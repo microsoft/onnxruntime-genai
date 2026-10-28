@@ -17,50 +17,28 @@ decision = og.DecisionSession("/models/kev-4b-fp32")
 answers = decision.decide(json.load(open("request.json")))
 ```
 
-`RankingSession` and `DecisionSession` are public typed C++ package entry points.
-They own the tokenizer and component sessions and perform the same rendering,
-tokenization, pooling, scoring, and answer shaping as Python:
+`RankingSession` and `DecisionSession` are public C++ package entry points.
+They accept and return UTF-8 JSON while owning the tokenizer and component
+sessions:
 
 ```cpp
-OgaStructuredRequest request;
-request.state = OgaStructuredValue::Object{{"weather", "heavy rain"}};
-request.questions.emplace_back(
-    "umbrella", OgaQuestion{"noul", "Should I take an umbrella?", {}});
-
 RankingSession ranking{"/models/clm-v0.1-8b-fp32", {"cuda"}};
-OgaModelResult answers = ranking.Run(request);
-
-OgaFreeFormRankRequest free_form;
-free_form.state = request.state;
-free_form.instructions = "Which activity is more suitable?";
-free_form.candidates = {{"picnic", "Have a picnic outdoors"},
-                        {"museum", "Visit an indoor museum"}};
-OgaRankingResult ranked = ranking.Rank(free_form);  // stable on ties
+auto ranked = ranking.Rank(
+    R"({"state":{"weather":"rain"},"instructions":"Choose","candidates":{"picnic":"Outside","museum":"Inside"}})");
 
 DecisionSession decision{"/models/kev-4b-fp32"};
-OgaModelResult decisions = decision.Decide(request);
+auto decisions = decision.Decide(
+    R"({"state":{"weather":"rain"},"questions":{"umbrella":{"type":"noul","instructions":"Take an umbrella?"}}})");
 ```
 
-`OgaStructuredValue` is a JSON-independent recursive variant supporting null,
-booleans, integers, doubles, strings, ordered arrays, and ordered objects.
-`OgaAnswer` exposes typed `noul`, `choice`, `score`, `confidence`,
-`probabilities`, and `legend` fields. `OgaModelResult::model` identifies CLM or
-KEV.
 Internally these workflows reuse the existing `Config`, `Tokenizer`, `Tensor`,
 and `NamedTensors` infrastructure. Named component execution and package pad
 token resolution are private implementation details rather than additional
 public handle families.
 
-The C ABI in `ort_genai_c.h` exposes opaque handles for the same
-functionality:
-
-* `OgaStructuredValueHandle`, request, and question builders preserve ordered
-  recursive request values while cloning values supplied by callers. These
-  handles are input-only; results use workflow-specific typed accessors rather
-  than a public polymorphic value/type API.
-* `OgaRankingSessionHandle` and `OgaDecisionSessionHandle` run typed requests;
-  model-result and ranking-result accessors expose all answer and ranked-item
-  fields without transferring borrowed string/value storage.
+The C ABI exposes only opaque ranking/decision session handles plus
+`RunJson`, `RankJson`, and `DecideJson`. Returned JSON strings use the existing
+`OgaDestroyString` ownership convention.
 
 ## Managed bindings
 
@@ -135,10 +113,9 @@ operator diagnostic. Native ORT GenAI CUDA qualification, device-resident
 cross-component tensors, and explicit workflow-controlled CUDA graph capture
 remain follow-up work and are not claimed by this first API.
 
-Creation, mutation, execution, and accessor functions return `OgaResult*`
-(`nullptr` on success). Destroy functions accept `nullptr`. Strings, tensor
-buffers, and typed result fields returned by accessors remain valid until their
-owning handle is mutated or destroyed.
+Creation and execution functions return `OgaResult*` (`nullptr` on success).
+Destroy functions accept `nullptr`; response strings are caller-owned and must
+be released with `OgaDestroyString`.
 
 ## Directory schema
 

@@ -19,142 +19,25 @@ ONNXTensorElementDataType ToTensorType(const pybind11::dtype& type);
 int ToNumpyType(ONNXTensorElementDataType type);
 pybind11::dtype ToNumpyDtype(ONNXTensorElementDataType type);
 
-OgaStructuredValue ToStructuredValue(pybind11::handle value) {
-  if (value.is_none()) return {};
-  if (pybind11::isinstance<pybind11::bool_>(value))
-    return pybind11::cast<bool>(value);
-  if (pybind11::isinstance<pybind11::int_>(value))
-    return pybind11::cast<int64_t>(value);
-  if (pybind11::isinstance<pybind11::float_>(value))
-    return pybind11::cast<double>(value);
-  if (pybind11::isinstance<pybind11::str>(value))
-    return pybind11::cast<std::string>(value);
-  if (pybind11::isinstance<pybind11::dict>(value)) {
-    OgaStructuredValue::Object object;
-    for (auto item : pybind11::reinterpret_borrow<pybind11::dict>(value))
-      object.emplace_back(pybind11::cast<std::string>(item.first),
-                          ToStructuredValue(item.second));
-    return object;
-  }
-  if (pybind11::isinstance<pybind11::list>(value) ||
-      pybind11::isinstance<pybind11::tuple>(value)) {
-    OgaStructuredValue::Array array;
-    for (auto item : pybind11::reinterpret_borrow<pybind11::sequence>(value))
-      array.push_back(ToStructuredValue(item));
-    return array;
-  }
-  throw std::invalid_argument("structured values must be None, bool, number, string, list, or dict");
-}
-
-OgaStructuredRequest ToStructuredRequest(const pybind11::dict& value) {
-  OgaStructuredRequest request;
-  if (value.contains("state")) request.state = ToStructuredValue(value["state"]);
-  if (value.contains("temperature"))
-    request.temperature = pybind11::cast<float>(value["temperature"]);
-  if (!value.contains("questions") || !pybind11::isinstance<pybind11::dict>(value["questions"]))
-    throw std::invalid_argument("questions must be a non-empty object");
-  for (auto item : pybind11::reinterpret_borrow<pybind11::dict>(value["questions"])) {
-    const auto id = pybind11::cast<std::string>(item.first);
-    const auto question_value = pybind11::cast<pybind11::dict>(item.second);
-    OgaQuestion question;
-    question.type = pybind11::cast<std::string>(question_value["type"]);
-    if (question_value.contains("instructions"))
-      question.instructions = ToStructuredValue(question_value["instructions"]);
-    if (question_value.contains("criteria"))
-      question.criteria = ToStructuredValue(question_value["criteria"]);
-    request.questions.emplace_back(id, std::move(question));
-  }
-  return request;
-}
-
-OgaFreeFormRankRequest ToFreeFormRankRequest(const pybind11::dict& value) {
-  OgaFreeFormRankRequest request;
-  if (value.contains("state")) request.state = ToStructuredValue(value["state"]);
-  if (value.contains("instructions"))
-    request.instructions = ToStructuredValue(value["instructions"]);
-  if (value.contains("temperature"))
-    request.temperature = pybind11::cast<float>(value["temperature"]);
-  if (!value.contains("candidates") ||
-      !pybind11::isinstance<pybind11::dict>(value["candidates"]))
-    throw std::invalid_argument("candidates must be a non-empty object");
-  for (auto item :
-       pybind11::reinterpret_borrow<pybind11::dict>(value["candidates"]))
-    request.candidates.emplace_back(
-        pybind11::cast<std::string>(item.first),
-        ToStructuredValue(item.second));
-  if (request.candidates.empty())
-    throw std::invalid_argument("candidates must be a non-empty object");
-  return request;
-}
-
-pybind11::dict AnswerToPython(const OgaAnswer& answer) {
-  pybind11::dict result;
-  result["type"] = answer.type;
-  if (answer.noul) result["noul"] = *answer.noul;
-  if (answer.choice) result["choice"] = *answer.choice;
-  if (answer.score) result["score"] = *answer.score;
-  if (answer.confidence) result["confidence"] = *answer.confidence;
-  if (!answer.probabilities.empty()) {
-    pybind11::dict probabilities;
-    for (const auto& [key, probability] : answer.probabilities)
-      probabilities[pybind11::str(key)] = probability;
-    result["probabilities"] = std::move(probabilities);
-  }
-  if (!answer.legend.empty()) {
-    pybind11::dict legend;
-    for (const auto& [key, description] : answer.legend)
-      legend[pybind11::str(key)] = description;
-    result["legend"] = std::move(legend);
-  }
-  return result;
-}
-
-pybind11::dict ResultToPython(const OgaModelResult& value) {
-  pybind11::dict result;
-  result["model"] = value.model;
-  pybind11::dict answers;
-  for (const auto& [id, answer] : value.answers)
-    answers[pybind11::str(id)] = AnswerToPython(answer);
-  result["answers"] = std::move(answers);
-  return result;
-}
-
-pybind11::dict RankingResultToPython(const OgaRankingResult& value) {
-  pybind11::dict result;
-  result["model"] = value.model;
-  pybind11::list ranked;
-  for (const auto& item : value.ranked) {
-    pybind11::dict entry;
-    entry["rank"] = item.rank;
-    entry["key"] = item.key;
-    entry["probability"] = item.probability;
-    ranked.append(std::move(entry));
-  }
-  result["ranked"] = std::move(ranked);
-  return result;
-}
-
 struct PyRankingSession {
   PyRankingSession(const std::string& path,
                    const std::vector<std::string>& providers)
       : session(path, providers) {}
-  pybind11::dict Run(const pybind11::dict& request) {
-    auto native_request = ToStructuredRequest(request);
-    OgaModelResult result;
+  std::string Run(const std::string& request) {
+    std::string result;
     {
       pybind11::gil_scoped_release release;
-      result = session.Run(native_request);
+      result = session.Run(request);
     }
-    return ResultToPython(result);
+    return result;
   }
-  pybind11::dict Rank(const pybind11::dict& request) {
-    auto native_request = ToFreeFormRankRequest(request);
-    OgaRankingResult result;
+  std::string Rank(const std::string& request) {
+    std::string result;
     {
       pybind11::gil_scoped_release release;
-      result = session.Rank(native_request);
+      result = session.Rank(request);
     }
-    return RankingResultToPython(result);
+    return result;
   }
   RankingSession session;
 };
@@ -163,17 +46,13 @@ struct PyDecisionSession {
   PyDecisionSession(const std::string& path,
                     const std::vector<std::string>& providers)
       : session(path, providers) {}
-  pybind11::dict Run(const pybind11::dict& request) {
-    if (request.contains("temperature"))
-      throw std::invalid_argument(
-          "temperature is supported only by ranking sessions");
-    auto native_request = ToStructuredRequest(request);
-    OgaModelResult result;
+  std::string Run(const std::string& request) {
+    std::string result;
     {
       pybind11::gil_scoped_release release;
-      result = session.Decide(native_request);
+      result = session.Decide(request);
     }
-    return ResultToPython(result);
+    return result;
   }
   DecisionSession session;
 };

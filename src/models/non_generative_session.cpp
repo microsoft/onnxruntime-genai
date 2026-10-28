@@ -2,9 +2,11 @@
 // Licensed under the MIT License.
 #include "../ort_genai.h"
 #include "../ort_genai_c_internal.h"
+#include "../json.h"
 #include "component_session.h"
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -21,6 +23,68 @@
 #include <unordered_map>
 
 namespace {
+
+struct OgaStructuredValue {
+  using Array = std::vector<OgaStructuredValue>;
+  using Object = std::vector<std::pair<std::string, OgaStructuredValue>>;
+  using Value = std::variant<std::monostate, bool, int64_t, double, std::string,
+                             Array, Object>;
+  Value value;
+
+  OgaStructuredValue() = default;
+  OgaStructuredValue(std::nullptr_t) {}
+  OgaStructuredValue(bool v) : value(v) {}
+  OgaStructuredValue(int64_t v) : value(v) {}
+  OgaStructuredValue(double v) : value(v) {}
+  OgaStructuredValue(std::string v) : value(std::move(v)) {}
+  OgaStructuredValue(Array v) : value(std::move(v)) {}
+  OgaStructuredValue(Object v) : value(std::move(v)) {}
+};
+
+struct OgaQuestion {
+  std::string type;
+  OgaStructuredValue instructions;
+  OgaStructuredValue criteria;
+};
+
+struct OgaStructuredRequest {
+  OgaStructuredValue state;
+  std::vector<std::pair<std::string, OgaQuestion>> questions;
+  float temperature{1.0f};
+};
+
+struct OgaAnswer {
+  std::string type;
+  std::optional<double> noul;
+  std::optional<std::string> choice;
+  std::optional<double> score;
+  std::optional<double> confidence;
+  std::vector<std::pair<std::string, double>> probabilities;
+  std::vector<std::pair<std::string, std::string>> legend;
+};
+
+struct OgaModelResult {
+  std::string model;
+  std::vector<std::pair<std::string, OgaAnswer>> answers;
+};
+
+struct OgaFreeFormRankRequest {
+  OgaStructuredValue state;
+  OgaStructuredValue instructions;
+  std::vector<std::pair<std::string, OgaStructuredValue>> candidates;
+  float temperature{1.0f};
+};
+
+struct OgaRankedItem {
+  size_t rank{};
+  std::string key;
+  double probability{};
+};
+
+struct OgaRankingResult {
+  std::string model;
+  std::vector<OgaRankedItem> ranked;
+};
 
 constexpr size_t kDefaultClmCacheEntries = 256;
 constexpr size_t kDefaultClmCacheBytes = 64 * 1024 * 1024;
@@ -119,6 +183,268 @@ constexpr int64_t kQuestionToken = 248061;
 constexpr int64_t kOptionStartToken = 248049;
 constexpr int64_t kOptionEndToken = 248050;
 constexpr int64_t kDecideToken = 248062;
+
+class StructuredJsonParser {
+ public:
+  explicit StructuredJsonParser(std::string_view source) : source_(source) {}
+
+  OgaStructuredValue Parse() {
+    auto value = ParseValue();
+    SkipWhitespace();
+    if (position_ != source_.size())
+      throw std::invalid_argument("unexpected trailing JSON data");
+    return value;
+  }
+
+ private:
+  void SkipWhitespace() {
+    while (position_ < source_.size() &&
+           (source_[position_] == ' ' || source_[position_] == '\t' ||
+            source_[position_] == '\r' || source_[position_] == '\n'))
+      ++position_;
+  }
+
+  char Take() {
+    if (position_ >= source_.size())
+      throw std::invalid_argument("unexpected end of JSON");
+    return source_[position_++];
+  }
+
+  void Expect(char expected) {
+    if (Take() != expected)
+      throw std::invalid_argument("invalid JSON syntax");
+  }
+
+  void ExpectLiteral(std::string_view literal) {
+    if (source_.substr(position_, literal.size()) != literal)
+      throw std::invalid_argument("invalid JSON literal");
+    position_ += literal.size();
+  }
+
+  static void AppendUtf8(std::string& output, uint32_t codepoint) {
+    if (codepoint <= 0x7f) {
+      output.push_back(static_cast<char>(codepoint));
+    } else if (codepoint <= 0x7ff) {
+      output.push_back(static_cast<char>(0xc0 | (codepoint >> 6)));
+      output.push_back(static_cast<char>(0x80 | (codepoint & 0x3f)));
+    } else if (codepoint <= 0xffff) {
+      output.push_back(static_cast<char>(0xe0 | (codepoint >> 12)));
+      output.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3f)));
+      output.push_back(static_cast<char>(0x80 | (codepoint & 0x3f)));
+    } else if (codepoint <= 0x10ffff) {
+      output.push_back(static_cast<char>(0xf0 | (codepoint >> 18)));
+      output.push_back(static_cast<char>(0x80 | ((codepoint >> 12) & 0x3f)));
+      output.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3f)));
+      output.push_back(static_cast<char>(0x80 | (codepoint & 0x3f)));
+    } else {
+      throw std::invalid_argument("invalid JSON Unicode codepoint");
+    }
+  }
+
+  uint32_t ParseHex4() {
+    uint32_t value{};
+    for (int i = 0; i < 4; ++i) {
+      const char c = Take();
+      value <<= 4;
+      if (c >= '0' && c <= '9')
+        value |= static_cast<uint32_t>(c - '0');
+      else if (c >= 'a' && c <= 'f')
+        value |= static_cast<uint32_t>(c - 'a' + 10);
+      else if (c >= 'A' && c <= 'F')
+        value |= static_cast<uint32_t>(c - 'A' + 10);
+      else
+        throw std::invalid_argument("invalid JSON Unicode escape");
+    }
+    return value;
+  }
+
+  std::string ParseString() {
+    Expect('"');
+    std::string result;
+    while (true) {
+      const char c = Take();
+      if (c == '"') return result;
+      if (static_cast<unsigned char>(c) < 0x20)
+        throw std::invalid_argument("unescaped JSON control character");
+      if (c != '\\') {
+        result.push_back(c);
+        continue;
+      }
+      switch (Take()) {
+        case '"':
+          result.push_back('"');
+          break;
+        case '\\':
+          result.push_back('\\');
+          break;
+        case '/':
+          result.push_back('/');
+          break;
+        case 'b':
+          result.push_back('\b');
+          break;
+        case 'f':
+          result.push_back('\f');
+          break;
+        case 'n':
+          result.push_back('\n');
+          break;
+        case 'r':
+          result.push_back('\r');
+          break;
+        case 't':
+          result.push_back('\t');
+          break;
+        case 'u': {
+          uint32_t codepoint = ParseHex4();
+          if (codepoint >= 0xd800 && codepoint <= 0xdbff) {
+            Expect('\\');
+            Expect('u');
+            const uint32_t low = ParseHex4();
+            if (low < 0xdc00 || low > 0xdfff)
+              throw std::invalid_argument("invalid JSON surrogate pair");
+            codepoint =
+                0x10000 + ((codepoint - 0xd800) << 10) + (low - 0xdc00);
+          } else if (codepoint >= 0xdc00 && codepoint <= 0xdfff) {
+            throw std::invalid_argument("invalid JSON surrogate pair");
+          }
+          AppendUtf8(result, codepoint);
+          break;
+        }
+        default:
+          throw std::invalid_argument("invalid JSON escape");
+      }
+    }
+  }
+
+  OgaStructuredValue ParseNumber() {
+    const size_t start = position_;
+    if (source_[position_] == '-') ++position_;
+    if (position_ >= source_.size())
+      throw std::invalid_argument("invalid JSON number");
+    if (source_[position_] == '0') {
+      ++position_;
+    } else {
+      if (source_[position_] < '1' || source_[position_] > '9')
+        throw std::invalid_argument("invalid JSON number");
+      while (position_ < source_.size() && source_[position_] >= '0' &&
+             source_[position_] <= '9')
+        ++position_;
+    }
+    bool floating = false;
+    if (position_ < source_.size() && source_[position_] == '.') {
+      floating = true;
+      ++position_;
+      const size_t fraction_start = position_;
+      while (position_ < source_.size() && source_[position_] >= '0' &&
+             source_[position_] <= '9')
+        ++position_;
+      if (fraction_start == position_)
+        throw std::invalid_argument("invalid JSON number");
+    }
+    if (position_ < source_.size() &&
+        (source_[position_] == 'e' || source_[position_] == 'E')) {
+      floating = true;
+      ++position_;
+      if (position_ < source_.size() &&
+          (source_[position_] == '+' || source_[position_] == '-'))
+        ++position_;
+      const size_t exponent_start = position_;
+      while (position_ < source_.size() && source_[position_] >= '0' &&
+             source_[position_] <= '9')
+        ++position_;
+      if (exponent_start == position_)
+        throw std::invalid_argument("invalid JSON number");
+    }
+    const auto token = source_.substr(start, position_ - start);
+    if (!floating) {
+      int64_t integer{};
+      const auto [end, error] =
+          std::from_chars(token.data(), token.data() + token.size(), integer);
+      if (error != std::errc{} || end != token.data() + token.size())
+        throw std::invalid_argument("JSON integer is outside int64 range");
+      return integer;
+    }
+    std::string owned(token);
+    char* end{};
+    const double number = std::strtod(owned.c_str(), &end);
+    if (end != owned.c_str() + owned.size() || !std::isfinite(number))
+      throw std::invalid_argument("invalid JSON floating-point number");
+    return number;
+  }
+
+  OgaStructuredValue ParseArray() {
+    Expect('[');
+    OgaStructuredValue::Array result;
+    SkipWhitespace();
+    if (position_ < source_.size() && source_[position_] == ']') {
+      ++position_;
+      return result;
+    }
+    while (true) {
+      result.push_back(ParseValue());
+      SkipWhitespace();
+      const char delimiter = Take();
+      if (delimiter == ']') return result;
+      if (delimiter != ',')
+        throw std::invalid_argument("invalid JSON array");
+    }
+  }
+
+  OgaStructuredValue ParseObject() {
+    Expect('{');
+    OgaStructuredValue::Object result;
+    SkipWhitespace();
+    if (position_ < source_.size() && source_[position_] == '}') {
+      ++position_;
+      return result;
+    }
+    while (true) {
+      SkipWhitespace();
+      auto key = ParseString();
+      SkipWhitespace();
+      Expect(':');
+      auto value = ParseValue();
+      if (std::any_of(result.begin(), result.end(),
+                      [&](const auto& item) { return item.first == key; }))
+        throw std::invalid_argument("duplicate JSON object key: " + key);
+      result.emplace_back(std::move(key), std::move(value));
+      SkipWhitespace();
+      const char delimiter = Take();
+      if (delimiter == '}') return result;
+      if (delimiter != ',')
+        throw std::invalid_argument("invalid JSON object");
+    }
+  }
+
+  OgaStructuredValue ParseValue() {
+    SkipWhitespace();
+    if (position_ >= source_.size())
+      throw std::invalid_argument("missing JSON value");
+    switch (source_[position_]) {
+      case 'n':
+        ExpectLiteral("null");
+        return nullptr;
+      case 't':
+        ExpectLiteral("true");
+        return true;
+      case 'f':
+        ExpectLiteral("false");
+        return false;
+      case '"':
+        return ParseString();
+      case '[':
+        return ParseArray();
+      case '{':
+        return ParseObject();
+      default:
+        return ParseNumber();
+    }
+  }
+
+  std::string_view source_;
+  size_t position_{};
+};
 
 template <class T>
 const T* Get(const OgaStructuredValue& value) {
@@ -265,6 +591,79 @@ const OgaStructuredValue* Find(const OgaStructuredValue& value, std::string_view
   const auto found = std::find_if(object->begin(), object->end(),
                                   [&](const auto& item) { return item.first == key; });
   return found == object->end() ? nullptr : &found->second;
+}
+
+const OgaStructuredValue& RequiredField(const OgaStructuredValue& object,
+                                        std::string_view key) {
+  const auto* value = Find(object, key);
+  if (!value)
+    throw std::invalid_argument("request requires field: " +
+                                std::string(key));
+  return *value;
+}
+
+float OptionalTemperature(const OgaStructuredValue& object) {
+  const auto* value = Find(object, "temperature");
+  if (!value) return 1.0f;
+  if (const auto* integer = Get<int64_t>(*value))
+    return static_cast<float>(*integer);
+  if (const auto* number = Get<double>(*value))
+    return static_cast<float>(*number);
+  throw std::invalid_argument("temperature must be numeric");
+}
+
+OgaStructuredRequest ParseStructuredRequest(std::string_view source) {
+  auto root = StructuredJsonParser(source).Parse();
+  if (!Get<OgaStructuredValue::Object>(root))
+    throw std::invalid_argument("request must be a JSON object");
+  OgaStructuredRequest request;
+  if (const auto* state = Find(root, "state")) request.state = *state;
+  request.temperature = OptionalTemperature(root);
+  const auto& questions_value = RequiredField(root, "questions");
+  const auto* questions = Get<OgaStructuredValue::Object>(questions_value);
+  if (!questions || questions->empty())
+    throw std::invalid_argument("questions must be a non-empty object");
+  for (const auto& [id, value] : *questions) {
+    if (id.find('\0') != std::string::npos)
+      throw std::invalid_argument(
+          "question id must not contain embedded NUL characters");
+    const auto* object = Get<OgaStructuredValue::Object>(value);
+    if (!object)
+      throw std::invalid_argument("question must be an object: " + id);
+    const auto* type = Get<std::string>(RequiredField(value, "type"));
+    if (!type)
+      throw std::invalid_argument("question type must be a string: " + id);
+    OgaQuestion question;
+    question.type = *type;
+    if (const auto* instructions = Find(value, "instructions"))
+      question.instructions = *instructions;
+    if (const auto* criteria = Find(value, "criteria"))
+      question.criteria = *criteria;
+    request.questions.emplace_back(id, std::move(question));
+  }
+  return request;
+}
+
+OgaFreeFormRankRequest ParseFreeFormRankRequest(std::string_view source) {
+  auto root = StructuredJsonParser(source).Parse();
+  if (!Get<OgaStructuredValue::Object>(root))
+    throw std::invalid_argument("request must be a JSON object");
+  OgaFreeFormRankRequest request;
+  if (const auto* state = Find(root, "state")) request.state = *state;
+  if (const auto* instructions = Find(root, "instructions"))
+    request.instructions = *instructions;
+  request.temperature = OptionalTemperature(root);
+  const auto& candidates_value = RequiredField(root, "candidates");
+  const auto* candidates = Get<OgaStructuredValue::Object>(candidates_value);
+  if (!candidates || candidates->empty())
+    throw std::invalid_argument("candidates must be a non-empty object");
+  for (const auto& [key, value] : *candidates) {
+    if (key.find('\0') != std::string::npos)
+      throw std::invalid_argument(
+          "candidate key must not contain embedded NUL characters");
+    request.candidates.emplace_back(key, value);
+  }
+  return request;
 }
 
 size_t ElementSize(OgaElementType type) {
@@ -736,6 +1135,125 @@ OgaAnswer Answer(const OgaQuestion& question, const Candidates& candidates,
     result.score = kev ? Round4(score) : score;
   }
   return result;
+}
+
+void AppendJsonString(std::string& output, std::string_view value) {
+  static constexpr char hex[] = "0123456789abcdef";
+  output.push_back('"');
+  for (const unsigned char c : value) {
+    switch (c) {
+      case '"':
+        output += "\\\"";
+        break;
+      case '\\':
+        output += "\\\\";
+        break;
+      case '\b':
+        output += "\\b";
+        break;
+      case '\f':
+        output += "\\f";
+        break;
+      case '\n':
+        output += "\\n";
+        break;
+      case '\r':
+        output += "\\r";
+        break;
+      case '\t':
+        output += "\\t";
+        break;
+      default:
+        if (c < 0x20) {
+          output += "\\u00";
+          output.push_back(hex[c >> 4]);
+          output.push_back(hex[c & 0xf]);
+        } else {
+          output.push_back(static_cast<char>(c));
+        }
+    }
+  }
+  output.push_back('"');
+}
+
+void AppendJsonMemberPrefix(std::string& output, std::string_view key,
+                            bool& first) {
+  if (!first) output.push_back(',');
+  first = false;
+  AppendJsonString(output, key);
+  output.push_back(':');
+}
+
+void AppendAnswerJson(std::string& output, const OgaAnswer& answer) {
+  output.push_back('{');
+  bool first = true;
+  AppendJsonMemberPrefix(output, "type", first);
+  AppendJsonString(output, answer.type);
+  if (answer.noul) {
+    AppendJsonMemberPrefix(output, "noul", first);
+    output += FormatPythonFloat(*answer.noul);
+  }
+  if (answer.choice) {
+    AppendJsonMemberPrefix(output, "choice", first);
+    AppendJsonString(output, *answer.choice);
+  }
+  if (answer.score) {
+    AppendJsonMemberPrefix(output, "score", first);
+    output += FormatPythonFloat(*answer.score);
+  }
+  if (answer.confidence) {
+    AppendJsonMemberPrefix(output, "confidence", first);
+    output += FormatPythonFloat(*answer.confidence);
+  }
+  if (!answer.probabilities.empty()) {
+    AppendJsonMemberPrefix(output, "probabilities", first);
+    output.push_back('{');
+    bool first_probability = true;
+    for (const auto& [key, probability] : answer.probabilities) {
+      AppendJsonMemberPrefix(output, key, first_probability);
+      output += FormatPythonFloat(probability);
+    }
+    output.push_back('}');
+  }
+  if (!answer.legend.empty()) {
+    AppendJsonMemberPrefix(output, "legend", first);
+    output.push_back('{');
+    bool first_legend = true;
+    for (const auto& [key, value] : answer.legend) {
+      AppendJsonMemberPrefix(output, key, first_legend);
+      AppendJsonString(output, value);
+    }
+    output.push_back('}');
+  }
+  output.push_back('}');
+}
+
+std::string SerializeJson(const OgaModelResult& result) {
+  std::string output{"{\"model\":"};
+  AppendJsonString(output, result.model);
+  output += ",\"answers\":{";
+  bool first = true;
+  for (const auto& [id, answer] : result.answers) {
+    AppendJsonMemberPrefix(output, id, first);
+    AppendAnswerJson(output, answer);
+  }
+  output += "}}";
+  return output;
+}
+
+std::string SerializeJson(const OgaRankingResult& result) {
+  std::string output{"{\"model\":"};
+  AppendJsonString(output, result.model);
+  output += ",\"ranked\":[";
+  for (size_t i = 0; i < result.ranked.size(); ++i) {
+    if (i) output.push_back(',');
+    const auto& item = result.ranked[i];
+    output += "{\"rank\":" + std::to_string(item.rank) + ",\"key\":";
+    AppendJsonString(output, item.key);
+    output += ",\"probability\":" + FormatPythonFloat(item.probability) + "}";
+  }
+  output += "]}";
+  return output;
 }
 
 }  // namespace
@@ -1732,46 +2250,6 @@ std::vector<std::string> CapiStrings(const char* const* values, size_t count,
   return result;
 }
 
-OgaStructuredValue& Value(OgaStructuredValueHandle* value) {
-  return CapiRequired(reinterpret_cast<OgaStructuredValue*>(value), "value");
-}
-const OgaStructuredValue& Value(const OgaStructuredValueHandle* value) {
-  return CapiRequired(reinterpret_cast<const OgaStructuredValue*>(value), "value");
-}
-OgaQuestion& Question(OgaQuestionHandle* value) {
-  return CapiRequired(reinterpret_cast<OgaQuestion*>(value), "question");
-}
-const OgaQuestion& Question(const OgaQuestionHandle* value) {
-  return CapiRequired(reinterpret_cast<const OgaQuestion*>(value), "question");
-}
-OgaStructuredRequest& Request(OgaStructuredRequestHandle* value) {
-  return CapiRequired(reinterpret_cast<OgaStructuredRequest*>(value), "request");
-}
-const OgaStructuredRequest& Request(const OgaStructuredRequestHandle* value) {
-  return CapiRequired(reinterpret_cast<const OgaStructuredRequest*>(value), "request");
-}
-OgaFreeFormRankRequest& RankRequest(OgaFreeFormRankRequestHandle* value) {
-  return CapiRequired(reinterpret_cast<OgaFreeFormRankRequest*>(value), "request");
-}
-const OgaFreeFormRankRequest& RankRequest(const OgaFreeFormRankRequestHandle* value) {
-  return CapiRequired(reinterpret_cast<const OgaFreeFormRankRequest*>(value), "request");
-}
-const OgaModelResult& ModelResult(const OgaModelResultHandle* value) {
-  return CapiRequired(reinterpret_cast<const OgaModelResult*>(value), "result");
-}
-const OgaRankingResult& RankingResult(const OgaRankingResultHandle* value) {
-  return CapiRequired(reinterpret_cast<const OgaRankingResult*>(value), "result");
-}
-const OgaAnswer& AnswerAt(const OgaModelResultHandle* value, size_t answer) {
-  return ModelResult(value).answers.at(answer).second;
-}
-
-template <class T>
-void OptionalNumber(const std::optional<T>& source, T* value, bool* present) {
-  CapiRequired(present, "present") = source.has_value();
-  if (source) CapiRequired(value, "value") = *source;
-}
-
 }  // namespace
 
 struct OGA_CPP_ONLY OgaRankingSessionHandle {
@@ -1792,194 +2270,6 @@ struct OGA_CPP_ONLY OgaDecisionSessionHandle {
 
 extern "C" {
 
-#define OGA_CREATE_STRUCTURED_VALUE(name, expression)                       \
-  OgaResult* OGA_API_CALL name(OgaStructuredValueHandle** out) {            \
-    OGA_CAPI_TRY                                                            \
-    auto& output = CapiRequired(out, "out");                                \
-    auto result = std::make_unique<OgaStructuredValue>(expression);         \
-    output = reinterpret_cast<OgaStructuredValueHandle*>(result.release()); \
-    return nullptr;                                                         \
-    OGA_CAPI_CATCH                                                          \
-  }
-
-OGA_CREATE_STRUCTURED_VALUE(OgaCreateStructuredValueNull, nullptr)
-
-OgaResult* OGA_API_CALL OgaCreateStructuredValueBool(
-    bool value, OgaStructuredValueHandle** out) {
-  OGA_CAPI_TRY
-  auto& output = CapiRequired(out, "out");
-  auto result = std::make_unique<OgaStructuredValue>(value);
-  output = reinterpret_cast<OgaStructuredValueHandle*>(result.release());
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaCreateStructuredValueInt64(
-    int64_t value, OgaStructuredValueHandle** out) {
-  OGA_CAPI_TRY
-  auto& output = CapiRequired(out, "out");
-  auto result = std::make_unique<OgaStructuredValue>(value);
-  output = reinterpret_cast<OgaStructuredValueHandle*>(result.release());
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaCreateStructuredValueDouble(
-    double value, OgaStructuredValueHandle** out) {
-  OGA_CAPI_TRY
-  auto& output = CapiRequired(out, "out");
-  auto result = std::make_unique<OgaStructuredValue>(value);
-  output = reinterpret_cast<OgaStructuredValueHandle*>(result.release());
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaCreateStructuredValueString(
-    const char* value, size_t length, OgaStructuredValueHandle** out) {
-  OGA_CAPI_TRY
-  auto& output = CapiRequired(out, "out");
-  auto result = std::make_unique<OgaStructuredValue>(
-      std::string(CapiRequired(value, "value"), length));
-  output = reinterpret_cast<OgaStructuredValueHandle*>(result.release());
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-OGA_CREATE_STRUCTURED_VALUE(OgaCreateStructuredValueArray, OgaStructuredValue::Array{})
-OGA_CREATE_STRUCTURED_VALUE(OgaCreateStructuredValueObject, OgaStructuredValue::Object{})
-
-#undef OGA_CREATE_STRUCTURED_VALUE
-
-OgaResult* OGA_API_CALL OgaStructuredValueArrayAppend(
-    OgaStructuredValueHandle* array, const OgaStructuredValueHandle* value) {
-  OGA_CAPI_TRY
-  auto* values = std::get_if<OgaStructuredValue::Array>(&Value(array).value);
-  if (!values) throw std::invalid_argument("value is not an array");
-  values->push_back(Value(value));
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaStructuredValueObjectAppend(
-    OgaStructuredValueHandle* object, const char* key, size_t key_length,
-    const OgaStructuredValueHandle* value) {
-  OGA_CAPI_TRY
-  auto* values = std::get_if<OgaStructuredValue::Object>(&Value(object).value);
-  if (!values) throw std::invalid_argument("value is not an object");
-  values->emplace_back(
-      std::string(CapiRequired(key, "key"), key_length), Value(value));
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-void OGA_API_CALL OgaDestroyStructuredValue(OgaStructuredValueHandle* value) {
-  delete reinterpret_cast<OgaStructuredValue*>(value);
-}
-
-OgaResult* OGA_API_CALL OgaCreateQuestion(
-    const char* type, const OgaStructuredValueHandle* instructions,
-    const OgaStructuredValueHandle* criteria, OgaQuestionHandle** out) {
-  OGA_CAPI_TRY
-  auto& output = CapiRequired(out, "out");
-  auto question = std::make_unique<OgaQuestion>();
-  question->type = CapiRequired(type, "type");
-  question->instructions = Value(instructions);
-  question->criteria = Value(criteria);
-  output = reinterpret_cast<OgaQuestionHandle*>(question.release());
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-void OGA_API_CALL OgaDestroyQuestion(OgaQuestionHandle* question) {
-  delete reinterpret_cast<OgaQuestion*>(question);
-}
-
-OgaResult* OGA_API_CALL OgaCreateStructuredRequest(OgaStructuredRequestHandle** out) {
-  OGA_CAPI_TRY
-  auto& output = CapiRequired(out, "out");
-  auto result = std::make_unique<OgaStructuredRequest>();
-  output = reinterpret_cast<OgaStructuredRequestHandle*>(result.release());
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaStructuredRequestSetState(
-    OgaStructuredRequestHandle* request, const OgaStructuredValueHandle* state) {
-  OGA_CAPI_TRY
-  Request(request).state = Value(state);
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaStructuredRequestAddQuestion(
-    OgaStructuredRequestHandle* request, const char* id,
-    const OgaQuestionHandle* question) {
-  OGA_CAPI_TRY
-  Request(request).questions.emplace_back(CapiRequired(id, "id"), Question(question));
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaStructuredRequestSetTemperature(
-    OgaStructuredRequestHandle* request, float temperature) {
-  OGA_CAPI_TRY
-  Request(request).temperature = temperature;
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-void OGA_API_CALL OgaDestroyStructuredRequest(OgaStructuredRequestHandle* request) {
-  delete reinterpret_cast<OgaStructuredRequest*>(request);
-}
-
-OgaResult* OGA_API_CALL OgaCreateFreeFormRankRequest(
-    OgaFreeFormRankRequestHandle** out) {
-  OGA_CAPI_TRY
-  auto& output = CapiRequired(out, "out");
-  auto result = std::make_unique<OgaFreeFormRankRequest>();
-  output = reinterpret_cast<OgaFreeFormRankRequestHandle*>(result.release());
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaFreeFormRankRequestSetState(
-    OgaFreeFormRankRequestHandle* request, const OgaStructuredValueHandle* state) {
-  OGA_CAPI_TRY
-  RankRequest(request).state = Value(state);
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaFreeFormRankRequestSetInstructions(
-    OgaFreeFormRankRequestHandle* request,
-    const OgaStructuredValueHandle* instructions) {
-  OGA_CAPI_TRY
-  RankRequest(request).instructions = Value(instructions);
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaFreeFormRankRequestAddCandidate(
-    OgaFreeFormRankRequestHandle* request, const char* key,
-    const OgaStructuredValueHandle* value) {
-  OGA_CAPI_TRY
-  RankRequest(request).candidates.emplace_back(CapiRequired(key, "key"), Value(value));
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaFreeFormRankRequestSetTemperature(
-    OgaFreeFormRankRequestHandle* request, float temperature) {
-  OGA_CAPI_TRY
-  RankRequest(request).temperature = temperature;
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-void OGA_API_CALL OgaDestroyFreeFormRankRequest(OgaFreeFormRankRequestHandle* request) {
-  delete reinterpret_cast<OgaFreeFormRankRequest*>(request);
-}
-
 OgaResult* OGA_API_CALL OgaCreateRankingSession(
     const char* package_path, const char* const* providers, size_t provider_count,
     OgaRankingSessionHandle** out) {
@@ -1997,26 +2287,26 @@ void OGA_API_CALL OgaDestroyRankingSession(OgaRankingSessionHandle* session) {
   delete session;
 }
 
-OgaResult* OGA_API_CALL OgaRankingSessionRun(
-    OgaRankingSessionHandle* session, const OgaStructuredRequestHandle* request,
-    OgaModelResultHandle** out) {
+OgaResult* OGA_API_CALL OgaRankingSessionRunJson(
+    OgaRankingSessionHandle* session, const char* request,
+    size_t request_length, const char** response) {
   OGA_CAPI_TRY
-  auto& output = CapiRequired(out, "out");
-  auto result = std::make_unique<OgaModelResult>(
-      CapiRequired(session, "session").value.Run(Request(request)));
-  output = reinterpret_cast<OgaModelResultHandle*>(result.release());
+  auto result = SerializeJson(CapiRequired(session, "session").value.Run(ParseStructuredRequest(std::string_view(CapiRequired(request, "request"), request_length))));
+  auto output = std::make_unique<char[]>(result.size() + 1);
+  std::memcpy(output.get(), result.c_str(), result.size() + 1);
+  CapiRequired(response, "response") = output.release();
   return nullptr;
   OGA_CAPI_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaRankingSessionRank(
-    OgaRankingSessionHandle* session, const OgaFreeFormRankRequestHandle* request,
-    OgaRankingResultHandle** out) {
+OgaResult* OGA_API_CALL OgaRankingSessionRankJson(
+    OgaRankingSessionHandle* session, const char* request,
+    size_t request_length, const char** response) {
   OGA_CAPI_TRY
-  auto& output = CapiRequired(out, "out");
-  auto result = std::make_unique<OgaRankingResult>(
-      CapiRequired(session, "session").value.Rank(RankRequest(request)));
-  output = reinterpret_cast<OgaRankingResultHandle*>(result.release());
+  auto result = SerializeJson(CapiRequired(session, "session").value.Rank(ParseFreeFormRankRequest(std::string_view(CapiRequired(request, "request"), request_length))));
+  auto output = std::make_unique<char[]>(result.size() + 1);
+  std::memcpy(output.get(), result.c_str(), result.size() + 1);
+  CapiRequired(response, "response") = output.release();
   return nullptr;
   OGA_CAPI_CATCH
 }
@@ -2038,169 +2328,16 @@ void OGA_API_CALL OgaDestroyDecisionSession(OgaDecisionSessionHandle* session) {
   delete session;
 }
 
-#define OGA_DECISION_RUN(name, method)                                              \
-  OgaResult* OGA_API_CALL name(                                                     \
-      OgaDecisionSessionHandle* session, const OgaStructuredRequestHandle* request, \
-      OgaModelResultHandle** out) {                                                 \
-    OGA_CAPI_TRY                                                                    \
-    auto& output = CapiRequired(out, "out");                                        \
-    auto result = std::make_unique<OgaModelResult>(                                 \
-        CapiRequired(session, "session").value.method(Request(request)));           \
-    output = reinterpret_cast<OgaModelResultHandle*>(result.release());             \
-    return nullptr;                                                                 \
-    OGA_CAPI_CATCH                                                                  \
-  }
-
-OGA_DECISION_RUN(OgaDecisionSessionDecide, Decide)
-#undef OGA_DECISION_RUN
-
-OgaResult* OGA_API_CALL OgaModelResultGetModel(
-    const OgaModelResultHandle* result, const char** out) {
+OgaResult* OGA_API_CALL OgaDecisionSessionDecideJson(
+    OgaDecisionSessionHandle* session, const char* request,
+    size_t request_length, const char** response) {
   OGA_CAPI_TRY
-  CapiRequired(out, "out") = ModelResult(result).model.c_str();
+  auto result = SerializeJson(CapiRequired(session, "session").value.Decide(ParseStructuredRequest(std::string_view(CapiRequired(request, "request"), request_length))));
+  auto output = std::make_unique<char[]>(result.size() + 1);
+  std::memcpy(output.get(), result.c_str(), result.size() + 1);
+  CapiRequired(response, "response") = output.release();
   return nullptr;
   OGA_CAPI_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaModelResultGetAnswerCount(
-    const OgaModelResultHandle* result, size_t* out) {
-  OGA_CAPI_TRY
-  CapiRequired(out, "out") = ModelResult(result).answers.size();
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaModelResultGetAnswerId(
-    const OgaModelResultHandle* result, size_t answer, const char** out) {
-  OGA_CAPI_TRY
-  CapiRequired(out, "out") = ModelResult(result).answers.at(answer).first.c_str();
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaModelResultGetAnswerType(
-    const OgaModelResultHandle* result, size_t answer, const char** out) {
-  OGA_CAPI_TRY
-  CapiRequired(out, "out") = AnswerAt(result, answer).type.c_str();
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaModelResultGetAnswerNoul(
-    const OgaModelResultHandle* result, size_t answer, double* value, bool* present) {
-  OGA_CAPI_TRY
-  OptionalNumber(AnswerAt(result, answer).noul, value, present);
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaModelResultGetAnswerChoice(
-    const OgaModelResultHandle* result, size_t answer, const char** value, bool* present) {
-  OGA_CAPI_TRY
-  const auto& choice = AnswerAt(result, answer).choice;
-  CapiRequired(present, "present") = choice.has_value();
-  if (choice) CapiRequired(value, "value") = choice->c_str();
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-#define OGA_MODEL_OPTIONAL(name, member)                                \
-  OgaResult* OGA_API_CALL name(                                         \
-      const OgaModelResultHandle* result, size_t answer, double* value, \
-      bool* present) {                                                  \
-    OGA_CAPI_TRY                                                        \
-    OptionalNumber(AnswerAt(result, answer).member, value, present);    \
-    return nullptr;                                                     \
-    OGA_CAPI_CATCH                                                      \
-  }
-OGA_MODEL_OPTIONAL(OgaModelResultGetAnswerScore, score)
-OGA_MODEL_OPTIONAL(OgaModelResultGetAnswerConfidence, confidence)
-#undef OGA_MODEL_OPTIONAL
-
-OgaResult* OGA_API_CALL OgaModelResultGetProbabilityCount(
-    const OgaModelResultHandle* result, size_t answer, size_t* out) {
-  OGA_CAPI_TRY
-  CapiRequired(out, "out") = AnswerAt(result, answer).probabilities.size();
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaModelResultGetProbability(
-    const OgaModelResultHandle* result, size_t answer, size_t index,
-    const char** key, double* value) {
-  OGA_CAPI_TRY
-  const auto& item = AnswerAt(result, answer).probabilities.at(index);
-  CapiRequired(key, "key") = item.first.c_str();
-  CapiRequired(value, "value") = item.second;
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaModelResultGetLegendCount(
-    const OgaModelResultHandle* result, size_t answer, size_t* out) {
-  OGA_CAPI_TRY
-  CapiRequired(out, "out") = AnswerAt(result, answer).legend.size();
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaModelResultGetLegend(
-    const OgaModelResultHandle* result, size_t answer, size_t index,
-    const char** key, const char** value) {
-  OGA_CAPI_TRY
-  const auto& item = AnswerAt(result, answer).legend.at(index);
-  CapiRequired(key, "key") = item.first.c_str();
-  CapiRequired(value, "value") = item.second.c_str();
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-void OGA_API_CALL OgaDestroyModelResult(OgaModelResultHandle* result) {
-  delete reinterpret_cast<OgaModelResult*>(result);
-}
-
-OgaResult* OGA_API_CALL OgaRankingResultGetModel(
-    const OgaRankingResultHandle* result, const char** out) {
-  OGA_CAPI_TRY
-  CapiRequired(out, "out") = RankingResult(result).model.c_str();
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaRankingResultGetCount(
-    const OgaRankingResultHandle* result, size_t* out) {
-  OGA_CAPI_TRY
-  CapiRequired(out, "out") = RankingResult(result).ranked.size();
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaRankingResultGetRank(
-    const OgaRankingResultHandle* result, size_t index, size_t* out) {
-  OGA_CAPI_TRY
-  CapiRequired(out, "out") = RankingResult(result).ranked.at(index).rank;
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaRankingResultGetKey(
-    const OgaRankingResultHandle* result, size_t index, const char** out) {
-  OGA_CAPI_TRY
-  CapiRequired(out, "out") = RankingResult(result).ranked.at(index).key.c_str();
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaRankingResultGetProbability(
-    const OgaRankingResultHandle* result, size_t index, double* out) {
-  OGA_CAPI_TRY
-  CapiRequired(out, "out") = RankingResult(result).ranked.at(index).probability;
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-void OGA_API_CALL OgaDestroyRankingResult(OgaRankingResultHandle* result) {
-  delete reinterpret_cast<OgaRankingResult*>(result);
 }
 
 }  // extern "C"

@@ -8,28 +8,12 @@
 #include <cstdlib>
 #include <filesystem>
 
-TEST(NonGenerativeSessionTest, PublicTypedValuesPreserveOrderAndTypes) {
-  OgaStructuredRequest request;
-  request.state = OgaStructuredValue::Object{
-      {"enabled", true}, {"count", int64_t{3}}, {"label", "demo"}};
-  request.questions.emplace_back(
-      "q", OgaQuestion{"choice", "Choose",
-                       OgaStructuredValue::Object{{"first", "A"}, {"second", "B"}}});
-  ASSERT_EQ(request.questions.front().first, "q");
-  const auto& object = std::get<OgaStructuredValue::Object>(request.state.value);
-  EXPECT_EQ(object[0].first, "enabled");
-  EXPECT_TRUE(std::get<bool>(object[0].second.value));
-  EXPECT_EQ(std::get<int64_t>(object[1].second.value), 3);
-}
-
 TEST(NonGenerativeSessionTest, RealPackagesRunWhenConfigured) {
   const char* root_value = std::getenv("ORT_GENAI_NON_GENERATIVE_TEST_ROOT");
   if (!root_value || !*root_value) GTEST_SKIP() << "set ORT_GENAI_NON_GENERATIVE_TEST_ROOT";
   const std::filesystem::path root(root_value);
-  OgaStructuredRequest request;
-  request.state = OgaStructuredValue::Object{{"weather", "heavy rain"}};
-  request.questions.emplace_back(
-      "umbrella", OgaQuestion{"noul", "Should I take an umbrella?", {}});
+  const std::string request =
+      R"({"state":{"weather":"heavy rain"},"questions":{"umbrella":{"type":"noul","instructions":"Should I take an umbrella?","criteria":{}}}})";
   std::vector<std::string> providers;
   if (const char* provider = std::getenv("ORT_GENAI_NON_GENERATIVE_PROVIDER");
       provider && *provider) {
@@ -41,12 +25,12 @@ TEST(NonGenerativeSessionTest, RealPackagesRunWhenConfigured) {
   const auto kev = decision.Decide(request);
   const auto repeated_clm = ranking.Run(request);
   const auto repeated_kev = decision.Decide(request);
-  ASSERT_EQ(clm.answers.size(), 1u);
-  ASSERT_EQ(kev.answers.size(), 1u);
-  ASSERT_TRUE(clm.answers.front().second.noul.has_value());
-  ASSERT_TRUE(kev.answers.front().second.noul.has_value());
-  EXPECT_EQ(clm.answers.front().second.noul, repeated_clm.answers.front().second.noul);
-  EXPECT_EQ(kev.answers.front().second.noul, repeated_kev.answers.front().second.noul);
-  request.state = std::string(100000, 'x');
-  EXPECT_THROW(decision.Decide(request), std::runtime_error);
+  EXPECT_NE(clm.find(R"("umbrella")"), std::string::npos);
+  EXPECT_NE(kev.find(R"("umbrella")"), std::string::npos);
+  EXPECT_EQ(clm, repeated_clm);
+  EXPECT_EQ(kev, repeated_kev);
+  const std::string oversized =
+      std::string(R"({"state":")") + std::string(100000, 'x') +
+      R"(","questions":{"q":{"type":"noul","criteria":{}}}})";
+  EXPECT_THROW(decision.Decide(oversized), std::runtime_error);
 }

@@ -68,71 +68,6 @@ struct OgaAbstract {
   void operator=(const OgaAbstract&) = delete;
 };
 
-// JSON-independent structured values used by the non-generative model APIs.
-// Objects are vectors rather than maps so request ordering is preserved.
-struct OgaStructuredValue {
-  using Array = std::vector<OgaStructuredValue>;
-  using Object = std::vector<std::pair<std::string, OgaStructuredValue>>;
-  using Value = std::variant<std::monostate, bool, int64_t, double, std::string, Array, Object>;
-  Value value;
-
-  OgaStructuredValue() = default;
-  OgaStructuredValue(std::nullptr_t) {}
-  OgaStructuredValue(bool v) : value(v) {}
-  OgaStructuredValue(int v) : value(static_cast<int64_t>(v)) {}
-  OgaStructuredValue(int64_t v) : value(v) {}
-  OgaStructuredValue(double v) : value(v) {}
-  OgaStructuredValue(const char* v) : value(std::string(v)) {}
-  OgaStructuredValue(std::string v) : value(std::move(v)) {}
-  OgaStructuredValue(Array v) : value(std::move(v)) {}
-  OgaStructuredValue(Object v) : value(std::move(v)) {}
-};
-
-struct OgaQuestion {
-  std::string type;  // "noul", "choice", or "score"
-  OgaStructuredValue instructions;
-  OgaStructuredValue criteria;
-};
-
-struct OgaStructuredRequest {
-  OgaStructuredValue state;
-  std::vector<std::pair<std::string, OgaQuestion>> questions;
-  float temperature{1.0f};
-};
-
-struct OgaAnswer {
-  std::string type;
-  std::optional<double> noul;
-  std::optional<std::string> choice;
-  std::optional<double> score;
-  std::optional<double> confidence;
-  std::vector<std::pair<std::string, double>> probabilities;
-  std::vector<std::pair<std::string, std::string>> legend;
-};
-
-struct OgaModelResult {
-  std::string model;
-  std::vector<std::pair<std::string, OgaAnswer>> answers;
-};
-
-struct OgaFreeFormRankRequest {
-  OgaStructuredValue state;
-  OgaStructuredValue instructions;
-  std::vector<std::pair<std::string, OgaStructuredValue>> candidates;
-  float temperature{1.0f};
-};
-
-struct OgaRankedItem {
-  size_t rank{};
-  std::string key;
-  double probability{};
-};
-
-struct OgaRankingResult {
-  std::string model;
-  std::vector<OgaRankedItem> ranked;
-};
-
 // Typed package entry points for ranking and decision inference.
 class OGA_CPP_ONLY RankingSession {
  public:
@@ -149,8 +84,8 @@ class OGA_CPP_ONLY RankingSession {
   }
   RankingSession(const RankingSession&) = delete;
   RankingSession& operator=(const RankingSession&) = delete;
-  OgaModelResult Run(const OgaStructuredRequest& request);
-  OgaRankingResult Rank(const OgaFreeFormRankRequest& request);
+  std::string Run(std::string_view request_json);
+  std::string Rank(std::string_view request_json);
 
  private:
   OgaRankingSessionHandle* handle_{};
@@ -171,7 +106,7 @@ class OGA_CPP_ONLY DecisionSession {
   }
   DecisionSession(const DecisionSession&) = delete;
   DecisionSession& operator=(const DecisionSession&) = delete;
-  OgaModelResult Decide(const OgaStructuredRequest& request);
+  std::string Decide(std::string_view request_json);
 
  private:
   OgaDecisionSessionHandle* handle_{};
@@ -192,26 +127,6 @@ inline void OgaCheckResult(OgaResult* result) {
 
 namespace OgaDetail {
 
-template <class T, void (*Destroy)(T*)>
-using Handle = std::unique_ptr<T, decltype(Destroy)>;
-
-using StructuredValueHandle =
-    Handle<OgaStructuredValueHandle, OgaDestroyStructuredValue>;
-using QuestionHandle = Handle<OgaQuestionHandle, OgaDestroyQuestion>;
-using StructuredRequestHandle =
-    Handle<OgaStructuredRequestHandle, OgaDestroyStructuredRequest>;
-using RankRequestHandle =
-    Handle<OgaFreeFormRankRequestHandle, OgaDestroyFreeFormRankRequest>;
-using ModelResultHandle = Handle<OgaModelResultHandle, OgaDestroyModelResult>;
-using RankingResultHandle = Handle<OgaRankingResultHandle, OgaDestroyRankingResult>;
-
-inline void RejectEmbeddedNull(std::string_view value,
-                               std::string_view field) {
-  if (value.find('\0') != std::string_view::npos)
-    throw std::invalid_argument(std::string(field) +
-                                " must not contain embedded NUL characters");
-}
-
 inline std::vector<const char*> StringPointers(const std::vector<std::string>& values) {
   std::vector<const char*> result;
   result.reserve(values.size());
@@ -219,157 +134,10 @@ inline std::vector<const char*> StringPointers(const std::vector<std::string>& v
   return result;
 }
 
-inline StructuredValueHandle MakeValue(const OgaStructuredValue& source) {
-  OgaStructuredValueHandle* raw{};
-  switch (source.value.index()) {
-    case 0:
-      OgaCheckResult(OgaCreateStructuredValueNull(&raw));
-      break;
-    case 1:
-      OgaCheckResult(OgaCreateStructuredValueBool(std::get<bool>(source.value), &raw));
-      break;
-    case 2:
-      OgaCheckResult(OgaCreateStructuredValueInt64(std::get<int64_t>(source.value), &raw));
-      break;
-    case 3:
-      OgaCheckResult(OgaCreateStructuredValueDouble(std::get<double>(source.value), &raw));
-      break;
-    case 4:
-      OgaCheckResult(OgaCreateStructuredValueString(
-          std::get<std::string>(source.value).data(),
-          std::get<std::string>(source.value).size(), &raw));
-      break;
-    case 5: {
-      OgaCheckResult(OgaCreateStructuredValueArray(&raw));
-      StructuredValueHandle result(raw, OgaDestroyStructuredValue);
-      for (const auto& item : std::get<OgaStructuredValue::Array>(source.value)) {
-        auto child = MakeValue(item);
-        OgaCheckResult(OgaStructuredValueArrayAppend(result.get(), child.get()));
-      }
-      return result;
-    }
-    case 6: {
-      OgaCheckResult(OgaCreateStructuredValueObject(&raw));
-      StructuredValueHandle result(raw, OgaDestroyStructuredValue);
-      for (const auto& [key, item] : std::get<OgaStructuredValue::Object>(source.value)) {
-        RejectEmbeddedNull(key, "structured object key");
-        auto child = MakeValue(item);
-        OgaCheckResult(
-            OgaStructuredValueObjectAppend(result.get(), key.data(), key.size(),
-                                           child.get()));
-      }
-      return result;
-    }
-    default:
-      throw std::runtime_error("unsupported structured value");
-  }
-  return StructuredValueHandle(raw, OgaDestroyStructuredValue);
-}
-
-inline StructuredRequestHandle MakeRequest(const OgaStructuredRequest& source) {
-  OgaStructuredRequestHandle* raw{};
-  OgaCheckResult(OgaCreateStructuredRequest(&raw));
-  StructuredRequestHandle result(raw, OgaDestroyStructuredRequest);
-  auto state = MakeValue(source.state);
-  OgaCheckResult(OgaStructuredRequestSetState(result.get(), state.get()));
-  OgaCheckResult(OgaStructuredRequestSetTemperature(result.get(), source.temperature));
-  for (const auto& [id, question] : source.questions) {
-    RejectEmbeddedNull(id, "question id");
-    RejectEmbeddedNull(question.type, "question type");
-    auto instructions = MakeValue(question.instructions);
-    auto criteria = MakeValue(question.criteria);
-    OgaQuestionHandle* question_raw{};
-    OgaCheckResult(OgaCreateQuestion(question.type.c_str(), instructions.get(),
-                                     criteria.get(), &question_raw));
-    QuestionHandle question_handle(question_raw, OgaDestroyQuestion);
-    OgaCheckResult(
-        OgaStructuredRequestAddQuestion(result.get(), id.c_str(), question_handle.get()));
-  }
-  return result;
-}
-
-inline RankRequestHandle MakeRequest(const OgaFreeFormRankRequest& source) {
-  OgaFreeFormRankRequestHandle* raw{};
-  OgaCheckResult(OgaCreateFreeFormRankRequest(&raw));
-  RankRequestHandle result(raw, OgaDestroyFreeFormRankRequest);
-  auto state = MakeValue(source.state);
-  auto instructions = MakeValue(source.instructions);
-  OgaCheckResult(OgaFreeFormRankRequestSetState(result.get(), state.get()));
-  OgaCheckResult(
-      OgaFreeFormRankRequestSetInstructions(result.get(), instructions.get()));
-  OgaCheckResult(OgaFreeFormRankRequestSetTemperature(result.get(), source.temperature));
-  for (const auto& [key, value] : source.candidates) {
-    RejectEmbeddedNull(key, "candidate key");
-    auto native_value = MakeValue(value);
-    OgaCheckResult(OgaFreeFormRankRequestAddCandidate(
-        result.get(), key.c_str(), native_value.get()));
-  }
-  return result;
-}
-
-inline OgaModelResult ReadModelResult(const OgaModelResultHandle* source) {
-  const char* model{};
-  OgaCheckResult(OgaModelResultGetModel(source, &model));
-  OgaModelResult result;
-  result.model = model;
-  size_t count{};
-  OgaCheckResult(OgaModelResultGetAnswerCount(source, &count));
-  result.answers.reserve(count);
-  for (size_t i = 0; i < count; ++i) {
-    const char* id{};
-    const char* type{};
-    OgaCheckResult(OgaModelResultGetAnswerId(source, i, &id));
-    OgaCheckResult(OgaModelResultGetAnswerType(source, i, &type));
-    OgaAnswer answer;
-    answer.type = type;
-    bool present{};
-    double number{};
-    OgaCheckResult(OgaModelResultGetAnswerNoul(source, i, &number, &present));
-    if (present) answer.noul = number;
-    const char* choice{};
-    OgaCheckResult(OgaModelResultGetAnswerChoice(source, i, &choice, &present));
-    if (present) answer.choice = choice;
-    OgaCheckResult(OgaModelResultGetAnswerScore(source, i, &number, &present));
-    if (present) answer.score = number;
-    OgaCheckResult(OgaModelResultGetAnswerConfidence(source, i, &number, &present));
-    if (present) answer.confidence = number;
-    size_t item_count{};
-    OgaCheckResult(OgaModelResultGetProbabilityCount(source, i, &item_count));
-    for (size_t j = 0; j < item_count; ++j) {
-      const char* key{};
-      OgaCheckResult(OgaModelResultGetProbability(source, i, j, &key, &number));
-      answer.probabilities.emplace_back(key, number);
-    }
-    OgaCheckResult(OgaModelResultGetLegendCount(source, i, &item_count));
-    for (size_t j = 0; j < item_count; ++j) {
-      const char* key{};
-      const char* value{};
-      OgaCheckResult(OgaModelResultGetLegend(source, i, j, &key, &value));
-      answer.legend.emplace_back(key, value);
-    }
-    result.answers.emplace_back(id, std::move(answer));
-  }
-  return result;
-}
-
-inline OgaRankingResult ReadRankingResult(const OgaRankingResultHandle* source) {
-  const char* model{};
-  OgaCheckResult(OgaRankingResultGetModel(source, &model));
-  OgaRankingResult result;
-  result.model = model;
-  size_t count{};
-  OgaCheckResult(OgaRankingResultGetCount(source, &count));
-  result.ranked.reserve(count);
-  for (size_t i = 0; i < count; ++i) {
-    OgaRankedItem item;
-    const char* key{};
-    OgaCheckResult(OgaRankingResultGetRank(source, i, &item.rank));
-    OgaCheckResult(OgaRankingResultGetKey(source, i, &key));
-    OgaCheckResult(OgaRankingResultGetProbability(source, i, &item.probability));
-    item.key = key;
-    result.ranked.push_back(std::move(item));
-  }
-  return result;
+inline std::string TakeString(const char* value) {
+  std::unique_ptr<const char, decltype(&OgaDestroyString)> owned(
+      value, OgaDestroyString);
+  return value ? std::string(value) : std::string{};
 }
 
 }  // namespace OgaDetail
@@ -380,20 +148,17 @@ inline RankingSession::RankingSession(
   OgaCheckResult(OgaCreateRankingSession(
       package_path.c_str(), provider_ptrs.data(), provider_ptrs.size(), &handle_));
 }
-inline OgaModelResult RankingSession::Run(const OgaStructuredRequest& request) {
-  auto native_request = OgaDetail::MakeRequest(request);
-  OgaModelResultHandle* raw{};
-  OgaCheckResult(OgaRankingSessionRun(handle_, native_request.get(), &raw));
-  OgaDetail::ModelResultHandle result(raw, OgaDestroyModelResult);
-  return OgaDetail::ReadModelResult(result.get());
+inline std::string RankingSession::Run(std::string_view request_json) {
+  const char* response{};
+  OgaCheckResult(OgaRankingSessionRunJson(
+      handle_, request_json.data(), request_json.size(), &response));
+  return OgaDetail::TakeString(response);
 }
-inline OgaRankingResult RankingSession::Rank(
-    const OgaFreeFormRankRequest& request) {
-  auto native_request = OgaDetail::MakeRequest(request);
-  OgaRankingResultHandle* raw{};
-  OgaCheckResult(OgaRankingSessionRank(handle_, native_request.get(), &raw));
-  OgaDetail::RankingResultHandle result(raw, OgaDestroyRankingResult);
-  return OgaDetail::ReadRankingResult(result.get());
+inline std::string RankingSession::Rank(std::string_view request_json) {
+  const char* response{};
+  OgaCheckResult(OgaRankingSessionRankJson(
+      handle_, request_json.data(), request_json.size(), &response));
+  return OgaDetail::TakeString(response);
 }
 
 inline DecisionSession::DecisionSession(
@@ -402,12 +167,11 @@ inline DecisionSession::DecisionSession(
   OgaCheckResult(OgaCreateDecisionSession(
       package_path.c_str(), provider_ptrs.data(), provider_ptrs.size(), &handle_));
 }
-inline OgaModelResult DecisionSession::Decide(const OgaStructuredRequest& request) {
-  auto native_request = OgaDetail::MakeRequest(request);
-  OgaModelResultHandle* raw{};
-  OgaCheckResult(OgaDecisionSessionDecide(handle_, native_request.get(), &raw));
-  OgaDetail::ModelResultHandle result(raw, OgaDestroyModelResult);
-  return OgaDetail::ReadModelResult(result.get());
+inline std::string DecisionSession::Decide(std::string_view request_json) {
+  const char* response{};
+  OgaCheckResult(OgaDecisionSessionDecideJson(
+      handle_, request_json.data(), request_json.size(), &response));
+  return OgaDetail::TakeString(response);
 }
 struct OgaSpeculativeStats : OgaAbstract {
   uint64_t GetCount(const char* name) const {

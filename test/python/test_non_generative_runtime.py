@@ -25,8 +25,8 @@ class _NativeSession:
         self.requests = []
 
     def run(self, request):
-        self.requests.append(request)
-        return {"answer": {"type": "noul", "noul": 0.75}}
+        self.requests.append(json.loads(request))
+        return json.dumps({"answer": {"type": "noul", "noul": 0.75}})
 
     def rank(self, request):
         return self.run(request)

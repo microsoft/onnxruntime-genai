@@ -234,7 +234,7 @@ def test_flat_kev_high_level_session(tmp_path):
         }
     )
     assert score["answers"]["q"]["confidence"] == 0
-    with pytest.raises(ValueError, match="temperature is supported only by ranking sessions"):
+    with pytest.raises(RuntimeError, match="temperature is supported only by ranking sessions"):
         session.decide(
             {
                 "state": "1",

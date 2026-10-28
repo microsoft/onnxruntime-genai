@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -24,11 +25,11 @@ class RankingSession:
         self._native = _RankingSession(str(package_path), providers or [])
 
     def rank(self, request: dict[str, Any]) -> dict[str, Any]:
-        return self._native.rank(request)
+        return json.loads(self._native.rank(json.dumps(request)))
 
     def run(self, request: dict[str, Any]) -> dict[str, Any]:
         """Run structured CLM questions."""
-        return self._native.run(request)
+        return json.loads(self._native.run(json.dumps(request)))
 
     __call__ = rank
 
@@ -44,7 +45,7 @@ class DecisionSession:
         self._native = _DecisionSession(str(package_path), providers or [])
 
     def decide(self, request: dict[str, Any]) -> dict[str, Any]:
-        return self._native.run(request)
+        return json.loads(self._native.run(json.dumps(request)))
 
     __call__ = decide
 
