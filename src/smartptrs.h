@@ -376,11 +376,13 @@ struct DeviceInterface {
   virtual bool RecyclesHostMirrorsAfterUpload(size_t /*bytes*/) const { return false; }
   // Default false: no effect — encoder / control-flow graph capture follows the normal per-EP config
   // default. An EP overrides to true to defensively force encoder capture off (see the AMDGPU
-  // override for rationale). Keep last for vtable ABI stability.
+  // override for rationale).
   virtual bool DisablesEncoderGraphCapture() const { return false; }
   // True when ReplayStateUpdates can reconstruct a partially accepted fixed-state transition.
-  // Keep last for vtable ABI stability.
   virtual bool SupportsCompactStateReplay() const { return false; }
+  // True when shared KV-cache outputs must expose the current logical sequence length while
+  // retaining their max-length backing allocation. Keep last for vtable ABI stability.
+  virtual bool UsesLogicalKeyValueCacheOutputViews() const { return false; }
 };
 
 // A shared_ptr based type that we expose through our C API should inherit from this type.
