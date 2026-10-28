@@ -5,6 +5,9 @@
 #include "models/model.h"
 #include "models/preprocessing/genai_tokenizer.h"
 #include "models/preprocessing/qwen2_5_vl_image_processor.h"
+#include "models/threadpool.h"
+#include <array>
+#include <cstring>
 #include <limits>
 #include <numeric>
 #include <regex>

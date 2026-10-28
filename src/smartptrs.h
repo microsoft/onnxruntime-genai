@@ -118,6 +118,8 @@ struct PositionInputs {
   virtual void Add() = 0;
   virtual void Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) = 0;
   virtual void RewindTo(size_t index) = 0;
+  virtual OrtValue* GetRotaryPositionIds() { return nullptr; }
+  virtual void SetRotaryPositionIds(OrtValue* positions) { (void)positions; }
 };
 
 struct BatchedSamplerState {
@@ -191,6 +193,8 @@ struct StateSlotDesc {
 enum class StateUpdateReplayKind : uint32_t {
   CausalConv = 1,
   GatedDeltaNet = 2,
+  Snapshot = 3,
+  Indexer = 4,
 };
 
 struct StateUpdateReplayDesc {
@@ -217,7 +221,7 @@ static_assert(std::is_trivially_copyable_v<StateUpdateReplayDesc>);
 // that boundary (Search, BatchedSampler, BatchedSamplerState, GeneratorParams, or Config).
 // Dynamically loaded add-ons must report this exact version before the host can safely call through
 // the C++ interface.
-inline constexpr uint32_t kDeviceInterfaceVersion = 6;
+inline constexpr uint32_t kDeviceInterfaceVersion = 13;
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}
