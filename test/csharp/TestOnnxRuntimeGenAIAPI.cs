@@ -87,7 +87,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         });
 
         private static string _adaptersPath => _lazyAdaptersPath.Value;
-        private static OgaHandle ogaHandle;
 
         private static int _epLibrariesRegistered = 0;
 
@@ -161,9 +160,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         public OnnxRuntimeGenAITests(ITestOutputHelper o)
         {
             Console.WriteLine("**** Running OnnxRuntimeGenAITests constructor");
-            // Initialize GenAI and register a handler to dispose it on process exit
-            ogaHandle = new OgaHandle();
-            AppDomain.CurrentDomain.ProcessExit += (sender, e) => ogaHandle.Dispose();
             RegisterEpLibrariesFromDirectory();
             this.output = o;
             Console.WriteLine("**** OnnxRuntimeGenAI constructor completed");
