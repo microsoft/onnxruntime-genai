@@ -778,6 +778,9 @@ class Model:
 
     def is_fused_rope_supported(self):
         # DML EP requires separate RoPE op, so fused RoPE is not supported on DML.
+        # CPU GroupQueryAttention requires head_size to be a multiple of 16 for fused RoPE.
+        if self.ep == "cpu" and self.head_size % 16 != 0:
+            return False
         return self.ep not in ["dml"]
 
     def is_fused_qk_norm_gqa_supported(self):
@@ -828,18 +831,30 @@ class Model:
             self.make_paged_attention_init()
 
         elif self.is_gqa_supported():
+            if self.ep == "cpu" and self.head_size % 8 != 0:
+                raise ValueError(
+                    f"CPU GroupQueryAttention requires head_size to be a multiple of 8, got {self.head_size}."
+                )
+
             # Change model settings for GroupQueryAttention
             self.attention_attrs["op_type"] = "GroupQueryAttention"
             print("GroupQueryAttention (GQA) is used in this model.")
-
-            # Some EPs don't support packed Q/K/V for GQA yet
-            self.attention_attrs["use_packed_matmul"] = self.is_packed_matmul_supported()
 
             # Some EPs don't support fusing rotary embeddings inside GQA yet
             self.attention_attrs["use_rope_in_attn"] = self.is_fused_rope_supported()
             if self.attention_attrs["use_rope_in_attn"]:
                 # GQA + Rot.Emb. does not require `position_ids` as input
                 del self.input_names["position_ids"]
+
+            # Some EPs don't support packed Q/K/V for GQA yet
+            self.attention_attrs["use_packed_matmul"] = (
+                self.is_packed_matmul_supported()
+                and (
+                    self.attention_attrs["use_rope_in_attn"]
+                    or not self.attention_attrs["rope"]
+                    or (self.attention_attrs["q_norm"] and self.attention_attrs["k_norm"])
+                )
+            )
 
         elif self.is_packed_attn_supported():
             # Change model settings for packed Attention
