@@ -6,6 +6,9 @@
 This is a partial implementation of docs/ModelBuilderConfiguration.md. The
 result bridges structured policy to existing exporters; it is not proof that
 the resulting graph, shared tensors, or runtime profile meet the full contract.
+
+Component source parsing and format-level validation belong to
+``loaders.component.ComponentModelLoader``; this module handles IR models only.
 """
 
 from __future__ import annotations
@@ -21,8 +24,25 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import onnx
+import onnx_ir as ir
+from loaders.component import ComponentModelLoader
 from quantization import QuantConfig
+
+
+def serialize_genai_config(config: dict[str, Any]) -> str:
+    """Indent config objects while keeping every array on one line."""
+    def format_value(value, level):
+        if not isinstance(value, dict) or not value:
+            return json.dumps(value)
+        indentation = " " * (4 * (level + 1))
+        entries = [
+            f"{indentation}{json.dumps(key)}: {format_value(child, level + 1)}"
+            for key, child in value.items()
+        ]
+        return "{\n" + ",\n".join(entries) + "\n" + " " * (4 * level) + "}"
+
+    return format_value(config, 0) + "\n"
+
 
 STRUCTURED_FIELDS = (
     "target_options",
@@ -110,6 +130,7 @@ class HeadComponent:
     inputs: tuple[ComponentBinding, ...]
     outputs: tuple[ComponentBinding, ...]
 
+
 @dataclass(frozen=True)
 class ComponentOptions:
     """Describe either generic ONNX heads or one pinned model-specific artifact.
@@ -123,6 +144,7 @@ class ComponentOptions:
     model_source: str | None = None
     artifact_revision: str | None = None
     base_revision: str | None = None
+
 
 @dataclass
 class EffectiveBuilderConfig:
@@ -569,7 +591,7 @@ def validate_component_backbone_destination(
         )
     if require_exists:
         model = load_component_model(destination, "backbone")
-        output_names = {value.name for value in model.graph.output}
+        output_names = {value.name for value in model.graph.outputs}
         if "hidden_states" not in output_names:
             raise ValueError(
                 "component backbone must expose a hidden_states output"
@@ -579,34 +601,22 @@ def validate_component_backbone_destination(
 
 def load_component_model(
     model_path: Path, component_name: str
-) -> onnx.ModelProto:
+) -> ir.Model:
     """Load one component graph without materializing external tensor data."""
-    try:
-        return onnx.load(model_path, load_external_data=False)
-    except Exception as error:
-        raise ValueError(
-            f"component {component_name!r} source is not a readable ONNX model: "
-            f"{model_path}"
-        ) from error
+    return ComponentModelLoader(model_path, component_name).load()
 
 
 def validate_component_model(model_path: Path, component_name: str) -> None:
-    """Run the ONNX structural checker after external paths are validated."""
-    try:
-        onnx.checker.check_model(model_path)
-    except Exception as error:
-        raise ValueError(
-            f"component {component_name!r} source is not a valid ONNX model: "
-            f"{model_path}"
-        ) from error
+    """Delegate source structure/schema validation to the component loader."""
+    ComponentModelLoader(model_path, component_name).validate()
 
 
 def validate_component_graph_bindings(
-    head: HeadComponent, model: onnx.ModelProto
+    head: HeadComponent, model: ir.Model
 ) -> None:
     """Require configured graph bindings to name actual graph values."""
-    graph_inputs = {value.name for value in model.graph.input}
-    graph_outputs = {value.name for value in model.graph.output}
+    graph_inputs = {value.name for value in model.graph.inputs}
+    graph_outputs = {value.name for value in model.graph.outputs}
     for binding in head.inputs:
         if binding.graph_name not in graph_inputs:
             raise ValueError(
@@ -622,7 +632,7 @@ def validate_component_graph_bindings(
 
 
 def find_external_data_files(
-    model: onnx.ModelProto, model_path: Path, component_name: str
+    model: ir.Model, model_path: Path, component_name: str
 ) -> list[tuple[str, Path]]:
     """Resolve a head graph's external tensor files without loading their data.
 
@@ -630,74 +640,9 @@ def find_external_data_files(
     traversing, malformed, or missing locations raise ``ValueError`` to prevent
     external-data references from escaping either source or destination roots.
     """
-    source_root = model_path.parent.resolve()
-    files = {}
-    for tensor in iter_tensor_protos(model):
-        entries = {entry.key: entry.value for entry in tensor.external_data}
-        if tensor.data_location != onnx.TensorProto.EXTERNAL and not entries:
-            continue
-        location = entries.get("location")
-        if not location:
-            raise ValueError(f"component {component_name!r} has external tensor data without a location")
-        relative = Path(location)
-        if (
-            relative.is_absolute()
-            or "\\" in location
-            or ":" in location
-            or any(part in ("", ".", "..") for part in relative.parts)
-        ):
-            raise ValueError(f"component {component_name!r} has unsafe external data location {location!r}")
-        source = (source_root / relative).resolve()
-        try:
-            source.relative_to(source_root)
-        except ValueError as error:
-            raise ValueError(
-                f"component {component_name!r} has unsafe external data location {location!r}"
-            ) from error
-        if not source.is_file():
-            raise ValueError(
-                f"component {component_name!r} external data file does not exist: {location}"
-            )
-        try:
-            offset = int(entries.get("offset", "0"))
-        except ValueError as error:
-            raise ValueError(
-                f"component {component_name!r} external data offset is invalid"
-            ) from error
-        element_size = onnx.helper.tensor_dtype_to_np_dtype(
-            tensor.data_type
-        ).itemsize
-        required_bytes = math.prod(tensor.dims) * element_size
-        try:
-            length = int(entries.get("length", str(required_bytes)))
-        except ValueError as error:
-            raise ValueError(
-                f"component {component_name!r} external data length is invalid"
-            ) from error
-        if offset < 0 or length < required_bytes:
-            raise ValueError(
-                f"component {component_name!r} external data range is too small"
-            )
-        if offset + length > source.stat().st_size:
-            raise ValueError(
-                f"component {component_name!r} external data range exceeds "
-                f"{location!r}"
-            )
-        files[location] = source
-    return list(files.items())
-
-
-def iter_tensor_protos(message):
-    """Yield every nested TensorProto that may carry external-data metadata."""
-    if isinstance(message, onnx.TensorProto):
-        yield message
-        return
-    for field, value in message.ListFields():
-        if field.type != field.TYPE_MESSAGE:
-            continue
-        children = value if field.is_repeated else (value,)
-        for child in children:
-            yield from iter_tensor_protos(child)
+    return ComponentModelLoader(model_path, component_name).external_data_files(
+        model.meta["builder_config.external_tensors"]
+    )
 
 
 def reject_duplicate_key(pairs):
@@ -887,8 +832,6 @@ def normalize_target_quant_config(
         raise ValueError("target weight overrides are not supported when weights.type=none")
     if merged["moe"]["type"] in ("mxfp4", "nvfp4") and execution_provider != "cuda":
         raise ValueError(f"moe.type={merged['moe']['type']} is supported only on CUDA")
-    if merged["format"]["matmulnbits_weights_prepacked"] and execution_provider != "cuda":
-        raise ValueError("format.matmulnbits_weights_prepacked is supported only on CUDA")
     if execution_provider == "trt-rtx" and weights_type in ("int4", "uint4", "int8", "uint8"):
         if "format" in canonical and canonical["format"].get("use_qdq") is False:
             raise ValueError("TRT-RTX integer dense weights require quant_config.format.use_qdq=true")
@@ -902,9 +845,7 @@ def normalize_target_quant_config(
         "algo_config": "weights.method",
         "moe_quant_type": "moe.type",
         "qmoe_block_size": "moe.block_size",
-        "qmoe_weights_prepacked": "moe.weights_prepacked",
         "use_qdq": "format.use_qdq",
-        "matmulnbits_weights_prepacked": "format.matmulnbits_weights_prepacked",
     }
     for legacy_key, path in aliases.items():
         section, leaf = path.split(".")
@@ -936,7 +877,6 @@ def flatten_target_options(
     flattened["is_symmetric"] = quant_config.weights.symmetric
     flattened["op_types_to_quantize"] = quant_config.weights.op_types
     flattened["use_qdq"] = quant_config.format.use_qdq
-    flattened["matmulnbits_weights_prepacked"] = quant_config.format.matmulnbits_weights_prepacked
     if "type" in options.get("quant_config", {}).get("moe", {}):
         if quant_config.moe.type == "none":
             flattened.pop("moe_quant_type", None)
@@ -974,14 +914,7 @@ def flatten_target_options(
             flattened[legacy_key] = kv_cache[field_name]
 
     optimizations = options.get("optimizations", {})
-    check_fields(optimizations, {"fuse_mlp_gate_up", "fuse_qkv"}, "target_options.optimizations")
-    if "fuse_mlp_gate_up" in optimizations:
-        warn_structured_override(legacy_options, "fuse_mlp_gate_up", "target_options.optimizations.fuse_mlp_gate_up")
-        flattened["fuse_mlp_gate_up"] = optimizations["fuse_mlp_gate_up"]
-    if "fuse_qkv" in optimizations:
-        warn_structured_override(legacy_options, "fuse_qkv", "target_options.optimizations.fuse_qkv")
-        warn_structured_override(legacy_options, "disable_qkv_fusion", "target_options.optimizations.fuse_qkv")
-        flattened["fuse_qkv"] = optimizations["fuse_qkv"]
+    check_fields(optimizations, set(), "target_options.optimizations")
 
     return flattened, quant_config, effective_precision
 
@@ -1067,8 +1000,6 @@ def normalize_drafter_quant_config(
             raise ValueError(f"DFlash2 INT4/INT8 offline prepacking requires weights.block_size in {supported_blocks}")
     if quant_config.moe.type != "none":
         raise ValueError(f"{drafter_type} does not support MoE expert quantization")
-    if execution_provider != "cuda" and quant_config.format.matmulnbits_weights_prepacked:
-        raise ValueError("prepacked MatMulNBits weights are supported only on CUDA")
     return quant_config
 
 
@@ -1088,7 +1019,6 @@ def flatten_drafter_options(
             "shared_weights",
             "quant_config",
             "attention",
-            "optimizations",
             "dspark",
         },
         "drafter_options",
@@ -1176,18 +1106,6 @@ def flatten_drafter_options(
             raise ValueError(f"{drafter_type} KV cache quantization is not supported")
         if kv_cache.get("windowed", False):
             raise ValueError(f"{drafter_type} windowed KV cache is not supported")
-
-    optimizations = options.get("optimizations", {})
-    check_fields(optimizations, {"fuse_mlp_gate_up", "fuse_qkv"}, "drafter_options.optimizations")
-    fuse_gate_up = optimizations.get("fuse_mlp_gate_up", False)
-    if fuse_gate_up and drafter_type != "dflash2":
-        raise ValueError(f"fuse_mlp_gate_up is not supported for drafter_type={drafter_type}")
-    fuse_qkv = optimizations.get("fuse_qkv", False)
-    if "fuse_qkv" in optimizations and drafter_type != "dflash2":
-        raise ValueError(f"fuse_qkv is not supported for drafter_type={drafter_type}")
-    if drafter_type == "dflash2":
-        flattened["dflash2_fuse_gate_up"] = fuse_gate_up
-        flattened["dflash2_fuse_qkv"] = fuse_qkv
 
     shared_weights = options.get("shared_weights", {})
     check_fields(shared_weights, {"embedding", "lm_head"}, "drafter_options.shared_weights")

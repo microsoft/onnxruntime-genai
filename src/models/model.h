@@ -24,13 +24,18 @@ class ThreadPool;
 void Cast(OrtValue& input, std::unique_ptr<OrtValue>& output, DeviceInterface& device, ONNXTensorElementDataType type);
 void CheckResult(extError_t error);
 void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config);
+void ApplySessionOptionsFromConfig(
+    const Config& config,
+    const Config::SessionOptions& config_session_options,
+    OrtSessionOptions& session_options, bool cloned_from_parent = false);
 
 // True when a session running on `session_device` may be handed a tensor whose memory lives on
 // `buffer_device`. ORT moves tensor data between host memory and the devices the session has an EP
 // for; for memory on any other device it neither copies nor rejects the binding but treats the
-// device pointer as host memory. Tensors that fail this test must be staged through a copy.
+// device pointer as host memory, which is only right when the memory is host-accessible (CPU,
+// OpenVINO, QNN shared memory). Tensors that fail this test must be staged through a copy.
 inline bool SessionCanAccess(const DeviceInterface& session_device, const DeviceInterface& buffer_device) {
-  return buffer_device.GetType() == DeviceType::CPU || buffer_device.GetType() == session_device.GetType();
+  return buffer_device.IsHostAccessible() || buffer_device.GetType() == session_device.GetType();
 }
 
 struct State {
@@ -157,7 +162,10 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
   OrtSessionOptions* GetSessionOptions(const std::string& model_id) const;
 
-  std::unique_ptr<OrtSession> CreateSession(OrtEnv& ort_env, const std::string& model_filename, OrtSessionOptions* session_options);
+  // Recreated legacy sessions use files: graph-only buffer registrations need
+  // not outlive model construction.
+  std::unique_ptr<OrtSession> CreateSession(OrtEnv& ort_env, const std::string& model_filename,
+                                            OrtSessionOptions* session_options, bool is_session_recreation = false);
 
   bool IsPruned() const;
 

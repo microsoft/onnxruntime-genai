@@ -195,17 +195,19 @@ class ModeloptModel(QuantizedModel):
         module.weight = self.get_tensor(name)
         return module
 
-    def prepare_qmoe_experts(self, experts):
-        def unpack(weight):
-            low = weight & 0x0F
-            high = weight >> 4
-            return torch.stack((low, high), dim=-1).reshape(weight.shape[0], -1)
+    def make_gate_module(self, base, dense=False):
+        module = self.make_dense_linear_module(base) if dense else self.make_tensor_module(f"{base}.weight")
+        module.exclude_from_quantization = True
+        return module
 
-        def pack(codes):
-            if codes.shape[0] % 2 != 0:
-                raise ValueError(f"NVFP4 QMoE packing requires an even N={codes.shape[0]} for nibble packing.")
-            codes = codes.T.contiguous()
-            return ((codes[:, 1::2] << 4) | (codes[:, 0::2] & 0x0F)).contiguous()
+    def prepare_qmoe_experts(self, experts):
+        weights_prepacked = int(self.quant_attrs.get("qmoe_weights_prepacked", 0) == 1)
+
+        def pack_weight(weight):
+            if weights_prepacked == 1:
+                return weight.reshape(weight.shape[1] * 2, weight.shape[0] // 2)
+            codes = torch.stack((weight & 15, weight >> 4), dim=-1).reshape(weight.shape[0], -1).transpose(0, 1)
+            return (codes[:, 0::2] | (codes[:, 1::2] << 4)).contiguous()
 
         def scale_bytes(projection):
             return projection.weight_scale.view(torch.uint8).contiguous()
@@ -213,17 +215,17 @@ class ModeloptModel(QuantizedModel):
         gate_up_weights, gate_up_scales, gate_up_globals = [], [], []
         down_weights, down_scales, down_globals = [], [], []
         for expert_id, expert in enumerate(experts):
-            gate_codes = unpack(expert.gate_proj.weight)
-            up_codes = unpack(expert.up_proj.weight)
-            if gate_codes.shape != up_codes.shape:
+            gate_weight = expert.gate_proj.weight
+            up_weight = expert.up_proj.weight
+            if gate_weight.shape != up_weight.shape:
                 raise ValueError(
                     f"ModelOpt expert {expert_id} gate/up weights must have matching shapes, "
-                    f"got {tuple(gate_codes.shape)} and {tuple(up_codes.shape)}."
+                    f"got {tuple(gate_weight.shape)} and {tuple(up_weight.shape)}."
                 )
 
-            intermediate_size = gate_codes.shape[0]
-            fused_codes = torch.stack((gate_codes, up_codes), dim=1).reshape(2 * intermediate_size, -1)
-            gate_up_weights.append(pack(fused_codes))
+            intermediate_size = gate_weight.shape[0]
+            fused_weight = torch.stack((gate_weight, up_weight), dim=1).reshape(2 * intermediate_size, -1)
+            gate_up_weights.append(pack_weight(fused_weight))
             gate_up_scales.append(
                 torch.stack((scale_bytes(expert.gate_proj), scale_bytes(expert.up_proj)), dim=1).reshape(
                     2 * intermediate_size, -1
@@ -239,12 +241,16 @@ class ModeloptModel(QuantizedModel):
                 )
             gate_up_globals.append(gate_global)
 
-            down_weights.append(pack(unpack(expert.down_proj.weight)))
+            down_weight = expert.down_proj.weight
+            if down_weight.shape[0] % 2 != 0:
+                raise ValueError(f"NVFP4 QMoE packing requires an even N={down_weight.shape[0]} for nibble packing.")
+            down_weights.append(pack_weight(down_weight))
             down_scales.append(scale_bytes(expert.down_proj))
             down_globals.append(expert.down_proj.weight_scale_2.float().reshape(()))
 
         prepared = QuantizedExperts()
         prepared.quant_type = "nvfp4"
+        prepared.weights_prepacked = weights_prepacked
         prepared.block_size = 16
         prepared.scale_dtype = ir.DataType.FLOAT8E4M3FN
         prepared.scales_raw = True
@@ -268,10 +274,8 @@ class ModeloptModel(QuantizedModel):
             la = SimpleNamespace()
             la.in_proj_qkv = self.make_linear_module(f"{prefix}.linear_attn.in_proj_qkv")
             la.in_proj_z = self.make_linear_module(f"{prefix}.linear_attn.in_proj_z")
-            la.in_proj_a = self.make_dense_linear_module(f"{prefix}.linear_attn.in_proj_a")
-            la.in_proj_b = self.make_dense_linear_module(f"{prefix}.linear_attn.in_proj_b")
-            la.in_proj_a.exclude_from_quantization = True
-            la.in_proj_b.exclude_from_quantization = True
+            la.in_proj_a = self.make_gate_module(f"{prefix}.linear_attn.in_proj_a", dense=True)
+            la.in_proj_b = self.make_gate_module(f"{prefix}.linear_attn.in_proj_b", dense=True)
             la.out_proj = self.make_linear_module(f"{prefix}.linear_attn.out_proj")
             la.conv1d = self.make_tensor_module(f"{prefix}.linear_attn.conv1d.weight")
             la.A_log = self.get_tensor(f"{prefix}.linear_attn.A_log")
@@ -296,15 +300,13 @@ class ModeloptModel(QuantizedModel):
 
         mlp = SimpleNamespace()
         if self.get_tensor(f"{prefix}.mlp.gate.weight") is not None:
-            mlp.gate = self.make_tensor_module(f"{prefix}.mlp.gate.weight")
-            mlp.gate.exclude_from_quantization = True
+            mlp.gate = self.make_gate_module(f"{prefix}.mlp.gate")
             shared = SimpleNamespace()
             shared.gate_proj = self.make_linear_module(f"{prefix}.mlp.shared_expert.gate_proj")
             shared.up_proj = self.make_linear_module(f"{prefix}.mlp.shared_expert.up_proj")
             shared.down_proj = self.make_linear_module(f"{prefix}.mlp.shared_expert.down_proj")
             mlp.shared_expert = shared
-            mlp.shared_expert_gate = self.make_tensor_module(f"{prefix}.mlp.shared_expert_gate.weight")
-            mlp.shared_expert_gate.exclude_from_quantization = True
+            mlp.shared_expert_gate = self.make_gate_module(f"{prefix}.mlp.shared_expert_gate")
             mlp.experts = []
             for expert_id in range(self.num_experts):
                 expert_prefix = f"{prefix}.mlp.experts.{expert_id}"

@@ -3409,23 +3409,26 @@ struct RootObject_Element : JSON::Element {
   JSON::Element& t_;
 };
 
-void ParseConfig(const fs::path& filename, std::string_view json_overlay, Config& config) {
-  std::ifstream file = filename.open(std::ios::binary | std::ios::ate);
-  if (!file.is_open()) {
-    throw std::runtime_error("Error opening " + filename.string());
-  }
-  std::streamsize const size = file.tellg();
-  file.seekg(0, std::ios::beg);
-
-  std::vector<char> buffer(size);
-  if (!file.read(buffer.data(), size)) {
-    throw std::runtime_error("Error reading " + filename.string());
+void ParseConfig(const fs::path& filename, std::string_view json_overlay, Config& config,
+                 std::optional<std::string_view> memory_json) {
+  std::vector<char> buffer;
+  if (!memory_json) {
+    std::ifstream file = filename.open(std::ios::binary | std::ios::ate);
+    if (!file.is_open()) {
+      throw std::runtime_error("Error opening " + filename.string());
+    }
+    std::streamsize const size = file.tellg();
+    file.seekg(0, std::ios::beg);
+    buffer.resize(size);
+    if (!file.read(buffer.data(), size)) {
+      throw std::runtime_error("Error reading " + filename.string());
+    }
   }
 
   Root_Element root{config};
   RootObject_Element root_object{root};
   try {
-    JSON::Parse(root_object, std::string_view(buffer.data(), buffer.size()));
+    JSON::Parse(root_object, memory_json.value_or(std::string_view(buffer.data(), buffer.size())));
   } catch (const std::exception& message) {
     std::ostringstream oss;
     oss << "Error encountered while parsing '" << filename.string() << "' " << message.what();
@@ -3626,8 +3629,10 @@ void WarnOnClampedDraftWidth(const Config& config) {
   }
 }
 
-Config::Config(const fs::path& path, std::string_view json_overlay) : config_path{path} {
-  ParseConfig(path / "genai_config.json", json_overlay, *this);
+Config::Config(const fs::path& path, std::string_view json_overlay,
+               std::optional<std::string_view> memory_json)
+    : config_path{path}, memory_assets_only_{memory_json.has_value()} {
+  ParseConfig(path / "genai_config.json", json_overlay, *this, memory_json);
   ModelStateManifest::ValidateConfig(model.decoder);
 
   if (model.context_length == 0 && !ModelType::IsRNNT(model.type) && !ModelType::IsStreamingEncDecASR(model.type)) {

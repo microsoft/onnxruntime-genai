@@ -219,18 +219,23 @@ TEST(CAPITests, TokenPostProcessorOpaqueResults) {
   const auto results = processor->GetNextTokenResults();
   ASSERT_EQ(results.size(), 1U);
   const auto* result = results[0];
+  ASSERT_NE(result, nullptr);
   EXPECT_EQ(processor->GetNextTokenResults()[0], result);
   const std::string expected = plain->Decode(generator->GetNextTokens()[0]);
-  EXPECT_EQ(result->GetText(), expected);
-  EXPECT_EQ(result->GetTimestamps(), nullptr);
-  EXPECT_EQ(OgaTokenPostProcessorResultGetTimestamps(nullptr), nullptr);
-  EXPECT_EQ(OgaTokenPostProcessorTimestampGetWordCount(nullptr), 0U);
-  EXPECT_EQ(OgaTokenPostProcessorTimestampGetSegmentCount(nullptr), 0U);
-  EXPECT_EQ(OgaTokenPostProcessorTimestampGetWord(nullptr, 0), nullptr);
-  EXPECT_EQ(OgaTokenPostProcessorTimestampGetSegment(nullptr, 0), nullptr);
+  EXPECT_STREQ(result->GetText(), expected.c_str());
+  EXPECT_EQ(result->GetTimestampResult(), nullptr);
+  const auto* native_result = OgaTokenPostProcessorGetResult(processor.get(), 0);
+  EXPECT_EQ(result, native_result);
+  EXPECT_EQ(result->GetText(), OgaTokenPostProcessorResultGetText(native_result));
+  EXPECT_EQ(OgaTokenPostProcessorResultGetTimestampResult(native_result), nullptr);
+  EXPECT_EQ(OgaTokenPostProcessorResultGetTimestampResult(nullptr), nullptr);
+  EXPECT_EQ(OgaTokenPostProcessorTimestampResultGetWordCount(nullptr), 0U);
+  EXPECT_EQ(OgaTokenPostProcessorTimestampResultGetSegmentCount(nullptr), 0U);
+  EXPECT_EQ(OgaTokenPostProcessorTimestampResultGetTimestampRecord(nullptr, OgaTimestampRecordKind_Words, 0), nullptr);
+  EXPECT_EQ(OgaTokenPostProcessorTimestampResultGetTimestampRecord(nullptr, OgaTimestampRecordKind_Segments, 0), nullptr);
   EXPECT_EQ(OgaTokenPostProcessorGetResult(processor.get(), 1), nullptr);
   generator->GenerateNextToken();
-  EXPECT_EQ(result->GetText(), expected);
+  EXPECT_STREQ(result->GetText(), expected.c_str());
   processor->Finalize();
   processor->Finalize();
   ASSERT_EQ(processor->GetNextTokenResults().size(), 1U);
@@ -3479,7 +3484,7 @@ TEST(CAPITests, TokenId_FromConfig) {
   // Copy minimal model files from tiny-random-gpt2
   std::string src_dir = MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32";
   for (const auto& entry : std::filesystem::directory_iterator(src_dir)) {
-    if (entry.path().filename() != "genai_config.json") {
+    if (entry.is_regular_file() && entry.path().filename() != "genai_config.json") {
       std::filesystem::copy_file(entry.path(), temp_dir / entry.path().filename(),
                                  std::filesystem::copy_options::overwrite_existing);
     }

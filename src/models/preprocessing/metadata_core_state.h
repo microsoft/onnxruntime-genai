@@ -10,21 +10,20 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace Generators {
 
 struct TokenMetadataInput {
   int32_t token_id;
-  std::optional<AcousticFrameInterval> token_acoustic_frame_interval;
+  std::optional<std::pair<int64_t, int64_t>> token_acoustic_frame_interval;
 };
 
 struct TimestampRecord {
   std::string text;
-  int64_t start_frame;
-  int64_t stop_frame;
-  double start_time;
-  double stop_time;
+  std::pair<int64_t, int64_t> frame_interval;
+  std::pair<double, double> time_interval;
 };
 
 struct TimestampResult {
@@ -62,20 +61,20 @@ class MetadataCoreState {
   void ProcessDecoded(const TokenMetadataInput& token, const OrtxWordPieceInfo& piece, PostProcessorResult& result);
   void ProcessFinalized(PostProcessorResult& result);
   void ProcessCompletedWords(TimestampResult& result);
-  void PublishWord(std::string_view text, AcousticFrameInterval interval, TimestampResult& result);
+  void PublishWord(std::string_view text, std::pair<int64_t, int64_t> interval, TimestampResult& result);
   void CompleteSegment(TimestampResult& result);
   void AddRecord(std::vector<TimestampRecord>& records, std::string_view text,
-                 AcousticFrameInterval interval);
+                 std::pair<int64_t, int64_t> interval);
 
   const MetadataCoreConfig& config_;
   TokenWordGroupingState word_grouping_;
   std::optional<int> segment_gap_threshold_frames_;
   double seconds_per_frame_{};
   // Keep intervals until the word grouper's pending-token watermark releases them.
-  std::deque<AcousticFrameInterval> pending_token_intervals_;
+  std::deque<std::pair<int64_t, int64_t>> pending_token_intervals_;
   size_t first_pending_token_index_{};
   std::optional<std::string> pending_segment_text_;
-  AcousticFrameInterval pending_segment_interval_{};
+  std::pair<int64_t, int64_t> pending_segment_interval_{};
 };
 
 }  // namespace Generators
