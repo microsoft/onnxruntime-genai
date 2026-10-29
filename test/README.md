@@ -14,6 +14,106 @@ This directory contains assets, scripts, and definitions used by the test suite.
     - `test/python/models/*` contains Python scripts used to test ONNX models. Scripts follow the `test_*.py` naming format.
 - `test/tool-definitions/*` contains all tool definitions used for testing.
 
+## Qwen position-input component tests
+
+`RopeRows/QwenPositionValuesTest.*` in `engine_unit_tests` checks exact image-prefill
+and successive decode position tensors for three-row and four-row Qwen mRoPE inputs.
+The four-row fixture is a tiny identity graph used only for real session metadata,
+not language-model inference. Regenerate it from the repository root with:
+
+```sh
+python test/python/create/create_qwen_position_inputs.py
+```
+
+The existing three-row Qwen3-VL fixture is retained as a control. These tests do not
+establish numerical vision-embedding or end-to-end generation parity.
+
+## Qwen partitioned host-vision regression
+
+Run the CPU host-runtime regression from `test/python`:
+
+```sh
+python -m pytest -q --test_models ../models models/test_qwen_fara_models.py -k qwen3_5_openvino_partitioned
+```
+
+The numerical cases generate small ONNX stages and PNG images in pytest temporary
+directories automatically. They use the actual partitioned Qwen3.5 runtime with
+independent NumPy references for interpolation, spatial-merge order, rotary values,
+frame masks, image-feature concatenation and host injection. A diagnostic merger
+preserves its complete inputs in the features so elementwise embedding comparisons
+observe each host calculation. Non-square, unequal packed/padded and temporal grids,
+real image preprocessing, and image prefill followed by text decoding are covered.
+Embedding input IDs are tested with both int32 and int64 graph declarations.
+Vision dtype cases cross float32/float16 pixel sources with individually typed
+patch and merger feeds and stage outputs, including mixed-type pipelines.
+Host math stays float32; numerical expectations account for rounding at each
+float16 boundary. Prefill and two text decode steps cover unequal images, with
+an additional temporal-mask control for all-float16 boundaries. Diagnostic graphs
+cast boundary inputs to float32 internally, so these do not test learned float16 kernels.
+Image injection requires float32 embedding output and matching decoder input;
+float16 embeddings remain usable for text-only input but are rejected for images.
+Qwen position-stage outputs support float32 and float16, not bfloat16 or integer
+outputs. Generator contract cases verify these rejections with session profiles:
+half image embeddings fail after vision/embedding execution but before decoder
+prefill, while unsupported position outputs fail before the merger runs.
+The CPU cast suite checks infinity/NaN preservation in both scalar directions,
+including the negative infinities used by temporal attention masks.
+OpenVINO-partitioned Qwen image grids accept the configured input name when the
+canonical `image_grid_thw` key is absent. When both are supplied, the canonical
+tensor takes priority for both vision and position inputs, regardless of insertion order.
+Profiled dtype cases require non-int64 `image_grid_thw` to be rejected before any
+vision stage executes; an int64 control verifies all three stages execute normally.
+Image rows are located from the canonical prompt tokens rather than the embedding
+session's input buffer. The `embedding_provider` cases run the embedding session on
+CPU or CUDA while the decoder and vision stages stay on CPU, each in a child process.
+Session profiles confirm the requested embedding provider; CUDA cases skip unless
+the build reports CUDA support. `FindQwenImageTokenRowsTest` covers host readback
+of separate device and host token storage in the native engine tests.
+ONNX and Pillow are required to execute all cases; the existing Qwen3.5 tokenizer
+and processor assets supply the fixture metadata.
+
+These are synthetic host-math and wiring tests, not pretrained-model feature parity,
+learned attention validation, public video support, or OpenVINO EP/device validation.
+
+Partitioned vision mergers are released after prompt injection; these regressions
+check output behavior across decoding, not memory usage or allocator reclamation.
+
+## Gemma3 partitioned image-injection regression
+
+Run the CPU runtime regression from `test/python`:
+
+```sh
+python -m pytest -q --test_models ../models models/test_decoder_state_input_ids.py -k gemma3_partitioned
+```
+
+The cases generate tiny ONNX vision, text-embedding and decoder graphs in pytest
+temporary directories. Direct tensor inputs check that the host merger replaces
+only image rows, while a diagnostic decoder exposes all received embeddings and
+token-type markers in its raw logits. Image/text-only prefill and two successive
+decode forwards cover int32/int64 embedding IDs, all int32/int64 source/decoder
+marker combinations, and a configured decoder input name.
+Vision input/output dtype cases independently cross float32 and float16 with both
+pixel source types, checking injected rows, markers and successive decode steps.
+Image injection requires float32 embedding output and matching decoder input.
+Profiled contract cases preserve text-only float16 embeddings while rejecting
+image injection after vision/embedding execution and before decoder prefill.
+Native `TokenTypeIdsLifecycleTest` cases cover int32/int64 decoder metadata and
+batch sizes one/two. Unchanged sequence lengths reuse the bound marker tensor,
+but every update still applies staged markers once or clears the buffer to text
+zeros; shape changes and invalid pending-marker lengths are also checked.
+Image cases also check full-prefill fallback when chunking is requested.
+Session profiles verify invalid marker dtypes and out-of-int32-range values are
+rejected before vision executes, while valid markers execute vision once.
+Missing/empty image markers retain their existing downstream error after vision.
+Partitioned Gemma3 requires a single vision graph; nonempty `vision.pipeline`
+configurations are rejected during model loading.
+ONNX and the existing `multimodal-decoder-no-input-ids` tokenizer assets are required.
+Cases skip if the optional model directory is absent; an existing directory with
+missing tokenizer assets still fails explicitly.
+
+These are synthetic runtime-wiring tests, not image-preprocessing, pretrained-model
+parity, chunked image-prefill support, or OpenVINO EP/device validation.
+
 ## Parallel preprocessing checks
 
 After building a Release configuration, run the focused C++ suite:

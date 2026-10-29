@@ -4,6 +4,10 @@
 #include <gtest/gtest.h>
 #include <algorithm>
 #include <array>
+#include <memory>
+#include <span>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include "models/io/default_position_inputs.h"
@@ -220,7 +224,95 @@ TYPED_TEST(PositionInputBuffersTest, DynamicMasksRetainDecoderSpecificPaddingBeh
   }
 }
 
+class QwenPositionValuesTest : public StandardPositionInputsTest, public testing::WithParamInterface<int64_t> {
+ protected:
+  void SetUp() override {
+    StandardPositionInputsTest::SetUp();
+    if (GetParam() == 4) {
+      session_ = model_->CreateSession(GetOrtEnv(), "../../qwen-position-inputs/four-row.onnx", model_->session_options_.get());
+      model_->session_info_ = SessionInfo{};
+      model_->session_info_.Add(*session_);
+    } else {
+      ASSERT_NO_FATAL_FAILURE(Use3DPositionIds());
+    }
+    ASSERT_EQ(model_->session_info_.GetInputShape("position_ids"),
+              (std::vector<int64_t>{GetParam(), -1, -1}));
+    ASSERT_EQ(model_->session_info_.GetInputDataType("position_ids"), ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+    ASSERT_EQ(model_->session_info_.GetInputDataType("attention_mask"), ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+    model_->config_->model.type = GetParam() == 4 ? "qwen3_5" : "qwen3_vl";
+    model_->config_->model.pad_token_id = 0;
+    model_->config_->model.image_token_id = 100;
+    model_->config_->model.video_token_id = 101;
+    model_->config_->model.vision_start_token_id = 102;
+    model_->config_->model.vision.spatial_merge_size = 2;
+    params_->search.batch_size = 1;
+    params_->search.num_beams = 1;
+  }
+
+  DeviceSpan<int32_t> UploadTokens(std::span<const int32_t> values) {
+    auto tokens = model_->p_device_->Allocate<int32_t>(values.size());
+    std::copy(values.begin(), values.end(), tokens.CpuSpan().begin());
+    tokens.CopyCpuToDevice();
+    return tokens;
+  }
+
+  void ExpectPositionIds(int64_t sequence_length, const std::vector<int64_t>& expected) {
+    const auto* tensor = state_->GetInput(model_->config_->model.decoder.inputs.position_ids.c_str());
+    ASSERT_NE(tensor, nullptr);
+    const auto info = tensor->GetTensorTypeAndShapeInfo();
+    ASSERT_EQ(info->GetElementType(), ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+    ASSERT_EQ(info->GetShape(), (std::vector<int64_t>{GetParam(), 1, sequence_length}));
+    ASSERT_EQ(info->GetElementCount(), expected.size());
+    const auto* data = tensor->GetTensorData<int64_t>();
+    EXPECT_EQ(std::vector<int64_t>(data, data + expected.size()), expected);
+  }
+};
+
 }  // namespace
+
+TEST_P(QwenPositionValuesTest, ImagePrefillAndSuccessiveDecode) {
+  auto inputs = CreatePositionInputs();
+  auto* qwen_inputs = dynamic_cast<Qwen2VLPositionInputs*>(inputs.get());
+  ASSERT_NE(qwen_inputs, nullptr);
+  auto grid = OrtValue::CreateTensor(model_->allocator_cpu_, std::array<int64_t, 2>{1, 3},
+                                     ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+  const std::array<int64_t, 3> grid_values{1, 4, 6};
+  std::copy(grid_values.begin(), grid_values.end(), grid->GetTensorMutableData<int64_t>());
+  qwen_inputs->SetGridTensors(std::make_shared<Tensor>(std::move(grid)), nullptr, nullptr);
+  inputs->Add();
+
+  const std::array<int32_t, 10> prompt{10, 102, 100, 100, 100, 100, 100, 100, 103, 11};
+  auto tokens = UploadTokens(prompt);
+  inputs->Update(tokens, 10, 10);
+  std::vector<int64_t> expected_prefill{
+      0, 1, 2, 2, 2, 2, 2, 2, 5, 6,
+      0, 1, 2, 2, 2, 3, 3, 3, 5, 6,
+      0, 1, 2, 3, 4, 2, 3, 4, 5, 6};
+  if (GetParam() == 4) {
+    expected_prefill.insert(expected_prefill.begin(), {0, 1, 2, 3, 4, 5, 6, 7, 8, 9});
+  }
+  {
+    SCOPED_TRACE("image prefill");
+    ASSERT_NO_FATAL_FAILURE(ExpectPositionIds(10, expected_prefill));
+  }
+
+  tokens = UploadTokens(std::array<int32_t, 1>{12});
+  inputs->Update(tokens, 11, 1);
+  {
+    SCOPED_TRACE("first decode, cached RoPE delta -3");
+    ASSERT_NO_FATAL_FAILURE(ExpectPositionIds(1, GetParam() == 4 ? std::vector<int64_t>{10, 7, 7, 7}
+                                                                 : std::vector<int64_t>{7, 7, 7}));
+  }
+  tokens = UploadTokens(std::array<int32_t, 1>{13});
+  inputs->Update(tokens, 12, 1);
+  {
+    SCOPED_TRACE("second decode, cached RoPE delta -3");
+    ASSERT_NO_FATAL_FAILURE(ExpectPositionIds(1, GetParam() == 4 ? std::vector<int64_t>{11, 8, 8, 8}
+                                                                 : std::vector<int64_t>{8, 8, 8}));
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(RopeRows, QwenPositionValuesTest, testing::Values<int64_t>(3, 4));
 
 TEST_F(StandardPositionInputsTest, QwenVLWith3DPositionIdsUsesMrope) {
   Use3DPositionIds();

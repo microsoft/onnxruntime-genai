@@ -11,6 +11,7 @@ This file can be used in two ways:
 """
 
 import argparse
+import gc
 import importlib.util
 import json
 import logging
@@ -29,6 +30,7 @@ logging.basicConfig(format="%(asctime)s %(name)s [%(levelname)s] - %(message)s",
 log = logging.getLogger("qwen-fara-vision-tests")
 
 _QWEN35_WEBGPU_GRAPH_CAPTURE_CHILD = "ORTGENAI_QWEN35_WEBGPU_GRAPH_CAPTURE_CHILD"
+_QWEN35_EMBEDDING_PROVIDER_CHILD = "ORTGENAI_QWEN35_EMBEDDING_PROVIDER_CHILD"
 
 
 @pytest.mark.parametrize("relative_model_path", [Path("qwen2-5-vl"), Path("qwen3-vl")])
@@ -683,6 +685,858 @@ def test_qwen3_5_hybrid_vision_preprocessing(test_data_path, relative_image_path
 
     assert inputs is not None
     assert "pixel_values" in inputs
+
+
+@pytest.mark.parametrize("relative_image_path", [Path("images") / "australia.jpg"])
+def test_qwen3_5_openvino_partitioned_requires_patch_image(test_data_path, relative_image_path, tmp_path):
+    """OpenVINO-partitioned Qwen models reject the built-in fallback patcher, whose patch
+    layout differs from the PatchImage layout their host-side vision merger expects."""
+    source_path = Path(test_data_path) / "qwen3-5"
+    if not source_path.exists():
+        pytest.skip("qwen3-5 test model not found")
+    image_path = os.fspath(Path(test_data_path).parent / relative_image_path)
+    if not os.path.exists(image_path):
+        pytest.skip(f"Test image not found: {image_path}")
+
+    model_path = tmp_path / "qwen3-5"
+    shutil.copytree(source_path, model_path)
+    prompt = "<|vision_start|><|image_pad|><|vision_end|>Describe"
+
+    def process():
+        config = og.Config(os.fspath(model_path))
+        config.overlay(json.dumps({"model": {"partitioning": "openvino"}}))
+        model = og.Model(config)
+        return model.create_multimodal_processor()(prompt, images=og.Images.open(image_path))
+
+    assert "pixel_values" in process()
+
+    processor_config_path = model_path / "processor_config.json"
+    processor_config = json.loads(processor_config_path.read_text())
+    transforms = processor_config["processor"]["transforms"]
+    processor_config["processor"]["transforms"] = [t for t in transforms if t["operation"]["type"] != "PatchImage"]
+    processor_config_path.write_text(json.dumps(processor_config))
+
+    with pytest.raises(Exception, match="PatchImage"):
+        process()
+
+
+def _qwen35_position_table():
+    row, col = np.indices((48, 48))
+    return np.stack((row * row, col * col, row * col, row % 3 - col % 5), axis=-1).astype(np.float32)
+
+
+_QWEN35_HALF_BOUNDARIES = {
+    "fp32": (),
+    "patch_input": ("patch_input",),
+    "patch_output": ("patch_output",),
+    "pos_output": ("pos_output",),
+    "merger_hidden": ("merger_hidden",),
+    "merger_mask": ("merger_mask",),
+    "merger_rope": ("merger_rope",),
+    "merger_output": ("merger_output",),
+    "all_half": (
+        "patch_input",
+        "patch_output",
+        "pos_output",
+        "merger_hidden",
+        "merger_mask",
+        "merger_rope",
+        "merger_output",
+    ),
+    "mixed": ("patch_output", "merger_hidden", "merger_rope"),
+}
+
+
+def _write_qwen35_partitioned_math_fixture(
+    test_data_path,
+    model_path,
+    *,
+    embedding_dtype=np.int32,
+    embedding_output_dtype=np.float32,
+    position_output_dtype=None,
+    half_boundaries=(),
+):
+    onnx = pytest.importorskip("onnx")
+    source = Path(test_data_path) / "qwen3-5"
+    if not source.exists():
+        pytest.skip("qwen3-5 test model not found")
+    model_path.mkdir()
+    for name in (
+        "genai_config.json",
+        "processor_config.json",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "special_tokens_map.json",
+    ):
+        shutil.copyfile(source / name, model_path / name)
+    helper = onnx.helper
+    tp = onnx.TensorProto
+    assert set(half_boundaries) <= set(_QWEN35_HALF_BOUNDARIES["all_half"])
+    assert position_output_dtype is None or "pos_output" not in half_boundaries
+
+    def boundary_type(name):
+        return tp.FLOAT16 if name in half_boundaries else tp.FLOAT
+
+    def value(name, dtype, shape):
+        return helper.make_tensor_value_info(name, dtype, shape)
+
+    def save(name, inputs, outputs, nodes, constants):
+        graph = helper.make_graph(
+            nodes, name, inputs, outputs, [onnx.numpy_helper.from_array(v, k) for k, v in constants.items()]
+        )
+        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)], ir_version=9)
+        onnx.checker.check_model(model, full_check=True)
+        onnx.save(model, model_path / f"{name}.onnx")
+        saved = onnx.load(model_path / f"{name}.onnx")
+        for expected, actual in zip([*inputs, *outputs], [*saved.graph.input, *saved.graph.output], strict=True):
+            assert actual.type.tensor_type.elem_type == expected.type.tensor_type.elem_type
+        if name == "embedding":
+            assert saved.graph.input[0].type.tensor_type.elem_type == onnx.helper.np_dtype_to_tensor_dtype(
+                np.dtype(embedding_dtype)
+            )
+
+    pixels = "float_pixels" if "patch_input" in half_boundaries else "pixel_values"
+    patch_output = "float_hidden" if "patch_output" in half_boundaries else "hidden_states"
+    save(
+        "patch_embed",
+        [value("pixel_values", boundary_type("patch_input"), ["N", 1536])],
+        [value("hidden_states", boundary_type("patch_output"), ["N", 4])],
+        [
+            *([helper.make_node("Cast", ["pixel_values"], [pixels], to=tp.FLOAT)] if pixels != "pixel_values" else []),
+            helper.make_node("Gather", [pixels, "columns"], ["selected"], axis=1),
+            helper.make_node("Add", ["selected", "bias"], [patch_output]),
+            *(
+                [helper.make_node("Cast", [patch_output], ["hidden_states"], to=tp.FLOAT16)]
+                if patch_output != "hidden_states"
+                else []
+            ),
+        ],
+        {
+            "columns": np.arange(4, dtype=np.int64),
+            "bias": np.array([0.125, 0.25, 0.375, 0.5], dtype=np.float32),
+        },
+    )
+    pos_type = boundary_type("pos_output") if position_output_dtype is None else position_output_dtype
+    pos_output = "float_positions" if pos_type != tp.FLOAT else "position_embeddings"
+    save(
+        "pos",
+        [value("position_indices", tp.INT64, [4, "N"])],
+        [value("position_embeddings", pos_type, [4, "N", 4])],
+        [
+            helper.make_node("Gather", ["table", "position_indices"], [pos_output], axis=0),
+            *(
+                [helper.make_node("Cast", [pos_output], ["position_embeddings"], to=pos_type)]
+                if pos_output != "position_embeddings"
+                else []
+            ),
+        ],
+        {"table": _qwen35_position_table().reshape(2304, 4)},
+    )
+    # Preserve every host-produced value in the final features, including the mask's infinity categories.
+    merger_inputs = {
+        name: f"float_{name}" if boundary in half_boundaries else name
+        for name, boundary in (
+            ("hidden_states", "merger_hidden"),
+            ("vision_attention_mask", "merger_mask"),
+            ("rotary_pos_emb", "merger_rope"),
+        )
+    }
+    merger_output = "float_features" if "merger_output" in half_boundaries else "image_features"
+    save(
+        "merger",
+        [
+            value("hidden_states", boundary_type("merger_hidden"), ["N", 4]),
+            value("vision_attention_mask", boundary_type("merger_mask"), [1, "N", "N"]),
+            value("rotary_pos_emb", boundary_type("merger_rope"), ["N", 4]),
+        ],
+        [value("image_features", boundary_type("merger_output"), ["image_tokens", 224])],
+        [
+            *[
+                helper.make_node("Cast", [name], [internal], to=tp.FLOAT)
+                for name, internal in merger_inputs.items()
+                if name != internal
+            ],
+            helper.make_node(
+                "IsInf",
+                [merger_inputs["vision_attention_mask"]],
+                ["negative_inf"],
+                detect_negative=1,
+                detect_positive=0,
+            ),
+            helper.make_node(
+                "Where", ["negative_inf", "zero", merger_inputs["vision_attention_mask"]], ["finite_mask"]
+            ),
+            helper.make_node("Cast", ["negative_inf"], ["mask_indicator"], to=tp.FLOAT),
+            *[
+                helper.make_node("Reshape", [merger_inputs.get(name, name), "flat_shape"], [f"{name}_flat"])
+                for name in ("hidden_states", "rotary_pos_emb", "finite_mask", "mask_indicator")
+            ],
+            helper.make_node(
+                "Concat",
+                ["hidden_states_flat", "rotary_pos_emb_flat", "finite_mask_flat", "mask_indicator_flat"],
+                ["payload"],
+                axis=0,
+            ),
+            helper.make_node("Shape", [merger_inputs["hidden_states"]], ["hidden_shape"]),
+            helper.make_node("Gather", ["hidden_shape", "first"], ["patch_count"], axis=0),
+            helper.make_node("Mul", ["patch_count", "capacity_per_patch"], ["capacity"]),
+            helper.make_node("Shape", ["payload"], ["payload_size"]),
+            helper.make_node("Sub", ["capacity", "payload_size"], ["padding_size"]),
+            helper.make_node("Concat", ["first", "padding_size"], ["pads"], axis=0),
+            helper.make_node("Pad", ["payload", "pads", "zero"], ["padded"]),
+            helper.make_node("Reshape", ["padded", "feature_shape"], [merger_output]),
+            *(
+                [helper.make_node("Cast", [merger_output], ["image_features"], to=tp.FLOAT16)]
+                if merger_output != "image_features"
+                else []
+            ),
+        ],
+        {
+            "zero": np.array(0, dtype=np.float32),
+            "flat_shape": np.array([-1], dtype=np.int64),
+            "first": np.array([0], dtype=np.int64),
+            "capacity_per_patch": np.array([56], dtype=np.int64),
+            "feature_shape": np.array([-1, 224], dtype=np.int64),
+        },
+    )
+    embedding_output_type = helper.np_dtype_to_tensor_dtype(np.dtype(embedding_output_dtype))
+    embeddings = "float_embeddings" if embedding_output_type != tp.FLOAT else "inputs_embeds"
+    save(
+        "embedding",
+        [value("input_ids", tp.INT32 if embedding_dtype == np.int32 else tp.INT64, ["B", "S"])],
+        [value("inputs_embeds", embedding_output_type, ["B", "S", 224])],
+        [
+            helper.make_node("Cast", ["input_ids"], ["float_ids"], to=tp.FLOAT),
+            helper.make_node("Unsqueeze", ["float_ids", "last_axis"], ["expanded_ids"]),
+            helper.make_node("Mul", ["expanded_ids", "scale"], ["scaled_ids"]),
+            helper.make_node("Add", ["scaled_ids", "offset"], [embeddings]),
+            *(
+                [helper.make_node("Cast", [embeddings], ["inputs_embeds"], to=embedding_output_type)]
+                if embeddings != "inputs_embeds"
+                else []
+            ),
+        ],
+        {
+            "last_axis": np.array([2], dtype=np.int64),
+            "scale": np.array(0.001, dtype=np.float32),
+            "offset": (0.25 + 0.0001 * np.arange(224)).astype(np.float32),
+        },
+    )
+    config_path = model_path / "genai_config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    model = config["model"]
+    scores = np.zeros(model["vocab_size"], dtype=np.float32)
+    scores[2] = 1
+    save(
+        "decoder",
+        [
+            value("inputs_embeds", embedding_output_type, ["B", "S", 224]),
+            value("attention_mask", tp.INT64, ["B", "totalS"]),
+            value("position_ids", tp.INT64, [4, "B", "S"]),
+        ],
+        [value("logits", tp.FLOAT, ["B", "S", model["vocab_size"]])],
+        [
+            helper.make_node("Shape", ["inputs_embeds"], ["embedding_shape"]),
+            helper.make_node("Gather", ["embedding_shape", "batch_sequence"], ["batch_sequence_shape"], axis=0),
+            helper.make_node("Concat", ["batch_sequence_shape", "vocab"], ["logits_shape"], axis=0),
+            helper.make_node("Expand", ["scores", "logits_shape"], ["logits"]),
+        ],
+        {
+            "batch_sequence": np.array([0, 1], dtype=np.int64),
+            "vocab": np.array([model["vocab_size"]], dtype=np.int64),
+            "scores": scores,
+        },
+    )
+    model["partitioning"] = "openvino"
+    decoder = model["decoder"]
+    decoder.update(
+        filename="decoder.onnx",
+        hidden_size=224,
+        head_size=224,
+        num_attention_heads=1,
+        num_key_value_heads=1,
+        num_hidden_layers=1,
+        session_options={"provider_options": []},
+    )
+    decoder.pop("pipeline", None)
+    model["embedding"] = {
+        "filename": "embedding.onnx",
+        "inputs": {"input_ids": "input_ids"},
+        "outputs": {"inputs_embeds": "inputs_embeds"},
+        "session_options": {"provider_options": []},
+    }
+    vision = model["vision"]
+    vision["filename"] = ""
+    vision["session_options"] = {"provider_options": []}
+    vision["pipeline"] = [
+        {
+            name: {
+                "filename": f"{name}.onnx",
+                "inputs": inputs,
+                "outputs": outputs,
+                "run_on_cpu": True,
+            }
+        }
+        for name, inputs, outputs in (
+            ("patch_embed", ["pixel_values"], ["hidden_states"]),
+            ("pos", ["position_indices"], ["position_embeddings"]),
+            ("merger", ["hidden_states", "vision_attention_mask", "rotary_pos_emb"], ["image_features"]),
+        )
+    ]
+    config["search"]["past_present_share_buffer"] = False
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    processor_path = model_path / "processor_config.json"
+    processor = json.loads(processor_path.read_text(encoding="utf-8"))
+    for transform in processor["processor"]["transforms"]:
+        operation = transform["operation"]
+        if operation["type"] == "Resize":
+            operation["attrs"].update(min_pixels=1024, max_pixels=6144)
+    processor_path.write_text(json.dumps(processor), encoding="utf-8")
+    return config
+
+
+def _qwen35_reference_features(patches, grid, *, half_boundaries=()):
+    t, h, w = map(int, grid)
+    assert h % 2 == w % 2 == 0
+    n = t * h * w
+    assert n <= 24
+    y = np.linspace(0, 47, h)
+    x = np.linspace(0, 47, w)
+    low_y, low_x = y.astype(np.int64), x.astype(np.int64)
+    high_y, high_x = np.minimum(low_y + 1, 47), np.minimum(low_x + 1, 47)
+    dy, dx = (y - low_y)[:, None, None], (x - low_x)[None, :, None]
+    table = _qwen35_position_table().astype(np.float64)
+    if "pos_output" in half_boundaries:
+        table = table.astype(np.float16).astype(np.float64)
+    positions = (
+        table[low_y[:, None], low_x[None, :]] * (1 - dy) * (1 - dx)
+        + table[low_y[:, None], high_x[None, :]] * (1 - dy) * dx
+        + table[high_y[:, None], low_x[None, :]] * dy * (1 - dx)
+        + table[high_y[:, None], high_x[None, :]] * dy * dx
+    )
+    np.testing.assert_array_equal(positions[0, 0], [0, 0, 0, 0])
+    endpoint = 2208 if "pos_output" in half_boundaries else 2209
+    np.testing.assert_array_equal(positions[-1, -1], [endpoint, endpoint, endpoint, 0])
+
+    def block_order(array):
+        return array.reshape(t, h // 2, 2, w // 2, 2, -1).transpose(0, 1, 3, 2, 4, 5).reshape(n, -1)
+
+    positions = block_order(np.broadcast_to(positions, (t, h, w, 4)))
+    selected = patches[:, :4]
+    if "patch_input" in half_boundaries:
+        selected = selected.astype(np.float16)
+    patch_hidden = selected.astype(np.float32) + np.array([0.125, 0.25, 0.375, 0.5], dtype=np.float32)
+    if "patch_output" in half_boundaries:
+        patch_hidden = patch_hidden.astype(np.float16)
+    hidden = (
+        patch_hidden.astype(np.float64) + positions
+        if half_boundaries
+        else patches[:, :4].astype(np.float64) + np.array([0.125, 0.25, 0.375, 0.5]) + positions
+    )
+    if "merger_hidden" in half_boundaries:
+        hidden = hidden.astype(np.float32).astype(np.float16).astype(np.float64)
+    rows, cols = np.indices((h, w))
+    rotary = np.stack((rows, rows * 0.01, cols, cols * 0.01), axis=-1)
+    rotary = block_order(np.broadcast_to(rotary, (t, h, w, 4)))
+    np.testing.assert_allclose(
+        rotary[:4], [[0, 0, 0, 0], [0, 0, 1, 0.01], [1, 0.01, 0, 0], [1, 0.01, 1, 0.01]], rtol=0, atol=1e-12
+    )
+    if "merger_rope" in half_boundaries:
+        rotary = rotary.astype(np.float32).astype(np.float16).astype(np.float64)
+    frames = np.repeat(np.arange(t), h * w)
+    cross_frame = frames[:, None] != frames[None, :]
+    payload = np.concatenate((hidden.ravel(), rotary.ravel(), np.zeros(n * n), cross_frame.ravel()))
+    features = np.pad(payload, (0, n * 56 - payload.size)).reshape(n // 4, 224)
+    if "merger_output" in half_boundaries:
+        features = features.astype(np.float32).astype(np.float16)
+    return features.astype(np.float32)
+
+
+def _qwen35_controlled_inputs(config, grids, *, padded=False):
+    model = config["model"]
+    patches = [
+        (0.01 * np.arange(np.prod(grid))[:, None] + 0.0001 * np.arange(1536)[None, :] + i).astype(np.float32)
+        for i, grid in enumerate(grids)
+    ]
+    ids = [10]
+    for grid in grids:
+        ids += [model["vision_start_token_id"]] + [model["image_token_id"]] * (int(np.prod(grid)) // 4)
+        ids += [151653, 11]
+    inputs = og.NamedTensors()
+    inputs["input_ids"] = np.asarray([ids], dtype=np.int32)
+    if padded:
+        pixels = np.full((len(grids), max(map(len, patches)), 1536), -123, dtype=np.float32)
+        for i, image_patches in enumerate(patches):
+            pixels[i, : len(image_patches)] = image_patches
+    else:
+        pixels = np.concatenate(patches)
+    inputs["pixel_values"] = pixels
+    inputs["image_grid_thw"] = np.asarray(grids, dtype=np.int64)
+    inputs["num_image_tokens"] = np.asarray([len(p) // 4 for p in patches], dtype=np.int64)
+    return inputs, patches
+
+
+def _qwen35_text_embeddings(ids):
+    return (0.25 + 0.001 * ids[..., None] + 0.0001 * np.arange(224)).astype(np.float32)
+
+
+def _qwen35_reference_embeddings(ids, patches, grids, image_token_id):
+    ids = ids.as_numpy()
+    expected = _qwen35_text_embeddings(ids)
+    expected[ids == image_token_id] = np.concatenate(
+        [_qwen35_reference_features(p, grid) for p, grid in zip(patches, grids, strict=True)]
+    )
+    return expected
+
+
+def _assert_qwen35_embeddings(actual, expected, ids, grids, image_token_id):
+    np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-4)
+    image_rows = ids.as_numpy() == image_token_id
+    np.testing.assert_allclose(actual[~image_rows], expected[~image_rows], rtol=1e-5, atol=1e-4)
+    features, reference = actual[image_rows], expected[image_rows]
+    offset = 0
+    for grid in grids:
+        n = int(np.prod(grid))
+        observed = features[offset : offset + n // 4].ravel()
+        wanted = reference[offset : offset + n // 4].ravel()
+        bounds = [0, 4 * n, 8 * n, 8 * n + n * n, 8 * n + 2 * n * n, 56 * n]
+        for name, start, end in zip(
+            ("hidden", "rotary", "finite_mask", "negative_inf", "padding"), bounds[:-1], bounds[1:], strict=True
+        ):
+            error = np.abs(observed[start:end].astype(np.float64) - wanted[start:end])
+            relative = error / np.maximum(np.abs(wanted[start:end]), 1e-12)
+            print(
+                f"grid={list(grid)} stream={name} "
+                f"max_abs={error.max(initial=0):.9g} max_rel={relative.max(initial=0):.9g}"
+            )
+            if name in ("finite_mask", "negative_inf", "padding"):
+                np.testing.assert_array_equal(observed[start:end], wanted[start:end])
+        offset += n // 4
+    assert offset == len(features)
+
+
+def _enable_qwen35_session_profiles(model_path, config):
+    for name in ("embedding", "decoder"):
+        config["model"][name]["session_options"]["enable_profiling"] = os.fspath(model_path / f"profile_{name}")
+    for entry in config["model"]["vision"]["pipeline"]:
+        for name, stage in entry.items():
+            stage.setdefault("session_options", {})["enable_profiling"] = os.fspath(model_path / f"profile_{name}")
+    (model_path / "genai_config.json").write_text(json.dumps(config), encoding="utf-8")
+
+
+def _assert_qwen35_session_runs(model_path, expected):
+    gc.collect()
+    for name, expected_runs in expected.items():
+        profiles = list(model_path.glob(f"profile_{name}_*.json"))
+        assert len(profiles) == 1
+        events = json.loads(profiles[0].read_text(encoding="utf-8"))
+        runs = sum(event.get("name") == "model_run" for event in events)
+        print(f"Qwen {name} model_run count={runs}, expected={expected_runs}")
+        assert runs == expected_runs
+
+
+@pytest.mark.parametrize("embedding_output_dtype", [np.float32, np.float16])
+def test_qwen3_5_openvino_partitioned_embedding_dtype_contract(test_data_path, tmp_path, embedding_output_dtype):
+    model_path = tmp_path / "qwen35-math"
+    config = _write_qwen35_partitioned_math_fixture(
+        test_data_path, model_path, embedding_output_dtype=embedding_output_dtype
+    )
+    _enable_qwen35_session_profiles(model_path, config)
+    model = og.Model(os.fspath(model_path))
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=32, do_sample=False)
+    text_generator = og.Generator(model, params)
+    text_ids = np.array([[2, 3]], dtype=np.int32)
+    text_generator.append_tokens(text_ids)
+    actual = text_generator.get_output("inputs_embeds").copy()
+    expected = _qwen35_text_embeddings(text_ids).astype(embedding_output_dtype)
+    assert actual.shape == (1, 2, 224)
+    assert actual.dtype == embedding_output_dtype
+    np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-6)
+    print(f"Qwen text embeddings shape={actual.shape} dtype={actual.dtype} max_abs={np.max(np.abs(actual - expected))}")
+    del text_generator
+
+    inputs, patches = _qwen35_controlled_inputs(config, [[1, 4, 6]])
+    generator = og.Generator(model, params)
+    if embedding_output_dtype == np.float16:
+        with pytest.raises(RuntimeError):
+            generator.set_inputs(inputs)
+    else:
+        generator.set_inputs(inputs)
+        generator.get_logits()
+        actual = generator.get_output("inputs_embeds").copy()
+        expected = _qwen35_reference_embeddings(
+            inputs["input_ids"], patches, [[1, 4, 6]], config["model"]["image_token_id"]
+        )
+        assert actual.shape == (1, 10, 224)
+        assert actual.dtype == np.float32
+        _assert_qwen35_embeddings(actual, expected, inputs["input_ids"], [[1, 4, 6]], config["model"]["image_token_id"])
+    del generator, params, model
+    _assert_qwen35_session_runs(
+        model_path,
+        {
+            "embedding": 2,
+            "decoder": 1 if embedding_output_dtype == np.float16 else 2,
+            "patch_embed": 1,
+            "pos": 1,
+            "merger": 1,
+        },
+    )
+
+
+@pytest.mark.parametrize("position_type", ["FLOAT", "FLOAT16", "BFLOAT16", "INT32"])
+def test_qwen3_5_openvino_partitioned_position_output_dtype_contract(test_data_path, tmp_path, position_type):
+    onnx = pytest.importorskip("onnx")
+    model_path = tmp_path / "qwen35-math"
+    config = _write_qwen35_partitioned_math_fixture(
+        test_data_path, model_path, position_output_dtype=getattr(onnx.TensorProto, position_type)
+    )
+    _enable_qwen35_session_profiles(model_path, config)
+    inputs, patches = _qwen35_controlled_inputs(config, [[1, 4, 6]])
+    model = og.Model(os.fspath(model_path))
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=32, do_sample=False)
+    generator = og.Generator(model, params)
+    supported = position_type in ("FLOAT", "FLOAT16")
+    if supported:
+        generator.set_inputs(inputs)
+        generator.get_logits()
+        expected = _qwen35_text_embeddings(inputs["input_ids"].as_numpy())
+        expected[inputs["input_ids"].as_numpy() == config["model"]["image_token_id"]] = _qwen35_reference_features(
+            patches[0], [1, 4, 6], half_boundaries=("pos_output",) if position_type == "FLOAT16" else ()
+        )
+        actual = generator.get_output("inputs_embeds").copy()
+        assert actual.shape == (1, 10, 224)
+        assert actual.dtype == np.float32
+        _assert_qwen35_embeddings(actual, expected, inputs["input_ids"], [[1, 4, 6]], config["model"]["image_token_id"])
+    else:
+        with pytest.raises(RuntimeError):
+            generator.set_inputs(inputs)
+    del generator, params, model
+    _assert_qwen35_session_runs(
+        model_path,
+        {"patch_embed": 1, "pos": 1, "merger": int(supported), "embedding": int(supported), "decoder": int(supported)},
+    )
+
+
+@pytest.mark.parametrize("embedding_dtype", [np.int32, np.int64])
+@pytest.mark.parametrize("case", ["non_square", "unequal_packed", "unequal_padded", "temporal"])
+def test_qwen3_5_openvino_partitioned_host_math(test_data_path, tmp_path, case, embedding_dtype):
+    model_path = tmp_path / "qwen35-math"
+    config = _write_qwen35_partitioned_math_fixture(test_data_path, model_path, embedding_dtype=embedding_dtype)
+    grids = [[2, 2, 4]] if case == "temporal" else [[1, 4, 6]]
+    if case.startswith("unequal"):
+        grids.append([1, 2, 4])
+    inputs, patches = _qwen35_controlled_inputs(config, grids, padded=case == "unequal_padded")
+    model = og.Model(os.fspath(model_path))
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=inputs["input_ids"].as_numpy().shape[1] + 4, do_sample=False, num_beams=1)
+    generator = og.Generator(model, params)
+    generator.set_inputs(inputs)
+    generator.get_logits()
+    expected = _qwen35_reference_embeddings(inputs["input_ids"], patches, grids, config["model"]["image_token_id"])
+    _assert_qwen35_embeddings(
+        generator.get_output("inputs_embeds").copy(),
+        expected,
+        inputs["input_ids"],
+        grids,
+        config["model"]["image_token_id"],
+    )
+
+
+@pytest.mark.parametrize("embedding_dtype", [np.int32, np.int64])
+@pytest.mark.parametrize("case", ["single", "unequal"])
+def test_qwen3_5_openvino_partitioned_processor_math(test_data_path, tmp_path, case, embedding_dtype):
+    image_module = pytest.importorskip("PIL.Image")
+    model_path = tmp_path / "qwen35-math"
+    config = _write_qwen35_partitioned_math_fixture(test_data_path, model_path, embedding_dtype=embedding_dtype)
+    paths = []
+    sizes = [(96, 64)] if case == "single" else [(96, 64), (64, 32)]
+    for i, (width, height) in enumerate(sizes):
+        row, col = np.indices((height, width))
+        pixels = np.stack(((row + i * 31) % 256, (col * 3 + i * 17) % 256, (row + col * 2) % 256), axis=-1)
+        path = tmp_path / f"image-{i}.png"
+        image_module.fromarray(pixels.astype(np.uint8)).save(path)
+        paths.append(os.fspath(path))
+    model = og.Model(os.fspath(model_path))
+    prompt = "<|vision_start|><|image_pad|><|vision_end|>" * len(paths) + "Describe"
+    inputs = model.create_multimodal_processor()(prompt, images=og.Images.open(*paths))
+    grids = inputs["image_grid_thw"].as_numpy()
+    np.testing.assert_array_equal(grids, [[1, 4, 6]] if case == "single" else [[1, 4, 6], [1, 2, 4]])
+    counts = np.prod(grids, axis=1)
+    np.testing.assert_array_equal(inputs["num_image_tokens"].as_numpy(), [counts.sum() // 4])
+    assert np.count_nonzero(inputs["input_ids"].as_numpy() == config["model"]["image_token_id"]) == counts.sum() // 4
+    pixels = inputs["pixel_values"].as_numpy().reshape(-1, 1536)
+    if len(pixels) == counts.sum():
+        patches = np.split(pixels, np.cumsum(counts)[:-1])
+    else:
+        assert len(pixels) == len(grids) * max(counts)
+        patches = [pixels[i * max(counts) : i * max(counts) + count] for i, count in enumerate(counts)]
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=inputs["input_ids"].as_numpy().shape[1] + 4, do_sample=False, num_beams=1)
+    generator = og.Generator(model, params)
+    generator.set_inputs(inputs)
+    generator.get_logits()
+    expected = _qwen35_reference_embeddings(inputs["input_ids"], patches, grids, config["model"]["image_token_id"])
+    _assert_qwen35_embeddings(
+        generator.get_output("inputs_embeds").copy(),
+        expected,
+        inputs["input_ids"],
+        grids,
+        config["model"]["image_token_id"],
+    )
+
+
+@pytest.mark.parametrize("embedding_dtype", [np.int32, np.int64])
+@pytest.mark.parametrize(
+    "grid_input_case",
+    [
+        "canonical",
+        "configured_only",
+        "canonical_with_configured_name",
+        "both_canonical_first",
+        "both_configured_first",
+    ],
+)
+def test_qwen3_5_openvino_partitioned_decode_embeddings(test_data_path, tmp_path, embedding_dtype, grid_input_case):
+    model_path = tmp_path / "qwen35-math"
+    config = _write_qwen35_partitioned_math_fixture(test_data_path, model_path, embedding_dtype=embedding_dtype)
+    grids = [[1, 4, 6], [1, 2, 4]]
+    inputs, patches = _qwen35_controlled_inputs(config, grids)
+    if grid_input_case != "canonical":
+        config["model"]["vision"]["inputs"]["image_grid_thw"] = "custom_image_grid"
+        (model_path / "genai_config.json").write_text(json.dumps(config), encoding="utf-8")
+        grid = inputs["image_grid_thw"]
+        renamed_inputs = og.NamedTensors()
+        for name in ("input_ids", "pixel_values", "num_image_tokens"):
+            renamed_inputs[name] = inputs[name]
+        if grid_input_case == "configured_only":
+            renamed_inputs["custom_image_grid"] = grid
+        else:
+            if grid_input_case == "both_configured_first":
+                renamed_inputs["custom_image_grid"] = np.array([[-1, -1, -1]], dtype=np.int64)
+            renamed_inputs["image_grid_thw"] = grid
+            if grid_input_case == "both_canonical_first":
+                renamed_inputs["custom_image_grid"] = np.array([[-1, -1, -1]], dtype=np.int64)
+        inputs = renamed_inputs
+    model = og.Model(os.fspath(model_path))
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=inputs["input_ids"].as_numpy().shape[1] + 4, do_sample=False, num_beams=1)
+    generator = og.Generator(model, params)
+    generator.set_inputs(inputs)
+    generator.get_logits()
+    expected = _qwen35_reference_embeddings(inputs["input_ids"], patches, grids, config["model"]["image_token_id"])
+    assert generator.get_output("inputs_embeds").shape == (1, 15, 224)
+    _assert_qwen35_embeddings(
+        generator.get_output("inputs_embeds").copy(),
+        expected,
+        inputs["input_ids"],
+        grids,
+        config["model"]["image_token_id"],
+    )
+    generator.generate_next_token()
+    assert generator.get_next_tokens() == [2]
+    for _ in range(2):
+        generator.get_logits()
+        np.testing.assert_allclose(
+            generator.get_output("inputs_embeds"),
+            _qwen35_text_embeddings(np.array([[2]], dtype=np.int32)),
+            rtol=1e-5,
+            atol=1e-4,
+        )
+        generator.generate_next_token()
+        assert generator.get_next_tokens() == [2]
+
+
+@pytest.mark.parametrize("embedding_dtype", [np.int32, np.int64])
+@pytest.mark.parametrize(
+    "embedding_provider",
+    [
+        "cpu",
+        pytest.param("cuda", marks=pytest.mark.skipif(not og.is_cuda_available(), reason="CUDA EP not available")),
+    ],
+)
+def test_qwen3_5_openvino_partitioned_embedding_provider(
+    test_data_path, tmp_path, request, embedding_dtype, embedding_provider
+):
+    """Image rows come from the canonical prompt tokens when only the embedding session uses another provider."""
+    if os.environ.get(_QWEN35_EMBEDDING_PROVIDER_CHILD) != "1":
+        if not test_data_path or not (Path(test_data_path) / "qwen3-5").exists():
+            pytest.skip("qwen3-5 test model not found")
+        # Reading device-resident embedding IDs on the host can crash the process, so keep that out of the runner.
+        test_node = f"{Path(__file__).resolve()}::{request.node.name}"
+        completed = run_subprocess(
+            [sys.executable, "-m", "pytest", "-sv", "--test_models", os.path.abspath(test_data_path), test_node],
+            cwd=Path(__file__).parents[1],
+            capture=True,
+            env={_QWEN35_EMBEDDING_PROVIDER_CHILD: "1"},
+            log=log,
+        )
+        assert b"1 passed" in completed.stdout, completed.stdout.decode(errors="replace")
+        return
+
+    model_path = tmp_path / "qwen35-math"
+    config = _write_qwen35_partitioned_math_fixture(test_data_path, model_path, embedding_dtype=embedding_dtype)
+    embedding_options = config["model"]["embedding"]["session_options"]
+    if embedding_provider == "cuda":
+        embedding_options["provider_options"] = [{"cuda": {}}]
+    embedding_options["enable_profiling"] = os.fspath(model_path / "profile_embedding")
+    (model_path / "genai_config.json").write_text(json.dumps(config), encoding="utf-8")
+    grids = [[1, 4, 6]]
+    inputs, patches = _qwen35_controlled_inputs(config, grids)
+    assert inputs["input_ids"].as_numpy().shape == (1, 10)
+
+    model = og.Model(os.fspath(model_path))
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=14, do_sample=False, num_beams=1)
+    generator = og.Generator(model, params)
+    generator.set_inputs(inputs)
+    generator.get_logits()
+    expected = _qwen35_reference_embeddings(inputs["input_ids"], patches, grids, config["model"]["image_token_id"])
+    assert generator.get_output("inputs_embeds").shape == (1, 10, 224)
+    _assert_qwen35_embeddings(
+        generator.get_output("inputs_embeds").copy(),
+        expected,
+        inputs["input_ids"],
+        grids,
+        config["model"]["image_token_id"],
+    )
+    generator.generate_next_token()
+    assert generator.get_next_tokens() == [2]
+    for _ in range(2):
+        generator.get_logits()
+        np.testing.assert_allclose(
+            generator.get_output("inputs_embeds"),
+            _qwen35_text_embeddings(np.array([[2]], dtype=np.int32)),
+            rtol=1e-5,
+            atol=1e-4,
+        )
+        generator.generate_next_token()
+        assert generator.get_next_tokens() == [2]
+
+    # Every embedding kernel must run on the requested provider, so a silent CPU fallback cannot pass as CUDA.
+    del generator, params, model
+    gc.collect()
+    profiles = list(model_path.glob("profile_embedding_*.json"))
+    assert len(profiles) == 1
+    events = json.loads(profiles[0].read_text(encoding="utf-8"))
+    providers = {
+        event["args"]["provider"] for event in events if event.get("cat") == "Node" and "provider" in event["args"]
+    }
+    print(f"Qwen embedding providers={sorted(providers)}")
+    assert providers == {"CUDAExecutionProvider" if embedding_provider == "cuda" else "CPUExecutionProvider"}
+
+
+@pytest.mark.parametrize("source_dtype", [np.float32, np.float16])
+@pytest.mark.parametrize("profile", _QWEN35_HALF_BOUNDARIES)
+def test_qwen3_5_openvino_partitioned_vision_dtype(test_data_path, tmp_path, source_dtype, profile):
+    half_boundaries = _QWEN35_HALF_BOUNDARIES[profile]
+    grid_cases = [[[1, 4, 6], [1, 2, 4]]]
+    if profile == "all_half":
+        grid_cases.append([[2, 2, 4]])
+    for case_index, grids in enumerate(grid_cases):
+        model_path = tmp_path / f"qwen35-dtype-{case_index}"
+        config = _write_qwen35_partitioned_math_fixture(
+            test_data_path,
+            model_path,
+            half_boundaries=half_boundaries,
+        )
+        inputs, patches = _qwen35_controlled_inputs(config, grids)
+        # Dyadic pixels avoid midpoint ties in the existing CPU half-cast implementation.
+        patches = [
+            (i + 1 / 256 + np.arange(len(patch))[:, None] / 32 + np.arange(1536)[None, :] / 128).astype(source_dtype)
+            for i, patch in enumerate(patches)
+        ]
+        inputs["pixel_values"] = np.concatenate(patches)
+        model = og.Model(os.fspath(model_path))
+        params = og.GeneratorParams(model)
+        params.set_search_options(max_length=inputs["input_ids"].as_numpy().shape[1] + 4, do_sample=False)
+        generator = og.Generator(model, params)
+        generator.set_inputs(inputs)
+        generator.get_logits()
+        expected = _qwen35_text_embeddings(inputs["input_ids"].as_numpy())
+        image_token_id = config["model"]["image_token_id"]
+        expected[inputs["input_ids"].as_numpy() == image_token_id] = np.concatenate(
+            [
+                _qwen35_reference_features(p, grid, half_boundaries=half_boundaries)
+                for p, grid in zip(patches, grids, strict=True)
+            ]
+        )
+        actual = generator.get_output("inputs_embeds").copy()
+        assert actual.dtype == np.float32
+        assert actual.shape == (1, 15 if case_index == 0 else 8, 224)
+        _assert_qwen35_embeddings(actual, expected, inputs["input_ids"], grids, image_token_id)
+        generator.generate_next_token()
+        assert generator.get_next_tokens() == [2]
+        for _ in range(2):
+            generator.get_logits()
+            np.testing.assert_allclose(
+                generator.get_output("inputs_embeds"),
+                _qwen35_text_embeddings(np.array([[2]], dtype=np.int32)),
+                rtol=1e-5,
+                atol=1e-4,
+            )
+            generator.generate_next_token()
+            assert generator.get_next_tokens() == [2]
+        del generator, params, model
+
+
+@pytest.mark.parametrize("grid_dtype", [np.int32, np.uint8, np.float32, np.float64, np.int64])
+def test_qwen3_5_openvino_partitioned_grid_dtype_before_vision(test_data_path, tmp_path, grid_dtype):
+    model_path = tmp_path / "qwen35-math"
+    config = _write_qwen35_partitioned_math_fixture(test_data_path, model_path)
+    for entry in config["model"]["vision"]["pipeline"]:
+        for name, stage in entry.items():
+            stage.setdefault("session_options", {})["enable_profiling"] = os.fspath(model_path / f"profile_{name}")
+    (model_path / "genai_config.json").write_text(json.dumps(config), encoding="utf-8")
+    grids = [[1, 4, 6]]
+    inputs, patches = _qwen35_controlled_inputs(config, grids)
+    inputs["image_grid_thw"] = np.array(grids, dtype=grid_dtype)
+    model = og.Model(os.fspath(model_path))
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=30)
+    generator = og.Generator(model, params)
+    if grid_dtype == np.int64:
+        generator.set_inputs(inputs)
+        generator.get_logits()
+        expected = _qwen35_reference_embeddings(inputs["input_ids"], patches, grids, config["model"]["image_token_id"])
+        _assert_qwen35_embeddings(
+            generator.get_output("inputs_embeds").copy(),
+            expected,
+            inputs["input_ids"],
+            grids,
+            config["model"]["image_token_id"],
+        )
+    else:
+        with pytest.raises(RuntimeError):
+            generator.set_inputs(inputs)
+    del generator, params, model
+    gc.collect()
+    for name in ("patch_embed", "pos", "merger"):
+        profiles = list(model_path.glob(f"profile_{name}_*.json"))
+        assert len(profiles) == 1
+        events = json.loads(profiles[0].read_text(encoding="utf-8"))
+        runs = sum(event.get("name") == "model_run" for event in events)
+        expected_runs = int(grid_dtype == np.int64)
+        print(f"Qwen {name} model_run count={runs}, expected={expected_runs}")
+        assert runs == expected_runs
+
+
+def test_qwen3_5_openvino_partitioned_fixture_routing(test_data_path, tmp_path):
+    model_path = tmp_path / "qwen35-math"
+    config = _write_qwen35_partitioned_math_fixture(test_data_path, model_path)
+    assert config["model"]["partitioning"] == "openvino"
+    assert "pipeline" not in config["model"]["decoder"]
+    assert "image_features" not in config["model"]["embedding"]["inputs"]
+    config["model"]["vision"]["pipeline"] = [
+        stage for stage in config["model"]["vision"]["pipeline"] if "pos" not in stage
+    ]
+    (model_path / "genai_config.json").write_text(json.dumps(config), encoding="utf-8")
+    model = og.Model(os.fspath(model_path))
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=20)
+    with pytest.raises(RuntimeError):
+        og.Generator(model, params)
 
 
 # ---------------------------------------------------------------------------

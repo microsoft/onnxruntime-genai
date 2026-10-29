@@ -16,11 +16,17 @@ Two test model variants (in test/models/):
                                         decoder does NOT.
   - multimodal-decoder-with-input-ids/ Gemma4-like:   both embedding and decoder
                                         declare input_ids.
+
+Temporary partitioned Gemma3 graphs also check host image injection and decoder
+token-type markers during prefill and successive decoding.
 """
 
 from __future__ import annotations
 
+import gc
+import json
 import os
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -127,3 +133,425 @@ def test_multimodal_prefill_chunking_falls_back_for_batched_prompts(test_data_pa
     assert len(with_chunk_size) == len(unchunked)
     for actual, expected in zip(with_chunk_size, unchunked, strict=True):
         np.testing.assert_array_equal(actual, expected)
+
+
+def _write_gemma3_partitioned_fixture(
+    test_data_path,
+    model_path,
+    marker_dtype,
+    *,
+    embedding_dtype=np.int32,
+    embedding_output_dtype=np.float32,
+    vision_input_dtype=np.float32,
+    vision_output_dtype=np.float32,
+):
+    onnx = pytest.importorskip("onnx")
+    source = Path(test_data_path) / "multimodal-decoder-no-input-ids"
+    if not source.exists():
+        pytest.skip(f"Test model not found: {source}")
+    model_path.mkdir()
+    for name in ("tokenizer.json", "tokenizer_config.json"):
+        shutil.copyfile(source / name, model_path / name)
+    helper = onnx.helper
+    tp = onnx.TensorProto
+
+    def value(name, dtype, shape):
+        return helper.make_tensor_value_info(name, dtype, shape)
+
+    def save(name, inputs, outputs, nodes, constants):
+        graph = helper.make_graph(
+            nodes, name, inputs, outputs, [onnx.numpy_helper.from_array(v, k) for k, v in constants.items()]
+        )
+        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)], ir_version=9)
+        onnx.checker.check_model(model, full_check=True)
+        onnx.save(model, model_path / f"{name}.onnx")
+        saved = onnx.load(model_path / f"{name}.onnx")
+        for expected, actual in zip([*inputs, *outputs], [*saved.graph.input, *saved.graph.output], strict=True):
+            assert actual.type.tensor_type.elem_type == expected.type.tensor_type.elem_type
+        if name == "embedding":
+            assert saved.graph.input[0].type.tensor_type.elem_type == onnx.helper.np_dtype_to_tensor_dtype(
+                np.dtype(embedding_dtype)
+            )
+
+    vision_input_type = helper.np_dtype_to_tensor_dtype(np.dtype(vision_input_dtype))
+    vision_output_type = helper.np_dtype_to_tensor_dtype(np.dtype(vision_output_dtype))
+    pixels = "float_pixels" if vision_input_type != tp.FLOAT else "pixel_values"
+    features = "float_features" if vision_output_type != tp.FLOAT else "image_features"
+    save(
+        "vision",
+        [value("pixel_values", vision_input_type, ["R", 4])],
+        [value("image_features", vision_output_type, ["R", 4])],
+        [
+            *([helper.make_node("Cast", ["pixel_values"], [pixels], to=tp.FLOAT)] if pixels != "pixel_values" else []),
+            helper.make_node("Mul", [pixels, "scale"], ["scaled_pixels"]),
+            helper.make_node("Add", ["scaled_pixels", "bias"], [features]),
+            *(
+                [helper.make_node("Cast", [features], ["image_features"], to=vision_output_type)]
+                if features != "image_features"
+                else []
+            ),
+        ],
+        {"scale": np.array(2, dtype=np.float32), "bias": np.array(0.5, dtype=np.float32)},
+    )
+    vision = onnx.load(model_path / "vision.onnx")
+    assert vision.graph.input[0].type.tensor_type.elem_type == vision_input_type
+    assert vision.graph.output[0].type.tensor_type.elem_type == vision_output_type
+    embedding_output_type = helper.np_dtype_to_tensor_dtype(np.dtype(embedding_output_dtype))
+    embeddings = "float_embeddings" if embedding_output_type != tp.FLOAT else "inputs_embeds"
+    save(
+        "embedding",
+        [value("input_ids", tp.INT32 if embedding_dtype == np.int32 else tp.INT64, ["B", "S"])],
+        [value("inputs_embeds", embedding_output_type, ["B", "S", 4])],
+        [
+            helper.make_node("Cast", ["input_ids"], ["float_ids"], to=tp.FLOAT),
+            helper.make_node("Unsqueeze", ["float_ids", "last_axis"], ["expanded_ids"]),
+            helper.make_node("Add", ["expanded_ids", "offset"], [embeddings]),
+            *(
+                [helper.make_node("Cast", [embeddings], ["inputs_embeds"], to=embedding_output_type)]
+                if embeddings != "inputs_embeds"
+                else []
+            ),
+        ],
+        {"last_axis": np.array([2], dtype=np.int64), "offset": (0.1 * np.arange(4)).astype(np.float32)},
+    )
+    # Echo every marker and embedding row, not just the logits used for sampling.
+    save(
+        "decoder",
+        [
+            value("inputs_embeds", embedding_output_type, ["B", "S", 4]),
+            value("attention_mask", tp.INT64, ["B", "totalS"]),
+            value("position_ids", tp.INT64, ["B", "S"]),
+            value("decoder_markers", tp.INT32 if marker_dtype == np.int32 else tp.INT64, ["B", "S"]),
+        ],
+        [value("logits", tp.FLOAT, ["B", "S", 10])],
+        [
+            *(
+                [helper.make_node("Cast", ["inputs_embeds"], [embeddings], to=tp.FLOAT)]
+                if embeddings != "inputs_embeds"
+                else []
+            ),
+            helper.make_node("Cast", ["decoder_markers"], ["float_markers"], to=tp.FLOAT),
+            helper.make_node("Unsqueeze", ["float_markers", "last_axis"], ["marker_column"]),
+            helper.make_node("Mul", [embeddings, "zero"], ["padding"]),
+            helper.make_node("Mul", ["marker_column", "zero"], ["zero_column"]),
+            helper.make_node("Add", ["zero_column", "winner"], ["winning_column"]),
+            helper.make_node("Concat", ["marker_column", embeddings, "padding", "winning_column"], ["logits"], axis=2),
+        ],
+        {
+            "last_axis": np.array([2], dtype=np.int64),
+            "zero": np.array(0, dtype=np.float32),
+            "winner": np.array(1000, dtype=np.float32),
+        },
+    )
+    config = {
+        "model": {
+            "type": "gemma3",
+            "partitioning": "openvino",
+            "bos_token_id": 1,
+            "eos_token_id": 1,
+            "pad_token_id": 0,
+            "image_token_id": 3,
+            "vocab_size": 10,
+            "context_length": 64,
+            "decoder": {
+                "filename": "decoder.onnx",
+                "hidden_size": 4,
+                "head_size": 4,
+                "num_attention_heads": 1,
+                "num_key_value_heads": 1,
+                "num_hidden_layers": 1,
+                "inputs": {
+                    "inputs_embeds": "inputs_embeds",
+                    "attention_mask": "attention_mask",
+                    "position_ids": "position_ids",
+                    "token_type_ids": "decoder_markers",
+                },
+                "outputs": {"logits": "logits"},
+                "session_options": {"provider_options": []},
+            },
+            "embedding": {
+                "filename": "embedding.onnx",
+                "inputs": {"input_ids": "input_ids"},
+                "outputs": {"inputs_embeds": "inputs_embeds"},
+                "session_options": {"provider_options": []},
+            },
+            "vision": {
+                "filename": "vision.onnx",
+                "inputs": {"pixel_values": "pixel_values"},
+                "outputs": {"image_features": "image_features"},
+                "session_options": {"provider_options": []},
+            },
+        },
+        "search": {"do_sample": False, "num_beams": 1, "max_length": 9, "past_present_share_buffer": False},
+    }
+    (model_path / "genai_config.json").write_text(json.dumps(config), encoding="utf-8")
+
+
+def test_gemma3_partitioned_fixture_skips_missing_source(tmp_path):
+    pytest.importorskip("onnx")
+    model_path = tmp_path / "gemma3-partitioned"
+    with pytest.raises(pytest.skip.Exception):
+        _write_gemma3_partitioned_fixture(tmp_path, model_path, np.int64)
+    assert not model_path.exists()
+
+
+@pytest.mark.parametrize("missing_asset", ["tokenizer.json", "tokenizer_config.json"])
+def test_gemma3_partitioned_fixture_rejects_incomplete_source(tmp_path, missing_asset):
+    pytest.importorskip("onnx")
+    source = tmp_path / "multimodal-decoder-no-input-ids"
+    source.mkdir()
+    if missing_asset == "tokenizer_config.json":
+        (source / "tokenizer.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(FileNotFoundError):
+        _write_gemma3_partitioned_fixture(tmp_path, tmp_path / "gemma3-partitioned", np.int64)
+
+
+def _assert_gemma3_partitioned_generation(generator, expected_embeddings, expected_markers):
+    for step in range(3):
+        generator.get_logits()
+        embeddings = generator.get_output("inputs_embeds").copy()
+        logits = generator.get_output("logits").copy()
+        assert embeddings.shape == expected_embeddings.shape
+        assert logits.shape == (*expected_markers.shape, 10)
+        assert embeddings.dtype == logits.dtype == np.float32
+        np.testing.assert_allclose(embeddings, expected_embeddings, rtol=1e-6, atol=1e-6)
+        np.testing.assert_array_equal(logits[:, :, 0], expected_markers)
+        expected_logits = np.zeros(logits.shape, dtype=np.float64)
+        expected_logits[:, :, 0] = expected_markers
+        expected_logits[:, :, 1:5] = expected_embeddings
+        expected_logits[:, :, 9] = 1000
+        np.testing.assert_allclose(logits, expected_logits, rtol=1e-6, atol=1e-6)
+        print(
+            f"step={step} embeddings={embeddings.tolist()} shape={embeddings.shape} dtype={embeddings.dtype} "
+            f"logits_shape={logits.shape} markers={logits[:, :, 0].tolist()} "
+            f"max_abs={np.max(np.abs(embeddings - expected_embeddings)):.9g}"
+        )
+        generator.generate_next_token()
+        np.testing.assert_array_equal(generator.get_next_tokens(), [9])
+        expected_embeddings = np.array([[[9, 9.1, 9.2, 9.3]]], dtype=np.float64)
+        expected_markers = np.zeros((1, 1), dtype=np.int64)
+
+
+def _enable_gemma3_vision_profile(model_path):
+    config_path = model_path / "genai_config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["model"]["vision"].setdefault("session_options", {})["enable_profiling"] = os.fspath(
+        model_path / "vision_profile"
+    )
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+
+def _assert_gemma3_session_runs(model_path, name, expected):
+    gc.collect()
+    profiles = list(model_path.glob(f"{name}_profile*.json"))
+    assert len(profiles) == 1
+    events = json.loads(profiles[0].read_text(encoding="utf-8"))
+    runs = sum(event.get("name") == "model_run" for event in events)
+    print(f"Gemma3 {name} model_run count={runs}, expected={expected}")
+    assert runs == expected
+
+
+def _assert_gemma3_vision_runs(model_path, expected):
+    _assert_gemma3_session_runs(model_path, "vision", expected)
+
+
+@pytest.mark.parametrize("embedding_output_dtype", [np.float32, np.float16])
+def test_gemma3_partitioned_embedding_dtype_contract(test_data_path, tmp_path, embedding_output_dtype):
+    model_path = tmp_path / "gemma3-partitioned"
+    _write_gemma3_partitioned_fixture(
+        test_data_path, model_path, np.int32, embedding_output_dtype=embedding_output_dtype
+    )
+    _enable_gemma3_vision_profile(model_path)
+    config_path = model_path / "genai_config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    for name in ("embedding", "decoder"):
+        config["model"][name]["session_options"]["enable_profiling"] = os.fspath(model_path / f"{name}_profile")
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    model = og.Model(os.fspath(model_path))
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=32, do_sample=False)
+    text_generator = og.Generator(model, params)
+    text_ids = np.array([[2, 3]], dtype=np.int32)
+    text_generator.append_tokens(text_ids)
+    actual = text_generator.get_output("inputs_embeds").copy()
+    expected = (text_ids[..., None] + 0.1 * np.arange(4)).astype(embedding_output_dtype)
+    assert actual.shape == (1, 2, 4)
+    assert actual.dtype == embedding_output_dtype
+    np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-6)
+    print(
+        f"Gemma3 text embeddings shape={actual.shape} dtype={actual.dtype} max_abs={np.max(np.abs(actual - expected))}"
+    )
+    del text_generator
+
+    inputs = og.NamedTensors()
+    ids = np.array([[2, 3, 4, 5, 6]], dtype=np.int32)
+    inputs["input_ids"] = ids
+    inputs["token_type_ids"] = np.array([[0, 1, 1, 0, 0]], dtype=np.int32)
+    inputs["pixel_values"] = np.arange(1, 9, dtype=np.float32).reshape(2, 4)
+    inputs["num_image_tokens"] = np.array([2], dtype=np.int64)
+    generator = og.Generator(model, params)
+    if embedding_output_dtype == np.float16:
+        with pytest.raises(RuntimeError):
+            generator.set_inputs(inputs)
+    else:
+        generator.set_inputs(inputs)
+        generator.get_logits()
+        expected = ids[..., None] + 0.1 * np.arange(4)
+        expected[0, 1:3] = [[2.5, 4.5, 6.5, 8.5], [10.5, 12.5, 14.5, 16.5]]
+        actual = generator.get_output("inputs_embeds").copy()
+        assert actual.shape == (1, 5, 4)
+        assert actual.dtype == np.float32
+        np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-4)
+    del generator, params, model
+    _assert_gemma3_session_runs(model_path, "embedding", 2)
+    _assert_gemma3_session_runs(model_path, "decoder", 1 if embedding_output_dtype == np.float16 else 2)
+    _assert_gemma3_vision_runs(model_path, 1)
+
+
+@pytest.mark.parametrize("embedding_dtype", [np.int32, np.int64])
+@pytest.mark.parametrize("source_marker_dtype", [np.int32, np.int64])
+@pytest.mark.parametrize("marker_dtype", [np.int32, np.int64])
+@pytest.mark.parametrize("chunk_size", [None, 2])
+def test_gemma3_partitioned_image_prefill_and_decode(
+    test_data_path, tmp_path, marker_dtype, chunk_size, source_marker_dtype, embedding_dtype
+):
+    model_path = tmp_path / "gemma3-partitioned"
+    _write_gemma3_partitioned_fixture(test_data_path, model_path, marker_dtype, embedding_dtype=embedding_dtype)
+    _enable_gemma3_vision_profile(model_path)
+    prompt = np.array([[2, 3, 4, 5, 6]], dtype=np.int32)
+    markers = np.array([[0, 1, 1, 0, 0]], dtype=source_marker_dtype)
+    inputs = og.NamedTensors()
+    inputs["input_ids"] = og.Tensor(prompt)
+    inputs["token_type_ids"] = og.Tensor(markers)
+    inputs["pixel_values"] = og.Tensor(np.array([[1, 2, 3, 4], [5, 6, 7, 8]], dtype=np.float32))
+    inputs["num_image_tokens"] = og.Tensor(np.array([2], dtype=np.int64))
+    model = og.Model(os.fspath(model_path))
+    params = og.GeneratorParams(model)
+    if chunk_size is not None:
+        params.set_search_options(chunk_size=chunk_size)
+    generator = og.Generator(model, params)
+    generator.set_inputs(inputs)
+    expected = prompt[:, :, None].astype(np.float64) + 0.1 * np.arange(4)
+    expected[0, 1:3] = [[2.5, 4.5, 6.5, 8.5], [10.5, 12.5, 14.5, 16.5]]
+    _assert_gemma3_partitioned_generation(generator, expected, markers)
+    del generator, params, model
+    _assert_gemma3_vision_runs(model_path, 1)
+
+
+@pytest.mark.parametrize("embedding_dtype", [np.int32, np.int64])
+@pytest.mark.parametrize("marker_dtype", [np.int32, np.int64])
+def test_gemma3_partitioned_text_only_and_decode(test_data_path, tmp_path, marker_dtype, embedding_dtype):
+    model_path = tmp_path / "gemma3-partitioned"
+    _write_gemma3_partitioned_fixture(test_data_path, model_path, marker_dtype, embedding_dtype=embedding_dtype)
+    prompt = np.array([[2, 3, 4, 5, 6]], dtype=np.int32)
+    inputs = og.NamedTensors()
+    inputs["input_ids"] = og.Tensor(prompt)
+    model = og.Model(os.fspath(model_path))
+    params = og.GeneratorParams(model)
+    generator = og.Generator(model, params)
+    generator.set_inputs(inputs)
+    expected = prompt[:, :, None].astype(np.float64) + 0.1 * np.arange(4)
+    _assert_gemma3_partitioned_generation(generator, expected, np.zeros(prompt.shape, dtype=marker_dtype))
+
+
+@pytest.mark.parametrize("source_dtype", [np.float32, np.float16])
+@pytest.mark.parametrize("vision_input_dtype", [np.float32, np.float16])
+@pytest.mark.parametrize("vision_output_dtype", [np.float32, np.float16])
+def test_gemma3_partitioned_vision_dtype(
+    test_data_path, tmp_path, source_dtype, vision_input_dtype, vision_output_dtype
+):
+    model_path = tmp_path / "gemma3-partitioned"
+    _write_gemma3_partitioned_fixture(
+        test_data_path,
+        model_path,
+        np.int32,
+        vision_input_dtype=vision_input_dtype,
+        vision_output_dtype=vision_output_dtype,
+    )
+    _enable_gemma3_vision_profile(model_path)
+    prompt = np.array([[2, 3, 4, 5, 6]], dtype=np.int32)
+    markers = np.array([[0, 1, 1, 0, 0]], dtype=np.int32)
+    inputs = og.NamedTensors()
+    inputs["input_ids"] = og.Tensor(prompt)
+    inputs["token_type_ids"] = og.Tensor(markers)
+    inputs["pixel_values"] = og.Tensor(np.array([[1, 2, 3, 4], [5, 6, 7, 8]], dtype=source_dtype))
+    inputs["num_image_tokens"] = og.Tensor(np.array([2], dtype=np.int64))
+    model = og.Model(os.fspath(model_path))
+    params = og.GeneratorParams(model)
+    generator = og.Generator(model, params)
+    generator.set_inputs(inputs)
+    expected = prompt[..., None].astype(np.float64) + 0.1 * np.arange(4)
+    expected[0, 1:3] = [[2.5, 4.5, 6.5, 8.5], [10.5, 12.5, 14.5, 16.5]]
+    _assert_gemma3_partitioned_generation(generator, expected, markers)
+    del generator, params, model
+    _assert_gemma3_vision_runs(model_path, 1)
+
+
+@pytest.mark.parametrize(
+    "source_dtype,marker",
+    [
+        (np.float32, 1),
+        (np.float64, 1),
+        (np.uint8, 1),
+        (np.int64, np.iinfo(np.int32).min - 1),
+        (np.int64, np.iinfo(np.int32).max + 1),
+    ],
+)
+def test_gemma3_partitioned_rejects_invalid_markers_before_vision(test_data_path, tmp_path, source_dtype, marker):
+    model_path = tmp_path / "gemma3-partitioned"
+    _write_gemma3_partitioned_fixture(test_data_path, model_path, np.int64)
+    _enable_gemma3_vision_profile(model_path)
+    inputs = og.NamedTensors()
+    inputs["input_ids"] = np.array([[2, 3, 4, 5, 6]], dtype=np.int32)
+    inputs["token_type_ids"] = np.array([[0, marker, marker, 0, 0]], dtype=source_dtype)
+    inputs["pixel_values"] = np.array([[1, 2, 3, 4], [5, 6, 7, 8]], dtype=np.float32)
+    inputs["num_image_tokens"] = np.array([2], dtype=np.int64)
+    model = og.Model(os.fspath(model_path))
+    params = og.GeneratorParams(model)
+    generator = og.Generator(model, params)
+    with pytest.raises(RuntimeError):
+        generator.set_inputs(inputs)
+    del generator, params, model
+    _assert_gemma3_vision_runs(model_path, 0)
+
+
+@pytest.mark.parametrize("empty_markers", [False, True])
+def test_gemma3_partitioned_missing_or_empty_markers(test_data_path, tmp_path, empty_markers):
+    model_path = tmp_path / "gemma3-partitioned"
+    _write_gemma3_partitioned_fixture(test_data_path, model_path, np.int64)
+    _enable_gemma3_vision_profile(model_path)
+    inputs = og.NamedTensors()
+    inputs["input_ids"] = np.array([[2, 3, 4, 5, 6]], dtype=np.int32)
+    if empty_markers:
+        inputs["token_type_ids"] = np.empty((1, 0), dtype=np.int32)
+    inputs["pixel_values"] = np.array([[1, 2, 3, 4], [5, 6, 7, 8]], dtype=np.float32)
+    inputs["num_image_tokens"] = np.array([2], dtype=np.int64)
+    model = og.Model(os.fspath(model_path))
+    params = og.GeneratorParams(model)
+    generator = og.Generator(model, params)
+    with pytest.raises(RuntimeError):
+        generator.set_inputs(inputs)
+    del generator, params, model
+    _assert_gemma3_vision_runs(model_path, 1)
+
+
+@pytest.mark.parametrize("vision_filename", ["", "vision.onnx"])
+def test_gemma3_partitioned_rejects_vision_pipeline(test_data_path, tmp_path, vision_filename):
+    model_path = tmp_path / "gemma3-partitioned"
+    _write_gemma3_partitioned_fixture(test_data_path, model_path, np.int64)
+    config_path = model_path / "genai_config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["model"]["vision"]["filename"] = vision_filename
+    config["model"]["vision"]["pipeline"] = [
+        {
+            "vision": {
+                "filename": "vision.onnx",
+                "inputs": ["pixel_values"],
+                "outputs": ["image_features"],
+                "run_on_cpu": True,
+            }
+        }
+    ]
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    with pytest.raises(RuntimeError):
+        og.Model(os.fspath(model_path))

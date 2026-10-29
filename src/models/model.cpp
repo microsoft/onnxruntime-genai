@@ -41,6 +41,7 @@
 #include "marian.h"
 #include "decoder_only_pipeline.h"
 #include "qwen_vl_model.h"
+#include "openvino_multi_modal.h"
 #include "ep/amdgpu/interface.h"
 #include "ep/dml/interface.h"
 #include "ep/openvino/interface.h"
@@ -197,14 +198,12 @@ void State::Run(OrtSession& session, bool graph_capture_this_run, int graph_capt
   DumpOutputs();
 }
 
-void State::SetRunOption(const char* key, const char* value) {
+void ApplyRunOption(OrtRunOptions& run_options, const char* key, const char* value) {
   if (strcmp(key, "terminate_session") == 0) {
     if (strcmp(value, "0") == 0) {
-      session_terminated_ = false;
-      run_options_->UnsetTerminate();
+      run_options.UnsetTerminate();
     } else if (strcmp(value, "1") == 0) {
-      session_terminated_ = true;
-      run_options_->SetTerminate();
+      run_options.SetTerminate();
     } else {
       // Value not expected
       throw std::runtime_error(std::string("terminate_session key value unexpected: ") + value);
@@ -213,20 +212,27 @@ void State::SetRunOption(const char* key, const char* value) {
   } else if (strcmp(key, "enable_profiling") == 0) {
 #if ORT_API_VERSION >= 25
     if (strcmp(value, "0") == 0) {
-      run_options_->DisableProfiling();
+      run_options.DisableProfiling();
     } else {
       // Enable run-level profiling. The profiling output file is named: <prefix>_<timestamp>.json
       // Value "1" uses the default prefix; any other value is treated as a custom prefix.
       constexpr const char* default_profile_prefix = "onnxruntime_run_profile";
       const char* prefix = (strcmp(value, "1") == 0) ? default_profile_prefix : value;
-      run_options_->EnableProfiling(fs::path(prefix).c_str());
+      run_options.EnableProfiling(fs::path(prefix).c_str());
     }
 #else
     throw std::runtime_error("enable_profiling requires ONNX Runtime 1.25 or later");
 #endif
     return;
   }
-  run_options_->AddConfigEntry(key, value);
+  run_options.AddConfigEntry(key, value);
+}
+
+void State::SetRunOption(const char* key, const char* value) {
+  ApplyRunOption(*run_options_, key, value);
+  if (strcmp(key, "terminate_session") == 0) {
+    session_terminated_ = strcmp(value, "1") == 0;
+  }
 }
 
 /*
@@ -1042,6 +1048,10 @@ std::unique_ptr<Config> CreateConfig(OrtEnv& ort_env, const char* config_path, c
   return std::make_unique<Config>(path, json_overlay);
 }
 
+bool IsOpenVINOPartitioned(const Config& config) {
+  return config.model.partitioning == "openvino";
+}
+
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
   if (config->model.draft)
     return std::make_shared<SpeculativeDecodingModel>(std::move(config), ort_env);
@@ -1067,6 +1077,11 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, /*vision=*/false, /*speech=*/true);
   if (ModelType::IsALM(config->model.type))
     return std::make_shared<WhisperModel>(std::move(config), ort_env);
+  if (ModelType::IsVLM(config->model.type) && IsOpenVINOPartitioned(*config)) {
+    // OpenVINO-partitioned VLMs currently use a text-only embedding graph and merge
+    // image features on the host.
+    return std::make_shared<OpenVINOMultiModalModel>(std::move(config), ort_env);
+  }
   if (ModelType::IsVLM(config->model.type))
     return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, false);
   if (ModelType::IsMMM(config->model.type)) {

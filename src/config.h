@@ -173,6 +173,11 @@ struct Config {
   struct Model {
     std::string type;
 
+    // Declares how the model graph was partitioned at export time. "openvino" indicates an
+    // OpenVINO-partitioned VLM (text-only embedding model + host-side image feature merge). Empty
+    // means a natively-exported model (graph-side merge). Read directly from genai_config.json
+    std::string partitioning;
+
     std::string tokenizer_dir;  // Directory containing tokenizer files. Empty means alongside genai_config.json. Resolved via Config::ResolvePath.
 
     int pad_token_id{};             // The id of the padding token.
@@ -613,6 +618,10 @@ struct Config {
 
         // Parakeet TDT decoder (prediction network) extra inputs
         std::string targets_length;
+
+        // Token type ids (0=text, 1=image). Required by OpenVINO-partitioned Gemma3 decoders, whose
+        // graph consumes them for image-token attention. Bound only when the decoder graph declares it.
+        std::string token_type_ids{Defaults::TokenTypeIdsName};
       } inputs;
 
       struct Outputs {
@@ -898,6 +907,8 @@ void SetSpeculativeBool(Config::Speculative& speculative, std::string_view name,
 // the main model's device, batching and paged-attention contract, but replaces model-specific
 // decoder state with the single MTP attention layer.
 std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config);
+void InheritNamedStrings(const std::vector<Config::NamedString>& parent,
+                         std::vector<Config::NamedString>& child);
 // Fills unset fields of `child` session options from `parent` (providers, provider options, config entries, custom ops).
 // custom_ops_library and custom_ops_libraries are inherited together only when the child sets neither; because
 // custom_ops_libraries is stored as a vector, an explicit `"custom_ops_libraries": []` leaves it empty and still inherits.

@@ -5,7 +5,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -15,6 +14,7 @@
 #include "models/io/embeddings.h"
 #include "models/io/extra_inputs.h"
 #include "models/io/logits.h"
+#include "models/io/token_type_ids.h"
 #include "io/kv_cache.h"
 #include "models/io/position_inputs.h"
 #include "model_type.h"
@@ -22,6 +22,8 @@
 #include "models/lfm2_audio_output.h"
 
 namespace Generators {
+
+struct OpenVINOVisionMerger;
 
 struct MultiModalLanguageModel : Model {
   MultiModalLanguageModel(std::unique_ptr<Config> config, OrtEnv& ort_env, bool vision, bool speech);
@@ -188,6 +190,7 @@ struct DecoderState : State {
                             model_.config_->model.decoder.inputs.embeddings};
   std::unique_ptr<Embeddings> per_layer_inputs_;        // Optional model input (Gemma4: per-layer conditioning)
   std::unique_ptr<DefaultInputIDs> decoder_input_ids_;  // Optional model input (e.g., Gemma4 decoder needs input_ids)
+  std::unique_ptr<TokenTypeIds> token_type_ids_;        // Optional model input (OpenVINO-partitioned Gemma3)
   std::unique_ptr<PositionInputs> position_inputs_;     // Model input
   std::unique_ptr<KeyValueCache> kv_cache_;             // Model input
   std::unique_ptr<RecurrentState> recurrent_state_;     // Model input (for hybrid models)
@@ -226,6 +229,10 @@ struct MultiModalPipelineState : State {
   std::unique_ptr<Lfm2AudioOutput> audio_output_;  // LFM2-Audio speech output, when the model has it
   std::shared_ptr<Adapters> adapters_;
   bool is_prompt_{true};
+
+  // Host-side vision production + image-feature merge for OpenVINO-partitioned VLMs. Null for native
+  // models, which fuse image features inside the embedding graph instead.
+  std::unique_ptr<OpenVINOVisionMerger> vision_merger_;
 
   const std::string vision_adapter_name_{"vision"};
   const std::string speech_adapter_name_{"speech"};
