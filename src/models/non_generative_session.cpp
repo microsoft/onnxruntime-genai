@@ -890,19 +890,28 @@ TokenBatch Tokenize(const Generators::Config& config,
                     const Generators::Tokenizer& tokenizer,
                     const std::vector<std::string>& texts) {
   if (texts.empty()) throw std::invalid_argument("questions must be non-empty");
-  std::vector<std::vector<int32_t>> rows;
+  std::vector<std::string> normalized;
+  normalized.reserve(texts.size());
+  for (const auto& text : texts) {
+    if (text.find('\0') != std::string::npos)
+      throw std::invalid_argument(
+          "structured text must not contain embedded NUL characters");
+    normalized.push_back(text.empty() ? " " : text);
+  }
+  std::vector<const char*> values;
+  values.reserve(normalized.size());
+  for (const auto& text : normalized) values.push_back(text.c_str());
+  auto rows = tokenizer.EncodeBatchRows(values);
   size_t width = 0;
   const auto max_context =
       static_cast<size_t>(config.model.context_length);
-  for (const auto& text : texts) {
-    auto row = EncodeText(tokenizer, text.empty() ? " " : text);
+  for (const auto& row : rows) {
     if (row.size() > max_context)
       throw std::invalid_argument(
           "CLM input exceeds configured context length " +
           std::to_string(max_context) + ": " + std::to_string(row.size()));
     if (row.empty()) throw std::invalid_argument("tokenization produced an empty row");
     width = std::max(width, row.size());
-    rows.push_back(std::move(row));
   }
   TokenBatch result;
   result.rows = rows.size();
