@@ -201,6 +201,14 @@ capture remain disabled until that ring holds a complete attention window.
 Full-attention drafters still require their entire prefix; their admission behavior
 is unchanged.
 
+Admission charges an adopted retained block against reclaimable capacity only when
+that block is actually in the prefix cache's reclaimable set. Fixed-state and draft
+checkpoint leases protect their complete physical ancestry from reclamation. Such a
+protected block already occupies committed pool capacity and is not charged again;
+an exact-fit request may therefore adopt it and reserve the remaining free blocks.
+Unleased retained blocks remain charged so selecting one request cannot let a later
+request plan against capacity that the first request's adoption has protected.
+
 The implementation applies only to newly admitted requests and does not splice
 a prefix into resident continuation turns. It still rejects target
 sliding-window KV rings and auxiliary caches that mirror every target block when
@@ -988,11 +996,17 @@ Requests that appended a token or became complete produce staged events. Events 
 
 The commit order in `Engine::RunDynamic()` is deliberate:
 
-1. Prepare the reservation: validate every ownership and capacity precondition of both sub-reservations. A fallback reservation copies each fixed staged output into its slot's inactive persistent bank. A direct reservation has already written full-step outputs there; if speculative verification keeps only a prefix, compact replay reconstructs the accepted state from the untouched active bank into that same inactive bank. Preparation synchronizes without publishing anything. This is the last step that performs fallible device work, and a failure here is fatal even though committed state is intact, because a partially written inactive bank cannot be proven consistent for a retry. The publish steps below do only host-side work; they can still throw on a state-machine misuse (for example a double publish), and the Engine treats any such throw as fatal too.
+1. Prepare the reservation: validate every ownership and capacity precondition of both sub-reservations, stage full-step fixed outputs in inactive banks as needed, and synchronize the preparation work without publishing anything. If speculative verification keeps only a prefix, compact replay reconstructs the accepted state from the untouched input snapshot into the inactive bank; this work may be queued for a later pool operation instead of executing during preparation. A preparation failure is fatal even though committed state is intact, because a partially written inactive bank cannot be proven consistent for a retry. The publication operations below do only host-side work; they can still throw on a state-machine misuse (for example a double publish), and the Engine treats any such throw as fatal too.
 2. Commit the request search checkpoints and sampler checkpoint.
 3. Publish the reservation: paged occupancy first, then the fixed bank flip.
 4. Commit each request's lightweight bookkeeping.
 5. Publish the staged events.
+
+Publication can precede physical execution of deferred replay. Before a later reader can consume
+the published bank, a pool operation executes replay or enqueues it ahead of that reader on the
+same device stream. If deferred replay fails, the triggering operation throws and the pool becomes
+unhealthy and unusable; already published metadata is not rolled back, and subsequent state
+readers are rejected rather than allowed to consume unreplayed state.
 
 Everything after step 1 crosses the commit boundary and is never retried. This is a fail-stop
 publication interval: a throw is fatal and the Engine is not used again; already published
@@ -1000,7 +1014,7 @@ components are not rolled back.
 
 Committing the cache reservation:
 
-- Flips each selected fixed slot to its freshly prepared bank, advances its state generation and committed token boundary, and publishes provisional fixed-slot ownership (`FixedStateReservation::PublishCommit()` is `noexcept`).
+- Flips each selected fixed slot to its prepared or replay-pending bank, advances its state generation and committed token boundary, and publishes provisional fixed-slot ownership (`FixedStateReservation::PublishCommit()` is `noexcept`).
 - Adds reserved blocks to existing block tables.
 - Adds provisional block tables for newly admitted requests.
 - Advances committed cache-slot counts.
@@ -1622,9 +1636,45 @@ positive fixed extent before allocating device storage. It also rejects a zero b
 two different fixed batch extents on input and output,
 dynamic or mismatched non-batch axes, and dtype mismatches. Every dtype and
 per-request row size is derived from that validated geometry, and state is
-allocated with the model state-device allocator. The initial implementation
-supports CPU and CUDA; other devices are rejected until they provide the required
-offset-copy and completion guarantees.
+allocated with the model state-device allocator. Devices are admitted only when
+they qualify the allocation, fill, ranged-copy, tensor-binding, and synchronization
+semantics needed to publish state transactionally. CPU, CUDA, and WebGPU satisfy
+that contract. CPU and CUDA bind offset tensor views directly; WebGPU uses staging
+bindings. Compact partial-acceptance replay is device-native on CUDA. WebGPU's
+`ReplayStateUpdates` processes descriptors in their supplied order: FP32
+GatedDeltaNet descriptors with one shared backing owner for their
+decay/key/delta capsule sections invoke ORT's `com.microsoft::GatedDeltaNetStateReplay`
+(version 1). Convolution descriptors and FP32 recurrent descriptors with separate
+capsule backing owners retain CPU staging, `ReplayStateUpdatesOnCpu`, and upload.
+Each descriptor finishes before the next one reads its inputs. Non-FP32 recurrent
+state and unknown replay kinds are rejected; the CPU recurrent reference also
+requires FP32. Invalid GPU views, helper-session creation errors, and failed ORT runs
+propagate without retrying on CPU. Consecutive CPU-fallback descriptors share one
+host mirror per backing, observe earlier writes, and upload each modified backing
+once, preserving untouched rows and bytes. Those mirrors are uploaded before a GPU
+descriptor runs and refreshed after it, so mixed replay preserves device ordering.
+
+The replay invocation remains private to the WebGPU device interface.
+The device owns its lazily created helper session, cloned from the fully configured
+allocator-initialization session options, with graph capture disabled. This first
+version supports context 0 only and requires an ORT build containing the operator.
+Full backing allocations are bound as rank-1 tensors; absolute logical byte offsets
+from `DeviceSpan::ByteOffset()` are converted to FP32-element metadata offsets.
+The output is prebound to the same inactive destination allocation as its input.
+The operator's checked completion makes a successful helper return a GPU-completion
+boundary; ORT failures propagate to the caller. The helper serializes its own runs,
+but callers must order target-session work before replay and keep borrowed
+buffer owners alive through the call. There is one helper `Session::Run` and one
+checked-completion boundary per recurrent descriptor, with no batching or GPU
+convolution replay. It does not publish or flip a state bank. `PrepareCommit` queues
+compact replay, and `PublishCommit` publishes bank metadata before the next pool
+operation flushes that replay ahead of all state readers. Preparation failures leave
+active banks unchanged and fail the reservation. A deferred replay error propagates
+from the next reader and marks the pool unhealthy, preventing further reservations
+or checkpoint capture from observing incomplete state.
+The source must be the incoming state before capsule capture, and capsule geometry
+and original capture capacity must match the producer; `kept_count` selects only
+the leading transitions, not a different capsule layout.
 
 Each resident request owns a stable slot identified by request identity and an
 allocation generation. A released and reused slot receives a new generation, so
@@ -1651,8 +1701,8 @@ storage already counted by `PersistentBytes`.
 Every tensor is backed by two persistent `[capacity, row...]` banks, and each slot
 records which bank is currently active (holds its visible committed state). This
 double buffering lets the commit be split into three phases so that a composite
-Engine transaction can validate and stage all of its resources, synchronize once,
-and then publish them at a single infallible boundary:
+Engine transaction can validate and stage its resources, synchronize the preparation
+work, and then publish metadata at a single infallible boundary:
 
 - **`ValidateCommit()`** is `const`, mutates nothing, and performs every host-side
   precondition check before device work begins. It proves every checkpointed slot
@@ -1660,23 +1710,25 @@ and then publish them at a single infallible boundary:
   left it (ownership, identity, generation, and reservation id), that publishing it
   cannot overflow a generation, and that no row regresses below its slot's
   `committed_tokens`.
-- **`PrepareCommit()`** is the fallible device-completion phase: it re-validates,
-  copies fallback outputs into the **inactive** bank, and synchronizes. A partially
-  accepted compact update over a direct output is replayed into the inactive bank by
-  the pool's next operation (`Reserve()`, `CapturePrefixCheckpoint()`, or the next
-  `PrepareCommit()`), which enqueues it ahead of every later reader of the banks on
-  the same stream, so the device runs the replay while the host prepares the next
-  step; discarding the prepared reservation drops it. A fully accepted direct
-  output needs no state copy. The active (visible) bank is never touched, so a
-  failure leaves committed state exactly as it was; it drains the device and marks
-  the pool unhealthy because the inactive banks may be left partially written. A
-  deferred replay that fails to launch also marks the pool unhealthy. The
-  reservation becomes `Prepared`.
+- **`PrepareCommit()`** is the fallible preparation phase: it re-validates,
+  copies full-step fallback outputs into the **inactive** bank, and synchronizes the
+  work it performs. A partially accepted compact update may instead queue replay
+  from the untouched input snapshot into the inactive bank. The pool's next operation
+  (`Reserve()`, `CapturePrefixCheckpoint()`, or the next `PrepareCommit()`) executes
+  that replay before allowing a later reader to proceed, or enqueues it ahead of the
+  reader on the same device stream. Discarding the prepared reservation drops its
+  deferred replay. A fully accepted direct output needs no state copy. Preparation
+  does not write the active (visible) bank, so a failure during preparation leaves
+  committed state exactly as it was; the pool drains the device and marks itself
+  unhealthy because the inactive banks may be left partially written. A
+  deferred replay that later fails also throws and marks the pool unhealthy, even
+  if publication has already occurred; subsequent state readers are rejected. The
+  reservation becomes `Prepared` without necessarily executing deferred replay.
 - **`PublishCommit()`** is `noexcept` and performs no fallible or device work: it
-  flips each slot to its freshly written bank, advances `state_generation`, sets
+  flips each slot to its prepared or replay-pending bank, advances `state_generation`, sets
   `committed_tokens` to the row's `target_tokens`, and publishes provisional
-  ownership. Because a prepared commit only wrote invisible banks, its output is
-  invisible until this flip.
+  ownership. Ownership and committed-token metadata become visible at this flip;
+  physical replay may still be pending.
 
 `Commit()` is a convenience wrapper that runs the three phases in order. `Discard()`
 is valid from either `Reserved` or `Prepared`: it preserves every resident slot's

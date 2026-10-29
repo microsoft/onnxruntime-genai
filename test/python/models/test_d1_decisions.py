@@ -367,7 +367,6 @@ def test_command_line(model_path, tmp_path, valid):
         capture_output=True,
         encoding="utf-8",
         check=False,
-        cwd=EXAMPLES_DIR,
         timeout=300,
     )
 

@@ -1202,6 +1202,8 @@ struct Dflash2Inputs_Element : JSON::Element {
       v_.qkv_row_map = JSON::Get<std::string_view>(value);
     } else if (name == "block_row_index") {
       v_.block_row_index = JSON::Get<std::string_view>(value);
+    } else if (name == "anchor_row_index") {
+      v_.anchor_row_index = JSON::Get<std::string_view>(value);
     } else if (name == "past_key_scale_names") {
       v_.past_key_scale_names = JSON::Get<std::string_view>(value);
     } else if (name == "past_value_scale_names") {
@@ -2283,6 +2285,29 @@ struct Model_Element : JSON::Element {
       v_.blank_id = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "max_symbols_per_step") {
       v_.max_symbols_per_step = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "timestamp_level") {
+      const auto level = JSON::Get<std::string_view>(value);
+      if (level == "off") {
+        v_.timestamp_level = Config::TimestampLevel::Off;
+      } else if (level == "word") {
+        v_.timestamp_level = Config::TimestampLevel::Word;
+      } else if (level == "segment") {
+        v_.timestamp_level = Config::TimestampLevel::Segment;
+      } else if (level == "all") {
+        v_.timestamp_level = Config::TimestampLevel::All;
+      } else {
+        throw std::runtime_error("timestamp_level must be one of: off, word, segment, all");
+      }
+    } else if (name == "segment_gap_threshold_seconds") {
+      if (std::holds_alternative<std::nullptr_t>(value)) {
+        v_.segment_gap_threshold_seconds.reset();
+      } else {
+        const double threshold = JSON::Get<double>(value);
+        if (!std::isfinite(threshold) || threshold < 0.0) {
+          throw std::runtime_error("segment_gap_threshold_seconds must be finite and >= 0");
+        }
+        v_.segment_gap_threshold_seconds = threshold;
+      }
     } else if (name == "left_context_samples") {
       v_.left_context_samples = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "right_context_samples") {
@@ -2305,6 +2330,10 @@ struct Model_Element : JSON::Element {
       return eos_token_id_;
     if (name == "tdt_durations")
       return tdt_durations_;
+    if (name == "segment_separators") {
+      v_.segment_separators.clear();
+      return segment_separators_;
+    }
     throw JSON::unknown_value_error{};
   }
 
@@ -2367,6 +2396,7 @@ struct Model_Element : JSON::Element {
   std::unique_ptr<Decoder_Element> draft_;
   Int_Array_Element eos_token_id_{v_.eos_token_id};
   Int_Array_Element tdt_durations_{v_.tdt_durations};
+  StringArray_Element segment_separators_{v_.segment_separators};
   Vision_Element vision_{v_.vision};
   Embedding_Element embedding_{v_.embedding};
   Speech_Element speech_{v_.speech};
@@ -2411,6 +2441,40 @@ int SafeDoubleToInt(double x, std::string_view name) {
 
   // 4. Perform the cast.
   return static_cast<int>(x);
+}
+
+void ValidateTimestampConfiguration(const Config::Model& model) {
+  if (model.timestamp_level == Config::TimestampLevel::Off) return;
+  if (!ModelType::IsRNNT(model.type))
+    throw std::runtime_error("Timestamp metadata requires a nemotron_speech model");
+  if (model.sample_rate <= 0 || model.hop_length <= 0 || model.subsampling_factor <= 0)
+    throw std::runtime_error("Timestamp metadata requires positive sample_rate, hop_length, and subsampling_factor");
+  (void)GetSegmentGapThresholdFrames(model);
+}
+
+std::optional<int> GetSegmentGapThresholdFrames(const Config::Model& model) {
+  return GetSegmentGapThresholdFrames(model.segment_gap_threshold_seconds, model.sample_rate,
+                                      model.hop_length, model.subsampling_factor);
+}
+
+std::optional<int> GetSegmentGapThresholdFrames(std::optional<double> seconds, int sample_rate,
+                                                int hop_length, int subsampling_factor) {
+  if (!seconds) return std::nullopt;
+  if (!std::isfinite(*seconds) || *seconds < 0.0) {
+    throw std::runtime_error("segment_gap_threshold_seconds must be finite and >= 0");
+  }
+  if (sample_rate <= 0 || hop_length <= 0 || subsampling_factor <= 0) {
+    throw std::runtime_error(
+        "segment_gap_threshold_seconds requires positive sample_rate, hop_length, and subsampling_factor");
+  }
+
+  const int64_t samples_per_frame = static_cast<int64_t>(hop_length) * subsampling_factor;
+  const double rounded_frames = std::round(
+      *seconds * sample_rate / samples_per_frame);
+  if (rounded_frames > std::numeric_limits<int>::max()) {
+    throw std::runtime_error("segment_gap_threshold_seconds is too large");
+  }
+  return static_cast<int>(rounded_frames);
 }
 
 int64_t SafeDoubleToInt64(double x, std::string_view name) {
@@ -3286,23 +3350,26 @@ struct RootObject_Element : JSON::Element {
   JSON::Element& t_;
 };
 
-void ParseConfig(const fs::path& filename, std::string_view json_overlay, Config& config) {
-  std::ifstream file = filename.open(std::ios::binary | std::ios::ate);
-  if (!file.is_open()) {
-    throw std::runtime_error("Error opening " + filename.string());
-  }
-  std::streamsize const size = file.tellg();
-  file.seekg(0, std::ios::beg);
-
-  std::vector<char> buffer(size);
-  if (!file.read(buffer.data(), size)) {
-    throw std::runtime_error("Error reading " + filename.string());
+void ParseConfig(const fs::path& filename, std::string_view json_overlay, Config& config,
+                 std::optional<std::string_view> memory_json) {
+  std::vector<char> buffer;
+  if (!memory_json) {
+    std::ifstream file = filename.open(std::ios::binary | std::ios::ate);
+    if (!file.is_open()) {
+      throw std::runtime_error("Error opening " + filename.string());
+    }
+    std::streamsize const size = file.tellg();
+    file.seekg(0, std::ios::beg);
+    buffer.resize(size);
+    if (!file.read(buffer.data(), size)) {
+      throw std::runtime_error("Error reading " + filename.string());
+    }
   }
 
   Root_Element root{config};
   RootObject_Element root_object{root};
   try {
-    JSON::Parse(root_object, std::string_view(buffer.data(), buffer.size()));
+    JSON::Parse(root_object, memory_json.value_or(std::string_view(buffer.data(), buffer.size())));
   } catch (const std::exception& message) {
     std::ostringstream oss;
     oss << "Error encountered while parsing '" << filename.string() << "' " << message.what();
@@ -3328,6 +3395,7 @@ void OverlayConfig(Config& config, std::string_view json) {
   JSON::Parse(element, json);
   ValidateRuntimeProfiles(candidate);
   ModelStateManifest::ValidateConfig(candidate.model.decoder);
+  ValidateTimestampConfiguration(candidate.model);
   std::swap(config, candidate);
 }
 
@@ -3494,8 +3562,10 @@ void WarnOnClampedDraftWidth(const Config& config) {
   }
 }
 
-Config::Config(const fs::path& path, std::string_view json_overlay) : config_path{path} {
-  ParseConfig(path / "genai_config.json", json_overlay, *this);
+Config::Config(const fs::path& path, std::string_view json_overlay,
+               std::optional<std::string_view> memory_json)
+    : config_path{path}, memory_assets_only_{memory_json.has_value()} {
+  ParseConfig(path / "genai_config.json", json_overlay, *this, memory_json);
   ModelStateManifest::ValidateConfig(model.decoder);
 
   if (model.context_length == 0 && !ModelType::IsRNNT(model.type) && !ModelType::IsStreamingEncDecASR(model.type)) {
@@ -3548,6 +3618,8 @@ Config::Config(const fs::path& path, std::string_view json_overlay) : config_pat
   // Validate all config-specified filenames/paths after parsing so downstream loaders
   // (model/processor/adapter creation) can rely on them being safe.
   ValidateModelPaths(*this);
+
+  ValidateTimestampConfiguration(model);
 
   WarnOnClampedDraftWidth(*this);
 }

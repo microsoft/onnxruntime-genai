@@ -46,6 +46,14 @@ TEST(MultiModalDevicePlacementTests, SessionCanAccessOnlyHostOrItsOwnMemory) {
   EXPECT_FALSE(Generators::SessionCanAccess(cpu, gpu));
 }
 
+TEST(MultiModalDevicePlacementTests, SessionCanAccessHostAccessibleDeviceMemory) {
+  auto& cpu = *Generators::GetDeviceInterface(Generators::DeviceType::CPU);
+  // OpenVINO allocates from the CPU interface and QNN from shared memory: host memory that a CPU
+  // session writes in place, so binding it needs no staging copy.
+  EXPECT_TRUE(Generators::SessionCanAccess(cpu, *Generators::GetDeviceInterface(Generators::DeviceType::OpenVINO)));
+  EXPECT_TRUE(Generators::SessionCanAccess(cpu, *Generators::GetDeviceInterface(Generators::DeviceType::QnnHtp)));
+}
+
 TEST(MultiModalDevicePlacementTests, StateDefaultsToTheModelDevices) {
   auto model = std::make_shared<PlacementTestModel>();
   auto params = std::make_shared<Generators::GeneratorParams>(*model);
@@ -106,6 +114,28 @@ TEST(MultiModalDevicePlacementTests, EmbeddingsPreserveCapturedDecodeBufferAcros
       EXPECT_EQ(state.inputs_.back(), embeddings.Get());
     }
   }
+}
+
+TEST(MultiModalDevicePlacementTests, EmbeddingsPreserveAdditionalFeatureDimension) {
+  Ort::InitApi();
+  auto model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto params = Generators::CreateGeneratorParams(*model);
+  PlacementTestState state{*params, *model, nullptr};
+  const auto& name = model->config_->model.decoder.inputs.input_ids;
+
+  Generators::Embeddings embeddings(
+      state, Generators::Embeddings::Mode::Input, name, /*hidden_size=*/256, /*feature_count=*/35);
+  embeddings.Add();
+  embeddings.UpdateSequenceLength(4);
+  EXPECT_EQ(embeddings.GetShape(), (std::vector<int64_t>{1, 4, 35, 256}));
+  EXPECT_EQ(embeddings.Get()->GetTensorTypeAndShapeInfo()->GetShape(),
+            (std::vector<int64_t>{1, 4, 35, 256}));
+
+  embeddings.UseChunkView(1, 2);
+  EXPECT_EQ(state.inputs_.back()->GetTensorTypeAndShapeInfo()->GetShape(),
+            (std::vector<int64_t>{1, 2, 35, 256}));
+  embeddings.RestoreFullView();
+  EXPECT_EQ(state.inputs_.back(), embeddings.Get());
 }
 
 }  // namespace
