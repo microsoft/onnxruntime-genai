@@ -16,7 +16,11 @@ steps:
       echo "PIP_INDEX_URL is not configured; authenticate the Python package feed before building the manylinux image."
       exit 1
     fi
-    python3 -m pip install requests
+    venv_dir=$(mktemp -d "$(Agent.TempDirectory)/manylinux-image-venv.XXXXXX")
+    trap 'rm -rf -- "$venv_dir"' EXIT
+    python3 -m venv "$venv_dir"
+    venv_python="$venv_dir/bin/python"
+    "$venv_python" -m pip install requests
     dockerBuildArgs="--build-arg BUILD_UID=$(id -u) --secret id=pip_index_url,env=PIP_INDEX_URL"
     if [ '${{ parameters.ep }}' = 'cuda' ] && [ '${{ parameters.arch }}' = 'arm64' ]; then
       [ '${{ parameters.cuda_version }}' = '13.1' ] || {
@@ -34,7 +38,7 @@ steps:
       dockerfile='tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_cpu_x64'
     fi
     set -x
-    python3 tools/ci_build/get_docker_image.py \
+    "$venv_python" tools/ci_build/get_docker_image.py \
       --dockerfile "$dockerfile" \
       --context tools/ci_build/github/linux/docker/manylinux \
       --docker-build-args "$dockerBuildArgs" \
