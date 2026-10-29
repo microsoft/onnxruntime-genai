@@ -24,8 +24,8 @@ extern "C" {
 #endif
 #define OGA_API_CALL _stdcall
 #else
-// To make symbols visible on macOS/iOS
-#ifdef __APPLE__
+// Keep the C ABI visible even when the library is built with hidden visibility.
+#if defined(__GNUC__)
 #define OGA_EXPORT __attribute__((visibility("default")))
 #else
 #define OGA_EXPORT
@@ -117,6 +117,8 @@ OGA_EXPORT int64_t OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStopFrame
 OGA_EXPORT double OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStartTime(const OgaTokenPostProcessorTimestampRecord* record);
 OGA_EXPORT double OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStopTime(const OgaTokenPostProcessorTimestampRecord* record);
 
+typedef struct OgaNonGenerativeSession OgaNonGenerativeSession;
+
 /**
  * \brief Reason why an Engine Request's generation turn stopped.
  */
@@ -197,6 +199,19 @@ OGA_EXPORT void OGA_API_CALL OgaSetTelemetryEnabled(bool enabled);
  *         and can will be freed when the OgaResult is destroyed.
  */
 OGA_EXPORT const char* OGA_API_CALL OgaResultGetError(const OgaResult* result);
+
+/**
+ * \brief Create a ranking or decision session from an existing configuration.
+ *
+ * The session copies the effective configuration. The caller may destroy or
+ * reuse \p config after this function returns.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateNonGenerativeSession(
+    const OgaConfig* config, OgaNonGenerativeSession** out);
+OGA_EXPORT void OGA_API_CALL OgaDestroyNonGenerativeSession(OgaNonGenerativeSession* session);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaNonGenerativeSessionRunJson(
+    OgaNonGenerativeSession* session, const char* request, size_t request_length,
+    const char** response);
 
 /**
  * \brief Control the logging behavior of the library.

@@ -4,11 +4,14 @@
 #pragma once
 
 #include <cstdint>
+#include <cstddef>
+#include <cstring>
 #include <functional>
 #include <limits>
 #include <memory>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -58,6 +61,28 @@ struct OgaAbstract {
   void operator=(const OgaAbstract&) = delete;
 };
 
+// Typed package entry points for ranking and decision inference.
+class NonGenerativeSession {
+ public:
+  explicit NonGenerativeSession(const OgaConfig& config);
+  ~NonGenerativeSession() { OgaDestroyNonGenerativeSession(handle_); }
+  NonGenerativeSession(NonGenerativeSession&& other) noexcept
+      : handle_(std::exchange(other.handle_, nullptr)) {}
+  NonGenerativeSession& operator=(NonGenerativeSession&& other) noexcept {
+    if (this != &other) {
+      OgaDestroyNonGenerativeSession(handle_);
+      handle_ = std::exchange(other.handle_, nullptr);
+    }
+    return *this;
+  }
+  NonGenerativeSession(const NonGenerativeSession&) = delete;
+  NonGenerativeSession& operator=(const NonGenerativeSession&) = delete;
+  std::string Run(std::string_view request_json);
+
+ private:
+  OgaNonGenerativeSession* handle_{};
+};
+
 struct OgaResult : OgaAbstract {
   const char* GetError() const { return OgaResultGetError(this); }
   static void operator delete(void* p) { OgaDestroyResult(reinterpret_cast<OgaResult*>(p)); }
@@ -71,6 +96,14 @@ inline void OgaCheckResult(OgaResult* result) {
   }
 }
 
+inline std::string NonGenerativeSession::Run(std::string_view request_json) {
+  const char* response{};
+  OgaCheckResult(OgaNonGenerativeSessionRunJson(
+      handle_, request_json.data(), request_json.size(), &response));
+  std::unique_ptr<const char, decltype(&OgaDestroyString)> owned(
+      response, OgaDestroyString);
+  return response ? std::string(response) : std::string{};
+}
 struct OgaSpeculativeStats : OgaAbstract {
   uint64_t GetCount(const char* name) const {
     uint64_t value;
@@ -286,6 +319,10 @@ struct OgaConfig : OgaAbstract {
 
   static void operator delete(void* p) { OgaDestroyConfig(reinterpret_cast<OgaConfig*>(p)); }
 };
+
+inline NonGenerativeSession::NonGenerativeSession(const OgaConfig& config) {
+  OgaCheckResult(OgaCreateNonGenerativeSession(&config, &handle_));
+}
 
 struct OgaModel : OgaAbstract {
   static std::unique_ptr<OgaModel> Create(const char* config_path) {
