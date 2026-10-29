@@ -25,6 +25,8 @@ def _load_base_module():
     builders_package = sys.modules.setdefault("models.builders", types.ModuleType("models.builders"))
     builders_package.__path__ = [BUILDERS_DIR]
 
+    if "models.builders.base" in sys.modules:
+        return sys.modules["models.builders.base"]
     spec = importlib.util.spec_from_file_location("models.builders.base", os.path.join(BUILDERS_DIR, "base.py"))
     module = importlib.util.module_from_spec(spec)
     sys.modules["models.builders.base"] = module

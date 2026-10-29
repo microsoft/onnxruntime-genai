@@ -12,6 +12,8 @@ sys.path.insert(0, str(BUILDERS_DIR.parent))
 
 
 def _load_builder_module(module_name):
+    if f"models.builders.{module_name}" in sys.modules:
+        return sys.modules[f"models.builders.{module_name}"]
     spec = importlib.util.spec_from_file_location(f"models.builders.{module_name}", BUILDERS_DIR / f"{module_name}.py")
     module = importlib.util.module_from_spec(spec)
     sys.modules[f"models.builders.{module_name}"] = module
@@ -39,9 +41,9 @@ class _FakeGQAModel:
     get_kv_cache_scale_inputs = Model.get_kv_cache_scale_inputs
     get_attention_op_attributes = Model.get_attention_op_attributes
 
-    def __init__(self, ep="cpu", fuse_qk_norm_gqa=True):
+    def __init__(self, ep="cpu"):
         self.ep = ep
-        self.extra_options = {"fuse_qk_norm_gqa": fuse_qk_norm_gqa}
+        self.extra_options = {}
         self.context_length_attrs = {"window_kv_cache": True}
         self.use_paged_attention = False
         self.kv_cache_attrs = {"quant_scheme": "none", "quant_mode": "PER_TENSOR", "bit_width": 0}
@@ -71,6 +73,20 @@ class _FakeGQAModel:
 def test_cpu_does_not_enable_fused_qk_norm_gqa_by_default():
     assert not _FakeGQAModel("cpu").is_fused_qk_norm_gqa_supported()
     assert _FakeGQAModel("cuda").is_fused_qk_norm_gqa_supported()
+
+
+@pytest.mark.parametrize("provider", ["cpu", "cuda", "webgpu", "dml", "trt-rtx"])
+@pytest.mark.parametrize("op_type", ["GroupQueryAttention", "PagedAttention"])
+@pytest.mark.parametrize("rope,use_rope_in_attn", [(False, False), (True, False), (True, True)])
+def test_qk_norm_fusion_is_automatic_only_for_supported_attention(provider, op_type, rope, use_rope_in_attn):
+    model = _FakeGQAModel(provider)
+    model.attention_attrs.update(op_type=op_type, rope=rope, use_rope_in_attn=use_rope_in_attn)
+    expected = (
+        provider in {"cuda", "webgpu"}
+        and op_type == "GroupQueryAttention"
+        and (not rope or use_rope_in_attn)
+    )
+    assert model.is_fused_qk_norm_gqa_supported() is expected
 
 
 def test_plain_gqa_omits_qk_norm_epsilon_attribute():

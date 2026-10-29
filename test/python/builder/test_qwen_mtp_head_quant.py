@@ -12,10 +12,10 @@ import onnx_ir as ir
 import pytest
 import torch
 from loaders.modelopt import ModeloptModel
-from loaders.qwen import QwenMTPModel
+from loaders.qwen import Qwen4ExpMTPModel, QwenMTPModel
 from safetensors.torch import save_file
 
-from models.builders.qwen import Qwen35DenseMTPModel, Qwen35Model, Qwen35MoEModel
+from models.builders.qwen import Qwen4ExpModel, Qwen35DenseMTPModel, Qwen35Model, Qwen35MoEModel
 
 
 def _resolve(extra_options, main_onnx_dtype=ir.DataType.INT4):
@@ -41,6 +41,29 @@ class FakeComponent:
         self.context_length = 128
         self.exclude_embeds = False
         self.model_type = "qwen3_5_moe"
+
+
+class FakeQwen4ExpComponent(FakeComponent):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options, multimodal_rotary=False):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self.multimodal_rotary = multimodal_rotary
+        self.model_type = "qwen4_exp"
+        self.hyper_connection_attrs = {"hidden_size": 8}
+        self.output_shapes = {"hidden_states": ["batch_size", "sequence_length", 2]}
+        self.filename = extra_options.get("filename", "text.onnx")
+        self.sparse_indexer_attrs = {
+            "index_share": {
+                "enabled": True,
+                "base_capacity": 35,
+                "max_draft_tokens": int(extra_options.get("max_draft_tokens", 7)),
+                "indices_output": "present_indices",
+                "counts_output": "present_counts",
+                "status_output": "indexer_status",
+            }
+        }
+
+    def make_hidden_state_shape(self, last_dim=None):
+        return ["batch_size", "sequence_length", last_dim or 2]
 
 
 def test_composite_without_mtp_creates_only_decoder(monkeypatch):
@@ -80,6 +103,175 @@ def test_dense_composite_with_mtp_uses_dense_components(monkeypatch):
     assert isinstance(model.mtp, FakeComponent)
     assert model.decoder.extra_options["include_hidden_states"] is True
     assert model.mtp.extra_options["filename"] == "mtp.onnx"
+
+
+@pytest.mark.parametrize("ep", ["cuda", "webgpu"])
+@pytest.mark.parametrize("prune_lm_head", [False, True])
+def test_qwen4_exp_composite_builds_declared_mtp(monkeypatch, ep, prune_lm_head):
+    monkeypatch.setitem(Qwen4ExpModel.__init__.__globals__, "Qwen4ExpTextModel", FakeQwen4ExpComponent)
+    monkeypatch.setitem(Qwen4ExpModel.make_mtp_model.__globals__, "Qwen4ExpMTPTextModel", FakeQwen4ExpComponent)
+    text_config = SimpleNamespace(
+        mtp_num_hidden_layers=1,
+        bos_token_id=1,
+        eos_token_id=2,
+        pad_token_id=0,
+    )
+
+    model = Qwen4ExpModel(
+        SimpleNamespace(text_config=text_config),
+        ir.DataType.FLOAT16,
+        ir.DataType.FLOAT16,
+        ep,
+        None,
+        {
+            "use_paged_attention": True,
+            "prune_lm_head": prune_lm_head,
+            "mtp_quant_config": '{"io_dtype":"fp16","weights":{"type":"int4"},"moe":{"type":"none"}}',
+        },
+    )
+
+    assert isinstance(model.decoder, FakeQwen4ExpComponent)
+    assert isinstance(model.mtp, FakeQwen4ExpComponent)
+    assert model.decoder.model_type == "qwen3_5"
+    assert model.decoder.extra_options["include_hidden_states"] is True
+    assert model.decoder.hyper_connection_attrs["emit_pre_final_hidden_states"] is True
+    assert model.decoder.output_shapes["hidden_states"] == ["batch_size", "sequence_length", 8]
+    assert model.mtp.extra_options["filename"] == "mtp.onnx"
+    assert model.decoder.extra_options["prune_lm_head"] is prune_lm_head
+    assert model.mtp.extra_options["prune_lm_head"] is prune_lm_head
+    assert model.mtp.extra_options["use_paged_attention"] is True
+
+
+def test_qwen4_exp_mtp_rejects_nonpaged_pruning():
+    model = object.__new__(Qwen4ExpModel)
+    config = SimpleNamespace(text_config=SimpleNamespace(mtp_num_hidden_layers=1))
+    with pytest.raises(ValueError, match="prune_lm_head"):
+        model.make_mtp_init(config, {"prune_lm_head": True})
+
+
+@pytest.mark.parametrize("prune_lm_head", [False, True])
+def test_qwen4_exp_mtp_config_emits_logits_indices(tmp_path, monkeypatch, prune_lm_head):
+    model = object.__new__(Qwen4ExpModel)
+    model.decoder = SimpleNamespace(num_kv_heads=2, head_size=256)
+    model.mtp = SimpleNamespace(use_paged_attention=True, prune_lm_head=prune_lm_head)
+    model.mtp_attrs = {"shared_initializers": []}
+    monkeypatch.setattr(model, "configure_paged_sessions", lambda config: None)
+    config_path = tmp_path / "genai_config.json"
+    config_path.write_text(json.dumps({"model": {"decoder": {}}}))
+
+    model.add_mtp_to_genai_config(str(tmp_path))
+
+    inputs = json.loads(config_path.read_text())["model"]["mtp"]["inputs"]
+    assert (inputs.get("logits_indices") == "logits_indices") is prune_lm_head
+
+
+def test_qwen4_exp_text_only_composite_builds_declared_mtp(monkeypatch):
+    monkeypatch.setitem(Qwen4ExpModel.__init__.__globals__, "Qwen4ExpTextModel", FakeQwen4ExpComponent)
+    monkeypatch.setitem(Qwen4ExpModel.make_mtp_model.__globals__, "Qwen4ExpMTPTextModel", FakeQwen4ExpComponent)
+    text_config = SimpleNamespace(
+        mtp_num_hidden_layers=1,
+        bos_token_id=1,
+        eos_token_id=2,
+        pad_token_id=0,
+    )
+
+    model = Qwen4ExpModel(
+        SimpleNamespace(text_config=text_config),
+        ir.DataType.FLOAT16,
+        ir.DataType.FLOAT16,
+        "cuda",
+        None,
+        {"text_only": True},
+    )
+
+    assert model.text_only is True
+    assert model.model_type == "qwen4_exp_text"
+    assert model.decoder.model_type == "qwen4_exp_text"
+    assert isinstance(model.mtp, FakeQwen4ExpComponent)
+    assert model.decoder.extra_options["include_hidden_states"] is True
+
+
+def test_qwen4_exp_text_only_dispatches_composite_builder(monkeypatch, tmp_path):
+    from models import builder as builder_module  # noqa: PLC0415
+
+    captured = {}
+
+    class FakeQwen4ExpModel:
+        def __init__(self, *args):
+            captured["args"] = args
+
+        def make_genai_config(self, *args):
+            pass
+
+        def save_processing(self, *args):
+            pass
+
+    config = SimpleNamespace(architectures=["Qwen4ExpForConditionalGeneration"])
+    monkeypatch.setattr(builder_module, "Qwen4ExpModel", FakeQwen4ExpModel)
+
+    builder_module.create_model(
+        "Qwen/Qwen3.8-Flash-Next",
+        str(tmp_path / "input"),
+        str(tmp_path / "output"),
+        "int4",
+        "cuda",
+        str(tmp_path / "cache"),
+        config_only=True,
+        text_only=True,
+        hf_details={"extra_kwargs": {}, "hf_name": "Qwen/Qwen3.8-Flash-Next", "hf_config": config},
+    )
+
+    assert captured["args"][0] is config
+    assert captured["args"][-1]["text_only"] is True
+
+
+def test_qwen4_exp_composite_saves_image_processor_config(monkeypatch, tmp_path):
+    image_processor = {
+        "size": {"shortest_edge": 65536, "longest_edge": 16777216},
+        "patch_size": 16,
+        "temporal_patch_size": 2,
+        "merge_size": 2,
+        "image_mean": [0.5, 0.5, 0.5],
+        "image_std": [0.5, 0.5, 0.5],
+    }
+    preprocessor_path = tmp_path / "preprocessor_config.json"
+    preprocessor_path.write_text(json.dumps(image_processor))
+    monkeypatch.setitem(
+        Qwen4ExpModel.save_processing.__globals__,
+        "hf_hub_download",
+        lambda *args, **kwargs: preprocessor_path,
+    )
+    decoder_calls = []
+    model = object.__new__(Qwen4ExpModel)
+    model.decoder = SimpleNamespace(save_processing=lambda *args: decoder_calls.append(args))
+    model.hf_token = True
+    model.hf_remote = False
+
+    model.save_processing("Qwen/Qwen3.8-Flash-Next", {}, tmp_path)
+
+    assert decoder_calls == [("Qwen/Qwen3.8-Flash-Next", {}, tmp_path)]
+    with open(tmp_path / "processor_config.json") as processor_config_file:
+        processor_config = json.load(processor_config_file)
+    transforms = processor_config["processor"]["transforms"]
+    assert transforms[2]["operation"]["attrs"] == {
+        "width": 540,
+        "height": 360,
+        "smart_resize": 1,
+        "min_pixels": 65536,
+        "max_pixels": 16777216,
+        "patch_size": 16,
+        "merge_size": 2,
+    }
+    assert transforms[4]["operation"]["attrs"] == {
+        "mean": [0.5, 0.5, 0.5],
+        "std": [0.5, 0.5, 0.5],
+        "qwen3_vl": 1,
+    }
+    assert transforms[5]["operation"]["attrs"] == {
+        "patch_size": 16,
+        "temporal_patch_size": 2,
+        "merge_size": 2,
+    }
 
 
 def test_dense_config_only_composite_does_not_require_decoder_token_ids(monkeypatch):
@@ -687,3 +879,47 @@ def test_dense_mtp_state_uses_dense_decoder_layer(monkeypatch):
 
     assert isinstance(mtp.layers[0], FakeDenseDecoderLayer)
     assert mtp.layers[0].state == {"marker": mtp_state["mtp.layers.0.marker"]}
+
+
+def test_qwen4_exp_mtp_state_uses_residual_linear_shared_schema(monkeypatch):
+    class FakeModule:
+        def __init__(self, config, layer_idx=None, use_combine=None):
+            self.config = config
+            self.layer_idx = layer_idx
+            self.use_combine = use_combine
+
+        def load_state_dict(self, state, strict):
+            self.state = state
+            return [], []
+
+        def eval(self):
+            return self
+
+    module_name = "transformers.models.qwen4_exp.modeling_qwen4_exp"
+    modeling_module = types.ModuleType(module_name)
+    modeling_module.Qwen4ExpTextDecoderLayer = FakeModule
+    modeling_module.Qwen4ExpTextGatedResidual = FakeModule
+    monkeypatch.setitem(sys.modules, module_name, modeling_module)
+    mtp_state = {
+        "mtp.fc_embedding.weight": torch.ones((2, 2)),
+        "mtp.fc_hidden.weight": torch.ones((2, 2)),
+        "mtp.pre_fc_norm_embedding.weight": torch.ones(2),
+        "mtp.pre_fc_norm_hidden.weight": torch.ones(8),
+        "mtp.hyper_connection_mixer.marker": torch.tensor(1.0),
+        "mtp.layers.0.marker": torch.tensor(2.0),
+    }
+
+    mtp = Qwen4ExpMTPModel.from_state(
+        mtp_state,
+        torch.ones((4, 2)),
+        torch.ones((4, 2)),
+        layer_config=SimpleNamespace(),
+    )
+
+    assert mtp.fc_embedding.weight is mtp_state["mtp.fc_embedding.weight"]
+    assert mtp.fc_hidden.weight is mtp_state["mtp.fc_hidden.weight"]
+    assert mtp.layers[0].config.layer_types == ["indexed_attention"]
+    assert mtp.layers[0].state == {"marker": mtp_state["mtp.layers.0.marker"]}
+    assert mtp.hyper_connection_mixer.state == {
+        "marker": mtp_state["mtp.hyper_connection_mixer.marker"]
+    }

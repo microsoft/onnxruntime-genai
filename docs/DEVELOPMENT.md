@@ -187,8 +187,7 @@ find_package(onnxruntime-genai CONFIG REQUIRED)
 target_link_libraries(my_app PRIVATE onnxruntime-genai::onnxruntime-genai)
 ```
 
-Configure the consumer with `-Donnxruntime-genai_DIR=<prefix>/lib/cmake/onnxruntime-genai`.
-ONNX Runtime is an external runtime dependency and is not included in the core archive.
+Configure the consumer with `-Donnxruntime-genai_DIR=<prefix>/lib/cmake/onnxruntime-genai`. ONNX Runtime is an external runtime dependency and is not included in the core archive.
 
 ---
 
@@ -218,36 +217,17 @@ python build.py --config RelWithDebInfo --test
 
 ### Native shared-library exports
 
-On Linux and Android, `src/exports.map` restricts `onnxruntime-genai` exports to
-the public `Oga*` C API. Apple builds use `src/exported-symbols.lst` for the same
-restriction. C++ consumers use the header-only wrappers over that API;
-GenAI internals and statically linked dependencies, including curl, remain private
-to prevent symbol collisions with libraries loaded by the host process. This
-does not hide symbols in separately shipped shared dependencies. Windows retains
-its explicit `OGA_EXPORT` exports, and CUDA add-on export policies are unchanged.
+On Linux and Android, `src/exports.map` restricts `onnxruntime-genai` exports to the public `Oga*` C API. Apple builds use `src/exported-symbols.lst` for the same restriction. C++ consumers use the header-only wrappers over that API; GenAI internals and statically linked dependencies, including curl, remain private to prevent symbol collisions with libraries loaded by the host process. This does not hide symbols in separately shipped shared dependencies. Windows retains its explicit `OGA_EXPORT` exports, and CUDA add-on export policies are unchanged.
 
-ELF links also localize definitions from all static archives with
-`--exclude-libs,ALL`, including GCC's implicitly linked `libstdc++_nonshared.a`
-compatibility archive on manylinux. Public APIs must remain in direct or OBJECT
-sources: placing them in STATIC archives would hide them despite the version script.
+ELF links also localize definitions from all static archives with `--exclude-libs,ALL`, including GCC's implicitly linked `libstdc++_nonshared.a` compatibility archive on manylinux. Public APIs must remain in direct or OBJECT sources: placing them in STATIC archives would hide them despite the version script.
 
-With `ENABLE_TESTS=ON` on Linux or macOS, check that every public API declared in
-`src/ort_genai_c.h` is exported and no other symbols are exported. The ELF checker
-inspects externally visible definitions only; local symbols left in the dynamic
-symbol table by GCC toolset compatibility objects are not exports:
+With `ENABLE_TESTS=ON` on Linux or macOS, check that every public API declared in `src/ort_genai_c.h` is exported and no other symbols are exported. The ELF checker inspects externally visible definitions only; local symbols left in the dynamic symbol table by GCC toolset compatibility objects are not exports:
 
 ```bash
 ctest --test-dir build/Linux/Release -R '^SharedLibraryExports$' --output-on-failure
 ```
 
-The Linux x64 CPU and CUDA CI jobs run both `SharedLibraryExports` and
-`TelemetryHelpersTests` explicitly, alongside `SharedLibraryArchiveExports` and
-`SharedLibraryArchiveRuntime`, which check strong/weak archive-symbol isolation
-and runtime calls through the public fixture API.
-Windows x64 CPU CI runs `TelemetryHelpersTests`,
-including redaction and environment-read race regressions. Linux and macOS core release jobs also run
-the export checker on the installed library against its installed public header,
-even with `ENABLE_TESTS=OFF`; macOS checks the signed library.
+The Linux x64 CPU and CUDA CI jobs run both `SharedLibraryExports` and `TelemetryHelpersTests` explicitly, alongside `SharedLibraryArchiveExports` and `SharedLibraryArchiveRuntime`, which check strong/weak archive-symbol isolation and runtime calls through the public fixture API. Windows x64 CPU CI runs `TelemetryHelpersTests`, including redaction and environment-read race regressions. Linux and macOS core release jobs also run the export checker on the installed library against its installed public header, even with `ENABLE_TESTS=OFF`; macOS checks the signed library.
 
 ### Python tests (pytest)
 
@@ -327,6 +307,17 @@ For a physical iOS device, use `--apple_sysroot iphoneos`. Cross-compiled target
 | `VERSION_INFO` | Package version (e.g. `0.15.0-dev`). |
 
 ---
+
+### Qwen3.8 operator attributes
+
+The text and MTP builders keep coupled operator settings in canonical dictionaries, shared by their expansion emitters rather than duplicated as loose instance fields:
+
+- `sparse_indexer_attrs`: `num_heads` (HF `indexer_n_heads`), `kv_heads`, `head_dim`, `token_budget` (HF `indexer_budget`), `compress_ratio`, `fixed_cache`, and paged `state_capacity`. These configure the sparse indexer operators and their cache bindings.
+- `ple_attrs`: zero-based `layer_ids` (HF `ple_layer_ids` is one-based), `embed_dim`, `conv_kernel_size`, `conv_dilation` (HF `ngram_size`), `ngram_size`, `token_pad_id`, `heads_per_ngram`, and `external`. These configure Engram's n-gram mapping, embedding lookup, and stateful convolution.
+- `hyper_connection_attrs`: `num_branches` (HF `hc_count`), expanded `hidden_size`, `tile_first_hidden_state`, and `emit_pre_final_hidden_states`. These configure branchwise normalization, mixing, and hidden-state graph outputs.
+- `attention_attrs["output_gate_type"]`: the attention output-gate activation, taken from HF `output_gate_type` or falling back to HF `hidden_act`.
+
+HF configuration field names are unchanged. Compact capture bindings for all three state families use the resolved `context_length_attrs["state_update_capacity"]`; paged CUDA `state_window=8` resolves to capacity 7, including PLE and indexer outputs.
 
 ## 11. Troubleshooting
 
