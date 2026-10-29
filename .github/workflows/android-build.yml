@@ -18,6 +18,7 @@ env:
   ANDROID_NDK_VERSION: "27.2.12479018"  # LTS version
 jobs:
   android_x64:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     # Note: linux is the only good option for the Android emulator currently.
     #       it doesn't work on macos-14.
     #         HVF error: HV_UNSUPPORTED

@@ -18,6 +18,7 @@ env:
   DOTNET_INSTALL_DIR: "${{ github.workspace }}/dotnet"
 jobs:
   linux_cpu_x64:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU", "JobId=linux_cpu_x64-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}"]
     steps:
       - name: Checkout OnnxRuntime GenAI repo

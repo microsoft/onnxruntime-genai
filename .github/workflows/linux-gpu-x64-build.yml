@@ -24,9 +24,10 @@ env:
 
 jobs:
   linux-cuda-x64-build:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     permissions:
       contents: read
-      packages: write # needed for GHCR push
+      packages: read
     env:
       PYTHON_EXECUTABLE: "/opt/python/cp312-cp312/bin/python3.12"
     runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-A10", "JobId=linux-cuda-x64-build-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}"]

@@ -36,6 +36,7 @@ jobs:
           verify: ${{ github.event_name == 'schedule' }}
 
   lint-cpp:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on:
       - self-hosted
       - "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU"

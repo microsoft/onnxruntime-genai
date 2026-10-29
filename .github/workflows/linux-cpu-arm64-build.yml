@@ -20,9 +20,10 @@ env:
 
 jobs:
   linux-cpu-arm64-build:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     permissions:
       contents: read
-      packages: write # needed for GHCR push
+      packages: read
     runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2004-ARM-CPU", "JobId=linux-cpu-arm64-build-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}"]
     steps:
       - name: Checkout OnnxRuntime GenAI repo
