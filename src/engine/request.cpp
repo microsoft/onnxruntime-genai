@@ -516,8 +516,12 @@ const char* Request::DraftTokenValidationError() const noexcept {
   // through stop_controller_ in exactly the same committed order the ordinary one-token path uses
   // (CommitAcceptedDraftsForTransaction for greedy verification, StageGenerationForTransaction for
   // sampled/batched verification), so it drafts and verifies normally.
-  if (guidance_logits_processor_) {
+  if (guidance_logits_processor_ && !guidance_logits_processor_->DelimitedOpeningToken()) {
     return "Speculative draft tokens are not supported with guidance.";
+  }
+
+  if (guidance_logits_processor_ && guidance_logits_processor_->IsDelimitedActive()) {
+    return "Speculative draft tokens are not supported inside a delimited region.";
   }
   if (!turn_policy_.IsGreedy() && turn_policy_.top_k <= 0) {
     return "Sampled speculative draft tokens require a positive top_k.";
@@ -528,6 +532,16 @@ const char* Request::DraftTokenValidationError() const noexcept {
            "turn already past its minimum generated token count.";
   }
   return nullptr;
+}
+
+bool Request::HasDelimitedGuidance() const {
+  return guidance_logits_processor_ &&
+         guidance_logits_processor_->DelimitedOpeningToken().has_value();
+}
+
+bool Request::HasGuidance() const {
+  return guidance_logits_processor_ &&
+         (!HasDelimitedGuidance() || guidance_logits_processor_->IsDelimitedActive());
 }
 
 void Request::SetDraftTokens(std::span<const int32_t> tokens) {
@@ -561,6 +575,14 @@ void Request::SetDraftTokens(std::span<const int32_t> tokens) {
     throw std::runtime_error(
         "A step accepts at most " + std::to_string(max_drafts) + " draft tokens.");
   }
+  if (guidance_logits_processor_) {
+    if (const auto opener = guidance_logits_processor_->DelimitedOpeningToken()) {
+      const auto boundary = std::find(tokens.begin(), tokens.end(), *opener);
+      // The marker itself must be selected by the target in its final sampling row. Verifying
+      // it as a draft would also verify the *next* argument row with unguided logits.
+      tokens = tokens.first(static_cast<size_t>(boundary - tokens.begin()));
+    }
+  }
   ValidateAppendLength(
       max_session_tokens_, static_cast<size_t>(CurrentSequenceLength()), tokens.size());
   if (tokens_host_.capacity() < tokens_host_.size() + tokens.size()) {
@@ -581,7 +603,23 @@ void Request::SetDraftTokenDistributions(
     tokens.push_back(SampleSparseToken(distribution.indices, distribution.probs, draft_rng_));
   }
   SetDraftTokens(tokens);
-  draft_token_distributions_.assign(distributions.begin(), distributions.end());
+  draft_token_distributions_.assign(distributions.begin(),
+                                    distributions.begin() + draft_tokens_.size());
+}
+
+void Request::SetSampledDraftTokens(std::span<const int32_t> tokens,
+                                    std::span<const TargetTokenSelection> distributions) {
+  if (tokens.size() != distributions.size()) {
+    throw std::runtime_error("Each sampled draft token needs the distribution it was drawn from.");
+  }
+  for (const auto& distribution : distributions) {
+    if (distribution.indices.empty() || distribution.indices.size() != distribution.probs.size()) {
+      throw std::runtime_error("Each sampled draft distribution must be non-empty and aligned.");
+    }
+  }
+  SetDraftTokens(tokens);
+  draft_token_distributions_.assign(distributions.begin(),
+                                    distributions.begin() + draft_tokens_.size());
 }
 
 std::span<const int32_t> Request::StagedDraftTokens() const {
@@ -644,6 +682,10 @@ void Request::CommitAcceptedDraftsForTransaction(size_t accepted_count) {
       tokens_host_.push_back(token);
       ++staged_draft_count_;
       ++accepted_draft_count_;
+      if (guidance_logits_processor_) {
+        int32_t committed = token;
+        guidance_logits_processor_->CommitTokens(std::span<int32_t>{&committed, 1});
+      }
       // Only an actually-appended token reaches the matcher here, exactly mirroring the ordinary
       // one-token path's token_appended gate in StageGeneration(): an accepted draft that turns out
       // to be EOS commits (GreedySearch_Cpu::CommitToken marks the search done) without appending,

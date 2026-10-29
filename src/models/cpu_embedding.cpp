@@ -102,8 +102,19 @@ void CpuEmbedding::Workspace::Wait() {
 }
 
 DeviceSpan<uint8_t> CpuEmbedding::Workspace::Prepare(Tensor& output) {
-  Wait();
   const size_t bytes = output.GetByteSpan().size();
+  if (output.p_device_->RecyclesHostMirrorsAfterUpload(bytes)) {
+    // Dropping the previous mirror hands it back to a pool that reuses it only once its upload has
+    // completed, so taking a fresh one never waits for the device. Reusing one mirror instead has to
+    // drain the whole stream, including any work queued after that upload.
+    pending_ = false;
+    buffer_ = output.p_device_->WrapMemoryBase(output.GetMutableRawData(), bytes);
+    buffer_->AllocateCpu();
+    capacity_ = 0;  // Never reused: the next lookup takes a fresh mirror again.
+    device_ = output.p_device_;
+    return DeviceSpan<uint8_t>{std::shared_ptr<DeviceBuffer>{buffer_}};
+  }
+  Wait();
   if (device_ != output.p_device_ || capacity_ < bytes || !buffer_ ||
       device_->GetType() != DeviceType::CUDA) {
     auto replacement = output.p_device_->WrapMemoryBase(output.GetMutableRawData(), bytes);

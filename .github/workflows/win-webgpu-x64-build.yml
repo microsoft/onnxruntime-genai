@@ -20,9 +20,11 @@ env:
   buildRoot: 'build/cpu/win-x64'
   binaryDir: 'build/cpu/win-x64/Release'
   WEBGPU_EP_PACKAGE_NAME: 'Microsoft.ML.OnnxRuntime.EP.WebGpu'
-  WEBGPU_EP_PACKAGE_VERSION: '0.2.0-dev.20260610+50c95100'
-  # Published ONNX Runtime used at test time (GenAI is built against the cmake-default ORT).
-  ORT_TEST_VERSION: '1.28.0-dev-20260610-0510-50c9510000'
+  WEBGPU_EP_PACKAGE_VERSION: '0.6.0-dev.20261020022011'
+  # Use an API-32 SDK for both the native build and runtime tests.
+  # PagedAttention requires the extended schema with attention_metadata at input 16.
+  # This core/plugin pair includes the GatedDeltaNetStateReplay schema and WebGPU kernel.
+  ORT_TEST_VERSION: '1.32.0-dev-20261018-0507-c1ea5bf'
 
 jobs:
   windows-webgpu-x64-build:
@@ -52,17 +54,18 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      - name: Download test-time ONNX Runtime and execution provider plugins
+      - name: Download ONNX Runtime SDK and execution provider plugins
         shell: pwsh
         run: |
-          # ort/lib holds the ONNX Runtime runtime (onnxruntime.dll) used at test time; ort/ep holds
-          # the execution provider plugin libraries (and their native dependencies) that the test
-          # harnesses enumerate and register. GenAI itself is built against the cmake-default ORT.
+          # Build and test against the same SDK; ort/ep holds the plugin libraries and their
+          # native dependencies that the test harnesses enumerate and register.
           # Both packages come from the ORT-Nightly ADO feed.
+          mkdir ort/include
           mkdir ort/lib
           mkdir ort/ep
           Write-Host "Downloading $env:ORT_PACKAGE_NAME version: $env:ORT_TEST_VERSION"
           nuget install $env:ORT_PACKAGE_NAME -version $env:ORT_TEST_VERSION -Source $env:ORT_NIGHTLY_FEED -x -NonInteractive -ExcludeVersion -DependencyVersion Ignore
+          Copy-Item "$env:ORT_PACKAGE_NAME/build/native/include/*" ort/include/ -Recurse -Force
           Copy-Item "$env:ORT_PACKAGE_NAME/runtimes/win-x64/native/*" ort/lib/ -Force
           Write-Host "Downloading $env:WEBGPU_EP_PACKAGE_NAME version: $env:WEBGPU_EP_PACKAGE_VERSION"
           nuget install $env:WEBGPU_EP_PACKAGE_NAME -version $env:WEBGPU_EP_PACKAGE_VERSION -Source $env:ORT_NIGHTLY_FEED -x -NonInteractive -ExcludeVersion -DependencyVersion Ignore
@@ -83,6 +86,7 @@ jobs:
           python build.py `
             --config Release `
             --build_dir $env:buildRoot `
+            --ort_home "$env:GITHUB_WORKSPACE\ort" `
             --parallel `
             --build_java `
             --use_guidance `
@@ -101,8 +105,8 @@ jobs:
         run: |
           cmake -S examples\c -B examples\c\build `
             -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER=ON -DMODEL_ASR=ON `
-            "-DORT_INCLUDE_DIR=$env:GITHUB_WORKSPACE\$env:binaryDir\_deps\ortlib-src\build\native\include" `
-            "-DORT_LIB_DIR=$env:GITHUB_WORKSPACE\$env:binaryDir\_deps\ortlib-src\runtimes\win-x64\native" `
+            "-DORT_INCLUDE_DIR=$env:GITHUB_WORKSPACE\ort\include" `
+            "-DORT_LIB_DIR=$env:GITHUB_WORKSPACE\ort\lib" `
             "-DOGA_INCLUDE_DIR=$env:GITHUB_WORKSPACE\src" `
             "-DOGA_LIB_DIR=$env:GITHUB_WORKSPACE\$env:binaryDir\Release"
           cmake --build examples\c\build --config Release
@@ -129,7 +133,7 @@ jobs:
           # plugin in that directory (the one the pipeline downloaded them to). The matching ORT
           # package is already in the global NuGet cache, so keep its feed out of dependency restore.
           cd test\csharp
-          dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release" /p:EPDir="$env:GITHUB_WORKSPACE\ort\ep" /p:RestoreSources="https://api.nuget.org/v3/index.json" --verbosity normal
+          dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release" /p:EPDir="$env:GITHUB_WORKSPACE\ort\ep" /p:OrtPackageVersion="$env:ORT_TEST_VERSION" /p:RestoreSources="https://api.nuget.org/v3/index.json" --verbosity normal
 
       - name: Verify Build Artifacts
         if: always()
@@ -141,3 +145,39 @@ jobs:
         run: |-
           copy $env:GITHUB_WORKSPACE\ort\lib\* .\$env:binaryDir\Release
           & .\$env:binaryDir\Release\unit_tests.exe --ep_dir $env:GITHUB_WORKSPACE\ort\ep
+
+      - name: Run required WebGPU Engine tests
+        run: |
+          & .\$env:binaryDir\Release\engine_unit_tests.exe --ep_dir $env:GITHUB_WORKSPACE\ort\ep --gtest_filter="DeviceSpanTest.*:GraphBuilderTest.*:BackingOwners/WebGpuStateReplayTest.*:WebGpuFixedStatePoolTest.*:FixedStatePoolTest.DeferredReplayFailurePoisonsPool:VarlenDecoderIOTest.PacksThreePlanePositionsInScheduledRequestOrder" --gtest_output="xml:webgpu-engine-tests.xml"
+          if ($LASTEXITCODE -ne 0) { throw "WebGPU Engine tests failed: $LASTEXITCODE" }
+          [xml]$results = Get-Content webgpu-engine-tests.xml
+          $required = @(
+            "DeviceSpanTest.BackingAndAbsoluteByteOffsetSurviveNestedViews",
+            "GraphBuilderTest.DefaultOnnxDomainStillExecutesCast",
+            "WebGpuFixedStatePoolTest.CompactPartialAcceptanceReplaysConvAndGdn",
+            "WebGpuFixedStatePoolTest.AdversarialReplayPreservesRequestState",
+            "WebGpuFixedStatePoolTest.PartialRequestsShareBackingTransfers",
+            "WebGpuFixedStatePoolTest.ConvolutionSharedMirrorsObserveEarlierDescriptorWrites",
+            "WebGpuFixedStatePoolTest.DeferredGpuRunFailurePoisonsPoolBeforeNextReader",
+            "FixedStatePoolTest.DeferredReplayFailurePoisonsPool",
+            "VarlenDecoderIOTest.PacksThreePlanePositionsInScheduledRequestOrder",
+            "BackingOwners/WebGpuStateReplayTest.ReplaysEveryPrefixOnGpuWithoutCpuStaging/0",
+            "BackingOwners/WebGpuStateReplayTest.ReplaysEveryPrefixOnGpuWithoutCpuStaging/1",
+            "BackingOwners/WebGpuStateReplayTest.RejectsInvalidViewsAndPropagatesOrtFailures/0",
+            "BackingOwners/WebGpuStateReplayTest.RejectsInvalidViewsAndPropagatesOrtFailures/1",
+            "BackingOwners/WebGpuStateReplayTest.ConvolutionStillStagesThroughCpu/0",
+            "BackingOwners/WebGpuStateReplayTest.ConvolutionStillStagesThroughCpu/1",
+            "BackingOwners/WebGpuStateReplayTest.SeparateCapsuleBackingsFallBackBeforeGpuReplay/0",
+            "BackingOwners/WebGpuStateReplayTest.SeparateCapsuleBackingsFallBackBeforeGpuReplay/1",
+            "BackingOwners/WebGpuStateReplayTest.MixedDescriptorsPreserveDependentExecutionOrder/0",
+            "BackingOwners/WebGpuStateReplayTest.MixedDescriptorsPreserveDependentExecutionOrder/1",
+            "BackingOwners/WebGpuStateReplayTest.GpuRunFailureStopsMixedSequenceWithoutCpuRetry/0",
+            "BackingOwners/WebGpuStateReplayTest.GpuRunFailureStopsMixedSequenceWithoutCpuRetry/1"
+          )
+          foreach ($test in $required) {
+            $suite, $name = $test -split '\.', 2
+            $cases = @($results.SelectNodes("//testcase[@classname='$suite' and @name='$name']"))
+            if ($cases.Count -ne 1 -or $cases[0].status -ne "run" -or $cases[0].result -ne "completed" -or $cases[0].SelectSingleNode("skipped")) {
+              throw "Required WebGPU Engine test did not run: $test"
+            }
+          }

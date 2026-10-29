@@ -339,8 +339,10 @@ EmbeddingState::EmbeddingState(const MultiModalLanguageModel& model, const Gener
   if (!model_.config_->model.embedding.outputs.per_layer_inputs.empty()) {
     auto shape = model_.session_info_.GetOutputShape(model_.config_->model.embedding.outputs.per_layer_inputs);
     int64_t per_layer_dim = shape.size() >= 3 ? shape.back() : 0;
+    int64_t per_layer_count = shape.size() >= 4 ? shape[shape.size() - 2] : 0;
     per_layer_inputs_ = std::make_unique<Embeddings>(*this, Embeddings::Mode::Output,
-                                                     model_.config_->model.embedding.outputs.per_layer_inputs, per_layer_dim);
+                                                     model_.config_->model.embedding.outputs.per_layer_inputs,
+                                                     per_layer_dim, per_layer_count);
     per_layer_inputs_->Add();
   }
 }
@@ -381,10 +383,13 @@ DeviceSpan<float> EmbeddingState::Run(int current_length, DeviceSpan<int32_t>& n
   if (model_.config_->model.embedding.run_options.has_value()) {
     State::SetRunOptions(model_.config_->model.embedding.run_options.value());
   }
+  // The run rewrites the host mirrors, which the last uploads may still be reading.
+  inputs_embeds_.WaitForUpload();
+  if (per_layer_inputs_) per_layer_inputs_->WaitForUpload();
   State::Run(*model_.embedding_session_);
 
   // No-ops unless the decoder's buffers are on a device this session cannot write; then the
-  // outputs went to staging buffers that must be copied across.
+  // outputs went to those buffers' host mirrors, which must be uploaded.
   inputs_embeds_.CopyToConsumer();
   if (per_layer_inputs_) per_layer_inputs_->CopyToConsumer();
 
@@ -403,8 +408,10 @@ DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int3
   if (!model_.config_->model.decoder.inputs.per_layer_inputs.empty()) {
     auto shape = model_.session_info_.GetInputShape(model_.config_->model.decoder.inputs.per_layer_inputs);
     int64_t per_layer_dim = shape.size() >= 3 ? shape.back() : 0;
+    int64_t per_layer_count = shape.size() >= 4 ? shape[shape.size() - 2] : 0;
     per_layer_inputs_ = std::make_unique<Embeddings>(*this, Embeddings::Mode::Input,
-                                                     model_.config_->model.decoder.inputs.per_layer_inputs, per_layer_dim);
+                                                     model_.config_->model.decoder.inputs.per_layer_inputs,
+                                                     per_layer_dim, per_layer_count);
     per_layer_inputs_->Add();
   }
 
@@ -438,8 +445,8 @@ DeviceSpan<float> DecoderState::Run(int current_length, DeviceSpan<int32_t>& nex
   const bool graph_capture_this_run = params_->use_graph_capture && seq_len == 1;
   const int graph_capture_variant = recurrent_state_ ? recurrent_state_->GraphCaptureVariant() : 0;
 
-  const int graph_id = seq_len * 2 + graph_capture_variant;
-  if (graph_capture_this_run && recurrent_state_ && recurrent_state_->ShouldFixUpGraphCapture(graph_id)) {
+  const int graph_id = graph_capture_this_run && recurrent_state_ ? GraphIdForLength(seq_len, graph_capture_variant) : -1;
+  if (graph_id > 0 && recurrent_state_ && recurrent_state_->ShouldFixUpGraphCapture(graph_id)) {
     recurrent_state_->SaveForGraphCapture();
     State::Run(*model_.decoder_session_, true, seq_len, graph_capture_variant);
     recurrent_state_->RestoreAfterGraphCapture(graph_id);

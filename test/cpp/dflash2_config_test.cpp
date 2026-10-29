@@ -1,11 +1,14 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <random>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -14,7 +17,9 @@
 #include "dflash2_drafter.h"
 #include "engine/paged_key_value_cache.h"
 #include "engine/step_plan.h"
+#include "ep/webgpu/session_options.h"
 #include "models/io/kv_cache.h"
+#include "models/session_options.h"
 #include "ort_genai.h"
 #include "search.h"
 
@@ -44,6 +49,27 @@ Config MakeDflash2Config() {
   dflash2.mask_token_id = 31;
   dflash2.sliding_window = 17;
   return config;
+}
+
+TEST(ConfigTests, FullProviderNameUpdatesCanonicalOptions) {
+  Config config;
+  SetProviderOption(config, "webgpu", "validationMode", "basic");
+  SetProviderOption(config, "WebGpuExecutionProvider", "adapterIndex", "3");
+
+  ASSERT_EQ(config.model.decoder.session_options.provider_options.size(), 1u);
+  const auto& provider_options = config.model.decoder.session_options.provider_options.front();
+  EXPECT_EQ(provider_options.name, "WebGPU");
+  ASSERT_EQ(provider_options.options.size(), 2u);
+  const auto find_option = [&provider_options](std::string_view name) {
+    return std::find_if(provider_options.options.begin(), provider_options.options.end(),
+                        [name](const auto& option) { return option.first == name; });
+  };
+  const auto validation_mode = find_option("validationMode");
+  ASSERT_NE(validation_mode, provider_options.options.end());
+  EXPECT_EQ(validation_mode->second, "basic");
+  const auto adapter_index = find_option("adapterIndex");
+  ASSERT_NE(adapter_index, provider_options.options.end());
+  EXPECT_EQ(adapter_index->second, "3");
 }
 
 struct TensorMetadata {
@@ -105,6 +131,8 @@ class FakeModelStateMetadata final : public ModelStateMetadata {
 
   bool HasInput(const std::string& name) const override { return inputs_.contains(name); }
   bool HasOutput(const std::string& name) const override { return outputs_.contains(name); }
+
+  void RemoveInput(const std::string& name) { inputs_.erase(name); }
 
   ONNXTensorElementDataType GetInputDataType(const std::string& name) const override {
     return inputs_.at(name).data_type;
@@ -200,6 +228,139 @@ fs_std::path WriteIncompleteBlockDrafterConfig() {
   return root;
 }
 
+// Builds a minimal ONNX drafter graph that consumes `anchor_row_index` and `aux_hidden_states`.
+// For each query block b in [0, query_batch):
+//   - draft token 0 reports `anchor_row_index[b]`
+//   - draft token 1 reports `static_cast<int32_t>(aux_hidden_states[anchor_row_index[b], 0])`
+//   - draft token 2 reports `static_cast<int32_t>(past_key_values.0.key[0, 0, 0, 0])`
+// and `present.0.key[0, 0, 0, 0]` is updated to `aux_hidden_states[anchor_row_index[0], 0]`, so
+// even a non-drafting step (whose lattice is discarded) records the row gathered by its borrowed
+// placeholder block for the next step to observe.
+fs_std::path WriteAnchorRowIndexDrafterModel() {
+  auto varint = [](uint64_t v) {
+    std::string out;
+    while (v >= 0x80u) {
+      out.push_back(static_cast<char>((v & 0x7fu) | 0x80u));
+      v >>= 7;
+    }
+    out.push_back(static_cast<char>(v));
+    return out;
+  };
+  auto vf = [&](uint32_t field, uint64_t v) {
+    return varint(static_cast<uint64_t>(field) << 3) + varint(v);
+  };
+  auto bf = [&](uint32_t field, std::string_view bytes) {
+    std::string out = varint((static_cast<uint64_t>(field) << 3) | 2u);
+    out += varint(bytes.size());
+    out.append(bytes.data(), bytes.size());
+    return out;
+  };
+  auto value_info = [&](std::string_view name, uint64_t elem_type,
+                        std::initializer_list<int64_t> dims) {
+    std::string shape;
+    for (const int64_t d : dims) {
+      const std::string dim =
+          d < 0 ? bf(2, d == -2 ? "q" : "d") : vf(1, static_cast<uint64_t>(d));
+      shape += bf(1, dim);
+    }
+    const std::string tensor_type = vf(1, elem_type) + bf(2, shape);
+    return bf(1, name) + bf(2, bf(1, tensor_type));
+  };
+  auto int64_init = [&](std::string_view name, std::initializer_list<int64_t> dims,
+                        std::initializer_list<int64_t> vals) {
+    std::string t;
+    for (const int64_t d : dims) t += vf(1, static_cast<uint64_t>(d));
+    t += vf(2, 7);  // TensorProto::INT64
+    for (const int64_t v : vals) t += vf(7, static_cast<uint64_t>(v));
+    t += bf(8, name);
+    return t;
+  };
+  auto node = [&](std::string_view op, std::initializer_list<std::string_view> ins,
+                  std::initializer_list<std::string_view> outs,
+                  std::string_view attr_name = {}, int64_t attr_int = 0) {
+    std::string n;
+    for (const auto i : ins) n += bf(1, i);
+    for (const auto o : outs) n += bf(2, o);
+    n += bf(4, op);
+    if (!attr_name.empty()) {
+      const std::string attr =
+          bf(1, attr_name) + vf(3, static_cast<uint64_t>(attr_int)) + vf(20, 2);
+      n += bf(5, attr);
+    }
+    return n;
+  };
+
+  constexpr uint64_t kFloat = 1, kInt32 = 6, kInt64 = 7;
+  std::string graph;
+  for (const auto& n : {
+           node("Gather", {"aux_hidden_states", "anchor_row_index"}, {"aa"}, "axis", 0),
+           node("Cast", {"aa"}, {"ai"}, "to", static_cast<int64_t>(kInt32)),
+           node("Unsqueeze", {"anchor_row_index", "a1"}, {"ac"}),
+           node("Sub", {"ac", "ac"}, {"zc"}),
+           node("GatherND", {"past_key_values.0.key", "i0"}, {"pk"}),
+           node("Cast", {"pk"}, {"pi"}, "to", static_cast<int64_t>(kInt32)),
+           node("Add", {"zc", "pi"}, {"pc"}),
+           node("Concat", {"ac", "ai", "pc"}, {"dv"}, "axis", 1),
+           node("Unsqueeze", {"dv", "a2"}, {"dc"}),
+           node("Concat", {"dc", "dc"}, {"draft_candidate_ids"}, "axis", 2),
+           node("Sub", {"draft_candidate_ids", "draft_candidate_ids"}, {"zi"}),
+           node("Cast", {"zi"}, {"zf"}, "to", static_cast<int64_t>(kFloat)),
+           node("Unsqueeze", {"zf", "a3"}, {"zs"}),
+           node("Concat", {"zs", "zs"}, {"draft_scores"}, "axis", 3),
+           node("Gather", {"aa", "a0"}, {"fa"}, "axis", 0),
+           node("Squeeze", {"fa", "a1"}, {"fv"}),
+           node("Sub", {"pk", "pk"}, {"pz"}),
+           node("Add", {"fv", "pz"}, {"fvu"}),
+           node("ScatterND", {"past_key_values.0.key", "i0", "fvu"}, {"present.0.key"}),
+           node("Identity", {"past_key_values.0.value"}, {"present.0.value"}),
+       }) {
+    graph += bf(1, n);
+  }
+  graph += bf(2, "anchor_dflash2");
+  for (const auto& init : {
+           int64_init("a0", {1}, {0}),
+           int64_init("a1", {1}, {1}),
+           int64_init("a2", {1}, {2}),
+           int64_init("a3", {1}, {3}),
+           int64_init("i0", {1, 4}, {0, 0, 0, 0}),
+       }) {
+    graph += bf(5, init);
+  }
+  for (const auto& vi : {
+           value_info("aux_hidden_states", kFloat, {-1, 1}),
+           value_info("input_ids", kInt64, {-1}),
+           value_info("q_row_map", kInt32, {-1}),
+           value_info("qkv_row_map", kInt32, {-1}),
+           value_info("block_row_index", kInt32, {-1}),
+           value_info("anchor_row_index", kInt32, {-2}),
+           value_info("cumulative_sequence_lengths", kInt32, {-1}),
+           value_info("past_sequence_lengths", kInt32, {-1}),
+           value_info("block_table", kInt32, {-1, -1}),
+           value_info("attention_metadata", kInt32, {3}),
+           value_info("past_key_values.0.key", kFloat, {-1, 4, 1, 1}),
+           value_info("past_key_values.0.value", kFloat, {-1, 4, 1, 1}),
+       }) {
+    graph += bf(11, vi);
+  }
+  for (const auto& vo : {
+           value_info("draft_candidate_ids", kInt32, {-2, 3, 2}),
+           value_info("draft_scores", kFloat, {-2, 3, 2, 2}),
+           value_info("present.0.key", kFloat, {-1, 4, 1, 1}),
+           value_info("present.0.value", kFloat, {-1, 4, 1, 1}),
+       }) {
+    graph += bf(12, vo);
+  }
+
+  const std::string model_bytes = vf(1, 8) + bf(7, graph) + bf(8, bf(1, "") + vf(2, 17));
+  const auto root = fs_std::temp_directory_path() / "ortgenai_dflash_anchor_drafter";
+  std::error_code error;
+  fs_std::remove_all(root, error);
+  fs_std::create_directories(root);
+  std::ofstream out(root / "dflash2_anchor.onnx", std::ios::binary);
+  out.write(model_bytes.data(), static_cast<std::streamsize>(model_bytes.size()));
+  return root;
+}
+
 }  // namespace
 
 TEST(Dflash2ConfigTest, RequiresDrafterFilename) {
@@ -239,6 +400,182 @@ TEST(Dflash2ConfigTest, ParsesIndependentSamplingOptions) {
   EXPECT_FLOAT_EQ(config.model.dflash2.sampling_temperature, 0.1f);
   EXPECT_FLOAT_EQ(config.model.dflash2.sampling_top_p, 0.95f);
   EXPECT_FLOAT_EQ(config.model.dflash2.sampling_min_p, 0.3f);
+}
+
+TEST(Dflash2ConfigTest, ParsesSampledProposal) {
+  using Proposal = Config::Model::Dflash2::SampledProposal;
+  auto parse = [](std::string_view name, std::string_view options) {
+    const auto root = fs_std::temp_directory_path() / std::string{name};
+    std::error_code error;
+    fs_std::remove_all(root, error);
+    fs_std::create_directories(root);
+    std::ofstream out(root / "genai_config.json", std::ios::binary);
+    out << R"({"model":{"type":"tiny-test-model","vocab_size":128,"context_length":32,)"
+           R"("decoder":{"filename":"model.onnx"},"dflash2":{"filename":"dflash2.onnx",)"
+           R"("num_hidden_layers":1,"num_key_value_heads":2,"head_size":8,"block_size":4,)"
+           R"("num_draft_tokens":3,"selector_top_k":4,"mask_token_id":31,"sliding_window":17)"
+        << options << R"(}},"search":{}})";
+    out.close();
+    return Config(fs::path{root.string()}, "");
+  };
+
+  EXPECT_EQ(parse("ortgenai_dflash_proposal_default", "").model.dflash2.sampled_proposal,
+            Proposal::Lattice);
+  EXPECT_EQ(parse("ortgenai_dflash_proposal_none", R"(,"sampled_proposal":"none")")
+                .model.dflash2.sampled_proposal,
+            Proposal::None);
+  const auto lattice = parse("ortgenai_dflash_proposal_lattice", R"(,"sampled_proposal":"lattice")");
+  EXPECT_EQ(lattice.model.dflash2.sampled_proposal, Proposal::Lattice);
+  EXPECT_FALSE(lattice.model.dflash2.independent_sampling);
+  EXPECT_EQ(parse("ortgenai_dflash_proposal_greedy", R"(,"sampled_proposal":"greedy_path")")
+                .model.dflash2.sampled_proposal,
+            Proposal::GreedyPath);
+  EXPECT_EQ(parse("ortgenai_dflash_proposal_alias", R"(,"independent_sampling":true)")
+                .model.dflash2.sampled_proposal,
+            Proposal::Independent);
+  EXPECT_THROW(parse("ortgenai_dflash_proposal_bad", R"(,"sampled_proposal":"beam")"),
+               std::runtime_error);
+
+  // Both spellings resolve the same way in either key order, and a contradiction is rejected.
+  for (const bool proposal_first : {true, false}) {
+    auto both = [&](std::string_view name, std::string_view proposal, bool independent) {
+      const std::string proposal_key = R"(,"sampled_proposal":")" + std::string{proposal} + "\"";
+      const std::string independent_key =
+          std::string{R"(,"independent_sampling":)"} + (independent ? "true" : "false");
+      return parse(std::string{name} + (proposal_first ? "_pf" : "_if"),
+                   proposal_first ? proposal_key + independent_key
+                                  : independent_key + proposal_key);
+    };
+    SCOPED_TRACE(proposal_first ? "sampled_proposal first" : "independent_sampling first");
+    EXPECT_EQ(both("ortgenai_dflash_proposal_none_false", "none", false)
+                  .model.dflash2.sampled_proposal,
+              Proposal::None);
+    const auto independent = both("ortgenai_dflash_proposal_indep_true", "independent", true);
+    EXPECT_EQ(independent.model.dflash2.sampled_proposal, Proposal::Independent);
+    EXPECT_TRUE(independent.model.dflash2.independent_sampling);
+    EXPECT_THROW(both("ortgenai_dflash_proposal_none_true", "none", true), std::runtime_error);
+    EXPECT_THROW(both("ortgenai_dflash_proposal_indep_false", "independent", false),
+                 std::runtime_error);
+  }
+  EXPECT_EQ(parse("ortgenai_dflash_proposal_legacy_false", R"(,"independent_sampling":false)")
+                .model.dflash2.sampled_proposal,
+            Proposal::Lattice);
+}
+
+TEST(Dflash2ConfigTest, LatticeWalkConditionsOnTheSampledPredecessor) {
+  // Step 0 always draws candidate 1. Step 1's row 0 would pick candidate 0 and row 1 candidate 1,
+  // so only a walk that follows the draw lands on 21.
+  Dflash2Lattice lattice;
+  lattice.top_k = 2;
+  lattice.candidate_ids = {10, 11, 20, 21};
+  lattice.scores = {-100.0f, 0.0f, -100.0f, 0.0f,
+                    0.0f, -100.0f, -100.0f, 0.0f};
+  std::mt19937 rng{7};
+  std::vector<int32_t> tokens;
+  std::vector<TargetTokenSelection> distributions;
+  Dflash2SampleLatticePath(lattice, 2, /*temperature=*/1.0f, /*top_k=*/20, /*top_p=*/1.0f, rng,
+                           tokens, distributions);
+  EXPECT_EQ(tokens, (std::vector<int32_t>{11, 21}));
+  ASSERT_EQ(distributions.size(), 2u);
+  EXPECT_EQ(distributions[1].indices.front(), 21);
+  EXPECT_NEAR(distributions[1].probs.front(), 1.0f, 1e-6f);
+
+  Dflash2SampleLatticePath(lattice, 1, 1.0f, 20, 1.0f, rng, tokens, distributions);
+  EXPECT_EQ(tokens, (std::vector<int32_t>{11}));
+}
+
+TEST(Dflash2ConfigTest, LatticeWalkTruncatesLikeTheTarget) {
+  Dflash2Lattice lattice;
+  lattice.top_k = 4;
+  lattice.candidate_ids = {10, 11, 12, 13};
+  lattice.scores.assign(16, 0.0f);
+  const std::array<float, 4> row{2.0f, 4.0f, 1.0f, 3.0f};
+  std::copy(row.begin(), row.end(), lattice.scores.begin());
+  std::mt19937 rng{3};
+  std::vector<int32_t> tokens;
+  std::vector<TargetTokenSelection> distributions;
+
+  // Top-k 3, then top-p 0.7 keeps the two leading candidates, renormalised at temperature 1.
+  Dflash2SampleLatticePath(lattice, 1, 1.0f, 3, 0.7f, rng, tokens, distributions);
+  ASSERT_EQ(distributions.size(), 1u);
+  EXPECT_EQ(distributions[0].indices, (std::vector<int32_t>{11, 13}));
+  EXPECT_NEAR(distributions[0].probs[0], 0.7310586f, 1e-6f);
+  EXPECT_NEAR(distributions[0].probs[1], 0.2689414f, 1e-6f);
+
+  // Top-p applies to the top-k renormalized mass: 0.731 of the top two already covers 0.7, while
+  // the full row would give the leader only 0.644 and keep a second candidate.
+  Dflash2SampleLatticePath(lattice, 1, 1.0f, 2, 0.7f, rng, tokens, distributions);
+  EXPECT_EQ(distributions[0].indices, (std::vector<int32_t>{11}));
+  EXPECT_EQ(tokens, (std::vector<int32_t>{11}));
+
+  Dflash2Lattice non_finite = lattice;
+  non_finite.scores[1] = std::numeric_limits<float>::infinity();
+  EXPECT_THROW(Dflash2SampleLatticePath(non_finite, 1, 1.0f, 0, 1.0f, rng, tokens, distributions),
+               std::runtime_error);
+
+  // Temperature 2 on the full row, with the sample frequencies matching the recorded q.
+  std::array<int, 4> counts{};
+  constexpr int kDraws = 20000;
+  for (int i = 0; i < kDraws; ++i) {
+    Dflash2SampleLatticePath(lattice, 1, 2.0f, 0, 1.0f, rng, tokens, distributions);
+    ++counts[static_cast<size_t>(tokens[0] - 10)];
+  }
+  ASSERT_EQ(distributions[0].indices, (std::vector<int32_t>{11, 13, 10, 12}));
+  for (size_t i = 0; i < distributions[0].indices.size(); ++i) {
+    const auto token = static_cast<size_t>(distributions[0].indices[i] - 10);
+    EXPECT_NEAR(static_cast<double>(counts[token]) / kDraws, distributions[0].probs[i], 0.015);
+  }
+}
+
+TEST(Dflash2ConfigTest, ParsesAnchorRowIndexInput) {
+  const auto root = fs_std::temp_directory_path() / "ortgenai_dflash_anchor_row_index";
+  std::error_code error;
+  fs_std::remove_all(root, error);
+  fs_std::create_directories(root);
+  std::ofstream out(root / "genai_config.json", std::ios::binary);
+  out << R"({"model":{"type":"tiny-test-model","vocab_size":128,"context_length":32,)"
+         R"("decoder":{"filename":"model.onnx"},"dflash2":{"filename":"dflash2.onnx",)"
+         R"("num_hidden_layers":1,"num_key_value_heads":2,"head_size":8,"block_size":4,)"
+         R"("num_draft_tokens":3,"selector_top_k":4,"mask_token_id":31,"sliding_window":17,)"
+         R"("inputs":{"anchor_row_index":"anchor_rows"}}},"search":{}})";
+  out.close();
+
+  Config config(fs::path{root.string()}, "");
+  EXPECT_EQ(config.model.dflash2.inputs.anchor_row_index, "anchor_rows");
+  // Absent by default: DFlash 2 / DSpark drafters do not read an anchor row.
+  EXPECT_TRUE(MakeDflash2Config().model.dflash2.inputs.anchor_row_index.empty());
+}
+
+TEST(Dflash2ConfigTest, AcceptsAnchorRowIndexInput) {
+  auto config = MakeDflash2Config();
+  config.model.dflash2.inputs.anchor_row_index = "anchor_row_index";
+  auto [target, drafter] = MakeCompatibleMetadata();
+  drafter.AddInput("anchor_row_index", ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32, {-1});
+  EXPECT_NO_THROW(ValidateDflash2ModelCompatibility(config, target, drafter, 8));
+}
+
+TEST(Dflash2ConfigTest, RejectsMissingOrMistypedAnchorRowIndexInput) {
+  auto config = MakeDflash2Config();
+  config.model.dflash2.inputs.anchor_row_index = "anchor_row_index";
+  {
+    auto [target, drafter] = MakeCompatibleMetadata();
+    EXPECT_THROW(ValidateDflash2ModelCompatibility(config, target, drafter, 8), std::runtime_error);
+  }
+  {
+    auto [target, drafter] = MakeCompatibleMetadata();
+    drafter.AddInput("anchor_row_index", ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, {-1});
+    EXPECT_THROW(ValidateDflash2ModelCompatibility(config, target, drafter, 8), std::runtime_error);
+  }
+  {
+    auto [target, drafter] = MakeCompatibleMetadata();
+    drafter.AddInput("anchor_row_index", ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32, {2});
+    EXPECT_THROW(ValidateDflash2ModelCompatibility(config, target, drafter, 8), std::runtime_error);
+  }
+  {
+    auto [target, drafter] = MakeCompatibleMetadata();
+    config.model.dflash2.inputs.anchor_row_index = config.model.dflash2.inputs.qkv_row_map;
+    EXPECT_THROW(ValidateDflash2ModelCompatibility(config, target, drafter, 8), std::runtime_error);
+  }
 }
 
 TEST(Dflash2ConfigTest, RejectsSamplingTemperatureOutsideFloatRange) {
@@ -323,6 +660,55 @@ TEST(Dflash2ConfigTest, PreservesTargetProviderOptions) {
             Config::NamedString("device_id", "1"));
 }
 
+TEST(Dflash2ConfigTest, WebGpuMatmulAccumulationDefaultsAndOverrides) {
+  if (FindRegisteredEpDevices("WebGpuExecutionProvider").empty()) {
+    GTEST_SKIP() << "No WebGPU EP device is registered.";
+  }
+  for (const char* model_kind : {"plain", "dflash2", "dspark"}) {
+    for (const char* batching : {"none", "dynamic", "static"}) {
+      for (int max_batch_size : {1, 2}) {
+        for (const char* explicit_value : {"", "0", "1"}) {
+          SCOPED_TRACE(::testing::Message() << model_kind << " " << batching << " batch="
+                                            << max_batch_size << " override=" << explicit_value);
+          auto config = MakeDflash2Config();
+          const std::string_view kind{model_kind}, batch{batching};
+          if (kind == "plain") config.model.dflash2.filename.clear();
+          config.model.dflash2.is_dspark = kind == "dspark";
+          if (batch == "dynamic") {
+            config.engine.dynamic_batching.emplace().max_batch_size = max_batch_size;
+          } else if (batch == "static") {
+            config.engine.static_batching.emplace().max_batch_size = max_batch_size;
+          }
+          Config::ProviderOptions provider{"WebGPU", {}};
+          if (*explicit_value) {
+            provider.options.emplace_back("enableMatmulFp32Accumulation", explicit_value);
+          }
+          // Projection must retain the same default/override for the auxiliary drafter session.
+          for (bool drafter : {false, true}) {
+            if (drafter && kind != "dflash2") continue;
+            const auto projected = drafter ? CreateDflash2Config(config) : nullptr;
+            auto options = OrtSessionOptions::Create();
+            WebGPUExecutionProvider::AppendExecutionProvider(*options, provider, projected ? *projected : config);
+            const char* key = "ep.webgpuexecutionprovider.enableMatmulFp32Accumulation";
+            const bool default_enabled = kind == "dflash2" || (batch != "none" && max_batch_size > 1);
+            const bool specified = *explicit_value || default_enabled;
+            ASSERT_EQ(options->HasConfigEntry(key), specified);
+            if (specified) {
+              size_t size{};
+              Ort::ThrowOnError(Ort::api->GetSessionConfigEntry(options.get(), key, nullptr, &size));
+              std::string value(size, '\0');
+              Ort::ThrowOnError(Ort::api->GetSessionConfigEntry(options.get(), key, value.data(), &size));
+              EXPECT_STREQ(value.c_str(), *explicit_value ? explicit_value : "1");
+            }
+          }
+          // Defaults must not mutate the user-provided options, including an explicit opt-out.
+          EXPECT_EQ(provider.options.size(), *explicit_value ? 1u : 0u);
+        }
+      }
+    }
+  }
+}
+
 TEST(Dflash2ConfigTest, DrafterSessionOverridesTargetConfigEntries) {
   auto config = MakeDflash2Config();
   config.model.decoder.session_options.config_entries.push_back(
@@ -340,6 +726,14 @@ TEST(Dflash2ConfigTest, DrafterSessionOverridesTargetConfigEntries) {
 TEST(Dflash2ConfigTest, AcceptsCompatibleAuxiliaryHiddenStates) {
   const auto config = MakeDflash2Config();
   const auto [target, drafter] = MakeCompatibleMetadata();
+  EXPECT_NO_THROW(ValidateDflash2ModelCompatibility(config, target, drafter, 8));
+}
+
+TEST(Dflash2ConfigTest, AcceptsOmittedAttentionMetadata) {
+  auto config = MakeDflash2Config();
+  config.model.dflash2.inputs.attention_metadata.clear();
+  auto [target, drafter] = MakeCompatibleMetadata();
+  drafter.RemoveInput("attention_metadata");
   EXPECT_NO_THROW(ValidateDflash2ModelCompatibility(config, target, drafter, 8));
 }
 
@@ -617,6 +1011,22 @@ TEST(Dflash2ConfigTest, RejectsWindowedPoolByteOverflow) {
       std::runtime_error);
 }
 
+TEST(Dflash2ConfigTest, SnapshotCapacityHonorsConfiguredLimitAndMemoryBudget) {
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(200, 40, 20, 20, 0), 0u);
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(200, 40, 20, 20, 1), 1u);
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(200, 40, 20, 20, 4), 4u);
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(200, 40, 20, 20, 32), 7u);
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(199, 40, 20, 20, 32), 6u);
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(79, 40, 20, 20, 32), 0u);
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(100, 100, 20, 20, 32), 0u);
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(100, 101, 20, 20, 32), 0u);
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(100, 40, 0, 20, 32), 0u);
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(100, 40, 20, 0, 32), 0u);
+  const size_t maximum = std::numeric_limits<size_t>::max();
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(maximum, 0, maximum / 2, 1, maximum), 2u);
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(maximum, maximum - 1, maximum, 1, maximum), 0u);
+}
+
 TEST(Dflash2ConfigTest, BillsFullAttentionCachePerTargetBlock) {
   auto config = MakeDflash2Config();
   config.model.dflash2.is_dspark = true;
@@ -774,6 +1184,135 @@ TEST(Dflash2ConfigTest, RunsPackedQkvDrafterWithoutQueryRowMap) {
   EXPECT_EQ(drafts[1], (std::vector<int32_t>{22, 0, 13, 325}));
 }
 
+TEST(Dflash2ConfigTest, RunsDrafterWithAnchorRowIndex) {
+  const auto root = WriteAnchorRowIndexDrafterModel();
+  auto config = MakeDflash2Config();
+  config.config_path = fs::path{root.string()};
+  auto& draft = config.model.dflash2;
+  draft.filename = "dflash2_anchor.onnx";
+  draft.num_hidden_layers = 1;
+  draft.num_key_value_heads = 1;
+  draft.head_size = 1;
+  draft.block_size = 4;
+  draft.num_draft_tokens = 3;
+  draft.selector_top_k = 2;
+  draft.sliding_window = 4;  // context_window_ = sliding_window + block_size = 8.
+  draft.inputs.anchor_row_index = "anchor_row_index";
+
+  auto model = std::make_shared<Dflash2Model>(CreateDflash2Config(config), GetOrtEnv());
+  ASSERT_TRUE(model->session_info_.HasInput(draft.inputs.anchor_row_index));
+  FakeModelStateMetadata target;
+  target.AddOutput("aux_hidden_states", ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, {-1, 1});
+  EXPECT_EQ(ValidateDflash2ModelCompatibility(config, target, model->session_info_, 4),
+            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+
+  const size_t ring_blocks = Dflash2Drafter::PoolBlocks(config, 4, 3);
+  Dflash2Drafter drafter{model, /*paged_block_size=*/4, ring_blocks, /*max_requests=*/3};
+
+  int req_a_id = 0, req_b_id = 0, req_c_id = 0;
+  auto* req_a = reinterpret_cast<Request*>(&req_a_id);
+  auto* req_b = reinterpret_cast<Request*>(&req_b_id);
+  auto* req_c = reinterpret_cast<Request*>(&req_c_id);
+  auto* device = GetDeviceInterface(DeviceType::CPU);
+
+  auto make_aux = [&](std::initializer_list<float> values) {
+    auto aux = std::make_unique<Tensor>(device, Ort::TypeToTensorType<float>);
+    aux->CreateTensor(std::array<int64_t, 2>{static_cast<int64_t>(values.size()), 1});
+    auto span = aux->GetDeviceSpan<float>();
+    std::copy(values.begin(), values.end(), span.CpuSpan().begin());
+    span.CopyCpuToDevice();
+    return aux;
+  };
+  std::vector<std::vector<int32_t>> drafts;
+
+  // 1. Per-query-block ordering for unequal context lengths: req_a ingests 3 rows (packed 0..2,
+  //    anchor row 2 = 102) and req_b ingests 5 rows (packed 3..7, anchor row 7 = 107).
+  {
+    auto aux = make_aux({100.0f, 101.0f, 102.0f, 103.0f, 104.0f, 105.0f, 106.0f, 107.0f});
+    const std::array feeds{
+        Dflash2Drafter::Feed{.request = req_a, .aux_row_begin = 0, .aux_row_count = 3, .first_position = 0, .anchor_token = 11, .draft_eligible = true, .wants_drafts = true},
+        Dflash2Drafter::Feed{.request = req_b, .aux_row_begin = 3, .aux_row_count = 5, .first_position = 0, .anchor_token = 12, .draft_eligible = true, .wants_drafts = true},
+    };
+    ASSERT_TRUE(drafter.Propose(*aux, feeds, drafts));
+    ASSERT_EQ(drafts.size(), 2u);
+    EXPECT_EQ(drafts[0], (std::vector<int32_t>{2, 102, 0}));
+    EXPECT_EQ(drafts[1], (std::vector<int32_t>{7, 107, 0}));
+  }
+
+  // 2. Window trimming: req_a supplies 10 rows (> context_window_ = 8), so its leading 2 rows
+  //    (200, 201) are dropped and packed rows 0..7 hold 202..209 (anchor row 7 = 209); req_b's
+  //    2 rows then pack into 8..9 (anchor row 9 = 211).
+  {
+    auto aux = make_aux({200.0f, 201.0f, 202.0f, 203.0f, 204.0f, 205.0f,
+                         206.0f, 207.0f, 208.0f, 209.0f, 210.0f, 211.0f});
+    const std::array feeds{
+        Dflash2Drafter::Feed{.request = req_a, .aux_row_begin = 0, .aux_row_count = 10, .first_position = 3, .anchor_token = 13, .draft_eligible = true, .wants_drafts = true},
+        Dflash2Drafter::Feed{.request = req_b, .aux_row_begin = 10, .aux_row_count = 2, .first_position = 5, .anchor_token = 14, .draft_eligible = true, .wants_drafts = true},
+    };
+    ASSERT_TRUE(drafter.Propose(*aux, feeds, drafts));
+    ASSERT_EQ(drafts.size(), 2u);
+    EXPECT_EQ(drafts[0], (std::vector<int32_t>{7, 209, 102}));
+    EXPECT_EQ(drafts[1], (std::vector<int32_t>{9, 211, 102}));
+  }
+
+  // 3. Mixed context-only and drafting feeds: req_a (2 rows, packed 0..1) and req_c (1 row,
+  //    packed 5) ingest context without drafting, while req_b (3 rows, packed 2..4) drafts from
+  //    packed anchor row 4 (= 304).
+  {
+    auto aux = make_aux({300.0f, 301.0f, 302.0f, 303.0f, 304.0f, 305.0f});
+    const std::array feeds{
+        Dflash2Drafter::Feed{.request = req_a, .aux_row_begin = 0, .aux_row_count = 2, .first_position = 13, .anchor_token = 15, .draft_eligible = false, .wants_drafts = false},
+        Dflash2Drafter::Feed{.request = req_b, .aux_row_begin = 2, .aux_row_count = 3, .first_position = 7, .anchor_token = 16, .draft_eligible = true, .wants_drafts = true},
+        Dflash2Drafter::Feed{.request = req_c, .aux_row_begin = 5, .aux_row_count = 1, .first_position = 0, .anchor_token = 17, .draft_eligible = true, .wants_drafts = false},
+    };
+    ASSERT_TRUE(drafter.Propose(*aux, feeds, drafts));
+    ASSERT_EQ(drafts.size(), 3u);
+    EXPECT_TRUE(drafts[0].empty());
+    EXPECT_EQ(drafts[1], (std::vector<int32_t>{4, 304, 209}));
+    EXPECT_TRUE(drafts[2].empty());
+  }
+
+  // 4. Borrowed placeholder's row-0 fallback: when no feed wants drafts and the first served feed
+  //    (req_a) carries 0 context rows, the borrowed query block falls back to packed row 0 (400)
+  //    of req_b's context rows (400, 401), which the graph records in present.0.key for the next
+  //    drafting step to read back in slot 2.
+  {
+    auto aux = make_aux({400.0f, 401.0f});
+    const std::array feeds{
+        Dflash2Drafter::Feed{.request = req_a, .aux_row_begin = 0, .aux_row_count = 0, .first_position = 15, .anchor_token = 18, .draft_eligible = false, .wants_drafts = false},
+        Dflash2Drafter::Feed{.request = req_b, .aux_row_begin = 0, .aux_row_count = 2, .first_position = 10, .anchor_token = 19, .draft_eligible = false, .wants_drafts = false},
+    };
+    ASSERT_TRUE(drafter.Propose(*aux, feeds, drafts));
+    ASSERT_EQ(drafts.size(), 2u);
+    EXPECT_TRUE(drafts[0].empty());
+    EXPECT_TRUE(drafts[1].empty());
+
+    auto next_aux = make_aux({500.0f});
+    const std::array next_feeds{
+        Dflash2Drafter::Feed{.request = req_a, .aux_row_begin = 0, .aux_row_count = 1, .first_position = 15, .anchor_token = 20, .draft_eligible = true, .wants_drafts = true},
+    };
+    ASSERT_TRUE(drafter.Propose(*next_aux, next_feeds, drafts));
+    ASSERT_EQ(drafts.size(), 1u);
+    EXPECT_EQ(drafts[0], (std::vector<int32_t>{0, 500, 400}));
+  }
+
+  // A real query block without a context row (or a placeholder step with zero total context rows)
+  // is rejected rather than indexing out of bounds.
+  {
+    auto aux = make_aux({600.0f});
+    const std::array missing_draft_context{
+        Dflash2Drafter::Feed{.request = req_a, .aux_row_begin = 0, .aux_row_count = 0, .first_position = 16, .anchor_token = 21, .draft_eligible = true, .wants_drafts = true},
+        Dflash2Drafter::Feed{.request = req_b, .aux_row_begin = 0, .aux_row_count = 1, .first_position = 12, .anchor_token = 22, .draft_eligible = false, .wants_drafts = false},
+    };
+    EXPECT_THROW(drafter.Propose(*aux, missing_draft_context, drafts), std::logic_error);
+
+    const std::array zero_total_context{
+        Dflash2Drafter::Feed{.request = req_a, .aux_row_begin = 0, .aux_row_count = 0, .first_position = 16, .anchor_token = 21, .draft_eligible = false, .wants_drafts = false},
+    };
+    EXPECT_THROW(drafter.Propose(*aux, zero_total_context, drafts), std::logic_error);
+  }
+}
+
 TEST(Dflash2ConfigTest, ExecutesWindowedRestoreAcrossRingWrap) {
   auto config = MakeDflash2Config();
   config.config_path = fs::path{MODEL_PATH "engine/synthetic-dspark"};
@@ -828,7 +1367,7 @@ TEST(Dflash2ConfigTest, ExecutesWindowedRestoreAcrossRingWrap) {
   next_aux.GetByteSpan().Zero();
   const std::array target_only{Dflash2Drafter::Feed{
       .request = peer, .aux_row_count = 1, .first_position = 24, .anchor_token = 13, .draft_eligible = true, .wants_drafts = true}};
-  ASSERT_FALSE(drafter.Propose(next_aux, target_only, proposals));
+  ASSERT_TRUE(drafter.Propose(next_aux, target_only, proposals));
   EXPECT_TRUE(proposals.front().empty());
   EXPECT_TRUE(drafter.CanCapturePrefix(source, 24));
   EXPECT_FALSE(drafter.CanCapturePrefix(source, 23));
@@ -838,6 +1377,7 @@ TEST(Dflash2ConfigTest, ExecutesWindowedRestoreAcrossRingWrap) {
     checkpoint.reset();
   }
   ASSERT_FALSE(indexed_checkpoint.expired());
+  drafter.Release(peer);
 
   const std::array uninterrupted{Dflash2Drafter::Feed{
       .request = source, .aux_row_count = 1, .first_position = 24, .anchor_token = 12, .draft_eligible = true, .wants_drafts = true}};
@@ -943,6 +1483,125 @@ TEST(Dflash2ConfigTest, ExecutesWindowedRestoreAcrossRingWrap) {
   invalid->caches.resize(checkpoint->caches.size());
   damaged.front().prefix_checkpoint = std::move(invalid);
   EXPECT_THROW(drafter.Propose(next_aux, damaged, proposals), std::logic_error);
+}
+
+TEST(Dflash2ConfigTest, SnapshotPoolRetainsAndRestoresMoreThanTwoBoundaries) {
+  auto config = MakeDflash2Config();
+  config.config_path = fs::path{MODEL_PATH "engine/synthetic-dspark"};
+  auto& draft = config.model.dflash2;
+  draft.filename = "dflash2.onnx";
+  draft.num_hidden_layers = 1;
+  draft.num_key_value_heads = 1;
+  draft.head_size = 1;
+  draft.block_size = 4;
+  draft.num_draft_tokens = 3;
+  draft.selector_top_k = 2;
+  draft.sliding_window = 8;
+  auto model = std::make_shared<Dflash2Model>(CreateDflash2Config(config), GetOrtEnv());
+  Dflash2Drafter drafter{model, 4, Dflash2Drafter::PoolBlocks(config, 4, 1), 1};
+  EXPECT_EQ(drafter.AvailablePrefixCheckpoints(), 1u);
+  drafter.SetPrefixCheckpointCapacity(0);
+  EXPECT_EQ(drafter.AvailablePrefixCheckpoints(), 0u);
+  int request_id = 0;
+  auto* request = reinterpret_cast<Request*>(&request_id);
+  Tensor aux{GetDeviceInterface(DeviceType::CPU), Ort::TypeToTensorType<float>};
+  aux.CreateTensor(std::array<int64_t, 2>{8, 1});
+  aux.GetByteSpan().Zero();
+  std::vector<std::vector<int32_t>> proposals;
+  const std::array initial{Dflash2Drafter::Feed{
+      .request = request, .aux_row_count = 8, .anchor_token = 11, .draft_eligible = true, .wants_drafts = true}};
+  ASSERT_TRUE(drafter.Propose(aux, initial, proposals));
+  EXPECT_EQ(drafter.CapturePrefix(request, 8), nullptr);
+  drafter.SetPrefixCheckpointCapacity(3);
+
+  std::vector<std::shared_ptr<const Dflash2PrefixCheckpoint>> checkpoints;
+  std::vector<std::vector<int32_t>> expected;
+  for (size_t position = 8; position <= 24; position += 8) {
+    auto checkpoint = drafter.CapturePrefix(request, position);
+    ASSERT_NE(checkpoint, nullptr);
+    checkpoints.push_back(std::move(checkpoint));
+    Tensor next_aux{GetDeviceInterface(DeviceType::CPU), Ort::TypeToTensorType<float>};
+    next_aux.CreateTensor(std::array<int64_t, 2>{1, 1});
+    next_aux.GetByteSpan().Zero();
+    const std::array next{Dflash2Drafter::Feed{
+        .request = request, .aux_row_count = 1, .first_position = position, .anchor_token = 12, .draft_eligible = true, .wants_drafts = true}};
+    ASSERT_TRUE(drafter.Propose(next_aux, next, proposals));
+    ASSERT_FALSE(proposals.front().empty());
+    expected.push_back(proposals.front());
+    if (position < 24) {
+      Tensor remaining{GetDeviceInterface(DeviceType::CPU), Ort::TypeToTensorType<float>};
+      remaining.CreateTensor(std::array<int64_t, 2>{7, 1});
+      remaining.GetByteSpan().Zero();
+      const std::array advance{Dflash2Drafter::Feed{
+          .request = request, .aux_row_count = 7, .first_position = position + 1, .anchor_token = 11, .draft_eligible = true, .wants_drafts = true}};
+      ASSERT_TRUE(drafter.Propose(remaining, advance, proposals));
+    }
+  }
+  EXPECT_EQ(drafter.AvailablePrefixCheckpoints(), 0u);
+  EXPECT_EQ(drafter.CapturePrefix(request, 25), nullptr);
+  EXPECT_THROW(drafter.SetPrefixCheckpointCapacity(0), std::logic_error);
+  for (size_t index = 0; index < checkpoints.size(); ++index) {
+    drafter.ReleaseAll();
+    Tensor next_aux{GetDeviceInterface(DeviceType::CPU), Ort::TypeToTensorType<float>};
+    next_aux.CreateTensor(std::array<int64_t, 2>{1, 1});
+    next_aux.GetByteSpan().Zero();
+    const std::array restored{Dflash2Drafter::Feed{
+        .request = request, .prefix_checkpoint = checkpoints[index], .aux_row_count = 1, .first_position = checkpoints[index]->token_count, .anchor_token = 12, .draft_eligible = true, .wants_drafts = true}};
+    ASSERT_TRUE(drafter.Propose(next_aux, restored, proposals));
+    EXPECT_EQ(proposals.front(), expected[index]);
+  }
+  checkpoints[1].reset();
+  EXPECT_EQ(drafter.AvailablePrefixCheckpoints(), 1u);
+  auto reused = drafter.CapturePrefix(request, 25);
+  ASSERT_NE(reused, nullptr);
+  EXPECT_EQ(drafter.AvailablePrefixCheckpoints(), 0u);
+  checkpoints.clear();
+  reused.reset();
+  drafter.SetPrefixCheckpointCapacity(0);
+  EXPECT_EQ(drafter.AvailablePrefixCheckpoints(), 0u);
+}
+
+TEST(Dflash2ConfigTest, MissingWindowedPrefixRebuildsBeforeDraftingOrCheckpointing) {
+  auto config = MakeDflash2Config();
+  config.config_path = fs::path{MODEL_PATH "engine/synthetic-dspark"};
+  auto& draft = config.model.dflash2;
+  draft.filename = "dflash2.onnx";
+  draft.num_hidden_layers = 1;
+  draft.num_key_value_heads = 1;
+  draft.head_size = 1;
+  draft.block_size = 4;
+  draft.num_draft_tokens = 3;
+  draft.selector_top_k = 2;
+  draft.sliding_window = 8;
+  auto model = std::make_shared<Dflash2Model>(CreateDflash2Config(config), GetOrtEnv());
+  Dflash2Drafter drafter{model, 4, Dflash2Drafter::PoolBlocks(config, 4, 1), 1};
+  int request_id = 0;
+  auto* request = reinterpret_cast<Request*>(&request_id);
+  Tensor aux{GetDeviceInterface(DeviceType::CPU), Ort::TypeToTensorType<float>};
+  aux.CreateTensor(std::array<int64_t, 2>{4, 1});
+  aux.GetByteSpan().Zero();
+  std::vector<std::vector<int32_t>> proposals;
+  for (size_t position = 24; position < 36; position += 4) {
+    const std::array feeds{Dflash2Drafter::Feed{
+        .request = request, .aux_row_count = 4, .first_position = position, .anchor_token = 12, .draft_eligible = true, .wants_drafts = true}};
+    ASSERT_TRUE(drafter.Propose(aux, feeds, proposals));
+    ASSERT_EQ(proposals.size(), 1u);
+    if (position < 32) {
+      EXPECT_TRUE(proposals.front().empty());
+      EXPECT_FALSE(drafter.CanCapturePrefix(request, position + 4));
+      EXPECT_EQ(drafter.CapturePrefix(request, position + 4), nullptr);
+    } else {
+      EXPECT_FALSE(proposals.front().empty());
+      EXPECT_TRUE(drafter.CanCapturePrefix(request, position + 4));
+      EXPECT_NE(drafter.CapturePrefix(request, position + 4), nullptr);
+    }
+  }
+  drafter.ReleaseAll();
+  const std::array restarted{Dflash2Drafter::Feed{
+      .request = request, .aux_row_count = 4, .first_position = 64, .anchor_token = 12, .draft_eligible = true, .wants_drafts = true}};
+  ASSERT_TRUE(drafter.Propose(aux, restarted, proposals));
+  EXPECT_TRUE(proposals.front().empty());
+  EXPECT_FALSE(drafter.CanCapturePrefix(request, 68));
 }
 
 TEST(Dflash2ConfigTest, CapturesAndRestoresExtendedWindowedPrefix) {
@@ -1295,10 +1954,12 @@ TEST(Dflash2ConfigTest, ReplacesProposalBufferWhenTheElementTypeChanges) {
   EXPECT_EQ(slot->GetElementCount(), 4u);
 }
 
-TEST(Dflash2ConfigTest, JoinsOnlyFromAnEligibleTurnAtSequenceStart) {
+TEST(Dflash2ConfigTest, JoinsEligibleTurnsAtZeroOrWithWindowedContext) {
   EXPECT_TRUE(Dflash2CanJoin(/*draft_eligible=*/true, /*first_position=*/0));
   EXPECT_FALSE(Dflash2CanJoin(/*draft_eligible=*/false, /*first_position=*/0));
   EXPECT_FALSE(Dflash2CanJoin(/*draft_eligible=*/true, /*first_position=*/1));
+  EXPECT_TRUE(Dflash2CanJoin(/*draft_eligible=*/true, /*first_position=*/1, /*context_window=*/12));
+  EXPECT_FALSE(Dflash2CanJoin(/*draft_eligible=*/false, /*first_position=*/1, /*context_window=*/12));
 }
 
 TEST(Dflash2ConfigTest, RingCheckpointPreservesLogicalSlotsAcrossPhysicalRemapping) {

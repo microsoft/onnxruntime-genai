@@ -39,6 +39,8 @@ Excluding the time it may take to download the original model, the model builder
 
 Model architectures are defined in classes. By defining model architectures in this way, future models can leverage class inheritance to greatly reduce the amount of time and effort needed to onboard new model architectures. Optimizations and quantizations are also inherited from the base classes so there is no additional work needed to add those opportunities per model.
 
+Component loaders live in `loaders/`, while architecture-specific graph-construction helpers belong to their corresponding builder classes. Portable standard-ONNX subgraphs and normalization helpers live in `builders/expansions/standard.py`; provider adapters register the required overrides under the same method names as the builders. Architecture-specific organization and contracts are documented separately, such as [Qwen3.8 design](docs/qwen3_8.md).
+
 ### Compatibility
 
 The models produced by the model builder should directly work in ONNX Runtime GenAI and other solutions that use ONNX Runtime such as Hugging Face's Optimum. There should be no additional model modifications needed.
@@ -53,8 +55,7 @@ After the final ONNX model is created, additional files are saved in the output 
 
 ### Configuration Boundary
 
-The experimental version-2 path adds grouped configuration entry points in
-`builder.py` and a normalization layer in `builder_config.py`. The current flow is:
+The experimental version-2 path adds grouped configuration entry points in `builder.py` and a normalization layer in `builder_config.py`. The current flow is:
 
 1. `parse_extra_options` collects legacy CLI strings and resolves structured policy.
 2. `check_extra_options` converts legacy values and loads Hugging Face metadata.
@@ -62,19 +63,25 @@ The experimental version-2 path adds grouped configuration entry points in
 4. The composite exporter writes the decoder and auxiliary runtime sections.
 5. The runtime fragment is merged into the completed `genai_config.json`.
 
-Legacy syntax is normalized before structured leaves are overlaid. A resolved
-`QuantConfig` is still export intent rather than a final graph manifest, so the
-builder separately validates emitted node names, tensor adoption, exporter
-capabilities, and runtime requirements.
+Legacy syntax is normalized before structured leaves are overlaid. A resolved `QuantConfig` is still export intent rather than a final graph manifest, so the builder separately validates emitted node names, tensor adoption, exporter capabilities, and runtime requirements.
 
-Do not move checkpoint unpacking into this layer or change the C++ runtime
-schema to accommodate builder inputs.
+Do not move checkpoint unpacking into this layer or change the C++ runtime schema to accommodate builder inputs.
 
 ### Architecture Classes
 
+Use ONNX IR values, nodes, attributes, tensors, and model load/save APIs for graph construction and transformation throughout the builder and its companion tools. Preserve use-def links and external tensor references when rewriting graphs. Protobuf conversion belongs only at interoperability boundaries that require it, such as the ONNX Runtime quantizer, existing protobuf-facing tool APIs, and ONNX structural checker; do not use ONNX helper APIs to construct or mutate graphs at those boundaries. Component packaging validates raw external-data metadata before IR conversion so malformed paths, ranges, and unsupported nested payloads cannot be normalized away before validation.
+
+ORT GenAI builder classes and the Transformers package are imported at module scope, but HF model classes are resolved only when loading weights for the selected architecture. Supporting a newer architecture must not require upgrading Transformers to continue exporting an older, already supported architecture. `Model.resolve_model_loader` keeps the ordered architecture-to-class-name registry, and `Model.resolve_transformers_class` accesses only the selected class through the package's lazy attributes, without local Transformers imports. Architecture-specific weight loaders use the same resolver. A missing selected class raises an `ImportError` naming the class and installed Transformers version with upgrade guidance; it never silently falls back to a different loader. Dependency import failures propagate without being rewritten as missing-class errors.
+
+Layer-limited Hugging Face loading uses a local configuration read through `AutoConfig`, not a persistent duplicate builder configuration. Composite architectures need their nested `text_config.num_hidden_layers` and `text_config.layer_types` limited together before weight loading; a top-level `num_hidden_layers` keyword alone does not configure the nested decoder. The MTP weight loader retains only its one-layer configuration, following the existing MTP loading contract.
+
 Classes are the main abstraction within the model builder. Information that is specific to a particular model architecture is stored within the model architecture's class. Class inheritance is used to re-use existing code and reduce the time it takes to support a new model architecture. It also allows for any functions in the `Model` class to be overwritten as needed. Any changes in the `Model` class that add or modify support for optimization or quantization will benefit all models without any additional effort to support per model.
 
+The Qwen3.5 builders live in `builders/qwen3_5/`: `text.py` owns dense and MoE decoders, `mtp.py` owns their prediction heads, and `model.py` composes the decoder with optional MTP or block drafters. The package and `builders/qwen.py` preserve the existing public class imports, following the component separation in `builders/qwen3_8/`.
+
 When adding support for a new model architecture, it is preferred to make changes in the `Model` class when possible. This allows the functions in `Model` to become more generic to multiple model architectures. An example of this is the changes made to support the `GemmaModel` class. If the changes are large or the model architecture is different than the currently supported options, it is easier to override or create new `Make` functions in the new model architecture's class. Examples of this include the changes made to support the `MistralModel` and `PhiModel` classes.
+
+`Model` directly owns shared graph initialization, paged-attention emitters, cache layouts, input/output setup, and serialization. Each model inherits this infrastructure rather than constructing an independent graph through ONNX helper or IR APIs. Standard-op decompositions remain in `builders/expansions/standard.py` and replace the relevant builder methods directly. Emit graph components and their bindings during construction; do not implement export features through post-export graph modification or standalone graph-splitting scripts.
 
 ### `Attrs` Dictionaries
 

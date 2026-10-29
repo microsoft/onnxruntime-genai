@@ -35,7 +35,7 @@ extern "C" {
 
 /** \addtogroup Global
  * ONNX Runtime Generative AI C API
- * This API is not thread safe.
+ * This API is not thread safe unless a function explicitly documents otherwise.
  * @{
  */
 
@@ -87,6 +87,35 @@ typedef struct OgaRequestOptions OgaRequestOptions;
 typedef struct OgaTurnOptions OgaTurnOptions;
 typedef struct OgaTurnUsage OgaTurnUsage;
 typedef struct OgaStreamingProcessor OgaStreamingProcessor;
+typedef struct OgaTokenPostProcessor OgaTokenPostProcessor;
+typedef struct OgaTokenPostProcessorResult OgaTokenPostProcessorResult;
+typedef struct OgaTokenPostProcessorTimestampResult OgaTokenPostProcessorTimestampResult;
+typedef struct OgaTokenPostProcessorTimestampRecord OgaTokenPostProcessorTimestampRecord;
+
+typedef enum OgaTimestampRecordKind {
+  OgaTimestampRecordKind_Words,
+  OgaTimestampRecordKind_Segments
+} OgaTimestampRecordKind;
+
+/** Configuration and tokenizer come from the generator's model.
+ * The generator must outlive the processor. Results are borrowed until its next mutation. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateTokenPostProcessor(const OgaGenerator* generator, OgaTokenPostProcessor** out);
+OGA_EXPORT void OGA_API_CALL OgaDestroyTokenPostProcessor(OgaTokenPostProcessor* processor);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenPostProcessorProcessNextTokens(OgaTokenPostProcessor* processor);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenPostProcessorFinalize(OgaTokenPostProcessor* processor);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenPostProcessorReset(OgaTokenPostProcessor* processor);
+OGA_EXPORT size_t OGA_API_CALL OgaTokenPostProcessorGetResultCount(const OgaTokenPostProcessor* processor);
+OGA_EXPORT const OgaTokenPostProcessorResult* OGA_API_CALL OgaTokenPostProcessorGetResult(const OgaTokenPostProcessor* processor, size_t index);
+OGA_EXPORT const char* OGA_API_CALL OgaTokenPostProcessorResultGetText(const OgaTokenPostProcessorResult* result);
+OGA_EXPORT const OgaTokenPostProcessorTimestampResult* OGA_API_CALL OgaTokenPostProcessorResultGetTimestampResult(const OgaTokenPostProcessorResult* result);
+OGA_EXPORT size_t OGA_API_CALL OgaTokenPostProcessorTimestampResultGetWordCount(const OgaTokenPostProcessorTimestampResult* timestamps);
+OGA_EXPORT size_t OGA_API_CALL OgaTokenPostProcessorTimestampResultGetSegmentCount(const OgaTokenPostProcessorTimestampResult* timestamps);
+OGA_EXPORT const OgaTokenPostProcessorTimestampRecord* OGA_API_CALL OgaTokenPostProcessorTimestampResultGetTimestampRecord(const OgaTokenPostProcessorTimestampResult* timestamps, OgaTimestampRecordKind kind, size_t index);
+OGA_EXPORT const char* OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetText(const OgaTokenPostProcessorTimestampRecord* record);
+OGA_EXPORT int64_t OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStartFrame(const OgaTokenPostProcessorTimestampRecord* record);
+OGA_EXPORT int64_t OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStopFrame(const OgaTokenPostProcessorTimestampRecord* record);
+OGA_EXPORT double OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStartTime(const OgaTokenPostProcessorTimestampRecord* record);
+OGA_EXPORT double OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStopTime(const OgaTokenPostProcessorTimestampRecord* record);
 
 /**
  * \brief Reason why an Engine Request's generation turn stopped.
@@ -311,6 +340,28 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRuntimeSettingsSetHandle(OgaRuntimeSetting
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateConfig(const char* config_path, OgaConfig** out);
 
 /**
+ * Creates a memory-backed config without reading genai_config.json from disk.
+ * Config bytes are parsed immediately;
+ * model graph and external initializer buffers must remain unchanged and alive
+ * until the model and its sessions are destroyed. Missing registered assets are
+ * errors. Callers must deny filesystem access to enforce a sandbox boundary; external initializers
+ * in subgraphs and non-text processors are not supported by this initial API.
+ * This API initially covers flat CPU text and translation models with external
+ * initializer data. Other execution providers, subgraphs, model packages,
+ * processors and adapters are outside this contract. File-backed shared
+ * initializer descriptors and custom-ops library paths are rejected.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateConfigFromBuffer(const char* config_json,
+                                                             size_t config_json_length,
+                                                             OgaConfig** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigAddExternalInitializerData(
+    OgaConfig* config, const char* filename, const void* data, size_t length);
+// Tokenizer JSON is copied and retained by models/tokenizers using this config.
+OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigSetTokenizerData(
+    OgaConfig* config, const char* config_json, size_t config_length,
+    const char* tokenizer_json, size_t tokenizer_length);
+
+/**
  * \brief Creates an OgaConfig from a model package directory, using the supplied execution
  *        provider to select a variant.
  *
@@ -364,10 +415,12 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigSetProviderOption(OgaConfig* config,
  * If using session options such as `session.use_ort_model_bytes_directly`, the model data must remain valid
  * until the OgaModel is destroyed, as the model data will be used directly by the Ort::Session.
  * Please see the relevant ONNX Runtime documentation for more details on this option.
+ * For configs created with OgaCreateConfigFromBuffer, graph buffers must remain valid until
+ * the model and all its sessions are destroyed, including recreated pipeline sessions.
  *
  * \param[in] config The config to add the model data to.
  * \param[in] model_filename The name of the model file as defined in the config.
- * \param[in] model_data The model data to add. The data is expected to be valid at least until the model is created.
+ * \param[in] model_data The model data to add, with the lifetime requirements described above.
  * \param[in] model_data_length The length of the model data.
  * \return OgaResult containing the error message if the addition of the model data failed.
  */
@@ -863,6 +916,16 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyMultiModalProcessor(OgaMultiModalProcesso
  *
  * Supported options:
  *
+ * - `literal`
+ *   - Purpose: Encodes text without interpreting registered added/special token
+ *     strings or inserting automatic control tokens. Applies to single and batch
+ *     encoding, including processor calls using this tokenizer.
+ *   - Values: `"true"` / `"false"` or `"1"` / `"0"`.
+ *   - Default: `"false"`, preserving existing encoding behavior.
+ *   - When enabled, overrides automatic insertion from `add_special_tokens`
+ *     without changing that option. Returns an error for invalid UTF-8 or text
+ *     requiring added/special IDs or unknown-token fallbacks.
+ *
  * - `add_special_tokens`
  *   - Purpose: Controls whether to add special tokens (e.g., BOS/EOS) during tokenization.
  *   - Values: `"true"` / `"false"` or `"1"` / `"0"`.
@@ -880,6 +943,8 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyMultiModalProcessor(OgaMultiModalProcesso
  *
  * Future tokenizer options may be added without changing this API signature.
  * Passing unknown keys will result in an error.
+ * Option updates must not overlap with encoding or other tokenizer operations.
+ * Use separate tokenizer instances when concurrent callers need different modes.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaUpdateTokenizerOptions(
     OgaTokenizer* tokenizer,
@@ -947,11 +1012,23 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetEorTokenId(const OgaTokenizer*
 /**
  * Encodes a single string and adds the encoded sequence of tokens to the OgaSequences. The OgaSequences must be freed with OgaDestroySequences
  * when it is no longer needed.
+ *
+ * Uses the tokenizer's `literal` option. Successful calls append one sequence,
+ * including an empty sequence for empty literal input. Errors leave the output
+ * sequences unchanged. Input strings must be null-terminated UTF-8.
+ *
+ * Thread safety: OgaTokenizerEncode calls may run concurrently on the same
+ * tokenizer with fixed options. Each concurrent call must use a distinct
+ * OgaSequences output, which must not be accessed or destroyed until that call
+ * completes. Keep the tokenizer alive until all encoding calls finish.
+ * Do not update tokenizer options or run other operations on that tokenizer
+ * while encoding calls are in progress.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer*, const char* str, OgaSequences* sequences);
 
 /**
  * Batch encode an array of strings and return a single tensor output
+ * using the tokenizer's `literal` option. Padding retains the model's pad token ID.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerEncodeBatch(const OgaTokenizer*, const char** strings, size_t count, OgaTensor** out);
 
@@ -1059,6 +1136,8 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyTokenizerStream(OgaTokenizerStream*);
  * 'out' is valid until the next call to OgaTokenizerStreamDecode or when the OgaTokenizerStream is destroyed
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamDecode(OgaTokenizerStream*, int32_t token, const char** out);
+
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamReset(OgaTokenizerStream*);
 
 /** Create an OgaTensor from an optional user owned buffer. If a user owned buffer is supplied, the OgaTensor does
  * not own the memory (as it has no way to free it) so the 'data' parameter must be valid for the lifetime of the OgaTensor.
@@ -1209,6 +1288,9 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaUnloadAdapter(OgaAdapters* adapters, const
 
 /**
  * \brief Sets the adapter with the given adapter name as active for the given OgaGenerator object.
+ * Activations are additive. With graph capture, each active adapter set uses its own capture identity.
+ * Activating an adapter does not recompute an existing KV cache; rewind to zero and append the prompt
+ * again if the adapter should also apply to the earlier tokens.
  * \param[in] generator The OgaGenerator object to set the active adapter.
  * \param[in] adapters The OgaAdapters object that manages the model adapters.
  * \param[in] adapter_name The name of the adapter to set as active.
@@ -1530,12 +1612,27 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetStopStrings(
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetGuidance(
     OgaTurnOptions* options, const char* guidance_type,
     const char* guidance_data);
-/** \brief Removes the configured grammar, so the Turn is unguided. */
+/** \brief Removes either whole-turn or delimited guidance, so the Turn is unguided. */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsClearGuidance(
     OgaTurnOptions* options);
 /** \brief Restores every Turn option to its unset state. */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsReset(
     OgaTurnOptions* options);
+/**
+ * \brief Sets marker-delimited Lark guidance for this Turn.
+ *
+ * Copies grammar immediately. opening_token and closing_token must be distinct nonnegative token
+ * IDs; grammar must be nonempty. The grammar describes only the body after the committed opening
+ * token and before the closing token. Outside that region generation is unguided. Marker IDs and
+ * grammar are validated against the model when the Turn is admitted, before Request mutation.
+ * An invalid setter call leaves the previous options unchanged. This mode and whole-turn guidance
+ * are mutually exclusive: call OgaTurnOptionsClearGuidance (or OgaTurnOptionsReset) before
+ * switching modes. The Engine must use dynamic batching. ClearGuidance and Reset both remove
+ * this configuration.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetDelimitedGuidance(
+    OgaTurnOptions* options, int32_t opening_token,
+    int32_t closing_token, const char* grammar);
 
 /** \brief Begins a Turn, copying input and supported options before return. */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestBeginTurn(

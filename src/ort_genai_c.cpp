@@ -20,6 +20,7 @@
 #include "engine/engine.h"
 #include "stop_string_matcher.h"
 #include "models/preprocessing/genai_tokenizer.h"
+#include "models/preprocessing/token_post_processor.h"
 #include "models/preprocessing/multi_modal_processor.h"
 #include "models/preprocessing/processor.h"
 #include "models/preprocessing/streaming_processor.h"
@@ -108,6 +109,10 @@ struct OgaStringArray : std::vector<std::string>, OgaAbstract {};
 struct OgaTensor : Generators::Tensor, OgaAbstract {};
 struct OgaTokenizer : Generators::Tokenizer, OgaAbstract {};
 struct OgaTokenizerStream : Generators::TokenizerStream, OgaAbstract {};
+struct OgaTokenPostProcessor : Generators::TokenPostProcessor, OgaAbstract {};
+struct OgaTokenPostProcessorResult : Generators::PostProcessorResult, OgaAbstract {};
+struct OgaTokenPostProcessorTimestampResult : Generators::TimestampResult, OgaAbstract {};
+struct OgaTokenPostProcessorTimestampRecord : Generators::TimestampRecord, OgaAbstract {};
 struct OgaEngine : Generators::Engine, OgaAbstract {};
 struct OgaEngineCapabilities : Generators::EngineCapabilities, OgaAbstract {};
 struct OgaEngineEvent : Generators::EngineEvent, OgaAbstract {};
@@ -140,7 +145,36 @@ T* ReturnUnique(std::unique_ptr<U> p) {
   return static_cast<T*>(p.release());
 }
 
+#define OGA_TRY try {
+#define OGA_CATCH                                                                   \
+  }                                                                                 \
+  catch (const std::exception& e) {                                                 \
+    return ReturnUnique<OgaResult>(std::make_unique<Generators::Result>(e.what())); \
+  }
+
 namespace {
+
+OgaResult* OgaGenerator_GetInputOutput(const OgaGenerator* oga_generator, const char* name, bool is_input, OgaTensor** out) {
+  OGA_TRY
+  auto& generator = *reinterpret_cast<const Generators::Generator*>(oga_generator);
+  auto* ortvalue = is_input ? generator.state_->GetInput(name) : generator.state_->GetOutput(name);
+  if (ortvalue == nullptr)
+    throw std::runtime_error(std::string("Generator ") + (is_input ? "input '" : "output '") + name + "' was not found.");
+
+  auto type_info = ortvalue->GetTensorTypeAndShapeInfo();
+  auto ortvalue_clone = OrtValue::CreateTensor(generator.model_->allocator_cpu_, type_info->GetShape(), type_info->GetElementType());
+
+  // Copy data to ortvalue_clone
+  bool is_cpu = ortvalue->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_CPU;
+  auto tensor_span = Generators::ByteWrapTensor(is_cpu ? *Generators::GetDeviceInterface(Generators::DeviceType::CPU) : *generator.model_->p_device_, *ortvalue);
+  auto copy_span = Generators::ByteWrapTensor(*Generators::GetDeviceInterface(Generators::DeviceType::CPU), *ortvalue_clone);
+  copy_span.CopyFrom(tensor_span);
+
+  auto tensor = std::make_shared<Generators::Tensor>(std::move(ortvalue_clone));
+  *out = ReturnShared<OgaTensor>(tensor);
+  return nullptr;
+  OGA_CATCH
+}
 
 OgaFinishReason ToCFinishReason(
     Generators::GenerationFinishReason finish_reason) {
@@ -171,13 +205,6 @@ static_assert(sizeof(OgaErrorCode) == sizeof(uint32_t));
 }  // namespace
 
 extern "C" {
-
-#define OGA_TRY try {
-#define OGA_CATCH                                                                   \
-  }                                                                                 \
-  catch (const std::exception& e) {                                                 \
-    return ReturnUnique<OgaResult>(std::make_unique<Generators::Result>(e.what())); \
-  }
 
 void OGA_API_CALL OgaShutdown() {
   if (!Generators::GenAiTelemetry::IsDestroyed()) {
@@ -339,6 +366,63 @@ OgaResult* OGA_API_CALL OgaCreateConfig(const char* config_path, OgaConfig** out
   OGA_TRY
   auto config = Generators::CreateConfig(Generators::GetOrtEnv(), config_path);
   *out = ReturnUnique<OgaConfig>(std::move(config));
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaCreateConfigFromBuffer(const char* config_json,
+                                                  size_t config_json_length,
+                                                  OgaConfig** out) {
+  OGA_TRY
+  if (!out) {
+    throw std::invalid_argument("Expected config JSON bytes and an output pointer.");
+  }
+  *out = nullptr;
+  if (!config_json || config_json_length == 0) {
+    throw std::invalid_argument("Expected config JSON bytes and an output pointer.");
+  }
+  auto config = std::make_unique<Generators::Config>(
+      fs::path{"."}, std::string_view{},
+      std::string_view{config_json, config_json_length});
+  *out = ReturnUnique<OgaConfig>(std::move(config));
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaConfigAddExternalInitializerData(
+    OgaConfig* config, const char* filename, const void* data, size_t length) {
+  OGA_TRY
+  if (!config || !config->memory_assets_only_ || !filename || !data || length == 0) {
+    throw std::invalid_argument("Expected external initializer bytes and a memory-only config.");
+  }
+  const std::string name{filename};
+  if (name.empty() || name == "." || name == ".." ||
+      name.find_first_of("/\\:") != std::string::npos) {
+    throw std::invalid_argument("External initializer name must be a flat relative asset name.");
+  }
+  if (!config->external_data_spans_
+           .emplace(name, std::span<const std::byte>{
+                              static_cast<const std::byte*>(data), length})
+           .second) {
+    throw std::invalid_argument("Duplicate external initializer asset: " + name);
+  }
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaConfigSetTokenizerData(
+    OgaConfig* config, const char* config_json, size_t config_length,
+    const char* tokenizer_json, size_t tokenizer_length) {
+  OGA_TRY
+  if (!config || !config->memory_assets_only_ || !config_json || !tokenizer_json ||
+      config_length == 0 || tokenizer_length == 0) {
+    throw std::invalid_argument("Expected tokenizer JSON bytes and a memory-only config.");
+  }
+  config->tokenizer_memory_data_ =
+      std::make_shared<const Generators::TokenizerMemoryData>(
+          Generators::TokenizerMemoryData{
+              std::string{config_json, config_length},
+              std::string{tokenizer_json, tokenizer_length}});
   return nullptr;
   OGA_CATCH
 }
@@ -736,41 +820,6 @@ OgaResult* OGA_API_CALL OgaGenerator_SetRuntimeOption(OgaGenerator* generator, c
   OGA_CATCH
 }
 
-namespace {
-
-/**
- * \brief Returns a copy of the model output identified by the given name as an OgaTensor on CPU. The buffer is owned by returned OgaTensor
- *       and will be released when the OgaTensor is destroyed
- * \param[in] oga_generator The generator to run the GetInput or GetOutput method on the name provided and the out pointer to store the output.
- * \param[in] name The name of the tensor.
- * \param[in] is_input Whether the tensor name is for an input or not.
- * \param[out] out The returned OgaTensor.
- * \return OgaResult containing the error message if the computation failed.
- */
-OgaResult* OGA_API_CALL OgaGenerator_GetInputOutput(const OgaGenerator* oga_generator, const char* name, bool is_input, OgaTensor** out) {
-  OGA_TRY
-  auto& generator = *reinterpret_cast<const Generators::Generator*>(oga_generator);
-  auto* ortvalue = is_input ? generator.state_->GetInput(name) : generator.state_->GetOutput(name);
-  if (ortvalue == nullptr)
-    throw std::runtime_error(std::string("Generator ") + (is_input ? "input '" : "output '") + name + "' was not found.");
-
-  auto type_info = ortvalue->GetTensorTypeAndShapeInfo();
-  auto ortvalue_clone = OrtValue::CreateTensor(generator.model_->allocator_cpu_, type_info->GetShape(), type_info->GetElementType());
-
-  // Copy data to ortvalue_clone
-  bool is_cpu = ortvalue->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_CPU;
-  auto tensor_span = Generators::ByteWrapTensor(is_cpu ? *Generators::GetDeviceInterface(Generators::DeviceType::CPU) : *generator.model_->p_device_, *ortvalue);
-  auto copy_span = Generators::ByteWrapTensor(*Generators::GetDeviceInterface(Generators::DeviceType::CPU), *ortvalue_clone);
-  copy_span.CopyFrom(tensor_span);
-
-  auto tensor = std::make_shared<Generators::Tensor>(std::move(ortvalue_clone));
-  *out = ReturnShared<OgaTensor>(tensor);
-  return nullptr;
-  OGA_CATCH
-}
-
-}  // namespace
-
 OgaResult* OGA_API_CALL OgaGenerator_GetInput(const OgaGenerator* generator, const char* name, OgaTensor** out) {
   return OgaGenerator_GetInputOutput(generator, name, true, out);
 }
@@ -1132,6 +1181,8 @@ OgaResult* OGA_API_CALL OgaTokenizerGetEorTokenId(const OgaTokenizer* tokenizer,
 
 OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer* tokenizer, const char* str, OgaSequences* sequences) {
   OGA_TRY
+  if (!tokenizer || !str || !sequences)
+    throw std::invalid_argument("tokenizer, text, and sequences must not be null.");
   sequences->emplace_back(tokenizer->Encode(str));
   return nullptr;
   OGA_CATCH
@@ -1193,6 +1244,75 @@ OgaResult* OGA_API_CALL OgaCreateTokenizerStream(const OgaTokenizer* p, OgaToken
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaCreateTokenPostProcessor(const OgaGenerator* generator, OgaTokenPostProcessor** out) {
+  OGA_TRY
+  if (!generator || !out) throw std::invalid_argument("Postprocessor arguments must not be null");
+  *out = ReturnUnique<OgaTokenPostProcessor>(std::make_unique<Generators::TokenPostProcessor>(*generator));
+  return nullptr;
+  OGA_CATCH
+}
+
+void OGA_API_CALL OgaDestroyTokenPostProcessor(OgaTokenPostProcessor* processor) {
+  delete static_cast<Generators::TokenPostProcessor*>(processor);
+}
+
+OgaResult* OGA_API_CALL OgaTokenPostProcessorProcessNextTokens(OgaTokenPostProcessor* processor) {
+  OGA_TRY
+  if (!processor) throw std::invalid_argument("Postprocessor must not be null");
+  processor->ProcessNextTokens();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTokenPostProcessorFinalize(OgaTokenPostProcessor* processor) {
+  OGA_TRY
+  if (!processor) throw std::invalid_argument("Postprocessor must not be null");
+  processor->Finalize();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTokenPostProcessorReset(OgaTokenPostProcessor* processor) {
+  OGA_TRY
+  if (!processor) throw std::invalid_argument("Postprocessor must not be null");
+  processor->Reset();
+  return nullptr;
+  OGA_CATCH
+}
+
+size_t OGA_API_CALL OgaTokenPostProcessorGetResultCount(const OgaTokenPostProcessor* processor) {
+  return processor ? processor->GetNextTokenResults().size() : 0;
+}
+
+const OgaTokenPostProcessorResult* OGA_API_CALL OgaTokenPostProcessorGetResult(const OgaTokenPostProcessor* processor, size_t index) {
+  if (!processor || index >= processor->GetNextTokenResults().size()) return nullptr;
+  return static_cast<const OgaTokenPostProcessorResult*>(&processor->GetNextTokenResults()[index]);
+}
+
+const char* OGA_API_CALL OgaTokenPostProcessorResultGetText(const OgaTokenPostProcessorResult* result) { return result ? result->text.c_str() : nullptr; }
+const OgaTokenPostProcessorTimestampResult* OGA_API_CALL OgaTokenPostProcessorResultGetTimestampResult(const OgaTokenPostProcessorResult* result) {
+  if (!result || !result->timestamps) return nullptr;
+  return static_cast<const OgaTokenPostProcessorTimestampResult*>(&*result->timestamps);
+}
+size_t OGA_API_CALL OgaTokenPostProcessorTimestampResultGetWordCount(const OgaTokenPostProcessorTimestampResult* timestamps) { return timestamps ? timestamps->words.size() : 0; }
+size_t OGA_API_CALL OgaTokenPostProcessorTimestampResultGetSegmentCount(const OgaTokenPostProcessorTimestampResult* timestamps) { return timestamps ? timestamps->segments.size() : 0; }
+const OgaTokenPostProcessorTimestampRecord* OGA_API_CALL OgaTokenPostProcessorTimestampResultGetTimestampRecord(const OgaTokenPostProcessorTimestampResult* timestamps, OgaTimestampRecordKind kind, size_t index) {
+  if (!timestamps) return nullptr;
+  switch (kind) {
+    case OgaTimestampRecordKind_Words:
+      return index < timestamps->words.size() ? static_cast<const OgaTokenPostProcessorTimestampRecord*>(&timestamps->words[index]) : nullptr;
+    case OgaTimestampRecordKind_Segments:
+      return index < timestamps->segments.size() ? static_cast<const OgaTokenPostProcessorTimestampRecord*>(&timestamps->segments[index]) : nullptr;
+    default:
+      return nullptr;
+  }
+}
+const char* OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetText(const OgaTokenPostProcessorTimestampRecord* record) { return record ? record->text.c_str() : nullptr; }
+int64_t OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStartFrame(const OgaTokenPostProcessorTimestampRecord* record) { return record ? record->frame_interval.first : 0; }
+int64_t OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStopFrame(const OgaTokenPostProcessorTimestampRecord* record) { return record ? record->frame_interval.second : 0; }
+double OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStartTime(const OgaTokenPostProcessorTimestampRecord* record) { return record ? record->time_interval.first : 0; }
+double OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStopTime(const OgaTokenPostProcessorTimestampRecord* record) { return record ? record->time_interval.second : 0; }
+
 OgaResult* OGA_API_CALL OgaCreateTokenizerStreamFromProcessor(const OgaMultiModalProcessor* p, OgaTokenizerStream** out) {
   OGA_TRY
   *out = ReturnUnique<OgaTokenizerStream>(p->tokenizer_->CreateStream());
@@ -1203,6 +1323,13 @@ OgaResult* OGA_API_CALL OgaCreateTokenizerStreamFromProcessor(const OgaMultiModa
 OgaResult* OGA_API_CALL OgaTokenizerStreamDecode(OgaTokenizerStream* p, int32_t token, const char** out) {
   OGA_TRY
   *out = p->Decode(token).c_str();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTokenizerStreamReset(OgaTokenizerStream* stream) {
+  OGA_TRY
+  stream->Reset();
   return nullptr;
   OGA_CATCH
 }
@@ -1998,8 +2125,46 @@ OgaResult* OgaTurnOptionsSetGuidance(
         "guidance_type and guidance_data must both be non-empty. Use "
         "OgaTurnOptionsClearGuidance for an unguided turn.");
   }
+  if (options->delimited_guidance) {
+    throw std::runtime_error(
+        "Whole-turn guidance conflicts with delimited guidance. Use "
+        "OgaTurnOptionsClearGuidance before changing guidance modes.");
+  }
   options->guidance_type = guidance_type;
   options->guidance_data = guidance_data;
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaTurnOptionsSetDelimitedGuidance(
+    OgaTurnOptions* options, int32_t opening_token,
+    int32_t closing_token, const char* grammar) {
+  OGA_TRY
+  if (!options) {
+    throw std::runtime_error("options must not be null.");
+  }
+  if (!grammar) {
+    throw std::runtime_error("grammar must not be null.");
+  }
+  options->ValidateOwnerThread();
+  if (opening_token < 0 || closing_token < 0 || opening_token == closing_token) {
+    throw std::runtime_error(
+        "opening_token and closing_token must be distinct nonnegative token IDs.");
+  }
+  if (!Generators::ValidateGuidanceRequest("lark_grammar", grammar)) {
+    throw std::runtime_error("grammar must not be empty.");
+  }
+  if (!options->guidance_type.empty() || !options->guidance_data.empty()) {
+    throw std::runtime_error(
+        "Delimited guidance conflicts with whole-turn guidance. Use "
+        "OgaTurnOptionsClearGuidance before changing guidance modes.");
+  }
+
+  // Allocate before replacing the old value so an invalid or failed update is atomic.
+  std::optional<Generators::TurnOptions::DelimitedGuidance> next{
+      Generators::TurnOptions::DelimitedGuidance{
+          opening_token, closing_token, grammar}};
+  options->delimited_guidance.swap(next);
   return nullptr;
   OGA_CATCH
 }
@@ -2012,6 +2177,7 @@ OgaResult* OgaTurnOptionsClearGuidance(OgaTurnOptions* options) {
   options->ValidateOwnerThread();
   options->guidance_type.clear();
   options->guidance_data.clear();
+  options->delimited_guidance.reset();
   return nullptr;
   OGA_CATCH
 }

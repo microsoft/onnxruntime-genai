@@ -8,6 +8,10 @@ that best matches the local hardware at load time. Files that are common across 
 such as tokenizer or processor configuration, can live in a sibling directory and be
 referenced from each variant's configuration with a path scheme.
 
+Model package support requires building against ONNX Runtime 1.31 or newer and
+loading a runtime that exposes the stable `OrtModelPackageApi`. Builds using older
+ONNX Runtime headers continue to support flat model directories.
+
 ## Package layout
 
 A model package is a directory containing a top-level `manifest.json`. The package owns a
@@ -191,8 +195,8 @@ auto model_ov = OgaModel::Create(*config);
 
 ## Runtime profiles
 
-The selected variant's `genai_config.json` may contain typed runtime profiles for CUDA GPU memory
-classes. Base `engine.dynamic_batching` values must remain safe for the minimum supported device;
+The selected variant's `genai_config.json` may contain typed runtime profiles for CUDA devices.
+Base `engine.dynamic_batching` values must remain safe for the minimum supported device;
 profiles are optional tuning upgrades applied once during Model creation, after provider/device
 resolution and before Engine allocation.
 
@@ -216,7 +220,9 @@ GPU's memory while loading its graph on another GPU.
       "id": "24gib-to-32gib",
       "eligibility": {
         "minimum_total_device_memory_bytes": 25769803776,
-        "maximum_total_device_memory_bytes": 34359738368
+        "maximum_total_device_memory_bytes": 34359738368,
+        "minimum_free_device_memory_bytes": 8589934592,
+        "maximum_free_device_memory_bytes": 21474836480
       },
       "overlay": {
         "model": {
@@ -243,16 +249,39 @@ GPU's memory while loading its graph on another GPU.
 }
 ```
 
-Profile IDs must be non-empty and unique. Every profile requires a minimum total-memory value;
-the maximum is optional and inclusive. Ranges must be valid and non-overlapping. Zero matches uses
-the base settings. `overlay` is typed and may contain any subset of these fields:
+Profile IDs must be non-empty and unique. Every profile requires a minimum total-memory value
+(`0` is valid); `maximum_total_device_memory_bytes` is optional and inclusive. Optional
+`minimum_free_device_memory_bytes` and `maximum_free_device_memory_bytes` set inclusive bounds
+on CUDA-reported free device memory; either bound may be omitted. The optional
+`eligibility.is_integrated` boolean matches a GPU integrated with host memory when true, or a
+discrete GPU when false. Omitting it matches either. Eligibility fields are combined with AND;
+future typed conditions extend the same object. Profiles may share a total-memory range when
+their free-memory ranges or explicit integrated/discrete conditions cannot match the same device.
+Free memory cannot exceed total memory, so a free-memory minimum above the total-memory maximum
+is invalid. A profile with no free-memory bounds or integrated condition matches either value
+and must not overlap another reachable profile. No match uses the base settings. For example,
+two profiles may share the same memory range with
+`"eligibility":{"minimum_total_device_memory_bytes":0,"is_integrated":true}` and
+`"eligibility":{"minimum_total_device_memory_bytes":0,"is_integrated":false}`.
+`overlay` is typed and may contain any subset of these fields:
 
 - `model.decoder.filename`
 - `engine.dynamic_batching.num_blocks`
 - `engine.dynamic_batching.max_batch_size`
 - `engine.dynamic_batching.max_scheduled_tokens`
+- `engine.dynamic_batching.dflash2_max_snapshots`
 - `search.chunk_size`
 - `speculative.max_draft_tokens`
+
+`dflash2_max_snapshots` defaults to `1`, accepts integers from `0` through
+`2147483647`, and uses `0` to disable windowed DFlash 2 prefix snapshots without
+disabling target prefix caching. The effective count is limited by the shared
+cache memory budget and target fixed-state checkpoint capacity (`max_batch_size`);
+it is not a guaranteed allocation. The selected runtime profile overrides the
+base configuration, including an explicit `0` opt-out. The Engine uses the
+resolved GenAI configuration when allocating its snapshot pool.
+See [Engine prefix caching](paged_attention_engine.md)
+for snapshot capture, lease protection, and replacement behavior.
 
 Omitted fields retain their base values. Every other config field is rejected from a runtime
 profile overlay. In particular, profiles cannot override `search.max_length`; applications set
@@ -265,11 +294,18 @@ cache and model context. A caller may explicitly choose a `max_session_tokens` v
 default but not above that capability when it is nonzero. A zero capability means the cache-backed
 ceiling is unavailable and preserves the `search.max_length` default and ceiling.
 
-Selection uses total device memory from the primary CUDA interface selected by the normal provider
-append path. The query intentionally uses the existing device-ID-agnostic interface for the current
-single-discrete-GPU scope. Distinguishing CUDA device ordinals on heterogeneous multi-GPU machines
-is deferred to a future interface change. Actual model and Engine allocation remains the
-authoritative fit check; profiles do not add a separate free-memory gate.
+Selection uses CUDA-reported total and free device memory from the primary CUDA interface selected
+by the normal provider append path, and queries integrated status only if a profile requires it.
+If that capability cannot be queried, the base settings are used with a warning; existing
+memory-only profiles do not need the new query. Device ordinal selection remains restricted to
+visible CUDA device 0. Free device memory is sampled once during Model creation, before Engine
+allocation; it may change after selection and does not represent free OS memory on a shared
+CPU/GPU memory pool. `is_integrated` identifies memory topology, not safe capacity. Authors must
+choose conservative blocks and verify peak OS-memory headroom on the target hardware. Actual
+model and Engine allocation remains the authoritative fit check, not the free-memory threshold.
+When GenAI logging is enabled, Model creation reports the chosen profile (or base configuration)
+and the total/free device memory and integrated status used for selection. An unknown free-memory
+value does not match a profile with free-memory bounds.
 
 ## Authoring notes
 

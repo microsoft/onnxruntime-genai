@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import sys
 import types
@@ -14,17 +13,15 @@ import onnx_ir as ir
 import onnxruntime as ort
 import pytest
 import torch
+from _builder_test_utils import load_builder_module
+from transformers import LlamaConfig
 
 BUILDERS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "builders"
 sys.path.insert(0, str(BUILDERS_DIR.parent))
 
 
 def _load_builder_module(module_name):
-    spec = importlib.util.spec_from_file_location(f"models.builders.{module_name}", BUILDERS_DIR / f"{module_name}.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[f"models.builders.{module_name}"] = module
-    spec.loader.exec_module(module)
-    return module
+    return load_builder_module(module_name)
 
 
 sys.modules.setdefault("models", types.ModuleType("models"))
@@ -38,6 +35,121 @@ Qwen25VLTextModel = qwen_module.Qwen25VLTextModel
 Qwen3VLTextModel = qwen_module.Qwen3VLTextModel
 Qwen35TextModel = qwen_module.Qwen35TextModel
 Qwen35MoETextModel = qwen_module.Qwen35MoETextModel
+
+
+def test_base_mlp_fusion_is_automatic():
+    config = LlamaConfig(
+        hidden_size=8,
+        intermediate_size=16,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        vocab_size=32,
+        max_position_embeddings=128,
+        architectures=["LlamaForCausalLM"],
+    )
+
+    model = Model(config, ir.DataType.FLOAT, ir.DataType.FLOAT, "cpu", "", {})
+
+    assert "fuse_gate_up" not in model.mlp_attrs
+
+
+def test_default_mlp_fusion_executes_without_extra_options():
+    config = LlamaConfig(
+        hidden_size=8,
+        intermediate_size=16,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        vocab_size=32,
+        max_position_embeddings=128,
+        architectures=["LlamaForCausalLM"],
+    )
+    model = Model(config, ir.DataType.FLOAT, ir.DataType.FLOAT, "cpu", "", {})
+    model.model.graph.inputs.append(model.make_value("hidden", ir.DataType.FLOAT, [1, 3, 8]))
+    generator = torch.Generator().manual_seed(42)
+    mlp = types.SimpleNamespace(
+        gate_proj=types.SimpleNamespace(weight=torch.randn(16, 8, generator=generator), bias=None),
+        up_proj=types.SimpleNamespace(weight=torch.randn(16, 8, generator=generator), bias=None),
+        down_proj=types.SimpleNamespace(weight=torch.randn(8, 16, generator=generator), bias=None),
+    )
+    model.make_mlp(0, mlp, "hidden")
+    model.model.graph.outputs.append(model.values[model.mlp_attrs["output_0"]])
+    proto = ir.to_proto(model.model)
+    assert sum(node.op_type == "MatMul" for node in proto.graph.node) == 2
+    assert sum(node.op_type == "Split" for node in proto.graph.node) == 1
+    hidden = torch.randn(1, 3, 8, generator=generator)
+    expected = (
+        torch.nn.functional.silu(hidden @ mlp.gate_proj.weight.T)
+        * (hidden @ mlp.up_proj.weight.T)
+    ) @ mlp.down_proj.weight.T
+    session = ort.InferenceSession(proto.SerializeToString(), providers=["CPUExecutionProvider"])
+    actual = session.run(None, {"hidden": hidden.numpy()})[0]
+    np.testing.assert_allclose(actual, expected.numpy(), rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.parametrize("provider", ["cuda", "cpu", "webgpu", "dml", "trt-rtx"])
+@pytest.mark.parametrize("mode", [0, 1, 2])
+def test_base_weight_packing_uses_explicit_target(monkeypatch, provider, mode):
+    monkeypatch.setattr(torch.version, "hip", None)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 3)
+    queried_devices = []
+
+    def get_capability(device):
+        queried_devices.append(device)
+        raise AssertionError("Export must not inspect the host GPU")
+
+    monkeypatch.setattr(torch.cuda, "get_device_capability", get_capability)
+    source_config = base_module.QuantConfig.from_dict(
+        {"moe": {"weights_prepacked": 1}, "format": {"matmulnbits_weights_prepacked": mode}}
+    )
+    model = Model.__new__(Model)
+    model.ep = provider
+    model.onnx_dtype = ir.DataType.INT4
+    model.extra_options = {"_quant_config": source_config}
+
+    model.make_quant_config_init()
+
+    expected_mode = mode if provider == "cuda" else 0
+    assert queried_devices == []
+    assert model.quant_config.runtime.matmulnbits_weights_prepacked == expected_mode
+    assert model.quant_config.moe.weights_prepacked == int(provider == "cuda")
+    assert source_config.moe.weights_prepacked == 1
+    assert source_config.runtime.matmulnbits_weights_prepacked == mode
+
+
+@pytest.mark.parametrize("available,hip", [(False, None), (True, "6.0")])
+def test_base_weight_packing_requires_nvidia_cuda(monkeypatch, available, hip):
+    monkeypatch.setattr(torch.version, "hip", hip)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: available)
+    model = Model.__new__(Model)
+    model.ep = "cuda"
+    model.quant_config = base_module.QuantConfig.from_dict({})
+
+    model.make_weight_packing_init()
+
+    assert model.quant_config.runtime.matmulnbits_weights_prepacked == 0
+    assert model.quant_config.moe.weights_prepacked == (0 if hip else -1)
+
+
+def test_base_weight_packing_handles_detection_failure(monkeypatch):
+    monkeypatch.setattr(torch.version, "hip", None)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+
+    def fail_capability(device):
+        raise RuntimeError("CUDA driver unavailable")
+
+    monkeypatch.setattr(torch.cuda, "get_device_capability", fail_capability)
+    model = Model.__new__(Model)
+    model.ep = "cuda"
+    model.quant_config = base_module.QuantConfig.from_dict({})
+
+    model.make_weight_packing_init()
+
+    assert model.quant_config.runtime.matmulnbits_weights_prepacked == 0
+    assert model.quant_config.moe.weights_prepacked == -1
 
 
 def test_base_matmul_honors_module_quantization_exclusion(monkeypatch):
@@ -83,8 +195,10 @@ def test_qwen35_moe_loads_moe_transformers_model(monkeypatch):
     class FakeDenseModel(FakeMoEModel):
         pass
 
-    monkeypatch.setattr(base_module, "Qwen3_5MoeForConditionalGeneration", FakeMoEModel)
-    monkeypatch.setattr(base_module, "Qwen3_5ForConditionalGeneration", FakeDenseModel)
+    transformers_stub = types.ModuleType("transformers")
+    transformers_stub.Qwen3_5MoeForConditionalGeneration = FakeMoEModel
+    transformers_stub.Qwen3_5ForConditionalGeneration = FakeDenseModel
+    monkeypatch.setattr(base_module, "transformers", transformers_stub)
 
     model = Qwen35MoETextModel.__new__(Qwen35MoETextModel)
     model.model_type = "qwen3_5_moe_text"
@@ -373,7 +487,6 @@ def test_qwen35_configures_interleaved_partial_mrope(monkeypatch):
     assert model.rope_attrs["mrope_layout"] == 1
     assert model.rope_attrs["rotary_embedding_dim"] == 32
     assert model.rope_attrs["cast"] == {"use_fp32": True, "root_input": True, "output_0": True}
-    assert model.linear_attn_op == "linear_attention"
     assert not model.is_fused_rope_supported()
 
 
@@ -431,6 +544,7 @@ def test_qwen35_genai_config_includes_recurrent_cache_names(monkeypatch, tmp_pat
 
     assert decoder["inputs"]["past_conv_names"] == "past.%d.conv"
     assert decoder["inputs"]["past_recurrent_names"] == "past.%d.recurrent"
+    assert "session.use_device_allocator_for_initializers" not in decoder["session_options"]
     assert decoder["outputs"]["present_conv_names"] == "present.%d.conv"
     assert decoder["outputs"]["present_recurrent_names"] == "present.%d.recurrent"
     assert model_config["bot_token_id"] == 10
@@ -632,6 +746,7 @@ def test_qwen35_attention_output_proj_gates_before_base_projection(
     model.attention_attrs = {
         "op_type": "GroupQueryAttention",
         "gate_path": "gate",
+        "o_path": "/model/layers.3/attn/GroupQueryAttention/output_0",
     }
     calls = []
 
@@ -756,8 +871,8 @@ def test_linear_attention_gate_emitter():
     ]
 
 
-def test_qwen35_linear_attention_uses_fused_gate(monkeypatch):
-    model = Qwen35TextModel.__new__(Qwen35TextModel)
+def test_qwen38_gated_delta_net_expansion_uses_linear_attention_gate(monkeypatch):
+    model = qwen_module.Qwen4ExpTextModel.__new__(qwen_module.Qwen4ExpTextModel)
     model.io_dtype = ir.DataType.FLOAT16
     model.linear_key_dim = 8
     model.linear_value_dim = 16
@@ -783,7 +898,7 @@ def test_qwen35_linear_attention_uses_fused_gate(monkeypatch):
         lambda name, **kwargs: gate_calls.append((name, kwargs)),
     )
 
-    outputs = model.make_linear_attention_normalize_and_gate(
+    outputs = model.make_gated_delta_net_gates_expansion(
         3,
         attention,
         "conv_output",
@@ -800,10 +915,10 @@ def test_qwen35_linear_attention_uses_fused_gate(monkeypatch):
         (
             "/model/layers.3/linear_attn/LinearAttentionGate",
             {
-                "a": "/a_proj/MatMul/output_0",
+                "a": "/a_proj/MatMul",
                 "dt_bias": "model.layers.3.linear_attn.dt_bias",
                 "decay_scale": "model.layers.3.linear_attn.neg_exp_A",
-                "b": "/b_proj/MatMul/output_0",
+                "b": "/b_proj/MatMul",
                 "shape": ["batch_size", "sequence_length", 4],
             },
         )
@@ -851,7 +966,7 @@ def test_qwen35_linear_attention_uses_gated_rms_norm(monkeypatch):
         "/model/layers.4/linear_attn/GatedRMSNorm",
         "linear_output",
         "model.layers.4.linear_attn.norm.weight",
-        "/z_proj/MatMul/output_0",
+        "/z_proj/MatMul",
         ["batch_size", "sequence_length", 2048],
         1e-6,
     )
@@ -935,6 +1050,7 @@ def test_qwen35_moe_combines_shared_expert_with_gated_add(monkeypatch):
 
 def test_qwen35_native_nvfp4_moe_uses_global_scales(monkeypatch):
     model = Qwen35MoETextModel.__new__(Qwen35MoETextModel)
+    model.use_paged_attention = False
     model.hidden_size = 16
     model.moe_attrs = {
         "op_type": "QMoE",
@@ -965,6 +1081,7 @@ def test_qwen35_native_nvfp4_moe_uses_global_scales(monkeypatch):
 
 def test_qwen35_shared_expert_reuses_mlp_builder(monkeypatch):
     model = Qwen35MoETextModel.__new__(Qwen35MoETextModel)
+    model.use_paged_attention = False
     model.io_dtype = ir.DataType.FLOAT16
     model.intermediate_size = 2048
     model.shared_expert_intermediate_size = 512
@@ -996,25 +1113,19 @@ def test_qwen35_shared_expert_reuses_mlp_builder(monkeypatch):
     assert gate == "/model/layers.3/shared_expert_gate/Sigmoid/output_0"
 
 
-def test_qwen35_shared_expert_uses_fused_mlp_builder(monkeypatch):
+def test_qwen35_shared_expert_restores_intermediate_size_after_failure(monkeypatch):
     model = Qwen35MoETextModel.__new__(Qwen35MoETextModel)
+    model.use_paged_attention = False
     model.io_dtype = ir.DataType.FLOAT16
     model.intermediate_size = 2048
     model.shared_expert_intermediate_size = 512
-    model.mlp_attrs = {"fuse_gate_up": True, "output_0": ""}
-    calls = []
+    model.mlp_attrs = {"output_0": ""}
 
-    def make_mlp_proj_fused(layer_id, mlp, root_input):
-        calls.append((layer_id, mlp, root_input, model.intermediate_size))
-        model.mlp_attrs["output_0"] = "shared_output"
+    def make_mlp_proj(*_args):
+        assert model.intermediate_size == 512
+        raise ValueError("invalid projection")
 
-    monkeypatch.setattr(model, "make_mlp_proj_fused", make_mlp_proj_fused)
-    monkeypatch.setattr(model, "make_matmul", lambda *_args: "/shared_expert_gate/MatMul")
-    monkeypatch.setattr(model, "make_sigmoid", lambda *_args, **_kwargs: None)
-
-    shared_expert = object()
-    output, _ = model.make_shared_expert(3, shared_expert, object(), "hidden_states")
-
-    assert calls == [(3, shared_expert, "hidden_states", 512)]
+    monkeypatch.setattr(model, "make_mlp_proj", make_mlp_proj)
+    with pytest.raises(ValueError, match="invalid projection"):
+        model.make_shared_expert(3, object(), object(), "hidden_states")
     assert model.intermediate_size == 2048
-    assert output == "shared_output"

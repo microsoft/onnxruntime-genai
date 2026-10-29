@@ -183,6 +183,8 @@ def _load_builder_cli_module(monkeypatch):
         "Qwen35TextModel",
         "Qwen3Model",
         "Qwen3VLTextModel",
+        "Qwen4ExpModel",
+        "Qwen4ExpTextModel",
         "QwenModel",
         "SmolLM3Model",
         "VideoChatFlashQwenModel",
@@ -221,10 +223,27 @@ def _parse_extra_options(builder, extra_options, precision="int4", execution_pro
     )
 
 
-def test_moe_quant_type_mxfp4_is_accepted(monkeypatch):
+@pytest.mark.parametrize("precision", ["int4", "int8"])
+def test_moe_quant_type_mxfp4_is_accepted(monkeypatch, precision):
     builder = _load_builder_cli_module(monkeypatch)
-    options = _parse_extra_options(builder, ["moe_quant_type=mxfp4"], "int4", "cuda")
+    options = _parse_extra_options(builder, ["moe_quant_type=mxfp4"], precision, "cuda")
     assert options["moe_quant_type"] == "mxfp4"
+
+
+@pytest.mark.parametrize(
+    ("moe_quant_type", "expected_op_type", "expected_bits"),
+    [("none", "MoE", 0), ("int4", "QMoE", 4), ("int8", "QMoE", 8)],
+)
+def test_make_moe_init_selects_operator(moe_quant_type, expected_op_type, expected_bits):
+    model = Model.__new__(Model)
+    model.quant_config = types.SimpleNamespace(moe=types.SimpleNamespace(type=moe_quant_type, weights_prepacked=-1))
+    model.ep = "cuda"
+    model.moe_attrs = {"swiglu_limit": None}
+
+    model.make_moe_init()
+
+    assert model.moe_attrs["op_type"] == expected_op_type
+    assert model.moe_attrs["expert_weight_bits"] == expected_bits
 
 
 def test_moe_quant_type_rejects_invalid_value(monkeypatch):
@@ -241,7 +260,7 @@ def test_use_8bits_moe_maps_to_moe_quant_type(monkeypatch):
 
 def test_moe_quant_type_mxfp4_requires_qmoe_precision(monkeypatch):
     builder = _load_builder_cli_module(monkeypatch)
-    with pytest.raises(ValueError, match="moe_quant_type=mxfp4 requires building with precision=int4"):
+    with pytest.raises(ValueError, match="moe_quant_type=mxfp4 requires building with symmetric int4 or int8"):
         _parse_extra_options(builder, ["moe_quant_type=mxfp4"], "fp16", "cuda")
 
 

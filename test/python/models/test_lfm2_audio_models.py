@@ -604,7 +604,9 @@ def _run_prompt(model, prompt, audios, num_tokens):
     params.set_search_options(do_sample=False, max_length=inputs["input_ids"].as_numpy().shape[1] + num_tokens)
     generator = og.Generator(model, params)
     generator.set_inputs(inputs)
-    prompt_embeds = generator.get_output("inputs_embeds")
+    # The decoder's input: get_output would find the embedding session's output first, which is only
+    # the source of the copy when the two sessions sit on different devices.
+    prompt_embeds = generator.get_input("inputs_embeds")
     while not generator.is_done():
         generator.generate_next_token()
     return generator.get_sequence(0), prompt_embeds
@@ -614,6 +616,10 @@ def _model_on(model_path, provider):
     config = og.Config(os.fspath(model_path))
     config.clear_providers()
     config.append_provider(provider)
+    if provider == "cuda":
+        # The CUDA EP allows TF32 math by default, which on some GPUs moves the encoder's features by
+        # up to about 3e-4 from CPU's. Without it, the comparisons with CPU only see the hand-offs.
+        config.set_provider_option("cuda", "use_tf32", "0")
     return og.Model(config)
 
 

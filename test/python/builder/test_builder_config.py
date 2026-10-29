@@ -8,6 +8,8 @@ import json
 import sys
 from pathlib import Path
 
+import onnx
+import onnx_ir as ir
 import pytest
 
 MODELS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models"
@@ -15,16 +17,187 @@ sys.path.insert(0, str(MODELS_DIR))
 
 from builder_config import (  # noqa: E402
     apply_runtime_config,
+    component_manifest_dict,
+    export_component_package,
+    find_external_data_files,
+    load_component_model,
     load_json_object,
     normalize_builder_config,
+    serialize_genai_config,
+    validate_component_backbone_destination,
     validate_model_dependent_config,
 )
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        [],
+        [1, 2, 3],
+        [[1, 2], []],
+        [{"kind": "paged_kv", "layer_ids": [3, 7]}, {"enabled": True}],
+        ["brackets [ ]", 'quote"', "line\nbreak", None, False, 0.25],
+    ],
+)
+def test_genai_config_serialization_keeps_arrays_inline(values):
+    config = {"model": {"values": values, "inputs": {"input_ids": "input_ids"}}, "search": {}}
+
+    serialized = serialize_genai_config(config)
+
+    assert json.loads(serialized) == config
+    assert f'        "values": {json.dumps(values)},' in serialized.splitlines()
+    assert '        "inputs": {\n            "input_ids": "input_ids"\n        }' in serialized
+    assert serialized.endswith("\n")
+
+
+def write_component_model(path, external_locations=()):
+    initializers = []
+    for index, location in enumerate(external_locations):
+        tensor = onnx.TensorProto(name=f"weight_{index}", data_type=onnx.TensorProto.FLOAT, dims=[1])
+        tensor.data_location = onnx.TensorProto.EXTERNAL
+        entry = tensor.external_data.add()
+        entry.key = "location"
+        entry.value = location
+        initializers.append(tensor)
+    hidden = onnx.helper.make_tensor_value_info("hidden_states", onnx.TensorProto.FLOAT, [None, 4])
+    scores = onnx.helper.make_tensor_value_info("scores", onnx.TensorProto.FLOAT, [None, 4])
+    graph = onnx.helper.make_graph(
+        [onnx.helper.make_node("Identity", ["hidden_states"], ["scores"])],
+        "component",
+        [hidden],
+        [scores],
+        initializer=initializers,
+    )
+    path.write_bytes(onnx.helper.make_model(graph).SerializeToString())
+
+
+def write_external_component_model(
+    path,
+    location,
+    *,
+    offset=None,
+    length=None,
+    dims=(4,),
+    input_name="hidden_states",
+    output_name="scores",
+):
+    tensor = onnx.TensorProto(
+        name="weight",
+        data_type=onnx.TensorProto.FLOAT,
+        dims=list(dims),
+        data_location=onnx.TensorProto.EXTERNAL,
+    )
+    for key, value in (
+        ("location", location),
+        ("offset", offset),
+        ("length", length),
+    ):
+        if value is not None:
+            entry = tensor.external_data.add()
+            entry.key = key
+            entry.value = str(value)
+    hidden = onnx.helper.make_tensor_value_info(
+        input_name, onnx.TensorProto.FLOAT, [None, 4]
+    )
+    scores = onnx.helper.make_tensor_value_info(
+        output_name, onnx.TensorProto.FLOAT, [None, 4]
+    )
+    graph = onnx.helper.make_graph(
+        [onnx.helper.make_node("Identity", [input_name], [output_name])],
+        "component",
+        [hidden],
+        [scores],
+        initializer=[tensor],
+    )
+    path.write_bytes(onnx.helper.make_model(graph).SerializeToString())
+
+
+def write_backbone(
+    output_dir, filename="model.onnx", output_name="hidden_states"
+):
+    output_dir.mkdir(exist_ok=True)
+    input_value = onnx.helper.make_tensor_value_info(
+        "input_ids", onnx.TensorProto.INT64, [None, None]
+    )
+    output_value = onnx.helper.make_tensor_value_info(
+        output_name, onnx.TensorProto.FLOAT, [None, None, 4]
+    )
+    model = onnx.helper.make_model(
+        onnx.helper.make_graph(
+            [
+                onnx.helper.make_node(
+                    "Cast",
+                    ["input_ids"],
+                    [output_name],
+                    to=onnx.TensorProto.FLOAT,
+                )
+            ],
+            "backbone",
+            [input_value],
+            [output_value],
+        )
+    )
+    onnx.save(model, output_dir / filename)
 
 
 def test_legacy_configuration_preserves_options():
     effective = normalize_builder_config("int4", "cuda", {"block_size": "64"})
     assert effective.version == 1
     assert effective.extra_options == {"block_size": "64"}
+
+
+@pytest.mark.parametrize("option", ["use_device_allocator_for_initializers"])
+@pytest.mark.parametrize("value", [True, False, "true", "false"])
+@pytest.mark.parametrize("version", [1, 2])
+def test_device_allocator_option_is_preserved(option, value, version):
+    effective = normalize_builder_config("int4", "cuda", {option: value}, builder_config_version=version)
+    assert effective.extra_options[option] == value
+
+
+@pytest.mark.parametrize("option", ["qmoe_weights_prepacked", "matmulnbits_weights_prepacked"])
+@pytest.mark.parametrize("version", [1, 2])
+def test_legacy_weight_packing_options_are_preserved(option, version):
+    effective = normalize_builder_config("int4", "cuda", {option: 0}, builder_config_version=version)
+    if version == 1:
+        assert effective.extra_options[option] == 0
+    else:
+        assert (
+            effective.target_options["quant_config"]["moe" if option.startswith("qmoe") else "format"][
+                "weights_prepacked" if option.startswith("qmoe") else option
+            ]
+            == 0
+        )
+
+
+@pytest.mark.parametrize(
+    "section,field",
+    [
+        ("moe", "weights_prepacked"),
+        ("format", "matmulnbits_weights_prepacked"),
+        ("runtime", "matmulnbits_weights_prepacked"),
+    ],
+)
+@pytest.mark.parametrize("component", ["target", "drafter"])
+def test_structured_weight_packing_options_are_preserved(section, field, component):
+    options = {"quant_config": {section: {field: 0}}}
+    kwargs = {f"{component}_options": options}
+    if component == "drafter":
+        options["drafter_type"] = "mtp"
+
+    effective = normalize_builder_config("int4", "cuda", **kwargs)
+    result = effective.target_options if component == "target" else effective.drafter_options
+    assert result["quant_config"]["format" if section == "runtime" else section][field] == 0
+
+
+@pytest.mark.parametrize("drafter_type", ["none", "mtp", "dflash2", "dspark"])
+@pytest.mark.parametrize("field", ["optimizations", "unknown_option"])
+def test_drafter_unknown_fields_are_rejected(drafter_type, field):
+    with pytest.raises(ValueError, match="unknown drafter_options field"):
+        normalize_builder_config(
+            "int4",
+            "cuda",
+            drafter_options={"drafter_type": drafter_type, field: {}},
+        )
 
 
 def test_structured_fields_select_version_two():
@@ -43,6 +216,706 @@ def test_structured_fields_select_version_two():
     assert effective.execution_provider == "cuda"
     assert effective.extra_options["_target_io_dtype"] == "bf16"
     assert effective.target_options["quant_config"]["moe"]["type"] == "int4"
+
+
+@pytest.mark.parametrize(
+    "component_options,match",
+    [
+        ({"heads": []}, "non-empty array"),
+        ({"heads": [{"name": "not/a-name", "source": "head.onnx"}]}, "must start with a letter"),
+        (
+            {
+                "heads": [
+                    {"name": "first", "source": "first.onnx", "filename": "head.onnx"},
+                    {"name": "second", "source": "second.onnx", "filename": "head.onnx"},
+                ]
+            },
+            "duplicate component filename",
+        ),
+        ({"heads": [{"name": "head", "source": "head.onnx", "filename": "../head.onnx"}]}, "without directories"),
+        (
+            {"heads": [{"name": "head", "source": "head.onnx", "inputs": {"indices": ""}}]},
+            "non-empty graph value name",
+        ),
+        (
+            {
+                "heads": [
+                    {
+                        "name": "head",
+                        "source": "head.onnx",
+                        "outputs": {"scores": "result", "labels": "result"},
+                    }
+                ]
+            },
+            "graph value names must be unique",
+        ),
+    ],
+)
+def test_component_options_validation(component_options, match):
+    with pytest.raises(ValueError, match=match):
+        normalize_builder_config("fp32", "cpu", component_options=component_options)
+
+
+def test_component_options_serialize_as_typed_structure():
+    effective = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={
+            "backbone": {"filename": "backbone.onnx"},
+            "heads": [{"name": "classification", "source": "source.onnx", "filename": "head.onnx"}],
+        },
+    )
+
+    assert effective.to_dict()["component_options"] == {
+        "backbone": {"filename": "backbone.onnx"},
+        "heads": [
+            {
+                "name": "classification",
+                "source": "source.onnx",
+                "filename": "head.onnx",
+                "inputs": {"hidden_states": "hidden_states"},
+                "outputs": {},
+            }
+        ],
+    }
+
+
+def test_component_options_configure_hidden_state_backbone():
+    effective = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={"heads": [{"name": "head", "source": "head.onnx"}]},
+    )
+
+    assert effective.extra_options["exclude_lm_head"] is True
+    assert effective.extra_options["exclude_mtp"] is True
+    assert "include_hidden_states" not in effective.extra_options
+    assert effective.extra_options["filename"] == "model.onnx"
+
+
+def test_component_package_stages_multiple_named_heads(tmp_path):
+    first = tmp_path / "first-source.onnx"
+    second = tmp_path / "second-source.onnx"
+    write_component_model(first)
+    write_component_model(second)
+    effective = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={
+            "backbone": {"filename": "backbone.onnx"},
+            "heads": [
+                {"name": "classification", "source": str(first), "filename": "classification.onnx"},
+                {"name": "regression", "source": str(second), "filename": "regression.onnx"},
+            ],
+        },
+    )
+    output_dir = tmp_path / "package"
+    write_backbone(output_dir, "backbone.onnx")
+
+    export_component_package(effective.component_options, str(output_dir))
+
+    assert (output_dir / "classification.onnx").read_bytes() == first.read_bytes()
+    assert (output_dir / "regression.onnx").read_bytes() == second.read_bytes()
+    manifest = json.loads((output_dir / "component_manifest.json").read_text())
+    assert manifest == {
+        "schema_version": 1,
+        "model_type": "generic-non-generative",
+        "components": {
+            "backbone": {
+                "role": "backbone",
+                "filename": "backbone.onnx",
+                "outputs": {"hidden_states": "hidden_states"},
+            },
+            "classification": {
+                "role": "head",
+                "filename": "classification.onnx",
+                "inputs": {"hidden_states": "hidden_states"},
+                "outputs": {},
+            },
+            "regression": {
+                "role": "head",
+                "filename": "regression.onnx",
+                "inputs": {"hidden_states": "hidden_states"},
+                "outputs": {},
+            },
+        },
+    }
+
+
+def test_component_manifest_serializes_auxiliary_input_and_output_bindings():
+    effective = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={
+            "heads": [
+                {
+                    "name": "rich_head",
+                    "source": "head.onnx",
+                    "inputs": {
+                        "hidden_states": "encoder_output",
+                        "item_indices": "candidate_ids",
+                        "item_mask": "candidate_mask",
+                    },
+                    "outputs": {"scores": "ranking_scores", "features": "head_features"},
+                }
+            ]
+        },
+    )
+
+    component = component_manifest_dict(effective.component_options)["components"]["rich_head"]
+    assert component["inputs"] == {
+        "hidden_states": "encoder_output",
+        "item_indices": "candidate_ids",
+        "item_mask": "candidate_mask",
+    }
+    assert component["outputs"] == {"scores": "ranking_scores", "features": "head_features"}
+
+
+def test_component_package_copies_arbitrary_relative_external_data_files(tmp_path):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    graph = source_dir / "head.onnx"
+    write_component_model(graph, ["weights/chunk-01.bin", "metadata.bin"])
+    (source_dir / "weights").mkdir()
+    (source_dir / "weights" / "chunk-01.bin").write_bytes(b"weights")
+    (source_dir / "metadata.bin").write_bytes(b"metadata")
+    output_dir = tmp_path / "package"
+    write_backbone(output_dir)
+    effective = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={"heads": [{"name": "head", "source": str(graph), "filename": "renamed-head.onnx"}]},
+    )
+
+    export_component_package(effective.component_options, str(output_dir))
+
+    assert (output_dir / "renamed-head.onnx").is_file()
+    assert (output_dir / "weights" / "chunk-01.bin").read_bytes() == b"weights"
+    assert (output_dir / "metadata.bin").read_bytes() == b"metadata"
+
+
+def test_component_package_rejects_backbone_external_data_collision(tmp_path):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    graph = source_dir / "head.onnx"
+    write_component_model(graph, ["backbone.onnx.data"])
+    (source_dir / "backbone.onnx.data").write_bytes(b"head")
+    output_dir = tmp_path / "package"
+    write_backbone(output_dir, "backbone.onnx")
+    (output_dir / "backbone.onnx.data").write_bytes(b"backbone weights")
+    effective = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={
+            "backbone": {"filename": "backbone.onnx"},
+            "heads": [{"name": "head", "source": str(graph)}],
+        },
+    )
+
+    with pytest.raises(ValueError, match="conflicts with packaged file"):
+        export_component_package(effective.component_options, str(output_dir))
+    assert (output_dir / "backbone.onnx.data").read_bytes() == b"backbone weights"
+    assert not (output_dir / "head.onnx").exists()
+
+
+def test_component_package_protects_backbone_declared_external_data(tmp_path):
+    output_dir = tmp_path / "package"
+    output_dir.mkdir()
+    backbone = output_dir / "model.onnx"
+    write_external_component_model(
+        backbone,
+        "weights.bin",
+        dims=(1,),
+        input_name="input_ids",
+        output_name="hidden_states",
+    )
+    (output_dir / "weights.bin").write_bytes(b"\0" * 4)
+
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    head = source_dir / "head.onnx"
+    write_external_component_model(head, "weights.bin", dims=(1,))
+    (source_dir / "weights.bin").write_bytes(b"\1" * 4)
+    options = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={"heads": [{"name": "head", "source": str(head)}]},
+    ).component_options
+
+    with pytest.raises(ValueError, match="conflicts with packaged file"):
+        export_component_package(options, str(output_dir))
+    assert (output_dir / "weights.bin").read_bytes() == b"\0" * 4
+    assert not (output_dir / "head.onnx").exists()
+
+
+@pytest.mark.parametrize(
+    ("offset", "length", "file_size", "match"),
+    [
+        (0, None, 1, "range exceeds"),
+        (32, 16, 16, "range exceeds"),
+        (0, 4, 16, "range is too small"),
+    ],
+)
+def test_component_package_rejects_invalid_external_data_ranges(
+    tmp_path, offset, length, file_size, match
+):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    graph = source_dir / "head.onnx"
+    write_external_component_model(
+        graph, "weights.bin", offset=offset, length=length
+    )
+    (source_dir / "weights.bin").write_bytes(b"\0" * file_size)
+    output_dir = tmp_path / "package"
+    write_backbone(output_dir)
+    options = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={"heads": [{"name": "head", "source": str(graph)}]},
+    ).component_options
+
+    with pytest.raises(ValueError, match=match):
+        export_component_package(options, str(output_dir))
+    assert not (output_dir / "head.onnx").exists()
+
+
+@pytest.mark.parametrize("location", [None, ""])
+def test_component_model_rejects_missing_external_location(tmp_path, location):
+    graph = tmp_path / "head.onnx"
+    write_external_component_model(graph, location)
+
+    with pytest.raises(ValueError, match="without a location"):
+        load_component_model(graph, "head")
+
+
+@pytest.mark.parametrize(
+    ("offset", "length", "match"),
+    [
+        ("", None, "offset is invalid"),
+        ("invalid", None, "offset is invalid"),
+        (None, "", "length is invalid"),
+        (None, "invalid", "length is invalid"),
+        (-1, None, "range is too small"),
+        (0, -1, "range is too small"),
+    ],
+)
+def test_component_model_rejects_malformed_external_ranges(
+    tmp_path, offset, length, match
+):
+    graph = tmp_path / "head.onnx"
+    write_external_component_model(graph, "weights.bin", offset=offset, length=length)
+    (tmp_path / "weights.bin").write_bytes(b"\0" * 16)
+
+    with pytest.raises(ValueError, match=match):
+        load_component_model(graph, "head")
+
+
+@pytest.mark.parametrize(
+    "placement",
+    [
+        "initializer",
+        "tensor",
+        "tensors",
+        "graph",
+        "graphs",
+        "function",
+        "function_default",
+        "sparse_initializer",
+        "sparse_attribute",
+        "training",
+        "malformed_attribute",
+        "non_external",
+    ],
+)
+def test_component_model_checks_original_nested_external_metadata(tmp_path, placement):
+    graph = tmp_path / "head.onnx"
+    write_external_component_model(graph, "../outside.bin")
+    model = onnx.load(graph, load_external_data=False)
+    tensor = copy.deepcopy(model.graph.initializer[0])
+    del model.graph.initializer[:]
+    attribute = onnx.helper.make_attribute("value", tensor)
+    if placement == "initializer":
+        model.graph.initializer.append(tensor)
+    elif placement == "non_external":
+        tensor.data_location = onnx.TensorProto.DEFAULT
+        model.graph.initializer.append(tensor)
+    elif placement == "sparse_initializer":
+        model.graph.sparse_initializer.add().values.CopyFrom(tensor)
+    elif placement == "training":
+        model.training_info.add().initialization.initializer.append(tensor)
+    elif placement == "function_default":
+        model.functions.add().attribute_proto.append(attribute)
+    else:
+        if placement == "tensors":
+            attribute = onnx.helper.make_attribute("values", [tensor])
+        elif placement in ("graph", "graphs"):
+            nested = onnx.helper.make_graph([], "nested", [], [], [tensor])
+            attribute = onnx.helper.make_attribute(
+                "body", [nested] if placement == "graphs" else nested
+            )
+        elif placement == "sparse_attribute":
+            attribute = onnx.AttributeProto(
+                name="sparse", type=onnx.AttributeProto.SPARSE_TENSOR
+            )
+            attribute.sparse_tensor.values.CopyFrom(tensor)
+        elif placement == "malformed_attribute":
+            attribute.type = onnx.AttributeProto.INT
+        node = (
+            model.functions.add().node.add()
+            if placement == "function"
+            else model.graph.node[0]
+        )
+        node.attribute.append(attribute)
+    graph.write_bytes(model.SerializeToString())
+
+    with pytest.raises(ValueError, match="unsafe external data location"):
+        load_component_model(graph, "head")
+
+
+def test_component_model_uses_ir_without_reading_external_payload(tmp_path):
+    graph = tmp_path / "head.onnx"
+    write_external_component_model(graph, "weights.bin", offset=4, length=16)
+    (tmp_path / "weights.bin").write_bytes(b"\0" * 20)
+
+    model = load_component_model(graph, "head")
+
+    assert isinstance(model, ir.Model)
+    assert [value.name for value in model.graph.inputs] == ["hidden_states"]
+    assert isinstance(model.graph.initializers["weight"].const_value, ir.ExternalTensor)
+    assert find_external_data_files(model, graph, "head") == [
+        ("weights.bin", tmp_path / "weights.bin")
+    ]
+
+
+@pytest.mark.parametrize(
+    "reserved_name",
+    ["genai_config.json", "tokenizer.json", "model.onnx.data"],
+)
+def test_component_package_rejects_exporter_owned_external_data(
+    tmp_path, reserved_name
+):
+    output_dir = tmp_path / "package"
+    write_backbone(output_dir)
+    graph = output_dir / "head.onnx"
+    write_component_model(graph, [reserved_name])
+    (output_dir / reserved_name).write_bytes(b"owned")
+    options = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={"heads": [{"name": "head", "source": str(graph)}]},
+    ).component_options
+
+    with pytest.raises(ValueError, match="conflicts with packaged file"):
+        export_component_package(options, str(output_dir))
+    assert (output_dir / reserved_name).read_bytes() == b"owned"
+
+
+def test_component_package_rejects_source_overwritten_by_backbone(tmp_path):
+    output_dir = tmp_path / "package"
+    write_backbone(output_dir)
+    source = output_dir / "model.onnx"
+    original = source.read_bytes()
+    options = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={
+            "heads": [
+                {
+                    "name": "head",
+                    "source": str(source),
+                    "filename": "head.onnx",
+                    "inputs": {"hidden_states": "input_ids"},
+                }
+            ]
+        },
+    ).component_options
+
+    with pytest.raises(ValueError, match="exporter-owned output"):
+        export_component_package(options, str(output_dir))
+    assert source.read_bytes() == original
+    assert not (output_dir / "head.onnx").exists()
+
+
+def test_component_package_validates_graph_binding_names(tmp_path):
+    graph = tmp_path / "head.onnx"
+    write_component_model(graph)
+    output_dir = tmp_path / "package"
+    write_backbone(output_dir)
+    effective = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={
+            "heads": [
+                {
+                    "name": "head",
+                    "source": str(graph),
+                    "inputs": {"hidden_states": "missing_input"},
+                    "outputs": {"scores": "missing_output"},
+                }
+            ]
+        },
+    )
+
+    with pytest.raises(ValueError, match="unknown graph input"):
+        export_component_package(effective.component_options, str(output_dir))
+    assert not (output_dir / "head.onnx").exists()
+
+    effective = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={
+            "heads": [
+                {
+                    "name": "head",
+                    "source": str(graph),
+                    "outputs": {"scores": "missing_output"},
+                }
+            ]
+        },
+    )
+    with pytest.raises(ValueError, match="unknown graph output"):
+        export_component_package(effective.component_options, str(output_dir))
+
+
+def test_component_package_rejects_destination_symlink(tmp_path):
+    graph = tmp_path / "head.onnx"
+    write_component_model(graph)
+    outside = tmp_path / "outside.onnx"
+    outside.write_bytes(b"unchanged")
+    output_dir = tmp_path / "package"
+    write_backbone(output_dir)
+    (output_dir / "head.onnx").symlink_to(outside)
+    effective = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={"heads": [{"name": "head", "source": str(graph)}]},
+    )
+
+    with pytest.raises(ValueError, match="destination contains symlink"):
+        export_component_package(effective.component_options, str(output_dir))
+    assert outside.read_bytes() == b"unchanged"
+
+
+def test_component_package_rejects_manifest_symlink(tmp_path):
+    graph = tmp_path / "head.onnx"
+    write_component_model(graph)
+    outside = tmp_path / "outside.json"
+    outside.write_text("unchanged")
+    output_dir = tmp_path / "package"
+    write_backbone(output_dir)
+    (output_dir / "component_manifest.json").symlink_to(outside)
+    options = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={"heads": [{"name": "head", "source": str(graph)}]},
+    ).component_options
+
+    with pytest.raises(ValueError, match="destination contains symlink"):
+        export_component_package(options, str(output_dir))
+    assert outside.read_text() == "unchanged"
+    assert not (output_dir / "head.onnx").exists()
+
+
+def test_component_package_rejects_non_directory_parent(tmp_path):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    graph = source_dir / "head.onnx"
+    write_component_model(graph, ["weights/chunk.bin"])
+    (source_dir / "weights").mkdir()
+    (source_dir / "weights" / "chunk.bin").write_bytes(b"weights")
+    output_dir = tmp_path / "package"
+    write_backbone(output_dir)
+    (output_dir / "weights").write_bytes(b"not a directory")
+    options = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={"heads": [{"name": "head", "source": str(graph)}]},
+    ).component_options
+
+    with pytest.raises(ValueError, match="parent is not a directory"):
+        export_component_package(options, str(output_dir))
+    assert not (output_dir / "head.onnx").exists()
+
+
+def test_symlinked_component_uses_external_data_beside_link(tmp_path):
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    target = target_dir / "head.onnx"
+    write_component_model(target, ["weights.bin"])
+    (target_dir / "weights.bin").write_bytes(b"target weights")
+
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    linked = source_dir / "head.onnx"
+    linked.symlink_to(target)
+    (source_dir / "weights.bin").write_bytes(b"linked weights")
+    output_dir = tmp_path / "package"
+    write_backbone(output_dir)
+    options = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={"heads": [{"name": "head", "source": str(linked)}]},
+    ).component_options
+
+    export_component_package(options, str(output_dir))
+
+    assert (output_dir / "weights.bin").read_bytes() == b"linked weights"
+
+
+def test_component_package_can_replace_its_own_previous_outputs(tmp_path):
+    graph = tmp_path / "head.onnx"
+    write_component_model(graph)
+    output_dir = tmp_path / "package"
+    write_backbone(output_dir)
+    options = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={"heads": [{"name": "head", "source": str(graph)}]},
+    ).component_options
+
+    export_component_package(options, str(output_dir))
+    export_component_package(options, str(output_dir))
+
+    assert (output_dir / "head.onnx").read_bytes() == graph.read_bytes()
+    assert (output_dir / "component_manifest.json").is_file()
+
+
+def test_component_package_rejects_copy_source_destination_chain(tmp_path):
+    output_dir = tmp_path / "package"
+    write_backbone(output_dir)
+    first = output_dir / "a.onnx"
+    second = output_dir / "b.onnx"
+    write_component_model(first)
+    write_component_model(second)
+    first_bytes = first.read_bytes()
+    second_bytes = second.read_bytes()
+    options = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={
+            "heads": [
+                {
+                    "name": "first",
+                    "source": str(first),
+                    "filename": "b.onnx",
+                },
+                {
+                    "name": "second",
+                    "source": str(second),
+                    "filename": "a.onnx",
+                },
+            ]
+        },
+    ).component_options
+
+    with pytest.raises(ValueError, match="overlapping copy chains"):
+        export_component_package(options, str(output_dir))
+    assert first.read_bytes() == first_bytes
+    assert second.read_bytes() == second_bytes
+
+
+def test_component_backbone_rejects_symlink_and_missing_config_only_file(tmp_path):
+    output_dir = tmp_path / "package"
+    output_dir.mkdir()
+    outside = tmp_path / "outside.onnx"
+    outside.write_bytes(b"unchanged")
+    (output_dir / "model.onnx").symlink_to(outside)
+    options = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={"heads": [{"name": "head", "source": "head.onnx"}]},
+    ).component_options
+
+    with pytest.raises(ValueError, match="destination contains symlink"):
+        validate_component_backbone_destination(options, output_dir, require_exists=False)
+    (output_dir / "model.onnx").unlink()
+    with pytest.raises(ValueError, match="backbone does not exist"):
+        validate_component_backbone_destination(options, output_dir, require_exists=True)
+
+
+def test_component_backbone_rejects_external_data_directory(tmp_path):
+    output_dir = tmp_path / "package"
+    write_backbone(output_dir)
+    (output_dir / "model.onnx.data").mkdir()
+    options = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={"heads": [{"name": "head", "source": "head.onnx"}]},
+    ).component_options
+
+    with pytest.raises(ValueError, match="existing directory"):
+        validate_component_backbone_destination(
+            options, output_dir, require_exists=False
+        )
+
+
+def test_config_only_backbone_requires_hidden_states_output(tmp_path):
+    output_dir = tmp_path / "package"
+    options = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={"heads": [{"name": "head", "source": "head.onnx"}]},
+    ).component_options
+
+    write_backbone(output_dir)
+    validate_component_backbone_destination(
+        options, output_dir, require_exists=True
+    )
+
+    write_backbone(output_dir, output_name="logits")
+    with pytest.raises(ValueError, match="hidden_states output"):
+        validate_component_backbone_destination(
+            options, output_dir, require_exists=True
+        )
+
+
+def test_generic_component_options_reject_revision_fields():
+    with pytest.raises(ValueError, match="artifact_revision requires model_source"):
+        normalize_builder_config(
+            "fp32",
+            "cpu",
+            component_options={
+                "artifact_revision": "unused",
+                "heads": [{"name": "head", "source": "head.onnx"}],
+            },
+        )
+
+
+@pytest.mark.parametrize("revision", ["main", "v1", "a" * 39, "g" * 40])
+def test_model_specific_component_options_require_commit_ids(revision):
+    with pytest.raises(ValueError, match="40-character commit ID"):
+        normalize_builder_config(
+            "fp32",
+            "cpu",
+            component_options={
+                "model_source": "artifact",
+                "artifact_revision": "a" * 40,
+                "base_revision": revision,
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    "location",
+    ["../outside.bin", "/absolute.bin", "C:/absolute.bin", r"weights\\outside.bin"],
+)
+def test_component_package_rejects_unsafe_external_data_locations(tmp_path, location):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    graph = source_dir / "head.onnx"
+    write_component_model(graph, [location])
+    output_dir = tmp_path / "package"
+    write_backbone(output_dir)
+    effective = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={"heads": [{"name": "head", "source": str(graph)}]},
+    )
+
+    with pytest.raises(ValueError, match="unsafe external data location"):
+        export_component_package(effective.component_options, str(output_dir))
+
+    assert not (output_dir / "head.onnx").exists()
 
 
 def test_unsigned_weight_type_defaults_to_asymmetric_quantization():
@@ -80,6 +953,8 @@ def test_provider_defaults_are_recorded(provider, accuracy_level, moe_block_size
     quant = effective.target_options["quant_config"]
     assert quant["weights"]["accuracy_level"] == accuracy_level
     assert quant["moe"]["block_size"] == moe_block_size
+    assert quant["moe"]["weights_prepacked"] == -1
+    assert quant["format"]["matmulnbits_weights_prepacked"] == 0
     assert quant["format"]["use_qdq"] is (provider == "NvTensorRtRtx")
     assert effective.execution_provider == ("trt-rtx" if provider == "NvTensorRtRtx" else provider)
 
@@ -261,32 +1136,27 @@ def test_dflash2_policy_is_independent_from_target(tmp_path):
     assert effective.extra_options["aux_hidden_state_layers"] == "2,4"
 
 
-@pytest.mark.parametrize("fuse_qkv", [False, True])
-def test_dflash2_qkv_fusion_maps_to_legacy_option(tmp_path, fuse_qkv):
+def test_webgpu_dflash2_defaults_to_fp16_body(tmp_path):
     effective = normalize_builder_config(
         "int4",
-        "cuda",
+        "webgpu",
         target_options={"attention": {"implementation": "paged"}},
-        drafter_options={
-            "drafter_type": "dflash2",
-            "path": make_drafter_checkpoint(tmp_path),
-            "optimizations": {"fuse_qkv": fuse_qkv},
-        },
+        drafter_options={"drafter_type": "dflash2", "path": make_drafter_checkpoint(tmp_path)},
     )
-    assert effective.extra_options["dflash2_fuse_qkv"] is fuse_qkv
+
+    assert effective.drafter_options["quant_config"]["io_dtype"] == "fp16"
 
 
-@pytest.mark.parametrize("fuse_qkv", [False, True])
-def test_qkv_fusion_is_rejected_for_other_drafters(tmp_path, fuse_qkv):
-    with pytest.raises(ValueError, match="fuse_qkv is not supported for drafter_type=dspark"):
+def test_webgpu_dflash2_rejects_bf16_body(tmp_path):
+    with pytest.raises(ValueError, match="WebGPU DFlash2 requires FP16"):
         normalize_builder_config(
             "int4",
-            "cuda",
+            "webgpu",
             target_options={"attention": {"implementation": "paged"}},
             drafter_options={
-                "drafter_type": "dspark",
+                "drafter_type": "dflash2",
                 "path": make_drafter_checkpoint(tmp_path),
-                "optimizations": {"fuse_qkv": fuse_qkv},
+                "quant_config": {"io_dtype": "bf16"},
             },
         )
 
@@ -348,10 +1218,31 @@ def test_dflash2_rejects_unsupported_body_block_size(tmp_path, block_size):
         )
 
 
-def test_dflash2_accepts_prepacked_body_weights_on_cuda(tmp_path):
+@pytest.mark.parametrize("provider", ["cuda", "cpu", "webgpu", "dml", "NvTensorRtRtx"])
+def test_dflash2_body_packing_is_derived_from_provider(tmp_path, provider):
     effective = normalize_builder_config(
         "int4",
-        "cuda",
+        provider,
+        target_options={"attention": {"implementation": "paged"}},
+        drafter_options={
+            "drafter_type": "dflash2",
+            "path": make_drafter_checkpoint(tmp_path),
+            "quant_config": {
+                "weights": {"type": "int4", "block_size": 32},
+            },
+        },
+    )
+
+    quant = effective.drafter_options["quant_config"]
+    assert quant["format"]["matmulnbits_weights_prepacked"] == 0
+    assert quant["moe"]["weights_prepacked"] == 0
+
+
+@pytest.mark.parametrize("provider", ["cuda", "cpu"])
+def test_dflash2_accepts_explicit_packing_controls(tmp_path, provider):
+    effective = normalize_builder_config(
+        "int4",
+        provider,
         target_options={"attention": {"implementation": "paged"}},
         drafter_options={
             "drafter_type": "dflash2",
@@ -362,25 +1253,7 @@ def test_dflash2_accepts_prepacked_body_weights_on_cuda(tmp_path):
             },
         },
     )
-
     assert effective.drafter_options["quant_config"]["format"]["matmulnbits_weights_prepacked"] == 1
-
-
-def test_dflash2_rejects_prepacked_body_weights_off_cuda(tmp_path):
-    with pytest.raises(ValueError, match="prepacked MatMulNBits weights are supported only on CUDA"):
-        normalize_builder_config(
-            "int4",
-            "cpu",
-            target_options={"attention": {"implementation": "paged"}},
-            drafter_options={
-                "drafter_type": "dflash2",
-                "path": make_drafter_checkpoint(tmp_path),
-                "quant_config": {
-                    "weights": {"type": "int4", "block_size": 32},
-                    "format": {"matmulnbits_weights_prepacked": 1},
-                },
-            },
-        )
 
 
 @pytest.mark.parametrize(
@@ -449,7 +1322,7 @@ def test_dflash2_int2_fpa_uses_structured_quant_config(tmp_path):
     assert effective.runtime_config["model"]["dflash2"]["session_options"]["ep.cuda.fpa_intb_gemm"] == "1"
 
 
-def test_dflash2_int2_offline_prepack_uses_sm80_layout(tmp_path):
+def test_dflash2_int2_accepts_sm80_offline_prepack(tmp_path):
     effective = normalize_builder_config(
         "int4",
         "cuda",
@@ -464,10 +1337,7 @@ def test_dflash2_int2_offline_prepack_uses_sm80_layout(tmp_path):
         },
         runtime_config={"model": {"dflash2": {"session_options": {"ep.cuda.fpa_intb_gemm": "0"}}}},
     )
-
-    quant = effective.extra_options["_drafter_quant_config"]
-    assert quant.format.matmulnbits_weights_prepacked == 1
-    assert effective.runtime_config["model"]["dflash2"]["session_options"]["ep.cuda.fpa_intb_gemm"] == "0"
+    assert effective.drafter_options["quant_config"]["format"]["matmulnbits_weights_prepacked"] == 1
 
 
 @pytest.mark.parametrize("block_size", [16, 32, 256])
@@ -813,6 +1683,156 @@ def test_runtime_adds_config_only_profile():
     assert updated["engine"]["dynamic_batching"]["num_blocks"] == 800
 
 
+def test_runtime_profiles_accept_disjoint_integrated_and_discrete_conditions():
+    generated = {"model": {"decoder": {}}, "engine": {"dynamic_batching": {"num_blocks": 32}}}
+    profiles = [
+        {
+            "id": str(integrated),
+            "eligibility": {"minimum_total_device_memory_bytes": 0, "is_integrated": integrated},
+            "overlay": {"engine": {"dynamic_batching": {"num_blocks": blocks}}},
+        }
+        for integrated, blocks in [(True, 40), (False, 80)]
+    ]
+    assert apply_runtime_config(generated, {"runtime_profiles": profiles})["runtime_profiles"] == profiles
+
+
+@pytest.mark.parametrize("invalid", [0, 1, "true", None])
+def test_runtime_profiles_require_boolean_integrated_condition(invalid):
+    generated = {"model": {"decoder": {}}}
+    profile = {
+        "id": "invalid",
+        "eligibility": {"minimum_total_device_memory_bytes": 0, "is_integrated": invalid},
+        "overlay": {"search": {"chunk_size": 1}},
+    }
+    with pytest.raises(ValueError, match="is_integrated must be a boolean"):
+        apply_runtime_config(generated, {"runtime_profiles": [profile]})
+
+
+@pytest.mark.parametrize("first,second", [(None, True), (False, False), (True, True)])
+def test_runtime_profiles_reject_overlapping_device_conditions(first, second):
+    generated = {"model": {"decoder": {}}}
+    profiles = [
+        {
+            "id": str(index),
+            "eligibility": {
+                "minimum_total_device_memory_bytes": minimum,
+                "maximum_total_device_memory_bytes": 10,
+                **({"is_integrated": value} if value is not None else {}),
+            },
+            "overlay": {"search": {"chunk_size": index + 1}},
+        }
+        for index, (minimum, value) in enumerate([(1, first), (10, second)])
+    ]
+    with pytest.raises(ValueError, match="eligibility ranges overlap"):
+        apply_runtime_config(generated, {"runtime_profiles": profiles})
+
+
+def test_runtime_profiles_allow_disjoint_free_memory_ranges():
+    generated = {"model": {"decoder": {}}}
+    profiles = [
+        {
+            "id": str(index),
+            "eligibility": {
+                "minimum_total_device_memory_bytes": 100,
+                "minimum_free_device_memory_bytes": minimum,
+                "maximum_free_device_memory_bytes": maximum,
+            },
+            "overlay": {"search": {"chunk_size": index + 1}},
+        }
+        for index, (minimum, maximum) in enumerate([(0, 80), (81, 100)])
+    ]
+    assert apply_runtime_config(generated, {"runtime_profiles": profiles})["runtime_profiles"] == profiles
+
+
+def test_runtime_profiles_allow_only_physically_disjoint_overlapping_ranges():
+    generated = {"model": {"decoder": {}}}
+    profiles = [
+        {
+            "id": "first",
+            "eligibility": {
+                "minimum_total_device_memory_bytes": 100,
+                "maximum_total_device_memory_bytes": 150,
+                "minimum_free_device_memory_bytes": 140,
+                "maximum_free_device_memory_bytes": 200,
+            },
+            "overlay": {"search": {"chunk_size": 1}},
+        },
+        {
+            "id": "second",
+            "eligibility": {
+                "minimum_total_device_memory_bytes": 100,
+                "maximum_total_device_memory_bytes": 200,
+                "minimum_free_device_memory_bytes": 160,
+                "maximum_free_device_memory_bytes": 200,
+            },
+            "overlay": {"search": {"chunk_size": 2}},
+        },
+    ]
+    assert apply_runtime_config(generated, {"runtime_profiles": profiles})["runtime_profiles"] == profiles
+
+
+@pytest.mark.parametrize("first_free,second_free", [(None, 0), (None, 1), (80, 80)])
+def test_runtime_profiles_reject_overlapping_free_memory_conditions(first_free, second_free):
+    generated = {"model": {"decoder": {}}}
+    profiles = [
+        {
+            "id": "first",
+            "eligibility": {
+                "minimum_total_device_memory_bytes": 100,
+                **({"maximum_free_device_memory_bytes": first_free} if first_free is not None else {}),
+            },
+            "overlay": {"search": {"chunk_size": 1}},
+        },
+        {
+            "id": "second",
+            "eligibility": {
+                "minimum_total_device_memory_bytes": 100,
+                "minimum_free_device_memory_bytes": second_free,
+            },
+            "overlay": {"search": {"chunk_size": 2}},
+        },
+    ]
+    with pytest.raises(ValueError, match="eligibility ranges overlap"):
+        apply_runtime_config(generated, {"runtime_profiles": profiles})
+
+
+@pytest.mark.parametrize("field", ["minimum_free_device_memory_bytes", "maximum_free_device_memory_bytes"])
+@pytest.mark.parametrize("invalid", [True, -1, 1.5, "100", None, 2**53])
+def test_runtime_profiles_require_valid_free_memory_bytes(field, invalid):
+    generated = {"model": {"decoder": {}}}
+    profile = {
+        "id": "invalid",
+        "eligibility": {"minimum_total_device_memory_bytes": 0, field: invalid},
+        "overlay": {"search": {"chunk_size": 1}},
+    }
+    with pytest.raises(ValueError, match=f"{field} must be a non-negative integer"):
+        apply_runtime_config(generated, {"runtime_profiles": [profile]})
+
+
+@pytest.mark.parametrize(
+    "eligibility,error",
+    [
+        (
+            {"minimum_free_device_memory_bytes": 81, "maximum_free_device_memory_bytes": 80},
+            "maximum free memory must not be below minimum",
+        ),
+        (
+            {"maximum_total_device_memory_bytes": 100, "minimum_free_device_memory_bytes": 101},
+            "minimum free memory exceeds maximum total memory",
+        ),
+    ],
+)
+def test_runtime_profiles_reject_impossible_free_memory_ranges(eligibility, error):
+    generated = {"model": {"decoder": {}}}
+    profile = {
+        "id": "invalid",
+        "eligibility": {"minimum_total_device_memory_bytes": 0, **eligibility},
+        "overlay": {"search": {"chunk_size": 1}},
+    }
+    with pytest.raises(ValueError, match=error):
+        apply_runtime_config(generated, {"runtime_profiles": [profile]})
+
+
 @pytest.mark.parametrize("in_profile", [False, True])
 @pytest.mark.parametrize(
     "engine,field,value,error",
@@ -836,6 +1856,31 @@ def test_runtime_batching_validation_is_shared_with_profiles(in_profile, engine,
 
     with pytest.raises(ValueError, match=error):
         apply_runtime_config(generated, runtime)
+
+
+@pytest.mark.parametrize("in_profile", [False, True])
+@pytest.mark.parametrize("value", [0, 1, 3, 2_147_483_647, -1, 1.5, 2**31, True, "3", None])
+def test_dflash2_snapshot_limits_in_runtime_config_and_profiles(in_profile, value):
+    generated = {"model": {"decoder": {}}, "engine": {"dynamic_batching": {"num_blocks": 32}}}
+    baseline = copy.deepcopy(generated)
+    runtime = {"engine": {"dynamic_batching": {"dflash2_max_snapshots": value}}}
+    if in_profile:
+        runtime = {
+            "runtime_profiles": [
+                {"id": "snapshots", "eligibility": {"minimum_total_device_memory_bytes": 0}, "overlay": runtime}
+            ]
+        }
+    if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 2_147_483_647:
+        result = apply_runtime_config(generated, runtime)
+        if in_profile:
+            assert result["runtime_profiles"] == runtime["runtime_profiles"]
+            assert result["engine"] == generated["engine"]
+        else:
+            assert result["engine"]["dynamic_batching"]["dflash2_max_snapshots"] == value
+    else:
+        with pytest.raises(ValueError, match="dflash2_max_snapshots must be an integer between"):
+            apply_runtime_config(generated, runtime)
+    assert generated == baseline
 
 
 @pytest.mark.parametrize("in_profile", [False, True])

@@ -5,7 +5,6 @@
 # --------------------------------------------------------------------------
 
 import os
-import tempfile
 
 import numpy as np
 import onnx_ir as ir
@@ -17,9 +16,8 @@ from tqdm import tqdm
 from .base import Model
 
 
-# Deliberately not a `Model` subclass: a block drafter emits a hand-written graph, so it shares
-# only the two stateless `Model` helpers below rather than the decoder builder's contract.
-class BlockDrafterBuilder:
+# Block drafters share Model's graph lifecycle while retaining their packed block I/O.
+class BlockDrafterBuilder(Model):
     """Shared graph, initializer, I/O, and file plumbing for block drafters."""
 
     # Weight-only quantization of the drafter body. ``quant_bits = None`` keeps every
@@ -40,17 +38,15 @@ class BlockDrafterBuilder:
     lm_head_adoption = None
     embed_adoption = None
 
+    def __init__(self, graph_name="block_drafter", const_prefix="drafter"):
+        super().__init__(graph_name=graph_name, graph_opset=21)
+        self.graph.opset_imports["com.microsoft"] = 1
+        self.const_cache = {}
+        self.const_prefix = const_prefix
+
     def make_graph(self, graph_name, const_prefix):
-        self.values: dict[str, ir.Value] = {}
-        self.node_names: set[str] = set()
-        self.graph = ir.Graph(
-            inputs=(),
-            outputs=(),
-            nodes=(),
-            opset_imports={"": 21, "com.microsoft": 1},
-            name=graph_name,
-        )
-        self.model = ir.Model(self.graph, ir_version=10, producer_name="onnxruntime-genai")
+        Model.make_graph(self, graph_name, opset=21)
+        self.graph.opset_imports["com.microsoft"] = 1
         self.const_cache: dict[str, str] = {}
         self.const_prefix = const_prefix
 
@@ -225,22 +221,35 @@ class BlockDrafterBuilder:
         self.make_value(output, self.io_dtype, [rows, self.hidden_size])
         return output
 
-    def skip_rms_norm(self, name, root, skip, weight_tensor, rows, want_sum=True):
+    def skip_rms_norm(self, name, root, skip, weight_tensor, rows, want_sum=True, dtype=None):
+        dtype = self.io_dtype if dtype is None else dtype
         initializer_name = name[1:].replace("/", ".") + ".weight"
         self.make_initializer(weight_tensor, initializer_name, to=self.io_dtype)
+        inputs = [root, skip, initializer_name]
+        if dtype != self.io_dtype:
+            # Retain the residual sum at the accumulation dtype until the next normalization.
+            for i, value in enumerate(inputs):
+                if self.values[value].dtype != dtype:
+                    inputs[i] = self.unary(
+                        "Cast", f"{name}/input{i}/Cast", value, dtype, self.values[value].shape, to=dtype
+                    )
         output = self.out(name)
         summed_output = f"{name}/output_3"
         self.make_node(
             "SkipSimplifiedLayerNormalization",
-            [root, skip, initializer_name],
+            inputs,
             [output, "", "", summed_output] if want_sum else [output],
             name=name,
             domain="com.microsoft",
             epsilon=self.rms_eps,
         )
-        self.make_value(output, self.io_dtype, [rows, self.hidden_size])
+        self.make_value(output, dtype, [rows, self.hidden_size])
         if want_sum:
-            self.make_value(summed_output, self.io_dtype, [rows, self.hidden_size])
+            self.make_value(summed_output, dtype, [rows, self.hidden_size])
+        if dtype != self.io_dtype:
+            output = self.unary(
+                "Cast", f"{name}/Cast", output, self.io_dtype, [rows, self.hidden_size], to=self.io_dtype
+            )
         return output, (summed_output if want_sum else None)
 
     def make_embedding(self, name, rows):
@@ -252,9 +261,15 @@ class BlockDrafterBuilder:
         No weights are produced for the quantized form: `adopt_target_tensors` copies the
         target's once it has been saved.
         """
+        if self.exclude_embeds:
+            return "inputs_embeds"
+        if self.target_model is not None and self.embed_quant is None:
+            return self.make_decoder_embedding(name, rows)
         output = self.out(name)
         if self.embed_quant is None:
-            self.make_initializer(self.weights["embed_tokens.weight"], "model.embed_tokens.weight", to=self.external_dtype)
+            self.make_initializer(
+                self.weights["embed_tokens.weight"], "model.embed_tokens.weight", to=self.external_dtype
+            )
             self.make_node("Gather", ["model.embed_tokens.weight", "input_ids"], [output], name=name)
         else:
             bits = self.embed_quant["bits"]
@@ -284,11 +299,97 @@ class BlockDrafterBuilder:
         self.make_value(output, self.external_dtype, [rows, self.hidden_size])
         return output
 
+    def make_decoder_embedding(self, name, rows):
+        """Reuse the decoder's lookup, including tied-weight transforms and quantized tables."""
+        nodes = {node.name: node for node in self.target_model.graph}
+        source = next(
+            (
+                nodes[f"/model/embed_tokens/{op}"].outputs[0]
+                for op in ("Slice", "GatherBlockQuantized", "Gather")
+                if f"/model/embed_tokens/{op}" in nodes
+            ),
+            None,
+        )
+        if source is None:
+            raise ValueError("The decoder graph has no token embedding lookup to share.")
+        if source.dtype is not None and source.dtype != self.external_dtype:
+            raise ValueError("The decoder embedding must match the drafter's I/O dtype.")
+        missing = []
+
+        def copy_value(value):
+            producer = value.producer()
+            if producer is None and value.const_value is None and value in self.target_model.graph.inputs:
+                if value.dtype != ir.DataType.INT64:
+                    raise ValueError(f"Unexpected decoder embedding input '{value.name}'.")
+                return "input_ids"
+            if value.name in self.values:
+                return value.name
+            if producer is None:
+                copied = self.make_value(value.name, value.dtype, value.shape)
+                copied.const_value = value.const_value
+                copied.metadata_props.update(value.metadata_props)
+                if copied.const_value is None:
+                    missing.append(value.name)
+                else:
+                    self.graph.register_initializer(copied)
+                return value.name
+            inputs = [copy_value(input_value) if input_value is not None else "" for input_value in producer.inputs]
+            output_names = [output.name for output in producer.outputs]
+            node = self.make_node(
+                producer.op_type,
+                inputs,
+                output_names,
+                name=producer.name,
+                domain=producer.domain,
+                **{key: attribute.value for key, attribute in producer.attributes.items()},
+            )
+            node.metadata_props.update(producer.metadata_props)
+            for output in producer.outputs:
+                shape = (
+                    [
+                        rows if isinstance(dim, ir.SymbolicDim) and dim.value == "num_tokens" else dim
+                        for dim in output.shape
+                    ]
+                    if output.shape is not None
+                    else None
+                )
+                copied = self.make_value(output.name, output.dtype, shape)
+                copied.metadata_props.update(output.metadata_props)
+            return value.name
+
+        root = copy_value(source)
+        if missing:
+            self.embed_adoption = {"initializers": tuple(missing)}
+        output = self.out(name)
+        self.rename_value(root, output)
+        self.make_value(output, self.external_dtype, [rows, self.hidden_size])
+        return output
+
     def pending_adoptions(self):
         """Return the adoption records still waiting on the target's saved bytes."""
         return [adoption for adoption in (self.embed_adoption, self.lm_head_adoption) if adoption is not None]
 
-    def adopt_target_tensors(self, target_model_path):
+    def embedding_initializers(self):
+        """Find the lookup's tensors, including a tied LM-head table."""
+        names = set()
+
+        def visit(value):
+            if value is None:
+                return
+            if value.name in self.graph.initializers:
+                if value.name.startswith(("model.embed_tokens.", "lm_head.MatMul.")):
+                    names.add(value.name)
+            elif value.producer() is not None:
+                for input_value in value.producer().inputs:
+                    visit(input_value)
+
+        for prefix in ("dflash2", "dspark"):
+            output = self.values.get(f"/{prefix}/embed_tokens/Gather/output_0")
+            if output is not None:
+                visit(output)
+        return frozenset(names)
+
+    def adopt_target_tensors(self, target_model_path, embedding_model_path=None):
         """Fill the drafter's shared tensors from the saved target model.
 
         Called between the target's save and the drafter's, so `target_model_path` exists and
@@ -300,7 +401,25 @@ class BlockDrafterBuilder:
             return
         target = ir.load(target_model_path)
         for adoption in pending:
-            self.adopt_target_node(target, adoption, os.path.basename(target_model_path))
+            source = (
+                ir.load(embedding_model_path)
+                if adoption is self.embed_adoption and embedding_model_path is not None
+                else target
+            )
+            if "node" in adoption:
+                self.adopt_target_node(
+                    source,
+                    adoption,
+                    os.path.basename(embedding_model_path or target_model_path)
+                    if adoption is self.embed_adoption
+                    else os.path.basename(target_model_path),
+                )
+            else:
+                for initializer_name in adoption["initializers"]:
+                    tensor = source.graph.initializers[initializer_name].const_value
+                    value = self.make_value(initializer_name, tensor.dtype, tensor.shape)
+                    value.const_value = tensor
+                    self.graph.register_initializer(value)
         self.embed_adoption = None
         self.lm_head_adoption = None
 
@@ -419,8 +538,7 @@ class BlockDrafterBuilder:
             # `MatMulNBits` takes the activations first and the packed weight second.
             "weight_input": 1,
             "reason": (
-                "Both models run the same head, so a mismatch here means the target would "
-                "reject nearly every draft."
+                "Both models run the same head, so a mismatch here means the target would reject nearly every draft."
             ),
         }
 
@@ -531,8 +649,11 @@ class BlockDrafterBuilder:
             ("cumulative_sequence_lengths", ir.DataType.INT32, ["batch_size + 1"]),
             ("past_sequence_lengths", ir.DataType.INT32, ["batch_size"]),
             ("block_table", ir.DataType.INT32, ["batch_size", "max_num_blocks"]),
-            ("attention_metadata", ir.DataType.INT32, [3]),
         ]
+        if self.exclude_embeds:
+            declarations.append(("inputs_embeds", self.external_dtype, ["num_block", self.hidden_size]))
+        if self.ep == "cuda":
+            declarations.append(("attention_metadata", ir.DataType.INT32, [3]))
         for name, dtype, shape in declarations:
             if name == "q_row_map" and not self.uses_q_row_map:
                 continue
@@ -555,51 +676,19 @@ class BlockDrafterBuilder:
         if self.pending_adoptions():
             raise ValueError("adopt_target_tensors must run before saving a drafter that adopts the target's tensors.")
         out_path = os.path.join(out_dir, self.filename)
-        data_path = out_path + ".data"
-        with tempfile.TemporaryDirectory(dir=out_dir, prefix=f".{self.filename}.") as staging_dir:
-            staged_path = os.path.join(staging_dir, self.filename)
-            staged_data_path = staged_path + ".data"
-            with tqdm() as progress:
-                total_set = False
+        with tqdm() as progress:
+            total_set = False
 
-                def callback(tensor, metadata):
-                    nonlocal total_set
-                    if not total_set:
-                        progress.total = metadata.total
-                        total_set = True
-                    progress.update()
-                    progress.set_description(f"Saving {tensor.name} ({tensor.dtype.short_name()}, {tensor.shape})")
+            def callback(tensor, metadata):
+                nonlocal total_set
+                if not total_set:
+                    progress.total = metadata.total
+                    total_set = True
+                progress.update()
+                progress.set_description(f"Saving {tensor.name} ({tensor.dtype.short_name()}, {tensor.shape})")
 
-                Model.stamp_build_metadata(self.model)
-                ir.save(
-                    self.model,
-                    staged_path,
-                    external_data=os.path.basename(staged_data_path),
-                    size_threshold_bytes=0,
-                    callback=callback,
-                )
-            self.replace_model_files(staged_path, staged_data_path, out_path, data_path, staging_dir)
-
-    def replace_model_files(self, staged_path, staged_data_path, out_path, data_path, staging_dir):
-        replacements = ((staged_data_path, data_path), (staged_path, out_path))
-        backups = []
-        installed = []
-        try:
-            for _, destination in replacements:
-                if os.path.exists(destination):
-                    backup = os.path.join(staging_dir, os.path.basename(destination) + ".bak")
-                    os.replace(destination, backup)
-                    backups.append((backup, destination))
-            for source, destination in replacements:
-                os.replace(source, destination)
-                installed.append(destination)
-        except Exception:
-            for path in reversed(installed):
-                if os.path.exists(path):
-                    os.remove(path)
-            for backup, destination in reversed(backups):
-                os.replace(backup, destination)
-            raise
+            Model.stamp_build_metadata(self.model)
+            Model.save_onnx_model(self.model, out_path, callback=callback)
 
     def genai_config_section(self):
         section = {
@@ -623,7 +712,7 @@ class BlockDrafterBuilder:
                 "cumulative_sequence_lengths": "cumulative_sequence_lengths",
                 "past_sequence_lengths": "past_sequence_lengths",
                 "block_table": "block_table",
-                "attention_metadata": "attention_metadata",
+                "attention_metadata": "attention_metadata" if self.ep == "cuda" else "",
                 "past_key_names": "past_key_values.%d.key",
                 "past_value_names": "past_key_values.%d.value",
             },
@@ -636,4 +725,6 @@ class BlockDrafterBuilder:
         }
         if not self.uses_q_row_map:
             del section["inputs"]["q_row_map"]
+        if self.exclude_embeds:
+            section["inputs"]["inputs_embeds"] = "inputs_embeds"
         return section
