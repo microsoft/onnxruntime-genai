@@ -9,6 +9,8 @@
 src/csharp/AssemblyInfo.cs
 /ort
 /build
+/build-local-ext/
+/build-pin-verification/
 /build_*
 /test/models/*
 /cache_models

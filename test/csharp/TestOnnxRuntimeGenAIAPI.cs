@@ -635,6 +635,14 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         [Fact(DisplayName = "TestTokenPostProcessorResults")]
         public void TestTokenPostProcessorResults()
         {
+            var timestampProperty = typeof(TokenPostProcessorResult).GetProperty(nameof(TokenPostProcessorResult.TimestampResult))!;
+            Assert.Equal(typeof(TokenPostProcessorTimestampResult), timestampProperty.PropertyType);
+            Assert.False(timestampProperty.CanWrite);
+            Assert.False(typeof(TokenPostProcessorTimestampRecord).GetProperty(nameof(TokenPostProcessorTimestampRecord.Text))!.CanWrite);
+            Assert.Equal(typeof(ValueTuple<long, long>), typeof(TokenPostProcessorTimestampRecord)
+                .GetProperty(nameof(TokenPostProcessorTimestampRecord.FrameInterval))!.PropertyType);
+            Assert.Equal(typeof(ValueTuple<double, double>), typeof(TokenPostProcessorTimestampRecord)
+                .GetProperty(nameof(TokenPostProcessorTimestampRecord.TimeInterval))!.PropertyType);
             using var model = new Model(_tinyRandomGpt2ModelPath);
             using var tokenizer = new Tokenizer(model);
             using var parameters = new GeneratorParams(model);
@@ -643,7 +651,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             using var processor = new TokenPostProcessor(generator);
             Assert.Empty(processor.GetNextTokenResults());
             processor.FinalizeProcessing();
-            Assert.Null(Assert.Single(processor.GetNextTokenResults()).GetTimestamps());
+            Assert.Null(Assert.Single(processor.GetNextTokenResults()).TimestampResult);
             processor.Reset();
             generator.AppendTokens(new int[] { 0, 0, 0, 52 });
             generator.GenerateNextToken();
@@ -652,30 +660,30 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             processor.ProcessNextTokens();
             var result = Assert.Single(processor.GetNextTokenResults());
             var expectedText = plain.Decode(tokenId);
-            var copiedText = result.GetText();
-            Assert.Equal(expectedText, result.GetText());
-            Assert.Null(result.GetTimestamps());
-            Assert.Equal(expectedText, Assert.Single(processor.GetNextTokenResults()).GetText());
+            var copiedText = result.Text;
+            Assert.Equal(expectedText, result.Text);
+            Assert.Null(result.TimestampResult);
+            Assert.Equal(expectedText, Assert.Single(processor.GetNextTokenResults()).Text);
             generator.GenerateNextToken();
-            Assert.Equal(expectedText, Assert.Single(processor.GetNextTokenResults()).GetText());
+            Assert.Equal(expectedText, Assert.Single(processor.GetNextTokenResults()).Text);
             processor.ProcessNextTokens();
-            Assert.Throws<InvalidOperationException>(() => result.GetText());
-            Assert.Throws<InvalidOperationException>(() => result.GetTimestamps());
-            Assert.Equal(plain.Decode(generator.GetNextTokens()[0]), Assert.Single(processor.GetNextTokenResults()).GetText());
+            Assert.Throws<InvalidOperationException>(() => result.Text);
+            Assert.Throws<InvalidOperationException>(() => result.TimestampResult);
+            Assert.Equal(plain.Decode(generator.GetNextTokens()[0]), Assert.Single(processor.GetNextTokenResults()).Text);
             var beforeFinalize = Assert.Single(processor.GetNextTokenResults());
             processor.FinalizeProcessing();
-            Assert.Throws<InvalidOperationException>(() => beforeFinalize.GetText());
+            Assert.Throws<InvalidOperationException>(() => beforeFinalize.Text);
             processor.FinalizeProcessing();
-            Assert.Equal("", Assert.Single(processor.GetNextTokenResults()).GetText());
+            Assert.Equal("", Assert.Single(processor.GetNextTokenResults()).Text);
             var beforeReset = Assert.Single(processor.GetNextTokenResults());
             processor.Reset();
             Assert.Empty(processor.GetNextTokenResults());
-            Assert.Throws<InvalidOperationException>(() => beforeReset.GetText());
+            Assert.Throws<InvalidOperationException>(() => beforeReset.Text);
             generator.Dispose();
             Assert.Throws<ObjectDisposedException>(() => processor.ProcessNextTokens());
             processor.Dispose();
             Assert.Equal(expectedText, copiedText);
-            Assert.Throws<ObjectDisposedException>(() => result.GetText());
+            Assert.Throws<ObjectDisposedException>(() => result.Text);
             Assert.Throws<ObjectDisposedException>(() => processor.GetNextTokenResults());
         }
 
@@ -706,7 +714,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             generator.AppendTokens(new int[] { 0, 0, 0, 52 });
             generator.GenerateNextToken();
             processor.ProcessNextTokens();
-            Assert.Equal(plain.Decode(generator.GetNextTokens()[0]), Assert.Single(processor.GetNextTokenResults()).GetText());
+            Assert.Equal(plain.Decode(generator.GetNextTokens()[0]), Assert.Single(processor.GetNextTokenResults()).Text);
         }
 
         [Fact]

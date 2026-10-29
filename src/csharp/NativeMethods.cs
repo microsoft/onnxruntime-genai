@@ -8,6 +8,12 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 {
     internal static class NativeMethods
     {
+        internal enum TimestampRecordKind
+        {
+            Words = 0,
+            Segments = 1
+        }
+
         internal class NativeLib
         {
 #if __ANDROID__
@@ -394,15 +400,13 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr OgaTokenPostProcessorResultGetText(IntPtr result);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr OgaTokenPostProcessorResultGetTimestamps(IntPtr result);
+        public static extern IntPtr OgaTokenPostProcessorResultGetTimestampResult(IntPtr result);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern UIntPtr OgaTokenPostProcessorTimestampGetWordCount(IntPtr timestamps);
+        public static extern UIntPtr OgaTokenPostProcessorTimestampResultGetWordCount(IntPtr timestamps);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern UIntPtr OgaTokenPostProcessorTimestampGetSegmentCount(IntPtr timestamps);
+        public static extern UIntPtr OgaTokenPostProcessorTimestampResultGetSegmentCount(IntPtr timestamps);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr OgaTokenPostProcessorTimestampGetWord(IntPtr timestamps, UIntPtr index);
-        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr OgaTokenPostProcessorTimestampGetSegment(IntPtr timestamps, UIntPtr index);
+        public static extern IntPtr OgaTokenPostProcessorTimestampResultGetTimestampRecord(IntPtr timestamps, TimestampRecordKind kind, UIntPtr index);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr OgaTokenPostProcessorTimestampRecordGetText(IntPtr record);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]

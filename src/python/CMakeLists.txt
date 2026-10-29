@@ -11,8 +11,6 @@ if(NOT DEFINED REPO_ROOT)
   project(onnxruntime_genai_python LANGUAGES C CXX)
 
   get_filename_component(REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
-  set(SRC_ROOT ${REPO_ROOT}/src)
-
   # Read the project version the same way global_variables.cmake does in-tree so
   # the wheel (setup.py.in / __init__.py.in @VERSION_INFO@) is versioned correctly.
   file(READ "${REPO_ROOT}/VERSION_INFO" VERSION_INFO)

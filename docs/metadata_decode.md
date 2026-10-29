@@ -27,21 +27,29 @@ while (!generator->IsDone()) {
   postprocessor->ProcessNextTokens();
   for (const auto* result : postprocessor->GetNextTokenResults()) {
     ProcessText(result->GetText());
-    if (const auto* timestamps = result->GetTimestamps()) {
-      for (size_t index = 0; index < timestamps->GetWordCount(); ++index)
-        ProcessWord(timestamps->GetWord(index));
-      for (size_t index = 0; index < timestamps->GetSegmentCount(); ++index)
-        ProcessSegment(timestamps->GetSegment(index));
+    if (const auto* timestamps = result->GetTimestampResult()) {
+      for (size_t index = 0; index < timestamps->GetWordCount(); ++index) {
+        const auto* word = timestamps->GetTimestampRecord(OgaTimestampRecordKind_Words, index);
+        ProcessWord(word->GetText(), word->GetFrameInterval(), word->GetTimestampInterval());
+      }
+      for (size_t index = 0; index < timestamps->GetSegmentCount(); ++index) {
+        const auto* segment = timestamps->GetTimestampRecord(OgaTimestampRecordKind_Segments, index);
+        ProcessSegment(segment->GetText(), segment->GetFrameInterval(), segment->GetTimestampInterval());
+      }
     }
   }
 }
 postprocessor->Finalize();
 for (const auto* result : postprocessor->GetNextTokenResults()) {
-  if (const auto* timestamps = result->GetTimestamps()) {
-    for (size_t index = 0; index < timestamps->GetWordCount(); ++index)
-      ProcessWord(timestamps->GetWord(index));
-    for (size_t index = 0; index < timestamps->GetSegmentCount(); ++index)
-      ProcessSegment(timestamps->GetSegment(index));
+  if (const auto* timestamps = result->GetTimestampResult()) {
+    for (size_t index = 0; index < timestamps->GetWordCount(); ++index) {
+      const auto* word = timestamps->GetTimestampRecord(OgaTimestampRecordKind_Words, index);
+      ProcessWord(word->GetText(), word->GetFrameInterval(), word->GetTimestampInterval());
+    }
+    for (size_t index = 0; index < timestamps->GetSegmentCount(); ++index) {
+      const auto* segment = timestamps->GetTimestampRecord(OgaTimestampRecordKind_Segments, index);
+      ProcessSegment(segment->GetText(), segment->GetFrameInterval(), segment->GetTimestampInterval());
+    }
   }
 }
 ```
@@ -91,7 +99,7 @@ TokenPostProcessor.ProcessNextTokens()
 
 TokenPostProcessor.GetNextTokenResults()
   -> TokenPostProcessorInternal.GetNextTokenResults(): read only
-  -> GetText() / nullable GetTimestamps()
+  -> GetText() / nullable GetTimestampResult()
 ```
 
 The private generator getter borrows existing transducer token and interval storage,
@@ -105,8 +113,11 @@ The private getter returns an internal `TokenOutputs` with inline private spans,
 not a heap-allocated PImpl. Token IDs and optional timing are separate collections;
 `GetAcousticFrameIntervals()` returns null when timing is absent. The spans borrow their
 producer's storage and must remain valid for `Process()`. Native timing uses
-`AcousticFrameInterval` and `std::optional`, not the public C interval layout or an
-integer presence flag. Public C declarations and result handles are unchanged.
+`std::pair<int64_t, int64_t>` and `std::optional`, not a public C interval layout or
+an integer presence flag. Timestamp records store frame bounds as an integer pair
+and rounded second bounds as a `std::pair<double, double>`. The first element is
+the start and the second is the exclusive stop. Public C declarations and result
+handles remain field-based and opaque.
 
 ### Batch and Offline Input
 
@@ -209,11 +220,19 @@ origins and interval semantics. Diarization is not implemented by this processor
 ## Bindings and Lifetime
 
 C exposes opaque `OgaTokenPostProcessor`, `OgaTokenPostProcessorResult`,
-`OgaTokenPostProcessorTimestamp`, and
+`OgaTokenPostProcessorTimestampResult`, and
 `OgaTokenPostProcessorTimestampRecord` handles, with typed getters for text,
 timestamp presence, word/segment counts, records, frame bounds, and second bounds.
 Result and record layouts are private. An out-of-range C result or record lookup
-returns null; the C++ record accessor throws `std::out_of_range`.
+returns null. `OgaTokenPostProcessorTimestampResultGetTimestampRecord()` selects
+words or segments through `OgaTimestampRecordKind`; it also returns null for an
+unknown kind. Word and segment counts have separate field accessors.
+
+Each C getter reads one field or returns one opaque child handle. Adding a native
+record field does not change existing getter signatures; expose a new field through
+a new accessor rather than extending a combined output-parameter list. The C#
+P/Invoke declarations mirror these C functions directly. Public language properties
+hide those accessor calls without exposing native layouts.
 
 Results, nested timestamp records, and native strings are borrowed until the next processor mutation
 or destruction, not the next getter or generator operation. Never free them;
@@ -226,16 +245,30 @@ internal stream owns one immutable configuration; metadata state reads that same
 
 Python uses `TokenPostProcessor(generator)`, `process_next_tokens()`,
 `get_next_token_results()`, `finalize()`, and `reset()`. Borrowed
-`TokenPostProcessorResult` objects expose `get_text()` and nullable
-`get_timestamps()`. Timestamp objects expose `get_words()` and `get_segments()`;
-records expose `get_text()`, `get_start_frame()`, `get_stop_frame()`,
-`get_start_time()`, and `get_stop_time()`.
+`TokenPostProcessorResult` objects expose read-only `text` and nullable
+`timestamp_result` properties. `TokenPostProcessorTimestampResult` objects expose
+`words` and `segments`;
+records expose `text`, `frame_interval`, and `time_interval`. Interval properties
+return two-element tuples ordered as `(start, stop)`. These pybind11 properties
+call the C++ wrapper getters, which delegate to the per-field C API. The binding
+constructs Python strings, tuples, and lists without exposing native layouts.
 
 C# uses `TokenPostProcessor(generator)`, `ProcessNextTokens()`,
 `GetNextTokenResults()`, `FinalizeProcessing()`, and `Reset()`. Borrowed
-`TokenPostProcessorResult` objects expose `GetText()` and nullable `GetTimestamps()`.
-Timestamp objects expose `GetWords()` and `GetSegments()`; records expose
-`GetText()`, `GetStartFrame()`, `GetStopFrame()`, `GetStartTime()`, and `GetStopTime()`.
+`TokenPostProcessorResult` objects expose read-only `Text` and nullable `TimestampResult`
+properties. `TokenPostProcessorTimestampResult` objects expose `Words` and `Segments`; records expose `Text`,
+`FrameInterval`, and `TimeInterval`. Interval properties return named `(Start, Stop)`
+value tuples. For example, read `record.Text` and `record.TimeInterval.Start`.
+
+C++ follows the global, method-only opaque wrapper pattern. `GetNextTokenResults()`
+returns borrowed `const OgaTokenPostProcessorResult*` pointers, not copied payloads.
+`GetText()` returns borrowed native text; `GetTimestampResult()` returns a nullable
+`const OgaTokenPostProcessorTimestampResult*`. The container exposes `GetWordCount()`,
+`GetSegmentCount()`, and `GetTimestampRecord(kind, index)`. Records expose `GetText()`,
+`GetFrameInterval()`, and `GetTimestampInterval()`; interval getters return `std::pair`
+values through the per-field C accessors. No public payload fields or separate C++
+value-model types are exposed. Native C++ callers must respect the borrowed lifetime
+themselves and copy text needed beyond the next processor mutation.
 
 Python and C# wrap the same native results without copying their payload. They
 reject access to results or nested records invalidated by processing, finalization,
