@@ -37,6 +37,8 @@ jobs:
         hostArchitecture: Arm64
       ${{ else }}:
         name: 'onnxruntime-Ubuntu2204-AMD-CPU'
+        demands:
+          - ImageOverride -equals onnxruntime-ubuntu2404-nvme-x64
       os: linux
 
   # win-arm64 has no JDK on the native arm64 agent, so the arm64 JNI shim is

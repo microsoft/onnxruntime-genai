@@ -25,6 +25,8 @@ jobs:
   pool:
     name: 'onnxruntime-Ubuntu2204-AMD-CPU'
     os: linux
+    demands:
+      - ImageOverride -equals onnxruntime-ubuntu2404-nvme-x64
   timeoutInMinutes: 60
   workspace:
     clean: all

@@ -12,7 +12,10 @@ jobs:
 - job: build_${{ parameters.os }}_${{ parameters.arch }}
   displayName: 'Build wheel (${{ parameters.os }} ${{ parameters.arch }})'
   ${{ if eq(parameters.os, 'linux') }}:
-    pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
+    pool:
+      name: 'onnxruntime-Ubuntu2204-AMD-CPU'
+      demands:
+        - ImageOverride -equals onnxruntime-ubuntu2404-nvme-x64
   ${{ if eq(parameters.os, 'win') }}:
     pool: 'onnxruntime-Win-CPU-2022'
   ${{ if eq(parameters.os, 'osx') }}:

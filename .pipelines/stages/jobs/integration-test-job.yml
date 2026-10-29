@@ -26,7 +26,10 @@ jobs:
     ${{ if eq(parameters.ep, 'cuda') }}:
       pool: 'onnxruntime-ado-ubuntu-A10-NV32'
     ${{ else }}:
-      pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
+      pool:
+        name: 'onnxruntime-Ubuntu2204-AMD-CPU'
+        demands:
+          - ImageOverride -equals onnxruntime-ubuntu2404-nvme-x64
   ${{ if eq(parameters.os, 'win') }}:
     ${{ if or(eq(parameters.ep, 'cuda'), eq(parameters.ep, 'webgpu')) }}:
       pool: 'onnxruntime-Win2022-GPU-A10'

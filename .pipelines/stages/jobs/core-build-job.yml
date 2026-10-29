@@ -40,6 +40,8 @@ jobs:
         hostArchitecture: Arm64
       ${{ else }}:
         name: 'onnxruntime-Ubuntu2204-AMD-CPU'
+        demands:
+          - ImageOverride -equals onnxruntime-ubuntu2404-nvme-x64
       os: linux
 
   ${{ if eq(parameters.os, 'win') }}:
