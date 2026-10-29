@@ -1,13 +1,11 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License
 
-import os
-
 import onnx_ir as ir
 import torch
 from loaders.engram import EngramWeights
 
-from .qwen3_8_graph import Qwen4ExpGraphModel
+from .graph import Qwen4ExpGraphModel
 
 
 class Qwen4ExpEngramModel(Qwen4ExpGraphModel):
@@ -102,18 +100,12 @@ class Qwen4ExpEngramModel(Qwen4ExpGraphModel):
                 ["batch_size", "sequence_length", ngram_heads, head_dim],
             )
             gathered = f"{cast_name}/output_0"
-        self.make_reshape(
-            "/model/ple/ngram_embedding/Reshape",
-            [gathered, f"/model/constants/INT64/[0, 0, {ple_embed_dim}]"],
-            self.io_dtype,
-            ["batch_size", "sequence_length", ple_embed_dim],
-            output_name=engram_embeddings.name,
+        self.make_node(
+            "Reshape",
+            inputs=[gathered, f"/model/constants/INT64/[0, 0, {ple_embed_dim}]"],
+            outputs=[engram_embeddings.name],
+            name="/model/ple/ngram_embedding/Reshape",
         )
 
     def save_model(self, output_dir):
-        ir.save(
-            self.model,
-            os.path.join(output_dir, self.filename),
-            external_data="engram.onnx.data",
-            size_threshold_bytes=0,
-        )
+        super().save_model(output_dir)

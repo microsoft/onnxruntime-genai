@@ -4,7 +4,7 @@
 import onnx_ir as ir
 import torch
 
-from .qwen3_8_graph import Qwen4ExpGraphModel
+from .graph import Qwen4ExpGraphModel
 
 
 class Qwen4ExpEmbeddingModel(Qwen4ExpGraphModel):

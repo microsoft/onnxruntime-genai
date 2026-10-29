@@ -8,13 +8,6 @@ import onnx_ir as ir
 class Standard:
     """Reusable expansions containing only standard ONNX operators."""
 
-    def make_expansion_constant(self, name, value, dtype=np.int64):
-        # Shape inference needs these small constants in the graph, not in external weight files.
-        tensor = ir.tensor(np.asarray(value, dtype=dtype), name=name)
-        self.make_node("Constant", [], [name], name=f"{name}/Constant", value=tensor)
-        self.make_value(name, tensor.dtype, tensor.shape)
-        return name
-
     def make_gated_add(self, name, root_input, scaled_input, gate, shape):
         # scaled_input * gate -> Add(root_input)
         mul_name = f"{name}/Mul"
@@ -38,22 +31,22 @@ class Standard:
         head_size = int(self.values[scale].shape[0])
         grouped_shape = [*shape[:-1], shape[-1] // head_size, head_size]
         # An inferred -1 is ambiguous when batch or sequence length is zero.
-        reshape = self.make_expansion_constant(
-            name=f"{name}/group_shape", value=[*([0] * (len(shape) - 1)), *grouped_shape[-2:]]
-        )
+        reshape = f"/model/constants/INT64/{[*([0] * (len(shape) - 1)), *grouped_shape[-2:]]}"
         self.make_reshape(f"{name}/Reshape", [root_input, reshape], self.io_dtype, grouped_shape)
         normalized = f"{name}/SimplifiedLayerNormalization/output_0"
-        Standard.make_simplified_layer_norm(
-            self,
+        self.make_layernorm_subgraph(
             f"{name}/SimplifiedLayerNormalization",
-            f"{name}/Reshape/output_0",
-            scale,
-            normalized,
-            self.io_dtype,
-            grouped_shape,
+            op_type="SimplifiedLayerNormalization",
+            inputs=[f"{name}/Reshape/output_0", scale],
+            outputs=[normalized],
+            skip=False,
+            new_io_dtype=self.io_dtype,
+            axis=-1,
+            stash_type=1,
             epsilon=epsilon,
         )
-        restore = self.make_expansion_constant(f"{name}/flat_shape", [*([0] * (len(shape) - 1)), shape[-1]])
+        self.make_value(normalized, self.io_dtype, grouped_shape)
+        restore = f"/model/constants/INT64/{[*([0] * (len(shape) - 1)), shape[-1]]}"
         self.make_reshape(f"{name}/Flatten", [normalized, restore], self.io_dtype, shape)
         self.make_cast(f"{name}/norm/Cast", f"{name}/Flatten/output_0", ir.DataType.FLOAT, shape)
         self.make_cast(f"{name}/gate/Cast", gate, ir.DataType.FLOAT, shape)
@@ -75,119 +68,16 @@ class Standard:
         owners = self.get_mrope_owners(rotary_dim)
         leading = list(self.values[root_input].shape)[:-1]
         positions = self.make_mrope_positions(name, kwargs["position_ids"], leading)
-        axes = self.make_expansion_constant(f"{name}/head_axis", [2])
+        axes = "/model/constants/INT64/[2]"
         cos, sin = [
             self.make_mrope_cache(name, kind, kwargs[f"{kind}_cache_name"], positions, owners, axes, dtype, leading)
             for kind in ("cos", "sin")
         ]
-        reshape = self.make_expansion_constant(f"{name}/head_shape", [0, 0, num_heads, self.head_size])
+        reshape = f"/model/constants/INT64/[0, 0, {num_heads}, {self.head_size}]"
         self.make_reshape(f"{name}/Reshape", [root_input, reshape], dtype, [*leading, num_heads, self.head_size])
         heads = f"{name}/Reshape/output_0"
         rotated = self.make_mrope_rotation(name, heads, cos, sin, dtype, [*leading, num_heads, rotary_dim])
         self.make_mrope_output(name, heads, rotated, output, dtype, [*leading, num_heads, rotary_dim])
-
-    def get_mrope_owners(self, rotary_dim):
-        """Map each rotary cache column to its temporal, height, or width position stream."""
-        if rotary_dim <= 0 or rotary_dim % 2 != 0 or rotary_dim > self.head_size:
-            raise ValueError("TRT-RTX MRoPE requires a positive, even rotary dimension no greater than the head size")
-        half = rotary_dim // 2
-        sections = self.rope_attrs["mrope_section"]
-        layout = self.rope_attrs["mrope_layout"]
-        if (
-            layout not in (0, 1)
-            or len(sections) != 3
-            or any(section < 0 for section in sections)
-            or sum(sections) != half
-        ):
-            raise ValueError(
-                "TRT-RTX MRoPE requires sectioned/interleaved layout and three non-negative sections "
-                "summing to half the rotary dimension"
-            )
-        if layout == 0:
-            return np.repeat(np.arange(3), sections)
-        # Match ORT MRotaryEmbedding / Qwen apply_interleaved_mrope: T is the
-        # default; H/W replace every third slot up to their section bounds.
-        # This is not round-robin exhaustion: [1, 1, 2] maps to [T, H, W, T].
-        owners = np.zeros(half, dtype=np.int64)
-        for dim in (1, 2):
-            owners[dim : min(3 * sections[dim], half) : 3] = dim
-        return owners
-
-    def make_mrope_positions(self, name, position_ids, shape):
-        # position_ids[3, B, S] -> Gather(0), Gather(1), Gather(2)
-        positions = []
-        for dim in range(3):
-            index = self.make_expansion_constant(f"{name}/position_index_{dim}", dim)
-            self.make_gather(f"{name}/positions_{dim}", [position_ids, index], ir.DataType.INT64, shape, axis=0)
-            positions.append(f"{name}/positions_{dim}/output_0")
-        return positions
-
-    def make_mrope_cache(self, name, kind, cache, positions, owners, axes, dtype, leading):
-        # cache -> Gather(T/H/W positions) -> Where(H) -> Where(W) -> Unsqueeze(head axis)
-        cache_shape = [*leading, len(owners)]
-        streams = []
-        for dim, position in enumerate(positions):
-            self.make_gather(f"{name}/{kind}_{dim}", [cache, position], dtype, cache_shape, axis=0)
-            streams.append(f"{name}/{kind}_{dim}/output_0")
-        selected = streams[0]
-        for dim in (1, 2):
-            mask = self.make_expansion_constant(f"{name}/{kind}_mask_{dim}", owners == dim, np.bool_)
-            self.make_where(f"{name}/{kind}_select_{dim}", [mask, streams[dim], selected], dtype, cache_shape)
-            selected = f"{name}/{kind}_select_{dim}/output_0"
-        self.make_unsqueeze(f"{name}/{kind}/Unsqueeze", [selected, axes], dtype, [*leading, 1, len(owners)])
-        return f"{name}/{kind}/Unsqueeze/output_0"
-
-    def make_mrope_rotation(self, name, heads, cos, sin, dtype, shape):
-        # heads -> Gather(x1/x2) -> [x1*cos - x2*sin, x2*cos + x1*sin] -> Concat
-        #                                                              -> optional pair interleaving
-        rotary_dim = shape[-1]
-        half = rotary_dim // 2
-        pair_shape = [*shape[:-1], half]
-        interleaved = self.rope_attrs["interleaved"]
-        first = np.arange(0, rotary_dim, 2) if interleaved else np.arange(half)
-        second = first + 1 if interleaved else first + half
-        parts = []
-        for label, indices in (("first", first), ("second", second)):
-            index = self.make_expansion_constant(f"{name}/{label}_indices", indices)
-            self.make_gather(f"{name}/{label}", [heads, index], dtype, pair_shape, axis=-1)
-            parts.append(f"{name}/{label}/output_0")
-        x1, x2 = parts
-        rotated = []
-        for label, left, right, make_op in (("first", x1, x2, self.make_sub), ("second", x2, x1, self.make_add)):
-            self.make_mul(f"{name}/{label}/cos", [left, cos], dtype, pair_shape)
-            self.make_mul(f"{name}/{label}/sin", [right, sin], dtype, pair_shape)
-            make_op(
-                f"{name}/{label}/rotate",
-                [f"{name}/{label}/cos/output_0", f"{name}/{label}/sin/output_0"],
-                dtype,
-                pair_shape,
-            )
-            rotated.append(f"{name}/{label}/rotate/output_0")
-        self.make_concat(f"{name}/Concat", rotated, dtype, shape, axis=-1)
-        merged = f"{name}/Concat/output_0"
-        if interleaved:
-            order = self.make_expansion_constant(
-                f"{name}/interleave_indices", np.stack([np.arange(half), np.arange(half) + half], axis=1).ravel()
-            )
-            self.make_gather(f"{name}/Interleave", [merged, order], dtype, shape, axis=-1)
-            merged = f"{name}/Interleave/output_0"
-        return merged
-
-    def make_mrope_output(self, name, heads, rotated, output, dtype, shape):
-        # rotated + Gather(unrotated tail) -> Concat -> Reshape[B, S, N*H]
-        rotary_dim = shape[-1]
-        if rotary_dim < self.head_size:
-            tail_index = self.make_expansion_constant(f"{name}/tail_indices", np.arange(rotary_dim, self.head_size))
-            self.make_gather(
-                f"{name}/Tail", [heads, tail_index], dtype, [*shape[:-1], self.head_size - rotary_dim], axis=-1
-            )
-            self.make_concat(
-                f"{name}/ConcatTail", [rotated, f"{name}/Tail/output_0"], dtype, [*shape[:-1], self.head_size], axis=-1
-            )
-            rotated = f"{name}/ConcatTail/output_0"
-        flat_shape = self.make_expansion_constant(f"{name}/flat_shape", [0, 0, shape[-2] * self.head_size])
-        self.make_node("Reshape", [rotated, flat_shape], [output], name=name)
-        self.make_value(output, dtype, [*shape[:-2], shape[-2] * self.head_size])
 
     def make_layernorm_subgraph(self, name, **kwargs):
         # This method can be used to create multiple LayerNorm operations
@@ -212,7 +102,7 @@ class Standard:
                 output_0=outputs[0],
                 output_3=outputs[3] if len(outputs) > 3 else None,
                 io_dtype=new_io_dtype,
-                shape=["batch_size", "sequence_length", self.hidden_size],
+                shape=self.values[inputs[0]].shape,
             )
 
         elif op_type == "SimplifiedLayerNormalization":
@@ -223,7 +113,8 @@ class Standard:
                 weight_name=inputs[1],
                 output_0=outputs[0],
                 io_dtype=new_io_dtype,
-                shape=["batch_size", "sequence_length", self.hidden_size],
+                shape=self.values[inputs[0]].shape,
+                epsilon=kwargs.get("epsilon"),
             )
 
         elif op_type == "SkipSimplifiedLayerNormalization":
@@ -236,369 +127,286 @@ class Standard:
                 output_0=outputs[0],
                 output_3=outputs[3] if len(outputs) > 3 else None,
                 io_dtype=new_io_dtype,
-                shape=["batch_size", "sequence_length", self.hidden_size],
+                shape=self.values[inputs[0]].shape,
             )
 
     def make_skip_simplified_layer_norm(
         self, basename, root_input, skip_input, weight_name, output_0, output_3, io_dtype, shape
     ):
-        #                          root_input         skip_input
-        #                              |                  |
-        #                              +------------------+
-        #                              |
-        #                             Add-------------> output (1)
-        #                              |
-        #                      SimplifiedLayerNorm----> output (0)
-        make_add_name = f"{basename}/Add"
-        output_3 = f"{make_add_name}/output_0" if output_3 is None else output_3
-        self.make_node("Add", inputs=[root_input, skip_input], outputs=[output_3], name=make_add_name)
-        self.make_value(output_3, io_dtype, shape=["batch_size", "sequence_length", self.hidden_size])
-
-        make_simplified_layer_norm_name = f"{basename}/skip_simplified_layer_norm"
+        add_name = f"{basename}/Add"
+        output_3 = f"{add_name}/output_0" if output_3 is None else output_3
+        self.make_node("Add", [root_input, skip_input], [output_3], name=add_name)
+        self.make_value(output_3, io_dtype, shape)
         self.make_simplified_layer_norm(
-            make_simplified_layer_norm_name, output_3, weight_name, output_0, io_dtype, shape=shape
+            f"{basename}/skip_simplified_layer_norm",
+            output_3,
+            weight_name,
+            output_0,
+            io_dtype,
+            shape,
         )
 
     def make_skip_layer_norm(
         self, basename, root_input, skip_input, weight_name, bias_name, output_0, output_3, io_dtype, shape
     ):
-        #                          root_input         skip_input
-        #                              |                  |
-        #                              +------------------+
-        #                              |
-        #                             Add-------------> output (1)
-        #                              |
-        #                      LayerNormalization-----> output (0)
-        make_add_name = f"{basename}/Add"
-        output_3 = f"{make_add_name}/output_0" if output_3 is None else output_3
-        self.make_node("Add", inputs=[root_input, skip_input], outputs=[output_3], name=make_add_name)
-        self.make_value(output_3, io_dtype, shape=["batch_size", "sequence_length", self.hidden_size])
-
-        make_layer_norm_name = f"{basename}/LayerNormalization"
-        inputs = [output_3, weight_name, bias_name]
-
-        kwargs = {"epsilon": self.layernorm_attrs["epsilon"]}
-        kwargs.update({"axis": -1, "stash_type": 1})
-
-        self.make_node("LayerNormalization", inputs=inputs, outputs=[output_0], name=make_layer_norm_name, **kwargs)
-        self.make_value(output_0, io_dtype, shape=shape)
+        add_name = f"{basename}/Add"
+        output_3 = f"{add_name}/output_0" if output_3 is None else output_3
+        self.make_node("Add", [root_input, skip_input], [output_3], name=add_name)
+        self.make_value(output_3, io_dtype, shape)
+        self.make_layernorm_op(
+            f"{basename}/LayerNormalization",
+            "LayerNormalization",
+            [output_3, weight_name, bias_name],
+            [output_0],
+            False,
+            io_dtype,
+            epsilon=self.layernorm_attrs["epsilon"],
+            axis=-1,
+            stash_type=1,
+        )
+        self.make_value(output_0, io_dtype, shape)
 
     def make_simplified_layer_norm(self, basename, root_input, weight_name, output_0, io_dtype, shape, epsilon=None):
-        #                            Cast (float32) - most calc happens in higher precision
-        #                              |
-        #                      +-------+-------+
-        #                      |               |
-        #                     Pow              |
-        #                      |               |
-        #                  ReduceMean          |
-        #                      |               |
-        #                     Add              |
-        #                      |               |
-        #                    Sqrt              |
-        #                      |               |
-        #                     Div              |
-        #                      |               |
-        #                      +-------+-------+
-        #                              |
-        #                             Mul
-        #                              |
-        #                            Cast_1 (io_dtype - float16)
-        #                              |
-        #                            Mul_1
-
-        make_cast_name = f"{basename}/Cast"
-        self.make_cast(make_cast_name, root_input, ir.DataType.FLOAT, shape=shape)
-
-        make_pow_name = f"{basename}/Pow"
-        make_pow_inputs = [f"{make_cast_name}/output_0", "/model/constants/FLOAT/2"]
-
+        # Match SimplifiedLayerNormalization: accumulate in FP32, cast before scaling.
+        self.make_cast(f"{basename}/Cast", root_input, ir.DataType.FLOAT, shape)
         self.make_node(
-            "Pow", inputs=make_pow_inputs, outputs=[f"{make_pow_name}/output_0"], name=make_pow_name, domain=""
+            "Pow",
+            [f"{basename}/Cast/output_0", "/model/constants/FLOAT/2"],
+            [f"{basename}/Pow/output_0"],
+            name=f"{basename}/Pow",
         )
-        self.make_value(f"{make_pow_name}/output_0", ir.DataType.FLOAT, shape=shape)
-
-        make_reducemean_name = f"{basename}/ReduceMean"
-        make_reducemean_inputs = [f"{make_pow_name}/output_0", "/model/constants/INT64/[-1]"]
+        self.make_value(f"{basename}/Pow/output_0", ir.DataType.FLOAT, shape)
+        reduced_shape = [*shape[:-1], 1]
         self.make_reduce_mean(
-            make_reducemean_name, make_reducemean_inputs, ir.DataType.FLOAT, keepdims=True, shape=shape
+            f"{basename}/ReduceMean",
+            [f"{basename}/Pow/output_0", "/model/constants/INT64/[-1]"],
+            ir.DataType.FLOAT,
+            reduced_shape,
+            keepdims=1,
         )
+        epsilon = self.layernorm_attrs["epsilon"] if epsilon is None else epsilon
+        self.make_add(
+            f"{basename}/Add",
+            [f"{basename}/ReduceMean/output_0", f"/model/constants/FLOAT/{epsilon}"],
+            ir.DataType.FLOAT,
+            reduced_shape,
+        )
+        self.make_sqrt(f"{basename}/Sqrt", [f"{basename}/Add/output_0"], ir.DataType.FLOAT, reduced_shape)
+        self.make_div(
+            f"{basename}/Div",
+            ["/model/constants/FLOAT/1", f"{basename}/Sqrt/output_0"],
+            ir.DataType.FLOAT,
+            reduced_shape,
+        )
+        self.make_mul(
+            f"{basename}/Mul", [f"{basename}/Div/output_0", f"{basename}/Cast/output_0"], ir.DataType.FLOAT, shape
+        )
+        self.make_cast(f"{basename}/Cast_1", f"{basename}/Mul/output_0", io_dtype, shape)
+        self.make_node("Mul", [f"{basename}/Cast_1/output_0", weight_name], [output_0], name=f"{basename}/Mul_1")
+        self.make_value(output_0, io_dtype, shape)
 
-        make_add_name = f"{basename}/Add"
-        make_add_inputs = [
-            f"{make_reducemean_name}/output_0",
-            f"/model/constants/FLOAT/{self.layernorm_attrs['epsilon'] if epsilon is None else epsilon}",
-        ]
-        self.make_add(make_add_name, make_add_inputs, ir.DataType.FLOAT, shape=shape)
+    def make_mrope_positions(self, name, position_ids, shape):
+        positions = []
+        for dim in range(3):
+            index = f"{name}/position_index_{dim}"
+            self.make_initializer(np.array(dim, dtype=np.int64), index)
+            self.make_gather(f"{name}/positions_{dim}", [position_ids, index], ir.DataType.INT64, shape, axis=0)
+            positions.append(f"{name}/positions_{dim}/output_0")
+        return positions
 
-        make_sqrt_name = f"{basename}/Sqrt"
-        make_sqrt_inputs = [f"{make_add_name}/output_0"]
-        self.make_sqrt(make_sqrt_name, make_sqrt_inputs, ir.DataType.FLOAT, shape=shape)
+    def make_mrope_cache(self, name, kind, cache, positions, owners, axes, dtype, leading):
+        cache_shape = [*leading, len(owners)]
+        streams = []
+        for dim, position in enumerate(positions):
+            self.make_gather(f"{name}/{kind}_{dim}", [cache, position], dtype, cache_shape, axis=0)
+            streams.append(f"{name}/{kind}_{dim}/output_0")
+        selected = streams[0]
+        for dim in (1, 2):
+            mask = f"{name}/{kind}_mask_{dim}"
+            self.make_initializer(owners == dim, mask)
+            self.make_where(f"{name}/{kind}_select_{dim}", [mask, streams[dim], selected], dtype, cache_shape)
+            selected = f"{name}/{kind}_select_{dim}/output_0"
+        self.make_unsqueeze(f"{name}/{kind}/Unsqueeze", [selected, axes], dtype, [*leading, 1, len(owners)])
+        return f"{name}/{kind}/Unsqueeze/output_0"
 
-        make_div_name = f"{basename}/Div"
-        make_div_inputs = ["/model/constants/FLOAT/1", f"{make_sqrt_name}/output_0"]
-        self.make_div(make_div_name, make_div_inputs, ir.DataType.FLOAT, shape=shape)
+    def make_mrope_rotation(self, name, heads, cos, sin, dtype, shape):
+        rotary_dim = shape[-1]
+        half = rotary_dim // 2
+        pair_shape = [*shape[:-1], half]
+        interleaved = self.rope_attrs["interleaved"]
+        first = np.arange(0, rotary_dim, 2) if interleaved else np.arange(half)
+        second = first + 1 if interleaved else first + half
+        parts = []
+        for label, indices in (("first", first), ("second", second)):
+            index = f"{name}/{label}_indices"
+            self.make_initializer(indices, index)
+            self.make_gather(f"{name}/{label}", [heads, index], dtype, pair_shape, axis=-1)
+            parts.append(f"{name}/{label}/output_0")
+        x1, x2 = parts
+        rotated = []
+        for label, left, right, make_op in (("first", x1, x2, self.make_sub), ("second", x2, x1, self.make_add)):
+            self.make_mul(f"{name}/{label}/cos", [left, cos], dtype, pair_shape)
+            self.make_mul(f"{name}/{label}/sin", [right, sin], dtype, pair_shape)
+            make_op(
+                f"{name}/{label}/rotate",
+                [f"{name}/{label}/cos/output_0", f"{name}/{label}/sin/output_0"],
+                dtype,
+                pair_shape,
+            )
+            rotated.append(f"{name}/{label}/rotate/output_0")
+        self.make_concat(f"{name}/Concat", rotated, dtype, shape, axis=-1)
+        merged = f"{name}/Concat/output_0"
+        if interleaved:
+            order = f"{name}/interleave_indices"
+            self.make_initializer(np.stack([np.arange(half), np.arange(half) + half], axis=1).ravel(), order)
+            self.make_gather(f"{name}/Interleave", [merged, order], dtype, shape, axis=-1)
+            merged = f"{name}/Interleave/output_0"
+        return merged
 
-        make_mul_name = f"{basename}/Mul"
-        make_mul_inputs = [f"{make_div_name}/output_0", f"{make_cast_name}/output_0"]
-        self.make_mul(make_mul_name, make_mul_inputs, ir.DataType.FLOAT, shape=shape)
+    def make_mrope_output(self, name, heads, rotated, output, dtype, shape):
+        rotary_dim = shape[-1]
+        if rotary_dim < self.head_size:
+            tail_index = f"{name}/tail_indices"
+            self.make_initializer(np.arange(rotary_dim, self.head_size), tail_index)
+            self.make_gather(
+                f"{name}/Tail", [heads, tail_index], dtype, [*shape[:-1], self.head_size - rotary_dim], axis=-1
+            )
+            self.make_concat(
+                f"{name}/ConcatTail", [rotated, f"{name}/Tail/output_0"], dtype, [*shape[:-1], self.head_size], axis=-1
+            )
+            rotated = f"{name}/ConcatTail/output_0"
+        flat_shape = f"/model/constants/INT64/[0, 0, {shape[-2] * self.head_size}]"
+        self.make_node("Reshape", [rotated, flat_shape], [output], name=name)
+        self.make_value(output, dtype, [*shape[:-2], shape[-2] * self.head_size])
 
-        make_cast_1_name = f"{basename}/Cast_1"
-        self.make_cast(make_cast_1_name, f"{make_mul_name}/output_0", dtype=io_dtype, shape=shape)
-
-        make_mul_1_name = f"{basename}/Mul_1"
-        make_mul_1_inputs = [f"{make_cast_1_name}/output_0", weight_name]
-
-        self.make_node("Mul", inputs=make_mul_1_inputs, outputs=[output_0], name=make_mul_1_name)
-        self.make_value(output_0, dtype=io_dtype, shape=shape)
-
-    def make_branchwise_rms_norm_expansion(self, name, root_input, norm, hidden_size):
-        """Apply RMS normalization independently to each hyper-connection branch."""
+    def make_branchwise_rms_norm(self, name, root_input, norm, hidden_size):
         token_shape = ["num_tokens"] if self.use_paged_attention else ["batch_size", "sequence_length"]
-        grouped_shape = [*token_shape, self.hyper_connection_attrs["num_branches"], hidden_size]
-        grouped_dims = (
-            [-1, self.hyper_connection_attrs["num_branches"], hidden_size]
-            if self.use_paged_attention else [0, 0, self.hyper_connection_attrs["num_branches"], hidden_size]
-        )
-        reshape_name = f"{name}/Reshape"
+        branches = self.hyper_connection_attrs["num_branches"]
+        grouped_shape = [*token_shape, branches, hidden_size]
+        grouped_dims = [-1, branches, hidden_size] if self.use_paged_attention else [0, 0, branches, hidden_size]
         self.make_reshape(
-            reshape_name,
+            f"{name}/Reshape", [root_input, f"/model/constants/INT64/{grouped_dims}"], self.io_dtype, grouped_shape
+        )
+        norm_scale_name = f"{name[1:].replace('/', '.')}.norm_scale"
+        self.make_initializer(norm.weight.new_ones(hidden_size), norm_scale_name, to=self.io_dtype)
+        normalized = f"{name}/SimplifiedLayerNormalization/output_0"
+        self.make_layernorm_subgraph(
+            f"{name}/SimplifiedLayerNormalization",
+            op_type="SimplifiedLayerNormalization",
+            inputs=[f"{name}/Reshape/output_0", norm_scale_name],
+            outputs=[normalized],
+            skip=False,
+            new_io_dtype=self.io_dtype,
+            axis=-1,
+            stash_type=1,
+            epsilon=self.layernorm_attrs["epsilon"],
+        )
+        self.make_value(normalized, self.io_dtype, grouped_shape)
+        flat_shape = [*token_shape, branches * hidden_size]
+        flat_dims = [-1, branches * hidden_size] if self.use_paged_attention else [0, 0, branches * hidden_size]
+        self.make_reshape(
+            f"{name}/Flatten", [normalized, f"/model/constants/INT64/{flat_dims}"], self.io_dtype, flat_shape
+        )
+        scale_name = f"{name[1:].replace('/', '.')}.weight"
+        self.make_initializer(norm.weight + 1.0, scale_name, to=self.io_dtype)
+        self.make_mul(name, [f"{name}/Flatten/output_0", scale_name], self.io_dtype, flat_shape)
+        return f"{name}/output_0"
+
+    def make_scaled_silu(self, name, root_input, shape, branches):
+        self.make_div(
+            f"{name}/Div",
+            [root_input, f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{branches}"],
+            self.io_dtype,
+            shape,
+        )
+        self.make_sigmoid(f"{name}/Sigmoid", f"{name}/Div/output_0", self.io_dtype, shape)
+        self.make_mul(name, [f"{name}/Div/output_0", f"{name}/Sigmoid/output_0"], self.io_dtype, shape)
+        return f"{name}/output_0"
+
+    def make_hyper_connection_pre_mix(self, name, streams, pre_mix, token_shape, branches):
+        grouped_shape = [*token_shape, branches, self.hidden_size]
+        grouped_dims = (
+            [-1, branches, self.hidden_size] if self.use_paged_attention else [0, 0, branches, self.hidden_size]
+        )
+        self.make_reshape(
+            f"{name}/streams/Reshape", [streams, f"/model/constants/INT64/{grouped_dims}"], self.io_dtype, grouped_shape
+        )
+        self.make_reshape(
+            f"{name}/pre_mix/Reshape", [pre_mix, f"/model/constants/INT64/{grouped_dims}"], self.io_dtype, grouped_shape
+        )
+        self.make_mul(
+            f"{name}/Mul",
+            [f"{name}/streams/Reshape/output_0", f"{name}/pre_mix/Reshape/output_0"],
+            self.io_dtype,
+            grouped_shape,
+        )
+        self.make_reduce_mean(
+            name,
+            [f"{name}/Mul/output_0", "/model/constants/INT64/[-2]"],
+            self.io_dtype,
+            [*token_shape, self.hidden_size],
+            keepdims=0,
+        )
+        return f"{name}/output_0"
+
+    def make_hyper_connection_post_mix(
+        self, name, streams, block_output, post_mix, token_shape, branches, output_name=None
+    ):
+        self.make_unsqueeze(
+            f"{name}/output/Unsqueeze",
+            [block_output, "/model/constants/INT64/[-2]"],
+            self.io_dtype,
+            [*token_shape, 1, self.hidden_size],
+        )
+        self.make_unsqueeze(
+            f"{name}/weight/Unsqueeze",
+            [post_mix, "/model/constants/INT64/[-1]"],
+            self.io_dtype,
+            [*token_shape, branches, 1],
+        )
+        self.make_mul(
+            f"{name}/Mul",
+            [f"{name}/output/Unsqueeze/output_0", f"{name}/weight/Unsqueeze/output_0"],
+            self.io_dtype,
+            [*token_shape, branches, self.hidden_size],
+        )
+        flat_shape = [*token_shape, branches * self.hidden_size]
+        flat_dims = (
+            [-1, branches * self.hidden_size] if self.use_paged_attention else [0, 0, branches * self.hidden_size]
+        )
+        self.make_reshape(
+            f"{name}/Reshape",
+            [f"{name}/Mul/output_0", f"/model/constants/INT64/{flat_dims}"],
+            self.io_dtype,
+            flat_shape,
+        )
+        output = f"{name}/output_0" if output_name is None else output_name
+        self.make_node("Add", [streams, f"{name}/Reshape/output_0"], [output], name=name)
+        self.make_value(output, self.io_dtype, flat_shape)
+        return output
+
+    def make_l2_normalize(self, basename, root_input):
+        grouped_shape = ["batch_size", "sequence_length", self.linear_num_key_heads, self.linear_key_head_dim]
+        grouped_dims = [0, 0, self.linear_num_key_heads, self.linear_key_head_dim]
+        self.make_reshape(
+            f"{basename}/flat/Reshape",
             [root_input, f"/model/constants/INT64/{grouped_dims}"],
             self.io_dtype,
             grouped_shape,
         )
-        norm_scale_name = f"{name[1:].replace('/', '.')}.norm_scale"
-        self.make_initializer(norm.weight.new_ones(hidden_size), norm_scale_name, to=self.io_dtype)
-        normalized_name = f"{name}/SimplifiedLayerNormalization"
-        normalized = f"{normalized_name}/output_0"
-        Standard.make_simplified_layer_norm(
-            self,
-            normalized_name,
-            f"{reshape_name}/output_0",
-            norm_scale_name,
-            normalized,
-            self.io_dtype,
-            grouped_shape,
-            epsilon=self.layernorm_attrs["epsilon"],
-        )
-        flatten_name = f"{name}/Flatten"
-        flat_shape = [*token_shape, self.hyper_connection_attrs["num_branches"] * hidden_size]
-        flat_dims = (
-            [-1, self.hyper_connection_attrs["num_branches"] * hidden_size]
-            if self.use_paged_attention else [0, 0, self.hyper_connection_attrs["num_branches"] * hidden_size]
-        )
-        self.make_reshape(
-            flatten_name,
-            [normalized, f"/model/constants/INT64/{flat_dims}"],
-            self.io_dtype,
-            flat_shape,
-        )
-        scale_name = f"{name[1:].replace('/', '.')}.weight"
-        self.make_initializer(norm.weight + 1.0, scale_name, to=self.io_dtype)
-        scale_mul_name = f"{name}/Scale"
-        self.make_mul(scale_mul_name, [f"{flatten_name}/output_0", scale_name], self.io_dtype, flat_shape)
-        return f"{scale_mul_name}/output_0"
-
-    def make_scaled_silu_expansion(self, name, root_input, shape, alpha):
-        """Expand ScaledSiLU into standard ONNX operators."""
-        divide_name = f"{name}/Div"
-        self.make_div(
-            divide_name,
-            [root_input, f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{1 / alpha:g}"],
-            self.io_dtype,
-            shape,
-        )
-        sigmoid_name = f"{name}/Sigmoid"
-        self.make_sigmoid(sigmoid_name, f"{divide_name}/output_0", self.io_dtype, shape)
-        self.make_mul(
-            name,
-            [f"{divide_name}/output_0", f"{sigmoid_name}/output_0"],
-            self.io_dtype,
-            shape,
-        )
-        return f"{name}/output_0"
-
-    def make_hyper_connection_pre_mix_expansion(self, name, streams, pre_mix, token_shape, hidden_size):
-        """Expand HyperConnectionPreMix into reshape, multiply, and reduction nodes."""
-        grouped_shape = [*token_shape, self.hyper_connection_attrs["num_branches"], hidden_size]
-        grouped_dims = (
-            [-1, self.hyper_connection_attrs["num_branches"], hidden_size]
-            if self.use_paged_attention else [0, 0, self.hyper_connection_attrs["num_branches"], hidden_size]
-        )
-        stream_reshape = f"{name}/streams/Reshape"
-        self.make_reshape(
-            stream_reshape,
-            [streams, f"/model/constants/INT64/{grouped_dims}"],
-            self.io_dtype,
-            grouped_shape,
-        )
-        gate_reshape = f"{name}/pre_mix/Reshape"
-        self.make_reshape(
-            gate_reshape,
-            [pre_mix, f"/model/constants/INT64/{grouped_dims}"],
-            self.io_dtype,
-            grouped_shape,
-        )
-        weighted = f"{name}/Mul"
-        self.make_mul(
-            weighted,
-            [f"{stream_reshape}/output_0", f"{gate_reshape}/output_0"],
-            self.io_dtype,
-            grouped_shape,
-        )
-        self.make_reduce_mean(
-            name,
-            [f"{weighted}/output_0", "/model/constants/INT64/[-2]"],
-            self.io_dtype,
-            [*token_shape, hidden_size],
-        )
-        return f"{name}/output_0"
-
-    def make_hyper_connection_post_mix_expansion(self, name, streams, block_output, post_mix, token_shape, hidden_size):
-        """Expand identity-stream HyperConnectionPostMix into standard ONNX operators."""
-        output_unsqueeze = f"{name}/output/Unsqueeze"
-        self.make_unsqueeze(
-            output_unsqueeze,
-            [block_output, "/model/constants/INT64/[-2]"],
-            self.io_dtype,
-            [*token_shape, 1, hidden_size],
-        )
-        weight_unsqueeze = f"{name}/weight/Unsqueeze"
-        self.make_unsqueeze(
-            weight_unsqueeze,
-            [post_mix, "/model/constants/INT64/[-1]"],
-            self.io_dtype,
-            [*token_shape, self.hyper_connection_attrs["num_branches"], 1],
-        )
-        weighted = f"{name}/Mul"
-        self.make_mul(
-            weighted,
-            [f"{output_unsqueeze}/output_0", f"{weight_unsqueeze}/output_0"],
-            self.io_dtype,
-            [*token_shape, self.hyper_connection_attrs["num_branches"], hidden_size],
-        )
-        flatten = f"{name}/Reshape"
-        flat_dims = (
-            [-1, self.hyper_connection_attrs["num_branches"] * hidden_size]
-            if self.use_paged_attention else [0, 0, self.hyper_connection_attrs["num_branches"] * hidden_size]
-        )
-        self.make_reshape(
-            flatten,
-            [f"{weighted}/output_0", f"/model/constants/INT64/{flat_dims}"],
-            self.io_dtype,
-            [*token_shape, self.hyper_connection_attrs["num_branches"] * hidden_size],
-        )
-        self.make_add(
-            name,
-            [streams, f"{flatten}/output_0"],
-            self.io_dtype,
-            [*token_shape, self.hyper_connection_attrs["num_branches"] * hidden_size],
-        )
-        return f"{name}/output_0"
-
-    def make_selected_counts(self, layer_id, selected_indices, capacity, packed):
-        """Expand the indexer's -1 padding convention into executor counts."""
-        basename = f"/model/layers.{layer_id}/attn/indexer/selected"
-        valid = f"{basename}/GreaterOrEqual"
-        selected_shape = ["num_tokens", capacity] if packed else ["batch_size", "sequence_length", capacity]
-        self.make_greater_or_equal(
-            valid,
-            [selected_indices, "/model/constants/INT32/0"],
-            selected_shape,
-        )
-        valid_int = f"{basename}/Where"
-        self.make_where(
-            valid_int,
-            [f"{valid}/output_0", "/model/constants/INT32/1", "/model/constants/INT32/0"],
-            ir.DataType.INT32,
-            selected_shape,
-        )
-        counts = f"{basename}/ReduceSum"
-        count_shape = ["num_tokens"] if packed else ["batch_size", "sequence_length"]
-        self.make_reduce_sum(
-            counts,
-            [f"{valid_int}/output_0", "/model/constants/INT64/[-1]"],
-            ir.DataType.INT32,
-            count_shape,
-        )
-        return f"{counts}/output_0"
-
-    def make_l2_normalize_expansion(self, basename, root_input):
-        """Expand per-head L2 normalization without runtime Shape operators."""
-        total_dim = self.linear_num_key_heads * self.linear_key_head_dim
-        grouped_shape = [
-            "batch_size",
-            "sequence_length",
-            self.linear_num_key_heads,
-            self.linear_key_head_dim,
-        ]
-        flat_name = f"{basename}/flat/Reshape"
-        self.make_reshape(
-            flat_name,
-            [root_input, f"/model/constants/INT64/[0, 0, {self.linear_num_key_heads}, {self.linear_key_head_dim}]"],
-            self.io_dtype,
-            grouped_shape,
-        )
-        norm_name = f"{basename}/LpNormalization"
         self.make_lp_normalization(
-            norm_name,
-            f"{flat_name}/output_0",
+            f"{basename}/LpNormalization",
+            f"{basename}/flat/Reshape/output_0",
             self.io_dtype,
             grouped_shape,
             axis=-1,
             p=2,
         )
-        unflat_name = f"{basename}/unflat/Reshape"
+        total_dim = self.linear_num_key_heads * self.linear_key_head_dim
         self.make_reshape(
-            unflat_name,
-            [f"{norm_name}/output_0", f"/model/constants/INT64/[0, 0, {total_dim}]"],
+            f"{basename}/unflat/Reshape",
+            [f"{basename}/LpNormalization/output_0", f"/model/constants/INT64/[0, 0, {total_dim}]"],
             self.io_dtype,
             ["batch_size", "sequence_length", total_dim],
         )
-        return f"{unflat_name}/output_0"
-
-    def make_attention_mask_graph_capture_reformatting_for_gqa(self):
-        # Make nodes for the attention mask subgraph that calculates
-        # attributes about the 2D attention mask to use in GroupQueryAttention
-        #
-        # Key difference vs make_attention_mask_standard_reformatting_for_gqa:
-        # - Standard mode: total_seq_len is calculated from Shape op (always runs on CPU)
-        # - Graph capture mode: No Shape ops inserted to ensure all ops run on GPU (no CPU ops)
-        #
-        #          attention_mask
-        #               |
-        #         Cast to int32
-        #               |
-        #           ReduceSum (keepdims=0)
-        #              /    \
-        #             /      \
-        #           Sub    ReduceMax
-        #            |        |
-        #       seqlens_k  total_seq_len
-        #         (1D)       (int)
-        basename = "/model/attn_mask_reformat"
-        attn_mask_basename = f"{basename}/attn_mask_subgraph"
-
-        # Calculate ReduceSum from attention_mask
-        cast_1_name = f"{attn_mask_basename}/Cast"
-        self.make_cast(
-            cast_1_name,
-            self.input_names["attention_mask"],
-            dtype=ir.DataType.INT32,
-            shape=["batch_size", "total_sequence_length"],
-        )
-        reduce_sum_name = f"{attn_mask_basename}/ReduceSum"
-        reduce_sum_inputs = [f"{cast_1_name}/output_0", "/model/constants/INT64/[1]"]
-        self.make_reduce_sum(reduce_sum_name, reduce_sum_inputs, dtype=ir.DataType.INT32, shape=["batch_size"])
-
-        # Left branch: Calculate seqlens_k = ReduceSum - 1
-        sub_name = f"{attn_mask_basename}/Sub"
-        sub_inputs = [f"{reduce_sum_name}/output_0", "/model/constants/INT32/[1]"]
-        self.make_sub(sub_name, sub_inputs, dtype=ir.DataType.INT32, shape=["batch_size"])
-
-        # Right branch: ReduceMax to get maximum int value for total_seq_len
-        reduce_max_name = f"{attn_mask_basename}/ReduceMax"
-        reduce_max_inputs = [f"{reduce_sum_name}/output_0"]
-        self.make_reduce_max(reduce_max_name, reduce_max_inputs, dtype=ir.DataType.INT32, shape=[])
-
-        self.mask_attrs["seqlens_k"] = sub_name
-        self.mask_attrs["total_seq_len"] = reduce_max_name
+        return f"{basename}/unflat/Reshape/output_0"

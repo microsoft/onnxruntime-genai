@@ -53,6 +53,14 @@ const std::string& TokenizerStream::Decode(int32_t token) {
   return chunk_;
 }
 
+TokenizerStream::~TokenizerStream() = default;
+
+void TokenizerStream::Reset() {
+  OrtxDispose(&cache_.p_);
+  CheckResult(OrtxCreate(kOrtxKindDetokenizerCache, cache_.Address()));
+  chunk_.clear();
+}
+
 Tokenizer::Tokenizer(const Config& config) : bos_token_id_{config.model.bos_token_id},
                                              eos_token_id_{config.model.eos_token_id},
                                              pad_token_id_{config.model.pad_token_id},
@@ -64,9 +72,20 @@ Tokenizer::Tokenizer(const Config& config) : bos_token_id_{config.model.bos_toke
   const char* keys[] = {"add_special_tokens", "skip_special_tokens"};
   const char* values[] = {"false", "true"};
 
-  // Resolve tokenizer_dir (may be empty, relative, absolute, or a "sha256:" shared-asset reference).
-  const fs::path tokenizer_dir = config.ResolvePath(config.model.tokenizer_dir);
-  CheckResult(OrtxCreateTokenizerWithOptions(tokenizer_.Address(), tokenizer_dir.string().c_str(), keys, values, 2));
+  if (config.memory_assets_only_) {
+    memory_data_ = config.tokenizer_memory_data_;
+    if (!memory_data_) {
+      throw std::runtime_error("Memory asset bundle is missing tokenizer data.");
+    }
+    memory_blob_.emplace(std::string_view{memory_data_->config_json},
+                         std::string_view{memory_data_->tokenizer_json});
+    CheckResult(OrtxCreateTokenizerFromBlob(tokenizer_.Address(), &*memory_blob_));
+    CheckResult(OrtxUpdateTokenizerOptions(tokenizer_, keys, values, 2));
+  } else {
+    // Resolve tokenizer_dir (may be empty, relative, absolute, or a "sha256:" shared-asset reference).
+    const fs::path tokenizer_dir = config.ResolvePath(config.model.tokenizer_dir);
+    CheckResult(OrtxCreateTokenizerWithOptions(tokenizer_.Address(), tokenizer_dir.string().c_str(), keys, values, 2));
+  }
 
   // Resolve any unset bot/eot/bor/eor IDs via model-type fallback strings.
   // Resolve any unset bot/eot/bor/eor IDs via model-type fallback.
@@ -98,6 +117,12 @@ int32_t Tokenizer::GetEorTokenId() const {
 
 std::unique_ptr<TokenizerStream> Tokenizer::CreateStream() const {
   return std::make_unique<TokenizerStream>(*this);
+}
+
+OrtxWordPieceInfo Tokenizer::GetWordPieceInfo(int32_t vocab_id) const {
+  OrtxWordPieceInfo piece{};
+  CheckResult(OrtxGetTokenWordPieceInfo(tokenizer_, vocab_id, &piece));
+  return piece;
 }
 
 void Tokenizer::UpdateOptions(const char* const* keys, const char* const* values, size_t num_options) {

@@ -44,7 +44,6 @@ def _load_base_module():
 def test_paged_attention_metadata_is_int32_triplet(monkeypatch):
     base = _load_base_module()
     monkeypatch.setattr(base.Model, "make_ep_expansions_init", lambda self: None)
-    monkeypatch.setattr(base.Model, "make_inputs_init", lambda self: None)
     config = types.SimpleNamespace(
         architectures=["TestModel"],
         hidden_act="silu",
@@ -461,7 +460,19 @@ def test_prepack_matmulnbits_accepts_symmetric_zero_point_input(monkeypatch, mod
         lambda value, n, k, bits, force_arch: value,
     )
 
-    model.prepack_matmulnbits_weights(model_proto)
+    graph_model = ir.from_proto(model_proto)
+    graph_model.metadata_props["packing-test"] = "model"
+    graph_model.graph.initializers["weight"].const_value = ir.Tensor(
+        weight,
+        name="weight",
+        doc_string="Original packed weight",
+        metadata_props={"packing-test": "tensor"},
+    )
+    model.prepack_matmulnbits_weights(graph_model)
+    assert graph_model.metadata_props["packing-test"] == "model"
+    assert graph_model.graph.initializers["weight"].const_value.doc_string == "Original packed weight"
+    assert graph_model.graph.initializers["weight"].const_value.metadata_props["packing-test"] == "tensor"
+    model_proto = ir.to_proto(graph_model)
 
     attrs = {attr.name: onnx.helper.get_attribute_value(attr) for attr in model_proto.graph.node[0].attribute}
     assert attrs.get("weight_prepacked", 0) == expected
@@ -584,29 +595,7 @@ def test_structured_unquantized_moe_completes_cli_option_parsing(monkeypatch):
     assert "moe_quant_type" not in options
 
 
-@pytest.mark.parametrize(
-    ("extra_options", "expected"),
-    [
-        ({"disable_qkv_fusion": "true"}, False),
-        ({"disable_qkv_fusion": "false"}, True),
-        ({"disable_qkv_fusion": "true", "fuse_qkv": "true"}, True),
-    ],
-)
-def test_disable_qkv_fusion_is_a_deprecated_inverse_alias(monkeypatch, capsys, extra_options, expected):
-    _run_check_extra_options(monkeypatch, extra_options)
-
-    assert extra_options["fuse_qkv"] is expected
-    assert "'disable_qkv_fusion' is deprecated" in capsys.readouterr().out
-
-
-@pytest.mark.parametrize("value,expected", [("0", False), ("1", True), ("false", False), ("true", True)])
-def test_target_gate_up_fusion_cli_boolean_normalization(monkeypatch, value, expected):
-    options = {"fuse_mlp_gate_up": value}
-    _run_check_extra_options(monkeypatch, options)
-    assert options["fuse_mlp_gate_up"] is expected
-
-
-def test_target_gate_up_fusion_help_documents_default_off(monkeypatch):
+def test_target_gate_up_fusion_help_omits_removed_option(monkeypatch):
     help_text = []
 
     def inspect_help(parser):
@@ -617,8 +606,9 @@ def test_target_gate_up_fusion_help_documents_default_off(monkeypatch):
     with pytest.raises(SystemExit) as error:
         builder_module.get_args()
     assert error.value.code == 0
-    fusion_help = help_text[0].split("fuse_mlp_gate_up =", 1)[1].split("dflash2_precision =", 1)[0]
-    assert "Default is false." in fusion_help
+    assert "fuse_mlp_gate_up =" not in help_text[0]
+    for removed in ("fuse_qkv", "disable_qkv_fusion", "fuse_qk_norm_gqa", "indexshare_max_draft_tokens"):
+        assert not any(line.strip().startswith(f"{removed} =") for line in help_text[0].splitlines())
 
 
 def test_mtp_quant_config_json_is_parsed(monkeypatch):

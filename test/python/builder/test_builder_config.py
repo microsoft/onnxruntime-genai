@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 import onnx
+import onnx_ir as ir
 import pytest
 
 MODELS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models"
@@ -18,6 +19,8 @@ from builder_config import (  # noqa: E402
     apply_runtime_config,
     component_manifest_dict,
     export_component_package,
+    find_external_data_files,
+    load_component_model,
     load_json_object,
     normalize_builder_config,
     serialize_genai_config,
@@ -47,7 +50,7 @@ def test_genai_config_serialization_keeps_arrays_inline(values):
     assert serialized.endswith("\n")
 
 
-def _write_component_model(path, external_locations=()):
+def write_component_model(path, external_locations=()):
     initializers = []
     for index, location in enumerate(external_locations):
         tensor = onnx.TensorProto(name=f"weight_{index}", data_type=onnx.TensorProto.FLOAT, dims=[1])
@@ -68,7 +71,7 @@ def _write_component_model(path, external_locations=()):
     path.write_bytes(onnx.helper.make_model(graph).SerializeToString())
 
 
-def _write_external_component_model(
+def write_external_component_model(
     path,
     location,
     *,
@@ -109,7 +112,7 @@ def _write_external_component_model(
     path.write_bytes(onnx.helper.make_model(graph).SerializeToString())
 
 
-def _write_backbone(
+def write_backbone(
     output_dir, filename="model.onnx", output_name="hidden_states"
 ):
     output_dir.mkdir(exist_ok=True)
@@ -151,14 +154,6 @@ def test_device_allocator_option_is_preserved(option, value, version):
     assert effective.extra_options[option] == value
 
 
-@pytest.mark.parametrize("option", ["fuse_mlp_gate_up", "dflash2_fuse_gate_up"])
-@pytest.mark.parametrize("value", [True, False, "true", "false"])
-@pytest.mark.parametrize("version", [1, 2])
-def test_upstream_fusion_options_are_preserved(option, value, version):
-    effective = normalize_builder_config("int4", "cuda", {option: value}, builder_config_version=version)
-    assert effective.extra_options[option] == value
-
-
 @pytest.mark.parametrize("option", ["qmoe_weights_prepacked", "matmulnbits_weights_prepacked"])
 @pytest.mark.parametrize("version", [1, 2])
 def test_legacy_weight_packing_options_are_preserved(option, version):
@@ -194,20 +189,14 @@ def test_structured_weight_packing_options_are_preserved(section, field, compone
     assert result["quant_config"]["format" if section == "runtime" else section][field] == 0
 
 
-@pytest.mark.parametrize("value", [True, False])
-def test_target_fusion_optimization_reaches_builder(value):
-    effective = normalize_builder_config("int4", "cuda", target_options={"optimizations": {"fuse_mlp_gate_up": value}})
-    assert effective.extra_options["fuse_mlp_gate_up"] is value
-
-
-@pytest.mark.parametrize("drafter_type", ["none", "mtp", "dspark"])
-@pytest.mark.parametrize("value", [True, False])
-def test_drafter_fusion_rejects_unsupported_types(drafter_type, value):
-    with pytest.raises(ValueError, match="not supported"):
+@pytest.mark.parametrize("drafter_type", ["none", "mtp", "dflash2", "dspark"])
+@pytest.mark.parametrize("field", ["optimizations", "unknown_option"])
+def test_drafter_unknown_fields_are_rejected(drafter_type, field):
+    with pytest.raises(ValueError, match="unknown drafter_options field"):
         normalize_builder_config(
             "int4",
             "cuda",
-            drafter_options={"drafter_type": drafter_type, "optimizations": {"fuse_mlp_gate_up": value}},
+            drafter_options={"drafter_type": drafter_type, field: {}},
         )
 
 
@@ -307,8 +296,8 @@ def test_component_options_configure_hidden_state_backbone():
 def test_component_package_stages_multiple_named_heads(tmp_path):
     first = tmp_path / "first-source.onnx"
     second = tmp_path / "second-source.onnx"
-    _write_component_model(first)
-    _write_component_model(second)
+    write_component_model(first)
+    write_component_model(second)
     effective = normalize_builder_config(
         "fp32",
         "cpu",
@@ -321,7 +310,7 @@ def test_component_package_stages_multiple_named_heads(tmp_path):
         },
     )
     output_dir = tmp_path / "package"
-    _write_backbone(output_dir, "backbone.onnx")
+    write_backbone(output_dir, "backbone.onnx")
 
     export_component_package(effective.component_options, str(output_dir))
 
@@ -386,12 +375,12 @@ def test_component_package_copies_arbitrary_relative_external_data_files(tmp_pat
     source_dir = tmp_path / "source"
     source_dir.mkdir()
     graph = source_dir / "head.onnx"
-    _write_component_model(graph, ["weights/chunk-01.bin", "metadata.bin"])
+    write_component_model(graph, ["weights/chunk-01.bin", "metadata.bin"])
     (source_dir / "weights").mkdir()
     (source_dir / "weights" / "chunk-01.bin").write_bytes(b"weights")
     (source_dir / "metadata.bin").write_bytes(b"metadata")
     output_dir = tmp_path / "package"
-    _write_backbone(output_dir)
+    write_backbone(output_dir)
     effective = normalize_builder_config(
         "fp32",
         "cpu",
@@ -409,10 +398,10 @@ def test_component_package_rejects_backbone_external_data_collision(tmp_path):
     source_dir = tmp_path / "source"
     source_dir.mkdir()
     graph = source_dir / "head.onnx"
-    _write_component_model(graph, ["backbone.onnx.data"])
+    write_component_model(graph, ["backbone.onnx.data"])
     (source_dir / "backbone.onnx.data").write_bytes(b"head")
     output_dir = tmp_path / "package"
-    _write_backbone(output_dir, "backbone.onnx")
+    write_backbone(output_dir, "backbone.onnx")
     (output_dir / "backbone.onnx.data").write_bytes(b"backbone weights")
     effective = normalize_builder_config(
         "fp32",
@@ -433,7 +422,7 @@ def test_component_package_protects_backbone_declared_external_data(tmp_path):
     output_dir = tmp_path / "package"
     output_dir.mkdir()
     backbone = output_dir / "model.onnx"
-    _write_external_component_model(
+    write_external_component_model(
         backbone,
         "weights.bin",
         dims=(1,),
@@ -445,7 +434,7 @@ def test_component_package_protects_backbone_declared_external_data(tmp_path):
     source_dir = tmp_path / "source"
     source_dir.mkdir()
     head = source_dir / "head.onnx"
-    _write_external_component_model(head, "weights.bin", dims=(1,))
+    write_external_component_model(head, "weights.bin", dims=(1,))
     (source_dir / "weights.bin").write_bytes(b"\1" * 4)
     options = normalize_builder_config(
         "fp32",
@@ -473,12 +462,12 @@ def test_component_package_rejects_invalid_external_data_ranges(
     source_dir = tmp_path / "source"
     source_dir.mkdir()
     graph = source_dir / "head.onnx"
-    _write_external_component_model(
+    write_external_component_model(
         graph, "weights.bin", offset=offset, length=length
     )
     (source_dir / "weights.bin").write_bytes(b"\0" * file_size)
     output_dir = tmp_path / "package"
-    _write_backbone(output_dir)
+    write_backbone(output_dir)
     options = normalize_builder_config(
         "fp32",
         "cpu",
@@ -490,6 +479,114 @@ def test_component_package_rejects_invalid_external_data_ranges(
     assert not (output_dir / "head.onnx").exists()
 
 
+@pytest.mark.parametrize("location", [None, ""])
+def test_component_model_rejects_missing_external_location(tmp_path, location):
+    graph = tmp_path / "head.onnx"
+    write_external_component_model(graph, location)
+
+    with pytest.raises(ValueError, match="without a location"):
+        load_component_model(graph, "head")
+
+
+@pytest.mark.parametrize(
+    ("offset", "length", "match"),
+    [
+        ("", None, "offset is invalid"),
+        ("invalid", None, "offset is invalid"),
+        (None, "", "length is invalid"),
+        (None, "invalid", "length is invalid"),
+        (-1, None, "range is too small"),
+        (0, -1, "range is too small"),
+    ],
+)
+def test_component_model_rejects_malformed_external_ranges(
+    tmp_path, offset, length, match
+):
+    graph = tmp_path / "head.onnx"
+    write_external_component_model(graph, "weights.bin", offset=offset, length=length)
+    (tmp_path / "weights.bin").write_bytes(b"\0" * 16)
+
+    with pytest.raises(ValueError, match=match):
+        load_component_model(graph, "head")
+
+
+@pytest.mark.parametrize(
+    "placement",
+    [
+        "initializer",
+        "tensor",
+        "tensors",
+        "graph",
+        "graphs",
+        "function",
+        "function_default",
+        "sparse_initializer",
+        "sparse_attribute",
+        "training",
+        "malformed_attribute",
+        "non_external",
+    ],
+)
+def test_component_model_checks_original_nested_external_metadata(tmp_path, placement):
+    graph = tmp_path / "head.onnx"
+    write_external_component_model(graph, "../outside.bin")
+    model = onnx.load(graph, load_external_data=False)
+    tensor = copy.deepcopy(model.graph.initializer[0])
+    del model.graph.initializer[:]
+    attribute = onnx.helper.make_attribute("value", tensor)
+    if placement == "initializer":
+        model.graph.initializer.append(tensor)
+    elif placement == "non_external":
+        tensor.data_location = onnx.TensorProto.DEFAULT
+        model.graph.initializer.append(tensor)
+    elif placement == "sparse_initializer":
+        model.graph.sparse_initializer.add().values.CopyFrom(tensor)
+    elif placement == "training":
+        model.training_info.add().initialization.initializer.append(tensor)
+    elif placement == "function_default":
+        model.functions.add().attribute_proto.append(attribute)
+    else:
+        if placement == "tensors":
+            attribute = onnx.helper.make_attribute("values", [tensor])
+        elif placement in ("graph", "graphs"):
+            nested = onnx.helper.make_graph([], "nested", [], [], [tensor])
+            attribute = onnx.helper.make_attribute(
+                "body", [nested] if placement == "graphs" else nested
+            )
+        elif placement == "sparse_attribute":
+            attribute = onnx.AttributeProto(
+                name="sparse", type=onnx.AttributeProto.SPARSE_TENSOR
+            )
+            attribute.sparse_tensor.values.CopyFrom(tensor)
+        elif placement == "malformed_attribute":
+            attribute.type = onnx.AttributeProto.INT
+        node = (
+            model.functions.add().node.add()
+            if placement == "function"
+            else model.graph.node[0]
+        )
+        node.attribute.append(attribute)
+    graph.write_bytes(model.SerializeToString())
+
+    with pytest.raises(ValueError, match="unsafe external data location"):
+        load_component_model(graph, "head")
+
+
+def test_component_model_uses_ir_without_reading_external_payload(tmp_path):
+    graph = tmp_path / "head.onnx"
+    write_external_component_model(graph, "weights.bin", offset=4, length=16)
+    (tmp_path / "weights.bin").write_bytes(b"\0" * 20)
+
+    model = load_component_model(graph, "head")
+
+    assert isinstance(model, ir.Model)
+    assert [value.name for value in model.graph.inputs] == ["hidden_states"]
+    assert isinstance(model.graph.initializers["weight"].const_value, ir.ExternalTensor)
+    assert find_external_data_files(model, graph, "head") == [
+        ("weights.bin", tmp_path / "weights.bin")
+    ]
+
+
 @pytest.mark.parametrize(
     "reserved_name",
     ["genai_config.json", "tokenizer.json", "model.onnx.data"],
@@ -498,9 +595,9 @@ def test_component_package_rejects_exporter_owned_external_data(
     tmp_path, reserved_name
 ):
     output_dir = tmp_path / "package"
-    _write_backbone(output_dir)
+    write_backbone(output_dir)
     graph = output_dir / "head.onnx"
-    _write_component_model(graph, [reserved_name])
+    write_component_model(graph, [reserved_name])
     (output_dir / reserved_name).write_bytes(b"owned")
     options = normalize_builder_config(
         "fp32",
@@ -515,7 +612,7 @@ def test_component_package_rejects_exporter_owned_external_data(
 
 def test_component_package_rejects_source_overwritten_by_backbone(tmp_path):
     output_dir = tmp_path / "package"
-    _write_backbone(output_dir)
+    write_backbone(output_dir)
     source = output_dir / "model.onnx"
     original = source.read_bytes()
     options = normalize_builder_config(
@@ -541,9 +638,9 @@ def test_component_package_rejects_source_overwritten_by_backbone(tmp_path):
 
 def test_component_package_validates_graph_binding_names(tmp_path):
     graph = tmp_path / "head.onnx"
-    _write_component_model(graph)
+    write_component_model(graph)
     output_dir = tmp_path / "package"
-    _write_backbone(output_dir)
+    write_backbone(output_dir)
     effective = normalize_builder_config(
         "fp32",
         "cpu",
@@ -582,11 +679,11 @@ def test_component_package_validates_graph_binding_names(tmp_path):
 
 def test_component_package_rejects_destination_symlink(tmp_path):
     graph = tmp_path / "head.onnx"
-    _write_component_model(graph)
+    write_component_model(graph)
     outside = tmp_path / "outside.onnx"
     outside.write_bytes(b"unchanged")
     output_dir = tmp_path / "package"
-    _write_backbone(output_dir)
+    write_backbone(output_dir)
     (output_dir / "head.onnx").symlink_to(outside)
     effective = normalize_builder_config(
         "fp32",
@@ -601,11 +698,11 @@ def test_component_package_rejects_destination_symlink(tmp_path):
 
 def test_component_package_rejects_manifest_symlink(tmp_path):
     graph = tmp_path / "head.onnx"
-    _write_component_model(graph)
+    write_component_model(graph)
     outside = tmp_path / "outside.json"
     outside.write_text("unchanged")
     output_dir = tmp_path / "package"
-    _write_backbone(output_dir)
+    write_backbone(output_dir)
     (output_dir / "component_manifest.json").symlink_to(outside)
     options = normalize_builder_config(
         "fp32",
@@ -623,11 +720,11 @@ def test_component_package_rejects_non_directory_parent(tmp_path):
     source_dir = tmp_path / "source"
     source_dir.mkdir()
     graph = source_dir / "head.onnx"
-    _write_component_model(graph, ["weights/chunk.bin"])
+    write_component_model(graph, ["weights/chunk.bin"])
     (source_dir / "weights").mkdir()
     (source_dir / "weights" / "chunk.bin").write_bytes(b"weights")
     output_dir = tmp_path / "package"
-    _write_backbone(output_dir)
+    write_backbone(output_dir)
     (output_dir / "weights").write_bytes(b"not a directory")
     options = normalize_builder_config(
         "fp32",
@@ -644,7 +741,7 @@ def test_symlinked_component_uses_external_data_beside_link(tmp_path):
     target_dir = tmp_path / "target"
     target_dir.mkdir()
     target = target_dir / "head.onnx"
-    _write_component_model(target, ["weights.bin"])
+    write_component_model(target, ["weights.bin"])
     (target_dir / "weights.bin").write_bytes(b"target weights")
 
     source_dir = tmp_path / "source"
@@ -653,7 +750,7 @@ def test_symlinked_component_uses_external_data_beside_link(tmp_path):
     linked.symlink_to(target)
     (source_dir / "weights.bin").write_bytes(b"linked weights")
     output_dir = tmp_path / "package"
-    _write_backbone(output_dir)
+    write_backbone(output_dir)
     options = normalize_builder_config(
         "fp32",
         "cpu",
@@ -667,9 +764,9 @@ def test_symlinked_component_uses_external_data_beside_link(tmp_path):
 
 def test_component_package_can_replace_its_own_previous_outputs(tmp_path):
     graph = tmp_path / "head.onnx"
-    _write_component_model(graph)
+    write_component_model(graph)
     output_dir = tmp_path / "package"
-    _write_backbone(output_dir)
+    write_backbone(output_dir)
     options = normalize_builder_config(
         "fp32",
         "cpu",
@@ -685,11 +782,11 @@ def test_component_package_can_replace_its_own_previous_outputs(tmp_path):
 
 def test_component_package_rejects_copy_source_destination_chain(tmp_path):
     output_dir = tmp_path / "package"
-    _write_backbone(output_dir)
+    write_backbone(output_dir)
     first = output_dir / "a.onnx"
     second = output_dir / "b.onnx"
-    _write_component_model(first)
-    _write_component_model(second)
+    write_component_model(first)
+    write_component_model(second)
     first_bytes = first.read_bytes()
     second_bytes = second.read_bytes()
     options = normalize_builder_config(
@@ -738,7 +835,7 @@ def test_component_backbone_rejects_symlink_and_missing_config_only_file(tmp_pat
 
 def test_component_backbone_rejects_external_data_directory(tmp_path):
     output_dir = tmp_path / "package"
-    _write_backbone(output_dir)
+    write_backbone(output_dir)
     (output_dir / "model.onnx.data").mkdir()
     options = normalize_builder_config(
         "fp32",
@@ -760,12 +857,12 @@ def test_config_only_backbone_requires_hidden_states_output(tmp_path):
         component_options={"heads": [{"name": "head", "source": "head.onnx"}]},
     ).component_options
 
-    _write_backbone(output_dir)
+    write_backbone(output_dir)
     validate_component_backbone_destination(
         options, output_dir, require_exists=True
     )
 
-    _write_backbone(output_dir, output_name="logits")
+    write_backbone(output_dir, output_name="logits")
     with pytest.raises(ValueError, match="hidden_states output"):
         validate_component_backbone_destination(
             options, output_dir, require_exists=True
@@ -806,9 +903,9 @@ def test_component_package_rejects_unsafe_external_data_locations(tmp_path, loca
     source_dir = tmp_path / "source"
     source_dir.mkdir()
     graph = source_dir / "head.onnx"
-    _write_component_model(graph, [location])
+    write_component_model(graph, [location])
     output_dir = tmp_path / "package"
-    _write_backbone(output_dir)
+    write_backbone(output_dir)
     effective = normalize_builder_config(
         "fp32",
         "cpu",
@@ -959,30 +1056,6 @@ def test_structured_target_overrides_legacy_alias():
     assert effective.target_options["quant_config"]["weights"]["block_size"] == 128
 
 
-@pytest.mark.parametrize("fuse_qkv", [False, True])
-def test_target_qkv_fusion_maps_to_legacy_option(fuse_qkv):
-    effective = normalize_builder_config(
-        "int4",
-        "cuda",
-        target_options={"optimizations": {"fuse_qkv": fuse_qkv}},
-    )
-
-    assert effective.extra_options["fuse_qkv"] is fuse_qkv
-
-
-@pytest.mark.parametrize("legacy_option", ["fuse_qkv", "disable_qkv_fusion"])
-def test_structured_target_qkv_fusion_overrides_legacy_option(legacy_option):
-    with pytest.warns(UserWarning, match=f"fuse_qkv overrides legacy extra_options.{legacy_option}"):
-        effective = normalize_builder_config(
-            "int4",
-            "cuda",
-            {legacy_option: True},
-            target_options={"optimizations": {"fuse_qkv": False}},
-        )
-
-    assert effective.extra_options["fuse_qkv"] is False
-
-
 @pytest.mark.parametrize(
     "legacy_options",
     [
@@ -1061,36 +1134,6 @@ def test_dflash2_policy_is_independent_from_target(tmp_path):
     assert drafter_quant["weights"]["type"] == "none"
     assert drafter_quant["weights"]["block_size"] == 32
     assert effective.extra_options["aux_hidden_state_layers"] == "2,4"
-
-
-@pytest.mark.parametrize("fuse_qkv", [False, True])
-def test_dflash2_qkv_fusion_maps_to_legacy_option(tmp_path, fuse_qkv):
-    effective = normalize_builder_config(
-        "int4",
-        "cuda",
-        target_options={"attention": {"implementation": "paged"}},
-        drafter_options={
-            "drafter_type": "dflash2",
-            "path": make_drafter_checkpoint(tmp_path),
-            "optimizations": {"fuse_qkv": fuse_qkv},
-        },
-    )
-    assert effective.extra_options["dflash2_fuse_qkv"] is fuse_qkv
-
-
-@pytest.mark.parametrize("fuse_qkv", [False, True])
-def test_qkv_fusion_is_rejected_for_other_drafters(tmp_path, fuse_qkv):
-    with pytest.raises(ValueError, match="fuse_qkv is not supported for drafter_type=dspark"):
-        normalize_builder_config(
-            "int4",
-            "cuda",
-            target_options={"attention": {"implementation": "paged"}},
-            drafter_options={
-                "drafter_type": "dspark",
-                "path": make_drafter_checkpoint(tmp_path),
-                "optimizations": {"fuse_qkv": fuse_qkv},
-            },
-        )
 
 
 def test_webgpu_dflash2_defaults_to_fp16_body(tmp_path):

@@ -100,7 +100,9 @@ def load_builder_module(module_name):
     if qualified_name in sys.modules:
         setattr(sys.modules["models.builders"], module_name, sys.modules[qualified_name])
         return sys.modules[qualified_name]
-    spec = importlib.util.spec_from_file_location(qualified_name, BUILDERS_DIR / f"{module_name}.py")
+    module_path = BUILDERS_DIR.joinpath(*module_name.split("."))
+    module_path = module_path / "__init__.py" if module_path.is_dir() else module_path.with_suffix(".py")
+    spec = importlib.util.spec_from_file_location(qualified_name, module_path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[qualified_name] = module
     spec.loader.exec_module(module)

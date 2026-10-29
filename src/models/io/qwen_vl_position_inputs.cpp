@@ -43,17 +43,6 @@ struct UpdatePositionIdsFunctor {
   }
 };
 
-struct FillMaskFunctor {
-  OrtValue* attention_mask;
-  int64_t total_size;
-
-  template <typename T>
-  void operator()() {
-    auto* mask_data = attention_mask->GetTensorMutableData<T>();
-    std::fill_n(mask_data, total_size, static_cast<T>(1));
-  }
-};
-
 struct InitPositionIdsFunctor {
   Qwen2VLPositionInputs* self;
   DeviceSpan<int32_t> next_tokens;
@@ -127,6 +116,8 @@ Qwen2VLPositionInputs::Qwen2VLPositionInputs(const Model& model, State& state, D
     rotary_history_input_ = std::make_unique<Tensor>(model_.p_device_inputs_, Ort::TypeToTensorType<int64_t>);
     rotary_history_input_->CreateTensor(history_shape, true);
   }
+  position_buffer_ = CreatePositionIdsBuffer(*state_.params_);
+  mask_buffer_ = CreateAttentionMaskBuffer(model_, *state_.params_, DynamicMaskUpdate::FillOnes);
 }
 
 void Qwen2VLPositionInputs::SetGridTensors(const std::shared_ptr<Tensor>& image_grid_thw,
@@ -372,9 +363,8 @@ void Qwen2VLPositionInputs::CreateAndInitialize3DPositionIDs(DeviceSpan<int32_t>
 
   UpdateRotaryHistory(*position_ids, 0, state_.params_->search.num_beams);
   // Move tensor to GPU and expand by num_beams
-  position_ids_->ort_tensor_ = model_.ExpandInputs(position_ids, state_.params_->search.num_beams);
+  SetPositionIDs(std::move(position_ids), state_.params_->search.num_beams);
   position_ids_shape_[1] *= state_.params_->search.num_beams;
-  state_.inputs_[posid_input_index_] = position_ids_->GetOrtTensor();
 
   // Expand rope_deltas_
   std::vector<int64_t> expanded_deltas;
@@ -403,9 +393,7 @@ void Qwen2VLPositionInputs::CreateAndInitializeAttentionMask(DeviceSpan<int32_t>
     }
   }
 
-  // Move tensor to GPU and expand by num_beams
-  attention_mask_->ort_tensor_ = model_.ExpandInputs(attention_mask, state_.params_->search.num_beams);
-  attention_mask_shape_[0] *= state_.params_->search.num_beams;
+  mask_buffer_->Initialize(*attention_mask_, attention_mask, state_.params_->search.num_beams, attention_mask_shape_);
   state_.inputs_[mask_input_index_] = attention_mask_->GetOrtTensor();
 }
 
@@ -423,16 +411,16 @@ void Qwen2VLPositionInputs::Update3DPositionIDs(int base_pos) {
   DispatchOnType(type_, UpdatePositionIdsFunctor{position_ids.get(), base_pos, batch_size, seq_len, rope_deltas_});
 
   UpdateRotaryHistory(*position_ids, base_pos, 1);
-  position_ids_->ort_tensor_ = model_.ExpandInputs(position_ids, 1);  // No beam expansion needed, already expanded
+  SetPositionIDs(std::move(position_ids), 1);  // Already expanded over beams.
+}
+
+void Qwen2VLPositionInputs::SetPositionIDs(std::unique_ptr<OrtValue> position_ids, int num_beams) {
+  position_buffer_->Assign(*position_ids_, model_, position_ids, num_beams);
   state_.inputs_[posid_input_index_] = position_ids_->GetOrtTensor();
 }
 
-void Qwen2VLPositionInputs::UpdateAttentionMask() {
-  auto attention_mask = OrtValue::CreateTensor(model_.allocator_cpu_, attention_mask_shape_, type_);
-
-  DispatchOnType(type_, FillMaskFunctor{attention_mask.get(), attention_mask_shape_[0] * attention_mask_shape_[1]});
-
-  attention_mask_->ort_tensor_ = model_.ExpandInputs(attention_mask, 1);
+void Qwen2VLPositionInputs::UpdateAttentionMask(int total_length, int new_length) {
+  mask_buffer_->Update(*attention_mask_, attention_mask_shape_, total_length, new_length);
   state_.inputs_[mask_input_index_] = attention_mask_->GetOrtTensor();
 }
 
@@ -453,8 +441,7 @@ void Qwen2VLPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_le
       attention_mask_shape_[1] = new_length;
       DispatchOnType(type_, InitAttentionMaskFunctor{this, next_tokens, attention_mask_shape_});
     } else {
-      attention_mask_shape_[1] = total_length;
-      UpdateAttentionMask();
+      UpdateAttentionMask(total_length, new_length);
     }
   }
 
@@ -462,15 +449,19 @@ void Qwen2VLPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_le
 }
 
 void Qwen2VLPositionInputs::RewindTo(size_t index) {
-  // For Qwen2-VL, we need to handle rewinding for beam search
-  // This is a simplified rewind, just updating the shape.
-  // A full rewind would require re-calculating rope_deltas if we rewound into the prompt.
-  // For now, we assume rewind only happens during generation.
+  if (index == 0) {
+    is_first_update_ = true;
+    position_ids_shape_[1] = state_.params_->search.batch_size;
+    attention_mask_shape_[0] = state_.params_->search.batch_size;
+    rope_deltas_.clear();
+    return;
+  }
+  // Partial rewinds during generation retain the prompt's mRoPE deltas.
   if (has_posid_input_) {
     position_ids_shape_[2] = static_cast<int64_t>(index);
   }
   if (has_mask_input_) {
-    attention_mask_shape_[1] = static_cast<int64_t>(index);
+    mask_buffer_->Rewind(*attention_mask_, attention_mask_shape_, index);
   }
   if (rotary_history_) {
     rotary_history_->Forecast(index);

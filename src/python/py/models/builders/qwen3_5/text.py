@@ -1,14 +1,164 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License
+
 import math
 
 import onnx_ir as ir
 import torch
 
-from .standard import Standard
+from ..base import Model
+from ..expansions.standard import Standard
 
 
-class Qwen35:
-    make_l2_normalize_expansion = Standard.make_l2_normalize_expansion
-    """Shared Qwen3.5 attention gate and normalization expansions."""
+class Qwen35TextModel(Model):
+    make_l2_normalize = Standard.make_l2_normalize
+
+    def validate_gated_delta_net_options(self, state_window, ep):
+        if self.use_paged_attention and ep not in {"cuda", "webgpu"}:
+            raise ValueError("Paged GatedDeltaNet exports require the CUDA or WebGPU execution provider")
+        if ep == "webgpu":
+            supported_dtypes = (
+                (ir.DataType.FLOAT16,) if self.use_paged_attention else (ir.DataType.FLOAT16, ir.DataType.FLOAT)
+            )
+            if self.io_dtype not in supported_dtypes:
+                raise ValueError(
+                    "GatedDeltaNet exports on WebGPU require FP16 for paged attention "
+                    "or FP16/FP32 for non-paged attention"
+                )
+        if state_window == 1:
+            raise ValueError("GatedDeltaNet state_window must be 0 or at least 2")
+        if state_window > 9:
+            raise ValueError("GatedDeltaNet state_window must not exceed 9 (state_update_capacity <= 8)")
+        if state_window and self.context_length_attrs["state_update_capacity"] not in (0, state_window - 1):
+            raise ValueError("state_update_capacity must equal state_window - 1 when both are specified")
+        if ep not in {"cuda", "webgpu"} and self.context_length_attrs["state_update_capacity"]:
+            raise ValueError("Compact recurrent state capture requires the CUDA or WebGPU execution provider")
+
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        if "linear_attn_op" in extra_options:
+            raise ValueError("linear_attn_op is selected automatically by execution provider; remove this option. Dense CPU/DML/TRT-RTX exports retain LinearAttention.")
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+
+        self.configure_gated_delta_net_io()
+
+        # OffsetRMSNorm: Qwen3.5 uses (1 + weight) * RMSNorm(x).
+        # Pre-bake the +1 into the weight initializer so the base class's
+        # SkipSimplifiedLayerNormalization can be used directly.
+        self.layernorm_attrs["add_offset"] = 1
+
+        # Qwen-3.5 uses interleaved, partial MRoPE for both text and multimodal inputs.
+        self.rope_attrs["mrope_layout"] = 1
+        self.rope_attrs["cast"]["use_fp32"] = True
+        self.rope_attrs["cast"]["root_input"] = True
+        self.rope_attrs["cast"]["output_0"] = True
+
+    def configure_gated_delta_net_io(self):
+        """Declare every linear-attention graph binding, so emitters never respell a name or shape."""
+        linear_layers = [
+            layer_id for layer_id, layer_type in enumerate(self.layer_types) if layer_type == "linear_attention"
+        ]
+        if not linear_layers:
+            # Without a linear-attention layer nothing below is emitted, so the capacity has no bindings.
+            self.context_length_attrs["state_update_capacity"] = 0
+            return
+
+        self.validate_gated_delta_net_options(
+            self.context_length_attrs["state_window"],
+            self.ep,
+        )
+        if self.context_length_attrs["state_window"] and self.ep in {"cuda", "webgpu"}:
+            self.context_length_attrs["state_update_capacity"] = self.context_length_attrs["state_window"] - 1
+
+        if self.use_paged_attention:
+            conv_shape = ["batch_size", self.linear_conv_dim, self.linear_conv_kernel_dim - 1]
+            self.input_shapes["past.conv"] = conv_shape
+            self.output_shapes["present.conv"] = conv_shape
+
+        recurrent_shape = [
+            "batch_size",
+            self.linear_num_value_heads,
+            self.linear_value_head_dim,
+            self.linear_key_head_dim,
+        ]
+        if self.ep in {"cuda", "webgpu"}:
+            self.input_types["past.recurrent"] = ir.DataType.FLOAT
+            self.input_shapes["past.recurrent"] = recurrent_shape
+            self.output_types["present.recurrent"] = ir.DataType.FLOAT
+            self.output_shapes["present.recurrent"] = recurrent_shape
+
+        capacity = self.context_length_attrs["state_update_capacity"]
+        if not capacity:
+            return
+
+        self.input_names["state_update.capture_count"] = "state_update_capture_count"
+        self.input_types["state_update.capture_count"] = ir.DataType.INT32
+        self.input_shapes["state_update.capture_count"] = ["batch_size"]
+        self.input_names["state_update.active"] = "state_update_active"
+        self.input_types["state_update.active"] = ir.DataType.INT32
+        self.input_shapes["state_update.active"] = [1]
+
+        if self.use_paged_attention:
+            self.output_names["state_update.conv_value"] = {
+                layer_id: f"state_update.{layer_id}.conv_value" for layer_id in linear_layers
+            }
+            self.output_types["state_update.conv_value"] = self.io_dtype
+            self.output_shapes["state_update.conv_value"] = ["batch_size", capacity, self.linear_conv_dim]
+
+        # One capsule packs each captured token's decay gates, key row, and value row back to back.
+        capsule_width = capacity * (
+            self.linear_num_value_heads
+            + self.linear_num_key_heads * self.linear_key_head_dim
+            + self.linear_num_value_heads * self.linear_value_head_dim
+        )
+        self.output_names["state_update.recurrent_capsule"] = {
+            layer_id: f"state_update.{layer_id}.recurrent_capsule" for layer_id in linear_layers
+        }
+        self.output_types["state_update.recurrent_capsule"] = ir.DataType.FLOAT
+        self.output_shapes["state_update.recurrent_capsule"] = ["batch_size", capsule_width]
+
+    def make_inputs_and_outputs(self):
+        # Qwen-3.5 uses 3D position_ids
+        self.input_shapes["position_ids"] = (
+            [3, "num_tokens"] if self.use_paged_attention else [3, "batch_size", "sequence_length"]
+        )
+        super().make_inputs_and_outputs()
+
+    def is_packed_attn_supported(self):
+        return False
+
+    def make_attention_init(self, config):
+        # Set QK norm before the base class selects packed or paged attention paths.
+        self.attention_attrs["q_norm"] = True
+        self.attention_attrs["k_norm"] = True
+        super().make_attention_init(config)
+        if self.use_paged_attention:
+            self.attention_attrs["use_packed_matmul"] = self.is_packed_matmul_supported()
+
+    def is_qkv_projection_packable(self, layer_id, attention):
+        v_name = f"/model/layers.{layer_id}/attn/v_proj/MatMul"
+        return v_name not in self.int4_customized_weight_config and super().is_qkv_projection_packable(
+            layer_id, attention
+        )
+
+    def is_fused_rope_supported(self):
+        # Qwen-3.5 applies MRoPE manually before attention, not fused in the op
+        return False
+
+    def make_attention(self, layer_id, attention, root_input, **kwargs):
+        """Dispatch to full attention or GatedDeltaNet based on layer type."""
+        if self.layer_types[layer_id] == "linear_attention":
+            self.make_qwen_gated_delta_net(layer_id, attention, root_input)
+        else:
+            super().make_attention(layer_id, attention, root_input, **kwargs)
+
+    def get_attn_module(self, layer_id, layer):
+        return layer.linear_attn if self.layer_types[layer_id] == "linear_attention" else layer.self_attn
+
+    def make_attention_input_proj(self, layer_id, attention, root_input, **kwargs):
+        """Split Qwen3.5's doubled, per-head Q projection into Q and gate."""
+        super().make_attention_input_proj(layer_id, attention, root_input, **kwargs)
+
+        self.split_attention_query_gate(layer_id)
 
     def split_attention_query_gate(self, layer_id):
         """Split the doubled per-head query projection into query and output gate."""
@@ -130,8 +280,8 @@ class Qwen35:
             axis=-1,
         )
 
-        q_path = self.make_l2_normalize_expansion(f"{basename}/q_l2norm", q_path)
-        k_path = self.make_l2_normalize_expansion(f"{basename}/k_l2norm", k_path)
+        q_path = self.make_l2_normalize(f"{basename}/q_l2norm", q_path)
+        k_path = self.make_l2_normalize(f"{basename}/k_l2norm", k_path)
         scale = 1.0 / math.sqrt(self.linear_key_head_dim)
         q_scaled = f"{basename}/q_scaled/Mul"
         self.make_mul(
@@ -161,12 +311,6 @@ class Qwen35:
             f"{gate_name}/output_0",
             f"{gate_name}/output_1",
         )
-
-    def make_attention_input_proj(self, layer_id, attention, root_input, **kwargs):
-        """Split Qwen3.5's doubled, per-head Q projection into Q and gate."""
-        super().make_attention_input_proj(layer_id, attention, root_input, **kwargs)
-
-        self.split_attention_query_gate(layer_id)
 
     def make_qwen_gated_delta_net(self, layer_id, linear_attn, root_input):
         """Build the Qwen linear-attention layer for dense or packed token layouts.
@@ -415,9 +559,81 @@ class Qwen35:
 
         self.layernorm_attrs["skip_input"] = f"{o_name}/output_0"
 
+    def make_decoder_state_groups(self, inputs, outputs):
+        if not self.use_paged_attention:
+            return []
 
-class Qwen35MoE:
-    """Qwen3.5 routed and shared expert graph expansions."""
+        full_attention_layers = [
+            layer_id
+            for layer_id, layer_type in enumerate(self.layer_types)
+            if layer_type in {"full_attention", "sliding_attention"}
+        ]
+        conv_layers = [
+            layer_id
+            for layer_id, layer_type in enumerate(self.layer_types)
+            if layer_type in {"conv", "linear_attention"}
+        ]
+        linear_attention_layers = [
+            layer_id for layer_id, layer_type in enumerate(self.layer_types) if layer_type == "linear_attention"
+        ]
+        state_groups = []
+        if full_attention_layers:
+            state_groups.append(self.make_paged_key_value_state_group(full_attention_layers))
+        if not linear_attention_layers:
+            return state_groups
+
+        state_update_capacity = (
+            self.context_length_attrs["state_update_capacity"] if "state_update_capture_count" in inputs else 0
+        )
+
+        for state_name, layer_ids in (
+            ("conv", conv_layers),
+            ("recurrent", linear_attention_layers),
+        ):
+            group = {
+                "kind": f"fixed_{state_name}",
+                "layer_ids": layer_ids,
+            }
+            if state_update_capacity:
+                state_update = {
+                    "capacity": state_update_capacity,
+                }
+                if state_name == "recurrent":
+                    state_update["key_head_count"] = self.linear_num_key_heads
+                group["state_update"] = state_update
+            state_groups.append(group)
+
+        return state_groups
+
+
+class Qwen35MoETextModel(Qwen35TextModel):
+    """Qwen3.5 MoE hybrid model builder.
+
+    Extends ``Qwen35TextModel`` with Mixture-of-Experts MLP layers.
+    Each decoder layer replaces the dense MLP with:
+    - A router that selects top-k experts from ``num_experts`` candidates
+    - Packed routed expert weights (gate_up_proj + down_proj)
+    - A shared expert (always-active) with its own gating signal
+
+    The attention side (GatedDeltaNet linear + gated full) is inherited
+    unchanged from the parent class.
+    """
+
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+
+        # MoE attributes specific to Qwen-3.5 MoE
+        self.moe_attrs["activation_type"] = "swiglu"
+        self.moe_attrs["swiglu_fusion"] = 1
+        self.moe_attrs["normalize_routing_weights"] = True
+
+        self.moe_intermediate_size = getattr(config, "moe_intermediate_size", 512)
+        self.shared_expert_intermediate_size = getattr(
+            config, "shared_expert_intermediate_size", self.moe_intermediate_size
+        )
+
+    def get_moe_module(self, layer_id, layer):
+        return layer.mlp
 
     def make_moe_preprocessing(self, layer_id, moe, root_input):
         self.make_interleaved_swiglu_moe_preprocessing(layer_id, moe)
@@ -481,10 +697,7 @@ class Qwen35MoE:
         intermediate_size = self.intermediate_size
         try:
             self.intermediate_size = self.shared_expert_intermediate_size
-            if self.mlp_attrs.get("fuse_gate_up", False):
-                self.make_mlp_proj_fused(layer_id, shared_expert, root_input)
-            else:
-                self.make_mlp_proj(layer_id, shared_expert, root_input)
+            self.make_mlp_proj(layer_id, shared_expert, root_input)
         finally:
             self.intermediate_size = intermediate_size
         shared_output = self.mlp_attrs["output_0"]

@@ -6,6 +6,9 @@
 This is a partial implementation of docs/ModelBuilderConfiguration.md. The
 result bridges structured policy to existing exporters; it is not proof that
 the resulting graph, shared tensors, or runtime profile meet the full contract.
+
+Component source parsing and format-level validation belong to
+``loaders.component.ComponentModelLoader``; this module handles IR models only.
 """
 
 from __future__ import annotations
@@ -21,7 +24,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import onnx
+import onnx_ir as ir
+from loaders.component import ComponentModelLoader
 from quantization import QuantConfig
 
 
@@ -126,6 +130,7 @@ class HeadComponent:
     inputs: tuple[ComponentBinding, ...]
     outputs: tuple[ComponentBinding, ...]
 
+
 @dataclass(frozen=True)
 class ComponentOptions:
     """Describe either generic ONNX heads or one pinned model-specific artifact.
@@ -139,6 +144,7 @@ class ComponentOptions:
     model_source: str | None = None
     artifact_revision: str | None = None
     base_revision: str | None = None
+
 
 @dataclass
 class EffectiveBuilderConfig:
@@ -585,7 +591,7 @@ def validate_component_backbone_destination(
         )
     if require_exists:
         model = load_component_model(destination, "backbone")
-        output_names = {value.name for value in model.graph.output}
+        output_names = {value.name for value in model.graph.outputs}
         if "hidden_states" not in output_names:
             raise ValueError(
                 "component backbone must expose a hidden_states output"
@@ -595,34 +601,22 @@ def validate_component_backbone_destination(
 
 def load_component_model(
     model_path: Path, component_name: str
-) -> onnx.ModelProto:
+) -> ir.Model:
     """Load one component graph without materializing external tensor data."""
-    try:
-        return onnx.load(model_path, load_external_data=False)
-    except Exception as error:
-        raise ValueError(
-            f"component {component_name!r} source is not a readable ONNX model: "
-            f"{model_path}"
-        ) from error
+    return ComponentModelLoader(model_path, component_name).load()
 
 
 def validate_component_model(model_path: Path, component_name: str) -> None:
-    """Run the ONNX structural checker after external paths are validated."""
-    try:
-        onnx.checker.check_model(model_path)
-    except Exception as error:
-        raise ValueError(
-            f"component {component_name!r} source is not a valid ONNX model: "
-            f"{model_path}"
-        ) from error
+    """Delegate source structure/schema validation to the component loader."""
+    ComponentModelLoader(model_path, component_name).validate()
 
 
 def validate_component_graph_bindings(
-    head: HeadComponent, model: onnx.ModelProto
+    head: HeadComponent, model: ir.Model
 ) -> None:
     """Require configured graph bindings to name actual graph values."""
-    graph_inputs = {value.name for value in model.graph.input}
-    graph_outputs = {value.name for value in model.graph.output}
+    graph_inputs = {value.name for value in model.graph.inputs}
+    graph_outputs = {value.name for value in model.graph.outputs}
     for binding in head.inputs:
         if binding.graph_name not in graph_inputs:
             raise ValueError(
@@ -638,7 +632,7 @@ def validate_component_graph_bindings(
 
 
 def find_external_data_files(
-    model: onnx.ModelProto, model_path: Path, component_name: str
+    model: ir.Model, model_path: Path, component_name: str
 ) -> list[tuple[str, Path]]:
     """Resolve a head graph's external tensor files without loading their data.
 
@@ -646,74 +640,9 @@ def find_external_data_files(
     traversing, malformed, or missing locations raise ``ValueError`` to prevent
     external-data references from escaping either source or destination roots.
     """
-    source_root = model_path.parent.resolve()
-    files = {}
-    for tensor in iter_tensor_protos(model):
-        entries = {entry.key: entry.value for entry in tensor.external_data}
-        if tensor.data_location != onnx.TensorProto.EXTERNAL and not entries:
-            continue
-        location = entries.get("location")
-        if not location:
-            raise ValueError(f"component {component_name!r} has external tensor data without a location")
-        relative = Path(location)
-        if (
-            relative.is_absolute()
-            or "\\" in location
-            or ":" in location
-            or any(part in ("", ".", "..") for part in relative.parts)
-        ):
-            raise ValueError(f"component {component_name!r} has unsafe external data location {location!r}")
-        source = (source_root / relative).resolve()
-        try:
-            source.relative_to(source_root)
-        except ValueError as error:
-            raise ValueError(
-                f"component {component_name!r} has unsafe external data location {location!r}"
-            ) from error
-        if not source.is_file():
-            raise ValueError(
-                f"component {component_name!r} external data file does not exist: {location}"
-            )
-        try:
-            offset = int(entries.get("offset", "0"))
-        except ValueError as error:
-            raise ValueError(
-                f"component {component_name!r} external data offset is invalid"
-            ) from error
-        element_size = onnx.helper.tensor_dtype_to_np_dtype(
-            tensor.data_type
-        ).itemsize
-        required_bytes = math.prod(tensor.dims) * element_size
-        try:
-            length = int(entries.get("length", str(required_bytes)))
-        except ValueError as error:
-            raise ValueError(
-                f"component {component_name!r} external data length is invalid"
-            ) from error
-        if offset < 0 or length < required_bytes:
-            raise ValueError(
-                f"component {component_name!r} external data range is too small"
-            )
-        if offset + length > source.stat().st_size:
-            raise ValueError(
-                f"component {component_name!r} external data range exceeds "
-                f"{location!r}"
-            )
-        files[location] = source
-    return list(files.items())
-
-
-def iter_tensor_protos(message):
-    """Yield every nested TensorProto that may carry external-data metadata."""
-    if isinstance(message, onnx.TensorProto):
-        yield message
-        return
-    for field, value in message.ListFields():
-        if field.type != field.TYPE_MESSAGE:
-            continue
-        children = value if field.is_repeated else (value,)
-        for child in children:
-            yield from iter_tensor_protos(child)
+    return ComponentModelLoader(model_path, component_name).external_data_files(
+        model.meta["builder_config.external_tensors"]
+    )
 
 
 def reject_duplicate_key(pairs):
@@ -985,14 +914,7 @@ def flatten_target_options(
             flattened[legacy_key] = kv_cache[field_name]
 
     optimizations = options.get("optimizations", {})
-    check_fields(optimizations, {"fuse_mlp_gate_up", "fuse_qkv"}, "target_options.optimizations")
-    if "fuse_mlp_gate_up" in optimizations:
-        warn_structured_override(legacy_options, "fuse_mlp_gate_up", "target_options.optimizations.fuse_mlp_gate_up")
-        flattened["fuse_mlp_gate_up"] = optimizations["fuse_mlp_gate_up"]
-    if "fuse_qkv" in optimizations:
-        warn_structured_override(legacy_options, "fuse_qkv", "target_options.optimizations.fuse_qkv")
-        warn_structured_override(legacy_options, "disable_qkv_fusion", "target_options.optimizations.fuse_qkv")
-        flattened["fuse_qkv"] = optimizations["fuse_qkv"]
+    check_fields(optimizations, set(), "target_options.optimizations")
 
     return flattened, quant_config, effective_precision
 
@@ -1097,7 +1019,6 @@ def flatten_drafter_options(
             "shared_weights",
             "quant_config",
             "attention",
-            "optimizations",
             "dspark",
         },
         "drafter_options",
@@ -1105,10 +1026,6 @@ def flatten_drafter_options(
     drafter_type = options.get("drafter_type")
     if drafter_type not in ("none", "mtp", "dflash2", "dspark"):
         raise ValueError("drafter_options.drafter_type must be mtp, dflash2, dspark, or none")
-    optimizations = options.get("optimizations", {})
-    check_fields(optimizations, {"fuse_mlp_gate_up", "fuse_qkv"}, "drafter_options.optimizations")
-    if "fuse_mlp_gate_up" in optimizations and drafter_type != "dflash2":
-        raise ValueError(f"fuse_mlp_gate_up is not supported for drafter_type={drafter_type}")
     if drafter_type == "mtp" and flattened.get("exclude_mtp", False):
         raise ValueError("drafter_options.drafter_type=mtp conflicts with legacy extra_options.exclude_mtp")
 
@@ -1189,18 +1106,6 @@ def flatten_drafter_options(
             raise ValueError(f"{drafter_type} KV cache quantization is not supported")
         if kv_cache.get("windowed", False):
             raise ValueError(f"{drafter_type} windowed KV cache is not supported")
-
-    optimizations = options.get("optimizations", {})
-    check_fields(optimizations, {"fuse_mlp_gate_up", "fuse_qkv"}, "drafter_options.optimizations")
-    fuse_gate_up = optimizations.get("fuse_mlp_gate_up", False)
-    if fuse_gate_up and drafter_type != "dflash2":
-        raise ValueError(f"fuse_mlp_gate_up is not supported for drafter_type={drafter_type}")
-    fuse_qkv = optimizations.get("fuse_qkv", False)
-    if "fuse_qkv" in optimizations and drafter_type != "dflash2":
-        raise ValueError(f"fuse_qkv is not supported for drafter_type={drafter_type}")
-    if drafter_type == "dflash2":
-        flattened["dflash2_fuse_gate_up"] = fuse_gate_up
-        flattened["dflash2_fuse_qkv"] = fuse_qkv
 
     shared_weights = options.get("shared_weights", {})
     check_fields(shared_weights, {"embedding", "lm_head"}, "drafter_options.shared_weights")

@@ -51,6 +51,16 @@ class FakeQwen4ExpComponent(FakeComponent):
         self.hyper_connection_attrs = {"hidden_size": 8}
         self.output_shapes = {"hidden_states": ["batch_size", "sequence_length", 2]}
         self.filename = extra_options.get("filename", "text.onnx")
+        self.sparse_indexer_attrs = {
+            "index_share": {
+                "enabled": True,
+                "base_capacity": 35,
+                "max_draft_tokens": int(extra_options.get("max_draft_tokens", 7)),
+                "indices_output": "present_indices",
+                "counts_output": "present_counts",
+                "status_output": "indexer_status",
+            }
+        }
 
     def make_hidden_state_shape(self, last_dim=None):
         return ["batch_size", "sequence_length", last_dim or 2]
@@ -123,7 +133,6 @@ def test_qwen4_exp_composite_builds_declared_mtp(monkeypatch, ep, prune_lm_head)
     assert isinstance(model.decoder, FakeQwen4ExpComponent)
     assert isinstance(model.mtp, FakeQwen4ExpComponent)
     assert model.decoder.model_type == "qwen3_5"
-    assert model.decoder.extra_options["external_engram"] is True
     assert model.decoder.extra_options["include_hidden_states"] is True
     assert model.decoder.hyper_connection_attrs["emit_pre_final_hidden_states"] is True
     assert model.decoder.output_shapes["hidden_states"] == ["batch_size", "sequence_length", 8]
@@ -179,9 +188,7 @@ def test_qwen4_exp_text_only_composite_builds_declared_mtp(monkeypatch):
     assert model.model_type == "qwen4_exp_text"
     assert model.decoder.model_type == "qwen4_exp_text"
     assert isinstance(model.mtp, FakeQwen4ExpComponent)
-    assert model.decoder.extra_options["external_engram"] is True
     assert model.decoder.extra_options["include_hidden_states"] is True
-    assert "external_engram" not in model.mtp.extra_options
 
 
 def test_qwen4_exp_text_only_dispatches_composite_builder(monkeypatch, tmp_path):

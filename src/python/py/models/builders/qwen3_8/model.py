@@ -9,12 +9,12 @@ import onnx_ir as ir
 from builder_config import serialize_genai_config
 from huggingface_hub import hf_hub_download, snapshot_download
 
-from .mtp import MTPModel
-from .qwen3_8_embedding import Qwen4ExpEmbeddingModel
-from .qwen3_8_engram import Qwen4ExpEngramModel
-from .qwen3_8_mtp import Qwen4ExpMTPTextModel
-from .qwen3_8_text import Qwen4ExpTextModel
-from .qwen3_8_vision import Qwen4ExpVisionModel
+from ..mtp import MTPModel
+from .embedding import Qwen4ExpEmbeddingModel
+from .engram import Qwen4ExpEngramModel
+from .mtp import Qwen4ExpMTPTextModel
+from .text import Qwen4ExpTextModel
+from .vision import Qwen4ExpVisionModel
 
 
 class Qwen4ExpModel(MTPModel):
@@ -26,7 +26,6 @@ class Qwen4ExpModel(MTPModel):
         self.extra_options = copy.deepcopy(extra_options)
         self.text_only = self.extra_options.get("text_only", False)
         decoder_options = self.make_mtp_init(config, self.extra_options)
-        decoder_options["external_engram"] = True
         self.decoder = Qwen4ExpTextModel(copy.deepcopy(config), io_dtype, onnx_dtype, ep, cache_dir, decoder_options)
         self.decoder.model_type = "qwen4_exp_text" if self.text_only else "qwen3_5"
         self.mtp = None
@@ -101,7 +100,6 @@ class Qwen4ExpModel(MTPModel):
         mtp_options["filename"] = "mtp.onnx"
         mtp_options.pop("include_hidden_states", None)
         mtp_options.pop("exclude_lm_head", None)
-        mtp_options.pop("external_engram", None)
         self.mtp = Qwen4ExpMTPTextModel(
             copy.deepcopy(config),
             self.mtp_attrs["io_dtype"],
@@ -111,6 +109,8 @@ class Qwen4ExpModel(MTPModel):
             mtp_options,
             multimodal_rotary=self.mtp_attrs.get("multimodal_rotary", False),
         )
+        if extra_options.get("use_paged_attention", False):
+            self.mtp_attrs["index_share"] = self.mtp.sparse_indexer_attrs["index_share"]
 
     def make_model(self, input_path):
         if self.decoder.quant_type == "fp8" and not os.path.isdir(input_path):
@@ -127,7 +127,6 @@ class Qwen4ExpModel(MTPModel):
             self.mtp.make_model(input_path)
 
     def save_model(self, output_dir):
-        table_name = "model.ple.ngram_embedding.weight"
         if self.input_path is None:
             raise RuntimeError("make_model must be called before save_model.")
         weights = self.decoder.load_weights(self.input_path)
@@ -144,21 +143,12 @@ class Qwen4ExpModel(MTPModel):
             scale_dtype=ir.DataType.FLOAT,
         )
         engram_model.save_model(output_dir)
-        table = ir.load(os.path.join(output_dir, engram_model.filename)).graph.initializers[table_name].const_value
-        for component in (self.decoder, self.mtp):
-            if component is not None and table_name in getattr(component, "external_data_files", {}):
-                component.external_data_tensors = {table_name: table}
-
         self.decoder.save_model(output_dir)
         if self.mtp is not None:
             self.mtp.save_model(output_dir)
             self.mtp_attrs["shared_initializers"] = self.share_initializers(
                 output_dir, self.decoder.filename, self.mtp.filename
             )
-            if self.mtp.use_paged_attention:
-                self.mtp_attrs["index_share"] = self.export_indexshare_graphs(
-                    output_dir, self.mtp.filename, min(int(self.extra_options.get("max_draft_tokens", 7)), 7)
-                )
         if self.text_only:
             return
         embedding_model = Qwen4ExpEmbeddingModel(
@@ -247,7 +237,7 @@ class Qwen4ExpModel(MTPModel):
         }
         if self.decoder.ep == "cuda":
             engram_session_options["session.layer_assignment_settings"] = (
-                f"cpu(={Qwen4ExpTextModel.CPU_EMBEDDING_ANNOTATION})"
+                f"cpu(={Qwen4ExpEngramModel.CPU_EMBEDDING_ANNOTATION})"
             )
         model_config["engram"] = {
             "filename": "engram.onnx",

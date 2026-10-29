@@ -13,6 +13,7 @@ file(GLOB test_srcs CONFIGURE_DEPENDS
 )
 
 # Keep tests with dedicated white-box executables out of the public-API unit_tests target.
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/audio_speech_validation_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/cpu_cast_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/dflash2_config_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/environment-tests.cpp")
@@ -28,6 +29,7 @@ list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/mtp_config_test.cpp"
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/qwen2vl_position_inputs_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/reinit_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/search_checkpoint_tests.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/state_graph_capture_tests.cpp")
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER AND ENABLE_CUDA_KERNEL_TESTS)
   message(STATUS "Including CUDA kernel tests in the build.")
@@ -322,6 +324,7 @@ file(GLOB engine_unit_test_srcs CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/engine/*.cpp"
 )
 list(APPEND engine_unit_test_srcs
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/audio_speech_validation_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/dflash2_config_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/mtp_config_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/model_package_test.cpp"
@@ -330,6 +333,7 @@ list(APPEND engine_unit_test_srcs
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/multi_modal_device_placement_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/qwen2vl_position_inputs_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/search_checkpoint_tests.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/state_graph_capture_tests.cpp"
 )
 add_executable(engine_unit_tests ${engine_unit_test_srcs})
 target_include_directories(engine_unit_tests PRIVATE

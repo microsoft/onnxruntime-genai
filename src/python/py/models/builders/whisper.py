@@ -13,6 +13,7 @@ import onnx_ir as ir
 import torch
 from builder_config import serialize_genai_config
 
+
 class WhisperEncoder(Model):
     # Each Whisper encoder layer is typically defined as:
     # input_layernorm --> attention --> output_layernorm --> MLP

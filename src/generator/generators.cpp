@@ -4,11 +4,13 @@
 // Modifications Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 #include "generators.h"
+#include "token_outputs.h"
 #include <algorithm>
 #include <cctype>
 #include <cstring>
 #include "config_utils.h"
 #include "models/preprocessing/genai_tokenizer.h"
+#include "models/preprocessing/token_post_processor.h"
 #include "models/preprocessing/streaming_processor.h"
 #include "models/nemotron_speech.h"
 #include "models/parakeet.h"
@@ -975,6 +977,20 @@ void Generator::GenerateNextToken() {
                                          ? static_cast<int64_t>(transducer_state_->GetStepTokens().size())
                                          : static_cast<int64_t>(search_->params_->BatchBeamSize());
   generation_telemetry_.OnTokenGenerated(active_token_count);
+}
+
+TokenOutputs Generator::GetTokenOutputs() const {
+  if (const auto* transducer = dynamic_cast<const TransducerState*>(state_.get())) {
+    const auto tokens = transducer->GetStepTokens();
+    if (model_->config_->model.timestamp_level != Config::TimestampLevel::Off) {
+      const auto intervals = transducer->GetStepTokenIntervals();
+      if (intervals.size() != tokens.size())
+        throw std::runtime_error("Generator timing count does not match emitted tokens");
+      return TokenOutputs{tokens, intervals};
+    }
+    return TokenOutputs{tokens};
+  }
+  return TokenOutputs{search_->GetNextTokens().CopyDeviceToCpu()};
 }
 
 SpeculativeStats Generator::GetSpeculativeStats() const {

@@ -490,8 +490,8 @@ DeviceSpan<float> DecoderState::Run(int current_length, DeviceSpan<int32_t>& nex
 
   if (recurrent_state_ && recurrent_state_->StateUpdateCaptureEnabled())
     graph_capture_variant += 2;
-  const int graph_id = seq_len * 4 + graph_capture_variant;
-  if (graph_capture_this_run && recurrent_state_ && recurrent_state_->ShouldFixUpGraphCapture(graph_id)) {
+  const int graph_id = graph_capture_this_run && recurrent_state_ ? GraphIdForLength(seq_len, graph_capture_variant) : -1;
+  if (graph_id > 0 && recurrent_state_ && recurrent_state_->ShouldFixUpGraphCapture(graph_id)) {
     recurrent_state_->SaveForGraphCapture();
     State::Run(*model_.decoder_session_, true, seq_len, graph_capture_variant);
     recurrent_state_->RestoreAfterGraphCapture(graph_id);

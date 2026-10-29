@@ -73,41 +73,25 @@ def _model(model_type, extra_options, use_paged_attention=True):
     return model
 
 
-@pytest.mark.parametrize(
-    ("extra_options", "expected"),
-    [
-        ({}, True),
-        ({"fuse_qkv": True}, True),
-        ({"fuse_qkv": False}, False),
-        ({"disable_qkv_fusion": True}, False),
-        ({"disable_qkv_fusion": False}, True),
-        ({"disable_qkv_fusion": True, "fuse_qkv": True}, True),
-    ],
-)
-def test_qwen35_paged_packs_qkv_unless_disabled(extra_options, expected):
-    model = _model(Qwen35TextModel, extra_options)
+@pytest.mark.parametrize("use_lora", [False, True])
+def test_qwen35_paged_packs_eligible_qkv_automatically(use_lora):
+    model = _model(Qwen35TextModel, {})
+    model.matmul_attrs["use_lora"] = use_lora
 
     model.make_attention_init(config=None)
 
     assert model.attention_attrs["op_type"] == "PagedAttention"
-    assert model.attention_attrs["use_packed_matmul"] is expected
+    assert model.attention_attrs["use_packed_matmul"] is not use_lora
 
 
-@pytest.mark.parametrize(
-    ("extra_options", "expected"),
-    [
-        ({}, True),
-        ({"fuse_qkv": True}, True),
-        ({"fuse_qkv": False}, False),
-        ({"disable_qkv_fusion": True}, False),
-        ({"disable_qkv_fusion": False}, True),
-        ({"disable_qkv_fusion": True, "fuse_qkv": True}, True),
-    ],
-)
-def test_qwen35_gqa_packs_qkv_unless_disabled(extra_options, expected):
-    model = _model(Qwen35TextModel, extra_options, use_paged_attention=False)
+@pytest.mark.parametrize("provider", ["cpu", "cuda", "webgpu", "dml", "trt-rtx"])
+@pytest.mark.parametrize("use_lora", [False, True])
+def test_qwen35_gqa_packs_eligible_qkv_automatically(provider, use_lora):
+    model = _model(Qwen35TextModel, {}, use_paged_attention=False)
+    model.ep = provider
+    model.matmul_attrs["use_lora"] = use_lora
 
-    assert model.is_packed_matmul_supported() is expected
+    assert model.is_packed_matmul_supported() is (provider != "dml" and not use_lora)
 
 
 def test_other_paged_models_with_qk_norm_keep_separate_projections():

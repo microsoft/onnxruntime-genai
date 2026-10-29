@@ -12,6 +12,39 @@ from unittest.mock import Mock
 import pytest
 
 
+def test_model_builder_uses_ir_instead_of_onnx_graph_helpers():
+    models_dir = Path(__file__).parents[3] / "src/python/py/models"
+    forbidden = {"helper", "numpy_helper", "external_data_helper"}
+    for path in models_dir.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    assert not (
+                        alias.name.startswith("onnx.") and alias.name.split(".")[1] in forbidden
+                    ), f"{path}:{node.lineno}"
+            elif isinstance(node, ast.ImportFrom):
+                if node.module == "onnx":
+                    assert not any(alias.name in forbidden for alias in node.names), f"{path}:{node.lineno}"
+                elif node.module and node.module.startswith("onnx."):
+                    assert node.module.split(".")[1] not in forbidden, f"{path}:{node.lineno}"
+            elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "onnx":
+                assert node.attr not in forbidden, f"{path}:{node.lineno}"
+
+
+def test_exported_graphs_use_base_model_initialization():
+    models_dir = Path(__file__).parents[3] / "src/python/py/models"
+    for path in (models_dir / "builders").rglob("*.py"):
+        if path.name == "base.py":
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                if isinstance(node.func.value, ast.Name) and node.func.value.id == "ir":
+                    assert node.func.attr not in {"Model", "Graph"}, f"{path}:{node.lineno}"
+    assert not (models_dir / "split_cpu_embedding.py").exists()
+    assert not (models_dir / "kv_cache_variant.py").exists()
+
+
 @pytest.mark.parametrize(
     ("relative_path", "dependency"),
     [
@@ -49,8 +82,9 @@ def weight_loader(monkeypatch, request):
     model.quant_type = None
     model.num_layers = 2
     model.extra_options = {"num_hidden_layers": 2}
-    model.hf_load_config = SimpleNamespace()
     transformers = ModuleType("transformers")
+    transformers.AutoConfig = Mock()
+    transformers.AutoConfig.from_pretrained.return_value = SimpleNamespace()
     monkeypatch.setattr(importlib.import_module("builders.base"), "transformers", transformers)
     return model, transformers
 
@@ -96,9 +130,9 @@ def test_load_weights_requires_only_selected_transformers_class(weight_loader, m
 @pytest.mark.parametrize(
     ("weight_loader", "model_type"),
     [
-        (("qwen3_8_text", "Qwen4ExpTextModel"), "qwen3_5"),
-        (("qwen3_8_text", "Qwen4ExpTextModel"), "qwen4_exp_text"),
-        (("qwen3_8_mtp", "Qwen4ExpMTPTextModel"), "qwen3_5"),
+        (("qwen3_8.text", "Qwen4ExpTextModel"), "qwen3_5"),
+        (("qwen3_8.text", "Qwen4ExpTextModel"), "qwen4_exp_text"),
+        (("qwen3_8.mtp", "Qwen4ExpMTPTextModel"), "qwen3_5"),
     ],
     indirect=["weight_loader"],
 )
@@ -106,8 +140,9 @@ def test_qwen4_exp_weight_loader_is_independent_of_runtime_model_type(weight_loa
     model, transformers = weight_loader
     model.model_type = model_type
     text_config = SimpleNamespace(num_hidden_layers=8, layer_types=["indexed_attention"] * 8)
-    model.hf_load_config = SimpleNamespace(text_config=text_config)
+    config = SimpleNamespace(text_config=text_config)
     loader = Mock()
+    transformers.AutoConfig.from_pretrained.return_value = config
     transformers.Qwen4ExpForConditionalGeneration = loader
     transformers.Qwen3_5ForConditionalGeneration = Mock()
 
@@ -117,9 +152,16 @@ def test_qwen4_exp_weight_loader_is_independent_of_runtime_model_type(weight_loa
         cache_dir=model.cache_dir,
         token=model.hf_token,
         trust_remote_code=model.hf_remote,
-        config=model.hf_load_config,
+        config=config,
     )
     assert text_config.layer_types == ["indexed_attention"] * model.num_layers
+    transformers.AutoConfig.from_pretrained.assert_called_once_with(
+        model.model_name_or_path,
+        cache_dir=model.cache_dir,
+        token=model.hf_token,
+        trust_remote_code=model.hf_remote,
+    )
+    assert not hasattr(model, "hf_load_config")
     transformers.Qwen3_5ForConditionalGeneration.from_pretrained.assert_not_called()
 
 
@@ -128,7 +170,7 @@ def test_qwen4_exp_weight_loader_is_independent_of_runtime_model_type(weight_loa
     [
         (("base", "Model"), "Qwen3_5ForConditionalGeneration", "4.45.0"),
         (("base", "Model"), "Qwen3_5ForConditionalGeneration", None),
-        (("qwen3_8_text", "Qwen4ExpTextModel"), "Qwen4ExpForConditionalGeneration", "5.20.1"),
+        (("qwen3_8.text", "Qwen4ExpTextModel"), "Qwen4ExpForConditionalGeneration", "5.20.1"),
         (("mistral", "Mistral3TextModel"), "Mistral3ForConditionalGeneration", "4.45.0"),
         (("qwen", "VideoChatFlashQwenModel"), "Qwen2ForCausalLM", "4.45.0"),
     ],

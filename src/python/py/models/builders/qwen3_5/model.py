@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License
+
 import copy
 import json
 import os
@@ -5,230 +8,9 @@ import os
 import onnx_ir as ir
 from builder_config import serialize_genai_config
 
-from .base import Model
-from .expansions.mtp import Qwen35MTP
-from .expansions.qwen3_5 import Qwen35, Qwen35MoE
-from .mtp import MTPModel
-
-
-class Qwen35TextModel(Qwen35, Model):
-    def validate_gated_delta_net_options(self, state_window, ep):
-        if self.use_paged_attention and ep not in {"cuda", "webgpu"}:
-            raise ValueError("Paged GatedDeltaNet exports require the CUDA or WebGPU execution provider")
-        if ep == "webgpu":
-            supported_dtypes = (
-                (ir.DataType.FLOAT16,) if self.use_paged_attention else (ir.DataType.FLOAT16, ir.DataType.FLOAT)
-            )
-            if self.io_dtype not in supported_dtypes:
-                raise ValueError(
-                    "GatedDeltaNet exports on WebGPU require FP16 for paged attention "
-                    "or FP16/FP32 for non-paged attention"
-                )
-        if state_window == 1:
-            raise ValueError("GatedDeltaNet state_window must be 0 or at least 2")
-        if state_window > 9:
-            raise ValueError("GatedDeltaNet state_window must not exceed 9 (state_update_capacity <= 8)")
-        if state_window and self.context_length_attrs["state_update_capacity"] not in (0, state_window - 1):
-            raise ValueError("state_update_capacity must equal state_window - 1 when both are specified")
-        if ep not in {"cuda", "webgpu"} and self.context_length_attrs["state_update_capacity"]:
-            raise ValueError("Compact recurrent state capture requires the CUDA or WebGPU execution provider")
-
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        if "linear_attn_op" in extra_options:
-            raise ValueError("linear_attn_op is selected automatically by execution provider; remove this option. Dense CPU/DML/TRT-RTX exports retain LinearAttention.")
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-
-        self.configure_gated_delta_net_io()
-
-        # OffsetRMSNorm: Qwen3.5 uses (1 + weight) * RMSNorm(x).
-        # Pre-bake the +1 into the weight initializer so the base class's
-        # SkipSimplifiedLayerNormalization can be used directly.
-        self.layernorm_attrs["add_offset"] = 1
-
-        # Qwen-3.5 uses interleaved, partial MRoPE for both text and multimodal inputs.
-        self.rope_attrs["mrope_layout"] = 1
-        self.rope_attrs["cast"]["use_fp32"] = True
-        self.rope_attrs["cast"]["root_input"] = True
-        self.rope_attrs["cast"]["output_0"] = True
-
-    def configure_gated_delta_net_io(self):
-        """Declare every linear-attention graph binding, so emitters never respell a name or shape."""
-        linear_layers = [
-            layer_id for layer_id, layer_type in enumerate(self.layer_types) if layer_type == "linear_attention"
-        ]
-        if not linear_layers:
-            # Without a linear-attention layer nothing below is emitted, so the capacity has no bindings.
-            self.context_length_attrs["state_update_capacity"] = 0
-            return
-
-        self.validate_gated_delta_net_options(
-            self.context_length_attrs["state_window"],
-            self.ep,
-        )
-        if self.context_length_attrs["state_window"] and self.ep in {"cuda", "webgpu"}:
-            self.context_length_attrs["state_update_capacity"] = self.context_length_attrs["state_window"] - 1
-
-        if self.use_paged_attention:
-            conv_shape = ["batch_size", self.linear_conv_dim, self.linear_conv_kernel_dim - 1]
-            self.input_shapes["past.conv"] = conv_shape
-            self.output_shapes["present.conv"] = conv_shape
-
-        recurrent_shape = [
-            "batch_size",
-            self.linear_num_value_heads,
-            self.linear_value_head_dim,
-            self.linear_key_head_dim,
-        ]
-        if self.ep in {"cuda", "webgpu"}:
-            self.input_types["past.recurrent"] = ir.DataType.FLOAT
-            self.input_shapes["past.recurrent"] = recurrent_shape
-            self.output_types["present.recurrent"] = ir.DataType.FLOAT
-            self.output_shapes["present.recurrent"] = recurrent_shape
-
-        capacity = self.context_length_attrs["state_update_capacity"]
-        if not capacity:
-            return
-
-        self.input_names["state_update.capture_count"] = "state_update_capture_count"
-        self.input_types["state_update.capture_count"] = ir.DataType.INT32
-        self.input_shapes["state_update.capture_count"] = ["batch_size"]
-        self.input_names["state_update.active"] = "state_update_active"
-        self.input_types["state_update.active"] = ir.DataType.INT32
-        self.input_shapes["state_update.active"] = [1]
-
-        if self.use_paged_attention:
-            self.output_names["state_update.conv_value"] = {
-                layer_id: f"state_update.{layer_id}.conv_value" for layer_id in linear_layers
-            }
-            self.output_types["state_update.conv_value"] = self.io_dtype
-            self.output_shapes["state_update.conv_value"] = ["batch_size", capacity, self.linear_conv_dim]
-
-        # One capsule packs each captured token's decay gates, key row, and value row back to back.
-        capsule_width = capacity * (
-            self.linear_num_value_heads
-            + self.linear_num_key_heads * self.linear_key_head_dim
-            + self.linear_num_value_heads * self.linear_value_head_dim
-        )
-        self.output_names["state_update.recurrent_capsule"] = {
-            layer_id: f"state_update.{layer_id}.recurrent_capsule" for layer_id in linear_layers
-        }
-        self.output_types["state_update.recurrent_capsule"] = ir.DataType.FLOAT
-        self.output_shapes["state_update.recurrent_capsule"] = ["batch_size", capsule_width]
-
-    def make_inputs_and_outputs(self):
-        # Qwen-3.5 uses 3D position_ids
-        self.input_shapes["position_ids"] = (
-            [3, "num_tokens"] if self.use_paged_attention else [3, "batch_size", "sequence_length"]
-        )
-        super().make_inputs_and_outputs()
-
-    def is_packed_attn_supported(self):
-        return False
-
-    def make_attention_init(self, config):
-        # Set QK norm before the base class selects packed or paged attention paths.
-        self.attention_attrs["q_norm"] = True
-        self.attention_attrs["k_norm"] = True
-        super().make_attention_init(config)
-        if self.use_paged_attention:
-            self.attention_attrs["use_packed_matmul"] = self.is_packed_matmul_supported()
-
-    def is_qkv_projection_packable(self, layer_id, attention):
-        v_name = f"/model/layers.{layer_id}/attn/v_proj/MatMul"
-        return v_name not in self.int4_customized_weight_config and super().is_qkv_projection_packable(
-            layer_id, attention
-        )
-
-    def is_fused_rope_supported(self):
-        # Qwen-3.5 applies MRoPE manually before attention, not fused in the op
-        return False
-
-    def make_attention(self, layer_id, attention, root_input, **kwargs):
-        """Dispatch to full attention or GatedDeltaNet based on layer type."""
-        if self.layer_types[layer_id] == "linear_attention":
-            self.make_qwen_gated_delta_net(layer_id, attention, root_input)
-        else:
-            super().make_attention(layer_id, attention, root_input, **kwargs)
-
-    def get_attn_module(self, layer_id, layer):
-        return layer.linear_attn if self.layer_types[layer_id] == "linear_attention" else layer.self_attn
-
-
-    def make_decoder_state_groups(self, inputs, outputs):
-        if not self.use_paged_attention:
-            return []
-
-        full_attention_layers = [
-            layer_id
-            for layer_id, layer_type in enumerate(self.layer_types)
-            if layer_type in {"full_attention", "sliding_attention"}
-        ]
-        conv_layers = [
-            layer_id
-            for layer_id, layer_type in enumerate(self.layer_types)
-            if layer_type in {"conv", "linear_attention"}
-        ]
-        linear_attention_layers = [
-            layer_id for layer_id, layer_type in enumerate(self.layer_types) if layer_type == "linear_attention"
-        ]
-        state_groups = []
-        if full_attention_layers:
-            state_groups.append(self.make_paged_key_value_state_group(full_attention_layers))
-        if not linear_attention_layers:
-            return state_groups
-
-        state_update_capacity = (
-            self.context_length_attrs["state_update_capacity"] if "state_update_capture_count" in inputs else 0
-        )
-
-        for state_name, layer_ids in (
-            ("conv", conv_layers),
-            ("recurrent", linear_attention_layers),
-        ):
-            group = {
-                "kind": f"fixed_{state_name}",
-                "layer_ids": layer_ids,
-            }
-            if state_update_capacity:
-                state_update = {
-                    "capacity": state_update_capacity,
-                }
-                if state_name == "recurrent":
-                    state_update["key_head_count"] = self.linear_num_key_heads
-                group["state_update"] = state_update
-            state_groups.append(group)
-
-        return state_groups
-
-
-class Qwen35MoETextModel(Qwen35MoE, Qwen35TextModel):
-    """Qwen3.5 MoE hybrid model builder.
-
-    Extends ``Qwen35TextModel`` with Mixture-of-Experts MLP layers.
-    Each decoder layer replaces the dense MLP with:
-    - A router that selects top-k experts from ``num_experts`` candidates
-    - Packed routed expert weights (gate_up_proj + down_proj)
-    - A shared expert (always-active) with its own gating signal
-
-    The attention side (GatedDeltaNet linear + gated full) is inherited
-    unchanged from the parent class.
-    """
-
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-
-        # MoE attributes specific to Qwen-3.5 MoE
-        self.moe_attrs["activation_type"] = "swiglu"
-        self.moe_attrs["swiglu_fusion"] = 1
-        self.moe_attrs["normalize_routing_weights"] = True
-
-        self.moe_intermediate_size = getattr(config, "moe_intermediate_size", 512)
-        self.shared_expert_intermediate_size = getattr(
-            config, "shared_expert_intermediate_size", self.moe_intermediate_size
-        )
-
-    def get_moe_module(self, layer_id, layer):
-        return layer.mlp
+from ..mtp import MTPModel
+from .mtp import Qwen35DenseMTPModel, Qwen35MTPModel
+from .text import Qwen35MoETextModel, Qwen35TextModel
 
 
 class Qwen35MoEModel(MTPModel):
@@ -596,20 +378,12 @@ class Qwen35MoEModel(MTPModel):
             if num_draft_tokens < 1:
                 raise ValueError("dflash2_num_draft_tokens must be a positive integer.")
 
-        fuse_gate_up = str(extra_options.get("dflash2_fuse_gate_up", False)).lower()
-        if fuse_gate_up not in ("true", "false"):
-            raise ValueError("dflash2_fuse_gate_up must be true or false.")
-        fuse_qkv = str(extra_options.get("dflash2_fuse_qkv", False)).lower()
-        if fuse_qkv not in ("true", "false"):
-            raise ValueError("dflash2_fuse_qkv must be true or false.")
         self.dflash2_attrs = {
             "io_dtype": io_dtype,
             "compute_dtype": drafter_io_dtype,
             "num_draft_tokens": num_draft_tokens,
             "precision": self.block_drafter_precision(extra_options, "dflash2_precision"),
             "quant_config": drafter_quant_config,
-            "fuse_gate_up": fuse_gate_up == "true",
-            "fuse_qkv": fuse_qkv == "true",
         }
 
         with open(os.path.join(self.dflash2_path, "config.json"), encoding="utf-8") as handle:
@@ -626,7 +400,7 @@ class Qwen35MoEModel(MTPModel):
     def make_dflash2_model(self, input_path):
         if not self.dflash2_path:
             return
-        from .dflash2 import DFlash2Builder  # noqa: PLC0415
+        from ..dflash2 import DFlash2Builder  # noqa: PLC0415
 
         print("Building DFlash 2 draft model -> dflash2.onnx")
         if input_path and os.path.isdir(input_path):
@@ -649,11 +423,10 @@ class Qwen35MoEModel(MTPModel):
             quant=self.block_drafter_quant(self.dflash2_attrs["precision"], self.dflash2_attrs["quant_config"]),
             lm_head_quant=self.block_drafter_lm_head_quant(),
             embed_quant=self.block_drafter_embed_quant(),
-            fuse_gate_up=self.dflash2_attrs["fuse_gate_up"],
-            include_attention_metadata=True,
             ep=self.decoder.ep,
             compute_dtype=self.dflash2_attrs["compute_dtype"],
-            fuse_qkv=self.dflash2_attrs["fuse_qkv"],
+            target_model=(self.decoder.embedding_model if self.decoder.exclude_embeds else self.decoder).model,
+            exclude_embeds=self.decoder.exclude_embeds,
         )
         self.dflash2.make_model()
 
@@ -668,16 +441,28 @@ class Qwen35MoEModel(MTPModel):
         )
 
     def save_block_drafter_model(self, drafter, output_dir, drafter_name, shared_weight_policies=None):
-        """Adopt the target's tensors, save the drafter, and fold what the two share onto one copy."""
+        """Save model-owned data and describe matching target tensors for runtime sharing."""
         if hasattr(drafter, "adopt_target_tensors"):
-            drafter.adopt_target_tensors(os.path.join(output_dir, self.decoder.filename))
+            target_path = os.path.join(output_dir, self.decoder.filename)
+            embedding_model = getattr(self.decoder, "embedding_model", None)
+            if embedding_model is not None:
+                drafter.adopt_target_tensors(
+                    target_path,
+                    embedding_model_path=os.path.join(output_dir, embedding_model.filename),
+                )
+            else:
+                drafter.adopt_target_tensors(target_path)
         drafter.save_model(output_dir)
 
         initializer_names = set(getattr(getattr(drafter, "graph", None), "initializers", {}))
-        embedding_initializers = frozenset(name for name in initializer_names if name.startswith("model.embed_tokens."))
+        embedding_initializers = (
+            drafter.embedding_initializers()
+            if hasattr(drafter, "embedding_initializers")
+            else frozenset(name for name in initializer_names if name.startswith("model.embed_tokens."))
+        )
         head_initializers = frozenset(name for name in initializer_names if name.startswith("lm_head.MatMul."))
         embedding = getattr(drafter, "embed_quant", None)
-        if not embedding_initializers:
+        if not embedding_initializers and not getattr(drafter, "exclude_embeds", False):
             embedding_initializers = (
                 frozenset(
                     {
@@ -702,6 +487,8 @@ class Qwen35MoEModel(MTPModel):
         private = set(head_initializers - adopted) if head is not None else set()
 
         if shared_weight_policies is not None:
+            if embedding_initializers & head_initializers and set(shared_weight_policies.values()) == {"required", "off"}:
+                raise ValueError("A tied embedding and LM head cannot have conflicting required/off sharing policies.")
             for tensor_name, initializers in (
                 ("embedding", embedding_initializers),
                 ("lm_head", head_initializers),
@@ -843,7 +630,7 @@ class Qwen35MoEModel(MTPModel):
     def make_dspark_model(self, input_path):
         if not self.dspark_path:
             return
-        from .dspark import DSparkBuilder  # noqa: PLC0415
+        from ..dspark import DSparkBuilder  # noqa: PLC0415
 
         print("Building DSpark draft model -> dspark.onnx")
         target_dir = input_path if input_path and os.path.isdir(input_path) else self.decoder.model_name_or_path
@@ -855,8 +642,10 @@ class Qwen35MoEModel(MTPModel):
             self.decoder.context_length,
             num_draft_tokens=self.dspark_attrs["num_draft_tokens"],
             top_k=self.dspark_attrs["top_k"],
-            include_attention_metadata=True,
+            ep=self.decoder.ep,
             embed_quant=self.block_drafter_embed_quant(),
+            target_model=self.decoder.model,
+            exclude_embeds=self.decoder.exclude_embeds,
             lm_head_quant=self.block_drafter_lm_head_quant(),
         )
         self.dspark.make_model()
@@ -890,96 +679,6 @@ class Qwen35MoEModel(MTPModel):
         with open(config_path, "w") as config_file:
             config_file.write(serialize_genai_config(genai_config))
         print("Added 'dspark' section to genai_config.json")
-
-
-class Qwen35MTPModel(Qwen35MTP, Qwen35MoETextModel):
-    """Qwen3.6 multi-token-prediction self-speculative head builder."""
-
-    is_moe_mtp = True
-
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        self.is_mtp_head = True
-
-        config = copy.deepcopy(config)
-        text_config = getattr(config, "text_config", config)
-        text_config.num_hidden_layers = 1
-        text_config.layer_types = ["full_attention"]
-        config.num_hidden_layers = 1
-        config.layer_types = ["full_attention"]
-
-        self.mtp_layer_config = copy.deepcopy(text_config)
-        self.mtp_layer_config.layer_types = ["full_attention"]
-        self.mtp_layer_config.num_hidden_layers = 1
-
-        extra_options = copy.deepcopy(extra_options)
-        extra_options["num_hidden_layers"] = 1
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-
-        quant_config = extra_options.get("_quant_config")
-        self.preserve_mtp_quantization = quant_config is None or quant_config.checkpoint_policy == "preserve"
-        self.input_names["hidden_states"] = "hidden_states"
-        self.input_types["hidden_states"] = self.io_dtype
-        self.input_shapes["hidden_states"] = self.make_hidden_state_shape()
-
-    def make_model(self, input_path):
-        self.make_inputs_and_outputs()
-        self.load_mtp_weights(input_path)
-        self.make_preprocessing_nodes()
-
-        projected = self.make_mtp_input_projection()
-        self.layernorm_attrs["root_input"] = projected
-        self.layernorm_attrs["skip_input"] = projected
-        self.layernorm_attrs["first_layernorm"] = True
-
-        self.make_layer(0, self.mtp_weights.layers[0])
-        self.make_layernorm(1, self.mtp_weights.norm, skip=True, simple=True, location="final_norm")
-        mtp_norm_output = self.layernorm_attrs["output_0"]
-        self.make_lm_head(self.mtp_weights.lm_head)
-
-        hidden_states_output = "hidden_states_out"
-        self.make_node(
-            "Identity",
-            inputs=[mtp_norm_output],
-            outputs=[hidden_states_output],
-            name="/model/mtp/hidden_states_out/Identity",
-        )
-        hidden_states_value = self.make_value(
-            hidden_states_output,
-            self.io_dtype,
-            shape=self.make_hidden_state_shape(),
-        )
-        self.model.graph.outputs.append(hidden_states_value)
-
-        self.make_postprocessing_nodes()
-        del self.mtp_weights
-
-    def load_mtp_weights(self, input_path):
-        model_dir = input_path if input_path and os.path.isdir(input_path) else self.model_name_or_path
-        try:
-            from loaders.qwen import QwenMTPModel  # noqa: PLC0415
-        except ImportError:
-            from onnxruntime_genai.models.loaders.qwen import QwenMTPModel  # noqa: PLC0415
-
-        self.mtp_weights = QwenMTPModel.from_pretrained(
-            self.quant_type,
-            input_path,
-            model_dir,
-            self.mtp_layer_config,
-            preserve_quantization=self.preserve_mtp_quantization,
-            load_quantized_model=self.load_weights,
-            is_moe=self.is_moe_mtp,
-            cache_dir=self.cache_dir,
-            token=self.hf_token,
-        )
-
-
-class Qwen35DenseMTPModel(Qwen35MTPModel):
-    """Dense Qwen3.5/Qwen3.8 MTP head with one full-attention decoder layer."""
-
-    is_moe_mtp = False
-
-    def make_layer(self, layer_id, layer):
-        return Qwen35TextModel.make_layer(self, layer_id, layer)
 
 
 class Qwen35Model(Qwen35MoEModel):

@@ -187,7 +187,6 @@ TEST(CAPITests, TokenizerCAPI) {
 TEST(CAPITests, TokenizerCreateFromConfigAndPath) {
 #if TEST_PHI2
   const char* input_string = "She sells sea shells by the sea shore.";
-
   auto config = OgaConfig::Create(PHI2_PATH);
   auto tokenizer_from_config = OgaTokenizer::Create(*config);
   auto tokenizer_from_path = OgaTokenizer::Create(PHI2_PATH);
@@ -201,6 +200,57 @@ TEST(CAPITests, TokenizerCreateFromConfigAndPath) {
   auto out_string = tokenizer_from_path->Decode(input_sequences->SequenceData(0), input_sequences->SequenceCount(0));
   ASSERT_STREQ(input_string, out_string);
 #endif
+}
+
+TEST(CAPITests, TokenPostProcessorOpaqueResults) {
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 10);
+  auto generator = OgaGenerator::Create(*model, *params);
+  auto tokenizer = OgaTokenizer::Create(*model);
+  auto plain = OgaTokenizerStream::Create(*tokenizer);
+  model.reset();
+  auto processor = OgaTokenPostProcessor::Create(*generator);
+  EXPECT_TRUE(processor->GetNextTokenResults().empty());
+  const std::array<int32_t, 4> prompt{0, 0, 0, 52};
+  generator->AppendTokens(prompt.data(), prompt.size());
+  generator->GenerateNextToken();
+  processor->ProcessNextTokens();
+  const auto results = processor->GetNextTokenResults();
+  ASSERT_EQ(results.size(), 1U);
+  const auto* result = results[0];
+  EXPECT_EQ(processor->GetNextTokenResults()[0], result);
+  const std::string expected = plain->Decode(generator->GetNextTokens()[0]);
+  EXPECT_EQ(result->GetText(), expected);
+  EXPECT_EQ(result->GetTimestamps(), nullptr);
+  EXPECT_EQ(OgaTokenPostProcessorResultGetTimestamps(nullptr), nullptr);
+  EXPECT_EQ(OgaTokenPostProcessorTimestampGetWordCount(nullptr), 0U);
+  EXPECT_EQ(OgaTokenPostProcessorTimestampGetSegmentCount(nullptr), 0U);
+  EXPECT_EQ(OgaTokenPostProcessorTimestampGetWord(nullptr, 0), nullptr);
+  EXPECT_EQ(OgaTokenPostProcessorTimestampGetSegment(nullptr, 0), nullptr);
+  EXPECT_EQ(OgaTokenPostProcessorGetResult(processor.get(), 1), nullptr);
+  generator->GenerateNextToken();
+  EXPECT_EQ(result->GetText(), expected);
+  processor->Finalize();
+  processor->Finalize();
+  ASSERT_EQ(processor->GetNextTokenResults().size(), 1U);
+  EXPECT_STREQ(processor->GetNextTokenResults()[0]->GetText(), "");
+  processor->Reset();
+  EXPECT_TRUE(processor->GetNextTokenResults().empty());
+  processor.reset();
+  generator.reset();
+}
+
+TEST(CAPITests, TokenPostProcessorRejectsInvalidCreation) {
+  OgaTokenPostProcessor* processor = nullptr;
+  EXPECT_THROW(OgaCheckResult(OgaCreateTokenPostProcessor(nullptr, &processor)), std::runtime_error);
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto params = OgaGeneratorParams::Create(*model);
+  auto generator = OgaGenerator::Create(*model, *params);
+  EXPECT_THROW(OgaCheckResult(OgaCreateTokenPostProcessor(generator.get(), nullptr)), std::runtime_error);
+  EXPECT_THROW(OgaCheckResult(OgaTokenPostProcessorProcessNextTokens(nullptr)), std::runtime_error);
+  EXPECT_THROW(OgaCheckResult(OgaTokenPostProcessorFinalize(nullptr)), std::runtime_error);
+  EXPECT_THROW(OgaCheckResult(OgaTokenPostProcessorReset(nullptr)), std::runtime_error);
 }
 
 TEST(CAPITests, EncodeBatchEmptyInputThrows) {
@@ -852,6 +902,7 @@ TEST(CAPITests, MarianBatchWithBeamsIOContract) {
   ASSERT_EQ(next_tokens.size(), expected_tokens.size());
   for (size_t beam = 0; beam < expected_tokens.size(); ++beam)
     EXPECT_EQ(next_tokens[beam], expected_tokens[beam]) << "beam " << beam;
+  EXPECT_THROW(OgaTokenPostProcessor::Create(*generator), std::runtime_error);
 }
 
 TEST(CAPITests, EndToEndPhi) {
@@ -3428,7 +3479,7 @@ TEST(CAPITests, TokenId_FromConfig) {
   // Copy minimal model files from tiny-random-gpt2
   std::string src_dir = MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32";
   for (const auto& entry : std::filesystem::directory_iterator(src_dir)) {
-    if (entry.path().filename() != "genai_config.json") {
+    if (entry.is_regular_file() && entry.path().filename() != "genai_config.json") {
       std::filesystem::copy_file(entry.path(), temp_dir / entry.path().filename(),
                                  std::filesystem::copy_options::overwrite_existing);
     }

@@ -7,13 +7,11 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
-import numpy as np
 import onnx
 import pytest
 from onnx import external_data_helper, helper
 
 from models.builders.qwen import Qwen4ExpModel, Qwen35MoEModel
-from models.builders.qwen3_8 import Qwen4ExpMTPTextModel
 
 
 def _make_external_model(path, data_name, tensors):
@@ -51,26 +49,6 @@ def _make_qwen_mtp_model():
         "shared_initializer_prefixes": ("lm_head.MatMul.",),
     }
     return model
-
-
-def test_qwen4_exp_mtp_offset_rmsnorm_uses_onnx_domain():
-    model = object.__new__(Qwen4ExpMTPTextModel)
-    model.io_dtype = onnx.TensorProto.FLOAT16
-    model.layernorm_attrs = {"add_offset": 1.0, "epsilon": 1e-6}
-    initializers = {}
-    nodes = []
-    model.make_initializer = lambda value, name, **kwargs: initializers.update({name: value})
-    model.make_node = lambda op_type, **kwargs: nodes.append(helper.make_node(op_type, **kwargs))
-    model.make_value = lambda *args, **kwargs: None
-    model.make_hidden_state_shape = lambda: [1, 1, 3]
-
-    output = model.make_offset_rmsnorm("/mtp/enorm", "input", np.asarray([-1.0, 0.0, 1.0]))
-
-    assert output == "/mtp/enorm/output_0"
-    assert len(nodes) == 1
-    assert nodes[0].op_type == "SimplifiedLayerNormalization"
-    assert nodes[0].domain == ""
-    assert initializers["mtp.enorm.weight"].tolist() == [0.0, 1.0, 2.0]
 
 
 @pytest.mark.parametrize(
@@ -192,7 +170,7 @@ def test_add_qwen4_exp_mtp_to_genai_config(tmp_path, fpa_intb_gemm):
 
 
 @pytest.mark.parametrize("qwen38", [False, True])
-def test_share_mtp_weights_repacks_data_after_staging_metadata(tmp_path, qwen38):
+def test_share_mtp_weights_preserves_private_data_after_staging_metadata(tmp_path, qwen38):
     main_data = b"samecodescalglob"
     mtp_data = b"samecodescalglobkeep"
     (tmp_path / "model.onnx.data").write_bytes(main_data)
@@ -225,14 +203,14 @@ def test_share_mtp_weights_repacks_data_after_staging_metadata(tmp_path, qwen38)
         model_builder.make_mtp_init(SimpleNamespace(text_config=SimpleNamespace(mtp_num_hidden_layers=1)), {})
     shared_initializers = model_builder.share_initializers(tmp_path, "model.onnx", "mtp.onnx")
 
-    assert (tmp_path / "mtp.onnx.data").read_bytes() == b"keep"
+    assert (tmp_path / "mtp.onnx.data").read_bytes() == mtp_data
     model = onnx.load(tmp_path / "mtp.onnx", load_external_data=False)
     initializers = {tensor.name: tensor for tensor in model.graph.initializer}
-    assert _external_info(initializers["model.embed_tokens.weight"]) == ("model.onnx.data", 0, 4)
-    assert _external_info(initializers["lm_head.MatMul.nvfp4_weight"]) == ("model.onnx.data", 4, 4)
-    assert _external_info(initializers["lm_head.MatMul.nvfp4_weight_scale"]) == ("model.onnx.data", 8, 4)
-    assert _external_info(initializers["lm_head.MatMul.nvfp4_weight_scale_2"]) == ("model.onnx.data", 12, 4)
-    assert _external_info(initializers["mtp.fc.weight"]) == ("mtp.onnx.data", 0, 4)
+    assert _external_info(initializers["model.embed_tokens.weight"]) == ("mtp.onnx.data", 0, 4)
+    assert _external_info(initializers["lm_head.MatMul.nvfp4_weight"]) == ("mtp.onnx.data", 4, 4)
+    assert _external_info(initializers["lm_head.MatMul.nvfp4_weight_scale"]) == ("mtp.onnx.data", 8, 4)
+    assert _external_info(initializers["lm_head.MatMul.nvfp4_weight_scale_2"]) == ("mtp.onnx.data", 12, 4)
+    assert _external_info(initializers["mtp.fc.weight"]) == ("mtp.onnx.data", 16, 4)
     assert shared_initializers == [
         {
             "name": "model.embed_tokens.weight",
@@ -291,10 +269,10 @@ def test_share_initializers_can_adopt_source_quantization(tmp_path):
         adopt_source_initializers={"lm_head.MatMul.weight_Q4"},
     )
 
-    assert (tmp_path / "dflash2.onnx.data").read_bytes() == b"keep"
+    assert (tmp_path / "dflash2.onnx.data").read_bytes() == b"mainkeep"
     model = onnx.load(tmp_path / "dflash2.onnx", load_external_data=False)
     initializers = {tensor.name: tensor for tensor in model.graph.initializer}
-    assert _external_info(initializers["lm_head.MatMul.weight_Q4"]) == ("model.onnx.data", 0, 4)
+    assert _external_info(initializers["lm_head.MatMul.weight_Q4"]) == ("dflash2.onnx.data", 0, 4)
     assert shared_initializers[0]["name"] == "lm_head.MatMul.weight_Q4"
 
 
