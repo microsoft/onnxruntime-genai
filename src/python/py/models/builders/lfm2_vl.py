@@ -348,7 +348,7 @@ class LFM2VLVisionEncoder(Model):
         self.make_node("Gelu", [root_input], [gelu_output], name=gelu_name, approximate="none")
         self.make_value(gelu_output, self.io_dtype, shape=["num_image_tokens", projector.linear_1.out_features])
         root_input = self.make_projector_linear(projector.linear_2, f"{basename}/linear_2", gelu_output)
-        self.make_node("Identity", [root_input], [self.output_names["image_features"]], name=f"{basename}/Identity")
+        self.rename_value(root_input, self.output_names["image_features"])
 
     def make_unshuffle_indices(self, basename):
         # Make the following subgraph, the rows of the [B*L,D] patches that make up each output token. Image b has
