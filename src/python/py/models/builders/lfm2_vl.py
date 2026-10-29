@@ -592,6 +592,17 @@ class LFM2VLModel:
         return {"processor": {"name": "lfm2_vl_image_processor", "transforms": transforms}}
 
     def make_model(self, input_path):
+        # All three models read the same checkpoint, so load it once
+        hf_model = self.vision.load_weights(input_path)
+        self.vision.load_weights = self.embedding.load_weights = lambda _input_path: hf_model
+        # The decoder loads another model from a pre-quantized or GGUF checkpoint, with an adapter or fewer layers
+        if (
+            self.decoder.quant_type is None
+            and not input_path.endswith(".gguf")
+            and not {"adapter_path", "num_hidden_layers"} & self.decoder.extra_options.keys()
+            and "load_weights" not in self.decoder.__dict__
+        ):
+            self.decoder.load_weights = self.vision.load_weights
         self.vision.make_model(input_path)
         self.embedding.make_model(input_path)
         self.decoder.make_model(input_path)

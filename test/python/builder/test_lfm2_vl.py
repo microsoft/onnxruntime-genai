@@ -376,6 +376,24 @@ def test_precision_and_quantization_reach_only_the_decoder(tmp_path, ep, io_dtyp
     assert not any(node.op_type == "MatMulNBits" for node in [*vision.node, *embedding.node])
 
 
+@pytest.mark.parametrize(
+    "decoder_options, loaded_by", [({}, ["vision"]), ({"num_hidden_layers": 2}, ["vision", "decoder"])]
+)
+def test_loads_the_checkpoint_once(monkeypatch, tmp_path, decoder_options, loaded_by):
+    config, hf_model = tiny_lfm2_vl()
+    write_image_processor(tmp_path / "checkpoint")
+    config.name_or_path = str(tmp_path / "checkpoint")
+    options = {"exclude_embeds": True, **decoder_options}
+    model = builder_module.LFM2VLModel(
+        config, ir.DataType.FLOAT, ir.DataType.FLOAT, "cpu", str(tmp_path / "cache"), options
+    )
+    loads = []
+    monkeypatch.setattr(lfm2_vl_module.Model, "load_weights", lambda self, input_path: loads.append(self) or hf_model)
+    model.make_model("")
+
+    assert loads == [getattr(model, part) for part in loaded_by]
+
+
 @pytest.mark.parametrize("layout, interpolation", [("lfm2.5", "LINEAR"), ("lfm2", "CUBIC")])
 def test_genai_config_and_processor_config(tmp_path, layout, interpolation):
     config, _ = tiny_lfm2_vl()
