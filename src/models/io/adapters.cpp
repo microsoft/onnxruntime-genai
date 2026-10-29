@@ -3,13 +3,25 @@
 
 #include "generator/generators.h"
 #include "models/io/adapters.h"
+#include "models/model.h"
+#include <filesystem>
 
 namespace Generators {
 
-Adapter::Adapter(const char* adapter_file_path)
-    // Keep adapter parameters CPU-backed so ORT copies them through the session's
-    // data transfer manager, which supports both plugin and provider-bridge EPs.
-    : adapter_{OrtLoraAdapter::Create(fs::path(adapter_file_path).c_str())} {}
+Adapter::Adapter(const char* adapter_file_path,
+                 const std::shared_ptr<const ExternalInitializerFileSources>& sources) {
+  if (sources) {
+    mapping_ = sources->Map(std::filesystem::path(adapter_file_path).filename().string());
+    OrtLoraAdapter* adapter = nullptr;
+    Ort::ThrowOnError(Ort::api->CreateLoraAdapterFromArray(
+        mapping_->data, mapping_->size, nullptr, &adapter));
+    adapter_.reset(adapter);
+  } else {
+    adapter_ = OrtLoraAdapter::Create(fs::path(adapter_file_path).c_str());
+  }
+}
+
+Adapter::~Adapter() = default;
 
 const OrtLoraAdapter* Adapter::AcquireRef() {
   // Private; only callable by Adapters (friend), which holds Adapters::mutex_
@@ -34,7 +46,8 @@ int32_t Adapter::RefCount() const {
   return ref_count_;
 }
 
-Adapters::Adapters(const Model*) {}
+Adapters::Adapters(const Model* model)
+    : file_sources_(model->config_->external_file_sources_) {}
 
 void Adapters::LoadAdapter(const char* adapter_file_path, const std::string& adapter_name) {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -42,7 +55,7 @@ void Adapters::LoadAdapter(const char* adapter_file_path, const std::string& ada
     throw std::runtime_error("Adapter already loaded: " + std::string{adapter_name});
   }
 
-  adapters_.emplace(adapter_name, std::make_unique<Adapter>(adapter_file_path));
+  adapters_.emplace(adapter_name, std::make_unique<Adapter>(adapter_file_path, file_sources_));
 }
 
 void Adapters::UnloadAdapter(const std::string& adapter_name) {

@@ -288,6 +288,10 @@ struct OgaConfig : OgaAbstract {
     OgaCheckResult(OgaConfigAddExternalInitializerData(this, filename.c_str(), data, length));
   }
 
+  void SetModelFileHandles(const char* const* names, const OgaFileHandle* handles, size_t count) {
+    OgaCheckResult(OgaConfigSetModelFileHandles(this, names, handles, count));
+  }
+
   void SetTokenizerData(std::string_view config_json, std::string_view tokenizer_json) {
     OgaCheckResult(OgaConfigSetTokenizerData(this, config_json.data(), config_json.size(),
                                              tokenizer_json.data(), tokenizer_json.size()));

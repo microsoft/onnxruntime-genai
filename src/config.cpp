@@ -16,7 +16,103 @@
 #include <stdexcept>
 #include <utility>
 
+#if defined(__linux__) || defined(__ANDROID__) || defined(__APPLE__)
+#include <sys/stat.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#endif
+
 namespace Generators {
+
+ExternalInitializerFileSources::~ExternalInitializerFileSources() {
+  for (const auto handle : handles) {
+#ifdef _WIN32
+    if (handle != nullptr && handle != INVALID_HANDLE_VALUE) {
+      CloseHandle(handle);
+    }
+#elif defined(__linux__) || defined(__ANDROID__) || defined(__APPLE__)
+    if (handle >= 0) {
+      close(handle);
+    }
+#endif
+  }
+}
+
+MappedModelFile::~MappedModelFile() {
+  if (data) {
+#ifdef _WIN32
+    UnmapViewOfFile(data);
+#elif defined(__linux__) || defined(__ANDROID__) || defined(__APPLE__)
+    munmap(data, size);
+#endif
+  }
+}
+
+std::unique_ptr<MappedModelFile> ExternalInitializerFileSources::Map(
+    const std::string& name, size_t maximum_size) const {
+#if defined(_WIN32) || defined(__linux__) || defined(__ANDROID__) || defined(__APPLE__)
+  const auto entry = std::find(names.begin(), names.end(), name);
+  if (entry == names.end()) {
+    throw std::runtime_error("Missing model file source: " + name);
+  }
+  const auto handle = handles[std::distance(names.begin(), entry)];
+#ifdef _WIN32
+  LARGE_INTEGER info{};
+  if (!GetFileSizeEx(handle, &info) || info.QuadPart <= 0 ||
+      static_cast<uint64_t>(info.QuadPart) > maximum_size) {
+    throw std::runtime_error("Invalid model file source length: " + name);
+  }
+  const size_t length = static_cast<size_t>(info.QuadPart);
+  auto result = std::make_unique<MappedModelFile>();
+  const HANDLE mapping = CreateFileMappingW(handle, nullptr, PAGE_READONLY, 0, 0, nullptr);
+  if (!mapping) {
+    throw std::runtime_error("Cannot create model file mapping: " + name +
+                             " (error " + std::to_string(GetLastError()) + ")");
+  }
+  void* data = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, length);
+  const DWORD map_error = data ? ERROR_SUCCESS : GetLastError();
+  CloseHandle(mapping);
+  if (!data) {
+    throw std::runtime_error("Cannot map model file source: " + name +
+                             " (error " + std::to_string(map_error) + ")");
+  }
+#else
+  struct stat info{};
+  if (fstat(handle, &info) != 0 || info.st_size <= 0 ||
+      static_cast<uint64_t>(info.st_size) > maximum_size) {
+    throw std::runtime_error("Invalid model file source length: " + name);
+  }
+  const size_t length = static_cast<size_t>(info.st_size);
+  auto result = std::make_unique<MappedModelFile>();
+  void* data = mmap(nullptr, length, PROT_READ, MAP_PRIVATE, handle, 0);
+  if (data == MAP_FAILED) {
+    throw std::runtime_error("Cannot map model file source: " + name);
+  }
+#endif
+  result->data = data;
+  result->size = length;
+  return result;
+#else
+  throw std::runtime_error("Model file sources are unsupported on this platform.");
+#endif
+}
+
+std::string Config::ReadFileSource(const std::string& name) const {
+  if (!external_file_sources_) {
+    throw std::runtime_error("Model file sources are not registered.");
+  }
+  auto mapping = external_file_sources_->Map(name, 16 * 1024 * 1024);
+  std::string result(static_cast<const char*>(mapping->data), mapping->size);
+  if (result.find('\0') != std::string::npos) {
+    throw std::runtime_error("Model metadata source must not contain embedded NUL bytes: " + name);
+  }
+  const auto first = result.find_first_not_of(" \t\r\n");
+  const auto last = result.find_last_not_of(" \t\r\n");
+  if (first == std::string::npos || result[first] != '{' || result[last] != '}') {
+    throw std::runtime_error("Model metadata source must contain a JSON object: " + name);
+  }
+  return result;
+}
 
 int64_t SafeDoubleToInt64(double x, std::string_view name);
 

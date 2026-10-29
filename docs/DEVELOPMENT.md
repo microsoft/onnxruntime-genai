@@ -23,10 +23,64 @@ This initial contract requires external initializer data and covers main-graph i
 Encoder–decoder coverage uses the existing synthetic Marian cache model with separate external-data buffers for both graphs. It checks path/memory generation parity after removing the staged files before memory-backed model creation, repeated generation after releasing the config, and rejection when either session's weight buffer is missing.
 
 Regenerate the tiny GPT-2 variant with `python test/models/hf-internal-testing/tiny-random-gpt2-fp32/export_external_data.py` in an environment containing `onnx`. Generate the pipeline fixture from the existing dummy decoder with the same script plus `--model-dir test/models/engine/dummy-decoder --filename decoder.onnx`.
+Generate its file-source adapter fixture with the same script plus
+`--model-dir test/models/engine/dummy-decoder --filename decoder.onnx --weights-filename adapter-weights.data --with-adapter`
+in an environment containing `onnx`, `numpy`, and `onnxruntime`.
 
 For the Marian variant, run the same script twice with `--model-dir test/models/marian-cache/dynamic --float-initializers-only`: once with `--filename encoder.onnx --weights-filename encoder-weights.data`, then with `--filename decoder.onnx --weights-filename decoder-weights.data`. Integer shape/axis constants remain inline for ORT shape inference.
 
 ---
+
+### Cross-platform native file-source loading
+
+`OgaConfigSetModelFileHandles` (`OgaConfig::SetModelFileHandles` in C++)
+registers a complete flat model directory as named, pre-opened, read-only files
+on a JSON-backed config. Supply tokenizer JSON through `OgaConfigSetTokenizerData`.
+Windows, Linux, Android, macOS and iOS use the same loading contract. `OgaFileHandle`
+is a native Windows `HANDLE` (`void*`), not a CRT descriptor, or a POSIX `int`
+descriptor. Windows handles must permit reading and are duplicated with only read
+rights; POSIX descriptors must already be read-only. Original handles can be closed
+after successful registration. File handles are not interchangeable between processes:
+the host must first transfer/duplicate them into the process calling this API.
+GenAI resolves graph names and ORT resolves external-weight names; the host does
+not need to parse ONNX tensors. CPU/WebGPU provider selection is unchanged.
+
+Descriptors are duplicated and shared across config copies and session recreation.
+Original handles may be closed and paths unlinked after registration. Graph-buffer
+overrides, such as decrypted translation graphs, are copied into model-owned
+storage during model creation. Tokenizers own their JSON and optional module data;
+speech/vision processor JSON and adapters can also come from the file sources.
+File-source preprocessing currently supports Whisper and Phi-4 multimodal only;
+other model types fail explicitly instead of reopening processor paths.
+Files must remain immutable. Metadata must contain a JSON object and no embedded
+NUL bytes. Nested names, packages and external tensor attributes are outside this
+contract.
+
+Build against an ORT SDK that exposes `GetExperimentalFunction` (API version 28
+or newer), and use a runtime with the experimental
+`OrtApi_SessionOptionsSetExternalInitializerFileHandles_SinceV32` entry.
+Older SDKs can still build the library, but descriptor registration fails explicitly.
+An unavailable API, missing file or invalid range is an explicit error, not
+filesystem or CPU fallback. ORT maps initializer ranges rather than entire weight
+files; small or unaligned tensors may be copied. Full ONNX loading with external
+initializers is required, including on mobile; minimal ORT builds do not advertise
+the entry. Execution-provider selection is unchanged. GPU providers use ordinary
+initializer upload from CPU-backed mappings, not Windows/D3D12 accelerated file
+loading. Ordinary path-based loading remains unchanged.
+File-source graph buffers are consumed during session creation. The ORT-format
+options `session.use_ort_model_bytes_directly=1` and
+`session.use_ort_model_bytes_for_initializers=1` are rejected in this mode rather
+than retaining pointers into a released mapping. Disabled (`0`) values remain
+supported. File-backed and registered graph overrides both undergo normal
+decoder state-manifest validation.
+Driver initialization must still occur before sandbox lockdown when required.
+
+`FileSourceAssetsTest.*` runs the same native-handle contract tests on desktop
+platforms and covers closed/unlinked files, graph and weight
+sources for both encoder/decoder sessions, failed registration, truncation,
+config-independent ownership, tokenizer-module tokens after config release,
+oversized metadata, metadata that could be mistaken for a path, and pipeline session recreation. It explicitly skips
+when the selected ORT lacks the API; those skips are not file-source validation.
 
 ## 1. Prerequisites
 

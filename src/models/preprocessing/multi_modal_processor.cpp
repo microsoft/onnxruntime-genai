@@ -47,6 +47,10 @@ std::shared_ptr<ThreadPool> Model::GetOrCreatePreprocessingThreadPool() const {
 }
 
 std::shared_ptr<MultiModalProcessor> Model::CreateMultiModalProcessor() const {
+  if (config_->external_file_sources_ &&
+      config_->model.type != "whisper" && config_->model.type != "phi4mm") {
+    throw std::runtime_error("File-source preprocessing is unsupported for model type: " + config_->model.type);
+  }
   return std::make_shared<MultiModalProcessor>(*config_, session_info_,
                                                config_->model.type == "whisper" ? nullptr : GetOrCreatePreprocessingThreadPool());
 }

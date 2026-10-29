@@ -504,6 +504,13 @@ std::vector<const char*> SessionInfo::GetOutputSymbolicShape(const std::string& 
 }
 
 Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
+  if (config_->external_file_sources_) {
+    for (auto& [name, bytes] : config_->model_data_spans_) {
+      auto storage = std::make_shared<const std::vector<std::byte>>(bytes.begin(), bytes.end());
+      config_->owned_file_source_graphs_[name] = storage;
+      bytes = *storage;
+    }
+  }
   CreateSessionOptions();
   EnsureDeviceOrtInit(*p_device_, *config_);
   AddSharedInitializers();
@@ -937,32 +944,76 @@ std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::str
   std::unique_ptr<OrtSession> session;
   if (config_->memory_assets_only_) {
     auto graph = config_->model_data_spans_.find(model_filename);
-    if (graph == config_->model_data_spans_.end() || graph->second.empty()) {
-      throw std::runtime_error("Memory asset bundle is missing graph: " + model_filename);
+    if (config_->external_file_sources_) {
+#if ORT_API_VERSION >= 28
+      if (Ort::api_version < 28) {
+        throw std::runtime_error("ORT does not support experimental initializer file sources.");
+      }
+      using RegisterFiles = OrtStatus*(ORT_API_CALL*)(OrtSessionOptions*, const char* const*, const OgaFileHandle*, size_t) noexcept;
+      const auto register_files = reinterpret_cast<RegisterFiles>(
+          Ort::api->GetExperimentalFunction(
+              "OrtApi_SessionOptionsSetExternalInitializerFileHandles_SinceV32"));
+      if (!register_files) {
+        throw std::runtime_error("ORT lacks the required initializer file-source API.");
+      }
+      for (const char* key : {"session.use_ort_model_bytes_directly",
+                              "session.use_ort_model_bytes_for_initializers"}) {
+        if (!session_options->HasConfigEntry(key)) {
+          continue;
+        }
+        size_t size = 0;
+        Ort::ThrowOnError(Ort::api->GetSessionConfigEntry(session_options, key, nullptr, &size));
+        std::vector<char> value(size);
+        Ort::ThrowOnError(Ort::api->GetSessionConfigEntry(session_options, key, value.data(), &size));
+        if (std::string_view{value.data()} == "1") {
+          throw std::runtime_error("File-source loading does not support ORT direct model bytes: " +
+                                   std::string{key});
+        }
+      }
+      auto options = session_options->Clone();
+      std::vector<const char*> names;
+      const auto& sources = *config_->external_file_sources_;
+      for (const auto& name : sources.names) {
+        names.push_back(name.c_str());
+      }
+      Ort::ThrowOnError(register_files(options.get(), names.data(), sources.handles.data(), names.size()));
+      if (graph != config_->model_data_spans_.end() && !graph->second.empty()) {
+        session = OrtSession::Create(ort_env, graph->second.data(), graph->second.size(), options.get());
+      } else {
+        auto mapping = sources.Map(model_filename);
+        session = OrtSession::Create(ort_env, mapping->data, mapping->size, options.get());
+      }
+#else
+      throw std::runtime_error("ORT lacks the required initializer file-source API.");
+#endif
+    } else {
+      if (graph == config_->model_data_spans_.end() || graph->second.empty()) {
+        throw std::runtime_error("Memory asset bundle is missing graph: " + model_filename);
+      }
+      if (config_->external_data_spans_.empty()) {
+        throw std::runtime_error("Memory asset bundle is missing external initializer buffers.");
+      }
+      auto options = session_options->Clone();
+      std::vector<fs::path> paths;
+      std::vector<char*> buffers;
+      std::vector<size_t> lengths;
+      paths.reserve(config_->external_data_spans_.size());
+      for (const auto& [name, data] : config_->external_data_spans_) {
+        paths.emplace_back(name);
+        // ORT's C API takes char*, but direct-buffer mode does not modify inputs.
+        buffers.push_back(const_cast<char*>(reinterpret_cast<const char*>(data.data())));
+        lengths.push_back(data.size());
+      }
+      std::vector<const ORTCHAR_T*> names;
+      for (const auto& path : paths) {
+        names.push_back(path.c_str());
+      }
+      Ort::ThrowOnError(Ort::api->AddExternalInitializersFromFilesInMemory(
+          options.get(), names.data(), buffers.data(), lengths.data(), names.size()));
+      options->AddConfigEntry("session.use_external_initializer_file_buffers_directly", "1");
+      session = OrtSession::Create(ort_env, graph->second.data(),
+                                   graph->second.size(), options.get());
     }
-    if (config_->external_data_spans_.empty()) {
-      throw std::runtime_error("Memory asset bundle is missing external initializer buffers.");
-    }
-    auto options = session_options->Clone();
-    std::vector<fs::path> paths;
-    std::vector<char*> buffers;
-    std::vector<size_t> lengths;
-    paths.reserve(config_->external_data_spans_.size());
-    for (const auto& [name, data] : config_->external_data_spans_) {
-      paths.emplace_back(name);
-      // ORT's C API takes char*, but direct-buffer mode does not modify inputs.
-      buffers.push_back(const_cast<char*>(reinterpret_cast<const char*>(data.data())));
-      lengths.push_back(data.size());
-    }
-    std::vector<const ORTCHAR_T*> names;
-    for (const auto& path : paths) {
-      names.push_back(path.c_str());
-    }
-    Ort::ThrowOnError(Ort::api->AddExternalInitializersFromFilesInMemory(
-        options.get(), names.data(), buffers.data(), lengths.data(), names.size()));
-    options->AddConfigEntry("session.use_external_initializer_file_buffers_directly", "1");
-    session = OrtSession::Create(ort_env, graph->second.data(),
-                                 graph->second.size(), options.get());
   } else if (auto model_data_it = config_->model_data_spans_.find(model_filename);
              !is_session_recreation && model_data_it != config_->model_data_spans_.end()) {
     // If model data was provided, load the model from memory

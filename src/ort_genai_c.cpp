@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 #include <memory>
+#include <algorithm>
 #include <stdexcept>
 #include <utility>
 #include <cstdint>
@@ -8,6 +9,11 @@
 #include <cstring>
 #include <limits>
 #include <optional>
+#if defined(__linux__) || defined(__ANDROID__) || defined(__APPLE__)
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 #include "span.h"
 #include "ort_genai_c.h"
 #include "generator/generators.h"
@@ -437,7 +443,8 @@ OgaResult* OGA_API_CALL OgaCreateConfigFromBuffer(const char* config_json,
 OgaResult* OGA_API_CALL OgaConfigAddExternalInitializerData(
     OgaConfig* config, const char* filename, const void* data, size_t length) {
   OGA_TRY
-  if (!config || !config->memory_assets_only_ || !filename || !data || length == 0) {
+  if (!config || !config->memory_assets_only_ || config->external_file_sources_ ||
+      !filename || !data || length == 0) {
     throw std::invalid_argument("Expected external initializer bytes and a memory-only config.");
   }
   const std::string name{filename};
@@ -452,6 +459,76 @@ OgaResult* OGA_API_CALL OgaConfigAddExternalInitializerData(
     throw std::invalid_argument("Duplicate external initializer asset: " + name);
   }
   return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaConfigSetModelFileHandles(
+    OgaConfig* config, const char* const* names, const OgaFileHandle* handles, size_t count) {
+  OGA_TRY
+#if (defined(_WIN32) || defined(__linux__) || defined(__ANDROID__) || defined(__APPLE__)) && ORT_API_VERSION >= 28
+  if (!config || !config->memory_assets_only_ || !config->external_data_spans_.empty() ||
+      (count != 0 && (!names || !handles))) {
+    throw std::invalid_argument("Expected initializer file sources and a memory-only config without weight buffers.");
+  }
+  (void)Generators::GetOrtEnv();
+  if (Ort::api_version < 28 ||
+      !Ort::api->GetExperimentalFunction(
+          "OrtApi_SessionOptionsSetExternalInitializerFileHandles_SinceV32")) {
+    throw std::runtime_error("ORT lacks the required initializer file-source API.");
+  }
+  auto sources = std::make_shared<Generators::ExternalInitializerFileSources>();
+  sources->names.reserve(count);
+  sources->handles.reserve(count);
+  for (size_t i = 0; i < count; ++i) {
+    if (!names[i]) {
+      throw std::invalid_argument("Null initializer file-source name.");
+    }
+    const std::string name{names[i]};
+    if (name.empty() || name == "." || name == ".." ||
+        name.find_first_of("/\\:") != std::string::npos ||
+        std::find(sources->names.begin(), sources->names.end(), name) != sources->names.end()) {
+      throw std::invalid_argument("Initializer file-source names must be unique flat relative names.");
+    }
+#ifdef _WIN32
+    sources->handles.push_back(nullptr);
+    auto& copy = sources->handles.back();
+    if (handles[i] == nullptr || handles[i] == INVALID_HANDLE_VALUE ||
+        !DuplicateHandle(GetCurrentProcess(), handles[i], GetCurrentProcess(), &copy,
+                         FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE, FALSE, 0)) {
+      throw std::runtime_error("Cannot duplicate external initializer file handle.");
+    }
+    BY_HANDLE_FILE_INFORMATION info{};
+    if (GetFileType(copy) != FILE_TYPE_DISK || !GetFileInformationByHandle(copy, &info) ||
+        (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+      throw std::invalid_argument("External initializer sources must be regular files.");
+    }
+#else
+    sources->handles.push_back(fcntl(handles[i], F_DUPFD_CLOEXEC, 0));
+    const auto copy = sources->handles.back();
+    if (copy < 0) {
+      throw std::runtime_error("Cannot duplicate external initializer descriptor.");
+    }
+    struct stat info{};
+    const int flags = fcntl(copy, F_GETFL);
+    if (flags < 0 || (flags & O_ACCMODE) != O_RDONLY ||
+        fstat(copy, &info) != 0 || !S_ISREG(info.st_mode) || info.st_size < 0) {
+      throw std::invalid_argument("External initializer sources must be read-only regular files.");
+    }
+#ifdef O_PATH
+    if ((flags & O_PATH) != 0) {
+      throw std::invalid_argument("External initializer sources must not be path-only.");
+    }
+#endif
+#endif
+    sources->names.push_back(name);
+  }
+  config->external_file_sources_ = std::move(sources);
+  return nullptr;
+#elif ORT_API_VERSION < 28
+  throw std::runtime_error("ORT lacks the required initializer file-source API.");
+#else
+  throw std::runtime_error("External initializer file handles are unsupported on this platform.");
+#endif
   OGA_CATCH
 }
 
