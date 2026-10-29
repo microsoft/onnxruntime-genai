@@ -225,7 +225,7 @@ def tiny_lfm2_vl(projector_use_layernorm=True):
     return config, hf_model
 
 
-def write_image_processor(path, layout="lfm2.5", resample=None):
+def write_image_processor(path, layout="lfm2.5", resample=None, max_num_patches=1024):
     """The image processor settings of a checkpoint, in the LFM2.5-VL or the LFM2-VL file layout."""
     path.mkdir(exist_ok=True)
     image_processor = {
@@ -237,10 +237,11 @@ def write_image_processor(path, layout="lfm2.5", resample=None):
         "image_std": [0.5, 0.5, 0.5],
         "min_image_tokens": 64,
         "max_image_tokens": 256,
-        "max_num_patches": 1024,
         "encoder_patch_size": 16,
         "downsample_factor": 2,
     }
+    if max_num_patches is not None:
+        image_processor["max_num_patches"] = max_num_patches
     # LFM2.5-VL nests the image processor in processor_config.json, LFM2-VL keeps it in preprocessor_config.json.
     if layout == "lfm2.5":
         (path / "processor_config.json").write_text(json.dumps({"image_processor": image_processor}))
@@ -408,9 +409,11 @@ def test_pre_quantized_checkpoint_reaches_only_the_decoder(tmp_path):
 
 
 @pytest.mark.parametrize("layout, interpolation", [("lfm2.5", "LINEAR"), ("lfm2", "CUBIC")])
-def test_genai_config_and_processor_config(tmp_path, layout, interpolation):
+# Without max_num_patches, transformers derives the fixture's 1024 from max_image_tokens and downsample_factor
+@pytest.mark.parametrize("max_num_patches", [1024, None])
+def test_genai_config_and_processor_config(tmp_path, layout, interpolation, max_num_patches):
     config, _ = tiny_lfm2_vl()
-    write_image_processor(tmp_path / "checkpoint", layout)
+    write_image_processor(tmp_path / "checkpoint", layout, max_num_patches=max_num_patches)
     config.name_or_path = str(tmp_path / "checkpoint")
     model = builder_module.LFM2VLModel(
         config, ir.DataType.FLOAT, ir.DataType.INT4, "cpu", str(tmp_path / "cache"), {"exclude_embeds": True}

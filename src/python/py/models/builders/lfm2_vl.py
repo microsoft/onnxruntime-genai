@@ -559,6 +559,10 @@ class LFM2VLModel:
         self.image_processor, _ = ImageProcessingMixin.get_image_processor_dict(
             self.decoder.model_name_or_path, cache_dir=cache_dir, token=self.decoder.hf_token
         )
+        # transformers derives max_num_patches when the checkpoint leaves it out, as this without image splitting
+        self.image_processor.setdefault(
+            "max_num_patches", self.image_processor["max_image_tokens"] * self.image_processor["downsample_factor"] ** 2
+        )
         self.processor_config = self.make_processor_config(self.image_processor)
 
     def make_processor_config(self, image_processor):
