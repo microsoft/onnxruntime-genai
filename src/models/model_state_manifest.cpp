@@ -283,7 +283,12 @@ void ValidateStateUpdateSession(std::string_view group_label,
         metadata.GetOutputDataType(state_name),
         metadata.GetOutputShape(state_name),
         state_name};
-    const size_t state_rank = update_kind == StateUpdateKind::GatedDeltaNet ? 4 : update_kind == StateUpdateKind::Ple ? 2 : 3;
+    size_t state_rank = 3;
+    if (update_kind == StateUpdateKind::GatedDeltaNet) {
+      state_rank = 4;
+    } else if (update_kind == StateUpdateKind::Ple) {
+      state_rank = 2;
+    }
     ValidateRank(group_label, "state output", state, state_rank);
     if (!DimensionsCompatible(state.shape[0], capture_count.shape[0])) {
       throw std::runtime_error(
