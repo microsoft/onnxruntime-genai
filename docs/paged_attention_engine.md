@@ -1644,8 +1644,10 @@ bindings. Compact partial-acceptance replay is device-native on CUDA. WebGPU's
 `ReplayStateUpdates` processes descriptors in their supplied order: FP32
 GatedDeltaNet descriptors with one shared backing owner for their
 decay/key/delta capsule sections invoke ORT's `com.microsoft::GatedDeltaNetStateReplay`
-(version 1). Convolution descriptors and FP32 recurrent descriptors with separate
-capsule backing owners retain CPU staging, `ReplayStateUpdatesOnCpu`, and upload.
+(version 1). FP16 and FP32 convolution descriptors invoke
+`com.microsoft::ConvStateReplay` (version 1). FP32 recurrent descriptors with
+separate capsule backing owners retain CPU staging, `ReplayStateUpdatesOnCpu`,
+and upload.
 Each descriptor finishes before the next one reads its inputs. Non-FP32 recurrent
 state and unknown replay kinds are rejected; the CPU recurrent reference also
 requires FP32. Invalid GPU views, helper-session creation errors, and failed ORT runs
@@ -1655,18 +1657,19 @@ once, preserving untouched rows and bytes. Those mirrors are uploaded before a G
 descriptor runs and refreshed after it, so mixed replay preserves device ordering.
 
 The replay invocation remains private to the WebGPU device interface.
-The device owns its lazily created helper session, cloned from the fully configured
+The device owns its lazily created helper sessions, cloned from the fully configured
 allocator-initialization session options, with graph capture disabled. This first
 version supports context 0 only and requires an ORT build containing the operator.
 Full backing allocations are bound as rank-1 tensors; absolute logical byte offsets
-from `DeviceSpan::ByteOffset()` are converted to FP32-element metadata offsets.
+from `DeviceSpan::ByteOffset()` are converted to FP32-element metadata offsets for
+recurrent replay and remain byte offsets for convolution replay.
 The output is prebound to the same inactive destination allocation as its input.
 The operator's checked completion makes a successful helper return a GPU-completion
 boundary; ORT failures propagate to the caller. The helper serializes its own runs,
 but callers must order target-session work before replay and keep borrowed
 buffer owners alive through the call. There is one helper `Session::Run` and one
-checked-completion boundary per recurrent descriptor, with no batching or GPU
-convolution replay. It does not publish or flip a state bank. `PrepareCommit` queues
+checked-completion boundary per GPU descriptor, without batching.
+Replay does not publish or flip a state bank. `PrepareCommit` queues
 compact replay, and `PublishCommit` publishes bank metadata before the next pool
 operation flushes that replay ahead of all state readers. Preparation failures leave
 active banks unchanged and fail the reservation. A deferred replay error propagates
@@ -1675,6 +1678,31 @@ or checkpoint capture from observing incomplete state.
 The source must be the incoming state before capsule capture, and capsule geometry
 and original capture capacity must match the producer; `kept_count` selects only
 the leading transitions, not a different capsule layout.
+
+Convolution replay caches separate FP16 and FP32 helper sessions and explicitly
+disables CPU EP fallback. It binds the full source, capture, and destination
+backings plus CPU `int64[8]` metadata:
+`source_offset_bytes, destination_offset_bytes, capture_offset_bytes,
+batch_size=1, channels, history_width, capacity, kept_count`.
+Views must be element-aligned, including two-byte-aligned FP16 views, and fit the
+full allocation and uint32 byte-indexing range. The destination backing must be
+distinct from both source and capture, even for disjoint views. Integer-only
+selection preserves FP16/FP32 payload bits, including NaNs and signed zero.
+`kept_count=0` copies incoming history; counts at or above history width select
+only the last history-width entries of the retained captured prefix.
+Zero accepted drafts still retain the anchor (`kept_count=1`); full acceptance
+commits the target's staged final state without replay.
+
+This requires a published ORT core containing the `ConvStateReplay` schema and
+a matching WebGPU plugin containing its kernel, from
+[microsoft/onnxruntime#33493](https://github.com/microsoft/onnxruntime/pull/33493)
+(merged October 21, 2026). Windows WebGPU CI pins core
+`1.32.0-dev-20261027-0506-7617fc8`, which contains the schema. The WebGPU plugin
+pin must still advance to a published build containing the kernel before this
+integration can merge. Missing schemas/kernels are errors, not CPU retries or
+skipped GPU tests. The required
+CI checks run the replay and fixed-state-pool suites and verify that every
+required GPU case executed; no local experimental ORT build is substituted.
 
 Each resident request owns a stable slot identified by request identity and an
 allocation generation. A released and reused slot receives a new generation, so

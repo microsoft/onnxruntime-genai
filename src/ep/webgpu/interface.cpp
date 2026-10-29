@@ -182,6 +182,7 @@ struct InterfaceImpl : DeviceInterface {
   const OrtMemoryInfo* ort_memory_info_{};
   std::mutex replay_mutex_;
   std::unique_ptr<OrtSession> replay_session_;
+  std::array<std::unique_ptr<OrtSession>, 2> conv_replay_sessions_;
   // Reusable CPU staging buffers for UpdateAttentionMask, pre-filled with 1s.
   // Content is always all 1s so sharing across generators is safe; only upload_bytes
   // worth of data is copied each call, regardless of buffer capacity.
@@ -248,15 +249,20 @@ struct InterfaceImpl : DeviceInterface {
         return descriptor.decay.SameBufferAs(descriptor.key) &&
                descriptor.decay.SameBufferAs(descriptor.delta);
       }
-      if (descriptor.kind != StateUpdateReplayKind::CausalConv) {
-        throw std::invalid_argument("Unsupported WebGPU state replay kind.");
+      if (descriptor.kind == StateUpdateReplayKind::CausalConv) {
+        return true;
       }
-      return false;
+      throw std::invalid_argument("Unsupported WebGPU state replay kind.");
     };
     size_t index = 0;
     while (index < count) {
       if (use_gpu(descriptors[index])) {
-        RunStateReplay(descriptors[index++]);
+        const auto& descriptor = descriptors[index++];
+        if (descriptor.kind == StateUpdateReplayKind::CausalConv) {
+          RunConvStateReplay(descriptor);
+        } else {
+          RunStateReplay(descriptor);
+        }
       } else {
         const size_t first = index++;
         while (index < count && !use_gpu(descriptors[index])) ++index;
@@ -459,8 +465,9 @@ struct InterfaceImpl : DeviceInterface {
     Synchronize();
   }
 
-  void EnsureReplaySession() {
-    if (replay_session_) return;
+  void EnsureReplaySession(bool convolution = false, bool half = false) {
+    auto& cached_session = convolution ? conv_replay_sessions_[half ? 0 : 1] : replay_session_;
+    if (cached_session) return;
     const auto& init_options =
         GetOrtGlobals()->device_allocators_[static_cast<int>(DeviceType::WEBGPU)].session_options_;
     if (!init_options || !ort_memory_info_ || ort_memory_info_->GetDeviceId() != 0) {
@@ -480,19 +487,88 @@ struct InterfaceImpl : DeviceInterface {
       }
     }
 
-    ModelConfig config("GatedDeltaNetStateReplay");
-    for (const char* name : {"source_state", "capsule", "destination_state"}) {
-      config.inputs.emplace_back(name, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, std::vector<int64_t>{-1});
+    const auto type = half ? ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16 : ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
+    ModelConfig config(convolution ? "ConvStateReplay" : "GatedDeltaNetStateReplay");
+    const std::array<const char*, 3> input_names = convolution
+                                                       ? std::array<const char*, 3>{"source_backing", "capture_backing", "destination_backing"}
+                                                       : std::array<const char*, 3>{"source_state", "capsule", "destination_state"};
+    for (const char* name : input_names) {
+      config.inputs.emplace_back(name, type, std::vector<int64_t>{-1});
     }
-    config.inputs.emplace_back("metadata", ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, std::vector<int64_t>{11});
-    config.outputs.emplace_back("replayed_state", ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, std::vector<int64_t>{-1});
+    config.inputs.emplace_back("metadata", ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, std::vector<int64_t>{convolution ? 8 : 11});
+    config.outputs.emplace_back("replayed_state", type, std::vector<int64_t>{-1});
     auto model = GraphBuilder::Build(config, "com.microsoft", 1);
     auto options = init_options->Clone();
     options->AddConfigEntry("ep.webgpuexecutionprovider.enableGraphCapture", "0");
+    if (convolution) options->AddConfigEntry("session.disable_cpu_ep_fallback", "1");
     OrtSession* session = nullptr;
     Ort::ThrowOnError(Ort::GetModelEditorApi().CreateSessionFromModel(
         &GetOrtEnv(), model.get(), options.get(), &session));
-    replay_session_.reset(session);
+    cached_session.reset(session);
+  }
+
+  void RunConvStateReplay(const StateUpdateReplayDesc& descriptor) {
+    std::lock_guard<std::mutex> lock(replay_mutex_);
+    if (descriptor.element_size != 2 && descriptor.element_size != 4) {
+      throw std::invalid_argument("WebGPU convolution state replay supports only FP16 and FP32 state.");
+    }
+    const auto extent_bytes = [&](uint64_t length) {
+      if (!descriptor.channel_count ||
+          descriptor.channel_count > std::numeric_limits<uint32_t>::max() / descriptor.element_size ||
+          length > std::numeric_limits<uint32_t>::max() /
+                       (descriptor.channel_count * descriptor.element_size)) {
+        throw std::invalid_argument("WebGPU convolution state replay geometry exceeds the uint32 byte range.");
+      }
+      return static_cast<size_t>(length * descriptor.channel_count * descriptor.element_size);
+    };
+    const auto backing = [&](const auto& view, size_t required_bytes) {
+      auto buffer = std::dynamic_pointer_cast<WebGPUMemory>(view.BackingBuffer());
+      if (!buffer || !ort_allocator_ || buffer->ort_allocator_ != ort_allocator_ ||
+          (!buffer->p_device_ && buffer->size_in_bytes_) ||
+          buffer->size_in_bytes_ > std::numeric_limits<uint32_t>::max() ||
+          buffer->size_in_bytes_ % descriptor.element_size ||
+          view.ByteOffset() % descriptor.element_size ||
+          view.ByteOffset() > buffer->size_in_bytes_ ||
+          view.size() > buffer->size_in_bytes_ - view.ByteOffset() ||
+          view.size() < required_bytes) {
+        throw std::invalid_argument("WebGPU convolution state replay requires valid element-aligned views of this device's full backings.");
+      }
+      return buffer;
+    };
+    const auto state_bytes = extent_bytes(descriptor.state_width);
+    auto source = backing(descriptor.source_state, state_bytes);
+    auto destination = backing(descriptor.destination_state, state_bytes);
+    auto capture = backing(descriptor.value, extent_bytes(descriptor.capacity));
+    const bool half = descriptor.element_size == 2;
+    EnsureReplaySession(true, half);
+    const auto tensor = [&](const WebGPUMemory& buffer) {
+      const std::array<int64_t, 1> shape{static_cast<int64_t>(buffer.size_in_bytes_ / descriptor.element_size)};
+      return OrtValue::CreateTensor(*ort_memory_info_, buffer.p_device_, buffer.size_in_bytes_, shape,
+                                    half ? ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16 : ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+    };
+    auto source_tensor = tensor(*source);
+    auto capture_tensor = source == capture ? nullptr : tensor(*capture);
+    auto destination_tensor = tensor(*destination);
+    // Offsets describe one request row within each full backing allocation.
+    std::array<int64_t, 8> metadata{
+        static_cast<int64_t>(descriptor.source_state.ByteOffset()),
+        static_cast<int64_t>(descriptor.destination_state.ByteOffset()),
+        static_cast<int64_t>(descriptor.value.ByteOffset()),
+        1, static_cast<int64_t>(descriptor.channel_count), static_cast<int64_t>(descriptor.state_width),
+        descriptor.capacity, descriptor.kept_count};
+    const std::array<int64_t, 1> metadata_shape{8};
+    auto cpu_memory_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+    auto metadata_tensor = OrtValue::CreateTensor(*cpu_memory_info, metadata.data(), sizeof(metadata),
+                                                  metadata_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+    auto& session = *conv_replay_sessions_[half ? 0 : 1];
+    auto binding = OrtIoBinding::Create(session);
+    binding->BindInput("source_backing", *source_tensor);
+    binding->BindInput("capture_backing", capture_tensor ? *capture_tensor : *source_tensor);
+    binding->BindInput("destination_backing", *destination_tensor);
+    binding->BindInput("metadata", *metadata_tensor);
+    binding->BindOutput("replayed_state", *destination_tensor);
+    // Checked completion errors escape without CPU retry; the pool retains its fail-stop policy.
+    session.Run(nullptr, *binding);
   }
 
   void RunStateReplay(const StateUpdateReplayDesc& descriptor) {
