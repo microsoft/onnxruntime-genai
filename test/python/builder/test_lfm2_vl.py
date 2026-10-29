@@ -219,6 +219,13 @@ def tiny_lfm2_vl(projector_use_layernorm=True):
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(0)
         hf_model = transformers.Lfm2VlForConditionalGeneration(config).eval()
+        # transformers starts the vision biases at 0 and the LayerNorm weights at 1, and the builder leaves out a zero
+        # bias: move them so the features check every bias Add and LayerNorm scale
+        with torch.no_grad():
+            for part in (hf_model.model.vision_tower, hf_model.model.multi_modal_projector):
+                for name, parameter in part.named_parameters():
+                    if name.endswith("bias") or "norm" in name:
+                        parameter.add_(torch.randn_like(parameter), alpha=config.initializer_range)
     # A large epsilon, so a LayerNorm built with the wrong one moves the features past the tolerance
     if hf_model.model.multi_modal_projector.layer_norm is not None:
         hf_model.model.multi_modal_projector.layer_norm.eps = 0.1
@@ -289,9 +296,11 @@ def test_vision_model_matches_transformers(tmp_path, projector_use_layernorm):
     expected = torch.cat(expected.pooler_output).numpy()
     assert features.shape == (sum(rows * cols // 4 for rows, cols in GRIDS), TEXT_HIDDEN_SIZE)
     np.testing.assert_allclose(features, expected, rtol=1e-5, atol=1e-5)
+    nodes = onnx.load(tmp_path / "vision.onnx", load_external_data=False).graph.node
     # WebGPU has no antialiased Resize, and these ops leave it for the CPU with copies of the activations.
-    op_types = {node.op_type for node in onnx.load(tmp_path / "vision.onnx", load_external_data=False).graph.node}
-    assert not op_types & {"Resize", "NonZero", "Compress", "Loop", "If"}
+    assert not {node.op_type for node in nodes} & {"Resize", "NonZero", "Compress", "Loop", "If"}
+    bias_adds = {f"/model/layers.{layer}/attn/{proj}_proj/Add" for layer in range(2) for proj in "qkv"}
+    assert bias_adds <= {node.name for node in nodes}
 
 
 @pytest.mark.parametrize("table_dtype", [ir.DataType.FLOAT, ir.DataType.FLOAT16])
