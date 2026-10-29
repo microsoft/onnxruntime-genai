@@ -63,6 +63,12 @@ canonical `image_grid_thw` key is absent. When both are supplied, the canonical
 tensor takes priority for both vision and position inputs, regardless of insertion order.
 Profiled dtype cases require non-int64 `image_grid_thw` to be rejected before any
 vision stage executes; an int64 control verifies all three stages execute normally.
+Image rows are located from the canonical prompt tokens rather than the embedding
+session's input buffer. The `embedding_provider` cases run the embedding session on
+CPU or CUDA while the decoder and vision stages stay on CPU, each in a child process.
+Session profiles confirm the requested embedding provider; CUDA cases skip unless
+the build reports CUDA support. `FindQwenImageTokenRowsTest` covers host readback
+of separate device and host token storage in the native engine tests.
 ONNX and Pillow are required to execute all cases; the existing Qwen3.5 tokenizer
 and processor assets supply the fixture metadata.
 

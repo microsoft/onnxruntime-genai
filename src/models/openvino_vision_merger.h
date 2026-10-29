@@ -15,6 +15,8 @@ namespace Generators {
 struct ExtraInput;
 struct GeneratorParams;
 struct OpenVINOMultiModalModel;
+template <typename T>
+struct DeviceSpan;
 
 // Host-side vision production + image-feature merge strategy for an OpenVINO-partitioned VLM.
 struct OpenVINOVisionMerger {
@@ -26,7 +28,8 @@ struct OpenVINOVisionMerger {
 
   // Scatters the produced image features into the (already computed, text-only) embeddings buffer at
   // this model's image placeholder token rows. Called once, from Run, after the embedding step.
-  virtual void Merge(OrtValue& inputs_embeds, const OrtValue& input_ids) = 0;
+  // input_ids are the canonical prompt tokens, which may live on a different device than the embeddings.
+  virtual void Merge(OrtValue& inputs_embeds, DeviceSpan<int32_t> input_ids) = 0;
 };
 
 // Scatters image feature rows into an embeddings buffer on the host, at the given token positions.
