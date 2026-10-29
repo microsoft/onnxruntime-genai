@@ -1654,6 +1654,29 @@ host mirror per backing, observe earlier writes, and upload each modified backin
 once, preserving untouched rows and bytes. Those mirrors are uploaded before a GPU
 descriptor runs and refreshed after it, so mixed replay preserves device ordering.
 
+WebGPU fixed-state gather, full-output preparation, and prefix-checkpoint capture collect
+zero-offset copies within that operation and call `OrtApi::CopyTensors` once per vector by
+default. Tensor views and buffer owners stay alive through submission. A nonzero-offset copy
+first submits the pending vector, then takes the existing CPU read/modify/write fallback;
+this preserves neighboring rows sharing a backing buffer. Other devices retain their
+individual copy path. No vector crosses a decoder run, replay, synchronization boundary,
+or state publication. Preparation submits ordinary copies before recording deferred replay,
+and publication remains host-only. Failure still poisons the pool and cannot publish a
+partially prepared reservation. WebGPU `Synchronize()` is not a host-completion fence:
+GPU ordering relies on submissions to the same queue, with blocking readback and checked
+replay providing completion where already required.
+
+The existing `CopyTensors` API is available since ORT 1.23 and is included in the API-32
+SDK used by WebGPU CI; no API/ABI or add-on interface change is needed. Reducing each
+compatible streamless GPU vector to one submission requires companion ORT
+[commit `77cbcc86f558`](https://github.com/microsoft/onnxruntime/commit/77cbcc86f558099c4496401788c91a6d91cf6d99).
+Older supported WebGPU plugins execute the vector as individual copies with the same
+ordering and correctness, but without the submission reduction. The WebGPU CI plugin pin
+must be updated once a nightly containing that ORT change is available; until then the
+required Engine tests cover collection and state integrity, and ORT's provider tests cover
+actual submission counts and stream routing. This does not depend on the separate
+`Queue.WriteBuffer` optimization.
+
 The replay invocation remains private to the WebGPU device interface.
 The device owns its lazily created helper session, cloned from the fully configured
 allocator-initialization session options, with graph capture disabled. This first
