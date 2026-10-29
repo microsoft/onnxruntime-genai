@@ -9,6 +9,7 @@
 #include "models/io/default_position_inputs.h"
 #include "models/io/tensor_scatter_kv_cache.h"
 
+#include <algorithm>
 #include <atomic>
 
 namespace Generators {
@@ -371,9 +372,12 @@ NemotronParseModel::NemotronParseModel(std::unique_ptr<Config> config,
       auto options = OrtSessionOptions::Create();
       auto session_config = decoder.session_options;
       // Replace the package's decode profile before provider setup, preserving other options.
-      std::erase_if(session_config.config_entries, [](const auto& entry) {
-        return entry.first == kNvProfileMinShapes || entry.first == kNvProfileOptShapes || entry.first == kNvProfileMaxShapes;
-      });
+      auto& entries = session_config.config_entries;
+      entries.erase(std::remove_if(entries.begin(), entries.end(), [](const auto& entry) {
+                      return entry.first == kNvProfileMinShapes || entry.first == kNvProfileOptShapes ||
+                             entry.first == kNvProfileMaxShapes;
+                    }),
+                    entries.end());
       ConfigureDecoderSession(*options, *config_, min_length, opt_length, max_length);
       CreateSessionOptionsFromConfig(session_config, *options,
                                      /*is_primary_session_options=*/false, disable_graph_capture);
