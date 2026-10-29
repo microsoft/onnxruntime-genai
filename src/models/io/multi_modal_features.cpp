@@ -4,10 +4,13 @@
 #include "models/model.h"
 #include "models/io/multi_modal_features.h"
 
+#include <array>
+#include <limits>
+
 namespace Generators {
 
 MultiModalFeatures::MultiModalFeatures(State& state, MultiModalFeatures::Mode mode, const std::string& name,
-                                       int64_t batch_size, int64_t num_feature_tokens)
+                                       int64_t batch_size, int64_t num_feature_tokens, int64_t extra_output_tokens)
     : state_{state},
       type_{mode == MultiModalFeatures::Mode::Input
                 ? model_.session_info_.GetInputDataType(name)
@@ -41,10 +44,30 @@ MultiModalFeatures::MultiModalFeatures(State& state, MultiModalFeatures::Mode mo
   //    The tensor does not need to be pre-allocated because it will be created during (1).
   // 4) Created as an input for embedding model (num_feature_tokens = 0)
   //    The tensor does not need to be pre-allocated because it will be created during (2).
+  if (extra_output_tokens < 0 || (extra_output_tokens > 0 && (mode != Mode::Output || shape_.size() != 2))) {
+    throw std::runtime_error("Extra feature capacity requires a rank-2 output with nonnegative tail size");
+  }
   if (mode == MultiModalFeatures::Mode::Output) {
     // Written by the encoder session, so it lives on that session's device, not the decoder's
     // (see SessionCanAccess).
-    features_ = OrtValue::CreateTensor(state_.p_session_device_->GetAllocator(), shape_, type_);
+    if (extra_output_tokens == 0) {
+      features_ = OrtValue::CreateTensor(state_.p_session_device_->GetAllocator(), shape_, type_);
+    } else {
+      if (num_feature_tokens < 0 || feature_width <= 0 ||
+          num_feature_tokens > std::numeric_limits<int64_t>::max() - extra_output_tokens) {
+        throw std::overflow_error("Feature capacity overflow");
+      }
+      const int64_t capacity = num_feature_tokens + extra_output_tokens;
+      const size_t element_bytes = Ort::SizeOf(type_);
+      if (static_cast<uint64_t>(capacity) > std::numeric_limits<size_t>::max() / feature_width / element_bytes) {
+        throw std::overflow_error("Feature buffer size overflow");
+      }
+      const std::array<int64_t, 2> backing_shape{capacity, feature_width};
+      backing_features_ = OrtValue::CreateTensor(state_.p_session_device_->GetAllocator(), backing_shape, type_);
+      features_ = OrtValue::CreateTensor(
+          backing_features_->GetTensorMemoryInfo(), backing_features_->GetTensorMutableRawData(),
+          static_cast<size_t>(num_feature_tokens) * static_cast<size_t>(feature_width) * element_bytes, shape_, type_);
+    }
   }
 }
 
@@ -69,6 +92,7 @@ void MultiModalFeatures::Update(bool is_prompt) {
   if (!is_prompt && shape_[shape_.size() - 2] > 0) {  // if num_image_tokens > 0
     shape_[shape_.size() - 2] = 0;
     features_ = OrtValue::CreateTensor(state_.p_session_device_inputs_->GetAllocator(), shape_, type_);
+    backing_features_.reset();
     state_.inputs_[index_] = features_.get();
   }
 }
@@ -84,6 +108,7 @@ void MultiModalFeatures::ReuseFeaturesBuffer(MultiModalFeatures& other) {
   if (SessionCanAccess(*state_.p_session_device_, producer_device)) {
     // Share the output MultiModalFeatures OrtValue* from other with the input MultiModalFeatures for this.
     features_ = std::move(other.features_);
+    backing_features_ = std::move(other.backing_features_);
     state_.inputs_[index_] = other.state_.outputs_[other.index_];
     return;
   }

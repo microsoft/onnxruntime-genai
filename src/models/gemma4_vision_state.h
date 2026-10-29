@@ -17,6 +17,8 @@ struct Gemma4VisionState : VisionState {
 
  private:
   std::vector<int64_t> image_token_counts_;
+  int64_t output_capacity_{};
+  std::vector<int64_t> per_image_output_shape_;
   size_t pixel_values_index_{SIZE_MAX};
   size_t position_ids_index_{SIZE_MAX};
 };
