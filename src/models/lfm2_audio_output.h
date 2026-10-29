@@ -75,6 +75,7 @@ struct Lfm2AudioOutput {
   int modality_left_{};
 
   std::vector<float> pending_embedding_;  // the last frame, as the decoder's next input
+  bool pending_in_codes_{};               // the last frame is also the last one in audio_codes_
   std::vector<int64_t> audio_codes_;      // num_frames * num_codebooks
   std::unique_ptr<OrtValue> audio_codes_tensor_;
   DeviceSpan<float> placeholder_logits_;

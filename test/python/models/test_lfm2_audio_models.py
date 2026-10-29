@@ -1013,6 +1013,36 @@ def test_lfm2_audio_interleaved_speech_matches_reference(test_data_path, tmp_pat
     assert codes.shape == (layout.count("A"), NUM_CODEBOOKS)
 
 
+@pytest.mark.parametrize("appended", [[10, 11], [10]], ids=["two-tokens", "one-token"])
+def test_lfm2_audio_turn_appended_during_speech_keeps_one_frame_per_placeholder(test_data_path, tmp_path, appended):
+    # Appending runs the last frame's placeholder through the decoder first. The frame sampled on that
+    # run has no placeholder in the sequence, so it must not show up in audio_codes. A single appended
+    # token starts the turn too, rather than taking the next frame's place.
+    model_path = _speech_model(test_data_path, tmp_path)
+    prompt = "<|startoftext|>Answer aloud. "
+    _, _, uninterrupted = _generate_speech(model_path, prompt, None, 45, audio_interleaved=True, audio_top_k=1)
+
+    model = og.Model(os.fspath(model_path))
+    inputs = model.create_multimodal_processor()(prompt, audios=None)
+    prompt_length = inputs["input_ids"].as_numpy().shape[1]
+    params = og.GeneratorParams(model)
+    params.set_search_options(do_sample=False, max_length=prompt_length + 45, audio_interleaved=True, audio_top_k=1)
+    generator = og.Generator(model, params)
+    generator.set_inputs(inputs)
+    for _ in range(INTERLEAVED_N_TEXT + 3):
+        generator.generate_next_token()
+    assert generator.get_sequence(0)[-1] == AUDIO_TOKEN_ID, "the turn must be appended in the middle of speech"
+
+    generator.append_tokens(np.array(appended, dtype=np.int32))
+    generator.generate_next_token()
+
+    sequence = generator.get_sequence(0)[prompt_length:].tolist()
+    codes = generator.get_output("audio_codes")
+    assert sequence[-1] != AUDIO_TOKEN_ID, "the appended turn starts in text"
+    assert codes.shape == (sequence.count(AUDIO_TOKEN_ID), NUM_CODEBOOKS)
+    np.testing.assert_array_equal(codes, uninterrupted[: len(codes)])
+
+
 @pytest.mark.parametrize("provider", ["cuda", "webgpu"])
 @pytest.mark.parametrize("num_clips", [0, 1], ids=["typed", "spoken"])
 def test_lfm2_audio_speech_output_with_the_decoder_on_another_provider_matches_cpu(
