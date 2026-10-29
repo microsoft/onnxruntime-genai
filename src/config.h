@@ -708,6 +708,51 @@ struct Config {
       bool IsEnabled() const noexcept { return enabled && !filename.empty(); }
     } mtp;
 
+    // Fixed-shape CUDA graph sessions and data plane for model.type "qwen38_flash_graph".
+    // Paths are relative to the model directory.
+    struct Qwen38Graph {
+      struct Head {
+        std::string filename_s1;
+        std::string filename_s2;
+        std::optional<SessionOptions> session_options;
+      } head;
+      std::string plane_library;
+      std::string ple_table;
+      int kv_capacity{33028};
+      int target_s1_graph_id{41};
+      int target_s2_graph_id{51};
+      int head_s1_graph_id{61};
+      int head_s2_graph_id{63};
+      bool warmup{true};
+      struct Mtp {
+        bool enabled{true};
+        bool prefill_head{true};
+        bool skip_refeed{false};
+      } mtp;
+      struct Fold {
+        bool enabled{false};
+        int target_graph_id{71};
+        bool force_reject{false};
+        struct HeadR2 {
+          std::string filename;
+          int graph_id{81};
+          std::optional<SessionOptions> session_options;
+        } head_r2;
+      } fold;
+      struct Prefill {
+        bool enabled{false};
+        int chunk{8192};
+        std::string weights_pool;
+        std::string constants;
+        struct Model {
+          std::string filename;
+          std::optional<SessionOptions> session_options;
+        } dense, head_kv;
+        std::vector<int> warmup_lengths{8192, 2048, 512, 128, 37};
+      } prefill;
+      bool IsConfigured() const noexcept { return !head.filename_s1.empty() || !fold.head_r2.filename.empty(); }
+    } qwen38_graph;
+
     // DFlash 2/DSpark block-drafter metadata. Unlike MTP the drafter is not decoder-shaped: it
     // reads the main model's auxiliary hidden states, predicts a whole block of tokens at once,
     // and returns a candidate lattice that the Engine walks greedily. model.dspark is a config
