@@ -30,6 +30,7 @@ logging.basicConfig(format="%(asctime)s %(name)s [%(levelname)s] - %(message)s",
 log = logging.getLogger("qwen-fara-vision-tests")
 
 _QWEN35_WEBGPU_GRAPH_CAPTURE_CHILD = "ORTGENAI_QWEN35_WEBGPU_GRAPH_CAPTURE_CHILD"
+_QWEN35_EMBEDDING_PROVIDER_CHILD = "ORTGENAI_QWEN35_EMBEDDING_PROVIDER_CHILD"
 
 
 @pytest.mark.parametrize("relative_model_path", [Path("qwen2-5-vl"), Path("qwen3-vl")])
@@ -1345,6 +1346,85 @@ def test_qwen3_5_openvino_partitioned_decode_embeddings(test_data_path, tmp_path
         )
         generator.generate_next_token()
         assert generator.get_next_tokens() == [2]
+
+
+@pytest.mark.parametrize("embedding_dtype", [np.int32, np.int64])
+@pytest.mark.parametrize(
+    "embedding_provider",
+    [
+        "cpu",
+        pytest.param("cuda", marks=pytest.mark.skipif(not og.is_cuda_available(), reason="CUDA EP not available")),
+    ],
+)
+def test_qwen3_5_openvino_partitioned_embedding_provider(
+    test_data_path, tmp_path, request, embedding_dtype, embedding_provider
+):
+    """Image rows come from the canonical prompt tokens when only the embedding session uses another provider."""
+    if os.environ.get(_QWEN35_EMBEDDING_PROVIDER_CHILD) != "1":
+        if not test_data_path or not (Path(test_data_path) / "qwen3-5").exists():
+            pytest.skip("qwen3-5 test model not found")
+        # Reading device-resident embedding IDs on the host can crash the process, so keep that out of the runner.
+        test_node = f"{Path(__file__).resolve()}::{request.node.name}"
+        completed = run_subprocess(
+            [sys.executable, "-m", "pytest", "-sv", "--test_models", os.path.abspath(test_data_path), test_node],
+            cwd=Path(__file__).parents[1],
+            capture=True,
+            env={_QWEN35_EMBEDDING_PROVIDER_CHILD: "1"},
+            log=log,
+        )
+        assert b"1 passed" in completed.stdout, completed.stdout.decode(errors="replace")
+        return
+
+    model_path = tmp_path / "qwen35-math"
+    config = _write_qwen35_partitioned_math_fixture(test_data_path, model_path, embedding_dtype=embedding_dtype)
+    embedding_options = config["model"]["embedding"]["session_options"]
+    if embedding_provider == "cuda":
+        embedding_options["provider_options"] = [{"cuda": {}}]
+    embedding_options["enable_profiling"] = os.fspath(model_path / "profile_embedding")
+    (model_path / "genai_config.json").write_text(json.dumps(config), encoding="utf-8")
+    grids = [[1, 4, 6]]
+    inputs, patches = _qwen35_controlled_inputs(config, grids)
+    assert inputs["input_ids"].as_numpy().shape == (1, 10)
+
+    model = og.Model(os.fspath(model_path))
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=14, do_sample=False, num_beams=1)
+    generator = og.Generator(model, params)
+    generator.set_inputs(inputs)
+    generator.get_logits()
+    expected = _qwen35_reference_embeddings(inputs["input_ids"], patches, grids, config["model"]["image_token_id"])
+    assert generator.get_output("inputs_embeds").shape == (1, 10, 224)
+    _assert_qwen35_embeddings(
+        generator.get_output("inputs_embeds").copy(),
+        expected,
+        inputs["input_ids"],
+        grids,
+        config["model"]["image_token_id"],
+    )
+    generator.generate_next_token()
+    assert generator.get_next_tokens() == [2]
+    for _ in range(2):
+        generator.get_logits()
+        np.testing.assert_allclose(
+            generator.get_output("inputs_embeds"),
+            _qwen35_text_embeddings(np.array([[2]], dtype=np.int32)),
+            rtol=1e-5,
+            atol=1e-4,
+        )
+        generator.generate_next_token()
+        assert generator.get_next_tokens() == [2]
+
+    # Every embedding kernel must run on the requested provider, so a silent CPU fallback cannot pass as CUDA.
+    del generator, params, model
+    gc.collect()
+    profiles = list(model_path.glob("profile_embedding_*.json"))
+    assert len(profiles) == 1
+    events = json.loads(profiles[0].read_text(encoding="utf-8"))
+    providers = {
+        event["args"]["provider"] for event in events if event.get("cat") == "Node" and "provider" in event["args"]
+    }
+    print(f"Qwen embedding providers={sorted(providers)}")
+    assert providers == {"CUDAExecutionProvider" if embedding_provider == "cuda" else "CPUExecutionProvider"}
 
 
 @pytest.mark.parametrize("source_dtype", [np.float32, np.float16])

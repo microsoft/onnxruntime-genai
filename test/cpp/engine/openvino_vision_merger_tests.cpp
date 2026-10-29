@@ -3,9 +3,11 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <memory>
 #include <span>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -92,6 +94,66 @@ TEST(PlanQwenImageSlicesTest, RejectsInvalidGridDimensionsAndTripletCount) {
   EXPECT_THROW(PlanQwenImageSlices(zero_grid, 0, 2), std::runtime_error);
   EXPECT_THROW(PlanQwenImageSlices(negative_grid, 0, 2), std::runtime_error);
   EXPECT_THROW(PlanQwenImageSlices(incomplete_grid, 2, 2), std::runtime_error);
+}
+
+// Keeps device and host storage apart, so only an explicit download makes current tokens visible on the host.
+struct SplitTokenBuffer final : DeviceBuffer {
+  SplitTokenBuffer(std::vector<int32_t> device_tokens, int32_t stale_host_value)
+      : device_{std::move(device_tokens)}, host_(device_.size(), stale_host_value) {
+    size_in_bytes_ = device_.size() * sizeof(int32_t);
+    p_device_ = reinterpret_cast<uint8_t*>(device_.data());
+    p_cpu_ = reinterpret_cast<uint8_t*>(host_.data());
+  }
+
+  const char* GetType() const override { return "test_split"; }
+  void AllocateCpu() override {}
+  void CopyDeviceToCpu() override {
+    ++downloads;
+    std::memcpy(p_cpu_, p_device_, size_in_bytes_);
+  }
+  void CopyCpuToDevice() override { ADD_FAILURE() << "token rows must not upload"; }
+  void CopyFrom(size_t, DeviceBuffer&, size_t, size_t) override { ADD_FAILURE() << "token rows must not copy"; }
+  void Zero() override { ADD_FAILURE() << "token rows must not zero"; }
+
+  std::vector<int32_t> device_;
+  std::vector<int32_t> host_;
+  int downloads{};
+};
+
+TEST(FindQwenImageTokenRowsTest, FindsRowsInCpuTokensWithoutCopying) {
+  auto tokens = GetDeviceInterface(DeviceType::CPU)->Allocate<int32_t>(5);
+  const std::array<int32_t, 5> values{10, 100, 100, 11, 100};
+  std::copy(values.begin(), values.end(), tokens.Span().begin());
+
+  EXPECT_EQ(FindQwenImageTokenRows(tokens, 100), (std::vector<int64_t>{1, 2, 4}));
+  EXPECT_TRUE(std::equal(values.begin(), values.end(), tokens.Span().begin()));
+  // CPU tokens alias their host view, so the download is a no-op.
+  EXPECT_EQ(tokens.CopyDeviceToCpu().data(), tokens.Span().data());
+}
+
+TEST(FindQwenImageTokenRowsTest, ReadsCurrentDeviceTokensOncePerCall) {
+  auto buffer = std::make_shared<SplitTokenBuffer>(std::vector<int32_t>{100, 10, 100, 100, 11, 100}, 100);
+  DeviceSpan<int32_t> tokens{std::shared_ptr<DeviceBuffer>{buffer}};
+
+  EXPECT_EQ(FindQwenImageTokenRows(tokens, 100), (std::vector<int64_t>{0, 2, 3, 5}));
+  EXPECT_EQ(buffer->downloads, 1);
+  EXPECT_EQ(buffer->host_, buffer->device_);
+
+  // Rows are relative to the subspan; device tokens 2..4 are {100, 100, 11}.
+  buffer->host_.assign(buffer->host_.size(), 100);
+  EXPECT_EQ(FindQwenImageTokenRows(tokens.subspan(2, 3), 100), (std::vector<int64_t>{0, 1}));
+  EXPECT_EQ(buffer->downloads, 2);
+}
+
+TEST(FindQwenImageTokenRowsTest, ReturnsNoRowsForTextAndEmptyTokens) {
+  auto buffer = std::make_shared<SplitTokenBuffer>(std::vector<int32_t>{10, 11, 12}, 100);
+  DeviceSpan<int32_t> tokens{std::shared_ptr<DeviceBuffer>{buffer}};
+
+  EXPECT_TRUE(FindQwenImageTokenRows(tokens, 100).empty());
+  EXPECT_EQ(buffer->downloads, 1);
+  EXPECT_TRUE(FindQwenImageTokenRows(tokens.subspan(1, 0), 100).empty());
+  EXPECT_TRUE(FindQwenImageTokenRows(DeviceSpan<int32_t>{}, 100).empty());
+  EXPECT_EQ(buffer->downloads, 1);
 }
 
 TEST(OpenVINOVisionStageSessionOptionsTest, PrefersStageThenVisionThenDecoderOptions) {

@@ -717,7 +717,7 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
     // OpenVINO-partitioned VLMs merge image features into the (text-only) embeddings on the host, after
     // the embedding graph runs and before the decoder consumes the shared inputs_embeds buffer.
     if (vision_merger_) {
-      vision_merger_->Merge(*decoder_state_->inputs_embeds_.Get(), *embedding_state_->input_ids_.Get());
+      vision_merger_->Merge(*decoder_state_->inputs_embeds_.Get(), next_tokens);
       vision_merger_.reset();
     }
 

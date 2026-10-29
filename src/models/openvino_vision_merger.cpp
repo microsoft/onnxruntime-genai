@@ -95,6 +95,17 @@ std::vector<QwenImageSlice> PlanQwenImageSlices(std::span<const int64_t> grid_va
   return slices;
 }
 
+std::vector<int64_t> FindQwenImageTokenRows(DeviceSpan<int32_t> tokens, int32_t image_token_id) {
+  std::vector<int64_t> rows;
+  if (tokens.empty()) return rows;
+  // The tokens may be device memory; CpuSpan alone would expose a stale or unallocated host mirror.
+  const auto host_tokens = tokens.CopyDeviceToCpu();
+  for (size_t i = 0; i < host_tokens.size(); ++i) {
+    if (host_tokens[i] == image_token_id) rows.push_back(static_cast<int64_t>(i));
+  }
+  return rows;
+}
+
 size_t MergeImageFeaturesIntoEmbeddings(OrtValue& inputs_embeds,
                                         const OrtValue& image_features,
                                         std::span<const int64_t> target_token_rows) {
@@ -216,7 +227,7 @@ struct Gemma3OpenVINOVisionMerger : OpenVINOVisionMerger {
   }
 
   void RunVision(const std::vector<ExtraInput>& extra_inputs) override;
-  void Merge(OrtValue& inputs_embeds, const OrtValue& input_ids) override;
+  void Merge(OrtValue& inputs_embeds, DeviceSpan<int32_t> input_ids) override;
 
  private:
   const OpenVINOMultiModalModel& model_;
@@ -254,10 +265,11 @@ void Gemma3OpenVINOVisionMerger::RunVision(const std::vector<ExtraInput>& extra_
   }
 }
 
-void Gemma3OpenVINOVisionMerger::Merge(OrtValue& inputs_embeds, const OrtValue& input_ids) {
+void Gemma3OpenVINOVisionMerger::Merge(OrtValue& inputs_embeds, DeviceSpan<int32_t> input_ids) {
   if (!image_features_) return;  // text-only prompt
 
-  const size_t prompt_tokens = input_ids.GetTensorTypeAndShapeInfo()->GetElementCount();
+  // Only the token count is needed, so the token values are never read back to the host.
+  const size_t prompt_tokens = input_ids.size();
   if (token_type_ids_.size() != prompt_tokens) {
     throw std::runtime_error("Gemma3 OpenVINO vision merger: token_type_ids has " +
                              std::to_string(token_type_ids_.size()) + " values but the prompt has " +
@@ -425,7 +437,7 @@ struct Qwen3_5OpenVINOVisionMerger : OpenVINOVisionMerger {
   explicit Qwen3_5OpenVINOVisionMerger(const OpenVINOMultiModalModel& model);
 
   void RunVision(const std::vector<ExtraInput>& extra_inputs) override;
-  void Merge(OrtValue& inputs_embeds, const OrtValue& input_ids) override;
+  void Merge(OrtValue& inputs_embeds, DeviceSpan<int32_t> input_ids) override;
 
  private:
   const OpenVINOMultiModalModel& model_;
@@ -707,29 +719,12 @@ void Qwen3_5OpenVINOVisionMerger::RunVision(const std::vector<ExtraInput>& extra
   }
 }
 
-void Qwen3_5OpenVINOVisionMerger::Merge(OrtValue& inputs_embeds, const OrtValue& input_ids) {
+void Qwen3_5OpenVINOVisionMerger::Merge(OrtValue& inputs_embeds, DeviceSpan<int32_t> input_ids) {
   if (!image_features_) return;  // text-only prompt
 
-  // Qwen marks image placeholder tokens with input_ids == image_token_id. input_ids may be int32 or
-  // int64 depending on the embedding graph, so dispatch on the element type.
-  const int64_t image_token_id = model_.config_->model.image_token_id;
-  const auto info = input_ids.GetTensorTypeAndShapeInfo();
-  const size_t count = info->GetElementCount();
-
-  std::vector<int64_t> image_token_rows;
-  image_token_rows.reserve(count);
-  if (info->GetElementType() == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
-    const int64_t* ids = input_ids.GetTensorData<int64_t>();
-    for (size_t i = 0; i < count; ++i) {
-      if (ids[i] == image_token_id) image_token_rows.push_back(static_cast<int64_t>(i));
-    }
-  } else {
-    const int32_t* ids = input_ids.GetTensorData<int32_t>();
-    for (size_t i = 0; i < count; ++i) {
-      if (ids[i] == image_token_id) image_token_rows.push_back(static_cast<int64_t>(i));
-    }
-  }
-
+  // Qwen marks image placeholder tokens with input_ids == image_token_id. The canonical tokens are int32
+  // even when the embedding graph declares int64 input_ids.
+  const auto image_token_rows = FindQwenImageTokenRows(input_ids, model_.config_->model.image_token_id);
   MergeAllImageFeatures(inputs_embeds, *image_features_, image_token_rows);
 }
 
