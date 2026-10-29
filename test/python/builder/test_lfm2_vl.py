@@ -387,10 +387,14 @@ def test_precision_and_quantization_reach_only_the_decoder(tmp_path, ep, io_dtyp
 
 
 @pytest.mark.parametrize(
-    "decoder_options, loaded_by", [({}, ["vision"]), ({"num_hidden_layers": 2}, ["vision", "decoder"])]
+    "decoder_options, quantized",
+    [({}, False), ({"adapter_path": "adapter"}, False), ({"num_hidden_layers": 1}, False), ({}, True)],
 )
-def test_loads_the_checkpoint_once(monkeypatch, tmp_path, decoder_options, loaded_by):
+def test_loads_the_checkpoint_once(monkeypatch, tmp_path, decoder_options, quantized):
+    # The decoder loads its own model when the shared one would be the wrong one
     config, hf_model = tiny_lfm2_vl()
+    if quantized:
+        config.quantization_config = {"quant_method": "awq", "bits": 4, "group_size": 32}
     write_image_processor(tmp_path / "checkpoint")
     config.name_or_path = str(tmp_path / "checkpoint")
     options = {"exclude_embeds": True, **decoder_options}
@@ -399,9 +403,12 @@ def test_loads_the_checkpoint_once(monkeypatch, tmp_path, decoder_options, loade
     )
     loads = []
     monkeypatch.setattr(lfm2_vl_module.Model, "load_weights", lambda self, input_path: loads.append(self) or hf_model)
+    for part in (model.vision, model.embedding, model.decoder):
+        monkeypatch.setattr(part, "make_model", lambda input_path, part=part: part.load_weights(input_path))
     model.make_model("")
 
-    assert loads == [getattr(model, part) for part in loaded_by]
+    shared = not decoder_options and not quantized
+    assert loads == ([model.vision] if shared else [model.vision, model.decoder])
 
 
 def test_pre_quantized_checkpoint_reaches_only_the_decoder(tmp_path):

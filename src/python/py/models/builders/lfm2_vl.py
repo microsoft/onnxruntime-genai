@@ -559,7 +559,7 @@ class LFM2VLModel:
         self.image_processor, _ = ImageProcessingMixin.get_image_processor_dict(
             self.decoder.model_name_or_path, cache_dir=cache_dir, token=self.decoder.hf_token
         )
-        # transformers derives max_num_patches when the checkpoint leaves it out, as this without image splitting
+        # transformers derives max_num_patches; without image splitting it is max_image_tokens * downsample_factor**2
         self.image_processor.setdefault(
             "max_num_patches", self.image_processor["max_image_tokens"] * self.image_processor["downsample_factor"] ** 2
         )
@@ -603,12 +603,10 @@ class LFM2VLModel:
         # All three models read the same checkpoint, so load it once
         hf_model = self.vision.load_weights(input_path)
         self.vision.load_weights = self.embedding.load_weights = lambda _input_path: hf_model
-        # The decoder loads another model from a pre-quantized or GGUF checkpoint, with an adapter or fewer layers
+        # The decoder loads another model from a pre-quantized checkpoint, with an adapter or with fewer layers
         if (
             self.decoder.quant_type is None
-            and not input_path.endswith(".gguf")
             and not {"adapter_path", "num_hidden_layers"} & self.decoder.extra_options.keys()
-            and "load_weights" not in self.decoder.__dict__
         ):
             self.decoder.load_weights = self.vision.load_weights
         self.vision.make_model(input_path)
