@@ -539,10 +539,14 @@ class LFM2VLModel:
         vision_dtype = ir.DataType.FLOAT16 if io_dtype == ir.DataType.BFLOAT16 else io_dtype
         # The remaining options configure the decoder
         options = {key: extra_options[key] for key in ("hf_token", "hf_remote") if key in extra_options}
+        # Without the checkpoint's quantization_config, Model loads them through transformers, not QuantModel
+        unquantized_config = copy.deepcopy(config)
+        if hasattr(unquantized_config, "quantization_config"):
+            delattr(unquantized_config, "quantization_config")
         self.vision = LFM2VLVisionEncoder(
-            copy.deepcopy(config), vision_dtype, vision_dtype, ep, cache_dir, dict(options)
+            copy.deepcopy(unquantized_config), vision_dtype, vision_dtype, ep, cache_dir, dict(options)
         )
-        self.embedding = LFM2VLEmbedding(copy.deepcopy(config), io_dtype, io_dtype, ep, cache_dir, dict(options))
+        self.embedding = LFM2VLEmbedding(unquantized_config, io_dtype, io_dtype, ep, cache_dir, dict(options))
         self.embedding.embed_attrs["image_features_dtype"] = self.vision.io_dtype
         self.decoder = LFM2Model(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         self.decoder.model_type = "lfm2_vl"

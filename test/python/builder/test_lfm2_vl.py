@@ -394,6 +394,19 @@ def test_loads_the_checkpoint_once(monkeypatch, tmp_path, decoder_options, loade
     assert loads == [getattr(model, part) for part in loaded_by]
 
 
+def test_pre_quantized_checkpoint_reaches_only_the_decoder(tmp_path):
+    # Model loads a checkpoint with a quantization_config through QuantModel, which has no vision tower
+    config, _ = tiny_lfm2_vl()
+    config.quantization_config = {"quant_method": "awq", "bits": 4, "group_size": 32}
+    write_image_processor(tmp_path / "checkpoint")
+    config.name_or_path = str(tmp_path / "checkpoint")
+    model = builder_module.LFM2VLModel(
+        config, ir.DataType.FLOAT, ir.DataType.INT4, "cpu", str(tmp_path / "cache"), {"exclude_embeds": True}
+    )
+
+    assert (model.vision.quant_type, model.embedding.quant_type, model.decoder.quant_type) == (None, None, "awq")
+
+
 @pytest.mark.parametrize("layout, interpolation", [("lfm2.5", "LINEAR"), ("lfm2", "CUBIC")])
 def test_genai_config_and_processor_config(tmp_path, layout, interpolation):
     config, _ = tiny_lfm2_vl()
