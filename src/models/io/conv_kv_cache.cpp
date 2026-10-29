@@ -71,6 +71,9 @@ ConvKeyValueCache::ConvKeyValueCache(State& state)
     } else if (g_log.enabled && !state_.params_->search.past_present_share_buffer && kv_share_buffer_) {
       Log("info", "ConvKeyValueCache: past_present_share_buffer was forced on due to a fixed kv-cache shape in the model graph.");
     }
+    if (state_.params_->use_graph_capture && !kv_share_buffer_) {
+      throw std::runtime_error("Graph capture is not supported with past_present_share_buffer set to false.");
+    }
 
     if (kv_share_buffer_) {
       const int64_t seq_cap = fixed_kv_seq_len > 0
@@ -184,6 +187,17 @@ void ConvKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_lengt
   }
 
   // --- Update conv state cache ---
+  // A captured graph keeps reading and writing the buffers it was captured with, so keep them
+  // and copy the state over.
+  if (state_.params_->use_graph_capture) {
+    if (!conv_is_first_update_) {
+      for (int i = 0; i < conv_layer_count_; i++) {
+        ByteWrapTensor(Device(), *conv_pasts_[i]).CopyFrom(ByteWrapTensor(Device(), *conv_presents_[i]));
+      }
+    }
+    conv_is_first_update_ = false;
+    return;
+  }
   if (!conv_is_first_update_) {
     for (int i = 0; i < conv_layer_count_; i++) {
       if (beam_indices.empty()) {
