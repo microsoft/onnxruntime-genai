@@ -8,7 +8,8 @@ lsb_packages=()
 if [ "$os_major_version" -lt 9 ]; then
   lsb_packages=(redhat-lsb-core)
 fi
-dnf install -y \
+# CUDA is supplied by the base image; OS dependencies do not need its package repository.
+dnf --disablerepo=cuda install -y \
   glibc-langpack-\* glibc-locale-source which "${lsb_packages[@]}" \
   perl-IPC-Cmd openssl-devel wget \
   expat-devel tar unzip zlib-devel make bzip2 bzip2-devel \

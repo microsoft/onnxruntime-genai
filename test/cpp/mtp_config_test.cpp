@@ -36,8 +36,10 @@ fs_std::path WriteMtpConfig(const std::string& output_name,
       " \"main_hidden_states\": \"main_hidden\","
       " \"outputs\": { \"" +
       output_name +
-      "\": \"head_feedback\" " + output_fields + " } } },"
-      " \"search\": {} " + speculative_fields + " }";
+      "\": \"head_feedback\" " +
+      output_fields + " } } },"
+                      " \"search\": {} " +
+      speculative_fields + " }";
   std::ofstream out(root / "genai_config.json", std::ios::binary);
   out << config;
   return root;
