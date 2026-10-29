@@ -1084,8 +1084,8 @@ def test_gemma4_fixed_output_failed_run_preserves_session(test_data_path, tmp_pa
     model, processor = _fixed_output_gemma4(test_data_path, tmp_path / "failed_run")
     path = os.fspath(_get_test_media_path(test_data_path, Path("images") / "australia.jpg"))
     inputs = processor(GEMMA4_IMAGE_TOKEN + "Describe", images=og.Images.open(path))
-    positions = _to_numpy(inputs["pixel_position_ids"])
-    inputs["pixel_position_ids"] = positions.astype(np.int32)
+    positions = inputs["pixel_position_ids"]
+    inputs["pixel_position_ids"] = _to_numpy(positions).astype(np.int32)
     params = og.GeneratorParams(model)
     params.set_search_options(max_length=4096)
     generator = og.Generator(model, params)
