@@ -8,6 +8,7 @@
 #include "../models/preprocessing/genai_tokenizer.h"
 #include "../stop_string_controller.h"
 #include "decoders/varlen_decoder_io.h"
+#include "nvtx_range.h"
 
 #include <limits>
 #include <new>
@@ -1869,6 +1870,7 @@ void Engine::RunStatic() {
 }
 
 void Engine::RunDynamic() {
+  ORTGENAI_NVTX_RANGE("Engine::Step");
   if (scheduler_->HasPendingRequests()) {
     // A dynamic step is a transaction with six phases:
     // plan -> reserve state -> checkpoint request state -> execute -> stage sampled tokens -> commit.
@@ -1880,6 +1882,7 @@ void Engine::RunDynamic() {
       // cache consistency failure proves that paged and fixed committed ownership disagree and is
       // fatal. Incidental failures such as allocation errors have not mutated Engine state and may
       // propagate without poisoning the Engine.
+      ORTGENAI_NVTX_RANGE("PlanStep");
       planning_result = scheduler_->PlanStep(step_plan_);
     } catch (const StepPlanningConsistencyError&) {
       MarkUnhealthyAndThrow(
@@ -1929,6 +1932,7 @@ void Engine::RunDynamic() {
       // token boundaries until Commit(). Prove the reservation matches the plan exactly -- required
       // flag, row count, new-slot count, staging bytes, and per-row request identity -- so a plan/reservation
       // divergence fails here (fatal) rather than silently committing mismatched state.
+      ORTGENAI_NVTX_RANGE("ReserveStep");
       reservation = cache_manager_->ReserveStep(step_plan_);
       const auto fixed_slots = reservation->FixedStateSlots();
       const bool has_fixed_state = !fixed_slots.empty();
@@ -2042,9 +2046,15 @@ void Engine::RunDynamic() {
       // Sampling mutates each request's Search state. Checkpoint it before the model run so failures
       // in execution or post-processing can discard the whole batch rather than partially advancing
       // whichever requests happened to finish first.
-      scheduled_requests.BeginTransaction();
+      {
+        ORTGENAI_NVTX_RANGE("BeginTransaction");
+        scheduled_requests.BeginTransaction();
+      }
       request_transaction_active = true;
-      model_executor_->Decode(scheduled_requests, context);
+      {
+        ORTGENAI_NVTX_RANGE("TargetDecode");
+        model_executor_->Decode(scheduled_requests, context);
+      }
       ++speculative_stats_.target_forward_passes;
     } catch (const ModelExecutionError& error) {
       const auto execution_error = std::current_exception();
@@ -2082,8 +2092,11 @@ void Engine::RunDynamic() {
     try {
       // Turn the final logits row for each packed request into a staged next-token result. Request
       // counters, host token mirrors, and completion status still remain unchanged in this phase.
-      scheduled_requests.GenerateNextTokensForTransaction(
-          step_plan_, step_results_);
+      {
+        ORTGENAI_NVTX_RANGE("GenerateNextTokens");
+        scheduled_requests.GenerateNextTokensForTransaction(
+            step_plan_, step_results_);
+      }
       // A verify step planned cache slots for every draft. Narrow the reservation to the accepted
       // prefix before anything is staged, so the paged and fixed states commit at one boundary.
       for (size_t i = 0; i < step_plan_.requests.size(); ++i) {
@@ -2182,6 +2195,7 @@ void Engine::RunDynamic() {
     // Validate every ownership and capacity precondition and perform all fallible fixed device
     // work into inactive banks without publishing anything.
     try {
+      ORTGENAI_NVTX_RANGE("PrepareCommit");
       reservation->PrepareCommit();
       if (mtp_step) {
         mtp_step->reservation->PrepareCommit();
@@ -2204,6 +2218,7 @@ void Engine::RunDynamic() {
       // contract violation is fatal here; anything else falls back to a target-only commit.
       std::exception_ptr fatal_preparation_error;
       try {
+        ORTGENAI_NVTX_RANGE("PrepareDflash2Feeds");
         PrepareDflash2Feeds(step_plan_, step_results_);
         dflash2_feeds_ready = true;
       } catch (const std::logic_error&) {
@@ -2231,10 +2246,13 @@ void Engine::RunDynamic() {
       // durable, publish paged occupancy and the fixed bank flip, then advance the lightweight
       // Request bookkeeping that readers observe. Any failure after this point is fatal because a
       // cooperating component may already have crossed the shared token boundary.
-      scheduled_requests.CommitStateForTransaction();
-      request_transaction_active = false;
-      reservation->Commit();
-      prefix_adoption_guard.Commit();
+      {
+        ORTGENAI_NVTX_RANGE("CommitState");
+        scheduled_requests.CommitStateForTransaction();
+        request_transaction_active = false;
+        reservation->Commit();
+        prefix_adoption_guard.Commit();
+      }
       if (mtp_step) {
         CommitMtpStep(*mtp_step);
       }
@@ -2256,6 +2274,7 @@ void Engine::RunDynamic() {
       }
       if (dflash2_feeds_ready) {
         try {
+          ORTGENAI_NVTX_RANGE("PublishDflash2Drafts");
           PublishDflash2Drafts(scheduled_requests);
           dflash2_consecutive_failures_ = 0;
         } catch (...) {

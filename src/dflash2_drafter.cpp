@@ -6,6 +6,7 @@
 #include "engine/request.h"
 #include "engine/decoders/varlen_decoder_io.h"
 #include "engine/paged_key_value_cache.h"
+#include "engine/nvtx_range.h"
 #include "models/io/kv_cache.h"
 
 #include <algorithm>
@@ -987,6 +988,8 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   const size_t block_size = static_cast<size_t>(config_.block_size);
   const size_t num_spec = static_cast<size_t>(config_.num_draft_tokens);
   const size_t top_k = static_cast<size_t>(config_.selector_top_k);
+  ORTGENAI_NVTX_PHASES(phases);
+  ORTGENAI_NVTX_PHASE_NEXT(phases, "D2Layout");
 
   // Only requests the ring pool can hold take part; the rest keep decoding without drafts.
   std::vector<size_t> served;
@@ -1151,6 +1154,7 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
     span.CopyCpuToDevice();
   };
 
+  ORTGENAI_NVTX_PHASE_NEXT(phases, "D2PackAux");
   auto& packed_aux = StepTensor(step_tensors_.packed_aux, device, aux_type_,
                                 {static_cast<int64_t>(num_ctx_rows),
                                  static_cast<int64_t>(aux_hidden_size_)});
@@ -1173,6 +1177,7 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
     destination_row += ingest_count[i];
   }
 
+  ORTGENAI_NVTX_PHASE_NEXT(phases, "D2Embed");
   auto& input_ids = StepTensor(step_tensors_.input_ids, device, Ort::TypeToTensorType<int64_t>,
                                {static_cast<int64_t>(num_block_rows)});
   Tensor* embeddings = nullptr;
@@ -1194,6 +1199,7 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
     if (embeddings) model_->cpu_embedding_->Run(cpu, *embeddings, step_tensors_.embedding_workspace);
   }
 
+  ORTGENAI_NVTX_PHASE_NEXT(phases, "D2Uploads");
   constexpr auto int32_type = Ort::TypeToTensorType<int32_t>;
   Tensor* q_row_map = nullptr;
   if (has_q_row_map_) {
@@ -1345,9 +1351,11 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
     outputs.push_back(caches_[i]->GetOrtTensor());
   }
 
+  ORTGENAI_NVTX_PHASE_NEXT(phases, "D2SessionRun");
   model_->session_->Run(run_options_.get(), input_names.data(), inputs.data(), input_names.size(),
                         output_names.data(), outputs.data(), output_names.size());
 
+  ORTGENAI_NVTX_PHASE_NEXT(phases, "D2Readback");
   for (const size_t i : served) {
     const auto& feed = feeds[i];
     requests_[feed.request].cached_positions = CheckedAdd(

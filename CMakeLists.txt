@@ -141,6 +141,11 @@ target_link_libraries(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} onnxrun
 target_link_directories(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} ${ORT_LIB_DIR})
 target_link_libraries(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} Threads::Threads)
 
+include(cmake/nvtx.cmake)
+if(ENABLE_NVTX)
+  target_link_libraries(${ORTGENAI_COMPILE_TARGET} PRIVATE onnxruntime-genai-nvtx)
+endif()
+
 if(WIN32)
   target_compile_definitions(onnxruntime-genai PRIVATE VERSION_INFO=\"${VERSION_INFO}\")
   target_compile_definitions(onnxruntime-genai PRIVATE VERSION_MAJOR=${VERSION_MAJOR})
@@ -383,6 +388,7 @@ endif()
 
 if(ENABLE_TESTS)
   message("------------------Enabling tests------------------")
+  add_subdirectory("${REPO_ROOT}/test/nvtx")
   add_subdirectory("${REPO_ROOT}/test")
 endif()
 

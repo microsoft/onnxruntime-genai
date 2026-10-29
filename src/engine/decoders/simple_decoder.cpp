@@ -6,6 +6,7 @@
 #include "static_batch_decoder_io.h"
 #include "varlen_decoder_io.h"
 #include "../../models/model_state_manifest.h"
+#include "../nvtx_range.h"
 
 namespace Generators {
 
@@ -168,17 +169,20 @@ void SimpleDecoder::Decode(ScheduledRequests& scheduled_requests,
                    known_shapes);
 
   std::unique_ptr<DecoderIO> decoder_state;
-  if (!cache_manager_->SupportsDynamicBatching()) {
-    decoder_state = std::make_unique<StaticBatchDecoderIO>(
-        model_, scheduled_requests, cache_manager_);
-  } else if (has_fixed_state_groups_) {
-    decoder_state = std::make_unique<HybridDecoderIO>(
-        model_, scheduled_requests, cache_manager_, context,
-        capture ? graph_buffers_.get() : nullptr, position_planes_, &embedding_workspace_);
-  } else {
-    decoder_state = std::make_unique<VarlenDecoderIO>(
-        model_, scheduled_requests, cache_manager_, &context,
-        capture ? graph_buffers_.get() : nullptr, position_planes_, &embedding_workspace_);
+  {
+    ORTGENAI_NVTX_RANGE("TargetBuildInputs");
+    if (!cache_manager_->SupportsDynamicBatching()) {
+      decoder_state = std::make_unique<StaticBatchDecoderIO>(
+          model_, scheduled_requests, cache_manager_);
+    } else if (has_fixed_state_groups_) {
+      decoder_state = std::make_unique<HybridDecoderIO>(
+          model_, scheduled_requests, cache_manager_, context,
+          capture ? graph_buffers_.get() : nullptr, position_planes_, &embedding_workspace_);
+    } else {
+      decoder_state = std::make_unique<VarlenDecoderIO>(
+          model_, scheduled_requests, cache_manager_, &context,
+          capture ? graph_buffers_.get() : nullptr, position_planes_, &embedding_workspace_);
+    }
   }
 
   if (IsGraphCaptureEnabled(model_->config_->model.decoder.session_options) &&
@@ -193,13 +197,16 @@ void SimpleDecoder::Decode(ScheduledRequests& scheduled_requests,
   }
 
   decoder_state->DumpInputs();
-  model_->session_decoder_->Run(context.run_options.get(),
-                                decoder_state->input_names_.data(),
-                                decoder_state->inputs_.data(),
-                                decoder_state->input_names_.size(),
-                                decoder_state->output_names_.data(),
-                                decoder_state->outputs_.data(),
-                                decoder_state->output_names_.size());
+  {
+    ORTGENAI_NVTX_RANGE("TargetSessionRun");
+    model_->session_decoder_->Run(context.run_options.get(),
+                                  decoder_state->input_names_.data(),
+                                  decoder_state->inputs_.data(),
+                                  decoder_state->input_names_.size(),
+                                  decoder_state->output_names_.data(),
+                                  decoder_state->outputs_.data(),
+                                  decoder_state->output_names_.size());
+  }
   decoder_state->DumpOutputs();
 
   scheduled_requests.AddDecoderState(std::move(decoder_state));
