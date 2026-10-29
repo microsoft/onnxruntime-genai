@@ -6,8 +6,12 @@
 #define OGA_USE_SPAN 1
 #include "../models/onnxruntime_api.h"
 #include "../ort_genai.h"
+#include <cstring>
+#include <filesystem>
 #include <iostream>
+#include <mutex>
 #include <optional>
+#include <unordered_map>
 
 using namespace pybind11::literals;
 
@@ -727,6 +731,14 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("clear_decoder_provider_options_hardware_device_type", &OgaConfig::ClearDecoderProviderOptionsHardwareDeviceType)
       .def("clear_decoder_provider_options_hardware_device_id", &OgaConfig::ClearDecoderProviderOptionsHardwareDeviceId)
       .def("clear_decoder_provider_options_hardware_vendor_id", &OgaConfig::ClearDecoderProviderOptionsHardwareVendorId);
+
+  pybind11::class_<NonGenerativeSession>(m, "_NonGenerativeSession")
+      .def(pybind11::init<const OgaConfig&>(), pybind11::arg("config"))
+      .def("run", [](NonGenerativeSession& session,
+                     const std::string& request) {
+        pybind11::gil_scoped_release release;
+        return session.Run(request);
+      });
 
   pybind11::class_<OgaModel>(m, "Model")
       .def(pybind11::init([](const OgaConfig& config) { return OgaModel::Create(config); }))

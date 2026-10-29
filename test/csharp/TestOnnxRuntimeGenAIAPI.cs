@@ -87,7 +87,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         });
 
         private static string _adaptersPath => _lazyAdaptersPath.Value;
-        private static OgaHandle ogaHandle;
 
         private static int _epLibrariesRegistered = 0;
 
@@ -161,12 +160,28 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         public OnnxRuntimeGenAITests(ITestOutputHelper o)
         {
             Console.WriteLine("**** Running OnnxRuntimeGenAITests constructor");
-            // Initialize GenAI and register a handler to dispose it on process exit
-            ogaHandle = new OgaHandle();
-            AppDomain.CurrentDomain.ProcessExit += (sender, e) => ogaHandle.Dispose();
             RegisterEpLibrariesFromDirectory();
             this.output = o;
             Console.WriteLine("**** OnnxRuntimeGenAI constructor completed");
+        }
+
+        [Fact(DisplayName = "TestSharedShutdownHandle")]
+        public void TestSharedShutdownHandle()
+        {
+            _ = new OnnxRuntimeGenAITests(output);
+            _ = new OnnxRuntimeGenAITests(output);
+
+            using var model = new Model(_tinyRandomGpt2ModelPath);
+            using var generatorParams = new GeneratorParams(model);
+            generatorParams.SetSearchOption("max_length", 10);
+            using var generator = new Generator(model, generatorParams);
+            generator.AppendTokens(new int[] { 0, 0, 0, 52 });
+
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+
+            generator.GenerateNextToken();
+            Assert.Equal(5, generator.GetSequence(0).Length);
         }
 
         private class IgnoreOnModelAbsenceFact : FactAttribute
@@ -317,7 +332,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         {
             byte[] audioBytes = File.ReadAllBytes(Path.Combine(GetDirectoryInTreeThatContains(Directory.GetCurrentDirectory(), "test"),
                                                             "audios", "1272-141231-0002.mp3"));
-            var audios = Audios.Load(audioBytes);
+            using var audios = Audios.Load(audioBytes);
             Assert.NotNull(audios);
         }
 
@@ -326,7 +341,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         {
             byte[] imageBytes = File.ReadAllBytes(Path.Combine(GetDirectoryInTreeThatContains(Directory.GetCurrentDirectory(), "test"),
                                                             "images", "10809054.jpg"));
-            var images = Images.Load(imageBytes);
+            using var images = Images.Load(imageBytes);
             Assert.NotNull(images);
         }
 
@@ -352,7 +367,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                     };
                     ulong batchSize = (ulong)strings.Length;
 
-                    var sequences = tokenizer.EncodeBatch(strings);
+                    using var sequences = tokenizer.EncodeBatch(strings);
                     Assert.NotNull(sequences);
                     Assert.Equal((ulong)strings.Length, sequences.NumSequences);
 
@@ -411,7 +426,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                     };
                     ulong batchSize = (ulong)strings.Length;
 
-                    var sequences = tokenizer.EncodeBatch(strings);
+                    using var sequences = tokenizer.EncodeBatch(strings);
                     Assert.NotNull(sequences);
                     Assert.Equal((ulong)strings.Length, sequences.NumSequences);
 
@@ -471,7 +486,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                     };
                     ulong batchSize = (ulong)strings.Length;
 
-                    var sequences = tokenizer.EncodeBatch(strings);
+                    using var sequences = tokenizer.EncodeBatch(strings);
                     Assert.NotNull(sequences);
                     Assert.Equal((ulong)strings.Length, sequences.NumSequences);
 
@@ -581,7 +596,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                         "The quick brown fox jumps over the lazy dog."
                     };
 
-                    var sequences = tokenizer.EncodeBatch(strings);
+                    using var sequences = tokenizer.EncodeBatch(strings);
 
                     Assert.NotNull(sequences);
                     Assert.Equal((ulong)strings.Length, sequences.NumSequences);
@@ -725,7 +740,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                         "The quick brown fox jumps over the lazy dog."
                     };
 
-                    var sequences = tokenizer.EncodeBatch(strings);
+                    using var sequences = tokenizer.EncodeBatch(strings);
 
                     Assert.NotNull(sequences);
                     Assert.Equal((ulong)strings.Length, sequences.NumSequences);
@@ -749,7 +764,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                 using (var tokenizer = new Tokenizer(model))
                 {
                     Assert.NotNull(tokenizer);
-                    var tokenizerStream = tokenizer.CreateStream();
+                    using var tokenizerStream = tokenizer.CreateStream();
 
                     var strings = new string[] {
                         "This is a test.",
@@ -757,7 +772,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                         "The quick brown fox jumps over the lazy dog."
                     };
 
-                    var sequences = tokenizer.EncodeBatch(strings);
+                    using var sequences = tokenizer.EncodeBatch(strings);
 
                     Assert.NotNull(sequences);
                     Assert.Equal((ulong)strings.Length, sequences.NumSequences);
@@ -785,11 +800,11 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                 using (var tokenizer = new Tokenizer(model))
                 {
                     Assert.NotNull(tokenizer);
-                    var tokenizerStream = tokenizer.CreateStream();
+                    using var tokenizerStream = tokenizer.CreateStream();
 
                     var str = "She sells sea shells by the sea shore.";
 
-                    var sequences = tokenizer.Encode(str);
+                    using var sequences = tokenizer.Encode(str);
 
                     Assert.NotNull(sequences);
 
@@ -822,7 +837,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                     };
                     var batchSize = (ulong)strings.Length;
 
-                    var sequences = tokenizer.EncodeBatch(strings);
+                    using var sequences = tokenizer.EncodeBatch(strings);
                     Assert.NotNull(sequences);
                     Assert.Equal((ulong)strings.Length, sequences.NumSequences);
 

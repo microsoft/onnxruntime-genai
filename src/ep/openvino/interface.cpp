@@ -16,6 +16,7 @@ struct InterfaceImpl : DeviceInterface {
   }
 
   DeviceType GetType() const override { return DeviceType::OpenVINO; }
+  bool IsHostAccessible() const override { return true; }  // Allocates from the CPU interface
 
   void InitOrt(const OrtApi& /*api*/, Ort::Allocator& /*allocator*/) override {
     // Since we use the CPU interface for allocation (right now), InitOrt should not be getting

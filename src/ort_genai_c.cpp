@@ -28,6 +28,7 @@
 #include "models/parakeet.h"
 #include "models/silero_vad.h"
 #include "models/model_package.h"
+#include "models/non_generative_session.h"
 #include "telemetry/model_telemetry.h"
 #include "telemetry/telemetry.h"
 #include "dll_load_error.h"
@@ -367,6 +368,50 @@ OgaResult* OGA_API_CALL OgaCreateConfig(const char* config_path, OgaConfig** out
   OGA_TRY
   auto config = Generators::CreateConfig(Generators::GetOrtEnv(), config_path);
   *out = ReturnUnique<OgaConfig>(std::move(config));
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaCreateNonGenerativeSession(
+    const OgaConfig* config, OgaNonGenerativeSession** out) {
+  OGA_TRY
+  if (!out) {
+    throw std::invalid_argument("out must not be null");
+  }
+  *out = nullptr;
+  if (!config) {
+    throw std::invalid_argument("config must not be null");
+  }
+  *out = Generators::CreateNonGenerativeSession(
+      static_cast<const Generators::Config&>(*config));
+  return nullptr;
+  OGA_CATCH
+}
+
+void OGA_API_CALL OgaDestroyNonGenerativeSession(
+    OgaNonGenerativeSession* session) {
+  Generators::DestroyNonGenerativeSession(session);
+}
+
+OgaResult* OGA_API_CALL OgaNonGenerativeSessionRunJson(
+    OgaNonGenerativeSession* session, const char* request,
+    size_t request_length, const char** response) {
+  OGA_TRY
+  if (!session) {
+    throw std::invalid_argument("session must not be null");
+  }
+  if (!request) {
+    throw std::invalid_argument("request must not be null");
+  }
+  if (!response) {
+    throw std::invalid_argument("response must not be null");
+  }
+  *response = nullptr;
+  const auto result = Generators::RunNonGenerativeSessionJson(
+      *session, std::string_view(request, request_length));
+  auto output = std::make_unique<char[]>(result.size() + 1);
+  std::memcpy(output.get(), result.c_str(), result.size() + 1);
+  *response = output.release();
   return nullptr;
   OGA_CATCH
 }
