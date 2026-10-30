@@ -58,13 +58,11 @@ TEST(DynamicBatchingConfigTest, ScheduledTokenBudgetAcceptsOverride) {
   EXPECT_EQ(config.engine.dynamic_batching->max_scheduled_tokens, 321u);
 }
 
-TEST(DynamicBatchingConfigTest, PrefixCachingDefaultsToEnabled) {
+TEST(DynamicBatchingConfigTest, PrefixCachingDefaultsToUnset) {
   const auto config = LoadDynamicConfig(R"({ "max_batch_size": 4 })");
 
   ASSERT_TRUE(config.engine.dynamic_batching.has_value());
-  EXPECT_TRUE(config.engine.dynamic_batching->prefix_caching);
-  EXPECT_FALSE(
-      config.engine.dynamic_batching->prefix_caching_explicitly_set);
+  EXPECT_FALSE(config.engine.dynamic_batching->prefix_caching.has_value());
 }
 
 TEST(DynamicBatchingConfigTest, PrefixCachingAcceptsExplicitDisable) {
@@ -72,9 +70,17 @@ TEST(DynamicBatchingConfigTest, PrefixCachingAcceptsExplicitDisable) {
       LoadDynamicConfig(R"({ "prefix_caching": false })");
 
   ASSERT_TRUE(config.engine.dynamic_batching.has_value());
-  EXPECT_FALSE(config.engine.dynamic_batching->prefix_caching);
-  EXPECT_TRUE(
-      config.engine.dynamic_batching->prefix_caching_explicitly_set);
+  ASSERT_TRUE(config.engine.dynamic_batching->prefix_caching.has_value());
+  EXPECT_FALSE(*config.engine.dynamic_batching->prefix_caching);
+}
+
+TEST(DynamicBatchingConfigTest, PrefixCachingAcceptsExplicitEnable) {
+  const auto config =
+      LoadDynamicConfig(R"({ "prefix_caching": true })");
+
+  ASSERT_TRUE(config.engine.dynamic_batching.has_value());
+  ASSERT_TRUE(config.engine.dynamic_batching->prefix_caching.has_value());
+  EXPECT_TRUE(*config.engine.dynamic_batching->prefix_caching);
 }
 
 TEST(CpuEmbeddingConfigTest, PrefaultDefaultsOnAndCanBeDisabled) {
