@@ -78,6 +78,7 @@ struct MarianState : State {
  private:
   const MarianModel& model_;
   void UpdateRnnStates(DeviceSpan<int32_t> next_indices);
+  void SaveDecoderCheckpoint(size_t sequence_length);
   void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices, int current_length, bool search_buffers);
 
   // Encoder IOs
@@ -95,6 +96,9 @@ struct MarianState : State {
   std::unique_ptr<Tensor> rnn_states_prev_;
   std::unique_ptr<OrtValue> past_key_values_length_;
   std::unique_ptr<Tensor> rnn_states_;
+  DeviceSpan<uint8_t> decoder_checkpoints_;
+  size_t decoder_checkpoint_bytes_{};
+  std::vector<int64_t> decoder_checkpoint_positions_;
   std::vector<std::unique_ptr<OrtValue>> values_;
   MarianLogits logits_{*this};
 };

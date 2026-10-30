@@ -1,5 +1,6 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
+#include <limits>
 #include "generator/generators.h"
 #include "marian.h"
 
@@ -204,6 +205,7 @@ void MarianInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
 DeviceSpan<float> MarianState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
   const int64_t encoder_hidden_size = model_.config_->model.encoder.hidden_size;
   if (first_run_ || !generation_started_) {
+    std::fill(decoder_checkpoint_positions_.begin(), decoder_checkpoint_positions_.end(), -1);
     if (!first_run_) {
       ClearIO();
       encoder_input_ids_.RewindTo(0);
@@ -363,6 +365,7 @@ DeviceSpan<float> MarianState::Run(int current_length, DeviceSpan<int32_t>& next
     }
     State::Run(*model_.session_decoder_);
     first_run_ = false;
+    SaveDecoderCheckpoint(static_cast<size_t>(current_length));
     return logits_.Get();
   }
 
@@ -380,19 +383,56 @@ DeviceSpan<float> MarianState::Run(int current_length, DeviceSpan<int32_t>& next
     State::SetRunOptions(model_.config_->model.decoder.run_options.value());
   }
   State::Run(*model_.session_decoder_);
+  SaveDecoderCheckpoint(static_cast<size_t>(current_length));
   return logits_.Get();
 }
 
-void MarianState::RewindTo(size_t index) {
-  if (index == 0) {
-    first_run_ = true;
-    generation_started_ = false;
-    encoder_prompt_tokens_.clear();
-    ClearIO();
-    encoder_input_ids_.RewindTo(0);
-    encoder_attention_mask_.RewindTo(0);
-    attention_mask_.RewindTo(0);
+void MarianState::SaveDecoderCheckpoint(size_t sequence_length) {
+  if (params_->search.batch_size != 1)
+    return;
+  auto state = rnn_states_->GetByteSpan();
+  const size_t max_length = static_cast<size_t>(params_->search.max_length);
+  if (state.empty() || max_length == std::numeric_limits<size_t>::max() ||
+      max_length + 1 > std::numeric_limits<size_t>::max() / state.size())
+    throw std::runtime_error("Marian decoder checkpoint capacity exceeds the addressable size");
+  if (sequence_length > max_length)
+    throw std::runtime_error("Marian decoder checkpoint exceeds max_length");
+  if (decoder_checkpoints_.empty()) {
+    decoder_checkpoints_ = model_.p_device_inputs_->Allocate<uint8_t>((max_length + 1) * state.size());
+    decoder_checkpoint_bytes_ = state.size();
+    decoder_checkpoint_positions_.assign(max_length + 1, -1);
   }
+  if (sequence_length >= decoder_checkpoint_positions_.size())
+    throw std::runtime_error("Marian decoder checkpoint exceeds the allocated capacity");
+  if (state.size() != decoder_checkpoint_bytes_)
+    throw std::runtime_error("Marian recurrent state size changed after checkpoint allocation");
+  decoder_checkpoints_.subspan(sequence_length * decoder_checkpoint_bytes_, decoder_checkpoint_bytes_).CopyFrom(state);
+  decoder_checkpoint_positions_[sequence_length] = *past_key_values_length_->GetTensorMutableData<int64_t>();
+}
+
+void MarianState::RewindTo(size_t index) {
+  if (index != 0 && index >= encoder_prompt_tokens_.size()) {
+    if (index >= decoder_checkpoint_positions_.size() || decoder_checkpoint_positions_[index] < 0)
+      throw std::runtime_error("Marian rewind requires a materialized decoder state at the requested length");
+    const auto saved = decoder_checkpoints_.subspan(index * decoder_checkpoint_bytes_, decoder_checkpoint_bytes_);
+    rnn_states_->GetByteSpan().CopyFrom(saved);
+    rnn_states_prev_->GetByteSpan().CopyFrom(saved);
+    *past_key_values_length_->GetTensorMutableData<int64_t>() = decoder_checkpoint_positions_[index];
+    std::fill(decoder_checkpoint_positions_.begin() + index + 1, decoder_checkpoint_positions_.end(), -1);
+    generation_started_ = true;
+    return;
+  }
+
+  first_run_ = index == 0;
+  generation_started_ = false;
+  encoder_prompt_tokens_.resize(index);
+  ClearIO();
+  encoder_input_ids_.RewindTo(0);
+  encoder_attention_mask_.RewindTo(0);
+  attention_mask_.RewindTo(0);
+  decoder_checkpoints_ = {};
+  decoder_checkpoint_bytes_ = 0;
+  decoder_checkpoint_positions_.clear();
 }
 
 void MarianState::UpdateRnnStates(DeviceSpan<int32_t> next_indices) {

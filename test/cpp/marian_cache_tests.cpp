@@ -2,8 +2,10 @@
 // Licensed under the MIT License.
 
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <array>
 #include <string>
+#include <vector>
 #include "ort_genai.h"
 
 namespace {
@@ -143,6 +145,206 @@ TEST(MarianCacheTests, GeneratorsHaveIndependentDynamicShapes) {
     ASSERT_EQ(scalar->GetSequenceCount(0), 2U + step);
     EXPECT_EQ(scalar->GetSequenceData(0)[1 + step], (sum + step) % 100 + 1);
   }
+}
+
+auto CreateRecurrentGenerator(OgaModel& model, const std::vector<int32_t>& source, bool chunked = false) {
+  auto params = OgaGeneratorParams::Create(model);
+  params->SetSearchOption("max_length", 64);
+  auto generator = OgaGenerator::Create(model, *params);
+  if (chunked) {
+    generator->AppendTokens(source.data(), 2);
+    generator->AppendTokens(source.data() + 2, source.size() - 2);
+  } else {
+    generator->AppendTokens(source.data(), source.size());
+  }
+  return generator;
+}
+
+void GenerateSteps(OgaGenerator& generator, size_t count) {
+  for (size_t step = 0; step < count; ++step)
+    generator.GenerateNextToken();
+}
+
+std::vector<float> CopyMarianLogits(OgaGenerator& generator) {
+  auto tensor = generator.GetLogits();
+  size_t count = 1;
+  for (auto dimension : tensor->Shape())
+    count *= static_cast<size_t>(dimension);
+  const auto* data = static_cast<const float*>(tensor->Data());
+  return {data, data + count};
+}
+
+void ForceMarianToken(OgaGenerator& generator, int32_t token, int32_t fallback = 0) {
+  auto tensor = generator.GetLogits();
+  auto* data = static_cast<float*>(tensor->Data());
+  std::fill_n(data, 128, -1000.0f);
+  data[fallback] = 500.0f;
+  data[token] = 1000.0f;
+  generator.SetLogits(*tensor);
+  generator.GenerateNextToken();
+}
+
+TEST(MarianCacheTests, CheckpointRestoresDecoderStateAndPosition) {
+  auto model = LoadMarianCacheModel("recurrent");
+  const std::vector<int32_t> source{2, 3, 4, 5};
+  for (bool chunked : {false, true}) {
+    for (size_t retained : {0U, 1U, 3U, 24U}) {
+      SCOPED_TRACE(chunked);
+      SCOPED_TRACE(retained);
+      auto reference = CreateRecurrentGenerator(*model, source);
+      auto generator = CreateRecurrentGenerator(*model, source, chunked);
+      GenerateSteps(*reference, retained + 1);
+      GenerateSteps(*generator, retained + 8);
+      generator->RewindTo(source.size() + retained);
+      EXPECT_EQ(CopyMarianLogits(*generator), CopyMarianLogits(*reference));
+      for (size_t step = 0; step < 3; ++step) {
+        generator->GenerateNextToken();
+        reference->GenerateNextToken();
+        EXPECT_EQ(generator->GetNextTokens()[0], reference->GetNextTokens()[0]);
+      }
+    }
+  }
+}
+
+TEST(MarianCacheTests, CheckpointRepeatedRewindsDiscardChangedFuture) {
+  auto model = LoadMarianCacheModel("recurrent");
+  const std::vector<int32_t> source{2, 3, 4, 5};
+  auto generator = CreateRecurrentGenerator(*model, source);
+  GenerateSteps(*generator, 10);
+  for (size_t retained : {4U, 1U, 3U, 0U}) {
+    SCOPED_TRACE(retained);
+    const auto* data = generator->GetSequenceData(0);
+    const std::vector<int32_t> history(data, data + generator->GetSequenceCount(0));
+    auto reference = CreateRecurrentGenerator(*model, source);
+    for (size_t index = 0; index <= retained; ++index)
+      ForceMarianToken(*reference, history[source.size() + index]);
+    generator->RewindTo(source.size() + retained);
+    EXPECT_EQ(CopyMarianLogits(*generator), CopyMarianLogits(*reference));
+    ForceMarianToken(*generator, 42);
+    ForceMarianToken(*reference, 42);
+    EXPECT_EQ(CopyMarianLogits(*generator), CopyMarianLogits(*reference));
+    GenerateSteps(*generator, 8);
+  }
+}
+
+TEST(MarianCacheTests, CheckpointEncoderRewindRecomputesRetainedSource) {
+  auto model = LoadMarianCacheModel("recurrent");
+  const std::vector<int32_t> source{2, 3, 4, 5, 6, 7};
+  for (bool chunked : {false, true}) {
+    for (size_t retained : {1U, 3U, 5U}) {
+      SCOPED_TRACE(chunked);
+      SCOPED_TRACE(retained);
+      auto generator = CreateRecurrentGenerator(*model, source, chunked);
+      GenerateSteps(*generator, 8);
+      generator->RewindTo(retained);
+      const std::vector<int32_t> prefix(source.begin(), source.begin() + retained + 1);
+      auto reference = CreateRecurrentGenerator(*model, prefix);
+      EXPECT_EQ(CopyMarianLogits(*generator), CopyMarianLogits(*reference));
+      GenerateSteps(*generator, 2);
+      GenerateSteps(*reference, 2);
+      EXPECT_EQ(generator->GetNextTokens()[0], reference->GetNextTokens()[0]);
+    }
+  }
+}
+
+TEST(MarianCacheTests, CheckpointRejectsMissingStateWithoutChangingGenerator) {
+  auto model = LoadMarianCacheModel("recurrent");
+  const std::vector<int32_t> source{2, 3, 4, 5};
+  auto generator = CreateRecurrentGenerator(*model, source);
+  generator->GenerateNextToken();
+  const int32_t continuation = 42;
+  generator->AppendTokens(&continuation, 1);
+  const auto expected = CopyMarianLogits(*generator);
+  const auto* data = generator->GetSequenceData(0);
+  const std::vector<int32_t> history(data, data + generator->GetSequenceCount(0));
+  EXPECT_THROW(generator->RewindTo(source.size() + 1), std::runtime_error);
+  ASSERT_EQ(generator->GetSequenceCount(0), history.size());
+  EXPECT_TRUE(std::equal(history.begin(), history.end(), generator->GetSequenceData(0)));
+  EXPECT_EQ(CopyMarianLogits(*generator), expected);
+}
+
+TEST(MarianCacheTests, CheckpointResetNoOpAndContinuationMatchFreshGenerator) {
+  auto model = LoadMarianCacheModel("recurrent");
+  const std::vector<int32_t> source{2, 3, 4, 5};
+  auto generator = CreateRecurrentGenerator(*model, source);
+  GenerateSteps(*generator, 8);
+  const auto expected = CopyMarianLogits(*generator);
+  generator->RewindTo(generator->TokenCount());
+  EXPECT_EQ(CopyMarianLogits(*generator), expected);
+  const std::vector<int32_t> replacement{6, 7, 8};
+  generator->RewindTo(0);
+  generator->AppendTokens(replacement.data(), replacement.size());
+  auto reference = CreateRecurrentGenerator(*model, replacement);
+  GenerateSteps(*generator, 4);
+  GenerateSteps(*reference, 4);
+  EXPECT_EQ(CopyMarianLogits(*generator), CopyMarianLogits(*reference));
+  const int32_t continuation = 42;
+  generator->AppendTokens(&continuation, 1);
+  reference->AppendTokens(&continuation, 1);
+  GenerateSteps(*generator, 8);
+  GenerateSteps(*reference, 2);
+  generator->RewindTo(replacement.size() + 6);
+  EXPECT_EQ(CopyMarianLogits(*generator), CopyMarianLogits(*reference));
+}
+
+TEST(MarianCacheTests, CheckpointPreservesDecoderNgramHistory) {
+  auto model = LoadMarianCacheModel("recurrent");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 32);
+  params->SetSearchOption("no_repeat_ngram_size", 2);
+  auto generator = OgaGenerator::Create(*model, *params);
+  const std::array<int32_t, 2> source{3, 3};
+  generator->AppendTokens(source.data(), source.size());
+  ForceMarianToken(*generator, 3, 42);
+  ForceMarianToken(*generator, 3, 42);
+  std::ignore = generator->GetLogits();
+  generator->RewindTo(source.size());
+  std::ignore = generator->GetLogits();
+  ForceMarianToken(*generator, 3, 42);
+  EXPECT_EQ(generator->GetNextTokens()[0], 3);
+  ForceMarianToken(*generator, 3, 42);
+  EXPECT_EQ(generator->GetNextTokens()[0], 42);
+}
+
+TEST(MarianCacheTests, CheckpointBatchResetAndNoOpPreserveState) {
+  auto model = LoadMarianCacheModel("recurrent");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("batch_size", 2);
+  auto generator = OgaGenerator::Create(*model, *params);
+  const std::array<int32_t, 4> source{2, 3, 4, 5};
+  generator->AppendTokens(source.data(), source.size());
+  GenerateSteps(*generator, 3);
+  const auto expected = CopyMarianLogits(*generator);
+  const size_t length = generator->TokenCount();
+  generator->RewindTo(length);
+  EXPECT_EQ(CopyMarianLogits(*generator), expected);
+  EXPECT_THROW(generator->RewindTo(length - 1), std::runtime_error);
+  EXPECT_EQ(generator->TokenCount(), length);
+  EXPECT_EQ(CopyMarianLogits(*generator), expected);
+  generator->RewindTo(0);
+  const std::array<int32_t, 6> replacement{6, 7, 8, 9, 10, 11};
+  generator->AppendTokens(replacement.data(), replacement.size());
+  auto reference = OgaGenerator::Create(*model, *params);
+  reference->AppendTokens(replacement.data(), replacement.size());
+  GenerateSteps(*generator, 3);
+  GenerateSteps(*reference, 3);
+  EXPECT_EQ(CopyMarianLogits(*generator), CopyMarianLogits(*reference));
+}
+
+TEST(MarianCacheTests, CheckpointAtMaximumLengthCanBeReplayed) {
+  auto model = LoadMarianCacheModel("recurrent");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 12);
+  auto generator = OgaGenerator::Create(*model, *params);
+  const std::array<int32_t, 4> source{2, 3, 4, 5};
+  generator->AppendTokens(source.data(), source.size());
+  GenerateSteps(*generator, 8);
+  const auto expected = CopyMarianLogits(*generator);
+  generator->RewindTo(11);
+  EXPECT_EQ(CopyMarianLogits(*generator), expected);
+  EXPECT_EQ(generator->TokenCount(), 12U);
+  EXPECT_THROW(generator->GenerateNextToken(), std::runtime_error);
+  EXPECT_EQ(CopyMarianLogits(*generator), expected);
 }
 
 class MarianCacheContractTests : public testing::TestWithParam<const char*> {};
