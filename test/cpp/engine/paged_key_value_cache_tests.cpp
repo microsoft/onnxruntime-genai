@@ -521,7 +521,6 @@ TEST(PagedKeyValueCacheManifestTest, HybridExactFitPrefixAdmissionMakesBoundedEn
     batching.num_blocks = 2;
     batching.max_batch_size = 3;
     batching.prefix_caching = prefix_caching;
-    batching.prefix_caching_explicitly_set = true;
     return CreateModel(GetOrtEnv(), std::move(config));
   };
   const auto begin = [&](const std::shared_ptr<Engine>& engine) {
@@ -1001,7 +1000,7 @@ TEST(PagedKeyValueCacheManifestTest, RemovalReusesCommittedSlidingWindowCapacity
 
 TEST(PagedKeyValueCacheManifestTest, PrefixCachingRejectsSlidingWindowCache) {
   auto model = LoadSyntheticPagedModel();
-  model->config_->engine.dynamic_batching->prefix_caching_explicitly_set = true;
+  model->config_->engine.dynamic_batching->prefix_caching = true;
   auto& decoder = model->config_->model.decoder;
   decoder.sliding_window = Config::Model::Decoder::SlidingWindow{};
   decoder.sliding_window->window_size = 4;
@@ -1020,7 +1019,7 @@ TEST(PagedKeyValueCacheManifestTest, OmittedPrefixCachingPreservesSlidingWindowC
   decoder.inputs.block_table_windowed = decoder.inputs.block_table;
   model->config_->search.chunk_size = 4;
 
-  EXPECT_TRUE(model->config_->engine.dynamic_batching->prefix_caching);
+  EXPECT_FALSE(model->config_->engine.dynamic_batching->prefix_caching.has_value());
   EXPECT_FALSE(ResolvePrefixCachingEnabled(model, /*auxiliary_bytes_per_block=*/0));
   auto cache = MakePagedCache(model);
 
@@ -1050,7 +1049,7 @@ TEST(PagedKeyValueCacheManifestTest, SingleBlockPoolKeepsPrefixCachingEnabled) {
 TEST(PagedKeyValueCacheManifestTest, PrefixCachingRejectsDsparkAuxiliaryState) {
   auto model = LoadSyntheticPagedModel();
   auto& batching = *model->config_->engine.dynamic_batching;
-  batching.prefix_caching_explicitly_set = true;
+  batching.prefix_caching = true;
   model->config_->model.dflash2.filename = "dspark.onnx";
   model->config_->model.dflash2.is_dspark = true;
 
@@ -1060,7 +1059,6 @@ TEST(PagedKeyValueCacheManifestTest, PrefixCachingRejectsDsparkAuxiliaryState) {
 TEST(PagedKeyValueCacheManifestTest, PrefixCachingSupportsFixedAuxiliaryPool) {
   auto model = LoadSyntheticPagedModel();
   model->config_->engine.dynamic_batching->prefix_caching = true;
-  model->config_->engine.dynamic_batching->prefix_caching_explicitly_set = true;
 
   EXPECT_THROW(
       PagedKeyValueCache(

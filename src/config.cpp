@@ -2850,7 +2850,6 @@ struct DynamicBatching_Element : JSON::Element {
       v_->max_scheduled_tokens = static_cast<size_t>(parsed_value);
     } else if (name == "prefix_caching") {
       v_->prefix_caching = JSON::Get<bool>(value);
-      v_->prefix_caching_explicitly_set = true;
     } else if (name == "dflash2_max_snapshots") {
       const auto parsed_value = SafeDoubleToInt(JSON::Get<double>(value), name);
       if (parsed_value < 0)
