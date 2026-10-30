@@ -5,6 +5,8 @@
 
 #include <atomic>
 #include <array>
+#include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <string_view>
 #include "../models/env_utils.h"
@@ -203,7 +205,9 @@ inline bool ShouldSuppressTelemetryFromEnvironment() {
 
 inline void ApplyTelemetryEnabledControl(bool requested_enabled,
                                          std::atomic<bool>& permanently_disabled,
-                                         std::atomic<bool>& enabled) {
+                                         std::atomic<bool>& enabled,
+                                         std::shared_mutex& lifecycle_mutex) {
+  std::unique_lock<std::shared_mutex> lock(lifecycle_mutex);
   if (permanently_disabled.load()) {
     return;
   }

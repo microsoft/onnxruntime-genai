@@ -4,7 +4,7 @@
 #pragma once
 
 #include <cstdint>
-#include <span>
+#include "../span.h"
 #include <string>
 #include <string_view>
 #include <utility>
@@ -110,7 +110,8 @@ class ResourceSampleWindow {
 
 HardwareDeviceInfo* FindOrtHardwareDeviceMatch(
     std::span<HardwareDeviceInfo> candidates,
-    const HardwareDeviceInfo& ort_device);
+    const HardwareDeviceInfo& ort_device,
+    std::span<const HardwareDeviceInfo> ort_devices);
 
 bool AccumulateProcessMemoryBytes(uint64_t& total, uint64_t used);
 
@@ -120,8 +121,9 @@ inline bool ShouldQueryNvmlProcessMemory(bool is_container) {
 
 inline bool ShouldBeginResourceSample(int64_t prompt_tokens,
                                       bool first_token_logged,
-                                      bool sample_started) {
-  return prompt_tokens == 0 && !first_token_logged && !sample_started;
+                                      bool sample_started,
+                                      bool session_sampled) {
+  return session_sampled && prompt_tokens == 0 && !first_token_logged && !sample_started;
 }
 
 }  // namespace TelemetryInternal

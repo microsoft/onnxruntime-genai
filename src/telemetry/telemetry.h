@@ -77,6 +77,7 @@ class GenAiTelemetry {
 
   // Control
   bool IsEnabled() const;
+  bool IsSessionSampled(uint32_t session_id);
   void SetEnabled(bool enabled);
 
   // Allocate a unique session ID for correlating events across a model lifecycle

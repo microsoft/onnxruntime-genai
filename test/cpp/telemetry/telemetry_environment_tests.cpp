@@ -6,6 +6,9 @@
 
 #include <deque>
 #include <atomic>
+#include <chrono>
+#include <future>
+#include <shared_mutex>
 #include <utility>
 
 namespace {
@@ -15,6 +18,8 @@ using namespace Generators::TelemetryInternal;
 
 class TelemetryEnvironmentTests : public ::testing::Test {
  protected:
+  std::shared_mutex lifecycle_mutex_;
+
   void SetUp() override {
     for (const char* name : kTelemetrySuppressionVariables) {
       variables_.emplace_back(name, std::nullopt);
@@ -84,12 +89,12 @@ TEST_F(TelemetryEnvironmentTests, EnvironmentOptOutObservedByControlIsPermanent)
   std::atomic<bool> enabled{true};
   ScopedEnvironmentVariable opt_out{"ORT_DISABLE_TELEMETRY", "true"};
 
-  ApplyTelemetryEnabledControl(false, permanently_disabled, enabled);
+  ApplyTelemetryEnabledControl(false, permanently_disabled, enabled, lifecycle_mutex_);
   EXPECT_TRUE(permanently_disabled.load());
   EXPECT_FALSE(enabled.load());
 
   opt_out.Set(std::nullopt);
-  ApplyTelemetryEnabledControl(true, permanently_disabled, enabled);
+  ApplyTelemetryEnabledControl(true, permanently_disabled, enabled, lifecycle_mutex_);
   EXPECT_TRUE(permanently_disabled.load());
   EXPECT_FALSE(enabled.load());
 }
@@ -98,13 +103,36 @@ TEST_F(TelemetryEnvironmentTests, OrdinaryApiDisableRemainsReversible) {
   std::atomic<bool> permanently_disabled{false};
   std::atomic<bool> enabled{true};
 
-  ApplyTelemetryEnabledControl(false, permanently_disabled, enabled);
+  ApplyTelemetryEnabledControl(false, permanently_disabled, enabled, lifecycle_mutex_);
   EXPECT_FALSE(permanently_disabled.load());
   EXPECT_FALSE(enabled.load());
 
-  ApplyTelemetryEnabledControl(true, permanently_disabled, enabled);
+  ApplyTelemetryEnabledControl(true, permanently_disabled, enabled, lifecycle_mutex_);
   EXPECT_FALSE(permanently_disabled.load());
   EXPECT_TRUE(enabled.load());
+}
+
+TEST_F(TelemetryEnvironmentTests, ControlReadsOptOutOnlyAfterAcquiringLifecycleLock) {
+  std::atomic<bool> permanently_disabled{false};
+  std::atomic<bool> enabled{true};
+  ScopedEnvironmentVariable opt_out{"ORT_DISABLE_TELEMETRY"};
+  std::unique_lock<std::shared_mutex> lock(lifecycle_mutex_);
+  std::promise<void> started;
+  auto control = std::async(std::launch::async, [&] {
+    started.set_value();
+    ApplyTelemetryEnabledControl(true, permanently_disabled, enabled, lifecycle_mutex_);
+  });
+  started.get_future().wait();
+  EXPECT_EQ(control.wait_for(std::chrono::milliseconds{50}), std::future_status::timeout);
+  opt_out.Set("true");
+  lock.unlock();
+  control.get();
+
+  EXPECT_TRUE(permanently_disabled.load());
+  EXPECT_FALSE(enabled.load());
+  opt_out.Set(std::nullopt);
+  ApplyTelemetryEnabledControl(true, permanently_disabled, enabled, lifecycle_mutex_);
+  EXPECT_FALSE(enabled.load());
 }
 
 TEST_F(TelemetryEnvironmentTests, RecognizesEveryCiAndTestFlagAndFailsClosed) {

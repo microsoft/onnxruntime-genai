@@ -67,7 +67,8 @@ bool GenerationTelemetry::BeginAppend() {
   if (append_tracking_) {
     append_start_time_ = std::chrono::steady_clock::now();
     if (TelemetryInternal::ShouldBeginResourceSample(
-            prompt_tokens_, first_token_logged_, resource_samples_.IsStarted())) {
+            prompt_tokens_, first_token_logged_, resource_samples_.IsStarted(),
+            GenAiTelemetry::Instance().IsSessionSampled(session_id_))) {
       resource_samples_.Begin(CollectProcessResourceUsage());
     }
   }
@@ -92,7 +93,8 @@ void GenerationTelemetry::OnTokenGenerated(int64_t active_token_count) {
     }
 
     const auto now = std::chrono::steady_clock::now();
-    if (prompt_tokens_ == 0 && generated_tokens_ == 0) start_time_ = now;
+    if (prompt_tokens_ == 0 && generated_tokens_ == 0 &&
+        !resource_samples_.IsStarted()) start_time_ = now;
     generated_tokens_ += active_token_count;
     last_token_time_ = now;
     if (!first_token_logged_) {

@@ -55,11 +55,33 @@ TEST(HardwareInfoTests, OrtFallbackResolvesPlatformUnknownWithoutMergingOrtDevic
       .vendor_id = 0x1234,
       .device_id = 0x5678};
 
-  EXPECT_EQ(FindOrtHardwareDeviceMatch(platform_devices, ort_device),
+  std::vector<HardwareDeviceInfo> ort_devices{ort_device};
+  EXPECT_EQ(FindOrtHardwareDeviceMatch(platform_devices, ort_device, ort_devices),
+            &platform_devices.front());
+  EXPECT_EQ(FindOrtHardwareDeviceMatch(ort_devices, ort_device, ort_devices), nullptr);
+}
+
+TEST(HardwareInfoTests, OrtProductMatchingRequiresUnambiguousUnknownDevice) {
+  std::vector<HardwareDeviceInfo> platform_devices{
+      {.type = "GPU", .source = "nvml", .vendor_id = 0x10de}};
+  std::vector<HardwareDeviceInfo> ort_devices{
+      {.type = "GPU", .source = "onnxruntime", .vendor_id = 0x10de, .device_id = 0x1234}};
+
+  EXPECT_EQ(FindOrtHardwareDeviceMatch(platform_devices, ort_devices.front(), ort_devices),
             &platform_devices.front());
 
-  std::vector<HardwareDeviceInfo> ort_devices{ort_device};
-  EXPECT_EQ(FindOrtHardwareDeviceMatch(ort_devices, ort_device), nullptr);
+  ort_devices.push_back(
+      {.type = "GPU", .source = "onnxruntime", .vendor_id = 0x10de, .device_id = 0x5678});
+  EXPECT_EQ(FindOrtHardwareDeviceMatch(platform_devices, ort_devices.front(), ort_devices), nullptr);
+  EXPECT_EQ(FindOrtHardwareDeviceMatch(platform_devices, ort_devices.back(), ort_devices), nullptr);
+
+  ort_devices.pop_back();
+  platform_devices.push_back(platform_devices.front());
+  EXPECT_EQ(FindOrtHardwareDeviceMatch(platform_devices, ort_devices.front(), ort_devices), nullptr);
+
+  platform_devices.back().device_id = ort_devices.front().device_id;
+  EXPECT_EQ(FindOrtHardwareDeviceMatch(platform_devices, ort_devices.front(), ort_devices),
+            &platform_devices.back());
 }
 
 TEST(HardwareInfoTests, NvmlProcessPolicyRejectsContainersSentinelsAndOverflow) {
@@ -104,13 +126,19 @@ TEST(HardwareInfoTests, ResourceWindowKeepsActualCompletionSampleWhenEmissionIsD
 
 TEST(HardwareInfoTests, ResourceSamplingStartsOnlyAtFirstLogicalAppend) {
   ResourceSampleWindow window;
-  EXPECT_TRUE(ShouldBeginResourceSample(0, false, window.IsStarted()));
+  EXPECT_TRUE(ShouldBeginResourceSample(0, false, window.IsStarted(), true));
   window.Begin(ProcessResourceUsage{.resident_memory_mb = 10, .cpu_time_ms = 100});
 
-  EXPECT_FALSE(ShouldBeginResourceSample(0, false, window.IsStarted()));
-  EXPECT_FALSE(ShouldBeginResourceSample(4, false, window.IsStarted()));
-  EXPECT_FALSE(ShouldBeginResourceSample(0, true, window.IsStarted()));
+  EXPECT_FALSE(ShouldBeginResourceSample(0, false, window.IsStarted(), true));
+  EXPECT_FALSE(ShouldBeginResourceSample(4, false, window.IsStarted(), true));
+  EXPECT_FALSE(ShouldBeginResourceSample(0, true, window.IsStarted(), true));
   EXPECT_EQ(window.Start().cpu_time_ms, 100);
+}
+
+TEST(HardwareInfoTests, UnsampledSessionsNeverBeginResourceSampling) {
+  EXPECT_FALSE(ShouldBeginResourceSample(0, false, false, false));
+  EXPECT_FALSE(ShouldBeginResourceSample(4, false, false, false));
+  EXPECT_FALSE(ShouldBeginResourceSample(0, true, false, false));
 }
 
 TEST(HardwareInfoTests, CurrentProcessSamplesUseExplicitUnknowns) {

@@ -424,7 +424,7 @@ int64_t ReadPhysicalCoreCount() {
       return -1;
     }
     const auto name = it->path().filename().string();
-    if (!name.starts_with("cpu") ||
+    if (name.compare(0, 3, "cpu") != 0 ||
         TelemetryInternal::ParseHardwareInteger(std::string_view{name}.substr(3)) < 0) {
       continue;
     }
@@ -650,6 +650,7 @@ void ReadOrtDevices(HardwareInfo& info) {
   }
 
   std::set<const OrtHardwareDevice*> seen;
+  std::vector<HardwareDeviceInfo> ort_devices;
   for (size_t index = 0; index < (std::min)(count, kMaxHardwareInventoryEntries);
        ++index) {
     const auto* hardware = Ort::api->EpDevice_Device(devices[index]);
@@ -674,12 +675,6 @@ void ReadOrtDevices(HardwareInfo& info) {
 
     device.vendor_id = Ort::api->HardwareDevice_VendorId(hardware);
     device.device_id = Ort::api->HardwareDevice_DeviceId(hardware);
-    if (auto* existing =
-            TelemetryInternal::FindOrtHardwareDeviceMatch(info.devices, device)) {
-      existing->type = device.type;
-      continue;
-    }
-
     device.source = "onnxruntime";
     const auto vendor =
         BoundedTelemetryCString(Ort::api->HardwareDevice_Vendor(hardware));
@@ -728,7 +723,18 @@ void ReadOrtDevices(HardwareInfo& info) {
       }
 #endif
     }
-    AddDevice(info, std::move(device));
+    ort_devices.push_back(std::move(device));
+  }
+  for (const auto& device : ort_devices) {
+    if (auto* existing = TelemetryInternal::FindOrtHardwareDeviceMatch(
+            info.devices, device, ort_devices)) {
+      existing->type = device.type;
+      if (existing->device_id < 0) {
+        existing->device_id = device.device_id;
+      }
+    } else {
+      AddDevice(info, device);
+    }
   }
   info.inventory_truncated |= count > kMaxHardwareInventoryEntries;
 }
@@ -739,17 +745,33 @@ namespace TelemetryInternal {
 
 HardwareDeviceInfo* FindOrtHardwareDeviceMatch(
     std::span<HardwareDeviceInfo> candidates,
-    const HardwareDeviceInfo& ort_device) {
-  const auto existing =
-      std::find_if(candidates.begin(), candidates.end(), [&](const auto& candidate) {
-        return (candidate.type == ort_device.type || candidate.type == "Unknown") &&
-               (ort_device.type == "CPU" ||
-                (candidate.source != "onnxruntime" &&
-                 candidate.vendor_id == ort_device.vendor_id &&
-                 (candidate.device_id == ort_device.device_id ||
-                  candidate.device_id == -1)));
-      });
-  return existing == candidates.end() ? nullptr : &*existing;
+    const HardwareDeviceInfo& ort_device,
+    std::span<const HardwareDeviceInfo> ort_devices) {
+  const auto compatible = [&](const auto& candidate) {
+    return (candidate.type == ort_device.type || candidate.type == "Unknown") &&
+           (ort_device.type == "CPU" ||
+            (candidate.source != "onnxruntime" &&
+             candidate.vendor_id == ort_device.vendor_id));
+  };
+  const auto exact = std::find_if(candidates.begin(), candidates.end(), [&](const auto& candidate) {
+    return compatible(candidate) &&
+           (ort_device.type == "CPU" || candidate.device_id == ort_device.device_id);
+  });
+  if (exact != candidates.end()) {
+    return &*exact;
+  }
+
+  // Without a product ID or a physical-device key, only a one-to-one match is safe.
+  if (std::count_if(candidates.begin(), candidates.end(), compatible) != 1 ||
+      std::count_if(ort_devices.begin(), ort_devices.end(), [&](const auto& device) {
+        return device.type == ort_device.type && device.vendor_id == ort_device.vendor_id;
+      }) != 1) {
+    return nullptr;
+  }
+  const auto unknown = std::find_if(candidates.begin(), candidates.end(), [&](const auto& candidate) {
+    return compatible(candidate) && candidate.device_id < 0;
+  });
+  return unknown == candidates.end() ? nullptr : &*unknown;
 }
 
 bool AccumulateProcessMemoryBytes(uint64_t& total, uint64_t used) {

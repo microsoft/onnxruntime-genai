@@ -845,6 +845,11 @@ void Generator::SetInputs(const NamedTensors& named_tensors) {
     }
   }
 
+  if (transducer_state_ && input_ids.empty()) {
+    generation_telemetry_.BeginAppend();
+    generation_telemetry_.CompleteAppend(0, state_->params_->search.num_beams, "audio");
+  }
+
   // Set any extra inputs (those defined in extra_inputs and those defined in the PresetExtraInputs registry)
   if (set_extra_inputs_) {
     state_->SetExtraInputs(extra_inputs_);

@@ -434,9 +434,19 @@ bool GenAiTelemetry::IsEnabled() const {
 void GenAiTelemetry::SetEnabled(bool enabled) {
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
   TelemetryInternal::ApplyTelemetryEnabledControl(
-      enabled, telemetry_disabled_, enabled_);
+      enabled, telemetry_disabled_, enabled_, mutex_);
 #else
   (void)enabled;
+#endif
+}
+
+bool GenAiTelemetry::IsSessionSampled(uint32_t session_id) {
+#if defined(ORTGENAI_ENABLE_TELEMETRY)
+  auto lock = LockForLogging();
+  return lock && TelemetryInternal::ShouldSampleSession(app_session_guid_, session_id);
+#else
+  (void)session_id;
+  return false;
 #endif
 }
 
