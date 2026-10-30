@@ -839,9 +839,17 @@ void CheckPipelineLoadingModes(std::initializer_list<LoadingMode> modes) {
     const bool file_sources = mode == LoadingMode::kFileSources || graph_override;
     const bool memory = mode == LoadingMode::kMemoryAssets || file_sources;
     const bool legacy = mode == LoadingMode::kLegacyModelData;
-    SCOPED_TRACE(graph_override ? "file-source-override" : file_sources ? "file-sources" : memory ? "memory-backed"
-                                             : legacy   ? "legacy-model-data"
-                                                        : "path-based");
+    const char* trace_label = "path-based";
+    if (graph_override) {
+      trace_label = "file-source-override";
+    } else if (file_sources) {
+      trace_label = "file-sources";
+    } else if (memory) {
+      trace_label = "memory-backed";
+    } else if (legacy) {
+      trace_label = "legacy-model-data";
+    }
+    SCOPED_TRACE(trace_label);
     ScopedAssetDirectory assets;
     const auto filename = assets.path.filename().string() + ".onnx";
     ASSERT_FALSE(std::filesystem::exists(filename));
