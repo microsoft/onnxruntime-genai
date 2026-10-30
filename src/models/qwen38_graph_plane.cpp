@@ -64,6 +64,26 @@ bool ReadExactWin32(HANDLE hFile, uint64_t offset, void* dst, size_t bytes) {
 // ------------------------------------------------------------------------------------------------
 // Plane library
 // ------------------------------------------------------------------------------------------------
+std::filesystem::path ResolveWindowsSharedLibraryPath(const std::filesystem::path& path) {
+  if (path.extension() != ".so") {
+    return path;
+  }
+  std::error_code ec;
+  auto dll_path = path;
+  dll_path.replace_extension(".dll");
+  if (std::filesystem::exists(dll_path, ec)) {
+    return dll_path;
+  }
+  const std::string stem = path.stem().string();
+  if (stem.rfind("lib", 0) == 0 && stem.size() > 3) {
+    auto stripped = path.parent_path() / (stem.substr(3) + ".dll");
+    if (std::filesystem::exists(stripped, ec)) {
+      return stripped;
+    }
+  }
+  return path;
+}
+
 #if defined(QWEN38_GRAPH_NO_POSIX)
 
 Qwen38Plane::Qwen38Plane(const std::filesystem::path&) { ThrowUnsupportedPlatform(); }
@@ -72,21 +92,7 @@ Qwen38Plane::~Qwen38Plane() = default;
 #elif defined(_WIN32)
 
 Qwen38Plane::Qwen38Plane(const std::filesystem::path& path) {
-  std::filesystem::path actual_path = path;
-  std::error_code ec;
-  if (actual_path.extension() == ".so") {
-    auto dll_path = actual_path;
-    dll_path.replace_extension(".dll");
-    if (std::filesystem::exists(dll_path, ec)) {
-      actual_path = dll_path;
-    } else {
-      std::string stem = actual_path.stem().string();
-      if (stem.rfind("lib", 0) == 0) {
-        auto stripped = actual_path.parent_path() / (stem.substr(3) + ".dll");
-        if (std::filesystem::exists(stripped, ec)) actual_path = stripped;
-      }
-    }
-  }
+  const std::filesystem::path actual_path = ResolveWindowsSharedLibraryPath(path);
   HMODULE mod = LoadLibraryW(actual_path.wstring().c_str());
   if (!mod) {
     const DWORD err = GetLastError();
@@ -109,6 +115,10 @@ Qwen38Plane::Qwen38Plane(const std::filesystem::path& path) {
     embed_rows = reinterpret_cast<decltype(embed_rows)>(GetProcAddress(mod, "qwen38_plane_embed_rows"));
     set_ple_host_params =
         reinterpret_cast<decltype(set_ple_host_params)>(GetProcAddress(mod, "qwen38_plane_set_ple_host_params"));
+    unset_ple_host_params =
+        reinterpret_cast<decltype(unset_ple_host_params)>(GetProcAddress(mod, "qwen38_plane_unset_ple_host_params"));
+    release_ple_workspace =
+        reinterpret_cast<decltype(release_ple_workspace)>(GetProcAddress(mod, "qwen38_plane_release_ple_workspace"));
     if (abi_version() != QWEN38_PLANE_ABI_VERSION) {
       throw std::runtime_error("qwen38_graph: the plane library has ABI version " + std::to_string(abi_version()) +
                                ", expected " + std::to_string(QWEN38_PLANE_ABI_VERSION));
@@ -124,6 +134,11 @@ Qwen38Plane::Qwen38Plane(const std::filesystem::path& path) {
 }
 
 Qwen38Plane::~Qwen38Plane() {
+  if (release_ple_workspace) {
+    release_ple_workspace();
+  } else if (set_ple_host_params) {
+    set_ple_host_params(nullptr);
+  }
   if (handle_) FreeLibrary(static_cast<HMODULE>(handle_));
 }
 
@@ -151,6 +166,10 @@ Qwen38Plane::Qwen38Plane(const std::filesystem::path& path) {
     embed_rows = reinterpret_cast<decltype(embed_rows)>(dlsym(handle_, "qwen38_plane_embed_rows"));
     set_ple_host_params =
         reinterpret_cast<decltype(set_ple_host_params)>(dlsym(handle_, "qwen38_plane_set_ple_host_params"));
+    unset_ple_host_params =
+        reinterpret_cast<decltype(unset_ple_host_params)>(dlsym(handle_, "qwen38_plane_unset_ple_host_params"));
+    release_ple_workspace =
+        reinterpret_cast<decltype(release_ple_workspace)>(dlsym(handle_, "qwen38_plane_release_ple_workspace"));
     if (abi_version() != QWEN38_PLANE_ABI_VERSION) {
       throw std::runtime_error("qwen38_graph: the plane library has ABI version " + std::to_string(abi_version()) +
                                ", expected " + std::to_string(QWEN38_PLANE_ABI_VERSION));
@@ -166,6 +185,11 @@ Qwen38Plane::Qwen38Plane(const std::filesystem::path& path) {
 }
 
 Qwen38Plane::~Qwen38Plane() {
+  if (release_ple_workspace) {
+    release_ple_workspace();
+  } else if (set_ple_host_params) {
+    set_ple_host_params(nullptr);
+  }
   if (handle_) dlclose(handle_);
 }
 
@@ -457,9 +481,23 @@ Qwen38FileMapping::Qwen38FileMapping(Qwen38Plane& plane, const std::filesystem::
     int err = plane_.host_register(base_, length_, 2 | 8);
     if (err == 0) {
       registered_ = base_;
-      void* dev_ptr = nullptr;
-      plane_.Check(plane_.host_get_device_pointer(&dev_ptr, base_, 0), "cudaHostGetDevicePointer(weight pool file)");
-      dev_ptr_ = dev_ptr;
+      try {
+        void* dev_ptr = nullptr;
+        plane_.Check(plane_.host_get_device_pointer(&dev_ptr, base_, 0), "cudaHostGetDevicePointer(weight pool file)");
+        dev_ptr_ = dev_ptr;
+      } catch (...) {
+        plane_.host_unregister(registered_);
+        UnmapViewOfFile(base_);
+        CloseHandle(hMap);
+        CloseHandle(hFile);
+        registered_ = nullptr;
+        base_ = nullptr;
+        dev_ptr_ = nullptr;
+        map_handle_ = nullptr;
+        file_handle_ = nullptr;
+        length_ = 0;
+        throw;
+      }
     } else {
       UnmapViewOfFile(base_);
       CloseHandle(hMap);
@@ -603,11 +641,15 @@ Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::filesystem::path& 
       }
       CloseHandle(hFile);
       mappings_.push_back(Mapping{vbuf, bytes, nullptr, nullptr, nullptr, true});
-      plane.Check(plane.host_register(vbuf, bytes, 2), "cudaHostRegister(PLE shard)");
-      mappings_.back().registered = vbuf;
-      void* dev_vbuf = nullptr;
-      plane.Check(plane.host_get_device_pointer(&dev_vbuf, vbuf, 0), "cudaHostGetDevicePointer(PLE shard)");
-      params.shard_ptr[i] = static_cast<const unsigned char*>(dev_vbuf);
+      if (pin_ple) {
+        plane.Check(plane.host_register(vbuf, bytes, 2), "cudaHostRegister(PLE shard)");
+        mappings_.back().registered = vbuf;
+        void* dev_vbuf = nullptr;
+        plane.Check(plane.host_get_device_pointer(&dev_vbuf, vbuf, 0), "cudaHostGetDevicePointer(PLE shard)");
+        params.shard_ptr[i] = static_cast<const unsigned char*>(dev_vbuf);
+      } else {
+        params.shard_ptr[i] = static_cast<const unsigned char*>(vbuf);
+      }
       first_row += shard.rows;
       params.shard_end[i] = first_row;
     }
@@ -632,6 +674,7 @@ Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::filesystem::path& 
 }
 
 Qwen38PleTable::~Qwen38PleTable() {
+  if (plane_.unset_ple_host_params) plane_.unset_ple_host_params(&params);
   for (auto& mapping : mappings_) {
     if (mapping.registered) plane_.host_unregister(mapping.registered);
     if (mapping.base) {
@@ -653,7 +696,7 @@ Qwen38FileMapping::Qwen38FileMapping(Qwen38Plane& plane, const std::filesystem::
     : plane_{plane}, path_{full_path} {
   const int fd = open(full_path.c_str(), O_RDONLY);
   if (fd < 0) throw std::runtime_error("qwen38_graph: cannot open weight pool file " + full_path.string());
-  struct stat st{};
+  struct stat st {};
   if (fstat(fd, &st) != 0 || st.st_size <= 0) {
     close(fd);
     throw std::runtime_error("qwen38_graph: empty or invalid weight pool file " + full_path.string());
@@ -740,7 +783,7 @@ Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::filesystem::path& 
       const std::filesystem::path full = root / shard.path;
       const int fd = open(full.c_str(), O_RDONLY);
       if (fd < 0) throw std::runtime_error("qwen38_graph: cannot open the PLE shard file " + full.string());
-      struct stat st{};
+      struct stat st {};
       if (fstat(fd, &st) != 0 || st.st_size <= 0) {
         close(fd);
         throw std::runtime_error("qwen38_graph: cannot stat the PLE shard file " + full.string());
@@ -791,6 +834,7 @@ Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::filesystem::path& 
 }
 
 Qwen38PleTable::~Qwen38PleTable() {
+  if (plane_.unset_ple_host_params) plane_.unset_ple_host_params(&params);
   for (auto& mapping : mappings_) {
     if (mapping.registered) plane_.host_unregister(mapping.registered);
     if (mapping.base) munmap(mapping.base, mapping.length);

@@ -45,11 +45,13 @@ constexpr const char* kValidPleTable =
 struct StubPlaneState {
   static inline std::vector<void*> registered_ptrs;
   static inline std::vector<void*> unregistered_ptrs;
+  static inline bool fail_get_device_pointer = false;
   static constexpr uintptr_t kDeviceOffset = 0x100000u;
 
   static void Reset() {
     registered_ptrs.clear();
     unregistered_ptrs.clear();
+    fail_get_device_pointer = false;
   }
 
   static const char* ErrorString(int) { return "stub error"; }
@@ -62,6 +64,9 @@ struct StubPlaneState {
     return 0;
   }
   static int HostGetDevicePointer(void** dev_ptr, void* host_ptr, unsigned) {
+    if (fail_get_device_pointer) {
+      return 1;
+    }
     *dev_ptr = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(host_ptr) + kDeviceOffset);
     return 0;
   }
@@ -281,12 +286,40 @@ TEST(Qwen38PleTableTest, ValidatesShardFileBoundsAndUsesDevicePointer) {
     EXPECT_EQ(StubPlaneState::unregistered_ptrs, StubPlaneState::registered_ptrs);
   }
 
+  // Verify Qwen38FileMapping rolls back registration when host_get_device_pointer fails.
+  {
+    Qwen38Plane plane;
+    InitStubPlane(plane);
+    StubPlaneState::fail_get_device_pointer = true;
+    EXPECT_THROW((Qwen38FileMapping{plane, dir / "ple" / "a.safetensors", true}), std::runtime_error);
+    EXPECT_EQ(StubPlaneState::registered_ptrs.size(), 1u);
+    EXPECT_EQ(StubPlaneState::unregistered_ptrs, StubPlaneState::registered_ptrs);
+  }
+
   std::error_code ec;
   std::filesystem::remove_all(dir, ec);
 }
 #endif
 
 // ---- plane library loader --------------------------------------------------------------------
+
+TEST(Qwen38PlaneTest, ResolvesWindowsSharedLibraryPathFromSoToDll) {
+  const auto dir = MakeScratchDir("resolve_dll");
+  const auto so_path = dir / "libqwen38_plane.so";
+  EXPECT_EQ(ResolveWindowsSharedLibraryPath(so_path), so_path);
+  EXPECT_EQ(ResolveWindowsSharedLibraryPath(dir / "qwen38_plane.dll"), dir / "qwen38_plane.dll");
+
+  // Stripped `lib` prefix (`qwen38_plane.dll`) is found when `libqwen38_plane.dll` is absent.
+  WriteFile(dir / "qwen38_plane.dll", "dll");
+  EXPECT_EQ(ResolveWindowsSharedLibraryPath(so_path), dir / "qwen38_plane.dll");
+
+  // Direct `.dll` replacement (`libqwen38_plane.dll`) takes precedence when present.
+  WriteFile(dir / "libqwen38_plane.dll", "dll");
+  EXPECT_EQ(ResolveWindowsSharedLibraryPath(so_path), dir / "libqwen38_plane.dll");
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
 
 TEST(Qwen38PlaneTest, LoadingAMissingLibraryFailsWithItsPath) {
   const auto missing = std::filesystem::path{"definitely"} / "missing" / "libqwen38_plane.so";
@@ -299,11 +332,25 @@ TEST(Qwen38PlaneTest, LoadingAMissingLibraryFailsWithItsPath) {
   }
 }
 
-#if !defined(_WIN32)
+#if !defined(QWEN38_GRAPH_NO_POSIX)
+namespace {
+
+std::filesystem::path GetBuiltPlaneLibraryPath() {
+#if defined(ORTGENAI_TEST_QWEN38_PLANE_LIB_PATH)
+  return std::filesystem::path{ORTGENAI_TEST_QWEN38_PLANE_LIB_PATH};
+#elif defined(_WIN32)
+  return std::filesystem::current_path() / "qwen38_plane.dll";
+#else
+  return std::filesystem::current_path() / "libqwen38_plane.so";
+#endif
+}
+
+}  // namespace
+
 TEST(Qwen38PlaneTest, PlaneKernelsHandleEmptyAndNonMultipleOf32Dimensions) {
-  const std::filesystem::path plane_lib = std::filesystem::current_path() / "libqwen38_plane.so";
+  const std::filesystem::path plane_lib = GetBuiltPlaneLibraryPath();
   if (!std::filesystem::exists(plane_lib)) {
-    GTEST_SKIP() << "libqwen38_plane.so not present in working directory";
+    GTEST_SKIP() << plane_lib.string() << " not present";
   }
   Qwen38Plane plane{plane_lib};
   if (plane.set_device(0) != 0) {
@@ -351,6 +398,108 @@ TEST(Qwen38PlaneTest, PlaneKernelsHandleEmptyAndNonMultipleOf32Dimensions) {
       }
     }
   }
+}
+
+TEST(Qwen38PlaneTest, StagedPleIsolatesMultipleTablesIgnoresUnrelatedMemcpyAndTearsDown) {
+  const std::filesystem::path plane_lib = GetBuiltPlaneLibraryPath();
+  if (!std::filesystem::exists(plane_lib)) {
+    GTEST_SKIP() << plane_lib.string() << " not present";
+  }
+  Qwen38Plane plane{plane_lib};
+  if (plane.set_device(0) != 0 || !plane.set_ple_host_params) {
+    GTEST_SKIP() << "No CUDA device or staged PLE support available";
+  }
+  void* stream = nullptr;
+  plane.Check(plane.stream_create(&stream), "stream_create");
+
+  // Two distinct staged PLE tables (`pad_ = 1`) with 1 head, head_dim = 4, 4 rows.
+  // FP8 E4M3 0x38 = 1.0f, 0x40 = 2.0f.
+  std::vector<unsigned char> shard1(16, 0x38u);  // 1.0f * scale(1.0f) -> bf16 1.0f (0x3F80)
+  std::vector<unsigned char> shard2(16, 0x40u);  // 2.0f * scale(2.0f) -> bf16 4.0f (0x4080)
+
+  auto make_staged_params = [](const unsigned char* shard_ptr, float scale) {
+    Qwen38PleParams p{};
+    p.n_heads = 1;
+    p.head_dim = 4;
+    p.heads_per_ngram = 1;
+    p.n_shards = 1;
+    p.mult[0] = 1;
+    p.vocab[0] = 4;
+    p.offset[0] = 0;
+    p.shard_end[0] = 4;
+    p.shard_ptr[0] = shard_ptr;
+    p.scale = scale;
+    p.pad_ = 1;
+    p.eos = 99;
+    p.capacity = 16;
+    return p;
+  };
+
+  Qwen38PleParams p1 = make_staged_params(shard1.data(), 1.0f);
+  Qwen38PleParams p2 = make_staged_params(shard2.data(), 2.0f);
+  plane.set_ple_host_params(&p1);
+  plane.set_ple_host_params(&p2);
+
+  PlaneBuffer d_p1{plane, sizeof(Qwen38PleParams), stream};
+  PlaneBuffer d_p2{plane, sizeof(Qwen38PleParams), stream};
+  plane.Check(plane.memcpy_h2d(d_p1.data(), &p1, sizeof(Qwen38PleParams), stream), "upload p1");
+  plane.Check(plane.memcpy_h2d(d_p2.data(), &p2, sizeof(Qwen38PleParams), stream), "upload p2");
+
+  // Unrelated memcpy_h2d of sizeof(Qwen38PleParams) whose leading ints look like valid n_heads/head_dim/n_shards.
+  Qwen38PleParams fake_payload{};
+  fake_payload.n_heads = 1;
+  fake_payload.head_dim = 4;
+  fake_payload.n_shards = 1;
+  fake_payload.pad_ = 1;
+  fake_payload.shard_ptr[0] = reinterpret_cast<const unsigned char*>(uintptr_t{0xDEADBEEFu});
+  PlaneBuffer d_unrelated{plane, sizeof(Qwen38PleParams), stream};
+  plane.Check(plane.memcpy_h2d(d_unrelated.data(), &fake_payload, sizeof(Qwen38PleParams), stream),
+              "unrelated memcpy_h2d");
+
+  const int64_t h_tokens[2] = {1, 2};
+  const int64_t h_ctx_in[2] = {0, 0};
+  PlaneBuffer d_tokens{plane, sizeof(h_tokens), stream};
+  PlaneBuffer d_ctx_in{plane, sizeof(h_ctx_in), stream};
+  PlaneBuffer d_ctx_out{plane, sizeof(h_ctx_in), stream};
+  PlaneBuffer d_out1{plane, 2 * 4 * sizeof(uint16_t), stream};
+  PlaneBuffer d_out2{plane, 2 * 4 * sizeof(uint16_t), stream};
+  plane.Check(plane.memcpy_h2d(d_tokens.data(), h_tokens, sizeof(h_tokens), stream), "tokens");
+  plane.Check(plane.memcpy_h2d(d_ctx_in.data(), h_ctx_in, sizeof(h_ctx_in), stream), "ctx_in");
+
+  // Both tables must gather from their own shard and cache independently despite p2 being registered second.
+  plane.ple_rows(stream, d_p1.data(), d_tokens.data(), 2, d_ctx_in.data(), d_ctx_out.data(), d_out1.data());
+  plane.ple_rows(stream, d_p2.data(), d_tokens.data(), 2, d_ctx_in.data(), d_ctx_out.data(), d_out2.data());
+
+  std::vector<uint16_t> out1(8, 0), out2(8, 0);
+  plane.Check(plane.memcpy_d2h(out1.data(), d_out1.data(), out1.size() * sizeof(uint16_t), stream), "d2h out1");
+  plane.Check(plane.memcpy_d2h(out2.data(), d_out2.data(), out2.size() * sizeof(uint16_t), stream), "d2h out2");
+  plane.Check(plane.stream_sync(stream), "sync");
+
+  for (uint16_t v : out1) EXPECT_EQ(v, 0x3F80u);  // bf16(1.0f)
+  for (uint16_t v : out2) EXPECT_EQ(v, 0x4080u);  // bf16(4.0f)
+
+  // Updating p1 in-place and re-registering must invalidate p1's N-gram row cache.
+  std::fill(shard1.begin(), shard1.end(), 0x40u);  // 2.0f * scale(1.0f) -> bf16 2.0f (0x4000)
+  plane.set_ple_host_params(&p1);
+  plane.ple_rows(stream, d_p1.data(), d_tokens.data(), 2, d_ctx_in.data(), d_ctx_out.data(), d_out1.data());
+  plane.Check(plane.memcpy_d2h(out1.data(), d_out1.data(), out1.size() * sizeof(uint16_t), stream), "d2h out1 updated");
+  plane.Check(plane.stream_sync(stream), "sync updated");
+  for (uint16_t v : out1) EXPECT_EQ(v, 0x4000u);  // bf16(2.0f)
+
+  // Unregistering p2 leaves p1 operational and tears down p2's staged state.
+  if (plane.unset_ple_host_params) {
+    plane.unset_ple_host_params(&p2);
+  }
+  std::fill(out1.begin(), out1.end(), 0);
+  plane.ple_rows(stream, d_p1.data(), d_tokens.data(), 2, d_ctx_in.data(), d_ctx_out.data(), d_out1.data());
+  plane.Check(plane.memcpy_d2h(out1.data(), d_out1.data(), out1.size() * sizeof(uint16_t), stream), "d2h out1 after unset");
+  plane.Check(plane.stream_sync(stream), "sync after unset");
+  for (uint16_t v : out1) EXPECT_EQ(v, 0x4000u);
+
+  if (plane.release_ple_workspace) {
+    plane.release_ple_workspace();
+  }
+  plane.stream_destroy(stream);
 }
 #endif
 
