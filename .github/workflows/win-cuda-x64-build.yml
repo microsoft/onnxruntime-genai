@@ -218,7 +218,7 @@ jobs:
         run: |
           $env:PATH = "$env:GITHUB_WORKSPACE\ort\ep;$env:GITHUB_WORKSPACE\ort\lib;${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin;" + $env:PATH
           cd test\csharp
-          dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release" /p:OrtLibDir="$env:GITHUB_WORKSPACE\ort\lib" /p:EPDir="$env:GITHUB_WORKSPACE\ort\ep" /p:OrtPackageVersion="$env:ORT_PACKAGE_VERSION" /p:RestoreSources="$env:ORT_NUGET_SOURCE"
+          dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release" /p:OrtLibDir="$env:GITHUB_WORKSPACE\ort\lib" /p:EPDir="$env:GITHUB_WORKSPACE\ort\ep" /p:OrtPackageVersion="$env:ORT_PACKAGE_VERSION"
 
       - name: Build the C# Examples
         run: |
