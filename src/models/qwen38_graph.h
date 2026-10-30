@@ -491,6 +491,7 @@ struct Qwen38GraphModel : Model {
   std::unique_ptr<Qwen38Plane> plane_;
   std::unique_ptr<Qwen38WeightPool> pool_;
   std::unique_ptr<Qwen38FileMapping> embed_mapping_;
+  bool embed_is_int8_{false};
   std::vector<std::unique_ptr<OrtValue>> embed_values_;
   std::unique_ptr<OrtSessionOptions> embedding_session_options_;
   std::unique_ptr<OrtSession> session_embedding_;
