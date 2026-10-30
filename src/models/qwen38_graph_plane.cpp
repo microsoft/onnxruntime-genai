@@ -108,6 +108,13 @@ Qwen38Plane::Qwen38Plane(const std::filesystem::path& path) {
     function = reinterpret_cast<std::remove_reference_t<decltype(function)> >(symbol);
   };
   try {
+    // The version is checked before the other symbols are resolved so that a stale library is reported as such rather than
+    // as lacking a symbol that a newer ABI added.
+    load(abi_version, "qwen38_plane_abi_version");
+    if (abi_version() != QWEN38_PLANE_ABI_VERSION) {
+      throw std::runtime_error("qwen38_graph: the plane library has ABI version " + std::to_string(abi_version()) +
+                               ", expected " + std::to_string(QWEN38_PLANE_ABI_VERSION));
+    }
 #define QWEN38_PLANE_LOAD(ret, name, args) load(name, "qwen38_plane_" #name);
     QWEN38_PLANE_FUNCTIONS(QWEN38_PLANE_LOAD)
 #undef QWEN38_PLANE_LOAD
@@ -119,13 +126,11 @@ Qwen38Plane::Qwen38Plane(const std::filesystem::path& path) {
         reinterpret_cast<decltype(unset_ple_host_params)>(GetProcAddress(mod, "qwen38_plane_unset_ple_host_params"));
     release_ple_workspace =
         reinterpret_cast<decltype(release_ple_workspace)>(GetProcAddress(mod, "qwen38_plane_release_ple_workspace"));
-    if (abi_version() != QWEN38_PLANE_ABI_VERSION) {
-      throw std::runtime_error("qwen38_graph: the plane library has ABI version " + std::to_string(abi_version()) +
-                               ", expected " + std::to_string(QWEN38_PLANE_ABI_VERSION));
-    }
     if (sizeof_ple_params() != static_cast<int>(sizeof(Qwen38PleParams))) {
       throw std::runtime_error("qwen38_graph: the plane library's PLE parameter layout differs from the host definition");
     }
+    attach();
+    attached_ = true;
   } catch (...) {
     FreeLibrary(mod);
     handle_ = nullptr;
@@ -134,11 +139,7 @@ Qwen38Plane::Qwen38Plane(const std::filesystem::path& path) {
 }
 
 Qwen38Plane::~Qwen38Plane() {
-  if (release_ple_workspace) {
-    release_ple_workspace();
-  } else if (set_ple_host_params) {
-    set_ple_host_params(nullptr);
-  }
+  if (attached_) detach();
   if (handle_) FreeLibrary(static_cast<HMODULE>(handle_));
 }
 
@@ -159,6 +160,13 @@ Qwen38Plane::Qwen38Plane(const std::filesystem::path& path) {
     function = reinterpret_cast<std::remove_reference_t<decltype(function)> >(symbol);
   };
   try {
+    // The version is checked before the other symbols are resolved so that a stale library is reported as such rather than
+    // as lacking a symbol that a newer ABI added.
+    load(abi_version, "qwen38_plane_abi_version");
+    if (abi_version() != QWEN38_PLANE_ABI_VERSION) {
+      throw std::runtime_error("qwen38_graph: the plane library has ABI version " + std::to_string(abi_version()) +
+                               ", expected " + std::to_string(QWEN38_PLANE_ABI_VERSION));
+    }
 #define QWEN38_PLANE_LOAD(ret, name, args) load(name, "qwen38_plane_" #name);
     QWEN38_PLANE_FUNCTIONS(QWEN38_PLANE_LOAD)
 #undef QWEN38_PLANE_LOAD
@@ -170,13 +178,11 @@ Qwen38Plane::Qwen38Plane(const std::filesystem::path& path) {
         reinterpret_cast<decltype(unset_ple_host_params)>(dlsym(handle_, "qwen38_plane_unset_ple_host_params"));
     release_ple_workspace =
         reinterpret_cast<decltype(release_ple_workspace)>(dlsym(handle_, "qwen38_plane_release_ple_workspace"));
-    if (abi_version() != QWEN38_PLANE_ABI_VERSION) {
-      throw std::runtime_error("qwen38_graph: the plane library has ABI version " + std::to_string(abi_version()) +
-                               ", expected " + std::to_string(QWEN38_PLANE_ABI_VERSION));
-    }
     if (sizeof_ple_params() != static_cast<int>(sizeof(Qwen38PleParams))) {
       throw std::runtime_error("qwen38_graph: the plane library's PLE parameter layout differs from the host definition");
     }
+    attach();
+    attached_ = true;
   } catch (...) {
     dlclose(handle_);
     handle_ = nullptr;
@@ -185,11 +191,7 @@ Qwen38Plane::Qwen38Plane(const std::filesystem::path& path) {
 }
 
 Qwen38Plane::~Qwen38Plane() {
-  if (release_ple_workspace) {
-    release_ple_workspace();
-  } else if (set_ple_host_params) {
-    set_ple_host_params(nullptr);
-  }
+  if (attached_) detach();
   if (handle_) dlclose(handle_);
 }
 

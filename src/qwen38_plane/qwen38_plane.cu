@@ -34,6 +34,111 @@
 typedef long long i64;
 typedef Qwen38PleParams PleParams;
 
+// Every CUDA step of the staged PLE path (pinned allocation, device aliasing, device-to-host copy, synchronisation) goes
+// through the helpers below, which report the cudaError_t and clear CUDA's last-error state on failure. Built with
+// QWEN38_PLANE_TEST_HOOKS (see qwen38_plane_abi.h) they can also be made to fail on demand and are counted; otherwise they
+// forward to CUDA. The hook state is guarded by g_staged_ple_mu like the staged state itself.
+#ifdef QWEN38_PLANE_TEST_HOOKS
+struct StagedTestHooks {
+  int fault_site = QWEN38_PLANE_FAULT_NONE;
+  int fault_skip = 0;
+  int fault_error = 0;
+  long long gather_rows = 0;
+  long long staged_launches = 0;
+  long long global_cleanups = 0;
+  long long live_pinned = 0;
+};
+static StagedTestHooks g_test_hooks;
+
+static inline cudaError_t hook_fault(int site) {
+  if (g_test_hooks.fault_site != site) return cudaSuccess;
+  if (g_test_hooks.fault_skip > 0) {
+    --g_test_hooks.fault_skip;
+    return cudaSuccess;
+  }
+  g_test_hooks.fault_site = QWEN38_PLANE_FAULT_NONE;
+  return (cudaError_t)g_test_hooks.fault_error;
+}
+static inline void hook_gather() { ++g_test_hooks.gather_rows; }
+static inline void hook_launch() { ++g_test_hooks.staged_launches; }
+static inline void hook_cleanup() { ++g_test_hooks.global_cleanups; }
+static inline void hook_pinned(int delta) { g_test_hooks.live_pinned += delta; }
+#else
+static inline cudaError_t hook_fault(int) { return cudaSuccess; }
+static inline void hook_gather() {}
+static inline void hook_launch() {}
+static inline void hook_cleanup() {}
+static inline void hook_pinned(int) {}
+#endif
+
+template <typename T>
+static inline cudaError_t staged_host_alloc(T** ptr, size_t bytes, unsigned int flags) {
+  void* raw = nullptr;
+  cudaError_t err = hook_fault(QWEN38_PLANE_FAULT_HOST_ALLOC);
+  if (err == cudaSuccess) err = cudaHostAlloc(&raw, bytes, flags);
+  if (err != cudaSuccess) {
+    cudaGetLastError();
+    *ptr = nullptr;
+    return err;
+  }
+  *ptr = static_cast<T*>(raw);
+  hook_pinned(1);
+  return cudaSuccess;
+}
+
+static inline void staged_host_free(void* ptr) {
+  if (ptr == nullptr) return;
+  if (cudaFreeHost(ptr) != cudaSuccess) cudaGetLastError();
+  hook_pinned(-1);
+}
+
+static inline cudaError_t staged_malloc(unsigned char** ptr, size_t bytes) {
+  *ptr = nullptr;
+  cudaError_t err = hook_fault(QWEN38_PLANE_FAULT_HOST_MALLOC);
+  if (err == cudaSuccess) {
+    *ptr = static_cast<unsigned char*>(malloc(bytes));
+    if (*ptr == nullptr) err = cudaErrorMemoryAllocation;
+  }
+  return err;
+}
+
+// Device address of a mapped pinned buffer. The host pointer is never substituted for it: a failure, or a null result, is an
+// error.
+static inline cudaError_t staged_device_alias(unsigned char** device_ptr, void* host_ptr) {
+  void* raw = nullptr;
+  cudaError_t err = hook_fault(QWEN38_PLANE_FAULT_DEVICE_ALIAS);
+  if (err == cudaSuccess) err = cudaHostGetDevicePointer(&raw, host_ptr, 0);
+  if (err == cudaSuccess && raw == nullptr) err = cudaErrorInvalidValue;
+  if (err != cudaSuccess) {
+    cudaGetLastError();
+    return err;
+  }
+  *device_ptr = static_cast<unsigned char*>(raw);
+  return cudaSuccess;
+}
+
+static inline cudaError_t staged_copy_to_host(void* dst, const void* src, size_t bytes, cudaMemcpyKind kind,
+                                              cudaStream_t stream) {
+  cudaError_t err = hook_fault(QWEN38_PLANE_FAULT_COPY);
+  if (err == cudaSuccess) err = cudaMemcpyAsync(dst, src, bytes, kind, stream);
+  if (err != cudaSuccess) cudaGetLastError();
+  return err;
+}
+
+static inline cudaError_t staged_stream_sync(cudaStream_t stream) {
+  cudaError_t err = hook_fault(QWEN38_PLANE_FAULT_SYNC);
+  if (err == cudaSuccess) err = cudaStreamSynchronize(stream);
+  if (err != cudaSuccess) cudaGetLastError();
+  return err;
+}
+
+static inline cudaError_t staged_device_sync() {
+  cudaError_t err = hook_fault(QWEN38_PLANE_FAULT_SYNC);
+  if (err == cudaSuccess) err = cudaDeviceSynchronize();
+  if (err != cudaSuccess) cudaGetLastError();
+  return err;
+}
+
 struct StagedPleWorkspace {
   PleParams params{};
   i64* scalars = nullptr;                  // pinned [64]: tok/ctl words + ctx_in
@@ -74,20 +179,20 @@ struct StagedPleWorkspace {
       }
     }
     if (scalars) {
-      cudaFreeHost(scalars);
+      staged_host_free(scalars);
       scalars = nullptr;
     }
     if (prep_ring) {
-      cudaFreeHost(prep_ring);
+      staged_host_free(prep_ring);
       prep_ring = nullptr;
       prep_ring_dev = nullptr;
     }
     if (prefill_tokens) {
-      cudaFreeHost(prefill_tokens);
+      staged_host_free(prefill_tokens);
       prefill_tokens = nullptr;
     }
     if (prefill_fp8) {
-      cudaFreeHost(prefill_fp8);
+      staged_host_free(prefill_fp8);
       prefill_fp8 = nullptr;
       prefill_fp8_dev = nullptr;
     }
@@ -109,53 +214,98 @@ static std::unordered_map<const void*, std::unique_ptr<StagedPleWorkspace>> g_ho
 static std::unordered_map<const void*, const void*> g_dev_to_host_ple;
 static const void* g_last_staged_host_key = nullptr;
 static bool g_ever_had_staged_ple = false;
+// Loaders (Qwen38Plane objects, possibly several per process) that attach()-ed to this module and have not detached yet.
+static int g_attached_loaders = 0;
 
-static inline void ensure_prep_workspace(StagedPleWorkspace& ws) {
+// Pinned buffers that ensure_staged_buffers has allocated but the workspace does not own yet.
+struct PendingStagedBuffers {
+  i64* scalars = nullptr;
+  unsigned char* prep_ring = nullptr;
+  unsigned char* prep_ring_dev = nullptr;
+  unsigned char* ngram_cache_data = nullptr;
+  i64* prefill_tokens = nullptr;
+  unsigned char* prefill_fp8 = nullptr;
+  unsigned char* prefill_fp8_dev = nullptr;
+
+  void discard() {
+    staged_host_free(scalars);
+    staged_host_free(prep_ring);
+    free(ngram_cache_data);
+    staged_host_free(prefill_tokens);
+    staged_host_free(prefill_fp8);
+    *this = PendingStagedBuffers{};
+  }
+};
+
+// Gives the workspace the pinned buffers one call needs: the scalar words and the prep ring and, for rows > 0, a token buffer
+// and a mapped FP8 buffer for `rows` rows of `row_bytes` bytes. All or nothing: every new buffer is allocated, and its
+// device alias verified, before any of them is published, so on failure what was allocated is freed and the workspace,
+// including its recorded capacities, is exactly as it was.
+static cudaError_t ensure_staged_buffers(StagedPleWorkspace& ws, size_t rows, size_t row_bytes) {
+  constexpr size_t kMinPrefillRows = 4096;
+  constexpr size_t kMinPrefillBytes = 4096ULL * 4096ULL;
+  if (rows != 0 && row_bytes != 0 && rows > SIZE_MAX / row_bytes) {
+    return cudaErrorInvalidValue;
+  }
+  const size_t need_bytes = rows * row_bytes;
+  PendingStagedBuffers fresh;
+  size_t new_rows = ws.prefill_cap_rows;
+  size_t new_bytes = ws.prefill_cap_bytes;
+  bool replaces_buffer = false;
+  cudaError_t err = cudaSuccess;
   if (!ws.scalars) {
-    cudaHostAlloc((void**)&ws.scalars, 64 * sizeof(i64), cudaHostAllocPortable);
+    err = staged_host_alloc(&fresh.scalars, 64 * sizeof(i64), cudaHostAllocPortable);
   }
-  if (!ws.prep_ring) {
-    cudaHostAlloc((void**)&ws.prep_ring, 64 * 8192, cudaHostAllocMapped | cudaHostAllocPortable);
-    void* dev_ptr = nullptr;
-    if (cudaHostGetDevicePointer(&dev_ptr, ws.prep_ring, 0) == cudaSuccess && dev_ptr != nullptr) {
-      ws.prep_ring_dev = static_cast<unsigned char*>(dev_ptr);
-    } else {
-      cudaGetLastError();
-      ws.prep_ring_dev = ws.prep_ring;
-    }
+  if (err == cudaSuccess && !ws.prep_ring) {
+    err = staged_host_alloc(&fresh.prep_ring, 64 * 8192, cudaHostAllocMapped | cudaHostAllocPortable);
+    if (err == cudaSuccess) err = staged_device_alias(&fresh.prep_ring_dev, fresh.prep_ring);
   }
-  if (!ws.ngram_cache_data) {
-    ws.ngram_cache_data =
-        (unsigned char*)malloc(StagedPleWorkspace::kCacheSlots * StagedPleWorkspace::kMaxRowBytes);
+  if (err == cudaSuccess && !ws.ngram_cache_data) {
+    err = staged_malloc(&fresh.ngram_cache_data, StagedPleWorkspace::kCacheSlots * StagedPleWorkspace::kMaxRowBytes);
+  }
+  if (err == cudaSuccess && rows != 0 && (!ws.prefill_tokens || rows > ws.prefill_cap_rows)) {
+    new_rows = rows < kMinPrefillRows ? kMinPrefillRows : rows;
+    err = staged_host_alloc(&fresh.prefill_tokens, new_rows * sizeof(i64), cudaHostAllocPortable);
+    replaces_buffer = replaces_buffer || ws.prefill_tokens != nullptr;
+  }
+  if (err == cudaSuccess && rows != 0 && (!ws.prefill_fp8 || need_bytes > ws.prefill_cap_bytes)) {
+    new_bytes = need_bytes < kMinPrefillBytes ? kMinPrefillBytes : need_bytes;
+    err = staged_host_alloc(&fresh.prefill_fp8, new_bytes, cudaHostAllocMapped | cudaHostAllocPortable);
+    if (err == cudaSuccess) err = staged_device_alias(&fresh.prefill_fp8_dev, fresh.prefill_fp8);
+    replaces_buffer = replaces_buffer || ws.prefill_fp8 != nullptr;
+  }
+  // The buffers being replaced may still be read by kernels of earlier calls: wait for them before they are freed.
+  if (err == cudaSuccess && replaces_buffer) err = staged_device_sync();
+  if (err != cudaSuccess) {
+    fresh.discard();
+    return err;
+  }
+
+  if (fresh.scalars) ws.scalars = fresh.scalars;
+  if (fresh.prep_ring) {
+    ws.prep_ring = fresh.prep_ring;
+    ws.prep_ring_dev = fresh.prep_ring_dev;
+  }
+  if (fresh.ngram_cache_data) {
+    ws.ngram_cache_data = fresh.ngram_cache_data;
     memset(ws.ngram_cache_valid, 0, sizeof(ws.ngram_cache_valid));
   }
-}
-
-static inline void ensure_prefill_workspace(StagedPleWorkspace& ws, size_t rows, size_t row_bytes) {
-  ensure_prep_workspace(ws);
-  if (rows > ws.prefill_cap_rows) {
-    if (ws.prefill_tokens) cudaFreeHost(ws.prefill_tokens);
-    size_t new_rows = rows < 4096 ? 4096 : rows;
-    cudaHostAlloc((void**)&ws.prefill_tokens, new_rows * sizeof(i64), cudaHostAllocPortable);
+  if (fresh.prefill_tokens) {
+    staged_host_free(ws.prefill_tokens);
+    ws.prefill_tokens = fresh.prefill_tokens;
     ws.prefill_cap_rows = new_rows;
   }
-  size_t need_bytes = rows * row_bytes;
-  if (need_bytes > ws.prefill_cap_bytes) {
-    if (ws.prefill_fp8) cudaFreeHost(ws.prefill_fp8);
-    size_t new_bytes = need_bytes < (4096ULL * 4096ULL) ? (4096ULL * 4096ULL) : need_bytes;
-    cudaHostAlloc((void**)&ws.prefill_fp8, new_bytes, cudaHostAllocMapped | cudaHostAllocPortable);
-    void* dev_ptr = nullptr;
-    if (cudaHostGetDevicePointer(&dev_ptr, ws.prefill_fp8, 0) == cudaSuccess && dev_ptr != nullptr) {
-      ws.prefill_fp8_dev = static_cast<unsigned char*>(dev_ptr);
-    } else {
-      cudaGetLastError();
-      ws.prefill_fp8_dev = ws.prefill_fp8;
-    }
+  if (fresh.prefill_fp8) {
+    staged_host_free(ws.prefill_fp8);
+    ws.prefill_fp8 = fresh.prefill_fp8;
+    ws.prefill_fp8_dev = fresh.prefill_fp8_dev;
     ws.prefill_cap_bytes = new_bytes;
   }
+  return cudaSuccess;
 }
 
 static inline void host_gather_ple_row(StagedPleWorkspace& ws, i64 tok, i64 s_c0, i64 s_c1, unsigned char* dst_fp8) {
+  hook_gather();
   const PleParams& HP = ws.params;
   const i64 c1 = s_c1;
   const i64 c0 = (c1 == HP.eos) ? HP.eos : s_c0;
@@ -207,9 +357,13 @@ static inline void host_gather_ple_row(StagedPleWorkspace& ws, i64 tok, i64 s_c0
   }
 }
 
+// Finds the staged workspace of the table `P` (a registered host key or the device copy of its parameters). Returns nullptr
+// for a table that is not staged; *out_unregistered_staged is set when `P` is staged but was never registered, and *out_error
+// when the device parameters could not be read back, in which case nothing may be launched for `P`.
 static StagedPleWorkspace* resolve_staged_ple_workspace(const void* P, cudaStream_t stream, bool allow_sync,
-                                                        bool* out_unregistered_staged) {
+                                                        bool* out_unregistered_staged, cudaError_t* out_error) {
   *out_unregistered_staged = false;
+  *out_error = cudaSuccess;
   if (g_host_ple_workspaces.empty() && !g_ever_had_staged_ple) {
     return nullptr;
   }
@@ -242,12 +396,12 @@ static StagedPleWorkspace* resolve_staged_ple_workspace(const void* P, cudaStrea
     return g_host_ple_workspaces.begin()->second.get();
   }
   PleParams dev_params{};
-  cudaError_t err = cudaMemcpyAsync(&dev_params, P, sizeof(PleParams), cudaMemcpyDefault, stream);
+  cudaError_t err = staged_copy_to_host(&dev_params, P, sizeof(PleParams), cudaMemcpyDefault, stream);
   if (err == cudaSuccess) {
-    err = cudaStreamSynchronize(stream);
+    err = staged_stream_sync(stream);
   }
   if (err != cudaSuccess) {
-    cudaGetLastError();
+    *out_error = err;
     return nullptr;
   }
   if (dev_params.pad_ == 1) {
@@ -714,12 +868,8 @@ __global__ void k_embed_rows(const __nv_bfloat16* table, const i64* ids, __nv_bf
 #define QWEN38_PLANE_EXPORT
 #endif
 
-extern "C" {
-QWEN38_PLANE_EXPORT int qwen38_plane_abi_version(void) { return QWEN38_PLANE_ABI_VERSION; }
-QWEN38_PLANE_EXPORT int qwen38_plane_sizeof_ple_params(void) { return (int)sizeof(PleParams); }
-
-QWEN38_PLANE_EXPORT void qwen38_plane_release_ple_workspace(void) {
-  std::lock_guard<std::mutex> lock(g_staged_ple_mu);
+// Drops every staged table of the module, whichever loader registered it. Caller holds g_staged_ple_mu.
+static void release_all_staged_state_locked() {
   bool need_sync = false;
   for (const auto& kv : g_host_ple_workspaces) {
     if (kv.second && kv.second->has_cuda_allocations()) {
@@ -739,6 +889,31 @@ QWEN38_PLANE_EXPORT void qwen38_plane_release_ple_workspace(void) {
   g_dev_to_host_ple.clear();
   g_last_staged_host_key = nullptr;
   g_ever_had_staged_ple = false;
+  hook_cleanup();
+}
+
+extern "C" {
+QWEN38_PLANE_EXPORT int qwen38_plane_abi_version(void) { return QWEN38_PLANE_ABI_VERSION; }
+QWEN38_PLANE_EXPORT int qwen38_plane_sizeof_ple_params(void) { return (int)sizeof(PleParams); }
+
+// The staged tables live in this module and the module is shared by every loader of the library file, so the state is
+// released by the last loader to detach, not by whichever loader is destroyed first.
+QWEN38_PLANE_EXPORT void qwen38_plane_attach(void) {
+  std::lock_guard<std::mutex> lock(g_staged_ple_mu);
+  ++g_attached_loaders;
+}
+
+QWEN38_PLANE_EXPORT void qwen38_plane_detach(void) {
+  std::lock_guard<std::mutex> lock(g_staged_ple_mu);
+  if (g_attached_loaders > 0 && --g_attached_loaders == 0) {
+    release_all_staged_state_locked();
+  }
+}
+
+// Explicit teardown of all staged tables of the module (every loader's); loaders do not call it from their destructors.
+QWEN38_PLANE_EXPORT void qwen38_plane_release_ple_workspace(void) {
+  std::lock_guard<std::mutex> lock(g_staged_ple_mu);
+  release_all_staged_state_locked();
 }
 
 QWEN38_PLANE_EXPORT void qwen38_plane_unset_ple_host_params(const void* params) {
@@ -790,21 +965,28 @@ QWEN38_PLANE_EXPORT void qwen38_plane_set_ple_host_params(const void* params) {
   }
 }
 
-QWEN38_PLANE_EXPORT void qwen38_plane_prep(void* s, const void* P, const void* tok_ptr, const void* pos_ptr, int pos_add, const void* ctx_in,
-                                           void* ctx_out, void* input_ids, void* position_ids, void* committed, void* past_pos,
-                                           void* ple_out, void* state) {
+QWEN38_PLANE_EXPORT int qwen38_plane_prep(void* s, const void* P, const void* tok_ptr, const void* pos_ptr, int pos_add, const void* ctx_in,
+                                          void* ctx_out, void* input_ids, void* position_ids, void* committed, void* past_pos,
+                                          void* ple_out, void* state) {
   {
     std::lock_guard<std::mutex> lock(g_staged_ple_mu);
     if (!g_host_ple_workspaces.empty() || g_ever_had_staged_ple) {
       cudaStream_t stream = (cudaStream_t)s;
       const bool allow_sync = !(pos_add >= 1 && pos_add <= 3 && state != nullptr);
       bool unregistered_staged = false;
-      StagedPleWorkspace* ws = resolve_staged_ple_workspace(P, stream, allow_sync, &unregistered_staged);
+      cudaError_t err = cudaSuccess;
+      StagedPleWorkspace* ws = resolve_staged_ple_workspace(P, stream, allow_sync, &unregistered_staged, &err);
+      if (err != cudaSuccess) {
+        return (int)err;
+      }
       if (unregistered_staged) {
-        return;
+        return (int)cudaErrorInvalidValue;
       }
       if (ws != nullptr) {
-        ensure_prep_workspace(*ws);
+        err = ensure_staged_buffers(*ws, 0, 0);
+        if (err != cudaSuccess) {
+          return (int)err;
+        }
         const i64* state_i64 = (const i64*)state;
         i64 tok = 0, pos = 0, s_c0 = 0, s_c1 = 0;
         const i64* expected_fold_tok_ptr =
@@ -828,9 +1010,19 @@ QWEN38_PLANE_EXPORT void qwen38_plane_prep(void* s, const void* P, const void* t
         } else if (pos_add == 0 && state != nullptr && tok_ptr == state_i64 && pos_ptr == (state_i64 + 1)) {
           // Row 0 of EnqueueFold / EnqueueVerify / EnqueueStep: copy all 10 words of `ctl` (`ctl[0..9]`)
           // plus `ctx_in[0..1]` in one batch so subsequent draft rows 1..3 need no stream synchronization.
-          cudaMemcpyAsync(&ws->scalars[0], state_i64, 10 * sizeof(i64), cudaMemcpyDeviceToHost, stream);
-          cudaMemcpyAsync(&ws->scalars[10], ctx_in, 2 * sizeof(i64), cudaMemcpyDeviceToHost, stream);
-          cudaStreamSynchronize(stream);
+          err = staged_copy_to_host(&ws->scalars[0], state_i64, 10 * sizeof(i64), cudaMemcpyDeviceToHost, stream);
+          if (err == cudaSuccess) {
+            err = staged_copy_to_host(&ws->scalars[10], ctx_in, 2 * sizeof(i64), cudaMemcpyDeviceToHost, stream);
+          }
+          if (err == cudaSuccess) {
+            err = staged_stream_sync(stream);
+          }
+          if (err != cudaSuccess) {
+            // The snapshot may be half written: rows 1..3 must not reuse it.
+            ws->cached_state_ptr = nullptr;
+            ws->cached_ctx_out_ptr = nullptr;
+            return (int)err;
+          }
           tok = ws->scalars[0];
           pos = ws->scalars[1];
           s_c0 = ws->scalars[10];
@@ -842,10 +1034,19 @@ QWEN38_PLANE_EXPORT void qwen38_plane_prep(void* s, const void* P, const void* t
         } else {
           ws->cached_state_ptr = nullptr;
           ws->cached_ctx_out_ptr = nullptr;
-          cudaMemcpyAsync(&ws->scalars[0], tok_ptr, sizeof(i64), cudaMemcpyDeviceToHost, stream);
-          cudaMemcpyAsync(&ws->scalars[1], pos_ptr, sizeof(i64), cudaMemcpyDeviceToHost, stream);
-          cudaMemcpyAsync(&ws->scalars[2], ctx_in, 2 * sizeof(i64), cudaMemcpyDeviceToHost, stream);
-          cudaStreamSynchronize(stream);
+          err = staged_copy_to_host(&ws->scalars[0], tok_ptr, sizeof(i64), cudaMemcpyDeviceToHost, stream);
+          if (err == cudaSuccess) {
+            err = staged_copy_to_host(&ws->scalars[1], pos_ptr, sizeof(i64), cudaMemcpyDeviceToHost, stream);
+          }
+          if (err == cudaSuccess) {
+            err = staged_copy_to_host(&ws->scalars[2], ctx_in, 2 * sizeof(i64), cudaMemcpyDeviceToHost, stream);
+          }
+          if (err == cudaSuccess) {
+            err = staged_stream_sync(stream);
+          }
+          if (err != cudaSuccess) {
+            return (int)err;
+          }
           tok = ws->scalars[0];
           pos = ws->scalars[1] + pos_add;
           s_c0 = ws->scalars[2];
@@ -853,19 +1054,21 @@ QWEN38_PLANE_EXPORT void qwen38_plane_prep(void* s, const void* P, const void* t
         }
         const size_t slot_offset = (size_t)(ws->ring_idx++ & 63u) * 8192u;
         unsigned char* slot_host = ws->prep_ring + slot_offset;
-        const unsigned char* slot_dev = (ws->prep_ring_dev ? ws->prep_ring_dev : ws->prep_ring) + slot_offset;
+        const unsigned char* slot_dev = ws->prep_ring_dev + slot_offset;
         host_gather_ple_row(*ws, tok, s_c0, s_c1, slot_host);
+        hook_launch();
         k_prep_staged<<<1, 1024, 0, stream>>>(ws->params.capacity, ws->params.n_heads, ws->params.head_dim,
                                               ws->params.scale, tok, pos, s_c1, slot_dev, (i64*)ctx_out,
                                               (i64*)input_ids, (i64*)position_ids, (int*)committed, (i64*)past_pos,
                                               (__nv_bfloat16*)ple_out, (i64*)state);
-        return;
+        return 0;
       }
     }
   }
   k_prep<<<1, 1024, 0, (cudaStream_t)s>>>((const PleParams*)P, (const i64*)tok_ptr, (const i64*)pos_ptr, pos_add,
                                           (const i64*)ctx_in, (i64*)ctx_out, (i64*)input_ids, (i64*)position_ids,
                                           (int*)committed, (i64*)past_pos, (__nv_bfloat16*)ple_out, (i64*)state);
+  return 0;
 }
 
 QWEN38_PLANE_EXPORT void qwen38_plane_argmax_part(void* s, const void* logits, int n, void* outv, void* outi, int nblocks) {
@@ -899,24 +1102,38 @@ QWEN38_PLANE_EXPORT void qwen38_plane_or_status(void* s, const void* st, int nst
 }
 
 /* ---- fast prefill kernels: batched PLE rows, dense -> packed state hand-off ---- */
-QWEN38_PLANE_EXPORT void qwen38_plane_ple_rows(void* s, const void* P, const void* tokens, int n, const void* ctx_in, void* ctx_out,
-                                               void* ple_out) {
-  if (n <= 0) return;
+QWEN38_PLANE_EXPORT int qwen38_plane_ple_rows(void* s, const void* P, const void* tokens, int n, const void* ctx_in, void* ctx_out,
+                                              void* ple_out) {
+  if (n <= 0) return 0;
   {
     std::lock_guard<std::mutex> lock(g_staged_ple_mu);
     if (!g_host_ple_workspaces.empty() || g_ever_had_staged_ple) {
       cudaStream_t stream = (cudaStream_t)s;
       bool unregistered_staged = false;
-      StagedPleWorkspace* ws = resolve_staged_ple_workspace(P, stream, /*allow_sync=*/true, &unregistered_staged);
+      cudaError_t err = cudaSuccess;
+      StagedPleWorkspace* ws = resolve_staged_ple_workspace(P, stream, /*allow_sync=*/true, &unregistered_staged, &err);
+      if (err != cudaSuccess) {
+        return (int)err;
+      }
       if (unregistered_staged) {
-        return;
+        return (int)cudaErrorInvalidValue;
       }
       if (ws != nullptr) {
         const size_t total = (size_t)ws->params.n_heads * (size_t)ws->params.head_dim;
-        ensure_prefill_workspace(*ws, (size_t)n, total);
-        cudaMemcpyAsync(ws->prefill_tokens, tokens, (size_t)n * sizeof(i64), cudaMemcpyDeviceToHost, stream);
-        cudaMemcpyAsync(&ws->scalars[2], ctx_in, 2 * sizeof(i64), cudaMemcpyDeviceToHost, stream);
-        cudaStreamSynchronize(stream);
+        err = ensure_staged_buffers(*ws, (size_t)n, total);
+        if (err != cudaSuccess) {
+          return (int)err;
+        }
+        err = staged_copy_to_host(ws->prefill_tokens, tokens, (size_t)n * sizeof(i64), cudaMemcpyDeviceToHost, stream);
+        if (err == cudaSuccess) {
+          err = staged_copy_to_host(&ws->scalars[2], ctx_in, 2 * sizeof(i64), cudaMemcpyDeviceToHost, stream);
+        }
+        if (err == cudaSuccess) {
+          err = staged_stream_sync(stream);
+        }
+        if (err != cudaSuccess) {
+          return (int)err;
+        }
         const i64* h_toks = ws->prefill_tokens;
         const i64 ctx0 = ws->scalars[2];
         const i64 ctx1 = ws->scalars[3];
@@ -928,15 +1145,17 @@ QWEN38_PLANE_EXPORT void qwen38_plane_ple_rows(void* s, const void* P, const voi
         }
         const i64 last_tok = h_toks[n - 1];
         const i64 last_c1 = n >= 2 ? h_toks[n - 2] : ctx1;
-        const unsigned char* fp8_dev = ws->prefill_fp8_dev ? ws->prefill_fp8_dev : ws->prefill_fp8;
-        k_ple_rows_staged<<<n, 1024, 0, stream>>>(ws->params.n_heads, ws->params.head_dim, ws->params.scale, fp8_dev, n,
-                                                  last_c1, last_tok, (i64*)ctx_out, (__nv_bfloat16*)ple_out);
-        return;
+        hook_launch();
+        k_ple_rows_staged<<<n, 1024, 0, stream>>>(ws->params.n_heads, ws->params.head_dim, ws->params.scale,
+                                                  ws->prefill_fp8_dev, n, last_c1, last_tok, (i64*)ctx_out,
+                                                  (__nv_bfloat16*)ple_out);
+        return 0;
       }
     }
   }
   k_ple_rows<<<n, 1024, 0, (cudaStream_t)s>>>((const PleParams*)P, (const i64*)tokens, n, (const i64*)ctx_in, (i64*)ctx_out,
                                               (__nv_bfloat16*)ple_out);
+  return 0;
 }
 
 QWEN38_PLANE_EXPORT void qwen38_plane_pool_keys(void* s, const void* raw, int nb, const void* knorm, const void* cosv, const void* sinv,
@@ -1014,4 +1233,36 @@ QWEN38_PLANE_EXPORT int qwen38_plane_memcpy2d_d2d(void* dst, size_t dpitch, cons
 QWEN38_PLANE_EXPORT int qwen38_plane_stream_create(void** s) { return (int)cudaStreamCreateWithFlags((cudaStream_t*)s, cudaStreamNonBlocking); }
 QWEN38_PLANE_EXPORT int qwen38_plane_stream_destroy(void* s) { return (int)cudaStreamDestroy((cudaStream_t)s); }
 QWEN38_PLANE_EXPORT int qwen38_plane_stream_sync(void* s) { return (int)cudaStreamSynchronize((cudaStream_t)s); }
+
+#ifdef QWEN38_PLANE_TEST_HOOKS
+QWEN38_PLANE_EXPORT int qwen38_plane_test_inject_staged_fault(int site, int skip, int error) {
+  const bool disarm = site == QWEN38_PLANE_FAULT_NONE;
+  if (site < QWEN38_PLANE_FAULT_NONE || site > QWEN38_PLANE_FAULT_SYNC || (!disarm && error == 0)) {
+    return (int)cudaErrorInvalidValue;
+  }
+  std::lock_guard<std::mutex> lock(g_staged_ple_mu);
+  g_test_hooks.fault_site = site;
+  g_test_hooks.fault_skip = skip < 0 ? 0 : skip;
+  g_test_hooks.fault_error = error;
+  return 0;
+}
+
+QWEN38_PLANE_EXPORT int qwen38_plane_test_stats(Qwen38PlaneTestStats* stats) {
+  if (stats == nullptr) return (int)cudaErrorInvalidValue;
+  std::lock_guard<std::mutex> lock(g_staged_ple_mu);
+  long long capacity_rows = 0;
+  for (const auto& kv : g_host_ple_workspaces) {
+    if (kv.second) capacity_rows += (long long)kv.second->prefill_cap_rows;
+  }
+  stats->gather_rows = g_test_hooks.gather_rows;
+  stats->staged_launches = g_test_hooks.staged_launches;
+  stats->global_cleanups = g_test_hooks.global_cleanups;
+  stats->live_pinned_allocations = g_test_hooks.live_pinned;
+  stats->prefill_capacity_rows = capacity_rows;
+  stats->staged_tables = (long long)g_host_ple_workspaces.size();
+  stats->attached_loaders = g_attached_loaders;
+  stats->fault_armed = g_test_hooks.fault_site != QWEN38_PLANE_FAULT_NONE ? 1 : 0;
+  return 0;
+}
+#endif
 }

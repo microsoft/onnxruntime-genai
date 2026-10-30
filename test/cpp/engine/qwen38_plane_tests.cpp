@@ -1,16 +1,31 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include <gtest/gtest.h>
 
 #include "models/qwen38_graph_plane.h"
+
+#if !defined(QWEN38_GRAPH_NO_POSIX)
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
+#endif
 
 namespace Generators::test {
 
@@ -360,8 +375,8 @@ TEST(Qwen38PlaneTest, PlaneKernelsHandleEmptyAndNonMultipleOf32Dimensions) {
   plane.Check(plane.stream_create(&stream), "stream_create");
 
   // Empty batch calls (n <= 0 / batch <= 0) must be no-ops without launching a 0-block grid.
-  plane.ple_rows(stream, nullptr, nullptr, 0, nullptr, nullptr, nullptr);
-  plane.ple_rows(stream, nullptr, nullptr, -1, nullptr, nullptr, nullptr);
+  EXPECT_EQ(plane.ple_rows(stream, nullptr, nullptr, 0, nullptr, nullptr, nullptr), 0);
+  EXPECT_EQ(plane.ple_rows(stream, nullptr, nullptr, -1, nullptr, nullptr, nullptr), 0);
   plane.transpose_f32(stream, nullptr, nullptr, 0, 1);
   plane.transpose_f32(stream, nullptr, nullptr, 16, 0);
   if (plane.embed_rows) {
@@ -467,8 +482,8 @@ TEST(Qwen38PlaneTest, StagedPleIsolatesMultipleTablesIgnoresUnrelatedMemcpyAndTe
   plane.Check(plane.memcpy_h2d(d_ctx_in.data(), h_ctx_in, sizeof(h_ctx_in), stream), "ctx_in");
 
   // Both tables must gather from their own shard and cache independently despite p2 being registered second.
-  plane.ple_rows(stream, d_p1.data(), d_tokens.data(), 2, d_ctx_in.data(), d_ctx_out.data(), d_out1.data());
-  plane.ple_rows(stream, d_p2.data(), d_tokens.data(), 2, d_ctx_in.data(), d_ctx_out.data(), d_out2.data());
+  EXPECT_EQ(plane.ple_rows(stream, d_p1.data(), d_tokens.data(), 2, d_ctx_in.data(), d_ctx_out.data(), d_out1.data()), 0);
+  EXPECT_EQ(plane.ple_rows(stream, d_p2.data(), d_tokens.data(), 2, d_ctx_in.data(), d_ctx_out.data(), d_out2.data()), 0);
 
   std::vector<uint16_t> out1(8, 0), out2(8, 0);
   plane.Check(plane.memcpy_d2h(out1.data(), d_out1.data(), out1.size() * sizeof(uint16_t), stream), "d2h out1");
@@ -481,7 +496,7 @@ TEST(Qwen38PlaneTest, StagedPleIsolatesMultipleTablesIgnoresUnrelatedMemcpyAndTe
   // Updating p1 in-place and re-registering must invalidate p1's N-gram row cache.
   std::fill(shard1.begin(), shard1.end(), 0x40u);  // 2.0f * scale(1.0f) -> bf16 2.0f (0x4000)
   plane.set_ple_host_params(&p1);
-  plane.ple_rows(stream, d_p1.data(), d_tokens.data(), 2, d_ctx_in.data(), d_ctx_out.data(), d_out1.data());
+  EXPECT_EQ(plane.ple_rows(stream, d_p1.data(), d_tokens.data(), 2, d_ctx_in.data(), d_ctx_out.data(), d_out1.data()), 0);
   plane.Check(plane.memcpy_d2h(out1.data(), d_out1.data(), out1.size() * sizeof(uint16_t), stream), "d2h out1 updated");
   plane.Check(plane.stream_sync(stream), "sync updated");
   for (uint16_t v : out1) EXPECT_EQ(v, 0x4000u);  // bf16(2.0f)
@@ -491,7 +506,7 @@ TEST(Qwen38PlaneTest, StagedPleIsolatesMultipleTablesIgnoresUnrelatedMemcpyAndTe
     plane.unset_ple_host_params(&p2);
   }
   std::fill(out1.begin(), out1.end(), 0);
-  plane.ple_rows(stream, d_p1.data(), d_tokens.data(), 2, d_ctx_in.data(), d_ctx_out.data(), d_out1.data());
+  EXPECT_EQ(plane.ple_rows(stream, d_p1.data(), d_tokens.data(), 2, d_ctx_in.data(), d_ctx_out.data(), d_out1.data()), 0);
   plane.Check(plane.memcpy_d2h(out1.data(), d_out1.data(), out1.size() * sizeof(uint16_t), stream), "d2h out1 after unset");
   plane.Check(plane.stream_sync(stream), "sync after unset");
   for (uint16_t v : out1) EXPECT_EQ(v, 0x4000u);
@@ -501,6 +516,669 @@ TEST(Qwen38PlaneTest, StagedPleIsolatesMultipleTablesIgnoresUnrelatedMemcpyAndTe
   }
   plane.stream_destroy(stream);
 }
+
+namespace {
+
+constexpr int kCudaErrorInvalidValue = 1;
+
+// Keeps the plane library loaded independently of the Qwen38Plane objects that load it, and gives access to the test hooks the
+// library exports when it is built with QWEN38_PLANE_TEST_HOOKS (see qwen38_plane_abi.h). The library holds process-wide state,
+// the staged PLE tables; holding it open is what lets a test look at that state after the loaders that used it are gone.
+class PlaneModuleReference {
+ public:
+  explicit PlaneModuleReference(const std::filesystem::path& path) {
+#if defined(_WIN32)
+    handle_ = LoadLibraryW(ResolveWindowsSharedLibraryPath(path).wstring().c_str());
+#else
+    handle_ = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+#endif
+    if (handle_ != nullptr) {
+      inject_fault_ = Symbol<Qwen38PlaneTestInjectFaultFn>("qwen38_plane_test_inject_staged_fault");
+      stats_ = Symbol<Qwen38PlaneTestStatsFn>("qwen38_plane_test_stats");
+    }
+  }
+
+  ~PlaneModuleReference() {
+    if (handle_ == nullptr) return;
+#if defined(_WIN32)
+    FreeLibrary(static_cast<HMODULE>(handle_));
+#else
+    dlclose(handle_);
+#endif
+  }
+
+  PlaneModuleReference(const PlaneModuleReference&) = delete;
+  PlaneModuleReference& operator=(const PlaneModuleReference&) = delete;
+
+  bool HasHooks() const { return inject_fault_ != nullptr && stats_ != nullptr; }
+
+  // The (skip + 1)-th execution of `site` from now on fails once with `error`.
+  void Arm(Qwen38PlaneFaultSite site, int skip, int error) const { EXPECT_EQ(inject_fault_(site, skip, error), 0); }
+
+  void Disarm() const { inject_fault_(QWEN38_PLANE_FAULT_NONE, 0, 0); }
+
+  Qwen38PlaneTestStats Stats() const {
+    Qwen38PlaneTestStats stats{};
+    EXPECT_EQ(stats_(&stats), 0);
+    return stats;
+  }
+
+ private:
+  template <typename Function>
+  Function Symbol(const char* name) const {
+#if defined(_WIN32)
+    return reinterpret_cast<Function>(GetProcAddress(static_cast<HMODULE>(handle_), name));
+#else
+    return reinterpret_cast<Function>(dlsym(handle_, name));
+#endif
+  }
+
+  void* handle_{};
+  Qwen38PlaneTestInjectFaultFn inject_fault_{};
+  Qwen38PlaneTestStatsFn stats_{};
+};
+
+class PlaneStream {
+ public:
+  explicit PlaneStream(Qwen38Plane& plane) : plane_{plane} {
+    plane_.Check(plane_.stream_create(&stream_), "stream_create");
+  }
+  ~PlaneStream() { plane_.stream_destroy(stream_); }
+  PlaneStream(const PlaneStream&) = delete;
+  PlaneStream& operator=(const PlaneStream&) = delete;
+
+  void* get() const { return stream_; }
+
+ private:
+  Qwen38Plane& plane_;
+  void* stream_{};
+};
+
+// FP8 E4M3 codes of 1, 2, 3 and 4 and the bf16 bit patterns they dequantize to at a scale of 1.
+constexpr std::array<unsigned char, 4> kAscendingRows = {0x38, 0x40, 0x44, 0x48};
+constexpr std::array<unsigned char, 4> kDescendingRows = {0x48, 0x44, 0x40, 0x38};
+
+uint16_t Bf16OfFp8(unsigned char code) {
+  switch (code) {
+    case 0x38:
+      return 0x3F80;
+    case 0x40:
+      return 0x4000;
+    case 0x44:
+      return 0x4040;
+    default:
+      return 0x4080;
+  }
+}
+
+// A staged PLE table (Qwen38PleParams::pad_ == 1: its FP8 rows stay in host memory and the module gathers them there)
+// registered with a plane, and the device buffers to call ple_rows and prep on it. The table has one head and four rows of four
+// values, and only the token takes part in the n-gram hash, so token t gathers row t % 4. Row r holds the FP8 code row_codes[r].
+class StagedPleRig {
+ public:
+  static constexpr size_t kRows = 4;
+  static constexpr size_t kRowWidth = 4;
+  static constexpr size_t kMaxTokens = 4200;
+  static constexpr size_t kPositions = 16;  // the table's capacity: how many positions past_pos has room for
+  static constexpr size_t kStateWords = 10;
+
+  StagedPleRig(Qwen38Plane& plane, const std::array<unsigned char, kRows>& row_codes)
+      : plane_{plane},
+        codes_{row_codes},
+        stream_{plane},
+        d_params_{plane, sizeof(Qwen38PleParams), stream_.get()},
+        d_tokens_{plane, kMaxTokens * sizeof(int64_t), stream_.get()},
+        d_ctx_in_{plane, 2 * sizeof(int64_t), stream_.get()},
+        d_ctx_out_{plane, 2 * sizeof(int64_t), stream_.get()},
+        d_out_{plane, kMaxTokens * kRowWidth * sizeof(uint16_t), stream_.get()},
+        d_tok_{plane, sizeof(int64_t), stream_.get()},
+        d_pos_{plane, sizeof(int64_t), stream_.get()},
+        d_state_{plane, kStateWords * sizeof(int64_t), stream_.get()},
+        d_input_ids_{plane, sizeof(int64_t), stream_.get()},
+        d_position_ids_{plane, sizeof(int64_t), stream_.get()},
+        d_committed_{plane, sizeof(int), stream_.get()},
+        d_past_pos_{plane, kPositions * sizeof(int64_t), stream_.get()} {
+    for (size_t row = 0; row < kRows; ++row) {
+      std::fill_n(shard_.begin() + row * kRowWidth, kRowWidth, codes_[row]);
+    }
+    params_.n_heads = 1;
+    params_.head_dim = static_cast<int>(kRowWidth);
+    params_.heads_per_ngram = 1;
+    params_.n_shards = 1;
+    params_.mult[0] = 1;
+    params_.vocab[0] = static_cast<long long>(kRows);
+    params_.shard_end[0] = static_cast<long long>(kRows);
+    params_.shard_ptr[0] = shard_.data();
+    params_.scale = 1.0f;
+    params_.pad_ = 1;
+    params_.eos = 99;
+    params_.capacity = static_cast<long long>(kPositions);
+    Upload(d_params_, &params_, sizeof(params_));
+    plane_.set_ple_host_params(&params_);
+  }
+
+  ~StagedPleRig() {
+    if (unregister_on_destruction_) plane_.unset_ple_host_params(&params_);
+  }
+
+  StagedPleRig(const StagedPleRig&) = delete;
+  StagedPleRig& operator=(const StagedPleRig&) = delete;
+
+  const Qwen38PleParams& params() const { return params_; }
+  const void* device_params() const { return d_params_.data(); }
+  void* stream() const { return stream_.get(); }
+
+  // Leaves the table registered with the module when the rig goes away, as a loader that never unregistered it would.
+  void KeepTableRegisteredOnDestruction() { unregister_on_destruction_ = false; }
+
+  // Registers the table afresh, which gives it an empty staged workspace.
+  void ResetTable() {
+    plane_.unset_ple_host_params(&params_);
+    plane_.set_ple_host_params(&params_);
+  }
+
+  PlaneBuffer DeviceCopy(const Qwen38PleParams& params) {
+    PlaneBuffer copy{plane_, sizeof(params), stream_.get()};
+    Upload(copy, &params, sizeof(params));
+    return copy;
+  }
+
+  int PleRows(const std::vector<int64_t>& tokens) {
+    Upload(d_tokens_, tokens.data(), tokens.size() * sizeof(int64_t));
+    return PleRowsOn(device_params(), d_tokens_.data(), tokens.size());
+  }
+
+  int PleRowsOn(const void* params, const void* tokens, size_t count) {
+    return plane_.ple_rows(stream_.get(), params, tokens, static_cast<int>(count), d_ctx_in_.data(), d_ctx_out_.data(),
+                           d_out_.data());
+  }
+
+  // prep with the token and the position in words of their own.
+  int PrepGeneric(int64_t token, int64_t position, int pos_add, const void* params = nullptr) {
+    Upload(d_tok_, &token, sizeof(token));
+    Upload(d_pos_, &position, sizeof(position));
+    return Prep(params, d_tok_.data(), d_pos_.data(), pos_add, d_ctx_in_.data());
+  }
+
+  // prep for row 0 of a fold: the token and the position are words 0 and 1 of the ten-word state, which also holds the tokens
+  // of the other rows.
+  int PrepRowZero(const std::array<int64_t, kStateWords>& state) {
+    Upload(d_state_, state.data(), sizeof(state));
+    return Prep(nullptr, d_state_.data(), d_state_.data() + sizeof(int64_t), 0, d_ctx_in_.data());
+  }
+
+  // prep for row 1..3 of the fold whose row 0 ran last: its context in is the previous row's context out.
+  int PrepFoldRow(int pos_add) {
+    const size_t token_word = pos_add == 1 ? 2 : (pos_add == 2 ? 8 : 9);
+    return Prep(nullptr, d_state_.data() + token_word * sizeof(int64_t), d_state_.data() + sizeof(int64_t), pos_add,
+                d_ctx_out_.data());
+  }
+
+  void FillOutputs(int byte) {
+    for (const PlaneBuffer* buffer : Outputs()) {
+      plane_.Check(plane_.device_memset(buffer->data(), byte, buffer->size(), stream_.get()), "device_memset");
+    }
+    Sync();
+  }
+
+  bool OutputsAre(uint8_t byte) {
+    for (const PlaneBuffer* buffer : Outputs()) {
+      for (uint8_t value : Read<uint8_t>(*buffer, buffer->size())) {
+        if (value != byte) return false;
+      }
+    }
+    return true;
+  }
+
+  std::vector<uint16_t> ReadPle(size_t tokens) { return Read<uint16_t>(d_out_, tokens * kRowWidth); }
+
+  std::vector<uint16_t> ExpectedPle(const std::vector<int64_t>& tokens) const {
+    std::vector<uint16_t> expected;
+    for (int64_t token : tokens) {
+      expected.insert(expected.end(), kRowWidth, Bf16OfFp8(codes_[static_cast<size_t>(token) % kRows]));
+    }
+    return expected;
+  }
+
+  // What prep has to produce for `token` at `position`: the graph row inputs, its PLE row and the next context, whose first
+  // word is `c1`, the token before it.
+  void ExpectPrepResult(int64_t token, int64_t position, int64_t c1) {
+    EXPECT_EQ(Read<int64_t>(d_input_ids_, 1)[0], token);
+    EXPECT_EQ(Read<int64_t>(d_position_ids_, 1)[0], position);
+    EXPECT_EQ(Read<int>(d_committed_, 1)[0], position);
+    EXPECT_EQ(Read<int64_t>(d_past_pos_, kPositions)[static_cast<size_t>(position)], position);
+    EXPECT_EQ(Read<int64_t>(d_ctx_out_, 2), (std::vector<int64_t>{c1, token}));
+    EXPECT_EQ(ReadPle(1), ExpectedPle({token}));
+  }
+
+ private:
+  int Prep(const void* params, const void* tok_ptr, const void* pos_ptr, int pos_add, const void* ctx_in) {
+    return plane_.prep(stream_.get(), params != nullptr ? params : device_params(), tok_ptr, pos_ptr, pos_add, ctx_in,
+                       d_ctx_out_.data(), d_input_ids_.data(), d_position_ids_.data(), d_committed_.data(),
+                       d_past_pos_.data(), d_out_.data(), d_state_.data());
+  }
+
+  std::array<const PlaneBuffer*, 6> Outputs() const {
+    return {&d_out_, &d_ctx_out_, &d_input_ids_, &d_position_ids_, &d_committed_, &d_past_pos_};
+  }
+
+  void Upload(const PlaneBuffer& buffer, const void* host, size_t bytes) {
+    plane_.Check(plane_.memcpy_h2d(buffer.data(), host, bytes, stream_.get()), "memcpy_h2d");
+  }
+
+  void Sync() { plane_.Check(plane_.stream_sync(stream_.get()), "stream_sync"); }
+
+  template <typename T>
+  std::vector<T> Read(const PlaneBuffer& buffer, size_t count) {
+    std::vector<T> values(count);
+    plane_.Check(plane_.memcpy_d2h(values.data(), buffer.data(), count * sizeof(T), stream_.get()), "memcpy_d2h");
+    Sync();
+    return values;
+  }
+
+  Qwen38Plane& plane_;
+  std::array<unsigned char, kRows> codes_;
+  PlaneStream stream_;
+  std::array<unsigned char, kRows * kRowWidth> shard_{};
+  Qwen38PleParams params_{};
+  bool unregister_on_destruction_{true};
+  PlaneBuffer d_params_, d_tokens_, d_ctx_in_, d_ctx_out_, d_out_;
+  PlaneBuffer d_tok_, d_pos_, d_state_, d_input_ids_, d_position_ids_, d_committed_, d_past_pos_;
+};
+
+// One CUDA step of the staged path that a test makes fail: the (skip + 1)-th execution of `site` in the call.
+struct StagingStep {
+  const char* name;
+  Qwen38PlaneFaultSite site;
+  int skip;
+  bool buffers_published;  // the staging buffers already belong to the workspace when this step runs
+};
+
+// The CUDA steps of the first call made on a table, in the order the module runs them.
+std::vector<StagingStep> PleRowsSteps() {
+  return {
+      {"read the table back from the device", QWEN38_PLANE_FAULT_COPY, 0, false},
+      {"wait for the table read back", QWEN38_PLANE_FAULT_SYNC, 0, false},
+      {"allocate the scalar words", QWEN38_PLANE_FAULT_HOST_ALLOC, 0, false},
+      {"allocate the prep ring", QWEN38_PLANE_FAULT_HOST_ALLOC, 1, false},
+      {"map the prep ring", QWEN38_PLANE_FAULT_DEVICE_ALIAS, 0, false},
+      {"allocate the n-gram row cache", QWEN38_PLANE_FAULT_HOST_MALLOC, 0, false},
+      {"allocate the token buffer", QWEN38_PLANE_FAULT_HOST_ALLOC, 2, false},
+      {"allocate the FP8 row buffer", QWEN38_PLANE_FAULT_HOST_ALLOC, 3, false},
+      {"map the FP8 row buffer", QWEN38_PLANE_FAULT_DEVICE_ALIAS, 1, false},
+      {"copy the tokens", QWEN38_PLANE_FAULT_COPY, 1, true},
+      {"copy the context", QWEN38_PLANE_FAULT_COPY, 2, true},
+      {"wait for the copies", QWEN38_PLANE_FAULT_SYNC, 1, true},
+  };
+}
+
+std::vector<StagingStep> PrepGenericSteps() {
+  return {
+      {"read the table back from the device", QWEN38_PLANE_FAULT_COPY, 0, false},
+      {"wait for the table read back", QWEN38_PLANE_FAULT_SYNC, 0, false},
+      {"allocate the scalar words", QWEN38_PLANE_FAULT_HOST_ALLOC, 0, false},
+      {"allocate the prep ring", QWEN38_PLANE_FAULT_HOST_ALLOC, 1, false},
+      {"map the prep ring", QWEN38_PLANE_FAULT_DEVICE_ALIAS, 0, false},
+      {"allocate the n-gram row cache", QWEN38_PLANE_FAULT_HOST_MALLOC, 0, false},
+      {"copy the token", QWEN38_PLANE_FAULT_COPY, 1, true},
+      {"copy the position", QWEN38_PLANE_FAULT_COPY, 2, true},
+      {"copy the context", QWEN38_PLANE_FAULT_COPY, 3, true},
+      {"wait for the copies", QWEN38_PLANE_FAULT_SYNC, 1, true},
+  };
+}
+
+std::vector<StagingStep> PrepRowZeroSteps() {
+  return {
+      {"read the table back from the device", QWEN38_PLANE_FAULT_COPY, 0, false},
+      {"wait for the table read back", QWEN38_PLANE_FAULT_SYNC, 0, false},
+      {"allocate the scalar words", QWEN38_PLANE_FAULT_HOST_ALLOC, 0, false},
+      {"allocate the prep ring", QWEN38_PLANE_FAULT_HOST_ALLOC, 1, false},
+      {"map the prep ring", QWEN38_PLANE_FAULT_DEVICE_ALIAS, 0, false},
+      {"allocate the n-gram row cache", QWEN38_PLANE_FAULT_HOST_MALLOC, 0, false},
+      {"copy the ctl words", QWEN38_PLANE_FAULT_COPY, 1, true},
+      {"copy the context", QWEN38_PLANE_FAULT_COPY, 2, true},
+      {"wait for the copies", QWEN38_PLANE_FAULT_SYNC, 1, true},
+  };
+}
+
+// A call that is made on a table with an empty staged workspace, which has to stage everything from scratch.
+struct ColdCall {
+  std::function<int()> run;
+  std::function<void()> expect_result;  // checks the outputs of a successful run
+  long long pinned_buffers;             // pinned staging buffers a successful run leaves in the workspace
+  long long capacity_rows;              // prefill capacity it leaves
+  long long gathered_rows;
+};
+
+class Qwen38PlaneStagedPleTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    library_path_ = GetBuiltPlaneLibraryPath();
+    if (!std::filesystem::exists(library_path_)) {
+      GTEST_SKIP() << library_path_.string() << " not present";
+    }
+    module_ = std::make_unique<PlaneModuleReference>(library_path_);
+    if (!module_->HasHooks()) {
+      GTEST_SKIP() << "the plane library was built without QWEN38_PLANE_TEST_HOOKS";
+    }
+    plane_ = std::make_unique<Qwen38Plane>(library_path_);
+    if (plane_->set_device(0) != 0 || !plane_->set_ple_host_params || !plane_->unset_ple_host_params) {
+      GTEST_SKIP() << "No CUDA device or staged PLE support available";
+    }
+  }
+
+  void TearDown() override {
+    if (module_ && module_->HasHooks()) module_->Disarm();
+    plane_.reset();
+  }
+
+  Qwen38PlaneTestStats Stats() const { return module_->Stats(); }
+  void Arm(Qwen38PlaneFaultSite site, int skip, int error) const { module_->Arm(site, skip, error); }
+
+  // Makes each of `steps` fail in turn on a first call and checks that the call returns exactly the injected error, runs no
+  // gather or kernel and writes no output, that the staged workspace keeps nothing of the steps that had succeeded (the
+  // buffers are all allocated or none is, and the capacity is only recorded with them), and that the same call then works.
+  void ExpectEveryStagingStepFailsCleanly(StagedPleRig& rig, const std::vector<StagingStep>& steps, const ColdCall& call) {
+    int index = 0;
+    for (const StagingStep& step : steps) {
+      SCOPED_TRACE(step.name);
+      // Not a CUDA error code: only the failed step can have produced it.
+      const int error = 1000 + index++;
+      rig.ResetTable();
+      rig.FillOutputs(0xAB);
+      const Qwen38PlaneTestStats before = Stats();
+
+      Arm(step.site, step.skip, error);
+      EXPECT_EQ(call.run(), error);
+      const Qwen38PlaneTestStats failed = Stats();
+      EXPECT_EQ(failed.fault_armed, 0) << "the injected fault never fired";
+      EXPECT_EQ(failed.gather_rows, before.gather_rows);
+      EXPECT_EQ(failed.staged_launches, before.staged_launches);
+      EXPECT_TRUE(rig.OutputsAre(0xAB));
+      EXPECT_EQ(failed.live_pinned_allocations,
+                before.live_pinned_allocations + (step.buffers_published ? call.pinned_buffers : 0));
+      EXPECT_EQ(failed.prefill_capacity_rows, step.buffers_published ? call.capacity_rows : 0);
+
+      EXPECT_EQ(call.run(), 0);
+      const Qwen38PlaneTestStats retried = Stats();
+      EXPECT_EQ(retried.gather_rows, before.gather_rows + call.gathered_rows);
+      EXPECT_EQ(retried.staged_launches, before.staged_launches + 1);
+      EXPECT_EQ(retried.live_pinned_allocations, before.live_pinned_allocations + call.pinned_buffers);
+      EXPECT_EQ(retried.prefill_capacity_rows, call.capacity_rows);
+      call.expect_result();
+    }
+  }
+
+  std::filesystem::path library_path_;
+  std::unique_ptr<PlaneModuleReference> module_;
+  std::unique_ptr<Qwen38Plane> plane_;
+};
+
+TEST_F(Qwen38PlaneStagedPleTest, PleRowsReportsEveryFailedStagingStepAndPublishesNothingPartial) {
+  StagedPleRig rig{*plane_, kAscendingRows};
+  const std::vector<int64_t> tokens = {1, 2};
+  ColdCall call;
+  call.run = [&] { return rig.PleRows(tokens); };
+  call.expect_result = [&] { EXPECT_EQ(rig.ReadPle(tokens.size()), rig.ExpectedPle(tokens)); };
+  call.pinned_buffers = 4;
+  call.capacity_rows = 4096;
+  call.gathered_rows = 2;
+  ExpectEveryStagingStepFailsCleanly(rig, PleRowsSteps(), call);
+}
+
+TEST_F(Qwen38PlaneStagedPleTest, PrepReportsEveryFailedStagingStepOnTheGenericPath) {
+  StagedPleRig rig{*plane_, kAscendingRows};
+  ColdCall call;
+  call.run = [&] { return rig.PrepGeneric(6, 5, 0); };
+  call.expect_result = [&] { rig.ExpectPrepResult(6, 5, 0); };
+  call.pinned_buffers = 2;
+  call.capacity_rows = 0;
+  call.gathered_rows = 1;
+  ExpectEveryStagingStepFailsCleanly(rig, PrepGenericSteps(), call);
+}
+
+TEST_F(Qwen38PlaneStagedPleTest, PrepReportsEveryFailedStagingStepOnRowZeroOfAFold) {
+  StagedPleRig rig{*plane_, kAscendingRows};
+  const std::array<int64_t, StagedPleRig::kStateWords> state = {7, 9, 2, 0, 0, 0, 0, 0, 1, 0};
+  ColdCall call;
+  call.run = [&] { return rig.PrepRowZero(state); };
+  call.expect_result = [&] { rig.ExpectPrepResult(7, 9, 0); };
+  call.pinned_buffers = 2;
+  call.capacity_rows = 0;
+  call.gathered_rows = 1;
+  ExpectEveryStagingStepFailsCleanly(rig, PrepRowZeroSteps(), call);
+}
+
+// A failed refresh of the token and context words must not leave the previous call's words to be gathered from.
+TEST_F(Qwen38PlaneStagedPleTest, PleRowsNeverGathersStaleTokensWhenARefreshFails) {
+  StagedPleRig rig{*plane_, kAscendingRows};
+  rig.ResetTable();
+  ASSERT_EQ(rig.PleRows({1, 2}), 0);
+
+  const std::vector<int64_t> tokens = {0, 3};
+  const struct {
+    const char* name;
+    Qwen38PlaneFaultSite site;
+    int skip;
+  } failures[] = {
+      {"copy the tokens", QWEN38_PLANE_FAULT_COPY, 0},
+      {"copy the context", QWEN38_PLANE_FAULT_COPY, 1},
+      {"wait for the copies", QWEN38_PLANE_FAULT_SYNC, 0},
+  };
+  int index = 0;
+  for (const auto& failure : failures) {
+    SCOPED_TRACE(failure.name);
+    const int error = 2000 + index++;
+    rig.FillOutputs(0xAB);
+    const Qwen38PlaneTestStats before = Stats();
+    Arm(failure.site, failure.skip, error);
+    EXPECT_EQ(rig.PleRows(tokens), error);
+    const Qwen38PlaneTestStats after = Stats();
+    EXPECT_EQ(after.fault_armed, 0);
+    EXPECT_EQ(after.gather_rows, before.gather_rows);
+    EXPECT_EQ(after.staged_launches, before.staged_launches);
+    EXPECT_TRUE(rig.OutputsAre(0xAB));
+
+    EXPECT_EQ(rig.PleRows(tokens), 0);
+    EXPECT_EQ(rig.ReadPle(tokens.size()), rig.ExpectedPle(tokens));
+  }
+}
+
+// Growing the prefill buffers replaces working buffers: when it fails the old ones, and their capacity, must stay.
+TEST_F(Qwen38PlaneStagedPleTest, PleRowsGrowthIsAllOrNothing) {
+  StagedPleRig rig{*plane_, kAscendingRows};
+  rig.ResetTable();
+  const std::vector<int64_t> short_tokens = {1, 2};
+  ASSERT_EQ(rig.PleRows(short_tokens), 0);
+  const Qwen38PlaneTestStats small = Stats();
+  EXPECT_EQ(small.prefill_capacity_rows, 4096);
+
+  std::vector<int64_t> long_tokens(4097);
+  for (size_t i = 0; i < long_tokens.size(); ++i) long_tokens[i] = static_cast<int64_t>(i);
+
+  const struct {
+    const char* name;
+    Qwen38PlaneFaultSite site;
+  } failures[] = {
+      {"allocate the larger token buffer", QWEN38_PLANE_FAULT_HOST_ALLOC},
+      {"wait for earlier work before the old buffer is freed", QWEN38_PLANE_FAULT_SYNC},
+  };
+  int index = 0;
+  for (const auto& failure : failures) {
+    SCOPED_TRACE(failure.name);
+    const int error = 3000 + index++;
+    rig.FillOutputs(0xAB);
+    const Qwen38PlaneTestStats before = Stats();
+    Arm(failure.site, 0, error);
+    EXPECT_EQ(rig.PleRows(long_tokens), error);
+    const Qwen38PlaneTestStats failed = Stats();
+    EXPECT_EQ(failed.fault_armed, 0);
+    EXPECT_EQ(failed.prefill_capacity_rows, small.prefill_capacity_rows);
+    EXPECT_EQ(failed.live_pinned_allocations, small.live_pinned_allocations);
+    EXPECT_EQ(failed.gather_rows, before.gather_rows);
+    EXPECT_EQ(failed.staged_launches, before.staged_launches);
+    EXPECT_TRUE(rig.OutputsAre(0xAB));
+
+    EXPECT_EQ(rig.PleRows(short_tokens), 0);
+    EXPECT_EQ(rig.ReadPle(short_tokens.size()), rig.ExpectedPle(short_tokens));
+  }
+
+  EXPECT_EQ(rig.PleRows(long_tokens), 0);
+  const Qwen38PlaneTestStats grown = Stats();
+  EXPECT_EQ(grown.prefill_capacity_rows, 4097);
+  EXPECT_EQ(grown.live_pinned_allocations, small.live_pinned_allocations);
+  EXPECT_EQ(rig.ReadPle(long_tokens.size()), rig.ExpectedPle(long_tokens));
+}
+
+// Rows 1..3 of a fold reuse what row 0 read back and so run no staging step at all (a CUDA graph capture could not take one);
+// a row 0 that failed leaves nothing for them to reuse.
+TEST_F(Qwen38PlaneStagedPleTest, FoldRowsReuseTheRowZeroSnapshotOnlyWhenRowZeroSucceeded) {
+  StagedPleRig rig{*plane_, kAscendingRows};
+  rig.ResetTable();
+  const std::array<int64_t, StagedPleRig::kStateWords> state = {7, 9, 2, 0, 0, 0, 0, 0, 1, 0};
+
+  const Qwen38PlaneFaultSite staging_sites[] = {QWEN38_PLANE_FAULT_HOST_ALLOC, QWEN38_PLANE_FAULT_HOST_MALLOC,
+                                                QWEN38_PLANE_FAULT_DEVICE_ALIAS, QWEN38_PLANE_FAULT_COPY,
+                                                QWEN38_PLANE_FAULT_SYNC};
+  for (Qwen38PlaneFaultSite site : staging_sites) {
+    SCOPED_TRACE(site);
+    module_->Disarm();
+    ASSERT_EQ(rig.PrepRowZero(state), 0);
+    Arm(site, 0, 4000);
+    EXPECT_EQ(rig.PrepFoldRow(1), 0);
+    EXPECT_EQ(Stats().fault_armed, 1) << "a fold row ran a staging step";
+    rig.ExpectPrepResult(2, 10, 7);
+  }
+
+  const struct {
+    const char* name;
+    Qwen38PlaneFaultSite site;
+    int skip;
+  } failures[] = {
+      {"copy the ctl words", QWEN38_PLANE_FAULT_COPY, 0},
+      {"copy the context", QWEN38_PLANE_FAULT_COPY, 1},
+      {"wait for the copies", QWEN38_PLANE_FAULT_SYNC, 0},
+  };
+  int index = 0;
+  for (const auto& failure : failures) {
+    SCOPED_TRACE(failure.name);
+    const int row_zero_error = 4100 + index;
+    const int fold_row_error = 4200 + index++;
+    module_->Disarm();
+    ASSERT_EQ(rig.PrepRowZero(state), 0);
+
+    Arm(failure.site, failure.skip, row_zero_error);
+    EXPECT_EQ(rig.PrepRowZero(state), row_zero_error);
+    // Row 1 must read its own words (the first copy it makes fails) instead of trusting the snapshot of the earlier row 0.
+    Arm(QWEN38_PLANE_FAULT_COPY, 0, fold_row_error);
+    EXPECT_EQ(rig.PrepFoldRow(1), fold_row_error);
+  }
+}
+
+// A table that is staged but was never registered has no host rows to gather from: it has to be an error, not a silent no-op.
+TEST_F(Qwen38PlaneStagedPleTest, AStagedTableThatWasNeverRegisteredIsAnErrorNotASilentSkip) {
+  StagedPleRig rig{*plane_, kAscendingRows};
+  std::array<unsigned char, StagedPleRig::kRows * StagedPleRig::kRowWidth> other_shard{};
+  Qwen38PleParams unregistered = rig.params();
+  unregistered.shard_ptr[0] = other_shard.data();
+  const PlaneBuffer d_unregistered = rig.DeviceCopy(unregistered);
+
+  rig.FillOutputs(0xAB);
+  const Qwen38PlaneTestStats before = Stats();
+  EXPECT_EQ(rig.PleRows({1, 2}), 0);
+  const Qwen38PlaneTestStats registered = Stats();
+  EXPECT_EQ(registered.gather_rows, before.gather_rows + 2);
+
+  rig.FillOutputs(0xAB);
+  EXPECT_EQ(rig.PleRowsOn(d_unregistered.data(), rig.device_params(), 2), kCudaErrorInvalidValue);
+  EXPECT_EQ(rig.PrepGeneric(1, 1, 0, d_unregistered.data()), kCudaErrorInvalidValue);
+  const Qwen38PlaneTestStats after = Stats();
+  EXPECT_EQ(after.gather_rows, registered.gather_rows);
+  EXPECT_EQ(after.staged_launches, registered.staged_launches);
+  EXPECT_TRUE(rig.OutputsAre(0xAB));
+}
+
+// Errors that CUDA itself reports, not injected ones, are propagated just as exactly.
+TEST_F(Qwen38PlaneStagedPleTest, PleRowsReturnsTheCudaErrorOfAFailedCopy) {
+  StagedPleRig rig{*plane_, kAscendingRows};
+  ASSERT_EQ(rig.PleRows({1, 2}), 0);
+  rig.FillOutputs(0xAB);
+  const Qwen38PlaneTestStats before = Stats();
+
+  // CUDA rejects a null device source for the copy of the tokens.
+  const int error = rig.PleRowsOn(rig.device_params(), nullptr, 2);
+  int64_t word = 0;
+  EXPECT_NE(error, 0);
+  EXPECT_EQ(error, plane_->memcpy_d2h(&word, nullptr, sizeof(word), rig.stream()));
+  const Qwen38PlaneTestStats after = Stats();
+  EXPECT_EQ(after.gather_rows, before.gather_rows);
+  EXPECT_EQ(after.staged_launches, before.staged_launches);
+  EXPECT_TRUE(rig.OutputsAre(0xAB));
+
+  EXPECT_EQ(rig.PleRows({3, 0}), 0);
+  EXPECT_EQ(rig.ReadPle(2), rig.ExpectedPle({3, 0}));
+}
+
+// The staged tables live in the module, which every loader of the library file shares: destroying one loader must leave the
+// tables of the others working, and the state is released once, by the last loader.
+TEST_F(Qwen38PlaneStagedPleTest, DestroyingOneLoaderKeepsTheStagedTablesOfTheOthers) {
+  const Qwen38PlaneTestStats start = Stats();  // loader A, plane_, is attached
+  auto plane_b = std::make_unique<Qwen38Plane>(library_path_);
+  auto rig_a = std::make_unique<StagedPleRig>(*plane_, kAscendingRows);
+  auto rig_b = std::make_unique<StagedPleRig>(*plane_b, kDescendingRows);
+  const Qwen38PlaneTestStats both = Stats();
+  EXPECT_EQ(both.attached_loaders, start.attached_loaders + 1);
+  EXPECT_EQ(both.staged_tables, start.staged_tables + 2);
+
+  const std::vector<int64_t> tokens = {0, 1, 2, 3};
+  ASSERT_EQ(rig_b->PleRows(tokens), 0);
+  EXPECT_EQ(rig_b->ReadPle(tokens.size()), rig_b->ExpectedPle(tokens));
+
+  rig_a.reset();
+  plane_.reset();
+  // Checked before loader B does any more work: if its table was dropped, running on it would not be safe.
+  const Qwen38PlaneTestStats after_a = Stats();
+  ASSERT_EQ(after_a.attached_loaders, start.attached_loaders);
+  ASSERT_EQ(after_a.global_cleanups, start.global_cleanups);
+  ASSERT_EQ(after_a.staged_tables, start.staged_tables + 1);
+
+  const std::vector<int64_t> more_tokens = {3, 3, 2, 0, 1};
+  rig_b->FillOutputs(0xAB);
+  ASSERT_EQ(rig_b->PleRows(more_tokens), 0);
+  EXPECT_EQ(rig_b->ReadPle(more_tokens.size()), rig_b->ExpectedPle(more_tokens));
+  EXPECT_EQ(Stats().staged_launches, after_a.staged_launches + 1);
+
+  rig_b.reset();
+  plane_b.reset();
+  const Qwen38PlaneTestStats end = Stats();
+  EXPECT_EQ(end.attached_loaders, start.attached_loaders - 1);
+  EXPECT_EQ(end.global_cleanups, start.global_cleanups + 1);
+  EXPECT_EQ(end.staged_tables, start.staged_tables);
+  EXPECT_EQ(end.live_pinned_allocations, start.live_pinned_allocations);
+}
+
+// Tables that a loader never unregistered are released with the module, when the last loader goes.
+TEST_F(Qwen38PlaneStagedPleTest, TheLastLoaderToDetachReleasesTheStagedTablesLeftRegistered) {
+  const Qwen38PlaneTestStats start = Stats();
+  auto rig = std::make_unique<StagedPleRig>(*plane_, kAscendingRows);
+  ASSERT_EQ(rig->PleRows({1, 2}), 0);
+  const Qwen38PlaneTestStats used = Stats();
+  EXPECT_EQ(used.staged_tables, start.staged_tables + 1);
+  EXPECT_GT(used.live_pinned_allocations, start.live_pinned_allocations);
+
+  rig->KeepTableRegisteredOnDestruction();
+  rig.reset();
+  EXPECT_EQ(Stats().staged_tables, used.staged_tables);
+
+  plane_.reset();
+  const Qwen38PlaneTestStats end = Stats();
+  EXPECT_EQ(end.attached_loaders, start.attached_loaders - 1);
+  EXPECT_EQ(end.global_cleanups, start.global_cleanups + 1);
+  EXPECT_EQ(end.staged_tables, 0);
+  EXPECT_EQ(end.live_pinned_allocations, 0);
+}
+
+}  // namespace
 #endif
 
 }  // namespace Generators::test
