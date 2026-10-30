@@ -196,7 +196,17 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
       throw std::runtime_error("DFlash draft count must match target prefix-state width");
     auto draft_config = CreateDflash2Config(*model_.config_);
     draft_config->model.embedding.filename.clear();
-    dflash_model_ = std::make_shared<Dflash2Model>(std::move(draft_config), GetOrtEnv());
+    dflash_model_ = std::make_shared<Dflash2Model>(
+        std::move(draft_config), GetOrtEnv(), nullptr,
+        [this](OrtSessionOptions& opts) {
+          if (model_.pool_) model_.pool_->AddTo(opts, "dflash2");
+          if (!model_.embed_values_.empty()) {
+            opts.AddInitializer("model.embed_tokens.weight", *model_.embed_values_.front());
+            if (model_.embed_is_int8_ && model_.embed_values_.size() >= 2) {
+              opts.AddInitializer("model.embed_tokens.weight.row_scales", *model_.embed_values_[1]);
+            }
+          }
+        });
     const auto cache_shape = dflash_model_->session_info_.GetInputShape("past_key_values.0.key");
     if (cache_shape.size() != 4 || (cache_shape[1] != 16 && cache_shape[1] != 128 && cache_shape[1] != 256))
       throw std::runtime_error("DFlash experiment requires cache pages of 16, 128, or 256 tokens");
@@ -208,6 +218,40 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
   Reset();
   if (dflash_) {
     const auto start = Clock::now();
+#if defined(_WIN32)
+    if (std::getenv("ORT_FORCE_DETERMINISTIC_MOE") == nullptr) {
+      _putenv_s("ORT_FORCE_DETERMINISTIC_MOE", "1");
+    }
+#else
+    setenv("ORT_FORCE_DETERMINISTIC_MOE", "1", 0);
+#endif
+    if (q.warmup && fast_ && fast_->unified) {
+      if (fast_->chunk > 512) {
+        Draft(d_dflash_prompt_.data(), static_cast<size_t>(fast_->chunk), static_cast<size_t>(capacity_), 1000, false);
+        dflash_->ReleaseAll();
+      }
+      const int warm_len = std::min<int>(fast_->chunk, 512);
+      std::vector<int32_t> prompt(warm_len, 1000);
+      FastAppend(prompt);
+      FastHandoff();
+      size_t pos = 0;
+      if (dflash_prompt_rows_ > 0) {
+        for (int rep = 0; rep < 5; ++rep) {
+          dflash_->ReleaseAll();
+          Draft(d_dflash_prompt_.data(), dflash_prompt_rows_, dflash_prompt_position_, 1000, true);
+        }
+        pos = dflash_prompt_position_ + dflash_prompt_rows_;
+        dflash_prompt_rows_ = 0;
+      }
+      for (size_t r = 1; r <= static_cast<size_t>(verify_rows_); ++r) {
+        for (int rep = 0; rep < 5; ++rep) {
+          Draft(d_dflash_prompt_.data(), r, pos, 1000, true);
+          pos += r;
+        }
+      }
+      SyncStream();
+      Reset();
+    }
     std::vector<int32_t> dummy(static_cast<size_t>(verify_rows_) * num_banks_ * 6, 1000);
     StepPrefill(dummy);
     Reset();
@@ -349,17 +393,38 @@ void Qwen38GraphEngine::BuildTarget() {
       NewDeviceTensor(shared_, name, FixedShape(info.GetInputShape(name)), info.GetInputDataType(name));
   }
 
-  // Detect multi-draft verification width from target graph outputs (present_mid3 -> S=4, present_mid2 -> S=3, else S=2).
+  // Detect multi-draft verification width from target graph outputs (state_update.* -> S = capacity+1,
+  // present_mid3 -> S=4, present_mid2 -> S=3, else S=2).
   verify_rows_ = 2;
+  compact_state_updates_ = false;
+  state_update_capacity_ = 0;
   for (const auto& name : out_names) {
-    if (StartsWith(name, "present_mid3.") || StartsWith(name, "head.present_mid3.")) {
+    if (StartsWith(name, "state_update.")) {
+      compact_state_updates_ = true;
+      NewDeviceTensor(state_update_tensors_, name, FixedShape(info.GetOutputShape(name)), info.GetOutputDataType(name));
+      if (name.find(".conv_value") != std::string::npos || name.find(".indexer_value") != std::string::npos) {
+        const auto su_shape = FixedShape(info.GetOutputShape(name));
+        if (su_shape.size() >= 2 && su_shape[1] > 0) {
+          state_update_capacity_ = std::max(state_update_capacity_, static_cast<int>(su_shape[1]));
+        }
+      }
+    } else if (StartsWith(name, "present_mid3.") || StartsWith(name, "head.present_mid3.")) {
       verify_rows_ = std::max(verify_rows_, 4);
     } else if (StartsWith(name, "present_mid2.") || StartsWith(name, "head.present_mid2.")) {
       verify_rows_ = std::max(verify_rows_, 3);
     }
   }
-  num_banks_ = fold_ ? (verify_rows_ + 1) : kBanks;
-  ledger_.SetNumBanks(num_banks_);
+  if (compact_state_updates_) {
+    if (state_update_capacity_ <= 0 || state_update_capacity_ + 1 > kMaxVerifyRows)
+      throw std::runtime_error("qwen38_graph: invalid compact state_update_capacity " +
+                               std::to_string(state_update_capacity_));
+    verify_rows_ = state_update_capacity_ + 1;
+    num_banks_ = 2;
+    ledger_.SetCompactPingPong(true, verify_rows_);
+  } else {
+    num_banks_ = fold_ ? (verify_rows_ + 1) : kBanks;
+    ledger_.SetNumBanks(num_banks_);
+  }
 
   // Recurrent banks: flat 256-byte-aligned arenas, identical layout in every bank (the extra scratch bank is only used by S=1).
   size_t arena_bytes = 0;
@@ -377,6 +442,105 @@ void Qwen38GraphEngine::BuildTarget() {
     for (const auto& name : bank_names)
       bank.tensors[name] = MakeTensor(bank.arena.data() + offsets[name], FixedShape(info.GetInputShape(name)),
                                       info.GetInputDataType(name));
+  }
+
+  if (compact_state_updates_) {
+    if (!plane_.replay_state_updates)
+      throw std::runtime_error("qwen38_graph: plane library lacks qwen38_plane_replay_state_updates");
+    for (int k = 0; k < 2; ++k) {
+      const Bank& src_bank = banks_[k];
+      const Bank& dst_bank = banks_[k ^ 1];
+      std::vector<Qwen38StateReplayDesc> fast_descs;
+      std::vector<Qwen38StateReplayDesc> generic_descs;
+      for (const auto& [su_name, su_tensor] : state_update_tensors_) {
+        const size_t dot1 = su_name.find('.');
+        const size_t dot2 = su_name.find('.', dot1 + 1);
+        const std::string lid_str = su_name.substr(dot1 + 1, dot2 - dot1 - 1);
+        const std::string kind_str = su_name.substr(dot2 + 1);
+        if (kind_str == "recurrent_capsule") {
+          const std::string state_name = "past_key_values." + lid_str + ".recurrent_state";
+          const DevTensor& src_t = *src_bank.tensors.at(state_name);
+          const DevTensor& dst_t = *dst_bank.tensors.at(state_name);
+          const uint64_t heads_v = static_cast<uint64_t>(src_t.shape.at(1));
+          const uint64_t width_v = static_cast<uint64_t>(src_t.shape.at(2));
+          const uint64_t width_k = static_cast<uint64_t>(src_t.shape.at(3));
+          const uint64_t cap = static_cast<uint64_t>(state_update_capacity_);
+          const uint64_t total_width = static_cast<uint64_t>(su_tensor->shape.at(1));
+          const uint64_t per_step = total_width / cap;
+          const uint64_t heads_k = (per_step - heads_v - heads_v * width_v) / width_k;
+          const float* capsule = reinterpret_cast<const float*>(su_tensor->ptr);
+          const float* decay = capsule;
+          const float* key = decay + cap * heads_v;
+          const float* delta = key + cap * heads_k * width_k;
+          Qwen38StateReplayDesc d{};
+          d.source_state = src_t.ptr;
+          d.destination_state = dst_t.ptr;
+          d.decay = decay;
+          d.key = key;
+          d.delta = delta;
+          d.channel_count = heads_v;
+          d.state_width = width_v;
+          d.key_width = width_k;
+          d.key_head_count = heads_k;
+          d.capacity = static_cast<uint32_t>(state_update_capacity_);
+          d.kept_count = 1;
+          d.element_size = 4;
+          d.kind = 2;
+          fast_descs.push_back(d);
+          const int blocks = static_cast<int>(heads_v * ((width_v + 31) / 32));
+          replay_fast_blocks_ = std::max(replay_fast_blocks_, blocks);
+        } else if (kind_str == "conv_value" || kind_str == "ple_conv_value") {
+          const std::string state_tail = (kind_str == "ple_conv_value") ? "ple_conv_state" : "conv_state";
+          const std::string state_name = "past_key_values." + lid_str + "." + state_tail;
+          const DevTensor& src_t = *src_bank.tensors.at(state_name);
+          const DevTensor& dst_t = *dst_bank.tensors.at(state_name);
+          Qwen38StateReplayDesc d{};
+          d.source_state = src_t.ptr;
+          d.destination_state = dst_t.ptr;
+          d.value = su_tensor->ptr;
+          d.channel_count = static_cast<uint64_t>(src_t.shape.at(1));
+          d.state_width = static_cast<uint64_t>(src_t.shape.at(2));
+          d.capacity = static_cast<uint32_t>(state_update_capacity_);
+          d.kept_count = 1;
+          d.element_size = static_cast<uint32_t>(Ort::SizeOf(src_t.type));
+          d.kind = 1;
+          generic_descs.push_back(d);
+        } else if (kind_str == "indexer_value") {
+          const std::string buf_name = "past_key_values." + lid_str + ".index_buffer";
+          const std::string len_name = "past_key_values." + lid_str + ".index_lengths";
+          const DevTensor& src_buf = *src_bank.tensors.at(buf_name);
+          const DevTensor& dst_buf = *dst_bank.tensors.at(buf_name);
+          const DevTensor& src_len = *src_bank.tensors.at(len_name);
+          const DevTensor& dst_len = *dst_bank.tensors.at(len_name);
+          Qwen38StateReplayDesc d{};
+          d.value = su_tensor->ptr;
+          d.source_aux_state = src_buf.ptr;
+          d.destination_aux_state = dst_buf.ptr;
+          d.source_lengths = reinterpret_cast<const int32_t*>(src_len.ptr);
+          d.destination_lengths = reinterpret_cast<int32_t*>(dst_len.ptr);
+          d.state_width = static_cast<uint64_t>(src_buf.shape.at(2));
+          d.state_capacity = 0;
+          d.aux_capacity = static_cast<uint64_t>(src_buf.shape.at(1));
+          d.capacity = static_cast<uint32_t>(state_update_capacity_);
+          d.kept_count = 1;
+          d.element_size = static_cast<uint32_t>(Ort::SizeOf(src_buf.type));
+          d.compress_ratio = 4;
+          d.kind = 4;
+          generic_descs.push_back(d);
+        } else {
+          throw std::runtime_error("qwen38_graph: unsupported state_update output " + su_name);
+        }
+      }
+      replay_fast_count_ = static_cast<int>(fast_descs.size());
+      replay_generic_count_ = static_cast<int>(generic_descs.size());
+      std::vector<Qwen38StateReplayDesc> all_descs = std::move(fast_descs);
+      all_descs.insert(all_descs.end(), generic_descs.begin(), generic_descs.end());
+      const size_t desc_bytes = all_descs.size() * sizeof(Qwen38StateReplayDesc);
+      replay_descs_dev_[k] = PlaneBuffer(plane_, desc_bytes, stream_);
+      plane_.Check(plane_.memcpy_h2d(replay_descs_dev_[k].data(), all_descs.data(), desc_bytes, stream_),
+                   "upload state replay descs");
+    }
+    SyncStream();
   }
 
   if (fold_) {
@@ -414,6 +578,9 @@ void Qwen38GraphEngine::BuildTarget() {
           {rows - 1});
     set32(NewDeviceTensor(in.tensors, "cumulative_sequence_lengths", {2}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32),
           {0, rows});
+    if (info.HasInput("state_update_capture_count"))
+      set32(NewDeviceTensor(in.tensors, "state_update_capture_count", {1}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32),
+            {rows - 1});
     if (info.HasInput("logits_indices"))
       set64(NewDeviceTensor(in.tensors, "logits_indices", {rows}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64), arange);
     if (info.HasInput("inputs_embeds")) {
@@ -429,14 +596,15 @@ void Qwen38GraphEngine::BuildTarget() {
   SyncStream();
 
   // One IO binding per (rows, ring phase). Graph k reads bank k; S=1 writes bank k+1 (present_mid -> scratch bank),
-  // S=R writes present_mid -> bank k+1, present_mid2 -> bank k+2, present_mid3 -> bank k+3, and present -> bank k+R.
+  // S=R writes present_mid -> bank k+1, present_mid2 -> bank k+2, present_mid3 -> bank k+3, and present -> bank k+R
+  // (or bank k^1 when compact_state_updates_ is enabled).
   const auto dtype_logits = info.GetOutputDataType("logits");
   for (int rows = min_rows; rows <= max_rows; ++rows) {
     for (int k = 0; k < num_banks_; ++k) {
       Direction& d = dirs_[rows - 1][k];
       d.binding = OrtIoBinding::Create(session);
       Bank& in_bank = banks_[k];
-      Bank& out_bank = banks_[(k + rows) % num_banks_];
+      Bank& out_bank = compact_state_updates_ ? banks_[k ^ 1] : banks_[(k + rows) % num_banks_];
       Bank& mid1_bank = rows >= 2 ? banks_[(k + 1) % num_banks_] : banks_[num_banks_];
       Bank& mid2_bank = rows >= 3 ? banks_[(k + 2) % num_banks_] : banks_[num_banks_];
       Bank& mid3_bank = rows >= 4 ? banks_[(k + 3) % num_banks_] : banks_[num_banks_];
@@ -518,6 +686,8 @@ void Qwen38GraphEngine::BuildTarget() {
           t = state_for(name.substr(13), mid2_bank);
         else if (StartsWith(name, "present_mid3."))
           t = state_for(name.substr(13), mid3_bank);
+        else if (StartsWith(name, "state_update."))
+          t = state_update_tensors_.at(name).get();
         else if (StartsWith(name, "present."))
           t = state_for(name.substr(8), out_bank);
         else if (name == "logits")
@@ -713,9 +883,8 @@ void Qwen38GraphEngine::PrepRow(int rows, int row, const void* tok, const void* 
   plane_.prep(stream_, params_dev_.data(), tok, pos, add, ctx_in, ctx_out, in.input_ids + 8 * row,
               in.position_ids + 8 * row, row == 0 ? in.committed : scratch_i32_.data(), past_pos_,
               in.ple + 2 * static_cast<size_t>(ple_width_) * row, ctl_.data());
-  if (in.inputs_embeds) {
-    plane_.EmbedRows(stream_, model_.EmbeddingTable(), in.input_ids + 8 * row,
-                     in.inputs_embeds + 2 * static_cast<size_t>(model_.config_->model.decoder.hidden_size) * row, 1);
+  if (row + 1 == rows && in.inputs_embeds) {
+    plane_.EmbedRows(stream_, model_.EmbeddingTable(), in.input_ids, in.inputs_embeds, rows);
   }
 }
 
@@ -727,6 +896,14 @@ void Qwen38GraphEngine::RunTarget(int rows, int phase, const Qwen38PromptRunHint
 void Qwen38GraphEngine::RunSession(OrtSession& session, const OrtRunOptions* run_options, const OrtIoBinding& binding,
                                    const Qwen38PromptRunHints* prompt) {
   RunWithQwen38OrtHints(run_hints_, prompt, [&] { session.Run(run_options, binding); });
+}
+
+void Qwen38GraphEngine::ReplayStateUpdates(int src_bank, size_t kept_count) {
+  if (!compact_state_updates_ || kept_count == 0 || kept_count >= static_cast<size_t>(verify_rows_)) return;
+  const int b = src_bank % 2;
+  plane_.Check(plane_.replay_state_updates(stream_, replay_descs_dev_[b].data(), replay_fast_count_,
+                                           replay_generic_count_, replay_fast_blocks_, static_cast<int>(kept_count)),
+               "replay compact state updates");
 }
 
 int64_t Qwen38GraphEngine::ReadCtl(int index) {
@@ -834,6 +1011,9 @@ void Qwen38GraphEngine::StepPrefill(std::span<const int32_t> tokens) {
     plane_.or_status(stream_, d.status, static_cast<int>(d.status_count), ctl_.data());
     if (step < static_cast<size_t>(R)) {
       plane_.Check(plane_.memcpy_d2d(ctx_commit_.data(), ctx_a_.data() + 16 * (step - 1), 16, stream_), "ctx commit");
+      if (compact_state_updates_) {
+        ReplayStateUpdates(ledger_.Bank(), step);
+      }
     }
     if (keep_hidden_)
       plane_.Check(plane_.memcpy_d2d(d_prompt_hidden_.data() + gi * row_bytes, d.hidden, step * row_bytes, stream_),
@@ -1049,15 +1229,11 @@ void Qwen38GraphEngine::FoldFirstDraft() {
 // token of verify row 0. A coincidence with that token is accepted by the graph and stays valid.
 void Qwen38GraphEngine::ForceRejectDraft() {
   SyncStream();
-  const int64_t forced = (ReadCtl(2) + 1) % vocab_;
-  WriteCtl(2, std::span<const int64_t>(&forced, 1));
-  if (verify_rows_ >= 3) {
-    const int64_t forced2 = (ReadCtl(8) + 1) % vocab_;
-    WriteCtl(8, std::span<const int64_t>(&forced2, 1));
-  }
-  if (verify_rows_ >= 4) {
-    const int64_t forced3 = (ReadCtl(9) + 1) % vocab_;
-    WriteCtl(9, std::span<const int64_t>(&forced3, 1));
+  constexpr int kDraftCtlSlots[7] = {2, 8, 9, 10, 11, 12, 13};
+  for (int d = 0; d < verify_rows_ - 1 && d < 7; ++d) {
+    const int slot = kDraftCtlSlots[d];
+    const int64_t forced = (ReadCtl(slot) + 1) % vocab_;
+    WriteCtl(slot, {&forced, 1});
   }
 }
 
@@ -1065,13 +1241,11 @@ void Qwen38GraphEngine::EnqueueFold() {
   if (force_reject_) ForceRejectDraft();
   ledger_.RequireRoom(verify_rows_, "the next verify step");
   const uint8_t* ctl = ctl_.data();
+  constexpr int kDraftCtlSlots[7] = {2, 8, 9, 10, 11, 12, 13};
   PrepRow(verify_rows_, 0, ctl + 0, ctl + 8, 0, ctx_commit_.data(), ctx_a_.data());
-  PrepRow(verify_rows_, 1, ctl + 16, ctl + 8, 1, ctx_a_.data(), ctx_a_.data() + 16);
-  if (verify_rows_ >= 3) {
-    PrepRow(verify_rows_, 2, ctl + 64, ctl + 8, 2, ctx_a_.data() + 16, ctx_a_.data() + 32);
-  }
-  if (verify_rows_ >= 4) {
-    PrepRow(verify_rows_, 3, ctl + 72, ctl + 8, 3, ctx_a_.data() + 32, ctx_a_.data() + 48);
+  for (int r = 1; r < verify_rows_; ++r) {
+    const int slot = kDraftCtlSlots[r - 1];
+    PrepRow(verify_rows_, r, ctl + 8 * slot, ctl + 8, r, ctx_a_.data() + 16 * (r - 1), ctx_a_.data() + 16 * r);
   }
   RunTarget(verify_rows_, ledger_.Bank());
   Direction& d = dirs_[verify_rows_ - 1][ledger_.Bank()];
@@ -1149,7 +1323,7 @@ void Qwen38GraphEngine::Draft(const uint8_t* features, size_t rows, size_t posit
     }
     if (drafts.size() != 1 || drafts[0].size() != size_t(verify_rows_ - 1))
       throw std::runtime_error("DFlash experiment returned an incomplete proposal");
-    constexpr int slots[3] = {2, 8, 9};
+    constexpr int slots[7] = {2, 8, 9, 10, 11, 12, 13};
     for (size_t i = 0; i < drafts[0].size(); ++i) {
       const int64_t d = drafts[0][i];
       WriteCtl(slots[i], {&d, 1});
@@ -1222,19 +1396,29 @@ Qwen38CycleRecord Qwen38GraphEngine::WaitCycle() {
   }
   std::atomic_thread_fence(std::memory_order_acquire);
   Qwen38CycleRecord result;
-  result.pred0 = record[1];
-  result.pred1 = record[2];
-  const int64_t acc_count = mtp_enabled_ ? record[3] : 0;
+  const uint64_t raw1 = static_cast<uint64_t>(record[1]);
+  const uint64_t raw2 = static_cast<uint64_t>(record[2]);
+  const uint64_t raw3 = static_cast<uint64_t>(record[3]);
+  const uint64_t raw5 = static_cast<uint64_t>(record[5]);
+  const uint64_t raw7 = static_cast<uint64_t>(record[7]);
+  result.pred0 = static_cast<int64_t>(static_cast<int32_t>(raw1 & 0xFFFFFFFFu));
+  result.pred1 = static_cast<int64_t>(static_cast<int32_t>(raw2 & 0xFFFFFFFFu));
+  const int64_t acc_count = mtp_enabled_ ? static_cast<int64_t>(static_cast<int32_t>(raw3 & 0xFFFFFFFFu)) : 0;
   result.accepted = acc_count > 0;
   result.accepted_count = static_cast<int>(acc_count);
   result.proposed_count = mtp_enabled_ ? (verify_rows_ - 1) : 1;
   const int64_t status = record[4];
-  result.new_pending = record[5];
+  result.new_pending = static_cast<int64_t>(static_cast<int32_t>(raw5 & 0xFFFFFFFFu));
   result.new_length = record[6];
   if (verify_rows_ >= 3) {
-    const uint64_t packed23 = static_cast<uint64_t>(record[7]);
-    result.pred2 = static_cast<int64_t>(static_cast<int32_t>(packed23 & 0xFFFFFFFFu));
-    result.pred3 = static_cast<int64_t>(static_cast<int32_t>(packed23 >> 32));
+    result.pred2 = static_cast<int64_t>(static_cast<int32_t>(raw7 & 0xFFFFFFFFu));
+    result.pred3 = static_cast<int64_t>(static_cast<int32_t>(raw7 >> 32));
+  }
+  if (verify_rows_ >= 5) {
+    result.pred4 = static_cast<int64_t>(static_cast<int32_t>(raw1 >> 32));
+    result.pred5 = static_cast<int64_t>(static_cast<int32_t>(raw2 >> 32));
+    result.pred6 = static_cast<int64_t>(static_cast<int32_t>(raw3 >> 32));
+    result.pred7 = static_cast<int64_t>(static_cast<int32_t>(raw5 >> 32));
   }
   inflight_ = false;
   if (status != 0) CheckDeviceStatus("decode", inflight_dir_);
@@ -1242,19 +1426,25 @@ Qwen38CycleRecord Qwen38GraphEngine::WaitCycle() {
 }
 
 void Qwen38GraphEngine::Advance(const Qwen38CycleRecord& record, bool want_more) {
-  ledger_.Advance(record.TokenCount());
+  const int prev_bank = ledger_.Bank();
+  const size_t step = record.TokenCount();
+  if (compact_state_updates_ && step < static_cast<size_t>(verify_rows_)) {
+    ReplayStateUpdates(prev_bank, step);
+  }
+  ledger_.Advance(step);
   ledger_.CheckDeviceLength(record.new_length);
-  if (fold_) head_length_ += static_cast<int>(record.TokenCount());
+  if (fold_) head_length_ += static_cast<int>(step);
   if (suffix_lookup_mode_ > 0) {
+    const int64_t preds[7] = {record.pred0, record.pred1, record.pred2, record.pred3,
+                              record.pred4, record.pred5, record.pred6};
     suffix_drafter_.AppendToken(static_cast<int32_t>(pending_));
-    if (record.accepted_count >= 1) suffix_drafter_.AppendToken(static_cast<int32_t>(record.pred0));
-    if (record.accepted_count >= 2) suffix_drafter_.AppendToken(static_cast<int32_t>(record.pred1));
-    if (record.accepted_count >= 3) suffix_drafter_.AppendToken(static_cast<int32_t>(record.pred2));
+    for (int i = 0; i < record.accepted_count && i < 7; ++i) {
+      suffix_drafter_.AppendToken(static_cast<int32_t>(preds[i]));
+    }
     pending_ = static_cast<int32_t>(record.new_pending);
   }
   if (!want_more) return;
   if (dflash_) {
-    const size_t step = record.TokenCount();
     pending_ = static_cast<int32_t>(record.new_pending);
     Draft(inflight_dir_->auxiliary, step, ledger_.Length() - step, pending_, true);
     EnqueueFold();
@@ -1262,20 +1452,13 @@ void Qwen38GraphEngine::Advance(const Qwen38CycleRecord& record, bool want_more)
   }
   if (fold_) {
     if (suffix_lookup_mode_ == 1 || (suffix_lookup_mode_ == 2 && !record.accepted)) {
-      int32_t lookup_drafts[3] = {-1, -1, -1};
+      int32_t lookup_drafts[7] = {-1, -1, -1, -1, -1, -1, -1};
+      constexpr int kDraftCtlSlots[7] = {2, 8, 9, 10, 11, 12, 13};
       const int max_d = verify_rows_ - 1;
       const int n_d = suffix_drafter_.ProposeDrafts(static_cast<int32_t>(record.new_pending), max_d, lookup_drafts, 3);
-      if (n_d >= 1) {
-        const int64_t d0 = lookup_drafts[0];
-        WriteCtl(2, std::span<const int64_t>(&d0, 1));
-      }
-      if (n_d >= 2 && verify_rows_ >= 3) {
-        const int64_t d1 = lookup_drafts[1];
-        WriteCtl(8, std::span<const int64_t>(&d1, 1));
-      }
-      if (n_d >= 3 && verify_rows_ >= 4) {
-        const int64_t d2 = lookup_drafts[2];
-        WriteCtl(9, std::span<const int64_t>(&d2, 1));
+      for (int i = 0; i < n_d && i < verify_rows_ - 1 && i < 7; ++i) {
+        const int64_t di = lookup_drafts[i];
+        WriteCtl(kDraftCtlSlots[i], {&di, 1});
       }
     }
     head_cur_ = ledger_.Bank();
@@ -1552,6 +1735,12 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
         for (const char* name : {"model.embed_tokens.weight", "head.mtp.embed_tokens.weight"}) {
           session_options_->AddInitializer(name, *embed_values_.back());
         }
+        const std::vector<int64_t> scale_shape{config_->model.vocab_size, 1};
+        const size_t scale_bytes = static_cast<size_t>(scale_shape[0]) * sizeof(float);
+        embed_values_.push_back(OrtValue::CreateTensor(
+            *p_device_->GetMemoryInfo(), embed_mapping_->device_data() + table_i8_bytes, scale_bytes, scale_shape,
+            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT));
+        session_options_->AddInitializer("model.embed_tokens.weight.row_scales", *embed_values_.back());
       }
     }
   }
@@ -1585,7 +1774,7 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
     if (!embed_values_.empty() &&
         (std::string(label) == "mtp" || std::string(label) == "drafter" || std::string(label) == "head_r2" ||
          std::string(label) == "head")) {
-      result->AddInitializer("mtp.embed_tokens.weight", *embed_values_.back());
+      result->AddInitializer("mtp.embed_tokens.weight", *embed_values_.front());
     }
     return result;
   };

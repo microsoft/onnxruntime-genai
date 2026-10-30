@@ -333,6 +333,22 @@ TEST(Qwen38GraphConfigTest, ModelPathsMustStayInsideTheModelFolder) {
 
 // ---- host ledger -----------------------------------------------------------------------------
 
+TEST(Qwen38DecodeLedgerTest, CompactPingPongAlternatesBanksAcrossOneToEightRowSteps) {
+  Qwen38DecodeLedger ledger{64};
+  ledger.SetCompactPingPong(true, 8);
+  EXPECT_EQ(ledger.NumBanks(), 2);
+  EXPECT_EQ(ledger.Bank(), 0);
+  const size_t steps[] = {8, 1, 5, 7, 3, 8, 2};
+  size_t length = 0;
+  for (size_t i = 0; i < std::size(steps); ++i) {
+    ledger.Advance(steps[i]);
+    length += steps[i];
+    EXPECT_EQ(ledger.Bank(), static_cast<int>((i + 1) % 2));
+    EXPECT_EQ(ledger.Length(), length);
+  }
+  EXPECT_THROW(ledger.Advance(9), std::logic_error);
+}
+
 TEST(Qwen38DecodeLedgerTest, RingBankFollowsTheCommittedRows) {
   Qwen38DecodeLedger ledger{64};
   EXPECT_EQ(ledger.Bank(), 0);

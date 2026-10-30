@@ -68,6 +68,8 @@ struct Qwen38Plane {
   // The destructor does not call it: it detaches from the module, which releases that state when the last loader goes.
   void (*release_ple_workspace)(void){};
   int (*dflash_select)(void* stream, const void* candidates, const void* scores, void* control, int drafts, int top_k){};
+  int (*replay_state_updates)(void* stream, const void* descs, int fast_count, int generic_count,
+                              int fast_blocks_per_descriptor, int kept_count){};
 
   // The QWEN38_PLANE_CAP_* bits the library reports; 0 for a library that predates qwen38_plane_capabilities.
   unsigned long long capabilities{};

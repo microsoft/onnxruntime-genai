@@ -440,7 +440,9 @@ ONNXTensorElementDataType ValidateDflash2ModelCompatibility(
       const auto output_type = drafter_metadata.GetOutputDataType(output_name);
       const bool supported_type = input_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
                                   input_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16 ||
-                                  input_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16;
+                                  input_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16 ||
+                                  input_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8 ||
+                                  input_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E4M3FN;
       if (input_type != output_type ||
           (cache_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED && input_type != cache_type) ||
           !supported_type) {
@@ -477,8 +479,12 @@ ONNXTensorElementDataType ValidateDflash2ModelCompatibility(
 }
 
 Dflash2Model::Dflash2Model(std::unique_ptr<Config> config, OrtEnv& ort_env,
-                           std::shared_ptr<CpuEmbedding> cpu_embedding)
+                           std::shared_ptr<CpuEmbedding> cpu_embedding,
+                           const std::function<void(OrtSessionOptions&)>& configure_session_options)
     : Model{std::move(config)}, cpu_embedding_{std::move(cpu_embedding)} {
+  if (configure_session_options && session_options_) {
+    configure_session_options(*session_options_);
+  }
   session_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());
   session_info_.Add(*session_);
   if (cpu_embedding_) {
@@ -971,10 +977,12 @@ void Dflash2Drafter::Release(const Request* request) {
 }
 
 void Dflash2Drafter::ReleaseAll() {
-  for (const auto& [request, state] : requests_) {
-    free_blocks_.insert(free_blocks_.end(), state.blocks.begin(), state.blocks.end());
-  }
   requests_.clear();
+  free_blocks_.resize(num_blocks_);
+  std::iota(free_blocks_.rbegin(), free_blocks_.rend(), int32_t{0});
+  for (auto& cache : caches_) {
+    if (cache) cache->GetByteSpan().Zero();
+  }
 }
 
 bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> feeds,

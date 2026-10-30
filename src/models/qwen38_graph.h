@@ -347,6 +347,7 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   void HeadPrefill();
   void RunHeadOnce(HeadSession& head, int rows);
   void ClearHead();
+  void ReplayStateUpdates(int src_bank, size_t kept_count);
   void CheckDeviceStatus(const char* where, const Direction* dir);
   int64_t ReadCtl(int index);
   void WriteCtl(int first, std::span<const int64_t> values);
@@ -367,20 +368,27 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   bool prefill_head_{};
   bool fold_{};
   bool force_reject_{};  // test hook (ORT_QWEN38_FORCE_REJECT): every draft is replaced before its verify
-  int verify_rows_{2};   // rows verified per target forward pass (2 = 1 draft, 3 = 2 drafts, 4 = 3 drafts)
+  bool compact_state_updates_{false};
+  int state_update_capacity_{0};
+  int verify_rows_{2};  // rows verified per target forward pass (2 = 1 draft, 3 = 2 drafts, 4 = 3 drafts, 8 = 7 drafts)
   int num_banks_{Qwen38DecodeLedger::kBanks};
   static constexpr int kBanks = Qwen38DecodeLedger::kBanks;
   static constexpr int kMaxBanks = 5;
-  static constexpr int kMaxVerifyRows = 4;
+  static constexpr int kMaxVerifyRows = 8;
   static_assert(kMaxBanks <= kQwen38GraphIdMaxPhases && kMaxVerifyRows <= kQwen38GraphIdMaxRows,
                 "every (row count, ring phase) of the decode graphs needs a CUDA graph id");
   static constexpr int kRing = 64;
   static constexpr int kArgmaxBlocks = 16;
 
   // target state
-  std::map<std::string, std::unique_ptr<DevTensor>> store_;   // in-place KV / positions
-  std::map<std::string, std::unique_ptr<DevTensor>> shared_;  // index_key buffers
-  Bank banks_[kMaxBanks + 1];                                 // last = scratch sink for S=1 present_mid
+  std::map<std::string, std::unique_ptr<DevTensor>> store_;                 // in-place KV / positions
+  std::map<std::string, std::unique_ptr<DevTensor>> shared_;                // index_key buffers
+  std::map<std::string, std::unique_ptr<DevTensor>> state_update_tensors_;  // compact state_update.* outputs
+  PlaneBuffer replay_descs_dev_[2];
+  int replay_fast_count_{0};
+  int replay_generic_count_{0};
+  int replay_fast_blocks_{0};
+  Bank banks_[kMaxBanks + 1];  // last = scratch sink for S=1 present_mid
   RowInputs inputs_[kMaxVerifyRows];
   Direction dirs_[kMaxVerifyRows][kMaxBanks];  // [rows-1][phase]
   std::vector<std::unique_ptr<DevTensor>> output_tensors_;
