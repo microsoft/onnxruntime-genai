@@ -1163,11 +1163,17 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   // Bucketing the width lets a growing context keep replaying one captured graph instead of
   // retiring one at every block boundary; columns past the live KV length are never read. Steps
   // that cannot be captured keep the exact width so their bound inputs are unchanged.
+  const bool single_windowed_decode_only =
+      (graph_capture_enabled_ && ring_blocks_ != 0 && max_requests_ == 1);
   const bool graph_eligible = Dflash2GraphCaptureAllowed(
-      graph_capture_enabled_, uniform_ingest, max_blocks, max_block_table_columns_);
+                                  graph_capture_enabled_, uniform_ingest, max_blocks, max_block_table_columns_) &&
+                              (!single_windowed_decode_only ||
+                               (drafts_wanted && num_ctx_rows <= block_size * served.size()));
   const size_t block_table_columns =
-      graph_eligible ? GetGraphBlockTableColumns(max_blocks, max_block_table_columns_)
-                     : max_blocks;
+      single_windowed_decode_only
+          ? std::max(max_blocks, max_block_table_columns_)
+          : (graph_eligible ? GetGraphBlockTableColumns(max_blocks, max_block_table_columns_)
+                            : max_blocks);
   auto fill_int32 = [this](Tensor& tensor, const std::vector<int32_t>& values) {
     auto span = Staging(tensor);
     std::memcpy(span.CpuSpan().data(), values.data(), values.size() * sizeof(int32_t));
