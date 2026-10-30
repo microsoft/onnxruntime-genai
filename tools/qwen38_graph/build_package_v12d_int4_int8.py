@@ -1070,7 +1070,7 @@ def unify_and_pack_flat_int4_int8_package(
     reuse_embed_from: Path,
 ) -> dict:
     """
-    Unify target -> model.onnx and head_r2 -> mtp.onnx for arbitrary
+    Unify target -> model.onnx (and model_s2..s4.onnx) and head_r2 -> mtp.onnx for arbitrary
     sequence_length (serving both prefill and decode), wire INT8 CPU embedding.onnx + embedding.onnx.data,
     pack all remaining BF16 initializers (norms, RoPE, router, shared_expert) into norm_and_rope.data
     in the root directory, and write weights_pool.txt.
@@ -1377,6 +1377,14 @@ def unify_and_pack_flat_int4_int8_package(
                 set_ext(t, "norm_and_rope.data", norm_rope_map[pkey], ln)
 
     onnx.save_model(models["target"], str(out_dir / "model.onnx"), save_as_external_data=False)
+    dst_s2 = out_dir / "model_s2.onnx"
+    if dst_s2.exists() or dst_s2.is_symlink():
+        dst_s2.unlink()
+    os.link(out_dir / "model.onnx", dst_s2)
+    from build_package_offload_v3 import build_multidraft_target_onnx  # noqa: PLC0415
+
+    build_multidraft_target_onnx(dst_s2, out_dir / "model_s3.onnx", verify_rows=3)
+    build_multidraft_target_onnx(dst_s2, out_dir / "model_s4.onnx", verify_rows=4)
     onnx.save_model(models["head_r2"], str(out_dir / "mtp.onnx"), save_as_external_data=False)
 
     return write_weights_pool(
@@ -1701,6 +1709,10 @@ def main() -> int:
             "libs/libqwen_mtp_head.so",
             "libs/libqwen_fold.so",
         ]
+        if "runtime_profiles" in cfg and "consumer-gpu-24g" in cfg["runtime_profiles"]:
+            cfg["runtime_profiles"]["consumer-gpu-24g"]["decoder"]["session_options"]["provider_options"][0]["cuda"][
+                "qmoe.offload_gpu_layers"
+            ] = "2"
         (out / "genai_config.json").write_text(json.dumps(cfg, indent=2) + "\n")
         manifest = {
             "variant": "qwen_flash_next_int4_int8_rc2",
