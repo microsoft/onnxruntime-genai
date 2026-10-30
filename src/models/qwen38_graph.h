@@ -194,6 +194,8 @@ struct Qwen38SuffixDrafter {
 };
 
 // Owns every device-side object of one model. Graphs stay captured across Engines (see Qwen38GraphModel::AcquireDevice).
+size_t ResolveQwen38MaxBatchSize(const Config& config);
+
 struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   explicit Qwen38GraphEngine(Qwen38GraphModel& model);
   ~Qwen38GraphEngine() override;
@@ -201,6 +203,8 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   int Capacity() const override { return capacity_; }
   int ReservedTail() const override { return std::max(verify_rows_, kReservedTail); }
   bool MtpEnabled() const override { return mtp_enabled_; }
+  size_t MaxBatchSize() const override { return static_cast<size_t>(max_batch_); }
+  bool SupportsDynamicBatching() const override { return true; }
   void Reset() override;
   void Drain() noexcept override;
 
@@ -218,10 +222,25 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   void Advance(const Qwen38CycleRecord& record, bool want_more) override;
   void CheckDecodeStatus() override;
 
+  void ResetSlot(size_t slot) override;
+  void PrefillChunkSlot(size_t slot, std::span<const int32_t> tokens) override;
+  int32_t PendingTokenSlot(size_t slot) const override;
+  void BeginDecodeSlot(size_t slot, bool want_more) override;
+  void DraftDeferredSlots(std::span<const size_t> active_slots) override;
+  void EnqueueBatchDecode(std::span<const size_t> active_slots) override;
+  void WaitBatchDecode(std::span<const size_t> active_slots,
+                       std::span<Qwen38CycleRecord> records) override;
+  void AdvanceBatchDecode(std::span<const size_t> active_slots,
+                          std::span<const Qwen38CycleRecord> records,
+                          std::span<const uint8_t> want_more,
+                          bool defer_next_cycle = false) override;
+
   double warmup_seconds{};
   double ple_register_seconds{};
 
  private:
+  static constexpr int kMaxBatch = 8;
+
   struct Bank {
     PlaneBuffer arena;
     std::map<std::string, std::unique_ptr<DevTensor>> tensors;  // keyed by input name (past_key_values.*)
@@ -266,10 +285,13 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   void BuildFastPrefill();
   void StepPrefill(std::span<const int32_t> tokens);
   void FastAppend(std::span<const int32_t> tokens);
+  void FastAppendSlot(int slot, std::span<const int32_t> tokens);
   void FastHandoff();
   void FastHeadKvPrefill();
   void FastReset();
   void MutedPrefill(bool muted);
+  void MutedPrefillSlot(int slot, bool muted);
+  void MuteSlot(int slot);
   void CallHeadR2(const int64_t tokens[2], const int64_t positions[2], const uint8_t* hidden0, const uint8_t* hidden1,
                   int commit_rows);
   void HeadPrefillFold();
@@ -281,6 +303,7 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
                              std::vector<int64_t> shape, ONNXTensorElementDataType type);
   void Warmup();
   void Draft(const uint8_t* features, size_t rows, size_t position, int32_t anchor, bool propose);
+  void DraftSlot(int slot, const uint8_t* features, size_t rows, size_t position, int32_t anchor, bool propose);
 
   void PrepRow(int rows, int row, const void* tok, const void* pos, int add, const void* ctx_in, void* ctx_out);
   void RunTarget(int rows, int phase);
@@ -291,10 +314,29 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   void RunHeadOnce(HeadSession& head, int rows);
   void ClearHead();
   void ReplayStateUpdates(int src_bank, size_t kept_count);
+  void ReplayStateUpdatesSlot(int src_bank, int slot, size_t kept_count);
+  Qwen38CycleRecord WaitCycleSlot(int slot);
   void CheckDeviceStatus(const char* where, const Direction* dir);
   int64_t ReadCtl(int index);
   void WriteCtl(int first, std::span<const int64_t> values);
+  int64_t ReadCtlSlot(int slot, int index);
+  void WriteCtlSlot(int slot, int first, std::span<const int64_t> values);
   void SyncStream();
+
+  uint8_t* ctl_slot(int slot) const { return ctl_.data() + static_cast<size_t>(slot) * 16 * sizeof(int64_t); }
+  uint8_t* ctx_commit_slot(int slot) const { return ctx_commit_.data() + static_cast<size_t>(slot) * 2 * sizeof(int64_t); }
+  uint8_t* ctx_a_slot(int slot) const { return ctx_a_.data() + static_cast<size_t>(slot) * kMaxVerifyRows * 2 * sizeof(int64_t); }
+  uint8_t* ctx_b_slot(int slot) const { return ctx_b_.data() + static_cast<size_t>(slot) * 2 * sizeof(int64_t); }
+  int64_t* result_ring_slot(int slot) const { return result_host_ + static_cast<size_t>(slot) * kRing * 8; }
+  uint8_t* d_tokens_slot(int slot) const { return d_tokens_.data() + static_cast<size_t>(slot) * token_slots_ * sizeof(int64_t); }
+  uint8_t* d_dflash_prompt_slot(int slot) const {
+    return d_dflash_prompt_.data() + static_cast<size_t>(slot) * static_cast<size_t>(fast_ ? fast_->chunk : 2048) * kDflashWidth * 2;
+  }
+  uint8_t* d_dflash_step_aux_slot(int slot) const {
+    return d_dflash_step_aux_.data() + static_cast<size_t>(slot) * kMaxVerifyRows * kDflashWidth * 2;
+  }
+  uint8_t* past_pos_slot(int slot) const { return past_pos_ + static_cast<size_t>(slot) * static_cast<size_t>(capacity_) * sizeof(int64_t); }
+  static const Request* SlotRequestKey(int slot) { return reinterpret_cast<const Request*>(static_cast<uintptr_t>(slot + 1)); }
 
   Qwen38GraphModel& model_;
   Qwen38Plane& plane_;
@@ -302,6 +344,8 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   std::unique_ptr<OrtMemoryInfo> memory_info_;
   const int capacity_;
   const int vocab_;
+  int max_batch_{1};
+  size_t token_slots_{};
   int hidden_width_{};
   int ple_width_{};
   int ple_layer_{};
@@ -326,17 +370,29 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   std::map<std::string, std::unique_ptr<DevTensor>> store_;                 // in-place KV / positions
   std::map<std::string, std::unique_ptr<DevTensor>> shared_;                // index_key buffers
   std::map<std::string, std::unique_ptr<DevTensor>> state_update_tensors_;  // compact state_update.* outputs
+  std::map<std::string, size_t> store_slot_bytes_;
+  std::map<std::string, size_t> shared_slot_bytes_;
+  std::map<std::string, size_t> bank_slot_bytes_;
+  std::map<std::string, size_t> su_slot_bytes_;
+  std::map<std::string, std::vector<int64_t>> store_slot_shape_;
+  std::map<std::string, std::vector<int64_t>> shared_slot_shape_;
+  std::map<std::string, std::vector<int64_t>> bank_slot_shape_;
+  std::map<std::string, std::vector<int64_t>> su_slot_shape_;
   PlaneBuffer replay_descs_dev_[2];
+  PlaneBuffer slot_replay_descs_dev_[2][kMaxBatch];
   int replay_fast_count_{0};
   int replay_generic_count_{0};
   int replay_fast_blocks_{0};
   Bank banks_[kMaxBanks + 1];                                 // last = scratch sink for S=1 present_mid
   RowInputs inputs_[kMaxVerifyRows];
   Direction dirs_[kMaxVerifyRows][kMaxBanks];  // [rows-1][phase]
+  RowInputs batch_inputs_[kMaxBatch];
+  Direction batch_dirs_[kMaxBatch][kMaxBanks];
   std::vector<std::unique_ptr<DevTensor>> output_tensors_;
   std::vector<std::unique_ptr<DevTensor>> head_views_;
   std::deque<PlaneBuffer> owned_;  // individually allocated tensors
   const Direction* inflight_dir_{};
+  int inflight_batch_{1};
 
   // control block / plane buffers
   PlaneBuffer ctl_, ctx_commit_, ctx_a_, ctx_b_, scratch_i32_, part_v_, part_i_, params_dev_;
@@ -402,6 +458,7 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   std::shared_ptr<Dflash2Model> dflash_model_;
   std::unique_ptr<Dflash2Drafter> dflash_;
   PlaneBuffer d_dflash_prompt_;
+  PlaneBuffer d_dflash_step_aux_;
   size_t dflash_prompt_rows_{};
   size_t dflash_prompt_position_{};
   bool dflash_ingested_in_turn_{false};
@@ -409,6 +466,16 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
 
   // host state
   Qwen38DecodeLedger ledger_;
+  std::vector<Qwen38DecodeLedger> slot_ledgers_;
+  int bank_phase_{0};
+  uint64_t slot_seq_[kMaxBatch]{};
+  int32_t slot_pending_[kMaxBatch]{};
+  size_t slot_dflash_prompt_rows_[kMaxBatch]{};
+  size_t slot_dflash_prompt_pos_[kMaxBatch]{};
+  bool slot_dflash_ingested_[kMaxBatch]{};
+  size_t slot_deferred_aux_rows_[kMaxBatch]{};
+  size_t slot_deferred_aux_pos_[kMaxBatch]{};
+  bool slot_decode_started_[kMaxBatch]{};
   Qwen38SuffixDrafter suffix_drafter_;
   int suffix_lookup_mode_{0};  // 0=off, 1=always prefer 3-gram suffix match, 2=fallback on prior draft reject
   uint64_t seq_{};
