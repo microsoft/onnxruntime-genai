@@ -9,10 +9,10 @@
 from __future__ import annotations
 
 import ast
+import copy
 import json
 import os
 import subprocess
-import types
 from collections.abc import Sequence
 from typing import Any
 
@@ -20,6 +20,7 @@ import numpy as np
 import onnx_ir as ir
 import torch
 import transformers
+from builder_config import serialize_genai_config
 from onnx_ir.tensor_adapters import TorchTensor, to_torch_dtype
 from onnxruntime.quantization.matmul_nbits_quantizer import (
     KQuantWeightOnlyQuantConfig,
@@ -32,8 +33,62 @@ from tqdm import tqdm
 from transformers import AutoTokenizer, GenerationConfig
 
 
+def load_text_backbone_adapter(
+    base_container, source, cache_dir=None, token=None
+):
+    """Load and merge an adapter whose keys target the nested text backbone."""
+    from peft import PeftConfig, get_peft_model
+    from peft.utils.save_and_load import (
+        load_peft_weights,
+        set_peft_model_state_dict,
+    )
+
+    if not hasattr(base_container, "model"):
+        raise ValueError(
+            "model-specific adapter base must expose its text backbone as model"
+        )
+    parent = base_container.model
+    attribute = "language_model" if hasattr(parent, "language_model") else None
+    text_backbone = (
+        parent.language_model if attribute is not None else parent
+    )
+    config = PeftConfig.from_pretrained(
+        source, cache_dir=cache_dir, token=token
+    )
+    adapted = get_peft_model(text_backbone, config)
+    weights = load_peft_weights(source, device="cpu")
+    load_result = set_peft_model_state_dict(
+        adapted, weights, adapter_name="default"
+    )
+    missing_adapter_keys = [
+        key
+        for key in load_result.missing_keys
+        if "lora_" in key or "modules_to_save" in key
+    ]
+    if missing_adapter_keys or load_result.unexpected_keys:
+        raise ValueError(
+            "model-specific adapter weights did not load exactly: "
+            f"missing={missing_adapter_keys}, "
+            f"unexpected={load_result.unexpected_keys}"
+        )
+    merged = adapted.merge_and_unload()
+    if attribute is None:
+        base_container.model = merged
+    else:
+        parent.language_model = merged
+    return base_container
+
+
 class Model:
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+    def __init__(
+        self, config=None, io_dtype=None, onnx_dtype=None, ep=None, cache_dir=None, extra_options=None,
+        *, graph_name=None, graph_opset=20,
+    ):
+        if graph_name is not None:
+            Model.make_graph(self, graph_name, opset=graph_opset)
+            return
+        if config is None or extra_options is None:
+            raise ValueError("Decoder construction requires a configuration and extra_options.")
         self.extra_options = extra_options
         self.make_config_init(config)
 
@@ -115,17 +170,11 @@ class Model:
         self.filename = extra_options.get("filename", "model.onnx")
         self.hf_token = extra_options.get("hf_token", True)
         self.hf_remote = extra_options.get("hf_remote", False)
+        self.revision = extra_options.get("base_revision")
 
         # States for building the model
-        self.graph = ir.Graph(
-            inputs=(),
-            outputs=(),
-            nodes=(),
-            opset_imports={"": 22, "com.microsoft": 1},
-            name="main_graph",
-        )
-        self.model = ir.Model(self.graph, ir_version=10, producer_name="onnxruntime-genai")
-        self.values = {}
+        self.make_graph("main_graph", opset=22)
+        self.graph.opset_imports["com.microsoft"] = 1
 
         # EP-specific variables
         self.ep = ep
@@ -158,12 +207,6 @@ class Model:
             "past_key_values.value": self.make_cache_names(["full_attention", "sliding_attention"], "past_key_values.value"),        # For standard models (note that `past_key_values.value` is written this way to match Hugging Face format)
             "past.conv": self.make_cache_names(["conv", "linear_attention"], "past.conv"),                                           # For causal convolution models
             "past.recurrent": self.make_cache_names(["linear_attention"], "past.recurrent"),                                         # For linear attention models
-            "block_table": "block_table",                                                                                            # For paged attention models
-            "block_table_windowed": "block_table_windowed",                                                                          # For paged attention models with sliding-window layers
-            "cumulative_sequence_lengths": "cumulative_sequence_lengths",                                                            # For paged attention models
-            "past_sequence_lengths": "past_sequence_lengths",                                                                        # For paged attention models
-            "attention_metadata": "attention_metadata",                                                                              # For paged attention models
-            "logits_indices": "logits_indices",                                                                                      # For paged attention models with a pruned LM head
         }
         self.input_types = {
             "input_ids": ir.DataType.INT64,                                                                                          # For standard models
@@ -174,12 +217,6 @@ class Model:
             "past_key_values.value": self.io_dtype,                                                                                  # For standard models (note that `past_key_values.value` is written this way to match Hugging Face format)
             "past.conv": self.io_dtype,                                                                                              # For causal convolution models
             "past.recurrent": self.io_dtype,                                                                                         # For linear attention models
-            "block_table": ir.DataType.INT32,                                                                                        # For paged attention models
-            "block_table_windowed": ir.DataType.INT32,                                                                               # For paged attention models with sliding-window layers
-            "cumulative_sequence_lengths": ir.DataType.INT32,                                                                        # For paged attention models
-            "past_sequence_lengths": ir.DataType.INT32,                                                                              # For paged attention models
-            "attention_metadata": ir.DataType.INT32,                                                                                 # For paged attention models
-            "logits_indices": ir.DataType.INT32,                                                                                     # For paged attention models with a pruned LM head
         }
         self.input_shapes = {
             "input_ids": ["batch_size", "sequence_length"],                                                                          # For standard models
@@ -201,12 +238,6 @@ class Model:
                 self.linear_key_head_dim,
                 self.linear_value_head_dim
             ],
-            "block_table": ["batch_size", "max_num_blocks"],                                                                         # For paged attention models
-            "block_table_windowed": ["batch_size", "max_num_blocks"],                                                                # Same column count as `block_table`: the op indexes it by true position, only the block ids repeat
-            "cumulative_sequence_lengths": ["batch_size + 1"],                                                                       # For paged attention models
-            "past_sequence_lengths": ["batch_size"],                                                                                 # For paged attention models
-            "attention_metadata": [3],                                                                                               # For paged attention models. Static shape: a tuple of scalars, not a per-sequence tensor.
-            "logits_indices": ["num_logits"],                                                                                        # For paged attention models with a pruned LM head
         }
         self.make_inputs_init()
 
@@ -388,7 +419,6 @@ class Model:
         self.mlp_attrs = {
             "use_proj": True,                                # Use projection style for MLP (GateProj/UpProj/DownProj)
             "use_fc": False,                                 # Use fully-connected style for MLP (FC1/FC2)
-            "fuse_gate_up": extra_options.get("fuse_mlp_gate_up", False),  # Fuse gate/up projections before quantization
             "output_0": "",                                  # Output 0 for MLP subgraph
         }
 
@@ -415,16 +445,20 @@ class Model:
         # prepacks the weights into the fpA_intB mixed-GEMM layout so the kernel can consume them directly:
         # 0 = off (raw blockwise layout), 1 = SM80/Ampere fpA_intB layout (weight_prepacked=1),
         # 2 = SM90/Hopper fpA_intB layout (weight_prepacked=2). Only meaningful on the CUDA EP; other EPs
-        # keep the raw blockwise layout. Override via extra_options["matmulnbits_weights_prepacked"].
+        # keep the raw blockwise layout. The execution provider and active NVIDIA GPU SM determine the mode.
         self.matmul_attrs["weights_prepacked"] = self.quant_config.runtime.matmulnbits_weights_prepacked
 
         self.quant_attrs = {
             "accuracy_level": self.quant_config.weights.accuracy_level,                    # ORT quantization accuracy level for MatMulNBits
             "qmoe_block_size": self.quant_config.moe.block_size,                           # QMoE block size (MXFP4 is pinned to 32 and NVFP4 to 16 inside MoEConfig)
+            "qmoe_weights_prepacked": self.quant_config.moe.weights_prepacked,
             "matmul_block_size": int(self.quant_config.weights.block_size),                # MatMulNBits block size
             "bits": 8 if self.onnx_dtype in {ir.DataType.INT8, ir.DataType.UINT8} else 4,  # Dense MatMulNBits weight bit-width (int4 vs int8 precision)
             "is_symmetric": self.quant_config.weights.symmetric,                           # Use symmetric zero-centered weight quantization
             "op_types_to_quantize": self.quant_config.weights.op_types,                    # Operator types eligible for weight quantization
+            "embedding_bits": resolve_dtype(self.extra_options["embedding_quant_type"]).bits
+            if self.extra_options.get("embedding_quant_type")
+            else (8 if self.onnx_dtype in {ir.DataType.INT8, ir.DataType.UINT8} else 4),
             "nodes_to_exclude": nodes_to_exclude,                                          # Node names excluded from weight quantization
             "use_qdq": self.quant_config.runtime.use_qdq,                                  # Create QuantizeLinear/DequantizeLinear nodes for quantized weights instead of using MatMulNBits.
         }
@@ -506,29 +540,13 @@ class Model:
         For an EP with specific subgraph requirements, this can be used to extend the current class
         with additional functionality provided by the expansion class.
         """
-        if self.ep == "trt-rtx":
-            from .expansions import TRT_RTX
+        if self.ep in {"trt-rtx", "dml"}:
+            from .expansions import DML, TRT_RTX
 
-            self.make_layernorm_subgraph = TRT_RTX.make_layernorm_subgraph.__get__(self, self.__class__)
-            self.make_skip_simplified_layer_norm = TRT_RTX.make_skip_simplified_layer_norm.__get__(self, self.__class__)
-            self.make_skip_layer_norm = TRT_RTX.make_skip_layer_norm.__get__(self, self.__class__)
-            self.make_simplified_layer_norm = TRT_RTX.make_simplified_layer_norm.__get__(self, self.__class__)
-            # TRT-RTX does not support these fused Qwen operators. Keep their unfused graphs.
-            self.make_gated_add = TRT_RTX.make_gated_add.__get__(self, self.__class__)
-            self.make_linear_attention_gate = TRT_RTX.make_linear_attention_gate.__get__(self, self.__class__)
-            self.make_gated_rms_norm = TRT_RTX.make_gated_rms_norm.__get__(self, self.__class__)
-            self.make_mrotary_embedding = TRT_RTX.make_mrotary_embedding.__get__(self, self.__class__)
-            self.make_expansion_constant = TRT_RTX.make_expansion_constant.__get__(self, self.__class__)
-            self.get_mrope_owners = TRT_RTX.get_mrope_owners.__get__(self, self.__class__)
-            self.make_mrope_positions = TRT_RTX.make_mrope_positions.__get__(self, self.__class__)
-            self.make_mrope_cache = TRT_RTX.make_mrope_cache.__get__(self, self.__class__)
-            self.make_mrope_rotation = TRT_RTX.make_mrope_rotation.__get__(self, self.__class__)
-            self.make_mrope_output = TRT_RTX.make_mrope_output.__get__(self, self.__class__)
-
-        elif self.ep == "dml":
-            from .expansions import DML
-
-            self.make_gated_add = DML.make_gated_add.__get__(self, self.__class__)
+            expansion = TRT_RTX if self.ep == "trt-rtx" else DML
+            for name, method in vars(expansion).items():
+                if callable(method):
+                    setattr(self, name, method.__get__(self, self.__class__))
 
         elif self.ep == "webgpu":
             from .expansions import WebGPU
@@ -551,6 +569,37 @@ class Model:
         }
 
     def make_inputs_init(self):
+        self.input_names.update(
+            {
+                "block_table": "block_table",
+                "block_table_windowed": "block_table_windowed",
+                "cumulative_sequence_lengths": "cumulative_sequence_lengths",
+                "past_sequence_lengths": "past_sequence_lengths",
+                "attention_metadata": "attention_metadata",
+                "logits_indices": "logits_indices",
+            }
+        )
+        self.input_types.update(
+            {
+                "block_table": ir.DataType.INT32,
+                "block_table_windowed": ir.DataType.INT32,
+                "cumulative_sequence_lengths": ir.DataType.INT32,
+                "past_sequence_lengths": ir.DataType.INT32,
+                "attention_metadata": ir.DataType.INT32,
+                "logits_indices": ir.DataType.INT32,
+            }
+        )
+        self.input_shapes.update(
+            {
+                "block_table": ["batch_size", "max_num_blocks"],
+                "block_table_windowed": ["batch_size", "max_num_blocks"],
+                "cumulative_sequence_lengths": ["batch_size + 1"],
+                "past_sequence_lengths": ["batch_size"],
+                "attention_metadata": [3],
+                "logits_indices": ["num_logits"],
+            }
+        )
+
         # Row dim of paged hidden states; "num_logits" once the LM head's rows have been selected.
         self.hidden_rows_dim = "num_tokens"
 
@@ -725,9 +774,6 @@ class Model:
         return (
             self.ep not in ["dml"]
             and not self.matmul_attrs["use_lora"]
-            and self.extra_options.get(
-                "fuse_qkv", not self.extra_options.get("disable_qkv_fusion", False)
-            )
         )
 
     def is_fused_rope_supported(self):
@@ -738,49 +784,48 @@ class Model:
         return (
             self.attention_attrs["op_type"] == "GroupQueryAttention"
             and self.ep in {"cuda", "webgpu"}
-            and self.extra_options.get("fuse_qk_norm_gqa", True)
             and (not self.attention_attrs["rope"] or self.attention_attrs["use_rope_in_attn"])
         )
+
+    def make_paged_attention_init(self):
+        valid_paged_configurations = {
+            ("cuda", ir.DataType.FLOAT16),
+            ("cuda", ir.DataType.BFLOAT16),
+            ("webgpu", ir.DataType.FLOAT16),
+        }
+        if (self.ep, self.io_dtype) not in valid_paged_configurations:
+            raise NotImplementedError(
+                "PagedAttention (use_paged_attention=true) requires CUDA with FP16/BF16 or WebGPU "
+                f"with FP16, not ({self.ep}, {self.io_dtype})."
+            )
+        block_size = int(self.extra_options.get("paged_block_size", 256))
+        self.attention_attrs["paged_block_size"] = block_size
+        if "multi_cache" in self.rope_attrs and self.original_context_length % block_size != 0:
+            raise ValueError(
+                "paged_block_size must evenly divide original_max_position_embeddings "
+                "for models that use short and long rotary caches."
+            )
+        self.attention_attrs["op_type"] = "PagedAttention"
+        print("PagedAttention (PA) is used in this model.")
+
+        # Packed Q/K/V MatMul is used unless disabled by LoRA/QLoRA or Q/K norm.
+        self.attention_attrs["use_packed_matmul"] = (
+            not self.matmul_attrs["use_lora"]
+            and not self.attention_attrs["q_norm"]
+            and not self.attention_attrs["k_norm"]
+        )
+
+        # Some architectures require a separate RoPE op before PagedAttention.
+        self.attention_attrs["use_rope_in_attn"] = self.is_fused_rope_supported()
+        if self.attention_attrs["use_rope_in_attn"] and "position_ids" in self.input_names:
+            del self.input_names["position_ids"]
 
     def make_attention_init(self, config):
         self.q_size = self.num_attn_heads * self.head_size
         self.kv_size = self.num_kv_heads * self.head_size
 
         if self.use_paged_attention:
-            valid_paged_configurations = {
-                ("cuda", ir.DataType.FLOAT16),
-                ("cuda", ir.DataType.BFLOAT16),
-                ("webgpu", ir.DataType.FLOAT16),
-            }
-            if (self.ep, self.io_dtype) not in valid_paged_configurations:
-                raise NotImplementedError(
-                    "PagedAttention (use_paged_attention=true) requires CUDA with FP16/BF16 or WebGPU "
-                    f"with FP16, not ({self.ep}, {self.io_dtype})."
-                )
-            block_size = int(self.extra_options.get("paged_block_size", 256))
-            self.attention_attrs["paged_block_size"] = block_size
-            if "multi_cache" in self.rope_attrs and self.original_context_length % block_size != 0:
-                raise ValueError(
-                    "paged_block_size must evenly divide original_max_position_embeddings "
-                    "for models that use short and long rotary caches."
-                )
-            self.attention_attrs["op_type"] = "PagedAttention"
-            print("PagedAttention (PA) is used in this model.")
-
-            # Packed Q/K/V MatMul is used unless disabled by LoRA/QLoRA or Q/K norm.
-            self.attention_attrs["use_packed_matmul"] = (
-                not self.matmul_attrs["use_lora"]
-                and not self.attention_attrs["q_norm"]
-                and not self.attention_attrs["k_norm"]
-                and self.extra_options.get(
-                    "fuse_qkv", not self.extra_options.get("disable_qkv_fusion", False)
-                )
-            )
-
-            # Some architectures require a separate RoPE op before PagedAttention.
-            self.attention_attrs["use_rope_in_attn"] = self.is_fused_rope_supported()
-            if self.attention_attrs["use_rope_in_attn"] and "position_ids" in self.input_names:
-                del self.input_names["position_ids"]
+            self.make_paged_attention_init()
 
         elif self.is_gqa_supported():
             # Change model settings for GroupQueryAttention
@@ -952,7 +997,6 @@ class Model:
                     f"Scales file layer_ids must be in [0, {self.num_layers}), got {layer_ids}."
                 )
 
-
             # `make_cache_names` keys the cache names by model layer id, so the layers that
             # actually carry a KV cache are the keys.
             kv_layer_ids = set(self.input_names.get("past_key_values.key", {}))
@@ -995,7 +1039,7 @@ class Model:
             self.make_initializer(make_kv_cache_scale(v_scales_per_layer, scale_index, layer_id), v_scale_name)
 
     def make_quant_config_init(self):
-        self.quant_config = self.extra_options.get("_quant_config", None)
+        self.quant_config = copy.deepcopy(self.extra_options.get("_quant_config", None))
         if self.quant_config is None:
             self.quant_config = QuantConfig.from_extra_options(
                 extra_options=self.extra_options,
@@ -1004,6 +1048,13 @@ class Model:
             )
         elif not isinstance(self.quant_config, QuantConfig):
             raise TypeError("_quant_config must be a QuantConfig instance")
+        self.make_weight_packing_init()
+
+    def make_weight_packing_init(self):
+        """Honor explicit target layouts without depending on the export host's GPU."""
+        if self.ep != "cuda" or torch.version.hip is not None:
+            self.quant_config.moe.weights_prepacked = 0
+            self.quant_config.runtime.matmulnbits_weights_prepacked = 0
 
     def make_moe_attrs_init(self, config):
         num_experts = (
@@ -1081,9 +1132,10 @@ class Model:
 
         # weights_prepacked is a CUDA-only QMoE layout contract. Non-CUDA EPs omit the attribute and use
         # their normal blockwise QMoE encoding, so CUDA-prepacked exports are not intended to be shared
-        # with CPU/WebGPU/TRT-RTX. Override via extra_options["qmoe_weights_prepacked"] (e.g. 0 to ship
-        # raw [E, N, K/pack] weights and let the CUDA runtime PrePack hook transform them).
+        # with CPU/WebGPU/TRT-RTX. The configured mode describes the deployment target, not the build host.
         self.moe_attrs["weights_prepacked"] = self.quant_config.moe.weights_prepacked
+        if moe_descriptor.name in {"nvfp4", "fp8"} and self.moe_attrs["weights_prepacked"] == -1:
+            self.moe_attrs["weights_prepacked"] = 0
         if mixed_width or uses_int2:
             self.moe_attrs["weights_prepacked"] = 0
 
@@ -1202,16 +1254,17 @@ class Model:
             and "/lm_head/MatMul" not in self.quant_attrs["nodes_to_exclude"]
         )
 
-    def make_tied_quantized_embedding_input_names(self):
+    def make_tied_quantized_embedding_input_names(self, lm_head):
         # Quantized tied embeddings in make_embedding() consume lm_head weights using
-        # algorithm-specific naming.
+        # algorithm-specific naming. Returns (bits, block_size, weight, scales, zero points),
+        # all taken from `lm_head` so they cannot disagree.
         #
         # Reference for quantized input names that will be produced:
         # +------------+-------------+--------------------------------------+--------------------------+-------------------------------+
         # | Symmetry   | Algorithm   | Weight Input Name Format             | Scales Input Name Format | Zero-Points Input Name Format |
         # +------------+-------------+--------------------------------------+--------------------------+-------------------------------+
-        # | asymmetric | default     | *.MatMul.weight                      | N/A                      | N/A                           |
-        # | symmetric  | default     | *.MatMul.weight_Q4                   | *.MatMul.weight_scales   | N/A                           |
+        # | asymmetric | default     | *.MatMul.weight_Q4 or _Q8            | *.MatMul.weight_scales   | *.MatMul.weight_zero_points   |
+        # | symmetric  | default     | *.MatMul.weight_Q4 or _Q8            | *.MatMul.weight_scales   | N/A                           |
         # | asymmetric | rtn*        | *.MatMul.weight_Q4G32 or _Q8G32      | *.MatMul.weight_scale    | *.MatMul.weight_zp            |
         # | symmetric  | rtn*        | *.MatMul.weight_Q4G32 or _Q8G32      | *.MatMul.weight_scale    | N/A                           |
         # | asymmetric | k_quant*    | *.MatMul.weight_Q4G32 or _Q8G32      | *.MatMul.weight_scale    | *.MatMul.weight_zp            |
@@ -1221,20 +1274,19 @@ class Model:
         #       k_quant* = k_quant, k_quant_last, k_quant_linear, k_quant_mixed
 
         # Pre-quantized lm_head (e.g. quant_auto): make_matmul_nbits registers weight under
-        # the MatMulNBits naming scheme rather than the to_nbits naming scheme. Return those
-        # names directly so make_embedding's GatherBlockQuantized references the right initializers.
-        # self.weights is the loaded model object (set in make_model before make_embedding runs).
-        wlm = getattr(getattr(self, "weights", None), "lm_head", None)
-        if wlm is not None and getattr(wlm, "qweight", None) is not None:
-            bits = wlm.bits
-            has_zeros = getattr(wlm, "qzeros", None) is not None
+        # the MatMulNBits naming scheme rather than the to_nbits naming scheme, and keeps the
+        # group size of its checkpoint.
+        if getattr(lm_head, "qweight", None) is not None:
+            has_zeros = getattr(lm_head, "qzeros", None) is not None
             return (
-                bits,
+                lm_head.bits,
+                int(lm_head.group_size),
                 "lm_head.MatMulNBits.qweight",
                 "lm_head.MatMulNBits.scales",
                 "lm_head.MatMulNBits.qzeros" if has_zeros else "",
             )
 
+        block_size = int(self.quant_attrs["matmul_block_size"])
         base_method = self.quantization_algo
         placement = self.matmul_mixed_precision
 
@@ -1248,10 +1300,11 @@ class Model:
         bits = resolve_dtype(last_matmul_type).bits if last_matmul_type else default_bits
         is_symmetric = self.quant_attrs["is_symmetric"]
 
-        if base_method == "rtn" or (base_method == "default" and bits != 4):
+        if base_method == "rtn":
             return (
                 bits,
-                f"lm_head.MatMul.weight_Q{bits}G{self.quant_attrs['matmul_block_size']}",
+                block_size,
+                f"lm_head.MatMul.weight_Q{bits}G{block_size}",
                 "lm_head.MatMul.weight_scale",
                 "lm_head.MatMul.weight_zp" if not is_symmetric else "",
             )
@@ -1259,7 +1312,8 @@ class Model:
         if base_method == "k_quant":
             return (
                 bits,
-                f"lm_head.MatMul.weight_Q{bits}G{self.quant_attrs['matmul_block_size']}",
+                block_size,
+                f"lm_head.MatMul.weight_Q{bits}G{block_size}",
                 "lm_head.MatMul.weight_scale",
                 "lm_head.MatMul.weight_zp",
             )
@@ -1268,10 +1322,65 @@ class Model:
         assert base_method == "default", "Unknown quantization algo config name detected"
         return (
             bits,
-            f"lm_head.MatMul.weight_Q{bits}" if is_symmetric else "lm_head.MatMul.weight",
-            "lm_head.MatMul.weight_scales" if is_symmetric else "",
-            "",
+            block_size,
+            f"lm_head.MatMul.weight_Q{bits}",
+            "lm_head.MatMul.weight_scales",
+            "" if is_symmetric else "lm_head.MatMul.weight_zero_points",
         )
+
+    def make_paged_config_inputs(self, inputs):
+        if self.use_paged_attention:
+            inputs["block_table"] = self.input_names["block_table"]
+            if self.has_windowed_paged_layers():
+                inputs["block_table_windowed"] = self.input_names["block_table_windowed"]
+            inputs["cumulative_sequence_lengths"] = self.input_names["cumulative_sequence_lengths"]
+            inputs["past_sequence_lengths"] = self.input_names["past_sequence_lengths"]
+            if "attention_metadata" in self.input_names:
+                inputs["attention_metadata"] = self.input_names["attention_metadata"]
+            if "logits_indices" in self.input_names:
+                inputs["logits_indices"] = self.input_names["logits_indices"]
+
+    def make_paged_window_config(self, genai_config):
+        if self.has_windowed_paged_layers():
+            # The runtime sizes the ring from `window_size` and the prefill chunk size, and
+            # builds `block_table_windowed` by repeating each request's ring across the columns.
+            # Only these layers read that table and the smaller `num_blocks_windowed` cache.
+            genai_config["model"]["decoder"]["sliding_window"] = {
+                "window_size": self.window_size,
+                "slide_key_value_cache": False,
+                "slide_inputs": False,
+                "layers": [layer_id for layer_id in range(self.num_layers) if self.is_windowed_paged_layer(layer_id)],
+                "cache_slack": 0,  # ring capacity comes from chunk_size, not from slack
+            }
+            # The ring only holds `chunk_size + window_size - 1` positions, so a prefill that
+            # ran in one shot would overwrite positions it still had to attend to. Chunking is
+            # not optional for this model, hence a default rather than an opt-in.
+            genai_config["search"]["chunk_size"] = int(
+                self.extra_options.get("paged_chunk_size", self.attention_attrs["paged_block_size"])
+            )
+        elif self.use_paged_attention and "paged_chunk_size" in self.extra_options:
+            # Nothing forces chunking without a ring, but this caps one request where
+            # max_scheduled_tokens only caps the step, so concurrent prefills interleave
+            # instead of running one at a time.
+            genai_config["search"]["chunk_size"] = int(self.extra_options["paged_chunk_size"])
+
+    def make_paged_engine_config(self, genai_config):
+        if self.use_paged_attention:
+            dynamic_batching = {
+                "block_size": self.attention_attrs["paged_block_size"],
+                "max_batch_size": int(self.extra_options.get("max_batch_size", 100)),
+            }
+            if self.has_windowed_paged_layers():
+                dynamic_batching["prefix_caching"] = False
+            if "num_blocks" in self.extra_options:
+                dynamic_batching["num_blocks"] = int(self.extra_options["num_blocks"])
+            else:
+                dynamic_batching["gpu_utilization_factor"] = float(
+                    self.extra_options.get("gpu_utilization_factor", 0.6)
+                )
+            if "max_scheduled_tokens" in self.extra_options:
+                dynamic_batching["max_scheduled_tokens"] = int(self.extra_options["max_scheduled_tokens"])
+            genai_config["engine"] = {"dynamic_batching": dynamic_batching}
 
     def make_genai_config(self, config, extra_kwargs, out_dir):
         # Create config with attributes from config.json and generation_config.json (if latter file exists)
@@ -1310,16 +1419,7 @@ class Model:
             inputs["attention_mask"] = self.input_names["attention_mask"]
         if "position_ids" in self.input_names:
             inputs["position_ids"] = self.input_names["position_ids"]
-        if self.use_paged_attention:
-            inputs["block_table"] = self.input_names["block_table"]
-            if self.has_windowed_paged_layers():
-                inputs["block_table_windowed"] = self.input_names["block_table_windowed"]
-            inputs["cumulative_sequence_lengths"] = self.input_names["cumulative_sequence_lengths"]
-            inputs["past_sequence_lengths"] = self.input_names["past_sequence_lengths"]
-            if "attention_metadata" in self.input_names:
-                inputs["attention_metadata"] = self.input_names["attention_metadata"]
-            if "logits_indices" in self.input_names:
-                inputs["logits_indices"] = self.input_names["logits_indices"]
+        self.make_paged_config_inputs(inputs)
         if "past_key_values.key" in self.input_names:
             inputs["past_key_names"] = "past_key_values.%d.key"
         if "past_key_values.value" in self.input_names:
@@ -1355,6 +1455,12 @@ class Model:
             outputs["state_update_conv_value_names"] = "state_update.%d.conv_value"
         if "state_update.recurrent_capsule" in self.output_names:
             outputs["state_update_recurrent_capsule_names"] = "state_update.%d.recurrent_capsule"
+        if "state_update.ple_tokens" in self.output_names:
+            outputs["state_update_ple_token_names"] = "state_update.%d.ple_tokens"
+        if "state_update.ple_conv_value" in self.output_names:
+            outputs["state_update_ple_conv_value_names"] = "state_update.%d.ple_conv_value"
+        if "state_update.indexer" in self.output_names:
+            outputs["state_update_indexer_names"] = "state_update.%d.indexer"
 
         genai_config = {
             "model": {
@@ -1415,30 +1521,7 @@ class Model:
                 "cache_slack": self.context_length_attrs["window_kv_cache_slack"],
             }
 
-        if self.has_windowed_paged_layers():
-            # The runtime sizes the ring from `window_size` and the prefill chunk size, and
-            # builds `block_table_windowed` by repeating each request's ring across the columns.
-            # Only these layers read that table and the smaller `num_blocks_windowed` cache.
-            genai_config["model"]["decoder"]["sliding_window"] = {
-                "window_size": self.window_size,
-                "slide_key_value_cache": False,
-                "slide_inputs": False,
-                "layers": [
-                    layer_id for layer_id in range(self.num_layers) if self.is_windowed_paged_layer(layer_id)
-                ],
-                "cache_slack": 0,  # ring capacity comes from chunk_size, not from slack
-            }
-            # The ring only holds `chunk_size + window_size - 1` positions, so a prefill that
-            # ran in one shot would overwrite positions it still had to attend to. Chunking is
-            # not optional for this model, hence a default rather than an opt-in.
-            genai_config["search"]["chunk_size"] = int(
-                self.extra_options.get("paged_chunk_size", self.attention_attrs["paged_block_size"])
-            )
-        elif self.use_paged_attention and "paged_chunk_size" in self.extra_options:
-            # Nothing forces chunking without a ring, but this caps one request where
-            # max_scheduled_tokens only caps the step, so concurrent prefills interleave
-            # instead of running one at a time.
-            genai_config["search"]["chunk_size"] = int(self.extra_options["paged_chunk_size"])
+        self.make_paged_window_config(genai_config)
 
         if self.ep != "cpu":
             ep_name = self.ep.replace("trt-rtx", "NvTensorRtRtx")
@@ -1452,30 +1535,15 @@ class Model:
             # Prepacked nodes take the fpA_intB path unconditionally. This flag also selects that
             # kernel family for raw-layout nodes and prepack-pass skips.
             session_options["ep.cuda.fpa_intb_gemm"] = "1"
+        if self.extra_options.get("use_device_allocator_for_initializers", False):
+            session_options["session.use_device_allocator_for_initializers"] = "1"
         if self.ep == "cuda" and self.matmul_attrs["weights_prepacked"] > 0:
             # MatMulNBitsFusion folds a following Add into optional bias input 5, but offline-
             # prepacked weights force the fpA_intB path, which does not support bias. Keep the
             # builder's separate Add nodes intact.
             session_options["optimization.disable_specified_optimizers"] = "MatMulNBitsFusion"
-        if self.extra_options.get("use_device_allocator_for_initializers", False):
-            session_options["session.use_device_allocator_for_initializers"] = "1"
 
-        if self.use_paged_attention:
-            dynamic_batching = {
-                "block_size": self.attention_attrs["paged_block_size"],
-                "max_batch_size": int(self.extra_options.get("max_batch_size", 100)),
-            }
-            if self.has_windowed_paged_layers():
-                dynamic_batching["prefix_caching"] = False
-            if "num_blocks" in self.extra_options:
-                dynamic_batching["num_blocks"] = int(self.extra_options["num_blocks"])
-            else:
-                dynamic_batching["gpu_utilization_factor"] = float(
-                    self.extra_options.get("gpu_utilization_factor", 0.6)
-                )
-            if "max_scheduled_tokens" in self.extra_options:
-                dynamic_batching["max_scheduled_tokens"] = int(self.extra_options["max_scheduled_tokens"])
-            genai_config["engine"] = {"dynamic_batching": dynamic_batching}
+        self.make_paged_engine_config(genai_config)
 
         if "max_draft_tokens" in self.extra_options:
             # Caps how many drafted tokens the engine verifies per step. This is independent of
@@ -1493,10 +1561,17 @@ class Model:
             ]
 
         self.update_genai_config(genai_config)
+        if hasattr(self, "embedding_model"):
+            genai_config["model"]["embedding"] = {
+                "filename": self.embedding_model.filename,
+                "session_options": {"intra_op_num_threads": 1},
+                "inputs": {"input_ids": "input_ids"},
+                "outputs": {"inputs_embeds": "inputs_embeds"},
+            }
 
         print(f"Saving GenAI config in {out_dir}")
         with open(os.path.join(out_dir, "genai_config.json"), "w") as f:
-            json.dump(genai_config, f, indent=4)
+            f.write(serialize_genai_config(genai_config))
 
     def update_genai_config(self, genai_config):
         """
@@ -1729,12 +1804,7 @@ class Model:
                 if lt == "linear_attention":
                     for proj in ("qkv_proj", "z_proj", "out_proj"):
                         customized_weight_config[f"/model/layers.{i}/linear_attn/{proj}/MatMul"] = {"bits": bits}
-                    mlp_projections = (
-                        ("gate_up_proj", "down_proj")
-                        if self.mlp_attrs.get("fuse_gate_up", False)
-                        else ("gate_proj", "up_proj", "down_proj")
-                    )
-                    for proj in mlp_projections:
+                    for proj in ("gate_proj", "up_proj", "down_proj"):
                         customized_weight_config[f"/model/layers.{i}/mlp/{proj}/MatMul"] = {"bits": bits}
 
         self.int4_customized_weight_config = customized_weight_config
@@ -1899,17 +1969,18 @@ class Model:
         # fpA_intB mixed-GEMM kernel and is independent of the quantization method or bit
         # width above, so it is applied here as an orthogonal post-pass over the quantized
         # MatMulNBits nodes.
-        self.prepack_matmulnbits_weights(model_proto)
-        return ir.from_proto(model_proto)
+        model = ir.from_proto(model_proto)
+        self.prepack_matmulnbits_weights(model)
+        return model
 
-    def prepack_matmulnbits_weights(self, model_proto):
+    def prepack_matmulnbits_weights(self, model):
         """CUDA-only post-pass that converts eligible MatMulNBits weights to the fpA_intB layout.
 
         Prepacking only rearranges the already-quantized weight bytes into the layout the
         CUDA mixed-GEMM kernel consumes directly; it does not change the numeric values and
         is independent of the quantization method (default/rtn/k_quant) and bit width
         (int4/int8) used to produce them. This lets any `algo_config` (e.g. `k_quant`)
-        be combined with `matmulnbits_weights_prepacked > 0`.
+        be combined with the explicitly selected deployment layout.
 
         Eligibility mirrors the runtime fpA_intB kernel: bits in {4, 8}, block_size supported
         by the target layout (SM80 -> {32, 64, 128}, SM90 -> {64, 128}), K % block_size == 0,
@@ -1922,67 +1993,72 @@ class Model:
         if self.ep != "cuda" or prepack_mode <= 0 or not self.quant_attrs["is_symmetric"]:
             return
 
-        from onnx import helper as onnx_helper, numpy_helper  # noqa: PLC0415
-
         force_arch = 90 if prepack_mode == 2 else 80
         allowed_block_sizes = (32, 64, 128) if prepack_mode == 1 else (64, 128)
-        initializers = {init.name: init for init in model_proto.graph.initializer}
+        graph = model.graph
+        initializers = graph.initializers
 
         candidates = 0
         prepacked = 0
-        skipped_block_sizes = set()
+        redundant_zero_points = set()
 
-        for node in model_proto.graph.node:
+        for node in graph:
             if node.op_type != "MatMulNBits" or node.domain != "com.microsoft":
                 continue
-            attrs = {a.name: a for a in node.attribute}
+            attrs = node.attributes
             if "weight_prepacked" in attrs:
-                continue
-            # Skip asymmetric weights: a non-empty zero-point input (4th input) means the
-            # weights are not symmetric, which the fpA_intB prepacked path does not target.
-            if len(node.input) > 3 and node.input[3]:
                 continue
             if not all(key in attrs for key in ("bits", "block_size", "K", "N")):
                 continue
 
             candidates += 1
-            bits = attrs["bits"].i
-            block_size = attrs["block_size"].i
-            k = attrs["K"].i
-            n = attrs["N"].i
+            bits = attrs["bits"].as_int()
+            block_size = attrs["block_size"].as_int()
+            k = attrs["K"].as_int()
+            n = attrs["N"].as_int()
             fpa_intb_eligible = (
                 bits in (4, 8)
                 and block_size in allowed_block_sizes
                 and k % block_size == 0
                 and n % (32 if bits == 8 else 64) == 0
             )
-            if not fpa_intb_eligible:
-                if block_size not in allowed_block_sizes:
-                    skipped_block_sizes.add(block_size)
+            if not fpa_intb_eligible or self.io_dtype not in (ir.DataType.FLOAT16, ir.DataType.BFLOAT16):
+                continue
+            if len(node.inputs) > 4 and node.inputs[4] is not None:
                 continue
 
-            init = initializers.get(node.input[1])
-            if init is None:
+            init = node.inputs[1]
+            if init is None or init.name not in initializers or init.const_value is None:
                 continue
+            # Shared embedding lookups must continue to read the original blockwise bytes.
+            if any(use.node is not node for use in init.uses()) or init.is_graph_output():
+                continue
+            if len(node.inputs) > 3 and node.inputs[3] is not None:
+                zero_points = node.inputs[3]
+                if zero_points.const_value is None or not np.all(
+                    zero_points.const_value.numpy() == (0x88 if bits == 4 else 0x80)
+                ):
+                    continue
 
-            packed = CudaQuantizer.prepack_matmulnbits_weight(numpy_helper.to_array(init), n, k, bits, force_arch)
-            init.CopyFrom(numpy_helper.from_array(np.ascontiguousarray(packed), init.name))
-            node.attribute.append(onnx_helper.make_attribute("weight_prepacked", prepack_mode))
+            packed = CudaQuantizer.prepack_matmulnbits_weight(init.const_value.numpy(), n, k, bits, force_arch)
+            init.const_value = ir.Tensor(
+                np.ascontiguousarray(packed),
+                name=init.name,
+                doc_string=init.const_value.doc_string,
+                metadata_props=init.const_value.metadata_props,
+            )
+            node.attributes["weight_prepacked"] = ir.AttrInt64("weight_prepacked", prepack_mode)
+            if len(node.inputs) > 3 and node.inputs[3] is not None:
+                redundant_zero_points.add(node.inputs[3].name)
+                node.replace_input_with(3, None)
             prepacked += 1
 
-        if candidates and not prepacked:
-            reason = (
-                f"block_size {sorted(skipped_block_sizes)} is not one of {list(allowed_block_sizes)} "
-                f"for the SM{force_arch} layout"
-                if skipped_block_sizes
-                else "no node met the fpA_intB K/N alignment"
-            )
-            raise ValueError(
-                f"matmulnbits_weights_prepacked={prepack_mode} prepacked 0 of {candidates} MatMulNBits "
-                f"nodes: {reason}. Choose a compatible block_size, use "
-                "matmulnbits_weights_prepacked=1 (SM80 layout, accepts block_size 32), or 0 to "
-                "prepack at session creation instead."
-            )
+        if redundant_zero_points:
+            for name in redundant_zero_points:
+                initializer = initializers[name]
+                if not initializer.uses() and not initializer.is_graph_output() and not initializer.is_graph_input():
+                    del initializers[name]
+
         if candidates:
             print(f"Prepacked {prepacked}/{candidates} MatMulNBits weights into the SM{force_arch} fpA_intB layout.")
 
@@ -2037,6 +2113,134 @@ class Model:
             commit_suffix = f"+{commit[:7]}" if (commit := cls.get_genai_commit()) else ""
             model.producer_version = f"{version}{commit_suffix}"
 
+    def make_packed_sparse_attention_indexer_merge(self, name, inputs, max_output_entries):
+        outputs = [f"{name}/output_{i}" for i in range(3)]
+        self.make_node(
+            "PackedSparseAttentionIndexerMerge",
+            inputs=inputs,
+            outputs=outputs,
+            name=name,
+            domain="com.microsoft",
+            policy_mode="append_range",
+            max_output_entries=max_output_entries,
+        )
+        for output, shape in zip(
+            outputs,
+            (["indexshare_merge_queries", max_output_entries], ["indexshare_merge_queries"], ["indexshare_merge_queries"]),
+            strict=True,
+        ):
+            self.make_value(output, ir.DataType.INT32, shape)
+
+    def make_graph(self, graph_name, opset=20, ir_version=10):
+        self.graph = ir.Graph(inputs=(), outputs=(), nodes=(), name=graph_name, opset_imports={"": opset})
+        self.model = ir.Model(self.graph, ir_version=ir_version, producer_name="onnxruntime-genai")
+        self.values = {}
+        self.node_names = set()
+
+    @classmethod
+    def save_onnx_model(cls, model, path, callback=None):
+        """Save weights and supported tensor attributes to one private data file."""
+        path = os.fspath(path)
+        data_name = os.path.basename(path) + ".data"
+        staged_data_name = data_name + ".saving"
+        staged_data_path = os.path.join(os.path.dirname(path), staged_data_name)
+        staged_model_path = path + ".saving"
+        graphs = list(model.graphs())
+        for function in model.functions.values():
+            graphs.extend([function.graph, *function.graph.subgraphs()])
+        initializers = [
+            value for graph in graphs for value in graph.initializers.values() if value.const_value is not None
+        ]
+        attributes = [
+            (node, attribute)
+            for graph in graphs
+            for node in graph
+            for attribute in node.attributes.values()
+            if not attribute.is_ref()
+            and attribute.type in {ir.AttributeType.TENSOR, ir.AttributeType.TENSORS}
+            # Keep small shape/axis constants readable by ORT shape inference.
+            and not (
+                node.op_type == "Constant" and node.domain in ("", "onnx.ai")
+                and attribute.type == ir.AttributeType.TENSOR and attribute.as_tensor().nbytes <= 256
+            )
+        ]
+        constant_attributes = [
+            (node, attribute)
+            for graph in graphs
+            for node in graph
+            if node.op_type == "Constant" and node.domain in ("", "onnx.ai")
+            for attribute in node.attributes.values()
+            if not attribute.is_ref() and attribute.type == ir.AttributeType.TENSOR
+            and attribute.as_tensor().nbytes <= 256
+            and isinstance(attribute.as_tensor(), ir.ExternalTensor)
+        ]
+        original_tensors = [value.const_value for value in initializers]
+        tensors = list(original_tensors)
+        for _, attribute in attributes:
+            tensors.extend(
+                [attribute.as_tensor()] if attribute.type == ir.AttributeType.TENSOR else attribute.as_tensors()
+            )
+        backups = []
+        installed = []
+        try:
+            for node, attribute in constant_attributes:
+                tensor = attribute.as_tensor()
+                node.attributes[attribute.name] = ir.AttrTensor(
+                    attribute.name,
+                    ir.Tensor(
+                        tensor.numpy(), dtype=tensor.dtype, name=tensor.name,
+                        doc_string=tensor.doc_string, metadata_props=tensor.metadata_props,
+                    ),
+                    attribute.doc_string,
+                )
+            # A different staging path avoids materializing existing destination tensors in memory.
+            external_tensors = ir.external_data.convert_tensors_to_external(
+                tensors, os.path.dirname(path), staged_data_name, callback=callback
+            )
+            external_tensors = iter(
+                ir.ExternalTensor(
+                    data_name, tensor.offset, tensor.length, tensor.dtype, shape=tensor.shape,
+                    name=original.name, doc_string=original.doc_string, metadata_props=original.metadata_props,
+                    base_dir=os.path.dirname(path),
+                )
+                for tensor, original in zip(external_tensors, tensors, strict=True)
+            )
+            for value in initializers:
+                value.const_value = next(external_tensors)
+            for node, attribute in attributes:
+                if attribute.type == ir.AttributeType.TENSOR:
+                    replacement = ir.AttrTensor(attribute.name, next(external_tensors), attribute.doc_string)
+                else:
+                    replacement = ir.AttrTensors(
+                        attribute.name, [next(external_tensors) for _ in attribute.as_tensors()], attribute.doc_string
+                    )
+                node.attributes[attribute.name] = replacement
+            ir.save(model, staged_model_path, format="protobuf")
+            try:
+                for destination in (path + ".data", path):
+                    if os.path.exists(destination):
+                        os.replace(destination, destination + ".bak")
+                        backups.append(destination)
+                for staged, destination in ((staged_data_path, path + ".data"), (staged_model_path, path)):
+                    os.replace(staged, destination)
+                    installed.append(destination)
+            except Exception:
+                for destination in installed:
+                    os.remove(destination)
+                for destination in reversed(backups):
+                    os.replace(destination + ".bak", destination)
+                raise
+            for destination in backups:
+                os.remove(destination + ".bak")
+        finally:
+            for value, tensor in zip(initializers, original_tensors, strict=True):
+                value.const_value = tensor
+            for node, attribute in [*attributes, *constant_attributes]:
+                node.attributes[attribute.name] = attribute
+            for staged_path in (staged_data_path, staged_model_path):
+                if os.path.exists(staged_path):
+                    os.remove(staged_path)
+
     def save_model(self, out_dir):
         print(f"Saving ONNX model in {out_dir}")
 
@@ -2047,18 +2251,15 @@ class Model:
         else:
             model = self.model
 
+        if hasattr(self, "quant_config"):
+            model.metadata_props["onnxruntime_genai.qmoe_weights_prepacked"] = str(self.moe_attrs["weights_prepacked"])
+            model.metadata_props["onnxruntime_genai.matmulnbits_weights_prepacked"] = str(self.matmul_attrs["weights_prepacked"])
+
         # Make sure all nodes are topologically sorted
         model.graph.sort()
 
-        # Save ONNX model with only one external data file and delete any existing duplicate copies
+        # Each graph owns one complete external-data file.
         out_path = os.path.join(out_dir, self.filename)
-        data_path = os.path.join(out_dir, os.path.basename(out_path) + ".data")
-        if os.path.exists(out_path):
-            print(f"Overwriting {out_path}")
-            os.remove(out_path)
-        if os.path.exists(data_path):
-            print(f"Overwriting {data_path}")
-            os.remove(data_path)
 
         with tqdm() as pbar:
             total_set = False
@@ -2073,18 +2274,14 @@ class Model:
                 pbar.set_description(f"Saving {tensor.name} ({tensor.dtype.short_name()}, {tensor.shape})")
 
             Model.stamp_build_metadata(model)
-            ir.save(
-                model,
-                out_path,
-                external_data=os.path.basename(data_path),
-                size_threshold_bytes=0,
-                callback=callback,
-            )
+            self.save_onnx_model(model, out_path, callback=callback)
 
         # Delete temporary cache dir if empty. The MTP head shares the main model's
         # cache dir and saves afterwards, so it may already be gone.
         if os.path.isdir(self.cache_dir) and not os.listdir(self.cache_dir):
             os.rmdir(self.cache_dir)
+        if hasattr(self, "embedding_model"):
+            self.embedding_model.save_model(out_dir)
 
     def to_str_dtype(self, dtype: ir.DataType) -> str:
         return dtype.name
@@ -2141,7 +2338,17 @@ class Model:
         value.const_value = ir_tensor
         self.model.graph.register_initializer(value)
 
-    def make_node(self, op_type, inputs: Sequence[str], outputs: Sequence[str], *, name: str, domain="", **kwargs):
+    def make_node(
+        self,
+        op_type,
+        inputs: Sequence[str],
+        outputs: Sequence[str],
+        *,
+        name: str,
+        domain="",
+        metadata_props: dict[str, str] | None = None,
+        **kwargs,
+    ):
         assert name, "Node name must be provided"
         if name in self.node_names:
             # Note:
@@ -2163,9 +2370,40 @@ class Model:
         # Resolve values from names
         input_values = [self.make_value(name) for name in inputs]
         output_values = [self.make_value(name) for name in outputs]
-        node = ir.node(op_type, inputs=input_values, attributes=kwargs, domain=domain, outputs=output_values, name=name)
+        node = ir.node(
+            op_type,
+            inputs=input_values,
+            attributes={key: int(value) if isinstance(value, bool) else value for key, value in kwargs.items()},
+            domain=domain,
+            outputs=output_values,
+            name=name,
+            metadata_props=metadata_props,
+        )
         self.model.graph.append(node)
         self.node_names.add(name)
+
+    def rename_value(self, name, output_name):
+        value = self.values[name]
+        if name == output_name:
+            return output_name
+        if value.is_graph_input() or value.is_initializer():
+            raise ValueError(f"Cannot rename graph input or initializer '{name}' to '{output_name}'.")
+        previous = self.values.get(output_name)
+        if previous is not None and previous is not value:
+            if previous.producer() is not None or previous.const_value is not None or previous.is_graph_input():
+                raise ValueError(f"Graph value '{output_name}' is already defined.")
+            if value.type is None:
+                value.type = previous.type
+            if value.shape is None:
+                value.shape = previous.shape
+            value.metadata_props.update(previous.metadata_props)
+            graph = self.model.graph
+            graph.outputs[:] = [value if output is previous else output for output in graph.outputs]
+            ir.convenience.replace_all_uses_with(previous, value)
+        value.name = output_name
+        self.values[output_name] = value
+        del self.values[name]
+        return output_name
 
     def make_value(self, name, dtype: ir.DataType | int | None = None, shape: Sequence[int | str] | ir.Shape | None = None) -> ir.Value:
         """Obtain or create an IR value by value name.
@@ -2247,8 +2485,9 @@ class Model:
         self.make_node("Gather", inputs=inputs, outputs=[output], name=name, axis=axis)
         self.make_value(output, dtype, shape=shape)
 
-    def make_gather_elements(self, name, inputs, dtype, shape, axis):
-        output = f"{name}/output_0"
+    def make_gather_elements(self, name, inputs, dtype, shape, axis, output=None):
+        # output is the name of the result. It defaults to {name}/output_0; pass a graph output name to write it directly.
+        output = output or f"{name}/output_0"
         self.make_node("GatherElements", inputs=inputs, outputs=[output], name=name, axis=axis)
         self.make_value(output, dtype, shape=shape)
 
@@ -2269,9 +2508,9 @@ class Model:
         self.make_node("Reshape", inputs=inputs, outputs=[output], name=name)
         self.make_value(output, dtype, shape=shape)
 
-    def make_shape(self, name, root_input, shape):
+    def make_shape(self, name, root_input, shape, **kwargs):
         output = f"{name}/output_0"
-        self.make_node("Shape", inputs=[root_input], outputs=[output], name=name)
+        self.make_node("Shape", inputs=[root_input], outputs=[output], name=name, **kwargs)
         self.make_value(output, ir.DataType.INT64, shape=shape)
 
     def make_constant_of_shape(self, name, root_input, value, dtype, shape):
@@ -2349,6 +2588,11 @@ class Model:
         self.make_node("ReduceMax", inputs=inputs, outputs=[output], name=name, keepdims=keepdims)
         self.make_value(output, dtype, shape=shape)
 
+    def make_cumsum(self, name, inputs, dtype, shape):
+        output = f"{name}/output_0"
+        self.make_node("CumSum", inputs=inputs, outputs=[output], name=name)
+        self.make_value(output, dtype, shape=shape)
+
     def make_reduce_mean(self, name, inputs, dtype, shape, keepdims=False):
         output = f"{name}/output_0"
         self.make_node("ReduceMean", inputs=inputs, outputs=[output], name=name, keepdims=keepdims)
@@ -2380,6 +2624,16 @@ class Model:
     def make_sub(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
         self.make_node("Sub", inputs=inputs, outputs=[output], name=name)
+        self.make_value(output, dtype, shape=shape)
+
+    def make_min(self, name, inputs, dtype, shape):
+        output = f"{name}/output_0"
+        self.make_node("Min", inputs=inputs, outputs=[output], name=name)
+        self.make_value(output, dtype, shape=shape)
+
+    def make_max(self, name, inputs, dtype, shape):
+        output = f"{name}/output_0"
+        self.make_node("Max", inputs=inputs, outputs=[output], name=name)
         self.make_value(output, dtype, shape=shape)
 
     def make_less(self, name, inputs):
@@ -2423,6 +2677,16 @@ class Model:
     def make_div(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
         self.make_node("Div", inputs=inputs, outputs=[output], name=name)
+        self.make_value(output, dtype, shape=shape)
+
+    def make_mod(self, name, inputs, dtype, shape):
+        output = f"{name}/output_0"
+        self.make_node("Mod", inputs=inputs, outputs=[output], name=name)
+        self.make_value(output, dtype, shape=shape)
+
+    def make_abs(self, name, root_input, dtype, shape):
+        output = f"{name}/output_0"
+        self.make_node("Abs", inputs=[root_input], outputs=[output], name=name)
         self.make_value(output, dtype, shape=shape)
 
     def make_tanh(self, name, root_input, dtype, shape):
@@ -2508,6 +2772,64 @@ class Model:
             state_window=self.context_length_attrs["state_window"],
         )
         self.make_value(output, self.io_dtype, shape=["batch_size", kwargs["channels"], "sequence_length"])
+        self.make_value(kwargs["present_conv_state"], self.io_dtype, shape=self.output_shapes["present.conv"])
+
+    def make_causal_conv_state_at_last_real_token(self, name, **kwargs):
+        """Write each row's conv state from the K-1 columns that end at its last real token.
+
+        CausalConvWithState returns its last K-1 input columns as the state. In a right-padded batch
+        those are pads for the shorter rows. Here row b reads columns n_b .. n_b + K-2 of
+        Concat(past_conv_state, conv_input), where n_b comes from make_last_real_token_position: the row's
+        last real token in this step is at index n_b - 1. Later steps then see the same state as a run of
+        that row alone. A row with n_b = 0 keeps its past state. An unpadded or left-padded row has
+        n_b = S, which gives the op's own state.
+
+        The Generator API pads only on the right and only in the first prefill, which this covers. The
+        Engine's static batching pads every step with a mask of ones, so its shorter rows still get pad
+        columns, as before. The index nodes are named by (C, K-1), so all layers of the same size share them.
+
+        S is read from root_input, the layer's [B, S, H] input, and not from the [B, C, S] conv input. With
+        WebGPU, ORT's transpose optimizer moves the Transpose before the conv past the Mul, so a Shape of the
+        conv input becomes Shape + Gather. That adds copy nodes, and the graph capture session is not created.
+        """
+        #   n (make_last_real_token_position)
+        #         |
+        #   Add([0 .. K-2])         past_conv_state   conv_input
+        #         |                         \           /
+        #   Unsqueeze(1)                     +- Concat -+
+        #         |                               |
+        #   Expand([1, C, 1]) ----------- GatherElements(axis=2)
+        #                                         |
+        #                                 present_conv_state
+        channels = kwargs["channels"]
+        state_size = kwargs["state_size"]
+
+        indices_basename = f"/model/conv_state/indices_{channels}x{state_size}"
+        add_name = f"{indices_basename}/Add"
+        add_inputs = [self.make_last_real_token_position(kwargs["root_input"]), f"/model/constants/INT32/{list(range(state_size))}"]
+        self.make_add(add_name, add_inputs, dtype=ir.DataType.INT32, shape=["batch_size", state_size])
+        unsqueeze_name = f"{indices_basename}/Unsqueeze"
+        unsqueeze_inputs = [f"{add_name}/output_0", "/model/constants/INT64/[1]"]
+        self.make_unsqueeze(unsqueeze_name, unsqueeze_inputs, dtype=ir.DataType.INT32, shape=["batch_size", 1, state_size])
+        expand_name = f"{indices_basename}/Expand"
+        expand_inputs = [f"{unsqueeze_name}/output_0", f"/model/constants/INT64/{[1, channels, 1]}"]
+        self.make_expand(expand_name, expand_inputs, dtype=ir.DataType.INT32, shape=["batch_size", channels, state_size])
+
+        concat_name = f"{name}/Concat"
+        concat_inputs = [kwargs["past_conv_state"], kwargs["conv_input"]]
+        self.make_concat(concat_name, concat_inputs, dtype=self.io_dtype, shape=["batch_size", channels, None], axis=2)
+
+        # genai keeps separate past and present conv buffers, so reading past while writing present is safe.
+        gather_name = f"{name}/GatherElements"
+        gather_inputs = [f"{concat_name}/output_0", f"{expand_name}/output_0"]
+        self.make_gather_elements(
+            gather_name,
+            gather_inputs,
+            dtype=self.io_dtype,
+            shape=["batch_size", channels, state_size],
+            axis=2,
+            output=kwargs["present_conv_state"],
+        )
 
     def make_varlen_causal_conv_with_state(self, name, **kwargs):
         """Emit packed causal convolution with optional compact state updates."""
@@ -2521,6 +2843,7 @@ class Model:
         state_update_capacity = kwargs.get("state_update_capacity", 0)
         if state_update_capacity:
             inputs.append(kwargs["state_update_capture_count"])
+            inputs.append(kwargs.get("state_update_active", ""))
 
         output = f"{name}/output_0"
         present_conv = kwargs["present_conv_state"]
@@ -2528,7 +2851,10 @@ class Model:
         if state_update_capacity:
             outputs.append(kwargs["state_update_value"])
 
-        attributes = {"activation": kwargs.get("activation", "silu")}
+        attributes = {
+            "activation": kwargs.get("activation", "silu"),
+            "dilation": kwargs.get("dilation", 1),
+        }
         if state_update_capacity:
             attributes["state_update_capacity"] = state_update_capacity
         self.make_node(
@@ -2555,6 +2881,48 @@ class Model:
             epsilon=epsilon,
         )
         self.make_value(output, self.io_dtype, shape=shape)
+
+    def make_scaled_silu(self, name, root_input, shape, branches):
+        output = f"{name}/output_0"
+        self.make_node(
+            "ScaledSiLU",
+            inputs=[root_input],
+            outputs=[output],
+            name=name,
+            domain="com.microsoft",
+            alpha=1.0 / branches,
+        )
+        self.make_value(output, self.io_dtype, shape)
+        return output
+
+    def make_hyper_connection_pre_mix(self, name, streams, pre_mix, token_shape, branches):
+        output = f"{name}/output_0"
+        self.make_node(
+            "HyperConnectionPreMix",
+            inputs=[streams, pre_mix],
+            outputs=[output],
+            name=name,
+            domain="com.microsoft",
+            num_branches=branches,
+            reduction_scale=1.0 / branches,
+        )
+        self.make_value(output, self.io_dtype, [*token_shape, self.hidden_size])
+        return output
+
+    def make_hyper_connection_post_mix(
+        self, name, streams, block_output, post_mix, token_shape, branches, output_name=None
+    ):
+        output = f"{name}/output_0" if output_name is None else output_name
+        self.make_node(
+            "HyperConnectionPostMix",
+            inputs=[streams, block_output, post_mix],
+            outputs=[output],
+            name=name,
+            domain="com.microsoft",
+            num_branches=branches,
+        )
+        self.make_value(output, self.io_dtype, [*token_shape, branches * self.hidden_size])
+        return output
 
     def make_gated_add(self, name, root_input, scaled_input, gate, shape):
         output = f"{name}/output_0"
@@ -2730,7 +3098,8 @@ class Model:
         seq_dim = kwargs.get("seq_dim", "sequence_length")
         output = "logits" if kwargs.get("logits", False) else f"{name}/output_0"
         self.make_node("MatMul", inputs=[root_input, weight], outputs=[output], name=name)
-        self.make_value(output, self.io_dtype, shape=self.make_hidden_state_shape(seq_dim=seq_dim, last_dim=last_dim))
+        output_shape = kwargs.get("output_shape", self.make_hidden_state_shape(seq_dim=seq_dim, last_dim=last_dim))
+        self.make_value(output, self.io_dtype, shape=output_shape)
 
         return name
 
@@ -2925,53 +3294,70 @@ class Model:
         else:
             raise NotImplementedError(f"The {self.onnx_dtype} precision is not currently supported.")
 
-    def make_packed_matmul_class(self, q_matmul, k_matmul, v_matmul):
+    def make_packed_matmul_class(self, *matmuls):
         if self.onnx_dtype in {ir.DataType.FLOAT, ir.DataType.FLOAT16, ir.DataType.BFLOAT16}:
-            return self.make_packed_matmul_float_class(q_matmul, k_matmul, v_matmul)
+            return self.make_packed_matmul_float_class(*matmuls)
         elif self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4, ir.DataType.INT8, ir.DataType.UINT8}:
-            return self.make_packed_matmul_int4_class(q_matmul, k_matmul, v_matmul)
+            return self.make_packed_matmul_int4_class(*matmuls)
         else:
             raise NotImplementedError(f"The {self.onnx_dtype} precision is not currently supported.")
 
-    def make_packed_matmul_float_class(self, q_matmul, k_matmul, v_matmul, **kwargs):
-        # N_q = num_attention_heads * head_size, N_kv = num_key_value_heads * head_size, H = hidden_size
-        # Combine 3 MatMuls of shape N_q x H, N_kv x H, N_kv x H into 1 packed MatMul of shape (N_q+N_kv+N_kv)xH
-        #
-        # Note: Packed MatMul is of shape (N_q+N_kv+N_kv)xH instead of Hx(N_q+N_kv+N_kv) because `make_matmul` will
-        # apply a transpose before saving
-        N_q, H = q_matmul.weight.shape
-        N_kv, _ = k_matmul.weight.shape
+    def make_packed_matmul_float_class(self, *matmuls, **kwargs):
+        if not matmuls:
+            raise ValueError("Packed MatMul requires at least one projection.")
 
         # Create dummy PackedMatMul class
         class PackedMatMul:
             def __init__(self):
-                self.weight = torch.cat([q_matmul.weight, k_matmul.weight, v_matmul.weight], dim=0).reshape(
-                    N_q + N_kv + N_kv, H
-                )
+                self.weight = torch.cat([matmul.weight for matmul in matmuls], dim=0)
 
         matmul = PackedMatMul()
         return matmul
 
-    def make_packed_matmul_int4_class(self, q_matmul, k_matmul, v_matmul):
-        if not hasattr(q_matmul, "qweight"):
-            return self.make_packed_matmul_float_class(q_matmul, k_matmul, v_matmul)
+    def make_packed_matmul_int4_class(self, *matmuls):
+        if not matmuls:
+            raise ValueError("Packed MatMul requires at least one projection.")
+        if any(hasattr(matmul, "qweight") != hasattr(matmuls[0], "qweight") for matmul in matmuls[1:]):
+            raise ValueError("All MatMuls must have the same weight representation for packed MatMul.")
+        if not hasattr(matmuls[0], "qweight"):
+            return self.make_packed_matmul_float_class(*matmuls)
+
+        first = matmuls[0]
+        if any(matmul.bits != first.bits for matmul in matmuls[1:]):
+            raise ValueError("All MatMuls must have the same bits for packed MatMul.")
+        if any(matmul.group_size != first.group_size for matmul in matmuls[1:]):
+            raise ValueError("All MatMuls must have the same group size for packed MatMul.")
+        if any(matmul.in_features != first.in_features for matmul in matmuls[1:]):
+            raise ValueError("All MatMuls must have the same input size for packed MatMul.")
+        if any(
+            (getattr(matmul, "qzeros", None) is None) != (getattr(first, "qzeros", None) is None)
+            for matmul in matmuls[1:]
+        ):
+            raise ValueError("All MatMuls must have the same zero-point representation for packed MatMul.")
+        g_idx = getattr(first, "g_idx", None)
+        if any(
+            (getattr(matmul, "g_idx", None) is None) != (g_idx is None)
+            or (g_idx is not None and not torch.equal(matmul.g_idx, g_idx))
+            for matmul in matmuls[1:]
+        ):
+            raise ValueError("All MatMuls must have the same channel mapping for packed MatMul.")
 
         # Create dummy PackedMatMul class
         class PackedMatMul:
             def __init__(self):
-                if q_matmul.bits != k_matmul.bits or q_matmul.bits != v_matmul.bits:
-                    raise ValueError("All MatMuls must have the same bits for packed MatMul.")
-                if q_matmul.group_size != k_matmul.group_size or q_matmul.group_size != v_matmul.group_size:
-                    raise ValueError("All MatMuls must have the same group size for packed MatMul.")
-                self.qweight = torch.cat([q_matmul.qweight, k_matmul.qweight, v_matmul.qweight], dim=0)
-                self.scales = torch.cat([q_matmul.scales, k_matmul.scales, v_matmul.scales], dim=0)
-                self.qzeros = torch.cat([q_matmul.qzeros, k_matmul.qzeros, v_matmul.qzeros], dim=0)
-                self.g_idx = q_matmul.g_idx
+                self.qweight = torch.cat([matmul.qweight for matmul in matmuls], dim=0)
+                self.scales = torch.cat([matmul.scales for matmul in matmuls], dim=0)
+                self.qzeros = (
+                    torch.cat([matmul.qzeros for matmul in matmuls], dim=0)
+                    if getattr(first, "qzeros", None) is not None
+                    else None
+                )
+                self.g_idx = g_idx
 
-                self.in_features = q_matmul.in_features
-                self.out_features = q_matmul.out_features + k_matmul.out_features + v_matmul.out_features
-                self.bits = q_matmul.bits
-                self.group_size = q_matmul.group_size
+                self.in_features = first.in_features
+                self.out_features = sum(matmul.out_features for matmul in matmuls)
+                self.bits = first.bits
+                self.group_size = first.group_size
 
         matmul = PackedMatMul()
         return matmul
@@ -3019,14 +3405,29 @@ class Model:
         # Tied float:     lm_head weight -> Transpose -> Gather
         # Separate:       embedding weight -------------> Gather
         can_reuse_lm_head = getattr(lm_head, "can_reuse_as_embedding", True)
+        requested_bits = (
+            self.quant_attrs.get("embedding_bits")
+            if getattr(self, "extra_options", {}).get("embedding_quant_type") is not None
+            else None
+        )
+        if requested_bits is not None:
+            if "Gather" not in self.quant_attrs["op_types_to_quantize"] or f"{basename}/Gather" in self.quant_attrs["nodes_to_exclude"]:
+                raise ValueError("embedding_quant_type conflicts with the token embedding's quantization exclusion.")
+            if requested_bits == 4 and self.onnx_dtype not in (ir.DataType.INT4, ir.DataType.UINT4):
+                raise ValueError("embedding_quant_type=int4 currently requires int4 model precision.")
+            if requested_bits != self.quant_attrs["bits"]:
+                can_reuse_lm_head = False
+        if not can_reuse_lm_head:
+            # The LM head cannot back the lookup, so the graph is untied after all.
+            self.tied_quantized_embeddings = False
+            self.tied_unquantized_embeddings = False
 
         # Use GatherBlockQuantized if and only if tied embeddings are enabled and the export model
         # is quantized. Quantized d_type in set_onnx_dtype is INT4/UINT4.
-        if self.tied_quantized_embeddings and can_reuse_lm_head:
-            bits, tied_weight_name, tied_weight_scale_name, tied_weight_zp_name = self.make_tied_quantized_embedding_input_names()
-            # A pre-quantized LM head keeps the group size of its checkpoint.
-            is_prequantized = getattr(lm_head, "qweight", None) is not None
-            block_size = int(lm_head.group_size if is_prequantized else self.quant_attrs["matmul_block_size"])
+        if self.tied_quantized_embeddings:
+            bits, block_size, tied_weight_name, tied_weight_scale_name, tied_weight_zp_name = (
+                self.make_tied_quantized_embedding_input_names(lm_head)
+            )
 
             gather_name = f"{basename}/GatherBlockQuantized"
             gather_output = f"{gather_name}/output_0"
@@ -3057,6 +3458,11 @@ class Model:
                 outputs=[gather_output],
                 name=gather_name,
                 domain="com.microsoft",
+                metadata_props=(
+                    {"layer_ann": "cpu_embedding"}
+                    if getattr(self, "use_cpu_embedding_gather", False)
+                    else None
+                ),
                 bits=bits,
                 block_size=block_size,
                 gather_axis=0,
@@ -3076,7 +3482,7 @@ class Model:
                 gather_output = f"{slice_name}/output_0"
 
         # Use Transpose + Gather for tied embeddings for float embedding layers
-        elif self.tied_unquantized_embeddings and can_reuse_lm_head:
+        elif self.tied_unquantized_embeddings:
             transpose_name = f"{basename}/Transpose"
             transpose_output = f"{transpose_name}/output_0"
             self.make_transpose(
@@ -3091,15 +3497,91 @@ class Model:
             gather_output = f"{gather_name}/output_0"
             self.make_node("Gather", inputs=[transpose_output, self.input_names["input_ids"]], outputs=[gather_output], name=gather_name)
 
+        elif (
+            getattr(self, "quant_attrs", {}).get("embedding_bits") == 8
+            and "Gather" in self.quant_attrs["op_types_to_quantize"]
+            and f"{basename}/Gather" not in self.quant_attrs["nodes_to_exclude"]
+        ):
+            if not self.quant_attrs["is_symmetric"]:
+                raise NotImplementedError("Direct INT8 embedding quantization currently requires is_symmetric=true.")
+
+            block_size = int(self.quant_attrs["matmul_block_size"])
+            signed_weight, scales = CudaQuantizer.symmetric_blockwise_quantize(
+                embedding,
+                bits=8,
+                block_size=block_size,
+            )
+            quantized_weight = (signed_weight.to(torch.int16) + 128).to(torch.uint8)
+            weight_name = "model.embed_tokens.weight_Q8"
+            scales_name = "model.embed_tokens.weight_scales"
+            self.make_initializer(quantized_weight, weight_name)
+            self.make_initializer(scales, scales_name, to=self.io_dtype)
+
+            gather_name = f"{basename}/GatherBlockQuantized"
+            gather_output = f"{gather_name}/output_0"
+            self.make_node(
+                "GatherBlockQuantized",
+                inputs=[weight_name, self.input_names["input_ids"], scales_name],
+                outputs=[gather_output],
+                name=gather_name,
+                domain="com.microsoft",
+                metadata_props=(
+                    {"layer_ann": "cpu_embedding"}
+                    if getattr(self, "use_cpu_embedding_gather", False)
+                    else None
+                ),
+                bits=8,
+                block_size=block_size,
+                gather_axis=0,
+                quantize_axis=1,
+            )
+
         else:
             weight = "model.embed_tokens.weight"
             self.make_initializer(embedding, weight, to=self.io_dtype)
 
             gather_name = f"{basename}/Gather"
             gather_output = f"{gather_name}/output_0"
-            self.make_node("Gather", inputs=[weight, self.input_names["input_ids"]], outputs=[gather_output], name=gather_name)
+            metadata_props = (
+                {"layer_ann": "cpu_embedding"}
+                if getattr(self, "use_cpu_embedding_gather", False)
+                else None
+            )
+            self.make_node(
+                "Gather",
+                inputs=[weight, self.input_names["input_ids"]],
+                outputs=[gather_output],
+                name=gather_name,
+                metadata_props=metadata_props,
+            )
 
         return gather_output
+
+    def make_embedding_component(self, embedding):
+        component = copy.copy(self)
+        if hasattr(component, "embedding_model"):
+            del component.embedding_model
+        component.filename = "embedding.onnx"
+        component.make_graph("token_embedding")
+        component.input_names = {"input_ids": "input_ids"}
+        component.layernorm_attrs = copy.deepcopy(self.layernorm_attrs)
+        component.layernorm_attrs["cast"]["use_fp32"] = False
+        component.model.graph.inputs.append(
+            component.make_value("input_ids", self.input_types["input_ids"], self.input_shapes["input_ids"])
+        )
+        component.make_embedding(embedding)
+        if hasattr(component, "weights"):
+            del component.weights
+        component.exact_quant_override_names = self.exact_quant_override_names.intersection(component.node_names)
+        component.exact_quant_overrides = {
+            name: override for name, override in self.exact_quant_overrides.items()
+            if name in component.node_names
+        }
+        component.rename_value(component.layernorm_attrs["root_input"], "inputs_embeds")
+        component.model.graph.outputs.append(
+            component.make_value("inputs_embeds", self.io_dtype, self.make_hidden_state_shape())
+        )
+        return component
 
     def make_embedding(self, embedding):
         basename = "/model/embed_tokens"
@@ -3276,7 +3758,7 @@ class Model:
 
     def make_layernorm_op(self, name, op_type, inputs, outputs, skip, new_io_dtype, **kwargs):
         # Create the LayerNorm, SimplifiedLayerNorm, SkipLayerNorm, or SkipSimplifiedLayerNorm op
-        self.make_node(op_type, inputs=inputs, outputs=outputs, name=name, domain=("com.microsoft" if skip else None), **kwargs)
+        self.make_node(op_type, inputs=inputs, outputs=outputs, name=name, domain=("com.microsoft" if skip else ""), **kwargs)
 
     def make_mscale_su(self, mscale):
         if mscale <= 1.0:
@@ -3738,7 +4220,9 @@ class Model:
 
         gather_name = f"{basename}/Gather"
         gather_output = f"{gather_name}/output_0"
-        self.make_gather(gather_name, [shape_output, "/model/constants/INT64/1"], dtype=ir.DataType.INT64, shape=None, axis=0)
+        self.make_gather(
+            gather_name, [shape_output, "/model/constants/INT64/1"], dtype=ir.DataType.INT64, shape=None, axis=0
+        )
 
         # max_num_blocks (block_table dim 1) x block_size approximates the max representable
         # context length. block_size is a build-time constant (matches the engine's block_size).
@@ -3764,11 +4248,21 @@ class Model:
         new_io_dtype = ir.DataType.FLOAT if self.layernorm_attrs["cast"]["use_fp32"] else self.io_dtype
         cast = old_io_dtype != new_io_dtype
 
+        q_norm_shape = (
+            ["num_tokens", self.q_size // self.head_size, self.head_size]
+            if self.use_paged_attention
+            else ["batch_size", "sequence_length * num_attention_heads", self.head_size]
+        )
+        k_norm_shape = (
+            ["num_tokens", self.kv_size // self.head_size, self.head_size]
+            if self.use_paged_attention
+            else ["batch_size", "sequence_length * num_key_value_heads", self.head_size]
+        )
         # Reshape Q MatMul from BxSxD to Bx(SxN)xH before LayerNorm
         q_reshape_1_name = f"/model/layers.{layer_id}/attn/q_norm/Reshape_1"
         q_reshape_1_inputs = [self.attention_attrs["q_path"], f"/model/constants/INT64/[0, -1, {self.head_size}]"]
         q_reshape_1_output = f"{q_reshape_1_name}/output_0"
-        self.make_reshape(q_reshape_1_name, q_reshape_1_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length * num_attention_heads", self.head_size])
+        self.make_reshape(q_reshape_1_name, q_reshape_1_inputs, dtype=self.io_dtype, shape=q_norm_shape)
 
         # Make Q LayerNorm
         q_layernorm_name = f"/model/layers.{layer_id}/attn/q_norm/SimplifiedLayerNormalization"
@@ -3792,7 +4286,7 @@ class Model:
         self.make_value(
             q_layernorm_outputs[0],
             dtype=new_io_dtype,
-            shape=["batch_size", "sequence_length * num_attention_heads", self.head_size],
+            shape=q_norm_shape,
         )
 
         # Reshape Q path after LayerNorm from Bx(SxN)xH to BxSxD.
@@ -3817,7 +4311,7 @@ class Model:
             k_reshape_1_name,
             k_reshape_1_inputs,
             dtype=self.io_dtype,
-            shape=["batch_size", "sequence_length * num_key_value_heads", self.head_size],
+            shape=k_norm_shape,
         )
 
         # Make K LayerNorm
@@ -3846,7 +4340,7 @@ class Model:
         self.make_value(
             k_layernorm_outputs[0],
             dtype=new_io_dtype,
-            shape=["batch_size", "sequence_length * num_key_value_heads", self.head_size],
+            shape=k_norm_shape,
         )
 
         # Reshape K path after LayerNorm from Bx(SxN)xH to BxSxD.
@@ -4387,21 +4881,41 @@ class Model:
         dt_bias = kwargs.get("dt_bias", "")
         if bool(a_log) != bool(dt_bias):
             raise ValueError("a_log and dt_bias must be set together")
-        if a_log:
+        state_update_capacity = kwargs.get("state_update_capacity", 0)
+        if a_log or state_update_capacity:
             inputs.extend([a_log, dt_bias])
+        if state_update_capacity:
+            inputs.extend(
+                [
+                    kwargs["state_update_capture_count"],
+                    kwargs["state_update_active"],
+                ]
+            )
 
         output = f"{name}/output_0"
         final_state = kwargs["final_state"]
+        outputs = [output, final_state]
+        if state_update_capacity:
+            outputs.append(kwargs["state_update_capsule"])
+        attributes = self.make_gated_delta_net_attributes(kwargs)
+        if state_update_capacity:
+            attributes["state_update_capacity"] = state_update_capacity
         self.make_node(
             "GatedDeltaNet",
             inputs=inputs,
-            outputs=[output, final_state],
+            outputs=outputs,
             name=name,
             domain="com.microsoft",
-            **self.make_gated_delta_net_attributes(kwargs),
+            **attributes,
         )
         self.make_value(output, self.io_dtype, shape=kwargs["output_shape"])
         self.make_value(final_state, ir.DataType.FLOAT, shape=kwargs["state_shape"])
+        if state_update_capacity:
+            self.make_value(
+                kwargs["state_update_capsule"],
+                ir.DataType.FLOAT,
+                shape=kwargs["state_update_capsule_shape"],
+            )
 
     def make_varlen_gated_delta_net(self, name, **kwargs):
         """Emit packed GatedDeltaNet with optional compact transition capsules."""
@@ -5037,10 +5551,7 @@ class Model:
         self.make_mlp_unpacked(layer_id, mlp, root_input)
 
         if self.mlp_attrs["use_proj"]:
-            if self.mlp_attrs.get("fuse_gate_up", False):
-                self.make_mlp_proj_fused(layer_id, mlp, root_input)
-            else:
-                self.make_mlp_proj(layer_id, mlp, root_input)
+            self.make_mlp_proj(layer_id, mlp, root_input)
         elif self.mlp_attrs["use_fc"]:
             self.make_mlp_fc(layer_id, mlp, root_input)
         else:
@@ -5178,6 +5689,8 @@ class Model:
             self.make_add_bias(mlp.up_proj.bias, up_add_name, root_input=f"{up_name}/output_0")
             up_name = up_add_name
 
+        self.make_mlp_proj_fused(layer_id, gate_matmul_name, up_matmul_name)
+
         # Make activation node(s)
         act_fn_name = self.make_activation(layer_id, root_input=f"{gate_name}/output_0")
 
@@ -5202,105 +5715,118 @@ class Model:
 
         self.mlp_attrs["output_0"] = f"{down_name}/output_0"
 
-    def make_mlp_proj_fused(self, layer_id, mlp, root_input):
-        #      root_input
-        #           |
-        #   GateUpProjMatMul
-        #           |
-        #         Split
-        #        /     \
-        #   ActFunc     |
-        #        \     /
-        #          Mul
-        #           |
-        #    DownProjMatMul
-
-        if hasattr(mlp.gate_proj, "base_layer") or hasattr(mlp.up_proj, "base_layer"):
-            raise ValueError("fuse_mlp_gate_up does not support adapted gate/up projections.")
-        if getattr(mlp.gate_proj, "quant_type", "none") != "none" or getattr(
-            mlp.up_proj, "quant_type", "none"
-        ) != "none":
-            raise ValueError("fuse_mlp_gate_up requires unpacked gate/up projections.")
-        if not mlp.gate_proj.weight.is_floating_point() or not mlp.up_proj.weight.is_floating_point():
-            raise ValueError("fuse_mlp_gate_up requires floating-point gate/up projections.")
-        expected_shape = (self.intermediate_size, self.hidden_size)
-        if tuple(mlp.gate_proj.weight.shape) != expected_shape or tuple(mlp.up_proj.weight.shape) != expected_shape:
-            raise ValueError(
-                f"fuse_mlp_gate_up requires gate/up weights with shape {expected_shape}, got "
-                f"{tuple(mlp.gate_proj.weight.shape)} and {tuple(mlp.up_proj.weight.shape)}."
-            )
-
+    def make_mlp_proj_fused(self, layer_id, gate_name, up_name):
+        """Combine compatible emitted projections, leaving their biases and policies intact."""
+        names = [f"/model/layers.{layer_id}/mlp/{kind}_proj/MatMul" for kind in ("gate", "up")]
+        if any(name in getattr(self, "exact_quant_override_names", ()) for name in (*names, gate_name, up_name)):
+            return
+        placement = getattr(self, "int4_customized_weight_config", {})
+        if placement.get(names[0]) != placement.get(names[1]):
+            return
         basename = f"/model/layers.{layer_id}/mlp"
-        gate_basename = f"{basename}/gate_proj/MatMul"
-        up_basename = f"{basename}/up_proj/MatMul"
-        excluded_nodes = set(getattr(self, "quant_attrs", {}).get("nodes_to_exclude", ()))
-        gate_excluded = getattr(mlp.gate_proj, "exclude_from_quantization", False) or gate_basename in excluded_nodes
-        up_excluded = getattr(mlp.up_proj, "exclude_from_quantization", False) or up_basename in excluded_nodes
-        if gate_excluded != up_excluded:
-            raise ValueError(
-                "fuse_mlp_gate_up cannot preserve a quantization exclusion that applies to only one of "
-                f"'{gate_basename}' and '{up_basename}'. Exclude both projections or disable fusion."
-            )
+        fused_name = f"{basename}/gate_up_proj/MatMul"
+        policy = placement.get(names[0])
+        fused_policy = placement.get(fused_name)
+        if policy is not None and fused_policy is not None and fused_policy != policy:
+            return
+        policy = policy if policy is not None else fused_policy
+        excluded = getattr(self, "quant_attrs", {}).get("nodes_to_exclude", ())
+        exclusions = [
+            name in excluded or actual in excluded for name, actual in zip(names, (gate_name, up_name), strict=True)
+        ]
+        if exclusions[0] != exclusions[1]:
+            return
 
-        gate_bias = mlp.gate_proj.bias
-        up_bias = mlp.up_proj.bias
-        for name, bias in (("gate", gate_bias), ("up", up_bias)):
-            if bias is not None and tuple(bias.shape) != (self.intermediate_size,):
-                raise ValueError(
-                    f"fuse_mlp_gate_up requires the {name} bias to have shape "
-                    f"({self.intermediate_size},), got {tuple(bias.shape)}."
+        gate = self.values[f"{gate_name}/output_0"].producer()
+        up = self.values[f"{up_name}/output_0"].producer()
+        if gate.op_type != up.op_type or gate.domain != up.domain or gate.inputs[0] is not up.inputs[0]:
+            return
+        if (gate.domain, gate.op_type) not in (("", "MatMul"), ("com.microsoft", "MatMulNBits")):
+            return
+        if gate.attributes != up.attributes or len(gate.inputs) != len(up.inputs):
+            return
+        nbits = gate.op_type == "MatMulNBits"
+        if nbits and (
+            len(gate.inputs) > 5
+            or gate.attributes["N"].as_int() != self.intermediate_size
+            or ("weight_prepacked" in gate.attributes and gate.attributes["weight_prepacked"].as_int() != 0)
+        ):
+            return
+        # MatMulNBits initializers are output-channel major; g_idx is shared across channels.
+        packed_inputs = 4 if nbits else 2
+        tensors = []
+        for index, (left, right) in enumerate(zip(gate.inputs[1:], up.inputs[1:], strict=True), 1):
+            if left is None or right is None or left.const_value is None or right.const_value is None:
+                return
+            if left.dtype != right.dtype or left.shape != right.shape:
+                return
+            if index >= packed_inputs:
+                if not np.array_equal(left.const_value.numpy(), right.const_value.numpy()):
+                    return
+                tensors.append(None)
+                continue
+            axis = 0 if nbits else 1
+            if len(left.shape) <= axis:
+                return
+            if not nbits and (len(left.shape) != 2 or left.shape[1] != self.intermediate_size):
+                return
+            if nbits and left.shape[0] != self.intermediate_size:
+                return
+            tensors.append((axis, left, right))
+
+        if nbits:
+            fused_name += "NBits"
+        inputs = [gate.inputs[0].name]
+        for index, tensor in enumerate(tensors, 1):
+            if tensor is None:
+                inputs.append(gate.inputs[index].name)
+            else:
+                axis, left, right = tensor
+                name = f"{fused_name[1:].replace('/', '.')}.input_{index}"
+                self.make_initializer(
+                    np.concatenate((left.const_value.numpy(), right.const_value.numpy()), axis=axis), name
                 )
-        bias_exists = (gate_bias is not None and torch.count_nonzero(gate_bias) > 0) or (
-            up_bias is not None and torch.count_nonzero(up_bias) > 0
+                inputs.append(name)
+        attributes = {name: attribute.value for name, attribute in gate.attributes.items()}
+        if nbits:
+            attributes["N"] *= 2
+        self.make_node(
+            gate.op_type, inputs, [f"{fused_name}/output_0"], name=fused_name, domain=gate.domain, **attributes
         )
-        if bias_exists:
-            gate_bias = torch.zeros_like(up_bias) if gate_bias is None else gate_bias
-            up_bias = torch.zeros_like(gate_bias) if up_bias is None else up_bias
-
-        gate_up_proj = types.SimpleNamespace(
-            weight=torch.cat((mlp.gate_proj.weight, mlp.up_proj.weight)),
-            bias=torch.cat((gate_bias, up_bias)) if bias_exists else None,
-            exclude_from_quantization=gate_excluded,
+        self.make_value(
+            f"{fused_name}/output_0",
+            self.io_dtype,
+            self.make_hidden_state_shape(last_dim=2 * self.intermediate_size),
         )
-        matmul_name = self.make_matmul(gate_up_proj, f"{basename}/gate_up_proj/MatMul", root_input)
-        projection_name = matmul_name
-        if bias_exists:
-            projection_name = f"{basename}/gate_up_proj/Add"
-            self.make_add_bias(
-                gate_up_proj.bias,
-                projection_name,
-                root_input=f"{matmul_name}/output_0",
-            )
-
-        gate_name = f"{basename}/gate_proj/MatMul/output_0"
-        up_name = f"{basename}/up_proj/MatMul/output_0"
+        split_outputs = [f"{basename}/gate_up_proj/Split/output_{i}" for i in range(2)]
         self.make_split(
             f"{basename}/gate_up_proj/Split",
-            [f"{projection_name}/output_0"],
-            [gate_name, up_name],
+            [f"{fused_name}/output_0"],
+            split_outputs,
             [self.io_dtype, self.io_dtype],
-            [
-                self.make_hidden_state_shape(last_dim=self.intermediate_size),
-                self.make_hidden_state_shape(last_dim=self.intermediate_size),
-            ],
+            [self.make_hidden_state_shape(last_dim=self.intermediate_size)] * 2,
             num_outputs=2,
         )
-
-        act_fn_name = self.make_activation(layer_id, root_input=gate_name)
-        mul_name = f"{basename}/Mul"
-        self.make_mul(
-            mul_name,
-            [f"{act_fn_name}/output_0", up_name],
-            dtype=self.io_dtype,
-            shape=self.make_hidden_state_shape(last_dim=self.intermediate_size),
-        )
-
-        down_name = self.make_matmul(mlp.down_proj, f"{basename}/down_proj/MatMul", f"{mul_name}/output_0")
-        if mlp.down_proj.bias is not None and torch.count_nonzero(mlp.down_proj.bias) > 0:
-            down_add_name = f"{basename}/down_proj/Add"
-            self.make_add_bias(mlp.down_proj.bias, down_add_name, root_input=f"{down_name}/output_0")
-            down_name = down_add_name
-        self.mlp_attrs["output_0"] = f"{down_name}/output_0"
+        fused = self.values[f"{fused_name}/output_0"].producer()
+        split = self.values[split_outputs[0]].producer()
+        graph = self.model.graph
+        graph.remove([fused, split])
+        old_inputs = [*gate.inputs[1:], *up.inputs[1:]]
+        old_outputs = [gate.outputs[0], up.outputs[0]]
+        ir.convenience.replace_nodes_and_values(graph, gate, [gate, up], [fused, split], old_outputs, split.outputs)
+        for temporary_name, output in zip(split_outputs, split.outputs, strict=True):
+            self.values.pop(temporary_name)
+            self.values[output.name] = output
+        for value in old_inputs:
+            if value is not None and not value.uses() and value.name in graph.initializers:
+                graph.initializers.pop(value.name)
+                self.values.pop(value.name, None)
+        if policy is not None:
+            placement[fused_name] = policy
+            for name in names:
+                placement.pop(name, None)
+        if exclusions[0]:
+            self.exclude_node_from_quantization(fused_name)
 
     def make_mlp_fc(self, layer_id, mlp, root_input):
         # Make nodes for the MLP subgraph
@@ -5411,6 +5937,8 @@ class Model:
                     f"{self.moe_attrs['quant_type']}."
                 )
             self.moe_attrs["block_size"] = experts.block_size
+            if native_quant_type == "nvfp4":
+                self.moe_attrs["weights_prepacked"] = -1
             if experts.weights_prepacked is not None:
                 self.moe_attrs["weights_prepacked"] = experts.weights_prepacked
             self.make_initializer(experts.gate_up_qweight, gate_up_name)
@@ -5621,26 +6149,15 @@ class Model:
         if "block_size" in self.moe_attrs:
             extra_kwargs["block_size"] = self.moe_attrs["block_size"]
 
-        if is_fp4:
+        if is_fp4 or quant_type == "fp8":
             # Select the MXFP4/NVFP4 kernel path; integer QMoE leaves quant_type at its default.
             extra_kwargs["quant_type"] = quant_type
-
         for attr_name in ("fc1_expert_weight_bits", "fc2_expert_weight_bits", "fc3_expert_weight_bits"):
             if attr_name in self.moe_attrs:
                 extra_kwargs[attr_name] = self.moe_attrs[attr_name]
 
-        # weights_prepacked is a tri-state CUDA QMoE attribute describing the expert-weight layout
-        # (see make_qmoe_weights, which produces the matching bytes):
-        #   -1       -> omit the attribute; the op treats weights as already
-        #               CUTLASS-prepacked, which is what the builder ships for CUDA.
-        #   1        -> weights are CUTLASS-prepacked (explicit form of the above).
-        #   0        -> weights are raw [E, N, K/pack]; the runtime PrePack hook
-        #               transforms them at load time.
-        # It is only meaningful for integer (INT4/INT8) CUDA QMoE and requires an ONNX Runtime build with
-        # the com.microsoft QMoE PrePack hook, so non-CUDA exports omit it and keep their own blockwise
-        # QMoE layout. Build separate ONNX files when CPU/WebGPU/TRT-RTX and CUDA QMoE exports are needed.
-        weights_prepacked = self.moe_attrs.get("weights_prepacked")
-        if weights_prepacked != -1 and self.ep == "cuda" and not is_fp4:
+        weights_prepacked = self.moe_attrs.get("weights_prepacked", -1)
+        if weights_prepacked != -1 and self.ep == "cuda" and (not is_fp4 or quant_type == "nvfp4"):
             extra_kwargs["weights_prepacked"] = weights_prepacked
 
         self.make_node(
@@ -5941,6 +6458,127 @@ class Model:
             self.layernorm_attrs[key] = selected[name]
         self.hidden_rows_dim = "num_logits"
 
+    def make_last_real_token_position(self, root_input):
+        """Find where each row's real tokens end in this step and return the [B, 1] int32 output name.
+
+        The result is n = min(p, S). p is the position after the last 1 in the row's attention_mask (0 when
+        the row has no 1), and S is the sequence length of root_input, any [B, S, ...] tensor of this step.
+        The row's last real token in this step is at index n - 1. When n is 0, this step has none.
+
+        This is right for every mask onnxruntime-genai's Generator API makes, and for other common ones:
+        - a right-padded first prefill: p is the row's real length (genai pads batches on the right);
+        - a left-padded prefill: p is S;
+        - zeros inside the row: the Qwen-VL mask is 0 at every pad-id token, also inside a prompt;
+        - a static mask, zero-filled to max_length for graph capture: the zeros come after p;
+        - decode: S is 1, so n is 1;
+        - a batch-1 continuation: the mask also counts past tokens, so n is S;
+        - a row with no 1: n is 0.
+        After the first prefill, every row must add the same number of new tokens, with no padding at the
+        end of the new chunk. og.Generator does this.
+
+        The nodes have fixed names, so every caller shares them: make_node skips names that already exist.
+        S then comes from the first caller's root_input, which is fine because every caller passes a
+        tensor of the same step.
+        """
+        #   attention_mask
+        #         |
+        #   Cast(int32) ---------------------+                root_input
+        #         |                          |                    |
+        #   Shape(start=1, end=2)            |            Shape(start=1, end=2)
+        #         |                          |                    |
+        #     Expand(1)                      |                Expand(1)
+        #         |                          |                    |
+        #    CumSum(axis=0)                  |                ReduceSum
+        #    [1, 2, ..., T]                  |                    |
+        #          \                         |                    |
+        #           +--------- Mul ----------+                    |
+        #                       |                                 |
+        #                ReduceMax(axis=1)                        |
+        #                        \                               /
+        #                         +------------ Min ------------+
+        #
+        # Shape writes its output on the CPU, and Expand reads its shape input on the CPU, so T and S reach
+        # the device as rows of ones. With CUDA, and with WebGPU when its graph capture is on, this adds no
+        # copy node; a copy node would block graph capture. Shape -> Gather -> Sub feeding a device op
+        # (measured with Clip) added one on CUDA. The math is int32 because WebGPU has no int64 CumSum or
+        # ReduceMax, and its Shape does not take an int64 input. WebGPU exports built without
+        # enable_webgpu_graph run the Cast on the CPU and copy the int32 mask to the device on each run.
+        basename = "/model/last_real_token"
+
+        mask_name = f"{basename}/Cast"
+        self.make_cast(mask_name, self.input_names["attention_mask"], dtype=ir.DataType.INT32, shape=["batch_size", "total_sequence_length"])
+        mask = f"{mask_name}/output_0"
+        total_shape_name = f"{basename}/positions/Shape"
+        self.make_shape(total_shape_name, mask, shape=[1], start=1, end=2)
+        total_ones_name = f"{basename}/positions/Expand"
+        total_ones_inputs = ["/model/constants/INT32/[1]", f"{total_shape_name}/output_0"]
+        self.make_expand(total_ones_name, total_ones_inputs, dtype=ir.DataType.INT32, shape=["total_sequence_length"])
+        positions_name = f"{basename}/positions/CumSum"
+        self.make_cumsum(positions_name, [f"{total_ones_name}/output_0", "/model/constants/INT64/0"], dtype=ir.DataType.INT32, shape=["total_sequence_length"])
+        mul_name = f"{basename}/Mul"
+        self.make_mul(mul_name, [mask, f"{positions_name}/output_0"], dtype=ir.DataType.INT32, shape=["batch_size", "total_sequence_length"])
+        end_name = f"{basename}/ReduceMax"
+        end_inputs = [f"{mul_name}/output_0", "/model/constants/INT64/[1]"]
+        self.make_reduce_max(end_name, end_inputs, dtype=ir.DataType.INT32, shape=["batch_size", 1], keepdims=True)
+
+        seq_shape_name = f"{basename}/seq_len/Shape"
+        self.make_shape(seq_shape_name, root_input, shape=[1], start=1, end=2)
+        seq_ones_name = f"{basename}/seq_len/Expand"
+        seq_ones_inputs = ["/model/constants/INT32/[1]", f"{seq_shape_name}/output_0"]
+        self.make_expand(seq_ones_name, seq_ones_inputs, dtype=ir.DataType.INT32, shape=["sequence_length"])
+        seq_len_name = f"{basename}/seq_len/ReduceSum"
+        self.make_reduce_sum(seq_len_name, [f"{seq_ones_name}/output_0", "/model/constants/INT64/[0]"], dtype=ir.DataType.INT32, shape=[1], keepdims=True)
+
+        min_name = f"{basename}/Min"
+        self.make_min(min_name, [f"{end_name}/output_0", f"{seq_len_name}/output_0"], dtype=ir.DataType.INT32, shape=["batch_size", 1])
+        return f"{min_name}/output_0"
+
+    def make_last_real_token_selection(self, basename, root_input):
+        """Pick each row's last real token from [B, S, H] hidden states and return the [B, 1, H] output name.
+
+        The index is n - 1, with n from make_last_real_token_position. A row with no real token reads
+        column 0.
+        """
+        #   n (make_last_real_token_position)       root_input
+        #         |                                     |
+        #   Sub(1) --> Max(0) --> Unsqueeze --> Expand  |
+        #                                         |     |
+        #                               GatherElements(axis=1)
+        sub_name = f"{basename}/Sub"
+        sub_inputs = [self.make_last_real_token_position(root_input), "/model/constants/INT32/1"]
+        self.make_sub(sub_name, sub_inputs, dtype=ir.DataType.INT32, shape=["batch_size", 1])
+        # A row with no real token would give -1, so keep the index at 0 or more.
+        max_name = f"{basename}/Max"
+        self.make_max(max_name, [f"{sub_name}/output_0", "/model/constants/INT32/0"], dtype=ir.DataType.INT32, shape=["batch_size", 1])
+        unsqueeze_name = f"{basename}/Unsqueeze"
+        self.make_unsqueeze(unsqueeze_name, [f"{max_name}/output_0", "/model/constants/INT64/[2]"], dtype=ir.DataType.INT32, shape=["batch_size", 1, 1])
+        # GatherElements returns the shape of its indices, so this assumes the LM head input is hidden_size wide.
+        expand_name = f"{basename}/Expand"
+        expand_inputs = [f"{unsqueeze_name}/output_0", f"/model/constants/INT64/[1, 1, {self.hidden_size}]"]
+        self.make_expand(expand_name, expand_inputs, dtype=ir.DataType.INT32, shape=["batch_size", 1, self.hidden_size])
+
+        gather_name = f"{basename}/GatherElements"
+        self.make_gather_elements(gather_name, [root_input, f"{expand_name}/output_0"], dtype=self.io_dtype, shape=["batch_size", 1, self.hidden_size], axis=1)
+        return f"{gather_name}/output_0"
+
+    def make_paged_lm_head(self, basename, root_input):
+        seq_dim = "num_logits"
+        if self.hidden_rows_dim != "num_logits":
+            gather_name = f"{basename}/selected_hidden_states/Gather"
+            gather_inputs = [root_input, self.input_names["logits_indices"]]
+            self.make_gather(
+                gather_name,
+                gather_inputs,
+                dtype=self.io_dtype,
+                shape=["num_logits", self.hidden_size],
+                axis=0,
+            )
+            root_input = f"{gather_name}/output_0"
+        # Outputs built after the LM head, such as aux_hidden_states, keep every row.
+        self.hidden_rows_dim = "num_tokens"
+        self.output_shapes["logits"] = ["num_logits", self.vocab_size]
+        return root_input, seq_dim
+
     def make_lm_head(self, lm_head):
         basename = "/lm_head"
 
@@ -5965,37 +6603,28 @@ class Model:
             # The runtime selects one final row per prefill request and every row required for
             # speculative verification. Rows are usually selected earlier, in the last decoder layer;
             # gather here only when the final norm's output must keep every row.
-            seq_dim = "num_logits"
-            if self.hidden_rows_dim != "num_logits":
-                gather_name = f"{basename}/selected_hidden_states/Gather"
-                gather_inputs = [root_input, self.input_names["logits_indices"]]
-                self.make_gather(
-                    gather_name,
-                    gather_inputs,
-                    dtype=self.io_dtype,
-                    shape=["num_logits", self.hidden_size],
-                    axis=0,
-                )
-                root_input = f"{gather_name}/output_0"
-            # Outputs built after the LM head, such as aux_hidden_states, keep every row.
-            self.hidden_rows_dim = "num_tokens"
-            self.output_shapes["logits"] = ["num_logits", self.vocab_size]
+            root_input, seq_dim = self.make_paged_lm_head(basename, root_input)
 
         elif self.prune_lm_head:
-            # Insert Gather(axis=1, idx=-1) + Unsqueeze(axis=1) to select only the last token's
-            # hidden state before the LM head. This avoids the expensive MatMul for all S tokens
-            # during prefill, reducing compute by ~S×.
+            # Select one hidden state per row before the LM head. This avoids the expensive MatMul
+            # for all S tokens during prefill, reducing compute by ~S×.
             seq_dim = 1
 
-            # Gather: [B, S, H] + scalar(-1) -> [B, H]
-            gather_name = f"{basename}/prune/Gather"
-            self.make_gather(gather_name, inputs=[root_input, "/model/constants/INT64/-1"], dtype=self.io_dtype, shape=["batch_size", self.hidden_size], axis=1)
+            if "attention_mask" in self.input_names:
+                root_input = self.make_last_real_token_selection(f"{basename}/prune", root_input)
+            else:
+                # Without a mask, take the last column, as before. Among non-paged exports only the Whisper
+                # decoder gets here. Its decoder prompts usually have the same length in every row, but they
+                # can differ, and then the shorter rows read a pad column, as they did before.
+                # Gather: [B, S, H] + scalar(-1) -> [B, H]
+                gather_name = f"{basename}/prune/Gather"
+                self.make_gather(gather_name, inputs=[root_input, "/model/constants/INT64/-1"], dtype=self.io_dtype, shape=["batch_size", self.hidden_size], axis=1)
 
-            # Unsqueeze: [B, H] -> [B, 1, H]
-            unsqueeze_name = f"{basename}/prune/Unsqueeze"
-            self.make_unsqueeze(unsqueeze_name, inputs=[f"{gather_name}/output_0", "/model/constants/INT64/[1]"], dtype=self.io_dtype, shape=["batch_size", 1, self.hidden_size])
+                # Unsqueeze: [B, H] -> [B, 1, H]
+                unsqueeze_name = f"{basename}/prune/Unsqueeze"
+                self.make_unsqueeze(unsqueeze_name, inputs=[f"{gather_name}/output_0", "/model/constants/INT64/[1]"], dtype=self.io_dtype, shape=["batch_size", 1, self.hidden_size])
 
-            root_input = f"{unsqueeze_name}/output_0"
+                root_input = f"{unsqueeze_name}/output_0"
 
             # Update logits output shape
             self.output_shapes["logits"] = ["batch_size", 1, self.vocab_size]
@@ -6122,6 +6751,7 @@ class Model:
         """Resolve the Transformers weight loader for this model's architecture."""
         # More specific markers must precede overlapping general markers (e.g. Qwen3.5 MoE before dense).
         model_loader_rules = (
+            ("qwen4_exp", "Qwen4ExpForConditionalGeneration"),
             ("qwen3_5_moe", "Qwen3_5MoeForConditionalGeneration"),
             ("qwen3_5", "Qwen3_5ForConditionalGeneration"),
             ("qwen3_vl_text", "Qwen3VLForConditionalGeneration"),
@@ -6179,10 +6809,31 @@ class Model:
             )
 
         else:
-            extra_kwargs = {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {}
+            extra_kwargs = {}
             auto_class = self.resolve_model_loader()
+            if "num_hidden_layers" in self.extra_options:
+                hf_config = transformers.AutoConfig.from_pretrained(
+                    self.model_name_or_path,
+                    cache_dir=self.cache_dir,
+                    token=self.hf_token,
+                    trust_remote_code=self.hf_remote,
+                    **({"revision": self.revision} if getattr(self, "revision", None) is not None else {}),
+                )
+                if hasattr(hf_config, "text_config"):
+                    hf_config.num_hidden_layers = self.num_layers
+                    hf_config.text_config.num_hidden_layers = self.num_layers
+                    if getattr(hf_config, "layer_types", None) is not None:
+                        hf_config.layer_types = hf_config.layer_types[: self.num_layers]
+                    if getattr(hf_config.text_config, "layer_types", None) is not None:
+                        hf_config.text_config.layer_types = hf_config.text_config.layer_types[: self.num_layers]
+                    extra_kwargs["config"] = hf_config
+                else:
+                    extra_kwargs["num_hidden_layers"] = self.num_layers
 
             # Load PyTorch model
+            revision = getattr(self, "revision", None)
+            if revision is not None:
+                extra_kwargs["revision"] = revision
             model = auto_class.from_pretrained(
                 self.model_name_or_path,
                 cache_dir=self.cache_dir,
@@ -6192,11 +6843,19 @@ class Model:
             )
 
         if "adapter_path" in self.extra_options:
-            from peft import PeftModel
+            if self.extra_options.get("_model_specific_hf", {}).get("adapter"):
+                model = load_text_backbone_adapter(
+                    model,
+                    self.extra_options["adapter_path"],
+                    cache_dir=self.cache_dir,
+                    token=self.hf_token,
+                )
+            else:
+                from peft import PeftModel
 
-            model = PeftModel.from_pretrained(
-                model, self.extra_options["adapter_path"], cache_dir=self.cache_dir, token=self.hf_token
-            )
+                model = PeftModel.from_pretrained(
+                    model, self.extra_options["adapter_path"], cache_dir=self.cache_dir, token=self.hf_token
+                )
 
         return model
 
@@ -6223,6 +6882,8 @@ class Model:
                     self.make_embedding(module.weight)
                 else:
                     # Exclude embedding layer from model
+                    if self.extra_options.get("dflash2_path"):
+                        self.embedding_model = self.make_embedding_component(module.weight)
                     self.layernorm_attrs["root_input"] = "inputs_embeds"
                     self.layernorm_attrs["skip_input"] = "inputs_embeds"
 
@@ -6767,3 +7428,50 @@ class Model:
     def make_postprocessing_nodes(self):
         # For most models, no postprocessing subgraph is needed
         return
+
+    def get_mrope_owners(self, rotary_dim):
+        """Map each rotary cache column to its temporal, height, or width position stream."""
+        if rotary_dim <= 0 or rotary_dim % 2 != 0 or rotary_dim > self.head_size:
+            raise ValueError("TRT-RTX MRoPE requires a positive, even rotary dimension no greater than the head size")
+        half = rotary_dim // 2
+        sections = self.rope_attrs["mrope_section"]
+        layout = self.rope_attrs["mrope_layout"]
+        if layout not in (0, 1) or len(sections) != 3 or any(s < 0 for s in sections) or sum(sections) != half:
+            raise ValueError(
+                "TRT-RTX MRoPE requires sectioned/interleaved layout and three non-negative sections "
+                "summing to half the rotary dimension"
+            )
+        if layout == 0:
+            return np.repeat(np.arange(3), sections)
+        # H/W replace every third slot; remaining columns belong to the temporal stream.
+        owners = np.zeros(half, dtype=np.int64)
+        for dim in (1, 2):
+            owners[dim : min(3 * sections[dim], half) : 3] = dim
+        return owners
+
+    def make_selected_counts(self, layer_id, selected_indices, capacity, packed):
+        """Expand the indexer's -1 padding convention into executor counts."""
+        basename = f"/model/layers.{layer_id}/attn/indexer/selected"
+        valid = f"{basename}/GreaterOrEqual"
+        selected_shape = ["num_tokens", capacity] if packed else ["batch_size", "sequence_length", capacity]
+        self.make_greater_or_equal(
+            valid,
+            [selected_indices, "/model/constants/INT32/0"],
+            selected_shape,
+        )
+        valid_int = f"{basename}/Where"
+        self.make_where(
+            valid_int,
+            [f"{valid}/output_0", "/model/constants/INT32/1", "/model/constants/INT32/0"],
+            ir.DataType.INT32,
+            selected_shape,
+        )
+        counts = f"{basename}/ReduceSum"
+        count_shape = ["num_tokens"] if packed else ["batch_size", "sequence_length"]
+        self.make_reduce_sum(
+            counts,
+            [f"{valid_int}/output_0", "/model/constants/INT64/[-1]"],
+            ir.DataType.INT32,
+            count_shape,
+        )
+        return f"{counts}/output_0"

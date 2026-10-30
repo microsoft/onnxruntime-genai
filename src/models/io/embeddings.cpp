@@ -7,15 +7,23 @@
 
 namespace Generators {
 
-Embeddings::Embeddings(State& state, Embeddings::Mode mode, const std::string& name, int64_t hidden_size)
+Embeddings::Embeddings(State& state, Embeddings::Mode mode, const std::string& name, int64_t hidden_size,
+                       int64_t feature_count)
     : state_{state},
-      shape_{static_cast<int64_t>(state_.params_->search.batch_size) * state_.params_->search.num_beams,
-             0, hidden_size > 0 ? hidden_size : model_.config_->model.decoder.hidden_size},
       type_{mode == Embeddings::Mode::Input
                 ? model_.session_info_.GetInputDataType(name)
                 : model_.session_info_.GetOutputDataType(name)},
       mode_{mode},
       name_{name} {
+  shape_ = {
+      static_cast<int64_t>(state_.params_->search.batch_size) * state_.params_->search.num_beams,
+      0,
+  };
+  if (feature_count > 0) {
+    shape_.push_back(feature_count);
+  }
+  shape_.push_back(hidden_size > 0 ? hidden_size : model_.config_->model.decoder.hidden_size);
+
   // Embeddings are only transient inputs and outputs.
   // They are never the user provided/requested model inputs/outputs
   // So only create the transient input and reuse that ortvalue for previous
@@ -52,7 +60,19 @@ void Embeddings::UpdateSequenceLength(size_t new_length) {
     shape_[1] = new_length;
 
     if (mode_ == Embeddings::Mode::Input) {
-      embeddings_->CreateTensor(shape_, state_.params_->use_graph_capture && new_length == 1);
+      const bool capture = state_.params_->use_graph_capture && new_length > 0 &&
+                           new_length <= static_cast<size_t>(state_.params_->max_graph_capture_length);
+      if (capture) {
+        auto& buffer = captured_embeddings_[new_length];
+        if (!buffer) {
+          buffer = std::make_shared<Tensor>(state_.p_session_device_inputs_, type_);
+          buffer->CreateTensor(shape_, true);
+        }
+        embeddings_ = buffer;
+      } else {
+        embeddings_ = std::make_shared<Tensor>(state_.p_session_device_inputs_, type_);
+        embeddings_->CreateTensor(shape_);
+      }
       state_.inputs_[index_] = embeddings_->GetOrtTensor();
     }
   }
@@ -70,13 +90,17 @@ void Embeddings::UseChunkView(size_t offset, size_t length) {
   }
 
   const size_t element_size = Ort::SizeOf(type_);
-  const size_t hidden_size = static_cast<size_t>(shape_[2]);
+  size_t feature_elements = 1;
+  for (size_t i = 2; i < shape_.size(); ++i) {
+    feature_elements *= static_cast<size_t>(shape_[i]);
+  }
   auto* raw = static_cast<uint8_t*>(embeddings_->GetMutableRawData());
 
-  std::array<int64_t, 3> chunk_shape{shape_[0], static_cast<int64_t>(length), shape_[2]};
+  auto chunk_shape = shape_;
+  chunk_shape[1] = static_cast<int64_t>(length);
   chunk_view_ = OrtValue::CreateTensor(embeddings_->GetOrtTensor()->GetTensorMemoryInfo(),
-                                       raw + offset * hidden_size * element_size,
-                                       length * hidden_size * element_size,
+                                       raw + offset * feature_elements * element_size,
+                                       length * feature_elements * element_size,
                                        std::span<const int64_t>(chunk_shape), type_);
   state_.inputs_[index_] = chunk_view_.get();
 }
@@ -102,40 +126,54 @@ void Embeddings::ReuseEmbeddingsBuffer(const Embeddings& other) {
 
   if (SessionCanAccess(*state_.p_session_device_, consumer_device)) {
     // Share the input embeddings OrtValue* from other with the output embedding for this.
-    staging_ = nullptr;
     consumer_ = nullptr;
-    staging_bytes_ = consumer_bytes_ = {};
+    consumer_device_ = nullptr;
+    consumer_bytes_ = {};
+    host_view_ = nullptr;
     state_.outputs_[index_] = consumer;
     return;
   }
 
   // The consumer allocated its input on a device this session has no EP for. Binding it as an
-  // output would have ORT write host bytes over that device pointer, so write a staging buffer on
-  // this session's own device instead and copy across in CopyToConsumer() once the session has run.
-  if (consumer != consumer_) {
-    // The decoder reallocated for a new sequence length: size the staging buffer to match and rewrap
-    // both sides once here, so steady-state decoding reuses the wrappers and their host mirrors.
-    auto consumer_shape = consumer->GetTensorTypeAndShapeInfo()->GetShape();
-    if (!staging_ || staging_shape_ != consumer_shape) {
-      staging_ = OrtValue::CreateTensor(state_.p_session_device_->GetAllocator(), consumer_shape, type_);
-      staging_shape_ = std::move(consumer_shape);
-      staging_bytes_ = ByteWrapTensor(*state_.p_session_device_, *staging_);
-    }
+  // output would have ORT write host bytes over that device pointer, so this session writes the
+  // buffer's host mirror instead, and CopyToConsumer() uploads it once the session has run.
+  if (consumer != consumer_ || recycle_mirror_) {
+    // Wrapped once per decoder buffer, so that decode steps reuse the wrapper and its mirror, unless
+    // the device recycles mirrors. Then every step takes a fresh one: replacing the wrapper hands the
+    // previous mirror back to a pool that reuses it only once its upload has completed, so nothing
+    // has to wait for that upload, whereas reusing a mirror drains the whole stream, including the
+    // decoder's input updates queued since (see CpuEmbedding::Workspace::Prepare).
+    auto info = consumer->GetTensorTypeAndShapeInfo();
+    auto shape = info->GetShape();
+    consumer_bytes_ = ByteWrapTensor(consumer_device, *consumer);
+    auto mirror = consumer_bytes_.empty() ? std::span<uint8_t>{} : consumer_bytes_.CpuSpan();
+    host_view_ = OrtValue::CreateTensor(*OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault),
+                                        mirror.data(), mirror.size_bytes(), shape, info->GetElementType());
     consumer_ = consumer;
     consumer_device_ = &consumer_device;
-    consumer_bytes_ = ByteWrapTensor(consumer_device, *consumer);
+    recycle_mirror_ = consumer_device.RecyclesHostMirrorsAfterUpload(mirror.size_bytes());
   }
-  state_.outputs_[index_] = staging_.get();
+  state_.outputs_[index_] = host_view_.get();
 }
 
 void Embeddings::CopyToConsumer() {
   if (!consumer_ || consumer_bytes_.empty())
     return;
 
-  consumer_bytes_.CopyFrom(staging_bytes_);
-  // A copy onto a device is queued on its stream; wait for it so the next token cannot rewrite the
-  // host mirror while the transfer is still reading it.
-  consumer_device_->Synchronize();
+  // Queued on the consumer device's stream ahead of the consumer's run. Nothing waits for it here,
+  // so that it does not hold back that run. A recycled mirror is never written again; any other is,
+  // so WaitForUpload waits for this upload first.
+  consumer_bytes_.CopyCpuToDevice();
+  if (!recycle_mirror_)
+    upload_device_ = consumer_device_;
+}
+
+void Embeddings::WaitForUpload() {
+  if (!upload_device_)
+    return;
+
+  upload_device_->Synchronize();
+  upload_device_ = nullptr;
 }
 
 }  // namespace Generators

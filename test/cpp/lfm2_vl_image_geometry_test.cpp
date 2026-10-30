@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "models/preprocessing/lfm2_vl_image_processor.h"
+#include "models/threadpool.h"
 
 // LFM2-VL splits an image into 16x16 encoder patches and the projector then pixel-unshuffles that
 // grid by 2, so the decoder sees one token per 32x32 pixel block. These tests pin the two things
@@ -92,7 +93,7 @@ TEST(Lfm2VlImagePatchesTest, FlattensPatchesInYXChannelOrderFromPaddedBatch) {
   for (size_t i = 0; i < image.size(); ++i) image[i] = static_cast<float>(i);
 
   std::vector<float> patches(geometry.num_patches * patch * patch * channels, -1.0f);
-  WriteLfm2VlImagePatches(image.data(), channels, padded_height, padded_width, geometry, patch, patches.data());
+  WriteLfm2VlImagePatches(nullptr, image.data(), channels, padded_height, padded_width, geometry, patch, patches.data());
 
   for (int64_t row = 0; row < geometry.patch_rows; ++row) {
     for (int64_t col = 0; col < geometry.patch_cols; ++col) {
@@ -105,6 +106,60 @@ TEST(Lfm2VlImagePatchesTest, FlattensPatchesInYXChannelOrderFromPaddedBatch) {
           }
         }
       }
+    }
+  }
+}
+
+TEST(Lfm2VlImagePatchesTest, ParallelWorkersMatchSequentialOutput) {
+  constexpr int64_t channels = 3, height = 512, width = 512, patch = 16;
+  const Lfm2VlImageGeometry geometry =
+      ComputeLfm2VlImageGeometry(height, width, patch, kDownsampleFactor);
+
+  std::vector<float> image(static_cast<size_t>(channels * height * width));
+  for (size_t i = 0; i < image.size(); ++i) {
+    image[i] = static_cast<float>(i % 251);
+  }
+
+  const size_t output_size =
+      static_cast<size_t>(geometry.num_patches * patch * patch * channels);
+  std::vector<float> expected(output_size);
+  WriteLfm2VlImagePatches(nullptr, image.data(), channels, height, width, geometry,
+                          patch, expected.data());
+
+  for (size_t worker_count : {1U, 3U}) {
+    ThreadPool pool{worker_count};
+    std::vector<float> actual(output_size);
+    WriteLfm2VlImagePatches(&pool, image.data(), channels, height, width, geometry,
+                            patch, actual.data());
+    EXPECT_EQ(actual, expected);
+  }
+}
+
+TEST(Lfm2VlImagePatchesTest, ParallelPaddedPatchesMatchScalarReference) {
+  constexpr int64_t height = 272, width = 496, padded_height = 288, padded_width = 512, patch = 16;
+  const auto geometry = ComputeLfm2VlImageGeometry(height, width, patch, kDownsampleFactor);
+  for (int64_t channels : {1, 3, 4}) {
+    std::vector<float> image(static_cast<size_t>(channels * padded_height * padded_width));
+    for (size_t i = 0; i < image.size(); ++i) image[i] = static_cast<float>(i);
+    std::vector<float> expected;
+    expected.reserve(static_cast<size_t>(channels * height * width));
+    for (int64_t row = 0; row < geometry.patch_rows; ++row)
+      for (int64_t col = 0; col < geometry.patch_cols; ++col)
+        for (int64_t y = 0; y < patch; ++y)
+          for (int64_t x = 0; x < patch; ++x)
+            for (int64_t c = 0; c < channels; ++c)
+              expected.push_back(image[c * padded_height * padded_width +
+                                       (row * patch + y) * padded_width + col * patch + x]);
+    std::vector<float> actual(expected.size(), -1.0f);
+    WriteLfm2VlImagePatches(nullptr, image.data(), channels, padded_height, padded_width,
+                            geometry, patch, actual.data());
+    EXPECT_EQ(actual, expected);
+    for (size_t workers : {0U, 1U, 3U}) {
+      ThreadPool pool{workers};
+      std::vector<float> parallel(expected.size(), -1.0f);
+      WriteLfm2VlImagePatches(&pool, image.data(), channels, padded_height, padded_width,
+                              geometry, patch, parallel.data());
+      EXPECT_EQ(parallel, expected);
     }
   }
 }

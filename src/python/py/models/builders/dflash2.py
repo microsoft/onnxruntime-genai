@@ -18,7 +18,7 @@ in the emitted ONNX:
    hidden state (``fc`` -> ``hidden_norm``), so only the ``block_size`` query rows carry
    a hidden stream. Context and query rows are merged into one packed
    ``PagedAttention`` call by gathering per-row K/V from ``concat(query, context)``;
-   the context rows' query is a duplicate of row 0 and their attention output is
+   the context rows' query is projected with their K/V and their attention output is
    dropped. This is what fills the draft KV cache — no separate cache-store op.
 2. **Non-causal attention** (``is_causal=0``): the query block attends to itself
    bidirectionally, with ``local_window_size`` still bounding the mask on the left.
@@ -26,8 +26,8 @@ in the emitted ONNX:
    coefficients are predicted per token and which reset at each block boundary.
 
 The drafter checkpoint ships no embedding and no LM head; both are the target's and are
-emitted with the target's initializer names so ``share_external_initializers`` can fold
-them back onto ``text.onnx.data``.
+emitted with the target's initializer names for runtime sharing. Each graph retains its
+own external-data file.
 """
 
 from __future__ import annotations
@@ -59,15 +59,23 @@ class DFlash2Builder(BlockDrafterBuilder):
         quant=None,
         lm_head_quant=None,
         embed_quant=None,
-        fuse_gate_up=False,
-        include_attention_metadata=True,
+        ep="cuda",
         compute_dtype=None,
-        fuse_qkv=False,
+        target_model=None,
+        exclude_embeds=False,
     ):
         self.draft_dir = draft_dir
         self.target_dir = target_dir
-        self.io_dtype = compute_dtype or ir.DataType.BFLOAT16
+        self.target_model = target_model
+        self.exclude_embeds = exclude_embeds
+        self.io_dtype = compute_dtype or (ir.DataType.BFLOAT16 if ep == "cuda" else io_dtype)
         self.external_dtype = io_dtype
+        self.layernorm_attrs = {
+            # WebGPU lacks BF16; widen residual-producing paths until after normalization.
+            "residual_dtype": ir.DataType.FLOAT
+            if ep == "webgpu" and io_dtype == ir.DataType.FLOAT16
+            else self.io_dtype,
+        }
         if quant is not None:
             self.quant_bits = quant["bits"]
             self.quant_block_size = quant["block_size"]
@@ -76,11 +84,9 @@ class DFlash2Builder(BlockDrafterBuilder):
         self.embed_quant = embed_quant
         self.filename = filename
         self.paged_block_size = paged_block_size
-        self.include_attention_metadata = include_attention_metadata
-        self.mlp_attrs = {"fuse_gate_up": fuse_gate_up}
-        self.attn_attrs = {"fuse_qkv": fuse_qkv}
+        self.ep = ep
         # An unconsumed graph input is copied to the CPU by ORT, which breaks CUDA graph capture.
-        self.uses_q_row_map = not fuse_qkv
+        self.uses_q_row_map = False
 
         with open(os.path.join(draft_dir, "config.json")) as f:
             cfg = json.load(f)
@@ -107,6 +113,8 @@ class DFlash2Builder(BlockDrafterBuilder):
         self.is_causal = bool(cfg.get("is_causal", False))
 
         self.taps = int(dfl["conv_kernel_size"])
+        if self.taps != 2:
+            raise ValueError(f"DFlash 2 requires conv_kernel_size=2 for block-boundary masking; got {self.taps}.")
         self.group_size = int(dfl["conv_group_size"])
         self.num_groups = self.hidden_size // self.group_size
         self.selector_rank = int(dfl["selector_rank"])
@@ -124,7 +132,7 @@ class DFlash2Builder(BlockDrafterBuilder):
         self.num_draft_tokens = self.block_size - 1
         self.input_embedding_scale = float(dfl.get("input_embedding_scale", 1.0))
         self.aux_hidden_size = self.hidden_size * len(self.target_layer_ids)
-        self.make_graph("dflash2_graph", "dflash2")
+        super().__init__("dflash2_graph", "dflash2")
 
     # ------------------------------------------------------------ rope caches
 
@@ -201,8 +209,15 @@ class DFlash2Builder(BlockDrafterBuilder):
         # Split output index is side * taps + tap (the reference reshapes to [T, 2, taps, G]).
         return [deltas[side * self.taps : (side + 1) * self.taps] for side in range(2)]
 
-    def _grouped_conv(self, prefix, x, deltas, base_kernel, shift_mask, rows):
-        """``sum_tap (base[tap] + delta[tap]) * shift(x, tap)`` inside each block."""
+    def _grouped_conv(self, prefix, x, deltas, base_kernel, shift_mask, rows, dtype=None):
+        """``coef, shift(x) -> [Cast] -> Mul -> Mask -> Add`` inside each block.
+
+        Finish convolutions retain the accumulation dtype through the following skip norm.
+        Coefficient construction and shifts stay at the normal activation dtype.
+        """
+        dtype = self.io_dtype if dtype is None else dtype
+        if dtype != self.io_dtype:
+            shift_mask = self.unary("Cast", f"{prefix}/mask/Cast", shift_mask, dtype, ["num_block", 1], to=dtype)
         terms = []
         for tap in range(self.taps):
             base_name = f"{prefix}.base_kernel.{tap}"
@@ -252,17 +267,20 @@ class DFlash2Builder(BlockDrafterBuilder):
                 self.make_node("Concat", [head, sl], [cat], name=f"{prefix}/shift{tap}/Concat", axis=0)
                 self.make_value(cat, self.io_dtype, ["num_block", self.hidden_size])
                 shifted = cat
-            term = self.binary(
-                "Mul", f"{prefix}/term{tap}/Mul", shifted, coef, self.io_dtype, ["num_block", self.hidden_size]
-            )
+            if dtype != self.io_dtype:
+                shifted = self.unary(
+                    "Cast", f"{prefix}/term{tap}/input/Cast", shifted, dtype, [rows, self.hidden_size], to=dtype
+                )
+                coef = self.unary("Cast", f"{prefix}/coef{tap}/Cast", coef, dtype, [rows, self.hidden_size], to=dtype)
+            term = self.binary("Mul", f"{prefix}/term{tap}/Mul", shifted, coef, dtype, ["num_block", self.hidden_size])
             if tap > 0:
                 term = self.binary(
-                    "Mul", f"{prefix}/term{tap}/Mask", term, shift_mask, self.io_dtype, ["num_block", self.hidden_size]
+                    "Mul", f"{prefix}/term{tap}/Mask", term, shift_mask, dtype, ["num_block", self.hidden_size]
                 )
             terms.append(term)
         out = terms[0]
         for i, term in enumerate(terms[1:], start=1):
-            out = self.binary("Add", f"{prefix}/sum{i}/Add", out, term, self.io_dtype, ["num_block", self.hidden_size])
+            out = self.binary("Add", f"{prefix}/sum{i}/Add", out, term, dtype, ["num_block", self.hidden_size])
         return out
 
     # ------------------------------------------------------------------ graph
@@ -287,28 +305,6 @@ class DFlash2Builder(BlockDrafterBuilder):
         ctx_n = self.rms_norm("/dflash2/hidden_norm", ctx, w["hidden_norm.weight"], "num_ctx")
         # Kept for drafters (LiLiCorr) whose candidate scorer reads the fc output of the anchor row.
         self.ctx_pre_norm = ctx
-        ctx_kv = []
-        for i in range(0 if self.attn_attrs["fuse_qkv"] else self.num_layers):
-            k = self.matmul(
-                f"/dflash2/layers.{i}/ctx_k/MatMul",
-                ctx_n,
-                w[f"layers.{i}.self_attn.k_proj.weight"],
-                self.hidden_size,
-                self.num_kv_heads * self.head_size,
-                "num_ctx",
-                weight_name=f"dflash2.layers.{i}.self_attn.k_proj.weight",
-            )
-            v = self.matmul(
-                f"/dflash2/layers.{i}/ctx_v/MatMul",
-                ctx_n,
-                w[f"layers.{i}.self_attn.v_proj.weight"],
-                self.hidden_size,
-                self.num_kv_heads * self.head_size,
-                "num_ctx",
-                weight_name=f"dflash2.layers.{i}.self_attn.v_proj.weight",
-            )
-            ctx_kv.append((k, v))
-
         # --- query path ---
         emb_ext = self.make_embedding("/dflash2/embed_tokens/Gather", rows_q)
         emb = self.unary(
@@ -333,7 +329,12 @@ class DFlash2Builder(BlockDrafterBuilder):
                 residual = hidden
             else:
                 x, residual = self.skip_rms_norm(
-                    f"{p}/input_layernorm", residual, hidden, w[f"layers.{i}.input_layernorm.weight"], rows_q
+                    f"{p}/input_layernorm",
+                    residual,
+                    hidden,
+                    w[f"layers.{i}.input_layernorm.weight"],
+                    rows_q,
+                    dtype=self.layernorm_attrs["residual_dtype"],
                 )
 
             # attention_conv.prepare / .finish
@@ -349,7 +350,7 @@ class DFlash2Builder(BlockDrafterBuilder):
                 rows_q,
             )
 
-            attn_out = self._make_attention(i, x, ctx_n if self.attn_attrs["fuse_qkv"] else ctx_kv[i], rows_q)
+            attn_out = self._make_attention(i, x, ctx_n, rows_q)
             attn_out = self._grouped_conv(
                 f"{p}/attention_conv/finish",
                 attn_out,
@@ -357,6 +358,7 @@ class DFlash2Builder(BlockDrafterBuilder):
                 w[f"layers.{i}.attention_conv.base_kernel"][1],
                 shift_mask,
                 rows_q,
+                dtype=self.layernorm_attrs["residual_dtype"],
             )
 
             y, residual = self.skip_rms_norm(
@@ -365,6 +367,7 @@ class DFlash2Builder(BlockDrafterBuilder):
                 attn_out,
                 w[f"layers.{i}.post_attention_layernorm.weight"],
                 rows_q,
+                dtype=self.layernorm_attrs["residual_dtype"],
             )
 
             mlp_deltas = self._conv_coefficients(
@@ -375,10 +378,24 @@ class DFlash2Builder(BlockDrafterBuilder):
             )
             m = self._make_mlp(i, y, w, rows_q)
             hidden = self._grouped_conv(
-                f"{p}/mlp_conv/finish", m, mlp_deltas[1], w[f"layers.{i}.mlp_conv.base_kernel"][1], shift_mask, rows_q
+                f"{p}/mlp_conv/finish",
+                m,
+                mlp_deltas[1],
+                w[f"layers.{i}.mlp_conv.base_kernel"][1],
+                shift_mask,
+                rows_q,
+                dtype=self.layernorm_attrs["residual_dtype"],
             )
 
-        final, _ = self.skip_rms_norm("/dflash2/norm", residual, hidden, w["norm.weight"], rows_q, want_sum=False)
+        final, _ = self.skip_rms_norm(
+            "/dflash2/norm",
+            residual,
+            hidden,
+            w["norm.weight"],
+            rows_q,
+            want_sum=False,
+            dtype=self.layernorm_attrs["residual_dtype"],
+        )
 
         self.make_candidates_and_selector(final, w)
         self.graph.sort()
@@ -389,13 +406,10 @@ class DFlash2Builder(BlockDrafterBuilder):
         return ""
 
     def _make_attention(self, i, x, context, rows_q):
-        """``context`` is the normalized context hidden state when Q/K/V are fused, else its ``(k, v)``."""
+        """Project the packed query and normalized context stream together."""
         p = f"/dflash2/layers.{i}"
         w = self.weights
-        if self.attn_attrs["fuse_qkv"]:
-            query, key, value = self.make_packed_qkv(i, x, context), "", ""
-        else:
-            query, key, value = self.make_separate_qkv(i, x, context, rows_q)
+        query, key, value = self.make_packed_qkv(i, x, context), "", ""
 
         q_norm = self.make_initializer(
             w[f"layers.{i}.self_attn.q_norm.weight"], f"dflash2.layers.{i}.self_attn.q_norm.weight", to=self.io_dtype
@@ -425,7 +439,7 @@ class DFlash2Builder(BlockDrafterBuilder):
                 k_norm,
                 "",
                 "",  # k_scale / v_scale
-                "attention_metadata" if self.include_attention_metadata else "",
+                "attention_metadata" if self.ep == "cuda" else "",
             ],
             [attn_out, f"present.{i}.key", f"present.{i}.value"],
             name=attn_name,
@@ -486,97 +500,26 @@ class DFlash2Builder(BlockDrafterBuilder):
         )
         return self.binary("Gather", f"{p}/attn/qkv_gather", qkv, "qkv_row_map", self.io_dtype, ["num_tokens", qkv_dim])
 
-    def make_separate_qkv(self, i, x, ctx_kv, rows_q):
-        p = f"/dflash2/layers.{i}"
-        w = self.weights
-        q = self.matmul(
-            f"{p}/attn/q_proj/MatMul",
-            x,
-            w[f"layers.{i}.self_attn.q_proj.weight"],
-            self.hidden_size,
-            self.num_heads * self.head_size,
-            rows_q,
-        )
-        k = self.matmul(
-            f"{p}/attn/k_proj/MatMul",
-            x,
-            w[f"layers.{i}.self_attn.k_proj.weight"],
-            self.hidden_size,
-            self.num_kv_heads * self.head_size,
-            rows_q,
-            weight_name=f"dflash2.layers.{i}.self_attn.k_proj.weight",
-        )
-        v = self.matmul(
-            f"{p}/attn/v_proj/MatMul",
-            x,
-            w[f"layers.{i}.self_attn.v_proj.weight"],
-            self.hidden_size,
-            self.num_kv_heads * self.head_size,
-            rows_q,
-            weight_name=f"dflash2.layers.{i}.self_attn.v_proj.weight",
-        )
-
-        # Interleave the block rows and the context rows into one packed token stream.
-        # `qkv_row_map` indexes concat(block, context); `q_row_map` indexes the block rows
-        # alone (context rows point at row 0 and their output is dropped).
-        kv_dim = self.num_kv_heads * self.head_size
-        k_cat = self.out(f"{p}/attn/k_concat")
-        self.make_node("Concat", [k, ctx_kv[0]], [k_cat], name=f"{p}/attn/k_concat", axis=0)
-        self.make_value(k_cat, self.io_dtype, ["num_rows", kv_dim])
-        v_cat = self.out(f"{p}/attn/v_concat")
-        self.make_node("Concat", [v, ctx_kv[1]], [v_cat], name=f"{p}/attn/v_concat", axis=0)
-        self.make_value(v_cat, self.io_dtype, ["num_rows", kv_dim])
-
-        q_all = self.binary(
-            "Gather",
-            f"{p}/attn/q_gather",
-            q,
-            "q_row_map",
-            self.io_dtype,
-            ["num_tokens", self.num_heads * self.head_size],
-        )
-        k_all = self.binary("Gather", f"{p}/attn/k_gather", k_cat, "qkv_row_map", self.io_dtype, ["num_tokens", kv_dim])
-        v_all = self.binary("Gather", f"{p}/attn/v_gather", v_cat, "qkv_row_map", self.io_dtype, ["num_tokens", kv_dim])
-        return q_all, k_all, v_all
-
     def _make_mlp(self, i, x, w, rows_q):
         p = f"/dflash2/layers.{i}/mlp"
-        if self.mlp_attrs["fuse_gate_up"]:
-            gate_up = self.matmul(
-                f"{p}/gate_up_proj/MatMul",
-                x,
-                torch.cat((w[f"layers.{i}.mlp.gate_proj.weight"], w[f"layers.{i}.mlp.up_proj.weight"]), dim=0),
-                self.hidden_size,
-                2 * self.intermediate_size,
-                rows_q,
-            )
-            gate, up = self.out(f"{p}/gate_proj/MatMul"), self.out(f"{p}/up_proj/MatMul")
-            self.make_node(
-                "Split",
-                [gate_up, self.const([self.intermediate_size, self.intermediate_size])],
-                [gate, up],
-                name=f"{p}/gate_up_proj/Split",
-                axis=-1,
-            )
-            self.make_value(gate, self.io_dtype, [rows_q, self.intermediate_size])
-            self.make_value(up, self.io_dtype, [rows_q, self.intermediate_size])
-        else:
-            gate = self.matmul(
-                f"{p}/gate_proj/MatMul",
-                x,
-                w[f"layers.{i}.mlp.gate_proj.weight"],
-                self.hidden_size,
-                self.intermediate_size,
-                rows_q,
-            )
-            up = self.matmul(
-                f"{p}/up_proj/MatMul",
-                x,
-                w[f"layers.{i}.mlp.up_proj.weight"],
-                self.hidden_size,
-                self.intermediate_size,
-                rows_q,
-            )
+        gate_up = self.matmul(
+            f"{p}/gate_up_proj/MatMul",
+            x,
+            torch.cat((w[f"layers.{i}.mlp.gate_proj.weight"], w[f"layers.{i}.mlp.up_proj.weight"]), dim=0),
+            self.hidden_size,
+            2 * self.intermediate_size,
+            rows_q,
+        )
+        gate, up = self.out(f"{p}/gate_proj/MatMul"), self.out(f"{p}/up_proj/MatMul")
+        self.make_node(
+            "Split",
+            [gate_up, self.const([self.intermediate_size, self.intermediate_size])],
+            [gate, up],
+            name=f"{p}/gate_up_proj/Split",
+            axis=-1,
+        )
+        self.make_value(gate, self.io_dtype, [rows_q, self.intermediate_size])
+        self.make_value(up, self.io_dtype, [rows_q, self.intermediate_size])
         sig = self.unary("Sigmoid", f"{p}/act/Sigmoid", gate, self.io_dtype, [rows_q, self.intermediate_size])
         silu = self.binary("Mul", f"{p}/act/Mul", gate, sig, self.io_dtype, [rows_q, self.intermediate_size])
         prod = self.binary("Mul", f"{p}/act/MulUp", silu, up, self.io_dtype, [rows_q, self.intermediate_size])
@@ -778,20 +721,28 @@ class DFlash2Builder(BlockDrafterBuilder):
                 continue
             with safetensors_torch.safe_open(shard, framework="pt") as f:
                 for key in f.keys():  # noqa: SIM118 -- safetensors handles are not iterable
-                    if key in embed_keys:
+                    if key in embed_keys and self.target_model is None and not self.exclude_embeds:
                         weights["embed_tokens.weight"] = f.get_tensor(key)
                     elif key == "lm_head.weight":
                         weights["lm_head.weight"] = f.get_tensor(key)
                     elif key in ("lm_head.weight_scale", "lm_head.weight_global_scale"):
                         weights["lm_head.weight_scale"] = f.get_tensor(key)
-        for required in ("embed_tokens.weight", "lm_head.weight"):
+        for required in (
+            ("embed_tokens.weight", "lm_head.weight")
+            if self.target_model is None and not self.exclude_embeds
+            else ("lm_head.weight",)
+        ):
             if required not in weights:
                 raise ValueError(f"Could not find '{required}' in the target checkpoint '{self.target_dir}'.")
         self.validate_weight_shapes(
             weights,
             {
                 "fc.weight": (self.hidden_size, self.aux_hidden_size),
-                "embed_tokens.weight": (self.vocab_size, self.hidden_size),
+                **(
+                    {"embed_tokens.weight": (self.vocab_size, self.hidden_size)}
+                    if self.target_model is None and not self.exclude_embeds
+                    else {}
+                ),
                 "lm_head.weight": (self.vocab_size, self.hidden_size),
             },
         )

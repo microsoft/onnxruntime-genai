@@ -58,13 +58,11 @@ TEST(DynamicBatchingConfigTest, ScheduledTokenBudgetAcceptsOverride) {
   EXPECT_EQ(config.engine.dynamic_batching->max_scheduled_tokens, 321u);
 }
 
-TEST(DynamicBatchingConfigTest, PrefixCachingDefaultsToEnabled) {
+TEST(DynamicBatchingConfigTest, PrefixCachingDefaultsToUnset) {
   const auto config = LoadDynamicConfig(R"({ "max_batch_size": 4 })");
 
   ASSERT_TRUE(config.engine.dynamic_batching.has_value());
-  EXPECT_TRUE(config.engine.dynamic_batching->prefix_caching);
-  EXPECT_FALSE(
-      config.engine.dynamic_batching->prefix_caching_explicitly_set);
+  EXPECT_FALSE(config.engine.dynamic_batching->prefix_caching.has_value());
 }
 
 TEST(DynamicBatchingConfigTest, PrefixCachingAcceptsExplicitDisable) {
@@ -72,9 +70,17 @@ TEST(DynamicBatchingConfigTest, PrefixCachingAcceptsExplicitDisable) {
       LoadDynamicConfig(R"({ "prefix_caching": false })");
 
   ASSERT_TRUE(config.engine.dynamic_batching.has_value());
-  EXPECT_FALSE(config.engine.dynamic_batching->prefix_caching);
-  EXPECT_TRUE(
-      config.engine.dynamic_batching->prefix_caching_explicitly_set);
+  ASSERT_TRUE(config.engine.dynamic_batching->prefix_caching.has_value());
+  EXPECT_FALSE(*config.engine.dynamic_batching->prefix_caching);
+}
+
+TEST(DynamicBatchingConfigTest, PrefixCachingAcceptsExplicitEnable) {
+  const auto config =
+      LoadDynamicConfig(R"({ "prefix_caching": true })");
+
+  ASSERT_TRUE(config.engine.dynamic_batching.has_value());
+  ASSERT_TRUE(config.engine.dynamic_batching->prefix_caching.has_value());
+  EXPECT_TRUE(*config.engine.dynamic_batching->prefix_caching);
 }
 
 TEST(CpuEmbeddingConfigTest, PrefaultDefaultsOnAndCanBeDisabled) {
@@ -168,11 +174,13 @@ TEST(DecoderStateGroupsConfigTest, ParsesSparseHybridManifest) {
       },
       {
         "kind": "fixed_conv",
-        "layer_ids": [0, 1, 2]
+        "layer_ids": [0, 1, 2],
+        "state_update": { "capacity": 3 }
       },
       {
         "kind": "fixed_recurrent",
-        "layer_ids": [0, 1, 2]
+        "layer_ids": [0, 1, 2],
+        "state_update": { "capacity": 3, "key_head_count": 1 }
       }
     ]
   })");
@@ -195,6 +203,42 @@ TEST(DecoderStateGroupsConfigTest, ParsesSparseHybridManifest) {
   EXPECT_EQ(config.model.decoder.inputs.state_update_active, "state_update_active");
   EXPECT_EQ(config.model.decoder.outputs.state_update_conv_value_names, "state_update.%d.conv_value");
   EXPECT_EQ(config.model.decoder.outputs.state_update_recurrent_capsule_names, "state_update.%d.recurrent_capsule");
+}
+
+TEST(DecoderStateGroupsConfigTest, ParsesPleAndPackedIndexerStateGroups) {
+  const auto config = LoadDecoderConfig(R"({
+    "num_hidden_layers": 2,
+    "ple_token_pad_id": 7,
+    "inputs": {
+      "past_ple_token_names": "past.%d.ple_tokens",
+      "past_ple_conv_names": "past.%d.ple_conv",
+      "past_indexer_names": "past.%d.indexer_key",
+      "past_indexer_kv_buffer_names": "past.%d.indexer_kv_buffer",
+      "past_indexer_state_lengths_names": "past.%d.indexer_state_lengths"
+    },
+    "outputs": {
+      "present_ple_token_names": "present.%d.ple_tokens",
+      "present_ple_conv_names": "present.%d.ple_conv",
+      "present_indexer_names": "present.%d.indexer_key",
+      "present_indexer_kv_buffer_names": "present.%d.indexer_kv_buffer",
+      "present_indexer_state_lengths_names": "present.%d.indexer_state_lengths"
+    },
+    "state_groups": [
+      {"kind": "fixed_ple", "layer_ids": [0]},
+      {"kind": "fixed_indexer", "layer_ids": [1]}
+    ]
+  })");
+
+  ASSERT_TRUE(config.model.decoder.state_groups);
+  ASSERT_EQ(config.model.decoder.state_groups->size(), 2u);
+  EXPECT_EQ(config.model.decoder.state_groups->at(0).kind,
+            Config::Model::Decoder::StateGroupKind::FixedPle);
+  EXPECT_EQ(config.model.decoder.state_groups->at(1).kind,
+            Config::Model::Decoder::StateGroupKind::FixedIndexer);
+  EXPECT_EQ(config.model.decoder.inputs.past_indexer_kv_buffer_names,
+            "past.%d.indexer_kv_buffer");
+  EXPECT_EQ(config.model.decoder.outputs.present_indexer_state_lengths_names,
+            "present.%d.indexer_state_lengths");
 }
 
 TEST(DecoderStateGroupsConfigTest, OverlayValidationIsTransactional) {

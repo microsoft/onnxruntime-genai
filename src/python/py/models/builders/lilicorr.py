@@ -58,8 +58,12 @@ class LiLiCorrBuilder(DFlash2Builder):
         # methods read is set below.
         self.draft_dir = draft_dir
         self.target_dir = target_dir
+        self.target_model = None
+        self.exclude_embeds = False
+        self.ep = "cuda"
         self.io_dtype = ir.DataType.BFLOAT16
         self.external_dtype = ir.DataType.BFLOAT16
+        self.layernorm_attrs = {"residual_dtype": self.io_dtype}
         if precision in ("int4", "int8"):
             self.quant_bits = 4 if precision == "int4" else 8
             self.quant_block_size = 32
@@ -72,9 +76,7 @@ class LiLiCorrBuilder(DFlash2Builder):
         self.filename = filename
         self.paged_block_size = paged_block_size
         self.mlp_attrs = {"fuse_gate_up": True}
-        self.attn_attrs = {"fuse_qkv": False}
-        self.include_attention_metadata = True
-        self.uses_q_row_map = True
+        self.uses_q_row_map = False
 
         with open(os.path.join(draft_dir, "config.json")) as f:
             cfg = json.load(f)

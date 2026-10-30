@@ -1,4 +1,5 @@
 #include "sequences.h"
+#include <optional>
 #include <random>
 #include <stdexcept>
 #include "beam_search_scorer.h"
@@ -119,7 +120,7 @@ struct Search : LeakChecked<Search> {
   virtual void SampleTopKTopP(int /*k*/, float /*p*/, float /*temperature*/, std::mt19937& /*rng*/) { assert(false); }
 
   // Scoring features
-  virtual void ApplyMinLength(int min_length) = 0;
+  virtual void ApplyMinLength(int min_length, std::optional<int> sequence_length = std::nullopt) = 0;
   virtual void ApplyRepetitionPenalty(float penalty) = 0;
   // This is inline because the standalone CUDA shared library does not compile search.cpp.
   virtual void ApplyNoRepeatNgram(int ngram_size) {
@@ -170,7 +171,7 @@ struct Search_Cpu : Search {
   DeviceSpan<float> GetLogits() const override;
   void SetLogits(DeviceSpan<float> logits) override;
 
-  void ApplyMinLength(int min_length) override;
+  void ApplyMinLength(int min_length, std::optional<int> sequence_length = std::nullopt) override;
   void ApplyRepetitionPenalty(float penalty) override;
   void ApplyNoRepeatNgram(int ngram_size) override;
 

@@ -27,10 +27,13 @@ sys.path.insert(0, str(MODELS_DIR))
 
 
 def _load_base_module():
-    sys.modules.setdefault("models", types.ModuleType("models"))
+    models_package = sys.modules.setdefault("models", types.ModuleType("models"))
+    models_package.__path__ = [str(MODELS_DIR)]
     builders_package = sys.modules.setdefault("models.builders", types.ModuleType("models.builders"))
     builders_package.__path__ = [str(BUILDERS_DIR)]
 
+    if "models.builders.base" in sys.modules:
+        return sys.modules["models.builders.base"]
     spec = importlib.util.spec_from_file_location("models.builders.base", BUILDERS_DIR / "base.py")
     module = importlib.util.module_from_spec(spec)
     sys.modules["models.builders.base"] = module
@@ -41,7 +44,6 @@ def _load_base_module():
 def test_paged_attention_metadata_is_int32_triplet(monkeypatch):
     base = _load_base_module()
     monkeypatch.setattr(base.Model, "make_ep_expansions_init", lambda self: None)
-    monkeypatch.setattr(base.Model, "make_inputs_init", lambda self: None)
     config = types.SimpleNamespace(
         architectures=["TestModel"],
         hidden_act="silu",
@@ -422,6 +424,65 @@ def test_to_nbits_forwards_requested_bits(monkeypatch, bits):
     assert result == "quantized-proto"
 
 
+@pytest.mark.parametrize("mode,block_size,expected", [(1, 32, 1), (2, 64, 2), (2, 32, 0)])
+def test_prepack_matmulnbits_accepts_symmetric_zero_point_input(monkeypatch, mode, block_size, expected):
+    model = Model.__new__(Model)
+    model.ep = "cuda"
+    model.io_dtype = ir.DataType.FLOAT16
+    model.matmul_attrs = {"weights_prepacked": mode}
+    model.quant_attrs = {"is_symmetric": True}
+
+    weight = np.zeros((64, 1, block_size // 2), dtype=np.uint8)
+    node = onnx.helper.make_node(
+        "MatMulNBits",
+        ["input", "weight", "scale", "zero_point"],
+        ["output"],
+        domain="com.microsoft",
+        bits=4,
+        block_size=block_size,
+        K=block_size,
+        N=64,
+    )
+    graph = onnx.helper.make_graph(
+        [node],
+        "test",
+        [],
+        [],
+        [
+            onnx.numpy_helper.from_array(weight, "weight"),
+            onnx.numpy_helper.from_array(np.full((64, 1), 0x88, dtype=np.uint8), "zero_point"),
+        ],
+    )
+    model_proto = onnx.helper.make_model(graph)
+    monkeypatch.setattr(
+        base_module.CudaQuantizer,
+        "prepack_matmulnbits_weight",
+        lambda value, n, k, bits, force_arch: value,
+    )
+
+    graph_model = ir.from_proto(model_proto)
+    graph_model.metadata_props["packing-test"] = "model"
+    graph_model.graph.initializers["weight"].const_value = ir.Tensor(
+        weight,
+        name="weight",
+        doc_string="Original packed weight",
+        metadata_props={"packing-test": "tensor"},
+    )
+    model.prepack_matmulnbits_weights(graph_model)
+    assert graph_model.metadata_props["packing-test"] == "model"
+    assert graph_model.graph.initializers["weight"].const_value.doc_string == "Original packed weight"
+    assert graph_model.graph.initializers["weight"].const_value.metadata_props["packing-test"] == "tensor"
+    model_proto = ir.to_proto(graph_model)
+
+    attrs = {attr.name: onnx.helper.get_attribute_value(attr) for attr in model_proto.graph.node[0].attribute}
+    assert attrs.get("weight_prepacked", 0) == expected
+    assert model_proto.graph.node[0].input[3] == ("" if expected else "zero_point")
+    assert ("zero_point" in {initializer.name for initializer in model_proto.graph.initializer}) == (not expected)
+    if not expected:
+        np.testing.assert_array_equal(onnx.numpy_helper.to_array(model_proto.graph.initializer[0]), weight)
+    model_proto.SerializeToString()
+
+
 def _make_matmul_chain(node_names, width=64):
     rng = np.random.default_rng(0)
     nodes, initializers, hidden = [], [], "x"
@@ -534,19 +595,20 @@ def test_structured_unquantized_moe_completes_cli_option_parsing(monkeypatch):
     assert "moe_quant_type" not in options
 
 
-@pytest.mark.parametrize(
-    ("extra_options", "expected"),
-    [
-        ({"disable_qkv_fusion": "true"}, False),
-        ({"disable_qkv_fusion": "false"}, True),
-        ({"disable_qkv_fusion": "true", "fuse_qkv": "true"}, True),
-    ],
-)
-def test_disable_qkv_fusion_is_a_deprecated_inverse_alias(monkeypatch, capsys, extra_options, expected):
-    _run_check_extra_options(monkeypatch, extra_options)
+def test_target_gate_up_fusion_help_omits_removed_option(monkeypatch):
+    help_text = []
 
-    assert extra_options["fuse_qkv"] is expected
-    assert "'disable_qkv_fusion' is deprecated" in capsys.readouterr().out
+    def inspect_help(parser):
+        help_text.extend(action.help for action in parser._actions if action.dest == "extra_options")
+        raise SystemExit(0)
+
+    monkeypatch.setattr(builder_module.argparse.ArgumentParser, "parse_args", inspect_help)
+    with pytest.raises(SystemExit) as error:
+        builder_module.get_args()
+    assert error.value.code == 0
+    assert "fuse_mlp_gate_up =" not in help_text[0]
+    for removed in ("fuse_qkv", "disable_qkv_fusion", "fuse_qk_norm_gqa", "indexshare_max_draft_tokens"):
+        assert not any(line.strip().startswith(f"{removed} =") for line in help_text[0].splitlines())
 
 
 def test_mtp_quant_config_json_is_parsed(monkeypatch):
@@ -664,14 +726,11 @@ def test_state_update_capacity_is_normalized(monkeypatch):
 
 
 @pytest.mark.parametrize("capacity", ["1", "8", 3])
-def test_webgpu_rejects_compact_state_updates(monkeypatch, capacity):
-    with pytest.raises(ValueError, match="Engine compact state replay is not implemented"):
-        _run_check_extra_options(
-            monkeypatch,
-            {"use_paged_attention": "true", "num_blocks": "8", "state_update_capacity": capacity},
-            precision="fp16",
-            execution_provider="webgpu",
-        )
+def test_webgpu_accepts_compact_state_updates(monkeypatch, capacity):
+    options = {"use_paged_attention": "true", "num_blocks": "8", "state_update_capacity": capacity}
+    _run_check_extra_options(monkeypatch, options, precision="fp16", execution_provider="webgpu")
+
+    assert options["state_update_capacity"] == int(capacity)
 
 
 def test_webgpu_allows_disabled_compact_state_updates(monkeypatch):
@@ -1199,6 +1258,62 @@ def test_paged_attention_rejects_merged_cache_sizing_conflicts(
     }
     with pytest.raises(ValueError, match="num_blocks and gpu_utilization_factor are mutually exclusive"):
         _run_check_extra_options(monkeypatch, options, precision="fp16", execution_provider=execution_provider)
+
+
+@pytest.mark.parametrize(
+    "legacy_allocation,runtime_allocation,expected_blocks",
+    [
+        ({}, {"num_blocks": 8}, 8),
+        ({"num_blocks": "16"}, {}, 16),
+        ({"num_blocks": "16"}, {"num_blocks": 8}, 8),
+    ],
+)
+def test_webgpu_paged_attention_effective_block_budget(
+    monkeypatch, legacy_allocation, runtime_allocation, expected_blocks
+):
+    effective = builder_module.normalize_builder_config(
+        "fp16",
+        "webgpu",
+        {"use_paged_attention": "true", **legacy_allocation},
+        runtime_config={"engine": {"dynamic_batching": runtime_allocation}},
+    )
+    options = effective.extra_options
+    _run_check_extra_options(monkeypatch, options, precision="fp16", execution_provider="webgpu")
+
+    generated = {
+        "engine": {
+            "dynamic_batching": {
+                key: options[key]
+                for key in ("num_blocks", "gpu_utilization_factor")
+                if key in options
+            }
+        }
+    }
+    merged = builder_module.apply_runtime_config(generated, effective.runtime_config)
+    assert merged["engine"]["dynamic_batching"] == {"num_blocks": expected_blocks}
+
+
+@pytest.mark.parametrize(
+    "runtime_allocation,error",
+    [
+        ({"gpu_utilization_factor": 0.6}, "num_blocks and gpu_utilization_factor are mutually exclusive"),
+        ({"num_blocks": 0}, "num_blocks.*positive integer"),
+        ({"num_blocks": None}, "num_blocks.*must not contain null"),
+    ],
+)
+def test_webgpu_paged_attention_rejects_runtime_removal_of_block_budget(
+    monkeypatch, runtime_allocation, error
+):
+    with pytest.raises(ValueError, match=error):
+        effective = builder_module.normalize_builder_config(
+            "fp16",
+            "webgpu",
+            {"use_paged_attention": "true", "num_blocks": "16"},
+            runtime_config={"engine": {"dynamic_batching": runtime_allocation}},
+        )
+        _run_check_extra_options(
+            monkeypatch, effective.extra_options, precision="fp16", execution_provider="webgpu"
+        )
 
 
 def test_paged_attention_normalizes_engine_options(monkeypatch):

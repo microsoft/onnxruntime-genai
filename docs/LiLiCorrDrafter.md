@@ -12,6 +12,8 @@ The exported graph keeps the DFlash 2 runtime contract. It still produces `draft
 walk and the paged drafter cache are shared with DFlash 2. The only extra input is the optional
 `anchor_row_index` (int32, one entry per query block): the packed `aux_hidden_states` row of the
 request's last committed context row. Configure it with `model.dflash2.inputs.anchor_row_index`.
+Like DFlash 2, the CUDA graph uses packed QKV projections and `qkv_row_map`; it does not
+declare the unused `q_row_map` input, avoiding a host copy during CUDA graph capture.
 
 ## Export
 
