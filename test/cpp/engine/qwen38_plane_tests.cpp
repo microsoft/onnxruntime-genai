@@ -990,8 +990,8 @@ TEST_F(Qwen38PlaneStagedPleTest, PleRowsGrowthIsAllOrNothing) {
   rig.ResetTable();
   const std::vector<int64_t> short_tokens = {1, 2};
   ASSERT_EQ(rig.PleRows(short_tokens), 0);
-  const Qwen38PlaneTestStats small = Stats();
-  EXPECT_EQ(small.prefill_capacity_rows, 4096);
+  const Qwen38PlaneTestStats after_short = Stats();
+  EXPECT_EQ(after_short.prefill_capacity_rows, 4096);
 
   std::vector<int64_t> long_tokens(4097);
   for (size_t i = 0; i < long_tokens.size(); ++i) long_tokens[i] = static_cast<int64_t>(i);
@@ -1013,8 +1013,8 @@ TEST_F(Qwen38PlaneStagedPleTest, PleRowsGrowthIsAllOrNothing) {
     EXPECT_EQ(rig.PleRows(long_tokens), error);
     const Qwen38PlaneTestStats failed = Stats();
     EXPECT_EQ(failed.fault_armed, 0);
-    EXPECT_EQ(failed.prefill_capacity_rows, small.prefill_capacity_rows);
-    EXPECT_EQ(failed.live_pinned_allocations, small.live_pinned_allocations);
+    EXPECT_EQ(failed.prefill_capacity_rows, after_short.prefill_capacity_rows);
+    EXPECT_EQ(failed.live_pinned_allocations, after_short.live_pinned_allocations);
     EXPECT_EQ(failed.gather_rows, before.gather_rows);
     EXPECT_EQ(failed.staged_launches, before.staged_launches);
     EXPECT_TRUE(rig.OutputsAre(0xAB));
@@ -1026,7 +1026,7 @@ TEST_F(Qwen38PlaneStagedPleTest, PleRowsGrowthIsAllOrNothing) {
   EXPECT_EQ(rig.PleRows(long_tokens), 0);
   const Qwen38PlaneTestStats grown = Stats();
   EXPECT_EQ(grown.prefill_capacity_rows, 4097);
-  EXPECT_EQ(grown.live_pinned_allocations, small.live_pinned_allocations);
+  EXPECT_EQ(grown.live_pinned_allocations, after_short.live_pinned_allocations);
   EXPECT_EQ(rig.ReadPle(long_tokens.size()), rig.ExpectedPle(long_tokens));
 }
 
