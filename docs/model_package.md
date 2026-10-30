@@ -263,9 +263,24 @@ and must not overlap another reachable profile. No match uses the base settings.
 two profiles may share the same memory range with
 `"eligibility":{"minimum_total_device_memory_bytes":0,"is_integrated":true}` and
 `"eligibility":{"minimum_total_device_memory_bytes":0,"is_integrated":false}`.
+
+Optional `minimum_effective_host_memory_bytes` and `maximum_effective_host_memory_bytes` set inclusive
+bounds on the effective host memory, and optional `minimum_available_host_memory_bytes` sets a lower
+bound on the host memory that is available now. The effective host memory is the physical memory, capped
+by the Linux cgroup v2 `memory.max` limit when one is set. The available host memory is `MemAvailable`
+from `/proc/meminfo` on Linux and the available physical memory reported by `GlobalMemoryStatusEx` on
+Windows, capped by the cgroup headroom (`memory.max` minus `memory.current`) and never above the
+effective host memory. The cgroup headroom counts page cache charged to the cgroup as used, so it
+under-reports rather than over-reports. A value the platform cannot report (for example the available
+host memory on macOS) does not match a profile that bounds it. Because the available host memory never
+exceeds the effective host memory, a `minimum_available_host_memory_bytes` above another profile's
+`maximum_effective_host_memory_bytes` keeps the two profiles from overlapping.
 `overlay` is typed and may contain any subset of these fields:
 
 - `model.decoder.filename`
+- `model.decoder.session_options`: an object of string-valued session config entries (for example
+  `"session.moe.offload.mode": "required"`) that replace or add to the entries of the same name in
+  the base `model.decoder.session_options`
 - `engine.dynamic_batching.num_blocks`
 - `engine.dynamic_batching.max_batch_size`
 - `engine.dynamic_batching.max_scheduled_tokens`

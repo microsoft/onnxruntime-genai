@@ -3201,8 +3201,11 @@ bool EligibilitiesIntersect(const Config::RuntimeProfile::Eligibility& a,
                                          std::numeric_limits<uint64_t>::max()),
                                      b.maximum_effective_host_memory_bytes.value_or(
                                          std::numeric_limits<uint64_t>::max()));
+  const auto minimum_available_host = std::max(a.minimum_available_host_memory_bytes.value_or(0),
+                                               b.minimum_available_host_memory_bytes.value_or(0));
   return minimum_total <= maximum_total && minimum_free <= maximum_free &&
          minimum_free <= maximum_total && minimum_host <= maximum_host &&
+         minimum_available_host <= maximum_host &&
          ExactConditionsIntersect(a.is_integrated, b.is_integrated);
 }
 

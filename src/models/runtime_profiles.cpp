@@ -9,6 +9,8 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <sstream>
+#include <string>
 #if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -20,34 +22,88 @@
 
 namespace Generators {
 
+std::optional<uint64_t> ParseMeminfoBytes(std::string_view meminfo, std::string_view key) {
+  while (!meminfo.empty()) {
+    const size_t end = meminfo.find('\n');
+    const std::string_view line = meminfo.substr(0, end);
+    meminfo = end == std::string_view::npos ? std::string_view{} : meminfo.substr(end + 1);
+    if (line.size() <= key.size() || line.compare(0, key.size(), key) != 0 || line[key.size()] != ':') {
+      continue;
+    }
+    std::istringstream fields{std::string{line.substr(key.size() + 1)}};
+    uint64_t value = 0;
+    std::string unit;
+    if (!(fields >> value)) return std::nullopt;
+    fields >> unit;
+    if (unit.empty()) return value;
+    if (unit != "kB" || value > std::numeric_limits<uint64_t>::max() / 1024) return std::nullopt;
+    return value * 1024;
+  }
+  return std::nullopt;
+}
+
+void ResolveHostMemoryFacts(const HostMemoryReadings& readings, std::optional<uint64_t>& effective_host_bytes,
+                            std::optional<uint64_t>& available_host_bytes) noexcept {
+  const bool has_cgroup_limit = readings.cgroup_limit && *readings.cgroup_limit > 0;
+
+  effective_host_bytes = readings.physical_total;
+  if (has_cgroup_limit && (!effective_host_bytes || *readings.cgroup_limit < *effective_host_bytes)) {
+    effective_host_bytes = *readings.cgroup_limit;
+  }
+
+  available_host_bytes = readings.physical_available;
+  if (has_cgroup_limit && readings.cgroup_usage) {
+    const uint64_t headroom =
+        *readings.cgroup_limit > *readings.cgroup_usage ? *readings.cgroup_limit - *readings.cgroup_usage : 0;
+    available_host_bytes = available_host_bytes ? std::min(*available_host_bytes, headroom) : headroom;
+  }
+  if (available_host_bytes && effective_host_bytes) {
+    available_host_bytes = std::min(*available_host_bytes, *effective_host_bytes);
+  }
+}
+
 namespace {
+
+#if defined(__linux__)
+std::optional<uint64_t> ReadCgroupBytes(const char* path) {
+  std::ifstream file(path);
+  uint64_t value = 0;
+  if (file && (file >> value)) return value;
+  return std::nullopt;  // memory.max holds "max" when the cgroup has no limit
+}
+
+std::optional<uint64_t> ReadMeminfoBytes(std::string_view key) {
+  std::ifstream file("/proc/meminfo");
+  if (!file) return std::nullopt;
+  std::ostringstream contents;
+  contents << file.rdbuf();
+  return ParseMeminfoBytes(contents.str(), key);
+}
+#endif
 
 void QueryHostMemoryFacts(std::optional<uint64_t>& effective_host_bytes,
                           std::optional<uint64_t>& available_host_bytes) noexcept {
+  HostMemoryReadings readings;
 #if defined(_WIN32)
   MEMORYSTATUSEX stat{};
   stat.dwLength = sizeof(stat);
   if (GlobalMemoryStatusEx(&stat)) {
-    effective_host_bytes = static_cast<uint64_t>(stat.ullTotalPhys);
-    available_host_bytes = static_cast<uint64_t>(stat.ullAvailPhys);
+    readings.physical_total = static_cast<uint64_t>(stat.ullTotalPhys);
+    readings.physical_available = static_cast<uint64_t>(stat.ullAvailPhys);
   }
 #else
   const long page_sz = sysconf(_SC_PAGESIZE);
   const long phys_pages = sysconf(_SC_PHYS_PAGES);
-  const long avphys_pages = sysconf(_SC_AVPHYS_PAGES);
   if (page_sz > 0 && phys_pages > 0) {
-    uint64_t total_phys = static_cast<uint64_t>(page_sz) * static_cast<uint64_t>(phys_pages);
-    std::ifstream cgroup_max("/sys/fs/cgroup/memory.max");
-    uint64_t cg_limit = 0;
-    if (cgroup_max && (cgroup_max >> cg_limit) && cg_limit > 0 && cg_limit < total_phys) {
-      total_phys = cg_limit;
-    }
-    effective_host_bytes = total_phys;
+    readings.physical_total = static_cast<uint64_t>(page_sz) * static_cast<uint64_t>(phys_pages);
   }
-  if (page_sz > 0 && avphys_pages > 0) {
-    available_host_bytes = static_cast<uint64_t>(page_sz) * static_cast<uint64_t>(avphys_pages);
-  }
+#if defined(__linux__)
+  readings.physical_available = ReadMeminfoBytes("MemAvailable");
+  readings.cgroup_limit = ReadCgroupBytes("/sys/fs/cgroup/memory.max");
+  readings.cgroup_usage = ReadCgroupBytes("/sys/fs/cgroup/memory.current");
 #endif
+#endif
+  ResolveHostMemoryFacts(readings, effective_host_bytes, available_host_bytes);
 }
 
 }  // namespace
