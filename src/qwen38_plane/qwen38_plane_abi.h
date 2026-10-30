@@ -14,12 +14,12 @@
 #define QWEN38_PLANE_ABI_VERSION 3
 
 // The number of int64 words the `state` buffer of prep (the `ctl` buffer of a fold) must have room for; a larger buffer is fine.
-// The kernels of the plane keep their words in 0..6, and words 8 and 9 hold the draft tokens of rows 2 and 3 of a fold (the
+// The kernels of the plane keep their words in 0..6, and words 8 to 13 hold the draft tokens of rows 2 to 7 of a fold (the
 // layout is in qwen38_plane.cu). With a staged PLE table (see prep below) row 0 of a fold (pos_add == 0, tok_ptr == state,
-// pos_ptr == state + 1) copies all of these words to the host in one go, and rows 1..3 (pos_add 1..3, tok_ptr == state + 2,
-// state + 8, state + 9) are then prepared from that copy. The library is given the buffer as a pointer and cannot check its
-// size: a smaller buffer is an out-of-bounds read of the device allocation.
-#define QWEN38_PLANE_STATE_MIN_WORDS 10
+// pos_ptr == state + 1) copies all of these words to the host in one go, and rows 1..7 (pos_add 1..7, tok_ptr == state + 2,
+// state + 8, ..., state + 13) are then prepared from that copy. The library is given the buffer as a pointer and cannot check
+// its size: a smaller buffer is an out-of-bounds read of the device allocation.
+#define QWEN38_PLANE_STATE_MIN_WORDS 14
 
 // Host-registered PLE (per-layer embedding) table description, copied to the device once. The library trusts the loader
 // for its invariants and does not validate them (ParseQwen38PleDescription enforces them): 1 <= n_heads <= 32,
@@ -50,6 +50,31 @@ static_assert(sizeof(void*) != 8 || offsetof(Qwen38PleParams, pad_) == 4660, "Qw
 static_assert(sizeof(void*) != 8 || offsetof(Qwen38PleParams, eos) == 4664, "Qwen38PleParams layout changed");
 static_assert(sizeof(void*) != 8 || offsetof(Qwen38PleParams, capacity) == 4672, "Qwen38PleParams layout changed");
 #endif
+
+// Device descriptor for compact state-update replay (GatedDeltaNet, CausalConvWithState, PackedSparseAttentionIndexer).
+typedef struct Qwen38StateReplayDesc {
+  const void* source_state;
+  void* destination_state;
+  const void* value;
+  const float* decay;
+  const float* key;
+  const float* delta;
+  const void* source_aux_state;
+  void* destination_aux_state;
+  const int32_t* source_lengths;
+  int32_t* destination_lengths;
+  uint64_t channel_count;
+  uint64_t state_width;
+  uint64_t key_width;
+  uint64_t key_head_count;
+  uint64_t state_capacity;
+  uint64_t aux_capacity;
+  uint32_t capacity;
+  uint32_t kept_count;
+  uint32_t element_size;
+  uint32_t compress_ratio;
+  uint32_t kind;
+} Qwen38StateReplayDesc;
 
 // X(return type, name, parameter list). The exported symbol is "qwen38_plane_" + name. `stream` is a cudaStream_t.
 // CUDA runtime helpers return the cudaError_t as int (0 = success).

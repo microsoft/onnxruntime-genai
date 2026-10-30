@@ -2718,7 +2718,7 @@ TEST_F(Qwen38PlaneStagedPleTest, ResidentPleRowsAndPrepDecodeBothFp8AndInt8Shard
     PlaneBuffer d_position_ids{*plane_, sizeof(int64_t), stream.get()};
     PlaneBuffer d_committed{*plane_, sizeof(int), stream.get()};
     PlaneBuffer d_past_pos{*plane_, kPositions * sizeof(int64_t), stream.get()};
-    PlaneBuffer d_state{*plane_, 10 * sizeof(int64_t), stream.get()};
+    PlaneBuffer d_state{*plane_, QWEN38_PLANE_STATE_MIN_WORDS * sizeof(int64_t), stream.get()};
     plane_->Check(plane_->memcpy_h2d(d_tok.data(), &h_tok, sizeof(h_tok), stream.get()), "tok");
     plane_->Check(plane_->memcpy_h2d(d_pos.data(), &h_pos, sizeof(h_pos), stream.get()), "pos");
     ASSERT_EQ(plane_->prep(stream.get(), d_params.data(), d_tok.data(), d_pos.data(), 0, d_ctx_in.data(), d_ctx_out.data(),
