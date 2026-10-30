@@ -746,6 +746,12 @@ combined budget: the target pool is scaled down so target plus head together cos
 configured block count would have cost without a head. A `num_blocks` too small to leave at least
 one block for each pool is rejected at Engine construction.
 
+**Head-local contracts.** The projected head clears target-only selected-logits inputs
+and compact replay capacity. Its disabled fixed-indexer payload capacity is resolved from
+the head's actual session outputs, not the target manifest. Resolution still validates
+the full state, dtype, buffer, and capture-control bindings, and malformed metadata does
+not publish a partial configuration. Enabled target replay contracts remain unchanged.
+
 **Failure isolation.** The target decode is mandatory; MTP drafting is optional acceleration. A
 recoverable head failure (cache pressure, shape mismatch, binding or session error) releases only
 MTP state, and the target step still commits — without drafts for that step — and increments
