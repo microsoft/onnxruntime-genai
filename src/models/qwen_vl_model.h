@@ -93,8 +93,8 @@ struct Qwen2_5_VL_PipelineState : public DecoderOnlyPipelineState {
   bool vision_ran_{false};
   std::unique_ptr<OrtValue> image_features_value_;
   std::vector<float> image_features_buffer_;       // backing storage for OrtValue
-  std::unique_ptr<OrtValue> vision_output_owner_;  // keeps the encoder's output alive when
-                                                   // image_features_value_ is a reshaped view of it
+  std::unique_ptr<OrtValue> vision_output_owner_;  // Owns the encoder output, including any padded tail
+                                                   // beyond the compact image_features_value_ view.
   size_t image_embed_consumed_{0};                 // Track how many vision embeddings we've injected
   bool embedding_merges_features_{false};          // embedding graph does the merge, so skip injection
   size_t image_feature_input_index_{SIZE_MAX};
