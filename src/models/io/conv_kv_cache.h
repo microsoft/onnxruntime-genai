@@ -22,7 +22,6 @@ struct ConvKeyValueCache : KeyValueCache {
   void PickPastState(DeviceSpan<int32_t> beam_indices, int index);
   void PickPastState(DeviceSpan<int32_t> beam_indices, int index);
 
-  template <typename T>
   void PickConvState(DeviceSpan<int32_t> beam_indices, int conv_index);
 
   DeviceInterface& Device() { return *model_.p_device_kvcache_; }
