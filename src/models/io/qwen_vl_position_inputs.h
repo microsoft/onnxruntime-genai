@@ -1,5 +1,7 @@
 #pragma once
 
+#include "attention_mask.h"
+#include "position_ids.h"
 #include "position_inputs.h"
 #include "rotary_position_history.h"
 #include <map>
