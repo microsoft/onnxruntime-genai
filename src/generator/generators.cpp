@@ -818,6 +818,7 @@ void Generator::AppendTokens(DeviceSpan<int32_t> input_ids) {
     set_extra_inputs_ = false;
   }
 
+  strategy_->PrepareForAppend(*this);
   RunGeneratedToken();
   if (!model_->config_->model.engram.filename.empty()) {
     input_ids.CopyDeviceToCpu();
