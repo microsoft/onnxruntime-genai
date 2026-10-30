@@ -21,8 +21,10 @@ namespace Generators {
 
 // The loaded plane library: one function pointer per entry of QWEN38_PLANE_FUNCTIONS, named like the entry.
 struct Qwen38Plane {
+  // An empty plane with no library loaded; the function pointers are filled in by the caller (tests).
   Qwen38Plane() = default;
-  // Loads `path`, resolves every symbol and checks the ABI version and structure layout.
+  // Loads `path` (or the built-in onnxruntime-genai-cuda library when `path` is empty), resolves every symbol and checks
+  // the ABI version and structure layout.
   explicit Qwen38Plane(const std::filesystem::path& path);
   ~Qwen38Plane();
   Qwen38Plane(const Qwen38Plane&) = delete;
