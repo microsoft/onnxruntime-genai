@@ -272,9 +272,9 @@ class Qwen35MoEModel(MTPModel):
         """Resolve how a block drafter gets its LM head, or ``None`` to keep it dense.
 
         The drafter's LM head *is* the target's, so it reuses the target's initializers rather
-        than quantizing a second copy (see ``adopt_target_tensors``). Only the
-        symmetric/``default`` ``MatMulNBits`` convention is wired up here; any other algorithm
-        or output format leaves the head dense instead of guessing at initializer names.
+        than quantizing a second copy (see ``adopt_target_tensors``). Only the 4-bit
+        symmetric/``default`` ``MatMulNBits`` convention is wired up here; any other algorithm,
+        bit width or output format leaves the head dense instead of guessing at initializer names.
         """
         decoder = self.decoder
         if decoder.exclude_lm_head or not decoder.is_lm_head_quantized():
@@ -285,7 +285,16 @@ class Qwen35MoEModel(MTPModel):
                 "DequantizeLinear/MatMul pair instead of the MatMulNBits this exporter can reuse."
             )
             return None
-        head_bits, weight_name, scales_name, zero_point_name = decoder.make_tied_quantized_embedding_input_names()
+        # decoder.make_model has already dropped its weights, so this predicts the to_nbits names.
+        head_bits, head_block_size, weight_name, scales_name, zero_point_name = (
+            decoder.make_tied_quantized_embedding_input_names(None)
+        )
+        if head_bits != 4:
+            print(
+                f"Leaving the block drafter's LM head dense: only a 4-bit target LM head is reused, "
+                f"and the target's is {head_bits}-bit."
+            )
+            return None
         shareable = (
             weight_name == f"lm_head.MatMul.weight_Q{head_bits}"
             and scales_name == "lm_head.MatMul.weight_scales"
@@ -298,6 +307,9 @@ class Qwen35MoEModel(MTPModel):
             )
             return None
         prepack = int(decoder.matmul_attrs["weights_prepacked"]) if decoder.ep == "cuda" else 0
+        if decoder.tied_quantized_embeddings:
+            # The prepack pass leaves a weight the tied embedding also reads in the raw layout.
+            prepack = 0
         adopt_target = not (prepack and decoder.io_dtype != ir.DataType.FLOAT16)
         if not adopt_target:
             print(
@@ -307,7 +319,7 @@ class Qwen35MoEModel(MTPModel):
             prepack = 0
         return {
             "bits": head_bits,
-            "block_size": int(decoder.quant_attrs["matmul_block_size"]),
+            "block_size": head_block_size,
             "prepack": prepack,
             "adopt_target": adopt_target,
         }
@@ -333,6 +345,10 @@ class Qwen35MoEModel(MTPModel):
                 "Leaving the block drafter's embedding dense: shared_embeddings makes the target "
                 "gather from its LM head weight, which this exporter does not know how to reuse."
             )
+            return None
+        if decoder.quant_attrs.get("embedding_bits", 4) != 4:
+            # embedding_quant_type=int8 writes its own model.embed_tokens.weight_Q8, which this exporter does not reuse.
+            print("Leaving the block drafter's embedding dense: the target's embedding table is not 4-bit.")
             return None
         # Only the symmetric/`default` convention names the table `*.weight_Q4` / `*.weight_scales`.
         if decoder.quantization_algo != "default" or not decoder.quant_attrs["is_symmetric"]:
