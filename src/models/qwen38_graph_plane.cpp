@@ -110,6 +110,8 @@ Qwen38Plane::Qwen38Plane(const std::filesystem::path& path) {
     set_ple_host_params =
         reinterpret_cast<decltype(set_ple_host_params)>(GetProcAddress(mod, "qwen38_plane_set_ple_host_params"));
     dflash_select = reinterpret_cast<decltype(dflash_select)>(GetProcAddress(mod, "qwen38_plane_dflash_select"));
+    replay_state_updates =
+        reinterpret_cast<decltype(replay_state_updates)>(GetProcAddress(mod, "qwen38_plane_replay_state_updates"));
     if (abi_version() != QWEN38_PLANE_ABI_VERSION) {
       throw std::runtime_error("qwen38_graph: the plane library has ABI version " + std::to_string(abi_version()) +
                                ", expected " + std::to_string(QWEN38_PLANE_ABI_VERSION));
@@ -153,6 +155,8 @@ Qwen38Plane::Qwen38Plane(const std::filesystem::path& path) {
     set_ple_host_params =
         reinterpret_cast<decltype(set_ple_host_params)>(dlsym(handle_, "qwen38_plane_set_ple_host_params"));
     dflash_select = reinterpret_cast<decltype(dflash_select)>(dlsym(handle_, "qwen38_plane_dflash_select"));
+    replay_state_updates =
+        reinterpret_cast<decltype(replay_state_updates)>(dlsym(handle_, "qwen38_plane_replay_state_updates"));
     if (abi_version() != QWEN38_PLANE_ABI_VERSION) {
       throw std::runtime_error("qwen38_graph: the plane library has ABI version " + std::to_string(abi_version()) +
                                ", expected " + std::to_string(QWEN38_PLANE_ABI_VERSION));
