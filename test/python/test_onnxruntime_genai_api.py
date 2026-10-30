@@ -507,6 +507,42 @@ def test_append_tokens_after_generation(test_data_path, relative_model_path, sto
     assert np.allclose(control.get_logits(), generator.get_logits(), rtol=0, atol=1e-6)
 
 
+def test_append_tokens_after_generation_with_guidance(test_data_path):
+    model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
+    model = og.Model(model_path)
+    tokenizer = og.Tokenizer(model)
+    pattern = r"[0-9]{8}"
+    prompt = np.array([[0, 0, 195, 731]], dtype=np.int32)
+
+    def new_generator(guidance):
+        search_params = og.GeneratorParams(model)
+        search_params.set_search_options(do_sample=False, max_length=20)
+        if guidance:
+            search_params.set_guidance("regex", pattern)
+        return og.Generator(model, search_params)
+
+    try:
+        generator = new_generator(guidance=True)
+    except RuntimeError as error:
+        if "guidance is unavailable" in str(error).lower():
+            pytest.skip("ONNX Runtime GenAI was built without guidance support")
+        raise
+    generator.append_tokens(prompt)
+    for _ in range(2):
+        generator.generate_next_token()
+    generator.append_tokens(np.array([tokenizer.encode("7")], dtype=np.int32))
+
+    control = new_generator(guidance=False)
+    control.append_tokens(generator.get_sequence(0)[np.newaxis, :])
+    assert np.allclose(control.get_logits(), generator.get_logits(), rtol=0, atol=1e-6)
+
+    # The grammar has to count the last generated token too, or the answer comes out too long.
+    while not generator.is_done():
+        generator.generate_next_token()
+    answer = tokenizer.decode(generator.get_sequence(0)[prompt.shape[1] :])
+    assert re.fullmatch(pattern, answer), answer
+
+
 # Test Model Loading with No Chat Template
 @pytest.mark.parametrize("device", devices)
 @pytest.mark.parametrize("batch", [True, False])

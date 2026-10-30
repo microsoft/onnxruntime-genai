@@ -696,6 +696,8 @@ std::vector<int32_t> GuidanceLogitsProcessor::GetFFTokens(size_t index) {
 }
 
 void GuidanceLogitsProcessor::CommitTokens(std::span<int32_t> tokens) {
+  // llguidance needs a mask between two commits, and an append right after a generation commits twice.
+  EnsureMaskScheduled();
   EnsureMaskReady();
   for (int i = 0; i < params_->search.batch_size; i++) {
     if (llg_constraints_[i].use_count() != 1) {
