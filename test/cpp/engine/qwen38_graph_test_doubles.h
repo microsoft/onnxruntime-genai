@@ -29,7 +29,14 @@ namespace Generators::test {
 //    tests also prove the executor drives the device in a legal order.
 class ScriptedQwen38Device final : public Qwen38DecodeDevice {
  public:
-  explicit ScriptedQwen38Device(int capacity = 68, bool mtp = true) : capacity_{capacity}, mtp_{mtp}, ledger_{capacity} {}
+  explicit ScriptedQwen38Device(int capacity = 68, bool mtp = true, size_t max_batch_size = 1)
+      : capacity_{capacity}, mtp_{mtp}, max_batch_size_{max_batch_size}, ledger_{capacity} {
+    slot_ledgers_.assign(max_batch_size_, Qwen38DecodeLedger{capacity});
+    slot_ingested_.resize(max_batch_size_);
+    slot_decoding_.assign(max_batch_size_, false);
+    slot_pending_.assign(max_batch_size_, -1);
+    slot_cycles_.assign(max_batch_size_, 0);
+  }
 
   // ---- script ----
   std::vector<bool> accept_pattern{true, false};
@@ -54,6 +61,7 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
   size_t ledger_length() const { return ledger_.Length(); }
   int ledger_bank() const { return ledger_.Bank(); }
   size_t CallCount(const std::string& name) const { return std::count(calls.begin(), calls.end(), name); }
+  const std::vector<int32_t>& slot_ingested(size_t s) const { return slot_ingested_.at(s); }
 
   // ---- fault injection ----
   bool fail_wait{};
@@ -62,6 +70,7 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
   // ---- Qwen38DecodeDevice ----
   int Capacity() const override { return capacity_; }
   bool MtpEnabled() const override { return mtp_; }
+  size_t MaxBatchSize() const override { return max_batch_size_; }
 
   void Reset() override {
     calls.push_back("reset");
@@ -71,6 +80,29 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
     decoding_ = false;
     pending_ = -1;
     cycle_ = 0;
+    for (size_t s = 0; s < max_batch_size_; ++s) {
+      slot_ledgers_[s].Reset();
+      slot_ingested_[s].clear();
+      slot_decoding_[s] = false;
+      slot_pending_[s] = -1;
+      slot_cycles_[s] = 0;
+    }
+  }
+
+  void ResetSlot(size_t slot_idx) override {
+    calls.push_back("reset_slot:" + std::to_string(slot_idx));
+    slot_ledgers_.at(slot_idx).Reset();
+    slot_ingested_.at(slot_idx).clear();
+    slot_decoding_.at(slot_idx) = false;
+    slot_pending_.at(slot_idx) = -1;
+    slot_cycles_.at(slot_idx) = 0;
+    if (slot_idx == 0) {
+      ledger_.Reset();
+      ingested.clear();
+      decoding_ = false;
+      pending_ = -1;
+      cycle_ = 0;
+    }
   }
 
   void Drain() noexcept override {
@@ -96,7 +128,32 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
     pending_ = TokenAt(ledger_.Length());
   }
 
+  void PrefillChunkSlot(size_t slot_idx, std::span<const int32_t> tokens) override {
+    calls.push_back("prefill_slot:" + std::to_string(slot_idx) + ":" + std::to_string(tokens.size()));
+    if (slot_decoding_.at(slot_idx)) throw std::logic_error("prefill after decoding started");
+    if (tokens.empty()) throw std::logic_error("empty prefill chunk");
+    auto& sl = slot_ledgers_.at(slot_idx);
+    sl.RequireRoom(tokens.size(), "the prompt", 3);
+    if (dense_prefill) {
+      sl.AdvancePrompt(tokens.size());
+    } else {
+      for (size_t i = 0; i < tokens.size();) {
+        const size_t step = i + 1 < tokens.size() ? 2 : 1;
+        sl.Advance(step);
+        i += step;
+      }
+    }
+    slot_ingested_.at(slot_idx).insert(slot_ingested_.at(slot_idx).end(), tokens.begin(), tokens.end());
+    slot_pending_.at(slot_idx) = TokenAt(sl.Length());
+    if (slot_idx == 0) {
+      ledger_ = sl;
+      ingested = slot_ingested_[0];
+      pending_ = slot_pending_[0];
+    }
+  }
+
   int32_t PendingToken() const override { return pending_; }
+  int32_t PendingTokenSlot(size_t slot_idx) const override { return slot_pending_.at(slot_idx); }
   size_t PrefillChunkTokens() const override { return preferred_chunk; }
 
   void BeginDecode(bool run_cycle) override {
@@ -110,6 +167,74 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
       handoff_length = ledger_.Length();
     }
     if (run_cycle) Enqueue();
+  }
+
+  void BeginDecodeSlot(size_t slot_idx, bool want_more) override {
+    calls.push_back("begin_slot:" + std::to_string(slot_idx) + ":" + (want_more ? "1" : "0"));
+    if (slot_decoding_.at(slot_idx)) throw std::logic_error("decoding already started");
+    if (slot_ledgers_.at(slot_idx).Length() == 0) throw std::logic_error("BeginDecodeSlot before prompt was ingested");
+    slot_decoding_.at(slot_idx) = true;
+    if (slot_idx == 0) decoding_ = true;
+    if (want_more && dense_prefill) {
+      ++handoffs;
+      handoff_length = slot_ledgers_.at(slot_idx).Length();
+    }
+  }
+
+  void EnqueueBatchDecode(std::span<const size_t> active_slots) override {
+    if (active_slots.empty()) return;
+    calls.push_back("enqueue_batch:" + std::to_string(active_slots.size()));
+    for (size_t s : active_slots) {
+      slot_ledgers_.at(s).RequireRoom(2, "the next verify step");
+      ++slot_cycles_.at(s);
+    }
+    inflight_ = true;
+    ++cycles_enqueued;
+  }
+
+  void WaitBatchDecode(std::span<const size_t> active_slots,
+                       std::span<Qwen38CycleRecord> records) override {
+    calls.push_back("wait_batch:" + std::to_string(active_slots.size()));
+    if (fail_wait) throw std::runtime_error("injected device failure");
+    if (!inflight_) throw std::logic_error("no batch cycle in flight");
+    inflight_ = false;
+    for (size_t i = 0; i < active_slots.size(); ++i) {
+      const size_t s = active_slots[i];
+      const size_t length = slot_ledgers_.at(s).Length();
+      Qwen38CycleRecord record;
+      record.pred0 = TokenAt(length + 1);
+      record.accepted = mtp_ && accept_pattern[(slot_cycles_.at(s) - 1) % accept_pattern.size()];
+      record.pred1 = record.accepted ? TokenAt(length + 2) : -7;
+      const size_t step = record.TokenCount();
+      record.new_pending = record.accepted ? record.pred1 : record.pred0;
+      record.new_length = static_cast<int64_t>(length + step);
+      records[i] = record;
+    }
+  }
+
+  void AdvanceBatchDecode(std::span<const size_t> active_slots,
+                          std::span<const Qwen38CycleRecord> records,
+                          std::span<const uint8_t> want_more,
+                          bool defer_next_cycle) override {
+    if (inflight_) throw std::logic_error("advance with a cycle still in flight");
+    std::vector<size_t> next_slots;
+    for (size_t i = 0; i < active_slots.size(); ++i) {
+      const size_t s = active_slots[i];
+      slot_ledgers_.at(s).Advance(records[i].TokenCount());
+      slot_ledgers_.at(s).CheckDeviceLength(records[i].new_length);
+      slot_pending_.at(s) = static_cast<int32_t>(records[i].new_pending);
+      if (s == 0) {
+        ledger_ = slot_ledgers_[0];
+        pending_ = slot_pending_[0];
+      }
+      if (want_more[i] != 0) {
+        next_slots.push_back(s);
+      }
+    }
+    calls.push_back("advance_batch:" + std::to_string(next_slots.size()));
+    if (!defer_next_cycle && !next_slots.empty()) {
+      EnqueueBatchDecode(next_slots);
+    }
   }
 
   Qwen38CycleRecord WaitCycle() override {
@@ -153,7 +278,13 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
 
   int capacity_;
   bool mtp_;
+  size_t max_batch_size_{1};
   Qwen38DecodeLedger ledger_;
+  std::vector<Qwen38DecodeLedger> slot_ledgers_;
+  std::vector<std::vector<int32_t>> slot_ingested_;
+  std::vector<bool> slot_decoding_;
+  std::vector<int32_t> slot_pending_;
+  std::vector<size_t> slot_cycles_;
   bool inflight_{};
   bool decoding_{};
   int32_t pending_{-1};
