@@ -409,8 +409,12 @@ void GreedySearch_Cuda::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
 
 void BeamSearch_Cuda::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
   auto next_tokens_gpu = next_tokens.Span();
-  cuda::Launch_ExpandInputSequences(next_tokens_gpu, sequences_.GetNextSequences().Span(), params_->search.batch_size, params_->search.num_beams, sequences_.max_length_, GetStream());
-  cuda::Launch_ExpandInputSequences(next_tokens_gpu, sequences_.GetSequences().Span(), params_->search.batch_size, params_->search.num_beams, sequences_.max_length_, GetStream());
+  const int current_length = sequences_.GetSequenceLength();
+  if (next_tokens.size() / params_->search.batch_size > static_cast<size_t>(sequences_.max_length_ - current_length))
+    throw std::runtime_error("User-defined tokens exceed max_length.");
+  cuda::Launch_ExpandInputSequences(next_tokens_gpu, sequences_.GetSequences().Span(), sequences_.GetNextSequences().Span(),
+                                    params_->search.batch_size, params_->search.num_beams, current_length,
+                                    sequences_.max_length_, GetStream());
   sequences_.AfterAppendNextTokens(next_tokens, params_->search.batch_size);  // next_tokens is batch_size
   sequences_.RecordPromptLength(params_->HasEncoderPromptTokens());
   CUDA_CHECK(cudaStreamSynchronize(GetStream()));

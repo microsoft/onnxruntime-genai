@@ -334,14 +334,19 @@ void BeamSearch_Cpu::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
   auto next_tokens_cpu = next_tokens.CpuSpan();
   auto batch_beam_size = params_->BatchBeamSize();
   auto tokens_count_per_batch = next_tokens_cpu.size() / params_->search.batch_size;
-  if (tokens_count_per_batch > sequences_.max_length_) {
+  const size_t current_length = static_cast<size_t>(sequences_.GetSequenceLength());
+  if (tokens_count_per_batch > sequences_.max_length_ - current_length) {
     throw std::runtime_error("User-defined tokens exceed max_length.");
   }
 
+  auto sequences_span = sequences_.GetSequences().Span();
   auto next_sequences_span = sequences_.GetNextSequences().Span();
   // Copy the user-defined tokens to the sequences
   for (ptrdiff_t i = 0; i < batch_beam_size; i++) {
-    std::span<int32_t> target = next_sequences_span.subspan(i * sequences_.max_length_, tokens_count_per_batch);
+    const size_t offset = i * sequences_.max_length_;
+    const std::span<const int32_t> prefix = sequences_span.subspan(offset, current_length);
+    copy(prefix, next_sequences_span.subspan(offset, current_length));
+    std::span<int32_t> target = next_sequences_span.subspan(offset + current_length, tokens_count_per_batch);
     std::span<const int32_t> source = next_tokens_cpu.subspan((i / params_->search.num_beams) * tokens_count_per_batch, tokens_count_per_batch);
     copy(source, target);
   }

@@ -96,7 +96,7 @@ struct MarianState : State {
   std::unique_ptr<Tensor> rnn_states_prev_;
   std::unique_ptr<OrtValue> past_key_values_length_;
   std::unique_ptr<Tensor> rnn_states_;
-  DeviceSpan<uint8_t> decoder_checkpoints_;
+  std::vector<DeviceSpan<uint8_t>> decoder_checkpoints_;
   size_t decoder_checkpoint_bytes_{};
   std::vector<int64_t> decoder_checkpoint_positions_;
   std::vector<std::unique_ptr<OrtValue>> values_;

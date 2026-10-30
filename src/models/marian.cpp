@@ -229,7 +229,7 @@ DeviceSpan<float> MarianState::Run(int current_length, DeviceSpan<int32_t>& next
     const int32_t pad_token_id = model_.config_->model.pad_token_id;
     const int32_t eos_token_id = model_.config_->model.eos_token_id[0];
 
-    auto chunk_cpu_span = next_tokens.CpuSpan();
+    auto chunk_cpu_span = next_tokens.CopyDeviceToCpu();
     if (batch_size == 0 || chunk_cpu_span.size() % batch_size != 0) {
       throw std::runtime_error(
           "MarianState::Run: prompt buffer holds " +
@@ -388,7 +388,7 @@ DeviceSpan<float> MarianState::Run(int current_length, DeviceSpan<int32_t>& next
 }
 
 void MarianState::SaveDecoderCheckpoint(size_t sequence_length) {
-  if (params_->search.batch_size != 1)
+  if (params_->search.batch_size != 1 || params_->search.num_beams != 1)
     return;
   auto state = rnn_states_->GetByteSpan();
   const size_t max_length = static_cast<size_t>(params_->search.max_length);
@@ -398,7 +398,7 @@ void MarianState::SaveDecoderCheckpoint(size_t sequence_length) {
   if (sequence_length > max_length)
     throw std::runtime_error("Marian decoder checkpoint exceeds max_length");
   if (decoder_checkpoints_.empty()) {
-    decoder_checkpoints_ = model_.p_device_inputs_->Allocate<uint8_t>((max_length + 1) * state.size());
+    decoder_checkpoints_.resize(max_length + 1);
     decoder_checkpoint_bytes_ = state.size();
     decoder_checkpoint_positions_.assign(max_length + 1, -1);
   }
@@ -406,7 +406,10 @@ void MarianState::SaveDecoderCheckpoint(size_t sequence_length) {
     throw std::runtime_error("Marian decoder checkpoint exceeds the allocated capacity");
   if (state.size() != decoder_checkpoint_bytes_)
     throw std::runtime_error("Marian recurrent state size changed after checkpoint allocation");
-  decoder_checkpoints_.subspan(sequence_length * decoder_checkpoint_bytes_, decoder_checkpoint_bytes_).CopyFrom(state);
+  auto& checkpoint = decoder_checkpoints_[sequence_length];
+  if (checkpoint.empty())
+    checkpoint = model_.p_device_inputs_->Allocate<uint8_t>(decoder_checkpoint_bytes_);
+  checkpoint.CopyFrom(state);
   decoder_checkpoint_positions_[sequence_length] = *past_key_values_length_->GetTensorMutableData<int64_t>();
 }
 
@@ -414,11 +417,12 @@ void MarianState::RewindTo(size_t index) {
   if (index != 0 && index >= encoder_prompt_tokens_.size()) {
     if (index >= decoder_checkpoint_positions_.size() || decoder_checkpoint_positions_[index] < 0)
       throw std::runtime_error("Marian rewind requires a materialized decoder state at the requested length");
-    const auto saved = decoder_checkpoints_.subspan(index * decoder_checkpoint_bytes_, decoder_checkpoint_bytes_);
+    const auto& saved = decoder_checkpoints_[index];
     rnn_states_->GetByteSpan().CopyFrom(saved);
     rnn_states_prev_->GetByteSpan().CopyFrom(saved);
     *past_key_values_length_->GetTensorMutableData<int64_t>() = decoder_checkpoint_positions_[index];
     std::fill(decoder_checkpoint_positions_.begin() + index + 1, decoder_checkpoint_positions_.end(), -1);
+    std::fill(decoder_checkpoints_.begin() + index + 1, decoder_checkpoints_.end(), DeviceSpan<uint8_t>{});
     generation_started_ = true;
     return;
   }
@@ -430,7 +434,7 @@ void MarianState::RewindTo(size_t index) {
   encoder_input_ids_.RewindTo(0);
   encoder_attention_mask_.RewindTo(0);
   attention_mask_.RewindTo(0);
-  decoder_checkpoints_ = {};
+  decoder_checkpoints_.clear();
   decoder_checkpoint_bytes_ = 0;
   decoder_checkpoint_positions_.clear();
 }
