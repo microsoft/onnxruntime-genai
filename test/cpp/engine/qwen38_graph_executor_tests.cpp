@@ -1534,6 +1534,81 @@ TEST_F(Qwen38GraphEngineTest, DynamicBatchingConfigurationIsRejected) {
   EXPECT_THROW(CreateQwen38GraphDependencies(model_, device_), std::runtime_error);
 }
 
+TEST_F(Qwen38GraphEngineTest, MultiSlotRaggedBatchDecodesConcurrentRequestsOfDifferentPromptAndDecodeLengths) {
+  device_ = std::make_shared<ScriptedQwen38Device>(/*capacity=*/68, /*mtp=*/true, /*max_batch_size=*/4);
+  device_->dense_prefill = true;
+  device_->preferred_chunk = 8;
+  auto engine = MakeEngine();
+  EXPECT_EQ(engine->GetCapabilities().configured_max_batch_size, 4u);
+
+  const auto p0 = Prompt(3, 12);
+  const auto p1 = Prompt(11, 20);  // 2 prefill chunks (8 + 3)
+  const auto p2 = Prompt(6, 30);
+  const auto p3 = Prompt(8, 40);
+
+  auto r0 = Begin(*engine, p0, /*max_generated_tokens=*/4);
+  auto r1 = Begin(*engine, p1, /*max_generated_tokens=*/7);
+  auto r2 = Begin(*engine, p2, /*max_generated_tokens=*/2);
+  auto r3 = Begin(*engine, p3, /*max_generated_tokens=*/5);
+
+  std::array<EngineEvent, 16> buffer;
+  std::map<const Request*, std::vector<int32_t>> emitted;
+  std::map<const Request*, GenerationFinishReason> reasons;
+  while (engine->HasPendingRequests()) {
+    const size_t count = engine->Run(buffer);
+    for (size_t i = 0; i < count; ++i) {
+      const EngineEvent& ev = buffer[i];
+      ASSERT_EQ(ev.flags & EngineEventFlagFailed, 0u);
+      if (ev.flags & EngineEventFlagToken) {
+        emitted[ev.request.get()].push_back(ev.token);
+      }
+      if (ev.flags & EngineEventFlagTurnFinished) {
+        reasons[ev.request.get()] = ev.finish_reason;
+      }
+    }
+  }
+
+  EXPECT_EQ(emitted[r0.get()], Expected(3, 4));
+  EXPECT_EQ(emitted[r1.get()], Expected(11, 7));
+  EXPECT_EQ(emitted[r2.get()], Expected(6, 2));
+  EXPECT_EQ(emitted[r3.get()], Expected(8, 5));
+  EXPECT_EQ(reasons[r0.get()], GenerationFinishReason::TurnLimit);
+  EXPECT_EQ(reasons[r1.get()], GenerationFinishReason::TurnLimit);
+  EXPECT_EQ(reasons[r2.get()], GenerationFinishReason::TurnLimit);
+  EXPECT_EQ(reasons[r3.get()], GenerationFinishReason::TurnLimit);
+  EXPECT_EQ(device_->slot_ingested(0), p0);
+  EXPECT_EQ(device_->slot_ingested(1), p1);
+  EXPECT_EQ(device_->slot_ingested(2), p2);
+  EXPECT_EQ(device_->slot_ingested(3), p3);
+}
+
+TEST_F(Qwen38GraphEngineTest, MultiSlotEvictsCompletedSlotsForQueuedRequests) {
+  device_ = std::make_shared<ScriptedQwen38Device>(/*capacity=*/68, /*mtp=*/true, /*max_batch_size=*/2);
+  device_->dense_prefill = true;
+  device_->preferred_chunk = 16;
+  auto engine = MakeEngine();
+  EXPECT_EQ(engine->GetCapabilities().configured_max_batch_size, 2u);
+
+  auto r0 = Begin(*engine, Prompt(4, 10), /*max_generated_tokens=*/2);
+  auto r1 = Begin(*engine, Prompt(5, 20), /*max_generated_tokens=*/6);
+  auto r2 = Begin(*engine, Prompt(7, 30), /*max_generated_tokens=*/3);  // queues until r0 finishes
+
+  std::array<EngineEvent, 16> buffer;
+  std::map<const Request*, std::vector<int32_t>> emitted;
+  while (engine->HasPendingRequests()) {
+    const size_t count = engine.get()->Run(buffer);
+    for (size_t i = 0; i < count; ++i) {
+      if (buffer[i].flags & EngineEventFlagToken) {
+        emitted[buffer[i].request.get()].push_back(buffer[i].token);
+      }
+    }
+  }
+
+  EXPECT_EQ(emitted[r0.get()], Expected(4, 2));
+  EXPECT_EQ(emitted[r1.get()], Expected(5, 6));
+  EXPECT_EQ(emitted[r2.get()], Expected(7, 3));
+}
+
 // Host cost of one Engine step (Run) with a device that answers instantly: everything the Engine adds around a cycle. Run
 // manually: engine_unit_tests --gtest_also_run_disabled_tests --gtest_filter='*RunOverhead*'.
 TEST_F(Qwen38GraphEngineTest, DISABLED_RunOverheadPerCycle) {
