@@ -24,6 +24,19 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <algorithm>
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
+#include <vector>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <memoryapi.h>
+#endif
 
 #include "qwen38_plane_abi.h"
 
@@ -45,8 +58,8 @@ struct StagedPleWorkspace {
   const void* cached_ctx_out_ptr = nullptr;
   i64 cached_c0 = 0;
   i64 cached_c1 = 0;
-  static constexpr size_t kCacheSlots = 2048;
-  static constexpr size_t kMaxRowBytes = 8192;
+  static constexpr size_t kCacheSlots = 16384;
+  static constexpr size_t kMaxRowBytes = 3072;
   unsigned char* ngram_cache_data = nullptr;
   i64 ngram_cache_keys[kCacheSlots][3]{};
   unsigned char ngram_cache_valid[kCacheSlots]{};
@@ -134,6 +147,194 @@ static inline void host_gather_ple_row(const PleParams& HP, i64 tok, i64 s_c0, i
     g_staged_ple.ngram_cache_keys[cache_slot][2] = c1;
     g_staged_ple.ngram_cache_valid[cache_slot] = 1;
   }
+}
+
+static inline const unsigned char* resolve_ple_head_ptr(const PleParams& HP, int h, i64 tok, i64 c0, i64 c1) {
+  unsigned long long mixed = (unsigned long long)tok * (unsigned long long)HP.mult[0];
+  mixed ^= (unsigned long long)c1 * (unsigned long long)HP.mult[1];
+  if (h >= HP.heads_per_ngram) mixed ^= (unsigned long long)c0 * (unsigned long long)HP.mult[2];
+  const i64 v = HP.vocab[h];
+  i64 r = (i64)mixed % v;
+  if (r < 0) r += v;
+  const i64 id = r + HP.offset[h];
+  int lo = 0, hi = HP.n_shards - 1;
+  while (lo < hi) {
+    const int mid = (lo + hi) >> 1;
+    if (HP.shard_end[mid] > id)
+      hi = mid;
+    else
+      lo = mid + 1;
+  }
+  const i64 first = lo == 0 ? 0 : HP.shard_end[lo - 1];
+  const i64 row_idx = id - first;
+  return HP.shard_ptr[lo] + (size_t)row_idx * (size_t)HP.head_dim;
+}
+
+struct PleGatherTask {
+  const PleParams* hp = nullptr;
+  const i64* h_toks = nullptr;
+  i64 ctx0 = 0;
+  i64 ctx1 = 0;
+  int n = 0;
+  size_t row_stride = 0;
+  unsigned char* dst_base = nullptr;
+  std::atomic<int> next_row{0};
+};
+
+struct PleGatherPool {
+  std::mutex mx;
+  std::condition_variable cv_work;
+  std::condition_variable cv_done;
+  PleGatherTask* task = nullptr;
+  int active_workers = 0;
+  int num_threads = 0;
+  uint64_t epoch = 0;
+  bool started = false;
+  std::mutex call_mx;
+
+  static void process_task(PleGatherTask* t) {
+    const PleParams& HP = *t->hp;
+    const int hd = HP.head_dim;
+    const int nh = HP.n_heads;
+    const size_t total_bytes = (size_t)nh * (size_t)hd;
+    const bool use_cache = (g_staged_ple.ngram_cache_data != nullptr && total_bytes <= StagedPleWorkspace::kMaxRowBytes);
+#ifdef _WIN32
+    thread_local std::vector<WIN32_MEMORY_RANGE_ENTRY> ranges;
+#endif
+    thread_local std::vector<const unsigned char*> miss_srcs;
+    thread_local std::vector<unsigned char*> miss_dsts;
+    constexpr int kSpan = 32;
+
+    while (true) {
+      const int i0 = t->next_row.fetch_add(kSpan, std::memory_order_relaxed);
+      if (i0 >= t->n) break;
+      const int i1 = (i0 + kSpan < t->n) ? (i0 + kSpan) : t->n;
+#ifdef _WIN32
+      ranges.clear();
+      ranges.reserve((size_t)(i1 - i0) * (size_t)nh);
+#endif
+      miss_srcs.clear();
+      miss_dsts.clear();
+      miss_srcs.reserve((size_t)(i1 - i0) * (size_t)nh);
+      miss_dsts.reserve((size_t)(i1 - i0) * (size_t)nh);
+
+      for (int i = i0; i < i1; ++i) {
+        const i64 tok = t->h_toks[i];
+        const i64 c1 = i >= 1 ? t->h_toks[i - 1] : t->ctx1;
+        const i64 c0raw = i >= 2 ? t->h_toks[i - 2] : (i == 1 ? t->ctx1 : t->ctx0);
+        const i64 c0 = (c1 == HP.eos) ? HP.eos : c0raw;
+        unsigned char* dst_fp8 = t->dst_base + (size_t)i * t->row_stride;
+        if (use_cache) {
+          const unsigned long long h =
+              ((unsigned long long)tok * 11400714819323198485ULL) ^
+              ((unsigned long long)c1 * 14029467366897019727ULL) ^
+              ((unsigned long long)c0 * 1609587929392839161ULL);
+          const size_t cache_slot = (size_t)(h & (StagedPleWorkspace::kCacheSlots - 1));
+          if (g_staged_ple.ngram_cache_valid[cache_slot] &&
+              g_staged_ple.ngram_cache_keys[cache_slot][0] == tok &&
+              g_staged_ple.ngram_cache_keys[cache_slot][1] == c0 &&
+              g_staged_ple.ngram_cache_keys[cache_slot][2] == c1) {
+            memcpy(dst_fp8, g_staged_ple.ngram_cache_data + cache_slot * StagedPleWorkspace::kMaxRowBytes, total_bytes);
+            continue;
+          }
+        }
+        for (int h = 0; h < nh; ++h) {
+          const unsigned char* src = resolve_ple_head_ptr(HP, h, tok, c0, c1);
+          miss_srcs.push_back(src);
+          miss_dsts.push_back(dst_fp8 + (size_t)h * (size_t)hd);
+#ifdef _WIN32
+          ranges.push_back({const_cast<unsigned char*>(src), (SIZE_T)hd});
+#endif
+        }
+      }
+
+      for (size_t k = 0; k < miss_srcs.size(); ++k) {
+        memcpy(miss_dsts[k], miss_srcs[k], (size_t)hd);
+      }
+#ifdef _WIN32
+      for (const auto& r : ranges) {
+        (void)VirtualUnlock(r.VirtualAddress, r.NumberOfBytes);
+      }
+#endif
+    }
+  }
+
+  void worker() {
+    uint64_t my_epoch = 0;
+    std::unique_lock<std::mutex> lk(mx);
+    while (true) {
+      cv_work.wait(lk, [&] { return epoch != my_epoch && task != nullptr; });
+      my_epoch = epoch;
+      PleGatherTask* t = task;
+      lk.unlock();
+      process_task(t);
+      lk.lock();
+      if (--active_workers == 0) {
+        cv_done.notify_all();
+      }
+    }
+  }
+
+  void run(const PleParams& HP, const i64* h_toks, i64 ctx0, i64 ctx1, int n, unsigned char* dst_base, size_t row_stride) {
+    std::lock_guard<std::mutex> call_lk(call_mx);
+    PleGatherTask t;
+    t.hp = &HP;
+    t.h_toks = h_toks;
+    t.ctx0 = ctx0;
+    t.ctx1 = ctx1;
+    t.n = n;
+    t.row_stride = row_stride;
+    t.dst_base = dst_base;
+    t.next_row.store(0, std::memory_order_relaxed);
+
+    {
+      std::unique_lock<std::mutex> lk(mx);
+      if (!started) {
+        started = true;
+        num_threads = (int)std::min(23u, std::max(3u, std::thread::hardware_concurrency() - 1));
+        for (int i = 0; i < num_threads; ++i) {
+          std::thread(&PleGatherPool::worker, this).detach();
+        }
+      }
+      task = &t;
+      active_workers = num_threads;
+      ++epoch;
+      cv_work.notify_all();
+    }
+    process_task(&t);
+    {
+      std::unique_lock<std::mutex> lk(mx);
+      cv_done.wait(lk, [&] { return active_workers == 0; });
+      task = nullptr;
+    }
+
+    const size_t total_bytes = (size_t)HP.n_heads * (size_t)HP.head_dim;
+    if (g_staged_ple.ngram_cache_data != nullptr && total_bytes <= StagedPleWorkspace::kMaxRowBytes) {
+      const int start_i = (n > 2048) ? (n - 2048) : 0;
+      for (int i = start_i; i < n; ++i) {
+        const i64 tok = h_toks[i];
+        const i64 c1 = i >= 1 ? h_toks[i - 1] : ctx1;
+        const i64 c0raw = i >= 2 ? h_toks[i - 2] : (i == 1 ? ctx1 : ctx0);
+        const i64 c0 = (c1 == HP.eos) ? HP.eos : c0raw;
+        const unsigned long long h =
+            ((unsigned long long)tok * 11400714819323198485ULL) ^
+            ((unsigned long long)c1 * 14029467366897019727ULL) ^
+            ((unsigned long long)c0 * 1609587929392839161ULL);
+        const size_t cache_slot = (size_t)(h & (StagedPleWorkspace::kCacheSlots - 1));
+        memcpy(g_staged_ple.ngram_cache_data + cache_slot * StagedPleWorkspace::kMaxRowBytes,
+               dst_base + (size_t)i * row_stride, total_bytes);
+        g_staged_ple.ngram_cache_keys[cache_slot][0] = tok;
+        g_staged_ple.ngram_cache_keys[cache_slot][1] = c0;
+        g_staged_ple.ngram_cache_keys[cache_slot][2] = c1;
+        g_staged_ple.ngram_cache_valid[cache_slot] = 1;
+      }
+    }
+  }
+};
+
+static PleGatherPool* get_ple_gather_pool() {
+  static PleGatherPool* pool = new PleGatherPool();
+  return pool;
 }
 
 __global__ void k_prep_staged(const PleParams* P, i64 tok, i64 pos, i64 s_c1, const unsigned char* fp8_row,
@@ -986,11 +1187,15 @@ QWEN38_PLANE_EXPORT void qwen38_plane_ple_rows(void* s, const void* P, const voi
     const i64* h_toks = g_staged_ple.prefill_tokens;
     const i64 ctx0 = g_staged_ple.scalars[2];
     const i64 ctx1 = g_staged_ple.scalars[3];
-    for (int i = 0; i < n; ++i) {
-      const i64 tok = h_toks[i];
-      const i64 c1 = i >= 1 ? h_toks[i - 1] : ctx1;
-      const i64 c0raw = i >= 2 ? h_toks[i - 2] : (i == 1 ? ctx1 : ctx0);
-      host_gather_ple_row(g_host_ple_params, tok, c0raw, c1, g_staged_ple.prefill_fp8 + (size_t)i * total);
+    if (n >= 32) {
+      get_ple_gather_pool()->run(g_host_ple_params, h_toks, ctx0, ctx1, n, g_staged_ple.prefill_fp8, total);
+    } else {
+      for (int i = 0; i < n; ++i) {
+        const i64 tok = h_toks[i];
+        const i64 c1 = i >= 1 ? h_toks[i - 1] : ctx1;
+        const i64 c0raw = i >= 2 ? h_toks[i - 2] : (i == 1 ? ctx1 : ctx0);
+        host_gather_ple_row(g_host_ple_params, tok, c0raw, c1, g_staged_ple.prefill_fp8 + (size_t)i * total);
+      }
     }
     const i64 last_tok = h_toks[n - 1];
     const i64 last_c1 = n >= 2 ? h_toks[n - 2] : ctx1;
