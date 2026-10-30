@@ -1415,7 +1415,7 @@ def clean_and_pack_package(source: Path, out: Path, copy: bool = False, embed_qu
     """Clean up unreferenced safetensors/dense.data/merged.data/generated.data, compact expert scales,
     split model.embed_tokens.weight into a standard CPU embedding.onnx + embedding.onnx.data model
     (INT8 per-row or BF16), unify target and MTP graphs so the same ONNX graph serves both prefill
-    and decode, and place all ONNX models (model.onnx, mtp.onnx, embedding.onnx)
+    and decode, and place all ONNX models (model.onnx, model_s2..s4.onnx, mtp.onnx, embedding.onnx)
     in the root package directory."""
     import numpy as np  # noqa: PLC0415
     import onnx  # noqa: PLC0415
@@ -1842,8 +1842,13 @@ def clean_and_pack_package(source: Path, out: Path, copy: bool = False, embed_qu
                 set_ext(t, "norm_and_rope.data", norm_rope_map[dedup_key], s_len)
                 packed_tensors += 1
 
-    # 5. Save cleaned unified ONNX models in the root directory and remove legacy subdirectories
+    # 5. Save cleaned unified ONNX models in the root directory, generate S=2..4 multi-draft QMoE graphs, and remove legacy subdirectories
     onnx.save_model(models["target"], str(out / "model.onnx"), save_as_external_data=False)
+    link_file(out / "model.onnx", out / "model_s2.onnx", copy)
+    from build_package_offload_v3 import build_multidraft_target_onnx  # noqa: PLC0415
+
+    build_multidraft_target_onnx(out / "model_s2.onnx", out / "model_s3.onnx", verify_rows=3)
+    build_multidraft_target_onnx(out / "model_s2.onnx", out / "model_s4.onnx", verify_rows=4)
     onnx.save_model(models["head_r2"], str(out / "mtp.onnx"), save_as_external_data=False)
     for obsolete_dir in ("target", "head_r2", "dense", "head_kv"):
         if (out / obsolete_dir).exists():
@@ -2096,6 +2101,12 @@ def main() -> None:
         default=False,
         help="keep SharedExpertDown projections in BF16",
     )
+    parser.add_argument(
+        "--expert-profile",
+        type=Path,
+        default=None,
+        help="STRP v1 expert-profile.bin copied into the package for the offload runtime profiles (clean packages)",
+    )
     args = parser.parse_args()
 
     source, out = args.from_package.resolve(), args.out.resolve()
@@ -2272,6 +2283,108 @@ def main() -> None:
         qwen["prefill"].pop("dense", None)
         qwen["prefill"].pop("head_kv", None)
         qwen["prefill"].pop("constants", None)
+
+        # Copy the STRP v1 expert popularity profile named by the offload runtime profiles
+        if args.expert_profile is not None:
+            shutil.copy2(args.expert_profile, out / "expert-profile.bin")
+        else:
+            print("note: no --expert-profile given; copy an STRP v1 expert-profile.bin into the package yourself")
+        config["runtime_profiles"] = [
+            {
+                "id": "consumer-gpu-24g",
+                "eligibility": {
+                    "minimum_total_device_memory_bytes": 21474836480,
+                    "maximum_total_device_memory_bytes": 26843545600,
+                    "minimum_effective_host_memory_bytes": 68719476736,
+                    "is_integrated": False,
+                },
+                "overlay": {
+                    "model": {
+                        "decoder": {
+                            "filename": "model_s4.onnx",
+                            "session_options": {
+                                "session.moe.offload.mode": "required",
+                                "session.moe.offload.placement": "adaptive",
+                                "session.moe.offload.cpu_execution": "auto",
+                                "session.moe.offload.device_expert_bytes": "10351538176",
+                                "session.moe.offload.popularity_file": "expert-profile.bin",
+                            },
+                        }
+                    }
+                },
+            },
+            {
+                "id": "consumer-gpu-24g-host-64g",
+                "eligibility": {
+                    "minimum_total_device_memory_bytes": 21474836480,
+                    "maximum_total_device_memory_bytes": 26843545600,
+                    "maximum_effective_host_memory_bytes": 68719476735,
+                    "is_integrated": False,
+                },
+                "overlay": {
+                    "model": {
+                        "decoder": {
+                            "filename": "model_s4.onnx",
+                            "session_options": {
+                                "session.moe.offload.mode": "required",
+                                "session.moe.offload.placement": "adaptive",
+                                "session.moe.offload.cpu_execution": "auto",
+                                "session.moe.offload.device_expert_bytes": "10351538176",
+                                "session.moe.offload.host_expert_bytes": "17179869184",
+                                "session.moe.offload.popularity_file": "expert-profile.bin",
+                            },
+                        }
+                    }
+                },
+            },
+            {
+                "id": "consumer-gpu-30g-ram-48g-32k",
+                "eligibility": {
+                    "minimum_total_device_memory_bytes": 26843545601,
+                    "maximum_total_device_memory_bytes": 32212254720,
+                    "maximum_effective_host_memory_bytes": 68719476735,
+                    "is_integrated": False,
+                },
+                "overlay": {
+                    "model": {
+                        "decoder": {
+                            "filename": "model_s4.onnx",
+                            "session_options": {
+                                "session.moe.offload.mode": "required",
+                                "session.moe.offload.placement": "adaptive",
+                                "session.moe.offload.cpu_execution": "auto",
+                                "session.moe.offload.device_expert_bytes": "18289511424",
+                                "session.moe.offload.host_expert_bytes": "41339060224",
+                                "session.moe.offload.popularity_file": "expert-profile.bin",
+                            },
+                        }
+                    }
+                },
+            },
+            {
+                "id": "consumer-gpu-32g",
+                "eligibility": {
+                    "minimum_total_device_memory_bytes": 26843545601,
+                    "maximum_total_device_memory_bytes": 36507222016,
+                    "minimum_effective_host_memory_bytes": 68719476736,
+                    "is_integrated": False,
+                },
+                "overlay": {
+                    "model": {
+                        "decoder": {
+                            "filename": "model_s4.onnx",
+                            "session_options": {
+                                "session.moe.offload.mode": "required",
+                                "session.moe.offload.placement": "adaptive",
+                                "session.moe.offload.cpu_execution": "auto",
+                                "session.moe.offload.device_expert_bytes": "19229035520",
+                                "session.moe.offload.popularity_file": "expert-profile.bin",
+                            },
+                        }
+                    }
+                },
+            },
+        ]
 
     if transform_models or clean_pkg:
         if clean_pkg:
