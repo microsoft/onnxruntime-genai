@@ -75,6 +75,8 @@ The tool currently supports the following model architectures.
 - LFM2 (text, LFM2-VL / LFM2.5-VL / d1-3B with their vision models, and the decoders of LFM2-Audio / LFM2.5-Audio)
 - LFM2 MoE
 - LFM3 (text and the decoders of LFM3-VL / LFM3-Audio / LFM3-Omni)
+  - With `exclude_embeds=true` the LFM3-VL / LFM3-Audio / LFM3-Omni decoders are stages of the `lfm3_vl`, `lfm3_audio` and `lfm3_omni` pipelines, which the runtime cannot load yet.
+  - LFM3-1.7B has a 262144-token context. Its RoPE caches take about 134 MB in a model with fp16 inputs and outputs and 268 MB with fp32 ones (CPU exports, int4 included). Every attention layer, the sliding-window ones included, keeps a KV cache of `search.max_length` tokens, which defaults to that context, so set `search.max_length` to the length you need.
 - Llama
 - Mistral
 - Nemotron

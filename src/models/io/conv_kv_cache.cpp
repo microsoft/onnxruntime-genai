@@ -36,8 +36,11 @@ ConvKeyValueCache::ConvKeyValueCache(State& state)
   for (int i = 0; i < layer_count_; ++i) {
     if (layer_types_[i] == "full_attention" || layer_types_[i] == "sliding_attention") {
       kv_layer_indices_.push_back(i);
-    } else {
+    } else if (layer_types_[i] == "conv") {
       conv_layer_indices_.push_back(i);
+    } else {
+      throw std::runtime_error(std::string{cache_name} + ": layer_types[" + std::to_string(i) + "] is \"" + layer_types_[i] +
+                               "\", expected \"conv\", \"full_attention\" or \"sliding_attention\"");
     }
   }
   kv_layer_count_ = static_cast<int>(kv_layer_indices_.size());

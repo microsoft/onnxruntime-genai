@@ -790,11 +790,11 @@ def create_model(
         onnx_model.model_type = "lfm2_audio" if onnx_model.exclude_embeds else "lfm2_audio_text"
     elif config.architectures[0] == "Lfm3ForCausalLM":
         onnx_model = LFM3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-    elif config.architectures[0] in LFM3Model.LOADERS:
+    elif config.architectures[0] in LFM3Model.MULTIMODAL:
         onnx_model = LFM3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         # With the embedding layer excluded the decoder is one stage of the lfm3_vl / lfm3_audio /
         # lfm3_omni pipeline (which the runtime does not have yet); otherwise a plain LFM3 text model.
-        pipeline = config.architectures[0].removesuffix("ForConditionalGeneration").lower().replace("lfm3", "lfm3_")
+        _, pipeline = LFM3Model.MULTIMODAL[config.architectures[0]]
         onnx_model.model_type = pipeline if onnx_model.exclude_embeds else "lfm3"
     elif config.architectures[0] == "LlamaForCausalLM":
         onnx_model = LlamaModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
