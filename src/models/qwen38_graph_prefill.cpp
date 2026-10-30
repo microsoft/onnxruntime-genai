@@ -567,7 +567,13 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
     if (dflash_ && dflash_prompt_rows_) {
       Draft(d_dflash_prompt_.data(), dflash_prompt_rows_, dflash_prompt_position_, 0, false);
       dflash_prompt_rows_ = 0;
+      dflash_ingested_in_turn_ = true;
     }
+    const size_t dflash_ctx_win =
+        (dflash_ && model_.config_->model.dflash2.sliding_window > 0)
+            ? static_cast<size_t>(model_.config_->model.dflash2.sliding_window +
+                                  model_.config_->model.dflash2.block_size)
+            : 0;
     MutedPrefill(true);
     size_t last_m = 1;
     for (size_t lo = 0; lo < n;) {
@@ -699,7 +705,10 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
       f.dense_length += m;
       if (dflash_) {
         if (lo + m < n) {
-          Draft(d_dflash_prompt_.data(), m, pos, 0, false);
+          if (dflash_ingested_in_turn_ || dflash_ctx_win == 0 || (n - (lo + m) < dflash_ctx_win)) {
+            Draft(d_dflash_prompt_.data(), m, pos, 0, false);
+            dflash_ingested_in_turn_ = true;
+          }
         } else {
           dflash_prompt_rows_ = m;
           dflash_prompt_position_ = pos;
