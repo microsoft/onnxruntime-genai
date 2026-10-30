@@ -10,8 +10,12 @@ from .base import Model
 
 
 class MistralModel(Model):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+    def make_config_init(self, config):
+        super().make_config_init(config)
+        window_size = getattr(config, "sliding_window", None)
+        if getattr(config, "layer_types", None) is None and window_size is not None and window_size > 0:
+            # MistralConfig omits layer_types; its configured window applies to every layer.
+            config.layer_types = ["sliding_attention"] * config.num_hidden_layers
 
 
 class Mistral3TextModel(MistralModel):
