@@ -391,7 +391,8 @@ void Qwen38GraphEngine::BuildFastPrefill() {
       const int parsed = std::atoi(env_chunk);
       if (parsed > 0) requested_chunk = parsed;
     }
-    fast->chunk = std::clamp(requested_chunk, 1, std::min<int>(capacity_, 8192));
+    const int max_prefill_chunk = (capacity_ > 65536) ? 4096 : 8192;
+    fast->chunk = std::clamp(requested_chunk, 1, std::min<int>(capacity_, max_prefill_chunk));
     if (fast->chunk < 1 || fast->chunk > capacity_) throw std::runtime_error("qwen38_graph: invalid prefill.chunk");
     fast->dense_inputs = fast->dense->GetInputNames();
     fast->dense_outputs = fast->dense->GetOutputNames();
