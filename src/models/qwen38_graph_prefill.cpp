@@ -440,8 +440,13 @@ void Qwen38GraphEngine::BuildFastPrefill() {
     fast->head_kv = model_.session_head_r2_.get();
     fast->dense_info.Add(*fast->dense);
     if (fast->head_kv) fast->head_kv_info.Add(*fast->head_kv);
-    fast->chunk = (q.prefill.chunk > 0) ? std::min(configured_chunk, 2048)
-                                        : std::min({configured_chunk, 2048, capacity_});
+    // An explicit prefill.chunk is honored up to the cap below; without one the prompt goes through in the step-sized chunk.
+    int requested_chunk = (q.prefill.chunk > 0) ? configured_chunk : std::min(configured_chunk, 2048);
+    if (const char* env_chunk = std::getenv("ORT_QWEN38_PREFILL_CHUNK")) {
+      const int parsed = std::atoi(env_chunk);
+      if (parsed > 0) requested_chunk = parsed;
+    }
+    fast->chunk = std::clamp(requested_chunk, 1, std::min<int>(capacity_, 8192));
     if (fast->chunk < 1 || fast->chunk > capacity_) throw std::runtime_error("qwen38_graph: invalid prefill.chunk");
     fast->dense_inputs = fast->dense->GetInputNames();
     fast->dense_outputs = fast->dense->GetOutputNames();
@@ -578,8 +583,7 @@ void Qwen38GraphEngine::FastAppendSlot(int slot, std::span<const int32_t> tokens
   size_t last_m = 1;
   for (size_t lo = 0; lo < n;) {
     const size_t pos = base + lo;
-    size_t max_m = static_cast<size_t>(f.chunk);
-    if (pos >= 16384 && max_m > 2048) max_m = std::min<size_t>(max_m, 2048);
+    const size_t max_m = static_cast<size_t>(f.chunk);
     const size_t m = std::min(max_m, n - lo);
     last_m = m;
     const Qwen38PromptRunHints prompt_run{total_expected, PromptChunkCompactExperts(pos, m)};
@@ -774,8 +778,7 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
     size_t last_m = 1;
     for (size_t lo = 0; lo < n;) {
       const size_t pos = base + lo;
-      size_t max_m = static_cast<size_t>(f.chunk);
-      if (pos >= 16384 && max_m > 2048) max_m = std::min<size_t>(max_m, 2048);
+      const size_t max_m = static_cast<size_t>(f.chunk);
       const size_t m = std::min(max_m, n - lo);
       last_m = m;
       const Qwen38PromptRunHints prompt_run{total_expected, PromptChunkCompactExperts(pos, m)};
