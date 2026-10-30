@@ -6,13 +6,19 @@
 
 import copy
 import os
+import shutil
 
 import onnx_ir as ir
 from quantization import QuantConfig
 
+from .base import Model
 
-class MTPModel:
+
+class MTPModel(Model):
     """Base class for composite models with an optional MTP graph."""
+
+    def __init__(self):
+        super().__init__(graph_name="mtp_package")
 
     def make_mtp_init(self, config, extra_options):
         self.mtp_attrs = {
@@ -95,6 +101,7 @@ class MTPModel:
         source_data_name = os.path.basename(source_data)
         target_data_name = os.path.basename(target_data)
         source_data_size = os.path.getsize(source_data)
+        target_data_size = os.path.getsize(target_data)
         source_info = {}
         for name, initializer in source_model.graph.initializers.items():
             tensor = initializer.const_value
@@ -123,6 +130,10 @@ class MTPModel:
                 or os.fspath(target_tensor.location) != target_data_name
                 or target_tensor.offset is None
                 or target_tensor.length is None
+                or target_tensor.offset < 0
+                or target_tensor.length < 0
+                or target_tensor.offset > target_data_size
+                or target_tensor.length > target_data_size - target_tensor.offset
                 or target_tensor.dtype.value != data_type
                 or tuple(target_tensor.shape) != dims
                 or target_tensor.length != source_length
@@ -134,51 +145,44 @@ class MTPModel:
                 shared[name] = (source_offset, source_length, target_tensor.offset)
         return source_info, shared
 
-    def stage_shared_initializers(self, target_model, source_data_name, target_data, shared):
-        target_data_name = os.path.basename(target_data)
+    def stage_shared_initializers(self, target_model, source_data, target_data, shared):
+        # Preserve offsets for every tensor, including attributes and subgraphs.
+        # Runtime sharing is configured separately; graph references remain private.
         staged_data = target_data + ".tmp"
-        kept = []
-        for name, initializer in target_model.graph.initializers.items():
-            tensor = initializer.const_value
-            if (
-                isinstance(tensor, ir.ExternalTensor)
-                and os.fspath(tensor.location) == target_data_name
-                and tensor.offset is not None
-                and tensor.length is not None
-                and name not in shared
-            ):
-                kept.append((tensor.offset, tensor.length, initializer))
-        kept.sort(key=lambda value: value[0])
-
-        with open(target_data, "rb") as source_file, open(staged_data, "wb") as target_file:
-            new_offset = 0
-            for old_offset, length, initializer in kept:
-                source_file.seek(old_offset)
+        target_data_size = os.path.getsize(target_data)
+        tensors = [
+            initializer.const_value
+            for graph in target_model.graphs()
+            for initializer in graph.initializers.values()
+        ]
+        for graph in target_model.graphs():
+            for node in graph:
+                for attribute in node.attributes.values():
+                    if not attribute.is_ref() and attribute.type == ir.AttributeType.TENSOR:
+                        tensors.append(attribute.as_tensor())
+                    elif not attribute.is_ref() and attribute.type == ir.AttributeType.TENSORS:
+                        tensors.extend(attribute.as_tensors())
+        for tensor in tensors:
+            if isinstance(tensor, ir.ExternalTensor) and os.fspath(tensor.location) == os.path.basename(target_data):
+                if (
+                    tensor.offset is None or tensor.length is None
+                    or tensor.offset < 0 or tensor.length < 0
+                    or tensor.offset > target_data_size
+                    or tensor.length > target_data_size - tensor.offset
+                ):
+                    raise EOFError(f"Invalid external tensor range in {target_data}: {tensor.name}")
+        shutil.copyfile(target_data, staged_data)
+        with open(source_data, "rb") as source_file, open(staged_data, "r+b") as target_file:
+            for name, (source_offset, length, target_offset) in shared.items():
+                source_file.seek(source_offset)
+                target_file.seek(target_offset)
                 remaining = length
                 while remaining:
                     data = source_file.read(min(1 << 22, remaining))
                     if not data:
-                        raise EOFError(
-                            f"Unexpected end of {target_data_name} while copying initializer '{initializer.name}'."
-                        )
+                        raise EOFError(f"Unexpected end of {source_data} while copying initializer '{name}'.")
                     target_file.write(data)
                     remaining -= len(data)
-                initializer.const_value = self.make_external_tensor(
-                    initializer.const_value,
-                    target_data_name,
-                    new_offset,
-                    length,
-                )
-                new_offset += length
-
-        for name, (source_offset, length, _) in shared.items():
-            initializer = target_model.graph.initializers[name]
-            initializer.const_value = self.make_external_tensor(
-                initializer.const_value,
-                source_data_name,
-                source_offset,
-                length,
-            )
         return staged_data
 
     def replace_shared_initializer_files(self, target_model_path, target_data, staged_model, staged_data):
@@ -230,7 +234,7 @@ class MTPModel:
         required_source_initializers=frozenset(),
         excluded_source_initializers=frozenset(),
     ):
-        """Deduplicate auxiliary-model tensors after both models have been serialized.
+        """Configure runtime sharing while keeping each serialized graph self-contained.
 
         Initializers normally share only when their bytes match. Names in
         ``adopt_source_initializers`` instead use the source tensor whenever dtype, shape, and
@@ -263,21 +267,25 @@ class MTPModel:
                 raise ValueError("Required shared initializers are unavailable: " + ", ".join(sorted(missing)))
             if not shared:
                 return []
-            self.stage_shared_initializers(target_model, os.path.basename(source_data), target_data, shared)
+            self.stage_shared_initializers(target_model, source_data, target_data, shared)
             ir.save(target_model, staged_model)
         except Exception as exc:
             for staged_path in (staged_data, staged_model):
                 if os.path.exists(staged_path):
                     os.remove(staged_path)
-            print(f"Warning: could not share auxiliary initializers ({exc}); duplicated copies remain in {target_data}.")
+            print(
+                f"Warning: could not share auxiliary initializers ({exc}); duplicated copies remain in {target_data}."
+            )
             return []
 
         if not self.replace_shared_initializer_files(target_model_path, target_data, staged_model, staged_data):
-            print(f"Warning: could not commit shared auxiliary initializers; duplicated copies remain in {target_data}.")
+            print(
+                f"Warning: could not commit shared auxiliary initializers; duplicated copies remain in {target_data}."
+            )
             return []
 
         shared_size_mb = sum(length for _, length, _ in shared.values()) / 1e6
-        print(f"Shared auxiliary initializers with the main model (saved {shared_size_mb:.0f} MB from {target_data}).")
+        print(f"Configured {shared_size_mb:.0f} MB of runtime initializer sharing; {target_data} remains self-contained.")
         return self.make_shared_initializer_config(source_info, shared, os.path.basename(source_data))
 
     def add_shared_initializers_to_genai_config(self, genai_config):

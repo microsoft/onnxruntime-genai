@@ -123,6 +123,9 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   bool IsPastPresentShareBufferEnabled(const std::string& model_type) const;
 };
 
+class TokenOutputs;
+class ASRPostProcessor;
+
 struct Generator : LeakChecked<Generator> {
   enum class Action {
     standard,   // Default, set in any other case
@@ -176,6 +179,8 @@ struct Generator : LeakChecked<Generator> {
   bool IsGreedySampling() const;
 
  private:
+  friend class ASRPostProcessor;
+  TokenOutputs GetTokenOutputs() const;
 #if defined(_MSC_VER)
   [[msvc::no_unique_address]]
 #else
@@ -235,6 +240,8 @@ struct OrtGlobals {
     // https://github.com/microsoft/onnxruntime/blob/3c8c46029735a89c8d1ea0aa6c1812db5b78ad72/include/onnxruntime/core/session/onnxruntime_c_api.h#L2852-L2862
     // Members are destroyed in reverse declaration order, so session_ must be declared BEFORE allocator_ so that
     // ~allocator_ runs first.
+    // Retained for WebGPU helper sessions, including the selected provider/device factory.
+    std::unique_ptr<OrtSessionOptions> session_options_;
     std::unique_ptr<OrtSession> session_;
     std::unique_ptr<Ort::Allocator> allocator_;
     // Optional host-accessible allocator for decode inputs, owned by the OrtEnv (do not free).

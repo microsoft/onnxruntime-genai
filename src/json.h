@@ -7,6 +7,14 @@
 // For the elements inside of an array, the names will be empty strings
 // The root element also has no names.
 //
+#pragma once
+
+#include <cstddef>
+#include <exception>
+#include <stdexcept>
+#include <string_view>
+#include <variant>
+
 namespace JSON {
 struct unknown_value_error : std::exception {};  // Throw this from any Element callback to throw a std::runtime error reporting the unknown value name
 struct type_mismatch {                           // When a file has one type, but we're expecting another type. "seen" & "expected" are indices into the Value std::variant below

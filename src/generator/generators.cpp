@@ -4,11 +4,13 @@
 // Modifications Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 #include "generators.h"
+#include "token_outputs.h"
 #include <algorithm>
 #include <cctype>
 #include <cstring>
 #include "config_utils.h"
 #include "models/preprocessing/genai_tokenizer.h"
+#include "models/postprocessing/asr_post_processor.h"
 #include "models/preprocessing/streaming_processor.h"
 #include "models/nemotron_speech.h"
 #include "models/parakeet.h"
@@ -771,6 +773,7 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
       else if (name.find("audio") != std::string::npos)
         used_audio = true;
     }
+
     append_input_modality = (used_vision && used_audio) ? "multimodal"
                             : used_vision               ? "vision"
                             : used_audio                ? "audio"
@@ -814,6 +817,9 @@ void Generator::AppendTokens(DeviceSpan<int32_t> input_ids) {
     set_extra_inputs_ = false;
   }
 
+  if (!model_->config_->model.engram.filename.empty()) {
+    input_ids.CopyDeviceToCpu();
+  }
   search_->AppendTokens(input_ids);
   computed_logits_ = false;
   ComputeLogits(input_ids);
@@ -973,6 +979,20 @@ void Generator::GenerateNextToken() {
   generation_telemetry_.OnTokenGenerated(active_token_count);
 }
 
+TokenOutputs Generator::GetTokenOutputs() const {
+  if (const auto* transducer = dynamic_cast<const TransducerState*>(state_.get())) {
+    const auto tokens = transducer->GetStepTokens();
+    if (model_->config_->model.timestamp_level != Config::TimestampLevel::Off) {
+      const auto intervals = transducer->GetStepTokenIntervals();
+      if (intervals.size() != tokens.size())
+        throw std::runtime_error("Generator timing count does not match emitted tokens");
+      return TokenOutputs{tokens, intervals};
+    }
+    return TokenOutputs{tokens};
+  }
+  return TokenOutputs{search_->GetNextTokens().CopyDeviceToCpu()};
+}
+
 SpeculativeStats Generator::GetSpeculativeStats() const {
   return strategy_->GetStats();
 }
@@ -1000,6 +1020,7 @@ void Generator::RewindToLength(size_t new_length) {
   const int64_t rewound_token_count =
       static_cast<int64_t>(current_length - new_length) *
       static_cast<int64_t>(search_->params_->BatchBeamSize());
+  state_->ValidateRewindTo(new_length);
   search_->RewindTo(new_length);
   state_->RewindTo(new_length);
   if (guidance_logits_processor_) {
@@ -1047,6 +1068,7 @@ void Generator::CropToAccepted(size_t new_length, size_t recurrent_position) {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (new_length > search_->GetSequenceLength())
     throw std::runtime_error("CropToAccepted: new_length exceeds current sequence length");
+  state_->ValidateCropToAccepted(new_length, recurrent_position);
   search_->RewindTo(new_length);
   state_->CropToAccepted(new_length, recurrent_position);
   if (guidance_logits_processor_) {
