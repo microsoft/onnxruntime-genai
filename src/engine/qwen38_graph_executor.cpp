@@ -193,19 +193,24 @@ Qwen38StepResult Qwen38GraphSession::Step(const Qwen38StepRequest& request) {
   const Qwen38CycleRecord record = device_->WaitCycle();
   ++work_metrics_.work_records;
   ++work_metrics_.target_forward_passes;
-  const std::array<int32_t, 4> predictions{
+  const std::array<int32_t, 8> predictions{
       static_cast<int32_t>(record.pred0),
       static_cast<int32_t>(record.pred1),
       static_cast<int32_t>(record.pred2),
       static_cast<int32_t>(record.pred3),
+      static_cast<int32_t>(record.pred4),
+      static_cast<int32_t>(record.pred5),
+      static_cast<int32_t>(record.pred6),
+      static_cast<int32_t>(record.pred7),
   };
   const size_t produced = record.TokenCount();
   if (produced == 0 || produced > predictions.size() || record.accepted_count < 0 ||
-      record.proposed_count < 0 || record.proposed_count > 3 ||
+      record.proposed_count < 0 || record.proposed_count > 7 ||
       (record.accepted_count > 0 && record.accepted_count > record.proposed_count)) {
     throw std::logic_error("Qwen backend returned a malformed cycle record.");
   }
-  const std::array<int64_t, 4> raw{record.pred0, record.pred1, record.pred2, record.pred3};
+  const std::array<int64_t, 8> raw{record.pred0, record.pred1, record.pred2, record.pred3,
+                                   record.pred4, record.pred5, record.pred6, record.pred7};
   for (size_t i = 0; i < produced; ++i) {
     if (raw[i] < 0 || raw[i] > std::numeric_limits<int32_t>::max()) {
       throw std::logic_error("Qwen backend returned an invalid token representation.");

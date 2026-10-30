@@ -133,6 +133,8 @@ Qwen38Plane::Qwen38Plane(const std::filesystem::path& path) {
     release_ple_workspace =
         reinterpret_cast<decltype(release_ple_workspace)>(GetProcAddress(mod, "qwen38_plane_release_ple_workspace"));
     dflash_select = reinterpret_cast<decltype(dflash_select)>(GetProcAddress(mod, "qwen38_plane_dflash_select"));
+    replay_state_updates =
+        reinterpret_cast<decltype(replay_state_updates)>(GetProcAddress(mod, "qwen38_plane_replay_state_updates"));
     // A library that predates the capabilities export has none: it still loads, for the packages that need none.
     const auto capabilities_export =
         reinterpret_cast<Qwen38PlaneCapabilitiesFn>(GetProcAddress(mod, "qwen38_plane_capabilities"));
@@ -192,6 +194,8 @@ Qwen38Plane::Qwen38Plane(const std::filesystem::path& path) {
     release_ple_workspace =
         reinterpret_cast<decltype(release_ple_workspace)>(dlsym(handle_, "qwen38_plane_release_ple_workspace"));
     dflash_select = reinterpret_cast<decltype(dflash_select)>(dlsym(handle_, "qwen38_plane_dflash_select"));
+    replay_state_updates =
+        reinterpret_cast<decltype(replay_state_updates)>(dlsym(handle_, "qwen38_plane_replay_state_updates"));
     // A library that predates the capabilities export has none: it still loads, for the packages that need none.
     const auto capabilities_export =
         reinterpret_cast<Qwen38PlaneCapabilitiesFn>(dlsym(handle_, "qwen38_plane_capabilities"));

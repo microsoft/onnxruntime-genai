@@ -43,6 +43,31 @@ static_assert(sizeof(void*) != 8 || offsetof(Qwen38PleParams, eos) == 4664, "Qwe
 static_assert(sizeof(void*) != 8 || offsetof(Qwen38PleParams, capacity) == 4672, "Qwen38PleParams layout changed");
 #endif
 
+// Device descriptor for compact state-update replay (GatedDeltaNet, CausalConvWithState, PackedSparseAttentionIndexer).
+typedef struct Qwen38StateReplayDesc {
+  const void* source_state;
+  void* destination_state;
+  const void* value;
+  const float* decay;
+  const float* key;
+  const float* delta;
+  const void* source_aux_state;
+  void* destination_aux_state;
+  const int32_t* source_lengths;
+  int32_t* destination_lengths;
+  uint64_t channel_count;
+  uint64_t state_width;
+  uint64_t key_width;
+  uint64_t key_head_count;
+  uint64_t state_capacity;
+  uint64_t aux_capacity;
+  uint32_t capacity;
+  uint32_t kept_count;
+  uint32_t element_size;
+  uint32_t compress_ratio;
+  uint32_t kind;
+} Qwen38StateReplayDesc;
+
 // X(return type, name, parameter list). The exported symbol is "qwen38_plane_" + name. `stream` is a cudaStream_t.
 // CUDA runtime helpers return the cudaError_t as int (0 = success).
 //
