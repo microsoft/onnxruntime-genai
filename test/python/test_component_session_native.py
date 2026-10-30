@@ -418,6 +418,49 @@ def test_stateful_kev_repeated_and_isolated_requests(tmp_path):
     assert isolated["answers"]["two"] == result["answers"]["two"]
 
 
+@pytest.mark.parametrize("question_count", [3, 4, 5])
+def test_cpu_kev_grouping_preserves_distinct_answers_and_order(
+    tmp_path, question_count
+):
+    package = _stateful_kev_package(tmp_path)
+    questions = {
+        f"question-{index}": {
+            "type": "choice",
+            "instructions": "choose " + ("detail " * (index * 8 + 1)),
+            "criteria": {
+                f"short-{index}": "a",
+                f"long-{index}": "option " * (index * 12 + 2),
+            },
+        }
+        for index in range(question_count)
+    }
+    request = {
+        "state": {"shared": "context"},
+        "questions": questions,
+    }
+
+    grouped = og.NonGenerativeSession(_cpu_config(package))
+    first = grouped.run(request)
+    repeated = grouped.run(request)
+    fresh = og.NonGenerativeSession(_cpu_config(package)).run(request)
+
+    individual = og.NonGenerativeSession(_cpu_config(package))
+    individual_answers = {}
+    for key, question in questions.items():
+        result = individual.run(
+            {
+                "state": request["state"],
+                "questions": {key: question},
+            }
+        )
+        individual_answers[key] = result["answers"][key]
+
+    assert list(first["answers"]) == list(questions)
+    assert first["answers"] == individual_answers
+    assert repeated == first
+    assert fresh == first
+
+
 def test_kev_enforces_configured_context_length(tmp_path):
     package = _stateful_kev_package(tmp_path)
     config = json.loads((package / "genai_config.json").read_text())
