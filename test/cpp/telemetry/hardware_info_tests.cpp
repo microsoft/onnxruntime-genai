@@ -69,6 +69,7 @@ TEST(HardwareInfoTests, OrtProductMatchingRequiresUnambiguousUnknownDevice) {
 
   EXPECT_EQ(FindOrtHardwareDeviceMatch(platform_devices, ort_devices.front(), ort_devices),
             &platform_devices.front());
+  EXPECT_EQ(FindOrtHardwareDeviceMatch(platform_devices, ort_devices.front(), {}), nullptr);
 
   ort_devices.push_back(
       {.type = "GPU", .source = "onnxruntime", .vendor_id = 0x10de, .device_id = 0x5678});
@@ -82,11 +83,18 @@ TEST(HardwareInfoTests, OrtProductMatchingRequiresUnambiguousUnknownDevice) {
   platform_devices.back().device_id = ort_devices.front().device_id;
   EXPECT_EQ(FindOrtHardwareDeviceMatch(platform_devices, ort_devices.front(), ort_devices),
             &platform_devices.back());
+
+  ort_devices.front().device_id = -1;
+  platform_devices.back().device_id = -1;
+  EXPECT_EQ(FindOrtHardwareDeviceMatch(platform_devices, ort_devices.front(), ort_devices), nullptr);
 }
 
 TEST(HardwareInfoTests, NvmlProcessPolicyRejectsContainersSentinelsAndOverflow) {
-  EXPECT_FALSE(ShouldQueryNvmlProcessMemory(true));
-  EXPECT_TRUE(ShouldQueryNvmlProcessMemory(false));
+  EXPECT_FALSE(ShouldQueryNvmlProcessMemory(true, false, 0xeffffffc));
+  EXPECT_TRUE(ShouldQueryNvmlProcessMemory(false, false, 0xeffffffc));
+  EXPECT_FALSE(ShouldQueryNvmlProcessMemory(false, false, 0));
+  EXPECT_FALSE(ShouldQueryNvmlProcessMemory(false, false, 4026533000));
+  EXPECT_FALSE(ShouldQueryNvmlProcessMemory(false, true, 0xeffffffc));
 
   uint64_t total = 100;
   EXPECT_FALSE(AccumulateProcessMemoryBytes(

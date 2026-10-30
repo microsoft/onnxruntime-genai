@@ -549,16 +549,16 @@ void GenAiTelemetry::LogHardwareInfo(uint32_t session_id) {
     if (!PrepareSampledEvent(summary, app_session_guid_, session_id)) {
       return;
     }
-    const auto info = CollectHardwareInfo();
-    if (info.devices.empty()) {
-      return;
-    }
-
     bool expected = false;
     if (!hardware_info_logged_.compare_exchange_strong(expected, true)) {
       return;
     }
     claimed = true;
+
+    const auto info = CollectHardwareInfo();
+    if (info.devices.empty()) {
+      return;
+    }
 
     summary.SetProperty("sessionId", static_cast<int64_t>(session_id));
     summary.SetProperty("availableSystemMemoryMB", info.available_system_memory_mb);

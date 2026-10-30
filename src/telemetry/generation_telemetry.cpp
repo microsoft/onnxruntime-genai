@@ -69,7 +69,9 @@ bool GenerationTelemetry::BeginAppend() {
     if (TelemetryInternal::ShouldBeginResourceSample(
             prompt_tokens_, first_token_logged_, resource_samples_.IsStarted(),
             GenAiTelemetry::Instance().IsSessionSampled(session_id_))) {
-      resource_samples_.Begin(CollectProcessResourceUsage());
+      ProcessResourceUsage baseline;
+      baseline.cpu_time_ms = ReadProcessCpuTimeMs();
+      resource_samples_.Begin(std::move(baseline));
     }
   }
   return append_tracking_;
@@ -108,8 +110,12 @@ void GenerationTelemetry::OnTokenGenerated(int64_t active_token_count) {
 }
 
 void GenerationTelemetry::OnGenerationCompleted() {
-  if (resource_samples_.IsStarted() && !resource_samples_.IsComplete() &&
-      generated_tokens_ > 0 && IsEnabled()) {
+  if (!resource_samples_.IsStarted() || resource_samples_.IsComplete()) return;
+  if (generated_tokens_ == 0) {
+    resource_samples_.Reset();
+    return;
+  }
+  if (IsEnabled()) {
     resource_samples_.Complete(CollectProcessResourceUsage());
   }
 }

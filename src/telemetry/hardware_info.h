@@ -115,8 +115,11 @@ HardwareDeviceInfo* FindOrtHardwareDeviceMatch(
 
 bool AccumulateProcessMemoryBytes(uint64_t& total, uint64_t used);
 
-inline bool ShouldQueryNvmlProcessMemory(bool is_container) {
-  return !is_container;
+inline bool ShouldQueryNvmlProcessMemory(bool is_container, bool is_wsl,
+                                         uint64_t pid_namespace_inode) {
+  // Linux UAPI linux/nsfs.h reserves PID_NS_INIT_INO for the initial PID namespace.
+  constexpr uint64_t kInitialPidNamespaceInode = 0xeffffffc;
+  return !is_container && !is_wsl && pid_namespace_inode == kInitialPidNamespaceInode;
 }
 
 inline bool ShouldBeginResourceSample(int64_t prompt_tokens,

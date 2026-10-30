@@ -36,18 +36,21 @@ adapter UUIDs, serial numbers, MAC addresses, PCI bus addresses, device-instance
 content. PCI addresses may be used locally to query allowlisted hardware properties but are not event fields.
 Descriptive strings are bounded and filesystem paths are redacted.
 
-Generator resource diagnostics record process resident RAM and cumulative process CPU time at the first prompt
-append and at the first observed completion query. Supported accelerator APIs also provide process GPU/NPU memory
-snapshots. These are process-wide observations, including concurrent requests and other activity, not isolated
-request allocations or peak measurements. Completion snapshots are cached: destroying a generator later does
+For sampled model sessions, generator resource diagnostics read only a process CPU-time baseline at the first
+prompt append or token-free audio input. At the first observed completion query, they record process resident RAM,
+the process CPU-time delta and supported process GPU/NPU memory snapshots. Zero-token audio completions discard
+their baseline so the next chunk starts a fresh interval. These are process-wide observations, including concurrent
+requests and other activity, not isolated request allocations or peak measurements. Completion snapshots are
+cached: destroying a generator later does
 not take a fresh sample or extend the resource interval. If completion is not observed, end measurements are
 unknown and labeled `resourceSampleScope=completion_not_observed`.
 
 Accelerator memory fields distinguish dedicated/shared capacity, device-wide free memory, process memory usage
 and the process's driver-managed memory budget. A budget or device-wide free-memory value is not a process
 allocation. Measurements include their collection source; unavailable or unreliable process-memory data,
-including unsupported container PID mappings, remains unknown. Hardware inventory also covers engine model
-loads, but request-resource snapshots currently cover generators, not `OgaEngine` requests or embeddings.
+including unsupported container PID mappings, remains unknown. Linux NVML process memory is queried only after
+verifying the initial Linux PID namespace; WSL process mappings remain unsupported. Hardware inventory also covers
+engine model loads, but request-resource snapshots currently cover generators, not `OgaEngine` requests or embeddings.
 
 Events are labeled `TelemetryLayer=onnxruntime_genai`. Generator timing and resource intervals differ from
 Foundry Local's request timings and must not be summed as independent work. Model/generator identifiers do not

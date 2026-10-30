@@ -24,6 +24,10 @@
 #include <set>
 #include <thread>
 
+#if defined(__linux__)
+#include <sys/stat.h>
+#endif
+
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -123,7 +127,7 @@ std::string CpuRegistryString(const char* name) {
     return "unknown";
   }
 
-  return BoundTelemetryString(TelemetryInternal::TrimAscii(
+  return ScrubStringForTelemetry(TelemetryInternal::TrimAscii(
       BoundedTelemetryCString(value.data(), value.size())));
 }
 
@@ -347,7 +351,7 @@ void ReadWindowsAccelerators(HardwareInfo& info) {
       std::string name(size, '\0');
       if (SUCCEEDED(adapter->GetProperty(DXCoreAdapterProperty::DriverDescription,
                                          name.size(), name.data()))) {
-        device.name = BoundTelemetryString(BoundedTelemetryCString(name.c_str(), name.size()));
+        device.name = ScrubStringForTelemetry(BoundedTelemetryCString(name.c_str(), name.size()));
       }
     }
 
@@ -396,7 +400,7 @@ HardwareDeviceInfo ReadCpuInfo() {
   std::array<char, kMaxTelemetryStringLength + 1> name{};
   size_t size = name.size();
   if (::sysctlbyname("machdep.cpu.brand_string", name.data(), &size, nullptr, 0) == 0) {
-    cpu.name = BoundTelemetryString(BoundedTelemetryCString(name.data(), name.size()));
+    cpu.name = ScrubStringForTelemetry(BoundedTelemetryCString(name.data(), name.size()));
   }
 #if defined(__aarch64__)
   cpu.vendor = "Apple";
@@ -531,11 +535,11 @@ class NvmlLibrary {
       device.source = "nvml";
       std::array<char, kMaxTelemetryStringLength + 1> name{};
       if (get_name && get_name(handle, name.data(), name.size()) == 0) {
-        device.name = BoundTelemetryString(
+        device.name = ScrubStringForTelemetry(
             BoundedTelemetryCString(name.data(), name.size()));
       }
       if (has_driver) {
-        device.driver_version = BoundTelemetryString(
+        device.driver_version = ScrubStringForTelemetry(
             BoundedTelemetryCString(driver.data(), driver.size()));
       }
       NvmlMemory memory{};
@@ -679,12 +683,12 @@ void ReadOrtDevices(HardwareInfo& info) {
     const auto vendor =
         BoundedTelemetryCString(Ort::api->HardwareDevice_Vendor(hardware));
     device.vendor =
-        vendor.empty() ? VendorName(device.vendor_id) : BoundTelemetryString(vendor);
+        vendor.empty() ? VendorName(device.vendor_id) : ScrubStringForTelemetry(vendor);
     if (const auto* metadata = Ort::api->HardwareDevice_Metadata(hardware)) {
       const auto name =
           BoundedTelemetryCString(Ort::api->GetKeyValue(metadata, "Description"));
       if (!name.empty()) {
-        device.name = BoundTelemetryString(name);
+        device.name = ScrubStringForTelemetry(name);
       }
 #if defined(__linux__)
       const auto bus_id =
@@ -702,12 +706,12 @@ void ReadOrtDevices(HardwareInfo& info) {
         const auto name_storage = ReadText(path / "product_name");
         const auto name_text = TelemetryInternal::TrimAscii(name_storage);
         if (!name_text.empty()) {
-          device.name = BoundTelemetryString(name_text);
+          device.name = ScrubStringForTelemetry(name_text);
         }
         const auto driver_storage = ReadText(path / "driver/module/version");
         const auto driver = TelemetryInternal::TrimAscii(driver_storage);
         if (!driver.empty()) {
-          device.driver_version = BoundTelemetryString(driver);
+          device.driver_version = ScrubStringForTelemetry(driver);
         }
         const auto total = TelemetryInternal::ParseHardwareInteger(
             ReadText(path / "mem_info_vram_total"));
@@ -725,9 +729,13 @@ void ReadOrtDevices(HardwareInfo& info) {
     }
     ort_devices.push_back(std::move(device));
   }
+  const std::span<const HardwareDeviceInfo> matchable_ort_devices =
+      info.inventory_truncated || count > kMaxHardwareInventoryEntries
+          ? std::span<const HardwareDeviceInfo>{}
+          : std::span<const HardwareDeviceInfo>{ort_devices};
   for (const auto& device : ort_devices) {
     if (auto* existing = TelemetryInternal::FindOrtHardwareDeviceMatch(
-            info.devices, device, ort_devices)) {
+            info.devices, device, matchable_ort_devices)) {
       existing->type = device.type;
       if (existing->device_id < 0) {
         existing->device_id = device.device_id;
@@ -755,7 +763,8 @@ HardwareDeviceInfo* FindOrtHardwareDeviceMatch(
   };
   const auto exact = std::find_if(candidates.begin(), candidates.end(), [&](const auto& candidate) {
     return compatible(candidate) &&
-           (ort_device.type == "CPU" || candidate.device_id == ort_device.device_id);
+           (ort_device.type == "CPU" ||
+            (candidate.device_id >= 0 && candidate.device_id == ort_device.device_id));
   });
   if (exact != candidates.end()) {
     return &*exact;
@@ -931,9 +940,13 @@ ProcessResourceUsage CollectProcessResourceUsage() noexcept {
             ToMB(static_cast<uint64_t>(pages * page_size));
       }
     }
-    if (!TelemetryInternal::ShouldQueryNvmlProcessMemory(
-            GetDeviceInfo().is_container)) {
-      Diagnostic("Telemetry NVML process memory is unknown in detected containers");
+    struct stat pid_namespace{};
+    const auto& device_info = GetDeviceInfo();
+    if (::stat("/proc/self/ns/pid", &pid_namespace) != 0 ||
+        !TelemetryInternal::ShouldQueryNvmlProcessMemory(
+            device_info.is_container, device_info.virtualization_type == "wsl",
+            static_cast<uint64_t>(pid_namespace.st_ino))) {
+      Diagnostic("Telemetry NVML process memory is unknown without verified host PIDs");
     } else {
       usage.gpu_memory_mb = NvmlLibrary{}.ProcessMemoryMB();
     }
