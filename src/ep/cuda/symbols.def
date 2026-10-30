@@ -1,3 +1,44 @@
 EXPORTS
    GetInterface
    GetInterfaceVersion
+   qwen38_plane_abi_version
+   qwen38_plane_sizeof_ple_params
+   qwen38_plane_capabilities
+   qwen38_plane_attach
+   qwen38_plane_detach
+   qwen38_plane_set_device
+   qwen38_plane_error_string
+   qwen38_plane_device_alloc
+   qwen38_plane_device_free
+   qwen38_plane_host_alloc
+   qwen38_plane_host_free
+   qwen38_plane_host_register
+   qwen38_plane_host_unregister
+   qwen38_plane_host_get_device_pointer
+   qwen38_plane_device_memset
+   qwen38_plane_memcpy_h2d
+   qwen38_plane_memcpy_d2h
+   qwen38_plane_memcpy_d2d
+   qwen38_plane_memcpy2d_d2d
+   qwen38_plane_stream_create
+   qwen38_plane_stream_destroy
+   qwen38_plane_stream_sync
+   qwen38_plane_prep
+   qwen38_plane_argmax_part
+   qwen38_plane_post_tok
+   qwen38_plane_post1
+   qwen38_plane_head_prep
+   qwen38_plane_head_post
+   qwen38_plane_or_status
+   qwen38_plane_ple_rows
+   qwen38_plane_pool_keys
+   qwen38_plane_transpose_f32
+   qwen38_plane_quantize_kv
+   qwen38_plane_embed_rows
+   qwen38_plane_embed_gather
+   qwen38_plane_prep_batched
+   qwen38_plane_set_ple_host_params
+   qwen38_plane_unset_ple_host_params
+   qwen38_plane_release_ple_workspace
+   qwen38_plane_dflash_select
+   qwen38_plane_replay_state_updates

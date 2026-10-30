@@ -281,7 +281,7 @@ if((USE_CUDA OR USE_TRT_RTX) AND CMAKE_CUDA_COMPILER)
   set_target_properties(onnxruntime-genai-cuda PROPERTIES LINKER_LANGUAGE CUDA)
   set_target_properties(onnxruntime-genai-cuda PROPERTIES FOLDER "GenAI")
   add_dependencies(onnxruntime-genai onnxruntime-genai-cuda)
-  source_group(TREE ${GENERATORS_ROOT}/ep/cuda FILES ${generator_cudalib_srcs})
+  source_group(TREE ${GENERATORS_ROOT} FILES ${generator_cudalib_srcs})
   list(APPEND ortgenai_embed_libs "$<TARGET_FILE:onnxruntime-genai-cuda>")
   if(APPLE)
     set_property(TARGET onnxruntime-genai-cuda APPEND_STRING PROPERTY LINK_FLAGS "-Xlinker -exported_symbols_list ${GENERATORS_ROOT}/ep/cuda/exported_symbols.lst")
@@ -293,8 +293,10 @@ if((USE_CUDA OR USE_TRT_RTX) AND CMAKE_CUDA_COMPILER)
     message(FATAL_ERROR "${target} unknown platform, need to specify shared library exports for it")
   endif()
 
-  # CUDA data plane of the "qwen38_flash_graph" model type. It is dlopen-ed by the model from a path inside the model
-  # folder (model.qwen38_graph.plane_library), never linked into GenAI, so the core library keeps no cudart dependency.
+  # CUDA data plane of the "qwen38_flash_graph" model type. The sources are compiled into onnxruntime-genai-cuda (see
+  # cmake/check_cuda.cmake), which the model uses unless model.qwen38_graph.plane_library names an existing library inside the
+  # model folder. ENABLE_QWEN38_PLANE additionally builds that standalone library; it is dlopen-ed, never linked into GenAI,
+  # so the core library keeps no cudart dependency.
   if(ENABLE_QWEN38_PLANE)
     if((UNIX AND NOT APPLE) OR WIN32)
       add_library(qwen38_plane SHARED "${GENERATORS_ROOT}/qwen38_plane/qwen38_plane.cu")
