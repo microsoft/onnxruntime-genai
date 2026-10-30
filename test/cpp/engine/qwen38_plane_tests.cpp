@@ -3,6 +3,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -349,6 +350,67 @@ TEST(Qwen38PlaneTest, PlaneKernelsHandleEmptyAndNonMultipleOf32Dimensions) {
         EXPECT_FLOAT_EQ(h_dst[(b * kN + c) * kN + r], h_src[(b * kN + r) * kN + c])
             << "b=" << b << " r=" << r << " c=" << c;
       }
+    }
+  }
+}
+
+TEST(Qwen38PlaneTest, EmbedRowsDequantizesAnInt8TableAndClampsOutOfRangeTokenIds) {
+  const std::filesystem::path plane_lib = std::filesystem::current_path() / "libqwen38_plane.so";
+  if (!std::filesystem::exists(plane_lib)) {
+    GTEST_SKIP() << "libqwen38_plane.so not present in working directory";
+  }
+  Qwen38Plane plane{plane_lib};
+  if (plane.set_device(0) != 0) {
+    GTEST_SKIP() << "No CUDA device available";
+  }
+  if (!plane.embed_rows) {
+    GTEST_SKIP() << "the plane library has no embed_rows";
+  }
+
+  // The per-row symmetric INT8 layout (selected by a negative width) is the int8 payload [vocab, width] followed by
+  // one float scale per row, and the plane addresses it with the model's vocabulary size.
+  constexpr int64_t kVocab = 248320;
+  constexpr int kWidth = 36;
+  std::vector<uint8_t> table(static_cast<size_t>(kVocab) * (kWidth + sizeof(float)));
+  auto* payload = reinterpret_cast<int8_t*>(table.data());
+  std::vector<float> scales(static_cast<size_t>(kVocab));
+  for (int64_t row = 0; row < kVocab; ++row) {
+    scales[static_cast<size_t>(row)] = 0.003f * static_cast<float>(1 + row % 11);
+    for (int c = 0; c < kWidth; ++c) {
+      payload[row * kWidth + c] = static_cast<int8_t>((row * 31 + c * 7) % 255 - 127);
+    }
+  }
+  std::memcpy(table.data() + static_cast<size_t>(kVocab) * kWidth, scales.data(), scales.size() * sizeof(float));
+
+  // Out-of-range ids read row 0.
+  const std::vector<int64_t> ids = {0, 1, 123456, kVocab - 1, kVocab, -1};
+  const int rows = static_cast<int>(ids.size());
+  std::vector<uint16_t> out(static_cast<size_t>(rows) * kWidth, 0);
+
+  void* stream = nullptr;
+  plane.Check(plane.stream_create(&stream), "stream_create");
+  PlaneBuffer d_table{plane, table.size(), stream};
+  PlaneBuffer d_ids{plane, ids.size() * sizeof(int64_t), stream};
+  PlaneBuffer d_out{plane, out.size() * sizeof(uint16_t), stream};
+  plane.Check(plane.memcpy_h2d(d_table.data(), table.data(), table.size(), stream), "memcpy_h2d(table)");
+  plane.Check(plane.memcpy_h2d(d_ids.data(), ids.data(), ids.size() * sizeof(int64_t), stream), "memcpy_h2d(ids)");
+  plane.embed_rows(stream, d_table.data(), d_ids.data(), d_out.data(), rows, -kWidth);
+  plane.Check(plane.memcpy_d2h(out.data(), d_out.data(), out.size() * sizeof(uint16_t), stream), "memcpy_d2h");
+  plane.Check(plane.stream_sync(stream), "stream_sync(embed_rows)");
+  plane.stream_destroy(stream);
+
+  // bfloat16 round to nearest even of the dequantized value.
+  auto to_bf16 = [](float value) {
+    uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    bits += 0x7FFFu + ((bits >> 16) & 1u);
+    return static_cast<uint16_t>(bits >> 16);
+  };
+  for (int r = 0; r < rows; ++r) {
+    const int64_t token = (ids[r] >= 0 && ids[r] < kVocab) ? ids[r] : 0;
+    for (int c = 0; c < kWidth; ++c) {
+      const float expected = static_cast<float>(payload[token * kWidth + c]) * scales[static_cast<size_t>(token)];
+      EXPECT_EQ(out[static_cast<size_t>(r) * kWidth + c], to_bf16(expected)) << "id=" << ids[r] << " c=" << c;
     }
   }
 }
