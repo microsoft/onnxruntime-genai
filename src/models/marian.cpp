@@ -413,10 +413,15 @@ void MarianState::SaveDecoderCheckpoint(size_t sequence_length) {
   decoder_checkpoint_positions_[sequence_length] = *past_key_values_length_->GetTensorMutableData<int64_t>();
 }
 
+void MarianState::ValidateRewindTo(size_t index) const {
+  if (index != 0 && index >= encoder_prompt_tokens_.size() &&
+      (index >= decoder_checkpoint_positions_.size() || decoder_checkpoint_positions_[index] < 0))
+    throw std::runtime_error("Marian rewind requires a materialized decoder state at the requested length");
+}
+
 void MarianState::RewindTo(size_t index) {
+  ValidateRewindTo(index);
   if (index != 0 && index >= encoder_prompt_tokens_.size()) {
-    if (index >= decoder_checkpoint_positions_.size() || decoder_checkpoint_positions_[index] < 0)
-      throw std::runtime_error("Marian rewind requires a materialized decoder state at the requested length");
     const auto& saved = decoder_checkpoints_[index];
     rnn_states_->GetByteSpan().CopyFrom(saved);
     rnn_states_prev_->GetByteSpan().CopyFrom(saved);

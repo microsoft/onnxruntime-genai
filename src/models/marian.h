@@ -73,6 +73,7 @@ struct MarianState : State {
   MarianState(const MarianState&) = delete;
   MarianState& operator=(const MarianState&) = delete;
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
+  void ValidateRewindTo(size_t index) const override;
   void RewindTo(size_t index) override;
 
  private:
