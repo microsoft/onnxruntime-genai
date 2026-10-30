@@ -43,10 +43,13 @@ struct Qwen38Plane {
   void (*embed_rows)(void* stream, const void* table, const void* ids, void* out, int rows, int width){};
   void (*set_ple_host_params)(const void* params){};
   void (*unset_ple_host_params)(const void* params){};
+  // Drops the staged PLE tables of the whole module, i.e. of every loader of the same library file, not just this one.
+  // The destructor does not call it: it detaches from the module, which releases that state when the last loader goes.
   void (*release_ple_workspace)(void){};
 
  private:
   void* handle_{};
+  bool attached_{};  // attach() has been called and detach() has not
 };
 
 // Zero-initialised device allocation owned by RAII.
