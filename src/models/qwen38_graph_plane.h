@@ -35,7 +35,7 @@ struct Qwen38Plane {
   // Throws std::runtime_error naming `what` when `error` (a cudaError_t) is not 0.
   void Check(int error, const char* what) const;
 
-#define QWEN38_PLANE_DECLARE(ret, name, args) ret(*name) args {};
+#define QWEN38_PLANE_DECLARE(ret, name, args) ret(*name) args{};
   QWEN38_PLANE_FUNCTIONS(QWEN38_PLANE_DECLARE)
 #undef QWEN38_PLANE_DECLARE
   void (*quantize_kv)(void* stream, const void* src, void* dst, const void* scale, int rows, int src_pitch_elems,
