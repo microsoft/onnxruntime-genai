@@ -30,8 +30,9 @@ struct MultiModalLanguageModel;
 struct Lfm2AudioOutput {
   Lfm2AudioOutput(const MultiModalLanguageModel& model, const GeneratorParams& params);
 
-  // Called at the top of every pipeline run with the tokens the search just chose.
-  void BeginStep(DeviceSpan<int32_t>& next_tokens, bool is_prompt);
+  // Called at the top of every pipeline run with the tokens the search just chose. new_turn is set for
+  // the prompt and for tokens appended after generation.
+  void BeginStep(DeviceSpan<int32_t>& next_tokens, bool new_turn);
 
   // True when the decoder's next input is the last audio frame rather than a token.
   bool HasPendingFrame() const { return !pending_embedding_.empty(); }

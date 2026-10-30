@@ -93,10 +93,8 @@ Lfm2AudioOutput::Lfm2AudioOutput(const MultiModalLanguageModel& model, const Gen
   placeholder_logits_.CopyCpuToDevice();
 }
 
-void Lfm2AudioOutput::BeginStep(DeviceSpan<int32_t>& next_tokens, bool is_prompt) {
-  // Generation follows each frame with its placeholder, so any other single token was appended.
-  if (is_prompt || next_tokens.size() != 1 ||
-      (HasPendingFrame() && next_tokens.CopyDeviceToCpu()[0] != placeholder_token_id_)) {
+void Lfm2AudioOutput::BeginStep(DeviceSpan<int32_t>& next_tokens, bool new_turn) {
+  if (new_turn || next_tokens.size() != 1) {
     // A new turn starts in text, whatever the last one ended in. A frame still pending here has no
     // placeholder in the sequence to carry it.
     if (HasPendingFrame() && pending_in_codes_) {

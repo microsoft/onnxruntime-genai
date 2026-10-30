@@ -791,6 +791,7 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   // prefill; speculative -> reconcile two inner KV caches).
   strategy_->PrepareForAppend(*this);
   RunGeneratedToken();
+  state_->StartTurn();
 
   auto input_ids_device = AllocateInputIdsOnDevice(input_ids);
   search_->AppendTokens(input_ids_device);
@@ -820,6 +821,7 @@ void Generator::AppendTokens(DeviceSpan<int32_t> input_ids) {
 
   strategy_->PrepareForAppend(*this);
   RunGeneratedToken();
+  state_->StartTurn();
   if (!model_->config_->model.engram.filename.empty()) {
     input_ids.CopyDeviceToCpu();
   }
@@ -834,6 +836,7 @@ void Generator::RunGeneratedToken() {
   // search was never added, so there is nothing to run.
   if (last_action_ != Action::generated || computed_logits_ || search_->IsDone())
     return;
+  state_->DiscardNextLogits();
   ComputeLogits(search_->GetNextTokens());
   // Keep committing the appended tokens to the guidance grammar, as before.
   last_action_ = Action::generated;

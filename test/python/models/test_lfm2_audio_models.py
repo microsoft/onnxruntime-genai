@@ -1013,34 +1013,82 @@ def test_lfm2_audio_interleaved_speech_matches_reference(test_data_path, tmp_pat
     assert codes.shape == (layout.count("A"), NUM_CODEBOOKS)
 
 
-@pytest.mark.parametrize("appended", [[10, 11], [10]], ids=["two-tokens", "one-token"])
-def test_lfm2_audio_turn_appended_during_speech_keeps_one_frame_per_placeholder(test_data_path, tmp_path, appended):
-    # Appending runs the last frame's placeholder through the decoder first. The frame sampled on that
-    # run has no placeholder in the sequence, so it must not show up in audio_codes. A single appended
-    # token starts the turn too, rather than taking the next frame's place.
-    model_path = _speech_model(test_data_path, tmp_path)
-    prompt = "<|startoftext|>Answer aloud. "
-    _, _, uninterrupted = _generate_speech(model_path, prompt, None, 45, audio_interleaved=True, audio_top_k=1)
-
+def _interleaved_generator(model_path, num_items):
     model = og.Model(os.fspath(model_path))
-    inputs = model.create_multimodal_processor()(prompt, audios=None)
+    inputs = model.create_multimodal_processor()("<|startoftext|>Answer aloud. ", audios=None)
     prompt_length = inputs["input_ids"].as_numpy().shape[1]
     params = og.GeneratorParams(model)
-    params.set_search_options(do_sample=False, max_length=prompt_length + 45, audio_interleaved=True, audio_top_k=1)
+    params.set_search_options(
+        do_sample=False, max_length=prompt_length + num_items, audio_interleaved=True, audio_top_k=1
+    )
     generator = og.Generator(model, params)
     generator.set_inputs(inputs)
-    for _ in range(INTERLEAVED_N_TEXT + 3):
-        generator.generate_next_token()
-    assert generator.get_sequence(0)[-1] == AUDIO_TOKEN_ID, "the turn must be appended in the middle of speech"
+    return generator, prompt_length
 
+
+def _appended_turn(generator, appended):
+    """How the turn the appended tokens start goes on: T for a text token, A for an audio frame."""
     generator.append_tokens(np.array(appended, dtype=np.int32))
-    generator.generate_next_token()
+    start = len(generator.get_sequence(0))
+    for _ in range(INTERLEAVED_N_TEXT + 1):
+        generator.generate_next_token()
+    return "".join("A" if token == AUDIO_TOKEN_ID else "T" for token in generator.get_sequence(0)[start:])
 
+
+@pytest.mark.parametrize("appended", [[10, 11], [10]], ids=["two-tokens", "one-token"])
+@pytest.mark.parametrize(
+    ("generated", "read_logits"),
+    [
+        (0, False),
+        (3, False),
+        (INTERLEAVED_N_TEXT + 3, False),
+        (INTERLEAVED_N_TEXT + 3, True),
+        (INTERLEAVED_N_TEXT + INTERLEAVED_N_AUDIO, False),
+    ],
+    ids=["after-prompt", "mid-text", "mid-speech", "mid-speech-logits-read", "after-a-block"],
+)
+def test_lfm2_audio_appended_turn_starts_in_text_with_one_frame_per_placeholder(
+    test_data_path, tmp_path, generated, read_logits, appended
+):
+    # Appended tokens start a new turn wherever they come, so it gets a whole text block. Appending first
+    # runs the last generated token, and a frame sampled after it, on that run or by get_logits, has no
+    # placeholder in the sequence to carry it, so it must not show up in audio_codes.
+    generator, prompt_length = _interleaved_generator(_speech_model(test_data_path, tmp_path), 45)
+    for _ in range(generated):
+        generator.generate_next_token()
+    codes_before = generator.get_output("audio_codes")
+    if read_logits:
+        generator.get_logits()
+
+    assert _appended_turn(generator, appended) == "T" * INTERLEAVED_N_TEXT + "A"
     sequence = generator.get_sequence(0)[prompt_length:].tolist()
     codes = generator.get_output("audio_codes")
-    assert sequence[-1] != AUDIO_TOKEN_ID, "the appended turn starts in text"
     assert codes.shape == (sequence.count(AUDIO_TOKEN_ID), NUM_CODEBOOKS)
-    np.testing.assert_array_equal(codes, uninterrupted[: len(codes)])
+    np.testing.assert_array_equal(codes[: len(codes_before)], codes_before)
+
+
+def test_lfm2_audio_turn_appended_after_end_of_audio_starts_in_text(test_data_path, tmp_path):
+    # After <|text_end|> the rest of the answer is speech, up to the end-of-audio code. The fixture writes
+    # neither on its own, so <|text_end|> is a token it does write, and the codebook is cut down to
+    # sixteen entries so that the last of them, end-of-audio, comes up.
+    _, text, _ = _generate_speech(
+        _speech_model(test_data_path, tmp_path / "text"),
+        "<|startoftext|>Answer aloud. ",
+        None,
+        INTERLEAVED_N_TEXT,
+        audio_interleaved=True,
+        audio_top_k=1,
+    )
+    model_path = _speech_model(test_data_path, tmp_path / "speech", text_end_token_id=text[1], codebook_size=16)
+    generator, prompt_length = _interleaved_generator(model_path, 45)
+    # Up to the first placeholder whose frame is end-of-audio, which audio_codes leaves out.
+    placeholders = frames = 0
+    while placeholders == frames:
+        generator.generate_next_token()
+        placeholders = generator.get_sequence(0)[prompt_length:].tolist().count(AUDIO_TOKEN_ID)
+        frames = len(generator.get_output("audio_codes"))
+
+    assert _appended_turn(generator, [10]) == "T" * INTERLEAVED_N_TEXT + "A"
 
 
 @pytest.mark.parametrize("provider", ["cuda", "webgpu"])
