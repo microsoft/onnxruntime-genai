@@ -14,7 +14,7 @@
 #include "models/nemotron_speech.h"
 #include "models/parakeet.h"
 #include "models/preprocessing/genai_tokenizer.h"
-#include "models/preprocessing/token_post_processor.h"
+#include "models/postprocessing/asr_post_processor.h"
 #include "models/preprocessing/nemotron_streaming_processor.h"
 #include "models/whisper.h"
 #include "ort_genai.h"
@@ -221,11 +221,11 @@ TEST(AudioSpeechValidationTests, NemotronProcessorEmitsChunkStartSample) {
   generator.SetInputs(*tail);
   ASSERT_FALSE(generator.IsDone());
   generator.GenerateNextToken();
-  Generators::TokenPostProcessor postprocessor{generator};
-  postprocessor.ProcessNextTokens();
-  auto results = postprocessor.GetNextTokenResults();
+  Generators::ASRPostProcessor postprocessor{generator};
+  postprocessor.ProcessNext();
+  auto results = postprocessor.GetNextResults();
   postprocessor.Finalize();
-  const auto& final_results = postprocessor.GetNextTokenResults();
+  const auto& final_results = postprocessor.GetNextResults();
   results.insert(results.end(), final_results.begin(), final_results.end());
   for (const auto& result : results) {
     for (const auto& word : result.timestamps->words) {
@@ -279,97 +279,6 @@ TEST(AudioSpeechValidationTests, ZeroAndSubFrameGapsSplitEachWord) {
   for (double threshold : {0.0, 0.01}) {
     EXPECT_EQ(Generators::GetSegmentGapThresholdFrames(threshold, 100, 10, 1), 0);
   }
-}
-
-TEST(TokenPostProcessorInternalTests, OfflineBatchMatchesIncrementalProcessing) {
-  Generators::Config model_config{fs::path{MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32"}, ""};
-  auto tokenizer = std::make_shared<Generators::Tokenizer>(model_config);
-  const std::string text = "Hello world. Next.";
-  const auto tokens = tokenizer->Encode(text.c_str());
-  ASSERT_GT(tokens.size(), 1U);
-  std::vector<std::pair<int64_t, int64_t>> intervals;
-  for (size_t index = 0; index < tokens.size(); ++index)
-    intervals.push_back({static_cast<int64_t>(index), static_cast<int64_t>(index + 1)});
-
-  Generators::MetadataCoreConfig config;
-  config.timestamps.level = Generators::Config::TimestampLevel::All;
-  config.timestamps.segment_separators = {"."};
-  config.seconds_per_frame = 0.1;
-  const auto process = [&](size_t batch_size) {
-    Generators::TokenPostProcessorInternal stream{tokenizer, config};
-    Generators::PostProcessorResult transcript;
-    transcript.timestamps.emplace();
-    const auto collect = [&] {
-      for (const auto& result : stream.GetNextTokenResults()) {
-        transcript.text += result.text;
-        EXPECT_TRUE(result.timestamps.has_value());
-        if (!result.timestamps) continue;
-        const auto& timestamps = *result.timestamps;
-        auto& output = *transcript.timestamps;
-        output.words.insert(output.words.end(), timestamps.words.begin(), timestamps.words.end());
-        output.segments.insert(output.segments.end(), timestamps.segments.begin(), timestamps.segments.end());
-      }
-    };
-    for (size_t offset = 0; offset < tokens.size(); offset += batch_size) {
-      const auto count = std::min(batch_size, tokens.size() - offset);
-      stream.Process(Generators::TokenOutputs{
-          std::span<const int32_t>{tokens}.subspan(offset, count),
-          std::span<const std::pair<int64_t, int64_t>>{intervals}.subspan(offset, count)});
-      collect();
-    }
-    stream.Finalize();
-    collect();
-    return transcript;
-  };
-
-  const auto batch = process(tokens.size());
-  const auto incremental = process(1);
-  EXPECT_EQ(batch.text, text);
-  EXPECT_EQ(batch.text, incremental.text);
-  const auto expect_records = [](const auto& actual, const auto& expected) {
-    ASSERT_FALSE(actual.empty());
-    ASSERT_EQ(actual.size(), expected.size());
-    for (size_t index = 0; index < actual.size(); ++index) {
-      EXPECT_EQ(actual[index].text, expected[index].text);
-      EXPECT_EQ(actual[index].frame_interval, expected[index].frame_interval);
-      EXPECT_DOUBLE_EQ(actual[index].time_interval.first, expected[index].time_interval.first);
-      EXPECT_DOUBLE_EQ(actual[index].time_interval.second, expected[index].time_interval.second);
-    }
-  };
-  expect_records(batch.timestamps->words, incremental.timestamps->words);
-  expect_records(batch.timestamps->segments, incremental.timestamps->segments);
-}
-
-TEST(TokenPostProcessorInternalTests, OptionalTimingAndCountValidation) {
-  Generators::Config model_config{fs::path{MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32"}, ""};
-  auto tokenizer = std::make_shared<Generators::Tokenizer>(model_config);
-  const std::string text = "Hello world.";
-  const auto tokens = tokenizer->Encode(text.c_str());
-  ASSERT_GT(tokens.size(), 1U);
-
-  Generators::TokenOutputs untimed{tokens};
-  EXPECT_EQ(untimed.GetAcousticFrameIntervals(), nullptr);
-  Generators::TokenPostProcessorInternal plain{tokenizer, {}};
-  plain.Process(untimed);
-  std::string decoded;
-  for (const auto& result : plain.GetNextTokenResults()) {
-    EXPECT_FALSE(result.timestamps.has_value());
-    decoded += result.text;
-  }
-  EXPECT_EQ(decoded, text);
-
-  Generators::MetadataCoreConfig config;
-  config.timestamps.level = Generators::Config::TimestampLevel::Word;
-  config.seconds_per_frame = 0.1;
-  Generators::TokenPostProcessorInternal timed{tokenizer, config};
-  const std::vector<std::pair<int64_t, int64_t>> incomplete(tokens.size() - 1, {4, 5});
-  EXPECT_THROW(timed.Process(Generators::TokenOutputs{tokens, std::span<const std::pair<int64_t, int64_t>>{incomplete}}), std::runtime_error);
-  EXPECT_THROW(timed.Process(untimed), std::runtime_error);
-  const std::vector<std::pair<int64_t, int64_t>> intervals(tokens.size(), {4, 5});
-  timed.Process(Generators::TokenOutputs{tokens, std::span<const std::pair<int64_t, int64_t>>{intervals}});
-  decoded.clear();
-  for (const auto& result : timed.GetNextTokenResults()) decoded += result.text;
-  EXPECT_EQ(decoded, text);
 }
 
 class MetadataCoreStateTests : public testing::Test {
@@ -430,24 +339,108 @@ class MetadataCoreStateTests : public testing::Test {
   const std::pair<int64_t, int64_t> interval{4, 5};
 };
 
-TEST_F(MetadataCoreStateTests, PostProcessorBaseOwnsTokenProcessor) {
-  const int initial_count = Generators::TokenPostProcessor::Count();
+TEST_F(MetadataCoreStateTests, BatchMatchesIncrementalProcessing) {
+  const std::string text = "Hello world. Next.";
+  const auto batch_tokens = tokenizer->Encode(text.c_str());
+  ASSERT_GT(batch_tokens.size(), 1U);
+  std::vector<std::pair<int64_t, int64_t>> intervals;
+  for (size_t index = 0; index < batch_tokens.size(); ++index)
+    intervals.push_back({static_cast<int64_t>(index), static_cast<int64_t>(index + 1)});
+
+  const auto process = [&](size_t batch_size) {
+    Generators::ASRPostProcessor processor{*generator};
+    Generators::ASRPostProcessorResult transcript;
+    transcript.timestamps.emplace();
+    const auto collect = [&] {
+      for (const auto& result : processor.GetNextResults()) {
+        transcript.text += result.text;
+        EXPECT_TRUE(result.timestamps.has_value());
+        if (!result.timestamps) continue;
+        const auto& timestamps = *result.timestamps;
+        auto& output = *transcript.timestamps;
+        output.words.insert(output.words.end(), timestamps.words.begin(), timestamps.words.end());
+        output.segments.insert(output.segments.end(), timestamps.segments.begin(), timestamps.segments.end());
+      }
+    };
+    for (size_t offset = 0; offset < batch_tokens.size(); offset += batch_size) {
+      const auto count = std::min(batch_size, batch_tokens.size() - offset);
+      source->SetStep(std::vector<int32_t>{batch_tokens.begin() + offset, batch_tokens.begin() + offset + count}, 0);
+      source->last_token_intervals_.assign(intervals.begin() + offset, intervals.begin() + offset + count);
+      processor.ProcessNext();
+      collect();
+    }
+    processor.Finalize();
+    collect();
+    return transcript;
+  };
+
+  const auto batch = process(batch_tokens.size());
+  const auto incremental = process(1);
+  EXPECT_EQ(batch.text, text);
+  EXPECT_EQ(batch.text, incremental.text);
+  const auto expect_records = [](const auto& actual, const auto& expected) {
+    ASSERT_FALSE(actual.empty());
+    ASSERT_EQ(actual.size(), expected.size());
+    for (size_t index = 0; index < actual.size(); ++index) {
+      EXPECT_EQ(actual[index].text, expected[index].text);
+      EXPECT_EQ(actual[index].frame_interval, expected[index].frame_interval);
+      EXPECT_DOUBLE_EQ(actual[index].time_interval.first, expected[index].time_interval.first);
+      EXPECT_DOUBLE_EQ(actual[index].time_interval.second, expected[index].time_interval.second);
+    }
+  };
+  expect_records(batch.timestamps->words, incremental.timestamps->words);
+  expect_records(batch.timestamps->segments, incremental.timestamps->segments);
+}
+
+TEST_F(MetadataCoreStateTests, OptionalTimingAndCountValidation) {
+  const std::string text = "Hello world.";
+
+  model->config_->model.timestamp_level = Generators::Config::TimestampLevel::Off;
+  source->SetStep(tokens, 4);
+  source->last_token_intervals_.clear();
+  Generators::ASRPostProcessor plain{*generator};
+  plain.ProcessNext();
+  std::string decoded;
+  for (const auto& result : plain.GetNextResults()) {
+    EXPECT_FALSE(result.timestamps.has_value());
+    decoded += result.text;
+  }
+  EXPECT_EQ(decoded, text);
+
+  model->config_->model.timestamp_level = Generators::Config::TimestampLevel::Word;
+  Generators::ASRPostProcessor timed{*generator};
+  source->SetStep(tokens, 4);
+  source->last_token_intervals_.pop_back();
+  EXPECT_THROW(timed.ProcessNext(), std::runtime_error);
+  model->config_->model.timestamp_level = Generators::Config::TimestampLevel::Off;
+  EXPECT_THROW(timed.ProcessNext(), std::runtime_error);
+  model->config_->model.timestamp_level = Generators::Config::TimestampLevel::Word;
+  source->SetStep(tokens, 4);
+  timed.ProcessNext();
+  decoded.clear();
+  for (const auto& result : timed.GetNextResults()) decoded += result.text;
+  EXPECT_EQ(decoded, text);
+}
+
+TEST_F(MetadataCoreStateTests, PostProcessorBaseDispatchesASRProcessor) {
+  const int initial_count = Generators::ASRPostProcessor::Count();
   {
-    auto processor = std::make_unique<Generators::TokenPostProcessor>(*generator);
-    processor->ProcessNextTokens();
-    ASSERT_EQ(processor->GetNextTokenResults().size(), tokens.size());
-    auto& token_processor = *processor;
+    auto processor = std::make_unique<Generators::ASRPostProcessor>(*generator);
+    auto& asr_processor = *processor;
     std::unique_ptr<Generators::PostProcessor> base = std::move(processor);
     EXPECT_NE(base, nullptr);
-    EXPECT_EQ(Generators::TokenPostProcessor::Count(), initial_count + 1);
+    EXPECT_EQ(Generators::ASRPostProcessor::Count(), initial_count + 1);
+    base->ProcessNext();
+    const std::vector<Generators::ASRPostProcessorResult>& results = asr_processor.GetNextResults();
+    ASSERT_EQ(results.size(), tokens.size());
     base->Finalize();
-    ASSERT_EQ(token_processor.GetNextTokenResults().size(), 1U);
+    ASSERT_EQ(asr_processor.GetNextResults().size(), 1U);
     base->Reset();
-    EXPECT_TRUE(token_processor.GetNextTokenResults().empty());
-    token_processor.ProcessNextTokens();
-    EXPECT_EQ(token_processor.GetNextTokenResults().size(), tokens.size());
+    EXPECT_TRUE(asr_processor.GetNextResults().empty());
+    base->ProcessNext();
+    EXPECT_EQ(asr_processor.GetNextResults().size(), tokens.size());
   }
-  EXPECT_EQ(Generators::TokenPostProcessor::Count(), initial_count);
+  EXPECT_EQ(Generators::ASRPostProcessor::Count(), initial_count);
 }
 
 TEST_F(MetadataCoreStateTests, ChunkStartSampleSurvivesGeneratorInputHandoff) {
@@ -473,9 +466,9 @@ TEST_F(MetadataCoreStateTests, ChunkStartSampleSurvivesGeneratorInputHandoff) {
 }
 
 TEST_F(MetadataCoreStateTests, PostProcessorOwnsGroupingAcrossMultipleEmissions) {
-  Generators::TokenPostProcessor processor{*generator};
-  processor.ProcessNextTokens();
-  const auto& results = processor.GetNextTokenResults();
+  Generators::ASRPostProcessor processor{*generator};
+  processor.ProcessNext();
+  const auto& results = processor.GetNextResults();
   ASSERT_EQ(results.size(), tokens.size());
   std::string text;
   std::string words;
@@ -484,9 +477,9 @@ TEST_F(MetadataCoreStateTests, PostProcessorOwnsGroupingAcrossMultipleEmissions)
     for (const auto& word : result.timestamps->words) words += word.text;
   }
   EXPECT_EQ(text, "Hello world.");
-  EXPECT_EQ(&processor.GetNextTokenResults(), &results);
+  EXPECT_EQ(&processor.GetNextResults(), &results);
   processor.Finalize();
-  for (const auto& result : processor.GetNextTokenResults()) {
+  for (const auto& result : processor.GetNextResults()) {
     for (const auto& word : result.timestamps->words) {
       words += word.text;
       EXPECT_EQ(word.frame_interval, interval);
@@ -494,45 +487,45 @@ TEST_F(MetadataCoreStateTests, PostProcessorOwnsGroupingAcrossMultipleEmissions)
   }
   EXPECT_EQ(words, text);
   processor.Finalize();
-  EXPECT_TRUE(processor.GetNextTokenResults()[0].timestamps->words.empty());
+  EXPECT_TRUE(processor.GetNextResults()[0].timestamps->words.empty());
   source->SetStep({}, 99);
-  processor.ProcessNextTokens();
-  EXPECT_TRUE(processor.GetNextTokenResults().empty());
+  processor.ProcessNext();
+  EXPECT_TRUE(processor.GetNextResults().empty());
 }
 
 TEST_F(MetadataCoreStateTests, InvalidIntervalsDoNotAdvanceDecoding) {
-  Generators::TokenPostProcessor processor{*generator};
+  Generators::ASRPostProcessor processor{*generator};
   source->last_token_intervals_.clear();
-  EXPECT_THROW(processor.ProcessNextTokens(), std::runtime_error);
+  EXPECT_THROW(processor.ProcessNext(), std::runtime_error);
   source->SetStep(tokens, 4);
   source->last_token_intervals_[0] = {5, 5};
-  EXPECT_THROW(processor.ProcessNextTokens(), std::runtime_error);
+  EXPECT_THROW(processor.ProcessNext(), std::runtime_error);
   source->last_token_intervals_[0] = {-1, 5};
-  EXPECT_THROW(processor.ProcessNextTokens(), std::runtime_error);
+  EXPECT_THROW(processor.ProcessNext(), std::runtime_error);
   source->last_token_intervals_.pop_back();
-  EXPECT_THROW(processor.ProcessNextTokens(), std::runtime_error);
+  EXPECT_THROW(processor.ProcessNext(), std::runtime_error);
   source->SetStep(tokens, 4);
-  processor.ProcessNextTokens();
+  processor.ProcessNext();
   std::string text;
-  for (const auto& result : processor.GetNextTokenResults()) text += result.text;
+  for (const auto& result : processor.GetNextResults()) text += result.text;
   EXPECT_EQ(text, "Hello world.");
 }
 
 TEST_F(MetadataCoreStateTests, GeneratorOutputSelectionUsesModelConfig) {
   source->SetTimestampsEnabled(false);
-  Generators::TokenPostProcessor timed_processor{*generator};
-  EXPECT_NO_THROW(timed_processor.ProcessNextTokens());
-  ASSERT_EQ(timed_processor.GetNextTokenResults().size(), tokens.size());
-  for (const auto& result : timed_processor.GetNextTokenResults())
+  Generators::ASRPostProcessor timed_processor{*generator};
+  EXPECT_NO_THROW(timed_processor.ProcessNext());
+  ASSERT_EQ(timed_processor.GetNextResults().size(), tokens.size());
+  for (const auto& result : timed_processor.GetNextResults())
     EXPECT_TRUE(result.timestamps.has_value());
 
   model->config_->model.timestamp_level = Generators::Config::TimestampLevel::Off;
   source->SetTimestampsEnabled(true);
   source->last_token_intervals_.clear();
-  Generators::TokenPostProcessor plain_processor{*generator};
-  EXPECT_NO_THROW(plain_processor.ProcessNextTokens());
+  Generators::ASRPostProcessor plain_processor{*generator};
+  EXPECT_NO_THROW(plain_processor.ProcessNext());
   std::string text;
-  for (const auto& result : plain_processor.GetNextTokenResults()) {
+  for (const auto& result : plain_processor.GetNextResults()) {
     EXPECT_FALSE(result.timestamps.has_value());
     text += result.text;
   }
@@ -540,19 +533,19 @@ TEST_F(MetadataCoreStateTests, GeneratorOutputSelectionUsesModelConfig) {
 }
 
 TEST_F(MetadataCoreStateTests, RepeatedVocabularyIdsKeepPositionSpecificIntervals) {
-  Generators::TokenPostProcessor processor{*generator};
+  Generators::ASRPostProcessor processor{*generator};
   const auto repeated = tokenizer->Encode(" Hello");
   source->SetStep(repeated, 2);
   for (auto& token_interval : source->last_token_intervals_) token_interval.second = 7;
-  processor.ProcessNextTokens();
+  processor.ProcessNext();
   source->SetStep(repeated, 20);
   for (auto& token_interval : source->last_token_intervals_) token_interval.second = 23;
-  processor.ProcessNextTokens();
+  processor.ProcessNext();
   std::vector<Generators::TimestampRecord> words;
-  for (const auto& result : processor.GetNextTokenResults())
+  for (const auto& result : processor.GetNextResults())
     words.insert(words.end(), result.timestamps->words.begin(), result.timestamps->words.end());
   processor.Finalize();
-  for (const auto& result : processor.GetNextTokenResults())
+  for (const auto& result : processor.GetNextResults())
     words.insert(words.end(), result.timestamps->words.begin(), result.timestamps->words.end());
   ASSERT_EQ(words.size(), 2U);
   EXPECT_EQ(words[0].text, " Hello");
@@ -566,30 +559,30 @@ TEST_F(MetadataCoreStateTests, RepeatedVocabularyIdsKeepPositionSpecificInterval
 }
 
 TEST_F(MetadataCoreStateTests, OpaqueFieldGettersReturnBorrowedRecords) {
-  auto processor = OgaTokenPostProcessor::Create(*reinterpret_cast<const OgaGenerator*>(generator.get()));
+  auto processor = OgaASRPostProcessor::Create(*reinterpret_cast<const OgaGenerator*>(generator.get()));
   size_t record_count = 0;
   std::string words;
   std::string segments;
   const auto check_records = [&] {
     size_t result_index = 0;
-    for (const auto* result : processor->GetNextTokenResults()) {
-      const auto* native_result = OgaTokenPostProcessorGetResult(processor.get(), result_index);
+    for (const auto* result : processor->GetNextResults()) {
+      const auto* native_result = OgaASRPostProcessorGetResult(processor.get(), result_index);
       ASSERT_NE(result, nullptr);
       EXPECT_EQ(result, native_result);
-      EXPECT_EQ(result->GetText(), OgaTokenPostProcessorResultGetText(native_result));
+      EXPECT_EQ(result->GetText(), OgaASRPostProcessorResultGetText(native_result));
       const auto* timestamps = result->GetTimestampResult();
       ASSERT_NE(timestamps, nullptr);
-      EXPECT_EQ(timestamps, OgaTokenPostProcessorResultGetTimestampResult(native_result));
+      EXPECT_EQ(timestamps, OgaASRPostProcessorResultGetTimestampResult(native_result));
       ++result_index;
       EXPECT_EQ(timestamps->GetTimestampRecord(static_cast<OgaTimestampRecordKind>(99), 0), nullptr);
       for (auto kind : {OgaTimestampRecordKind_Words, OgaTimestampRecordKind_Segments}) {
         const bool use_segments = kind == OgaTimestampRecordKind_Segments;
         const auto count = use_segments ? timestamps->GetSegmentCount() : timestamps->GetWordCount();
-        EXPECT_EQ(count, use_segments ? OgaTokenPostProcessorTimestampResultGetSegmentCount(timestamps)
-                                      : OgaTokenPostProcessorTimestampResultGetWordCount(timestamps));
+        EXPECT_EQ(count, use_segments ? OgaASRPostProcessorTimestampResultGetSegmentCount(timestamps)
+                                      : OgaASRPostProcessorTimestampResultGetWordCount(timestamps));
         for (size_t index = 0; index < count; ++index) {
           const auto* record = timestamps->GetTimestampRecord(kind, index);
-          const auto* native_record = OgaTokenPostProcessorTimestampResultGetTimestampRecord(timestamps, kind, index);
+          const auto* native_record = OgaASRPostProcessorTimestampResultGetTimestampRecord(timestamps, kind, index);
           ASSERT_NE(record, nullptr);
           EXPECT_EQ(record, native_record);
           ++record_count;
@@ -600,17 +593,17 @@ TEST_F(MetadataCoreStateTests, OpaqueFieldGettersReturnBorrowedRecords) {
           EXPECT_DOUBLE_EQ(times.first, 0.4);
           EXPECT_DOUBLE_EQ(times.second, 0.5);
           (use_segments ? segments : words).append(record->GetText());
-          EXPECT_EQ(record->GetText(), OgaTokenPostProcessorTimestampRecordGetText(native_record));
-          EXPECT_EQ(frames.first, OgaTokenPostProcessorTimestampRecordGetStartFrame(native_record));
-          EXPECT_EQ(frames.second, OgaTokenPostProcessorTimestampRecordGetStopFrame(native_record));
-          EXPECT_DOUBLE_EQ(times.first, OgaTokenPostProcessorTimestampRecordGetStartTime(native_record));
-          EXPECT_DOUBLE_EQ(times.second, OgaTokenPostProcessorTimestampRecordGetStopTime(native_record));
+          EXPECT_EQ(record->GetText(), OgaASRPostProcessorTimestampRecordGetText(native_record));
+          EXPECT_EQ(frames.first, OgaASRPostProcessorTimestampRecordGetStartFrame(native_record));
+          EXPECT_EQ(frames.second, OgaASRPostProcessorTimestampRecordGetStopFrame(native_record));
+          EXPECT_DOUBLE_EQ(times.first, OgaASRPostProcessorTimestampRecordGetStartTime(native_record));
+          EXPECT_DOUBLE_EQ(times.second, OgaASRPostProcessorTimestampRecordGetStopTime(native_record));
         }
         EXPECT_EQ(timestamps->GetTimestampRecord(kind, count), nullptr);
       }
     }
   };
-  processor->ProcessNextTokens();
+  processor->ProcessNext();
   check_records();
   processor->Finalize();
   check_records();
@@ -622,17 +615,17 @@ TEST_F(MetadataCoreStateTests, OpaqueFieldGettersReturnBorrowedRecords) {
 TEST_F(MetadataCoreStateTests, SegmentGapsAndFinalizationPreserveExactText) {
   for (double threshold : {0.0, 0.01, 1.0}) {
     model->config_->model.segment_gap_threshold_seconds = threshold;
-    Generators::TokenPostProcessor processor{*generator};
+    Generators::ASRPostProcessor processor{*generator};
     std::vector<Generators::TimestampRecord> segments;
     const auto collect = [&] {
-      for (const auto& result : processor.GetNextTokenResults())
+      for (const auto& result : processor.GetNextResults())
         segments.insert(segments.end(), result.timestamps->segments.begin(), result.timestamps->segments.end());
     };
     source->SetStep(tokenizer->Encode(" first"), 2);
-    processor.ProcessNextTokens();
+    processor.ProcessNext();
     collect();
     source->SetStep(tokenizer->Encode(" second"), threshold < 1.0 ? 2 : 20);
-    processor.ProcessNextTokens();
+    processor.ProcessNext();
     collect();
     processor.Finalize();
     collect();
@@ -640,7 +633,7 @@ TEST_F(MetadataCoreStateTests, SegmentGapsAndFinalizationPreserveExactText) {
     EXPECT_EQ(segments[0].text, " first");
     EXPECT_EQ(segments[1].text, " second");
     processor.Finalize();
-    EXPECT_TRUE(processor.GetNextTokenResults()[0].timestamps->segments.empty());
+    EXPECT_TRUE(processor.GetNextResults()[0].timestamps->segments.empty());
   }
 }
 
@@ -649,12 +642,12 @@ TEST_F(MetadataCoreStateTests, TimestampLevelsControlOnlyPublishedRecords) {
   for (auto level : {Level::Off, Level::Word, Level::Segment, Level::All}) {
     model->config_->model.timestamp_level = level;
     source->SetTimestampsEnabled(level != Level::Off);
-    Generators::TokenPostProcessor processor{*generator};
-    processor.ProcessNextTokens();
+    Generators::ASRPostProcessor processor{*generator};
+    processor.ProcessNext();
     size_t words = 0;
     size_t segments = 0;
     const auto collect = [&] {
-      for (const auto& result : processor.GetNextTokenResults()) {
+      for (const auto& result : processor.GetNextResults()) {
         EXPECT_EQ(result.timestamps.has_value(), level != Level::Off);
         words += result.timestamps ? result.timestamps->words.size() : 0;
         segments += result.timestamps ? result.timestamps->segments.size() : 0;
@@ -669,34 +662,34 @@ TEST_F(MetadataCoreStateTests, TimestampLevelsControlOnlyPublishedRecords) {
 }
 
 TEST_F(MetadataCoreStateTests, ResetClearsPendingStateAndResultsAreReadOnly) {
-  Generators::TokenPostProcessor processor{*generator};
-  processor.ProcessNextTokens();
-  const auto owned = processor.GetNextTokenResults();
+  Generators::ASRPostProcessor processor{*generator};
+  processor.ProcessNext();
+  const auto owned = processor.GetNextResults();
   source->SetStep({}, 99);
-  EXPECT_EQ(processor.GetNextTokenResults().size(), tokens.size());
-  EXPECT_EQ(processor.GetNextTokenResults()[0].text, owned[0].text);
+  EXPECT_EQ(processor.GetNextResults().size(), tokens.size());
+  EXPECT_EQ(processor.GetNextResults()[0].text, owned[0].text);
   processor.Reset();
-  EXPECT_TRUE(processor.GetNextTokenResults().empty());
+  EXPECT_TRUE(processor.GetNextResults().empty());
   processor.Finalize();
-  EXPECT_TRUE(processor.GetNextTokenResults()[0].timestamps->words.empty());
-  EXPECT_TRUE(processor.GetNextTokenResults()[0].timestamps->segments.empty());
+  EXPECT_TRUE(processor.GetNextResults()[0].timestamps->words.empty());
+  EXPECT_TRUE(processor.GetNextResults()[0].timestamps->segments.empty());
   source->SetStep(tokens, 8);
-  processor.ProcessNextTokens();
+  processor.ProcessNext();
   std::string text;
-  for (const auto& result : processor.GetNextTokenResults()) text += result.text;
+  for (const auto& result : processor.GetNextResults()) text += result.text;
   EXPECT_EQ(text, "Hello world.");
   processor.Finalize();
-  ASSERT_FALSE(processor.GetNextTokenResults()[0].timestamps->words.empty());
-  EXPECT_EQ(processor.GetNextTokenResults()[0].timestamps->words.back().frame_interval.first, 8);
+  ASSERT_FALSE(processor.GetNextResults()[0].timestamps->words.empty());
+  EXPECT_EQ(processor.GetNextResults()[0].timestamps->words.back().frame_interval.first, 8);
   EXPECT_EQ(owned.size(), tokens.size());
 }
 
 TEST_F(MetadataCoreStateTests, RejectsMultipleSequences) {
   params->search.batch_size = 2;
-  EXPECT_THROW((Generators::TokenPostProcessor{*generator}), std::runtime_error);
+  EXPECT_THROW((Generators::ASRPostProcessor{*generator}), std::runtime_error);
   params->search.batch_size = 1;
   params->search.num_beams = 2;
-  EXPECT_THROW((Generators::TokenPostProcessor{*generator}), std::runtime_error);
+  EXPECT_THROW((Generators::ASRPostProcessor{*generator}), std::runtime_error);
 }
 
 TEST(AudioSpeechValidationTests, ParakeetEncoderChannelDimensionValidation) {

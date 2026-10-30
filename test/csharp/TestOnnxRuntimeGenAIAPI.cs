@@ -632,76 +632,76 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             Assert.Contains(reason, error.Message);
         }
 
-        [Fact(DisplayName = "TestTokenPostProcessorResults")]
-        public void TestTokenPostProcessorResults()
+        [Fact(DisplayName = "TestASRPostProcessorResults")]
+        public void TestASRPostProcessorResults()
         {
-            var timestampProperty = typeof(TokenPostProcessorResult).GetProperty(nameof(TokenPostProcessorResult.TimestampResult))!;
-            Assert.Equal(typeof(TokenPostProcessorTimestampResult), timestampProperty.PropertyType);
+            var timestampProperty = typeof(ASRPostProcessorResult).GetProperty(nameof(ASRPostProcessorResult.TimestampResult))!;
+            Assert.Equal(typeof(ASRPostProcessorTimestampResult), timestampProperty.PropertyType);
             Assert.False(timestampProperty.CanWrite);
-            Assert.False(typeof(TokenPostProcessorTimestampRecord).GetProperty(nameof(TokenPostProcessorTimestampRecord.Text))!.CanWrite);
-            Assert.Equal(typeof(ValueTuple<long, long>), typeof(TokenPostProcessorTimestampRecord)
-                .GetProperty(nameof(TokenPostProcessorTimestampRecord.FrameInterval))!.PropertyType);
-            Assert.Equal(typeof(ValueTuple<double, double>), typeof(TokenPostProcessorTimestampRecord)
-                .GetProperty(nameof(TokenPostProcessorTimestampRecord.TimeInterval))!.PropertyType);
+            Assert.False(typeof(ASRPostProcessorTimestampRecord).GetProperty(nameof(ASRPostProcessorTimestampRecord.Text))!.CanWrite);
+            Assert.Equal(typeof(ValueTuple<long, long>), typeof(ASRPostProcessorTimestampRecord)
+                .GetProperty(nameof(ASRPostProcessorTimestampRecord.FrameInterval))!.PropertyType);
+            Assert.Equal(typeof(ValueTuple<double, double>), typeof(ASRPostProcessorTimestampRecord)
+                .GetProperty(nameof(ASRPostProcessorTimestampRecord.TimeInterval))!.PropertyType);
             using var model = new Model(_tinyRandomGpt2ModelPath);
             using var tokenizer = new Tokenizer(model);
             using var parameters = new GeneratorParams(model);
             parameters.SetSearchOption("max_length", 10);
             using var generator = new Generator(model, parameters);
-            using var processor = new TokenPostProcessor(generator);
-            Assert.Empty(processor.GetNextTokenResults());
+            using var processor = new ASRPostProcessor(generator);
+            Assert.Empty(processor.GetNextResults());
             processor.FinalizeProcessing();
-            Assert.Null(Assert.Single(processor.GetNextTokenResults()).TimestampResult);
+            Assert.Null(Assert.Single(processor.GetNextResults()).TimestampResult);
             processor.Reset();
             generator.AppendTokens(new int[] { 0, 0, 0, 52 });
             generator.GenerateNextToken();
             using var plain = tokenizer.CreateStream();
             var tokenId = generator.GetNextTokens()[0];
-            processor.ProcessNextTokens();
-            var result = Assert.Single(processor.GetNextTokenResults());
+            processor.ProcessNext();
+            ASRPostProcessorResult result = Assert.Single(processor.GetNextResults());
             var expectedText = plain.Decode(tokenId);
             var copiedText = result.Text;
             Assert.Equal(expectedText, result.Text);
             Assert.Null(result.TimestampResult);
-            Assert.Equal(expectedText, Assert.Single(processor.GetNextTokenResults()).Text);
+            Assert.Equal(expectedText, Assert.Single(processor.GetNextResults()).Text);
             generator.GenerateNextToken();
-            Assert.Equal(expectedText, Assert.Single(processor.GetNextTokenResults()).Text);
-            processor.ProcessNextTokens();
+            Assert.Equal(expectedText, Assert.Single(processor.GetNextResults()).Text);
+            processor.ProcessNext();
             Assert.Throws<InvalidOperationException>(() => result.Text);
             Assert.Throws<InvalidOperationException>(() => result.TimestampResult);
-            Assert.Equal(plain.Decode(generator.GetNextTokens()[0]), Assert.Single(processor.GetNextTokenResults()).Text);
-            var beforeFinalize = Assert.Single(processor.GetNextTokenResults());
+            Assert.Equal(plain.Decode(generator.GetNextTokens()[0]), Assert.Single(processor.GetNextResults()).Text);
+            var beforeFinalize = Assert.Single(processor.GetNextResults());
             processor.FinalizeProcessing();
             Assert.Throws<InvalidOperationException>(() => beforeFinalize.Text);
             processor.FinalizeProcessing();
-            Assert.Equal("", Assert.Single(processor.GetNextTokenResults()).Text);
-            var beforeReset = Assert.Single(processor.GetNextTokenResults());
+            Assert.Equal("", Assert.Single(processor.GetNextResults()).Text);
+            var beforeReset = Assert.Single(processor.GetNextResults());
             processor.Reset();
-            Assert.Empty(processor.GetNextTokenResults());
+            Assert.Empty(processor.GetNextResults());
             Assert.Throws<InvalidOperationException>(() => beforeReset.Text);
             generator.Dispose();
-            Assert.Throws<ObjectDisposedException>(() => processor.ProcessNextTokens());
+            Assert.Throws<ObjectDisposedException>(() => processor.ProcessNext());
             processor.Dispose();
             Assert.Equal(expectedText, copiedText);
             Assert.Throws<ObjectDisposedException>(() => result.Text);
-            Assert.Throws<ObjectDisposedException>(() => processor.GetNextTokenResults());
+            Assert.Throws<ObjectDisposedException>(() => processor.GetNextResults());
         }
 
         [Theory]
         [InlineData("batch_size")]
         [InlineData("num_beams")]
-        public void TestTokenPostProcessorRejectsMultipleSequences(string option)
+        public void TestASRPostProcessorRejectsMultipleSequences(string option)
         {
             using var model = new Model(_tinyRandomGpt2ModelPath);
             using var parameters = new GeneratorParams(model);
             parameters.SetSearchOption(option, 2);
             using var generator = new Generator(model, parameters);
-            var error = Assert.Throws<OnnxRuntimeGenAIException>(() => new TokenPostProcessor(generator));
+            var error = Assert.Throws<OnnxRuntimeGenAIException>(() => new ASRPostProcessor(generator));
             Assert.Contains("batch_size=1 and num_beams=1", error.Message);
         }
 
         [Fact]
-        public void TestTokenPostProcessorUsesGeneratorsModel()
+        public void TestASRPostProcessorUsesGeneratorsModel()
         {
             using var model = new Model(_tinyRandomGpt2ModelPath);
             using var tokenizer = new Tokenizer(model);
@@ -710,17 +710,17 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             parameters.SetSearchOption("max_length", 10);
             using var generator = new Generator(model, parameters);
             model.Dispose();
-            using var processor = new TokenPostProcessor(generator);
+            using var processor = new ASRPostProcessor(generator);
             generator.AppendTokens(new int[] { 0, 0, 0, 52 });
             generator.GenerateNextToken();
-            processor.ProcessNextTokens();
-            Assert.Equal(plain.Decode(generator.GetNextTokens()[0]), Assert.Single(processor.GetNextTokenResults()).Text);
+            processor.ProcessNext();
+            Assert.Equal(plain.Decode(generator.GetNextTokens()[0]), Assert.Single(processor.GetNextResults()).Text);
         }
 
         [Fact]
-        public void TestTokenPostProcessorRejectsNullGenerator()
+        public void TestASRPostProcessorRejectsNullGenerator()
         {
-            Assert.Throws<ArgumentNullException>(() => new TokenPostProcessor(null));
+            Assert.Throws<ArgumentNullException>(() => new ASRPostProcessor(null));
         }
 
         [IgnoreOnModelAbsenceFact(DisplayName = "TestTokenizerBatchEncodeSingleDecode")]

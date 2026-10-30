@@ -31,7 +31,7 @@ struct TimestampResult {
   std::vector<TimestampRecord> segments;
 };
 
-struct PostProcessorResult {
+struct ASRPostProcessorResult {
   std::string text;
   std::optional<TimestampResult> timestamps;
 };
@@ -50,7 +50,7 @@ struct MetadataCoreConfig {
 };
 
 class MetadataCoreState {
-  friend class TokenPostProcessorInternal;
+  friend class ASRPostProcessor;
 
  private:
   explicit MetadataCoreState(const MetadataCoreConfig& config);
@@ -58,8 +58,8 @@ class MetadataCoreState {
   MetadataCoreState& operator=(const MetadataCoreState&) = delete;
   bool TimestampsEnabled() const { return config_.timestamps.level != Config::TimestampLevel::Off; }
   void ValidateInput(const TokenMetadataInput& token) const;
-  void ProcessDecoded(const TokenMetadataInput& token, const OrtxWordPieceInfo& piece, PostProcessorResult& result);
-  void ProcessFinalized(PostProcessorResult& result);
+  void ProcessDecoded(const TokenMetadataInput& token, const OrtxWordPieceInfo& piece, ASRPostProcessorResult& result);
+  void ProcessFinalized(ASRPostProcessorResult& result);
   void ProcessCompletedWords(TimestampResult& result);
   void PublishWord(std::string_view text, std::pair<int64_t, int64_t> interval, TimestampResult& result);
   void CompleteSegment(TimestampResult& result);
