@@ -686,8 +686,9 @@ void Qwen38GraphEngine::PrepRow(int rows, int row, const void* tok, const void* 
               in.ple + 2 * static_cast<size_t>(ple_width_) * row, ctl_.data());
   if (in.inputs_embeds) {
     const int embed_width = model_.config_->model.decoder.hidden_size;
+    const int encoded_width = model_.embed_is_int8_ ? -embed_width : embed_width;
     plane_.embed_rows(stream_, model_.embed_mapping_->device_data(), in.input_ids + 8 * row,
-                      in.inputs_embeds + 2 * static_cast<size_t>(embed_width) * row, 1, embed_width);
+                      in.inputs_embeds + 2 * static_cast<size_t>(embed_width) * row, 1, encoded_width);
   }
 }
 
@@ -1433,17 +1434,30 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
     if (std::filesystem::exists(embed_data_path)) {
       embed_mapping_ = std::make_unique<Qwen38FileMapping>(*plane_, embed_data_path, true);
       const std::vector<int64_t> embed_shape{config_->model.vocab_size, config_->model.decoder.hidden_size};
-      const size_t expected_bytes =
+      const size_t expected_bf16_bytes =
           static_cast<size_t>(embed_shape[0]) * static_cast<size_t>(embed_shape[1]) * sizeof(uint16_t);
-      if (embed_mapping_->size() >= expected_bytes) {
+      const size_t expected_int8_bytes =
+          static_cast<size_t>(embed_shape[0]) * static_cast<size_t>(embed_shape[1]) +
+          static_cast<size_t>(embed_shape[0]) * sizeof(float);
+      if (embed_mapping_->size() >= expected_bf16_bytes) {
+        embed_is_int8_ = false;
         embed_values_.push_back(OrtValue::CreateTensor(
-            *p_device_->GetMemoryInfo(), embed_mapping_->device_data(), expected_bytes, embed_shape,
+            *p_device_->GetMemoryInfo(), embed_mapping_->device_data(), expected_bf16_bytes, embed_shape,
             ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16));
         for (const char* name : {"model.embed_tokens.weight", "head.mtp.embed_tokens.weight"}) {
           session_options_->AddInitializer(name, *embed_values_.back());
         }
+      } else if (embed_mapping_->size() >= expected_int8_bytes) {
+        embed_is_int8_ = true;
+        const size_t table_i8_bytes = static_cast<size_t>(embed_shape[0]) * static_cast<size_t>(embed_shape[1]);
+        embed_values_.push_back(OrtValue::CreateTensor(
+            *p_device_->GetMemoryInfo(), embed_mapping_->device_data(), table_i8_bytes, embed_shape,
+            ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8));
+        for (const char* name : {"model.embed_tokens.weight", "head.mtp.embed_tokens.weight"}) {
+          session_options_->AddInitializer(name, *embed_values_.back());
+        }
       } else {
-        embed_mapping_.reset();  // not the vocab_size x hidden_size table: nothing may gather rows from it
+        embed_mapping_.reset();  // neither the BF16 nor the INT8 vocab_size x hidden_size table: nothing may gather rows from it
       }
     }
   }
