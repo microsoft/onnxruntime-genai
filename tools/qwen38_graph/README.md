@@ -33,7 +33,9 @@ The Engine backend, the plane library and these scripts are in this repository. 
 | the exported static-capture graphs (target, MTP head, and for the v12b stack the folded, dense, head-R2 and head-KV graphs plus `weights_pool.txt` and the QSA constants) | exported from the Qwen3.8-Flash-Next NVFP4 checkpoint together with the libraries above; see "Package" for the layout the scripts expect |
 | a CUDA execution provider that supports the S=2 target graphs, NVFP4 MoE and `arena_extend_strategy=kSameAsRequested` | the plugin CUDA EP, registered with `og.register_execution_provider_library` (`--provider`, `$QWEN_PROVIDER` or `<package>/provider/`; one provider path per process) |
 | `libqwen38_plane.so` (optional) | `make qwen38_plane` of this tree (`-DENABLE_QWEN38_PLANE=ON`); without it the model uses the plane built into `onnxruntime-genai-cuda` |
-| a natural-text pool for the benchmark prompts | any natural text of at least ~40k tokens, as `--text-pool` (or `$QWEN38_TEXT_POOL`): a text file or a `.npy` of token ids |
+| natural-text pools for the benchmark and gate prompts | any natural text of at least ~40k tokens, as `--text-pool` (and `--prose-pool` for the gate's `prose` case; or `$QWEN38_TEXT_POOL` / `$QWEN38_PROSE_POOL`): a text file or a `.npy` of token ids |
+| reference streams for the identity gate | a recording of the same prompts from another runner, or of this backend with `--no-mtp` / `--force-reject` (see `engine_gate.py`) |
+| research inputs of `mmlu_engine_eval.py`, `lcb_engine_eval.py` and `test_plane_kernels.py` | the research helper modules (`eval_lib`, `eval_mcq_genai`; `$QWEN38_EVAL_PATHS` or `PYTHONPATH`), the MMLU-Pro and LiveCodeBench prompts, samples and tests, an HF checkpoint folder, and for the kernel tests `mobius`, `torch` and the research runner; the other scripts need none of them |
 
 ## Package
 
@@ -100,9 +102,20 @@ All need a package; the ones that build prompts need a text pool (`--text-pool`,
 | `qwen38_engine_util.py` | helpers shared by the scripts: CUDA EP registration and model loading with config overlays (`$QWEN38_OVERLAY_JSON`), the natural-text prompt pools, and `run_turn` (one greedy turn through `og.Engine`); registers the DLL directories on Windows |
 | `calibrate_qwen38_kv.py` | calibrate per-channel INT8 and FP8 KV-cache scales for the 12 target sparse-attention layers and 1 MTP-head sparse-attention layer |
 | `smoke.py` | minimal example, prints the stream, speed and speculative statistics |
+| `engine_gate.py` | token-identity gate: greedy streams of the gate prompts against a `--reference` (a recording of `--no-mtp` or `--force-reject`, i.e. MTP == no-MTP, or another runner's streams); `--prefill steps` must be identical, `--prefill fast` is checked for an equal first token, equal prompt length and an identical prefix of at least `--min-fast-prefix` tokens and reported as agreement statistics; EOS mode and `--ignore-eos` fixed length |
+| `engine_behaviours.py` | (`--prefill steps\|fast`) stop tokens, limits, stop strings, cancel during prefill/decode, second request queued, continuation, rewind, capability errors, statistics |
 | `bench_engine_mtp.py` | vLLM-protocol decode benchmark (exact prompt length, 256 new tokens, 1 warm-up + 3 runs, TPS = 255 tokens / time between first and last token) |
 | `bench_ttft_engine.py` | time to first token at several prompt lengths (+ optional MMLU-Pro prompt ids from `--mmlu-prompts`): begin_turn to the Run that delivers the token |
+| `engine_prompt_lengths.py` | `run` the same greedy turns for 1 .. 20000-token prompts (dense chunk boundaries 8191/8192/8193, ...) with `--prefill steps` and `--prefill fast`, then `compare` (first token equal, shared prefix) |
+| `mmlu_engine_eval.py` | MMLU-Pro 800 through the Engine (shards, resumable) and the MTP == no-MTP stream check (`--check-items`, `--force-reject`, `--compare`) |
+| `lcb_engine_eval.py` | LiveCodeBench v6 (175 problems) through the Engine, generated in resumable `--shard K --shards N` runs; with `--grade --arms name=glob ...` the completed shards are graded in the `lcb-grader` Docker sandbox at each cap of `--caps` (default 16K and 32K) and the arms are compared with a paired exact McNemar test |
+| `test_plane_kernels.py` | kernel tests of the plane's fast prefill kernels (`ple_rows`, `pool_keys`, `transpose_f32`) against the research implementations |
 | `run_with_ram_budget.py` | runs a command (for example `bench_engine_mtp.py`) with a bounded host expert cache for a QMoE-offload package: `$ORT_QMOE_HOST_CACHE_MIB` / `$ORT_QMOE_HOST_CACHE_LAYERS` from `--ram-budget-gib` minus `--reserve-gib`, and with `--enforce` a `systemd-run --user` cap on the whole command; `test_ram_budget.py` is its unit test (`python -m unittest test_ram_budget`) |
+
+A qualification pass of a package: `engine_gate.py` with `--force-reject --prefill steps` (record), then without `--force-reject`
+with `--reference` of that recording (MTP stream == no-MTP stream); `engine_behaviours.py --prefill steps`; `bench_engine_mtp.py` on
+the fixed-length package; `bench_ttft_engine.py`; `engine_prompt_lengths.py` with both prefill modes; and, for accuracy,
+`mmlu_engine_eval.py` and `lcb_engine_eval.py`.
 
 The provider-side settings the numbers in the PR descriptions were taken with are
 `CUDA_MODULE_LOADING=EAGER ORT_ENABLE_FP4_GEMV=1 ORT_NVFP4_FC1_EXPERT_REUSE=0 ORT_FORCE_DETERMINISTIC_MOE=1`
