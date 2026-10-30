@@ -7,6 +7,7 @@ namespace Generators {
 class PostProcessor {
  public:
   virtual ~PostProcessor() = default;
+  virtual void ProcessNext() = 0;
   virtual void Finalize() = 0;
   virtual void Reset() = 0;
 

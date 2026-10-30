@@ -12,22 +12,27 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
     public class NativeMethodsMarshallingTests
     {
         [Fact]
-        public void TokenPostProcessorOutputsUseOpaquePointers()
+        public void ASRPostProcessorOutputsUseOpaquePointers()
         {
-            var nativeMethods = typeof(TokenPostProcessor).Assembly.GetType("Microsoft.ML.OnnxRuntimeGenAI.NativeMethods", true)!;
-            foreach (var name in new[] { "OgaTokenPostProcessorGetResult", "OgaTokenPostProcessorResultGetTimestampResult",
-                "OgaTokenPostProcessorTimestampResultGetTimestampRecord" })
+            var nativeMethods = typeof(ASRPostProcessor).Assembly.GetType("Microsoft.ML.OnnxRuntimeGenAI.NativeMethods", true)!;
+            foreach (var name in new[] { "OgaASRPostProcessorAsPostProcessor", "OgaPostProcessorProcessNext",
+                "OgaPostProcessorFinalize", "OgaPostProcessorReset",
+                "OgaASRPostProcessorGetResult", "OgaASRPostProcessorResultGetTimestampResult",
+                "OgaASRPostProcessorTimestampResultGetTimestampRecord" })
             {
                 var method = nativeMethods.GetMethod(name, BindingFlags.Public | BindingFlags.Static)!;
                 Assert.Equal(typeof(IntPtr), method.ReturnType);
             }
+            var destroy = nativeMethods.GetMethod("OgaDestroyPostProcessor", BindingFlags.Public | BindingFlags.Static)!;
+            Assert.Equal(typeof(void), destroy.ReturnType);
+            Assert.Equal(typeof(IntPtr), Assert.Single(destroy.GetParameters()).ParameterType);
         }
 
         [Fact]
         public void TimestampRecordLookupUsesKindSelector()
         {
-            var nativeMethods = typeof(TokenPostProcessor).Assembly.GetType("Microsoft.ML.OnnxRuntimeGenAI.NativeMethods", true)!;
-            var method = nativeMethods.GetMethod("OgaTokenPostProcessorTimestampResultGetTimestampRecord", BindingFlags.Public | BindingFlags.Static)!;
+            var nativeMethods = typeof(ASRPostProcessor).Assembly.GetType("Microsoft.ML.OnnxRuntimeGenAI.NativeMethods", true)!;
+            var method = nativeMethods.GetMethod("OgaASRPostProcessorTimestampResultGetTimestampRecord", BindingFlags.Public | BindingFlags.Static)!;
             var parameters = method.GetParameters();
             Assert.Equal(3, parameters.Length);
             Assert.Equal(typeof(IntPtr), parameters[0].ParameterType);

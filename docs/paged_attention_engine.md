@@ -844,8 +844,10 @@ token budget. The proposal width an automatic drafter aims for is model/Engine c
 The request must already belong to the Engine, have completed prefill, and be ready to decode.
 Verification supports greedy target selection and random target sampling with a positive `top_k`;
 proposals remain deterministic. Whole-turn guidance, a `repetition_penalty` other than 1,
-no-repeat-ngram processing, or a not-yet-met minimum generated token count makes a turn
+or no-repeat-ngram processing makes a turn
 ineligible for drafts, because the verification rows do not reproduce those logits processors.
+Minimum generated-token counts are supported: each target verification row, including the
+correction/bonus row, masks EOS using its own logical sequence position before argmax or sampling.
 Delimited guidance permits drafts outside its constrained regions: proposals stop before the
 opening marker, drafts pause inside the region, and resume after the closing marker. Automatic
 MTP drafting remains disabled throughout a delimited turn. Eligibility is per turn: the next turn
@@ -886,6 +888,15 @@ can never be verified under a later turn that resolved a different policy.
 loading or running that head. The flag does not affect an `MtpGenerator` constructed explicitly by
 the application. Server authors should size capacity and handle failures against the following
 behaviors.
+
+**Selected logits.** An MTP graph can expose an optional
+`model.mtp.inputs.logits_indices` input containing int32 packed-row indices.
+Gathering those hidden-state rows before the vocabulary projection avoids
+computing logits for auxiliary cache-update rows that drafting does not sample.
+This binding belongs to the head and is not inherited from
+`model.decoder.inputs.logits_indices`; target and head graphs may select logits
+independently. Target verification must still project every required draft and
+correction/bonus row.
 
 **Auxiliary memory accounting.** The head is a second paged pool that always holds the same block
 count as the target pool, so both are sized from one budget. With
@@ -1133,7 +1144,7 @@ For eligible decode shapes, the decoder may capture or replay a CUDA graph. Pref
 `ScheduledRequests::GenerateNextTokensForTransaction()` then:
 
 1. Applies each request's logits processors to its own logits row.
-2. Samples a next token using the scheduler-owned batched sampler when supported, otherwise uses the per-request search path. A greedy request that verified drafts this step skips sampling: drafted requests run without logits processors, so the argmax that verification already computed for the row after the accepted prefix is committed directly.
+2. Samples a next token using the scheduler-owned batched sampler when supported, otherwise uses the per-request search path. A greedy request that verified drafts this step skips sampling: verification already applied the row-specific EOS floor before computing argmax, so the token for the row after the accepted prefix is committed directly.
 3. Runs the per-request sequence and EOS handling.
 4. Produces a `RequestStepResult` for each request.
 
@@ -1281,7 +1292,7 @@ override it explicitly.
 `no_repeat_ngram_size` is only implemented by the CPU search, so a nonzero value is rejected at
 admission by a core-owned capability predicate keyed by the scoring device type, rather than
 throwing after the model has already run. A `repetition_penalty` other than 1, a nonzero
-`no_repeat_ngram_size`, or an unmet minimum also disables speculative drafting for that turn,
+`no_repeat_ngram_size` also disables speculative drafting for that turn,
 because verification rows do not reproduce those logits processors.
 
 `min_generated_tokens` masks the end-of-sequence token until the turn has generated that many
@@ -1849,20 +1860,28 @@ allocation surface.
 
 A reservation accepts requests in scheduled row order and exposes ordered handles,
 bindings, and target tokens. A contiguous resident interval binds its active bank
-directly as model input and its inactive bank as model output. If resident banks
+directly as model input and its inactive bank as model output. When
+`search.past_present_share_buffer` is enabled on CUDA, the append-only fixed-indexer key
+input and output instead alias the same buffer; the separately double-buffered
+indexer length remains the publication boundary. If resident banks
 differ, the pool first copies only minority rows into a canonical bank and changes
 their selectors after synchronization; this representation-only normalization does
 not advance request state. New admissions and fragmented intervals gather committed
-or zero state into contiguous model inputs and use distinct staged outputs. No path
-binds an output over visible committed state. The reservation reports its input/output
+or zero state into contiguous model inputs and use staged outputs. The indexer key
+uses one shared staging buffer under the same option; other state keeps distinct
+input and output staging. No mutable visibility metadata is bound over visible
+committed state. The reservation reports its input/output
 binding footprint through the retained `PlannedStagingBytes` API; direct views overlap
 storage already counted by `PersistentBytes`.
 
-Every tensor is backed by two persistent `[capacity, row...]` banks, and each slot
+Every tensor is normally backed by two persistent `[capacity, row...]` banks, and each slot
 records which bank is currently active (holds its visible committed state). This
 double buffering lets the commit be split into three phases so that a composite
-Engine transaction can validate and stage its resources, synchronize the preparation
-work, and then publish metadata at a single infallible boundary:
+Engine transaction can validate and stage all of its resources, synchronize once,
+and then publish them at a single infallible boundary. The fixed-indexer key is the
+one exception when sharing is enabled: `PackedSparseAttentionIndexer` only appends
+keys, while its separately banked state length determines the committed prefix. A
+discard can therefore leave unreferenced appended bytes without exposing them.
 
 - **`ValidateCommit()`** is `const`, mutates nothing, and performs every host-side
   precondition check before device work begins. It proves every checkpointed slot
@@ -1878,7 +1897,8 @@ work, and then publish metadata at a single infallible boundary:
   that replay before allowing a later reader to proceed, or enqueues it ahead of the
   reader on the same device stream. Discarding the prepared reservation drops its
   deferred replay. A fully accepted direct output needs no state copy. Preparation
-  does not write the active (visible) bank, so a failure during preparation leaves
+  does not write the active (visible) bank, except for append-only shared indexer-key
+  writes bounded by separately published committed lengths, so a failure during preparation leaves
   committed state exactly as it was; the pool drains the device and marks itself
   unhealthy because the inactive banks may be left partially written. A
   deferred replay that later fails also throws and marks the pool unhealthy, even
@@ -1914,7 +1934,8 @@ bank is written by the commit that publishes it before it is ever gathered, and 
 slot's inactive bank is only ever written (never read) before it becomes active, so
 the persistent banks never need construction-time zeroing. The pool therefore does
 not zero on release, and does not zero gather or staged tensors. It reports its
-persistent bytes (both state banks and both staging buffers), reusable zeroing scratch bytes, and
+persistent bytes (normally both state banks and both staging buffers; one of each for
+a shared indexer key), reusable zeroing scratch bytes, and
 the active reservation's input/output binding footprint separately. The two-bank design trades roughly double
 the persistent footprint for a publish that is a host-only bank flip with no device
 copy, which is what lets `PublishCommit()` be `noexcept`.

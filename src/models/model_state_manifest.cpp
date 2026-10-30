@@ -37,6 +37,17 @@ std::vector<StateBinding> StateBindingsFor(
       return {{"state", inputs.past_conv_names, outputs.present_conv_names}};
     case StateGroupKind::FixedRecurrent:
       return {{"state", inputs.past_recurrent_names, outputs.present_recurrent_names}};
+    case StateGroupKind::FixedPle:
+      return {
+          {"tokens", inputs.past_ple_token_names, outputs.present_ple_token_names},
+          {"conv", inputs.past_ple_conv_names, outputs.present_ple_conv_names},
+      };
+    case StateGroupKind::FixedIndexer:
+      return {
+          {"key", inputs.past_indexer_names, outputs.present_indexer_names},
+          {"kv_buffer", inputs.past_indexer_kv_buffer_names, outputs.present_indexer_kv_buffer_names},
+          {"state_lengths", inputs.past_indexer_state_lengths_names, outputs.present_indexer_state_lengths_names},
+      };
     case StateGroupKind::Invalid:
       return {};
   }
@@ -45,7 +56,16 @@ std::vector<StateBinding> StateBindingsFor(
 
 bool IsFixedKind(StateGroupKind kind) {
   return kind == StateGroupKind::FixedConv ||
-         kind == StateGroupKind::FixedRecurrent;
+         kind == StateGroupKind::FixedRecurrent ||
+         kind == StateGroupKind::FixedPle ||
+         kind == StateGroupKind::FixedIndexer;
+}
+
+bool SupportsStateUpdate(StateGroupKind kind) {
+  return kind == StateGroupKind::FixedConv ||
+         kind == StateGroupKind::FixedRecurrent ||
+         kind == StateGroupKind::FixedPle ||
+         kind == StateGroupKind::FixedIndexer;
 }
 
 StateUpdateKind StateUpdateKindFor(StateGroupKind kind) {
@@ -54,6 +74,12 @@ StateUpdateKind StateUpdateKindFor(StateGroupKind kind) {
   }
   if (kind == StateGroupKind::FixedRecurrent) {
     return StateUpdateKind::GatedDeltaNet;
+  }
+  if (kind == StateGroupKind::FixedPle) {
+    return StateUpdateKind::Ple;
+  }
+  if (kind == StateGroupKind::FixedIndexer) {
+    return StateUpdateKind::Indexer;
   }
   return StateUpdateKind::Invalid;
 }
@@ -66,6 +92,10 @@ std::string_view StateGroupKindName(StateGroupKind kind) {
       return "fixed_conv";
     case StateGroupKind::FixedRecurrent:
       return "fixed_recurrent";
+    case StateGroupKind::FixedPle:
+      return "fixed_ple";
+    case StateGroupKind::FixedIndexer:
+      return "fixed_indexer";
     case StateGroupKind::Invalid:
       return "invalid";
   }
@@ -246,38 +276,65 @@ void ValidateStateUpdateSession(std::string_view group_label,
         output_name};
   };
 
-  const auto state_binding = StateBindingsFor(inputs, outputs, group.kind).front();
+  const auto state_bindings = StateBindingsFor(inputs, outputs, group.kind);
   for (const int layer_id : group.layer_ids) {
-    const auto state_name = ExpandBinding(state_binding.output, layer_id);
+    const auto state_name = ExpandBinding(state_bindings.front().output, layer_id);
     const TensorMetadata state{
         metadata.GetOutputDataType(state_name),
         metadata.GetOutputShape(state_name),
         state_name};
-    ValidateRank(
-        group_label, "state output", state,
-        update_kind == StateUpdateKind::CausalConv ? 3 : 4);
+    size_t state_rank = 3;
+    if (update_kind == StateUpdateKind::GatedDeltaNet) {
+      state_rank = 4;
+    } else if (update_kind == StateUpdateKind::Ple) {
+      state_rank = 2;
+    }
+    ValidateRank(group_label, "state output", state, state_rank);
     if (!DimensionsCompatible(state.shape[0], capture_count.shape[0])) {
       throw std::runtime_error(
           std::string{group_label} + " state_update capture_count input '" + capture_count_name +
           "' has batch dimension incompatible with state output '" + state.name + "'");
     }
 
-    if (update_kind == StateUpdateKind::CausalConv) {
-      const auto value = get_output("value", outputs.state_update_conv_value_names, layer_id);
+    if (update_kind == StateUpdateKind::CausalConv || update_kind == StateUpdateKind::Ple) {
+      const auto& value_template = update_kind == StateUpdateKind::CausalConv
+                                       ? outputs.state_update_conv_value_names
+                                       : outputs.state_update_ple_conv_value_names;
+      const TensorMetadata conv_state = update_kind == StateUpdateKind::Ple
+                                            ? TensorMetadata{
+                                                  metadata.GetOutputDataType(ExpandBinding(state_bindings[1].output, layer_id)),
+                                                  metadata.GetOutputShape(ExpandBinding(state_bindings[1].output, layer_id)),
+                                                  ExpandBinding(state_bindings[1].output, layer_id)}
+                                            : state;
+      ValidateRank(group_label, "convolution state output", conv_state, 3);
+      const auto value = get_output("value", value_template, layer_id);
       ValidateRank(group_label, "state_update value output", value, 3);
-      if (value.data_type != state.data_type) {
+      if (value.data_type != conv_state.data_type) {
         throw std::runtime_error(
             std::string{group_label} + " state_update value output '" + value.name +
-            "' must have the same dtype as state output '" + state.name + "'");
+            "' must have the same dtype as state output '" + conv_state.name + "'");
       }
-      if (!DimensionsCompatible(state.shape[0], value.shape[0]) ||
+      if (!DimensionsCompatible(conv_state.shape[0], value.shape[0]) ||
           value.shape[1] != update.capacity ||
-          !DimensionsCompatible(state.shape[1], value.shape[2])) {
+          !DimensionsCompatible(conv_state.shape[1], value.shape[2])) {
         throw std::runtime_error(
             std::string{group_label} + " state_update value output '" + value.name +
             "' has incompatible batch, capacity, or channel dimensions");
       }
-    } else {
+      if (update_kind == StateUpdateKind::Ple && !outputs.state_update_ple_token_names.empty()) {
+        const auto tokens = get_output("tokens", outputs.state_update_ple_token_names, layer_id);
+        ValidateRank(group_label, "state_update tokens output", tokens, 3);
+        if (state.data_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64 ||
+            tokens.data_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64 ||
+            !DimensionsCompatible(state.shape[0], tokens.shape[0]) ||
+            tokens.shape[1] != update.capacity ||
+            !DimensionsCompatible(state.shape[1], tokens.shape[2])) {
+          throw std::runtime_error(
+              std::string{group_label} + " state_update tokens output '" + tokens.name +
+              "' must be int64 [batch, capacity, token_state_width]");
+        }
+      }
+    } else if (update_kind == StateUpdateKind::GatedDeltaNet) {
       const auto capsule = get_output(
           "capsule", outputs.state_update_recurrent_capsule_names, layer_id);
       ValidateRank(group_label, "state_update capsule output", capsule, 2);
@@ -300,6 +357,25 @@ void ValidateStateUpdateSession(std::string_view group_label,
         throw std::runtime_error(
             std::string{group_label} + " state_update capsule output '" + capsule.name +
             "' width must be " + std::to_string(expected_width));
+      }
+    } else {
+      const auto payload = get_output("indexer", outputs.state_update_indexer_names, layer_id);
+      const auto buffer_name = ExpandBinding(state_bindings[1].output, layer_id);
+      const auto lengths_name = ExpandBinding(state_bindings[2].output, layer_id);
+      const TensorMetadata buffer{metadata.GetOutputDataType(buffer_name), metadata.GetOutputShape(buffer_name), buffer_name};
+      const TensorMetadata lengths{metadata.GetOutputDataType(lengths_name), metadata.GetOutputShape(lengths_name), lengths_name};
+      ValidateRank(group_label, "state_update indexer output", payload, 3);
+      ValidateRank(group_label, "indexer buffer output", buffer, 3);
+      ValidateRank(group_label, "indexer lengths output", lengths, 2);
+      if (payload.data_type != state.data_type || buffer.data_type != state.data_type ||
+          lengths.data_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 ||
+          payload.shape[1] != update.capacity || lengths.shape[1] != 2 ||
+          buffer.shape[1] != 2 * update.compress_ratio - 1 ||
+          !DimensionsCompatible(state.shape[0], payload.shape[0]) ||
+          !DimensionsCompatible(state.shape[2], payload.shape[2]) ||
+          !DimensionsCompatible(buffer.shape[2], payload.shape[2])) {
+        throw std::runtime_error(
+            std::string{group_label} + " has incompatible indexer state_update geometry or dtype");
       }
     }
   }
@@ -337,7 +413,9 @@ bool ModelStateManifest::HasStateGroupKind(StateGroupKind kind) const {
 
 bool ModelStateManifest::HasFixedStateGroups() const {
   return HasStateGroupKind(StateGroupKind::FixedConv) ||
-         HasStateGroupKind(StateGroupKind::FixedRecurrent);
+         HasStateGroupKind(StateGroupKind::FixedRecurrent) ||
+         HasStateGroupKind(StateGroupKind::FixedPle) ||
+         HasStateGroupKind(StateGroupKind::FixedIndexer);
 }
 
 void ModelStateManifest::ValidateConfig(const Decoder& decoder) {
@@ -372,8 +450,9 @@ void ModelStateManifest::ValidateConfig(const Decoder& decoder) {
     if (group.state_update) {
       ++fixed_state_update_group_count;
       const auto& update = *group.state_update;
-      if (!IsFixedKind(group.kind)) {
-        throw std::runtime_error(group_label + " only fixed state groups support state_update");
+      if (!SupportsStateUpdate(group.kind)) {
+        throw std::runtime_error(
+            group_label + " does not support state_update; partial acceptance requires replay");
       }
       if (update.capacity < 1 || update.capacity > Decoder::MaxStateUpdateCapacity) {
         throw std::runtime_error(
@@ -397,6 +476,15 @@ void ModelStateManifest::ValidateConfig(const Decoder& decoder) {
       if (group.kind == StateGroupKind::FixedRecurrent && update.key_head_count <= 0) {
         throw std::runtime_error(
             group_label + " fixed_recurrent state_update requires key_head_count");
+      }
+      if (group.kind != StateGroupKind::FixedRecurrent && update.key_head_count != 0) {
+        throw std::runtime_error(group_label + " state_update does not use key_head_count");
+      }
+      if (group.kind == StateGroupKind::FixedIndexer && update.compress_ratio <= 0) {
+        throw std::runtime_error(group_label + " state_update requires compress_ratio");
+      }
+      if (group.kind != StateGroupKind::FixedIndexer && update.compress_ratio != 0) {
+        throw std::runtime_error(group_label + " state_update does not use compress_ratio");
       }
 
       if (!fixed_state_update_capacity) {
@@ -452,15 +540,27 @@ void ModelStateManifest::ValidateConfig(const Decoder& decoder) {
       validate_binding(binding);
     }
     if (group.state_update) {
-      const auto& output_template = group.kind == StateGroupKind::FixedConv
-                                        ? decoder.outputs.state_update_conv_value_names
-                                        : decoder.outputs.state_update_recurrent_capsule_names;
-      ValidateBindingTemplate(group_label, "state_update", "output", output_template);
-      for (const int layer_id : group.layer_ids) {
-        const auto output_name = ExpandBinding(output_template, layer_id);
-        if (!expanded_bindings.insert(output_name).second) {
-          throw std::runtime_error(
-              group_label + " resolves more than one binding to '" + output_name + "'");
+      std::vector<const std::string*> output_templates;
+      if (group.kind == StateGroupKind::FixedConv) {
+        output_templates = {&decoder.outputs.state_update_conv_value_names};
+      } else if (group.kind == StateGroupKind::FixedRecurrent) {
+        output_templates = {&decoder.outputs.state_update_recurrent_capsule_names};
+      } else if (group.kind == StateGroupKind::FixedPle) {
+        output_templates = {&decoder.outputs.state_update_ple_conv_value_names};
+        if (!decoder.outputs.state_update_ple_token_names.empty()) {
+          output_templates.push_back(&decoder.outputs.state_update_ple_token_names);
+        }
+      } else {
+        output_templates = {&decoder.outputs.state_update_indexer_names};
+      }
+      for (const auto* output_template : output_templates) {
+        ValidateBindingTemplate(group_label, "state_update", "output", *output_template);
+        for (const int layer_id : group.layer_ids) {
+          const auto output_name = ExpandBinding(*output_template, layer_id);
+          if (!expanded_bindings.insert(output_name).second) {
+            throw std::runtime_error(
+                group_label + " resolves more than one binding to '" + output_name + "'");
+          }
         }
       }
     }
@@ -470,6 +570,17 @@ void ModelStateManifest::ValidateConfig(const Decoder& decoder) {
       fixed_state_update_group_count != fixed_group_count) {
     throw std::runtime_error(
         "All fixed state groups must declare state_update when any fixed group declares it");
+  }
+  if (decoder.state_update_capacity > 0) {
+    if (fixed_state_update_group_count != fixed_group_count) {
+      throw std::runtime_error(
+          "All fixed state groups must declare state_update when decoder state updates are enabled");
+    }
+    if (!fixed_state_update_capacity ||
+        *fixed_state_update_capacity != decoder.state_update_capacity) {
+      throw std::runtime_error(
+          "Fixed state_update capacity must match model.decoder.state_update_capacity");
+    }
   }
 }
 

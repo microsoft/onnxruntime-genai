@@ -48,6 +48,7 @@ struct State {
   virtual void Finalize(int current_length) {}
 
   virtual void RewindTo(size_t index) { (void)index; };
+  virtual void ValidateRewindTo(size_t index) const { (void)index; }
 
   // Snapshot/restore the model's recurrent state for speculative decoding. Default no-op
   // for models without recurrent state. SnapshotState() captures the conv/linear-attention
@@ -62,6 +63,7 @@ struct State {
   // attention KV cache + position to `new_length` and crops the recurrent state to the state
   // AFTER verify token `recurrent_position` (that token's window slot).
   virtual bool HasCroppableRecurrentState() const { return false; }
+  virtual bool CropRequiresSnapshot() const { return false; }
   // Width of that window, i.e. the longest forward whose per-token states all stay addressable.
   // 1 when the model carries no window.
   virtual int64_t RecurrentStateWindow() const { return 1; }
@@ -69,10 +71,16 @@ struct State {
     (void)new_length;
     (void)recurrent_position;
   }
+  virtual void ValidateCropToAccepted(size_t new_length, size_t recurrent_position) const {
+    (void)new_length;
+    (void)recurrent_position;
+  }
 
   // Stage a hidden_states input value for the next Run (models with a hidden_states input,
   // e.g. the MTP self-speculative head). Default no-op.
   virtual void SetHiddenStates(OrtValue* hidden_states) { (void)hidden_states; }
+  virtual OrtValue* GetRotaryPositionIds() { return nullptr; }
+  virtual void SetRotaryPositionIds(OrtValue* positions) { (void)positions; }
 
   virtual OrtValue* GetInput(const char* name);
   virtual OrtValue* GetOutput(const char* name);

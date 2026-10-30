@@ -60,7 +60,19 @@ void Embeddings::UpdateSequenceLength(size_t new_length) {
     shape_[1] = new_length;
 
     if (mode_ == Embeddings::Mode::Input) {
-      embeddings_->CreateTensor(shape_, state_.params_->use_graph_capture && new_length == 1);
+      const bool capture = state_.params_->use_graph_capture && new_length > 0 &&
+                           new_length <= static_cast<size_t>(state_.params_->max_graph_capture_length);
+      if (capture) {
+        auto& buffer = captured_embeddings_[new_length];
+        if (!buffer) {
+          buffer = std::make_shared<Tensor>(state_.p_session_device_inputs_, type_);
+          buffer->CreateTensor(shape_, true);
+        }
+        embeddings_ = buffer;
+      } else {
+        embeddings_ = std::make_shared<Tensor>(state_.p_session_device_inputs_, type_);
+        embeddings_->CreateTensor(shape_);
+      }
       state_.inputs_[index_] = embeddings_->GetOrtTensor();
     }
   }

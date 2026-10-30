@@ -865,7 +865,7 @@ struct CudaInterfaceImplBase : DeviceInterface {
       const auto& source = descriptors[index];
       auto& destination = ordered_replay_descriptors_[index];
       destination = cuda::StateUpdateReplayDescGpu{
-          source.source_state.Span().data(),
+          source.source_state.empty() ? nullptr : source.source_state.Span().data(),
           source.destination_state.Span().data(),
           source.value.empty() ? nullptr : source.value.Span().data(),
           source.decay.empty()
@@ -877,13 +877,24 @@ struct CudaInterfaceImplBase : DeviceInterface {
           source.delta.empty()
               ? nullptr
               : reinterpret_cast<const float*>(source.delta.Span().data()),
+          source.source_aux_state.empty() ? nullptr : source.source_aux_state.Span().data(),
+          source.destination_aux_state.empty() ? nullptr : source.destination_aux_state.Span().data(),
+          source.source_lengths.empty()
+              ? nullptr
+              : reinterpret_cast<const int32_t*>(source.source_lengths.Span().data()),
+          source.destination_lengths.empty()
+              ? nullptr
+              : reinterpret_cast<int32_t*>(source.destination_lengths.Span().data()),
           source.channel_count,
           source.state_width,
           source.key_width,
           source.key_head_count,
+          source.state_capacity,
+          source.aux_capacity,
           source.capacity,
           source.kept_count,
           source.element_size,
+          source.compress_ratio,
           static_cast<uint32_t>(source.kind),
       };
     }
