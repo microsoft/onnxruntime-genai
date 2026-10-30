@@ -2377,6 +2377,144 @@ TEST(Qwen38CacheShapeTest, IgnoresInputsThatDoNotDependOnTheCapacity) {
   EXPECT_NO_THROW(ValidateQwen38CacheShapes(inputs, 33028, "target"));
 }
 
+TEST(Qwen38MoeOffloadTest, ParsesTheModeAndBudgetEntries) {
+  const auto parse = [](const std::vector<Config::NamedString>& entries) {
+    return ParseQwen38MoeOffloadSettings(entries);
+  };
+
+  auto settings = parse({});
+  EXPECT_FALSE(settings.enabled);
+  EXPECT_FALSE(settings.constrained);
+  EXPECT_EQ(settings.reserve_device_bytes, 6442450944ULL);
+  EXPECT_FALSE(parse({{"session.moe.offload.mode", "disabled"}}).enabled);
+
+  // "auto" offloads only when the experts do not fit; the other modes always offload.
+  settings = parse({{"session.moe.offload.mode", "auto"}});
+  EXPECT_TRUE(settings.enabled);
+  EXPECT_FALSE(settings.constrained);
+  for (const char* mode : {"required", "1", "on"}) {
+    settings = parse({{"session.moe.offload.mode", mode}});
+    EXPECT_TRUE(settings.enabled) << mode;
+    EXPECT_TRUE(settings.constrained) << mode;
+  }
+
+  // An explicit expert budget is a constrained offload on its own; "auto" and "0" leave it to the runtime.
+  settings = parse({{"session.moe.offload.device_expert_bytes", "21474836480"}});
+  EXPECT_TRUE(settings.enabled);
+  EXPECT_TRUE(settings.constrained);
+  EXPECT_TRUE(settings.has_device_expert_bytes);
+  EXPECT_EQ(settings.device_expert_bytes, 21474836480ULL);
+  for (const char* unset : {"auto", "0"}) {
+    EXPECT_FALSE(parse({{"session.moe.offload.device_expert_bytes", unset}}).enabled) << unset;
+  }
+  settings = parse({{"session.moe.offload.device_expert_bytes", "not-a-number"}});
+  EXPECT_TRUE(settings.constrained);
+  EXPECT_FALSE(settings.has_device_expert_bytes);
+
+  EXPECT_FALSE(parse({{"session.moe.offload.source_root", ""}}).has_source_root);
+  EXPECT_TRUE(parse({{"session.moe.offload.source_root", "/models/pkg"}}).has_source_root);
+
+  settings = parse({{"session.moe.offload.reserve_device_bytes", "1073741824"}});
+  EXPECT_TRUE(settings.has_reserve_device_bytes);
+  EXPECT_EQ(settings.reserve_device_bytes, 1073741824ULL);
+  EXPECT_FALSE(parse({{"session.moe.offload.reserve_device_bytes", "auto"}}).has_reserve_device_bytes);
+}
+
+TEST(Qwen38MoeOffloadTest, ContextTierFollowsTheTargetFileName) {
+  const auto tier = Qwen38ContextTierForTarget("model_128k.onnx");
+  ASSERT_TRUE(tier.has_value());
+  EXPECT_EQ(tier->name, "128k");
+  EXPECT_EQ(tier->kv_capacity, 133128);
+
+  const auto sixty_four = Qwen38ContextTierForTarget("target/model_s4_64k.onnx");
+  ASSERT_TRUE(sixty_four.has_value());
+  EXPECT_EQ(sixty_four->name, "64k");
+  EXPECT_EQ(sixty_four->kv_capacity, 65800);
+
+  const auto eight = Qwen38ContextTierForTarget("model_8k.onnx");
+  ASSERT_TRUE(eight.has_value());
+  EXPECT_EQ(eight->kv_capacity, 8456);
+
+  const auto two = Qwen38ContextTierForTarget("model_2k.onnx");
+  ASSERT_TRUE(two.has_value());
+  EXPECT_EQ(two->kv_capacity, 2312);
+
+  // The context settings are not part of the tier: the capacity gives them through the one shared rule, so the tier never
+  // disagrees with what SyncQwen38GraphContext sets once the session exists.
+  const std::pair<const char*, int> context_lengths[] = {
+      {"model_128k.onnx", 133120}, {"model_64k.onnx", 65792}, {"model_8k.onnx", 8448}, {"model_2k.onnx", 2304}};
+  for (const auto& [file, context_length] : context_lengths) {
+    const auto of_file = Qwen38ContextTierForTarget(file);
+    ASSERT_TRUE(of_file.has_value()) << file;
+    const Qwen38GraphContext context = SyncQwen38GraphContext(of_file->kv_capacity, 0, /*context_requested=*/true);
+    EXPECT_EQ(context.kv_capacity, of_file->kv_capacity) << file;
+    EXPECT_EQ(context.context_length, context_length) << file;
+  }
+
+  // The graph's own past_position_ids decides for every other file; "model_32k" must not be read as "2k" or "128k" as "8k".
+  for (const char* other : {"model.onnx", "model_s4.onnx", "model_dynamic_ctx.onnx", "model_16k.onnx", "model_32k.onnx"}) {
+    EXPECT_FALSE(Qwen38ContextTierForTarget(other).has_value()) << other;
+  }
+}
+
+TEST(Qwen38MoeOffloadTest, SessionEntriesAreEmptyUnlessOffloadIsEnabled) {
+  EXPECT_TRUE(Qwen38MoeOffloadSessionEntries(Qwen38MoeOffloadSettings{}, "/models/pkg", 133128, true).empty());
+}
+
+TEST(Qwen38MoeOffloadTest, SessionEntriesDefaultTheSourceRootAndReserve) {
+  const auto settings = ParseQwen38MoeOffloadSettings({{"session.moe.offload.mode", "required"}});
+  EXPECT_EQ(Qwen38MoeOffloadSessionEntries(settings, "/models/pkg", 33032, false),
+            (std::vector<Config::NamedString>{{"session.moe.offload.source_root", "/models/pkg"},
+                                              {"session.moe.offload.reserve_device_bytes", "6442450944"}}));
+
+  const auto configured = ParseQwen38MoeOffloadSettings({{"session.moe.offload.mode", "required"},
+                                                         {"session.moe.offload.source_root", "/elsewhere"},
+                                                         {"session.moe.offload.reserve_device_bytes", "1073741824"}});
+  EXPECT_TRUE(Qwen38MoeOffloadSessionEntries(configured, "/models/pkg", 33032, false).empty());
+}
+
+TEST(Qwen38MoeOffloadTest, AdaptiveBudgetMovesWithTheKvCapacity) {
+  const auto settings = ParseQwen38MoeOffloadSettings({{"session.moe.offload.mode", "required"},
+                                                       {"session.moe.offload.source_root", "/models/pkg"},
+                                                       {"session.moe.offload.device_expert_bytes", "21474836480"}});
+  const auto budget = [&](const Qwen38MoeOffloadSettings& s, int kv_capacity, bool adaptive) {
+    return Qwen38MoeOffloadSessionEntries(s, "/models/pkg", kv_capacity, adaptive);
+  };
+  const auto entries = [](const char* expert, const char* reserve) {
+    return std::vector<Config::NamedString>{{"session.moe.offload.device_expert_bytes", expert},
+                                            {"session.moe.offload.reserve_device_bytes", reserve}};
+  };
+
+  // 16 KiB of KV cache per token against the 33032-token reference: a longer context is paid for by the expert cache ...
+  EXPECT_EQ(budget(settings, 133128, true), entries("19834863616", "8082423808"));
+  EXPECT_EQ(budget(settings, 65800, true), entries("20937965568", "6979321856"));
+  // ... and the memory a shorter one frees goes to it.
+  EXPECT_EQ(budget(settings, 8456, true), entries("21877489664", "6039797760"));
+  EXPECT_EQ(budget(settings, 2312, true), entries("21978152960", "5939134464"));
+
+  // Not adaptive, or at the reference capacity: only the missing reserve is defaulted.
+  const std::vector<Config::NamedString> default_reserve{{"session.moe.offload.reserve_device_bytes", "6442450944"}};
+  EXPECT_EQ(budget(settings, 133128, false), default_reserve);
+  EXPECT_EQ(budget(settings, 33032, true), default_reserve);
+
+  // Without an explicit expert budget only the reserve is adapted.
+  const auto reserve_only = ParseQwen38MoeOffloadSettings({{"session.moe.offload.mode", "required"},
+                                                           {"session.moe.offload.source_root", "/models/pkg"}});
+  EXPECT_EQ(budget(reserve_only, 133128, true),
+            (std::vector<Config::NamedString>{{"session.moe.offload.reserve_device_bytes", "8082423808"}}));
+
+  // The budgets never drop below 1 GB (experts) and 2 GiB (reserve).
+  const auto small_experts = ParseQwen38MoeOffloadSettings({{"session.moe.offload.mode", "required"},
+                                                            {"session.moe.offload.source_root", "/models/pkg"},
+                                                            {"session.moe.offload.device_expert_bytes", "1500000000"}});
+  EXPECT_EQ(budget(small_experts, 133128, true), entries("1000000000", "8082423808"));
+  const auto small_reserve = ParseQwen38MoeOffloadSettings({{"session.moe.offload.mode", "required"},
+                                                            {"session.moe.offload.source_root", "/models/pkg"},
+                                                            {"session.moe.offload.reserve_device_bytes", "2200000000"}});
+  EXPECT_EQ(budget(small_reserve, 2312, true),
+            (std::vector<Config::NamedString>{{"session.moe.offload.reserve_device_bytes", "2147483648"}}));
+}
+
 TEST(Qwen38QsaConstantsTest, RequiresBothCosAndSinForTargetAndHead) {
   const auto dir = MakeScratchDir("qsa_complete");
   WriteFile(dir / "qsa_consts.bin", std::string(4096, '\0'));

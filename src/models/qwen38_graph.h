@@ -19,6 +19,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "engine/backend_capabilities.h"
@@ -345,6 +346,39 @@ void ValidateQwen38CacheShapes(const std::vector<Qwen38CacheInput>& inputs, int 
 // pad past_position_ids beyond the KV cache (e.g. 33040 positions for 33028 KV rows), so using the KV cache length preserves
 // compatibility with ValidateQwen38CacheShapes.
 int64_t ResolveQwen38GraphKvCapacity(const std::vector<Qwen38CacheInput>& inputs);
+
+// MoE expert offload (ORT QMoE offload v4) as requested by the decoder's "session.moe.offload.*" config entries.
+struct Qwen38MoeOffloadSettings {
+  static constexpr uint64_t kDefaultReserveDeviceBytes = 6442450944ULL;  // 6 GiB
+
+  bool enabled{false};      // mode is required/auto/1/on, or device_expert_bytes is explicit
+  bool constrained{false};  // mode is required/1/on, or device_expert_bytes is explicit: the experts must not all stay on the device
+  bool has_source_root{false};
+  bool has_reserve_device_bytes{false};
+  bool has_device_expert_bytes{false};
+  uint64_t device_expert_bytes{0};
+  uint64_t reserve_device_bytes{kDefaultReserveDeviceBytes};
+};
+
+Qwen38MoeOffloadSettings ParseQwen38MoeOffloadSettings(const std::vector<Config::NamedString>& config_entries);
+
+// KV capacity of the target graph variants that are named after their context tier (model_2k.onnx, model_8k.onnx,
+// model_64k.onnx, model_128k.onnx), known before the session exists. Empty for any other file name. The context length and
+// the generation budget are not part of it: SyncQwen38GraphContext derives them from the graph once the session exists.
+struct Qwen38ContextTier {
+  std::string_view name;  // "2k", "8k", "64k", "128k"
+  int kv_capacity{};
+};
+std::optional<Qwen38ContextTier> Qwen38ContextTierForTarget(const std::string& target_filename);
+
+// "session.moe.offload.*" entries added to the target session once the KV capacity of the selected target graph is known:
+// the model folder as the default source_root, and the reserve (and explicit expert) budgets. With
+// `adaptive_context_budget` the budgets follow the KV cache relative to the 32K-context reference: memory a longer
+// context needs is taken from the expert cache, memory a shorter context frees is given to it. Empty unless offload is
+// enabled.
+std::vector<Config::NamedString> Qwen38MoeOffloadSessionEntries(const Qwen38MoeOffloadSettings& settings,
+                                                                const std::filesystem::path& model_root, int kv_capacity,
+                                                                bool adaptive_context_budget);
 
 // Constants of the PackedQSAIndexer state conversion (key-norm weights, leading-RoPE tables) for the dense -> packed hand-off.
 struct Qwen38QsaConstants {
