@@ -2605,6 +2605,8 @@ struct Qwen38Graph_Element : JSON::Element {
       v_.ple_table = JSON::Get<std::string_view>(value);
     } else if (name == "kv_capacity") {
       v_.kv_capacity = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "max_batch_size") {
+      v_.max_batch_size = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "warmup") {
       v_.warmup = JSON::Get<bool>(value);
     } else {

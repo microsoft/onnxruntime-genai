@@ -126,6 +126,7 @@ Qwen38Plane::Qwen38Plane(const std::filesystem::path& path) {
     quantize_kv = reinterpret_cast<decltype(quantize_kv)>(GetProcAddress(mod, "qwen38_plane_quantize_kv"));
     embed_rows = reinterpret_cast<decltype(embed_rows)>(GetProcAddress(mod, "qwen38_plane_embed_rows"));
     embed_gather = reinterpret_cast<decltype(embed_gather)>(GetProcAddress(mod, "qwen38_plane_embed_gather"));
+    prep_batched = reinterpret_cast<decltype(prep_batched)>(GetProcAddress(mod, "qwen38_plane_prep_batched"));
     set_ple_host_params =
         reinterpret_cast<decltype(set_ple_host_params)>(GetProcAddress(mod, "qwen38_plane_set_ple_host_params"));
     unset_ple_host_params =
@@ -187,6 +188,7 @@ Qwen38Plane::Qwen38Plane(const std::filesystem::path& path) {
     quantize_kv = reinterpret_cast<decltype(quantize_kv)>(dlsym(handle_, "qwen38_plane_quantize_kv"));
     embed_rows = reinterpret_cast<decltype(embed_rows)>(dlsym(handle_, "qwen38_plane_embed_rows"));
     embed_gather = reinterpret_cast<decltype(embed_gather)>(dlsym(handle_, "qwen38_plane_embed_gather"));
+    prep_batched = reinterpret_cast<decltype(prep_batched)>(dlsym(handle_, "qwen38_plane_prep_batched"));
     set_ple_host_params =
         reinterpret_cast<decltype(set_ple_host_params)>(dlsym(handle_, "qwen38_plane_set_ple_host_params"));
     unset_ple_host_params =
@@ -280,6 +282,27 @@ void Qwen38Plane::EmbedRows(void* stream, const Qwen38EmbeddingTable& table, con
   }
   throw std::runtime_error("qwen38_graph: the plane library " + library_path +
                            " lacks the qwen38_plane_embed_gather export needed to gather embedding rows");
+}
+
+void Qwen38Plane::PrepBatched(void* stream, const void* params, int rows, int batch, const void* ctx_in, void* ctx_out,
+                              void* input_ids, void* position_ids, void* committed, void* past_pos, void* ple_out,
+                              void* state) const {
+  if (rows < 1 || rows > QWEN38_PLANE_MAX_PREP_ROWS) {
+    throw std::invalid_argument("qwen38_graph: batched prep needs 1.." + std::to_string(QWEN38_PLANE_MAX_PREP_ROWS) +
+                                " rows per slot, got " + std::to_string(rows));
+  }
+  if (batch < 1 || batch > QWEN38_PLANE_MAX_PREP_BATCH) {
+    throw std::invalid_argument("qwen38_graph: batched prep needs 1.." + std::to_string(QWEN38_PLANE_MAX_PREP_BATCH) +
+                                " slots, got " + std::to_string(batch));
+  }
+  RequireCapabilities(QWEN38_PLANE_CAP_BATCHED_PREP, "preparing the inputs of several request slots in one call");
+  if (!prep_batched) {
+    throw std::runtime_error("qwen38_graph: the plane library " + library_path +
+                             " lacks the qwen38_plane_prep_batched export needed to prepare several request slots");
+  }
+  Check(prep_batched(stream, params, rows, batch, ctx_in, ctx_out, input_ids, position_ids, committed, past_pos, ple_out,
+                     state),
+        "prep_batched");
 }
 
 size_t Qwen38EmbeddingTableBytes(Qwen38EmbeddingFormat format, long long rows, long long width) {
