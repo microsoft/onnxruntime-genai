@@ -175,6 +175,42 @@ private copy that is extended, so the earlier package is never modified. The scr
 `--out` that is equal to, nested in or around `--src`, `--reuse-hc-bf16-from`, `--plane-lib` or `--provider-lib` (checked before
 anything is deleted).
 
+### QMoE-offload packages (`build_package_offload_v3.py`)
+
+`build_package_offload_v3.py --from-package <v12b package> --out <dir> --plane-lib <libqwen38_plane.so> --provider-lib
+<libonnxruntime_providers_cuda.so>` converts a v12b package (layered, or flat with `model.onnx` in the root) so that the routed experts
+stay in host memory and are streamed to the GPU on demand (`stack` is `v12b-engine-qmoe-offload-v3` in `package_manifest.json`).
+Everything that does not change is hard-linked from the source (`--copy` copies):
+
+* the 48 `com.microsoft::QMoE` nodes of the target graph become `com.microsoft::QMoEOffload` nodes (explicit `layer_index`,
+  `hidden_size` and `inter_size`, plus tile, working-buffer and CUDA-graph attributes). The graph is written as `model_s2.onnx` (in
+  `target/` for a layered package); `model_s3.onnx` and `model_s4.onnx` extend it to 3 and 4 verify rows (2 or 3 chained MTP drafts),
+  and `model.onnx` is a copy of `model_s4.onnx`;
+* `weights_pool.txt` puts the routed-expert weights and scales (63.28 GiB) in `cpu` mmap placement. `--dense-placement` (default
+  `host_mapped`) places the `dense.data` weights of the dense prefill session, `--embed-placement` (default `host_mapped`) the token
+  embedding and `--mtp-moe-placement` (default `device`) the MTP-head experts;
+* `dense/model.onnx` keeps the stock GPU `QMoE` on the UVA-mapped expert weights; `--dense-offload-qmoe` rewrites it to `QMoEOffload`
+  streaming `--prefill-chunk` rows instead;
+* `--target-resident-slots` and `--target-spare-slots` set the resident and spare expert slots of every target node.
+  `--expert-profile <expert-profile.bin>` (an STRP v1 expert-popularity file) chooses the initial resident experts per layer instead,
+  `--total-resident-slots` in total (default 48 x `--target-resident-slots`, or 48 x 20) with a floor of `--min-slots-per-layer` (default 4)
+  per layer, or the same count for every layer with `--uniform-profile-slots`;
+* `genai_config.json` gets CUDA-graph capture and `kSameAsRequested` arena options for the decoder, MTP-head, dense and head-KV sessions;
+  `--vram-limit-gib` becomes `gpu_device_mem_limit`, `--stop-token-id` replaces `eos_token_id` and `--prefill-chunk` (default 512) sets
+  `prefill.chunk`;
+* `--plane-lib` and `--provider-lib` are copied to `libs/` and `provider/`; `--ops-dir` adds its `libqwen_*.so` files to `libs/`.
+
+`--out` must not be equal to or nested in `--from-package` (or contain it). It does not have to be new or empty, so a rebuild replaces
+its files, and for a source without `dense/model.onnx` the script removes stale `dense/` and `head_kv/` (flat source: also
+`target/` and `head_r2/`) folders from it. The source package is never modified: every graph is saved to a new file, and the
+`model_s2.onnx`, `model_s3.onnx` and `model_s4.onnx` of a source that already has them are regenerated instead of hard-linked. With
+`--mtp-moe-placement host_mapped` it can also write a 4.7 GiB `<package>_mtp_moe_aligned.bin` next to the source package (Linux only:
+`os.copy_file_range`). Use `run_with_ram_budget.py` to run an offload package with a bounded host expert cache.
+
+`--migrate-shared-onnx <in.onnx> --out-onnx <out.onnx>` is a separate mode that rewrites one graph: legacy 26-input `QMoEOffload` nodes
+move to the compact schema (inputs 21, 24 and 25 become inputs 2, 3 and 4; `--strip-phase` drops the optional phase input and
+`--strip-stats` the statistics outputs) without touching the external weight data.
+
 ## Engine usage
 
 ```python
@@ -202,6 +238,7 @@ The builders produce a package; every other script needs one, and the ones that 
 | `build_package_engine_v12b.py` | v12b / v12c / v12d package (folded cycle + fast prefill, optional `--kv-quant`, `--weight-quant`, `--mtp-moe-quant`, `--hc-quant`, `--share-dense-weights`, and the flat `--clean-package` layout) from an existing v12b package |
 | `build_package_v12d_int4_int8.py` | INT4 QMoE + INT8 MatMulNBits variant of the v12d package for SM80 and newer (layered, or flat with `--clean-flat-package`) |
 | `build_package_contrib_ops.py` | rewrites a flat RC2 package to standard ONNX and `com.microsoft` contrib operators only (no `custom_ops_libraries`) |
+| `build_package_offload_v3.py` | QMoE-offload package from a v12b package (`QMoEOffload` nodes, host-resident routed experts, S=2..4 target graphs, optional expert profile and resident slots); `--migrate-shared-onnx` migrates one graph to the compact `QMoEOffload` schema |
 | `qwen38_engine_util.py` | helpers shared by the scripts: CUDA EP registration and model loading with config overlays (`$QWEN38_OVERLAY_JSON`), the natural-text prompt pools, and `run_turn` (one greedy turn through `og.Engine`); registers the DLL directories on Windows |
 | `calibrate_qwen38_kv.py` | calibrate per-channel INT8 and FP8 KV-cache scales for the 12 target sparse-attention layers and 1 MTP-head sparse-attention layer (the JSON of the wanted quantization is the `--kv-scale-file` of `build_package_engine_v12b.py`); `--out` receives the `--quant-type` scales and the other quantization is written beside it under the name with the quantization token swapped (`kv_scales_int8_per_channel.json` -> `kv_scales_fp8_per_channel.json`, `scales.json` -> `scales.fp8_per_channel.json`), so the two files never collide (a collision is an error before any work) |
 | `smoke.py` | minimal example, prints the stream, speed and speculative statistics |
