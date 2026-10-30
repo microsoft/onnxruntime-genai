@@ -175,7 +175,8 @@ class Model:
         self.graph_attrs = Model.default_graph_attrs()
 
         # States for building the model
-        self.make_graph(
+        Model.make_graph(
+            self,
             "main_graph",
             opset=self.graph_attrs["ai.onnx"],
             ir_version=self.graph_attrs["ir_version"],

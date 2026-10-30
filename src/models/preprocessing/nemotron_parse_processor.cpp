@@ -32,7 +32,7 @@ std::unique_ptr<OrtValue> BuildInputIds(const Tokenizer& tokenizer,
   input_ids.insert(input_ids.begin(), decoder_start_token_id);
 
   ValidateNemotronParsePromptLength(input_ids.size(), required_prompt_length,
-                                   context_length);
+                                    context_length);
 
   const std::array<int64_t, 2> shape{1, static_cast<int64_t>(input_ids.size())};
   auto value = OrtValue::CreateTensor<int32_t>(allocator, shape);

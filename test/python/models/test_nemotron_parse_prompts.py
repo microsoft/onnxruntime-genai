@@ -32,11 +32,20 @@ def _save_graph(path, nodes, inputs, outputs, initializers=()):
 
 @pytest.fixture
 def model_factory(tmp_path):
-    def create(prefill_length=8, fixed_length=None, provider="cpu", fail_decoder=False,
-               decoder_run_options=None, invalid_cache=False, cache_dtype=np.float32,
-               normalization=None,
-               vision_config_filename="vision_processing.json", add_bos_token=True, add_eos_token=True,
-               profile_keys=("min", "opt", "max")):
+    def create(
+        prefill_length=8,
+        fixed_length=None,
+        provider="cpu",
+        fail_decoder=False,
+        decoder_run_options=None,
+        invalid_cache=False,
+        cache_dtype=np.float32,
+        normalization=None,
+        vision_config_filename="vision_processing.json",
+        add_bos_token=True,
+        add_eos_token=True,
+        profile_keys=("min", "opt", "max"),
+    ):
         cache_type = helper.np_dtype_to_tensor_dtype(np.dtype(cache_dtype))
         model_dir = tmp_path / f"model_{prefill_length}_{fixed_length}"
         model_dir.mkdir()
@@ -56,10 +65,12 @@ def model_factory(tmp_path):
         )
         config["search"].update(max_length=CONTEXT_LENGTH, do_sample=False)
         if provider != "cpu":
-            config["model"]["decoder"]["session_options"].update({
-                "provider_options": [{provider: {}}],
-                "session.disable_cpu_ep_fallback": "1",
-            })
+            config["model"]["decoder"]["session_options"].update(
+                {
+                    "provider_options": [{provider: {}}],
+                    "session.disable_cpu_ep_fallback": "1",
+                }
+            )
         if provider == "NvTensorRtRtx":
             config["model"]["vision"]["session_options"] = {
                 "provider_options": [{provider: {}}],
@@ -73,43 +84,55 @@ def model_factory(tmp_path):
             config["model"]["decoder"]["run_options"] = decoder_run_options
         (model_dir / "genai_config.json").write_text(json.dumps(config))
         (model_dir / vision_config_filename).write_text(
-            json.dumps({
-                "image_height": 2,
-                "image_width": 2,
-                **(DEFAULT_NORMALIZATION if normalization is None else normalization),
-                "processor": {
-                    "name": "nemotron_parse_image_processor",
-                    "transforms": [{
-                        "operation": {
-                            "name": "decode_image",
-                            "type": "DecodeImage",
-                            "attrs": {"color_space": "RGB"},
-                        }
-                    }],
-                },
-            })
+            json.dumps(
+                {
+                    "image_height": 2,
+                    "image_width": 2,
+                    **(DEFAULT_NORMALIZATION if normalization is None else normalization),
+                    "processor": {
+                        "name": "nemotron_parse_image_processor",
+                        "transforms": [
+                            {
+                                "operation": {
+                                    "name": "decode_image",
+                                    "type": "DecodeImage",
+                                    "attrs": {"color_space": "RGB"},
+                                }
+                            }
+                        ],
+                    },
+                }
+            )
         )
 
         special_tokens = [
-            "<s>", "<pad>", "</s>", "<unk>",
-            "<predict_bbox>", "<predict_classes>", "<output_markdown>",
+            "<s>",
+            "<pad>",
+            "</s>",
+            "<unk>",
+            "<predict_bbox>",
+            "<predict_classes>",
+            "<output_markdown>",
         ]
-        vocab = {token: index for index, token in enumerate(special_tokens + ["x"])}
+        vocab = {token: index for index, token in enumerate([*special_tokens, "x"])}
         tokenizer = Tokenizer(models.BPE(vocab=vocab, merges=[], unk_token="<unk>"))
         tokenizer.add_special_tokens(special_tokens)
         template = (["<s>"] if add_bos_token else []) + ["$A"] + (["</s>"] if add_eos_token else [])
         tokenizer.post_processor = processors.TemplateProcessing(
-            single=" ".join(template), special_tokens=[(token, vocab[token]) for token in template if token != "$A"],
+            single=" ".join(template),
+            special_tokens=[(token, vocab[token]) for token in template if token != "$A"],
         )
         tokenizer.save(str(model_dir / "tokenizer.json"))
         (model_dir / "tokenizer_config.json").write_text(
-            json.dumps({
-                "tokenizer_class": "PreTrainedTokenizerFast",
-                "bos_token": "<s>",
-                "eos_token": "</s>",
-                "pad_token": "<pad>",
-                "unk_token": "<unk>",
-            })
+            json.dumps(
+                {
+                    "tokenizer_class": "PreTrainedTokenizerFast",
+                    "bos_token": "<s>",
+                    "eos_token": "</s>",
+                    "pad_token": "<pad>",
+                    "unk_token": "<unk>",
+                }
+            )
         )
 
         cross_shape = [1, 1, 1, 1]
@@ -141,25 +164,36 @@ def model_factory(tmp_path):
         if fail_decoder:
             nodes[0] = helper.make_node("Gather", ["values", "decoder_input_ids"], ["tokens_float"])
         for kind in ("key", "value"):
-            inputs.extend([
-                helper.make_tensor_value_info(f"past_key_values.0.{kind}", cache_type, cache_shape),
-                helper.make_tensor_value_info(f"cross_past_key_values.0.{kind}", cache_type, cross_shape),
-            ])
+            inputs.extend(
+                [
+                    helper.make_tensor_value_info(f"past_key_values.0.{kind}", cache_type, cache_shape),
+                    helper.make_tensor_value_info(f"cross_past_key_values.0.{kind}", cache_type, cross_shape),
+                ]
+            )
             outputs.append(helper.make_tensor_value_info(f"present.0.{kind}", cache_type, cache_shape))
-            nodes.append(helper.make_node(
-                "TensorScatter", [f"past_key_values.0.{kind}", "updates", "cache_write_indices"],
-                [f"present.0.{kind}"], axis=2,
-            ))
+            nodes.append(
+                helper.make_node(
+                    "TensorScatter",
+                    [f"past_key_values.0.{kind}", "updates", "cache_write_indices"],
+                    [f"present.0.{kind}"],
+                    axis=2,
+                )
+            )
 
-        nodes.extend([
-            helper.make_node("ReduceSum", ["decoder_attention_mask", "axes"], ["length"], keepdims=0),
-            helper.make_node("Add", ["length", "cache_write_indices"], ["next_id"]),
-            helper.make_node("Mod", ["next_id", "vocab_size"], ["token_id"]),
-            helper.make_node("OneHot", ["token_id", "vocab_size", "values"], ["scores"]),
-            helper.make_node("Unsqueeze", ["scores", "axes"], ["logits"]),
-        ])
+        nodes.extend(
+            [
+                helper.make_node("ReduceSum", ["decoder_attention_mask", "axes"], ["length"], keepdims=0),
+                helper.make_node("Add", ["length", "cache_write_indices"], ["next_id"]),
+                helper.make_node("Mod", ["next_id", "vocab_size"], ["token_id"]),
+                helper.make_node("OneHot", ["token_id", "vocab_size", "values"], ["scores"]),
+                helper.make_node("Unsqueeze", ["scores", "axes"], ["logits"]),
+            ]
+        )
         _save_graph(
-            model_dir / "decoder.onnx", nodes, inputs, outputs,
+            model_dir / "decoder.onnx",
+            nodes,
+            inputs,
+            outputs,
             [
                 numpy_helper.from_array(np.array([1], dtype=np.int64), "axes"),
                 numpy_helper.from_array(np.array([1, 3], dtype=np.int64), "cache_axes"),
@@ -191,7 +225,9 @@ def trt_rtx_provider():
 @pytest.mark.parametrize("missing", ["min", "opt", "max"])
 def test_trt_rtx_rejects_partial_explicit_profiles(model_factory, trt_rtx_provider, missing):
     with pytest.raises(RuntimeError, match="Explicit TRT-RTX profiles must specify.*together"):
-        model_factory(provider=trt_rtx_provider, profile_keys=tuple(kind for kind in ("min", "opt", "max") if kind != missing))
+        model_factory(
+            provider=trt_rtx_provider, profile_keys=tuple(kind for kind in ("min", "opt", "max") if kind != missing)
+        )
 
 
 @pytest.mark.parametrize("prefill_length", [8, 16])
@@ -211,7 +247,7 @@ def test_trt_rtx_static_and_dynamic_prefill(model_factory, images, trt_rtx_provi
             generator.generate_next_token()
             consumed = generator.get_sequence(0)[:-1]
             expected = np.zeros((1, 1, CONTEXT_LENGTH, 1), dtype=np.float32)
-            expected[0, 0, :len(consumed), 0] = consumed
+            expected[0, 0, : len(consumed), 0] = consumed
             for kind in ("key", "value"):
                 np.testing.assert_array_equal(generator.get_output(f"present.0.{kind}"), expected)
                 np.testing.assert_array_equal(generator.get_input(f"past_key_values.0.{kind}"), expected)
@@ -275,7 +311,7 @@ def test_processor_uses_tokenizer_special_tokens(model_factory, tmp_path, images
     model = model_factory(add_bos_token=add_bos_token, add_eos_token=add_eos_token)
     reference = Tokenizer.from_file(str(tmp_path / "model_8_None" / "tokenizer.json"))
     text = prompt or DEFAULT_TASK
-    expected = [2] + reference.encode(text, add_special_tokens=True).ids
+    expected = [2, *reference.encode(text, add_special_tokens=True).ids]
     standalone = og.Tokenizer(model)
     raw = reference.encode(text, add_special_tokens=False).ids
     np.testing.assert_array_equal(standalone.encode(text), raw)
@@ -307,7 +343,9 @@ def test_fixed_prompt_length_checked_by_processor(model_factory, images, prefill
     if prompt_length == prefill_length:
         assert processor(prompt, images=images)["input_ids"].as_numpy().shape == (1, prefill_length)
     else:
-        with pytest.raises(RuntimeError, match=rf"prompt has {prompt_length} tokens.*requires exactly {prefill_length}"):
+        with pytest.raises(
+            RuntimeError, match=rf"prompt has {prompt_length} tokens.*requires exactly {prefill_length}"
+        ):
             processor(prompt, images=images)
 
 
@@ -359,7 +397,8 @@ def test_processor_rejects_multiple_prompts(model_factory, images, prompts):
 @pytest.fixture
 def example_common(monkeypatch):
     monkeypatch.syspath_prepend(str(Path(__file__).parents[3] / "examples/python"))
-    import common
+    import common  # noqa: PLC0415
+
     return common
 
 
@@ -375,7 +414,7 @@ def test_example_model_type_prompt_default(tmp_path, example_common, model_type,
 
 def test_example_default_matches_exported_task(tmp_path, monkeypatch, example_common):
     monkeypatch.syspath_prepend(str(Path(__file__).parents[3] / "src/python/py/models"))
-    from builders.nemotron_parse import NemotronParseModel
+    from builders.nemotron_parse import NemotronParseModel  # noqa: PLC0415
 
     (tmp_path / "genai_config.json").write_text(json.dumps({"model": {"type": "nemotron_parse"}}))
     assert example_common.get_default_user_prompt(str(tmp_path), "fallback") == NemotronParseModel.default_user_prompt
@@ -403,14 +442,17 @@ def test_processor_uses_builtin_default_task(model_factory, images):
 
 @pytest.mark.parametrize("model_type", ["nemotron_parse", "gemma3"])
 @pytest.mark.parametrize("user_prompt", [None, "custom", "What color is the sky?"])
-@pytest.mark.parametrize("package_max, explicit_max, expected", [
-    (1032, None, 1032),
-    (4096, None, 4096),
-    (8192, None, 7680),
-    (1032, 512, 512),
-    (8192, 8000, 8000),
-    (1032, 2048, 2048),
-])
+@pytest.mark.parametrize(
+    "package_max, explicit_max, expected",
+    [
+        (1032, None, 1032),
+        (4096, None, 4096),
+        (8192, None, 7680),
+        (1032, 512, 512),
+        (8192, 8000, 8000),
+        (1032, 2048, 2048),
+    ],
+)
 def test_multimodal_example_max_length(
     example_common, monkeypatch, tmp_path, model_type, user_prompt, package_max, explicit_max, expected
 ):
@@ -431,9 +473,19 @@ def test_multimodal_example_max_length(
     }.items():
         monkeypatch.setitem(main.__globals__, name, Mock(return_value=result))
     args = Namespace(
-        model_path=str(tmp_path), execution_provider="cpu", ep_path=None, use_winml=False,
-        user_prompt=user_prompt, system_prompt="system", debug=False, verbose=False,
-        response_format="", timings=False, non_interactive=True, image_paths=[], audio_paths=[],
+        model_path=str(tmp_path),
+        execution_provider="cpu",
+        ep_path=None,
+        use_winml=False,
+        user_prompt=user_prompt,
+        system_prompt="system",
+        debug=False,
+        verbose=False,
+        response_format="",
+        timings=False,
+        non_interactive=True,
+        image_paths=[],
+        audio_paths=[],
     )
     if explicit_max is not None:
         args.max_length = explicit_max
@@ -449,7 +501,7 @@ def test_exported_chat_template_preserves_task(
     model_factory, images, tmp_path, monkeypatch, example_common, structured, prompt
 ):
     monkeypatch.syspath_prepend(str(Path(__file__).parents[3] / "src/python/py/models"))
-    from builders.nemotron_parse import NemotronParseModel
+    from builders.nemotron_parse import NemotronParseModel  # noqa: PLC0415
 
     model = model_factory()
     package_dir = tmp_path / "model_8_None"
@@ -567,10 +619,10 @@ def test_in_place_cache_across_multiple_steps(model_factory, images, tmp_path, p
         generator.set_runtime_option("enable_profiling", "0")
         consumed = generator.get_sequence(0)[:-1]
         expected_mask = np.zeros((1, CONTEXT_LENGTH), dtype=np.int64)
-        expected_mask[:, :len(consumed)] = 1
+        expected_mask[:, : len(consumed)] = 1
         np.testing.assert_array_equal(generator.get_input("decoder_attention_mask"), expected_mask)
         expected = np.zeros((1, 1, CONTEXT_LENGTH, 1), dtype=cache_dtype)
-        expected[0, 0, :len(consumed), 0] = consumed
+        expected[0, 0, : len(consumed), 0] = consumed
         for kind in ("key", "value"):
             np.testing.assert_array_equal(generator.get_output(f"present.0.{kind}"), expected)
             np.testing.assert_array_equal(generator.get_input(f"past_key_values.0.{kind}"), expected)
@@ -578,9 +630,10 @@ def test_in_place_cache_across_multiple_steps(model_factory, images, tmp_path, p
     profiles = list(tmp_path.glob("cache_run*.json"))
     assert profiles, "No profile was written for cache validation"
     scatter_events = [
-        event for path in profiles for event in json.loads(path.read_text())
-        if event.get("args", {}).get("op_name") == "TensorScatter"
-        and event.get("args", {}).get("provider")
+        event
+        for path in profiles
+        for event in json.loads(path.read_text())
+        if event.get("args", {}).get("op_name") == "TensorScatter" and event.get("args", {}).get("provider")
     ]
     assert len(scatter_events) == 12, "Expected key/value TensorScatter kernels for all six steps"
     expected_provider = "CUDAExecutionProvider" if provider == "cuda" else "CPUExecutionProvider"
@@ -588,10 +641,14 @@ def test_in_place_cache_across_multiple_steps(model_factory, images, tmp_path, p
 
 
 @pytest.mark.parametrize("height,width", [(1, 1), (2, 2), (7, 3), (3, 7)])
-@pytest.mark.parametrize("normalization", [
-    DEFAULT_NORMALIZATION,
-    {"image_mean": [0.1, 0.2, 0.3], "image_std": [0.5, 0.75, 1.0]},
-], ids=["checkpoint", "configured"])
+@pytest.mark.parametrize(
+    "normalization",
+    [
+        DEFAULT_NORMALIZATION,
+        {"image_mean": [0.1, 0.2, 0.3], "image_std": [0.5, 0.75, 1.0]},
+    ],
+    ids=["checkpoint", "configured"],
+)
 def test_pixels_match_checkpoint_resize_pad_normalize(model_factory, tmp_path, height, width, normalization):
     cv2 = pytest.importorskip("cv2")
     image_module = pytest.importorskip("PIL.Image")
@@ -610,7 +667,7 @@ def test_pixels_match_checkpoint_resize_pad_normalize(model_factory, tmp_path, h
     resized = cv2.resize(pixels, (resized_w, resized_h), interpolation=cv2.INTER_LINEAR)
     canvas = np.full((2, 2, 3), 255, dtype=np.uint8)
     top, left = (2 - resized_h) // 2, (2 - resized_w) // 2
-    canvas[top:top + resized_h, left:left + resized_w] = resized
+    canvas[top : top + resized_h, left : left + resized_w] = resized
     mean = np.array(normalization["image_mean"], dtype=np.float32)
     std = np.array(normalization["image_std"], dtype=np.float32)
     expected = ((canvas.astype(np.float32) / 255 - mean) / std).transpose(2, 0, 1)[None]
@@ -618,14 +675,23 @@ def test_pixels_match_checkpoint_resize_pad_normalize(model_factory, tmp_path, h
     np.testing.assert_allclose(actual, expected, rtol=0, atol=1.1 / (255 * std.min()))
 
 
-@pytest.mark.parametrize("field,value", [
-    ("image_mean", None), ("image_std", None),
-    ("image_mean", []), ("image_mean", [0.1, 0.2]),
-    ("image_std", [1, 1, 1, 1]), ("image_std", [1, 0, 1]),
-    ("image_std", [1, -1, 1]), ("image_std", [1, 1e-50, 1]),
-    ("image_mean", [1e100, 0, 0]), ("image_std", [1, "invalid", 1]),
-    ("image_mean", 0.5), ("image_std", True),
-])
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("image_mean", None),
+        ("image_std", None),
+        ("image_mean", []),
+        ("image_mean", [0.1, 0.2]),
+        ("image_std", [1, 1, 1, 1]),
+        ("image_std", [1, 0, 1]),
+        ("image_std", [1, -1, 1]),
+        ("image_std", [1, 1e-50, 1]),
+        ("image_mean", [1e100, 0, 0]),
+        ("image_std", [1, "invalid", 1]),
+        ("image_mean", 0.5),
+        ("image_std", True),
+    ],
+)
 def test_rejects_invalid_normalization_config(model_factory, field, value):
     normalization = dict(DEFAULT_NORMALIZATION)
     if value is None:

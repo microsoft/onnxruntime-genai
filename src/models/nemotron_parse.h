@@ -7,8 +7,8 @@
 namespace Generators {
 
 void ValidateNemotronParsePromptLength(size_t prompt_length,
-                                     int64_t required_prompt_length,
-                                     int context_length);
+                                       int64_t required_prompt_length,
+                                       int context_length);
 
 struct NemotronParseModel : Model {
   NemotronParseModel(std::unique_ptr<Config> config, OrtEnv& ort_env);

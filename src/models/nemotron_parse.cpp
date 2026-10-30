@@ -15,13 +15,14 @@
 namespace Generators {
 
 void ValidateNemotronParsePromptLength(size_t prompt_length,
-                                     int64_t required_prompt_length,
-                                     int context_length) {
+                                       int64_t required_prompt_length,
+                                       int context_length) {
   if (prompt_length == 0 || prompt_length >= static_cast<size_t>(context_length)) {
     throw std::runtime_error(
         "Nemotron Parse prompt has " + std::to_string(prompt_length) +
         " tokens including special tokens; it must be non-empty and shorter "
-        "than context_length=" + std::to_string(context_length) +
+        "than context_length=" +
+        std::to_string(context_length) +
         " to leave room for generation.");
   }
   if (required_prompt_length > 0 &&
@@ -29,7 +30,8 @@ void ValidateNemotronParsePromptLength(size_t prompt_length,
     throw std::runtime_error(
         "Nemotron Parse prompt has " + std::to_string(prompt_length) +
         " tokens including special tokens, but the fixed prefill session "
-        "requires exactly " + std::to_string(required_prompt_length) +
+        "requires exactly " +
+        std::to_string(required_prompt_length) +
         ". Shorter prompts are not padded and longer prompts are not truncated. "
         "Export a decoder with a dynamic sequence dimension to support other prompt lengths.");
   }
@@ -368,7 +370,7 @@ NemotronParseModel::NemotronParseModel(std::unique_ptr<Config> config,
     // Preserve static default-prompt and Q=1 decode performance. Custom prompts
     // use an eagerly created dynamic session; no sessions are built during Run.
     const auto create_prefill_options = [&](int min_length, int opt_length, int max_length,
-                                             bool disable_graph_capture) {
+                                            bool disable_graph_capture) {
       auto options = OrtSessionOptions::Create();
       auto session_config = decoder.session_options;
       // Replace the package's decode profile before provider setup, preserving other options.

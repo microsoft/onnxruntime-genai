@@ -211,7 +211,7 @@ bool ParseArgs(
   app.add_option("--ep_path", ep_path, "Path to execution provider DLL/SO for plug-in providers (ex: onnxruntime_providers_cuda.dll or onnxruntime_providers_tensorrt.dll)");
   app.add_option("--system_prompt", system_prompt, "System prompt to use for the model.");
   auto* user_prompt_option = app.add_option("--user_prompt", user_prompt,
-                 "User prompt. Multimodal examples choose a default for the model type when omitted. Model prompt restrictions apply.");
+                                            "User prompt. Multimodal examples choose a default for the model type when omitted. Model prompt restrictions apply.");
   app.add_flag("--rewind", rewind, "Rewind to the system prompt after each generation. Defaults to false. Only used in model_chat.");
   app.add_flag_callback(
       "--non_interactive", [&] { interactive = false; }, "Disable interactive mode");

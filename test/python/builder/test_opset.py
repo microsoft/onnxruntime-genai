@@ -10,10 +10,9 @@ import onnx
 import onnx_ir as ir
 import onnxruntime as ort
 import pytest
+from _builder_test_utils import load_builder_module
 from onnx import TensorProto, helper, numpy_helper
 from transformers import LlamaConfig
-
-from _builder_test_utils import load_builder_module
 
 base = load_builder_module("base")
 BlockDrafterBuilder = load_builder_module("block_drafter").BlockDrafterBuilder
@@ -138,7 +137,9 @@ def _run(model, inputs):
     options = ort.SessionOptions()
     options.intra_op_num_threads = 1
     options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
-    return ort.InferenceSession(model.SerializeToString(), options, providers=["CPUExecutionProvider"]).run(None, inputs)
+    return ort.InferenceSession(model.SerializeToString(), options, providers=["CPUExecutionProvider"]).run(
+        None, inputs
+    )
 
 
 def _compare_with_previous_opsets(model, inputs):
@@ -171,7 +172,9 @@ def test_shape_cast_topk_and_control_flow_match_previous_opsets(condition, graph
         helper.make_node("Transpose", ["restored"], ["transposed"], perm=[1, 0]),
         helper.make_node("Shape", ["transposed"], ["transposed_shape"]),
         helper.make_node(
-            "ConstantOfShape", ["transposed_shape"], ["offset"],
+            "ConstantOfShape",
+            ["transposed_shape"],
+            ["offset"],
             value=numpy_helper.from_array(np.array([0.25], dtype=np.float32)),
         ),
         helper.make_node("Add", ["transposed", "offset"], ["shifted"]),
@@ -199,8 +202,10 @@ def test_shape_cast_topk_and_control_flow_match_previous_opsets(condition, graph
         ],
     )
     model = helper.make_model(
-        graph, opset_imports=[helper.make_opsetid("", graph_attrs["ai.onnx"])],
-        ir_version=graph_attrs["ir_version"], producer_name=graph_attrs["producer_name"],
+        graph,
+        opset_imports=[helper.make_opsetid("", graph_attrs["ai.onnx"])],
+        ir_version=graph_attrs["ir_version"],
+        producer_name=graph_attrs["producer_name"],
     )
     _compare_with_previous_opsets(
         model,
@@ -233,8 +238,10 @@ def test_qdq_default_dtypes_and_values_match_previous_opsets(dtype, blocked, gra
         [numpy_helper.from_array(scales, "scale"), numpy_helper.from_array(zeros, "zero")],
     )
     model = helper.make_model(
-        graph, opset_imports=[helper.make_opsetid("", graph_attrs["ai.onnx"])],
-        ir_version=graph_attrs["ir_version"], producer_name=graph_attrs["producer_name"],
+        graph,
+        opset_imports=[helper.make_opsetid("", graph_attrs["ai.onnx"])],
+        ir_version=graph_attrs["ir_version"],
+        producer_name=graph_attrs["producer_name"],
     )
     _compare_with_previous_opsets(
         model,
