@@ -462,6 +462,7 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   PlaneBuffer d_dflash_prompt_;
   size_t dflash_prompt_rows_{};
   size_t dflash_prompt_position_{};
+  bool dflash_ingested_in_turn_{false};
   static constexpr size_t kDflashWidth = 12800;
 
   // host state
