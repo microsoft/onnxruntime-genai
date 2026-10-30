@@ -43,6 +43,10 @@ FixedStateGeometry ValidateFixedStateGeometry(std::string_view input_name,
                                               ONNXTensorElementDataType output_type,
                                               std::span<const int64_t> output_shape);
 
+// Checks the byte-copy widths supported by compact replay on every execution provider.
+void ValidateFixedStateUpdateElementSize(
+    Config::Model::Decoder::StateUpdateKind kind, size_t element_size);
+
 enum class FixedStateSlotOwnership {
   Free,
   Reserved,
@@ -234,6 +238,7 @@ class FixedStateReservation {
 
 class FixedStatePool {
  public:
+  static size_t StateBankBytes(const Model& model, size_t capacity);
   FixedStatePool(std::shared_ptr<Model> model, size_t capacity,
                  size_t prefix_checkpoint_capacity = 0);
   ~FixedStatePool();
