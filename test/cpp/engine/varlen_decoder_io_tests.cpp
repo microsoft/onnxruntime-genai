@@ -13,10 +13,81 @@
 #include "engine/step_plan.h"
 #include "engine_test_doubles.h"
 #include "engine_test_helpers.h"
+#include "models/io/rotary_position_history.h"
 
 namespace Generators {
 namespace test {
 namespace {
+
+TEST(RotaryPositionHistoryTest, RetainsPromptCoordinatesAndForecastsGeneratedTokens) {
+  RotaryPositionHistory history{1, 8};
+  const std::array<int64_t, 9> prompt{0, 1, 1, 0, 2, 2, 0, 1, 4};
+  history.Update(prompt, 0, 3);
+  const auto values = history.Values();
+  EXPECT_EQ(values[1], 1);
+  EXPECT_EQ(values[8 + 1], 2);
+  EXPECT_EQ(values[16 + 2], 4);
+  for (size_t plane = 0; plane < 3; ++plane) {
+    for (size_t token = 3; token < 8; ++token)
+      EXPECT_EQ(values[plane * 8 + token], static_cast<int64_t>(token + 2));
+  }
+  const std::array<int64_t, 3> decode{5, 5, 5};
+  history.Update(decode, 3, 1);
+  EXPECT_EQ(values[16 + 2], 4);
+  EXPECT_EQ(values[8 + 4], 6);
+  history.Forecast(2);
+  EXPECT_EQ(values[2], 3);
+  EXPECT_EQ(values[8 + 2], 3);
+  EXPECT_EQ(values[16 + 2], 3);
+  history.Forecast(0);
+  for (size_t plane = 0; plane < 3; ++plane)
+    EXPECT_EQ(values[plane * 8 + 7], 7);
+}
+
+TEST(RotaryPositionHistoryTest, ExpandsEachPromptRowAcrossItsBeams) {
+  RotaryPositionHistory history{4, 4};
+  const std::array<int64_t, 12> prompt{0, 1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6};
+  history.Update(prompt, 0, 2, 2);
+  for (size_t plane = 0; plane < 3; ++plane) {
+    EXPECT_EQ(history.Values()[(plane * 4 + 0) * 4 + 1], prompt[plane * 4 + 1]);
+    EXPECT_EQ(history.Values()[(plane * 4 + 1) * 4 + 1], prompt[plane * 4 + 1]);
+    EXPECT_EQ(history.Values()[(plane * 4 + 2) * 4 + 1], prompt[plane * 4 + 3]);
+    EXPECT_EQ(history.Values()[(plane * 4 + 3) * 4 + 1], prompt[plane * 4 + 3]);
+  }
+}
+
+TEST(RotaryPositionHistoryTest, MtpCopiesBothRowsAndFutureCoordinatesWithoutAliasing) {
+  RotaryPositionHistory main{2, 8};
+  RotaryPositionHistory head{2, 6};
+  const std::array<int64_t, 12> prompt{0, 1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6};
+  main.Update(prompt, 0, 2);
+  head.CopyFrom(main.Values(), 8);
+  for (size_t row = 0; row < 6; ++row)
+    for (size_t token = 0; token < 6; ++token)
+      EXPECT_EQ(head.Values()[row * 6 + token], main.Values()[row * 8 + token]);
+  const auto old = head.Values()[0];
+  main.Values()[0] = 42;
+  EXPECT_EQ(head.Values()[0], old);
+}
+
+TEST(RotaryPositionHistoryTest, RejectsMalformedOrOutOfCapacityCoordinates) {
+  EXPECT_THROW((RotaryPositionHistory{0, 4}), std::runtime_error);
+  RotaryPositionHistory history{1, 4};
+  EXPECT_THROW(history.Update(std::array<int64_t, 3>{0, 0, 0}, 4, 1), std::runtime_error);
+  EXPECT_THROW(history.Update(std::array<int64_t, 3>{0, -1, 0}, 0, 1), std::runtime_error);
+  EXPECT_THROW(history.Update(std::array<int64_t, 3>{0, 0, 0}, 0, 1, 2), std::runtime_error);
+  EXPECT_THROW(history.CopyFrom(std::array<int64_t, 3>{0, 0, 0}, 1), std::runtime_error);
+  EXPECT_THROW(history.Forecast(5), std::runtime_error);
+}
+
+TEST(RotaryPositionHistoryTest, PadsUnusedForecastRowsWithinTheRotaryTable) {
+  RotaryPositionHistory history{1, 8, 7};
+  history.Update(std::array<int64_t, 3>{4, 5, 6}, 0, 1);
+  for (size_t plane = 0; plane < 3; ++plane)
+    for (size_t token = 1; token < 8; ++token)
+      EXPECT_EQ(history.Values()[plane * 8 + token], 7);
+  EXPECT_THROW(history.Update(std::array<int64_t, 3>{8, 8, 8}, 1, 1), std::runtime_error);
+}
 
 TEST(VarlenDecoderIOTest, PackedHybridPositionIdsAcceptTokenVectorOrMropeMatrix) {
   EXPECT_NO_THROW(ValidatePackedPositionIdsInput(
@@ -51,6 +122,20 @@ TEST(VarlenDecoderIOTest, PackedHybridPositionIdsAcceptTokenVectorOrMropeMatrix)
   EXPECT_THROW(ValidatePackedPositionIdsInput(
                    ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64,
                    std::array<int64_t, 1>{0}),
+               std::runtime_error);
+}
+
+TEST(VarlenDecoderIOTest, PackedHiddenStatesUseExportedInputWidth) {
+  EXPECT_NO_THROW(ValidatePackedHiddenStatesInputShape(
+      std::array<int64_t, 2>{3, 10240}, 3,
+      std::array<int64_t, 2>{-1, 10240}));
+  EXPECT_THROW(ValidatePackedHiddenStatesInputShape(
+                   std::array<int64_t, 2>{3, 2560}, 3,
+                   std::array<int64_t, 2>{-1, 10240}),
+               std::runtime_error);
+  EXPECT_THROW(ValidatePackedHiddenStatesInputShape(
+                   std::array<int64_t, 2>{2, 10240}, 3,
+                   std::array<int64_t, 2>{-1, 10240}),
                std::runtime_error);
 }
 
@@ -367,6 +452,24 @@ TEST(VarlenDecoderIOTest, GraphIdSeparatesEveryCapturedShape) {
   EXPECT_EQ(ids.size(), 5u);
 }
 
+TEST(VarlenDecoderIOTest, GraphIdSeparatesMtpScratchBanksFromCommittedState) {
+  GraphAnnotationIds ids;
+  const auto committed = DecodeGraphKey(1, 1, 8, 3);
+  const auto first_bank = DecodeGraphKey(1, 1, 8, 3, 1);
+  const auto second_bank = DecodeGraphKey(1, 1, 8, 3, 2);
+  ASSERT_TRUE(committed.has_value());
+  ASSERT_TRUE(first_bank.has_value());
+  ASSERT_TRUE(second_bank.has_value());
+  const int committed_id = ids.Id(*committed);
+  const int first_id = ids.Id(*first_bank);
+  const int second_id = ids.Id(*second_bank);
+  EXPECT_NE(committed_id, first_id);
+  EXPECT_NE(committed_id, second_id);
+  EXPECT_NE(first_id, second_id);
+  EXPECT_EQ(ids.Id(*DecodeGraphKey(1, 1, 8, 3, 1)), first_id);
+  EXPECT_EQ(ids.Id(*DecodeGraphKey(1, 1, 8, 3, 2)), second_id);
+}
+
 TEST(VarlenDecoderIOTest, GraphIdIsStableForARepeatedShape) {
   GraphAnnotationIds ids;
   const auto key = DecodeGraphKey(/*batch_size=*/2, /*tokens_per_request=*/8,
@@ -485,6 +588,21 @@ TEST(VarlenDecoderIOTest, PacksMetadataInOperatorContractOrder) {
   EXPECT_EQ(packed[0], 3);
   EXPECT_EQ(packed[1], 513);
   EXPECT_EQ(packed[2], 257);
+}
+
+TEST(VarlenDecoderIOTest, PacksSelectedOnlySparseMetadataInOperatorContractOrder) {
+  AttentionMetadataValues metadata;
+  metadata.max_query_len_bound = 3;
+  metadata.max_kv_len_bound = 513;
+  metadata.max_kv_len_lower_bound = 257;
+  const auto packed = PackSparseAttentionMetadata(metadata);
+
+  static_assert(packed.size() == kSparseAttentionMetadataElementCount);
+  EXPECT_EQ(packed[0], 3);
+  EXPECT_EQ(packed[1], 0);
+  EXPECT_EQ(packed[2], 513);
+  EXPECT_EQ(packed[3], 0);
+  EXPECT_EQ(packed[4], 513);
 }
 
 TEST(VarlenDecoderIOTest, RejectsZeroSizedGraphBounds) {

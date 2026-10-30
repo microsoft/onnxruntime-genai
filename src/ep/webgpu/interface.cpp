@@ -248,7 +248,9 @@ struct InterfaceImpl : DeviceInterface {
         return descriptor.decay.SameBufferAs(descriptor.key) &&
                descriptor.decay.SameBufferAs(descriptor.delta);
       }
-      if (descriptor.kind != StateUpdateReplayKind::CausalConv) {
+      if (descriptor.kind != StateUpdateReplayKind::CausalConv &&
+          descriptor.kind != StateUpdateReplayKind::Snapshot &&
+          descriptor.kind != StateUpdateReplayKind::Indexer) {
         throw std::invalid_argument("Unsupported WebGPU state replay kind.");
       }
       return false;
@@ -450,6 +452,13 @@ struct InterfaceImpl : DeviceInterface {
           source.kept_count,
           source.element_size,
           source.kind,
+          stage_view(source.source_aux_state),
+          stage_view(source.destination_aux_state, true),
+          stage_view(source.source_lengths),
+          stage_view(source.destination_lengths, true),
+          source.state_capacity,
+          source.aux_capacity,
+          source.compress_ratio,
       });
     }
     ReplayStateUpdatesOnCpu(staged.data(), staged.size());

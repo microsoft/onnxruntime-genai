@@ -5,8 +5,10 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "model.h"
@@ -14,12 +16,16 @@
 #include "models/io/multi_modal_features.h"
 #include "models/io/embeddings.h"
 #include "models/io/extra_inputs.h"
+#include "models/io/hidden_states.h"
 #include "models/io/logits.h"
+#include "models/io/indexer_cache.h"
+#include "models/io/ple_state.h"
 #include "io/kv_cache.h"
 #include "models/io/position_inputs.h"
 #include "model_type.h"
 #include "models/io/recurrent_state.h"
 #include "models/lfm2_audio_output.h"
+#include "engram.h"
 
 namespace Generators {
 
@@ -33,11 +39,13 @@ struct MultiModalLanguageModel : Model {
   std::unique_ptr<OrtSession> vision_session_;     // pixel_values, [image_attention_mask], image_sizes -> image_features
   std::unique_ptr<OrtSession> speech_session_;     // audio_embeds, audio_sizes, audio_projection_mode -> audio_features
   std::unique_ptr<OrtSession> embedding_session_;  // input_ids, image_features, audio_features -> inputs_embeds
+  std::unique_ptr<OrtSession> engram_session_;     // input_ids, token history -> engram_embeddings
   std::unique_ptr<OrtSession> decoder_session_;    // inputs_embeds, attention_mask, kv_cache -> logits
 
   std::unique_ptr<OrtSessionOptions> vision_session_options_;
   std::unique_ptr<OrtSessionOptions> speech_session_options_;
   std::unique_ptr<OrtSessionOptions> embedding_session_options_;
+  std::unique_ptr<OrtSessionOptions> engram_session_options_;
 
   // LFM2-Audio speech output, present when model.audio_output names the two graphs.
   std::unique_ptr<OrtSession> depthformer_session_;      // hidden_states -> one audio code per run, a frame in num_codebooks runs
@@ -168,6 +176,19 @@ struct DecoderState : State {
   DecoderState& operator=(const DecoderState&) = delete;
 
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
+  void RewindTo(size_t index) override;
+  void ValidateRewindTo(size_t index) const override;
+  void SnapshotState(size_t position) override;
+  OrtValue* GetRotaryPositionIds() override { return position_inputs_->GetRotaryPositionIds(); }
+  void SetRotaryPositionIds(OrtValue* positions) override { position_inputs_->SetRotaryPositionIds(positions); }
+  bool HasCroppableRecurrentState() const override;
+  bool CropRequiresSnapshot() const override {
+    return (recurrent_state_ && recurrent_state_->CropRequiresSnapshot()) ||
+           (indexer_cache_ && indexer_cache_->HasStateUpdates());
+  }
+  int64_t RecurrentStateWindow() const override;
+  void CropToAccepted(size_t new_length, size_t recurrent_position) override;
+  void ValidateCropToAccepted(size_t new_length, size_t recurrent_position) const override;
   void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int current_length, DeviceSpan<int32_t> beam_indices);
 
   // Prefill chunking (see search.chunk_size). The embedding model still runs once over the whole
@@ -176,7 +197,8 @@ struct DecoderState : State {
   bool SupportsPrefillChunking(bool has_multimodal_content) const;
   void PrepareEmbeddingsForPrefill(size_t new_length);
   DeviceSpan<float> RunPrefillWithChunking(int current_length, DeviceSpan<int32_t>& next_tokens,
-                                           DeviceSpan<int32_t> next_indices, size_t chunk_size);
+                                           DeviceSpan<int32_t> next_indices, size_t chunk_size,
+                                           EngramState* engram_state);
 
  private:
   friend struct MultiModalPipelineState;
@@ -187,11 +209,15 @@ struct DecoderState : State {
   Embeddings inputs_embeds_{*this, Embeddings::Mode::Input,  // Model input
                             model_.config_->model.decoder.inputs.embeddings};
   std::unique_ptr<Embeddings> per_layer_inputs_;        // Optional model input (Gemma4: per-layer conditioning)
+  std::unique_ptr<Embeddings> engram_embeddings_;       // Optional CPU Engram output staged on CUDA
   std::unique_ptr<DefaultInputIDs> decoder_input_ids_;  // Optional model input (e.g., Gemma4 decoder needs input_ids)
   std::unique_ptr<PositionInputs> position_inputs_;     // Model input
   std::unique_ptr<KeyValueCache> kv_cache_;             // Model input
   std::unique_ptr<RecurrentState> recurrent_state_;     // Model input (for hybrid models)
-  Logits logits_{*this};                                // Model output
+  std::unique_ptr<PleState> ple_state_;                 // Model input (Qwen4-Exp PLE)
+  std::unique_ptr<IndexerCache> indexer_cache_;         // Model input (Qwen4-Exp QSA)
+  std::unique_ptr<HiddenStatesOutputs> hidden_states_output_;
+  Logits logits_{*this};  // Model output
 };
 
 struct MultiModalPipelineState : State {
@@ -204,6 +230,18 @@ struct MultiModalPipelineState : State {
 
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens,
                         DeviceSpan<int32_t> next_indices) override;
+  void RewindTo(size_t index) override;
+  void ValidateRewindTo(size_t index) const override;
+  void SnapshotState(size_t position) override;
+  OrtValue* GetRotaryPositionIds() override { return decoder_state_->GetRotaryPositionIds(); }
+  void SetRotaryPositionIds(OrtValue* positions) override { decoder_state_->SetRotaryPositionIds(positions); }
+  bool HasCroppableRecurrentState() const override;
+  bool CropRequiresSnapshot() const override {
+    return decoder_state_->CropRequiresSnapshot() || engram_state_ != nullptr;
+  }
+  int64_t RecurrentStateWindow() const override;
+  void CropToAccepted(size_t new_length, size_t recurrent_position) override;
+  void ValidateCropToAccepted(size_t new_length, size_t recurrent_position) const override;
 
   OrtValue* GetInput(const char* name) override;
 
@@ -222,6 +260,7 @@ struct MultiModalPipelineState : State {
   std::unique_ptr<VisionState> vision_state_;
   std::unique_ptr<SpeechState> speech_state_;
   std::unique_ptr<EmbeddingState> embedding_state_;
+  std::unique_ptr<EngramState> engram_state_;
   std::unique_ptr<DecoderState> decoder_state_;
   std::unique_ptr<Lfm2AudioOutput> audio_output_;  // LFM2-Audio speech output, when the model has it
   std::shared_ptr<Adapters> adapters_;

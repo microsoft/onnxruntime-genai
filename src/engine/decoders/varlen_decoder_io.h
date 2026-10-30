@@ -20,11 +20,16 @@ struct AttentionMetadataValues {
 };
 
 inline constexpr size_t kAttentionMetadataElementCount = 3;
+inline constexpr size_t kSparseAttentionMetadataElementCount = 5;
 
 void ValidatePackedPositionIdsInput(
     ONNXTensorElementDataType data_type,
     std::span<const int64_t> shape,
     std::span<const char* const> symbolic_shape = {});
+void ValidatePackedHiddenStatesInputShape(
+    std::span<const int64_t> shape,
+    size_t scheduled_token_rows,
+    std::span<const int64_t> model_shape);
 
 AttentionMetadataValues GetAttentionMetadataForPlan(const StepPlan& plan);
 // `max_query_len` is the number of new tokens every sequence contributes to steps served by this
@@ -36,6 +41,8 @@ AttentionMetadataValues GetAttentionMetadataForGraphStep(
 AttentionMetadataValues GetAttentionMetadataForGraphStep(
     const StepPlan& plan, size_t block_table_columns, size_t block_size);
 std::array<int32_t, kAttentionMetadataElementCount> PackAttentionMetadata(
+    const AttentionMetadataValues& metadata);
+std::array<int32_t, kSparseAttentionMetadataElementCount> PackSparseAttentionMetadata(
     const AttentionMetadataValues& metadata);
 
 // Packed token rows whose logits the Engine consumes, ordered exactly as ProcessLogits returns
@@ -64,10 +71,15 @@ size_t VarlenGraphBufferBytes(const Model& model, size_t position_planes,
 // captured. Every component changes something the captured launches bake in: tensor shapes come
 // from the batch and the per-request token count, grid dimensions from the block-table width, and
 // the device addresses of the fixed decoder state from its binding layout. `state_binding_key` is
-// zero for models without fixed decoder state.
+// zero for models without fixed decoder state. Session, IndexShare mode, and the owner's persistent
+// extra-binding layout each occupy their own exact component, never a combined pointer hash.
 std::optional<GraphAnnotationIds::Key> DecodeGraphKey(size_t batch_size, size_t tokens_per_request,
                                                       size_t block_table_columns,
-                                                      size_t state_binding_key);
+                                                      size_t state_binding_key,
+                                                      size_t state_binding_domain = 0,
+                                                      const OrtSession* decoder_session = nullptr,
+                                                      bool indexshare_decode = false,
+                                                      size_t extra_binding_layout_key = 0);
 
 /**
  * @struct VarlenGraphBuffers
@@ -91,9 +103,12 @@ struct VarlenGraphBuffers {
 
   // Annotation id for a decode step of this shape, or -1 when it cannot be captured.
   int GraphId(size_t batch_size, size_t tokens_per_request, size_t block_table_columns,
-              size_t state_binding_key) {
-    const auto key =
-        DecodeGraphKey(batch_size, tokens_per_request, block_table_columns, state_binding_key);
+              size_t state_binding_key, size_t state_binding_domain = 0,
+              const OrtSession* decoder_session = nullptr, bool indexshare_decode = false,
+              size_t extra_binding_layout_key = 0) {
+    const auto key = DecodeGraphKey(batch_size, tokens_per_request, block_table_columns,
+                                    state_binding_key, state_binding_domain, decoder_session,
+                                    indexshare_decode, extra_binding_layout_key);
     return key ? graph_ids.Id(*key) : -1;
   }
 
@@ -104,10 +119,13 @@ struct VarlenGraphBuffers {
 
   std::unique_ptr<Tensor> input_ids;
   std::unique_ptr<Tensor> embeddings;
+  std::unique_ptr<Tensor> engram_embeddings;
+  std::unique_ptr<Tensor> engram_present_tokens;
   std::unique_ptr<Tensor> cumulative_sequence_lengths;
   std::unique_ptr<Tensor> past_sequence_lengths;
   // Null unless the model consumes packed position_ids.
   std::unique_ptr<Tensor> position_ids;
+  std::unique_ptr<Tensor> rotary_position_ids;
   // Null unless the model gathers selected packed rows before its LM head.
   std::unique_ptr<Tensor> logits_indices;
   std::unique_ptr<Tensor> logits;
@@ -168,6 +186,7 @@ struct VarlenDecoderIO : DecoderIO {
  private:
   void PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
   void PreparePositionIds(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
+  void PrepareRotaryPositionIds(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
   void PrepareAttentionMetadata(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
   void PrepareHiddenStatesInput(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
   void PrepareLogitsIndices(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
