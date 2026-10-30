@@ -55,6 +55,8 @@ if((USE_CUDA OR USE_TRT_RTX) AND CMAKE_CUDA_COMPILER)
     "${GENERATORS_ROOT}/ep/cuda/*.h"
     "${GENERATORS_ROOT}/ep/cuda/*.cu"
     "${GENERATORS_ROOT}/ep/cuda/*.cuh"
+    "${GENERATORS_ROOT}/qwen38_plane/*.cu"
+    "${GENERATORS_ROOT}/qwen38_plane/*.h"
   )
 
   # session_options.{h,cpp} are plain C++ (no CUDA kernels) and belong in the
