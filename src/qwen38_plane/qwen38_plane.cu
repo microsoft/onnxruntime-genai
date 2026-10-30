@@ -157,13 +157,21 @@ __global__ void k_prep_staged(const PleParams* P, i64 tok, i64 pos, i64 s_c1, co
     const int j = tid + u * blockDim.x;
     b[u] = (j < total) ? fp8_row[j] : 0;
   }
+  const float scale = P->scale;
+  const bool is_int8 = (scale < 0.0f);
+  const float abs_scale = is_int8 ? -scale : scale;
 #pragma unroll
   for (int u = 0; u < 3; ++u) {
     const int j = tid + u * blockDim.x;
     if (j < total) {
-      const __half_raw hr = __nv_cvt_fp8_to_halfraw(b[u], __NV_E4M3);
-      const float f = __half2float(*reinterpret_cast<const __half*>(&hr));
-      ple_out[j] = __float2bfloat16_rn(f * P->scale);
+      float f;
+      if (is_int8) {
+        f = static_cast<float>(static_cast<signed char>(b[u]));
+      } else {
+        const __half_raw hr = __nv_cvt_fp8_to_halfraw(b[u], __NV_E4M3);
+        f = __half2float(*reinterpret_cast<const __half*>(&hr));
+      }
+      ple_out[j] = __float2bfloat16_rn(f * abs_scale);
     }
   }
   if (tid == 0) {
@@ -186,13 +194,21 @@ __global__ void k_ple_rows_staged(const PleParams* P, const unsigned char* fp8_r
     const int j = tid + u * blockDim.x;
     b[u] = (j < total) ? src[j] : 0;
   }
+  const float scale = P->scale;
+  const bool is_int8 = (scale < 0.0f);
+  const float abs_scale = is_int8 ? -scale : scale;
 #pragma unroll
   for (int u = 0; u < 3; ++u) {
     const int j = tid + u * blockDim.x;
     if (j < total) {
-      const __half_raw hr = __nv_cvt_fp8_to_halfraw(b[u], __NV_E4M3);
-      const float f = __half2float(*reinterpret_cast<const __half*>(&hr));
-      out[j] = __float2bfloat16_rn(f * P->scale);
+      float f;
+      if (is_int8) {
+        f = static_cast<float>(static_cast<signed char>(b[u]));
+      } else {
+        const __half_raw hr = __nv_cvt_fp8_to_halfraw(b[u], __NV_E4M3);
+        f = __half2float(*reinterpret_cast<const __half*>(&hr));
+      }
+      out[j] = __float2bfloat16_rn(f * abs_scale);
     }
   }
   if (i == n - 1 && tid == 0) {
@@ -261,13 +277,21 @@ __global__ void k_prep(const PleParams* P, const i64* tok_ptr, const i64* pos_pt
       b[u] = s_src[h][s_row[h] * hd + c];
     }
   }
+  const float scale = P->scale;
+  const bool is_int8 = (scale < 0.0f);
+  const float abs_scale = is_int8 ? -scale : scale;
 #pragma unroll
   for (int u = 0; u < 3; ++u) {
     const int j = tid + u * blockDim.x;
     if (j < total) {
-      const __half_raw hr = __nv_cvt_fp8_to_halfraw(b[u], __NV_E4M3);
-      const float f = __half2float(*reinterpret_cast<const __half*>(&hr));
-      ple_out[j] = __float2bfloat16_rn(f * P->scale);
+      float f;
+      if (is_int8) {
+        f = static_cast<float>(static_cast<signed char>(b[u]));
+      } else {
+        const __half_raw hr = __nv_cvt_fp8_to_halfraw(b[u], __NV_E4M3);
+        f = __half2float(*reinterpret_cast<const __half*>(&hr));
+      }
+      ple_out[j] = __float2bfloat16_rn(f * abs_scale);
     }
   }
   if (tid == 0) {
@@ -462,13 +486,21 @@ __global__ void k_ple_rows(const PleParams* P, const i64* tokens, int n, const i
       b[u] = s_src[h][s_row[h] * hd + c];
     }
   }
+  const float scale = P->scale;
+  const bool is_int8 = (scale < 0.0f);
+  const float abs_scale = is_int8 ? -scale : scale;
 #pragma unroll
   for (int u = 0; u < 3; ++u) {
     const int j = tid + u * blockDim.x;
     if (j < total) {
-      const __half_raw hr = __nv_cvt_fp8_to_halfraw(b[u], __NV_E4M3);
-      const float f = __half2float(*reinterpret_cast<const __half*>(&hr));
-      out[j] = __float2bfloat16_rn(f * P->scale);
+      float f;
+      if (is_int8) {
+        f = static_cast<float>(static_cast<signed char>(b[u]));
+      } else {
+        const __half_raw hr = __nv_cvt_fp8_to_halfraw(b[u], __NV_E4M3);
+        f = __half2float(*reinterpret_cast<const __half*>(&hr));
+      }
+      out[j] = __float2bfloat16_rn(f * abs_scale);
     }
   }
   if (i == n - 1 && tid == 0) {
@@ -560,11 +592,26 @@ __global__ void k_quantize_kv(const __nv_bfloat16* src, uint8_t* dst, const floa
 __global__ void k_embed_rows(const __nv_bfloat16* table, const i64* ids, __nv_bfloat16* out, int rows, int width) {
   const int r = blockIdx.x;
   if (r >= rows) return;
-  const i64 tok = ids[r];
+  const i64 raw_tok = ids[r];
+  const i64 tok = (raw_tok >= 0 && raw_tok < 248320) ? raw_tok : 0;
   const uint4* src = reinterpret_cast<const uint4*>(table + (size_t)tok * width);
   uint4* dst = reinterpret_cast<uint4*>(out + (size_t)r * width);
   const int n8 = width / 8;
   for (int i = threadIdx.x; i < n8; i += blockDim.x) dst[i] = src[i];
+}
+
+__global__ void k_embed_rows_int8(const int8_t* table, const float* row_scales, const i64* ids, __nv_bfloat16* out,
+                                  int rows, int width) {
+  const int r = blockIdx.x;
+  if (r >= rows) return;
+  const i64 raw_tok = ids[r];
+  const i64 tok = (raw_tok >= 0 && raw_tok < 248320) ? raw_tok : 0;
+  const int8_t* src = table + (size_t)tok * width;
+  const float sc = row_scales[tok];
+  __nv_bfloat16* dst = out + (size_t)r * width;
+  for (int i = threadIdx.x; i < width; i += blockDim.x) {
+    dst[i] = __float2bfloat16_rn(static_cast<float>(src[i]) * sc);
+  }
 }
 
 #ifdef _WIN32
@@ -732,7 +779,15 @@ QWEN38_PLANE_EXPORT void qwen38_plane_quantize_kv(void* s, const void* src, void
 }
 
 QWEN38_PLANE_EXPORT void qwen38_plane_embed_rows(void* s, const void* table, const void* ids, void* out, int rows, int width) {
-  if (rows <= 0 || width <= 0) return;
+  if (rows <= 0 || width == 0) return;
+  if (width < 0) {
+    // A negative width selects the per-row symmetric INT8 table whose float row scales follow the int8 payload.
+    const int actual_width = -width;
+    const int8_t* table_i8 = static_cast<const int8_t*>(table);
+    const float* scales_f32 = reinterpret_cast<const float*>(table_i8 + 248320ULL * static_cast<size_t>(actual_width));
+    k_embed_rows_int8<<<rows, 256, 0, (cudaStream_t)s>>>(table_i8, scales_f32, (const i64*)ids, (__nv_bfloat16*)out, rows, actual_width);
+    return;
+  }
   k_embed_rows<<<rows, 256, 0, (cudaStream_t)s>>>((const __nv_bfloat16*)table, (const i64*)ids, (__nv_bfloat16*)out, rows, width);
 }
 
