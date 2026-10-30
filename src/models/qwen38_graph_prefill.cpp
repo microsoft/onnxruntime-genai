@@ -553,6 +553,8 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
           binding->BindInput(name.c_str(), view(f.idx.data() + 4, {1}, i32));
         else if (name == "cumulative_sequence_lengths")
           binding->BindInput(name.c_str(), view(f.idx.data() + 8, {2}, i32));
+        else if (name == "state_update_capture_count")
+          binding->BindInput(name.c_str(), view(f.idx.data() + 8, {1}, i32));
         else if (name == ple_name)
           binding->BindInput(name.c_str(), view(f.ples.data(), {1, int64_t(m), ple_width_}, bf16));
         else if (fold_tensors_.count(name))
@@ -592,6 +594,8 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
         } else if (name.rfind("present_mid3.", 0) == 0) {
           const std::string in_n = "past_key_values." + name.substr(13);
           binding->BindOutput(name.c_str(), *banks_[4].tensors.at(in_n)->value);
+        } else if (name.rfind("state_update.", 0) == 0) {
+          binding->BindOutput(name.c_str(), *state_update_tensors_.at(name)->value);
         } else if (name.rfind("present.", 0) == 0) {
           const std::string in_n = "past_key_values." + name.substr(8);
           OrtValue& val = store_.count(in_n) ? *store_.at(in_n)->value

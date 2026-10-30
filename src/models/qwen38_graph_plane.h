@@ -39,6 +39,8 @@ struct Qwen38Plane {
   void (*embed_rows)(void* stream, const void* table, const void* ids, void* out, int rows, int width){};
   void (*set_ple_host_params)(const void* params){};
   int (*dflash_select)(void* stream, const void* candidates, const void* scores, void* control, int drafts, int top_k){};
+  int (*replay_state_updates)(void* stream, const void* descs, int fast_count, int generic_count,
+                              int fast_blocks_per_descriptor, int kept_count){};
 
  private:
   void* handle_{};
