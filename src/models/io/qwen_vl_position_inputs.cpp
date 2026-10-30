@@ -43,17 +43,6 @@ struct UpdatePositionIdsFunctor {
   }
 };
 
-struct FillMaskFunctor {
-  OrtValue* attention_mask;
-  int64_t total_size;
-
-  template <typename T>
-  void operator()() {
-    auto* mask_data = attention_mask->GetTensorMutableData<T>();
-    std::fill_n(mask_data, total_size, static_cast<T>(1));
-  }
-};
-
 struct InitPositionIdsFunctor {
   Qwen2VLPositionInputs* self;
   DeviceSpan<int32_t> next_tokens;
@@ -109,6 +98,26 @@ Qwen2VLPositionInputs::Qwen2VLPositionInputs(const Model& model, State& state, D
     attention_mask_shape_[1] = 0;  // Will be set during first update
     attention_mask_ = std::make_unique<Tensor>(model_.p_device_inputs_, type_);
   }
+  const auto& history_name = model_.config_->model.decoder.inputs.rotary_position_ids;
+  if (!history_name.empty()) {
+    const auto shape = model_.session_info_.GetInputShape(history_name);
+    if (!has_posid_input_ || type_ != Ort::TypeToTensorType<int64_t> ||
+        model_.session_info_.GetInputDataType(history_name) != Ort::TypeToTensorType<int64_t> ||
+        shape.size() != 3 || shape[0] != 3 || state_.params_->search.max_length <= 0) {
+      throw std::runtime_error("Rotary history requires int64 [3, batch, history] and current T/H/W positions");
+    }
+    const std::array<int64_t, 3> history_shape{
+        3, state_.params_->BatchBeamSize(), state_.params_->search.max_length};
+    rotary_history_ = std::make_unique<RotaryPositionHistory>(
+        history_shape[1], history_shape[2], model_.config_->model.context_length - 1);
+    rotary_history_value_ = OrtValue::CreateTensor(
+        model_.allocator_cpu_.GetInfo(), rotary_history_->Values().data(),
+        rotary_history_->Values().size_bytes(), history_shape, Ort::TypeToTensorType<int64_t>);
+    rotary_history_input_ = std::make_unique<Tensor>(model_.p_device_inputs_, Ort::TypeToTensorType<int64_t>);
+    rotary_history_input_->CreateTensor(history_shape, true);
+  }
+  position_buffer_ = CreatePositionIdsBuffer(*state_.params_);
+  mask_buffer_ = CreateAttentionMaskBuffer(model_, *state_.params_, DynamicMaskUpdate::FillOnes);
 }
 
 void Qwen2VLPositionInputs::SetGridTensors(const std::shared_ptr<Tensor>& image_grid_thw,
@@ -145,6 +154,11 @@ void Qwen2VLPositionInputs::Add() {
   }
   if (has_mask_input_) {
     AddAttentionMask();
+  }
+  if (rotary_history_) {
+    rotary_input_index_ = state_.inputs_.size();
+    state_.inputs_.push_back(rotary_history_input_->GetOrtTensor());
+    state_.input_names_.push_back(model_.config_->model.decoder.inputs.rotary_position_ids.c_str());
   }
 }
 
@@ -347,10 +361,10 @@ void Qwen2VLPositionInputs::CreateAndInitialize3DPositionIDs(DeviceSpan<int32_t>
     rope_deltas_.push_back(max_pos_for_batch + 1 - seq_len);
   }
 
+  UpdateRotaryHistory(*position_ids, 0, state_.params_->search.num_beams);
   // Move tensor to GPU and expand by num_beams
-  position_ids_->ort_tensor_ = model_.ExpandInputs(position_ids, state_.params_->search.num_beams);
+  SetPositionIDs(std::move(position_ids), state_.params_->search.num_beams);
   position_ids_shape_[1] *= state_.params_->search.num_beams;
-  state_.inputs_[posid_input_index_] = position_ids_->GetOrtTensor();
 
   // Expand rope_deltas_
   std::vector<int64_t> expanded_deltas;
@@ -379,9 +393,7 @@ void Qwen2VLPositionInputs::CreateAndInitializeAttentionMask(DeviceSpan<int32_t>
     }
   }
 
-  // Move tensor to GPU and expand by num_beams
-  attention_mask_->ort_tensor_ = model_.ExpandInputs(attention_mask, state_.params_->search.num_beams);
-  attention_mask_shape_[0] *= state_.params_->search.num_beams;
+  mask_buffer_->Initialize(*attention_mask_, attention_mask, state_.params_->search.num_beams, attention_mask_shape_);
   state_.inputs_[mask_input_index_] = attention_mask_->GetOrtTensor();
 }
 
@@ -398,23 +410,26 @@ void Qwen2VLPositionInputs::Update3DPositionIDs(int base_pos) {
 
   DispatchOnType(type_, UpdatePositionIdsFunctor{position_ids.get(), base_pos, batch_size, seq_len, rope_deltas_});
 
-  position_ids_->ort_tensor_ = model_.ExpandInputs(position_ids, 1);  // No beam expansion needed, already expanded
+  UpdateRotaryHistory(*position_ids, base_pos, 1);
+  SetPositionIDs(std::move(position_ids), 1);  // Already expanded over beams.
+}
+
+void Qwen2VLPositionInputs::SetPositionIDs(std::unique_ptr<OrtValue> position_ids, int num_beams) {
+  position_buffer_->Assign(*position_ids_, model_, position_ids, num_beams);
   state_.inputs_[posid_input_index_] = position_ids_->GetOrtTensor();
 }
 
-void Qwen2VLPositionInputs::UpdateAttentionMask() {
-  auto attention_mask = OrtValue::CreateTensor(model_.allocator_cpu_, attention_mask_shape_, type_);
-
-  DispatchOnType(type_, FillMaskFunctor{attention_mask.get(), attention_mask_shape_[0] * attention_mask_shape_[1]});
-
-  attention_mask_->ort_tensor_ = model_.ExpandInputs(attention_mask, 1);
+void Qwen2VLPositionInputs::UpdateAttentionMask(int total_length, int new_length) {
+  mask_buffer_->Update(*attention_mask_, attention_mask_shape_, total_length, new_length);
   state_.inputs_[mask_input_index_] = attention_mask_->GetOrtTensor();
 }
 
 void Qwen2VLPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) {
   if (has_posid_input_) {
     position_ids_shape_[2] = new_length;
-    if (is_first_update_) {
+    if (rotary_source_) {
+      UpdateFromRotarySource(total_length, new_length);
+    } else if (is_first_update_) {
       DispatchOnType(type_, InitPositionIdsFunctor{this, next_tokens, position_ids_shape_});
     } else {
       Update3DPositionIDs(total_length - new_length);
@@ -426,8 +441,7 @@ void Qwen2VLPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_le
       attention_mask_shape_[1] = new_length;
       DispatchOnType(type_, InitAttentionMaskFunctor{this, next_tokens, attention_mask_shape_});
     } else {
-      attention_mask_shape_[1] = total_length;
-      UpdateAttentionMask();
+      UpdateAttentionMask(total_length, new_length);
     }
   }
 
@@ -435,16 +449,88 @@ void Qwen2VLPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_le
 }
 
 void Qwen2VLPositionInputs::RewindTo(size_t index) {
-  // For Qwen2-VL, we need to handle rewinding for beam search
-  // This is a simplified rewind, just updating the shape.
-  // A full rewind would require re-calculating rope_deltas if we rewound into the prompt.
-  // For now, we assume rewind only happens during generation.
+  if (index == 0) {
+    is_first_update_ = true;
+    position_ids_shape_[1] = state_.params_->search.batch_size;
+    attention_mask_shape_[0] = state_.params_->search.batch_size;
+    rope_deltas_.clear();
+    return;
+  }
+  // Partial rewinds during generation retain the prompt's mRoPE deltas.
   if (has_posid_input_) {
     position_ids_shape_[2] = static_cast<int64_t>(index);
   }
   if (has_mask_input_) {
-    attention_mask_shape_[1] = static_cast<int64_t>(index);
+    mask_buffer_->Rewind(*attention_mask_, attention_mask_shape_, index);
   }
+  if (rotary_history_) {
+    rotary_history_->Forecast(index);
+    PublishRotaryHistory();
+  }
+  if (index == 0) {
+    is_first_update_ = true;
+    position_ids_shape_[1] = state_.params_->search.batch_size;
+    attention_mask_shape_[0] = state_.params_->search.batch_size;
+    rope_deltas_.clear();
+  }
+}
+
+void Qwen2VLPositionInputs::PublishRotaryHistory() {
+  auto destination = rotary_history_input_->GetDeviceSpan<int64_t>();
+  auto host = destination.CpuSpan();
+  std::copy(rotary_history_->Values().begin(), rotary_history_->Values().end(), host.begin());
+  destination.CopyCpuToDevice();
+  state_.inputs_[rotary_input_index_] = rotary_history_input_->GetOrtTensor();
+}
+
+void Qwen2VLPositionInputs::UpdateRotaryHistory(OrtValue& positions, size_t start, size_t beams) {
+  if (!rotary_history_) return;
+  auto info = positions.GetTensorTypeAndShapeInfo();
+  const auto shape = info->GetShape();
+  rotary_history_->Update(
+      {positions.GetTensorData<int64_t>(), info->GetElementCount()}, start, shape[2], beams);
+  PublishRotaryHistory();
+}
+
+void Qwen2VLPositionInputs::UpdateFromRotarySource(int total_length, int new_length) {
+  if (!rotary_history_ || total_length < new_length || new_length <= 0) {
+    throw std::runtime_error("MTP rotary positions require a configured history and a valid step length");
+  }
+  auto info = rotary_source_->GetTensorTypeAndShapeInfo();
+  const auto shape = info->GetShape();
+  if (rotary_source_->GetTensorMemoryInfo().GetDeviceType() != OrtMemoryInfoDeviceType_CPU ||
+      info->GetElementType() != Ort::TypeToTensorType<int64_t> ||
+      shape.size() != 3 || shape[0] != 3 || shape[1] != state_.params_->BatchBeamSize() || shape[2] <= 0) {
+    throw std::runtime_error("Main rotary position history must be a CPU int64 [3, batch, history] tensor");
+  }
+  rotary_history_->CopyFrom({rotary_source_->GetTensorData<int64_t>(), info->GetElementCount()}, shape[2]);
+  if (total_length > state_.params_->search.max_length) {
+    throw std::runtime_error("MTP step exceeds rotary history capacity");
+  }
+  position_ids_shape_[1] = shape[1];
+  auto positions = OrtValue::CreateTensor(model_.allocator_cpu_, position_ids_shape_, Ort::TypeToTensorType<int64_t>);
+  auto* data = positions->GetTensorMutableData<int64_t>();
+  const size_t capacity = state_.params_->search.max_length;
+  for (size_t row = 0; row < static_cast<size_t>(3 * shape[1]); ++row) {
+    const auto source = rotary_history_->Values().subspan(row * capacity + total_length - new_length, new_length);
+    std::copy(source.begin(), source.end(), data + row * new_length);
+  }
+  if (state_.params_->use_graph_capture && new_length <= state_.params_->max_graph_capture_length) {
+    auto& buffer = captured_rotary_positions_[new_length];
+    if (!buffer) {
+      buffer = std::make_unique<Tensor>(model_.p_device_inputs_, Ort::TypeToTensorType<int64_t>);
+      buffer->CreateTensor(position_ids_shape_, true);
+    }
+    auto destination = buffer->GetDeviceSpan<int64_t>();
+    std::copy_n(positions->GetTensorData<int64_t>(), positions->GetTensorTypeAndShapeInfo()->GetElementCount(),
+                destination.CpuSpan().begin());
+    destination.CopyCpuToDevice();
+    state_.inputs_[posid_input_index_] = buffer->GetOrtTensor();
+  } else {
+    position_ids_->ort_tensor_ = model_.ExpandInputs(positions, 1);
+    state_.inputs_[posid_input_index_] = position_ids_->GetOrtTensor();
+  }
+  PublishRotaryHistory();
 }
 
 }  // namespace Generators

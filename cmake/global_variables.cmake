@@ -98,6 +98,8 @@ file(GLOB generator_srcs CONFIGURE_DEPENDS
   "${MODELS_ROOT}/*.cpp"
   "${MODELS_ROOT}/io/*.h"
   "${MODELS_ROOT}/io/*.cpp"
+  "${MODELS_ROOT}/postprocessing/*.h"
+  "${MODELS_ROOT}/postprocessing/*.cpp"
   "${MODELS_ROOT}/preprocessing/*.h"
   "${MODELS_ROOT}/preprocessing/*.cpp"
   "${ENGINE_ROOT}/*.h"

@@ -12,15 +12,33 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
     public class NativeMethodsMarshallingTests
     {
         [Fact]
-        public void TokenPostProcessorOutputsUseOpaquePointers()
+        public void ASRPostProcessorOutputsUseOpaquePointers()
         {
-            var nativeMethods = typeof(TokenPostProcessor).Assembly.GetType("Microsoft.ML.OnnxRuntimeGenAI.NativeMethods", true)!;
-            foreach (var name in new[] { "OgaTokenPostProcessorGetResult", "OgaTokenPostProcessorResultGetTimestamps",
-                "OgaTokenPostProcessorTimestampGetWord", "OgaTokenPostProcessorTimestampGetSegment" })
+            var nativeMethods = typeof(ASRPostProcessor).Assembly.GetType("Microsoft.ML.OnnxRuntimeGenAI.NativeMethods", true)!;
+            foreach (var name in new[] { "OgaASRPostProcessorAsPostProcessor", "OgaPostProcessorProcessNext",
+                "OgaPostProcessorFinalize", "OgaPostProcessorReset",
+                "OgaASRPostProcessorGetResult", "OgaASRPostProcessorResultGetTimestampResult",
+                "OgaASRPostProcessorTimestampResultGetTimestampRecord" })
             {
                 var method = nativeMethods.GetMethod(name, BindingFlags.Public | BindingFlags.Static)!;
                 Assert.Equal(typeof(IntPtr), method.ReturnType);
             }
+            var destroy = nativeMethods.GetMethod("OgaDestroyPostProcessor", BindingFlags.Public | BindingFlags.Static)!;
+            Assert.Equal(typeof(void), destroy.ReturnType);
+            Assert.Equal(typeof(IntPtr), Assert.Single(destroy.GetParameters()).ParameterType);
+        }
+
+        [Fact]
+        public void TimestampRecordLookupUsesKindSelector()
+        {
+            var nativeMethods = typeof(ASRPostProcessor).Assembly.GetType("Microsoft.ML.OnnxRuntimeGenAI.NativeMethods", true)!;
+            var method = nativeMethods.GetMethod("OgaASRPostProcessorTimestampResultGetTimestampRecord", BindingFlags.Public | BindingFlags.Static)!;
+            var parameters = method.GetParameters();
+            Assert.Equal(3, parameters.Length);
+            Assert.Equal(typeof(IntPtr), parameters[0].ParameterType);
+            Assert.True(parameters[1].ParameterType.IsEnum);
+            Assert.Equal(typeof(int), Enum.GetUnderlyingType(parameters[1].ParameterType));
+            Assert.Equal(typeof(UIntPtr), parameters[2].ParameterType);
         }
 
         [Fact]
