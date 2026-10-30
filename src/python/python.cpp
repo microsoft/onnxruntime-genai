@@ -6,8 +6,12 @@
 #define OGA_USE_SPAN 1
 #include "../models/onnxruntime_api.h"
 #include "../ort_genai.h"
+#include <cstring>
+#include <filesystem>
 #include <iostream>
+#include <mutex>
 #include <optional>
+#include <unordered_map>
 
 using namespace pybind11::literals;
 
@@ -329,17 +333,17 @@ struct PyPostProcessorOutput {
   }
 };
 
-using PyTokenPostProcessorResult = PyPostProcessorOutput<OgaTokenPostProcessorResult>;
-using PyTokenPostProcessorTimestamp = PyPostProcessorOutput<OgaTokenPostProcessorTimestamp>;
-using PyTokenPostProcessorTimestampRecord = PyPostProcessorOutput<OgaTokenPostProcessorTimestampRecord>;
+using PyASRPostProcessorResult = PyPostProcessorOutput<OgaASRPostProcessorResult>;
+using PyASRPostProcessorTimestampResult = PyPostProcessorOutput<OgaASRPostProcessorTimestampResult>;
+using PyASRPostProcessorTimestampRecord = PyPostProcessorOutput<OgaASRPostProcessorTimestampRecord>;
 
-struct PyTokenPostProcessor {
-  explicit PyTokenPostProcessor(std::unique_ptr<OgaTokenPostProcessor> processor)
+struct PyASRPostProcessor {
+  explicit PyASRPostProcessor(std::unique_ptr<OgaASRPostProcessor> processor)
       : processor_{std::move(processor)} {}
 
-  void ProcessNextTokens() {
+  void ProcessNext() {
     result_lifetime_ = std::make_shared<bool>(true);
-    processor_->ProcessNextTokens();
+    processor_->ProcessNext();
   }
 
   void Finalize() {
@@ -352,14 +356,17 @@ struct PyTokenPostProcessor {
     processor_->Reset();
   }
 
-  std::vector<PyTokenPostProcessorResult> GetNextTokenResults() const {
-    std::vector<PyTokenPostProcessorResult> results;
-    for (const auto* result : processor_->GetNextTokenResults()) results.push_back({result, result_lifetime_});
+  std::vector<PyASRPostProcessorResult> GetNextResults() const {
+    std::vector<PyASRPostProcessorResult> results;
+    const auto native_results = processor_->GetNextResults();
+    results.reserve(native_results.size());
+    for (const auto* result : native_results)
+      results.push_back({result, result_lifetime_});
     return results;
   }
 
  private:
-  std::unique_ptr<OgaTokenPostProcessor> processor_;
+  std::unique_ptr<OgaASRPostProcessor> processor_;
   std::shared_ptr<bool> result_lifetime_{std::make_shared<bool>(true)};
 };
 
@@ -372,8 +379,8 @@ struct PyGenerator {
     return ToPython(generator_->GetNextTokens());
   }
 
-  std::unique_ptr<OgaTokenPostProcessor> CreatePostProcessor() {
-    return OgaTokenPostProcessor::Create(*generator_);
+  std::unique_ptr<OgaASRPostProcessor> CreatePostProcessor() {
+    return OgaASRPostProcessor::Create(*generator_);
   }
 
   pybind11::array_t<int32_t> GetSequence(int index) {
@@ -544,46 +551,48 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
            pybind11::arg("enable_ff_tokens") = false)
       .def("get_search_options", &PyGeneratorParams::GetSearchOptions);
 
-  pybind11::class_<PyTokenPostProcessorTimestampRecord>(m, "TokenPostProcessorTimestampRecord")
-      .def("get_text", [](const PyTokenPostProcessorTimestampRecord& record) { return record.Get().GetText(); })
-      .def("get_start_frame", [](const PyTokenPostProcessorTimestampRecord& record) { return record.Get().GetStartFrame(); })
-      .def("get_stop_frame", [](const PyTokenPostProcessorTimestampRecord& record) { return record.Get().GetStopFrame(); })
-      .def("get_start_time", [](const PyTokenPostProcessorTimestampRecord& record) { return record.Get().GetStartTime(); })
-      .def("get_stop_time", [](const PyTokenPostProcessorTimestampRecord& record) { return record.Get().GetStopTime(); });
+  pybind11::class_<PyASRPostProcessorTimestampRecord>(m, "ASRPostProcessorTimestampRecord")
+      .def_property_readonly("text", [](const PyASRPostProcessorTimestampRecord& record) { return record.Get().GetText(); })
+      .def_property_readonly("frame_interval", [](const PyASRPostProcessorTimestampRecord& record) { return record.Get().GetFrameInterval(); })
+      .def_property_readonly("time_interval", [](const PyASRPostProcessorTimestampRecord& record) { return record.Get().GetTimestampInterval(); });
 
-  pybind11::class_<PyTokenPostProcessorTimestamp>(m, "TokenPostProcessorTimestamp")
-      .def("get_words", [](const PyTokenPostProcessorTimestamp& result) {
-        std::vector<PyTokenPostProcessorTimestampRecord> records;
+  pybind11::class_<PyASRPostProcessorTimestampResult>(m, "ASRPostProcessorTimestampResult")
+      .def_property_readonly("words", [](const PyASRPostProcessorTimestampResult& result) {
+        std::vector<PyASRPostProcessorTimestampRecord> records;
         const auto& timestamps = result.Get();
-        for (size_t index = 0; index < timestamps.GetWordCount(); ++index)
-          records.push_back({&timestamps.GetWord(index), result.lifetime});
+        const auto count = timestamps.GetWordCount();
+        records.reserve(count);
+        for (size_t index = 0; index < count; ++index)
+          records.push_back({timestamps.GetTimestampRecord(OgaTimestampRecordKind_Words, index), result.lifetime});
         return records;
       })
-      .def("get_segments", [](const PyTokenPostProcessorTimestamp& result) {
-        std::vector<PyTokenPostProcessorTimestampRecord> records;
+      .def_property_readonly("segments", [](const PyASRPostProcessorTimestampResult& result) {
+        std::vector<PyASRPostProcessorTimestampRecord> records;
         const auto& timestamps = result.Get();
-        for (size_t index = 0; index < timestamps.GetSegmentCount(); ++index)
-          records.push_back({&timestamps.GetSegment(index), result.lifetime});
+        const auto count = timestamps.GetSegmentCount();
+        records.reserve(count);
+        for (size_t index = 0; index < count; ++index)
+          records.push_back({timestamps.GetTimestampRecord(OgaTimestampRecordKind_Segments, index), result.lifetime});
         return records;
       });
 
-  pybind11::class_<PyTokenPostProcessorResult>(m, "TokenPostProcessorResult")
-      .def("get_text", [](const PyTokenPostProcessorResult& result) { return result.Get().GetText(); })
-      .def("get_timestamps", [](const PyTokenPostProcessorResult& result) -> std::optional<PyTokenPostProcessorTimestamp> {
-        const auto* timestamps = result.Get().GetTimestamps();
+  pybind11::class_<PyASRPostProcessorResult>(m, "ASRPostProcessorResult")
+      .def_property_readonly("text", [](const PyASRPostProcessorResult& result) { return result.Get().GetText(); })
+      .def_property_readonly("timestamp_result", [](const PyASRPostProcessorResult& result) -> std::optional<PyASRPostProcessorTimestampResult> {
+        const auto* timestamps = result.Get().GetTimestampResult();
         if (!timestamps) return std::nullopt;
-        return PyTokenPostProcessorTimestamp{timestamps, result.lifetime};
+        return PyASRPostProcessorTimestampResult{timestamps, result.lifetime};
       });
 
-  pybind11::class_<PyTokenPostProcessor>(m, "TokenPostProcessor")
+  pybind11::class_<PyASRPostProcessor>(m, "ASRPostProcessor")
       .def(pybind11::init([](PyGenerator& generator) {
-             return std::make_unique<PyTokenPostProcessor>(generator.CreatePostProcessor());
+             return std::make_unique<PyASRPostProcessor>(generator.CreatePostProcessor());
            }),
            pybind11::keep_alive<1, 2>())
-      .def("process_next_tokens", &PyTokenPostProcessor::ProcessNextTokens)
-      .def("get_next_token_results", &PyTokenPostProcessor::GetNextTokenResults)
-      .def("finalize", &PyTokenPostProcessor::Finalize)
-      .def("reset", &PyTokenPostProcessor::Reset);
+      .def("process_next", &PyASRPostProcessor::ProcessNext)
+      .def("get_next_results", &PyASRPostProcessor::GetNextResults)
+      .def("finalize", &PyASRPostProcessor::Finalize)
+      .def("reset", &PyASRPostProcessor::Reset);
 
   pybind11::class_<OgaTokenizerStream>(m, "TokenizerStream")
       .def("decode", [](OgaTokenizerStream& t, int32_t token) { return t.Decode(token); })
@@ -722,6 +731,14 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("clear_decoder_provider_options_hardware_device_type", &OgaConfig::ClearDecoderProviderOptionsHardwareDeviceType)
       .def("clear_decoder_provider_options_hardware_device_id", &OgaConfig::ClearDecoderProviderOptionsHardwareDeviceId)
       .def("clear_decoder_provider_options_hardware_vendor_id", &OgaConfig::ClearDecoderProviderOptionsHardwareVendorId);
+
+  pybind11::class_<NonGenerativeSession>(m, "_NonGenerativeSession")
+      .def(pybind11::init<const OgaConfig&>(), pybind11::arg("config"))
+      .def("run", [](NonGenerativeSession& session,
+                     const std::string& request) {
+        pybind11::gil_scoped_release release;
+        return session.Run(request);
+      });
 
   pybind11::class_<OgaModel>(m, "Model")
       .def(pybind11::init([](const OgaConfig& config) { return OgaModel::Create(config); }))

@@ -16,6 +16,7 @@
 namespace Generators {
 
 struct Config;
+struct TokenizerMemoryData;
 struct Tensor;
 
 struct Tokenizer;
@@ -64,12 +65,16 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenize
   int32_t GetBorTokenId() const;
   int32_t GetEorTokenId() const;
 
+ private:
+  std::shared_ptr<const TokenizerMemoryData> memory_data_;
+  std::optional<OrtxTokenizerBlob> memory_blob_;
+
+ public:
   OrtxPtr<OrtxTokenizer> tokenizer_;
 
  private:
   friend struct TokenizerStream;
-  friend class TokenPostProcessor;
-  friend class TokenPostProcessorInternal;
+  friend class ASRPostProcessor;
   OrtxWordPieceInfo GetWordPieceInfo(int32_t vocab_id) const;
 
   bool literal_ = false;
