@@ -3,6 +3,7 @@
 // Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Portions of this file consist of AI generated content.
 #include "generator/generators.h"
+#include "models/env_utils.h"
 #include "models/model_state_manifest.h"
 #include "models/model_type.h"
 #include "runtime_settings.h"
@@ -3676,15 +3677,27 @@ void LogRuntimeProfileSelection(std::string_view profile_id, const RuntimeProfil
 void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device) {
   ValidateRuntimeProfiles(config);
   const Config::RuntimeProfile* selected = nullptr;
-  for (const auto& profile : config.runtime_profiles) {
-    if (!MatchesEligibility(profile.eligibility, device)) {
-      continue;
+  // ORTGENAI_ENABLE_RUNTIME_PROFILE=<id> applies that profile whatever the device facts are, to try the profile of a
+  // smaller GPU on a larger one.
+  const std::string forced_id = GetEnv("ORTGENAI_ENABLE_RUNTIME_PROFILE");
+  if (!forced_id.empty()) {
+    const auto forced = std::find_if(config.runtime_profiles.begin(), config.runtime_profiles.end(),
+                                     [&](const Config::RuntimeProfile& profile) { return profile.id == forced_id; });
+    if (forced == config.runtime_profiles.end()) {
+      throw std::runtime_error("ORTGENAI_ENABLE_RUNTIME_PROFILE='" + forced_id + "' not found in runtime_profiles");
     }
-    if (selected) {
-      throw std::runtime_error("multiple runtime profiles match device eligibility: '" +
-                               selected->id + "' and '" + profile.id + "'");
+    selected = &*forced;
+  } else {
+    for (const auto& profile : config.runtime_profiles) {
+      if (!MatchesEligibility(profile.eligibility, device)) {
+        continue;
+      }
+      if (selected) {
+        throw std::runtime_error("multiple runtime profiles match device eligibility: '" +
+                                 selected->id + "' and '" + profile.id + "'");
+      }
+      selected = &profile;
     }
-    selected = &profile;
   }
   if (!selected) {
     if (!config.runtime_profiles.empty()) {
@@ -3729,7 +3742,8 @@ void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device) {
   if (selected->overlay.speculative.max_draft_tokens) {
     WarnOnClampedDraftWidth(config);
   }
-  LogRuntimeProfileSelection(selected->id, device);
+  LogRuntimeProfileSelection(
+      forced_id.empty() ? selected->id : selected->id + " (forced by ORTGENAI_ENABLE_RUNTIME_PROFILE)", device);
 }
 
 void ApplyRuntimeProfile(Config& config, uint64_t total_device_memory_bytes) {

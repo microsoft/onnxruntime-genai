@@ -307,6 +307,12 @@ When GenAI logging is enabled, Model creation reports the chosen profile (or bas
 and the total/free device memory and integrated status used for selection. An unknown free-memory
 value does not match a profile with free-memory bounds.
 
+Setting `ORTGENAI_ENABLE_RUNTIME_PROFILE=<id>` applies the profile with that `id` and skips
+eligibility matching, so the profile of a smaller GPU can be tried on a larger one. An id that is
+not in `runtime_profiles` fails Model creation instead of falling back to the base settings; an
+empty value is ignored. The override only takes effect for models that declare `runtime_profiles`.
+The forced profile's overlay is applied as written, even if the device is too small for it.
+
 ## Authoring notes
 
 - Every variant declared in the component's `variants` map must have its own directory

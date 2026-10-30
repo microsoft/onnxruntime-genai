@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <optional>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -11,6 +12,7 @@
 #include "engine_test_doubles.h"
 #include "models/runtime_profiles.h"
 #include "models/session_options.h"
+#include "scoped-environment-variable.h"
 
 namespace Generators::test {
 
@@ -239,6 +241,62 @@ TEST(ConfigTest, RuntimeProfileUsesBaseWhenNoRangeMatches) {
 
   ASSERT_TRUE(config.engine.dynamic_batching->num_blocks);
   EXPECT_EQ(*config.engine.dynamic_batching->num_blocks, 32u);
+}
+
+namespace {
+
+constexpr const char* kForcedRuntimeProfileConfig = R"({
+  "engine":{"dynamic_batching":{"num_blocks":32}},
+  "runtime_profiles":[
+    {"id":"consumer-gpu-24g",
+     "eligibility":{"minimum_total_device_memory_bytes":0,
+                    "maximum_total_device_memory_bytes":25769803776},
+     "overlay":{"engine":{"dynamic_batching":{"num_blocks":24}}}},
+    {"id":"datacenter-gpu",
+     "eligibility":{"minimum_total_device_memory_bytes":85899345920},
+     "overlay":{"engine":{"dynamic_batching":{"num_blocks":128}}}}
+  ]
+})";
+
+constexpr uint64_t kDatacenterTotalDeviceMemoryBytes = 150136356864ULL;
+
+}  // namespace
+
+TEST(ConfigTest, RuntimeProfileEnvOverrideSelectsProfileRegardlessOfEligibility) {
+  Config config;
+  OverlayConfig(config, kForcedRuntimeProfileConfig);
+
+  ScopedEnvironmentVariable forced{"ORTGENAI_ENABLE_RUNTIME_PROFILE", "consumer-gpu-24g"};
+  ApplyRuntimeProfile(config, kDatacenterTotalDeviceMemoryBytes);
+
+  ASSERT_TRUE(config.engine.dynamic_batching);
+  EXPECT_EQ(*config.engine.dynamic_batching->num_blocks, 24u);
+}
+
+TEST(ConfigTest, RuntimeProfileEnvOverrideRejectsUnknownProfileId) {
+  Config config;
+  OverlayConfig(config, kForcedRuntimeProfileConfig);
+
+  ScopedEnvironmentVariable forced{"ORTGENAI_ENABLE_RUNTIME_PROFILE", "consumer-gpu-32g"};
+  try {
+    ApplyRuntimeProfile(config, kDatacenterTotalDeviceMemoryBytes);
+    FAIL() << "An unknown forced profile id must not fall back to device eligibility";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(std::string{error.what()}.find("consumer-gpu-32g"), std::string::npos) << error.what();
+  }
+  EXPECT_EQ(*config.engine.dynamic_batching->num_blocks, 32u);
+}
+
+TEST(ConfigTest, RuntimeProfileEnvOverrideIgnoredWhenEmptyOrUnset) {
+  for (const std::optional<std::string>& value : {std::optional<std::string>{}, std::optional<std::string>{""}}) {
+    Config config;
+    OverlayConfig(config, kForcedRuntimeProfileConfig);
+
+    ScopedEnvironmentVariable forced{"ORTGENAI_ENABLE_RUNTIME_PROFILE", value};
+    ApplyRuntimeProfile(config, kDatacenterTotalDeviceMemoryBytes);
+
+    EXPECT_EQ(*config.engine.dynamic_batching->num_blocks, 128u);
+  }
 }
 
 TEST(ConfigTest, Dflash2SnapshotsDefaultToOneAndAllowZeroOrLargerPools) {
