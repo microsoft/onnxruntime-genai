@@ -13,6 +13,7 @@
 namespace {
 
 bool sampled = true;
+bool enabled = true;
 int baseline_reads = 0;
 int resource_reads = 0;
 int64_t cpu_time_ms = 0;
@@ -23,6 +24,7 @@ class GenerationResourceTests : public ::testing::Test {
  protected:
   void SetUp() override {
     sampled = true;
+    enabled = true;
     baseline_reads = 0;
     resource_reads = 0;
     cpu_time_ms = 0;
@@ -47,7 +49,7 @@ GenAiTelemetry& GenAiTelemetry::Instance() {
 }
 
 bool GenAiTelemetry::IsDestroyed() { return false; }
-bool GenAiTelemetry::IsEnabled() const { return true; }
+bool GenAiTelemetry::IsEnabled() const { return enabled; }
 bool GenAiTelemetry::IsSessionSampled(uint32_t) { return sampled; }
 void GenAiTelemetry::LogGeneratorCreate(uint32_t, uint32_t, int, int, int, int,
                                         float, float, bool, bool, bool) {}
@@ -132,6 +134,25 @@ TEST_F(GenerationResourceTests, TokenFreeAudioInputsDelimitWindowsAndRetainEncod
   EXPECT_EQ(events[1].process_cpu_time_ms, 10);
   EXPECT_GE(events[0].time_to_first_token_ms, 10);
   EXPECT_EQ(modalities, (std::vector<std::string>{"audio", "audio"}));
+}
+
+TEST_F(GenerationResourceTests, DisabledCompletionCannotSampleAfterReenable) {
+  {
+    GenerationTelemetry generation{5, false};
+    generation.BeginAppend();
+    generation.CompleteAppend(4, 1, "text");
+    cpu_time_ms = 10;
+    generation.OnTokenGenerated(1);
+    enabled = false;
+    generation.OnGenerationCompleted();
+    enabled = true;
+    cpu_time_ms = 999;
+    generation.OnGenerationCompleted();
+  }
+  EXPECT_EQ(resource_reads, 0);
+  ASSERT_EQ(events.size(), 1u);
+  EXPECT_EQ(events.front().process_cpu_time_ms, -1);
+  EXPECT_EQ(events.front().resource_sample_scope, "completion_not_observed");
 }
 
 TEST_F(GenerationResourceTests, SilentAudioCompletionDiscardsBaselineBeforeNextChunk) {

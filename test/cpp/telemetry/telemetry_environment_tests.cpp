@@ -135,6 +135,25 @@ TEST_F(TelemetryEnvironmentTests, ControlReadsOptOutOnlyAfterAcquiringLifecycleL
   EXPECT_FALSE(enabled.load());
 }
 
+TEST_F(TelemetryEnvironmentTests, DelayedProcessLoggingHonorsPermanentOptOut) {
+  std::atomic<bool> permanently_disabled{false};
+  std::atomic<bool> enabled{true};
+  ApplyTelemetryEnabledControl(false, permanently_disabled, enabled, lifecycle_mutex_);
+  EXPECT_TRUE(LockTelemetryForLogging(false, permanently_disabled, enabled, lifecycle_mutex_));
+  EXPECT_FALSE(LockTelemetryForLogging(true, permanently_disabled, enabled, lifecycle_mutex_));
+
+  std::promise<void> resume;
+  auto process_logging = std::async(std::launch::async, [&] {
+    resume.get_future().wait();
+    return LockTelemetryForLogging(false, permanently_disabled, enabled, lifecycle_mutex_).owns_lock();
+  });
+  ScopedEnvironmentVariable opt_out{"ORT_DISABLE_TELEMETRY", "true"};
+  ApplyTelemetryEnabledControl(false, permanently_disabled, enabled, lifecycle_mutex_);
+  opt_out.Set(std::nullopt);
+  resume.set_value();
+  EXPECT_FALSE(process_logging.get());
+}
+
 TEST_F(TelemetryEnvironmentTests, RecognizesEveryCiAndTestFlagAndFailsClosed) {
   EXPECT_FALSE(ShouldSuppressTelemetryFromEnvironment());
   const std::string oversized(Generators::kMaxTelemetryInputBytes + 1, ' ');

@@ -203,6 +203,16 @@ inline bool ShouldSuppressTelemetryFromEnvironment() {
          value == "y";
 }
 
+inline std::shared_lock<std::shared_mutex> LockTelemetryForLogging(
+    bool require_enabled, const std::atomic<bool>& permanently_disabled,
+    const std::atomic<bool>& enabled, std::shared_mutex& lifecycle_mutex) {
+  std::shared_lock<std::shared_mutex> lock(lifecycle_mutex);
+  if (permanently_disabled.load() || (require_enabled && !enabled.load())) {
+    return {};
+  }
+  return lock;
+}
+
 inline void ApplyTelemetryEnabledControl(bool requested_enabled,
                                          std::atomic<bool>& permanently_disabled,
                                          std::atomic<bool>& enabled,

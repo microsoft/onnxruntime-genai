@@ -466,8 +466,9 @@ void GenAiTelemetry::TrySuppressNetworkContext() {
 }
 
 std::shared_lock<std::shared_mutex> GenAiTelemetry::LockForLogging(bool require_enabled) {
-  std::shared_lock<std::shared_mutex> lock(mutex_);
-  if ((require_enabled && !enabled_.load()) || !initialized_.load() || !impl_ || !impl_->logger)
+  auto lock = TelemetryInternal::LockTelemetryForLogging(
+      require_enabled, telemetry_disabled_, enabled_, mutex_);
+  if (!lock || !initialized_.load() || !impl_ || !impl_->logger)
     return {};  // empty (unlocked) -> caller bails
   return lock;  // locked; ownership moves to caller
 }
@@ -479,7 +480,7 @@ void GenAiTelemetry::LogProcessInfo() {
   bool emitted = false;
   bool warn_device_id_fallback = false;
   // Runtime API suppression leaves the uploader live, so ProcessInfo still fires. Full process
-  // suppression never initializes a logger and returns here.
+  // suppression blocks logging even when the logger was initialized before the opt-out.
   RunLocked([&] {
     // Only log once per process, and only mark it logged while telemetry is live.
     bool expected = false;

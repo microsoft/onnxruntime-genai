@@ -737,6 +737,9 @@ void ReadOrtDevices(HardwareInfo& info) {
     if (auto* existing = TelemetryInternal::FindOrtHardwareDeviceMatch(
             info.devices, device, matchable_ort_devices)) {
       existing->type = device.type;
+      if (existing->vendor_id < 0) {
+        existing->vendor_id = device.vendor_id;
+      }
       if (existing->device_id < 0) {
         existing->device_id = device.device_id;
       }

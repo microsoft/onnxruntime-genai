@@ -117,6 +117,8 @@ void GenerationTelemetry::OnGenerationCompleted() {
   }
   if (IsEnabled()) {
     resource_samples_.Complete(CollectProcessResourceUsage());
+  } else {
+    resource_samples_.Reset();
   }
 }
 
