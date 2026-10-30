@@ -360,7 +360,12 @@ void Qwen38GraphEngine::BuildFastPrefill() {
     fast->head_kv = model_.session_head_r2_.get();
     fast->dense_info.Add(*fast->dense);
     if (fast->head_kv) fast->head_kv_info.Add(*fast->head_kv);
-    fast->chunk = (q.prefill.chunk > 0) ? std::min<int>(q.prefill.chunk, 2048) : 512;
+    int cfg_chunk = (q.prefill.chunk > 0) ? q.prefill.chunk : 512;
+    if (const char* env_chunk = std::getenv("ORT_QWEN38_PREFILL_CHUNK")) {
+      const int parsed = std::atoi(env_chunk);
+      if (parsed > 0) cfg_chunk = parsed;
+    }
+    fast->chunk = std::clamp(cfg_chunk, 1, std::min<int>(capacity_, 8192));
     if (fast->chunk < 1 || fast->chunk > capacity_) throw std::runtime_error("qwen38_graph: invalid prefill.chunk");
     fast->dense_inputs = fast->dense->GetInputNames();
     fast->dense_outputs = fast->dense->GetOutputNames();
@@ -491,24 +496,26 @@ void Qwen38GraphEngine::FastAppendSlot(int slot, std::span<const int32_t> tokens
   const auto bf16 = ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16;
   const std::string ple_name = "ple_embeddings." + std::to_string(ple_layer_);
 
-  if (dflash_ && slot_dflash_prompt_rows_[slot]) {
-    DraftSlot(slot, d_dflash_prompt_slot(slot), slot_dflash_prompt_rows_[slot], slot_dflash_prompt_pos_[slot], 0, false);
-    slot_dflash_prompt_rows_[slot] = 0;
-    slot_dflash_ingested_[slot] = true;
-  }
   const size_t dflash_ctx_win =
       (dflash_ && model_.config_->model.dflash2.sliding_window > 0)
           ? static_cast<size_t>(model_.config_->model.dflash2.sliding_window +
                                 model_.config_->model.dflash2.block_size)
           : 0;
+  if (dflash_ && slot_dflash_prompt_rows_[slot]) {
+    if (dflash_ctx_win == 0 || slot_dflash_ingested_[slot] || total_expected <= base ||
+        (total_expected - base) < dflash_ctx_win) {
+      DraftSlot(slot, d_dflash_prompt_slot(slot), slot_dflash_prompt_rows_[slot], slot_dflash_prompt_pos_[slot], 0, false);
+      slot_dflash_ingested_[slot] = true;
+    }
+    slot_dflash_prompt_rows_[slot] = 0;
+  }
   MutedPrefillSlot(slot, true);
   const int cur_bank = bank_phase_ % num_banks_;
   const int scratch_bank = (bank_phase_ + 1) % num_banks_;
   size_t last_m = 1;
   for (size_t lo = 0; lo < n;) {
     const size_t pos = base + lo;
-    size_t max_m = static_cast<size_t>(f.chunk);
-    if (pos >= 16384 && max_m > 2048) max_m = std::min<size_t>(max_m, 2048);
+    const size_t max_m = static_cast<size_t>(f.chunk);
     const size_t m = std::min(max_m, n - lo);
     last_m = m;
 #if defined(_WIN32)
@@ -651,7 +658,8 @@ void Qwen38GraphEngine::FastAppendSlot(int slot, std::span<const int32_t> tokens
     if (slot == 0) f.dense_length += m;
     if (dflash_) {
       if (lo + m < n) {
-        if (slot_dflash_ingested_[slot] || dflash_ctx_win == 0 || (n - (lo + m) < dflash_ctx_win)) {
+        if (slot_dflash_ingested_[slot] || dflash_ctx_win == 0 || total_expected <= (pos + m) ||
+            (total_expected - (pos + m) < dflash_ctx_win)) {
           DraftSlot(slot, d_dflash_prompt_slot(slot), m, pos, 0, false);
           slot_dflash_ingested_[slot] = true;
         }
@@ -714,22 +722,24 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
   const std::string ple_name = "ple_embeddings." + std::to_string(ple_layer_);
 
   if (f.unified) {
-    if (dflash_ && dflash_prompt_rows_) {
-      Draft(d_dflash_prompt_.data(), dflash_prompt_rows_, dflash_prompt_position_, 0, false);
-      dflash_prompt_rows_ = 0;
-      dflash_ingested_in_turn_ = true;
-    }
     const size_t dflash_ctx_win =
         (dflash_ && model_.config_->model.dflash2.sliding_window > 0)
             ? static_cast<size_t>(model_.config_->model.dflash2.sliding_window +
                                   model_.config_->model.dflash2.block_size)
             : 0;
+    if (dflash_ && dflash_prompt_rows_) {
+      if (dflash_ctx_win == 0 || dflash_ingested_in_turn_ || total_expected <= base ||
+          (total_expected - base) < dflash_ctx_win) {
+        Draft(d_dflash_prompt_.data(), dflash_prompt_rows_, dflash_prompt_position_, 0, false);
+        dflash_ingested_in_turn_ = true;
+      }
+      dflash_prompt_rows_ = 0;
+    }
     MutedPrefill(true);
     size_t last_m = 1;
     for (size_t lo = 0; lo < n;) {
       const size_t pos = base + lo;
-      size_t max_m = static_cast<size_t>(f.chunk);
-      if (pos >= 16384 && max_m > 2048) max_m = std::min<size_t>(max_m, 2048);
+      const size_t max_m = static_cast<size_t>(f.chunk);
       const size_t m = std::min(max_m, n - lo);
       last_m = m;
 #if defined(_WIN32)
@@ -859,7 +869,8 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
       f.dense_length += m;
       if (dflash_) {
         if (lo + m < n) {
-          if (dflash_ingested_in_turn_ || dflash_ctx_win == 0 || (n - (lo + m) < dflash_ctx_win)) {
+          if (dflash_ingested_in_turn_ || dflash_ctx_win == 0 || total_expected <= (pos + m) ||
+              (total_expected - (pos + m) < dflash_ctx_win)) {
             Draft(d_dflash_prompt_.data(), m, pos, 0, false);
             dflash_ingested_in_turn_ = true;
           }

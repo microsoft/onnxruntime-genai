@@ -56,7 +56,7 @@ static StagedPleWorkspace g_staged_ple{};
 
 static inline void ensure_prep_workspace() {
   if (!g_staged_ple.scalars) {
-    cudaHostAlloc((void**)&g_staged_ple.scalars, 64 * sizeof(i64), cudaHostAllocPortable);
+    cudaHostAlloc((void**)&g_staged_ple.scalars, 256 * sizeof(i64), cudaHostAllocMapped | cudaHostAllocPortable);
   }
   if (!g_staged_ple.prep_ring) {
     cudaHostAlloc((void**)&g_staged_ple.prep_ring, 64 * 8192, cudaHostAllocMapped | cudaHostAllocPortable);
@@ -143,7 +143,7 @@ __global__ void k_prep_staged(const PleParams* P, i64 tok, i64 pos, i64 s_c1, co
   if (tid == 0) {
     input_ids[0] = tok;
     position_ids[0] = pos;
-    committed[0] = (int)pos;
+    if (committed != nullptr) committed[0] = (int)pos;
     if (pos >= 0 && pos < P->capacity)
       past_pos[pos] = pos;
     else
@@ -177,6 +177,54 @@ __global__ void k_prep_staged(const PleParams* P, i64 tok, i64 pos, i64 s_c1, co
   if (tid == 0) {
     ctx_out[0] = s_c1;
     ctx_out[1] = tok;
+  }
+}
+
+__global__ void k_prep_fold_staged(const PleParams* P, const i64* row_toks, i64 base_pos, const i64* row_c1s,
+                                   const unsigned char* fp8_rows, i64* ctx_out, i64* input_ids, i64* position_ids,
+                                   int* committed, i64* past_pos, __nv_bfloat16* ple_out, i64* state) {
+  const int row = blockIdx.x;
+  const int tid = threadIdx.x;
+  const i64 tok = row_toks[row];
+  const i64 pos = base_pos + row;
+  const i64 s_c1 = row_c1s[row];
+  if (tid == 0) {
+    input_ids[row] = tok;
+    position_ids[row] = pos;
+    if (row == 0 && committed != nullptr) committed[0] = (int)pos;
+    if (pos >= 0 && pos < P->capacity)
+      past_pos[pos] = pos;
+    else
+      atomicOr((unsigned long long*)&state[5], 1ULL);
+    ctx_out[2 * row + 0] = s_c1;
+    ctx_out[2 * row + 1] = tok;
+  }
+  const int hd = P->head_dim;
+  const int total = P->n_heads * hd;
+  const unsigned char* fp8_row = fp8_rows + (size_t)row * 8192u;
+  __nv_bfloat16* out_row = ple_out + (size_t)row * total;
+  unsigned char b[3];
+#pragma unroll
+  for (int u = 0; u < 3; ++u) {
+    const int j = tid + u * blockDim.x;
+    b[u] = (j < total) ? fp8_row[j] : 0;
+  }
+  const float scale = P->scale;
+  const bool is_int8 = (scale < 0.0f);
+  const float abs_scale = is_int8 ? -scale : scale;
+#pragma unroll
+  for (int u = 0; u < 3; ++u) {
+    const int j = tid + u * blockDim.x;
+    if (j < total) {
+      float f;
+      if (is_int8) {
+        f = static_cast<float>(static_cast<signed char>(b[u]));
+      } else {
+        const __half_raw hr = __nv_cvt_fp8_to_halfraw(b[u], __NV_E4M3);
+        f = __half2float(*reinterpret_cast<const __half*>(&hr));
+      }
+      out_row[j] = __float2bfloat16_rn(f * abs_scale);
+    }
   }
 }
 
@@ -782,7 +830,6 @@ QWEN38_PLANE_EXPORT void qwen38_plane_prep(void* s, const void* P, const void* t
       if (g_has_host_ple_params && g_host_ple_params.pad_ == 1) {
         constexpr int kSlots[8] = {0, 2, 8, 9, 10, 11, 12, 13};
         const int ple_total = g_host_ple_params.n_heads * g_host_ple_params.head_dim;
-        int dummy_committed = 0;
         for (int b = 0; b < batch; ++b) {
           i64* state_b = (i64*)state + (size_t)b * 16;
           const i64* ctx_in_b = (const i64*)ctx_in + (size_t)b * 2;
@@ -792,12 +839,39 @@ QWEN38_PLANE_EXPORT void qwen38_plane_prep(void* s, const void* P, const void* t
           int* committed_b = (int*)committed + b;
           i64* past_pos_b = (i64*)past_pos + (size_t)b * g_host_ple_params.capacity;
           __nv_bfloat16* ple_out_b = (__nv_bfloat16*)ple_out + (size_t)b * rows * ple_total;
-          for (int r = 0; r < rows; ++r) {
-            const void* r_ctx_in = (r == 0) ? ctx_in_b : (ctx_out_b + 2 * (r - 1));
-            void* r_ctx_out = ctx_out_b + 2 * r;
-            qwen38_plane_prep(s, P, state_b + kSlots[r], state_b + 1, r, r_ctx_in, r_ctx_out,
-                              input_ids_b + r, position_ids_b + r, r == 0 ? committed_b : &dummy_committed,
-                              past_pos_b, ple_out_b + (size_t)r * ple_total, state_b);
+          if (batch == 1) {
+            ensure_prep_workspace();
+            cudaStream_t stream = (cudaStream_t)s;
+            cudaMemcpyAsync(&g_staged_ple.scalars[0], state_b, 14 * sizeof(i64), cudaMemcpyDeviceToHost, stream);
+            cudaMemcpyAsync(&g_staged_ple.scalars[14], ctx_in_b, 2 * sizeof(i64), cudaMemcpyDeviceToHost, stream);
+            cudaStreamSynchronize(stream);
+            const i64 base_pos = g_staged_ple.scalars[1];
+            i64 cur_c0 = g_staged_ple.scalars[14];
+            i64 cur_c1 = g_staged_ple.scalars[15];
+            const unsigned int base_ring = (g_staged_ple.ring_idx * 8u) & 56u;
+            g_staged_ple.ring_idx = (g_staged_ple.ring_idx + 1u) & 7u;
+            unsigned char* fp8_base = g_staged_ple.prep_ring + base_ring * 8192u;
+            i64* d_toks = g_staged_ple.scalars + 16 + base_ring * 2;
+            i64* d_c1s = d_toks + 8;
+            for (int r = 0; r < rows; ++r) {
+              const i64 tok = g_staged_ple.scalars[kSlots[r]];
+              d_toks[r] = tok;
+              d_c1s[r] = cur_c1;
+              host_gather_ple_row(g_host_ple_params, tok, cur_c0, cur_c1, fp8_base + (size_t)r * 8192u);
+              cur_c0 = cur_c1;
+              cur_c1 = tok;
+            }
+            k_prep_fold_staged<<<rows, 1024, 0, stream>>>((const PleParams*)P, d_toks, base_pos, d_c1s, fp8_base,
+                                                          ctx_out_b, input_ids_b, position_ids_b,
+                                                          committed_b, past_pos_b, ple_out_b, state_b);
+          } else {
+            for (int r = 0; r < rows; ++r) {
+              const void* r_ctx_in = (r == 0) ? ctx_in_b : (ctx_out_b + 2 * (r - 1));
+              void* r_ctx_out = ctx_out_b + 2 * r;
+              qwen38_plane_prep(s, P, state_b + kSlots[r], state_b + 1, r, r_ctx_in, r_ctx_out,
+                                input_ids_b + r, position_ids_b + r, r == 0 ? committed_b : nullptr,
+                                past_pos_b, ple_out_b + (size_t)r * ple_total, state_b);
+            }
           }
         }
         return;
