@@ -97,6 +97,7 @@ struct State {
 
   const Model& model_;
   bool session_terminated_{};
+  bool generation_started_{false};
   std::shared_ptr<const GeneratorParams> params_;
 
   // Devices to allocate this state's tensors from. They mirror Model::p_device_ /

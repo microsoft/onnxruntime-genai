@@ -26,6 +26,12 @@ struct DefaultInputIDs : InputIDs {
   const char* name_;
 
   OrtValue* Get() override { return value_->GetOrtTensor(); }
+  void RewindTo(size_t index) {
+    if (index == 0) {
+      is_prompt_ = true;
+      shape_ = {state_.params_->BatchBeamSize(), 0};
+    }
+  }
 
  private:
   State& state_;

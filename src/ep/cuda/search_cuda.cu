@@ -12,21 +12,24 @@
 namespace Generators {
 namespace cuda {
 
-__global__ void ExpandInputSequences(int32_t* input_sequences, int32_t* sequences, int batch_size, int beam_size, int sequence_length, int max_length) {
-  // The original inputs are not expanded, this expands them in place into the sequences
+__global__ void ExpandInputSequences(const int32_t* input_sequences, const int32_t* current_sequences, int32_t* sequences, int batch_size, int beam_size, int sequence_length, int past_length, int max_length) {
   for (size_t batch = 0; batch < batch_size; batch++) {
     for (size_t beam = 0; beam < beam_size; beam++) {
+      const size_t offset = (batch * beam_size + beam) * max_length;
+      for (int j = 0; j < past_length; j++) {
+        sequences[offset + j] = current_sequences[offset + j];
+      }
       for (int j = 0; j < sequence_length; j++) {
-        sequences[(batch * beam_size + beam) * max_length + j] = input_sequences[batch * sequence_length + j];
+        sequences[offset + past_length + j] = input_sequences[batch * sequence_length + j];
       }
     }
   }
 }
 
-void Launch_ExpandInputSequences(const std::span<int32_t> input_sequences, std::span<int32_t> sequences, int batch_size, int beam_size, int max_length, cudaStream_t stream) {
+void Launch_ExpandInputSequences(std::span<const int32_t> input_sequences, std::span<const int32_t> current_sequences, std::span<int32_t> sequences, int batch_size, int beam_size, int past_length, int max_length, cudaStream_t stream) {
   const int total_elements = static_cast<int>(input_sequences.size());
   const int new_length = total_elements / batch_size;
-  ExpandInputSequences<<<1, 1, 0, stream>>>(input_sequences.data(), sequences.data(), batch_size, beam_size, new_length, max_length);
+  ExpandInputSequences<<<1, 1, 0, stream>>>(input_sequences.data(), current_sequences.data(), sequences.data(), batch_size, beam_size, new_length, past_length, max_length);
   CUDA_CHECK_LAUNCH();
 }
 

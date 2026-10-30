@@ -556,6 +556,134 @@ TEST(SamplingTests, NoRepeatNgramCorrectnessCpu) {
   // must be banned, so greedy falls back to the next-best allowed token (42).
   EXPECT_EQ(first_token(3), 42)
       << "Token 7 should be banned (repeats 3-gram 5,6,7); expected fallback to token 42.";
+
+  // Also verify prefill chunking across multiple AppendTokens calls before
+  // GenerateNextToken accumulates the full decoder prompt length.
+  {
+    auto params = OgaGeneratorParams::Create(*model);
+    params->SetSearchOption("max_length", 32);
+    params->SetSearchOptionBool("do_sample", false);
+    params->SetSearchOption("batch_size", batch_size);
+    params->SetSearchOption("repetition_penalty", 1.0);
+    params->SetSearchOption("no_repeat_ngram_size", 3.0);
+
+    auto generator = OgaGenerator::Create(*model, *params);
+    const std::array<int32_t, 3> chunk1{5, 6, 7};
+    const std::array<int32_t, 3> chunk2{8, 5, 6};
+    generator->AppendTokens(chunk1.data(), chunk1.size());
+    generator->AppendTokens(chunk2.data(), chunk2.size());
+    generator->SetLogits(*OgaTensor::Create(logits_cpu.data(), shape));
+    generator->GenerateNextToken();
+    EXPECT_EQ(generator->GetNextTokens()[0], 42);
+  }
+}
+
+// For encoder-decoder models (e.g. marian-ssru), AppendTokenSequences supplies
+// the encoder's source prompt tokens. ApplyNoRepeatNgram must only scan
+// generated decoder tokens and must not ban n-grams that appeared in the
+// encoder prompt.
+TEST(SamplingTests, NoRepeatNgramEncoderDecoderIgnoresPromptTokensCpu) {
+  auto model = OgaModel::Create(MODEL_PATH "marian-batch-values");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 16);
+  params->SetSearchOptionBool("do_sample", false);
+  params->SetSearchOption("batch_size", 2);
+  params->SetSearchOption("repetition_penalty", 1.0);
+  params->SetSearchOption("no_repeat_ngram_size", 2.0);
+
+  // In marian-batch-values, the decoder always scores token 3 highest for a
+  // 2-token prompt row. Putting {3, 3} in the encoder prompt creates the
+  // 2-gram (3, 3) in the encoder input.
+  const std::array<int32_t, 1> first{5};
+  const std::array<int32_t, 2> second{3, 3};
+  auto sequences = OgaSequences::Create();
+  sequences->Append(first.data(), first.size());
+  sequences->Append(second.data(), second.size());
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokenSequences(*sequences);
+  const size_t generated_start = generator->TokenCount();
+  ASSERT_EQ(generated_start, 2U);
+
+  // Step 1: first generated decoder token for row 1 is 3.
+  generator->GenerateNextToken();
+  ASSERT_EQ(generator->GetSequenceCount(1), generated_start + 1);
+  EXPECT_EQ(generator->GetSequenceData(1)[generated_start], 3);
+
+  // Step 2: decoder output so far is [3] (length 1 < ngram_size 2), so token 3
+  // must NOT be banned by the encoder prompt's (3, 3).
+  generator->GenerateNextToken();
+  ASSERT_EQ(generator->GetSequenceCount(1), generated_start + 2);
+  EXPECT_EQ(generator->GetSequenceData(1)[generated_start + 1], 3);
+
+  // Step 3: decoder output is now [3, 3], so repeating (3, 3) in the decoder
+  // output IS banned by no_repeat_ngram_size=2 and selects the next-highest
+  // token (0 / EOS) instead of 3.
+  generator->GenerateNextToken();
+  EXPECT_NE(generator->GetNextTokens()[1], 3);
+  EXPECT_EQ(generator->GetNextTokens()[1], 0);
+
+  // Also verify that a subsequent AppendTokens call (decoder continuation)
+  // preserves the initial source boundary rather than resetting it and erasing
+  // prior decoder n-gram history.
+  auto dynamic_model = OgaModel::Create(MODEL_PATH "marian-cache/dynamic");
+  auto single_params = OgaGeneratorParams::Create(*dynamic_model);
+  single_params->SetSearchOption("max_length", 16);
+  single_params->SetSearchOptionBool("do_sample", false);
+  single_params->SetSearchOption("batch_size", 1);
+  single_params->SetSearchOption("repetition_penalty", 1.0);
+  single_params->SetSearchOption("no_repeat_ngram_size", 2.0);
+
+  const int vocab_size = 128;
+  std::array<int64_t, 2> logits_shape{1, vocab_size};
+  std::vector<float> logits_cpu(vocab_size, 1.0f);
+  logits_cpu[3] = 10.0f;
+  logits_cpu[42] = 8.0f;
+
+  auto single_generator = OgaGenerator::Create(*dynamic_model, *single_params);
+  single_generator->AppendTokens(second.data(), second.size());
+  ASSERT_EQ(single_generator->TokenCount(), 2U);
+
+  // Generate first decoder token (3), then append a second decoder token (3)
+  // via AppendTokens; the next generated token must still ban (3, 3) and
+  // select 42.
+  single_generator->SetLogits(*OgaTensor::Create(logits_cpu.data(), logits_shape));
+  single_generator->GenerateNextToken();
+  EXPECT_EQ(single_generator->GetNextTokens()[0], 3);
+  const std::array<int32_t, 1> continuation{3};
+  single_generator->AppendTokens(continuation.data(), continuation.size());
+  single_generator->SetLogits(*OgaTensor::Create(logits_cpu.data(), logits_shape));
+  single_generator->GenerateNextToken();
+  EXPECT_EQ(single_generator->GetNextTokens()[0], 42);
+
+  // Also verify encoder-side multi-chunk prefill: appending two encoder chunks
+  // of length 3 before generation starts must accumulate the full encoder
+  // boundary (6 tokens) so neither chunk is scanned by ApplyNoRepeatNgram.
+  auto chunked_generator = OgaGenerator::Create(*dynamic_model, *single_params);
+  const std::array<int32_t, 3> enc_chunk1{5, 3, 3};
+  const std::array<int32_t, 3> enc_chunk2{4, 3, 3};
+  chunked_generator->AppendTokens(enc_chunk1.data(), enc_chunk1.size());
+  chunked_generator->AppendTokens(enc_chunk2.data(), enc_chunk2.size());
+  ASSERT_EQ(chunked_generator->TokenCount(), 6U);
+
+  // Step 1: generates first decoder token (3).
+  chunked_generator->SetLogits(*OgaTensor::Create(logits_cpu.data(), logits_shape));
+  chunked_generator->GenerateNextToken();
+  EXPECT_EQ(chunked_generator->GetNextTokens()[0], 3);
+
+  // Step 2: decoder sequence is [3] (length 1 < ngram_size 2); token 3 must NOT
+  // be banned by the second encoder chunk's (3, 3).
+  std::ignore = chunked_generator->GetLogits();
+  chunked_generator->SetLogits(*OgaTensor::Create(logits_cpu.data(), logits_shape));
+  chunked_generator->GenerateNextToken();
+  EXPECT_EQ(chunked_generator->GetNextTokens()[0], 3);
+
+  // Step 3: decoder sequence is now [3, 3], so repeating (3, 3) IS banned and
+  // selects fallback token 42.
+  std::ignore = chunked_generator->GetLogits();
+  chunked_generator->SetLogits(*OgaTensor::Create(logits_cpu.data(), logits_shape));
+  chunked_generator->GenerateNextToken();
+  EXPECT_EQ(chunked_generator->GetNextTokens()[0], 42);
 }
 
 #if USE_CUDA
