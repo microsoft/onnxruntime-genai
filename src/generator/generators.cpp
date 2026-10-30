@@ -845,6 +845,11 @@ void Generator::SetInputs(const NamedTensors& named_tensors) {
     }
   }
 
+  if (transducer_state_ && input_ids.empty()) {
+    generation_telemetry_.BeginAppend();
+    generation_telemetry_.CompleteAppend(0, state_->params_->search.num_beams, "audio");
+  }
+
   // Set any extra inputs (those defined in extra_inputs and those defined in the PresetExtraInputs registry)
   if (set_extra_inputs_) {
     state_->SetExtraInputs(extra_inputs_);
@@ -929,7 +934,11 @@ bool Generator::IsDone() {
   if (transducer_state_) {
     // Pending mel input means we haven't started processing this chunk yet
     if (!extra_inputs_.empty()) return false;
-    return transducer_state_->IsChunkDone();
+    const bool is_done = transducer_state_->IsChunkDone();
+    if (is_done) {
+      generation_telemetry_.OnGenerationCompleted();
+    }
+    return is_done;
   }
 
   if (computed_logits_) {
@@ -943,6 +952,7 @@ bool Generator::IsDone() {
       guidance_logits_processor_->Reset();
       last_action_ = Action::standard;
     }
+    generation_telemetry_.OnGenerationCompleted();
   }
 
   return is_done;

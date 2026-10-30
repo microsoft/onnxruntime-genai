@@ -175,6 +175,15 @@ set_target_properties(telemetry_helpers_tests PROPERTIES
 )
 add_test(NAME TelemetryHelpersTests COMMAND telemetry_helpers_tests)
 
+add_executable(generation_resource_tests
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry/generation-resource-tests.cpp"
+  "${CMAKE_SOURCE_DIR}/src/telemetry/generation_telemetry.cpp")
+target_compile_definitions(generation_resource_tests PRIVATE ORTGENAI_ENABLE_TELEMETRY)
+target_include_directories(generation_resource_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(generation_resource_tests PRIVATE GTest::gtest_main)
+set_target_properties(generation_resource_tests PROPERTIES FOLDER "Tests")
+add_test(NAME GenerationResourceTests COMMAND generation_resource_tests)
+
 # Standalone shutdown / re-initialization tests. Isolated in their own executable because they call
 # OgaShutdown(), which resets process-global GenAI state (env, device interfaces, add-on libraries,
 # registered plugin EPs). Keeping them out of unit_tests avoids any coupling to test order. This
@@ -286,7 +295,8 @@ if (ENABLE_TELEMETRY AND NOT ANDROID AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
     set(telemetry_device_info_test_source "device_info_tests.cpp")
   endif()
   add_executable(telemetry_device_info_tests
-    "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry/${telemetry_device_info_test_source}")
+    "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry/${telemetry_device_info_test_source}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry/hardware_info_tests.cpp")
   target_include_directories(telemetry_device_info_tests PRIVATE
     ${ORT_HEADER_DIR}
     ${onnxruntime_extensions_SOURCE_DIR}/shared/api
