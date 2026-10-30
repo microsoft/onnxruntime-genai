@@ -5,6 +5,8 @@
 #include <iostream>
 #include <cstring>
 #include <algorithm>
+#include <array>
+#include <limits>
 
 namespace Generators {
 
@@ -358,7 +360,7 @@ void Qwen2_5_VL_PipelineState::RunVision(const std::vector<ExtraInput>& extra_in
 void Qwen2_5_VL_PipelineState::RunSingleSessionVision(const std::vector<ExtraInput>& extra_inputs) {
   const auto& pixel_name = vl_model_.config_->model.vision.inputs.pixel_values;
 
-  auto find_extra_input = [&extra_inputs](const std::string& name) -> OrtValue* {
+  auto find_extra_input = [&extra_inputs](std::string_view name) -> OrtValue* {
     for (const auto& input : extra_inputs) {
       if (input.name == name) return input.tensor->GetOrtTensor();
     }
@@ -433,6 +435,101 @@ void Qwen2_5_VL_PipelineState::RunSingleSessionVision(const std::vector<ExtraInp
     output_index = static_cast<size_t>(std::distance(output_names.begin(), found));
   }
   const char* output_name_ptrs[] = {output_names[output_index].c_str()};
+
+  auto output_shape = vl_model_.session_info_.GetOutputShape(output_names[output_index]);
+  const int64_t output_capacity =
+      output_shape.size() == 2 || output_shape.size() == 3 ? output_shape[output_shape.size() - 2] : 0;
+  if (vl_model_.config_->model.type == "gemma4" && output_capacity > 0) {
+    if (output_shape.size() == 3) {
+      if (output_shape[0] > 1) {
+        throw std::runtime_error("Gemma 4 sequential vision requires an output batch dimension of one or dynamic");
+      }
+      output_shape[0] = 1;
+    }
+    const auto declared_pixels = vl_model_.session_info_.GetInputShape(pixel_name);
+    auto* positions = find_extra_input(vl_model_.config_->model.vision.inputs.pixel_position_ids);
+    const auto position_shape = positions ? positions->GetTensorTypeAndShapeInfo()->GetShape()
+                                          : std::vector<int64_t>{};
+    if (num_images <= 0 || pixel_shape.size() != 3 || declared_pixels.size() != 3 ||
+        declared_pixels[0] > 1 || position_shape.size() != 3 ||
+        position_shape[0] != num_images || position_shape[1] != pixel_shape[1] || position_shape[2] != 2) {
+      throw std::runtime_error("Gemma 4 fixed-output vision requires matching rank-3 per-image pixel and position inputs");
+    }
+
+    auto* counts = find_extra_input(Config::Defaults::NumImageTokens);
+    if (!counts || counts->GetTensorTypeAndShapeInfo()->GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64 ||
+        counts->GetTensorTypeAndShapeInfo()->GetElementCount() != static_cast<size_t>(num_images)) {
+      throw std::runtime_error("Gemma 4 fixed-output vision requires one INT64 num_image_tokens value per image");
+    }
+    const int64_t* image_token_counts = counts->GetTensorData<int64_t>();
+    int64_t total_tokens = 0;
+    for (int64_t image = 0; image < num_images; ++image) {
+      const int64_t count = image_token_counts[image];
+      if (count <= 0 || count > output_capacity) {
+        throw std::runtime_error("Gemma 4 image token counts must be positive and not exceed vision output capacity");
+      }
+      if (total_tokens > std::numeric_limits<int64_t>::max() - count) {
+        throw std::overflow_error("Gemma 4 image token count overflow");
+      }
+      total_tokens += count;
+    }
+
+    const int64_t tail_tokens = output_capacity - image_token_counts[num_images - 1];
+    const int64_t hidden_size = output_shape.back() > 0 ? output_shape.back()
+                                                        : vl_model_.config_->model.decoder.hidden_size;
+    if (hidden_size <= 0 || total_tokens > std::numeric_limits<int64_t>::max() - tail_tokens) {
+      throw std::overflow_error("Gemma 4 feature capacity overflow");
+    }
+    output_shape.back() = hidden_size;
+    const int64_t backing_tokens = total_tokens + tail_tokens;
+    const auto type = vl_model_.session_info_.GetOutputDataType(output_names[output_index]);
+    const size_t element_bytes = Ort::SizeOf(type);
+    if (static_cast<uint64_t>(backing_tokens) > std::numeric_limits<size_t>::max() / hidden_size / element_bytes) {
+      throw std::overflow_error("Gemma 4 feature capacity overflow");
+    }
+    const size_t row_bytes = static_cast<size_t>(hidden_size) * element_bytes;
+    const std::array<int64_t, 2> backing_shape{backing_tokens, hidden_size};
+    auto backing = OrtValue::CreateTensor(vl_model_.allocator_cpu_, backing_shape, type);
+    auto* data = static_cast<uint8_t*>(backing->GetTensorMutableRawData());
+    if (vl_model_.config_->model.vision.run_options.has_value()) {
+      State::SetRunOptions(*vl_model_.config_->model.vision.run_options);
+    }
+    // Each run overwrites only the preceding image's padding; the last write needs a full tail.
+    run_options_->AddConfigEntry("disable_synchronize_execution_providers", "0");
+    int64_t feature_offset = 0;
+    for (int64_t image = 0; image < num_images; ++image) {
+      std::vector<std::unique_ptr<OrtValue>> slices;
+      slices.reserve(batched_indices.size());
+      for (size_t index : batched_indices) {
+        slices.push_back(SliceLeadingImage(*source_values[index], image));
+        input_values[index] = slices.back().get();
+      }
+      auto output = OrtValue::CreateTensor(
+          backing->GetTensorMemoryInfo(), data + static_cast<size_t>(feature_offset) * row_bytes,
+          static_cast<size_t>(output_capacity) * row_bytes, output_shape, type);
+      OrtValue* output_ptr = output.get();
+      vl_model_.vision_session_->Run(run_options_.get(), input_name_ptrs.data(), input_values.data(),
+                                     input_name_ptrs.size(), output_name_ptrs, &output_ptr, 1);
+      feature_offset += image_token_counts[image];
+    }
+
+    const std::array<int64_t, 2> compact_shape{total_tokens, hidden_size};
+    auto compact = OrtValue::CreateTensor(backing->GetTensorMemoryInfo(), data,
+                                          static_cast<size_t>(total_tokens) * row_bytes, compact_shape, type);
+    std::unique_ptr<OrtValue> owner;
+    if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+      owner = std::move(backing);
+    } else {
+      Cast(*compact, owner, *GetDeviceInterface(DeviceType::CPU), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+    }
+    image_features_value_ = OrtValue::CreateTensor(
+        owner->GetTensorMemoryInfo(), owner->GetTensorMutableRawData(),
+        static_cast<size_t>(total_tokens) * static_cast<size_t>(hidden_size) * sizeof(float),
+        compact_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+    vision_output_owner_ = std::move(owner);
+    vision_ran_ = true;
+    return;
+  }
 
   auto run_encoder = [&]() {
     if (vl_model_.config_->model.vision.run_options.has_value()) {

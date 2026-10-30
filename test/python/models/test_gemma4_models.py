@@ -219,7 +219,6 @@ def _create_fixed_output_vision_model(onnx, output_path, capacity, *, output_ran
     output.shape = ir.Shape([capacity, 2048] if output_rank == 2 else [1, capacity, 2048])
     graph.outputs.clear()
     graph.outputs.append(output)
-    # State adds unconfigured outputs on first Run, which can reallocate its binding vector.
     graph.outputs.append(valid_features)
     ir.save(model, output_path)
 
@@ -968,17 +967,17 @@ def _fixed_output_gemma4(
     output_rank=2,
     feature_dtype=np.float32,
     disable_ep_sync=False,
+    consume_features=True,
 ):
     onnx = pytest.importorskip("onnx")
-    shutil.copytree(_get_gemma4_model_path(test_data_path), model_path)
-    _register_gemma4_image_token(model_path)
-    config_path = model_path / "genai_config.json"
+    config_path = _write_pipelined_gemma4(
+        onnx,
+        _get_gemma4_model_path(test_data_path),
+        model_path,
+        feature_type=onnx.TensorProto.FLOAT16 if feature_dtype == np.float16 else onnx.TensorProto.FLOAT,
+        consume_features=consume_features,
+    )
     config = json.loads(config_path.read_text(encoding="utf-8"))
-    config["model"]["speech"] = {"filename": "", "config_filename": ""}
-    config["model"]["vocab_size"] = 8
-    config["model"]["eos_token_id"] = [1]
-    config["model"]["image_token_id"] = GEMMA4_IMAGE_TOKEN_ID
-    config["search"]["past_present_share_buffer"] = False
     if disable_ep_sync:
         config["model"]["vision"]["run_options"] = {"disable_synchronize_execution_providers": "1"}
     config_path.write_text(json.dumps(config), encoding="utf-8")
@@ -989,13 +988,6 @@ def _fixed_output_gemma4(
         output_rank=output_rank,
         feature_dtype=feature_dtype,
     )
-    _create_dynamic_embedding_model(
-        onnx,
-        model_path / "dummy_embedding.onnx",
-        GEMMA4_IMAGE_TOKEN_ID,
-        feature_type=ir.DataType.FLOAT16 if feature_dtype == np.float16 else None,
-    )
-    _create_dynamic_decoder_model(onnx, model_path / "dummy_text.onnx")
     model = og.Model(os.fspath(model_path))
     return model, model.create_multimodal_processor()
 
@@ -1012,10 +1004,11 @@ def _fixed_output_gemma4(
         (["sheet.png", "australia.jpg"], 2, np.float32, False, 260),
     ],
 )
+@pytest.mark.parametrize("consume_features", [True, False])
 def test_gemma4_fixed_output_overlapping_writes(
-    test_data_path, tmp_path, image_names, output_rank, feature_dtype, disable_ep_sync, capacity
+    test_data_path, tmp_path, image_names, output_rank, feature_dtype, disable_ep_sync, capacity, consume_features
 ):
-    """Embedding sees compact valid prefixes after the owning vision state is released."""
+    """The pipelined decoder consumes only valid prefixes, with or without an in-graph merge."""
     model, processor = _fixed_output_gemma4(
         test_data_path,
         tmp_path / "fixed_output",
@@ -1023,6 +1016,7 @@ def test_gemma4_fixed_output_overlapping_writes(
         feature_dtype=feature_dtype,
         disable_ep_sync=disable_ep_sync,
         capacity=capacity,
+        consume_features=consume_features,
     )
     paths = [os.fspath(_get_test_media_path(test_data_path, Path("images") / name)) for name in image_names]
     images = og.Images.open(*paths) if paths else None
@@ -1049,13 +1043,15 @@ def test_gemma4_fixed_output_overlapping_writes(
         params.set_search_options(max_length=4096)
         generator = og.Generator(model, params)
         generator.set_inputs(inputs)
-        np.testing.assert_array_equal(generator.get_input("image_features"), expected_features)
+        if consume_features:
+            np.testing.assert_array_equal(generator.get_input("image_features"), expected_features)
         np.testing.assert_array_equal(generator.get_output("inputs_embeds"), expected_embeds)
         generator.generate_next_token()
         assert generator.get_next_tokens() == ([2] if paths else [0])
         generator.generate_next_token()
         np.testing.assert_array_equal(generator.get_output("inputs_embeds"), np.zeros((1, 1, 2048)))
-        assert generator.get_input("image_features").shape == (0, 2048)
+        if consume_features:
+            assert generator.get_input("image_features").shape == (0, 2048)
         del generator
 
 

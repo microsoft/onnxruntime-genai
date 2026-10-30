@@ -10,7 +10,6 @@
 #include "qwen_vl_state.h"
 #include <algorithm>
 #include <future>
-#include <limits>
 #include <numeric>
 
 namespace Generators {
@@ -21,20 +20,10 @@ int64_t GetNumImageTokens(const std::vector<ExtraInput>& extra_inputs) {
   for (size_t i = 0; i < extra_inputs.size(); ++i) {
     if (extra_inputs[i].name == Config::Defaults::NumImageTokens) {
       assert(extra_inputs[i].tensor->ort_tensor_);
-      const auto info = extra_inputs[i].tensor->ort_tensor_->GetTensorTypeAndShapeInfo();
-      if (info->GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
-        throw std::runtime_error("num_image_tokens must have type INT64");
-      }
       const int64_t* num_image_tokens_data = extra_inputs[i].tensor->ort_tensor_->GetTensorData<int64_t>();
-      int64_t total = 0;
-      for (size_t j = 0; j < info->GetElementCount(); ++j) {
-        const int64_t count = num_image_tokens_data[j];
-        if (count < 0 || count > std::numeric_limits<int64_t>::max() - total) {
-          throw std::runtime_error("num_image_tokens must be nonnegative and have a total that fits INT64");
-        }
-        total += count;
-      }
-      return total;
+      return std::accumulate(num_image_tokens_data,
+                             num_image_tokens_data + extra_inputs[i].tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount(),
+                             0LL);
     }
   }
 
