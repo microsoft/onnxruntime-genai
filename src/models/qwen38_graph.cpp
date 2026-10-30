@@ -535,8 +535,9 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
         dflash_->ReleaseAll();
         SyncStream();
       }
-      if (fast_->chunk > 512) {
-        Draft(d_dflash_prompt_.data(), static_cast<size_t>(fast_->chunk), static_cast<size_t>(capacity_), 1000, false);
+      const size_t warm_dflash_chunk = std::min<size_t>(static_cast<size_t>(fast_->chunk), 2048);
+      if (warm_dflash_chunk > 512) {
+        Draft(d_dflash_prompt_.data(), warm_dflash_chunk, static_cast<size_t>(capacity_), 1000, false);
         dflash_->ReleaseAll();
       }
       const int warm_len = std::min<int>(fast_->chunk, 512);
@@ -2615,7 +2616,32 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
   // several slots read its output names from the model file, so that a target the batched device cannot serve is refused
   // before any weight is uploaded. The check against the session below stays authoritative.
   std::string target_filename = config_->model.decoder.filename;
-  if (const char* drafts_env = std::getenv("ORT_QWEN38_MTP_DRAFTS")) {
+  if (const char* ctx_env = std::getenv("ORT_QWEN38_CONTEXT_LENGTH")) {
+    std::string tier(ctx_env);
+    std::transform(tier.begin(), tier.end(), tier.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (tier == "2048")
+      tier = "2k";
+    else if (tier == "8192")
+      tier = "8k";
+    else if (tier == "16384")
+      tier = "16k";
+    else if (tier == "32768")
+      tier = "32k";
+    else if (tier == "65536")
+      tier = "64k";
+    else if (tier == "131072")
+      tier = "128k";
+    if (tier == "32k") {
+      target_filename = "model.onnx";
+    } else if (!tier.empty()) {
+      const std::string cand = "model_" + tier + ".onnx";
+      if (std::filesystem::exists(root / cand)) {
+        target_filename = cand;
+      } else if (std::filesystem::exists(root / "model_dynamic_ctx.onnx")) {
+        target_filename = "model_dynamic_ctx.onnx";
+      }
+    }
+  } else if (const char* drafts_env = std::getenv("ORT_QWEN38_MTP_DRAFTS")) {
     const int d = std::atoi(drafts_env);
     if (d >= 1 && d <= 3) {
       const std::filesystem::path parent = std::filesystem::path(target_filename).parent_path();
@@ -2690,6 +2716,14 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
   // The outputs of the session are authoritative (the model file may not be a protobuf one): refuse a ring-bank target for
   // several slots before anything else is built.
   ValidateQwen38BatchedTargetOutputs(ResolveQwen38MaxBatchSize(*config_), session_target_->GetOutputNames());
+  if (session_info_.HasInput("past_position_ids")) {
+    const auto pos_shape = session_info_.GetInputShape("past_position_ids");
+    if (pos_shape.size() == 2 && pos_shape[1] > 0) {
+      config_->model.qwen38_graph.kv_capacity = static_cast<int>(pos_shape[1]);
+      config_->model.context_length = std::max(1, static_cast<int>(pos_shape[1]) - 8);
+      config_->search.max_length = config_->model.context_length;
+    }
+  }
   if (g_log.enabled) Log("qwen38_graph") << "target session " << SecondsSince(start) << " s" << std::endl;
 
   auto make_options = [&](const std::optional<Config::SessionOptions>& configured, bool inherit, const char* label) {
