@@ -12,6 +12,37 @@ Prerequisites:
 Example call to benchmarking script
 python benchmark_e2e.py -i {model folder} -b 1 -l 128 -g 256 -r 100 -w 10 -k 5 -o {output csv file name}
 
+Token generation metrics
+
+Token Generation Throughput measures post-first-token decode, not isolated
+generate_next_token() call speed. For each measured request, the interval runs
+continuously from completion of the first generated token (including is_done())
+through completion of the final generated token (including is_done()). It includes
+intervening loop work, blocking refill/verification calls, and buffered token
+returns. It excludes prompt processing and first-token generation; it is not
+computed by subtracting independently aggregated TTFT from wall-clock time.
+
+Let N be the actual generated tokens per sequence, measured by the change in
+generator.token_count() after appending the prompt, including early termination.
+The existing batched generator interface supplies a common sequence length;
+these metrics use that length and do not infer individual sequences' EOS positions.
+For N > 1 and a positive finite decode interval T seconds, request throughput is
+batch_size * (N - 1) / T tokens/second. Request latency is 1000 * T / (N - 1)
+milliseconds/token per sequence, without division by batch size.
+--aggregation mean or median aggregates these request-level rates and latencies
+separately, rather than pooling individual call durations or inverting an
+aggregated latency. Batch size is applied exactly once, in throughput only.
+
+Requests with only one generated token (including early EOS), no post-first token,
+or no measurable decode interval do not contribute to decode aggregates. If none
+contribute, both metrics print N/A and their existing result-list slots are None.
+Saved JSON omits token_generation_throughput_tps and token_generation_latency_ms
+and records token_generation_metrics_status: "unavailable", avoiding NaN or
+infinite rates. Mixed runs aggregate only contributing requests. Existing output
+field names are unchanged; Tokens Generated remains the requested generation
+length, while decode calculations use actual emitted counts. Other timing and
+throughput metrics retain their existing definitions.
+
 Engine guidance benchmark
 
 Build with guidance and run paired guided and unguided requests to compare setup latency, time to first token, inter-token latency, decode throughput, and schema compliance:
