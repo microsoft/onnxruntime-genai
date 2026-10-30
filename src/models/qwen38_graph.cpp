@@ -120,7 +120,7 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
   const auto& q = model_.config_->model.qwen38_graph;
   mtp_enabled_ = q.mtp.enabled;
   prefill_head_ = q.mtp.prefill_head;
-  keep_hidden_ = mtp_enabled_ && prefill_head_;
+  keep_hidden_ = mtp_enabled_ && prefill_head_ && model_.config_->model.dflash2.filename.empty();
   fold_ = q.fold.enabled;
   // Test hook, deliberately not a config key: ORT_QWEN38_FORCE_REJECT=1 replaces every draft before its verify.
   if (const char* force_reject_env = std::getenv("ORT_QWEN38_FORCE_REJECT")) {
@@ -185,13 +185,36 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
     plane_.Check(plane_.memcpy_h2d(d_arange32_.data(), a32.data(), slots * 4, stream_), "arange32");
     SyncStream();  // host vectors die here
   }
-  if (fold_)
+  if (fold_ && model_.session_head_r2_)
     BuildHeadR2();
-  else if (mtp_enabled_)
+  else if (mtp_enabled_ && !fold_)
     BuildHead();
   if (q.prefill.enabled) BuildFastPrefill();
+  if (!model_.config_->model.dflash2.filename.empty()) {
+    if (!fold_ || !fast_ || !fast_->unified)
+      throw std::runtime_error("DFlash experiment requires unified folded prefill");
+    if (model_.config_->model.dflash2.num_draft_tokens != verify_rows_ - 1)
+      throw std::runtime_error("DFlash draft count must match target prefix-state width");
+    auto draft_config = CreateDflash2Config(*model_.config_);
+    draft_config->model.embedding.filename.clear();
+    dflash_model_ = std::make_shared<Dflash2Model>(std::move(draft_config), GetOrtEnv());
+    const auto cache_shape = dflash_model_->session_info_.GetInputShape("past_key_values.0.key");
+    if (cache_shape.size() != 4 || (cache_shape[1] != 16 && cache_shape[1] != 128 && cache_shape[1] != 256))
+      throw std::runtime_error("DFlash experiment requires cache pages of 16, 128, or 256 tokens");
+    const size_t page_size = static_cast<size_t>(cache_shape[1]);
+    dflash_ = std::make_unique<Dflash2Drafter>(
+        dflash_model_, page_size, Dflash2Drafter::PoolBlocks(*model_.config_, page_size, 1), 1);
+    d_dflash_prompt_ = PlaneBuffer(plane_, size_t(fast_->chunk) * kDflashWidth * 2, stream_);
+  }
   Reset();
-  if (q.warmup) {
+  if (dflash_) {
+    const auto start = Clock::now();
+    std::vector<int32_t> dummy(static_cast<size_t>(verify_rows_) * num_banks_ * 6, 1000);
+    StepPrefill(dummy);
+    Reset();
+    warmup_seconds = SecondsSince(start);
+  }
+  if (q.warmup && !dflash_) {
     const auto start = Clock::now();
     Warmup();
     warmup_seconds = SecondsSince(start);
@@ -365,9 +388,9 @@ void Qwen38GraphEngine::BuildTarget() {
     plane_.Check(plane_.memcpy_h2d(fold_ptrs_.data(), ptrs, sizeof(ptrs), stream_), "fold ptrs");
     SyncStream();  // ptrs lives on the stack
     const auto i64 = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64;
-    fold_tensors_["fold.ctl"] = MakeTensor(ctl_.data(), {8}, i64);
+    fold_tensors_["fold.ctl"] = MakeTensor(ctl_.data(), info.GetInputShape("fold.ctl"), i64);
     fold_tensors_["fold.ctx_commit"] = MakeTensor(ctx_commit_.data(), {2}, i64);
-    fold_tensors_["fold.ctx_a"] = MakeTensor(ctx_a_.data(), {2}, i64);
+    fold_tensors_["fold.ctx_a"] = MakeTensor(ctx_a_.data(), {verify_rows_ > 2 ? 2 * verify_rows_ : 2}, i64);
     fold_tensors_["fold.ctx_b"] = MakeTensor(ctx_a_.data() + 16, {2}, i64);
     fold_tensors_["fold.ptrs"] = MakeTensor(fold_ptrs_.data(), {2}, i64);
   }
@@ -507,7 +530,10 @@ void Qwen38GraphEngine::BuildTarget() {
           t = add_own(name, {static_cast<int64_t>(status_count_)}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
         else if (name == "next_tokens")
           t = add_own(name, {1, rows}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
-        else
+        else if (name == "aux_hidden_states") {
+          t = add_own(name, {1, rows, int64_t(kDflashWidth)}, ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16);
+          d.auxiliary = t->ptr;
+        } else
           throw std::runtime_error("qwen38_graph: unsupported target output " + name);
         d.binding->BindOutput(name.c_str(), *t->value);
       }
@@ -631,6 +657,7 @@ void Qwen38GraphEngine::BuildHead() {
 void Qwen38GraphEngine::BuildHeadState() {
   const SessionInfo& info = fold_ ? model_.session_info_ : head_[0].info;
   const std::string prefix = fold_ ? "head.past_key_values.0." : "past_key_values.0.";
+  if (!model_.config_->model.dflash2.filename.empty() && !info.HasInput(prefix + "key")) return;
   for (const char* tail : {"key", "value", "index_key"})
     NewDeviceTensor(head_store_, std::string("past_key_values.0.") + tail, FixedShape(info.GetInputShape(prefix + tail)),
                     info.GetInputDataType(prefix + tail));
@@ -658,6 +685,8 @@ bool Qwen38GraphEngine::ContextIsHealthy() const noexcept { return model_.IsExec
 
 void Qwen38GraphEngine::Reset() {
   SyncStream();
+  if (dflash_) dflash_->ReleaseAll();
+  dflash_prompt_rows_ = 0;
   for (auto& bank : banks_)
     if (bank.arena.data()) plane_.Check(plane_.device_memset(bank.arena.data(), 0, bank.arena.size(), stream_), "clear bank");
   for (auto& entry : store_) plane_.Check(plane_.device_memset(entry.second->ptr, 0, entry.second->Bytes(), stream_), "clear store");
@@ -1107,11 +1136,58 @@ void Qwen38GraphEngine::EnqueueStep() {
   inflight_ = true;
 }
 
+void Qwen38GraphEngine::Draft(const uint8_t* features, size_t rows, size_t position,
+                              int32_t anchor, bool propose) {
+  if (!features || rows == 0) throw std::runtime_error("DFlash experiment requires committed feature rows");
+  if (!plane_.dflash_select) SyncStream();
+  const int64_t shape[2] = {int64_t(rows), int64_t(kDflashWidth)};
+  Tensor auxiliary(model_.p_device_, ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16);
+  auxiliary.ort_tensor_ = OrtValue::CreateTensor(*memory_info_, const_cast<uint8_t*>(features),
+                                                 rows * kDflashWidth * 2, std::span<const int64_t>(shape, 2),
+                                                 ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16);
+  Dflash2Drafter::Feed feed{};
+  feed.aux_row_count = rows;
+  feed.first_position = position;
+  feed.anchor_token = anchor;
+  feed.draft_eligible = true;
+  feed.wants_drafts = propose;
+  std::vector<std::vector<int32_t>> drafts;
+  if (!dflash_->Propose(auxiliary, {&feed, 1}, drafts, nullptr, nullptr, plane_.dflash_select != nullptr))
+    throw std::runtime_error("DFlash experiment could not ingest the committed target features");
+  if (propose) {
+    if (plane_.dflash_select) {
+      plane_.Check(plane_.dflash_select(stream_, dflash_->CandidateIds().GetRawData(),
+                                        dflash_->Scores().GetRawData(), ctl_.data(),
+                                        verify_rows_ - 1, model_.config_->model.dflash2.selector_top_k),
+                   "select DFlash drafts on device");
+      return;
+    }
+    if (drafts.size() != 1 || drafts[0].size() != size_t(verify_rows_ - 1))
+      throw std::runtime_error("DFlash experiment returned an incomplete proposal");
+    constexpr int slots[3] = {2, 8, 9};
+    for (size_t i = 0; i < drafts[0].size(); ++i) {
+      const int64_t d = drafts[0][i];
+      WriteCtl(slots[i], {&d, 1});
+    }
+  }
+}
+
 void Qwen38GraphEngine::BeginDecode(bool run_cycle) {
   if (decode_started_) throw std::logic_error("qwen38_graph: decoding already started");
   if (ledger_.Length() == 0) throw std::logic_error("qwen38_graph: BeginDecode before the prompt was ingested");
   decode_started_ = true;
   run_hints_.ExpectPrefillTokens(0);
+  if (dflash_) {
+    if (!run_cycle) return;
+    FastHandoff();
+    const int64_t state[2] = {pending_, static_cast<int64_t>(ledger_.Length())};
+    WriteCtl(0, std::span<const int64_t>(state, 2));
+    if (!dflash_prompt_rows_) throw std::runtime_error("DFlash experiment lacks prompt features");
+    Draft(d_dflash_prompt_.data(), dflash_prompt_rows_, dflash_prompt_position_, pending_, true);
+    dflash_prompt_rows_ = 0;
+    EnqueueFold();
+    return;
+  }
   if (fold_) {
     if (!run_cycle) return;
     ClearHead();
@@ -1192,6 +1268,13 @@ void Qwen38GraphEngine::Advance(const Qwen38CycleRecord& record, bool want_more)
     pending_ = static_cast<int32_t>(record.new_pending);
   }
   if (!want_more) return;
+  if (dflash_) {
+    const size_t step = record.TokenCount();
+    pending_ = static_cast<int32_t>(record.new_pending);
+    Draft(inflight_dir_->auxiliary, step, ledger_.Length() - step, pending_, true);
+    EnqueueFold();
+    return;
+  }
   if (fold_) {
     if (suffix_lookup_mode_ == 1 || (suffix_lookup_mode_ == 2 && !record.accepted)) {
       int32_t lookup_drafts[3] = {-1, -1, -1};
@@ -1428,7 +1511,8 @@ std::unique_ptr<Config> PreflightQwen38GraphModelConfig(std::unique_ptr<Config> 
         "qwen38_flash_graph requires model.qwen38_graph.{head.filename_s1|fold.head_r2.filename,plane_library,ple_table}");
   if (q.fold.enabled) {
     if (!q.mtp.enabled) throw std::runtime_error("model.qwen38_graph.fold requires model.qwen38_graph.mtp.enabled");
-    if (q.fold.head_r2.filename.empty()) throw std::runtime_error("model.qwen38_graph.fold.head_r2.filename is required");
+    if (q.fold.head_r2.filename.empty() && config_->model.dflash2.filename.empty())
+      throw std::runtime_error("model.qwen38_graph.fold.head_r2.filename is required");
   } else if (q.mtp.enabled && q.head.filename_s2.empty()) {
     throw std::runtime_error("model.qwen38_graph.head.filename_s2 is required when MTP is enabled");
   }
@@ -1577,8 +1661,10 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
   };
 
   if (q.fold.enabled) {
-    head_r2_session_options_ = make_options(q.fold.head_r2.session_options, true, "mtp");
-    session_head_r2_ = CreateSession(ort_env, q.fold.head_r2.filename, head_r2_session_options_.get());
+    if (!q.fold.head_r2.filename.empty() && config_->model.dflash2.filename.empty()) {
+      head_r2_session_options_ = make_options(q.fold.head_r2.session_options, true, "mtp");
+      session_head_r2_ = CreateSession(ort_env, q.fold.head_r2.filename, head_r2_session_options_.get());
+    }
     if (separate_prefill_sessions) {
       // the dense / head-KV sessions are not graph captured and do not inherit the decoder's provider options
       dense_session_options_ = make_options(q.prefill.dense.session_options, false, "dense");

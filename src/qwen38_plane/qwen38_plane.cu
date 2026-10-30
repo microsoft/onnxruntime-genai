@@ -1593,3 +1593,29 @@ QWEN38_PLANE_EXPORT int qwen38_plane_test_stream_capture(void* stream, int begin
 }
 #endif
 }
+
+__global__ void DflashSelect(const int32_t* candidates, const float* scores, i64* control,
+                             int drafts, int top_k) {
+  const int slots[] = {2, 8, 9};
+  int previous = 0;
+  for (int step = 0; step < drafts; ++step) {
+    const float* row = scores + (step * top_k + previous) * top_k;
+    int best = 0;
+    for (int index = 1; index < top_k; ++index) {
+      if (row[best] < row[index]) best = index;
+    }
+    control[slots[step]] = candidates[step * top_k + best];
+    previous = best;
+  }
+}
+
+extern "C" QWEN38_PLANE_EXPORT int qwen38_plane_dflash_select(
+    void* stream, const void* candidates, const void* scores,
+    void* control, int drafts, int top_k) {
+  if (!candidates || !scores || !control || drafts < 1 || drafts > 3 || top_k < 1)
+    return static_cast<int>(cudaErrorInvalidValue);
+  DflashSelect<<<1, 1, 0, static_cast<cudaStream_t>(stream)>>>(
+      static_cast<const int32_t*>(candidates), static_cast<const float*>(scores),
+      static_cast<i64*>(control), drafts, top_k);
+  return static_cast<int>(cudaGetLastError());
+}
