@@ -89,6 +89,7 @@ so shared I/O, precision, and graph settings are initialized in one place.
 DFlash 2 and LiLiCorr use `load_drafter_weights` for their paired checkpoints.
 The `make_slice_range` and `make_split_equal` convenience helpers delegate to
 the inherited `Model` operators without changing their call signatures.
+LiLiCorr uses `Model.make_topk` directly, including its value/index output names.
 
 ### `Attrs` Dictionaries
 

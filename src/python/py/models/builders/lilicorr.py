@@ -202,9 +202,9 @@ class LiLiCorrBuilder(DFlash2Builder):
         hsel = self.reshape(f"{p}/select/Flatten", sl, [-1, h], bf, ["num_sample", h])
         logits = self.make_lm_head(hsel, "num_sample")
         logits32 = self.make_cast(f"{p}/logits/Cast", logits, f32, ["num_sample", self.vocab_size])
-        vals, idx = self.make_topk(
-            f"{p}/topk/TopK", logits32, k, f"{p}/topk/values", f"{p}/topk/indices", ["num_sample", k]
-        )
+        topk_name = f"{p}/topk/TopK"
+        self.make_topk(topk_name, [logits32, self.const([k])], f32, ["num_sample", k])
+        vals, idx = self.out(topk_name), f"{topk_name}/output_1"
         # Log-partition from the (descending) top-k max. ReduceLogSumExp / ReduceMax over a [rows, vocab] tensor run a
         # cuDNN reduction that is ~100x slower than ORT's own last-axis ReduceSum.
         top_logit = self.make_slice_range(f"{p}/logits/max", vals, 0, 1, 1, f32, ["num_sample", 1])

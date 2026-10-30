@@ -148,12 +148,6 @@ class BlockDrafterBuilder(Model):
         self.make_value(output, dtype, shape)
         return output
 
-    def make_topk(self, name, root_input, k, values_name, indices_name, shape):
-        self.make_node("TopK", [root_input, self.const([k])], [values_name, indices_name], name=name, axis=-1, largest=1, sorted=1)
-        self.make_value(values_name, ir.DataType.FLOAT, shape)
-        self.make_value(indices_name, ir.DataType.INT64, shape)
-        return values_name, indices_name
-
     def make_silu(self, name, root_input, dtype, shape):
         sigmoid = self.unary("Sigmoid", f"{name}/Sigmoid", root_input, dtype, shape)
         return self.binary("Mul", f"{name}/Mul", root_input, sigmoid, dtype, shape)
