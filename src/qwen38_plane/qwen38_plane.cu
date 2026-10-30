@@ -36,13 +36,13 @@ typedef Qwen38PleParams PleParams;
 
 struct StagedPleWorkspace {
   PleParams params{};
-  i64* scalars = nullptr;                   // pinned [64]: tok/ctl words + ctx_in
-  unsigned char* prep_ring = nullptr;       // pinned mapped [64 * 8192]
-  unsigned char* prep_ring_dev = nullptr;   // device alias for prep_ring
+  i64* scalars = nullptr;                  // pinned [64]: tok/ctl words + ctx_in
+  unsigned char* prep_ring = nullptr;      // pinned mapped [64 * 8192]
+  unsigned char* prep_ring_dev = nullptr;  // device alias for prep_ring
   unsigned int ring_idx = 0;
-  i64* prefill_tokens = nullptr;            // pinned [cap_rows]
-  unsigned char* prefill_fp8 = nullptr;     // pinned mapped [cap_rows * max_total]
-  unsigned char* prefill_fp8_dev = nullptr; // device alias for prefill_fp8
+  i64* prefill_tokens = nullptr;             // pinned [cap_rows]
+  unsigned char* prefill_fp8 = nullptr;      // pinned mapped [cap_rows * max_total]
+  unsigned char* prefill_fp8_dev = nullptr;  // device alias for prefill_fp8
   size_t prefill_cap_rows = 0;
   size_t prefill_cap_bytes = 0;
   const void* cached_state_ptr = nullptr;
@@ -791,8 +791,8 @@ QWEN38_PLANE_EXPORT void qwen38_plane_set_ple_host_params(const void* params) {
 }
 
 QWEN38_PLANE_EXPORT void qwen38_plane_prep(void* s, const void* P, const void* tok_ptr, const void* pos_ptr, int pos_add, const void* ctx_in,
-                       void* ctx_out, void* input_ids, void* position_ids, void* committed, void* past_pos,
-                       void* ple_out, void* state) {
+                                           void* ctx_out, void* input_ids, void* position_ids, void* committed, void* past_pos,
+                                           void* ple_out, void* state) {
   {
     std::lock_guard<std::mutex> lock(g_staged_ple_mu);
     if (!g_host_ple_workspaces.empty() || g_ever_had_staged_ple) {
@@ -873,19 +873,19 @@ QWEN38_PLANE_EXPORT void qwen38_plane_argmax_part(void* s, const void* logits, i
 }
 
 QWEN38_PLANE_EXPORT void qwen38_plane_post1(void* s, const void* v0, const void* i0, int nb, void* state, void* ctx_commit, const void* ctx_a,
-                        const void* st0, int nst, void* result, int ring) {
+                                            const void* st0, int nst, void* result, int ring) {
   k_post1<<<1, 32, 0, (cudaStream_t)s>>>((const float*)v0, (const int*)i0, nb, (i64*)state, (i64*)ctx_commit,
                                          (const i64*)ctx_a, (const int*)st0, nst, (i64*)result, ring);
 }
 
 QWEN38_PLANE_EXPORT void qwen38_plane_post_tok(void* s, const void* tok01, void* state, void* ctx_commit, const void* ctx_a, const void* ctx_b,
-                           const void* st0, int nst, void* result, int ring) {
+                                               const void* st0, int nst, void* result, int ring) {
   k_post_tok<<<1, 32, 0, (cudaStream_t)s>>>((const i64*)tok01, (i64*)state, (i64*)ctx_commit, (const i64*)ctx_a,
                                             (const i64*)ctx_b, (const int*)st0, nst, (i64*)result, ring);
 }
 
 QWEN38_PLANE_EXPORT void qwen38_plane_head_prep(void* s, const void* ctl, int rows, int hlen, int hidden_width, const void* src, void* dst,
-                            void* tokens, void* positions, void* committed) {
+                                                void* tokens, void* positions, void* committed) {
   k_head_prep<<<1, 1024, 0, (cudaStream_t)s>>>((const i64*)ctl, rows, hlen, hidden_width, (const uint4*)src, (uint4*)dst,
                                                (i64*)tokens, (i64*)positions, (int*)committed);
 }
@@ -900,7 +900,7 @@ QWEN38_PLANE_EXPORT void qwen38_plane_or_status(void* s, const void* st, int nst
 
 /* ---- fast prefill kernels: batched PLE rows, dense -> packed state hand-off ---- */
 QWEN38_PLANE_EXPORT void qwen38_plane_ple_rows(void* s, const void* P, const void* tokens, int n, const void* ctx_in, void* ctx_out,
-                           void* ple_out) {
+                                               void* ple_out) {
   if (n <= 0) return;
   {
     std::lock_guard<std::mutex> lock(g_staged_ple_mu);
@@ -940,7 +940,7 @@ QWEN38_PLANE_EXPORT void qwen38_plane_ple_rows(void* s, const void* P, const voi
 }
 
 QWEN38_PLANE_EXPORT void qwen38_plane_pool_keys(void* s, const void* raw, int nb, const void* knorm, const void* cosv, const void* sinv,
-                            int width, float eps, int first_block, void* out) {
+                                                int width, float eps, int first_block, void* out) {
   if (nb <= 0) return;
   k_pool_keys<<<nb, 128, 0, (cudaStream_t)s>>>((const __nv_bfloat16*)raw, (const __nv_bfloat16*)knorm,
                                                (const __nv_bfloat16*)cosv, (const __nv_bfloat16*)sinv, width, eps,
@@ -955,7 +955,7 @@ QWEN38_PLANE_EXPORT void qwen38_plane_transpose_f32(void* s, const void* src, vo
 }
 
 QWEN38_PLANE_EXPORT void qwen38_plane_quantize_kv(void* s, const void* src, void* dst, const void* scale, int rows, int src_pitch_elems,
-                              int dst_pitch_elems, int mode) {
+                                                  int dst_pitch_elems, int mode) {
   if (rows <= 0) return;
   k_quantize_kv<<<rows, 256, 0, (cudaStream_t)s>>>((const __nv_bfloat16*)src, (uint8_t*)dst, (const float*)scale, rows,
                                                    src_pitch_elems, dst_pitch_elems, mode);
@@ -1008,7 +1008,7 @@ QWEN38_PLANE_EXPORT int qwen38_plane_memcpy_d2d(void* dst, const void* src, size
   return (int)cudaMemcpyAsync(dst, src, bytes, cudaMemcpyDeviceToDevice, (cudaStream_t)s);
 }
 QWEN38_PLANE_EXPORT int qwen38_plane_memcpy2d_d2d(void* dst, size_t dpitch, const void* src, size_t spitch, size_t width, size_t height,
-                              void* s) {
+                                                  void* s) {
   return (int)cudaMemcpy2DAsync(dst, dpitch, src, spitch, width, height, cudaMemcpyDeviceToDevice, (cudaStream_t)s);
 }
 QWEN38_PLANE_EXPORT int qwen38_plane_stream_create(void** s) { return (int)cudaStreamCreateWithFlags((cudaStream_t*)s, cudaStreamNonBlocking); }

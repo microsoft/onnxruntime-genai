@@ -696,7 +696,7 @@ Qwen38FileMapping::Qwen38FileMapping(Qwen38Plane& plane, const std::filesystem::
     : plane_{plane}, path_{full_path} {
   const int fd = open(full_path.c_str(), O_RDONLY);
   if (fd < 0) throw std::runtime_error("qwen38_graph: cannot open weight pool file " + full_path.string());
-  struct stat st {};
+  struct stat st{};
   if (fstat(fd, &st) != 0 || st.st_size <= 0) {
     close(fd);
     throw std::runtime_error("qwen38_graph: empty or invalid weight pool file " + full_path.string());
@@ -783,7 +783,7 @@ Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::filesystem::path& 
       const std::filesystem::path full = root / shard.path;
       const int fd = open(full.c_str(), O_RDONLY);
       if (fd < 0) throw std::runtime_error("qwen38_graph: cannot open the PLE shard file " + full.string());
-      struct stat st {};
+      struct stat st{};
       if (fstat(fd, &st) != 0 || st.st_size <= 0) {
         close(fd);
         throw std::runtime_error("qwen38_graph: cannot stat the PLE shard file " + full.string());
