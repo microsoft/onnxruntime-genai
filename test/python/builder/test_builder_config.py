@@ -200,6 +200,52 @@ def test_drafter_unknown_fields_are_rejected(drafter_type, field):
         )
 
 
+@pytest.mark.parametrize("value", [False, True])
+def test_target_shared_input_projection_merge_maps_to_legacy_option(value):
+    effective = normalize_builder_config(
+        "bf16",
+        "cuda",
+        target_options={"optimizations": {"merge_shared_input_projections": value}},
+    )
+
+    assert effective.extra_options["merge_shared_input_projections"] is value
+
+
+def test_structured_shared_input_projection_merge_overrides_legacy_option():
+    with pytest.warns(
+        UserWarning,
+        match="merge_shared_input_projections overrides legacy extra_options.merge_shared_input_projections",
+    ):
+        effective = normalize_builder_config(
+            "bf16",
+            "cuda",
+            {"merge_shared_input_projections": True},
+            target_options={"optimizations": {"merge_shared_input_projections": False}},
+        )
+
+    assert effective.extra_options["merge_shared_input_projections"] is False
+
+
+@pytest.mark.parametrize("value", ["true", 1])
+def test_target_shared_input_projection_merge_must_be_boolean(value):
+    with pytest.raises(ValueError, match="merge_shared_input_projections must be a boolean"):
+        normalize_builder_config(
+            "bf16",
+            "cuda",
+            target_options={"optimizations": {"merge_shared_input_projections": value}},
+        )
+
+
+@pytest.mark.parametrize("field", ["fuse_qkv", "fuse_mlp_gate_up", "unknown_option"])
+def test_target_optimizations_reject_other_fields(field):
+    with pytest.raises(ValueError, match="unknown target_options.optimizations field"):
+        normalize_builder_config(
+            "bf16",
+            "cuda",
+            target_options={"optimizations": {field: True}},
+        )
+
+
 def test_structured_fields_select_version_two():
     effective = normalize_builder_config(
         None,
