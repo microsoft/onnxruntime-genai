@@ -122,6 +122,44 @@ root layout instead of the `target/`, `head_r2/`, `dense/` and `head_kv/` folder
 cache in BF16 while the target KV cache is INT8; `--keep-bf16-router-shared` and `--keep-bf16-shared-down` keep the MoE router and
 the shared-expert projections in BF16.
 
+### INT4 + INT8 package for SM80 and newer (`build_package_v12d_int4_int8.py`)
+
+`build_package_v12d_int4_int8.py --hf-dir <checkpoint> --v12b-dir <v12b package> --v12d-dir <v12d package> --ops-dir <custom-op
+libraries> --out <dir>` builds the Ampere-friendly variant of the v12d package from the HF checkpoint and the graphs of the two
+existing packages:
+
+* the MoE experts of the 48 target layers and of the MTP head are `com.microsoft::QMoE` (INT4 symmetric, block size 32, SM80 prepacked
+  layout);
+* the dense projections and the hyper-connection down/up weights (402 unique weights) are `com.microsoft::MatMulNBits` (INT8 symmetric,
+  block size 32, SM80 prepacked layout); `--keep-bf16-router-shared` keeps the MoE router and the shared-expert projections in BF16;
+* the PLE tables are symmetric INT8 shards (`ple/ple_int8_*.data`); the token embedding stays on the CPU (BF16 in the host pool, INT8
+  `embedding.onnx` in the flat package) and the LM head is BF16 in the layered package and INT8 in the flat one;
+* the target KV cache is the calibrated per-channel INT8 cache, the MTP-head KV cache is BF16;
+* the custom-op libraries and the CUDA provider come from `--ops-dir` (`sm_80`, `sm_86`, `sm_89` and `sm_90` builds without the
+  Hopper-only TMA / cluster ops); the flat package also accepts `--plane-lib` and `--provider-lib` to override the plane library and the
+  provider;
+* the package is self-contained: no `.safetensors` files and no unreferenced bytes of the source weights.
+
+`--clean-flat-package` writes the flat root layout; it needs `--reuse-embed-from <clean package>`, which supplies `embedding.onnx` +
+`embedding.onnx.data`, `attn_consts.data`, `genai_config.json` and the tokenizer files. `--reuse-ple-from` and `--reuse-qmoe-from`
+hard-link the PLE shards and the INT4 expert data of an earlier build instead of recomputing them. `--hf-dir`, `--v12b-dir`,
+`--v12d-dir`, `--ops-dir` and `--out` are required, and `--out` must not be equal to or nested in `--v12b-dir` or `--v12d-dir` (or
+contain one). The script needs `torch`.
+
+### Standard-operator packages (`build_package_contrib_ops.py`)
+
+`build_package_contrib_ops.py --src <flat RC2 package> --out <dir> --plane-lib <libqwen38_plane.so> --provider-lib
+<libonnxruntime_providers_cuda.so>` rewrites the `model.onnx` and `mtp.onnx` of a flat RC2 package (the NVFP4 + FP8 or the INT4 + INT8
+variant) so that they use only standard ONNX operators and `com.microsoft` contrib operators (for example `MatMulBlockQuantizedFp8Weight`,
+`HyperConnectionLowRankMix`, `GatedDeltaNet`, `DynamicSparseAttention`), writes the weights the new nodes need to
+`contrib_weights.data`, and removes `custom_ops_libraries` and `runtime_profiles` from `genai_config.json` (`libs/` keeps only the plane
+library); `package_manifest.json` records `contrib_ops_only` and the rewrite counts. The CUDA provider has to implement those
+contrib operators. `--fp8-mlp-shared` and `--fp8-shared-down-only` quantize BF16 shared-expert projections to FP8 (all of them, or only
+`SharedExpertDown`) instead of keeping them as BF16 `MatMul`; `--reuse-hc-bf16-from <converted package>` takes the BF16
+hyper-connection weights and `contrib_weights.data` from an earlier conversion so that the INT8 hyper-connection chains fuse into
+`HyperConnectionLowRankMix`. The script deletes an existing `--out` first and refuses an `--out` that is equal to, nested in or around
+`--src`.
+
 ## Engine usage
 
 ```python
@@ -147,6 +185,8 @@ The builders produce a package; every other script needs one, and the ones that 
 | --- | --- |
 | `build_package.py` | v11 package (S=1 / S=2 chain verify) from its parts, with the PLE table |
 | `build_package_engine_v12b.py` | v12b / v12c / v12d package (folded cycle + fast prefill, optional `--kv-quant`, `--weight-quant`, `--mtp-moe-quant`, `--hc-quant`, `--share-dense-weights`, and the flat `--clean-package` layout) from an existing v12b package |
+| `build_package_v12d_int4_int8.py` | INT4 QMoE + INT8 MatMulNBits variant of the v12d package for SM80 and newer (layered, or flat with `--clean-flat-package`) |
+| `build_package_contrib_ops.py` | rewrites a flat RC2 package to standard ONNX and `com.microsoft` contrib operators only (no `custom_ops_libraries`) |
 | `qwen38_engine_util.py` | helpers shared by the scripts: CUDA EP registration and model loading with config overlays (`$QWEN38_OVERLAY_JSON`), the natural-text prompt pools, and `run_turn` (one greedy turn through `og.Engine`); registers the DLL directories on Windows |
 | `calibrate_qwen38_kv.py` | calibrate per-channel INT8 and FP8 KV-cache scales for the 12 target sparse-attention layers and 1 MTP-head sparse-attention layer (the JSON of the wanted quantization is the `--kv-scale-file` of `build_package_engine_v12b.py`); `--out` receives the `--quant-type` scales and the other quantization is written beside it under the name with the quantization token swapped (`kv_scales_int8_per_channel.json` -> `kv_scales_fp8_per_channel.json`, `scales.json` -> `scales.fp8_per_channel.json`), so the two files never collide (a collision is an error before any work) |
 | `smoke.py` | minimal example, prints the stream, speed and speculative statistics |
