@@ -35,6 +35,10 @@ namespace {
     << "    --ep_library_path <path>\n"
     << "      Register a plugin EP DLL/SO before loading the model. Provider options from\n"
     << "      genai_config.json are preserved. Without -e, use the providers in that file.\n"
+    << "    --adapter_path <path>\n"
+    << "      Load a compatible .onnx_adapter and activate it on every generator. Omit for no adapter.\n"
+    << "    --adapter_name <name>\n"
+    << "      Name used to load and activate the adapter. Default: " << defaults.adapter_name << "\n"
     << "    -b,--batch_size <number>\n"
     << "      Number of sequences to generate in parallel. Default: " << defaults.batch_size << "\n"
     << "    Prompt options:\n"
@@ -121,6 +125,9 @@ void VerifyOptions(const Options& opts) {
   if (opts.ep_library_path.empty()) {
     ValidateExecutionProvider(opts.execution_provider);
   }
+  if (opts.adapter_name.empty()) {
+    throw std::runtime_error("Adapter name must not be empty.");
+  }
 }
 
 }  // namespace
@@ -151,6 +158,13 @@ Options ParseOptionsFromCommandLine(int argc, const char* const* argv) {
         if (opts.ep_library_path.empty()) {
           throw std::runtime_error("Plugin EP library path must not be empty.");
         }
+      } else if (arg == "--adapter_path") {
+        opts.adapter_path = next_arg(i);
+        if (opts.adapter_path.empty()) {
+          throw std::runtime_error("Adapter path must not be empty.");
+        }
+      } else if (arg == "--adapter_name") {
+        opts.adapter_name = next_arg(i);
       } else if (arg == "-b" || arg == "--batch_size") {
         opts.batch_size = ParseNumber<size_t>(next_arg(i));
       } else if (arg == "-l" || arg == "--prompt_length") {
