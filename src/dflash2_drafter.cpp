@@ -785,12 +785,73 @@ void Dflash2Drafter::AllocateCache() {
   }
 }
 
+bool Dflash2Drafter::ReplayPrefix(const Feed& feed) {
+  if (!feed.adopted_prefix_match || !feed.draft_eligible ||
+      requests_.find(feed.request) != requests_.end()) {
+    return false;
+  }
+  const auto& match = *feed.adopted_prefix_match;
+  if (ring_blocks_ == 0 || feed.first_position != match.token_count ||
+      match.blocks.empty() || match.blocks.size() != match.auxiliary_blocks.size()) {
+    throw std::logic_error("DFlash prefix replay needs a complete windowed match.");
+  }
+  if (free_blocks_.size() < ring_blocks_) {
+    ++admission_misses_;
+    return false;
+  }
+
+  const size_t rows = std::min(match.token_count, context_window_);
+  const size_t first_position = match.token_count - rows;
+  const size_t row_bytes = CheckedMultiply(aux_hidden_size_, Ort::SizeOf(aux_type_),
+                                           "DFlash prefix auxiliary row");
+  const size_t block_bytes = CheckedMultiply(paged_block_size_, row_bytes,
+                                             "DFlash prefix auxiliary block");
+  std::vector<uint8_t> auxiliary_bytes(
+      CheckedMultiply(rows, row_bytes, "DFlash prefix auxiliary rows"));
+  for (size_t position = first_position; position < match.token_count;) {
+    const size_t block_index = position / paged_block_size_;
+    const size_t block_offset = position % paged_block_size_;
+    const size_t count = std::min(paged_block_size_ - block_offset,
+                                  match.token_count - position);
+    const auto& block = match.auxiliary_blocks[block_index];
+    if (!block || block->size() != block_bytes) {
+      throw std::logic_error("A cached DFlash prefix is missing auxiliary rows.");
+    }
+    std::copy_n(
+        block->begin() + static_cast<ptrdiff_t>(block_offset * row_bytes),
+        count * row_bytes,
+        auxiliary_bytes.begin() +
+            static_cast<ptrdiff_t>((position - first_position) * row_bytes));
+    position += count;
+  }
+
+  Tensor auxiliary{GetDeviceInterface(DeviceType::CPU), aux_type_};
+  const std::array<int64_t, 2> shape{
+      static_cast<int64_t>(rows), static_cast<int64_t>(aux_hidden_size_)};
+  auxiliary.CreateTensor(shape);
+  auxiliary.GetByteSpan().CopyFromCpu(std::span<const uint8_t>{auxiliary_bytes});
+  auto& state = requests_[feed.request];
+  EnsureBlocks(state, 0);
+  state.cached_positions = first_position;
+  const std::array replay_feed{
+      Feed{.request = feed.request,
+           .aux_row_count = rows,
+           .first_position = first_position,
+           .draft_eligible = true}};
+  std::vector<std::vector<int32_t>> ignored_drafts;
+  return Propose(auxiliary, replay_feed, ignored_drafts);
+}
+
 bool Dflash2Drafter::Admit(const Feed& feed) {
   if (requests_.find(feed.request) != requests_.end()) {
     return true;
   }
   if (feed.draft_eligible && feed.first_position != 0 && RestorePrefix(feed)) {
     return true;
+  }
+  if (feed.draft_eligible && feed.first_position != 0 &&
+      !feed.prefix_checkpoint && feed.adopted_prefix_match) {
+    return ReplayPrefix(feed);
   }
   if (feed.first_position != 0 && feed.prefix_checkpoint) {
     return false;

@@ -195,9 +195,14 @@ prepare/publish ordering then advances both components atomically; rollback
 discards the provisional fixed row, releases adopted paged references, and
 restores the request cursor.
 
-A windowed DFlash2 drafter without a matching optional draft checkpoint can ingest
-the recomputed target suffix into a fresh ring. Drafting and draft-checkpoint
-capture remain disabled until that ring holds a complete attention window.
+A windowed DFlash2 drafter without a matching optional draft checkpoint first
+replays the most recent target auxiliary rows retained with the adopted prefix
+into a fresh ring. The replay is bounded to the drafter attention window and
+uses its ordinary context path; it does not rerun the target layers. Once the
+ring is reconstructed, drafting can resume on the warm request's executed
+suffix. If replay is unavailable or drafter ring capacity is occupied, the
+request remains target-only and can ingest newly executed target rows until it
+has a complete attention window.
 Full-attention drafters still require their entire prefix; their admission behavior
 is unchanged.
 
@@ -219,7 +224,8 @@ can coexist with target prefix caching. For a windowed DFlash 2 drafter, an
 optional ring checkpoint can be attached to the exact indexed target boundary
 after its fixed-state checkpoint and the complete drafter proposal succeed.
 The ring is restored into newly allocated drafter blocks before a cached
-request joins at a nonzero position. Set
+request joins at a nonzero position. A matching snapshot is preferred over
+auxiliary replay and avoids the extra drafter forward pass. Set
 `engine.dynamic_batching.dflash2_max_snapshots` in the GenAI configuration to set the maximum number of
 retained DFlash 2 ring snapshots for a hybrid target with fixed state and prefix
 caching enabled. It defaults to `1`; `0` disables only drafter
@@ -248,15 +254,18 @@ With `og.set_log_options(enabled=True)`, Engine construction logs the requested
 and effective snapshot counts, actual target block count, block size, target
 cache bytes, and draft snapshot reservation bytes under `engine_cache`.
 If the matching draft checkpoint is absent, the request retains the full
-target hit, but cannot immediately resume DFlash drafting at that boundary.
-An eligible windowed drafter with a free ring can start ingesting auxiliary
-hidden states from target tokens executed **after** the cached boundary. It
-does not replay or reconstruct the skipped prefix. DFlash drafts remain disabled
-until those newly executed tokens cover its required context window
-(`model.dflash2.sliding_window + model.dflash2.block_size`). Only then can
-drafting resume, subject to the normal turn eligibility and generation limits.
-A short request may finish before reaching that threshold and use no DFlash
-drafts at all. A matching snapshot avoids this warm-up.
+target hit. Every indexed target block for an eligible windowed DFlash model
+also retains its packed target auxiliary rows in host memory. The drafter
+replays the most recent
+`model.dflash2.sliding_window + model.dflash2.block_size` rows through its
+context path and can then draft immediately, subject to normal turn
+eligibility and generation limits. This fallback also applies when
+`dflash2_max_snapshots` is explicitly `0`; that setting disables GPU snapshot
+rings, not host auxiliary retention or target prefix caching. Retained rows
+share the indexed blocks' lifetime and are released on eviction. Their host
+cost is the indexed-token count times the packed auxiliary width, which can
+exceed the GPU memory saved when projected draft K/V is narrower. A matching
+snapshot avoids the replay forward pass.
 Full-attention DSpark remains target-only
 after a nonzero-position prefix hit.
 
@@ -2044,9 +2053,10 @@ Rewind releases any tracked DFlash/DSpark state, including its cache blocks. On 
 that was previously sampled or admission-denied can try to join again if its new position-zero
 step is draft-eligible and capacity is available. A nonzero-position hit also joins a windowed
 DFlash 2 drafter immediately when its exact target boundary still has a draft checkpoint and a
-free ring. Without a matching checkpoint, an eligible windowed drafter can claim a free ring but
-must ingest a full required context window of newly executed target tokens before proposing
-drafts. Full-attention DSpark cannot join at a nonzero position without its prior context.
+free ring. Without a matching checkpoint, an eligible windowed drafter can reconstruct its recent
+window from the auxiliary rows retained with the adopted target blocks. If reconstruction cannot
+run because drafter capacity is occupied, it can later claim a free ring and warm it from newly
+executed target tokens. Full-attention DSpark cannot join at a nonzero position without its prior context.
 Rewind therefore does not guarantee renewed drafting.
 
 ## Backpressure and fairness

@@ -17,6 +17,7 @@
 namespace Generators {
 
 struct Request;
+struct PrefixCacheMatch;
 
 struct Dflash2PrefixCheckpoint {
   size_t token_count{};
@@ -134,6 +135,7 @@ struct Dflash2Drafter {
     bool wants_drafts{};
     bool wants_independent_sampling{};
     bool wants_lattice{};
+    std::shared_ptr<const PrefixCacheMatch> adopted_prefix_match;
   };
 
   /**
@@ -199,6 +201,8 @@ struct Dflash2Drafter {
                std::vector<std::vector<int32_t>>& drafts,
                std::vector<std::vector<TargetTokenSelection>>* draft_distributions = nullptr,
                std::vector<Dflash2Lattice>* lattices = nullptr);
+  // Rebuilds a windowed ring from target auxiliary rows retained with an adopted prefix.
+  bool ReplayPrefix(const Feed& feed);
 
   // Returns a request's blocks to the pool. Safe for requests the drafter never saw.
   void Release(const Request* request);

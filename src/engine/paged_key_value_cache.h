@@ -113,7 +113,11 @@ struct PagedKeyValueCache {
   void RecordPrefixPublicationRefusal() noexcept;
   void SealCommittedBlocks(const void* request_id,
                            std::span<const int32_t> tokens,
-                           std::shared_ptr<const FixedStatePrefixCheckpoint> checkpoint = nullptr);
+                           size_t first_position = 0,
+                           std::span<const uint8_t> auxiliary = {});
+  bool RequiresAuxiliaryPrefix() const;
+  std::shared_ptr<const BlockIdentity> SealedPrefixIdentity(
+      const void* request_id, size_t token_count) const;
   void SealCheckpointedPrefix(
       const void* request_id, std::span<const int32_t> tokens, size_t token_count,
       const std::function<std::shared_ptr<const FixedStatePrefixCheckpoint>()>& capture_checkpoint);

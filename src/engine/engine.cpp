@@ -595,6 +595,7 @@ void Engine::PrepareDflash2Feeds(const StepPlan& plan,
     feed.request = entry.request.get();
     if (entry.prefix_match) {
       feed.prefix_checkpoint = entry.prefix_match->draft_checkpoint;
+      feed.adopted_prefix_match = entry.prefix_match;
     }
     feed.aux_row_begin = entry.packed_token_offset;
     feed.aux_row_count = valid_rows;
@@ -673,6 +674,7 @@ void Engine::PublishDflash2Drafts(ScheduledRequests& scheduled_requests) {
 void Engine::ReleaseConsumedDflash2Checkpoints() noexcept {
   for (auto& feed : dflash2_feeds_) {
     feed.prefix_checkpoint.reset();
+    feed.adopted_prefix_match.reset();
   }
 }
 
@@ -2734,7 +2736,8 @@ void Engine::RunDynamic() {
         entry.prefix_match.reset();
       }
       try {
-        cache_manager_->SealCommittedBlocks(step_plan_);
+        cache_manager_->SealCommittedBlocks(
+            step_plan_, scheduled_requests.AuxHiddenStates());
       } catch (const std::bad_alloc&) {
         cache_manager_->RecordPrefixPublicationRefusal();
       }
