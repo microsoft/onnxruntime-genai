@@ -37,6 +37,14 @@ bool StartsWith(const std::string& value, const char* prefix) {
   return value.rfind(prefix, 0) == 0;
 }
 
+struct WarmupFlag {
+  explicit WarmupFlag(Qwen38OrtRunHints& hints) : hints_{hints} { hints_.SetWarmup(true); }
+  ~WarmupFlag() { hints_.SetWarmup(false); }
+  WarmupFlag(const WarmupFlag&) = delete;
+  WarmupFlag& operator=(const WarmupFlag&) = delete;
+  Qwen38OrtRunHints& hints_;
+};
+
 size_t Elements(const std::vector<int64_t>& shape) {
   size_t count = 1;
   for (int64_t dim : shape) count *= static_cast<size_t>(dim);
@@ -573,6 +581,7 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
   if (dflash_) {
     const auto start = Clock::now();
     run_hints_.RequireDeterministicMoe();
+    const WarmupFlag warmup_flag{run_hints_};
     const Qwen38DflashWarmupPlan warmup = PlanQwen38DflashWarmup(q.warmup, verify_rows_, num_banks_);
     if (warmup.drafter && fast_ && fast_->unified) {
       if (max_batch_ > 1) {
@@ -2448,13 +2457,7 @@ void Qwen38GraphEngine::Warmup() {
   // The Runs of the warmup carry ORT_QMOE_IN_WARMUP and, from here on, every Run of the engine asks for deterministic
   // MoE tactics: the engine keeps that state and publishes it around each Run only (qwen38_ort_env.h), also when this
   // throws.
-  struct WarmupFlag {
-    explicit WarmupFlag(Qwen38OrtRunHints& hints) : hints_{hints} { hints_.SetWarmup(true); }
-    ~WarmupFlag() { hints_.SetWarmup(false); }
-    WarmupFlag(const WarmupFlag&) = delete;
-    WarmupFlag& operator=(const WarmupFlag&) = delete;
-    Qwen38OrtRunHints& hints_;
-  } warmup_flag{run_hints_};
+  const WarmupFlag warmup_flag{run_hints_};
   const int R = fold_ ? verify_rows_ : 2;
   const int max_prompt = capacity_ - Qwen38DecodeDevice::kReservedTail - (R + 1);
   if (max_prompt < R) return;
