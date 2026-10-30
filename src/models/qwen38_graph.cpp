@@ -1255,12 +1255,13 @@ void Qwen38GraphEngine::ForceRejectDraft() {
 void Qwen38GraphEngine::EnqueueFold() {
   if (force_reject_) ForceRejectDraft();
   ledger_.RequireRoom(verify_rows_, "the next verify step");
-  const uint8_t* ctl = ctl_.data();
-  constexpr int kDraftCtlSlots[7] = {2, 8, 9, 10, 11, 12, 13};
-  PrepRow(verify_rows_, 0, ctl + 0, ctl + 8, 0, ctx_commit_.data(), ctx_a_.data());
-  for (int r = 1; r < verify_rows_; ++r) {
-    const int slot = kDraftCtlSlots[r - 1];
-    PrepRow(verify_rows_, r, ctl + 8 * slot, ctl + 8, r, ctx_a_.data() + 16 * (r - 1), ctx_a_.data() + 16 * r);
+  const RowInputs& in = inputs_[verify_rows_ - 1];
+  plane_.Check(plane_.prep(stream_, params_dev_.data(), ctl_.data(), ctl_.data() + 8, -verify_rows_,
+                           ctx_commit_.data(), ctx_a_.data(), in.input_ids, in.position_ids, in.committed, past_pos_,
+                           in.ple, ctl_.data()),
+               "prepare the fold rows");
+  if (in.inputs_embeds) {
+    plane_.EmbedRows(stream_, model_.EmbeddingTable(), in.input_ids, in.inputs_embeds, verify_rows_);
   }
   RunTarget(verify_rows_, ledger_.Bank());
   Direction& d = dirs_[verify_rows_ - 1][ledger_.Bank()];
