@@ -2910,7 +2910,10 @@ TEST(PrefixSnapshotCacheTest, RelativeDiskParentIsResolvedBeforeTheWorkingDirect
     fs_std::path previous{fs_std::current_path()};
     ~ScopedWorkingDirectory() { fs_std::current_path(previous); }
   } working_directory;
+  fs_std::current_path(test_directory.Path().parent_path());
   const auto relative = fs_std::relative(test_directory.Path(), fs_std::current_path());
+  ASSERT_FALSE(relative.empty());
+  ASSERT_TRUE(relative.is_relative());
   PrefixSnapshotCache cache{{0, 0, 16}, 1, relative};
   fs_std::current_path(other_directory.Path());
   auto entry = MakeStorageEntry(cache, GetDeviceInterface(DeviceType::CPU));
