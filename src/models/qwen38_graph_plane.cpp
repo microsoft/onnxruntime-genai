@@ -96,8 +96,31 @@ Qwen38Plane::~Qwen38Plane() = default;
 #elif defined(_WIN32)
 
 Qwen38Plane::Qwen38Plane(const std::filesystem::path& path) {
-  const std::filesystem::path actual_path = ResolveWindowsSharedLibraryPath(path);
-  HMODULE mod = LoadLibraryW(actual_path.wstring().c_str());
+  HMODULE mod = nullptr;
+  std::filesystem::path actual_path = path;
+  if (actual_path.empty()) {
+    actual_path = "onnxruntime-genai-cuda.dll";
+    HMODULE self_mod = nullptr;
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCWSTR>(&ParseQwen38PleDescription), &self_mod) &&
+        self_mod) {
+      wchar_t self_buf[MAX_PATH]{};
+      if (GetModuleFileNameW(self_mod, self_buf, MAX_PATH) > 0) {
+        auto candidate = std::filesystem::path(self_buf).parent_path() / L"onnxruntime-genai-cuda.dll";
+        std::error_code ec;
+        if (std::filesystem::exists(candidate, ec)) {
+          actual_path = candidate;
+        }
+      }
+    }
+    mod = LoadLibraryW(actual_path.wstring().c_str());
+    if (!mod) {
+      mod = LoadLibraryW(L"onnxruntime-genai-cuda.dll");
+    }
+  } else {
+    actual_path = ResolveWindowsSharedLibraryPath(actual_path);
+    mod = LoadLibraryW(actual_path.wstring().c_str());
+  }
   if (!mod) {
     const DWORD err = GetLastError();
     throw std::runtime_error("qwen38_graph: failed to load the plane library " + actual_path.string() +
@@ -160,10 +183,34 @@ Qwen38Plane::~Qwen38Plane() {
 #else
 
 Qwen38Plane::Qwen38Plane(const std::filesystem::path& path) {
-  handle_ = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+  std::string tried_name = path.string();
+  if (path.empty()) {
+    const char* default_lib =
+#if defined(__APPLE__)
+        "libonnxruntime-genai-cuda.dylib";
+#else
+        "libonnxruntime-genai-cuda.so";
+#endif
+    tried_name = default_lib;
+    // The CUDA library is normally already loaded by the CUDA execution provider. Otherwise look next to GenAI.
+    handle_ = dlopen(default_lib, RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
+    if (!handle_) {
+      Dl_info info{};
+      if (dladdr(reinterpret_cast<const void*>(&ParseQwen38PleDescription), &info) != 0 && info.dli_fname) {
+        const auto candidate = std::filesystem::path(info.dli_fname).parent_path() / default_lib;
+        tried_name = candidate.string();
+        handle_ = dlopen(candidate.c_str(), RTLD_NOW | RTLD_LOCAL);
+      }
+    }
+    if (!handle_) {
+      handle_ = dlopen(default_lib, RTLD_NOW | RTLD_LOCAL);
+    }
+  } else {
+    handle_ = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+  }
   if (!handle_) {
     const char* reason = dlerror();
-    throw std::runtime_error("qwen38_graph: failed to load the plane library " + path.string() + ": " +
+    throw std::runtime_error("qwen38_graph: failed to load the plane library " + tried_name + ": " +
                              (reason ? reason : "unknown error"));
   }
   library_path = path.string();
