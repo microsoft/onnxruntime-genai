@@ -91,6 +91,10 @@ class DFlash2Builder(BlockDrafterBuilder):
         with open(os.path.join(draft_dir, "config.json")) as f:
             cfg = json.load(f)
         self.cfg = cfg
+        self.make_drafter_config_init(cfg, max_position_embeddings, num_draft_tokens)
+        super().__init__("dflash2_graph", "dflash2")
+
+    def make_drafter_config_init(self, cfg, max_position_embeddings, num_draft_tokens):
         dfl = cfg["dflash_config"]
         self.dflash_config = dfl
 
@@ -132,7 +136,6 @@ class DFlash2Builder(BlockDrafterBuilder):
         self.num_draft_tokens = self.block_size - 1
         self.input_embedding_scale = float(dfl.get("input_embedding_scale", 1.0))
         self.aux_hidden_size = self.hidden_size * len(self.target_layer_ids)
-        super().__init__("dflash2_graph", "dflash2")
 
     # ------------------------------------------------------------ rope caches
 
@@ -286,7 +289,7 @@ class DFlash2Builder(BlockDrafterBuilder):
     # ------------------------------------------------------------------ graph
 
     def make_model(self):
-        w = self.load_weights()
+        w = self.load_drafter_weights()
         self.declare_io()
         self._make_rope_caches()
 
@@ -704,7 +707,7 @@ class DFlash2Builder(BlockDrafterBuilder):
 
     # --------------------------------------------------------------- weights
 
-    def load_weights(self):
+    def load_drafter_weights(self):
         import safetensors.torch as safetensors_torch  # noqa: PLC0415
 
         weights = {}

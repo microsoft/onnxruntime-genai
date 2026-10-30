@@ -53,36 +53,26 @@ class LiLiCorrBuilder(DFlash2Builder):
         precision="bf16",
         lm_head_precision="int8",
     ):
-        # DFlash2Builder.__init__ is intentionally not called: it parses a DFlash 2 config (rope_parameters,
-        # selector_rank, ...) that a LiLiCorr checkpoint does not have. Every attribute the inherited graph-building
-        # methods read is set below.
-        self.draft_dir = draft_dir
-        self.target_dir = target_dir
-        self.target_model = None
-        self.exclude_embeds = False
-        self.ep = "cuda"
-        self.io_dtype = ir.DataType.BFLOAT16
-        self.external_dtype = ir.DataType.BFLOAT16
-        self.layernorm_attrs = {"residual_dtype": self.io_dtype}
+        quant = None
         if precision in ("int4", "int8"):
-            self.quant_bits = 4 if precision == "int4" else 8
-            self.quant_block_size = 32
-            self.quant_prepack = 0
+            quant = {"bits": 4 if precision == "int4" else 8, "block_size": 32, "prepack": 0}
         elif precision != "bf16":
             raise ValueError(f"precision must be bf16, int4 or int8, got {precision!r}.")
         self.lm_head_precision = lm_head_precision
-        self.lm_head_quant = None
-        self.embed_quant = None
-        self.filename = filename
-        self.paged_block_size = paged_block_size
-        self.mlp_attrs = {"fuse_gate_up": True}
-        self.uses_q_row_map = False
+        super().__init__(
+            draft_dir,
+            target_dir,
+            ir.DataType.BFLOAT16,
+            paged_block_size,
+            max_position_embeddings,
+            filename=filename,
+            num_draft_tokens=num_draft_tokens,
+            quant=quant,
+        )
 
-        with open(os.path.join(draft_dir, "config.json")) as f:
-            cfg = json.load(f)
+    def make_drafter_config_init(self, cfg, max_position_embeddings, num_draft_tokens):
         if cfg.get("dflash_config", {}).get("projector_type") != "lilicorr" or not cfg["dflash_config"].get("lilicorr_enabled", True):
-            raise ValueError(f"'{draft_dir}' is not a LiLiCorr draft checkpoint (dflash_config.projector_type != 'lilicorr').")
-        self.cfg = cfg
+            raise ValueError(f"'{self.draft_dir}' is not a LiLiCorr draft checkpoint (dflash_config.projector_type != 'lilicorr').")
         dfl = cfg["dflash_config"]
         self.dflash_config = dfl
 
@@ -132,11 +122,10 @@ class LiLiCorrBuilder(DFlash2Builder):
         self.factor_dim = int(dfl["lilicorr_factor_dim"])
         self.vector_eps = float(dfl["lilicorr_vector_eps"])
         self.logit_scale = float(dfl["lilicorr_logit_scale"])
-        self.make_graph("dflash2_graph", "dflash2")
 
     # ---------------------------------------------------------------- weights
 
-    def load_weights(self):
+    def load_drafter_weights(self):
         try:
             from loaders.modelopt import ModeloptModel  # noqa: PLC0415
         except ImportError:
@@ -209,7 +198,7 @@ class LiLiCorrBuilder(DFlash2Builder):
         bf, f32 = self.io_dtype, ir.DataType.FLOAT
 
         h3 = self.reshape(f"{p}/select/Reshape", final, [-1, self.block_size, h], bf, ["batch_size", self.block_size, h])
-        sl = self.make_slice(f"{p}/select/Slice", h3, 1, self.block_size, 1, bf, ["batch_size", n, h])
+        sl = self.make_slice_range(f"{p}/select/Slice", h3, 1, self.block_size, 1, bf, ["batch_size", n, h])
         hsel = self.reshape(f"{p}/select/Flatten", sl, [-1, h], bf, ["num_sample", h])
         logits = self.make_lm_head(hsel, "num_sample")
         logits32 = self.make_cast(f"{p}/logits/Cast", logits, f32, ["num_sample", self.vocab_size])
@@ -218,7 +207,7 @@ class LiLiCorrBuilder(DFlash2Builder):
         )
         # Log-partition from the (descending) top-k max. ReduceLogSumExp / ReduceMax over a [rows, vocab] tensor run a
         # cuDNN reduction that is ~100x slower than ORT's own last-axis ReduceSum.
-        top_logit = self.make_slice(f"{p}/logits/max", vals, 0, 1, 1, f32, ["num_sample", 1])
+        top_logit = self.make_slice_range(f"{p}/logits/max", vals, 0, 1, 1, f32, ["num_sample", 1])
         shifted = self.binary("Sub", f"{p}/logits/shift", logits32, top_logit, f32, ["num_sample", self.vocab_size])
         expd = self.unary("Exp", f"{p}/logits/exp", shifted, f32, ["num_sample", self.vocab_size])
         denom = self.binary(
@@ -238,7 +227,7 @@ class LiLiCorrBuilder(DFlash2Builder):
         bf, f32 = self.io_dtype, ir.DataType.FLOAT
 
         prob = self.unary("Exp", f"{p}/feat/exp", logp, f32, ["num_sample", k])
-        mx = self.make_slice(f"{p}/feat/max", logp, 0, 1, 1, f32, ["num_sample", 1])
+        mx = self.make_slice_range(f"{p}/feat/max", logp, 0, 1, 1, f32, ["num_sample", 1])
         rel = self.binary("Sub", f"{p}/feat/rel", logp, mx, f32, ["num_sample", k])
         cols = [
             self.binary("Unsqueeze", f"{p}/feat/u{i}", tensor, self.const([-1]), f32, ["num_sample", k, 1])
@@ -331,7 +320,7 @@ class LiLiCorrBuilder(DFlash2Builder):
             w[f"lilicorr.layers.{layer_id}.attn.in_proj_bias"],
             ["batch_size", lat, 3 * lh],
         )
-        parts = self.make_split(
+        parts = self.make_split_equal(
             f"{q}/qkv/split", qkv, [f"{q}/qkv/split_{i}" for i in range(3)], bf, ["batch_size", lat, lh], axis=-1
         )
         hs = []
@@ -436,7 +425,7 @@ class LiLiCorrBuilder(DFlash2Builder):
         eb = torch.cat([w["lilicorr.out_head.bias"], w["lilicorr.in_head.bias"]], 0)
         edges = self.make_linear(f"{p}/edges", fh, ew, eb, ["batch_size", n, k, 2 * fd])
         edges = self.make_cast(f"{p}/edges/cast", edges, f32, ["batch_size", n, k, 2 * fd])
-        out_raw, in_raw = self.make_split(
+        out_raw, in_raw = self.make_split_equal(
             f"{p}/edges/split", edges, [f"{p}/edges/out", f"{p}/edges/in"], f32, ["batch_size", n, k, fd], axis=-1
         )
         out_vec = self.make_l2_normalize(f"{p}/out_norm", out_raw, ["batch_size", n, k, fd])
@@ -462,14 +451,14 @@ class LiLiCorrBuilder(DFlash2Builder):
         # allocates per call, which cannot be captured in a CUDA graph.
         start = self.binary("Mul", f"{p}/start/mul", in_vec, anchor_out, f32, ["batch_size", n, k, fd])
         start = self.binary("ReduceSum", f"{p}/start/sum", start, self.const([-1]), f32, ["batch_size", n, k], keepdims=0)
-        start = self.make_slice(f"{p}/start/first", start, 0, 1, 1, f32, ["batch_size", 1, k])
+        start = self.make_slice_range(f"{p}/start/first", start, 0, 1, 1, f32, ["batch_size", 1, k])
         start = self.binary("Unsqueeze", f"{p}/start/unsq", start, self.const([2]), f32, ["batch_size", 1, 1, k])
         start = self.binary("Expand", f"{p}/start/expand", start, self.const([1, 1, k, k]), f32, ["batch_size", 1, k, k])
         scale_c = self.const(np.full((1,), self.logit_scale, np.float32), f32)
         start = self.binary("Mul", f"{p}/start/scale", start, scale_c, f32, ["batch_size", 1, k, k])
 
-        out_head = self.make_slice(f"{p}/out_head", out_vec, 0, n - 1, 1, f32, ["batch_size", n - 1, k, fd])
-        in_tail = self.make_slice(f"{p}/in_tail", in_vec, 1, n, 1, f32, ["batch_size", n - 1, k, fd])
+        out_head = self.make_slice_range(f"{p}/out_head", out_vec, 0, n - 1, 1, f32, ["batch_size", n - 1, k, fd])
+        in_tail = self.make_slice_range(f"{p}/in_tail", in_vec, 1, n, 1, f32, ["batch_size", n - 1, k, fd])
         in_tail_t = self.unary("Transpose", f"{p}/in_tail_t", in_tail, f32, ["batch_size", n - 1, fd, k], perm=[0, 1, 3, 2])
         pairs = self.binary("MatMul", f"{p}/pairs", out_head, in_tail_t, f32, ["batch_size", n - 1, k, k])
         pairs = self.binary("Mul", f"{p}/pairs/scale", pairs, scale_c, f32, ["batch_size", n - 1, k, k])

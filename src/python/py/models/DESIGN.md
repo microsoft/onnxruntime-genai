@@ -83,6 +83,13 @@ When adding support for a new model architecture, it is preferred to make change
 
 `Model` directly owns shared graph initialization, paged-attention emitters, cache layouts, input/output setup, and serialization. Each model inherits this infrastructure rather than constructing an independent graph through ONNX helper or IR APIs. Standard-op decompositions remain in `builders/expansions/standard.py` and replace the relevant builder methods directly. Emit graph components and their bindings during construction; do not implement export features through post-export graph modification or standalone graph-splitting scripts.
 
+Block drafters share `Model`'s graph lifecycle. LiLiCorr calls the DFlash 2
+constructor and overrides `make_drafter_config_init` for its checkpoint schema,
+so shared I/O, precision, and graph settings are initialized in one place.
+DFlash 2 and LiLiCorr use `load_drafter_weights` for their paired checkpoints.
+The `make_slice_range` and `make_split_equal` convenience helpers delegate to
+the inherited `Model` operators without changing their call signatures.
+
 ### `Attrs` Dictionaries
 
 Attributes specific to operators and their scenario-specific variables are created and defined in the `Model` class under the operator's dictionary of variables. They should not be created and defined within functions. With this approach, information is globally accessible at all times and across all layers. This is particularly useful when creating an ONNX model where components are added or removed within it to support the user's requested scenario.

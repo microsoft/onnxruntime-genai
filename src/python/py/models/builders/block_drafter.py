@@ -44,12 +44,6 @@ class BlockDrafterBuilder(Model):
         self.const_cache = {}
         self.const_prefix = const_prefix
 
-    def make_graph(self, graph_name, const_prefix):
-        Model.make_graph(self, graph_name, opset=21)
-        self.graph.opset_imports["com.microsoft"] = 1
-        self.const_cache: dict[str, str] = {}
-        self.const_prefix = const_prefix
-
     def make_value(self, name, dtype=None, shape=None):
         if name == "":
             return ir.Value(name="")
@@ -133,21 +127,19 @@ class BlockDrafterBuilder(Model):
         self.make_value(output, dtype, shape)
         return output
 
-    def make_slice(self, name, root_input, start, end, axis, dtype, shape):
-        output = self.out(name)
-        self.make_node(
-            "Slice",
+    def make_slice_range(self, name, root_input, start, end, axis, dtype, shape):
+        self.make_slice(
+            name,
             [root_input, self.const([start]), self.const([end]), self.const([axis])],
-            [output],
-            name=name,
+            dtype,
+            shape,
         )
-        self.make_value(output, dtype, shape)
-        return output
+        return self.out(name)
 
-    def make_split(self, name, root_input, outputs, dtype, shape, axis=-1):
-        self.make_node("Split", [root_input], outputs, name=name, axis=axis, num_outputs=len(outputs))
-        for output in outputs:
-            self.make_value(output, dtype, shape)
+    def make_split_equal(self, name, root_input, outputs, dtype, shape, axis=-1):
+        self.make_split(
+            name, [root_input], outputs, [dtype] * len(outputs), [shape] * len(outputs), axis=axis, num_outputs=len(outputs)
+        )
         return outputs
 
     def make_concat(self, name, inputs, dtype, shape, axis=0, output=None):

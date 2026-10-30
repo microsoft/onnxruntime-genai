@@ -21,6 +21,7 @@ sys.path.insert(0, str(MODELS_DIR))
 
 from loaders.modelopt import ModeloptModel  # noqa: E402
 
+from models.builders.dflash2 import DFlash2Builder  # noqa: E402
 from models.builders.lilicorr import LiLiCorrBuilder  # noqa: E402
 
 
@@ -274,6 +275,43 @@ def test_q8_0_unpacking_and_dequantization_in_loader(tmp_path):
     torch.testing.assert_close(weights_bf16["lm_head.weight"], reconstructed)
 
 
+@pytest.mark.parametrize("precision,bits", [("bf16", None), ("int4", 4), ("int8", 8)])
+def test_lilicorr_reuses_parent_initialization(tmp_path, monkeypatch, precision, bits):
+    draft_dir, target_dir = write_lilicorr_checkpoints(tmp_path)
+    parent_init = DFlash2Builder.__init__
+    initialized = []
+
+    def initialize(builder, *args, **kwargs):
+        parent_init(builder, *args, **kwargs)
+        initialized.append(builder)
+
+    monkeypatch.setattr(DFlash2Builder, "__init__", initialize)
+    builder = LiLiCorrBuilder(
+        draft_dir,
+        target_dir,
+        paged_block_size=128,
+        max_position_embeddings=32,
+        filename="custom.onnx",
+        num_draft_tokens=2,
+        precision=precision,
+    )
+    assert initialized == [builder]
+    assert builder.quant_bits == bits
+    assert (
+        builder.io_dtype == builder.external_dtype == builder.layernorm_attrs["residual_dtype"] == ir.DataType.BFLOAT16
+    )
+    assert builder.ep == "cuda"
+    assert builder.target_model is None
+    assert not builder.exclude_embeds
+    assert builder.filename == "custom.onnx"
+    assert builder.paged_block_size == 128
+    assert builder.max_position == 32
+    assert builder.block_size == 3
+    assert builder.num_draft_tokens == 2
+    assert builder.model.graph.opset_imports[""] == 21
+    assert builder.model.graph.opset_imports["com.microsoft"] == 1
+
+
 @pytest.mark.parametrize("lm_head_precision", ["int8", "bf16"])
 @pytest.mark.parametrize("num_layers", [1, 2])
 def test_lilicorr_builder_emits_valid_graph(tmp_path, lm_head_precision, num_layers):
@@ -348,7 +386,7 @@ def test_lilicorr_stages_run_on_cpu(tmp_path):
     builder = LiLiCorrBuilder(draft_dir, target_dir, paged_block_size=256, lm_head_precision="bf16")
     builder.io_dtype = ir.DataType.FLOAT
     builder.external_dtype = ir.DataType.FLOAT
-    builder.load_weights()
+    builder.load_drafter_weights()
     builder.make_initializer(builder.weights["embed_tokens.weight"], "model.embed_tokens.weight", to=ir.DataType.FLOAT)
 
     builder.graph.inputs.append(
