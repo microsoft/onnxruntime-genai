@@ -25,6 +25,7 @@ list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/parallel_performance
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/parallel_preprocessing_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/parallel_utils_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/model_package_test.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/mtp_config_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/qwen2vl_position_inputs_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/reinit_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/search_checkpoint_tests.cpp")
@@ -326,6 +327,7 @@ file(GLOB engine_unit_test_srcs CONFIGURE_DEPENDS
 list(APPEND engine_unit_test_srcs
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/audio_speech_validation_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/dflash2_config_test.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/mtp_config_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/model_package_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/lfm2_audio_frames_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/lfm2_vl_image_geometry_test.cpp"

@@ -24,13 +24,18 @@ class ThreadPool;
 void Cast(OrtValue& input, std::unique_ptr<OrtValue>& output, DeviceInterface& device, ONNXTensorElementDataType type);
 void CheckResult(extError_t error);
 void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config);
+void ApplySessionOptionsFromConfig(
+    const Config& config,
+    const Config::SessionOptions& config_session_options,
+    OrtSessionOptions& session_options, bool cloned_from_parent = false);
 
 // True when a session running on `session_device` may be handed a tensor whose memory lives on
 // `buffer_device`. ORT moves tensor data between host memory and the devices the session has an EP
 // for; for memory on any other device it neither copies nor rejects the binding but treats the
-// device pointer as host memory. Tensors that fail this test must be staged through a copy.
+// device pointer as host memory, which is only right when the memory is host-accessible (CPU,
+// OpenVINO, QNN shared memory). Tensors that fail this test must be staged through a copy.
 inline bool SessionCanAccess(const DeviceInterface& session_device, const DeviceInterface& buffer_device) {
-  return buffer_device.GetType() == DeviceType::CPU || buffer_device.GetType() == session_device.GetType();
+  return buffer_device.IsHostAccessible() || buffer_device.GetType() == session_device.GetType();
 }
 
 struct State {
@@ -43,6 +48,7 @@ struct State {
   virtual void Finalize(int current_length) {}
 
   virtual void RewindTo(size_t index) { (void)index; };
+  virtual void ValidateRewindTo(size_t index) const { (void)index; }
 
   // Snapshot/restore the model's recurrent state for speculative decoding. Default no-op
   // for models without recurrent state. SnapshotState() captures the conv/linear-attention
@@ -57,6 +63,7 @@ struct State {
   // attention KV cache + position to `new_length` and crops the recurrent state to the state
   // AFTER verify token `recurrent_position` (that token's window slot).
   virtual bool HasCroppableRecurrentState() const { return false; }
+  virtual bool CropRequiresSnapshot() const { return false; }
   // Width of that window, i.e. the longest forward whose per-token states all stay addressable.
   // 1 when the model carries no window.
   virtual int64_t RecurrentStateWindow() const { return 1; }
@@ -64,10 +71,16 @@ struct State {
     (void)new_length;
     (void)recurrent_position;
   }
+  virtual void ValidateCropToAccepted(size_t new_length, size_t recurrent_position) const {
+    (void)new_length;
+    (void)recurrent_position;
+  }
 
   // Stage a hidden_states input value for the next Run (models with a hidden_states input,
   // e.g. the MTP self-speculative head). Default no-op.
   virtual void SetHiddenStates(OrtValue* hidden_states) { (void)hidden_states; }
+  virtual OrtValue* GetRotaryPositionIds() { return nullptr; }
+  virtual void SetRotaryPositionIds(OrtValue* positions) { (void)positions; }
 
   virtual OrtValue* GetInput(const char* name);
   virtual OrtValue* GetOutput(const char* name);
@@ -157,7 +170,10 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
   OrtSessionOptions* GetSessionOptions(const std::string& model_id) const;
 
-  std::unique_ptr<OrtSession> CreateSession(OrtEnv& ort_env, const std::string& model_filename, OrtSessionOptions* session_options);
+  // Recreated legacy sessions use files: graph-only buffer registrations need
+  // not outlive model construction.
+  std::unique_ptr<OrtSession> CreateSession(OrtEnv& ort_env, const std::string& model_filename,
+                                            OrtSessionOptions* session_options, bool is_session_recreation = false);
 
   bool IsPruned() const;
 

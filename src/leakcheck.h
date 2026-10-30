@@ -18,7 +18,7 @@ struct StreamingProcessor;
 struct Tensor;
 struct Tokenizer;
 struct TokenizerStream;
-class TokenPostProcessor;
+class ASRPostProcessor;
 
 template <typename... Types>
 struct LeakTypeList {
@@ -27,7 +27,7 @@ struct LeakTypeList {
   static bool Dump();
 };
 
-using LeakTypes = LeakTypeList<Engine, GeneratorParams, Generator, Model, Request, Search, StreamingProcessor, Tensor, Tokenizer, TokenizerStream, TokenPostProcessor>;
+using LeakTypes = LeakTypeList<Engine, GeneratorParams, Generator, Model, Request, Search, StreamingProcessor, Tensor, Tokenizer, TokenizerStream, ASRPostProcessor>;
 
 template <typename T>
 struct LeakChecked {
