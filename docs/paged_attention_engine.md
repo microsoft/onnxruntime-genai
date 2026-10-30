@@ -2321,37 +2321,41 @@ tombstone.
 
 Changes to shared types such as `Request`, `ScheduledRequests`, `ModelExecutor`, or `SimpleDecoder` should be checked against both paths. This document should be updated only where behavior is shared or where the dynamic path changes.
 
-### Static single-slot backend that selects its own tokens
+### Static backend that selects its own tokens
 
-The `qwen38_flash_graph` model type (Qwen3.8-Flash CUDA-graph decode with a built-in MTP(1) loop) runs on the static path
-through a `ModelExecutor` that chooses its own tokens, instead of attaching decoder state with logits. It is a single-slot
-backend: fixed in-place KV, a recurrent-state bank ring and a device-side draft -> verify -> commit loop that cannot be
-paged, batched or cropped to an arbitrary token. `CreateEngineBackend` (`src/engine/backend_factory.h`) and
-`CreateQwen38GraphDependencies` (`src/engine/qwen38_graph_executor.h`) assemble it:
+The `qwen38_flash_graph` model type (Qwen3.8-Flash CUDA-graph decode with a built-in multi-token-prediction loop: an MTP head
+proposes up to three draft tokens per cycle, a DFlash2 drafter up to seven) runs on the static path through a `ModelExecutor`
+that chooses its own tokens, instead of attaching decoder state with logits. Its state is fixed in-place KV, a
+recurrent-state bank ring and a device-side draft -> verify -> commit loop that cannot be paged or cropped to an arbitrary
+token. The device holds `model.qwen38_graph.max_batch_size` slots (default 1), one resident Request per slot.
+`CreateEngineBackend` (`src/engine/backend_factory.h`) and `CreateQwen38GraphDependencies`
+(`src/engine/qwen38_graph_executor.h`) assemble it:
 
-- `FixedSlotCacheManager` (`Qwen38GraphCacheManager`, `src/engine/fixed_slot_scheduler.h`) holds one row. `FixedSlotScheduler`
-  queues further Requests and recycles the slot when the resident turn is complete. `RewindToStartOfTurn` releases the slot; a
-  continued turn (`BeginTurn` on the resident Request) and the replay after a rewind re-ingest the whole retained history
-  (through the same chunked prefill as a new prompt), because the look-ahead cycle and the bank ring cannot be rolled back.
-  There is no prefix cache.
+- `FixedSlotCacheManager` (`Qwen38GraphCacheManager`, `src/engine/fixed_slot_scheduler.h`) holds one row per slot (`SlotOf`,
+  `ResidentRequestCount`). `FixedSlotScheduler` queues further Requests and replaces a slot as soon as its turn is over, so a
+  short prompt or answer does not wait for a long one, and `CacheManager::SupportsContinuousMultiSlotDecoding()` lets a
+  resident Request continue its turn while others are resident. `RewindToStartOfTurn` releases the slot; a continued turn
+  (`BeginTurn` on the resident Request) and the replay after a rewind re-ingest the whole retained history (through the same
+  chunked prefill as a new prompt), because the look-ahead cycle and the bank ring cannot be rolled back. There is no prefix
+  cache.
 - `Qwen38GraphExecutor::SelectsOwnTokens()` is true. One Engine step is one prompt chunk (the size the device asks for,
   `Qwen38DecodeDevice::PrefillChunkTokens()`: `model.qwen38_graph.prefill.chunk` when set, otherwise 8192 tokens with the
   dense prefill (`prefill.enabled`) and 2048 per step through the decode graphs, see `EffectiveQwen38PrefillChunkTokens`;
   the decode-graph path needs an even chunk; a step that only advances the prompt delivers no event, so `CancelRequest`
   stays responsive; the dense prefill state continues across the chunks and is handed over to the decode state in the step that
-  ingests the last one) or one whole cycle (with `fold.enabled`: one CUDA-graph launch). The executor tells the device the
-  prompt length of the turn (`Qwen38DecodeDevice::ExpectPrefillTokens`, after `Reset()` and before the first chunk); the
-  device hands it to the ORT QMoE kernels with every chunk of that turn and drops it at `Reset()`/`BeginDecode()`. The
-  executor itself stores the expected length on the device instance rather than writing environment variables directly; the
-  production device then publishes `ORT_QMOE_PREFILL_TOTAL_TOKENS` through `Qwen38OrtEnvScope` around each ORT `Run` under a
-  process-wide mutex (isolating participating Qwen runs from each other, though unrelated concurrent ORT sessions in the same
-  process can still observe the process environment; see `src/models/qwen38_ort_env.h`). The
-  executor declares its step plan via `ScheduledRequests::BeginBackendStep` and stages owned `BackendRowResult` records
-  (`PrefillProgress` and/or `SelectedTokenBlock`) via `ScheduledRequests::StageBackendRow`; `GenerateNextTokens` validates the
-  batch before mutating any Request, commits candidates through `Request::CommitExternalTokens` (observing stop strings, EOS,
-  turn limit, and context limit in order), and records `TokenCommitAck` counts (consumed, appended, and staged for events)
-  settled through `TokenProducingSession` before events are published. Stop strings are therefore accepted on this static path;
-  every other static executor still rejects them.
+  ingests the last one) or one whole cycle (with `fold.enabled`: one CUDA-graph launch). With several slots a step advances
+  every slot (`Qwen38GraphSession::StepBatch`): it commits the in-flight batched cycle of the decoding slots, prefills the next
+  chunk of the slots that have not started decoding and enqueues the next batched cycle. The executor itself stores the expected
+  prompt length on the device instance (`Qwen38DecodeDevice::ExpectPrefillTokens`) rather than writing environment variables
+  directly; the production device then publishes `ORT_QMOE_PREFILL_TOTAL_TOKENS` through `Qwen38OrtEnvScope` around each ORT
+  `Run` under a process-wide mutex (isolating participating Qwen runs from each other, though unrelated concurrent ORT sessions
+  in the same process can still observe the process environment; see `src/models/qwen38_ort_env.h`). The executor declares its
+  step plan via `ScheduledRequests::BeginBackendStep` and stages owned `BackendRowResult` records (`PrefillProgress` and/or
+  `SelectedTokenBlock`, up to `kMaxGeneratedTokensPerStep` candidate tokens) via `ScheduledRequests::StageBackendRow`;
+  `GenerateNextTokens` validates the whole batch before mutating any Request, commits candidates through
+  `Request::CommitExternalTokens` (observing stop strings, EOS, turn limit, and context limit in order), and records
+  `TokenCommitAck` counts (consumed, appended, and staged for events) settled through `TokenProducingSession` before events are
+  published.
 - The next cycle is enqueued before a step returns, so the GPU runs it while the Engine delivers the previous tokens. A stop
   string can only be known after delivery, so one cycle may be wasted; the next request, a rewind and Engine teardown wait for
   it with `Qwen38DecodeDevice::Drain()`. The record of such a cycle is never consumed, so its status is read from the device
@@ -2363,19 +2367,20 @@ paged, batched or cropped to an arbitrary token. `CreateEngineBackend` (`src/eng
   model fails). A fatal execution failure poisons the mutable device context across Engine leases until the model is reloaded.
 - `ModelExecutor::ValidateTurn` and `BackendCapabilities` reject, before any Request mutation, what the device loop cannot do:
   sampling, repetition penalty, no-repeat n-grams, `min_generated_tokens`, seeds and guidance. `MaxDraftTokensPerStep()` is
-  zero (the caller cannot attach drafts). `GetCapabilities()` reports one row and `max_request_length` = KV capacity - 4,
-  clamped to `model.context_length` when that is configured, so it is the smaller of the two.
-- `GetSpeculativeStats()` includes the executor's counters (`ModelExecutor::AddSpeculativeStats`): one round per cycle, one
-  or more proposed drafts per round (the fold verifies 1..3), accepted drafts, bonus and correction tokens, the
-  acceptance-length histogram. The counters describe what the Engine consumed, as `Engine::RecordSpeculativeCommit` does for
-  sampled MTP: a turn that ends inside a cycle (turn or session limit, stop string, EOS) only accepts the drafts it delivered,
+  zero (the caller cannot attach drafts). `GetCapabilities()` reports the resolved slot count and `max_request_length` =
+  KV capacity - reserved tail, clamped to `model.context_length` when that is configured, so it is the smaller of the two.
+- `GetSpeculativeStats()` includes the executor's counters (`ModelExecutor::AddSpeculativeStats`): one round per slot and
+  cycle, one or more proposed drafts per round (the fold verifies 1..3), accepted drafts, bonus and correction tokens, the
+  acceptance-length histogram. One target forward is counted per step, however many slots it batches. The counters describe
+  what the Engine consumed, as `Engine::RecordSpeculativeCommit` does for sampled MTP: a turn that ends inside a cycle (turn or
+  session limit, stop string, EOS) only accepts the drafts it delivered,
   `draft_tokens_evaluated` counts the draft positions examined up to the terminal token (every accepted draft consumed, an EOS
   draft included, plus the rejected position only when the turn got as far as the correction token), so `acceptance_rate` is not
   diluted by drafts after the end of the turn. Rounds are classified like `Engine::RecordSpeculativeCommit` does, by the number
   of accepted drafts that were delivered: none is a zero-accept round, all of the proposed ones a full-accept round and anything
-  in between a partial-accept round (`partial_accept_rounds`, counted whether or not a correction token was delivered).
-- The model's device state is leased to one Engine at a time (`Qwen38GraphModel::AcquireDevice`); a second Engine over the same
-  model fails with a clear error until the first one is destroyed. The model has no Generator API support.
+  in between a partial-accept round (`partial_accept_rounds`, counted whether or not a correction token was delivered).- The model's device state is leased to one Engine at a time (`Qwen38GraphModel::AcquireDevice`); a second Engine over the same
+  model fails with a clear error until the first one is destroyed, and a poisoned context cannot be leased again. The model has
+  no Generator API support.
 
 ## Experimental low-level public API shape
 
