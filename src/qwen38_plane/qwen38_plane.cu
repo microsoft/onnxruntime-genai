@@ -304,17 +304,52 @@ __global__ void k_prep_fold(const PleParams* P, const i64* ctx_in, i64* ctx_a, i
                             int* committed, i64* past_pos, __nv_bfloat16* ple_out, i64* state) {
   __shared__ i64 s_row[32];
   __shared__ const unsigned char* s_src[32];
-  __shared__ i64 s_tok, s_pos, s_c0, s_c1;
+  __shared__ i64 s_tok, s_pos, s_c0, s_c1, s_muted;
   const int row = blockIdx.x;
+  const int rows = gridDim.x;
+  const int b = blockIdx.y;
   const int tid = threadIdx.x;
+  i64* state_b = state + (size_t)b * 16;
+  const i64* ctx_in_b = ctx_in + (size_t)b * 2;
+  i64* ctx_a_b = ctx_a + (size_t)b * 2 * rows;
+  i64* input_ids_b = input_ids + (size_t)b * rows;
+  i64* position_ids_b = position_ids + (size_t)b * rows;
+  int* committed_b = committed + b;
+  i64* past_pos_b = past_pos + (size_t)b * P->capacity;
+  const int hd = P->head_dim;
+  const int total = P->n_heads * hd;
+  __nv_bfloat16* row_ple = ple_out + ((size_t)b * rows + row) * total;
+
   if (tid == 0) {
-    constexpr int kSlots[8] = {0, 2, 8, 9, 10, 11, 12, 13};
-    s_tok = state[kSlots[row]];
-    s_pos = state[1] + row;
-    s_c1 = (row == 0) ? ctx_in[1] : state[kSlots[row - 1]];
-    s_c0 = (row == 0) ? ctx_in[0] : ((row == 1) ? ctx_in[1] : state[kSlots[row - 2]]);
+    s_muted = state_b[3];
+    if (s_muted != 0) {
+      s_tok = 0;
+      s_pos = row;
+      s_c1 = P->eos;
+      s_c0 = P->eos;
+    } else {
+      constexpr int kSlots[8] = {0, 2, 8, 9, 10, 11, 12, 13};
+      s_tok = state_b[kSlots[row]];
+      s_pos = state_b[1] + row;
+      s_c1 = (row == 0) ? ctx_in_b[1] : state_b[kSlots[row - 1]];
+      s_c0 = (row == 0) ? ctx_in_b[0] : ((row == 1) ? ctx_in_b[1] : state_b[kSlots[row - 2]]);
+    }
   }
   __syncthreads();
+  if (s_muted != 0) {
+    if (tid == 0) {
+      input_ids_b[row] = 0;
+      position_ids_b[row] = row;
+      if (row == 0) committed_b[0] = 0;
+      if (row < P->capacity) past_pos_b[row] = row;
+      ctx_a_b[2 * row + 0] = P->eos;
+      ctx_a_b[2 * row + 1] = 0;
+    }
+    for (int j = tid; j < total; j += blockDim.x) {
+      row_ple[j] = __float2bfloat16_rn(0.0f);
+    }
+    return;
+  }
   const i64 tok = s_tok, pos = s_pos, c1 = s_c1;
   const i64 c0 = (c1 == P->eos) ? P->eos : s_c0;
   if (tid < P->n_heads) {
@@ -339,48 +374,45 @@ __global__ void k_prep_fold(const PleParams* P, const i64* ctx_in, i64* ctx_a, i
     s_src[h] = P->shard_ptr[lo];
   }
   if (tid == 0) {
-    input_ids[row] = tok;
-    position_ids[row] = pos;
-    if (row == 0) committed[0] = (int)pos;
+    input_ids_b[row] = tok;
+    position_ids_b[row] = pos;
+    if (row == 0) committed_b[0] = (int)pos;
     if (pos >= 0 && pos < P->capacity)
-      past_pos[pos] = pos;
+      past_pos_b[pos] = pos;
     else
-      atomicOr((unsigned long long*)&state[5], 1ULL);
+      atomicOr((unsigned long long*)&state_b[5], 1ULL);
   }
   __syncthreads();
-  const int hd = P->head_dim;
-  const int total = P->n_heads * hd;
-  unsigned char b[3];
+  unsigned char b_vals[3];
 #pragma unroll
   for (int u = 0; u < 3; ++u) {
     const int j = tid + u * blockDim.x;
-    b[u] = 0;
+    b_vals[u] = 0;
     if (j < total) {
       const int h = j / hd, c = j - h * hd;
-      b[u] = s_src[h][s_row[h] * hd + c];
+      b_vals[u] = s_src[h][s_row[h] * hd + c];
     }
   }
   const float scale = P->scale;
   const bool is_int8 = (scale < 0.0f);
   const float abs_scale = is_int8 ? -scale : scale;
-  __nv_bfloat16* row_ple = ple_out + (size_t)row * total;
 #pragma unroll
   for (int u = 0; u < 3; ++u) {
     const int j = tid + u * blockDim.x;
     if (j < total) {
       float f;
       if (is_int8) {
-        f = static_cast<float>(static_cast<signed char>(b[u]));
+        f = static_cast<float>(static_cast<signed char>(b_vals[u]));
       } else {
-        const __half_raw hr = __nv_cvt_fp8_to_halfraw(b[u], __NV_E4M3);
+        const __half_raw hr = __nv_cvt_fp8_to_halfraw(b_vals[u], __NV_E4M3);
         f = __half2float(*reinterpret_cast<const __half*>(&hr));
       }
       row_ple[j] = __float2bfloat16_rn(f * abs_scale);
     }
   }
   if (tid == 0) {
-    ctx_a[2 * row + 0] = c1;
-    ctx_a[2 * row + 1] = tok;
+    ctx_a_b[2 * row + 0] = c1;
+    ctx_a_b[2 * row + 1] = tok;
   }
 }
 
@@ -742,25 +774,39 @@ QWEN38_PLANE_EXPORT void qwen38_plane_set_ple_host_params(const void* params) {
 QWEN38_PLANE_EXPORT void qwen38_plane_prep(void* s, const void* P, const void* tok_ptr, const void* pos_ptr, int pos_add, const void* ctx_in,
                        void* ctx_out, void* input_ids, void* position_ids, void* committed, void* past_pos,
                        void* ple_out, void* state) {
-  if (pos_add <= -2 && pos_add >= -8) {
-    const int rows = -pos_add;
-    if (g_has_host_ple_params && g_host_ple_params.pad_ == 1) {
-      constexpr int kSlots[8] = {0, 2, 8, 9, 10, 11, 12, 13};
-      const int ple_total = g_host_ple_params.n_heads * g_host_ple_params.head_dim;
-      int dummy_committed = 0;
-      for (int r = 0; r < rows; ++r) {
-        const void* r_ctx_in = (r == 0) ? ctx_in : ((const i64*)ctx_out + 2 * (r - 1));
-        void* r_ctx_out = (i64*)ctx_out + 2 * r;
-        qwen38_plane_prep(s, P, (const i64*)state + kSlots[r], (const i64*)state + 1, r, r_ctx_in, r_ctx_out,
-                          (i64*)input_ids + r, (i64*)position_ids + r, r == 0 ? committed : &dummy_committed,
-                          past_pos, (__nv_bfloat16*)ple_out + (size_t)r * ple_total, state);
+  if (pos_add <= -2) {
+    const int raw = -pos_add;
+    const int rows = raw & 0xFF;
+    const int batch = (raw >> 8) > 0 ? (raw >> 8) : 1;
+    if (rows >= 2 && rows <= 8) {
+      if (g_has_host_ple_params && g_host_ple_params.pad_ == 1) {
+        constexpr int kSlots[8] = {0, 2, 8, 9, 10, 11, 12, 13};
+        const int ple_total = g_host_ple_params.n_heads * g_host_ple_params.head_dim;
+        int dummy_committed = 0;
+        for (int b = 0; b < batch; ++b) {
+          i64* state_b = (i64*)state + (size_t)b * 16;
+          const i64* ctx_in_b = (const i64*)ctx_in + (size_t)b * 2;
+          i64* ctx_out_b = (i64*)ctx_out + (size_t)b * 2 * rows;
+          i64* input_ids_b = (i64*)input_ids + (size_t)b * rows;
+          i64* position_ids_b = (i64*)position_ids + (size_t)b * rows;
+          int* committed_b = (int*)committed + b;
+          i64* past_pos_b = (i64*)past_pos + (size_t)b * g_host_ple_params.capacity;
+          __nv_bfloat16* ple_out_b = (__nv_bfloat16*)ple_out + (size_t)b * rows * ple_total;
+          for (int r = 0; r < rows; ++r) {
+            const void* r_ctx_in = (r == 0) ? ctx_in_b : (ctx_out_b + 2 * (r - 1));
+            void* r_ctx_out = ctx_out_b + 2 * r;
+            qwen38_plane_prep(s, P, state_b + kSlots[r], state_b + 1, r, r_ctx_in, r_ctx_out,
+                              input_ids_b + r, position_ids_b + r, r == 0 ? committed_b : &dummy_committed,
+                              past_pos_b, ple_out_b + (size_t)r * ple_total, state_b);
+          }
+        }
+        return;
       }
+      k_prep_fold<<<dim3(rows, batch), 1024, 0, (cudaStream_t)s>>>((const PleParams*)P, (const i64*)ctx_in, (i64*)ctx_out,
+                                                                   (i64*)input_ids, (i64*)position_ids, (int*)committed,
+                                                                   (i64*)past_pos, (__nv_bfloat16*)ple_out, (i64*)state);
       return;
     }
-    k_prep_fold<<<rows, 1024, 0, (cudaStream_t)s>>>((const PleParams*)P, (const i64*)ctx_in, (i64*)ctx_out,
-                                                    (i64*)input_ids, (i64*)position_ids, (int*)committed,
-                                                    (i64*)past_pos, (__nv_bfloat16*)ple_out, (i64*)state);
-    return;
   }
   if (g_has_host_ple_params && g_host_ple_params.pad_ == 1) {
     ensure_prep_workspace();
@@ -1068,6 +1114,15 @@ __global__ void k_replay_generic(const Qwen38StateReplayDesc* __restrict__ descs
   const uint64_t start = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
 
   if (descriptor.kind == 4) {
+    if (kept_override == 0) {
+      if (blockIdx.x == 0 && threadIdx.x == 0) {
+        const_cast<int32_t*>(descriptor.source_lengths)[0] = 0;
+        const_cast<int32_t*>(descriptor.source_lengths)[1] = 0;
+        descriptor.destination_lengths[0] = 0;
+        descriptor.destination_lengths[1] = 0;
+      }
+      return;
+    }
     const int32_t old_key_length = descriptor.source_lengths[0];
     const int32_t old_buffer_length = descriptor.source_lengths[1];
     const uint64_t new_block_count =
@@ -1134,11 +1189,20 @@ __global__ void k_replay_generic(const Qwen38StateReplayDesc* __restrict__ descs
 extern "C" QWEN38_PLANE_EXPORT int qwen38_plane_replay_state_updates(
     void* stream, const void* descs, int fast_count, int generic_count,
     int fast_blocks_per_descriptor, int kept_count) {
-  if (!descs || kept_count < 1 || kept_count > kPlaneMaxReplayTransitions) {
+  if (!descs || kept_count < 0 || kept_count > kPlaneMaxReplayTransitions) {
     return static_cast<int>(cudaErrorInvalidValue);
   }
   const auto* typed = static_cast<const Qwen38StateReplayDesc*>(descs);
   cudaStream_t cu_stream = static_cast<cudaStream_t>(stream);
+  if (kept_count == 0) {
+    if (generic_count > 0) {
+      const dim3 grid(1, static_cast<unsigned>(generic_count));
+      k_replay_generic<<<grid, 32, 0, cu_stream>>>(typed + fast_count, 0);
+      cudaError_t err = cudaGetLastError();
+      if (err != cudaSuccess) return static_cast<int>(err);
+    }
+    return 0;
+  }
   if (fast_count > 0 && fast_blocks_per_descriptor > 0) {
     const dim3 grid(static_cast<unsigned>(fast_blocks_per_descriptor), static_cast<unsigned>(fast_count));
     k_replay_gdn<<<grid, kPlaneReplayThreads, 0, cu_stream>>>(typed, kept_count);

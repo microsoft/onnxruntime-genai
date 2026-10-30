@@ -789,6 +789,7 @@ struct Config {
 
       // Prompt tokens ingested per Engine step (even, so S=2 pairs stay aligned); one step runs one chunk or one cycle.
       int prefill_chunk_tokens{2048};
+      int max_batch_size{1};
 
       struct Mtp {
         bool enabled{true};       // false: plain S=1 graph decode (no draft/verify)

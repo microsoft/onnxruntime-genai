@@ -2604,6 +2604,8 @@ struct Qwen38Graph_Element : JSON::Element {
       v_.prefill_chunk_tokens = SafeDoubleToInt(JSON::Get<double>(value), name);
       if (v_.prefill_chunk_tokens <= 0 || (v_.prefill_chunk_tokens % 2) != 0)
         throw std::runtime_error("prefill_chunk_tokens must be a positive even integer");
+    } else if (name == "max_batch_size") {
+      v_.max_batch_size = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "warmup") {
       v_.warmup = JSON::Get<bool>(value);
     } else {
