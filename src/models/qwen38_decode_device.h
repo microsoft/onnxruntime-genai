@@ -93,6 +93,52 @@ class Qwen38DecodeDevice {
   // Positions at the end of the KV store that are never filled: a verify step writes two rows past the committed length.
   static constexpr int kReservedTail = 4;
   virtual int ReservedTail() const { return kReservedTail; }
+
+  // Multi-slot / batched execution contract (defaults to single-slot slot 0).
+  virtual size_t MaxBatchSize() const { return 1; }
+  virtual bool SupportsDynamicBatching() const { return false; }
+
+  virtual void ResetSlot(size_t slot) {
+    if (slot != 0) throw std::logic_error("Single-slot device only supports slot 0.");
+    Reset();
+  }
+  virtual void PrefillChunkSlot(size_t slot, std::span<const int32_t> tokens) {
+    if (slot != 0) throw std::logic_error("Single-slot device only supports slot 0.");
+    PrefillChunk(tokens);
+  }
+  virtual int32_t PendingTokenSlot(size_t slot) const {
+    if (slot != 0) throw std::logic_error("Single-slot device only supports slot 0.");
+    return PendingToken();
+  }
+  virtual void BeginDecodeSlot(size_t slot, bool want_more) {
+    if (slot != 0) throw std::logic_error("Single-slot device only supports slot 0.");
+    BeginDecode(want_more);
+  }
+  virtual void DraftDeferredSlots(std::span<const size_t> active_slots) {
+    (void)active_slots;
+  }
+  virtual void EnqueueBatchDecode(std::span<const size_t> active_slots) {
+    (void)active_slots;
+  }
+  virtual void WaitBatchDecode(std::span<const size_t> active_slots,
+                               std::span<Qwen38CycleRecord> records) {
+    if (active_slots.size() == 1 && active_slots[0] == 0 && !records.empty()) {
+      records[0] = WaitCycle();
+      return;
+    }
+    throw std::logic_error("Single-slot device does not implement WaitBatchDecode for multiple slots.");
+  }
+  virtual void AdvanceBatchDecode(std::span<const size_t> active_slots,
+                                  std::span<const Qwen38CycleRecord> records,
+                                  std::span<const uint8_t> want_more,
+                                  bool defer_next_cycle = false) {
+    (void)defer_next_cycle;
+    if (active_slots.size() == 1 && active_slots[0] == 0 && !records.empty() && !want_more.empty()) {
+      Advance(records[0], want_more[0] != 0);
+      return;
+    }
+    throw std::logic_error("Single-slot device does not implement AdvanceBatchDecode for multiple slots.");
+  }
 };
 
 // Host mirror of the device loop's committed state: how many tokens are committed and which recurrent bank of the ring the

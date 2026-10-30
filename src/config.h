@@ -783,6 +783,8 @@ struct Config {
 
       bool warmup{true};  // Run the graph warm-up (captures every CUDA graph) when the model is created
 
+      int max_batch_size{1};  // Concurrent request slots (1..8) of the Engine-hosted decode device
+
       struct Mtp {
         bool enabled{true};       // false: plain S=1 graph decode (no draft/verify)
         bool prefill_head{true};  // feed the prompt hidden rows to the head (vLLM does the same)

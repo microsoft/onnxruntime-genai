@@ -54,6 +54,13 @@ struct Qwen38Plane {
   // throws (naming the int8_embedding capability) for an INT8 table.
   void EmbedRows(void* stream, const Qwen38EmbeddingTable& table, const void* ids, void* out, int n) const;
 
+  // prep for the `rows` rows of one folded verify step of each of `batch` request slots in one call (the optional export
+  // qwen38_plane_prep_batched; the layout of the arrays is documented in the ABI header). Throws std::invalid_argument for a
+  // `rows` or `batch` out of range, std::runtime_error naming the batched_prep capability for a library without it, and
+  // std::runtime_error with the CUDA error the plane returns.
+  void PrepBatched(void* stream, const void* params, int rows, int batch, const void* ctx_in, void* ctx_out, void* input_ids,
+                   void* position_ids, void* committed, void* past_pos, void* ple_out, void* state) const;
+
 #define QWEN38_PLANE_DECLARE(ret, name, args) ret(*name) args{};
   QWEN38_PLANE_FUNCTIONS(QWEN38_PLANE_DECLARE)
 #undef QWEN38_PLANE_DECLARE
@@ -62,6 +69,7 @@ struct Qwen38Plane {
                       int dst_pitch_elems, int mode){};
   void (*embed_rows)(void* stream, const void* table, const void* ids, void* out, int rows, int width){};
   Qwen38PlaneEmbedGatherFn embed_gather{};
+  Qwen38PlanePrepBatchedFn prep_batched{};
   void (*set_ple_host_params)(const void* params){};
   void (*unset_ple_host_params)(const void* params){};
   // Drops the staged PLE tables of the whole module, i.e. of every loader of the same library file, not just this one.
