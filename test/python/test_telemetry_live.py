@@ -55,6 +55,7 @@ def main():
         patch.dict(os.environ, signals),
         patch.object(telemetry_mod, "get_telemetry_base_dir", return_value=Path(directory)),
         patch.object(deviceid, "get_telemetry_base_dir", return_value=Path(directory)),
+        patch.object(deviceid, "_WindowsStore", deviceid._FileStore),
         patch.dict(deviceid._device_id_state, {"device_id": None, "status": deviceid.DeviceIdStatus.NEW}),
         patch.object(telemetry_mod.GenAITelemetry, "_instance", None),
     ):

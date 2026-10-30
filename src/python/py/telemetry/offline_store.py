@@ -64,16 +64,14 @@ class OfflineEventStore:
             suffixes = ("", "-wal", "-shm", "-journal")
             for suffix in suffixes:
                 self._directory.validate_file(name + suffix)
-            self._db_fd = self._directory.open_file(name, os.O_RDWR | os.O_CREAT)
-            if os.fstat(self._db_fd).st_nlink != 1:
-                raise PermissionError("Telemetry database cannot be a hard link")
+            self._db_fd, identity = self._directory.prepare_sqlite_file(name)
             conn = sqlite3.connect(
                 (self._directory.path / name).as_uri() + "?mode=rw",
                 timeout=self._busy_timeout_ms / 1000.0,
                 check_same_thread=False,
                 uri=True,
             )
-            self._directory.verify_file_handle(name, self._db_fd)
+            self._directory.verify_file_identity(name, identity)
             for suffix in suffixes:
                 self._directory.validate_file(name + suffix)
             conn.execute("PRAGMA journal_mode=WAL")
@@ -131,10 +129,9 @@ class OfflineEventStore:
         name = os.path.basename(self._db_path)
         for suffix in ("", "-wal", "-shm"):
             try:
-                fd = directory.open_file(name + suffix, os.O_RDONLY)
+                directory.harden_file(name + suffix)
             except FileNotFoundError:
                 continue
-            os.close(fd)
 
     @property
     def is_open(self) -> bool:

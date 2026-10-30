@@ -1,11 +1,20 @@
 #include "generator/generators.h"
 #include "decoder_only.h"
+#include "engram.h"
 
 namespace Generators {
 DecoderOnly_Model::DecoderOnly_Model(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
   session_decoder_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());
   session_info_.Add(*session_decoder_);
+  if (!config_->model.engram.filename.empty()) {
+    engram_session_options_ = OrtSessionOptions::Create();
+    CreateSessionOptionsFromConfig(
+        config_->model.engram.session_options.value_or(config_->model.decoder.session_options),
+        *engram_session_options_, true, /*disable_graph_capture=*/true);
+    session_engram_ = CreateSession(ort_env, config_->model.engram.filename, engram_session_options_.get());
+    session_info_.Add(*session_engram_);
+  }
   if (!config_->model.embedding.filename.empty()) {
     if (!config_->engine.dynamic_batching) {
       throw std::runtime_error("Decoder-only CPU embedding requires the dynamic-batching Engine.");
@@ -22,11 +31,56 @@ std::unique_ptr<State> DecoderOnly_Model::CreateState(DeviceSpan<int32_t> sequen
   return std::make_unique<DecoderOnly_State>(*this, sequence_lengths_unk, params);
 }
 
+void DecoderOnly_Model::InitializeIndexShare(const Config::Model::Mtp::IndexShare& config, OrtEnv&) {
+  if (config.base_capacity == 0) return;
+  SessionInfo extend_info;
+  extend_info.Add(*session_decoder_);
+  SessionInfo decode_info;
+  decode_info.Add(*session_decoder_);
+  const auto indices_shape = extend_info.GetOutputShape(config.indices_output);
+  const auto counts_shape = extend_info.GetOutputShape(config.counts_output);
+  const int64_t output_capacity = indices_shape.size() == 2 ? indices_shape[1] : 0;
+  if (indices_shape.size() != 2 || output_capacity < config.base_capacity ||
+      output_capacity > static_cast<int64_t>(config.base_capacity) + config.max_draft_tokens - 1 || counts_shape.size() != 1 ||
+      extend_info.GetOutputDataType(config.indices_output) != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 ||
+      extend_info.GetOutputDataType(config.counts_output) != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 ||
+      decode_info.GetOutputDataType(config.status_output) != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 ||
+      decode_info.GetOutputShape(config.status_output).size() != 1) {
+    throw std::runtime_error("IndexShare graph outputs do not match their configured int32 selection contract.");
+  }
+  const std::vector<const char*> selection_inputs{
+      config.indices_input.c_str(), config.counts_input.c_str(), "base_row_indices",
+      "range_starts", "range_ends"};
+  for (const char* name : selection_inputs) {
+    if (!decode_info.HasInput(name) || decode_info.GetInputDataType(name) != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
+      throw std::runtime_error("IndexShare decode graph is missing a configured int32 input.");
+    }
+    const auto shape = decode_info.GetInputShape(name);
+    const bool indices = std::string_view{name} == config.indices_input;
+    if (shape.size() != (indices ? 2u : 1u) || (indices && shape[1] != config.base_capacity)) {
+      throw std::runtime_error("IndexShare decode input shape does not match the configured selection contract.");
+    }
+  }
+  {
+    if (!decode_info.HasInput("mode") || !decode_info.HasInput("projection_rows") ||
+        decode_info.GetInputDataType("mode") != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 ||
+        decode_info.GetInputShape("mode") != std::vector<int64_t>{1} ||
+        decode_info.GetInputDataType("projection_rows") != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64 ||
+        decode_info.GetInputShape("projection_rows").size() != 1) {
+      throw std::runtime_error("IndexShare requires an int32[1] mode and int64 projection rows.");
+    }
+  }
+  index_share_config_ = config;
+  index_share_config_.max_draft_tokens = static_cast<int>(output_capacity - config.base_capacity + 1);
+}
+
 DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, DeviceSpan<int32_t> sequence_lengths_unk, const GeneratorParams& params)
     : State{params, model},
       model_{model},
       kv_cache_(model_.p_device_kvcache_->CreateKeyValueCache(*this)),
       recurrent_state_(CreateRecurrentState(*this, /*graph_capture_variants_supported=*/true)),
+      ple_state_(CreatePleState(*this)),
+      indexer_cache_(CreateIndexerCache(*this)),
       position_inputs_{model_.p_device_inputs_->CreatePositionInputs(*this, sequence_lengths_unk, model_.config_->model.decoder.inputs.attention_mask)} {
   input_ids_.Add();
   position_inputs_->Add();
@@ -35,6 +89,19 @@ DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, DeviceSpan<
     kv_cache_->Add();
   if (recurrent_state_)
     recurrent_state_->Add();
+  if (ple_state_)
+    ple_state_->Add();
+  if (indexer_cache_)
+    indexer_cache_->Add();
+  if (model_.session_engram_) {
+    engram_state_ = std::make_unique<EngramState>(model_, *model_.session_engram_, params);
+    const auto& name = model_.config_->model.decoder.inputs.engram_embeddings;
+    const auto shape = model_.session_info_.GetInputShape(name);
+    if (shape.size() != 3 || shape.back() <= 0)
+      throw std::runtime_error("Generator Engram embeddings require [batch, sequence, static_width]");
+    engram_embeddings_ = std::make_unique<Embeddings>(*this, Embeddings::Mode::Input, name, shape.back());
+    engram_embeddings_->Add();
+  }
   // Models with a hidden_states input (e.g. the MTP self-speculative head) feed the main
   // model's last hidden state. Only created when the config declares the input.
   if (!model_.config_->model.decoder.inputs.hidden_states.empty()) {
@@ -48,6 +115,8 @@ DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, DeviceSpan<
     hidden_states_output_->Add();
   }
 }
+
+DecoderOnly_State::~DecoderOnly_State() = default;
 
 void DecoderOnly_State::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
   extra_inputs_.Add(extra_inputs, model_.session_decoder_->GetInputNames());
@@ -67,6 +136,12 @@ DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& 
   }
 
   UpdateInputsOutputs(next_tokens, next_indices, total_length);
+  if (engram_state_) {
+    engram_state_->UpdateInputsOutputs(next_tokens);
+    engram_state_->Run(total_length, next_tokens, next_indices);
+    engram_embeddings_->UpdateSequenceLength(num_tokens / params_->BatchBeamSize());
+    engram_state_->CopyEmbeddingsTo(*engram_embeddings_);
+  }
   if (model_.config_->model.decoder.run_options.has_value()) {
     State::SetRunOptions(model_.config_->model.decoder.run_options.value());
   }
@@ -76,18 +151,30 @@ DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& 
   // each captured length getting its own annotation id / static buffers.
   const int seq_len = static_cast<int>(input_ids_.GetShape()[1]);
   const bool graph_capture_this_run =
-      params_->use_graph_capture && seq_len >= 1 && seq_len <= params_->max_graph_capture_length;
-  const int graph_capture_variant = recurrent_state_ ? recurrent_state_->GraphCaptureVariant() : 0;
+      params_->use_graph_capture && seq_len >= 1 && seq_len <= params_->max_graph_capture_length &&
+      (!indexer_cache_ || !indexer_cache_->UsesHostSequenceLength());
+  int graph_capture_variant = recurrent_state_ ? recurrent_state_->GraphCaptureVariant() : 0;
+  if (ple_state_) {
+    const int ple_graph_capture_variant = ple_state_->GraphCaptureVariant();
+    if (recurrent_state_ && recurrent_state_->UsesGraphCaptureDoubleBuffer() &&
+        graph_capture_variant != ple_graph_capture_variant)
+      throw std::runtime_error("PLE and recurrent state graph-capture buffer variants are out of sync");
+    graph_capture_variant = ple_graph_capture_variant;
+  }
 
   // ORT captures by re-running the model inside this one Run(), which over-applies an
   // in-place recurrent state. Let the capture happen, then undo it and replay.
-  const int graph_id = seq_len * 2 + graph_capture_variant;
-  if (graph_capture_this_run && recurrent_state_ && recurrent_state_->ShouldFixUpGraphCapture(graph_id)) {
+  if (recurrent_state_ && recurrent_state_->StateUpdateCaptureEnabled())
+    graph_capture_variant += 2;
+  const int graph_id = graph_capture_this_run && recurrent_state_ ? GraphIdForLength(seq_len, graph_capture_variant) : -1;
+  if (graph_id > 0 && recurrent_state_ && recurrent_state_->ShouldFixUpGraphCapture(graph_id)) {
     recurrent_state_->SaveForGraphCapture();
     State::Run(*model_.session_decoder_, true, seq_len, graph_capture_variant);
     recurrent_state_->RestoreAfterGraphCapture(graph_id);
   }
   State::Run(*model_.session_decoder_, graph_capture_this_run, seq_len, graph_capture_variant);
+  if (recurrent_state_) recurrent_state_->SetForwardLength(seq_len);
+  if (ple_state_) ple_state_->SetForwardLength(seq_len);
 
   return logits_.Get();
 }
@@ -111,6 +198,12 @@ DeviceSpan<float> DecoderOnly_State::RunWithChunking(int total_length, DeviceSpa
 
     // Process this chunk - fills KV cache progressively
     UpdateInputsOutputs(chunk_tokens, next_indices, length);
+    if (engram_state_) {
+      engram_state_->UpdateInputsOutputs(chunk_tokens);
+      engram_state_->Run(length, chunk_tokens, next_indices);
+      engram_embeddings_->UpdateSequenceLength(current_chunk_size / params_->BatchBeamSize());
+      engram_state_->CopyEmbeddingsTo(*engram_embeddings_);
+    }
 
     // Graph capture is typically disabled during context phase chunking
     bool graph_capture_this_run = false;  // Disable graph capture during chunking
@@ -123,28 +216,56 @@ DeviceSpan<float> DecoderOnly_State::RunWithChunking(int total_length, DeviceSpa
   return logits_.Get();
 }
 
+void DecoderOnly_State::ValidateRewindTo(size_t index) const {
+  if (indexer_cache_) indexer_cache_->ValidateRewindTo(index);
+  if (recurrent_state_) recurrent_state_->ValidateRewindTo(index);
+  if (ple_state_) ple_state_->ValidateRewindTo(index);
+  if (engram_state_) engram_state_->ValidateRewindTo(index);
+}
+
 void DecoderOnly_State::RewindTo(size_t index) {
+  ValidateRewindTo(index);
+  if (engram_state_) engram_state_->RewindTo(index);
   position_inputs_->RewindTo(index);
   if (kv_cache_)
     kv_cache_->RewindTo(index);
   if (recurrent_state_)
     recurrent_state_->RewindTo(index);
+  if (ple_state_)
+    ple_state_->RewindTo(index);
+  if (indexer_cache_)
+    indexer_cache_->RewindTo(index);
 }
 
 void DecoderOnly_State::SnapshotState(size_t position) {
+  if (engram_state_) engram_state_->SnapshotState(position);
   if (recurrent_state_)
     recurrent_state_->Snapshot(position);
+  if (ple_state_)
+    ple_state_->Snapshot(position);
+  if (indexer_cache_)
+    indexer_cache_->Snapshot(position);
 }
 
 bool DecoderOnly_State::HasCroppableRecurrentState() const {
-  return recurrent_state_ && recurrent_state_->IsWindowed();
+  return recurrent_state_ && recurrent_state_->IsWindowed() && !ple_state_ && !engram_state_ &&
+         (!indexer_cache_ || indexer_cache_->HasStateUpdates());
 }
 
 int64_t DecoderOnly_State::RecurrentStateWindow() const {
   return recurrent_state_ ? recurrent_state_->StateWindow() : 1;
 }
 
+void DecoderOnly_State::ValidateCropToAccepted(size_t new_length, size_t recurrent_position) const {
+  (void)new_length;
+  if (recurrent_state_) recurrent_state_->ValidateCropPosition(recurrent_position);
+  if (ple_state_) ple_state_->ValidateCropPosition(recurrent_position);
+  if (engram_state_) engram_state_->ValidateAcceptedPrefix(recurrent_position + 1);
+  if (indexer_cache_) indexer_cache_->ValidateAcceptedPrefix(recurrent_position + 1);
+}
+
 void DecoderOnly_State::CropToAccepted(size_t new_length, size_t recurrent_position) {
+  ValidateCropToAccepted(new_length, recurrent_position);
   // Roll the attention KV cache + position back to the committed length, and crop the recurrent
   // state to the state AFTER verify token `recurrent_position` (no replay forward). Used by
   // lossless multi-token MTP partial accept.
@@ -153,6 +274,10 @@ void DecoderOnly_State::CropToAccepted(size_t new_length, size_t recurrent_posit
     kv_cache_->RewindTo(new_length);
   if (recurrent_state_)
     recurrent_state_->CropToPosition(recurrent_position);
+  if (ple_state_)
+    ple_state_->CropToPosition(recurrent_position);
+  if (indexer_cache_)
+    indexer_cache_->CommitAcceptedPrefix(recurrent_position + 1);
 }
 
 void DecoderOnly_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> beam_indices, int total_length) {
@@ -183,6 +308,10 @@ void DecoderOnly_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, De
     kv_cache_->Update(beam_indices, kv_cache_length);
   if (recurrent_state_)
     recurrent_state_->Update();
+  if (ple_state_)
+    ple_state_->Update();
+  if (indexer_cache_)
+    indexer_cache_->Update(beam_indices, total_length, static_cast<int>(new_length));
   if (hidden_states_)
     hidden_states_->Update(static_cast<int>(new_length));
   if (hidden_states_output_)

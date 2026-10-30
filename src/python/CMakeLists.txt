@@ -11,8 +11,6 @@ if(NOT DEFINED REPO_ROOT)
   project(onnxruntime_genai_python LANGUAGES C CXX)
 
   get_filename_component(REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
-  set(SRC_ROOT ${REPO_ROOT}/src)
-
   # Read the project version the same way global_variables.cmake does in-tree so
   # the wheel (setup.py.in / __init__.py.in @VERSION_INFO@) is versioned correctly.
   file(READ "${REPO_ROOT}/VERSION_INFO" VERSION_INFO)
@@ -168,7 +166,8 @@ if(BUILD_WHEEL)
   configure_file(${CMAKE_CURRENT_SOURCE_DIR}/__init__.py.in ${WHEEL_TARGET_NAME}/__init__.py @ONLY)
 
   # Copy over any additional python files
-  file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/py/" DESTINATION ${WHEEL_TARGET_NAME}/)
+  file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/py/" DESTINATION ${WHEEL_TARGET_NAME}/
+    REGEX "/models/gemma[^/]+/" EXCLUDE)
   file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/package_description.md" DESTINATION ${WHEEL_FILES_DIR}/)
   file(COPY "${REPO_ROOT}/ThirdPartyNotices.txt" DESTINATION ${WHEEL_TARGET_NAME}/)
   file(COPY "${REPO_ROOT}/LICENSE" DESTINATION ${WHEEL_TARGET_NAME}/)

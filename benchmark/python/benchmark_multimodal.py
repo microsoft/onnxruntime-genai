@@ -314,6 +314,7 @@ def run_benchmark(
             model_name=sanitize_model_identifier(Path(args.input_folder)),
             backend="onnxruntime-genai",
             device="default",
+            batch_size=1,
             prompt_length=prompt_length,
             tokens_generated=generation_length,
             prompt_processing_latency_ms=avg_prompt_latency_ms,

@@ -21,20 +21,9 @@ with open(long_description_file, encoding="utf-8") as fdesc:
 
 extras = ["ThirdPartyNotices.txt", "LICENSE"]
 package_name = '@TARGET_NAME@'
-packages = [
-    'onnxruntime_genai',
-    'onnxruntime_genai.models',
-    'onnxruntime_genai.models.loaders',
-    'onnxruntime_genai.models.quantization',
-    'onnxruntime_genai.models.builders',
-    'onnxruntime_genai.models.builders.expansions',
-]
-if @PYTHON_TELEMETRY_ENABLED@:
-    packages.extend([
-        'onnxruntime_genai.telemetry',
-        'onnxruntime_genai.telemetry.deviceid',
-        'onnxruntime_genai.telemetry.library',
-    ])
+packages = find_packages(include=['onnxruntime_genai', 'onnxruntime_genai.*'])
+if not @PYTHON_TELEMETRY_ENABLED@:
+    packages = [name for name in packages if not name.startswith('onnxruntime_genai.telemetry')]
 
 
 def _onnxruntime_dependency() -> str:

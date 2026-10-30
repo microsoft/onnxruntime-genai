@@ -50,7 +50,8 @@ void ApplyRuntimeProfileForSelectedDevice(Config& config, DeviceInterface& devic
       return;
     }
   }
-  ApplyRuntimeProfile(config, RuntimeProfileDeviceFacts{total_device_memory_bytes, is_integrated});
+  ApplyRuntimeProfile(config, RuntimeProfileDeviceFacts{
+                                  total_device_memory_bytes, is_integrated, available_device_memory_bytes});
   config.runtime_profiles.clear();
 }
 

@@ -75,17 +75,28 @@ void InheritSessionOptions(const Config::SessionOptions& parent,
   if (!child.inter_op_num_threads) child.inter_op_num_threads = parent.inter_op_num_threads;
   if (!child.enable_cpu_mem_arena) child.enable_cpu_mem_arena = parent.enable_cpu_mem_arena;
   if (!child.enable_mem_pattern) child.enable_mem_pattern = parent.enable_mem_pattern;
+  if (!child.use_deterministic_compute) child.use_deterministic_compute = parent.use_deterministic_compute;
   if (!child.log_id) child.log_id = parent.log_id;
   if (!child.log_severity_level) child.log_severity_level = parent.log_severity_level;
   if (!child.log_verbosity_level) child.log_verbosity_level = parent.log_verbosity_level;
   if (!child.enable_profiling) child.enable_profiling = parent.enable_profiling;
-  if (!child.custom_ops_library) child.custom_ops_library = parent.custom_ops_library;
+  // custom_ops_library and custom_ops_libraries form one setting: the child inherits both only when it sets neither.
+  // Because custom_ops_libraries is stored as a vector, an explicit `"custom_ops_libraries": []` leaves it empty and
+  // still inherits the parent's custom-op libraries unless custom_ops_library is set.
+  if (!child.custom_ops_library && child.custom_ops_libraries.empty()) {
+    child.custom_ops_library = parent.custom_ops_library;
+    child.custom_ops_libraries = parent.custom_ops_libraries;
+  }
   if (!child.graph_optimization_level) child.graph_optimization_level = parent.graph_optimization_level;
   InheritNamedStrings(parent.config_entries, child.config_entries);
   InheritProviderOptions(parent, child);
 }
 
 }  // namespace
+
+void InheritSessionOptionsFromParent(const Config::SessionOptions& parent, Config::SessionOptions& child) {
+  InheritSessionOptions(parent, child);
+}
 
 std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config) {
   const auto& mtp = config.model.mtp;
@@ -121,6 +132,16 @@ std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config) {
   }
   // An empty MTP list intentionally disables sharing the main decoder's initializers.
   decoder.shared_initializers = mtp.shared_initializers;
+  if (mtp.index_share.enabled || mtp.index_share.base_capacity != 0) {
+    if (mtp.index_share.indices_input.empty() || mtp.index_share.counts_input.empty() ||
+        mtp.index_share.indices_output.empty() || mtp.index_share.counts_output.empty() ||
+        mtp.index_share.status_output.empty() ||
+        mtp.index_share.base_capacity <= 0 || mtp.index_share.max_draft_tokens < 1 ||
+        mtp.index_share.max_draft_tokens > 7 ||
+        mtp.index_share.base_capacity > std::numeric_limits<int>::max() - mtp.index_share.max_draft_tokens + 1) {
+      throw std::runtime_error("MTP IndexShare requires complete selection metadata.");
+    }
+  }
   decoder.num_hidden_layers = mtp.num_hidden_layers;
   decoder.num_key_value_heads = mtp.num_key_value_heads;
   decoder.head_size = mtp.head_size;
@@ -128,8 +149,12 @@ std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config) {
   decoder.inputs.input_ids = mtp.inputs.input_ids;
   decoder.inputs.hidden_states = mtp.inputs.hidden_states;
   decoder.inputs.position_ids = mtp.inputs.position_ids;
+  decoder.inputs.rotary_position_ids = mtp.inputs.rotary_position_ids;
   decoder.inputs.past_key_names = mtp.inputs.past_key_names;
   decoder.inputs.past_value_names = mtp.inputs.past_value_names;
+  decoder.inputs.past_indexer_names = mtp.inputs.past_indexer_names;
+  decoder.inputs.past_sequence_length = mtp.inputs.past_sequence_length;
+  decoder.inputs.logits_indices = mtp.inputs.logits_indices;
   // The projection starts from a copy of the target config, so a per-token quantized target would
   // otherwise leak its scale name templates into the head. The head is always an unquantized
   // full-attention layer and declares no scale tensors, so clear them: leaving them in place would
@@ -141,20 +166,49 @@ std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config) {
   decoder.outputs.hidden_states = mtp.outputs.hidden_states;
   decoder.outputs.present_key_names = mtp.outputs.present_key_names;
   decoder.outputs.present_value_names = mtp.outputs.present_value_names;
+  decoder.outputs.present_indexer_names = mtp.outputs.present_indexer_names;
   decoder.outputs.present_key_scale_names.clear();
   decoder.outputs.present_value_scale_names.clear();
 
-  // The MTP graph is one full-attention layer. Paged-attention metadata and block-table names are
+  // The MTP graph is one decoder layer. Paged-attention metadata and block-table names are
   // deliberately inherited above; fixed recurrent state and a main-model sliding window are not.
   decoder.layer_types.assign(static_cast<size_t>(mtp.num_hidden_layers), "full_attention");
   decoder.conv_cache_size = 0;
-  decoder.state_update_capacity = 0;
   decoder.sliding_window.reset();
-  decoder.state_groups.reset();
+  if (!mtp.inputs.past_indexer_names.empty() ||
+      !mtp.outputs.present_indexer_names.empty()) {
+    if (mtp.inputs.past_indexer_names.empty() ||
+        mtp.outputs.present_indexer_names.empty() ||
+        !decoder.state_groups) {
+      throw std::runtime_error(
+          "MTP indexer state requires matching input/output templates and a target fixed_indexer group.");
+    }
+    const auto indexer = std::find_if(
+        decoder.state_groups->begin(), decoder.state_groups->end(),
+        [](const Config::Model::Decoder::StateGroup& group) {
+          return group.kind == Config::Model::Decoder::StateGroupKind::FixedIndexer;
+        });
+    if (indexer == decoder.state_groups->end() || !indexer->state_update) {
+      throw std::runtime_error(
+          "MTP indexer state requires the target fixed_indexer state_update contract.");
+    }
+    auto projected_indexer = *indexer;
+    projected_indexer.layer_ids = {0};
+    // Chained head runs consume full present state. Compact replay is reserved for the target's
+    // verify transaction, which captures a whole speculative block in one invocation.
+    projected_indexer.state_update->enabled = false;
+    decoder.state_groups = std::vector<Config::Model::Decoder::StateGroup>{
+        {Config::Model::Decoder::StateGroupKind::PagedKeyValue, {0}, std::nullopt},
+        std::move(projected_indexer)};
+  } else {
+    decoder.state_update_capacity = 0;
+    decoder.state_groups.reset();
+  }
   decoder.pipeline.clear();
   // A chained draft feeds every stage the previous stage's hidden states, so the head must emit its
   // own hidden states. Record that before clearing the MTP section the demand was inferred from.
   projected->engine.hidden_states_output_required = true;
+  projected->model.engram = {};
   projected->model.mtp = {};
   return projected;
 }
@@ -336,6 +390,18 @@ GraphOptimizationLevel GetGraphOptimizationLevel(std::string_view name) {
   }
 }
 
+// Appends parsed string elements to `v`; an empty array leaves `v` unchanged.
+struct StringArray_Element : JSON::Element {
+  explicit StringArray_Element(std::vector<std::string>& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    v_.push_back(std::string{JSON::Get<std::string_view>(value)});
+  }
+
+ private:
+  std::vector<std::string>& v_;
+};
+
 struct SessionOptions_Element : JSON::Element {
   explicit SessionOptions_Element(Config::SessionOptions& v) : v_{v} {}
 
@@ -356,10 +422,14 @@ struct SessionOptions_Element : JSON::Element {
       v_.enable_cpu_mem_arena = JSON::Get<bool>(value);
     } else if (name == "enable_mem_pattern") {
       v_.enable_mem_pattern = JSON::Get<bool>(value);
+    } else if (name == "use_deterministic_compute") {
+      v_.use_deterministic_compute = JSON::Get<bool>(value);
     } else if (name == "graph_optimization_level") {
       v_.graph_optimization_level = GetGraphOptimizationLevel(JSON::Get<std::string_view>(value));
     } else if (name == "custom_ops_library") {
       v_.custom_ops_library = JSON::Get<std::string_view>(value);
+    } else if (name == "custom_ops_libraries") {
+      throw std::runtime_error("custom_ops_libraries must be an array of strings");
     } else {
       // Session options that are set with AddConfigEntry
       v_.config_entries.emplace_back(name, JSON::Get<std::string_view>(value));
@@ -370,12 +440,18 @@ struct SessionOptions_Element : JSON::Element {
     if (name == "provider_options") {
       return provider_options_;
     }
+    if (name == "custom_ops_libraries") {
+      // Overlays append to custom_ops_libraries (and [] leaves existing entries unchanged), matching config_entries
+      // and provider_options.
+      return custom_ops_libraries_;
+    }
     throw JSON::unknown_value_error{};
   }
 
  private:
   Config::SessionOptions& v_;
   ProviderOptionsArray_Element provider_options_{v_.provider_options};
+  StringArray_Element custom_ops_libraries_{v_.custom_ops_libraries};
 };
 
 struct RunOptions_Element : JSON::Element {
@@ -460,6 +536,10 @@ struct DecoderInputs_Element : JSON::Element {
       v_.input_ids = JSON::Get<std::string_view>(value);
     } else if (name == "inputs_embeds") {
       v_.embeddings = JSON::Get<std::string_view>(value);
+    } else if (name == "engram_embeddings") {
+      v_.engram_embeddings = JSON::Get<std::string_view>(value);
+    } else if (name == "rotary_position_ids") {
+      v_.rotary_position_ids = JSON::Get<std::string_view>(value);
     } else if (name == "attention_mask") {
       v_.attention_mask = JSON::Get<std::string_view>(value);
     } else if (name == "position_ids") {
@@ -468,6 +548,8 @@ struct DecoderInputs_Element : JSON::Element {
       v_.past_key_names = JSON::Get<std::string_view>(value);
     } else if (name == "past_value_names") {
       v_.past_value_names = JSON::Get<std::string_view>(value);
+    } else if (name == "past_indexer_names") {
+      v_.past_indexer_names = JSON::Get<std::string_view>(value);
     } else if (name == "past_key_scale_names") {
       v_.past_key_scale_names = JSON::Get<std::string_view>(value);
     } else if (name == "past_value_scale_names") {
@@ -510,6 +592,14 @@ struct DecoderInputs_Element : JSON::Element {
       v_.past_conv_names = JSON::Get<std::string_view>(value);
     } else if (name == "past_recurrent_names") {
       v_.past_recurrent_names = JSON::Get<std::string_view>(value);
+    } else if (name == "past_ple_token_names") {
+      v_.past_ple_token_names = JSON::Get<std::string_view>(value);
+    } else if (name == "past_ple_conv_names") {
+      v_.past_ple_conv_names = JSON::Get<std::string_view>(value);
+    } else if (name == "past_indexer_kv_buffer_names") {
+      v_.past_indexer_kv_buffer_names = JSON::Get<std::string_view>(value);
+    } else if (name == "past_indexer_state_lengths_names") {
+      v_.past_indexer_state_lengths_names = JSON::Get<std::string_view>(value);
     } else if (name == "state_update_capture_count") {
       v_.state_update_capture_count = JSON::Get<std::string_view>(value);
     } else if (name == "state_update_active") {
@@ -545,6 +635,12 @@ struct DecoderOutputs_Element : JSON::Element {
       v_.present_key_names = JSON::Get<std::string_view>(value);
     } else if (name == "present_value_names") {
       v_.present_value_names = JSON::Get<std::string_view>(value);
+    } else if (name == "present_indexer_names") {
+      v_.present_indexer_names = JSON::Get<std::string_view>(value);
+    } else if (name == "state_update_indexer_value_names") {
+      v_.state_update_indexer_value_names = JSON::Get<std::string_view>(value);
+    } else if (name == "state_update_indexer_row_names") {
+      v_.state_update_indexer_row_names = JSON::Get<std::string_view>(value);
     } else if (name == "present_key_scale_names") {
       v_.present_key_scale_names = JSON::Get<std::string_view>(value);
     } else if (name == "present_value_scale_names") {
@@ -559,10 +655,24 @@ struct DecoderOutputs_Element : JSON::Element {
       v_.present_conv_names = JSON::Get<std::string_view>(value);
     } else if (name == "present_recurrent_names") {
       v_.present_recurrent_names = JSON::Get<std::string_view>(value);
+    } else if (name == "present_ple_token_names") {
+      v_.present_ple_token_names = JSON::Get<std::string_view>(value);
+    } else if (name == "present_ple_conv_names") {
+      v_.present_ple_conv_names = JSON::Get<std::string_view>(value);
+    } else if (name == "present_indexer_kv_buffer_names") {
+      v_.present_indexer_kv_buffer_names = JSON::Get<std::string_view>(value);
+    } else if (name == "present_indexer_state_lengths_names") {
+      v_.present_indexer_state_lengths_names = JSON::Get<std::string_view>(value);
     } else if (name == "state_update_conv_value_names") {
       v_.state_update_conv_value_names = JSON::Get<std::string_view>(value);
     } else if (name == "state_update_recurrent_capsule_names") {
       v_.state_update_recurrent_capsule_names = JSON::Get<std::string_view>(value);
+    } else if (name == "state_update_ple_token_names") {
+      v_.state_update_ple_token_names = JSON::Get<std::string_view>(value);
+    } else if (name == "state_update_ple_conv_value_names") {
+      v_.state_update_ple_conv_value_names = JSON::Get<std::string_view>(value);
+    } else if (name == "state_update_indexer_names") {
+      v_.state_update_indexer_names = JSON::Get<std::string_view>(value);
     } else if (name == "hidden_states") {
       v_.hidden_states = JSON::Get<std::string_view>(value);
     } else if (name == "aux_hidden_states") {
@@ -582,17 +692,6 @@ struct DecoderOutputs_Element : JSON::Element {
 
  private:
   Config::Model::Decoder::Outputs& v_;
-};
-
-struct StringArray_Element : JSON::Element {
-  explicit StringArray_Element(std::vector<std::string>& v) : v_{v} {}
-
-  void OnValue(std::string_view name, JSON::Value value) override {
-    v_.push_back(std::string{JSON::Get<std::string_view>(value)});
-  }
-
- private:
-  std::vector<std::string>& v_;
 };
 
 struct IntArray_Element : JSON::Element {
@@ -687,6 +786,13 @@ struct StateUpdate_Element : JSON::Element {
         throw std::runtime_error("Decoder state update key_head_count must be positive");
       }
       v_.key_head_count = static_cast<int>(count);
+    } else if (name == "compress_ratio") {
+      const auto ratio = SafeDoubleToInt64(
+          JSON::Get<double>(value), "model.decoder.state_groups.state_update.compress_ratio");
+      if (ratio < 1 || ratio > std::numeric_limits<int>::max()) {
+        throw std::runtime_error("Decoder state update compress_ratio must be positive");
+      }
+      v_.compress_ratio = static_cast<int>(ratio);
     } else if (name == "kind" || name == "capture_count" || name == "value" ||
                name == "active" || name == "capsule") {
       throw std::runtime_error(
@@ -714,6 +820,10 @@ struct StateGroup_Element : JSON::Element {
         v_.kind = DecoderStateGroupKind::FixedConv;
       } else if (kind == "fixed_recurrent") {
         v_.kind = DecoderStateGroupKind::FixedRecurrent;
+      } else if (kind == "fixed_ple") {
+        v_.kind = DecoderStateGroupKind::FixedPle;
+      } else if (kind == "fixed_indexer") {
+        v_.kind = DecoderStateGroupKind::FixedIndexer;
       } else if (kind == "fixed") {
         throw std::runtime_error(
             "Decoder state group kind 'fixed' is no longer supported; use 'fixed_conv' or "
@@ -805,7 +915,9 @@ struct PipelineModel_Element : JSON::Element {
 
   JSON::Element& OnObject(std::string_view name) override {
     if (name == "session_options") {
-      v_.session_options = Config::SessionOptions{};
+      if (!v_.session_options) {
+        v_.session_options.emplace();
+      }
       session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
       return *session_options_;
     }
@@ -838,19 +950,36 @@ struct PipelineModel_Element : JSON::Element {
   StringStringMap_Element output_names_forwarder_{v_.output_names_forwarder};
 };
 
+namespace {
+
+template <typename PipelineModel>
+PipelineModel& GetOrCreatePipelineModel(std::vector<PipelineModel>& models, std::string_view model_id) {
+  auto model = std::find_if(models.begin(), models.end(),
+                            [model_id](const auto& model) { return model.model_id == model_id; });
+  if (model != models.end()) {
+    return *model;
+  }
+
+  auto& new_model = models.emplace_back();
+  new_model.model_id = model_id;
+  return new_model;
+}
+
+}  // namespace
+
 struct PipelineModelObject_Element : JSON::Element {
   explicit PipelineModelObject_Element(std::vector<Config::Model::Decoder::PipelineModel>& v) : v_{v} {}
 
   Element& OnObject(std::string_view name) override {
-    auto& model = v_.emplace_back();
-    model.model_id = name;
-    pipeline_model_elements_.emplace_back(model);
-    return pipeline_model_elements_.back();
+    pipeline_model_element_.reset();  // Appending below may reallocate v_.
+    auto& model = GetOrCreatePipelineModel(v_, name);
+    pipeline_model_element_ = std::make_unique<PipelineModel_Element>(model);
+    return *pipeline_model_element_;
   }
 
  private:
   std::vector<Config::Model::Decoder::PipelineModel>& v_;
-  std::vector<PipelineModel_Element> pipeline_model_elements_;
+  std::unique_ptr<PipelineModel_Element> pipeline_model_element_;
 };
 
 struct Pipeline_Element : JSON::Element {
@@ -977,6 +1106,14 @@ struct Decoder_Element : JSON::Element {
                                  std::to_string(Config::Model::Decoder::MaxStateUpdateCapacity));
     } else if (name == "conv_cache_size") {
       v_.conv_cache_size = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "ple_token_pad_id") {
+      v_.ple_token_pad_id = SafeDoubleToInt64(JSON::Get<double>(value), name);
+      if (v_.ple_token_pad_id < 0)
+        throw std::runtime_error("ple_token_pad_id must be nonnegative");
+    } else if (name == "indexer_compress_ratio") {
+      v_.indexer_compress_ratio = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (v_.indexer_compress_ratio <= 0)
+        throw std::runtime_error("indexer_compress_ratio must be positive");
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1043,13 +1180,15 @@ struct Decoder_Element : JSON::Element {
 };
 
 struct MtpInputs_Element : JSON::Element {
-  explicit MtpInputs_Element(Config::Model::Mtp::Inputs& v) : v_{v} {}
+  explicit MtpInputs_Element(Config::Model::Mtp& mtp) : v_{mtp.inputs}, index_share_{mtp.index_share} {}
 
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "input_ids") {
       v_.input_ids = JSON::Get<std::string_view>(value);
     } else if (name == "hidden_states") {
       v_.hidden_states = JSON::Get<std::string_view>(value);
+    } else if (name == "rotary_position_ids") {
+      v_.rotary_position_ids = JSON::Get<std::string_view>(value);
     } else if (name == "attention_mask") {
       v_.attention_mask = JSON::Get<std::string_view>(value);
     } else if (name == "position_ids") {
@@ -1058,6 +1197,16 @@ struct MtpInputs_Element : JSON::Element {
       v_.past_key_names = JSON::Get<std::string_view>(value);
     } else if (name == "past_value_names") {
       v_.past_value_names = JSON::Get<std::string_view>(value);
+    } else if (name == "past_indexer_names") {
+      v_.past_indexer_names = JSON::Get<std::string_view>(value);
+    } else if (name == "past_sequence_length") {
+      v_.past_sequence_length = JSON::Get<std::string_view>(value);
+    } else if (name == "past_indices") {
+      index_share_.indices_input = JSON::Get<std::string_view>(value);
+    } else if (name == "past_counts") {
+      index_share_.counts_input = JSON::Get<std::string_view>(value);
+    } else if (name == "logits_indices") {
+      v_.logits_indices = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1065,10 +1214,11 @@ struct MtpInputs_Element : JSON::Element {
 
  private:
   Config::Model::Mtp::Inputs& v_;
+  Config::Model::Mtp::IndexShare& index_share_;
 };
 
 struct MtpOutputs_Element : JSON::Element {
-  explicit MtpOutputs_Element(Config::Model::Mtp::Outputs& v) : v_{v} {}
+  explicit MtpOutputs_Element(Config::Model::Mtp& mtp) : v_{mtp.outputs}, index_share_{mtp.index_share} {}
 
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "logits") {
@@ -1079,6 +1229,14 @@ struct MtpOutputs_Element : JSON::Element {
       v_.present_key_names = JSON::Get<std::string_view>(value);
     } else if (name == "present_value_names") {
       v_.present_value_names = JSON::Get<std::string_view>(value);
+    } else if (name == "present_indexer_names") {
+      v_.present_indexer_names = JSON::Get<std::string_view>(value);
+    } else if (name == "present_indices") {
+      index_share_.indices_output = JSON::Get<std::string_view>(value);
+    } else if (name == "present_counts") {
+      index_share_.counts_output = JSON::Get<std::string_view>(value);
+    } else if (name == "indexer_status") {
+      index_share_.status_output = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1086,6 +1244,7 @@ struct MtpOutputs_Element : JSON::Element {
 
  private:
   Config::Model::Mtp::Outputs& v_;
+  Config::Model::Mtp::IndexShare& index_share_;
 };
 
 struct Mtp_Element : JSON::Element {
@@ -1107,6 +1266,11 @@ struct Mtp_Element : JSON::Element {
       if (v_.head_size <= 0) throw std::out_of_range("head_size must be > 0");
     } else if (name == "main_hidden_states") {
       v_.main_hidden_states = JSON::Get<std::string_view>(value);
+    } else if (name == "base_capacity") {
+      v_.index_share.base_capacity = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (v_.index_share.base_capacity <= 0) throw std::out_of_range("base_capacity must be > 0");
+      v_.index_share.enabled = true;
+      if (v_.index_share.max_draft_tokens == 0) v_.index_share.max_draft_tokens = 7;
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1143,8 +1307,8 @@ struct Mtp_Element : JSON::Element {
   Config::Model::Mtp& v_;
   std::unique_ptr<SessionOptions_Element> session_options_;
   std::unique_ptr<RunOptions_Element> run_options_;
-  MtpInputs_Element inputs_{v_.inputs};
-  MtpOutputs_Element outputs_{v_.outputs};
+  MtpInputs_Element inputs_{v_};
+  MtpOutputs_Element outputs_{v_};
   SharedInitializers_Element shared_initializers_{v_.shared_initializers};
 };
 
@@ -1164,6 +1328,8 @@ struct Dflash2Inputs_Element : JSON::Element {
       v_.qkv_row_map = JSON::Get<std::string_view>(value);
     } else if (name == "block_row_index") {
       v_.block_row_index = JSON::Get<std::string_view>(value);
+    } else if (name == "anchor_row_index") {
+      v_.anchor_row_index = JSON::Get<std::string_view>(value);
     } else if (name == "past_key_scale_names") {
       v_.past_key_scale_names = JSON::Get<std::string_view>(value);
     } else if (name == "past_value_scale_names") {
@@ -1404,7 +1570,9 @@ struct VisionPipelineModel_Element : JSON::Element {
 
   Element& OnObject(std::string_view name) override {
     if (name == "session_options") {
-      v_.session_options = Config::SessionOptions{};
+      if (!v_.session_options) {
+        v_.session_options.emplace();
+      }
       session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
       return *session_options_;
     }
@@ -1438,15 +1606,15 @@ struct VisionPipelineModelObject_Element : JSON::Element {
   explicit VisionPipelineModelObject_Element(std::vector<Config::Model::Vision::PipelineModel>& v) : v_{v} {}
 
   Element& OnObject(std::string_view name) override {
-    auto& model = v_.emplace_back();
-    model.model_id = name;
-    elements_.emplace_back(model);
-    return elements_.back();
+    element_.reset();  // Appending below may reallocate v_.
+    auto& model = GetOrCreatePipelineModel(v_, name);
+    element_ = std::make_unique<VisionPipelineModel_Element>(model);
+    return *element_;
   }
 
  private:
   std::vector<Config::Model::Vision::PipelineModel>& v_;
-  std::vector<VisionPipelineModel_Element> elements_;
+  std::unique_ptr<VisionPipelineModel_Element> element_;
 };
 
 struct VisionPipeline_Element : JSON::Element {
@@ -2178,6 +2346,81 @@ struct Embedding_Element : JSON::Element {
   EmbeddingOutputs_Element outputs_{v_.outputs};
 };
 
+struct EngramInputs_Element : JSON::Element {
+  explicit EngramInputs_Element(Config::Model::Engram::Inputs& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "input_ids") {
+      v_.input_ids = JSON::Get<std::string_view>(value);
+    } else if (name == "past_ple_token_names" || name == "past_tokens") {
+      v_.past_tokens = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Engram::Inputs& v_;
+};
+
+struct EngramOutputs_Element : JSON::Element {
+  explicit EngramOutputs_Element(Config::Model::Engram::Outputs& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "embeddings") {
+      v_.embeddings = JSON::Get<std::string_view>(value);
+    } else if (name == "present_ple_token_names" || name == "present_tokens") {
+      v_.present_tokens = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Engram::Outputs& v_;
+};
+
+struct Engram_Element : JSON::Element {
+  explicit Engram_Element(Config::Model::Engram& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "filename") {
+      v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "cache_capacity") {
+      const double capacity = JSON::Get<double>(value);
+      if (capacity < 0 || capacity != std::trunc(capacity)) {
+        throw std::runtime_error("model.engram.cache_capacity must be a non-negative integer");
+      }
+      v_.cache_capacity = static_cast<size_t>(capacity);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "session_options") {
+      v_.session_options = Config::SessionOptions{};
+      session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
+      return *session_options_;
+    }
+    if (name == "run_options") {
+      v_.run_options = Config::RunOptions{};
+      run_options_ = std::make_unique<RunOptions_Element>(*v_.run_options);
+      return *run_options_;
+    }
+    if (name == "inputs") return inputs_;
+    if (name == "outputs") return outputs_;
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Engram& v_;
+  std::unique_ptr<SessionOptions_Element> session_options_;
+  std::unique_ptr<RunOptions_Element> run_options_;
+  EngramInputs_Element inputs_{v_.inputs};
+  EngramOutputs_Element outputs_{v_.outputs};
+};
+
 struct Model_Element : JSON::Element {
   explicit Model_Element(Config::Model& v)
       : v_{v}, block_drafter_alias_{v_.dflash2.configured_alias_is_dspark} {}
@@ -2243,6 +2486,29 @@ struct Model_Element : JSON::Element {
       v_.blank_id = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "max_symbols_per_step") {
       v_.max_symbols_per_step = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "timestamp_level") {
+      const auto level = JSON::Get<std::string_view>(value);
+      if (level == "off") {
+        v_.timestamp_level = Config::TimestampLevel::Off;
+      } else if (level == "word") {
+        v_.timestamp_level = Config::TimestampLevel::Word;
+      } else if (level == "segment") {
+        v_.timestamp_level = Config::TimestampLevel::Segment;
+      } else if (level == "all") {
+        v_.timestamp_level = Config::TimestampLevel::All;
+      } else {
+        throw std::runtime_error("timestamp_level must be one of: off, word, segment, all");
+      }
+    } else if (name == "segment_gap_threshold_seconds") {
+      if (std::holds_alternative<std::nullptr_t>(value)) {
+        v_.segment_gap_threshold_seconds.reset();
+      } else {
+        const double threshold = JSON::Get<double>(value);
+        if (!std::isfinite(threshold) || threshold < 0.0) {
+          throw std::runtime_error("segment_gap_threshold_seconds must be finite and >= 0");
+        }
+        v_.segment_gap_threshold_seconds = threshold;
+      }
     } else if (name == "left_context_samples") {
       v_.left_context_samples = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "right_context_samples") {
@@ -2265,6 +2531,10 @@ struct Model_Element : JSON::Element {
       return eos_token_id_;
     if (name == "tdt_durations")
       return tdt_durations_;
+    if (name == "segment_separators") {
+      v_.segment_separators.clear();
+      return segment_separators_;
+    }
     throw JSON::unknown_value_error{};
   }
 
@@ -2287,6 +2557,9 @@ struct Model_Element : JSON::Element {
     }
     if (name == "embedding") {
       return embedding_;
+    }
+    if (name == "engram") {
+      return engram_;
     }
     if (name == "speech") {
       return speech_;
@@ -2327,8 +2600,10 @@ struct Model_Element : JSON::Element {
   std::unique_ptr<Decoder_Element> draft_;
   Int_Array_Element eos_token_id_{v_.eos_token_id};
   Int_Array_Element tdt_durations_{v_.tdt_durations};
+  StringArray_Element segment_separators_{v_.segment_separators};
   Vision_Element vision_{v_.vision};
   Embedding_Element embedding_{v_.embedding};
+  Engram_Element engram_{v_.engram};
   Speech_Element speech_{v_.speech};
   AudioOutput_Element audio_output_{v_.audio_output};
   Joiner_Element joiner_{v_.joiner};
@@ -2371,6 +2646,40 @@ int SafeDoubleToInt(double x, std::string_view name) {
 
   // 4. Perform the cast.
   return static_cast<int>(x);
+}
+
+void ValidateTimestampConfiguration(const Config::Model& model) {
+  if (model.timestamp_level == Config::TimestampLevel::Off) return;
+  if (!ModelType::IsRNNT(model.type))
+    throw std::runtime_error("Timestamp metadata requires a nemotron_speech model");
+  if (model.sample_rate <= 0 || model.hop_length <= 0 || model.subsampling_factor <= 0)
+    throw std::runtime_error("Timestamp metadata requires positive sample_rate, hop_length, and subsampling_factor");
+  (void)GetSegmentGapThresholdFrames(model);
+}
+
+std::optional<int> GetSegmentGapThresholdFrames(const Config::Model& model) {
+  return GetSegmentGapThresholdFrames(model.segment_gap_threshold_seconds, model.sample_rate,
+                                      model.hop_length, model.subsampling_factor);
+}
+
+std::optional<int> GetSegmentGapThresholdFrames(std::optional<double> seconds, int sample_rate,
+                                                int hop_length, int subsampling_factor) {
+  if (!seconds) return std::nullopt;
+  if (!std::isfinite(*seconds) || *seconds < 0.0) {
+    throw std::runtime_error("segment_gap_threshold_seconds must be finite and >= 0");
+  }
+  if (sample_rate <= 0 || hop_length <= 0 || subsampling_factor <= 0) {
+    throw std::runtime_error(
+        "segment_gap_threshold_seconds requires positive sample_rate, hop_length, and subsampling_factor");
+  }
+
+  const int64_t samples_per_frame = static_cast<int64_t>(hop_length) * subsampling_factor;
+  const double rounded_frames = std::round(
+      *seconds * sample_rate / samples_per_frame);
+  if (rounded_frames > std::numeric_limits<int>::max()) {
+    throw std::runtime_error("segment_gap_threshold_seconds is too large");
+  }
+  return static_cast<int>(rounded_frames);
 }
 
 int64_t SafeDoubleToInt64(double x, std::string_view name) {
@@ -2541,7 +2850,11 @@ struct DynamicBatching_Element : JSON::Element {
       v_->max_scheduled_tokens = static_cast<size_t>(parsed_value);
     } else if (name == "prefix_caching") {
       v_->prefix_caching = JSON::Get<bool>(value);
-      v_->prefix_caching_explicitly_set = true;
+    } else if (name == "dflash2_max_snapshots") {
+      const auto parsed_value = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (parsed_value < 0)
+        throw std::out_of_range("dflash2_max_snapshots must be >= 0");
+      v_->dflash2_max_snapshots = static_cast<size_t>(parsed_value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -2612,6 +2925,10 @@ struct RuntimeProfileEligibility_Element : JSON::Element {
       v_.minimum_total_device_memory_bytes = ParseRuntimeProfileMemoryBytes(value, name);
     } else if (name == "maximum_total_device_memory_bytes") {
       v_.maximum_total_device_memory_bytes = ParseRuntimeProfileMemoryBytes(value, name);
+    } else if (name == "minimum_free_device_memory_bytes") {
+      v_.minimum_free_device_memory_bytes = ParseRuntimeProfileMemoryBytes(value, name);
+    } else if (name == "maximum_free_device_memory_bytes") {
+      v_.maximum_free_device_memory_bytes = ParseRuntimeProfileMemoryBytes(value, name);
     } else if (name == "is_integrated") {
       v_.is_integrated = JSON::Get<bool>(value);
     } else {
@@ -2628,8 +2945,9 @@ struct RuntimeProfileDynamicBatching_Element : JSON::Element {
 
   void OnValue(std::string_view name, JSON::Value value) override {
     const auto parsed = SafeDoubleToInt(JSON::Get<double>(value), name);
-    if (parsed <= 0) {
-      throw std::out_of_range(std::string{name} + " must be > 0");
+    if (parsed < 0 || (parsed == 0 && name != "dflash2_max_snapshots")) {
+      throw std::out_of_range(std::string{name} +
+                              (name == "dflash2_max_snapshots" ? " must be >= 0" : " must be > 0"));
     }
     if (name == "num_blocks") {
       v_.num_blocks = static_cast<size_t>(parsed);
@@ -2637,6 +2955,8 @@ struct RuntimeProfileDynamicBatching_Element : JSON::Element {
       v_.max_batch_size = static_cast<size_t>(parsed);
     } else if (name == "max_scheduled_tokens") {
       v_.max_scheduled_tokens = static_cast<size_t>(parsed);
+    } else if (name == "dflash2_max_snapshots") {
+      v_.dflash2_max_snapshots = static_cast<size_t>(parsed);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -2835,12 +3155,20 @@ bool ExactConditionsIntersect(const std::optional<T>& first, const std::optional
 
 bool EligibilitiesIntersect(const Config::RuntimeProfile::Eligibility& a,
                             const Config::RuntimeProfile::Eligibility& b) {
-  const uint64_t a_maximum = a.maximum_total_device_memory_bytes.value_or(
-      std::numeric_limits<uint64_t>::max());
-  const uint64_t b_maximum = b.maximum_total_device_memory_bytes.value_or(
-      std::numeric_limits<uint64_t>::max());
-  return *a.minimum_total_device_memory_bytes <= b_maximum &&
-         *b.minimum_total_device_memory_bytes <= a_maximum &&
+  const auto minimum_total = std::max(*a.minimum_total_device_memory_bytes,
+                                      *b.minimum_total_device_memory_bytes);
+  const auto maximum_total = std::min(a.maximum_total_device_memory_bytes.value_or(
+                                          std::numeric_limits<uint64_t>::max()),
+                                      b.maximum_total_device_memory_bytes.value_or(
+                                          std::numeric_limits<uint64_t>::max()));
+  const auto minimum_free = std::max(a.minimum_free_device_memory_bytes.value_or(0),
+                                     b.minimum_free_device_memory_bytes.value_or(0));
+  const auto maximum_free = std::min(a.maximum_free_device_memory_bytes.value_or(
+                                         std::numeric_limits<uint64_t>::max()),
+                                     b.maximum_free_device_memory_bytes.value_or(
+                                         std::numeric_limits<uint64_t>::max()));
+  return minimum_total <= maximum_total && minimum_free <= maximum_free &&
+         minimum_free <= maximum_total &&
          ExactConditionsIntersect(a.is_integrated, b.is_integrated);
 }
 
@@ -2849,6 +3177,12 @@ bool MatchesEligibility(const Config::RuntimeProfile::Eligibility& eligibility,
   return device.total_device_memory_bytes >= *eligibility.minimum_total_device_memory_bytes &&
          (!eligibility.maximum_total_device_memory_bytes ||
           device.total_device_memory_bytes <= *eligibility.maximum_total_device_memory_bytes) &&
+         (!eligibility.minimum_free_device_memory_bytes ||
+          (device.free_device_memory_bytes &&
+           *device.free_device_memory_bytes >= *eligibility.minimum_free_device_memory_bytes)) &&
+         (!eligibility.maximum_free_device_memory_bytes ||
+          (device.free_device_memory_bytes &&
+           *device.free_device_memory_bytes <= *eligibility.maximum_free_device_memory_bytes)) &&
          (!eligibility.is_integrated ||
           (device.is_integrated && *device.is_integrated == *eligibility.is_integrated));
 }
@@ -2872,6 +3206,19 @@ void ValidateRuntimeProfiles(const Config& config) {
       throw std::runtime_error("runtime profile '" + profile.id +
                                "' has maximum_total_device_memory_bytes below its minimum");
     }
+    if (profile.eligibility.maximum_free_device_memory_bytes &&
+        *profile.eligibility.maximum_free_device_memory_bytes <
+            profile.eligibility.minimum_free_device_memory_bytes.value_or(0)) {
+      throw std::runtime_error("runtime profile '" + profile.id +
+                               "' has maximum_free_device_memory_bytes below its minimum");
+    }
+    if (profile.eligibility.minimum_free_device_memory_bytes &&
+        profile.eligibility.maximum_total_device_memory_bytes &&
+        *profile.eligibility.minimum_free_device_memory_bytes >
+            *profile.eligibility.maximum_total_device_memory_bytes) {
+      throw std::runtime_error("runtime profile '" + profile.id +
+                               "' requires more free device memory than its maximum total");
+    }
     const auto& batching = profile.overlay.dynamic_batching;
     const auto& search = profile.overlay.search;
     if (profile.overlay.model.decoder_filename && profile.overlay.model.decoder_filename->empty()) {
@@ -2883,7 +3230,7 @@ void ValidateRuntimeProfiles(const Config& config) {
                          "runtime profile '" + profile.id + "' model.decoder.filename");
     }
     if (!profile.overlay.model.decoder_filename && !batching.num_blocks && !batching.max_batch_size &&
-        !batching.max_scheduled_tokens && !search.chunk_size &&
+        !batching.max_scheduled_tokens && !batching.dflash2_max_snapshots && !search.chunk_size &&
         !profile.overlay.speculative.max_draft_tokens) {
       throw std::runtime_error("runtime profile '" + profile.id +
                                "' does not contain any overlay fields");
@@ -3012,7 +3359,7 @@ void SetProviderOption(Config& config, std::string_view provider_name, std::stri
   }
 
   // JSON-escape all caller-supplied string fragments before concatenating them into the
-  // JSON document. Without escaping, quote/backslash characters in provider_name,
+  // JSON document. Without escaping, quote/backslash characters in the provider name,
   // option_name, or option_value would let a caller inject arbitrary JSON structure
   // (sibling keys, new provider entries, etc.) into the parsed configuration.
   std::ostringstream json;
@@ -3054,6 +3401,16 @@ bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options) {
         }
         return true;
       } else if (provider_options->name == "AMDGPU") {
+        // Graph capture defaults to ON for the AMDGPU umbrella EP (both the MIGraphX and DirectX
+        // backends) and can be opted out per model via the provider option "enable_graph_capture": "0"
+        // (like DML). The MIGraphX backend relies on capture being on by default; non-decoder
+        // sub-sessions are already forced off via the disable_graph_capture flag in
+        // AppendExecutionProvider.
+        for (const auto& value : provider_options->options) {
+          if (value.first == "enable_graph_capture" && value.second == "0") {
+            return false;
+          }
+        }
         return true;
       } else if (provider_options->name == "WebGPU") {
         for (const auto& value : provider_options->options) {
@@ -3197,23 +3554,26 @@ struct RootObject_Element : JSON::Element {
   JSON::Element& t_;
 };
 
-void ParseConfig(const fs::path& filename, std::string_view json_overlay, Config& config) {
-  std::ifstream file = filename.open(std::ios::binary | std::ios::ate);
-  if (!file.is_open()) {
-    throw std::runtime_error("Error opening " + filename.string());
-  }
-  std::streamsize const size = file.tellg();
-  file.seekg(0, std::ios::beg);
-
-  std::vector<char> buffer(size);
-  if (!file.read(buffer.data(), size)) {
-    throw std::runtime_error("Error reading " + filename.string());
+void ParseConfig(const fs::path& filename, std::string_view json_overlay, Config& config,
+                 std::optional<std::string_view> memory_json) {
+  std::vector<char> buffer;
+  if (!memory_json) {
+    std::ifstream file = filename.open(std::ios::binary | std::ios::ate);
+    if (!file.is_open()) {
+      throw std::runtime_error("Error opening " + filename.string());
+    }
+    std::streamsize const size = file.tellg();
+    file.seekg(0, std::ios::beg);
+    buffer.resize(size);
+    if (!file.read(buffer.data(), size)) {
+      throw std::runtime_error("Error reading " + filename.string());
+    }
   }
 
   Root_Element root{config};
   RootObject_Element root_object{root};
   try {
-    JSON::Parse(root_object, std::string_view(buffer.data(), buffer.size()));
+    JSON::Parse(root_object, memory_json.value_or(std::string_view(buffer.data(), buffer.size())));
   } catch (const std::exception& message) {
     std::ostringstream oss;
     oss << "Error encountered while parsing '" << filename.string() << "' " << message.what();
@@ -3232,14 +3592,41 @@ void ParseConfig(const fs::path& filename, std::string_view json_overlay, Config
   ValidateRuntimeProfiles(config);
 }
 
+void RefreshEngramProviders(Config& config) {
+  if (config.model.engram.session_options) {
+    auto& options = *config.model.engram.session_options;
+    options.providers.clear();
+    for (const auto& provider : options.provider_options)
+      options.providers.push_back(provider.name);
+  }
+}
+
 void OverlayConfig(Config& config, std::string_view json) {
   Config candidate{config};
   Root_Element root{candidate};
   RootObject_Element element{root};
   JSON::Parse(element, json);
+  RefreshEngramProviders(candidate);
   ValidateRuntimeProfiles(candidate);
   ModelStateManifest::ValidateConfig(candidate.model.decoder);
+  ValidateTimestampConfiguration(candidate.model);
   std::swap(config, candidate);
+}
+
+void LogRuntimeProfileSelection(std::string_view profile_id, const RuntimeProfileDeviceFacts& device) {
+  if (!g_log.enabled) return;
+
+  auto& stream = Log("info");
+  stream << "Runtime profile: " << profile_id
+         << " (total_device_memory_bytes=" << device.total_device_memory_bytes
+         << ", free_device_memory_bytes=";
+  if (device.free_device_memory_bytes) {
+    stream << *device.free_device_memory_bytes;
+  } else {
+    stream << "unknown";
+  }
+  stream << ", is_integrated=" << (device.is_integrated ? (*device.is_integrated ? "true" : "false") : "unknown")
+         << ')' << std::endl;
 }
 
 void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device) {
@@ -3250,17 +3637,20 @@ void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device) {
       continue;
     }
     if (selected) {
-      throw std::runtime_error("multiple runtime profiles match total device memory: '" +
+      throw std::runtime_error("multiple runtime profiles match device eligibility: '" +
                                selected->id + "' and '" + profile.id + "'");
     }
     selected = &profile;
   }
   if (!selected) {
+    if (!config.runtime_profiles.empty()) {
+      LogRuntimeProfileSelection("base config", device);
+    }
     return;
   }
   const auto& batching = selected->overlay.dynamic_batching;
   const bool has_batching_overlay = batching.num_blocks || batching.max_batch_size ||
-                                    batching.max_scheduled_tokens;
+                                    batching.max_scheduled_tokens || batching.dflash2_max_snapshots;
   if (has_batching_overlay && !config.engine.dynamic_batching) {
     throw std::runtime_error("runtime profile '" + selected->id +
                              "' requires engine.dynamic_batching in the base config");
@@ -3274,6 +3664,7 @@ void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device) {
     if (batching.num_blocks) effective.num_blocks = batching.num_blocks;
     if (batching.max_batch_size) effective.max_batch_size = *batching.max_batch_size;
     if (batching.max_scheduled_tokens) effective.max_scheduled_tokens = *batching.max_scheduled_tokens;
+    if (batching.dflash2_max_snapshots) effective.dflash2_max_snapshots = *batching.dflash2_max_snapshots;
   }
   const auto& search = selected->overlay.search;
   if (search.chunk_size) candidate.search.chunk_size = search.chunk_size;
@@ -3284,6 +3675,7 @@ void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device) {
   if (selected->overlay.speculative.max_draft_tokens) {
     WarnOnClampedDraftWidth(config);
   }
+  LogRuntimeProfileSelection(selected->id, device);
 }
 
 void ApplyRuntimeProfile(Config& config, uint64_t total_device_memory_bytes) {
@@ -3384,8 +3776,10 @@ void WarnOnClampedDraftWidth(const Config& config) {
   }
 }
 
-Config::Config(const fs::path& path, std::string_view json_overlay) : config_path{path} {
-  ParseConfig(path / "genai_config.json", json_overlay, *this);
+Config::Config(const fs::path& path, std::string_view json_overlay,
+               std::optional<std::string_view> memory_json)
+    : config_path{path}, memory_assets_only_{memory_json.has_value()} {
+  ParseConfig(path / "genai_config.json", json_overlay, *this, memory_json);
   ModelStateManifest::ValidateConfig(model.decoder);
 
   if (model.context_length == 0 && !ModelType::IsRNNT(model.type) && !ModelType::IsStreamingEncDecASR(model.type)) {
@@ -3434,10 +3828,18 @@ Config::Config(const fs::path& path, std::string_view json_overlay) : config_pat
       model.embedding.session_options->providers.push_back(provider_option.name);
     }
   }
+  RefreshEngramProviders(*this);
+
+  if ((!model.engram.filename.empty() || !model.decoder.inputs.past_ple_token_names.empty()) &&
+      model.decoder.ple_token_pad_id < 0) {
+    throw std::runtime_error("Engram/PLE models require model.decoder.ple_token_pad_id");
+  }
 
   // Validate all config-specified filenames/paths after parsing so downstream loaders
   // (model/processor/adapter creation) can rely on them being safe.
   ValidateModelPaths(*this);
+
+  ValidateTimestampConfiguration(model);
 
   WarnOnClampedDraftWidth(*this);
 }

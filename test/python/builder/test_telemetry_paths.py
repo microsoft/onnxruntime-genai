@@ -1,6 +1,7 @@
 import builtins
 import importlib.util
 import json
+import os
 import sys
 import types
 from pathlib import Path
@@ -17,16 +18,24 @@ def _load_builder_entrypoint_module():
     builders_stub.__package__ = "builders"
 
     def _getattr(name):
+        if name.startswith("__"):
+            raise AttributeError(name)
         return type(name, (), {})
 
     builders_stub.__getattr__ = _getattr
-    previous_builders = sys.modules.get("builders")
-    had_previous_builders = "builders" in sys.modules
+    builder_modules = {
+        "builders": builders_stub,
+        "builders.non_generative": types.ModuleType("builders.non_generative"),
+        "builders.qwen3_5": types.ModuleType("builders.qwen3_5"),
+    }
+    for module in builder_modules.values():
+        module.__getattr__ = _getattr
+    previous_builders = {name: sys.modules.get(name) for name in builder_modules}
     models_path_added = str(MODELS_DIR) not in sys.path
     try:
         if models_path_added:
             sys.path.insert(0, str(MODELS_DIR))
-        sys.modules["builders"] = builders_stub
+        sys.modules.update(builder_modules)
         spec = importlib.util.spec_from_file_location("models_builder_telemetry", MODELS_DIR / "builder.py")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
@@ -34,10 +43,11 @@ def _load_builder_entrypoint_module():
     finally:
         if models_path_added:
             sys.path.remove(str(MODELS_DIR))
-        if had_previous_builders:
-            sys.modules["builders"] = previous_builders
-        else:
-            sys.modules.pop("builders", None)
+        for name, previous in previous_builders.items():
+            if previous is not None:
+                sys.modules[name] = previous
+            else:
+                sys.modules.pop(name, None)
 
 
 telemetry_spec = importlib.util.spec_from_file_location(
@@ -276,12 +286,13 @@ def test_build_telemetry_sanitizes_model_name_and_normalizes_provider(monkeypatc
 
     monkeypatch.setattr(builder_telemetry, "get_telemetry", RecordingTelemetry)
     onnx_model = types.SimpleNamespace(
+        num_layers=4,
         model=types.SimpleNamespace(
             graph=[
                 types.SimpleNamespace(op_type="MatMul", domain=""),
                 types.SimpleNamespace(op_type="GroupQueryAttention", domain="com.microsoft"),
             ]
-        )
+        ),
     )
 
     builder_telemetry.emit(
@@ -303,6 +314,7 @@ def test_build_telemetry_sanitizes_model_name_and_normalizes_provider(monkeypatc
     assert captured["operator_types"] == "GroupQueryAttention,MatMul"
     assert captured["has_custom_ops"] is True
     assert captured["duration_ms"] >= 0
+    assert captured["num_layers"] == 4
 
 
 def test_build_telemetry_counts_exported_artifacts(monkeypatch, tmp_path, builder_telemetry):
@@ -376,8 +388,18 @@ def test_builder_cli_retains_the_telemetry_optout(monkeypatch, builder_module):
     assert builder_module.get_args().disable_telemetry is True
 
 
-def test_early_failure_does_not_report_a_successful_build(monkeypatch, tmp_path, builder_telemetry, builder_module):
+@pytest.mark.parametrize("disable_telemetry", [False, True])
+def test_early_failure_does_not_report_a_successful_build(
+    monkeypatch, tmp_path, builder_telemetry, builder_module, disable_telemetry
+):
     captured = {}
+    shutdown = []
+    monkeypatch.delenv("ORT_DISABLE_TELEMETRY", raising=False)
+    monkeypatch.setattr(
+        builder_module.ModelBuilderTelemetry,
+        "shutdown",
+        lambda self: shutdown.append(os.environ.get("ORT_DISABLE_TELEMETRY")),
+    )
     monkeypatch.setattr(
         builder_module.ModelBuilderTelemetry,
         "emit",
@@ -392,9 +414,11 @@ def test_early_failure_does_not_report_a_successful_build(monkeypatch, tmp_path,
             "fp16",
             "cpu",
             str(tmp_path / "cache"),
+            disable_telemetry=disable_telemetry,
         )
 
     assert captured == {}
+    assert shutdown == ["1" if disable_telemetry else None]
 
 
 def test_interrupted_build_is_not_reported_as_success(monkeypatch, tmp_path, builder_telemetry, builder_module):
@@ -437,7 +461,9 @@ def test_structured_runtime_config_is_applied_before_success_telemetry(
 ):
     captured = {}
     config = types.SimpleNamespace(architectures=["LlamaForCausalLM"])
-    effective = types.SimpleNamespace(precision="fp16", runtime_config={"search": {"max_length": 128}})
+    effective = types.SimpleNamespace(
+        precision="fp16", runtime_config={"search": {"max_length": 128}}, component_options=None
+    )
 
     class ConfigOnlyModel:
         def make_genai_config(self, config, extra_kwargs, output_dir):

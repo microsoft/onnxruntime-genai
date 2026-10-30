@@ -187,7 +187,6 @@ TEST(CAPITests, TokenizerCAPI) {
 TEST(CAPITests, TokenizerCreateFromConfigAndPath) {
 #if TEST_PHI2
   const char* input_string = "She sells sea shells by the sea shore.";
-
   auto config = OgaConfig::Create(PHI2_PATH);
   auto tokenizer_from_config = OgaTokenizer::Create(*config);
   auto tokenizer_from_path = OgaTokenizer::Create(PHI2_PATH);
@@ -201,6 +200,89 @@ TEST(CAPITests, TokenizerCreateFromConfigAndPath) {
   auto out_string = tokenizer_from_path->Decode(input_sequences->SequenceData(0), input_sequences->SequenceCount(0));
   ASSERT_STREQ(input_string, out_string);
 #endif
+}
+
+TEST(CAPITests, ASRPostProcessorOpaqueResults) {
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 10);
+  auto generator = OgaGenerator::Create(*model, *params);
+  auto tokenizer = OgaTokenizer::Create(*model);
+  auto plain = OgaTokenizerStream::Create(*tokenizer);
+  model.reset();
+  auto processor = OgaASRPostProcessor::Create(*generator);
+  EXPECT_TRUE(processor->GetNextResults().empty());
+  const std::array<int32_t, 4> prompt{0, 0, 0, 52};
+  generator->AppendTokens(prompt.data(), prompt.size());
+  generator->GenerateNextToken();
+  auto* base = OgaASRPostProcessorAsPostProcessor(processor.get());
+  ASSERT_NE(base, nullptr);
+  OgaCheckResult(OgaPostProcessorProcessNext(base));
+  const auto results = processor->GetNextResults();
+  ASSERT_EQ(results.size(), 1U);
+  const OgaASRPostProcessorResult* result = results[0];
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(processor->GetNextResults()[0], result);
+  const std::string expected = plain->Decode(generator->GetNextTokens()[0]);
+  EXPECT_STREQ(result->GetText(), expected.c_str());
+  EXPECT_EQ(result->GetTimestampResult(), nullptr);
+  const auto* native_result = OgaASRPostProcessorGetResult(processor.get(), 0);
+  EXPECT_EQ(result, native_result);
+  EXPECT_EQ(result->GetText(), OgaASRPostProcessorResultGetText(native_result));
+  EXPECT_EQ(OgaASRPostProcessorResultGetTimestampResult(native_result), nullptr);
+  EXPECT_EQ(OgaASRPostProcessorResultGetTimestampResult(nullptr), nullptr);
+  EXPECT_EQ(OgaASRPostProcessorTimestampResultGetWordCount(nullptr), 0U);
+  EXPECT_EQ(OgaASRPostProcessorTimestampResultGetSegmentCount(nullptr), 0U);
+  EXPECT_EQ(OgaASRPostProcessorTimestampResultGetTimestampRecord(nullptr, OgaTimestampRecordKind_Words, 0), nullptr);
+  EXPECT_EQ(OgaASRPostProcessorTimestampResultGetTimestampRecord(nullptr, OgaTimestampRecordKind_Segments, 0), nullptr);
+  EXPECT_EQ(OgaASRPostProcessorGetResult(processor.get(), 1), nullptr);
+  generator->GenerateNextToken();
+  EXPECT_STREQ(result->GetText(), expected.c_str());
+  processor->ProcessNext();
+  EXPECT_EQ(processor->GetNextResults()[0]->GetText(), std::string{plain->Decode(generator->GetNextTokens()[0])});
+  processor->Finalize();
+  processor->Finalize();
+  ASSERT_EQ(processor->GetNextResults().size(), 1U);
+  EXPECT_STREQ(processor->GetNextResults()[0]->GetText(), "");
+  processor->Reset();
+  EXPECT_TRUE(processor->GetNextResults().empty());
+  processor.reset();
+  generator.reset();
+}
+
+TEST(CAPITests, ASRPostProcessorBaseLifecycle) {
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 10);
+  auto generator = OgaGenerator::Create(*model, *params);
+  auto processor = OgaASRPostProcessor::Create(*generator);
+  const auto* asr = processor.get();
+  std::unique_ptr<OgaPostProcessor> base{OgaASRPostProcessorAsPostProcessor(processor.release())};
+  const std::array<int32_t, 4> prompt{0, 0, 0, 52};
+  generator->AppendTokens(prompt.data(), prompt.size());
+  generator->GenerateNextToken();
+  base->ProcessNext();
+  ASSERT_EQ(asr->GetNextResults().size(), 1U);
+  base->Finalize();
+  ASSERT_EQ(asr->GetNextResults().size(), 1U);
+  EXPECT_STREQ(asr->GetNextResults()[0]->GetText(), "");
+  base->Reset();
+  EXPECT_TRUE(asr->GetNextResults().empty());
+  base.reset();
+}
+
+TEST(CAPITests, ASRPostProcessorRejectsInvalidCreation) {
+  OgaASRPostProcessor* processor = nullptr;
+  EXPECT_THROW(OgaCheckResult(OgaCreateASRPostProcessor(nullptr, &processor)), std::runtime_error);
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto params = OgaGeneratorParams::Create(*model);
+  auto generator = OgaGenerator::Create(*model, *params);
+  EXPECT_THROW(OgaCheckResult(OgaCreateASRPostProcessor(generator.get(), nullptr)), std::runtime_error);
+  EXPECT_EQ(OgaASRPostProcessorAsPostProcessor(nullptr), nullptr);
+  EXPECT_THROW(OgaCheckResult(OgaPostProcessorProcessNext(nullptr)), std::runtime_error);
+  EXPECT_THROW(OgaCheckResult(OgaPostProcessorFinalize(nullptr)), std::runtime_error);
+  EXPECT_THROW(OgaCheckResult(OgaPostProcessorReset(nullptr)), std::runtime_error);
+  EXPECT_NO_THROW(OgaDestroyPostProcessor(nullptr));
 }
 
 TEST(CAPITests, EncodeBatchEmptyInputThrows) {
@@ -278,6 +360,291 @@ TEST(CAPITests, TokenizerUpdateOptions) {
       throw std::runtime_error("Stream token decoding mismatch");
   }
 #endif
+}
+
+namespace {
+
+class LiteralTokenizerApiTest : public testing::Test {
+ protected:
+  void SetUp() override {
+    if (const char* path = std::getenv("ORT_GENAI_LITERAL_TEST_MODEL_PATH"); path && *path) {
+      model_path_ = path;
+    } else {
+#if TEST_PHI2
+      model_path_ = PHI2_PATH;
+#else
+      GTEST_SKIP() << "Set ORT_GENAI_LITERAL_TEST_MODEL_PATH to a staged real model pack.";
+#endif
+    }
+    ASSERT_TRUE(std::filesystem::exists(std::filesystem::path(model_path_) / "genai_config.json"));
+    tokenizer_ = OgaTokenizer::Create(model_path_.c_str());
+    const char* keys[] = {"skip_special_tokens"};
+    const char* values[] = {"false"};
+    tokenizer_->UpdateOptions(keys, values, 1);
+    for (const char* marker : {"<|endoftext|>", "<|endofprompt|>", "<|assistant|>", "<|end|>", "<|user|>",
+                               "<|system|>", "<|tool|>", "<|/tool|>", "<|tool_call|>", "<|/tool_call|>",
+                               "<|tool_response|>", "<|tag|>"}) {
+      auto sequences = OgaSequences::Create();
+      tokenizer_->Encode(marker, *sequences);
+      if (sequences->SequenceCount(0) != 1) continue;
+      const int32_t id = sequences->SequenceData(0)[0];
+      if (std::strcmp(tokenizer_->Decode(&id, 1), marker) == 0) {
+        markers_.emplace_back(marker, id);
+      }
+    }
+    ASSERT_FALSE(markers_.empty()) << "The real tokenizer must recognize at least one control marker.";
+    legacy_tokenizer_ = OgaTokenizer::Create(model_path_.c_str());
+    legacy_tokenizer_->UpdateOptions(keys, values, 1);
+    SetLiteral(*tokenizer_, true);
+  }
+
+  static void SetLiteral(OgaTokenizer& tokenizer, bool enabled) {
+    const char* keys[] = {"literal"};
+    const char* values[] = {enabled ? "true" : "false"};
+    tokenizer.UpdateOptions(keys, values, 1);
+  }
+
+  void ExpectNoControlTokens(const OgaSequences& sequences) const {
+    ASSERT_EQ(sequences.Count(), 1);
+    const size_t count = sequences.SequenceCount(0);
+    ASSERT_GT(count, 0);
+    const int32_t* tokens = sequences.SequenceData(0);
+    for (const auto& [marker, id] : markers_) {
+      EXPECT_EQ(std::find(tokens, tokens + count, id), tokens + count) << marker;
+    }
+  }
+
+  std::string model_path_;
+  std::unique_ptr<OgaTokenizer> tokenizer_;
+  std::unique_ptr<OgaTokenizer> legacy_tokenizer_;
+  std::vector<std::pair<std::string, int32_t>> markers_;
+};
+
+}  // namespace
+
+TEST(CAPITests, TokenizerEncodeRejectsNullArguments) {
+  std::unique_ptr<OgaResult> result(OgaTokenizerEncode(nullptr, "control", nullptr));
+  ASSERT_NE(result, nullptr);
+  EXPECT_NE(std::strlen(OgaResultGetError(result.get())), 0);
+}
+
+TEST_F(LiteralTokenizerApiTest, EncodesControlMarkersAsLiteralText) {
+  for (const auto& [marker, id] : markers_) {
+    SCOPED_TRACE(marker);
+    const std::string text = "control " + marker + " control";
+    auto sequences = OgaSequences::Create();
+    tokenizer_->Encode(text.c_str(), *sequences);
+    ASSERT_NO_FATAL_FAILURE(ExpectNoControlTokens(*sequences));
+    EXPECT_STREQ(tokenizer_->Decode(sequences->SequenceData(0), sequences->SequenceCount(0)), text.c_str());
+  }
+}
+
+TEST_F(LiteralTokenizerApiTest, PreservesLegacyEncodingAndOptions) {
+  for (const auto& [marker, id] : markers_) {
+    SCOPED_TRACE(marker);
+    auto literal = OgaSequences::Create();
+    tokenizer_->Encode(marker.c_str(), *literal);
+    ASSERT_NO_FATAL_FAILURE(ExpectNoControlTokens(*literal));
+    auto legacy = OgaSequences::Create();
+    legacy_tokenizer_->Encode(marker.c_str(), *legacy);
+    ASSERT_EQ(legacy->SequenceCount(0), 1);
+    EXPECT_EQ(legacy->SequenceData(0)[0], id);
+  }
+}
+
+TEST_F(LiteralTokenizerApiTest, EmptyLiteralDoesNotInsertAutomaticTokens) {
+  const char* keys[] = {"add_special_tokens"};
+  const char* values[] = {"true"};
+  tokenizer_->UpdateOptions(keys, values, 1);
+  auto sequences = OgaSequences::Create();
+  tokenizer_->Encode("", *sequences);
+  ASSERT_EQ(sequences->Count(), 1);
+  EXPECT_EQ(sequences->SequenceCount(0), 0);
+}
+
+TEST_F(LiteralTokenizerApiTest, EmptyLegacyEncodingHasNoTokensWhenDisabled) {
+  const char* keys[] = {"add_special_tokens"};
+  const char* values[] = {"false"};
+  legacy_tokenizer_->UpdateOptions(keys, values, 1);
+  auto sequences = OgaSequences::Create();
+  legacy_tokenizer_->Encode("", *sequences);
+  ASSERT_EQ(sequences->Count(), 1);
+  EXPECT_EQ(sequences->SequenceCount(0), 0);
+}
+
+TEST_F(LiteralTokenizerApiTest, RejectsInvalidInputWithoutAppendingSequence) {
+  auto sequences = OgaSequences::Create();
+  tokenizer_->Encode("control", *sequences);
+  ASSERT_EQ(sequences->Count(), 1);
+  const std::vector<int32_t> expected(sequences->SequenceData(0),
+                                      sequences->SequenceData(0) + sequences->SequenceCount(0));
+  EXPECT_THROW(tokenizer_->Encode(nullptr, *sequences), std::runtime_error);
+  EXPECT_THROW(tokenizer_->Encode("\xff", *sequences), std::runtime_error);
+  EXPECT_THROW(tokenizer_->Encode("control\xff", *sequences), std::runtime_error);
+  ASSERT_EQ(sequences->Count(), 1);
+  EXPECT_EQ(std::vector<int32_t>(sequences->SequenceData(0),
+                                 sequences->SequenceData(0) + sequences->SequenceCount(0)),
+            expected);
+  std::unique_ptr<OgaResult> result(OgaTokenizerEncode(tokenizer_.get(), "control", nullptr));
+  ASSERT_NE(result, nullptr);
+}
+
+TEST_F(LiteralTokenizerApiTest, ConcurrentLiteralCallsDoNotChangeLegacyRecognition) {
+  const auto [marker, id] = markers_.front();
+  auto literal_worker = [&] {
+    for (int i = 0; i < 32; ++i) {
+      auto sequences = OgaSequences::Create();
+      ASSERT_NO_THROW(tokenizer_->Encode(marker.c_str(), *sequences));
+      ASSERT_NO_FATAL_FAILURE(ExpectNoControlTokens(*sequences));
+    }
+  };
+  auto legacy_worker = [&] {
+    for (int i = 0; i < 32; ++i) {
+      auto sequences = OgaSequences::Create();
+      ASSERT_NO_THROW(legacy_tokenizer_->Encode(marker.c_str(), *sequences));
+      ASSERT_EQ(sequences->SequenceCount(0), 1);
+      EXPECT_EQ(sequences->SequenceData(0)[0], id);
+    }
+  };
+  std::thread literal_thread(literal_worker);
+  std::thread second_literal_thread(literal_worker);
+  std::thread legacy_thread(legacy_worker);
+  literal_thread.join();
+  second_literal_thread.join();
+  legacy_thread.join();
+}
+
+TEST_F(LiteralTokenizerApiTest, RealModelGeneratesFromLiteralTokens) {
+  const char* override_path = std::getenv("ORT_GENAI_LITERAL_GENERATION_MODEL_PATH");
+  const std::string generation_path = override_path && *override_path ? override_path : model_path_;
+  auto config = OgaConfig::Create(generation_path.c_str());
+  config->ClearProviders();
+  config->Overlay(R"({"search":{"past_present_share_buffer":false}})");
+  auto model = OgaModel::Create(*config);
+  auto generation_tokenizer = OgaTokenizer::Create(*model);
+  SetLiteral(*generation_tokenizer, true);
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 512.0);
+  params->SetSearchOptionBool("do_sample", false);
+  auto generator = OgaGenerator::Create(*model, *params);
+  auto input = OgaSequences::Create();
+  generation_tokenizer->Encode("!", *input);
+  ASSERT_EQ(input->Count(), 1);
+  ASSERT_GT(input->SequenceCount(0), 0);
+  EXPECT_STREQ(generation_tokenizer->Decode(input->SequenceData(0), input->SequenceCount(0)), "!");
+  generator->AppendTokenSequences(*input);
+  const size_t before = OgaGenerator_GetSequenceCount(generator.get(), 0);
+  int iterations = 0;
+  while (!generator->IsDone() && iterations < 4) {
+    generator->GenerateNextToken();
+    ++iterations;
+  }
+  EXPECT_GT(iterations, 0);
+  EXPECT_GT(OgaGenerator_GetSequenceCount(generator.get(), 0), before);
+}
+
+TEST_F(LiteralTokenizerApiTest, LiteralOptionAcceptsBooleanValuesAndCanBeDisabled) {
+  const auto& [marker, id] = markers_.front();
+  const char* keys[] = {"literal"};
+  for (const char* value : {"false", "true", "0", "1"}) {
+    SCOPED_TRACE(value);
+    const char* values[] = {value};
+    tokenizer_->UpdateOptions(keys, values, 1);
+    auto sequences = OgaSequences::Create();
+    tokenizer_->Encode(marker.c_str(), *sequences);
+    if (std::strcmp(value, "true") == 0 || std::strcmp(value, "1") == 0) {
+      ASSERT_NO_FATAL_FAILURE(ExpectNoControlTokens(*sequences));
+    } else {
+      ASSERT_EQ(sequences->SequenceCount(0), 1);
+      EXPECT_EQ(sequences->SequenceData(0)[0], id);
+    }
+  }
+}
+
+TEST_F(LiteralTokenizerApiTest, RejectedOptionUpdatesLeaveModeAndOtherOptionsUnchanged) {
+  const char* literal_keys[] = {"literal", "skip_special_tokens"};
+  for (const char* value : {"", "yes", "TRUE"}) {
+    SCOPED_TRACE(value);
+    const char* values[] = {value, "true"};
+    EXPECT_THROW(tokenizer_->UpdateOptions(literal_keys, values, 2), std::runtime_error);
+  }
+  const char* invalid_keys[] = {"literal", "not_a_tokenizer_option"};
+  const char* invalid_values[] = {"false", "true"};
+  EXPECT_THROW(tokenizer_->UpdateOptions(invalid_keys, invalid_values, 2), std::runtime_error);
+  const char* null_keys[] = {"literal", nullptr};
+  EXPECT_THROW(tokenizer_->UpdateOptions(null_keys, invalid_values, 2), std::runtime_error);
+
+  const auto& [marker, id] = markers_.front();
+  auto sequences = OgaSequences::Create();
+  tokenizer_->Encode(marker.c_str(), *sequences);
+  ASSERT_NO_FATAL_FAILURE(ExpectNoControlTokens(*sequences));
+  EXPECT_STREQ(tokenizer_->Decode(&id, 1), marker.c_str());
+}
+
+TEST_F(LiteralTokenizerApiTest, MixedOptionsPreserveAutomaticInsertionWhenLiteralIsDisabled) {
+  const char* keys[] = {"literal", "add_special_tokens"};
+  const char* values[] = {"true", "true"};
+  tokenizer_->UpdateOptions(keys, values, 2);
+  const char* legacy_keys[] = {"add_special_tokens"};
+  const char* legacy_values[] = {"true"};
+  legacy_tokenizer_->UpdateOptions(legacy_keys, legacy_values, 1);
+
+  auto empty = OgaSequences::Create();
+  tokenizer_->Encode("", *empty);
+  ASSERT_EQ(empty->Count(), 1);
+  EXPECT_EQ(empty->SequenceCount(0), 0);
+  SetLiteral(*tokenizer_, false);
+  const auto& marker = markers_.front().first;
+  auto actual = OgaSequences::Create();
+  auto expected = OgaSequences::Create();
+  tokenizer_->Encode(marker.c_str(), *actual);
+  legacy_tokenizer_->Encode(marker.c_str(), *expected);
+  ASSERT_GT(expected->SequenceCount(0), 0);
+  EXPECT_EQ(std::vector<int32_t>(actual->SequenceData(0), actual->SequenceData(0) + actual->SequenceCount(0)),
+            std::vector<int32_t>(expected->SequenceData(0), expected->SequenceData(0) + expected->SequenceCount(0)));
+}
+
+TEST_F(LiteralTokenizerApiTest, RejectsNullOptionArraysAndValues) {
+  const char* keys[] = {"literal"};
+  const char* values[] = {"false"};
+  const char* null_values[] = {nullptr};
+  EXPECT_THROW(tokenizer_->UpdateOptions(nullptr, values, 1), std::runtime_error);
+  EXPECT_THROW(tokenizer_->UpdateOptions(keys, nullptr, 1), std::runtime_error);
+  EXPECT_THROW(tokenizer_->UpdateOptions(keys, null_values, 1), std::runtime_error);
+  EXPECT_THROW(tokenizer_->UpdateOptions(nullptr, nullptr, 0), std::runtime_error);
+  std::unique_ptr<OgaResult> result(OgaUpdateTokenizerOptions(nullptr, keys, values, 1));
+  ASSERT_NE(result, nullptr);
+  EXPECT_NE(std::strlen(OgaResultGetError(result.get())), 0);
+}
+
+TEST_F(LiteralTokenizerApiTest, BatchEncodingUsesTheConfiguredModeAndRetainsPadding) {
+  const std::string text = "control " + markers_.front().first + " control";
+  const char* strings[] = {text.c_str(), "!"};
+  for (OgaTokenizer* tokenizer : {tokenizer_.get(), legacy_tokenizer_.get()}) {
+    auto single = OgaSequences::Create();
+    tokenizer->Encode(strings[0], *single);
+    tokenizer->Encode(strings[1], *single);
+    auto batch = tokenizer->EncodeBatch(strings, 2);
+    const size_t width = std::max(single->SequenceCount(0), single->SequenceCount(1));
+    EXPECT_EQ(batch->Type(), OgaElementType_int32);
+    EXPECT_EQ(batch->Shape(), (std::vector<int64_t>{2, static_cast<int64_t>(width)}));
+    const auto* ids = static_cast<const int32_t*>(batch->Data());
+    ASSERT_NE(ids, nullptr);
+    for (size_t i = 0; i < 2; ++i) {
+      const size_t count = single->SequenceCount(i);
+      EXPECT_EQ(std::vector<int32_t>(ids + i * width, ids + i * width + count),
+                std::vector<int32_t>(single->SequenceData(i), single->SequenceData(i) + count));
+      for (size_t j = count; j < width; ++j) {
+        EXPECT_EQ(ids[i * width + j], tokenizer->GetPadTokenId());
+      }
+    }
+  }
+  const char* invalid_strings[] = {text.c_str(), "\xff"};
+  OgaTensor* output = nullptr;
+  std::unique_ptr<OgaResult> result(OgaTokenizerEncodeBatch(tokenizer_.get(), invalid_strings, 2, &output));
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(output, nullptr);
+  EXPECT_NE(std::strlen(OgaResultGetError(result.get())), 0);
 }
 
 TEST(CAPITests, ChatTemplate) {
@@ -567,6 +934,7 @@ TEST(CAPITests, MarianBatchWithBeamsIOContract) {
   ASSERT_EQ(next_tokens.size(), expected_tokens.size());
   for (size_t beam = 0; beam < expected_tokens.size(); ++beam)
     EXPECT_EQ(next_tokens[beam], expected_tokens[beam]) << "beam " << beam;
+  EXPECT_THROW(OgaASRPostProcessor::Create(*generator), std::runtime_error);
 }
 
 TEST(CAPITests, EndToEndPhi) {
@@ -1246,6 +1614,43 @@ TEST(CAPITests, EngineTurnOptionsGenerationPolicy) {
     EXPECT_EQ(request->BeginTurn(input_tokens, turn_options.get()), 1u);
     request->Close();
   }
+}
+
+TEST(CAPITests, EngineTurnOptionsDelimitedGuidanceSetters) {
+  auto config = OgaConfig::Create(MODEL_PATH "engine/synthetic-paged");
+  auto model = OgaModel::Create(*config);
+  auto engine = OgaEngine::Create(*model);
+  auto request = engine->CreateRequest();
+  auto options = request->CreateTurnOptions();
+  constexpr const char* grammar = "start: \"ok\"";
+
+  auto expect_error = [](OgaResult* result) {
+    std::unique_ptr<OgaResult> error{result};
+    EXPECT_NE(error, nullptr);
+  };
+
+  expect_error(OgaTurnOptionsSetDelimitedGuidance(nullptr, 11, 12, grammar));
+  expect_error(OgaTurnOptionsSetDelimitedGuidance(options.get(), 11, 12, nullptr));
+  expect_error(OgaTurnOptionsSetDelimitedGuidance(options.get(), -1, 12, grammar));
+  expect_error(OgaTurnOptionsSetDelimitedGuidance(options.get(), 11, 11, grammar));
+  expect_error(OgaTurnOptionsSetDelimitedGuidance(options.get(), 11, 12, ""));
+
+  // Both C and C++ entry points accept and copy a nonempty grammar. Invalid replacements leave
+  // the delimited configuration in place, so switching to whole-turn guidance still fails.
+  EXPECT_NO_THROW(options->SetDelimitedGuidance(11, 12, grammar));
+  expect_error(OgaTurnOptionsSetDelimitedGuidance(options.get(), 11, 11, grammar));
+  expect_error(OgaTurnOptionsSetGuidance(options.get(), "regex", "ok"));
+  EXPECT_NO_THROW(options->SetDelimitedGuidance(13, 14, grammar));
+
+  options->ClearGuidance();
+  EXPECT_NO_THROW(options->SetGuidance("regex", "ok"));
+  expect_error(OgaTurnOptionsSetDelimitedGuidance(options.get(), 11, 12, grammar));
+
+  options->Reset();
+  EXPECT_NO_THROW(options->SetDelimitedGuidance(11, 12, grammar));
+  options->ClearGuidance();
+  EXPECT_NO_THROW(options->SetGuidance("regex", "ok"));
+  request->Close();
 }
 
 // A model whose own search defaults keep every turn greedy silently overrides an explicit
@@ -3106,7 +3511,7 @@ TEST(CAPITests, TokenId_FromConfig) {
   // Copy minimal model files from tiny-random-gpt2
   std::string src_dir = MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32";
   for (const auto& entry : std::filesystem::directory_iterator(src_dir)) {
-    if (entry.path().filename() != "genai_config.json") {
+    if (entry.is_regular_file() && entry.path().filename() != "genai_config.json") {
       std::filesystem::copy_file(entry.path(), temp_dir / entry.path().filename(),
                                  std::filesystem::copy_options::overwrite_existing);
     }

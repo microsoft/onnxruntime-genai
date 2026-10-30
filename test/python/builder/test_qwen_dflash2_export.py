@@ -12,8 +12,15 @@ import onnx_ir as ir
 import onnxruntime as ort
 import pytest
 import torch
+import transformers
+from onnxruntime.quantization.matmul_nbits_quantizer import (
+    DefaultWeightOnlyQuantConfig,
+    DefaultWeightOnlyQuantizer,
+)
+from safetensors.torch import save_file
 
 from models.builders.base import Model
+from models.builders.block_drafter import BlockDrafterBuilder
 from models.builders.dflash2 import DFlash2Builder
 from models.builders.mtp import MTPModel
 from models.builders.qwen import Qwen35MoEModel
@@ -51,7 +58,7 @@ def _draft_checkpoint(tmp_path, target_layer_ids=TARGET_LAYER_IDS):
     return str(draft_dir)
 
 
-def _composite(aux_layers=AUX_LAYERS, use_paged_attention=True):
+def _composite(aux_layers=AUX_LAYERS, use_paged_attention=True, ep="cuda"):
     model = object.__new__(Qwen35MoEModel)
     model.dflash2 = None
     model.dflash2_shared_initializers = []
@@ -78,6 +85,8 @@ def _composite(aux_layers=AUX_LAYERS, use_paged_attention=True):
         attention_attrs={"paged_block_size": 256},
         context_length=32768,
         original_context_length=131072,
+        ep=ep,
+        model=ir.Model(ir.Graph([], [], nodes=[]), ir_version=10),
     )
     return model
 
@@ -276,139 +285,346 @@ def test_builder_exposes_the_api_the_composite_drives():
     assert all(hasattr(DFlash2Builder, name) for name in ("make_model", "save_model", "genai_config_section"))
 
 
-def test_target_mlp_gate_up_fusion_preserves_projection_order():
-    model = object.__new__(Model)
-    model.io_dtype = ir.DataType.FLOAT16
-    model.intermediate_size = 2
-    model.hidden_size = 3
-    model.mlp_attrs = {"output_0": ""}
-    calls = {}
-
-    def make_matmul(self, projection, basename, root_input):
-        calls.setdefault("matmuls", []).append((basename, root_input, projection.weight.clone()))
-        return basename
-
-    def make_split(self, name, inputs, outputs, dtypes, shapes, axis=-1, num_outputs=None):
-        calls["split"] = (name, inputs, outputs, dtypes, shapes, axis, num_outputs)
-
-    model.make_matmul = types.MethodType(make_matmul, model)
-    model.make_split = types.MethodType(make_split, model)
-    model.make_activation = types.MethodType(lambda self, layer_id, root_input: f"/act/{layer_id}", model)
-    model.make_mul = types.MethodType(lambda self, *args, **kwargs: None, model)
-    model.make_hidden_state_shape = types.MethodType(lambda self, last_dim: ["tokens", last_dim], model)
-
+@pytest.mark.parametrize("provider", ["cpu", "cuda", "webgpu", "dml", "trt-rtx"])
+def test_target_mlp_gate_up_fusion_preserves_projection_order(provider):
+    model = _mlp_graph_model(provider=provider)
     mlp = types.SimpleNamespace(
         gate_proj=types.SimpleNamespace(weight=torch.full((2, 3), 1.0), bias=None),
         up_proj=types.SimpleNamespace(weight=torch.full((2, 3), 2.0), bias=None),
         down_proj=types.SimpleNamespace(weight=torch.ones((3, 2)), bias=None),
     )
+    model.make_mlp(4, mlp, "residual")
 
-    model.make_mlp_proj_fused(4, mlp, "residual")
-
-    fused_name, fused_input, fused_weight = calls["matmuls"][0]
-    assert fused_name == "/model/layers.4/mlp/gate_up_proj/MatMul"
-    assert fused_input == "residual"
-    torch.testing.assert_close(fused_weight[:2], mlp.gate_proj.weight)
-    torch.testing.assert_close(fused_weight[2:], mlp.up_proj.weight)
-    assert calls["split"][2] == [
+    fused = next(node for node in model.graph if node.name == "/model/layers.4/mlp/gate_up_proj/MatMul")
+    assert fused.inputs[0].name == "residual"
+    np.testing.assert_array_equal(
+        fused.inputs[1].const_value.numpy(), torch.cat((mlp.gate_proj.weight, mlp.up_proj.weight)).T
+    )
+    split = next(node for node in model.graph if node.op_type == "Split")
+    assert [value.name for value in split.outputs] == [
         "/model/layers.4/mlp/gate_proj/MatMul/output_0",
         "/model/layers.4/mlp/up_proj/MatMul/output_0",
     ]
-    assert calls["split"][-1] == 2
     assert model.mlp_attrs["output_0"] == "/model/layers.4/mlp/down_proj/MatMul/output_0"
 
 
-def test_target_mlp_gate_up_fusion_zero_fills_a_missing_bias():
+def _mlp_graph_model(provider="cpu", dtype=ir.DataType.FLOAT):
     model = object.__new__(Model)
-    model.io_dtype = ir.DataType.FLOAT16
-    model.intermediate_size = 2
+    model.ep = provider
+    model.io_dtype = dtype
+    model.onnx_dtype = dtype
     model.hidden_size = 3
-    model.mlp_attrs = {"output_0": ""}
-    calls = {}
+    model.intermediate_size = 2
+    model.use_paged_attention = False
+    model.activation = "silu"
+    model.mlp_attrs = {"use_proj": True, "output_0": ""}
+    model.layernorm_attrs = {}
+    model.quant_attrs = {"nodes_to_exclude": [], "accuracy_level": 4, "use_qdq": False}
+    model.values = {}
+    model.node_names = set()
+    model.graph = ir.Graph([], [], nodes=[], opset_imports={"": 21, "com.microsoft": 1})
+    model.model = ir.Model(model.graph, ir_version=10)
+    model.graph.inputs.append(model.make_value("residual", dtype, [1, 2, 3]))
+    return model
 
-    def make_matmul(self, projection, basename, root_input):
-        calls.setdefault("projections", []).append(projection)
-        return basename
 
-    model.make_matmul = types.MethodType(make_matmul, model)
-    model.make_split = types.MethodType(lambda self, *args, **kwargs: None, model)
-    model.make_add_bias = types.MethodType(lambda self, *args, **kwargs: None, model)
-    model.make_activation = types.MethodType(lambda self, layer_id, root_input: f"/act/{layer_id}", model)
-    model.make_mul = types.MethodType(lambda self, *args, **kwargs: None, model)
-    model.make_hidden_state_shape = types.MethodType(lambda self, last_dim: ["tokens", last_dim], model)
+@pytest.mark.parametrize("incompatibility", ["adapter", "packed", "integer", "exclusion", "override", "precision"])
+def test_automatic_gate_up_fusion_preserves_unsupported_projection_paths(monkeypatch, incompatibility):
+    model = object.__new__(Model)
+    model.mlp_attrs = {"use_proj": True}
+    model.layernorm_attrs = {}
+    mlp = types.SimpleNamespace(
+        gate_proj=types.SimpleNamespace(weight=torch.ones(2, 3), bias=None),
+        up_proj=types.SimpleNamespace(weight=torch.ones(2, 3), bias=None),
+    )
+    gate_name = "/model/layers.0/mlp/gate_proj/MatMul"
+    if incompatibility == "adapter":
+        mlp.gate_proj.base_layer = object()
+    elif incompatibility == "packed":
+        mlp.gate_proj.quant_type = "fp8"
+    elif incompatibility == "integer":
+        mlp.gate_proj.weight = torch.ones(2, 3, dtype=torch.int8)
+    elif incompatibility == "exclusion":
+        model.quant_attrs = {"nodes_to_exclude": [gate_name]}
+    elif incompatibility == "override":
+        model.exact_quant_override_names = {gate_name}
+    elif incompatibility == "precision":
+        model.int4_customized_weight_config = {gate_name: {"bits": 8}}
+    calls = []
 
+    def unfused(layer_id, weights, root_input):
+        calls.append((layer_id, weights, root_input))
+        model.mlp_attrs["output_0"] = "unfused_output"
+
+    monkeypatch.setattr(model, "make_mlp_proj", unfused)
+    model.make_mlp(0, mlp, "hidden")
+    assert calls == [(0, mlp, "hidden")]
+    assert model.layernorm_attrs["skip_input"] == "unfused_output"
+
+
+def test_target_mlp_gate_up_graph_fusion_preserves_a_missing_bias():
+    model = _mlp_graph_model()
     mlp = types.SimpleNamespace(
         gate_proj=types.SimpleNamespace(weight=torch.ones((2, 3)), bias=torch.ones(2)),
         up_proj=types.SimpleNamespace(weight=torch.ones((2, 3)), bias=None),
         down_proj=types.SimpleNamespace(weight=torch.ones((3, 2)), bias=None),
     )
+    model.make_mlp(0, mlp, "residual")
+    assert sum(node.op_type == "MatMul" for node in model.graph) == 2
+    assert sum(node.op_type == "Add" for node in model.graph) == 1
+    model.graph.outputs.append(model.values[model.mlp_attrs["output_0"]])
+    hidden = torch.randn(1, 2, 3)
+    expected = (
+        torch.nn.functional.silu(hidden @ mlp.gate_proj.weight.T + 1) * (hidden @ mlp.up_proj.weight.T)
+    ) @ mlp.down_proj.weight.T
+    session = ort.InferenceSession(ir.to_proto(model.model).SerializeToString(), providers=["CPUExecutionProvider"])
+    np.testing.assert_allclose(
+        session.run(None, {"residual": hidden.numpy()})[0], expected.numpy(), rtol=1e-5, atol=1e-5
+    )
 
-    model.make_mlp_proj_fused(0, mlp, "residual")
 
-    torch.testing.assert_close(calls["projections"][0].bias, torch.tensor([1.0, 1.0, 0.0, 0.0]))
-
-
-def test_target_mlp_gate_up_fusion_rejects_projection_shape_mismatch():
-    model = object.__new__(Model)
-    model.intermediate_size = 2
-    model.hidden_size = 3
+def test_target_mlp_gate_up_fusion_preserves_projection_shape_mismatch():
+    model = _mlp_graph_model()
     mlp = types.SimpleNamespace(
         gate_proj=types.SimpleNamespace(weight=torch.ones((2, 3)), bias=None),
         up_proj=types.SimpleNamespace(weight=torch.ones((3, 3)), bias=None),
+        down_proj=types.SimpleNamespace(weight=torch.ones((3, 2)), bias=None),
     )
-
-    with pytest.raises(ValueError, match="gate/up weights with shape"):
-        model.make_mlp_proj_fused(0, mlp, "residual")
+    model.make_mlp(0, mlp, "residual")
+    assert not any(node.op_type == "Split" for node in model.graph)
 
 
 def test_target_mlp_gate_up_fusion_maps_matching_exclusions():
-    model = object.__new__(Model)
-    model.io_dtype = ir.DataType.FLOAT16
-    model.intermediate_size = 2
-    model.hidden_size = 3
-    model.mlp_attrs = {"output_0": ""}
-    model.quant_attrs = {
-        "nodes_to_exclude": [
-            "/model/layers.0/mlp/gate_proj/MatMul",
-            "/model/layers.0/mlp/up_proj/MatMul",
-        ]
-    }
-    model.make_matmul = types.MethodType(
-        lambda self, projection, basename, root_input: (
-            self.exclude_node_from_quantization(basename)
-            if getattr(projection, "exclude_from_quantization", False)
-            else None
-        )
-        or basename,
-        model,
-    )
-    model.make_split = types.MethodType(lambda self, *args, **kwargs: None, model)
-    model.make_activation = types.MethodType(lambda self, layer_id, root_input: f"/act/{layer_id}", model)
-    model.make_mul = types.MethodType(lambda self, *args, **kwargs: None, model)
-    model.make_hidden_state_shape = types.MethodType(lambda self, last_dim: ["tokens", last_dim], model)
+    model = _mlp_graph_model()
+    model.quant_attrs["nodes_to_exclude"] = [
+        "/model/layers.0/mlp/gate_proj/MatMul",
+        "/model/layers.0/mlp/up_proj/MatMul",
+    ]
     mlp = types.SimpleNamespace(
         gate_proj=types.SimpleNamespace(weight=torch.ones((2, 3)), bias=None),
         up_proj=types.SimpleNamespace(weight=torch.ones((2, 3)), bias=None),
         down_proj=types.SimpleNamespace(weight=torch.ones((3, 2)), bias=None),
     )
 
-    model.make_mlp_proj_fused(0, mlp, "residual")
+    model.make_mlp(0, mlp, "residual")
 
     assert "/model/layers.0/mlp/gate_up_proj/MatMul" in model.quant_attrs["nodes_to_exclude"]
 
 
-def test_target_mlp_gate_up_fusion_rejects_one_sided_exclusion():
-    model = object.__new__(Model)
-    model.intermediate_size = 2
-    model.hidden_size = 3
-    model.quant_attrs = {"nodes_to_exclude": ["/model/layers.0/mlp/gate_proj/MatMul"]}
+def test_target_mlp_gate_up_fusion_preserves_one_sided_exclusion():
+    model = _mlp_graph_model()
+    model.quant_attrs["nodes_to_exclude"] = ["/model/layers.0/mlp/gate_proj/MatMul"]
     mlp = types.SimpleNamespace(
         gate_proj=types.SimpleNamespace(weight=torch.ones((2, 3)), bias=None),
         up_proj=types.SimpleNamespace(weight=torch.ones((2, 3)), bias=None),
+        down_proj=types.SimpleNamespace(weight=torch.ones((3, 2)), bias=None),
+    )
+    model.make_mlp(0, mlp, "residual")
+    assert sum(node.op_type == "MatMul" for node in model.graph) == 3
+    assert not any(node.op_type == "Split" for node in model.graph)
+
+
+@pytest.mark.parametrize("bits,with_g_idx", [(4, False), (8, False), (4, True)])
+@pytest.mark.parametrize("symmetric", [False, True])
+def test_prequantized_gate_up_graph_fusion_matches_separate_projections(bits, symmetric, with_g_idx):
+    generator = torch.Generator().manual_seed(7)
+    quantizer = DefaultWeightOnlyQuantizer(
+        DefaultWeightOnlyQuantConfig(block_size=32, bits=bits, is_symmetric=symmetric)
     )
 
-    with pytest.raises(ValueError, match="applies to only one"):
-        model.make_mlp_proj_fused(0, mlp, "residual")
+    def projection():
+        weight = torch.randn(16, 64, generator=generator)
+        qweight, scales, zeros = quantizer.qbits_block_quant(weight.T.numpy())
+        if symmetric and with_g_idx:
+            zeros.fill(0x88 if bits == 4 else 128)
+        return types.SimpleNamespace(
+            qweight=torch.from_numpy(qweight),
+            scales=torch.from_numpy(scales),
+            qzeros=torch.from_numpy(zeros) if not symmetric or with_g_idx else None,
+            g_idx=torch.arange(64, dtype=torch.int32) // 32 if with_g_idx else None,
+            bits=bits,
+            group_size=32,
+            in_features=64,
+            out_features=16,
+            bias=None,
+        )
+
+    mlp = types.SimpleNamespace(
+        gate_proj=projection(),
+        up_proj=projection(),
+        down_proj=types.SimpleNamespace(weight=torch.randn(64, 16, generator=generator), bias=None),
+    )
+    hidden = torch.randn(1, 2, 64, generator=generator).numpy()
+    outputs = []
+    for fused in (False, True):
+        model = _mlp_graph_model()
+        model.onnx_dtype = ir.DataType.INT4 if bits == 4 else ir.DataType.INT8
+        model.hidden_size = 64
+        model.intermediate_size = 16
+        model.values["residual"].shape = ir.Shape([1, 2, 64])
+        if not fused:
+            model.exact_quant_override_names = {"/model/layers.0/mlp/gate_proj/MatMul"}
+        model.make_mlp(0, mlp, "residual")
+        model.graph.outputs.append(model.values[model.mlp_attrs["output_0"]])
+        nodes = [node for node in model.graph if node.op_type == "MatMulNBits"]
+        assert len(nodes) == (1 if fused else 2)
+        if fused:
+            assert nodes[0].attributes["N"].as_int() == 32
+        session = ort.InferenceSession(ir.to_proto(model.model).SerializeToString(), providers=["CPUExecutionProvider"])
+        outputs.append(session.run(None, {"residual": hidden})[0])
+    np.testing.assert_allclose(outputs[0], outputs[1], rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.parametrize(
+    "policy,fuses",
+    [
+        ("matching", True),
+        ("fused", True),
+        ("different", False),
+        ("exact", False),
+        ("excluded", False),
+        ("conflict", False),
+    ],
+)
+def test_mlp_graph_fusion_preserves_precision_policy(policy, fuses):
+    model = _mlp_graph_model()
+    gate = "/model/layers.0/mlp/gate_proj/MatMul"
+    up = "/model/layers.0/mlp/up_proj/MatMul"
+    fused = "/model/layers.0/mlp/gate_up_proj/MatMul"
+    model.int4_customized_weight_config = {gate: {"bits": 8}, up: {"bits": 8}}
+    if policy == "different":
+        model.int4_customized_weight_config[up] = {"bits": 4}
+    elif policy == "exact":
+        model.exact_quant_override_names = {gate}
+    elif policy == "excluded":
+        model.quant_attrs["nodes_to_exclude"] = [gate]
+    elif policy == "conflict":
+        model.int4_customized_weight_config[fused] = {"bits": 4}
+    elif policy == "fused":
+        model.int4_customized_weight_config = {fused: {"bits": 8}}
+    mlp = types.SimpleNamespace(
+        gate_proj=types.SimpleNamespace(weight=torch.ones(2, 3), bias=None),
+        up_proj=types.SimpleNamespace(weight=torch.ones(2, 3), bias=None),
+        down_proj=types.SimpleNamespace(weight=torch.ones(3, 2), bias=None),
+    )
+    model.make_mlp(0, mlp, "residual")
+    assert any(node.op_type == "Split" for node in model.graph) is fuses
+    if fuses:
+        assert model.int4_customized_weight_config[fused] == {"bits": 8}
+    else:
+        assert all(any(node.name == name for node in model.graph) for name in (gate, up))
+
+
+@pytest.mark.parametrize("incompatibility", ["bits", "g_idx", "prepacked", "exact", "exclusion"])
+def test_prequantized_gate_up_graph_fusion_preserves_unsupported_nodes(incompatibility):
+    model = _mlp_graph_model()
+    model.onnx_dtype = ir.DataType.INT4
+    model.hidden_size = 64
+    model.values["residual"].shape = ir.Shape([1, 2, 64])
+    names = []
+    for kind in ("gate", "up"):
+        bits = 8 if incompatibility == "bits" and kind == "up" else 4
+        projection = types.SimpleNamespace(
+            qweight=torch.full((2, 2, 32 * bits // 8), 0x99, dtype=torch.uint8),
+            scales=torch.ones(2, 2),
+            qzeros=torch.full((2, (2 * bits + 7) // 8), 0x88, dtype=torch.uint8),
+            g_idx=(torch.arange(64, dtype=torch.int32) // 32) if incompatibility == "g_idx" else None,
+            bits=bits,
+            group_size=32,
+            in_features=64,
+            out_features=2,
+        )
+        if incompatibility == "g_idx" and kind == "up":
+            projection.g_idx = projection.g_idx.flip(0)
+        name = model.make_matmul(projection, f"/model/layers.0/mlp/{kind}_proj/MatMul", "residual")
+        names.append(name)
+        if incompatibility == "prepacked":
+            model.values[f"{name}/output_0"].producer().attributes["weight_prepacked"] = ir.AttrInt64(
+                "weight_prepacked", 1
+            )
+    if incompatibility == "exact":
+        model.exact_quant_override_names = {names[0]}
+    elif incompatibility == "exclusion":
+        model.quant_attrs["nodes_to_exclude"] = [names[0]]
+    model.make_mlp_proj_fused(0, *names)
+    assert [node.name for node in model.graph] == names
+
+
+def test_mlp_graph_fusion_preserves_real_adapter_path():
+    model = _mlp_graph_model()
+    generator = torch.Generator().manual_seed(13)
+    gate_weight = torch.randn(2, 3, generator=generator)
+    lora_a = torch.randn(1, 3, generator=generator)
+    lora_b = torch.randn(2, 1, generator=generator)
+    mlp = types.SimpleNamespace(
+        gate_proj=types.SimpleNamespace(
+            base_layer=types.SimpleNamespace(weight=gate_weight, bias=None),
+            lora_A=types.SimpleNamespace(default=types.SimpleNamespace(weight=lora_a)),
+            lora_B=types.SimpleNamespace(default=types.SimpleNamespace(weight=lora_b.clone())),
+            scaling={"default": 0.5},
+            bias=None,
+        ),
+        up_proj=types.SimpleNamespace(weight=torch.randn(2, 3, generator=generator), bias=None),
+        down_proj=types.SimpleNamespace(weight=torch.randn(3, 2, generator=generator), bias=None),
+    )
+    model.make_mlp(0, mlp, "residual")
+    assert not any(node.op_type == "Split" for node in model.graph)
+    model.graph.outputs.append(model.values[model.mlp_attrs["output_0"]])
+    hidden = torch.randn(1, 2, 3, generator=generator)
+    gate = hidden @ gate_weight.T + (hidden @ lora_a.T) @ lora_b.T * 0.5
+    expected = (torch.nn.functional.silu(gate) * (hidden @ mlp.up_proj.weight.T)) @ mlp.down_proj.weight.T
+    session = ort.InferenceSession(ir.to_proto(model.model).SerializeToString(), providers=["CPUExecutionProvider"])
+    np.testing.assert_allclose(
+        session.run(None, {"residual": hidden.numpy()})[0], expected.numpy(), rtol=1e-5, atol=1e-5
+    )
+
+
+@pytest.mark.parametrize("dtype", [ir.DataType.FLOAT16, ir.DataType.BFLOAT16])
+def test_mlp_graph_fusion_preserves_initializer_dtype(dtype):
+    model = _mlp_graph_model(dtype=dtype)
+    mlp = types.SimpleNamespace(
+        gate_proj=types.SimpleNamespace(weight=torch.ones(2, 3), bias=None),
+        up_proj=types.SimpleNamespace(weight=torch.full((2, 3), 2.0), bias=None),
+        down_proj=types.SimpleNamespace(weight=torch.ones(3, 2), bias=None),
+    )
+    model.make_mlp(0, mlp, "residual")
+    fused = next(node for node in model.graph if node.name == "/model/layers.0/mlp/gate_up_proj/MatMul")
+    assert fused.inputs[1].dtype == dtype
+    proto = ir.to_proto(model.model)
+    assert next(tensor for tensor in proto.graph.initializer if tensor.name == fused.inputs[1].name).data_type == dtype
+
+
+@pytest.mark.parametrize("matching", [False, True])
+def test_mlp_graph_fusion_preserves_real_per_node_quantization(matching):
+    model = _mlp_graph_model()
+    model.hidden_size = model.intermediate_size = 64
+    model.values["residual"].shape = ir.Shape([1, 2, 64])
+    model.onnx_dtype = ir.DataType.INT4
+    model.quant_attrs.update(bits=4, matmul_block_size=32, is_symmetric=True, op_types_to_quantize=("MatMul",))
+    model.matmul_attrs = {"weights_prepacked": 0}
+    gate = "/model/layers.0/mlp/gate_proj/MatMul"
+    up = "/model/layers.0/mlp/up_proj/MatMul"
+    model.int4_customized_weight_config = {gate: {"bits": 8}}
+    if matching:
+        model.int4_customized_weight_config[up] = {"bits": 8}
+    generator = torch.Generator().manual_seed(23)
+    mlp = types.SimpleNamespace(
+        **{
+            f"{kind}_proj": types.SimpleNamespace(weight=torch.randn(64, 64, generator=generator), bias=None)
+            for kind in ("gate", "up", "down")
+        }
+    )
+    model.make_mlp(0, mlp, "residual")
+    model.graph.outputs.append(model.values[model.mlp_attrs["output_0"]])
+    quantized = model.to_nbits()
+    nodes = {node.name: node for node in quantized.graph if node.op_type == "MatMulNBits"}
+    expected = {"/model/layers.0/mlp/gate_up_proj/MatMul_Q8": 8} if matching else {f"{gate}_Q8": 8, f"{up}_Q4": 4}
+    expected["/model/layers.0/mlp/down_proj/MatMul_Q4"] = 4
+    assert {name: node.attributes["bits"].as_int() for name, node in nodes.items()} == expected
+    session = ort.InferenceSession(ir.to_proto(quantized).SerializeToString(), providers=["CPUExecutionProvider"])
+    result = session.run(None, {"residual": torch.randn(1, 2, 64, generator=generator).numpy()})[0]
+    assert result.shape == (1, 2, 64)
+    assert np.isfinite(result).all()
 
 
 @pytest.mark.parametrize("quant_type,bits", [("int4", 4), ("int8", 8)])
@@ -679,6 +895,204 @@ def test_kv_cache_uses_configured_paged_block_size(tmp_path):
     assert builder.values["past_key_values.0.key"].shape[1] == 512
 
 
+def test_webgpu_drafter_omits_attention_metadata(tmp_path):
+    builder = DFlash2Builder(
+        _draft_checkpoint(tmp_path),
+        str(tmp_path),
+        ir.DataType.FLOAT16,
+        paged_block_size=256,
+        max_position_embeddings=128,
+        ep="webgpu",
+    )
+
+    builder.declare_io()
+
+    assert "attention_metadata" not in builder.values
+    assert builder.genai_config_section()["inputs"]["attention_metadata"] == ""
+
+
+def make_precision_checkpoint(tmp_path, num_layers):
+    """Write a small checkpoint so graph tests exercise the real loader and quantizer."""
+    draft_dir = _draft_checkpoint(tmp_path)
+    config_path = os.path.join(draft_dir, "config.json")
+    with open(config_path) as f:
+        config = json.load(f)
+    config.update(hidden_size=32, intermediate_size=64, head_dim=16, num_hidden_layers=num_layers)
+    with open(config_path, "w") as f:
+        json.dump(config, f)
+    generator = torch.Generator().manual_seed(7)
+
+    def weight(*shape):
+        return torch.randn(shape, generator=generator) * 0.01
+
+    weights = {
+        "fc.weight": weight(32, 96),
+        "hidden_norm.weight": torch.ones(32),
+        "norm.weight": torch.ones(32),
+        "candidate_selector.hidden_projection.weight": weight(4, 32),
+        "candidate_selector.predecessor_codebook": weight(32, 4),
+        "candidate_selector.successor_codebook": weight(32, 4),
+    }
+    for layer in range(num_layers):
+        prefix = f"layers.{layer}"
+        for norm in ("input_layernorm", "post_attention_layernorm"):
+            weights[f"{prefix}.{norm}.weight"] = torch.ones(32)
+        for name, shape in (
+            ("self_attn.q_proj", (32, 32)),
+            ("self_attn.k_proj", (16, 32)),
+            ("self_attn.v_proj", (16, 32)),
+            ("self_attn.o_proj", (32, 32)),
+            ("mlp.gate_proj", (64, 32)),
+            ("mlp.up_proj", (64, 32)),
+            ("mlp.down_proj", (32, 64)),
+        ):
+            weights[f"{prefix}.{name}.weight"] = weight(*shape)
+        for norm in ("q_norm", "k_norm"):
+            weights[f"{prefix}.self_attn.{norm}.weight"] = torch.ones(16)
+        for conv in ("attention_conv", "mlp_conv"):
+            weights[f"{prefix}.{conv}.kernel_projection.weight"] = weight(32, 32)
+            weights[f"{prefix}.{conv}.base_kernel"] = weight(2, 2, 8, 4)
+    save_file(weights, os.path.join(draft_dir, "model.safetensors"))
+    save_file(
+        {"model.embed_tokens.weight": weight(32, 32), "lm_head.weight": weight(32, 32)},
+        str(tmp_path / "model.safetensors"),
+    )
+    return draft_dir
+
+
+@pytest.mark.parametrize("ep", ["webgpu", "cuda"])
+@pytest.mark.parametrize("num_layers", [1, 3])
+def test_dflash2_residual_precision_graph(tmp_path, ep, num_layers):
+    builder = DFlash2Builder(
+        make_precision_checkpoint(tmp_path, num_layers),
+        str(tmp_path),
+        ir.DataType.FLOAT16,
+        256,
+        128,
+        ep=ep,
+        quant={"bits": 4, "block_size": 32, "prepack": 0, "lm_head": None},
+    )
+    builder.make_model()
+    model = ir.serde.serialize_model(builder.model)
+    activation = ir.DataType.FLOAT16 if ep == "webgpu" else ir.DataType.BFLOAT16
+    residual = ir.DataType.FLOAT if ep == "webgpu" else activation
+    norms = [node for node in builder.graph if node.op_type == "SkipSimplifiedLayerNormalization"]
+    assert len(norms) == 2 * num_layers
+    for node in norms:
+        assert all(value.dtype == residual for value in node.inputs)
+        assert all(value.dtype == residual for value in node.outputs if value.name)
+        assert builder.graph.initializers[node.name[1:].replace("/", ".") + ".weight"].dtype == activation
+        if ep == "webgpu":
+            cast = next(n for n in builder.graph if n.name == node.name + "/Cast")
+            assert cast.inputs[0] is node.outputs[0]
+            assert cast.outputs[0].dtype == activation
+            assert node.inputs[1].producer().op_type == "Add"  # No narrowing between finish and norm.
+            if node.name != "/dflash2/layers.0/post_attention_layernorm":
+                parent = node.inputs[0].producer()
+                assert parent.op_type == "SkipSimplifiedLayerNormalization"
+                assert node.inputs[0] is parent.outputs[3]
+        else:
+            assert not any(n.name == node.name + "/Cast" for n in builder.graph)
+    for node in builder.graph:
+        if "/finish/term" in node.name or "/finish/sum" in node.name:
+            assert node.outputs[0].dtype == residual
+        if "/prepare/" in node.name and node.op_type in ("Mul", "Add"):
+            assert node.outputs[0].dtype == activation
+        if "/coef" in node.name and node.op_type == "Add":
+            assert node.outputs[0].dtype == activation
+        if node.op_type in ("MatMulNBits", "PagedAttention"):
+            assert node.inputs[0].dtype == activation
+            assert node.outputs[0].dtype == activation
+        if node.op_type == "MatMulNBits":
+            assert node.attributes["bits"].value == 4
+    assert all(v.dtype == activation for v in builder.graph.inputs if v.name.startswith("past_key_values."))
+    assert {v.name for v in builder.graph.outputs} == {
+        "draft_candidate_ids",
+        "draft_scores",
+        *(f"present.{i}.{kind}" for i in range(num_layers) for kind in ("key", "value")),
+    }
+    if ep == "webgpu":
+        reference = DFlash2Builder(
+            builder.draft_dir,
+            str(tmp_path),
+            ir.DataType.FLOAT16,
+            256,
+            128,
+            ep=ep,
+            quant={"bits": 4, "block_size": 32, "prepack": 0, "lm_head": None},
+        )
+        reference.layernorm_attrs["residual_dtype"] = reference.io_dtype
+        reference.make_model()
+        original = ir.serde.serialize_model(reference.model)
+        assert {v.name: v.SerializeToString() for v in model.graph.initializer} == {
+            v.name: v.SerializeToString() for v in original.graph.initializer
+        }
+        assert list(model.graph.input) == list(original.graph.input)
+        assert list(model.graph.output) == list(original.graph.output)
+
+
+@pytest.mark.parametrize("ep,io_dtype", [("cpu", ir.DataType.FLOAT), ("webgpu", ir.DataType.FLOAT)])
+def test_non_fp16_precision_policy_is_unchanged(tmp_path, ep, io_dtype):
+    builder = DFlash2Builder(_draft_checkpoint(tmp_path), str(tmp_path), io_dtype, 256, 128, ep=ep)
+    assert builder.io_dtype == builder.layernorm_attrs["residual_dtype"] == io_dtype
+
+
+def test_shared_skip_norm_default_keeps_existing_dtype():
+    builder = BlockDrafterBuilder()
+    builder.io_dtype = ir.DataType.BFLOAT16
+    builder.hidden_size, builder.rms_eps = 8, 1e-6
+    builder.make_graph("skip_norm", "test")
+    for name in ("root", "skip"):
+        builder.graph.inputs.append(builder.make_value(name, builder.io_dtype, [5, 8]))
+    output, residual = builder.skip_rms_norm("/norm", "root", "skip", torch.ones(8), 5)
+    assert [node.op_type for node in builder.graph] == ["SkipSimplifiedLayerNormalization"]
+    assert builder.values[output].dtype == builder.values[residual].dtype == ir.DataType.BFLOAT16
+
+
+@pytest.mark.parametrize("with_conv", [False, True])
+def test_fp32_finish_and_residual_norm_stay_finite(tmp_path, with_conv):
+    builder = DFlash2Builder(_draft_checkpoint(tmp_path), str(tmp_path), ir.DataType.FLOAT16, 256, 128, ep="webgpu")
+    rows = 10  # Two blocks, including a shift-mask reset.
+    for name in ("root", "branch"):
+        builder.graph.inputs.append(builder.make_value(name, ir.DataType.FLOAT16, [rows, 8]))
+    branch = "branch"
+    if with_conv:
+        mask = builder._block_shift_mask(branch)
+        deltas = [builder.make_initializer(torch.zeros(rows, 2, 1), f"delta{i}", to=builder.io_dtype) for i in range(2)]
+        branch = builder._grouped_conv(
+            "/conv/finish",
+            branch,
+            deltas,
+            torch.stack((torch.full((2, 4), 7.0), torch.ones(2, 4))),
+            mask,
+            rows,
+            dtype=builder.layernorm_attrs["residual_dtype"],
+        )
+    normalized, residual = builder.skip_rms_norm(
+        "/norm", "root", branch, torch.ones(8), rows, dtype=builder.layernorm_attrs["residual_dtype"]
+    )
+    builder.graph.outputs.extend([builder.values[normalized], builder.values[residual]])
+    model = ir.serde.serialize_model(builder.model)
+    onnx.checker.check_model(model)
+    session = ort.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"])
+    root = np.full((rows, 8), 55008, dtype=np.float16)
+    values = np.tile(np.array([-15200, 100, 200, 300, 400, 500, 600, 700], dtype=np.float16), (rows, 1))
+    if not with_conv:
+        values.fill(40576)
+    expected_branch = values.astype(np.float32)
+    if with_conv:
+        shifted = np.concatenate((expected_branch[:1], expected_branch[:-1]))
+        mask = (np.arange(rows) % builder.block_size != 0).astype(np.float32)[:, None]
+        expected_branch = expected_branch * 7 + shifted * mask
+    expected_sum = root.astype(np.float32) + expected_branch
+    expected = expected_sum / np.sqrt(np.mean(expected_sum**2, axis=-1, keepdims=True) + builder.rms_eps)
+    assert np.abs(expected_branch if with_conv else expected_sum).max() > np.finfo(np.float16).max
+    actual, actual_sum = session.run(None, {"root": root, "branch": values})
+    assert np.isfinite(actual).all() and np.isfinite(actual_sum).all()
+    np.testing.assert_allclose(actual_sum, expected_sum, rtol=0, atol=0)
+    np.testing.assert_allclose(actual, expected.astype(np.float16), rtol=1e-3, atol=1e-3)
+
+
 def test_non_fp8_lm_head_preserves_target_layout_and_dtype(tmp_path):
     builder = DFlash2Builder(
         _draft_checkpoint(tmp_path),
@@ -733,8 +1147,9 @@ def _quant_composite(
             Model.make_tied_quantized_embedding_input_names, model.decoder
         )
     else:
-        model.decoder.make_tied_quantized_embedding_input_names = lambda: (
+        model.decoder.make_tied_quantized_embedding_input_names = lambda _lm_head: (
             4,
+            32,
             weight_name,
             scales_name,
             zero_point_name,
@@ -806,7 +1221,7 @@ def test_quantized_drafter_reuses_the_targets_lm_head_names():
     }
 
 
-def test_structured_drafter_quantization_does_not_inherit_target_layout():
+def test_structured_drafter_quantization_uses_target_hardware_layout():
     quant_config = types.SimpleNamespace(
         weights=types.SimpleNamespace(block_size=128),
         format=types.SimpleNamespace(matmulnbits_weights_prepacked=0),
@@ -815,7 +1230,7 @@ def test_structured_drafter_quantization_does_not_inherit_target_layout():
     quant = _quant_composite().block_drafter_quant("int4", quant_config)
 
     assert quant["block_size"] == 128
-    assert quant["prepack"] == 0
+    assert quant["prepack"] == 1
 
 
 @pytest.mark.parametrize(
@@ -887,14 +1302,14 @@ def test_drafter_resolves_the_actual_target_lm_head_bit_width(onnx_dtype, last_m
         last_matmul_type=last_matmul_type,
     )
 
-    head_bits, *_ = model.decoder.make_tied_quantized_embedding_input_names()
+    head_bits, *_ = model.decoder.make_tied_quantized_embedding_input_names(None)
     head_quant = model.block_drafter_lm_head_quant()
 
     assert head_bits == expected_bits
     if expected_bits == 4:
         assert head_quant["bits"] == expected_bits
     else:
-        # The block-drafter quantizer cannot reproduce the target's Q8G initializer layout.
+        # Only a 4-bit target LM head is reused.
         assert head_quant is None
 
 
@@ -920,6 +1335,20 @@ def test_prepacked_bf16_target_keeps_a_private_raw_quantized_drafter_head():
         "block_size": 32,
         "prepack": 0,
         "adopt_target": False,
+    }
+
+
+@pytest.mark.parametrize("io_dtype", [ir.DataType.FLOAT16, ir.DataType.BFLOAT16])
+def test_tied_prepacked_target_shares_its_raw_lm_head_with_the_drafter(io_dtype):
+    # The prepack pass leaves an LM head the tied embedding also reads raw, so any drafter can adopt it.
+    model = _quant_composite(io_dtype=io_dtype)
+    model.decoder.tied_quantized_embeddings = True
+
+    assert model.block_drafter_lm_head_quant() == {
+        "bits": 4,
+        "block_size": 32,
+        "prepack": 0,
+        "adopt_target": True,
     }
 
 
@@ -960,6 +1389,14 @@ def test_quantized_target_table_is_adopted_by_the_drafter():
 )
 def test_an_unadoptable_target_table_leaves_the_drafter_embedding_dense(overrides):
     assert _embed_quant_composite(**overrides).block_drafter_embed_quant() is None
+
+
+def test_int8_target_table_leaves_the_drafter_embedding_dense():
+    # embedding_quant_type=int8 writes model.embed_tokens.weight_Q8, not the weight_Q4 the drafter adopts.
+    model = _embed_quant_composite()
+    model.decoder.quant_attrs["embedding_bits"] = 8
+
+    assert model.block_drafter_embed_quant() is None
 
 
 def test_private_quantized_drafter_head_is_not_shared(tmp_path):
@@ -1077,6 +1514,20 @@ def test_required_policy_requests_exact_target_adoption(tmp_path):
     model.share_initializers = share_initializers
 
     model.save_dflash2_model(str(tmp_path))
+
+
+def test_tied_embedding_rejects_conflicting_sharing_policies(tmp_path):
+    model = _composite()
+    model.dflash2 = types.SimpleNamespace(
+        filename="dflash2.onnx",
+        lm_head_quant=None,
+        graph=types.SimpleNamespace(initializers={"lm_head.MatMul.weight": object()}),
+        embedding_initializers=lambda: frozenset({"lm_head.MatMul.weight"}),
+        save_model=lambda _output_dir: None,
+    )
+    model.dflash2_shared_weight_policies = {"embedding": "required", "lm_head": "off"}
+    with pytest.raises(ValueError, match="tied embedding"):
+        model.save_dflash2_model(str(tmp_path))
 
 
 def test_required_policy_rejects_a_private_quantized_head(tmp_path):
@@ -1206,8 +1657,7 @@ def test_quantized_body_prepacking_requires_supported_shape(
 
 
 @pytest.mark.parametrize("bits", [None, 2, 4, 8])
-@pytest.mark.parametrize("fuse_gate_up", [False, True])
-def test_mlp_gate_up_fusion_preserves_weight_rows(tmp_path, bits, fuse_gate_up):
+def test_mlp_gate_up_fusion_preserves_weight_rows(tmp_path, bits):
     quant = {"bits": bits, "block_size": 8, "prepack": 0} if bits else None
     builder = DFlash2Builder(
         _draft_checkpoint(tmp_path),
@@ -1216,7 +1666,6 @@ def test_mlp_gate_up_fusion_preserves_weight_rows(tmp_path, bits, fuse_gate_up):
         paged_block_size=256,
         max_position_embeddings=128,
         quant=quant,
-        fuse_gate_up=fuse_gate_up,
     )
     generator = torch.Generator().manual_seed(42)
     weights = {
@@ -1231,12 +1680,7 @@ def test_mlp_gate_up_fusion_preserves_weight_rows(tmp_path, bits, fuse_gate_up):
     builder._make_mlp(0, "hidden_states", weights, "num_block")
 
     projections = [node for node in builder.graph if node.op_type in ("MatMul", "MatMulNBits")]
-    assert len(projections) == (2 if fuse_gate_up else 3)
-    if not fuse_gate_up:
-        assert not any(node.op_type == "Split" for node in builder.graph)
-        assert projections[0].name == "/dflash2/layers.0/mlp/gate_proj/MatMul"
-        assert projections[1].name == "/dflash2/layers.0/mlp/up_proj/MatMul"
-        return
+    assert len(projections) == 2
 
     projection = next(node for node in builder.graph if node.name == "/dflash2/layers.0/mlp/gate_up_proj/MatMul")
     assert projection.op_type == ("MatMulNBits" if bits else "MatMul")
@@ -1285,13 +1729,31 @@ def test_mlp_gate_up_fusion_execution_matches_unfused(tmp_path, bits):
             paged_block_size=256,
             max_position_embeddings=128,
             quant={"bits": bits, "block_size": 32, "prepack": 0} if bits else None,
-            fuse_gate_up=fused,
         )
         builder.io_dtype = ir.DataType.FLOAT
         builder.hidden_size = 32
         builder.intermediate_size = 64
         builder.graph.inputs.append(builder.make_value("hidden_states", ir.DataType.FLOAT, ["num_block", 32]))
-        output = builder._make_mlp(0, "hidden_states", weights, "num_block")
+        if fused:
+            output = builder._make_mlp(0, "hidden_states", weights, "num_block")
+        else:
+            gate, up = [
+                builder.matmul(
+                    f"/{projection}/MatMul",
+                    "hidden_states",
+                    weights[f"layers.0.mlp.{projection}.weight"],
+                    32,
+                    64,
+                    "num_block",
+                )
+                for projection in ("gate_proj", "up_proj")
+            ]
+            sigmoid = builder.unary("Sigmoid", "/sigmoid", gate, ir.DataType.FLOAT, ["num_block", 64])
+            silu = builder.binary("Mul", "/silu", gate, sigmoid, ir.DataType.FLOAT, ["num_block", 64])
+            product = builder.binary("Mul", "/product", silu, up, ir.DataType.FLOAT, ["num_block", 64])
+            output = builder.matmul(
+                "/down/MatMul", product, weights["layers.0.mlp.down_proj.weight"], 64, 32, "num_block"
+            )
         builder.graph.outputs.append(builder.values[output])
         model = ir.serde.serialize_model(builder.model)
         onnx.checker.check_model(model)
@@ -1329,7 +1791,6 @@ def test_qkv_fusion_feeds_packed_qkv_to_paged_attention(tmp_path, bits):
         paged_block_size=256,
         max_position_embeddings=128,
         quant={"bits": bits, "block_size": 8, "prepack": 0} if bits else None,
-        fuse_qkv=True,
     )
     builder.weights = _attention_weights(torch.Generator().manual_seed(7), 8, 8, 4)
 
@@ -1352,16 +1813,13 @@ def test_qkv_fusion_feeds_packed_qkv_to_paged_attention(tmp_path, bits):
     assert not any(node.op_type == "Split" for node in builder.graph)
 
 
-@pytest.mark.parametrize("fuse_qkv", [False, True])
-def test_qkv_fusion_drops_the_query_row_map_input(tmp_path, fuse_qkv):
-    builder = DFlash2Builder(
-        _draft_checkpoint(tmp_path), str(tmp_path), ir.DataType.BFLOAT16, 256, 128, fuse_qkv=fuse_qkv
-    )
+def test_qkv_fusion_drops_the_query_row_map_input(tmp_path):
+    builder = DFlash2Builder(_draft_checkpoint(tmp_path), str(tmp_path), ir.DataType.BFLOAT16, 256, 128)
 
     builder.declare_io()
 
-    assert ("q_row_map" in {value.name for value in builder.graph.inputs}) is not fuse_qkv
-    assert ("q_row_map" in builder.genai_config_section()["inputs"]) is not fuse_qkv
+    assert "q_row_map" not in {value.name for value in builder.graph.inputs}
+    assert "q_row_map" not in builder.genai_config_section()["inputs"]
 
 
 @pytest.mark.parametrize("bits", [None, 4, 8])
@@ -1378,7 +1836,6 @@ def test_qkv_fusion_matches_unfused_projections(tmp_path, bits):
             paged_block_size=256,
             max_position_embeddings=128,
             quant={"bits": bits, "block_size": 32, "prepack": 0} if bits else None,
-            fuse_qkv=fused,
         )
         builder.io_dtype = ir.DataType.FLOAT
         builder.hidden_size, builder.num_heads, builder.num_kv_heads, builder.head_size = hidden, 2, 1, 16
@@ -1390,20 +1847,31 @@ def test_qkv_fusion_matches_unfused_projections(tmp_path, bits):
         if fused:
             outputs = [builder.make_packed_qkv(0, "hidden_states", "ctx_n")]
         else:
-            ctx_kv = [
+            projections = [
                 builder.matmul(
-                    f"/dflash2/layers.0/ctx_{proj[0]}/MatMul",
-                    "ctx_n",
+                    f"/reference/{proj}/MatMul",
+                    "hidden_states" if proj == "q_proj" else "all_rows",
                     weights[f"layers.0.self_attn.{proj}.weight"],
                     hidden,
-                    kv_dim,
-                    "num_ctx",
-                    weight_name=f"dflash2.layers.0.self_attn.{proj}.weight",
+                    q_dim if proj == "q_proj" else kv_dim,
+                    "num_block" if proj == "q_proj" else "num_rows",
                 )
-                for proj in ("k_proj", "v_proj")
+                for proj in ("q_proj", "k_proj", "v_proj")
             ]
-            outputs = list(builder.make_separate_qkv(0, "hidden_states", ctx_kv, "num_block"))
+            builder.make_node("Concat", ["hidden_states", "ctx_n"], ["all_rows"], name="/reference/Concat", axis=0)
+            outputs = [
+                builder.binary(
+                    "Gather",
+                    f"/reference/{projection}/Gather",
+                    root,
+                    "q_row_map" if projection == "q_proj" else "qkv_row_map",
+                    ir.DataType.FLOAT,
+                    ["num_tokens", q_dim if projection == "q_proj" else kv_dim],
+                )
+                for projection, root in zip(("q_proj", "k_proj", "v_proj"), projections, strict=True)
+            ]
         builder.graph.outputs.extend(builder.values[output] for output in outputs)
+        builder.graph.sort()
         model = ir.serde.serialize_model(builder.model)
         onnx.checker.check_model(model)
         sessions.append(ort.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"]))
@@ -1424,11 +1892,11 @@ def test_qkv_fusion_matches_unfused_projections(tmp_path, bits):
         np.testing.assert_allclose(packed[:, q_dim + kv_dim :], v, rtol=1e-5, atol=1e-5)
 
 
-def _quantized_head_builder(tmp_path, bits=4, block_size=8):
+def _quantized_head_builder(tmp_path, bits=4, block_size=8, io_dtype=ir.DataType.FLOAT16):
     builder = DFlash2Builder(
         _draft_checkpoint(tmp_path),
         str(tmp_path),
-        ir.DataType.FLOAT16,
+        io_dtype,
         paged_block_size=256,
         max_position_embeddings=128,
         quant={
@@ -1517,6 +1985,19 @@ def test_quantized_lm_head_adopts_the_targets_bytes_and_attributes(tmp_path):
     assert builder.lm_head_adoption is None
 
 
+def test_bf16_drafter_adopts_an_unpacked_target_lm_head(tmp_path):
+    builder = _quantized_head_builder(tmp_path, io_dtype=ir.DataType.BFLOAT16)
+    builder.make_lm_head("hidden_states", "num_sample")
+    target_path, qweight, _ = _save_quantized_target(tmp_path, builder, weight_prepacked=None)
+
+    builder.adopt_target_tensors(target_path)
+
+    adopted = builder.graph.initializers["lm_head.MatMul.weight_Q4"].const_value.numpy()
+    np.testing.assert_array_equal(adopted, qweight)
+    node = next(node for node in builder.graph if node.name == "/lm_head/MatMul")
+    assert "weight_prepacked" not in node.attributes
+
+
 def test_adopted_lm_head_survives_a_round_trip_to_disk(tmp_path):
     builder = _quantized_head_builder(tmp_path)
     builder.make_lm_head("hidden_states", "num_sample")
@@ -1602,6 +2083,256 @@ def test_a_dense_target_leaves_the_drafter_embedding_dense(tmp_path):
     assert node.op_type == "Gather"
     assert "model.embed_tokens.weight" in builder.graph.initializers
     assert builder.embed_adoption is None
+
+
+@pytest.mark.parametrize("tied", [False, True])
+def test_drafter_reuses_decoder_embedding_during_export(tmp_path, tied):
+    decoder = object.__new__(Model)
+    decoder.make_graph("decoder", opset=21)
+    decoder.io_dtype = ir.DataType.FLOAT
+    decoder.onnx_dtype = ir.DataType.FLOAT
+    decoder.vocab_size, decoder.hidden_size = 32, 8
+    decoder.use_paged_attention = True
+    decoder.hidden_rows_dim = "num_tokens"
+    decoder.input_names = {"input_ids": "input_ids"}
+    decoder.quant_attrs = {}
+    decoder.tied_quantized_embeddings = False
+    decoder.tied_unquantized_embeddings = tied
+    decoder.embed_attrs = {"scale": 1}
+    decoder.layernorm_attrs = {"cast": {"use_fp32": False}}
+    decoder.graph.inputs.append(decoder.make_value("input_ids", ir.DataType.INT64, ["num_tokens"]))
+    table = torch.arange(256, dtype=torch.float32).reshape(32, 8) / 256
+    if tied:
+        decoder.make_initializer(table.T, "lm_head.MatMul.weight")
+    decoder.make_embedding(table)
+    decoder.values[decoder.layernorm_attrs["root_input"]].metadata_props["embedding_test"] = "decoder"
+    decoder.graph.outputs.append(decoder.values[decoder.layernorm_attrs["root_input"]])
+
+    builder = DFlash2Builder(
+        _draft_checkpoint(tmp_path),
+        str(tmp_path),
+        ir.DataType.FLOAT,
+        256,
+        128,
+        ep="cpu",
+        target_model=decoder.model,
+    )
+    builder.graph.inputs.append(builder.make_value("input_ids", ir.DataType.INT64, ["num_block"]))
+    output = builder.make_embedding("/dflash2/embed_tokens/Gather", "num_block")
+    builder.graph.outputs.append(builder.values[output])
+    builder.save_model(str(tmp_path))
+
+    name = "lm_head.MatMul.weight" if tied else "model.embed_tokens.weight"
+    assert builder.graph.initializers[name].const_value is decoder.graph.initializers[name].const_value
+    assert builder.embedding_initializers() == frozenset({name})
+    copied = builder.values[output]
+    assert copied.metadata_props["embedding_test"] == "decoder"
+    assert copied.shape == ir.Shape(["num_block", 8])
+    saved = ir.load(tmp_path / "dflash2.onnx")
+    assert {value.const_value.location for value in saved.graph.initializers.values()} == {"dflash2.onnx.data"}
+    session = ort.InferenceSession(str(tmp_path / "dflash2.onnx"), providers=["CPUExecutionProvider"])
+    ids = np.array([3, 0, 31, 3], dtype=np.int64)
+    np.testing.assert_array_equal(session.run(None, {"input_ids": ids})[0], table.numpy()[ids])
+
+
+@pytest.mark.parametrize("ep", ["cuda", "webgpu"])
+def test_drafter_excludes_embedding_during_export(tmp_path, ep):
+    builder = DFlash2Builder(
+        make_precision_checkpoint(tmp_path, 1),
+        str(tmp_path),
+        ir.DataType.FLOAT16,
+        256,
+        128,
+        ep=ep,
+        exclude_embeds=True,
+    )
+    builder.make_model()
+    builder.save_model(str(tmp_path))
+    saved = ir.load(tmp_path / "dflash2.onnx")
+    inputs = {value.name: value for value in saved.graph.inputs}
+    assert inputs["inputs_embeds"].shape == ir.Shape(["num_block", 32])
+    assert "input_ids" in inputs  # Selector scores still need the anchor token.
+    assert ("attention_metadata" in inputs) == (ep == "cuda")
+    assert not any(name.startswith("model.embed_tokens.") for name in saved.graph.initializers)
+    assert builder.genai_config_section()["inputs"]["inputs_embeds"] == "inputs_embeds"
+    assert {value.const_value.location for value in saved.graph.initializers.values()} == {"dflash2.onnx.data"}
+    assert len(saved.graph) > 0
+
+
+@pytest.mark.parametrize("ep", ["cuda", "webgpu"])
+def test_complete_dflash_export_matches_embedding_inputs_on_cuda(tmp_path, ep):
+    if "CUDAExecutionProvider" not in ort.get_available_providers() or not torch.cuda.is_available():
+        pytest.skip("CUDA is required to execute the exported PagedAttention graph.")
+    draft_dir = make_precision_checkpoint(tmp_path, 1)
+    decoder = object.__new__(Model)
+    decoder.make_graph("decoder", opset=21)
+    decoder.io_dtype, decoder.onnx_dtype = ir.DataType.FLOAT16, ir.DataType.FLOAT16
+    decoder.vocab_size, decoder.hidden_size = 32, 32
+    decoder.use_paged_attention, decoder.hidden_rows_dim = True, "num_tokens"
+    decoder.input_names, decoder.quant_attrs = {"input_ids": "input_ids"}, {}
+    decoder.tied_quantized_embeddings = decoder.tied_unquantized_embeddings = False
+    decoder.embed_attrs, decoder.layernorm_attrs = {"scale": 1}, {"cast": {"use_fp32": False}}
+    decoder.graph.inputs.append(decoder.make_value("input_ids", ir.DataType.INT64, ["num_tokens"]))
+    table = torch.arange(1024, dtype=torch.float16).reshape(32, 32) / 1024
+    decoder.make_embedding(table)
+    sessions = []
+    for exclude_embeds in (False, True):
+        builder = DFlash2Builder(
+            draft_dir,
+            str(tmp_path),
+            ir.DataType.FLOAT16,
+            256,
+            128,
+            ep=ep,
+            compute_dtype=ir.DataType.FLOAT16,
+            target_model=decoder.model,
+            exclude_embeds=exclude_embeds,
+            filename=f"dflash-{exclude_embeds}.onnx",
+        )
+        builder.make_model()
+        builder.save_model(str(tmp_path))
+        options = ort.SessionOptions()
+        options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
+        sessions.append(
+            ort.InferenceSession(str(tmp_path / builder.filename), options, providers=["CUDAExecutionProvider"])
+        )
+    rng = np.random.default_rng(42)
+    ids = np.array([3, 31, 31, 31, 31], dtype=np.int64)
+    feeds = {
+        "input_ids": ids,
+        "aux_hidden_states": rng.standard_normal((3, 96)).astype(np.float16) * 0.01,
+        "qkv_row_map": np.array([5, 6, 7, 0, 1, 2, 3, 4], dtype=np.int32),
+        "block_row_index": np.arange(3, 8, dtype=np.int32),
+        "cumulative_sequence_lengths": np.array([0, 8], dtype=np.int32),
+        "past_sequence_lengths": np.array([0], dtype=np.int32),
+        "block_table": np.array([[0]], dtype=np.int32),
+        "past_key_values.0.key": np.zeros((1, 256, 1, 16), dtype=np.float16),
+        "past_key_values.0.value": np.zeros((1, 256, 1, 16), dtype=np.float16),
+    }
+    if ep == "cuda":
+        feeds["attention_metadata"] = np.array([8, 8, 8], dtype=np.int32)
+
+    def run(session, inputs):
+        binding = session.io_binding()
+        caches = {}
+        for name, value in inputs.items():
+            if name.startswith("past_key_values."):
+                cache = ort.OrtValue.ortvalue_from_numpy(value.copy(), "cuda", 0)
+                caches[name] = cache
+                binding.bind_ortvalue_input(name, cache)
+            else:
+                binding.bind_cpu_input(name, value)
+        for output in session.get_outputs():
+            if output.name.startswith("present."):
+                binding.bind_ortvalue_output(output.name, caches[output.name.replace("present.", "past_key_values.")])
+            else:
+                binding.bind_output(output.name, "cuda", 0)
+        session.run_with_iobinding(binding)
+        return binding.copy_outputs_to_cpu()
+
+    expected = run(sessions[0], feeds)
+    actual = run(sessions[1], {**feeds, "inputs_embeds": table.numpy()[ids]})
+    for left, right in zip(expected, actual, strict=True):
+        assert np.isfinite(left).all() and np.isfinite(right).all()
+        np.testing.assert_array_equal(left, right)
+
+
+@pytest.mark.parametrize("weight_dtype", [ir.DataType.FLOAT16, ir.DataType.INT4])
+def test_pure_model_exports_excluded_dflash_embedding(tmp_path, monkeypatch, weight_dtype):
+    config = transformers.LlamaConfig(
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        vocab_size=32,
+        max_position_embeddings=128,
+        architectures=["LlamaForCausalLM"],
+        _name_or_path=str(tmp_path),
+        eos_token_id=2,
+    )
+    weights = transformers.LlamaForCausalLM(config).eval()
+    options = {
+        "exclude_embeds": True,
+        "use_paged_attention": True,
+        "dflash2_path": _draft_checkpoint(tmp_path),
+        "op_types_to_quantize": ("MatMul", "Gather"),
+    }
+    decoder = Model(config, ir.DataType.FLOAT16, weight_dtype, "cuda", str(tmp_path / "cache"), options)
+    monkeypatch.setattr(decoder, "load_weights", lambda _path: weights)
+    decoder.make_model(str(tmp_path))
+    decoder.save_model(str(tmp_path))
+    decoder.make_genai_config(config, {}, str(tmp_path))
+
+    embedding_path = tmp_path / decoder.embedding_model.filename
+    assert embedding_path.name == "embedding.onnx"
+    embedding = ir.load(embedding_path)
+    assert [value.name for value in embedding.graph.inputs] == ["input_ids"]
+    assert [value.name for value in embedding.graph.outputs] == ["inputs_embeds"]
+    assert embedding.graph.outputs[0].dtype == ir.DataType.FLOAT16
+    assert embedding.graph.inputs[0].shape == ir.Shape(decoder.input_shapes["input_ids"])
+    assert {value.const_value.location for value in embedding.graph.initializers.values()} == {"embedding.onnx.data"}
+    assert not any(name.startswith("model.embed_tokens.") for name in decoder.graph.initializers)
+    with open(tmp_path / "genai_config.json") as handle:
+        generated = json.load(handle)
+    assert generated["model"]["embedding"]["filename"] == "embedding.onnx"
+    assert generated["model"]["embedding"]["inputs"]["input_ids"] == "input_ids"
+    assert generated["model"]["embedding"]["outputs"]["inputs_embeds"] == "inputs_embeds"
+    assert generated["model"]["decoder"]["inputs"]["inputs_embeds"] == "inputs_embeds"
+    session = ort.InferenceSession(str(embedding_path), providers=["CPUExecutionProvider"])
+    ids = np.array([3, 31, 0, 3], dtype=np.int64)
+    actual = session.run(None, {"input_ids": ids})[0]
+    expected = weights.model.embed_tokens.weight.detach().numpy()[ids].astype(np.float16)
+    if weight_dtype == ir.DataType.FLOAT16:
+        np.testing.assert_array_equal(actual, expected)
+    else:
+        assert any(node.op_type == "GatherBlockQuantized" for node in embedding.graph)
+        np.testing.assert_allclose(actual, expected, rtol=0.2, atol=0.005)
+
+
+def test_embedding_adoption_uses_engine_graph_and_head_uses_decoder(tmp_path):
+    builder = _quantized_embedding_builder(tmp_path, block_size=8)
+    builder.make_embedding("/dflash2/embed_tokens/Gather", "num_block")
+    builder.make_lm_head("hidden_states")
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    source_path, embedding_weight, embedding_scales = _quantized_embedding_target(source_dir, builder, block_size=8)
+    embedding_path = tmp_path / "embedding.onnx"
+    Model.save_onnx_model(ir.load(source_path), embedding_path)
+    decoder_path, head_weight, head_scales = _save_quantized_target(tmp_path, builder)
+
+    builder.adopt_target_tensors(decoder_path, embedding_model_path=embedding_path)
+
+    for name, expected in (
+        ("model.embed_tokens.weight_Q4", embedding_weight),
+        ("model.embed_tokens.weight_scales", embedding_scales),
+        ("lm_head.MatMul.weight_Q4", head_weight),
+        ("lm_head.MatMul.weight_scales", head_scales),
+    ):
+        np.testing.assert_array_equal(builder.graph.initializers[name].const_value.numpy(), expected)
+    assert not builder.pending_adoptions()
+
+
+def test_composite_routes_adoption_to_named_engine_graph(tmp_path):
+    model = _composite()
+    model.decoder.exclude_embeds = True
+    model.decoder.embedding_model = types.SimpleNamespace(filename="embedding.onnx")
+    captured = {}
+    drafter = types.SimpleNamespace(
+        filename="dflash2.onnx",
+        exclude_embeds=True,
+        lm_head_quant=None,
+        adopt_target_tensors=lambda source, **kwargs: captured.update(source=source, **kwargs),
+        save_model=lambda _output: None,
+    )
+    model.share_initializers = lambda *args, **kwargs: []
+
+    model.save_block_drafter_model(drafter, str(tmp_path), "DFlash 2")
+
+    assert captured == {
+        "source": str(tmp_path / "model.onnx"),
+        "embedding_model_path": str(tmp_path / "embedding.onnx"),
+    }
 
 
 def test_quantized_embedding_matches_the_targets_initializer_names(tmp_path):
@@ -1717,6 +2448,18 @@ def test_fp8_lm_head_normalizes_supported_scale_layouts(tmp_path, scale_shape):
     assert tuple(scale.shape) == (builder.vocab_size, 1)
 
 
+@pytest.mark.parametrize("conv_kernel_size", [0, 1, 3, 4])
+def test_unsupported_conv_kernel_size_is_rejected(tmp_path, conv_kernel_size):
+    draft_dir = _draft_checkpoint(tmp_path)
+    config_path = tmp_path / "dflash2_draft" / "config.json"
+    config = json.loads(config_path.read_text())
+    config["dflash_config"]["conv_kernel_size"] = conv_kernel_size
+    config_path.write_text(json.dumps(config))
+
+    with pytest.raises(ValueError, match=rf"conv_kernel_size=2.*got {conv_kernel_size}"):
+        DFlash2Builder(draft_dir, str(tmp_path), ir.DataType.FLOAT16, 256, 128)
+
+
 def test_unsupported_rope_type_is_rejected(tmp_path):
     draft_dir = _draft_checkpoint(tmp_path)
     config_path = tmp_path / "dflash2_draft" / "config.json"
@@ -1746,30 +2489,29 @@ def test_five_uniformly_windowed_layers_accept_total_layer_count(tmp_path):
     assert builder.sliding_window == 2048
 
 
-@pytest.mark.parametrize("fuse_gate_up", [False, True, "true", "false"])
-def test_drafter_uses_target_context_length(tmp_path, monkeypatch, fuse_gate_up):
+def test_drafter_uses_target_context_length(tmp_path, monkeypatch):
     captured = {}
 
     class StubDFlash2Builder:
         def __init__(self, _draft_dir, _target_dir, _io_dtype, _paged_block_size, max_position, **_kwargs):
             captured["max_position"] = max_position
-            captured["fuse_gate_up"] = _kwargs["fuse_gate_up"]
+            captured["ep"] = _kwargs["ep"]
 
         def make_model(self):
             pass
 
     dflash2_module = importlib.import_module("models.builders.dflash2")
     monkeypatch.setattr(dflash2_module, "DFlash2Builder", StubDFlash2Builder)
-    model = _composite()
+    model = _composite(ep="webgpu")
     model.make_dflash2_init(
-        io_dtype=None,
-        extra_options={"dflash2_path": _draft_checkpoint(tmp_path), "dflash2_fuse_gate_up": fuse_gate_up},
+        io_dtype=ir.DataType.FLOAT16,
+        extra_options={"dflash2_path": _draft_checkpoint(tmp_path)},
     )
 
     model.make_dflash2_model(str(tmp_path))
 
     assert captured["max_position"] == model.decoder.context_length
-    assert captured["fuse_gate_up"] is (str(fuse_gate_up).lower() == "true")
+    assert captured["ep"] == "webgpu"
 
 
 def test_drafter_resolves_target_repository_to_local_snapshot(tmp_path, monkeypatch):
@@ -1807,64 +2549,13 @@ def test_drafter_resolves_target_repository_to_local_snapshot(tmp_path, monkeypa
     }
 
 
-def test_gate_up_fusion_defaults_off(tmp_path):
+def test_fusion_is_intrinsic_to_the_drafter(tmp_path):
     model = _composite()
     model.make_dflash2_init(io_dtype=None, extra_options={"dflash2_path": _draft_checkpoint(tmp_path)})
 
-    assert model.dflash2_attrs["fuse_gate_up"] is False
     builder = DFlash2Builder(model.dflash2_path, str(tmp_path), ir.DataType.BFLOAT16, 256, 128)
-    assert builder.mlp_attrs["fuse_gate_up"] is False
-
-
-def test_qkv_fusion_defaults_off(tmp_path):
-    model = _composite()
-    model.make_dflash2_init(io_dtype=None, extra_options={"dflash2_path": _draft_checkpoint(tmp_path)})
-
-    assert model.dflash2_attrs["fuse_qkv"] is False
-    builder = DFlash2Builder(model.dflash2_path, str(tmp_path), ir.DataType.BFLOAT16, 256, 128)
-    assert builder.attn_attrs["fuse_qkv"] is False
-
-
-@pytest.mark.parametrize("fuse_qkv", [True, "true", "false"])
-def test_qkv_fusion_option_reaches_the_builder(tmp_path, monkeypatch, fuse_qkv):
-    captured = {}
-
-    class StubDFlash2Builder:
-        def __init__(self, *_args, **kwargs):
-            captured["fuse_qkv"] = kwargs["fuse_qkv"]
-
-        def make_model(self):
-            pass
-
-    monkeypatch.setattr(importlib.import_module("models.builders.dflash2"), "DFlash2Builder", StubDFlash2Builder)
-    model = _composite()
-    model.make_dflash2_init(
-        io_dtype=None, extra_options={"dflash2_path": _draft_checkpoint(tmp_path), "dflash2_fuse_qkv": fuse_qkv}
-    )
-
-    model.make_dflash2_model(str(tmp_path))
-
-    assert captured["fuse_qkv"] is (str(fuse_qkv).lower() == "true")
-
-
-@pytest.mark.parametrize("value", ["yes", "", 1, None])
-def test_qkv_fusion_rejects_invalid_option(tmp_path, value):
-    model = _composite()
-    with pytest.raises(ValueError, match="dflash2_fuse_qkv must be true or false"):
-        model.make_dflash2_init(
-            io_dtype=None,
-            extra_options={"dflash2_path": _draft_checkpoint(tmp_path), "dflash2_fuse_qkv": value},
-        )
-
-
-@pytest.mark.parametrize("value", ["yes", "", 1, None])
-def test_gate_up_fusion_rejects_invalid_option(tmp_path, value):
-    model = _composite()
-    with pytest.raises(ValueError, match="dflash2_fuse_gate_up must be true or false"):
-        model.make_dflash2_init(
-            io_dtype=None,
-            extra_options={"dflash2_path": _draft_checkpoint(tmp_path), "dflash2_fuse_gate_up": value},
-        )
+    assert not hasattr(builder, "attn_attrs")
+    assert not builder.uses_q_row_map
 
 
 def test_failed_save_preserves_existing_dflash2_files(tmp_path, monkeypatch):
@@ -1874,14 +2565,11 @@ def test_failed_save_preserves_existing_dflash2_files(tmp_path, monkeypatch):
     data_path.write_bytes(b"old data")
     builder = object.__new__(DFlash2Builder)
     builder.filename = "dflash2.onnx"
-    # save_model stamps build metadata on the model, so the stub has to accept attributes.
-    builder.model = types.SimpleNamespace()
+    builder.model = ir.Model(ir.Graph(inputs=(), outputs=(), nodes=(), opset_imports={"": 22}), ir_version=10)
 
     def fail_save(_model, staged_path, **kwargs):
         with open(staged_path, "wb") as staged_model:
             staged_model.write(b"partial model")
-        with open(os.path.join(os.path.dirname(staged_path), kwargs["external_data"]), "wb") as staged_data:
-            staged_data.write(b"partial data")
         raise OSError("injected save failure")
 
     monkeypatch.setattr(ir, "save", fail_save)

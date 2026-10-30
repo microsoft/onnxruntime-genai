@@ -567,6 +567,17 @@ class TestTelemetryPackaging(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as temp_dir:
             Path(temp_dir, "package_description.md").write_text("description", encoding="utf-8")
+            for package in (
+                "onnxruntime_genai",
+                "onnxruntime_genai.models",
+                "onnxruntime_genai.models.builders",
+                "onnxruntime_genai.models.builders.qwen3_8",
+                "onnxruntime_genai.telemetry",
+                "onnxruntime_genai.telemetry.library",
+            ):
+                directory = Path(temp_dir, *package.split("."))
+                directory.mkdir(parents=True, exist_ok=True)
+                (directory / "__init__.py").touch()
             previous_dir = os.getcwd()
             try:
                 os.chdir(temp_dir)
@@ -586,6 +597,7 @@ class TestTelemetryPackaging(unittest.TestCase):
 
         self.assertNotIn("onnxruntime_genai.telemetry", packages)
         self.assertIn("onnxruntime_genai.models", packages)
+        self.assertIn("onnxruntime_genai.models.builders.qwen3_8", packages)
 
     def test_wheel_requires_supported_python(self):
         self.assertEqual(self._configured_setup(True)["python_requires"], ">=3.10")
@@ -1730,6 +1742,7 @@ class TestLiveTelemetryIsolation(_HermeticTelemetryTestCase):
         import json
         from contextlib import redirect_stdout
 
+        import telemetry.deviceid as deviceid
         import telemetry.library.transport as transport_mod
         from telemetry.offline_store import OfflineEventStore
 
@@ -1754,10 +1767,16 @@ class TestLiveTelemetryIsolation(_HermeticTelemetryTestCase):
             with (
                 patch.dict(os.environ, {"ORT_GENAI_RUN_LIVE_TELEMETRY_TEST": "1", "JENKINS_URL": "true"}),
                 patch.object(transport_mod.HttpJsonPostTransport, "send", send),
+                patch.object(deviceid.platform, "system", return_value="Windows"),
+                patch.object(deviceid, "_WindowsDeviceIdMutex"),
+                patch.object(
+                    deviceid, "_WindowsStore", side_effect=AssertionError("real registry accessed")
+                ) as registry,
                 redirect_stdout(io.StringIO()),
             ):
                 self.assertEqual(live.main(), 0)
                 self.assertEqual(os.environ["JENKINS_URL"], "true")
+                registry.assert_not_called()
             self.assertEqual(unrelated.count(), 1)
             self.assertEqual(len(sent_names), 6)
             self.assertEqual(
@@ -2670,6 +2689,39 @@ class TestOfflineEventStore(unittest.TestCase):
         batch = s.get_batch(3)
         self.assertEqual([p for _, p in batch], [b'{"e":0}', b'{"e":1}', b'{"e":2}'])
 
+    @unittest.skipIf(os.name == "nt", "POSIX SQLite record locks")
+    def test_wal_locks_survive_hardening_and_overlapping_stores(self):
+        import subprocess
+
+        from telemetry.offline_store import OfflineEventStore
+
+        store = self._new_store()
+        probe = (
+            "import fcntl, sys\n"
+            "with open(sys.argv[1] + '-shm', 'r+b') as handle:\n"
+            "    try:\n"
+            "        fcntl.lockf(handle, fcntl.LOCK_EX | fcntl.LOCK_NB, 1, 128)\n"
+            "    except BlockingIOError:\n"
+            "        print('held')\n"
+            "    else:\n"
+            "        print('available')\n"
+        )
+        for overlap in (False, True):
+            with self.subTest(overlap=overlap):
+                if overlap:
+                    peer = OfflineEventStore(store.db_path)
+                    self.assertTrue(peer.is_open)
+                    peer.close()
+                self.assertTrue(store.store(b'{"event":1}'))
+                child = subprocess.run(
+                    [sys.executable, "-c", probe, store.db_path],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                    timeout=5,
+                )
+                self.assertEqual(child.stdout.strip(), "held")
+
     def test_reserved_event_is_durable_and_released_with_enrichment(self):
         s = self._new_store()
         with patch("telemetry.offline_store.time.time", return_value=100.0):
@@ -3166,6 +3218,43 @@ class TestUploaderDrainLogic(unittest.TestCase):
         self.addCleanup(store.close)
         self.addCleanup(uploader.close)
         return store, uploader
+
+    def test_late_upload_success_is_reconciled_before_new_events(self):
+        import threading
+
+        from telemetry.library.options import CompressionType
+        from telemetry.library.transport import HttpJsonPostTransport
+        from telemetry.uploader import DrainOutcome
+
+        for compression in CompressionType:
+            with self.subTest(compression=compression):
+                store, uploader = self._setup()
+                uploader._transport.compression = compression
+                uploader._send_timeout = 0.01
+                store.store(b'{"first":1}')
+                release = threading.Event()
+                sent = []
+
+                def send(request, _timeout, sent=sent, release=release):
+                    sent.append(request.data)
+                    if len(sent) == 1:
+                        self.assertTrue(release.wait(5))
+                    return True, 204
+
+                with patch.object(HttpJsonPostTransport, "_do_request_blocking", side_effect=send):
+                    try:
+                        self.assertEqual(uploader.drain_once().outcome, DrainOutcome.TRANSPORT_RETRY)
+                        store.store(b'{"second":1}')
+                        release.set()
+                        uploader._transport._inflight_worker.join(5)
+                        self.assertEqual(uploader.drain_once().delivered, 1)
+                        self.assertEqual(len(sent), 1)
+                        self.assertEqual([payload for _, payload in store.get_batch(10)], [b'{"second":1}'])
+                        self.assertEqual(uploader.drain_once().delivered, 1)
+                        self.assertEqual(len(sent), 2)
+                        self.assertEqual(store.count(), 0)
+                    finally:
+                        release.set()
 
     def test_drain_lock_outlives_timed_out_http_worker(self):
         import subprocess

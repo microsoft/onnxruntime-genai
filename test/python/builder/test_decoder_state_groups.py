@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import sys
 import types
@@ -11,17 +10,15 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import torch
+from _builder_test_utils import load_builder_module
 
 BUILDERS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "builders"
 sys.path.insert(0, str(BUILDERS_DIR.parent))
 
 
 def _load_builder_module(module_name):
-    spec = importlib.util.spec_from_file_location(f"models.builders.{module_name}", BUILDERS_DIR / f"{module_name}.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[f"models.builders.{module_name}"] = module
-    spec.loader.exec_module(module)
-    return module
+    return load_builder_module(module_name)
 
 
 sys.modules.setdefault("models", types.ModuleType("models"))
@@ -32,6 +29,7 @@ base_module = _load_builder_module("base")
 qwen_module = _load_builder_module("qwen")
 Model = base_module.Model
 Qwen35TextModel = qwen_module.Qwen35TextModel
+Qwen4ExpTextModel = qwen_module.Qwen4ExpTextModel
 
 
 def test_prequantized_linear_attention_gate_is_rejected():
@@ -319,6 +317,124 @@ def test_qwen38_official_geometry_emits_exact_sparse_groups(monkeypatch, tmp_pat
     assert decoder["outputs"]["present_recurrent_names"] == "present.%d.recurrent"
 
 
+def test_qwen4_exp_paged_state_groups_own_ple_and_sparse_kv():
+    model = _make_config_model(
+        Qwen4ExpTextModel,
+        layer_types=["linear_attention", "indexed_attention"],
+    )
+    model.ple_attrs = {"layer_ids": {0}}
+
+    groups = model.make_decoder_state_groups({}, {})
+
+    assert groups == [
+        {"kind": "paged_kv", "layer_ids": [1]},
+        {"kind": "fixed_conv", "layer_ids": [0]},
+        {"kind": "fixed_recurrent", "layer_ids": [0]},
+        {"kind": "fixed_ple", "layer_ids": [0]},
+    ]
+
+
+def test_qwen4_exp_adds_indexer_group_only_with_complete_bindings():
+    model = _make_config_model(
+        Qwen4ExpTextModel,
+        layer_types=["indexed_attention"],
+    )
+    model.ple_attrs = {"layer_ids": set()}
+    model.input_names.update(
+        {
+            "past.indexer": {0: "past.0.indexer_key"},
+            "past.indexer_kv_buffer": {0: "past.0.indexer_kv_buffer"},
+            "past.indexer_state_lengths": {0: "past.0.indexer_state_lengths"},
+        }
+    )
+
+    groups = model.make_decoder_state_groups({}, {})
+
+    assert groups == [
+        {"kind": "paged_kv", "layer_ids": [0]},
+        {"kind": "fixed_indexer", "layer_ids": [0]},
+    ]
+
+
+def test_qwen4_exp_emits_complete_compact_ple_and_indexer_manifest(monkeypatch, tmp_path):
+    model = _make_config_model(
+        Qwen4ExpTextModel,
+        layer_types=["linear_attention", "indexed_attention"],
+    )
+    model.num_layers = 2
+    model.ple_attrs = {"layer_ids": {0}, "token_pad_id": 1, "external": False}
+    model.sparse_indexer_attrs = {"compress_ratio": 4, "fixed_cache": False}
+    model.linear_num_key_heads = 2
+    model.context_length_attrs["state_update_capacity"] = 7
+    model.input_names.update(
+        {
+            "state_update.capture_count": "state_update_capture_count",
+            "state_update.active": "state_update_active",
+            "past.indexer": {1: "past.1.indexer_key"},
+            "past.indexer_kv_buffer": {1: "past.1.indexer_kv_buffer"},
+            "past.indexer_state_lengths": {1: "past.1.indexer_state_lengths"},
+        }
+    )
+    model.output_names.update(
+        {
+            "state_update.ple_tokens": {0: "state_update.0.ple_tokens"},
+            "state_update.ple_conv_value": {0: "state_update.0.ple_conv_value"},
+            "state_update.indexer": {1: "state_update.1.indexer"},
+            "present.indexer": {1: "present.1.indexer_key"},
+            "present.indexer_kv_buffer": {1: "present.1.indexer_kv_buffer"},
+            "present.indexer_state_lengths": {1: "present.1.indexer_state_lengths"},
+        }
+    )
+
+    decoder = _write_config(monkeypatch, tmp_path, model)["model"]["decoder"]
+
+    assert decoder["outputs"]["state_update_ple_token_names"] == "state_update.%d.ple_tokens"
+    assert decoder["outputs"]["state_update_ple_conv_value_names"] == "state_update.%d.ple_conv_value"
+    assert decoder["outputs"]["state_update_indexer_names"] == "state_update.%d.indexer"
+    assert decoder["state_groups"][-2:] == [
+        {"kind": "fixed_ple", "layer_ids": [0], "state_update": {"capacity": 7}},
+        {
+            "kind": "fixed_indexer",
+            "layer_ids": [1],
+            "state_update": {"capacity": 7, "compress_ratio": 4},
+        },
+    ]
+
+
+def test_qwen4_exp_config_emits_packed_indexer_state_group(monkeypatch, tmp_path):
+    model = _make_config_model(
+        Qwen4ExpTextModel,
+        layer_types=["indexed_attention"],
+    )
+    model.num_layers = 1
+    model.ple_attrs = {"layer_ids": set(), "token_pad_id": 248044, "external": False}
+    model.sparse_indexer_attrs = {"compress_ratio": 4, "fixed_cache": False}
+    model.input_names.update(
+        {
+            "past.indexer": {0: "past.0.indexer_key"},
+            "past.indexer_kv_buffer": {0: "past.0.indexer_kv_buffer"},
+            "past.indexer_state_lengths": {0: "past.0.indexer_state_lengths"},
+        }
+    )
+    model.output_names.update(
+        {
+            "present.indexer": {0: "present.0.indexer_key"},
+            "present.indexer_kv_buffer": {0: "present.0.indexer_kv_buffer"},
+            "present.indexer_state_lengths": {0: "present.0.indexer_state_lengths"},
+        }
+    )
+
+    decoder = _write_config(monkeypatch, tmp_path, model)["model"]["decoder"]
+
+    assert decoder["state_groups"] == [
+        {"kind": "paged_kv", "layer_ids": [0]},
+        {"kind": "fixed_indexer", "layer_ids": [0]},
+    ]
+    assert decoder["inputs"]["past_indexer_names"] == "past.%d.indexer_key"
+    assert decoder["inputs"]["past_indexer_kv_buffer_names"] == "past.%d.indexer_kv_buffer"
+    assert decoder["inputs"]["past_indexer_state_lengths_names"] == "past.%d.indexer_state_lengths"
+
+
 def test_qwen38_compact_state_update_bindings_are_emitted(monkeypatch, tmp_path):
     model = _make_config_model(Qwen35TextModel, layer_types=["linear_attention", "full_attention"])
     model.context_length_attrs["state_update_capacity"] = 3
@@ -392,9 +508,10 @@ def test_varlen_ops_emit_compact_state_updates_at_exact_slots():
         state_update_value_shape=["batch_size", 3, 48],
     )
     conv = model.nodes[-1][1]
-    assert conv["inputs"] == ["x", "weight", "cu", "bias", "past", "capture_count"]
+    assert conv["inputs"] == ["x", "weight", "cu", "bias", "past", "capture_count", ""]
     assert conv["outputs"] == ["/conv/output_0", "present", "state_update.0.conv_value"]
     assert conv["state_update_capacity"] == 3
+    assert conv["dilation"] == 1
 
     model.make_varlen_gated_delta_net(
         "/gdn",
@@ -453,11 +570,13 @@ def test_varlen_ops_omit_compact_state_updates_at_zero_capacity():
         state_update_capacity=0,
         output_shape=["num_tokens", 48],
         present_conv_shape=["batch_size", 48, 3],
+        dilation=3,
     )
     conv = model.nodes[-1][1]
     assert conv["inputs"] == ["x", "weight", "cu", "bias", "past"]
     assert conv["outputs"] == ["/conv/output_0", "present"]
     assert "state_update_capacity" not in conv
+    assert conv["dilation"] == 3
 
     model.make_varlen_gated_delta_net(
         "/gdn",
@@ -609,29 +728,58 @@ def test_dense_gated_delta_net_supports_bfloat16_io():
 
 
 @pytest.mark.parametrize(
-    ("use_paged_attention", "linear_attn_op", "state_window", "ep", "message"),
+    ("state_window", "ep", "message"),
     [
-        (True, "linear_attention", 0, "webgpu", "CUDA execution provider"),
-        (False, "gated_delta_net", 0, "webgpu", "CUDA execution provider"),
-        (True, "linear_attention", 1, "cuda", "require state_window=0"),
-        (False, "gated_delta_net", 1, "cuda", "require state_window=0"),
+        (0, "cpu", "CUDA or WebGPU execution provider"),
+        (1, "cuda", "state_window must be 0 or at least 2"),
     ],
 )
-def test_qwen35_gated_delta_net_option_validation(
-    use_paged_attention,
-    linear_attn_op,
-    state_window,
-    ep,
-    message,
-):
+def test_qwen35_gated_delta_net_validation(state_window, ep, message):
     model = Qwen35TextModel.__new__(Qwen35TextModel)
+    model.use_paged_attention = True
+    model.io_dtype = base_module.ir.DataType.FLOAT16
+    model.context_length_attrs = {"state_update_capacity": 0}
     with pytest.raises(ValueError, match=message):
-        model.validate_gated_delta_net_options(
-            use_paged_attention,
-            linear_attn_op,
-            state_window,
-            ep,
-        )
+        model.validate_gated_delta_net_options(state_window, ep)
+
+
+@pytest.mark.parametrize("ep", ["cuda", "webgpu"])
+def test_qwen35_gated_delta_net_supported_providers(ep):
+    model = Qwen35TextModel.__new__(Qwen35TextModel)
+    model.use_paged_attention = True
+    model.io_dtype = base_module.ir.DataType.FLOAT16
+    model.context_length_attrs = {"state_update_capacity": 0}
+    model.validate_gated_delta_net_options(0, ep)
+
+
+@pytest.mark.parametrize("use_paged_attention", [False, True])
+def test_qwen35_gated_delta_net_accepts_webgpu(use_paged_attention):
+    model = Qwen35TextModel.__new__(Qwen35TextModel)
+    model.use_paged_attention = use_paged_attention
+    model.io_dtype = base_module.ir.DataType.FLOAT16
+    model.context_length_attrs = {"state_update_capacity": 0}
+    model.validate_gated_delta_net_options(0, "webgpu")
+
+
+def test_qwen35_non_paged_gated_delta_net_accepts_webgpu_fp32():
+    model = Qwen35TextModel.__new__(Qwen35TextModel)
+    model.use_paged_attention = False
+    model.io_dtype = base_module.ir.DataType.FLOAT
+    model.context_length_attrs = {"state_update_capacity": 0}
+    model.validate_gated_delta_net_options(0, "webgpu")
+
+
+@pytest.mark.parametrize(
+    "use_paged_attention,io_dtype",
+    [(True, base_module.ir.DataType.FLOAT), (False, base_module.ir.DataType.BFLOAT16)],
+)
+def test_qwen35_gated_delta_net_rejects_unsupported_webgpu_dtype(use_paged_attention, io_dtype):
+    model = Qwen35TextModel.__new__(Qwen35TextModel)
+    model.use_paged_attention = use_paged_attention
+    model.io_dtype = io_dtype
+    model.context_length_attrs = {"state_update_capacity": 0}
+    with pytest.raises(ValueError, match="WebGPU require FP16"):
+        model.validate_gated_delta_net_options(0, "webgpu")
 
 
 def _packed_gated_delta_net_model(
@@ -641,7 +789,6 @@ def _packed_gated_delta_net_model(
 ):
     model = Qwen35TextModel.__new__(Qwen35TextModel)
     model.use_paged_attention = True
-    model.linear_attn_op = "gated_delta_net"
     model.ep = "cuda"
     model.context_length_attrs = {"state_window": 0, "state_update_capacity": capacity}
     model.io_dtype = io_dtype
@@ -715,6 +862,9 @@ def test_qwen38_packed_layer_reuses_declared_state_update_bindings(monkeypatch):
     model.make_gated_delta_net_layer(0, SimpleNamespace(A_log="a_log", dt_bias="dt_bias"), "conv", "b", "a")
 
     gdn = calls[0]
+    assert gdn["q_path"] == "conv"
+    assert gdn["k_path"] == ""
+    assert gdn["v_path"] == ""
     assert gdn["state_update_capture_count"] == model.input_names["state_update.capture_count"]
     assert gdn["state_update_active"] == model.input_names["state_update.active"]
     assert gdn["state_update_capsule"] == model.output_names["state_update.recurrent_capsule"][0]
@@ -723,6 +873,7 @@ def test_qwen38_packed_layer_reuses_declared_state_update_bindings(monkeypatch):
     assert model.make_conv_state_update_kwargs(0) == {
         "state_update_capacity": 3,
         "state_update_capture_count": model.input_names["state_update.capture_count"],
+        "state_update_active": model.input_names["state_update.active"],
         "state_update_value": model.output_names["state_update.conv_value"][0],
         "state_update_value_shape": model.output_shapes["state_update.conv_value"],
     }
@@ -730,6 +881,8 @@ def test_qwen38_packed_layer_reuses_declared_state_update_bindings(monkeypatch):
 
 def test_qwen38_dense_gated_delta_net_exports_raw_a_log(monkeypatch):
     model = Qwen35TextModel.__new__(Qwen35TextModel)
+    model.ep = "cuda"
+    model.context_length_attrs = {"state_update_capacity": 0}
     model.use_paged_attention = False
     model.io_dtype = base_module.ir.DataType.FLOAT16
     model.linear_key_dim = 8
@@ -748,7 +901,7 @@ def test_qwen38_dense_gated_delta_net_exports_raw_a_log(monkeypatch):
     calls = []
     monkeypatch.setattr(Model, "make_gated_delta_net", lambda self, name, **kwargs: calls.append((name, kwargs)))
 
-    a_log = qwen_module.torch.tensor([0.25, -0.5, 0.0])
+    a_log = torch.tensor([0.25, -0.5, 0.0])
     output = model.make_gated_delta_net_layer(
         1,
         SimpleNamespace(A_log=a_log, dt_bias="dt_bias_value"),
@@ -758,10 +911,13 @@ def test_qwen38_dense_gated_delta_net_exports_raw_a_log(monkeypatch):
     )
 
     gdn = calls[0][1]
+    assert gdn["q_path"] == "conv_output"
+    assert gdn["k_path"] == ""
+    assert gdn["v_path"] == ""
     assert gdn["a_log"] == "model.layers.1.linear_attn.A_log"
     assert gdn["state_shape"] == ["batch_size", 3, 8, 4]
     assert gdn["gate_shape"] == ["batch_size", "sequence_length", 3]
     assert "state_update_capacity" not in gdn
     exported_a_log = next(args[0] for args, _ in initializers if args[1] == gdn["a_log"])
-    qwen_module.torch.testing.assert_close(exported_a_log, a_log)
+    torch.testing.assert_close(exported_a_log, a_log)
     assert output.endswith("/gdn_out/Reshape/output_0")

@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include <string>
+#include <tuple>
 #include <utility>
 
 #include <gtest/gtest.h>
@@ -12,6 +13,74 @@
 #include "models/session_options.h"
 
 namespace Generators::test {
+
+TEST(ConfigTest, ParsesDeterministicCompute) {
+  Config config;
+  EXPECT_FALSE(config.model.decoder.session_options.use_deterministic_compute.has_value());
+  OverlayConfig(config, R"({"model":{"decoder":{"session_options":{"use_deterministic_compute":true}}}})");
+  EXPECT_EQ(config.model.decoder.session_options.use_deterministic_compute, true);
+  EXPECT_TRUE(config.model.decoder.session_options.config_entries.empty());
+  OverlayConfig(config, R"({"model":{"decoder":{"session_options":{"use_deterministic_compute":false}}}})");
+  EXPECT_EQ(config.model.decoder.session_options.use_deterministic_compute, false);
+  EXPECT_THROW(OverlayConfig(config,
+                             R"({"model":{"decoder":{"session_options":{"use_deterministic_compute":"true"}}}})"),
+               std::exception);
+}
+
+TEST(ConfigTest, ParsesTimestampConfiguration) {
+  Config config;
+
+  OverlayConfig(config, R"({"model":{
+    "type":"nemotron_speech",
+    "timestamp_level":"all",
+    "sample_rate":16000,
+    "hop_length":160,
+    "subsampling_factor":8,
+    "segment_separators":[".","!?"] ,
+    "segment_gap_threshold_seconds":1.25
+  }})");
+
+  EXPECT_EQ(config.model.timestamp_level, Config::TimestampLevel::All);
+  EXPECT_EQ(config.model.segment_separators, (std::vector<std::string>{".", "!?"}));
+  EXPECT_EQ(config.model.segment_gap_threshold_seconds, 1.25);
+}
+
+TEST(ConfigTest, ParsesDisabledTimestampGap) {
+  Config config;
+  config.model.segment_gap_threshold_seconds = 1.0;
+
+  OverlayConfig(config, R"({"model":{"segment_gap_threshold_seconds":null}})");
+
+  EXPECT_FALSE(config.model.segment_gap_threshold_seconds.has_value());
+}
+
+TEST(ConfigTest, RejectsInvalidTimestampConfiguration) {
+  for (const char* json : {
+           R"({"model":{"timestamp_level":"token"}})",
+           R"({"model":{"segment_gap_threshold_frames":12}})",
+           R"({"model":{"segment_gap_threshold_seconds":-1}})"}) {
+    Config config;
+    EXPECT_THROW(OverlayConfig(config, json), std::runtime_error);
+  }
+}
+
+TEST(ConfigTest, RejectsInvalidTimestampOverlayWithoutChangingConfig) {
+  Config config;
+  for (const auto& overlay : {
+           R"({"model":{"type":"nemotron_speech","timestamp_level":"word"}})",
+           R"({"model":{"type":"gpt2","timestamp_level":"word","sample_rate":100,"hop_length":10,"subsampling_factor":1}})",
+           R"({"model":{"type":"nemotron_speech","timestamp_level":"segment","sample_rate":16000,"hop_length":160,"subsampling_factor":8,"segment_gap_threshold_seconds":1e20}})"}) {
+    EXPECT_THROW(OverlayConfig(config, overlay), std::runtime_error);
+    EXPECT_EQ(config.model.timestamp_level, Config::TimestampLevel::Off);
+  }
+}
+
+TEST(ConfigTest, AcceptsZeroTimestampGap) {
+  Config config;
+  OverlayConfig(config, R"({"model":{"segment_gap_threshold_seconds":0}})");
+  ASSERT_TRUE(config.model.segment_gap_threshold_seconds.has_value());
+  EXPECT_EQ(GetSegmentGapThresholdFrames(config.model.segment_gap_threshold_seconds, 100, 10, 1), 0);
+}
 
 TEST(ConfigTest, ParsesStaticBatching) {
   Config config;
@@ -29,6 +98,90 @@ TEST(ConfigTest, ParsesSelectedLogitsInput) {
   OverlayConfig(config, R"({"model":{"decoder":{"inputs":{"logits_indices":"selected_rows"}}}})");
 
   EXPECT_EQ(config.model.decoder.inputs.logits_indices, "selected_rows");
+}
+
+TEST(ConfigTest, ParsesRotaryHistoryAndIndexerCompressionMetadata) {
+  Config config;
+  OverlayConfig(config, R"({"model":{
+    "decoder":{"hidden_size":16,"indexer_compress_ratio":8,"ple_token_pad_id":7,
+               "inputs":{"rotary_position_ids":"main_rotary_history"}},
+    "mtp":{"filename":"mtp.onnx","num_hidden_layers":1,"num_key_value_heads":1,"head_size":16,
+           "inputs":{"rotary_position_ids":"head_rotary_history"}}
+  }})");
+  EXPECT_EQ(config.model.decoder.inputs.rotary_position_ids, "main_rotary_history");
+  EXPECT_EQ(config.model.decoder.indexer_compress_ratio, 8);
+  EXPECT_EQ(config.model.decoder.ple_token_pad_id, 7);
+  auto head = CreateMtpDecoderConfig(config);
+  EXPECT_EQ(head->model.decoder.inputs.rotary_position_ids, "head_rotary_history");
+  EXPECT_EQ(head->model.decoder.indexer_compress_ratio, 8);
+}
+
+TEST(ConfigTest, RejectsInvalidPlePadIdsAndCompressionRatios) {
+  for (const auto* value : {"1.5", "-1", "1e100"}) {
+    Config config;
+    const std::string overlay = std::string{R"({"model":{"decoder":{"ple_token_pad_id":)"} + value + "}}}";
+    EXPECT_THROW(OverlayConfig(config, overlay), std::exception);
+  }
+  for (const auto* value : {"0", "-1", "1.5", "1e100"}) {
+    Config config;
+    const std::string overlay = std::string{R"({"model":{"decoder":{"indexer_compress_ratio":)"} + value + "}}}";
+    EXPECT_THROW(OverlayConfig(config, overlay), std::exception);
+  }
+}
+
+TEST(ConfigTest, EngramRequiresExplicitPaddingAndRetainsItsOwnProviders) {
+  const auto root = fs::path{MODEL_PATH "engine/dummy-decoder"};
+  EXPECT_THROW((Config{root, R"({"model":{"engram":{"filename":"engram.onnx"}}})"}), std::runtime_error);
+  EXPECT_THROW((Config{root, R"({"model":{"decoder":{"inputs":{"past_ple_token_names":"past.%d.ple_tokens"}}}})"}),
+               std::runtime_error);
+  Config config{root, R"({"model":{
+    "decoder":{"ple_token_pad_id":7},
+    "engram":{"filename":"engram.onnx","session_options":{"provider_options":[{"cuda":{}}]}}
+  }})"};
+  ASSERT_TRUE(config.model.engram.session_options);
+  EXPECT_EQ(config.model.engram.session_options->providers, (std::vector<std::string>{"cuda"}));
+}
+
+TEST(ConfigTest, EngramProviderOverridesAreAppliedAndUnknownProvidersFailExplicitly) {
+  Config config;
+  OverlayConfig(config, R"({"model":{"engram":{"session_options":{"provider_options":[{"cpu":{}}]}}}})");
+  EXPECT_EQ(config.model.engram.session_options->providers, (std::vector<std::string>{"CPU"}));
+  OverlayConfig(config, R"({"search":{"max_length":8}})");
+  EXPECT_EQ(config.model.engram.session_options->providers, (std::vector<std::string>{"CPU"}));
+  auto unknown = std::make_unique<Config>(
+      fs::path{MODEL_PATH "engine/dummy-decoder"}, R"({"model":{
+        "type":"qwen4_exp_text",
+        "decoder":{"ple_token_pad_id":7},
+        "engram":{"filename":"engram.onnx","session_options":{"provider_options":[{"nonexistent_provider":{}}]}}
+      }})");
+  try {
+    CreateModel(GetOrtEnv(), std::move(unknown));
+    FAIL() << "Unknown Engram provider must not silently fall back to CPU";
+  } catch (const std::exception& error) {
+    EXPECT_NE(std::string{error.what()}.find("nonexistent_provider"), std::string::npos) << error.what();
+  }
+}
+
+TEST(ConfigTest, ParsesEngramPleTokenNames) {
+  Config config;
+  OverlayConfig(config, R"({"model":{"engram":{
+    "inputs":{"past_ple_token_names":"past.1.ple_tokens"},
+    "outputs":{"present_ple_token_names":"present.1.ple_tokens"}
+  }}})");
+
+  EXPECT_EQ(config.model.engram.inputs.past_tokens, "past.1.ple_tokens");
+  EXPECT_EQ(config.model.engram.outputs.present_tokens, "present.1.ple_tokens");
+}
+
+TEST(ConfigTest, ParsesLegacyEngramTokenNames) {
+  Config config;
+  OverlayConfig(config, R"({"model":{"engram":{
+    "inputs":{"past_tokens":"legacy_past"},
+    "outputs":{"present_tokens":"legacy_present"}
+  }}})");
+
+  EXPECT_EQ(config.model.engram.inputs.past_tokens, "legacy_past");
+  EXPECT_EQ(config.model.engram.outputs.present_tokens, "legacy_present");
 }
 
 TEST(ConfigTest, RejectsNonPositiveStaticBatchSize) {
@@ -86,6 +239,58 @@ TEST(ConfigTest, RuntimeProfileUsesBaseWhenNoRangeMatches) {
 
   ASSERT_TRUE(config.engine.dynamic_batching->num_blocks);
   EXPECT_EQ(*config.engine.dynamic_batching->num_blocks, 32u);
+}
+
+TEST(ConfigTest, Dflash2SnapshotsDefaultToOneAndAllowZeroOrLargerPools) {
+  Config defaults;
+  OverlayConfig(defaults, R"({"engine":{"dynamic_batching":{"num_blocks":32}}})");
+  ASSERT_TRUE(defaults.engine.dynamic_batching);
+  EXPECT_EQ(defaults.engine.dynamic_batching->dflash2_max_snapshots, 1u);
+
+  for (const size_t capacity : {size_t{0}, size_t{1}, size_t{3}, size_t{2147483647}}) {
+    Config config;
+    OverlayConfig(config, R"({"engine":{"dynamic_batching":{"dflash2_max_snapshots":)" +
+                              std::to_string(capacity) + "}}}");
+    EXPECT_EQ(config.engine.dynamic_batching->dflash2_max_snapshots, capacity);
+    OverlayConfig(config, R"({"runtime_profiles":[{
+      "id":"snapshot-pool",
+      "eligibility":{"minimum_total_device_memory_bytes":100},
+      "overlay":{"engine":{"dynamic_batching":{"dflash2_max_snapshots":)" +
+                              std::to_string(capacity == 0 ? 3 : 0) + "}}}}]}");
+    ApplyRuntimeProfile(config, 99);
+    EXPECT_EQ(config.engine.dynamic_batching->dflash2_max_snapshots, capacity);
+    ApplyRuntimeProfile(config, 100);
+    EXPECT_EQ(config.engine.dynamic_batching->dflash2_max_snapshots, capacity == 0 ? 3u : 0u);
+  }
+}
+
+TEST(ConfigTest, Dflash2SnapshotLimitRejectsInvalidValuesTransactionally) {
+  for (const auto* value : {"-1", "1.5", "2147483648", "true", "\"3\"", "null"}) {
+    Config config;
+    OverlayConfig(config, R"({"engine":{"dynamic_batching":{"dflash2_max_snapshots":3}}})");
+    EXPECT_THROW(OverlayConfig(config, R"({"engine":{"dynamic_batching":{"dflash2_max_snapshots":)" +
+                                           std::string{value} + "}}}"),
+                 std::runtime_error);
+    EXPECT_EQ(config.engine.dynamic_batching->dflash2_max_snapshots, 3u);
+    EXPECT_THROW(OverlayConfig(config, R"({"runtime_profiles":[{
+      "id":"invalid",
+      "eligibility":{"minimum_total_device_memory_bytes":0},
+      "overlay":{"engine":{"dynamic_batching":{"dflash2_max_snapshots":)" +
+                                           std::string{value} + "}}}}]}"),
+                 std::runtime_error);
+    EXPECT_TRUE(config.runtime_profiles.empty());
+  }
+}
+
+TEST(ConfigTest, Dflash2SnapshotOnlyProfileRequiresDynamicBatchingEvenWhenDisabled) {
+  Config config;
+  OverlayConfig(config, R"({"runtime_profiles":[{
+    "id":"disabled",
+    "eligibility":{"minimum_total_device_memory_bytes":0},
+    "overlay":{"engine":{"dynamic_batching":{"dflash2_max_snapshots":0}}}
+  }]})");
+  EXPECT_THROW(ApplyRuntimeProfile(config, 0), std::runtime_error);
+  EXPECT_FALSE(config.engine.dynamic_batching);
 }
 
 TEST(ConfigTest, RuntimeProfileUsesDefaultCudaDevice) {
@@ -190,6 +395,164 @@ TEST(ConfigTest, IntegratedEligibilityRequiresBooleanAndDisjointRanges) {
       EXPECT_NE(std::string(error.what()).find("eligibility ranges overlap"), std::string::npos);
     }
   }
+}
+
+TEST(ConfigTest, FreeMemoryProfilesMatchInclusiveBoundsAndKeepLegacyCallersSafe) {
+  Config config;
+  OverlayConfig(config, R"({
+    "engine":{"dynamic_batching":{"num_blocks":32}},
+    "runtime_profiles":[
+      {"id":"less-free","eligibility":{"minimum_total_device_memory_bytes":100,
+        "minimum_free_device_memory_bytes":50,"maximum_free_device_memory_bytes":80},
+       "overlay":{"engine":{"dynamic_batching":{"num_blocks":40}}}},
+      {"id":"more-free","eligibility":{"minimum_total_device_memory_bytes":100,
+        "minimum_free_device_memory_bytes":81,"maximum_free_device_memory_bytes":100},
+       "overlay":{"engine":{"dynamic_batching":{"num_blocks":80}}}}
+    ]
+  })");
+
+  for (const auto [free_bytes, expected_blocks] : {
+           std::pair{49u, 32u}, std::pair{50u, 40u}, std::pair{80u, 40u},
+           std::pair{81u, 80u}, std::pair{100u, 80u}, std::pair{101u, 32u}}) {
+    auto candidate = config;
+    CountingCudaDevice device;
+    device.state->total_memory_bytes = 200;
+    device.state->free_memory_bytes = free_bytes;
+    ApplyRuntimeProfileForSelectedDevice(candidate, device);
+    EXPECT_EQ(*candidate.engine.dynamic_batching->num_blocks, expected_blocks) << free_bytes;
+    EXPECT_EQ(device.state->memory_queries, 1u);
+    EXPECT_EQ(device.state->integrated_queries, 0u);
+  }
+
+  auto legacy_caller = config;
+  ApplyRuntimeProfile(legacy_caller, 200);
+  EXPECT_EQ(*legacy_caller.engine.dynamic_batching->num_blocks, 32u);
+}
+
+TEST(ConfigTest, FreeMemoryEligibilityRespectsPhysicalMemoryDomain) {
+  Config config;
+  OverlayConfig(config, R"({
+    "runtime_profiles":[
+      {"id":"first","eligibility":{"minimum_total_device_memory_bytes":100,
+        "maximum_total_device_memory_bytes":150,"minimum_free_device_memory_bytes":140,
+        "maximum_free_device_memory_bytes":200},"overlay":{"search":{"chunk_size":1}}},
+      {"id":"second","eligibility":{"minimum_total_device_memory_bytes":100,
+        "maximum_total_device_memory_bytes":200,"minimum_free_device_memory_bytes":160,
+        "maximum_free_device_memory_bytes":200},"overlay":{"search":{"chunk_size":2}}}
+    ]
+  })");
+  auto second = config;
+  ApplyRuntimeProfile(config, RuntimeProfileDeviceFacts{150, false, 140});
+  EXPECT_EQ(config.search.chunk_size, 1u);
+  ApplyRuntimeProfile(second, RuntimeProfileDeviceFacts{160, false, 160});
+  EXPECT_EQ(second.search.chunk_size, 2u);
+
+  for (const auto* other_free : {"80", "81"}) {
+    Config overlapping;
+    const auto json = std::string{R"({"runtime_profiles":[
+      {"id":"first","eligibility":{"minimum_total_device_memory_bytes":100,
+        "maximum_free_device_memory_bytes":80},"overlay":{"search":{"chunk_size":1}}},
+      {"id":"second","eligibility":{"minimum_total_device_memory_bytes":100,
+        "minimum_free_device_memory_bytes":)"} +
+                      other_free + R"(},"overlay":{"search":{"chunk_size":2}}}
+    ]})";
+    if (std::string_view{other_free} == "80") {
+      EXPECT_THROW(OverlayConfig(overlapping, json), std::runtime_error);
+    } else {
+      EXPECT_NO_THROW(OverlayConfig(overlapping, json));
+    }
+  }
+}
+
+TEST(ConfigTest, FreeMemoryEligibilityRejectsInvalidAndUnreachableRanges) {
+  for (const auto* field : {"minimum_free_device_memory_bytes", "maximum_free_device_memory_bytes"}) {
+    for (const auto* value : {"-1", "1.5", "true", "null", "\"100\"", "9007199254740992"}) {
+      Config config;
+      const auto json = std::string{R"({"runtime_profiles":[{
+        "id":"invalid","eligibility":{"minimum_total_device_memory_bytes":0,")"} +
+                        field + R"(":)" + value + R"(},"overlay":{"search":{"chunk_size":1}}}]})";
+      EXPECT_THROW(OverlayConfig(config, json), std::runtime_error) << field << ": " << value;
+    }
+  }
+
+  for (const auto* eligibility : {
+           R"("minimum_free_device_memory_bytes":81,"maximum_free_device_memory_bytes":80)",
+           R"("maximum_total_device_memory_bytes":100,"minimum_free_device_memory_bytes":101)"}) {
+    Config config;
+    const auto json = std::string{R"({"runtime_profiles":[{
+      "id":"invalid","eligibility":{"minimum_total_device_memory_bytes":0,)"} +
+                      eligibility + R"(},"overlay":{"search":{"chunk_size":1}}}]})";
+    EXPECT_THROW(OverlayConfig(config, json), std::runtime_error) << eligibility;
+  }
+
+  Config zero_free;
+  OverlayConfig(zero_free, R"({"runtime_profiles":[{
+    "id":"zero","eligibility":{"minimum_total_device_memory_bytes":100,
+      "maximum_free_device_memory_bytes":0},"overlay":{"search":{"chunk_size":1}}}]})");
+  ApplyRuntimeProfile(zero_free, RuntimeProfileDeviceFacts{100, false, 0});
+  EXPECT_EQ(zero_free.search.chunk_size, 1u);
+}
+
+TEST(ConfigTest, FreeMemoryAndIntegratedConditionsMatchTogether) {
+  Config config;
+  OverlayConfig(config, R"({
+    "engine":{"dynamic_batching":{"num_blocks":32}},
+    "runtime_profiles":[{
+      "id":"shared-with-headroom","eligibility":{
+        "minimum_total_device_memory_bytes":100,"maximum_total_device_memory_bytes":200,
+        "minimum_free_device_memory_bytes":40,"maximum_free_device_memory_bytes":80,
+        "is_integrated":true},
+      "overlay":{"engine":{"dynamic_batching":{"num_blocks":64}}}
+    }]
+  })");
+
+  for (const auto [integrated, free_bytes, expected_blocks] : {
+           std::tuple{true, 39u, 32u}, std::tuple{true, 40u, 64u},
+           std::tuple{true, 80u, 64u}, std::tuple{true, 81u, 32u},
+           std::tuple{false, 40u, 32u}}) {
+    auto candidate = config;
+    CountingCudaDevice device;
+    device.state->total_memory_bytes = 200;
+    device.state->free_memory_bytes = free_bytes;
+    device.state->is_integrated = integrated;
+    ApplyRuntimeProfileForSelectedDevice(candidate, device);
+    EXPECT_EQ(*candidate.engine.dynamic_batching->num_blocks, expected_blocks);
+    EXPECT_EQ(device.state->integrated_queries, 1u);
+  }
+}
+
+TEST(ConfigTest, RuntimeProfileLogsSelectedAndBaseWithObservedFacts) {
+  Config config;
+  OverlayConfig(config, R"({
+    "engine":{"dynamic_batching":{"num_blocks":32}},
+    "runtime_profiles":[{
+      "id":"headroom","eligibility":{"minimum_total_device_memory_bytes":100,
+        "minimum_free_device_memory_bytes":40},
+      "overlay":{"engine":{"dynamic_batching":{"num_blocks":64}}}
+    }]
+  })");
+  const auto previous_logging = g_log.enabled;
+  SetLogBool("enabled", true);
+
+  auto selected = config;
+  testing::internal::CaptureStderr();
+  ApplyRuntimeProfile(selected, RuntimeProfileDeviceFacts{100, false, 40});
+  const auto selected_log = testing::internal::GetCapturedStderr();
+  EXPECT_NE(selected_log.find("Runtime profile: headroom"), std::string::npos);
+  EXPECT_NE(selected_log.find("total_device_memory_bytes=100"), std::string::npos);
+  EXPECT_NE(selected_log.find("free_device_memory_bytes=40"), std::string::npos);
+  EXPECT_NE(selected_log.find("is_integrated=false"), std::string::npos);
+  EXPECT_EQ(selected_log.find("Runtime profile:"), selected_log.rfind("Runtime profile:"));
+
+  testing::internal::CaptureStderr();
+  ApplyRuntimeProfile(config, 100);
+  const auto base_log = testing::internal::GetCapturedStderr();
+  SetLogBool("enabled", previous_logging);
+  EXPECT_NE(base_log.find("Runtime profile: base config"), std::string::npos);
+  EXPECT_NE(base_log.find("total_device_memory_bytes=100"), std::string::npos);
+  EXPECT_NE(base_log.find("free_device_memory_bytes=unknown"), std::string::npos);
+  EXPECT_NE(base_log.find("is_integrated=unknown"), std::string::npos);
+  EXPECT_EQ(base_log.find("Runtime profile:"), base_log.rfind("Runtime profile:"));
 }
 
 TEST(ConfigTest, RuntimeProfilesRejectAmbiguousCudaDeviceBeforeMemoryQuery) {
@@ -483,6 +846,96 @@ TEST(ConfigTest, RejectsMtpScaleBindings) {
     Config config;
     EXPECT_THROW(OverlayConfig(config, json), std::runtime_error) << json;
   }
+}
+
+template <typename PipelineModels>
+void ExpectPipelineOverlayMerged(const PipelineModels& pipeline) {
+  ASSERT_EQ(pipeline.size(), 3u);
+
+  const auto& untouched_model = pipeline[0];
+  EXPECT_EQ(untouched_model.model_id, "untouched_model");
+  EXPECT_EQ(untouched_model.filename, "untouched.onnx");
+  ASSERT_TRUE(untouched_model.session_options);
+  ASSERT_TRUE(untouched_model.session_options->log_id);
+  EXPECT_EQ(*untouched_model.session_options->log_id, "untouched");
+  EXPECT_FALSE(untouched_model.session_options->enable_profiling);
+
+  const auto& existing_model = pipeline[1];
+  EXPECT_EQ(existing_model.model_id, "existing_model");
+  EXPECT_EQ(existing_model.filename, "existing.onnx");
+  ASSERT_TRUE(existing_model.session_options);
+  ASSERT_TRUE(existing_model.session_options->log_id);
+  EXPECT_EQ(*existing_model.session_options->log_id, "original");
+  ASSERT_TRUE(existing_model.session_options->enable_profiling);
+  EXPECT_EQ(*existing_model.session_options->enable_profiling, "profile");
+  ASSERT_EQ(existing_model.session_options->provider_options.size(), 1u);
+  EXPECT_EQ(existing_model.session_options->provider_options[0].name, "CPU");
+
+  const auto& new_model = pipeline[2];
+  EXPECT_EQ(new_model.model_id, "new_model");
+  EXPECT_EQ(new_model.filename, "new.onnx");
+}
+
+TEST(ConfigTest, PipelineOverlayMergesByModelId) {
+  Config config;
+  OverlayConfig(config, R"({
+    "model": {
+      "decoder": {
+        "pipeline": [{
+          "untouched_model": {
+            "filename": "untouched.onnx",
+            "session_options": {"log_id": "untouched"}
+          },
+          "existing_model": {
+            "filename": "existing.onnx",
+            "session_options": {
+              "log_id": "original",
+              "provider_options": [{"CPU": {}}]
+            }
+          }
+        }]
+      },
+      "vision": {
+        "pipeline": [{
+          "untouched_model": {
+            "filename": "untouched.onnx",
+            "session_options": {"log_id": "untouched"}
+          },
+          "existing_model": {
+            "filename": "existing.onnx",
+            "session_options": {
+              "log_id": "original",
+              "provider_options": [{"CPU": {}}]
+            }
+          }
+        }]
+      }
+    }
+  })");
+
+  OverlayConfig(config, R"({
+    "model": {
+      "decoder": {
+        "pipeline": [{
+          "existing_model": {
+            "session_options": {"enable_profiling": "profile"}
+          },
+          "new_model": {"filename": "new.onnx"}
+        }]
+      },
+      "vision": {
+        "pipeline": [{
+          "existing_model": {
+            "session_options": {"enable_profiling": "profile"}
+          },
+          "new_model": {"filename": "new.onnx"}
+        }]
+      }
+    }
+  })");
+
+  ExpectPipelineOverlayMerged(config.model.decoder.pipeline);
+  ExpectPipelineOverlayMerged(config.model.vision.pipeline);
 }
 
 }  // namespace Generators::test

@@ -310,6 +310,33 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
   // is comparable to the step itself, so ask the device for the token ids in one launch instead.
   const bool step_has_drafts = std::any_of(draft_token_counts_.begin(), draft_token_counts_.end(),
                                            [](size_t count) { return count != 0; });
+  if (step_has_drafts) {
+    size_t first_row = 0;
+    for (size_t i = 0; i < requests_.size(); ++i) {
+      const size_t draft_count = draft_token_counts_[i];
+      auto& request = requests_[i];
+      if (draft_count != 0) {
+        const int eos_floor = request->TurnEosFloor();
+        const int64_t committed_length = request->CommittedSequenceLength();
+        for (size_t offset = 0; offset <= draft_count; ++offset) {
+          const int64_t row_length = committed_length + static_cast<int64_t>(offset);
+          if (row_length >= eos_floor) {
+            break;
+          }
+          // Staged drafts already extend Search's sequence; each verification row needs its
+          // own logical length, including the correction/bonus row, before argmax or top-k.
+          request->search_->SetLogits(verify_rows[first_row + offset]);
+          request->search_->ApplyMinLength(eos_floor, static_cast<int>(row_length));
+          if (model_->p_device_scoring_->GetType() == DeviceType::CPU) {
+            // SetLogits downloads the shared buffer again for the next row, so persist this
+            // host-side mask first. Device scorers already modify the device buffer in place.
+            verify_rows[first_row + offset].CopyCpuToDevice();
+          }
+        }
+      }
+      first_row += draft_count + 1;
+    }
+  }
   std::vector<int32_t> row_argmax =
       step_has_drafts ? TryDeviceArgmaxPerRow(*model_->p_device_inputs_, verify_rows)
                       : std::vector<int32_t>{};
@@ -516,7 +543,7 @@ void ScheduledRequests::ScheduleGuidanceMasks() noexcept {
     std::vector<ConstrainedLogitsProcessor*> processors;
     processors.reserve(requests_.size());
     for (const auto& request : requests_) {
-      if (request->guidance_logits_processor_ &&
+      if (request->HasGuidance() &&
           !request->IsTurnComplete()) {
         processors.push_back(request->guidance_logits_processor_.get());
       }
@@ -944,9 +971,9 @@ void ScheduledRequests::GenerateNextTokensForTransaction(
     } else if (requests_[i]->IsChunkComplete() && selected_tokens[i].empty() &&
                !sampled_by_batched_sampler[i]) {
       if (greedy_tokens[i] >= 0) {
-        // Drafted requests run without logits processors (see Request::DraftTokenValidationError),
-        // so the verification argmax of this row already is the greedy token. Committing it directly
-        // skips a second pass over the vocabulary and its device round trip.
+        // Verification rows already have the applicable EOS floor applied, and other logits
+        // processors are excluded by DraftTokenValidationError, so this is the greedy token.
+        // Committing it directly skips a second vocabulary pass and its device round trip.
         requests_[i]->search_->CommitToken(greedy_tokens[i]);
         results[i] = requests_[i]->StageGenerationForTransaction(plan.requests[i]);
       } else {

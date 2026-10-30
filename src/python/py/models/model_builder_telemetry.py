@@ -89,7 +89,7 @@ class ModelBuilderTelemetry:
 
             model_type = getattr(onnx_model, "model_type", getattr(config, "model_type", ""))
             hidden_size = getattr(config, "hidden_size", 0)
-            num_layers = getattr(config, "num_hidden_layers", 0)
+            num_layers = getattr(onnx_model, "num_layers", getattr(config, "num_hidden_layers", 0))
             num_attn_heads = getattr(config, "num_attention_heads", 0)
             num_kv_heads = getattr(config, "num_key_value_heads", num_attn_heads)
             vocab_size = getattr(config, "vocab_size", 0)

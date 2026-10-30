@@ -73,6 +73,7 @@ class EventUploader:
         self._pending_ack_ids: list[int] = []
         self._pending_delete_ids: list[int] = []
         self._split_batch_size: int | None = None
+        self._pending_batch: list[tuple[int, bytes]] | None = None
 
     def start(self) -> None:
         if self._thread is not None:
@@ -194,7 +195,9 @@ class EventUploader:
             self._pending_delete_ids = []
             return DrainResult(0, 0, DrainOutcome.PROGRESS)
 
-        batch = self._store.get_batch_for_upload(batch_limit, deadline)
+        batch = self._pending_batch
+        if batch is None:
+            batch = self._store.get_batch_for_upload(batch_limit, deadline)
         if batch is None:
             return DrainResult(0, 0, DrainOutcome.STORAGE_RETRY)
         if not batch:
@@ -213,6 +216,7 @@ class EventUploader:
             builder.add(payload)
             included.append(row_id)
         payload_bytes = builder.build()
+        self._pending_batch = [(row_id, payload) for row_id, payload in batch if row_id in included]
 
         timeout = self._send_timeout
         if deadline is not None:
@@ -244,10 +248,12 @@ class EventUploader:
             release_admission()
 
         if success:
+            self._pending_batch = None
             self._split_batch_size = None
             result = self._finish_handled_rows(included, deadline)
             return result._replace(delivered=len(included))
         if not HttpJsonPostTransport.is_retryable(status):
+            self._pending_batch = None
             if status in {400, 413, 422} and len(included) > 1:
                 self._split_batch_size = max(1, len(included) // 2)
                 return DrainResult(0, len(included), DrainOutcome.SPLIT)

@@ -20,6 +20,7 @@
 #include "engine/engine.h"
 #include "stop_string_matcher.h"
 #include "models/preprocessing/genai_tokenizer.h"
+#include "models/postprocessing/asr_post_processor.h"
 #include "models/preprocessing/multi_modal_processor.h"
 #include "models/preprocessing/processor.h"
 #include "models/preprocessing/streaming_processor.h"
@@ -27,6 +28,7 @@
 #include "models/parakeet.h"
 #include "models/silero_vad.h"
 #include "models/model_package.h"
+#include "models/non_generative_session.h"
 #include "telemetry/model_telemetry.h"
 #include "telemetry/telemetry.h"
 #include "dll_load_error.h"
@@ -108,6 +110,11 @@ struct OgaStringArray : std::vector<std::string>, OgaAbstract {};
 struct OgaTensor : Generators::Tensor, OgaAbstract {};
 struct OgaTokenizer : Generators::Tokenizer, OgaAbstract {};
 struct OgaTokenizerStream : Generators::TokenizerStream, OgaAbstract {};
+struct OgaPostProcessor : Generators::PostProcessor, OgaAbstract {};
+struct OgaASRPostProcessor : Generators::ASRPostProcessor, OgaAbstract {};
+struct OgaASRPostProcessorResult : Generators::ASRPostProcessorResult, OgaAbstract {};
+struct OgaASRPostProcessorTimestampResult : Generators::TimestampResult, OgaAbstract {};
+struct OgaASRPostProcessorTimestampRecord : Generators::TimestampRecord, OgaAbstract {};
 struct OgaEngine : Generators::Engine, OgaAbstract {};
 struct OgaEngineCapabilities : Generators::EngineCapabilities, OgaAbstract {};
 struct OgaEngineEvent : Generators::EngineEvent, OgaAbstract {};
@@ -361,6 +368,107 @@ OgaResult* OGA_API_CALL OgaCreateConfig(const char* config_path, OgaConfig** out
   OGA_TRY
   auto config = Generators::CreateConfig(Generators::GetOrtEnv(), config_path);
   *out = ReturnUnique<OgaConfig>(std::move(config));
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaCreateNonGenerativeSession(
+    const OgaConfig* config, OgaNonGenerativeSession** out) {
+  OGA_TRY
+  if (!out) {
+    throw std::invalid_argument("out must not be null");
+  }
+  *out = nullptr;
+  if (!config) {
+    throw std::invalid_argument("config must not be null");
+  }
+  *out = Generators::CreateNonGenerativeSession(
+      static_cast<const Generators::Config&>(*config));
+  return nullptr;
+  OGA_CATCH
+}
+
+void OGA_API_CALL OgaDestroyNonGenerativeSession(
+    OgaNonGenerativeSession* session) {
+  Generators::DestroyNonGenerativeSession(session);
+}
+
+OgaResult* OGA_API_CALL OgaNonGenerativeSessionRunJson(
+    OgaNonGenerativeSession* session, const char* request,
+    size_t request_length, const char** response) {
+  OGA_TRY
+  if (!session) {
+    throw std::invalid_argument("session must not be null");
+  }
+  if (!request) {
+    throw std::invalid_argument("request must not be null");
+  }
+  if (!response) {
+    throw std::invalid_argument("response must not be null");
+  }
+  *response = nullptr;
+  const auto result = Generators::RunNonGenerativeSessionJson(
+      *session, std::string_view(request, request_length));
+  auto output = std::make_unique<char[]>(result.size() + 1);
+  std::memcpy(output.get(), result.c_str(), result.size() + 1);
+  *response = output.release();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaCreateConfigFromBuffer(const char* config_json,
+                                                  size_t config_json_length,
+                                                  OgaConfig** out) {
+  OGA_TRY
+  if (!out) {
+    throw std::invalid_argument("Expected config JSON bytes and an output pointer.");
+  }
+  *out = nullptr;
+  if (!config_json || config_json_length == 0) {
+    throw std::invalid_argument("Expected config JSON bytes and an output pointer.");
+  }
+  auto config = std::make_unique<Generators::Config>(
+      fs::path{"."}, std::string_view{},
+      std::string_view{config_json, config_json_length});
+  *out = ReturnUnique<OgaConfig>(std::move(config));
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaConfigAddExternalInitializerData(
+    OgaConfig* config, const char* filename, const void* data, size_t length) {
+  OGA_TRY
+  if (!config || !config->memory_assets_only_ || !filename || !data || length == 0) {
+    throw std::invalid_argument("Expected external initializer bytes and a memory-only config.");
+  }
+  const std::string name{filename};
+  if (name.empty() || name == "." || name == ".." ||
+      name.find_first_of("/\\:") != std::string::npos) {
+    throw std::invalid_argument("External initializer name must be a flat relative asset name.");
+  }
+  if (!config->external_data_spans_
+           .emplace(name, std::span<const std::byte>{
+                              static_cast<const std::byte*>(data), length})
+           .second) {
+    throw std::invalid_argument("Duplicate external initializer asset: " + name);
+  }
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaConfigSetTokenizerData(
+    OgaConfig* config, const char* config_json, size_t config_length,
+    const char* tokenizer_json, size_t tokenizer_length) {
+  OGA_TRY
+  if (!config || !config->memory_assets_only_ || !config_json || !tokenizer_json ||
+      config_length == 0 || tokenizer_length == 0) {
+    throw std::invalid_argument("Expected tokenizer JSON bytes and a memory-only config.");
+  }
+  config->tokenizer_memory_data_ =
+      std::make_shared<const Generators::TokenizerMemoryData>(
+          Generators::TokenizerMemoryData{
+              std::string{config_json, config_length},
+              std::string{tokenizer_json, tokenizer_length}});
   return nullptr;
   OGA_CATCH
 }
@@ -1119,6 +1227,8 @@ OgaResult* OGA_API_CALL OgaTokenizerGetEorTokenId(const OgaTokenizer* tokenizer,
 
 OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer* tokenizer, const char* str, OgaSequences* sequences) {
   OGA_TRY
+  if (!tokenizer || !str || !sequences)
+    throw std::invalid_argument("tokenizer, text, and sequences must not be null.");
   sequences->emplace_back(tokenizer->Encode(str));
   return nullptr;
   OGA_CATCH
@@ -1180,6 +1290,79 @@ OgaResult* OGA_API_CALL OgaCreateTokenizerStream(const OgaTokenizer* p, OgaToken
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaCreateASRPostProcessor(const OgaGenerator* generator, OgaASRPostProcessor** out) {
+  OGA_TRY
+  if (!generator || !out) throw std::invalid_argument("Postprocessor arguments must not be null");
+  *out = ReturnUnique<OgaASRPostProcessor>(std::make_unique<Generators::ASRPostProcessor>(*generator));
+  return nullptr;
+  OGA_CATCH
+}
+
+void OGA_API_CALL OgaDestroyPostProcessor(OgaPostProcessor* processor) {
+  delete static_cast<Generators::PostProcessor*>(processor);
+}
+
+OgaPostProcessor* OGA_API_CALL OgaASRPostProcessorAsPostProcessor(OgaASRPostProcessor* processor) {
+  return static_cast<OgaPostProcessor*>(static_cast<Generators::PostProcessor*>(processor));
+}
+
+OgaResult* OGA_API_CALL OgaPostProcessorProcessNext(OgaPostProcessor* processor) {
+  OGA_TRY
+  if (!processor) throw std::invalid_argument("Postprocessor must not be null");
+  processor->ProcessNext();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaPostProcessorFinalize(OgaPostProcessor* processor) {
+  OGA_TRY
+  if (!processor) throw std::invalid_argument("Postprocessor must not be null");
+  processor->Finalize();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaPostProcessorReset(OgaPostProcessor* processor) {
+  OGA_TRY
+  if (!processor) throw std::invalid_argument("Postprocessor must not be null");
+  processor->Reset();
+  return nullptr;
+  OGA_CATCH
+}
+
+size_t OGA_API_CALL OgaASRPostProcessorGetResultCount(const OgaASRPostProcessor* processor) {
+  return processor ? processor->GetNextResults().size() : 0;
+}
+
+const OgaASRPostProcessorResult* OGA_API_CALL OgaASRPostProcessorGetResult(const OgaASRPostProcessor* processor, size_t index) {
+  if (!processor || index >= processor->GetNextResults().size()) return nullptr;
+  return static_cast<const OgaASRPostProcessorResult*>(&processor->GetNextResults()[index]);
+}
+
+const char* OGA_API_CALL OgaASRPostProcessorResultGetText(const OgaASRPostProcessorResult* result) { return result ? result->text.c_str() : nullptr; }
+const OgaASRPostProcessorTimestampResult* OGA_API_CALL OgaASRPostProcessorResultGetTimestampResult(const OgaASRPostProcessorResult* result) {
+  if (!result || !result->timestamps) return nullptr;
+  return static_cast<const OgaASRPostProcessorTimestampResult*>(&*result->timestamps);
+}
+size_t OGA_API_CALL OgaASRPostProcessorTimestampResultGetWordCount(const OgaASRPostProcessorTimestampResult* timestamps) { return timestamps ? timestamps->words.size() : 0; }
+size_t OGA_API_CALL OgaASRPostProcessorTimestampResultGetSegmentCount(const OgaASRPostProcessorTimestampResult* timestamps) { return timestamps ? timestamps->segments.size() : 0; }
+const OgaASRPostProcessorTimestampRecord* OGA_API_CALL OgaASRPostProcessorTimestampResultGetTimestampRecord(const OgaASRPostProcessorTimestampResult* timestamps, OgaTimestampRecordKind kind, size_t index) {
+  if (!timestamps) return nullptr;
+  switch (kind) {
+    case OgaTimestampRecordKind_Words:
+      return index < timestamps->words.size() ? static_cast<const OgaASRPostProcessorTimestampRecord*>(&timestamps->words[index]) : nullptr;
+    case OgaTimestampRecordKind_Segments:
+      return index < timestamps->segments.size() ? static_cast<const OgaASRPostProcessorTimestampRecord*>(&timestamps->segments[index]) : nullptr;
+    default:
+      return nullptr;
+  }
+}
+const char* OGA_API_CALL OgaASRPostProcessorTimestampRecordGetText(const OgaASRPostProcessorTimestampRecord* record) { return record ? record->text.c_str() : nullptr; }
+int64_t OGA_API_CALL OgaASRPostProcessorTimestampRecordGetStartFrame(const OgaASRPostProcessorTimestampRecord* record) { return record ? record->frame_interval.first : 0; }
+int64_t OGA_API_CALL OgaASRPostProcessorTimestampRecordGetStopFrame(const OgaASRPostProcessorTimestampRecord* record) { return record ? record->frame_interval.second : 0; }
+double OGA_API_CALL OgaASRPostProcessorTimestampRecordGetStartTime(const OgaASRPostProcessorTimestampRecord* record) { return record ? record->time_interval.first : 0; }
+double OGA_API_CALL OgaASRPostProcessorTimestampRecordGetStopTime(const OgaASRPostProcessorTimestampRecord* record) { return record ? record->time_interval.second : 0; }
+
 OgaResult* OGA_API_CALL OgaCreateTokenizerStreamFromProcessor(const OgaMultiModalProcessor* p, OgaTokenizerStream** out) {
   OGA_TRY
   *out = ReturnUnique<OgaTokenizerStream>(p->tokenizer_->CreateStream());
@@ -1190,6 +1373,13 @@ OgaResult* OGA_API_CALL OgaCreateTokenizerStreamFromProcessor(const OgaMultiModa
 OgaResult* OGA_API_CALL OgaTokenizerStreamDecode(OgaTokenizerStream* p, int32_t token, const char** out) {
   OGA_TRY
   *out = p->Decode(token).c_str();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTokenizerStreamReset(OgaTokenizerStream* stream) {
+  OGA_TRY
+  stream->Reset();
   return nullptr;
   OGA_CATCH
 }
@@ -1985,8 +2175,46 @@ OgaResult* OgaTurnOptionsSetGuidance(
         "guidance_type and guidance_data must both be non-empty. Use "
         "OgaTurnOptionsClearGuidance for an unguided turn.");
   }
+  if (options->delimited_guidance) {
+    throw std::runtime_error(
+        "Whole-turn guidance conflicts with delimited guidance. Use "
+        "OgaTurnOptionsClearGuidance before changing guidance modes.");
+  }
   options->guidance_type = guidance_type;
   options->guidance_data = guidance_data;
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaTurnOptionsSetDelimitedGuidance(
+    OgaTurnOptions* options, int32_t opening_token,
+    int32_t closing_token, const char* grammar) {
+  OGA_TRY
+  if (!options) {
+    throw std::runtime_error("options must not be null.");
+  }
+  if (!grammar) {
+    throw std::runtime_error("grammar must not be null.");
+  }
+  options->ValidateOwnerThread();
+  if (opening_token < 0 || closing_token < 0 || opening_token == closing_token) {
+    throw std::runtime_error(
+        "opening_token and closing_token must be distinct nonnegative token IDs.");
+  }
+  if (!Generators::ValidateGuidanceRequest("lark_grammar", grammar)) {
+    throw std::runtime_error("grammar must not be empty.");
+  }
+  if (!options->guidance_type.empty() || !options->guidance_data.empty()) {
+    throw std::runtime_error(
+        "Delimited guidance conflicts with whole-turn guidance. Use "
+        "OgaTurnOptionsClearGuidance before changing guidance modes.");
+  }
+
+  // Allocate before replacing the old value so an invalid or failed update is atomic.
+  std::optional<Generators::TurnOptions::DelimitedGuidance> next{
+      Generators::TurnOptions::DelimitedGuidance{
+          opening_token, closing_token, grammar}};
+  options->delimited_guidance.swap(next);
   return nullptr;
   OGA_CATCH
 }
@@ -1999,6 +2227,7 @@ OgaResult* OgaTurnOptionsClearGuidance(OgaTurnOptions* options) {
   options->ValidateOwnerThread();
   options->guidance_type.clear();
   options->guidance_data.clear();
+  options->delimited_guidance.reset();
   return nullptr;
   OGA_CATCH
 }

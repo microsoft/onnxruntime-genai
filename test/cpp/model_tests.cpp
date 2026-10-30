@@ -15,6 +15,7 @@
 #include <ort_genai.h>
 
 #include "models/model.h"
+#include "models/model_type.h"
 #include "models/qwen_vl_model.h"
 #include "models/qwen_vl_vision.h"
 
@@ -22,6 +23,22 @@
 
 // External global variable from main.cpp for custom model path
 extern std::string g_custom_model_path;
+
+TEST(ModelTests, MultimodalPipelineTypes) {
+  for (const auto* model_type : {"fara", "qwen2_5_vl", "qwen3_vl", "gemma4"}) {
+    EXPECT_TRUE(Generators::ModelType::IsPipe(model_type)) << model_type;
+  }
+}
+
+TEST(ModelTests, UnsupportedMultimodalPipelineTypes) {
+  for (const auto* model_type : {"mistral3", "lfm2_vl", "phi4mm", "gemma3", "qwen3_5", "unknown"}) {
+    EXPECT_FALSE(Generators::ModelType::IsPipe(model_type)) << model_type;
+  }
+}
+
+TEST(ModelTests, TextPipelineType) {
+  EXPECT_TRUE(Generators::ModelType::IsPipe("decoder-pipeline"));
+}
 
 TEST(ModelTests, QwenVisionEmbeddingShapeValidation) {
   EXPECT_NO_THROW(Generators::ValidateVisionEmbeddingShapes(

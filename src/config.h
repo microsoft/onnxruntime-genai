@@ -8,14 +8,21 @@
 
 #include <functional>
 #include <memory>
+#include <optional>
 
 namespace Generators {
 
 struct RuntimeSettings;
 
+struct TokenizerMemoryData {
+  std::string config_json;
+  std::string tokenizer_json;
+};
+
 struct Config {
   Config() = default;
-  Config(const fs::path& path, std::string_view json_overlay);
+  Config(const fs::path& path, std::string_view json_overlay,
+         std::optional<std::string_view> memory_json = std::nullopt);
 
   struct Defaults {
     // Decoder names
@@ -133,11 +140,18 @@ struct Config {
     std::optional<int> inter_op_num_threads;
     std::optional<bool> enable_cpu_mem_arena;
     std::optional<bool> enable_mem_pattern;
+    std::optional<bool> use_deterministic_compute;
     std::optional<std::string> log_id;
     std::optional<int> log_severity_level;
     std::optional<int> log_verbosity_level;
     std::optional<std::string> enable_profiling;
+    // Custom-op library or libraries registered on the session options: custom_ops_library is registered first,
+    // followed by custom_ops_libraries in order, with duplicate resolved paths registered once. Every entry must
+    // resolve to an existing file in the model folder, a registered EP library directory, or the current working
+    // directory (entries are not searched via LD_LIBRARY_PATH / PATH). OverlayConfig appends to custom_ops_libraries
+    // (an empty [] overlay leaves existing entries unchanged).
     std::optional<std::string> custom_ops_library;
+    std::vector<std::string> custom_ops_libraries;
     std::optional<GraphOptimizationLevel> graph_optimization_level;
 
     // TODO(baijumeswani): Sharing env allocators across sessions leads to crashes on windows and iOS.
@@ -149,6 +163,13 @@ struct Config {
   };
 
   using RunOptions = std::vector<NamedString>;  // Entries go into OrtRunOptions::AddConfigEntry
+
+  enum class TimestampLevel {
+    Off,      // Do not collect or return timestamp metadata.
+    Word,     // Return completed word records.
+    Segment,  // Return completed segment records while constructing words internally.
+    All,      // Return completed word and segment records; character records are out of scope.
+  };
 
   struct Model {
     std::string type;
@@ -196,6 +217,13 @@ struct Config {
     int chunk_samples{};
     int blank_id{};
     int max_symbols_per_step{};
+
+    // Controls timestamp output: off, completed words, completed segments, or words and segments.
+    TimestampLevel timestamp_level{TimestampLevel::Off};
+    // Punctuation strings that complete a segment. An empty list disables punctuation segmentation.
+    std::vector<std::string> segment_separators{".", "?", "!"};
+    // Optional minimum inter-word gap in seconds that starts a new segment.
+    std::optional<double> segment_gap_threshold_seconds;
 
     // Parakeet TDT (Token-and-Duration Transducer) parameters
     int left_context_samples{};
@@ -256,6 +284,23 @@ struct Config {
         std::string per_layer_inputs;  // Gemma4: per-layer conditioning from embedding to decoder
       } outputs;
     } embedding;
+
+    struct Engram {
+      std::string filename;
+      size_t cache_capacity{4096};
+      std::optional<SessionOptions> session_options;
+      std::optional<RunOptions> run_options;
+
+      struct Inputs {
+        std::string input_ids{Defaults::InputIdsName};
+        std::string past_tokens{"past_ple_tokens"};
+      } inputs;
+
+      struct Outputs {
+        std::string embeddings{"engram_embeddings"};
+        std::string present_tokens{"present_ple_tokens"};
+      } outputs;
+    } engram;
 
     struct Vision {
       std::string filename;
@@ -491,6 +536,8 @@ struct Config {
       // Hybrid SSM+Attention (LFM2) parameters
       std::vector<std::string> layer_types;  // Per-layer type: "conv" or "full_attention"
       int conv_cache_size{};                 // Convolution cache width (conv_L_cache from HF config)
+      int64_t ple_token_pad_id{-1};
+      int indexer_compress_ratio{};  // Zero means unspecified by an older export.
 
       struct SlidingWindow {               // Sliding window parameters for models that process input prompt in chunks
         int window_size{};                 // The size of the window to slide over the input prompt
@@ -513,12 +560,16 @@ struct Config {
         PagedKeyValue,
         FixedConv,
         FixedRecurrent,
+        FixedPle,
+        FixedIndexer,
       };
 
       enum class StateUpdateKind {
         Invalid,
         CausalConv,
         GatedDeltaNet,
+        Ple,
+        Indexer,
       };
 
       static constexpr int MaxStateUpdateCapacity = 8;
@@ -527,6 +578,7 @@ struct Config {
         int capacity{};
         bool enabled{true};
         int key_head_count{};
+        int compress_ratio{};
       };
 
       struct StateGroup {
@@ -541,8 +593,10 @@ struct Config {
       struct Inputs {
         std::string input_ids{Defaults::InputIdsName};
         std::string embeddings{Defaults::InputsEmbedsName};
+        std::string engram_embeddings;
         std::string attention_mask{Defaults::AttentionMaskName};
         std::string position_ids{Defaults::PositionIdsName};
+        std::string rotary_position_ids;
         std::string past_key_names{Defaults::PastKeyName};
         std::string past_value_names{Defaults::PastValueName};
         std::string past_key_scale_names;
@@ -569,6 +623,11 @@ struct Config {
         std::string logits_indices;
         std::string past_conv_names{Defaults::PastConvName};  // Conv cache input name template (LFM2)
         std::string past_recurrent_names{Defaults::PastRecurrentName};
+        std::string past_ple_token_names;
+        std::string past_ple_conv_names;
+        std::string past_indexer_names;
+        std::string past_indexer_kv_buffer_names;
+        std::string past_indexer_state_lengths_names;
         std::string state_update_capture_count{Defaults::StateUpdateCaptureCountName};  // Per-sequence capture count
         std::string state_update_active{Defaults::StateUpdateActiveName};               // Capture enable flag
 
@@ -599,8 +658,18 @@ struct Config {
         std::string rnn_states{Defaults::RnnStatesName};
         std::string present_conv_names{Defaults::PresentConvName};  // Conv cache output name template (LFM2)
         std::string present_recurrent_names{Defaults::PresentRecurrentName};
+        std::string present_ple_token_names;
+        std::string present_ple_conv_names;
+        std::string present_indexer_names;
+        std::string present_indexer_kv_buffer_names;
+        std::string present_indexer_state_lengths_names;
+        std::string state_update_indexer_value_names;
+        std::string state_update_indexer_row_names;
         std::string state_update_conv_value_names{Defaults::StateUpdateConvValueName};
         std::string state_update_recurrent_capsule_names{Defaults::StateUpdateRecurrentCapsuleName};
+        std::string state_update_ple_token_names;
+        std::string state_update_ple_conv_value_names;
+        std::string state_update_indexer_names;
         std::string hidden_states;  // Last hidden state output (when exported with include_hidden_states; e.g. fed to the MTP head)
         // Residual streams tapped at model.dflash2.aux_hidden_state_layers, concatenated on the
         // last axis. Empty unless the model was exported with aux_hidden_state_layers.
@@ -645,6 +714,16 @@ struct Config {
     // hidden-state output and the head's feedback output.
     struct Mtp {
       bool enabled{true};
+      struct IndexShare {
+        bool enabled{false};
+        int base_capacity{};
+        int max_draft_tokens{};
+        std::string indices_input{"past_indices"};
+        std::string counts_input{"past_counts"};
+        std::string indices_output;
+        std::string counts_output;
+        std::string status_output{"indexer_status"};
+      } index_share;
       std::string filename;  // e.g. "mtp.onnx"; used by model packaging/building tools
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
@@ -667,8 +746,12 @@ struct Config {
         std::string hidden_states{Defaults::HiddenStatesName};
         std::string attention_mask{Defaults::AttentionMaskName};
         std::string position_ids{Defaults::PositionIdsName};
+        std::string rotary_position_ids;
         std::string past_key_names{Defaults::PastKeyName};
         std::string past_value_names{Defaults::PastValueName};
+        std::string past_indexer_names;
+        std::string past_sequence_length;
+        std::string logits_indices;
       } inputs;
 
       struct Outputs {
@@ -676,6 +759,7 @@ struct Config {
         std::string hidden_states{"hidden_states_out"};
         std::string present_key_names{Defaults::PresentKeyName};
         std::string present_value_names{Defaults::PresentValueName};
+        std::string present_indexer_names;
       } outputs;
 
       bool IsEnabled() const noexcept { return enabled && !filename.empty(); }
@@ -725,6 +809,8 @@ struct Config {
         std::string q_row_map{"q_row_map"};
         std::string qkv_row_map{"qkv_row_map"};
         std::string block_row_index{"block_row_index"};
+        // Optional (LiLiCorr): packed aux_hidden_states row of each request's last context row.
+        std::string anchor_row_index;
         std::string cumulative_sequence_lengths{Defaults::CumulativeSequenceLengthsName};
         std::string past_sequence_lengths{Defaults::PastSequenceLengthsName};
         std::string block_table{Defaults::BlockTableName};
@@ -795,8 +881,8 @@ struct Config {
       std::optional<float> gpu_utilization_factor;  // Fraction of free GPU memory to use for key-value cache.
       size_t max_batch_size{16};                    // Maximum batch size for dynamically batching requests.
       size_t max_scheduled_tokens{2048};            // Maximum tokens in one dynamically batched model run.
-      bool prefix_caching{true};
-      bool prefix_caching_explicitly_set{};
+      std::optional<bool> prefix_caching;
+      size_t dflash2_max_snapshots{1};  // Budget-limited windowed drafter prefix snapshots; 0 disables.
     };
     std::optional<DynamicBatching> dynamic_batching;  // Dynamic batching settings
 
@@ -820,6 +906,8 @@ struct Config {
     struct Eligibility {
       std::optional<uint64_t> minimum_total_device_memory_bytes;
       std::optional<uint64_t> maximum_total_device_memory_bytes;
+      std::optional<uint64_t> minimum_free_device_memory_bytes;
+      std::optional<uint64_t> maximum_free_device_memory_bytes;
       std::optional<bool> is_integrated;
     } eligibility;
 
@@ -832,6 +920,7 @@ struct Config {
         std::optional<size_t> num_blocks;
         std::optional<size_t> max_batch_size;
         std::optional<size_t> max_scheduled_tokens;
+        std::optional<size_t> dflash2_max_snapshots;
       } dynamic_batching;
 
       struct Search {
@@ -852,6 +941,9 @@ struct Config {
 
   std::unordered_map<std::string, std::string> nominal_names_to_graph_names_;     // Mapping of nominal input/output names to graph input/output names
   std::unordered_map<std::string, std::span<const std::byte>> model_data_spans_;  // Model bytes to support loading a model from memory
+  bool memory_assets_only_{};
+  std::unordered_map<std::string, std::span<const std::byte>> external_data_spans_;
+  std::shared_ptr<const TokenizerMemoryData> tokenizer_memory_data_;
 };
 
 void SetSearchNumber(Config::Search& search, std::string_view name, double value);
@@ -862,16 +954,26 @@ void SetSpeculativeBool(Config::Speculative& speculative, std::string_view name,
 // the main model's device, batching and paged-attention contract, but replaces model-specific
 // decoder state with the single MTP attention layer.
 std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config);
+// Fills unset fields of `child` session options from `parent` (providers, provider options, config entries, custom ops).
+// custom_ops_library and custom_ops_libraries are inherited together only when the child sets neither; because
+// custom_ops_libraries is stored as a vector, an explicit `"custom_ops_libraries": []` leaves it empty and still inherits.
+void InheritSessionOptionsFromParent(const Config::SessionOptions& parent, Config::SessionOptions& child);
 void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
 void OverlayConfig(Config& config, std::string_view json);
 struct RuntimeProfileDeviceFacts {
   uint64_t total_device_memory_bytes{};
   std::optional<bool> is_integrated;
+  // Unset means unknown: profiles with free-memory bounds do not match.
+  std::optional<uint64_t> free_device_memory_bytes;
 };
 void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device);
 void ApplyRuntimeProfile(Config& config, uint64_t total_device_memory_bytes);
 int SafeDoubleToInt(double x, std::string_view name);
+void ValidateTimestampConfiguration(const Config::Model& model);
+std::optional<int> GetSegmentGapThresholdFrames(const Config::Model& model);
+std::optional<int> GetSegmentGapThresholdFrames(std::optional<double> seconds, int sample_rate,
+                                                int hop_length, int subsampling_factor);
 
 // Logs a warning when the drafter's exported geometry is narrower than
 // speculative.max_draft_tokens. The engine clamps to the smallest bound at dispatch rather than

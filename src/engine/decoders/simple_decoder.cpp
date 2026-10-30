@@ -12,6 +12,9 @@ namespace Generators {
 SimpleDecoder::SimpleDecoder(std::shared_ptr<DecoderOnly_Model> model,
                              std::shared_ptr<CacheManager> cache_manager)
     : model_{model}, cache_manager_{cache_manager} {
+  if (model_->session_engram_ && !cache_manager_->SupportsDynamicBatching()) {
+    throw std::runtime_error("Engine Engram requires dynamic batching for packed decoder inputs.");
+  }
   const ModelStateManifest manifest{model_->config_->model.decoder};
   has_fixed_state_groups_ = manifest.HasFixedStateGroups();
   const bool has_position_ids = model_->session_info_.HasInput(
@@ -50,13 +53,18 @@ SimpleDecoder::~SimpleDecoder() {
   // The session outlives this decoder and keeps every graph it captured, so the graphs have to go
   // before the buffers whose addresses they recorded. Destructors must not throw.
   if (graph_buffers_ && model_->session_decoder_) {
-    for (const int annotation_id : graph_buffers_->graph_ids.AssignedIds()) {
-      try {
-        model_->session_decoder_->ReleaseCapturedGraph(annotation_id);
-      } catch (...) {
-        if (g_log.enabled && g_log.graph_capture) {
-          Log("graph_capture") << "ReleaseCapturedGraph(id=" << annotation_id << ") failed"
-                               << std::endl;
+    for (auto* session : {model_->session_decoder_.get()}) {
+      if (!session) {
+        continue;
+      }
+      for (const int annotation_id : graph_buffers_->graph_ids.AssignedIds()) {
+        try {
+          session->ReleaseCapturedGraph(annotation_id);
+        } catch (...) {
+          if (g_log.enabled && g_log.graph_capture) {
+            Log("graph_capture") << "ReleaseCapturedGraph(id=" << annotation_id << ") failed"
+                                 << std::endl;
+          }
         }
       }
     }
@@ -109,7 +117,8 @@ void SimpleDecoder::LogGraphDecision(size_t batch_size, size_t tokens_per_reques
   auto& stream = Log("graph_capture");
   stream << "decode batch=" << batch_size << " tokens_per_request=" << tokens_per_request
          << " block_table_columns=" << context.block_table_columns
-         << " state_binding=" << context.fixed_state_binding_key << " -> ";
+         << " state_binding=" << context.fixed_state_binding_key
+         << " state_domain=" << context.fixed_state_binding_domain << " -> ";
   switch (fallback) {
     case GraphFallback::kCaptured:
       stream << "graph id " << annotation_id;
@@ -126,6 +135,9 @@ void SimpleDecoder::LogGraphDecision(size_t batch_size, size_t tokens_per_reques
              << " max_query_tokens=" << graph_buffers_->max_query_tokens
              << " max_token_rows=" << graph_buffers_->max_token_rows << ")";
       break;
+    case GraphFallback::kUnknownBindingLayout:
+      stream << "eager (extra or fixed bindings have no persistent layout identity)";
+      break;
     case GraphFallback::kUncapturableShape:
       stream << "eager ("
              << (shapes >= GraphAnnotationIds::kMaxCapturedShapes ? "shape budget exhausted"
@@ -135,6 +147,22 @@ void SimpleDecoder::LogGraphDecision(size_t batch_size, size_t tokens_per_reques
   }
   stream << " [" << shapes << "/" << GraphAnnotationIds::kMaxCapturedShapes << " shapes assigned]"
          << std::endl;
+}
+
+std::optional<GraphAnnotationIds::Key> SimpleDecoder::GraphKeyForContext(
+    size_t batch_size, size_t tokens_per_request, const ExecutionContext& context,
+    const OrtSession* default_session) {
+  const bool has_extras = !context.extra_inputs.empty() || !context.extra_outputs.empty() ||
+                          !context.extra_input_names.empty() || !context.extra_output_names.empty();
+  if ((has_extras && context.extra_binding_layout_key == 0) ||
+      (!context.fixed_state_bindings.empty() && context.fixed_state_binding_key == 0 &&
+       context.extra_binding_layout_key == 0)) {
+    return std::nullopt;
+  }
+  return DecodeGraphKey(batch_size, tokens_per_request, context.block_table_columns,
+                        context.fixed_state_binding_key, context.fixed_state_binding_domain,
+                        context.decoder_session ? context.decoder_session : default_session,
+                        context.indexshare_decode, context.extra_binding_layout_key);
 }
 
 void SimpleDecoder::Decode(ScheduledRequests& scheduled_requests,
@@ -156,10 +184,15 @@ void SimpleDecoder::Decode(ScheduledRequests& scheduled_requests,
   } else if (!graph_buffers_->Fits(scheduled_requests.size(), tokens_per_request)) {
     fallback = GraphFallback::kStepTooWide;
   } else {
-    annotation_id = graph_buffers_->GraphId(scheduled_requests.size(), tokens_per_request,
-                                            context.block_table_columns,
-                                            context.fixed_state_binding_key);
-    if (annotation_id <= 0) {
+    const auto key = GraphKeyForContext(scheduled_requests.size(), tokens_per_request,
+                                        context, model_->session_decoder_.get());
+    if (key) {
+      annotation_id = graph_buffers_->graph_ids.Id(*key);
+    } else if ((!context.extra_inputs.empty() || !context.extra_outputs.empty() ||
+                !context.fixed_state_bindings.empty())) {
+      fallback = GraphFallback::kUnknownBindingLayout;
+    }
+    if (annotation_id <= 0 && fallback != GraphFallback::kUnknownBindingLayout) {
       fallback = GraphFallback::kUncapturableShape;
     }
   }
@@ -192,14 +225,23 @@ void SimpleDecoder::Decode(ScheduledRequests& scheduled_requests,
     }
   }
 
+  if (context.extra_input_names.size() != context.extra_inputs.size() ||
+      context.extra_output_names.size() != context.extra_outputs.size()) {
+    throw std::runtime_error("Extra decoder binding names and tensors do not match.");
+  }
+  decoder_state->input_names_.insert(decoder_state->input_names_.end(), context.extra_input_names.begin(), context.extra_input_names.end());
+  decoder_state->inputs_.insert(decoder_state->inputs_.end(), context.extra_inputs.begin(), context.extra_inputs.end());
+  decoder_state->output_names_.insert(decoder_state->output_names_.end(), context.extra_output_names.begin(), context.extra_output_names.end());
+  decoder_state->outputs_.insert(decoder_state->outputs_.end(), context.extra_outputs.begin(), context.extra_outputs.end());
   decoder_state->DumpInputs();
-  model_->session_decoder_->Run(context.run_options.get(),
-                                decoder_state->input_names_.data(),
-                                decoder_state->inputs_.data(),
-                                decoder_state->input_names_.size(),
-                                decoder_state->output_names_.data(),
-                                decoder_state->outputs_.data(),
-                                decoder_state->output_names_.size());
+  auto* session = context.decoder_session ? context.decoder_session : model_->session_decoder_.get();
+  session->Run(context.run_options.get(),
+               decoder_state->input_names_.data(),
+               decoder_state->inputs_.data(),
+               decoder_state->input_names_.size(),
+               decoder_state->output_names_.data(),
+               decoder_state->outputs_.data(),
+               decoder_state->output_names_.size());
   decoder_state->DumpOutputs();
 
   scheduled_requests.AddDecoderState(std::move(decoder_state));
