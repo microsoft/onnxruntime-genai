@@ -1176,7 +1176,7 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   auto fill_int32 = [this](Tensor& tensor, const std::vector<int32_t>& values) {
     auto span = Staging(tensor);
     std::memcpy(span.CpuSpan().data(), values.data(), values.size() * sizeof(int32_t));
-    span.CopyCpuToDevice();
+    span.CopyCpuRangeToDevice();
   };
 
   auto& packed_aux = StepTensor(step_tensors_.packed_aux, device, aux_type_,
@@ -1218,7 +1218,7 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
         cpu[slot * block_size + row] = config_.mask_token_id;
       }
     }
-    span.CopyCpuToDevice();
+    span.CopyCpuRangeToDevice();
     if (embeddings) model_->cpu_embedding_->Run(cpu, *embeddings, step_tensors_.embedding_workspace);
   }
 
@@ -1284,7 +1284,7 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
         columns[column] = blocks[column % blocks.size()];
       }
     }
-    span.CopyCpuToDevice();
+    span.CopyCpuRangeToDevice();
   }
 
   auto& metadata = StepTensor(step_tensors_.attention_metadata, GetDeviceInterface(DeviceType::CPU),
