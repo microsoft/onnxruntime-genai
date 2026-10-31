@@ -30,6 +30,41 @@ from onnxruntime_genai.models.quantization.kv_cache_calibration import (
 )
 from transformers import AutoTokenizer
 
+# Every run calibrates both quantizations; --out receives the one named by --quant-type.
+QUANT_TYPES = ("int8_per_channel", "fp8_per_channel")
+
+
+def ensure_distinct_outputs(output_paths: dict[str, Path]) -> None:
+    """Raises ValueError when two quantizations would be written to the same file."""
+    owners: dict[Path, str] = {}
+    for qtype, path in output_paths.items():
+        resolved = Path(os.path.normcase(path.resolve()))
+        if resolved in owners:
+            raise ValueError(f"{owners[resolved]} and {qtype} calibrations would both be written to {path}")
+        owners[resolved] = qtype
+
+
+def plan_output_paths(out_json: Path, quant_type: str) -> dict[str, Path]:
+    """Maps each calibrated quantization to its own output file.
+
+    `out_json` receives the `quant_type` calibration. The other quantization is written beside it under a name built from the
+    quantization names, not from the rest of the basename: the `quant_type` token of the name is swapped for the other type
+    (kv_scales_int8_per_channel.json -> kv_scales_fp8_per_channel.json), and a name without it gets the other type as an extra
+    suffix (scales.json -> scales.fp8_per_channel.json). Raises ValueError, before any calibration work, for an unsupported
+    `quant_type` or when two quantizations would share a file.
+    """
+    if quant_type not in QUANT_TYPES:
+        raise ValueError(f"quant_type must be one of {', '.join(QUANT_TYPES)}, got {quant_type!r}")
+    other_type = next(qtype for qtype in QUANT_TYPES if qtype != quant_type)
+    if quant_type in out_json.name:
+        other_name = out_json.name.replace(quant_type, other_type)
+    else:
+        other_name = f"{out_json.stem}.{other_type}{out_json.suffix}"
+    by_type = {quant_type: out_json, other_type: out_json.with_name(other_name)}
+    output_paths = {qtype: by_type[qtype] for qtype in QUANT_TYPES}
+    ensure_distinct_outputs(output_paths)
+    return output_paths
+
 
 def pair_envelope_partial(x: np.ndarray, num_kv_heads: int, head_size: int, rotary_dim: int) -> np.ndarray:
     """Rotation-invariant envelope for partial-rotary K (rotary_dim <= head_size).
@@ -64,6 +99,8 @@ def calibrate_package(
     rotary_dim: int = 64,
     sample_budget: int = 16384,
 ) -> dict:
+    output_paths = plan_output_paths(out_json, quant_type)
+
     import onnxruntime as ort  # noqa: PLC0415
     from mobius._configs import Qwen4ExpConfig  # noqa: PLC0415
     from mobius.generation._qwen4_exp_ple import Qwen4ExpCPUPLELookup  # noqa: PLC0415
@@ -238,8 +275,43 @@ def calibrate_package(
                 flush=True,
             )
 
+    return calibrate_quant_types(
+        output_paths,
+        k_amax,
+        v_amax,
+        k_env_buf,
+        v_env_buf,
+        k_raw_buf,
+        v_raw_buf,
+        layer_ids=layer_ids,
+        method=method,
+        percentile=percentile,
+        rotary_dim=rotary_dim,
+    )
+
+
+def calibrate_quant_types(
+    output_paths: dict[str, Path],
+    k_amax: np.ndarray,
+    v_amax: np.ndarray,
+    k_env_buf: list,
+    v_env_buf: list,
+    k_raw_buf: list,
+    v_raw_buf: list,
+    *,
+    layer_ids: list[int],
+    method: str,
+    percentile: float,
+    rotary_dim: int,
+) -> dict:
+    """Turns the captured K/V statistics into the scales of every quantization and writes each to its own file.
+
+    The buffers have one entry per target layer followed by one for the MTP head (`len(layer_ids) + 1` in total).
+    """
+    num_layers = len(layer_ids)
+    total_entries = num_layers + 1
     results = {}
-    for qtype in ("int8_per_channel", "fp8_per_channel"):
+    for qtype, target_path in output_paths.items():
         qmax = _get_quant_type_max(qtype)
         is_fp8 = qtype.startswith("fp8")
         qneg, qpos = (-qmax, qmax) if is_fp8 else (-qmax, qmax - 1.0)
@@ -300,7 +372,6 @@ def calibrate_package(
             },
         }
         results[qtype] = payload
-        target_path = out_json if qtype == quant_type else out_json.with_name(out_json.name.replace("int8", "fp8"))
         target_path.parent.mkdir(parents=True, exist_ok=True)
         target_path.write_text(json.dumps(payload, indent=2) + "\n")
         print(f"Wrote {target_path}: stats={json.dumps(payload['stats'])}", flush=True)
@@ -312,8 +383,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--package", type=Path, required=True, help="v12b package folder")
     parser.add_argument("--checkpoint", type=Path, required=True, help="HuggingFace checkpoint folder for PLE lookup")
-    parser.add_argument("--out", type=Path, required=True, help="output calibrated scale JSON path")
-    parser.add_argument("--quant-type", default="int8_per_channel")
+    parser.add_argument(
+        "--out",
+        type=Path,
+        required=True,
+        help="output calibrated scale JSON path of --quant-type; the other quantization is written beside it "
+        "(kv_scales_int8_per_channel.json -> kv_scales_fp8_per_channel.json, scales.json -> scales.fp8_per_channel.json)",
+    )
+    parser.add_argument("--quant-type", default="int8_per_channel", choices=QUANT_TYPES)
     parser.add_argument("--method", default="percentile", choices=("minmax", "percentile", "mse"))
     parser.add_argument("--percentile", type=float, default=99.99)
     parser.add_argument("--num-seqs", type=int, default=24)
