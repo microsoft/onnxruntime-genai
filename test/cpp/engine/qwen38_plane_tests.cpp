@@ -697,6 +697,101 @@ TEST(Qwen38PlaneCapabilityTest, RequireCapabilitiesNamesTheMissingCapabilityWhat
                           "the INT8 PLE table", "model/libqwen38_plane.so");
 }
 
+// The host validates what it hands to qwen38_plane_prep_batched, whatever the library does with it: the batch size is an
+// explicit argument, never packed into another one, and nothing reaches a library that lacks the entry point or the capability.
+namespace {
+
+struct BatchedPrepStub {
+  struct Call {
+    const void* params;
+    int rows;
+    int batch;
+    const void* state;
+  };
+  static inline std::vector<Call> calls;
+  static inline int result = 0;
+
+  static int Run(void*, const void* params, int rows, int batch, const void*, void*, void*, void*, void*, void*, void*,
+                 void* state) {
+    calls.push_back({params, rows, batch, state});
+    return result;
+  }
+};
+
+}  // namespace
+
+TEST(Qwen38PlaneBatchedPrepTest, TheHostPassesTheRowsAndTheBatchAsExplicitArguments) {
+  Qwen38Plane plane;
+  InitCurrentStubPlane(plane);
+  plane.prep_batched = &BatchedPrepStub::Run;
+  BatchedPrepStub::calls.clear();
+  BatchedPrepStub::result = 0;
+  int params = 0;
+  int state = 0;
+  for (int rows = 1; rows <= QWEN38_PLANE_MAX_PREP_ROWS; ++rows) {
+    for (int batch = 1; batch <= QWEN38_PLANE_MAX_PREP_BATCH; ++batch) {
+      plane.PrepBatched(nullptr, &params, rows, batch, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &state);
+      ASSERT_FALSE(BatchedPrepStub::calls.empty());
+      EXPECT_EQ(BatchedPrepStub::calls.back().rows, rows);
+      EXPECT_EQ(BatchedPrepStub::calls.back().batch, batch);
+      EXPECT_EQ(BatchedPrepStub::calls.back().params, &params);
+      EXPECT_EQ(BatchedPrepStub::calls.back().state, &state);
+    }
+  }
+  EXPECT_EQ(BatchedPrepStub::calls.size(), static_cast<size_t>(QWEN38_PLANE_MAX_PREP_ROWS) * QWEN38_PLANE_MAX_PREP_BATCH);
+}
+
+TEST(Qwen38PlaneBatchedPrepTest, TheHostRejectsARowCountOrBatchOutOfRangeBeforeCallingTheLibrary) {
+  Qwen38Plane plane;
+  InitCurrentStubPlane(plane);
+  plane.prep_batched = &BatchedPrepStub::Run;
+  BatchedPrepStub::calls.clear();
+  BatchedPrepStub::result = 0;
+  const auto prep = [&](int rows, int batch) {
+    plane.PrepBatched(nullptr, nullptr, rows, batch, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+  };
+  for (const int rows : {-8, -1, 0, QWEN38_PLANE_MAX_PREP_ROWS + 1, 0x108}) {
+    EXPECT_THROW(prep(rows, 2), std::invalid_argument) << rows;
+  }
+  for (const int batch : {-1, 0, QWEN38_PLANE_MAX_PREP_BATCH + 1, 0x200}) {
+    EXPECT_THROW(prep(4, batch), std::invalid_argument) << batch;
+  }
+  EXPECT_TRUE(BatchedPrepStub::calls.empty());
+}
+
+TEST(Qwen38PlaneBatchedPrepTest, ALibraryWithoutTheCapabilityOrTheExportIsNeverCalled) {
+  Qwen38Plane plane;
+  InitCurrentStubPlane(plane);
+  plane.prep_batched = &BatchedPrepStub::Run;
+  BatchedPrepStub::calls.clear();
+  const auto prep = [&] {
+    plane.PrepBatched(nullptr, nullptr, 2, 2, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+  };
+
+  plane.capabilities = QWEN38_PLANE_ALL_CAPABILITIES & ~QWEN38_PLANE_CAP_BATCHED_PREP;
+  ExpectMissingCapability(prep, "batched_prep", "preparing the inputs of several request slots", "current/libqwen38_plane.so");
+
+  plane.capabilities = QWEN38_PLANE_ALL_CAPABILITIES;
+  plane.prep_batched = nullptr;  // the bit without the export: a broken library
+  EXPECT_THROW(prep(), std::runtime_error);
+  EXPECT_TRUE(BatchedPrepStub::calls.empty());
+}
+
+TEST(Qwen38PlaneBatchedPrepTest, ACudaErrorOfTheLibraryBecomesAnException) {
+  Qwen38Plane plane;
+  InitCurrentStubPlane(plane);
+  plane.prep_batched = &BatchedPrepStub::Run;
+  BatchedPrepStub::calls.clear();
+  BatchedPrepStub::result = 1;  // cudaErrorInvalidValue
+  try {
+    plane.PrepBatched(nullptr, nullptr, 2, 2, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+    ADD_FAILURE() << "the error of the library was swallowed";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(std::string{error.what()}.find("prep_batched"), std::string::npos) << error.what();
+  }
+  BatchedPrepStub::result = 0;
+}
+
 TEST(Qwen38PleDescriptionTest, Int8ShardsNeedTheInt8PleCapability) {
   const auto dir = MakeScratchDir("ple_int8_capability");
   const auto fp8_path = WriteFile(dir / "fp8_table.txt", kValidPleTable);
@@ -893,10 +988,14 @@ class Qwen38TestPackage {
   static constexpr size_t kBf16TableBytes = 1000 * 16 * 2;
   static constexpr size_t kInt8TableBytes = 1000 * 16 + 1000 * 4;  // INT8 rows, then one float scale per row
 
-  // `fold` makes it a package of the folded MTP stack (model.qwen38_graph.fold.enabled).
-  explicit Qwen38TestPackage(bool fold = false) : dir_{MakeScratchDir(fold ? "package_support_fold" : "package_support")} {
-    const std::string fold_stack =
+  // `fold` makes it a package of the folded MTP stack (model.qwen38_graph.fold.enabled); `max_batch_size` is the number of
+  // request slots it configures (model.qwen38_graph.max_batch_size).
+  explicit Qwen38TestPackage(bool fold = false, int max_batch_size = 1)
+      : dir_{MakeScratchDir(std::string{fold ? "package_support_fold" : "package_support"} +
+                            (max_batch_size > 1 ? "_slots" + std::to_string(max_batch_size) : ""))} {
+    std::string fold_stack =
         fold ? R"(,"mtp":{"enabled":true},"fold":{"enabled":true,"head_r2":{"filename":"head_r2.onnx"}})" : "";
+    if (max_batch_size > 1) fold_stack += R"(,"max_batch_size":)" + std::to_string(max_batch_size);
     WriteFile(dir_ / "genai_config.json",
               R"({"model":{"type":"qwen38_flash_graph","vocab_size":1000,"context_length":64,
                   "decoder":{"filename":"model.onnx","hidden_size":16,"num_attention_heads":1,"num_hidden_layers":1,
@@ -1041,6 +1140,51 @@ TEST(Qwen38PackageSupportTest, AFoldedPackageNeedsTheBatchedPrepCapabilityAtMode
   EXPECT_EQ(folded.Require(current), Qwen38EmbeddingFormat::kBf16);
 }
 
+// A configuration with several request slots prepares the rows of every slot with qwen38_plane_prep_batched (batched_prep). A
+// library without it must not load the model: the rows would otherwise go through the single-slot entry point, which knows
+// nothing of the slot count. A single-slot package of the same library loads.
+TEST(Qwen38PackageSupportTest, SeveralRequestSlotsNeedTheBatchedPrepCapabilityAtModelLoad) {
+  Qwen38TestPackage slots{/*fold=*/true, /*max_batch_size=*/2};
+  slots.Write(kValidPleTable, Qwen38TestPackage::kBf16TableBytes);
+
+  Qwen38Plane legacy;
+  InitLegacyStubPlane(legacy);
+  ExpectMissingCapability([&] { slots.Require(legacy); }, "negative_pos_add_batch", "model.qwen38_graph.fold",
+                          "legacy/libqwen38_plane.so");
+
+  // A library of the negative_pos_add_batch generation prepares the rows of one slot only.
+  Qwen38Plane one_slot_only;
+  InitLegacyStubPlane(one_slot_only);
+  one_slot_only.capabilities = QWEN38_PLANE_CAP_NEGATIVE_POS_ADD_BATCH | QWEN38_PLANE_CAP_INT8_EMBEDDING | QWEN38_PLANE_CAP_INT8_PLE;
+  ExpectMissingCapability([&] { slots.Require(one_slot_only); }, "batched_prep", "model.qwen38_graph.max_batch_size",
+                          "legacy/libqwen38_plane.so");
+
+  Qwen38TestPackage single{/*fold=*/true, /*max_batch_size=*/1};
+  single.Write(kValidPleTable, Qwen38TestPackage::kBf16TableBytes);
+  EXPECT_EQ(single.Require(one_slot_only), Qwen38EmbeddingFormat::kBf16);
+
+  Qwen38Plane with_batched_prep;
+  InitLegacyStubPlane(with_batched_prep);
+  with_batched_prep.capabilities = QWEN38_PLANE_CAP_NEGATIVE_POS_ADD_BATCH | QWEN38_PLANE_CAP_BATCHED_PREP;
+  EXPECT_EQ(slots.Require(with_batched_prep), Qwen38EmbeddingFormat::kBf16);
+
+  // Every slot count above one needs it, the other capabilities of the package are still required.
+  for (int count = 3; count <= QWEN38_PLANE_MAX_PREP_BATCH; ++count) {
+    Qwen38TestPackage package{/*fold=*/true, count};
+    package.Write(kValidPleTable, Qwen38TestPackage::kBf16TableBytes);
+    ExpectMissingCapability([&] { package.Require(one_slot_only); }, "batched_prep", "max_batch_size",
+                            "legacy/libqwen38_plane.so");
+    EXPECT_EQ(package.Require(with_batched_prep), Qwen38EmbeddingFormat::kBf16) << count;
+  }
+  slots.Write(Int8PleTable(), Qwen38TestPackage::kBf16TableBytes);
+  ExpectMissingCapability([&] { slots.Require(with_batched_prep); }, "int8_ple", slots.ple_path().string(),
+                          "legacy/libqwen38_plane.so");
+
+  Qwen38Plane current;
+  InitCurrentStubPlane(current);
+  EXPECT_EQ(slots.Require(current), Qwen38EmbeddingFormat::kBf16);
+}
+
 // A package without the fold stack never prepares more than one row per call, so it keeps loading with a library from before
 // the batch, whatever its formats (the INT8 ones with the capabilities of their own).
 TEST(Qwen38PackageSupportTest, PackagesWithoutTheFoldStackNeedNoBatchedPrepCapability) {
@@ -1176,6 +1320,32 @@ TEST_F(Qwen38LegacyPlaneLibraryTest, FoldedPackagesAreRefusedAtModelLoad) {
   Qwen38TestPackage plain;
   plain.Write(kValidPleTable, Qwen38TestPackage::kBf16TableBytes);
   EXPECT_EQ(plain.Require(*plane_), Qwen38EmbeddingFormat::kBf16);
+}
+
+// A library from before the batched prep exports no qwen38_plane_prep_batched: a package of several request slots is refused
+// at model load with a capability diagnostic (never a prep of the first slot only), whatever its other settings, while a
+// single-slot package of the same format keeps loading.
+TEST_F(Qwen38LegacyPlaneLibraryTest, PackagesOfSeveralRequestSlotsAreRefusedAtModelLoad) {
+  EXPECT_TRUE(plane_->prep_batched == nullptr);
+  EXPECT_EQ(plane_->capabilities & QWEN38_PLANE_CAP_BATCHED_PREP, 0ull);
+
+  Qwen38TestPackage slots{/*fold=*/false, /*max_batch_size=*/2};
+  slots.Write(kValidPleTable, Qwen38TestPackage::kBf16TableBytes);
+  ExpectMissingCapability([&] { slots.Require(*plane_); }, "batched_prep", "model.qwen38_graph.max_batch_size",
+                          library_path_.string());
+
+  Qwen38TestPackage folded_slots{/*fold=*/true, /*max_batch_size=*/4};
+  folded_slots.Write(kValidPleTable, Qwen38TestPackage::kBf16TableBytes);
+  ExpectMissingCapability([&] { folded_slots.Require(*plane_); }, "negative_pos_add_batch", "model.qwen38_graph.fold",
+                          library_path_.string());
+
+  Qwen38TestPackage single;
+  single.Write(kValidPleTable, Qwen38TestPackage::kBf16TableBytes);
+  EXPECT_EQ(single.Require(*plane_), Qwen38EmbeddingFormat::kBf16);
+
+  // The entry point itself refuses too: nothing is prepared through the single-slot export in its place.
+  EXPECT_THROW(plane_->PrepBatched(nullptr, nullptr, 2, 2, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr),
+               std::runtime_error);
 }
 
 #if !defined(_WIN32)
@@ -3940,6 +4110,126 @@ class HashedPleTable {
     return Read();
   }
 
+  // prep called with `pos_add`, whatever it asks for: the error it returns and what it left in the buffers that Reset filled
+  // with 0xAB (which is Expected() of no rows when it wrote nothing).
+  std::pair<int, FoldPrepOutputs> PrepWithPosAdd(const FoldState& state, const FoldContext& context, int pos_add) {
+    Reset(state, context);
+    const int error = Prepare(state_.data(), pos_add, context_in_.data(), contexts_.data(), input_ids_.data(),
+                              position_ids_.data(), committed_.data(), ple_.data());
+    return {error, Read()};
+  }
+
+  static constexpr size_t kCtlWords = QWEN38_PLANE_CTL_WORDS_PER_SLOT;
+  static constexpr int64_t kSpareWord = 0x5A5A;  // in the control words past the 14 that a fold step uses
+
+  // The first `rows` rows of the fold step of every slot, prepared by one call of prep_batched (`states[b]` are the control
+  // words of slot b, `contexts[b]` its n-gram context), read back slot by slot in the layout of Expected(): the rows past `rows`
+  // hold the fill value. A word of the control words that the call has no reason to write is checked to be left alone.
+  std::vector<FoldPrepOutputs> PrepBatched(const std::vector<FoldState>& states, const std::vector<FoldContext>& contexts,
+                                           int rows, bool with_committed = true) {
+    const size_t batch = states.size();
+    const size_t n = static_cast<size_t>(rows);
+    std::vector<int64_t> control(batch * kCtlWords, kSpareWord);
+    std::vector<int64_t> context_in(batch * 2);
+    for (size_t b = 0; b < batch; ++b) {
+      std::copy(states[b].begin(), states[b].end(), control.begin() + static_cast<std::ptrdiff_t>(b * kCtlWords));
+      std::copy(contexts[b].begin(), contexts[b].end(), context_in.begin() + static_cast<std::ptrdiff_t>(b * 2));
+    }
+    const PlaneBuffer state = device_.Upload(control);
+    const PlaneBuffer ctx_in = device_.Upload(context_in);
+    const PlaneBuffer ctx_out = device_.Filled(batch * n * 2 * sizeof(int64_t), 0xAB);
+    const PlaneBuffer input_ids = device_.Filled(batch * n * sizeof(int64_t), 0xAB);
+    const PlaneBuffer position_ids = device_.Filled(batch * n * sizeof(int64_t), 0xAB);
+    const PlaneBuffer committed = device_.Filled(batch * sizeof(int32_t), 0xAB);
+    const PlaneBuffer past_pos = device_.Filled(batch * StagedPleRig::kPositions * sizeof(int64_t), 0xAB);
+    const PlaneBuffer ple = device_.Filled(batch * n * kRowValues * sizeof(uint16_t), 0xAB);
+    EXPECT_EQ(plane_.prep_batched(device_.stream(), device_params_.data(), rows, static_cast<int>(batch), ctx_in.data(),
+                                  ctx_out.data(), input_ids.data(), position_ids.data(),
+                                  with_committed ? committed.data() : nullptr, past_pos.data(), ple.data(), state.data()),
+              0);
+
+    const auto contexts_out = device_.Download<int64_t>(ctx_out, batch * n * 2);
+    const auto ids = device_.Download<int64_t>(input_ids, batch * n);
+    const auto positions = device_.Download<int64_t>(position_ids, batch * n);
+    const auto committed_out = device_.Download<int32_t>(committed, batch);
+    const auto past = device_.Download<int64_t>(past_pos, batch * StagedPleRig::kPositions);
+    const auto ple_out = device_.Download<uint16_t>(ple, batch * n * kRowValues);
+    const auto control_out = device_.Download<int64_t>(state, batch * kCtlWords);
+
+    const int64_t filled = static_cast<int64_t>(0xABABABABABABABABull);
+    std::vector<FoldPrepOutputs> slots(batch);
+    for (size_t b = 0; b < batch; ++b) {
+      FoldPrepOutputs& slot = slots[b];
+      slot.input_ids.assign(kMaxRows, filled);
+      slot.position_ids.assign(kMaxRows, filled);
+      slot.contexts.assign(2 * kMaxRows, filled);
+      slot.ple.assign(kMaxRows * kRowValues, 0xABAB);
+      std::copy_n(ids.begin() + static_cast<std::ptrdiff_t>(b * n), n, slot.input_ids.begin());
+      std::copy_n(positions.begin() + static_cast<std::ptrdiff_t>(b * n), n, slot.position_ids.begin());
+      std::copy_n(contexts_out.begin() + static_cast<std::ptrdiff_t>(b * n * 2), n * 2, slot.contexts.begin());
+      std::copy_n(ple_out.begin() + static_cast<std::ptrdiff_t>(b * n * kRowValues), n * kRowValues, slot.ple.begin());
+      slot.past_pos.assign(past.begin() + static_cast<std::ptrdiff_t>(b * StagedPleRig::kPositions),
+                           past.begin() + static_cast<std::ptrdiff_t>((b + 1) * StagedPleRig::kPositions));
+      slot.state.assign(control_out.begin() + static_cast<std::ptrdiff_t>(b * kCtlWords),
+                        control_out.begin() + static_cast<std::ptrdiff_t>(b * kCtlWords + StagedPleRig::kStateWords));
+      for (size_t word = StagedPleRig::kStateWords; word < kCtlWords; ++word) {
+        EXPECT_EQ(control_out[b * kCtlWords + word], kSpareWord) << "control word " << word << " of slot " << b;
+      }
+      slot.committed = with_committed ? committed_out[b] : static_cast<int32_t>(0xABABABABu);
+    }
+    return slots;
+  }
+
+  // What prep_batched has to leave for a muted slot of a table the GPU addresses: idle inputs (token 0 at position r, eos
+  // contexts, a zero PLE row), the committed length 0, and the control words as they were.
+  FoldPrepOutputs ExpectedIdle(const FoldState& state, int rows, bool with_committed = true) const {
+    FoldPrepOutputs expected = Expected(state, FoldContext{{0, 0}}, 0, with_committed);
+    for (size_t r = 0; r < static_cast<size_t>(rows); ++r) {
+      expected.input_ids[r] = 0;
+      expected.position_ids[r] = static_cast<int64_t>(r);
+      expected.contexts[2 * r] = kEos;
+      expected.contexts[2 * r + 1] = 0;
+      std::fill_n(expected.ple.begin() + static_cast<std::ptrdiff_t>(r * kRowValues), kRowValues, uint16_t{0});
+      expected.past_pos[r] = static_cast<int64_t>(r);
+    }
+    if (with_committed) expected.committed = 0;
+    return expected;
+  }
+
+  // The outcome of prep_batched for arguments that are not valid: the error it returns and whether it wrote anything. Every
+  // pointer is valid but the one named by `null_argument`.
+  struct RawBatchedPrep {
+    int error;
+    bool wrote;
+  };
+  RawBatchedPrep PrepBatchedRaw(int rows, int batch, const std::string& null_argument = std::string{}) {
+    constexpr size_t kSlots = QWEN38_PLANE_MAX_PREP_BATCH;
+    const PlaneBuffer state = device_.Upload(std::vector<int64_t>(kSlots * kCtlWords, 3));
+    const PlaneBuffer ctx_in = device_.Filled(kSlots * 2 * sizeof(int64_t), 0);
+    const PlaneBuffer ctx_out = device_.Filled(kSlots * kMaxRows * 2 * sizeof(int64_t), 0xAB);
+    const PlaneBuffer input_ids = device_.Filled(kSlots * kMaxRows * sizeof(int64_t), 0xAB);
+    const PlaneBuffer position_ids = device_.Filled(kSlots * kMaxRows * sizeof(int64_t), 0xAB);
+    const PlaneBuffer committed = device_.Filled(kSlots * sizeof(int32_t), 0xAB);
+    const PlaneBuffer past_pos = device_.Filled(kSlots * StagedPleRig::kPositions * sizeof(int64_t), 0xAB);
+    const PlaneBuffer ple = device_.Filled(kSlots * kMaxRows * kRowValues * sizeof(uint16_t), 0xAB);
+    const auto pointer = [&](const char* name, const PlaneBuffer& buffer) -> void* {
+      return null_argument == name ? nullptr : buffer.data();
+    };
+    const int error = plane_.prep_batched(
+        device_.stream(), null_argument == "params" ? nullptr : device_params_.data(), rows, batch,
+        pointer("ctx_in", ctx_in), pointer("ctx_out", ctx_out), pointer("input_ids", input_ids),
+        pointer("position_ids", position_ids), pointer("committed", committed), pointer("past_pos", past_pos),
+        pointer("ple", ple), pointer("state", state));
+    const auto untouched = [&](const PlaneBuffer& buffer, size_t bytes) {
+      const auto values = device_.Download<uint8_t>(buffer, bytes);
+      return std::all_of(values.begin(), values.end(), [](uint8_t value) { return value == 0xAB; });
+    };
+    const bool wrote = !untouched(ctx_out, ctx_out.size()) || !untouched(input_ids, input_ids.size()) ||
+                       !untouched(position_ids, position_ids.size()) || !untouched(committed, committed.size()) ||
+                       !untouched(past_pos, past_pos.size()) || !untouched(ple, ple.size());
+    return {error, wrote};
+  }
+
  private:
   uint16_t Dequantized(uint8_t code) const {
     if (params_.scale < 0.0f) return Bf16Bits(static_cast<float>(static_cast<int8_t>(code)) * -params_.scale);
@@ -4074,6 +4364,216 @@ TEST_F(Qwen38PlaneFoldPrepTest, FusedPrepWithoutACommittedLengthWritesEverything
                                 table.PrepInOneCall(scenario.state, scenario.context, rows, /*with_committed=*/false),
                                 std::string{staged ? "staged table, " : "device table, "} + std::to_string(rows) + " rows");
     }
+  }
+}
+
+// The slots of a batch to prepare: slot b takes the scenario b + `shift`, and its tokens, position and context are told apart
+// from those of the other slots by an offset of b (an end of sequence token stays one), so that a slot that reads the words,
+// the context or the output rows of another one is noticed. No slot is muted.
+struct BatchedFoldSlots {
+  std::vector<FoldState> states;
+  std::vector<FoldContext> contexts;
+};
+
+BatchedFoldSlots MakeBatchedFoldSlots(size_t batch, size_t shift) {
+  constexpr int64_t kEos = HashedPleTable::kEos;
+  const std::vector<FoldScenario>& scenarios = FoldScenarios();
+  BatchedFoldSlots slots;
+  for (size_t b = 0; b < batch; ++b) {
+    const FoldScenario& scenario = scenarios[(b + shift) % scenarios.size()];
+    FoldState state = scenario.state;
+    FoldContext context = scenario.context;
+    const int64_t offset = static_cast<int64_t>(b);
+    for (const size_t word : StagedPleRig::kFoldTokenWords) {
+      if (state[word] != kEos) state[word] += 17 * offset;
+    }
+    state[1] += offset;
+    state[3] = 0;  // not muted
+    for (int64_t& token : context) {
+      if (token != kEos) token += offset;
+    }
+    slots.states.push_back(state);
+    slots.contexts.push_back(context);
+  }
+  return slots;
+}
+
+// The batched prep (qwen38_plane_prep_batched, QWEN38_PLANE_CAP_BATCHED_PREP) of every slot of a batch against the prep of the
+// same slot on its own, row by row as the engine prepared a step before the entry point existed, and against the PLE rows,
+// graph inputs and contexts that the host computes from the table.
+class Qwen38PlaneBatchedPrepKernelTest : public PlaneKernelFixture<::testing::Test> {
+ protected:
+  void SetUp() override {
+    PlaneKernelFixture<::testing::Test>::SetUp();
+    if (IsSkipped()) return;
+    ASSERT_TRUE(plane_->prep_batched != nullptr) << "the plane library has no qwen38_plane_prep_batched";
+    ASSERT_NE(plane_->capabilities & QWEN38_PLANE_CAP_BATCHED_PREP, 0ull);
+  }
+
+  static std::string Describe(bool staged, float scale) {
+    return std::string{staged ? "staged table, " : "device table, "} + (scale < 0.0f ? "INT8" : "FP8");
+  }
+
+  void ExpectEverySlotToMatchItsOwnPrep(bool staged, float scale) {
+    KernelTestDevice device{*plane_};
+    HashedPleTable table{*plane_, device, scale, staged};
+    for (int rows = 1; rows <= static_cast<int>(HashedPleTable::kMaxRows); ++rows) {
+      for (size_t batch = 1; batch <= QWEN38_PLANE_MAX_PREP_BATCH; ++batch) {
+        const BatchedFoldSlots slots = MakeBatchedFoldSlots(batch, static_cast<size_t>(rows));
+        const std::vector<FoldPrepOutputs> prepared = table.PrepBatched(slots.states, slots.contexts, rows);
+        ASSERT_EQ(prepared.size(), batch);
+        for (size_t b = 0; b < batch; ++b) {
+          const std::string what = Describe(staged, scale) + ", " + std::to_string(rows) + " rows of slot " +
+                                   std::to_string(b) + " of " + std::to_string(batch);
+          ExpectSameFoldPrepOutputs(table.Expected(slots.states[b], slots.contexts[b], rows), prepared[b],
+                                    what + ", against the host");
+          ExpectSameFoldPrepOutputs(table.PrepEveryRowSeparately(slots.states[b], slots.contexts[b], rows), prepared[b],
+                                    what + ", against one row at a time");
+        }
+      }
+    }
+  }
+};
+
+TEST_F(Qwen38PlaneBatchedPrepKernelTest, EverySlotMatchesItsOwnPrepForAnFp8DeviceTable) {
+  ExpectEverySlotToMatchItsOwnPrep(/*staged=*/false, 0.3f);
+}
+
+TEST_F(Qwen38PlaneBatchedPrepKernelTest, EverySlotMatchesItsOwnPrepForAnFp8StagedTable) {
+  ExpectEverySlotToMatchItsOwnPrep(/*staged=*/true, 0.3f);
+}
+
+TEST_F(Qwen38PlaneBatchedPrepKernelTest, EverySlotMatchesItsOwnPrepForAnInt8DeviceTable) {
+  if ((plane_->capabilities & QWEN38_PLANE_CAP_INT8_PLE) == 0) GTEST_SKIP() << "the plane library has no INT8 PLE";
+  ExpectEverySlotToMatchItsOwnPrep(/*staged=*/false, -0.0123f);
+}
+
+TEST_F(Qwen38PlaneBatchedPrepKernelTest, EverySlotMatchesItsOwnPrepForAnInt8StagedTable) {
+  if ((plane_->capabilities & QWEN38_PLANE_CAP_INT8_PLE) == 0) GTEST_SKIP() << "the plane library has no INT8 PLE";
+  ExpectEverySlotToMatchItsOwnPrep(/*staged=*/true, -0.0123f);
+}
+
+// A slot whose control word 3 is nonzero takes no part in the step: a table the GPU addresses prepares idle inputs for it and
+// leaves its control words alone, and the slots around it are prepared as if it were live. A staged table prepares every slot
+// from its control words, muted or not (the caller ignores the rows of a muted slot either way).
+TEST_F(Qwen38PlaneBatchedPrepKernelTest, AMutedSlotIsPreparedAsAnIdleSlotWithoutDisturbingItsNeighbours) {
+  const std::vector<std::vector<size_t>> muted_slots = {{1}, {0, 3}, {2, 3, 4}, {0, 1, 2, 3, 4, 5, 6, 7}};
+  for (const bool staged : {false, true}) {
+    KernelTestDevice device{*plane_};
+    HashedPleTable table{*plane_, device, 0.3f, staged};
+    for (const int rows : {1, 2, 5, 8}) {
+      for (const std::vector<size_t>& muted : muted_slots) {
+        const size_t batch = muted.back() == 7 ? 8 : muted.back() + 2;  // at least one live slot after the last muted one
+        BatchedFoldSlots slots = MakeBatchedFoldSlots(batch, 1);
+        std::vector<bool> is_muted(batch, false);
+        for (const size_t b : muted) {
+          slots.states[b][3] = 1;
+          is_muted[b] = true;
+        }
+        const std::vector<FoldPrepOutputs> prepared = table.PrepBatched(slots.states, slots.contexts, rows);
+        for (size_t b = 0; b < batch; ++b) {
+          const std::string what = std::string{staged ? "staged table, " : "device table, "} + std::to_string(rows) +
+                                   " rows, slot " + std::to_string(b) + (is_muted[b] ? " (muted)" : "") + " of " +
+                                   std::to_string(batch);
+          const FoldPrepOutputs expected = is_muted[b] && !staged
+                                               ? table.ExpectedIdle(slots.states[b], rows)
+                                               : table.Expected(slots.states[b], slots.contexts[b], rows);
+          ExpectSameFoldPrepOutputs(expected, prepared[b], what);
+        }
+      }
+    }
+  }
+}
+
+// The one-slot prep never reads the mute word: a control word 3 that is not zero is no state of the slot there.
+TEST_F(Qwen38PlaneBatchedPrepKernelTest, TheSingleSlotPrepIgnoresTheMuteWord) {
+  const FoldScenario& scenario = FoldScenarios().front();
+  FoldState state = scenario.state;
+  state[3] = 1;
+  for (const bool staged : {false, true}) {
+    KernelTestDevice device{*plane_};
+    HashedPleTable table{*plane_, device, 0.3f, staged};
+    for (const int rows : {2, 8}) {
+      ExpectSameFoldPrepOutputs(table.Expected(state, scenario.context, rows),
+                                table.PrepInOneCall(state, scenario.context, rows),
+                                std::string{staged ? "staged table, " : "device table, "} + std::to_string(rows) + " rows");
+    }
+  }
+}
+
+TEST_F(Qwen38PlaneBatchedPrepKernelTest, WithoutACommittedLengthEverythingElseIsWritten) {
+  for (const bool staged : {false, true}) {
+    KernelTestDevice device{*plane_};
+    HashedPleTable table{*plane_, device, 0.3f, staged};
+    for (const int rows : {1, 3, 8}) {
+      for (const size_t batch : {size_t{1}, size_t{4}, size_t{8}}) {
+        const BatchedFoldSlots slots = MakeBatchedFoldSlots(batch, 2);
+        const std::vector<FoldPrepOutputs> prepared =
+            table.PrepBatched(slots.states, slots.contexts, rows, /*with_committed=*/false);
+        for (size_t b = 0; b < batch; ++b) {
+          ExpectSameFoldPrepOutputs(table.Expected(slots.states[b], slots.contexts[b], rows, /*with_committed=*/false),
+                                    prepared[b],
+                                    std::string{staged ? "staged table, " : "device table, "} + std::to_string(rows) +
+                                        " rows, slot " + std::to_string(b) + " of " + std::to_string(batch));
+        }
+      }
+    }
+  }
+}
+
+// A row count or a batch outside the supported ranges, or a missing buffer, is an error that is returned before anything is
+// launched, not a launch that runs with whatever the numbers make of it.
+TEST_F(Qwen38PlaneBatchedPrepKernelTest, RefusesAnInvalidRowCountBatchOrPointerWithoutWritingAnything) {
+  constexpr int kInvalidValue = 1;  // cudaErrorInvalidValue
+  for (const bool staged : {false, true}) {
+    KernelTestDevice device{*plane_};
+    HashedPleTable table{*plane_, device, 0.3f, staged};
+    const std::string table_kind = staged ? "staged table" : "device table";
+
+    const auto valid = table.PrepBatchedRaw(QWEN38_PLANE_MAX_PREP_ROWS, QWEN38_PLANE_MAX_PREP_BATCH);
+    EXPECT_EQ(valid.error, 0) << table_kind;
+    EXPECT_TRUE(valid.wrote) << table_kind;
+
+    for (const int rows : {-8, -1, 0, QWEN38_PLANE_MAX_PREP_ROWS + 1, 16, 0x108}) {
+      const auto refused = table.PrepBatchedRaw(rows, 2);
+      EXPECT_EQ(refused.error, kInvalidValue) << table_kind << ", rows " << rows;
+      EXPECT_FALSE(refused.wrote) << table_kind << ", rows " << rows;
+    }
+    for (const int batch : {-1, 0, QWEN38_PLANE_MAX_PREP_BATCH + 1, 16, 0x200}) {
+      const auto refused = table.PrepBatchedRaw(2, batch);
+      EXPECT_EQ(refused.error, kInvalidValue) << table_kind << ", batch " << batch;
+      EXPECT_FALSE(refused.wrote) << table_kind << ", batch " << batch;
+    }
+    for (const char* missing : {"params", "ctx_in", "ctx_out", "input_ids", "position_ids", "past_pos", "ple", "state"}) {
+      const auto refused = table.PrepBatchedRaw(2, 2, missing);
+      EXPECT_EQ(refused.error, kInvalidValue) << table_kind << ", without " << missing;
+      EXPECT_FALSE(refused.wrote) << table_kind << ", without " << missing;
+    }
+    // The committed lengths are optional.
+    const auto without_committed = table.PrepBatchedRaw(2, 2, "committed");
+    EXPECT_EQ(without_committed.error, 0) << table_kind;
+    EXPECT_TRUE(without_committed.wrote) << table_kind;
+  }
+}
+
+// The single-slot prep used to receive the batch size packed into pos_add (-(rows | batch << 8)). It no longer reads such a
+// value as anything: a pos_add below -8 is refused, so a caller that still packs a batch never gets inputs for the wrong rows.
+TEST_F(Qwen38PlaneBatchedPrepKernelTest, TheSingleSlotPrepRefusesABatchPackedIntoPosAdd) {
+  constexpr int kInvalidValue = 1;  // cudaErrorInvalidValue
+  const FoldScenario& scenario = FoldScenarios().front();
+  for (const bool staged : {false, true}) {
+    KernelTestDevice device{*plane_};
+    HashedPleTable table{*plane_, device, 0.3f, staged};
+    for (const int pos_add : {-(8 | (2 << 8)), -(2 | (4 << 8)), -(8 | (8 << 8)), -9, -16, -0x100}) {
+      const auto [error, outputs] = table.PrepWithPosAdd(scenario.state, scenario.context, pos_add);
+      EXPECT_EQ(error, kInvalidValue) << (staged ? "staged table" : "device table") << ", pos_add " << pos_add;
+      ExpectSameFoldPrepOutputs(table.Expected(scenario.state, scenario.context, 0), outputs,
+                                std::string{"nothing written for pos_add "} + std::to_string(pos_add));
+    }
+    // The documented range keeps working.
+    const auto [error, outputs] = table.PrepWithPosAdd(scenario.state, scenario.context, -8);
+    EXPECT_EQ(error, 0);
+    ExpectSameFoldPrepOutputs(table.Expected(scenario.state, scenario.context, 8), outputs, "pos_add -8");
   }
 }
 
