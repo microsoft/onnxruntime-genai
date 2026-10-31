@@ -1,6 +1,14 @@
 name: "Linux CPU x64 Build"
 on:
   workflow_dispatch:
+    inputs:
+      telemetry_tests:
+        description: Telemetry test coverage
+        type: choice
+        options:
+          - smoke
+          - full
+        default: smoke
   push:
     branches:
       - main
@@ -10,6 +18,7 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: true
 env:
+  TELEMETRY_TESTS: ${{ inputs.telemetry_tests || 'smoke' }}
   ORT_BUILD_VERSION: "1.26.0"
   ORT_RUNTIME_VERSION: "1.31.0"
   ORT_BUILD_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
@@ -146,7 +155,7 @@ jobs:
       - name: Run the Python tests
         run: |
           export ORTGENAI_LOG_ORT_LIB=1
-          python3 test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/models
+          python3 test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/models --telemetry-tests "$TELEMETRY_TESTS"
 
       - name: Build the C# API and Run the C# Tests
         run: |

@@ -21,6 +21,9 @@ with open(long_description_file, encoding="utf-8") as fdesc:
 
 extras = ["ThirdPartyNotices.txt", "LICENSE"]
 package_name = '@TARGET_NAME@'
+packages = find_packages(include=['onnxruntime_genai', 'onnxruntime_genai.*'])
+if not @PYTHON_TELEMETRY_ENABLED@:
+    packages = [name for name in packages if not name.startswith('onnxruntime_genai.telemetry')]
 
 
 def _onnxruntime_dependency() -> str:
@@ -56,7 +59,8 @@ setup(
     description='ONNX Runtime GenAI',
     long_description=long_description,
     long_description_content_type='text/markdown',
-    packages=find_packages(include=['onnxruntime_genai', 'onnxruntime_genai.*']),
+    python_requires='>=3.10',
+    packages=packages,
     include_package_data=True,
     package_data={'': ['*.pyd', '*.dll', '*.so*', '*.dylib'] + extras},
     install_requires=_get_install_requires(),

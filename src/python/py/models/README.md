@@ -163,6 +163,12 @@ For memory-dependent INT4/INT8 KV-cache graphs, use the [KV-cache variant author
 
 Python callers should pass structured dictionaries to `parse_extra_options` before calling `create_model` with its returned options. The legacy options parameter still takes a list of `KEY=VALUE` strings, not a dictionary. Pass `precision=None` explicitly when deriving it from the structured target. A standalone `create_model` call without prepared Hugging Face metadata still fails.
 
+Telemetry can be disabled with the CLI flag `--disable_telemetry` or the Python
+keyword `create_model(..., disable_telemetry=True, **extra_options)`. This sets the
+process-wide `ORT_DISABLE_TELEMETRY=1` opt-out before telemetry initializes.
+Every `create_model` call performs bounded telemetry shutdown, including when
+export fails or is interrupted.
+
 ### Original PyTorch Model from Hugging Face
 
 This scenario is where your PyTorch model is not downloaded locally (either in the default Hugging Face cache directory or in a local folder on disk).
