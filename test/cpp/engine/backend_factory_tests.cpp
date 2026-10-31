@@ -83,7 +83,7 @@ TEST(EngineBackendFactoryTest, ExplicitContradictionsFailBeforeAdmission) {
   capabilities.token_selection = BackendTokenSelection::Engine;
   EngineDependencies dependencies{cache, std::move(scheduler), std::move(executor)};
   dependencies.backend_capabilities = capabilities;
-  EXPECT_THROW(std::make_shared<Engine>(model, std::move(dependencies)), std::runtime_error);
+  EXPECT_THROW((void)std::make_shared<Engine>(model, std::move(dependencies)), std::runtime_error);
 }
 
 TEST(EngineBackendFactoryTest, SelectedTokensCannotClaimPagedTransactions) {
