@@ -56,8 +56,11 @@ struct Qwen38EmbeddingTable {
 // mapped until the process exits, and a loader of the same file that follows (the next model, or the same model loaded again)
 // shares that copy. Unloading a library that has launched CUDA kernels and loading it again made the first kernel launch of the
 // later copy crash inside the CUDA runtime (a SIGSEGV in libcudart 13.0, in its lazy loading of the module of the kernel), so the
-// host never takes that path. A library that is rejected while it loads (a stale ABI, a missing symbol) has launched nothing and
-// is released.
+// host never takes that path. The built-in plane is part of onnxruntime-genai-cuda, so that library stays mapped as well, also
+// across OgaShutdown(): the next init enters it again without a reload. Its device interface (src/ep/cuda/interface.cpp) is
+// written for that: it releases its stream and its allocator pointer when it is destroyed, and GetInterface() destroys the
+// interface of the previous init before it creates the next one. A library that is rejected while it loads (a stale ABI, a
+// missing symbol) has launched nothing and is released.
 struct Qwen38Plane {
   // An empty plane with no library loaded; the function pointers are filled in by the caller (tests).
   Qwen38Plane() = default;
