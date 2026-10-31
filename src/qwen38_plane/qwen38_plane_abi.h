@@ -54,6 +54,13 @@ typedef struct Qwen38StateReplayDesc {
   uint32_t kind;
 } Qwen38StateReplayDesc;
 
+// Limits of the compact state-update replay kernels (k_replay_gdn, k_replay_generic). The plane sizes its shared tiles and its
+// grid from them and the host checks every replay descriptor against them while it builds it (ValidateQwen38ReplayDescriptor),
+// so a geometry the kernels cannot hold fails the model load instead of silently corrupting the recurrent state.
+#define QWEN38_PLANE_MAX_REPLAY_TRANSITIONS 8  // transitions one replay keeps: the capacity of the state_update outputs
+#define QWEN38_PLANE_MAX_REPLAY_KEY_WIDTH 256  // GatedDeltaNet key width: a row of the key tile (a multiple of 4: float4 loads)
+#define QWEN38_PLANE_REPLAY_ROWS_PER_BLOCK 32  // value rows of a GatedDeltaNet state one thread block of k_replay_gdn replays
+
 // X(return type, name, parameter list). The exported symbol is "qwen38_plane_" + name. `stream` is a cudaStream_t.
 // CUDA runtime helpers return the cudaError_t as int (0 = success).
 //

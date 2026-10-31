@@ -1523,9 +1523,10 @@ extern "C" QWEN38_PLANE_EXPORT int qwen38_plane_dflash_select(
 namespace {
 
 constexpr int kPlaneReplayThreads = 256;
-constexpr int kPlaneReplayRows = 32;
-constexpr int kPlaneMaxReplayTransitions = 8;
-constexpr int kPlaneMaxReplayKeyWidth = 256;
+constexpr int kPlaneReplayRows = QWEN38_PLANE_REPLAY_ROWS_PER_BLOCK;
+constexpr int kPlaneMaxReplayTransitions = QWEN38_PLANE_MAX_REPLAY_TRANSITIONS;
+constexpr int kPlaneMaxReplayKeyWidth = QWEN38_PLANE_MAX_REPLAY_KEY_WIDTH;
+static_assert(kPlaneMaxReplayKeyWidth % 4 == 0, "k_replay_gdn loads float4 along the key width");
 constexpr int kPlaneGenericBlocksPerDesc = 128;
 
 __global__ void __launch_bounds__(kPlaneReplayThreads) k_replay_gdn(
