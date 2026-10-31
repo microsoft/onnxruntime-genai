@@ -4,17 +4,23 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <memory>
+#include <stdexcept>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
 
+#include "config.h"
+#include "models/qwen38_graph.h"
 #include "models/qwen38_graph_plane.h"
 
 #if !defined(QWEN38_GRAPH_NO_POSIX)
@@ -64,10 +70,25 @@ struct StubPlaneState {
   static inline bool fail_get_device_pointer = false;
   static constexpr uintptr_t kDeviceOffset = 0x100000u;
 
+  // The embedding exports record their calls; the gather returns gather_error.
+  struct GatherCall {
+    const void* table;
+    long long table_rows;
+    int format;
+    int n;
+    int width;
+  };
+  static inline std::vector<GatherCall> gather_calls;
+  static inline std::vector<std::pair<int, int>> legacy_gather_calls;  // (rows, width)
+  static inline int gather_error = 0;
+
   static void Reset() {
     registered_ptrs.clear();
     unregistered_ptrs.clear();
     fail_get_device_pointer = false;
+    gather_calls.clear();
+    legacy_gather_calls.clear();
+    gather_error = 0;
   }
 
   static const char* ErrorString(int) { return "stub error"; }
@@ -86,6 +107,13 @@ struct StubPlaneState {
     *dev_ptr = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(host_ptr) + kDeviceOffset);
     return 0;
   }
+  static int EmbedGather(void*, const void* table, long long table_rows, int format, const void*, void*, int n, int width) {
+    gather_calls.push_back({table, table_rows, format, n, width});
+    return gather_error;
+  }
+  static void LegacyEmbedRows(void*, const void*, const void*, void*, int rows, int width) {
+    legacy_gather_calls.emplace_back(rows, width);
+  }
 };
 
 void InitStubPlane(Qwen38Plane& plane) {
@@ -94,6 +122,46 @@ void InitStubPlane(Qwen38Plane& plane) {
   plane.host_register = &StubPlaneState::HostRegister;
   plane.host_unregister = &StubPlaneState::HostUnregister;
   plane.host_get_device_pointer = &StubPlaneState::HostGetDevicePointer;
+}
+
+// The stubs of a plane library from before the INT8 formats (only the BF16 embed_rows, no capabilities) and of one built from
+// this source (embed_gather and every capability).
+void InitLegacyStubPlane(Qwen38Plane& plane) {
+  InitStubPlane(plane);
+  plane.embed_rows = &StubPlaneState::LegacyEmbedRows;
+  plane.library_path = "legacy/libqwen38_plane.so";
+}
+
+void InitCurrentStubPlane(Qwen38Plane& plane) {
+  InitStubPlane(plane);
+  plane.embed_rows = &StubPlaneState::LegacyEmbedRows;
+  plane.embed_gather = &StubPlaneState::EmbedGather;
+  plane.capabilities = QWEN38_PLANE_ALL_CAPABILITIES;
+  plane.library_path = "current/libqwen38_plane.so";
+}
+
+// Runs `action`, which has to fail with the diagnostic of a missing plane capability that names the capability, what required
+// it and the library.
+template <typename Action>
+void ExpectMissingCapability(Action&& action, const std::string& capability, const std::string& required_by,
+                             const std::string& library) {
+  try {
+    action();
+    ADD_FAILURE() << "expected the missing plane capability " << capability << " to be refused";
+  } catch (const std::runtime_error& error) {
+    const std::string message = error.what();
+    EXPECT_NE(message.find("requires the plane capability " + capability), std::string::npos) << message;
+    EXPECT_NE(message.find(required_by), std::string::npos) << message;
+    EXPECT_NE(message.find(library), std::string::npos) << message;
+  }
+}
+
+// The PLE table description with INT8 shards (a negative scale) instead of FP8 shards.
+std::string Int8PleTable() {
+  std::string text = kValidPleTable;
+  const std::string fp8_scale = "scale 0.5";
+  text.replace(text.find(fp8_scale), fp8_scale.size(), "scale -0.5");
+  return text;
 }
 
 }  // namespace
@@ -315,6 +383,462 @@ TEST(Qwen38PleTableTest, ValidatesShardFileBoundsAndUsesDevicePointer) {
   std::error_code ec;
   std::filesystem::remove_all(dir, ec);
 }
+
+namespace {
+
+// The shard files that kValidPleTable describes: shard a holds 11 rows of 4 bytes from byte 128, shard b 13 rows from byte 0.
+void WritePleShards(const std::filesystem::path& dir) {
+  std::filesystem::create_directories(dir / "ple");
+  WriteFile(dir / "ple" / "a.safetensors", std::string(172, 'a'));
+  WriteFile(dir / "ple" / "b.safetensors", std::string(52, 'b'));
+}
+
+}  // namespace
+
+// An INT8 PLE package needs a plane that decodes negative-scale shards: a library without that capability would read them as
+// FP8, so the table is refused before any shard is mapped, while FP8 packages keep working with it.
+TEST(Qwen38PleTableTest, Int8ShardsAreRefusedBeforeAnyShardIsMappedWhenThePlaneLacksTheCapability) {
+  const auto dir = MakeScratchDir("ple_int8_map");
+  WritePleShards(dir);
+  const auto fp8_path = WriteFile(dir / "fp8_table.txt", kValidPleTable);
+  const auto int8_path = WriteFile(dir / "int8_table.txt", Int8PleTable());
+
+  Qwen38Plane legacy;
+  InitLegacyStubPlane(legacy);
+  {
+    Qwen38PleTable table{legacy, fp8_path, dir, 64};
+    EXPECT_FLOAT_EQ(table.params.scale, 0.5f);
+    EXPECT_EQ(StubPlaneState::registered_ptrs.size(), 2u);
+  }
+  StubPlaneState::Reset();
+  ExpectMissingCapability([&] { Qwen38PleTable table{legacy, int8_path, dir, 64}; }, "int8_ple", int8_path.string(),
+                          "legacy/libqwen38_plane.so");
+  EXPECT_TRUE(StubPlaneState::registered_ptrs.empty());
+
+  Qwen38Plane current;
+  InitCurrentStubPlane(current);
+  {
+    Qwen38PleTable table{current, int8_path, dir, 64};
+    EXPECT_FLOAT_EQ(table.params.scale, -0.5f);
+    EXPECT_EQ(StubPlaneState::registered_ptrs.size(), 2u);
+  }
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+#endif
+
+// ---- plane capabilities and the embedding table ----------------------------------------------
+
+TEST(Qwen38PlaneCapabilityTest, EveryCapabilityIsADistinctBitWithAName) {
+  const std::vector<std::pair<unsigned long long, std::string>> capabilities = {
+#define QWEN38_TEST_CAPABILITY(bit, name) {bit, name},
+      QWEN38_PLANE_CAPABILITIES(QWEN38_TEST_CAPABILITY)
+#undef QWEN38_TEST_CAPABILITY
+  };
+  unsigned long long seen = 0;
+  for (const auto& [bit, name] : capabilities) {
+    EXPECT_NE(bit, 0ull) << name;
+    EXPECT_EQ(bit & (bit - 1ull), 0ull) << name << " is not a single bit";
+    EXPECT_EQ(seen & bit, 0ull) << name << " reuses the bit of another capability";
+    seen |= bit;
+  }
+  EXPECT_EQ(seen, QWEN38_PLANE_ALL_CAPABILITIES);
+}
+
+TEST(Qwen38PlaneCapabilityTest, DescribesCapabilitiesByName) {
+  EXPECT_EQ(DescribeQwen38PlaneCapabilities(0), "none");
+  EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_CAP_INT8_EMBEDDING), "int8_embedding");
+  EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_CAP_INT8_PLE), "int8_ple");
+  EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_ALL_CAPABILITIES), "int8_embedding, int8_ple");
+  // A bit that this build has no name for is reported, not dropped.
+  EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_CAP_INT8_PLE | (1ull << 40)), "int8_ple, unknown bits 0x10000000000");
+}
+
+TEST(Qwen38PlaneCapabilityTest, RequireCapabilitiesNamesTheMissingCapabilityWhatRequiredItAndTheLibrary) {
+  Qwen38Plane plane;
+  plane.library_path = "model/libqwen38_plane.so";
+  plane.capabilities = QWEN38_PLANE_CAP_INT8_PLE;
+
+  EXPECT_NO_THROW(plane.RequireCapabilities(0, "a package that needs nothing"));
+  EXPECT_NO_THROW(plane.RequireCapabilities(QWEN38_PLANE_CAP_INT8_PLE, "the INT8 PLE table"));
+
+  // Only the capability that is missing is named as missing, and what the library does report is listed.
+  try {
+    plane.RequireCapabilities(QWEN38_PLANE_ALL_CAPABILITIES, "the INT8 package");
+    ADD_FAILURE() << "a missing capability must be refused";
+  } catch (const std::runtime_error& error) {
+    const std::string message = error.what();
+    EXPECT_NE(message.find("the INT8 package requires the plane capability int8_embedding, which the plane library "
+                           "model/libqwen38_plane.so does not provide"),
+              std::string::npos)
+        << message;
+    EXPECT_NE(message.find("it reports: int8_ple"), std::string::npos) << message;
+  }
+
+  plane.capabilities = 0;  // a library that predates the capabilities export reports none
+  ExpectMissingCapability([&] { plane.RequireCapabilities(QWEN38_PLANE_CAP_INT8_PLE, "the INT8 PLE table"); }, "int8_ple",
+                          "the INT8 PLE table", "model/libqwen38_plane.so");
+}
+
+TEST(Qwen38PleDescriptionTest, Int8ShardsNeedTheInt8PleCapability) {
+  const auto dir = MakeScratchDir("ple_int8_capability");
+  const auto fp8_path = WriteFile(dir / "fp8_table.txt", kValidPleTable);
+  const auto int8_path = WriteFile(dir / "int8_table.txt", Int8PleTable());
+  const auto fp8_table = ParseQwen38PleDescription(fp8_path);
+  const auto int8_table = ParseQwen38PleDescription(int8_path);
+  EXPECT_FLOAT_EQ(fp8_table.params.scale, 0.5f);
+  EXPECT_FLOAT_EQ(int8_table.params.scale, -0.5f);
+
+  Qwen38Plane legacy;  // reports no capability
+  legacy.library_path = "legacy/libqwen38_plane.so";
+  EXPECT_NO_THROW(RequireQwen38PleTableSupported(legacy, fp8_table, fp8_path));
+  ExpectMissingCapability([&] { RequireQwen38PleTableSupported(legacy, int8_table, int8_path); }, "int8_ple",
+                          int8_path.string(), "legacy/libqwen38_plane.so");
+
+  // INT8 embedding rows do not make INT8 PLE shards decodable.
+  Qwen38Plane embedding_only;
+  embedding_only.capabilities = QWEN38_PLANE_CAP_INT8_EMBEDDING;
+  EXPECT_THROW(RequireQwen38PleTableSupported(embedding_only, int8_table, int8_path), std::runtime_error);
+
+  Qwen38Plane capable;
+  capable.capabilities = QWEN38_PLANE_CAP_INT8_PLE;
+  EXPECT_NO_THROW(RequireQwen38PleTableSupported(capable, int8_table, int8_path));
+  EXPECT_NO_THROW(RequireQwen38PleTableSupported(capable, fp8_table, fp8_path));
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+TEST(Qwen38EmbeddingTableTest, SizesBothLayoutsFromTheRowCount) {
+  EXPECT_EQ(Qwen38EmbeddingTableBytes(Qwen38EmbeddingFormat::kBf16, 1000, 16), 32000u);
+  EXPECT_EQ(Qwen38EmbeddingTableBytes(Qwen38EmbeddingFormat::kInt8, 1000, 16), 20000u);  // 1000 * 16 + 1000 * sizeof(float)
+  EXPECT_EQ(Qwen38EmbeddingTableBytes(Qwen38EmbeddingFormat::kInt8, 248320, 36), 248320u * 40u);
+  EXPECT_EQ(Qwen38EmbeddingTableBytes(Qwen38EmbeddingFormat::kNone, 1000, 16), 0u);
+  EXPECT_EQ(Qwen38EmbeddingTableBytes(Qwen38EmbeddingFormat::kBf16, 0, 16), 0u);
+  EXPECT_EQ(Qwen38EmbeddingTableBytes(Qwen38EmbeddingFormat::kInt8, 1000, 0), 0u);
+}
+
+TEST(Qwen38EmbeddingTableTest, SelectsTheLayoutOfTheFileForAnyVocabularySize) {
+  Qwen38Plane plane;
+  plane.capabilities = QWEN38_PLANE_ALL_CAPABILITIES;
+  const std::filesystem::path file = "embedding.onnx.data";
+  const auto select = [&](size_t file_bytes, long long rows, long long width) {
+    return SelectQwen38EmbeddingFormat(plane, file, file_bytes, rows, width);
+  };
+
+  // A vocabulary of 1000 with a width of 16 is 32000 bytes as bfloat16 and 20000 bytes as INT8 rows followed by float scales.
+  EXPECT_EQ(select(32000, 1000, 16), Qwen38EmbeddingFormat::kBf16);
+  EXPECT_EQ(select(40000, 1000, 16), Qwen38EmbeddingFormat::kBf16);
+  EXPECT_EQ(select(20000, 1000, 16), Qwen38EmbeddingFormat::kInt8);
+  EXPECT_EQ(select(19999, 1000, 16), Qwen38EmbeddingFormat::kNone);
+  EXPECT_EQ(select(0, 1000, 16), Qwen38EmbeddingFormat::kNone);
+
+  // A vocabulary above the 248320 rows that the plane once assumed.
+  const long long large = 248320 + 77;
+  const size_t large_bf16 = Qwen38EmbeddingTableBytes(Qwen38EmbeddingFormat::kBf16, large, 8);
+  const size_t large_int8 = Qwen38EmbeddingTableBytes(Qwen38EmbeddingFormat::kInt8, large, 8);
+  EXPECT_EQ(large_int8, static_cast<size_t>(large) * 12u);
+  EXPECT_EQ(select(large_bf16, large, 8), Qwen38EmbeddingFormat::kBf16);
+  EXPECT_EQ(select(large_int8, large, 8), Qwen38EmbeddingFormat::kInt8);
+  EXPECT_EQ(select(large_int8 - 1, large, 8), Qwen38EmbeddingFormat::kNone);
+
+  // Without a vocabulary size or a hidden size there is no table.
+  EXPECT_EQ(select(32000, 0, 16), Qwen38EmbeddingFormat::kNone);
+  EXPECT_EQ(select(32000, 1000, 0), Qwen38EmbeddingFormat::kNone);
+}
+
+TEST(Qwen38EmbeddingTableTest, AnInt8TableNeedsTheInt8EmbeddingCapability) {
+  const std::filesystem::path file = std::filesystem::path{"package"} / "embedding.onnx.data";
+  Qwen38Plane legacy;  // reports no capability
+  legacy.library_path = "legacy/libqwen38_plane.so";
+
+  // A BF16 table stays usable, and a file that is neither layout is no table at all rather than a capability error.
+  EXPECT_EQ(SelectQwen38EmbeddingFormat(legacy, file, 32000, 1000, 16), Qwen38EmbeddingFormat::kBf16);
+  EXPECT_EQ(SelectQwen38EmbeddingFormat(legacy, file, 100, 1000, 16), Qwen38EmbeddingFormat::kNone);
+  ExpectMissingCapability([&] { SelectQwen38EmbeddingFormat(legacy, file, 20000, 1000, 16); }, "int8_embedding",
+                          file.string(), "legacy/libqwen38_plane.so");
+
+  // INT8 PLE shards do not make INT8 embedding rows gatherable.
+  Qwen38Plane ple_only;
+  ple_only.capabilities = QWEN38_PLANE_CAP_INT8_PLE;
+  EXPECT_THROW(SelectQwen38EmbeddingFormat(ple_only, file, 20000, 1000, 16), std::runtime_error);
+
+  Qwen38Plane capable;
+  capable.capabilities = QWEN38_PLANE_CAP_INT8_EMBEDDING;
+  EXPECT_EQ(SelectQwen38EmbeddingFormat(capable, file, 20000, 1000, 16), Qwen38EmbeddingFormat::kInt8);
+}
+
+TEST(Qwen38EmbeddingTableTest, EmbedRowsGathersThroughEmbedGatherWithTheRowCountAndLayoutOfTheTable) {
+  Qwen38Plane plane;
+  InitCurrentStubPlane(plane);
+  int device_table = 0;
+  const int64_t ids[2] = {3, 4};
+  uint16_t out[2] = {};
+  const Qwen38EmbeddingTable bf16{&device_table, 1000, 16, false};
+  const Qwen38EmbeddingTable int8{&device_table, 248320 + 77, 8, true};
+
+  plane.EmbedRows(nullptr, bf16, ids, out, 2);
+  plane.EmbedRows(nullptr, int8, ids, out, 1);
+  ASSERT_EQ(StubPlaneState::gather_calls.size(), 2u);
+  EXPECT_EQ(StubPlaneState::gather_calls[0].table, &device_table);
+  EXPECT_EQ(StubPlaneState::gather_calls[0].table_rows, 1000);
+  EXPECT_EQ(StubPlaneState::gather_calls[0].format, QWEN38_PLANE_EMBEDDING_BF16);
+  EXPECT_EQ(StubPlaneState::gather_calls[0].n, 2);
+  EXPECT_EQ(StubPlaneState::gather_calls[0].width, 16);
+  EXPECT_EQ(StubPlaneState::gather_calls[1].table_rows, 248320 + 77);
+  EXPECT_EQ(StubPlaneState::gather_calls[1].format, QWEN38_PLANE_EMBEDDING_INT8_ROW);
+  EXPECT_EQ(StubPlaneState::gather_calls[1].n, 1);
+  EXPECT_EQ(StubPlaneState::gather_calls[1].width, 8);  // the layout is a format, not a negative width
+  EXPECT_TRUE(StubPlaneState::legacy_gather_calls.empty());
+
+  // A CUDA error of the gather is reported.
+  StubPlaneState::gather_error = 700;
+  EXPECT_THROW(plane.EmbedRows(nullptr, bf16, ids, out, 2), std::runtime_error);
+}
+
+TEST(Qwen38EmbeddingTableTest, WithoutEmbedGatherOnlyBf16TablesUseTheLegacyExport) {
+  Qwen38Plane legacy;
+  InitLegacyStubPlane(legacy);
+  int device_table = 0;
+  const int64_t ids[1] = {0};
+  uint16_t out[1] = {};
+  const Qwen38EmbeddingTable bf16{&device_table, 1000, 16, false};
+  const Qwen38EmbeddingTable int8{&device_table, 1000, 16, true};
+
+  legacy.EmbedRows(nullptr, bf16, ids, out, 1);
+  ASSERT_EQ(StubPlaneState::legacy_gather_calls.size(), 1u);
+  EXPECT_EQ(StubPlaneState::legacy_gather_calls[0], std::make_pair(1, 16));
+
+  // The legacy export has no INT8 mode: it must never be handed an INT8 table.
+  ExpectMissingCapability([&] { legacy.EmbedRows(nullptr, int8, ids, out, 1); }, "int8_embedding", "an INT8 embedding table",
+                          "legacy/libqwen38_plane.so");
+  EXPECT_EQ(StubPlaneState::legacy_gather_calls.size(), 1u);
+
+  Qwen38Plane bare;  // neither embedding export
+  InitStubPlane(bare);
+  EXPECT_THROW(bare.EmbedRows(nullptr, bf16, ids, out, 1), std::runtime_error);
+}
+
+namespace {
+
+// A model folder to check against a plane library: genai_config.json, the PLE table description and an embedding table file
+// for a vocabulary of 1000 and a hidden size of 16. RequireQwen38PackageSupportedByPlane reads nothing else, so there is no
+// ONNX graph and no PLE shard.
+class Qwen38TestPackage {
+ public:
+  static constexpr size_t kBf16TableBytes = 1000 * 16 * 2;
+  static constexpr size_t kInt8TableBytes = 1000 * 16 + 1000 * 4;  // INT8 rows, then one float scale per row
+
+  Qwen38TestPackage() : dir_{MakeScratchDir("package_support")} {
+    WriteFile(dir_ / "genai_config.json",
+              R"({"model":{"type":"qwen38_flash_graph","vocab_size":1000,"context_length":64,
+                  "decoder":{"filename":"model.onnx","hidden_size":16,"num_attention_heads":1,"num_hidden_layers":1,
+                             "num_key_value_heads":1,"head_size":16},
+                  "embedding":{"filename":"embedding.onnx"},
+                  "qwen38_graph":{"plane_library":"plane.so","ple_table":"ple_table.txt",
+                                  "head":{"filename_s1":"head.onnx"}}},
+                  "search":{"max_length":64}})");
+    config_ = std::make_unique<Config>(fs::path{dir_.string()}, std::string_view{});
+  }
+
+  ~Qwen38TestPackage() {
+    std::error_code ec;
+    std::filesystem::remove_all(dir_, ec);
+  }
+
+  Qwen38TestPackage(const Qwen38TestPackage&) = delete;
+  Qwen38TestPackage& operator=(const Qwen38TestPackage&) = delete;
+
+  // Sets the PLE table description and the size of the embedding table file.
+  void Write(const std::string& ple_description, size_t embedding_table_bytes) {
+    WriteFile(ple_path(), ple_description);
+    WriteFile(embedding_path(), std::string(embedding_table_bytes, '\0'));
+  }
+
+  std::filesystem::path ple_path() const { return dir_ / "ple_table.txt"; }
+  std::filesystem::path embedding_path() const { return dir_ / "embedding.onnx.data"; }
+
+  Qwen38EmbeddingFormat Require(const Qwen38Plane& plane) const {
+    return RequireQwen38PackageSupportedByPlane(plane, *config_, dir_);
+  }
+
+ private:
+  std::filesystem::path dir_;
+  std::unique_ptr<Config> config_;
+};
+
+}  // namespace
+
+// The model constructor runs RequireQwen38PackageSupportedByPlane when it has loaded the plane library: an INT8 package has to
+// fail there, before any weight is uploaded or any session is created, and a package of another format has to keep working
+// with a library from before the INT8 formats.
+TEST(Qwen38PackageSupportTest, AnInt8PleTableNeedsThePleCapabilityAtModelLoad) {
+  Qwen38TestPackage package;
+  package.Write(Int8PleTable(), Qwen38TestPackage::kBf16TableBytes);
+  Qwen38Plane legacy;
+  InitLegacyStubPlane(legacy);
+  ExpectMissingCapability([&] { package.Require(legacy); }, "int8_ple", package.ple_path().string(),
+                          "legacy/libqwen38_plane.so");
+  EXPECT_TRUE(StubPlaneState::registered_ptrs.empty());
+
+  Qwen38Plane current;
+  InitCurrentStubPlane(current);
+  EXPECT_EQ(package.Require(current), Qwen38EmbeddingFormat::kBf16);
+}
+
+TEST(Qwen38PackageSupportTest, AnInt8EmbeddingTableNeedsTheEmbeddingCapabilityAtModelLoad) {
+  Qwen38TestPackage package;
+  package.Write(kValidPleTable, Qwen38TestPackage::kInt8TableBytes);
+  Qwen38Plane legacy;
+  InitLegacyStubPlane(legacy);
+  ExpectMissingCapability([&] { package.Require(legacy); }, "int8_embedding", package.embedding_path().string(),
+                          "legacy/libqwen38_plane.so");
+
+  Qwen38Plane current;
+  InitCurrentStubPlane(current);
+  EXPECT_EQ(package.Require(current), Qwen38EmbeddingFormat::kInt8);
+}
+
+TEST(Qwen38PackageSupportTest, EachInt8FormatNeedsItsOwnCapability) {
+  Qwen38TestPackage package;
+  package.Write(Int8PleTable(), Qwen38TestPackage::kInt8TableBytes);
+
+  Qwen38Plane embedding_only;
+  InitCurrentStubPlane(embedding_only);
+  embedding_only.capabilities = QWEN38_PLANE_CAP_INT8_EMBEDDING;
+  ExpectMissingCapability([&] { package.Require(embedding_only); }, "int8_ple", package.ple_path().string(),
+                          "current/libqwen38_plane.so");
+
+  Qwen38Plane ple_only;
+  InitCurrentStubPlane(ple_only);
+  ple_only.capabilities = QWEN38_PLANE_CAP_INT8_PLE;
+  ExpectMissingCapability([&] { package.Require(ple_only); }, "int8_embedding", package.embedding_path().string(),
+                          "current/libqwen38_plane.so");
+
+  Qwen38Plane both;
+  InitCurrentStubPlane(both);
+  EXPECT_EQ(package.Require(both), Qwen38EmbeddingFormat::kInt8);
+}
+
+TEST(Qwen38PackageSupportTest, Bf16EmbeddingAndFp8PleTablesStayUsableWithALegacyLibrary) {
+  Qwen38TestPackage package;
+  package.Write(kValidPleTable, Qwen38TestPackage::kBf16TableBytes);
+  Qwen38Plane legacy;
+  InitLegacyStubPlane(legacy);
+  EXPECT_EQ(package.Require(legacy), Qwen38EmbeddingFormat::kBf16);
+  EXPECT_TRUE(StubPlaneState::registered_ptrs.empty());
+}
+
+TEST(Qwen38PackageSupportTest, AMissingOrTooSmallEmbeddingTableMapsNothingAndNeedsNoCapability) {
+  Qwen38TestPackage package;
+  package.Write(kValidPleTable, Qwen38TestPackage::kInt8TableBytes - 1);
+  Qwen38Plane legacy;
+  InitLegacyStubPlane(legacy);
+  EXPECT_EQ(package.Require(legacy), Qwen38EmbeddingFormat::kNone);
+
+  std::filesystem::remove(package.embedding_path());
+  EXPECT_EQ(package.Require(legacy), Qwen38EmbeddingFormat::kNone);
+
+  // The PLE table is still checked when there is no embedding table.
+  WriteFile(package.ple_path(), Int8PleTable());
+  ExpectMissingCapability([&] { package.Require(legacy); }, "int8_ple", package.ple_path().string(),
+                          "legacy/libqwen38_plane.so");
+}
+
+TEST(Qwen38PackageSupportTest, AnUnreadablePleDescriptionFailsAtModelLoad) {
+  Qwen38TestPackage package;
+  package.Write("not a qwen38 PLE table\n", Qwen38TestPackage::kBf16TableBytes);
+  Qwen38Plane current;
+  InitCurrentStubPlane(current);
+  EXPECT_THROW(package.Require(current), std::runtime_error);
+}
+
+#if defined(ORTGENAI_TEST_QWEN38_LEGACY_PLANE_LIB_PATH) && !defined(QWEN38_GRAPH_NO_POSIX)
+// The fixture library stands for a plane library built before the INT8 embedding table and INT8 PLE shards (see
+// qwen38_legacy_plane_lib.cpp): the loader has to accept it, since BF16 and FP8 packages work with it, and a package that
+// needs a capability it lacks has to fail with a diagnostic when the model is loaded.
+class Qwen38LegacyPlaneLibraryTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    library_path_ = std::filesystem::path{ORTGENAI_TEST_QWEN38_LEGACY_PLANE_LIB_PATH};
+    plane_ = std::make_unique<Qwen38Plane>(library_path_);
+  }
+
+  std::filesystem::path library_path_;
+  std::unique_ptr<Qwen38Plane> plane_;
+};
+
+TEST_F(Qwen38LegacyPlaneLibraryTest, LoadsWithoutTheOptionalExportsAndReportsNoCapabilities) {
+  EXPECT_EQ(plane_->abi_version(), QWEN38_PLANE_ABI_VERSION);
+  EXPECT_EQ(plane_->capabilities, 0ull);
+  EXPECT_TRUE(plane_->embed_gather == nullptr);
+  EXPECT_TRUE(plane_->embed_rows != nullptr);
+  EXPECT_EQ(std::filesystem::path{plane_->library_path}, library_path_);
+}
+
+TEST_F(Qwen38LegacyPlaneLibraryTest, Bf16EmbeddingPackagesStayUsable) {
+  std::vector<uint16_t> table(3 * 8);  // a vocabulary of 3 with a width of 8
+  for (size_t i = 0; i < table.size(); ++i) table[i] = static_cast<uint16_t>(0x3F00 + i);
+  const std::vector<int64_t> ids = {2, 0};
+  std::vector<uint16_t> out(2 * 8, 0xDEAD);
+
+  ASSERT_EQ(SelectQwen38EmbeddingFormat(*plane_, "embedding.onnx.data", table.size() * sizeof(uint16_t), 3, 8),
+            Qwen38EmbeddingFormat::kBf16);
+  const Qwen38EmbeddingTable bf16{table.data(), 3, 8, false};
+  plane_->EmbedRows(nullptr, bf16, ids.data(), out.data(), 2);
+  EXPECT_TRUE(std::equal(out.begin(), out.begin() + 8, table.begin() + 16));
+  EXPECT_TRUE(std::equal(out.begin() + 8, out.end(), table.begin()));
+}
+
+TEST_F(Qwen38LegacyPlaneLibraryTest, Int8EmbeddingPackagesAreRefusedAtLoadAndNeverGathered) {
+  const std::filesystem::path file = std::filesystem::path{"package"} / "embedding.onnx.data";
+  // A vocabulary of 1000 with a width of 16 as INT8 rows and float scales is 20000 bytes; as bfloat16 it would be 32000.
+  ExpectMissingCapability([&] { SelectQwen38EmbeddingFormat(*plane_, file, 20000, 1000, 16); }, "int8_embedding",
+                          file.string(), library_path_.string());
+
+  // Gathering it anyway would make the legacy export return without writing the rows: it is refused instead.
+  std::vector<uint16_t> out(16, 0xDEAD);
+  const int64_t id = 5;
+  const Qwen38EmbeddingTable int8{out.data(), 1000, 16, true};
+  ExpectMissingCapability([&] { plane_->EmbedRows(nullptr, int8, &id, out.data(), 1); }, "int8_embedding",
+                          "an INT8 embedding table", library_path_.string());
+  EXPECT_EQ(out, std::vector<uint16_t>(16, 0xDEAD));
+}
+
+TEST_F(Qwen38LegacyPlaneLibraryTest, ModelPackagesAreCheckedAgainstTheLibraryAtModelLoad) {
+  Qwen38TestPackage package;
+  package.Write(kValidPleTable, Qwen38TestPackage::kBf16TableBytes);
+  EXPECT_EQ(package.Require(*plane_), Qwen38EmbeddingFormat::kBf16);
+
+  package.Write(Int8PleTable(), Qwen38TestPackage::kBf16TableBytes);
+  ExpectMissingCapability([&] { package.Require(*plane_); }, "int8_ple", package.ple_path().string(),
+                          library_path_.string());
+
+  package.Write(kValidPleTable, Qwen38TestPackage::kInt8TableBytes);
+  ExpectMissingCapability([&] { package.Require(*plane_); }, "int8_embedding", package.embedding_path().string(),
+                          library_path_.string());
+}
+
+#if !defined(_WIN32)
+TEST_F(Qwen38LegacyPlaneLibraryTest, Fp8PlePackagesStayUsableAndInt8PlePackagesAreRefused) {
+  const auto dir = MakeScratchDir("ple_legacy_library");
+  WritePleShards(dir);
+  const auto fp8_path = WriteFile(dir / "fp8_table.txt", kValidPleTable);
+  const auto int8_path = WriteFile(dir / "int8_table.txt", Int8PleTable());
+
+  {
+    Qwen38PleTable table{*plane_, fp8_path, dir, 64};
+    EXPECT_FLOAT_EQ(table.params.scale, 0.5f);
+    EXPECT_EQ(table.params.n_shards, 2);
+  }
+  ExpectMissingCapability([&] { Qwen38PleTable table{*plane_, int8_path, dir, 64}; }, "int8_ple", int8_path.string(),
+                          library_path_.string());
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+#endif
 #endif
 
 // ---- plane library loader --------------------------------------------------------------------
@@ -359,6 +883,14 @@ std::filesystem::path GetBuiltPlaneLibraryPath() {
 #else
   return std::filesystem::current_path() / "libqwen38_plane.so";
 #endif
+}
+
+// The bfloat16 bits of `value` rounded to nearest even, as the plane rounds.
+uint16_t Bf16Bits(float value) {
+  uint32_t bits = 0;
+  std::memcpy(&bits, &value, sizeof(bits));
+  bits += 0x7FFFu + ((bits >> 16) & 1u);
+  return static_cast<uint16_t>(bits >> 16);
 }
 
 }  // namespace
@@ -623,7 +1155,9 @@ class StagedPleRig {
   static constexpr size_t kPositions = 16;  // the table's capacity: how many positions past_pos has room for
   static constexpr size_t kStateWords = 10;
 
-  StagedPleRig(Qwen38Plane& plane, const std::array<unsigned char, kRows>& row_codes)
+  // `scale` is that of Qwen38PleParams: positive for FP8 shards (row_codes are FP8 E4M3 codes), the negative of the dequantization
+  // scale for INT8 shards (row_codes are the int8 values).
+  StagedPleRig(Qwen38Plane& plane, const std::array<unsigned char, kRows>& row_codes, float scale = 1.0f)
       : plane_{plane},
         codes_{row_codes},
         stream_{plane},
@@ -650,7 +1184,7 @@ class StagedPleRig {
     params_.vocab[0] = static_cast<long long>(kRows);
     params_.shard_end[0] = static_cast<long long>(kRows);
     params_.shard_ptr[0] = shard_.data();
-    params_.scale = 1.0f;
+    params_.scale = scale;
     params_.pad_ = 1;
     params_.eos = 99;
     params_.capacity = static_cast<long long>(kPositions);
@@ -736,7 +1270,11 @@ class StagedPleRig {
   std::vector<uint16_t> ExpectedPle(const std::vector<int64_t>& tokens) const {
     std::vector<uint16_t> expected;
     for (int64_t token : tokens) {
-      expected.insert(expected.end(), kRowWidth, Bf16OfFp8(codes_[static_cast<size_t>(token) % kRows]));
+      const unsigned char code = codes_[static_cast<size_t>(token) % kRows];
+      const uint16_t value = params_.scale < 0.0f
+                                 ? Bf16Bits(static_cast<float>(static_cast<int8_t>(code)) * -params_.scale)
+                                 : Bf16OfFp8(code);
+      expected.insert(expected.end(), kRowWidth, value);
     }
     return expected;
   }
@@ -1179,67 +1717,239 @@ TEST_F(Qwen38PlaneStagedPleTest, TheLastLoaderToDetachReleasesTheStagedTablesLef
   EXPECT_EQ(end.live_pinned_allocations, 0);
 }
 
+// A negative scale marks INT8 shards: the same bytes are FP8 E4M3 codes at a positive scale (here 1, -2, NaN and a tiny negative
+// subnormal) and int8 values at a negative one. A plane library without QWEN38_PLANE_CAP_INT8_PLE decodes them as FP8.
+TEST_F(Qwen38PlaneStagedPleTest, Int8ShardsAreDecodedAsInt8ValuesWithTheMagnitudeOfTheScale) {
+  ASSERT_NE(plane_->capabilities & QWEN38_PLANE_CAP_INT8_PLE, 0ull);
+  const std::array<unsigned char, StagedPleRig::kRows> codes = {0x38, 0xC0, 0x7F, 0x81};  // 56, -64, 127 and -127
+  StagedPleRig rig{*plane_, codes, -0.25f};
+
+  const std::vector<int64_t> tokens = {0, 1, 2, 3, 6};  // token t gathers row t % 4
+  ASSERT_EQ(rig.PleRows(tokens), 0);
+  const std::vector<uint16_t> gathered = rig.ReadPle(tokens.size());
+  EXPECT_EQ(gathered, rig.ExpectedPle(tokens));
+  const std::array<uint16_t, 4> bf16_of_row = {0x4160, 0xC180, 0x41FE, 0xC1FE};  // 14, -16, 31.75, -31.75
+  for (size_t i = 0; i < tokens.size(); ++i) {
+    for (size_t c = 0; c < StagedPleRig::kRowWidth; ++c) {
+      EXPECT_EQ(gathered[i * StagedPleRig::kRowWidth + c], bf16_of_row[static_cast<size_t>(tokens[i]) % 4])
+          << "token=" << tokens[i] << " c=" << c;
+    }
+  }
+
+  ASSERT_EQ(rig.PrepGeneric(6, 5, 0), 0);
+  rig.ExpectPrepResult(6, 5, 0);
+}
+
+// The CPU embedding table file of a test: `vocab` rows of `width` values that differ from row to row, as bfloat16 rows or as
+// int8 rows followed by one float scale per row (the layouts that SelectQwen38EmbeddingFormat recognizes).
+uint32_t EmbeddingValueSeed(size_t row, size_t column) {
+  uint32_t h = static_cast<uint32_t>(row) * 2654435761u ^ (static_cast<uint32_t>(column) + 1u) * 40503u;
+  h ^= h >> 15;
+  h *= 2246822519u;
+  h ^= h >> 13;
+  return h;
+}
+
+std::vector<uint8_t> MakeEmbeddingTable(int64_t vocab, int width, bool int8) {
+  const size_t rows = static_cast<size_t>(vocab);
+  const size_t columns = static_cast<size_t>(width);
+  std::vector<uint8_t> table(int8 ? rows * (columns + sizeof(float)) : rows * columns * sizeof(uint16_t));
+  if (int8) {
+    for (size_t row = 0; row < rows; ++row) {
+      for (size_t c = 0; c < columns; ++c) {
+        table[row * columns + c] = static_cast<uint8_t>(static_cast<int8_t>(EmbeddingValueSeed(row, c) % 255u - 127u));
+      }
+      const float scale = 0.001f * static_cast<float>(1u + EmbeddingValueSeed(row, columns) % 97u);
+      std::memcpy(table.data() + rows * columns + row * sizeof(float), &scale, sizeof(scale));
+    }
+  } else {
+    for (size_t row = 0; row < rows; ++row) {
+      for (size_t c = 0; c < columns; ++c) {
+        const uint16_t value = static_cast<uint16_t>(EmbeddingValueSeed(row, c) >> 8);
+        std::memcpy(table.data() + (row * columns + c) * sizeof(uint16_t), &value, sizeof(value));
+      }
+    }
+  }
+  return table;
+}
+
+// What gathering the row of `id` has to produce: the (dequantized) row, or row 0 for an id outside the table.
+std::vector<uint16_t> ExpectedEmbeddingRow(const std::vector<uint8_t>& table, int64_t vocab, int width, bool int8,
+                                           int64_t id) {
+  const size_t row = (id >= 0 && id < vocab) ? static_cast<size_t>(id) : 0;
+  const size_t columns = static_cast<size_t>(width);
+  std::vector<uint16_t> expected(columns);
+  if (int8) {
+    float scale = 0.0f;
+    std::memcpy(&scale, table.data() + static_cast<size_t>(vocab) * columns + row * sizeof(float), sizeof(scale));
+    for (size_t c = 0; c < columns; ++c) {
+      expected[c] = Bf16Bits(static_cast<float>(static_cast<int8_t>(table[row * columns + c])) * scale);
+    }
+  } else {
+    std::memcpy(expected.data(), table.data() + row * columns * sizeof(uint16_t), columns * sizeof(uint16_t));
+  }
+  return expected;
+}
+
+// Uploads `table` and `ids`, calls `gather(stream, device_table, device_ids, device_out)` and returns the gathered rows, which
+// start out as 0xABAB.
+std::vector<uint16_t> RunEmbeddingGather(
+    Qwen38Plane& plane, const std::vector<uint8_t>& table, const std::vector<int64_t>& ids, int width,
+    const std::function<void(void* stream, const void* table, const void* ids, void* out)>& gather) {
+  PlaneStream stream{plane};
+  std::vector<uint16_t> out(ids.size() * static_cast<size_t>(width), 0);
+  PlaneBuffer d_table{plane, table.size(), stream.get()};
+  PlaneBuffer d_ids{plane, ids.size() * sizeof(int64_t), stream.get()};
+  PlaneBuffer d_out{plane, out.size() * sizeof(uint16_t), stream.get()};
+  plane.Check(plane.memcpy_h2d(d_table.data(), table.data(), table.size(), stream.get()), "memcpy_h2d(table)");
+  plane.Check(plane.memcpy_h2d(d_ids.data(), ids.data(), ids.size() * sizeof(int64_t), stream.get()), "memcpy_h2d(ids)");
+  plane.Check(plane.device_memset(d_out.data(), 0xAB, d_out.size(), stream.get()), "device_memset(out)");
+  gather(stream.get(), d_table.data(), d_ids.data(), d_out.data());
+  plane.Check(plane.memcpy_d2h(out.data(), d_out.data(), out.size() * sizeof(uint16_t), stream.get()), "memcpy_d2h");
+  plane.Check(plane.stream_sync(stream.get()), "stream_sync(embedding gather)");
+  return out;
+}
+
+// Gathers `ids` from a `vocab` x `width` table through qwen38_plane_embed_gather, which is given nothing but the row count and
+// the layout, and expects every row to be that of the table; an id outside [0, vocab) reads row 0.
+void ExpectEmbedGatherAddressesTheTableByItsRowCount(Qwen38Plane& plane, int64_t vocab, int width, bool int8,
+                                                     const std::vector<int64_t>& ids) {
+  SCOPED_TRACE(std::string{int8 ? "int8" : "bfloat16"} + " table of " + std::to_string(vocab) + " rows of " +
+               std::to_string(width));
+  const std::vector<uint8_t> table = MakeEmbeddingTable(vocab, width, int8);
+  const std::vector<uint16_t> out = RunEmbeddingGather(
+      plane, table, ids, width, [&](void* stream, const void* d_table, const void* d_ids, void* d_out) {
+        plane.Check(plane.embed_gather(stream, d_table, vocab, int8 ? QWEN38_PLANE_EMBEDDING_INT8_ROW : QWEN38_PLANE_EMBEDDING_BF16,
+                                       d_ids, d_out, static_cast<int>(ids.size()), width),
+                    "embed_gather");
+      });
+  const std::vector<uint16_t> row_zero = ExpectedEmbeddingRow(table, vocab, width, int8, 0);
+  for (size_t r = 0; r < ids.size(); ++r) {
+    const std::vector<uint16_t> expected = ExpectedEmbeddingRow(table, vocab, width, int8, ids[r]);
+    const std::vector<uint16_t> row(out.begin() + static_cast<std::ptrdiff_t>(r * static_cast<size_t>(width)),
+                                    out.begin() + static_cast<std::ptrdiff_t>((r + 1) * static_cast<size_t>(width)));
+    EXPECT_EQ(row, expected) << "id=" << ids[r];
+    const bool in_table = ids[r] > 0 && ids[r] < vocab;
+    if (in_table) EXPECT_NE(expected, row_zero) << "the table cannot tell row " << ids[r] << " from row 0";
+  }
+}
+
+// Loads the built plane library on device 0 for a test of its embedding exports, or skips.
+class Qwen38PlaneEmbeddingTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    const std::filesystem::path plane_lib = GetBuiltPlaneLibraryPath();
+    if (!std::filesystem::exists(plane_lib)) {
+      GTEST_SKIP() << plane_lib.string() << " not present";
+    }
+    plane_ = std::make_unique<Qwen38Plane>(plane_lib);
+    if (plane_->set_device(0) != 0) {
+      GTEST_SKIP() << "No CUDA device available";
+    }
+    ASSERT_TRUE(plane_->embed_gather != nullptr) << "the plane library has no embed_gather";
+  }
+
+  std::unique_ptr<Qwen38Plane> plane_;
+};
+
 }  // namespace
 
-TEST(Qwen38PlaneTest, EmbedRowsDequantizesAnInt8TableAndClampsOutOfRangeTokenIds) {
+TEST_F(Qwen38PlaneEmbeddingTest, EmbedGatherDequantizesAnInt8TableAndClampsOutOfRangeTokenIds) {
+  // The row count of the table the plane once assumed, with an odd-sized hidden dimension.
+  constexpr int64_t kVocab = 248320;
+  ExpectEmbedGatherAddressesTheTableByItsRowCount(*plane_, kVocab, 36, true, {0, 1, 123456, kVocab - 1, kVocab, -1});
+}
+
+TEST_F(Qwen38PlaneEmbeddingTest, EmbedGatherAddressesAnInt8TableSmallerThanTheOldFixedVocabularyByItsOwnRowCount) {
+  // 1000 rows of 16 are 16000 bytes of int8 values followed by 1000 float scales: a 20000-byte file whose scales start at
+  // byte 16000, not at the 248320 * 16 that a plane with a vocabulary of its own would read them from.
+  constexpr int64_t kVocab = 1000;
+  constexpr int kWidth = 16;
+  ASSERT_EQ(MakeEmbeddingTable(kVocab, kWidth, true).size(), 20000u);
+  ExpectEmbedGatherAddressesTheTableByItsRowCount(*plane_, kVocab, kWidth, true,
+                                                  {0, 5, 999, 1000, 4000, -1, 248319, 248320, 3, 998});
+}
+
+TEST_F(Qwen38PlaneEmbeddingTest, EmbedGatherAddressesAnInt8TableLargerThanTheOldFixedVocabularyByItsOwnRowCount) {
+  // Rows from 248320 on are in this table; the ids just past it read row 0.
+  constexpr int64_t kVocab = 248320 + 77;
+  ExpectEmbedGatherAddressesTheTableByItsRowCount(
+      *plane_, kVocab, 8, true, {248319, 248320, 248321, 248396, kVocab, kVocab + 1000, 123456, -1, -248320});
+}
+
+TEST_F(Qwen38PlaneEmbeddingTest, EmbedGatherAddressesABf16TableByItsOwnRowCount) {
+  ExpectEmbedGatherAddressesTheTableByItsRowCount(*plane_, 1000, 16, false, {0, 5, 999, 1000, 4000, -1, 248319, 248320});
+  constexpr int64_t kVocab = 248320 + 77;
+  ExpectEmbedGatherAddressesTheTableByItsRowCount(*plane_, kVocab, 8, false,
+                                                  {248319, 248320, 248396, kVocab, kVocab + 1000, 0, -7});
+}
+
+TEST_F(Qwen38PlaneEmbeddingTest, EmbedGatherRejectsArgumentsThatDoNotDescribeATable) {
+  PlaneStream stream{*plane_};
+  PlaneBuffer table{*plane_, 4096, stream.get()};
+  PlaneBuffer ids{*plane_, 4 * sizeof(int64_t), stream.get()};
+  PlaneBuffer out{*plane_, 4 * 64 * sizeof(uint16_t), stream.get()};
+  const auto gather = [&](long long table_rows, int format, int n, int width) {
+    return plane_->embed_gather(stream.get(), table.data(), table_rows, format, ids.data(), out.data(), n, width);
+  };
+
+  EXPECT_EQ(gather(64, QWEN38_PLANE_EMBEDDING_BF16, 2, 16), 0);
+  EXPECT_EQ(gather(64, QWEN38_PLANE_EMBEDDING_INT8_ROW, 2, 16), 0);
+  // Nothing to gather is not an error, whatever the table.
+  EXPECT_EQ(plane_->embed_gather(stream.get(), nullptr, 0, 7, nullptr, nullptr, 0, 0), 0);
+  EXPECT_EQ(plane_->embed_gather(stream.get(), nullptr, 0, 7, nullptr, nullptr, -1, 0), 0);
+
+  EXPECT_EQ(gather(0, QWEN38_PLANE_EMBEDDING_BF16, 2, 16), kCudaErrorInvalidValue);
+  EXPECT_EQ(gather(-5, QWEN38_PLANE_EMBEDDING_BF16, 2, 16), kCudaErrorInvalidValue);
+  EXPECT_EQ(gather(64, QWEN38_PLANE_EMBEDDING_BF16, 2, 0), kCudaErrorInvalidValue);
+  // The width of an INT8 table is a layout, no longer a negative width.
+  EXPECT_EQ(gather(64, QWEN38_PLANE_EMBEDDING_BF16, 2, -16), kCudaErrorInvalidValue);
+  EXPECT_EQ(gather(64, QWEN38_PLANE_EMBEDDING_INT8_ROW, 2, -16), kCudaErrorInvalidValue);
+  EXPECT_EQ(gather(64, 7, 2, 16), kCudaErrorInvalidValue);
+  EXPECT_EQ(gather(64, -1, 2, 16), kCudaErrorInvalidValue);
+  // 3 rows of 6 int8 values are 18 bytes, so the float scales that follow them would not be aligned.
+  EXPECT_EQ(gather(3, QWEN38_PLANE_EMBEDDING_INT8_ROW, 2, 6), kCudaErrorInvalidValue);
+  plane_->Check(plane_->stream_sync(stream.get()), "stream_sync(embed_gather arguments)");
+}
+
+TEST_F(Qwen38PlaneEmbeddingTest, EmbedRowsOfALibraryBeforeEmbedGatherStillGathersBf16RowsAndHasNoInt8Mode) {
+  if (!plane_->embed_rows) {
+    GTEST_SKIP() << "the plane library has no embed_rows";
+  }
+  constexpr int64_t kVocab = 64;
+  constexpr int kWidth = 16;
+  constexpr size_t kColumns = static_cast<size_t>(kWidth);
+  const std::vector<uint8_t> table = MakeEmbeddingTable(kVocab, kWidth, false);
+  const std::vector<int64_t> ids = {3, 63, 0};
+
+  const std::vector<uint16_t> gathered = RunEmbeddingGather(
+      *plane_, table, ids, kWidth, [&](void* stream, const void* d_table, const void* d_ids, void* d_out) {
+        plane_->embed_rows(stream, d_table, d_ids, d_out, static_cast<int>(ids.size()), kWidth);
+      });
+  for (size_t r = 0; r < ids.size(); ++r) {
+    const std::vector<uint16_t> row(gathered.begin() + static_cast<std::ptrdiff_t>(r * kColumns),
+                                    gathered.begin() + static_cast<std::ptrdiff_t>((r + 1) * kColumns));
+    EXPECT_EQ(row, ExpectedEmbeddingRow(table, kVocab, kWidth, false, ids[r])) << "id=" << ids[r];
+  }
+
+  // A negative width, once how an INT8 table was requested, now writes nothing instead of reading the table as bfloat16.
+  const std::vector<uint16_t> untouched = RunEmbeddingGather(
+      *plane_, table, ids, kWidth, [&](void* stream, const void* d_table, const void* d_ids, void* d_out) {
+        plane_->embed_rows(stream, d_table, d_ids, d_out, static_cast<int>(ids.size()), -kWidth);
+      });
+  EXPECT_EQ(untouched, std::vector<uint16_t>(untouched.size(), static_cast<uint16_t>(0xABAB)));
+}
+
+TEST(Qwen38PlaneTest, ImplementsEveryCapabilityAndExportsTheCapabilityQuery) {
   const std::filesystem::path plane_lib = GetBuiltPlaneLibraryPath();
   if (!std::filesystem::exists(plane_lib)) {
     GTEST_SKIP() << plane_lib.string() << " not present";
   }
   Qwen38Plane plane{plane_lib};
-  if (plane.set_device(0) != 0) {
-    GTEST_SKIP() << "No CUDA device available";
-  }
-  if (!plane.embed_rows) {
-    GTEST_SKIP() << "the plane library has no embed_rows";
-  }
-
-  // The per-row symmetric INT8 layout (selected by a negative width) is the int8 payload [vocab, width] followed by
-  // one float scale per row, and the plane addresses it with the model's vocabulary size.
-  constexpr int64_t kVocab = 248320;
-  constexpr int kWidth = 36;
-  std::vector<uint8_t> table(static_cast<size_t>(kVocab) * (kWidth + sizeof(float)));
-  auto* payload = reinterpret_cast<int8_t*>(table.data());
-  std::vector<float> scales(static_cast<size_t>(kVocab));
-  for (int64_t row = 0; row < kVocab; ++row) {
-    scales[static_cast<size_t>(row)] = 0.003f * static_cast<float>(1 + row % 11);
-    for (int c = 0; c < kWidth; ++c) {
-      payload[row * kWidth + c] = static_cast<int8_t>((row * 31 + c * 7) % 255 - 127);
-    }
-  }
-  std::memcpy(table.data() + static_cast<size_t>(kVocab) * kWidth, scales.data(), scales.size() * sizeof(float));
-
-  // Out-of-range ids read row 0.
-  const std::vector<int64_t> ids = {0, 1, 123456, kVocab - 1, kVocab, -1};
-  const int rows = static_cast<int>(ids.size());
-  std::vector<uint16_t> out(static_cast<size_t>(rows) * kWidth, 0);
-
-  void* stream = nullptr;
-  plane.Check(plane.stream_create(&stream), "stream_create");
-  PlaneBuffer d_table{plane, table.size(), stream};
-  PlaneBuffer d_ids{plane, ids.size() * sizeof(int64_t), stream};
-  PlaneBuffer d_out{plane, out.size() * sizeof(uint16_t), stream};
-  plane.Check(plane.memcpy_h2d(d_table.data(), table.data(), table.size(), stream), "memcpy_h2d(table)");
-  plane.Check(plane.memcpy_h2d(d_ids.data(), ids.data(), ids.size() * sizeof(int64_t), stream), "memcpy_h2d(ids)");
-  plane.embed_rows(stream, d_table.data(), d_ids.data(), d_out.data(), rows, -kWidth);
-  plane.Check(plane.memcpy_d2h(out.data(), d_out.data(), out.size() * sizeof(uint16_t), stream), "memcpy_d2h");
-  plane.Check(plane.stream_sync(stream), "stream_sync(embed_rows)");
-  plane.stream_destroy(stream);
-
-  // bfloat16 round to nearest even of the dequantized value.
-  auto to_bf16 = [](float value) {
-    uint32_t bits = 0;
-    std::memcpy(&bits, &value, sizeof(bits));
-    bits += 0x7FFFu + ((bits >> 16) & 1u);
-    return static_cast<uint16_t>(bits >> 16);
-  };
-  for (int r = 0; r < rows; ++r) {
-    const int64_t token = (ids[r] >= 0 && ids[r] < kVocab) ? ids[r] : 0;
-    for (int c = 0; c < kWidth; ++c) {
-      const float expected = static_cast<float>(payload[token * kWidth + c]) * scales[static_cast<size_t>(token)];
-      EXPECT_EQ(out[static_cast<size_t>(r) * kWidth + c], to_bf16(expected)) << "id=" << ids[r] << " c=" << c;
-    }
-  }
+  EXPECT_EQ(plane.capabilities, static_cast<unsigned long long>(QWEN38_PLANE_ALL_CAPABILITIES));
+  EXPECT_TRUE(plane.embed_gather != nullptr);
+  EXPECT_EQ(std::filesystem::path{plane.library_path}.filename(), plane_lib.filename());
+  EXPECT_NO_THROW(plane.RequireCapabilities(QWEN38_PLANE_ALL_CAPABILITIES, "an INT8 package"));
 }
 #endif
 
