@@ -2159,6 +2159,13 @@ token. The device holds `model.qwen38_graph.max_batch_size` slots (default 1), o
   `Reset()` (which clears the bits): a cancellation or stop-string match that leaves a cycle behind therefore still fails the
   next request or the rewind when that cycle went wrong. At Engine teardown the device is only drained: nobody is left to
   report to. A fatal execution failure poisons the mutable device context across Engine leases until the model is reloaded.
+- With several slots the DFlash2 drafter proposes for one slot after the other without waiting for the device in between.
+  A step tensor larger than a launch can carry (4032 bytes: the block table of a long context) is uploaded from its host
+  mirror when the device reaches the copy, so one shared mirror per tensor would be rewritten by the next slot's proposal
+  before the previous upload ran, and the first slot would read another request's block ids. The engine therefore asks the
+  drafter for a fresh mirror per upload (`Dflash2Drafter::SetFreshStagingMirrors`, `Dflash2HostStaging`): the pinned-mirror
+  pool hands a mirror out again only after the upload that read it has run, and never waits for the device to do so. A
+  single-slot engine keeps one mirror per tensor, as before.
 - `ModelExecutor::ValidateTurn` and `BackendCapabilities` reject, before any Request mutation, what the device loop cannot do:
   sampling, repetition penalty, no-repeat n-grams, `min_generated_tokens`, seeds and guidance. `MaxDraftTokensPerStep()` is
   zero (the caller cannot attach drafts). `GetCapabilities()` reports the resolved slot count and `max_request_length` =

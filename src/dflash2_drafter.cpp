@@ -740,7 +740,7 @@ Tensor& Dflash2Drafter::StepTensor(std::unique_ptr<Tensor>& slot, DeviceInterfac
     ReleaseCapturedGraphs();
     if (displaced) {
       model_->p_device_->Synchronize();
-      staging_.erase(displaced.get());
+      staging_.Forget(displaced.get());
     }
     ++buffer_generation_;
   }
@@ -748,12 +748,8 @@ Tensor& Dflash2Drafter::StepTensor(std::unique_ptr<Tensor>& slot, DeviceInterfac
 }
 
 DeviceSpan<uint8_t> Dflash2Drafter::Staging(Tensor& tensor) {
-  auto [it, inserted] = staging_.try_emplace(&tensor);
-  if (inserted) {
-    it->second = tensor.p_device_->WrapMemory(
-        std::span<uint8_t>{static_cast<uint8_t*>(tensor.GetMutableRawData()), tensor.bytes_});
-  }
-  return it->second.subspan(0, tensor.GetElementCount() * Ort::SizeOf(tensor.type_));
+  return staging_.Acquire(*tensor.p_device_, &tensor, tensor.GetMutableRawData(), tensor.bytes_,
+                          tensor.GetElementCount() * Ort::SizeOf(tensor.type_));
 }
 
 void Dflash2Drafter::ReleaseCapturedGraphs() noexcept {
@@ -1318,7 +1314,9 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
     run_options_->AddConfigEntry("gpu_graph_id", std::to_string(annotation_id).c_str());
     // A replayed step that proposes drafts reads its outputs back below with a synchronizing copy,
     // so the run itself need not wait for the device; the copy also drains the uploads from the
-    // step tensors' host mirrors before the next step rewrites them.
+    // step tensors' host mirrors before the next step rewrites them. A step that selects its drafts on
+    // the device has no such copy: a caller that proposes again without waiting for the device takes
+    // fresh mirrors (SetFreshStagingMirrors).
     const bool async_run = device_selection ||
                            (capture && drafts_wanted && device->GetType() == DeviceType::CUDA);
     run_options_->AddConfigEntry("disable_synchronize_execution_providers", async_run ? "1" : "0");

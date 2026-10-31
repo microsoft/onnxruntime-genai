@@ -329,6 +329,8 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
         dflash_model_, page_size,
         Dflash2Drafter::PoolBlocks(*model_.config_, page_size, static_cast<size_t>(max_batch_)),
         static_cast<size_t>(max_batch_));
+    // The slots are drafted one after the other without draining the stream in between.
+    dflash_->SetFreshStagingMirrors(max_batch_ > 1);
     dflash_prompt_slot_rows_ = Qwen38DflashPromptSlotRows(fast_->chunk, verify_rows_);
     d_dflash_prompt_ =
         PlaneBuffer(plane_, static_cast<size_t>(max_batch_) * dflash_prompt_slot_rows_ * kDflashWidth * 2, stream_);
