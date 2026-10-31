@@ -406,6 +406,7 @@ struct StringArray_Element : JSON::Element {
 struct SessionOptions_Element : JSON::Element {
   explicit SessionOptions_Element(Config::SessionOptions& v) : v_{v} {}
 
+  // The typed options handled here are listed in IsTypedSessionOptionName; keep the two in sync.
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "log_id") {
       v_.log_id = JSON::Get<std::string_view>(value);
@@ -2974,10 +2975,24 @@ struct RuntimeProfileDynamicBatching_Element : JSON::Element {
   Config::RuntimeProfile::Overlay::DynamicBatching& v_;
 };
 
+// The session options that SessionOptions_Element parses into typed fields. Everything else is an ORT config entry.
+bool IsTypedSessionOptionName(std::string_view name) {
+  static constexpr std::string_view kTypedNames[] = {
+      "log_id", "enable_profiling", "intra_op_num_threads", "inter_op_num_threads", "log_severity_level",
+      "log_verbosity_level", "enable_cpu_mem_arena", "enable_mem_pattern", "use_deterministic_compute",
+      "graph_optimization_level", "custom_ops_library", "custom_ops_libraries"};
+  return std::find(std::begin(kTypedNames), std::end(kTypedNames), name) != std::end(kTypedNames);
+}
+
 struct RuntimeProfileSessionOptions_Element : JSON::Element {
   explicit RuntimeProfileSessionOptions_Element(std::map<std::string, std::string>& v) : v_{v} {}
 
   void OnValue(std::string_view name, JSON::Value value) override {
+    // A profile only overlays ORT config entries. A typed option would be passed to AddConfigEntry and have no effect.
+    if (IsTypedSessionOptionName(name)) {
+      throw std::runtime_error("runtime profile session_options only accept ORT config entries; '" +
+                               std::string{name} + "' is a typed session option");
+    }
     v_[std::string{name}] = std::string{JSON::Get<std::string_view>(value)};
   }
 
@@ -3264,6 +3279,20 @@ void ValidateRuntimeProfiles(const Config& config) {
             *profile.eligibility.maximum_total_device_memory_bytes) {
       throw std::runtime_error("runtime profile '" + profile.id +
                                "' requires more free device memory than its maximum total");
+    }
+    if (profile.eligibility.maximum_effective_host_memory_bytes &&
+        *profile.eligibility.maximum_effective_host_memory_bytes <
+            profile.eligibility.minimum_effective_host_memory_bytes.value_or(0)) {
+      throw std::runtime_error("runtime profile '" + profile.id +
+                               "' has maximum_effective_host_memory_bytes below its minimum");
+    }
+    // The available host memory never exceeds the effective host memory.
+    if (profile.eligibility.minimum_available_host_memory_bytes &&
+        profile.eligibility.maximum_effective_host_memory_bytes &&
+        *profile.eligibility.minimum_available_host_memory_bytes >
+            *profile.eligibility.maximum_effective_host_memory_bytes) {
+      throw std::runtime_error("runtime profile '" + profile.id +
+                               "' requires more available host memory than its maximum effective host memory");
     }
     const auto& batching = profile.overlay.dynamic_batching;
     const auto& search = profile.overlay.search;
@@ -3720,12 +3749,17 @@ void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device) {
     candidate.model.decoder.filename = *selected->overlay.model.decoder_filename;
   }
   for (const auto& [k, v] : selected->overlay.model.decoder_session_options) {
+    // Overlays append to config_entries, so one key can appear more than once. Update every occurrence so that a stale
+    // duplicate cannot override the profile value.
     auto& entries = candidate.model.decoder.session_options.config_entries;
-    auto it = std::find_if(entries.begin(), entries.end(),
-                           [&](const auto& pair) { return pair.first == k; });
-    if (it != entries.end()) {
-      it->second = v;
-    } else {
+    bool found = false;
+    for (auto& entry : entries) {
+      if (entry.first == k) {
+        entry.second = v;
+        found = true;
+      }
+    }
+    if (!found) {
       entries.emplace_back(k, v);
     }
   }

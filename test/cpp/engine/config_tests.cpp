@@ -426,6 +426,47 @@ TEST(ConfigTest, RuntimeProfileAppliesDecoderSessionOptionsAndHostMemoryEligibil
   EXPECT_EQ(entries["session.moe.offload.host_expert_bytes"], "42949672960");
 }
 
+TEST(ConfigTest, RuntimeProfileUpdatesEveryDuplicateOfASessionConfigEntry) {
+  // Every overlay appends its decoder session config entries, so one key can be present more than once.
+  Config config;
+  OverlayConfig(config, R"({"model":{"decoder":{"session_options":{"session.moe.offload.mode":"base"}}}})");
+  OverlayConfig(config, R"({"model":{"decoder":{"session_options":{"session.moe.offload.mode":"overlay"}}}})");
+  ASSERT_EQ(config.model.decoder.session_options.config_entries.size(), 2u);
+  OverlayConfig(config, R"({"runtime_profiles":[{"id":"p","eligibility":{"minimum_total_device_memory_bytes":0},
+    "overlay":{"model":{"decoder":{"session_options":{
+      "session.moe.offload.mode":"required","session.moe.offload.host_expert_bytes":"4096"}}}}}]})");
+
+  ApplyRuntimeProfile(config, 100);
+
+  // The entries are applied in order, so an entry that kept an older value would override the profile's.
+  const auto& entries = config.model.decoder.session_options.config_entries;
+  ASSERT_EQ(entries.size(), 3u);
+  for (const auto& [key, value] : entries) {
+    EXPECT_EQ(value, key == "session.moe.offload.mode" ? "required" : "4096") << key;
+  }
+}
+
+TEST(ConfigTest, RuntimeProfileSessionOptionsRejectTypedSessionOptions) {
+  // A profile overlays ORT session config entries. A typed option such as graph_optimization_level would be passed to
+  // ORT as a raw config entry, which ignores it, so it is rejected instead of silently having no effect.
+  for (const char* name : {"log_id", "enable_profiling", "intra_op_num_threads", "inter_op_num_threads",
+                           "log_severity_level", "log_verbosity_level", "enable_cpu_mem_arena", "enable_mem_pattern",
+                           "use_deterministic_compute", "graph_optimization_level", "custom_ops_library",
+                           "custom_ops_libraries"}) {
+    Config config;
+    const std::string json = std::string{R"({"runtime_profiles":[{"id":"p",
+      "eligibility":{"minimum_total_device_memory_bytes":0},
+      "overlay":{"model":{"decoder":{"session_options":{")"} +
+                             name + R"(":"1"}}}}}]})";
+    try {
+      OverlayConfig(config, json);
+      ADD_FAILURE() << name << " was accepted";
+    } catch (const std::runtime_error& error) {
+      EXPECT_NE(std::string{error.what()}.find(name), std::string::npos) << error.what();
+    }
+  }
+}
+
 TEST(ConfigTest, AvailableHostMemoryEligibilityNeedsAKnownValueAtOrAboveTheMinimum) {
   Config config;
   OverlayConfig(config, R"({"runtime_profiles":[{
@@ -463,6 +504,25 @@ TEST(ConfigTest, AvailableHostMemoryMinimumIsCheckedAgainstTheOtherProfilesEffec
       EXPECT_NO_THROW(OverlayConfig(config, json)) << available_minimum;
     }
   }
+}
+
+TEST(ConfigTest, HostMemoryBoundsAreValidatedWithinOneProfile) {
+  const auto load = [](const std::string& eligibility) {
+    Config config;
+    OverlayConfig(config, R"({"runtime_profiles":[{"id":"p","eligibility":{"minimum_total_device_memory_bytes":0,)" +
+                              eligibility + R"(},"overlay":{"search":{"chunk_size":1}}}]})");
+  };
+
+  // Like the device memory bounds, the effective host memory maximum cannot be below its minimum.
+  EXPECT_NO_THROW(load(R"("minimum_effective_host_memory_bytes":100,"maximum_effective_host_memory_bytes":100)"));
+  EXPECT_THROW(load(R"("minimum_effective_host_memory_bytes":101,"maximum_effective_host_memory_bytes":100)"),
+               std::runtime_error);
+
+  // The available host memory never exceeds the effective host memory, so a minimum above the effective maximum can
+  // never be met.
+  EXPECT_NO_THROW(load(R"("minimum_available_host_memory_bytes":100,"maximum_effective_host_memory_bytes":100)"));
+  EXPECT_THROW(load(R"("minimum_available_host_memory_bytes":101,"maximum_effective_host_memory_bytes":100)"),
+               std::runtime_error);
 }
 
 TEST(ConfigTest, ParsesMeminfoValues) {
@@ -521,10 +581,11 @@ TEST(ConfigTest, ResolvesEffectiveAndAvailableHostMemoryAgainstTheCgroup) {
   EXPECT_EQ(effective, std::optional<uint64_t>{64 * GiB});
   EXPECT_EQ(available, std::optional<uint64_t>{40 * GiB});
 
-  // The cgroup headroom stands in when MemAvailable cannot be read.
+  // The cgroup headroom does not stand in for a MemAvailable that cannot be read: the host may have less memory free
+  // than the cgroup has headroom.
   resolve({128 * GiB, std::nullopt, cgroup(64 * GiB, 54 * GiB)});
   EXPECT_EQ(effective, std::optional<uint64_t>{64 * GiB});
-  EXPECT_EQ(available, std::optional<uint64_t>{54 * GiB});
+  EXPECT_FALSE(available.has_value());
 
   // The available memory never exceeds the effective memory.
   resolve({64 * GiB, 100 * GiB});
@@ -535,10 +596,10 @@ TEST(ConfigTest, ResolvesEffectiveAndAvailableHostMemoryAgainstTheCgroup) {
   EXPECT_EQ(effective, std::optional<uint64_t>{64 * GiB});
   EXPECT_FALSE(available.has_value());
 
-  // A zero cgroup limit is ignored.
-  resolve({64 * GiB, 40 * GiB, cgroup(0, std::nullopt)});
-  EXPECT_EQ(effective, std::optional<uint64_t>{64 * GiB});
-  EXPECT_EQ(available, std::optional<uint64_t>{40 * GiB});
+  // A zero cgroup limit is a hard limit of zero bytes, not an unlimited cgroup.
+  resolve({64 * GiB, 40 * GiB, cgroup(0, 0)});
+  EXPECT_EQ(effective, std::optional<uint64_t>{0});
+  EXPECT_EQ(available, std::optional<uint64_t>{0});
 
   // A cgroup with no limit anywhere leaves the physical readings alone.
   resolve({64 * GiB, 40 * GiB, cgroup(std::nullopt, std::nullopt)});
@@ -776,6 +837,35 @@ TEST(ConfigTest, CgroupMemoryIsUnboundedWhenEveryLevelIsUnlimited) {
   EXPECT_FALSE(hybrid.headroom.has_value());
 }
 
+TEST(ConfigTest, CgroupMemoryTreatsAZeroMemoryMaxAsAHardLimit) {
+  // memory.max is "max" when a cgroup is unlimited, so a number, including zero, is a limit.
+  FakeHostFiles files;
+  files["/proc/self/cgroup"] = "0::/app/job\n";
+  files["/proc/self/mountinfo"] = std::string{kHostMountinfo};
+  AddCgroup(files, "/sys/fs/cgroup");
+  AddCgroup(files, "/sys/fs/cgroup/app");
+  AddMemoryFiles(files, "/sys/fs/cgroup/app", "0", 0);
+  AddCgroup(files, "/sys/fs/cgroup/app/job");
+  AddMemoryFiles(files, "/sys/fs/cgroup/app/job", std::to_string(8 * kGiB), 2 * kGiB);
+
+  const CgroupMemoryLimits cgroup = ResolveCgroupMemory(files);
+  EXPECT_EQ(cgroup.status, CgroupStatus::kResolved);
+  EXPECT_EQ(cgroup.limit, std::optional<uint64_t>{0});
+  EXPECT_EQ(cgroup.headroom, std::optional<uint64_t>{0});
+
+  const HostFacts facts = ResolveHostFacts(cgroup, 128 * kGiB, 100 * kGiB);
+  EXPECT_EQ(facts.effective, std::optional<uint64_t>{0});
+  EXPECT_EQ(facts.available, std::optional<uint64_t>{0});
+
+  // The host-wide memory must not make a profile eligible when the cgroup allows none.
+  Config config;
+  OverlayConfig(config, R"({"runtime_profiles":[{"id":"any-host",
+    "eligibility":{"minimum_total_device_memory_bytes":0,"minimum_effective_host_memory_bytes":1},
+    "overlay":{"search":{"chunk_size":1}}}]})");
+  ApplyRuntimeProfile(config, RuntimeProfileDeviceFacts{1, false, std::nullopt, facts.effective, facts.available});
+  EXPECT_FALSE(config.search.chunk_size.has_value());
+}
+
 TEST(ConfigTest, CgroupMemoryReadsEscapedMountsAndPicksTheMountThatShowsTheMostAncestors) {
   FakeHostFiles files;
   files["/proc/self/cgroup"] = "0::/a b/leaf\n";
@@ -974,6 +1064,56 @@ TEST(ConfigTest, IntegratedCapabilityFailureUsesBaseAndReportsError) {
   EXPECT_EQ(*config.engine.dynamic_batching->num_blocks, 32u);
   EXPECT_TRUE(config.runtime_profiles.empty());
   EXPECT_EQ(device.state->integrated_queries, 1u);
+}
+
+namespace {
+
+constexpr const char* kIntegratedRuntimeProfileConfig = R"({
+  "engine":{"dynamic_batching":{"num_blocks":32}},
+  "runtime_profiles":[
+    {"id":"integrated","eligibility":{"minimum_total_device_memory_bytes":0,"is_integrated":true},
+     "overlay":{"engine":{"dynamic_batching":{"num_blocks":40}}}},
+    {"id":"discrete","eligibility":{"minimum_total_device_memory_bytes":0,"is_integrated":false},
+     "overlay":{"engine":{"dynamic_batching":{"num_blocks":80}}}}
+  ]
+})";
+
+}  // namespace
+
+TEST(ConfigTest, ForcedRuntimeProfileDoesNotNeedTheIntegratedCapabilityQuery) {
+  Config config;
+  OverlayConfig(config, kIntegratedRuntimeProfileConfig);
+  CountingCudaDevice device;
+  device.state->total_memory_bytes = 100;
+  device.state->is_integrated = std::nullopt;  // the capability query fails
+
+  ScopedEnvironmentVariable forced{"ORTGENAI_ENABLE_RUNTIME_PROFILE", "integrated"};
+  testing::internal::CaptureStderr();
+  ApplyRuntimeProfileForSelectedDevice(config, device);
+  const auto warning = testing::internal::GetCapturedStderr();
+
+  // The forced profile is applied as written, and eligibility, which is what needs the query, is skipped.
+  EXPECT_EQ(*config.engine.dynamic_batching->num_blocks, 40u);
+  EXPECT_EQ(device.state->integrated_queries, 0u);
+  EXPECT_EQ(warning.find("test integrated-device query failed"), std::string::npos) << warning;
+  EXPECT_TRUE(config.runtime_profiles.empty());
+}
+
+TEST(ConfigTest, UnknownForcedRuntimeProfileIdFailsWhenTheIntegratedCapabilityQueryFails) {
+  Config config;
+  OverlayConfig(config, kIntegratedRuntimeProfileConfig);
+  CountingCudaDevice device;
+  device.state->total_memory_bytes = 100;
+  device.state->is_integrated = std::nullopt;
+
+  ScopedEnvironmentVariable forced{"ORTGENAI_ENABLE_RUNTIME_PROFILE", "no-such-profile"};
+  try {
+    ApplyRuntimeProfileForSelectedDevice(config, device);
+    FAIL() << "An unknown forced profile id must not fall back to the base settings";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(std::string{error.what()}.find("no-such-profile"), std::string::npos) << error.what();
+  }
+  EXPECT_EQ(*config.engine.dynamic_batching->num_blocks, 32u);
 }
 
 TEST(ConfigTest, IntegratedEligibilityRequiresBooleanAndDisjointRanges) {

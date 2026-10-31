@@ -3,6 +3,7 @@
 
 #include "runtime_profiles.h"
 
+#include "env_utils.h"
 #include "smartptrs.h"
 
 #include <algorithm>
@@ -54,15 +55,18 @@ void ResolveHostMemoryFacts(const HostMemoryReadings& readings, std::optional<ui
     return;
   }
 
-  const bool has_cgroup_limit = cgroup.limit && *cgroup.limit > 0;
+  // A cgroup limit of zero is a hard limit, not an unlimited cgroup: only "max" means unlimited, and it leaves the limit
+  // unset.
   effective_host_bytes = readings.physical_total;
-  if (has_cgroup_limit && (!effective_host_bytes || *cgroup.limit < *effective_host_bytes)) {
+  if (cgroup.limit && (!effective_host_bytes || *cgroup.limit < *effective_host_bytes)) {
     effective_host_bytes = *cgroup.limit;
   }
 
+  // The cgroup headroom only tightens a known physical availability. It does not stand in for one that could not be
+  // read, because the host can have less free memory than the cgroup has headroom.
   available_host_bytes = readings.physical_available;
-  if (cgroup.headroom) {
-    available_host_bytes = available_host_bytes ? std::min(*available_host_bytes, *cgroup.headroom) : *cgroup.headroom;
+  if (available_host_bytes && cgroup.headroom) {
+    available_host_bytes = std::min(*available_host_bytes, *cgroup.headroom);
   }
   if (available_host_bytes && effective_host_bytes) {
     available_host_bytes = std::min(*available_host_bytes, *effective_host_bytes);
@@ -259,7 +263,6 @@ CgroupMemoryLimits ResolveProcessCgroupMemory(const HostFileReader& read_file) {
     if (!max_text || TrimWhitespace(*max_text) == "max") continue;
     const auto max_bytes = ParseCgroupBytes(*max_text);
     if (!max_bytes) return with_status(Status::kUnresolved);
-    if (*max_bytes == 0) continue;  // a zero limit is ignored, as in ResolveHostMemoryFacts
 
     const auto current_text = read_file(JoinPath(directory, "memory.current"));
     const auto current_bytes = current_text ? ParseCgroupBytes(*current_text) : std::nullopt;
@@ -342,7 +345,11 @@ void ApplyRuntimeProfileForSelectedDevice(Config& config, DeviceInterface& devic
   size_t total_device_memory_bytes{};
   device.GetAvailableMemory(available_device_memory_bytes, total_device_memory_bytes);
   std::optional<bool> is_integrated;
-  if (std::any_of(config.runtime_profiles.begin(), config.runtime_profiles.end(), [](const auto& profile) {
+  // A forced profile is selected whatever the device facts are, so it does not need the integrated-device query, and a
+  // failure of that query must not drop it.
+  const bool profile_is_forced = !GetEnv("ORTGENAI_ENABLE_RUNTIME_PROFILE").empty();
+  if (!profile_is_forced &&
+      std::any_of(config.runtime_profiles.begin(), config.runtime_profiles.end(), [](const auto& profile) {
         return profile.eligibility.is_integrated.has_value();
       })) {
     std::string error;

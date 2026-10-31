@@ -36,9 +36,11 @@ struct HostMemoryReadings {
 };
 
 // Derives the host memory facts used for runtime profile eligibility. The effective memory is the physical memory
-// capped by the cgroup limit. The available memory is capped by the cgroup headroom and never exceeds the effective
-// memory. Both are left empty when the process's cgroup is unresolved, because the host-wide values would then
-// overstate what the process may use.
+// capped by the cgroup limit. The available memory is the physical availability capped by the cgroup headroom, and
+// never exceeds the effective memory; it stays empty when the physical availability was not reported, because the
+// cgroup headroom says nothing about how much memory the host has free. A zero cgroup limit is a hard limit. Both facts
+// are left empty when the process's cgroup is unresolved, because the host-wide values would then overstate what the
+// process may use.
 void ResolveHostMemoryFacts(const HostMemoryReadings& readings, std::optional<uint64_t>& effective_host_bytes,
                             std::optional<uint64_t>& available_host_bytes) noexcept;
 
