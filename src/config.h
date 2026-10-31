@@ -884,6 +884,9 @@ struct Config {
       size_t max_scheduled_tokens{2048};            // Maximum tokens in one dynamically batched model run.
       std::optional<bool> prefix_caching;
       size_t dflash2_max_snapshots{1};  // Budget-limited windowed drafter prefix snapshots; 0 disables.
+      bool enable_recompute_preemption{false};
+      size_t max_preemptions_per_step{1};
+      size_t min_decode_steps_before_preemption{8};
     };
     std::optional<DynamicBatching> dynamic_batching;  // Dynamic batching settings
 
@@ -926,6 +929,9 @@ struct Config {
         std::optional<size_t> max_batch_size;
         std::optional<size_t> max_scheduled_tokens;
         std::optional<size_t> dflash2_max_snapshots;
+        std::optional<bool> enable_recompute_preemption;
+        std::optional<size_t> max_preemptions_per_step;
+        std::optional<size_t> min_decode_steps_before_preemption;
       } dynamic_batching;
 
       struct Search {

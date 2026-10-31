@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <limits>
 #include <numeric>
+#include <unordered_map>
 #include <set>
 #include <string_view>
 #include <unordered_set>
@@ -1025,8 +1026,46 @@ void PagedKeyValueCache::RebuildBlockTableIndex() noexcept {
   }
 }
 
-StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
-  const size_t committed_request_count = block_tables_.size();
+StepPlanningResult PagedKeyValueCache::PlanStepResources(
+    StepPlan& plan, std::span<const void* const> released_requests) const {
+  if (!released_requests.empty() &&
+      (Windowed() || prefix_cache_->Options().requires_checkpoint)) {
+    throw StepPlanningConsistencyError(
+        "Preemption planning does not support windowed or fixed-state caches.");
+  }
+  const auto find_table = [this](const void* request_id) {
+    const auto index = block_table_index_->Find(request_id);
+    return index ? &block_tables_[*index] : nullptr;
+  };
+  std::optional<RequestIndex> released_ids;
+  std::optional<std::unordered_map<size_t, size_t>> released_references;
+  if (!released_requests.empty()) {
+    released_ids.emplace(released_requests.size());
+    released_references.emplace();
+  }
+  for (size_t index = 0; index < released_requests.size(); ++index) {
+    const void* request_id = released_requests[index];
+    const auto* table = find_table(request_id);
+    if (!table || !released_ids->Insert(request_id, index)) {
+      throw StepPlanningConsistencyError("Preemption release set has an unknown or duplicate request.");
+    }
+    ValidateRemove(request_id);
+    for (const auto& block : table->Blocks()) {
+      ++(*released_references)[block->Id()];
+    }
+  }
+  const auto remaining_references = [&released_references](const Block& block) {
+    if (!released_references) {
+      return block.RefCount();
+    }
+    const auto released = released_references->find(block.Id());
+    const size_t count = released == released_references->end() ? 0 : released->second;
+    if (count > block.RefCount()) {
+      throw StepPlanningConsistencyError("Preemption releases more references than a block owns.");
+    }
+    return block.RefCount() - count;
+  };
+  const size_t committed_request_count = block_tables_.size() - released_requests.size();
   if (committed_request_count > max_batch_size_) {
     throw StepPlanningConsistencyError(
         "Committed paged cache requests exceed the configured batch size.");
@@ -1040,8 +1079,21 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
         "Step plan request limit exceeds the configured batch size.");
   }
 
-  const size_t available_blocks =
+  size_t available_blocks =
       block_pool_->AvailableBlocks() + prefix_cache_->ReclaimableBlocks();
+  // A shared prefix is not freed merely because one resident relinquishes it. Count a physical
+  // block only when all request references disappear, leaving it free or retained-only.
+  if (!released_requests.empty()) {
+    for (const auto& block : block_pool_->OwnedBlocks()) {
+      if (released_references->count(block->Id()) == 0) {
+        continue;
+      }
+      const size_t remaining = remaining_references(*block);
+      if (remaining == 0 || (block->HasIdentity() && remaining == 1)) {
+        ++available_blocks;
+      }
+    }
+  }
   const size_t available_window_blocks =
       Windowed() ? window_block_pool_->AvailableBlocks() : 0;
   size_t planned_blocks = 0;
@@ -1084,13 +1136,23 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
       // contribute to available_blocks, so avoid rebuilding the pool-sized leased-ancestry bitmap
       // for every queued candidate. An optional draft checkpoint is attached only at the same
       // endpoint; this fast path relies on the fixed checkpoint, not on draft coverage.
-      for (const size_t block_id :
-           prefix_cache_->ReclaimableBlockIds(entry.prefix_match->blocks)) {
-        // Charge only paged-only retained blocks that contribute to available_blocks. Claiming a
-        // shared block once prevents later candidates from planning against capacity that the
-        // first selected adoption protects.
-        if (charged_retained_blocks.count(block_id) == 0) {
-          claimed_retained_blocks.push_back(block_id);
+      if (released_references) {
+        // Hypothetical releases have not yet updated the prefix cache's reclaimable entries.
+        for (const auto& block : entry.prefix_match->blocks) {
+          if (remaining_references(*block) == 1 &&
+              charged_retained_blocks.count(block->Id()) == 0) {
+            claimed_retained_blocks.push_back(block->Id());
+          }
+        }
+      } else {
+        for (const size_t block_id :
+             prefix_cache_->ReclaimableBlockIds(entry.prefix_match->blocks)) {
+          // Charge only paged-only retained blocks that contribute to available_blocks. Claiming a
+          // shared block once prevents later candidates from planning against capacity that the
+          // first selected adoption protects.
+          if (charged_retained_blocks.count(block_id) == 0) {
+            claimed_retained_blocks.push_back(block_id);
+          }
         }
       }
     }
@@ -1125,16 +1187,15 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
     }
     ++selected_requests;
   };
-  const auto find_table = [this](const void* request_id) {
-    const auto index = block_table_index_->Find(request_id);
-    return index ? &block_tables_[*index] : nullptr;
-  };
   RequestIndex request_ids{plan.requests.size()};
   for (size_t i = 0; i < plan.requests.size(); ++i) {
     const auto& candidate = plan.requests[i];
     if (!request_ids.Insert(candidate.request_id, i)) {
       throw StepPlanningConsistencyError(
           "Step plan contains a duplicate request.");
+    }
+    if (released_ids && released_ids->Find(candidate.request_id)) {
+      throw StepPlanningConsistencyError("Preemption plan still selects a released resident.");
     }
 
     const auto* table = find_table(candidate.request_id);

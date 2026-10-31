@@ -164,6 +164,28 @@ Generic head graphs and confined external-data files are copied only after the c
 
 For memory-dependent INT4/INT8 KV-cache graphs, use the [KV-cache variant authoring workflow](../../../../docs/ModelBuilderConfiguration.md#authoring-kv-cache-variants) to export each variant directly from the checkpoint with its own KV scheme and external-data file.
 
+Structured runtime settings also accept `enable_recompute_preemption` (strict JSON boolean,
+default `false`), `max_preemptions_per_step` (default `1`), and
+`min_decode_steps_before_preemption` (default `8`) under `engine.dynamic_batching`.
+Both limits must be integers from `1` through `2147483647`; booleans are not numeric limits.
+The same fields are accepted in runtime-profile overlays, including an explicit `false` opt-out.
+These are Engine policy settings, not legacy extra options or ONNX graph transformations.
+The runtime rejects enabled preemption for fixed/hybrid, ring/model-managed, and hosted
+auxiliary/speculative state. Logical context is preserved, but provider floating-point
+determinism must be qualified separately.
+
+```bash
+# From wheel, for a supported full-attention paged target:
+python -m onnxruntime_genai.models.builder -i target_checkpoint -o output -p fp16 -e cuda \
+  --extra_options use_paged_attention=true \
+  --runtime_config '{"engine":{"dynamic_batching":{"enable_recompute_preemption":true,"max_preemptions_per_step":1,"min_decode_steps_before_preemption":8}}}'
+
+# From source, keep the base opt-in but disable it for this memory class:
+python src/python/py/models/builder.py -i target_checkpoint -o output -p fp16 -e cuda \
+  --extra_options use_paged_attention=true \
+  --runtime_config '{"engine":{"dynamic_batching":{"enable_recompute_preemption":true}},"runtime_profiles":[{"id":"wait-only","eligibility":{"minimum_total_device_memory_bytes":0,"maximum_total_device_memory_bytes":8589934592},"overlay":{"engine":{"dynamic_batching":{"enable_recompute_preemption":false}}}}]}'
+```
+
 Python callers should pass structured dictionaries to `parse_extra_options` before calling `create_model` with its returned options. The legacy options parameter still takes a list of `KEY=VALUE` strings, not a dictionary. Pass `precision=None` explicitly when deriving it from the structured target. A standalone `create_model` call without prepared Hugging Face metadata still fails.
 
 ### Original PyTorch Model from Hugging Face

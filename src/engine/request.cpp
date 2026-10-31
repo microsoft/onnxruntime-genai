@@ -274,6 +274,8 @@ uint64_t Request::CommitTurnAdmission(
   pending_reseed_applied_ = false;
   turn_prompt_tokens_ = tokens_host_.size() - admission.host_token_count;
   turn_generated_tokens_ = 0;
+  decode_steps_since_admission_ = 0;
+  generated_since_admission_ = false;
   current_turn_id_ = next_turn_id_;
   has_current_turn_ = true;
   turn_boundaries_.push_back(
@@ -340,6 +342,7 @@ void Request::MarkClosedFromEngine(const Engine& engine) noexcept {
   assert(BelongsTo(engine));
   status_ = RequestStatus::Closed;
   needs_replay_after_rewind_ = false;
+  needs_replay_after_preemption_ = false;
   guidance_transaction_checkpoint_.reset();
   guidance_logits_processor_.reset();
   stop_controller_.reset();
@@ -362,6 +365,7 @@ void Request::MarkFailedFromEngine(const Engine& engine) noexcept {
   assert(BelongsTo(engine));
   finish_reason_ = GenerationFinishReason::Failed;
   needs_replay_after_rewind_ = false;
+  needs_replay_after_preemption_ = false;
   // A fatal failure replaces any undelivered result and becomes the sole terminal outcome.
   matched_stop_string_index_ = -1;
 }
@@ -372,6 +376,7 @@ void Request::CompleteFailedTurnFromEngine(const Engine& engine) noexcept {
   status_ = RequestStatus::TurnComplete;
   finish_reason_ = GenerationFinishReason::Failed;
   needs_replay_after_rewind_ = false;
+  needs_replay_after_preemption_ = false;
   matched_stop_string_index_ = -1;
   ReleaseTurnResources();
 }
@@ -512,6 +517,10 @@ int Request::TurnEosFloor() const noexcept {
 }
 
 const char* Request::DraftTokenValidationError() const noexcept {
+  if (params_->config.engine.dynamic_batching &&
+      params_->config.engine.dynamic_batching->enable_recompute_preemption) {
+    return "Speculative drafts are not supported with recompute preemption.";
+  }
   // A stop-enabled turn is not excluded here: draft verification observes target-accepted tokens
   // through stop_controller_ in exactly the same committed order the ordinary one-token path uses
   // (CommitAcceptedDraftsForTransaction for greedy verification, StageGenerationForTransaction for
@@ -789,6 +798,10 @@ RequestStateSnapshot Request::Snapshot() const {
   snapshot.current_turn_id = current_turn_id_;
   snapshot.finish_reason = finish_reason_;
   snapshot.matched_stop_string_index = matched_stop_string_index_;
+  snapshot.needs_cache_replay = NeedsCacheReplay();
+  snapshot.prefix_adoption_staged = prefix_adoption_staged_;
+  snapshot.preemption_count = preemption_count_;
+  snapshot.recomputed_token_count = recomputed_token_count_;
   return snapshot;
 }
 
@@ -909,11 +922,16 @@ void Request::StagePrefixAdoption(size_t adopted_tokens) {
     throw std::runtime_error(
         "A cached prefix can only be staged for an unprocessed queued request.");
   }
+  prefix_adoption_previous_length_ = adopted_prefix_length_;
+  prefix_adoption_previous_cached_tokens_ = turn_cached_prompt_tokens_;
   processed_sequence_length_ = static_cast<int64_t>(adopted_tokens);
   adopted_prefix_length_ = adopted_tokens;
-  const size_t turn_start = tokens_host_.size() - turn_prompt_tokens_;
-  turn_cached_prompt_tokens_ =
-      adopted_tokens > turn_start ? adopted_tokens - turn_start : 0;
+  // Re-adopting KV during the same Turn is not another cached prompt admission.
+  if (!needs_replay_after_preemption_ || preemption_turn_id_ != current_turn_id_) {
+    const size_t turn_start = tokens_host_.size() - turn_prompt_tokens_;
+    turn_cached_prompt_tokens_ =
+        adopted_tokens > turn_start ? adopted_tokens - turn_start : 0;
+  }
   prefix_adoption_staged_ = true;
 }
 
@@ -922,8 +940,8 @@ void Request::RollbackPrefixAdoption() noexcept {
     return;
   }
   processed_sequence_length_ = 0;
-  adopted_prefix_length_ = 0;
-  turn_cached_prompt_tokens_ = 0;
+  adopted_prefix_length_ = prefix_adoption_previous_length_;
+  turn_cached_prompt_tokens_ = prefix_adoption_previous_cached_tokens_;
   prefix_adoption_staged_ = false;
   scheduled_token_count_ = 0;
 }
@@ -933,7 +951,35 @@ bool Request::IsTurnComplete() const {
 }
 
 bool Request::IsPrefill() const {
-  return processed_sequence_length_ < prompt_sequence_length_;
+  return processed_sequence_length_ < prompt_sequence_length_ ||
+         (needs_replay_after_preemption_ &&
+          processed_sequence_length_ < static_cast<int64_t>(recompute_sequence_length_));
+}
+
+bool Request::CanSuspendForRecompute() const {
+  return (IsExecuting(status_) || Generators::IsTurnComplete(status_)) &&
+         finish_reason_ != GenerationFinishReason::Failed &&
+         processed_sequence_length_ > 0 && !prefix_adoption_staged_ &&
+         draft_tokens_.empty() && staged_draft_count_ == 0 &&
+         (Generators::IsTurnComplete(status_) || !IsPrefill());
+}
+
+void Request::SuspendForRecompute() noexcept {
+  assert(CanSuspendForRecompute());
+  recompute_sequence_length_ = tokens_host_.size();
+  // A canceled partial replay may be evicted again before rebuilding its earlier discarded KV.
+  recompute_processed_length_ = std::max(
+      recompute_processed_length_, static_cast<size_t>(processed_sequence_length_));
+  preemption_turn_id_ = current_turn_id_;
+  processed_sequence_length_ = 0;
+  scheduled_token_count_ = 0;
+  decode_steps_since_admission_ = 0;
+  generated_since_admission_ = false;
+  needs_replay_after_preemption_ = true;
+  ++preemption_count_;
+  if (!Generators::IsTurnComplete(status_)) {
+    status_ = RequestStatus::Suspended;
+  }
 }
 
 void Request::GenerateNextTokens(DeviceSpan<float> logits, bool guidance_applied) {
@@ -1115,6 +1161,7 @@ void Request::CommitStateForTransaction() {
 
 void Request::CommitStep(const RequestStepPlan& plan,
                          const RequestStepResult& result) noexcept {
+  const size_t processed_before = static_cast<size_t>(processed_sequence_length_);
   // Draft verification has already retained the accepted prefix in the host mirror and Search.
   // tokens_host_ retains its existing max-length reservation, so the final append cannot allocate
   // at this commit boundary.
@@ -1127,6 +1174,23 @@ void Request::CommitStep(const RequestStepPlan& plan,
   // A verify step reserved cache slots for every draft; the rejected ones were never committed.
   processed_sequence_length_ =
       static_cast<int64_t>(plan.target_cache_slots - (plan.draft_token_count - accepted_drafts));
+  if (needs_replay_after_preemption_) {
+    const size_t processed_after = static_cast<size_t>(processed_sequence_length_);
+    recomputed_token_count_ +=
+        std::min(recompute_processed_length_, processed_after) -
+        std::min(recompute_processed_length_, processed_before);
+    if (processed_after >= recompute_sequence_length_) {
+      needs_replay_after_preemption_ = false;
+      recompute_sequence_length_ = 0;
+      recompute_processed_length_ = 0;
+    }
+  }
+  if (result.token_appended) {
+    generated_since_admission_ = true;
+    if (!plan.is_prefill) {
+      ++decode_steps_since_admission_;
+    }
+  }
   needs_replay_after_rewind_ = false;
   status_ = result.done ? RequestStatus::TurnComplete : RequestStatus::Active;
   if (result.done) {
@@ -1430,6 +1494,11 @@ void Request::CommitRewind(RequestRewindState&& state) noexcept {
   turn_generated_tokens_ = 0;
   ReleaseTurnResources();
   needs_replay_after_rewind_ = true;
+  needs_replay_after_preemption_ = false;
+  recompute_sequence_length_ = 0;
+  recompute_processed_length_ = 0;
+  decode_steps_since_admission_ = 0;
+  generated_since_admission_ = false;
 }
 
 }  // namespace Generators

@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <exception>
 #include <optional>
 
 #include "request.h"
@@ -53,11 +54,15 @@ struct KeyValueCacheState : State {
 struct CacheManager {
   CacheManager(std::shared_ptr<Model> model) : model_{model} {}
 
-  static std::unique_ptr<CacheManager> Create(std::shared_ptr<Model> model,
-                                              size_t auxiliary_bytes_per_block = 0,
-                                              size_t auxiliary_reserved_memory_bytes = 0,
-                                              size_t optional_draft_checkpoint_bytes = 0,
-                                              bool* draft_checkpoint_enabled = nullptr);
+  // Auxiliary bytes identify model state that participates in cache capability checks.
+  // Non-auxiliary reserved bytes affect automatic sizing only (for example graph buffers).
+  static std::unique_ptr<CacheManager> Create(
+      std::shared_ptr<Model> model,
+      size_t auxiliary_bytes_per_block = 0,
+      size_t auxiliary_reserved_memory_bytes = 0,
+      size_t optional_draft_checkpoint_bytes = 0,
+      bool* draft_checkpoint_enabled = nullptr,
+      size_t non_auxiliary_reserved_memory_bytes = 0);
 
   virtual bool CanAllocate(const std::vector<std::shared_ptr<Request>>& requests) const = 0;
 
@@ -74,9 +79,8 @@ struct CacheManager {
 
   virtual void Deallocate(std::vector<std::shared_ptr<Request>>& requests) = 0;
 
-  // Validates and then releases all committed model state for a completed Request so its retained
-  // token prefix can be replayed after rewind. Validation must not mutate state. The release keeps
-  // scheduler ownership and Request identity intact.
+  // Validates and then releases committed model state so the retained token sequence can be
+  // replayed. Validation must not mutate ownership. Release keeps scheduler membership intact.
   virtual void ValidateRewind(
       const std::shared_ptr<Request>& request) const = 0;
   virtual void ReleaseForRewind(
@@ -148,6 +152,17 @@ struct CacheManager {
     throw std::logic_error("Cache manager does not support transactional step planning.");
   }
 
+  virtual bool SupportsRecomputePreemption() const { return false; }
+  // Read-only feasibility probe; shared references must be counted after all proposed releases.
+  virtual StepPlanningResult PlanStepAfterReleasing(
+      StepPlan&, std::span<const std::shared_ptr<Request>>) const {
+    throw std::logic_error("Cache manager does not support recompute preemption planning.");
+  }
+  // Validated, allocation-free publication of cache release and the Request replay boundary.
+  virtual void CommitPreemption(const std::shared_ptr<Request>&) noexcept {
+    std::terminate();
+  }
+
   // Reorders already-selected and budgeted rows for execution without changing request
   // admission or per-request token budgets.
   virtual void OrderStepForExecution(StepPlan&) const {}
@@ -200,7 +215,8 @@ struct PagedCacheManager : CacheManager {
   PagedCacheManager(std::shared_ptr<Model> model,
                     size_t auxiliary_bytes_per_block = 0,
                     size_t auxiliary_reserved_memory_bytes = 0,
-                    size_t optional_draft_checkpoint_bytes = 0);
+                    size_t optional_draft_checkpoint_bytes = 0,
+                    size_t non_auxiliary_reserved_memory_bytes = 0);
   bool DraftCheckpointEnabled() const noexcept { return draft_checkpoint_capacity_ != 0; }
   size_t DraftCheckpointCapacity() const noexcept override { return draft_checkpoint_capacity_; }
 
@@ -236,6 +252,13 @@ struct PagedCacheManager : CacheManager {
   size_t ResidentRequestCount() const override { return cache_allocated_requests_.size(); }
 
   size_t BlockTableColumns() const override { return key_value_cache_->BlockTableColumns(); }
+  bool SupportsRecomputePreemption() const override {
+    return !fixed_state_pool_ && key_value_cache_->MaxQueryTokensPerRequest() == 0 &&
+           !has_auxiliary_state_;
+  }
+  StepPlanningResult PlanStepAfterReleasing(
+      StepPlan& plan, std::span<const std::shared_ptr<Request>> requests) const override;
+  void CommitPreemption(const std::shared_ptr<Request>& request) noexcept override;
   size_t TargetBlockCount() const override { return key_value_cache_->MaxRequestBlockCount(); }
   size_t TargetBlockSize() const override { return key_value_cache_->BlockSize(); }
 
@@ -290,9 +313,11 @@ struct PagedCacheManager : CacheManager {
   std::unique_ptr<CacheStepReservation> ReserveStep(const StepPlan& plan) override;
 
  private:
+  void ReleaseForRewindValidated(const std::shared_ptr<Request>& request) noexcept;
   std::shared_ptr<GeneratorParams> params_;
   std::unique_ptr<PagedKeyValueCache> key_value_cache_;
   std::unique_ptr<FixedStatePool> fixed_state_pool_;
+  bool has_auxiliary_state_{};
   size_t draft_checkpoint_capacity_{};
   std::vector<std::shared_ptr<Request>> cache_allocated_requests_;
 };
