@@ -62,9 +62,9 @@ typedef struct Qwen38StateReplayDesc {
 #define QWEN38_PLANE_REPLAY_ROWS_PER_BLOCK 32  // value rows of a GatedDeltaNet state one thread block of k_replay_gdn replays
 
 // Limits of the folded multi-row prep (prep with a negative pos_add, prep_batched).
-#define QWEN38_PLANE_MAX_PREP_ROWS 8            // rows of one folded verify step
-#define QWEN38_PLANE_MAX_PREP_BATCH 8           // request slots prep_batched prepares in one call
-#define QWEN38_PLANE_CTL_WORDS_PER_SLOT 16      // int64 control words of one request slot (the `state` of prep)
+#define QWEN38_PLANE_MAX_PREP_ROWS 8        // rows of one folded verify step
+#define QWEN38_PLANE_MAX_PREP_BATCH 8       // request slots prep_batched prepares in one call
+#define QWEN38_PLANE_CTL_WORDS_PER_SLOT 16  // int64 control words of one request slot (the `state` of prep)
 
 // X(return type, name, parameter list). The exported symbol is "qwen38_plane_" + name. `stream` is a cudaStream_t.
 // CUDA runtime helpers return the cudaError_t as int (0 = success).
@@ -158,9 +158,9 @@ typedef struct Qwen38StateReplayDesc {
 #define QWEN38_PLANE_CAP_BATCHED_PREP 0x8ull
 
 // X(bit, name), in bit order.
-#define QWEN38_PLANE_CAPABILITIES(X)                    \
-  X(QWEN38_PLANE_CAP_INT8_EMBEDDING, "int8_embedding")  \
-  X(QWEN38_PLANE_CAP_INT8_PLE, "int8_ple")              \
+#define QWEN38_PLANE_CAPABILITIES(X)                                   \
+  X(QWEN38_PLANE_CAP_INT8_EMBEDDING, "int8_embedding")                 \
+  X(QWEN38_PLANE_CAP_INT8_PLE, "int8_ple")                             \
   X(QWEN38_PLANE_CAP_NEGATIVE_POS_ADD_BATCH, "negative_pos_add_batch") \
   X(QWEN38_PLANE_CAP_BATCHED_PREP, "batched_prep")
 
@@ -202,8 +202,10 @@ typedef int (*Qwen38PlaneEmbedGatherFn)(void* stream, const void* table, long lo
 //   past_pos      int64[batch][Qwen38PleParams::capacity]
 //   ple_out       bfloat16[batch][rows][n_heads * head_dim]
 // A slot whose control word state[3] is nonzero is muted: its rows are token 0 at position r with eos contexts and a zero PLE
-// row, so a slot that takes no part in the step still feeds the graph valid inputs (a table that is staged on the host
-// prepares such a slot as an idle one instead: token and position 0 + r, which the caller ignores as well).
+// row, so a slot that takes no part in the step still feeds the graph valid inputs, and its control words are left alone. A
+// table that is staged on the host prepares the rows of every slot from its control words, muted or not (those of a muted
+// slot hold token 0 at position 0 after the engine mutes it, plus the draft tokens it kept, all valid inputs); the caller
+// ignores the rows of a muted slot either way.
 // Returns 0, or the cudaError_t: cudaErrorInvalidValue before anything is launched for a `rows` or `batch` out of range or a
 // null pointer other than `committed`, and, for a PLE table staged on the host, the errors named for prep.
 typedef int (*Qwen38PlanePrepBatchedFn)(void* stream, const void* params, int rows, int batch, const void* ctx_in, void* ctx_out,
