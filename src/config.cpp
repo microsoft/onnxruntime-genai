@@ -2458,8 +2458,6 @@ struct Qwen38GraphMtp_Element : JSON::Element {
       v_.enabled = JSON::Get<bool>(value);
     } else if (name == "prefill_head") {
       v_.prefill_head = JSON::Get<bool>(value);
-    } else if (name == "skip_refeed") {
-      v_.skip_refeed = JSON::Get<bool>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -2475,8 +2473,6 @@ struct Qwen38GraphFoldHeadR2_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "filename") {
       v_.filename = JSON::Get<std::string_view>(value);
-    } else if (name == "graph_id") {
-      v_.graph_id = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -2502,17 +2498,13 @@ struct Qwen38GraphFold_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "enabled") {
       v_.enabled = JSON::Get<bool>(value);
-    } else if (name == "target_graph_id") {
-      v_.target_graph_id = SafeDoubleToInt(JSON::Get<double>(value), name);
-    } else if (name == "force_reject") {
-      v_.force_reject = JSON::Get<bool>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
   }
 
   Element& OnObject(std::string_view name) override {
-    if (name == "head_r2" || name == "mtp" || name == "drafter") return head_r2_;
+    if (name == "head_r2") return head_r2_;
     throw JSON::unknown_value_error{};
   }
 
@@ -2554,6 +2546,7 @@ struct Qwen38GraphPrefill_Element : JSON::Element {
       v_.enabled = JSON::Get<bool>(value);
     } else if (name == "chunk") {
       v_.chunk = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (v_.chunk < 0) throw std::runtime_error("prefill.chunk must not be negative (0 selects the default)");
     } else if (name == "weights_pool") {
       v_.weights_pool = JSON::Get<std::string_view>(value);
     } else if (name == "constants") {
@@ -2594,18 +2587,6 @@ struct Qwen38Graph_Element : JSON::Element {
       v_.ple_table = JSON::Get<std::string_view>(value);
     } else if (name == "kv_capacity") {
       v_.kv_capacity = SafeDoubleToInt(JSON::Get<double>(value), name);
-    } else if (name == "target_s1_graph_id") {
-      v_.target_s1_graph_id = SafeDoubleToInt(JSON::Get<double>(value), name);
-    } else if (name == "target_s2_graph_id") {
-      v_.target_s2_graph_id = SafeDoubleToInt(JSON::Get<double>(value), name);
-    } else if (name == "head_s1_graph_id") {
-      v_.head_s1_graph_id = SafeDoubleToInt(JSON::Get<double>(value), name);
-    } else if (name == "head_s2_graph_id") {
-      v_.head_s2_graph_id = SafeDoubleToInt(JSON::Get<double>(value), name);
-    } else if (name == "prefill_chunk_tokens") {
-      v_.prefill_chunk_tokens = SafeDoubleToInt(JSON::Get<double>(value), name);
-      if (v_.prefill_chunk_tokens <= 0 || (v_.prefill_chunk_tokens % 2) != 0)
-        throw std::runtime_error("prefill_chunk_tokens must be a positive even integer");
     } else if (name == "warmup") {
       v_.warmup = JSON::Get<bool>(value);
     } else {
