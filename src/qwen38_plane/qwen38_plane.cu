@@ -1439,9 +1439,29 @@ static inline ParkedStreamKey CurrentParkedStreamKey(cudaStream_t stream) {
   return ParkedStreamKey{dev, stream};
 }
 
+#ifdef QWEN38_PLANE_TEST_HOOKS
+// QWEN38_PLANE_FAULT_LAUNCH: the number of launches to let through before the next one is made to look rejected, -1 when
+// disarmed. It is not part of g_test_hooks because BeginLaunch is reached with and without g_staged_ple_mu.
+static std::atomic<int> g_test_launch_skip{-1};
+
+// A launch of no blocks is refused by the runtime, which records the error like it does for any rejected launch, in the
+// last-error slot that LaunchStatus reads; nothing runs. The launch that follows is not affected.
+static inline void RejectLaunchForTest() {
+  int skip = g_test_launch_skip.load();
+  while (skip >= 0 && !g_test_launch_skip.compare_exchange_weak(skip, skip > 0 ? skip - 1 : -1)) {
+  }
+  if (skip == 0) k_or_status<<<0, 32>>>(nullptr, 0, nullptr);
+}
+#endif
+
 // BeginLaunch drops an error that the thread may still hold from an earlier call that nobody read, so that LaunchStatus
 // reports only the launches since then. An error that sticks (a faulted context) is not dropped and still fails the launch.
-static inline void BeginLaunch() { (void)cudaGetLastError(); }
+static inline void BeginLaunch() {
+  (void)cudaGetLastError();
+#ifdef QWEN38_PLANE_TEST_HOOKS
+  RejectLaunchForTest();
+#endif
+}
 static inline int LaunchStatus() { return static_cast<int>(cudaGetLastError()); }
 static inline void ParkLaunchStatus(cudaStream_t stream) {
   if (const int err = LaunchStatus()) {
@@ -1498,7 +1518,7 @@ static cudaError_t resolve_staged_ple_geometry(const void* P, cudaStream_t strea
 // single launch. The pointers are those of prep for the slot; `committed` is null or the slot's own int. The control words and
 // the context in are read back once, as row 0 of the one-row form does; the PLE rows are gathered on the host and one block per
 // row prepares the rest, only row 0 getting the committed length. A step that fails returns its cudaError_t before it gathers
-// or launches anything.
+// or launches anything, and a launch that the runtime rejects returns its error too.
 static int prep_staged_fold_rows(cudaStream_t stream, const void* P, int rows, const void* ctx_in, void* ctx_out,
                                  void* input_ids, void* position_ids, void* committed, void* past_pos, void* ple_out,
                                  void* state) {
@@ -1545,11 +1565,12 @@ static int prep_staged_fold_rows(cudaStream_t stream, const void* P, int rows, c
     c1 = tok;
   }
   hook_launch();
+  BeginLaunch();
   k_prep_fold_staged<<<rows, 1024, 0, stream>>>(ws->params.capacity, ws->params.n_heads, ws->params.head_dim,
                                                 ws->params.scale, step, ws->scalars[1], device_rows, (i64*)ctx_out,
                                                 (i64*)input_ids, (i64*)position_ids, (int*)committed, (i64*)past_pos,
                                                 (__nv_bfloat16*)ple_out, (i64*)state);
-  return 0;
+  return LaunchStatus();
 }
 
 extern "C" {
@@ -2041,11 +2062,13 @@ QWEN38_PLANE_EXPORT int qwen38_plane_stream_sync(void* s) {
 #ifdef QWEN38_PLANE_TEST_HOOKS
 QWEN38_PLANE_EXPORT int qwen38_plane_test_inject_staged_fault(int site, int skip, int error) {
   const bool disarm = site == QWEN38_PLANE_FAULT_NONE;
-  if (site < QWEN38_PLANE_FAULT_NONE || site > QWEN38_PLANE_FAULT_THREAD_START || (!disarm && error == 0)) {
+  if (site < QWEN38_PLANE_FAULT_NONE || site > QWEN38_PLANE_FAULT_LAUNCH || (!disarm && error == 0)) {
     return (int)cudaErrorInvalidValue;
   }
   std::lock_guard<std::mutex> lock(g_staged_ple_mu);
-  g_test_hooks.fault_site = site;
+  const bool launch = site == QWEN38_PLANE_FAULT_LAUNCH;
+  g_test_launch_skip.store(launch ? (skip < 0 ? 0 : skip) : -1);
+  g_test_hooks.fault_site = launch ? QWEN38_PLANE_FAULT_NONE : site;
   g_test_hooks.fault_skip = skip < 0 ? 0 : skip;
   g_test_hooks.fault_error = error;
   return 0;
@@ -2065,7 +2088,7 @@ QWEN38_PLANE_EXPORT int qwen38_plane_test_stats(Qwen38PlaneTestStats* stats) {
   stats->prefill_capacity_rows = capacity_rows;
   stats->staged_tables = (long long)g_host_ple_workspaces.size();
   stats->attached_loaders = g_attached_loaders;
-  stats->fault_armed = g_test_hooks.fault_site != QWEN38_PLANE_FAULT_NONE ? 1 : 0;
+  stats->fault_armed = (g_test_hooks.fault_site != QWEN38_PLANE_FAULT_NONE || g_test_launch_skip.load() >= 0) ? 1 : 0;
   stats->unfenced_drains = g_test_hooks.unfenced_drains;
   stats->gather_pool_threads = g_ple_gather_pool != nullptr ? g_ple_gather_pool->pool.ThreadCount() : 0;
   return 0;

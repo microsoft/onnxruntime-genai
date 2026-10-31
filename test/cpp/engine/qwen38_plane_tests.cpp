@@ -4608,6 +4608,83 @@ TEST_F(Qwen38PlaneStagedBatchedPrepTest, ABatchOfAStagedTableIsGatheredOnTheHost
   }
 }
 
+// A launch that the CUDA runtime rejects (a bad launch configuration, no kernel image for the device) is recorded only as the last
+// error of the calling thread and the stream stays healthy, so an export that returns the status of its launch has to read it,
+// and one that gets it from a helper has to pass it on: a status that is lost leaves the outputs stale and reports success.
+// QWEN38_PLANE_FAULT_LAUNCH makes the runtime reject the launch of the next call, whichever path the call takes.
+class Qwen38PlaneLaunchStatusTest : public Qwen38PlaneStagedPleTest {
+ protected:
+  // The error that the runtime gives to the launch of no blocks that QWEN38_PLANE_FAULT_LAUNCH makes, found out with an export
+  // whose launch is rejected (argmax_part of no rows) because the code depends on the CUDA version.
+  int StatusOfALaunchOfNoBlocks() {
+    PlaneStream stream{*plane_};
+    plane_->argmax_part(stream.get(), nullptr, 0, nullptr, nullptr, 0);
+    return plane_->stream_sync(stream.get());
+  }
+
+  // Runs `call`, which returns the status of an export, with a launch that the runtime rejects: the status has to be the error of
+  // the runtime, the error must not stay behind as the last error of the thread, and the next call has to succeed again.
+  void ExpectARejectedLaunchIsReported(const std::string& what, const std::function<int()>& call) {
+    SCOPED_TRACE(what);
+    const int rejected_status = StatusOfALaunchOfNoBlocks();
+    ASSERT_NE(rejected_status, 0) << "the runtime accepts a launch of no blocks";
+    ASSERT_EQ(call(), 0) << "the call fails without a rejected launch";
+    Arm(QWEN38_PLANE_FAULT_LAUNCH, /*skip=*/0, rejected_status);
+    const int status = call();
+    const bool launched = Stats().fault_armed == 0;
+    module_->Disarm();
+    EXPECT_TRUE(launched) << "the call launched no kernel through a launch bracket";
+    EXPECT_EQ(status, rejected_status);
+    EXPECT_EQ(module_->PeekLastError(), 0) << "the rejected launch stayed behind as the last error of the thread";
+    EXPECT_EQ(call(), 0) << "the call after the rejected launch fails";
+  }
+};
+
+// The prep of one row, of a folded step and of a folded step of several slots, on a table the GPU addresses and on one that is
+// staged on the host.
+TEST_F(Qwen38PlaneLaunchStatusTest, PrepReportsARejectedLaunchOnEveryPathOfAStagedAndOfADeviceTable) {
+  ASSERT_NE(plane_->capabilities & QWEN38_PLANE_CAP_NEGATIVE_POS_ADD_BATCH, 0ull);
+  ASSERT_TRUE(plane_->prep_batched != nullptr) << "the plane library has no qwen38_plane_prep_batched";
+  const FoldScenario& scenario = FoldScenarios().front();
+  for (const bool staged : {false, true}) {
+    KernelTestDevice device{*plane_};
+    HashedPleTable table{*plane_, device, 0.3f, staged};
+    const std::string kind = staged ? "staged table, " : "device table, ";
+    for (const int pos_add : {0, -2, -8}) {
+      ExpectARejectedLaunchIsReported(kind + "prep with pos_add " + std::to_string(pos_add), [&] {
+        return table.PrepWithPosAdd(scenario.state, scenario.context, pos_add).first;
+      });
+    }
+    for (const int rows : {1, 2, 8}) {
+      ExpectARejectedLaunchIsReported(kind + "prep_batched of " + std::to_string(rows) + " rows",
+                                      [&] { return table.PrepBatchedRaw(rows, 3).error; });
+    }
+  }
+}
+
+TEST_F(Qwen38PlaneLaunchStatusTest, PleRowsReportsARejectedLaunchOfAStagedTable) {
+  StagedPleRig rig{*plane_, kAscendingRows};
+  ExpectARejectedLaunchIsReported("staged table, ple_rows", [&] { return rig.PleRows({1, 2}); });
+}
+
+// The staged prep launches once per slot: a launch that is rejected after the first slot is reported, and the slots after it
+// are not prepared.
+TEST_F(Qwen38PlaneLaunchStatusTest, ABatchStopsAtTheSlotWhoseLaunchWasRejected) {
+  ASSERT_TRUE(plane_->prep_batched != nullptr) << "the plane library has no qwen38_plane_prep_batched";
+  KernelTestDevice device{*plane_};
+  HashedPleTable table{*plane_, device, 0.3f, /*staged=*/true};
+  ASSERT_EQ(table.PrepBatchedRaw(2, 3).error, 0);
+  const int rejected_status = StatusOfALaunchOfNoBlocks();
+  ASSERT_NE(rejected_status, 0) << "the runtime accepts a launch of no blocks";
+  const Qwen38PlaneTestStats before = Stats();
+  Arm(QWEN38_PLANE_FAULT_LAUNCH, /*skip=*/1, rejected_status);
+  const HashedPleTable::RawBatchedPrep second_slot = table.PrepBatchedRaw(2, 3);
+  module_->Disarm();
+  EXPECT_EQ(second_slot.error, rejected_status);
+  EXPECT_EQ(Stats().staged_launches, before.staged_launches + 2) << "the first two slots are launched, the third is not";
+  EXPECT_EQ(module_->PeekLastError(), 0);
+}
+
 // The staged table is gathered on the host by threads of the plane library when a prefill has 32 tokens or more. They run code of
 // the library, so they have to be stopped and joined when the last loader of the module goes (a thread that is still alive could
 // return into code the host no longer has), and a loader that follows has to start threads of its own. The host never unloads

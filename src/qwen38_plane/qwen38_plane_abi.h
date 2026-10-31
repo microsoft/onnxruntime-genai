@@ -293,6 +293,7 @@ typedef enum Qwen38PlaneFaultSite {
   QWEN38_PLANE_FAULT_EVENT_CREATE = 6,  // cudaEventCreateWithFlags of a completion event (only when it is created)
   QWEN38_PLANE_FAULT_EVENT_RECORD = 7,  // cudaEventRecord of a completion event, after the kernel was launched
   QWEN38_PLANE_FAULT_THREAD_START = 8,  // creation of a gather worker thread (std::thread throws std::system_error)
+  QWEN38_PLANE_FAULT_LAUNCH = 9,        // a kernel launch that the CUDA runtime rejects (see Qwen38PlaneTestInjectFaultFn)
 } Qwen38PlaneFaultSite;
 
 typedef struct Qwen38PlaneTestStats {
@@ -310,6 +311,11 @@ typedef struct Qwen38PlaneTestStats {
 
 // Arms one fault: the (skip + 1)-th execution of `site` from now on fails with `error` instead of calling CUDA, once. A site
 // of QWEN38_PLANE_FAULT_NONE disarms. Returns 0, or cudaErrorInvalidValue for an unknown site or an `error` of 0.
+// QWEN38_PLANE_FAULT_LAUNCH does not replace a CUDA call: the (skip + 1)-th kernel launch that the module reports the status of
+// (every export that launches a kernel) is preceded by a launch of no blocks, which the runtime rejects like any bad launch
+// configuration, so what the export reports for its launch is the error that the runtime recorded (its code depends on the CUDA
+// version). The kernel itself still runs, so every argument has to be valid. `error` is not used, but like for every other site
+// it must not be 0.
 typedef int (*Qwen38PlaneTestInjectFaultFn)(int site, int skip, int error);
 // Fills `stats`. Returns 0, or cudaErrorInvalidValue for a null `stats`.
 typedef int (*Qwen38PlaneTestStatsFn)(Qwen38PlaneTestStats* stats);
