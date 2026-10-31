@@ -450,7 +450,9 @@ TEST(Qwen38PlaneCapabilityTest, DescribesCapabilitiesByName) {
   EXPECT_EQ(DescribeQwen38PlaneCapabilities(0), "none");
   EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_CAP_INT8_EMBEDDING), "int8_embedding");
   EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_CAP_INT8_PLE), "int8_ple");
-  EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_ALL_CAPABILITIES), "int8_embedding, int8_ple");
+  EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_CAP_NEGATIVE_POS_ADD_BATCH), "negative_pos_add_batch");
+  EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_ALL_CAPABILITIES),
+            "int8_embedding, int8_ple, negative_pos_add_batch");
   // A bit that this build has no name for is reported, not dropped.
   EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_CAP_INT8_PLE | (1ull << 40)), "int8_ple, unknown bits 0x10000000000");
 }
@@ -465,7 +467,7 @@ TEST(Qwen38PlaneCapabilityTest, RequireCapabilitiesNamesTheMissingCapabilityWhat
 
   // Only the capability that is missing is named as missing, and what the library does report is listed.
   try {
-    plane.RequireCapabilities(QWEN38_PLANE_ALL_CAPABILITIES, "the INT8 package");
+    plane.RequireCapabilities(QWEN38_PLANE_CAP_INT8_EMBEDDING | QWEN38_PLANE_CAP_INT8_PLE, "the INT8 package");
     ADD_FAILURE() << "a missing capability must be refused";
   } catch (const std::runtime_error& error) {
     const std::string message = error.what();
@@ -474,6 +476,17 @@ TEST(Qwen38PlaneCapabilityTest, RequireCapabilitiesNamesTheMissingCapabilityWhat
               std::string::npos)
         << message;
     EXPECT_NE(message.find("it reports: int8_ple"), std::string::npos) << message;
+  }
+
+  // Every missing capability is named.
+  try {
+    plane.RequireCapabilities(QWEN38_PLANE_ALL_CAPABILITIES, "the fold package");
+    ADD_FAILURE() << "a missing capability must be refused";
+  } catch (const std::runtime_error& error) {
+    const std::string message = error.what();
+    EXPECT_NE(message.find("the fold package requires the plane capability int8_embedding, negative_pos_add_batch, which"),
+              std::string::npos)
+        << message;
   }
 
   plane.capabilities = 0;  // a library that predates the capabilities export reports none
@@ -630,14 +643,18 @@ class Qwen38TestPackage {
   static constexpr size_t kBf16TableBytes = 1000 * 16 * 2;
   static constexpr size_t kInt8TableBytes = 1000 * 16 + 1000 * 4;  // INT8 rows, then one float scale per row
 
-  Qwen38TestPackage() : dir_{MakeScratchDir("package_support")} {
+  // `fold` makes it a package of the folded MTP stack (model.qwen38_graph.fold.enabled).
+  explicit Qwen38TestPackage(bool fold = false) : dir_{MakeScratchDir(fold ? "package_support_fold" : "package_support")} {
+    const std::string fold_stack =
+        fold ? R"(,"mtp":{"enabled":true},"fold":{"enabled":true,"head_r2":{"filename":"head_r2.onnx"}})" : "";
     WriteFile(dir_ / "genai_config.json",
               R"({"model":{"type":"qwen38_flash_graph","vocab_size":1000,"context_length":64,
                   "decoder":{"filename":"model.onnx","hidden_size":16,"num_attention_heads":1,"num_hidden_layers":1,
                              "num_key_value_heads":1,"head_size":16},
                   "embedding":{"filename":"embedding.onnx"},
                   "qwen38_graph":{"plane_library":"plane.so","ple_table":"ple_table.txt",
-                                  "head":{"filename_s1":"head.onnx"}}},
+                                  "head":{"filename_s1":"head.onnx"})" +
+                  fold_stack + R"(}},
                   "search":{"max_length":64}})");
     config_ = std::make_unique<Config>(fs::path{dir_.string()}, std::string_view{});
   }
@@ -719,6 +736,55 @@ TEST(Qwen38PackageSupportTest, EachInt8FormatNeedsItsOwnCapability) {
   Qwen38Plane both;
   InitCurrentStubPlane(both);
   EXPECT_EQ(package.Require(both), Qwen38EmbeddingFormat::kInt8);
+}
+
+// The folded MTP stack prepares the rows of a verify step with one negative-pos_add call (negative_pos_add_batch). A library
+// without it would prepare the first row and leave the others stale, so the model must not load with it.
+TEST(Qwen38PackageSupportTest, AFoldedPackageNeedsTheBatchedPrepCapabilityAtModelLoad) {
+  Qwen38TestPackage folded{/*fold=*/true};
+  folded.Write(kValidPleTable, Qwen38TestPackage::kBf16TableBytes);
+
+  Qwen38Plane legacy;
+  InitLegacyStubPlane(legacy);
+  ExpectMissingCapability([&] { folded.Require(legacy); }, "negative_pos_add_batch", "model.qwen38_graph.fold",
+                          "legacy/libqwen38_plane.so");
+
+  // The INT8 capabilities do not stand in for it.
+  Qwen38Plane int8_only;
+  InitCurrentStubPlane(int8_only);
+  int8_only.capabilities = QWEN38_PLANE_CAP_INT8_EMBEDDING | QWEN38_PLANE_CAP_INT8_PLE;
+  ExpectMissingCapability([&] { folded.Require(int8_only); }, "negative_pos_add_batch", "model.qwen38_graph.fold",
+                          "current/libqwen38_plane.so");
+
+  Qwen38Plane batch_only;
+  InitLegacyStubPlane(batch_only);
+  batch_only.capabilities = QWEN38_PLANE_CAP_NEGATIVE_POS_ADD_BATCH;
+  EXPECT_EQ(folded.Require(batch_only), Qwen38EmbeddingFormat::kBf16);
+
+  // The other capabilities of the package are still required.
+  folded.Write(Int8PleTable(), Qwen38TestPackage::kBf16TableBytes);
+  ExpectMissingCapability([&] { folded.Require(batch_only); }, "int8_ple", folded.ple_path().string(),
+                          "legacy/libqwen38_plane.so");
+
+  Qwen38Plane current;
+  InitCurrentStubPlane(current);
+  EXPECT_EQ(folded.Require(current), Qwen38EmbeddingFormat::kBf16);
+}
+
+// A package without the fold stack never prepares more than one row per call, so it keeps loading with a library from before
+// the batch, whatever its formats (the INT8 ones with the capabilities of their own).
+TEST(Qwen38PackageSupportTest, PackagesWithoutTheFoldStackNeedNoBatchedPrepCapability) {
+  Qwen38TestPackage package;
+  package.Write(kValidPleTable, Qwen38TestPackage::kBf16TableBytes);
+  Qwen38Plane legacy;
+  InitLegacyStubPlane(legacy);
+  EXPECT_EQ(package.Require(legacy), Qwen38EmbeddingFormat::kBf16);
+
+  Qwen38Plane before_the_batch;
+  InitCurrentStubPlane(before_the_batch);
+  before_the_batch.capabilities = QWEN38_PLANE_CAP_INT8_EMBEDDING | QWEN38_PLANE_CAP_INT8_PLE;
+  package.Write(Int8PleTable(), Qwen38TestPackage::kInt8TableBytes);
+  EXPECT_EQ(package.Require(before_the_batch), Qwen38EmbeddingFormat::kInt8);
 }
 
 TEST(Qwen38PackageSupportTest, Bf16EmbeddingAndFp8PleTablesStayUsableWithALegacyLibrary) {
@@ -818,6 +884,19 @@ TEST_F(Qwen38LegacyPlaneLibraryTest, ModelPackagesAreCheckedAgainstTheLibraryAtM
   package.Write(kValidPleTable, Qwen38TestPackage::kInt8TableBytes);
   ExpectMissingCapability([&] { package.Require(*plane_); }, "int8_embedding", package.embedding_path().string(),
                           library_path_.string());
+}
+
+// The folded MTP stack needs the batched prep, which a library from before it prepares one row of: the model fails at load
+// instead of verifying stale rows, while the same package without the fold stack keeps working.
+TEST_F(Qwen38LegacyPlaneLibraryTest, FoldedPackagesAreRefusedAtModelLoad) {
+  Qwen38TestPackage folded{/*fold=*/true};
+  folded.Write(kValidPleTable, Qwen38TestPackage::kBf16TableBytes);
+  ExpectMissingCapability([&] { folded.Require(*plane_); }, "negative_pos_add_batch", "model.qwen38_graph.fold",
+                          library_path_.string());
+
+  Qwen38TestPackage plain;
+  plain.Write(kValidPleTable, Qwen38TestPackage::kBf16TableBytes);
+  EXPECT_EQ(plain.Require(*plane_), Qwen38EmbeddingFormat::kBf16);
 }
 
 #if !defined(_WIN32)
@@ -1383,6 +1462,7 @@ class StagedPleRig {
 // The fold step of every width a verify step has (S=2 .. S=8), prepared in one call and checked row by row.
 void ExpectEveryFoldStepWidthIsPreparedInOneCall(Qwen38Plane& plane, const std::array<unsigned char, 4>& codes, float scale,
                                                  bool staged) {
+  ASSERT_NE(plane.capabilities & QWEN38_PLANE_CAP_NEGATIVE_POS_ADD_BATCH, 0ull);
   StagedPleRig rig{plane, codes, scale, staged};
   const std::array<int64_t, StagedPleRig::kStateWords> state = {7, 5, 2, 0, 0, 0, 0, 0, 1, 6, 9, 4, 3, 10};
   for (int rows = 2; rows <= static_cast<int>(StagedPleRig::kMaxFoldRows); ++rows) {
@@ -2082,6 +2162,7 @@ TEST(Qwen38PlaneTest, ImplementsEveryCapabilityAndExportsTheCapabilityQuery) {
   }
   Qwen38Plane plane{plane_lib};
   EXPECT_EQ(plane.capabilities, static_cast<unsigned long long>(QWEN38_PLANE_ALL_CAPABILITIES));
+  EXPECT_NE(plane.capabilities & QWEN38_PLANE_CAP_NEGATIVE_POS_ADD_BATCH, 0ull);
   EXPECT_TRUE(plane.embed_gather != nullptr);
   EXPECT_EQ(std::filesystem::path{plane.library_path}.filename(), plane_lib.filename());
   EXPECT_NO_THROW(plane.RequireCapabilities(QWEN38_PLANE_ALL_CAPABILITIES, "an INT8 package"));
