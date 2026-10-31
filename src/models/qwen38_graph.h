@@ -127,12 +127,17 @@ Qwen38EmbeddingFormat RequireQwen38PackageSupportedByPlane(const Qwen38Plane& pl
 // fold model), one per (row count, ping-pong direction) for the S=1/S=2 head sessions and one per ring phase for the
 // standalone R=2 head. The ids are derived from the role of the run, they are not configurable, and they are distinct
 // across the sessions of a model. 0 is ORT's default annotation and -1 means "do not capture"; neither is produced.
+// The DFlash2 drafter is a session of its own that numbers the shapes it captures itself (engine/graph_annotation_ids.h),
+// so it takes none of these ids; the S=8 (seven drafts) target of its folded pipeline is a kTarget run of 8 rows.
 enum class Qwen38GraphRun { kTarget,
                             kHead,
                             kHeadR2 };
-inline constexpr int kQwen38GraphIdMaxRows = 4;    // verify rows of the target (S=1 .. S=4)
+inline constexpr int kQwen38GraphRunCount = 3;     // the enumerators above
+inline constexpr int kQwen38GraphIdMaxRows = 8;    // verify rows of the target (S=1 .. S=8)
 inline constexpr int kQwen38GraphIdMaxPhases = 8;  // ring banks / ping-pong directions of any decode mode
-// Throws std::out_of_range for a row count or phase beyond the limits above.
+static_assert(static_cast<int>(Qwen38GraphRun::kHeadR2) + 1 == kQwen38GraphRunCount,
+              "kQwen38GraphRunCount must count every Qwen38GraphRun");
+// Throws std::out_of_range for a run, row count or phase beyond the limits above.
 int Qwen38GraphAnnotationId(Qwen38GraphRun run, int rows, int phase);
 
 // The packed QSA indexer pools kQwen38IndexKeyRatio tokens into one compressed index key.

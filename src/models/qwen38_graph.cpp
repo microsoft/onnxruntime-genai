@@ -101,11 +101,13 @@ size_t DevTensor::Bytes() const {
 }
 
 int Qwen38GraphAnnotationId(Qwen38GraphRun run, int rows, int phase) {
-  if (rows < 1 || rows > kQwen38GraphIdMaxRows || phase < 0 || phase >= kQwen38GraphIdMaxPhases) {
-    throw std::out_of_range("qwen38_graph: no CUDA graph id for rows=" + std::to_string(rows) +
-                            ", phase=" + std::to_string(phase));
+  const int run_index = static_cast<int>(run);
+  if (run_index < 0 || run_index >= kQwen38GraphRunCount || rows < 1 || rows > kQwen38GraphIdMaxRows || phase < 0 ||
+      phase >= kQwen38GraphIdMaxPhases) {
+    throw std::out_of_range("qwen38_graph: no CUDA graph id for run=" + std::to_string(run_index) +
+                            ", rows=" + std::to_string(rows) + ", phase=" + std::to_string(phase));
   }
-  return 1 + (static_cast<int>(run) * kQwen38GraphIdMaxRows + (rows - 1)) * kQwen38GraphIdMaxPhases + phase;
+  return 1 + (run_index * kQwen38GraphIdMaxRows + (rows - 1)) * kQwen38GraphIdMaxPhases + phase;
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -222,13 +224,7 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
   Reset();
   if (dflash_) {
     const auto start = Clock::now();
-#if defined(_WIN32)
-    if (std::getenv("ORT_FORCE_DETERMINISTIC_MOE") == nullptr) {
-      _putenv_s("ORT_FORCE_DETERMINISTIC_MOE", "1");
-    }
-#else
-    setenv("ORT_FORCE_DETERMINISTIC_MOE", "1", 0);
-#endif
+    run_hints_.RequireDeterministicMoe();
     if (q.warmup && fast_ && fast_->unified) {
       if (fast_->chunk > 512) {
         Draft(d_dflash_prompt_.data(), static_cast<size_t>(fast_->chunk), static_cast<size_t>(capacity_), 1000, false);
