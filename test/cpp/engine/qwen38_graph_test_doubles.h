@@ -4,14 +4,14 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <map>
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
-
-#include "models/qwen38_decode_device.h"
 
 namespace Generators::test {
 
@@ -20,7 +20,8 @@ namespace Generators::test {
 //  - the "model" is a function of the position: the greedy token at sequence position p is TokenAt(p), so a Request that
 //    runs it sees the sequence prompt ++ TokenAt(H), TokenAt(H + 1), ... (H = prompt length) regardless of how the steps
 //    were chunked, and re-ingesting a longer history (a continued turn) keeps producing TokenAt of the next position;
-//  - the drafter is right on the cycles named by `accept_pattern` (cycled), so cycles commit 1 or 2 tokens;
+//  - the drafter is right on the cycles named by `accept_pattern` (cycled), so cycles commit 1 or 2 tokens; SetDrafts()
+//    switches to the fold's multi-draft cycles (2..3 drafts per verify, any accepted prefix 0..drafts per cycle);
 //  - `dense_prefill` models the fast prefill: chunks of any size advance the ledger at bank 0 (no S=2 pairs), the hand-off
 //    to the decode state happens in BeginDecode(run_cycle = true) and only once all chunks arrived, `preferred_chunk` is
 //    the chunk size the device asks the executor for;
@@ -47,6 +48,19 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
 
   bool dense_prefill{};
   size_t preferred_chunk{};
+
+  // Every verify proposes `drafts` tokens and accepts the next entry of `accepted_counts` (cycled, each 0..drafts) of them
+  // in order, so the cycle commits that many tokens + 1 (the correction, or the bonus when all were accepted). The record
+  // then reports them like the production device does, through `accepted_count`. Call it before the first Reset().
+  void SetDrafts(int drafts, std::vector<int> accepted_counts) {
+    if (drafts < 1 || drafts > 3) throw std::invalid_argument("a verify proposes 1..3 drafts");
+    for (const int count : accepted_counts) {
+      if (count < 0 || count > drafts) throw std::invalid_argument("a verify accepts 0..drafts drafts");
+    }
+    drafts_ = drafts;
+    accepted_counts_ = std::move(accepted_counts);
+    ledger_.SetNumBanks(drafts + 2);  // the bank ring of the fold: one more than the rows of a verify
+  }
 
   // ---- observation ----
   std::vector<std::string> calls;      // "reset", "expect:<n>", "prefill:<n>", "begin:<run_cycle>", "wait", "advance:<more>", "drain"
@@ -143,11 +157,24 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
     if (fail_cycle != 0 && cycle_ == fail_cycle) throw std::runtime_error("injected device validation failure");
     Qwen38CycleRecord record;
     const size_t length = ledger_.Length();
-    record.pred0 = TokenAt(length + 1);
-    record.accepted = mtp_ && accept_pattern[(cycle_ - 1) % accept_pattern.size()];
-    record.pred1 = record.accepted ? TokenAt(length + 2) : -7;  // a rejected draft leaves row 1 meaningless
-    const size_t step = record.TokenCount();
-    record.new_pending = record.accepted ? record.pred1 : record.pred0;
+    size_t accepted_drafts = 0;
+    if (accepted_counts_.empty()) {
+      record.accepted = mtp_ && accept_pattern[(cycle_ - 1) % accept_pattern.size()];  // the legacy single-draft flag
+      accepted_drafts = record.accepted ? 1 : 0;
+    } else {
+      accepted_drafts = mtp_ ? static_cast<size_t>(accepted_counts_[(cycle_ - 1) % accepted_counts_.size()]) : 0;
+      record.accepted = accepted_drafts > 0;
+      record.accepted_count = static_cast<int>(accepted_drafts);
+    }
+    record.proposed_count = mtp_ ? drafts_ : 1;
+    // Rows after the first mismatch are meaningless; the cycle commits the accepted drafts and one token more.
+    const size_t step = accepted_drafts + 1;
+    const std::array<int64_t*, 4> predictions{&record.pred0, &record.pred1, &record.pred2, &record.pred3};
+    for (size_t i = 0; i < predictions.size(); ++i) {
+      *predictions[i] = i < step ? TokenAt(length + 1 + i) : -7;
+    }
+    if (record.TokenCount() != step) throw std::logic_error("the scripted record disagrees with its own token count");
+    record.new_pending = *predictions[step - 1];
     record.new_length = static_cast<int64_t>(length + step);
     return record;
   }
@@ -171,7 +198,7 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
 
  private:
   void Enqueue() {
-    ledger_.RequireRoom(2, "the next verify step");
+    ledger_.RequireRoom(static_cast<size_t>(drafts_) + 1, "the next verify step");
     inflight_ = true;
     running_ = true;
     ++cycle_;
@@ -187,6 +214,8 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
 
   int capacity_;
   bool mtp_;
+  int drafts_{1};
+  std::vector<int> accepted_counts_;
   Qwen38DecodeLedger ledger_;
   bool inflight_{};
   bool running_{};
