@@ -499,6 +499,35 @@ TEST(Qwen38FoldIoTest, StateOutputsBindOverTheMatchingInputs) {
   EXPECT_EQ(Qwen38FoldStateInput("next_tokens"), nullptr);
 }
 
+// The engine owns a device buffer for each input of the SpeculativePrefixCommit node (rc4 contract) and for nothing else. The
+// rc3 node had a fifth input, fold.ctx_b: the target of such a package has to be refused by name when it is built, not fail with
+// the "map::at" of a container lookup.
+TEST(Qwen38FoldIoTest, TheFoldModelMayOnlyTakeTheInputsOfTheContract) {
+  const char* const contract_inputs[] = {"fold.ctl", "fold.ctx_commit", "fold.ctx_a", "fold.ptrs"};
+  EXPECT_STREQ(kQwen38FoldCtl, contract_inputs[0]);
+  EXPECT_STREQ(kQwen38FoldCtxCommit, contract_inputs[1]);
+  EXPECT_STREQ(kQwen38FoldCtxA, contract_inputs[2]);
+  EXPECT_STREQ(kQwen38FoldPtrs, contract_inputs[3]);
+  for (const char* name : contract_inputs) {
+    EXPECT_NO_THROW(RequireQwen38FoldInput(name)) << name;
+  }
+
+  // The rc3 input, near misses, and the names of the outputs of the node: none of them is an input the engine can bind.
+  for (const char* name : {"fold.ctx_b", "fold.ptrs2", "fold.ctx_a ", "fold.CTL", "fold.", "fold", "fold.tail_done",
+                           "fold.ctl_out", "fold.ctx_commit_out"}) {
+    try {
+      RequireQwen38FoldInput(name);
+      ADD_FAILURE() << "the fold input '" << name << "' was accepted";
+    } catch (const std::runtime_error& error) {
+      const std::string message = error.what();
+      EXPECT_NE(message.find(std::string("the input '") + name + "'"), std::string::npos) << message;
+      EXPECT_NE(message.find("SpeculativePrefixCommit contract of ORT #33474"), std::string::npos) << message;
+      for (const char* valid : contract_inputs) EXPECT_NE(message.find(valid), std::string::npos) << message;
+      EXPECT_EQ(message.find("map::at"), std::string::npos) << message;
+    }
+  }
+}
+
 TEST(Qwen38CycleRecordTest, AcceptedCyclesCommitTwoTokens) {
   Qwen38CycleRecord record;
   EXPECT_EQ(record.TokenCount(), 1u);

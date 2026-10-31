@@ -634,11 +634,11 @@ void Qwen38GraphEngine::FastAppendSlot(int slot, std::span<const int32_t> tokens
         binding->BindInput(name.c_str(), view(f.idx.data() + 8, {1}, i32));
       else if (name == ple_name)
         binding->BindInput(name.c_str(), view(f.ples.data(), {1, int64_t(m), ple_width_}, bf16));
-      else if (name == "fold.ctl")
+      else if (name == kQwen38FoldCtl)
         binding->BindInput(name.c_str(), view(ctl_slot(slot), {kFoldCtlWords}, i64));
-      else if (name == "fold.ctx_commit")
+      else if (name == kQwen38FoldCtxCommit)
         binding->BindInput(name.c_str(), view(ctx_commit_slot(slot), {kFoldCtxCommitWords}, i64));
-      else if (name == "fold.ctx_a")
+      else if (name == kQwen38FoldCtxA)
         binding->BindInput(name.c_str(), view(ctx_a_slot(slot), {2 * verify_rows_}, i64));
       else if (fold_tensors_.count(name))
         binding->BindInput(name.c_str(), *fold_tensors_.at(name)->value);

@@ -843,6 +843,7 @@ void Qwen38GraphEngine::BuildTarget() {
   ple_layer_ = -1;
   for (const auto& name : in_names) {
     if (fold_ && StartsWith(name, "fold.")) {
+      RequireQwen38FoldInput(name);
       kinds[name] = Kind::kFold;
     } else if (fold_ && StartsWith(name, "head.past_key_values.0.")) {
       kinds[name] = Kind::kHeadIn;
@@ -1145,10 +1146,10 @@ void Qwen38GraphEngine::BuildTarget() {
     plane_.Check(plane_.memcpy_h2d(fold_ptrs_.data(), ptrs, sizeof(ptrs), stream_), "fold ptrs");
     SyncStream();  // ptrs lives on the stack
     const auto i64 = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64;
-    fold_tensors_["fold.ctl"] = MakeTensor(ctl_.data(), {kFoldCtlWords}, i64);
-    fold_tensors_["fold.ctx_commit"] = MakeTensor(ctx_commit_.data(), {kFoldCtxCommitWords}, i64);
-    fold_tensors_["fold.ctx_a"] = MakeTensor(ctx_a_.data(), {2 * verify_rows_}, i64);
-    fold_tensors_["fold.ptrs"] = MakeTensor(fold_ptrs_.data(), {2}, i64);
+    fold_tensors_[kQwen38FoldCtl] = MakeTensor(ctl_.data(), {kFoldCtlWords}, i64);
+    fold_tensors_[kQwen38FoldCtxCommit] = MakeTensor(ctx_commit_.data(), {kFoldCtxCommitWords}, i64);
+    fold_tensors_[kQwen38FoldCtxA] = MakeTensor(ctx_a_.data(), {2 * verify_rows_}, i64);
+    fold_tensors_[kQwen38FoldPtrs] = MakeTensor(fold_ptrs_.data(), {2}, i64);
   }
 
   // Per-row-count inputs
@@ -1407,11 +1408,11 @@ void Qwen38GraphEngine::BuildTarget() {
             case Kind::kFold:
               // The slots lie kFoldCtlWords, kFoldCtxCommitWords and kFoldCtxAWords words apart whatever the verify width, as the
               // plane prepares them (QWEN38_PLANE_CTL_WORDS_PER_SLOT, QWEN38_PLANE_CTX_WORDS_PER_SLOT).
-              if (name == "fold.ctl")
+              if (name == kQwen38FoldCtl)
                 t = add_view(name, ctl_.data(), {B * kFoldCtlWords}, i64);
-              else if (name == "fold.ctx_commit")
+              else if (name == kQwen38FoldCtxCommit)
                 t = add_view(name, ctx_commit_.data(), {B * kFoldCtxCommitWords}, i64);
-              else if (name == "fold.ctx_a")  // the op derives the per-slot stride from the size: keep it equal to ctx_a_slot()
+              else if (name == kQwen38FoldCtxA)  // the op derives the per-slot stride from the size: keep it equal to ctx_a_slot()
                 t = add_view(name, ctx_a_.data(), {B * kFoldCtxAWords}, i64);
               else
                 t = fold_tensors_.at(name).get();

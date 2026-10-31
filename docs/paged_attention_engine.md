@@ -2361,6 +2361,10 @@ token. The device holds `model.qwen38_graph.max_batch_size` slots (default 1), o
   this layout wrote slot `s` at word `2 * rows * s` (the same offset only for 8 rows) and does not report `ctx_slot_stride`:
   the model refuses it for several slots, because the n-gram context a slot commits would otherwise be read from the wrong
   words with no error.
+- The fold model takes exactly the four graph inputs of the `SpeculativePrefixCommit` contract of ORT #33474: `fold.ctl`,
+  `fold.ctx_commit`, `fold.ctx_a` and `fold.ptrs`. The engine owns a device buffer for each of them and for nothing else, so
+  when it builds the target it refuses a model with any other `fold.*` input, such as the `fold.ctx_b` of the node of an earlier
+  export, with a `std::runtime_error` that names the input; export the model package again for the contract.
 - The compact `state_update` replay rewrites the recurrent, convolution and indexer state of a slot in place after a partial
   acceptance. A `CausalConvWithState` state is replayed in either physical layout, `[batch, channels, history]` (what the
   exporter writes) or `[batch, history, channels]`: `ValidateQwen38ReplayDescriptor` takes the channel count from the last
