@@ -218,10 +218,10 @@ Qwen38GraphContext SyncQwen38GraphContext(int64_t graph_positions, int configure
 // plane capability, an INT8 embedding table (<model.embedding.filename>.data of vocab_size x hidden_size INT8 rows and
 // one float scale per row) needs int8_embedding, the folded MTP verify path (model.qwen38_graph.fold.enabled), which
 // prepares all the rows of a verify step with one call, needs negative_pos_add_batch, and a configuration with several request
-// slots (ResolveQwen38MaxBatchSize > 1), which prepares the rows of every slot with one call too, needs batched_prep
-// (qwen38_graph_plane.h). Throws a std::runtime_error naming the missing capability, what required it and the library when the
-// library lacks one; BF16 and FP8 packages without the fold path or with one slot need no capability. Returns the layout of
-// the embedding table the model maps from that file: kNone when the package has no table of that shape.
+// slots (ResolveQwen38MaxBatchSize > 1), which prepares the rows of every slot with one call too, needs batched_prep and
+// ctx_slot_stride (qwen38_graph_plane.h). Throws a std::runtime_error naming the missing capability, what required it and the
+// library when the library lacks one; BF16 and FP8 packages without the fold path or with one slot need no capability.
+// Returns the layout of the embedding table the model maps from that file: kNone when the package has no table of that shape.
 Qwen38EmbeddingFormat RequireQwen38PackageSupportedByPlane(const Qwen38Plane& plane, const Config& config,
                                                            const std::filesystem::path& model_folder);
 
