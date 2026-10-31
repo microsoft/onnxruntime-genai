@@ -5,11 +5,15 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 BUILDERS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "builders"
-sys.path.insert(0, str(BUILDERS_DIR.parents[1]))
+sys.path.insert(0, str(BUILDERS_DIR.parent))
 
 
 def _load_builder_module(module_name):
+    if f"models.builders.{module_name}" in sys.modules:
+        return sys.modules[f"models.builders.{module_name}"]
     spec = importlib.util.spec_from_file_location(f"models.builders.{module_name}", BUILDERS_DIR / f"{module_name}.py")
     module = importlib.util.module_from_spec(spec)
     sys.modules[f"models.builders.{module_name}"] = module
@@ -27,12 +31,22 @@ Model = base_module.Model
 
 class _FakeGQAModel:
     is_fused_qk_norm_gqa_supported = Model.is_fused_qk_norm_gqa_supported
+    uses_windowed_kv_cache = Model.uses_windowed_kv_cache
     make_group_query_attention = Model.make_group_query_attention
+    make_paged_attention = Model.make_paged_attention
     get_qk_norm_weight_names = Model.get_qk_norm_weight_names
+    get_kv_cache_scale_names = Model.get_kv_cache_scale_names
+    extend_with_optional_inputs = Model.extend_with_optional_inputs
+    get_qk_norm_weight_inputs = Model.get_qk_norm_weight_inputs
+    get_kv_cache_scale_inputs = Model.get_kv_cache_scale_inputs
+    get_attention_op_attributes = Model.get_attention_op_attributes
 
-    def __init__(self, ep="cpu", fuse_qk_norm_gqa=True):
+    def __init__(self, ep="cpu"):
         self.ep = ep
-        self.extra_options = {"fuse_qk_norm_gqa": fuse_qk_norm_gqa}
+        self.extra_options = {}
+        self.context_length_attrs = {"window_kv_cache": True}
+        self.use_paged_attention = False
+        self.kv_cache_attrs = {"quant_scheme": "none", "quant_mode": "PER_TENSOR", "bit_width": 0}
         self.num_attn_heads = 8
         self.num_kv_heads = 2
         self.head_size = 16
@@ -61,6 +75,20 @@ def test_cpu_does_not_enable_fused_qk_norm_gqa_by_default():
     assert _FakeGQAModel("cuda").is_fused_qk_norm_gqa_supported()
 
 
+@pytest.mark.parametrize("provider", ["cpu", "cuda", "webgpu", "dml", "trt-rtx"])
+@pytest.mark.parametrize("op_type", ["GroupQueryAttention", "PagedAttention"])
+@pytest.mark.parametrize("rope,use_rope_in_attn", [(False, False), (True, False), (True, True)])
+def test_qk_norm_fusion_is_automatic_only_for_supported_attention(provider, op_type, rope, use_rope_in_attn):
+    model = _FakeGQAModel(provider)
+    model.attention_attrs.update(op_type=op_type, rope=rope, use_rope_in_attn=use_rope_in_attn)
+    expected = (
+        provider in {"cuda", "webgpu"}
+        and op_type == "GroupQueryAttention"
+        and (not rope or use_rope_in_attn)
+    )
+    assert model.is_fused_qk_norm_gqa_supported() is expected
+
+
 def test_plain_gqa_omits_qk_norm_epsilon_attribute():
     model = _FakeGQAModel()
 
@@ -82,6 +110,98 @@ def test_fused_qk_norm_gqa_emits_qk_norm_epsilon_attribute():
     )
 
     assert model.nodes[-1]["attributes"]["qk_norm_epsilon"] == 1e-6
+
+
+def test_paged_attention_preserves_sliding_window_size():
+    model = _FakeGQAModel("cuda")
+    model.window_size = 4096
+
+    model.make_paged_attention(
+        "/paged",
+        q_path="q",
+        k_path="k",
+        v_path="v",
+        cumulative_sequence_lengths="cumulative_sequence_lengths",
+        past_sequence_lengths="past_sequence_lengths",
+        block_table="block_table",
+    )
+
+    assert model.nodes[-1]["attributes"]["local_window_size"] == 4096
+
+
+def test_quantized_gqa_emits_scale_inputs_and_attributes():
+    model = _FakeGQAModel("cuda")
+    model.kv_cache_attrs = {"quant_scheme": "int4_per_channel", "quant_mode": "PER_CHANNEL", "bit_width": 4}
+
+    model.make_group_query_attention("/gqa", layer_id=3, q_path="q", k_path="k", v_path="v")
+
+    node = model.nodes[-1]
+    assert node["inputs"][12:14] == [
+        "model.layers.3.attn.k_scale",
+        "model.layers.3.attn.v_scale",
+    ]
+    assert node["attributes"]["k_quant_type"] == "PER_CHANNEL"
+    assert node["attributes"]["v_quant_type"] == "PER_CHANNEL"
+    assert node["attributes"]["kv_cache_bit_width"] == 4
+
+
+def test_quantized_paged_attention_emits_scale_inputs_and_attributes():
+    model = _FakeGQAModel("cuda")
+    model.kv_cache_attrs = {"quant_scheme": "int8_per_channel", "quant_mode": "PER_CHANNEL", "bit_width": 8}
+
+    model.make_paged_attention(
+        "/paged",
+        layer_id=3,
+        q_path="q",
+        k_path="k",
+        v_path="v",
+        cumulative_sequence_lengths="cumulative_sequence_lengths",
+        past_sequence_lengths="past_sequence_lengths",
+        block_table="block_table",
+    )
+
+    node = model.nodes[-1]
+    assert node["inputs"][14:16] == [
+        "model.layers.3.attn.k_scale",
+        "model.layers.3.attn.v_scale",
+    ]
+    assert node["attributes"]["k_quant_type"] == "PER_CHANNEL"
+    assert node["attributes"]["v_quant_type"] == "PER_CHANNEL"
+    # PagedAttention derives the cache element type from the tensor, so it has no bit-width attribute.
+    assert "kv_cache_bit_width" not in node["attributes"]
+
+
+def test_quantized_paged_attention_requires_layer_id():
+    model = _FakeGQAModel("cuda")
+    model.kv_cache_attrs = {"quant_scheme": "int8_per_tensor", "quant_mode": "PER_TENSOR", "bit_width": 8}
+
+    with pytest.raises(ValueError, match="layer_id is required"):
+        model.make_paged_attention(
+            "/paged",
+            q_path="q",
+            k_path="k",
+            v_path="v",
+            cumulative_sequence_lengths="cumulative_sequence_lengths",
+            past_sequence_lengths="past_sequence_lengths",
+            block_table="block_table",
+        )
+
+
+@pytest.mark.parametrize("provided", ["q_norm_weight", "k_norm_weight"])
+def test_paged_attention_rejects_unpaired_qk_norm_weights(provided):
+    model = _FakeGQAModel("cuda")
+
+    with pytest.raises(ValueError, match="must be provided together"):
+        model.make_paged_attention(
+            "/paged",
+            q_path="q",
+            k_path="k",
+            v_path="v",
+            cumulative_sequence_lengths="cumulative_sequence_lengths",
+            past_sequence_lengths="past_sequence_lengths",
+            block_table="block_table",
+            **{provided: "norm"},
+        )
 
 
 def test_get_qk_norm_weight_names_follows_convention():

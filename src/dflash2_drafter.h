@@ -1,0 +1,276 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+
+#pragma once
+
+#include <cstddef>
+#include <memory>
+#include <span>
+#include <unordered_map>
+#include <vector>
+
+#include "models/model.h"
+#include "models/cpu_embedding.h"
+#include "engine/graph_annotation_ids.h"
+#include "decoding/speculative_sampling.h"
+#include "engine/prefix_snapshot_cache.h"
+
+namespace Generators {
+
+struct Request;
+
+struct Dflash2PrefixCheckpoint : PrefixSnapshotCache::Entry {
+  size_t token_count{};
+  size_t ring_blocks{};
+};
+
+size_t Dflash2DraftWidth(size_t capability_limit, size_t configured_limit,
+                         size_t sequence_length_after_step, size_t sequence_limit,
+                         size_t remaining_turn_tokens_after_step);
+
+size_t Dflash2GraphBlockTableColumnLimit(size_t context_length, size_t paged_block_size,
+                                         size_t query_block_size);
+
+bool Dflash2GraphCaptureAllowed(bool enabled, bool uniform_ingest,
+                                size_t max_blocks, size_t max_columns) noexcept;
+
+// Reshapes a proposal tensor the drafter reuses between steps, replacing its buffer only when a
+// step needs more room than the one it kept. `reallocated` is set when the buffer moved, which
+// invalidates any CUDA graph captured against its old address.
+Tensor& Dflash2StepTensor(std::unique_ptr<Tensor>& slot, DeviceInterface* device,
+                          ONNXTensorElementDataType type, const std::vector<int64_t>& shape,
+                          bool* reallocated = nullptr,
+                          std::unique_ptr<Tensor>* displaced = nullptr);
+
+// A windowed drafter can rebuild a missing prefix from subsequently recomputed context rows.
+bool Dflash2CanJoin(bool draft_eligible, size_t first_position, size_t context_window = 0) noexcept;
+
+TargetTokenSelection Dflash2IndependentDraftDistribution(
+    const int32_t* candidate_ids, const float* logits, size_t top_k,
+    float temperature, float top_p, float min_p);
+
+// One request's drafted lattice: `top_k` candidates per step and, per step, a [top_k, top_k] edge
+// matrix whose row i scores this step's candidates given the previous step's candidate i.
+struct Dflash2Lattice {
+  size_t top_k{};
+  std::vector<int32_t> candidate_ids;  // [steps, top_k]
+  std::vector<float> scores;           // [steps, top_k, top_k]
+
+  size_t Steps() const noexcept { return top_k == 0 ? 0 : candidate_ids.size() / top_k; }
+};
+
+// Samples a path of up to `steps` tokens: each step draws from the row its predecessor's draw
+// selects, tempered and truncated like the target, and records the distribution it drew from.
+void Dflash2SampleLatticePath(const Dflash2Lattice& lattice, size_t steps, float temperature,
+                              int top_k, float top_p, std::mt19937& rng,
+                              std::vector<int32_t>& tokens,
+                              std::vector<TargetTokenSelection>& distributions);
+
+/**
+ * @brief Hosts a DFlash 2 or DSpark block-drafter session.
+ *
+ * The drafter graph is not decoder-shaped, so this only borrows Model for its session options,
+ * shared initializers and device interfaces. It never produces a State.
+ */
+struct Dflash2Model : Model {
+  Dflash2Model(std::unique_ptr<Config> config, OrtEnv& ort_env,
+               std::shared_ptr<CpuEmbedding> cpu_embedding = nullptr);
+
+  std::unique_ptr<State> CreateState(DeviceSpan<int32_t>, const GeneratorParams&) const override;
+
+  std::unique_ptr<OrtSession> session_;
+  std::shared_ptr<CpuEmbedding> cpu_embedding_;
+};
+
+// Decoder-shaped view of model.dflash2, so Model's session-option and shared-initializer plumbing
+// applies to the drafter session unchanged.
+std::unique_ptr<Config> CreateDflash2Config(const Config& config);
+
+// Validates the target/drafter tensor contract and returns the shared cache element type.
+ONNXTensorElementDataType ValidateDflash2ModelCompatibility(
+    const Config& config,
+    const ModelStateMetadata& target_metadata,
+    const ModelStateMetadata& drafter_metadata,
+    size_t paged_block_size);
+
+/**
+ * @brief Runs the configured block drafter for one engine step.
+ *
+ * The drafter never re-runs the target's layers. Each step it turns the target's auxiliary hidden
+ * states into per-layer K/V for the tokens the target just committed, writes them into its own
+ * paged cache, and attends a block of `block_size` query rows over that cache. DFlash 2 uses an
+ * anchor row plus one mask row per draft; DSpark predicts from every row. Both produce a lattice
+ * of top-k candidates and pairwise edge scores that is walked greedily on the host.
+ *
+ * Context rows and query rows travel through one packed PagedAttention call: `qkv_row_map` picks
+ * each packed row's K/V out of `concat(query, context)` and the context rows' attention output is
+ * discarded. That is also what fills the cache, so there is no separate cache-store op.
+ */
+struct Dflash2Drafter {
+  /**
+   * @brief One request's contribution to a step.
+   *
+   * Rows [aux_row_begin, aux_row_begin + aux_row_count) of the target's packed auxiliary hidden
+   * states hold positions [first_position, first_position + aux_row_count). Rejected draft rows
+   * are excluded by the caller, so every row named here is committed context.
+   */
+  struct Feed {
+    Request* request{};
+    std::shared_ptr<const Dflash2PrefixCheckpoint> prefix_checkpoint;
+    size_t aux_row_begin{};
+    size_t aux_row_count{};
+    size_t first_position{};
+    int32_t anchor_token{};
+    bool draft_eligible{};
+    bool wants_drafts{};
+    bool wants_independent_sampling{};
+    bool wants_lattice{};
+  };
+
+  /**
+   * @brief Builds the drafter over its own paged cache pool.
+   * @param max_requests Sequences the pool was sized for. A windowed pool holds `max_requests`
+   *        rings; a full-attention pool holds the target's blocks plus one query-block spill per
+   *        request, so both are only sufficient while at most that many requests are tracked.
+   */
+  Dflash2Drafter(std::shared_ptr<Dflash2Model> model, size_t paged_block_size, size_t num_blocks,
+                 size_t max_requests);
+  ~Dflash2Drafter();
+
+  // Binds the shared Engine policy once, before tracking requests.
+  void InitializeSnapshotCache(std::shared_ptr<PrefixSnapshotCache> snapshot_cache);
+
+  // Bytes of drafter K/V per paged block, so the main cache pool can budget for it up front.
+  static size_t BytesPerBlock(const Config& config, size_t paged_block_size,
+                              ONNXTensorElementDataType cache_type);
+
+  // Blocks needed for `max_batch_size` requests, or 0 when a full-attention drafter must instead
+  // be sized against the target pool. A windowed drafter only needs a fixed ring per request.
+  static size_t PoolBlocks(const Config& config, size_t paged_block_size, size_t max_batch_size);
+
+  // Total K/V bytes occupied by a pool of `pool_blocks`.
+  static size_t PoolBytes(const Config& config, size_t paged_block_size, size_t pool_blocks,
+                          ONNXTensorElementDataType cache_type);
+
+  // A full-attention drafter mirrors the target's committed blocks and reserves enough extra
+  // blocks for every active request's query rows.
+  static size_t FullAttentionPoolBlocks(size_t target_blocks, size_t paged_block_size,
+                                        size_t query_block_size, size_t max_batch_size);
+
+  static size_t FullAttentionReservedBytes(size_t paged_block_size, size_t query_block_size,
+                                           size_t max_batch_size, size_t bytes_per_block);
+
+  static size_t EmbeddingReservedBytes(size_t max_batch_size, size_t query_block_size,
+                                       size_t hidden_size, ONNXTensorElementDataType type);
+
+  size_t NumDraftTokens() const { return static_cast<size_t>(config_.num_draft_tokens); }
+  size_t AdmissionMisses() const { return admission_misses_; }
+
+  // A windowed drafter retains only a bounded ring, independently of the target context length.
+  static size_t PrefixCheckpointBytes(const Config& config, size_t paged_block_size,
+                                      ONNXTensorElementDataType cache_type);
+  bool CanCapturePrefix(const Request* request, size_t token_count) const;
+  std::shared_ptr<const Dflash2PrefixCheckpoint> CapturePrefix(const Request* request,
+                                                               size_t token_count);
+
+  /**
+   * @brief Ingests every served feed's context and drafts for the ones that asked.
+   * @param aux_hidden_states The target's packed [token_count, aux_hidden_size] output.
+   * @param drafts Resized to feeds.size(); entry i is empty unless feeds[i] was served and asked.
+   *
+   * A request joins at position zero, with a restored windowed checkpoint, or by rebuilding a
+   * window from recomputed target rows. A rebuilding request cannot draft or capture a prefix until
+   * its complete attention window is available. Every admitted request keeps its cache blocks until
+   * Release. Requests that arrive once the pool is fully subscribed decode without block drafts;
+   * a windowed request can rebuild after capacity becomes available. A tracked request continues
+   * feeding context during sampled turns so a later greedy turn can resume drafting.
+   */
+  // Returns true only when the drafter session executed. A feed that wants its lattice gets it in
+  // `lattices` instead of a greedy path, so the caller can sample it with the request's RNG.
+  bool Propose(Tensor& aux_hidden_states, std::span<const Feed> feeds,
+               std::vector<std::vector<int32_t>>& drafts,
+               std::vector<std::vector<TargetTokenSelection>>* draft_distributions = nullptr,
+               std::vector<Dflash2Lattice>* lattices = nullptr);
+
+  // Returns a request's blocks to the pool. Safe for requests the drafter never saw.
+  void Release(const Request* request);
+
+  // Drops every tracked request's cache state and returns its blocks. Used after a recoverable
+  // proposal failure: the drafter's cached context is no longer contiguous with the target for any
+  // in-flight request. Windowed requests can rebuild a complete window before resuming drafts;
+  // full-attention requests can only rejoin from position zero.
+  void ReleaseAll();
+
+ private:
+  struct RequestState {
+    std::vector<int32_t> blocks;
+    size_t cached_positions{};  // Logical committed cursor; a windowed ring retains only its live tail.
+    size_t context_start{};     // Nonzero when rebuilding after a target-only prefix hit.
+  };
+
+  bool HasContext(const RequestState& state, size_t end_position) const noexcept;
+  // Whether the drafter can carry this feed's request, admitting it to the pool when it can.
+  bool Admit(const Feed& feed);
+  bool RestorePrefix(const Feed& feed);
+  std::shared_ptr<PrefixSnapshotCache> prefix_snapshot_cache_;
+  // Grows a request's block list so positions [0, positions) are addressable. A windowed drafter
+  // gets a fixed ring instead, which its block table repeats across every column.
+  void EnsureBlocks(RequestState& state, size_t positions);
+  void AllocateCache();
+  Tensor& StepTensor(std::unique_ptr<Tensor>& slot, DeviceInterface* device,
+                     ONNXTensorElementDataType type, const std::vector<int64_t>& shape);
+  void ReleaseCapturedGraphs() noexcept;
+
+  std::shared_ptr<Dflash2Model> model_;
+  const Config::Model::Dflash2& config_;
+  size_t paged_block_size_{};
+  size_t num_blocks_{};
+  // Context positions the drafter must keep behind the query block. Zero when it is not windowed,
+  // in which case the whole sequence stays resident.
+  size_t context_window_{};
+  bool has_q_row_map_{true};
+  size_t ring_blocks_{};
+  // Concurrent requests the pool was sized for, and the blocks a full-attention request's query
+  // rows can need beyond the committed context the target pool already accounts for.
+  size_t max_requests_{};
+  size_t query_spill_blocks_{};
+  size_t aux_hidden_size_{};
+  ONNXTensorElementDataType aux_type_{ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED};
+  ONNXTensorElementDataType cache_type_{ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED};
+
+  std::vector<std::unique_ptr<Tensor>> caches_;  // 2 * num_hidden_layers, key then value per layer
+  std::vector<std::string> cache_input_names_, cache_output_names_;
+  // Proposal tensors, reused across steps and grown to the high-water mark of the batches served
+  // so far, so a steady-state decode step allocates none of them.
+  struct StepTensors {
+    std::unique_ptr<Tensor> packed_aux;
+    std::unique_ptr<Tensor> input_ids;
+    std::unique_ptr<Tensor> embeddings;
+    CpuEmbedding::Workspace embedding_workspace;
+    std::unique_ptr<Tensor> q_row_map;
+    std::unique_ptr<Tensor> qkv_row_map;
+    std::unique_ptr<Tensor> block_row_index;
+    std::unique_ptr<Tensor> anchor_row_index;
+    std::unique_ptr<Tensor> cumulative_sequence_lengths;
+    std::unique_ptr<Tensor> past_sequence_lengths;
+    std::unique_ptr<Tensor> block_table;
+    std::unique_ptr<Tensor> attention_metadata;
+    std::unique_ptr<Tensor> candidate_ids;
+    std::unique_ptr<Tensor> scores;
+  } step_tensors_;
+  // Block-table widths are bucketed to powers of two up to this cap so that a growing context
+  // reuses a captured graph instead of retiring one per block boundary.
+  size_t max_block_table_columns_{};
+  bool graph_capture_enabled_{};
+  GraphAnnotationIds graph_ids_;
+  // Bumped whenever a proposal tensor outgrows its buffer and moves. A captured graph records the
+  // old addresses, so anything captured before a move must never be replayed after it.
+  size_t buffer_generation_{};
+  std::vector<int32_t> free_blocks_;
+  std::unordered_map<const Request*, RequestState> requests_;
+  size_t admission_misses_{};
+
+  std::unique_ptr<OrtRunOptions> run_options_;
+};
+
+}  // namespace Generators

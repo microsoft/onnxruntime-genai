@@ -1,0 +1,33 @@
+// Copyright (C) [2026] Advanced Micro Devices, Inc. All rights reserved.
+// Portions of this file consist of AI generated content.
+//
+// SPDX-License-Identifier: MIT
+//
+// Licensed under the MIT License. See License.txt in the project root for
+// license information.
+
+#pragma once
+
+#include "models/model.h"
+#include "models/preprocessing/processor.h"
+#include "ortx_processor.h"
+
+namespace Generators {
+
+void TransposeVideoChatFlashHwcToChw(ThreadPool* thread_pool, const float* source,
+                                     float* destination, int64_t num_images,
+                                     int64_t channels, int64_t height, int64_t width);
+
+struct VideoChatFlashProcessor : Processor {
+  VideoChatFlashProcessor(Config& config, const SessionInfo& session_info);
+
+  std::unique_ptr<NamedTensors> Process(const Tokenizer& tokenizer, const Payload& payload) const override;
+
+ private:
+  ort_extensions::OrtxObjectPtr<OrtxProcessor> processor_;
+
+  ONNXTensorElementDataType pixel_values_type_;
+  int64_t num_visual_tokens_;
+};
+
+}  // namespace Generators

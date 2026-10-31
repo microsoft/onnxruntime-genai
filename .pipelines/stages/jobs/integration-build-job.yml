@@ -7,7 +7,6 @@ parameters:
   - 'osx'
 - name: arch
   type: string
-  default: 'x64'
 
 jobs:
 - job: build_${{ parameters.os }}_${{ parameters.arch }}

@@ -50,7 +50,14 @@ Run the build script with `--help` for further details on all these options.
 
 There is also a script to build an AAR with x86_64 and arm64-v8a libraries. See /tools/ci_build/github/android/build_aar_package.py.
 
+### Telemetry permissions
+
+When telemetry is enabled, the AAR manifest declares `android.permission.INTERNET` and
+`android.permission.ACCESS_NETWORK_STATE`. Android manifest merging adds these permissions to the
+consuming application. They are required for the bundled 1DS transport to upload events and adapt
+transmission to network state. Build the AAR without telemetry if the application must not request
+these capabilities.
+
 This AAR can be used in a test Android app. 
 See src\java\src\test\android\app\build.gradle for example of how to manually specify onnxruntime-android and a custom built onnxruntime-genai AAR as dependencies in build.gradle. 
 The dependencies can also be added to an app using Android Studio.
-

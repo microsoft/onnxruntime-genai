@@ -14,6 +14,10 @@ must:
   4. restore per-channel quantization when ``qmoe_block_size <= 0``, and
   5. keep the SIGNED blockwise scales (taking ``abs()`` reintroduces the
      garbage-output bug).
+
+The CPU and WebGPU paths share the raw MatMulNBits encoding and must keep the
+``[N, K/pack]`` storage contract the QMoE op validates, for INT4 and INT8.
+WebGPU additionally requires whole blocks; INT4 requires even K.
 """
 
 from __future__ import annotations
@@ -21,96 +25,125 @@ from __future__ import annotations
 import importlib.util
 import sys
 import types
-from pathlib import Path
 
 import pytest
 import torch
+from _builder_test_utils import BUILDERS_DIR, load_builder_module
 
-
-def _module_available(module_name):
-    try:
-        return importlib.util.find_spec(module_name) is not None
-    except (ModuleNotFoundError, ValueError):
-        return False
-
-
-def _stub_missing_builder_dependencies():
-    if not _module_available("onnx_ir"):
-        onnx_ir = types.ModuleType("onnx_ir")
-        onnx_ir.DataType = types.SimpleNamespace(INT4=object(), FLOAT=object(), FLOAT16=object(), BFLOAT16=object())
-        tensor_adapters = types.ModuleType("onnx_ir.tensor_adapters")
-        tensor_adapters.TorchTensor = object
-        tensor_adapters.to_torch_dtype = lambda dtype: dtype
-        sys.modules["onnx_ir"] = onnx_ir
-        sys.modules["onnx_ir.tensor_adapters"] = tensor_adapters
-
-    if not _module_available("onnxruntime.quantization.matmul_nbits_quantizer"):
-        # Prefer the real onnxruntime package when it is installed; only fabricate a
-        # top-level stub when the package truly isn't available. This avoids shadowing a
-        # real onnxruntime wheel (which would break other tests in the session) and only
-        # supplies the specific submodule the builder needs.
-        if _module_available("onnxruntime"):
-            import onnxruntime  # noqa: PLC0415
-        else:
-            onnxruntime = sys.modules.setdefault("onnxruntime", types.ModuleType("onnxruntime"))
-        quantization = getattr(onnxruntime, "quantization", None)
-        if quantization is None:
-            quantization = types.ModuleType("onnxruntime.quantization")
-        matmul_nbits_quantizer = types.ModuleType("onnxruntime.quantization.matmul_nbits_quantizer")
-        for class_name in (
-            "KQuantWeightOnlyQuantConfig",
-            "MatMulNBitsQuantizer",
-            "QuantFormat",
-            "RTNWeightOnlyQuantConfig",
-        ):
-            setattr(matmul_nbits_quantizer, class_name, type(class_name, (), {}))
-        onnxruntime.quantization = quantization
-        quantization.matmul_nbits_quantizer = matmul_nbits_quantizer
-        sys.modules["onnxruntime.quantization"] = quantization
-        sys.modules["onnxruntime.quantization.matmul_nbits_quantizer"] = matmul_nbits_quantizer
-
-    if not _module_available("tqdm"):
-        tqdm_module = types.ModuleType("tqdm")
-        tqdm_module.tqdm = lambda iterable=None, *args, **kwargs: iterable
-        sys.modules["tqdm"] = tqdm_module
-
-    if not _module_available("transformers"):
-        transformers = types.ModuleType("transformers")
-        for class_name in (
-            "AutoConfig",
-            "AutoModelForCausalLM",
-            "AutoModelForSpeechSeq2Seq",
-            "AutoTokenizer",
-            "GenerationConfig",
-        ):
-            setattr(transformers, class_name, type(class_name, (), {}))
-        sys.modules["transformers"] = transformers
-
-
-_stub_missing_builder_dependencies()
-
-BUILDERS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "builders"
-sys.path.insert(0, str(BUILDERS_DIR.parents[1]))
-
-
-def _load_builder_module(module_name):
-    spec = importlib.util.spec_from_file_location(f"models.builders.{module_name}", BUILDERS_DIR / f"{module_name}.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[f"models.builders.{module_name}"] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-sys.modules.setdefault("models", types.ModuleType("models"))
-builders_package = sys.modules.setdefault("models.builders", types.ModuleType("models.builders"))
-builders_package.__path__ = [str(BUILDERS_DIR)]
-
-base_module = _load_builder_module("base")
+base_module = load_builder_module("base")
 Model = base_module.Model
-cuda_quantizer_module = sys.modules["models.builders.cuda_quantizer"]
+cuda_quantizer_module = sys.modules["quantization.cuda_quantizer"]
 qmoe_symmetric_per_channel_quantize = cuda_quantizer_module.CudaQuantizer.qmoe_symmetric_per_channel_quantize
-gptoss_module = _load_builder_module("gptoss")
+quant_config_module = sys.modules["quantization.quant_config"]
+MoEConfig = quant_config_module.MoEConfig
+gptoss_module = load_builder_module("gptoss")
 GPTOSSModel = gptoss_module.GPTOSSModel
+phi_module = load_builder_module("phi")
+Phi3MoELongRoPEModel = phi_module.Phi3MoELongRoPEModel
+
+
+def test_base_moe_orchestrates_model_hooks(monkeypatch):
+    model = Model.__new__(Model)
+    calls = []
+    moe = object()
+
+    monkeypatch.setattr(model, "make_moe_preprocessing", lambda *args: calls.append(("preprocess", args)))
+    monkeypatch.setattr(model, "make_moe_router", lambda *args: calls.append(("router", args)), raising=False)
+    monkeypatch.setattr(model, "make_moe_subgraph", lambda *args: calls.append(("subgraph", args)), raising=False)
+
+    model.make_moe(3, moe, "hidden_states")
+
+    expected_args = (3, moe, "hidden_states")
+    assert calls == [
+        ("preprocess", expected_args),
+        ("router", expected_args),
+        ("subgraph", expected_args),
+    ]
+
+
+def test_make_initializer_preserves_raw_fp8_bytes():
+    if not hasattr(base_module.ir.DataType, "FLOAT8E8M0"):
+        pytest.skip("Installed onnx_ir does not support FLOAT8E8M0")
+
+    class InitializerGraph:
+        def register_initializer(self, value):
+            self.value = value
+
+    model = Model.__new__(Model)
+    model.values = {}
+    model.model = types.SimpleNamespace(graph=InitializerGraph())
+    encoded = torch.tensor([0x7F, 0x80], dtype=torch.uint8)
+
+    for dtype in (base_module.ir.DataType.FLOAT8E8M0, base_module.ir.DataType.FLOAT8E4M3FN):
+        model.make_initializer(encoded, dtype.name, to=dtype, raw=True)
+        proto = base_module.ir.serde.serialize_tensor(model.model.graph.value.const_value)
+        assert proto.data_type == dtype.value
+        assert proto.raw_data == bytes([0x7F, 0x80])
+
+
+def test_phi_moe_uses_base_layer_route():
+    model = Phi3MoELongRoPEModel.__new__(Phi3MoELongRoPEModel)
+    moe = object()
+    layer = types.SimpleNamespace(block_sparse_moe=moe)
+
+    assert model.get_moe_module(2, layer) is moe
+
+    assert "make_layer" not in Phi3MoELongRoPEModel.__dict__
+
+
+def test_phi_moe_quantizes_each_projection_with_its_effective_bits():
+    model = Phi3MoELongRoPEModel.__new__(Phi3MoELongRoPEModel)
+    model.io_dtype = base_module.ir.DataType.FLOAT16
+    model.moe_attrs = {
+        "num_experts": 1,
+        "fc1_expert_weight_bits": 2,
+        "fc2_expert_weight_bits": 4,
+        "fc3_expert_weight_bits": 2,
+    }
+    calls = []
+    model.make_qmoe_weights = lambda weight, bits: (
+        calls.append(bits) or torch.zeros(1, dtype=torch.uint8),
+        torch.zeros(1),
+    )
+    model.make_initializer = lambda *args, **kwargs: None
+    expert = types.SimpleNamespace(
+        w1=types.SimpleNamespace(weight=torch.zeros(4, 4)),
+        w2=types.SimpleNamespace(weight=torch.zeros(4, 4)),
+        w3=types.SimpleNamespace(weight=torch.zeros(4, 4)),
+    )
+
+    model.make_moe_preprocessing(0, types.SimpleNamespace(experts=[expert]), "root")
+
+    assert calls == [2, 4, 2]
+
+
+def test_gptoss_moe_uses_base_layer_route():
+    model = GPTOSSModel.__new__(GPTOSSModel)
+    moe = object()
+    layer = types.SimpleNamespace(mlp=moe)
+
+    assert model.get_moe_module(2, layer) is moe
+    assert "make_layer" not in GPTOSSModel.__dict__
+
+
+def test_gptoss_moe_dispatches_fused_and_decomposed_paths(monkeypatch):
+    model = GPTOSSModel.__new__(GPTOSSModel)
+    calls = []
+    moe = object()
+
+    monkeypatch.setattr(model, "make_moe_preprocessing", lambda *args: calls.append("preprocess"))
+    monkeypatch.setattr(model, "make_moe_router", lambda *args: calls.append("router"))
+    monkeypatch.setattr(model, "make_moe_subgraph", lambda *args: calls.append("subgraph"))
+    monkeypatch.setattr(model, "make_moe_decomposed", lambda *args: calls.append("decomposed"))
+
+    model.ep = "cuda"
+    model.make_moe(2, moe, "hidden_states")
+    assert calls == ["preprocess", "router", "subgraph"]
+
+    calls.clear()
+    model.ep = "dml"
+    model.make_moe(2, moe, "hidden_states")
+    assert calls == ["decomposed"]
 
 
 def _load_builder_cli_module(monkeypatch):
@@ -120,12 +153,19 @@ def _load_builder_cli_module(monkeypatch):
         "ErnieModel",
         "Gemma2Model",
         "Gemma3Model",
+        "Gemma4MoEModel",
+        "Gemma4Model",
         "GemmaModel",
         "GPTOSSModel",
+        "GraniteMoEHybridModel",
         "GraniteModel",
         "HunyuanDenseV1Model",
         "InternLM2Model",
+        "LFM2AudioModel",
         "LFM2Model",
+        "LFM2MoEModel",
+        "LFM2VLModel",
+        "LFM3Model",
         "LlamaModel",
         "Mistral3TextModel",
         "MistralModel",
@@ -141,16 +181,21 @@ def _load_builder_cli_module(monkeypatch):
         "Phi4MMModel",
         "PhiModel",
         "Qwen25VLTextModel",
-        "Qwen35MoeTextModel",
+        "Qwen35MoETextModel",
         "Qwen35TextModel",
         "Qwen3Model",
         "Qwen3VLTextModel",
+        "Qwen4ExpModel",
+        "Qwen4ExpTextModel",
         "QwenModel",
         "SmolLM3Model",
         "VideoChatFlashQwenModel",
         "WhisperModel",
     ):
         setattr(builders_module, class_name, type(class_name, (), {}))
+    # Submodule imports (e.g. `from quantization import ...`) must resolve to the
+    # real, dependency-free modules rather than the class stubs above.
+    builders_module.__path__ = [str(BUILDERS_DIR)]
     monkeypatch.setitem(sys.modules, "builders", builders_module)
 
     module_name = "builder_cli_under_test"
@@ -161,56 +206,334 @@ def _load_builder_cli_module(monkeypatch):
     return module
 
 
-def test_moe_quant_type_mxfp4_is_accepted(monkeypatch):
+def _parse_extra_options(builder, extra_options, precision="int4", execution_provider="cuda", quantization_config=None):
+    # Parser validation in these tests should not depend on remote/model IO.
+    builder.get_hf_details = lambda *args, **kwargs: {
+        "hf_config": types.SimpleNamespace(
+            tie_word_embeddings=True,
+            quantization_config=quantization_config or {},
+        )
+    }
+    return builder.parse_extra_options(
+        "dummy-model",
+        "",
+        "",
+        precision,
+        execution_provider,
+        "",
+        extra_options,
+    )
+
+
+@pytest.mark.parametrize("precision", ["int4", "int8"])
+def test_moe_quant_type_mxfp4_is_accepted(monkeypatch, precision):
     builder = _load_builder_cli_module(monkeypatch)
-    options = builder.parse_extra_options(["moe_quant_type=mxfp4"], "int4", "cuda")
+    options = _parse_extra_options(builder, ["moe_quant_type=mxfp4"], precision, "cuda")
     assert options["moe_quant_type"] == "mxfp4"
+
+
+@pytest.mark.parametrize(
+    ("moe_quant_type", "expected_op_type", "expected_bits"),
+    [("none", "MoE", 0), ("int4", "QMoE", 4), ("int8", "QMoE", 8)],
+)
+def test_make_moe_init_selects_operator(moe_quant_type, expected_op_type, expected_bits):
+    model = Model.__new__(Model)
+    model.quant_config = types.SimpleNamespace(moe=types.SimpleNamespace(type=moe_quant_type, weights_prepacked=-1))
+    model.ep = "cuda"
+    model.moe_attrs = {"swiglu_limit": None}
+
+    model.make_moe_init()
+
+    assert model.moe_attrs["op_type"] == expected_op_type
+    assert model.moe_attrs["expert_weight_bits"] == expected_bits
 
 
 def test_moe_quant_type_rejects_invalid_value(monkeypatch):
     builder = _load_builder_cli_module(monkeypatch)
     with pytest.raises(ValueError, match="moe_quant_type must be one of"):
-        builder.parse_extra_options(["moe_quant_type=fp8"], "int4", "cuda")
+        _parse_extra_options(builder, ["moe_quant_type=fp8"], "int4", "cuda")
 
 
 def test_use_8bits_moe_maps_to_moe_quant_type(monkeypatch):
     builder = _load_builder_cli_module(monkeypatch)
-    options = builder.parse_extra_options(["use_8bits_moe=true"], "int4", "cuda")
+    options = _parse_extra_options(builder, ["use_8bits_moe=true"], "int4", "cuda")
     assert options["moe_quant_type"] == "int8"
 
 
 def test_moe_quant_type_mxfp4_requires_qmoe_precision(monkeypatch):
     builder = _load_builder_cli_module(monkeypatch)
-    with pytest.raises(ValueError, match="moe_quant_type=mxfp4 requires building with precision=int4"):
-        builder.parse_extra_options(["moe_quant_type=mxfp4"], "fp16", "cuda")
+    with pytest.raises(ValueError, match="moe_quant_type=mxfp4 requires building with symmetric int4 or int8"):
+        _parse_extra_options(builder, ["moe_quant_type=mxfp4"], "fp16", "cuda")
 
 
-def test_gptoss_fp4_rejects_quark_experts_before_emitting_nodes():
-    model = types.SimpleNamespace(
-        moe_attrs={"op_type": "QMoE", "quant_type": "fp4"},
-        has_quark_experts=lambda experts: True,
+@pytest.mark.parametrize("precision", ["fp16", "bf16", "fp32"])
+def test_moe_quant_type_nvfp4_accepts_floating_graph_precision(monkeypatch, precision):
+    builder = _load_builder_cli_module(monkeypatch)
+    options = _parse_extra_options(builder, ["moe_quant_type=nvfp4"], precision, "cuda")
+
+    assert options["moe_quant_type"] == "nvfp4"
+
+
+def test_modelopt_selects_native_quantization_from_metadata(monkeypatch):
+    builder = _load_builder_cli_module(monkeypatch)
+    options = _parse_extra_options(
+        builder,
+        [],
+        quantization_config={"quant_method": "modelopt", "kv_cache_quant_algo": "FP8"},
     )
-    mlp = types.SimpleNamespace(experts=types.SimpleNamespace(fc1_weights=torch.empty(0), fc2_weights=torch.empty(0)))
 
-    with pytest.raises(ValueError, match="pre-quantized Quark GPT-OSS experts"):
-        GPTOSSModel.make_moe_fused(model, 0, mlp, "root")
+    assert options["moe_quant_type"] == "nvfp4"
+    assert "kv_cache_quant_scheme" not in options
 
 
-def test_gptoss_original_mxfp4_blocks_pack_to_qmoe_layout():
-    blocks = torch.arange(2 * 4 * 2 * 16, dtype=torch.uint8).reshape(2, 4, 2, 16)
-    packed = GPTOSSModel.__new__(GPTOSSModel).pack_original_mxfp4_blocks_for_qmoe(blocks)
+def test_modelopt_rejects_non_cuda_execution_provider(monkeypatch):
+    builder = _load_builder_cli_module(monkeypatch)
 
-    low_codes = blocks & 0x0F
-    high_codes = blocks >> 4
-    codes = torch.empty(2, 4, 2, 32, dtype=torch.uint8)
-    codes[..., 0::2] = low_codes
-    codes[..., 1::2] = high_codes
-    codes = codes.reshape(2, 4, 64)
-    codes_kn = codes.permute(0, 2, 1).contiguous()
-    expected = (codes_kn[..., 1::2] << 4) | codes_kn[..., 0::2]
+    with pytest.raises(ValueError, match="only supported on the CUDA EP"):
+        _parse_extra_options(builder, [], execution_provider="cpu", quantization_config={"quant_method": "modelopt"})
 
-    assert packed.shape == (2, 64, 2)
-    assert torch.equal(packed, expected)
+
+@pytest.mark.parametrize("precision", ["fp16", "bf16", "fp32", "int4"])
+def test_modelopt_native_quantization_is_independent_of_graph_precision(monkeypatch, precision):
+    builder = _load_builder_cli_module(monkeypatch)
+    options = _parse_extra_options(builder, [], precision=precision, quantization_config={"quant_method": "modelopt"})
+
+    assert options["moe_quant_type"] == "nvfp4"
+
+
+def test_base_rejects_packed_expert_quant_type_mismatch():
+    model = Model.__new__(Model)
+    model.moe_attrs = {"op_type": "QMoE", "quant_type": "fp4"}
+    experts = types.SimpleNamespace(quant_type="int")
+
+    with pytest.raises(ValueError, match="Checkpoint experts use int, but QMoE is configured for fp4"):
+        model.make_moe_expert_initializers(0, experts)
+
+
+@pytest.mark.parametrize(
+    "fc1_type,fc2_type,expected",
+    [
+        ("int2", "int4", (2, 4, 2)),
+        ("int4", "int2", (4, 2, 4)),
+        ("int2", "int2", (2, 2, 2)),
+    ],
+)
+def test_make_moe_init_configures_mixed_width_cuda(fc1_type, fc2_type, expected):
+    model = Model.__new__(Model)
+    model.ep = "cuda"
+    model.hidden_size = 128
+    model.intermediate_size = 128
+    model.moe_attrs = {"swiglu_limit": None}
+    model.quant_config = types.SimpleNamespace(
+        moe=MoEConfig(type="int4", fc1_type=fc1_type, fc2_type=fc2_type, block_size=64)
+    )
+
+    model.make_moe_init()
+
+    assert (
+        model.moe_attrs["fc1_expert_weight_bits"],
+        model.moe_attrs["fc2_expert_weight_bits"],
+        model.moe_attrs["fc3_expert_weight_bits"],
+    ) == expected
+    assert model.moe_attrs["weights_prepacked"] == 0
+
+
+def test_make_moe_init_rejects_nondivisible_mixed_width_block_size():
+    model = Model.__new__(Model)
+    model.ep = "cuda"
+    model.hidden_size = 2880
+    model.intermediate_size = 2880
+    model.moe_attrs = {"swiglu_limit": None}
+    model.quant_config = types.SimpleNamespace(
+        moe=MoEConfig(type="int4", fc1_type="int2", fc2_type="int4", block_size=128)
+    )
+
+    with pytest.raises(ValueError, match="hidden_size=2880 and intermediate_size=2880"):
+        model.make_moe_init()
+
+
+def test_make_moe_init_accepts_noop_int4_projection_overrides():
+    model = Model.__new__(Model)
+    model.ep = "cpu"
+    model.moe_attrs = {"swiglu_limit": None}
+    model.quant_config = types.SimpleNamespace(
+        moe=MoEConfig(type="int4", fc1_type="int4", fc2_type="int4", block_size=32)
+    )
+
+    model.make_moe_init()
+
+    assert model.moe_attrs["expert_weight_bits"] == 4
+    assert "fc1_expert_weight_bits" not in model.moe_attrs
+    assert "fc2_expert_weight_bits" not in model.moe_attrs
+
+
+def test_mixed_width_expert_initializers_use_projection_bits():
+    model = Model.__new__(Model)
+    model.ep = "cuda"
+    model.io_dtype = base_module.ir.DataType.FLOAT16
+    model.moe_attrs = {
+        "op_type": "QMoE",
+        "quant_type": "int",
+        "num_experts": 1,
+        "expert_weight_bits": 4,
+        "fc1_expert_weight_bits": 2,
+        "fc2_expert_weight_bits": 4,
+        "weights_prepacked": 0,
+    }
+    model.quant_attrs = {"qmoe_block_size": 64}
+    initializers = {}
+    model.make_initializer = lambda tensor, name, **kwargs: initializers.setdefault(name, tensor)
+    experts = types.SimpleNamespace()
+
+    model.make_moe_expert_initializers(
+        0,
+        experts,
+        torch.zeros(1, 8, 64),
+        torch.zeros(1, 64, 8),
+    )
+
+    assert initializers["model.layers.0.moe.experts.gate_up_proj.qweight"].shape == (1, 8, 16)
+    assert initializers["model.layers.0.moe.experts.down_proj.qweight"].shape == (1, 64, 4)
+    assert initializers["model.layers.0.moe.experts.gate_up_proj.scales"].shape == (1, 8, 1)
+    assert initializers["model.layers.0.moe.experts.down_proj.scales"].shape == (1, 64, 1)
+
+
+def test_qmoe_node_emits_mixed_width_attributes():
+    model = Model.__new__(Model)
+    model.ep = "cuda"
+    model.io_dtype = base_module.ir.DataType.FLOAT16
+    model.moe_attrs = {
+        "activation_alpha": 1.0,
+        "activation_beta": 0.0,
+        "activation_type": "swiglu",
+        "expert_weight_bits": 4,
+        "fc1_expert_weight_bits": 2,
+        "fc2_expert_weight_bits": 4,
+        "fc3_expert_weight_bits": 2,
+        "normalize_routing_weights": True,
+        "quant_type": "int",
+        "swiglu_fusion": 1,
+        "swiglu_limit": None,
+        "top_k": 4,
+        "use_sparse_mixer": False,
+        "weights_prepacked": 0,
+        "block_size": 64,
+    }
+    captured = {}
+    model.make_node = lambda op_type, **kwargs: captured.update(op_type=op_type, **kwargs)
+    model.make_value = lambda *args, **kwargs: None
+    model.make_hidden_state_shape = lambda: ["tokens", 64]
+
+    model.make_qmoe_op(
+        "/moe",
+        root_input="input",
+        router_probs="router",
+        weight1="fc1",
+        scales1="fc1_scales",
+        weight2="fc2",
+        scales2="fc2_scales",
+    )
+
+    assert captured["fc1_expert_weight_bits"] == 2
+    assert captured["fc2_expert_weight_bits"] == 4
+    assert captured["fc3_expert_weight_bits"] == 2
+    assert captured["weights_prepacked"] == 0
+
+
+def test_base_emits_declared_mxfp4_scale_format_and_globals():
+    model = Model.__new__(Model)
+    model.io_dtype = base_module.ir.DataType.FLOAT16
+    model.moe_attrs = {
+        "op_type": "QMoE",
+        "quant_type": "fp4",
+        "global_scale_names": {},
+        "zero_point_names": {},
+    }
+    experts = types.SimpleNamespace(
+        quant_type="fp4",
+        block_size=32,
+        scale_dtype=base_module.ir.DataType.FLOAT8E8M0,
+        scales_raw=True,
+        weights_prepacked=None,
+        gate_up_qweight=torch.zeros(1, 32, 2, dtype=torch.uint8),
+        gate_up_scales=torch.zeros(1, 4, 1, dtype=torch.uint8),
+        gate_up_zero_points=None,
+        gate_up_global_scales=torch.ones(1),
+        down_qweight=torch.zeros(1, 32, 1, dtype=torch.uint8),
+        down_scales=torch.zeros(1, 2, 1, dtype=torch.uint8),
+        down_zero_points=None,
+        down_global_scales=torch.ones(1),
+    )
+    initializers = {}
+    model.make_initializer = lambda tensor, name, **kwargs: initializers.setdefault(name, kwargs)
+
+    model.make_moe_expert_initializers(2, experts)
+
+    scale_name = "model.layers.2.moe.experts.gate_up_proj.scales"
+    assert initializers[scale_name] == {"to": base_module.ir.DataType.FLOAT8E8M0, "raw": True}
+    assert model.moe_attrs["block_size"] == 32
+    assert model.moe_attrs["global_scale_names"][2] == (
+        "model.layers.2.moe.experts.gate_up_proj.global_scales",
+        "model.layers.2.moe.experts.down_proj.global_scales",
+    )
+
+
+def test_gptoss_fp4_delegates_normalized_experts_to_base():
+    model = GPTOSSModel.__new__(GPTOSSModel)
+    model.moe_attrs = {"op_type": "QMoE", "quant_type": "fp4"}
+    model.io_dtype = base_module.ir.DataType.FLOAT16
+    packed_experts = object()
+    calls = []
+    model.load_mxfp4_experts = lambda layer_id: packed_experts
+    model.make_moe_expert_initializers = lambda *args: calls.append(args)
+    model.make_initializer = lambda *args, **kwargs: None
+    experts = types.SimpleNamespace(
+        gate_up_proj_bias=torch.ones(2, 4),
+        down_proj_bias=torch.ones(2, 2),
+    )
+
+    model.make_moe_preprocessing(3, types.SimpleNamespace(experts=experts), "root")
+
+    assert calls == [(3, packed_experts)]
+
+
+def test_gptoss_integer_qmoe_decodes_mxfp4_checkpoint_experts():
+    model = GPTOSSModel.__new__(GPTOSSModel)
+    model.moe_attrs = {"op_type": "QMoE", "quant_type": "int"}
+    model.io_dtype = base_module.ir.DataType.FLOAT16
+    gate_up = torch.ones(2, 4, 8)
+    down = torch.ones(2, 8, 2)
+    calls = []
+    model.load_mxfp4_experts = lambda layer_id, decode=False: (gate_up, down) if decode else None
+    model.make_moe_expert_initializers = lambda *args: calls.append(args)
+    model.make_initializer = lambda *args, **kwargs: None
+    experts = types.SimpleNamespace(
+        gate_up_proj=torch.empty(2, 8, 4),
+        gate_up_proj_bias=torch.ones(2, 4),
+        down_proj_bias=torch.ones(2, 8),
+    )
+
+    model.make_moe_preprocessing(3, types.SimpleNamespace(experts=experts), "root")
+
+    assert calls == [(3, experts, gate_up, down)]
+
+
+def test_gptoss_delegates_packed_checkpoint_experts_to_base():
+    model = GPTOSSModel.__new__(GPTOSSModel)
+    model.moe_attrs = {"op_type": "QMoE", "quant_type": "int"}
+    model.io_dtype = base_module.ir.DataType.FLOAT16
+    calls = []
+    experts = types.SimpleNamespace(
+        quant_type="int",
+        gate_up_bias=torch.ones(2, 4),
+        down_bias=torch.ones(2, 2),
+    )
+    model.make_moe_expert_initializers = lambda *args: calls.append(args)
+    model.make_initializer = lambda *args, **kwargs: None
+
+    model.make_moe_preprocessing(3, types.SimpleNamespace(experts=experts), "root")
+
+    assert calls == [(3, experts)]
 
 
 class _FakeMoEModel:
@@ -226,11 +549,11 @@ class _FakeMoEModel:
         self.quant_attrs = {"qmoe_block_size": block_size}
         self.calls = []
 
-    def _cutlass_prepacked_blockwise_quantize(self, weights):
+    def _cutlass_prepacked_blockwise_quantize(self, weights, bits=None):
         self.calls.append(("cutlass", self.qmoe_block_size))
         return torch.zeros(1, dtype=torch.uint8), torch.zeros(1, dtype=torch.float32)
 
-    def _matmulnbits_blockwise_quantize(self, weights):
+    def _matmulnbits_blockwise_quantize(self, weights, bits=None):
         self.calls.append(("matmulnbits", self.qmoe_block_size))
         return torch.zeros(1, dtype=torch.uint8), torch.zeros(1, dtype=torch.float32)
 
@@ -260,46 +583,7 @@ class _RealMoEModel:
         self.extra_options = extra_options or {}
 
 
-class _FakeGPTOSSModel:
-    make_qmoe_weight_initializer_shapes = GPTOSSModel.make_qmoe_weight_initializer_shapes
-
-    def __init__(self, ep, weights_prepacked):
-        self.ep = ep
-        self.hidden_size = 96
-        self.intermediate_size = 128
-        self.moe_attrs = {"expert_weight_bits": 4, "num_experts": 2, "weights_prepacked": weights_prepacked}
-
-
 _W = torch.zeros(8, 128)  # dummy expert weight [N, K]
-
-
-@pytest.mark.parametrize(
-    "weights_prepacked,gate_shape,down_shape,expected_gate_shape,expected_down_shape",
-    [
-        (-1, (96, 128), (128, 48), (2, 96, 128), (2, 128, 48)),
-        (0, (256, 48), (96, 64), (2, 256, 48), (2, 96, 64)),
-        (1, (96, 128), (128, 48), (2, 96, 128), (2, 128, 48)),
-    ],
-)
-def test_gptoss_qmoe_initializer_shapes_match_schema(
-    weights_prepacked,
-    gate_shape,
-    down_shape,
-    expected_gate_shape,
-    expected_down_shape,
-):
-    model = _FakeGPTOSSModel("cuda", weights_prepacked)
-    gate_up_qweights = [torch.zeros(gate_shape, dtype=torch.uint8) for _ in range(model.moe_attrs["num_experts"])]
-    down_qweights = [torch.zeros(down_shape, dtype=torch.uint8) for _ in range(model.moe_attrs["num_experts"])]
-
-    gate_up_initializer_shape, down_initializer_shape = model.make_qmoe_weight_initializer_shapes(
-        gate_up_qweights,
-        down_qweights,
-        has_quark_experts=False,
-    )
-
-    assert tuple(torch.stack(gate_up_qweights, dim=0).view(gate_up_initializer_shape).shape) == expected_gate_shape
-    assert tuple(torch.stack(down_qweights, dim=0).view(down_initializer_shape).shape) == expected_down_shape
 
 
 @pytest.mark.parametrize("weights_prepacked", [-1, 1])
@@ -318,14 +602,121 @@ def test_cuda_raw_path_for_zero():
     assert model.calls == [("matmulnbits", 128)]
 
 
-def test_non_cuda_does_not_use_cuda_only_paths():
-    """The CUDA-only encodings must not be used on other EPs, even when
-    weights_prepacked is set."""
-    model = _FakeMoEModel("cpu", 128, 0)
+@pytest.mark.parametrize("ep", ["cpu", "webgpu"])
+@pytest.mark.parametrize("weights_prepacked", [-1, 0, 1])
+def test_cpu_and_webgpu_use_signed_scale_blockwise_quantizer(ep, weights_prepacked):
+    """CPU and WebGPU ship raw MatMulNBits-convention blockwise weights (signed
+    block scales) regardless of the CUDA-only weights_prepacked knob, and never
+    the CUTLASS-prepacked encoding."""
+    model = _FakeMoEModel(ep, 128, weights_prepacked)
     model.make_qmoe_weights(_W)
-    assert ("cutlass", 128) not in model.calls
-    assert ("matmulnbits", 128) not in model.calls
+    assert model.calls == [("matmulnbits", 128)]
+    assert model.moe_attrs["block_size"] == 128
+
+
+@pytest.mark.parametrize("weights_prepacked", [-1, 0, 1])
+def test_trt_rtx_keeps_the_original_symmetric_blockwise_encoding(weights_prepacked):
+    """The signed-scale grid has not been measured on the TRT-RTX kernel, so that
+    EP stays on the encoding it shipped with."""
+    model = _FakeMoEModel("trt-rtx", 128, weights_prepacked)
+    model.make_qmoe_weights(_W)
     assert model.calls == [("symmetric", 128)]
+    assert model.moe_attrs["block_size"] == 128
+
+
+@pytest.mark.parametrize("ep", ["cpu", "webgpu", "cuda"])
+def test_matmulnbits_blockwise_paths_validate_block_size(ep):
+    """Every EP on the MatMulNBits grid shares the CUDA block-size constraint."""
+    model = _FakeMoEModel(ep, 16, -1)
+    with pytest.raises(ValueError, match="block_size 32, 64, or 128"):
+        model.make_qmoe_weights(_W)
+    assert model.calls == []
+
+
+@pytest.mark.parametrize("ep,weights_prepacked", [("cpu", -1), ("cuda", 0)])
+@pytest.mark.parametrize("bits,k,expected_columns", [(2, 40, 10), (4, 40, 20), (8, 40, 40), (8, 33, 33)])
+def test_raw_blockwise_storage_drops_the_block_padding(ep, weights_prepacked, bits, k, expected_columns):
+    """The MatMulNBits quantizer pads K up to whole blocks; the QMoE op validates raw storage as
+    [E, N, K/pack], so the padding must not reach the initializer."""
+    model = _RealMoEModel(ep, 32, weights_prepacked, bits=bits)
+    model._matmulnbits_blockwise_quantize = Model._matmulnbits_blockwise_quantize.__get__(model)
+    torch.manual_seed(0)
+    weights = torch.randn(3, k)
+    qweight, scales = model.make_qmoe_weights(weights)
+    assert tuple(qweight.shape) == (3, expected_columns)
+    assert tuple(scales.shape) == (3, 2)
+    padded, _ = cuda_quantizer_module.CudaQuantizer.matmulnbits_blockwise_quantize(weights, bits, 32)
+    assert tuple(padded.shape) == (3, 2 * (32 // (8 // bits)))
+    assert torch.equal(qweight, padded[:, :expected_columns])
+
+
+@pytest.mark.parametrize("ep,weights_prepacked", [("cpu", -1), ("webgpu", -1), ("cuda", 0)])
+def test_raw_blockwise_int4_rejects_odd_input_dimension(ep, weights_prepacked):
+    model = _RealMoEModel(ep, 32, weights_prepacked)
+    model._matmulnbits_blockwise_quantize = Model._matmulnbits_blockwise_quantize.__get__(model)
+    with pytest.raises(RuntimeError, match=r"INT4 QMoE requires expert input dimension K \(33\) to be divisible by 2"):
+        model.make_qmoe_weights(torch.zeros(4, 33))
+
+
+@pytest.mark.parametrize("bits", [4, 8])
+@pytest.mark.parametrize("block_size", [32, 64, 128])
+def test_webgpu_blockwise_rejects_partial_blocks(bits, block_size):
+    model = _RealMoEModel("webgpu", block_size, -1, bits=bits)
+    model._matmulnbits_blockwise_quantize = Model._matmulnbits_blockwise_quantize.__get__(model)
+    with pytest.raises(RuntimeError, match=rf"WebGPU QMoE.*K \(40\).*qmoe_block_size \({block_size}\)"):
+        model.make_qmoe_weights(torch.zeros(4, 40))
+
+
+@pytest.mark.parametrize("ep,weights_prepacked", [("cpu", -1), ("webgpu", -1)])
+def test_non_cuda_blockwise_int8_uses_offset_128_storage(ep, weights_prepacked):
+    """INT8 QMoE bytes are q + 128 (the CPU kernel dequantizes with default_zp_8bit = 128), on the
+    same signed-scale grid as INT4: the block's max-magnitude element maps exactly to qmin."""
+    model = _RealMoEModel(ep, 32, weights_prepacked, bits=8)
+    model._matmulnbits_blockwise_quantize = Model._matmulnbits_blockwise_quantize.__get__(model)
+    weights = torch.zeros(1, 32)
+    weights[0, 0] = 8.0  # positive extreme of block 0
+    weights[0, 1] = -4.0
+    weights[0, 2] = 0.0625
+    qweight, scales = model.make_qmoe_weights(weights)
+    assert qweight.dtype == torch.uint8 and tuple(qweight.shape) == (1, 32)
+    assert scales.shape == (1, 1) and scales[0, 0] == -0.0625  # signed: 8.0 / qmin(-128)
+    assert qweight[0, 0].item() == 0  # 8.0 -> qmin (-128) + 128, exact
+    assert qweight[0, 1].item() == 64 + 128  # -4.0 / -0.0625 = 64
+    assert qweight[0, 2].item() == 127  # 0.0625 / -0.0625 = -1
+    assert qweight[0, 3].item() == 128  # zero -> the zero point
+    dequantized = (qweight[0].to(torch.float32) - 128.0) * scales[0, 0].to(torch.float32)
+    assert torch.equal(dequantized, weights[0])
+
+
+def test_cuda_raw_blockwise_int2_packs_four_codes_per_byte():
+    model = _RealMoEModel("cuda", 64, 0, bits=2)
+    model._matmulnbits_blockwise_quantize = Model._matmulnbits_blockwise_quantize.__get__(model)
+    weights = torch.zeros(1, 64)
+    weights[0, :4] = torch.tensor([2.0, 1.0, 0.0, -1.0])
+
+    qweight, scales = model.make_qmoe_weights(weights)
+
+    assert tuple(qweight.shape) == (1, 16)
+    assert scales[0, 0] == -1.0
+    assert qweight[0, 0].item() == 0b11100100
+
+
+@pytest.mark.parametrize("ep", ["cpu", "webgpu"])
+def test_non_cuda_blockwise_scales_are_signed_and_do_not_clip_the_extreme(ep):
+    """The signed-scale grid maps each block's max-magnitude element exactly to
+    qmin, so a positive extreme is no longer clipped to 7/8 of its value. This is
+    also the grid the CPU QMoE MLAS Q4 fast path re-quantizes to, keeping that path
+    lossless."""
+    model = _RealMoEModel(ep, 32, -1, bits=4)
+    model._matmulnbits_blockwise_quantize = Model._matmulnbits_blockwise_quantize.__get__(model)
+    weights = torch.zeros(1, 32)
+    weights[0, 0] = 8.0  # positive extreme of block 0
+    weights[0, 1] = -4.0
+    qweight, scales = model.make_qmoe_weights(weights)
+    assert scales.shape == (1, 1) and scales[0, 0] == -1.0  # signed: 8.0 / qmin(-8)
+    q = qweight[0, 0].item()
+    assert (q & 0xF) == 0  # 8.0 -> qmin (-8) + 8 == 0, exact
+    assert (q >> 4) == 12  # -4.0 / -1.0 = 4 -> 4 + 8
 
 
 @pytest.mark.parametrize(
@@ -522,15 +913,18 @@ def test_cuda_raw_per_channel_quantization_does_not_require_qmoe_pack_pybind(mon
 
 
 @pytest.mark.skipif(not _ort_cuda_available(), reason="onnxruntime CUDA pybind not available")
-def test_cutlass_prepacked_scales_are_positive_with_full_range_symmetric_quantization():
-    """The synced CudaQuantizer full-range symmetric path returns positive
-    scales, and the encoded shapes must match the QMoE op's prepacked layout."""
+def test_cutlass_prepacked_scales_preserve_mlas_sign():
     model = _FakeMoEModel("cuda", 128, -1)
     torch.manual_seed(0)
     weights = torch.randn(256, 256) * 0.05  # [N, K]
     qweight, scales = Model._cutlass_prepacked_blockwise_quantize(model, weights)
 
+    blocked = weights.reshape(256, 2, 128)
+    argmax = blocked.abs().argmax(dim=2, keepdim=True)
+    expected_scales = blocked.gather(2, argmax).squeeze(2) / -8.0
+
     assert qweight.dtype == torch.uint8
     assert tuple(qweight.shape) == (256, 128)  # [K, N/2] for INT4
     assert tuple(scales.shape) == (256, 2)  # [N, K/block]
-    assert (scales > 0).all()
+    assert (scales < 0).any() and (scales > 0).any()
+    assert torch.equal(scales, expected_scales)

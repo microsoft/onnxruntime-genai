@@ -2,31 +2,246 @@
 // Licensed under the MIT License.
 
 #include "simple_decoder.h"
+#include "hybrid_decoder_io.h"
 #include "static_batch_decoder_io.h"
 #include "varlen_decoder_io.h"
+#include "../../models/model_state_manifest.h"
 
 namespace Generators {
 
 SimpleDecoder::SimpleDecoder(std::shared_ptr<DecoderOnly_Model> model,
                              std::shared_ptr<CacheManager> cache_manager)
-    : model_{model}, cache_manager_{cache_manager} {}
+    : model_{model}, cache_manager_{cache_manager} {
+  if (model_->session_engram_ && !cache_manager_->SupportsDynamicBatching()) {
+    throw std::runtime_error("Engine Engram requires dynamic batching for packed decoder inputs.");
+  }
+  const ModelStateManifest manifest{model_->config_->model.decoder};
+  has_fixed_state_groups_ = manifest.HasFixedStateGroups();
+  const bool has_position_ids = model_->session_info_.HasInput(
+      model_->config_->model.decoder.inputs.position_ids);
+  if (cache_manager_->SupportsDynamicBatching() && has_position_ids) {
+    const auto& position_ids =
+        model_->config_->model.decoder.inputs.position_ids;
+    const auto position_shape =
+        model_->session_info_.GetInputShape(position_ids);
+    ValidatePackedPositionIdsInput(
+        model_->session_info_.GetInputDataType(position_ids),
+        position_shape,
+        model_->session_info_.GetInputSymbolicShape(position_ids));
+    if (position_shape.size() == 2 &&
+        (!model_->config_->model.vision.filename.empty() ||
+         !model_->config_->model.vision.pipeline.empty() ||
+         !model_->config_->model.speech.filename.empty())) {
+      throw std::runtime_error(
+          "Packed [3, num_tokens] position_ids support text-only models; "
+          "multimodal coordinates are not supported by the Engine.");
+    }
+    position_planes_ = PackedPositionIdPlanes(*model_);
+  }
+  if (IsGraphCaptureEnabled(model_->config_->model.decoder.session_options) &&
+      cache_manager_->SupportsDynamicBatching()) {
+    // The scheduler clamps every request's draft width to what the cache can roll back, and a
+    // verify step runs one token plus those drafts. A per-request speculative option can raise the
+    // width above the config default, so the cache's ceiling is what the buffers have to cover.
+    graph_buffers_ = std::make_unique<VarlenGraphBuffers>(
+        *model_, position_planes_, cache_manager_->MaxDraftTokensPerStep() + 1);
+  }
+}
 
-void SimpleDecoder::Decode(ScheduledRequests& scheduled_requests) {
-  cache_manager_->Step();
-  std::unique_ptr<DecoderIO> decoder_state =
-      cache_manager_->SupportsDynamicBatching()
-          ? static_cast<std::unique_ptr<DecoderIO>>(std::make_unique<VarlenDecoderIO>(model_, scheduled_requests, cache_manager_))
-          : static_cast<std::unique_ptr<DecoderIO>>(std::make_unique<StaticBatchDecoderIO>(model_, scheduled_requests, cache_manager_));
+SimpleDecoder::~SimpleDecoder() {
+#if ORT_API_VERSION >= 27
+  // The session outlives this decoder and keeps every graph it captured, so the graphs have to go
+  // before the buffers whose addresses they recorded. Destructors must not throw.
+  if (graph_buffers_ && model_->session_decoder_) {
+    for (auto* session : {model_->session_decoder_.get()}) {
+      if (!session) {
+        continue;
+      }
+      for (const int annotation_id : graph_buffers_->graph_ids.AssignedIds()) {
+        try {
+          session->ReleaseCapturedGraph(annotation_id);
+        } catch (...) {
+          if (g_log.enabled && g_log.graph_capture) {
+            Log("graph_capture") << "ReleaseCapturedGraph(id=" << annotation_id << ") failed"
+                                 << std::endl;
+          }
+        }
+      }
+    }
+  }
+#endif
+}
 
-  auto run_options = scheduled_requests.RunOptions();
+namespace {
+
+// A step can be captured only if it looks like every other step the graph will serve: the same
+// number of new tokens for every sequence. Prefill and chunked-prefill steps carry a variable number
+// of tokens and are shaped differently from run to run, so they always execute eagerly. Returns the
+// shared per-request token count, or zero when the step cannot be captured.
+size_t UniformDecodeTokenCount(ScheduledRequests& scheduled_requests) {
+  size_t tokens_per_request = 0;
+  for (auto& request : scheduled_requests) {
+    const size_t token_count = request->ScheduledTokenCount();
+    if (request->IsPrefill() || token_count == 0) {
+      return 0;
+    }
+    if (tokens_per_request == 0) {
+      tokens_per_request = token_count;
+    } else if (tokens_per_request != token_count) {
+      return 0;
+    }
+  }
+  return tokens_per_request;
+}
+
+// The scheduler already proved a capture-eligible plan is uniform, so any row carries the count.
+size_t PlanDecodeTokenCount(const StepPlan& plan) {
+  if (!plan.graph_capture_eligible || plan.requests.empty()) {
+    return 0;
+  }
+  return plan.requests.front().unprocessed_token_count;
+}
+
+}  // namespace
+
+void SimpleDecoder::LogGraphDecision(size_t batch_size, size_t tokens_per_request,
+                                     const ExecutionContext& context, int annotation_id,
+                                     GraphFallback fallback, size_t known_shapes) {
+  const size_t shapes = graph_buffers_ ? graph_buffers_->graph_ids.size() : 0;
+  const bool new_shape = shapes != known_shapes;
+  const bool reason_changed = fallback != last_fallback_;
+  last_fallback_ = fallback;
+  if (!g_log.enabled || !g_log.graph_capture || (!new_shape && !reason_changed)) {
+    return;
+  }
+  auto& stream = Log("graph_capture");
+  stream << "decode batch=" << batch_size << " tokens_per_request=" << tokens_per_request
+         << " block_table_columns=" << context.block_table_columns
+         << " state_binding=" << context.fixed_state_binding_key
+         << " state_domain=" << context.fixed_state_binding_domain << " -> ";
+  switch (fallback) {
+    case GraphFallback::kCaptured:
+      stream << "graph id " << annotation_id;
+      break;
+    case GraphFallback::kDisabled:
+      stream << "eager (graph capture not enabled for this decoder)";
+      break;
+    case GraphFallback::kNonUniformStep:
+      stream << "eager (prefill, or requests contribute different token counts)";
+      break;
+    case GraphFallback::kStepTooWide:
+      stream << "eager (step exceeds the persistent buffers: max_batch_size="
+             << graph_buffers_->max_batch_size
+             << " max_query_tokens=" << graph_buffers_->max_query_tokens
+             << " max_token_rows=" << graph_buffers_->max_token_rows << ")";
+      break;
+    case GraphFallback::kUnknownBindingLayout:
+      stream << "eager (extra or fixed bindings have no persistent layout identity)";
+      break;
+    case GraphFallback::kUncapturableShape:
+      stream << "eager ("
+             << (shapes >= GraphAnnotationIds::kMaxCapturedShapes ? "shape budget exhausted"
+                                                                  : "shape has no annotation key")
+             << ")";
+      break;
+  }
+  stream << " [" << shapes << "/" << GraphAnnotationIds::kMaxCapturedShapes << " shapes assigned]"
+         << std::endl;
+}
+
+std::optional<GraphAnnotationIds::Key> SimpleDecoder::GraphKeyForContext(
+    size_t batch_size, size_t tokens_per_request, const ExecutionContext& context,
+    const OrtSession* default_session) {
+  const bool has_extras = !context.extra_inputs.empty() || !context.extra_outputs.empty() ||
+                          !context.extra_input_names.empty() || !context.extra_output_names.empty();
+  if ((has_extras && context.extra_binding_layout_key == 0) ||
+      (!context.fixed_state_bindings.empty() && context.fixed_state_binding_key == 0 &&
+       context.extra_binding_layout_key == 0)) {
+    return std::nullopt;
+  }
+  return DecodeGraphKey(batch_size, tokens_per_request, context.block_table_columns,
+                        context.fixed_state_binding_key, context.fixed_state_binding_domain,
+                        context.decoder_session ? context.decoder_session : default_session,
+                        context.indexshare_decode, context.extra_binding_layout_key);
+}
+
+void SimpleDecoder::Decode(ScheduledRequests& scheduled_requests,
+                           ExecutionContext& context) {
+  const size_t tokens_per_request = context.plan
+                                        ? PlanDecodeTokenCount(*context.plan)
+                                        : UniformDecodeTokenCount(scheduled_requests);
+  // -1 tells the CUDA EP to run eagerly. Otherwise every distinct decode shape gets its own
+  // annotation id: the EP runs that id once eagerly, captures it on the next occurrence, and
+  // replays from then on. The id also covers the fixed-state binding layout, whose device
+  // addresses move when the persistent bank flips.
+  const size_t known_shapes = graph_buffers_ ? graph_buffers_->graph_ids.size() : 0;
+  int annotation_id = -1;
+  GraphFallback fallback = GraphFallback::kCaptured;
+  if (graph_buffers_ == nullptr) {
+    fallback = GraphFallback::kDisabled;
+  } else if (tokens_per_request == 0) {
+    fallback = GraphFallback::kNonUniformStep;
+  } else if (!graph_buffers_->Fits(scheduled_requests.size(), tokens_per_request)) {
+    fallback = GraphFallback::kStepTooWide;
+  } else {
+    const auto key = GraphKeyForContext(scheduled_requests.size(), tokens_per_request,
+                                        context, model_->session_decoder_.get());
+    if (key) {
+      annotation_id = graph_buffers_->graph_ids.Id(*key);
+    } else if ((!context.extra_inputs.empty() || !context.extra_outputs.empty() ||
+                !context.fixed_state_bindings.empty())) {
+      fallback = GraphFallback::kUnknownBindingLayout;
+    }
+    if (annotation_id <= 0 && fallback != GraphFallback::kUnknownBindingLayout) {
+      fallback = GraphFallback::kUncapturableShape;
+    }
+  }
+  const bool capture = annotation_id > 0;
+  LogGraphDecision(scheduled_requests.size(), tokens_per_request, context, annotation_id, fallback,
+                   known_shapes);
+
+  std::unique_ptr<DecoderIO> decoder_state;
+  if (!cache_manager_->SupportsDynamicBatching()) {
+    decoder_state = std::make_unique<StaticBatchDecoderIO>(
+        model_, scheduled_requests, cache_manager_);
+  } else if (has_fixed_state_groups_) {
+    decoder_state = std::make_unique<HybridDecoderIO>(
+        model_, scheduled_requests, cache_manager_, context,
+        capture ? graph_buffers_.get() : nullptr, position_planes_, &embedding_workspace_);
+  } else {
+    decoder_state = std::make_unique<VarlenDecoderIO>(
+        model_, scheduled_requests, cache_manager_, &context,
+        capture ? graph_buffers_.get() : nullptr, position_planes_, &embedding_workspace_);
+  }
+
+  if (IsGraphCaptureEnabled(model_->config_->model.decoder.session_options) &&
+      cache_manager_->SupportsDynamicBatching()) {
+    context.run_options->AddConfigEntry("gpu_graph_id", std::to_string(annotation_id).c_str());
+    // Every consumer of a captured step's outputs runs on the session's CUDA stream, and the first
+    // host read of them (the sampled token ids) synchronizes that stream. Skipping the end-of-run
+    // synchronization lets that work queue behind the graph instead of waiting for the device.
+    if (capture && model_->p_device_->GetType() == DeviceType::CUDA) {
+      context.run_options->AddConfigEntry("disable_synchronize_execution_providers", "1");
+    }
+  }
+
+  if (context.extra_input_names.size() != context.extra_inputs.size() ||
+      context.extra_output_names.size() != context.extra_outputs.size()) {
+    throw std::runtime_error("Extra decoder binding names and tensors do not match.");
+  }
+  decoder_state->input_names_.insert(decoder_state->input_names_.end(), context.extra_input_names.begin(), context.extra_input_names.end());
+  decoder_state->inputs_.insert(decoder_state->inputs_.end(), context.extra_inputs.begin(), context.extra_inputs.end());
+  decoder_state->output_names_.insert(decoder_state->output_names_.end(), context.extra_output_names.begin(), context.extra_output_names.end());
+  decoder_state->outputs_.insert(decoder_state->outputs_.end(), context.extra_outputs.begin(), context.extra_outputs.end());
   decoder_state->DumpInputs();
-  model_->session_decoder_->Run(run_options.get(),
-                                decoder_state->input_names_.data(),
-                                decoder_state->inputs_.data(),
-                                decoder_state->input_names_.size(),
-                                decoder_state->output_names_.data(),
-                                decoder_state->outputs_.data(),
-                                decoder_state->output_names_.size());
+  auto* session = context.decoder_session ? context.decoder_session : model_->session_decoder_.get();
+  session->Run(context.run_options.get(),
+               decoder_state->input_names_.data(),
+               decoder_state->inputs_.data(),
+               decoder_state->input_names_.size(),
+               decoder_state->output_names_.data(),
+               decoder_state->outputs_.data(),
+               decoder_state->output_names_.size());
   decoder_state->DumpOutputs();
 
   scheduled_requests.AddDecoderState(std::move(decoder_state));

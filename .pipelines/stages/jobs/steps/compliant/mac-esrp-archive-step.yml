@@ -1,14 +1,12 @@
 parameters:
 - name: FolderPath
   type: string
-  default: ''
 
 - name: Pattern
   type: string
-  default: '*.zip'
 
 steps:
-- task: SFP.build-tasks.custom-build-task-1.EsrpCodeSigning@5
+- task: EsrpCodeSigning@6
   displayName: 'ESRP CodeSigning'
   inputs:
     ConnectedServiceName: 'esrp_release'

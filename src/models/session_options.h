@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 #pragma once
 
-#include "../generators.h"
+#include "generator/generators.h"
 
 namespace Generators {
 
@@ -29,6 +29,10 @@ bool AppendExecutionProviderV2(OrtSessionOptions& session_options,
 // Appends an execution provider using the legacy V1 API (key/value string pairs).
 void AppendExecutionProviderV1(OrtSessionOptions& session_options,
                                const Config::ProviderOptions& provider_options);
+
+// Keeps the first provider-specific device selected for the primary session.
+DeviceInterface* SelectPrimarySessionDevice(DeviceInterface* selected_device,
+                                            DeviceInterface* candidate_device);
 
 // Iterates over the requested providers, dispatches to provider-specific
 // AppendExecutionProvider implementations, and returns the DeviceInterface

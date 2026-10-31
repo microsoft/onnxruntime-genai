@@ -14,6 +14,7 @@
 # 2) Run this script with the desired arguments. Run benchmark_e2e.py -h for help.
 
 import argparse
+import importlib.metadata
 import json
 import os
 import subprocess
@@ -22,6 +23,7 @@ import time
 
 import numpy as np
 import onnxruntime_genai as og
+import pandas as pd
 import psutil
 from metrics import BenchmarkRecord
 from tqdm import tqdm
@@ -40,7 +42,7 @@ except Exception:
 
 # Monitor the GPU memory usage
 def monitor_gpu_memory():
-    global peak_gpu_memory
+    global peak_gpu_memory  # noqa: PLW0603
 
     while not stop_monitoring:
         result = subprocess.run(
@@ -64,7 +66,7 @@ def monitor_gpu_memory():
 
 # Monitor the CPU memory usage
 def monitor_cpu_memory():
-    global peak_cpu_memory
+    global peak_cpu_memory  # noqa: PLW0603
 
     while not stop_monitoring:
         current_used_memory = round(psutil.virtual_memory().used / 1024**3, 2)
@@ -83,8 +85,6 @@ def get_prompt_by_length(prompt_length):
 
 def get_target_pip_package_version(target_pip_package_name_list):
     # get package name and version
-    import importlib.metadata
-
     installed_packages_list = sorted(
         [
             f"{dist.metadata['Name']}=={dist.version}"
@@ -101,18 +101,32 @@ def get_target_pip_package_version(target_pip_package_name_list):
     return pkg_name, pkg_version
 
 
-def save_results(args, results, filename, print_memory_usage=False):
-    import pandas as pd
+def aggregate_measurements(measurements, aggregation):
+    if not measurements:
+        raise ValueError("No measurements to aggregate (empty timing list). Check --repetitions / warmup / generation lengths.")
+    if aggregation == "mean":
+        return float(np.mean(measurements))
+    if aggregation == "median":
+        return float(np.median(measurements))
+    raise ValueError(f"Unsupported aggregation: {aggregation}")
 
+
+def save_results(args, results, filename, print_memory_usage=False):
     columns = [
         "Batch Size",
         "Prompt Length",
         "Tokens Generated",
         "Max Length",
+        "Model Creation Latency (ms)",
+        "Tokenizer Creation Latency (ms)",
+        "Generator Creation Latency (ms)",
+        "First Warmup AppendTokens Latency (ms)",
         "Tokenization Throughput (tps)",
         "Tokenization Latency (ms)",
         "Prompt Processing Throughput (tps)",
         "Prompt Processing Latency (ms)",
+        "Time to First Token (ms)",
+        "Time to First Token StdDev (ms)",
         "Token Generation Throughput (tps)",
         "Token Generation Latency (ms)",
         "Sampling Throughput (tps)",
@@ -151,10 +165,21 @@ def save_results(args, results, filename, print_memory_usage=False):
         record.config.customized["prompt_length"] = row["Prompt Length"]
         record.config.customized["tokens_generated"] = row["Tokens Generated"]
         record.config.customized["max_length"] = row["Max Length"]
+        record.config.customized["aggregation"] = args.aggregation
+        record.metrics.customized["model_creation_latency_ms"] = row["Model Creation Latency (ms)"]
+        record.metrics.customized["tokenizer_creation_latency_ms"] = row["Tokenizer Creation Latency (ms)"]
+        generator_creation_latency_ms = row["Generator Creation Latency (ms)"]
+        if pd.notna(generator_creation_latency_ms):
+            record.metrics.customized["generator_creation_latency_ms"] = generator_creation_latency_ms
+        first_warmup_append_tokens_latency_ms = row["First Warmup AppendTokens Latency (ms)"]
+        if pd.notna(first_warmup_append_tokens_latency_ms):
+            record.metrics.customized["first_warmup_append_tokens_latency_ms"] = first_warmup_append_tokens_latency_ms
         record.metrics.customized["tokenization_throughput_tps"] = row["Tokenization Throughput (tps)"]
         record.metrics.customized["tokenization_latency_ms"] = row["Tokenization Latency (ms)"]
         record.metrics.customized["prompt_processing_throughput_tps"] = row["Prompt Processing Throughput (tps)"]
         record.metrics.customized["prompt_processing_latency_ms"] = row["Prompt Processing Latency (ms)"]
+        record.metrics.customized["time_to_first_token_ms"] = row["Time to First Token (ms)"]
+        record.metrics.customized["time_to_first_token_stddev_ms"] = row["Time to First Token StdDev (ms)"]
         record.metrics.customized["token_generation_throughput_tps"] = row["Token Generation Throughput (tps)"]
         record.metrics.customized["token_generation_latency_ms"] = row["Token Generation Latency (ms)"]
         record.metrics.customized["sampling_throughput_tps"] = row["Sampling Throughput (tps)"]
@@ -179,9 +204,9 @@ def run_benchmark_memory(args, batch_size, prompt_length, generation_length, max
     """
     This function is to run benchmark and print the memory usage
     """
-    global stop_monitoring
-    global peak_gpu_memory
-    global peak_cpu_memory
+    global stop_monitoring  # noqa: PLW0603
+    global peak_gpu_memory  # noqa: PLW0603
+    global peak_cpu_memory  # noqa: PLW0603
 
     # Reset the peak memory variables and the monitoring flag
     stop_monitoring = False
@@ -221,15 +246,20 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     if args.execution_provider != "follow_config":
         config.clear_providers()
         if args.execution_provider != "cpu":
+            provider_to_append = "WebGpuExecutionProvider" if args.execution_provider == "webgpu" else args.execution_provider
             if args.verbose:
-                print(f"Setting model to {args.execution_provider}")
-            config.append_provider(args.execution_provider)
+                print(f"Setting model to {provider_to_append}")
+            config.append_provider(provider_to_append)
     if args.verbose:
         print("Loading model... ")
+    model_creation_start_time = time.perf_counter()
     model = og.Model(config)
+    model_creation_latency_s = time.perf_counter() - model_creation_start_time
     if args.verbose:
         print("Model loaded")
+    tokenizer_creation_start_time = time.perf_counter()
     tokenizer = og.Tokenizer(model)
+    tokenizer_creation_latency_s = time.perf_counter() - tokenizer_creation_start_time
 
     # Get model type
     model_type = None
@@ -247,7 +277,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
                 "Chat template must have exactly one pair of curly braces with input word in it, e.g. '<|user|>\n{input} <|end|>\n<|assistant|>'"
             )
     else:
-        if model_type.startswith("phi2") or model_type.startswith("phi3"):
+        if model_type.startswith(("phi2", "phi3")):
             args.chat_template = "<|user|>\n{input} <|end|>\n<|assistant|>"
         elif model_type.startswith("phi4"):
             args.chat_template = "<|im_start|>user<|im_sep|>\n{input}<|im_end|>\n<|im_start|>assistant<|im_sep|>"
@@ -298,20 +328,32 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         top_k=args.top_k,
         top_p=args.top_p,
         temperature=temperature,
-        **({ "max_length": max_length } if override_max_length else {}),
+        **({"max_length": max_length} if override_max_length else {}),
         min_length=max_length if override_max_length else prompt_length + generation_length,
         batch_size=batch_size,
     )
 
+    # Time the first generator without changing where generators are created.
+    generator_creation_latency_s = None
+
+    def create_generator():
+        nonlocal generator_creation_latency_s
+        if generator_creation_latency_s is not None:
+            return og.Generator(model, params)
+        generator_creation_start_time = time.perf_counter()
+        gen = og.Generator(model, params)
+        generator_creation_latency_s = time.perf_counter() - generator_creation_start_time
+        return gen
+
     # When reuse_generator is enabled, create a single generator and reuse it via
     # rewind_to(0). This avoids recreating the generator (and reallocating
     # KV cache) each iteration. Otherwise, create a fresh generator per iteration.
-    generator = og.Generator(model, params) if args.reuse_generator else None
+    generator = create_generator() if args.reuse_generator else None
 
     if need_generate_prompt:
         # Use a generator to produce the prompt.  When reusing, use the single
         # generator; otherwise create a temporary one that is destroyed after.
-        gen = generator if args.reuse_generator else og.Generator(model, params)
+        gen = generator if args.reuse_generator else create_generator()
 
         text_seed = "a"
         seed_prompt = f"{args.chat_template.format(input=text_seed)}"
@@ -333,13 +375,26 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
 
     if args.verbose:
         print("Running warmup runs...")
-    for _ in tqdm(range(args.warmup)):
+    if need_generate_prompt and args.warmup > 0:
+        print(
+            "WARNING: The prompt was generated with the model before warmup, so the first warmup append_tokens "
+            "call is not a cold-start measurement. Use --use_random_tokens or --use_prompt_set to prepare the "
+            "prompt without an earlier model run."
+        )
+    first_warmup_append_tokens_latency_s = None
+    for warmup_index in tqdm(range(args.warmup)):
         if args.reuse_generator:
             generator.rewind_to(0)
             gen = generator
         else:
-            gen = og.Generator(model, params)
+            gen = create_generator()
+        if warmup_index == 0:
+            # Measure the Python-visible append_tokens call, not an isolated or
+            # explicitly synchronized Ort::Run invocation.
+            first_warmup_start_time = time.perf_counter()
         gen.append_tokens(tokens)
+        if warmup_index == 0:
+            first_warmup_append_tokens_latency_s = time.perf_counter() - first_warmup_start_time
         target_token_count = gen.token_count() + generation_length
         while not gen.is_done() and gen.token_count() < target_token_count:
             gen.generate_next_token()
@@ -371,7 +426,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
             generator.rewind_to(0)
             gen = generator
         else:
-            gen = og.Generator(model, params)
+            gen = create_generator()
 
         # Measure prompt processing
         prompt_start_time = time.perf_counter()
@@ -407,41 +462,71 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     if generator:
         del generator
 
+    aggregation_label = "Average" if args.aggregation == "mean" else "Median"
+
+    model_creation_latency_ms = model_creation_latency_s * 1000
+    tokenizer_creation_latency_ms = tokenizer_creation_latency_s * 1000
+    generator_creation_latency_ms = (
+        generator_creation_latency_s * 1000 if generator_creation_latency_s is not None else None
+    )
+    first_warmup_append_tokens_latency_ms = (
+        first_warmup_append_tokens_latency_s * 1000
+        if first_warmup_append_tokens_latency_s is not None
+        else None
+    )
+    print(f"Model Creation Latency: {model_creation_latency_ms} ms")
+    print(f"Tokenizer Creation Latency: {tokenizer_creation_latency_ms} ms")
+    if generator_creation_latency_ms is None:
+        print("Generator Creation Latency: N/A (no generator was created)")
+    else:
+        print(f"Generator Creation Latency: {generator_creation_latency_ms} ms")
+    if first_warmup_append_tokens_latency_ms is None:
+        print("First Warmup AppendTokens Latency: N/A (--warmup=0)")
+    else:
+        print(f"First Warmup AppendTokens Latency: {first_warmup_append_tokens_latency_ms} ms")
+
     # Calculate tokenization metrics
-    avg_tokenization_latency_s = sum(tokenize_times) / len(tokenize_times)
-    avg_tokenization_latency_ms = avg_tokenization_latency_s * 1000
-    avg_per_token_tokenization_latency_ms = avg_tokenization_latency_ms / prompt_length
-    avg_tokenization_thrpt = batch_size * (1000 / avg_per_token_tokenization_latency_ms)
-    print(f"Average Tokenization Latency (per token): {avg_per_token_tokenization_latency_ms} ms")
-    print(f"Average Tokenization Throughput (per token): {avg_tokenization_thrpt} tps")
+    tokenization_latency_s = aggregate_measurements(tokenize_times, args.aggregation)
+    tokenization_latency_ms = tokenization_latency_s * 1000
+    per_token_tokenization_latency_ms = tokenization_latency_ms / prompt_length
+    tokenization_thrpt = batch_size * (1000 / per_token_tokenization_latency_ms)
+    print(f"{aggregation_label} Tokenization Latency (per token): {per_token_tokenization_latency_ms} ms")
+    print(f"{aggregation_label} Tokenization Throughput (per token): {tokenization_thrpt} tps")
 
     # Calculate prompt processing metrics
-    avg_prompt_latency_s = sum(prompt_times) / len(prompt_times)
-    avg_prompt_latency_ms = avg_prompt_latency_s * 1000
-    avg_per_token_prompt_latency_ms = avg_prompt_latency_ms / prompt_length
-    avg_per_token_prompt_thrpt = batch_size * (1000 / avg_per_token_prompt_latency_ms)
-    print(f"Average Prompt Processing Latency (per token): {avg_per_token_prompt_latency_ms} ms")
-    print(f"Average Prompt Processing Throughput (per token): {avg_per_token_prompt_thrpt} tps")
+    prompt_latency_s = aggregate_measurements(prompt_times, args.aggregation)
+    prompt_latency_ms = prompt_latency_s * 1000
+    per_token_prompt_latency_ms = prompt_latency_ms / prompt_length
+    per_token_prompt_thrpt = batch_size * (1000 / per_token_prompt_latency_ms)
+
+    # Time to first token = prompt prefill + first-token sampling
+    ttft_times = [p + s for p, s in zip(prompt_times, sampling_times)]
+    ttft_ms = aggregate_measurements(ttft_times, args.aggregation) * 1000
+    std_ttft_ms = float(np.std(ttft_times)) * 1000
+    print(f"{aggregation_label} Time to First Token: {ttft_ms} ms")
+    print(f"Time to First Token StdDev: {std_ttft_ms} ms")
+    print(f"{aggregation_label} Prompt Processing Latency (per token): {per_token_prompt_latency_ms} ms")
+    print(f"{aggregation_label} Prompt Processing Throughput (per token): {per_token_prompt_thrpt} tps")
 
     # Calculate token generation input prep metrics
-    avg_token_gen_latency_s = sum(token_gen_times) / len(token_gen_times)
-    avg_token_gen_latency_ms = avg_token_gen_latency_s * 1000
-    avg_token_gen_thrpt = batch_size * (1 / avg_token_gen_latency_s)
-    print(f"Average Token Generation Latency (per token): {avg_token_gen_latency_ms} ms")
-    print(f"Average Token Generation Throughput (per token): {avg_token_gen_thrpt} tps")
+    token_gen_latency_s = aggregate_measurements(token_gen_times, args.aggregation)
+    token_gen_latency_ms = token_gen_latency_s * 1000
+    token_gen_thrpt = batch_size * (1 / token_gen_latency_s)
+    print(f"{aggregation_label} Token Generation Latency (per token): {token_gen_latency_ms} ms")
+    print(f"{aggregation_label} Token Generation Throughput (per token): {token_gen_thrpt} tps")
 
     # Calculate sampling metrics
-    avg_sampling_latency_s = sum(sampling_times) / len(sampling_times)
-    avg_sampling_latency_ms = avg_sampling_latency_s * 1000
-    avg_sampling_thrpt = batch_size * (1 / avg_sampling_latency_s)
-    print(f"Average Sampling Latency (per token): {avg_sampling_latency_ms} ms")
-    print(f"Average Sampling Throughput (per token): {avg_sampling_thrpt} tps")
+    sampling_latency_s = aggregate_measurements(sampling_times, args.aggregation)
+    sampling_latency_ms = sampling_latency_s * 1000
+    sampling_thrpt = batch_size * (1 / sampling_latency_s)
+    print(f"{aggregation_label} Sampling Latency (per token): {sampling_latency_ms} ms")
+    print(f"{aggregation_label} Sampling Throughput (per token): {sampling_thrpt} tps")
 
     # Calculate wall clock time
-    avg_wall_clock_time = sum(wall_clock_times) / len(wall_clock_times)
-    avg_wall_clock_thrpt = batch_size * (max_length / avg_wall_clock_time)
-    print(f"Average Wall Clock Time: {avg_wall_clock_time} s")
-    print(f"Average Wall Clock Throughput: {avg_wall_clock_thrpt} tps")
+    wall_clock_time = aggregate_measurements(wall_clock_times, args.aggregation)
+    wall_clock_thrpt = batch_size * (max_length / wall_clock_time)
+    print(f"{aggregation_label} Wall Clock Time: {wall_clock_time} s")
+    print(f"{aggregation_label} Wall Clock Throughput: {wall_clock_thrpt} tps")
 
     if args.print_memory_usage:
         if IS_NVIDIA_SYSTEM:
@@ -454,16 +539,22 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         prompt_length,
         generation_length,
         max_length,
-        avg_tokenization_thrpt,
-        avg_tokenization_latency_ms,
-        avg_per_token_prompt_thrpt,
-        avg_per_token_prompt_latency_ms,
-        avg_token_gen_thrpt,
-        avg_token_gen_latency_ms,
-        avg_sampling_thrpt,
-        avg_sampling_latency_ms,
-        avg_wall_clock_thrpt,
-        avg_wall_clock_time,
+        model_creation_latency_ms,
+        tokenizer_creation_latency_ms,
+        generator_creation_latency_ms,
+        first_warmup_append_tokens_latency_ms,
+        tokenization_thrpt,
+        tokenization_latency_ms,
+        per_token_prompt_thrpt,
+        per_token_prompt_latency_ms,
+        ttft_ms,
+        std_ttft_ms,
+        token_gen_thrpt,
+        token_gen_latency_ms,
+        sampling_thrpt,
+        sampling_latency_ms,
+        wall_clock_thrpt,
+        wall_clock_time,
     ]
     return metrics
 
@@ -476,6 +567,14 @@ def main(args):
             raise ValueError(
                 "Cannot use --ep_library_path with --execution_provider=follow_config."
                 "Please specify an execution provider using -e (e.g., -e cuda or -e NvTensorRtRtx)"
+            )
+
+        if args.execution_provider == "webgpu":
+            raise ValueError(
+                "Cannot use --ep_library_path with --execution_provider=webgpu. "
+                "WebGPU EP is a plugin package and should be installed via "
+                "'pip install onnxruntime-ep-webgpu', then selected with '-e webgpu' "
+                "without --ep_library_path."
             )
 
         if args.verbose:
@@ -496,15 +595,28 @@ def main(args):
         og.register_execution_provider_library(provider_registration_name, args.ep_library_path)
         if args.verbose:
             print(f"Successfully registered {provider_registration_name} from {args.ep_library_path}")
+    elif args.execution_provider == "webgpu":
+        print("WebGPU EP selected. Attempting to import 'onnxruntime-ep-webgpu' for registration...")
+        try:
+            import onnxruntime_ep_webgpu as webgpu_ep
+        except ImportError as exc:
+            raise ValueError(
+                "WebGPU EP selected but 'onnxruntime-ep-webgpu' is not installed. "
+                "Install it with: pip install onnxruntime-ep-webgpu"
+            ) from exc
+
+        provider_registration_name = webgpu_ep.get_ep_name()
+        provider_library_path = webgpu_ep.get_library_path()
+        og.register_execution_provider_library(provider_registration_name, provider_library_path)
 
     all_csv_metrics = []
 
     for batch_size in args.batch_sizes:
-        for l, prompt_length in enumerate(args.prompt_lengths):
-            for g, gen_length in enumerate(args.generation_lengths):
+        for prompt_idx, prompt_length in enumerate(args.prompt_lengths):
+            for gen_idx, gen_length in enumerate(args.generation_lengths):
                 if args.max_lengths:
-                    m = l * len(args.generation_lengths) + g
-                    max_length = args.max_lengths[0] if len(args.max_lengths) == 1 else args.max_lengths[m]
+                    max_idx = prompt_idx * len(args.generation_lengths) + gen_idx
+                    max_length = args.max_lengths[0] if len(args.max_lengths) == 1 else args.max_lengths[max_idx]
                 else:
                     max_length = prompt_length + gen_length
                 print(
@@ -559,6 +671,12 @@ if __name__ == "__main__":
     )
     parser.add_argument("-r", "--repetitions", type=int, default=10, help="Number of times to repeat the benchmark")
     parser.add_argument("-w", "--warmup", type=int, default=5, help="Number of warmup runs before benchmarking")
+    parser.add_argument(
+        "--aggregation",
+        choices=["mean", "median"],
+        default="mean",
+        help="Statistic used to aggregate benchmark timings (default: mean)",
+    )
     parser.add_argument("-k", "--top_k", type=int, default=50, help="Top k tokens to sample from")
     parser.add_argument("-p", "--top_p", type=float, default=1.0, help="Top p probability to sample with")
     parser.add_argument(
@@ -593,7 +711,7 @@ if __name__ == "__main__":
         type=str,
         required=False,
         default="follow_config",
-        choices=["cpu", "cuda", "dml", "NvTensorRtRtx", "follow_config"],
+        choices=["cpu", "cuda", "webgpu", "dml", "NvTensorRtRtx", "follow_config"],
         help="Execution provider to run the ONNX Runtime session with. Defaults to follow_config that uses the execution provider listed in the genai_config.json instead.",
     )
     parser.add_argument(

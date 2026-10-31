@@ -1,0 +1,454 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+
+#include <string>
+
+#include <gtest/gtest.h>
+
+#include "config.h"
+
+namespace Generators::test {
+namespace {
+
+Config LoadDynamicConfig(std::string_view dynamic_batching) {
+  const std::string overlay =
+      R"({ "engine": { "dynamic_batching": )" +
+      std::string{dynamic_batching} + " } }";
+  return Config{
+      fs::path{std::string{MODEL_PATH "engine/dummy-decoder"}},
+      overlay};
+}
+
+Config LoadDecoderConfig(std::string_view decoder) {
+  const std::string overlay =
+      R"({ "model": { "decoder": )" +
+      std::string{decoder} + " } }";
+  return Config{
+      fs::path{std::string{MODEL_PATH "engine/dummy-decoder"}},
+      overlay};
+}
+
+std::string CaptureStateGroupError(std::string_view decoder) {
+  try {
+    (void)LoadDecoderConfig(decoder);
+  } catch (const std::runtime_error& error) {
+    return error.what();
+  }
+  return {};
+}
+
+void ExpectStateGroupError(std::string_view decoder, std::string_view expected) {
+  const auto message = CaptureStateGroupError(decoder);
+  ASSERT_FALSE(message.empty());
+  EXPECT_NE(message.find(expected), std::string::npos) << message;
+}
+
+TEST(DynamicBatchingConfigTest, ScheduledTokenBudgetDefaultsTo2048) {
+  const auto config = LoadDynamicConfig(R"({ "max_batch_size": 4 })");
+
+  ASSERT_TRUE(config.engine.dynamic_batching.has_value());
+  EXPECT_EQ(config.engine.dynamic_batching->max_scheduled_tokens, 2048u);
+}
+
+TEST(DynamicBatchingConfigTest, ScheduledTokenBudgetAcceptsOverride) {
+  const auto config =
+      LoadDynamicConfig(R"({ "max_scheduled_tokens": 321 })");
+
+  ASSERT_TRUE(config.engine.dynamic_batching.has_value());
+  EXPECT_EQ(config.engine.dynamic_batching->max_scheduled_tokens, 321u);
+}
+
+TEST(DynamicBatchingConfigTest, PrefixCachingDefaultsToUnset) {
+  const auto config = LoadDynamicConfig(R"({ "max_batch_size": 4 })");
+
+  ASSERT_TRUE(config.engine.dynamic_batching.has_value());
+  EXPECT_FALSE(config.engine.dynamic_batching->prefix_caching.has_value());
+}
+
+TEST(DynamicBatchingConfigTest, PrefixCachingAcceptsExplicitDisable) {
+  const auto config =
+      LoadDynamicConfig(R"({ "prefix_caching": false })");
+
+  ASSERT_TRUE(config.engine.dynamic_batching.has_value());
+  ASSERT_TRUE(config.engine.dynamic_batching->prefix_caching.has_value());
+  EXPECT_FALSE(*config.engine.dynamic_batching->prefix_caching);
+}
+
+TEST(DynamicBatchingConfigTest, PrefixCachingAcceptsExplicitEnable) {
+  const auto config =
+      LoadDynamicConfig(R"({ "prefix_caching": true })");
+
+  ASSERT_TRUE(config.engine.dynamic_batching.has_value());
+  ASSERT_TRUE(config.engine.dynamic_batching->prefix_caching.has_value());
+  EXPECT_TRUE(*config.engine.dynamic_batching->prefix_caching);
+}
+
+TEST(DynamicBatchingConfigTest, SnapshotTiersDefaultOffAndAcceptIndependentBudgets) {
+  const auto defaults = LoadDynamicConfig(R"({"max_batch_size":4})");
+  EXPECT_TRUE(defaults.engine.dynamic_batching->prefix_caching.value_or(true));
+  EXPECT_FALSE(defaults.engine.dynamic_batching->snapshot_cache.Enabled());
+  EXPECT_FALSE(defaults.engine.dynamic_batching->max_snapshots);
+  EXPECT_EQ(defaults.engine.dynamic_batching->dflash2_max_snapshots, 1u);
+  const auto config = LoadDynamicConfig(R"({
+    "prefix_caching": true,
+    "max_snapshots": 8,
+    "snapshot_cache": {
+      "vram_bytes": 4294967296, "ram_bytes": 8589934592, "disk_bytes": 17179869184,
+      "directory": "spill"
+    }
+  })");
+  const auto& batching = *config.engine.dynamic_batching;
+  EXPECT_TRUE(batching.prefix_caching);
+  ASSERT_EQ(batching.max_snapshots, 8u);
+  EXPECT_EQ(batching.snapshot_cache.vram_bytes, 4294967296ull);
+  EXPECT_EQ(batching.snapshot_cache.ram_bytes, 8589934592ull);
+  EXPECT_EQ(batching.snapshot_cache.disk_bytes, 17179869184ull);
+  EXPECT_EQ(batching.snapshot_cache.directory, "spill");
+}
+
+TEST(DynamicBatchingConfigTest, RejectsInvalidSnapshotBudgetsAndCount) {
+  for (const auto* value : {"-1", "1.5", "true", "\"16\"", "9007199254740992"}) {
+    for (const auto* tier : {"vram_bytes", "ram_bytes", "disk_bytes"}) {
+      const auto config = std::string{"{\"snapshot_cache\":{\""} +
+                          tier + "\":" + value + "}}";
+      EXPECT_THROW(LoadDynamicConfig(config), std::runtime_error);
+    }
+  }
+  for (const auto* value : {"-1", "1.5", "true", "2147483648"}) {
+    EXPECT_THROW(LoadDynamicConfig(std::string{R"({"max_snapshots":)"} +
+                                   value + "}"),
+                 std::runtime_error);
+  }
+  EXPECT_NO_THROW(LoadDynamicConfig(R"({"max_snapshots":0})"));
+}
+
+TEST(DynamicBatchingConfigTest, RuntimeProfileReplacesSnapshotPolicyAndCanDisableCount) {
+  auto config = LoadDynamicConfig(R"({
+    "prefix_caching":true,
+    "max_snapshots":8,
+    "snapshot_cache":{"vram_bytes":1024,"ram_bytes":2048}
+  })");
+  OverlayConfig(config, R"({"runtime_profiles":[{
+    "id":"disk-only",
+    "eligibility":{"minimum_total_device_memory_bytes":0},
+    "overlay":{"engine":{"dynamic_batching":{
+      "prefix_caching":false,"max_snapshots":0,
+      "snapshot_cache":{"disk_bytes":4096}
+    }}}
+  }]})");
+  ApplyRuntimeProfile(config, uint64_t{0});
+  const auto& batching = *config.engine.dynamic_batching;
+  ASSERT_TRUE(batching.prefix_caching.has_value());
+  EXPECT_FALSE(*batching.prefix_caching);
+  ASSERT_EQ(batching.max_snapshots, 0u);
+  EXPECT_EQ(batching.snapshot_cache.vram_bytes, 0u);
+  EXPECT_EQ(batching.snapshot_cache.ram_bytes, 0u);
+  EXPECT_EQ(batching.snapshot_cache.disk_bytes, 4096u);
+}
+
+TEST(DynamicBatchingConfigTest, OverlayReplacesSnapshotPolicyIncludingExplicitEmptyOptOut) {
+  auto config = LoadDynamicConfig(R"({
+    "snapshot_cache":{"vram_bytes":1024,"ram_bytes":2048,"directory":"spill"}
+  })");
+  OverlayConfig(config, R"({"engine":{"dynamic_batching":{
+    "snapshot_cache":{"disk_bytes":4096}
+  }}})");
+  const auto& policy = config.engine.dynamic_batching->snapshot_cache;
+  EXPECT_TRUE(policy.explicitly_set);
+  EXPECT_EQ(policy.vram_bytes, 0u);
+  EXPECT_EQ(policy.ram_bytes, 0u);
+  EXPECT_EQ(policy.disk_bytes, 4096u);
+  EXPECT_TRUE(policy.directory.empty());
+
+  OverlayConfig(config, R"({"engine":{"dynamic_batching":{"snapshot_cache":{}}}})");
+  const auto& disabled = config.engine.dynamic_batching->snapshot_cache;
+  EXPECT_TRUE(disabled.Configured());
+  EXPECT_FALSE(disabled.Enabled());
+  EXPECT_TRUE(disabled.directory.empty());
+}
+
+TEST(CpuEmbeddingConfigTest, PrefaultDefaultsOnAndCanBeDisabled) {
+  const fs::path model_path{std::string{MODEL_PATH "engine/dummy-decoder"}};
+  const Config default_config{model_path, "{}"};
+  EXPECT_TRUE(default_config.model.embedding.prefault);
+
+  const Config cold_start_config{model_path, R"({ "model": { "embedding": { "prefault": false } } })"};
+  EXPECT_FALSE(cold_start_config.model.embedding.prefault);
+}
+
+class InvalidScheduledTokenBudgetTest
+    : public ::testing::TestWithParam<const char*> {};
+
+TEST_P(InvalidScheduledTokenBudgetTest, RejectsNonPositiveOrNonIntegralValue) {
+  EXPECT_THROW(
+      LoadDynamicConfig(
+          std::string{R"({ "max_scheduled_tokens": )"} + GetParam() + " }"),
+      std::runtime_error);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    InvalidValues,
+    InvalidScheduledTokenBudgetTest,
+    ::testing::Values("0", "-1", "1.5", "4000000000"));
+
+TEST(DecoderStateGroupsConfigTest, PreservesLegacyManifestAbsence) {
+  const auto config = LoadDynamicConfig(R"({ "max_batch_size": 4 })");
+
+  EXPECT_FALSE(config.model.decoder.state_groups.has_value());
+}
+
+TEST(DecoderStateGroupsConfigTest, ParsesStateUpdateWithDefaultOptions) {
+  const auto config = LoadDecoderConfig(R"({
+    "num_hidden_layers": 1,
+    "state_groups": [{
+      "kind": "fixed_conv",
+      "layer_ids": [0],
+      "state_update": { "capacity": 3 }
+    }]
+  })");
+
+  ASSERT_TRUE(config.model.decoder.state_groups);
+  const auto& groups = *config.model.decoder.state_groups;
+  ASSERT_EQ(groups.size(), 1u);
+  ASSERT_TRUE(groups[0].state_update);
+  EXPECT_TRUE(groups[0].state_update->enabled);
+  EXPECT_EQ(groups[0].state_update->capacity, 3);
+  EXPECT_EQ(groups[0].state_update->key_head_count, 0);
+}
+
+TEST(DecoderStateGroupsConfigTest, UsesDefaultStateUpdateBindings) {
+  const auto config = LoadDecoderConfig(R"({ "state_update_capacity": 3 })");
+
+  EXPECT_EQ(config.model.decoder.inputs.state_update_capture_count, Config::Defaults::StateUpdateCaptureCountName);
+  EXPECT_EQ(config.model.decoder.inputs.state_update_active, Config::Defaults::StateUpdateActiveName);
+  EXPECT_EQ(config.model.decoder.outputs.state_update_conv_value_names, Config::Defaults::StateUpdateConvValueName);
+  EXPECT_EQ(config.model.decoder.outputs.state_update_recurrent_capsule_names,
+            Config::Defaults::StateUpdateRecurrentCapsuleName);
+}
+
+TEST(DecoderStateGroupsConfigTest, UsesLegacyRecurrentStateBindingDefaults) {
+  const auto config = LoadDecoderConfig("{}");
+
+  EXPECT_EQ(config.model.decoder.inputs.past_conv_names, "past_key_values.%d.conv_state");
+  EXPECT_EQ(config.model.decoder.inputs.past_recurrent_names, "past_key_values.%d.recurrent_state");
+  EXPECT_EQ(config.model.decoder.outputs.present_conv_names, "present.%d.conv_state");
+  EXPECT_EQ(config.model.decoder.outputs.present_recurrent_names, "present.%d.recurrent_state");
+}
+
+TEST(DecoderStateGroupsConfigTest, ParsesSparseHybridManifest) {
+  const auto config = LoadDecoderConfig(R"({
+    "num_hidden_layers": 4,
+    "state_update_capacity": 3,
+    "inputs": {
+      "past_conv_names": "past_key_values.%d.conv_state",
+      "past_recurrent_names": "past_key_values.%d.recurrent_state",
+      "state_update_capture_count": "state_update_capture_count",
+      "state_update_active": "state_update_active"
+    },
+    "outputs": {
+      "present_conv_names": "present.%d.conv_state",
+      "present_recurrent_names": "present.%d.recurrent_state",
+      "state_update_conv_value_names": "state_update.%d.conv_value",
+      "state_update_recurrent_capsule_names": "state_update.%d.recurrent_capsule"
+    },
+    "state_groups": [
+      {
+        "kind": "paged_kv",
+        "layer_ids": [3]
+      },
+      {
+        "kind": "fixed_conv",
+        "layer_ids": [0, 1, 2],
+        "state_update": { "capacity": 3 }
+      },
+      {
+        "kind": "fixed_recurrent",
+        "layer_ids": [0, 1, 2],
+        "state_update": { "capacity": 3, "key_head_count": 1 }
+      }
+    ]
+  })");
+
+  ASSERT_TRUE(config.model.decoder.state_groups);
+  const auto& state_groups = *config.model.decoder.state_groups;
+  ASSERT_EQ(state_groups.size(), 3u);
+  EXPECT_EQ(state_groups[0].kind, Config::Model::Decoder::StateGroupKind::PagedKeyValue);
+  EXPECT_EQ(state_groups[0].layer_ids, std::vector<int>({3}));
+  EXPECT_EQ(state_groups[1].kind, Config::Model::Decoder::StateGroupKind::FixedConv);
+  EXPECT_EQ(state_groups[1].layer_ids, std::vector<int>({0, 1, 2}));
+  EXPECT_EQ(state_groups[2].kind, Config::Model::Decoder::StateGroupKind::FixedRecurrent);
+  EXPECT_EQ(state_groups[2].layer_ids, std::vector<int>({0, 1, 2}));
+  EXPECT_EQ(config.model.decoder.inputs.past_conv_names, "past_key_values.%d.conv_state");
+  EXPECT_EQ(config.model.decoder.inputs.past_recurrent_names, "past_key_values.%d.recurrent_state");
+  EXPECT_EQ(config.model.decoder.outputs.present_conv_names, "present.%d.conv_state");
+  EXPECT_EQ(config.model.decoder.outputs.present_recurrent_names, "present.%d.recurrent_state");
+  EXPECT_EQ(config.model.decoder.state_update_capacity, 3);
+  EXPECT_EQ(config.model.decoder.inputs.state_update_capture_count, "state_update_capture_count");
+  EXPECT_EQ(config.model.decoder.inputs.state_update_active, "state_update_active");
+  EXPECT_EQ(config.model.decoder.outputs.state_update_conv_value_names, "state_update.%d.conv_value");
+  EXPECT_EQ(config.model.decoder.outputs.state_update_recurrent_capsule_names, "state_update.%d.recurrent_capsule");
+}
+
+TEST(DecoderStateGroupsConfigTest, ParsesPleAndPackedIndexerStateGroups) {
+  const auto config = LoadDecoderConfig(R"({
+    "num_hidden_layers": 2,
+    "ple_token_pad_id": 7,
+    "inputs": {
+      "past_ple_token_names": "past.%d.ple_tokens",
+      "past_ple_conv_names": "past.%d.ple_conv",
+      "past_indexer_names": "past.%d.indexer_key",
+      "past_indexer_kv_buffer_names": "past.%d.indexer_kv_buffer",
+      "past_indexer_state_lengths_names": "past.%d.indexer_state_lengths"
+    },
+    "outputs": {
+      "present_ple_token_names": "present.%d.ple_tokens",
+      "present_ple_conv_names": "present.%d.ple_conv",
+      "present_indexer_names": "present.%d.indexer_key",
+      "present_indexer_kv_buffer_names": "present.%d.indexer_kv_buffer",
+      "present_indexer_state_lengths_names": "present.%d.indexer_state_lengths"
+    },
+    "state_groups": [
+      {"kind": "fixed_ple", "layer_ids": [0]},
+      {"kind": "fixed_indexer", "layer_ids": [1]}
+    ]
+  })");
+
+  ASSERT_TRUE(config.model.decoder.state_groups);
+  ASSERT_EQ(config.model.decoder.state_groups->size(), 2u);
+  EXPECT_EQ(config.model.decoder.state_groups->at(0).kind,
+            Config::Model::Decoder::StateGroupKind::FixedPle);
+  EXPECT_EQ(config.model.decoder.state_groups->at(1).kind,
+            Config::Model::Decoder::StateGroupKind::FixedIndexer);
+  EXPECT_EQ(config.model.decoder.inputs.past_indexer_kv_buffer_names,
+            "past.%d.indexer_kv_buffer");
+  EXPECT_EQ(config.model.decoder.outputs.present_indexer_state_lengths_names,
+            "present.%d.indexer_state_lengths");
+}
+
+TEST(DecoderStateGroupsConfigTest, OverlayValidationIsTransactional) {
+  auto config = LoadDecoderConfig(R"({
+    "num_hidden_layers": 1,
+    "state_groups": [{
+      "kind": "fixed_conv", "layer_ids": [0]
+    }]
+  })");
+
+  EXPECT_THROW(
+      OverlayConfig(config, R"({
+        "model": {"decoder": {
+          "state_groups": [{
+            "kind": "fixed_conv", "layer_ids": [1]
+          }]
+        }}
+      })"),
+      std::runtime_error);
+
+  ASSERT_TRUE(config.model.decoder.state_groups);
+  ASSERT_EQ(config.model.decoder.state_groups->size(), 1u);
+  EXPECT_EQ(config.model.decoder.state_groups->front().kind, Config::Model::Decoder::StateGroupKind::FixedConv);
+  EXPECT_EQ(config.model.decoder.state_groups->front().layer_ids, std::vector<int>({0}));
+}
+
+TEST(DecoderStateGroupsConfigTest, RejectsMissingOrUnknownKind) {
+  ExpectStateGroupError(
+      R"({"num_hidden_layers": 1, "state_groups": [{
+        "layer_ids": [0]
+      }]})",
+      "is missing kind");
+
+  ExpectStateGroupError(
+      R"({"num_hidden_layers": 1, "state_groups": [{
+        "kind": "unknown", "layer_ids": [0]
+      }]})",
+      "Unsupported decoder state group kind 'unknown'");
+}
+
+TEST(DecoderStateGroupsConfigTest, RejectsLegacySchemaWithMigrationGuidance) {
+  ExpectStateGroupError(
+      R"({"num_hidden_layers": 1, "state_groups": [{
+        "kind": "fixed", "layer_ids": [0]
+      }]})",
+      "use 'fixed_conv' or 'fixed_recurrent'");
+
+  ExpectStateGroupError(
+      R"({"num_hidden_layers": 1, "state_groups": [{
+        "kind": "fixed_conv", "layer_ids": [0],
+        "state_update": {"kind": "causal_conv", "capacity": 3}
+      }]})",
+      "Legacy decoder state_update field 'kind'");
+
+  ExpectStateGroupError(
+      R"({"num_hidden_layers": 1, "state_groups": [{
+        "kind": "fixed_conv", "layer_ids": [0], "bindings": {}
+      }]})",
+      "move binding templates to model.decoder.inputs and model.decoder.outputs");
+}
+
+TEST(DecoderStateGroupsConfigTest, AllowsIndependentFixedGroupsOnTheSameLayer) {
+  EXPECT_NO_THROW(LoadDecoderConfig(
+      R"({"num_hidden_layers": 1,
+          "inputs": {"past_recurrent_names": "past_recurrent.%d"},
+          "outputs": {"present_recurrent_names": "present_recurrent.%d"},
+          "state_groups": [
+            {"kind": "fixed_conv", "layer_ids": [0]},
+            {"kind": "fixed_recurrent", "layer_ids": [0]}
+          ]})"));
+}
+
+TEST(DecoderStateGroupsConfigTest, RejectsMalformedBindingTemplates) {
+  ExpectStateGroupError(
+      R"({"num_hidden_layers": 1,
+          "inputs": {"past_recurrent_names": "past.recurrent"},
+          "state_groups": [{"kind": "fixed_recurrent", "layer_ids": [0]}]})",
+      "expected exactly one %d");
+
+  ExpectStateGroupError(
+      R"({"num_hidden_layers": 1,
+          "inputs": {"past_recurrent_names": "past.%d.recurrent"},
+          "outputs": {"present_recurrent_names": ""},
+          "state_groups": [{"kind": "fixed_recurrent", "layer_ids": [0]}]})",
+      "missing its output template");
+}
+
+TEST(DecoderStateGroupsConfigTest, RejectsDuplicateOrOutOfRangeLayerIds) {
+  ExpectStateGroupError(
+      R"({"num_hidden_layers": 2, "state_groups": [{
+        "kind": "fixed_recurrent", "layer_ids": [0, 0]
+      }]})",
+      "duplicate layer_id 0");
+
+  ExpectStateGroupError(
+      R"({"num_hidden_layers": 2, "state_groups": [{
+        "kind": "fixed_recurrent", "layer_ids": [2]
+      }]})",
+      "outside [0, num_hidden_layers)");
+}
+
+TEST(DecoderStateGroupsConfigTest, RejectsPagedLayerOverlap) {
+  ExpectStateGroupError(
+      R"({"num_hidden_layers": 1, "state_groups": [
+        {"kind": "paged_kv", "layer_ids": [0]},
+        {"kind": "paged_kv", "layer_ids": [0]}
+      ]})",
+      "overlaps another paged_kv group at layer_id 0");
+}
+
+TEST(DecoderStateGroupsConfigTest, RejectsDuplicateExpandedBindings) {
+  ExpectStateGroupError(
+      R"({"num_hidden_layers": 1,
+          "inputs": {
+            "past_conv_names": "past.%d",
+            "past_recurrent_names": "past.%d"
+          },
+          "outputs": {
+            "present_recurrent_names": "present_recurrent.%d"
+          },
+          "state_groups": [
+            {"kind": "fixed_conv", "layer_ids": [0]},
+            {"kind": "fixed_recurrent", "layer_ids": [0]}
+          ]})",
+      "resolves more than one binding to 'past.0'");
+}
+
+}  // namespace
+}  // namespace Generators::test

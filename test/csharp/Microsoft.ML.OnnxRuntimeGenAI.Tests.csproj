@@ -49,7 +49,7 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Visible>false</Visible>
     </None>
-    <None Condition="Exists('$(OrtLibDir)\onnxruntime_providers_cuda.dll')" Include="$(OrtLibDir)\onnxruntime_providers_cuda.dll">
+    <None Condition="'$(EPDir)' == '' and Exists('$(OrtLibDir)\onnxruntime_providers_cuda.dll')" Include="$(OrtLibDir)\onnxruntime_providers_cuda.dll">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Visible>false</Visible>
     </None>
@@ -71,7 +71,7 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Visible>false</Visible>
     </None>
-    <None Condition="Exists('$(OrtLibDir)\libonnxruntime_providers_cuda.so')" Include="$(OrtLibDir)\libonnxruntime_providers_cuda.so">
+    <None Condition="'$(EPDir)' == '' and Exists('$(OrtLibDir)\libonnxruntime_providers_cuda.so')" Include="$(OrtLibDir)\libonnxruntime_providers_cuda.so">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Visible>false</Visible>
     </None>
@@ -97,6 +97,7 @@
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.5.0" />
     <PackageReference Include="xunit" Version="2.4.1" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.4.3" />
+    <PackageReference Include="System.CommandLine" Version="2.0.1" />
     <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="$(OrtPackageVersion)" />
   </ItemGroup>
 
@@ -109,6 +110,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Compile Include="$(TestsSrcRoot)\..\examples\csharp\Common\Common.cs" Link="Examples\Common.cs" />
     <ProjectReference Include="$(TestsSrcRoot)\..\src\csharp\Microsoft.ML.OnnxRuntimeGenAI.csproj" />
   </ItemGroup>
 

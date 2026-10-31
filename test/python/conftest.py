@@ -2,9 +2,13 @@
 # Licensed under the MIT License
 
 import functools
+import logging
 import os
 
 import pytest
+from _test_utils import register_plugin_providers
+
+register_plugin_providers(logging.getLogger(__name__))
 
 
 def pytest_addoption(parser):
@@ -86,17 +90,49 @@ def qwen_for(request):
 
 
 @pytest.fixture
+def qwen_graph_for(request):
+    return functools.partial(
+        get_path_for_model,
+        request.config.getoption("--test_models"),
+        "qwen-2.5-0.5b-graph",
+        "int4",
+    )
+
+
+@pytest.fixture
+def phi4_graph_for(request):
+    return functools.partial(
+        get_path_for_model,
+        request.config.getoption("--test_models"),
+        "phi-4-mini-graph",
+        "int4",
+    )
+
+
+@pytest.fixture
 def path_for_model(request):
     return functools.partial(get_path_for_model, request.config.getoption("--test_models"))
 
 
-@pytest.fixture
-def nemotron_speech_model_path(request):
-    """Return the path to a nemotron_speech model directory, or skip if not available."""
+# ASR streaming model directories exercised by the streaming-ASR tests.
+ASR_SPEECH_MODELS = [
+    "nemotron-speech-streaming",
+    "moonshine-streaming-small",
+    "moonshine-streaming-tiny",
+]
+
+
+@pytest.fixture(params=ASR_SPEECH_MODELS)
+def asr_speech_model_path(request):
+    """Return the path to an ASR streaming model directory, or skip if not available.
+
+    Parametrized over every known ASR streaming model so that each test using this
+    fixture runs once per model (and is skipped for any model that isn't present).
+    """
     test_data = request.config.getoption("--test_models")
-    model_path = os.path.join(test_data, "nemotron-speech-streaming")
+    model_path = os.path.join(test_data, request.param)
     if not os.path.exists(model_path):
-        pytest.skip(f"Nemotron speech model not found at {model_path}")
+        pytest.skip(f"ASR speech model not found at {model_path}")
     return model_path
 
 

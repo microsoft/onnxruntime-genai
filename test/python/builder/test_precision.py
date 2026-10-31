@@ -15,19 +15,25 @@ import sys
 import types
 from pathlib import Path
 
+import numpy as np
+import onnx
 import onnx_ir as ir
+import onnxruntime as ort
 import pytest
 
 MODELS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models"
 BUILDERS_DIR = MODELS_DIR / "builders"
-sys.path.insert(0, str(BUILDERS_DIR.parents[1]))
+sys.path.insert(0, str(MODELS_DIR))
 
 
 def _load_base_module():
-    sys.modules.setdefault("models", types.ModuleType("models"))
+    models_package = sys.modules.setdefault("models", types.ModuleType("models"))
+    models_package.__path__ = [str(MODELS_DIR)]
     builders_package = sys.modules.setdefault("models.builders", types.ModuleType("models.builders"))
     builders_package.__path__ = [str(BUILDERS_DIR)]
 
+    if "models.builders.base" in sys.modules:
+        return sys.modules["models.builders.base"]
     spec = importlib.util.spec_from_file_location("models.builders.base", BUILDERS_DIR / "base.py")
     module = importlib.util.module_from_spec(spec)
     sys.modules["models.builders.base"] = module
@@ -35,19 +41,157 @@ def _load_base_module():
     return module
 
 
+def test_paged_attention_metadata_is_int32_triplet(monkeypatch):
+    base = _load_base_module()
+    monkeypatch.setattr(base.Model, "make_ep_expansions_init", lambda self: None)
+    config = types.SimpleNamespace(
+        architectures=["TestModel"],
+        hidden_act="silu",
+        hidden_size=64,
+        intermediate_size=128,
+        max_position_embeddings=1024,
+        num_attention_heads=8,
+        num_hidden_layers=2,
+        num_key_value_heads=2,
+        vocab_size=256,
+        _name_or_path="test",
+    )
+
+    model = base.Model(config, ir.DataType.FLOAT16, ir.DataType.FLOAT16, "cuda", None, {})
+    other_model = base.Model(config, ir.DataType.FLOAT16, ir.DataType.FLOAT16, "cuda", None, {})
+
+    assert model.input_types["attention_metadata"] == ir.DataType.INT32
+    assert model.input_shapes["attention_metadata"] == [3]
+    assert model.input_shapes["attention_metadata"] is not other_model.input_shapes["attention_metadata"]
+
+
+def test_context_length_uses_seq_length_without_max_position_embeddings(monkeypatch):
+    base = _load_base_module()
+    monkeypatch.setattr(base.Model, "make_ep_expansions_init", lambda self: None)
+    monkeypatch.setattr(base.Model, "make_inputs_init", lambda self: None)
+    config = types.SimpleNamespace(
+        architectures=["WhisperForConditionalGeneration"],
+        hidden_act="gelu",
+        hidden_size=64,
+        intermediate_size=128,
+        num_attention_heads=8,
+        num_hidden_layers=2,
+        num_key_value_heads=8,
+        seq_length=1500,
+        vocab_size=256,
+        _name_or_path="test",
+    )
+
+    model = base.Model(config, ir.DataType.FLOAT16, ir.DataType.FLOAT16, "cpu", None, {})
+
+    assert model.context_length == 1500
+
+
+def test_make_inputs_and_outputs_expands_per_layer_name_dicts():
+    model = Model.__new__(Model)
+    model.model = types.SimpleNamespace(graph=types.SimpleNamespace(inputs=[], outputs=[]))
+    model.input_names = {"past_key_self": {0: "past_key_self_0", 1: "past_key_self_1"}}
+    model.input_types = {"past_key_self": ir.DataType.FLOAT16}
+    model.input_shapes = {"past_key_self": ["batch_size", 8, "past_sequence_length", 64]}
+    model.output_names = {"present_key_self": {0: "present_key_self_0", 1: "present_key_self_1"}}
+    model.output_types = {"present_key_self": ir.DataType.FLOAT16}
+    model.output_shapes = {"present_key_self": ["batch_size", 8, "total_sequence_length", 64]}
+    model.make_value = lambda name, dtype=None, shape=None: name
+
+    model.make_inputs_and_outputs()
+
+    assert model.model.graph.inputs == ["past_key_self_0", "past_key_self_1"]
+    assert model.model.graph.outputs == ["present_key_self_0", "present_key_self_1"]
+
+
+def test_make_outputs_init_accepts_custom_output_schema():
+    model = Model.__new__(Model)
+    model.io_dtype = ir.DataType.FLOAT16
+    model.layer_types = ["full_attention"]
+    model.output_names = {
+        "hidden_states": "hidden_states",
+        "logits": "logits",
+        "present_key_self": {0: "present_key_self_0"},
+    }
+    model.output_types = {"logits": ir.DataType.FLOAT16}
+    model.output_shapes = {}
+    model.extra_options = {"include_hidden_states": True}
+    model.use_paged_attention = False
+
+    model.make_outputs_init()
+
+    assert model.output_names == {
+        "hidden_states": "hidden_states",
+        "logits": "logits",
+        "present_key_self": {0: "present_key_self_0"},
+    }
+
+
+def test_num_hidden_layers_truncates_configured_layer_types(monkeypatch):
+    base = _load_base_module()
+    monkeypatch.setattr(base.Model, "make_ep_expansions_init", lambda self: None)
+    monkeypatch.setattr(base.Model, "make_inputs_init", lambda self: None)
+    config = types.SimpleNamespace(
+        architectures=["TestModel"],
+        hidden_act="silu",
+        hidden_size=64,
+        intermediate_size=128,
+        layer_types=["linear_attention", "linear_attention", "linear_attention", "full_attention"],
+        max_position_embeddings=1024,
+        num_attention_heads=8,
+        num_hidden_layers=4,
+        num_key_value_heads=2,
+        vocab_size=256,
+        _name_or_path="test",
+    )
+
+    model = base.Model(
+        config,
+        ir.DataType.FLOAT16,
+        ir.DataType.FLOAT16,
+        "cuda",
+        None,
+        {"num_hidden_layers": 2},
+    )
+
+    assert model.num_layers == 2
+    assert model.layer_types == ["linear_attention", "linear_attention"]
+
+
+def _make_paged_attention_init_model(execution_provider, io_dtype):
+    model = Model.__new__(Model)
+    model.num_attn_heads = 8
+    model.num_kv_heads = 2
+    model.head_size = 64
+    model.use_paged_attention = True
+    model.ep = execution_provider
+    model.io_dtype = io_dtype
+    model.extra_options = {}
+    model.attention_attrs = {"q_norm": False, "k_norm": False}
+    model.matmul_attrs = {"use_lora": False}
+    model.rope_attrs = {}
+    model.input_names = {"position_ids": "position_ids", "attention_metadata": "attention_metadata"}
+    return model
+
+
+def test_webgpu_paged_attention_accepts_fp16_and_keeps_metadata():
+    model = _make_paged_attention_init_model("webgpu", ir.DataType.FLOAT16)
+
+    model.make_attention_init(types.SimpleNamespace())
+
+    assert model.attention_attrs["op_type"] == "PagedAttention"
+    assert "attention_metadata" in model.input_names
+
+
+@pytest.mark.parametrize("io_dtype", [ir.DataType.FLOAT, ir.DataType.BFLOAT16])
+def test_webgpu_paged_attention_rejects_unsupported_io_dtype(io_dtype):
+    model = _make_paged_attention_init_model("webgpu", io_dtype)
+
+    with pytest.raises(NotImplementedError, match="WebGPU with FP16"):
+        model.make_attention_init(types.SimpleNamespace())
+
+
 def _load_builder_entrypoint_module():
-    # `builder.py` imports the concrete model classes via `from builders import (...)`.
-    # Provide a stub `builders` module so we can import the lightweight precision helpers
-    # (`set_onnx_dtype` / `set_io_dtype` / `check_extra_options`) without pulling in every
-    # model builder.
-    builders_stub = types.ModuleType("builders")
-
-    def _stub_getattr(name):  # PEP 562: satisfies `from builders import <ModelClass>`
-        return type(name, (), {})
-
-    builders_stub.__getattr__ = _stub_getattr
-    sys.modules["builders"] = builders_stub
-
     spec = importlib.util.spec_from_file_location("models_builder_entrypoint", MODELS_DIR / "builder.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -57,6 +201,38 @@ def _load_builder_entrypoint_module():
 base_module = _load_base_module()
 builder_module = _load_builder_entrypoint_module()
 Model = base_module.Model
+
+
+def test_add_special_token_ids_uses_first_available_candidate():
+    config = types.SimpleNamespace()
+    tokenizer = types.SimpleNamespace(
+        get_vocab=lambda: {
+            "<tool_call>": "10",
+            "<|tool_call|>": "11",
+            "<|/tool_call|>": "12",
+            "<think>": "13",
+            "</think>": "14",
+        }
+    )
+
+    builder_module.add_special_token_ids(config, tokenizer)
+
+    assert config.bot_token_id == 10
+    assert config.eot_token_id == 12
+    assert config.bor_token_id == 13
+    assert config.eor_token_id == 14
+
+
+def test_add_special_token_ids_omits_tokens_not_in_vocabulary():
+    config = types.SimpleNamespace()
+    tokenizer = types.SimpleNamespace(get_vocab=dict)
+
+    builder_module.add_special_token_ids(config, tokenizer)
+
+    assert not hasattr(config, "bot_token_id")
+    assert not hasattr(config, "eot_token_id")
+    assert not hasattr(config, "bor_token_id")
+    assert not hasattr(config, "eor_token_id")
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +276,74 @@ def test_int8_io_dtype_is_not_forced_to_fp32(execution_provider, expected):
 
 
 # ---------------------------------------------------------------------------
+# `--precision` cannot re-quantize weights a checkpoint already quantized, so a request the
+# checkpoint overrides has to say so: the only other symptom is an oversized artifact.
+# ---------------------------------------------------------------------------
+
+
+def _float_quantized_config():
+    return types.SimpleNamespace(
+        quantization_config={
+            "quant_method": "compressed-tensors",
+            "config_groups": {
+                "group_0": {"weights": {"num_bits": 8, "type": "float"}},
+                "group_1": {"weights": {"num_bits": 4, "type": "float"}},
+            },
+        }
+    )
+
+
+def test_float_quantized_checkpoint_warns_that_int4_will_not_reach_its_weights(capsys):
+    builder_module.warn_if_checkpoint_overrides_precision(_float_quantized_config(), "int4", ir.DataType.INT4)
+
+    captured = capsys.readouterr().out
+    assert "compressed-tensors" in captured
+    assert "4-bit float, 8-bit float" in captured
+
+
+@pytest.mark.parametrize(
+    "quantization_config,precision,onnx_dtype",
+    [
+        # An int4 checkpoint built at int4 is the intended flow, not an override.
+        ({"quant_method": "gptq", "bits": 4}, "int4", ir.DataType.INT4),
+        # A float build makes no quantization request to override.
+        ({"quant_method": "compressed-tensors", "config_groups": {}}, "bf16", ir.DataType.BFLOAT16),
+        # An undeclared format is not evidence of a mismatch.
+        ({"quant_method": "quark"}, "int4", ir.DataType.INT4),
+    ],
+)
+def test_no_warning_when_the_checkpoint_and_the_request_agree(capsys, quantization_config, precision, onnx_dtype):
+    config = types.SimpleNamespace(quantization_config=quantization_config)
+
+    builder_module.warn_if_checkpoint_overrides_precision(config, precision, onnx_dtype)
+
+    assert capsys.readouterr().out == ""
+
+
+def test_unquantized_checkpoint_is_never_warned_about(capsys):
+    builder_module.warn_if_checkpoint_overrides_precision(types.SimpleNamespace(), "int4", ir.DataType.INT4)
+
+    assert capsys.readouterr().out == ""
+
+
+def test_int4_checkpoint_built_at_int8_is_reported(capsys):
+    config = types.SimpleNamespace(quantization_config={"quant_method": "gptq", "bits": 4})
+
+    builder_module.warn_if_checkpoint_overrides_precision(config, "int8", ir.DataType.INT8)
+
+    assert "4-bit int" in capsys.readouterr().out
+
+
+# ModelOpt states the whole checkpoint's format in `quant_algo` rather than per-group metadata.
+def test_modelopt_checkpoint_warns_from_its_quant_algo(capsys):
+    config = types.SimpleNamespace(quantization_config={"quant_method": "modelopt", "quant_algo": "NVFP4"})
+
+    builder_module.warn_if_checkpoint_overrides_precision(config, "int4", ir.DataType.INT4)
+
+    assert "4-bit float" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
 # int8's INT8/UINT8 onnx_dtype routes through the MatMulNBits builders, which
 # fall back to a float MatMul when the source model is not already quantized.
 # ---------------------------------------------------------------------------
@@ -139,18 +383,17 @@ def _make_quant_model(bits):
     model = Model.__new__(Model)
     model.model = object()
     model.ep = "cpu"  # keep the CUDA prepack post-pass a no-op
-    model.matmulnbits_weights_prepacked = 0
+    model.matmul_attrs = {"weights_prepacked": 0}
     model.quantization_algo = "default"
     model.int4_customized_weight_config = {}
     model.quant_attrs = {
         "bits": bits,
-        "qdq_block_size": 32,
+        "matmul_block_size": 32,
         "is_symmetric": True,
         "accuracy_level": 4,
         "nodes_to_exclude": [],
         "use_qdq": False,
         "op_types_to_quantize": ("MatMul",),
-        "algo_config": None,
     }
     return model
 
@@ -181,57 +424,942 @@ def test_to_nbits_forwards_requested_bits(monkeypatch, bits):
     assert result == "quantized-proto"
 
 
+@pytest.mark.parametrize("mode,block_size,expected", [(1, 32, 1), (2, 64, 2), (2, 32, 0)])
+def test_prepack_matmulnbits_accepts_symmetric_zero_point_input(monkeypatch, mode, block_size, expected):
+    model = Model.__new__(Model)
+    model.ep = "cuda"
+    model.io_dtype = ir.DataType.FLOAT16
+    model.matmul_attrs = {"weights_prepacked": mode}
+    model.quant_attrs = {"is_symmetric": True}
+
+    weight = np.zeros((64, 1, block_size // 2), dtype=np.uint8)
+    node = onnx.helper.make_node(
+        "MatMulNBits",
+        ["input", "weight", "scale", "zero_point"],
+        ["output"],
+        domain="com.microsoft",
+        bits=4,
+        block_size=block_size,
+        K=block_size,
+        N=64,
+    )
+    graph = onnx.helper.make_graph(
+        [node],
+        "test",
+        [],
+        [],
+        [
+            onnx.numpy_helper.from_array(weight, "weight"),
+            onnx.numpy_helper.from_array(np.full((64, 1), 0x88, dtype=np.uint8), "zero_point"),
+        ],
+    )
+    model_proto = onnx.helper.make_model(graph)
+    monkeypatch.setattr(
+        base_module.CudaQuantizer,
+        "prepack_matmulnbits_weight",
+        lambda value, n, k, bits, force_arch: value,
+    )
+
+    graph_model = ir.from_proto(model_proto)
+    graph_model.metadata_props["packing-test"] = "model"
+    graph_model.graph.initializers["weight"].const_value = ir.Tensor(
+        weight,
+        name="weight",
+        doc_string="Original packed weight",
+        metadata_props={"packing-test": "tensor"},
+    )
+    model.prepack_matmulnbits_weights(graph_model)
+    assert graph_model.metadata_props["packing-test"] == "model"
+    assert graph_model.graph.initializers["weight"].const_value.doc_string == "Original packed weight"
+    assert graph_model.graph.initializers["weight"].const_value.metadata_props["packing-test"] == "tensor"
+    model_proto = ir.to_proto(graph_model)
+
+    attrs = {attr.name: onnx.helper.get_attribute_value(attr) for attr in model_proto.graph.node[0].attribute}
+    assert attrs.get("weight_prepacked", 0) == expected
+    assert model_proto.graph.node[0].input[3] == ("" if expected else "zero_point")
+    assert ("zero_point" in {initializer.name for initializer in model_proto.graph.initializer}) == (not expected)
+    if not expected:
+        np.testing.assert_array_equal(onnx.numpy_helper.to_array(model_proto.graph.initializer[0]), weight)
+    model_proto.SerializeToString()
+
+
+def _make_matmul_chain(node_names, width=64):
+    rng = np.random.default_rng(0)
+    nodes, initializers, hidden = [], [], "x"
+    for index, name in enumerate(node_names):
+        weight = onnx.numpy_helper.from_array(rng.standard_normal((width, width), dtype=np.float32), f"w{index}")
+        initializers.append(weight)
+        nodes.append(onnx.helper.make_node("MatMul", [hidden, weight.name], [f"y{index}"], name=name))
+        hidden = f"y{index}"
+    graph = onnx.helper.make_graph(
+        nodes,
+        "matmul_chain",
+        [onnx.helper.make_tensor_value_info("x", onnx.TensorProto.FLOAT, [1, width])],
+        [onnx.helper.make_tensor_value_info(hidden, onnx.TensorProto.FLOAT, [1, width])],
+        initializers,
+    )
+    return ir.from_proto(onnx.helper.make_model(graph, opset_imports=[onnx.helper.make_opsetid("", 21)]))
+
+
+DOWN_PROJ = "/model/layers.0/mlp/down_proj/MatMul"
+LM_HEAD = "/lm_head/MatMul"
+
+
+@pytest.mark.parametrize("method", ["default", "rtn", "k_quant"])
+@pytest.mark.parametrize(
+    "bits, options, expected",
+    [
+        (4, {}, {DOWN_PROJ: 4, LM_HEAD: 4}),
+        (8, {}, {DOWN_PROJ: 8, LM_HEAD: 8}),
+        (4, {"matmul_mixed_precision": "last_matmul:int8"}, {DOWN_PROJ: 4, LM_HEAD: 8}),
+        (8, {"matmul_mixed_precision": "last_matmul:int4"}, {DOWN_PROJ: 8, LM_HEAD: 4}),
+        (8, {"nodes_to_exclude": [LM_HEAD]}, {DOWN_PROJ: 8}),
+    ],
+)
+def test_to_nbits_quantizes_matmuls_to_requested_bits(method, bits, options, expected):
+    model = _make_quant_model(bits)
+    model.model = _make_matmul_chain([DOWN_PROJ, LM_HEAD])
+    model.quant_config = base_module.QuantConfig.from_extra_options(
+        {"algo_config": method, **options}, precision=f"int{bits}", execution_provider="cpu"
+    )
+    model.quant_type = None
+    model.make_quant_init(types.SimpleNamespace())
+
+    quantized = model.to_nbits()
+
+    emitted = {node.name: node.attributes["bits"].as_int() for node in quantized.graph if node.op_type == "MatMulNBits"}
+    assert emitted == {f"{name}_Q{node_bits}": node_bits for name, node_bits in expected.items()}
+
+
+def _run_check_extra_options(
+    monkeypatch,
+    extra_options,
+    *,
+    precision="int4",
+    execution_provider="cpu",
+    tie_word_embeddings=True,
+    layer_types=None,
+    attn_logit_softcapping=None,
+):
+    # Avoid Hugging Face network/config loading and provide only the config fields needed.
+    fake_config = types.SimpleNamespace(
+        tie_word_embeddings=tie_word_embeddings,
+        layer_types=layer_types,
+        attn_logit_softcapping=attn_logit_softcapping,
+    )
+
+    def _fake_get_hf_details(*_args, **_kwargs):
+        return {
+            "extra_kwargs": {},
+            "hf_name": "fake-model",
+            "hf_config": fake_config,
+        }
+
+    monkeypatch.setattr(builder_module, "get_hf_details", _fake_get_hf_details)
+    builder_module.check_extra_options(
+        model_name="fake-model",
+        input_path="/tmp/fake-model",
+        output_dir="/tmp/fake-output",
+        precision=precision,
+        execution_provider=execution_provider,
+        cache_dir="/tmp/fake-cache",
+        extra_options=extra_options,
+    )
+
+
+def test_structured_unquantized_moe_completes_cli_option_parsing(monkeypatch):
+    fake_config = types.SimpleNamespace(tie_word_embeddings=True, layer_types=None)
+    monkeypatch.setattr(
+        builder_module,
+        "get_hf_details",
+        lambda *_args, **_kwargs: {
+            "extra_kwargs": {},
+            "hf_name": "fake-model",
+            "hf_config": fake_config,
+        },
+    )
+
+    options = builder_module.parse_extra_options(
+        model_name="fake-model",
+        input_path="/tmp/fake-model",
+        output_dir="/tmp/fake-output",
+        precision="int4",
+        execution_provider="cuda",
+        cache_dir="/tmp/fake-cache",
+        extra_options=[],
+        builder_config_version=2,
+        target_options={"quant_config": {"moe": {"type": "none"}}},
+    )
+
+    assert options["_quant_config"].moe.type == "none"
+    assert "moe_quant_type" not in options
+
+
+def test_target_gate_up_fusion_help_omits_removed_option(monkeypatch):
+    help_text = []
+
+    def inspect_help(parser):
+        help_text.extend(action.help for action in parser._actions if action.dest == "extra_options")
+        raise SystemExit(0)
+
+    monkeypatch.setattr(builder_module.argparse.ArgumentParser, "parse_args", inspect_help)
+    with pytest.raises(SystemExit) as error:
+        builder_module.get_args()
+    assert error.value.code == 0
+    assert "fuse_mlp_gate_up =" not in help_text[0]
+    for removed in ("fuse_qkv", "disable_qkv_fusion", "fuse_qk_norm_gqa", "indexshare_max_draft_tokens"):
+        assert not any(line.strip().startswith(f"{removed} =") for line in help_text[0].splitlines())
+
+
+def test_mtp_quant_config_json_is_parsed(monkeypatch):
+    options = {"mtp_quant_config": '{"io_dtype":"bf16","weights":{"type":"int4"}}'}
+
+    _run_check_extra_options(monkeypatch, options)
+
+    assert options["mtp_quant_config"].io_dtype == "bf16"
+    assert options["mtp_quant_config"].weights.type == "int4"
+    assert options["mtp_quant_config"].checkpoint_policy == "requantize"
+
+
+def test_mtp_quant_config_typed_dict_preserves_explicit_policy(monkeypatch):
+    options = {
+        "mtp_quant_config": {
+            "checkpoint_policy": "preserve",
+            "io_dtype": "bf16",
+            "weights": {"type": "int4"},
+        }
+    }
+
+    _run_check_extra_options(monkeypatch, options)
+
+    assert options["mtp_quant_config"].checkpoint_policy == "preserve"
+
+
+def test_parse_extra_options_preserves_equals_inside_json(monkeypatch):
+    captured = {}
+
+    def fake_check_extra_options(*args):
+        captured.update(args[-1])
+
+    monkeypatch.setattr(builder_module, "check_extra_options", fake_check_extra_options)
+    builder_module.parse_extra_options(
+        "model",
+        "input",
+        "output",
+        "int4",
+        "cuda",
+        "cache",
+        ['mtp_quant_config={"weights":{"overrides":[{"match":{"name":"name=a"},"exclude":true}]}}'],
+    )
+
+    assert captured["mtp_quant_config"] == ('{"weights":{"overrides":[{"match":{"name":"name=a"},"exclude":true}]}}')
+
+
+def test_qwen35_moe_architecture_selects_composite_builder(monkeypatch, tmp_path):
+    captured = {}
+
+    class FakeQwen35MoEModel:
+        exclude_embeds = False
+
+        def __init__(self, *args):
+            captured["args"] = args
+
+        def make_genai_config(self, *args):
+            captured["genai_config"] = args
+
+        def save_processing(self, *args):
+            captured["processing"] = args
+
+    config = types.SimpleNamespace(architectures=["Qwen3_5MoeForConditionalGeneration"])
+    monkeypatch.setattr(builder_module, "Qwen35MoEModel", FakeQwen35MoEModel)
+
+    builder_module.create_model(
+        "fake-model",
+        str(tmp_path / "input"),
+        str(tmp_path / "output"),
+        "fp16",
+        "cpu",
+        str(tmp_path / "cache"),
+        config_only=True,
+        hf_details={"extra_kwargs": {}, "hf_name": "fake-model", "hf_config": config},
+    )
+
+    assert captured["args"][0] is config
+    assert captured["args"][5]["config_only"] is True
+    assert captured["genai_config"][0] is config
+    assert captured["processing"][0] == "fake-model"
+
+
+def test_state_window_must_be_non_negative(monkeypatch):
+    with pytest.raises(ValueError, match="non-negative integer"):
+        _run_check_extra_options(monkeypatch, {"state_window": "-1"})
+
+
+def test_state_window_is_normalized(monkeypatch):
+    options = {"state_window": "3"}
+
+    _run_check_extra_options(monkeypatch, options)
+
+    assert options["state_window"] == 3
+
+
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        ({"use_paged_attention": "true", "state_update_capacity": "-1"}, "0 through 8"),
+        ({"use_paged_attention": "true", "state_update_capacity": "9"}, "0 through 8"),
+        ({"use_paged_attention": "true", "state_update_capacity": "abc"}, "0 through 8"),
+        ({"state_update_capacity": "3"}, "requires use_paged_attention=true"),
+    ],
+)
+def test_state_update_capacity_is_validated(monkeypatch, options, message):
+    with pytest.raises(ValueError, match=message):
+        _run_check_extra_options(monkeypatch, options)
+
+
+def test_state_update_capacity_is_normalized(monkeypatch):
+    options = {"use_paged_attention": "true", "state_update_capacity": "3"}
+
+    _run_check_extra_options(monkeypatch, options)
+
+    assert options["state_update_capacity"] == 3
+
+
+@pytest.mark.parametrize("capacity", ["1", "8", 3])
+def test_webgpu_accepts_compact_state_updates(monkeypatch, capacity):
+    options = {"use_paged_attention": "true", "num_blocks": "8", "state_update_capacity": capacity}
+    _run_check_extra_options(monkeypatch, options, precision="fp16", execution_provider="webgpu")
+
+    assert options["state_update_capacity"] == int(capacity)
+
+
+def test_webgpu_allows_disabled_compact_state_updates(monkeypatch):
+    options = {"use_paged_attention": "true", "num_blocks": "8", "state_update_capacity": "0"}
+
+    _run_check_extra_options(monkeypatch, options, precision="fp16", execution_provider="webgpu")
+
+    assert options["state_update_capacity"] == 0
+
+
+def test_webgpu_paged_attention_rejects_gemma2_softcap(monkeypatch):
+    with pytest.raises(ValueError, match="does not support non-zero attention softcap"):
+        _run_check_extra_options(
+            monkeypatch,
+            {"use_paged_attention": "true", "num_blocks": "8"},
+            precision="fp16",
+            execution_provider="webgpu",
+            attn_logit_softcapping=50.0,
+        )
+
+
+def test_num_hidden_layers_rejects_more_layers_than_configured(monkeypatch):
+    with pytest.raises(ValueError, match="layer_types has 1 entries"):
+        _run_check_extra_options(
+            monkeypatch,
+            {"num_hidden_layers": "2"},
+            layer_types=["full_attention"],
+        )
+
+
+def test_num_hidden_layers_is_normalized(monkeypatch):
+    options = {"num_hidden_layers": "1"}
+
+    _run_check_extra_options(monkeypatch, options, layer_types=["full_attention"])
+
+    assert options["num_hidden_layers"] == 1
+
+
 # ---------------------------------------------------------------------------
 # int8 rejects the unsupported QDQ format (8-bit MatMulNBits is QOperator-only).
 # ---------------------------------------------------------------------------
 
 
-def test_int8_with_qdq_is_rejected():
+def test_int8_with_qdq_is_rejected(monkeypatch):
     with pytest.raises(NotImplementedError, match="QDQ"):
-        builder_module.check_extra_options({"use_qdq": "true"}, "int8", "cpu")
+        _run_check_extra_options(monkeypatch, {"use_qdq": "true"}, precision="int8")
 
 
-def test_int4_with_qdq_is_allowed():
+def test_int4_with_qdq_is_allowed(monkeypatch):
     # QDQ is only rejected for int8; int4 still supports it.
-    builder_module.check_extra_options({"use_qdq": "true"}, "int4", "cpu")
+    _run_check_extra_options(monkeypatch, {"use_qdq": "true"}, precision="int4")
 
 
-# ---------------------------------------------------------------------------
-# Deprecated int4_* extra_option names still map to the generalized names.
-# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "quant_type",
+    ["int8_per_tensor", "int8_per_channel", "int4_per_tensor", "int4_per_channel", "fp8_per_tensor", "fp8_per_channel"],
+)
+def test_kv_cache_quant_scheme_is_accepted_for_supported_providers(monkeypatch, quant_type):
+    options = {"kv_cache_quant_scheme": quant_type.upper()}
+
+    _run_check_extra_options(monkeypatch, options, precision="fp16", execution_provider="cuda")
+
+    assert options["kv_cache_quant_scheme"] == quant_type
 
 
-def test_deprecated_int4_aliases_are_renamed():
-    kv = {
-        "int4_accuracy_level": "2",
-        "int4_block_size": "64",
-        "int4_is_symmetric": "false",
-        "int4_op_types_to_quantize": "MatMul/Gather",
-        "int4_nodes_to_exclude": "/lm_head/MatMul",
-        "int4_algo_config": "k_quant",
+def test_kv_cache_quant_scheme_rejects_unsupported_value(monkeypatch):
+    with pytest.raises(ValueError, match="kv_cache_quant_scheme must be one of"):
+        _run_check_extra_options(
+            monkeypatch, {"kv_cache_quant_scheme": "int6_per_tensor"}, precision="fp16", execution_provider="cuda"
+        )
+
+
+def test_quantized_kv_cache_rejects_unsupported_provider(monkeypatch):
+    with pytest.raises(ValueError, match="only supported for the CPU and CUDA"):
+        _run_check_extra_options(
+            monkeypatch, {"kv_cache_quant_scheme": "int8_per_tensor"}, precision="fp16", execution_provider="webgpu"
+        )
+
+
+def test_shared_embeddings_with_untied_weights_is_rejected(monkeypatch):
+    with pytest.raises(ValueError, match="tie_word_embeddings=false"):
+        _run_check_extra_options(
+            monkeypatch,
+            {"shared_embeddings": "true"},
+            precision="int4",
+            tie_word_embeddings=False,
+        )
+
+
+def test_shared_embeddings_with_tied_weights_is_accepted(monkeypatch):
+    # Should not raise when tie_word_embeddings=True
+    _run_check_extra_options(
+        monkeypatch,
+        {"shared_embeddings": "true"},
+        precision="int4",
+        tie_word_embeddings=True,
+    )
+
+
+def test_shared_embeddings_defaults_to_tied_when_config_ties_embeddings(monkeypatch):
+    # When shared_embeddings is not specified, it defaults to tie_word_embeddings value
+    # Should not raise because shared_embeddings will default to True when tie_word_embeddings=True
+    _run_check_extra_options(
+        monkeypatch,
+        {},
+        precision="int4",
+        tie_word_embeddings=True,
+    )
+
+
+def test_shared_embeddings_defaults_to_false_when_config_doesnt_tie_embeddings(monkeypatch):
+    # When shared_embeddings is not specified and tie_word_embeddings=False,
+    # shared_embeddings will default to False
+    _run_check_extra_options(
+        monkeypatch,
+        {},
+        precision="int4",
+        tie_word_embeddings=False,
+    )
+
+
+def test_shared_embeddings_handles_none_tie_word_embeddings(monkeypatch):
+    # When tie_word_embeddings is None, it should default to False
+    with pytest.raises(ValueError, match="tie_word_embeddings=false"):
+        _run_check_extra_options(
+            monkeypatch,
+            {"shared_embeddings": "true"},
+            precision="int4",
+            tie_word_embeddings=None,
+        )
+
+
+def test_hidden_state_shape_defaults_to_non_paged_for_bare_model():
+    model = Model.__new__(Model)
+    model.use_paged_attention = False
+    model.hidden_size = 64
+    assert model.make_hidden_state_shape() == ["batch_size", "sequence_length", 64]
+
+
+def test_hidden_state_shape_uses_flat_token_axis_for_paged_model():
+    model = Model.__new__(Model)
+    model.use_paged_attention = True
+    model.hidden_rows_dim = "num_tokens"
+    model.hidden_size = 64
+    assert model.make_hidden_state_shape() == ["num_tokens", 64]
+    assert model.make_hidden_state_shape(seq_dim="batch_size") == ["batch_size", 64]
+
+
+@pytest.mark.parametrize(
+    "extra_options, logits_first_dim",
+    [
+        ({"include_hidden_states": True}, "num_tokens"),
+        ({"include_hidden_states": True, "prune_lm_head": True}, "num_logits"),
+    ],
+)
+def test_paged_attention_uses_flat_hidden_states_output_shape(extra_options, logits_first_dim):
+    model = Model.__new__(Model)
+    model.use_paged_attention = True
+    model.io_dtype = ir.DataType.FLOAT16
+    model.hidden_size = 64
+    model.vocab_size = 128
+    model.num_kv_heads = 4
+    model.head_size = 16
+    model.layer_types = ["full_attention"]
+    model.extra_options = extra_options
+    model.output_names = {
+        "hidden_states": "hidden_states",
+        "logits": "logits",
+        "present.conv": {},
+        "present.recurrent": {},
     }
-    builder_module.apply_deprecated_extra_option_aliases(kv)
-    assert kv == {
-        "accuracy_level": "2",
-        "block_size": "64",
-        "is_symmetric": "false",
-        "op_types_to_quantize": "MatMul/Gather",
-        "nodes_to_exclude": "/lm_head/MatMul",
-        "algo_config": "k_quant",
+    model.output_types = {"logits": ir.DataType.FLOAT16}
+    model.output_shapes = {
+        "hidden_states": ["batch_size", "sequence_length", model.hidden_size],
+        "logits": ["batch_size", "sequence_length", model.vocab_size],
+        "present.key": [],
+        "present.value": [],
     }
 
+    model.make_outputs_init()
 
-def test_deprecated_alias_does_not_override_new_name():
-    # If both the old and new names are provided, the new name wins and the old key is dropped.
-    kv = {"int4_algo_config": "rtn", "algo_config": "k_quant"}
-    builder_module.apply_deprecated_extra_option_aliases(kv)
-    assert kv == {"algo_config": "k_quant"}
+    assert model.output_shapes["hidden_states"] == ["num_tokens", model.hidden_size]
+    assert model.output_shapes["logits"] == [logits_first_dim, model.vocab_size]
+    assert model.prune_lm_head is (logits_first_dim == "num_logits")
 
 
-def test_check_extra_options_accepts_deprecated_int4_names():
-    # End-to-end through check_extra_options: deprecated names are normalized in-place.
-    kv = {"int4_algo_config": "k_quant", "int4_op_types_to_quantize": "MatMul/Gather"}
-    builder_module.check_extra_options(kv, "int4", "cpu")
-    assert kv["algo_config"] == "k_quant"
-    assert kv["op_types_to_quantize"] == ("MatMul", "Gather")
-    assert "int4_algo_config" not in kv and "int4_op_types_to_quantize" not in kv
+@pytest.mark.parametrize(
+    "prune_lm_head, logits_first_dim, logits_indices, expected_rows",
+    [
+        (True, "num_logits", [1, 2, 3, 5], [1, 2, 3, 5]),
+        (False, "num_tokens", None, [0, 1, 2, 3, 4, 5]),
+    ],
+)
+def test_paged_attention_lm_head_pruning(
+    monkeypatch, tmp_path, prune_lm_head, logits_first_dim, logits_indices, expected_rows
+):
+    model = Model.__new__(Model)
+    model.use_paged_attention = True
+    model.hidden_rows_dim = "num_tokens"
+    model.prune_lm_head = prune_lm_head
+    model.io_dtype = ir.DataType.FLOAT
+    model.hidden_size = 3
+    model.vocab_size = 3
+    model.input_names = {"logits_indices": "logits_indices"}
+    model.output_types = {"logits": ir.DataType.FLOAT}
+    model.output_shapes = {"logits": [logits_first_dim, model.vocab_size]}
+    model.layernorm_attrs = {"output_0": "hidden_states"}
+    model.lm_head_attrs = {"scale": 1, "mask": None, "softcap": 0.0}
+    model.values = {}
+    model.node_names = set()
+    graph = ir.Graph(
+        inputs=(),
+        outputs=(),
+        nodes=(),
+        opset_imports={"": 21},
+        name="paged_logits_test",
+    )
+    model.model = ir.Model(graph, ir_version=10)
+    graph.inputs.append(model.make_value("hidden_states", ir.DataType.FLOAT, ["num_tokens", model.hidden_size]))
+    if prune_lm_head:
+        graph.inputs.append(model.make_value("logits_indices", ir.DataType.INT32, ["num_logits"]))
+
+    def make_matmul(_lm_head, name, root_input, **_kwargs):
+        model.make_node("Identity", inputs=[root_input], outputs=["logits"], name=name)
+        model.make_value("logits", ir.DataType.FLOAT, [logits_first_dim, model.vocab_size])
+        return name
+
+    monkeypatch.setattr(model, "make_matmul", make_matmul)
+    model.make_lm_head(types.SimpleNamespace(bias=None))
+    graph.outputs.append(model.make_value("logits"))
+
+    model_path = tmp_path / "paged_logits.onnx"
+    ir.save(model.model, model_path)
+    session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
+
+    hidden_states = np.arange(18, dtype=np.float32).reshape(6, model.hidden_size)
+    feeds = {"hidden_states": hidden_states}
+    if logits_indices is not None:
+        feeds["logits_indices"] = np.asarray(logits_indices, dtype=np.int32)
+    (logits,) = session.run(
+        None,
+        feeds,
+    )
+
+    np.testing.assert_array_equal(logits, hidden_states[expected_rows])
+    assert session.get_outputs()[0].shape == [logits_first_dim, model.vocab_size]
+    assert model.output_shapes["logits"] == [logits_first_dim, model.vocab_size]
+
+
+@pytest.mark.parametrize("include_hidden_states, prunes", [(False, True), (True, False)])
+def test_paged_rows_are_selected_before_the_final_norm(monkeypatch, tmp_path, include_hidden_states, prunes):
+    model = Model.__new__(Model)
+    model.use_paged_attention = True
+    model.hidden_rows_dim = "num_tokens"
+    model.prune_lm_head = True
+    model.include_hidden_states = include_hidden_states
+    model.io_dtype = ir.DataType.FLOAT
+    model.hidden_size = 3
+    model.vocab_size = 3
+    model.input_names = {"logits_indices": "logits_indices"}
+    model.output_types = {"logits": ir.DataType.FLOAT}
+    model.output_shapes = {"logits": ["num_logits", model.vocab_size]}
+    model.layernorm_attrs = {"root_input": "residual", "skip_input": "mlp_output"}
+    model.lm_head_attrs = {"scale": 1, "mask": None, "softcap": 0.0}
+    model.values = {}
+    model.node_names = set()
+    graph = ir.Graph(inputs=(), outputs=(), nodes=(), opset_imports={"": 21}, name="paged_rows_test")
+    model.model = ir.Model(graph, ir_version=10)
+    for name in ("residual", "mlp_output"):
+        graph.inputs.append(model.make_value(name, ir.DataType.FLOAT, ["num_tokens", model.hidden_size]))
+    graph.inputs.append(model.make_value("logits_indices", ir.DataType.INT32, ["num_logits"]))
+
+    assert model.prunes_hidden_rows() is prunes
+    if prunes:
+        model.make_selected_hidden_rows()
+    rows = model.make_hidden_state_shape()[0]
+    assert rows == ("num_logits" if prunes else "num_tokens")
+
+    # Stand-in for the final SkipLayerNorm: any row-wise op on the residual and the MLP output.
+    model.make_node(
+        "Add",
+        inputs=[model.layernorm_attrs["root_input"], model.layernorm_attrs["skip_input"]],
+        outputs=["final_norm"],
+        name="final_norm",
+    )
+    model.make_value("final_norm", ir.DataType.FLOAT, [rows, model.hidden_size])
+    model.layernorm_attrs["output_0"] = "final_norm"
+
+    def make_matmul(_lm_head, name, root_input, **_kwargs):
+        model.make_node("Identity", inputs=[root_input], outputs=["logits"], name=name)
+        model.make_value("logits", ir.DataType.FLOAT, ["num_logits", model.vocab_size])
+        return name
+
+    monkeypatch.setattr(model, "make_matmul", make_matmul)
+    model.make_lm_head(types.SimpleNamespace(bias=None))
+    graph.outputs.append(model.make_value("logits"))
+
+    gathers = [node for node in graph if node.op_type == "Gather"]
+    assert len(gathers) == (2 if prunes else 1)
+    assert model.make_hidden_state_shape()[0] == "num_tokens"
+
+    model_path = tmp_path / "paged_rows.onnx"
+    ir.save(model.model, model_path)
+    session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
+    residual = np.arange(18, dtype=np.float32).reshape(6, model.hidden_size)
+    mlp_output = 100 * residual
+    indices = np.array([1, 2, 5], dtype=np.int32)
+    (logits,) = session.run(None, {"residual": residual, "mlp_output": mlp_output, "logits_indices": indices})
+
+    np.testing.assert_array_equal(logits, (residual + mlp_output)[indices])
+
+
+@pytest.mark.parametrize("layer_id, selects", [(0, False), (1, True)])
+def test_paged_rows_are_selected_after_the_last_attention(monkeypatch, layer_id, selects):
+    model = Model.__new__(Model)
+    model.use_paged_attention = True
+    model.prune_lm_head = True
+    model.include_hidden_states = False
+    model.num_layers = 2
+    model.moe_attrs = {"num_experts": 0}
+    model.layernorm_attrs = {"first_layernorm": False, "last_layernorm": False, "simple": True, "output_0": "norm"}
+    calls = []
+    monkeypatch.setattr(model, "make_layernorm", lambda _id, _norm, skip, simple, location: calls.append(location))
+    monkeypatch.setattr(model, "make_attention", lambda *_args, **_kwargs: calls.append("attention"))
+    monkeypatch.setattr(model, "make_selected_hidden_rows", lambda: calls.append("select"))
+    monkeypatch.setattr(model, "make_mlp", lambda *_args, **_kwargs: calls.append("mlp"))
+    layer = types.SimpleNamespace(input_layernorm=None, self_attn=None, post_attention_layernorm=None, mlp=None)
+
+    model.make_layer(layer_id, layer)
+
+    expected = ["input", "attention", "post_attention", "mlp"]
+    if selects:
+        expected.insert(2, "select")
+    assert calls == expected
+
+
+@pytest.mark.parametrize("layer_id, selects", [(0, False), (1, True)])
+def test_phi_selects_rows_before_final_mlp_and_residual(monkeypatch, layer_id, selects):
+    model_type = importlib.import_module("models.builders.phi").PhiModel
+    model = model_type.__new__(model_type)
+    model.use_paged_attention = True
+    model.prune_lm_head = True
+    model.include_hidden_states = False
+    model.hidden_rows_dim = "num_tokens"
+    model.num_layers = 2
+    model.hidden_size = 3
+    model.io_dtype = ir.DataType.FLOAT
+    model.input_names = {"logits_indices": "logits_indices"}
+    model.values = {"norm": types.SimpleNamespace(dtype=ir.DataType.FLOAT)}
+    model.layernorm_attrs = {
+        "first_layernorm": False,
+        "last_layernorm": False,
+        "simple": False,
+        "output_0": "norm",
+        "skip_input": "residual",
+    }
+    calls = []
+    monkeypatch.setattr(model, "make_layernorm", lambda *_args, **_kwargs: calls.append("input"))
+    monkeypatch.setattr(model, "make_attention", lambda *_args, **_kwargs: calls.append("attention"))
+    monkeypatch.setattr(model, "make_mlp", lambda _id, _mlp, root_input: calls.append(("mlp", root_input)))
+    monkeypatch.setattr(model, "make_gather", lambda *_args, **_kwargs: calls.append("gather"))
+
+    def select_rows():
+        calls.append("select")
+        model.hidden_rows_dim = "num_logits"
+
+    monkeypatch.setattr(model, "make_selected_hidden_rows", select_rows)
+    monkeypatch.setattr(
+        model, "make_add", lambda _name, _inputs, **kwargs: calls.append(("residual", kwargs["shape"][0]))
+    )
+    layer = types.SimpleNamespace(input_layernorm=None, self_attn=None, mlp=None)
+
+    model.make_layer(layer_id, layer)
+
+    mlp_input = "/model/layers.1/mlp_input/Gather/output_0" if selects else "norm"
+    expected = ["input", "attention", ("mlp", mlp_input), ("residual", "num_logits" if selects else "num_tokens")]
+    if selects:
+        expected[2:2] = ["select", "gather"]
+    assert calls == expected
+
+
+@pytest.mark.parametrize(
+    "model_name, uses_conv", [("gemma", False), ("granite", False), ("lfm2", False), ("lfm2", True)]
+)
+@pytest.mark.parametrize("layer_id", [0, 1])
+def test_paged_layer_overrides_select_rows_before_final_feed_forward(monkeypatch, model_name, uses_conv, layer_id):
+    module_name, class_name = {
+        "gemma": ("gemma", "Gemma2Model"),
+        "granite": ("granite", "GraniteModel"),
+        "lfm2": ("lfm2", "LFM2Model"),
+    }[model_name]
+    model_type = getattr(importlib.import_module(f"models.builders.{module_name}"), class_name)
+    model = model_type.__new__(model_type)
+    model.use_paged_attention = True
+    model.prune_lm_head = True
+    model.include_hidden_states = False
+    model.hidden_rows_dim = "num_tokens"
+    model.num_layers = 2
+    model.hidden_size = 3
+    model.io_dtype = ir.DataType.FLOAT
+    model.residual_scale = 1
+    model.layer_types = ["full_attention", "conv" if uses_conv else "full_attention"]
+    model.layernorm_attrs = {
+        "first_layernorm": False,
+        "last_layernorm": False,
+        "simple": True,
+        "root_input": "residual",
+        "skip_input": "attention_output",
+        "output_0": "norm",
+        "cast": {"root_input": False, "output_0": False},
+    }
+    calls = []
+    monkeypatch.setattr(model, "make_layernorm", lambda _id, _norm, skip, simple, location: calls.append(location))
+    monkeypatch.setattr(model, "make_attention", lambda *_args, **_kwargs: calls.append("attention"))
+    monkeypatch.setattr(model, "make_mlp", lambda *_args, **_kwargs: calls.append("mlp"))
+    if model_name == "lfm2":
+        monkeypatch.setattr(model, "make_feed_forward", lambda *_args, **_kwargs: calls.append("feed_forward"))
+        monkeypatch.setattr(model, "make_short_conv", lambda *_args: calls.append("conv") or "conv_output")
+    monkeypatch.setattr(
+        model, "make_mul", lambda name, _inputs, **kwargs: calls.append((name[-5:], kwargs["shape"][0]))
+    )
+
+    def select_rows():
+        calls.append("select")
+        model.hidden_rows_dim = "num_logits"
+
+    monkeypatch.setattr(model, "make_selected_hidden_rows", select_rows)
+    layer = types.SimpleNamespace(
+        input_layernorm=None,
+        operator_norm=None,
+        self_attn=None,
+        conv=None,
+        post_attention_layernorm=None,
+        pre_feedforward_layernorm=None,
+        post_feedforward_layernorm=None,
+        ffn_norm=None,
+        mlp=None,
+    )
+
+    model.make_layer(layer_id, layer)
+
+    row_dim = "num_logits" if layer_id == 1 else "num_tokens"
+    expected = {
+        "gemma": ["input", "attention", "post_attention", "pre_feedforward", "mlp", "post_feedforward"],
+        "granite": ["input", "attention", ("Mul_1", row_dim), "post_attention", "mlp", ("Mul_2", row_dim)],
+        "lfm2": ["operator", "conv" if uses_conv and layer_id == 1 else "attention", "ffn", "feed_forward"],
+    }[model_name]
+    if layer_id == 1:
+        expected.insert(2, "select")
+    assert calls == expected
+
+
+@pytest.mark.parametrize(
+    "extra_options, error",
+    [
+        ({"use_paged_attention": "true", "paged_block_size": "0"}, "paged_block_size"),
+        # 768 is a multiple of 256, so the old rule let it through and PagedAttention's
+        # CheckInputs then failed the first forward pass of the built model.
+        ({"use_paged_attention": "true", "paged_block_size": "768"}, "paged_block_size"),
+        ({"use_paged_attention": "true", "paged_chunk_size": "0"}, "paged_chunk_size"),
+        ({"use_paged_attention": "true", "paged_chunk_size": "-1"}, "paged_chunk_size"),
+        ({"use_paged_attention": "true", "paged_chunk_size": "abc"}, "paged_chunk_size"),
+        ({"use_paged_attention": "true", "num_blocks": "0"}, "num_blocks"),
+        ({"use_paged_attention": "true", "num_blocks": "abc"}, "num_blocks"),
+        ({"use_paged_attention": "true", "max_batch_size": "-1"}, "max_batch_size"),
+        ({"use_paged_attention": "true", "max_batch_size": "257"}, "max_batch_size"),
+        ({"use_paged_attention": "true", "gpu_utilization_factor": "0"}, "gpu_utilization_factor"),
+        ({"use_paged_attention": "true", "gpu_utilization_factor": "1.1"}, "gpu_utilization_factor"),
+    ],
+)
+def test_paged_attention_rejects_invalid_engine_options(monkeypatch, extra_options, error):
+    with pytest.raises(ValueError, match=error):
+        _run_check_extra_options(monkeypatch, extra_options, precision="bf16", execution_provider="cuda")
+
+
+def test_webgpu_paged_attention_requires_num_blocks(monkeypatch):
+    with pytest.raises(ValueError, match="num_blocks"):
+        _run_check_extra_options(
+            monkeypatch,
+            {"use_paged_attention": "true"},
+            precision="fp16",
+            execution_provider="webgpu",
+        )
+
+
+@pytest.mark.parametrize("legacy_num_blocks", [None, "4"])
+def test_webgpu_paged_attention_accepts_runtime_num_blocks(monkeypatch, legacy_num_blocks):
+    options = {
+        "use_paged_attention": "true",
+        "_runtime_config": {"engine": {"dynamic_batching": {"num_blocks": 8}}},
+    }
+    if legacy_num_blocks is not None:
+        options["num_blocks"] = legacy_num_blocks
+    _run_check_extra_options(monkeypatch, options, precision="fp16", execution_provider="webgpu")
+
+
+@pytest.mark.parametrize("num_blocks", [0, -1, False, 1.5, "8"])
+def test_webgpu_paged_attention_rejects_invalid_runtime_num_blocks(monkeypatch, num_blocks):
+    options = {
+        "use_paged_attention": "true",
+        "num_blocks": "8",
+        "_runtime_config": {"engine": {"dynamic_batching": {"num_blocks": num_blocks}}},
+    }
+    with pytest.raises(ValueError, match="num_blocks"):
+        _run_check_extra_options(monkeypatch, options, precision="fp16", execution_provider="webgpu")
+
+
+@pytest.mark.parametrize("execution_provider", ["webgpu", "cuda"])
+@pytest.mark.parametrize(
+    ("legacy_options", "runtime_batching"),
+    [
+        ({}, {"num_blocks": 8, "gpu_utilization_factor": 0.6}),
+        ({"num_blocks": "8"}, {"gpu_utilization_factor": 0.6}),
+        ({"gpu_utilization_factor": "0.6"}, {"num_blocks": 8}),
+        ({"num_blocks": "8", "gpu_utilization_factor": "0.6"}, {}),
+    ],
+)
+def test_paged_attention_rejects_merged_cache_sizing_conflicts(
+    monkeypatch, execution_provider, legacy_options, runtime_batching
+):
+    options = {
+        "use_paged_attention": "true",
+        **legacy_options,
+        "_runtime_config": {"engine": {"dynamic_batching": runtime_batching}},
+    }
+    with pytest.raises(ValueError, match="num_blocks and gpu_utilization_factor are mutually exclusive"):
+        _run_check_extra_options(monkeypatch, options, precision="fp16", execution_provider=execution_provider)
+
+
+@pytest.mark.parametrize(
+    "legacy_allocation,runtime_allocation,expected_blocks",
+    [
+        ({}, {"num_blocks": 8}, 8),
+        ({"num_blocks": "16"}, {}, 16),
+        ({"num_blocks": "16"}, {"num_blocks": 8}, 8),
+    ],
+)
+def test_webgpu_paged_attention_effective_block_budget(
+    monkeypatch, legacy_allocation, runtime_allocation, expected_blocks
+):
+    effective = builder_module.normalize_builder_config(
+        "fp16",
+        "webgpu",
+        {"use_paged_attention": "true", **legacy_allocation},
+        runtime_config={"engine": {"dynamic_batching": runtime_allocation}},
+    )
+    options = effective.extra_options
+    _run_check_extra_options(monkeypatch, options, precision="fp16", execution_provider="webgpu")
+
+    generated = {
+        "engine": {
+            "dynamic_batching": {
+                key: options[key]
+                for key in ("num_blocks", "gpu_utilization_factor")
+                if key in options
+            }
+        }
+    }
+    merged = builder_module.apply_runtime_config(generated, effective.runtime_config)
+    assert merged["engine"]["dynamic_batching"] == {"num_blocks": expected_blocks}
+
+
+@pytest.mark.parametrize(
+    "runtime_allocation,error",
+    [
+        ({"gpu_utilization_factor": 0.6}, "num_blocks and gpu_utilization_factor are mutually exclusive"),
+        ({"num_blocks": 0}, "num_blocks.*positive integer"),
+        ({"num_blocks": None}, "num_blocks.*must not contain null"),
+    ],
+)
+def test_webgpu_paged_attention_rejects_runtime_removal_of_block_budget(
+    monkeypatch, runtime_allocation, error
+):
+    with pytest.raises(ValueError, match=error):
+        effective = builder_module.normalize_builder_config(
+            "fp16",
+            "webgpu",
+            {"use_paged_attention": "true", "num_blocks": "16"},
+            runtime_config={"engine": {"dynamic_batching": runtime_allocation}},
+        )
+        _run_check_extra_options(
+            monkeypatch, effective.extra_options, precision="fp16", execution_provider="webgpu"
+        )
+
+
+def test_paged_attention_normalizes_engine_options(monkeypatch):
+    extra_options = {
+        "use_paged_attention": "true",
+        "paged_block_size": "512",
+        "paged_chunk_size": "64",
+        "gpu_utilization_factor": "0.75",
+        "max_batch_size": "32",
+    }
+    _run_check_extra_options(monkeypatch, extra_options, precision="bf16", execution_provider="cuda")
+    assert extra_options["paged_block_size"] == 512
+    assert extra_options["paged_chunk_size"] == 64
+    assert extra_options["gpu_utilization_factor"] == 0.75
+    assert extra_options["max_batch_size"] == 32
+
+    fixed_cache_options = {
+        "use_paged_attention": "true",
+        "num_blocks": "1024",
+    }
+    _run_check_extra_options(monkeypatch, fixed_cache_options, precision="bf16", execution_provider="cuda")
+    assert fixed_cache_options["num_blocks"] == 1024
+
+
+@pytest.mark.parametrize(
+    "option_value, expected",
+    [
+        ("true", True),
+        ("false", False),
+    ],
+)
+def test_paged_attention_accepts_lm_head_pruning_option(monkeypatch, option_value, expected):
+    extra_options = {
+        "use_paged_attention": "true",
+        "prune_lm_head": option_value,
+    }
+    _run_check_extra_options(monkeypatch, extra_options, precision="bf16", execution_provider="cuda")
+    assert extra_options["prune_lm_head"] is expected
+
+
+@pytest.mark.parametrize("option", ["exclude_embeds", "exclude_lm_head"])
+def test_paged_attention_rejects_incompatible_graph_interfaces(monkeypatch, option):
+    with pytest.raises(ValueError, match=option):
+        _run_check_extra_options(
+            monkeypatch,
+            {"use_paged_attention": "true", option: "true"},
+            precision="bf16",
+            execution_provider="cuda",
+        )

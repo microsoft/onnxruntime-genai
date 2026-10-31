@@ -10,11 +10,13 @@ Generator loop.
 """
 
 import argparse
+import importlib
 import os
 import time
 import wave
 
 import onnxruntime_genai as og
+from common import register_ep
 
 
 def _audio_duration_seconds(path: str) -> float:
@@ -28,7 +30,8 @@ def _audio_duration_seconds(path: str) -> float:
         # Not a valid/parsable WAV stream; fall back to soundfile below.
         pass
     try:
-        import soundfile as sf  # type: ignore
+        sf = importlib.import_module("soundfile")  # type: ignore
+
         info = sf.info(path)
         return float(info.frames) / float(info.samplerate)
     except Exception:
@@ -39,6 +42,7 @@ def _audio_duration_seconds(path: str) -> float:
 
 def run(args: argparse.Namespace) -> None:
     print("Loading model...")
+    register_ep(args.execution_provider, "", False)
     config = og.Config(args.model_path)
     if args.execution_provider != "follow_config":
         config.clear_providers()

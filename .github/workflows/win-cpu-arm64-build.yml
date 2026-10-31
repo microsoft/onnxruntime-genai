@@ -11,32 +11,34 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: true
 env:
-  binaryDir: 'build/cpu/win-arm64'
+  buildRoot: 'build/cpu/win-arm64'
+  binaryDir: 'build/cpu/win-arm64/Release'
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
+  ORT_NIGHTLY_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
 
 jobs:
   windows-cpu-arm64-build:
-    runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-win11-arm64-cpu2"]
+    runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-win11-arm64-cpu2", "JobId=windows-cpu-arm64-build-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}"]
     steps:
       - name: Checkout OnnxRuntime GenAI repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: true
 
-      - uses: nuget/setup-nuget@v2
+      - uses: nuget/setup-nuget@b26b823c478ee115be5c9403e62c90b0bf943843 # v3.1.0
         with:
           nuget-version: '5.x'
 
       - name: Set up Python 3.12 for ARM64
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
           architecture: 'arm64'
           cache: 'pip'
 
       - name: Setup Java 21
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           java-version: '21'
           distribution: 'temurin'
@@ -44,7 +46,7 @@ jobs:
           cache: 'gradle'
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
+        uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
         with:
           gradle-version: '8.6'
 
@@ -55,7 +57,7 @@ jobs:
           $ORT_NIGHTLY_VERSION = $resp.value[0].versions[0].normalizedVersion
           Write-Host "$ORT_NIGHTLY_VERSION"
           "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
-          nuget install ${{ env.ORT_PACKAGE_NAME }} -version $ORT_NIGHTLY_VERSION -x -NonInteractive
+          nuget install ${{ env.ORT_PACKAGE_NAME }} -version $ORT_NIGHTLY_VERSION -Source ${{ env.ORT_NIGHTLY_SOURCE }} -x -NonInteractive
 
       - run: Get-ChildItem  ${{ env.ORT_PACKAGE_NAME }} -Recurse
         continue-on-error: true
@@ -78,21 +80,30 @@ jobs:
           choco install llvm --yes
           Add-Content $env:GITHUB_PATH "C:\Program Files\LLVM\bin"
 
-      - name: Configure CMake
+      - name: Build with build.py
         run: |
           python -m pip install wheel requests
 
-          cmake --preset windows_arm64_cpu_release -DENABLE_JAVA=ON -DUSE_GUIDANCE=ON
-
-      - name: Build with CMake
-        run: |
-          cmake --build --preset windows_arm64_cpu_release --parallel
-          cmake --build --preset windows_arm64_cpu_release --target PyPackageBuild
+          python build.py `
+            --config Release `
+            --build_dir $env:buildRoot `
+            --parallel `
+            --build_java `
+            --use_guidance `
+            --arm64 `
+            --update --build `
+            --skip_examples `
+            --cmake_extra_defines `
+              'CMAKE_EXE_LINKER_FLAGS_INIT=/profile /DYNAMICBASE' `
+              'CMAKE_MODULE_LINKER_FLAGS_INIT=/profile /DYNAMICBASE' `
+              'CMAKE_SHARED_LINKER_FLAGS_INIT=/profile /DYNAMICBASE' `
+              'CMAKE_C_FLAGS=/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob2 /DNDEBUG' `
+              'CMAKE_CXX_FLAGS=/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob2 /DNDEBUG'
 
       - name: Build the C Examples
         run: |
           cmake -S examples\c -B examples\c\build `
-            -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER= -DNEMOTRON_SPEECH=ON `
+            -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER= -DMODEL_ASR=ON `
             "-DORT_INCLUDE_DIR=$env:GITHUB_WORKSPACE\$env:binaryDir\_deps\ortlib-src\build\native\include" `
             "-DORT_LIB_DIR=$env:GITHUB_WORKSPACE\$env:binaryDir\_deps\ortlib-src\runtimes\win-arm64\native" `
             "-DOGA_INCLUDE_DIR=$env:GITHUB_WORKSPACE\src" `
@@ -103,10 +114,11 @@ jobs:
         run: |
           # Uninstalling LLVM/Clang as it is no longer required and causes issues with numpy installation
           choco uninstall llvm --yes
-          python -m pip install -r test\python\requirements.txt --user
+          Get-Content test\python\requirements.txt | Where-Object { $_ -notmatch '^numpy<2$' } | Set-Content $env:TEMP\requirements-win-arm64.txt
+          python -m pip install -r $env:TEMP\requirements-win-arm64.txt --user
           python -m pip install -r test\python\cpu\torch\requirements.txt --user
           python -m pip install -r test\python\cpu\ort\requirements.txt --user
-          python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl"))
+          python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --force-reinstall --no-deps
 
       - name: Run the Java tests
         run: |

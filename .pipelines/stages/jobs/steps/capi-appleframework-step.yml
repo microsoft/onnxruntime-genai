@@ -1,8 +1,9 @@
 parameters:
 - name: build_config
   type: string
-  default: 'release'
 - name: build_settings_file
+  type: string
+- name: ort_version
   type: string
 steps:
 
@@ -11,19 +12,26 @@ steps:
   path: onnxruntime-genai
   submodules: recursive
 
-- template: utils/set-genai-version.yml
+- template: utils/apply-genai-version.yml
+  parameters:
+    os: macos
 - template: utils/set-cmake-build-type.yml
   parameters:
     build_config: ${{parameters.build_config}}
+- template: utils/download-apple-ort.yml
+  parameters:
+    ort_version: ${{ parameters.ort_version }}
 
-- template: utils/set-nightly-build-option-variable.yml
+# --- Feed isolation: pip → Lotus --------------------------------------------
+- template: utils/authenticate-pip-lotus.yml
 
 - script: |
     set -e
-    python3 -m pip install requests
+    python3 -m pip install --user --break-system-packages requests
     python3 tools/ci_build/github/apple/build_apple_framework.py \
           --build_dir "$(Build.BinariesDirectory)/apple_framework" \
           --config $(cmake_build_type) \
+          --ort_home "$(Build.BinariesDirectory)/ort_home" \
           "${{ parameters.build_settings_file }}"
 
     mkdir $(Build.BinariesDirectory)/artifacts

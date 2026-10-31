@@ -1,0 +1,6 @@
+steps:
+- task: PipAuthenticate@1
+  displayName: 'Authenticate pip to Lotus feed'
+  inputs:
+    artifactFeeds: '$(lotusFeedName)'
+    onlyAddExtraIndex: false

@@ -10,24 +10,44 @@ on:
       - main
       - rel-*
   workflow_dispatch:
+  schedule:
+    - cron: '23 6 * * *'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: true
 
 jobs:
+  lint-action-pins:
+    name: GitHub Actions pinning
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check action SHA pins
+        uses: suzuki-shunsuke/pinact-action@896d595f299e71d65b9d28349d6956abe144390a # v3.0.0
+        with:
+          fix: "false"
+          no_api: ${{ github.event_name != 'schedule' }}
+          verify: ${{ github.event_name == 'schedule' }}
+
   lint-cpp:
     runs-on:
       - self-hosted
       - "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU"
+      - "JobId=lint-cpp-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}"
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: 'false'
 
       - name: Check format
-        uses: microsoft/onnxruntime-github-actions/format-lint-check@v0.0.6
+        uses: microsoft/onnxruntime-github-actions/format-lint-check@efa14f1fd8b27f52a47d9f0cacdbf642972c6090 # v0.0.14
         with:
           llvm-version: '20.1.0'
           llvm-sha256-hash: '954ac51498519f6ed9540714fb04bc401f70039b296a8160dd1559be380788d7'

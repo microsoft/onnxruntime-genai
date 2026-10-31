@@ -32,6 +32,38 @@ def pytest_addoption(parser):
         choices=list(models.DEVICE_DIRNAMES),
         help="Execution providers to test (repeatable). Defaults to cpu only.",
     )
+    group.addoption(
+        "--dflash2-webgpu-model",
+        default=None,
+        help="Exported paged Qwen3.8 WebGPU DFlash2 model directory for opt-in precision, token and activity tests.",
+    )
+    group.addoption(
+        "--run-engine-tests",
+        action="store_true",
+        default=False,
+        help=(
+            "Run the paged-attention Engine integration tests "
+            "(test_integration_engine.py). Skipped by default so the "
+            "text-generation pipeline, which collects the whole directory, "
+            "does not require the pinned paged model artifact."
+        ),
+    )
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "engine: paged-attention Engine integration test; opt in with --run-engine-tests.",
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    if config.getoption("--run-engine-tests"):
+        return
+    skip_engine = pytest.mark.skip(reason="Engine integration tests are opt-in; pass --run-engine-tests.")
+    for item in items:
+        if "engine" in item.keywords:
+            item.add_marker(skip_engine)
 
 
 def pytest_generate_tests(metafunc):
@@ -45,6 +77,4 @@ def pytest_generate_tests(metafunc):
 
 @pytest.fixture
 def model_path(device, model, pytestconfig):
-    return resolver.get_path_for(
-        model, device, model_root=pytestconfig.getoption("--model-root")
-    )
+    return resolver.get_path_for(model, device, model_root=pytestconfig.getoption("--model-root"))

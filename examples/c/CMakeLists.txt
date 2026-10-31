@@ -26,7 +26,7 @@ option(MODEL_CHAT "Build the Model Chat example" OFF)
 option(MODEL_QA "Build the Model Q&A example" OFF)
 option(MODEL_MM "Build the Model Multimodal example" OFF)
 option(WHISPER "Build the Whisper example" OFF)
-option(NEMOTRON_SPEECH "Build the Nemotron Speech Streaming example" OFF)
+option(MODEL_ASR "Build the Model ASR (streaming) example" OFF)
 
 if(USE_CXX)
   add_compile_definitions(USE_CXX)
@@ -141,8 +141,35 @@ if(WHISPER)
   target_link_libraries(whisper PRIVATE CLI11::CLI11)
 endif()
 
-if(NEMOTRON_SPEECH)
-  add_executable(nemotron_speech ${EXAMPLES_SOURCE_DIR}/nemotron_speech.cpp)
-  prepare_executable(nemotron_speech)
-  target_link_libraries(nemotron_speech PRIVATE nlohmann_json::nlohmann_json)
+if(MODEL_ASR)
+  add_executable(model_asr ${EXAMPLES_SOURCE_DIR}/model_asr.cpp)
+  prepare_executable(model_asr)
+  target_link_libraries(model_asr PRIVATE nlohmann_json::nlohmann_json)
+endif()
+
+include(CTest)
+if(BUILD_TESTING)
+  set(EXAMPLE_TEST_MODEL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../test/models/hf-internal-testing/tiny-random-gpt2-fp32")
+  foreach(example model_qa model_chat model_mm)
+    if(TARGET ${example})
+      add_test(NAME ${example}_invalid_max_length
+        COMMAND ${CMAKE_COMMAND} -DEXAMPLE=$<TARGET_FILE:${example}>
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/invalid_max_length.cmake)
+      add_test(NAME ${example}_invalid_batch_beam
+        COMMAND ${CMAKE_COMMAND} -DEXAMPLE=$<TARGET_FILE:${example}>
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/invalid_batch_beam.cmake)
+      add_test(NAME ${example}_oversized_max_length
+        COMMAND ${CMAKE_COMMAND} -DEXAMPLE=$<TARGET_FILE:${example}>
+          -DMODEL_DIR=${EXAMPLE_TEST_MODEL_DIR}
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/oversized_max_length.cmake)
+    endif()
+  endforeach()
+  foreach(example model_qa model_chat)
+    if(TARGET ${example})
+      add_test(NAME ${example}_valid_max_length
+        COMMAND ${CMAKE_COMMAND} -DEXAMPLE=$<TARGET_FILE:${example}>
+          -DMODEL_DIR=${EXAMPLE_TEST_MODEL_DIR}
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/valid_max_length.cmake)
+    endif()
+  endforeach()
 endif()

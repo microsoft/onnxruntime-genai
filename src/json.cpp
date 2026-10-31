@@ -1,4 +1,4 @@
-#include "generators.h"
+#include "generator/generators.h"
 #include "json.h"
 
 #include <cmath>
@@ -20,6 +20,8 @@ struct JSON {
 
   double Parse_Number();
   std::string Parse_String();
+  uint32_t Parse_Hex4();
+  static void Append_Utf8(std::string& output, uint32_t codepoint);
 
   bool Skip(char c);  // If *current_ is 'c' skip over it and return true
   template <size_t TCount>
@@ -232,11 +234,46 @@ double JSON::Parse_Number() {
   return value;
 }
 
+uint32_t JSON::Parse_Hex4() {
+  if (current_ + 4 > end_) {
+    throw std::runtime_error("End of file parsing string uXXXX code");
+  }
+  uint32_t value{};
+  auto result = std::from_chars(current_, current_ + 4, value, 16);
+  if (result.ec != std::errc{} || result.ptr != current_ + 4) {
+    throw std::runtime_error("Error parsing uXXXX code");
+  }
+  current_ = result.ptr;
+  return value;
+}
+
+void JSON::Append_Utf8(std::string& output, uint32_t codepoint) {
+  if (codepoint <= 0x7f) {
+    output.push_back(static_cast<char>(codepoint));
+  } else if (codepoint <= 0x7ff) {
+    output.push_back(static_cast<char>(0xc0 | (codepoint >> 6)));
+    output.push_back(static_cast<char>(0x80 | (codepoint & 0x3f)));
+  } else if (codepoint <= 0xffff) {
+    output.push_back(static_cast<char>(0xe0 | (codepoint >> 12)));
+    output.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3f)));
+    output.push_back(static_cast<char>(0x80 | (codepoint & 0x3f)));
+  } else {
+    output.push_back(static_cast<char>(0xf0 | (codepoint >> 18)));
+    output.push_back(static_cast<char>(0x80 | ((codepoint >> 12) & 0x3f)));
+    output.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3f)));
+    output.push_back(static_cast<char>(0x80 | (codepoint & 0x3f)));
+  }
+}
+
 std::string JSON::Parse_String() {
   std::string string;
-  while (char c = GetChar()) {
+  while (true) {
+    char c = static_cast<char>(GetChar());
     if (c == '"') {
       break;
+    }
+    if (static_cast<unsigned char>(c) < 0x20) {
+      throw std::runtime_error("Unescaped control character in string");
     }
 
     if (c == '\\') {
@@ -262,19 +299,25 @@ std::string JSON::Parse_String() {
           break;
         case 'u':  // 16-bit unicode escape code
         {
-          if (current_ + 4 > end_) {
-            throw std::runtime_error("End of file parsing string uXXXX code");
+          uint32_t codepoint = Parse_Hex4();
+          if (codepoint >= 0xd800 && codepoint <= 0xdbff) {
+            if (!Skip('\\') || !Skip('u')) {
+              throw std::runtime_error("Invalid JSON surrogate pair");
+            }
+            const uint32_t low = Parse_Hex4();
+            if (low < 0xdc00 || low > 0xdfff) {
+              throw std::runtime_error("Invalid JSON surrogate pair");
+            }
+            codepoint =
+                0x10000 + ((codepoint - 0xd800) << 10) + (low - 0xdc00);
+          } else if (codepoint >= 0xdc00 && codepoint <= 0xdfff) {
+            throw std::runtime_error("Invalid JSON surrogate pair");
           }
-
-          unsigned value = 0;
-          auto result = std::from_chars(current_, current_ + 4, value, 16);
-          if (result.ec != std::errc{} || result.ptr != current_ + 4) {
-            throw std::runtime_error("Error parsing uXXXX code");
-          }
-          current_ = result.ptr;
-          throw std::runtime_error("Unsupported uXXXX code used");  // TODO: Current we ignore these, as strings are already utf8
-          continue;                                                 // We don't push_back the char in this case
+          Append_Utf8(string, codepoint);
+          continue;
         }
+        default:
+          throw std::runtime_error("Invalid JSON escape");
       }
     }
     string.push_back(c);

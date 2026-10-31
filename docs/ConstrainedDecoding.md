@@ -8,3 +8,34 @@ We have integrated [LLGuidance](https://github.com/guidance-ai/llguidance) for c
 3. Regex: If a particular regular expression is desired.
 
 To ensure that the function/tool calling works correctly with constrained decoding, you need to modify your tokenizer.json file. For each model that has its own tool calling token, the tool calling token's `special` attribute needs to be set to true. For example, Phi-4 mini uses the <|tool_call|> and <|/tool_call|> tokens so you should set the `special` attribute for them as `true` inside `tokenizer.json`.
+
+### Engine cache and request lifetime
+
+The Engine reuses immutable tokenizer and compiled-grammar assets across requests created from the
+same model. Each request still owns an independent mutable grammar cursor, so concurrent requests,
+transaction rollback, and speculative clones cannot modify one another. Continuing a retained
+request starts a fresh cursor at the beginning of the same grammar without recompiling it.
+
+The model-local grammar cache retains at most 64 compiled grammars and 16 MiB of cache-key data.
+Least-recently-used entries are evicted first. Active requests and asynchronous mask work retain
+shared ownership of their assets, so eviction or model-handle release does not invalidate in-flight
+generation.
+
+Builds created without guidance support reject a request that supplies guidance instead of silently
+generating unconstrained output. Configure the build with `USE_GUIDANCE=ON` (or the corresponding
+build-script option) before enabling guidance in `GeneratorParams` (classic Generator) or in
+`OgaTurnOptions` (Engine, where guidance is scoped to one turn).
+
+For Engine turns that mix free text with structured tool calls,
+`OgaTurnOptionsSetDelimitedGuidance(options, opening_token, closing_token, lark_body_grammar)`
+constrains only the body between two distinct, authoritative token IDs. The opening marker must
+be committed before the grammar activates; the closing marker is allowed only when the body
+grammar accepts its end. Text before and after the region remains unconstrained, including
+reasoning text. The grammar describes the body, not either marker. Validate generated content
+at the application layer before executing a tool.
+
+Delimited guidance requires dynamic batching and cannot be combined with whole-turn guidance.
+`OgaTurnOptionsClearGuidance` or `OgaTurnOptionsReset` clears either mode. Ordinary whole-turn
+guidance disables speculative drafts; delimited guidance permits drafts outside its region,
+truncates proposals before an opening marker, and suspends drafting inside the region. Automatic
+MTP drafting is unavailable for delimited turns.

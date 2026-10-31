@@ -1,8 +1,8 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 #include "model.h"
-#include "input_ids.h"
-#include "position_inputs.h"
+#include "models/io/input_ids.h"
+#include "models/io/default_position_inputs.h"
 
 namespace Generators {
 
@@ -60,6 +60,12 @@ struct MarianModel : Model {
   std::unique_ptr<OrtSessionOptions> encoder_session_options_;
   std::unique_ptr<OrtSession> session_encoder_;  // encoder_decoder_init.onnx
   std::unique_ptr<OrtSession> session_decoder_;  // decoder.onnx
+  struct CachedSourceProjection {
+    std::string name;
+    std::array<int64_t, 3> shape;
+    ONNXTensorElementDataType type;
+  };
+  std::vector<CachedSourceProjection> cached_source_projections_;
 };
 
 struct MarianState : State {
@@ -70,12 +76,14 @@ struct MarianState : State {
 
  private:
   const MarianModel& model_;
+  void UpdateRnnStates(DeviceSpan<int32_t> next_indices);
   void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices, int current_length, bool search_buffers);
 
   // Encoder IOs
   DefaultInputIDs encoder_input_ids_{*this};
   DefaultPositionInputs encoder_attention_mask_;
   std::unique_ptr<OrtValue> encoder_outputs_;
+  std::vector<std::unique_ptr<OrtValue>> cached_source_projections_;
 
   // Decoder IOs
   MarianInputIDs decoder_input_ids_{*this};

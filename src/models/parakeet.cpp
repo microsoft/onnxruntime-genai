@@ -11,7 +11,7 @@
 #include <limits>
 #include <stdexcept>
 
-#include "../generators.h"
+#include "generator/generators.h"
 #include "parakeet.h"
 
 namespace Generators {
@@ -76,21 +76,24 @@ ParakeetTdtModel::ParakeetTdtModel(std::unique_ptr<Config> config, OrtEnv& ort_e
   decoder_session_options_ = OrtSessionOptions::Create();
   joiner_session_options_ = OrtSessionOptions::Create();
 
+  // AMDGPU-only: the DirectX/MIGraphX backends cannot capture these control-flow encoder/joiner
+  // graphs. DML's existing (default-on) capture behavior is intentionally left unchanged.
+  const bool disable_subsession_graph_capture = p_device_ && p_device_->GetType() == DeviceType::AMDGPU;
   if (config_->model.encoder.session_options.has_value()) {
     CreateSessionOptionsFromConfig(config_->model.encoder.session_options.value(),
-                                   *encoder_session_options_, true);
+                                   *encoder_session_options_, true, /*disable_graph_capture=*/disable_subsession_graph_capture);
   } else {
     CreateSessionOptionsFromConfig(config_->model.decoder.session_options,
-                                   *encoder_session_options_, true);
+                                   *encoder_session_options_, true, /*disable_graph_capture=*/disable_subsession_graph_capture);
   }
   CreateSessionOptionsFromConfig(config_->model.decoder.session_options,
                                  *decoder_session_options_, true);
   if (config_->model.joiner.session_options.has_value()) {
     CreateSessionOptionsFromConfig(config_->model.joiner.session_options.value(),
-                                   *joiner_session_options_, true);
+                                   *joiner_session_options_, true, /*disable_graph_capture=*/disable_subsession_graph_capture);
   } else {
     CreateSessionOptionsFromConfig(config_->model.decoder.session_options,
-                                   *joiner_session_options_, true);
+                                   *joiner_session_options_, true, /*disable_graph_capture=*/disable_subsession_graph_capture);
   }
 
   std::string encoder_filename = config_->model.encoder.filename;
@@ -358,6 +361,7 @@ void ParakeetTdtState::EncodeNextChunk() {
   // ORT typically routes outputs back to CPU via MemcpyToHost. Handle both
   // just in case.
   auto enc_shape = enc_output->GetTensorTypeAndShapeInfo()->GetShape();
+  ValidateParakeetEncoderOutputShape(enc_shape, cfg_.hidden_dim);
   current_enc_time_ = enc_shape[2];
   size_t enc_elems = 1;
   for (auto d : enc_shape) enc_elems *= static_cast<size_t>(d);
@@ -430,6 +434,8 @@ int32_t ParakeetTdtState::EmitNextToken() {
 
     // Decoder output is [1, dec_dim, 1]; reshape to [1, 1, dec_dim] for
     // the joiner via a plain memcpy (layout is identical for contiguous data).
+    auto dec_output_shape = decoder_output_->GetTensorTypeAndShapeInfo()->GetShape();
+    ValidateParakeetDecoderOutputShape(dec_output_shape, dec_dim);
     auto dec_shape = std::array<int64_t, 3>{1, 1, dec_dim};
     if (!decoder_frame_) {
       decoder_frame_ = OrtValue::CreateTensor(cpu_allocator, dec_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);

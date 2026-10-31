@@ -9,6 +9,8 @@
 src/csharp/AssemblyInfo.cs
 /ort
 /build
+/build-local-ext/
+/build-pin-verification/
 /build_*
 /test/models/*
 /cache_models
@@ -30,7 +32,14 @@ examples/python/hf_cache
 examples/csharp/ModelChat/models
 
 !test/models/gemma4/*
+!/test/models/lfm2-audio/
+!test/models/lfm2-audio/*
 !test/models/hf-internal-testing/*
+!test/models/lfm2-vl/*
+!test/models/marian-batch/*
+!test/models/marian-batch-beams/*
+!test/models/marian-batch-values/
+!test/models/marian-batch-values/*
 !test/models/mistral3/*
 !test/models/multimodal-decoder-no-input-ids/*
 !test/models/multimodal-decoder-with-input-ids/*
@@ -40,6 +49,18 @@ examples/csharp/ModelChat/models
 !test/models/qwen3-5/*
 !test/models/qwen3-vl/*
 !test/models/whisper/*
+
+!/test/models/engine/
+/test/models/engine/*
+!/test/models/engine/synthetic-fixed-components/
+!/test/models/engine/synthetic-fixed-components/decoder.onnx
+!/test/models/engine/synthetic-fixed-components/genai_config.json
+!/test/models/engine/synthetic-paged-scales/
+!/test/models/engine/synthetic-paged-scales/decoder.onnx
+!/test/models/engine/synthetic-paged-scales/genai_config.json
+!/test/models/engine/synthetic-paged-selected-logits/
+!/test/models/engine/synthetic-paged-selected-logits/decoder.onnx
+!/test/models/engine/synthetic-paged-selected-logits/genai_config.json
 
 .ipynb_checkpoints/
 /src/java/.gradle

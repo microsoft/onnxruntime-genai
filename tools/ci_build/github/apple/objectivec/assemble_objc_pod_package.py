@@ -57,9 +57,9 @@ def get_pod_files(package_variant: PackageVariant):
     Gets the source and header files for the given package variant.
     """
     filtered_pod_files = {}
-    for key in all_objc_files:
-        filtered_pod_files[key] = filter_files("src", all_objc_files[key], [])
-        filtered_pod_files[key].extend(filter_files(None, all_objc_files[key], []))
+    for key, objc_files in all_objc_files.items():
+        filtered_pod_files[key] = filter_files("src", objc_files, [])
+        filtered_pod_files[key].extend(filter_files(None, objc_files, []))
     return filtered_pod_files
 
 

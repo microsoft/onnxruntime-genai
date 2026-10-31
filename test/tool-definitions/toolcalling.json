@@ -1,0 +1,264 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "get_weather",
+      "description": "Get the current weather for a city.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "city": {
+            "type": "string",
+            "description": "City name, e.g. Paris"
+          },
+          "unit": {
+            "type": "string",
+            "enum": [
+              "celsius",
+              "fahrenheit"
+            ],
+            "description": "Temperature unit"
+          }
+        },
+        "required": [
+          "city"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "search_flights",
+      "description": "Search available flights between two airports on a date.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "origin": {
+            "type": "string",
+            "description": "IATA origin code"
+          },
+          "destination": {
+            "type": "string",
+            "description": "IATA destination code"
+          },
+          "date": {
+            "type": "string",
+            "description": "Departure date YYYY-MM-DD"
+          },
+          "passengers": {
+            "type": "integer",
+            "description": "Number of passengers"
+          },
+          "nonstop": {
+            "type": "boolean",
+            "description": "Only non-stop flights"
+          }
+        },
+        "required": [
+          "origin",
+          "destination",
+          "date"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "create_order",
+      "description": "Place an order for items.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "List of item SKUs"
+          },
+          "priority": {
+            "type": "string",
+            "enum": [
+              "standard",
+              "express"
+            ],
+            "description": "Shipping priority"
+          }
+        },
+        "required": [
+          "items"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "get_stock_price",
+      "description": "Look up the latest price for a stock ticker.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "ticker": {
+            "type": "string",
+            "description": "Ticker symbol, e.g. MSFT"
+          },
+          "currency": {
+            "type": "string",
+            "enum": [
+              "USD",
+              "EUR",
+              "JPY"
+            ],
+            "description": "Quote currency"
+          }
+        },
+        "required": [
+          "ticker"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "send_email",
+      "description": "Send an email to a recipient.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "to": {
+            "type": "string",
+            "description": "Recipient email address"
+          },
+          "subject": {
+            "type": "string",
+            "description": "Subject line"
+          },
+          "body": {
+            "type": "string",
+            "description": "Message body"
+          },
+          "importance": {
+            "type": "string",
+            "enum": [
+              "low",
+              "normal",
+              "high"
+            ],
+            "description": "Message importance"
+          }
+        },
+        "required": [
+          "to",
+          "subject",
+          "body"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "create_event",
+      "description": "Create a calendar event.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "Event title"
+          },
+          "start": {
+            "type": "string",
+            "description": "Start time ISO-8601"
+          },
+          "duration_minutes": {
+            "type": "integer",
+            "description": "Length in minutes"
+          },
+          "attendees": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Attendee email addresses"
+          }
+        },
+        "required": [
+          "title",
+          "start"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "translate_text",
+      "description": "Translate text into a target language.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "Text to translate"
+          },
+          "target_language": {
+            "type": "string",
+            "enum": [
+              "en",
+              "fr",
+              "de",
+              "ja"
+            ],
+            "description": "Target language code"
+          },
+          "formality": {
+            "type": "string",
+            "enum": [
+              "formal",
+              "informal"
+            ],
+            "description": "Desired formality"
+          }
+        },
+        "required": [
+          "text",
+          "target_language"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "convert_units",
+      "description": "Convert a value between measurement units.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "number",
+            "description": "Numeric value to convert"
+          },
+          "from_unit": {
+            "type": "string",
+            "description": "Source unit"
+          },
+          "to_unit": {
+            "type": "string",
+            "description": "Target unit"
+          }
+        },
+        "required": [
+          "value",
+          "from_unit",
+          "to_unit"
+        ]
+      }
+    }
+  }
+]

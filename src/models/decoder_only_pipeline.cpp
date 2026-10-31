@@ -1,11 +1,11 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include "../generators.h"
+#include "generator/generators.h"
 #include "../logging.h"
 #include "../tracing.h"
 #include "decoder_only_pipeline.h"
-#include "windowed_kv_cache.h"
+#include "io/windowed_kv_cache.h"
 
 namespace Generators {
 
@@ -17,6 +17,9 @@ DecoderOnlyPipelineModel::DecoderOnlyPipelineModel(std::unique_ptr<Config> confi
 
   for (auto& session : sessions_) {
     session_info_.Add(*session);
+  }
+  if (config_->model.decoder.state_groups) {
+    ModelStateManifest{config_->model.decoder}.ValidateSession(session_info_);
   }
 }
 
@@ -70,9 +73,11 @@ bool IntermediatePipelineState::SupportsPrimaryDevice() const {
 DeviceSpan<float> IntermediatePipelineState::Run(int total_length, DeviceSpan<int32_t>& next_tokens,
                                                  DeviceSpan<int32_t> next_indices) {
   if (!model_.sessions_[id_]) {
-    const_cast<DecoderOnlyPipelineModel*>(&model_)->sessions_[id_] =
-        OrtSession::Create(model_.ort_env_, (model_.config_->config_path / fs::path(model_.config_->model.decoder.pipeline[id_].filename)).c_str(),
-                           model_.GetSessionOptions(model_.config_->model.decoder.pipeline[id_].model_id));
+    auto* model = const_cast<DecoderOnlyPipelineModel*>(&model_);
+    const auto& stage = model_.config_->model.decoder.pipeline[id_];
+    model->sessions_[id_] =
+        model->CreateSession(model_.ort_env_, stage.filename, model_.GetSessionOptions(stage.model_id),
+                             /*is_session_recreation=*/true);
   }
 
   if (model_.config_->model.decoder.pipeline[id_].run_options.has_value()) {
@@ -116,10 +121,12 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
     : State{params, model},
       input_ids_{CreateInputIDs(*this)},
       model_{model},
-      key_value_cache_{CreateKeyValueCache(*this)},
+      key_value_cache_{model_.p_device_kvcache_->CreateKeyValueCache(*this)},
       do_key_value_cache_partial_update_{key_value_cache_ && key_value_cache_->IsPartialUpdateSupported()},
-      recurrent_state_{CreateRecurrentState(*this)},
-      position_inputs_{CreatePositionInputs(*this, sequence_lengths, model_.config_->model.decoder.inputs.attention_mask)} {
+      // Pipeline stages currently run without graph capture, so do not alternate recurrent-state
+      // graph variants that the stage runner never selects.
+      recurrent_state_{CreateRecurrentState(*this, /*graph_capture_variants_supported=*/false)},
+      position_inputs_{model_.p_device_inputs_->CreatePositionInputs(*this, sequence_lengths, model_.config_->model.decoder.inputs.attention_mask)} {
   input_ids_->Add();
   position_inputs_->Add();
   logits_.Add();
@@ -249,6 +256,8 @@ void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>
       }
     }
     pipeline_state->ClearIO();
+
+    OnStageStart(pipeline_state->id_);
 
     // Managed inputs and outputs are those inputs and outputs that the
     // Model knows how to create and update from one run to the next.

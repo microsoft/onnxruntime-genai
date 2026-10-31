@@ -1,0 +1,2380 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License
+
+from __future__ import annotations
+
+import copy
+import json
+import sys
+from pathlib import Path
+
+import onnx
+import onnx_ir as ir
+import pytest
+
+MODELS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models"
+sys.path.insert(0, str(MODELS_DIR))
+
+from builder_config import (  # noqa: E402
+    apply_runtime_config,
+    component_manifest_dict,
+    export_component_package,
+    find_external_data_files,
+    load_component_model,
+    load_json_object,
+    normalize_builder_config,
+    serialize_genai_config,
+    validate_component_backbone_destination,
+    validate_model_dependent_config,
+)
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        [],
+        [1, 2, 3],
+        [[1, 2], []],
+        [{"kind": "paged_kv", "layer_ids": [3, 7]}, {"enabled": True}],
+        ["brackets [ ]", 'quote"', "line\nbreak", None, False, 0.25],
+    ],
+)
+def test_genai_config_serialization_keeps_arrays_inline(values):
+    config = {"model": {"values": values, "inputs": {"input_ids": "input_ids"}}, "search": {}}
+
+    serialized = serialize_genai_config(config)
+
+    assert json.loads(serialized) == config
+    assert f'        "values": {json.dumps(values)},' in serialized.splitlines()
+    assert '        "inputs": {\n            "input_ids": "input_ids"\n        }' in serialized
+    assert serialized.endswith("\n")
+
+
+def write_component_model(path, external_locations=()):
+    initializers = []
+    for index, location in enumerate(external_locations):
+        tensor = onnx.TensorProto(name=f"weight_{index}", data_type=onnx.TensorProto.FLOAT, dims=[1])
+        tensor.data_location = onnx.TensorProto.EXTERNAL
+        entry = tensor.external_data.add()
+        entry.key = "location"
+        entry.value = location
+        initializers.append(tensor)
+    hidden = onnx.helper.make_tensor_value_info("hidden_states", onnx.TensorProto.FLOAT, [None, 4])
+    scores = onnx.helper.make_tensor_value_info("scores", onnx.TensorProto.FLOAT, [None, 4])
+    graph = onnx.helper.make_graph(
+        [onnx.helper.make_node("Identity", ["hidden_states"], ["scores"])],
+        "component",
+        [hidden],
+        [scores],
+        initializer=initializers,
+    )
+    path.write_bytes(onnx.helper.make_model(graph).SerializeToString())
+
+
+def write_external_component_model(
+    path,
+    location,
+    *,
+    offset=None,
+    length=None,
+    dims=(4,),
+    input_name="hidden_states",
+    output_name="scores",
+):
+    tensor = onnx.TensorProto(
+        name="weight",
+        data_type=onnx.TensorProto.FLOAT,
+        dims=list(dims),
+        data_location=onnx.TensorProto.EXTERNAL,
+    )
+    for key, value in (
+        ("location", location),
+        ("offset", offset),
+        ("length", length),
+    ):
+        if value is not None:
+            entry = tensor.external_data.add()
+            entry.key = key
+            entry.value = str(value)
+    hidden = onnx.helper.make_tensor_value_info(input_name, onnx.TensorProto.FLOAT, [None, 4])
+    scores = onnx.helper.make_tensor_value_info(output_name, onnx.TensorProto.FLOAT, [None, 4])
+    graph = onnx.helper.make_graph(
+        [onnx.helper.make_node("Identity", [input_name], [output_name])],
+        "component",
+        [hidden],
+        [scores],
+        initializer=[tensor],
+    )
+    path.write_bytes(onnx.helper.make_model(graph).SerializeToString())
+
+
+def write_backbone(output_dir, filename="model.onnx", output_name="hidden_states"):
+    output_dir.mkdir(exist_ok=True)
+    input_value = onnx.helper.make_tensor_value_info("input_ids", onnx.TensorProto.INT64, [None, None])
+    output_value = onnx.helper.make_tensor_value_info(output_name, onnx.TensorProto.FLOAT, [None, None, 4])
+    model = onnx.helper.make_model(
+        onnx.helper.make_graph(
+            [
+                onnx.helper.make_node(
+                    "Cast",
+                    ["input_ids"],
+                    [output_name],
+                    to=onnx.TensorProto.FLOAT,
+                )
+            ],
+            "backbone",
+            [input_value],
+            [output_value],
+        )
+    )
+    onnx.save(model, output_dir / filename)
+
+
+def test_legacy_configuration_preserves_options():
+    effective = normalize_builder_config("int4", "cuda", {"block_size": "64"})
+    assert effective.version == 1
+    assert effective.extra_options == {"block_size": "64"}
+
+
+@pytest.mark.parametrize("option", ["use_device_allocator_for_initializers"])
+@pytest.mark.parametrize("value", [True, False, "true", "false"])
+@pytest.mark.parametrize("version", [1, 2])
+def test_device_allocator_option_is_preserved(option, value, version):
+    effective = normalize_builder_config("int4", "cuda", {option: value}, builder_config_version=version)
+    assert effective.extra_options[option] == value
+
+
+@pytest.mark.parametrize("option", ["qmoe_weights_prepacked", "matmulnbits_weights_prepacked"])
+@pytest.mark.parametrize("version", [1, 2])
+def test_legacy_weight_packing_options_are_preserved(option, version):
+    effective = normalize_builder_config("int4", "cuda", {option: 0}, builder_config_version=version)
+    if version == 1:
+        assert effective.extra_options[option] == 0
+    else:
+        assert (
+            effective.target_options["quant_config"]["moe" if option.startswith("qmoe") else "format"][
+                "weights_prepacked" if option.startswith("qmoe") else option
+            ]
+            == 0
+        )
+
+
+@pytest.mark.parametrize(
+    "section,field",
+    [
+        ("moe", "weights_prepacked"),
+        ("format", "matmulnbits_weights_prepacked"),
+        ("runtime", "matmulnbits_weights_prepacked"),
+    ],
+)
+@pytest.mark.parametrize("component", ["target", "drafter"])
+def test_structured_weight_packing_options_are_preserved(section, field, component):
+    options = {"quant_config": {section: {field: 0}}}
+    kwargs = {f"{component}_options": options}
+    if component == "drafter":
+        options["drafter_type"] = "mtp"
+
+    effective = normalize_builder_config("int4", "cuda", **kwargs)
+    result = effective.target_options if component == "target" else effective.drafter_options
+    assert result["quant_config"]["format" if section == "runtime" else section][field] == 0
+
+
+@pytest.mark.parametrize("drafter_type", ["none", "mtp", "dflash2", "dspark"])
+@pytest.mark.parametrize("field", ["optimizations", "unknown_option"])
+def test_drafter_unknown_fields_are_rejected(drafter_type, field):
+    with pytest.raises(ValueError, match="unknown drafter_options field"):
+        normalize_builder_config(
+            "int4",
+            "cuda",
+            drafter_options={"drafter_type": drafter_type, field: {}},
+        )
+
+
+def test_structured_fields_select_version_two():
+    effective = normalize_builder_config(
+        None,
+        "cuda",
+        target_options={
+            "quant_config": {
+                "io_dtype": "bf16",
+                "weights": {"type": "int4", "block_size": 64},
+            }
+        },
+    )
+    assert effective.version == 2
+    assert effective.precision == "int4"
+    assert effective.execution_provider == "cuda"
+    assert effective.extra_options["_target_io_dtype"] == "bf16"
+    assert effective.target_options["quant_config"]["moe"]["type"] == "int4"
+
+
+@pytest.mark.parametrize(
+    "component_options,match",
+    [
+        ({"heads": []}, "non-empty array"),
+        ({"heads": [{"name": "not/a-name", "source": "head.onnx"}]}, "must start with a letter"),
+        (
+            {
+                "heads": [
+                    {"name": "first", "source": "first.onnx", "filename": "head.onnx"},
+                    {"name": "second", "source": "second.onnx", "filename": "head.onnx"},
+                ]
+            },
+            "duplicate component filename",
+        ),
+        ({"heads": [{"name": "head", "source": "head.onnx", "filename": "../head.onnx"}]}, "without directories"),
+        (
+            {"heads": [{"name": "head", "source": "head.onnx", "inputs": {"indices": ""}}]},
+            "non-empty graph value name",
+        ),
+        (
+            {
+                "heads": [
+                    {
+                        "name": "head",
+                        "source": "head.onnx",
+                        "outputs": {"scores": "result", "labels": "result"},
+                    }
+                ]
+            },
+            "graph value names must be unique",
+        ),
+    ],
+)
+def test_component_options_validation(component_options, match):
+    with pytest.raises(ValueError, match=match):
+        normalize_builder_config("fp32", "cpu", component_options=component_options)
+
+
+def test_component_options_serialize_as_typed_structure():
+    effective = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={
+            "backbone": {"filename": "backbone.onnx"},
+            "heads": [{"name": "classification", "source": "source.onnx", "filename": "head.onnx"}],
+        },
+    )
+
+    assert effective.to_dict()["component_options"] == {
+        "backbone": {"filename": "backbone.onnx"},
+        "heads": [
+            {
+                "name": "classification",
+                "source": "source.onnx",
+                "filename": "head.onnx",
+                "inputs": {"hidden_states": "hidden_states"},
+                "outputs": {},
+            }
+        ],
+    }
+
+
+def test_component_options_configure_hidden_state_backbone():
+    effective = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={"heads": [{"name": "head", "source": "head.onnx"}]},
+    )
+
+    assert effective.extra_options["exclude_lm_head"] is True
+    assert effective.extra_options["exclude_mtp"] is True
+    assert "include_hidden_states" not in effective.extra_options
+    assert effective.extra_options["filename"] == "model.onnx"
+
+
+def test_component_package_stages_multiple_named_heads(tmp_path):
+    first = tmp_path / "first-source.onnx"
+    second = tmp_path / "second-source.onnx"
+    write_component_model(first)
+    write_component_model(second)
+    effective = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={
+            "backbone": {"filename": "backbone.onnx"},
+            "heads": [
+                {"name": "classification", "source": str(first), "filename": "classification.onnx"},
+                {"name": "regression", "source": str(second), "filename": "regression.onnx"},
+            ],
+        },
+    )
+    output_dir = tmp_path / "package"
+    write_backbone(output_dir, "backbone.onnx")
+
+    export_component_package(effective.component_options, str(output_dir))
+
+    assert (output_dir / "classification.onnx").read_bytes() == first.read_bytes()
+    assert (output_dir / "regression.onnx").read_bytes() == second.read_bytes()
+    manifest = json.loads((output_dir / "component_manifest.json").read_text())
+    assert manifest == {
+        "schema_version": 1,
+        "model_type": "generic-non-generative",
+        "components": {
+            "backbone": {
+                "role": "backbone",
+                "filename": "backbone.onnx",
+                "outputs": {"hidden_states": "hidden_states"},
+            },
+            "classification": {
+                "role": "head",
+                "filename": "classification.onnx",
+                "inputs": {"hidden_states": "hidden_states"},
+                "outputs": {},
+            },
+            "regression": {
+                "role": "head",
+                "filename": "regression.onnx",
+                "inputs": {"hidden_states": "hidden_states"},
+                "outputs": {},
+            },
+        },
+    }
+
+
+def test_component_manifest_serializes_auxiliary_input_and_output_bindings():
+    effective = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={
+            "heads": [
+                {
+                    "name": "rich_head",
+                    "source": "head.onnx",
+                    "inputs": {
+                        "hidden_states": "encoder_output",
+                        "item_indices": "candidate_ids",
+                        "item_mask": "candidate_mask",
+                    },
+                    "outputs": {"scores": "ranking_scores", "features": "head_features"},
+                }
+            ]
+        },
+    )
+
+    component = component_manifest_dict(effective.component_options)["components"]["rich_head"]
+    assert component["inputs"] == {
+        "hidden_states": "encoder_output",
+        "item_indices": "candidate_ids",
+        "item_mask": "candidate_mask",
+    }
+    assert component["outputs"] == {"scores": "ranking_scores", "features": "head_features"}
+
+
+def test_component_package_copies_arbitrary_relative_external_data_files(tmp_path):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    graph = source_dir / "head.onnx"
+    write_component_model(graph, ["weights/chunk-01.bin", "metadata.bin"])
+    (source_dir / "weights").mkdir()
+    (source_dir / "weights" / "chunk-01.bin").write_bytes(b"weights")
+    (source_dir / "metadata.bin").write_bytes(b"metadata")
+    output_dir = tmp_path / "package"
+    write_backbone(output_dir)
+    effective = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={"heads": [{"name": "head", "source": str(graph), "filename": "renamed-head.onnx"}]},
+    )
+
+    export_component_package(effective.component_options, str(output_dir))
+
+    assert (output_dir / "renamed-head.onnx").is_file()
+    assert (output_dir / "weights" / "chunk-01.bin").read_bytes() == b"weights"
+    assert (output_dir / "metadata.bin").read_bytes() == b"metadata"
+
+
+def test_component_package_rejects_backbone_external_data_collision(tmp_path):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    graph = source_dir / "head.onnx"
+    write_component_model(graph, ["backbone.onnx.data"])
+    (source_dir / "backbone.onnx.data").write_bytes(b"head")
+    output_dir = tmp_path / "package"
+    write_backbone(output_dir, "backbone.onnx")
+    (output_dir / "backbone.onnx.data").write_bytes(b"backbone weights")
+    effective = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={
+            "backbone": {"filename": "backbone.onnx"},
+            "heads": [{"name": "head", "source": str(graph)}],
+        },
+    )
+
+    with pytest.raises(ValueError, match="conflicts with packaged file"):
+        export_component_package(effective.component_options, str(output_dir))
+    assert (output_dir / "backbone.onnx.data").read_bytes() == b"backbone weights"
+    assert not (output_dir / "head.onnx").exists()
+
+
+def test_component_package_protects_backbone_declared_external_data(tmp_path):
+    output_dir = tmp_path / "package"
+    output_dir.mkdir()
+    backbone = output_dir / "model.onnx"
+    write_external_component_model(
+        backbone,
+        "weights.bin",
+        dims=(1,),
+        input_name="input_ids",
+        output_name="hidden_states",
+    )
+    (output_dir / "weights.bin").write_bytes(b"\0" * 4)
+
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    head = source_dir / "head.onnx"
+    write_external_component_model(head, "weights.bin", dims=(1,))
+    (source_dir / "weights.bin").write_bytes(b"\1" * 4)
+    options = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={"heads": [{"name": "head", "source": str(head)}]},
+    ).component_options
+
+    with pytest.raises(ValueError, match="conflicts with packaged file"):
+        export_component_package(options, str(output_dir))
+    assert (output_dir / "weights.bin").read_bytes() == b"\0" * 4
+    assert not (output_dir / "head.onnx").exists()
+
+
+@pytest.mark.parametrize(
+    ("offset", "length", "file_size", "match"),
+    [
+        (0, None, 1, "range exceeds"),
+        (32, 16, 16, "range exceeds"),
+        (0, 4, 16, "range is too small"),
+    ],
+)
+def test_component_package_rejects_invalid_external_data_ranges(tmp_path, offset, length, file_size, match):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    graph = source_dir / "head.onnx"
+    write_external_component_model(graph, "weights.bin", offset=offset, length=length)
+    (source_dir / "weights.bin").write_bytes(b"\0" * file_size)
+    output_dir = tmp_path / "package"
+    write_backbone(output_dir)
+    options = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={"heads": [{"name": "head", "source": str(graph)}]},
+    ).component_options
+
+    with pytest.raises(ValueError, match=match):
+        export_component_package(options, str(output_dir))
+    assert not (output_dir / "head.onnx").exists()
+
+
+@pytest.mark.parametrize("location", [None, ""])
+def test_component_model_rejects_missing_external_location(tmp_path, location):
+    graph = tmp_path / "head.onnx"
+    write_external_component_model(graph, location)
+
+    with pytest.raises(ValueError, match="without a location"):
+        load_component_model(graph, "head")
+
+
+@pytest.mark.parametrize(
+    ("offset", "length", "match"),
+    [
+        ("", None, "offset is invalid"),
+        ("invalid", None, "offset is invalid"),
+        (None, "", "length is invalid"),
+        (None, "invalid", "length is invalid"),
+        (-1, None, "range is too small"),
+        (0, -1, "range is too small"),
+    ],
+)
+def test_component_model_rejects_malformed_external_ranges(tmp_path, offset, length, match):
+    graph = tmp_path / "head.onnx"
+    write_external_component_model(graph, "weights.bin", offset=offset, length=length)
+    (tmp_path / "weights.bin").write_bytes(b"\0" * 16)
+
+    with pytest.raises(ValueError, match=match):
+        load_component_model(graph, "head")
+
+
+@pytest.mark.parametrize(
+    "placement",
+    [
+        "initializer",
+        "tensor",
+        "tensors",
+        "graph",
+        "graphs",
+        "function",
+        "function_default",
+        "sparse_initializer",
+        "sparse_attribute",
+        "training",
+        "malformed_attribute",
+        "non_external",
+    ],
+)
+def test_component_model_checks_original_nested_external_metadata(tmp_path, placement):
+    graph = tmp_path / "head.onnx"
+    write_external_component_model(graph, "../outside.bin")
+    model = onnx.load(graph, load_external_data=False)
+    tensor = copy.deepcopy(model.graph.initializer[0])
+    del model.graph.initializer[:]
+    attribute = onnx.helper.make_attribute("value", tensor)
+    if placement == "initializer":
+        model.graph.initializer.append(tensor)
+    elif placement == "non_external":
+        tensor.data_location = onnx.TensorProto.DEFAULT
+        model.graph.initializer.append(tensor)
+    elif placement == "sparse_initializer":
+        model.graph.sparse_initializer.add().values.CopyFrom(tensor)
+    elif placement == "training":
+        model.training_info.add().initialization.initializer.append(tensor)
+    elif placement == "function_default":
+        model.functions.add().attribute_proto.append(attribute)
+    else:
+        if placement == "tensors":
+            attribute = onnx.helper.make_attribute("values", [tensor])
+        elif placement in ("graph", "graphs"):
+            nested = onnx.helper.make_graph([], "nested", [], [], [tensor])
+            attribute = onnx.helper.make_attribute("body", [nested] if placement == "graphs" else nested)
+        elif placement == "sparse_attribute":
+            attribute = onnx.AttributeProto(name="sparse", type=onnx.AttributeProto.SPARSE_TENSOR)
+            attribute.sparse_tensor.values.CopyFrom(tensor)
+        elif placement == "malformed_attribute":
+            attribute.type = onnx.AttributeProto.INT
+        node = model.functions.add().node.add() if placement == "function" else model.graph.node[0]
+        node.attribute.append(attribute)
+    graph.write_bytes(model.SerializeToString())
+
+    with pytest.raises(ValueError, match="unsafe external data location"):
+        load_component_model(graph, "head")
+
+
+def test_component_model_uses_ir_without_reading_external_payload(tmp_path):
+    graph = tmp_path / "head.onnx"
+    write_external_component_model(graph, "weights.bin", offset=4, length=16)
+    (tmp_path / "weights.bin").write_bytes(b"\0" * 20)
+
+    model = load_component_model(graph, "head")
+
+    assert isinstance(model, ir.Model)
+    assert [value.name for value in model.graph.inputs] == ["hidden_states"]
+    assert isinstance(model.graph.initializers["weight"].const_value, ir.ExternalTensor)
+    assert find_external_data_files(model, graph, "head") == [("weights.bin", tmp_path / "weights.bin")]
+
+
+@pytest.mark.parametrize(
+    "reserved_name",
+    ["genai_config.json", "tokenizer.json", "model.onnx.data"],
+)
+def test_component_package_rejects_exporter_owned_external_data(tmp_path, reserved_name):
+    output_dir = tmp_path / "package"
+    write_backbone(output_dir)
+    graph = output_dir / "head.onnx"
+    write_component_model(graph, [reserved_name])
+    (output_dir / reserved_name).write_bytes(b"owned")
+    options = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={"heads": [{"name": "head", "source": str(graph)}]},
+    ).component_options
+
+    with pytest.raises(ValueError, match="conflicts with packaged file"):
+        export_component_package(options, str(output_dir))
+    assert (output_dir / reserved_name).read_bytes() == b"owned"
+
+
+def test_component_package_rejects_source_overwritten_by_backbone(tmp_path):
+    output_dir = tmp_path / "package"
+    write_backbone(output_dir)
+    source = output_dir / "model.onnx"
+    original = source.read_bytes()
+    options = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={
+            "heads": [
+                {
+                    "name": "head",
+                    "source": str(source),
+                    "filename": "head.onnx",
+                    "inputs": {"hidden_states": "input_ids"},
+                }
+            ]
+        },
+    ).component_options
+
+    with pytest.raises(ValueError, match="exporter-owned output"):
+        export_component_package(options, str(output_dir))
+    assert source.read_bytes() == original
+    assert not (output_dir / "head.onnx").exists()
+
+
+def test_component_package_validates_graph_binding_names(tmp_path):
+    graph = tmp_path / "head.onnx"
+    write_component_model(graph)
+    output_dir = tmp_path / "package"
+    write_backbone(output_dir)
+    effective = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={
+            "heads": [
+                {
+                    "name": "head",
+                    "source": str(graph),
+                    "inputs": {"hidden_states": "missing_input"},
+                    "outputs": {"scores": "missing_output"},
+                }
+            ]
+        },
+    )
+
+    with pytest.raises(ValueError, match="unknown graph input"):
+        export_component_package(effective.component_options, str(output_dir))
+    assert not (output_dir / "head.onnx").exists()
+
+    effective = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={
+            "heads": [
+                {
+                    "name": "head",
+                    "source": str(graph),
+                    "outputs": {"scores": "missing_output"},
+                }
+            ]
+        },
+    )
+    with pytest.raises(ValueError, match="unknown graph output"):
+        export_component_package(effective.component_options, str(output_dir))
+
+
+def test_component_package_rejects_destination_symlink(tmp_path):
+    graph = tmp_path / "head.onnx"
+    write_component_model(graph)
+    outside = tmp_path / "outside.onnx"
+    outside.write_bytes(b"unchanged")
+    output_dir = tmp_path / "package"
+    write_backbone(output_dir)
+    (output_dir / "head.onnx").symlink_to(outside)
+    effective = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={"heads": [{"name": "head", "source": str(graph)}]},
+    )
+
+    with pytest.raises(ValueError, match="destination contains symlink"):
+        export_component_package(effective.component_options, str(output_dir))
+    assert outside.read_bytes() == b"unchanged"
+
+
+def test_component_package_rejects_manifest_symlink(tmp_path):
+    graph = tmp_path / "head.onnx"
+    write_component_model(graph)
+    outside = tmp_path / "outside.json"
+    outside.write_text("unchanged")
+    output_dir = tmp_path / "package"
+    write_backbone(output_dir)
+    (output_dir / "component_manifest.json").symlink_to(outside)
+    options = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={"heads": [{"name": "head", "source": str(graph)}]},
+    ).component_options
+
+    with pytest.raises(ValueError, match="destination contains symlink"):
+        export_component_package(options, str(output_dir))
+    assert outside.read_text() == "unchanged"
+    assert not (output_dir / "head.onnx").exists()
+
+
+def test_component_package_rejects_non_directory_parent(tmp_path):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    graph = source_dir / "head.onnx"
+    write_component_model(graph, ["weights/chunk.bin"])
+    (source_dir / "weights").mkdir()
+    (source_dir / "weights" / "chunk.bin").write_bytes(b"weights")
+    output_dir = tmp_path / "package"
+    write_backbone(output_dir)
+    (output_dir / "weights").write_bytes(b"not a directory")
+    options = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={"heads": [{"name": "head", "source": str(graph)}]},
+    ).component_options
+
+    with pytest.raises(ValueError, match="parent is not a directory"):
+        export_component_package(options, str(output_dir))
+    assert not (output_dir / "head.onnx").exists()
+
+
+def test_symlinked_component_uses_external_data_beside_link(tmp_path):
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    target = target_dir / "head.onnx"
+    write_component_model(target, ["weights.bin"])
+    (target_dir / "weights.bin").write_bytes(b"target weights")
+
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    linked = source_dir / "head.onnx"
+    linked.symlink_to(target)
+    (source_dir / "weights.bin").write_bytes(b"linked weights")
+    output_dir = tmp_path / "package"
+    write_backbone(output_dir)
+    options = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={"heads": [{"name": "head", "source": str(linked)}]},
+    ).component_options
+
+    export_component_package(options, str(output_dir))
+
+    assert (output_dir / "weights.bin").read_bytes() == b"linked weights"
+
+
+def test_component_package_can_replace_its_own_previous_outputs(tmp_path):
+    graph = tmp_path / "head.onnx"
+    write_component_model(graph)
+    output_dir = tmp_path / "package"
+    write_backbone(output_dir)
+    options = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={"heads": [{"name": "head", "source": str(graph)}]},
+    ).component_options
+
+    export_component_package(options, str(output_dir))
+    export_component_package(options, str(output_dir))
+
+    assert (output_dir / "head.onnx").read_bytes() == graph.read_bytes()
+    assert (output_dir / "component_manifest.json").is_file()
+
+
+def test_component_package_rejects_copy_source_destination_chain(tmp_path):
+    output_dir = tmp_path / "package"
+    write_backbone(output_dir)
+    first = output_dir / "a.onnx"
+    second = output_dir / "b.onnx"
+    write_component_model(first)
+    write_component_model(second)
+    first_bytes = first.read_bytes()
+    second_bytes = second.read_bytes()
+    options = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={
+            "heads": [
+                {
+                    "name": "first",
+                    "source": str(first),
+                    "filename": "b.onnx",
+                },
+                {
+                    "name": "second",
+                    "source": str(second),
+                    "filename": "a.onnx",
+                },
+            ]
+        },
+    ).component_options
+
+    with pytest.raises(ValueError, match="overlapping copy chains"):
+        export_component_package(options, str(output_dir))
+    assert first.read_bytes() == first_bytes
+    assert second.read_bytes() == second_bytes
+
+
+def test_component_backbone_rejects_symlink_and_missing_config_only_file(tmp_path):
+    output_dir = tmp_path / "package"
+    output_dir.mkdir()
+    outside = tmp_path / "outside.onnx"
+    outside.write_bytes(b"unchanged")
+    (output_dir / "model.onnx").symlink_to(outside)
+    options = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={"heads": [{"name": "head", "source": "head.onnx"}]},
+    ).component_options
+
+    with pytest.raises(ValueError, match="destination contains symlink"):
+        validate_component_backbone_destination(options, output_dir, require_exists=False)
+    (output_dir / "model.onnx").unlink()
+    with pytest.raises(ValueError, match="backbone does not exist"):
+        validate_component_backbone_destination(options, output_dir, require_exists=True)
+
+
+def test_component_backbone_rejects_external_data_directory(tmp_path):
+    output_dir = tmp_path / "package"
+    write_backbone(output_dir)
+    (output_dir / "model.onnx.data").mkdir()
+    options = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={"heads": [{"name": "head", "source": "head.onnx"}]},
+    ).component_options
+
+    with pytest.raises(ValueError, match="existing directory"):
+        validate_component_backbone_destination(options, output_dir, require_exists=False)
+
+
+def test_config_only_backbone_requires_hidden_states_output(tmp_path):
+    output_dir = tmp_path / "package"
+    options = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={"heads": [{"name": "head", "source": "head.onnx"}]},
+    ).component_options
+
+    write_backbone(output_dir)
+    validate_component_backbone_destination(options, output_dir, require_exists=True)
+
+    write_backbone(output_dir, output_name="logits")
+    with pytest.raises(ValueError, match="hidden_states output"):
+        validate_component_backbone_destination(options, output_dir, require_exists=True)
+
+
+def test_generic_component_options_reject_revision_fields():
+    with pytest.raises(ValueError, match="artifact_revision requires model_source"):
+        normalize_builder_config(
+            "fp32",
+            "cpu",
+            component_options={
+                "artifact_revision": "unused",
+                "heads": [{"name": "head", "source": "head.onnx"}],
+            },
+        )
+
+
+@pytest.mark.parametrize("revision", ["main", "v1", "a" * 39, "g" * 40])
+def test_model_specific_component_options_require_commit_ids(revision):
+    with pytest.raises(ValueError, match="40-character commit ID"):
+        normalize_builder_config(
+            "fp32",
+            "cpu",
+            component_options={
+                "model_source": "artifact",
+                "artifact_revision": "a" * 40,
+                "base_revision": revision,
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    "location",
+    ["../outside.bin", "/absolute.bin", "C:/absolute.bin", r"weights\\outside.bin"],
+)
+def test_component_package_rejects_unsafe_external_data_locations(tmp_path, location):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    graph = source_dir / "head.onnx"
+    write_component_model(graph, [location])
+    output_dir = tmp_path / "package"
+    write_backbone(output_dir)
+    effective = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={"heads": [{"name": "head", "source": str(graph)}]},
+    )
+
+    with pytest.raises(ValueError, match="unsafe external data location"):
+        export_component_package(effective.component_options, str(output_dir))
+
+    assert not (output_dir / "head.onnx").exists()
+
+
+def test_unsigned_weight_type_defaults_to_asymmetric_quantization():
+    effective = normalize_builder_config(
+        None,
+        "cuda",
+        target_options={"quant_config": {"weights": {"type": "uint4"}}},
+    )
+
+    assert effective.extra_options["_quant_config"].weights.symmetric is False
+    assert effective.extra_options["is_symmetric"] is False
+
+
+def test_version_one_rejects_structured_fields():
+    with pytest.raises(ValueError, match="version=1 cannot be combined"):
+        normalize_builder_config("int4", "cuda", builder_config_version=1, target_options={})
+
+
+def test_unsupported_version_is_rejected():
+    with pytest.raises(ValueError, match="unsupported builder_config_version=3"):
+        normalize_builder_config("int4", "cuda", builder_config_version=3)
+
+
+@pytest.mark.parametrize(
+    "provider,accuracy_level,moe_block_size",
+    [("cpu", 4, 32), ("webgpu", 4, 32), ("cuda", 0, 32), ("NvTensorRtRtx", 0, 128)],
+)
+def test_provider_defaults_are_recorded(provider, accuracy_level, moe_block_size):
+    effective = normalize_builder_config(
+        "int4",
+        provider,
+        builder_config_version=2,
+        target_options={},
+    )
+    quant = effective.target_options["quant_config"]
+    assert quant["weights"]["accuracy_level"] == accuracy_level
+    assert quant["moe"]["block_size"] == moe_block_size
+    assert quant["moe"]["weights_prepacked"] == -1
+    assert quant["format"]["matmulnbits_weights_prepacked"] == 0
+    assert quant["format"]["use_qdq"] is (provider == "NvTensorRtRtx")
+    assert effective.execution_provider == ("trt-rtx" if provider == "NvTensorRtRtx" else provider)
+
+
+@pytest.mark.parametrize(
+    "precision,provider,legacy_options,expected_io_dtype",
+    [
+        ("int4", "cpu", {}, "fp32"),
+        ("int8", "cpu", {}, "fp32"),
+        ("int4", "cuda", {"use_cuda_bf16": "true"}, "bf16"),
+        ("int4", "webgpu", {"use_webgpu_fp32": "true"}, "fp32"),
+    ],
+)
+def test_structured_defaults_preserve_provider_aware_io_dtype(precision, provider, legacy_options, expected_io_dtype):
+    effective = normalize_builder_config(
+        precision,
+        provider,
+        legacy_options,
+        builder_config_version=2,
+        target_options={},
+    )
+
+    assert effective.target_options["quant_config"]["io_dtype"] == expected_io_dtype
+
+
+def test_explicit_target_checkpoint_policy_is_rejected():
+    with pytest.raises(ValueError, match="checkpoint_policy is not supported"):
+        normalize_builder_config(
+            "int4",
+            "cuda",
+            target_options={"quant_config": {"checkpoint_policy": "preserve"}},
+        )
+
+
+@pytest.mark.parametrize(
+    "quant_config",
+    [
+        {"weights": {"type": "int2"}},
+        {"moe": {"type": "int2"}},
+        {
+            "weights": {
+                "type": "int4",
+                "overrides": [{"match": {"name": "/model/a/MatMul"}, "type": "int2"}],
+            }
+        },
+    ],
+)
+def test_target_int2_policy_is_rejected(quant_config):
+    with pytest.raises(ValueError, match="target_options.quant_config does not support int2"):
+        normalize_builder_config(
+            "int4",
+            "cuda",
+            target_options={"quant_config": quant_config},
+        )
+
+
+@pytest.mark.parametrize(
+    "quant_config",
+    [
+        {"weights": {"type": "int2"}},
+        {"moe": {"type": "int2"}},
+        {"weights": {"type": "int4", "overrides": [{"match": {"name": "/model/a/MatMul"}, "type": "int2"}]}},
+    ],
+)
+def test_structured_mtp_rejects_int2(quant_config):
+    with pytest.raises(ValueError, match="MTP quant_config does not support int2"):
+        normalize_builder_config(
+            "int4",
+            "cuda",
+            drafter_options={"drafter_type": "mtp", "quant_config": quant_config},
+        )
+
+
+def test_dense_target_rejects_weight_overrides():
+    with pytest.raises(ValueError, match="weight overrides are not supported when weights.type=none"):
+        normalize_builder_config(
+            None,
+            "cuda",
+            target_options={
+                "quant_config": {
+                    "io_dtype": "bf16",
+                    "weights": {
+                        "type": "none",
+                        "overrides": [{"match": {"name": "/model/a/MatMul"}, "type": "int8"}],
+                    },
+                }
+            },
+        )
+
+
+def test_structured_target_overrides_legacy_alias():
+    with pytest.warns(UserWarning, match="weights.block_size overrides"):
+        effective = normalize_builder_config(
+            "int4",
+            "cuda",
+            {"block_size": 32},
+            target_options={"quant_config": {"weights": {"block_size": 128}}},
+        )
+    assert effective.target_options["quant_config"]["weights"]["block_size"] == 128
+
+
+@pytest.mark.parametrize(
+    "legacy_options",
+    [
+        {"moe_quant_type": "int8"},
+        {"use_8bits_moe": True},
+    ],
+)
+def test_structured_dense_weights_preserve_explicit_legacy_moe_policy(legacy_options):
+    effective = normalize_builder_config(
+        "int4",
+        "cuda",
+        legacy_options,
+        target_options={"quant_config": {"weights": {"type": "int4"}}},
+    )
+    assert effective.target_options["quant_config"]["moe"]["type"] == "int8"
+
+
+def test_structured_config_normalizes_legacy_quantization_lists():
+    effective = normalize_builder_config(
+        "int4",
+        "cuda",
+        {
+            "op_types_to_quantize": "MatMul/Gather",
+            "nodes_to_exclude": "/model/a/MatMul,/model/b/MatMul",
+        },
+        target_options={},
+    )
+    weights = effective.target_options["quant_config"]["weights"]
+    assert weights["op_types"] == ["MatMul", "Gather"]
+    assert [override["match"]["name"] for override in weights["overrides"]] == [
+        "/model/a/MatMul",
+        "/model/b/MatMul",
+    ]
+    assert effective.extra_options["_quant_config"].legacy_nodes_to_exclude == frozenset(
+        {"/model/a/MatMul", "/model/b/MatMul"}
+    )
+
+
+def test_structured_exclusions_replace_legacy_exclusion_provenance():
+    node_name = "/model/a/MatMul"
+    effective = normalize_builder_config(
+        "int4",
+        "cuda",
+        {"nodes_to_exclude": node_name},
+        target_options={
+            "quant_config": {
+                "weights": {
+                    "overrides": [{"match": {"name": node_name}, "exclude": True}],
+                }
+            }
+        },
+    )
+
+    assert effective.extra_options["_quant_config"].legacy_nodes_to_exclude == frozenset()
+
+
+def make_drafter_checkpoint(tmp_path):
+    path = tmp_path / "drafter"
+    path.mkdir()
+    (path / "config.json").write_text(json.dumps({"dflash_config": {"target_layer_ids": [1, 3]}}))
+    return str(path)
+
+
+def test_dflash2_policy_is_independent_from_target(tmp_path):
+    effective = normalize_builder_config(
+        "int4",
+        "cuda",
+        target_options={
+            "quant_config": {"weights": {"type": "int4", "block_size": 128}},
+            "attention": {"implementation": "paged"},
+        },
+        drafter_options={"drafter_type": "dflash2", "path": make_drafter_checkpoint(tmp_path)},
+    )
+    drafter_quant = effective.drafter_options["quant_config"]
+    assert drafter_quant["io_dtype"] == "bf16"
+    assert drafter_quant["weights"]["type"] == "none"
+    assert drafter_quant["weights"]["block_size"] == 32
+    assert effective.extra_options["aux_hidden_state_layers"] == "2,4"
+
+
+def test_webgpu_dflash2_defaults_to_fp16_body(tmp_path):
+    effective = normalize_builder_config(
+        "int4",
+        "webgpu",
+        target_options={"attention": {"implementation": "paged"}},
+        drafter_options={"drafter_type": "dflash2", "path": make_drafter_checkpoint(tmp_path)},
+    )
+
+    assert effective.drafter_options["quant_config"]["io_dtype"] == "fp16"
+
+
+def test_webgpu_dflash2_rejects_bf16_body(tmp_path):
+    with pytest.raises(ValueError, match="WebGPU DFlash2 requires FP16"):
+        normalize_builder_config(
+            "int4",
+            "webgpu",
+            target_options={"attention": {"implementation": "paged"}},
+            drafter_options={
+                "drafter_type": "dflash2",
+                "path": make_drafter_checkpoint(tmp_path),
+                "quant_config": {"io_dtype": "bf16"},
+            },
+        )
+
+
+def test_dflash2_accepts_fp16_body_dtype(tmp_path):
+    effective = normalize_builder_config(
+        "int4",
+        "cuda",
+        target_options={"attention": {"implementation": "paged"}},
+        drafter_options={
+            "drafter_type": "dflash2",
+            "path": make_drafter_checkpoint(tmp_path),
+            "quant_config": {"io_dtype": "fp16"},
+        },
+    )
+    assert effective.drafter_options["quant_config"]["io_dtype"] == "fp16"
+
+
+def test_dflash2_rejects_fp32_body_dtype(tmp_path):
+    with pytest.raises(ValueError, match="DFlash2 body io_dtype must be fp16 or bf16"):
+        normalize_builder_config(
+            "int4",
+            "cuda",
+            target_options={"attention": {"implementation": "paged"}},
+            drafter_options={
+                "drafter_type": "dflash2",
+                "path": make_drafter_checkpoint(tmp_path),
+                "quant_config": {"io_dtype": "fp32"},
+            },
+        )
+
+
+def test_dflash2_rejects_unsupported_checkpoint_policy(tmp_path):
+    with pytest.raises(ValueError, match="checkpoint_policy other than 'preserve' is not supported"):
+        normalize_builder_config(
+            "int4",
+            "cuda",
+            target_options={"attention": {"implementation": "paged"}},
+            drafter_options={
+                "drafter_type": "dflash2",
+                "path": make_drafter_checkpoint(tmp_path),
+                "quant_config": {"checkpoint_policy": "requantize"},
+            },
+        )
+
+
+@pytest.mark.parametrize("block_size", [0, "per_channel", 17])
+def test_dflash2_rejects_unsupported_body_block_size(tmp_path, block_size):
+    with pytest.raises(ValueError, match="integer weights.block_size must be one of"):
+        normalize_builder_config(
+            "int4",
+            "cuda",
+            target_options={"attention": {"implementation": "paged"}},
+            drafter_options={
+                "drafter_type": "dflash2",
+                "path": make_drafter_checkpoint(tmp_path),
+                "quant_config": {"weights": {"type": "int4", "block_size": block_size}},
+            },
+        )
+
+
+@pytest.mark.parametrize("provider", ["cuda", "cpu", "webgpu", "dml", "NvTensorRtRtx"])
+def test_dflash2_body_packing_is_derived_from_provider(tmp_path, provider):
+    effective = normalize_builder_config(
+        "int4",
+        provider,
+        target_options={"attention": {"implementation": "paged"}},
+        drafter_options={
+            "drafter_type": "dflash2",
+            "path": make_drafter_checkpoint(tmp_path),
+            "quant_config": {
+                "weights": {"type": "int4", "block_size": 32},
+            },
+        },
+    )
+
+    quant = effective.drafter_options["quant_config"]
+    assert quant["format"]["matmulnbits_weights_prepacked"] == 0
+    assert quant["moe"]["weights_prepacked"] == 0
+
+
+@pytest.mark.parametrize("provider", ["cuda", "cpu"])
+def test_dflash2_accepts_explicit_packing_controls(tmp_path, provider):
+    effective = normalize_builder_config(
+        "int4",
+        provider,
+        target_options={"attention": {"implementation": "paged"}},
+        drafter_options={
+            "drafter_type": "dflash2",
+            "path": make_drafter_checkpoint(tmp_path),
+            "quant_config": {
+                "weights": {"type": "int4", "block_size": 32},
+                "format": {"matmulnbits_weights_prepacked": 1},
+            },
+        },
+    )
+    assert effective.drafter_options["quant_config"]["format"]["matmulnbits_weights_prepacked"] == 1
+
+
+@pytest.mark.parametrize(
+    "quant_config",
+    [
+        {"weights": {"type": "none", "block_size": 64}},
+        {"weights": {"type": "none", "method": "rtn"}},
+        {"weights": {"type": "none", "overrides": [{"match": {"name": "/model/a/MatMul"}, "exclude": True}]}},
+        {"format": {"use_qdq": True}},
+    ],
+)
+def test_dspark_rejects_unconsumed_quantization_policy(tmp_path, quant_config):
+    with pytest.raises(ValueError, match="DSpark quantization settings"):
+        normalize_builder_config(
+            "int4",
+            "cuda",
+            target_options={"attention": {"implementation": "paged"}},
+            drafter_options={
+                "drafter_type": "dspark",
+                "path": make_drafter_checkpoint(tmp_path),
+                "quant_config": quant_config,
+            },
+        )
+
+
+@pytest.mark.parametrize("field", ["accuracy_level", "op_types", "overrides"])
+def test_dflash2_rejects_unconsumed_weight_policy(tmp_path, field):
+    values = {
+        "accuracy_level": 4,
+        "op_types": ["MatMul"],
+        "overrides": [{"match": {"name": "/model/a/MatMul"}, "exclude": True}],
+    }
+    with pytest.raises(ValueError, match=f"weights.{field} is not supported"):
+        normalize_builder_config(
+            "int4",
+            "cuda",
+            target_options={"attention": {"implementation": "paged"}},
+            drafter_options={
+                "drafter_type": "dflash2",
+                "path": make_drafter_checkpoint(tmp_path),
+                "quant_config": {"weights": {field: values[field]}},
+            },
+        )
+
+
+def test_dflash2_int2_fpa_uses_structured_quant_config(tmp_path):
+    effective = normalize_builder_config(
+        "int4",
+        "cuda",
+        target_options={"attention": {"implementation": "paged"}},
+        drafter_options={
+            "drafter_type": "dflash2",
+            "path": make_drafter_checkpoint(tmp_path),
+            "quant_config": {
+                "weights": {"type": "int2", "block_size": 64},
+            },
+        },
+        runtime_config={"model": {"dflash2": {"session_options": {"ep.cuda.fpa_intb_gemm": "1"}}}},
+    )
+
+    quant = effective.extra_options["_drafter_quant_config"]
+    assert quant.weights.type == "int2"
+    assert quant.weights.block_size == 64
+    assert quant.format.matmulnbits_weights_prepacked == 0
+    assert effective.extra_options["dflash2_precision"] == "int2"
+    assert effective.runtime_config["model"]["dflash2"]["session_options"]["ep.cuda.fpa_intb_gemm"] == "1"
+
+
+def test_dflash2_int2_accepts_sm80_offline_prepack(tmp_path):
+    effective = normalize_builder_config(
+        "int4",
+        "cuda",
+        target_options={"attention": {"implementation": "paged"}},
+        drafter_options={
+            "drafter_type": "dflash2",
+            "path": make_drafter_checkpoint(tmp_path),
+            "quant_config": {
+                "weights": {"type": "int2", "block_size": 64},
+                "format": {"matmulnbits_weights_prepacked": 1},
+            },
+        },
+        runtime_config={"model": {"dflash2": {"session_options": {"ep.cuda.fpa_intb_gemm": "0"}}}},
+    )
+    assert effective.drafter_options["quant_config"]["format"]["matmulnbits_weights_prepacked"] == 1
+
+
+@pytest.mark.parametrize("block_size", [16, 32, 256])
+def test_dflash2_int2_fpa_rejects_unsupported_block_size(tmp_path, block_size):
+    with pytest.raises(ValueError, match="INT2 fpA_intB requires weights.block_size=64 or 128"):
+        normalize_builder_config(
+            "int4",
+            "cuda",
+            target_options={"attention": {"implementation": "paged"}},
+            drafter_options={
+                "drafter_type": "dflash2",
+                "path": make_drafter_checkpoint(tmp_path),
+                "quant_config": {
+                    "weights": {"type": "int2", "block_size": block_size},
+                },
+            },
+            runtime_config={"model": {"dflash2": {"session_options": {"ep.cuda.fpa_intb_gemm": "1"}}}},
+        )
+
+
+def test_dflash2_fpa_runtime_requires_integer_weights(tmp_path):
+    with pytest.raises(ValueError, match="requires integer weights"):
+        normalize_builder_config(
+            "int4",
+            "cuda",
+            target_options={"attention": {"implementation": "paged"}},
+            drafter_options={
+                "drafter_type": "dflash2",
+                "path": make_drafter_checkpoint(tmp_path),
+            },
+            runtime_config={"model": {"dflash2": {"session_options": {"ep.cuda.fpa_intb_gemm": "1"}}}},
+        )
+
+
+def test_fpa_runtime_requires_cuda(tmp_path):
+    with pytest.raises(ValueError, match="supported only on CUDA"):
+        normalize_builder_config(
+            "int4",
+            "cpu",
+            target_options={"attention": {"implementation": "paged"}},
+            drafter_options={
+                "drafter_type": "dflash2",
+                "path": make_drafter_checkpoint(tmp_path),
+                "quant_config": {"weights": {"type": "int4", "block_size": 32}},
+            },
+            runtime_config={"model": {"dflash2": {"session_options": {"ep.cuda.fpa_intb_gemm": "1"}}}},
+        )
+
+
+@pytest.mark.parametrize(
+    "drafter_options,legacy_options",
+    [
+        ({"drafter_type": "none"}, {"dflash2_path": "legacy"}),
+        ({"drafter_type": "mtp"}, {"dspark_path": "legacy"}),
+        ({"drafter_type": "dflash2", "path": "structured"}, {"dspark_path": "legacy"}),
+    ],
+)
+def test_structured_drafter_rejects_conflicting_legacy_selection(tmp_path, drafter_options, legacy_options):
+    if drafter_options.get("path"):
+        drafter_options["path"] = make_drafter_checkpoint(tmp_path)
+    with pytest.raises(ValueError, match="conflicts with legacy drafter selection"):
+        normalize_builder_config(
+            "int4",
+            "cuda",
+            legacy_options,
+            target_options={"attention": {"implementation": "paged"}},
+            drafter_options=drafter_options,
+        )
+
+
+def test_structured_mtp_rejects_legacy_exclusion():
+    with pytest.raises(ValueError, match="drafter_type=mtp conflicts with legacy extra_options.exclude_mtp"):
+        normalize_builder_config(
+            "int4",
+            "cuda",
+            {"exclude_mtp": True},
+            drafter_options={"drafter_type": "mtp"},
+        )
+
+
+@pytest.mark.parametrize(
+    "precision,provider,legacy_options,expected_io_dtype",
+    [
+        ("int4", "cuda", {}, "fp16"),
+        ("int4", "cuda", {"use_cuda_bf16": "true"}, "bf16"),
+        ("fp32", "cpu", {}, "fp32"),
+    ],
+)
+def test_structured_mtp_inherits_target_io_dtype(precision, provider, legacy_options, expected_io_dtype):
+    effective = normalize_builder_config(
+        precision,
+        provider,
+        legacy_options,
+        drafter_options={"drafter_type": "mtp"},
+    )
+    assert effective.drafter_options["quant_config"]["io_dtype"] == expected_io_dtype
+    assert effective.extra_options["mtp_quant_config"].io_dtype == expected_io_dtype
+
+
+def test_structured_mtp_rejects_io_dtype_that_differs_from_the_target():
+    with pytest.raises(ValueError, match="MTP io_dtype must match the target io_dtype 'fp16'"):
+        normalize_builder_config(
+            "int4",
+            "cuda",
+            drafter_options={"drafter_type": "mtp", "quant_config": {"io_dtype": "bf16"}},
+        )
+
+
+def test_block_drafter_rejects_windowed_kv_cache(tmp_path):
+    with pytest.raises(ValueError, match="windowed KV cache is not supported"):
+        normalize_builder_config(
+            "int4",
+            "cuda",
+            target_options={"attention": {"implementation": "paged"}},
+            drafter_options={
+                "drafter_type": "dflash2",
+                "path": make_drafter_checkpoint(tmp_path),
+                "attention": {"kv_cache": {"windowed": True}},
+            },
+        )
+
+
+def test_search_alone_is_preserved_in_legacy_configuration():
+    effective = normalize_builder_config("int4", "cuda", search={"top_k": 7})
+    assert effective.version == 1
+    assert effective.runtime_config == {"search": {"top_k": 7}}
+
+
+def test_unquantized_moe_requires_explicit_expert_policy():
+    effective = normalize_builder_config(
+        None,
+        "cuda",
+        target_options={"quant_config": {"io_dtype": "bf16", "weights": {"type": "none"}}},
+    )
+    model_config = type("Config", (), {"num_experts": 8})()
+    with pytest.raises(ValueError, match="moe.type is required"):
+        validate_model_dependent_config(effective, model_config)
+
+    explicit = normalize_builder_config(
+        None,
+        "cuda",
+        target_options={
+            "quant_config": {
+                "io_dtype": "bf16",
+                "weights": {"type": "none"},
+                "moe": {"type": "none"},
+            }
+        },
+    )
+    validate_model_dependent_config(explicit, model_config)
+
+
+@pytest.mark.parametrize(
+    "model_config,error",
+    [
+        (
+            type("Config", (), {"architectures": ["Qwen3_5ForConditionalGeneration"], "mtp_num_hidden_layers": 0})(),
+            "checkpoint with an MTP head",
+        ),
+        (
+            type("Config", (), {"architectures": ["LlamaForCausalLM"], "mtp_num_hidden_layers": 1})(),
+            "supported Qwen3.5 architecture",
+        ),
+    ],
+)
+def test_explicit_mtp_requires_supported_checkpoint(model_config, error):
+    effective = normalize_builder_config(
+        "int4",
+        "cuda",
+        drafter_options={"drafter_type": "mtp"},
+    )
+
+    with pytest.raises(ValueError, match=error):
+        validate_model_dependent_config(effective, model_config)
+
+
+def test_explicit_mtp_accepts_supported_checkpoint():
+    effective = normalize_builder_config(
+        "int4",
+        "cuda",
+        drafter_options={"drafter_type": "mtp"},
+    )
+    model_config = type(
+        "Config",
+        (),
+        {"architectures": ["Qwen3_5MoeForConditionalGeneration"], "mtp_num_hidden_layers": 1},
+    )()
+
+    validate_model_dependent_config(effective, model_config)
+
+
+def test_explicit_unquantized_moe_is_not_copied_to_legacy_options():
+    with pytest.warns(UserWarning, match="moe.type overrides legacy"):
+        effective = normalize_builder_config(
+            "int4",
+            "cuda",
+            {"moe_quant_type": "int8", "use_8bits_moe": True},
+            target_options={"quant_config": {"moe": {"type": "none"}}},
+        )
+
+    assert effective.extra_options["_quant_config"].moe.type == "none"
+    assert "moe_quant_type" not in effective.extra_options
+    assert "use_8bits_moe" not in effective.extra_options
+
+
+def test_checkpoint_moe_policy_updates_implicit_structured_config():
+    effective = normalize_builder_config(
+        "bf16",
+        "cuda",
+        target_options={"quant_config": {"weights": {"type": "none"}}},
+    )
+    effective.extra_options["moe_quant_type"] = "nvfp4"
+
+    validate_model_dependent_config(effective, type("Config", (), {"num_experts": 8})())
+
+    assert effective.extra_options["_quant_config"].moe.type == "nvfp4"
+    assert effective.extra_options["_quant_config"].moe.block_size == 16
+    assert effective.target_options["quant_config"]["moe"]["type"] == "nvfp4"
+
+
+def test_checkpoint_moe_policy_rejects_conflicting_explicit_type():
+    effective = normalize_builder_config(
+        "bf16",
+        "cuda",
+        target_options={"quant_config": {"moe": {"type": "none"}}},
+    )
+    effective.extra_options["moe_quant_type"] = "nvfp4"
+
+    with pytest.raises(ValueError, match="conflicts with checkpoint moe_quant_type"):
+        validate_model_dependent_config(effective, type("Config", (), {"num_experts": 8})())
+
+    assert effective.extra_options["_quant_config"].moe.type == "none"
+    assert effective.target_options["quant_config"]["moe"]["type"] == "none"
+
+
+def test_speculative_layers_flatten_in_order():
+    effective = normalize_builder_config(
+        "int4",
+        "cuda",
+        target_options={"attention": {"implementation": "paged"}},
+        speculative_options={"aux_hidden_state_layers": [6, 20, 34]},
+    )
+    assert effective.extra_options["aux_hidden_state_layers"] == "6,20,34"
+
+
+@pytest.mark.parametrize("value", [1.5, True, "4"])
+def test_structured_state_update_capacity_must_be_an_integer(value):
+    with pytest.raises(ValueError, match="state_update_capacity must be an integer"):
+        normalize_builder_config(
+            "int4",
+            "cuda",
+            target_options={"attention": {"implementation": "paged"}},
+            speculative_options={"state_update_capacity": value},
+        )
+
+
+@pytest.mark.parametrize("value", [256.0, True, "256"])
+def test_structured_paged_block_size_must_be_an_integer(value):
+    with pytest.raises(ValueError, match="attention.paged.block_size must be an integer"):
+        normalize_builder_config(
+            "int4",
+            "cuda",
+            target_options={"attention": {"implementation": "paged", "paged": {"block_size": value}}},
+        )
+
+
+@pytest.mark.parametrize("value", [3.5, True, "3"])
+def test_structured_drafter_integer_fields_reject_coercion(tmp_path, value):
+    with pytest.raises(ValueError, match="num_draft_tokens must be an integer"):
+        normalize_builder_config(
+            "int4",
+            "cuda",
+            target_options={"attention": {"implementation": "paged"}},
+            drafter_options={
+                "drafter_type": "dflash2",
+                "path": make_drafter_checkpoint(tmp_path),
+                "num_draft_tokens": value,
+            },
+        )
+
+
+def test_json_loader_rejects_duplicates_and_null(tmp_path):
+    duplicate = tmp_path / "duplicate.json"
+    duplicate.write_text('{"search": {}, "search": {}}')
+    with pytest.raises(ValueError, match="duplicate JSON key 'search'"):
+        load_json_object(duplicate, "runtime_config")
+    with pytest.raises(ValueError, match="must not contain null"):
+        load_json_object('{"search": {"top_k": null}}', "runtime_config")
+
+
+def test_runtime_merge_replaces_arrays_and_fixed_allocation():
+    generated = {
+        "model": {
+            "decoder": {
+                "filename": "model.onnx",
+                "session_options": {"provider_options": [{"CUDA": {"required": "1"}}]},
+            }
+        },
+        "engine": {"dynamic_batching": {"block_size": 256, "gpu_utilization_factor": 0.6}},
+        "search": {"top_k": 50},
+    }
+    original = copy.deepcopy(generated)
+    runtime = {
+        "model": {"decoder": {"session_options": {"provider_options": [{"CUDA": {"gpu_mem_limit": "1024"}}]}}},
+        "engine": {"dynamic_batching": {"num_blocks": 128}},
+        "search": {"top_k": 1},
+    }
+    merged = apply_runtime_config(generated, runtime)
+    assert merged["model"]["decoder"]["filename"] == "model.onnx"
+    assert merged["model"]["decoder"]["session_options"]["provider_options"] == [
+        {"CUDA": {"required": "1", "gpu_mem_limit": "1024"}}
+    ]
+    assert merged["engine"]["dynamic_batching"] == {"block_size": 256, "num_blocks": 128}
+    assert merged["search"]["top_k"] == 1
+    assert generated == original
+
+
+def test_runtime_adds_config_only_profile():
+    generated = {
+        "model": {
+            "context_length": 262144,
+            "decoder": {"filename": "model.onnx"},
+            "dflash2": {"num_draft_tokens": 7},
+        },
+        "engine": {"dynamic_batching": {"num_blocks": 800, "max_batch_size": 1}},
+        "search": {"max_length": 200001, "chunk_size": 512},
+        "speculative": {"max_draft_tokens": 7},
+    }
+    profile = {
+        "id": "32gib",
+        "eligibility": {"minimum_total_device_memory_bytes": 34359738368},
+        "overlay": {
+            "engine": {"dynamic_batching": {"num_blocks": 928, "max_batch_size": 8}},
+            "search": {"chunk_size": 256},
+            "speculative": {"max_draft_tokens": 6},
+        },
+    }
+
+    updated = apply_runtime_config(generated, {"runtime_profiles": [profile]})
+
+    assert updated["runtime_profiles"] == [profile]
+    assert updated["model"]["decoder"]["filename"] == "model.onnx"
+    assert updated["engine"]["dynamic_batching"]["num_blocks"] == 800
+
+
+def test_runtime_profiles_accept_disjoint_integrated_and_discrete_conditions():
+    generated = {"model": {"decoder": {}}, "engine": {"dynamic_batching": {"num_blocks": 32}}}
+    profiles = [
+        {
+            "id": str(integrated),
+            "eligibility": {"minimum_total_device_memory_bytes": 0, "is_integrated": integrated},
+            "overlay": {"engine": {"dynamic_batching": {"num_blocks": blocks}}},
+        }
+        for integrated, blocks in [(True, 40), (False, 80)]
+    ]
+    assert apply_runtime_config(generated, {"runtime_profiles": profiles})["runtime_profiles"] == profiles
+
+
+@pytest.mark.parametrize("invalid", [0, 1, "true", None])
+def test_runtime_profiles_require_boolean_integrated_condition(invalid):
+    generated = {"model": {"decoder": {}}}
+    profile = {
+        "id": "invalid",
+        "eligibility": {"minimum_total_device_memory_bytes": 0, "is_integrated": invalid},
+        "overlay": {"search": {"chunk_size": 1}},
+    }
+    with pytest.raises(ValueError, match="is_integrated must be a boolean"):
+        apply_runtime_config(generated, {"runtime_profiles": [profile]})
+
+
+@pytest.mark.parametrize("first,second", [(None, True), (False, False), (True, True)])
+def test_runtime_profiles_reject_overlapping_device_conditions(first, second):
+    generated = {"model": {"decoder": {}}}
+    profiles = [
+        {
+            "id": str(index),
+            "eligibility": {
+                "minimum_total_device_memory_bytes": minimum,
+                "maximum_total_device_memory_bytes": 10,
+                **({"is_integrated": value} if value is not None else {}),
+            },
+            "overlay": {"search": {"chunk_size": index + 1}},
+        }
+        for index, (minimum, value) in enumerate([(1, first), (10, second)])
+    ]
+    with pytest.raises(ValueError, match="eligibility ranges overlap"):
+        apply_runtime_config(generated, {"runtime_profiles": profiles})
+
+
+def test_runtime_profiles_allow_disjoint_free_memory_ranges():
+    generated = {"model": {"decoder": {}}}
+    profiles = [
+        {
+            "id": str(index),
+            "eligibility": {
+                "minimum_total_device_memory_bytes": 100,
+                "minimum_free_device_memory_bytes": minimum,
+                "maximum_free_device_memory_bytes": maximum,
+            },
+            "overlay": {"search": {"chunk_size": index + 1}},
+        }
+        for index, (minimum, maximum) in enumerate([(0, 80), (81, 100)])
+    ]
+    assert apply_runtime_config(generated, {"runtime_profiles": profiles})["runtime_profiles"] == profiles
+
+
+def test_runtime_profiles_allow_only_physically_disjoint_overlapping_ranges():
+    generated = {"model": {"decoder": {}}}
+    profiles = [
+        {
+            "id": "first",
+            "eligibility": {
+                "minimum_total_device_memory_bytes": 100,
+                "maximum_total_device_memory_bytes": 150,
+                "minimum_free_device_memory_bytes": 140,
+                "maximum_free_device_memory_bytes": 200,
+            },
+            "overlay": {"search": {"chunk_size": 1}},
+        },
+        {
+            "id": "second",
+            "eligibility": {
+                "minimum_total_device_memory_bytes": 100,
+                "maximum_total_device_memory_bytes": 200,
+                "minimum_free_device_memory_bytes": 160,
+                "maximum_free_device_memory_bytes": 200,
+            },
+            "overlay": {"search": {"chunk_size": 2}},
+        },
+    ]
+    assert apply_runtime_config(generated, {"runtime_profiles": profiles})["runtime_profiles"] == profiles
+
+
+@pytest.mark.parametrize("first_free,second_free", [(None, 0), (None, 1), (80, 80)])
+def test_runtime_profiles_reject_overlapping_free_memory_conditions(first_free, second_free):
+    generated = {"model": {"decoder": {}}}
+    profiles = [
+        {
+            "id": "first",
+            "eligibility": {
+                "minimum_total_device_memory_bytes": 100,
+                **({"maximum_free_device_memory_bytes": first_free} if first_free is not None else {}),
+            },
+            "overlay": {"search": {"chunk_size": 1}},
+        },
+        {
+            "id": "second",
+            "eligibility": {
+                "minimum_total_device_memory_bytes": 100,
+                "minimum_free_device_memory_bytes": second_free,
+            },
+            "overlay": {"search": {"chunk_size": 2}},
+        },
+    ]
+    with pytest.raises(ValueError, match="eligibility ranges overlap"):
+        apply_runtime_config(generated, {"runtime_profiles": profiles})
+
+
+@pytest.mark.parametrize("field", ["minimum_free_device_memory_bytes", "maximum_free_device_memory_bytes"])
+@pytest.mark.parametrize("invalid", [True, -1, 1.5, "100", None, 2**53])
+def test_runtime_profiles_require_valid_free_memory_bytes(field, invalid):
+    generated = {"model": {"decoder": {}}}
+    profile = {
+        "id": "invalid",
+        "eligibility": {"minimum_total_device_memory_bytes": 0, field: invalid},
+        "overlay": {"search": {"chunk_size": 1}},
+    }
+    with pytest.raises(ValueError, match=f"{field} must be a non-negative integer"):
+        apply_runtime_config(generated, {"runtime_profiles": [profile]})
+
+
+@pytest.mark.parametrize(
+    "eligibility,error",
+    [
+        (
+            {"minimum_free_device_memory_bytes": 81, "maximum_free_device_memory_bytes": 80},
+            "maximum free memory must not be below minimum",
+        ),
+        (
+            {"maximum_total_device_memory_bytes": 100, "minimum_free_device_memory_bytes": 101},
+            "minimum free memory exceeds maximum total memory",
+        ),
+    ],
+)
+def test_runtime_profiles_reject_impossible_free_memory_ranges(eligibility, error):
+    generated = {"model": {"decoder": {}}}
+    profile = {
+        "id": "invalid",
+        "eligibility": {"minimum_total_device_memory_bytes": 0, **eligibility},
+        "overlay": {"search": {"chunk_size": 1}},
+    }
+    with pytest.raises(ValueError, match=error):
+        apply_runtime_config(generated, {"runtime_profiles": [profile]})
+
+
+@pytest.mark.parametrize("in_profile", [False, True])
+@pytest.mark.parametrize(
+    "engine,field,value,error",
+    [
+        ({"static_batching": {}}, "num_blocks", 16, "absent dynamic_batching"),
+        ({"dynamic_batching": {}}, "num_blocks", 2**31, "at most 2147483647"),
+        ({"dynamic_batching": {}}, "max_scheduled_tokens", 2**31, "at most 2147483647"),
+        ({"dynamic_batching": {}}, "max_batch_size", 257, "at most 256"),
+        ({"dynamic_batching": {}}, "num_blocks", True, "positive integer"),
+    ],
+)
+def test_runtime_batching_validation_is_shared_with_profiles(in_profile, engine, field, value, error):
+    generated = {"model": {"decoder": {}}, "engine": engine}
+    runtime = {"engine": {"dynamic_batching": {field: value}}}
+    if in_profile:
+        runtime = {
+            "runtime_profiles": [
+                {"id": "gpu", "eligibility": {"minimum_total_device_memory_bytes": 1}, "overlay": runtime}
+            ]
+        }
+
+    with pytest.raises(ValueError, match=error):
+        apply_runtime_config(generated, runtime)
+
+
+@pytest.mark.parametrize("in_profile", [False, True])
+@pytest.mark.parametrize(
+    "field,error",
+    [
+        ("dflash2_max_snapshots", "dflash2_max_snapshots must be an integer between"),
+        ("max_snapshots", "max_snapshots must be an integer from"),
+    ],
+)
+@pytest.mark.parametrize("value", [0, 1, 3, 2_147_483_647, -1, 1.5, 2**31, True, "3", None])
+def test_snapshot_limits_in_runtime_config_and_profiles(in_profile, field, error, value):
+    generated = {"model": {"decoder": {}}, "engine": {"dynamic_batching": {"num_blocks": 32}}}
+    baseline = copy.deepcopy(generated)
+    runtime = {"engine": {"dynamic_batching": {field: value}}}
+    if in_profile:
+        runtime = {
+            "runtime_profiles": [
+                {"id": "snapshots", "eligibility": {"minimum_total_device_memory_bytes": 0}, "overlay": runtime}
+            ]
+        }
+    if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 2_147_483_647:
+        result = apply_runtime_config(generated, runtime)
+        if in_profile:
+            assert result["runtime_profiles"] == runtime["runtime_profiles"]
+            assert result["engine"] == generated["engine"]
+        else:
+            assert result["engine"]["dynamic_batching"][field] == value
+    else:
+        with pytest.raises(ValueError, match=error):
+            apply_runtime_config(generated, runtime)
+    assert generated == baseline
+
+
+@pytest.mark.parametrize("in_profile", [False, True])
+@pytest.mark.parametrize(
+    "model,supported",
+    [
+        ({"decoder": {}}, True),
+        ({"decoder": {}, "dspark": {"filename": "dspark.onnx"}}, False),
+        ({"decoder": {}, "mtp": {"filename": "mtp.onnx"}}, False),
+        ({"decoder": {}, "mtp": {"filename": "mtp.onnx", "enabled": False}}, True),
+        ({"decoder": {}, "dflash2": {"filename": "dflash2.onnx"}}, False),
+        ({"decoder": {}, "dflash2": {"filename": "dflash2.onnx", "sliding_window": None}}, False),
+        ({"decoder": {}, "dflash2": {"filename": "dflash2.onnx", "sliding_window": 8}}, True),
+        (
+            {"decoder": {"sliding_window": {"layers": [0]}, "inputs": {"block_table_windowed": "windowed"}}},
+            False,
+        ),
+        ({"decoder": {"sliding_window": {"layers": []}, "inputs": {"block_table_windowed": "windowed"}}}, True),
+        ({"decoder": {"sliding_window": {"layers": [0]}}}, True),
+    ],
+)
+def test_runtime_prefix_caching_respects_exported_layout(in_profile, model, supported):
+    generated = {"model": model, "engine": {"dynamic_batching": {"prefix_caching": False}}}
+    runtime = {"engine": {"dynamic_batching": {"prefix_caching": True}}}
+    if in_profile:
+        runtime = {
+            "runtime_profiles": [
+                {"id": "prefix-cache", "eligibility": {"minimum_total_device_memory_bytes": 0}, "overlay": runtime}
+            ]
+        }
+    baseline = copy.deepcopy(generated)
+    if supported:
+        updated = apply_runtime_config(generated, runtime)
+        if in_profile:
+            assert updated["runtime_profiles"] == runtime["runtime_profiles"]
+        else:
+            assert updated["engine"]["dynamic_batching"]["prefix_caching"] is True
+    else:
+        with pytest.raises(ValueError, match="prefix_caching is unsupported by the exported layout"):
+            apply_runtime_config(generated, runtime)
+    assert generated == baseline
+
+
+@pytest.mark.parametrize("policy", [{}, {"disk_bytes": 4096}])
+def test_runtime_snapshot_policy_replaces_existing_budgets(policy):
+    generated = {
+        "engine": {
+            "dynamic_batching": {"snapshot_cache": {"vram_bytes": 1024, "ram_bytes": 2048, "directory": "spill"}}
+        }
+    }
+    baseline = copy.deepcopy(generated)
+    updated = apply_runtime_config(generated, {"engine": {"dynamic_batching": {"snapshot_cache": policy}}})
+    assert updated["engine"]["dynamic_batching"]["snapshot_cache"] == policy
+    assert generated == baseline
+
+
+def test_runtime_snapshot_tiers_and_count_cap_are_preserved():
+    generated = {"engine": {"dynamic_batching": {"num_blocks": 128}}}
+    policy = {
+        "prefix_caching": True,
+        "max_snapshots": 8,
+        "snapshot_cache": {
+            "vram_bytes": 4_294_967_296,
+            "ram_bytes": 8_589_934_592,
+            "disk_bytes": 17_179_869_184,
+            "directory": "spill",
+        },
+    }
+    runtime = {"engine": {"dynamic_batching": policy}}
+    updated = apply_runtime_config(generated, runtime)
+    assert updated["engine"]["dynamic_batching"] == {"num_blocks": 128, **policy}
+    profile = {
+        "id": "snapshot-storage",
+        "eligibility": {"minimum_total_device_memory_bytes": 0},
+        "overlay": runtime,
+    }
+    assert apply_runtime_config(generated, {"runtime_profiles": [profile]})["runtime_profiles"] == [profile]
+    assert generated == {"engine": {"dynamic_batching": {"num_blocks": 128}}}
+
+
+@pytest.mark.parametrize("in_profile", [False, True])
+@pytest.mark.parametrize("tier", ["vram_bytes", "ram_bytes", "disk_bytes"])
+@pytest.mark.parametrize("invalid", [-1, 1.5, True, "16", 9_007_199_254_740_992])
+def test_runtime_rejects_invalid_snapshot_byte_limits(in_profile, tier, invalid):
+    generated = {"engine": {"dynamic_batching": {"num_blocks": 128}}}
+    runtime = {"engine": {"dynamic_batching": {"snapshot_cache": {tier: invalid}}}}
+    if in_profile:
+        runtime = {
+            "runtime_profiles": [
+                {"id": "snapshots", "eligibility": {"minimum_total_device_memory_bytes": 0}, "overlay": runtime}
+            ]
+        }
+    with pytest.raises(ValueError, match="non-negative integer byte count"):
+        apply_runtime_config(generated, runtime)
+
+
+@pytest.mark.parametrize("in_profile", [False, True])
+@pytest.mark.parametrize(
+    "model,max_draft_tokens,error",
+    [
+        ({"decoder": {}}, 4, "absent speculative configuration"),
+        ({"decoder": {}, "dflash2": {"num_draft_tokens": 4}}, 5, "exported drafter/state capacity"),
+        (
+            {"decoder": {"state_update_capacity": 3}, "dspark": {"num_draft_tokens": 7}},
+            4,
+            "exported drafter/state capacity",
+        ),
+        ({"decoder": {}, "dflash2": {"num_draft_tokens": 4}}, 4, None),
+        ({"decoder": {"state_update_capacity": 3}, "dspark": {"num_draft_tokens": 7}}, 3, None),
+        ({"decoder": {}, "mtp": {}}, 16, None),
+    ],
+)
+def test_runtime_draft_capacity_validation_is_shared_with_profiles(in_profile, model, max_draft_tokens, error):
+    generated = {"model": model}
+    runtime = {"speculative": {"max_draft_tokens": max_draft_tokens}}
+    if in_profile:
+        runtime = {
+            "runtime_profiles": [
+                {"id": "gpu", "eligibility": {"minimum_total_device_memory_bytes": 1}, "overlay": runtime}
+            ]
+        }
+
+    if error:
+        with pytest.raises(ValueError, match=error):
+            apply_runtime_config(generated, runtime)
+    else:
+        updated = apply_runtime_config(generated, runtime)
+        for key, value in runtime.items():
+            assert updated[key] == value
+
+
+@pytest.mark.parametrize(
+    "overlay",
+    [{}, {"model": {}}, {"model": {"decoder": {}}}, {"engine": {"dynamic_batching": {}}}, {"search": {}}],
+)
+def test_runtime_rejects_profile_without_overlay_fields(overlay):
+    generated = {"model": {"decoder": {}}, "engine": {"dynamic_batching": {}}, "search": {}}
+    profile = {"id": "empty", "eligibility": {"minimum_total_device_memory_bytes": 1}, "overlay": overlay}
+    with pytest.raises(ValueError, match="must contain at least one overlay field"):
+        apply_runtime_config(generated, {"runtime_profiles": [profile]})
+
+
+def test_runtime_rejects_profile_max_length():
+    generated = {"model": {"context_length": 4096}, "search": {"max_length": 4096}}
+    profile = {
+        "id": "request-limit",
+        "eligibility": {"minimum_total_device_memory_bytes": 1},
+        "overlay": {"search": {"max_length": 2048}},
+    }
+    with pytest.raises(ValueError, match="unknown runtime_config.runtime_profiles\\[0\\].overlay.search"):
+        apply_runtime_config(generated, {"runtime_profiles": [profile]})
+
+
+def test_runtime_rejects_protected_and_absent_components():
+    generated = {"model": {"decoder": {}}, "engine": {"dynamic_batching": {"block_size": 256}}}
+    with pytest.raises(ValueError, match="unknown runtime_config.engine.dynamic_batching"):
+        apply_runtime_config(generated, {"engine": {"dynamic_batching": {"block_size": 16}}})
+    with pytest.raises(ValueError, match="absent model component 'dflash2'"):
+        apply_runtime_config(generated, {"model": {"dflash2": {"session_options": {}}}})
+
+
+def test_runtime_rejects_absent_engine_and_speculative_capabilities():
+    generated = {"model": {"decoder": {}}, "search": {}}
+    with pytest.raises(ValueError, match="absent engine configuration"):
+        apply_runtime_config(generated, {"engine": {"dynamic_batching": {"num_blocks": 16}}})
+    with pytest.raises(ValueError, match="absent speculative configuration"):
+        apply_runtime_config(generated, {"speculative": {"max_draft_tokens": 4}})
+
+
+def test_runtime_adds_speculative_config_for_exported_drafter():
+    generated = {
+        "model": {
+            "decoder": {},
+            "dflash2": {"filename": "dflash2.onnx", "num_draft_tokens": 7},
+        },
+        "search": {},
+    }
+
+    updated = apply_runtime_config(generated, {"speculative": {"max_draft_tokens": 7}})
+
+    assert updated["speculative"] == {"max_draft_tokens": 7}
+
+
+@pytest.mark.parametrize("value", [True, 0, 17, 1.5, "4"])
+def test_runtime_rejects_invalid_max_draft_tokens(value):
+    generated = {"model": {"decoder": {}}, "speculative": {"max_draft_tokens": 4}}
+    with pytest.raises(ValueError, match="max_draft_tokens must be an integer between 1 and 16"):
+        apply_runtime_config(generated, {"speculative": {"max_draft_tokens": value}})
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("max_batch_size", 0),
+        ("max_scheduled_tokens", -1),
+        ("num_blocks", 0),
+        ("gpu_utilization_factor", 0),
+        ("gpu_utilization_factor", 1.1),
+    ],
+)
+def test_runtime_rejects_invalid_dynamic_batching_values(field, value):
+    generated = {"model": {"decoder": {}}, "engine": {"dynamic_batching": {"block_size": 256}}}
+    with pytest.raises(ValueError, match=field):
+        apply_runtime_config(generated, {"engine": {"dynamic_batching": {field: value}}})
+
+
+def test_runtime_allows_overwriting_fpa_intb_session_option():
+    generated = {
+        "model": {
+            "dflash2": {
+                "filename": "dflash2.onnx",
+                "session_options": {"ep.cuda.fpa_intb_gemm": "0"},
+            }
+        }
+    }
+    updated = apply_runtime_config(
+        generated,
+        {"model": {"dflash2": {"session_options": {"ep.cuda.fpa_intb_gemm": "1"}}}},
+    )
+
+    assert updated["model"]["dflash2"]["session_options"]["ep.cuda.fpa_intb_gemm"] == "1"
+
+
+@pytest.mark.parametrize("value", [True, 1, "true", "2"])
+def test_runtime_rejects_invalid_fpa_intb_session_option(value):
+    generated = {"model": {"dflash2": {"session_options": {"ep.cuda.fpa_intb_gemm": "0"}}}}
+    with pytest.raises(ValueError, match="must be '0' or '1'"):
+        apply_runtime_config(
+            generated,
+            {"model": {"dflash2": {"session_options": {"ep.cuda.fpa_intb_gemm": value}}}},
+        )
+
+
+def test_runtime_rejects_overwriting_required_session_option():
+    generated = {"model": {"decoder": {"session_options": {"required": "original"}}}}
+    with pytest.raises(ValueError, match="required session option"):
+        apply_runtime_config(
+            generated,
+            {"model": {"decoder": {"session_options": {"required": "replacement"}}}},
+        )
+
+
+def test_runtime_rejects_provider_changes():
+    generated = {
+        "model": {
+            "decoder": {
+                "session_options": {"provider_options": [{"CUDA": {}}]},
+            }
+        }
+    }
+    with pytest.raises(ValueError, match="cannot change execution providers"):
+        apply_runtime_config(
+            generated,
+            {"model": {"decoder": {"session_options": {"provider_options": [{"CPU": {}}]}}}},
+        )
+    with pytest.raises(ValueError, match="cannot change execution providers"):
+        apply_runtime_config(
+            generated,
+            {"model": {"decoder": {"session_options": {"provider_options": []}}}},
+        )
+
+
+@pytest.mark.parametrize(
+    "generated_name,runtime_name,generated_options,runtime_options",
+    [
+        ("cuda", "CUDA", {"enable_cuda_graph": "1", "device_id": "0"}, {"gpu_mem_limit": "1024"}),
+        ("WebGPU", "webgpu", {"validationMode": "basic"}, {"validationMode": "disabled"}),
+        ("NvTensorRtRtx", "NVTENSORRTRTX", {"enable_cuda_graph": "1"}, {"enable_cuda_graph": "0"}),
+    ],
+)
+def test_runtime_provider_options_merge_case_insensitively(
+    generated_name, runtime_name, generated_options, runtime_options
+):
+    generated = {
+        "model": {
+            "decoder": {
+                "session_options": {"provider_options": [{generated_name: generated_options}]},
+            }
+        }
+    }
+
+    updated = apply_runtime_config(
+        generated,
+        {"model": {"decoder": {"session_options": {"provider_options": [{runtime_name: runtime_options}]}}}},
+    )
+
+    assert updated["model"]["decoder"]["session_options"]["provider_options"] == [
+        {generated_name: {**generated_options, **runtime_options}}
+    ]
+
+
+@pytest.mark.parametrize(
+    "provider,option_name",
+    [
+        ("WebGPU", "multiRotaryCacheConcatOffset"),
+        ("NvTensorRtRtx", "multi_rotary_cache_concat_offset"),
+    ],
+)
+def test_runtime_rejects_graph_derived_provider_option_changes(provider, option_name):
+    generated = {"model": {"decoder": {"session_options": {"provider_options": [{provider: {option_name: "4096"}}]}}}}
+    runtime = {"model": {"decoder": {"session_options": {"provider_options": [{provider: {option_name: "1"}}]}}}}
+
+    with pytest.raises(ValueError, match="cannot overwrite graph-derived provider option"):
+        apply_runtime_config(generated, runtime)
+
+
+@pytest.mark.parametrize("runtime_options", [{"unknown": "1"}, {"gpu_mem_limit": 1024}])
+def test_runtime_rejects_unsupported_or_non_string_provider_options(runtime_options):
+    generated = {
+        "model": {"decoder": {"session_options": {"provider_options": [{"CUDA": {"enable_cuda_graph": "0"}}]}}}
+    }
+
+    with pytest.raises(ValueError, match="unsupported runtime provider option|must be strings"):
+        apply_runtime_config(
+            generated,
+            {"model": {"decoder": {"session_options": {"provider_options": [{"CUDA": runtime_options}]}}}},
+        )
+
+
+@pytest.mark.parametrize("run_options", ["invalid", [], {"tag": 1}])
+def test_runtime_run_options_must_be_an_object_of_strings(run_options):
+    generated = {"model": {"decoder": {"session_options": {}}}}
+
+    with pytest.raises(ValueError, match="run_options must be an object of strings"):
+        apply_runtime_config(generated, {"model": {"decoder": {"run_options": run_options}}})
+
+
+@pytest.mark.parametrize("component_name", ["dflash2", "dspark"])
+def test_runtime_block_drafter_cannot_disable_execution_provider_synchronization(component_name):
+    generated = {"model": {component_name: {"session_options": {}}}}
+    runtime = {
+        "model": {
+            component_name: {
+                "run_options": {"disable_synchronize_execution_providers": "1"},
+            }
+        }
+    }
+
+    with pytest.raises(ValueError, match="cannot disable execution-provider synchronization"):
+        apply_runtime_config(generated, runtime)
+
+
+@pytest.mark.parametrize("max_length", ["8192", 0, True])
+def test_runtime_search_max_length_must_be_a_positive_integer(max_length):
+    generated = {"model": {"context_length": 4096}}
+
+    with pytest.raises(ValueError, match="max_length must be an integer between 1 and 2147483647"):
+        apply_runtime_config(generated, {"search": {"max_length": max_length}})
+
+
+@pytest.mark.parametrize(
+    "field,value,error",
+    [
+        ("do_sample", "false", "must be a boolean"),
+        ("top_k", "7", "must be an integer"),
+        ("top_k", -1, "must be an integer between 0 and 2147483647"),
+        ("top_k", 2**31, "must be an integer between 0 and 2147483647"),
+        ("top_p", "0.9", "must be a finite number"),
+        ("top_p", 1.1, "must be at most 1"),
+        ("temperature", -0.1, "must be at least 0"),
+        ("repetition_penalty", 0, "must be greater than 0"),
+        ("batch_size", 33, "must be an integer between 1 and 32"),
+    ],
+)
+def test_runtime_search_validates_parser_types_and_ranges(field, value, error):
+    generated = {"model": {"context_length": 4096}, "search": {"max_length": 4096}}
+
+    with pytest.raises(ValueError, match=error):
+        apply_runtime_config(generated, {"search": {field: value}})
+
+
+def test_runtime_search_max_length_cannot_exceed_context_length():
+    generated = {"model": {"context_length": 4096}, "search": {"max_length": 4096}}
+
+    with pytest.raises(ValueError, match="exceeds the exported model context_length"):
+        apply_runtime_config(generated, {"search": {"max_length": 8192}})
+
+
+def test_runtime_search_rejects_unknown_fields():
+    with pytest.raises(ValueError, match="unknown runtime_config.search field"):
+        apply_runtime_config({"model": {"context_length": 4096}}, {"search": {"unsupported": 1}})
+
+
+def test_runtime_allows_block_drafter_to_repeat_decoder_provider_options():
+    generated = {
+        "model": {
+            "decoder": {"session_options": {"provider_options": [{"cuda": {"enable_cuda_graph": "0"}}]}},
+            "dflash2": {"session_options": {"ep.cuda.fpa_intb_gemm": "0"}},
+        }
+    }
+    runtime = {"model": {"dflash2": {"session_options": {"provider_options": [{"cuda": {"enable_cuda_graph": "1"}}]}}}}
+
+    updated = apply_runtime_config(generated, runtime)
+
+    assert updated["model"]["dflash2"]["session_options"]["provider_options"] == [{"cuda": {"enable_cuda_graph": "1"}}]
+
+
+def test_runtime_rejects_non_session_model_members():
+    generated = {"model": {"decoder": {"session_options": {}}, "vocab_size": 32000}}
+    with pytest.raises(ValueError, match="not a session-bearing component"):
+        apply_runtime_config(generated, {"model": {"vocab_size": {"session_options": {}}}})
+
+
+def test_runtime_rejects_draft_limit_above_exported_capacity():
+    generated = {
+        "model": {
+            "decoder": {"session_options": {}},
+            "dflash2": {"session_options": {}, "num_draft_tokens": 4},
+        },
+        "speculative": {"max_draft_tokens": 4},
+    }
+    with pytest.raises(ValueError, match="exceeds the exported drafter/state capacity"):
+        apply_runtime_config(generated, {"speculative": {"max_draft_tokens": 5}})
+
+
+def test_runtime_accepts_mtp_without_static_draft_capacity():
+    generated = {
+        "model": {
+            "decoder": {"session_options": {}},
+            "mtp": {"filename": "mtp.onnx"},
+        }
+    }
+
+    updated = apply_runtime_config(generated, {"speculative": {"max_draft_tokens": 8}})
+
+    assert updated["speculative"] == {"max_draft_tokens": 8}
+
+
+@pytest.mark.parametrize(
+    "mtp_options",
+    [
+        {"session_options": {"intra_op_num_threads": 4}},
+        {"run_options": {"tag": "mtp"}},
+        {"session_options": {"log_id": "mtp"}, "run_options": {"tag": "mtp"}},
+    ],
+)
+def test_runtime_accepts_mtp_options_without_generated_session_options(mtp_options):
+    generated = {"model": {"decoder": {"session_options": {}}, "mtp": {"filename": "mtp.onnx"}}}
+    updated = apply_runtime_config(generated, {"model": {"mtp": mtp_options}})
+
+    assert updated["model"]["mtp"] == {"filename": "mtp.onnx", **mtp_options}
+    assert generated["model"]["mtp"] == {"filename": "mtp.onnx"}
+
+
+@pytest.mark.parametrize("mtp_session", [None, {}, {"provider_options": [{"CUDA": {"gpu_mem_limit": "2048"}}]}])
+def test_runtime_mtp_provider_options_use_component_or_inherited_providers(mtp_session):
+    generated = {
+        "model": {
+            "decoder": {"session_options": {"provider_options": [{"CUDA": {"gpu_mem_limit": "1024"}}]}},
+            "mtp": {"filename": "mtp.onnx"},
+        }
+    }
+    if mtp_session is not None:
+        generated["model"]["mtp"]["session_options"] = mtp_session
+    original = copy.deepcopy(generated)
+    runtime = {"model": {"mtp": {"session_options": {"provider_options": [{"cuda": {"enable_cuda_graph": "1"}}]}}}}
+    original_runtime = copy.deepcopy(runtime)
+
+    updated = apply_runtime_config(generated, runtime)
+
+    assert updated["model"]["mtp"]["session_options"]["provider_options"] == [
+        {"CUDA": {"gpu_mem_limit": "2048" if mtp_session else "1024", "enable_cuda_graph": "1"}}
+    ]
+    assert generated == original
+    assert runtime == original_runtime
+
+
+@pytest.mark.parametrize(
+    "runtime_providers,error",
+    [
+        ([{"CPU": {}}], "cannot change execution providers"),
+        ([], "cannot change execution providers"),
+        ([{"webgpu": {"multiRotaryCacheConcatOffset": "0"}}], "graph-derived provider option"),
+    ],
+)
+def test_runtime_mtp_rejects_incompatible_provider_overrides(runtime_providers, error):
+    generated = {
+        "model": {
+            "decoder": {
+                "session_options": {"provider_options": [{"WebGPU": {"multiRotaryCacheConcatOffset": "4096"}}]}
+            },
+            "mtp": {"filename": "mtp.onnx"},
+        }
+    }
+    with pytest.raises(ValueError, match=error):
+        apply_runtime_config(
+            generated, {"model": {"mtp": {"session_options": {"provider_options": runtime_providers}}}}
+        )
+
+
+@pytest.mark.parametrize(
+    "session_options",
+    [
+        {"intra_op_num_threads": "4"},
+        {"inter_op_num_threads": 1.5},
+        {"log_severity_level": True},
+        {"log_verbosity_level": 2**31},
+        {"enable_cpu_mem_arena": "true"},
+        {"enable_mem_pattern": 1},
+        {"graph_optimization_level": "ORT_ENABLE_EVERYTHING"},
+        {"enable_profiling": 1},
+        {"ep.cuda.fpa_intb_gemm": 1},
+    ],
+)
+def test_runtime_rejects_invalid_session_option_values(session_options):
+    generated = {"model": {"decoder": {"session_options": {}}}}
+
+    with pytest.raises(ValueError, match="session_options"):
+        apply_runtime_config(generated, {"model": {"decoder": {"session_options": session_options}}})
+
+
+def test_runtime_accepts_parser_typed_session_options():
+    generated = {"model": {"decoder": {"session_options": {}}}}
+    session_options = {
+        "intra_op_num_threads": 4,
+        "enable_cpu_mem_arena": False,
+        "graph_optimization_level": "ORT_ENABLE_ALL",
+        "log_id": "decoder",
+        "ep.cuda.fpa_intb_gemm": "1",
+    }
+
+    updated = apply_runtime_config(generated, {"model": {"decoder": {"session_options": session_options}}})
+
+    assert updated["model"]["decoder"]["session_options"] == session_options

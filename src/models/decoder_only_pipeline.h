@@ -8,13 +8,13 @@
 
 #include "../worker_thread.h"
 #include "model.h"
-#include "input_ids.h"
-#include "logits.h"
-#include "kv_cache.h"
-#include "windowed_kv_cache.h"
-#include "position_inputs.h"
-#include "extra_inputs.h"
-#include "recurrent_state.h"
+#include "models/io/input_ids.h"
+#include "models/io/logits.h"
+#include "io/kv_cache.h"
+#include "io/windowed_kv_cache.h"
+#include "models/io/position_inputs.h"
+#include "models/io/extra_inputs.h"
+#include "models/io/recurrent_state.h"
 
 namespace Generators {
 
@@ -71,6 +71,10 @@ struct DecoderOnlyPipelineState : State {
                    DeviceSpan<int32_t> next_indices, bool is_last_chunk);
 
  protected:
+  // Virtual hook called before a pipeline stage gathers its inputs.
+  // Allows derived classes to update managed inputs for the stage about to run.
+  virtual void OnStageStart(size_t stage_id) {}
+
   // Virtual hook called after each pipeline stage completes, before next stage starts.
   // Allows derived classes to modify stage outputs (e.g., inject vision embeddings).
   // stage_id: ID of the stage that just completed

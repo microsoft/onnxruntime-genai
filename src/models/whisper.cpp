@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
-#include "../generators.h"
+#include "generator/generators.h"
+#include "models/io/static_kv_cache.h"
 #include "whisper.h"
 
 namespace Generators {
@@ -8,7 +9,11 @@ namespace Generators {
 WhisperModel::WhisperModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
   encoder_session_options_ = OrtSessionOptions::Create();
-  CreateSessionOptionsFromConfig(config_->model.encoder.session_options.has_value() ? config_->model.encoder.session_options.value() : config_->model.decoder.session_options, *encoder_session_options_, true);
+  // Some EPs defensively force encoder graph capture off by default (e.g. AMDGPU, where captured
+  // replay of this control-flow graph is unproven); ask the device rather than hard-coding its type.
+  // DML's default-on capture behavior is intentionally unchanged.
+  const bool disable_encoder_graph_capture = p_device_ && p_device_->DisablesEncoderGraphCapture();
+  CreateSessionOptionsFromConfig(config_->model.encoder.session_options.has_value() ? config_->model.encoder.session_options.value() : config_->model.decoder.session_options, *encoder_session_options_, true, /*disable_graph_capture=*/disable_encoder_graph_capture);
 
   session_encoder_ = CreateSession(ort_env, config_->model.encoder.filename, encoder_session_options_.get());
   session_decoder_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());
@@ -30,11 +35,8 @@ void AudioEncoderState::SetExtraInputs(const std::vector<ExtraInput>& extra_inpu
   audio_features_ = std::make_unique<AudioFeatures>(*this, model_.config_->model.encoder.inputs.audio_features, extra_inputs);
   audio_features_->Add();
 
-  // Verify that the frame size is expected
-  const int num_frames = static_cast<int>(audio_features_->GetShape()[2]);
-  if (num_frames != GetNumFrames()) {
-    throw new std::runtime_error("Whisper uses num_frames = 3000. The provided inputs have num_frames = " + std::to_string(num_frames));
-  }
+  const auto& shape = audio_features_->GetShape();
+  ValidateWhisperAudioFeaturesShape(shape, GetNumFrames());
 
   // Add encoder hidden states
   auto hidden_states_shape = std::array<int64_t, 3>{params_->BatchBeamSize(), GetNumFrames() / 2, model_.config_->model.encoder.hidden_size};
@@ -54,7 +56,7 @@ DeviceSpan<float> AudioEncoderState::Run(int current_length, DeviceSpan<int32_t>
 WhisperDecoderState::WhisperDecoderState(const WhisperModel& model, const GeneratorParams& params, const int num_frames)
     : State{params, model},
       model_{model},
-      kv_cache_(CreateKeyValueCache(*this)),
+      kv_cache_(model_.p_device_kvcache_->CreateKeyValueCache(*this)),
       num_frames_{num_frames} {
   input_ids_.Add();
   logits_.Add();

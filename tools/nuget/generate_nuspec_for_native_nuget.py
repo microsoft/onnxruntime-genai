@@ -115,7 +115,10 @@ def generate_dependencies(xml_text, package_version, ort_package_name, ort_packa
     for framework in target_frameworks:
         xml_text.append(f'<group targetFramework="{framework}">')
         xml_text.append(f'<dependency id="Microsoft.ML.OnnxRuntimeGenAI.Managed" version="{package_version}" />')
-        xml_text.append(f'<dependency id="{ort_package_name}" version="{ort_package_version}" />')
+        # ort_package_name is empty for packages (e.g. .Foundry) that intentionally
+        # carry no ONNX Runtime dependency; skip the ORT <dependency> in that case.
+        if ort_package_name:
+            xml_text.append(f'<dependency id="{ort_package_name}" version="{ort_package_version}" />')
         xml_text.append("</group>")
 
     xml_text.append("</dependencies>")
@@ -144,6 +147,33 @@ def generate_files(lines, args):
         elif runtime.startswith("linux"):
             add_native_artifact_if_exists(lines, runtime, "libonnxruntime-genai.so")
             add_native_artifact_if_exists(lines, runtime, "libonnxruntime-genai-cuda.so")
+            arm64_core = Path(
+                f"{args.sources_path}/{args.native_build_path}/{runtime}/{args.build_config}/libonnxruntime-genai.so"
+            )
+            if (
+                runtime == "linux-arm64"
+                and args.package_name == "Microsoft.ML.OnnxRuntimeGenAI.Cuda"
+                and arm64_core.exists()
+            ):
+                shim = arm64_core.parent / "libonnxruntime-genai-cuda.so"
+                if not shim.exists():
+                    raise FileNotFoundError(f"Missing ARM64 CUDA runtime library: {shim}")
+                for artifact in (
+                    "libonnxruntime.so",
+                    "libonnxruntime.so.1",
+                    "libonnxruntime.so.1.30.0",
+                    "libonnxruntime_providers_shared.so",
+                    "libonnxruntime_providers_cuda.so",
+                ):
+                    p = arm64_core.parent / artifact
+                    if not p.exists():
+                        raise FileNotFoundError(f"Missing ARM64 CUDA runtime library: {p}")
+                    add_native_artifact_if_exists(lines, runtime, artifact)
+                for artifact in ("LICENSE", "ThirdPartyNotices.txt"):
+                    p = Path(f"{args.sources_path}/{args.native_build_path}/{runtime}/{args.build_config}/ORT-{artifact}")
+                    if not p.exists():
+                        raise FileNotFoundError(f"Missing ARM64 ONNX Runtime {artifact}: {p}")
+                    lines.append(f'<file src="{p.absolute()}" target="licenses\\onnxruntime\\{artifact}" />')
         elif runtime.startswith("osx"):
             add_native_artifact_if_exists(lines, runtime, "libonnxruntime-genai.dylib")
         elif runtime.startswith("ios"):

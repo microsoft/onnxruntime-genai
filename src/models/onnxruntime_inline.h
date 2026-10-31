@@ -121,6 +121,11 @@ inline size_t SizeOf(ONNXTensorElementDataType type) {
       return sizeof(Ort::Float16_t);
     case Ort::TypeToTensorType<Ort::BFloat16_t>:
       return sizeof(Ort::BFloat16_t);
+    // FP8 KV caches are stored as single-byte elements. There is no Ort wrapper type for them,
+    // so match the ONNX element type directly.
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E4M3FN:
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E5M2:
+      return sizeof(uint8_t);
     default:
       throw std::runtime_error("Unsupported ONNXTensorElementDataType in GetTypeSize");
   }
@@ -360,6 +365,12 @@ inline const OrtHardwareDevice* OrtEpDevice::Device() const {
   return Ort::api->EpDevice_Device(this);
 }
 
+inline const OrtMemoryInfo* OrtEpDevice::GetMemoryInfo(OrtDeviceMemoryType memory_type) const {
+  // Returns nullptr when the EP advertises no allocator of this type — callers branch on that, so
+  // forward the pointer directly and do NOT ThrowOnError (the C API returns no status here).
+  return Ort::api->EpDevice_MemoryInfo(this, memory_type);
+}
+
 inline OrtHardwareDeviceType OrtHardwareDevice::Type() const {
   return Ort::api->HardwareDevice_Type(this);
 }
@@ -433,6 +444,12 @@ inline OrtEnv& OrtEnv::CreateAndRegisterAllocator(const OrtMemoryInfo& mem_info,
   return *this;
 }
 
+inline Ort::Allocator* OrtEnv::GetSharedAllocator(const OrtMemoryInfo& mem_info) const {
+  OrtAllocator* p = nullptr;
+  Ort::ThrowOnError(Ort::api->GetSharedAllocator(const_cast<OrtEnv*>(this), &mem_info, &p));
+  return static_cast<Ort::Allocator*>(p);  // env-owned; may be nullptr if no match
+}
+
 inline void OrtEnv::CopyTensors(const std::vector<const OrtValue*>& src_tensors,
                                 const std::vector<OrtValue*>& dst_tensors,
                                 OrtSyncStream* stream) const {
@@ -452,6 +469,10 @@ inline std::vector<const OrtEpDevice*> OrtEnv::GetEpDevices() {
     devices.emplace_back(device_ptrs[i]);
   }
   return devices;
+}
+
+inline void OrtEnv::ReleaseSharedAllocator(const OrtEpDevice* ep_device, OrtDeviceMemoryType mem_type) {
+  Ort::ThrowOnError(Ort::api->ReleaseSharedAllocator(this, ep_device, mem_type));
 }
 
 inline std::unique_ptr<OrtThreadingOptions> OrtThreadingOptions::Create() {
@@ -610,6 +631,11 @@ inline OrtSessionOptions& OrtSessionOptions::SetGraphOptimizationLevel(GraphOpti
   return *this;
 }
 
+inline OrtSessionOptions& OrtSessionOptions::SetDeterministicCompute(bool value) {
+  Ort::ThrowOnError(Ort::api->SetDeterministicCompute(this, value));
+  return *this;
+}
+
 inline OrtSessionOptions& OrtSessionOptions::SetOptimizedModelFilePath(const ORTCHAR_T* optimized_model_filepath) {
   Ort::ThrowOnError(Ort::api->SetOptimizedModelFilePath(this, optimized_model_filepath));
   return *this;
@@ -721,11 +747,6 @@ inline OrtSessionOptions& OrtSessionOptions::AppendExecutionProvider_CUDA(const 
 
 inline OrtSessionOptions& OrtSessionOptions::AppendExecutionProvider_CUDA_V2(const OrtCUDAProviderOptionsV2& provider_options) {
   Ort::ThrowOnError(Ort::api->SessionOptionsAppendExecutionProvider_CUDA_V2(this, &provider_options));
-  return *this;
-}
-
-inline OrtSessionOptions& OrtSessionOptions::AppendExecutionProvider_ROCM(const OrtROCMProviderOptions& provider_options) {
-  Ort::ThrowOnError(Ort::api->SessionOptionsAppendExecutionProvider_ROCM(this, &provider_options));
   return *this;
 }
 
@@ -1531,9 +1552,9 @@ inline void OrtOp::Invoke(const OrtKernelContext* context,
                                        output_values, static_cast<int>(output_count)));
 }
 
-inline std::unique_ptr<OrtLoraAdapter> OrtLoraAdapter::Create(const ORTCHAR_T* adapter_file_path, OrtAllocator& allocator) {
+inline std::unique_ptr<OrtLoraAdapter> OrtLoraAdapter::Create(const ORTCHAR_T* adapter_file_path, OrtAllocator* allocator) {
   OrtLoraAdapter* p;
-  Ort::ThrowOnError(Ort::api->CreateLoraAdapter(adapter_file_path, &allocator, &p));
+  Ort::ThrowOnError(Ort::api->CreateLoraAdapter(adapter_file_path, allocator, &p));
   return std::unique_ptr<OrtLoraAdapter>{p};
 }
 
@@ -1541,46 +1562,16 @@ inline std::unique_ptr<OrtLoraAdapter> OrtLoraAdapter::Create(const ORTCHAR_T* a
 
 namespace Ort {
 
-inline const ModelPackageApi& GetModelPackageApi() {
-  static const ModelPackageApi fns = []() {
-    ModelPackageApi f;
-    if (api == nullptr) {
-      return f;
-    }
-    // Resolve OrtModelPackageApi entries via the C API to avoid including
-    // onnxruntime_experimental_cxx_api.h. That header defines the
-    // Ort::Experimental::Get_OrtModelPackageApi_*_SinceV28_Fn accessors but transitively
-    // pulls in onnxruntime_cxx_api.h, which redefines the Ort:: types that genai has
-    // vendored in onnxruntime_api.h.
-#define GENAI_MP_V28_FN(NAME)                                                \
-  reinterpret_cast<OrtExperimental_OrtModelPackageApi_##NAME##_SinceV28_Fn>( \
-      api->GetExperimentalFunction(                                          \
-          kOrtExperimental_OrtModelPackageApi_##NAME##_SinceV28_FnName))
-
-    f.CreateModelPackageOptionsFromSessionOptions = GENAI_MP_V28_FN(CreateModelPackageOptionsFromSessionOptions);
-    f.ReleaseModelPackageOptions = GENAI_MP_V28_FN(ReleaseModelPackageOptions);
-    f.CreateModelPackageContext = GENAI_MP_V28_FN(CreateModelPackageContext);
-    f.ReleaseModelPackageContext = GENAI_MP_V28_FN(ReleaseModelPackageContext);
-    f.ModelPackage_GetComponentCount = GENAI_MP_V28_FN(ModelPackage_GetComponentCount);
-    f.ModelPackage_GetComponentNames = GENAI_MP_V28_FN(ModelPackage_GetComponentNames);
-    f.ModelPackage_GetVariantCount = GENAI_MP_V28_FN(ModelPackage_GetVariantCount);
-    f.ModelPackage_GetVariantNames = GENAI_MP_V28_FN(ModelPackage_GetVariantNames);
-    f.ModelPackage_GetVariantEpName = GENAI_MP_V28_FN(ModelPackage_GetVariantEpName);
-    f.ModelPackage_ResolveStringRef = GENAI_MP_V28_FN(ModelPackage_ResolveStringRef);
-    f.SelectComponent = GENAI_MP_V28_FN(SelectComponent);
-    f.ReleaseModelPackageComponentContext = GENAI_MP_V28_FN(ReleaseModelPackageComponentContext);
-    f.ModelPackageComponent_GetSelectedVariantFolderPath =
-        GENAI_MP_V28_FN(ModelPackageComponent_GetSelectedVariantFolderPath);
-
-#undef GENAI_MP_V28_FN
-    return f;
-  }();
-  if (fns.CreateModelPackageContext == nullptr) {
-    throw std::runtime_error(
-        "Model package API is not available in this ONNX Runtime build. "
-        "Model packages require ONNX Runtime with the OrtModelPackageApi experimental functions.");
+inline const OrtModelPackageApi& GetModelPackageApi() {
+  if (api == nullptr || api_version < 31) {
+    throw std::runtime_error("Model packages require ONNX Runtime 1.31 or newer.");
   }
-  return fns;
+  const auto* model_package_api = api->GetModelPackageApi();
+  if (model_package_api == nullptr) {
+    throw std::runtime_error(
+        "Model package API is not available in this ONNX Runtime build.");
+  }
+  return *model_package_api;
 }
 
 }  // namespace Ort

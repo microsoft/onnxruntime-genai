@@ -1,18 +1,98 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
-#include "../generators.h"
+#include "generator/generators.h"
 #include "marian.h"
 
 namespace Generators {
 
+namespace {
+constexpr std::string_view kCachedSourceProjectionPrefix{"cached_source_projection_"};
+
+std::string ShapeString(std::span<const int64_t> shape, std::span<const char* const> symbols = {}) {
+  std::string result{"["};
+  for (size_t i = 0; i < shape.size(); ++i) {
+    if (i != 0)
+      result += ", ";
+    result += shape[i] < 0 && !symbols.empty() && symbols[i][0] != '\0'
+                  ? symbols[i]
+                  : std::to_string(shape[i]);
+  }
+  return result + "]";
+}
+
+bool SameDimensions(const std::vector<int64_t>& left, const std::vector<const char*>& left_symbols,
+                    const std::vector<int64_t>& right, const std::vector<const char*>& right_symbols, size_t count) {
+  if (left.size() < count || right.size() < count)
+    return false;
+  for (size_t i = 0; i < count; ++i) {
+    if (left[i] != right[i] ||
+        (left[i] < 0 && std::strcmp(left_symbols[i], right_symbols[i]) != 0))
+      return false;
+  }
+  return true;
+}
+}  // namespace
+
 MarianModel::MarianModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
   encoder_session_options_ = OrtSessionOptions::Create();
-  CreateSessionOptionsFromConfig(config_->model.encoder.session_options.has_value() ? config_->model.encoder.session_options.value() : config_->model.decoder.session_options, *encoder_session_options_, true);
+  // Some EPs defensively force encoder graph capture off by default (e.g. AMDGPU, where captured
+  // replay of this control-flow graph is unproven); ask the device rather than hard-coding its type.
+  // DML's default-on capture behavior is intentionally unchanged.
+  const bool disable_encoder_graph_capture = p_device_ && p_device_->DisablesEncoderGraphCapture();
+  CreateSessionOptionsFromConfig(config_->model.encoder.session_options.has_value() ? config_->model.encoder.session_options.value() : config_->model.decoder.session_options, *encoder_session_options_, true, /*disable_graph_capture=*/disable_encoder_graph_capture);
 
   session_encoder_ = CreateSession(ort_env, config_->model.encoder.filename, encoder_session_options_.get());
   session_decoder_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());
 
+  SessionInfo encoder_info, decoder_info;
+  encoder_info.Add(*session_encoder_);
+  decoder_info.Add(*session_decoder_);
+  std::set<std::string> cache_names;
+  for (const auto& name : session_encoder_->GetInputNames()) {
+    if (name.compare(0, kCachedSourceProjectionPrefix.size(), kCachedSourceProjectionPrefix) == 0)
+      throw std::runtime_error("Marian cache '" + name + "' must not be an encoder input");
+  }
+  for (const auto& name : session_decoder_->GetOutputNames()) {
+    if (name.compare(0, kCachedSourceProjectionPrefix.size(), kCachedSourceProjectionPrefix) == 0)
+      throw std::runtime_error("Marian cache '" + name + "' must not be a decoder output");
+  }
+  for (const auto& name : session_encoder_->GetOutputNames()) {
+    if (name.compare(0, kCachedSourceProjectionPrefix.size(), kCachedSourceProjectionPrefix) == 0)
+      cache_names.insert(name);
+  }
+  for (const auto& name : session_decoder_->GetInputNames()) {
+    if (name.compare(0, kCachedSourceProjectionPrefix.size(), kCachedSourceProjectionPrefix) == 0)
+      cache_names.insert(name);
+  }
+  for (const auto& name : cache_names) {
+    if (!encoder_info.HasOutput(name) || !decoder_info.HasInput(name)) {
+      throw std::runtime_error("Marian cache '" + name + "' requires an encoder output and a matching decoder input");
+    }
+    const auto input_shape = decoder_info.GetInputShape(name);
+    const auto output_shape = encoder_info.GetOutputShape(name);
+    const auto input_symbols = decoder_info.GetInputSymbolicShape(name);
+    const auto output_symbols = encoder_info.GetOutputSymbolicShape(name);
+    const auto input_type = decoder_info.GetInputDataType(name);
+    const auto output_type = encoder_info.GetOutputDataType(name);
+    const auto source_shape = encoder_info.GetOutputShape(config_->model.encoder.outputs.encoder_outputs);
+    const auto source_symbols = encoder_info.GetOutputSymbolicShape(config_->model.encoder.outputs.encoder_outputs);
+    if (input_shape.size() != 3 || output_shape.size() != 3 ||
+        !SameDimensions(input_shape, input_symbols, output_shape, output_symbols, 3) ||
+        !SameDimensions(output_shape, output_symbols, source_shape, source_symbols, 2) ||
+        output_shape[0] == 0 || output_shape[1] == 0 || output_shape[2] <= 0 ||
+        input_type != output_type ||
+        (output_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT && output_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16)) {
+      throw std::runtime_error(
+          "Marian cache '" + name +
+          "' requires matching float32 or float16 [batch, source, projection] tensors "
+          "with a fixed projection width and the encoder's batch/source dimensions: encoder output " +
+          ShapeString(output_shape, output_symbols) + " (type " + std::to_string(output_type) +
+          "), decoder input " + ShapeString(input_shape, input_symbols) + " (type " + std::to_string(input_type) +
+          "), encoder source " + ShapeString(source_shape, source_symbols));
+    }
+    cached_source_projections_.push_back({name, {output_shape[0], output_shape[1], output_shape[2]}, output_type});
+  }
   session_info_.Add(*session_decoder_);
   session_info_.Add(*session_encoder_);
 }
@@ -25,6 +105,10 @@ MarianLogits::MarianLogits(State& state)
 }
 
 std::unique_ptr<State> MarianModel::CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const {
+  if (!cached_source_projections_.empty() &&
+      (p_device_->GetType() != DeviceType::CPU || params.search.num_beams != 1 || !params.IsGreedySampling())) {
+    throw std::runtime_error("Marian cached projections support CPU greedy generation with one beam only");
+  }
   return std::make_unique<MarianState>(*this, sequence_lengths, params);
 }
 
@@ -32,6 +116,7 @@ MarianState::MarianState(const MarianModel& model, DeviceSpan<int32_t> sequence_
     : State{params, model},
       model_{model},
       encoder_attention_mask_{model, *this, sequence_lengths_unk, model_.config_->model.encoder.inputs.attention_mask},
+      cached_source_projections_(model.cached_source_projections_.size()),
       attention_mask_{model, *this, sequence_lengths_unk, model_.config_->model.decoder.inputs.encoder_attention_mask} {
 }
 
@@ -88,6 +173,19 @@ void MarianInputIDs::Add() {
 }
 
 void MarianInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
+  // The tensor holds one token per batch*beam entry. The copy below is
+  // unchecked in release builds (DeviceSpan::CopyFrom only asserts) and always
+  // copies the destination's length, so a shorter source is read past its end
+  // and the tail fills with unrelated memory. That is then consumed as token
+  // ids by the decoder's embedding gather, which reads out of bounds.
+  // Validate explicitly so the caller gets a diagnosable error instead.
+  if (new_tokens.size() != static_cast<size_t>(shape_[0])) {
+    throw std::runtime_error(
+        "MarianInputIDs::Update: got " + std::to_string(new_tokens.size()) +
+        " token(s) but the input tensor holds " + std::to_string(shape_[0]) +
+        " (batch_size * num_beams). Every batch entry needs exactly one token.");
+  }
+
   value_->CreateTensor(shape_, state_.params_->use_graph_capture);
   state_.inputs_[input_index_] = value_->GetOrtTensor();
 
@@ -112,19 +210,54 @@ DeviceSpan<float> MarianState::Run(int current_length, DeviceSpan<int32_t>& next
 
     encoder_attention_mask_.Add();
 
-    // Create a new DeviceSpan with one additional token (0) appended
-    auto original_cpu_span = next_tokens.CpuSpan();
-    auto extended_tokens = model_.p_device_inputs_->Allocate<int32_t>(original_cpu_span.size() + 1);
-    auto extended_cpu_span = extended_tokens.CpuSpan();
+    // Append eos per sequence at its own unpadded length. PadInputs right-pads,
+    // so appending once at the end of the flattened buffer would leave eos
+    // behind the padding for every row but the last.
+    //
+    // The prompt buffer is [batch_size, seq_len]: DefaultInputIDs and
+    // DefaultPositionInputs expand it over beams themselves, so only
+    // decoder-side tensors are sized batch*beam.
+    const size_t batch_size = static_cast<size_t>(params_->search.batch_size);
+    const int32_t pad_token_id = model_.config_->model.pad_token_id;
+    const int32_t eos_token_id = model_.config_->model.eos_token_id[0];
 
-    // Copy original tokens and append eos_token_id
-    std::copy(original_cpu_span.begin(), original_cpu_span.end(), extended_cpu_span.begin());
-    extended_cpu_span[original_cpu_span.size()] = model_.config_->model.eos_token_id[0];  // Append eos_token_id
+    auto original_cpu_span = next_tokens.CpuSpan();
+    if (batch_size == 0 || original_cpu_span.size() % batch_size != 0) {
+      throw std::runtime_error(
+          "MarianState::Run: prompt buffer holds " +
+          std::to_string(original_cpu_span.size()) +
+          " token(s), which is not a positive multiple of batch_size " +
+          std::to_string(batch_size) +
+          ". The buffer must be a padded [batch_size, sequence_length] block.");
+    }
+    const size_t src_width = original_cpu_span.size() / batch_size;
+    const size_t dst_width = src_width + 1;
+
+    auto extended_tokens = model_.p_device_inputs_->Allocate<int32_t>(batch_size * dst_width);
+    auto extended_cpu_span = extended_tokens.CpuSpan();
+    for (size_t b = 0; b < batch_size; b++) {
+      auto src = original_cpu_span.subspan(b * src_width, src_width);
+      auto dst = extended_cpu_span.subspan(b * dst_width, dst_width);
+
+      size_t length = src_width;
+      for (size_t i = 0; i < src_width; i++) {
+        if (src[i] == pad_token_id) {
+          length = i;
+          break;
+        }
+      }
+
+      std::copy(src.begin(), src.begin() + length, dst.begin());
+      dst[length] = eos_token_id;
+      std::fill(dst.begin() + length + 1, dst.end(), pad_token_id);
+    }
     extended_tokens.CopyCpuToDevice();
 
     encoder_input_ids_.Update(extended_tokens);
     const size_t new_length = static_cast<size_t>(encoder_input_ids_.GetShape()[1]);
-    encoder_attention_mask_.Update(next_tokens, current_length, static_cast<int>(new_length));
+    // The mask is built by scanning the token buffer over batch*seq_len, so it
+    // must see the extended buffer rather than the original padded one.
+    encoder_attention_mask_.Update(extended_tokens, current_length, static_cast<int>(new_length));
 
     const auto encoder_outputs_type = model_.session_info_.GetOutputDataType(model_.config_->model.encoder.outputs.encoder_outputs.c_str());
     const std::array<int64_t, 3> encoder_outputs_shape{encoder_input_ids_.GetShape()[0], encoder_input_ids_.GetShape()[1], encoder_hidden_size};
@@ -132,6 +265,19 @@ DeviceSpan<float> MarianState::Run(int current_length, DeviceSpan<int32_t>& next
 
     output_names_.push_back(model_.config_->model.encoder.outputs.encoder_outputs.c_str());
     outputs_.push_back(encoder_outputs_.get());
+    for (size_t i = 0; i < cached_source_projections_.size(); ++i) {
+      const auto& projection = model_.cached_source_projections_[i];
+      const std::array<int64_t, 3> shape{encoder_outputs_shape[0], encoder_outputs_shape[1], projection.shape[2]};
+      for (size_t dim = 0; dim < 2; ++dim) {
+        if (projection.shape[dim] >= 0 && projection.shape[dim] != shape[dim]) {
+          throw std::runtime_error("Marian cache '" + projection.name + "' declares " + ShapeString(projection.shape) +
+                                   " but the request requires " + ShapeString(shape));
+        }
+      }
+      cached_source_projections_[i] = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), shape, projection.type);
+      output_names_.push_back(projection.name.c_str());
+      outputs_.push_back(cached_source_projections_[i].get());
+    }
 
     if (model_.config_->model.encoder.run_options.has_value()) {
       State::SetRunOptions(model_.config_->model.encoder.run_options.value());
@@ -140,14 +286,23 @@ DeviceSpan<float> MarianState::Run(int current_length, DeviceSpan<int32_t>& next
 
     // Clear inputs and outputs for the decoder
     ClearIO();
+    for (size_t i = 0; i < cached_source_projections_.size(); ++i) {
+      input_names_.push_back(model_.cached_source_projections_[i].name.c_str());
+      inputs_.push_back(cached_source_projections_[i].get());
+    }
 
     // Initialize the decoder inputs and outputs
     decoder_input_ids_.name_ = model_.config_->model.decoder.inputs.input_ids.c_str();
     decoder_input_ids_.Add();
 
-    next_tokens.CpuSpan()[next_tokens.size() - 1] = model_.config_->model.bos_token_id;
+    // Every sequence in the batch starts decoding from bos. Decoder tensors are
+    // sized batch*beam because beam expansion has already happened by here.
+    auto decoder_start_tokens = model_.p_device_inputs_->Allocate<int32_t>(params_->BatchBeamSize());
+    std::fill(decoder_start_tokens.CpuSpan().begin(), decoder_start_tokens.CpuSpan().end(),
+              model_.config_->model.bos_token_id);
+    decoder_start_tokens.CopyCpuToDevice();
 
-    decoder_input_ids_.Update(next_tokens.subspan(next_tokens.size() - 1, 1));
+    decoder_input_ids_.Update(decoder_start_tokens);
 
     const std::array<int64_t, 1> past_key_values_length_shape{1};
     past_key_values_length_ = OrtValue::CreateTensor(model_.allocator_cpu_, past_key_values_length_shape, model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.past_key_values_length));
@@ -158,7 +313,7 @@ DeviceSpan<float> MarianState::Run(int current_length, DeviceSpan<int32_t>& next
 
     // attention_mask_.attention_mask_name_ = model_.config_->model.decoder.inputs.encoder_attention_mask;
     attention_mask_.Add();
-    attention_mask_.Update(next_tokens, current_length, static_cast<int>(new_length));
+    attention_mask_.Update(extended_tokens, current_length, static_cast<int>(new_length));
 
     const auto hidden_states_type = model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.encoder_hidden_states.c_str());
     const std::array<int64_t, 3> encoder_hidden_states_shape{decoder_input_ids_.GetMarianInputsShape()[0], encoder_input_ids_.GetShape()[1], encoder_hidden_size};
@@ -201,11 +356,7 @@ DeviceSpan<float> MarianState::Run(int current_length, DeviceSpan<int32_t>& next
 
   // Update the decoder inputs with the next tokens
   decoder_input_ids_.Update(next_tokens);
-  const std::array<int64_t, 3> rnn_states_prev_shape{3, decoder_input_ids_.GetMarianInputsShape()[0], encoder_hidden_size};
-
-  auto rnn_states_prev_data = rnn_states_prev_->GetDeviceSpan<int32_t>();
-  auto rnn_states_data = rnn_states_->GetDeviceSpan<int32_t>();
-  rnn_states_prev_data.CopyFrom(rnn_states_data);
+  UpdateRnnStates(next_indices);
 
   auto data = past_key_values_length_->GetTensorMutableData<int64_t>();
   *data += 1;
@@ -218,6 +369,44 @@ DeviceSpan<float> MarianState::Run(int current_length, DeviceSpan<int32_t>& next
   }
   State::Run(*model_.session_decoder_);
   return logits_.Get();
+}
+
+void MarianState::UpdateRnnStates(DeviceSpan<int32_t> next_indices) {
+  if (next_indices.empty()) {
+    rnn_states_prev_->GetByteSpan().CopyFrom(rnn_states_->GetByteSpan());
+    return;
+  }
+
+  const size_t batch_beam_size = params_->BatchBeamSize();
+  auto indices = next_indices.CopyDeviceToCpu();
+  if (indices.size() != batch_beam_size) {
+    throw std::runtime_error("MarianState::UpdateRnnStates: beam index count does not match batch_size * num_beams");
+  }
+
+  auto source = rnn_states_->GetByteSpan();
+  auto destination = rnn_states_prev_->GetByteSpan();
+  constexpr size_t rnn_state_slots = 3;
+  if (source.size() != destination.size() || source.size() % (rnn_state_slots * batch_beam_size) != 0) {
+    throw std::runtime_error("MarianState::UpdateRnnStates: recurrent state buffers have incompatible sizes");
+  }
+  const size_t bytes_per_beam = source.size() / (rnn_state_slots * batch_beam_size);
+
+  for (size_t slot = 0; slot < rnn_state_slots; ++slot) {
+    for (size_t destination_beam = 0; destination_beam < batch_beam_size; ++destination_beam) {
+      const int32_t source_beam = indices[destination_beam];
+      if (source_beam < 0 || static_cast<size_t>(source_beam) >= batch_beam_size) {
+        throw std::runtime_error("MarianState::UpdateRnnStates: beam index is out of range");
+      }
+
+      auto source_state = source.subspan(
+          (slot * batch_beam_size + static_cast<size_t>(source_beam)) * bytes_per_beam,
+          bytes_per_beam);
+      auto destination_state = destination.subspan(
+          (slot * batch_beam_size + destination_beam) * bytes_per_beam,
+          bytes_per_beam);
+      destination_state.CopyFrom(source_state);
+    }
+  }
 }
 
 }  // namespace Generators
