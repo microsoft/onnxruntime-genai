@@ -40,8 +40,9 @@ struct DevTensor {
 };
 
 // Device copy of every initializer that several sessions of the stack have in common (decode/fold, head, dense prefill,
-// head KV prefill): loaded once from the files of a text manifest (tools/qwen38_graph/build_package_v12b.py), handed to each
-// session through AddInitializer (ORT uses a user supplied initializer in place when it is on the session's device).
+// head KV prefill): loaded once from the files of a text manifest (weights_pool.txt, written by the package builders in
+// tools/qwen38_graph/, e.g. build_package_engine_v12b.py), handed to each session through AddInitializer (ORT uses a
+// user supplied initializer in place when it is on the session's device).
 struct Qwen38WeightPool {
   Qwen38WeightPool(Qwen38Plane& plane, const std::filesystem::path& manifest_path, const std::filesystem::path& root,
                    const OrtMemoryInfo& memory_info, int threads = 8);
@@ -93,6 +94,18 @@ size_t EffectiveQwen38PrefillChunkTokens(const Config::Model::Qwen38Graph& q);
 // Throws a std::runtime_error unless the effective prompt chunk lies in [1, kv_capacity] (dense prefill) or, when the
 // prompt is ingested by the decode graphs (prefill.enabled false), is even so that S=2 pairs stay aligned.
 void ValidateQwen38PrefillChunk(const Config::Model::Qwen38Graph& q);
+
+// Throws std::invalid_argument naming the first prompt id outside [0, vocab_size). The ids are row indices of the
+// embedding gather on the device, which has no bound check of its own: an id outside the table reads past the mapped
+// file (a sticky CUDA error that takes the whole context down, or another row's data), so the engine rejects them
+// before it touches any state.
+void ValidateQwen38PromptTokens(std::span<const int32_t> tokens, int vocab_size);
+
+// Whether the session of the standalone R=2 head captures CUDA graphs. That session is created from the decoder's
+// options merged into model.qwen38_graph.fold.head_r2.session_options (which may name only a few settings), so the
+// answer comes from the merged options, not from the configured ones: Warmup() runs the head the number of times a
+// captured graph needs, and a capture that lands in a live request stalls it.
+bool Qwen38HeadR2CapturesGraph(const Config::SessionOptions& decoder, const std::optional<Config::SessionOptions>& head_r2);
 
 // The CUDA graphs of the decode stack. ORT keeps one captured graph per annotation id in a session, so every run that
 // binds different buffers needs an id of its own: one per (row count, ring phase) for the target (decode graphs or the

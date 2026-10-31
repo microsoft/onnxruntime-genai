@@ -1,14 +1,21 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <algorithm>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <iterator>
+#include <limits>
+#include <optional>
 #include <set>
+#include <span>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -17,6 +24,7 @@
 #include "models/model_type.h"
 #include "models/qwen38_decode_device.h"
 #include "models/qwen38_graph.h"
+#include "scoped-environment-variable.h"
 
 namespace Generators::test {
 
@@ -45,15 +53,20 @@ struct MockPlaneTracker {
   static inline int fail_on_alloc_call = -1;
   static inline DeviceAlias device_alias = DeviceAlias::kBiased;
   static inline std::vector<void*> live_device_ptrs;
-  static inline std::vector<void*> registered_host_ptrs;
+  static inline std::vector<void*> registered_host_ptrs;  // accepted registrations only
   static inline std::vector<void*> unregistered_host_ptrs;
+  static inline std::vector<std::pair<uintptr_t, uintptr_t>> live_host_ranges;
+  static inline int rejected_host_registrations = 0;
   static constexpr uintptr_t kDevBias = 0x200000u;
+  static constexpr int kHostMemoryAlreadyRegistered = 712;  // cudaErrorHostMemoryAlreadyRegistered
 
   static void Reset(int fail_alloc = -1) {
     for (void* p : live_device_ptrs) std::free(p);
     live_device_ptrs.clear();
     registered_host_ptrs.clear();
     unregistered_host_ptrs.clear();
+    live_host_ranges.clear();
+    rejected_host_registrations = 0;
     alloc_calls = 0;
     fail_on_alloc_call = fail_alloc;
     device_alias = DeviceAlias::kBiased;
@@ -83,11 +96,25 @@ struct MockPlaneTracker {
     std::free(p);
     return 0;
   }
-  static int HostRegister(void* p, size_t, unsigned) {
+  // Like cudaHostRegister, refuses a range that overlaps one that is still registered.
+  static int HostRegister(void* p, size_t bytes, unsigned) {
+    const auto begin = reinterpret_cast<uintptr_t>(p);
+    const auto end = begin + bytes;
+    for (const auto& [live_begin, live_end] : live_host_ranges) {
+      if (begin < live_end && live_begin < end) {
+        ++rejected_host_registrations;
+        return kHostMemoryAlreadyRegistered;
+      }
+    }
+    live_host_ranges.emplace_back(begin, end);
     registered_host_ptrs.push_back(p);
     return 0;
   }
   static int HostUnregister(void* p) {
+    const auto begin = reinterpret_cast<uintptr_t>(p);
+    live_host_ranges.erase(std::remove_if(live_host_ranges.begin(), live_host_ranges.end(),
+                                          [begin](const auto& range) { return range.first == begin; }),
+                           live_host_ranges.end());
     unregistered_host_ptrs.push_back(p);
     return 0;
   }
@@ -527,6 +554,76 @@ TEST(Qwen38GraphConfigTest, NonInheritedPrefillSessionOptionsRetainCudaProviderW
   EXPECT_TRUE(IsGraphCaptureEnabled(resolved_inherited));
 }
 
+// Warmup() runs the standalone R=2 head the number of times a captured graph needs; the answer has to come from the
+// options the head session is created with (the decoder's merged into the configured ones), not from the configured ones
+// alone, or a graph is captured inside a live request.
+TEST(Qwen38GraphConfigTest, HeadR2CapturesGraphsWhenItsMergedSessionOptionsDo) {
+  const auto decoder_options = [](const char* cuda_options) {
+    Config config;
+    OverlayConfig(config, std::string(R"({"model":{"decoder":{"session_options":{"provider_options":[{"cuda":)") +
+                              cuda_options + "}]}}}}");
+    config.model.decoder.session_options.providers = {"cuda"};
+    return config.model.decoder.session_options;
+  };
+  // The head_r2 options as the configuration loader leaves them: `providers` names the provider_options sections.
+  const auto head_r2_options = [](const char* session_options) {
+    Config config;
+    OverlayConfig(config, std::string(R"({"model":{"qwen38_graph":{"fold":{"head_r2":{"session_options":)") +
+                              session_options + "}}}}}");
+    auto options = config.model.qwen38_graph.fold.head_r2.session_options;
+    for (const auto& provider : options->provider_options) options->providers.push_back(provider.name);
+    return options;
+  };
+
+  const auto capturing = decoder_options(R"({"device_id":"0","enable_cuda_graph":"1"})");
+  ASSERT_TRUE(IsGraphCaptureEnabled(capturing));
+  EXPECT_TRUE(Qwen38HeadR2CapturesGraph(capturing, std::nullopt));
+
+  // Options that name unrelated settings only: the head session still inherits the decoder's CUDA provider and with it
+  // the graph capture, although the configured options alone enable none.
+  const auto unrelated = head_r2_options(R"({"intra_op_num_threads":2})");
+  EXPECT_FALSE(IsGraphCaptureEnabled(*unrelated));
+  EXPECT_TRUE(Qwen38HeadR2CapturesGraph(capturing, unrelated));
+
+  // A provider section that does not mention graph capture inherits it from the decoder's section of the same provider.
+  const auto device_only = head_r2_options(R"({"provider_options":[{"cuda":{"device_id":"1"}}]})");
+  EXPECT_FALSE(IsGraphCaptureEnabled(*device_only));
+  EXPECT_TRUE(Qwen38HeadR2CapturesGraph(capturing, device_only));
+
+  // An explicit opt-out of the head session wins over the decoder's setting.
+  const auto opted_out = head_r2_options(R"({"provider_options":[{"cuda":{"enable_cuda_graph":"0"}}]})");
+  EXPECT_FALSE(Qwen38HeadR2CapturesGraph(capturing, opted_out));
+
+  // A decoder that does not capture does not make its head capture.
+  const auto eager = decoder_options(R"({"device_id":"0"})");
+  EXPECT_FALSE(Qwen38HeadR2CapturesGraph(eager, std::nullopt));
+  EXPECT_FALSE(Qwen38HeadR2CapturesGraph(eager, unrelated));
+  EXPECT_FALSE(Qwen38HeadR2CapturesGraph(eager, device_only));
+}
+
+TEST(Qwen38PromptTokenTest, AcceptsEveryIdOfTheVocabulary) {
+  const std::vector<int32_t> tokens = {0, 1, 1000, 248319};
+  EXPECT_NO_THROW(ValidateQwen38PromptTokens(tokens, 248320));
+  EXPECT_NO_THROW(ValidateQwen38PromptTokens(std::span<const int32_t>{}, 248320));
+}
+
+TEST(Qwen38PromptTokenTest, RejectsIdsOutsideTheVocabularyAndNamesTheOffender) {
+  const auto message_of = [](std::vector<int32_t> tokens, int vocab) {
+    try {
+      ValidateQwen38PromptTokens(tokens, vocab);
+    } catch (const std::invalid_argument& e) {
+      return std::string{e.what()};
+    }
+    return std::string{};
+  };
+  EXPECT_NE(message_of({5, -1}, 10).find("prompt token 1 has id -1"), std::string::npos);
+  EXPECT_NE(message_of({3, 4, 10}, 10).find("prompt token 2 has id 10"), std::string::npos);
+  EXPECT_NE(message_of({0, std::numeric_limits<int32_t>::max()}, 248320).find("prompt token 1"), std::string::npos);
+  EXPECT_NE(message_of({std::numeric_limits<int32_t>::min()}, 248320).find("prompt token 0"), std::string::npos);
+  EXPECT_TRUE(message_of({9}, 10).empty());
+  EXPECT_FALSE(message_of({0}, 0).empty());  // an empty vocabulary accepts nothing
+}
+
 TEST(Qwen38CacheShapeTest, AcceptsTheExportedGeometry) {
   const std::vector<Qwen38CacheInput> target = {
       {"input_ids", {-1, 1}},
@@ -737,7 +834,8 @@ TEST(Qwen38WeightPoolTest, CleansUpEarlierAllocationsOnConstructorFailureAndSupp
                                        "session target embed 2\n");
   auto mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
 
-  // Fail on the 2nd device_alloc call: the 1st device allocation and the host_pool mapping must be cleaned up.
+  // Fail on the 2nd device_alloc call: the 1st device allocation must be released. Host ranges are registered only after
+  // every entry is placed, so none exists yet; cleanup after a registration is covered by the tests further down.
   {
     Qwen38Plane plane;
     InitMockPlane(plane, /*fail_alloc=*/2);
@@ -867,6 +965,62 @@ TEST(Qwen38WeightPoolTest, CpuEntriesWithoutADeviceAliasStayCpuTensors) {
     }
     EXPECT_EQ(MockPlaneTracker::unregistered_host_ptrs, MockPlaneTracker::registered_host_ptrs);
   }
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+TEST(Qwen38WeightPoolTest, PinningTheCpuPoolRegistersEachMappedRangeOnce) {
+  const auto dir = MakeScratchDir("weight_pool_pin_cpu_pool");
+  const auto manifest_path = WriteMappedPoolManifest(dir, /*with_cpu_entry=*/true);
+  auto mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+
+  for (const char* pin : {"1", "0"}) {
+    ScopedEnvironmentVariable pin_cpu_pool{"ORTGENAI_PIN_CPU_POOL", pin};
+    Qwen38Plane plane;
+    InitMockPlane(plane);
+    {
+      // The file mapping must leave the registration to the pool: a whole-file registration made under
+      // ORTGENAI_PIN_CPU_POOL=1 would overlap the pool's own range and CUDA rejects that (712).
+      Qwen38WeightPool pool{plane, manifest_path, dir, *mem_info, 1};
+      EXPECT_EQ(MockPlaneTracker::rejected_host_registrations, 0) << "ORTGENAI_PIN_CPU_POOL=" << pin;
+      EXPECT_EQ(MockPlaneTracker::registered_host_ptrs.size(), 2u) << "one range per mapped file";
+      EXPECT_EQ(pool.cpu_bytes, 32u);
+      EXPECT_EQ(pool.host_mapped_bytes, 64u);
+    }
+    EXPECT_EQ(MockPlaneTracker::unregistered_host_ptrs, MockPlaneTracker::registered_host_ptrs);
+    EXPECT_TRUE(MockPlaneTracker::live_host_ranges.empty());
+  }
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+TEST(Qwen38WeightPoolTest, AFailedDeviceCopyUnregistersTheHostRangesAndFreesTheDeviceMemory) {
+  const auto dir = MakeScratchDir("weight_pool_short_read");
+  WriteFile(dir / "w0.bin", std::string(8, 'a'));  // the entry below declares 32 bytes
+  WriteFile(dir / "embed.bin", std::string(128, 'e'));
+  const auto manifest_path = WriteFile(dir / "pool.txt",
+                                       "qwen38_weights_pool 1\n"
+                                       "pool 0 1 0 32 1 8 w0.bin\n"
+                                       "host_pool 1 1 32 64 2 2 8 embed.bin\n"
+                                       "session target w0 0\n"
+                                       "session target embed 1\n");
+  auto mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+
+  Qwen38Plane plane;
+  InitMockPlane(plane);
+  try {
+    Qwen38WeightPool pool{plane, manifest_path, dir, *mem_info, 1};
+    ADD_FAILURE() << "a weight file shorter than its entry must fail the construction";
+  } catch (const std::runtime_error& e) {
+    EXPECT_NE(std::string(e.what()).find("short read"), std::string::npos) << e.what();
+  }
+  // The host range was registered before the upload failed: the failure path must give it back, and the device copy.
+  EXPECT_EQ(MockPlaneTracker::registered_host_ptrs.size(), 1u);
+  EXPECT_EQ(MockPlaneTracker::unregistered_host_ptrs, MockPlaneTracker::registered_host_ptrs);
+  EXPECT_TRUE(MockPlaneTracker::live_host_ranges.empty());
+  EXPECT_TRUE(MockPlaneTracker::live_device_ptrs.empty());
 
   std::error_code ec;
   std::filesystem::remove_all(dir, ec);
