@@ -17,6 +17,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -134,9 +135,20 @@ void ValidateQwen38MultiSlotConfig(const Config& config);
 // Throws a std::runtime_error unless a target graph with these outputs can be run for `request_slots` slots at once: every slot
 // keeps its own accepted prefix of the verify rows, which the batched run restores per slot from the compact state_update.*
 // outputs, so a ring-bank target (present_mid* outputs, one bank per row count for the whole batch) is refused with a
-// diagnostic naming the output. Run as soon as the target session exists, before the other sessions are created and before
-// any device state is allocated; a single slot has no restriction.
+// diagnostic naming the output. A single slot has no restriction. The model constructor runs it twice: on the outputs read
+// from the model file before any weight is uploaded (ValidateQwen38TargetModelFile), and, authoritatively, on the outputs of
+// the target session as soon as that exists, before the other sessions are created and any device state is allocated.
 void ValidateQwen38BatchedTargetOutputs(size_t request_slots, const std::vector<std::string>& output_names);
+
+// The names of the outputs of the graph of the ONNX model file `model_file`, in order, read from its protobuf encoding
+// (ModelProto.graph, GraphProto.output, ValueInfoProto.name) without reading a single initializer, so that they are known
+// before any weight is uploaded. nullopt when the file cannot be opened, is not a protobuf ONNX model (an ORT-format model,
+// say) or has no output: the caller then relies on the outputs of the session.
+std::optional<std::vector<std::string>> ReadQwen38OnnxOutputNames(const std::filesystem::path& model_file);
+
+// ValidateQwen38BatchedTargetOutputs on the outputs of `model_file`, for several slots only (a single slot reads nothing). A
+// file whose outputs cannot be read is accepted here and left to the check against the session.
+void ValidateQwen38TargetModelFile(size_t request_slots, const std::filesystem::path& model_file);
 
 // Checks a model package against the plane library it names, when the model is loaded, before its weights are uploaded and
 // before any session is created: an INT8 PLE table (model.qwen38_graph.ple_table with a negative scale) needs the int8_ple

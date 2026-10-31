@@ -659,6 +659,50 @@ void ExpectConfigDiagnostic(const Config& config, const std::string& needle) {
   }
 }
 
+// Hand-encoded protobuf: the framing of the few ONNX fields the output-name reader walks (onnx.ModelProto.graph = 7,
+// GraphProto.{node = 1, name = 2, initializer = 5, input = 11, output = 12, value_info = 13}, ValueInfoProto.{name = 1,
+// type = 2}).
+std::string ProtoVarint(uint64_t value) {
+  std::string bytes;
+  while (value >= 0x80) {
+    bytes.push_back(static_cast<char>((value & 0x7F) | 0x80));
+    value >>= 7;
+  }
+  bytes.push_back(static_cast<char>(value));
+  return bytes;
+}
+
+std::string ProtoBytes(uint32_t field, const std::string& payload) {
+  return ProtoVarint((uint64_t{field} << 3) | 2) + ProtoVarint(payload.size()) + payload;
+}
+
+std::string ProtoVarintField(uint32_t field, uint64_t value) {
+  return ProtoVarint(uint64_t{field} << 3) + ProtoVarint(value);
+}
+
+std::string ProtoValueInfo(const std::string& name) {
+  return ProtoBytes(1, name) + ProtoBytes(2, std::string(40, '\x08')) + ProtoBytes(3, "doc");
+}
+
+std::string OnnxModelBytes(const std::vector<std::string>& outputs, size_t initializer_bytes = 0) {
+  std::string graph;
+  graph += ProtoBytes(1, "node payload");
+  graph += ProtoBytes(2, "main_graph");
+  graph += ProtoBytes(5, std::string(initializer_bytes, '\x7f'));
+  graph += ProtoBytes(11, ProtoValueInfo("input_ids"));
+  for (const std::string& name : outputs) graph += ProtoBytes(12, ProtoValueInfo(name));
+  graph += ProtoBytes(13, ProtoValueInfo("intermediate"));
+
+  std::string model;
+  model += ProtoVarintField(1, 9);  // ir_version
+  model += ProtoBytes(2, "tests");  // producer_name
+  model += ProtoBytes(7, graph);
+  model += ProtoBytes(8, ProtoVarintField(2, 21));                // opset_import
+  model += ProtoVarint((15u << 3) | 1) + std::string(8, '\x01');  // a fixed64 field
+  model += ProtoVarint((16u << 3) | 5) + std::string(4, '\x02');  // a fixed32 field
+  return model;
+}
+
 }  // namespace
 
 // Several slots are decoded by the batched fold target and prefilled chunk by chunk through it. Everything else is refused when
@@ -755,6 +799,97 @@ TEST(Qwen38MultiSlotConfigTest, SeveralSlotsNeedACompactStateTarget) {
   EXPECT_NO_THROW(ValidateQwen38BatchedTargetOutputs(1, plain));
   EXPECT_THROW(ValidateQwen38BatchedTargetOutputs(2, plain), std::runtime_error);
   EXPECT_THROW(ValidateQwen38BatchedTargetOutputs(2, {}), std::runtime_error);
+}
+
+// The same check runs on the model file before any weight is uploaded: the output names come from the protobuf framing of the
+// graph, whose initializers are skipped, not parsed.
+TEST(Qwen38MultiSlotConfigTest, TheOutputNamesOfTheModelFileAreReadWithoutParsingItsInitializers) {
+  const auto dir = MakeScratchDir("onnx_outputs");
+  const std::vector<std::string> outputs = {"logits", "present_mid.0.key", "state_update.1.conv_value", "next_tokens"};
+
+  const auto small = WriteFile(dir / "small.onnx", OnnxModelBytes(outputs));
+  ASSERT_TRUE(ReadQwen38OnnxOutputNames(small).has_value());
+  EXPECT_EQ(*ReadQwen38OnnxOutputNames(small), outputs);  // the input and value_info entries are not outputs
+
+  const auto big = WriteFile(dir / "big.onnx", OnnxModelBytes(outputs, size_t{3} << 20));
+  ASSERT_GT(std::filesystem::file_size(big), size_t{3} << 20);
+  EXPECT_EQ(ReadQwen38OnnxOutputNames(big), std::optional<std::vector<std::string>>{outputs});
+
+  std::vector<std::string> many;
+  for (int i = 0; i < 300; ++i) many.push_back("state_update." + std::to_string(i) + ".conv_value");
+  EXPECT_EQ(ReadQwen38OnnxOutputNames(WriteFile(dir / "many.onnx", OnnxModelBytes(many, 1000))),
+            std::optional<std::vector<std::string>>{many});
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+TEST(Qwen38MultiSlotConfigTest, ARingBankTargetFileIsRefusedForSeveralSlotsBeforeAnyWeightIsUploaded) {
+  const auto dir = MakeScratchDir("onnx_ring_target");
+  const std::vector<std::string> compact = {"logits", "next_tokens", "present.0.key", "state_update.1.conv_value"};
+  const auto compact_file = WriteFile(dir / "compact.onnx", OnnxModelBytes(compact, 4096));
+  for (size_t slots = 1; slots <= 8; ++slots) EXPECT_NO_THROW(ValidateQwen38TargetModelFile(slots, compact_file)) << slots;
+
+  for (const char* ring_output : {"present_mid.0.key", "present_mid2.1.recurrent_state", "present_mid3.1.conv_state"}) {
+    std::vector<std::string> ring = compact;
+    ring.emplace_back(ring_output);
+    const auto ring_file = WriteFile(dir / "ring.onnx", OnnxModelBytes(ring, 4096));
+    EXPECT_NO_THROW(ValidateQwen38TargetModelFile(1, ring_file)) << ring_output;
+    for (size_t slots = 2; slots <= 8; ++slots) {
+      try {
+        ValidateQwen38TargetModelFile(slots, ring_file);
+        ADD_FAILURE() << slots << " slots accepted " << ring_output;
+      } catch (const std::runtime_error& error) {
+        const std::string message = error.what();
+        EXPECT_NE(message.find(ring_output), std::string::npos) << message;
+        EXPECT_NE(message.find(std::to_string(slots) + " request slots"), std::string::npos) << message;
+      }
+    }
+  }
+
+  const auto plain_file = WriteFile(dir / "plain.onnx", OnnxModelBytes({"logits", "present.0.key"}));
+  EXPECT_THROW(ValidateQwen38TargetModelFile(2, plain_file), std::runtime_error);  // no state_update.* outputs
+
+  // A single slot has no restriction and reads nothing: not even a file that does not exist.
+  EXPECT_NO_THROW(ValidateQwen38TargetModelFile(1, dir / "missing.onnx"));
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+// A file the reader cannot make sense of (an ORT-format model, a truncated or damaged one) is not an error of its own: the
+// outputs of the session, which ORT loads and checks anyway, stay authoritative.
+TEST(Qwen38MultiSlotConfigTest, AFileThatIsNotAnOnnxProtobufIsLeftToTheCheckAgainstTheSession) {
+  const auto dir = MakeScratchDir("onnx_malformed");
+  const std::string model = OnnxModelBytes({"logits", "present_mid.0.key"}, 256);
+
+  std::map<std::string, std::string> files;
+  files["empty"] = "";
+  files["text"] = "this is not a model";
+  files["ort_format"] = std::string("\x1c\x00\x00\x00ORTM\x00\x00\x00\x00", 12);
+  files["truncated_in_the_graph"] = model.substr(0, model.size() / 2);
+  files["truncated_in_a_varint"] = ProtoVarint(1u << 3) + ProtoVarint(7) + std::string(1, '\x80');
+  files["no_graph"] = ProtoVarintField(1, 9) + ProtoBytes(2, "tests");
+  files["a_graph_without_outputs"] = ProtoBytes(7, ProtoBytes(2, "main_graph") + ProtoBytes(11, ProtoValueInfo("x")));
+  files["two_graphs"] = model + model;
+  files["a_name_that_leaves_its_message"] =
+      ProtoBytes(7, ProtoBytes(12, ProtoVarint((1u << 3) | 2) + ProtoVarint(100) + "short"));
+  files["an_output_without_a_name"] = ProtoBytes(7, ProtoBytes(12, ProtoBytes(2, "type only")));
+  files["a_group"] = ProtoBytes(7, ProtoBytes(12, ProtoValueInfo("logits")) + ProtoVarint((9u << 3) | 3));
+  files["an_endless_varint"] = ProtoVarint((7u << 3) | 2) + std::string(12, '\xff');
+  files["a_huge_value_info"] = ProtoBytes(7, ProtoBytes(12, ProtoBytes(2, std::string((size_t{1} << 20) + 1, '\x08'))));
+
+  for (const auto& [label, bytes] : files) {
+    const auto file = WriteFile(dir / (label + ".onnx"), bytes);
+    EXPECT_FALSE(ReadQwen38OnnxOutputNames(file).has_value()) << label;
+    EXPECT_NO_THROW(ValidateQwen38TargetModelFile(8, file)) << label;
+  }
+  EXPECT_FALSE(ReadQwen38OnnxOutputNames(dir / "missing.onnx").has_value());
+  EXPECT_NO_THROW(ValidateQwen38TargetModelFile(8, dir / "missing.onnx"));
+  EXPECT_FALSE(ReadQwen38OnnxOutputNames(dir).has_value());  // a directory
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
 }
 
 // The DFlash drafter's prompt-feature buffer gives every slot Qwen38DflashPromptSlotRows rows. The warm-up of the drafter views
