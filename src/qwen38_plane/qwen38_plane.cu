@@ -526,7 +526,7 @@ __global__ void k_prep_staged(i64 capacity, int n_heads, int head_dim, float sca
   if (tid == 0) {
     input_ids[0] = tok;
     position_ids[0] = pos;
-    committed[0] = (int)pos;
+    if (committed != nullptr) committed[0] = (int)pos;
     if (pos >= 0 && pos < capacity)
       past_pos[pos] = pos;
     else
@@ -636,7 +636,7 @@ __global__ void k_prep(const PleParams* P, const i64* tok_ptr, const i64* pos_pt
   if (tid == 0) {
     input_ids[0] = tok;
     position_ids[0] = pos;
-    committed[0] = (int)pos;
+    if (committed != nullptr) committed[0] = (int)pos;
     if (pos >= 0 && pos < P->capacity)
       past_pos[pos] = pos;
     else
@@ -1287,32 +1287,30 @@ QWEN38_PLANE_EXPORT int qwen38_plane_prep(void* s, const void* P, const void* to
     size_t staged_ple_total = 0;
     {
       std::lock_guard<std::mutex> lock(g_staged_ple_mu);
-      if (!g_host_ple_workspaces.empty() || g_ever_had_staged_ple) {
-        bool unregistered_staged = false;
-        cudaError_t err = cudaSuccess;
-        StagedPleWorkspace* ws =
-            resolve_staged_ple_workspace(P, stream, /*allow_sync=*/true, &unregistered_staged, &err);
-        if (err != cudaSuccess) {
-          return (int)err;
-        }
-        if (unregistered_staged) {
-          return (int)cudaErrorInvalidValue;
-        }
-        if (ws != nullptr) {
-          staged_ple_total = (size_t)ws->params.n_heads * (size_t)ws->params.head_dim;
-        }
+      bool unregistered_staged = false;
+      cudaError_t err = cudaSuccess;
+      StagedPleWorkspace* ws =
+          resolve_staged_ple_workspace(P, stream, /*allow_sync=*/true, &unregistered_staged, &err);
+      if (err != cudaSuccess) {
+        return (int)err;
+      }
+      if (unregistered_staged) {
+        return (int)cudaErrorInvalidValue;
+      }
+      if (ws != nullptr) {
+        staged_ple_total = (size_t)ws->params.n_heads * (size_t)ws->params.head_dim;
       }
     }
     if (staged_ple_total != 0) {
-      // The host-table gather is per row, so the staged path keeps one prep per row (the mutex is not held here).
+      // The host-table gather is per row, so the staged path keeps one prep per row (the mutex is not held here). Row 0 owns
+      // the committed length: the other rows get no committed pointer, so nothing but device memory reaches a kernel.
       constexpr int kSlots[8] = {0, 2, 8, 9, 10, 11, 12, 13};
-      int dummy_committed = 0;
       for (int r = 0; r < rows; ++r) {
         const void* r_ctx_in = (r == 0) ? ctx_in : ((const i64*)ctx_out + 2 * (r - 1));
         void* r_ctx_out = (i64*)ctx_out + 2 * r;
         const int rc = qwen38_plane_prep(s, P, (const i64*)state + kSlots[r], (const i64*)state + 1, r, r_ctx_in,
                                          r_ctx_out, (i64*)input_ids + r, (i64*)position_ids + r,
-                                         r == 0 ? committed : &dummy_committed, past_pos,
+                                         r == 0 ? committed : nullptr, past_pos,
                                          (__nv_bfloat16*)ple_out + (size_t)r * staged_ple_total, state);
         if (rc != 0) return rc;
       }
