@@ -14,8 +14,10 @@
 #include <cstdint>
 #include <deque>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -96,22 +98,58 @@ size_t EffectiveQwen38PrefillChunkTokens(const Config::Model::Qwen38Graph& q);
 // prompt is ingested by the decode graphs (prefill.enabled false), is even so that S=2 pairs stay aligned.
 void ValidateQwen38PrefillChunk(const Config::Model::Qwen38Graph& q);
 
+// The number of request slots the device hosts: engine.dynamic_batching.max_batch_size, else engine.static_batching, else
+// model.qwen38_graph.max_batch_size, else search.batch_size, else the ORT_QWEN38_MAX_BATCH_SIZE test hook (the first of them
+// that is set, or that asks for more than one slot, where 1 is the default); 1 when none is. Throws std::out_of_range naming the
+// setting unless the value lies in [1, Config::Model::Qwen38Graph::kMaxBatchSize]: the device never clamps a request silently.
+size_t ResolveQwen38MaxBatchSize(const Config& config);
+
+// True when prefill.enabled names a dense prefill graph other than the decoder (model.qwen38_graph.prefill.dense.filename):
+// the prompt then runs through sessions of its own. Otherwise the fold target ingests the prompt itself (unified prefill).
+bool Qwen38HasSeparatePrefillSessions(const Config& config);
+
+// Throws a std::runtime_error at model creation, before the plane library is loaded and before any weight is uploaded, for a
+// configuration that asks for several request slots (ResolveQwen38MaxBatchSize > 1) on a decode stack that cannot serve
+// them: slots are decoded by the batched fold target (model.qwen38_graph.fold.enabled) and their prompts are ingested chunk by
+// chunk through it (unified fast prefill: prefill.enabled without a separate dense graph). A single slot has no restriction.
+void ValidateQwen38MultiSlotConfig(const Config& config);
+
+// Throws a std::runtime_error unless a target graph with these outputs can be run for `request_slots` slots at once: every slot
+// keeps its own accepted prefix of the verify rows, which the batched run restores per slot from the compact state_update.*
+// outputs, so a ring-bank target (present_mid* outputs, one bank per row count for the whole batch) is refused with a
+// diagnostic naming the output. A single slot has no restriction. The model constructor runs it twice: on the outputs read
+// from the model file before any weight is uploaded (ValidateQwen38TargetModelFile), and, authoritatively, on the outputs of
+// the target session as soon as that exists, before the other sessions are created and any device state is allocated.
+void ValidateQwen38BatchedTargetOutputs(size_t request_slots, const std::vector<std::string>& output_names);
+
+// The names of the outputs of the graph of the ONNX model file `model_file`, in order, read from its protobuf encoding
+// (ModelProto.graph, GraphProto.output, ValueInfoProto.name) without reading a single initializer, so that they are known
+// before any weight is uploaded. nullopt when the file cannot be opened, is not a protobuf ONNX model (an ORT-format model,
+// say) or has no output: the caller then relies on the outputs of the session.
+std::optional<std::vector<std::string>> ReadQwen38OnnxOutputNames(const std::filesystem::path& model_file);
+
+// ValidateQwen38BatchedTargetOutputs on the outputs of `model_file`, for several slots only (a single slot reads nothing). A
+// file whose outputs cannot be read is accepted here and left to the check against the session.
+void ValidateQwen38TargetModelFile(size_t request_slots, const std::filesystem::path& model_file);
+
 // Checks a model package against the plane library it names, when the model is loaded, before its weights are uploaded and
 // before any session is created: an INT8 PLE table (model.qwen38_graph.ple_table with a negative scale) needs the int8_ple
 // plane capability, an INT8 embedding table (<model.embedding.filename>.data of vocab_size x hidden_size INT8 rows and
-// one float scale per row) needs int8_embedding, and the folded MTP verify path (model.qwen38_graph.fold.enabled), which
-// prepares all the rows of a verify step with one call, needs negative_pos_add_batch (qwen38_graph_plane.h). Throws a
-// std::runtime_error naming the missing capability, what required it and the library when the library lacks one; BF16 and
-// FP8 packages without the fold path need no capability. Returns the layout of the embedding table the model maps from that
-// file: kNone when the package has no table of that shape.
+// one float scale per row) needs int8_embedding, the folded MTP verify path (model.qwen38_graph.fold.enabled), which
+// prepares all the rows of a verify step with one call, needs negative_pos_add_batch, and a configuration with several request
+// slots (ResolveQwen38MaxBatchSize > 1), which prepares the rows of every slot with one call too, needs batched_prep
+// (qwen38_graph_plane.h). Throws a std::runtime_error naming the missing capability, what required it and the library when the
+// library lacks one; BF16 and FP8 packages without the fold path or with one slot need no capability. Returns the layout of
+// the embedding table the model maps from that file: kNone when the package has no table of that shape.
 Qwen38EmbeddingFormat RequireQwen38PackageSupportedByPlane(const Qwen38Plane& plane, const Config& config,
                                                            const std::filesystem::path& model_folder);
 
 // The CUDA graphs of the decode stack. ORT keeps one captured graph per annotation id in a session, so every run that
 // binds different buffers needs an id of its own: one per (row count, ring phase) for the target (decode graphs or the
-// fold model), one per (row count, ping-pong direction) for the S=1/S=2 head sessions and one per ring phase for the
-// standalone R=2 head. The ids are derived from the role of the run, they are not configurable, and they are distinct
-// across the sessions of a model. 0 is ORT's default annotation and -1 means "do not capture"; neither is produced.
+// fold model), one per (row count, ring phase, number of request slots) for the batched runs of the fold target, one per
+// (row count, ping-pong direction) for the S=1/S=2 head sessions and one per ring phase for the standalone R=2 head. The ids
+// are derived from the role of the run, they are not configurable, and they are distinct across the sessions of a model.
+// 0 is ORT's default annotation and -1 means "do not capture"; neither is produced.
 // The DFlash2 drafter is a session of its own that numbers the shapes it captures itself (engine/graph_annotation_ids.h),
 // so it takes none of these ids; the S=8 (seven drafts) target of its folded pipeline is a kTarget run of 8 rows.
 enum class Qwen38GraphRun { kTarget,
@@ -120,10 +158,13 @@ enum class Qwen38GraphRun { kTarget,
 inline constexpr int kQwen38GraphRunCount = 3;     // the enumerators above
 inline constexpr int kQwen38GraphIdMaxRows = 8;    // verify rows of the target (S=1 .. S=8)
 inline constexpr int kQwen38GraphIdMaxPhases = 8;  // ring banks / ping-pong directions of any decode mode
+inline constexpr int kQwen38GraphIdMaxBatch = 8;   // request slots of one batched target run (B = 1 .. 8)
 static_assert(static_cast<int>(Qwen38GraphRun::kHeadR2) + 1 == kQwen38GraphRunCount,
               "kQwen38GraphRunCount must count every Qwen38GraphRun");
-// Throws std::out_of_range for a run, row count or phase beyond the limits above.
-int Qwen38GraphAnnotationId(Qwen38GraphRun run, int rows, int phase);
+// `batch` is the number of request slots the run serves: only the fold target runs batched (batch > 1), every other run is
+// one slot. The ids of batch 1 do not depend on the batch dimension. Throws std::out_of_range for a run, row count, phase or
+// batch beyond the limits above, or a batch above 1 for a run other than kTarget.
+int Qwen38GraphAnnotationId(Qwen38GraphRun run, int rows, int phase, int batch = 1);
 
 // ORT captures a graph after a few eager runs of it: the warm-up of a graph runs it this many times, to be safe.
 inline constexpr int kQwen38WarmupRunsPerGraph = 6;
@@ -137,6 +178,26 @@ struct Qwen38DflashWarmupPlan {
   size_t target_tokens{};
 };
 Qwen38DflashWarmupPlan PlanQwen38DflashWarmup(bool warmup, int verify_rows, int num_banks) noexcept;
+
+// Rows of the DFlash prompt-feature buffer that one request slot owns: a prompt chunk of `chunk` rows, but at least the
+// `verify_rows` of a verification step, because the warm-up of the drafter views that many rows from the same buffer
+// (a prefill.chunk below the verify width would otherwise make it read past the allocation). Throws std::invalid_argument
+// unless both are positive.
+size_t Qwen38DflashPromptSlotRows(int chunk, int verify_rows);
+
+// Tokens of a prompt that stay allocated once its request is over: a longer prompt gives its buffer back.
+inline constexpr size_t kQwen38RetainedPromptTokens = 8192;
+
+// Forgets the prompt a request slot ingested, as the slot starts its next request (Reset and ResetSlot of slot 0 both call
+// it). The tokens are only kept for the head prefill of that request, so a long-lived engine holds at most the prompt of the
+// request in flight, never those it served before; the buffer of a prompt beyond kQwen38RetainedPromptTokens is released.
+void Qwen38ForgetPromptTokens(std::vector<int32_t>& tokens) noexcept;
+
+// The decode status of a device with several slots. The validation bits of a decode accumulate in the ctl[5] word of the slot
+// that ran it, so every slot that started a decode (`started[slot]`) is read through `read_bits(slot)`, the slots beyond
+// slot 0 included; a slot that never started is not read. Throws a std::runtime_error naming every slot with bits set (a
+// device with a single slot keeps the message without a slot).
+void CheckQwen38DecodeStatus(std::span<const bool> started, const std::function<int64_t(size_t)>& read_bits);
 
 // The packed QSA indexer pools kQwen38IndexKeyRatio tokens into one compressed index key.
 inline constexpr int kQwen38IndexKeyRatio = 4;
@@ -272,6 +333,8 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   int Capacity() const override { return capacity_; }
   int ReservedTail() const override { return std::max(verify_rows_, kReservedTail); }
   bool MtpEnabled() const override { return mtp_enabled_; }
+  size_t MaxBatchSize() const override { return static_cast<size_t>(max_batch_); }
+  bool SupportsDynamicBatching() const override { return true; }
   void Reset() override;
   void Drain() noexcept override;
   void MarkContextFailed() noexcept override;
@@ -286,16 +349,34 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   int32_t PendingToken() const override { return pending_; }
   size_t PrefillChunkTokens() const override;
   void ExpectPrefillTokens(size_t total_tokens) override { run_hints_.ExpectPrefillTokens(total_tokens); }
+  // The prompt length of the turn of `slot`, kept as the slot's own state and handed to ORT only by the Runs that ingest
+  // that slot's prompt chunks (qwen38_ort_env.h).
+  void ExpectPrefillTokensSlot(size_t slot, size_t total_tokens) override;
 
   void BeginDecode(bool run_cycle) override;
   Qwen38CycleRecord WaitCycle() override;
   void Advance(const Qwen38CycleRecord& record, bool want_more) override;
   void CheckDecodeStatus() override;
 
+  void ResetSlot(size_t slot) override;
+  void PrefillChunkSlot(size_t slot, std::span<const int32_t> tokens) override;
+  int32_t PendingTokenSlot(size_t slot) const override;
+  void BeginDecodeSlot(size_t slot, bool want_more) override;
+  void DraftDeferredSlots(std::span<const size_t> active_slots) override;
+  void EnqueueBatchDecode(std::span<const size_t> active_slots) override;
+  void WaitBatchDecode(std::span<const size_t> active_slots,
+                       std::span<Qwen38CycleRecord> records) override;
+  void AdvanceBatchDecode(std::span<const size_t> active_slots,
+                          std::span<const Qwen38CycleRecord> records,
+                          std::span<const uint8_t> want_more,
+                          bool defer_next_cycle = false) override;
+
   double warmup_seconds{};
   double ple_register_seconds{};
 
  private:
+  static constexpr int kMaxBatch = Config::Model::Qwen38Graph::kMaxBatchSize;
+
   struct Bank {
     PlaneBuffer arena;
     std::map<std::string, std::unique_ptr<DevTensor>> tensors;  // keyed by input name (past_key_values.*)
@@ -340,10 +421,14 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   void BuildFastPrefill();
   void StepPrefill(std::span<const int32_t> tokens);
   void FastAppend(std::span<const int32_t> tokens);
-  void FastHandoff();
+  void FastAppendSlot(int slot, std::span<const int32_t> tokens);
+  void FastHandoff(size_t slot_idx = 0);
   void FastHeadKvPrefill();
   void FastReset();
   void MutedPrefill(bool muted);
+  void MutedPrefillSlot(int slot, bool muted);
+  void MuteSlot(int slot);
+  void ResetSlotIndexLengths(int slot);
   void CallHeadR2(const int64_t tokens[2], const int64_t positions[2], const uint8_t* hidden0, const uint8_t* hidden1,
                   int commit_rows);
   void HeadPrefillFold();
@@ -355,13 +440,15 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
                              std::vector<int64_t> shape, ONNXTensorElementDataType type);
   void Warmup();
   void Draft(const uint8_t* features, size_t rows, size_t position, int32_t anchor, bool propose);
+  void DraftSlot(int slot, const uint8_t* features, size_t rows, size_t position, int32_t anchor, bool propose);
 
   void PrepRow(int rows, int row, const void* tok, const void* pos, int add, const void* ctx_in, void* ctx_out);
+  void PrepBatch(int batch);
   void RunTarget(int rows, int phase, const Qwen38PromptRunHints* prompt = nullptr);
   // Every ORT Run of the engine goes through here: it publishes the QMoE hints of run_hints_ for exactly this Run
-  // (qwen38_ort_env.h).
+  // (qwen38_ort_env.h). `participants` are the slots the Run serves: only their notices are published and consumed.
   void RunSession(OrtSession& session, const OrtRunOptions* run_options, const OrtIoBinding& binding,
-                  const Qwen38PromptRunHints* prompt = nullptr);
+                  const Qwen38PromptRunHints* prompt = nullptr, Qwen38SlotMask participants = Qwen38SlotBit(0));
   void EnqueueVerify();
   void EnqueueStep();
   void EnqueueHead(int rows, const uint8_t* hidden_src);
@@ -369,10 +456,29 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   void RunHeadOnce(HeadSession& head, int rows);
   void ClearHead();
   void ReplayStateUpdates(int src_bank, size_t kept_count);
+  void ReplayStateUpdatesSlot(int src_bank, int slot, size_t kept_count);
+  Qwen38CycleRecord WaitCycleSlot(int slot);
   void CheckDeviceStatus(const char* where, const Direction* dir);
   int64_t ReadCtl(int index);
   void WriteCtl(int first, std::span<const int64_t> values);
+  int64_t ReadCtlSlot(int slot, int index);
+  void WriteCtlSlot(int slot, int first, std::span<const int64_t> values);
   void SyncStream();
+
+  uint8_t* ctl_slot(int slot) const { return ctl_.data() + static_cast<size_t>(slot) * 16 * sizeof(int64_t); }
+  uint8_t* ctx_commit_slot(int slot) const { return ctx_commit_.data() + static_cast<size_t>(slot) * 2 * sizeof(int64_t); }
+  uint8_t* ctx_a_slot(int slot) const { return ctx_a_.data() + static_cast<size_t>(slot) * kMaxVerifyRows * 2 * sizeof(int64_t); }
+  uint8_t* ctx_b_slot(int slot) const { return ctx_b_.data() + static_cast<size_t>(slot) * 2 * sizeof(int64_t); }
+  int64_t* result_ring_slot(int slot) const { return result_host_ + static_cast<size_t>(slot) * kRing * 8; }
+  uint8_t* d_tokens_slot(int slot) const { return d_tokens_.data() + static_cast<size_t>(slot) * token_slots_ * sizeof(int64_t); }
+  uint8_t* d_dflash_prompt_slot(int slot) const {
+    return d_dflash_prompt_.data() + static_cast<size_t>(slot) * dflash_prompt_slot_rows_ * kDflashWidth * 2;
+  }
+  uint8_t* d_dflash_step_aux_slot(int slot) const {
+    return d_dflash_step_aux_.data() + static_cast<size_t>(slot) * kMaxVerifyRows * kDflashWidth * 2;
+  }
+  uint8_t* past_pos_slot(int slot) const { return past_pos_ + static_cast<size_t>(slot) * static_cast<size_t>(capacity_) * sizeof(int64_t); }
+  static const Request* SlotRequestKey(int slot) { return reinterpret_cast<const Request*>(static_cast<uintptr_t>(slot + 1)); }
 
   Qwen38GraphModel& model_;
   Qwen38Plane& plane_;
@@ -380,6 +486,8 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   std::unique_ptr<OrtMemoryInfo> memory_info_;
   const int capacity_;
   const int vocab_;
+  int max_batch_{1};
+  size_t token_slots_{};
   int hidden_width_{};
   int ple_width_{};
   int ple_layer_{};
@@ -396,8 +504,11 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   static constexpr int kBanks = Qwen38DecodeLedger::kBanks;
   static constexpr int kMaxBanks = 5;
   static constexpr int kMaxVerifyRows = 8;
-  static_assert(kMaxBanks <= kQwen38GraphIdMaxPhases && kMaxVerifyRows <= kQwen38GraphIdMaxRows,
-                "every (row count, ring phase) of the decode graphs needs a CUDA graph id");
+  static_assert(kMaxBanks <= kQwen38GraphIdMaxPhases && kMaxVerifyRows <= kQwen38GraphIdMaxRows &&
+                    kMaxBatch <= kQwen38GraphIdMaxBatch,
+                "every (row count, ring phase, request slots) of the decode graphs needs a CUDA graph id");
+  static_assert(kMaxBatch <= QWEN38_PLANE_MAX_PREP_BATCH && kMaxVerifyRows <= QWEN38_PLANE_MAX_PREP_ROWS,
+                "the plane prepares every slot and row of a step in one call");
   static constexpr int kRing = 64;
   static constexpr int kArgmaxBlocks = 16;
 
@@ -405,17 +516,31 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   std::map<std::string, std::unique_ptr<DevTensor>> store_;                 // in-place KV / positions
   std::map<std::string, std::unique_ptr<DevTensor>> shared_;                // index_key buffers
   std::map<std::string, std::unique_ptr<DevTensor>> state_update_tensors_;  // compact state_update.* outputs
+  std::map<std::string, size_t> store_slot_bytes_;
+  std::map<std::string, size_t> shared_slot_bytes_;
+  std::map<std::string, size_t> bank_slot_bytes_;
+  std::map<std::string, size_t> su_slot_bytes_;
+  std::map<std::string, std::vector<int64_t>> store_slot_shape_;
+  std::map<std::string, std::vector<int64_t>> shared_slot_shape_;
+  std::map<std::string, std::vector<int64_t>> bank_slot_shape_;
+  std::map<std::string, std::vector<int64_t>> su_slot_shape_;
   PlaneBuffer replay_descs_dev_[2];
+  PlaneBuffer slot_replay_descs_dev_[2][kMaxBatch];
+  // The (source, destination) lengths of every indexer layer of a slot, as bank 0 -> bank 1 replays them.
+  std::vector<int32_t*> slot_index_lengths_[kMaxBatch];
   int replay_fast_count_{0};
   int replay_generic_count_{0};
   int replay_fast_blocks_{0};
   Bank banks_[kMaxBanks + 1];  // last = scratch sink for S=1 present_mid
   RowInputs inputs_[kMaxVerifyRows];
   Direction dirs_[kMaxVerifyRows][kMaxBanks];  // [rows-1][phase]
+  RowInputs batch_inputs_[kMaxBatch];
+  Direction batch_dirs_[kMaxBatch][kMaxBanks];
   std::vector<std::unique_ptr<DevTensor>> output_tensors_;
   std::vector<std::unique_ptr<DevTensor>> head_views_;
   std::deque<PlaneBuffer> owned_;  // individually allocated tensors
   const Direction* inflight_dir_{};
+  int inflight_batch_{1};
 
   // control block / plane buffers
   PlaneBuffer ctl_, ctx_commit_, ctx_a_, ctx_b_, scratch_i32_, part_v_, part_i_, params_dev_;
@@ -481,11 +606,21 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   std::shared_ptr<Dflash2Model> dflash_model_;
   std::unique_ptr<Dflash2Drafter> dflash_;
   PlaneBuffer d_dflash_prompt_;
-  Qwen38DflashPromptFeatures dflash_prompt_;  // which prompt chunks the drafter ingests; its window is set with dflash_
+  size_t dflash_prompt_slot_rows_{};  // rows one slot's slice of d_dflash_prompt_ holds (Qwen38DflashPromptSlotRows)
+  PlaneBuffer d_dflash_step_aux_;     // aux rows of the verify steps, kMaxVerifyRows per slot
+  // Which prompt chunks the drafter ingests, one per slot (slot 0 serves the single-slot calls); the window is set with dflash_
+  Qwen38DflashPromptFeatures slot_dflash_prompt_[kMaxBatch];
   static constexpr size_t kDflashWidth = 12800;
 
   // host state
   Qwen38DecodeLedger ledger_;
+  std::vector<Qwen38DecodeLedger> slot_ledgers_;
+  int bank_phase_{0};
+  uint64_t slot_seq_[kMaxBatch]{};
+  int32_t slot_pending_[kMaxBatch]{};
+  size_t slot_deferred_aux_rows_[kMaxBatch]{};
+  size_t slot_deferred_aux_pos_[kMaxBatch]{};
+  bool slot_decode_started_[kMaxBatch]{};
   Qwen38SuffixDrafter suffix_drafter_;
   int suffix_lookup_mode_{0};  // 0=off, 1=always prefer 3-gram suffix match, 2=fallback on prior draft reject
   uint64_t seq_{};
@@ -495,7 +630,7 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   int32_t pending_{};
   std::vector<int32_t> prompt_tokens_;
   const uint8_t* last_hidden_ptr_{};  // hidden output of the last cycle (rows h0, h1)
-  Qwen38OrtRunHints run_hints_;       // what the ORT QMoE kernels are told with each Run (qwen38_ort_env.h)
+  Qwen38OrtRunHints run_hints_;       // per slot: what the ORT QMoE kernels are told with each Run (qwen38_ort_env.h)
 };
 
 struct Qwen38GraphModel : Model {

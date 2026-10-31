@@ -12,6 +12,7 @@
 
 #include "models/model.h"
 #include "models/cpu_embedding.h"
+#include "dflash2_staging.h"
 #include "engine/graph_annotation_ids.h"
 #include "decoding/speculative_sampling.h"
 
@@ -172,6 +173,10 @@ struct Dflash2Drafter {
                                        size_t hidden_size, ONNXTensorElementDataType type);
 
   size_t NumDraftTokens() const { return static_cast<size_t>(config_.num_draft_tokens); }
+  // A caller that proposes for one request after the other without waiting for the device in between (several request slots of
+  // one engine) asks for a fresh host mirror per upload, so a proposal never rewrites the mirror the previous one is still
+  // being uploaded from (Dflash2HostStaging).
+  void SetFreshStagingMirrors(bool fresh) noexcept { staging_.SetFreshMirrorPerUpload(fresh); }
   size_t AdmissionMisses() const { return admission_misses_; }
 
   // A windowed drafter retains only a bounded ring, independently of the target context length.
@@ -284,7 +289,7 @@ struct Dflash2Drafter {
   std::unordered_map<const Request*, RequestState> requests_;
   size_t admission_misses_{};
 
-  std::unordered_map<const Tensor*, DeviceSpan<uint8_t>> staging_;
+  Dflash2HostStaging staging_;
   std::unique_ptr<OrtRunOptions> run_options_;
 };
 

@@ -2105,56 +2105,114 @@ tombstone.
 
 Changes to shared types such as `Request`, `ScheduledRequests`, `ModelExecutor`, or `SimpleDecoder` should be checked against both paths. This document should be updated only where behavior is shared or where the dynamic path changes.
 
-### Static single-slot backend that selects its own tokens
+### Static backend that selects its own tokens
 
-The `qwen38_flash_graph` model type (Qwen3.8-Flash CUDA-graph decode with a built-in MTP(1) loop) runs on the static path
-through a `ModelExecutor` that chooses its own tokens, instead of attaching decoder state with logits. It is a single-slot
-backend: fixed in-place KV, a recurrent-state bank ring and a device-side draft -> verify -> commit loop that cannot be
-paged, batched or cropped to an arbitrary token. `CreateEngineBackend` (`src/engine/backend_factory.h`) and
-`CreateQwen38GraphDependencies` (`src/engine/qwen38_graph_executor.h`) assemble it:
+The `qwen38_flash_graph` model type (Qwen3.8-Flash CUDA-graph decode with a built-in multi-token-prediction loop: an MTP head
+proposes up to three draft tokens per cycle, a DFlash2 drafter up to seven) runs on the static path through a `ModelExecutor`
+that chooses its own tokens, instead of attaching decoder state with logits. Its state is fixed in-place KV, a
+recurrent-state bank ring and a device-side draft -> verify -> commit loop that cannot be paged or cropped to an arbitrary
+token. The device holds `model.qwen38_graph.max_batch_size` slots (default 1), one resident Request per slot.
+`CreateEngineBackend` (`src/engine/backend_factory.h`) and `CreateQwen38GraphDependencies`
+(`src/engine/qwen38_graph_executor.h`) assemble it:
 
-- `FixedSlotCacheManager` (`Qwen38GraphCacheManager`, `src/engine/fixed_slot_scheduler.h`) holds one row. `StaticBatchScheduler`
-  queues further Requests and recycles the slot when the resident turn is complete. `RewindToStartOfTurn` releases the slot; a
-  continued turn (`BeginTurn` on the resident Request) and the replay after a rewind re-ingest the whole retained history
-  (through the same chunked prefill as a new prompt), because the look-ahead cycle and the bank ring cannot be rolled back.
-  There is no prefix cache.
+- The slot count is an integer in 1..8 (`Config::Model::Qwen38Graph::kMaxBatchSize`): the JSON parser rejects any other
+  `max_batch_size` and names the key and the value, and the other settings that can choose the count
+  (`engine.dynamic_batching.max_batch_size`, `engine.static_batching.max_batch_size`, `search.batch_size`) are held to the same
+  range at model creation instead of being clamped silently. Several slots are served by the batched fold target and only
+  work with: the folded MTP stack (`fold.enabled`); the unified fast prefill, i.e. `prefill.enabled` without a separate dense
+  graph (the prompts are ingested chunk by chunk through the fold target, slot by slot; a configuration with
+  `prefill.enabled` false or with a dense prefill graph is single-slot); a compact-state target (the exporter's
+  `state_update.*` outputs; a ring-bank target with `present_mid*` outputs keeps one bank per row count for the whole batch and
+  is single-slot); and a plane library with the `batched_prep` capability (`qwen38_plane_prep_batched`, which takes the row
+  count and the slot count as arguments). The model checks the first two before the plane library is loaded and any weight is
+  uploaded, the plane capability when the library has been loaded and before any weight is uploaded, and the compact-state
+  property on the output names of the target graph, which it reads from the model file (`ReadQwen38OnnxOutputNames`: the
+  protobuf framing of `ModelProto.graph` and `GraphProto.output`, skipping every initializer) before any weight is uploaded
+  too. A model file the reader cannot parse (an ORT-format model, say) is left to the same check on the output names of the
+  target session, which runs as soon as that session exists, before the other sessions and any device state are created.
+  Each failure is a `std::runtime_error` that names the setting. A plane library without `batched_prep` still loads packages
+  with one slot.
+- `FixedSlotCacheManager` (`Qwen38GraphCacheManager`, `src/engine/fixed_slot_scheduler.h`) holds one row per slot (`SlotOf`,
+  `ResidentRequestCount`). With one slot, `StaticBatchScheduler` queues further Requests and recycles the slot when the
+  resident turn is complete. With several slots, a continuous `FixedSlotScheduler` replaces a slot as soon as its turn is over,
+  so a short prompt or answer does not wait for a long one, and `CacheManager::SupportsContinuousMultiSlotDecoding()` lets a
+  resident Request continue its turn while others are resident. `RewindToStartOfTurn` releases the slot; a continued turn
+  (`BeginTurn` on the resident Request) and the replay after a rewind re-ingest the whole retained history (through the same
+  chunked prefill as a new prompt), because the look-ahead cycle and the bank ring cannot be rolled back. There is no prefix
+  cache.
 - `Qwen38GraphExecutor::SelectsOwnTokens()` is true. One Engine step is one prompt chunk (the size the device asks for,
   `Qwen38DecodeDevice::PrefillChunkTokens()`: `model.qwen38_graph.prefill.chunk` when set, otherwise 8192 tokens with the
   dense prefill (`prefill.enabled`) and 2048 per step through the decode graphs, see `EffectiveQwen38PrefillChunkTokens`;
   the decode-graph path needs an even chunk; a step that only advances the prompt delivers no event, so `CancelRequest`
   stays responsive; the dense prefill state continues across the chunks and is handed over to the decode state in the step that
   ingests the last one) or one whole cycle (with `fold.enabled`: one CUDA-graph launch). The executor tells the device the
-  prompt length of the turn (`Qwen38DecodeDevice::ExpectPrefillTokens`, after `Reset()` and before the first chunk); the
-  device hands it to the ORT QMoE kernels with every chunk of that turn and drops it at `Reset()`/`BeginDecode()`. The value
-  is device state: nothing is published through the process environment, so Engines of different models never share it. The
-  executor declares its step plan via `ScheduledRequests::BeginBackendStep` and stages owned `BackendRowResult` records
-  (`PrefillProgress` and/or `SelectedTokenBlock`) via `ScheduledRequests::StageBackendRow`; `GenerateNextTokens` validates the
-  batch before mutating any Request, commits candidates through `Request::CommitExternalTokens` (observing stop strings, EOS,
-  turn limit, and context limit in order), and records `TokenCommitAck` counts (consumed, appended, and staged for events)
-  settled through `TokenProducingSession` before events are published. Stop strings are therefore accepted on this static path;
-  every other static executor still rejects them.
+  prompt length of the turn (`Qwen38DecodeDevice::ExpectPrefillTokens`, after `Reset()` and before the first chunk; with
+  several slots `ExpectPrefillTokensSlot(slot, total)`, after `ResetSlot(slot)` and before the first `PrefillChunkSlot` of
+  that slot); the device hands it to the ORT QMoE kernels with every chunk of that turn and drops it at
+  `Reset()`/`ResetSlot()`/`BeginDecode()`/`BeginDecodeSlot()`. The value is state of the device and, with several slots, of
+  the slot: nothing is published through the process environment by the executor, so Engines of different models and slots
+  that ingest their prompts in interleaved chunks never see each other's value. The device itself publishes the QMoE hints
+  (`ORT_QMOE_PREFILL_NEW_TURN`, `ORT_QMOE_PREFILL_TOTAL_TOKENS`, `ORT_QMOE_CURRENT_MAX_COMPACT_EXPERTS`,
+  `ORT_QMOE_PREFILL_HANDOFF_DONE`, `ORT_QMOE_IN_WARMUP`), because ORT's QMoE kernels read them from the process environment
+  until per-run config entries exist, and only for the duration of one ORT Run (`Qwen38OrtEnvScope`, one process-wide lock,
+  the previous values are restored): the values of a prompt chunk are computed from that chunk's slot alone, never kept or
+  max-merged across Runs, and a Run publishes the new-turn and hand-off notices of the slots it serves only (a prompt chunk
+  serves its slot, a batched decode the slots that decode in it).
+  With several slots a step advances every slot (`Qwen38GraphSession::StepBatch`): it commits the in-flight batched cycle of
+  the decoding slots, prefills the next chunk of the slots that have not started decoding and enqueues the next batched
+  cycle. The executor declares its step plan via `ScheduledRequests::BeginBackendStep` and stages owned `BackendRowResult`
+  records (`PrefillProgress` and/or `SelectedTokenBlock`, up to `kMaxGeneratedTokensPerStep` candidate tokens) via
+  `ScheduledRequests::StageBackendRow`; `GenerateNextTokens` validates the whole batch before mutating any Request, commits
+  candidates through `Request::CommitExternalTokens` (observing stop strings, EOS, turn limit, and context limit in order),
+  and records `TokenCommitAck` counts (consumed, appended, and staged for events) settled through `TokenProducingSession`
+  before events are published. Stop strings are therefore accepted on this static path; every other static executor still
+  rejects them.
 - The next cycle is enqueued before a step returns, so the GPU runs it while the Engine delivers the previous tokens. A stop
   string can only be known after delivery, so one cycle may be wasted; the next request, a rewind and Engine teardown wait for
   it with `Qwen38DecodeDevice::Drain()`. The record of such a cycle is never consumed, so its status is read from the device
   instead: `CheckDecodeStatus()` right after `Drain()` reports the error bits accumulated by every cycle since the last
   `Reset()`, also when a record was left unconsumed. The executor always runs `Drain()` and then `CheckDecodeStatus()` before
   `Reset()` (which clears the bits): a cancellation or stop-string match that leaves a cycle behind therefore still fails the
-  next request or the rewind when that cycle went wrong. At Engine teardown the device is only drained: nobody is left to
-  report to. A fatal execution failure poisons the mutable device context across Engine leases until the model is reloaded.
+  next request or the rewind when that cycle went wrong. The same holds for `ResetSlot()` with several slots: the bits of a
+  batched cycle are kept per slot, `ResetSlot()` clears the ones of its slot, and `CheckDecodeStatus()` reads every slot that
+  started a decode (slot 0 or not) and names the slots with bits set. A slot handed to a new request, whose previous request
+  was canceled or finished while a batched cycle was in flight, is therefore only reset once the stream was drained and the
+  status of all the slots was read (a status that was already read since the last cycle, as at the end of a chain of cycles,
+  is not read again). A device error is fatal to the Engine, as every executor failure is, so a reported status is never
+  consumed twice, and a fatal execution failure poisons the mutable device context across Engine leases until the model is
+  reloaded. At Engine teardown the device is only drained: nobody is left to report to.
+- Known limitation: with several slots a batched decode cycle is only enqueued once every requested slot has ingested its
+  prompt (`StepBatch` phase 2), so a slot that is ready decodes only after the last chunk of the longest prompt of the batch
+  (it still delivers its first token right after its own prompt), and admitting a long prompt pauses the decoding peers until
+  that prompt is ingested. The barrier protects the state of the slots that are part-way through their prompts, and the device
+  has no primitive to lift it: a batched cycle runs the target over the slots `0 .. max(active slot)` (the batch rows are the
+  slots; there is no slot-to-row indirection), and `Qwen38GraphEngine::MuteSlot` only keeps the other slots of that range
+  valid inputs: it sets the control words of the slot to idle (`{0, 0, 0, 1}`) and zeroes the lengths of its indexer buffers,
+  and the forward then writes the idle row (token 0 at position r, empty contexts, a zero per-layer embedding row) into the
+  slot's KV rows `0 .. r - 1` and its recurrent state. That is harmless for a finished or unassigned slot, which `ResetSlot()`
+  and its next prompt initialize again, and destroys a slot that is part-way through its prompt. Besides, the recurrent state
+  ring advances once per cycle for the whole batch (`bank_phase_`) while a prompt chunk reads and commits the slot's state in
+  the bank of that moment. Decoding the ready slots between the chunks of another prompt therefore needs masked KV and state
+  writes for the slots that sit out a cycle (or a slot-indirected batched binding) and a ring phase per slot that is in
+  prefill: new graph, kernel and device work that this change does not include. Until then a ragged batch decodes in lockstep
+  once its last prompt is in; the chunk size (`prefill.chunk`) bounds how long a step takes, not how long the peers wait.
+- With several slots the DFlash2 drafter proposes for one slot after the other without waiting for the device in between.
+  A step tensor larger than a launch can carry (4032 bytes: the block table of a long context) is uploaded from its host
+  mirror when the device reaches the copy, so one shared mirror per tensor would be rewritten by the next slot's proposal
+  before the previous upload ran, and the first slot would read another request's block ids. The engine therefore asks the
+  drafter for a fresh mirror per upload (`Dflash2Drafter::SetFreshStagingMirrors`, `Dflash2HostStaging`): the pinned-mirror
+  pool hands a mirror out again only after the upload that read it has run, and never waits for the device to do so. A
+  single-slot engine keeps one mirror per tensor, as before.
 - `ModelExecutor::ValidateTurn` and `BackendCapabilities` reject, before any Request mutation, what the device loop cannot do:
   sampling, repetition penalty, no-repeat n-grams, `min_generated_tokens`, seeds and guidance. `MaxDraftTokensPerStep()` is
-  zero (the caller cannot attach drafts). `GetCapabilities()` reports one row and `max_request_length` = KV capacity - 4.
-- `GetSpeculativeStats()` includes the executor's counters (`ModelExecutor::AddSpeculativeStats`): one round per cycle, one
-  or more proposed drafts per round (the fold verifies 1..3), accepted drafts, bonus and correction tokens, the
-  acceptance-length histogram. The counters describe what the Engine consumed, as `Engine::RecordSpeculativeCommit` does for
-  sampled MTP: a turn that ends inside a cycle (turn or session limit, stop string, EOS) only accepts the drafts it delivered,
-  `draft_tokens_evaluated` counts the draft positions examined up to the terminal token (every accepted draft consumed, an EOS
-  draft included, plus the rejected position only when the turn got as far as the correction token), so `acceptance_rate` is not
-  diluted by drafts after the end of the turn. Rounds are classified like `Engine::RecordSpeculativeCommit` does, by the number
-  of accepted drafts that were delivered: none is a zero-accept round, all of the proposed ones a full-accept round and anything
-  in between a partial-accept round (`partial_accept_rounds`, counted whether or not a correction token was delivered).
+  zero (the caller cannot attach drafts). `GetCapabilities()` reports the resolved slot count and `max_request_length` =
+  KV capacity - reserved tail.
+- `GetSpeculativeStats()` includes the executor's counters (`ModelExecutor::AddSpeculativeStats`): one round per slot and
+  cycle, S - 1 proposed drafts per round, accepted drafts, bonus and correction tokens, the acceptance-length histogram. One
+  target forward is counted per step, however many slots it batches.
 - The model's device state is leased to one Engine at a time (`Qwen38GraphModel::AcquireDevice`); a second Engine over the same
-  model fails with a clear error until the first one is destroyed. The model has no Generator API support.
+  model fails with a clear error until the first one is destroyed, and a poisoned context cannot be leased again. The model has
+  no Generator API support.
 
 ## Experimental low-level public API shape
 

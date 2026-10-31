@@ -783,6 +783,11 @@ struct Config {
 
       bool warmup{true};  // Run the graph warm-up (captures every CUDA graph) when the model is created
 
+      // Concurrent request slots of the Engine-hosted decode device, in [1, kMaxBatchSize]. Values above 1 need the fold
+      // stack with unified fast prefill (see ValidateQwen38MultiSlotConfig).
+      static constexpr int kMaxBatchSize{8};
+      int max_batch_size{1};
+
       struct Mtp {
         bool enabled{true};       // false: plain S=1 graph decode (no draft/verify)
         bool prefill_head{true};  // feed the prompt hidden rows to the head (vLLM does the same)
