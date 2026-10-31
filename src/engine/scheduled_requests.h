@@ -111,11 +111,9 @@ struct ScheduledRequests {
   std::vector<DeviceSpan<float>> ProcessLogits();
 
   void GenerateNextTokens(std::vector<RequestStepResult>& results);
-  // For a ModelExecutor that selects its own tokens (ModelExecutor::SelectsOwnTokens): stages the tokens
-  // the executor committed for scheduled row `row` (an empty span for a step that only advanced the prompt).
-  // Once any row is staged, GenerateNextTokens commits these tokens through
-  // Request::CommitExternalTokens instead of sampling logits.
-  void StageExecutorTokens(size_t row, std::span<const int32_t> tokens);
+  // For a ModelExecutor that selects its own tokens (ModelExecutor::SelectsOwnTokens): BeginBackendStep declares the
+  // rows of the step and StageBackendRow hands over each row's result. GenerateNextTokens validates the whole batch
+  // and commits the selected tokens through Request::CommitExternalTokens instead of sampling logits.
   void BeginBackendStep(std::vector<BackendPlannedRow> plan);
   void StageBackendRow(size_t request_row, BackendRowResult result);
   void SetBackendLimits(size_t max_slots, size_t max_result_tokens) {
@@ -162,11 +160,7 @@ struct ScheduledRequests {
   // Drafts the transaction stages onto each request's sequence, in scheduled row order. Empty
   // outside a dynamic step plan.
   std::vector<size_t> draft_token_counts_;
-  // Tokens an executor that selects its own tokens committed this step, per scheduled row. Empty unless
-  // StageExecutorTokens was called.
-  std::vector<std::vector<int32_t>> executor_tokens_;
   StepOutputKind output_kind_{StepOutputKind::DecoderOutputs};
-  bool legacy_executor_tokens_{};
   std::vector<BackendPlannedRow> backend_plan_;
   std::vector<BackendRowResult> backend_rows_;
   std::vector<size_t> backend_request_rows_;

@@ -60,10 +60,10 @@ struct ModelExecutor {
    * @brief True when Decode chooses the next tokens itself instead of attaching decoder state with logits.
    *
    * Such an executor (for example one whose graph selects greedy tokens and verifies its own speculative
-   * drafts on the device) hands the tokens it committed to ScheduledRequests::StageExecutorTokens, and
-   * ScheduledRequests::GenerateNextTokens commits them through Request::CommitExternalTokens instead of
-   * sampling. Stop strings are valid for such a turn on the static path: committing is token-wise and a
-   * match only ends the turn, so nothing has to be rolled back.
+   * drafts on the device) declares its step with ScheduledRequests::BeginBackendStep and hands each row's tokens to
+   * ScheduledRequests::StageBackendRow; ScheduledRequests::GenerateNextTokens validates them and commits them through
+   * Request::CommitExternalTokens instead of sampling. Stop strings are valid for such a turn on the static path:
+   * committing is token-wise and a match only ends the turn, so nothing has to be rolled back.
    */
   virtual bool SelectsOwnTokens() const { return false; }
 

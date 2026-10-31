@@ -218,23 +218,6 @@ Tensor* ScheduledRequests::HiddenStates() const {
   return decoder_state_ ? decoder_state_->HiddenStates() : nullptr;
 }
 
-void ScheduledRequests::StageExecutorTokens(size_t row, std::span<const int32_t> tokens) {
-  if (!backend_plan_.empty() || !backend_rows_.empty())
-    throw std::logic_error("Cannot mix legacy executor tokens and backend rows.");
-  if (row >= requests_.size()) {
-    throw std::logic_error("Executor tokens were staged for a row that was not scheduled.");
-  }
-  if (tokens.size() > kMaxGeneratedTokensPerStep) {
-    throw std::logic_error("An executor staged more tokens than one step can report.");
-  }
-  if (executor_tokens_.empty()) {
-    executor_tokens_.resize(requests_.size());
-  }
-  output_kind_ = StepOutputKind::BackendRows;
-  legacy_executor_tokens_ = true;
-  executor_tokens_[row].assign(tokens.begin(), tokens.end());
-}
-
 void ScheduledRequests::BeginBackendStep(std::vector<BackendPlannedRow> plan) {
   if (output_kind_ != StepOutputKind::DecoderOutputs || decoder_state_)
     throw std::logic_error("An executor step can select its output protocol only once.");
@@ -262,7 +245,7 @@ void ScheduledRequests::BeginBackendStep(std::vector<BackendPlannedRow> plan) {
 }
 
 void ScheduledRequests::StageBackendRow(size_t request_row, BackendRowResult result) {
-  if (output_kind_ != StepOutputKind::BackendRows || legacy_executor_tokens_)
+  if (output_kind_ != StepOutputKind::BackendRows)
     throw std::logic_error("Backend rows require an explicit backend step plan.");
   for (size_t row : backend_request_rows_) {
     if (row == request_row)
@@ -308,7 +291,7 @@ void ScheduledRequests::ValidateBackendRows() const {
 }
 
 void ScheduledRequests::GenerateNextTokens(std::vector<RequestStepResult>& results) {
-  if (output_kind_ == StepOutputKind::BackendRows && !legacy_executor_tokens_) {
+  if (output_kind_ == StepOutputKind::BackendRows) {
     ValidateBackendRows();  // The entire batch is checked before the first Request changes.
     if (backend_committed_)
       throw std::logic_error("A backend completion batch was committed more than once.");
@@ -333,15 +316,6 @@ void ScheduledRequests::GenerateNextTokens(std::vector<RequestStepResult>& resul
       ack.finish_reason = result.finish_reason;
       ack.disposition = result.done ? ContinuationDisposition::Invalidate : ContinuationDisposition::Continue;
       commit_acks_.push_back(std::move(ack));
-    }
-    return;
-  }
-  if (legacy_executor_tokens_) {
-    results.assign(requests_.size(), RequestStepResult{});
-    for (size_t row = 0; row < requests_.size(); ++row) {
-      if (!executor_tokens_[row].empty() && IsExecuting(requests_[row]->status_)) {
-        results[row] = requests_[row]->CommitExternalTokens(executor_tokens_[row]);
-      }
     }
     return;
   }
