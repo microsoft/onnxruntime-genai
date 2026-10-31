@@ -33,6 +33,15 @@
 #endif
 #if USE_CUDA
 #include "ep/cuda/session_options.h"  // Generators::CUDAExecutionProvider::ResolveStreamBindingOptions
+#include "models/qwen38_graph_plane.h"  // Generators::Qwen38Plane: the plane that pins the CUDA add-on
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
 #endif
 
 #include <gtest/gtest.h>
@@ -236,6 +245,18 @@ bool Contains(const std::string& text, const char* part) { return text.find(part
 
 constexpr int kStreamRaceRounds = 10;
 
+// Whether the CUDA add-on is still mapped in the process, without loading it.
+bool CudaAddOnIsMapped() {
+#if defined(_WIN32)
+  return GetModuleHandleW(L"onnxruntime-genai-cuda.dll") != nullptr;
+#else
+  void* handle = dlopen("libonnxruntime-genai-cuda.so", RTLD_NOW | RTLD_NOLOAD);
+  if (handle == nullptr) return false;
+  dlclose(handle);
+  return true;
+#endif
+}
+
 }  // namespace
 
 // Concurrent first uses of the add-on all target the same GPU before any of them has a stream: half of the threads
@@ -371,6 +392,41 @@ TEST(ReInitTests, ALegacyCudaSessionWithoutAnIdIsBoundToGpuZero) {
   ASSERT_NE(cuda, nullptr) << unavailable;
   EXPECT_EQ(cuda->GetDeviceId(&resolved), 0);
   OgaShutdown();
+}
+
+// The CUDA add-on keeps its stream, its allocator pointer and its device interface in file-scope state. The qwen38 plane built
+// into the add-on is never unloaded (a library that has launched kernels must not be unloaded and loaded again, see
+// Qwen38Plane), so a process that has loaded a qwen38_flash_graph model keeps the add-on mapped across OgaShutdown() and the
+// next init enters it again with the interface of the previous init still in it. The add-on has to release that state before it
+// builds the new interface: a Debug build otherwise aborts on the asserts that guard it, a Release build leaks the stream of
+// the previous init, and an interface that is destroyed after the new one was built releases the stream of the new one.
+// A leaked stream cannot be seen from the outside (the streams of a process cannot be counted, and a destroyed one must not be
+// queried), so a Release build catches the last case only, as the null stream checked below.
+TEST(ReInitTests, TheCudaAddOnIsEnteredAgainWhenTheBuiltInQwen38PlaneKeepsItMapped) {
+  // A round is what loading a qwen38_flash_graph model and unloading it again does to the add-on.
+  for (int round = 0; round < 3; ++round) {
+    Generators::DeviceInterface* device = nullptr;
+    try {
+      device = Generators::GetDeviceInterface(Generators::DeviceType::CUDA);
+      device->InitOrt(*Ort::api, Ort::Allocator::GetWithDefaultOptions());
+    } catch (const std::exception& e) {
+      OgaShutdown();
+      GTEST_SKIP() << "the CUDA add-on is not usable here: " << e.what();
+    }
+    ASSERT_NE(device->GetCudaStream(), nullptr) << "round " << round;
+    EXPECT_NO_THROW(device->Synchronize()) << "round " << round;
+
+    try {
+      Generators::Qwen38Plane plane{std::filesystem::path{}};  // what a qwen38_flash_graph model loads
+    } catch (const std::exception& e) {
+      OgaShutdown();
+      GTEST_SKIP() << "the CUDA add-on has no qwen38 plane: " << e.what();
+    }
+
+    OgaShutdown();
+    if (!CudaAddOnIsMapped())
+      GTEST_SKIP() << "OgaShutdown() unloaded the CUDA add-on in spite of the plane, so there is no re-entry to cover";
+  }
 }
 #endif  // USE_CUDA
 
