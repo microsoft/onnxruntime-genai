@@ -87,12 +87,33 @@ Config::SessionOptions ResolveQwen38AuxiliarySessionOptions(const Config::Sessio
 // enabled, otherwise prefill_chunk_tokens).
 size_t EffectiveQwen38PrefillChunkTokens(const Config::Model::Qwen38Graph& q);
 
+// The packed QSA indexer pools kQwen38IndexKeyRatio tokens into one compressed index key.
+inline constexpr int kQwen38IndexKeyRatio = 4;
+
+// A cache input of an exported graph as the graph declares it (dimensions <= 0 are symbolic).
+struct Qwen38CacheInput {
+  std::string name;
+  std::vector<int64_t> shape;
+};
+
+// The engine allocates every KV / position / index-key buffer from the shapes the graphs declare, but its ledger and
+// the strides of the dense hand-off and of the head KV prefill come from model.qwen38_graph.kv_capacity. Throws a
+// std::runtime_error naming the offending input of `graph` ("target", "head", ...) unless the two agree:
+//   past_key_values.<n>.key|value (also head.past_key_values.<n>.*)  [batch, 2, kv_capacity, 256]
+//   past_position_ids                                                [batch, >= kv_capacity]
+//   past_key_values.<n>.index_key                                    [batch, >= kv_capacity / ratio, width]
+// where ratio is kQwen38IndexKeyRatio. Other inputs (recurrent state, index buffers, ...) do not depend on the
+// capacity and are ignored.
+void ValidateQwen38CacheShapes(const std::vector<Qwen38CacheInput>& inputs, int kv_capacity, const std::string& graph);
+
 // Constants of the PackedQSAIndexer state conversion (key-norm weights, leading-RoPE tables) for the dense -> packed hand-off.
 struct Qwen38QsaConstants {
+  // fp32 scales per quantized-KV layer: one per channel of the 2 KV heads x 256 channels.
+  static constexpr size_t kKvScaleCount = 512;
   struct Set {
     std::map<int, const uint8_t*> knorm;   // per QSA layer (bf16 [128])
-    std::map<int, const uint8_t*> kscale;  // per QSA layer (fp32 [512], optional for INT8/FP8 KV)
-    std::map<int, const uint8_t*> vscale;  // per QSA layer (fp32 [512], optional for INT8/FP8 KV)
+    std::map<int, const uint8_t*> kscale;  // per QSA layer (fp32 [kKvScaleCount], optional for INT8/FP8 KV)
+    std::map<int, const uint8_t*> vscale;  // per QSA layer (fp32 [kKvScaleCount], optional for INT8/FP8 KV)
     const uint8_t* cos{};                  // bf16 [max_pos, width]
     const uint8_t* sin{};
     int width{};
