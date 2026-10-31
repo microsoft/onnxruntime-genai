@@ -23,6 +23,7 @@
 #include "model.h"
 #include "../dflash2_drafter.h"
 #include "qwen38_decode_device.h"
+#include "qwen38_dflash_prompt.h"
 #include "qwen38_graph_plane.h"
 #include "qwen38_ort_env.h"
 #include "span.h"
@@ -501,9 +502,7 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   std::shared_ptr<Dflash2Model> dflash_model_;
   std::unique_ptr<Dflash2Drafter> dflash_;
   PlaneBuffer d_dflash_prompt_;
-  size_t dflash_prompt_rows_{};
-  size_t dflash_prompt_position_{};
-  bool dflash_ingested_in_turn_{false};
+  Qwen38DflashPromptFeatures dflash_prompt_;  // which prompt chunks the drafter ingests; its window is set with dflash_
   static constexpr size_t kDflashWidth = 12800;
 
   // host state
