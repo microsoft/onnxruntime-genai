@@ -657,6 +657,7 @@ struct CountingCudaDeviceState {
   size_t device_to_host_copies{};
   size_t host_to_device_copies{};
   bool separate_host_mirror{};
+  bool recycles_host_mirrors{};
   size_t synchronize_calls{};
   size_t memory_queries{};
   size_t integrated_queries{};
@@ -740,6 +741,7 @@ struct CountingCudaDevice final : DeviceInterface {
   }
   std::unique_ptr<KeyValueCache> CreateKeyValueCache(State&) override { return {}; }
   void Synchronize() override { ++state->synchronize_calls; }
+  bool RecyclesHostMirrorsAfterUpload(size_t) const override { return state->recycles_host_mirrors; }
   void GetAvailableMemory(size_t& free_bytes, size_t& total_bytes) override {
     ++state->memory_queries;
     if (state->fail_memory_query) {
