@@ -13,6 +13,7 @@
 #include "models/postprocessing/asr_post_processor.h"
 #include "models/preprocessing/streaming_processor.h"
 #include "models/nemotron_speech.h"
+#include "models/nemotron_bolt.h"
 #include "models/parakeet.h"
 #include "sequences.h"
 #include "models/env_utils.h"
@@ -586,6 +587,8 @@ std::unique_ptr<Search> CreateSearch(const GeneratorParams& params) {
       throw std::runtime_error("eos_token_id (" + std::to_string(eos_token_id) + ") must be in range [0, " + std::to_string(params.config.model.vocab_size) + ") (vocab_size)");
   }
 
+  if (params.config.model.type == "nemotron_bolt")
+    return CreateNemotronBoltSearch(params);
   if (params.search.num_beams > 1)
     return params.p_device->CreateBeam(params);
   return params.p_device->CreateGreedy(params);
@@ -618,6 +621,8 @@ Generator::Generator(const Model& model, const GeneratorParams& params)
   // search/logits pipeline; skip the standard validations and create the
   // TransducerState-derived state directly.
   const auto& model_type = model.config_->model.type;
+  if (model_type == "nemotron_bolt")
+    ValidateNemotronBoltSearch(params);
   if (ModelType::IsTransducer(model_type) || ModelType::IsStreamingEncDecASR(model_type)) {
     state_ = model.CreateState({}, params);
     transducer_state_ = dynamic_cast<TransducerState*>(state_.get());
@@ -794,9 +799,14 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   state_->StartTurn();
 
   auto input_ids_device = AllocateInputIdsOnDevice(input_ids);
-  search_->AppendTokens(input_ids_device);
   computed_logits_ = false;
-  ComputeLogits(input_ids_device);
+  if (auto* bolt = dynamic_cast<NemotronBoltState*>(state_.get())) {
+    bolt->Prefill(input_ids);
+    search_->AppendTokens(input_ids_device);
+  } else {
+    search_->AppendTokens(input_ids_device);
+    ComputeLogits(input_ids_device);
+  }
 
   generation_telemetry_.CompleteAppend(
       input_ids.size(), state_->params_->search.num_beams, append_input_modality);
@@ -808,6 +818,11 @@ void Generator::AppendTokens(DeviceSpan<int32_t> input_ids) {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (input_ids.empty())
     throw std::runtime_error("input_ids is empty");
+  if (model_->config_->model.type == "nemotron_bolt") {
+    auto cpu = input_ids.CopyDeviceToCpu();
+    AppendTokens(cpu_span<const int32_t>{cpu.data(), cpu.size()});
+    return;
+  }
   if ((input_ids.size() / state_->params_->search.batch_size) + search_->GetSequenceLength() >
       state_->params_->search.max_length)
     throw std::runtime_error("device input_ids + current sequence length exceeds max length");
@@ -970,6 +985,8 @@ bool Generator::IsSessionTerminated() const {
 }
 
 void Generator::SetLogits(DeviceSpan<float> logits) {
+  if (model_->config_->model.type == "nemotron_bolt")
+    throw std::runtime_error("nemotron_bolt: SetLogits is unsupported");
   search_->SetLogits(logits);
   computed_logits_ = true;
 }
@@ -1016,6 +1033,8 @@ SpeculativeStats Generator::GetSpeculativeStats() const {
 
 void Generator::RewindToLength(size_t new_length) {
   const auto& model_type = model_->config_->model.type;
+  if (model_type == "nemotron_bolt" && new_length != 0)
+    throw std::runtime_error("nemotron_bolt: only reset-to-zero rewind is supported");
   // RNNT/TDT/streaming-enc-dec-ASR models (e.g. Moonshine) take the
   // TransducerState path and never create search_, so rewind is unsupported.
   // Fail clearly here before search_ is dereferenced below.
