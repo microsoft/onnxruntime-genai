@@ -52,7 +52,46 @@ std::vector<int64_t> FixedShape(std::vector<int64_t> shape) {
 
 constexpr int kStatusRingSpinCheck = 1 << 16;
 
+// The cache inputs of `info` that depend on the KV capacity: every input under `prefix` (and past_position_ids).
+std::vector<Qwen38CacheInput> CacheInputsOf(const SessionInfo& info, const char* prefix, bool with_positions) {
+  std::vector<Qwen38CacheInput> inputs;
+  for (const auto& name : info.GetInputNames()) {
+    if (StartsWith(name, prefix) || (with_positions && name == "past_position_ids"))
+      inputs.push_back({name, info.GetInputShape(name)});
+  }
+  return inputs;
+}
+
 }  // namespace
+
+void ValidateQwen38CacheShapes(const std::vector<Qwen38CacheInput>& inputs, int kv_capacity, const std::string& graph) {
+  const auto fail = [&](const Qwen38CacheInput& input, const char* requirement) {
+    std::ostringstream message;
+    message << "qwen38_graph: model.qwen38_graph.kv_capacity (" << kv_capacity << ") does not match the " << graph
+            << " input \"" << input.name << "\", declared as [";
+    for (size_t i = 0; i < input.shape.size(); ++i) message << (i ? ", " : "") << input.shape[i];
+    message << "]: " << requirement << ". Set kv_capacity to the capacity the graphs were exported with.";
+    throw std::runtime_error(message.str());
+  };
+  for (const auto& input : inputs) {
+    const auto& shape = input.shape;
+    const size_t dot = input.name.rfind('.');
+    const std::string tail = dot == std::string::npos ? input.name : input.name.substr(dot + 1);
+    const bool is_cache = input.name.find("past_key_values.") != std::string::npos;
+    if (input.name == "past_position_ids") {
+      if (shape.size() != 2) fail(input, "expected [batch, kv_capacity]");
+      if (shape[1] < kv_capacity) fail(input, "dimension 1 must be static and at least kv_capacity");
+    } else if (is_cache && (tail == "key" || tail == "value")) {
+      if (shape.size() != 4) fail(input, "expected [batch, 2, kv_capacity, 256]");
+      if (shape[1] != 2 || shape[3] != 256) fail(input, "the hand-off copies 2 KV heads of 256 channels");
+      if (shape[2] != kv_capacity) fail(input, "dimension 2 (the cache length) must be static and kv_capacity long");
+    } else if (is_cache && tail == "index_key") {
+      if (shape.size() != 3) fail(input, "expected [batch, kv_capacity / 4, width]");
+      if (shape[1] < kv_capacity / kQwen38IndexKeyRatio)
+        fail(input, "dimension 1 must be static and hold one key per 4 positions");
+    }
+  }
+}
 
 size_t DevTensor::Bytes() const {
   return Elements(shape) * Ort::SizeOf(type);
@@ -78,6 +117,13 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
     suffix_lookup_mode_ = std::atoi(sl_env);
   }
   if (fold_ && !mtp_enabled_) throw std::runtime_error("qwen38_graph: the fold stack requires model.qwen38_graph.mtp.enabled");
+  // The strides of the hand-off and of the head KV prefill come from kv_capacity: reject graphs exported for another
+  // capacity before any cache buffer is allocated.
+  ValidateQwen38CacheShapes(CacheInputsOf(model_.session_info_, "past_key_values.", true), capacity_, "target");
+  if (fold_) {
+    ValidateQwen38CacheShapes(CacheInputsOf(model_.session_info_, "head.past_key_values.", false), capacity_,
+                              "fold head");
+  }
   stream_ = model_.p_device_->GetCudaStream();
   plane_.Check(plane_.set_device(model_.p_device_->GetDeviceId(nullptr)), "cudaSetDevice");
   memory_info_ = model_.p_device_->GetMemoryInfo();
@@ -227,6 +273,19 @@ void Qwen38GraphEngine::BuildTarget() {
     }
   }
   if (ple_layer_ < 0) throw std::runtime_error("qwen38_graph: target has no ple_embeddings input");
+  // PrepRow fills inputs_embeds from the token ids (plane embed_rows over the device-mapped embedding table); a target
+  // that takes them cannot run without either, and must never run on zero embeddings.
+  if (info.HasInput("inputs_embeds")) {
+    if (!plane_.embed_rows)
+      throw std::runtime_error(
+          "qwen38_graph: the target takes inputs_embeds but the plane library lacks the "
+          "qwen38_plane_embed_rows export");
+    if (!model_.embed_mapping_)
+      throw std::runtime_error(
+          "qwen38_graph: the target takes inputs_embeds, which are gathered from the embedding table mapped from "
+          "<model.embedding.filename>.data (at least vocab_size * hidden_size * 2 bytes); that file is missing or too "
+          "small");
+  }
 
   // Output facts
   const std::string hidden_name = info.HasOutput("hidden_states_out") ? "hidden_states_out" : "hidden_states";
@@ -461,6 +520,9 @@ void Qwen38GraphEngine::BuildHead() {
   head_[1].rows = 2;
   head_[1].session = model_.session_head_s2_.get();
   for (auto& h : head_) h.info.Add(*h.session);
+  for (const HeadSession& h : head_)
+    ValidateQwen38CacheShapes(CacheInputsOf(h.info, "past_key_values.", false), capacity_,
+                              h.rows == 1 ? "head (S=1)" : "head (S=2)");
   BuildHeadState();
 
   for (HeadSession& h : head_) {
@@ -607,7 +669,7 @@ void Qwen38GraphEngine::PrepRow(int rows, int row, const void* tok, const void* 
   plane_.prep(stream_, params_dev_.data(), tok, pos, add, ctx_in, ctx_out, in.input_ids + 8 * row,
               in.position_ids + 8 * row, row == 0 ? in.committed : scratch_i32_.data(), past_pos_,
               in.ple + 2 * static_cast<size_t>(ple_width_) * row, ctl_.data());
-  if (in.inputs_embeds && plane_.embed_rows && model_.embed_mapping_) {
+  if (in.inputs_embeds) {
     const int embed_width = model_.config_->model.decoder.hidden_size;
     plane_.embed_rows(stream_, model_.embed_mapping_->device_data(), in.input_ids + 8 * row,
                       in.inputs_embeds + 2 * static_cast<size_t>(embed_width) * row, 1, embed_width);
@@ -774,6 +836,7 @@ void Qwen38GraphEngine::BuildHeadR2() {
   HeadR2Session& h = head_r2_;
   h.session = model_.session_head_r2_.get();
   h.info.Add(*h.session);
+  ValidateQwen38CacheShapes(CacheInputsOf(h.info, "past_key_values.", false), capacity_, "head_r2");
   const auto bf16 = ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16;
   const auto i64 = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64;
   const auto i32 = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32;
@@ -954,8 +1017,10 @@ void Qwen38GraphEngine::EnqueueFold() {
 }
 
 void Qwen38GraphEngine::CheckDecodeStatus() {
-  if (!fold_ || !decode_started_ || inflight_) return;
-  SyncStream();
+  if (!decode_started_) return;
+  // ctl[5] ORs the validation status of every call of the decode: the target's (fold: the whole fused cycle) and,
+  // outside the fold stack, the standalone head's, which the cycle record's status does not carry. The stream is idle
+  // once ReadCtl returns, so this also holds after Drain() while the last cycle's record (inflight_) is unconsumed.
   const int64_t bits = ReadCtl(5);
   if (bits != 0) throw std::runtime_error("qwen38_graph: device error bits " + std::to_string(bits) + " after decode");
 }
@@ -1355,6 +1420,8 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
         for (const char* name : {"model.embed_tokens.weight", "head.mtp.embed_tokens.weight"}) {
           session_options_->AddInitializer(name, *embed_values_.back());
         }
+      } else {
+        embed_mapping_.reset();  // not the vocab_size x hidden_size table: nothing may gather rows from it
       }
     }
   }

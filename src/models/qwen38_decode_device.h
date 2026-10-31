@@ -70,7 +70,11 @@ class Qwen38DecodeDevice {
   virtual Qwen38CycleRecord WaitCycle() = 0;
   // Commits `record` on the host and, when `want_more`, enqueues the next cycle (look-ahead).
   virtual void Advance(const Qwen38CycleRecord& record, bool want_more) = 0;
-  // Throws when the device accumulated an error over the cycles of the decode. Only called while no cycle is in flight.
+  // Throws when the device accumulated a validation error over the decode: from the target and, outside the fold
+  // stack, from the standalone head, whose status the cycle record does not carry. Valid once BeginDecode ran, also
+  // right after Drain() while the record of the last cycle is still unconsumed (cancellation, stop string): it
+  // synchronizes the stream itself, so the error of a cycle nobody waited for is reported here instead of being
+  // cleared by the next Reset().
   virtual void CheckDecodeStatus() {}
 
   // Positions at the end of the KV store that are never filled: a verify step writes two rows past the committed length.

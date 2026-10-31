@@ -173,22 +173,32 @@ Qwen38WeightPool::Qwen38WeightPool(Qwen38Plane& plane, const std::filesystem::pa
 #endif
       }
     }
-    if (plane_.host_get_device_pointer) {
-      for (auto& entry : entries_) {
-        if (entry.placement == "host_mapped" || entry.host_mapped || entry.placement == "cpu") {
-          void* dev_ptr = nullptr;
-          if (plane_.host_get_device_pointer(&dev_ptr, entry.ptr, 0) == 0 && dev_ptr != nullptr &&
-              dev_ptr != entry.ptr) {
-            if (entry.placement == "host_mapped" || entry.host_mapped) {
-              entry.value = OrtValue::CreateTensor(memory_info, dev_ptr, static_cast<size_t>(entry.length), entry.shape,
-                                                   static_cast<ONNXTensorElementDataType>(entry.dtype));
-            } else {
-              entry.gpu_mapped_value =
-                  OrtValue::CreateTensor(memory_info, dev_ptr, static_cast<size_t>(entry.length), entry.shape,
-                                         static_cast<ONNXTensorElementDataType>(entry.dtype));
-            }
-          }
-        }
+    // A host-mapped initializer reaches ORT as a CUDA tensor, so it needs the device alias of its registered range:
+    // without one the graph would read through the raw host address. CPU-placed initializers only use an alias for the
+    // dense session; without one they stay plain CPU tensors (see AddTo).
+    for (size_t idx = 0; idx < entries_.size(); ++idx) {
+      Entry& entry = entries_[idx];
+      const bool host_mapped = entry.placement == "host_mapped" || entry.host_mapped;
+      if (!host_mapped && entry.placement != "cpu") continue;
+      void* dev_ptr = nullptr;
+      const bool has_alias = plane_.host_get_device_pointer != nullptr &&
+                             plane_.host_get_device_pointer(&dev_ptr, entry.ptr, 0) == 0 && dev_ptr != nullptr;
+      if (!has_alias) {
+        if (host_mapped)
+          throw std::runtime_error("qwen38_graph: no device address for the host-mapped weight pool entry " +
+                                   std::to_string(idx) + " of " + entry.file.string() +
+                                   ": its range is not registered with CUDA as mapped memory");
+        entry.gpu_mapped_value.reset();
+        continue;
+      }
+      if (dev_ptr == entry.ptr) continue;  // unified addressing: the host address is the device address
+      if (host_mapped) {
+        entry.value = OrtValue::CreateTensor(memory_info, dev_ptr, static_cast<size_t>(entry.length), entry.shape,
+                                             static_cast<ONNXTensorElementDataType>(entry.dtype));
+      } else {
+        entry.gpu_mapped_value =
+            OrtValue::CreateTensor(memory_info, dev_ptr, static_cast<size_t>(entry.length), entry.shape,
+                                   static_cast<ONNXTensorElementDataType>(entry.dtype));
       }
     }
   } catch (...) {
@@ -316,10 +326,13 @@ Qwen38QsaConstants::Qwen38QsaConstants(Qwen38Plane& plane, const std::filesystem
       if (item.bytes != 128 * 2)
         throw std::runtime_error("qwen38_graph: unexpected QSA knorm byte size: " + item.name);
       set.knorm[std::stoi(item.name.substr(6))] = ptr;
-    } else if (item.name.rfind("kscale.", 0) == 0) {
-      set.kscale[std::stoi(item.name.substr(7))] = ptr;
-    } else if (item.name.rfind("vscale.", 0) == 0) {
-      set.vscale[std::stoi(item.name.substr(7))] = ptr;
+    } else if (item.name.rfind("kscale.", 0) == 0 || item.name.rfind("vscale.", 0) == 0) {
+      // Both quantized-KV hand-off paths read one fp32 scale per channel of the 2 KV heads x 256 channels.
+      if (item.bytes != Qwen38QsaConstants::kKvScaleCount * sizeof(float))
+        throw std::runtime_error("qwen38_graph: a QSA KV scale must hold exactly " +
+                                 std::to_string(Qwen38QsaConstants::kKvScaleCount) + " floats: " + item.name);
+      auto& scales = item.name[0] == 'k' ? set.kscale : set.vscale;
+      scales[std::stoi(item.name.substr(7))] = ptr;
     }
   }
   if (!target.cos || !target.sin || !head.cos || !head.sin || target.knorm.empty() || head.knorm.empty())
@@ -332,7 +345,15 @@ Qwen38QsaConstants::Qwen38QsaConstants(Qwen38Plane& plane, const std::filesystem
 
 namespace {
 
-constexpr int kRatio = 4;  // PackedQSAIndexer pooling ratio
+constexpr int kRatio = kQwen38IndexKeyRatio;  // PackedQSAIndexer pooling ratio
+
+// The prefill graphs that take inputs_embeds get them from the CPU embedding session (RunCpuEmbedding).
+void RequireCpuEmbeddingSession(const Qwen38GraphModel& model) {
+  if (!model.session_embedding_)
+    throw std::runtime_error(
+        "qwen38_graph: the prefill graphs take inputs_embeds, which the CPU embedding session computes, but "
+        "model.embedding.filename is not configured");
+}
 
 int LayerOf(const std::string& name) {
   const size_t first = name.find('.');
@@ -374,6 +395,7 @@ void Qwen38GraphEngine::BuildFastPrefill() {
     fast->ples = PlaneBuffer(plane_, static_cast<size_t>(fast->chunk) * ple_width_ * 2, stream_);
     fast->scratch = PlaneBuffer(plane_, 4096, stream_);
     if (fast->dense_info.HasInput("inputs_embeds") || fast->head_kv_info.HasInput("inputs_embeds")) {
+      RequireCpuEmbeddingSession(model_);
       const size_t max_emb_bytes =
           static_cast<size_t>(fast->chunk) * static_cast<size_t>(model_.config_->model.decoder.hidden_size) * 2;
       fast->embeds = PlaneBuffer(plane_, max_emb_bytes, stream_);
@@ -410,6 +432,7 @@ void Qwen38GraphEngine::BuildFastPrefill() {
   fast->raw_keys = PlaneBuffer(plane_, slots * 128 * 2, stream_);
   fast->scratch = PlaneBuffer(plane_, 256, stream_);
   if (fast->dense_info.HasInput("inputs_embeds") || fast->head_kv_info.HasInput("inputs_embeds")) {
+    RequireCpuEmbeddingSession(model_);
     const size_t max_emb_bytes =
         static_cast<size_t>(fast->chunk) * static_cast<size_t>(model_.config_->model.decoder.hidden_size) * 2;
     fast->embeds = PlaneBuffer(plane_, max_emb_bytes, stream_);
