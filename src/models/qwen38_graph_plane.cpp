@@ -149,8 +149,8 @@ Qwen38Plane::Qwen38Plane(const std::filesystem::path& path) {
 }
 
 Qwen38Plane::~Qwen38Plane() {
+  // detach() stops and joins the threads the module started. The module stays loaded: see the comment of the class.
   if (attached_) detach();
-  if (handle_) FreeLibrary(static_cast<HMODULE>(handle_));
 }
 
 #else
@@ -211,8 +211,8 @@ Qwen38Plane::Qwen38Plane(const std::filesystem::path& path) {
 }
 
 Qwen38Plane::~Qwen38Plane() {
+  // detach() stops and joins the threads the module started. The module stays loaded: see the comment of the class.
   if (attached_) detach();
-  if (handle_) dlclose(handle_);
 }
 
 #endif
