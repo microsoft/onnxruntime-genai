@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstdlib>
 #include <initializer_list>
+#include <iterator>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -351,6 +352,245 @@ TEST(Qwen38OrtRunHintsTest, ThePromptLengthIsNeverReadBackFromTheEnvironment) {
 
   Qwen38OrtRunHints unannounced;
   EXPECT_EQ(unannounced.BeginPromptChunk(0, 100), 100u);
+}
+
+// ---- per slot ------------------------------------------------------------------------------------------------------------
+
+namespace {
+
+// ORT consumes the new-turn notice of the Run it reads it in.
+void ConsumeNoticeLikeOrt(const char* name) {
+  if (Read(name) == "1") WriteLikeOrt(name, "0");
+}
+
+struct SeenByRun {
+  std::optional<std::string> new_turn, handoff, total, compact;
+};
+
+// One ORT Run that serves `participants`: records what it sees in the environment and consumes the notices like ORT.
+SeenByRun RunLikeOrt(Qwen38OrtRunHints& hints, const Qwen38PromptRunHints* prompt, Qwen38SlotMask participants) {
+  SeenByRun seen;
+  RunWithQwen38OrtHints(
+      hints, prompt,
+      [&] {
+        seen.new_turn = Read(Qwen38OrtEnv::kNewTurn);
+        seen.handoff = Read(Qwen38OrtEnv::kHandoffDone);
+        seen.total = Read(Qwen38OrtEnv::kPrefillTotalTokens);
+        seen.compact = Read(Qwen38OrtEnv::kCurrentMaxCompactExperts);
+        ConsumeNoticeLikeOrt(Qwen38OrtEnv::kNewTurn);
+        ConsumeNoticeLikeOrt(Qwen38OrtEnv::kHandoffDone);
+      },
+      participants);
+  return seen;
+}
+
+}  // namespace
+
+TEST(Qwen38OrtRunHintsSlotTest, SlotMasksNameTheSlotsOfARun) {
+  EXPECT_EQ(Qwen38SlotBit(0), 1u);
+  EXPECT_EQ(Qwen38SlotBit(3), 8u);
+  EXPECT_EQ(Qwen38FirstSlots(1), 1u);
+  EXPECT_EQ(Qwen38FirstSlots(3), 7u);
+  EXPECT_EQ(Qwen38FirstSlots(8), 0xFFu);
+  EXPECT_EQ(Qwen38SlotMaskOf(std::vector<size_t>{0, 2}), 5u);
+  EXPECT_EQ(Qwen38SlotMaskOf(std::vector<size_t>{}), 0u);
+}
+
+TEST(Qwen38OrtRunHintsSlotTest, TheSlotCountIsBoundedLikeTheDevice) {
+  EXPECT_EQ(Qwen38OrtRunHints{}.SlotCount(), 1u);
+  EXPECT_EQ(Qwen38OrtRunHints{8}.SlotCount(), 8u);
+  EXPECT_THROW(Qwen38OrtRunHints{0}, std::invalid_argument);
+  EXPECT_THROW(Qwen38OrtRunHints{9}, std::invalid_argument);
+  Qwen38OrtRunHints hints{2};
+  hints.ExpectPrefillTokens(1, 70);
+  hints.SetSlotCount(4);  // the slots that exist keep their state
+  EXPECT_EQ(hints.SlotCount(), 4u);
+  EXPECT_EQ(hints.ExpectedPrefillTokens(1), 70u);
+  EXPECT_EQ(hints.ExpectedPrefillTokens(3), 0u);
+}
+
+TEST(Qwen38OrtRunHintsSlotTest, AnUnknownSlotIsRejectedBeforeAnythingIsPublished) {
+  Qwen38OrtRunHints hints{2};
+  EXPECT_THROW(hints.BeginTurn(2), std::out_of_range);
+  EXPECT_THROW(hints.ExpectPrefillTokens(2, 10), std::out_of_range);
+  EXPECT_THROW(hints.ExpectedPrefillTokens(2), std::out_of_range);
+  EXPECT_THROW(hints.BeginPromptChunk(2, 0, 10), std::out_of_range);
+  EXPECT_THROW(hints.MarkHandoff(2), std::out_of_range);
+  EXPECT_THROW(hints.Collect(nullptr, Qwen38SlotBit(2)), std::out_of_range);
+  EXPECT_THROW(hints.Collect(nullptr, Qwen38SlotBit(1) | Qwen38SlotBit(5)), std::out_of_range);
+  EXPECT_THROW(hints.Collect(nullptr, 0), std::out_of_range) << "a Run serves at least one slot";
+  const std::vector<Qwen38OrtEnvVariable> none;
+  const Qwen38OrtEnvScope scope{none};
+  EXPECT_THROW(hints.RunReturned(scope, Qwen38SlotBit(2)), std::out_of_range);
+}
+
+TEST(Qwen38OrtRunHintsSlotTest, TheTurnStateOfASlotIsIndependentOfTheOthers) {
+  Qwen38OrtRunHints hints{3};
+  hints.BeginTurn(1);
+  EXPECT_TRUE(hints.Collect(nullptr, Qwen38SlotBit(0)).empty());
+  EXPECT_NE(Find(hints.Collect(nullptr, Qwen38SlotBit(1)), Qwen38OrtEnv::kNewTurn), nullptr);
+  EXPECT_TRUE(hints.Collect(nullptr, Qwen38SlotBit(2)).empty());
+
+  hints.MarkHandoff(2);
+  EXPECT_EQ(Find(hints.Collect(nullptr, Qwen38SlotBit(0)), Qwen38OrtEnv::kHandoffDone), nullptr);
+  EXPECT_EQ(Find(hints.Collect(nullptr, Qwen38SlotBit(1)), Qwen38OrtEnv::kHandoffDone), nullptr);
+  EXPECT_NE(Find(hints.Collect(nullptr, Qwen38SlotBit(2)), Qwen38OrtEnv::kHandoffDone), nullptr);
+}
+
+TEST(Qwen38OrtRunHintsSlotTest, ANewTurnOfOneSlotLeavesTheOthersAlone) {
+  Qwen38OrtRunHints hints{2};
+  hints.ExpectPrefillTokens(0, 20);
+  hints.MarkHandoff(0);
+  hints.ExpectPrefillTokens(1, 50);
+  hints.BeginTurn(1);
+  EXPECT_EQ(hints.ExpectedPrefillTokens(1), 0u) << "nothing of the previous turn of the slot survives";
+  EXPECT_EQ(hints.ExpectedPrefillTokens(0), 0u) << "slot 0 handed off: its length was spent";
+  EXPECT_NE(Find(hints.Collect(nullptr, Qwen38SlotBit(0)), Qwen38OrtEnv::kHandoffDone), nullptr)
+      << "the hand-off notice of slot 0 is still pending";
+
+  hints.ExpectPrefillTokens(0, 20);
+  hints.BeginTurn(1);
+  EXPECT_EQ(hints.ExpectedPrefillTokens(0), 20u) << "the length of another slot is not touched";
+  hints.BeginAllTurns();
+  EXPECT_EQ(hints.ExpectedPrefillTokens(0), 0u);
+  EXPECT_EQ(Find(hints.Collect(nullptr, Qwen38SlotBit(0)), Qwen38OrtEnv::kHandoffDone), nullptr);
+  EXPECT_NE(Find(hints.Collect(nullptr, Qwen38SlotBit(0)), Qwen38OrtEnv::kNewTurn), nullptr);
+  EXPECT_NE(Find(hints.Collect(nullptr, Qwen38SlotBit(1)), Qwen38OrtEnv::kNewTurn), nullptr);
+}
+
+TEST(Qwen38OrtRunHintsSlotTest, ThePromptLengthIsKeptPerSlotAndASlotStartedLaterNeverReplacesIt) {
+  Qwen38OrtRunHints hints{2};
+  hints.BeginAllTurns();
+  hints.ExpectPrefillTokens(0, 20);
+  hints.ExpectPrefillTokens(1, 5);  // announced after slot 0's, before slot 0's second chunk
+  EXPECT_EQ(hints.BeginPromptChunk(0, 0, 8), 20u);
+  EXPECT_EQ(hints.BeginPromptChunk(1, 0, 5), 5u);
+  EXPECT_EQ(hints.BeginPromptChunk(0, 8, 8), 20u);
+  EXPECT_EQ(hints.BeginPromptChunk(0, 16, 4), 20u);
+  EXPECT_EQ(hints.ExpectedPrefillTokens(0), 20u);
+  EXPECT_EQ(hints.ExpectedPrefillTokens(1), 5u);
+
+  // Never less than what the slot has ingested, whatever another slot was announced.
+  hints.ExpectPrefillTokens(0, 0);
+  hints.ExpectPrefillTokens(1, 4096);
+  EXPECT_EQ(hints.BeginPromptChunk(0, 24, 8), 32u);
+  EXPECT_EQ(hints.BeginPromptChunk(1, 0, 8), 4096u);
+}
+
+TEST(Qwen38OrtRunHintsSlotTest, HandingOffASlotSpendsOnlyItsOwnPromptLength) {
+  Qwen38OrtRunHints hints{2};
+  hints.ExpectPrefillTokens(0, 20);
+  hints.ExpectPrefillTokens(1, 5);
+  hints.MarkHandoff(1);
+  EXPECT_EQ(hints.ExpectedPrefillTokens(1), 0u);
+  EXPECT_EQ(hints.ExpectedPrefillTokens(0), 20u);
+}
+
+TEST(Qwen38OrtRunHintsSlotTest, OnlyTheFirstChunkOfASlotRearmsItsNewTurnNotice) {
+  Qwen38OrtRunHints hints{2};
+  hints.BeginPromptChunk(1, 0, 8);
+  RunWithQwen38OrtHints(hints, nullptr, [] { WriteLikeOrt(Qwen38OrtEnv::kNewTurn, "0"); }, Qwen38SlotBit(1));
+  hints.BeginPromptChunk(1, 8, 8);
+  EXPECT_EQ(Find(hints.Collect(nullptr, Qwen38SlotBit(1)), Qwen38OrtEnv::kNewTurn), nullptr);
+  hints.BeginPromptChunk(0, 0, 8);  // the first chunk of slot 0 arms slot 0's notice, not slot 1's
+  EXPECT_NE(Find(hints.Collect(nullptr, Qwen38SlotBit(0)), Qwen38OrtEnv::kNewTurn), nullptr);
+  EXPECT_EQ(Find(hints.Collect(nullptr, Qwen38SlotBit(1)), Qwen38OrtEnv::kNewTurn), nullptr);
+}
+
+TEST(Qwen38OrtRunHintsSlotTest, AChunkOfOneSlotWithdrawsOnlyItsOwnHandoffNotice) {
+  Qwen38OrtRunHints hints{2};
+  hints.MarkHandoff(0);
+  hints.MarkHandoff(1);
+  hints.BeginPromptChunk(1, 0, 8);
+  EXPECT_NE(Find(hints.Collect(nullptr, Qwen38SlotBit(0)), Qwen38OrtEnv::kHandoffDone), nullptr);
+  EXPECT_EQ(Find(hints.Collect(nullptr, Qwen38SlotBit(1)), Qwen38OrtEnv::kHandoffDone), nullptr);
+}
+
+TEST(Qwen38OrtRunHintsSlotTest, ARunPublishesAndConsumesTheNoticesOfItsParticipantsOnly) {
+  Qwen38OrtRunHints hints{3};
+  hints.BeginAllTurns();
+  hints.MarkHandoff(0);
+  hints.MarkHandoff(2);
+
+  // A Run that serves slot 1 sees only slot 1's new-turn notice, and consuming it leaves the others pending.
+  const auto only_one = RunLikeOrt(hints, nullptr, Qwen38SlotBit(1));
+  EXPECT_EQ(only_one.new_turn, "1");
+  EXPECT_NE(only_one.handoff, "1");
+  EXPECT_EQ(Find(hints.Collect(nullptr, Qwen38SlotBit(1)), Qwen38OrtEnv::kNewTurn), nullptr);
+  EXPECT_NE(Find(hints.Collect(nullptr, Qwen38SlotBit(0)), Qwen38OrtEnv::kNewTurn), nullptr);
+  EXPECT_NE(Find(hints.Collect(nullptr, Qwen38SlotBit(2)), Qwen38OrtEnv::kHandoffDone), nullptr);
+
+  // A batched Run of slots 0 and 2 publishes each notice once and clears both slots.
+  const auto several = RunLikeOrt(hints, nullptr, Qwen38SlotBit(0) | Qwen38SlotBit(2));
+  EXPECT_EQ(several.new_turn, "1");
+  EXPECT_EQ(several.handoff, "1");
+  EXPECT_TRUE(hints.Collect(nullptr, Qwen38SlotMask{7}).empty());
+}
+
+TEST(Qwen38OrtRunHintsSlotTest, ANoticeThatOrtDidNotConsumeStaysPendingForItsSlotOnly) {
+  Qwen38OrtRunHints hints{2};
+  hints.BeginAllTurns();
+  RunWithQwen38OrtHints(hints, nullptr, [] {}, Qwen38SlotBit(0));  // ORT left the notice alone
+  EXPECT_NE(Find(hints.Collect(nullptr, Qwen38SlotBit(0)), Qwen38OrtEnv::kNewTurn), nullptr);
+  RunWithQwen38OrtHints(hints, nullptr, [] { WriteLikeOrt(Qwen38OrtEnv::kNewTurn, "0"); }, Qwen38SlotBit(1));
+  EXPECT_NE(Find(hints.Collect(nullptr, Qwen38SlotBit(0)), Qwen38OrtEnv::kNewTurn), nullptr)
+      << "the Run of slot 1 consumed the notice of slot 1 only";
+  EXPECT_EQ(Find(hints.Collect(nullptr, Qwen38SlotBit(1)), Qwen38OrtEnv::kNewTurn), nullptr);
+}
+
+// The schedule that a process-wide value gets wrong: A ingests a chunk, B starts its prompt, A ingests the next one. Every
+// Run must be told the values of its own slot, and nothing may stay behind in the process environment.
+TEST(Qwen38OrtRunHintsSlotTest, InterleavedPromptChunksOfTwoSlotsEachSeeTheirOwnValues) {
+  const char* const names[] = {Qwen38OrtEnv::kNewTurn, Qwen38OrtEnv::kHandoffDone, Qwen38OrtEnv::kPrefillTotalTokens,
+                               Qwen38OrtEnv::kCurrentMaxCompactExperts};
+  std::vector<std::optional<std::string>> before;
+  for (const char* name : names) before.push_back(Read(name));
+
+  Qwen38OrtRunHints hints{2};
+  hints.BeginAllTurns();
+  hints.ExpectPrefillTokens(0, 4096);  // slot A: a long prompt, 3 chunks follow
+  hints.ExpectPrefillTokens(1, 100);   // slot B: announced after A started, before A's second chunk
+
+  const auto chunk = [&](size_t slot, size_t ingested, size_t tokens, int compact) {
+    const Qwen38PromptRunHints prompt{hints.BeginPromptChunk(slot, ingested, tokens), compact};
+    return RunLikeOrt(hints, &prompt, Qwen38SlotBit(slot));
+  };
+  const auto a0 = chunk(0, 0, 1024, 128);
+  const auto b0 = chunk(1, 0, 100, 64);
+  const auto a1 = chunk(0, 1024, 1024, 128);
+  const auto a2 = chunk(0, 2048, 2048, 64);
+
+  EXPECT_EQ(a0.total, "4096");
+  EXPECT_EQ(a0.compact, "128");
+  EXPECT_EQ(a0.new_turn, "1");
+  EXPECT_EQ(b0.total, "100") << "the total of the slot that ran last is never merged into the other's";
+  EXPECT_EQ(b0.compact, "64");
+  EXPECT_EQ(b0.new_turn, "1") << "slot B's first chunk carries its own notice although slot A consumed one before";
+  EXPECT_EQ(a1.total, "4096") << "slot B started in between and changed nothing for slot A";
+  EXPECT_EQ(a1.compact, "128");
+  EXPECT_EQ(a1.new_turn, before[0]) << "the notice of slot A was consumed by its first chunk";
+  EXPECT_EQ(a2.total, "4096");
+  EXPECT_EQ(a2.compact, "64") << "recomputed for every Run, the larger wave of the earlier chunks is not kept";
+
+  for (size_t i = 0; i < std::size(names); ++i) EXPECT_EQ(Read(names[i]), before[i]) << names[i];
+}
+
+TEST(Qwen38OrtRunHintsSlotTest, ADecodeRunOfSomeSlotsCarriesNoPromptValuesAndNoNoticeOfTheOthers) {
+  const auto before_total = Read(Qwen38OrtEnv::kPrefillTotalTokens);
+  const auto before_compact = Read(Qwen38OrtEnv::kCurrentMaxCompactExperts);
+  Qwen38OrtRunHints hints{3};
+  hints.BeginAllTurns();
+  hints.ExpectPrefillTokens(2, 64);  // slot 2 is still prefilling
+  hints.BeginPromptChunk(2, 0, 8);
+  hints.MarkHandoff(0);  // slots 0 and 1 decode
+  hints.MarkHandoff(1);
+  const auto decode = RunLikeOrt(hints, nullptr, Qwen38SlotBit(0) | Qwen38SlotBit(1));
+  EXPECT_EQ(decode.handoff, "1");
+  EXPECT_EQ(decode.total, before_total) << "a decode Run publishes no prompt length";
+  EXPECT_EQ(decode.compact, before_compact);
+  EXPECT_NE(Find(hints.Collect(nullptr, Qwen38SlotBit(2)), Qwen38OrtEnv::kNewTurn), nullptr)
+      << "the notice of the prefilling slot is still pending";
+  EXPECT_EQ(hints.ExpectedPrefillTokens(2), 64u);
 }
 
 }  // namespace Generators::test

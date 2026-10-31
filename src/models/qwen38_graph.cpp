@@ -226,7 +226,8 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
       capacity_{model.config_->model.qwen38_graph.kv_capacity},
       vocab_{model.config_->model.vocab_size},
       max_batch_{static_cast<int>(ResolveQwen38MaxBatchSize(*model.config_))},
-      ledger_{model.config_->model.qwen38_graph.kv_capacity} {
+      ledger_{model.config_->model.qwen38_graph.kv_capacity},
+      run_hints_{static_cast<size_t>(max_batch_)} {
   const auto& q = model_.config_->model.qwen38_graph;
   mtp_enabled_ = q.mtp.enabled;
   prefill_head_ = q.mtp.prefill_head;
@@ -411,7 +412,8 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
                          "clear warmup bank");
             SyncStream();
             Direction& d = batch_dirs_[B - 1][k];
-            RunSession(*model_.session_target_, d.run_options.get(), *d.binding);
+            RunSession(*model_.session_target_, d.run_options.get(), *d.binding, nullptr,
+                       Qwen38FirstSlots(static_cast<size_t>(B)));
             SyncStream();
           }
         }
@@ -1274,7 +1276,7 @@ void Qwen38GraphEngine::Reset() {
   if (mtp_enabled_) ClearHead();
   SyncStream();
   FastReset();
-  run_hints_.BeginTurn();
+  run_hints_.BeginAllTurns();
   seq_ = 0;
   bank_phase_ = 0;
   inflight_batch_ = 1;
@@ -1328,6 +1330,7 @@ void Qwen38GraphEngine::ResetSlot(size_t slot_idx) {
   const int64_t muted_val = 1;
   WriteCtlSlot(s, 3, {&muted_val, 1});
   SyncStream();
+  run_hints_.BeginTurn(slot_idx);
   slot_ledgers_[s].Reset();
   slot_seq_[s] = 0;
   slot_pending_[s] = -1;
@@ -1371,8 +1374,13 @@ void Qwen38GraphEngine::RunTarget(int rows, int phase, const Qwen38PromptRunHint
 }
 
 void Qwen38GraphEngine::RunSession(OrtSession& session, const OrtRunOptions* run_options, const OrtIoBinding& binding,
-                                   const Qwen38PromptRunHints* prompt) {
-  RunWithQwen38OrtHints(run_hints_, prompt, [&] { session.Run(run_options, binding); });
+                                   const Qwen38PromptRunHints* prompt, Qwen38SlotMask participants) {
+  RunWithQwen38OrtHints(run_hints_, prompt, [&] { session.Run(run_options, binding); }, participants);
+}
+
+void Qwen38GraphEngine::ExpectPrefillTokensSlot(size_t slot, size_t total_tokens) {
+  if (slot >= static_cast<size_t>(max_batch_)) throw std::out_of_range("qwen38_graph: slot index out of range");
+  run_hints_.ExpectPrefillTokens(slot, total_tokens);
 }
 
 void Qwen38GraphEngine::ReplayStateUpdates(int src_bank, size_t kept_count) {
@@ -1985,7 +1993,7 @@ void Qwen38GraphEngine::BeginDecodeSlot(size_t slot_idx, bool want_more) {
     MuteSlot(s);
     return;
   }
-  FastHandoff();
+  FastHandoff(slot_idx);
   const int64_t state[4] = {slot_pending_[s], static_cast<int64_t>(slot_ledgers_[s].Length()), 0, 0};
   WriteCtlSlot(s, 0, std::span<const int64_t>(state, 4));
   if (dflash_) {
@@ -2028,7 +2036,7 @@ void Qwen38GraphEngine::EnqueueBatchDecode(std::span<const size_t> active_slots)
   PrepBatch(B);
   Direction& d = (B == 1) ? dirs_[verify_rows_ - 1][bank_phase_ % num_banks_]
                           : batch_dirs_[B - 1][bank_phase_ % num_banks_];
-  RunSession(*model_.session_target_, d.run_options.get(), *d.binding);
+  RunSession(*model_.session_target_, d.run_options.get(), *d.binding, nullptr, Qwen38SlotMaskOf(active_slots));
   last_hidden_ptr_ = d.hidden;
   inflight_dir_ = &d;
   inflight_batch_ = B;

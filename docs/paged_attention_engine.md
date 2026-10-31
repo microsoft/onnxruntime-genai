@@ -2142,15 +2142,28 @@ token. The device holds `model.qwen38_graph.max_batch_size` slots (default 1), o
   dense prefill (`prefill.enabled`) and 2048 per step through the decode graphs, see `EffectiveQwen38PrefillChunkTokens`;
   the decode-graph path needs an even chunk; a step that only advances the prompt delivers no event, so `CancelRequest`
   stays responsive; the dense prefill state continues across the chunks and is handed over to the decode state in the step that
-  ingests the last one) or one whole cycle (with `fold.enabled`: one CUDA-graph launch). With several slots a step advances
-  every slot (`Qwen38GraphSession::StepBatch`): it commits the in-flight batched cycle of the decoding slots, prefills the next
-  chunk of the slots that have not started decoding and enqueues the next batched cycle. The executor declares its step plan via
-  `ScheduledRequests::BeginBackendStep` and stages owned `BackendRowResult` records (`PrefillProgress` and/or
-  `SelectedTokenBlock`, up to `kMaxGeneratedTokensPerStep` candidate tokens) via `ScheduledRequests::StageBackendRow`;
-  `GenerateNextTokens` validates the whole batch before mutating any Request, commits candidates through
-  `Request::CommitExternalTokens` (observing stop strings, EOS, turn limit, and context limit in order), and records
-  `TokenCommitAck` counts (consumed, appended, and staged for events) settled through `TokenProducingSession` before events are
-  published.
+  ingests the last one) or one whole cycle (with `fold.enabled`: one CUDA-graph launch). The executor tells the device the
+  prompt length of the turn (`Qwen38DecodeDevice::ExpectPrefillTokens`, after `Reset()` and before the first chunk; with
+  several slots `ExpectPrefillTokensSlot(slot, total)`, after `ResetSlot(slot)` and before the first `PrefillChunkSlot` of
+  that slot); the device hands it to the ORT QMoE kernels with every chunk of that turn and drops it at
+  `Reset()`/`ResetSlot()`/`BeginDecode()`/`BeginDecodeSlot()`. The value is state of the device and, with several slots, of
+  the slot: nothing is published through the process environment by the executor, so Engines of different models and slots
+  that ingest their prompts in interleaved chunks never see each other's value. The device itself publishes the QMoE hints
+  (`ORT_QMOE_PREFILL_NEW_TURN`, `ORT_QMOE_PREFILL_TOTAL_TOKENS`, `ORT_QMOE_CURRENT_MAX_COMPACT_EXPERTS`,
+  `ORT_QMOE_PREFILL_HANDOFF_DONE`, `ORT_QMOE_IN_WARMUP`), because ORT's QMoE kernels read them from the process environment
+  until per-run config entries exist, and only for the duration of one ORT Run (`Qwen38OrtEnvScope`, one process-wide lock,
+  the previous values are restored): the values of a prompt chunk are computed from that chunk's slot alone, never kept or
+  max-merged across Runs, and a Run publishes the new-turn and hand-off notices of the slots it serves only (a prompt chunk
+  serves its slot, a batched decode the slots that decode in it).
+  With several slots a step advances every slot (`Qwen38GraphSession::StepBatch`): it commits the in-flight batched cycle of
+  the decoding slots, prefills the next chunk of the slots that have not started decoding and enqueues the next batched
+  cycle. The executor declares its step plan via `ScheduledRequests::BeginBackendStep` and stages owned `BackendRowResult`
+  records (`PrefillProgress` and/or `SelectedTokenBlock`, up to `kMaxGeneratedTokensPerStep` candidate tokens) via
+  `ScheduledRequests::StageBackendRow`; `GenerateNextTokens` validates the whole batch before mutating any Request, commits
+  candidates through `Request::CommitExternalTokens` (observing stop strings, EOS, turn limit, and context limit in order),
+  and records `TokenCommitAck` counts (consumed, appended, and staged for events) settled through `TokenProducingSession`
+  before events are published. Stop strings are therefore accepted on this static path; every other static executor still
+  rejects them.
 - The next cycle is enqueued before a step returns, so the GPU runs it while the Engine delivers the previous tokens. A stop
   string can only be known after delivery, so one cycle may be wasted; the next request, a rewind and Engine teardown wait for
   it with `Qwen38DecodeDevice::Drain()`. The record of such a cycle is never consumed, so its status is read from the device

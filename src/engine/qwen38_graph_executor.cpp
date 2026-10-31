@@ -540,6 +540,8 @@ void Qwen38GraphSession::StepBatch(std::span<const Qwen38StepRequest> requests, 
       const size_t remaining = req.tokens.size() - st.prefilled;
       const size_t chunk = std::min(options_.prefill_chunk_tokens, remaining);
       if (st.prefilled == 0) {
+        // The length is the slot's own state in the device: slots that start their prompts one after the other never
+        // overwrite what the others were told, and the executor never touches the process environment.
         device_->ExpectPrefillTokensSlot(s, req.tokens.size());
       }
       st.dirty = true;
