@@ -207,15 +207,18 @@ void Qwen38GraphSession::OnStepCommitted(const RequestStepResult& result) {
       ++stats_.acceptance_length_histogram[effective_accepted];
     }
     stats_.draft_tokens_accepted += effective_accepted;
-    if (effective_accepted == n_prop) {
+    // The same classification as Engine::RecordSpeculativeCommit, by the drafts that were delivered; whether a correction
+    // or bonus token followed is counted on its own.
+    if (effective_accepted == 0) {
+      ++stats_.zero_accept_rounds;
+    } else if (effective_accepted == n_prop) {
       ++stats_.full_accept_rounds;
+    } else {
+      ++stats_.partial_accept_rounds;
+    }
+    if (effective_accepted == n_prop) {
       if (emitted > n_prop) {
         ++stats_.bonus_tokens;
-      }
-    } else if (effective_accepted == 0) {
-      ++stats_.zero_accept_rounds;
-      if (emitted > 0) {
-        ++stats_.correction_tokens;
       }
     } else if (emitted > effective_accepted) {
       ++stats_.correction_tokens;
@@ -241,6 +244,7 @@ void Qwen38GraphSession::AddStats(SpeculativeStats& stats) const {
   add(stats.target_forward_passes, stats_.target_forward_passes);
   add(stats.target_verify_forward_passes, stats_.target_verify_forward_passes);
   add(stats.full_accept_rounds, stats_.full_accept_rounds);
+  add(stats.partial_accept_rounds, stats_.partial_accept_rounds);
   add(stats.zero_accept_rounds, stats_.zero_accept_rounds);
   for (size_t i = 0; i < stats.acceptance_length_histogram.size(); ++i) {
     add(stats.acceptance_length_histogram[i], stats_.acceptance_length_histogram[i]);
