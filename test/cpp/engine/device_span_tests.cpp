@@ -42,6 +42,16 @@ struct RangeUploadRecorder final : UploadRecorder {
 
 }  // namespace
 
+// DeviceBuffer objects are created by the dynamically loaded add-ons and called through by the host (and the other way
+// around), so adding the virtual CopyCpuRangeToDevice moved the slots of CopyFrom, Zero and the methods after them. A host
+// that accepted an add-on built before it would dispatch to the wrong methods; the version the host demands must therefore
+// stay past the layout that introduced it. An add-on built from a tree without the ranged upload reports at most 16, the
+// version that added the qwen38_graph member to Config::Model.
+TEST(DeviceInterfaceVersionTest, IsPastTheDeviceBufferRangedUploadLayout) {
+  constexpr uint32_t kVersionOfTheRangedUpload = 17;
+  EXPECT_GE(kDeviceInterfaceVersion, kVersionOfTheRangedUpload);
+}
+
 TEST(DeviceSpanTest, RangeUploadForwardsTheByteRangeOfTheSubspan) {
   auto buffer = std::make_shared<RangeUploadRecorder>(16 * sizeof(int32_t));
   auto* recorder = buffer.get();

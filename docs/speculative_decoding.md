@@ -292,8 +292,10 @@ Because the add-on is loaded dynamically, `kDeviceInterfaceVersion` in
 `OrtGlobals::LoadCudaInterface` *before* `GetInterface` is resolved, so a mismatched
 `onnxruntime-genai-cuda` package fails loudly instead of calling through a shifted vtable.
 The rotary-history/configuration and device-span replay interface changes use device-interface version
-13. Rebuild provider add-ons against the matching core; do not reuse a binary
-compiled against the earlier layout.
+13. The ranged CPU-to-device upload (`DeviceBuffer::CopyCpuRangeToDevice`, used for the DFlash2 drafter
+staging buffers) adds a virtual method to `DeviceBuffer` and uses version 17, after version 16 added the
+`qwen38_graph` member to `Config::Model` and version 15 added the pinned-host copies to `DeviceInterface`.
+Rebuild provider add-ons against the matching core; do not reuse a binary compiled against the earlier layout.
 
 ### Hybrid (linear-attention) models
 
