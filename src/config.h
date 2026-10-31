@@ -6,6 +6,7 @@
 #include "filesystem.h"
 #include "provider_options.h"
 
+#include <array>
 #include <functional>
 #include <map>
 #include <memory>
@@ -81,6 +82,7 @@ struct Config {
     static constexpr std::string_view CurrentSequenceLengthName = "current_sequence_length";
     static constexpr std::string_view TotalSequenceLengthName = "total_sequence_length";
     static constexpr std::string_view CacheIndirectionName = "cache_indirection";
+    static constexpr std::string_view CacheWriteIndicesName = "cache_write_indices";
     static constexpr std::string_view AlignmentHeadsName = "alignment_heads";
     static constexpr std::string_view TokenTypeIdsName = "token_type_ids";
 
@@ -525,6 +527,8 @@ struct Config {
       std::optional<RunOptions> run_options;
       std::vector<SharedInitializer> shared_initializers;
 
+      int prefill_sequence_length{};
+
       int hidden_size{};          // Not currently used, potentially useful for embeddings in the future
       int num_attention_heads{};  // Not currently used, potentially useful if num_key_value_heads isn't set
       int num_key_value_heads{};
@@ -609,6 +613,7 @@ struct Config {
         std::string current_sequence_length{Defaults::CurrentSequenceLengthName};
         std::string total_sequence_length{Defaults::TotalSequenceLengthName};
         std::string cache_indirection{Defaults::CacheIndirectionName};
+        std::string cache_write_indices{Defaults::CacheWriteIndicesName};
         std::string encoder_hidden_states{Defaults::EncoderHiddenStatesName};
         std::string rnn_prev_states{Defaults::RnnStatesPrevName};
         std::string encoder_attention_mask{Defaults::EncoderAttentionMaskName};
@@ -950,6 +955,16 @@ struct Config {
   std::unordered_map<std::string, std::span<const std::byte>> external_data_spans_;
   std::shared_ptr<const TokenizerMemoryData> tokenizer_memory_data_;
 };
+
+// Native RGB preprocessing settings; ORT Extensions interprets the processor pipeline.
+struct VisionProcessingConfig {
+  std::array<float, 3> image_mean{};
+  std::array<float, 3> image_std{};
+  std::optional<int64_t> image_height;
+  std::optional<int64_t> image_width;
+};
+
+VisionProcessingConfig LoadVisionProcessingConfig(const fs::path& path);
 
 void SetSearchNumber(Config::Search& search, std::string_view name, double value);
 void SetSearchBool(Config::Search& search, std::string_view name, bool value);

@@ -190,7 +190,7 @@ int main(int argc, char** argv) {
   bool verbose = false, debug = false, interactive = true, rewind = true;
   std::vector<std::string> image_paths;
   std::vector<std::string> audio_paths;
-  if (!ParseArgs(argc, argv, generator_params_args, guidance_args, model_path, ep, ep_path, system_prompt, user_prompt, verbose, debug, interactive, rewind, image_paths, audio_paths)) {
+  if (!ParseArgs(argc, argv, generator_params_args, guidance_args, model_path, ep, ep_path, system_prompt, user_prompt, verbose, debug, interactive, rewind, image_paths, audio_paths, /*use_model_prompt_default=*/true)) {
     return -1;
   }
 

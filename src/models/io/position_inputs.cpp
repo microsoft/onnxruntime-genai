@@ -130,7 +130,10 @@ struct DynamicAttentionMaskBuffer : AttentionMaskBuffer {
 };
 
 struct StaticAttentionMaskBuffer : AttentionMaskBuffer {
-  explicit StaticAttentionMaskBuffer(int max_length) : max_length_{max_length} {}
+  explicit StaticAttentionMaskBuffer(int max_length) : max_length_{max_length} {
+    if (max_length_ <= 0)
+      throw std::runtime_error("Attention mask capacity must be positive");
+  }
 
   void Initialize(Tensor& tensor, std::unique_ptr<OrtValue>& values, int num_beams,
                   std::array<int64_t, 2>& shape) override {
@@ -210,13 +213,15 @@ std::unique_ptr<PositionIdsBuffer> CreatePositionIdsBuffer(const GeneratorParams
 }
 
 std::unique_ptr<AttentionMaskBuffer> CreateAttentionMaskBuffer(
-    const Model& model, const GeneratorParams& params, DynamicMaskUpdate update) {
-  if (params.use_graph_capture ||
+    const Model& model, const GeneratorParams& params, DynamicMaskUpdate update,
+    std::optional<int> static_mask_capacity) {
+  if (static_mask_capacity || params.use_graph_capture ||
       (params.IsPastPresentShareBufferEnabled(model.config_->model.type) &&
        model.p_device_inputs_->ShouldUseStaticPositionInputsForSharedBuffers(model.config_->model))) {
+    const int capacity = static_mask_capacity.value_or(params.search.max_length);
     if (model.p_device_inputs_->GetType() == DeviceType::WEBGPU)
-      return std::make_unique<CpuStagedAttentionMaskBuffer>(params.search.max_length);
-    return std::make_unique<StaticAttentionMaskBuffer>(params.search.max_length);
+      return std::make_unique<CpuStagedAttentionMaskBuffer>(capacity);
+    return std::make_unique<StaticAttentionMaskBuffer>(capacity);
   }
   return std::make_unique<DynamicAttentionMaskBuffer>(model, update);
 }

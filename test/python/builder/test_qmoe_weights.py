@@ -171,6 +171,7 @@ def _load_builder_cli_module(monkeypatch):
         "MistralModel",
         "Model",
         "NemotronModel",
+        "NemotronParseModel",
         "OLMoModel",
         "Phi3MiniLongRoPEModel",
         "Phi3MiniModel",

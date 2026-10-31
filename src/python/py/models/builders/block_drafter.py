@@ -39,8 +39,9 @@ class BlockDrafterBuilder(Model):
     embed_adoption = None
 
     def __init__(self, graph_name="block_drafter", const_prefix="drafter"):
-        super().__init__(graph_name=graph_name, graph_opset=21)
-        self.graph.opset_imports["com.microsoft"] = 1
+        self.graph_attrs = Model.default_graph_attrs()
+        super().__init__(graph_name=graph_name, graph_opset=self.graph_attrs["ai.onnx"])
+        self.graph.opset_imports["com.microsoft"] = self.graph_attrs["com.microsoft"]
         self.const_cache = {}
         self.const_prefix = const_prefix
 
