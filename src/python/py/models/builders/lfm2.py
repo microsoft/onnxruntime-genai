@@ -47,11 +47,11 @@ class LFM2Model(Model):
             raise ValueError(
                 f"Unsupported layer types {unsupported}: expected 'conv', 'full_attention' or 'sliding_attention'."
             )
-        if self.use_paged_attention and "conv" in self.layer_types:
-            # TODO: packed paged inputs need a varlen conv (VarlenCausalConvWithState, as in Qwen3.5); the
-            # batched CausalConvWithState path would mix the sequences of a packed batch and has no attention
-            # mask to find each row's last real token with.
-            raise NotImplementedError("use_paged_attention=true does not support models with conv layers yet.")
+        if self.use_paged_attention and "conv" in self.layer_types and self.ep != "cuda":
+            # TODO: allow WebGPU, which also has VarlenCausalConvWithState, once paged conv layers have run there.
+            raise NotImplementedError(
+                f"use_paged_attention=true with conv layers is supported on CUDA only for now, not {self.ep}."
+            )
         self.attention_attrs["q_norm"] = True
         self.attention_attrs["k_norm"] = True
         super().make_attention_init(config)
@@ -74,37 +74,47 @@ class LFM2Model(Model):
 
     def make_short_conv(self, layer_id, conv_module, root_input):
         basename = f"/model/layers.{layer_id}/conv"
+        # Paged inputs are packed as [num_tokens, channels], the layout VarlenCausalConvWithState takes as is.
+        packed = self.use_paged_attention
+        channels_shape = (
+            ["num_tokens", self.hidden_size] if packed else ["batch_size", self.hidden_size, "sequence_length"]
+        )
 
         # 1. Input projection: project input to 3 * hidden_size
         in_proj_name = f"{basename}/in_proj/MatMul"
         in_proj_name = self.make_matmul(conv_module.in_proj, in_proj_name, root_input)
+        split_input = f"{in_proj_name}/output_0"
 
-        # Transpose from (B, S, 3*H) to (B, 3*H, S)
-        transpose_1_name = f"{basename}/Transpose_1"
-        self.make_transpose(
-            transpose_1_name, f"{in_proj_name}/output_0", self.io_dtype,
-            shape=["batch_size", 3 * self.hidden_size, "sequence_length"], perm=[0, 2, 1],
-        )
+        if not packed:
+            # Transpose from (B, S, 3*H) to (B, 3*H, S)
+            transpose_1_name = f"{basename}/Transpose_1"
+            self.make_transpose(
+                transpose_1_name,
+                split_input,
+                self.io_dtype,
+                shape=["batch_size", 3 * self.hidden_size, "sequence_length"],
+                perm=[0, 2, 1],
+            )
+            split_input = f"{transpose_1_name}/output_0"
 
-        # Split into 3 equal parts along dim 1: b, c, x
+        # Split into 3 equal parts along the channel axis: b, c, x
         split_tensor_name = f"/model/constants/INT64/{[self.hidden_size, self.hidden_size, self.hidden_size]}"
         split_name = f"{basename}/Split"
         b_out = f"{split_name}/output_0"
         c_out = f"{split_name}/output_1"
         x_out = f"{split_name}/output_2"
-        split_shape = ["batch_size", self.hidden_size, "sequence_length"]
         self.make_split(
             split_name,
-            inputs=[f"{transpose_1_name}/output_0", split_tensor_name],
+            inputs=[split_input, split_tensor_name],
             outputs=[b_out, c_out, x_out],
             dtypes=[self.io_dtype] * 3,
-            shapes=[split_shape] * 3,
-            axis=1,
+            shapes=[channels_shape] * 3,
+            axis=-1 if packed else 1,
         )
 
         # Element-wise multiply: bx = b * x
         mul_1_name = f"{basename}/Mul_1"
-        self.make_mul(mul_1_name, [b_out, x_out], self.io_dtype, shape=["batch_size", self.hidden_size, "sequence_length"])
+        self.make_mul(mul_1_name, [b_out, x_out], self.io_dtype, shape=channels_shape)
 
         # 2. Stateful depthwise convolution
         conv_weight_name = f"model.layers.{layer_id}.conv.conv.weight"
@@ -116,48 +126,65 @@ class LFM2Model(Model):
             self.make_initializer(conv_module.conv.bias, conv_bias_name, to=self.io_dtype)
 
         past_conv_state = self.input_names["past.conv"][layer_id]
-        conv_op_name = f"{basename}/CausalConvWithState"
-        # present_state is a required output of CausalConvWithState, so it cannot be left out; it goes to an
-        # unused value. The gather below writes each row's state at its last real token instead, so a padded
-        # batch keeps the right state.
-        self.make_causal_conv_with_state(
-            conv_op_name,
-            root_input=f"{mul_1_name}/output_0",
-            weight=conv_weight_name,
-            bias=conv_bias_name,
-            past_conv_state=past_conv_state,
-            present_conv_state=f"{conv_op_name}/output_1",
-            activation="none",
-            channels=self.hidden_size,
-        )
-        self.make_causal_conv_state_at_last_real_token(
-            f"{basename}/present_conv_state",
-            root_input=root_input,
-            past_conv_state=past_conv_state,
-            conv_input=f"{mul_1_name}/output_0",
-            present_conv_state=self.output_names["present.conv"][layer_id],
-            channels=self.hidden_size,
-            state_size=self.conv_L_cache - 1,
-        )
+        if packed:
+            # cumulative_sequence_lengths gives each sequence its own past and present conv state.
+            conv_op_name = f"{basename}/VarlenCausalConvWithState"
+            self.make_varlen_causal_conv_with_state(
+                conv_op_name,
+                root_input=f"{mul_1_name}/output_0",
+                weight=conv_weight_name,
+                bias=conv_bias_name,
+                cumulative_sequence_length=self.input_names["cumulative_sequence_lengths"],
+                past_conv_state=past_conv_state,
+                present_conv_state=self.output_names["present.conv"][layer_id],
+                activation="none",
+                output_shape=channels_shape,
+                present_conv_shape=self.output_shapes["present.conv"],
+            )
+        else:
+            conv_op_name = f"{basename}/CausalConvWithState"
+            # present_state is a required output of CausalConvWithState, so it cannot be left out; it goes to an
+            # unused value. The gather below writes each row's state at its last real token instead, so a padded
+            # batch keeps the right state.
+            self.make_causal_conv_with_state(
+                conv_op_name,
+                root_input=f"{mul_1_name}/output_0",
+                weight=conv_weight_name,
+                bias=conv_bias_name,
+                past_conv_state=past_conv_state,
+                present_conv_state=f"{conv_op_name}/output_1",
+                activation="none",
+                channels=self.hidden_size,
+            )
+            self.make_causal_conv_state_at_last_real_token(
+                f"{basename}/present_conv_state",
+                root_input=root_input,
+                past_conv_state=past_conv_state,
+                conv_input=f"{mul_1_name}/output_0",
+                present_conv_state=self.output_names["present.conv"][layer_id],
+                channels=self.hidden_size,
+                state_size=self.conv_L_cache - 1,
+            )
 
         # Element-wise multiply: result = c * conv_out
         mul_2_name = f"{basename}/Mul_2"
-        self.make_mul(
-            mul_2_name,
-            [c_out, f"{conv_op_name}/output_0"],
-            self.io_dtype,
-            shape=["batch_size", self.hidden_size, "sequence_length"],
-        )
+        self.make_mul(mul_2_name, [c_out, f"{conv_op_name}/output_0"], self.io_dtype, shape=channels_shape)
+        out_proj_input = f"{mul_2_name}/output_0"
 
         # 3. Output processing: transpose back and project
-        transpose_2_name = f"{basename}/Transpose_2"
-        self.make_transpose(
-            transpose_2_name, f"{mul_2_name}/output_0", self.io_dtype,
-            shape=["batch_size", "sequence_length", self.hidden_size], perm=[0, 2, 1],
-        )
+        if not packed:
+            transpose_2_name = f"{basename}/Transpose_2"
+            self.make_transpose(
+                transpose_2_name,
+                out_proj_input,
+                self.io_dtype,
+                shape=["batch_size", "sequence_length", self.hidden_size],
+                perm=[0, 2, 1],
+            )
+            out_proj_input = f"{transpose_2_name}/output_0"
 
         out_proj_name = f"{basename}/out_proj/MatMul"
-        out_proj_name = self.make_matmul(conv_module.out_proj, out_proj_name, f"{transpose_2_name}/output_0")
+        out_proj_name = self.make_matmul(conv_module.out_proj, out_proj_name, out_proj_input)
         return f"{out_proj_name}/output_0"
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
