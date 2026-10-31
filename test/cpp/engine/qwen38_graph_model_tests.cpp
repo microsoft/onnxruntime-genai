@@ -27,7 +27,9 @@
 #include "models/model_state_manifest.h"
 #include "models/model_type.h"
 #include "models/qwen38_decode_device.h"
+#include "models/qwen38_dflash_prompt.h"
 #include "models/qwen38_graph.h"
+#include "models/qwen38_ort_env.h"
 #include "models/qwen38_replay_geometry.h"
 #include "scoped-environment-variable.h"
 #include "span.h"
@@ -1624,6 +1626,193 @@ TEST(Qwen38DflashPromptFeaturesTest, ResetStartsTheNextTurnFromScratch) {
   const DflashPromptRun second = RunDflashPrompt(features, 4096, 256, 256, 4096);
   ASSERT_EQ(second.ingested.size(), first.ingested.size());
   EXPECT_EQ(second.ingested.front().position, first.ingested.front().position);
+}
+
+namespace {
+
+// One slot of a multi-slot engine while its prompt is prefilled, driven as Qwen38GraphExecutor and FastAppendSlot do: the
+// first call of the slot announces the prompt length, every call prefills a chunk of at most `call_rows` tokens as forwards
+// of at most `forward_rows`, and the last chunk of the prompt goes to decoding with the slot's hand-off.
+struct DflashSlotPrompt {
+  DflashSlotPrompt(size_t prompt_tokens, size_t window) : prompt{prompt_tokens}, features{window} {}
+
+  size_t prompt;
+  Qwen38DflashPromptFeatures features;
+  size_t prefilled{0};
+  DflashPromptRun run;
+};
+
+// `hint_slot` is the slot of `hints` that holds the prompt length of the slot: its own, unless a test shares one.
+void PrefillDflashSlotCall(Qwen38OrtRunHints& hints, size_t hint_slot, DflashSlotPrompt& slot, size_t call_rows,
+                           size_t forward_rows) {
+  const size_t base = slot.prefilled;
+  const size_t n = std::min(call_rows, slot.prompt - base);
+  if (base == 0) hints.ExpectPrefillTokens(hint_slot, slot.prompt);
+  const size_t total_expected = hints.BeginPromptChunk(hint_slot, base, n);
+  if (const auto saved = slot.features.BeginCall(total_expected)) slot.run.ingested.push_back(*saved);
+  for (size_t lo = 0; lo < n;) {
+    const size_t m = std::min(forward_rows, n - lo);
+    if (const auto ingest = slot.features.ChunkDone({base + lo, m}, lo + m == n, total_expected)) {
+      slot.run.ingested.push_back(*ingest);
+    }
+    lo += m;
+  }
+  slot.prefilled += n;
+  if (slot.prefilled == slot.prompt) {
+    slot.run.last = slot.features.TakeSavedChunk();
+    hints.MarkHandoff(hint_slot);
+  }
+}
+
+struct DflashPromptMix {
+  size_t short_prompt;  // slot 0
+  size_t long_prompt;   // slot 1
+  size_t window;
+  size_t call_rows;
+  size_t forward_rows;
+
+  size_t Calls(size_t prompt) const { return (prompt + call_rows - 1) / call_rows; }
+  size_t ShortCalls() const { return Calls(short_prompt); }
+  size_t LongCalls() const { return Calls(long_prompt); }
+};
+
+// The prompts of both slots when the executor hands the slots their calls in `order` (the slot each next call is for).
+// `shared_length` has the slots read one prompt length, as the process-wide variable they used to did.
+std::array<DflashPromptRun, 2> RunInterleavedDflashPrompts(const std::vector<size_t>& order, const DflashPromptMix& mix,
+                                                           bool shared_length) {
+  Qwen38OrtRunHints hints(2);
+  std::array<DflashSlotPrompt, 2> slots = {DflashSlotPrompt{mix.short_prompt, mix.window},
+                                           DflashSlotPrompt{mix.long_prompt, mix.window}};
+  for (const size_t s : order) {
+    PrefillDflashSlotCall(hints, shared_length ? 0 : s, slots[s], mix.call_rows, mix.forward_rows);
+  }
+  return {slots[0].run, slots[1].run};
+}
+
+// Every order of the calls of the two slots, each slot's own calls staying in sequence.
+std::vector<std::vector<size_t>> EveryInterleaving(const DflashPromptMix& mix) {
+  std::vector<size_t> order(mix.ShortCalls(), 0);
+  order.insert(order.end(), mix.LongCalls(), 1);  // sorted, so next_permutation visits each distinct order once
+  std::vector<std::vector<size_t>> orders;
+  do {
+    orders.push_back(order);
+  } while (std::next_permutation(order.begin(), order.end()));
+  return orders;
+}
+
+void ExpectSameDflashRun(const DflashPromptRun& actual, const DflashPromptRun& expected) {
+  ASSERT_EQ(actual.ingested.size(), expected.ingested.size());
+  for (size_t i = 0; i < expected.ingested.size(); ++i) {
+    EXPECT_EQ(actual.ingested[i].position, expected.ingested[i].position) << "ingested chunk " << i;
+    EXPECT_EQ(actual.ingested[i].rows, expected.ingested[i].rows) << "ingested chunk " << i;
+  }
+  ASSERT_EQ(actual.last.has_value(), expected.last.has_value());
+  if (expected.last) {
+    EXPECT_EQ(actual.last->position, expected.last->position);
+    EXPECT_EQ(actual.last->rows, expected.last->rows);
+  }
+}
+
+size_t RowsOfDflashRun(const DflashPromptRun& run) {
+  size_t rows = run.last ? run.last->rows : 0;
+  for (const DflashChunk& chunk : run.ingested) rows += chunk.rows;
+  return rows;
+}
+
+// 9000- and 32768-token prompts, the drafter window of 2056 positions (sliding window 2048 plus a block of 8).
+constexpr DflashPromptMix kTwoPrompts8192{9000, 32768, 2056, 8192, 8192};
+
+}  // namespace
+
+TEST(Qwen38DflashPromptFeaturesTest, TwoSlotsThatInterleaveTheirChunksEachKeepTheirOwnPromptLength) {
+  const DflashPromptMix mix = kTwoPrompts8192;
+  // Slot 0 holds back its first 8192 rows until its second chunk, and reaches decoding with the 808 rows of its tail: that
+  // is short of the window, so the held-back rows are needed and ingested, whatever the other slot announced meanwhile.
+  const std::vector<std::vector<size_t>> orders = {{0, 1, 0, 1, 1, 1}, {1, 0, 1, 0, 1, 1}};
+  for (const std::vector<size_t>& order : orders) {
+    SCOPED_TRACE("first call for slot " + std::to_string(order.front()));
+    const auto runs = RunInterleavedDflashPrompts(order, mix, false);
+
+    ASSERT_EQ(runs[0].ingested.size(), 1u);
+    EXPECT_EQ(runs[0].ingested[0].position, 0u);
+    EXPECT_EQ(runs[0].ingested[0].rows, 8192u);
+    ASSERT_TRUE(runs[0].last.has_value());
+    EXPECT_EQ(runs[0].last->position, 8192u);
+    EXPECT_EQ(runs[0].last->rows, 808u);
+    EXPECT_EQ(RowsOfDflashRun(runs[0]), 8192u + 808u);
+    ExpectDrafterHasTheWindow(runs[0], mix.short_prompt, mix.window);
+
+    // The 32768-token prompt is past its window until its last chunk, which alone holds more than the window.
+    EXPECT_TRUE(runs[1].ingested.empty());
+    ASSERT_TRUE(runs[1].last.has_value());
+    EXPECT_EQ(runs[1].last->position, 24576u);
+    EXPECT_EQ(runs[1].last->rows, 8192u);
+    ExpectDrafterHasTheWindow(runs[1], mix.long_prompt, mix.window);
+  }
+}
+
+TEST(Qwen38DflashPromptFeaturesTest, EveryInterleavingOfTwoSlotsGivesEachPromptItsOwnOutcome) {
+  // Whole 8192-token calls decide the held-back chunk of a slot when its next call begins; the small forwards of the other
+  // chunkings make the calls decide chunks while they run, so both predicates meet every order of the calls of the slots.
+  const DflashPromptMix mixes[] = {kTwoPrompts8192,
+                                   {9000, 32768, 2056, 8192, 2048},
+                                   {9000, 32768, 2056, 4096, 1024},
+                                   {9000, 32768, 2056, 3000, 3000},
+                                   {2057, 9000, 2056, 1024, 512}};
+  for (const DflashPromptMix& mix : mixes) {
+    SCOPED_TRACE("call_rows=" + std::to_string(mix.call_rows) + " forward_rows=" + std::to_string(mix.forward_rows) +
+                 " prompts=" + std::to_string(mix.short_prompt) + "/" + std::to_string(mix.long_prompt));
+    Qwen38DflashPromptFeatures alone_short(mix.window), alone_long(mix.window);
+    const DflashPromptRun short_alone =
+        RunDflashPrompt(alone_short, mix.short_prompt, mix.call_rows, mix.forward_rows, mix.short_prompt);
+    const DflashPromptRun long_alone =
+        RunDflashPrompt(alone_long, mix.long_prompt, mix.call_rows, mix.forward_rows, mix.long_prompt);
+    ExpectDrafterHasTheWindow(short_alone, mix.short_prompt, mix.window);
+    ExpectDrafterHasTheWindow(long_alone, mix.long_prompt, mix.window);
+
+    const auto orders = EveryInterleaving(mix);
+    ASSERT_GE(orders.size(), 2u);
+    for (const std::vector<size_t>& order : orders) {
+      std::string trace;
+      for (const size_t s : order) trace += static_cast<char>('0' + s);
+      SCOPED_TRACE("order " + trace);
+      const auto runs = RunInterleavedDflashPrompts(order, mix, false);
+      ExpectSameDflashRun(runs[0], short_alone);
+      ExpectSameDflashRun(runs[1], long_alone);
+    }
+  }
+
+  // A 4096-token call is run as forwards of 1024: the forward [6144, 7168) of the second call of the 9000-token prompt
+  // reaches into its window [6944, 9000), is ingested while the call runs, and starts the contiguous ingestion.
+  const DflashPromptMix inner = {9000, 32768, 2056, 4096, 1024};
+  const auto runs = RunInterleavedDflashPrompts({0, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1}, inner, false);
+  ASSERT_EQ(runs[0].ingested.size(), 2u);
+  EXPECT_EQ(runs[0].ingested[0].position, 6144u);
+  EXPECT_EQ(runs[0].ingested[1].position, 7168u);
+  ASSERT_TRUE(runs[0].last.has_value());
+  EXPECT_EQ(runs[0].last->position, 8192u);
+  EXPECT_EQ(runs[0].last->rows, 808u);
+}
+
+TEST(Qwen38DflashPromptFeaturesTest, APromptLengthSharedBetweenSlotsLetsTheLongerPromptDropRowsOfTheShorterOne) {
+  // What the process-wide prompt length did: the 32768 announced by the longer prompt after the first chunk of the 9000-token
+  // one is what its second chunk then sees, so its held-back 8192 rows look 24576 positions short of the end and are
+  // dropped, leaving the 808 rows of its tail for a window of 2056.
+  const auto whole = RunInterleavedDflashPrompts({0, 1, 0, 1, 1, 1}, kTwoPrompts8192, true);
+  EXPECT_TRUE(whole[0].ingested.empty());
+  EXPECT_EQ(RowsOfDflashRun(whole[0]), 808u);
+  EXPECT_LT(RowsOfDflashRun(whole[0]), kTwoPrompts8192.window);
+
+  // The forwards of a call decide the same way: the forward the second call ingested, and the chunk held back for the third,
+  // are both dropped.
+  const DflashPromptMix inner = {9000, 32768, 2056, 4096, 1024};
+  const auto forwards = RunInterleavedDflashPrompts({0, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1}, inner, true);
+  EXPECT_TRUE(forwards[0].ingested.empty());
+  EXPECT_EQ(RowsOfDflashRun(forwards[0]), 808u);
+
+  // With a length of their own the same order loses nothing.
+  const auto own = RunInterleavedDflashPrompts({0, 1, 0, 1, 1, 1}, kTwoPrompts8192, false);
+  EXPECT_EQ(RowsOfDflashRun(own[0]), 8192u + 808u);
 }
 
 TEST(Qwen38GraphIdTest, IdsAreDerivedFromTheRunAndAreDistinct) {
