@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <random>
 #include <sstream>
+#include <stdexcept>
 #include <thread>
 #if defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
@@ -97,6 +98,14 @@ size_t DevTensor::Bytes() const {
   return Elements(shape) * Ort::SizeOf(type);
 }
 
+int Qwen38GraphAnnotationId(Qwen38GraphRun run, int rows, int phase) {
+  if (rows < 1 || rows > kQwen38GraphIdMaxRows || phase < 0 || phase >= kQwen38GraphIdMaxPhases) {
+    throw std::out_of_range("qwen38_graph: no CUDA graph id for rows=" + std::to_string(rows) +
+                            ", phase=" + std::to_string(phase));
+  }
+  return 1 + (static_cast<int>(run) * kQwen38GraphIdMaxRows + (rows - 1)) * kQwen38GraphIdMaxPhases + phase;
+}
+
 // ------------------------------------------------------------------------------------------------
 // Engine
 // ------------------------------------------------------------------------------------------------
@@ -109,10 +118,12 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
   const auto& q = model_.config_->model.qwen38_graph;
   mtp_enabled_ = q.mtp.enabled;
   prefill_head_ = q.mtp.prefill_head;
-  skip_refeed_ = q.mtp.skip_refeed;
   keep_hidden_ = mtp_enabled_ && prefill_head_;
   fold_ = q.fold.enabled;
-  force_reject_ = q.fold.force_reject;
+  // Test hook, deliberately not a config key: ORT_QWEN38_FORCE_REJECT=1 replaces every draft before its verify.
+  if (const char* force_reject_env = std::getenv("ORT_QWEN38_FORCE_REJECT")) {
+    force_reject_ = std::atoi(force_reject_env) != 0;
+  }
   if (const char* sl_env = std::getenv("ORT_QWEN38_SUFFIX_LOOKUP")) {
     suffix_lookup_mode_ = std::atoi(sl_env);
   }
@@ -232,7 +243,6 @@ void Qwen38GraphEngine::SyncStream() {
 void Qwen38GraphEngine::BuildTarget() {
   OrtSession& session = *model_.session_target_;
   const SessionInfo& info = model_.session_info_;
-  const auto& q = model_.config_->model.qwen38_graph;
   const auto in_names = session.GetInputNames();
   const auto out_names = session.GetOutputNames();
 
@@ -505,7 +515,7 @@ void Qwen38GraphEngine::BuildTarget() {
       d.status_count = status_count_;
       for (auto& entry : own) output_tensors_.push_back(std::move(entry.second));
       d.run_options = OrtRunOptions::Create();
-      const int id = fold_ ? q.fold.target_graph_id + k : (rows == 1 ? q.target_s1_graph_id : q.target_s2_graph_id) + k;
+      const int id = Qwen38GraphAnnotationId(Qwen38GraphRun::kTarget, rows, k);
       d.run_options->AddConfigEntry("gpu_graph_id", std::to_string(id).c_str());
       d.run_options->AddConfigEntry("disable_synchronize_execution_providers", "1");
     }
@@ -514,7 +524,6 @@ void Qwen38GraphEngine::BuildTarget() {
 }
 
 void Qwen38GraphEngine::BuildHead() {
-  const auto& q = model_.config_->model.qwen38_graph;
   head_[0].rows = 1;
   head_[0].session = model_.session_head_s1_.get();
   head_[1].rows = 2;
@@ -605,7 +614,7 @@ void Qwen38GraphEngine::BuildHead() {
         d.binding->BindOutput(name.c_str(), *t->value);
       }
       d.run_options = OrtRunOptions::Create();
-      const int id = (rows == 1 ? q.head_s1_graph_id : q.head_s2_graph_id) + dir;
+      const int id = Qwen38GraphAnnotationId(Qwen38GraphRun::kHead, rows, dir);
       d.run_options->AddConfigEntry("gpu_graph_id", std::to_string(id).c_str());
       d.run_options->AddConfigEntry("disable_synchronize_execution_providers", "1");
     }
@@ -710,8 +719,24 @@ void Qwen38GraphEngine::CheckDeviceStatus(const char* where, const Direction* di
 
 // ---- prompt ingestion -------------------------------------------------------------------------
 size_t EffectiveQwen38PrefillChunkTokens(const Config::Model::Qwen38Graph& q) {
-  if (q.prefill.enabled) return q.prefill.chunk > 0 ? static_cast<size_t>(q.prefill.chunk) : 0;
-  return q.prefill_chunk_tokens > 0 ? static_cast<size_t>(q.prefill_chunk_tokens) : 0;
+  constexpr int kStepChunk = 2048;   // prompt tokens per Engine step through the decode graphs
+  constexpr int kDenseChunk = 8192;  // prompt tokens per call of the dense prefill session
+  if (q.prefill.chunk > 0) return static_cast<size_t>(q.prefill.chunk);
+  return static_cast<size_t>(q.prefill.enabled ? kDenseChunk : kStepChunk);
+}
+
+void ValidateQwen38PrefillChunk(const Config::Model::Qwen38Graph& q) {
+  if (q.prefill.chunk < 0)
+    throw std::runtime_error("model.qwen38_graph.prefill.chunk must not be negative (0 selects the default)");
+  const size_t chunk = EffectiveQwen38PrefillChunkTokens(q);
+  if (q.prefill.enabled) {
+    if (chunk > static_cast<size_t>(std::max(q.kv_capacity, 0)))
+      throw std::runtime_error("model.qwen38_graph.prefill.chunk must be in [1, kv_capacity]");
+  } else if ((chunk % 2) != 0) {
+    throw std::runtime_error(
+        "model.qwen38_graph.prefill.chunk must be even when the prompt is ingested by the decode graphs "
+        "(prefill.enabled is false)");
+  }
 }
 
 size_t Qwen38GraphEngine::PrefillChunkTokens() const {
@@ -832,7 +857,6 @@ void Qwen38GraphEngine::HeadPrefill() {
 
 // ---- fold: standalone R=2 head, prompt context by pairs, first draft ----------------------------------------------------
 void Qwen38GraphEngine::BuildHeadR2() {
-  const auto& q = model_.config_->model.qwen38_graph;
   HeadR2Session& h = head_r2_;
   h.session = model_.session_head_r2_.get();
   h.info.Add(*h.session);
@@ -887,7 +911,8 @@ void Qwen38GraphEngine::BuildHeadR2() {
       d.binding->BindOutput(name.c_str(), *t->value);
     }
     d.run_options = OrtRunOptions::Create();
-    d.run_options->AddConfigEntry("gpu_graph_id", std::to_string(q.fold.head_r2.graph_id + k).c_str());
+    d.run_options->AddConfigEntry("gpu_graph_id",
+                                  std::to_string(Qwen38GraphAnnotationId(Qwen38GraphRun::kHeadR2, 2, k)).c_str());
     d.run_options->AddConfigEntry("disable_synchronize_execution_providers", "1");
   }
   SyncStream();
@@ -1163,15 +1188,7 @@ void Qwen38GraphEngine::Advance(const Qwen38CycleRecord& record, bool want_more)
     return;
   }
   if (mtp_enabled_) {
-    const size_t row_bytes = static_cast<size_t>(hidden_width_) * 2;
-    if (record.accepted) {
-      if (skip_refeed_)
-        EnqueueHead(1, last_hidden_ptr_ + row_bytes);
-      else
-        EnqueueHead(2, last_hidden_ptr_);
-    } else {
-      EnqueueHead(1, last_hidden_ptr_);
-    }
+    EnqueueHead(record.accepted ? 2 : 1, last_hidden_ptr_);
     EnqueueVerify();
   } else {
     EnqueueStep();
@@ -1365,10 +1382,7 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
   if (separate_prefill_sessions && (q.prefill.head_kv.filename.empty() || q.prefill.constants.empty()))
     throw std::runtime_error(
         "model.qwen38_graph.prefill with a separate dense graph requires prefill.{head_kv.filename,constants}");
-  if (q.prefill.enabled && (q.prefill.chunk < 1 || q.prefill.chunk > q.kv_capacity))
-    throw std::runtime_error("model.qwen38_graph.prefill.chunk must be in [1, kv_capacity]");
-  if (!q.prefill.enabled && (q.prefill_chunk_tokens <= 0 || (q.prefill_chunk_tokens % 2) != 0))
-    throw std::runtime_error("model.qwen38_graph.prefill_chunk_tokens must be a positive even integer");
+  ValidateQwen38PrefillChunk(q);
   if (q.kv_capacity <= Qwen38DecodeDevice::kReservedTail)
     throw std::runtime_error("model.qwen38_graph.kv_capacity must exceed " + std::to_string(Qwen38DecodeDevice::kReservedTail));
   if (!p_device_ || p_device_->GetType() != DeviceType::CUDA)
