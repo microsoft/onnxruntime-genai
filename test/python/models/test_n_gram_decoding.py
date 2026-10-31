@@ -2303,6 +2303,14 @@ def qwen3_guidance_model_path(qwen3_model_path):
     return qwen3_model_path
 
 
+@pytest.fixture(scope="module")
+def gpt2_tokenizer_source(request):
+    path = os.path.join(request.config.getoption("--test_models"), "hf-internal-testing", "tiny-random-gpt2-fp32")
+    if not os.path.exists(os.path.join(path, "tokenizer.json")):
+        pytest.skip("tiny-random-gpt2-fp32 test model is unavailable")
+    return path
+
+
 def _guided_generator(model_path, prompt, *, guidance_type, guidance_data,
                       max_length, ngram_size=0, max_draft_tokens=4,
                       ngram_chained_lookup=False,
@@ -3242,6 +3250,42 @@ class TestNGramGuidance:
         assert actual == expected
         assert _decode_tokens(qwen3_guidance_model_path, actual).strip() == literal
         _assert_stats_consistent(generator.get_speculative_stats())
+
+    @pytest.mark.parametrize(
+        "pattern",
+        [
+            # The forced words run past max_length.
+            r"[0-9] to the and of in is on that for it",
+            # The forced words fill the sequence, and the grammar still wants a digit after them.
+            r"[0-9] to the and of in[0-9]",
+        ],
+    )
+    def test_fast_forward_tokens_stop_at_max_length_after_lookup_miss(self, gpt2_tokenizer_source, tmp_path, pattern):
+        model_path = _make_constant_guidance_model(tmp_path / "ff_max_length", gpt2_tokenizer_source, 0)
+        prompt = [0, 0, 195, 731]
+        try:
+            generator = _guided_generator(
+                model_path,
+                prompt,
+                guidance_type="regex",
+                guidance_data=pattern,
+                max_length=10,
+                ngram_size=3,
+                enable_ff_tokens=True,
+            )
+        except RuntimeError as error:
+            if "guidance is unavailable" in str(error).lower():
+                pytest.skip("ONNX Runtime GenAI was built without guidance support")
+            raise
+        # The prompt's last two tokens appear nowhere earlier, so the lookup misses and a standard step picks the digit.
+        generator.generate_next_token()
+        assert generator.get_speculative_stats()["standard_fallback_steps"] == 1
+        # The next step commits the digit to the grammar, and the forced words that fit fill the sequence.
+        generator.generate_next_token()
+        assert generator.is_done()
+        tail = [int(token) for token in generator.get_sequence(0)][len(prompt) :]
+        assert len(tail) == 6
+        assert re.fullmatch(r"[0-9] to the and of in", _decode_tokens(model_path, tail))
 
 
 class TestNGramCapabilityGuards:
