@@ -44,8 +44,9 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
   size_t preferred_chunk{};
 
   // ---- observation ----
-  std::vector<std::string> calls;  // "reset", "prefill:<n>", "begin:<run_cycle>", "wait", "advance:<more>", "drain"
-  std::vector<int32_t> ingested;   // tokens received since the last reset, in order
+  std::vector<std::string> calls;      // "reset", "expect:<n>", "prefill:<n>", "begin:<run_cycle>", "wait", "advance:<more>", "drain"
+  std::vector<int32_t> ingested;       // tokens received since the last reset, in order
+  std::vector<size_t> prefill_totals;  // for every PrefillChunk, the prompt length the device was told to expect (0 = none)
   size_t cycles_enqueued{};
   size_t handoffs{};        // dense prefill: hand-offs performed (one per BeginDecode with a cycle)
   size_t handoff_length{};  // prompt length at the last hand-off
@@ -71,6 +72,7 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
     decoding_ = false;
     pending_ = -1;
     cycle_ = 0;
+    expected_prefill_ = 0;
   }
 
   void Drain() noexcept override {
@@ -78,10 +80,17 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
     inflight_ = false;
   }
 
+  void ExpectPrefillTokens(size_t total_tokens) override {
+    calls.push_back("expect:" + std::to_string(total_tokens));
+    if (decoding_ || ledger_.Length() != 0) throw std::logic_error("the prompt length was announced after its ingestion started");
+    expected_prefill_ = total_tokens;
+  }
+
   void PrefillChunk(std::span<const int32_t> tokens) override {
     calls.push_back("prefill:" + std::to_string(tokens.size()));
     if (decoding_) throw std::logic_error("prefill after decoding started");
     if (tokens.empty()) throw std::logic_error("empty prefill chunk");
+    prefill_totals.push_back(expected_prefill_);
     ledger_.RequireRoom(tokens.size(), "the prompt", 3);
     if (dense_prefill) {
       ledger_.AdvancePrompt(tokens.size());
@@ -104,6 +113,7 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
     if (decoding_) throw std::logic_error("decoding already started");
     if (ledger_.Length() == 0) throw std::logic_error("BeginDecode before the prompt was ingested");
     decoding_ = true;
+    expected_prefill_ = 0;
     if (run_cycle && dense_prefill) {
       if (ingested.size() != ledger_.Length()) throw std::logic_error("hand-off before every chunk was ingested");
       ++handoffs;
@@ -158,6 +168,7 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
   bool decoding_{};
   int32_t pending_{-1};
   size_t cycle_{};
+  size_t expected_prefill_{};  // ExpectPrefillTokens: device-local, dropped by Reset() and BeginDecode()
 };
 
 }  // namespace Generators::test
