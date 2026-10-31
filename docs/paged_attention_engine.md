@@ -2399,9 +2399,11 @@ token. The device holds `model.qwen38_graph.max_batch_size` slots (default 1), o
   rejects them.
 >>>>>>> a3ef7173b (Address PR #2822 review feedback on per-slot ORT run hints)
 - The next cycle is enqueued before a step returns, so the GPU runs it while the Engine delivers the previous tokens. A stop
-  string can only be known after delivery, so one cycle may be wasted; the next request, a rewind and Engine teardown wait for
-  it with `Qwen38DecodeDevice::Drain()`. The record of such a cycle is never consumed, so its status is read from the device
-  instead: `CheckDecodeStatus()` right after `Drain()` reports the error bits accumulated by every cycle since the last
+  string can only be known after delivery, so one cycle may be wasted; the next request and Engine teardown wait for it with
+  `Qwen38DecodeDevice::Drain()`, and so does a rewind of a single-slot device. With several slots a rewind's `ReleaseSlot()` only
+  forgets the slot; the replayed prompt waits for the device in `BeginSlot()`, before it resets the slot. The record of such a
+  cycle is never consumed, so its status is read from the device instead: `CheckDecodeStatus()` right after `Drain()` reports
+  the error bits accumulated by every cycle since the last
   `Reset()`, also when a record was left unconsumed. The executor always runs `Drain()` and then `CheckDecodeStatus()` before
   `Reset()` (which clears the bits): a cancellation or stop-string match that leaves a cycle behind therefore still fails the
   next request or the rewind when that cycle went wrong. The same holds for `ResetSlot()` with several slots: the bits of a
@@ -2414,15 +2416,20 @@ token. The device holds `model.qwen38_graph.max_batch_size` slots (default 1), o
   reloaded. At Engine teardown the executor drains the device and reads its status too, but nobody is left to report an error
   to, so a failure poisons the device context instead (the next Engine over the model fails).
 - Known limitation: with several slots a batched decode cycle is only enqueued once every requested slot has ingested its
-  prompt (`StepBatch` phase 2), so a slot that is ready decodes only after the last chunk of the longest prompt of the batch
+  prompt. `StepBatch` enqueues one in phase 2, when all the requested slots are decoding, and lets the device enqueue the next
+  one while it advances a finished cycle (phase 1) only when every requested slot is decoding too; otherwise it passes
+  `defer_next_cycle`, the device keeps the aux rows of the cycle for the DFlash2 drafter, and the next cycle waits for the
+  prompts. So a slot that is ready decodes only after the last chunk of the longest prompt of the batch
   (it still delivers its first token right after its own prompt), and admitting a long prompt pauses the decoding peers until
   that prompt is ingested. The barrier protects the state of the slots that are part-way through their prompts, and the device
   has no primitive to lift it: a batched cycle runs the target over the slots `0 .. max(active slot)` (the batch rows are the
   slots; there is no slot-to-row indirection), and `Qwen38GraphEngine::MuteSlot` only keeps the other slots of that range
   valid inputs: it sets the control words of the slot to idle (`{0, 0, 0, 1}`) and zeroes the lengths of its indexer buffers,
   and the forward then writes the idle row (token 0 at position r, empty contexts, a zero per-layer embedding row) into the
-  slot's KV rows `0 .. r - 1` and its recurrent state. That is harmless for a finished or unassigned slot, which `ResetSlot()`
-  and its next prompt initialize again, and destroys a slot that is part-way through its prompt. Besides, the recurrent state
+  slot's KV rows `0 .. r - 1` and its recurrent state. That is harmless for a finished slot, which `ResetSlot()` and its next
+  prompt initialize again, and for a slot nobody has used yet (the executor does not reset it, but slots are assigned from the
+  lowest index, so it lies above every slot a cycle runs and is never muted); it destroys a slot that is part-way through its
+  prompt. Besides, the recurrent state
   ring advances once per cycle for the whole batch (`bank_phase_`) while a prompt chunk reads and commits the slot's state in
   the bank of that moment. Decoding the ready slots between the chunks of another prompt therefore needs masked KV and state
   writes for the slots that sit out a cycle (or a slot-indirected batched binding) and a ring phase per slot that is in
