@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <random>
 #include <sstream>
 #include <stdexcept>
@@ -69,6 +70,103 @@ std::vector<Qwen38CacheInput> CacheInputsOf(const SessionInfo& info, const char*
   }
   return inputs;
 }
+
+// Walks the fields of one protobuf message that occupies the bytes [begin, end) of a stream. Only the headers of the fields
+// are read: a length-delimited payload is skipped unless ReadPayload() asks for it, so the initializers that make up the bulk
+// of a model file are never touched. A malformed message (a truncated field, a length that leaves the message, a group) ends
+// the walk with Failed() set.
+class ProtoFieldReader {
+ public:
+  struct Field {
+    uint32_t number{};
+    bool length_delimited{};
+    uint64_t payload_begin{};
+    uint64_t payload_size{};
+  };
+
+  ProtoFieldReader(std::istream& in, uint64_t begin, uint64_t end) : in_(in), pos_(begin), end_(end) {}
+
+  bool Failed() const { return failed_; }
+
+  // Moves to the next field; false at the end of the message and when it is malformed.
+  bool Next(Field& field) {
+    if (failed_ || pos_ >= end_) return false;
+    uint64_t tag = 0;
+    if (!ReadVarint(tag)) return Fail();
+    const uint64_t number = tag >> 3;
+    if (number == 0 || number > kMaxFieldNumber) return Fail();
+    field = Field{static_cast<uint32_t>(number), false, 0, 0};
+    switch (tag & 7u) {
+      case 0: {  // varint
+        uint64_t ignored = 0;
+        return ReadVarint(ignored) || Fail();
+      }
+      case 1:  // 64-bit
+        return Skip(8);
+      case 2: {  // length-delimited
+        uint64_t size = 0;
+        if (!ReadVarint(size) || size > end_ - pos_) return Fail();
+        field.length_delimited = true;
+        field.payload_begin = pos_;
+        field.payload_size = size;
+        return Skip(size);
+      }
+      case 5:  // 32-bit
+        return Skip(4);
+      default:  // groups and unknown wire types
+        return Fail();
+    }
+  }
+
+  // The payload of a length-delimited field that Next() returned.
+  bool ReadPayload(const Field& field, std::string& bytes) {
+    bytes.resize(static_cast<size_t>(field.payload_size));
+    in_.clear();
+    in_.seekg(static_cast<std::streamoff>(field.payload_begin));
+    in_.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    stream_at_pos_ = false;
+    return static_cast<bool>(in_) || Fail();
+  }
+
+ private:
+  bool Fail() {
+    failed_ = true;
+    return false;
+  }
+
+  bool Skip(uint64_t count) {
+    if (count > end_ - pos_) return Fail();
+    pos_ += count;
+    stream_at_pos_ = false;
+    return true;
+  }
+
+  bool ReadVarint(uint64_t& value) {
+    value = 0;
+    for (unsigned shift = 0; shift < 64; shift += 7) {
+      if (pos_ >= end_) return false;
+      if (!stream_at_pos_) {
+        in_.clear();
+        in_.seekg(static_cast<std::streamoff>(pos_));
+        stream_at_pos_ = true;
+      }
+      const std::istream::int_type byte = in_.get();
+      if (byte == std::istream::traits_type::eof()) return false;
+      ++pos_;
+      value |= static_cast<uint64_t>(byte & 0x7F) << shift;
+      if ((byte & 0x80) == 0) return true;
+    }
+    return false;
+  }
+
+  std::istream& in_;
+  uint64_t pos_;
+  uint64_t end_;
+  bool stream_at_pos_{false};  // whether the stream is positioned at pos_
+  bool failed_{false};
+
+  static constexpr uint64_t kMaxFieldNumber = (uint64_t{1} << 29) - 1;  // the protobuf limit
+};
 
 }  // namespace
 
@@ -175,6 +273,55 @@ void ValidateQwen38BatchedTargetOutputs(size_t request_slots, const std::vector<
   }
   if (!compact_state) {
     throw std::runtime_error(needs + "the target graph has none. Set max_batch_size to 1 or export the target with compact state updates.");
+  }
+}
+
+std::optional<std::vector<std::string>> ReadQwen38OnnxOutputNames(const std::filesystem::path& model_file) {
+  constexpr uint32_t kModelGraph = 7;     // onnx.ModelProto.graph
+  constexpr uint32_t kGraphOutput = 12;   // onnx.GraphProto.output
+  constexpr uint32_t kValueInfoName = 1;  // onnx.ValueInfoProto.name
+  constexpr uint64_t kMaxValueInfoBytes = uint64_t{1} << 20;
+
+  std::ifstream file(model_file, std::ios::binary);
+  if (!file) return std::nullopt;
+  file.seekg(0, std::ios::end);
+  const std::streamoff file_size = file.tellg();
+  if (!file || file_size <= 0) return std::nullopt;
+
+  std::vector<std::string> names;
+  bool has_graph = false;
+  ProtoFieldReader model(file, 0, static_cast<uint64_t>(file_size));
+  ProtoFieldReader::Field field;
+  while (model.Next(field)) {
+    if (field.number != kModelGraph || !field.length_delimited) continue;
+    if (has_graph) return std::nullopt;
+    has_graph = true;
+    ProtoFieldReader graph(file, field.payload_begin, field.payload_begin + field.payload_size);
+    ProtoFieldReader::Field output;
+    while (graph.Next(output)) {
+      if (output.number != kGraphOutput || !output.length_delimited) continue;
+      std::string value_info;
+      if (output.payload_size > kMaxValueInfoBytes || !graph.ReadPayload(output, value_info)) return std::nullopt;
+      std::istringstream value_info_stream(value_info);
+      ProtoFieldReader info(value_info_stream, 0, value_info.size());
+      ProtoFieldReader::Field entry;
+      std::string name;
+      while (info.Next(entry)) {
+        if (entry.number == kValueInfoName && entry.length_delimited && !info.ReadPayload(entry, name)) return std::nullopt;
+      }
+      if (info.Failed() || name.empty()) return std::nullopt;
+      names.push_back(std::move(name));
+    }
+    if (graph.Failed()) return std::nullopt;
+  }
+  if (model.Failed() || !has_graph || names.empty()) return std::nullopt;
+  return names;
+}
+
+void ValidateQwen38TargetModelFile(size_t request_slots, const std::filesystem::path& model_file) {
+  if (request_slots <= 1) return;
+  if (const auto output_names = ReadQwen38OnnxOutputNames(model_file)) {
+    ValidateQwen38BatchedTargetOutputs(request_slots, *output_names);
   }
 }
 
@@ -2464,6 +2611,27 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
   // are created, instead of letting the library read INT8 values as FP8 shards or as a bfloat16 table.
   const Qwen38EmbeddingFormat embed_format = RequireQwen38PackageSupportedByPlane(*plane_, *config_, root);
 
+  // The target graph decides how the slots are batched: choose it now (the MTP-drafts test hook may pick another one), and for
+  // several slots read its output names from the model file, so that a target the batched device cannot serve is refused
+  // before any weight is uploaded. The check against the session below stays authoritative.
+  std::string target_filename = config_->model.decoder.filename;
+  if (const char* drafts_env = std::getenv("ORT_QWEN38_MTP_DRAFTS")) {
+    const int d = std::atoi(drafts_env);
+    if (d >= 1 && d <= 3) {
+      const std::filesystem::path parent = std::filesystem::path(target_filename).parent_path();
+      const std::string alt_name = "model_s" + std::to_string(d + 1) + ".onnx";
+      const std::string alt = (parent.empty() ? std::filesystem::path(alt_name) : (parent / alt_name)).string();
+      if (std::filesystem::exists(root / alt)) {
+        target_filename = alt;
+      } else if (std::filesystem::exists(root / ("target/" + alt_name))) {
+        target_filename = "target/" + alt_name;
+      }
+    }
+  }
+  if (!config_->memory_assets_only_ && config_->model_data_spans_.count(target_filename) == 0) {
+    ValidateQwen38TargetModelFile(ResolveQwen38MaxBatchSize(*config_), root / target_filename);
+  }
+
   // Device copy of the initializers several sessions have in common (optional)
   if (!q.prefill.weights_pool.empty()) {
     pool_ = std::make_unique<Qwen38WeightPool>(*plane_, root / q.prefill.weights_pool, root, *p_device_->GetMemoryInfo());
@@ -2517,23 +2685,10 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
     }
   }
 
-  std::string target_filename = config_->model.decoder.filename;
-  if (const char* drafts_env = std::getenv("ORT_QWEN38_MTP_DRAFTS")) {
-    const int d = std::atoi(drafts_env);
-    if (d >= 1 && d <= 3) {
-      const std::filesystem::path parent = std::filesystem::path(target_filename).parent_path();
-      const std::string alt_name = "model_s" + std::to_string(d + 1) + ".onnx";
-      const std::string alt = (parent.empty() ? std::filesystem::path(alt_name) : (parent / alt_name)).string();
-      if (std::filesystem::exists(root / alt)) {
-        target_filename = alt;
-      } else if (std::filesystem::exists(root / ("target/" + alt_name))) {
-        target_filename = "target/" + alt_name;
-      }
-    }
-  }
   session_target_ = CreateSession(ort_env, target_filename, session_options_.get());
   session_info_.Add(*session_target_);
-  // The outputs of the target are known now: refuse a ring-bank target for several slots before anything else is built.
+  // The outputs of the session are authoritative (the model file may not be a protobuf one): refuse a ring-bank target for
+  // several slots before anything else is built.
   ValidateQwen38BatchedTargetOutputs(ResolveQwen38MaxBatchSize(*config_), session_target_->GetOutputNames());
   if (g_log.enabled) Log("qwen38_graph") << "target session " << SecondsSince(start) << " s" << std::endl;
 
