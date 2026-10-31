@@ -2696,9 +2696,9 @@ TEST_F(Qwen38PlaneStagedPleTest, StagedPleRowsAcrossMultipleStreamsDoesNotCorrup
   for (uint16_t v : out_b) EXPECT_EQ(v, 0x4080u);
 }
 
-// A fold step prepared in one call (a negative pos_add) of a staged table: every row is prepared, and rows 1 and up reuse what
-// row 0 read back, so they copy nothing from the device and wait for no stream; only row 0 gets the committed length, and no row
-// is handed anything but device memory.
+// A fold step prepared in one call (a negative pos_add) of a staged table: every row is gathered, from the one copy of the
+// control words and the context that the step makes and the one wait for the stream, and the rows are prepared by a single
+// kernel launch; only row 0 gets the committed length, and no row is handed anything but device memory.
 TEST_F(Qwen38PlaneStagedPleTest, ABatchedFoldStepPreparesEveryRowOfAStagedTable) {
   StagedPleRig rig{*plane_, kAscendingRows};
   rig.ResetTable();
@@ -2710,19 +2710,19 @@ TEST_F(Qwen38PlaneStagedPleTest, ABatchedFoldStepPreparesEveryRowOfAStagedTable)
     ASSERT_EQ(rig.PrepFoldStep(state, rows), 0);
     const Qwen38PlaneTestStats after = Stats();
     EXPECT_EQ(after.gather_rows, before.gather_rows + rows);
-    EXPECT_EQ(after.staged_launches, before.staged_launches + rows);
+    EXPECT_EQ(after.staged_launches, before.staged_launches + 1) << "one launch prepares every row of the step";
     rig.ExpectFoldStepResult(state, rows);
   }
 
-  // The table is warm now: row 0 makes the two copies of the control words and the context and one wait, no row after it does.
+  // The table is warm now: the step makes the two copies of the control words and the context and one wait, no row does.
   const int rows = static_cast<int>(StagedPleRig::kMaxFoldRows);
   rig.FillOutputs(0xAB);
   Arm(QWEN38_PLANE_FAULT_COPY, 2, 5000);
   ASSERT_EQ(rig.PrepFoldStep(state, rows), 0);
-  EXPECT_EQ(Stats().fault_armed, 1) << "a row after row 0 copied from the device";
+  EXPECT_EQ(Stats().fault_armed, 1) << "the step copied more than its control words and its context from the device";
   Arm(QWEN38_PLANE_FAULT_SYNC, 1, 5001);
   ASSERT_EQ(rig.PrepFoldStep(state, rows), 0);
-  EXPECT_EQ(Stats().fault_armed, 1) << "a row after row 0 waited for the stream";
+  EXPECT_EQ(Stats().fault_armed, 1) << "the step waited for the stream more than once";
   module_->Disarm();
   rig.ExpectFoldStepResult(state, rows);
 }
@@ -4574,6 +4574,32 @@ TEST_F(Qwen38PlaneBatchedPrepKernelTest, TheSingleSlotPrepRefusesABatchPackedInt
     const auto [error, outputs] = table.PrepWithPosAdd(scenario.state, scenario.context, -8);
     EXPECT_EQ(error, 0);
     ExpectSameFoldPrepOutputs(table.Expected(scenario.state, scenario.context, 8), outputs, "pos_add -8");
+  }
+}
+
+// A table that is staged on the host is prepared slot by slot: the rows of a slot are gathered on the host and prepared by one
+// launch (the plain next-token row too), whatever the batch, and every slot gets exactly the rows its own control words ask for.
+class Qwen38PlaneStagedBatchedPrepTest : public Qwen38PlaneStagedPleTest {};
+
+TEST_F(Qwen38PlaneStagedBatchedPrepTest, ABatchOfAStagedTableIsGatheredOnTheHostAndLaunchedOncePerSlot) {
+  ASSERT_TRUE(plane_->prep_batched != nullptr) << "the plane library has no qwen38_plane_prep_batched";
+  KernelTestDevice device{*plane_};
+  HashedPleTable table{*plane_, device, 0.3f, /*staged=*/true};
+  for (const int rows : {1, 2, 5, 8}) {
+    for (const size_t batch : {size_t{1}, size_t{3}, size_t{8}}) {
+      const std::string what = std::to_string(rows) + " rows of " + std::to_string(batch) + " slots";
+      const BatchedFoldSlots slots = MakeBatchedFoldSlots(batch, static_cast<size_t>(rows));
+      const Qwen38PlaneTestStats before = Stats();
+      const std::vector<FoldPrepOutputs> prepared = table.PrepBatched(slots.states, slots.contexts, rows);
+      const Qwen38PlaneTestStats after = Stats();
+      EXPECT_EQ(after.gather_rows, before.gather_rows + static_cast<long long>(batch) * rows) << what;
+      EXPECT_EQ(after.staged_launches, before.staged_launches + static_cast<long long>(batch)) << what;
+      ASSERT_EQ(prepared.size(), batch);
+      for (size_t b = 0; b < batch; ++b) {
+        ExpectSameFoldPrepOutputs(table.Expected(slots.states[b], slots.contexts[b], rows), prepared[b],
+                                  what + ", slot " + std::to_string(b));
+      }
+    }
   }
 }
 
