@@ -2178,6 +2178,21 @@ token. The device holds `model.qwen38_graph.max_batch_size` slots (default 1), o
   is not read again). A device error is fatal to the Engine, as every executor failure is, so a reported status is never
   consumed twice, and a fatal execution failure poisons the mutable device context across Engine leases until the model is
   reloaded. At Engine teardown the device is only drained: nobody is left to report to.
+- Known limitation: with several slots a batched decode cycle is only enqueued once every requested slot has ingested its
+  prompt (`StepBatch` phase 2), so a slot that is ready decodes only after the last chunk of the longest prompt of the batch
+  (it still delivers its first token right after its own prompt), and admitting a long prompt pauses the decoding peers until
+  that prompt is ingested. The barrier protects the state of the slots that are part-way through their prompts, and the device
+  has no primitive to lift it: a batched cycle runs the target over the slots `0 .. max(active slot)` (the batch rows are the
+  slots; there is no slot-to-row indirection), and `Qwen38GraphEngine::MuteSlot` only keeps the other slots of that range
+  valid inputs: it sets the control words of the slot to idle (`{0, 0, 0, 1}`) and zeroes the lengths of its indexer buffers,
+  and the forward then writes the idle row (token 0 at position r, empty contexts, a zero per-layer embedding row) into the
+  slot's KV rows `0 .. r - 1` and its recurrent state. That is harmless for a finished or unassigned slot, which `ResetSlot()`
+  and its next prompt initialize again, and destroys a slot that is part-way through its prompt. Besides, the recurrent state
+  ring advances once per cycle for the whole batch (`bank_phase_`) while a prompt chunk reads and commits the slot's state in
+  the bank of that moment. Decoding the ready slots between the chunks of another prompt therefore needs masked KV and state
+  writes for the slots that sit out a cycle (or a slot-indirected batched binding) and a ring phase per slot that is in
+  prefill: new graph, kernel and device work that this change does not include. Until then a ragged batch decodes in lockstep
+  once its last prompt is in; the chunk size (`prefill.chunk`) bounds how long a step takes, not how long the peers wait.
 - With several slots the DFlash2 drafter proposes for one slot after the other without waiting for the device in between.
   A step tensor larger than a launch can carry (4032 bytes: the block table of a long context) is uploaded from its host
   mirror when the device reaches the copy, so one shared mirror per tensor would be rewritten by the next slot's proposal
