@@ -2927,6 +2927,14 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
       config_->model.qwen38_graph.kv_capacity = context.kv_capacity;
       config_->model.context_length = context.context_length;
       config_->search.max_length = context.max_length;
+      // A tier request that no model_<tier>.onnx answers falls back to another graph (see ResolveQwen38TargetGraphFilename), so
+      // the graph that was taken and the context it gave are what tells a mistyped or unsupported tier from a served one.
+      if (g_log.enabled) {
+        Log("qwen38_graph") << "target graph " << target_filename << ": kv_capacity " << context.kv_capacity
+                            << ", context_length " << context.context_length << ", max_length " << context.max_length
+                            << (context_request.empty() ? std::string() : ", ORT_QWEN38_CONTEXT_LENGTH=" + context_request)
+                            << std::endl;
+      }
     }
   }
   if (g_log.enabled) Log("qwen38_graph") << "target session " << SecondsSince(start) << " s" << std::endl;
