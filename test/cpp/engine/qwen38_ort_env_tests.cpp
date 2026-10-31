@@ -310,7 +310,9 @@ TEST(Qwen38OrtRunHintsTest, AFailedRunRestoresTheEnvironmentAndKeepsTheNoticesPe
   EXPECT_THROW(RunWithQwen38OrtHints(hints, nullptr,
                                      [] {
                                        WriteLikeOrt(Qwen38OrtEnv::kNewTurn, "0");
-                                       throw std::runtime_error("Run failed");
+                                       // Not unconditional on purpose: the bookkeeping after a Run that provably never
+                                       // returns would be unreachable code, which MSVC reports as C4702.
+                                       if (Read(Qwen38OrtEnv::kNewTurn) == "0") throw std::runtime_error("Run failed");
                                      }),
                std::runtime_error);
   EXPECT_EQ(Read(Qwen38OrtEnv::kNewTurn), before);
