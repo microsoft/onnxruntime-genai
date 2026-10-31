@@ -1,0 +1,61 @@
+# Preserve signed Windows/macOS cores and combine them with audited Linux wheels.
+parameters:
+- name: platforms
+  type: object
+
+steps:
+- task: UsePythonVersion@0
+  displayName: 'Use Python 3.11'
+  inputs:
+    versionSpec: '3.11'
+    addToPath: true
+
+- template: utils/authenticate-pip-lotus.yml
+
+- script: python -m pip install wheel packaging
+  displayName: 'Install core wheel packaging dependencies'
+
+- ${{ each platform in parameters.platforms }}:
+  - template: utils/download-core-cmake-package.yml
+    parameters:
+      core_artifact: 'core-${{ platform.rid }}-${{ platform.ep }}-cmake-pkg'
+      target_path: '$(coreDownloadsDir)/${{ platform.rid }}'
+
+  - powershell: |
+      $ErrorActionPreference = 'Stop'
+      python tools/python/generate_core_wheel.py `
+        --core_dir '$(coreDownloadsDir)/${{ platform.rid }}' `
+        --rid '${{ platform.rid }}' `
+        --package_version '$(genai_version)' `
+        --output_dir '$(coreWheelsDir)'
+      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    displayName: 'Package native core wheel (${{ platform.rid }} / ${{ platform.ep }})'
+    workingDirectory: '$(Build.SourcesDirectory)'
+
+- task: DownloadPipelineArtifact@2
+  displayName: 'Download repaired Linux x64 core wheel'
+  inputs:
+    artifactName: 'python-wheel-linux-x64-core'
+    targetPath: '$(coreWheelsDir)'
+
+- task: DownloadPipelineArtifact@2
+  displayName: 'Download repaired Linux ARM64 core wheel'
+  inputs:
+    artifactName: 'python-wheel-linux-arm64-core'
+    targetPath: '$(coreWheelsDir)'
+
+- powershell: |
+    $ErrorActionPreference = 'Stop'
+    $wheels = @(Get-ChildItem '$(coreWheelsDir)' -Filter '*.whl' -File)
+    if ($wheels.Count -ne 5) { throw "Expected five native core wheels; found $($wheels.Count)" }
+    foreach ($platform in @('manylinux_2_28_x86_64', 'manylinux_2_34_aarch64')) {
+      $matchingWheels = @($wheels | Where-Object { $_.Name -match [regex]::Escape($platform) })
+      if ($matchingWheels.Count -ne 1) { throw "Expected one repaired $platform core wheel; found $($matchingWheels.Count)" }
+    }
+  displayName: 'Assert complete native core wheel set'
+
+- task: 1ES.PublishPipelineArtifact@1
+  displayName: 'Publish native core wheels (python-wheel-core)'
+  inputs:
+    artifactName: 'python-wheel-core'
+    targetPath: '$(coreWheelsDir)'
