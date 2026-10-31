@@ -238,10 +238,11 @@ struct StateUpdateReplayDesc {
 
 // Increment whenever a layout the add-on boundary depends on changes: DeviceInterface's virtual
 // layout, or the virtual or data layout of any type constructed by, passed to, or returned across
-// that boundary (Search, BatchedSampler, BatchedSamplerState, GeneratorParams, or Config).
+// that boundary (DeviceBuffer, Search, BatchedSampler, BatchedSamplerState, GeneratorParams, or Config).
 // Dynamically loaded add-ons must report this exact version before the host can safely call through
 // the C++ interface.
-inline constexpr uint32_t kDeviceInterfaceVersion = 14;
+// Version 15: DeviceBuffer::CopyCpuRangeToDevice shifted the virtual slots that follow CopyCpuToDevice.
+inline constexpr uint32_t kDeviceInterfaceVersion = 15;
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}
