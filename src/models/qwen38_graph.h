@@ -115,10 +115,12 @@ bool Qwen38HeadR2CapturesGraph(const Config::SessionOptions& decoder, const std:
 
 // Checks a model package against the plane library it names, when the model is loaded, before its weights are uploaded and
 // before any session is created: an INT8 PLE table (model.qwen38_graph.ple_table with a negative scale) needs the int8_ple
-// plane capability and an INT8 embedding table (<model.embedding.filename>.data of vocab_size x hidden_size INT8 rows and
-// one float scale per row) needs int8_embedding (qwen38_graph_plane.h). Throws a std::runtime_error naming the missing
-// capability, the file and the library when the library lacks one; BF16 and FP8 packages need no capability. Returns the
-// layout of the embedding table the model maps from that file: kNone when the package has no table of that shape.
+// plane capability, an INT8 embedding table (<model.embedding.filename>.data of vocab_size x hidden_size INT8 rows and
+// one float scale per row) needs int8_embedding, and the folded MTP verify path (model.qwen38_graph.fold.enabled), which
+// prepares all the rows of a verify step with one call, needs negative_pos_add_batch (qwen38_graph_plane.h). Throws a
+// std::runtime_error naming the missing capability, what required it and the library when the library lacks one; BF16 and
+// FP8 packages without the fold path need no capability. Returns the layout of the embedding table the model maps from that
+// file: kNone when the package has no table of that shape.
 Qwen38EmbeddingFormat RequireQwen38PackageSupportedByPlane(const Qwen38Plane& plane, const Config& config,
                                                            const std::filesystem::path& model_folder);
 

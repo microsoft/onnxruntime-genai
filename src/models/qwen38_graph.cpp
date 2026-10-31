@@ -1672,6 +1672,12 @@ bool Qwen38HeadR2CapturesGraph(const Config::SessionOptions& decoder,
 
 Qwen38EmbeddingFormat RequireQwen38PackageSupportedByPlane(const Qwen38Plane& plane, const Config& config,
                                                            const std::filesystem::path& model_folder) {
+  // EnqueueFold prepares the rows of a verify step with one negative-pos_add call; a library without the batch would prepare
+  // the first row and leave the others stale, so a package with the fold stack needs the capability.
+  if (config.model.qwen38_graph.fold.enabled) {
+    plane.RequireCapabilities(QWEN38_PLANE_CAP_NEGATIVE_POS_ADD_BATCH,
+                              "the folded MTP verify path (model.qwen38_graph.fold)");
+  }
   const std::filesystem::path ple_table_path = model_folder / config.model.qwen38_graph.ple_table;
   RequireQwen38PleTableSupported(plane, ParseQwen38PleDescription(ple_table_path), ple_table_path);
   if (config.model.embedding.filename.empty()) return Qwen38EmbeddingFormat::kNone;
