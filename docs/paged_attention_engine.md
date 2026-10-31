@@ -2115,6 +2115,20 @@ token. The device holds `model.qwen38_graph.max_batch_size` slots (default 1), o
 `CreateEngineBackend` (`src/engine/backend_factory.h`) and `CreateQwen38GraphDependencies`
 (`src/engine/qwen38_graph_executor.h`) assemble it:
 
+- The slot count is an integer in 1..8 (`Config::Model::Qwen38Graph::kMaxBatchSize`): the JSON parser rejects any other
+  `max_batch_size` and names the key and the value, and the other settings that can choose the count
+  (`engine.dynamic_batching.max_batch_size`, `engine.static_batching.max_batch_size`, `search.batch_size`) are held to the same
+  range at model creation instead of being clamped silently. Several slots are served by the batched fold target and only
+  work with: the folded MTP stack (`fold.enabled`); the unified fast prefill, i.e. `prefill.enabled` without a separate dense
+  graph (the prompts are ingested chunk by chunk through the fold target, slot by slot; a configuration with
+  `prefill.enabled` false or with a dense prefill graph is single-slot); a compact-state target (the exporter's
+  `state_update.*` outputs; a ring-bank target with `present_mid*` outputs keeps one bank per row count for the whole batch and
+  is single-slot); and a plane library with the `batched_prep` capability (`qwen38_plane_prep_batched`, which takes the row
+  count and the slot count as arguments). The model checks the first two before the plane library is loaded and any weight is
+  uploaded, the plane capability when the library has been loaded and before any weight is uploaded, and the compact-state
+  property as soon as the target session exists (its output names are only known then), before the other sessions and any
+  device state are created. Each failure is a `std::runtime_error` that names the setting. A plane library without
+  `batched_prep` still loads packages with one slot.
 - `FixedSlotCacheManager` (`Qwen38GraphCacheManager`, `src/engine/fixed_slot_scheduler.h`) holds one row per slot (`SlotOf`,
   `ResidentRequestCount`). With one slot, `StaticBatchScheduler` queues further Requests and recycles the slot when the
   resident turn is complete. With several slots, a continuous `FixedSlotScheduler` replaces a slot as soon as its turn is over,

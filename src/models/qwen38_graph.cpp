@@ -102,23 +102,80 @@ void ValidateQwen38CacheShapes(const std::vector<Qwen38CacheInput>& inputs, int 
 }
 
 size_t ResolveQwen38MaxBatchSize(const Config& config) {
+  constexpr long long kMaxSlots = Config::Model::Qwen38Graph::kMaxBatchSize;
+  const auto checked = [&](long long requested, const char* setting) {
+    if (requested < 1 || requested > kMaxSlots) {
+      throw std::out_of_range(std::string(setting) + " must be in [1, " + std::to_string(kMaxSlots) +
+                              "] for qwen38_flash_graph, got " + std::to_string(requested));
+    }
+    return static_cast<size_t>(requested);
+  };
   if (config.engine.dynamic_batching) {
-    return std::max<size_t>(1, config.engine.dynamic_batching->max_batch_size);
+    return checked(static_cast<long long>(config.engine.dynamic_batching->max_batch_size),
+                   "engine.dynamic_batching.max_batch_size");
   }
   if (config.engine.static_batching) {
-    return std::max<size_t>(1, config.engine.static_batching->max_batch_size);
+    return checked(static_cast<long long>(config.engine.static_batching->max_batch_size),
+                   "engine.static_batching.max_batch_size");
   }
-  if (config.model.qwen38_graph.max_batch_size > 1) {
-    return static_cast<size_t>(config.model.qwen38_graph.max_batch_size);
+  // 1 is the default, which leaves the choice to the settings below; any other value is the one asked for (the parser
+  // refuses what lies outside [1, kMaxBatchSize], a programmatically built Config is checked here).
+  if (config.model.qwen38_graph.max_batch_size != 1) {
+    return checked(config.model.qwen38_graph.max_batch_size, "model.qwen38_graph.max_batch_size");
   }
   if (config.search.batch_size > 1) {
-    return static_cast<size_t>(config.search.batch_size);
+    return checked(config.search.batch_size, "search.batch_size");
   }
   if (const char* env = std::getenv("ORT_QWEN38_MAX_BATCH_SIZE")) {
     const int parsed = std::atoi(env);
-    if (parsed > 1) return static_cast<size_t>(parsed);
+    if (parsed > 1) return checked(parsed, "ORT_QWEN38_MAX_BATCH_SIZE");
   }
   return 1;
+}
+
+bool Qwen38HasSeparatePrefillSessions(const Config& config) {
+  const auto& q = config.model.qwen38_graph;
+  return q.prefill.enabled && !q.prefill.dense.filename.empty() && q.prefill.dense.filename != config.model.decoder.filename;
+}
+
+void ValidateQwen38MultiSlotConfig(const Config& config) {
+  const size_t slots = ResolveQwen38MaxBatchSize(config);
+  if (slots <= 1) return;
+  const auto& q = config.model.qwen38_graph;
+  const std::string needs = "qwen38_flash_graph: " + std::to_string(slots) +
+                            " request slots (model.qwen38_graph.max_batch_size, engine.dynamic_batching / static_batching "
+                            "max_batch_size or search.batch_size) need ";
+  if (!q.fold.enabled) {
+    throw std::runtime_error(needs +
+                             "the folded verify path (model.qwen38_graph.fold.enabled): every other decode path runs one "
+                             "request slot. Set max_batch_size to 1 or enable the fold stack.");
+  }
+  if (!q.prefill.enabled || Qwen38HasSeparatePrefillSessions(config)) {
+    throw std::runtime_error(needs +
+                             "the unified fast prefill (model.qwen38_graph.prefill.enabled with the fold model as the dense "
+                             "graph, that is without a separate prefill.dense.filename): the prompt of a slot is ingested "
+                             "chunk by chunk through the fold target, the only prompt path that addresses one slot. Neither "
+                             "the decode-graph prompt path (prefill.enabled=false) nor a separate dense prefill graph can. "
+                             "Set max_batch_size to 1 or enable the unified prefill.");
+  }
+}
+
+void ValidateQwen38BatchedTargetOutputs(size_t request_slots, const std::vector<std::string>& output_names) {
+  if (request_slots <= 1) return;
+  const std::string needs = "qwen38_flash_graph: " + std::to_string(request_slots) +
+                            " request slots need a target graph with compact recurrent-state replay (state_update.* "
+                            "outputs: every slot keeps its own accepted prefix), but ";
+  bool compact_state = false;
+  for (const std::string& name : output_names) {
+    if (StartsWith(name, "state_update.")) compact_state = true;
+    if (StartsWith(name, "present_mid") || StartsWith(name, "head.present_mid")) {
+      throw std::runtime_error(needs + "the target is a ring-bank graph (it has the intermediate-state output '" + name +
+                               "'). Set max_batch_size to 1 or export the target with compact state updates.");
+    }
+  }
+  if (!compact_state) {
+    throw std::runtime_error(needs + "the target graph has none. Set max_batch_size to 1 or export the target with compact state updates.");
+  }
 }
 
 size_t DevTensor::Bytes() const {
@@ -163,7 +220,7 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
       plane_{*model.plane_},
       capacity_{model.config_->model.qwen38_graph.kv_capacity},
       vocab_{model.config_->model.vocab_size},
-      max_batch_{static_cast<int>(std::min<size_t>(ResolveQwen38MaxBatchSize(*model.config_), kMaxBatch))},
+      max_batch_{static_cast<int>(ResolveQwen38MaxBatchSize(*model.config_))},
       ledger_{model.config_->model.qwen38_graph.kv_capacity} {
   const auto& q = model_.config_->model.qwen38_graph;
   mtp_enabled_ = q.mtp.enabled;
@@ -2335,9 +2392,7 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
   }
   if (q.prefill.enabled && !q.fold.enabled)
     throw std::runtime_error("model.qwen38_graph.prefill requires fold.enabled");
-  const bool separate_prefill_sessions =
-      q.prefill.enabled && !q.prefill.dense.filename.empty() &&
-      q.prefill.dense.filename != config_->model.decoder.filename;
+  const bool separate_prefill_sessions = Qwen38HasSeparatePrefillSessions(*config_);
   if (separate_prefill_sessions && (q.prefill.head_kv.filename.empty() || q.prefill.constants.empty()))
     throw std::runtime_error(
         "model.qwen38_graph.prefill with a separate dense graph requires prefill.{head_kv.filename,constants}");
@@ -2346,6 +2401,8 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
     throw std::runtime_error("model.qwen38_graph.kv_capacity must exceed " + std::to_string(Qwen38DecodeDevice::kReservedTail));
   if (!p_device_ || p_device_->GetType() != DeviceType::CUDA)
     throw std::runtime_error("qwen38_flash_graph requires the CUDA execution provider");
+  // Several request slots need the fold stack and the unified prefill: refuse the rest here, not at the first decode.
+  ValidateQwen38MultiSlotConfig(*config_);
 
   // Token selection is done by the device loop; the Engine's Search only does bookkeeping (EOS, max length), on the CPU so
   // that committing a token never synchronises the CUDA stream the look-ahead cycle runs on.
@@ -2433,6 +2490,8 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
   }
   session_target_ = CreateSession(ort_env, target_filename, session_options_.get());
   session_info_.Add(*session_target_);
+  // The outputs of the target are known now: refuse a ring-bank target for several slots before anything else is built.
+  ValidateQwen38BatchedTargetOutputs(ResolveQwen38MaxBatchSize(*config_), session_target_->GetOutputNames());
   if (g_log.enabled) Log("qwen38_graph") << "target session " << SecondsSince(start) << " s" << std::endl;
 
   auto make_options = [&](const std::optional<Config::SessionOptions>& configured, bool inherit, const char* label) {
