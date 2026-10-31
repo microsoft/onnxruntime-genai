@@ -1,25 +1,28 @@
 #!/usr/bin/env python3
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
-"""Zero-copy package builder and graph migrator for QMoEOffload v3 (NVFP4 and SharedExpertBlockV1 INT4).
+"""Zero-copy QMoE-offload package builder: standard com.microsoft::QMoE nodes plus session.moe.offload.* options.
 
-Supports two migration modes:
-1. NVFP4 v12b package migration (--from-package <pkg_dir> --out <dir>):
+The target runtime is the ONNX Runtime CUDA provider with QMoE offload (microsoft/onnxruntime#33450 -> #33622). It has no
+QMoEOffload operator (creating a session with one fails) and the QMoE schema has no offload attribute: exporters emit
+standard com.microsoft::QMoE nodes and the offload is configured with `session.moe.offload.*` session options.
+
+NVFP4 v12b package conversion (--from-package <pkg_dir> --out <dir>):
    - Hard-links all weight files (0 GiB disk copy).
-   - Rewrites the 48 com.microsoft::QMoE nodes in target/model.onnx (or model.onnx) and dense/model.onnx to
-     com.microsoft::QMoEOffload with explicit layer_index, hidden_size, inter_size, and v3 dispatch controls.
+   - Checks that the runtime can offload the 48 com.microsoft::QMoE nodes of target/model.onnx (or model.onnx) and keeps
+     them as they are, apart from clearing the router_weights input (input 14), which the offload backend does not take.
+     The graph is written as model_s2.onnx; model_s3.onnx and model_s4.onnx extend it to 3 and 4 verify rows.
    - Updates weights_pool.txt so the 48 layers of routed expert weights/scales (63.281 GiB) use "cpu"
      mmap placement, and optionally places dense/source_weights/dense.data (5.270 GiB) in "host_mapped"
      UVA placement for 24 GiB VRAM targets.
-   - Configures genai_config.json for 24 GiB or 32 GiB VRAM operation.
-2. Standalone SharedExpertBlockV1 v3 compact schema migration (--migrate-shared-onnx <in.onnx> --out-onnx <out.onnx>):
-   - Rewrites legacy 26-input QMoEOffload nodes (21->2 expert_blocks, 24->3 fc2_bias, 25->4 optional phase)
-     without reading or regenerating the 63.457 GiB external weight payload (Section 5.3 / F8).
+   - Configures genai_config.json for 24 GiB or 32 GiB VRAM operation and sets the decoder's session.moe.offload.*
+     options: mode, placement, the byte budgets, the expert-popularity file and per-layer resident-slot caps.
 """
 
 from __future__ import annotations
 
 import argparse
+import collections
 import hashlib
 import json
 import os
@@ -28,6 +31,33 @@ from pathlib import Path
 
 import onnx
 from onnx import helper
+from package_paths import reject_output_overlap
+
+OFFLOAD_MODES = ("required", "auto")
+OFFLOAD_PLACEMENTS = ("adaptive", "static")
+OFFLOAD_OPTION_PREFIX = "session.moe.offload."
+EXPERT_PROFILE_NAME = "expert-profile.bin"
+ALIGNED_MTP_RELATIVE = "target/head_data/source_weights/mtp_moe_aligned.bin"
+ROUTER_WEIGHTS_INPUT = 14
+# Inputs of the QMoE schema that the offload backend does not take: fc3 and zero-point banks, router_weights and the
+# activation scales.
+UNSUPPORTED_OFFLOAD_INPUTS = (8, 9, 10, 11, 12, 13, 14, 17, 18, 19, 20)
+OFFLOAD_WEIGHT_INPUTS = (2, 3, 5, 6)
+NVFP4_GLOBAL_SCALE_INPUTS = (15, 16)
+
+REMOVED_OPTIONS = {
+    "--migrate-shared-onnx": "it rewrites legacy 26-input QMoEOffload graphs, and the runtime has no QMoEOffload operator. "
+    "No data-preserving conversion of their expert_blocks input to standard QMoE exists; INT4 packages come from "
+    "build_package_v12d_int4_int8.py",
+    "--out-onnx": "it belongs to --migrate-shared-onnx",
+    "--strip-phase": "it belongs to --migrate-shared-onnx",
+    "--strip-stats": "it belongs to --migrate-shared-onnx",
+    "--target-spare-slots": "spare slots are the runtime's decision; choose --offload-placement static (none) or adaptive",
+    "--dense-offload-qmoe": "it rewrote dense/model.onnx to the QMoEOffload operator, which the runtime does not have; "
+    "the dense graph keeps the stock QMoE on UVA-mapped expert weights",
+    "--dense-stream-min-rows": "it set attributes of the QMoEOffload operator, which the runtime does not have",
+    "--dense-stream-wave": "it set attributes of the QMoEOffload operator, which the runtime does not have",
+}
 
 REPLACED = {
     Path("genai_config.json"),
@@ -114,46 +144,6 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def migrate_shared_onnx_v3(in_onnx: Path, out_onnx: Path, strip_phase: bool = False, strip_stats: bool = False) -> int:
-    """Zero-copy v3 compact shared schema migration (21->2, 24->3, 25->4) per Section 5.3 (F8)."""
-    model = onnx.load(str(in_onnx), load_external_data=False)
-    migrated = 0
-    stat_outputs_removed = set()
-    for node in model.graph.node:
-        if node.domain == "com.microsoft" and node.op_type == "QMoEOffload":
-            inputs = list(node.input)
-            if len(inputs) >= 22 and inputs[21]:
-                x_in = inputs[0]
-                router_in = inputs[1]
-                blocks_in = inputs[21]
-                bias_in = inputs[24] if len(inputs) > 24 else ""
-                phase_in = "" if strip_phase else (inputs[25] if len(inputs) > 25 else "")
-                new_inputs = [x_in, router_in, blocks_in]
-                if bias_in or phase_in:
-                    new_inputs.append(bias_in)
-                if phase_in:
-                    new_inputs.append(phase_in)
-                del node.input[:]
-                node.input.extend(new_inputs)
-                if strip_stats and len(node.output) > 1:
-                    for out_name in list(node.output)[1:]:
-                        if out_name:
-                            stat_outputs_removed.add(out_name)
-                    del node.output[1:]
-                existing_attrs = {a.name for a in node.attribute}
-                if "layout_id" not in existing_attrs:
-                    node.attribute.append(helper.make_attribute("layout_id", "ort.qmoe.w4a16.block32.shared.v1"))
-                if "layer_index" not in existing_attrs:
-                    node.attribute.append(helper.make_attribute("layer_index", migrated))
-                migrated += 1
-    if stat_outputs_removed:
-        kept_outputs = [o for o in model.graph.output if o.name not in stat_outputs_removed]
-        del model.graph.output[:]
-        model.graph.output.extend(kept_outputs)
-    save_model_fresh(model, out_onnx)
-    return migrated
-
-
 def load_expert_profile_plan(
     profile_path: Path,
     num_layers: int = 48,
@@ -162,96 +152,268 @@ def load_expert_profile_plan(
     min_slots_per_layer: int = 4,
     uniform: bool = False,
 ) -> dict[int, list[int]]:
-    """Loads STRP v1 expert-profile.bin and assigns per-layer hot expert lists summing to total_slots."""
+    """Loads an STRP v1 expert-profile.bin and picks the hottest experts of every layer, `total_slots` in total.
+
+    The profile ranks (layer, expert) pairs from the most to the least popular, and every layer keeps a prefix of its
+    own ranking. Uniform: each layer gets total_slots // num_layers experts, and each of the total_slots % num_layers
+    remaining slots goes to a different layer, the ones whose next expert ranks highest. Otherwise every layer first
+    gets min_slots_per_layer (at most total_slots // num_layers), then the globally most popular experts take the rest.
+    A request the profile cannot fill raises ValueError, so the plan always sums to exactly `total_slots`.
+    """
     import struct  # noqa: PLC0415
 
     import numpy as np  # noqa: PLC0415
 
+    if num_layers <= 0 or num_experts <= 0:
+        raise ValueError(f"num_layers and num_experts must be positive, got {num_layers} and {num_experts}")
+    if total_slots < 0 or min_slots_per_layer < 0:
+        raise ValueError(
+            f"total_slots and min_slots_per_layer must not be negative: {total_slots}, {min_slots_per_layer}"
+        )
+
     data = profile_path.read_bytes()
+    if len(data) < 24:
+        raise ValueError(f"{profile_path} is {len(data)} bytes, shorter than the 24-byte STRP header")
     magic, version, hdr_layers, hdr_experts, _slots, n_ranked = struct.unpack("<6I", data[:24])
     if magic != 1347572819 or version != 1 or hdr_layers != num_layers or hdr_experts != num_experts:
         raise ValueError(
             f"Incompatible expert profile header in {profile_path}: {(magic, version, hdr_layers, hdr_experts)}"
         )
+    if len(data) < 24 + n_ranked * 4:
+        raise ValueError(f"{profile_path} ranks {n_ranked} experts but holds only {(len(data) - 24) // 4}")
     pairs = np.frombuffer(data[24 : 24 + n_ranked * 4], dtype=np.uint16).reshape(n_ranked, 2)
+    if n_ranked and (int(pairs[:, 0].max()) >= num_layers or int(pairs[:, 1].max()) >= num_experts):
+        raise ValueError(f"{profile_path} ranks a layer or expert outside {num_layers} layers x {num_experts} experts")
 
-    by_layer: dict[int, list[int]] = {layer: [] for layer in range(num_layers)}
-    for l_id, e_id in pairs:
-        by_layer[int(l_id)].append(int(e_id))
+    ranked: list[list[int]] = [[] for _ in range(num_layers)]
+    position: list[list[int]] = [[] for _ in range(num_layers)]
+    order: list[tuple[int, int]] = []
+    seen: set[tuple[int, int]] = set()
+    for rank, (layer, expert) in enumerate(pairs.tolist()):
+        if (layer, expert) not in seen:
+            seen.add((layer, expert))
+            ranked[layer].append(expert)
+            position[layer].append(rank)
+            order.append((layer, expert))
+
+    if total_slots > len(order):
+        raise ValueError(f"{total_slots} resident slots requested but {profile_path} ranks only {len(order)} experts")
 
     if uniform:
-        per_layer = total_slots // num_layers
-        return {layer: by_layer[layer][:per_layer] for layer in range(num_layers)}
+        base, remainder = divmod(total_slots, num_layers)
+        short = [layer for layer in range(num_layers) if len(ranked[layer]) < base]
+        if short:
+            raise ValueError(
+                f"{base} slots per layer requested but layers {short[:8]} rank fewer experts in the profile"
+            )
+        candidates = sorted(
+            (layer for layer in range(num_layers) if len(ranked[layer]) > base), key=lambda layer: position[layer][base]
+        )
+        if len(candidates) < remainder:
+            raise ValueError(
+                f"{total_slots} slots over {num_layers} layers leave {remainder} extra slots, but only "
+                f"{len(candidates)} layers rank more than {base} experts"
+            )
+        extra = set(candidates[:remainder])
+        selected = {layer: ranked[layer][: base + (layer in extra)] for layer in range(num_layers)}
+    else:
+        floor = min(min_slots_per_layer, total_slots // num_layers)
+        selected = {layer: ranked[layer][:floor] for layer in range(num_layers)}
+        chosen = {layer: set(experts) for layer, experts in selected.items()}
+        budget = total_slots - sum(len(experts) for experts in selected.values())
+        for layer, expert in order:
+            if budget <= 0:
+                break
+            if expert not in chosen[layer]:
+                selected[layer].append(expert)
+                chosen[layer].add(expert)
+                budget -= 1
 
-    selected: dict[int, list[int]] = {layer: [] for layer in range(num_layers)}
-    selected_set: dict[int, set[int]] = {layer: set() for layer in range(num_layers)}
-    budget = total_slots
-    floor = min(min_slots_per_layer, total_slots // num_layers, num_experts)
-    for layer in range(num_layers):
-        for e in by_layer[layer][:floor]:
-            selected[layer].append(e)
-            selected_set[layer].add(e)
-            budget -= 1
-
-    for l_id, e_id in pairs:
-        if budget <= 0:
-            break
-        layer = int(l_id)
-        e = int(e_id)
-        if e not in selected_set[layer] and len(selected[layer]) < num_experts:
-            selected[layer].append(e)
-            selected_set[layer].add(e)
-            budget -= 1
-
+    planned = sum(len(experts) for experts in selected.values())
+    if planned != total_slots:
+        raise RuntimeError(f"expert profile plan holds {planned} slots, not the {total_slots} requested")
     return selected
 
 
-def rewrite_nvfp4_qmoe_to_offload(
-    in_onnx: Path,
-    out_onnx: Path,
-    hidden_size: int = 2560,
-    inter_size: int = 640,
-    token_tile_size: int = 32,
-    extra_attrs: dict | None = None,
-    per_layer_initial_experts: dict[int, list[int]] | None = None,
-) -> int:
-    """Rewrites com.microsoft::QMoE (quant_type='nvfp4') nodes to com.microsoft::QMoEOffload."""
-    model = onnx.load(str(in_onnx), load_external_data=False)
-    rewritten = 0
-    for node in model.graph.node:
-        if node.domain == "com.microsoft" and node.op_type == "QMoE":
-            layer_idx = rewritten
-            node.op_type = "QMoEOffload"
-            if len(node.input) > 14 and node.input[14]:
-                node.input[14] = ""
-            existing_attrs = {a.name for a in node.attribute}
-            if "layer_index" not in existing_attrs:
-                node.attribute.append(helper.make_attribute("layer_index", layer_idx))
-            if "hidden_size" not in existing_attrs:
-                node.attribute.append(helper.make_attribute("hidden_size", hidden_size))
-            if "inter_size" not in existing_attrs:
-                node.attribute.append(helper.make_attribute("inter_size", inter_size))
-            if "token_tile_size" not in existing_attrs:
-                node.attribute.append(helper.make_attribute("token_tile_size", token_tile_size))
-            if "gpu_working_bytes" not in existing_attrs:
-                node.attribute.append(helper.make_attribute("gpu_working_bytes", 512 << 20))
-            if "pinned_staging_bytes" not in existing_attrs:
-                node.attribute.append(helper.make_attribute("pinned_staging_bytes", 64 << 20))
-            if "allow_cuda_graph" not in existing_attrs:
-                node.attribute.append(helper.make_attribute("allow_cuda_graph", 1))
-            if per_layer_initial_experts is not None and layer_idx in per_layer_initial_experts:
-                init_exps = per_layer_initial_experts[layer_idx]
-                node.attribute.append(helper.make_attribute("resident_slots", len(init_exps)))
-                node.attribute.append(helper.make_attribute("initial_experts", init_exps))
-                existing_attrs.add("resident_slots")
-                existing_attrs.add("initial_experts")
-            if extra_attrs:
-                for k_attr, v_attr in extra_attrs.items():
-                    if k_attr not in existing_attrs and v_attr is not None:
-                        node.attribute.append(helper.make_attribute(k_attr, v_attr))
-            rewritten += 1
-    save_model_fresh(model, out_onnx)
-    return rewritten
+def qmoe_nodes(model: onnx.ModelProto) -> list[onnx.NodeProto]:
+    return [node for node in model.graph.node if node.domain == "com.microsoft" and node.op_type == "QMoE"]
+
+
+def node_label(name: str, ordinal: int) -> str:
+    return repr(name) if name else f"#{ordinal} (unnamed)"
+
+
+def qmoe_attribute(node: onnx.NodeProto, name: str, default=None):
+    """Reads a node attribute like the runtime does: strings come back as str and an absent one as `default`."""
+    for attribute in node.attribute:
+        if attribute.name == name:
+            value = helper.get_attribute_value(attribute)
+            return value.decode() if isinstance(value, bytes) else value
+    return default
+
+
+def parse_layer_index(name: str) -> int | None:
+    """Mirrors the runtime's layer-number extraction: digits after "layers.", "layer." or "blocks." that end the name or
+    are followed by a non-alphanumeric character, e.g. 5 in "model.layers.5.mlp". Returns None when there is none."""
+    for prefix in ("layers.", "layer.", "blocks."):
+        search_from = 0
+        while search_from < len(name):
+            position = name.find(prefix, search_from)
+            if position < 0:
+                break
+            end = position + len(prefix)
+            digits_end = end
+            while digits_end < len(name) and name[digits_end] in "0123456789":
+                digits_end += 1
+            if digits_end > end:
+                value = int(name[end:digits_end])
+                if value > 2**31 - 1:
+                    return None
+                following = name[digits_end] if digits_end < len(name) else ""
+                if not following or not (following.isascii() and following.isalnum()):
+                    return value
+            search_from = end
+    return None
+
+
+def qmoe_offload_problems(node: onnx.NodeProto, constants: dict[str, onnx.TensorProto]) -> list[str]:
+    """Lists the reasons the runtime's QMoE offload (onnxruntime#33622, moe_quantization.cc) rejects `node`.
+
+    `constants` maps the names of the graph's constant initializers to them. An empty list means the node is eligible;
+    `session.moe.offload.mode=required` fails session creation for a node with reasons, and `auto` runs that node
+    without offload.
+    """
+    problems = []
+
+    def slot(index: int) -> str:
+        return node.input[index] if index < len(node.input) else ""
+
+    quant_type = qmoe_attribute(node, "quant_type", "int")
+    bits = qmoe_attribute(node, "expert_weight_bits", 4)
+    fc1_bits = qmoe_attribute(node, "fc1_expert_weight_bits", bits)
+    fc2_bits = qmoe_attribute(node, "fc2_expert_weight_bits", bits)
+    block_size = qmoe_attribute(node, "block_size", -1)
+    prepacked = qmoe_attribute(node, "weights_prepacked", -1)
+    nvfp4_row_major = quant_type == "nvfp4" and prepacked == 1
+    int4_prepacked = quant_type == "int" and bits == fc1_bits == fc2_bits == 4 and prepacked != 0 and block_size == 32
+    int3_raw = (
+        quant_type == "int" and bits == fc1_bits == fc2_bits == 3 and prepacked == 0 and block_size in (32, 64, 128)
+    )
+    if quant_type == "nvfp4" and block_size not in (-1, 16):
+        problems.append(f"block_size={block_size}: quant_type='nvfp4' takes block_size 16")
+    if not (nvfp4_row_major or int4_prepacked or int3_raw):
+        problems.append(
+            f"quant_type={quant_type!r} expert_weight_bits={bits} block_size={block_size} weights_prepacked={prepacked} "
+            "is not NVFP4 with weights_prepacked=1, INT4 with block_size=32 and prepacked weights, or raw INT3"
+        )
+    elif not (bits == 4 or int3_raw):
+        problems.append(f"expert_weight_bits={bits} must be 4 for NVFP4")
+
+    activation = qmoe_attribute(node, "activation_type", "relu")
+    swiglu_fusion = qmoe_attribute(node, "swiglu_fusion", 0)
+    if activation != "swiglu" or swiglu_fusion not in (0, 1):
+        problems.append(
+            f"activation_type={activation!r} swiglu_fusion={swiglu_fusion}: only swiglu with swiglu_fusion 0 or 1 is offloaded"
+        )
+    if qmoe_attribute(node, "use_sparse_mixer", 0) == 1:
+        problems.append("use_sparse_mixer=1 is not offloaded")
+
+    unsupported = [index for index in UNSUPPORTED_OFFLOAD_INPUTS if slot(index)]
+    if unsupported:
+        problems.append(f"inputs {unsupported} are not supported by the offload backend")
+
+    not_constant = [index for index in OFFLOAD_WEIGHT_INPUTS if slot(index) not in constants]
+    if not_constant:
+        problems.append(f"inputs {not_constant} (expert weights and scales) must be constant graph initializers")
+    else:
+        for index in (2, 5):
+            rank = len(constants[slot(index)].dims)
+            if rank != 3:
+                problems.append(f"input {index} has rank {rank}, expected 3 (experts x rows x columns)")
+    if quant_type == "nvfp4":
+        missing = [index for index in NVFP4_GLOBAL_SCALE_INPUTS if slot(index) not in constants]
+        if missing:
+            problems.append(
+                f"NVFP4 needs the constant global scales {list(NVFP4_GLOBAL_SCALE_INPUTS)}, missing {missing}"
+            )
+    return problems
+
+
+def prepare_qmoe_for_offload(model: onnx.ModelProto) -> dict:
+    """Readies the com.microsoft::QMoE nodes of `model` (edited in place) for the runtime's offload backend.
+
+    The runtime offloads standard QMoE nodes and has no offload operator or attribute, so the nodes keep their op type and
+    attributes. The only edit is clearing the optional router_weights input (14), which the backend does not take: the
+    nodes then weight the selected experts by router_probs, like the fresh nodes of build_package_v12d_int4_int8.py.
+    Returns {"nodes": the names of the QMoE nodes in graph order, "router_weights_cleared": count,
+    "rejected": {position in "nodes": reasons}} for the nodes the backend would still reject.
+    """
+    graph_inputs = {value.name for value in model.graph.input}
+    # An initializer that is also a graph input can be overridden at run time, so the runtime does not treat it as constant.
+    constants = {
+        init.name: init for init in model.graph.initializer if model.ir_version < 4 or init.name not in graph_inputs
+    }
+    nodes = qmoe_nodes(model)
+    cleared = 0
+    for node in nodes:
+        if len(node.input) > ROUTER_WEIGHTS_INPUT and node.input[ROUTER_WEIGHTS_INPUT]:
+            node.input[ROUTER_WEIGHTS_INPUT] = ""
+            cleared += 1
+    rejected = {}
+    for ordinal, node in enumerate(nodes):
+        problems = qmoe_offload_problems(node, constants)
+        if problems:
+            rejected[ordinal] = problems
+    return {"nodes": [node.name for node in nodes], "router_weights_cleared": cleared, "rejected": rejected}
+
+
+def format_node_overrides(caps: dict[str, int]) -> str:
+    """Formats per-node resident-slot caps as the value of session.moe.offload.node_overrides.
+
+    The runtime splits entries at ';', takes the name up to the first ':' and trims ASCII whitespace around it, so a name
+    that has one of those cannot be written.
+    """
+    entries = []
+    for name, cap in caps.items():
+        if not name or name != name.strip(" \t\n\v\f\r") or ";" in name or ":" in name:
+            raise ValueError(f"node name {name!r} cannot appear in session.moe.offload.node_overrides")
+        if not 0 <= cap <= 2**31 - 1:
+            raise ValueError(f"resident slot cap {cap} of node {name!r} is outside 0..{2**31 - 1}")
+        entries.append(f"{name}:max_resident_slots={cap}")
+    return ";".join(entries)
+
+
+def offload_session_options(
+    mode: str,
+    placement: str,
+    device_expert_bytes: str | None = None,
+    host_expert_bytes: str | None = None,
+    popularity_file: str | None = None,
+    node_overrides: str | None = None,
+) -> dict[str, str]:
+    """The session.moe.offload.* entries (all values are strings) that configure the runtime's QMoE offload."""
+    if mode not in OFFLOAD_MODES:
+        raise ValueError(f"offload mode {mode!r} is not one of {OFFLOAD_MODES}")
+    if placement not in OFFLOAD_PLACEMENTS:
+        raise ValueError(f"offload placement {placement!r} is not one of {OFFLOAD_PLACEMENTS}")
+    options = {"mode": mode, "placement": placement, "cpu_execution": "auto"}
+    optional = {
+        "device_expert_bytes": device_expert_bytes,
+        "host_expert_bytes": host_expert_bytes,
+        "popularity_file": popularity_file,
+        "node_overrides": node_overrides,
+    }
+    options.update({key: value for key, value in optional.items() if value})
+    return {OFFLOAD_OPTION_PREFIX + key: value for key, value in options.items()}
+
+
+def budget_bytes(text: str) -> str:
+    """argparse type of the byte budgets: "auto" or a non-negative integer, as the runtime parses them."""
+    if text.lower() == "auto":
+        return "auto"
+    if text.isascii() and text.isdigit() and int(text) < 2**64:
+        return str(int(text))
+    raise argparse.ArgumentTypeError(f"{text!r} is not 'auto' or a number of bytes between 0 and {2**64 - 1}")
 
 
 def build_multidraft_target_onnx(in_onnx: Path, out_onnx: Path, verify_rows: int = 3) -> dict:
@@ -558,6 +720,112 @@ def build_multidraft_target_onnx(in_onnx: Path, out_onnx: Path, verify_rows: int
     }
 
 
+def check_pool_bindings(pool_ids: list[int], sessions: list[tuple[str, str, int]], where: str) -> None:
+    """Raises ValueError unless every pool id is defined once and every session binding names a defined pool."""
+    duplicated = sorted(pid for pid, count in collections.Counter(pool_ids).items() if count > 1)
+    if duplicated:
+        raise ValueError(f"{where}: pool ids {duplicated} are defined more than once")
+    defined = set(pool_ids)
+    dangling = [(sess, name, pid) for sess, name, pid in sessions if pid not in defined]
+    if dangling:
+        shown = ", ".join(f"session {sess} {name} {pid}" for sess, name, pid in dangling[:5])
+        raise ValueError(f"{where}: {len(dangling)} session bindings name a pool that is not defined, e.g. {shown}")
+
+
+def plan_aligned_copy(lengths: list[tuple[int, int]], alignment: int = 4096) -> tuple[dict[int, int], int]:
+    """Packs ranges back to back, each starting on an `alignment` boundary. Takes (key, length) pairs in order and
+    returns ({key: destination offset}, size of the packed file)."""
+    offsets: dict[int, int] = {}
+    cursor = 0
+    for key, length in lengths:
+        cursor = -(-cursor // alignment) * alignment
+        offsets[key] = cursor
+        cursor += length
+    return offsets, cursor
+
+
+def check_file_ranges(ranges: list[tuple[int, Path, int, int, int]]) -> None:
+    """Raises ValueError naming the pool whose (pool id, source file, source offset, _, length) range is not in its file."""
+    for pid, src, src_offset, _dst_offset, length in ranges:
+        if not src.is_file():
+            raise ValueError(f"pool {pid}: source file {src} does not exist")
+        size = src.stat().st_size
+        if src_offset < 0 or length < 0 or src_offset + length > size:
+            raise ValueError(f"pool {pid}: bytes {src_offset}..{src_offset + length} lie outside {src} ({size} bytes)")
+
+
+def copy_file_ranges(dst: Path, ranges: list[tuple[int, Path, int, int, int]]) -> None:
+    """Writes `dst` from (pool id, source file, source offset, destination offset, length) ranges.
+
+    Every range is checked against its source file before `dst` is created, so an out-of-bounds pool fails with its id
+    instead of leaving a short file.
+    """
+    check_file_ranges(ranges)
+    with open(dst, "wb") as fout:
+        for _pid, src, src_offset, dst_offset, length in ranges:
+            with open(src, "rb") as fin:
+                remaining = length
+                while remaining > 0:
+                    copied = os.copy_file_range(
+                        fin.fileno(),
+                        fout.fileno(),
+                        min(remaining, 1 << 26),
+                        offset_src=src_offset + length - remaining,
+                        offset_dst=dst_offset + length - remaining,
+                    )
+                    if copied <= 0:
+                        raise RuntimeError(f"os.copy_file_range stopped early copying {src}")
+                    remaining -= copied
+        fout.truncate(max((dst_offset + length for _pid, _src, _off, dst_offset, length in ranges), default=0))
+
+
+def relocate_unaligned_mtp_pools(
+    source_pkg: Path, out_pkg: Path, pool_records: list[list[str]], mtp_pool_ids: set[int], placement: str
+) -> dict[int, str]:
+    """Moves every MTP MoE pool that starts at a non-16-byte-aligned file offset into one aligned file.
+
+    `pool_records` holds the split `pool`/`host_pool` lines of weights_pool.txt. The ids are whatever the source package
+    uses: each moved pool gets a record derived from its own line, pointing at its range of the aligned file, and the
+    result maps pool id -> that record. The file sits next to the source package and is named after the layout, so a
+    changed layout never reuses a stale copy; the output package hard-links it.
+    """
+    unaligned = sorted(
+        (parts for parts in pool_records if int(parts[1]) in mtp_pool_ids and int(parts[3]) % 16 != 0),
+        key=lambda parts: int(parts[1]),
+    )
+    if not unaligned:
+        return {}
+    offsets, total_size = plan_aligned_copy([(int(parts[1]), int(parts[4])) for parts in unaligned])
+    ranges = [
+        (int(parts[1]), source_pkg / parts[6 + int(parts[5])], int(parts[3]), offsets[int(parts[1])], int(parts[4]))
+        for parts in unaligned
+    ]
+    check_file_ranges(ranges)
+    # The file name identifies the layout and the source files, so a changed package never reuses a stale copy.
+    layout = []
+    for (_pid, src, offset, dst_offset, length), parts in zip(ranges, unaligned, strict=True):
+        stat = src.stat()
+        layout.append([parts[6 + int(parts[5])], offset, length, dst_offset, stat.st_size, stat.st_mtime_ns])
+    digest = hashlib.sha256(json.dumps(sorted(layout)).encode()).hexdigest()[:12]
+    shared_aligned = source_pkg.parent / f"{source_pkg.name}_mtp_moe_aligned-{digest}.bin"
+    if not shared_aligned.exists() or shared_aligned.stat().st_size != total_size:
+        tmp_aligned = shared_aligned.with_suffix(".tmp")
+        try:
+            copy_file_ranges(tmp_aligned, ranges)
+        except BaseException:
+            tmp_aligned.unlink(missing_ok=True)
+            raise
+        tmp_aligned.replace(shared_aligned)
+    link_file(shared_aligned, out_pkg / ALIGNED_MTP_RELATIVE, copy=False)
+    records = {}
+    for parts in unaligned:
+        pid = int(parts[1])
+        rank = int(parts[5])
+        head = ["pool", parts[1], parts[2], str(offsets[pid]), parts[4], *parts[5 : 6 + rank]]
+        records[pid] = " ".join([*head, ALIGNED_MTP_RELATIVE, placement])
+    return records
+
+
 def build_offload_weights_pool(
     source_pkg: Path,
     out_pkg: Path,
@@ -593,40 +861,15 @@ def build_offload_weights_pool(
                 dense_bound_names.add(name)
             session_lines.append((sess, name, pid))
 
-    aligned_mtp_rel = "target/head_data/source_weights/mtp_moe_aligned.bin"
-    need_aligned_mtp_copy = False
-    for line in src_pool[1:]:
-        parts = line.strip().split()
-        if parts and parts[0] in ("pool", "host_pool") and int(parts[1]) in mtp_moe_pool_ids:
-            if int(parts[3]) % 16 != 0:
-                need_aligned_mtp_copy = True
-
-    if mtp_moe_placement != "device" and need_aligned_mtp_copy:
-        shared_aligned = source_pkg.parent / f"{source_pkg.name}_mtp_moe_aligned.bin"
-        src_st = source_pkg / "target/head_data/source_weights/model-bf16-00011.safetensors"
-        expected_size = 3355443200 + 1677721600
-        if not shared_aligned.exists() or shared_aligned.stat().st_size != expected_size:
-            tmp_aligned = shared_aligned.with_suffix(".tmp")
-            with open(src_st, "rb") as fin, open(tmp_aligned, "wb") as fout:
-                in_fd = fin.fileno()
-                out_fd = fout.fileno()
-                for src_off, dst_off, total_len in [
-                    (7243385096, 0, 3355443200),
-                    (5565663496, 3355443200, 1677721600),
-                ]:
-                    rem = total_len
-                    r_off = src_off
-                    w_off = dst_off
-                    while rem > 0:
-                        chunk = min(rem, 1 << 26)
-                        copied = os.copy_file_range(in_fd, out_fd, chunk, offset_src=r_off, offset_dst=w_off)
-                        if copied <= 0:
-                            raise RuntimeError("os.copy_file_range returned 0")
-                        r_off += copied
-                        w_off += copied
-                        rem -= copied
-            tmp_aligned.replace(shared_aligned)
-        link_file(shared_aligned, out_pkg / aligned_mtp_rel, copy=False)
+    source_records = [
+        parts for parts in (line.split() for line in src_pool[1:]) if parts and parts[0] in ("pool", "host_pool")
+    ]
+    check_pool_bindings([int(parts[1]) for parts in source_records], session_lines, "the source weights_pool.txt")
+    aligned_mtp_records = {}
+    if mtp_moe_placement != "device":
+        aligned_mtp_records = relocate_unaligned_mtp_pools(
+            source_pkg, out_pkg, source_records, mtp_moe_pool_ids, mtp_moe_placement
+        )
 
     for line in src_pool[1:]:
         s = line.strip()
@@ -649,20 +892,13 @@ def build_offload_weights_pool(
                 else:
                     pool_lines.append(base_s)
             elif pid in mtp_moe_pool_ids and mtp_moe_placement != "device":
-                if not need_aligned_mtp_copy:
-                    pool_lines.append(f"{base_s} {mtp_moe_placement}")
-                elif pid == 607:
-                    pool_lines.append(f"pool 607 16 0 3355443200 3 512 1280 2560 {aligned_mtp_rel} {mtp_moe_placement}")
-                elif pid == 608:
-                    pool_lines.append(
-                        f"pool 608 16 3355443200 1677721600 3 512 2560 640 {aligned_mtp_rel} {mtp_moe_placement}"
-                    )
+                pool_lines.append(aligned_mtp_records.get(pid, f"{base_s} {mtp_moe_placement}"))
             elif default_placement != "device":
                 pool_lines.append(f"{base_s} {default_placement}")
             else:
                 pool_lines.append(base_s)
 
-    next_pool_id = len(pool_lines)
+    next_pool_id = max((int(parts[1]) for parts in source_records), default=-1) + 1
     target_bound_names = {name for sess, name, _ in session_lines if sess == "target"}
     flat_root = (source_pkg / "model.onnx").exists()
     target_onnx_src = (source_pkg / "model.onnx") if flat_root else (source_pkg / "target/model.onnx")
@@ -709,9 +945,10 @@ def build_offload_weights_pool(
     out_lines = ["qwen38_weights_pool 1", *pool_lines]
     for sess, name, pid in session_lines:
         out_lines.append(f"session {sess} {name} {pid}")
+    check_pool_bindings([int(line.split()[1]) for line in pool_lines], session_lines, "the rewritten weights_pool.txt")
     (out_pkg / "weights_pool.txt").write_text("\n".join(out_lines) + "\n")
     return {
-        "total_pool_entries": next_pool_id,
+        "total_pool_entries": len(pool_lines),
         "cpu_qmoe_entries": len(qmoe_pool_ids),
         "added_dense_entries": added_dense_entries,
         "dense_placement": dense_placement,
@@ -720,14 +957,106 @@ def build_offload_weights_pool(
     }
 
 
-def main() -> None:
+def check_layer_numbering(model: onnx.ModelProto, not_offloaded: frozenset[int] = frozenset()) -> None:
+    """Refuses a graph whose QMoE nodes the runtime would number differently from their position in the graph.
+
+    The expert profile ranks experts by layer number, and the runtime matches them to nodes by the layer it reads from a
+    node's name (digits after "layers.", "layer." or "blocks.", else the same in the name of its fc1 weights input). A node
+    without one is numbered in registration order, counting only the nodes the runtime offloads.
+    """
+    registered: list[int] = []
+    for ordinal, node in enumerate(qmoe_nodes(model)):
+        if ordinal in not_offloaded:
+            continue
+        number = parse_layer_index(node.name)
+        if number is None and len(node.input) > 2:
+            number = parse_layer_index(node.input[2])
+        if number is None:
+            number = len(registered)
+            while number in registered:
+                number += 1
+        if number != ordinal:
+            raise ValueError(
+                f"QMoE node {node_label(node.name, ordinal)} is number {ordinal} in the graph but the runtime "
+                f"numbers it layer {number}"
+            )
+        registered.append(number)
+
+
+def qmoe_expert_counts(model: onnx.ModelProto) -> set[int]:
+    """The number of experts (leading dimension of the fc1 weights) of the QMoE nodes."""
+    initializers = {init.name: init for init in model.graph.initializer}
+    counts = set()
+    for node in qmoe_nodes(model):
+        weights = initializers.get(node.input[2]) if len(node.input) > 2 else None
+        if weights is not None and len(weights.dims) == 3:
+            counts.add(weights.dims[0])
+    return counts
+
+
+def plan_resident_caps(
+    args: argparse.Namespace, model: onnx.ModelProto, node_count: int, not_offloaded: frozenset[int] = frozenset()
+) -> dict[int, int]:
+    """The resident-slot caps asked for on the command line, keyed by position in the graph's QMoE nodes.
+
+    `--target-resident-slots N` caps every layer at N experts. With `--expert-profile` and a slot count, the profile
+    decides how the slots (`--total-resident-slots`, else N per layer) are spread over the layers, and each layer is capped
+    at its share; the runtime then keeps the hottest experts of the profile resident up to that cap. Without a slot count
+    there is no cap and the runtime plans the residency from its byte budgets.
+    """
+    if args.expert_profile is None or (args.total_resident_slots is None and args.target_resident_slots is None):
+        return (
+            dict.fromkeys(range(node_count), args.target_resident_slots)
+            if args.target_resident_slots is not None
+            else {}
+        )
+    counts = qmoe_expert_counts(model)
+    if len(counts) != 1:
+        raise ValueError(f"--expert-profile needs QMoE nodes with one expert count, the graph has {sorted(counts)}")
+    check_layer_numbering(model, not_offloaded)
+    total = args.total_resident_slots
+    if total is None:
+        total = args.target_resident_slots * node_count
+    try:
+        plan = load_expert_profile_plan(
+            args.expert_profile.resolve(),
+            num_layers=node_count,
+            num_experts=counts.pop(),
+            total_slots=total,
+            min_slots_per_layer=4 if args.min_slots_per_layer is None else args.min_slots_per_layer,
+            uniform=args.uniform_profile_slots,
+        )
+    except ValueError as error:
+        raise ValueError(f"--expert-profile: {error}") from error
+    return {layer: len(experts) for layer, experts in plan.items()}
+
+
+def check_slot_arguments(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    for flag in ("target_resident_slots", "total_resident_slots", "min_slots_per_layer"):
+        if getattr(args, flag) is not None and getattr(args, flag) < 0:
+            parser.error(f"--{flag.replace('_', '-')} must not be negative")
+    if args.expert_profile is None:
+        for flag, given in (
+            ("--total-resident-slots", args.total_resident_slots is not None),
+            ("--min-slots-per-layer", args.min_slots_per_layer is not None),
+            ("--uniform-profile-slots", args.uniform_profile_slots),
+        ):
+            if given:
+                parser.error(f"{flag} needs --expert-profile")
+    elif (args.uniform_profile_slots or args.min_slots_per_layer is not None) and (
+        args.total_resident_slots is None and args.target_resident_slots is None
+    ):
+        parser.error(
+            "--uniform-profile-slots and --min-slots-per-layer need --total-resident-slots or --target-resident-slots"
+        )
+    if args.uniform_profile_slots and args.min_slots_per_layer is not None:
+        parser.error("--min-slots-per-layer does not apply with --uniform-profile-slots")
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument(
-        "--migrate-shared-onnx", type=Path, default=None, help="Input ONNX for standalone v3 shared migration"
-    )
-    parser.add_argument("--out-onnx", type=Path, default=None, help="Output ONNX for standalone v3 shared migration")
-    parser.add_argument("--strip-phase", action="store_true")
-    parser.add_argument("--strip-stats", action="store_true")
+    for flag in REMOVED_OPTIONS:
+        parser.add_argument(flag, nargs="?", const="", default=None, help=argparse.SUPPRESS)
 
     parser.add_argument("--from-package", type=Path, default=None)
     parser.add_argument("--out", type=Path, default=None)
@@ -741,42 +1070,161 @@ def main() -> None:
     )
     parser.add_argument("--stop-token-id", type=int, default=None)
     parser.add_argument("--prefill-chunk", type=int, default=512)
-    parser.add_argument("--target-resident-slots", type=int, default=None)
-    parser.add_argument("--target-spare-slots", type=int, default=None)
-    parser.add_argument("--expert-profile", type=Path, default=None, help="Path to STRP v1 expert-profile.bin")
-    parser.add_argument("--total-resident-slots", type=int, default=None, help="Total resident slots across 48 layers")
-    parser.add_argument("--min-slots-per-layer", type=int, default=4)
-    parser.add_argument("--uniform-profile-slots", action="store_true")
-    parser.add_argument("--dense-stream-min-rows", type=int, default=1)
-    parser.add_argument("--dense-stream-wave", type=int, default=64)
+    parser.add_argument(
+        "--offload-mode",
+        choices=OFFLOAD_MODES,
+        default="required",
+        help="session.moe.offload.mode. required: offload every QMoE node, and fail the build if the runtime would reject "
+        "one. auto: the runtime offloads what it can and keeps the other nodes on the GPU",
+    )
+    parser.add_argument(
+        "--offload-placement",
+        choices=OFFLOAD_PLACEMENTS,
+        default="adaptive",
+        help="session.moe.offload.placement. static: a fixed resident set. adaptive: spare slots promote hot experts",
+    )
+    parser.add_argument(
+        "--device-expert-bytes",
+        type=budget_bytes,
+        default=None,
+        help="session.moe.offload.device_expert_bytes: GPU bytes for resident experts ('auto' or a byte count)",
+    )
+    parser.add_argument(
+        "--host-expert-bytes",
+        type=budget_bytes,
+        default=None,
+        help="session.moe.offload.host_expert_bytes: host bytes for cached experts ('auto' or a byte count)",
+    )
+    parser.add_argument(
+        "--target-resident-slots",
+        type=int,
+        default=None,
+        help="Cap on the resident experts of every layer (a max_resident_slots node override). With --expert-profile it is "
+        "the per-layer average of --total-resident-slots",
+    )
+    parser.add_argument(
+        "--expert-profile",
+        type=Path,
+        default=None,
+        help="STRP v1 expert-profile.bin; copied next to the decoder graph and set as session.moe.offload.popularity_file",
+    )
+    parser.add_argument(
+        "--total-resident-slots",
+        type=int,
+        default=None,
+        help="Total resident experts over all layers, spread by --expert-profile (needs --expert-profile)",
+    )
+    parser.add_argument(
+        "--min-slots-per-layer",
+        type=int,
+        default=None,
+        help="Floor of the per-layer share of --total-resident-slots when spreading by --expert-profile (default 4)",
+    )
+    parser.add_argument(
+        "--uniform-profile-slots",
+        action="store_true",
+        help="Share --total-resident-slots evenly over the layers instead of by popularity",
+    )
     parser.add_argument(
         "--dense-gpu-qmoe",
         action="store_true",
         default=True,
-        help="Keep stock GPU QMoE in dense/model.onnx using UVA-mapped expert weights",
+        help="Keep stock GPU QMoE in dense/model.onnx using UVA-mapped expert weights (always on)",
     )
-    parser.add_argument("--dense-offload-qmoe", dest="dense_gpu_qmoe", action="store_false")
     parser.add_argument("--dense-placement", choices=["device", "host_mapped", "cpu"], default="host_mapped")
     parser.add_argument("--mtp-moe-placement", choices=["device", "host_mapped"], default="device")
     parser.add_argument("--embed-placement", choices=["device", "host_mapped"], default="host_mapped")
     parser.add_argument("--vram-limit-gib", type=float, default=None)
     parser.add_argument("--copy", action="store_true")
-    args = parser.parse_args()
+    return parser
 
-    if args.migrate_shared_onnx is not None:
-        if args.out_onnx is None:
-            raise SystemExit("--out-onnx is required with --migrate-shared-onnx")
-        n = migrate_shared_onnx_v3(args.migrate_shared_onnx, args.out_onnx, args.strip_phase, args.strip_stats)
-        print(f"Migrated {n} QMoEOffload nodes to v3 compact shared schema -> {args.out_onnx}")
-        return
+
+def main() -> None:
+    parser = build_parser()
+    args = parser.parse_args()
+    for flag, reason in REMOVED_OPTIONS.items():
+        if getattr(args, flag.lstrip("-").replace("-", "_")) is not None:
+            parser.error(f"{flag} was removed: {reason}")
 
     if args.from_package is None or args.out is None or args.plane_lib is None or args.provider_lib is None:
         raise SystemExit("--from-package, --out, --plane-lib, and --provider-lib are required for package build")
+    check_slot_arguments(parser, args)
 
     source = args.from_package.resolve()
-    out = args.out.resolve()
-    if out == source or out.is_relative_to(source) or source.is_relative_to(out):
-        raise SystemExit("--out must not be equal to or nested inside --from-package")
+    out = reject_output_overlap(
+        args.out,
+        {
+            "--from-package": args.from_package,
+            "--plane-lib": args.plane_lib,
+            "--provider-lib": args.provider_lib,
+            "--ops-dir": args.ops_dir,
+            "--expert-profile": args.expert_profile,
+        },
+    )
+    flat_root = (source / "model.onnx").exists()
+    target_src = (source / "model.onnx") if flat_root else (source / "target/model.onnx")
+    target_out_dir = out if flat_root else (out / "target")
+    required_files = {
+        "genai_config.json of --from-package": source / "genai_config.json",
+        "weights_pool.txt of --from-package": source / "weights_pool.txt",
+        "the target graph of --from-package": target_src,
+        "--plane-lib": args.plane_lib,
+        "--provider-lib": args.provider_lib,
+        "--expert-profile": args.expert_profile,
+    }
+    for label, path in required_files.items():
+        if path is not None and not path.is_file():
+            raise SystemExit(f"{label} not found: {path}")
+
+    # Everything that can reject the request runs before the output folder is created.
+    model = onnx.load(str(target_src), load_external_data=False)
+    graphs = {target_src: model}
+    if (source / "dense/model.onnx").exists():
+        graphs[source / "dense/model.onnx"] = onnx.load(str(source / "dense/model.onnx"), load_external_data=False)
+    for path, graph_model in graphs.items():
+        legacy = sum(node.op_type == "QMoEOffload" for node in graph_model.graph.node)
+        if legacy:
+            raise SystemExit(
+                f"{path} has {legacy} QMoEOffload nodes. The runtime has no such operator, so the graph cannot load: "
+                "rebuild the package with standard com.microsoft::QMoE nodes"
+            )
+    qmoe = prepare_qmoe_for_offload(model)
+    names, rejected = qmoe["nodes"], qmoe["rejected"]
+    if not names:
+        raise SystemExit(f"{target_src} has no com.microsoft::QMoE node to offload")
+    if rejected:
+        first = next(iter(rejected))
+        summary = (
+            f"{len(rejected)} of {len(names)} QMoE nodes cannot be offloaded by the runtime; "
+            f"first, {node_label(names[first], first)}: {'; '.join(rejected[first])}"
+        )
+        if args.offload_mode == "required":
+            raise SystemExit(f"{summary}. Fix the graph, or use --offload-mode auto to keep those nodes on the GPU.")
+        print(f"warning: {summary}. They stay on the GPU.")
+    try:
+        overrides = {}
+        for ordinal, cap in plan_resident_caps(args, model, len(names), frozenset(rejected)).items():
+            # A node the runtime does not offload is not registered with it, and an override naming it is an error.
+            if ordinal in rejected:
+                continue
+            if not names[ordinal] or names[ordinal] in overrides:
+                raise ValueError(
+                    "per-node resident-slot caps need uniquely named QMoE nodes, "
+                    f"but {node_label(names[ordinal], ordinal)} is unnamed or shares its name"
+                )
+            overrides[names[ordinal]] = cap
+        node_overrides = format_node_overrides(overrides)
+    except ValueError as error:
+        raise SystemExit(f"error: {error}") from error
+    offload_options = offload_session_options(
+        args.offload_mode,
+        args.offload_placement,
+        args.device_expert_bytes,
+        args.host_expert_bytes,
+        EXPERT_PROFILE_NAME if args.expert_profile is not None else None,
+        node_overrides,
+    )
+
     out.mkdir(parents=True, exist_ok=True)
 
     linked = link_tree(source, out, args.copy)
@@ -786,53 +1234,16 @@ def main() -> None:
     link_file(args.plane_lib.resolve(), out / "libs/libqwen38_plane.so", copy=True)
     link_file(args.provider_lib.resolve(), out / "provider/libonnxruntime_providers_cuda.so", copy=True)
 
-    profile_plan = None
-    if args.expert_profile is not None:
-        total_slots = args.total_resident_slots or ((args.target_resident_slots or 20) * 48)
-        profile_plan = load_expert_profile_plan(
-            args.expert_profile.resolve(),
-            num_layers=48,
-            num_experts=512,
-            total_slots=total_slots,
-            min_slots_per_layer=args.min_slots_per_layer,
-            uniform=args.uniform_profile_slots,
-        )
-
-    target_attrs = {
-        "resident_slots": args.target_resident_slots,
-        "spare_slots": args.target_spare_slots,
-        "stream_rows": 0,
-    }
-    dense_attrs = {
-        "resident_slots": 0,
-        "spare_slots": 0,
-        "stream_rows": args.prefill_chunk,
-        "stream_min_tokens": 1,
-        "stream_min_rows": args.dense_stream_min_rows,
-        "stream_wave": args.dense_stream_wave,
-    }
-    flat_root = (source / "model.onnx").exists()
-    target_src = (source / "model.onnx") if flat_root else (source / "target/model.onnx")
-    target_out_dir = out if flat_root else (out / "target")
-    target_rewritten = rewrite_nvfp4_qmoe_to_offload(
-        target_src,
-        target_out_dir / "model_s2.onnx",
-        extra_attrs=target_attrs,
-        per_layer_initial_experts=profile_plan,
-    )
+    save_model_fresh(model, target_out_dir / "model_s2.onnx")
     build_multidraft_target_onnx(target_out_dir / "model_s2.onnx", target_out_dir / "model_s3.onnx", verify_rows=3)
     build_multidraft_target_onnx(target_out_dir / "model_s2.onnx", target_out_dir / "model_s4.onnx", verify_rows=4)
     link_file(target_out_dir / "model_s4.onnx", target_out_dir / "model.onnx", copy=True)
+    if args.expert_profile is not None:
+        # A copy: the output may hard-link the source package, and nothing here may write through to it.
+        link_file(args.expert_profile.resolve(), target_out_dir / EXPERT_PROFILE_NAME, copy=True)
     if (source / "dense/model.onnx").exists():
-        if args.dense_gpu_qmoe:
-            link_file(source / "dense/model.onnx", out / "dense/model.onnx", args.copy)
-            dense_rewritten = 0
-        else:
-            dense_rewritten = rewrite_nvfp4_qmoe_to_offload(
-                source / "dense/model.onnx", out / "dense/model.onnx", extra_attrs=dense_attrs
-            )
+        link_file(source / "dense/model.onnx", out / "dense/model.onnx", args.copy)
     else:
-        dense_rewritten = 0
         for obsolete_dir in ("target", "head_r2", "dense", "head_kv") if flat_root else ("dense", "head_kv"):
             if (out / obsolete_dir).exists():
                 shutil.rmtree(out / obsolete_dir)
@@ -850,6 +1261,7 @@ def main() -> None:
     cuda_opts["arena.extend_strategy"] = "1"
     if args.vram_limit_gib is not None and args.vram_limit_gib > 0:
         cuda_opts["gpu_device_mem_limit"] = str(int(args.vram_limit_gib * (1024**3)))
+    config["model"]["decoder"]["session_options"].update(offload_options)
 
     qwen = config["model"]["qwen38_graph"]
     fold_head_key = "mtp" if "mtp" in qwen["fold"] else ("drafter" if "drafter" in qwen["fold"] else "head_r2")
@@ -885,10 +1297,12 @@ def main() -> None:
     providers = {p.name: sha256(p) for p in sorted((out / "provider").glob("*.so"))}
     manifest = {
         "from_package": str(source),
-        "stack": "v12b-engine-qmoe-offload-v3",
+        "stack": "v12b-engine-qmoe-offload-v4",
         "hard_linked_files": linked,
-        "target_qmoe_offload_nodes": target_rewritten,
-        "dense_qmoe_offload_nodes": dense_rewritten,
+        "target_qmoe_nodes": len(names),
+        "router_weights_cleared": qmoe["router_weights_cleared"],
+        "qmoe_nodes_not_offloaded": [node_label(names[ordinal], ordinal) for ordinal in sorted(rejected)],
+        "offload_session_options": offload_options,
         "pool_stats": pool_stats,
         "eos_token_id": config["model"]["eos_token_id"],
         "vram_limit_gib": args.vram_limit_gib,
@@ -898,8 +1312,9 @@ def main() -> None:
     }
     (out / "package_manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print(
-        f"Built offload v3 package: {out} (linked={linked}, target_qmoe={target_rewritten}, "
-        f"dense_qmoe={dense_rewritten}, pool={pool_stats})"
+        f"Built offload package: {out} (linked={linked}, target_qmoe={len(names)}, "
+        f"router_weights_cleared={qmoe['router_weights_cleared']}, not_offloaded={len(rejected)}, "
+        f"offload={offload_options}, pool={pool_stats})"
     )
 
 
