@@ -2355,8 +2355,9 @@ paged, batched or cropped to an arbitrary token. `CreateEngineBackend` (`src/eng
   instead: `CheckDecodeStatus()` right after `Drain()` reports the error bits accumulated by every cycle since the last
   `Reset()`, also when a record was left unconsumed. The executor always runs `Drain()` and then `CheckDecodeStatus()` before
   `Reset()` (which clears the bits): a cancellation or stop-string match that leaves a cycle behind therefore still fails the
-  next request or the rewind when that cycle went wrong. At Engine teardown the device is only drained: nobody is left to
-  report to. A fatal execution failure poisons the mutable device context across Engine leases until the model is reloaded.
+  next request or the rewind when that cycle went wrong. At Engine teardown the executor drains the device and reads its status
+  too, but nobody is left to report an error to, so a failure poisons the device context instead (the next Engine over the
+  model fails). A fatal execution failure poisons the mutable device context across Engine leases until the model is reloaded.
 - `ModelExecutor::ValidateTurn` and `BackendCapabilities` reject, before any Request mutation, what the device loop cannot do:
   sampling, repetition penalty, no-repeat n-grams, `min_generated_tokens`, seeds and guidance. `MaxDraftTokensPerStep()` is
   zero (the caller cannot attach drafts). `GetCapabilities()` reports one row and `max_request_length` = KV capacity - 4.
