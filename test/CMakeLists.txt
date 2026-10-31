@@ -14,6 +14,7 @@ file(GLOB test_srcs CONFIGURE_DEPENDS
 
 # Keep tests with dedicated white-box executables out of the public-API unit_tests target.
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/audio_speech_validation_test.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/config_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/cpu_cast_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/dflash2_config_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/environment-tests.cpp")
@@ -56,7 +57,7 @@ target_include_directories(unit_tests PRIVATE
 
 target_link_directories(unit_tests PRIVATE ${ORT_LIB_DIR})
 target_link_libraries(unit_tests PRIVATE
-  onnxruntime-genai-obj
+  onnxruntime-genai
   onnxruntime_extensions
   GTest::gtest
 )
@@ -348,6 +349,7 @@ file(GLOB engine_unit_test_srcs CONFIGURE_DEPENDS
 )
 list(APPEND engine_unit_test_srcs
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/audio_speech_validation_test.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/config_tests.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/dflash2_config_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/mtp_config_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/model_package_test.cpp"

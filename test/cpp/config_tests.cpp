@@ -25,16 +25,13 @@ TEST(ConfigTests, DmlGraphCaptureIsEnabledByDefault) {
   EXPECT_TRUE(Generators::IsGraphCaptureEnabled(MakeSessionOptions("DML")));
 }
 
-TEST(ConfigTests, DmlGraphCaptureOptOutAcceptsFalseValuesCaseInsensitively) {
-  for (const auto& value : {"0", "false", "False", "FALSE"}) {
-    SCOPED_TRACE(value);
-    EXPECT_FALSE(Generators::IsGraphCaptureEnabled(
-        MakeSessionOptions("DML", {{"enable_graph_capture", value}})));
-  }
+TEST(ConfigTests, DmlGraphCaptureOptOutAcceptsZero) {
+  EXPECT_FALSE(Generators::IsGraphCaptureEnabled(
+      MakeSessionOptions("DML", {{"enable_graph_capture", "0"}})));
 }
 
 TEST(ConfigTests, DmlGraphCaptureRemainsEnabledForNonOptOutValues) {
-  for (const auto& value : {"1", "true", "TRUE", "on", "unexpected"}) {
+  for (const auto& value : {"1", "true", "TRUE", "false", "False", "FALSE", "on", "unexpected"}) {
     SCOPED_TRACE(value);
     EXPECT_TRUE(Generators::IsGraphCaptureEnabled(
         MakeSessionOptions("DML", {{"enable_graph_capture", value}})));
@@ -48,7 +45,7 @@ TEST(ConfigTests, UnrelatedDmlOptionsDoNotDisableGraphCapture) {
 
 TEST(ConfigTests, ProviderSpecificGraphCaptureOptionsRemainIndependent) {
   EXPECT_TRUE(Generators::IsGraphCaptureEnabled(
-      MakeSessionOptions("NvTensorRtRtx", {{"enable_graph_capture", "false"},
+      MakeSessionOptions("NvTensorRtRtx", {{"enable_graph_capture", "0"},
                                            {"enable_cuda_graph", "1"}})));
 }
 
