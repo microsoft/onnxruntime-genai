@@ -2143,7 +2143,12 @@ paged, batched or cropped to an arbitrary token. `Engine::CreateDependencies` as
   penalty, no-repeat n-grams, `min_generated_tokens`, seeds and guidance. `MaxDraftTokensPerStep()` is zero (the caller cannot
   attach drafts). `GetCapabilities()` reports one row and `max_request_length` = KV capacity - 4.
 - `GetSpeculativeStats()` includes the executor's counters (`ModelExecutor::AddSpeculativeStats`): one round per cycle, one
-  proposed draft per round, accepted drafts, bonus and correction tokens, the acceptance-length histogram.
+  or more proposed drafts per round (the fold verifies 1..3), accepted drafts, bonus and correction tokens, the
+  acceptance-length histogram. The counters describe what the Engine consumed, as `Engine::RecordSpeculativeCommit` does for
+  sampled MTP: a turn that ends inside a cycle (turn or session limit, stop string, EOS) only accepts the drafts it delivered,
+  `draft_tokens_evaluated` counts the draft positions examined up to the terminal token (every accepted draft consumed, an EOS
+  draft included, plus the rejected position only when the turn got as far as the correction token), so `acceptance_rate` is not
+  diluted by drafts after the end of the turn.
 - The model's device state is leased to one Engine at a time (`Qwen38GraphModel::AcquireDevice`); a second Engine over the same
   model fails with a clear error until the first one is destroyed. The model has no Generator API support.
 
