@@ -12,6 +12,7 @@
 #include <chrono>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -88,6 +89,18 @@ class Qwen38GraphEngineTest : public ::testing::Test {
     std::vector<int32_t> tokens;
     for (size_t i = 0; i < count; ++i) tokens.push_back(device_->TokenAt(first_position + i));
     return tokens;
+  }
+
+  // Runs the Engine until an event reports a failure and returns its error code (nullopt: none did).
+  static std::optional<EngineErrorCode> RunUntilFailure(Engine& engine, size_t max_runs = 100) {
+    std::array<EngineEvent, 8> buffer;
+    for (size_t run = 0; run < max_runs && engine.HasPendingRequests(); ++run) {
+      const size_t count = engine.Run(buffer);
+      for (size_t i = 0; i < count; ++i) {
+        if (buffer[i].flags & EngineEventFlagFailed) return buffer[i].error_code;
+      }
+    }
+    return std::nullopt;
   }
 
   static TurnOptions Limit(size_t max_generated_tokens) {
@@ -256,6 +269,7 @@ TEST_F(Qwen38GraphEngineTest, AStopStringEndsTheTurnAndTheWastedLookAheadCycleIs
   EXPECT_EQ(stop_stats.bonus_tokens, 0u);
   // The device cannot know about stop strings: the cycle after the one that matched is still in flight...
   EXPECT_TRUE(device_->inflight());
+  EXPECT_TRUE(device_->running());
 
   // ...and a new request waits for it (Reset) before reusing the device.
   const size_t resets = device_->CallCount("reset");
@@ -756,7 +770,106 @@ TEST_F(Qwen38GraphEngineTest, DeviceErrorBitsAfterACanceledTurnAreSurfacedOnTheN
   EXPECT_EQ(device_->status_checks, 1u);
 }
 
-// ---- capabilities and errors -----------------------------------------------------------------
+// The wasted look-ahead cycle of a stop-string or canceled turn is never waited for, so its record stays unconsumed: the
+// device reports its validation failure only once it was drained, and a Reset() would erase it. The executor must
+// therefore drain and check before it lets anything reset the device.
+TEST_F(Qwen38GraphEngineTest, AFailureOfTheLookAheadCycleVisibleOnlyAfterDrainSurfacesWhenAStopStringTurnIsRewound) {
+  device_->overrides[5] = 5;
+  device_->overrides[6] = 6;
+  device_->fail_cycle = 2;  // cycle 1 completes the stop string; cycle 2 is the look-ahead nobody waits for
+  auto engine = MakeEngine();
+  auto request = engine->CreateRequest();
+  TurnOptions options;
+  options.request = request;
+  options.max_generated_tokens = 20;
+  options.stop_strings = {"STOP"};
+  const uint64_t turn = request->BeginTurn(Prompt(5), options);
+
+  const auto outcome = RunToCompletion(*engine, request);
+
+  EXPECT_EQ(outcome.finish_reason, GenerationFinishReason::StopString);  // the turn itself is fine
+  EXPECT_EQ(outcome.failure_flags, 0u);
+  EXPECT_TRUE(device_->inflight());  // the record of the look-ahead cycle is unconsumed...
+  EXPECT_TRUE(device_->running());   // ...and nothing has synchronized the stream yet
+  EXPECT_EQ(device_->status_checks, 0u);
+
+  EXPECT_THROW(request->RewindToStartOfTurn(turn), std::runtime_error);
+  EXPECT_TRUE(device_->inflight());  // Drain() completed the cycle without consuming its record
+  EXPECT_FALSE(device_->running());
+  EXPECT_EQ(device_->order, (std::vector<std::string>{"reset", "drain", "status"}));  // the only Reset was the first turn's
+}
+
+TEST_F(Qwen38GraphEngineTest, AFailureOfTheLookAheadCycleVisibleOnlyAfterDrainFailsTheNextRequestInsteadOfBeingResetAway) {
+  device_->overrides[5] = 5;
+  device_->overrides[6] = 6;
+  device_->fail_cycle = 2;
+  auto engine = MakeEngine();
+  auto request = engine->CreateRequest();
+  TurnOptions options;
+  options.request = request;
+  options.max_generated_tokens = 20;
+  options.stop_strings = {"STOP"};
+  request->BeginTurn(Prompt(5), options);
+  ASSERT_EQ(RunToCompletion(*engine, request).finish_reason, GenerationFinishReason::StopString);
+  ASSERT_TRUE(device_->inflight());
+
+  // The next request claims the slot: Release() drains the unconsumed cycle and checks the device before any Reset().
+  device_->overrides.clear();
+  auto next = Begin(*engine, Prompt(5, 25), /*max_generated_tokens=*/4);
+  const auto failure = RunUntilFailure(*engine);
+
+  ASSERT_TRUE(failure.has_value()) << "the error bits of the drained cycle were never reported";
+  EXPECT_EQ(*failure, EngineErrorCode::EngineExecutionFailure);
+  EXPECT_EQ(device_->order, (std::vector<std::string>{"reset", "drain", "status"}));  // no Reset() erased the bits first
+  EXPECT_EQ(device_->CallCount("expect:5"), 1u);                                      // only the first request's announcement
+}
+
+TEST_F(Qwen38GraphEngineTest, AFailureOfTheFirstCycleVisibleOnlyAfterDrainSurfacesAfterACancellation) {
+  model_->config_->model.qwen38_graph.prefill.chunk = 64;
+  device_->fail_cycle = 1;  // the cycle BeginDecode enqueued
+  auto engine = MakeEngine();
+  auto request = engine->CreateRequest();
+  TurnOptions options;
+  options.request = request;
+  const uint64_t turn = request->BeginTurn(Prompt(5), options);
+  std::array<EngineEvent, 8> buffer;
+  ASSERT_GE(engine->Run(buffer), 1u);  // prefill and the first token; cycle 1 is running
+  ASSERT_TRUE(device_->running());
+
+  EXPECT_TRUE(engine->CancelRequest(request, turn));
+  ASSERT_EQ(engine->Run(buffer), 1u);
+  EXPECT_EQ(buffer[0].finish_reason, GenerationFinishReason::Canceled);
+  EXPECT_EQ(buffer[0].flags & EngineEventFlagFailed, 0u);  // cancellation does not wait for the device
+  EXPECT_TRUE(device_->running());
+
+  auto next = Begin(*engine, Prompt(5, 25), /*max_generated_tokens=*/4);
+  const auto failure = RunUntilFailure(*engine);
+
+  ASSERT_TRUE(failure.has_value()) << "the error bits of the canceled cycle were never reported";
+  EXPECT_EQ(*failure, EngineErrorCode::EngineExecutionFailure);
+  EXPECT_EQ(device_->order, (std::vector<std::string>{"reset", "drain", "status"}));
+}
+
+TEST_F(Qwen38GraphEngineTest, ADrainedLookAheadCycleWithoutErrorBitsIsCheckedAndTheNextRequestRuns) {
+  device_->overrides[5] = 5;
+  device_->overrides[6] = 6;
+  auto engine = MakeEngine();
+  auto request = engine->CreateRequest();
+  TurnOptions options;
+  options.request = request;
+  options.max_generated_tokens = 20;
+  options.stop_strings = {"STOP"};
+  request->BeginTurn(Prompt(5), options);
+  ASSERT_EQ(RunToCompletion(*engine, request).finish_reason, GenerationFinishReason::StopString);
+
+  device_->overrides.clear();
+  auto next = Begin(*engine, Prompt(5, 25), /*max_generated_tokens=*/3);
+  const auto outcome = RunToCompletion(*engine, next);
+
+  EXPECT_EQ(outcome.failure_flags, 0u);
+  EXPECT_EQ(outcome.tokens, Expected(5, 3));
+  EXPECT_EQ(device_->order, (std::vector<std::string>{"reset", "drain", "status", "reset", "status"}));
+}
 
 TEST_F(Qwen38GraphEngineTest, CapabilitiesAreHonest) {
   auto engine = MakeEngine();
@@ -856,9 +969,9 @@ TEST_F(Qwen38GraphEngineTest, DestroyingTheEngineDrainsTheDevice) {
     auto request = Begin(*engine, Prompt(5), /*max_generated_tokens=*/10);
     std::array<EngineEvent, 8> buffer;
     ASSERT_GE(engine->Run(buffer), 1u);
-    ASSERT_TRUE(device_->inflight());
+    ASSERT_TRUE(device_->running());
   }
-  EXPECT_FALSE(device_->inflight());
+  EXPECT_FALSE(device_->running());  // the cycle was waited for (its record stays unconsumed)
   EXPECT_GE(device_->CallCount("drain"), 1u);
 }
 
