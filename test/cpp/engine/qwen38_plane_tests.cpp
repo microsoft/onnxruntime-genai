@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -22,6 +23,7 @@
 #include "config.h"
 #include "models/qwen38_graph.h"
 #include "models/qwen38_graph_plane.h"
+#include "models/qwen38_replay_geometry.h"
 
 #if !defined(QWEN38_GRAPH_NO_POSIX)
 #if defined(_WIN32)
@@ -954,14 +956,31 @@ TEST(Qwen38PlaneTest, LoadingAMissingLibraryFailsWithItsPath) {
 #if !defined(QWEN38_GRAPH_NO_POSIX)
 namespace {
 
+// With CUDA 13.0 and the CUDA add-on loaded in the process, unloading this library and loading it again made the first kernel
+// launch of a later copy crash inside the runtime's lazy module load. The tests create and destroy a loader each, so the first
+// call maps the library for the rest of the process and the loaders after it only ever share that copy.
+void KeepPlaneLibraryMapped(const std::filesystem::path& path) {
+  static const bool mapped = [&path] {
+    if (!std::filesystem::exists(path)) return false;
+#if defined(_WIN32)
+    return LoadLibraryW(ResolveWindowsSharedLibraryPath(path).wstring().c_str()) != nullptr;
+#else
+    return dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL) != nullptr;
+#endif
+  }();
+  static_cast<void>(mapped);
+}
+
 std::filesystem::path GetBuiltPlaneLibraryPath() {
 #if defined(ORTGENAI_TEST_QWEN38_PLANE_LIB_PATH)
-  return std::filesystem::path{ORTGENAI_TEST_QWEN38_PLANE_LIB_PATH};
+  const std::filesystem::path path{ORTGENAI_TEST_QWEN38_PLANE_LIB_PATH};
 #elif defined(_WIN32)
-  return std::filesystem::current_path() / "qwen38_plane.dll";
+  const std::filesystem::path path = std::filesystem::current_path() / "qwen38_plane.dll";
 #else
-  return std::filesystem::current_path() / "libqwen38_plane.so";
+  const std::filesystem::path path = std::filesystem::current_path() / "libqwen38_plane.so";
 #endif
+  KeepPlaneLibraryMapped(path);
+  return path;
 }
 
 // The bfloat16 bits of `value` rounded to nearest even, as the plane rounds.
@@ -2185,6 +2204,1141 @@ TEST(Qwen38PlaneTest, PreparesEveryRowOfAFoldStepInOneCallForADeviceTable) {
     ExpectEveryFoldStepWidthIsPreparedInOneCall(plane, int8_codes, -0.25f, /*staged=*/false);
   }
 }
+
+// The kernels that decide the committed state of every cycle, against references on the host: the compact replay of the recurrent
+// state (k_replay_gdn and k_replay_generic), the fused prep of a fold step (k_prep_fold) and the draft selector (DflashSelect).
+// They need a CUDA device and skip without one, like the tests above.
+
+namespace {
+
+// The replay kernels add with __fadd_rn and multiply with __fmul_rn, which round every operation to single precision and never
+// contract into an fma. The reference rounds every operation too: the volatile stores keep the compiler from fusing a * b + c * d.
+float ExactMultiply(float a, float b) {
+  volatile float product = a * b;
+  return product;
+}
+
+float ExactAdd(float a, float b) {
+  volatile float sum = a + b;
+  return sum;
+}
+
+// A reproducible stream of pseudo-random words (xorshift32): the same on every platform, unlike the standard distributions.
+class WordStream {
+ public:
+  explicit WordStream(uint32_t seed) : state_{seed != 0 ? seed : 1u} {}
+
+  uint32_t Next() {
+    state_ ^= state_ << 13;
+    state_ ^= state_ >> 17;
+    state_ ^= state_ << 5;
+    return state_;
+  }
+
+  // A float in [low, high).
+  float NextFloat(float low, float high) {
+    const float unit = static_cast<float>(Next() >> 8) * (1.0f / 16777216.0f);
+    return low + (high - low) * unit;
+  }
+
+ private:
+  uint32_t state_;
+};
+
+std::vector<float> RandomFloats(WordStream& words, size_t count, float low, float high) {
+  std::vector<float> values(count);
+  for (float& value : values) value = words.NextFloat(low, high);
+  return values;
+}
+
+// `count` elements of `element_size` (2 or 4) bytes as random bit patterns: the replay of a convolution or of an index buffer
+// copies elements without looking at their values.
+std::vector<uint32_t> RandomElements(WordStream& words, size_t count, size_t element_size) {
+  std::vector<uint32_t> elements(count);
+  for (uint32_t& element : elements) {
+    element = element_size == 2 ? (words.Next() & 0xFFFFu) : words.Next();
+  }
+  return elements;
+}
+
+std::vector<uint8_t> PackElements(const std::vector<uint32_t>& elements, size_t element_size) {
+  std::vector<uint8_t> bytes(elements.size() * element_size);
+  for (size_t i = 0; i < elements.size(); ++i) {
+    if (element_size == 2) {
+      const uint16_t element = static_cast<uint16_t>(elements[i]);
+      std::memcpy(bytes.data() + i * element_size, &element, element_size);
+    } else {
+      std::memcpy(bytes.data() + i * element_size, &elements[i], element_size);
+    }
+  }
+  return bytes;
+}
+
+std::vector<uint32_t> UnpackElements(const std::vector<uint8_t>& bytes, size_t element_size) {
+  std::vector<uint32_t> elements(bytes.size() / element_size);
+  for (size_t i = 0; i < elements.size(); ++i) {
+    if (element_size == 2) {
+      uint16_t element = 0;
+      std::memcpy(&element, bytes.data() + i * element_size, element_size);
+      elements[i] = element;
+    } else {
+      std::memcpy(&elements[i], bytes.data() + i * element_size, element_size);
+    }
+  }
+  return elements;
+}
+
+// The IEEE bit patterns of `values`: what a bit-exact comparison looks at, a NaN or a negative zero included.
+std::vector<uint32_t> BitsOf(const std::vector<float>& values) {
+  std::vector<uint32_t> bits(values.size());
+  if (!values.empty()) std::memcpy(bits.data(), values.data(), values.size() * sizeof(float));
+  return bits;
+}
+
+// Compares two tensors element by element and reports where the first difference is instead of printing both.
+template <typename T>
+void ExpectSameElements(const std::vector<T>& expected, const std::vector<T>& actual, const std::string& what) {
+  ASSERT_EQ(expected.size(), actual.size()) << what;
+  size_t different = 0;
+  size_t first = 0;
+  for (size_t i = 0; i < expected.size(); ++i) {
+    if (expected[i] == actual[i]) continue;
+    if (different++ == 0) first = i;
+  }
+  EXPECT_EQ(different, 0u) << what << ": " << different << " of " << expected.size()
+                           << " elements differ, the first is element " << first << " (expected 0x" << std::hex
+                           << static_cast<unsigned long long>(expected[first]) << ", got 0x"
+                           << static_cast<unsigned long long>(actual[first]) << ")";
+}
+
+// Loads the built plane library on device 0 for a test of its kernels, or skips.
+template <typename Base>
+class PlaneKernelFixture : public Base {
+ protected:
+  void SetUp() override {
+    const std::filesystem::path plane_lib = GetBuiltPlaneLibraryPath();
+    if (!std::filesystem::exists(plane_lib)) {
+      GTEST_SKIP() << plane_lib.string() << " not present";
+    }
+    plane_ = std::make_unique<Qwen38Plane>(plane_lib);
+    if (plane_->set_device(0) != 0) {
+      GTEST_SKIP() << "No CUDA device available";
+    }
+  }
+
+  std::unique_ptr<Qwen38Plane> plane_;
+};
+
+// A stream of the plane and the transfers the kernel tests make on it.
+class KernelTestDevice {
+ public:
+  explicit KernelTestDevice(Qwen38Plane& plane) : plane_{plane}, stream_{plane} {}
+
+  void* stream() const { return stream_.get(); }
+
+  PlaneBuffer UploadBytes(const void* host, size_t bytes) {
+    PlaneBuffer buffer{plane_, bytes, stream_.get()};
+    plane_.Check(plane_.memcpy_h2d(buffer.data(), host, bytes, stream_.get()), "memcpy_h2d");
+    return buffer;
+  }
+
+  template <typename T>
+  PlaneBuffer Upload(const std::vector<T>& values) {
+    return UploadBytes(values.data(), values.size() * sizeof(T));
+  }
+
+  // A buffer whose bytes all are `byte`: an output that a kernel has to overwrite, or leave alone.
+  PlaneBuffer Filled(size_t bytes, int byte) {
+    PlaneBuffer buffer{plane_, bytes, stream_.get()};
+    plane_.Check(plane_.device_memset(buffer.data(), byte, bytes, stream_.get()), "device_memset");
+    return buffer;
+  }
+
+  void Fill(const PlaneBuffer& buffer, int byte) {
+    plane_.Check(plane_.device_memset(buffer.data(), byte, buffer.size(), stream_.get()), "device_memset");
+  }
+
+  template <typename T>
+  std::vector<T> Download(const PlaneBuffer& buffer, size_t count) {
+    std::vector<T> values(count);
+    plane_.Check(plane_.memcpy_d2h(values.data(), buffer.data(), count * sizeof(T), stream_.get()), "memcpy_d2h");
+    plane_.Check(plane_.stream_sync(stream_.get()), "stream_sync");
+    return values;
+  }
+
+  // Leaves an error in the last-error slot of the calling thread, as a failed call does whose caller never asks for the error:
+  // a memset of a null pointer fails, and nothing reads the error afterwards.
+  void LeaveAnUnreadError() { EXPECT_NE(plane_.device_memset(nullptr, 0, 16, stream_.get()), 0); }
+
+ private:
+  Qwen38Plane& plane_;
+  PlaneStream stream_;
+};
+
+// How a convolution state of `channels` channels over `history` steps is laid out. The compact replay supports the
+// channel-first [channels, history] layout the exporter writes: a history-first [history, channels] state is refused when the
+// model loads (ValidateQwen38ReplayDescriptor). The change that replays the history-first layout adds its enumerator here, its
+// case in ConvStateIndex, the descriptor it needs in ConvolutionState::Descriptor and an instantiation of
+// Qwen38PlaneConvReplayTest.
+enum class ConvStateLayout { kChannelFirst };
+
+const char* ConvStateLayoutName(ConvStateLayout layout) {
+  if (layout == ConvStateLayout::kChannelFirst) return "ChannelFirst";
+  return "Unknown";
+}
+
+void PrintTo(ConvStateLayout layout, std::ostream* os) { *os << ConvStateLayoutName(layout); }
+
+// The index of the element of `channel` at `step` of the history in a state of `layout`.
+size_t ConvStateIndex(ConvStateLayout layout, size_t history, size_t channel, size_t step) {
+  if (layout == ConvStateLayout::kChannelFirst) return channel * history + step;
+  throw std::logic_error("unsupported convolution state layout");
+}
+
+// A state the compact replay rewrites: its buffers on the device, the descriptor the engine builds for it, and the state the
+// replay has to leave after `kept` accepted transitions, computed on the host.
+class ReplayedState {
+ public:
+  virtual ~ReplayedState() = default;
+  // Whether k_replay_gdn replays it (the descriptors of those come first in a launch); the others go to k_replay_generic.
+  virtual bool IsFast() const = 0;
+  virtual Qwen38StateReplayDesc Descriptor() const = 0;
+  // The thread blocks per descriptor that k_replay_gdn needs for it (0 for the others).
+  virtual int Blocks() const { return 0; }
+  // Fills the destination with 0xAB, so that an element the replay does not write is noticed.
+  virtual void ResetDestination() = 0;
+  virtual void ExpectReplayedAfter(int kept) = 0;
+};
+
+// A gated delta net state of `heads_v` value heads, each a [width_v, width_k] matrix. The capsule holds the `capacity`
+// transitions as the state_update output of the model packs them: the decays [capacity, heads_v], then the keys [capacity,
+// heads_k, width_k], then the deltas [capacity, heads_v, width_v].
+struct GatedDeltaNetShape {
+  int heads_v;
+  int heads_k;
+  int width_v;
+  int width_k;
+  int capacity;
+};
+
+// The state after the first `kept` transitions: s = s * decay + key * delta for every element, in that order of rounding.
+// Value head h reads key head h * heads_k / heads_v, so the value heads that share a key head are consecutive.
+std::vector<float> ReplayGatedDeltaNetOnTheHost(const GatedDeltaNetShape& shape, const std::vector<float>& state,
+                                                const std::vector<float>& capsule, int kept) {
+  const size_t capacity = static_cast<size_t>(shape.capacity);
+  const size_t heads_v = static_cast<size_t>(shape.heads_v);
+  const size_t heads_k = static_cast<size_t>(shape.heads_k);
+  const size_t width_v = static_cast<size_t>(shape.width_v);
+  const size_t width_k = static_cast<size_t>(shape.width_k);
+  const float* decay = capsule.data();
+  const float* key = decay + capacity * heads_v;
+  const float* delta = key + capacity * heads_k * width_k;
+  std::vector<float> next(state.size());
+  for (size_t head = 0; head < heads_v; ++head) {
+    const size_t key_head = head * heads_k / heads_v;
+    for (size_t v = 0; v < width_v; ++v) {
+      for (size_t k = 0; k < width_k; ++k) {
+        const size_t index = (head * width_v + v) * width_k + k;
+        float s = state[index];
+        for (size_t t = 0; t < static_cast<size_t>(kept); ++t) {
+          const float decayed = ExactMultiply(s, decay[t * heads_v + head]);
+          const float written = ExactMultiply(key[(t * heads_k + key_head) * width_k + k], delta[(t * heads_v + head) * width_v + v]);
+          s = ExactAdd(decayed, written);
+        }
+        next[index] = s;
+      }
+    }
+  }
+  return next;
+}
+
+class GatedDeltaNetState final : public ReplayedState {
+ public:
+  GatedDeltaNetState(KernelTestDevice& device, const GatedDeltaNetShape& shape, uint32_t seed)
+      : device_{device}, shape_{shape} {
+    WordStream words{seed};
+    const size_t capacity = static_cast<size_t>(shape.capacity);
+    const size_t heads_v = static_cast<size_t>(shape.heads_v);
+    const size_t heads_k = static_cast<size_t>(shape.heads_k);
+    const size_t width_v = static_cast<size_t>(shape.width_v);
+    const size_t width_k = static_cast<size_t>(shape.width_k);
+    state_ = RandomFloats(words, heads_v * width_v * width_k, -2.0f, 2.0f);
+    capsule_ = RandomFloats(words, capacity * heads_v, 0.5f, 1.0f);
+    const std::vector<float> keys = RandomFloats(words, capacity * heads_k * width_k, -1.0f, 1.0f);
+    const std::vector<float> deltas = RandomFloats(words, capacity * heads_v * width_v, -1.0f, 1.0f);
+    capsule_.insert(capsule_.end(), keys.begin(), keys.end());
+    capsule_.insert(capsule_.end(), deltas.begin(), deltas.end());
+    source_ = device.Upload(state_);
+    capsule_device_ = device.Upload(capsule_);
+    destination_ = device.Filled(state_.size() * sizeof(float), 0xAB);
+  }
+
+  bool IsFast() const override { return true; }
+
+  Qwen38StateReplayDesc Descriptor() const override {
+    const uint64_t capacity = static_cast<uint64_t>(shape_.capacity);
+    const uint64_t heads_v = static_cast<uint64_t>(shape_.heads_v);
+    const uint64_t heads_k = static_cast<uint64_t>(shape_.heads_k);
+    const uint64_t width_k = static_cast<uint64_t>(shape_.width_k);
+    const float* decay = reinterpret_cast<const float*>(capsule_device_.data());
+    const float* key = decay + capacity * heads_v;
+    const float* delta = key + capacity * heads_k * width_k;
+    Qwen38StateReplayDesc d{};
+    d.source_state = source_.data();
+    d.destination_state = destination_.data();
+    d.decay = decay;
+    d.key = key;
+    d.delta = delta;
+    d.channel_count = heads_v;
+    d.state_width = static_cast<uint64_t>(shape_.width_v);
+    d.key_width = width_k;
+    d.key_head_count = heads_k;
+    d.capacity = static_cast<uint32_t>(shape_.capacity);
+    d.kept_count = 1;
+    d.element_size = 4;
+    d.kind = 2;
+    return d;
+  }
+
+  // The thread blocks the engine budgets for the geometry it derives from the shapes of the package.
+  int Blocks() const override {
+    const int64_t capacity = shape_.capacity;
+    const int64_t per_transition = int64_t{shape_.heads_v} + int64_t{shape_.heads_k} * shape_.width_k +
+                                   int64_t{shape_.heads_v} * shape_.width_v;
+    Qwen38ReplayRequest request;
+    request.kind = Qwen38ReplayKind::kGatedDeltaNet;
+    request.capacity = shape_.capacity;
+    request.state = {"recurrent_state", {1, shape_.heads_v, shape_.width_v, shape_.width_k}, sizeof(float)};
+    request.update = {"recurrent_capsule", {1, capacity * per_transition}, sizeof(float)};
+    return ValidateQwen38ReplayDescriptor(request).blocks;
+  }
+
+  void ResetDestination() override { device_.Fill(destination_, 0xAB); }
+
+  void ExpectReplayedAfter(int kept) override {
+    ExpectSameElements(BitsOf(ReplayGatedDeltaNetOnTheHost(shape_, state_, capsule_, kept)),
+                       BitsOf(device_.Download<float>(destination_, state_.size())),
+                       "gated delta net state [" + std::to_string(shape_.heads_v) + " value heads of " +
+                           std::to_string(shape_.width_v) + " x " + std::to_string(shape_.width_k) + ", " +
+                           std::to_string(shape_.heads_k) + " key heads] after " + std::to_string(kept) + " of " +
+                           std::to_string(shape_.capacity) + " transitions");
+  }
+
+ private:
+  KernelTestDevice& device_;
+  GatedDeltaNetShape shape_;
+  std::vector<float> state_;
+  std::vector<float> capsule_;
+  PlaneBuffer source_, capsule_device_, destination_;
+};
+
+struct ConvolutionShape {
+  size_t channels;
+  size_t history;
+  int capacity;
+  size_t element_size;
+};
+
+// The state after `kept` steps of `update` ([capacity, channels]: one row per step) were appended to the history: the last
+// `history` steps of the old history followed by the kept steps. Written in terms of that concatenation, whatever the layout.
+std::vector<uint32_t> ReplayConvolutionOnTheHost(ConvStateLayout layout, const ConvolutionShape& shape,
+                                                 const std::vector<uint32_t>& state, const std::vector<uint32_t>& update,
+                                                 int kept) {
+  std::vector<uint32_t> next(state.size());
+  for (size_t channel = 0; channel < shape.channels; ++channel) {
+    for (size_t step = 0; step < shape.history; ++step) {
+      const size_t source_step = step + static_cast<size_t>(kept);
+      next[ConvStateIndex(layout, shape.history, channel, step)] =
+          source_step < shape.history ? state[ConvStateIndex(layout, shape.history, channel, source_step)]
+                                      : update[(source_step - shape.history) * shape.channels + channel];
+    }
+  }
+  return next;
+}
+
+class ConvolutionState final : public ReplayedState {
+ public:
+  ConvolutionState(KernelTestDevice& device, ConvStateLayout layout, const ConvolutionShape& shape, uint32_t seed)
+      : device_{device}, layout_{layout}, shape_{shape} {
+    WordStream words{seed};
+    state_ = RandomElements(words, shape.channels * shape.history, shape.element_size);
+    update_ = RandomElements(words, static_cast<size_t>(shape.capacity) * shape.channels, shape.element_size);
+    source_ = device.Upload(PackElements(state_, shape.element_size));
+    update_device_ = device.Upload(PackElements(update_, shape.element_size));
+    destination_ = device.Filled(state_.size() * shape.element_size, 0xAB);
+  }
+
+  bool IsFast() const override { return false; }
+
+  // The descriptor of a channel-first state, built as the engine builds it.
+  Qwen38StateReplayDesc Descriptor() const override {
+    Qwen38StateReplayDesc d{};
+    d.source_state = source_.data();
+    d.destination_state = destination_.data();
+    d.value = update_device_.data();
+    d.channel_count = shape_.channels;
+    d.state_width = shape_.history;
+    d.capacity = static_cast<uint32_t>(shape_.capacity);
+    d.kept_count = 1;
+    d.element_size = static_cast<uint32_t>(shape_.element_size);
+    d.kind = 1;
+    return d;
+  }
+
+  void ResetDestination() override { device_.Fill(destination_, 0xAB); }
+
+  void ExpectReplayedAfter(int kept) override {
+    ExpectSameElements(ReplayConvolutionOnTheHost(layout_, shape_, state_, update_, kept),
+                       UnpackElements(device_.Download<uint8_t>(destination_, destination_.size()), shape_.element_size),
+                       std::string{ConvStateLayoutName(layout_)} + " convolution state of " + std::to_string(shape_.channels) +
+                           " channels over " + std::to_string(shape_.history) + " steps of " +
+                           std::to_string(shape_.element_size) + " bytes after " + std::to_string(kept) + " of " +
+                           std::to_string(shape_.capacity) + " steps");
+  }
+
+ private:
+  KernelTestDevice& device_;
+  ConvStateLayout layout_;
+  ConvolutionShape shape_;
+  std::vector<uint32_t> state_;
+  std::vector<uint32_t> update_;
+  PlaneBuffer source_, update_device_, destination_;
+};
+
+// The buffer of the partly filled block of the compressed index keys: `entries` rows of `width` elements, of which the first
+// `buffer_length` are in use, and the two lengths words of the layer (the compressed keys so far, the entries in the buffer).
+struct IndexerShape {
+  size_t entries;
+  size_t width;
+  int capacity;
+  size_t element_size;
+  int ratio;
+  int key_length;
+  int buffer_length;
+};
+
+class IndexerState final : public ReplayedState {
+ public:
+  IndexerState(KernelTestDevice& device, const IndexerShape& shape, uint32_t seed) : device_{device}, shape_{shape} {
+    WordStream words{seed};
+    buffer_ = RandomElements(words, shape.entries * shape.width, shape.element_size);
+    update_ = RandomElements(words, static_cast<size_t>(shape.capacity) * shape.width, shape.element_size);
+    source_ = device.Upload(PackElements(buffer_, shape.element_size));
+    update_device_ = device.Upload(PackElements(update_, shape.element_size));
+    source_lengths_ = device.Upload(std::vector<int32_t>{shape.key_length, shape.buffer_length});
+    destination_ = device.Filled(buffer_.size() * shape.element_size, 0xAB);
+    destination_lengths_ = device.Filled(2 * sizeof(int32_t), 0xAB);
+  }
+
+  bool IsFast() const override { return false; }
+
+  Qwen38StateReplayDesc Descriptor() const override {
+    Qwen38StateReplayDesc d{};
+    d.value = update_device_.data();
+    d.source_aux_state = source_.data();
+    d.destination_aux_state = destination_.data();
+    d.source_lengths = reinterpret_cast<const int32_t*>(source_lengths_.data());
+    d.destination_lengths = reinterpret_cast<int32_t*>(destination_lengths_.data());
+    d.state_width = shape_.width;
+    d.state_capacity = 0;
+    d.aux_capacity = shape_.entries;
+    d.capacity = static_cast<uint32_t>(shape_.capacity);
+    d.kept_count = 1;
+    d.element_size = static_cast<uint32_t>(shape_.element_size);
+    d.compress_ratio = static_cast<uint32_t>(shape_.ratio);
+    d.kind = 4;
+    return d;
+  }
+
+  void ResetDestination() override {
+    device_.Fill(destination_, 0xAB);
+    device_.Fill(destination_lengths_, 0xAB);
+  }
+
+  // The buffer and the update make one run of entries [buffer_length old ones, then the kept new ones]. Every `ratio` of them
+  // from the start are pooled into one more compressed key; the rest are the entries of the new buffer, whose other rows hold
+  // nothing that is read.
+  void ExpectReplayedAfter(int kept) override {
+    const size_t old_length = static_cast<size_t>(shape_.buffer_length);
+    const size_t total = old_length + static_cast<size_t>(kept);
+    const size_t ratio = static_cast<size_t>(shape_.ratio);
+    const size_t blocks = total / ratio;
+    const size_t remainder = total % ratio;
+    std::vector<uint32_t> expected;
+    for (size_t entry = 0; entry < remainder; ++entry) {
+      const size_t position = blocks * ratio + entry;
+      for (size_t component = 0; component < shape_.width; ++component) {
+        expected.push_back(position < old_length ? buffer_[position * shape_.width + component]
+                                                 : update_[(position - old_length) * shape_.width + component]);
+      }
+    }
+    const std::string what = "index buffer of " + std::to_string(shape_.entries) + " entries of " +
+                             std::to_string(shape_.width) + " x " + std::to_string(shape_.element_size) +
+                             " bytes holding " + std::to_string(shape_.buffer_length) + ", ratio " +
+                             std::to_string(shape_.ratio) + ", after " + std::to_string(kept) + " of " +
+                             std::to_string(shape_.capacity) + " rows";
+    std::vector<uint32_t> actual = UnpackElements(device_.Download<uint8_t>(destination_, destination_.size()), shape_.element_size);
+    actual.resize(expected.size());
+    ExpectSameElements(expected, actual, what);
+    EXPECT_EQ(device_.Download<int32_t>(destination_lengths_, 2),
+              (std::vector<int32_t>{shape_.key_length + static_cast<int32_t>(blocks), static_cast<int32_t>(remainder)}))
+        << what << ": the lengths";
+  }
+
+ private:
+  KernelTestDevice& device_;
+  IndexerShape shape_;
+  std::vector<uint32_t> buffer_;
+  std::vector<uint32_t> update_;
+  PlaneBuffer source_, update_device_, source_lengths_, destination_, destination_lengths_;
+};
+
+// One launch of the replay over `states` with `kept` accepted transitions, laid out as the engine lays the descriptors out (the
+// k_replay_gdn ones first), followed by the comparison of every destination with the host reference.
+void ReplayAndExpect(Qwen38Plane& plane, KernelTestDevice& device, const std::vector<ReplayedState*>& states, int kept) {
+  std::vector<Qwen38StateReplayDesc> descriptors;
+  int fast_count = 0;
+  int generic_count = 0;
+  int fast_blocks = 0;
+  for (ReplayedState* state : states) {
+    if (!state->IsFast()) continue;
+    descriptors.push_back(state->Descriptor());
+    ++fast_count;
+    fast_blocks = state->Blocks() > fast_blocks ? state->Blocks() : fast_blocks;
+  }
+  for (ReplayedState* state : states) {
+    if (state->IsFast()) continue;
+    descriptors.push_back(state->Descriptor());
+    ++generic_count;
+  }
+  for (ReplayedState* state : states) state->ResetDestination();
+  const PlaneBuffer device_descriptors = device.Upload(descriptors);
+  ASSERT_EQ(plane.replay_state_updates(device.stream(), device_descriptors.data(), fast_count, generic_count, fast_blocks, kept), 0);
+  for (ReplayedState* state : states) state->ExpectReplayedAfter(kept);
+}
+
+class Qwen38PlaneReplayTest : public PlaneKernelFixture<::testing::Test> {};
+
+class Qwen38PlaneConvReplayTest : public PlaneKernelFixture<::testing::TestWithParam<ConvStateLayout>> {};
+
+}  // namespace
+
+TEST_F(Qwen38PlaneReplayTest, GatedDeltaNetReplaysEveryAcceptanceLengthBitExactly) {
+  ASSERT_TRUE(plane_->replay_state_updates != nullptr) << "the plane library has no replay_state_updates";
+  KernelTestDevice device{*plane_};
+  // Value and key widths that fill neither the 32 rows of a block nor the 128 key elements a warp covers, key heads shared by
+  // several value heads, a value width one past a block, the widest key with the most transitions the kernel holds, and the
+  // smallest state.
+  const GatedDeltaNetShape shapes[] = {
+      {4, 2, 100, 132, 7},
+      {6, 2, 33, 128, 4},
+      {3, 3, 64, QWEN38_PLANE_MAX_REPLAY_KEY_WIDTH, QWEN38_PLANE_MAX_REPLAY_TRANSITIONS},
+      {2, 1, 32, 4, 1},
+  };
+  uint32_t seed = 1;
+  for (const GatedDeltaNetShape& shape : shapes) {
+    GatedDeltaNetState state{device, shape, seed++};
+    // Partial acceptance from one transition up to the full capsule.
+    for (int kept = 1; kept <= shape.capacity; ++kept) {
+      ReplayAndExpect(*plane_, device, {&state}, kept);
+    }
+  }
+}
+
+TEST_F(Qwen38PlaneReplayTest, IndexerReplaysEveryBufferFillAndAcceptanceLength) {
+  ASSERT_TRUE(plane_->replay_state_updates != nullptr) << "the plane library has no replay_state_updates";
+  KernelTestDevice device{*plane_};
+  constexpr int kCapacity = 7;
+  uint32_t seed = 50;
+  for (size_t element_size : {size_t{2}, size_t{4}}) {
+    for (size_t width : {size_t{6}, size_t{128}}) {
+      // Every number of entries the buffer can hold before the update: the block is completed by some accepted rows and
+      // overflows into the next one for others.
+      for (int buffer_length = 0; buffer_length < kQwen38IndexKeyRatio; ++buffer_length) {
+        IndexerState state{device, {7, width, kCapacity, element_size, kQwen38IndexKeyRatio, 10 + buffer_length, buffer_length}, seed++};
+        for (int kept = 1; kept <= kCapacity; ++kept) {
+          ReplayAndExpect(*plane_, device, {&state}, kept);
+        }
+      }
+    }
+  }
+}
+
+TEST_F(Qwen38PlaneReplayTest, OneLaunchReplaysEveryKindOfStateOfAModel) {
+  ASSERT_TRUE(plane_->replay_state_updates != nullptr) << "the plane library has no replay_state_updates";
+  KernelTestDevice device{*plane_};
+  constexpr int kCapacity = 7;
+  GatedDeltaNetState wide{device, {4, 2, 100, 132, kCapacity}, 11};
+  GatedDeltaNetState narrow{device, {6, 3, 33, 64, kCapacity}, 12};
+  ConvolutionState conv_bf16{device, ConvStateLayout::kChannelFirst, {5, 3, kCapacity, 2}, 13};
+  ConvolutionState conv_fp32{device, ConvStateLayout::kChannelFirst, {300, 4, kCapacity, 4}, 14};
+  IndexerState index_bf16{device, {7, 128, kCapacity, 2, kQwen38IndexKeyRatio, 21, 2}, 15};
+  IndexerState index_fp32{device, {7, 6, kCapacity, 4, kQwen38IndexKeyRatio, 33, 3}, 16};
+  const std::vector<ReplayedState*> states = {&conv_bf16, &wide, &index_fp32, &conv_fp32, &narrow, &index_bf16};
+  for (int kept : {1, 3, kCapacity}) {
+    SCOPED_TRACE("kept " + std::to_string(kept));
+    ReplayAndExpect(*plane_, device, states, kept);
+  }
+}
+
+TEST_F(Qwen38PlaneReplayTest, RejectsAnAcceptanceLengthTheKernelsCannotReplay) {
+  ASSERT_TRUE(plane_->replay_state_updates != nullptr) << "the plane library has no replay_state_updates";
+  KernelTestDevice device{*plane_};
+  GatedDeltaNetState state{device, {2, 1, 32, 4, 2}, 7};
+  const PlaneBuffer descriptors = device.Upload(std::vector<Qwen38StateReplayDesc>{state.Descriptor()});
+  void* stream = device.stream();
+  for (int kept : {0, -1, QWEN38_PLANE_MAX_REPLAY_TRANSITIONS + 1}) {
+    EXPECT_EQ(plane_->replay_state_updates(stream, descriptors.data(), 1, 0, state.Blocks(), kept), kCudaErrorInvalidValue)
+        << "kept " << kept;
+  }
+  EXPECT_EQ(plane_->replay_state_updates(stream, nullptr, 1, 0, state.Blocks(), 1), kCudaErrorInvalidValue);
+}
+
+// The error of an earlier call that nobody read (here a memset of a null pointer) is not the error of the launch that follows:
+// a replay that reported it would fail a cycle whose state is sound.
+TEST_F(Qwen38PlaneReplayTest, AnErrorAnEarlierCallLeftUnreadDoesNotFailTheLaunch) {
+  ASSERT_TRUE(plane_->replay_state_updates != nullptr) << "the plane library has no replay_state_updates";
+  KernelTestDevice device{*plane_};
+  GatedDeltaNetState gdn{device, {2, 1, 32, 4, 3}, 7};
+  ConvolutionState conv{device, ConvStateLayout::kChannelFirst, {5, 3, 3, 2}, 8};
+  device.LeaveAnUnreadError();
+  ReplayAndExpect(*plane_, device, {&gdn}, 2);
+  device.LeaveAnUnreadError();
+  ReplayAndExpect(*plane_, device, {&conv}, 2);
+  device.LeaveAnUnreadError();
+  ReplayAndExpect(*plane_, device, {&conv, &gdn}, 3);
+}
+
+// The replay of a convolution state in every layout it supports against the host reference; a layout the replay learns is added
+// to the instantiation below.
+TEST_P(Qwen38PlaneConvReplayTest, ReplaysEveryAcceptanceLengthBitExactly) {
+  ASSERT_TRUE(plane_->replay_state_updates != nullptr) << "the plane library has no replay_state_updates";
+  KernelTestDevice device{*plane_};
+  // The usual kernel of 4 taps (a history of 3), a history of 1 that the first kept step already pushes out, a history shorter
+  // than the acceptance, and more channels than the 128 blocks of 256 threads cover with one element each.
+  const ConvolutionShape shapes[] = {
+      {5, 3, 7, 0},
+      {9, 1, 3, 0},
+      {64, 2, 7, 0},
+      {9000, 4, 7, 0},
+  };
+  uint32_t seed = 200;
+  for (size_t element_size : {size_t{2}, size_t{4}}) {
+    for (ConvolutionShape shape : shapes) {
+      shape.element_size = element_size;
+      ConvolutionState state{device, GetParam(), shape, seed++};
+      for (int kept = 1; kept <= shape.capacity; ++kept) {
+        ReplayAndExpect(*plane_, device, {&state}, kept);
+      }
+    }
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(SupportedLayouts, Qwen38PlaneConvReplayTest, ::testing::Values(ConvStateLayout::kChannelFirst),
+                         [](const ::testing::TestParamInfo<ConvStateLayout>& layout_info) {
+                           return std::string{ConvStateLayoutName(layout_info.param)};
+                         });
+
+namespace {
+
+// The value of an FP8 E4M3 code that is not NaN: a sign, four exponent bits (bias 7) and three mantissa bits, where exponent 0
+// denotes a subnormal number. Every such value is exact in a float.
+float Fp8E4M3Value(uint8_t code) {
+  const int exponent = (code >> 3) & 0xF;
+  const int mantissa = code & 0x7;
+  const float magnitude = exponent == 0 ? std::ldexp(static_cast<float>(mantissa), -9)
+                                        : std::ldexp(static_cast<float>(8 + mantissa), exponent - 10);
+  return (code & 0x80) != 0 ? -magnitude : magnitude;
+}
+
+using FoldState = std::array<int64_t, StagedPleRig::kStateWords>;
+using FoldContext = std::array<int64_t, 2>;
+
+// What the preparation of the rows of a fold step leaves in device memory, read back. Every buffer is filled with 0xAB first, so
+// that a word the preparation does not write shows.
+struct FoldPrepOutputs {
+  std::vector<int64_t> input_ids;
+  std::vector<int64_t> position_ids;
+  std::vector<int64_t> contexts;  // for every row: the token before it, then its own
+  std::vector<int64_t> past_pos;
+  std::vector<int64_t> state;
+  std::vector<uint16_t> ple;  // bfloat16 bits
+  int32_t committed{};
+};
+
+// A PLE table in which a row depends on the token and on the two tokens before it, as in the models, so that the preparation of
+// a fold step shows whether every row sees the right n-gram context. It has four heads of eight values: heads 0 and 1 hash the
+// token and the one before it, heads 2 and 3 also hash the one before that. The heads index 61, 53, 47 and 59 rows of a table
+// that is split into two shards at row 100, so that head 1 reads from both. A head selects its row as the plane does: the token
+// and the contexts times the multipliers, xor-ed, modulo the vocabulary of the head. The rows are FP8 codes, or INT8 values for a
+// negative scale. The table is addressed by the GPU or, when `staged`, kept in host memory for the module to gather from.
+class HashedPleTable {
+ public:
+  static constexpr size_t kHeads = 4;
+  static constexpr size_t kHeadDim = 8;
+  static constexpr size_t kRowValues = kHeads * kHeadDim;
+  static constexpr size_t kTableRows = 220;       // the vocabularies of the heads, one after the other
+  static constexpr size_t kFirstShardRows = 100;  // the rows after these are in the second shard
+  static constexpr size_t kMaxRows = StagedPleRig::kMaxFoldRows;
+  static constexpr int64_t kEos = 99;
+
+  HashedPleTable(Qwen38Plane& plane, KernelTestDevice& device, float scale, bool staged)
+      : plane_{plane}, device_{device}, staged_{staged}, table_(kTableRows * kHeadDim) {
+    WordStream words{12345};
+    // Clearing the lowest bit of a code keeps it away from the NaNs of E4M3 (0x7F and 0xFF).
+    for (uint8_t& code : table_) code = static_cast<uint8_t>((words.Next() >> 24) & 0xFEu);
+
+    params_.n_heads = static_cast<int>(kHeads);
+    params_.head_dim = static_cast<int>(kHeadDim);
+    params_.heads_per_ngram = 2;
+    params_.n_shards = 2;
+    // Large multipliers, so that the hash is often negative as a signed word.
+    params_.mult[0] = static_cast<long long>(0x9E3779B97F4A7C15ull);
+    params_.mult[1] = static_cast<long long>(0xC2B2AE3D27D4EB4Full);
+    params_.mult[2] = static_cast<long long>(0x165667B19E3779F9ull);
+    const std::array<long long, kHeads> vocabularies = {61, 53, 47, 59};
+    long long offset = 0;
+    for (size_t head = 0; head < kHeads; ++head) {
+      params_.vocab[head] = vocabularies[head];
+      params_.offset[head] = offset;
+      offset += vocabularies[head];
+    }
+    params_.shard_end[0] = static_cast<long long>(kFirstShardRows);
+    params_.shard_end[1] = static_cast<long long>(kTableRows);
+    const size_t first_shard_bytes = kFirstShardRows * kHeadDim;
+    if (staged_) {
+      params_.shard_ptr[0] = table_.data();
+      params_.shard_ptr[1] = table_.data() + first_shard_bytes;
+    } else {
+      first_shard_ = device.UploadBytes(table_.data(), first_shard_bytes);
+      second_shard_ = device.UploadBytes(table_.data() + first_shard_bytes, table_.size() - first_shard_bytes);
+      params_.shard_ptr[0] = first_shard_.data();
+      params_.shard_ptr[1] = second_shard_.data();
+    }
+    params_.scale = scale;
+    params_.pad_ = staged_ ? 1 : 0;
+    params_.eos = kEos;
+    params_.capacity = static_cast<long long>(StagedPleRig::kPositions);
+    device_params_ = device.UploadBytes(&params_, sizeof(params_));
+    if (staged_) plane_.set_ple_host_params(&params_);
+
+    state_ = device.Filled(StagedPleRig::kStateWords * sizeof(int64_t), 0);
+    context_in_ = device.Filled(sizeof(FoldContext), 0);
+    input_ids_ = device.Filled(kMaxRows * sizeof(int64_t), 0);
+    position_ids_ = device.Filled(kMaxRows * sizeof(int64_t), 0);
+    contexts_ = device.Filled(2 * kMaxRows * sizeof(int64_t), 0);
+    ple_ = device.Filled(kMaxRows * kRowValues * sizeof(uint16_t), 0);
+    past_pos_ = device.Filled(StagedPleRig::kPositions * sizeof(int64_t), 0);
+    committed_ = device.Filled(sizeof(int32_t), 0);
+    spare_committed_ = device.Filled(sizeof(int32_t), 0);
+  }
+
+  ~HashedPleTable() {
+    if (staged_) plane_.unset_ple_host_params(&params_);
+  }
+
+  HashedPleTable(const HashedPleTable&) = delete;
+  HashedPleTable& operator=(const HashedPleTable&) = delete;
+
+  // The PLE row of `token` after `previous` and `before_previous`, as bfloat16 bits: what the host computes from the table.
+  std::vector<uint16_t> ExpectedRow(int64_t token, int64_t previous, int64_t before_previous) const {
+    // The positions behind an end of sequence token are masked to it.
+    const int64_t before = previous == kEos ? kEos : before_previous;
+    std::vector<uint16_t> values;
+    for (int head = 0; head < static_cast<int>(kHeads); ++head) {
+      uint64_t mixed = static_cast<uint64_t>(token) * static_cast<uint64_t>(params_.mult[0]);
+      mixed ^= static_cast<uint64_t>(previous) * static_cast<uint64_t>(params_.mult[1]);
+      if (head >= params_.heads_per_ngram) mixed ^= static_cast<uint64_t>(before) * static_cast<uint64_t>(params_.mult[2]);
+      const long long vocabulary = params_.vocab[head];
+      long long remainder = static_cast<long long>(mixed) % vocabulary;
+      if (remainder < 0) remainder += vocabulary;
+      const size_t row = static_cast<size_t>(remainder + params_.offset[head]);
+      for (size_t component = 0; component < kHeadDim; ++component) {
+        values.push_back(Dequantized(table_[row * kHeadDim + component]));
+      }
+    }
+    return values;
+  }
+
+  // What the preparation of the first `rows` rows of a fold step has to leave in the buffers that Reset filled with 0xAB: for
+  // every row its graph inputs, its slot of past_pos, its PLE row and its context; the committed length (of row 0) only when
+  // the call was given a place for it; bit 0 of state word 5 when a row lies past the table.
+  FoldPrepOutputs Expected(const FoldState& state, const FoldContext& context, int rows, bool with_committed = true) const {
+    const int64_t filled = static_cast<int64_t>(0xABABABABABABABABull);
+    FoldPrepOutputs expected;
+    expected.input_ids.assign(kMaxRows, filled);
+    expected.position_ids.assign(kMaxRows, filled);
+    expected.contexts.assign(2 * kMaxRows, filled);
+    expected.past_pos.assign(StagedPleRig::kPositions, filled);
+    expected.state.assign(state.begin(), state.end());
+    expected.ple.assign(kMaxRows * kRowValues, 0xABAB);
+    expected.committed = static_cast<int32_t>(0xABABABABu);
+    std::vector<int64_t> tokens;
+    for (size_t r = 0; r < static_cast<size_t>(rows); ++r) {
+      const int64_t token = state[StagedPleRig::kFoldTokenWords[r]];
+      const int64_t position = state[1] + static_cast<int64_t>(r);
+      const int64_t previous = r == 0 ? context[1] : tokens[r - 1];
+      const int64_t before_previous = r == 0 ? context[0] : (r == 1 ? context[1] : tokens[r - 2]);
+      tokens.push_back(token);
+      expected.input_ids[r] = token;
+      expected.position_ids[r] = position;
+      expected.contexts[2 * r] = previous;
+      expected.contexts[2 * r + 1] = token;
+      const std::vector<uint16_t> row = ExpectedRow(token, previous, before_previous);
+      std::copy(row.begin(), row.end(), expected.ple.begin() + static_cast<std::ptrdiff_t>(r * kRowValues));
+      if (position >= 0 && position < static_cast<int64_t>(StagedPleRig::kPositions)) {
+        expected.past_pos[static_cast<size_t>(position)] = position;
+      } else {
+        expected.state[5] |= 1;
+      }
+      if (r == 0 && with_committed) expected.committed = static_cast<int32_t>(position);
+    }
+    return expected;
+  }
+
+  // The rows prepared one call at a time, as the engine prepared them before the fold step had a call of its own: row r
+  // takes its token from its state word, runs at the position word plus r, and starts from the context row r - 1 left.
+  FoldPrepOutputs PrepEveryRowSeparately(const FoldState& state, const FoldContext& context, int rows) {
+    Reset(state, context);
+    for (size_t r = 0; r < static_cast<size_t>(rows); ++r) {
+      const uint8_t* token = state_.data() + StagedPleRig::kFoldTokenWords[r] * sizeof(int64_t);
+      const uint8_t* context_in = r == 0 ? context_in_.data() : contexts_.data() + 2 * (r - 1) * sizeof(int64_t);
+      EXPECT_EQ(Prepare(token, static_cast<int>(r), context_in, contexts_.data() + 2 * r * sizeof(int64_t),
+                        input_ids_.data() + r * sizeof(int64_t), position_ids_.data() + r * sizeof(int64_t),
+                        r == 0 ? committed_.data() : spare_committed_.data(),
+                        ple_.data() + r * kRowValues * sizeof(uint16_t)),
+                0)
+          << "row " << r;
+    }
+    return Read();
+  }
+
+  // All the rows prepared by the one call that a negative pos_add asks for.
+  FoldPrepOutputs PrepInOneCall(const FoldState& state, const FoldContext& context, int rows, bool with_committed = true) {
+    Reset(state, context);
+    EXPECT_EQ(Prepare(state_.data(), -rows, context_in_.data(), contexts_.data(), input_ids_.data(), position_ids_.data(),
+                      with_committed ? committed_.data() : nullptr, ple_.data()),
+              0);
+    return Read();
+  }
+
+ private:
+  uint16_t Dequantized(uint8_t code) const {
+    if (params_.scale < 0.0f) return Bf16Bits(static_cast<float>(static_cast<int8_t>(code)) * -params_.scale);
+    return Bf16Bits(Fp8E4M3Value(code) * params_.scale);
+  }
+
+  void Reset(const FoldState& state, const FoldContext& context) {
+    for (const PlaneBuffer* output : {&input_ids_, &position_ids_, &contexts_, &ple_, &past_pos_, &committed_, &spare_committed_}) {
+      device_.Fill(*output, 0xAB);
+    }
+    plane_.Check(plane_.memcpy_h2d(state_.data(), state.data(), sizeof(state), device_.stream()), "memcpy_h2d");
+    plane_.Check(plane_.memcpy_h2d(context_in_.data(), context.data(), sizeof(context), device_.stream()), "memcpy_h2d");
+  }
+
+  int Prepare(const void* token, int pos_add, const void* context_in, void* context_out, void* input_ids, void* position_ids,
+              void* committed, void* ple) {
+    return plane_.prep(device_.stream(), device_params_.data(), token, state_.data() + sizeof(int64_t), pos_add, context_in,
+                       context_out, input_ids, position_ids, committed, past_pos_.data(), ple, state_.data());
+  }
+
+  FoldPrepOutputs Read() {
+    FoldPrepOutputs outputs;
+    outputs.input_ids = device_.Download<int64_t>(input_ids_, kMaxRows);
+    outputs.position_ids = device_.Download<int64_t>(position_ids_, kMaxRows);
+    outputs.contexts = device_.Download<int64_t>(contexts_, 2 * kMaxRows);
+    outputs.past_pos = device_.Download<int64_t>(past_pos_, StagedPleRig::kPositions);
+    outputs.state = device_.Download<int64_t>(state_, StagedPleRig::kStateWords);
+    outputs.ple = device_.Download<uint16_t>(ple_, kMaxRows * kRowValues);
+    outputs.committed = device_.Download<int32_t>(committed_, 1)[0];
+    return outputs;
+  }
+
+  Qwen38Plane& plane_;
+  KernelTestDevice& device_;
+  const bool staged_;
+  std::vector<uint8_t> table_;
+  Qwen38PleParams params_{};
+  PlaneBuffer first_shard_, second_shard_, device_params_;
+  PlaneBuffer state_, context_in_, input_ids_, position_ids_, contexts_, ple_, past_pos_, committed_, spare_committed_;
+};
+
+void ExpectSameFoldPrepOutputs(const FoldPrepOutputs& expected, const FoldPrepOutputs& actual, const std::string& what) {
+  ExpectSameElements(expected.input_ids, actual.input_ids, what + ": input_ids");
+  ExpectSameElements(expected.position_ids, actual.position_ids, what + ": position_ids");
+  ExpectSameElements(expected.contexts, actual.contexts, what + ": the contexts");
+  ExpectSameElements(expected.past_pos, actual.past_pos, what + ": past_pos");
+  ExpectSameElements(expected.state, actual.state, what + ": the state");
+  ExpectSameElements(expected.ple, actual.ple, what + ": the PLE rows");
+  EXPECT_EQ(expected.committed, actual.committed) << what << ": the committed length";
+}
+
+// A fold step to prepare: the control words (word 0, 2 and 8..13 hold the tokens of the rows, word 1 the position of row 0, word
+// 5 status bits; the other words are no tokens) and the two tokens before row 0, the older one first.
+struct FoldScenario {
+  const char* name;
+  FoldState state;
+  FoldContext context;
+};
+
+const std::vector<FoldScenario>& FoldScenarios() {
+  constexpr int64_t kEos = HashedPleTable::kEos;
+  static const std::vector<FoldScenario> scenarios = {
+      {"ordinary", {{7, 5, 2, 701, 702, 0x10, 703, 704, 1, 6, 9, 4, 3, 10}}, {{11, 13}}},
+      {"the context ends at the end of sequence", {{7, 5, 2, 701, 702, 0x10, 703, 704, 1, 6, 9, 4, 3, 10}}, {{5, kEos}}},
+      {"drafts that are the end of sequence", {{7, 5, kEos, 701, 702, 0x10, 703, 704, 1, 6, kEos, 4, 3, kEos}}, {{11, 13}}},
+      {"one token over and over", {{4, 3, 4, 701, 702, 0x10, 703, 704, 4, 4, 4, 4, 4, 4}}, {{4, 4}}},
+      {"positions past the table", {{7, 14, 2, 701, 702, 0x10, 703, 704, 1, 6, 9, 4, 3, 10}}, {{11, 13}}},
+      {"token ids of a large vocabulary",
+       {{151643, 7, 248320, 701, 702, 0x10, 703, 704, 262143, 151935, 100000, 9, 3, 10}},
+       {{150000, 152000}}},
+      {"zeros", {{0, 0, 0, 701, 702, 0x10, 703, 704, 0, 0, 0, 0, 0, 0}}, {{0, 0}}},
+  };
+  return scenarios;
+}
+
+class Qwen38PlaneFoldPrepTest : public PlaneKernelFixture<::testing::Test> {
+ protected:
+  // The fused prep (k_prep_fold, or the per-row staging for a staged table) of 2 to 8 rows against the prep of the same rows one
+  // call at a time and against the PLE rows, graph inputs and contexts that the host computes from the table.
+  void ExpectTheFusedPrepToMatchEveryRowSeparately(bool staged, float scale) {
+    ASSERT_NE(plane_->capabilities & QWEN38_PLANE_CAP_NEGATIVE_POS_ADD_BATCH, 0ull);
+    KernelTestDevice device{*plane_};
+    HashedPleTable table{*plane_, device, scale, staged};
+    // The rows of the table have to depend on each of the three tokens, or a wrong context could go unnoticed.
+    ASSERT_NE(table.ExpectedRow(7, 11, 13), table.ExpectedRow(8, 11, 13)) << "the token";
+    ASSERT_NE(table.ExpectedRow(7, 11, 13), table.ExpectedRow(7, 12, 13)) << "the previous token";
+    ASSERT_NE(table.ExpectedRow(7, 11, 13), table.ExpectedRow(7, 11, 14)) << "the token before the previous one";
+    ASSERT_EQ(table.ExpectedRow(7, HashedPleTable::kEos, 13), table.ExpectedRow(7, HashedPleTable::kEos, 14))
+        << "the positions behind an end of sequence are masked";
+    for (const FoldScenario& scenario : FoldScenarios()) {
+      for (int rows = 2; rows <= static_cast<int>(HashedPleTable::kMaxRows); ++rows) {
+        const std::string what = std::string{staged ? "staged table" : "device table"} + ", " +
+                                 (scale < 0.0f ? "INT8" : "FP8") + ", " + scenario.name + ", " + std::to_string(rows) + " rows";
+        const FoldPrepOutputs expected = table.Expected(scenario.state, scenario.context, rows);
+        const FoldPrepOutputs separate = table.PrepEveryRowSeparately(scenario.state, scenario.context, rows);
+        const FoldPrepOutputs fused = table.PrepInOneCall(scenario.state, scenario.context, rows);
+        ExpectSameFoldPrepOutputs(expected, separate, what + ", one row at a time against the host");
+        ExpectSameFoldPrepOutputs(separate, fused, what + ", in one call against one row at a time");
+        ExpectSameFoldPrepOutputs(expected, fused, what + ", in one call against the host");
+      }
+    }
+  }
+};
+
+TEST_F(Qwen38PlaneFoldPrepTest, FusedPrepMatchesEveryRowSeparatelyForAnFp8DeviceTable) {
+  ExpectTheFusedPrepToMatchEveryRowSeparately(/*staged=*/false, 0.3f);
+}
+
+TEST_F(Qwen38PlaneFoldPrepTest, FusedPrepMatchesEveryRowSeparatelyForAnFp8StagedTable) {
+  ExpectTheFusedPrepToMatchEveryRowSeparately(/*staged=*/true, 0.3f);
+}
+
+TEST_F(Qwen38PlaneFoldPrepTest, FusedPrepMatchesEveryRowSeparatelyForAnInt8DeviceTable) {
+  if ((plane_->capabilities & QWEN38_PLANE_CAP_INT8_PLE) == 0) GTEST_SKIP() << "the plane library has no INT8 PLE";
+  ExpectTheFusedPrepToMatchEveryRowSeparately(/*staged=*/false, -0.0123f);
+}
+
+TEST_F(Qwen38PlaneFoldPrepTest, FusedPrepMatchesEveryRowSeparatelyForAnInt8StagedTable) {
+  if ((plane_->capabilities & QWEN38_PLANE_CAP_INT8_PLE) == 0) GTEST_SKIP() << "the plane library has no INT8 PLE";
+  ExpectTheFusedPrepToMatchEveryRowSeparately(/*staged=*/true, -0.0123f);
+}
+
+// The prep of one row skips the committed length when it is given no place for it, and so does the prep of a whole step.
+TEST_F(Qwen38PlaneFoldPrepTest, FusedPrepWithoutACommittedLengthWritesEverythingElse) {
+  ASSERT_NE(plane_->capabilities & QWEN38_PLANE_CAP_NEGATIVE_POS_ADD_BATCH, 0ull);
+  const FoldScenario& scenario = FoldScenarios().front();
+  for (bool staged : {false, true}) {
+    KernelTestDevice device{*plane_};
+    HashedPleTable table{*plane_, device, 0.3f, staged};
+    for (int rows : {2, 5, 8}) {
+      ExpectSameFoldPrepOutputs(table.Expected(scenario.state, scenario.context, rows, /*with_committed=*/false),
+                                table.PrepInOneCall(scenario.state, scenario.context, rows, /*with_committed=*/false),
+                                std::string{staged ? "staged table, " : "device table, "} + std::to_string(rows) + " rows");
+    }
+  }
+}
+
+// What the draft selector reads and writes: the candidates and scores of up to 7 drafts, and the control words that receive the
+// chosen candidates. A sentinel word marks every word of the control state that the selector does not write.
+constexpr std::array<size_t, 7> kDflashDraftSlots = {2, 8, 9, 10, 11, 12, 13};
+constexpr size_t kDflashControlWords = 16;
+
+std::vector<int64_t> DflashControlSentinels() {
+  std::vector<int64_t> control(kDflashControlWords);
+  for (size_t i = 0; i < control.size(); ++i) control[i] = -1000 - static_cast<int64_t>(i);
+  return control;
+}
+
+// The candidates of `drafts` steps and their scores: the scores of step s after candidate p of step s - 1 are
+// scores[(s * top_k + p) * top_k ...], one for each candidate of step s (step 0 reads the row of p = 0).
+struct DflashLattice {
+  int drafts;
+  int top_k;
+  std::vector<int32_t> candidates;  // [drafts, top_k]
+  std::vector<float> scores;        // [drafts, top_k, top_k]
+};
+
+// The selection on the host: a greedy walk that takes, at every step, the candidate with the highest score in the row of the
+// candidate chosen before it. Of equal scores the first wins (std::max_element), like the selector of the drafter on the host
+// that the plane's one replaces (src/dflash2_drafter.cpp).
+std::vector<int64_t> SelectOnTheHost(const DflashLattice& lattice) {
+  std::vector<int64_t> control = DflashControlSentinels();
+  const size_t top_k = static_cast<size_t>(lattice.top_k);
+  size_t previous = 0;
+  for (size_t step = 0; step < static_cast<size_t>(lattice.drafts); ++step) {
+    const float* row = lattice.scores.data() + (step * top_k + previous) * top_k;
+    const size_t best = static_cast<size_t>(std::max_element(row, row + top_k) - row);
+    control[kDflashDraftSlots[step]] = lattice.candidates[step * top_k + best];
+    previous = best;
+  }
+  return control;
+}
+
+class Qwen38PlaneDflashSelectTest : public PlaneKernelFixture<::testing::Test> {
+ protected:
+  // The control words the selector leaves, the sentinels where it writes nothing.
+  std::vector<int64_t> SelectOnTheDevice(KernelTestDevice& device, const DflashLattice& lattice) {
+    const PlaneBuffer candidates = device.Upload(lattice.candidates);
+    const PlaneBuffer scores = device.Upload(lattice.scores);
+    const PlaneBuffer control = device.Upload(DflashControlSentinels());
+    EXPECT_EQ(plane_->dflash_select(device.stream(), candidates.data(), scores.data(), control.data(), lattice.drafts,
+                                    lattice.top_k),
+              0);
+    return device.Download<int64_t>(control, kDflashControlWords);
+  }
+};
+
+// The rule that decides a tie: of several candidates with the highest score the one with the LOWEST index wins, because a
+// candidate takes over only when its score is strictly greater than that of the best so far. Signed zeros are equal scores.
+TEST_F(Qwen38PlaneDflashSelectTest, TheCandidateWithTheLowestIndexWinsATie) {
+  ASSERT_TRUE(plane_->dflash_select != nullptr) << "the plane library has no dflash_select";
+  KernelTestDevice device{*plane_};
+  const float infinity = std::numeric_limits<float>::infinity();
+  struct Case {
+    const char* name;
+    std::vector<float> scores;
+    size_t winner;
+  };
+  const Case cases[] = {
+      {"one maximum in the middle", {1, 5, 3, 2}, 1},
+      {"one maximum at the first index", {4, 3, 2, 1}, 0},
+      {"one maximum at the last index", {1, 2, 3, 4}, 3},
+      {"two equal maxima", {1, 5, 5, 2}, 1},
+      {"equal maxima at both ends", {5, 1, 2, 5}, 0},
+      {"three equal maxima", {1, 5, 5, 5}, 1},
+      {"all scores equal", {3, 3, 3, 3}, 0},
+      {"equal negative maxima", {-5, -3, -3, -4}, 1},
+      {"equal infinite maxima", {1, infinity, infinity, 2}, 1},
+      {"all scores minus infinity", {-infinity, -infinity, -infinity, -infinity}, 0},
+      {"a zero and a negative zero", {-1, -0.0f, 0.0f, -1}, 1},
+      {"a negative zero and a zero", {-1, 0.0f, -0.0f, -1}, 1},
+  };
+  for (const Case& test_case : cases) {
+    const DflashLattice lattice{1, 4, {10, 20, 30, 40}, test_case.scores};
+    const std::vector<int64_t> control = SelectOnTheDevice(device, lattice);
+    EXPECT_EQ(control[kDflashDraftSlots[0]], lattice.candidates[test_case.winner]) << test_case.name;
+    EXPECT_EQ(control, SelectOnTheHost(lattice)) << test_case.name;
+  }
+}
+
+// The candidate a step chose selects the row of scores the next step reads. The lattice is built so that every step has a row
+// for each candidate chosen before it and only one of them leads to the expected token: the ones that are not read hold a
+// maximum of their own, which a selector that ignores the walk would pick.
+TEST_F(Qwen38PlaneDflashSelectTest, TheChosenCandidateSelectsTheScoresOfTheNextStep) {
+  ASSERT_TRUE(plane_->dflash_select != nullptr) << "the plane library has no dflash_select";
+  KernelTestDevice device{*plane_};
+  constexpr int kDrafts = 4;
+  constexpr int kTopK = 3;
+  DflashLattice lattice{kDrafts, kTopK, {}, std::vector<float>(kDrafts * kTopK * kTopK, 0.0f)};
+  for (int step = 0; step < kDrafts; ++step) {
+    for (int k = 0; k < kTopK; ++k) lattice.candidates.push_back(100 * (step + 1) + k);
+  }
+  const auto set_row = [&lattice](int step, int previous, std::array<float, kTopK> row) {
+    std::copy(row.begin(), row.end(), lattice.scores.begin() + (step * kTopK + previous) * kTopK);
+  };
+  // The walk: step 0 reads the row of previous = 0 and picks index 1; step 1 reads the row of 1 and picks 2; step 2 reads the
+  // row of 2, where all scores are equal, and picks 0; step 3 reads the row of 0, where the maximum is shared by 1 and 2, and
+  // picks 1.
+  set_row(0, 0, {1, 7, 3});
+  set_row(0, 1, {9, 0, 0});
+  set_row(0, 2, {0, 9, 0});
+  set_row(1, 0, {8, 0, 0});
+  set_row(1, 1, {4, 4, 6});
+  set_row(1, 2, {0, 0, 0});
+  set_row(2, 0, {0, 0, 9});
+  set_row(2, 1, {0, 9, 0});
+  set_row(2, 2, {5, 5, 5});
+  set_row(3, 0, {2, 6, 6});
+  set_row(3, 1, {0, 0, 9});
+  set_row(3, 2, {9, 0, 0});
+  const std::vector<int64_t> control = SelectOnTheDevice(device, lattice);
+  EXPECT_EQ(control[kDflashDraftSlots[0]], 101);
+  EXPECT_EQ(control[kDflashDraftSlots[1]], 202);
+  EXPECT_EQ(control[kDflashDraftSlots[2]], 300);
+  EXPECT_EQ(control[kDflashDraftSlots[3]], 401);
+  EXPECT_EQ(control, SelectOnTheHost(lattice));
+}
+
+TEST_F(Qwen38PlaneDflashSelectTest, MatchesTheHostWalkForRandomLatticesWithManyTies) {
+  ASSERT_TRUE(plane_->dflash_select != nullptr) << "the plane library has no dflash_select";
+  KernelTestDevice device{*plane_};
+  WordStream words{4242};
+  const float infinity = std::numeric_limits<float>::infinity();
+  for (int top_k : {1, 2, 3, 8, 16}) {
+    for (int drafts = 1; drafts <= 7; ++drafts) {
+      for (int round = 0; round < 4; ++round) {
+        DflashLattice lattice{drafts, top_k, {}, {}};
+        for (int i = 0; i < drafts * top_k; ++i) lattice.candidates.push_back(static_cast<int32_t>(words.Next() % 248000u));
+        // Scores of four distinct values (and some minus infinities) make equal maxima common.
+        for (int i = 0; i < drafts * top_k * top_k; ++i) {
+          const uint32_t word = words.Next();
+          lattice.scores.push_back(word % 11u == 0 ? -infinity : static_cast<float>(word % 4u));
+        }
+        const std::string what = std::to_string(drafts) + " drafts of " + std::to_string(top_k) + " candidates, round " +
+                                 std::to_string(round);
+        ExpectSameElements(SelectOnTheHost(lattice), SelectOnTheDevice(device, lattice), what);
+      }
+    }
+  }
+}
+
+// Only the words of the drafts that were asked for are written (the words between them are not the selector's), and a call it
+// cannot serve writes none.
+TEST_F(Qwen38PlaneDflashSelectTest, WritesOnlyTheWordsOfTheRequestedDraftsAndRejectsWhatItCannotServe) {
+  ASSERT_TRUE(plane_->dflash_select != nullptr) << "the plane library has no dflash_select";
+  KernelTestDevice device{*plane_};
+  const DflashLattice lattice{3, 2, {1, 2, 3, 4, 5, 6}, std::vector<float>(3 * 2 * 2, 1.0f)};
+  const std::vector<int64_t> control = SelectOnTheDevice(device, lattice);
+  std::vector<int64_t> expected = DflashControlSentinels();
+  expected[2] = 1;
+  expected[8] = 3;
+  expected[9] = 5;
+  EXPECT_EQ(control, expected);
+
+  const PlaneBuffer candidates = device.Upload(lattice.candidates);
+  const PlaneBuffer scores = device.Upload(lattice.scores);
+  const PlaneBuffer words = device.Upload(DflashControlSentinels());
+  void* stream = device.stream();
+  EXPECT_EQ(plane_->dflash_select(stream, nullptr, scores.data(), words.data(), 3, 2), kCudaErrorInvalidValue);
+  EXPECT_EQ(plane_->dflash_select(stream, candidates.data(), nullptr, words.data(), 3, 2), kCudaErrorInvalidValue);
+  EXPECT_EQ(plane_->dflash_select(stream, candidates.data(), scores.data(), nullptr, 3, 2), kCudaErrorInvalidValue);
+  EXPECT_EQ(plane_->dflash_select(stream, candidates.data(), scores.data(), words.data(), 0, 2), kCudaErrorInvalidValue);
+  EXPECT_EQ(plane_->dflash_select(stream, candidates.data(), scores.data(), words.data(), 8, 2), kCudaErrorInvalidValue);
+  EXPECT_EQ(plane_->dflash_select(stream, candidates.data(), scores.data(), words.data(), 3, 0), kCudaErrorInvalidValue);
+  EXPECT_EQ(device.Download<int64_t>(words, kDflashControlWords), DflashControlSentinels());
+}
+
+// The error of an earlier call that nobody read (here a memset of a null pointer) is not the error of the selection that follows.
+TEST_F(Qwen38PlaneDflashSelectTest, AnErrorAnEarlierCallLeftUnreadDoesNotFailTheLaunch) {
+  ASSERT_TRUE(plane_->dflash_select != nullptr) << "the plane library has no dflash_select";
+  KernelTestDevice device{*plane_};
+  const DflashLattice lattice{2, 2, {1, 2, 3, 4}, {0, 1, 2, 0, 5, 3, 1, 1}};
+  device.LeaveAnUnreadError();
+  EXPECT_EQ(SelectOnTheDevice(device, lattice), SelectOnTheHost(lattice));
+}
+
+}  // namespace
 #endif
 
 }  // namespace Generators::test

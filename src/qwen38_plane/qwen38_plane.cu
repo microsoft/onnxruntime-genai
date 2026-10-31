@@ -636,7 +636,7 @@ __global__ void k_prep_fold(const PleParams* P, const i64* ctx_in, i64* ctx_a, i
   if (tid == 0) {
     input_ids[row] = tok;
     position_ids[row] = pos;
-    if (row == 0) committed[0] = (int)pos;
+    if (row == 0 && committed != nullptr) committed[0] = (int)pos;
     if (pos >= 0 && pos < P->capacity)
       past_pos[pos] = pos;
     else
@@ -1494,6 +1494,10 @@ QWEN38_PLANE_EXPORT int qwen38_plane_test_stats(Qwen38PlaneTestStats* stats) {
 #endif
 }
 
+// A launch reports its own error and no other one: the last-error slot of the host thread may still hold the error of an
+// earlier call that nobody read. An error that sticks (a faulted context) is not dropped and still fails the launch.
+static inline void DropStaleCudaError() { cudaGetLastError(); }
+
 __global__ void DflashSelect(const int32_t* candidates, const float* scores, i64* control,
                              int drafts, int top_k) {
   const int slots[] = {2, 8, 9, 10, 11, 12, 13};
@@ -1514,6 +1518,7 @@ extern "C" QWEN38_PLANE_EXPORT int qwen38_plane_dflash_select(
     void* control, int drafts, int top_k) {
   if (!candidates || !scores || !control || drafts < 1 || drafts > 7 || top_k < 1)
     return static_cast<int>(cudaErrorInvalidValue);
+  DropStaleCudaError();
   DflashSelect<<<1, 1, 0, static_cast<cudaStream_t>(stream)>>>(
       static_cast<const int32_t*>(candidates), static_cast<const float*>(scores),
       static_cast<i64*>(control), drafts, top_k);
@@ -1668,6 +1673,7 @@ extern "C" QWEN38_PLANE_EXPORT int qwen38_plane_replay_state_updates(
   }
   const auto* typed = static_cast<const Qwen38StateReplayDesc*>(descs);
   cudaStream_t cu_stream = static_cast<cudaStream_t>(stream);
+  DropStaleCudaError();
   if (fast_count > 0 && fast_blocks_per_descriptor > 0) {
     const dim3 grid(static_cast<unsigned>(fast_blocks_per_descriptor), static_cast<unsigned>(fast_count));
     k_replay_gdn<<<grid, kPlaneReplayThreads, 0, cu_stream>>>(typed, kept_count);
