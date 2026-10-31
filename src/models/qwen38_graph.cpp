@@ -2949,18 +2949,9 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
 
   const auto start = Clock::now();
   const std::filesystem::path root = std::filesystem::weakly_canonical(std::filesystem::path{config_->config_path.string()});
-  // An empty or missing plane_library falls back to the plane built into onnxruntime-genai-cuda.
-  std::filesystem::path plane_path;
-  if (!q.plane_library.empty()) {
-    plane_path = std::filesystem::weakly_canonical(root / q.plane_library);
-    const std::string root_prefix = (root / "").string();
-    if (plane_path.string().compare(0, root_prefix.size(), root_prefix) != 0)
-      throw std::runtime_error("model.qwen38_graph.plane_library must resolve inside the model folder: " + plane_path.string());
-    if (!std::filesystem::exists(plane_path)) {
-      plane_path.clear();
-    }
-  }
-  plane_ = std::make_unique<Qwen38Plane>(plane_path);
+  // An empty or missing plane_library falls back to the plane built into onnxruntime-genai-cuda; a Windows host resolves
+  // the POSIX name of the package to the .dll it ships first.
+  plane_ = std::make_unique<Qwen38Plane>(ResolveQwen38PlaneLibraryPath(root, q.plane_library, kQwen38WindowsHost));
   plane_->Check(plane_->set_device(p_device_->GetDeviceId(nullptr)), "cudaSetDevice");
 
   // An INT8 package needs a plane library that can decode it: refuse it now, before the weights are uploaded and the sessions
