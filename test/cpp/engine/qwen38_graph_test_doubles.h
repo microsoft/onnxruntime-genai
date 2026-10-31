@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <span>
 #include <stdexcept>
@@ -48,6 +49,10 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
 
   bool dense_prefill{};
   size_t preferred_chunk{};
+
+  // Called at the end of ExpectPrefillTokens(), that is between the publication of a turn's prompt length and its first
+  // PrefillChunk(): a test that drives several Engines blocks here to interleave their owner threads the worst way.
+  std::function<void(size_t)> on_expect_prefill;
 
   // Every verify proposes `drafts` tokens and accepts the next entry of `accepted_counts` (cycled, each 0..drafts) of them
   // in order, so the cycle commits that many tokens + 1 (the correction, or the bonus when all were accepted). The record
@@ -110,6 +115,7 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
     calls.push_back("expect:" + std::to_string(total_tokens));
     if (decoding_ || ledger_.Length() != 0) throw std::logic_error("the prompt length was announced after its ingestion started");
     expected_prefill_ = total_tokens;
+    if (on_expect_prefill) on_expect_prefill(total_tokens);
   }
 
   void PrefillChunk(std::span<const int32_t> tokens) override {

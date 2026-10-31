@@ -10,10 +10,15 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <condition_variable>
+#include <cstdlib>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -21,12 +26,93 @@
 #include "engine/qwen38_graph_executor.h"
 #include "engine_test_doubles.h"
 #include "engine_test_helpers.h"
+#include "models/qwen38_ort_env.h"
 #include "qwen38_graph_test_doubles.h"
 
 namespace Generators::test {
 namespace {
 
 constexpr int32_t kEos = 1;
+
+// A reusable barrier for a fixed number of threads. It gives up (instead of hanging the test) when a peer is gone.
+class Rendezvous {
+ public:
+  explicit Rendezvous(size_t parties) : parties_{parties} {}
+
+  // Blocks until every party has arrived; false when the rendezvous was abandoned or the peers never came.
+  bool ArriveAndWait() {
+    std::unique_lock<std::mutex> lock{mutex_};
+    if (abandoned_) return false;
+    const size_t generation = generation_;
+    if (++arrived_ == parties_) {
+      arrived_ = 0;
+      ++generation_;
+      cv_.notify_all();
+      return true;
+    }
+    cv_.wait_for(lock, std::chrono::seconds(30), [&] { return generation_ != generation || abandoned_; });
+    return generation_ != generation;
+  }
+
+  void Abandon() {
+    {
+      std::lock_guard<std::mutex> lock{mutex_};
+      abandoned_ = true;
+    }
+    cv_.notify_all();
+  }
+
+  size_t Completed() {
+    std::lock_guard<std::mutex> lock{mutex_};
+    return generation_;
+  }
+
+ private:
+  const size_t parties_;
+  std::mutex mutex_;
+  std::condition_variable cv_;
+  size_t arrived_{};
+  size_t generation_{};
+  bool abandoned_{};
+};
+
+// Sets a process environment variable for its lifetime and restores the previous state: the stand-in for the variable a
+// process-wide publication of the prompt length would write.
+class ScopedProcessEnv {
+ public:
+  ScopedProcessEnv(const char* name, const char* value) : name_{name} {
+    if (const char* previous = std::getenv(name)) previous_ = previous;
+    Write(value);
+  }
+  ~ScopedProcessEnv() {
+    if (previous_) {
+      Write(previous_->c_str());
+    } else {
+      Unset();
+    }
+  }
+  ScopedProcessEnv(const ScopedProcessEnv&) = delete;
+  ScopedProcessEnv& operator=(const ScopedProcessEnv&) = delete;
+
+ private:
+  void Write(const char* value) const {
+#if defined(_WIN32)
+    _putenv_s(name_, value);
+#else
+    setenv(name_, value, 1);
+#endif
+  }
+  void Unset() const {
+#if defined(_WIN32)
+    _putenv_s(name_, "");  // an empty value removes the variable
+#else
+    unsetenv(name_);
+#endif
+  }
+
+  const char* name_;
+  std::optional<std::string> previous_;
+};
 
 struct Outcome {
   std::vector<int32_t> tokens;
@@ -700,6 +786,128 @@ TEST_F(Qwen38GraphEngineTest, TheDeviceIsToldThePromptLengthAfterTheResetAndBefo
   ASSERT_EQ(RunToCompletion(*engine, request).tokens, Expected(16, 2));
   EXPECT_EQ(device_->CallCount("expect:16"), 1u);
   EXPECT_EQ(device_->prefill_totals, (std::vector<size_t>{11, 11, 11, 16, 16, 16, 16}));
+}
+
+// The prompt length of a turn belongs to its device. Two Engines on two owner threads (each with its own model and device)
+// are held between the publication of the length and the first chunk of the turn, so the schedule "A publishes, B
+// publishes, A ingests" of a process-wide variable happens at every turn start. Each device must see the length of its own
+// turn in every chunk, after a Reset (continued turn) and after a cancellation, and nothing may travel through the process
+// environment.
+TEST_F(Qwen38GraphEngineTest, EnginesOnTwoOwnerThreadsKeepTheirOwnExpectedPrefillTotals) {
+  struct Owner {
+    size_t prompt;           // the first turn; a continued turn follows it
+    size_t canceled_prompt;  // canceled after its first chunk
+    size_t last_prompt;
+    std::shared_ptr<Model> model;
+    std::shared_ptr<ScriptedQwen38Device> device;
+    std::vector<std::vector<int32_t>> tokens;
+    std::vector<GenerationFinishReason> finish_reasons;
+    std::string error;
+  };
+  const auto make_owner = [](size_t prompt, size_t canceled_prompt, size_t last_prompt) {
+    Owner owner{prompt, canceled_prompt, last_prompt, LoadSyntheticPagedModel(), std::make_shared<ScriptedQwen38Device>(/*capacity=*/128), {}, {}, {}};
+    owner.model->config_->engine.dynamic_batching.reset();
+    owner.model->config_->model.qwen38_graph.prefill.chunk = 4;
+    return owner;
+  };
+  Owner a = make_owner(21, 15, 6);
+  Owner b = make_owner(7, 9, 10);
+
+  Rendezvous rendezvous{2};
+  for (Owner* owner : {&a, &b}) {
+    owner->device->on_expect_prefill = [&rendezvous](size_t) {
+      if (!rendezvous.ArriveAndWait()) throw std::runtime_error("the other owner thread never reached its publication");
+    };
+  }
+
+  const auto run_owner = [&rendezvous](Owner& owner) {
+    try {
+      auto engine = std::make_shared<Engine>(owner.model, CreateQwen38GraphDependencies(owner.model, owner.device));
+      const auto drive = [&](const std::shared_ptr<Request>& request) {
+        std::vector<int32_t> tokens;
+        auto reason = GenerationFinishReason::None;
+        std::array<EngineEvent, 8> buffer;
+        for (size_t runs = 0; engine->HasPendingRequests(); ++runs) {
+          if (runs > 10000) throw std::runtime_error("the Engine did not finish");
+          const size_t count = engine->Run(buffer);
+          for (size_t i = 0; i < count; ++i) {
+            if (buffer[i].request != request) continue;
+            if (buffer[i].flags & EngineEventFlagFailed) throw std::runtime_error("the request failed");
+            if (buffer[i].flags & EngineEventFlagToken) tokens.push_back(buffer[i].token);
+            if (buffer[i].flags & EngineEventFlagTurnFinished) reason = buffer[i].finish_reason;
+          }
+        }
+        owner.tokens.push_back(std::move(tokens));
+        owner.finish_reasons.push_back(reason);
+      };
+
+      auto request = engine->CreateRequest();
+      TurnOptions first = Limit(3);
+      first.request = request;
+      request->BeginTurn(Prompt(owner.prompt), first);
+      drive(request);
+
+      const std::vector<int32_t> follow_up{30, 31};  // the continued turn re-ingests the whole history after a Reset
+      TurnOptions second = Limit(2);
+      second.request = request;
+      request->BeginTurn(follow_up, second);
+      drive(request);
+
+      auto canceled = engine->CreateRequest();
+      TurnOptions canceled_options;
+      canceled_options.request = canceled;
+      const uint64_t turn = canceled->BeginTurn(Prompt(owner.canceled_prompt), canceled_options);
+      std::array<EngineEvent, 8> buffer;
+      engine->Run(buffer);  // the first chunk of the prompt only
+      engine->CancelRequest(canceled, turn);
+      drive(canceled);
+
+      auto last = engine->CreateRequest();
+      TurnOptions last_options = Limit(2);
+      last_options.request = last;
+      last->BeginTurn(Prompt(owner.last_prompt), last_options);
+      drive(last);
+    } catch (const std::exception& error) {
+      owner.error = error.what();
+      rendezvous.Abandon();
+    }
+  };
+
+  ScopedProcessEnv sentinel{Qwen38OrtEnv::kPrefillTotalTokens, "424242"};
+  std::thread thread_a{[&] { run_owner(a); }};
+  std::thread thread_b{[&] { run_owner(b); }};
+  thread_a.join();
+  thread_b.join();
+
+  EXPECT_EQ(rendezvous.Completed(), 4u);  // one publication per turn on each device
+  const auto totals = [](size_t total, size_t chunk) { return std::vector<size_t>((total + chunk - 1) / chunk, total); };
+  for (Owner* owner : {&a, &b}) {
+    SCOPED_TRACE("prompt of " + std::to_string(owner->prompt) + " tokens");
+    EXPECT_EQ(owner->error, "");
+    auto expected = totals(owner->prompt, 4);
+    for (const auto& part : {totals(owner->prompt + 3 + 2, 4), std::vector<size_t>{owner->canceled_prompt},
+                             totals(owner->last_prompt, 4)}) {
+      expected.insert(expected.end(), part.begin(), part.end());
+    }
+    EXPECT_EQ(owner->device->prefill_totals, expected);
+
+    const auto& device = *owner->device;
+    ASSERT_EQ(owner->tokens.size(), 4u);
+    EXPECT_EQ(owner->tokens[0], (std::vector<int32_t>{device.TokenAt(owner->prompt), device.TokenAt(owner->prompt + 1),
+                                                      device.TokenAt(owner->prompt + 2)}));
+    EXPECT_EQ(owner->tokens[1],
+              (std::vector<int32_t>{device.TokenAt(owner->prompt + 5), device.TokenAt(owner->prompt + 6)}));
+    EXPECT_TRUE(owner->tokens[2].empty());
+    EXPECT_EQ(owner->tokens[3],
+              (std::vector<int32_t>{device.TokenAt(owner->last_prompt), device.TokenAt(owner->last_prompt + 1)}));
+    EXPECT_EQ(owner->finish_reasons,
+              (std::vector<GenerationFinishReason>{GenerationFinishReason::TurnLimit, GenerationFinishReason::TurnLimit,
+                                                   GenerationFinishReason::Canceled, GenerationFinishReason::TurnLimit}));
+  }
+
+  const char* published = std::getenv(Qwen38OrtEnv::kPrefillTotalTokens);
+  ASSERT_NE(published, nullptr);
+  EXPECT_STREQ(published, "424242") << "the executor must not publish the prompt length in the process environment";
 }
 
 TEST_F(Qwen38GraphEngineTest, CancelDuringPrefillStopsBeforeDecodingAndTheNextRequestStartsClean) {
