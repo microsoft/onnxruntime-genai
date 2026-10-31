@@ -5,7 +5,7 @@ launcher and pooled-result validator used to reproduce the optimized
 8,192-input / 512-output workload. See [RESULTS.md](RESULTS.md) for all
 optimization gains and [the detailed log](../../../docs/Qwen38MtpEngramIssues.md)
 for operator validation and rejected experiments. The static-graph Engine
-backend (draft PRs #2725-#2729) is measured with the same 8,192 / 512 protocol
+backend (PRs #2725-#2729) is measured with the same 8,192 / 512 protocol
 in [RESULTS.md](RESULTS.md#static-graph-backend-next-to-the-paged-engine); its
 scripts are `tools/qwen38_graph/` of that series; the scripts here do not run it
 (the model type rejects the minimum generated-token count they request).
@@ -166,6 +166,14 @@ Do not discard slow measured requests or average invocation TPS numbers.
 If the pooled result is below 100, the validator exits nonzero rather than
 claiming success. Hardware load, arithmetic-dependent acceptance and cold
 unseen-shape tuning can affect the result.
+
+The ratios and percentages quoted in the static-graph and Windows RTX 5090
+sections of [RESULTS.md](RESULTS.md) are derived from the table rows they
+summarize. After editing those rows or the text around them, run
+`python benchmark/python/qwen38/check_results_ratios.py` (add `--print` to list
+every derived value); it exits nonzero if a quoted value disagrees with its
+rows. `python -m pytest test/python/test_qwen38_results_ratios.py` tests the
+checker itself. Both only recompute the reported numbers and measure nothing.
 
 ## Original local deployment
 

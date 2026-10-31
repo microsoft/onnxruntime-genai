@@ -135,7 +135,7 @@ memory-instrumented request timings in the throughput comparison.
 
 A second Engine backend serves the same checkpoint from captured CUDA graphs
 with a fixed-capacity KV cache and a device-side MTP(1) loop (model type
-`qwen38_flash_graph`, draft PRs #2725-#2729). The table uses the protocol of
+`qwen38_flash_graph`, PRs #2725-#2729). The table uses the protocol of
 this document: one H200, batch one, greedy decoding, exactly **8,192 uncached
 input tokens and 512 generated tokens**, with the prompt text of
 `benchmark_qwen_mtp.py` (the same sentence repeated). The static-graph row
@@ -216,15 +216,15 @@ and 32 GiB (`<= 32,768 MiB`) VRAM budgets across 2k-32k prefill and decode:
 - **32 GiB GPU budget (`qwen_flash_next_nvfp4_fp8_rc1_offload_32g`, `s6768`: `6,768 + 96` physical slots = `27.54%` resident)**: **`32,403 MiB (31.64 GiB)`** peak GPU memory (`<= 32,768 MiB`), adaptive decode **`196.48 tok/s` median / `208.35 tok/s` peak** at 2k context (`15.89 ms/cycle`), **`167.57 tok/s` median / `191.04 tok/s` peak** at 8k, **`155.74 tok/s` median / `160.87 tok/s` peak** at 32k (`S=3`; `150.75 / 167.74 tok/s` at `S=4`), TTFT `0.450 / 0.736 / 1.129 / 2.564 s` (`128 / 512 / 2k / 8k`), and MMLU-Pro 800 **`661/800 (82.625%)`** at **`173.05 tok/s` median / `190.28 tok/s` peak** (`486.2 tok/s` median / `756.4 tok/s` peak across 8 GPUs).
 - **Bounded host RAM cgroup evaluation (`64 GiB` and `48 GiB` enforced `MemoryMax` on 32 GiB GPU)**:
   - **`64 GiB` enforced RAM (`ORT_QMOE_HOST_CACHE_MIB=57344`, `17,808 / 17,808` cold experts cached = `100%` disjoint)**: **`51.14 GiB`** cgroup `memory.peak` (`0` OOM), **`1.14 s` TTFT / `169.66 tok/s` median (`182.09–189.03 tok/s` peak)** at 2k, **`3.30 s` TTFT / `145.21 tok/s` median (`160.84 tok/s` peak)** at 8k, and **`17.55 s` TTFT / `134.02 tok/s` median (`137.42 tok/s` peak)** at 32k.
-  - **`48 GiB` enforced RAM (`ORT_QMOE_HOST_CACHE_MIB=40960`, `15,456 / 18,096` cold experts cached = `85.4%`)**: **`45.29 GiB`** cgroup `memory.peak` (`0` OOM), **`1.40 s` TTFT / `123.41 tok/s` median (`147.40 tok/s` peak)** at 2k and **`3.59 s` TTFT / `114.42 tok/s` median (`162.42 tok/s` peak)** at 8k when page-cache hot, and **`54.5–75.1 tok/s`** (`2.5–3.0x` vs baseline) under cold-storage `DROP_PAGE_CACHE=1`.
+  - **`48 GiB` enforced RAM (`ORT_QMOE_HOST_CACHE_MIB=40960`, `15,456 / 18,096` cold experts cached = `85.4%`)**: **`45.29 GiB`** cgroup `memory.peak` (`0` OOM), **`1.40 s` TTFT / `123.41 tok/s` median (`147.40 tok/s` peak)** at 2k and **`3.59 s` TTFT / `114.42 tok/s` median (`162.42 tok/s` peak)** at 8k when page-cache hot, and **`54.5–75.1 tok/s`** under cold-storage `DROP_PAGE_CACHE=1` (no cold-storage baseline is recorded here, so no ratio is claimed).
 
 ### Consumer GPU Evaluation: Windows RTX 5090 (32 GB VRAM, 64 GB DDR5 RAM, Ryzen 9 9950X)
 
 We ported and evaluated `qwen_flash_next_nvfp4_fp8_rc1_offload_32g` (`model.type = "qwen38_flash_graph"`, 4-row folded MTP `model_s4.onnx` + 3-draft `mtp.onnx`) on a consumer Windows 11 Pro workstation (**NVIDIA GeForce RTX 5090 32 GB GDDR7 `sm_120`** under WDDM, **AMD Ryzen 9 9950X 16-Core / 32-Thread AVX-512**, **64 GB DDR5 RAM**, Visual Studio 2026 MSVC 19.50, CUDA 13.2). Decode runs entirely inside a single captured 48-layer CUDA Graph via the zero-copy device-doorbell protocol (`DoorbellService` + `QMoEOffloadMergeFinalizeCombineKernel`) with `ORT_QMOE_HOST_CACHE_GIB=0` (direct `MapViewOfFile` over `source_weights\experts.data` with `MEMORY_PRIORITY_VERY_LOW` initial upload so `0 MiB` of GPU-resident experts pollute the Windows CPU Working Set).
 
-Four targeted optimizations increased RTX 5090 decode throughput by **`+141.3%`–`+143.8%` (`2.41x–2.44x`)** and prefill speed by **`2.64x–3.20x`**:
+Session 1 (the `75%` configuration) and four further optimizations (Phase 1–4, below) raised RTX 5090 decode throughput over the initial port by **`2.28x`–`2.47x`** (**`+128.4%`–`+147.1%`**; the summary table gives each context and configuration) and improved time to first token (TTFT) by **`1.11x`–`3.35x`** depending on prompt length ([TTFT by prompt length](#ttft-by-prompt-length-on-windows-rtx-5090)). TTFT covers the whole first-token path rather than prefill alone, and most of its improvement was already present after Session 1. The four Phase 1–4 optimizations are:
 
-1. **WDDM Silent VRAM Spillover Elimination & Spare-Slot Reclamation (`qmoe_offload.cc`)**: Reclaiming unused `spare_slots_` (`768 -> 0` when promotions are off, or capped to `2/layer = 96` slots when enabled, saving **`1.77–2.02 GiB`** VRAM), enabling `use_arena_dequant` (`-600 MiB`), and scaling resident hot experts to `60%–62%` (`4,880–5,046` slots = `12.9–13.3 GiB`) keeps total `cudaMalloc` safely below the `~30.9 GiB` WDDM physical VRAM threshold. This eliminates silent WDDM paging to Shared GPU Memory over PCIe and cuts intra-cycle layer-to-layer GPU stalls (`gap_in`) by **88.6%** (`77.02 ms/cycle` / `1,640.3 us/layer` -> **`8.76 ms/cycle` / `184.9 us/layer`**).
+1. **WDDM Silent VRAM Spillover Elimination & Spare-Slot Reclamation (`qmoe_offload.cc`)**: Reclaiming unused `spare_slots_` (`768 -> 0` when promotions are off, or capped to `2/layer = 96` slots when enabled, saving **`1.77–2.02 GiB`** VRAM), enabling `use_arena_dequant` (`-600 MiB`), and scaling resident hot experts to `60%–62%` (`4,880–5,046` slots = `12.9–13.3 GiB`) keeps total `cudaMalloc` safely below the `~30.9 GiB` WDDM physical VRAM threshold. This eliminates silent WDDM paging to Shared GPU Memory over PCIe and cuts intra-cycle layer-to-layer GPU stalls (`gap_in`) by **88.6%** per cycle (`77.02 ms/cycle` / `1,640.3 us/layer` -> **`8.76 ms/cycle` / `184.9 us/layer`**).
 2. **Single-Barrier Grouped Cold-Expert Dispatch, CCD Core Pinning & AVX-512 Prefetch (`qmoe_spin_pool.h`, `qmoe_shared_layout_avx512.cc`)**: Setting `ORT_QMOE_SHARED_GROUPED_CALLS=64` (`FC1=128`, `FC2=256`) dispatches all `~18.8` active cold experts per layer in **1 thread-pool barrier per layer** (`48` barriers/cycle instead of `144`), while `DiscoverWindowsBalancedCpuOrder` pins `SpinPool` workers round-robin across both Ryzen 9 9950X CCDs (`GetLogicalProcessorInformationEx` + `SetThreadAffinityMask`) and `Fp4Group4Avx512` issues `_mm_prefetch` (`_MM_HINT_T0`) for the next 4-row weight block.
 3. **Cross-Layer Async Cold-Expert Promotion (`DoorbellService::PromoLoop`) & Prefill DMA Overlap (`PrefetchNextQMoEPrefillDmaPass`)**: During decode, `PromoLoop()` inspects lookahead layers `idx + 2..4` and enqueues asynchronous H2D DMA promotions onto a pre-allocated low-priority `promo_stream_` while intermediate layers execute on the CPU and GPU. During prefill, active-expert filtering (`expert_Zero_counts_host_[e] == 0`, cutting PCIe volume by `45%–76%`), single-contiguous-buffer DMA packing, and `PrefetchNextQMoEPrefillDmaPass` overlap next-pass/next-layer host staging and PCIe DMA with GPU MoE/attention compute.
 4. **4-Row Batched PLE Control Staging & 2,048-Slot Hot N-Gram PLE Cache (`qwen38_plane.cu`)**: Batching the 40-word control H2D copy across all 4 folded draft rows and adding a `16 MiB` (`2,048 x 3,840` BF16) direct-mapped N-gram PLE row cache in `StagedPleWorkspace` cuts inter-cycle MTP draft + control overhead (`t1 + t2 + t3`) by **50.8%** (`13.67 -> 6.72 ms/cycle`).
@@ -241,17 +241,31 @@ Four targeted optimizations increased RTX 5090 decode throughput by **`+141.3%`�
 | **Measured Cycle Time (`ctx=512` / `ctx=2048`)** | `137.22 ms` / `137.69 ms` | `63.38 ms` / `81.22 ms` | **`63.38–64.23 ms` / `61.94–63.40 ms`** |
 | **Measured Decode Throughput (`ctx=512` / `ctx=2048`)** | `27.22 tok/s` / `27.95 tok/s` | `40.90 tok/s` / `46.33 tok/s` | **`54.47–58.93 tok/s` / `58.90–62.13 tok/s`** |
 
+#### TTFT by prompt length on Windows RTX 5090
+
+TTFT is what `bench_ttft_engine.py` reports: the time from submitting the prompt (`begin_turn`) to the return of the `Engine.run` call that delivers the first token. That interval includes every prompt chunk, the dense-to-packed hand-off, the batched head-KV prefill, the first draft and the enqueue of the first verify cycle, so the factors below are TTFT improvements, not isolated prefill speedups.
+
+| Prompt tokens | Initial Port (Baseline) | Session 1 Opt (`75%` Scale) | **Phase 1–4 Final** | **TTFT improvement vs. baseline** | Session 1 / final |
+|---:|---:|---:|---:|---:|---:|
+| 128 | 2.65 s | 1.97 s | 2.38 s | **1.11x** | 0.83x |
+| 256 | 4.21 s | 2.27 s | 2.90 s | **1.45x** | 0.78x |
+| 512 | 8.07 s | 3.21 s | 3.06 s | **2.64x** | 1.05x |
+| 2,048 | 32.02 s | 9.48 s | 9.57–10.78 s | **2.97x–3.35x** | 0.88x–0.99x |
+| 8,192 | 140.47 s | 42.16 s | 42.94–43.98 s | **3.19x–3.27x** | 0.96x–0.98x |
+
+Each factor is the baseline (or Session 1) time divided by the final time, rounded to two decimals from the times shown. Where the final column is a range of recorded values, the factor range runs from the slowest to the fastest final value. A Session 1 / final value below `1.00x` means the final configuration's TTFT is higher than Session 1's: most of the improvement over the baseline was already present after Session 1. `check_results_ratios.py` recomputes these factors from the rows above, so they are derived rather than typed. They use the numbers reported here and are not independent GPU measurements.
+
 #### Verified Windows RTX 5090 Benchmark & MMLU-Pro Summary
 
 | Benchmark / Suite | Initial Port (Baseline) | Session 1 Opt (`75%` Scale) | **Phase 1–4 Final (`62%` Default / Cross-Layer Promo)** | Total Improvement vs. Baseline |
 |---|---:|---:|---:|---|
 | **`engine_behaviours.py` Functional & Determinism** | `26 / 26 PASS` | `26 / 26 PASS` | **`26 / 26 PASS` (`100%` turn-to-turn bit-exact)** | **100% compliant** |
-| **`bench_engine_mtp.py` (`ctx=512` median decode)** | `23.85 tok/s` (`167.85 ms/cycle`) | `27.22 tok/s` (`137.22 ms/cycle`) | **`54.47 tok/s` (default) / `58.15–58.93 tok/s` (promo, `63.38–64.23 ms/cycle`)** | **`+143.8%` (`2.44x`)** |
-| **`bench_engine_mtp.py` (`ctx=2048` median decode)** | `25.16 tok/s` (`152.93 ms/cycle`) | `27.95 tok/s` (`137.69 ms/cycle`) | **`58.90 tok/s` (default) / `60.70–62.13 tok/s` (promo, `61.94–63.40 ms/cycle`)** | **`+141.3%` (`2.41x`)** |
+| **`bench_engine_mtp.py` (`ctx=512` median decode)** | `23.85 tok/s` (`167.85 ms/cycle`) | `27.22 tok/s` (`137.22 ms/cycle`) | **`54.47 tok/s` (default) / `58.15–58.93 tok/s` (promo, `63.38–64.23 ms/cycle`)** | **`+128.4%` (`2.28x`) default / `+143.8%`–`+147.1%` (`2.44x`–`2.47x`) promo** |
+| **`bench_engine_mtp.py` (`ctx=2048` median decode)** | `25.16 tok/s` (`152.93 ms/cycle`) | `27.95 tok/s` (`137.69 ms/cycle`) | **`58.90 tok/s` (default) / `60.70–62.13 tok/s` (promo, `61.94–63.40 ms/cycle`)** | **`+134.1%` (`2.34x`) default / `+141.3%`–`+146.9%` (`2.41x`–`2.47x`) promo** |
 | **`mmlu_engine_eval.py` (`80`-shard 0 accuracy)** | `8 / 10 (80.0%)` | `8 / 10 (80.0%)` | **`8 / 10 (80.0%)`, `0` truncated** | **Exact parity** |
 | **`mmlu_engine_eval.py` (Long-CoT decode `tok/s`)** | `24.64–26.34 tok/s` (`25.67` avg) | `31.34–35.23 tok/s` (`33.78` avg) | **`51.51–60.42 tok/s` (`56.15 tok/s` avg, `63.56 tok/s` peak)** | **`+118.7%` (`2.19x`)** |
 | **`mmlu_engine_eval.py` (Total 10-item shard wall time)** | `189.51 s` | `106.62 s` | **`72.62 s` (`2.61x` faster than baseline, `-31.9%` vs Session 1)** | **`2.61x` end-to-end speedup** |
-| **`bench_ttft_engine.py` (`L=128 / 256 / 512 / 2048 / 8192`)** | `2.65 / 4.21 / 8.07 / 32.02 / 140.47 s` | `1.97 / 2.27 / 3.21 / 9.48 / 42.16 s` | **`2.38 / 2.90 / 3.06 / 9.57–10.78 / 42.94–43.98 s`** | **`2.64x–3.20x` faster** |
+| **`bench_ttft_engine.py` (TTFT by prompt length)** | per-length table above | per-length table above | **per-length table above** | **TTFT improvement `1.11x`–`3.35x`, depending on prompt length (table above)** |
 
 Read the comparison with these caveats:
 
@@ -263,7 +277,7 @@ Read the comparison with these caveats:
   MTP; the static-graph loop proposes one draft token per cycle.
 - **The repeated-sentence prompt favors speculation.** Acceptance was 1.000 on
   it, so 252.5 tokens/s is close to the two-tokens-per-cycle ceiling of the
-  7.9 ms cycle. Natural text accepts 0.79-0.95 and decodes at 232-249 tokens/s.
+  7.9 ms cycle. Natural text accepts 0.79-0.95 and decodes at 231.5-249.0 tokens/s.
   The paged table does not control for acceptance either.
 - **Scope of the static-graph backend:** greedy decoding only, one resident
   request (others queue), Linux and Windows with CUDA, no prefix cache, sessions
