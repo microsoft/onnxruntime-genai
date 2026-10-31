@@ -124,6 +124,19 @@ static_assert(static_cast<int>(Qwen38GraphRun::kHeadR2) + 1 == kQwen38GraphRunCo
 // Throws std::out_of_range for a run, row count or phase beyond the limits above.
 int Qwen38GraphAnnotationId(Qwen38GraphRun run, int rows, int phase);
 
+// ORT captures a graph after a few eager runs of it: the warm-up of a graph runs it this many times, to be safe.
+inline constexpr int kQwen38WarmupRunsPerGraph = 6;
+
+// What the DFlash engine runs while its model is created. model.qwen38_graph.warmup=false opts out of all of it, as for the
+// other paths: no forward, hence no CUDA graph captured and no startup cost, for the drafter or for the target. With
+// warmup=true the drafter ingests a warm-up prompt and drafts every row width (`drafter`) and `target_tokens` dummy prompt
+// tokens step through the S=verify_rows target graphs, enough runs of every (rows, ring bank) graph to capture it.
+struct Qwen38DflashWarmupPlan {
+  bool drafter{};
+  size_t target_tokens{};
+};
+Qwen38DflashWarmupPlan PlanQwen38DflashWarmup(bool warmup, int verify_rows, int num_banks) noexcept;
+
 // The packed QSA indexer pools kQwen38IndexKeyRatio tokens into one compressed index key.
 inline constexpr int kQwen38IndexKeyRatio = 4;
 

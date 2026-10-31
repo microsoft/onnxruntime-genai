@@ -109,6 +109,12 @@ int Qwen38GraphAnnotationId(Qwen38GraphRun run, int rows, int phase) {
   return 1 + (run_index * kQwen38GraphIdMaxRows + (rows - 1)) * kQwen38GraphIdMaxPhases + phase;
 }
 
+Qwen38DflashWarmupPlan PlanQwen38DflashWarmup(bool warmup, int verify_rows, int num_banks) noexcept {
+  if (!warmup || verify_rows < 1 || num_banks < 1) return {};
+  return {true, static_cast<size_t>(verify_rows) * static_cast<size_t>(num_banks) *
+                    static_cast<size_t>(kQwen38WarmupRunsPerGraph)};
+}
+
 // ------------------------------------------------------------------------------------------------
 // Engine
 // ------------------------------------------------------------------------------------------------
@@ -224,7 +230,8 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
   if (dflash_) {
     const auto start = Clock::now();
     run_hints_.RequireDeterministicMoe();
-    if (q.warmup && fast_ && fast_->unified) {
+    const Qwen38DflashWarmupPlan warmup = PlanQwen38DflashWarmup(q.warmup, verify_rows_, num_banks_);
+    if (warmup.drafter && fast_ && fast_->unified) {
       if (fast_->chunk > 512) {
         Draft(d_dflash_prompt_.data(), static_cast<size_t>(fast_->chunk), static_cast<size_t>(capacity_), 1000, false);
         dflash_->ReleaseAll();
@@ -251,9 +258,11 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
       SyncStream();
       Reset();
     }
-    std::vector<int32_t> dummy(static_cast<size_t>(verify_rows_) * num_banks_ * 6, 1000);
-    StepPrefill(dummy);
-    Reset();
+    if (warmup.target_tokens > 0) {
+      std::vector<int32_t> dummy(warmup.target_tokens, 1000);
+      StepPrefill(dummy);
+      Reset();
+    }
     warmup_seconds = SecondsSince(start);
   }
   if (q.warmup && !dflash_) {
@@ -1503,7 +1512,7 @@ void Qwen38GraphEngine::Warmup() {
       Reset();
     }
   }
-  const int warm_tokens = target_captures_graph ? (R * num_banks_ * 6) : (R * num_banks_);
+  const int warm_tokens = target_captures_graph ? (R * num_banks_ * kQwen38WarmupRunsPerGraph) : (R * num_banks_);
   const int chunk_tokens = std::min(warm_tokens, (max_prompt / R) * R);
   for (int done = 0; done < warm_tokens; done += chunk_tokens) {
     if (done > 0) Reset();
@@ -1516,7 +1525,7 @@ void Qwen38GraphEngine::Warmup() {
     const auto& q = model_.config_->model.qwen38_graph;
     const bool head_captures_graph =
         q.fold.head_r2.session_options ? IsGraphCaptureEnabled(*q.fold.head_r2.session_options) : target_captures_graph;
-    const int head_warm_calls = head_captures_graph ? (num_banks_ * 6) : num_banks_;
+    const int head_warm_calls = head_captures_graph ? (num_banks_ * kQwen38WarmupRunsPerGraph) : num_banks_;
     ClearHead();
     SyncStream();
     for (int i = 0; i < head_warm_calls; ++i) {
