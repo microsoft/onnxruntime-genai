@@ -173,6 +173,20 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             _ = new OnnxRuntimeGenAITests(output);
         }
 
+        [Fact]
+        public void TestRuntimeSurvivesTestInstanceCollection()
+        {
+            CreateCollectibleTestInstances();
+            using var model = new Model(_tinyRandomGpt2ModelPath);
+            using var tokenizer = new Tokenizer(model);
+
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+
+            using var tokens = tokenizer.Encode("test");
+            Assert.NotEmpty(tokens[0].ToArray());
+        }
+
         [Fact(DisplayName = "TestSharedShutdownHandle")]
         public void TestSharedShutdownHandle()
         {

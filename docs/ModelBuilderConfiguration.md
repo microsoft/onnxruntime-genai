@@ -612,6 +612,13 @@ The same component ownership can later accommodate audio without changing the ta
 | Olive `search` | Runtime `search` |
 | Any other `extra_options` key | No canonical destination yet; see rule 8 |
 
+Structured `runtime_config.engine.dynamic_batching` also accepts `prefix_caching`,
+`max_snapshots`, and `snapshot_cache`. These opt-in snapshot tiers
+and their additional count cap define one Engine-owned policy, not per-component
+budgets. Currently only DFlash ring snapshots participate; retained target KV
+and fixed state remain outside these limits. See
+[Paged Attention Engine](paged_attention_engine.md#tiered-snapshot-cache).
+
 Target and DFlash2 gate/up fusion both default to `false` and support explicit fusion controls. The `use_device_allocator_for_initializers` extra option remains supported and opt-in (default `false`), except that paged Qwen3.8 sessions enable it automatically. Explicit per-op packing fields select the target layout independently.
 
 Normalization rules:

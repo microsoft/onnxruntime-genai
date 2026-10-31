@@ -96,12 +96,8 @@ def write_external_component_model(
             entry = tensor.external_data.add()
             entry.key = key
             entry.value = str(value)
-    hidden = onnx.helper.make_tensor_value_info(
-        input_name, onnx.TensorProto.FLOAT, [None, 4]
-    )
-    scores = onnx.helper.make_tensor_value_info(
-        output_name, onnx.TensorProto.FLOAT, [None, 4]
-    )
+    hidden = onnx.helper.make_tensor_value_info(input_name, onnx.TensorProto.FLOAT, [None, 4])
+    scores = onnx.helper.make_tensor_value_info(output_name, onnx.TensorProto.FLOAT, [None, 4])
     graph = onnx.helper.make_graph(
         [onnx.helper.make_node("Identity", [input_name], [output_name])],
         "component",
@@ -112,16 +108,10 @@ def write_external_component_model(
     path.write_bytes(onnx.helper.make_model(graph).SerializeToString())
 
 
-def write_backbone(
-    output_dir, filename="model.onnx", output_name="hidden_states"
-):
+def write_backbone(output_dir, filename="model.onnx", output_name="hidden_states"):
     output_dir.mkdir(exist_ok=True)
-    input_value = onnx.helper.make_tensor_value_info(
-        "input_ids", onnx.TensorProto.INT64, [None, None]
-    )
-    output_value = onnx.helper.make_tensor_value_info(
-        output_name, onnx.TensorProto.FLOAT, [None, None, 4]
-    )
+    input_value = onnx.helper.make_tensor_value_info("input_ids", onnx.TensorProto.INT64, [None, None])
+    output_value = onnx.helper.make_tensor_value_info(output_name, onnx.TensorProto.FLOAT, [None, None, 4])
     model = onnx.helper.make_model(
         onnx.helper.make_graph(
             [
@@ -456,15 +446,11 @@ def test_component_package_protects_backbone_declared_external_data(tmp_path):
         (0, 4, 16, "range is too small"),
     ],
 )
-def test_component_package_rejects_invalid_external_data_ranges(
-    tmp_path, offset, length, file_size, match
-):
+def test_component_package_rejects_invalid_external_data_ranges(tmp_path, offset, length, file_size, match):
     source_dir = tmp_path / "source"
     source_dir.mkdir()
     graph = source_dir / "head.onnx"
-    write_external_component_model(
-        graph, "weights.bin", offset=offset, length=length
-    )
+    write_external_component_model(graph, "weights.bin", offset=offset, length=length)
     (source_dir / "weights.bin").write_bytes(b"\0" * file_size)
     output_dir = tmp_path / "package"
     write_backbone(output_dir)
@@ -499,9 +485,7 @@ def test_component_model_rejects_missing_external_location(tmp_path, location):
         (0, -1, "range is too small"),
     ],
 )
-def test_component_model_rejects_malformed_external_ranges(
-    tmp_path, offset, length, match
-):
+def test_component_model_rejects_malformed_external_ranges(tmp_path, offset, length, match):
     graph = tmp_path / "head.onnx"
     write_external_component_model(graph, "weights.bin", offset=offset, length=length)
     (tmp_path / "weights.bin").write_bytes(b"\0" * 16)
@@ -550,21 +534,13 @@ def test_component_model_checks_original_nested_external_metadata(tmp_path, plac
             attribute = onnx.helper.make_attribute("values", [tensor])
         elif placement in ("graph", "graphs"):
             nested = onnx.helper.make_graph([], "nested", [], [], [tensor])
-            attribute = onnx.helper.make_attribute(
-                "body", [nested] if placement == "graphs" else nested
-            )
+            attribute = onnx.helper.make_attribute("body", [nested] if placement == "graphs" else nested)
         elif placement == "sparse_attribute":
-            attribute = onnx.AttributeProto(
-                name="sparse", type=onnx.AttributeProto.SPARSE_TENSOR
-            )
+            attribute = onnx.AttributeProto(name="sparse", type=onnx.AttributeProto.SPARSE_TENSOR)
             attribute.sparse_tensor.values.CopyFrom(tensor)
         elif placement == "malformed_attribute":
             attribute.type = onnx.AttributeProto.INT
-        node = (
-            model.functions.add().node.add()
-            if placement == "function"
-            else model.graph.node[0]
-        )
+        node = model.functions.add().node.add() if placement == "function" else model.graph.node[0]
         node.attribute.append(attribute)
     graph.write_bytes(model.SerializeToString())
 
@@ -582,18 +558,14 @@ def test_component_model_uses_ir_without_reading_external_payload(tmp_path):
     assert isinstance(model, ir.Model)
     assert [value.name for value in model.graph.inputs] == ["hidden_states"]
     assert isinstance(model.graph.initializers["weight"].const_value, ir.ExternalTensor)
-    assert find_external_data_files(model, graph, "head") == [
-        ("weights.bin", tmp_path / "weights.bin")
-    ]
+    assert find_external_data_files(model, graph, "head") == [("weights.bin", tmp_path / "weights.bin")]
 
 
 @pytest.mark.parametrize(
     "reserved_name",
     ["genai_config.json", "tokenizer.json", "model.onnx.data"],
 )
-def test_component_package_rejects_exporter_owned_external_data(
-    tmp_path, reserved_name
-):
+def test_component_package_rejects_exporter_owned_external_data(tmp_path, reserved_name):
     output_dir = tmp_path / "package"
     write_backbone(output_dir)
     graph = output_dir / "head.onnx"
@@ -844,9 +816,7 @@ def test_component_backbone_rejects_external_data_directory(tmp_path):
     ).component_options
 
     with pytest.raises(ValueError, match="existing directory"):
-        validate_component_backbone_destination(
-            options, output_dir, require_exists=False
-        )
+        validate_component_backbone_destination(options, output_dir, require_exists=False)
 
 
 def test_config_only_backbone_requires_hidden_states_output(tmp_path):
@@ -858,15 +828,11 @@ def test_config_only_backbone_requires_hidden_states_output(tmp_path):
     ).component_options
 
     write_backbone(output_dir)
-    validate_component_backbone_destination(
-        options, output_dir, require_exists=True
-    )
+    validate_component_backbone_destination(options, output_dir, require_exists=True)
 
     write_backbone(output_dir, output_name="logits")
     with pytest.raises(ValueError, match="hidden_states output"):
-        validate_component_backbone_destination(
-            options, output_dir, require_exists=True
-        )
+        validate_component_backbone_destination(options, output_dir, require_exists=True)
 
 
 def test_generic_component_options_reject_revision_fields():
@@ -1859,11 +1825,18 @@ def test_runtime_batching_validation_is_shared_with_profiles(in_profile, engine,
 
 
 @pytest.mark.parametrize("in_profile", [False, True])
+@pytest.mark.parametrize(
+    "field,error",
+    [
+        ("dflash2_max_snapshots", "dflash2_max_snapshots must be an integer between"),
+        ("max_snapshots", "max_snapshots must be an integer from"),
+    ],
+)
 @pytest.mark.parametrize("value", [0, 1, 3, 2_147_483_647, -1, 1.5, 2**31, True, "3", None])
-def test_dflash2_snapshot_limits_in_runtime_config_and_profiles(in_profile, value):
+def test_snapshot_limits_in_runtime_config_and_profiles(in_profile, field, error, value):
     generated = {"model": {"decoder": {}}, "engine": {"dynamic_batching": {"num_blocks": 32}}}
     baseline = copy.deepcopy(generated)
-    runtime = {"engine": {"dynamic_batching": {"dflash2_max_snapshots": value}}}
+    runtime = {"engine": {"dynamic_batching": {field: value}}}
     if in_profile:
         runtime = {
             "runtime_profiles": [
@@ -1876,11 +1849,105 @@ def test_dflash2_snapshot_limits_in_runtime_config_and_profiles(in_profile, valu
             assert result["runtime_profiles"] == runtime["runtime_profiles"]
             assert result["engine"] == generated["engine"]
         else:
-            assert result["engine"]["dynamic_batching"]["dflash2_max_snapshots"] == value
+            assert result["engine"]["dynamic_batching"][field] == value
     else:
-        with pytest.raises(ValueError, match="dflash2_max_snapshots must be an integer between"):
+        with pytest.raises(ValueError, match=error):
             apply_runtime_config(generated, runtime)
     assert generated == baseline
+
+
+@pytest.mark.parametrize("in_profile", [False, True])
+@pytest.mark.parametrize(
+    "model,supported",
+    [
+        ({"decoder": {}}, True),
+        ({"decoder": {}, "dspark": {"filename": "dspark.onnx"}}, False),
+        ({"decoder": {}, "mtp": {"filename": "mtp.onnx"}}, False),
+        ({"decoder": {}, "mtp": {"filename": "mtp.onnx", "enabled": False}}, True),
+        ({"decoder": {}, "dflash2": {"filename": "dflash2.onnx"}}, False),
+        ({"decoder": {}, "dflash2": {"filename": "dflash2.onnx", "sliding_window": None}}, False),
+        ({"decoder": {}, "dflash2": {"filename": "dflash2.onnx", "sliding_window": 8}}, True),
+        (
+            {"decoder": {"sliding_window": {"layers": [0]}, "inputs": {"block_table_windowed": "windowed"}}},
+            False,
+        ),
+        ({"decoder": {"sliding_window": {"layers": []}, "inputs": {"block_table_windowed": "windowed"}}}, True),
+        ({"decoder": {"sliding_window": {"layers": [0]}}}, True),
+    ],
+)
+def test_runtime_prefix_caching_respects_exported_layout(in_profile, model, supported):
+    generated = {"model": model, "engine": {"dynamic_batching": {"prefix_caching": False}}}
+    runtime = {"engine": {"dynamic_batching": {"prefix_caching": True}}}
+    if in_profile:
+        runtime = {
+            "runtime_profiles": [
+                {"id": "prefix-cache", "eligibility": {"minimum_total_device_memory_bytes": 0}, "overlay": runtime}
+            ]
+        }
+    baseline = copy.deepcopy(generated)
+    if supported:
+        updated = apply_runtime_config(generated, runtime)
+        if in_profile:
+            assert updated["runtime_profiles"] == runtime["runtime_profiles"]
+        else:
+            assert updated["engine"]["dynamic_batching"]["prefix_caching"] is True
+    else:
+        with pytest.raises(ValueError, match="prefix_caching is unsupported by the exported layout"):
+            apply_runtime_config(generated, runtime)
+    assert generated == baseline
+
+
+@pytest.mark.parametrize("policy", [{}, {"disk_bytes": 4096}])
+def test_runtime_snapshot_policy_replaces_existing_budgets(policy):
+    generated = {
+        "engine": {
+            "dynamic_batching": {"snapshot_cache": {"vram_bytes": 1024, "ram_bytes": 2048, "directory": "spill"}}
+        }
+    }
+    baseline = copy.deepcopy(generated)
+    updated = apply_runtime_config(generated, {"engine": {"dynamic_batching": {"snapshot_cache": policy}}})
+    assert updated["engine"]["dynamic_batching"]["snapshot_cache"] == policy
+    assert generated == baseline
+
+
+def test_runtime_snapshot_tiers_and_count_cap_are_preserved():
+    generated = {"engine": {"dynamic_batching": {"num_blocks": 128}}}
+    policy = {
+        "prefix_caching": True,
+        "max_snapshots": 8,
+        "snapshot_cache": {
+            "vram_bytes": 4_294_967_296,
+            "ram_bytes": 8_589_934_592,
+            "disk_bytes": 17_179_869_184,
+            "directory": "spill",
+        },
+    }
+    runtime = {"engine": {"dynamic_batching": policy}}
+    updated = apply_runtime_config(generated, runtime)
+    assert updated["engine"]["dynamic_batching"] == {"num_blocks": 128, **policy}
+    profile = {
+        "id": "snapshot-storage",
+        "eligibility": {"minimum_total_device_memory_bytes": 0},
+        "overlay": runtime,
+    }
+    assert apply_runtime_config(generated, {"runtime_profiles": [profile]})["runtime_profiles"] == [profile]
+    assert generated == {"engine": {"dynamic_batching": {"num_blocks": 128}}}
+
+
+@pytest.mark.parametrize("in_profile", [False, True])
+@pytest.mark.parametrize("tier", ["vram_bytes", "ram_bytes", "disk_bytes"])
+@pytest.mark.parametrize("invalid", [-1, 1.5, True, "16", 9_007_199_254_740_992])
+def test_runtime_rejects_invalid_snapshot_byte_limits(in_profile, tier, invalid):
+    generated = {"engine": {"dynamic_batching": {"num_blocks": 128}}}
+    runtime = {"engine": {"dynamic_batching": {"snapshot_cache": {tier: invalid}}}}
+    if in_profile:
+        runtime = {
+            "runtime_profiles": [
+                {"id": "snapshots", "eligibility": {"minimum_total_device_memory_bytes": 0}, "overlay": runtime}
+            ]
+        }
+    with pytest.raises(ValueError, match="non-negative integer byte count"):
+        apply_runtime_config(generated, runtime)
 
 
 @pytest.mark.parametrize("in_profile", [False, True])

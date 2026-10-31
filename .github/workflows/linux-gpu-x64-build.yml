@@ -1,6 +1,11 @@
 name: "Linux CUDA x64 Build"
 on:
   workflow_dispatch:
+    inputs:
+      dflash2_graph_model:
+        description: "Graph-enabled Qwen DFlash2 model on the runner under /data/ortgenai (256-token blocks, 512-token prefill)"
+        type: string
+        default: ""
   push:
     branches:
       - main
@@ -221,6 +226,8 @@ jobs:
       #         dotnet test /p:NativeBuildOutputDir='/ort_genai_src/build/cuda/Release/'"
 
       - name: Docker -- Run unit tests
+        env:
+          D_FLASH2_GRAPH_TEST_MODEL: ${{ inputs.dflash2_graph_model }}
         run: |
           echo "Running docker image onnxruntimecudabuildx64"
           rm -f build/cuda/Release/libonnxruntime_providers_cuda.so
@@ -228,6 +235,7 @@ jobs:
           docker run \
             --gpus all \
             --rm \
+            --env D_FLASH2_GRAPH_TEST_MODEL \
             --volume /data/ortgenai/:/data/ortgenai/ \
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
             -w /ort_genai_src onnxruntimecudabuildx64 bash -c " \

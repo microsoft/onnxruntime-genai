@@ -117,7 +117,7 @@ to 2048. Both limits are positive and independent.
 
 ### Prefix caching
 
-Dynamic batching reuses complete prompt blocks from earlier requests by default.
+Dynamic batching caches prefixes by default for supported layouts.
 Set `engine.dynamic_batching.prefix_caching` to `false` to disable it. A lookup
 compares both the token contents and the complete parent-block identity; hash
 equality alone is never accepted as a match. The final prompt token always runs
@@ -218,35 +218,239 @@ emit an explicit `false` opt-out. A fixed-size Engine-hosted auxiliary pool
 can coexist with target prefix caching. For a windowed DFlash 2 drafter, an
 optional ring checkpoint can be attached to the exact indexed target boundary
 after its fixed-state checkpoint and the complete drafter proposal succeed.
-The ring is restored into newly allocated drafter blocks before a cached
-request joins at a nonzero position. Set
-`engine.dynamic_batching.dflash2_max_snapshots` in the GenAI configuration to set the maximum number of
-retained DFlash 2 ring snapshots for a hybrid target with fixed state and prefix
-caching enabled. It defaults to `1`; `0` disables only drafter
-snapshots, not target prefix caching. Values must be integers from `0` through
-`2147483647`. The effective capacity is capped by the target fixed-state checkpoint
-capacity (`max_batch_size`) and the shared cache memory budget, reserving at least
-one target block. This applies to both explicit `num_blocks` and automatic
-`gpu_utilization_factor` sizing; insufficient memory reduces the snapshot count
-rather than exhausting the target pool. The setting is also supported in runtime-profile
-overlays. Snapshots are captured lazily. When the pool is full, only one unleased
-ring checkpoint is replaced at a later boundary, without evicting target
-blocks or fixed state. Selection deliberately follows target block eviction
-order, not snapshot capture age: descendants precede ancestors on the same
-physical path. For snapshots at tokens 4 and 8, the token-8 snapshot is removed
-first, preserving the shorter prefix for broader reuse. A longer target hit
-can therefore lose its draft snapshot and initially run without DFlash drafts.
-Leased snapshots are skipped and never overwritten.
-Increasing the snapshot limit trades target-cache capacity for draft reuse.
-The budget guarantees only one remaining target block, not that a previously
-fitting prompt still fits or that a cached prefix plus a private suffix can
-coexist. For example, increasing the limit from 1 to 4 can shrink an eight-block
-target pool to one block; such a pool cannot retain a full cached block and
-execute the remaining prompt token at the same time. Reduce the snapshot limit
-or increase the cache budget when target admission becomes constrained.
-With `og.set_log_options(enabled=True)`, Engine construction logs the requested
-and effective snapshot counts, actual target block count, block size, target
-cache bytes, and draft snapshot reservation bytes under `engine_cache`.
+The ring is restored into newly allocated drafter blocks before a cached request
+joins at a nonzero position.
+
+### Tiered snapshot cache
+
+Snapshot storage uses one Engine-owned policy, not separate limits keyed by
+`decoder`, `dflash2`, `mtp`, or other component names. Configure
+`engine.dynamic_batching.snapshot_cache` with any combination of
+`vram_bytes`, `ram_bytes`, and `disk_bytes`; within an explicit object, omitted
+limits default to zero and disable that tier. Omitting the entire object preserves
+legacy device-resident DFlash snapshots, count-limited and reserved from the
+existing cache budget. An explicit empty object or all-zero budgets disable
+snapshot storage on CPU/CUDA without disabling target prefix caching.
+`max_snapshots`, when present, is the shared count cap, not a per-component
+allowance. It is unbounded when omitted. Separate Engine instances have
+independent policies; these are not process-wide limits.
+
+**Current integration: DFlash snapshots only.** DFlash ring payloads are the
+only component registered with this policy today. These limits do not cover retained
+target KV, hybrid fixed-state checkpoints, active drafter rings, or total process
+memory. Target KV and fixed state remain device-resident under their existing
+budgets. CPU execution supports explicit RAM and disk tiers; explicit VRAM
+storage requires CUDA.
+
+WebGPU keeps snapshots device-resident and ignores all three tier byte budgets.
+When nonzero byte budgets are configured, each Engine logs one warning if warning
+logging is enabled. The byte limits are not enforced on WebGPU; `prefix_caching`,
+`dflash2_max_snapshots`, and `max_snapshots` still apply. Snapshot capacity remains
+bounded by the existing device cache reservation, and unleased snapshots are
+reclaimed at the count limit. Target KV and fixed-state reclamation are unchanged.
+
+```json
+{
+  "engine": {
+    "dynamic_batching": {
+      "prefix_caching": true,
+      "dflash2_max_snapshots": 8,
+      "max_snapshots": 8,
+      "snapshot_cache": {
+        "vram_bytes": 104857600,
+        "ram_bytes": 209715200,
+        "disk_bytes": 419430400
+      }
+    }
+  }
+}
+```
+
+`dflash2_max_snapshots` defaults to one and adds a DFlash-only count ceiling
+across all tiers. Zero disables DFlash snapshots without disabling target prefix
+caching. The DFlash count is also capped by the hybrid fixed-state checkpoint
+capacity (`max_batch_size`). `max_snapshots` is an optional additional count cap
+shared by every producer; zero disables all snapshot publication. Neither count
+increases a tier budget or enables storage when an explicit policy sets all byte
+budgets to zero on CPU or CUDA. Without an explicit policy, device-resident
+snapshots retain the previous residency and count defaults, but not the previous
+eviction order (see below). WebGPU does not require byte budgets.
+Snapshot counts must be integers from zero through 2147483647; byte limits must
+be non-negative exact integers no greater than 9007199254740991 and fit the
+platform's `size_t`. Prefix caching may be enabled without enabling any draft
+snapshot tier.
+
+The Engine owns one `PrefixSnapshotCache` and supplies it to snapshot producers;
+the drafter does not create a private policy. `PrefixCache` owns prefix identity.
+New snapshots enter the fastest tier with available capacity. Under pressure,
+unleased least-recently-used payloads are demoted from VRAM to RAM to disk;
+when no lower tier can retain them they are evicted. Committed restoration
+refreshes eviction recency; it does not promote a payload to a faster tier.
+At the count cap, the oldest unleased snapshot is replaced, reusing compatible
+storage in its current tier without reusing the old checkpoint identity. A leased snapshot cannot
+move or be overwritten, and its bytes continue counting against its tier.
+If all suitable capacity is leased, publication is refused and counted in the
+existing prefix-publication refusal metric.
+
+**Intentional behavior change:** LRU replacement also applies when `snapshot_cache`
+is omitted. The previous descendant-before-ancestor preference is not retained:
+an older, shorter checkpoint can be evicted before a newer descendant during
+chunked prefill. A target-prefix hit at that shorter boundary can therefore lack
+a draft snapshot and require draft-context rebuilding. This policy favors recent
+capture/restore activity, not prefix breadth; it is not a claim that LRU wins for
+every branching workload. Target-prefix identity and target KV eviction are unchanged.
+
+VRAM snapshot capacity is rounded down to whole rings and reserved from the
+shared target/drafter KV budget before target sizing. It is reduced when necessary
+to preserve at least one target block, for both `num_blocks` and automatic sizing.
+RAM and disk do not consume that GPU reserve. CUDA RAM payloads use pinned memory.
+CPU/CUDA capture and restore transfer only selected ring blocks and synchronize before
+publication. WebGPU stages each backing buffer once per layer, gathers/scatters
+the selected blocks on the CPU, and uploads the destination once. Tier moves copy into separately budgeted destination storage before
+releasing the source. A failed move leaves its source intact; completed independent
+demotions remain valid even if a later operation fails. If a disk demotion fails
+operationally, the policy then evicts that unleased source when no usable lower
+tier remains, allowing admission to continue.
+
+Pinned allocation and release (`cudaHostAlloc`/`cudaFreeHost`) can implicitly
+synchronize and take milliseconds for large rings. They occur on the serving
+path during cold capture, demotion, eviction and lazy transfer-scratch creation;
+compatible count replacement reuses storage but does not eliminate these costs.
+Allocations use `cudaHostAllocPortable` for CUDA-context portability. These
+operations must run outside an active CUDA stream capture. This implementation
+does not preallocate the RAM tier or provide a pinned-buffer pool, and byte
+budgets are not allocation-latency guarantees.
+
+Disk spill files are uniquely owned, Engine-local temporary payloads, never a persistent
+cache. `directory` optionally names an existing parent directory; otherwise the
+system temporary directory is used. With disk enabled, Engine construction
+resolves this path to an absolute path, checks that it is an existing directory,
+and creates, writes and removes a private probe payload to check usability.
+Configuration errors name `engine.dynamic_batching.snapshot_cache.directory`;
+later working-directory changes do not redirect spill. Only the manager's own generated files and
+directories are removed after their final owners release them. A lease may outlive
+the drafter, including its disk storage. A process crash can leave `oga-prefix-*`
+directories behind. There is no startup sweep because another live Engine may own
+them; operators may remove confirmed orphan directories only after ensuring that
+no live process or outstanding owner is using them. Disk transfer scratch is bounded to
+one reusable 1 MiB buffer per cache manager and is separate from retained payload budgets;
+tensor/index metadata and filesystem allocation overhead are also excluded.
+Adjacent disk ranges share transfer-buffer batches instead of synchronizing per
+ring block, and capture flushes once before publishing the complete snapshot.
+Disk I/O remains synchronous and can increase inference-loop latency; budgets
+are capacity limits, not latency guarantees.
+Treat explicit RAM/disk tiering as a **latency-tolerant opt-in** until the exact
+deployment has been qualified under sustained pressure. Allocation, copies,
+disk I/O, synchronization and source release run on the Engine loop and can
+delay unrelated decoding requests. No bounded pinned-buffer pool is provided.
+An operational disk allocation or demotion failure disables further disk writes
+for that Engine and logs a warning when warning logging is enabled. Recreating the
+Engine is required to re-enable disk writes. Existing disk snapshots remain readable,
+but their storage is not reused for new captures. RAM/VRAM admission can reclaim
+unleased victims rather than repeatedly retrying the failing disk path; leased
+payloads remain protected. A disk-only policy refuses subsequent captures.
+Other operational disk failures refuse capture or discard the failed restore snapshot,
+without clearing healthy drafter context or spending its proposal-failure budget.
+Contract violations and device failures still propagate.
+Cleanup failures are logged as warnings.
+Spill directories request owner-only filesystem permissions. Windows inherits
+the parent directory's ACL, so a custom parent must restrict access appropriately.
+
+Runtime-profile overlays accept `prefix_caching`, `dflash2_max_snapshots`,
+`max_snapshots`, and `snapshot_cache`. A profile's snapshot-cache object replaces
+the base object completely, so omitted tier limits disable those tiers in that
+profile.
+
+CUDA add-ons must be built for the same device-interface version as the core
+library. Install matching core/add-on packages together; older add-on binaries
+are rejected rather than loaded with an incompatible C++ layout.
+
+#### Snapshot diagnostics and qualification
+
+Enable the existing GenAI logger with `SetLogBool("enabled", true)` to receive
+`engine_snapshot_cache` events. No separate logging option or public metrics
+interface is required. Storage events report effective tier limits, current
+retained payload bytes, the shared count ceiling, and whether legacy
+device-resident storage is selected. Tier numbers are `0` for VRAM, `1` for RAM,
+`2` for disk, and `3` when no entry is associated with an event.
+For device-resident storage, count limits and the existing cache reservation
+apply instead of the tier byte limits.
+
+`allocated`, `reused`, `demoted`, `evicted`, and `discarded` describe storage
+decisions. `refused` distinguishes disabled counts, payloads too large for any
+tier, and capacity protected by component-count, shared-count, or tier leases.
+`move_staged` reports occupancy while both source and destination are charged;
+`demoted` reports occupancy after source release. These bytes exclude transfer
+scratch, metadata, allocator overhead, and active inference memory.
+Successful DFlash `capture` and `restore`, and storage `demoted` events, include
+host elapsed microseconds through transfer synchronization. Capture timing also
+includes admission and any required demotions; these are synchronous operation
+times, not independent disk bandwidth or end-to-end request latency measures.
+
+Qualify the exact core/add-on build on the intended CUDA stack before relying
+on tiered-cache performance. Check output against cache-disabled controls,
+exercise simultaneous adoption leases and all-leased refusal, then release
+owners and verify progress. Include tier demotion, disk failure/retry,
+cancellation, CUDA graph restore, and final-owner spill cleanup. Record
+configured and effective budgets, staged peak payload occupancy, transfer
+latencies, and request latency with logging disabled for timing measurements.
+CPU results and measurements from an earlier storage implementation do not
+qualify CUDA transfers or the revised policy.
+
+`examples/python/engine/prefix-cache-qa.py` retains repeatable `growing-chain`
+and `branching` scenarios for eviction-policy comparisons, and `tier-pressure`
+for new prefill admissions after a peer starts decoding. `history-capacity`
+revisits distinct histories after filling the cache without assuming they all
+remain resident. For example:
+
+```bash
+python examples/python/engine/prefix-cache-qa.py --model-path <configured-model> \
+  --suites growing-chain branching tier-pressure history-capacity --scenario-repeats 5 \
+  --lengths 2561 4097 --chunk-sizes 512 --max-batch-size 16 --num-blocks 256 \
+  --pressure-requests 6 --generated-tokens 64 --reference-repeats 2 \
+  --build-label <source-and-policy-identity> --output <report.json>
+```
+
+Each repetition uses a fresh Engine; every output and failing repetition remains
+in the JSON. Reports include raw request/TTFT/inter-token timings, nearest-rank
+p50/p95/p99, sample counts, aggregate generation throughput, cached tokens and
+speculative counters. Inter-token intervals are host-observed event arrival
+gaps, including Engine stalls and event batching, not individual GPU kernel times.
+Small sample counts do not establish a reliable p99 distribution. No warmup
+repetition is silently excluded.
+
+Compare victim selection on otherwise identical binaries at equal **effective**
+snapshot capacity, with `snapshot_cache` omitted; record reservation diagnostics
+separately from logging-disabled timing runs. Compare tier placement separately
+against that device-resident policy, not only against snapshots disabled.
+Under a fixed total KV byte budget, report effective target blocks and retained
+histories alongside throughput and tail latency. These scripts do not by
+themselves establish equal capacities or infer a numerical root cause from
+cache-disabled failures; run base and head on the same prompts and CUDA stack.
+Concurrent exact-output qualification remains tracked separately in #2698.
+
+CUDA graph qualification uses the parameterized
+`SnapshotTiers/Dflash2GraphRestoreTest.*` cases for explicit VRAM, RAM, disk and
+mixed placement. The mixed case creates three boundaries and revisits the older
+RAM/disk snapshots after demotion. Set `D_FLASH2_GRAPH_TEST_MODEL` to a
+graph-enabled Qwen DFlash2 package (256-token blocks, 512-token prefill), and
+`D_FLASH2_GRAPH_TEST_REQUIRED=1` to fail rather than skip if the model is missing.
+The Linux and Windows CUDA build workflows accept the `dflash2_graph_model`
+manual-dispatch input for this qualification. The package must already be
+provisioned on the runner; ordinary CI without it still skips these real-model
+cases and must not be reported as real CUDA graph qualification.
+
+The generic configuration and shared Engine ownership establish the policy for
+future snapshot-producing components without creating component-specific controls.
+The storage manager is deliberately independent of token identity and tensor
+semantics. Integrating retained target KV and fixed state requires shared
+accounting and coordinated eviction even if those payloads remain in VRAM.
+Offloading them additionally requires a coordinated
+checkpoint bundle, physical-block reallocation on restore, per-component lease
+protection, and transactional publication of the complete bundle. This PR does
+not integrate or offload those components, and the configured budgets do not yet
+bound the entire retained prefix.
+
 If the matching draft checkpoint is absent, the request retains the full
 target hit, but cannot immediately resume DFlash drafting at that boundary.
 An eligible windowed drafter with a free ring can start ingesting auxiliary
@@ -268,7 +472,8 @@ property of the ONNX graph or a per-session, per-Request, or per-Turn setting.
 The pool is not resized during active request processing.
 
 For example, retain up to four snapshots on a larger device while preserving
-the one-snapshot base default:
+the one-snapshot base count ceiling. Both configurations explicitly enable
+prefix caching and share a RAM byte budget, which can further limit the count:
 
 ```json
 {
@@ -276,7 +481,9 @@ the one-snapshot base default:
     "dynamic_batching": {
       "num_blocks": 512,
       "max_batch_size": 8,
-      "dflash2_max_snapshots": 1
+      "prefix_caching": true,
+      "dflash2_max_snapshots": 1,
+      "snapshot_cache": {"ram_bytes": 1073741824}
     }
   },
   "runtime_profiles": [{
@@ -2011,18 +2218,27 @@ automatic sizing, that pool is allocated before the target measures free memory.
 is explicit, its fixed footprint is instead validated and deducted from the byte budget represented
 by that baseline target block count before either cache pool is allocated.
 A windowed DFlash 2 model with hybrid target prefix caching reserves one
-additional ring per retained snapshot, independent of context length. The
-maximum comes from the Engine construction override or
+additional ring per retained snapshot, independent of context length.
 `engine.dynamic_batching.dflash2_max_snapshots` (default `1`, with `0` disabling
-draft snapshots), capped by target fixed-state checkpoint capacity. The shared
-memory budget can reduce that count, including to zero, so at least one target
-paged block remains after the auxiliary pool and snapshot reservations.
-More snapshots can substantially reduce target capacity and reject prompts
-that fitted with a smaller limit; the one-block minimum is not an admission
-guarantee. Engine construction logs the effective count and target-cache size
-when logging is enabled. Readers lease immutable snapshots through admission;
-replacement cannot overwrite an in-flight adopter. Without a matching draft
-snapshot, the target prefix still hits, but DFlash cannot draft immediately.
+draft snapshots) caps only DFlash snapshots. The configured VRAM, RAM, and disk
+byte budgets take effect first, and can reduce that count to zero. An optional
+`max_snapshots` applies a further shared count cap without changing any
+component-specific limit.
+
+VRAM snapshots reserve only the whole rings that fit their VRAM byte budget and
+the shared target-cache budget, while preserving at least one target paged
+block. RAM and disk snapshots do not reduce target cache capacity. CUDA RAM
+snapshots use pinned host storage; capture downloads selected ring blocks and
+restore uploads them into a request's active ring. CPU execution uses ordinary
+RAM or disk storage. These transfers add capture and prefix-hit latency, not
+per-token transfers during steady-state decoding.
+
+Readers lease immutable snapshots through admission; replacement cannot move or
+overwrite an in-flight adopter, and leased bytes remain charged to their tier.
+A lease keeps storage alive after the drafter or Engine manager is destroyed.
+Compatible storage is reused only after the previous snapshot's last lease
+ends. Allocation failure leaves target-only prefix reuse available. Without a
+matching draft snapshot, the target prefix still hits, but DFlash cannot draft immediately.
 It can ingest newly executed target tokens into a fresh windowed ring and resume
 drafting only after those tokens fill the required context window; a short
 request can remain target-only throughout. The skipped prefix is not rebuilt.

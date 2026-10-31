@@ -134,7 +134,11 @@ PrefixCacheMatch PrefixCache::Match(std::span<const int32_t> tokens,
       match.token_count = token_count;
       match.blocks = std::move(blocks);
       match.fixed_state_checkpoint = endpoint->checkpoint;
-      match.draft_checkpoint = endpoint->draft_checkpoint;
+      match.draft_checkpoint.reset();
+      if (endpoint->draft_checkpoint &&
+          endpoint->draft_checkpoint->state != PrefixSnapshotCache::State::Evicted) {
+        match.draft_checkpoint = endpoint->draft_checkpoint;
+      }
     }
     if (!match.fixed_state_checkpoint) {
       return {};
@@ -645,7 +649,8 @@ bool PrefixCache::CanAttachDraftCheckpoint(
   }
   const auto* entry = FindEntry(identity);
   return entry && entry->checkpoint && entry->checkpoint->TokenCount() == token_count &&
-         !entry->draft_checkpoint;
+         (!entry->draft_checkpoint ||
+          entry->draft_checkpoint->state == PrefixSnapshotCache::State::Evicted);
 }
 
 std::shared_ptr<const FixedStatePrefixCheckpoint> PrefixCache::DraftBoundary(
@@ -676,18 +681,6 @@ void PrefixCache::DropUnleasedDraftCheckpoints() {
       entry.draft_checkpoint.reset();
     }
   }
-}
-
-bool PrefixCache::ReclaimDraftCheckpoint() {
-  // Deliberately share block eviction order: descendants precede their ancestors, preserving
-  // shorter reusable prefixes rather than the oldest capture time. Leased rings are skipped.
-  for (auto* entry : recency_) {
-    if (entry->draft_checkpoint && entry->draft_checkpoint.use_count() == 1) {
-      entry->draft_checkpoint.reset();
-      return true;
-    }
-  }
-  return false;
 }
 
 size_t PrefixCache::ReclaimCheckpoints(size_t checkpoints_needed) {

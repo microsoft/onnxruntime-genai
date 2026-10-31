@@ -131,20 +131,40 @@ DFlash2 and DSpark selection requires a local checkpoint `path` and paged target
 
 Runtime fragments are applied after composite configuration generation. Objects merge recursively; arrays replace whole. The validator rejects absent engine or speculative capabilities, invalid allocation and draft limits, provider changes, and changes to graph-required session options. WebGPU paged attention requires a positive `num_blocks` in the effective allocation policy. This may come from legacy extra options or `runtime_config.engine.dynamic_batching.num_blocks`; the runtime overlay takes precedence. Combining `gpu_utilization_factor` with a fixed capacity is rejected; WebGPU always requires a positive fixed capacity.
 
-`runtime_config.engine.dynamic_batching.dflash2_max_snapshots` limits retained windowed DFlash 2 prefix snapshots for a hybrid target with fixed state and prefix caching enabled. It defaults to `1`, accepts integers from `0` through `2147483647`, and uses `0` to disable drafter snapshots without disabling target prefix caching. The runtime caps the count by the shared cache memory budget and target checkpoint capacity (`max_batch_size`). The same field is accepted in `runtime_profiles[].overlay.engine.dynamic_batching`. For a supported paged DFlash 2 export, use either form in the structured builder invocation:
+Prefix caching is enabled by default for supported layouts. Structured `runtime_config.engine.dynamic_batching`
+accepts `prefix_caching`, `max_snapshots`, `dflash2_max_snapshots`, and
+`snapshot_cache`.
+The latter specifies VRAM, RAM, and ephemeral disk budgets shared by an Engine's
+registered snapshot components, rather than separate per-model allowances.
+Currently only DFlash ring snapshots participate; target KV and fixed state are
+not counted. `dflash2_max_snapshots` defaults to `1`, accepts integers from `0`
+through `2147483647`, and adds a DFlash-only count ceiling after the byte budgets;
+zero disables DFlash snapshots without disabling target prefix caching.
+`max_snapshots` is an optional additional Engine-wide count ceiling and is
+unbounded when omitted. Neither count can increase a byte budget or enable a
+storage tier. Omitting `snapshot_cache` preserves legacy device-resident snapshots
+under the existing cache reservation; an explicit empty object or zero budgets
+disable snapshot storage on CPU/CUDA. WebGPU ignores tier byte budgets and
+retains count-limited device-resident snapshots. The same fields are accepted in
+runtime-profile overlays; a profile's `snapshot_cache` replaces the base object
+completely rather than merging omitted tiers. See
+[tiered snapshot configuration](../../../../docs/paged_attention_engine.md#tiered-snapshot-cache)
+for limits, policy, and a complete runtime JSON example.
+
+For a supported paged DFlash 2 export, use either form in the structured builder invocation:
 
 ```bash
 # From wheel:
 python -m onnxruntime_genai.models.builder -i target_checkpoint -o output -p int4 -e cuda \
   --builder_config_version 2 --extra_options use_paged_attention=true \
   --drafter_options '{"drafter_type":"dflash2","path":"drafter_checkpoint"}' \
-  --runtime_config '{"engine":{"dynamic_batching":{"dflash2_max_snapshots":4}}}'
+  --runtime_config '{"engine":{"dynamic_batching":{"prefix_caching":true,"dflash2_max_snapshots":4,"snapshot_cache":{"ram_bytes":1073741824}}}}'
 
 # From source, at the repository root:
 python src/python/py/models/builder.py -i target_checkpoint -o output -p int4 -e cuda \
   --builder_config_version 2 --extra_options use_paged_attention=true \
   --drafter_options '{"drafter_type":"dflash2","path":"drafter_checkpoint"}' \
-  --runtime_config '{"runtime_profiles":[{"id":"larger-snapshot-pool","eligibility":{"minimum_total_device_memory_bytes":34359738368},"overlay":{"engine":{"dynamic_batching":{"dflash2_max_snapshots":4}}}}]}'
+  --runtime_config '{"runtime_profiles":[{"id":"larger-snapshot-pool","eligibility":{"minimum_total_device_memory_bytes":34359738368},"overlay":{"engine":{"dynamic_batching":{"prefix_caching":true,"dflash2_max_snapshots":4,"snapshot_cache":{"ram_bytes":1073741824}}}}}]}'
 ```
 
 `component_options` is omitted by default. When present, it exports a final-hidden-state backbone without its LM/MTP heads and packages either generic pre-built ONNX heads or one pinned model-specific artifact. Generic declarations require a non-empty `heads` array with unique safe names and filenames; every logical input/output binding must name an actual graph input/output. Revision fields are rejected for generic heads. Model-specific declarations use `model_source` instead of `heads` and require non-empty `artifact_revision` and `base_revision` pins. Component mode cannot be combined with `drafter_options`.
@@ -372,7 +392,15 @@ This scenario is for when you want to build a model that uses the `PagedAttentio
 
 Paged attention supports CUDA with `fp16` or `bf16` precision and WebGPU with `fp16` precision. Paged exports include the CPU `attention_metadata` input used by the runtime to provide stable query and KV bounds without downloading device sequence lengths in every attention layer. Paged attention cannot be combined with `exclude_embeds` or `exclude_lm_head`. `paged_block_size` defaults to `256` and must be a power of two and at least `16`, matching what the ONNX Runtime PagedAttention op accepts; for models with short and long rotary caches, it must also evenly divide `original_max_position_embeddings`. The vendored FlashAttention paged kernel needs the block to be a multiple of its tile as well (256 for `head_size <= 64`, 128 for `head_size <= 128`, otherwise 64), so a smaller block stays valid but makes ORT fall back to another attention backend. A quantized KV cache is exempt from the tile requirement alone: FlashAttention still serves it, through a dense dequantized path with no page alignment to satisfy. A block drafter (`dflash2_path`/`dspark_path`) shares the target's block size and usually has the smaller head size, so it reaches its tile at a larger block than the target does. `gpu_utilization_factor` defaults to `0.6` and must be greater than `0` and at most `1`. `max_batch_size` defaults to `100` and must be a positive integer no greater than `256`. `paged_chunk_size` must be a positive integer and is written to `search.chunk_size`. It caps the prompt tokens a single request contributes to one step, whereas `max_scheduled_tokens` caps the step as a whole; a value at or above `max_scheduled_tokens` therefore has no effect, and a smaller one lets concurrent prefills interleave rather than letting one request consume the step budget on its own. Models whose sliding-window layers are served from a ring of blocks hold only `paged_chunk_size + window_size - 1` positions, so they require chunked prefill and default to `paged_block_size`. For every other paged model it is written only when passed.
 
-Prefix caching is enabled by default for dynamic batching and can be disabled by setting `engine.dynamic_batching.prefix_caching` to `false` in `genai_config.json`. The builder writes this opt-out automatically for paged sliding-window KV rings, MTP, DSpark, and full-attention DFlash 2 because those layouts mirror auxiliary state per target block and do not yet support prefix caching. DFlash 2 with a positive sliding window uses a fixed-size auxiliary pool and retains the default target prefix caching behavior.
+Prefix caching is enabled by default for supported dynamic-batching layouts. Set
+`engine.dynamic_batching.prefix_caching` to `false` in `genai_config.json` to
+disable it. The builder writes an explicit `false` for paged
+sliding-window KV rings, MTP, DSpark, and full-attention DFlash 2 because those
+layouts mirror auxiliary state per target block and do not yet support prefix
+caching. DFlash 2 with a positive sliding window uses a fixed-size auxiliary pool
+and supports default-enabled target prefix caching and device-resident draft
+snapshots. Explicit tiered snapshot policies require a nonzero tier budget on
+CPU/CUDA as described above.
 
 `max_scheduled_tokens` and `num_blocks` are additional `engine.dynamic_batching` knobs and are written only when passed. `max_scheduled_tokens` caps the tokens in one dynamically batched forward pass and therefore caps the peak prefill activation, which is the largest transient in a long-context deployment. `num_blocks` sets the total block budget before auxiliary-cache reservations. The target's resolved pool can be smaller when MTP or a full-attention block drafter reserves cache memory, and all resident requests share that pool, so `num_blocks * paged_block_size` is only the single-request upper bound when the target owns every configured block. `num_blocks` is mutually exclusive with `gpu_utilization_factor`, which is omitted from the config when `num_blocks` is set.
 

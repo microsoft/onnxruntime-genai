@@ -1,6 +1,11 @@
 name: "Windows CUDA x64 Build"
 on:
   workflow_dispatch:
+    inputs:
+      dflash2_graph_model:
+        description: "Graph-enabled Qwen DFlash2 model directory on the runner (256-token blocks, 512-token prefill)"
+        type: string
+        default: ""
   push:
     branches:
       - main
@@ -233,6 +238,8 @@ jobs:
           .\examples\csharp\ModelChat\bin\Release\net8.0\ModelChat.exe -m test\models\qwen-2.5-0.5b\int4\cpu\ -e cpu --response_format lark_grammar --tools_file test\models\tool-definitions\weather.json --tool_call_start "<tool_call>" --tool_call_end "</tool_call>" --user_prompt "What is the weather in Redmond, WA?" --tool_output --non_interactive --verbose
 
       - name: Prepend CUDA to PATH and Run tests
+        env:
+          D_FLASH2_GRAPH_TEST_MODEL: ${{ inputs.dflash2_graph_model }}
         run: |-
           $env:PATH = "$env:GITHUB_WORKSPACE\ort\ep;$env:GITHUB_WORKSPACE\ort\lib;${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin;" + $env:PATH
           echo "Current PATH variable is: $env:PATH"
