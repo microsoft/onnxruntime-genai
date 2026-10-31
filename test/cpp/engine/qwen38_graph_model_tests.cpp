@@ -1950,6 +1950,196 @@ TEST(Qwen38MoeOffloadTest, AdaptiveBudgetMovesWithTheKvCapacity) {
             (std::vector<Config::NamedString>{{"session.moe.offload.reserve_device_bytes", "2147483648"}}));
 }
 
+namespace {
+
+using OffloadEntries = std::vector<Config::NamedString>;
+
+constexpr const char* kMode = "session.moe.offload.mode";
+constexpr const char* kRoot = "session.moe.offload.source_root";
+constexpr const char* kExpert = "session.moe.offload.device_expert_bytes";
+constexpr const char* kReserve = "session.moe.offload.reserve_device_bytes";
+
+// What the target session gets for a decoder that configures `configured`, on a graph of `kv_capacity` positions.
+OffloadEntries SessionEntries(const OffloadEntries& configured, int kv_capacity, bool adaptive) {
+  const auto settings = ParseQwen38MoeOffloadSettings(configured);
+  return Qwen38MoeOffloadSessionEntries(settings, "/models/pkg", kv_capacity, adaptive);
+}
+
+bool HasEntry(const OffloadEntries& entries, const char* key) {
+  return std::any_of(entries.begin(), entries.end(), [key](const Config::NamedString& e) { return e.first == key; });
+}
+
+// A decoder that offloads (mode=required) from the model folder, plus the entries in `more`: only the budgets are left
+// to be defaulted.
+OffloadEntries Required(const OffloadEntries& more = {}) {
+  OffloadEntries entries{{kMode, "required"}, {kRoot, "/models/pkg"}};
+  entries.insert(entries.end(), more.begin(), more.end());
+  return entries;
+}
+
+// Text that is not a byte count for the runtime, which reads decimal digits and nothing else. std::stoull takes most
+// of these: it skips white space, accepts a sign, and stops at the first character that is not a digit.
+const std::vector<std::string>& NotByteCounts() {
+  static const std::vector<std::string> values = {
+      "not-a-number", "123abc", " 123", "123 ", "\t123", "-5", "+123", "", " ", "0x10", "1e9", "1.5", "1,000",
+      "18446744073709551616",       // 2^64
+      "999999999999999999999999"};  // far beyond 64 bits
+  return values;
+}
+
+constexpr int kBudgetCapacities[] = {133128, 65800, 33032, 8456, 2312};
+
+}  // namespace
+
+TEST(Qwen38MoeOffloadTest, ByteCountsAreReadAsDecimalDigitsOnly) {
+  for (const char* valid : {"0", "00", "7", "0001073741824", "9223372036854775808", "18446744073709551615"}) {
+    const auto reserve = ParseQwen38MoeOffloadSettings({{kReserve, valid}});
+    EXPECT_TRUE(reserve.has_reserve_device_bytes) << valid;
+    EXPECT_FALSE(reserve.malformed_reserve_device_bytes) << valid;
+    EXPECT_EQ(reserve.reserve_device_bytes, std::stoull(valid)) << valid;
+
+    const auto expert = ParseQwen38MoeOffloadSettings({{kExpert, valid}});
+    EXPECT_FALSE(expert.malformed_device_expert_bytes) << valid;
+    // A count of 0 leaves the expert cache to the runtime, in any spelling; every other count is an explicit budget.
+    const bool zero = std::stoull(valid) == 0;
+    EXPECT_EQ(expert.has_device_expert_bytes, !zero) << valid;
+    EXPECT_EQ(expert.constrained, !zero) << valid;
+    EXPECT_EQ(expert.enabled, !zero) << valid;
+  }
+
+  for (const std::string& text : NotByteCounts()) {
+    SCOPED_TRACE("'" + text + "'");
+    const auto reserve = ParseQwen38MoeOffloadSettings({{kMode, "required"}, {kReserve, text}});
+    EXPECT_TRUE(reserve.malformed_reserve_device_bytes);
+    EXPECT_FALSE(reserve.has_reserve_device_bytes);
+    EXPECT_EQ(reserve.reserve_device_bytes, 6442450944ULL);  // nothing is taken from the text
+
+    // A malformed budget is still an attempt to budget the experts: the offload stays constrained, and the runtime
+    // reports the value.
+    const auto expert = ParseQwen38MoeOffloadSettings({{kExpert, text}});
+    EXPECT_TRUE(expert.malformed_device_expert_bytes);
+    EXPECT_FALSE(expert.has_device_expert_bytes);
+    EXPECT_TRUE(expert.enabled);
+    EXPECT_TRUE(expert.constrained);
+    EXPECT_EQ(expert.device_expert_bytes, 0ULL);
+  }
+
+  // "auto" is the one word: it leaves the reserve to the default and the expert cache to the runtime.
+  const auto auto_reserve = ParseQwen38MoeOffloadSettings({{kReserve, "auto"}});
+  EXPECT_FALSE(auto_reserve.has_reserve_device_bytes);
+  EXPECT_FALSE(auto_reserve.malformed_reserve_device_bytes);
+  EXPECT_FALSE(ParseQwen38MoeOffloadSettings({{kExpert, "auto"}}).malformed_device_expert_bytes);
+}
+
+TEST(Qwen38MoeOffloadTest, AMalformedReserveIsNeverReplacedWhetherOrNotTheBudgetAdapts) {
+  // The reported case: required mode, a reserve that is not a number, the 128K graph, adaptive budgets. The reserve
+  // became 8082423808, and the configuration error never reached the runtime.
+  EXPECT_FALSE(HasEntry(SessionEntries({{kMode, "required"}, {kReserve, "not-a-number"}}, 133128, true), kReserve));
+
+  const OffloadEntries only_root{{kRoot, "/models/pkg"}};
+  for (const std::string& text : NotByteCounts()) {
+    for (const int kv_capacity : kBudgetCapacities) {
+      for (const bool adaptive : {true, false}) {
+        SCOPED_TRACE("'" + text + "' kv_capacity=" + std::to_string(kv_capacity) + (adaptive ? " adaptive" : " fixed"));
+        // Neither a default nor an adapted number: the entry stays as configured, and the other defaults are as ever.
+        EXPECT_EQ(SessionEntries({{kMode, "required"}, {kReserve, text}}, kv_capacity, adaptive), only_root);
+        // A valid expert budget next to it does not change that.
+        const OffloadEntries more{{kExpert, "21474836480"}, {kReserve, text}};
+        EXPECT_FALSE(HasEntry(SessionEntries(Required(more), kv_capacity, adaptive), kReserve));
+      }
+    }
+  }
+  EXPECT_EQ(SessionEntries(Required({{kExpert, "21474836480"}, {kReserve, "oops"}}), 133128, true),
+            (OffloadEntries{{kExpert, "19834863616"}}));
+}
+
+TEST(Qwen38MoeOffloadTest, AMalformedExpertBudgetIsNeverReplacedWhetherOrNotTheBudgetAdapts) {
+  const OffloadEntries adapted{{kRoot, "/models/pkg"}, {kReserve, "8082423808"}};
+  const OffloadEntries defaulted{{kRoot, "/models/pkg"}, {kReserve, "6442450944"}};
+  for (const std::string& text : NotByteCounts()) {
+    for (const int kv_capacity : kBudgetCapacities) {
+      for (const bool adaptive : {true, false}) {
+        SCOPED_TRACE("'" + text + "' kv_capacity=" + std::to_string(kv_capacity) + (adaptive ? " adaptive" : " fixed"));
+        const auto entries = SessionEntries({{kExpert, text}}, kv_capacity, adaptive);
+        EXPECT_FALSE(HasEntry(entries, kExpert));
+        // It is still a constrained offload, so the other entries are added.
+        EXPECT_TRUE(HasEntry(entries, kRoot));
+        EXPECT_TRUE(HasEntry(entries, kReserve));
+      }
+    }
+    SCOPED_TRACE("'" + text + "'");
+    // The reserve follows the context as ever.
+    EXPECT_EQ(SessionEntries({{kExpert, text}}, 133128, true), adapted);
+    EXPECT_EQ(SessionEntries({{kExpert, text}}, 133128, false), defaulted);
+  }
+}
+
+TEST(Qwen38MoeOffloadTest, ValidByteCountsAdaptOrStayAsConfigured) {
+  const auto reserve = [](const char* text, int kv_capacity, bool adaptive) {
+    return SessionEntries(Required({{kReserve, text}}), kv_capacity, adaptive);
+  };
+  const auto only_reserve = [](const char* bytes) { return OffloadEntries{{kReserve, bytes}}; };
+
+  // A valid reserve moves with the context when the budget adapts (1 GiB + 100096 positions of 16 KiB) ...
+  EXPECT_EQ(reserve("1073741824", 133128, true), only_reserve("2713714688"));
+  EXPECT_EQ(reserve("0001073741824", 133128, true), only_reserve("2713714688"));
+  EXPECT_EQ(reserve("1073741824", 8456, true), only_reserve("2147483648"));  // the 2 GiB floor
+  EXPECT_EQ(reserve("0", 133128, true), only_reserve("2147483648"));         // a count of 0 is a valid reserve
+  // ... and the entry stays as configured when it does not, or when the capacity is the reference one.
+  EXPECT_TRUE(reserve("1073741824", 133128, false).empty());
+  EXPECT_TRUE(reserve("1073741824", 33032, true).empty());
+  EXPECT_TRUE(reserve("0001073741824", 2312, false).empty());
+  // "auto" takes the default, adapted like any other reserve.
+  EXPECT_EQ(reserve("auto", 133128, true), only_reserve("8082423808"));
+  EXPECT_EQ(reserve("auto", 133128, false), only_reserve("6442450944"));
+
+  // An explicit expert budget is adapted as ever, in any spelling of the number.
+  for (const char* expert : {"21474836480", "000021474836480"}) {
+    const auto adapted = SessionEntries(Required({{kExpert, expert}, {kReserve, "6442450944"}}), 133128, true);
+    EXPECT_EQ(adapted, (OffloadEntries{{kExpert, "19834863616"}, {kReserve, "8082423808"}})) << expert;
+  }
+}
+
+TEST(Qwen38MoeOffloadTest, TheLastEntryOfAKeyIsTheOneThatCounts) {
+  // The session options keep the last value of a key, so an earlier duplicate must neither hide a malformed value nor
+  // stand in for it.
+  const auto entries = [](const OffloadEntries& more, bool adaptive) {
+    return SessionEntries(Required(more), 133128, adaptive);
+  };
+  for (const bool adaptive : {true, false}) {
+    EXPECT_FALSE(HasEntry(entries({{kReserve, "1073741824"}, {kReserve, "oops"}}, adaptive), kReserve)) << adaptive;
+    EXPECT_FALSE(HasEntry(entries({{kExpert, "21474836480"}, {kExpert, "123abc"}}, adaptive), kExpert)) << adaptive;
+  }
+  EXPECT_EQ(entries({{kReserve, "oops"}, {kReserve, "1073741824"}}, true), (OffloadEntries{{kReserve, "2713714688"}}));
+  EXPECT_TRUE(entries({{kReserve, "oops"}, {kReserve, "1073741824"}}, false).empty());
+  EXPECT_EQ(entries({{kExpert, "oops"}, {kExpert, "21474836480"}}, true),
+            (OffloadEntries{{kExpert, "19834863616"}, {kReserve, "8082423808"}}));
+
+  // The mode follows the same rule: the last one decides.
+  EXPECT_FALSE(ParseQwen38MoeOffloadSettings({{kMode, "required"}, {kMode, "disabled"}}).enabled);
+  EXPECT_TRUE(ParseQwen38MoeOffloadSettings({{kMode, "disabled"}, {kMode, "required"}}).constrained);
+}
+
+TEST(Qwen38MoeOffloadTest, BudgetsUpToTheLargestCountAdaptWithoutWrappingAround) {
+  // The runtime accepts budgets up to UINT64_MAX; read as signed numbers they would wrap around to the floors.
+  const char* const largest = "18446744073709551615";
+  const char* const two_pow_63 = "9223372036854775808";
+  const auto reserve = [](const char* text, int kv_capacity) {
+    return SessionEntries(Required({{kReserve, text}}), kv_capacity, true);
+  };
+  const auto only_reserve = [](const char* bytes) { return OffloadEntries{{kReserve, bytes}}; };
+  EXPECT_EQ(reserve(largest, 133128), only_reserve(largest));  // saturates
+  EXPECT_EQ(reserve(largest, 2312), only_reserve("18446744073206235135"));
+  EXPECT_EQ(reserve(two_pow_63, 133128), only_reserve("9223372038494748672"));
+  EXPECT_EQ(reserve(two_pow_63, 2312), only_reserve("9223372036351459328"));
+
+  const auto expert = [](const char* text, int kv_capacity) {
+    return SessionEntries(Required({{kExpert, text}, {kReserve, "6442450944"}}), kv_capacity, true);
+  };
+  EXPECT_EQ(expert(largest, 133128), (OffloadEntries{{kExpert, "18446744072069578751"}, {kReserve, "8082423808"}}));
+  EXPECT_EQ(expert(largest, 2312), (OffloadEntries{{kExpert, largest}, {kReserve, "5939134464"}}));
+}
+
 TEST(Qwen38QsaConstantsTest, RequiresBothCosAndSinForTargetAndHead) {
   const auto dir = MakeScratchDir("qsa_complete");
   WriteFile(dir / "qsa_consts.bin", std::string(4096, '\0'));
