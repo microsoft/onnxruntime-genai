@@ -4863,6 +4863,36 @@ TEST_F(Qwen38PlaneGatherPoolTest, AWorkerThatCannotBeStartedIsAnErrorAndLeavesNo
   }
 }
 
+// A thread that cannot allocate the scratch lists of its gather must not throw out of the pool (a worker that did would take the
+// process down, and the exception of the calling thread would leave through the C interface): the prefill fails, launches
+// nothing and does not fill the n-gram cache with rows that were not all gathered. The workers are alive afterwards and the next
+// prefill is gathered completely.
+TEST_F(Qwen38PlaneGatherPoolTest, AThreadThatCannotAllocateItsScratchFailsThePrefillWithoutThrowing) {
+  StagedPleRig rig{*plane_, kAscendingRows};
+  const int workers = GatherWorkers();
+  const std::vector<int64_t> first = Tokens(500);
+  ASSERT_EQ(rig.PleRows(first), 0);
+  ASSERT_EQ(Stats().gather_pool_threads, workers);
+
+  // Every token of the second prefill gathers another row than the token at its place in the first one, whose rows are what
+  // the staging buffer still holds: a row that the failed gather left in the buffer or in the cache is a wrong one.
+  std::vector<int64_t> second = first;
+  for (int64_t& token : second) ++token;
+  rig.FillOutputs(0xAB);
+  const Qwen38PlaneTestStats before = Stats();
+  Arm(QWEN38_PLANE_FAULT_GATHER_SCRATCH, /*skip=*/0, 5000);
+  EXPECT_EQ(rig.PleRows(second), kCudaErrorMemoryAllocation);
+  const Qwen38PlaneTestStats failed = Stats();
+  EXPECT_EQ(failed.fault_armed, 0) << "no thread sized its scratch lists";
+  EXPECT_EQ(failed.gather_pool_threads, workers) << "a worker was lost";
+  EXPECT_EQ(failed.gather_rows, before.gather_rows);
+  EXPECT_EQ(failed.staged_launches, before.staged_launches);
+  EXPECT_TRUE(rig.OutputsAre(0xAB));
+
+  ASSERT_EQ(rig.PleRows(second), 0);
+  EXPECT_EQ(rig.ReadPle(second.size()), rig.ExpectedPle(second));
+}
+
 // What the draft selector reads and writes: the candidates and scores of up to 7 drafts, and the control words that receive the
 // chosen candidates. A sentinel word marks every word of the control state that the selector does not write.
 constexpr std::array<size_t, 7> kDflashDraftSlots = {2, 8, 9, 10, 11, 12, 13};

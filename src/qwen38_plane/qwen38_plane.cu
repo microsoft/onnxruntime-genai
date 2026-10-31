@@ -28,6 +28,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <exception>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -476,6 +477,12 @@ struct PleGatherTask {
   size_t row_stride = 0;
   unsigned char* dst_base = nullptr;
   std::atomic<int> next_row{0};
+  // Set by a thread that could not allocate its scratch lists. The rows it had claimed are not gathered, so the gather failed.
+  std::atomic<bool> failed{false};
+#ifdef QWEN38_PLANE_TEST_HOOKS
+  // QWEN38_PLANE_FAULT_GATHER_SCRATCH: the next thread to size its scratch lists fails, as if the allocation threw.
+  std::atomic<bool> fail_next_scratch{false};
+#endif
 };
 
 // Creates a gather worker. A test build can make the creation fail (QWEN38_PLANE_FAULT_THREAD_START), as std::thread does when
@@ -493,7 +500,18 @@ struct PleGatherPool {
   qwen38_plane::ParallelPool pool{qwen38_plane::DefaultParallelWorkerCount(std::thread::hardware_concurrency()),
                                   start_gather_thread};
 
+  // The body that every thread of the pool runs. A body must not throw (a worker that did would terminate the process, and the
+  // calling thread's exception would leave through the C interface), and the scratch lists of GatherSpans are the one thing in
+  // it that allocates, so a thread that cannot make them is stopped here, the others carry on, and run() reports the failure.
   static void process_task(PleGatherTask* t) {
+    try {
+      GatherSpans(t);
+    } catch (const std::exception&) {
+      t->failed.store(true, std::memory_order_relaxed);
+    }
+  }
+
+  static void GatherSpans(PleGatherTask* t) {
     StagedPleWorkspace& ws = *t->ws;
     const PleParams& HP = ws.params;
     const int hd = HP.head_dim;
@@ -513,6 +531,9 @@ struct PleGatherPool {
       const int i0 = t->next_row.fetch_add(kSpan, std::memory_order_relaxed);
       if (i0 >= t->n) break;
       const int i1 = (i0 + kSpan < t->n) ? (i0 + kSpan) : t->n;
+#ifdef QWEN38_PLANE_TEST_HOOKS
+      if (t->fail_next_scratch.exchange(false)) throw std::bad_alloc();
+#endif
 #ifdef _WIN32
       ranges.clear();
       ranges.reserve((size_t)(i1 - i0) * (size_t)nh);
@@ -560,7 +581,9 @@ struct PleGatherPool {
   }
 
   // Gathers the PLE rows of the `n` token ids at `h_toks` into `dst_base`, `row_stride` bytes apart, on every worker and on the
-  // calling thread. Returns cudaErrorMemoryAllocation, with nothing gathered, when the worker threads cannot be started.
+  // calling thread. Returns cudaErrorMemoryAllocation when the worker threads cannot be started, in which case nothing is
+  // gathered, or when a thread cannot allocate its scratch lists, in which case the rows are incomplete and the n-gram cache
+  // is left as it was. The workers are alive after either, so the next call gathers as usual.
   cudaError_t run(StagedPleWorkspace& ws, const i64* h_toks, i64 ctx0, i64 ctx1, int n, unsigned char* dst_base,
                   size_t row_stride) {
     PleGatherTask t;
@@ -572,8 +595,12 @@ struct PleGatherPool {
     t.row_stride = row_stride;
     t.dst_base = dst_base;
     t.next_row.store(0, std::memory_order_relaxed);
+#ifdef QWEN38_PLANE_TEST_HOOKS
+    t.fail_next_scratch.store(hook_fault(QWEN38_PLANE_FAULT_GATHER_SCRATCH) != cudaSuccess, std::memory_order_relaxed);
+#endif
 
     if (pool.Run([&t] { process_task(&t); })) return cudaErrorMemoryAllocation;
+    if (t.failed.load(std::memory_order_relaxed)) return cudaErrorMemoryAllocation;
 
     const PleParams& HP = ws.params;
     const size_t total_bytes = (size_t)HP.n_heads * (size_t)HP.head_dim;
@@ -2062,7 +2089,7 @@ QWEN38_PLANE_EXPORT int qwen38_plane_stream_sync(void* s) {
 #ifdef QWEN38_PLANE_TEST_HOOKS
 QWEN38_PLANE_EXPORT int qwen38_plane_test_inject_staged_fault(int site, int skip, int error) {
   const bool disarm = site == QWEN38_PLANE_FAULT_NONE;
-  if (site < QWEN38_PLANE_FAULT_NONE || site > QWEN38_PLANE_FAULT_LAUNCH || (!disarm && error == 0)) {
+  if (site < QWEN38_PLANE_FAULT_NONE || site > QWEN38_PLANE_FAULT_GATHER_SCRATCH || (!disarm && error == 0)) {
     return (int)cudaErrorInvalidValue;
   }
   std::lock_guard<std::mutex> lock(g_staged_ple_mu);

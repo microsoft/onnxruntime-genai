@@ -285,15 +285,16 @@ typedef int (*Qwen38PlanePrepBatchedFn)(void* stream, const void* params, int ro
 // The step of the staged PLE path that an injected fault replaces with an error.
 typedef enum Qwen38PlaneFaultSite {
   QWEN38_PLANE_FAULT_NONE = 0,
-  QWEN38_PLANE_FAULT_HOST_ALLOC = 1,    // pinned cudaHostAlloc of a staging buffer
-  QWEN38_PLANE_FAULT_HOST_MALLOC = 2,   // malloc of the host n-gram row cache
-  QWEN38_PLANE_FAULT_DEVICE_ALIAS = 3,  // cudaHostGetDevicePointer of a mapped staging buffer
-  QWEN38_PLANE_FAULT_COPY = 4,          // device-to-host cudaMemcpyAsync
-  QWEN38_PLANE_FAULT_SYNC = 5,          // cudaStreamSynchronize / cudaDeviceSynchronize
-  QWEN38_PLANE_FAULT_EVENT_CREATE = 6,  // cudaEventCreateWithFlags of a completion event (only when it is created)
-  QWEN38_PLANE_FAULT_EVENT_RECORD = 7,  // cudaEventRecord of a completion event, after the kernel was launched
-  QWEN38_PLANE_FAULT_THREAD_START = 8,  // creation of a gather worker thread (std::thread throws std::system_error)
-  QWEN38_PLANE_FAULT_LAUNCH = 9,        // a kernel launch that the CUDA runtime rejects (see Qwen38PlaneTestInjectFaultFn)
+  QWEN38_PLANE_FAULT_HOST_ALLOC = 1,       // pinned cudaHostAlloc of a staging buffer
+  QWEN38_PLANE_FAULT_HOST_MALLOC = 2,      // malloc of the host n-gram row cache
+  QWEN38_PLANE_FAULT_DEVICE_ALIAS = 3,     // cudaHostGetDevicePointer of a mapped staging buffer
+  QWEN38_PLANE_FAULT_COPY = 4,             // device-to-host cudaMemcpyAsync
+  QWEN38_PLANE_FAULT_SYNC = 5,             // cudaStreamSynchronize / cudaDeviceSynchronize
+  QWEN38_PLANE_FAULT_EVENT_CREATE = 6,     // cudaEventCreateWithFlags of a completion event (only when it is created)
+  QWEN38_PLANE_FAULT_EVENT_RECORD = 7,     // cudaEventRecord of a completion event, after the kernel was launched
+  QWEN38_PLANE_FAULT_THREAD_START = 8,     // creation of a gather worker thread (std::thread throws std::system_error)
+  QWEN38_PLANE_FAULT_LAUNCH = 9,           // a kernel launch that the CUDA runtime rejects (see Qwen38PlaneTestInjectFaultFn)
+  QWEN38_PLANE_FAULT_GATHER_SCRATCH = 10,  // the scratch lists of a gather thread (std::bad_alloc)
 } Qwen38PlaneFaultSite;
 
 typedef struct Qwen38PlaneTestStats {
