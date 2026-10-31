@@ -17,7 +17,7 @@ namespace Generators {
 struct ModelType {
   inline static bool IsLLM(const std::string& model_type) {
     // Large-language model (LLM)
-    static constexpr std::array<std::string_view, 35> LLM = {"chatglm", "decoder", "ernie4_5", "gemma", "gemma2", "gemma3_text", "gemma3_vl_text", "gemma4_text", "gpt2", "gptoss", "granite", "granitemoehybrid", "hunyuandensev1", "internlm2", "lfm2", "lfm2_audio_text", "lfm2_moe", "lfm2_vl_text", "llama", "mistral", "mistral3_text", "nemotron", "olmo", "phi", "phimoe", "phi3", "phi3small", "qwen2", "qwen2_5_vl_text", "qwen3", "qwen3_vl_text", "qwen3_5_moe_text", "qwen3_5_text", "qwen4_exp_text", "smollm3"};
+    static constexpr std::array<std::string_view, 36> LLM = {"chatglm", "decoder", "ernie4_5", "gemma", "gemma2", "gemma3_text", "gemma3_vl_text", "gemma4_text", "gpt2", "gptoss", "granite", "granitemoehybrid", "hunyuandensev1", "internlm2", "lfm2", "lfm2_audio_text", "lfm2_moe", "lfm2_vl_text", "lfm3", "llama", "mistral", "mistral3_text", "nemotron", "olmo", "phi", "phimoe", "phi3", "phi3small", "qwen2", "qwen2_5_vl_text", "qwen3", "qwen3_vl_text", "qwen3_5_moe_text", "qwen3_5_text", "qwen4_exp_text", "smollm3"};
     return std::find(LLM.begin(), LLM.end(), model_type) != LLM.end();
   }
 
@@ -89,8 +89,9 @@ struct ModelType {
     // The MoE variant (LFM2-8B-A1B, LFM2.5-8B-A1B, LFM2-24B-A2B) has the same runtime shape, and
     // "lfm2_vl_text" / "lfm2_audio_text" are LFM2-VL / LFM2-Audio checkpoints exported as plain text
     // decoders; all have the same conv/attention layer mix and need the same conv state cache.
+    // LFM3 adds sliding-window attention layers, which keep a KV cache like the full ones.
     return model_type == "lfm2" || model_type == "lfm2_moe" || model_type == "lfm2_vl_text" ||
-           model_type == "lfm2_audio_text";
+           model_type == "lfm2_audio_text" || model_type == "lfm3";
   }
 };
 

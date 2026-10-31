@@ -534,7 +534,7 @@ struct Config {
       int state_update_capacity{};
 
       // Hybrid SSM+Attention (LFM2) parameters
-      std::vector<std::string> layer_types;  // Per-layer type: "conv" or "full_attention"
+      std::vector<std::string> layer_types;  // Per-layer type: "conv", "full_attention" or "sliding_attention"
       int conv_cache_size{};                 // Convolution cache width (conv_L_cache from HF config)
       int64_t ple_token_pad_id{-1};
       int indexer_compress_ratio{};  // Zero means unspecified by an older export.

@@ -431,13 +431,9 @@ def test_lfm2_last_real_token_with_a_static_mask(tmp_path):
     assert position([[0, 0, 1, 1], [1, 0, 1, 1], [1, 1, 0, 0]], sequence_length=4) == [4, 4, 2]
 
 
-def test_lfm2_paged_export_keeps_the_conv_op_state():
-    # Paged exports have no attention mask to find the last real token with.
-    model, _ = _build_tiny_lfm2({"use_paged_attention": True}, "cuda", ir.DataType.FLOAT16)
-
-    graph = model.model.graph
-    assert _conv_state_producers(graph) == {
-        "present.0.conv": "CausalConvWithState",
-        "present.2.conv": "CausalConvWithState",
-    }
-    assert not [node.name for node in graph if node.op_type == "GatherElements"]
+@pytest.mark.parametrize("kind", sorted(TINY_MODELS))
+def test_lfm2_refuses_paged_attention(kind):
+    # Paged inputs pack the tokens of every sequence into one axis, which the batched conv op would mix;
+    # the export also failed to load, on a rank-3 Transpose of the rank-2 packed tokens.
+    with pytest.raises(NotImplementedError, match="conv layers"):
+        _build_tiny_lfm2({"use_paged_attention": True}, "cuda", ir.DataType.FLOAT16, kind=kind)

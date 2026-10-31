@@ -6,6 +6,7 @@
 # --------------------------------------------------------------------------
 import json
 import os
+from typing import ClassVar
 
 import onnx_ir as ir
 import torch
@@ -26,12 +27,6 @@ class LFM2Model(Model):
         self.make_intermediate_size_init(config)
 
         self.conv_L_cache = config.conv_L_cache
-        self.conv_attrs = {
-            # Write each row's conv state at its last real token, so a padded batch keeps the right state.
-            # The last real token comes from the attention mask, so exports without one (paged) keep the
-            # op's own state.
-            "state_per_row": "attention_mask" in self.input_names,
-        }
 
     def make_intermediate_size_init(self, config):
         # Calculate the dynamic intermediate_size for the MLP.
@@ -46,6 +41,17 @@ class LFM2Model(Model):
         self.intermediate_size = intermediate_size
 
     def make_attention_init(self, config):
+        # make_layer builds any non-conv layer as attention, and the runtime's conv/KV cache rejects other types.
+        unsupported = sorted(set(self.layer_types) - {"conv", "full_attention", "sliding_attention"})
+        if unsupported:
+            raise ValueError(
+                f"Unsupported layer types {unsupported}: expected 'conv', 'full_attention' or 'sliding_attention'."
+            )
+        if self.use_paged_attention and "conv" in self.layer_types:
+            # TODO: packed paged inputs need a varlen conv (VarlenCausalConvWithState, as in Qwen3.5); the
+            # batched CausalConvWithState path would mix the sequences of a packed batch and has no attention
+            # mask to find each row's last real token with.
+            raise NotImplementedError("use_paged_attention=true does not support models with conv layers yet.")
         self.attention_attrs["q_norm"] = True
         self.attention_attrs["k_norm"] = True
         super().make_attention_init(config)
@@ -110,32 +116,29 @@ class LFM2Model(Model):
             self.make_initializer(conv_module.conv.bias, conv_bias_name, to=self.io_dtype)
 
         past_conv_state = self.input_names["past.conv"][layer_id]
-        present_conv_state = self.output_names["present.conv"][layer_id]
-        state_per_row = self.conv_attrs["state_per_row"]
         conv_op_name = f"{basename}/CausalConvWithState"
-        # present_state is a required output of CausalConvWithState, so it cannot be left out. In the
-        # per-row case it goes to an unused value and the gather below writes the graph output instead.
-        conv_op_state = f"{conv_op_name}/output_1" if state_per_row else present_conv_state
+        # present_state is a required output of CausalConvWithState, so it cannot be left out; it goes to an
+        # unused value. The gather below writes each row's state at its last real token instead, so a padded
+        # batch keeps the right state.
         self.make_causal_conv_with_state(
             conv_op_name,
             root_input=f"{mul_1_name}/output_0",
             weight=conv_weight_name,
             bias=conv_bias_name,
             past_conv_state=past_conv_state,
-            present_conv_state=conv_op_state,
+            present_conv_state=f"{conv_op_name}/output_1",
             activation="none",
             channels=self.hidden_size,
         )
-        if state_per_row:
-            self.make_causal_conv_state_at_last_real_token(
-                f"{basename}/present_conv_state",
-                root_input=root_input,
-                past_conv_state=past_conv_state,
-                conv_input=f"{mul_1_name}/output_0",
-                present_conv_state=present_conv_state,
-                channels=self.hidden_size,
-                state_size=self.conv_L_cache - 1,
-            )
+        self.make_causal_conv_state_at_last_real_token(
+            f"{basename}/present_conv_state",
+            root_input=root_input,
+            past_conv_state=past_conv_state,
+            conv_input=f"{mul_1_name}/output_0",
+            present_conv_state=self.output_names["present.conv"][layer_id],
+            channels=self.hidden_size,
+            state_size=self.conv_L_cache - 1,
+        )
 
         # Element-wise multiply: result = c * conv_out
         mul_2_name = f"{basename}/Mul_2"
@@ -158,10 +161,11 @@ class LFM2Model(Model):
         return f"{out_proj_name}/output_0"
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
-        # Alias attribute names for compatibility with the base class
-        attention.o_proj = attention.out_proj
-        attention.q_norm = attention.q_layernorm
-        attention.k_norm = attention.k_layernorm
+        # Alias attribute names for compatibility with the base class (LFM3 already uses the base names)
+        if hasattr(attention, "out_proj"):
+            attention.o_proj = attention.out_proj
+            attention.q_norm = attention.q_layernorm
+            attention.k_norm = attention.k_layernorm
         super().make_attention(layer_id, attention, root_input, **kwargs)
 
     def make_layer(self, layer_id, layer):
@@ -177,11 +181,12 @@ class LFM2Model(Model):
         )
 
         # Operator block: Attention or Conv depending on layer type
-        if self.layer_types[layer_id] == "full_attention":
-            self.make_attention(layer_id, layer.self_attn, root_input=self.layernorm_attrs["output_0"])
-        else:  # 'conv'
+        if self.layer_types[layer_id] == "conv":
             conv_output = self.make_short_conv(layer_id, layer.conv, self.layernorm_attrs["output_0"])
             self.layernorm_attrs["skip_input"] = conv_output
+        else:  # 'full_attention', or LFM3's 'sliding_attention'
+            self.make_attention(layer_id, layer.self_attn, root_input=self.layernorm_attrs["output_0"])
+        self.make_post_norm(layer_id, getattr(layer, "post_operator_norm", None), location="post_operator")
 
         if layer_id == self.num_layers - 1 and self.prunes_hidden_rows():
             self.make_selected_hidden_rows()
@@ -195,11 +200,23 @@ class LFM2Model(Model):
         )
 
         self.make_feed_forward(layer_id, layer, root_input=self.layernorm_attrs["output_0"])
+        self.make_post_norm(layer_id, getattr(layer, "post_ffn_norm", None), location="post_ffn")
 
         self.layernorm_attrs["first_layernorm"] = False
         if layer_id == self.num_layers - 1:
             # Norm after last decoder layer of model (last layer --> norm)
             self.layernorm_attrs["last_layernorm"] = True
+
+    def make_post_norm(self, layer_id, norm, location):
+        # LFM3's sandwich norm: a plain RMSNorm on the block output before it joins the residual
+        # stream, so it becomes the skip input of the next SkipLayerNorm. LFM2 layers have none.
+        if norm is None:
+            return
+        root_input = self.layernorm_attrs["root_input"]
+        self.layernorm_attrs["root_input"] = self.layernorm_attrs["skip_input"]
+        self.make_layernorm(layer_id, norm, skip=False, simple=self.layernorm_attrs["simple"], location=location)
+        self.layernorm_attrs["root_input"] = root_input
+        self.layernorm_attrs["skip_input"] = self.layernorm_attrs["output_0"]
 
     def get_feed_forward_module(self, layer):
         # Hugging Face names the module `feed_forward`; the quantized-checkpoint IR exposes it as `mlp`.
@@ -219,6 +236,161 @@ class LFM2Model(Model):
         decoder = genai_config["model"]["decoder"]
         decoder["layer_types"] = self.layer_types
         decoder["conv_cache_size"] = self.conv_L_cache - 1
+
+
+class LFM3Model(LFM2Model):
+    """LFM3 decoder (LFM3-1.7B, and the decoder of LFM3-VL, LFM3-Audio and LFM3-Omni).
+
+    The LFM2 conv/attention stack with:
+    - a third layer type, "sliding_attention", using GQA's local window;
+    - RoPE per attention layer type (nested `rope_parameters`). The full-attention layers rotate only
+      a prefix of the frequencies of the full head dim and leave a zero-frequency tail, like Gemma4's
+      proportional RoPE, so the tail is baked into a full-width cos/sin cache;
+    - a sigmoid output gate per head (`gate_proj`) applied before `o_proj`;
+    - sandwich norms (`post_operator_norm`, `post_ffn_norm`), see `LFM2Model.make_post_norm`.
+    """
+
+    def make_rope_init(self, config):
+        # The base reader expects flat {"rope_type": ...}; the per-type caches are built in __init__, only for
+        # the attention layer types the model has. Some transformers versions add flat rope_theta/rope_type
+        # entries next to the per-type ones, which are skipped. The Hub checkpoints call the zero-tail RoPE
+        # "default", transformers calls it "proportional".
+        rope_parameters = {
+            layer_type: params
+            for layer_type, params in (getattr(config, "rope_parameters", None) or {}).items()
+            if isinstance(params, dict)
+        }
+        attention_types = sorted({"full_attention", "sliding_attention"} & set(self.layer_types))
+        missing = [layer_type for layer_type in attention_types if layer_type not in rope_parameters]
+        if missing:
+            raise NotImplementedError(f"LFM3 expects rope_parameters per attention layer type; {missing} have none.")
+        self.lfm3_rope_parameters = {layer_type: rope_parameters[layer_type] for layer_type in attention_types}
+        for layer_type, params in self.lfm3_rope_parameters.items():
+            if (
+                params.get("rope_type", "default") not in ("default", "proportional")
+                or params.get("factor", 1.0) != 1.0
+            ):
+                raise NotImplementedError(f"LFM3 {layer_type} RoPE {params} is not supported.")
+
+    def make_attention_init(self, config):
+        super().make_attention_init(config)
+        # Only these ops implement the sliding window and the KV cache; the packed Attention and
+        # MultiHeadAttention fallbacks (e.g. CUDA or DML with fp32, CPU with fp16) would build a different model.
+        if self.attention_attrs["op_type"] not in {"GroupQueryAttention", "PagedAttention"}:
+            raise NotImplementedError(
+                f"LFM3 needs GroupQueryAttention (sliding window, KV cache), but {self.ep}/{self.io_dtype} selects "
+                f"{self.attention_attrs['op_type']}; export for CPU with fp32 or for CUDA with fp16."
+            )
+        # DML's GroupQueryAttention ignores local_window_size, so the sliding layers would see the whole context.
+        if self.ep == "dml" and "sliding_attention" in self.layer_types:
+            raise NotImplementedError("LFM3's sliding_attention layers need a local window, which DML does not apply.")
+
+    # VL, Audio and Omni checkpoints nest the decoder under model.language_model, and their remote code
+    # registers the first auto class rather than AutoModelForCausalLM. With the embedding layer excluded the
+    # decoder is a stage of the second, a pipeline the runtime does not have yet.
+    MULTIMODAL: ClassVar[dict[str, tuple[str, str]]] = {
+        "Lfm3VlForConditionalGeneration": ("AutoModelForImageTextToText", "lfm3_vl"),
+        "Lfm3AudioForConditionalGeneration": ("AutoModelForMultimodalLM", "lfm3_audio"),
+        "Lfm3OmniForConditionalGeneration": ("AutoModelForMultimodalLM", "lfm3_omni"),
+    }
+
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        self.architecture = config.architectures[0]
+        # LFM3-Audio and LFM3-Omni hand the turn to speech with these tokens; text and VL configs have none.
+        self.modality_switch_token_ids = [
+            getattr(config, name)
+            for name in ("audio_start_token_id", "mixed_start_token_id", "text_end_token_id")
+            if getattr(config, name, None) is not None
+        ]
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        dtype = ir.DataType.FLOAT if self.rope_attrs["cast"]["use_fp32"] else self.io_dtype
+        self.rope_cache_names = {}
+        for layer_type in self.lfm3_rope_parameters:
+            names = (f"cos_cache_{layer_type}", f"sin_cache_{layer_type}")
+            for name, cache in zip(names, self.make_lfm3_rope_caches(layer_type), strict=True):
+                self.make_initializer(cache, name, to=dtype)
+            self.rope_cache_names[layer_type] = names
+        self.rope_attrs["create_caches"] = False
+
+    def resolve_model_loader(self):
+        loader, _ = self.MULTIMODAL.get(self.architecture, ("AutoModelForCausalLM", None))
+        return self.resolve_transformers_class(loader)
+
+    def update_genai_config(self, genai_config):
+        super().update_genai_config(genai_config)
+        if not self.modality_switch_token_ids:
+            return
+        # As in LFM2AudioModel: what follows is speech, which this runtime cannot generate for LFM3,
+        # so stop there and keep the text that came first.
+        eos_token_id = genai_config["model"].get("eos_token_id")
+        eos_token_ids = list(eos_token_id) if isinstance(eos_token_id, list) else [eos_token_id]
+        eos_token_ids += [token for token in self.modality_switch_token_ids if token not in eos_token_ids]
+        genai_config["model"]["eos_token_id"] = eos_token_ids
+
+    def make_context_length_init(self, config):
+        super().make_context_length_init(config)
+        # TODO: sliding layers keep max_length KV caches until the runtime's hybrid conv/KV cache
+        # (ConvKeyValueCache) has window-sized buffers.
+        if self.extra_options.get("windowed_kv_cache", False):
+            print("Warning: LFM3 ignores windowed_kv_cache=true; its sliding layers keep max_length KV caches.")
+        self.context_length_attrs["window_kv_cache"] = False
+
+    def make_intermediate_size_init(self, config):
+        # Lfm3Config has no block_auto_adjust_ff_dim: the MLP uses intermediate_size as is.
+        self.intermediate_size = config.intermediate_size
+
+    def make_lfm3_rope_caches(self, layer_type):
+        """(context_length, head_dim / 2) cos/sin caches with LFM3's zero-frequency tail."""
+        params = self.lfm3_rope_parameters[layer_type]
+        rope_angles = int(params.get("partial_rotary_factor", 1.0) * self.head_size) // 2
+        inv_freq = 1.0 / params["rope_theta"] ** (torch.arange(0, 2 * rope_angles, 2).float() / self.head_size)
+        inv_freq = torch.cat((inv_freq, torch.zeros(self.head_size // 2 - rope_angles)))
+        freqs = torch.outer(torch.arange(self.context_length).float(), inv_freq)
+        return freqs.cos(), freqs.sin()
+
+    def make_attention(self, layer_id, attention, root_input, **kwargs):
+        # Selects this layer type's RoPE caches in make_rotary_embedding_caches
+        self.attention_layer_type = self.layer_types[layer_id]
+        super().make_attention(layer_id, attention, root_input, **kwargs)
+
+    def make_rotary_embedding_caches(self, **kwargs):
+        return self.rope_cache_names[self.attention_layer_type]
+
+    def make_attention_output_proj(self, layer_id, attention, root_input, **kwargs):
+        # attn_output * sigmoid(gate_proj(x)), one gate per head, broadcast over head_dim
+        basename = f"/model/layers.{layer_id}/attn/gate"
+        gate_shape = self.make_hidden_state_shape(last_dim=self.num_attn_heads)
+        lead = [0] * (len(gate_shape) - 1)
+        gate_name = self.make_matmul(attention.gate_proj, f"{basename}/MatMul", root_input)
+        self.make_sigmoid(f"{basename}/Sigmoid", f"{gate_name}/output_0", self.io_dtype, gate_shape)
+        self.make_reshape(
+            f"{basename}/Reshape_gate",
+            [f"{basename}/Sigmoid/output_0", f"/model/constants/INT64/{[*lead, self.num_attn_heads, 1]}"],
+            self.io_dtype,
+            [*gate_shape, 1],
+        )
+        heads_shape = [*gate_shape, self.head_size]
+        self.make_reshape(
+            f"{basename}/Reshape_attn",
+            [self.attention_attrs["o_path"], f"/model/constants/INT64/{[*lead, self.num_attn_heads, self.head_size]}"],
+            self.io_dtype,
+            heads_shape,
+        )
+        self.make_mul(
+            f"{basename}/Mul",
+            [f"{basename}/Reshape_attn/output_0", f"{basename}/Reshape_gate/output_0"],
+            self.io_dtype,
+            heads_shape,
+        )
+        out_shape = self.make_hidden_state_shape(last_dim=self.num_attn_heads * self.head_size)
+        self.make_reshape(
+            f"{basename}/Reshape_out",
+            [f"{basename}/Mul/output_0", f"/model/constants/INT64/{[*lead, self.num_attn_heads * self.head_size]}"],
+            self.io_dtype,
+            out_shape,
+        )
+        self.attention_attrs["o_path"] = f"{basename}/Reshape_out/output_0"
+        super().make_attention_output_proj(layer_id, attention, root_input, **kwargs)
 
 
 class LFM2AudioModel(LFM2Model):
