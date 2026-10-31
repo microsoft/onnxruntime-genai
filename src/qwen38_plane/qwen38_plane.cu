@@ -442,7 +442,7 @@ __global__ void k_prep_staged(i64 capacity, int n_heads, int head_dim, float sca
   if (tid == 0) {
     input_ids[0] = tok;
     position_ids[0] = pos;
-    committed[0] = (int)pos;
+    if (committed != nullptr) committed[0] = (int)pos;
     if (pos >= 0 && pos < capacity)
       past_pos[pos] = pos;
     else
@@ -552,7 +552,7 @@ __global__ void k_prep(const PleParams* P, const i64* tok_ptr, const i64* pos_pt
   if (tid == 0) {
     input_ids[0] = tok;
     position_ids[0] = pos;
-    committed[0] = (int)pos;
+    if (committed != nullptr) committed[0] = (int)pos;
     if (pos >= 0 && pos < P->capacity)
       past_pos[pos] = pos;
     else
@@ -1150,15 +1150,15 @@ QWEN38_PLANE_EXPORT int qwen38_plane_prep(void* s, const void* P, const void* to
       }
     }
     if (staged_ple_total != 0) {
-      // The host-table gather is per row, so the staged path keeps one prep per row (the mutex is not held here).
+      // The host-table gather is per row, so the staged path keeps one prep per row (the mutex is not held here). Row 0 owns
+      // the committed length: the other rows get no committed pointer, so nothing but device memory reaches a kernel.
       constexpr int kSlots[8] = {0, 2, 8, 9, 10, 11, 12, 13};
-      int dummy_committed = 0;
       for (int r = 0; r < rows; ++r) {
         const void* r_ctx_in = (r == 0) ? ctx_in : ((const i64*)ctx_out + 2 * (r - 1));
         void* r_ctx_out = (i64*)ctx_out + 2 * r;
         const int rc = qwen38_plane_prep(s, P, (const i64*)state + kSlots[r], (const i64*)state + 1, r, r_ctx_in,
                                          r_ctx_out, (i64*)input_ids + r, (i64*)position_ids + r,
-                                         r == 0 ? committed : &dummy_committed, past_pos,
+                                         r == 0 ? committed : nullptr, past_pos,
                                          (__nv_bfloat16*)ple_out + (size_t)r * staged_ple_total, state);
         if (rc != 0) return rc;
       }

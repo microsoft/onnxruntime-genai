@@ -1144,9 +1144,11 @@ uint16_t Bf16OfFp8(unsigned char code) {
   }
 }
 
-// A staged PLE table (Qwen38PleParams::pad_ == 1: its FP8 rows stay in host memory and the module gathers them there)
-// registered with a plane, and the device buffers to call ple_rows and prep on it. The table has one head and four rows of four
-// values, and only the token takes part in the n-gram hash, so token t gathers row t % 4. Row r holds the FP8 code row_codes[r].
+// A PLE table registered with a plane, and the device buffers to call ple_rows and prep on it. The table has one head and four
+// rows of four values, and only the token takes part in the n-gram hash, so token t gathers row t % 4. Row r holds the FP8 code
+// row_codes[r]. By default the table is staged (Qwen38PleParams::pad_ == 1): its FP8 rows stay in host memory and the module
+// gathers them there. A table that is not staged is addressed by the GPU, as the shards are when the CUDA driver maps them: its
+// rows are in device memory, nothing is registered with set_ple_host_params and prep gathers them in the kernel.
 class StagedPleRig {
  public:
   static constexpr size_t kRows = 4;
@@ -1154,23 +1156,30 @@ class StagedPleRig {
   static constexpr size_t kMaxTokens = 4200;
   static constexpr size_t kPositions = 16;  // the table's capacity: how many positions past_pos has room for
   static constexpr size_t kStateWords = 14;
+  static constexpr size_t kMaxFoldRows = 8;
+  // The words of the state that hold the token of row r of a fold step: row 0 reads word 0, row 1 word 2 and rows 2..7 words
+  // 8..13.
+  static constexpr std::array<size_t, kMaxFoldRows> kFoldTokenWords = {0, 2, 8, 9, 10, 11, 12, 13};
 
   // `scale` is that of Qwen38PleParams: positive for FP8 shards (row_codes are FP8 E4M3 codes), the negative of the dequantization
   // scale for INT8 shards (row_codes are the int8 values).
-  StagedPleRig(Qwen38Plane& plane, const std::array<unsigned char, kRows>& row_codes, float scale = 1.0f)
+  StagedPleRig(Qwen38Plane& plane, const std::array<unsigned char, kRows>& row_codes, float scale = 1.0f,
+               bool staged = true)
       : plane_{plane},
         codes_{row_codes},
+        staged_{staged},
         stream_{plane},
         d_params_{plane, sizeof(Qwen38PleParams), stream_.get()},
+        d_shard_{plane, kRows * kRowWidth, stream_.get()},
         d_tokens_{plane, kMaxTokens * sizeof(int64_t), stream_.get()},
         d_ctx_in_{plane, 2 * sizeof(int64_t), stream_.get()},
-        d_ctx_out_{plane, 2 * sizeof(int64_t), stream_.get()},
+        d_ctx_out_{plane, 2 * kMaxFoldRows * sizeof(int64_t), stream_.get()},
         d_out_{plane, kMaxTokens * kRowWidth * sizeof(uint16_t), stream_.get()},
         d_tok_{plane, sizeof(int64_t), stream_.get()},
         d_pos_{plane, sizeof(int64_t), stream_.get()},
         d_state_{plane, kStateWords * sizeof(int64_t), stream_.get()},
-        d_input_ids_{plane, sizeof(int64_t), stream_.get()},
-        d_position_ids_{plane, sizeof(int64_t), stream_.get()},
+        d_input_ids_{plane, kMaxFoldRows * sizeof(int64_t), stream_.get()},
+        d_position_ids_{plane, kMaxFoldRows * sizeof(int64_t), stream_.get()},
         d_committed_{plane, sizeof(int), stream_.get()},
         d_past_pos_{plane, kPositions * sizeof(int64_t), stream_.get()} {
     for (size_t row = 0; row < kRows; ++row) {
@@ -1183,17 +1192,22 @@ class StagedPleRig {
     params_.mult[0] = 1;
     params_.vocab[0] = static_cast<long long>(kRows);
     params_.shard_end[0] = static_cast<long long>(kRows);
-    params_.shard_ptr[0] = shard_.data();
+    if (staged_) {
+      params_.shard_ptr[0] = shard_.data();
+    } else {
+      Upload(d_shard_, shard_.data(), shard_.size());
+      params_.shard_ptr[0] = d_shard_.data();
+    }
     params_.scale = scale;
-    params_.pad_ = 1;
+    params_.pad_ = staged_ ? 1 : 0;
     params_.eos = 99;
     params_.capacity = static_cast<long long>(kPositions);
     Upload(d_params_, &params_, sizeof(params_));
-    plane_.set_ple_host_params(&params_);
+    if (staged_) plane_.set_ple_host_params(&params_);
   }
 
   ~StagedPleRig() {
-    if (unregister_on_destruction_) plane_.unset_ple_host_params(&params_);
+    if (staged_ && unregister_on_destruction_) plane_.unset_ple_host_params(&params_);
   }
 
   StagedPleRig(const StagedPleRig&) = delete;
@@ -1247,6 +1261,46 @@ class StagedPleRig {
     const size_t token_word = pos_add == 1 ? 2 : static_cast<size_t>(6 + pos_add);
     return Prep(nullptr, d_state_.data() + token_word * sizeof(int64_t), d_state_.data() + sizeof(int64_t), pos_add,
                 d_ctx_out_.data());
+  }
+
+  // prep for the `rows` rows of a fold step in one call, which a negative pos_add asks for: row r takes its token from the
+  // state word of row r (kFoldTokenWords) and runs at position state[1] + r.
+  int PrepFoldStep(const std::array<int64_t, kStateWords>& state, int rows, const void* params = nullptr) {
+    Upload(d_state_, state.data(), sizeof(state));
+    return Prep(params, d_state_.data(), d_state_.data() + sizeof(int64_t), -rows, d_ctx_in_.data());
+  }
+
+  // What PrepFoldStep has to leave in the outputs that FillOutputs(0xAB) set: for every row its graph inputs, its slot of
+  // past_pos, its PLE row and its context (the token before it, then its own); only row 0 gives the committed length. Whatever
+  // lies past the last row, and the state, are untouched.
+  void ExpectFoldStepResult(const std::array<int64_t, kStateWords>& state, int rows) {
+    const int64_t filled = static_cast<int64_t>(0xABABABABABABABABull);
+    const size_t count = static_cast<size_t>(rows);
+    const int64_t position = state[1];
+    std::vector<int64_t> tokens;
+    std::vector<int64_t> input_ids(kMaxFoldRows, filled);
+    std::vector<int64_t> position_ids(kMaxFoldRows, filled);
+    std::vector<int64_t> contexts(2 * kMaxFoldRows, filled);
+    std::vector<int64_t> past_pos(kPositions, filled);
+    for (size_t r = 0; r < count; ++r) {
+      const int64_t token = state[kFoldTokenWords[r]];
+      const int64_t row_position = position + static_cast<int64_t>(r);
+      tokens.push_back(token);
+      input_ids[r] = token;
+      position_ids[r] = row_position;
+      contexts[2 * r] = r == 0 ? 0 : tokens[r - 1];  // the context in of the rig is zero
+      contexts[2 * r + 1] = token;
+      past_pos[static_cast<size_t>(row_position)] = row_position;
+    }
+    EXPECT_EQ(Read<int64_t>(d_input_ids_, kMaxFoldRows), input_ids);
+    EXPECT_EQ(Read<int64_t>(d_position_ids_, kMaxFoldRows), position_ids);
+    EXPECT_EQ(Read<int64_t>(d_ctx_out_, 2 * kMaxFoldRows), contexts);
+    EXPECT_EQ(Read<int64_t>(d_past_pos_, kPositions), past_pos);
+    EXPECT_EQ(Read<int>(d_committed_, 1)[0], position) << "the committed length is that of row 0";
+    std::vector<uint16_t> ple = ExpectedPle(tokens);
+    ple.resize((count + 1) * kRowWidth, 0xABAB);
+    EXPECT_EQ(ReadPle(count + 1), ple);
+    EXPECT_EQ(Read<int64_t>(d_state_, kStateWords), std::vector<int64_t>(state.begin(), state.end()));
   }
 
   void FillOutputs(int byte) {
@@ -1317,13 +1371,27 @@ class StagedPleRig {
 
   Qwen38Plane& plane_;
   std::array<unsigned char, kRows> codes_;
+  const bool staged_;
   PlaneStream stream_;
   std::array<unsigned char, kRows * kRowWidth> shard_{};
   Qwen38PleParams params_{};
   bool unregister_on_destruction_{true};
-  PlaneBuffer d_params_, d_tokens_, d_ctx_in_, d_ctx_out_, d_out_;
+  PlaneBuffer d_params_, d_shard_, d_tokens_, d_ctx_in_, d_ctx_out_, d_out_;
   PlaneBuffer d_tok_, d_pos_, d_state_, d_input_ids_, d_position_ids_, d_committed_, d_past_pos_;
 };
+
+// The fold step of every width a verify step has (S=2 .. S=8), prepared in one call and checked row by row.
+void ExpectEveryFoldStepWidthIsPreparedInOneCall(Qwen38Plane& plane, const std::array<unsigned char, 4>& codes, float scale,
+                                                 bool staged) {
+  StagedPleRig rig{plane, codes, scale, staged};
+  const std::array<int64_t, StagedPleRig::kStateWords> state = {7, 5, 2, 0, 0, 0, 0, 0, 1, 6, 9, 4, 3, 10};
+  for (int rows = 2; rows <= static_cast<int>(StagedPleRig::kMaxFoldRows); ++rows) {
+    SCOPED_TRACE(std::string{staged ? "staged table, " : "device table, "} + std::to_string(rows) + " rows");
+    rig.FillOutputs(0xAB);
+    ASSERT_EQ(rig.PrepFoldStep(state, rows), 0);
+    rig.ExpectFoldStepResult(state, rows);
+  }
+}
 
 // One CUDA step of the staged path that a test makes fail: the (skip + 1)-th execution of `site` in the call.
 struct StagingStep {
@@ -1631,10 +1699,77 @@ TEST_F(Qwen38PlaneStagedPleTest, AStagedTableThatWasNeverRegisteredIsAnErrorNotA
   rig.FillOutputs(0xAB);
   EXPECT_EQ(rig.PleRowsOn(d_unregistered.data(), rig.device_params(), 2), kCudaErrorInvalidValue);
   EXPECT_EQ(rig.PrepGeneric(1, 1, 0, d_unregistered.data()), kCudaErrorInvalidValue);
+  const std::array<int64_t, StagedPleRig::kStateWords> fold_state = {7, 5, 2, 0, 0, 0, 0, 0, 1, 6, 9, 4, 3, 10};
+  EXPECT_EQ(rig.PrepFoldStep(fold_state, 4, d_unregistered.data()), kCudaErrorInvalidValue);
   const Qwen38PlaneTestStats after = Stats();
   EXPECT_EQ(after.gather_rows, registered.gather_rows);
   EXPECT_EQ(after.staged_launches, registered.staged_launches);
   EXPECT_TRUE(rig.OutputsAre(0xAB));
+}
+
+// A fold step prepared in one call (a negative pos_add) of a staged table: every row is prepared, and rows 1 and up reuse what
+// row 0 read back, so they copy nothing from the device and wait for no stream; only row 0 gets the committed length, and no row
+// is handed anything but device memory.
+TEST_F(Qwen38PlaneStagedPleTest, ABatchedFoldStepPreparesEveryRowOfAStagedTable) {
+  StagedPleRig rig{*plane_, kAscendingRows};
+  rig.ResetTable();
+  const std::array<int64_t, StagedPleRig::kStateWords> state = {7, 5, 2, 0, 0, 0, 0, 0, 1, 6, 9, 4, 3, 10};
+  for (int rows = 2; rows <= static_cast<int>(StagedPleRig::kMaxFoldRows); ++rows) {
+    SCOPED_TRACE(rows);
+    rig.FillOutputs(0xAB);
+    const Qwen38PlaneTestStats before = Stats();
+    ASSERT_EQ(rig.PrepFoldStep(state, rows), 0);
+    const Qwen38PlaneTestStats after = Stats();
+    EXPECT_EQ(after.gather_rows, before.gather_rows + rows);
+    EXPECT_EQ(after.staged_launches, before.staged_launches + rows);
+    rig.ExpectFoldStepResult(state, rows);
+  }
+
+  // The table is warm now: row 0 makes the two copies of the control words and the context and one wait, no row after it does.
+  const int rows = static_cast<int>(StagedPleRig::kMaxFoldRows);
+  rig.FillOutputs(0xAB);
+  Arm(QWEN38_PLANE_FAULT_COPY, 2, 5000);
+  ASSERT_EQ(rig.PrepFoldStep(state, rows), 0);
+  EXPECT_EQ(Stats().fault_armed, 1) << "a row after row 0 copied from the device";
+  Arm(QWEN38_PLANE_FAULT_SYNC, 1, 5001);
+  ASSERT_EQ(rig.PrepFoldStep(state, rows), 0);
+  EXPECT_EQ(Stats().fault_armed, 1) << "a row after row 0 waited for the stream";
+  module_->Disarm();
+  rig.ExpectFoldStepResult(state, rows);
+}
+
+// A row 0 that fails stops the step: the error is the one of the failed step and no row is prepared.
+TEST_F(Qwen38PlaneStagedPleTest, ABatchedFoldStepThatFailsOnRowZeroPreparesNoRow) {
+  StagedPleRig rig{*plane_, kAscendingRows};
+  rig.ResetTable();
+  const std::array<int64_t, StagedPleRig::kStateWords> state = {7, 5, 2, 0, 0, 0, 0, 0, 1, 6, 9, 4, 3, 10};
+  ASSERT_EQ(rig.PrepFoldStep(state, 4), 0);
+
+  rig.FillOutputs(0xAB);
+  const Qwen38PlaneTestStats before = Stats();
+  Arm(QWEN38_PLANE_FAULT_COPY, 0, 5002);
+  EXPECT_EQ(rig.PrepFoldStep(state, 4), 5002);
+  const Qwen38PlaneTestStats failed = Stats();
+  EXPECT_EQ(failed.fault_armed, 0) << "the injected fault never fired";
+  EXPECT_EQ(failed.gather_rows, before.gather_rows);
+  EXPECT_EQ(failed.staged_launches, before.staged_launches);
+  EXPECT_TRUE(rig.OutputsAre(0xAB));
+
+  ASSERT_EQ(rig.PrepFoldStep(state, 4), 0);
+  rig.ExpectFoldStepResult(state, 4);
+}
+
+TEST_F(Qwen38PlaneStagedPleTest, ABatchedFoldStepPreparesEveryRowOfAnInt8StagedTable) {
+  ASSERT_NE(plane_->capabilities & QWEN38_PLANE_CAP_INT8_PLE, 0ull);
+  const std::array<unsigned char, StagedPleRig::kRows> codes = {0x38, 0xC0, 0x7F, 0x81};  // 56, -64, 127 and -127
+  ExpectEveryFoldStepWidthIsPreparedInOneCall(*plane_, codes, -0.25f, /*staged=*/true);
+}
+
+// A table in device memory, which the kernel gathers from itself, next to a staged one that is registered with the module.
+TEST_F(Qwen38PlaneStagedPleTest, ABatchedFoldStepOfADeviceTableIsNotMistakenForAStagedOne) {
+  StagedPleRig staged{*plane_, kDescendingRows};
+  ASSERT_EQ(staged.PleRows({1, 2}), 0);
+  ExpectEveryFoldStepWidthIsPreparedInOneCall(*plane_, kAscendingRows, 1.0f, /*staged=*/false);
 }
 
 // Errors that CUDA itself reports, not injected ones, are propagated just as exactly.
@@ -1950,6 +2085,24 @@ TEST(Qwen38PlaneTest, ImplementsEveryCapabilityAndExportsTheCapabilityQuery) {
   EXPECT_TRUE(plane.embed_gather != nullptr);
   EXPECT_EQ(std::filesystem::path{plane.library_path}.filename(), plane_lib.filename());
   EXPECT_NO_THROW(plane.RequireCapabilities(QWEN38_PLANE_ALL_CAPABILITIES, "an INT8 package"));
+}
+
+// A negative pos_add prepares the rows of a fold step in one call; here for a table in device memory, which the kernel gathers
+// from by itself (the staged tables are covered by Qwen38PlaneStagedPleTest).
+TEST(Qwen38PlaneTest, PreparesEveryRowOfAFoldStepInOneCallForADeviceTable) {
+  const std::filesystem::path plane_lib = GetBuiltPlaneLibraryPath();
+  if (!std::filesystem::exists(plane_lib)) {
+    GTEST_SKIP() << plane_lib.string() << " not present";
+  }
+  Qwen38Plane plane{plane_lib};
+  if (plane.set_device(0) != 0) {
+    GTEST_SKIP() << "No CUDA device available";
+  }
+  ExpectEveryFoldStepWidthIsPreparedInOneCall(plane, kAscendingRows, 1.0f, /*staged=*/false);
+  const std::array<unsigned char, 4> int8_codes = {0x38, 0xC0, 0x7F, 0x81};
+  if (plane.capabilities & QWEN38_PLANE_CAP_INT8_PLE) {
+    ExpectEveryFoldStepWidthIsPreparedInOneCall(plane, int8_codes, -0.25f, /*staged=*/false);
+  }
 }
 #endif
 
