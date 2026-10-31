@@ -23,6 +23,7 @@ import numpy as np
 import onnx
 import torch
 from onnx import TensorProto, helper, numpy_helper
+from package_config import migrate_qwen38_graph_config
 from package_paths import reject_output_overlap
 
 ALIGN = 4096
@@ -1152,6 +1153,22 @@ def write_weights_pool_flat(out_dir: Path, model_paths: dict[str, Path]) -> dict
     }
 
 
+def to_contrib_ops_config(cfg: dict) -> list[str]:
+    """Rewrites `cfg`, the genai_config.json of the source package, for the contrib-ops-only package.
+
+    That package has no offload runtime profiles and no custom-op libraries (the decoder and the fold head session loaded them),
+    and its config only has the keys the engine accepts. Returns the changes made to the `model.qwen38_graph` keys.
+    """
+    cfg.pop("runtime_profiles", None)
+    cfg["model"]["decoder"]["session_options"].pop("custom_ops_libraries", None)
+    qwen = cfg["model"].get("qwen38_graph", {})
+    changes = migrate_qwen38_graph_config(qwen)
+    head = qwen.get("fold", {}).get("head_r2")
+    if isinstance(head, dict):
+        head.get("session_options", {}).pop("custom_ops_libraries", None)
+    return changes
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--src", type=Path, required=True, help="Source RC2 package directory")
@@ -1241,10 +1258,8 @@ def main() -> int:
 
     # Update genai_config.json: remove custom_ops_libraries and offload runtime_profiles!
     cfg = json.loads((src / "genai_config.json").read_text())
-    cfg.pop("runtime_profiles", None)
-    cfg["model"]["decoder"]["session_options"].pop("custom_ops_libraries", None)
-    if "fold" in cfg["model"].get("qwen38_graph", {}) and "mtp" in cfg["model"]["qwen38_graph"]["fold"]:
-        cfg["model"]["qwen38_graph"]["fold"]["mtp"].get("session_options", {}).pop("custom_ops_libraries", None)
+    for change in to_contrib_ops_config(cfg):
+        print(f"genai_config: {change}")
     (out / "genai_config.json").write_text(json.dumps(cfg, indent=2) + "\n")
 
     manifest = (

@@ -7,7 +7,7 @@ per-channel), 16-bit weight quantization (FP8 E4M3FN or NVFP4 block-16 on attent
 hyper-connection weights, and MTP head experts), dense/head-KV weight sharing, and host-mapped token embeddings.
 
 usage: build_package_engine_v12b.py --from-package <dir> --out <dir> --plane-lib <libqwen38_plane.so>
-                                    [--stop-token-id N] [--prefill-chunk-tokens N] [--prefill-chunk N] [--copy]
+                                    [--stop-token-id N] [--prefill-chunk N] [--prefill-chunk-tokens N] [--copy]
                                     [--kv-quant {none,int8,fp8}] [--kv-scale-file <json>] [--dsa-lib <so>]
                                     [--weight-quant {none,fp8,nvfp4,fp8_attn_nvfp4_shared}]
                                     [--mtp-moe-quant {none,fp8,nvfp4}]
@@ -16,6 +16,10 @@ usage: build_package_engine_v12b.py --from-package <dir> --out <dir> --plane-lib
                                     [--gemm-lib <so>] [--mtp-lib <so>] [--hc-lib <so>] [--ops-lib <so>]
 Every path is an argument; nothing is read from the environment. Load the result with og.Config / og.Model / og.Engine and
 register the CUDA execution provider of <out>/provider/ (one provider path per process).
+
+The genai_config.json of the result only has the keys the engine accepts (see package_config.py): the config of a package that
+was built for an earlier config surface is migrated while it is read, and --prefill-chunk-tokens (the former name of
+--prefill-chunk) writes `prefill.chunk`.
 """
 
 from __future__ import annotations
@@ -28,6 +32,8 @@ import os
 import shutil
 from collections import defaultdict
 from pathlib import Path
+
+from package_config import migrate_qwen38_graph_config
 
 REPLACED = {"genai_config.json", "package_manifest.json", "README.md"}
 PLANE_REL = Path("libs/libqwen38_plane.so")
@@ -1881,6 +1887,59 @@ def clean_and_pack_package(source: Path, out: Path, copy: bool = False, embed_qu
     }
 
 
+def resolve_prefill_chunk(prefill_chunk: int | None, prefill_chunk_tokens: int | None) -> int | None:
+    """The chunk asked for with --prefill-chunk or with its former name --prefill-chunk-tokens (both are `prefill.chunk`)."""
+    if prefill_chunk is not None and prefill_chunk_tokens is not None and prefill_chunk != prefill_chunk_tokens:
+        raise SystemExit(
+            f"--prefill-chunk ({prefill_chunk}) and --prefill-chunk-tokens ({prefill_chunk_tokens}) both set prefill.chunk "
+            "to different values; pass only --prefill-chunk"
+        )
+    return prefill_chunk if prefill_chunk is not None else prefill_chunk_tokens
+
+
+def set_prefill_chunk(qwen: dict, chunk: int | None) -> None:
+    """Writes `prefill.chunk`, the one chunk setting, and keeps the warm-up lengths that fit into one chunk.
+
+    The builder needs `prefill.enabled`, and the engine then requires 1 <= chunk <= kv_capacity.
+    """
+    if chunk is None:
+        return
+    if chunk <= 0:
+        raise SystemExit("--prefill-chunk must be positive")
+    kv_capacity = qwen.get("kv_capacity")
+    if isinstance(kv_capacity, int) and chunk > kv_capacity:
+        raise SystemExit(f"--prefill-chunk ({chunk}) must not exceed model.qwen38_graph.kv_capacity ({kv_capacity})")
+    prefill = qwen["prefill"]
+    prefill["chunk"] = chunk
+    if "warmup_lengths" in prefill:
+        prefill["warmup_lengths"] = [int(x) for x in prefill["warmup_lengths"] if int(x) <= chunk]
+
+
+def set_clean_fold_head(qwen: dict) -> None:
+    """Points `fold.head_r2` at the packed head graph (mtp.onnx), keeping the session options of the source package."""
+    old_head = qwen["fold"].get("head_r2")
+    head = {"filename": "mtp.onnx"}
+    if isinstance(old_head, dict) and "session_options" in old_head:
+        head["session_options"] = old_head["session_options"]
+    else:
+        head["session_options"] = {
+            "log_id": "onnxruntime-genai",
+            "graph_optimization_level": "ORT_DISABLE_ALL",
+            "provider_options": [
+                {
+                    "cuda": {
+                        "enable_cuda_graph": "1",
+                        "min_num_runs_before_cuda_graph_capture": "4",
+                        "arena_extend_strategy": "kSameAsRequested",
+                        "arena.extend_strategy": "1",
+                    }
+                }
+            ],
+            "session.use_device_allocator_for_initializers": "1",
+        }
+    qwen["fold"]["head_r2"] = head
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--from-package", type=Path, required=True, help="existing v12b package folder")
@@ -1895,13 +1954,14 @@ def main() -> None:
         "--prefill-chunk-tokens",
         type=int,
         default=None,
-        help="model.qwen38_graph.prefill_chunk_tokens (only used when prefill.enabled is false)",
+        help="former name of --prefill-chunk: writes model.qwen38_graph.prefill.chunk (the one chunk setting)",
     )
     parser.add_argument(
         "--prefill-chunk",
         type=int,
         default=None,
-        help="model.qwen38_graph.prefill.chunk (caps dense prefill chunk size and filters prefill.warmup_lengths)",
+        help="model.qwen38_graph.prefill.chunk (dense prefill chunk size, at most kv_capacity; also filters "
+        "prefill.warmup_lengths)",
     )
     parser.add_argument("--copy", action="store_true", help="copy instead of hard-linking")
     parser.add_argument(
@@ -2074,6 +2134,16 @@ def main() -> None:
         if lib_arg is not None and not lib_arg.exists():
             raise SystemExit(f"missing library for {flag_name}: {lib_arg}")
 
+    config = json.loads((source / "genai_config.json").read_text())
+    qwen = config["model"]["qwen38_graph"]
+    for change in migrate_qwen38_graph_config(qwen):
+        print(f"genai_config: {change}")
+    if not qwen.get("fold", {}).get("enabled") or not qwen.get("prefill", {}).get("enabled"):
+        raise SystemExit("the source package is not a v12 package (fold.enabled and prefill.enabled are required)")
+    if args.stop_token_id is not None:
+        config["model"]["eos_token_id"] = [args.stop_token_id]
+    set_prefill_chunk(qwen, resolve_prefill_chunk(args.prefill_chunk, args.prefill_chunk_tokens))
+
     out.mkdir(parents=True, exist_ok=True)
 
     skip_rel: set[Path] = set()
@@ -2108,23 +2178,6 @@ def main() -> None:
     link_file(args.plane_lib.resolve(), out / PLANE_REL, True)
     if args.provider_lib is not None:
         link_file(args.provider_lib.resolve(), out / "provider" / "libonnxruntime_providers_cuda.so", True)
-
-    config = json.loads((source / "genai_config.json").read_text())
-    qwen = config["model"]["qwen38_graph"]
-    if not qwen.get("fold", {}).get("enabled") or not qwen.get("prefill", {}).get("enabled"):
-        raise SystemExit("the source package is not a v12 package (fold.enabled and prefill.enabled are required)")
-    if args.stop_token_id is not None:
-        config["model"]["eos_token_id"] = [args.stop_token_id]
-    if args.prefill_chunk_tokens is not None:
-        qwen["prefill_chunk_tokens"] = args.prefill_chunk_tokens
-    if args.prefill_chunk is not None:
-        if args.prefill_chunk <= 0:
-            raise SystemExit("--prefill-chunk must be positive")
-        qwen["prefill"]["chunk"] = args.prefill_chunk
-        if "warmup_lengths" in qwen["prefill"]:
-            qwen["prefill"]["warmup_lengths"] = [
-                int(x) for x in qwen["prefill"]["warmup_lengths"] if int(x) <= args.prefill_chunk
-            ]
 
     src_manifest = {}
     if (source / "package_manifest.json").exists():
@@ -2209,27 +2262,7 @@ def main() -> None:
     if clean_pkg:
         clean_info = clean_and_pack_package(source, out, copy=args.copy, embed_quant=args.embed_quant)
         config["model"]["decoder"]["filename"] = "model.onnx"
-        old_fold_head = qwen["fold"].pop("head_r2", None) or qwen["fold"].get("mtp", {})
-        graph_id = old_fold_head.get("graph_id", 81) if isinstance(old_fold_head, dict) else 81
-        qwen["fold"]["mtp"] = {"filename": "mtp.onnx", "graph_id": graph_id}
-        if isinstance(old_fold_head, dict) and "session_options" in old_fold_head:
-            qwen["fold"]["mtp"]["session_options"] = old_fold_head["session_options"]
-        else:
-            qwen["fold"]["mtp"]["session_options"] = {
-                "log_id": "onnxruntime-genai",
-                "graph_optimization_level": "ORT_DISABLE_ALL",
-                "provider_options": [
-                    {
-                        "cuda": {
-                            "enable_cuda_graph": "1",
-                            "min_num_runs_before_cuda_graph_capture": "4",
-                            "arena_extend_strategy": "kSameAsRequested",
-                            "arena.extend_strategy": "1",
-                        }
-                    }
-                ],
-                "session.use_device_allocator_for_initializers": "1",
-            }
+        set_clean_fold_head(qwen)
         config["model"]["embedding"] = {
             "filename": "embedding.onnx",
             "session_options": {"intra_op_num_threads": 1},

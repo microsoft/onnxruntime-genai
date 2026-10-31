@@ -5,12 +5,14 @@
 
 The builders run on tiny synthetic checkpoints and packages, so no GPU, checkpoint or custom-op library is needed. The tests cover
 what the builders do to files (handles that stay open on failure, an output folder that overlaps an input, the reused
-``contrib_weights.data``), not the numerics of the converted graphs.
+``contrib_weights.data``) and which ``model.qwen38_graph`` keys they write to genai_config.json, not the numerics of the converted
+graphs.
 """
 
 from __future__ import annotations
 
 import builtins
+import copy
 import dataclasses
 import hashlib
 import json
@@ -25,7 +27,12 @@ import numpy as np
 import onnx
 import pytest
 import torch
-from _qwen38_tools_test_utils import load_tools
+from _qwen38_tools_test_utils import (
+    REMOVED_QWEN38_GRAPH_KEYS,
+    load_tools,
+    prefill_chunk_problem,
+    unknown_qwen38_graph_keys,
+)
 from onnx import TensorProto, helper, numpy_helper
 
 ALIGN = 4096
@@ -33,12 +40,15 @@ ALIGN = 4096
 
 @pytest.fixture(scope="module")
 def builders():
-    with load_tools("package_paths", "build_package_v12d_int4_int8", "build_package_contrib_ops") as (
-        paths,
-        v12d,
-        contrib,
-    ):
-        yield types.SimpleNamespace(paths=paths, v12d=v12d, contrib=contrib)
+    with load_tools(
+        "package_config",
+        "package_paths",
+        "build_package",
+        "build_package_engine_v12b",
+        "build_package_v12d_int4_int8",
+        "build_package_contrib_ops",
+    ) as (config, paths, fresh, v12b, v12d, contrib):
+        yield types.SimpleNamespace(config=config, paths=paths, fresh=fresh, v12b=v12b, v12d=v12d, contrib=contrib)
 
 
 class ReachedError(Exception):
@@ -634,10 +644,11 @@ def package_fingerprint(root):
     return {path.name: fingerprint(path) for path in sorted(root.iterdir())}
 
 
-def convert(builders, monkeypatch, root, make_variant, reference=None, flags=None, extra_nodes=()):
+def convert(builders, monkeypatch, root, make_variant, reference=None, flags=None, extra_nodes=(), config=None):
     """Builds a synthetic source package below ``root`` and runs ``build_package_contrib_ops.main()`` on it.
 
     The names of the source, the reference and the output share a prefix, so a path check that compares strings would refuse them.
+    ``config`` is the genai_config.json of the source (one custom-op library on the decoder by default).
     """
     src = root / "qwen38"
     src.mkdir()
@@ -653,7 +664,7 @@ def convert(builders, monkeypatch, root, make_variant, reference=None, flags=Non
         outputs.append("unsupported")
     save_model(src / "model.onnx", nodes, outputs, initializers, domains)
     save_model(src / "mtp.onnx", [helper.make_node("Identity", ["x"], ["y"])], ["y"], [])
-    config = {"model": {"decoder": {"session_options": {"custom_ops_libraries": ["libs/libqwen_fold.so"]}}}}
+    config = config or {"model": {"decoder": {"session_options": {"custom_ops_libraries": ["libs/libqwen_fold.so"]}}}}
     (src / "genai_config.json").write_text(json.dumps(config))
 
     libs = root / "libs"
@@ -731,3 +742,488 @@ def test_failed_conversion_releases_the_data_file_and_keeps_the_reference(builde
     assert [handle.name for handle in handles if not handle.closed] == []
     if reuse:
         assert package_fingerprint(reference) == reference_before
+
+
+# ---------------------------------------------------------------------------
+# genai_config.json: only the model.qwen38_graph keys the engine accepts
+# ---------------------------------------------------------------------------
+
+HEAD_KEYS = ["mtp", "drafter", "head_r2"]
+HEAD_SESSION = {
+    "log_id": "onnxruntime-genai",
+    "custom_ops_libraries": ["libs/libqwen_mtp_head.so", "libs/libqwen_fold.so"],
+    "provider_options": [{"cuda": {"enable_cuda_graph": "1"}}],
+}
+WARMUP_LENGTHS = [8192, 2048, 512, 128, 37]
+
+
+def current_qwen38_graph(prefill_enabled=True):
+    """A ``model.qwen38_graph`` section of the current config surface, as a v12 package has it."""
+    gemm = {"custom_ops_libraries": ["libs/libqwen_fused_gemm_r5.so"]}
+    return {
+        "plane_library": "libs/libqwen38_plane.so",
+        "kv_capacity": 33028,
+        "warmup": True,
+        "head": {"filename_s1": "mtp_head/s1.onnx", "filename_s2": "mtp_head/s2.onnx", "session_options": {}},
+        "mtp": {"enabled": True, "prefill_head": True},
+        "fold": {
+            "enabled": True,
+            "head_r2": {"filename": "head_r2/model.onnx", "session_options": copy.deepcopy(HEAD_SESSION)},
+        },
+        "prefill": {
+            "enabled": prefill_enabled,
+            "chunk": 8192,
+            "weights_pool": "weights_pool.txt",
+            "constants": "qsa_consts.txt",
+            "warmup_lengths": list(WARMUP_LENGTHS),
+            "dense": {"filename": "dense/model.onnx", "session_options": copy.deepcopy(gemm)},
+            "head_kv": {"filename": "head_kv/model.onnx", "session_options": copy.deepcopy(gemm)},
+        },
+    }
+
+
+def legacy_qwen38_graph(head_key="mtp", prefill_enabled=True):
+    """``current_qwen38_graph`` as an earlier config surface wrote it, with the keys the engine now rejects.
+
+    ``head_key`` names the fold head session: ``fold.mtp``, ``fold.drafter`` or ``fold.head_r2``, which then carries the removed
+    ``graph_id``. Together the three variants have every key of ``REMOVED_QWEN38_GRAPH_KEYS``.
+    """
+    qwen = current_qwen38_graph(prefill_enabled)
+    fold = qwen["fold"]
+    fold[head_key] = {**fold.pop("head_r2"), "graph_id": 81}
+    fold.update(target_graph_id=80, force_reject=False)
+    qwen["mtp"]["skip_refeed"] = False
+    qwen["prefill_chunk_tokens"] = 4096
+    qwen.update(target_s1_graph_id=1, target_s2_graph_id=2, head_s1_graph_id=3, head_s2_graph_id=4)
+    return qwen
+
+
+def removed_key_section(dotted):
+    """The current section plus the one removed key ``dotted``."""
+    qwen = current_qwen38_graph()
+    *parents, leaf = dotted.split(".")
+    parent = qwen
+    for part in parents:
+        parent = parent[part]
+    parent[leaf] = {"filename": "mtp.onnx"} if dotted in ("fold.mtp", "fold.drafter") else 81
+    return qwen
+
+
+def test_the_config_fixtures_match_the_config_parser():
+    assert unknown_qwen38_graph_keys(current_qwen38_graph()) == []
+    assert prefill_chunk_problem(current_qwen38_graph()) is None
+    rejected = {
+        key.removeprefix("model.qwen38_graph.")
+        for head_key in HEAD_KEYS
+        for key in unknown_qwen38_graph_keys(legacy_qwen38_graph(head_key))
+    }
+    assert rejected == set(REMOVED_QWEN38_GRAPH_KEYS)
+
+
+# package_config.py
+
+
+@pytest.mark.parametrize("prefill_enabled", [True, False], ids=["dense-prefill", "step-prefill"])
+@pytest.mark.parametrize("head_key", HEAD_KEYS)
+def test_migration_turns_a_legacy_section_into_the_current_one(builders, head_key, prefill_enabled):
+    qwen = legacy_qwen38_graph(head_key, prefill_enabled)
+
+    changes = builders.config.migrate_qwen38_graph_config(qwen)
+
+    expected = current_qwen38_graph(prefill_enabled)
+    if not prefill_enabled:
+        expected["prefill"]["chunk"] = 4096  # prefill_chunk_tokens was the chunk of the step path
+    assert qwen == expected
+    assert unknown_qwen38_graph_keys(qwen) == []
+    assert changes
+
+
+@pytest.mark.parametrize("dotted", REMOVED_QWEN38_GRAPH_KEYS)
+def test_migration_removes_and_reports_each_removed_key(builders, dotted):
+    qwen = removed_key_section(dotted)
+    assert unknown_qwen38_graph_keys(qwen)
+
+    changes = builders.config.migrate_qwen38_graph_config(qwen)
+
+    assert qwen == current_qwen38_graph()
+    assert len(changes) == 1
+    assert dotted in changes[0]
+
+
+@pytest.mark.parametrize("alias", ["mtp", "drafter"])
+def test_a_head_session_alias_becomes_head_r2(builders, alias):
+    qwen = current_qwen38_graph()
+    qwen["fold"][alias] = qwen["fold"].pop("head_r2")
+
+    changes = builders.config.migrate_qwen38_graph_config(qwen)
+
+    assert qwen == current_qwen38_graph()
+    assert changes == [f"renamed fold.{alias} to fold.head_r2"]
+
+
+@pytest.mark.parametrize("aliases", [("mtp",), ("drafter",), ("mtp", "drafter")])
+def test_an_existing_head_r2_wins_over_the_aliases(builders, aliases):
+    qwen = current_qwen38_graph()
+    for alias in aliases:
+        qwen["fold"][alias] = {"filename": f"{alias}.onnx"}
+
+    builders.config.migrate_qwen38_graph_config(qwen)
+
+    assert qwen == current_qwen38_graph()
+
+
+@pytest.mark.parametrize(
+    ("enabled", "chunk", "tokens", "expected"),
+    [
+        (False, 0, 4096, 4096),
+        (False, 8192, 4096, 4096),
+        (False, 8192, 0, 8192),
+        (True, 8192, 4096, 8192),
+        (True, 0, 4096, 0),
+    ],
+    ids=["step-default", "step-replaced", "step-zero", "dense-kept", "dense-default"],
+)
+def test_prefill_chunk_tokens_only_replaces_the_chunk_of_the_step_path(builders, enabled, chunk, tokens, expected):
+    qwen = current_qwen38_graph(enabled)
+    qwen["prefill"]["chunk"] = chunk
+    qwen["prefill_chunk_tokens"] = tokens
+
+    builders.config.migrate_qwen38_graph_config(qwen)
+
+    assert "prefill_chunk_tokens" not in qwen
+    assert qwen["prefill"]["chunk"] == expected
+    assert prefill_chunk_problem(qwen) is None
+
+
+def test_a_section_without_fold_and_prefill_is_migrated(builders):
+    qwen = {"plane_library": "p.so", "mtp": {"enabled": True, "skip_refeed": True}, "head_s1_graph_id": 3}
+    qwen["prefill_chunk_tokens"] = 2048
+
+    builders.config.migrate_qwen38_graph_config(qwen)
+
+    assert qwen == {"plane_library": "p.so", "mtp": {"enabled": True}, "prefill": {"chunk": 2048}}
+
+
+def test_migration_leaves_the_current_surface_and_unknown_keys_alone(builders):
+    qwen = current_qwen38_graph()
+    assert builders.config.migrate_qwen38_graph_config(qwen) == []
+    assert qwen == current_qwen38_graph()
+
+    # A key the engine never knew stays, so the engine still reports the typo when the package is loaded.
+    qwen["fold"]["head_r3"] = {}
+    qwen["unexpected"] = 1
+    assert builders.config.migrate_qwen38_graph_config(qwen) == []
+    assert sorted(unknown_qwen38_graph_keys(qwen)) == [
+        "model.qwen38_graph.fold.head_r3",
+        "model.qwen38_graph.unexpected",
+    ]
+
+
+def test_migrating_twice_changes_nothing_the_second_time(builders):
+    qwen = legacy_qwen38_graph()
+    builders.config.migrate_qwen38_graph_config(qwen)
+    assert builders.config.migrate_qwen38_graph_config(qwen) == []
+
+
+# build_package_engine_v12b.py
+
+
+@pytest.mark.parametrize(
+    ("chunk", "tokens", "expected"), [(None, None, None), (2048, None, 2048), (None, 2048, 2048), (2048, 2048, 2048)]
+)
+def test_the_two_prefill_chunk_flags_set_one_value(builders, chunk, tokens, expected):
+    assert builders.v12b.resolve_prefill_chunk(chunk, tokens) == expected
+
+
+def test_different_values_for_the_two_prefill_chunk_flags_are_refused(builders):
+    with pytest.raises(SystemExit, match="--prefill-chunk .* and --prefill-chunk-tokens .* different values"):
+        builders.v12b.resolve_prefill_chunk(2048, 4096)
+
+
+def test_prefill_chunk_is_written_to_prefill_chunk_and_trims_the_warmup_lengths(builders):
+    qwen = current_qwen38_graph()
+
+    builders.v12b.set_prefill_chunk(qwen, 2048)
+
+    assert qwen["prefill"]["chunk"] == 2048
+    assert qwen["prefill"]["warmup_lengths"] == [2048, 512, 128, 37]
+    assert unknown_qwen38_graph_keys(qwen) == []
+    assert prefill_chunk_problem(qwen) is None
+
+
+@pytest.mark.parametrize(
+    ("chunk", "message"), [(0, "must be positive"), (-2, "must be positive"), (33029, "must not exceed")]
+)
+def test_an_invalid_prefill_chunk_is_refused_and_leaves_the_section_alone(builders, chunk, message):
+    qwen = current_qwen38_graph()
+    with pytest.raises(SystemExit, match=message):
+        builders.v12b.set_prefill_chunk(qwen, chunk)
+    assert qwen == current_qwen38_graph()
+
+
+def test_the_largest_prefill_chunk_is_kv_capacity_and_none_changes_nothing(builders):
+    qwen = current_qwen38_graph()
+    builders.v12b.set_prefill_chunk(qwen, qwen["kv_capacity"])
+    assert prefill_chunk_problem(qwen) is None
+
+    unchanged = current_qwen38_graph()
+    builders.v12b.set_prefill_chunk(unchanged, None)
+    assert unchanged == current_qwen38_graph()
+
+
+@pytest.mark.parametrize("head_key", HEAD_KEYS)
+def test_a_clean_package_keeps_the_head_session_options_under_head_r2(builders, head_key):
+    qwen = legacy_qwen38_graph(head_key)
+    builders.config.migrate_qwen38_graph_config(qwen)
+
+    builders.v12b.set_clean_fold_head(qwen)
+
+    assert qwen["fold"] == {"enabled": True, "head_r2": {"filename": "mtp.onnx", "session_options": HEAD_SESSION}}
+    assert unknown_qwen38_graph_keys(qwen) == []
+
+
+def test_a_clean_package_without_head_session_options_gets_the_cuda_graph_options(builders):
+    qwen = current_qwen38_graph()
+    del qwen["fold"]["head_r2"]
+
+    builders.v12b.set_clean_fold_head(qwen)
+
+    head = qwen["fold"]["head_r2"]
+    assert set(head) == {"filename", "session_options"}
+    assert head["filename"] == "mtp.onnx"
+    assert head["session_options"]["provider_options"][0]["cuda"]["enable_cuda_graph"] == "1"
+    assert unknown_qwen38_graph_keys(qwen) == []
+
+
+def make_v12b_source(root, qwen):
+    """A package folder for ``build_package_engine_v12b.py`` that has a config and a few files but no graphs, and a plane library."""
+    source = root / "source"
+    (source / "libs").mkdir(parents=True)
+    (source / "head_r2").mkdir()
+    (source / "head_r2" / "model.onnx").write_bytes(b"head")
+    (source / "libs" / "libqwen38_plane.so").write_bytes(b"previous plane")
+    (source / "genai_config.json").write_text(json.dumps({"model": {"eos_token_id": [248046], "qwen38_graph": qwen}}))
+    plane = root / "libqwen38_plane.so"
+    plane.write_bytes(b"plane")
+    return source, plane
+
+
+def run_v12b(builders, monkeypatch, root, qwen, *flags):
+    source, plane = make_v12b_source(root, qwen)
+    out = root / "out"
+    run_main(monkeypatch, builders.v12b, "--from-package", source, "--out", out, "--plane-lib", plane, *flags)
+    return out
+
+
+@pytest.mark.parametrize("head_key", HEAD_KEYS)
+@pytest.mark.parametrize(
+    ("flags", "chunk"),
+    [
+        ((), 8192),
+        (("--prefill-chunk", "2048"), 2048),
+        (("--prefill-chunk-tokens", "2048"), 2048),
+        (("--prefill-chunk", "2048", "--prefill-chunk-tokens", "2048"), 2048),
+    ],
+    ids=["no-flag", "prefill-chunk", "former-name", "both"],
+)
+def test_v12b_builder_writes_the_current_config_surface(
+    builders, tmp_path, monkeypatch, capsys, head_key, flags, chunk
+):
+    out = run_v12b(builders, monkeypatch, tmp_path, legacy_qwen38_graph(head_key), *flags)
+
+    qwen = json.loads((out / "genai_config.json").read_text())["model"]["qwen38_graph"]
+    expected = current_qwen38_graph()
+    expected["prefill"]["chunk"] = chunk
+    expected["prefill"]["warmup_lengths"] = [x for x in WARMUP_LENGTHS if x <= chunk]
+    assert qwen == expected
+    assert unknown_qwen38_graph_keys(qwen) == []
+    assert prefill_chunk_problem(qwen) is None
+    assert "genai_config: dropped target_s1_graph_id" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("flags", "message"),
+    [
+        (("--prefill-chunk", "2048", "--prefill-chunk-tokens", "4096"), "different values"),
+        (("--prefill-chunk", "0"), "must be positive"),
+        (("--prefill-chunk-tokens", "33029"), "must not exceed"),
+    ],
+)
+def test_v12b_builder_refuses_an_invalid_chunk_before_it_creates_the_output(
+    builders, tmp_path, monkeypatch, flags, message
+):
+    with pytest.raises(SystemExit, match=message):
+        run_v12b(builders, monkeypatch, tmp_path, legacy_qwen38_graph(), *flags)
+    assert not (tmp_path / "out").exists()
+
+
+def test_v12b_builder_refuses_a_source_without_the_folded_decode_before_it_creates_the_output(
+    builders, tmp_path, monkeypatch
+):
+    qwen = legacy_qwen38_graph()
+    qwen["fold"]["enabled"] = False
+    with pytest.raises(SystemExit, match="not a v12 package"):
+        run_v12b(builders, monkeypatch, tmp_path, qwen)
+    assert not (tmp_path / "out").exists()
+
+
+# build_package_contrib_ops.py
+
+
+def contrib_source_config(qwen):
+    session_options = {"log_id": "onnxruntime-genai", "custom_ops_libraries": ["libs/libqwen_fold.so"]}
+    return {
+        "runtime_profiles": {"offload": {"session.moe.offload.mode": "auto"}},
+        "model": {"decoder": {"session_options": session_options}, "qwen38_graph": qwen},
+    }
+
+
+def head_session_without_custom_ops():
+    return {key: value for key, value in HEAD_SESSION.items() if key != "custom_ops_libraries"}
+
+
+@pytest.mark.parametrize("head_key", HEAD_KEYS)
+def test_contrib_config_has_no_custom_ops_and_only_current_keys(builders, head_key):
+    cfg = contrib_source_config(legacy_qwen38_graph(head_key))
+
+    changes = builders.contrib.to_contrib_ops_config(cfg)
+
+    qwen = cfg["model"]["qwen38_graph"]
+    assert changes
+    assert unknown_qwen38_graph_keys(qwen) == []
+    assert "runtime_profiles" not in cfg
+    assert cfg["model"]["decoder"]["session_options"] == {"log_id": "onnxruntime-genai"}
+    assert qwen["fold"]["head_r2"]["session_options"] == head_session_without_custom_ops()
+
+
+def test_contrib_config_without_a_qwen38_graph_section_is_still_rewritten(builders):
+    cfg = {"runtime_profiles": [], "model": {"decoder": {"session_options": {"custom_ops_libraries": ["a.so"]}}}}
+    assert builders.contrib.to_contrib_ops_config(cfg) == []
+    assert cfg == {"model": {"decoder": {"session_options": {}}}}
+
+
+@pytest.mark.parametrize("head_key", HEAD_KEYS)
+def test_contrib_builder_writes_the_current_config_surface(builders, tmp_path, monkeypatch, capsys, head_key):
+    config = contrib_source_config(legacy_qwen38_graph(head_key))
+
+    run = convert(builders, monkeypatch, tmp_path, bf16_skinny_gemm, flags=(), config=config)
+
+    written = json.loads((run.out / "genai_config.json").read_text())
+    qwen = written["model"]["qwen38_graph"]
+    expected = current_qwen38_graph()
+    expected["fold"]["head_r2"]["session_options"] = head_session_without_custom_ops()
+    assert qwen == expected
+    assert unknown_qwen38_graph_keys(qwen) == []
+    assert "runtime_profiles" not in written
+    assert "genai_config: dropped target_s1_graph_id" in capsys.readouterr().out
+    # The session labels of the weights pool are a package file format, not config keys.
+    manifest = json.loads((run.out / "package_manifest.json").read_text())
+    assert set(manifest["weights_pool"]["sessions"]) == {"target", "mtp"}
+
+
+# build_package_v12d_int4_int8.py
+
+V12D_DATA_FILES = [
+    "qmoe_int4.data",
+    "qmoe_scales.data",
+    "matmul_int8.data",
+    "matmul_scales.data",
+    "embed_tokens.data",
+    "lm_head.data",
+    "small_weights.data",
+]
+V12D_LIBS = [
+    "libqwen38_plane.so",
+    "libqwen_packed_qsa_indexer_v11.so",
+    "libqwen_fused_ops.so",
+    "libqwen_fused_attn_r5.so",
+    "libqwen_guarded_dsa_r2_v12.so",
+    "libqwen_mtp_head.so",
+    "libqwen_fold.so",
+]
+
+
+def stub_v12d_conversion(monkeypatch, v12d):
+    """Replaces the conversion steps of ``build_package_v12d_int4_int8.main()``; its config and library steps stay real."""
+
+    def build_qmoe_int4(_reader, data_root):
+        for name in V12D_DATA_FILES:
+            (data_root / name).write_bytes(b"")
+        return {}
+
+    monkeypatch.setattr(v12d, "HFCheckpointReader", lambda *_: object())
+    monkeypatch.setattr(v12d, "build_ple_int8", lambda *_: None)
+    monkeypatch.setattr(v12d, "build_qmoe_int4", build_qmoe_int4)
+    monkeypatch.setattr(v12d, "collect_v12b_bf16_map", lambda *_: {})
+    monkeypatch.setattr(v12d, "build_matmul_int8", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(v12d, "rewrite_submodel", lambda *_args, **_kwargs: onnx.ModelProto())
+    monkeypatch.setattr(v12d, "unify_and_pack_flat_int4_int8_package", lambda *_: {})
+    monkeypatch.setattr(v12d, "consolidate_remaining_external_initializers", lambda *_: None)
+    monkeypatch.setattr(v12d, "write_weights_pool", lambda *_: {})
+
+
+def make_v12d_inputs(root, qwen):
+    """The input folders of the v12d builder; the v12d package and the embedding package both have a config with ``qwen``."""
+    folders = {name: root / name for name in ("hf", "v12b", "v12d", "reuse_embed", "ops")}
+    for folder in folders.values():
+        folder.mkdir()
+    config = json.dumps({"model": {"decoder": {"session_options": {}}, "qwen38_graph": qwen}})
+    for name in ("v12d", "reuse_embed"):
+        (folders[name] / "genai_config.json").write_text(config)
+    for name in ("qsa_consts.txt", "qsa_consts.bin"):
+        (folders["v12d"] / name).write_bytes(b"qsa")
+    for name in V12D_LIBS:
+        (folders["ops"] / name).write_bytes(name.encode())
+    return folders
+
+
+@pytest.mark.parametrize("head_key", HEAD_KEYS)
+@pytest.mark.parametrize("flat", [False, True], ids=["target-folders", "clean-flat"])
+def test_v12d_builder_writes_the_current_config_surface(builders, tmp_path, monkeypatch, capsys, head_key, flat):
+    stub_v12d_conversion(monkeypatch, builders.v12d)
+    folders = make_v12d_inputs(tmp_path, legacy_qwen38_graph(head_key))
+    out = tmp_path / "out"
+    argv = ["--hf-dir", folders["hf"], "--v12b-dir", folders["v12b"], "--v12d-dir", folders["v12d"]]
+    argv += ["--ops-dir", folders["ops"], "--out", out]
+    if flat:
+        argv += ["--clean-flat-package", "--reuse-embed-from", folders["reuse_embed"]]
+
+    assert run_main(monkeypatch, builders.v12d, *argv) == 0
+
+    written = json.loads((out / "genai_config.json").read_text())
+    qwen = written["model"]["qwen38_graph"]
+    expected = current_qwen38_graph()
+    if not flat:  # the dense and head-KV sessions need no custom operators
+        for name in ("dense", "head_kv"):
+            del expected["prefill"][name]["session_options"]["custom_ops_libraries"]
+    assert qwen == expected
+    assert unknown_qwen38_graph_keys(qwen) == []
+    assert len(written["model"]["decoder"]["session_options"]["custom_ops_libraries"]) == 6
+    assert "genai_config: dropped target_s1_graph_id" in capsys.readouterr().out
+
+
+# build_package.py
+
+
+@pytest.mark.parametrize("flags", [(), ("--no-mtp", "--no-warmup")], ids=["mtp", "no-mtp"])
+def test_the_fresh_package_builder_writes_the_current_config_surface(builders, tmp_path, monkeypatch, flags):
+    fresh = builders.fresh
+    argv = ["--out", tmp_path / "pkg", "--skip-ple", "--plane-lib", tmp_path / "libqwen38_plane.so"]
+    (tmp_path / "libqwen38_plane.so").write_bytes(b"plane")
+    for flag, name in (("--target-bundle", "target"), ("--head-bundle", "head"), ("--checkpoint", "checkpoint")):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "model.onnx").write_bytes(b"graph")
+        argv += [flag, tmp_path / name]
+    for name in ("tokenizer.json", "tokenizer_config.json", "chat_template.jinja", "generation_config.json"):
+        (tmp_path / "checkpoint" / name).write_text("{}")
+    for lib in {**fresh.TARGET_LIBS, **fresh.HEAD_EXTRA_LIBS}:
+        (tmp_path / f"lib{lib}.so").write_bytes(lib.encode())
+        argv += [f"--lib-{lib.replace('_', '-')}", tmp_path / f"lib{lib}.so"]
+
+    run_main(monkeypatch, fresh, *argv, *flags)
+
+    qwen = json.loads((tmp_path / "pkg" / "genai_config.json").read_text())["model"]["qwen38_graph"]
+    assert unknown_qwen38_graph_keys(qwen) == []
+    assert prefill_chunk_problem(qwen) is None
+    assert qwen["mtp"] == {"enabled": not flags, "prefill_head": True}
+    assert qwen["warmup"] is (not flags)
