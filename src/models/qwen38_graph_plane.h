@@ -24,6 +24,23 @@ namespace Generators {
 // (`libfoo.dll` or `foo.dll`) when present alongside `path`; otherwise returns `path` unchanged.
 std::filesystem::path ResolveWindowsSharedLibraryPath(const std::filesystem::path& path);
 
+// True in a Windows build: the host that translates a POSIX library name in a package to the `.dll` the package ships.
+#if defined(_WIN32)
+inline constexpr bool kQwen38WindowsHost = true;
+#else
+inline constexpr bool kQwen38WindowsHost = false;
+#endif
+
+// Resolves model.qwen38_graph.plane_library (`configured`, relative to `model_root`) to the standalone plane library to
+// load, or to an empty path when the plane built into onnxruntime-genai-cuda is to be used: nothing is configured, or the
+// configured library is not in the package. On a Windows host a configured `libfoo.so` / `foo.so` stands for the
+// `libfoo.dll` / `foo.dll` the package ships, so that alias is looked up (ResolveWindowsSharedLibraryPath, the translation
+// the loader applies) before the library is judged missing. The library, and the alias, must resolve inside `model_root`,
+// symlinks included (std::runtime_error otherwise). `windows_host` is a parameter so that the decision of a Windows host
+// can be tested on every platform; the model passes kQwen38WindowsHost.
+std::filesystem::path ResolveQwen38PlaneLibraryPath(const std::filesystem::path& model_root,
+                                                    const std::string& configured, bool windows_host);
+
 // A CPU embedding table that the plane gathers rows from (the model's embed_tokens, mapped from <embedding>.data).
 struct Qwen38EmbeddingTable {
   const void* data{};  // device-addressable base of the table
@@ -42,8 +59,10 @@ struct Qwen38EmbeddingTable {
 // host never takes that path. A library that is rejected while it loads (a stale ABI, a missing symbol) has launched nothing and
 // is released.
 struct Qwen38Plane {
+  // An empty plane with no library loaded; the function pointers are filled in by the caller (tests).
   Qwen38Plane() = default;
-  // Loads `path`, resolves every symbol and checks the ABI version and structure layout.
+  // Loads `path` (or the built-in onnxruntime-genai-cuda library when `path` is empty), resolves every symbol and checks
+  // the ABI version and structure layout.
   explicit Qwen38Plane(const std::filesystem::path& path);
   ~Qwen38Plane();
   Qwen38Plane(const Qwen38Plane&) = delete;
