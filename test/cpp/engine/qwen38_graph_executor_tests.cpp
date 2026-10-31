@@ -522,6 +522,97 @@ TEST_F(Qwen38GraphEngineTest, AnEndOfSequenceBonusTokenIsNotAnExaminedDraft) {
   EXPECT_FLOAT_EQ(stats.acceptance_rate, 1.0f);
 }
 
+TEST_F(Qwen38GraphEngineTest, RoundsAreClassifiedByTheNumberOfDraftsThatWereAccepted) {
+  device_->SetDrafts(3, {0, 1, 2, 3});
+  auto engine = MakeEngine();
+  auto request = Begin(*engine, Prompt(5), /*max_generated_tokens=*/11);  // the first token, then 1 + 2 + 3 + 4 tokens
+
+  const auto outcome = RunToCompletion(*engine, request);
+
+  EXPECT_EQ(outcome.tokens, Expected(5, 11));
+  const auto stats = engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.rounds, 4u);
+  EXPECT_EQ(stats.draft_tokens_proposed, 12u);
+  EXPECT_EQ(stats.draft_tokens_evaluated, 9u);  // 1 + 2 + 3 + 3: every round but the full one examined its rejected draft
+  EXPECT_EQ(stats.draft_tokens_accepted, 6u);
+  EXPECT_FLOAT_EQ(stats.acceptance_rate, 6.0f / 9.0f);
+  EXPECT_EQ(stats.zero_accept_rounds, 1u);
+  EXPECT_EQ(stats.partial_accept_rounds, 2u);
+  EXPECT_EQ(stats.full_accept_rounds, 1u);
+  for (size_t accepted = 0; accepted <= 3; ++accepted) {
+    EXPECT_EQ(stats.acceptance_length_histogram[accepted], 1u) << "accepted=" << accepted;
+  }
+  EXPECT_EQ(stats.correction_tokens, 3u);
+  EXPECT_EQ(stats.bonus_tokens, 1u);
+  EXPECT_EQ(stats.tokens_emitted, 11u);
+  EXPECT_EQ(stats.tokens_discarded, 0u);
+}
+
+TEST_F(Qwen38GraphEngineTest, APartialAcceptRoundIsCountedEvenWhenTheTurnEndsBeforeItsCorrectionToken) {
+  device_->SetDrafts(3, {1});
+  auto engine = MakeEngine();
+  auto request = Begin(*engine, Prompt(5), /*max_generated_tokens=*/2);  // the accepted draft fits, the correction does not
+
+  const auto outcome = RunToCompletion(*engine, request);
+
+  EXPECT_EQ(outcome.tokens, Expected(5, 2));
+  const auto stats = engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.partial_accept_rounds, 1u);
+  EXPECT_EQ(stats.zero_accept_rounds, 0u);
+  EXPECT_EQ(stats.full_accept_rounds, 0u);
+  EXPECT_EQ(stats.correction_tokens, 0u);  // no correction was delivered, but the round is partial all the same
+  EXPECT_EQ(stats.bonus_tokens, 0u);
+}
+
+TEST_F(Qwen38GraphEngineTest, ARoundTruncatedInsideItsAcceptedDraftsIsClassifiedByTheDraftsItDelivered) {
+  device_->SetDrafts(3, {3});
+  auto engine = MakeEngine();
+  auto request = Begin(*engine, Prompt(5), /*max_generated_tokens=*/2);  // one of the three accepted drafts fits
+
+  RunToCompletion(*engine, request);
+
+  const auto stats = engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.draft_tokens_accepted, 1u);
+  EXPECT_EQ(stats.partial_accept_rounds, 1u);
+  EXPECT_EQ(stats.full_accept_rounds, 0u);
+  EXPECT_EQ(stats.bonus_tokens, 0u);
+}
+
+TEST_F(Qwen38GraphEngineTest, AnEndOfSequenceFirstDraftIsAZeroAcceptRound) {
+  device_->SetDrafts(3, {3});
+  device_->overrides[6] = kEos;
+  auto engine = MakeEngine();
+  auto request = Begin(*engine, Prompt(5), /*max_generated_tokens=*/20);
+
+  const auto outcome = RunToCompletion(*engine, request);
+
+  EXPECT_EQ(outcome.tokens, Expected(5, 1));
+  EXPECT_EQ(outcome.finish_reason, GenerationFinishReason::EosToken);
+  const auto stats = engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.draft_tokens_evaluated, 1u);
+  EXPECT_EQ(stats.draft_tokens_accepted, 0u);
+  EXPECT_EQ(stats.zero_accept_rounds, 1u);
+  EXPECT_EQ(stats.partial_accept_rounds, 0u);
+  EXPECT_EQ(stats.acceptance_length_histogram[0], 1u);
+}
+
+TEST_F(Qwen38GraphEngineTest, RoundCountersOfSeveralRequestsAddUp) {
+  device_->SetDrafts(3, {1});
+  auto engine = MakeEngine();
+  for (int i = 0; i < 2; ++i) {
+    auto request = Begin(*engine, Prompt(5, 12 + i), /*max_generated_tokens=*/3);  // first token, accepted draft, correction
+    ASSERT_EQ(RunToCompletion(*engine, request).tokens, Expected(5, 3));
+  }
+
+  const auto stats = engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.rounds, 2u);
+  EXPECT_EQ(stats.partial_accept_rounds, 2u);
+  EXPECT_EQ(stats.acceptance_length_histogram[1], 2u);
+  EXPECT_EQ(stats.correction_tokens, 2u);
+  EXPECT_EQ(stats.draft_tokens_evaluated, 4u);
+  EXPECT_EQ(stats.draft_tokens_accepted, 2u);
+}
+
 // ---- prefill, cancellation, queueing ---------------------------------------------------------
 
 TEST_F(Qwen38GraphEngineTest, ThePromptIsIngestedInChunksOverSeveralSteps) {
