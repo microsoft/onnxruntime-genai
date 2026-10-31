@@ -118,6 +118,10 @@ class Qwen38OrtRunHints {
   }
   bool InWarmup() const noexcept { return warmup_; }
 
+  // Every Run of this engine asks for deterministic MoE tactics from now on, without being a warmup Run: the DFlash
+  // pipeline verifies at S=8 under CUDA graphs from its first decode on, whether or not the model warms up.
+  void RequireDeterministicMoe() noexcept { deterministic_moe_ = true; }
+
   // The variables to publish around the next Run; `prompt` is set for the Runs that ingest prompt tokens.
   std::vector<Qwen38OrtEnvVariable> Collect(const Qwen38PromptRunHints* prompt) const;
 
