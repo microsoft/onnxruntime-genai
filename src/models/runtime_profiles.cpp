@@ -7,8 +7,8 @@
 #include "smartptrs.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <charconv>
-#include <fstream>
 #include <iostream>
 #include <limits>
 #include <sstream>
@@ -21,6 +21,7 @@
 #endif
 #include <windows.h>
 #else
+#include <fcntl.h>
 #include <unistd.h>
 #endif
 
@@ -209,12 +210,6 @@ std::optional<uint64_t> ParseCgroupBytes(std::string_view text) {
   return value;
 }
 
-// Whether `controllers`, the content of cgroup.controllers, lists the controller `name`.
-bool ControllersInclude(std::string_view controllers, std::string_view name) {
-  const std::vector<std::string_view> fields = SplitFields(TrimWhitespace(controllers));
-  return std::find(fields.begin(), fields.end(), name) != fields.end();
-}
-
 }  // namespace
 
 CgroupMemoryLimits ResolveProcessCgroupMemory(const HostFileReader& read_file) {
@@ -224,13 +219,19 @@ CgroupMemoryLimits ResolveProcessCgroupMemory(const HostFileReader& read_file) {
     limits.status = status;
     return limits;
   };
+  // For the files that must be read to resolve the cgroup: one that is missing or unreadable leaves it unresolved.
+  const auto read_text = [&read_file](const std::string& path) -> std::optional<std::string> {
+    HostFile file = read_file(path);
+    if (file.status != HostFileStatus::kRead) return std::nullopt;
+    return std::move(file.text);
+  };
 
-  const auto cgroup_text = read_file("/proc/self/cgroup");
+  const auto cgroup_text = read_text("/proc/self/cgroup");
   std::string cgroup_path;
   if (!cgroup_text || !ParseCgroup2Path(*cgroup_text, cgroup_path)) return with_status(Status::kUnresolved);
   if (cgroup_path.empty()) return with_status(Status::kNotApplicable);
 
-  const auto mountinfo = read_file("/proc/self/mountinfo");
+  const auto mountinfo = read_text("/proc/self/mountinfo");
   std::vector<Cgroup2Mount> mounts;
   if (!mountinfo || !ParseCgroup2Mounts(*mountinfo, mounts)) return with_status(Status::kUnresolved);
   if (mounts.empty()) return with_status(Status::kNotApplicable);
@@ -260,28 +261,21 @@ CgroupMemoryLimits ResolveProcessCgroupMemory(const HostFileReader& read_file) {
     directories.push_back(JoinPath(directories.back(), (*process_path)[i]));
   }
   // Every cgroup directory has cgroup.controllers, so its absence means the path does not lead to the process's cgroup.
-  if (!read_file(JoinPath(directories.back(), "cgroup.controllers"))) return with_status(Status::kUnresolved);
+  if (!read_text(JoinPath(directories.back(), "cgroup.controllers"))) return with_status(Status::kUnresolved);
 
   CgroupMemoryLimits limits = with_status(Status::kResolved);
-  for (size_t level = 0; level < directories.size(); ++level) {
-    const std::string& directory = directories[level];
-    const auto max_text = read_file(JoinPath(directory, "memory.max"));
-    if (!max_text) {
-      // memory.max does not exist in the hierarchy root or in a cgroup without the memory controller, and neither
-      // bounds the process. A cgroup that lists the controller does have the file, so one that cannot be read there
-      // must not read as unlimited.
-      const bool hierarchy_root = level == 0 && mount_depth == 0;
-      const auto controllers = read_file(JoinPath(directory, "cgroup.controllers"));
-      if (!controllers || (!hierarchy_root && ControllersInclude(*controllers, "memory"))) {
-        return with_status(Status::kUnresolved);
-      }
-      continue;
-    }
-    if (TrimWhitespace(*max_text) == "max") continue;
-    const auto max_bytes = ParseCgroupBytes(*max_text);
+  for (const std::string& directory : directories) {
+    const HostFile max_file = read_file(JoinPath(directory, "memory.max"));
+    // memory.max does not exist in the hierarchy root or in a cgroup without the memory controller, and neither bounds
+    // the process. One that exists but cannot be read is an unknown limit at every level: the root of a container's
+    // cgroup namespace looks like the hierarchy root, yet has the file.
+    if (max_file.status == HostFileStatus::kMissing) continue;
+    if (max_file.status != HostFileStatus::kRead) return with_status(Status::kUnresolved);
+    if (TrimWhitespace(max_file.text) == "max") continue;
+    const auto max_bytes = ParseCgroupBytes(max_file.text);
     if (!max_bytes) return with_status(Status::kUnresolved);
 
-    const auto current_text = read_file(JoinPath(directory, "memory.current"));
+    const auto current_text = read_text(JoinPath(directory, "memory.current"));
     const auto current_bytes = current_text ? ParseCgroupBytes(*current_text) : std::nullopt;
     if (!current_bytes) return with_status(Status::kUnresolved);
     const uint64_t headroom = *max_bytes > *current_bytes ? *max_bytes - *current_bytes : 0;
@@ -291,20 +285,35 @@ CgroupMemoryLimits ResolveProcessCgroupMemory(const HostFileReader& read_file) {
   return limits;
 }
 
+#if defined(__linux__)
+HostFile ReadHostFile(const std::string& path) {
+  const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+  if (fd < 0) return {errno == ENOENT ? HostFileStatus::kMissing : HostFileStatus::kUnreadable, {}};
+
+  HostFile file{HostFileStatus::kRead, {}};
+  char buffer[4096];
+  while (true) {
+    const ssize_t count = ::read(fd, buffer, sizeof(buffer));
+    if (count > 0) {
+      file.text.append(buffer, static_cast<size_t>(count));
+    } else if (count == 0) {
+      break;
+    } else if (errno != EINTR) {
+      file = {HostFileStatus::kUnreadable, {}};
+      break;
+    }
+  }
+  ::close(fd);
+  return file;
+}
+#endif
+
 namespace {
 
 #if defined(__linux__)
-std::optional<std::string> ReadHostFile(const std::string& path) {
-  std::ifstream file(path);
-  if (!file) return std::nullopt;
-  std::ostringstream contents;
-  contents << file.rdbuf();
-  return contents.str();
-}
-
 std::optional<uint64_t> ReadMeminfoBytes(std::string_view key) {
-  const auto meminfo = ReadHostFile("/proc/meminfo");
-  return meminfo ? ParseMeminfoBytes(*meminfo, key) : std::nullopt;
+  const HostFile meminfo = ReadHostFile("/proc/meminfo");
+  return meminfo.status == HostFileStatus::kRead ? ParseMeminfoBytes(meminfo.text, key) : std::nullopt;
 }
 #endif
 

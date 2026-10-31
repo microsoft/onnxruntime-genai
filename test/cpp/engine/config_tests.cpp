@@ -1,14 +1,21 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <map>
 #include <optional>
+#include <random>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <tuple>
 #include <utility>
 #include <vector>
+#if defined(__linux__)
+#include <unistd.h>
+#endif
 
 #include <gtest/gtest.h>
 
@@ -633,16 +640,23 @@ constexpr std::string_view kHostMountinfo =
     "rw,nsdelegate,memory_recursiveprot\n"
     "25 22 0:25 / /run rw,nosuid,nodev shared:6 - tmpfs tmpfs rw,mode=755\n";
 
+// A path that is not in the fake host does not exist. One that holds this marker exists but cannot be read.
+constexpr std::string_view kUnreadableMarker = "<the file cannot be read>";
+
+void MakeUnreadable(FakeHostFiles& files, const std::string& path) { files[path] = std::string{kUnreadableMarker}; }
+
 CgroupMemoryLimits ResolveCgroupMemory(const FakeHostFiles& files) {
-  return ResolveProcessCgroupMemory([&files](const std::string& path) -> std::optional<std::string> {
+  return ResolveProcessCgroupMemory([&files](const std::string& path) -> HostFile {
     const auto file = files.find(path);
-    if (file == files.end()) return std::nullopt;
-    return file->second;
+    if (file == files.end()) return {HostFileStatus::kMissing, {}};
+    if (file->second == kUnreadableMarker) return {HostFileStatus::kUnreadable, {}};
+    return {HostFileStatus::kRead, file->second};
   });
 }
 
-// The files every cgroup directory has. cgroup.controllers lists the controllers the cgroup has: a cgroup that has the
-// memory controller also has memory.max and memory.current (see AddMemoryFiles), except for the hierarchy root.
+// The files every cgroup directory has. The resolver only needs cgroup.controllers to be there, but the fixture lists
+// the controllers as the kernel does: a cgroup that has the memory controller also has memory.max and memory.current
+// (see AddMemoryFiles), while the hierarchy root and a cgroup without the controller have neither.
 void AddCgroup(FakeHostFiles& files, const std::string& directory, bool has_memory_controller = true) {
   files[directory + "/cgroup.controllers"] =
       has_memory_controller ? "cpuset cpu io memory pids\n" : "cpuset cpu io pids\n";
@@ -840,7 +854,9 @@ TEST(ConfigTest, CgroupMemoryIsUnboundedWhenEveryLevelIsUnlimited) {
   EXPECT_FALSE(hybrid.headroom.has_value());
 }
 
-TEST(ConfigTest, CgroupMemoryMaxMayBeMissingOnlyFromTheHierarchyRootAndCgroupsWithoutTheMemoryController) {
+TEST(ConfigTest, CgroupMemoryMaxThatDoesNotExistDoesNotBoundTheProcess) {
+  // memory.max is absent from the hierarchy root and from a cgroup without the memory controller. Neither limits the
+  // process, so the levels that have the file decide.
   FakeHostFiles files;
   files["/proc/self/cgroup"] = "0::/app/job\n";
   files["/proc/self/mountinfo"] = std::string{kHostMountinfo};
@@ -853,26 +869,88 @@ TEST(ConfigTest, CgroupMemoryMaxMayBeMissingOnlyFromTheHierarchyRootAndCgroupsWi
   EXPECT_EQ(cgroup.limit, std::optional<uint64_t>{8 * kGiB});
   EXPECT_EQ(cgroup.headroom, std::optional<uint64_t>{6 * kGiB});
 
-  // memory.max exists wherever the memory controller does, so one that is missing from the process's cgroup, or from
-  // an ancestor, is not an unlimited level.
-  auto without_leaf_max = files;
-  without_leaf_max.erase("/sys/fs/cgroup/app/job/memory.max");
-  EXPECT_EQ(ResolveCgroupMemory(without_leaf_max).status, CgroupStatus::kUnresolved);
-  auto with_ancestor_controller = files;
-  AddCgroup(with_ancestor_controller, "/sys/fs/cgroup/app");
-  EXPECT_EQ(ResolveCgroupMemory(with_ancestor_controller).status, CgroupStatus::kUnresolved);
+  // A process in the hierarchy root has no level with a limit.
+  files["/proc/self/cgroup"] = "0::/\n";
+  cgroup = ResolveCgroupMemory(files);
+  EXPECT_EQ(cgroup.status, CgroupStatus::kResolved);
+  EXPECT_FALSE(cgroup.limit.has_value());
+  EXPECT_FALSE(cgroup.headroom.has_value());
 
-  // A level without memory.max and without a readable cgroup.controllers cannot be classified.
-  auto without_controllers = files;
-  without_controllers.erase("/sys/fs/cgroup/app/cgroup.controllers");
-  EXPECT_EQ(ResolveCgroupMemory(without_controllers).status, CgroupStatus::kUnresolved);
+  // Nor does one in a cgroup namespace whose root has no memory controller.
+  FakeHostFiles namespace_root;
+  namespace_root["/proc/self/cgroup"] = "0::/\n";
+  namespace_root["/proc/self/mountinfo"] =
+      "30 22 0:26 / /sys/fs/cgroup ro,nosuid,nodev,noexec,relatime - cgroup2 cgroup rw\n";
+  AddCgroup(namespace_root, "/sys/fs/cgroup", /*has_memory_controller=*/false);
+  cgroup = ResolveCgroupMemory(namespace_root);
+  EXPECT_EQ(cgroup.status, CgroupStatus::kResolved);
+  EXPECT_FALSE(cgroup.limit.has_value());
+  EXPECT_FALSE(cgroup.headroom.has_value());
 
-  // A mount rooted at a sub-cgroup does not show the hierarchy root, so its first level needs memory.max as well.
+  // A mount rooted at a sub-cgroup shows no hierarchy root, and its mounted cgroup may lack the controller as well.
+  FakeHostFiles sub_mount;
+  sub_mount["/proc/self/cgroup"] = "0::/app/job\n";
+  sub_mount["/proc/self/mountinfo"] =
+      "30 22 0:26 /app /sys/fs/cgroup ro,nosuid,nodev,noexec,relatime - cgroup2 cgroup rw\n";
+  AddCgroup(sub_mount, "/sys/fs/cgroup", /*has_memory_controller=*/false);
+  AddCgroup(sub_mount, "/sys/fs/cgroup/job");
+  AddMemoryFiles(sub_mount, "/sys/fs/cgroup/job", std::to_string(8 * kGiB), 2 * kGiB);
+  cgroup = ResolveCgroupMemory(sub_mount);
+  EXPECT_EQ(cgroup.status, CgroupStatus::kResolved);
+  EXPECT_EQ(cgroup.limit, std::optional<uint64_t>{8 * kGiB});
+  EXPECT_EQ(cgroup.headroom, std::optional<uint64_t>{6 * kGiB});
+}
+
+TEST(ConfigTest, CgroupMemoryMaxThatCannotBeReadLeavesTheHostMemoryUnknownAtEveryLevel) {
+  // A container with its own cgroup namespace: the mount root and /proc/self/cgroup both show "/", exactly as they do
+  // for a process in the hierarchy root of a host, yet the container's cgroup has a memory.max that is its limit.
+  FakeHostFiles files;
+  files["/proc/self/cgroup"] = "0::/\n";
+  files["/proc/self/mountinfo"] = "30 22 0:26 / /sys/fs/cgroup ro,nosuid,nodev,noexec,relatime - cgroup2 cgroup rw\n";
+  AddCgroup(files, "/sys/fs/cgroup");
+  AddMemoryFiles(files, "/sys/fs/cgroup", std::to_string(8 * kGiB), 2 * kGiB);
+  CgroupMemoryLimits cgroup = ResolveCgroupMemory(files);
+  EXPECT_EQ(cgroup.status, CgroupStatus::kResolved);
+  HostFacts facts = ResolveHostFacts(cgroup, 128 * kGiB, 100 * kGiB);
+  EXPECT_EQ(facts.effective, std::optional<uint64_t>{8 * kGiB});
+  EXPECT_EQ(facts.available, std::optional<uint64_t>{6 * kGiB});
+
+  // The same container whose memory.max exists but cannot be read must not look like one without a limit.
+  MakeUnreadable(files, "/sys/fs/cgroup/memory.max");
+  cgroup = ResolveCgroupMemory(files);
+  EXPECT_EQ(cgroup.status, CgroupStatus::kUnresolved);
+  EXPECT_FALSE(cgroup.limit.has_value());
+  EXPECT_FALSE(cgroup.headroom.has_value());
+  facts = ResolveHostFacts(cgroup, 128 * kGiB, 100 * kGiB);
+  EXPECT_FALSE(facts.effective.has_value());
+  EXPECT_FALSE(facts.available.has_value());
+
+  // So the host's memory does not make a profile that needs a large host eligible.
+  Config config;
+  OverlayConfig(config, R"({"runtime_profiles":[{"id":"large-host",
+    "eligibility":{"minimum_total_device_memory_bytes":0,"minimum_effective_host_memory_bytes":68719476736},
+    "overlay":{"search":{"chunk_size":1}}}]})");
+  ApplyRuntimeProfile(config, RuntimeProfileDeviceFacts{1, false, std::nullopt, facts.effective, facts.available});
+  EXPECT_FALSE(config.search.chunk_size.has_value());
+
+  // The root of the namespace can be above the process's own cgroup, and it can hold the tighter limit.
+  files["/proc/self/cgroup"] = "0::/job\n";
+  AddCgroup(files, "/sys/fs/cgroup/job");
+  AddMemoryFiles(files, "/sys/fs/cgroup/job", std::to_string(4 * kGiB), 1 * kGiB);
+  EXPECT_EQ(ResolveCgroupMemory(files).status, CgroupStatus::kUnresolved);
+  files["/sys/fs/cgroup/memory.max"] = "max\n";
+  cgroup = ResolveCgroupMemory(files);
+  EXPECT_EQ(cgroup.status, CgroupStatus::kResolved);
+  EXPECT_EQ(cgroup.limit, std::optional<uint64_t>{4 * kGiB});
+  EXPECT_EQ(cgroup.headroom, std::optional<uint64_t>{3 * kGiB});
+
+  // A mount rooted at a sub-cgroup is no different.
   FakeHostFiles sub_mount;
   sub_mount["/proc/self/cgroup"] = "0::/app/job\n";
   sub_mount["/proc/self/mountinfo"] =
       "30 22 0:26 /app /sys/fs/cgroup ro,nosuid,nodev,noexec,relatime - cgroup2 cgroup rw\n";
   AddCgroup(sub_mount, "/sys/fs/cgroup");
+  MakeUnreadable(sub_mount, "/sys/fs/cgroup/memory.max");
   AddCgroup(sub_mount, "/sys/fs/cgroup/job");
   AddMemoryFiles(sub_mount, "/sys/fs/cgroup/job", std::to_string(8 * kGiB), 2 * kGiB);
   EXPECT_EQ(ResolveCgroupMemory(sub_mount).status, CgroupStatus::kUnresolved);
@@ -881,6 +959,60 @@ TEST(ConfigTest, CgroupMemoryMaxMayBeMissingOnlyFromTheHierarchyRootAndCgroupsWi
   EXPECT_EQ(cgroup.status, CgroupStatus::kResolved);
   EXPECT_EQ(cgroup.limit, std::optional<uint64_t>{8 * kGiB});
 }
+
+#if defined(__linux__)
+TEST(ConfigTest, HostFileReaderTellsAMissingFileFromAnUnreadableOne) {
+  std::error_code ec;
+  const auto directory = std::filesystem::canonical(std::filesystem::temp_directory_path(), ec) /
+                         ("genai_host_file_reader_test_" + std::to_string(std::random_device{}()));
+  ASSERT_TRUE(std::filesystem::create_directories(directory, ec)) << ec.message();
+  struct Cleanup {
+    std::filesystem::path path;
+    ~Cleanup() {
+      std::error_code ignored;
+      std::filesystem::remove_all(path, ignored);
+    }
+  } cleanup{directory};
+  const auto write_file = [&directory](const char* name, const std::string& text) {
+    const std::string path = (directory / name).string();
+    std::ofstream{path, std::ios::binary} << text;
+    return path;
+  };
+
+  // A file is read to its end, however long it is, and an empty file is read as empty.
+  const std::string long_text(10000, 'x');
+  HostFile file = ReadHostFile(write_file("long", long_text));
+  EXPECT_EQ(file.status, HostFileStatus::kRead);
+  EXPECT_EQ(file.text, long_text);
+  file = ReadHostFile(write_file("empty", ""));
+  EXPECT_EQ(file.status, HostFileStatus::kRead);
+  EXPECT_TRUE(file.text.empty());
+  // The files under /proc report no size, so they can only be read to their end.
+  file = ReadHostFile("/proc/self/status");
+  EXPECT_EQ(file.status, HostFileStatus::kRead);
+  EXPECT_FALSE(file.text.empty());
+
+  // A file that is not there is missing, and so is one in a directory that is not there.
+  EXPECT_EQ(ReadHostFile((directory / "absent").string()).status, HostFileStatus::kMissing);
+  EXPECT_EQ(ReadHostFile((directory / "absent" / "file").string()).status, HostFileStatus::kMissing);
+
+  // Whatever else keeps a file from being read says nothing about whether it is there. A directory can be opened but
+  // not read.
+  file = ReadHostFile(directory.string());
+  EXPECT_EQ(file.status, HostFileStatus::kUnreadable);
+  EXPECT_TRUE(file.text.empty());
+  EXPECT_EQ(ReadHostFile((directory / "long" / "file").string()).status, HostFileStatus::kUnreadable);
+  const std::string denied = write_file("denied", "8589934592\n");
+  std::filesystem::permissions(denied, std::filesystem::perms::none, ec);
+  ASSERT_FALSE(ec) << ec.message();
+  // The superuser reads a file whatever its permissions are.
+  if (::geteuid() != 0) {
+    file = ReadHostFile(denied);
+    EXPECT_EQ(file.status, HostFileStatus::kUnreadable);
+    EXPECT_TRUE(file.text.empty());
+  }
+}
+#endif
 
 TEST(ConfigTest, CgroupMemoryTreatsAZeroMemoryMaxAsAHardLimit) {
   // memory.max is "max" when a cgroup is unlimited, so a number, including zero, is a limit.
@@ -989,6 +1121,7 @@ TEST(ConfigTest, UnreadableOrUnparseableCgroupInputsLeaveTheHostMemoryUnknown) {
   };
   const std::vector<std::pair<std::string, std::function<void(FakeHostFiles&)>>> corruptions = {
       {"missing /proc/self/cgroup", [](FakeHostFiles& f) { f.erase("/proc/self/cgroup"); }},
+      {"unreadable /proc/self/cgroup", [](FakeHostFiles& f) { MakeUnreadable(f, "/proc/self/cgroup"); }},
       {"empty /proc/self/cgroup", [](FakeHostFiles& f) { f["/proc/self/cgroup"] = ""; }},
       {"malformed /proc/self/cgroup", [](FakeHostFiles& f) { f["/proc/self/cgroup"] = "not a cgroup file\n"; }},
       {"non-numeric hierarchy id", [](FakeHostFiles& f) { f["/proc/self/cgroup"] = "x::/app/job\n"; }},
@@ -996,6 +1129,7 @@ TEST(ConfigTest, UnreadableOrUnparseableCgroupInputsLeaveTheHostMemoryUnknown) {
       {"relative cgroup path", [](FakeHostFiles& f) { f["/proc/self/cgroup"] = "0::app/job\n"; }},
       {"cgroup path outside the namespace root", [](FakeHostFiles& f) { f["/proc/self/cgroup"] = "0::/../app/job\n"; }},
       {"missing /proc/self/mountinfo", [](FakeHostFiles& f) { f.erase("/proc/self/mountinfo"); }},
+      {"unreadable /proc/self/mountinfo", [](FakeHostFiles& f) { MakeUnreadable(f, "/proc/self/mountinfo"); }},
       {"empty /proc/self/mountinfo", mountinfo("")},
       {"malformed /proc/self/mountinfo", mountinfo("garbage\n")},
       {"mountinfo without a separator", mountinfo("24 22 0:22 / /sys/fs/cgroup rw shared:5 cgroup2 cgroup2 rw\n")},
@@ -1005,22 +1139,20 @@ TEST(ConfigTest, UnreadableOrUnparseableCgroupInputsLeaveTheHostMemoryUnknown) {
       {"cgroup2 mount root outside the namespace root",
        mountinfo("24 22 0:22 /../.. /sys/fs/cgroup rw - cgroup2 cgroup2 rw\n")},
       {"cgroup directory that is not visible", [&](FakeHostFiles& f) { f.erase(job + "/cgroup.controllers"); }},
+      {"unreadable cgroup.controllers", [&](FakeHostFiles& f) { MakeUnreadable(f, job + "/cgroup.controllers"); }},
       {"unparseable memory.max", [&](FakeHostFiles& f) { f[job + "/memory.max"] = "lots\n"; }},
       {"negative memory.max", [&](FakeHostFiles& f) { f[job + "/memory.max"] = "-1\n"; }},
       {"empty memory.max", [&](FakeHostFiles& f) { f[job + "/memory.max"] = ""; }},
       {"memory.max beyond 64 bits", [&](FakeHostFiles& f) { f[job + "/memory.max"] = "18446744073709551616\n"; }},
       {"missing memory.current", [&](FakeHostFiles& f) { f.erase(job + "/memory.current"); }},
+      {"unreadable memory.current", [&](FakeHostFiles& f) { MakeUnreadable(f, job + "/memory.current"); }},
       {"unparseable memory.current", [&](FakeHostFiles& f) { f[job + "/memory.current"] = "n/a\n"; }},
-      // The cgroup lists the memory controller, so memory.max exists and not being able to read it is not "unlimited".
-      {"unreadable memory.max in a cgroup with the memory controller",
-       [&](FakeHostFiles& f) { f.erase(job + "/memory.max"); }},
-      {"unreadable memory.max in an ancestor with the memory controller",
-       [](FakeHostFiles& f) { f.erase("/sys/fs/cgroup/app/memory.max"); }},
-      {"unreadable memory.max and cgroup.controllers in an ancestor",
-       [](FakeHostFiles& f) {
-         f.erase("/sys/fs/cgroup/app/memory.max");
-         f.erase("/sys/fs/cgroup/app/cgroup.controllers");
-       }},
+      // A memory.max that exists but cannot be read is an unknown limit, not an unlimited level.
+      {"unreadable memory.max in the process's cgroup", [&](FakeHostFiles& f) { MakeUnreadable(f, job + "/memory.max"); }},
+      {"unreadable memory.max in an ancestor",
+       [](FakeHostFiles& f) { MakeUnreadable(f, "/sys/fs/cgroup/app/memory.max"); }},
+      {"unreadable memory.max in the mounted cgroup root",
+       [](FakeHostFiles& f) { MakeUnreadable(f, "/sys/fs/cgroup/memory.max"); }},
   };
   for (const auto& [name, corrupt] : corruptions) {
     auto files = valid_files();

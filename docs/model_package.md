@@ -282,14 +282,15 @@ cgroup2 mount in `/proc/self/mountinfo`. The mount may be rooted at a sub-cgroup
 sees only its own cgroup, in which case the path is taken relative to the mount root. The limit is the
 tightest `memory.max` and the headroom is the tightest `memory.max` minus `memory.current` over that
 cgroup and each ancestor up to the mount root, so a service cgroup with a tighter limit or less headroom
-than the process's own cgroup is honored. A level whose `memory.max` is `max`, or that has no memory
-controller, does not bound the process, while a `memory.max` of `0` is a limit of zero bytes. cgroup v1
-limits are not consulted, and a system without a cgroup2 mount uses the physical memory unchanged. When
-cgroup v2 applies but the process's cgroup cannot be read or located (an unreadable or malformed
-`/proc/self/cgroup` or `/proc/self/mountinfo`, a cgroup that is not below any cgroup2 mount root, a
-`memory.max` that cannot be read from a cgroup that lists the memory controller in its
-`cgroup.controllers`, or an unparseable `memory.max` or `memory.current`), both host memory facts are
-unknown rather than falling back to the host-wide values.
+than the process's own cgroup is honored. A level whose `memory.max` is `max`, or that has no `memory.max`
+(the hierarchy root, or a cgroup without the memory controller), does not bound the process, while a
+`memory.max` of `0` is a limit of zero bytes. cgroup v1 limits are not consulted, and a system without a
+cgroup2 mount uses the physical memory unchanged. When cgroup v2 applies but the process's cgroup cannot be
+read or located (an unreadable or malformed `/proc/self/cgroup` or `/proc/self/mountinfo`, a cgroup that is
+not below any cgroup2 mount root, a `memory.max` that exists but cannot be read at any level, including the
+root of a container's cgroup namespace, which looks like the hierarchy root but has the file, or an
+unparseable `memory.max` or `memory.current`), both host memory facts are unknown rather than falling back to
+the host-wide values.
 
 A value the platform cannot report (for example the available host memory on macOS) or that could not be
 resolved does not match a profile that bounds it. Because the available host memory never exceeds the
