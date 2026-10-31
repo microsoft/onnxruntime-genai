@@ -41,6 +41,16 @@ inline constexpr bool kQwen38WindowsHost = false;
 std::filesystem::path ResolveQwen38PlaneLibraryPath(const std::filesystem::path& model_root,
                                                     const std::string& configured, bool windows_host);
 
+#if !defined(QWEN38_GRAPH_NO_POSIX) && !defined(_WIN32)
+// Opens the library built into onnxruntime-genai-cuda, named `library`, for the loader of an empty plane library path: the
+// copy that is already loaded (normally by the CUDA execution provider) if there is one, otherwise `beside / library` (when
+// `beside` is not empty), otherwise `library` through the search path of the dynamic loader. Returns the module, or null with
+// `failures` naming each file that was tried and the loader's reason for it ("<file>: <reason>", joined by "; "), so that every
+// reason is the one of its own file. A declaration of the loader's own steps so that a test can run them on a directory it
+// controls, as with ResolveQwen38PlaneLibraryPath above.
+void* OpenQwen38BuiltInPlaneModule(const char* library, const std::filesystem::path& beside, std::string& failures);
+#endif
+
 // A CPU embedding table that the plane gathers rows from (the model's embed_tokens, mapped from <embedding>.data).
 struct Qwen38EmbeddingTable {
   const void* data{};  // device-addressable base of the table
@@ -65,7 +75,8 @@ struct Qwen38Plane {
   // An empty plane with no library loaded; the function pointers are filled in by the caller (tests).
   Qwen38Plane() = default;
   // Loads `path` (or the built-in onnxruntime-genai-cuda library when `path` is empty), resolves every symbol and checks
-  // the ABI version and structure layout.
+  // the ABI version and structure layout. Throws std::runtime_error naming each file that was tried and why it did not load,
+  // or the library that lacks a symbol, has another ABI version, or has another structure layout.
   explicit Qwen38Plane(const std::filesystem::path& path);
   ~Qwen38Plane();
   Qwen38Plane(const Qwen38Plane&) = delete;
@@ -111,7 +122,8 @@ struct Qwen38Plane {
 
   // The QWEN38_PLANE_CAP_* bits the library reports; 0 for a library that predates qwen38_plane_capabilities.
   unsigned long long capabilities{};
-  // The file the library was loaded from (named by the capability diagnostics).
+  // The file the library was loaded from, which the diagnostics of the loader and of RequireCapabilities name: the path that
+  // was given or, for the built-in plane, the file the module was found in (the library name when the loader cannot tell).
   std::string library_path;
 
  private:

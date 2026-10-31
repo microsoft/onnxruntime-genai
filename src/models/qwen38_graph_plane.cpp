@@ -118,40 +118,53 @@ Qwen38Plane::~Qwen38Plane() = default;
 Qwen38Plane::Qwen38Plane(const std::filesystem::path& path) {
   HMODULE mod = nullptr;
   std::filesystem::path actual_path = path;
+  // "<file> (Win32 error N)" for each file that did not load, in the order tried. The error is read right after its own
+  // LoadLibraryW: GetLastError() after a second attempt would report that attempt for the file of the first.
+  std::string failures;
+  const auto open = [&failures](const std::filesystem::path& name) -> HMODULE {
+    HMODULE module = LoadLibraryW(name.wstring().c_str());
+    if (!module) {
+      const DWORD err = GetLastError();
+      if (!failures.empty()) failures += "; ";
+      failures += name.string() + " (Win32 error " + std::to_string(err) + ")";
+    }
+    return module;
+  };
   if (actual_path.empty()) {
-    actual_path = "onnxruntime-genai-cuda.dll";
+    const std::filesystem::path built_in_name = "onnxruntime-genai-cuda.dll";
+    actual_path = built_in_name;
     HMODULE self_mod = nullptr;
     if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                            reinterpret_cast<LPCWSTR>(&ParseQwen38PleDescription), &self_mod) &&
         self_mod) {
       wchar_t self_buf[MAX_PATH]{};
       if (GetModuleFileNameW(self_mod, self_buf, MAX_PATH) > 0) {
-        auto candidate = std::filesystem::path(self_buf).parent_path() / L"onnxruntime-genai-cuda.dll";
+        auto candidate = std::filesystem::path(self_buf).parent_path() / built_in_name;
         std::error_code ec;
         if (std::filesystem::exists(candidate, ec)) {
           actual_path = candidate;
         }
       }
     }
-    mod = LoadLibraryW(actual_path.wstring().c_str());
-    if (!mod) {
-      mod = LoadLibraryW(L"onnxruntime-genai-cuda.dll");
+    mod = open(actual_path);
+    // Then by name, through the DLL search path, unless that was the name that has just been tried.
+    if (!mod && actual_path != built_in_name) {
+      actual_path = built_in_name;
+      mod = open(actual_path);
     }
   } else {
     actual_path = ResolveWindowsSharedLibraryPath(actual_path);
-    mod = LoadLibraryW(actual_path.wstring().c_str());
+    mod = open(actual_path);
   }
   if (!mod) {
-    const DWORD err = GetLastError();
-    throw std::runtime_error("qwen38_graph: failed to load the plane library " + actual_path.string() +
-                             " (Win32 error " + std::to_string(err) + ")");
+    throw std::runtime_error("qwen38_graph: failed to load the plane library " + failures);
   }
   handle_ = static_cast<void*>(mod);
   library_path = actual_path.string();
-  auto load = [mod](auto& function, const char* symbol_name) {
+  auto load = [this, mod](auto& function, const char* symbol_name) {
     FARPROC symbol = GetProcAddress(mod, symbol_name);
     if (!symbol) {
-      throw std::runtime_error(std::string("qwen38_graph: the plane library lacks the symbol ") + symbol_name);
+      throw std::runtime_error("qwen38_graph: the plane library " + library_path + " lacks the symbol " + symbol_name);
     }
     function = reinterpret_cast<std::remove_reference_t<decltype(function)> >(symbol);
   };
@@ -160,8 +173,8 @@ Qwen38Plane::Qwen38Plane(const std::filesystem::path& path) {
     // as lacking a symbol that a newer ABI added.
     load(abi_version, "qwen38_plane_abi_version");
     if (abi_version() != QWEN38_PLANE_ABI_VERSION) {
-      throw std::runtime_error("qwen38_graph: the plane library has ABI version " + std::to_string(abi_version()) +
-                               ", expected " + std::to_string(QWEN38_PLANE_ABI_VERSION));
+      throw std::runtime_error("qwen38_graph: the plane library " + library_path + " has ABI version " +
+                               std::to_string(abi_version()) + ", expected " + std::to_string(QWEN38_PLANE_ABI_VERSION));
     }
 #define QWEN38_PLANE_LOAD(ret, name, args) load(name, "qwen38_plane_" #name);
     QWEN38_PLANE_FUNCTIONS(QWEN38_PLANE_LOAD)
@@ -184,7 +197,8 @@ Qwen38Plane::Qwen38Plane(const std::filesystem::path& path) {
         reinterpret_cast<Qwen38PlaneCapabilitiesFn>(GetProcAddress(mod, "qwen38_plane_capabilities"));
     capabilities = capabilities_export ? capabilities_export() : 0ull;
     if (sizeof_ple_params() != static_cast<int>(sizeof(Qwen38PleParams))) {
-      throw std::runtime_error("qwen38_graph: the plane library's PLE parameter layout differs from the host definition");
+      throw std::runtime_error("qwen38_graph: the PLE parameter layout of the plane library " + library_path +
+                               " differs from the host definition");
     }
     attach();
     attached_ = true;
@@ -202,42 +216,71 @@ Qwen38Plane::~Qwen38Plane() {
 
 #else
 
+namespace {
+
+// Appends "<name>: <why dlopen(name) failed>" to `failures`. Call it right after the failed dlopen: dlerror() reports the
+// latest failed call, so the reason read after a later attempt would be paired with the wrong file.
+void NoteDlopenFailure(std::string& failures, const std::string& name) {
+  const char* reason = dlerror();
+  if (!failures.empty()) failures += "; ";
+  failures += name + ": " + (reason ? reason : "unknown error");
+}
+
+}  // namespace
+
+void* OpenQwen38BuiltInPlaneModule(const char* library, const std::filesystem::path& beside, std::string& failures) {
+  failures.clear();
+  // The CUDA library is normally already loaded by the CUDA execution provider, and that copy is the one to use. A miss is
+  // the expected case here and not a failure, so its pending error is dropped.
+  if (void* module = dlopen(library, RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD)) return module;
+  (void)dlerror();
+  if (!beside.empty()) {
+    const std::string candidate = (beside / library).string();
+    if (void* module = dlopen(candidate.c_str(), RTLD_NOW | RTLD_LOCAL)) return module;
+    NoteDlopenFailure(failures, candidate);
+  }
+  if (void* module = dlopen(library, RTLD_NOW | RTLD_LOCAL)) return module;
+  NoteDlopenFailure(failures, library);
+  return nullptr;
+}
+
 Qwen38Plane::Qwen38Plane(const std::filesystem::path& path) {
-  std::string tried_name = path.string();
-  if (path.empty()) {
-    const char* default_lib =
+  const bool built_in = path.empty();
+  const char* default_lib =
 #if defined(__APPLE__)
-        "libonnxruntime-genai-cuda.dylib";
+      "libonnxruntime-genai-cuda.dylib";
 #else
-        "libonnxruntime-genai-cuda.so";
+      "libonnxruntime-genai-cuda.so";
 #endif
-    tried_name = default_lib;
-    // The CUDA library is normally already loaded by the CUDA execution provider. Otherwise look next to GenAI.
-    handle_ = dlopen(default_lib, RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
-    if (!handle_) {
-      Dl_info info{};
-      if (dladdr(reinterpret_cast<const void*>(&ParseQwen38PleDescription), &info) != 0 && info.dli_fname) {
-        const auto candidate = std::filesystem::path(info.dli_fname).parent_path() / default_lib;
-        tried_name = candidate.string();
-        handle_ = dlopen(candidate.c_str(), RTLD_NOW | RTLD_LOCAL);
-      }
+  std::string failures;
+  if (built_in) {
+    // Look next to the module that holds this loader (GenAI) unless the library is already loaded.
+    std::filesystem::path beside;
+    Dl_info info{};
+    if (dladdr(reinterpret_cast<const void*>(&ParseQwen38PleDescription), &info) != 0 && info.dli_fname) {
+      beside = std::filesystem::path(info.dli_fname).parent_path();
     }
-    if (!handle_) {
-      handle_ = dlopen(default_lib, RTLD_NOW | RTLD_LOCAL);
-    }
+    handle_ = OpenQwen38BuiltInPlaneModule(default_lib, beside, failures);
   } else {
     handle_ = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+    if (!handle_) NoteDlopenFailure(failures, path.string());
   }
   if (!handle_) {
-    const char* reason = dlerror();
-    throw std::runtime_error("qwen38_graph: failed to load the plane library " + tried_name + ": " +
-                             (reason ? reason : "unknown error"));
+    throw std::runtime_error("qwen38_graph: failed to load the plane library " + failures);
   }
   library_path = path.string();
+  if (built_in) {
+    // The file the module was loaded from: the diagnostics that name the library are about it, and the lookup above
+    // does not say which of its steps found it.
+    library_path = default_lib;
+    Dl_info loaded{};
+    const void* symbol = dlsym(handle_, "qwen38_plane_abi_version");
+    if (symbol && dladdr(symbol, &loaded) != 0 && loaded.dli_fname) library_path = loaded.dli_fname;
+  }
   auto load = [this](auto& function, const char* symbol_name) {
     void* symbol = dlsym(handle_, symbol_name);
     if (!symbol) {
-      throw std::runtime_error(std::string("qwen38_graph: the plane library lacks the symbol ") + symbol_name);
+      throw std::runtime_error("qwen38_graph: the plane library " + library_path + " lacks the symbol " + symbol_name);
     }
     function = reinterpret_cast<std::remove_reference_t<decltype(function)> >(symbol);
   };
@@ -246,8 +289,8 @@ Qwen38Plane::Qwen38Plane(const std::filesystem::path& path) {
     // as lacking a symbol that a newer ABI added.
     load(abi_version, "qwen38_plane_abi_version");
     if (abi_version() != QWEN38_PLANE_ABI_VERSION) {
-      throw std::runtime_error("qwen38_graph: the plane library has ABI version " + std::to_string(abi_version()) +
-                               ", expected " + std::to_string(QWEN38_PLANE_ABI_VERSION));
+      throw std::runtime_error("qwen38_graph: the plane library " + library_path + " has ABI version " +
+                               std::to_string(abi_version()) + ", expected " + std::to_string(QWEN38_PLANE_ABI_VERSION));
     }
 #define QWEN38_PLANE_LOAD(ret, name, args) load(name, "qwen38_plane_" #name);
     QWEN38_PLANE_FUNCTIONS(QWEN38_PLANE_LOAD)
@@ -270,7 +313,8 @@ Qwen38Plane::Qwen38Plane(const std::filesystem::path& path) {
         reinterpret_cast<Qwen38PlaneCapabilitiesFn>(dlsym(handle_, "qwen38_plane_capabilities"));
     capabilities = capabilities_export ? capabilities_export() : 0ull;
     if (sizeof_ple_params() != static_cast<int>(sizeof(Qwen38PleParams))) {
-      throw std::runtime_error("qwen38_graph: the plane library's PLE parameter layout differs from the host definition");
+      throw std::runtime_error("qwen38_graph: the PLE parameter layout of the plane library " + library_path +
+                               " differs from the host definition");
     }
     attach();
     attached_ = true;

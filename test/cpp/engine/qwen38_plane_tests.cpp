@@ -1767,8 +1767,93 @@ TEST(Qwen38PlaneTest, LoadingAMissingLibraryFailsWithItsPath) {
   } catch (const std::runtime_error& error) {
     const std::string message = error.what();
     EXPECT_NE(message.find("qwen38"), std::string::npos) << message;
+#if !defined(QWEN38_GRAPH_NO_POSIX)
+    EXPECT_NE(message.find(missing.string()), std::string::npos) << message;
+#endif
   }
 }
+
+#if !defined(QWEN38_GRAPH_NO_POSIX)
+// A library that loads but is not a plane library is rejected with a message that names it. The diagnostics of the built-in
+// plane are about a file the user did not choose, so each of them says which file it is about; the library here is the
+// custom ops fixture, which has no plane symbol.
+TEST(Qwen38PlaneTest, ALibraryWithoutThePlaneSymbolsIsRejectedByName) {
+  const std::filesystem::path other_library =
+      std::filesystem::path{ORTGENAI_TEST_CUSTOM_OPS_LIB_DIR} / ORTGENAI_TEST_CUSTOM_OPS_FIRST_FILENAME;
+  ASSERT_TRUE(std::filesystem::exists(other_library)) << other_library.string() << " is missing";
+  try {
+    Qwen38Plane plane{other_library};
+    FAIL() << other_library.string() << " has no plane symbol, and loading it must throw";
+  } catch (const std::runtime_error& error) {
+    const std::string message = error.what();
+    EXPECT_NE(message.find(other_library.string()), std::string::npos) << message;
+    EXPECT_NE(message.find("lacks the symbol qwen38_plane_abi_version"), std::string::npos) << message;
+  }
+}
+#endif
+
+#if !defined(QWEN38_GRAPH_NO_POSIX) && !defined(_WIN32)
+// The built-in lookup tries the file beside the module and then the bare name. When both fail, each is reported with the
+// reason of its own attempt: dlerror() describes the latest failed dlopen, so reading it once at the end named the file beside
+// the module with the reason that the bare name was not found.
+TEST(Qwen38PlaneTest, TheBuiltInLookupReportsWhyEachFileItTriedDidNotLoad) {
+  const auto dir = MakeScratchDir("built_in_lookup");
+  const std::string library = "libgenai_qwen38_not_a_plane_library.so";
+  const std::filesystem::path beside = WriteFile(dir / library, "this is not a shared library");
+
+  // The reason the loader gives for each of the two files when it is asked about that file alone.
+  const auto reason_of = [](const std::string& file) {
+    void* module = dlopen(file.c_str(), RTLD_NOW | RTLD_LOCAL);
+    if (module != nullptr) {
+      dlclose(module);
+      return std::string{};
+    }
+    const char* reason = dlerror();
+    return std::string{reason ? reason : "unknown error"};
+  };
+  const std::string beside_reason = reason_of(beside.string());
+  const std::string name_reason = reason_of(library);
+  ASSERT_FALSE(beside_reason.empty()) << beside.string() << " loaded";
+  ASSERT_FALSE(name_reason.empty()) << library << " loaded";
+  ASSERT_NE(beside_reason, name_reason);
+
+  std::string failures = "left over from an earlier call";
+  EXPECT_EQ(OpenQwen38BuiltInPlaneModule(library.c_str(), dir, failures), nullptr);
+  EXPECT_EQ(failures, beside.string() + ": " + beside_reason + "; " + library + ": " + name_reason);
+
+  // Without a directory beside the module (the loader could not tell where it is), only the bare name is tried.
+  EXPECT_EQ(OpenQwen38BuiltInPlaneModule(library.c_str(), {}, failures), nullptr);
+  EXPECT_EQ(failures, library + ": " + name_reason);
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+#endif
+
+#if defined(__linux__) && defined(ORTGENAI_TEST_QWEN38_LEGACY_PLANE_LIB_PATH)
+// A library that is already loaded (the CUDA execution provider normally loads onnxruntime-genai-cuda before the first model)
+// is the one the lookup returns, found by its name before anything beside the module is opened: a copy of the plane
+// library beside the module would be mapped as a second module, with its own state, next to the one that is running.
+TEST(Qwen38PlaneTest, TheBuiltInLookupUsesTheLibraryThatIsAlreadyLoadedAndNotACopyBesideTheModule) {
+  const std::filesystem::path loaded{ORTGENAI_TEST_QWEN38_LEGACY_PLANE_LIB_PATH};
+  const Qwen38Plane holder{loaded};  // keeps the library mapped
+  void* const mapped = dlopen(loaded.c_str(), RTLD_NOW | RTLD_NOLOAD);
+  ASSERT_NE(mapped, nullptr);
+
+  const auto dir = MakeScratchDir("built_in_loaded");
+  std::error_code ec;
+  std::filesystem::copy_file(loaded, dir / loaded.filename(), ec);
+  ASSERT_FALSE(ec) << ec.message();
+
+  std::string failures;
+  void* module = OpenQwen38BuiltInPlaneModule(loaded.filename().c_str(), dir, failures);
+  EXPECT_EQ(module, mapped) << "the lookup did not return the module that is already loaded: " << failures;
+  if (module != nullptr) dlclose(module);
+  dlclose(mapped);
+
+  std::filesystem::remove_all(dir, ec);
+}
+#endif
 
 #if !defined(QWEN38_GRAPH_NO_POSIX)
 namespace {
@@ -1969,6 +2054,9 @@ TEST(Qwen38PlaneTest, LoadsBuiltInGenaiCudaLibraryWhenPathIsEmpty) {
   }
   EXPECT_EQ(plane->abi_version(), QWEN38_PLANE_ABI_VERSION);
   EXPECT_EQ(plane->sizeof_ple_params(), static_cast<int>(sizeof(Qwen38PleParams)));
+  // The diagnostics that name the plane library (the capability and loader messages) name the file it was loaded from, not an
+  // empty string.
+  EXPECT_EQ(std::filesystem::path{plane->library_path}.filename(), cuda_library.filename()) << plane->library_path;
   // The loader tolerates a standalone library without the optional exports, but the library built from this tree has every
   // one of them: each has to be in the export lists of onnxruntime-genai-cuda (src/ep/cuda).
   EXPECT_NE(plane->quantize_kv, nullptr);
