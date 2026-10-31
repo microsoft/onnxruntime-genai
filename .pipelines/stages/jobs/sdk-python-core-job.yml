@@ -1,0 +1,78 @@
+# Native-only wheels for applications that supply ORT and the CUDA add-on at runtime.
+# Use CUDA-enabled cores on Windows/Linux and CPU cores on macOS.
+# Linux jobs repair in their native manylinux containers before the aggregate job publishes.
+parameters:
+- name: cuda_version
+  type: string
+- name: platforms
+  type: object
+  default:
+  - { rid: win-x64, ep: cuda }
+  - { rid: win-arm64, ep: cuda }
+  - { rid: osx-arm64, ep: cpu }
+
+jobs:
+- job: python_linux_x64_core
+  displayName: 'python · linux-x64 · core'
+  pool:
+    name: 'onnxruntime-Ubuntu2204-AMD-CPU'
+    os: linux
+  timeoutInMinutes: 120
+  workspace:
+    clean: all
+  variables:
+  - name: artifactName
+    value: 'python-wheel-linux-x64-core'
+  steps:
+  - checkout: self
+    clean: true
+  - template: steps/sdk-python-core-linux-step.yml
+    parameters:
+      arch: x64
+      cuda_version: ${{ parameters.cuda_version }}
+
+- job: python_linux_arm64_core
+  displayName: 'python · linux-arm64 · core'
+  pool:
+    name: 'onnxruntime-linux-ARM64-CPU-2019'
+    hostArchitecture: Arm64
+    os: linux
+  timeoutInMinutes: 120
+  workspace:
+    clean: all
+  variables:
+  - name: artifactName
+    value: 'python-wheel-linux-arm64-core'
+  steps:
+  - checkout: self
+    clean: true
+  - template: steps/sdk-python-core-linux-step.yml
+    parameters:
+      arch: arm64
+      cuda_version: '13.1'
+
+- job: python_core_wheels
+  displayName: 'python · wheels · core'
+  dependsOn:
+  - python_linux_x64_core
+  - python_linux_arm64_core
+  pool:
+    name: 'onnxruntime-Win-CPU-2022'
+    os: windows
+  timeoutInMinutes: 30
+  workspace:
+    clean: all
+  variables:
+  - name: coreDownloadsDir
+    value: '$(Build.BinariesDirectory)/core-wheel-inputs'
+  - name: coreWheelsDir
+    value: '$(Build.ArtifactStagingDirectory)/core-wheels'
+  - name: GDN_CODESIGN_TARGETDIRECTORY
+    value: '$(Build.ArtifactStagingDirectory)/core-wheels'
+  steps:
+  - checkout: self
+    clean: true
+
+  - template: steps/sdk-python-core-win-step.yml
+    parameters:
+      platforms: ${{ parameters.platforms }}
