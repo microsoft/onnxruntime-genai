@@ -98,7 +98,8 @@ class Qwen38DecodeDevice {
   // stack, from the standalone head, whose status the cycle record does not carry. Valid once BeginDecode ran, also
   // right after Drain() while the record of the last cycle is still unconsumed (cancellation, stop string): it
   // synchronizes the stream itself, so the error of a cycle nobody waited for is reported here instead of being
-  // cleared by the next Reset().
+  // cleared by the next Reset() or ResetSlot(). A device with several slots reports the error of every slot that
+  // started a decode, not only slot 0's; the executor calls it, after Drain(), before it resets a slot.
   virtual void CheckDecodeStatus() {}
 
   // Positions at the end of the KV store that are never filled: a verify step of R rows writes R rows past the committed length,

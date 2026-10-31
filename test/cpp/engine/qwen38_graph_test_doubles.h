@@ -34,7 +34,11 @@ namespace Generators::test {
 //    stream (WaitCycle, Drain, CheckDecodeStatus, Reset). Like the real device, Drain() completes it without consuming its
 //    record (the cycle stays "in flight" until WaitCycle), and CheckDecodeStatus() synchronizes itself and reports the
 //    error bits accumulated by every completed cycle, consumed or not, until Reset() clears them. `fail_cycle` makes a cycle
-//    accumulate such bits when it completes, so a failure only becomes visible after the stream was drained.
+//    accumulate such bits when it completes, so a failure only becomes visible after the stream was drained;
+//  - the batched cycles of a device with several slots complete the same way (WaitBatchDecode, Drain, CheckDecodeStatus,
+//    Reset and ResetSlot synchronize), but the error bits are the slot's own: `fail_slot_cycle` names, per slot, the batched
+//    cycle of that slot (1-based) that leaves bits in it, ResetSlot() clears only that slot's bits and CheckDecodeStatus()
+//    reports those of every slot that started decoding, not only slot 0's.
 class ScriptedQwen38Device final : public Qwen38DecodeDevice {
  public:
   explicit ScriptedQwen38Device(int capacity = 68, bool mtp = true, size_t max_batch_size = 1)
@@ -44,6 +48,7 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
     slot_decoding_.assign(max_batch_size_, false);
     slot_pending_.assign(max_batch_size_, -1);
     slot_cycles_.assign(max_batch_size_, 0);
+    slot_error_bits_.assign(max_batch_size_, 0);
     slot_expected_prefill_.assign(max_batch_size_, 0);
   }
 
@@ -110,6 +115,8 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
   size_t fail_cycle{};       // 1-based cycle of a decode that accumulates error bits when it completes (0 = none)
   // Positions at the end of the store that a verify step keeps free.
   int reserved_tail{Qwen38DecodeDevice::kReservedTail};
+  // Several slots: slot -> 1-based batched cycle of that slot that leaves error bits in the slot when it completes.
+  std::map<size_t, size_t> fail_slot_cycle;
 
   // ---- Qwen38DecodeDevice ----
   void MarkContextFailed() noexcept override { context_healthy = false; }
@@ -132,6 +139,7 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
     expected_prefill_ = 0;
     error_bits_ = 0;  // ...then clears the device state, error bits included
     for (size_t s = 0; s < max_batch_size_; ++s) {
+      slot_error_bits_[s] = 0;
       slot_ledgers_[s].Reset();
       slot_ingested_[s].clear();
       slot_decoding_[s] = false;
@@ -143,6 +151,9 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
 
   void ResetSlot(size_t slot_idx) override {
     calls.push_back("reset_slot:" + std::to_string(slot_idx));
+    order.push_back("reset_slot:" + std::to_string(slot_idx));
+    Complete();  // like the real device, the slot is cleared after the stream finished: its error bits are gone with it
+    slot_error_bits_.at(slot_idx) = 0;
     slot_ledgers_.at(slot_idx).Reset();
     slot_ingested_.at(slot_idx).clear();
     slot_decoding_.at(slot_idx) = false;
@@ -264,6 +275,8 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
       ++slot_cycles_.at(s);
     }
     inflight_ = true;
+    running_ = true;
+    batch_slots_.assign(active_slots.begin(), active_slots.end());
     ++cycles_enqueued;
   }
 
@@ -272,6 +285,7 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
     calls.push_back("wait_batch:" + std::to_string(active_slots.size()));
     if (fail_wait) throw std::runtime_error("injected device failure");
     if (!inflight_) throw std::logic_error("no batch cycle in flight");
+    Complete();
     inflight_ = false;
     for (size_t i = 0; i < active_slots.size(); ++i) {
       const size_t s = active_slots[i];
@@ -362,6 +376,15 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
   void CheckDecodeStatus() override {
     ++status_checks;
     order.push_back("status");
+    if (max_batch_size_ > 1) {
+      Complete();
+      for (size_t s = 0; s < max_batch_size_; ++s) {
+        if (slot_decoding_[s] && (fail_status_check || slot_error_bits_[s] != 0)) {
+          throw std::runtime_error("injected device error bits in slot " + std::to_string(s));
+        }
+      }
+      return;
+    }
     if (!decoding_) return;  // like the real device: nothing to check before the decode started
     Complete();              // it synchronizes the stream itself, also while a cycle is in flight or its record unconsumed
     if (fail_status_check || error_bits_ != 0) throw std::runtime_error("injected device error bits");
@@ -381,6 +404,11 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
     if (!running_) return;
     running_ = false;
     if (fail_cycle != 0 && cycle_ == fail_cycle) error_bits_ |= 2;
+    for (const size_t s : batch_slots_) {
+      const auto failing = fail_slot_cycle.find(s);
+      if (failing != fail_slot_cycle.end() && slot_cycles_.at(s) == failing->second) slot_error_bits_.at(s) |= 2;
+    }
+    batch_slots_.clear();
   }
 
   int capacity_;
@@ -394,6 +422,8 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
   std::vector<bool> slot_decoding_;
   std::vector<int32_t> slot_pending_;
   std::vector<size_t> slot_cycles_;
+  std::vector<int64_t> slot_error_bits_;  // the ctl[5] word of every slot
+  std::vector<size_t> batch_slots_;       // the slots of the batched cycle that is running
   bool inflight_{};
   bool running_{};
   bool decoding_{};

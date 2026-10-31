@@ -126,6 +126,8 @@ class Qwen38GraphSession : public FixedSlotSession {
   void RethrowDeferredError();
   void ReportDeferredError() const;
   void CheckStatusIfPending();
+  // The step before anything that clears the device state (Reset(), ResetSlot()), which also clears the error bits.
+  void DrainAndCheckStatus();
 
   std::shared_ptr<Qwen38DecodeDevice> device_;
   Options options_;

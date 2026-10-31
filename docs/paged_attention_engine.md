@@ -2401,9 +2401,15 @@ token. The device holds `model.qwen38_graph.max_batch_size` slots (default 1), o
   instead: `CheckDecodeStatus()` right after `Drain()` reports the error bits accumulated by every cycle since the last
   `Reset()`, also when a record was left unconsumed. The executor always runs `Drain()` and then `CheckDecodeStatus()` before
   `Reset()` (which clears the bits): a cancellation or stop-string match that leaves a cycle behind therefore still fails the
-  next request or the rewind when that cycle went wrong. At Engine teardown the executor drains the device and reads its status
-  too, but nobody is left to report an error to, so a failure poisons the device context instead (the next Engine over the
-  model fails). A fatal execution failure poisons the mutable device context across Engine leases until the model is reloaded.
+  next request or the rewind when that cycle went wrong. The same holds for `ResetSlot()` with several slots: the bits of a
+  batched cycle are kept per slot, `ResetSlot()` clears the ones of its slot, and `CheckDecodeStatus()` reads every slot that
+  started a decode (slot 0 or not) and names the slots with bits set. A slot handed to a new request, whose previous request
+  was canceled or finished while a batched cycle was in flight, is therefore only reset once the stream was drained and the
+  status of all the slots was read (a status that was already read since the last cycle, as at the end of a chain of cycles,
+  is not read again). A device error is fatal to the Engine, as every executor failure is, so a reported status is never
+  consumed twice, and a fatal execution failure poisons the mutable device context across Engine leases until the model is
+  reloaded. At Engine teardown the executor drains the device and reads its status too, but nobody is left to report an error
+  to, so a failure poisons the device context instead (the next Engine over the model fails).
 - With several slots the DFlash2 drafter proposes for one slot after the other without waiting for the device in between.
   A step tensor larger than a launch can carry (4032 bytes: the block table of a long context) is uploaded from its host
   mirror when the device reaches the copy, so one shared mirror per tensor would be rewritten by the next slot's proposal
