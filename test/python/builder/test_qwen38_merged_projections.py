@@ -439,6 +439,62 @@ def test_merged_sparse_projection_rejects_qkv_bias(projection):
     assert not model.calls
 
 
+def make_router_model(merge):
+    model = make_group_model()
+    model.merge_shared_input_projections = merge
+    model.merged_shared_expert_layers = set()
+    model.use_paged_attention = True
+    model.moe_attrs = {"num_experts": 8}
+    model.make_reshape = MethodType(
+        lambda self, *args, **kwargs: self.calls.append(("make_reshape", args, kwargs)), model
+    )
+    return model
+
+
+def make_router_moe():
+    return SimpleNamespace(
+        gate=make_projection(8),
+        shared_expert=SimpleNamespace(gate_proj=make_projection(16), up_proj=make_projection(16)),
+    )
+
+
+def test_merged_moe_router_shares_one_matmul_with_the_shared_expert_gate_and_up():
+    model = make_router_model(merge=True)
+
+    assert model.make_moe_router(3, make_router_moe(), "x") is None
+
+    (matmul, matmul_args, _), (split, split_args, _), (reshape, reshape_args, _) = model.calls
+    assert matmul == "make_matmul"
+    # The router (8 experts) plus the shared expert's gate (16) and up (16).
+    assert matmul_args[0].weight.shape == (8 + 16 + 16, 16)
+    assert matmul_args[1:] == ("/model/layers.3/moe/router_shared_gate_up_proj/MatMul", "x")
+    assert split == "make_split"
+    assert split_args[2] == [
+        "/model/layers.3/moe/router/MatMul/output_0",
+        "/model/layers.3/mlp/gate_proj/MatMul/output_0",
+        "/model/layers.3/mlp/up_proj/MatMul/output_0",
+    ]
+    assert reshape == "make_reshape"
+    assert reshape_args[0] == "/model/layers.3/moe/router/Reshape"
+    assert reshape_args[1][0] == "/model/layers.3/moe/router/MatMul/output_0"
+    assert model.merged_shared_expert_layers == {3}
+
+
+def test_moe_router_without_merging_keeps_the_base_builder_graph():
+    model = make_router_model(merge=False)
+    moe = make_router_moe()
+
+    assert model.make_moe_router(3, moe, "x") is None
+
+    (matmul, matmul_args, _), (reshape, reshape_args, _) = model.calls
+    assert matmul == "make_matmul"
+    assert matmul_args[0] is moe.gate
+    assert matmul_args[1:] == ("/model/layers.3/moe/router/MatMul", "x")
+    assert reshape == "make_reshape"
+    assert reshape_args[0] == "/model/layers.3/moe/router/Reshape"
+    assert not model.merged_shared_expert_layers
+
+
 def test_option_requires_a_floating_point_export(checkpoint):
     parsed_config = builder.AutoConfig.from_pretrained(str(checkpoint))
     for dtype in (ir.DataType.INT4, ir.DataType.UINT8):

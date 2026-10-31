@@ -725,9 +725,13 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
         return f"{b_name}/output_0", f"{a_name}/output_0"
 
     def make_moe_router(self, layer_id, moe, root_input):
-        if not self.merge_shared_input_projections:
-            return super().make_moe_router(layer_id, moe, root_input)
+        # Returns nothing, like the base builder: consumers address the router output by name.
+        if self.merge_shared_input_projections:
+            self.make_merged_moe_router(layer_id, moe, root_input)
+        else:
+            super().make_moe_router(layer_id, moe, root_input)
 
+    def make_merged_moe_router(self, layer_id, moe, root_input):
         # The router and the shared expert's gate and up projections read the same activation. The
         # shared expert's one-wide output gate is left out: a width that is not a multiple of 8 would
         # make the merged GEMM's output unaligned.
