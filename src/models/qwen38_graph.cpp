@@ -14,6 +14,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <random>
 #include <sstream>
 #include <stdexcept>
@@ -325,6 +326,68 @@ void ValidateQwen38TargetModelFile(size_t request_slots, const std::filesystem::
   }
 }
 
+std::string NormalizeQwen38ContextTier(const std::string& request) {
+  std::string tier;
+  tier.reserve(request.size());
+  for (const char c : request) {
+    const bool upper = c >= 'A' && c <= 'Z';
+    if (!upper && !(c >= 'a' && c <= 'z') && !(c >= '0' && c <= '9')) {
+      throw std::invalid_argument("ORT_QWEN38_CONTEXT_LENGTH='" + request +
+                                  "' is not a context tier: use 2k, 8k, 16k, 32k, 64k, 128k or a token count");
+    }
+    tier.push_back(upper ? static_cast<char>(c - 'A' + 'a') : c);
+  }
+  static constexpr std::pair<const char*, const char*> kTierOfCount[] = {
+      {"2048", "2k"}, {"8192", "8k"}, {"16384", "16k"}, {"32768", "32k"}, {"65536", "64k"}, {"131072", "128k"}};
+  for (const auto& [count, name] : kTierOfCount) {
+    if (tier == count) return name;
+  }
+  return tier;
+}
+
+std::string ResolveQwen38TargetGraphFilename(const std::string& decoder_filename, const std::string& context_request,
+                                             const std::string& mtp_drafts,
+                                             const std::function<bool(const std::string&)>& exists) {
+  const std::string tier = NormalizeQwen38ContextTier(context_request);
+  // Config paths are validated to be relative and free of "..", so the folder of the decoder stays inside the model folder.
+  const std::string folder = std::filesystem::path(decoder_filename).parent_path().generic_string();
+  const auto next_to_decoder = [&folder](const std::string& name) { return folder.empty() ? name : folder + "/" + name; };
+
+  if (!tier.empty()) {
+    const std::string tier_graph = next_to_decoder("model_" + tier + ".onnx");
+    const std::string dynamic_graph = next_to_decoder("model_dynamic_ctx.onnx");
+    const std::vector<std::string> candidates = tier == "32k" ? std::vector<std::string>{tier_graph, decoder_filename, dynamic_graph}
+                                                              : std::vector<std::string>{tier_graph, dynamic_graph, decoder_filename};
+    for (const std::string& candidate : candidates) {
+      if (exists(candidate)) return candidate;
+    }
+    std::string tried;
+    for (const std::string& candidate : candidates) tried += (tried.empty() ? "'" : ", '") + candidate + "'";
+    throw std::runtime_error("qwen38_flash_graph: ORT_QWEN38_CONTEXT_LENGTH=" + context_request +
+                             " names the context tier '" + tier + "', but the model folder has none of " + tried);
+  }
+
+  const int drafts = std::atoi(mtp_drafts.c_str());
+  if (drafts >= 1 && drafts <= 3) {
+    const std::string name = "model_s" + std::to_string(drafts + 1) + ".onnx";
+    for (const std::string& candidate : {next_to_decoder(name), "target/" + name}) {
+      if (exists(candidate)) return candidate;
+    }
+  }
+  return decoder_filename;
+}
+
+Qwen38GraphContext SyncQwen38GraphContext(int64_t graph_positions, int configured_max_length, bool context_requested) {
+  if (graph_positions <= 0) throw std::invalid_argument("qwen38_flash_graph: the target graph has no KV positions");
+  Qwen38GraphContext context;
+  context.kv_capacity = static_cast<int>(std::min<int64_t>(graph_positions, std::numeric_limits<int>::max()));
+  context.context_length = std::max(1, context.kv_capacity - kQwen38GraphIdMaxRows);
+  context.max_length = context_requested || configured_max_length <= 0
+                           ? context.context_length
+                           : std::min(configured_max_length, context.context_length);
+  return context;
+}
+
 size_t DevTensor::Bytes() const {
   return Elements(shape) * Ort::SizeOf(type);
 }
@@ -535,8 +598,9 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
         dflash_->ReleaseAll();
         SyncStream();
       }
-      if (fast_->chunk > 512) {
-        Draft(d_dflash_prompt_.data(), static_cast<size_t>(fast_->chunk), static_cast<size_t>(capacity_), 1000, false);
+      const size_t warm_dflash_chunk = std::min<size_t>(static_cast<size_t>(fast_->chunk), 2048);
+      if (warm_dflash_chunk > 512) {
+        Draft(d_dflash_prompt_.data(), warm_dflash_chunk, static_cast<size_t>(capacity_), 1000, false);
         dflash_->ReleaseAll();
       }
       const int warm_len = std::min<int>(fast_->chunk, 512);
@@ -2614,20 +2678,18 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
   // The target graph decides how the slots are batched: choose it now (the MTP-drafts test hook may pick another one), and for
   // several slots read its output names from the model file, so that a target the batched device cannot serve is refused
   // before any weight is uploaded. The check against the session below stays authoritative.
-  std::string target_filename = config_->model.decoder.filename;
-  if (const char* drafts_env = std::getenv("ORT_QWEN38_MTP_DRAFTS")) {
-    const int d = std::atoi(drafts_env);
-    if (d >= 1 && d <= 3) {
-      const std::filesystem::path parent = std::filesystem::path(target_filename).parent_path();
-      const std::string alt_name = "model_s" + std::to_string(d + 1) + ".onnx";
-      const std::string alt = (parent.empty() ? std::filesystem::path(alt_name) : (parent / alt_name)).string();
-      if (std::filesystem::exists(root / alt)) {
-        target_filename = alt;
-      } else if (std::filesystem::exists(root / ("target/" + alt_name))) {
-        target_filename = "target/" + alt_name;
-      }
-    }
-  }
+  // The graph is chosen once, and the pre-upload reader below and CreateSession open that same file. ORT_QWEN38_CONTEXT_LENGTH
+  // is read once as well: it also decides how the context settings follow the graph.
+  const char* context_env = std::getenv("ORT_QWEN38_CONTEXT_LENGTH");
+  const char* drafts_env = std::getenv("ORT_QWEN38_MTP_DRAFTS");
+  const std::string context_request = context_env ? context_env : "";
+  const auto package_has_file = [&](const std::string& file) {
+    if (config_->model_data_spans_.count(file) != 0) return true;
+    std::error_code error;
+    return !config_->memory_assets_only_ && std::filesystem::is_regular_file(root / file, error);
+  };
+  const std::string target_filename = ResolveQwen38TargetGraphFilename(
+      config_->model.decoder.filename, context_request, drafts_env ? drafts_env : "", package_has_file);
   if (!config_->memory_assets_only_ && config_->model_data_spans_.count(target_filename) == 0) {
     ValidateQwen38TargetModelFile(ResolveQwen38MaxBatchSize(*config_), root / target_filename);
   }
@@ -2690,6 +2752,18 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
   // The outputs of the session are authoritative (the model file may not be a protobuf one): refuse a ring-bank target for
   // several slots before anything else is built.
   ValidateQwen38BatchedTargetOutputs(ResolveQwen38MaxBatchSize(*config_), session_target_->GetOutputNames());
+  if (session_info_.HasInput("past_position_ids")) {
+    const auto pos_shape = session_info_.GetInputShape("past_position_ids");
+    if (pos_shape.size() == 2 && pos_shape[1] > 0) {
+      // The capacity follows the graph. The default generation budget follows it only when a context tier was requested: a
+      // package that limits search.max_length keeps its limit.
+      const Qwen38GraphContext context =
+          SyncQwen38GraphContext(pos_shape[1], config_->search.max_length, !context_request.empty());
+      config_->model.qwen38_graph.kv_capacity = context.kv_capacity;
+      config_->model.context_length = context.context_length;
+      config_->search.max_length = context.max_length;
+    }
+  }
   if (g_log.enabled) Log("qwen38_graph") << "target session " << SecondsSince(start) << " s" << std::endl;
 
   auto make_options = [&](const std::optional<Config::SessionOptions>& configured, bool inherit, const char* label) {

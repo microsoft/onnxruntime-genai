@@ -149,8 +149,8 @@ Qwen38Plane::Qwen38Plane(const std::filesystem::path& path) {
 }
 
 Qwen38Plane::~Qwen38Plane() {
+  // detach() stops and joins the threads the module started. The module stays loaded: see the comment of the class.
   if (attached_) detach();
-  if (handle_) FreeLibrary(static_cast<HMODULE>(handle_));
 }
 
 #else
@@ -211,8 +211,8 @@ Qwen38Plane::Qwen38Plane(const std::filesystem::path& path) {
 }
 
 Qwen38Plane::~Qwen38Plane() {
+  // detach() stops and joins the threads the module started. The module stays loaded: see the comment of the class.
   if (attached_) detach();
-  if (handle_) dlclose(handle_);
 }
 
 #endif
@@ -707,7 +707,7 @@ Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::filesystem::path& 
       const auto& shard = description.shards[i];
       const std::filesystem::path full = root / shard.path;
       HANDLE hFile = CreateFileW(full.wstring().c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
-                                 OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+                                 OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_RANDOM_ACCESS, nullptr);
       if (hFile == INVALID_HANDLE_VALUE) {
         throw std::runtime_error("qwen38_graph: cannot open the PLE shard file " + full.string());
       }

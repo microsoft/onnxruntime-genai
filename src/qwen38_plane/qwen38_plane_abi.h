@@ -70,10 +70,12 @@ typedef struct Qwen38StateReplayDesc {
 // CUDA runtime helpers return the cudaError_t as int (0 = success).
 //
 // prep and ple_rows return 0 on success. A PLE table that is not GPU-addressable (Qwen38PleParams::pad_ == 1) is "staged":
-// the token and context words are read back to the host and the FP8 rows are gathered there. Every step of that staging
-// (pinned allocation, device alias, copy, synchronisation) is checked; when one fails, or when the table was never
-// registered with set_ple_host_params, the function returns the cudaError_t (cudaErrorInvalidValue for the unregistered
-// table) before it gathers or launches anything, so the outputs are untouched. Callers must check the result.
+// the token and context words are read back to the host and the FP8 rows are gathered there (a gather of 32 or more rows by
+// worker threads that the module starts when it first needs them). Every step of that staging (pinned allocation, device
+// alias, copy, synchronisation, starting the worker threads, which fails with cudaErrorMemoryAllocation) is checked; when one
+// fails, or when the table was never registered with set_ple_host_params, the function returns the cudaError_t
+// (cudaErrorInvalidValue for the unregistered table) before it gathers or launches anything, so the outputs are untouched.
+// Callers must check the result.
 //
 // prep prepares the graph inputs of one row: the token is read from tok_ptr and the position from pos_ptr plus pos_add. With
 // QWEN38_PLANE_CAP_NEGATIVE_POS_ADD_BATCH a pos_add in [-8, -2] instead prepares the rows = -pos_add rows of one folded verify
@@ -85,9 +87,11 @@ typedef struct Qwen38StateReplayDesc {
 // below -8 is not a row count: prep returns cudaErrorInvalidValue before it launches anything. Several request slots in one
 // call are prepared by prep_batched (QWEN38_PLANE_CAP_BATCHED_PREP), never by an encoding inside pos_add.
 //
-// The module keeps process-wide state (the staged tables registered through set_ple_host_params) that is shared by every
-// loader of the same library file. A loader calls attach once the module is loaded and validated and detach once before it
-// unloads it; the module drops that state only when the last attached loader detaches.
+// The module keeps process-wide state (the staged tables registered through set_ple_host_params, and the worker threads of the
+// staged gather) that is shared by every loader of the same library file. A loader calls attach once the module is loaded and
+// validated and detach once before it unloads it; the module drops that state, and stops and joins its threads, only when the
+// last attached loader detaches. A host must therefore detach before it releases the library (FreeLibrary / dlclose). The
+// reference host, Qwen38Plane, detaches and then keeps the library mapped until the process exits (see qwen38_graph_plane.h).
 #define QWEN38_PLANE_FUNCTIONS(X)                                                                                  \
   X(int, abi_version, (void))                                                                                      \
   X(int, sizeof_ple_params, (void))                                                                                \
@@ -226,6 +230,7 @@ typedef enum Qwen38PlaneFaultSite {
   QWEN38_PLANE_FAULT_DEVICE_ALIAS = 3,  // cudaHostGetDevicePointer of a mapped staging buffer
   QWEN38_PLANE_FAULT_COPY = 4,          // device-to-host cudaMemcpyAsync
   QWEN38_PLANE_FAULT_SYNC = 5,          // cudaStreamSynchronize / cudaDeviceSynchronize
+  QWEN38_PLANE_FAULT_THREAD_START = 6,  // creation of a gather worker thread (std::thread throws std::system_error)
 } Qwen38PlaneFaultSite;
 
 typedef struct Qwen38PlaneTestStats {
@@ -237,6 +242,7 @@ typedef struct Qwen38PlaneTestStats {
   long long staged_tables;            // registered staged tables
   long long attached_loaders;         // loaders currently attached to the module
   long long fault_armed;              // 1 while an injected fault has not fired yet
+  long long gather_pool_threads;      // live worker threads of the staged PLE gather
 } Qwen38PlaneTestStats;
 
 // Arms one fault: the (skip + 1)-th execution of `site` from now on fails with `error` instead of calling CUDA, once. A site
