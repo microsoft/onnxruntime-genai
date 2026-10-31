@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import random
+import re
 import shutil
 import struct
 import sys
@@ -1634,7 +1635,8 @@ def test_a_legacy_qmoe_offload_dense_graph_is_refused(offload, tmp_path, monkeyp
     dense = dense_model()
     dense.graph.node[0].op_type = "QMoEOffload"
     save_model(dense, package.root / "dense/model.onnx")
-    with pytest.raises(SystemExit, match=r"dense/model\.onnx has 1 QMoEOffload nodes"):
+    dense_graph = re.escape(str(Path("dense") / "model.onnx"))
+    with pytest.raises(SystemExit, match=rf"{dense_graph} has 1 QMoEOffload nodes"):
         run_builder(monkeypatch, offload, package, tmp_path / "out")
     assert not (tmp_path / "out").exists()
 
@@ -2097,6 +2099,9 @@ def test_the_built_package_creates_a_session_in_the_installed_runtime(
     ids=["QMoEOffload operator", "layer_index attribute", "resident_slots attribute"],
 )
 def test_what_the_previous_builder_emitted_does_not_load(ort, graph, message):
+    # The status category of a failed load depends on the runtime build: the released runtime reports an unregistered operator as
+    # Fail and an unknown attribute as InvalidGraph, while a build that registers its own QMoEOffload schema can report InvalidGraph
+    # or NotImplemented. The behaviour that matters is that session creation fails and names the operator or the attribute.
     with pytest.raises(Exception, match=message) as excinfo:
         create_session(ort, graph())
-    assert type(excinfo.value).__name__ == "InvalidGraph"
+    assert type(excinfo.value).__name__ in {"Fail", "InvalidGraph", "NotImplemented"}
