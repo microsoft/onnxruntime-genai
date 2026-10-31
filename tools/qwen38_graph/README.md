@@ -143,8 +143,9 @@ existing packages:
 `--clean-flat-package` writes the flat root layout; it needs `--reuse-embed-from <clean package>`, which supplies `embedding.onnx` +
 `embedding.onnx.data`, `attn_consts.data`, `genai_config.json` and the tokenizer files. `--reuse-ple-from` and `--reuse-qmoe-from`
 hard-link the PLE shards and the INT4 expert data of an earlier build instead of recomputing them. `--hf-dir`, `--v12b-dir`,
-`--v12d-dir`, `--ops-dir` and `--out` are required, and `--out` must not be equal to or nested in `--v12b-dir` or `--v12d-dir` (or
-contain one). The script needs `torch`.
+`--v12d-dir`, `--ops-dir` and `--out` are required. `--out` must not be equal to, nested in or around any input (`--hf-dir`,
+`--v12b-dir`, `--v12d-dir`, `--ops-dir`, `--reuse-ple-from`, `--reuse-qmoe-from`, `--reuse-embed-from`, `--plane-lib`,
+`--provider-lib`); this is checked before anything is deleted. The script needs `torch`.
 
 ### Standard-operator packages (`build_package_contrib_ops.py`)
 
@@ -157,8 +158,10 @@ library); `package_manifest.json` records `contrib_ops_only` and the rewrite cou
 contrib operators. `--fp8-mlp-shared` and `--fp8-shared-down-only` quantize BF16 shared-expert projections to FP8 (all of them, or only
 `SharedExpertDown`) instead of keeping them as BF16 `MatMul`; `--reuse-hc-bf16-from <converted package>` takes the BF16
 hyper-connection weights and `contrib_weights.data` from an earlier conversion so that the INT8 hyper-connection chains fuse into
-`HyperConnectionLowRankMix`. The script deletes an existing `--out` first and refuses an `--out` that is equal to, nested in or around
-`--src`.
+`HyperConnectionLowRankMix`; the reused `contrib_weights.data` is hard-linked and, when new weights have to be appended, replaced by a
+private copy that is extended, so the earlier package is never modified. The script deletes an existing `--out` first and refuses an
+`--out` that is equal to, nested in or around `--src`, `--reuse-hc-bf16-from`, `--plane-lib` or `--provider-lib` (checked before
+anything is deleted).
 
 ## Engine usage
 
@@ -211,7 +214,10 @@ The provider-side settings the numbers in the PR descriptions were taken with ar
 
 The logic that does not need a GPU is covered by `test/cpp/engine/qwen38_graph_*_tests.cpp` (scripted device, real Engine); the pure logic of
 the qualification scripts (acceptance histogram, calibration output names, the MMLU prompt check and `--compare`) by
-`test/python/builder/test_qwen38_qualification_tools.py` (`cd test/python/builder && python -m pytest -q test_qwen38_qualification_tools.py`).
+`test/python/builder/test_qwen38_qualification_tools.py`, and the file handling of the package builders (PLE shard files, the output
+overlap check, the reused `contrib_weights.data`; synthetic packages, no checkpoint or custom-op library) by
+`test/python/builder/test_qwen38_package_builders.py` (`cd test/python/builder && python -m pytest -q test_qwen38_qualification_tools.py
+test_qwen38_package_builders.py`).
 `engine_unit_tests --gtest_also_run_disabled_tests --gtest_filter='*RunOverhead*'` measures the host cost of one Engine step with
 an instantly answering device.
 

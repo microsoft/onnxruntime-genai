@@ -28,6 +28,7 @@ import numpy as np
 import onnx
 import torch
 from onnx import TensorProto, helper, numpy_helper
+from package_paths import reject_output_overlap
 
 ALIGN = 4096
 PLE_INT8_SCALE = 0.000703105776
@@ -244,41 +245,26 @@ def build_ple_int8(hf_reader: HFCheckpointReader, v12d_dir: Path, out_dir: Path)
         else:
             lines.append(line)
 
-    file_idx = 0
-    in_file_count = 0
-    cur_f = None
-    cur_rel = ""
-    cur_off = 0
-
     inv_scale = 1.0 / PLE_INT8_SCALE
-    for s in range(128):
-        if cur_f is None:
-            cur_rel = f"ple/ple_int8_{file_idx:02d}.data"
-            cur_f = open(out_dir / cur_rel, "wb")  # noqa: SIM115 - spans loop iterations, closed when the shard is full
-            cur_off = 0
-            in_file_count = 0
+    shard = 0
+    for file_idx, shard_count in enumerate(shards_per_file):
+        rel = f"ple/ple_int8_{file_idx:02d}.data"
+        off = 0
+        with open(out_dir / rel, "wb") as f:
+            for _ in range(shard_count):
+                t = hf_reader.read_bf16_tensor(
+                    f"model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_{shard}.weight"
+                ).to(device="cuda", dtype=torch.bfloat16)  # [rows, 160]
+                rows, width = t.shape
+                assert width == 160, f"Unexpected PLE shard shape {t.shape}"
+                q_i8 = torch.round(t.float() * inv_scale).clamp(-127.0, 127.0).to(torch.int8).cpu().numpy()
+                raw_bytes = q_i8.tobytes()
+                assert len(raw_bytes) == rows * width
 
-        t = hf_reader.read_bf16_tensor(
-            f"model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_{s}.weight"
-        ).to(device="cuda", dtype=torch.bfloat16)  # [rows, 160]
-        rows, width = t.shape
-        assert width == 160, f"Unexpected PLE shard shape {t.shape}"
-        q_i8 = torch.round(t.float() * inv_scale).clamp(-127.0, 127.0).to(torch.int8).cpu().numpy()
-        raw_bytes = q_i8.tobytes()
-        assert len(raw_bytes) == rows * width
-
-        cur_f.write(raw_bytes)
-        lines.append(f"shard {cur_rel} {cur_off} {rows}")
-        cur_off += len(raw_bytes)
-        in_file_count += 1
-
-        if in_file_count == shards_per_file[file_idx]:
-            cur_f.close()
-            cur_f = None
-            file_idx += 1
-
-    if cur_f is not None:
-        cur_f.close()
+                f.write(raw_bytes)
+                lines.append(f"shard {rel} {off} {rows}")
+                off += len(raw_bytes)
+                shard += 1
 
     (out_dir / "ple_table.txt").write_text("\n".join(lines) + "\n")
     print(f"[PLE] Quantized 128 PLE shards to INT8 in {time.time() - t0:.1f}s")
@@ -1579,11 +1565,20 @@ def main() -> int:
     args = ap.parse_args()
 
     t_start = time.time()
-    out = args.out.resolve()
-    for label, given_dir in (("--v12b-dir", args.v12b_dir), ("--v12d-dir", args.v12d_dir)):
-        src_dir = given_dir.resolve()
-        if out == src_dir or out.is_relative_to(src_dir) or src_dir.is_relative_to(out):
-            raise SystemExit(f"--out ({out}) must not be equal to or nested inside {label} ({src_dir})")
+    out = reject_output_overlap(
+        args.out,
+        {
+            "--hf-dir": args.hf_dir,
+            "--v12b-dir": args.v12b_dir,
+            "--v12d-dir": args.v12d_dir,
+            "--ops-dir": args.ops_dir,
+            "--reuse-ple-from": args.reuse_ple_from,
+            "--reuse-qmoe-from": args.reuse_qmoe_from,
+            "--reuse-embed-from": args.reuse_embed_from,
+            "--plane-lib": args.plane_lib,
+            "--provider-lib": args.provider_lib,
+        },
+    )
     has_existing_ple = (out / "ple_table.txt").exists() and len(list((out / "ple").glob("ple_int8_*.data"))) == 10
     if args.clean_flat_package:
         for sub in ["libs", "provider", "ple"]:

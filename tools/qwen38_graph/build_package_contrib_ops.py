@@ -23,6 +23,7 @@ import numpy as np
 import onnx
 import torch
 from onnx import TensorProto, helper, numpy_helper
+from package_paths import reject_output_overlap
 
 ALIGN = 4096
 
@@ -62,27 +63,58 @@ def ensure_ms_opset(model: onnx.ModelProto, version: int = 1) -> None:
 
 
 class ContribWeightWriter:
-    def __init__(self, src_dir: Path, out_dir: Path) -> None:
+    """Appends converted tensors to `<out>/contrib_weights.data` at 4096-byte aligned offsets.
+
+    With `reuse_data` the file starts as a hard link of an existing `contrib_weights.data` (offsets already
+    recorded in that package's graphs stay valid) and new tensors are appended after its end. The link is
+    replaced by a private copy right before the first append, so the reused package is never modified.
+    """
+
+    def __init__(self, src_dir: Path, out_dir: Path, reuse_data: Path | None = None) -> None:
         self.src_dir = src_dir
         self.out_dir = out_dir
         self.data_file_name = "contrib_weights.data"
         self.data_path = out_dir / self.data_file_name
-        self.fh = open(self.data_path, "wb")  # noqa: SIM115 - owned by the writer, released in close()
+        self.fh = None
         self.pos = 0
+        self.closed = False
         self.cache: dict[tuple, dict] = {}
+        # An existing name can be a hard link into another package; opening it for writing would modify that package.
+        self.data_path.unlink(missing_ok=True)
+        if reuse_data is None:
+            self.fh = open(self.data_path, "wb")  # noqa: SIM115 - owned by the writer, released in close()
+        else:
+            os.link(reuse_data, self.data_path)
+            self.pos = self.data_path.stat().st_size
 
     def close(self) -> None:
-        self.fh.close()
+        self.closed = True
+        if self.fh is not None:
+            self.fh.close()
+            self.fh = None
         if self.pos == 0 and self.data_path.exists():
             self.data_path.unlink()
 
+    def _writable(self):
+        if self.closed:
+            raise ValueError("write to a closed ContribWeightWriter")
+        if self.fh is None:
+            private = self.data_path.with_name(self.data_file_name + ".tmp")
+            shutil.copyfile(self.data_path, private)
+            os.replace(private, self.data_path)
+            self.fh = open(self.data_path, "ab")  # noqa: SIM115 - owned by the writer, released in close()
+            if self.fh.tell() != self.pos:
+                raise RuntimeError(f"{self.data_path} has {self.fh.tell()} bytes, expected the reused {self.pos}")
+        return self.fh
+
     def write_bytes(self, raw: bytes, dtype: int, dims: list[int]) -> dict:
+        fh = self._writable()
         pad = align_up(self.pos) - self.pos
         if pad:
-            self.fh.write(b"\x00" * pad)
+            fh.write(b"\x00" * pad)
             self.pos += pad
         off = self.pos
-        self.fh.write(raw)
+        fh.write(raw)
         self.pos += len(raw)
         return {
             "location": self.data_file_name,
@@ -1133,9 +1165,16 @@ def main() -> int:
 
     t0 = time.time()
     src = args.src.resolve(strict=True)
-    out = args.out.resolve()
-    if out == src or out.is_relative_to(src) or src.is_relative_to(out):
-        raise SystemExit(f"--out ({out}) must not be equal to or nested inside --src ({src}), or contain it")
+    ref_pkg = args.reuse_hc_bf16_from.resolve(strict=True) if args.reuse_hc_bf16_from is not None else None
+    out = reject_output_overlap(
+        args.out,
+        {
+            "--src": src,
+            "--reuse-hc-bf16-from": ref_pkg,
+            "--plane-lib": args.plane_lib,
+            "--provider-lib": args.provider_lib,
+        },
+    )
     if out.exists():
         shutil.rmtree(out)
     out.mkdir(parents=True, exist_ok=True)
@@ -1170,19 +1209,15 @@ def main() -> int:
     shutil.copy2(src / "model.onnx", out / "model.onnx")
     shutil.copy2(src / "mtp.onnx", out / "mtp.onnx")
 
-    writer = ContribWeightWriter(src, out)
+    writer = ContribWeightWriter(src, out, reuse_data=None if ref_pkg is None else ref_pkg / "contrib_weights.data")
     hc_bf16_target = None
     hc_bf16_mtp = None
-    if args.reuse_hc_bf16_from is not None:
-        ref_pkg = args.reuse_hc_bf16_from.resolve(strict=True)
-        writer.close()
-        if (out / "contrib_weights.data").exists():
-            (out / "contrib_weights.data").unlink()
-        os.link(ref_pkg / "contrib_weights.data", out / "contrib_weights.data")
-        m_ref_t = onnx.load(str(ref_pkg / "model.onnx"), load_external_data=False)
-        m_ref_h = onnx.load(str(ref_pkg / "mtp.onnx"), load_external_data=False)
-        hc_bf16_target = {t.name: t for t in m_ref_t.graph.initializer if t.name.endswith(".untiled_bf16")}
-        hc_bf16_mtp = {t.name: t for t in m_ref_h.graph.initializer if t.name.endswith(".untiled_bf16")}
+    try:
+        if ref_pkg is not None:
+            m_ref_t = onnx.load(str(ref_pkg / "model.onnx"), load_external_data=False)
+            m_ref_h = onnx.load(str(ref_pkg / "mtp.onnx"), load_external_data=False)
+            hc_bf16_target = {t.name: t for t in m_ref_t.graph.initializer if t.name.endswith(".untiled_bf16")}
+            hc_bf16_mtp = {t.name: t for t in m_ref_h.graph.initializer if t.name.endswith(".untiled_bf16")}
         target_stats = convert_model_to_contrib_ops(
             out / "model.onnx",
             writer,
@@ -1199,24 +1234,8 @@ def main() -> int:
             fp8_shared_down_only=args.fp8_shared_down_only,
             hc_bf16_inits=hc_bf16_mtp,
         )
-    else:
-        try:
-            target_stats = convert_model_to_contrib_ops(
-                out / "model.onnx",
-                writer,
-                is_mtp=False,
-                fp8_mlp_shared=args.fp8_mlp_shared,
-                fp8_shared_down_only=args.fp8_shared_down_only,
-            )
-            mtp_stats = convert_model_to_contrib_ops(
-                out / "mtp.onnx",
-                writer,
-                is_mtp=True,
-                fp8_mlp_shared=args.fp8_mlp_shared,
-                fp8_shared_down_only=args.fp8_shared_down_only,
-            )
-        finally:
-            writer.close()
+    finally:
+        writer.close()
 
     pool_info = write_weights_pool_flat(out, {"target": out / "model.onnx", "mtp": out / "mtp.onnx"})
 
