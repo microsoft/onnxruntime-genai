@@ -882,6 +882,16 @@ struct Config {
       size_t max_batch_size{16};                    // Maximum batch size for dynamically batching requests.
       size_t max_scheduled_tokens{2048};            // Maximum tokens in one dynamically batched model run.
       std::optional<bool> prefix_caching;
+      std::optional<size_t> max_snapshots;  // Optional shared Engine-wide snapshot count limit.
+      struct SnapshotCache {
+        size_t vram_bytes{};
+        size_t ram_bytes{};
+        size_t disk_bytes{};
+        std::string directory;
+        bool explicitly_set{};
+        bool Enabled() const noexcept { return vram_bytes != 0 || ram_bytes != 0 || disk_bytes != 0; }
+        bool Configured() const noexcept { return explicitly_set || Enabled() || !directory.empty(); }
+      } snapshot_cache;
       size_t dflash2_max_snapshots{1};  // Budget-limited windowed drafter prefix snapshots; 0 disables.
     };
     std::optional<DynamicBatching> dynamic_batching;  // Dynamic batching settings
@@ -920,6 +930,9 @@ struct Config {
         std::optional<size_t> num_blocks;
         std::optional<size_t> max_batch_size;
         std::optional<size_t> max_scheduled_tokens;
+        std::optional<bool> prefix_caching;
+        std::optional<size_t> max_snapshots;
+        std::optional<Engine::DynamicBatching::SnapshotCache> snapshot_cache;
         std::optional<size_t> dflash2_max_snapshots;
       } dynamic_batching;
 

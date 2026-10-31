@@ -43,6 +43,10 @@ namespace Generators {
 namespace test {
 
 struct EngineRunTestAccess {
+  static PrefixSnapshotCache* SnapshotCache(const Engine& engine) {
+    return engine.snapshot_cache_.get();
+  }
+
   static EngineHealth Health(const Engine& engine) { return engine.health_; }
   static std::pair<int64_t, int64_t> MtpShadowLengths(const Engine& engine, const Request& target) {
     const auto& shadow = engine.mtp_requests_.at(&target);
@@ -764,6 +768,37 @@ class EngineRunTest : public ::testing::Test {
 
   std::shared_ptr<Model> model_;
 };
+
+TEST(EngineSnapshotCacheTest, PolicyPreservesLegacyDefaultsAndIsOwnedByTheEngine) {
+  auto model = CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-composite");
+  auto& batching = *model->config_->engine.dynamic_batching;
+  EXPECT_FALSE(batching.prefix_caching.has_value());
+  auto no_budget = Engine::CreateDependencies(model);
+  EXPECT_NE(no_budget.snapshot_cache, nullptr);
+  batching.snapshot_cache.ram_bytes = 1024;
+  auto implicit_enabled = Engine::CreateDependencies(model);
+  EXPECT_NE(implicit_enabled.snapshot_cache, nullptr);
+  batching.snapshot_cache.ram_bytes = 0;
+  batching.snapshot_cache.explicitly_set = true;
+  auto explicit_zero = Engine::CreateDependencies(model);
+  EXPECT_EQ(explicit_zero.snapshot_cache, nullptr);
+  batching.prefix_caching = false;
+  batching.snapshot_cache.ram_bytes = 1024;
+  auto disabled = Engine::CreateDependencies(model);
+  EXPECT_EQ(disabled.snapshot_cache, nullptr);
+  batching.prefix_caching = true;
+  auto dependencies = Engine::CreateDependencies(model);
+  ASSERT_NE(dependencies.snapshot_cache, nullptr);
+  std::weak_ptr<PrefixSnapshotCache> policy = dependencies.snapshot_cache;
+  {
+    Engine engine{model, std::move(dependencies)};
+    EXPECT_EQ(EngineRunTestAccess::SnapshotCache(engine), policy.lock().get());
+  }
+  EXPECT_TRUE(policy.expired());
+  batching.max_snapshots = 0;
+  auto no_snapshots = Engine::CreateDependencies(model);
+  EXPECT_EQ(no_snapshots.snapshot_cache, nullptr);
+}
 
 TEST_F(EngineRunTest, ReleasesConsumedRestoreLeasesBeforeTheNextCapture) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/2, EosToken(*model_));
