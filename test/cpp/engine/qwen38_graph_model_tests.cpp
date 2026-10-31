@@ -240,13 +240,22 @@ TEST(Qwen38GraphConfigTest, RejectsKeysThatAreNotPublicConfiguration) {
       R"({"model":{"qwen38_graph":{"target_s2_graph_id":51}}})",
       R"({"model":{"qwen38_graph":{"head_s1_graph_id":61}}})",
       R"({"model":{"qwen38_graph":{"head_s2_graph_id":63}}})",
-      R"({"model":{"qwen38_graph":{"fold":{"target_graph_id":71}}}})",
-      R"({"model":{"qwen38_graph":{"fold":{"head_r2":{"graph_id":81}}}}})",
+      R"({"model":{"qwen38_graph":{"fold":{"target_graph_id":0}}}})",
+      R"({"model":{"qwen38_graph":{"fold":{"head_r2":{"graph_id":0}}}}})",
+      R"({"model":{"qwen38_graph":{"fold":{"target_graph_id":71,"head_r2":{"graph_id":71}}}}})",
   };
   for (const char* overlay : overlays) {
     Config config;
     EXPECT_THROW(OverlayConfig(config, overlay), std::exception) << overlay;
   }
+}
+
+TEST(Qwen38GraphConfigTest, AcceptsLegacyRc5FoldGraphIdsThroughCompatibilityLayer) {
+  Config config;
+  EXPECT_NO_THROW(OverlayConfig(
+      config, R"({"model":{"qwen38_graph":{"fold":{"enabled":true,"target_graph_id":71,"head_r2":{"filename":"r2.onnx","graph_id":81}}}}})"));
+  EXPECT_EQ(config.model.qwen38_graph.fold.legacy_target_graph_id, 71);
+  EXPECT_EQ(config.model.qwen38_graph.fold.head_r2.legacy_graph_id, 81);
 }
 
 TEST(Qwen38GraphConfigTest, FoldAndPrefillPathsMustStayInsideTheModelFolder) {

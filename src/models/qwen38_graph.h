@@ -19,6 +19,7 @@
 #include <string>
 #include <vector>
 
+#include "engine/backend_capabilities.h"
 #include "model.h"
 #include "qwen38_decode_device.h"
 #include "qwen38_graph_plane.h"
@@ -238,9 +239,12 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   ~Qwen38GraphEngine() override;
 
   int Capacity() const override { return capacity_; }
+  int ReservedTail() const override { return std::max(verify_rows_, kReservedTail); }
   bool MtpEnabled() const override { return mtp_enabled_; }
   void Reset() override;
   void Drain() noexcept override;
+  void MarkContextFailed() noexcept override;
+  bool ContextIsHealthy() const noexcept override;
 
   // Ingests prompt tokens: by the dense chunked prefill session when prefill.enabled (FastAppend: the dense state continues
   // across chunks and is handed over to the decode state in BeginDecode), otherwise by S=2 graph steps (StepPrefill; the
@@ -458,6 +462,9 @@ struct Qwen38GraphModel : Model {
   // Leases the device engine to one Engine at a time (it owns the captured graphs, the KV store and the bank ring). The
   // lease drains the device when released and keeps the model alive. Throws when another Engine holds it.
   std::shared_ptr<Qwen38DecodeDevice> AcquireDevice();
+  void PoisonExecutionContext() noexcept { context_healthy_.store(false); }
+  bool IsExecutionContextHealthy() const noexcept { return context_healthy_.load(); }
+  const BackendCapabilities& ResolvedBackendCapabilities() const noexcept { return resolved_capabilities_; }
 
   // Declaration order = reverse destruction order: the engine and the sessions go first, then the shared weights / constants
   // they were given, then the plane library.
@@ -480,6 +487,8 @@ struct Qwen38GraphModel : Model {
 
  private:
   std::atomic<bool> leased_{false};
+  std::atomic<bool> context_healthy_{true};
+  BackendCapabilities resolved_capabilities_;
 };
 
 }  // namespace Generators

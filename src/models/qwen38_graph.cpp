@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 //
 // Qwen3.8-Flash-Next NVFP4 CUDA-graph decode + MTP(1): model and device engine. See qwen38_graph.h.
+#include "engine/step_plan.h"
 #include "generator/generators.h"
 #include "logging.h"
 #include "qwen38_graph.h"
@@ -648,6 +649,10 @@ void Qwen38GraphEngine::ClearHead() {
   head_turn_ = 0;
   head_cur_ = 0;
 }
+
+void Qwen38GraphEngine::MarkContextFailed() noexcept { model_.PoisonExecutionContext(); }
+
+bool Qwen38GraphEngine::ContextIsHealthy() const noexcept { return model_.IsExecutionContextHealthy(); }
 
 void Qwen38GraphEngine::Reset() {
   SyncStream();
@@ -1497,6 +1502,24 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
   }
 
   engine_ = std::make_unique<Qwen38GraphEngine>(*this);
+  auto& capabilities = resolved_capabilities_;
+  capabilities.token_selection = BackendTokenSelection::Backend;
+  capabilities.admission = BackendAdmission::WholeBatch;
+  capabilities.kv_storage = BackendKvStorage::PersistentContiguous;
+  capabilities.additional_state = BackendAdditionalState::PrivateBanks;
+  capabilities.continuation = BackendContinuation::ReplayHistory;
+  capabilities.rewind = BackendRewind::ReplayHistory;
+  capabilities.supports_sampling = false;
+  capabilities.supports_penalties = false;
+  capabilities.supports_min_generated_tokens = false;
+  capabilities.supports_guidance = false;
+  capabilities.supports_stop_strings = true;
+  capabilities.max_slots = 1;
+  capabilities.configured_max_batch_size = 1;
+  capabilities.max_request_length = static_cast<uint64_t>(engine_->Capacity() - engine_->ReservedTail());
+  capabilities.max_result_tokens = kMaxGeneratedTokensPerStep;
+  if (config_->engine.dynamic_batching)
+    capabilities.max_scheduled_tokens = config_->engine.dynamic_batching->max_scheduled_tokens;
 }
 
 Qwen38GraphModel::~Qwen38GraphModel() = default;
@@ -1526,15 +1549,26 @@ std::unique_ptr<State> Qwen38GraphModel::CreateState(DeviceSpan<int32_t>, const 
 }
 
 std::shared_ptr<Qwen38DecodeDevice> Qwen38GraphModel::AcquireDevice() {
+  if (!IsExecutionContextHealthy())
+    throw std::runtime_error("qwen38_flash_graph: the execution context is poisoned; reload the Model before creating another Engine.");
   if (leased_.exchange(true))
     throw std::runtime_error(
         "qwen38_flash_graph: the model's CUDA-graph state is already used by another Engine; destroy that Engine first "
         "(one Engine per model).");
+  if (!IsExecutionContextHealthy()) {
+    leased_.store(false);
+    throw std::runtime_error("qwen38_flash_graph: the execution context is poisoned; reload the Model before creating another Engine.");
+  }
   Qwen38GraphEngine* engine = engine_.get();
   // The lease keeps the model alive and drains the device before releasing it, so a look-ahead cycle never outlives its Engine.
   std::shared_ptr<Model> keep_alive = shared_from_this();
   return std::shared_ptr<Qwen38DecodeDevice>(engine, [this, keep_alive](Qwen38DecodeDevice* device) {
     device->Drain();
+    try {
+      device->CheckDecodeStatus();
+    } catch (...) {
+      PoisonExecutionContext();
+    }
     leased_.store(false);
   });
 }
