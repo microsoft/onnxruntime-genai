@@ -6,6 +6,7 @@
 #include <random>
 
 #include "execution_context.h"
+#include "executor_result.h"
 #include "request.h"
 
 namespace Generators {
@@ -62,6 +63,11 @@ struct BatchedSamplingPlan {
 };
 
 struct ScheduledRequests {
+  ~ScheduledRequests();
+  ScheduledRequests(ScheduledRequests&&) noexcept;
+  ScheduledRequests& operator=(ScheduledRequests&&) noexcept;
+  ScheduledRequests(const ScheduledRequests&) = delete;
+  ScheduledRequests& operator=(const ScheduledRequests&) = delete;
   ScheduledRequests(std::vector<std::shared_ptr<Request>> requests,
                     std::shared_ptr<Model> model,
                     BatchedSampler* batched_sampler,
@@ -105,6 +111,20 @@ struct ScheduledRequests {
   std::vector<DeviceSpan<float>> ProcessLogits();
 
   void GenerateNextTokens(std::vector<RequestStepResult>& results);
+  // For a ModelExecutor that selects its own tokens (ModelExecutor::SelectsOwnTokens): stages the tokens
+  // the executor committed for scheduled row `row` (an empty span for a step that only advanced the prompt).
+  // Once any row is staged, GenerateNextTokens commits these tokens through
+  // Request::CommitExternalTokens instead of sampling logits.
+  void StageExecutorTokens(size_t row, std::span<const int32_t> tokens);
+  void BeginBackendStep(std::vector<BackendPlannedRow> plan);
+  void StageBackendRow(size_t request_row, BackendRowResult result);
+  void SetBackendLimits(size_t max_slots, size_t max_result_tokens) {
+    backend_max_slots_ = max_slots;
+    backend_max_result_tokens_ = max_result_tokens;
+  }
+  StepOutputKind OutputKind() const { return output_kind_; }
+  const std::vector<BackendRowResult>& BackendRows() const { return backend_rows_; }
+  const std::vector<TokenCommitAck>& CommitAcks() const { return commit_acks_; }
   void ScheduleGuidanceMasks() noexcept;
   void BeginTransaction();
   void GenerateNextTokensForTransaction(
@@ -117,6 +137,7 @@ struct ScheduledRequests {
   friend struct test::EngineRunTestAccess;
 
   bool PrepareBatchedSamplingPlan(bool require_transaction_support);
+  void ValidateBackendRows() const;
   bool TryGenerateNextTokensBatched(std::vector<DeviceSpan<float>>& logits,
                                     bool guidance_applied,
                                     std::vector<RequestStepResult>* results = nullptr);
@@ -141,6 +162,18 @@ struct ScheduledRequests {
   // Drafts the transaction stages onto each request's sequence, in scheduled row order. Empty
   // outside a dynamic step plan.
   std::vector<size_t> draft_token_counts_;
+  // Tokens an executor that selects its own tokens committed this step, per scheduled row. Empty unless
+  // StageExecutorTokens was called.
+  std::vector<std::vector<int32_t>> executor_tokens_;
+  StepOutputKind output_kind_{StepOutputKind::DecoderOutputs};
+  bool legacy_executor_tokens_{};
+  std::vector<BackendPlannedRow> backend_plan_;
+  std::vector<BackendRowResult> backend_rows_;
+  std::vector<size_t> backend_request_rows_;
+  std::vector<TokenCommitAck> commit_acks_;
+  size_t backend_max_slots_{std::numeric_limits<size_t>::max()};
+  size_t backend_max_result_tokens_{kMaxGeneratedTokensPerStep};
+  bool backend_committed_{};
   std::shared_ptr<Model> model_;
   std::unique_ptr<DecoderIO> decoder_state_;
   std::unique_ptr<ExecutionContext> execution_context_;

@@ -2105,6 +2105,57 @@ tombstone.
 
 Changes to shared types such as `Request`, `ScheduledRequests`, `ModelExecutor`, or `SimpleDecoder` should be checked against both paths. This document should be updated only where behavior is shared or where the dynamic path changes.
 
+### Static single-slot backend that selects its own tokens
+
+The `qwen38_flash_graph` model type (Qwen3.8-Flash CUDA-graph decode with a built-in MTP(1) loop) runs on the static path
+through a `ModelExecutor` that chooses its own tokens, instead of attaching decoder state with logits. It is a single-slot
+backend: fixed in-place KV, a recurrent-state bank ring and a device-side draft -> verify -> commit loop that cannot be
+paged, batched or cropped to an arbitrary token. `CreateEngineBackend` (`src/engine/backend_factory.h`) and
+`CreateQwen38GraphDependencies` (`src/engine/qwen38_graph_executor.h`) assemble it:
+
+- `FixedSlotCacheManager` (`Qwen38GraphCacheManager`, `src/engine/fixed_slot_scheduler.h`) holds one row. `StaticBatchScheduler`
+  queues further Requests and recycles the slot when the resident turn is complete. `RewindToStartOfTurn` releases the slot; a
+  continued turn (`BeginTurn` on the resident Request) and the replay after a rewind re-ingest the whole retained history
+  (through the same chunked prefill as a new prompt), because the look-ahead cycle and the bank ring cannot be rolled back.
+  There is no prefix cache.
+- `Qwen38GraphExecutor::SelectsOwnTokens()` is true. One Engine step is one prompt chunk (the size the device asks for,
+  `Qwen38DecodeDevice::PrefillChunkTokens()`: `model.qwen38_graph.prefill.chunk` when set, otherwise 8192 tokens with the
+  dense prefill (`prefill.enabled`) and 2048 per step through the decode graphs, see `EffectiveQwen38PrefillChunkTokens`;
+  the decode-graph path needs an even chunk; a step that only advances the prompt delivers no event, so `CancelRequest`
+  stays responsive; the dense prefill state continues across the chunks and is handed over to the decode state in the step that
+  ingests the last one) or one whole cycle (with `fold.enabled`: one CUDA-graph launch). The executor tells the device the
+  prompt length of the turn (`Qwen38DecodeDevice::ExpectPrefillTokens`, after `Reset()` and before the first chunk); the
+  device hands it to the ORT QMoE kernels with every chunk of that turn and drops it at `Reset()`/`BeginDecode()`. The value
+  is device state: nothing is published through the process environment, so Engines of different models never share it. The
+  executor declares its step plan via `ScheduledRequests::BeginBackendStep` and stages owned `BackendRowResult` records
+  (`PrefillProgress` and/or `SelectedTokenBlock`) via `ScheduledRequests::StageBackendRow`; `GenerateNextTokens` validates the
+  batch before mutating any Request, commits candidates through `Request::CommitExternalTokens` (observing stop strings, EOS,
+  turn limit, and context limit in order), and records `TokenCommitAck` counts (consumed, appended, and staged for events)
+  settled through `TokenProducingSession` before events are published. Stop strings are therefore accepted on this static path;
+  every other static executor still rejects them.
+- The next cycle is enqueued before a step returns, so the GPU runs it while the Engine delivers the previous tokens. A stop
+  string can only be known after delivery, so one cycle may be wasted; the next request, a rewind and Engine teardown wait for
+  it with `Qwen38DecodeDevice::Drain()`. The record of such a cycle is never consumed, so its status is read from the device
+  instead: `CheckDecodeStatus()` right after `Drain()` reports the error bits accumulated by every cycle since the last
+  `Reset()`, also when a record was left unconsumed. The executor always runs `Drain()` and then `CheckDecodeStatus()` before
+  `Reset()` (which clears the bits): a cancellation or stop-string match that leaves a cycle behind therefore still fails the
+  next request or the rewind when that cycle went wrong. At Engine teardown the device is only drained: nobody is left to
+  report to. A fatal execution failure poisons the mutable device context across Engine leases until the model is reloaded.
+- `ModelExecutor::ValidateTurn` and `BackendCapabilities` reject, before any Request mutation, what the device loop cannot do:
+  sampling, repetition penalty, no-repeat n-grams, `min_generated_tokens`, seeds and guidance. `MaxDraftTokensPerStep()` is
+  zero (the caller cannot attach drafts). `GetCapabilities()` reports one row and `max_request_length` = KV capacity - 4.
+- `GetSpeculativeStats()` includes the executor's counters (`ModelExecutor::AddSpeculativeStats`): one round per cycle, one
+  or more proposed drafts per round (the fold verifies 1..3), accepted drafts, bonus and correction tokens, the
+  acceptance-length histogram. The counters describe what the Engine consumed, as `Engine::RecordSpeculativeCommit` does for
+  sampled MTP: a turn that ends inside a cycle (turn or session limit, stop string, EOS) only accepts the drafts it delivered,
+  `draft_tokens_evaluated` counts the draft positions examined up to the terminal token (every accepted draft consumed, an EOS
+  draft included, plus the rejected position only when the turn got as far as the correction token), so `acceptance_rate` is not
+  diluted by drafts after the end of the turn. Rounds are classified like `Engine::RecordSpeculativeCommit` does, by the number
+  of accepted drafts that were delivered: none is a zero-accept round, all of the proposed ones a full-accept round and anything
+  in between a partial-accept round (`partial_accept_rounds`, counted whether or not a correction token was delivered).
+- The model's device state is leased to one Engine at a time (`Qwen38GraphModel::AcquireDevice`); a second Engine over the same
+  model fails with a clear error until the first one is destroyed. The model has no Generator API support.
+
 ## Experimental low-level public API shape
 
 The language bindings currently expose the same basic low-level loop. Production hosts are expected to wrap this surface or use its replacement rather than expose it as their stable API:
