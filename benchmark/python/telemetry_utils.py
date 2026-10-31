@@ -26,11 +26,23 @@ def _source_path():
             sys.path.remove(_SOURCE_ROOT)
 
 
-try:
-    from onnxruntime_genai.telemetry.path_utils import normalize_execution_provider, sanitize_model_identifier
-except ImportError:
-    with _source_path():
-        from telemetry.path_utils import normalize_execution_provider, sanitize_model_identifier
+def _load_path_utils():
+    try:
+        importlib.import_module("onnxruntime_genai")
+    except ModuleNotFoundError as error:
+        if error.name != "onnxruntime_genai":
+            raise
+        with _source_path():
+            return importlib.import_module("telemetry.path_utils")
+    return importlib.import_module("onnxruntime_genai.telemetry.path_utils")
+
+
+def normalize_execution_provider(provider):
+    return _load_path_utils().normalize_execution_provider(provider)
+
+
+def sanitize_model_identifier(identifier):
+    return _load_path_utils().sanitize_model_identifier(identifier)
 
 
 def get_telemetry():

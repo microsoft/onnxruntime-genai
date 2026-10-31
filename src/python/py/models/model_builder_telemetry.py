@@ -40,7 +40,10 @@ class ModelBuilderTelemetry:
 
     def get_telemetry(self):
         try:
-            return self.load_telemetry_module().GenAITelemetry()
+            module = self.load_telemetry_module()
+            if os.environ.get("ORT_DISABLE_TELEMETRY", "").strip().lower() in {"1", "true", "yes", "on", "y"}:
+                module.disable_telemetry()
+            return module.GenAITelemetry()
         except Exception:
             logging.getLogger(__name__).debug("Model-builder telemetry is unavailable", exc_info=True)
             return None

@@ -282,6 +282,33 @@ class TestOptOut(_HermeticTelemetryTestCase):
         device_id.assert_not_called()
         self.assertEqual(self._sent_event_names(), [])
 
+    def test_builder_opt_out_disables_existing_runtime(self):
+        import importlib.util
+
+        from telemetry.telemetry import GenAITelemetry
+
+        import telemetry as telemetry_module
+
+        runtime = GenAITelemetry()
+        self._join_heartbeat()
+        self.assertTrue(runtime._uploader.stop_loop())
+        runtime.log_model_build(action="create_model", duration_ms=1.0, success=True)
+        sent_before = self.mock_send.call_count
+        helper_path = Path(_TELEMETRY_SOURCE_PATH) / "models" / "model_builder_telemetry.py"
+        spec = importlib.util.spec_from_file_location("builder_telemetry_opt_out", helper_path)
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+
+        os.environ["ORT_DISABLE_TELEMETRY"] = "1"
+        with patch.object(helper.ModelBuilderTelemetry, "load_telemetry_module", return_value=telemetry_module):
+            builder = helper.ModelBuilderTelemetry()
+            builder.emit(None, None, "fp16", "cpu", "", {}, "", "model")
+            builder.shutdown()
+
+        self.assertTrue(runtime._telemetry_disabled)
+        self.assertFalse(runtime.accepts_detailed_events)
+        self.assertEqual(self.mock_send.call_count, sent_before)
+
     def test_public_disable_before_initialization_only_latches_suppression(self):
         from telemetry.telemetry import GenAITelemetry, disable_telemetry
 
@@ -708,7 +735,7 @@ class TestBenchmarkTelemetryIdentifiers(unittest.TestCase):
         self.assertEqual(module.sanitize_model_identifier("/secret.onnx"), "[path]")
         self.assertEqual(module.sanitize_model_identifier("microsoft/phi-3-mini"), "microsoft/phi-3-mini")
         self.assertEqual(module.normalize_execution_provider("NvTensorRtRtx"), "trt-rtx")
-        path_utils_module = sys.modules[module.sanitize_model_identifier.__module__]
+        path_utils_module = module._load_path_utils()
         with patch.object(path_utils_module.os.path, "exists") as mock_exists:
             self.assertEqual(module.sanitize_model_identifier("microsoft/phi-3-mini"), "microsoft/phi-3-mini")
         mock_exists.assert_not_called()
@@ -821,9 +848,14 @@ class TestBenchmarkTelemetryIdentifiers(unittest.TestCase):
     def test_telemetry_disabled_wheel_does_not_load_source_telemetry(self):
         import types
 
-        module = self._load_helper()
         wheel = types.ModuleType("onnxruntime_genai")
         wheel.__path__ = []
+        with patch.dict(
+            sys.modules,
+            {"onnxruntime_genai": wheel, "onnxruntime_genai.telemetry": None, "telemetry": None},
+        ):
+            module = self._load_helper()
+            self.assertIsNone(module.get_telemetry())
         with (
             patch.dict(sys.modules, {"onnxruntime_genai": wheel, "onnxruntime_genai.telemetry": None}),
             patch.object(module, "_source_path") as source_path,
@@ -2688,6 +2720,37 @@ class TestOfflineEventStore(unittest.TestCase):
         self.assertEqual(s.count(), 5)
         batch = s.get_batch(3)
         self.assertEqual([p for _, p in batch], [b'{"e":0}', b'{"e":1}', b'{"e":2}'])
+
+    def test_upload_storage_deadlines_bound_thread_lock_contention(self):
+        import threading
+        import time
+
+        for method in ("get_batch_for_upload", "get_acknowledged_ids", "acknowledge", "delete"):
+            with self.subTest(method=method):
+                store = self._new_store()
+                self.assertTrue(store.store(b'{"event":1}'))
+                original = store.get_batch(10)
+                args = [10] if method.startswith("get_") else [[original[0][0]]]
+                finished = threading.Event()
+                result = []
+
+                def drain(store=store, method=method, args=args, finished=finished, result=result):
+                    result.append(getattr(store, method)(*args, deadline=time.monotonic() + 0.05))
+                    finished.set()
+
+                worker = threading.Thread(target=drain)
+                with store._lock:
+                    worker.start()
+                    completed_before_release = finished.wait(0.5)
+                worker.join(5)
+                self.assertTrue(completed_before_release)
+                self.assertEqual(result, [None if method.startswith("get_") else False])
+                self.assertEqual(store.get_batch(10), original)
+                retry = getattr(store, method)(*args, deadline=time.monotonic() + 1.0)
+                if method.startswith("get_"):
+                    self.assertIsNotNone(retry)
+                else:
+                    self.assertTrue(retry)
 
     @unittest.skipIf(os.name == "nt", "POSIX SQLite record locks")
     def test_wal_locks_survive_hardening_and_overlapping_stores(self):
