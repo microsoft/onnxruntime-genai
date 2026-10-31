@@ -570,6 +570,216 @@ TEST(Qwen38GraphConfigTest, PrefillChunkValidation) {
   EXPECT_THROW(ValidateQwen38PrefillChunk(config.model.qwen38_graph), std::runtime_error);
 }
 
+// The documented slot range is enforced where the key is parsed, with the key and the value in the message, not by a later
+// resolution that would map the value to one slot or clamp it.
+TEST(Qwen38GraphConfigTest, MaxBatchSizeMustLieInTheDocumentedSlotRange) {
+  const auto parse = [](const std::string& value) {
+    Config config;
+    OverlayConfig(config, R"({"model":{"qwen38_graph":{"max_batch_size":)" + value + "}}}");
+    return config.model.qwen38_graph.max_batch_size;
+  };
+  EXPECT_EQ(Config{}.model.qwen38_graph.max_batch_size, 1);
+  EXPECT_EQ(parse("1"), 1);
+  EXPECT_EQ(parse("2"), 2);
+  EXPECT_EQ(parse("8"), Config::Model::Qwen38Graph::kMaxBatchSize);
+  for (const char* value : {"-1", "0", "9", "16", "1000"}) {
+    try {
+      parse(value);
+      ADD_FAILURE() << "max_batch_size " << value << " was accepted";
+    } catch (const std::exception& error) {  // the JSON reader reports it with the position in the file
+      const std::string message = error.what();
+      EXPECT_NE(message.find("max_batch_size"), std::string::npos) << message;
+      EXPECT_NE(message.find("[1, 8]"), std::string::npos) << message;
+      EXPECT_NE(message.find(std::string{"got "} + value), std::string::npos) << message;
+    }
+  }
+}
+
+TEST(Qwen38GraphConfigTest, TheSlotCountIsResolvedFromItsSettingsAndNeverClampedSilently) {
+  Config config;
+  EXPECT_EQ(ResolveQwen38MaxBatchSize(config), 1u);
+  config.model.qwen38_graph.max_batch_size = 4;
+  EXPECT_EQ(ResolveQwen38MaxBatchSize(config), 4u);
+  config.model.qwen38_graph.max_batch_size = Config::Model::Qwen38Graph::kMaxBatchSize;
+  EXPECT_EQ(ResolveQwen38MaxBatchSize(config), 8u);
+
+  // A programmatically built Config is checked like a parsed one: no value maps to one slot or to the maximum.
+  for (const int value : {-1, 0, 9, 64}) {
+    config.model.qwen38_graph.max_batch_size = value;
+    try {
+      ResolveQwen38MaxBatchSize(config);
+      ADD_FAILURE() << "max_batch_size " << value << " was resolved";
+    } catch (const std::out_of_range& error) {
+      EXPECT_NE(std::string{error.what()}.find("model.qwen38_graph.max_batch_size"), std::string::npos) << error.what();
+    }
+  }
+
+  // The engine-level settings take precedence, and they are held to the same range.
+  Config dynamic;
+  dynamic.model.qwen38_graph.max_batch_size = 2;
+  dynamic.engine.dynamic_batching.emplace();
+  dynamic.engine.dynamic_batching->max_batch_size = 3;
+  EXPECT_EQ(ResolveQwen38MaxBatchSize(dynamic), 3u);
+  dynamic.engine.dynamic_batching->max_batch_size = 16;  // the default of the dynamic engine
+  EXPECT_THROW(ResolveQwen38MaxBatchSize(dynamic), std::out_of_range);
+  dynamic.engine.dynamic_batching->max_batch_size = 0;
+  EXPECT_THROW(ResolveQwen38MaxBatchSize(dynamic), std::out_of_range);
+
+  Config fixed;
+  fixed.engine.static_batching.emplace();
+  EXPECT_EQ(ResolveQwen38MaxBatchSize(fixed), 4u);
+  fixed.engine.static_batching->max_batch_size = 9;
+  EXPECT_THROW(ResolveQwen38MaxBatchSize(fixed), std::out_of_range);
+
+  Config search;
+  search.search.batch_size = 3;
+  EXPECT_EQ(ResolveQwen38MaxBatchSize(search), 3u);
+  search.search.batch_size = 9;
+  EXPECT_THROW(ResolveQwen38MaxBatchSize(search), std::out_of_range);
+}
+
+namespace {
+
+// A folded package: prefill, the dense graph and the slot count are what the tests vary.
+Config FoldedPackageConfig(const std::string& qwen38_graph_overlay) {
+  Config config;
+  OverlayConfig(config,
+                R"({"model":{"type":"qwen38_flash_graph","decoder":{"filename":"model.onnx"},"qwen38_graph":)" +
+                    qwen38_graph_overlay + "}}");
+  return config;
+}
+
+void ExpectConfigDiagnostic(const Config& config, const std::string& needle) {
+  try {
+    ValidateQwen38MultiSlotConfig(config);
+    ADD_FAILURE() << "the configuration was accepted, expected a diagnostic with '" << needle << "'";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(std::string{error.what()}.find(needle), std::string::npos) << error.what();
+  }
+}
+
+}  // namespace
+
+// Several slots are decoded by the batched fold target and prefilled chunk by chunk through it. Everything else is refused when
+// the model is created (source validation, no GPU), not at the first decode of an admitted request.
+TEST(Qwen38MultiSlotConfigTest, ASingleSlotHasNoRestriction) {
+  for (const char* overlay : {R"({"max_batch_size":1})",
+                              R"({"max_batch_size":1,"fold":{"enabled":true},"prefill":{"enabled":false}})",
+                              R"({"fold":{"enabled":true},"prefill":{"enabled":true,"dense":{"filename":"dense.onnx"}}})"}) {
+    EXPECT_NO_THROW(ValidateQwen38MultiSlotConfig(FoldedPackageConfig(overlay))) << overlay;
+  }
+}
+
+TEST(Qwen38MultiSlotConfigTest, SeveralSlotsNeedTheFoldStack) {
+  ExpectConfigDiagnostic(FoldedPackageConfig(R"({"max_batch_size":2})"), "model.qwen38_graph.fold.enabled");
+  ExpectConfigDiagnostic(FoldedPackageConfig(R"({"max_batch_size":8,"prefill":{"enabled":true}})"),
+                         "model.qwen38_graph.fold.enabled");
+}
+
+TEST(Qwen38MultiSlotConfigTest, SeveralSlotsNeedTheUnifiedFastPrefill) {
+  // prefill.enabled=false: the prompt would go through the decode graphs, which cannot address a slot.
+  ExpectConfigDiagnostic(FoldedPackageConfig(R"({"max_batch_size":2,"fold":{"enabled":true}})"),
+                         "unified fast prefill");
+  ExpectConfigDiagnostic(FoldedPackageConfig(R"({"max_batch_size":2,"fold":{"enabled":true},"prefill":{"enabled":false}})"),
+                         "prefill.enabled");
+  // A separate dense prefill graph is not slot-addressed either.
+  ExpectConfigDiagnostic(
+      FoldedPackageConfig(R"({"max_batch_size":4,"fold":{"enabled":true},
+                              "prefill":{"enabled":true,"dense":{"filename":"dense/model.onnx"}}})"),
+      "separate prefill.dense.filename");
+  EXPECT_TRUE(Qwen38HasSeparatePrefillSessions(
+      FoldedPackageConfig(R"({"fold":{"enabled":true},"prefill":{"enabled":true,"dense":{"filename":"dense/model.onnx"}}})")));
+}
+
+TEST(Qwen38MultiSlotConfigTest, TheUnifiedFastPrefillOfTheFoldTargetServesEverySlotCount) {
+  for (int slots = 2; slots <= Config::Model::Qwen38Graph::kMaxBatchSize; ++slots) {
+    const std::string overlay = R"({"max_batch_size":)" + std::to_string(slots) +
+                                R"(,"fold":{"enabled":true},"prefill":{"enabled":true}})";
+    EXPECT_NO_THROW(ValidateQwen38MultiSlotConfig(FoldedPackageConfig(overlay))) << slots;
+  }
+  // Naming the decoder itself as the dense graph is still the unified prefill.
+  const Config same = FoldedPackageConfig(
+      R"({"max_batch_size":2,"fold":{"enabled":true},"prefill":{"enabled":true,"dense":{"filename":"model.onnx"}}})");
+  EXPECT_FALSE(Qwen38HasSeparatePrefillSessions(same));
+  EXPECT_NO_THROW(ValidateQwen38MultiSlotConfig(same));
+}
+
+TEST(Qwen38MultiSlotConfigTest, TheSlotCountOfTheEngineSettingsIsValidatedLikeTheModelKey) {
+  Config config = FoldedPackageConfig(R"({"fold":{"enabled":true},"prefill":{"enabled":false}})");
+  EXPECT_NO_THROW(ValidateQwen38MultiSlotConfig(config));  // one slot
+  config.engine.static_batching.emplace();                 // four slots
+  ExpectConfigDiagnostic(config, "unified fast prefill");
+  config.engine.static_batching->max_batch_size = 9;
+  EXPECT_THROW(ValidateQwen38MultiSlotConfig(config), std::out_of_range);
+}
+
+// A ring-bank target keeps one bank per row count for the whole batch, so it cannot restore the accepted prefix of every slot.
+// The check names the output and runs before the engine binds anything.
+TEST(Qwen38MultiSlotConfigTest, SeveralSlotsNeedACompactStateTarget) {
+  const std::vector<std::string> compact = {"logits",
+                                            "hidden_states_out",
+                                            "next_tokens",
+                                            "validation.aggregate",
+                                            "aux_hidden_states",
+                                            "fold.tail_done",
+                                            "present_position_ids",
+                                            "present.0.key",
+                                            "present.1.recurrent_state",
+                                            "state_update.1.conv_value",
+                                            "state_update.1.recurrent_value"};
+  for (size_t slots = 1; slots <= 8; ++slots) {
+    EXPECT_NO_THROW(ValidateQwen38BatchedTargetOutputs(slots, compact)) << slots;
+  }
+
+  for (const char* ring_output : {"present_mid.0.key", "present_mid2.1.recurrent_state", "present_mid3.1.conv_state",
+                                  "head.present_mid.0.key"}) {
+    std::vector<std::string> ring = compact;
+    ring.emplace_back(ring_output);
+    EXPECT_NO_THROW(ValidateQwen38BatchedTargetOutputs(1, ring)) << ring_output;  // single-slot ring targets stay supported
+    for (size_t slots = 2; slots <= 8; ++slots) {
+      try {
+        ValidateQwen38BatchedTargetOutputs(slots, ring);
+        ADD_FAILURE() << slots << " slots accepted " << ring_output;
+      } catch (const std::runtime_error& error) {
+        const std::string message = error.what();
+        EXPECT_NE(message.find(ring_output), std::string::npos) << message;
+        EXPECT_NE(message.find(std::to_string(slots) + " request slots"), std::string::npos) << message;
+        EXPECT_NE(message.find("state_update"), std::string::npos) << message;
+      }
+    }
+  }
+
+  // No state_update.* outputs and no ring outputs: nothing restores the accepted prefix either.
+  const std::vector<std::string> plain = {"logits", "hidden_states_out", "next_tokens", "present.0.key"};
+  EXPECT_NO_THROW(ValidateQwen38BatchedTargetOutputs(1, plain));
+  EXPECT_THROW(ValidateQwen38BatchedTargetOutputs(2, plain), std::runtime_error);
+  EXPECT_THROW(ValidateQwen38BatchedTargetOutputs(2, {}), std::runtime_error);
+}
+
+// The DFlash drafter's prompt-feature buffer gives every slot Qwen38DflashPromptSlotRows rows. The warm-up of the drafter views
+// verify_rows rows of every slot from it, so a prefill.chunk below the verify width (chunk 4 against S=8) must not shrink it.
+TEST(Qwen38DflashPromptBufferTest, EverySlotOwnsAtLeastAChunkAndTheVerifyWidthOfRows) {
+  EXPECT_EQ(Qwen38DflashPromptSlotRows(4, 8), 8u);
+  EXPECT_EQ(Qwen38DflashPromptSlotRows(1, 2), 2u);
+  EXPECT_EQ(Qwen38DflashPromptSlotRows(8, 8), 8u);
+  EXPECT_EQ(Qwen38DflashPromptSlotRows(9, 8), 9u);
+  EXPECT_EQ(Qwen38DflashPromptSlotRows(2048, 8), 2048u);
+  for (const int chunk : {1, 2, 3, 4, 7, 8, 9, 16, 512, 2048}) {
+    for (int verify_rows = 2; verify_rows <= 8; ++verify_rows) {
+      const size_t slot_rows = Qwen38DflashPromptSlotRows(chunk, verify_rows);
+      EXPECT_GE(slot_rows, static_cast<size_t>(chunk));
+      EXPECT_GE(slot_rows, static_cast<size_t>(verify_rows));
+      for (size_t batch = 1; batch <= 8; ++batch) {
+        // The rows of the warm-up view (batch x verify_rows) fit the buffer (batch x slot_rows).
+        EXPECT_LE(batch * static_cast<size_t>(verify_rows), batch * slot_rows) << chunk << "/" << verify_rows << "/" << batch;
+      }
+    }
+  }
+  EXPECT_THROW(Qwen38DflashPromptSlotRows(0, 8), std::invalid_argument);
+  EXPECT_THROW(Qwen38DflashPromptSlotRows(4, 0), std::invalid_argument);
+  EXPECT_THROW(Qwen38DflashPromptSlotRows(-1, 8), std::invalid_argument);
+}
+
 TEST(Qwen38GraphConfigTest, DflashWarmupAtModelCreationHonorsTheWarmupSetting) {
   // warmup=false: the engine runs no forward while the model is created, neither the drafter's nor the target's.
   Config off;
@@ -834,6 +1044,43 @@ TEST(Qwen38GraphIdTest, RejectsRunsRowsAndPhasesBeyondTheLimits) {
   EXPECT_THROW(Qwen38GraphAnnotationId(Qwen38GraphRun::kHeadR2, 2, kQwen38GraphIdMaxPhases), std::out_of_range);
   EXPECT_THROW(Qwen38GraphAnnotationId(static_cast<Qwen38GraphRun>(kQwen38GraphRunCount), 1, 0), std::out_of_range);
   EXPECT_THROW(Qwen38GraphAnnotationId(static_cast<Qwen38GraphRun>(-1), 1, 0), std::out_of_range);
+}
+
+// The batched runs of the fold target (B = 2 .. 8 request slots) have ids of their own: none is shared with a single-slot run
+// or with a run of another width, and the ids of a single slot do not depend on the batch dimension.
+TEST(Qwen38GraphIdTest, BatchedTargetRunsHaveTheirOwnIds) {
+  std::set<int> seen;
+  for (const Qwen38GraphRun run : {Qwen38GraphRun::kTarget, Qwen38GraphRun::kHead, Qwen38GraphRun::kHeadR2}) {
+    for (int rows = 1; rows <= kQwen38GraphIdMaxRows; ++rows) {
+      for (int phase = 0; phase < kQwen38GraphIdMaxPhases; ++phase) {
+        const int single = Qwen38GraphAnnotationId(run, rows, phase);
+        EXPECT_EQ(single, Qwen38GraphAnnotationId(run, rows, phase, 1));
+        EXPECT_TRUE(seen.insert(single).second);
+      }
+    }
+  }
+  const size_t single_slot_ids = seen.size();
+  for (int batch = 2; batch <= kQwen38GraphIdMaxBatch; ++batch) {
+    for (int rows = 1; rows <= kQwen38GraphIdMaxRows; ++rows) {
+      for (int phase = 0; phase < kQwen38GraphIdMaxPhases; ++phase) {
+        const int id = Qwen38GraphAnnotationId(Qwen38GraphRun::kTarget, rows, phase, batch);
+        EXPECT_GT(id, 0);
+        EXPECT_EQ(id, Qwen38GraphAnnotationId(Qwen38GraphRun::kTarget, rows, phase, batch));
+        EXPECT_TRUE(seen.insert(id).second) << "duplicate id " << id << " for batch " << batch;
+      }
+    }
+  }
+  EXPECT_EQ(seen.size() - single_slot_ids,
+            static_cast<size_t>(kQwen38GraphIdMaxBatch - 1) * kQwen38GraphIdMaxRows * kQwen38GraphIdMaxPhases);
+}
+
+TEST(Qwen38GraphIdTest, OnlyTheTargetRunsBatchedAndTheBatchStaysWithinTheLimits) {
+  EXPECT_THROW(Qwen38GraphAnnotationId(Qwen38GraphRun::kTarget, 2, 0, 0), std::out_of_range);
+  EXPECT_THROW(Qwen38GraphAnnotationId(Qwen38GraphRun::kTarget, 2, 0, kQwen38GraphIdMaxBatch + 1), std::out_of_range);
+  EXPECT_THROW(Qwen38GraphAnnotationId(Qwen38GraphRun::kTarget, 2, 0, -1), std::out_of_range);
+  EXPECT_THROW(Qwen38GraphAnnotationId(Qwen38GraphRun::kHead, 1, 0, 2), std::out_of_range);
+  EXPECT_THROW(Qwen38GraphAnnotationId(Qwen38GraphRun::kHeadR2, 2, 0, 2), std::out_of_range);
+  EXPECT_NO_THROW(Qwen38GraphAnnotationId(Qwen38GraphRun::kHead, 1, 0, 1));
 }
 
 TEST(Qwen38GraphConfigTest, NonInheritedPrefillSessionOptionsRetainCudaProviderWithoutGraphCapture) {
