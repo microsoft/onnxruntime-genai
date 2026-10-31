@@ -166,6 +166,10 @@ struct Dflash2Drafter {
                                        size_t hidden_size, ONNXTensorElementDataType type);
 
   size_t NumDraftTokens() const { return static_cast<size_t>(config_.num_draft_tokens); }
+  // The row width and element type of the packed [token_count, aux_hidden_size] input that Propose reads, as the drafter
+  // session declares it. Propose slices the caller's tensor with this stride and does not check it against the tensor.
+  size_t AuxHiddenSize() const { return aux_hidden_size_; }
+  ONNXTensorElementDataType AuxType() const { return aux_type_; }
   size_t AdmissionMisses() const { return admission_misses_; }
 
   // A windowed drafter retains only a bounded ring, independently of the target context length.

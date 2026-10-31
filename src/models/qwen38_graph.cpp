@@ -121,6 +121,16 @@ Qwen38DflashWarmupPlan PlanQwen38DflashWarmup(bool warmup, int verify_rows, int 
                     static_cast<size_t>(kQwen38WarmupRunsPerGraph)};
 }
 
+void ValidateQwen38DflashFeatureLayout(size_t aux_width, ONNXTensorElementDataType aux_type) {
+  if (aux_width == kQwen38DflashFeatureWidth && aux_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16) return;
+  throw std::runtime_error("qwen38_graph: the DFlash drafter reads auxiliary hidden states of " + std::to_string(aux_width) +
+                           " values of ONNX element type " + std::to_string(static_cast<int>(aux_type)) +
+                           " per row, but the engine produces rows of " + std::to_string(kQwen38DflashFeatureWidth) +
+                           " bfloat16 values (ONNX element type " +
+                           std::to_string(static_cast<int>(ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16)) +
+                           "); check model.dflash2.inputs.aux_hidden_states");
+}
+
 // ------------------------------------------------------------------------------------------------
 // Engine
 // ------------------------------------------------------------------------------------------------
@@ -160,10 +170,11 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
   stage_host_ = stage_.data();
 
   // control block (the fold model binds it as input, so it exists before the target bindings)
-  // Allocated with 16 int64 words so slots [8] and [9] hold draft_1 and draft_2 for S=3 / S=4 multi-draft verify.
+  // Allocated with 16 int64 words: the fold model reads the verify tokens from them, [0] the pending token, [2] draft_0 and
+  // [8] .. [13] draft_1 .. draft_6 for the S=3 .. S=8 multi-draft verify.
   ctl_ = PlaneBuffer(plane_, 16 * sizeof(int64_t), stream_);
   ctx_commit_ = PlaneBuffer(plane_, 2 * sizeof(int64_t), stream_);
-  // ctx_a_ holds 4 contiguous 2-int64 row contexts (rows 0..3); ctx_b_ is row 1's buffer (also aliased at ctx_a_ + 16).
+  // ctx_a_ holds kMaxVerifyRows contiguous 2-int64 row contexts (rows 0 .. 7); ctx_b_ is row 1's buffer (also aliased at ctx_a_ + 16).
   ctx_a_ = PlaneBuffer(plane_, kMaxVerifyRows * 2 * sizeof(int64_t), stream_);
   ctx_b_ = PlaneBuffer(plane_, 2 * sizeof(int64_t), stream_);
   if (fold_) BuildHeadState();  // the fold model binds the head state
@@ -230,6 +241,7 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
     const size_t page_size = static_cast<size_t>(cache_shape[1]);
     dflash_ = std::make_unique<Dflash2Drafter>(
         dflash_model_, page_size, Dflash2Drafter::PoolBlocks(*model_.config_, page_size, 1), 1);
+    ValidateQwen38DflashFeatureLayout(dflash_->AuxHiddenSize(), dflash_->AuxType());
     d_dflash_prompt_ = PlaneBuffer(plane_, size_t(fast_->chunk) * kDflashWidth * 2, stream_);
     const auto& dflash_config = model_.config_->model.dflash2;
     dflash_prompt_ = Qwen38DflashPromptFeatures{
@@ -442,7 +454,11 @@ void Qwen38GraphEngine::BuildTarget() {
     num_banks_ = fold_ ? (verify_rows_ + 1) : kBanks;
     ledger_.SetNumBanks(num_banks_);
   }
-
+  // A verify step writes verify_rows_ rows past the committed length, so a store no longer than ReservedTail() could not hold
+  // even an empty request: model.qwen38_graph.kv_capacity is validated against the smallest tail (kReservedTail) only.
+  if (capacity_ <= ReservedTail())
+    throw std::runtime_error("model.qwen38_graph.kv_capacity must exceed " + std::to_string(ReservedTail()) +
+                             ", the positions a verify step of " + std::to_string(verify_rows_) + " rows keeps free");
   // Recurrent banks: flat 256-byte-aligned arenas, identical layout in every bank (the extra scratch bank is only used by S=1).
   size_t arena_bytes = 0;
   std::map<std::string, size_t> offsets;
@@ -1228,7 +1244,7 @@ void Qwen38GraphEngine::HeadPrefillFold() {
 }
 
 // Head call on (pending, last hidden) @ L with one committed row: the draft goes to ctl[2]; the head ring is rotated to the
-// verify ring phase; ctl = (pending, L, draft, ..., head length). For S=3 / S=4, chained speculative drafts d2/d3 go to ctl[8]/ctl[9].
+// verify ring phase; ctl = (pending, L, draft, ..., head length). For S=3 .. S=8, the chained speculative drafts go to ctl[8] .. ctl[13].
 void Qwen38GraphEngine::FoldFirstDraft() {
   const size_t length = ledger_.Length();
   const int bank = ledger_.Bank();
@@ -1928,7 +1944,7 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
   capabilities.supports_stop_strings = true;
   capabilities.max_slots = 1;
   capabilities.configured_max_batch_size = 1;
-  const uint64_t kv_limit = static_cast<uint64_t>(engine_->Capacity() - engine_->ReservedTail());
+  const uint64_t kv_limit = static_cast<uint64_t>(engine_->MaxSequenceLength());
   capabilities.max_request_length =
       config_->model.context_length > 0
           ? std::min<uint64_t>(kv_limit, static_cast<uint64_t>(config_->model.context_length))

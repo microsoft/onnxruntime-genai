@@ -446,6 +446,25 @@ TEST(Qwen38DecodeLedgerTest, AStepCommitsOneOrTwoRows) {
   EXPECT_EQ(ledger.Length(), 0u);
 }
 
+// The refusal names the rows the ledger does commit, whatever the verify width, not the 1 or 2 of the S=2 ring.
+TEST(Qwen38DecodeLedgerTest, TheRefusalOfAStepNamesTheRowsTheLedgerCommits) {
+  const auto message_of = [](Qwen38DecodeLedger& ledger, size_t step) {
+    try {
+      ledger.Advance(step);
+    } catch (const std::logic_error& e) {
+      return std::string{e.what()};
+    }
+    return std::string{};
+  };
+  Qwen38DecodeLedger ring{64};
+  EXPECT_NE(message_of(ring, 3).find("commits 1 to 2 rows, not 3"), std::string::npos);
+  Qwen38DecodeLedger ping_pong{64};
+  ping_pong.SetCompactPingPong(true, 8);
+  EXPECT_NE(message_of(ping_pong, 9).find("commits 1 to 8 rows, not 9"), std::string::npos);
+  EXPECT_NE(message_of(ping_pong, 0).find("commits 1 to 8 rows, not 0"), std::string::npos);
+  EXPECT_TRUE(message_of(ping_pong, 8).empty());
+}
+
 TEST(Qwen38DecodeLedgerTest, CapacityIncludesTheReservedTail) {
   Qwen38DecodeLedger ledger{10};
   EXPECT_NO_THROW(ledger.RequireRoom(10, "x"));
@@ -860,6 +879,33 @@ TEST(Qwen38GraphConfigTest, HeadR2CapturesGraphsWhenItsMergedSessionOptionsDo) {
   EXPECT_FALSE(Qwen38HeadR2CapturesGraph(eager, std::nullopt));
   EXPECT_FALSE(Qwen38HeadR2CapturesGraph(eager, unrelated));
   EXPECT_FALSE(Qwen38HeadR2CapturesGraph(eager, device_only));
+}
+
+TEST(Qwen38DflashFeatureLayoutTest, OnlyTheRowsTheEngineProducesAreAccepted) {
+  EXPECT_NO_THROW(ValidateQwen38DflashFeatureLayout(kQwen38DflashFeatureWidth, ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16));
+  EXPECT_NO_THROW(ValidateQwen38DflashFeatureLayout(12800, ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16));
+}
+
+// Propose slices the engine's feature buffer with the stride of the drafter's own input, so any other width or element type
+// would read outside every row. The message names what the drafter declares and what the engine produces.
+TEST(Qwen38DflashFeatureLayoutTest, ADrafterOfAnotherWidthOrTypeIsRefusedAtLoad) {
+  const auto message_of = [](size_t width, ONNXTensorElementDataType type) {
+    try {
+      ValidateQwen38DflashFeatureLayout(width, type);
+    } catch (const std::runtime_error& e) {
+      return std::string{e.what()};
+    }
+    return std::string{};
+  };
+  const std::string wider = message_of(kQwen38DflashFeatureWidth * 2, ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16);
+  EXPECT_NE(wider.find("25600"), std::string::npos) << wider;
+  EXPECT_NE(wider.find("12800"), std::string::npos) << wider;
+  EXPECT_FALSE(message_of(kQwen38DflashFeatureWidth - 1, ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16).empty());
+  EXPECT_FALSE(message_of(kQwen38DflashFeatureWidth + 1, ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16).empty());
+  EXPECT_FALSE(message_of(0, ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16).empty());
+  EXPECT_FALSE(message_of(kQwen38DflashFeatureWidth, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16).empty());
+  EXPECT_FALSE(message_of(kQwen38DflashFeatureWidth, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT).empty());
+  EXPECT_FALSE(message_of(kQwen38DflashFeatureWidth, ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED).empty());
 }
 
 TEST(Qwen38PromptTokenTest, AcceptsEveryIdOfTheVocabulary) {

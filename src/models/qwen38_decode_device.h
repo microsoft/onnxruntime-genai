@@ -15,9 +15,10 @@
 
 namespace Generators {
 
-// What one draft -> verify -> commit cycle published. The verify step ran the target on [pending token, draft0, (draft1, draft2)]:
-// pred0..pred3 are the target's greedy predictions at each verify row. The longest matching prefix of drafts is accepted
-// (accepted_count in 0..3; 1 + accepted_count tokens are committed, and the bank ring advances by 1 + accepted_count).
+// What one draft -> verify -> commit cycle published. The verify step ran the target on [pending token, draft0, ...,
+// draft(R-2)], R = 2 .. 8 rows: pred0..pred7 are the target's greedy predictions at each verify row (those past row R - 1 are
+// unused). The longest matching prefix of drafts is accepted (accepted_count in 0 .. R - 1; 1 + accepted_count tokens are
+// committed, and the bank ring advances by 1 + accepted_count, or by one bank when the compact replay ping-pongs between two).
 struct Qwen38CycleRecord {
   int64_t pred0{};
   int64_t pred1{};
@@ -53,7 +54,7 @@ class Qwen38DecodeDevice {
   virtual void MarkContextFailed() noexcept {}
   virtual bool ContextIsHealthy() const noexcept { return true; }
 
-  // Largest sequence (prompt + generated) the fixed KV store holds is Capacity() - kReservedTail.
+  // Largest sequence (prompt + generated) the fixed KV store holds is MaxSequenceLength() = Capacity() - ReservedTail().
   virtual int Capacity() const = 0;
   virtual bool MtpEnabled() const = 0;
 
@@ -90,14 +91,22 @@ class Qwen38DecodeDevice {
   // cleared by the next Reset().
   virtual void CheckDecodeStatus() {}
 
-  // Positions at the end of the KV store that are never filled: a verify step writes two rows past the committed length.
+  // Positions at the end of the KV store that are never filled: a verify step of R rows writes R rows past the committed length,
+  // and no device keeps fewer than kReservedTail free. A device that verifies more rows reports a larger ReservedTail().
   static constexpr int kReservedTail = 4;
   virtual int ReservedTail() const { return kReservedTail; }
+  // The tail can leave nothing (a store smaller than the rows one verify step writes): 0 then, never a wrapped negative count.
+  size_t MaxSequenceLength() const {
+    const int room = Capacity() - ReservedTail();
+    return room > 0 ? static_cast<size_t>(room) : 0;
+  }
 };
 
 // Host mirror of the device loop's committed state: how many tokens are committed and which recurrent bank of the ring the
-// next target step reads. A target step reading bank k writes its committed state into bank (k + step) % kBanks (step = rows
-// committed: 1 or 2), which is why three banks suffice: the bank being read, the mid-state (S=2) and the result.
+// next target step reads. A target step reading bank k writes its committed state into bank (k + step) % num_banks (step = rows
+// committed, 1 .. max_step), so a ring of max_step + 1 banks holds the bank being read, the mid-states of the step and the
+// result (kBanks = 3 for the S=2 verify). The compact replay (SetCompactPingPong) instead reads the committed state of one bank
+// and writes the state after the accepted rows into the other, so two banks that swap on every step suffice for any row count.
 class Qwen38DecodeLedger {
  public:
   static constexpr int kBanks = 3;
@@ -134,7 +143,8 @@ class Qwen38DecodeLedger {
   // Commits `step` rows (1 .. max_step_).
   void Advance(size_t step) {
     if (step < 1 || step > max_step_)
-      throw std::logic_error("qwen38_graph: a step commits 1 or 2 rows, not " + std::to_string(step));
+      throw std::logic_error("qwen38_graph: a step commits 1 to " + std::to_string(max_step_) + " rows, not " +
+                             std::to_string(step));
     bank_ = ping_pong_
                 ? static_cast<int>((static_cast<size_t>(bank_) + 1) % static_cast<size_t>(num_banks_))
                 : static_cast<int>((static_cast<size_t>(bank_) + step) % static_cast<size_t>(num_banks_));
