@@ -13,7 +13,7 @@
 // 3: prep and ple_rows return the CUDA error of the staged PLE path (they returned void); attach/detach were added.
 #define QWEN38_PLANE_ABI_VERSION 3
 
-// Host-registered FP8 PLE (per-layer embedding) table description, copied to the device once.
+// Host-registered PLE (per-layer embedding) table description, copied to the device once.
 typedef struct Qwen38PleParams {
   int n_heads, head_dim, heads_per_ngram, n_shards;
   long long mult[4];
@@ -21,6 +21,8 @@ typedef struct Qwen38PleParams {
   long long offset[32];
   long long shard_end[256];
   const unsigned char* shard_ptr[256];
+  // Dequantisation scale of the shard bytes, which are FP8 E4M3 when it is positive. A negative value marks INT8 shards
+  // whose scale is |scale| (QWEN38_PLANE_CAP_INT8_PLE); a library without that capability would decode them as FP8.
   float scale;
   int pad_;
   long long eos;
@@ -85,6 +87,53 @@ typedef struct Qwen38PleParams {
   X(void, transpose_f32, (void* stream, const void* src, void* dst, int n, int batch))                             \
   X(void, attach, (void))                                                                                          \
   X(void, detach, (void))
+
+// ---- Optional exports and capabilities ---------------------------------------------------------------------------------
+// A feature added after ABI version 3 does not bump the version: a library that predates it has to stay loadable for the
+// packages that do not use it. Instead the library reports the features it was built with through the optional export
+// "qwen38_plane_capabilities" (Qwen38PlaneCapabilitiesFn) as the OR of the QWEN38_PLANE_CAP_* bits below
+// (QWEN38_PLANE_ALL_CAPABILITIES for a library built from this header). The loader resolves it without requiring it, so a
+// library that predates the export reports 0, and keeps the mask in Qwen38Plane::capabilities. Wherever a package selects a
+// feature, the loader calls Qwen38Plane::RequireCapabilities(bits, what), which fails the model load with a diagnostic naming
+// the missing capability, what required it and the library path, instead of letting the package run on a library that would
+// misread it.
+//
+// To add a capability: define the next free bit, add it to QWEN38_PLANE_CAPABILITIES (the name is what the diagnostic prints;
+// the library reports every listed bit with no further change), implement it, call RequireCapabilities where the loader
+// selects it, and cover a library with and a library without the bit in the qwen38_plane tests.
+#define QWEN38_PLANE_CAP_INT8_EMBEDDING 0x1ull  // embed_gather: per-row INT8 embedding tables (any row count)
+#define QWEN38_PLANE_CAP_INT8_PLE 0x2ull        // a negative Qwen38PleParams::scale marks INT8 PLE shards
+
+// X(bit, name), in bit order.
+#define QWEN38_PLANE_CAPABILITIES(X)                   \
+  X(QWEN38_PLANE_CAP_INT8_EMBEDDING, "int8_embedding") \
+  X(QWEN38_PLANE_CAP_INT8_PLE, "int8_ple")
+
+#define QWEN38_PLANE_CAPABILITY_BIT_(bit, name) | (bit)
+#define QWEN38_PLANE_ALL_CAPABILITIES (0ull QWEN38_PLANE_CAPABILITIES(QWEN38_PLANE_CAPABILITY_BIT_))
+
+typedef unsigned long long (*Qwen38PlaneCapabilitiesFn)(void);
+
+// Layout of the embedding table that embed_gather reads.
+typedef enum Qwen38PlaneEmbeddingFormat {
+  QWEN38_PLANE_EMBEDDING_BF16 = 0,      // table_rows x width bfloat16
+  QWEN38_PLANE_EMBEDDING_INT8_ROW = 1,  // table_rows x width int8, followed by table_rows float scales (one per row)
+} Qwen38PlaneEmbeddingFormat;
+
+// Optional export "qwen38_plane_embed_gather" (QWEN38_PLANE_CAP_INT8_EMBEDDING): enqueues the gather of n rows of an
+// embedding table into `out` ([n, width] bfloat16; INT8 rows are multiplied by their row scale). `table` is device
+// addressable and holds table_rows rows of `width` elements in `format` (a Qwen38PlaneEmbeddingFormat); `ids` holds n int64
+// token ids on the device, and an id outside [0, table_rows) reads row 0. Both that bound and the start of the INT8 row
+// scales (table + table_rows * width bytes) come from table_rows, the vocabulary size of the model, so the plane has no
+// vocabulary size of its own. Returns 0, including for n <= 0 (nothing is launched), or cudaErrorInvalidValue before it
+// launches anything for table_rows <= 0, width <= 0, an unknown format, or an INT8 table whose scales would not be 4-byte
+// aligned (table_rows * width not a multiple of 4).
+typedef int (*Qwen38PlaneEmbedGatherFn)(void* stream, const void* table, long long table_rows, int format, const void* ids,
+                                        void* out, int n, int width);
+
+// Optional export "qwen38_plane_embed_rows" (void; stream, table, ids, out, rows, width): the gather of libraries that predate
+// embed_gather. It reads a BF16 table of an unknown row count, so it applies no upper bound to the ids, and it does nothing
+// for a width <= 0 (it has no INT8 mode). The loader uses it only for a BF16 table when the library has no embed_gather.
 
 // ---- Test hooks -------------------------------------------------------------------------------------------------------
 // Compiled into the library only when it is built with QWEN38_PLANE_TEST_HOOKS (the CMake option ENABLE_TESTS). They are not

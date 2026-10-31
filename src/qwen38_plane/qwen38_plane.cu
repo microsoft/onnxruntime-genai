@@ -21,12 +21,14 @@
 #include <cuda_runtime.h>
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include <memory>
 #include <mutex>
+#include <type_traits>
 #include <unordered_map>
 
 #include "qwen38_plane_abi.h"
@@ -453,13 +455,20 @@ __global__ void k_prep_staged(i64 capacity, int n_heads, int head_dim, float sca
     const int j = tid + u * blockDim.x;
     b[u] = (j < total) ? fp8_row[j] : 0;
   }
+  const bool is_int8 = (scale < 0.0f);
+  const float abs_scale = is_int8 ? -scale : scale;
 #pragma unroll
   for (int u = 0; u < 3; ++u) {
     const int j = tid + u * blockDim.x;
     if (j < total) {
-      const __half_raw hr = __nv_cvt_fp8_to_halfraw(b[u], __NV_E4M3);
-      const float f = __half2float(*reinterpret_cast<const __half*>(&hr));
-      ple_out[j] = __float2bfloat16_rn(f * scale);
+      float f;
+      if (is_int8) {
+        f = static_cast<float>(static_cast<signed char>(b[u]));
+      } else {
+        const __half_raw hr = __nv_cvt_fp8_to_halfraw(b[u], __NV_E4M3);
+        f = __half2float(*reinterpret_cast<const __half*>(&hr));
+      }
+      ple_out[j] = __float2bfloat16_rn(f * abs_scale);
     }
   }
   if (tid == 0) {
@@ -481,13 +490,20 @@ __global__ void k_ple_rows_staged(int n_heads, int head_dim, float scale, const 
     const int j = tid + u * blockDim.x;
     b[u] = (j < total) ? src[j] : 0;
   }
+  const bool is_int8 = (scale < 0.0f);
+  const float abs_scale = is_int8 ? -scale : scale;
 #pragma unroll
   for (int u = 0; u < 3; ++u) {
     const int j = tid + u * blockDim.x;
     if (j < total) {
-      const __half_raw hr = __nv_cvt_fp8_to_halfraw(b[u], __NV_E4M3);
-      const float f = __half2float(*reinterpret_cast<const __half*>(&hr));
-      out[j] = __float2bfloat16_rn(f * scale);
+      float f;
+      if (is_int8) {
+        f = static_cast<float>(static_cast<signed char>(b[u]));
+      } else {
+        const __half_raw hr = __nv_cvt_fp8_to_halfraw(b[u], __NV_E4M3);
+        f = __half2float(*reinterpret_cast<const __half*>(&hr));
+      }
+      out[j] = __float2bfloat16_rn(f * abs_scale);
     }
   }
   if (i == n - 1 && tid == 0) {
@@ -556,13 +572,21 @@ __global__ void k_prep(const PleParams* P, const i64* tok_ptr, const i64* pos_pt
       b[u] = s_src[h][s_row[h] * hd + c];
     }
   }
+  const float scale = P->scale;
+  const bool is_int8 = (scale < 0.0f);
+  const float abs_scale = is_int8 ? -scale : scale;
 #pragma unroll
   for (int u = 0; u < 3; ++u) {
     const int j = tid + u * blockDim.x;
     if (j < total) {
-      const __half_raw hr = __nv_cvt_fp8_to_halfraw(b[u], __NV_E4M3);
-      const float f = __half2float(*reinterpret_cast<const __half*>(&hr));
-      ple_out[j] = __float2bfloat16_rn(f * P->scale);
+      float f;
+      if (is_int8) {
+        f = static_cast<float>(static_cast<signed char>(b[u]));
+      } else {
+        const __half_raw hr = __nv_cvt_fp8_to_halfraw(b[u], __NV_E4M3);
+        f = __half2float(*reinterpret_cast<const __half*>(&hr));
+      }
+      ple_out[j] = __float2bfloat16_rn(f * abs_scale);
     }
   }
   if (tid == 0) {
@@ -757,13 +781,21 @@ __global__ void k_ple_rows(const PleParams* P, const i64* tokens, int n, const i
       b[u] = s_src[h][s_row[h] * hd + c];
     }
   }
+  const float scale = P->scale;
+  const bool is_int8 = (scale < 0.0f);
+  const float abs_scale = is_int8 ? -scale : scale;
 #pragma unroll
   for (int u = 0; u < 3; ++u) {
     const int j = tid + u * blockDim.x;
     if (j < total) {
-      const __half_raw hr = __nv_cvt_fp8_to_halfraw(b[u], __NV_E4M3);
-      const float f = __half2float(*reinterpret_cast<const __half*>(&hr));
-      out[j] = __float2bfloat16_rn(f * P->scale);
+      float f;
+      if (is_int8) {
+        f = static_cast<float>(static_cast<signed char>(b[u]));
+      } else {
+        const __half_raw hr = __nv_cvt_fp8_to_halfraw(b[u], __NV_E4M3);
+        f = __half2float(*reinterpret_cast<const __half*>(&hr));
+      }
+      out[j] = __float2bfloat16_rn(f * abs_scale);
     }
   }
   if (i == n - 1 && tid == 0) {
@@ -852,14 +884,32 @@ __global__ void k_quantize_kv(const __nv_bfloat16* src, uint8_t* dst, const floa
   dst[(size_t)r * dst_pitch_elems + c] = out_byte;
 }
 
-__global__ void k_embed_rows(const __nv_bfloat16* table, const i64* ids, __nv_bfloat16* out, int rows, int width) {
+// The embedding gathers read row `tok` of a table of table_rows rows (the model's vocabulary size, passed by the loader); an
+// id outside [0, table_rows) reads row 0.
+__global__ void k_embed_rows(const __nv_bfloat16* table, i64 table_rows, const i64* ids, __nv_bfloat16* out, int rows,
+                             int width) {
   const int r = blockIdx.x;
   if (r >= rows) return;
-  const i64 tok = ids[r];
+  const i64 raw_tok = ids[r];
+  const i64 tok = (raw_tok >= 0 && raw_tok < table_rows) ? raw_tok : 0;
   const uint4* src = reinterpret_cast<const uint4*>(table + (size_t)tok * width);
   uint4* dst = reinterpret_cast<uint4*>(out + (size_t)r * width);
   const int n8 = width / 8;
   for (int i = threadIdx.x; i < n8; i += blockDim.x) dst[i] = src[i];
+}
+
+__global__ void k_embed_rows_int8(const int8_t* table, const float* row_scales, i64 table_rows, const i64* ids,
+                                  __nv_bfloat16* out, int rows, int width) {
+  const int r = blockIdx.x;
+  if (r >= rows) return;
+  const i64 raw_tok = ids[r];
+  const i64 tok = (raw_tok >= 0 && raw_tok < table_rows) ? raw_tok : 0;
+  const int8_t* src = table + (size_t)tok * width;
+  const float sc = row_scales[tok];
+  __nv_bfloat16* dst = out + (size_t)r * width;
+  for (int i = threadIdx.x; i < width; i += blockDim.x) {
+    dst[i] = __float2bfloat16_rn(static_cast<float>(src[i]) * sc);
+  }
 }
 
 #ifdef _WIN32
@@ -895,6 +945,8 @@ static void release_all_staged_state_locked() {
 extern "C" {
 QWEN38_PLANE_EXPORT int qwen38_plane_abi_version(void) { return QWEN38_PLANE_ABI_VERSION; }
 QWEN38_PLANE_EXPORT int qwen38_plane_sizeof_ple_params(void) { return (int)sizeof(PleParams); }
+// Optional export: what this build implements beyond the mandatory symbols (see the capabilities in qwen38_plane_abi.h).
+QWEN38_PLANE_EXPORT unsigned long long qwen38_plane_capabilities(void) { return QWEN38_PLANE_ALL_CAPABILITIES; }
 
 // The staged tables live in this module and the module is shared by every loader of the library file, so the state is
 // released by the last loader to detach, not by whichever loader is destroyed first.
@@ -1182,8 +1234,35 @@ QWEN38_PLANE_EXPORT void qwen38_plane_quantize_kv(void* s, const void* src, void
 
 QWEN38_PLANE_EXPORT void qwen38_plane_embed_rows(void* s, const void* table, const void* ids, void* out, int rows, int width) {
   if (rows <= 0 || width <= 0) return;
-  k_embed_rows<<<rows, 256, 0, (cudaStream_t)s>>>((const __nv_bfloat16*)table, (const i64*)ids, (__nv_bfloat16*)out, rows, width);
+  // Kept for loaders that predate embed_gather: the row count of the table is unknown here, so no id is too large.
+  k_embed_rows<<<rows, 256, 0, (cudaStream_t)s>>>((const __nv_bfloat16*)table, LLONG_MAX, (const i64*)ids, (__nv_bfloat16*)out, rows,
+                                                  width);
 }
+
+QWEN38_PLANE_EXPORT int qwen38_plane_embed_gather(void* s, const void* table, long long table_rows, int format, const void* ids,
+                                                  void* out, int n, int width) {
+  if (n <= 0) return 0;
+  if (table_rows <= 0 || width <= 0) return (int)cudaErrorInvalidValue;
+  if (format == QWEN38_PLANE_EMBEDDING_INT8_ROW) {
+    // The row scales follow the int8 payload, whose size comes from the row count of the table.
+    const size_t payload_bytes = (size_t)table_rows * (size_t)width;
+    if (payload_bytes % sizeof(float) != 0) return (int)cudaErrorInvalidValue;
+    const int8_t* payload = static_cast<const int8_t*>(table);
+    const float* row_scales = reinterpret_cast<const float*>(payload + payload_bytes);
+    k_embed_rows_int8<<<n, 256, 0, (cudaStream_t)s>>>(payload, row_scales, table_rows, (const i64*)ids, (__nv_bfloat16*)out, n,
+                                                      width);
+    return 0;
+  }
+  if (format != QWEN38_PLANE_EMBEDDING_BF16) return (int)cudaErrorInvalidValue;
+  k_embed_rows<<<n, 256, 0, (cudaStream_t)s>>>((const __nv_bfloat16*)table, table_rows, (const i64*)ids, (__nv_bfloat16*)out, n,
+                                               width);
+  return 0;
+}
+
+static_assert(std::is_same<decltype(&qwen38_plane_capabilities), Qwen38PlaneCapabilitiesFn>::value,
+              "qwen38_plane_capabilities must match Qwen38PlaneCapabilitiesFn");
+static_assert(std::is_same<decltype(&qwen38_plane_embed_gather), Qwen38PlaneEmbedGatherFn>::value,
+              "qwen38_plane_embed_gather must match Qwen38PlaneEmbedGatherFn");
 
 /* ---- CUDA runtime helpers (all return cudaError_t as int, 0 = success) ---- */
 QWEN38_PLANE_EXPORT int qwen38_plane_set_device(int device) { return (int)cudaSetDevice(device); }

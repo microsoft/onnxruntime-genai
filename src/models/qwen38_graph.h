@@ -94,6 +94,15 @@ size_t EffectiveQwen38PrefillChunkTokens(const Config::Model::Qwen38Graph& q);
 // prompt is ingested by the decode graphs (prefill.enabled false), is even so that S=2 pairs stay aligned.
 void ValidateQwen38PrefillChunk(const Config::Model::Qwen38Graph& q);
 
+// Checks a model package against the plane library it names, when the model is loaded, before its weights are uploaded and
+// before any session is created: an INT8 PLE table (model.qwen38_graph.ple_table with a negative scale) needs the int8_ple
+// plane capability and an INT8 embedding table (<model.embedding.filename>.data of vocab_size x hidden_size INT8 rows and
+// one float scale per row) needs int8_embedding (qwen38_graph_plane.h). Throws a std::runtime_error naming the missing
+// capability, the file and the library when the library lacks one; BF16 and FP8 packages need no capability. Returns the
+// layout of the embedding table the model maps from that file: kNone when the package has no table of that shape.
+Qwen38EmbeddingFormat RequireQwen38PackageSupportedByPlane(const Qwen38Plane& plane, const Config& config,
+                                                           const std::filesystem::path& model_folder);
+
 // The CUDA graphs of the decode stack. ORT keeps one captured graph per annotation id in a session, so every run that
 // binds different buffers needs an id of its own: one per (row count, ring phase) for the target (decode graphs or the
 // fold model), one per (row count, ping-pong direction) for the S=1/S=2 head sessions and one per ring phase for the
@@ -466,11 +475,15 @@ struct Qwen38GraphModel : Model {
   bool IsExecutionContextHealthy() const noexcept { return context_healthy_.load(); }
   const BackendCapabilities& ResolvedBackendCapabilities() const noexcept { return resolved_capabilities_; }
 
+  // The CPU embedding table that PrepRow gathers rows from (data is null when the model has none; see embed_mapping_).
+  Qwen38EmbeddingTable EmbeddingTable() const;
+
   // Declaration order = reverse destruction order: the engine and the sessions go first, then the shared weights / constants
   // they were given, then the plane library.
   std::unique_ptr<Qwen38Plane> plane_;
   std::unique_ptr<Qwen38WeightPool> pool_;
   std::unique_ptr<Qwen38FileMapping> embed_mapping_;
+  bool embed_is_int8_{false};
   std::vector<std::unique_ptr<OrtValue>> embed_values_;
   std::unique_ptr<OrtSessionOptions> embedding_session_options_;
   std::unique_ptr<OrtSession> session_embedding_;
