@@ -1947,29 +1947,43 @@ TEST(Qwen38PlaneTest, EmbedRowsCopiesWholeRowsOfAnyWidthAndAlignment) {
   plane.stream_destroy(stream);
 }
 
+// An empty library path loads the plane built into onnxruntime-genai-cuda from beside the module that holds the loader (this
+// binary). test/CMakeLists.txt defines ORTGENAI_TEST_GENAI_CUDA_LIB_PATH exactly when that target is part of the build, and
+// stages it beside the test, so whether the test runs is decided from that, before anything is loaded: with the target in
+// the build, a library that is missing or does not load (a broken sibling lookup, a missing runtime dependency) fails the
+// test with the loader's own message instead of skipping it.
 TEST(Qwen38PlaneTest, LoadsBuiltInGenaiCudaLibraryWhenPathIsEmpty) {
+#if !defined(ORTGENAI_TEST_GENAI_CUDA_LIB_PATH)
+  GTEST_SKIP() << "this build has no onnxruntime-genai-cuda target (no USE_CUDA/USE_TRT_RTX), so there is no built-in plane";
+#else
+  const std::filesystem::path cuda_library{ORTGENAI_TEST_GENAI_CUDA_LIB_PATH};
+  std::error_code exists_error;
+  ASSERT_TRUE(std::filesystem::exists(cuda_library, exists_error))
+      << "the onnxruntime-genai-cuda target is part of this build, but " << cuda_library.string() << " is missing";
+
   std::unique_ptr<Qwen38Plane> plane;
   try {
     plane = std::make_unique<Qwen38Plane>(std::filesystem::path{});
-  } catch (const std::runtime_error& error) {
-    const std::string message = error.what();
-    if (message.find("failed to load the plane library") != std::string::npos ||
-        message.find("is not supported") != std::string::npos) {
-      GTEST_SKIP() << "onnxruntime-genai-cuda is not available: " << message;
-    }
-    FAIL() << message;
+  } catch (const std::exception& error) {
+    FAIL() << "the built " << cuda_library.string() << " did not load as the built-in plane: " << error.what();
   }
   EXPECT_EQ(plane->abi_version(), QWEN38_PLANE_ABI_VERSION);
   EXPECT_EQ(plane->sizeof_ple_params(), static_cast<int>(sizeof(Qwen38PleParams)));
+  // The loader tolerates a standalone library without the optional exports, but the library built from this tree has every
+  // one of them: each has to be in the export lists of onnxruntime-genai-cuda (src/ep/cuda).
   EXPECT_NE(plane->quantize_kv, nullptr);
   EXPECT_NE(plane->embed_rows, nullptr);
   EXPECT_NE(plane->embed_gather, nullptr);
   EXPECT_NE(plane->prep_batched, nullptr);
   EXPECT_NE(plane->set_ple_host_params, nullptr);
   EXPECT_NE(plane->unset_ple_host_params, nullptr);
+  EXPECT_NE(plane->release_ple_workspace, nullptr);
   EXPECT_NE(plane->dflash_select, nullptr);
   EXPECT_NE(plane->replay_state_updates, nullptr);
+  EXPECT_EQ(plane->capabilities, QWEN38_PLANE_ALL_CAPABILITIES);
+#endif
 }
+
 TEST(Qwen38PlaneTest, PlaneKernelsHandleEmptyAndNonMultipleOf32Dimensions) {
   const std::filesystem::path plane_lib = GetBuiltPlaneLibraryPath();
   if (!std::filesystem::exists(plane_lib)) {
