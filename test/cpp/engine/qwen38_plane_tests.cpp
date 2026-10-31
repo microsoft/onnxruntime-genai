@@ -622,7 +622,7 @@ uint32_t ConvLayoutWord(Qwen38PlaneConvStateLayout layout) { return static_cast<
 TEST(Qwen38ConvReplayDescriptorTest, TheLayoutTookTheTailPaddingOfTheDescriptor) {
   // A plane built before the field reads the descriptors at the same stride, and a descriptor that never sets the field is
   // channel-first, which is what such a plane assumes.
-  if (sizeof(void*) == 8) {
+  if constexpr (sizeof(void*) == 8) {
     EXPECT_EQ(sizeof(Qwen38StateReplayDesc), 152u);
     EXPECT_EQ(offsetof(Qwen38StateReplayDesc, kind), 144u);
     EXPECT_EQ(offsetof(Qwen38StateReplayDesc, layout), 148u);
