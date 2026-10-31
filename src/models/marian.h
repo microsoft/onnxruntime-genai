@@ -73,10 +73,13 @@ struct MarianState : State {
   MarianState(const MarianState&) = delete;
   MarianState& operator=(const MarianState&) = delete;
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
+  void ValidateRewindTo(size_t index) const override;
+  void RewindTo(size_t index) override;
 
  private:
   const MarianModel& model_;
   void UpdateRnnStates(DeviceSpan<int32_t> next_indices);
+  void SaveDecoderCheckpoint(size_t sequence_length);
   void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices, int current_length, bool search_buffers);
 
   // Encoder IOs
@@ -84,6 +87,7 @@ struct MarianState : State {
   DefaultPositionInputs encoder_attention_mask_;
   std::unique_ptr<OrtValue> encoder_outputs_;
   std::vector<std::unique_ptr<OrtValue>> cached_source_projections_;
+  std::vector<int32_t> encoder_prompt_tokens_;
 
   // Decoder IOs
   MarianInputIDs decoder_input_ids_{*this};
@@ -93,6 +97,9 @@ struct MarianState : State {
   std::unique_ptr<Tensor> rnn_states_prev_;
   std::unique_ptr<OrtValue> past_key_values_length_;
   std::unique_ptr<Tensor> rnn_states_;
+  std::vector<DeviceSpan<uint8_t>> decoder_checkpoints_;
+  size_t decoder_checkpoint_bytes_{};
+  std::vector<int64_t> decoder_checkpoint_positions_;
   std::vector<std::unique_ptr<OrtValue>> values_;
   MarianLogits logits_{*this};
 };

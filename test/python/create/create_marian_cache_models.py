@@ -22,14 +22,9 @@ def save_graph(directory, stage, inputs, outputs, nodes, constants):
         stage,
         [helper.make_tensor_value_info(*value) for value in inputs],
         [helper.make_tensor_value_info(*value) for value in outputs],
-        [
-            numpy_helper.from_array(np.asarray(value), name)
-            for name, value in constants.items()
-        ],
+        [numpy_helper.from_array(np.asarray(value), name) for name, value in constants.items()],
     )
-    model = helper.make_model(
-        graph, opset_imports=[helper.make_opsetid("", 17)], ir_version=9
-    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)], ir_version=9)
     onnx.checker.check_model(model)
     onnx.save(model, directory / f"{stage}.onnx")
 
@@ -43,6 +38,7 @@ def create_model(
     fixed=False,
     error=None,
     ragged=False,
+    recurrent=False,
 ):
     directory.mkdir(parents=True, exist_ok=True)
     batch, source = (2, 3) if fixed else ("batch", "source")
@@ -55,25 +51,17 @@ def create_model(
     }
     nodes = [
         helper.make_node("Cast", ["input_ids"], ["float_ids"], to=float_type),
-        helper.make_node(
-            "Unsqueeze", ["float_ids", "unsqueeze_axis"], ["expanded_ids"]
-        ),
-        helper.make_node(
-            "Tile", ["expanded_ids", "hidden_repeats"], ["encoder_outputs"]
-        ),
+        helper.make_node("Unsqueeze", ["float_ids", "unsqueeze_axis"], ["expanded_ids"]),
+        helper.make_node("Tile", ["expanded_ids", "hidden_repeats"], ["encoder_outputs"]),
     ]
     projection_ids = "expanded_ids"
     if ragged:
         constants["source_axis"] = np.array([1], np.int64)
         nodes[2:2] = [
             helper.make_node("Cast", ["attention_mask"], ["float_mask"], to=float_type),
-            helper.make_node(
-                "Unsqueeze", ["float_mask", "unsqueeze_axis"], ["expanded_mask"]
-            ),
+            helper.make_node("Unsqueeze", ["float_mask", "unsqueeze_axis"], ["expanded_mask"]),
             helper.make_node("Mul", ["expanded_ids", "expanded_mask"], ["masked_ids"]),
-            helper.make_node(
-                "ReduceSum", ["masked_ids", "source_axis"], ["source_sum"], keepdims=1
-            ),
+            helper.make_node("ReduceSum", ["masked_ids", "source_axis"], ["source_sum"], keepdims=1),
             helper.make_node("Add", ["expanded_ids", "source_sum"], ["context_ids"]),
         ]
         # Spread the masked source sum to valid positions so the decoder mask
@@ -98,12 +86,8 @@ def create_model(
         constants[f"repeats_{i}"] = np.array([1, 1, width], np.int64)
         nodes.extend(
             [
-                helper.make_node(
-                    "Add", [projection_ids, f"offset_{i}"], [f"offset_ids_{i}"]
-                ),
-                helper.make_node(
-                    "Tile", [f"offset_ids_{i}", f"repeats_{i}"], [f"projection_{i}"]
-                ),
+                helper.make_node("Add", [projection_ids, f"offset_{i}"], [f"offset_ids_{i}"]),
+                helper.make_node("Tile", [f"offset_ids_{i}", f"repeats_{i}"], [f"projection_{i}"]),
                 helper.make_node("Cast", [f"projection_{i}"], [name], to=dtype),
             ]
         )
@@ -129,18 +113,27 @@ def create_model(
         "one_hot_values": np.array([0, 10], np.float32),
     }
     nodes = [helper.make_node("Identity", ["rnn_states_prev"], ["rnn_states"])]
+    if recurrent:
+        constants["state_axes"] = np.array([0, 2], np.int64)
+        nodes = [
+            helper.make_node("Cast", ["input_ids"], ["state_tokens"], to=float_type),
+            helper.make_node("Unsqueeze", ["state_tokens", "state_axes"], ["state_increment"]),
+            helper.make_node("Add", ["rnn_states_prev", "state_increment"], ["rnn_states"]),
+            helper.make_node(
+                "ReduceSum",
+                ["rnn_states", "state_axes"],
+                ["recurrent_sum"],
+                keepdims=0,
+            ),
+        ]
     if ragged:
         constants["source_axis"] = np.array([1], np.int64)
         constants["unsqueeze_axis"] = np.array([2], np.int64)
         constants["eos"] = np.array(0, np.int64)
         nodes.extend(
             [
-                helper.make_node(
-                    "Cast", ["encoder_attention_mask"], ["float_mask"], to=float_type
-                ),
-                helper.make_node(
-                    "Unsqueeze", ["float_mask", "unsqueeze_axis"], ["expanded_mask"]
-                ),
+                helper.make_node("Cast", ["encoder_attention_mask"], ["float_mask"], to=float_type),
+                helper.make_node("Unsqueeze", ["float_mask", "unsqueeze_axis"], ["expanded_mask"]),
                 helper.make_node(
                     "Cast",
                     ["encoder_attention_mask"],
@@ -161,7 +154,7 @@ def create_model(
                 ),
             ]
         )
-    sums = []
+    sums = ["recurrent_sum"] if recurrent else []
     for i in range(count or 6):
         name = PREFIX + str(i)
         cache_shape = copy.copy(shape)
@@ -170,9 +163,7 @@ def create_model(
             if error == "missing-input":
                 continue
             if error == "wrong-sessions":
-                nodes.append(
-                    helper.make_node("Identity", ["encoder_hidden_states"], [name])
-                )
+                nodes.append(helper.make_node("Identity", ["encoder_hidden_states"], [name]))
                 outputs.append((name, float_type, hidden_shape))
                 continue
             if error == "type":
@@ -195,58 +186,36 @@ def create_model(
                 outputs.append((name, cache_type, cache_shape))
         else:
             constants[f"offset_{i}"] = np.array(i, np.float32)
-            nodes.append(
-                helper.make_node(
-                    "Add", ["encoder_hidden_states", f"offset_{i}"], [name]
-                )
-            )
+            nodes.append(helper.make_node("Add", ["encoder_hidden_states", f"offset_{i}"], [name]))
         constants[f"weight_{i}"] = np.array(i + 1, np.float32)
         axes = "reduce_axes"
         if len(cache_shape) == 2:
             axes = "rank_two_axes"
             constants[axes] = np.array([1], np.int64)
-        nodes.append(
-            helper.make_node("Cast", [name], [f"float_cache_{i}"], to=float_type)
-        )
+        nodes.append(helper.make_node("Cast", [name], [f"float_cache_{i}"], to=float_type))
         reduced_cache = f"float_cache_{i}"
         if ragged:
             reduced_cache = f"masked_cache_{i}"
-            nodes.append(
-                helper.make_node(
-                    "Mul", [f"float_cache_{i}", "expanded_mask"], [reduced_cache]
-                )
-            )
+            nodes.append(helper.make_node("Mul", [f"float_cache_{i}", "expanded_mask"], [reduced_cache]))
         nodes.extend(
             [
-                helper.make_node(
-                    "ReduceSum", [reduced_cache, axes], [f"sum_{i}"], keepdims=0
-                ),
-                helper.make_node(
-                    "Mul", [f"sum_{i}", f"weight_{i}"], [f"weighted_sum_{i}"]
-                ),
+                helper.make_node("ReduceSum", [reduced_cache, axes], [f"sum_{i}"], keepdims=0),
+                helper.make_node("Mul", [f"sum_{i}", f"weight_{i}"], [f"weighted_sum_{i}"]),
             ]
         )
         sums.append(f"weighted_sum_{i}")
     nodes.extend(
         [
             helper.make_node("Sum", sums, ["cache_sum"]),
-            helper.make_node(
-                "Cast", ["cache_sum"], ["cache_sum_int"], to=TensorProto.INT64
-            ),
-            helper.make_node(
-                "Add", ["cache_sum_int", "past_key_values_length"], ["step_sum"]
-            ),
+            helper.make_node("Cast", ["cache_sum"], ["cache_sum_int"], to=TensorProto.INT64),
+            helper.make_node("Add", ["cache_sum_int", "past_key_values_length"], ["step_sum"]),
             helper.make_node("Mod", ["step_sum", "modulus"], ["token_mod"]),
             helper.make_node("Add", ["token_mod", "one"], ["token"]),
-            helper.make_node(
-                "OneHot", ["token", "vocab", "one_hot_values"], ["logits"], axis=-1
-            ),
+            helper.make_node("OneHot", ["token", "vocab", "one_hot_values"], ["logits"], axis=-1),
         ]
     )
     if ragged:
-        nodes.insert(
-            -1, helper.make_node("Where", ["at_eos", "eos", "token"], ["next_token"])
-        )
+        nodes.insert(-1, helper.make_node("Where", ["at_eos", "eos", "token"], ["next_token"]))
         nodes[-1].input[0] = "next_token"
     save_graph(directory, "decoder", inputs, outputs, nodes, constants)
     config = {
@@ -282,9 +251,7 @@ def create_model(
         },
         "search": {"max_length": 12, "num_beams": 1, "do_sample": False, "top_k": 1},
     }
-    (directory / "genai_config.json").write_text(
-        json.dumps(config, indent=2) + "\n", encoding="utf-8", newline="\n"
-    )
+    (directory / "genai_config.json").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8", newline="\n")
 
 
 def main():
@@ -292,6 +259,7 @@ def main():
     parser.add_argument("--output-dir", type=Path, required=True)
     root = parser.parse_args().output_dir
     create_model(root / "dynamic")
+    create_model(root / "recurrent", recurrent=True)
     create_model(root / "static", fixed=True)
     create_model(root / "fp16", count=3, dtype=TensorProto.FLOAT16, width=2)
     create_model(root / "unsupported-type", dtype=TensorProto.INT32)

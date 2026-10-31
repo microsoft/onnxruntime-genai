@@ -800,6 +800,10 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SetRuntimeOption(OgaGenerator* g
 /**
  * \brief Rewinds the generator to the given length. This is useful when the user wants to rewind the generator to a specific length
  *        and continue generating from that point. Rewinding is not supported with beam search.
+ *        Single-row, non-beam Marian generators retain owned decoder-state checkpoints bounded by max_length.
+ *        Decoder rewinds restore the recurrent state and position; rewinding into the encoder
+ *        prompt recomputes from the retained source on the next model run. A decoder boundary
+ *        without materialized model state returns an error without truncating the token history.
  * \param[in] generator The generator to rewind to the given length.
  * \param[in] new_length The desired length in tokens after rewinding.
  * \return OgaResult containing the error message if the rewinding failed.

@@ -883,6 +883,7 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
     guidance_logits_processor_->CommitTokens(next_tokens_span);
   }
 
+  state_->generation_started_ = search_->sequences_.HasGeneratedTokens();
   auto logits = state_->Run(search_->GetSequenceLength(), next_tokens, search_->GetNextIndices());
   if (g_log.enabled && g_log.model_logits) {
     auto& stream = Log("model_logits");
