@@ -21,6 +21,7 @@
 #include <cuda_runtime.h>
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,6 +29,7 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <type_traits>
 #include <unordered_map>
 
 #include "qwen38_plane_abi.h"
@@ -965,11 +967,14 @@ __global__ void k_quantize_kv(const __nv_bfloat16* src, uint8_t* dst, const floa
   dst[(size_t)r * dst_pitch_elems + c] = out_byte;
 }
 
-__global__ void k_embed_rows(const __nv_bfloat16* table, const i64* ids, __nv_bfloat16* out, int rows, int width) {
+// The embedding gathers read row `tok` of a table of table_rows rows (the model's vocabulary size, passed by the loader); an
+// id outside [0, table_rows) reads row 0.
+__global__ void k_embed_rows(const __nv_bfloat16* table, i64 table_rows, const i64* ids, __nv_bfloat16* out, int rows,
+                             int width) {
   const int r = blockIdx.x;
   if (r >= rows) return;
   const i64 raw_tok = ids[r];
-  const i64 tok = (raw_tok >= 0 && raw_tok < 248320) ? raw_tok : 0;
+  const i64 tok = (raw_tok >= 0 && raw_tok < table_rows) ? raw_tok : 0;
   const __nv_bfloat16* src = table + (size_t)tok * width;
   __nv_bfloat16* dst = out + (size_t)r * width;
   // A row is 2 * width bytes, so the rows are 16-byte aligned for the vector copy only when width is a multiple of 8 (and the
@@ -982,12 +987,12 @@ __global__ void k_embed_rows(const __nv_bfloat16* table, const i64* ids, __nv_bf
   for (int i = n8 * 8 + threadIdx.x; i < width; i += blockDim.x) dst[i] = src[i];
 }
 
-__global__ void k_embed_rows_int8(const int8_t* table, const float* row_scales, const i64* ids, __nv_bfloat16* out,
-                                  int rows, int width) {
+__global__ void k_embed_rows_int8(const int8_t* table, const float* row_scales, i64 table_rows, const i64* ids,
+                                  __nv_bfloat16* out, int rows, int width) {
   const int r = blockIdx.x;
   if (r >= rows) return;
   const i64 raw_tok = ids[r];
-  const i64 tok = (raw_tok >= 0 && raw_tok < 248320) ? raw_tok : 0;
+  const i64 tok = (raw_tok >= 0 && raw_tok < table_rows) ? raw_tok : 0;
   const int8_t* src = table + (size_t)tok * width;
   const float sc = row_scales[tok];
   __nv_bfloat16* dst = out + (size_t)r * width;
@@ -1094,6 +1099,8 @@ static inline void ClearParkedLaunchStatusForStream(cudaStream_t stream) {
 extern "C" {
 QWEN38_PLANE_EXPORT int qwen38_plane_abi_version(void) { return QWEN38_PLANE_ABI_VERSION; }
 QWEN38_PLANE_EXPORT int qwen38_plane_sizeof_ple_params(void) { return (int)sizeof(PleParams); }
+// Optional export: what this build implements beyond the mandatory symbols (see the capabilities in qwen38_plane_abi.h).
+QWEN38_PLANE_EXPORT unsigned long long qwen38_plane_capabilities(void) { return QWEN38_PLANE_ALL_CAPABILITIES; }
 
 // The staged tables live in this module and the module is shared by every loader of the library file, so the state is
 // released by the last loader to detach, not by whichever loader is destroyed first.
@@ -1436,20 +1443,40 @@ QWEN38_PLANE_EXPORT void qwen38_plane_quantize_kv(void* s, const void* src, void
 }
 
 QWEN38_PLANE_EXPORT void qwen38_plane_embed_rows(void* s, const void* table, const void* ids, void* out, int rows, int width) {
-  if (rows <= 0 || width == 0) return;
+  if (rows <= 0 || width <= 0) return;
+  // Kept for loaders that predate embed_gather: the row count of the table is unknown here, so no id is too large.
   BeginLaunch();
-  if (width < 0) {
-    // A negative width selects the per-row symmetric INT8 table whose float row scales follow the int8 payload.
-    const int actual_width = -width;
-    const int8_t* table_i8 = static_cast<const int8_t*>(table);
-    const float* scales_f32 = reinterpret_cast<const float*>(table_i8 + 248320ULL * static_cast<size_t>(actual_width));
-    k_embed_rows_int8<<<rows, 256, 0, (cudaStream_t)s>>>(table_i8, scales_f32, (const i64*)ids, (__nv_bfloat16*)out, rows, actual_width);
-    ParkLaunchStatus();
-    return;
-  }
-  k_embed_rows<<<rows, 256, 0, (cudaStream_t)s>>>((const __nv_bfloat16*)table, (const i64*)ids, (__nv_bfloat16*)out, rows, width);
+  k_embed_rows<<<rows, 256, 0, (cudaStream_t)s>>>((const __nv_bfloat16*)table, LLONG_MAX, (const i64*)ids, (__nv_bfloat16*)out, rows,
+                                                  width);
   ParkLaunchStatus((cudaStream_t)s);
 }
+
+QWEN38_PLANE_EXPORT int qwen38_plane_embed_gather(void* s, const void* table, long long table_rows, int format, const void* ids,
+                                                  void* out, int n, int width) {
+  if (n <= 0) return 0;
+  if (table_rows <= 0 || width <= 0) return (int)cudaErrorInvalidValue;
+  if (format == QWEN38_PLANE_EMBEDDING_INT8_ROW) {
+    // The row scales follow the int8 payload, whose size comes from the row count of the table.
+    const size_t payload_bytes = (size_t)table_rows * (size_t)width;
+    if (payload_bytes % sizeof(float) != 0) return (int)cudaErrorInvalidValue;
+    const int8_t* payload = static_cast<const int8_t*>(table);
+    const float* row_scales = reinterpret_cast<const float*>(payload + payload_bytes);
+    BeginLaunch();
+    k_embed_rows_int8<<<n, 256, 0, (cudaStream_t)s>>>(payload, row_scales, table_rows, (const i64*)ids, (__nv_bfloat16*)out, n,
+                                                      width);
+    return LaunchStatus();
+  }
+  if (format != QWEN38_PLANE_EMBEDDING_BF16) return (int)cudaErrorInvalidValue;
+  BeginLaunch();
+  k_embed_rows<<<n, 256, 0, (cudaStream_t)s>>>((const __nv_bfloat16*)table, table_rows, (const i64*)ids, (__nv_bfloat16*)out, n,
+                                               width);
+  return LaunchStatus();
+}
+
+static_assert(std::is_same<decltype(&qwen38_plane_capabilities), Qwen38PlaneCapabilitiesFn>::value,
+              "qwen38_plane_capabilities must match Qwen38PlaneCapabilitiesFn");
+static_assert(std::is_same<decltype(&qwen38_plane_embed_gather), Qwen38PlaneEmbedGatherFn>::value,
+              "qwen38_plane_embed_gather must match Qwen38PlaneEmbedGatherFn");
 
 /* ---- CUDA runtime helpers (all return cudaError_t as int, 0 = success) ---- */
 QWEN38_PLANE_EXPORT int qwen38_plane_set_device(int device) { return (int)cudaSetDevice(device); }

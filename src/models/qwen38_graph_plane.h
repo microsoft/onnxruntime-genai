@@ -23,6 +23,14 @@ namespace Generators {
 // (`libfoo.dll` or `foo.dll`) when present alongside `path`; otherwise returns `path` unchanged.
 std::filesystem::path ResolveWindowsSharedLibraryPath(const std::filesystem::path& path);
 
+// A CPU embedding table that the plane gathers rows from (the model's embed_tokens, mapped from <embedding>.data).
+struct Qwen38EmbeddingTable {
+  const void* data{};  // device-addressable base of the table
+  long long rows{};    // rows in the table: the model's vocabulary size
+  int width{};         // elements per row: the model's hidden size
+  bool int8{};         // per-row INT8 payload followed by one float scale per row; bfloat16 rows otherwise
+};
+
 // The loaded plane library: one function pointer per entry of QWEN38_PLANE_FUNCTIONS, named like the entry.
 //
 // The destructor detaches from the module, which stops and joins the threads the module started and releases the staged
@@ -43,22 +51,44 @@ struct Qwen38Plane {
   // Throws std::runtime_error naming `what` when `error` (a cudaError_t) is not 0.
   void Check(int error, const char* what) const;
 
+  // Throws std::runtime_error when the library lacks any of the QWEN38_PLANE_CAP_* bits in `required`. The message reads
+  // "<required_by> requires the plane capability <names>, which the plane library <path> does not provide (it reports: ...)",
+  // with `required_by` naming what the package selected (e.g. "the INT8 PLE table <path>"), so a package that needs a newer
+  // library fails when the model is loaded instead of running on a library that would misread it.
+  void RequireCapabilities(unsigned long long required, const std::string& required_by) const;
+
+  // Gathers `n` rows of `table` for the int64 token ids at `ids` into the bfloat16 `out` ([n, table.width]) on `stream`. Uses
+  // embed_gather, which takes the row count of the table; a library without it only has the legacy BF16 embed_rows, and
+  // throws (naming the int8_embedding capability) for an INT8 table.
+  void EmbedRows(void* stream, const Qwen38EmbeddingTable& table, const void* ids, void* out, int n) const;
+
 #define QWEN38_PLANE_DECLARE(ret, name, args) ret(*name) args{};
   QWEN38_PLANE_FUNCTIONS(QWEN38_PLANE_DECLARE)
 #undef QWEN38_PLANE_DECLARE
+  // Optional exports: null in a library that predates them (see "Optional exports and capabilities" in the ABI header).
   void (*quantize_kv)(void* stream, const void* src, void* dst, const void* scale, int rows, int src_pitch_elems,
                       int dst_pitch_elems, int mode){};
   void (*embed_rows)(void* stream, const void* table, const void* ids, void* out, int rows, int width){};
+  Qwen38PlaneEmbedGatherFn embed_gather{};
   void (*set_ple_host_params)(const void* params){};
   void (*unset_ple_host_params)(const void* params){};
   // Drops the staged PLE tables of the whole module, i.e. of every loader of the same library file, not just this one.
   // The destructor does not call it: it detaches from the module, which releases that state when the last loader goes.
   void (*release_ple_workspace)(void){};
 
+  // The QWEN38_PLANE_CAP_* bits the library reports; 0 for a library that predates qwen38_plane_capabilities.
+  unsigned long long capabilities{};
+  // The file the library was loaded from (named by the capability diagnostics).
+  std::string library_path;
+
  private:
   void* handle_{};   // the module; never released once the library is attached (see above)
   bool attached_{};  // attach() has been called and detach() has not
 };
+
+// The names of the QWEN38_PLANE_CAP_* bits set in `mask`, comma separated ("none" for 0); bits this build has no name for
+// are listed as one hexadecimal value.
+std::string DescribeQwen38PlaneCapabilities(unsigned long long mask);
 
 // Zero-initialised device allocation owned by RAII.
 struct PlaneBuffer {
@@ -111,6 +141,28 @@ struct Qwen38PleDescription {
 // Reads a "qwen38_ple_table 1" description. Throws std::runtime_error on a wrong header, a malformed table, or a shard
 // path that is absolute or contains "..": shards must live inside the model folder.
 Qwen38PleDescription ParseQwen38PleDescription(const std::filesystem::path& table_path);
+
+// Throws std::runtime_error, naming the missing int8_ple capability and the library, when the shards of the table are INT8
+// (a negative scale) and `plane` would decode them as FP8. Checked before any shard is mapped.
+void RequireQwen38PleTableSupported(const Qwen38Plane& plane, const Qwen38PleDescription& description,
+                                    const std::filesystem::path& table_path);
+
+// The layout of a CPU embedding table file (<model.embedding.filename>.data).
+enum class Qwen38EmbeddingFormat {
+  kNone,  // neither layout below: nothing may gather rows from the file
+  kBf16,  // rows x width bfloat16
+  kInt8,  // rows x width int8, followed by one float scale per row (per-row symmetric)
+};
+
+// The size in bytes of a `rows` x `width` table in `format` (0 for kNone).
+size_t Qwen38EmbeddingTableBytes(Qwen38EmbeddingFormat format, long long rows, long long width);
+
+// Decides the layout of the embedding table file `table_path` of `file_bytes` bytes for a vocabulary of `rows` and a hidden
+// size of `width`: bfloat16 when the file holds that many bytes, INT8 when it holds the INT8 layout, otherwise kNone.
+// Throws std::runtime_error, naming the missing int8_embedding capability and the library, when the table is INT8 and
+// `plane` cannot gather it. The model constructor calls it when the table is mapped, i.e. at model load.
+Qwen38EmbeddingFormat SelectQwen38EmbeddingFormat(const Qwen38Plane& plane, const std::filesystem::path& table_path,
+                                                  size_t file_bytes, long long rows, long long width);
 
 // Parsed "qwen38_weights_pool 1" manifest: the initializers that several sessions of the stack share, as tensors stored in
 // files of the model folder, plus the (session label -> initializer name, pool id) lists. Kept apart from the weight pool
