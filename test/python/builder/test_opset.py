@@ -59,7 +59,6 @@ def graph_attrs(tmp_path):
 def test_all_graph_builders_default_to_opset_24(tmp_path):
     model = _builder(tmp_path)
     drafter = BlockDrafterBuilder()
-    drafter.make_graph("test_drafter", "/constants")
     expected = {"ai.onnx": 24, "com.microsoft": 1, "ir_version": 10, "producer_name": "onnxruntime-genai"}
     for builder in (model, drafter):
         assert builder.graph_attrs == expected
@@ -74,8 +73,6 @@ def test_graph_attrs_are_per_instance(tmp_path):
     second = _builder(tmp_path)
     first_drafter = BlockDrafterBuilder()
     second_drafter = BlockDrafterBuilder()
-    first_drafter.make_graph("first", "/constants")
-    second_drafter.make_graph("second", "/constants")
     first.graph_attrs["ai.onnx"] = 25
     first_drafter.graph_attrs["ai.onnx"] = 26
     assert second.graph_attrs["ai.onnx"] == 24
