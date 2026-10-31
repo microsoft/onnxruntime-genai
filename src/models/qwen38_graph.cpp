@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <charconv>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -21,6 +22,7 @@
 #include <random>
 #include <sstream>
 #include <stdexcept>
+#include <system_error>
 #include <thread>
 #if defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
@@ -2885,32 +2887,72 @@ Qwen38EmbeddingFormat RequireQwen38PackageSupportedByPlane(const Qwen38Plane& pl
                                      config.model.vocab_size, config.model.decoder.hidden_size);
 }
 
+namespace {
+
+// A byte count the way the runtime reads one: decimal digits only (no sign, white space or trailing text), not empty,
+// and within 64 bits. std::stoull skips leading white space, takes a sign and ignores whatever follows the digits.
+std::optional<uint64_t> ParseQwen38ByteCount(const std::string& text) {
+  if (text.empty()) return std::nullopt;
+  const char* const end = text.data() + text.size();
+  uint64_t bytes = 0;
+  const auto [last, error] = std::from_chars(text.data(), end, bytes, 10);
+  if (error != std::errc{} || last != end) return std::nullopt;
+  return bytes;
+}
+
+// `bytes` moved by `delta` (of either sign) without wrapping around: the runtime accepts budgets up to UINT64_MAX.
+uint64_t AddBytesSaturating(uint64_t bytes, int64_t delta) {
+  constexpr uint64_t kMaxBytes = std::numeric_limits<uint64_t>::max();
+  if (delta >= 0) {
+    const uint64_t increase = static_cast<uint64_t>(delta);
+    return bytes > kMaxBytes - increase ? kMaxBytes : bytes + increase;
+  }
+  const uint64_t decrease = static_cast<uint64_t>(-delta);
+  return bytes < decrease ? 0 : bytes - decrease;
+}
+
+}  // namespace
+
 Qwen38MoeOffloadSettings ParseQwen38MoeOffloadSettings(const std::vector<Config::NamedString>& config_entries) {
-  const auto parse_bytes = [](const std::string& text, uint64_t& bytes) {
-    try {
-      bytes = std::stoull(text);
-      return true;
-    } catch (const std::exception&) {
-      return false;
-    }
+  // The session options keep the last value of a key that is configured more than once (overlays append entries),
+  // so that is the value that counts here as well.
+  const auto last_value = [&config_entries](const char* key) -> const std::string* {
+    const auto entry = std::find_if(config_entries.rbegin(), config_entries.rend(),
+                                    [key](const Config::NamedString& candidate) { return candidate.first == key; });
+    return entry == config_entries.rend() ? nullptr : &entry->second;
   };
 
   Qwen38MoeOffloadSettings settings;
-  for (const auto& [key, value] : config_entries) {
-    if (key == "session.moe.offload.mode" &&
-        (value == "required" || value == "auto" || value == "1" || value == "on")) {
-      settings.enabled = true;
-      if (value != "auto") settings.constrained = true;
-    } else if (key == "session.moe.offload.device_expert_bytes" && value != "auto" && value != "0") {
+  const std::string* mode = last_value("session.moe.offload.mode");
+  if (mode != nullptr && (*mode == "required" || *mode == "auto" || *mode == "1" || *mode == "on")) {
+    settings.enabled = true;
+    if (*mode != "auto") settings.constrained = true;
+  }
+
+  // "auto" and a count of 0 leave the expert cache to the runtime. A malformed value still asks for a constrained
+  // offload (it is an attempt to budget the experts), and the runtime reports it.
+  const std::string* expert_bytes = last_value("session.moe.offload.device_expert_bytes");
+  if (expert_bytes != nullptr && *expert_bytes != "auto") {
+    const std::optional<uint64_t> bytes = ParseQwen38ByteCount(*expert_bytes);
+    if (!bytes.has_value() || *bytes != 0) {
       settings.enabled = true;
       settings.constrained = true;
-      if (parse_bytes(value, settings.device_expert_bytes)) settings.has_device_expert_bytes = true;
-    } else if (key == "session.moe.offload.source_root" && !value.empty()) {
-      settings.has_source_root = true;
-    } else if (key == "session.moe.offload.reserve_device_bytes" && !value.empty() && value != "auto") {
-      settings.has_reserve_device_bytes = true;
-      parse_bytes(value, settings.reserve_device_bytes);
+      settings.has_device_expert_bytes = bytes.has_value();
+      settings.malformed_device_expert_bytes = !bytes.has_value();
+      settings.device_expert_bytes = bytes.value_or(0);
     }
+  }
+
+  const std::string* source_root = last_value("session.moe.offload.source_root");
+  settings.has_source_root = source_root != nullptr && !source_root->empty();
+
+  // Only "auto" takes the default reserve; the empty string is malformed like any other text that is not a byte count.
+  const std::string* reserve_bytes = last_value("session.moe.offload.reserve_device_bytes");
+  if (reserve_bytes != nullptr && *reserve_bytes != "auto") {
+    const std::optional<uint64_t> bytes = ParseQwen38ByteCount(*reserve_bytes);
+    settings.has_reserve_device_bytes = bytes.has_value();
+    settings.malformed_reserve_device_bytes = !bytes.has_value();
+    if (bytes.has_value()) settings.reserve_device_bytes = *bytes;
   }
   return settings;
 }
@@ -2936,24 +2978,27 @@ std::vector<Config::NamedString> Qwen38MoeOffloadSessionEntries(const Qwen38MoeO
                                                                 bool adaptive_context_budget) {
   constexpr int64_t kReferenceKvCapacity = 33032;  // the 32K-context target graph
   constexpr int64_t kKvBytesPerToken = 16384;
-  constexpr int64_t kMinDeviceExpertBytes = 1000000000;
-  constexpr int64_t kMinReserveDeviceBytes = 2147483648;
+  constexpr uint64_t kMinDeviceExpertBytes = 1000000000ULL;
+  constexpr uint64_t kMinReserveDeviceBytes = 2147483648ULL;
 
   std::vector<Config::NamedString> entries;
   if (!settings.enabled) return entries;
   if (!settings.has_source_root) entries.emplace_back("session.moe.offload.source_root", model_root.string());
 
+  // A malformed budget gets no entry, adapted or not: it stays as configured and the runtime rejects it by name.
   const int64_t delta_kv_bytes = (static_cast<int64_t>(kv_capacity) - kReferenceKvCapacity) * kKvBytesPerToken;
   if (adaptive_context_budget && delta_kv_bytes != 0) {
     if (settings.has_device_expert_bytes) {
-      const int64_t device_expert_bytes =
-          std::max(kMinDeviceExpertBytes, static_cast<int64_t>(settings.device_expert_bytes) - delta_kv_bytes);
+      const uint64_t device_expert_bytes =
+          std::max(kMinDeviceExpertBytes, AddBytesSaturating(settings.device_expert_bytes, -delta_kv_bytes));
       entries.emplace_back("session.moe.offload.device_expert_bytes", std::to_string(device_expert_bytes));
     }
-    const int64_t reserve_device_bytes =
-        std::max(kMinReserveDeviceBytes, static_cast<int64_t>(settings.reserve_device_bytes) + delta_kv_bytes);
-    entries.emplace_back("session.moe.offload.reserve_device_bytes", std::to_string(reserve_device_bytes));
-  } else if (!settings.has_reserve_device_bytes) {
+    if (!settings.malformed_reserve_device_bytes) {
+      const uint64_t reserve_device_bytes =
+          std::max(kMinReserveDeviceBytes, AddBytesSaturating(settings.reserve_device_bytes, delta_kv_bytes));
+      entries.emplace_back("session.moe.offload.reserve_device_bytes", std::to_string(reserve_device_bytes));
+    }
+  } else if (!settings.has_reserve_device_bytes && !settings.malformed_reserve_device_bytes) {
     entries.emplace_back("session.moe.offload.reserve_device_bytes", std::to_string(settings.reserve_device_bytes));
   }
   return entries;

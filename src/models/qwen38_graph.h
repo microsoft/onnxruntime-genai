@@ -347,15 +347,23 @@ void ValidateQwen38CacheShapes(const std::vector<Qwen38CacheInput>& inputs, int 
 // compatibility with ValidateQwen38CacheShapes.
 int64_t ResolveQwen38GraphKvCapacity(const std::vector<Qwen38CacheInput>& inputs);
 
-// MoE expert offload (ORT QMoE offload v4) as requested by the decoder's "session.moe.offload.*" config entries.
+// MoE expert offload (ORT QMoE offload v4) as requested by the decoder's "session.moe.offload.*" config entries. A key
+// that is configured more than once counts with its last value, the one the session options end up with. The byte
+// counts are read the way the runtime reads them: decimal digits only (no sign, white space or trailing text), not
+// empty, within 64 bits.
 struct Qwen38MoeOffloadSettings {
   static constexpr uint64_t kDefaultReserveDeviceBytes = 6442450944ULL;  // 6 GiB
 
   bool enabled{false};      // mode is required/auto/1/on, or device_expert_bytes is explicit
   bool constrained{false};  // mode is required/1/on, or device_expert_bytes is explicit: the experts must not all stay on the device
   bool has_source_root{false};
-  bool has_reserve_device_bytes{false};
-  bool has_device_expert_bytes{false};
+  bool has_reserve_device_bytes{false};  // a valid byte count is configured, reserve_device_bytes holds it
+  bool has_device_expert_bytes{false};   // the same for device_expert_bytes, unless it is "auto" or 0 (runtime's call)
+  // The entry is there but is not a byte count (for the reserve: nor "auto"). It is left as configured, so that the
+  // runtime rejects it by name; it is never replaced by a default or an adapted budget. The byte count of the
+  // setting is not meaningful then.
+  bool malformed_device_expert_bytes{false};
+  bool malformed_reserve_device_bytes{false};
   uint64_t device_expert_bytes{0};
   uint64_t reserve_device_bytes{kDefaultReserveDeviceBytes};
 };
@@ -374,8 +382,10 @@ std::optional<Qwen38ContextTier> Qwen38ContextTierForTarget(const std::string& t
 // "session.moe.offload.*" entries added to the target session once the KV capacity of the selected target graph is known:
 // the model folder as the default source_root, and the reserve (and explicit expert) budgets. With
 // `adaptive_context_budget` the budgets follow the KV cache relative to the 32K-context reference: memory a longer
-// context needs is taken from the expert cache, memory a shorter context frees is given to it. Empty unless offload is
-// enabled.
+// context needs is taken from the expert cache, memory a shorter context frees is given to it (the budgets are 64-bit
+// and saturate instead of wrapping). Empty unless offload is enabled. A budget that is configured but malformed gets
+// no entry in any case, so it stays as configured and the runtime rejects it: a configuration error is never turned
+// into a valid default or adapted value.
 std::vector<Config::NamedString> Qwen38MoeOffloadSessionEntries(const Qwen38MoeOffloadSettings& settings,
                                                                 const std::filesystem::path& model_root, int kv_capacity,
                                                                 bool adaptive_context_budget);
