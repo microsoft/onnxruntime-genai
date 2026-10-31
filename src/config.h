@@ -793,8 +793,10 @@ struct Config {
       // session used for the prompt context (pair calls) and the first draft.
       struct Fold {
         bool enabled{false};
+        std::optional<int> legacy_target_graph_id;
         struct HeadR2 {
           std::string filename;
+          std::optional<int> legacy_graph_id;
           std::optional<SessionOptions> session_options;
         } head_r2;
       } fold;
