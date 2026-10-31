@@ -75,6 +75,30 @@ typedef struct Qwen38StateReplayDesc {
 #define QWEN38_PLANE_MAX_REPLAY_KEY_WIDTH 256  // GatedDeltaNet key width: a row of the key tile (a multiple of 4: float4 loads)
 #define QWEN38_PLANE_REPLAY_ROWS_PER_BLOCK 32  // value rows of a GatedDeltaNet state one thread block of k_replay_gdn replays
 
+// Optional exports "qwen38_plane_dflash_select" and "qwen38_plane_replay_state_updates": a library that predates them lacks the
+// symbols, the loader leaves the pointers null, and the host then selects the draft chain itself and refuses compact state
+// updates. Both return 0 or a cudaError_t, including the error of their own launch; cudaErrorInvalidValue comes before anything
+// is launched, for the arguments named below.
+//
+// dflash_select walks the lattice of the drafter on the device: step s takes the best-scoring of the top_k candidates of the
+// branch that step s - 1 chose (branch 0 for s = 0) and writes the token id to control word {2, 8, 9, 10, 11, 12, 13}[s]. The
+// candidates are [drafts, top_k] int32 and the scores [drafts, top_k, top_k] float (the row of step s is that of the branch
+// chosen before it); a tie takes the first of the best. drafts has to be in [1, 7], top_k at least 1, no pointer null.
+typedef int (*Qwen38PlaneDflashSelectFn)(void* stream, const void* candidates, const void* scores, void* control, int drafts,
+                                         int top_k);
+
+// replay_state_updates keeps the first kept_count (1 .. QWEN38_PLANE_MAX_REPLAY_TRANSITIONS) transitions of the state updates
+// of a verify step. descs holds fast_count GatedDeltaNet descriptors (kind 2) followed by generic_count descriptors of the
+// other kinds (1 = CausalConvWithState, 4 = PackedSparseAttentionIndexer; the Snapshot kind 3 of the host is not replayed by
+// the plane). Every GatedDeltaNet descriptor gets fast_blocks_per_descriptor thread blocks, which have to cover its
+// heads * ceil(state_width / QWEN38_PLANE_REPLAY_ROWS_PER_BLOCK) blocks. kept_count replaces the one of every descriptor.
+// Negative counts, a missing block budget for GatedDeltaNet descriptors, a null descs and a kept_count out of range are
+// refused: a call that would skip its work and report success would leave the destination state stale. What the descriptors
+// hold lives on the device and cannot be checked by the plane; the host validates it while it builds them
+// (ValidateQwen38ReplayDescriptor).
+typedef int (*Qwen38PlaneReplayStateUpdatesFn)(void* stream, const void* descs, int fast_count, int generic_count,
+                                               int fast_blocks_per_descriptor, int kept_count);
+
 // X(return type, name, parameter list). The exported symbol is "qwen38_plane_" + name. `stream` is a cudaStream_t.
 // CUDA runtime helpers return the cudaError_t as int (0 = success).
 //

@@ -3096,18 +3096,6 @@ TEST(Qwen38PlaneTest, PreparesEveryRowOfAFoldStepInOneCallForADeviceTable) {
 
 namespace {
 
-// The replay kernels add with __fadd_rn and multiply with __fmul_rn, which round every operation to single precision and never
-// contract into an fma. The reference rounds every operation too: the volatile stores keep the compiler from fusing a * b + c * d.
-float ExactMultiply(float a, float b) {
-  volatile float product = a * b;
-  return product;
-}
-
-float ExactAdd(float a, float b) {
-  volatile float sum = a + b;
-  return sum;
-}
-
 // A reproducible stream of pseudo-random words (xorshift32): the same on every platform, unlike the standard distributions.
 class WordStream {
  public:
@@ -3306,8 +3294,11 @@ struct GatedDeltaNetShape {
   int capacity;
 };
 
-// The state after the first `kept` transitions: s = s * decay + key * delta for every element, in that order of rounding.
-// Value head h reads key head h * heads_k / heads_v, so the value heads that share a key head are consecutive.
+// The state after the first `kept` transitions of every element: the state is decayed with one rounded multiplication and the
+// key times the delta is then added with one fused multiply-add, s = fma(key, delta, s * decay). That is how ORT's recurrent
+// kernel, the CUDA EP kernel and the CPU replay (state_update_replay.h) round, so the replayed state is bit-identical to the
+// one the unfused decode step would have produced. A separately rounded key * delta would differ in the last bit of about one
+// element in five. Value head h reads key head h * heads_k / heads_v, so the value heads that share a key head are consecutive.
 std::vector<float> ReplayGatedDeltaNetOnTheHost(const GatedDeltaNetShape& shape, const std::vector<float>& state,
                                                 const std::vector<float>& capsule, int kept) {
   const size_t capacity = static_cast<size_t>(shape.capacity);
@@ -3326,9 +3317,8 @@ std::vector<float> ReplayGatedDeltaNetOnTheHost(const GatedDeltaNetShape& shape,
         const size_t index = (head * width_v + v) * width_k + k;
         float s = state[index];
         for (size_t t = 0; t < static_cast<size_t>(kept); ++t) {
-          const float decayed = ExactMultiply(s, decay[t * heads_v + head]);
-          const float written = ExactMultiply(key[(t * heads_k + key_head) * width_k + k], delta[(t * heads_v + head) * width_v + v]);
-          s = ExactAdd(decayed, written);
+          const float decayed = s * decay[t * heads_v + head];
+          s = std::fma(key[(t * heads_k + key_head) * width_k + k], delta[(t * heads_v + head) * width_v + v], decayed);
         }
         next[index] = s;
       }
@@ -3399,6 +3389,12 @@ class GatedDeltaNetState final : public ReplayedState {
   }
 
   void ResetDestination() override { device_.Fill(destination_, 0xAB); }
+
+  // After ResetDestination: the destination still holds the fill, i.e. no replay wrote into it.
+  void ExpectDestinationUntouched() {
+    ExpectSameElements(std::vector<uint32_t>(state_.size(), 0xABABABABu),
+                       BitsOf(device_.Download<float>(destination_, state_.size())), "the destination of a refused replay");
+  }
 
   void ExpectReplayedAfter(int kept) override {
     ExpectSameElements(BitsOf(ReplayGatedDeltaNetOnTheHost(shape_, state_, capsule_, kept)),
@@ -3677,6 +3673,41 @@ TEST_F(Qwen38PlaneReplayTest, RejectsAnAcceptanceLengthTheKernelsCannotReplay) {
         << "kept " << kept;
   }
   EXPECT_EQ(plane_->replay_state_updates(stream, nullptr, 1, 0, state.Blocks(), 1), kCudaErrorInvalidValue);
+}
+
+// A call that would skip its launches and still report success leaves the destination state stale for the next cycle, so counts
+// and a block budget that cannot describe the descriptors are refused, and they leave the destination untouched.
+TEST_F(Qwen38PlaneReplayTest, RejectsCountsThatWouldSilentlySkipTheReplay) {
+  ASSERT_TRUE(plane_->replay_state_updates != nullptr) << "the plane library has no replay_state_updates";
+  KernelTestDevice device{*plane_};
+  GatedDeltaNetState state{device, {2, 1, 32, 4, 2}, 7};
+  const PlaneBuffer descriptors = device.Upload(std::vector<Qwen38StateReplayDesc>{state.Descriptor()});
+  void* stream = device.stream();
+  const int blocks = state.Blocks();
+  struct Call {
+    int fast_count;
+    int generic_count;
+    int blocks_per_descriptor;
+  };
+  // Counts that cannot describe the descriptors: GatedDeltaNet descriptors without a block budget, and negative counts.
+  const Call refused[] = {
+      {1, 0, 0},
+      {1, 0, -1},
+      {-1, 0, blocks},
+      {0, -1, blocks},
+      {-1, -1, blocks},
+  };
+  for (const Call& call : refused) {
+    state.ResetDestination();
+    EXPECT_EQ(plane_->replay_state_updates(stream, descriptors.data(), call.fast_count, call.generic_count,
+                                           call.blocks_per_descriptor, 1),
+              kCudaErrorInvalidValue)
+        << call.fast_count << " fast, " << call.generic_count << " generic, " << call.blocks_per_descriptor << " blocks";
+    state.ExpectDestinationUntouched();
+  }
+  // Without GatedDeltaNet descriptors the block budget is not used, and a call with nothing to replay is a no-op.
+  EXPECT_EQ(plane_->replay_state_updates(stream, descriptors.data(), 0, 0, 0, 1), 0);
+  ReplayAndExpect(*plane_, device, {&state}, 1);
 }
 
 // The error of an earlier call that nobody read (here a memset of a null pointer) is not the error of the launch that follows:

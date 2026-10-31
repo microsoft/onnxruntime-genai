@@ -679,8 +679,9 @@ __global__ void k_prep(const PleParams* P, const i64* tok_ptr, const i64* pos_pt
   }
 }
 
-__global__ void k_prep_fold(const PleParams* P, const i64* ctx_in, i64* ctx_a, i64* input_ids, i64* position_ids,
-                            int* committed, i64* past_pos, __nv_bfloat16* ple_out, i64* state) {
+__global__ void __launch_bounds__(1024) k_prep_fold(const PleParams* P, const i64* ctx_in, i64* ctx_a, i64* input_ids,
+                                                    i64* position_ids, int* committed, i64* past_pos,
+                                                    __nv_bfloat16* ple_out, i64* state) {
   __shared__ i64 s_row[32];
   __shared__ const unsigned char* s_src[32];
   __shared__ i64 s_tok, s_pos, s_c0, s_c1;
@@ -1168,7 +1169,8 @@ static inline ParkedStreamKey CurrentParkedStreamKey(cudaStream_t stream) {
   return ParkedStreamKey{dev, stream};
 }
 
-// Drops a stale error of the thread so that LaunchStatus() reports only the launch that follows.
+// BeginLaunch drops an error that the thread may still hold from an earlier call that nobody read, so that LaunchStatus
+// reports only the launches since then. An error that sticks (a faulted context) is not dropped and still fails the launch.
 static inline void BeginLaunch() { (void)cudaGetLastError(); }
 static inline int LaunchStatus() { return static_cast<int>(cudaGetLastError()); }
 static inline void ParkLaunchStatus(cudaStream_t stream) {
@@ -1316,10 +1318,11 @@ QWEN38_PLANE_EXPORT int qwen38_plane_prep(void* s, const void* P, const void* to
       }
       return 0;
     }
+    BeginLaunch();
     k_prep_fold<<<rows, 1024, 0, stream>>>((const PleParams*)P, (const i64*)ctx_in, (i64*)ctx_out, (i64*)input_ids,
                                            (i64*)position_ids, (int*)committed, (i64*)past_pos,
                                            (__nv_bfloat16*)ple_out, (i64*)state);
-    return 0;
+    return LaunchStatus();
   }
   {
     std::lock_guard<std::mutex> lock(g_staged_ple_mu);
@@ -1741,10 +1744,6 @@ QWEN38_PLANE_EXPORT int qwen38_plane_test_stream_capture(void* stream, int begin
 #endif
 }
 
-// A launch reports its own error and no other one: the last-error slot of the host thread may still hold the error of an
-// earlier call that nobody read. An error that sticks (a faulted context) is not dropped and still fails the launch.
-static inline void DropStaleCudaError() { cudaGetLastError(); }
-
 __global__ void DflashSelect(const int32_t* candidates, const float* scores, i64* control,
                              int drafts, int top_k) {
   const int slots[] = {2, 8, 9, 10, 11, 12, 13};
@@ -1765,12 +1764,14 @@ extern "C" QWEN38_PLANE_EXPORT int qwen38_plane_dflash_select(
     void* control, int drafts, int top_k) {
   if (!candidates || !scores || !control || drafts < 1 || drafts > 7 || top_k < 1)
     return static_cast<int>(cudaErrorInvalidValue);
-  DropStaleCudaError();
+  BeginLaunch();
   DflashSelect<<<1, 1, 0, static_cast<cudaStream_t>(stream)>>>(
       static_cast<const int32_t*>(candidates), static_cast<const float*>(scores),
       static_cast<i64*>(control), drafts, top_k);
-  return static_cast<int>(cudaGetLastError());
+  return LaunchStatus();
 }
+static_assert(std::is_same<decltype(&qwen38_plane_dflash_select), Qwen38PlaneDflashSelectFn>::value,
+              "qwen38_plane_dflash_select must match Qwen38PlaneDflashSelectFn");
 
 namespace {
 
@@ -1832,10 +1833,10 @@ __global__ void __launch_bounds__(kPlaneReplayThreads) k_replay_gdn(
         const float decay = decay_tile[t];
         const float delta = delta_tile[t * kPlaneReplayRows + r];
         const float* key = key_tile + t * key_width + k;
-        s.x = __fadd_rn(__fmul_rn(s.x, decay), __fmul_rn(key[0], delta));
-        s.y = __fadd_rn(__fmul_rn(s.y, decay), __fmul_rn(key[1], delta));
-        s.z = __fadd_rn(__fmul_rn(s.z, decay), __fmul_rn(key[2], delta));
-        s.w = __fadd_rn(__fmul_rn(s.w, decay), __fmul_rn(key[3], delta));
+        s.x = __fmaf_rn(key[0], delta, __fmul_rn(s.x, decay));
+        s.y = __fmaf_rn(key[1], delta, __fmul_rn(s.y, decay));
+        s.z = __fmaf_rn(key[2], delta, __fmul_rn(s.z, decay));
+        s.w = __fmaf_rn(key[3], delta, __fmul_rn(s.w, decay));
       }
       *reinterpret_cast<float4*>(destination + row + k) = s;
     }
@@ -1915,23 +1916,25 @@ __global__ void k_replay_generic(const Qwen38StateReplayDesc* __restrict__ descs
 extern "C" QWEN38_PLANE_EXPORT int qwen38_plane_replay_state_updates(
     void* stream, const void* descs, int fast_count, int generic_count,
     int fast_blocks_per_descriptor, int kept_count) {
-  if (!descs || kept_count < 1 || kept_count > kPlaneMaxReplayTransitions) {
+  // Counts and block budgets that would skip a launch without a word leave the destination bank stale: they are refused.
+  if (!descs || kept_count < 1 || kept_count > kPlaneMaxReplayTransitions || fast_count < 0 || generic_count < 0 ||
+      (fast_count > 0 && fast_blocks_per_descriptor < 1)) {
     return static_cast<int>(cudaErrorInvalidValue);
   }
   const auto* typed = static_cast<const Qwen38StateReplayDesc*>(descs);
   cudaStream_t cu_stream = static_cast<cudaStream_t>(stream);
-  DropStaleCudaError();
-  if (fast_count > 0 && fast_blocks_per_descriptor > 0) {
+  BeginLaunch();
+  if (fast_count > 0) {
     const dim3 grid(static_cast<unsigned>(fast_blocks_per_descriptor), static_cast<unsigned>(fast_count));
     k_replay_gdn<<<grid, kPlaneReplayThreads, 0, cu_stream>>>(typed, kept_count);
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) return static_cast<int>(err);
+    if (const int status = LaunchStatus()) return status;
   }
   if (generic_count > 0) {
     const dim3 grid(kPlaneGenericBlocksPerDesc, static_cast<unsigned>(generic_count));
     k_replay_generic<<<grid, kPlaneReplayThreads, 0, cu_stream>>>(typed + fast_count, kept_count);
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) return static_cast<int>(err);
+    if (const int status = LaunchStatus()) return status;
   }
   return 0;
 }
+static_assert(std::is_same<decltype(&qwen38_plane_replay_state_updates), Qwen38PlaneReplayStateUpdatesFn>::value,
+              "qwen38_plane_replay_state_updates must match Qwen38PlaneReplayStateUpdatesFn");
