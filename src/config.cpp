@@ -2473,6 +2473,10 @@ struct Qwen38GraphFoldHeadR2_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "filename") {
       v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "graph_id") {
+      const int id = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (id <= 0) throw std::runtime_error("fold.head_r2.graph_id must be a positive integer");
+      v_.legacy_graph_id = id;
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -2498,8 +2502,22 @@ struct Qwen38GraphFold_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "enabled") {
       v_.enabled = JSON::Get<bool>(value);
+    } else if (name == "target_graph_id") {
+      const int id = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (id <= 0) throw std::runtime_error("fold.target_graph_id must be a positive integer");
+      if (v_.head_r2.legacy_graph_id && *v_.head_r2.legacy_graph_id == id)
+        throw std::runtime_error("fold.target_graph_id and fold.head_r2.graph_id must be distinct");
+      v_.legacy_target_graph_id = id;
     } else {
       throw JSON::unknown_value_error{};
+    }
+  }
+
+  void OnComplete(bool empty) override {
+    (void)empty;
+    if (v_.legacy_target_graph_id && v_.head_r2.legacy_graph_id &&
+        *v_.legacy_target_graph_id == *v_.head_r2.legacy_graph_id) {
+      throw std::runtime_error("fold.target_graph_id and fold.head_r2.graph_id must be distinct");
     }
   }
 

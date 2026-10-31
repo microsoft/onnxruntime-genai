@@ -45,6 +45,10 @@ class Qwen38DecodeDevice {
  public:
   virtual ~Qwen38DecodeDevice() = default;
 
+  // Fatal execution invalidates mutable state across Engine leases; reset does not recover it.
+  virtual void MarkContextFailed() noexcept {}
+  virtual bool ContextIsHealthy() const noexcept { return true; }
+
   // Largest sequence (prompt + generated) the fixed KV store holds is Capacity() - kReservedTail.
   virtual int Capacity() const = 0;
   virtual bool MtpEnabled() const = 0;
@@ -84,6 +88,7 @@ class Qwen38DecodeDevice {
 
   // Positions at the end of the KV store that are never filled: a verify step writes two rows past the committed length.
   static constexpr int kReservedTail = 4;
+  virtual int ReservedTail() const { return kReservedTail; }
 };
 
 // Host mirror of the device loop's committed state: how many tokens are committed and which recurrent bank of the ring the
