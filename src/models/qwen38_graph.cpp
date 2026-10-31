@@ -296,7 +296,8 @@ void Qwen38GraphEngine::BuildTarget() {
       throw std::runtime_error(
           "qwen38_graph: the target takes inputs_embeds, which are gathered from the embedding table mapped from "
           "<model.embedding.filename>.data (at least vocab_size * hidden_size * 2 bytes, or vocab_size * hidden_size + "
-          "vocab_size * 4 bytes for a per-row INT8 table); that file is missing or too small");
+          "vocab_size * 4 bytes, plus at most 4096, for a per-row INT8 table); that file is missing, truncated or of "
+          "another size");
   }
 
   // Output facts
