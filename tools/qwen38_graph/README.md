@@ -100,14 +100,14 @@ All need a package; the ones that build prompts need a text pool (`--text-pool`,
 | script | purpose |
 | --- | --- |
 | `qwen38_engine_util.py` | helpers shared by the scripts: CUDA EP registration and model loading with config overlays (`$QWEN38_OVERLAY_JSON`), the natural-text prompt pools, and `run_turn` (one greedy turn through `og.Engine`); registers the DLL directories on Windows |
-| `calibrate_qwen38_kv.py` | calibrate per-channel INT8 and FP8 KV-cache scales for the 12 target sparse-attention layers and 1 MTP-head sparse-attention layer |
+| `calibrate_qwen38_kv.py` | calibrate per-channel INT8 and FP8 KV-cache scales for the 12 target sparse-attention layers and 1 MTP-head sparse-attention layer; `--out` receives the `--quant-type` scales and the other quantization is written beside it under the name with the quantization token swapped (`kv_scales_int8_per_channel.json` -> `kv_scales_fp8_per_channel.json`, `scales.json` -> `scales.fp8_per_channel.json`), so the two files never collide (a collision is an error before any work) |
 | `smoke.py` | minimal example, prints the stream, speed and speculative statistics |
 | `engine_gate.py` | token-identity gate: greedy streams of the gate prompts against a `--reference` (a recording of `--no-mtp` or `--force-reject`, i.e. MTP == no-MTP, or another runner's streams); `--prefill steps` must be identical, `--prefill fast` is checked for an equal first token, equal prompt length and an identical prefix of at least `--min-fast-prefix` tokens and reported as agreement statistics; EOS mode and `--ignore-eos` fixed length |
 | `engine_behaviours.py` | (`--prefill steps\|fast`) stop tokens, limits, stop strings, cancel during prefill/decode, second request queued, continuation, rewind, capability errors, statistics |
-| `bench_engine_mtp.py` | vLLM-protocol decode benchmark (exact prompt length, 256 new tokens, 1 warm-up + 3 runs, TPS = 255 tokens / time between first and last token) |
+| `bench_engine_mtp.py` | vLLM-protocol decode benchmark (exact prompt length, 256 new tokens, 1 warm-up + 3 runs, TPS = 255 tokens / time between first and last token); the acceptance statistics are the difference of the two full acceptance-length histograms taken around the run (rounds of different draft widths keep their own bins), and an inconsistent snapshot is an error |
 | `bench_ttft_engine.py` | time to first token at several prompt lengths (+ optional MMLU-Pro prompt ids from `--mmlu-prompts`): begin_turn to the Run that delivers the token |
 | `engine_prompt_lengths.py` | `run` the same greedy turns for 1 .. 20000-token prompts (dense chunk boundaries 8191/8192/8193, ...) with `--prefill steps` and `--prefill fast`, then `compare` (first token equal, shared prefix) |
-| `mmlu_engine_eval.py` | MMLU-Pro 800 through the Engine (shards, resumable) and the MTP == no-MTP stream check (`--check-items`, `--force-reject`, `--compare`) |
+| `mmlu_engine_eval.py` | MMLU-Pro 800 through the Engine (shards, resumable) and the MTP == no-MTP stream check (`--check-items`, `--force-reject`, `--compare`); a run stops before generating when an Engine prompt differs from the canonical prompt ids/text, and `--compare A B` (A an MTP run, B a `--force-reject` run) exits non-zero unless both cover the same items and every stream is identical |
 | `lcb_engine_eval.py` | LiveCodeBench v6 (175 problems) through the Engine, generated in resumable `--shard K --shards N` runs; with `--grade --arms name=glob ...` the completed shards are graded in the `lcb-grader` Docker sandbox at each cap of `--caps` (default 16K and 32K) and the arms are compared with a paired exact McNemar test |
 | `test_plane_kernels.py` | kernel tests of the plane's fast prefill kernels (`ple_rows`, `pool_keys`, `transpose_f32`) against the research implementations |
 | `run_with_ram_budget.py` | runs a command (for example `bench_engine_mtp.py`) with a bounded host expert cache for a QMoE-offload package: `$ORT_QMOE_HOST_CACHE_MIB` / `$ORT_QMOE_HOST_CACHE_LAYERS` from `--ram-budget-gib` minus `--reserve-gib`, and with `--enforce` a `systemd-run --user` cap on the whole command; `test_ram_budget.py` is its unit test (`python -m unittest test_ram_budget`) |
@@ -121,7 +121,9 @@ The provider-side settings the numbers in the PR descriptions were taken with ar
 `CUDA_MODULE_LOADING=EAGER ORT_ENABLE_FP4_GEMV=1 ORT_NVFP4_FC1_EXPERT_REUSE=0 ORT_FORCE_DETERMINISTIC_MOE=1`
 (provider-branch switches; they are not read by GenAI).
 
-The logic that does not need a GPU is covered by `test/cpp/engine/qwen38_graph_*_tests.cpp` (scripted device, real Engine).
+The logic that does not need a GPU is covered by `test/cpp/engine/qwen38_graph_*_tests.cpp` (scripted device, real Engine); the pure logic of
+the qualification scripts (acceptance histogram, calibration output names, the MMLU prompt check and `--compare`) by
+`test/python/builder/test_qwen38_qualification_tools.py` (`cd test/python/builder && python -m pytest -q test_qwen38_qualification_tools.py`).
 `engine_unit_tests --gtest_also_run_disabled_tests --gtest_filter='*RunOverhead*'` measures the host cost of one Engine step with
 an instantly answering device.
 
