@@ -467,6 +467,21 @@ def test_rewind(test_data_path, relative_model_path):
     assert np.array_equal(expected_sequence, generator.get_sequence(0))
 
 
+def test_rewind_into_full_prompt(test_data_path):
+    model = og.Model(os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32"))
+    search_params = og.GeneratorParams(model)
+    search_params.set_search_options(do_sample=False, max_length=10)
+    generator = og.Generator(model, search_params)
+    prompt = np.array([0, 0, 195, 731, 731, 114, 114, 114, 114, 114], dtype=np.int32)
+    generator.append_tokens(prompt[np.newaxis, :])
+    generator.rewind_to(9)
+
+    # Replaying the last prompt token fills the sequence again, so the token sampled after it is not added.
+    generator.generate_next_token()
+    assert generator.is_done()
+    assert np.array_equal(prompt, generator.get_sequence(0))
+
+
 @pytest.mark.parametrize("stop_at_eos", [False, True])
 @pytest.mark.parametrize(
     "relative_model_path",
@@ -541,6 +556,60 @@ def test_append_tokens_after_generation_with_guidance(test_data_path):
         generator.generate_next_token()
     answer = tokenizer.decode(generator.get_sequence(0)[prompt.shape[1] :])
     assert re.fullmatch(pattern, answer), answer
+
+
+def _new_ff_tokens_generator(test_data_path, device, pattern):
+    # The CUDA copies of the tiny GPT-2 model have no tokenizer files, which guidance needs.
+    config = og.Config(os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32"))
+    config.clear_providers()
+    if device != "cpu":
+        config.append_provider(device)
+    model = og.Model(config)
+    search_params = og.GeneratorParams(model)
+    search_params.set_search_options(do_sample=False, max_length=10)
+    search_params.set_guidance("regex", pattern, enable_ff_tokens=True)
+    try:
+        generator = og.Generator(model, search_params)
+    except RuntimeError as error:
+        if "guidance is unavailable" in str(error).lower():
+            pytest.skip("ONNX Runtime GenAI was built without guidance support")
+        raise
+    generator.append_tokens(np.array([[0, 0, 195, 731]], dtype=np.int32))
+    # The first step picks the digit; committing it to the grammar forces the words after it.
+    generator.generate_next_token()
+    return og.Tokenizer(model), generator
+
+
+ff_tokens_devices = ["cpu", "cuda"] if og.is_cuda_available() else ["cpu"]
+
+
+@pytest.mark.parametrize("device", ff_tokens_devices)
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        # The forced words run past max_length.
+        r"[0-9] to the and of in is on that for it",
+        # The forced words fill the sequence, and the grammar still wants a digit after them.
+        r"[0-9] to the and of in[0-9]",
+    ],
+)
+def test_guidance_ff_tokens_stop_at_max_length(test_data_path, device, pattern):
+    tokenizer, generator = _new_ff_tokens_generator(test_data_path, device, pattern)
+    generator.generate_next_token()
+    assert generator.is_done()
+    sequence = generator.get_sequence(0)
+    assert len(sequence) == 10
+    assert re.fullmatch(r"[0-9] to the and of in", tokenizer.decode(sequence[4:]))
+
+
+@pytest.mark.parametrize("device", ff_tokens_devices)
+def test_guidance_ff_tokens_leave_no_room_for_append(test_data_path, device):
+    _, generator = _new_ff_tokens_generator(test_data_path, device, r"[0-9] to the and of in is on that for it")
+    # The append first runs the digit, and the words the grammar forces after it fill the sequence.
+    with pytest.raises(RuntimeError, match="exceeds max length"):
+        generator.append_tokens(np.array([[52]], dtype=np.int32))
+    assert generator.is_done()
+    assert len(generator.get_sequence(0)) == 10
 
 
 # Test Model Loading with No Chat Template

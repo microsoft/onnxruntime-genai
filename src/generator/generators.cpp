@@ -749,8 +749,11 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (input_ids.size() == 0)
     throw std::runtime_error("input_ids is empty");
-  if ((input_ids.size() / state_->params_->search.batch_size) + search_->GetSequenceLength() > state_->params_->search.max_length)
-    throw std::runtime_error("input_ids size (" + std::to_string(input_ids.size()) + ") + current sequence length (" + std::to_string(search_->GetSequenceLength()) + ") exceeds max length (" + std::to_string(state_->params_->search.max_length) + ")");
+  const auto throw_if_exceeds_max_length = [&]() {
+    if ((input_ids.size() / state_->params_->search.batch_size) + search_->GetSequenceLength() > state_->params_->search.max_length)
+      throw std::runtime_error("input_ids size (" + std::to_string(input_ids.size()) + ") + current sequence length (" + std::to_string(search_->GetSequenceLength()) + ") exceeds max length (" + std::to_string(state_->params_->search.max_length) + ")");
+  };
+  throw_if_exceeds_max_length();
   if (search_->GetSequenceLength() != 0 && state_->params_->search.batch_size > 1)
     throw std::runtime_error("AppendTokens can only be called once for batch_size > 1. To call AppendTokens again, use RewindToLength(0)");
 
@@ -791,6 +794,8 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   // prefill; speculative -> reconcile two inner KV caches).
   strategy_->PrepareForAppend(*this);
   RunGeneratedToken();
+  // Running the last generated token can append the tokens the grammar forces after it.
+  throw_if_exceeds_max_length();
   state_->StartTurn();
 
   auto input_ids_device = AllocateInputIdsOnDevice(input_ids);
@@ -838,6 +843,11 @@ void Generator::RunGeneratedToken() {
     return;
   state_->DiscardNextLogits();
   ComputeLogits(search_->GetNextTokens());
+  // Forced tokens that fill the sequence end the generation, as in GenerateNextToken.
+  if (search_->GetSequenceLength() >= state_->params_->search.max_length) {
+    computed_logits_ = false;
+    return;
+  }
   // Keep committing the appended tokens to the guidance grammar, as before.
   last_action_ = Action::generated;
 }
@@ -893,6 +903,8 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
 
   if (guidance_logits_processor_ && last_action_ == Action::generated) {
     auto ff_tokens = guidance_logits_processor_->GetFFTokens(0);
+    // The sequence holds max_length tokens, so forced tokens past it are dropped.
+    ff_tokens.resize(std::min(ff_tokens.size(), static_cast<size_t>(state_->params_->search.max_length - search_->GetSequenceLength())));
     if (!ff_tokens.empty()) {
       // process fast-forward tokens
       std::span<int32_t> forced_tokens_span{ff_tokens};
