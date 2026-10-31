@@ -2148,7 +2148,9 @@ paged, batched or cropped to an arbitrary token. `Engine::CreateDependencies` as
   sampled MTP: a turn that ends inside a cycle (turn or session limit, stop string, EOS) only accepts the drafts it delivered,
   `draft_tokens_evaluated` counts the draft positions examined up to the terminal token (every accepted draft consumed, an EOS
   draft included, plus the rejected position only when the turn got as far as the correction token), so `acceptance_rate` is not
-  diluted by drafts after the end of the turn.
+  diluted by drafts after the end of the turn. Rounds are classified like `Engine::RecordSpeculativeCommit` does, by the number
+  of accepted drafts that were delivered: none is a zero-accept round, all of the proposed ones a full-accept round and anything
+  in between a partial-accept round (`partial_accept_rounds`, counted whether or not a correction token was delivered).
 - The model's device state is leased to one Engine at a time (`Qwen38GraphModel::AcquireDevice`); a second Engine over the same
   model fails with a clear error until the first one is destroyed. The model has no Generator API support.
 
