@@ -1,11 +1,13 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <array>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <map>
 #include <optional>
 #include <set>
 #include <stdexcept>
@@ -735,6 +737,88 @@ TEST(Qwen38PromptTokensTest, ForgettingAPromptDropsItsTokensAndTheBufferOfALongO
     EXPECT_TRUE(tokens.empty());
     EXPECT_LE(tokens.capacity(), kQwen38RetainedPromptTokens);
   }
+}
+
+// A device with several slots keeps the validation bits of a decode in the slot that ran it. Its decode status is the status of
+// every slot that started a decode, slot 0 or not, and a slot that never started is not even read.
+namespace {
+
+struct ScriptedStatusBits {
+  std::map<size_t, int64_t> bits;
+  std::vector<size_t> read;
+  std::function<int64_t(size_t)> Reader() {
+    return [this](size_t slot) {
+      read.push_back(slot);
+      const auto found = bits.find(slot);
+      return found == bits.end() ? int64_t{0} : found->second;
+    };
+  }
+};
+
+std::string StatusMessage(std::span<const bool> started, const std::function<int64_t(size_t)>& reader) {
+  try {
+    CheckQwen38DecodeStatus(started, reader);
+  } catch (const std::runtime_error& e) {
+    return e.what();
+  }
+  return {};
+}
+
+}  // namespace
+
+TEST(Qwen38DecodeStatusTest, OnlySlotsThatStartedADecodeAreReadAndCleanBitsPass) {
+  ScriptedStatusBits device;
+  const std::array<bool, 4> started{true, true, false, true};
+  const auto reader = device.Reader();
+  EXPECT_NO_THROW(CheckQwen38DecodeStatus(started, reader));
+  EXPECT_EQ(device.read, (std::vector<size_t>{0, 1, 3}));
+
+  device.read.clear();
+  device.bits[2] = 8;  // bits of a slot that never started a decode (stale memory) are not looked at
+  EXPECT_NO_THROW(CheckQwen38DecodeStatus(started, reader));
+  EXPECT_EQ(device.read, (std::vector<size_t>{0, 1, 3}));
+
+  const std::array<bool, 3> none{false, false, false};
+  device.read.clear();
+  EXPECT_NO_THROW(CheckQwen38DecodeStatus(none, reader));
+  EXPECT_TRUE(device.read.empty());
+  EXPECT_NO_THROW(CheckQwen38DecodeStatus(std::span<const bool>{}, reader));
+}
+
+TEST(Qwen38DecodeStatusTest, ErrorBitsOfANonZeroSlotAreReportedAndNameTheSlot) {
+  const std::array<bool, 4> started{true, true, false, true};
+  for (const size_t failing : {size_t{1}, size_t{3}}) {
+    ScriptedStatusBits device;
+    device.bits[failing] = 4;
+    const std::string message = StatusMessage(started, device.Reader());
+    EXPECT_NE(message.find("slot " + std::to_string(failing) + "=4"), std::string::npos) << message;
+    EXPECT_NE(message.find("device error bits"), std::string::npos) << message;
+    EXPECT_EQ(message.find("slot 0"), std::string::npos) << message;
+  }
+}
+
+TEST(Qwen38DecodeStatusTest, EverySlotWithErrorBitsIsNamedAndEveryStartedSlotIsStillRead) {
+  ScriptedStatusBits device;
+  device.bits[0] = 1;
+  device.bits[3] = 6;
+  const std::array<bool, 4> started{true, true, false, true};
+  const std::string message = StatusMessage(started, device.Reader());
+  EXPECT_NE(message.find("slot 0=1"), std::string::npos) << message;
+  EXPECT_NE(message.find("slot 3=6"), std::string::npos) << message;
+  EXPECT_EQ(message.find("slot 1"), std::string::npos) << message;
+  EXPECT_EQ(device.read, (std::vector<size_t>{0, 1, 3}));
+}
+
+TEST(Qwen38DecodeStatusTest, ADeviceWithASingleSlotKeepsItsMessage) {
+  ScriptedStatusBits device;
+  device.bits[0] = 2;
+  const std::array<bool, 1> started{true};
+  EXPECT_EQ(StatusMessage(started, device.Reader()), "qwen38_graph: device error bits 2 after decode");
+
+  const std::array<bool, 1> not_started{false};
+  device.read.clear();
+  EXPECT_EQ(StatusMessage(not_started, device.Reader()), "");  // nothing to check before the decode started
+  EXPECT_TRUE(device.read.empty());
 }
 
 TEST(Qwen38GraphConfigTest, DflashWarmupAtModelCreationHonorsTheWarmupSetting) {

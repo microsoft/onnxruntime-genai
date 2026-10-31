@@ -217,6 +217,24 @@ void Qwen38ForgetPromptTokens(std::vector<int32_t>& tokens) noexcept {
   if (tokens.capacity() > kQwen38RetainedPromptTokens) std::vector<int32_t>().swap(tokens);
 }
 
+void CheckQwen38DecodeStatus(std::span<const bool> started, const std::function<int64_t(size_t)>& read_bits) {
+  std::ostringstream failures;
+  size_t failed = 0;
+  int64_t first_bits = 0;
+  for (size_t slot = 0; slot < started.size(); ++slot) {
+    if (!started[slot]) continue;
+    const int64_t bits = read_bits(slot);
+    if (bits == 0) continue;
+    if (failed++ == 0) first_bits = bits;
+    failures << (failed > 1 ? ", " : "") << "slot " << slot << "=" << bits;
+  }
+  if (failed == 0) return;
+  if (started.size() == 1) {
+    throw std::runtime_error("qwen38_graph: device error bits " + std::to_string(first_bits) + " after decode");
+  }
+  throw std::runtime_error("qwen38_graph: device error bits after decode (" + failures.str() + ")");
+}
+
 // ------------------------------------------------------------------------------------------------
 // Engine
 // ------------------------------------------------------------------------------------------------
@@ -1794,12 +1812,16 @@ void Qwen38GraphEngine::EnqueueFold() {
 }
 
 void Qwen38GraphEngine::CheckDecodeStatus() {
-  if (!decode_started_) return;
-  // ctl[5] ORs the validation status of every call of the decode: the target's (fold: the whole fused cycle) and,
-  // outside the fold stack, the standalone head's, which the cycle record's status does not carry. The stream is idle
-  // once ReadCtl returns, so this also holds after Drain() while the last cycle's record (inflight_) is unconsumed.
-  const int64_t bits = ReadCtl(5);
-  if (bits != 0) throw std::runtime_error("qwen38_graph: device error bits " + std::to_string(bits) + " after decode");
+  // ctl[5] of a slot ORs the validation status of every call of its decode: the target's (fold: the whole fused cycle) and,
+  // outside the fold stack, the standalone head's, which the cycle record's status does not carry. Every slot has its own
+  // word, so every slot that started a decode is read, not only slot 0. The stream is idle once ReadCtlSlot returns, so
+  // this also holds after Drain() while the last cycle's record (inflight_) is unconsumed.
+  std::array<bool, kMaxBatch> started{};
+  for (int s = 0; s < max_batch_; ++s) {
+    started[static_cast<size_t>(s)] = s == 0 ? decode_started_ : slot_decode_started_[s];
+  }
+  CheckQwen38DecodeStatus(std::span<const bool>{started.data(), static_cast<size_t>(max_batch_)},
+                          [this](size_t slot) { return ReadCtlSlot(static_cast<int>(slot), 5); });
 }
 
 // ---- decode -----------------------------------------------------------------------------------

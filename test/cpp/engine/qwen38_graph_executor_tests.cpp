@@ -13,6 +13,7 @@
 #include <condition_variable>
 #include <cstdlib>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -762,6 +763,90 @@ TEST(Qwen38GraphSessionTest, AnOddChunkOfTheOptionsIsRoundedDownToAnEvenOne) {
 
   EXPECT_EQ(device->CallCount("prefill:4"), 2u);
   EXPECT_EQ(device->CallCount("prefill:3"), 1u);
+}
+
+// A session over a device with two slots. Both slots decode through batched cycles; then one of them is handed to a new
+// request while the next batched cycle of both is still running on the device.
+class TwoSlotSession {
+ public:
+  explicit TwoSlotSession(std::map<size_t, size_t> fail_slot_cycle = {})
+      : device{std::make_shared<ScriptedQwen38Device>(/*capacity=*/68, /*mtp=*/true, /*max_batch_size=*/2)} {
+    device->dense_prefill = true;
+    device->fail_slot_cycle = std::move(fail_slot_cycle);
+    Qwen38GraphSession::Options options;
+    options.prefill_chunk_tokens = 16;
+    session = std::make_unique<Qwen38GraphSession>(device, options);
+    for (size_t i = 0; i < prompts.size(); ++i) {
+      for (size_t t = 0; t < 5 + i; ++t) prompts[i].push_back(12 + static_cast<int32_t>(10 * i + t));
+    }
+  }
+
+  // One batched step; slot s serves prompts[assignment[s]] (the Request identity is the prompt).
+  void Step(std::array<size_t, 2> assignment) {
+    std::array<Qwen38StepRequest, 2> requests;
+    for (size_t s = 0; s < requests.size(); ++s) {
+      requests[s].slot = s;
+      requests[s].owner = &prompts[assignment[s]];
+      requests[s].turn_id = 1;
+      requests[s].tokens = prompts[assignment[s]];
+      requests[s].token_budget = 50;
+      requests[s].session_budget = 60;
+    }
+    std::array<Qwen38StepResult, 2> results;
+    session->StepBatch(requests, results);
+  }
+
+  // Slots 0 and 1 serve prompts 0 and 1: both prompts, the first token of each, batched cycle 1; then cycle 1 is committed
+  // and cycle 2 is in flight.
+  void RunTwoCycles() {
+    Step({0, 1});
+    Step({0, 1});
+  }
+
+  // The request of `replaced` is canceled (the device is not touched) and prompt 2 takes its slot; the step that runs it
+  // is the one that resets the slot.
+  void ReplaceAndStep(size_t replaced) {
+    const size_t calls_before = device->calls.size();
+    session->ReleaseSlot(replaced);
+    EXPECT_EQ(device->calls.size(), calls_before);
+    EXPECT_TRUE(device->running()) << "a cancellation does not wait for the device";
+    Step({replaced == 0 ? size_t{2} : size_t{0}, replaced == 1 ? size_t{2} : size_t{1}});
+  }
+
+  std::shared_ptr<ScriptedQwen38Device> device;
+  std::unique_ptr<Qwen38GraphSession> session;
+  std::array<std::vector<int32_t>, 3> prompts;
+};
+
+// ResetSlot() clears the error bits of its slot, and the bits of a batched cycle that a canceled request left in flight are
+// reported nowhere else: the session must drain the stream and read the decode status of the device before it resets the
+// slot of a new request, whichever slot that is and whichever slot holds the bits (the slots beyond 0 included).
+TEST(Qwen38GraphSessionTest, DeferredErrorBitsOfAnySlotAreReportedBeforeAReplacedSlotIsReset) {
+  for (const size_t failing : {size_t{0}, size_t{1}}) {
+    for (const size_t replaced : {size_t{0}, size_t{1}}) {
+      SCOPED_TRACE("replaced slot " + std::to_string(replaced) + ", error bits in slot " + std::to_string(failing));
+      TwoSlotSession two{{{failing, 2}}};
+      two.RunTwoCycles();
+      EXPECT_THROW(two.ReplaceAndStep(replaced), std::runtime_error);
+      EXPECT_EQ(two.device->CallCount("reset_slot:" + std::to_string(replaced)), 0u)
+          << "the slot was reset before the error bits were read";
+      EXPECT_EQ(two.device->order, (std::vector<std::string>{"reset", "drain", "status"}));
+      EXPECT_FALSE(two.device->running());
+    }
+  }
+}
+
+TEST(Qwen38GraphSessionTest, AReplacedSlotIsResetAfterTheStreamWasDrainedAndTheStatusOfEverySlotWasRead) {
+  for (const size_t replaced : {size_t{0}, size_t{1}}) {
+    SCOPED_TRACE("replaced slot " + std::to_string(replaced));
+    TwoSlotSession two;  // no error bits
+    two.RunTwoCycles();
+    EXPECT_NO_THROW(two.ReplaceAndStep(replaced));
+    EXPECT_EQ(two.device->order,
+              (std::vector<std::string>{"reset", "drain", "status", "reset_slot:" + std::to_string(replaced)}));
+    EXPECT_EQ(two.device->slot_ingested(replaced), two.prompts[2]);
+    EXPECT_EQ(two.device->slot_prefill_totals.back(), (std::pair<size_t, size_t>{replaced, two.prompts[2].size()}));
+  }
 }
 
 TEST_F(Qwen38GraphEngineTest, TheDeviceIsToldThePromptLengthAfterTheResetAndBeforeTheFirstChunkOfEveryTurn) {
@@ -1695,6 +1780,130 @@ TEST_F(Qwen38GraphEngineTest, MultiSlotAReplacedSlotIsAnnouncedTheLengthOfItsNew
   const char* published = std::getenv(Qwen38OrtEnv::kPrefillTotalTokens);
   ASSERT_NE(published, nullptr);
   EXPECT_STREQ(published, "424242");
+}
+
+// ---- multi-slot device status ----------------------------------------------------------------
+
+// The error bits of a batched cycle live in the slot that ran it. A request that is canceled while its cycle is in flight
+// leaves them unreported, and the next request that takes the slot must not reset them away: the Engine fails with the
+// device error instead.
+TEST_F(Qwen38GraphEngineTest, MultiSlotDeferredErrorBitsOfACanceledSlotAreReportedBeforeANewRequestTakesIt) {
+  device_ = std::make_shared<ScriptedQwen38Device>(/*capacity=*/68, /*mtp=*/true, /*max_batch_size=*/2);
+  device_->dense_prefill = true;
+  device_->preferred_chunk = 16;
+  device_->fail_slot_cycle = {{1, 2}};  // the second batched cycle leaves error bits in slot 1
+  auto engine = MakeEngine();
+
+  auto r0 = Begin(*engine, Prompt(5, 10), /*max_generated_tokens=*/30);
+  auto r1 = engine->CreateRequest();
+  TurnOptions options = Limit(30);
+  options.request = r1;
+  const uint64_t turn = r1->BeginTurn(Prompt(6, 20), options);
+
+  std::array<EngineEvent, 8> buffer;
+  ASSERT_GE(engine->Run(buffer), 1u);  // both prompts, batched cycle 1 in flight
+  ASSERT_GE(engine->Run(buffer), 1u);  // cycle 1 committed, cycle 2 in flight
+  ASSERT_TRUE(device_->inflight());
+
+  EXPECT_TRUE(engine->CancelRequest(r1, turn));
+  bool canceled = false;
+  for (int i = 0; i < 4 && !canceled; ++i) {
+    const size_t count = engine->Run(buffer);
+    for (size_t j = 0; j < count; ++j) {
+      ASSERT_EQ(buffer[j].flags & EngineEventFlagFailed, 0u) << "cancellation does not wait for the device";
+      canceled = canceled || (buffer[j].request == r1 && buffer[j].finish_reason == GenerationFinishReason::Canceled);
+    }
+  }
+  ASSERT_TRUE(canceled);
+  EXPECT_EQ(device_->CallCount("reset_slot:1"), 0u);
+
+  auto r2 = Begin(*engine, Prompt(7, 30), /*max_generated_tokens=*/4);  // takes the free slot 1
+  const auto failure = RunUntilFailure(*engine);
+
+  ASSERT_TRUE(failure.has_value()) << "the error bits of the canceled slot were reset away";
+  EXPECT_EQ(*failure, EngineErrorCode::EngineExecutionFailure);
+  EXPECT_EQ(device_->CallCount("reset_slot:1"), 0u);
+  EXPECT_EQ(device_->order, (std::vector<std::string>{"reset", "drain", "status"}));
+}
+
+// Slot 0 finishes and a queued request takes it while the request of slot 1 decodes on: the status check before the reset of
+// slot 0 covers slot 1 too.
+TEST_F(Qwen38GraphEngineTest, MultiSlotErrorBitsOfANonZeroSlotAreReportedWhenSlotZeroIsHandedOver) {
+  device_ = std::make_shared<ScriptedQwen38Device>(/*capacity=*/68, /*mtp=*/true, /*max_batch_size=*/2);
+  device_->dense_prefill = true;
+  device_->preferred_chunk = 16;
+  device_->fail_slot_cycle = {{1, 2}};
+  auto engine = MakeEngine();
+
+  auto r0 = Begin(*engine, Prompt(4, 10), /*max_generated_tokens=*/2);  // done after its first batched cycle
+  auto r1 = Begin(*engine, Prompt(5, 20), /*max_generated_tokens=*/30);
+  auto r2 = Begin(*engine, Prompt(7, 30), /*max_generated_tokens=*/3);  // takes slot 0 when r0 is over
+  const auto failure = RunUntilFailure(*engine);
+
+  ASSERT_TRUE(failure.has_value()) << "the error bits of slot 1 were never reported";
+  EXPECT_EQ(*failure, EngineErrorCode::EngineExecutionFailure);
+  EXPECT_EQ(device_->CallCount("reset_slot:0"), 0u) << "slot 0 was reset before the status of slot 1 was read";
+  EXPECT_EQ(device_->order, (std::vector<std::string>{"reset", "drain", "status"}));
+}
+
+// No error bits: the status of the device is read once before the slot is reset and the requests all complete.
+TEST_F(Qwen38GraphEngineTest, MultiSlotAHandedOverSlotIsResetAfterTheStatusOfTheDeviceWasRead) {
+  device_ = std::make_shared<ScriptedQwen38Device>(/*capacity=*/68, /*mtp=*/true, /*max_batch_size=*/2);
+  device_->dense_prefill = true;
+  device_->preferred_chunk = 16;
+  auto engine = MakeEngine();
+
+  auto r0 = Begin(*engine, Prompt(4, 10), /*max_generated_tokens=*/2);
+  auto r1 = Begin(*engine, Prompt(5, 20), /*max_generated_tokens=*/12);
+  auto r2 = Begin(*engine, Prompt(7, 30), /*max_generated_tokens=*/3);
+
+  std::array<EngineEvent, 16> buffer;
+  std::map<const Request*, std::vector<int32_t>> emitted;
+  for (size_t runs = 0; engine->HasPendingRequests(); ++runs) {
+    ASSERT_LT(runs, 1000u) << "the Engine did not finish";
+    const size_t count = engine->Run(buffer);
+    for (size_t i = 0; i < count; ++i) {
+      ASSERT_EQ(buffer[i].flags & EngineEventFlagFailed, 0u);
+      if (buffer[i].flags & EngineEventFlagToken) emitted[buffer[i].request.get()].push_back(buffer[i].token);
+    }
+  }
+  EXPECT_EQ(emitted[r0.get()], Expected(4, 2));
+  EXPECT_EQ(emitted[r1.get()], Expected(5, 12));
+  EXPECT_EQ(emitted[r2.get()], Expected(7, 3));
+
+  const auto& order = device_->order;
+  const auto reset = std::find(order.begin(), order.end(), "reset_slot:0");
+  ASSERT_NE(reset, order.end());
+  ASSERT_GE(reset - order.begin(), 3);
+  EXPECT_EQ(*(reset - 1), "status");
+  EXPECT_EQ(*(reset - 2), "drain");
+}
+
+// After every request of the chain finished the status was checked at the end of the chain: the slot that the next request
+// takes is reset without another drain.
+TEST_F(Qwen38GraphEngineTest, MultiSlotAHandedOverSlotNeedsNoSecondStatusCheckAfterTheChainEnded) {
+  device_ = std::make_shared<ScriptedQwen38Device>(/*capacity=*/68, /*mtp=*/true, /*max_batch_size=*/2);
+  device_->dense_prefill = true;
+  device_->preferred_chunk = 16;
+  auto engine = MakeEngine();
+
+  auto r0 = Begin(*engine, Prompt(4, 10), /*max_generated_tokens=*/2);
+  auto r1 = Begin(*engine, Prompt(5, 20), /*max_generated_tokens=*/3);
+  ASSERT_EQ(RunToCompletion(*engine, r0).failure_flags, 0u);
+  ASSERT_FALSE(engine->HasPendingRequests());
+  const size_t checks = device_->status_checks;
+  ASSERT_GE(checks, 1u);
+  EXPECT_EQ(device_->order.back(), "status") << "the end of the chain checked the status";
+
+  auto r2 = Begin(*engine, Prompt(7, 30), /*max_generated_tokens=*/3);
+  const auto outcome = RunToCompletion(*engine, r2);
+  EXPECT_EQ(outcome.failure_flags, 0u);
+  EXPECT_EQ(outcome.tokens, Expected(7, 3));
+  const auto& order = device_->order;
+  const auto reset = std::find(order.begin(), order.end(), "reset_slot:0");
+  ASSERT_NE(reset, order.end());
+  EXPECT_EQ(*(reset - 1), "status");
+  EXPECT_EQ(std::count(order.begin(), reset, "drain"), 0) << "the status was already read: nothing to drain for";
 }
 
 // Host cost of one Engine step (Run) with a device that answers instantly: everything the Engine adds around a cycle. Run

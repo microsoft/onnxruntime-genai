@@ -115,6 +115,18 @@ void Qwen38GraphSession::CheckStatusIfPending() {
   }
 }
 
+// Reset() and ResetSlot() clear the error bits that cycles left in the device. A cycle nobody consumed (the look-ahead of a
+// cancelled or stopped turn) reports them nowhere else, so whatever is about to clear the device first drains it and reads
+// the status of every slot: Drain(), then CheckDecodeStatus(), as Begin() and Release() do. A no-op when the status was
+// checked already.
+void Qwen38GraphSession::DrainAndCheckStatus() {
+  if (status_checked_) {
+    return;
+  }
+  device_->Drain();
+  CheckStatusIfPending();
+}
+
 void Qwen38GraphSession::ClearSlot(SlotState& slot) noexcept {
   ++slot.epoch;
   slot.owner = nullptr;
@@ -137,11 +149,7 @@ void Qwen38GraphSession::Begin(const Qwen38StepRequest& request) {
   if (deferred_error_) {
     std::rethrow_exception(std::exchange(deferred_error_, nullptr));
   }
-  if (!status_checked_) {
-    device_->Drain();
-    status_checked_ = true;
-    device_->CheckDecodeStatus();
-  }
+  DrainAndCheckStatus();
   if (device_dirty_) {
     device_->Reset();
     device_dirty_ = false;
@@ -160,9 +168,10 @@ void Qwen38GraphSession::BeginSlot(size_t slot, const Qwen38StepRequest& request
     throw std::out_of_range("Qwen38GraphSession: slot index out of range.");
   }
   SlotState& st = slot_states_[slot];
-  // The device status belongs to the old epoch and must be observed before any reset clears it.
-  device_->Drain();
-  CheckStatusIfPending();
+  if (device_dirty_ || st.dirty) {
+    // The turn that held the slot may have left error bits nobody reported yet: the reset below would clear them.
+    DrainAndCheckStatus();
+  }
   st.owner = nullptr;
   st.pending = {};
   if (device_dirty_) {
@@ -219,13 +228,8 @@ void Qwen38GraphSession::ReleaseSlot(size_t slot) {
     Release();
     return;
   }
-  // This backend quiesces a containing batch. Other residents keep their completed records for collection;
-  // the retired row is discarded by identity matching, before its numerical slot is reset for a new owner.
-  device_->Drain();
   ClearSlot(slot_states_[slot]);
   completions_.Retire(slot);
-  RethrowDeferredError();
-  CheckStatusIfPending();
 }
 
 void Qwen38GraphSession::ReleaseSlotForTeardown(size_t slot) noexcept {
