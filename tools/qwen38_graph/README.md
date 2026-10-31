@@ -234,8 +234,11 @@ been loaded by a CUDA build of #33622.
   (the number after `layers.`, `layer.` or `blocks.` in the node name, or in the name of its fc1 weights, else the registration
   order);
 * `genai_config.json` gets the `session.moe.offload.*` options on the decoder, and CUDA-graph capture and `kSameAsRequested` arena
-  options for the decoder, MTP-head, dense and head-KV sessions; `--vram-limit-gib` becomes `gpu_device_mem_limit`,
-  `--stop-token-id` replaces `eos_token_id` and `--prefill-chunk` (default 512) sets `prefill.chunk`;
+  options for the decoder, the MTP head (`fold.head_r2`), dense and head-KV sessions; `--vram-limit-gib` becomes
+  `gpu_device_mem_limit`, `--stop-token-id` replaces `eos_token_id` and `--prefill-chunk` (default 512) sets `prefill.chunk`, which
+  the engine accepts up to `kv_capacity` with `prefill.enabled` and as an even number without it (checked before anything is
+  written). The `model.qwen38_graph` section of the source is migrated to the current config surface first (see "Config surface of
+  the built packages"), and a source without `fold.head_r2` or `prefill` is refused;
 * `--plane-lib` and `--provider-lib` are copied to `libs/` and `provider/`; `--ops-dir` adds its `libqwen_*.so` files to `libs/`.
 
 `--out` must not be equal to, nested in or contain `--from-package`, `--plane-lib`, `--provider-lib`, `--ops-dir` or

@@ -34,7 +34,12 @@ from _qwen38_qmoe_offload_contract import (
     simulate_session_creation,
     validate_popularity_file,
 )
-from _qwen38_tools_test_utils import load_tools
+from _qwen38_tools_test_utils import (
+    REMOVED_QWEN38_GRAPH_KEYS,
+    load_tools,
+    prefill_chunk_problem,
+    unknown_qwen38_graph_keys,
+)
 from onnx import TensorProto, helper, numpy_helper
 
 LAYERS = 3
@@ -190,8 +195,10 @@ def genai_config(layered):
                 },
             },
             "qwen38_graph": {
-                "fold": {"mtp": {"filename": "mtp/model.onnx"}},
+                "kv_capacity": 4096,
+                "fold": {"enabled": True, "head_r2": {"filename": "head_r2/model.onnx"}},
                 "prefill": {
+                    "enabled": True,
                     "chunk": 1024,
                     "dense": {"filename": "dense/model.onnx", "session_options": {"provider_options": [{"cuda": {}}]}},
                 },
@@ -209,12 +216,12 @@ session target model.norm.weight 1
 """
 
 
-def make_package(tmp_path, *, model=None, layered=False, pool_text=DEFAULT_POOL, dense=True):
+def make_package(tmp_path, *, model=None, layered=False, pool_text=DEFAULT_POOL, dense=True, config=None):
     """A source package under ``tmp_path/pkg`` (flat, or with the decoder graph in ``target/``) and the two libraries."""
     root = tmp_path / "pkg"
     decoder_dir = root / "target" if layered else root
     save_model(decoder_model() if model is None else model, decoder_dir / "model.onnx")
-    (root / "genai_config.json").write_text(json.dumps(genai_config(layered)))
+    (root / "genai_config.json").write_text(json.dumps(genai_config(layered) if config is None else config))
     (root / "weights_pool.txt").write_text(pool_text)
     if dense:
         save_model(dense_model(), root / "dense" / "model.onnx")
@@ -1412,12 +1419,14 @@ def test_budgets_and_the_other_options_reach_the_config(offload, tmp_path, monke
     prefill = config["model"]["qwen38_graph"]["prefill"]
     assert (prefill["chunk"], prefill["warmup_lengths"]) == (256, [256, 128, 37])
     assert (
-        config["model"]["qwen38_graph"]["fold"]["mtp"]["session_options"][
+        config["model"]["qwen38_graph"]["fold"]["head_r2"]["session_options"][
             "session.use_device_allocator_for_initializers"
         ]
         == "1"
     )
-    assert not any(key.startswith(PREFIX) for key in config["model"]["qwen38_graph"]["fold"]["mtp"]["session_options"])
+    assert not any(
+        key.startswith(PREFIX) for key in config["model"]["qwen38_graph"]["fold"]["head_r2"]["session_options"]
+    )
 
 
 def test_a_package_without_a_dense_graph_builds(offload, tmp_path, monkeypatch, multidraft_calls):
@@ -1765,6 +1774,211 @@ def test_the_default_mtp_placement_leaves_the_pools_alone(offload, tmp_path, mon
     check_bound(records, bindings)
     assert records[1][3:5] == ["4097", "100"] and records[2][3:5] == ["9001", "5000"]
     assert not (out / ALIGNED).exists()
+
+
+# ---------------------------------------------------------------------------
+# genai_config.json: only the model.qwen38_graph keys the engine accepts
+# ---------------------------------------------------------------------------
+
+HEAD_SESSION_OPTIONS = {
+    "log_id": "onnxruntime-genai",
+    "graph_optimization_level": "ORT_DISABLE_ALL",
+    "provider_options": [
+        {
+            "cuda": {
+                "enable_cuda_graph": "1",
+                "min_num_runs_before_cuda_graph_capture": "4",
+                "arena_extend_strategy": "kSameAsRequested",
+                "arena.extend_strategy": "1",
+            }
+        }
+    ],
+    "session.use_device_allocator_for_initializers": "1",
+}
+
+
+def config_with_removed_key(key, layered=False):
+    """The source config of a package built for an earlier config surface: ``key`` is a path below model.qwen38_graph."""
+    config = genai_config(layered)
+    qwen = config["model"]["qwen38_graph"]
+    if key in ("fold.mtp", "fold.drafter"):
+        qwen["fold"][key.removeprefix("fold.")] = qwen["fold"].pop("head_r2")
+        return config
+    *parents, leaf = key.split(".")
+    section = qwen
+    for part in parents:
+        section = section.setdefault(part, {})
+    section[leaf] = 1
+    return config
+
+
+def printed_config_changes(capsys):
+    return sorted(line for line in capsys.readouterr().out.splitlines() if line.startswith("genai_config:"))
+
+
+@pytest.mark.parametrize("layered", [False, True])
+def test_the_built_config_has_only_keys_the_engine_accepts(offload, tmp_path, monkeypatch, multidraft_calls, layered):
+    package = make_package(tmp_path, layered=layered)
+    _out, config, *_ = build(monkeypatch, offload, package, tmp_path, layered=layered)
+    qwen = config["model"]["qwen38_graph"]
+    assert unknown_qwen38_graph_keys(qwen) == []
+    assert prefill_chunk_problem(qwen) is None
+    assert qwen["fold"] == {
+        "enabled": True,
+        "head_r2": {"filename": "head_r2/model.onnx", "session_options": HEAD_SESSION_OPTIONS},
+    }
+    assert qwen["prefill"]["chunk"] == 512
+
+
+@pytest.mark.parametrize("key", REMOVED_QWEN38_GRAPH_KEYS)
+def test_a_removed_key_of_the_source_config_is_not_carried_into_the_package(
+    offload, tmp_path, monkeypatch, multidraft_calls, key
+):
+    assert unknown_qwen38_graph_keys(config_with_removed_key(key)["model"]["qwen38_graph"]) != []
+    package = make_package(tmp_path, config=config_with_removed_key(key))
+    _out, config, *_ = build(monkeypatch, offload, package, tmp_path)
+    qwen = config["model"]["qwen38_graph"]
+    assert unknown_qwen38_graph_keys(qwen) == []
+    assert qwen["fold"]["head_r2"] == {"filename": "head_r2/model.onnx", "session_options": HEAD_SESSION_OPTIONS}
+
+
+@pytest.mark.parametrize("layered", [False, True])
+@pytest.mark.parametrize("alias", ["mtp", "drafter"])
+def test_a_source_of_the_earlier_config_surface_is_migrated(
+    offload, tmp_path, monkeypatch, multidraft_calls, capsys, layered, alias
+):
+    config = genai_config(layered)
+    qwen = config["model"]["qwen38_graph"]
+    qwen.update(
+        target_s1_graph_id=1, target_s2_graph_id=2, head_s1_graph_id=3, head_s2_graph_id=4, prefill_chunk_tokens=2048
+    )
+    qwen["mtp"] = {"enabled": True, "prefill_head": False, "skip_refeed": True}
+    head = {
+        **qwen["fold"].pop("head_r2"),
+        "graph_id": 9,
+        "session_options": {"custom_ops_libraries": ["libs/earlier.so"]},
+    }
+    qwen["fold"].update({alias: head, "force_reject": False, "target_graph_id": 8})
+    package = make_package(tmp_path, layered=layered, config=config)
+    before = snapshot(package.root)
+
+    _out, built, *_ = build(monkeypatch, offload, package, tmp_path, layered=layered)
+
+    qwen = built["model"]["qwen38_graph"]
+    assert unknown_qwen38_graph_keys(qwen) == []
+    assert qwen["mtp"] == {"enabled": True, "prefill_head": False}
+    assert qwen["fold"] == {
+        "enabled": True,
+        "head_r2": {"filename": "head_r2/model.onnx", "session_options": HEAD_SESSION_OPTIONS},
+    }
+    assert printed_config_changes(capsys) == sorted(
+        f"genai_config: {change}"
+        for change in (
+            "dropped target_s1_graph_id",
+            "dropped target_s2_graph_id",
+            "dropped head_s1_graph_id",
+            "dropped head_s2_graph_id",
+            "dropped mtp.skip_refeed",
+            "dropped fold.force_reject",
+            "dropped fold.target_graph_id",
+            f"renamed fold.{alias} to fold.head_r2",
+            "dropped fold.head_r2.graph_id",
+            "dropped prefill_chunk_tokens (prefill.chunk is the one chunk setting)",
+        )
+    )
+    assert snapshot(package.root) == before
+
+
+def test_a_source_that_is_already_on_the_current_surface_is_not_reported_as_changed(
+    offload, tmp_path, monkeypatch, multidraft_calls, capsys
+):
+    package = make_package(tmp_path)
+    build(monkeypatch, offload, package, tmp_path)
+    assert printed_config_changes(capsys) == []
+
+
+def test_prefill_chunk_tokens_of_a_source_without_the_dense_prefill_becomes_the_chunk_the_option_replaces(
+    offload, tmp_path, monkeypatch, multidraft_calls, capsys
+):
+    config = genai_config(False)
+    qwen = config["model"]["qwen38_graph"]
+    qwen["prefill"]["enabled"] = False
+    qwen["prefill_chunk_tokens"] = 4096
+    package = make_package(tmp_path, config=config)
+    _out, built, *_ = build(monkeypatch, offload, package, tmp_path, "--prefill-chunk", "256")
+    assert printed_config_changes(capsys) == ["genai_config: renamed prefill_chunk_tokens to prefill.chunk"]
+    qwen = built["model"]["qwen38_graph"]
+    assert "prefill_chunk_tokens" not in qwen
+    assert (qwen["prefill"]["chunk"], prefill_chunk_problem(qwen)) == (256, None)
+
+
+def test_the_session_labels_of_the_weights_pool_are_not_config_keys_and_stay(
+    offload, tmp_path, monkeypatch, multidraft_calls
+):
+    extra = [("mtp", "model.mtp.norm.weight", 0), ("drafter", "model.drafter.norm.weight", 1)]
+    extra.append(("head_r2", "model.head.norm.weight", 0))
+    pool = DEFAULT_POOL + "".join(f"session {label} {name} {pid}\n" for label, name, pid in extra)
+    package = make_package(tmp_path, pool_text=pool)
+    out, *_ = build(monkeypatch, offload, package, tmp_path)
+    _records, bindings = read_pool(out / "weights_pool.txt")
+    assert [binding for binding in bindings if binding[0] in {label for label, _name, _pid in extra}] == extra
+
+
+@pytest.mark.parametrize(
+    ("edit", "message"),
+    [
+        (lambda model: model.pop("qwen38_graph"), "has no model.qwen38_graph section"),
+        (lambda model: model["qwen38_graph"].pop("fold"), r"has no model.qwen38_graph.fold.head_r2 section"),
+        (lambda model: model["qwen38_graph"]["fold"].pop("head_r2"), r"has no model.qwen38_graph.fold.head_r2 section"),
+        (lambda model: model["qwen38_graph"].pop("prefill"), "has no model.qwen38_graph.prefill section"),
+    ],
+    ids=["no qwen38_graph", "no fold", "no head_r2", "no prefill"],
+)
+def test_a_source_config_without_what_the_builder_rewrites_is_refused_before_anything_is_written(
+    offload, tmp_path, monkeypatch, multidraft_calls, edit, message
+):
+    config = genai_config(False)
+    edit(config["model"])
+    package = make_package(tmp_path, config=config)
+    out = tmp_path / "out"
+    with pytest.raises(SystemExit, match=message):
+        run_builder(monkeypatch, offload, package, out)
+    assert not out.exists()
+
+
+@pytest.mark.parametrize(
+    ("enabled", "chunk", "message"),
+    [
+        (True, 0, "--prefill-chunk must be positive"),
+        (True, -2, "--prefill-chunk must be positive"),
+        (True, 4098, r"--prefill-chunk \(4098\) must not exceed model.qwen38_graph.kv_capacity \(4096\)"),
+        (False, 0, "--prefill-chunk must be positive"),
+        (False, 513, r"--prefill-chunk \(513\) must be even"),
+    ],
+)
+def test_a_prefill_chunk_the_engine_rejects_is_refused_before_anything_is_written(
+    offload, tmp_path, monkeypatch, multidraft_calls, enabled, chunk, message
+):
+    config = genai_config(False)
+    config["model"]["qwen38_graph"]["prefill"]["enabled"] = enabled
+    package = make_package(tmp_path, config=config)
+    out = tmp_path / "out"
+    with pytest.raises(SystemExit, match=message):
+        run_builder(monkeypatch, offload, package, out, "--prefill-chunk", chunk)
+    assert not out.exists()
+
+
+@pytest.mark.parametrize(("enabled", "chunk"), [(True, 4096), (True, 513), (True, 1), (False, 2), (False, 4098)])
+def test_a_prefill_chunk_the_engine_accepts_is_written(
+    offload, tmp_path, monkeypatch, multidraft_calls, enabled, chunk
+):
+    config = genai_config(False)
+    config["model"]["qwen38_graph"]["prefill"]["enabled"] = enabled
+    package = make_package(tmp_path, config=config)
+    _out, built, *_ = build(monkeypatch, offload, package, tmp_path, "--prefill-chunk", chunk)
+    qwen = built["model"]["qwen38_graph"]
+    assert qwen["prefill"]["chunk"] == chunk
+    assert prefill_chunk_problem(qwen) is None
 
 
 # ---------------------------------------------------------------------------

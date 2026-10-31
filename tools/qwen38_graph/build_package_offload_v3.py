@@ -17,6 +17,8 @@ NVFP4 v12b package conversion (--from-package <pkg_dir> --out <dir>):
      UVA placement for 24 GiB VRAM targets.
    - Configures genai_config.json for 24 GiB or 32 GiB VRAM operation and sets the decoder's session.moe.offload.*
      options: mode, placement, the byte budgets, the expert-popularity file and per-layer resident-slot caps.
+     The model.qwen38_graph section of the source is moved to the config surface the engine accepts (see
+     package_config.py): the MTP head session is fold.head_r2, and there are no CUDA graph ids.
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ from pathlib import Path
 
 import onnx
 from onnx import helper
+from package_config import migrate_qwen38_graph_config
 from package_paths import reject_output_overlap
 
 OFFLOAD_MODES = ("required", "auto")
@@ -1069,7 +1072,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Directory containing rebased libqwen_*.so custom op libraries",
     )
     parser.add_argument("--stop-token-id", type=int, default=None)
-    parser.add_argument("--prefill-chunk", type=int, default=512)
+    parser.add_argument(
+        "--prefill-chunk",
+        type=int,
+        default=512,
+        help="model.qwen38_graph.prefill.chunk: at most the kv_capacity of the source package when it has prefill.enabled, "
+        "an even number otherwise",
+    )
     parser.add_argument(
         "--offload-mode",
         choices=OFFLOAD_MODES,
@@ -1139,6 +1148,38 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def migrate_source_config(config: dict, prefill_chunk: int) -> list[str]:
+    """Moves `model.qwen38_graph` of the source config to the current config surface and returns what it changed.
+
+    The builder rewrites `fold.head_r2.session_options` and `prefill.chunk`, so the source needs both sections. The engine
+    accepts a chunk of 1 to kv_capacity with `prefill.enabled`, and an even chunk without it.
+    """
+    qwen = config["model"].get("qwen38_graph")
+    if not isinstance(qwen, dict):
+        raise SystemExit("genai_config.json of --from-package has no model.qwen38_graph section")
+    changes = migrate_qwen38_graph_config(qwen)
+    fold = qwen.get("fold")
+    if not isinstance(fold, dict) or not isinstance(fold.get("head_r2"), dict):
+        raise SystemExit("genai_config.json of --from-package has no model.qwen38_graph.fold.head_r2 section")
+    prefill = qwen.get("prefill")
+    if not isinstance(prefill, dict):
+        raise SystemExit("genai_config.json of --from-package has no model.qwen38_graph.prefill section")
+    if prefill_chunk <= 0:
+        raise SystemExit("--prefill-chunk must be positive")
+    kv_capacity = qwen.get("kv_capacity")
+    if prefill.get("enabled"):
+        if isinstance(kv_capacity, int) and prefill_chunk > kv_capacity:
+            raise SystemExit(
+                f"--prefill-chunk ({prefill_chunk}) must not exceed model.qwen38_graph.kv_capacity ({kv_capacity})"
+            )
+    elif prefill_chunk % 2:
+        raise SystemExit(
+            f"--prefill-chunk ({prefill_chunk}) must be even: prefill.enabled is false in --from-package, "
+            "so the decode graphs ingest the prompt"
+        )
+    return changes
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
@@ -1175,6 +1216,10 @@ def main() -> None:
     for label, path in required_files.items():
         if path is not None and not path.is_file():
             raise SystemExit(f"{label} not found: {path}")
+
+    config = json.loads((source / "genai_config.json").read_text())
+    for change in migrate_source_config(config, args.prefill_chunk):
+        print(f"genai_config: {change}")
 
     # Everything that can reject the request runs before the output folder is created.
     model = onnx.load(str(target_src), load_external_data=False)
@@ -1251,7 +1296,6 @@ def main() -> None:
         source, out, args.dense_placement, args.mtp_moe_placement, args.embed_placement
     )
 
-    config = json.loads((source / "genai_config.json").read_text())
     if args.stop_token_id is not None:
         config["model"]["eos_token_id"] = [args.stop_token_id]
 
@@ -1264,8 +1308,7 @@ def main() -> None:
     config["model"]["decoder"]["session_options"].update(offload_options)
 
     qwen = config["model"]["qwen38_graph"]
-    fold_head_key = "mtp" if "mtp" in qwen["fold"] else ("drafter" if "drafter" in qwen["fold"] else "head_r2")
-    qwen["fold"][fold_head_key]["session_options"] = {
+    qwen["fold"]["head_r2"]["session_options"] = {
         "log_id": "onnxruntime-genai",
         "graph_optimization_level": "ORT_DISABLE_ALL",
         "provider_options": [
