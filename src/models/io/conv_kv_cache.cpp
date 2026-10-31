@@ -74,6 +74,9 @@ ConvKeyValueCache::ConvKeyValueCache(State& state)
     } else if (g_log.enabled && !state_.params_->search.past_present_share_buffer && kv_share_buffer_) {
       Log("info", "ConvKeyValueCache: past_present_share_buffer was forced on due to a fixed kv-cache shape in the model graph.");
     }
+    if (state_.params_->use_graph_capture && !kv_share_buffer_) {
+      throw std::runtime_error("Graph capture is not supported with past_present_share_buffer set to false.");
+    }
 
     if (kv_share_buffer_) {
       const int64_t seq_cap = fixed_kv_seq_len > 0
@@ -187,6 +190,21 @@ void ConvKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_lengt
   }
 
   // --- Update conv state cache ---
+  // A captured graph keeps reading and writing the buffers it was captured with, so keep them
+  // and copy the state over.
+  if (state_.params_->use_graph_capture) {
+    if (!conv_is_first_update_) {
+      for (int i = 0; i < conv_layer_count_; i++) {
+        if (beam_indices.empty()) {
+          ByteWrapTensor(Device(), *conv_pasts_[i]).CopyFrom(ByteWrapTensor(Device(), *conv_presents_[i]));
+        } else {
+          PickConvState(beam_indices, i);
+        }
+      }
+    }
+    conv_is_first_update_ = false;
+    return;
+  }
   if (!conv_is_first_update_) {
     for (int i = 0; i < conv_layer_count_; i++) {
       if (beam_indices.empty()) {
@@ -194,11 +212,7 @@ void ConvKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_lengt
         conv_pasts_[i] = std::move(conv_presents_[i]);
       } else {
         // Reorder conv state by beam indices
-        if (conv_type_ == Ort::TypeToTensorType<float>) {
-          PickConvState<float>(beam_indices, i);
-        } else {
-          PickConvState<Ort::Float16_t>(beam_indices, i);
-        }
+        PickConvState(beam_indices, i);
       }
       state_.inputs_[conv_input_index_ + i] = conv_pasts_[i].get();
     }
@@ -250,26 +264,19 @@ void ConvKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices, int inde
   }
 }
 
-template <typename T>
 void ConvKeyValueCache::PickConvState(DeviceSpan<int32_t> beam_indices_device, int conv_index) {
   std::span<int32_t> beam_indices = beam_indices_device.CopyDeviceToCpu();
-  auto& shape = conv_shapes_[conv_index];
-  auto block_size_per_beam = shape[1] * shape[2];  // H * L
+  const auto& shape = conv_shapes_[conv_index];
+  const size_t block_bytes_per_beam = static_cast<size_t>(shape[1] * shape[2]) * Ort::SizeOf(conv_type_);
 
-  OrtValue& present = *conv_presents_[conv_index];
-  std::unique_ptr<OrtValue> past = OrtValue::CreateTensor<T>(Allocator(), shape);
-
-  auto past_span = KeyValueCacheDetail::WrapKvCacheTensor<T>(Device(), *past, conv_type_);
-  auto present_span = KeyValueCacheDetail::WrapKvCacheTensor<T>(Device(), present, conv_type_);
-
+  // In place, so that a captured graph keeps reading the same past buffer.
+  auto past = ByteWrapTensor(Device(), *conv_pasts_[conv_index]);
+  auto present = ByteWrapTensor(Device(), *conv_presents_[conv_index]);
   for (size_t j = 0; j < beam_indices.size(); j++) {
-    int32_t beam_index = beam_indices[j];
-    auto present_data = present_span.subspan(beam_index * block_size_per_beam, block_size_per_beam);
-    auto past_data = past_span.subspan(j * block_size_per_beam, block_size_per_beam);
-    past_data.CopyFrom(present_data);
+    const size_t beam_index = static_cast<size_t>(beam_indices[j]);
+    past.subspan(j * block_bytes_per_beam, block_bytes_per_beam)
+        .CopyFrom(present.subspan(beam_index * block_bytes_per_beam, block_bytes_per_beam));
   }
-
-  conv_pasts_[conv_index] = std::move(past);
 }
 
 }  // namespace Generators
