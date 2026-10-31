@@ -175,7 +175,9 @@ std::string NormalizeQwen38ContextTier(const std::string& request);
 //  - `context_request` (ORT_QWEN38_CONTEXT_LENGTH, see NormalizeQwen38ContextTier) takes model_<tier>.onnx, else
 //    model_dynamic_ctx.onnx, else the decoder itself. The graph of a package is the 32K one, so the 32k tier tries
 //    model_32k.onnx, then the decoder, then model_dynamic_ctx.onnx. The first candidate that exists wins; when none does, a
-//    std::runtime_error names every path that was tried.
+//    std::runtime_error names every path that was tried. Because the decoder is one of the candidates, a tier that has no graph
+//    of its own is not an error: the model constructor logs the graph it took, with the kv_capacity, context_length and
+//    max_length that graph gave, when logging is enabled.
 //  - Without a context request, `mtp_drafts` (ORT_QWEN38_MTP_DRAFTS, 1..3) takes model_s<drafts + 1>.onnx next to the decoder,
 //    else under target/, else the decoder.
 // With neither, the decoder is returned as configured and nothing is looked up.
