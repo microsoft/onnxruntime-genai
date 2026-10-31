@@ -84,6 +84,26 @@ std::filesystem::path ResolveWindowsSharedLibraryPath(const std::filesystem::pat
   return path;
 }
 
+std::filesystem::path ResolveQwen38PlaneLibraryPath(const std::filesystem::path& model_root,
+                                                    const std::string& configured, bool windows_host) {
+  if (configured.empty()) return {};
+  const std::filesystem::path root = std::filesystem::weakly_canonical(model_root);
+  const std::string root_prefix = (root / "").string();
+  const auto resolve_inside_root = [&](const std::filesystem::path& candidate) {
+    std::filesystem::path resolved = std::filesystem::weakly_canonical(candidate);
+    if (resolved.string().compare(0, root_prefix.size(), root_prefix) != 0)
+      throw std::runtime_error("model.qwen38_graph.plane_library must resolve inside the model folder: " +
+                               resolved.string());
+    return resolved;
+  };
+  std::filesystem::path library = resolve_inside_root(root / configured);
+  if (windows_host) {
+    const std::filesystem::path alias = ResolveWindowsSharedLibraryPath(library);
+    if (alias != library) library = resolve_inside_root(alias);
+  }
+  return std::filesystem::exists(library) ? library : std::filesystem::path{};
+}
+
 #if defined(QWEN38_GRAPH_NO_POSIX)
 
 Qwen38Plane::Qwen38Plane(const std::filesystem::path&) { ThrowUnsupportedPlatform(); }
