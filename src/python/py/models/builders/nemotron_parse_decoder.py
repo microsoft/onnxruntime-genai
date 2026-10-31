@@ -98,7 +98,7 @@ class NemotronParseDecoderComponent(Model):
 
         hidden_states = self.make_decoder_embedding(weights.decoder)
         attention_mask = self.make_attention_mask()
-        for layer_id, layer in enumerate(weights.decoder.layers):
+        for layer_id, layer in enumerate(weights.decoder.layers[: self.num_layers]):
             hidden_states = self.make_decoder_layer(
                 layer_id, layer, hidden_states, attention_mask
             )

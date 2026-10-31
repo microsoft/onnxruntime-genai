@@ -250,7 +250,12 @@ class NemotronParseModel(Model):
         if self.ep == "cuda" and self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4}:
             # CUDA MatMulNBits cannot accept the bias attached by MatMulAddFusion.
             # TRT-RTX QDQ exports must retain this optimizer for INT4 fusion.
-            decoder["session_options"]["optimization.disable_specified_optimizers"] = "MatMulAddFusion"
+            # Keep any exclusion the base builder already set (e.g. MatMulNBitsFusion for prepacked weights).
+            key = "optimization.disable_specified_optimizers"
+            disabled = [name for name in decoder["session_options"].get(key, "").split(",") if name]
+            if "MatMulAddFusion" not in disabled:
+                disabled.append("MatMulAddFusion")
+            decoder["session_options"][key] = ",".join(disabled)
 
         search = genai_config["search"]
         search.update(num_beams=1, num_return_sequences=1, past_present_share_buffer=True)

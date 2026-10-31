@@ -21,6 +21,7 @@
 
 #include "config.h"
 #include "engine_test_doubles.h"
+#include "models/model_type.h"
 #include "models/runtime_profiles.h"
 #include "models/session_options.h"
 #include "scoped-environment-variable.h"
@@ -1880,6 +1881,26 @@ TEST(ConfigTest, PipelineOverlayMergesByModelId) {
 
   ExpectPipelineOverlayMerged(config.model.decoder.pipeline);
   ExpectPipelineOverlayMerged(config.model.vision.pipeline);
+}
+
+TEST(ConfigTest, ParsesNemotronParseFixture) {
+  const auto config_path = fs::path{__FILE__}.parent_path().parent_path().parent_path() / "configs" / "nemotron-parse";
+  Config config{config_path, std::string_view{}};
+
+  EXPECT_EQ(config.model.type, "nemotron_parse");
+  EXPECT_EQ(config.model.context_length, 1032);
+  EXPECT_TRUE(ModelType::IsVLM(config.model.type));
+  EXPECT_EQ(config.model.vision.num_visual_tokens, 3201);
+  EXPECT_EQ(config.model.vision.config_filename, "vision_processing.json");
+  EXPECT_EQ(config.model.vision.outputs.image_features,
+            "encoder_hidden_states");
+  EXPECT_EQ(config.model.decoder.prefill_sequence_length, 8);
+  EXPECT_EQ(config.model.decoder.inputs.cache_write_indices,
+            "cache_write_indices");
+  EXPECT_EQ(config.model.encoder.outputs.cross_present_key_names,
+            "cross_present.%d.key");
+  EXPECT_EQ(config.model.encoder.outputs.cross_present_value_names,
+            "cross_present.%d.value");
 }
 
 }  // namespace Generators::test
