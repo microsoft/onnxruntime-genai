@@ -131,8 +131,4 @@ size_t FixedSlotCacheManager::SlotOf(const std::shared_ptr<Request>& request) co
   return static_cast<size_t>(it - slots_.begin());
 }
 
-// ------------------------------------------------------------------------------------------------
-// Scheduler (multi-slot devices only: a device with one slot uses the Engine's static scheduler)
-// ------------------------------------------------------------------------------------------------
-
 }  // namespace Generators

@@ -270,6 +270,20 @@ TEST_F(Qwen38GraphEngineTest, TheTurnLimitCutsAnAcceptedCycleAndEndsTheLoop) {
   EXPECT_EQ(engine->GetSpeculativeStats().tokens_discarded, 1u);
 }
 
+TEST_F(Qwen38GraphEngineTest, ATurnLimitOfOneEndsOnThePromptPredictionWithoutStartingACycle) {
+  auto engine = MakeEngine();
+  auto request = Begin(*engine, Prompt(5), /*max_generated_tokens=*/1);
+
+  const auto outcome = RunToCompletion(*engine, request);
+
+  EXPECT_EQ(outcome.tokens, Expected(5, 1));
+  EXPECT_EQ(outcome.finish_reason, GenerationFinishReason::TurnLimit);
+  EXPECT_EQ(outcome.finished_events, 1u);
+  EXPECT_EQ(device_->cycles_enqueued, 0u);
+  EXPECT_EQ(device_->CallCount("wait"), 0u);
+  EXPECT_EQ(engine->GetSpeculativeStats().rounds, 0u);
+}
+
 TEST_F(Qwen38GraphEngineTest, AnEndOfSequenceTokenFirstInACycleEndsTheTurnWithoutBeingDelivered) {
   device_->overrides[6] = kEos;
   auto engine = MakeEngine();
@@ -338,6 +352,20 @@ TEST_F(Qwen38GraphEngineTest, TheSessionLimitEndsTheTurnWithTheContextLimitReaso
   EXPECT_EQ(outcome.finish_reason, GenerationFinishReason::ContextLimit);
   EXPECT_EQ(request->CurrentSequenceLength(), 8);
   EXPECT_EQ(device_->calls.back(), "advance:0");
+}
+
+TEST_F(Qwen38GraphEngineTest, ASessionThatFillsTheWholeKvCapacityEndsWithTheContextLimitReason) {
+  auto engine = MakeEngine();
+  const size_t limit = engine->GetCapabilities().max_request_length;
+  auto request = Begin(*engine, Prompt(5), /*max_generated_tokens=*/limit, /*max_session_tokens=*/limit);
+
+  const auto outcome = RunToCompletion(*engine, request);
+
+  // The device ledger throws when a cycle does not fit, so reaching the limit cleanly proves the reserved tail is honored.
+  EXPECT_EQ(outcome.failure_flags, 0u);
+  EXPECT_EQ(outcome.finish_reason, GenerationFinishReason::ContextLimit);
+  EXPECT_EQ(outcome.tokens, Expected(5, limit - 5));
+  EXPECT_EQ(request->CurrentSequenceLength(), static_cast<int64_t>(limit));
 }
 
 TEST_F(Qwen38GraphEngineTest, AStopStringEndsTheTurnAndTheWastedLookAheadCycleIsHarmless) {
@@ -1553,7 +1581,7 @@ TEST_F(Qwen38GraphEngineTest, DISABLED_RunOverheadPerCycle) {
   const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
   std::cout << "Engine::Run: " << runs << " runs, " << tokens << " events in " << seconds * 1e3 << " ms = "
             << seconds / static_cast<double>(runs) * 1e6 << " us per run" << std::endl;
-  EXPECT_EQ(tokens, generated + 0);
+  EXPECT_EQ(tokens, generated);
 }
 
 }  // namespace
