@@ -681,9 +681,10 @@ void Qwen38GraphEngine::Reset() {
 void Qwen38GraphEngine::PrepRow(int rows, int row, const void* tok, const void* pos, int add, const void* ctx_in,
                                 void* ctx_out) {
   const RowInputs& in = inputs_[rows - 1];
-  plane_.prep(stream_, params_dev_.data(), tok, pos, add, ctx_in, ctx_out, in.input_ids + 8 * row,
-              in.position_ids + 8 * row, row == 0 ? in.committed : scratch_i32_.data(), past_pos_,
-              in.ple + 2 * static_cast<size_t>(ple_width_) * row, ctl_.data());
+  plane_.Check(plane_.prep(stream_, params_dev_.data(), tok, pos, add, ctx_in, ctx_out, in.input_ids + 8 * row,
+                           in.position_ids + 8 * row, row == 0 ? in.committed : scratch_i32_.data(), past_pos_,
+                           in.ple + 2 * static_cast<size_t>(ple_width_) * row, ctl_.data()),
+               "prep");
   if (in.inputs_embeds) {
     const int embed_width = model_.config_->model.decoder.hidden_size;
     plane_.embed_rows(stream_, model_.embed_mapping_->device_data(), in.input_ids + 8 * row,
@@ -754,6 +755,16 @@ size_t Qwen38GraphEngine::PrefillChunkTokens() const {
   return fast_ ? static_cast<size_t>(fast_->chunk) : EffectiveQwen38PrefillChunkTokens(model_.config_->model.qwen38_graph);
 }
 
+void ValidateQwen38PromptTokens(std::span<const int32_t> tokens, int vocab_size) {
+  for (size_t i = 0; i < tokens.size(); ++i) {
+    if (tokens[i] < 0 || tokens[i] >= vocab_size) {
+      throw std::invalid_argument("qwen38_graph: prompt token " + std::to_string(i) + " has id " +
+                                  std::to_string(tokens[i]) + ", outside [0, " + std::to_string(vocab_size) +
+                                  ") (model.vocab_size)");
+    }
+  }
+}
+
 // ctl[3] = mute: the fold graph runs without its decode bookkeeping while it ingests prompt rows.
 void Qwen38GraphEngine::MutedPrefill(bool muted) {
   if (!fold_) return;
@@ -762,6 +773,8 @@ void Qwen38GraphEngine::MutedPrefill(bool muted) {
 }
 
 void Qwen38GraphEngine::PrefillChunk(std::span<const int32_t> tokens) {
+  // Before any device copy or state change: a rejected chunk leaves the engine as it was.
+  ValidateQwen38PromptTokens(tokens, vocab_);
   if (fast_)
     FastAppend(tokens);
   else
@@ -773,11 +786,11 @@ void Qwen38GraphEngine::PrefillChunk(std::span<const int32_t> tokens) {
 
 void Qwen38GraphEngine::StepPrefill(std::span<const int32_t> tokens) {
   if (decode_started_) throw std::logic_error("qwen38_graph: PrefillChunk after decoding started");
-  MutedPrefill(true);
   const size_t n = tokens.size();
   if (n == 0) throw std::logic_error("qwen38_graph: empty prefill chunk");
   const int R = fold_ ? verify_rows_ : 2;
   ledger_.RequireRoom(n, "the prompt", static_cast<size_t>(R + 1));
+  MutedPrefill(true);
   const size_t base = ledger_.Length();
   const Qwen38PromptRunHints prompt_run{run_hints_.ExpectedPrefillTokens(), 0};
   {
@@ -1249,7 +1262,7 @@ void Qwen38GraphEngine::Warmup() {
   if (fold_) {
     const auto& q = model_.config_->model.qwen38_graph;
     const bool head_captures_graph =
-        q.fold.head_r2.session_options ? IsGraphCaptureEnabled(*q.fold.head_r2.session_options) : target_captures_graph;
+        Qwen38HeadR2CapturesGraph(model_.config_->model.decoder.session_options, q.fold.head_r2.session_options);
     const int head_warm_calls = head_captures_graph ? (num_banks_ * 6) : num_banks_;
     ClearHead();
     SyncStream();
@@ -1369,6 +1382,11 @@ Config::SessionOptions ResolveQwen38AuxiliarySessionOptions(const Config::Sessio
     }
   }
   return options;
+}
+
+bool Qwen38HeadR2CapturesGraph(const Config::SessionOptions& decoder,
+                               const std::optional<Config::SessionOptions>& head_r2) {
+  return IsGraphCaptureEnabled(ResolveQwen38AuxiliarySessionOptions(decoder, head_r2, /*inherit=*/true));
 }
 
 Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_env) : Model{std::move(config)} {

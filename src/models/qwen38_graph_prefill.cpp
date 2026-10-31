@@ -512,8 +512,9 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
       const size_t m = std::min(max_m, n - lo);
       last_m = m;
       const Qwen38PromptRunHints prompt_run{total_expected, PromptChunkCompactExperts(pos, m)};
-      plane_.ple_rows(stream_, params_dev_.data(), d_tokens_.data() + 8 * pos, static_cast<int>(m), ctx_commit_.data(),
-                      ctx_b_.data(), f.ples.data());
+      plane_.Check(plane_.ple_rows(stream_, params_dev_.data(), d_tokens_.data() + 8 * pos, static_cast<int>(m),
+                                   ctx_commit_.data(), ctx_b_.data(), f.ples.data()),
+                   "ple_rows");
       plane_.Check(plane_.memcpy_d2d(ctx_commit_.data(), ctx_b_.data(), 16, stream_), "ctx commit");
       plane_.Check(plane_.memcpy_d2d(past_pos_ + 8 * pos, d_arange64_.data() + 8 * pos, m * 8, stream_), "past_pos");
       const int32_t meta32[4] = {
@@ -643,8 +644,9 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
     }
     const size_t m = std::min(max_m, n - lo);
     const Qwen38PromptRunHints prompt_run{total_expected, PromptChunkCompactExperts(pos, m)};
-    plane_.ple_rows(stream_, params_dev_.data(), d_tokens_.data() + 8 * pos, static_cast<int>(m), ctx_commit_.data(),
-                    ctx_b_.data(), f.ples.data());
+    plane_.Check(plane_.ple_rows(stream_, params_dev_.data(), d_tokens_.data() + 8 * pos, static_cast<int>(m),
+                                 ctx_commit_.data(), ctx_b_.data(), f.ples.data()),
+                 "ple_rows");
     plane_.Check(plane_.memcpy_d2d(ctx_commit_.data(), ctx_b_.data(), 16, stream_), "ctx commit");
     const int64_t last_row = static_cast<int64_t>(m) - 1;
     plane_.Check(plane_.memcpy_h2d(f.idx.data(), &last_row, 8, stream_), "logits_indices");

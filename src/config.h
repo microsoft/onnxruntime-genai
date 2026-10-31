@@ -805,8 +805,8 @@ struct Config {
       // Engine step (an even number, so S=2 pairs stay aligned). With `enabled` it is ingested by the dense chunked
       // prefill session, `chunk` tokens per call, and its state is handed over to the packed decode state + a batched
       // KV-only head prefill. The dense/head_kv/decode sessions share one device copy of every identical initializer
-      // (weights_pool, built by tools/qwen38_graph/build_package_v12.py). `chunk` 0 selects the default of the path in
-      // use: 2048 tokens per step, 8192 per dense chunk.
+      // (weights_pool, written by the package builders in tools/qwen38_graph/, e.g. build_package_engine_v12b.py).
+      // `chunk` 0 selects the default of the path in use: 2048 tokens per step, 8192 per dense chunk.
       struct Prefill {
         bool enabled{false};
         int chunk{0};
