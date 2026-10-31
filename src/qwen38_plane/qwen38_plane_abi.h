@@ -155,14 +155,16 @@ typedef enum Qwen38PlaneEmbeddingFormat {
 // token ids on the device, and an id outside [0, table_rows) reads row 0. Both that bound and the start of the INT8 row
 // scales (table + table_rows * width bytes) come from table_rows, the vocabulary size of the model, so the plane has no
 // vocabulary size of its own. Returns 0, including for n <= 0 (nothing is launched), or cudaErrorInvalidValue before it
-// launches anything for table_rows <= 0, width <= 0, an unknown format, or an INT8 table whose scales would not be 4-byte
+// launches anything for table_rows <= 0, width <= 0, an unknown format, a BF16 table whose width is not a multiple of 8
+// (a row is copied in 16-byte vectors; an INT8 row has no such limit), or an INT8 table whose scales would not be 4-byte
 // aligned (table_rows * width not a multiple of 4).
 typedef int (*Qwen38PlaneEmbedGatherFn)(void* stream, const void* table, long long table_rows, int format, const void* ids,
                                         void* out, int n, int width);
 
 // Optional export "qwen38_plane_embed_rows" (void; stream, table, ids, out, rows, width): the gather of libraries that predate
-// embed_gather. It reads a BF16 table of an unknown row count, so it applies no upper bound to the ids, and it does nothing
-// for a width <= 0 (it has no INT8 mode). The loader uses it only for a BF16 table when the library has no embed_gather.
+// embed_gather. It reads a BF16 table of an unknown row count, so it applies no upper bound to the ids, it does nothing
+// for a width <= 0 (it has no INT8 mode), and its width must be a multiple of 8 (the loader refuses a BF16 table of another
+// width). The loader uses it only for a BF16 table when the library has no embed_gather.
 
 // ---- Test hooks -------------------------------------------------------------------------------------------------------
 // Compiled into the library only when it is built with QWEN38_PLANE_TEST_HOOKS (the CMake option ENABLE_TESTS). They are not

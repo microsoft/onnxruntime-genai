@@ -1467,6 +1467,9 @@ QWEN38_PLANE_EXPORT int qwen38_plane_embed_gather(void* s, const void* table, lo
     return LaunchStatus();
   }
   if (format != QWEN38_PLANE_EMBEDDING_BF16) return (int)cudaErrorInvalidValue;
+  // A BF16 row is copied in 16-byte vectors: another width would leave the tail of each row unwritten and misalign every
+  // row after the first.
+  if (width % 8 != 0) return (int)cudaErrorInvalidValue;
   BeginLaunch();
   k_embed_rows<<<n, 256, 0, (cudaStream_t)s>>>((const __nv_bfloat16*)table, table_rows, (const i64*)ids, (__nv_bfloat16*)out, n,
                                                width);

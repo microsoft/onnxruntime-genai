@@ -138,8 +138,9 @@ struct Qwen38PleDescription {
   std::vector<Shard> shards;
 };
 
-// Reads a "qwen38_ple_table 1" description. Throws std::runtime_error on a wrong header, a malformed table, or a shard
-// path that is absolute or contains "..": shards must live inside the model folder.
+// Reads a "qwen38_ple_table 1" description. Throws std::runtime_error on a wrong header, a malformed table, a missing, zero or
+// non-finite scale (positive for FP8 shards, negative for INT8 shards), or a shard path that is absolute or contains "..":
+// shards must live inside the model folder.
 Qwen38PleDescription ParseQwen38PleDescription(const std::filesystem::path& table_path);
 
 // Throws std::runtime_error, naming the missing int8_ple capability and the library, when the shards of the table are INT8
@@ -157,10 +158,19 @@ enum class Qwen38EmbeddingFormat {
 // The size in bytes of a `rows` x `width` table in `format` (0 for kNone).
 size_t Qwen38EmbeddingTableBytes(Qwen38EmbeddingFormat format, long long rows, long long width);
 
+// The most that a file may be larger than the INT8 layout and still be read as that layout: the 4096-byte alignment that
+// external data can be padded to. (Two layouts that differ by no more than this cannot be told apart by size.)
+constexpr size_t kQwen38Int8EmbeddingSlackBytes = 4096;
+
 // Decides the layout of the embedding table file `table_path` of `file_bytes` bytes for a vocabulary of `rows` and a hidden
-// size of `width`: bfloat16 when the file holds that many bytes, INT8 when it holds the INT8 layout, otherwise kNone.
-// Throws std::runtime_error, naming the missing int8_embedding capability and the library, when the table is INT8 and
-// `plane` cannot gather it. The model constructor calls it when the table is mapped, i.e. at model load.
+// size of `width`: bfloat16 when the file holds at least that many bytes, INT8 when it is the size of the INT8 layout plus
+// at most kQwen38Int8EmbeddingSlackBytes, otherwise kNone. The size is all that tells the layouts apart, so a file between
+// the two sizes (a truncated bfloat16 table, or a vocabulary that is not the one of the file) is kNone, not INT8, which
+// would gather garbage from it.
+// Throws std::runtime_error when the plane cannot gather the table: when it is INT8 and `plane` lacks the int8_embedding
+// capability (the message names it and the library), when a bfloat16 table has a width that is not a multiple of 8 (rows
+// are copied in 16-byte vectors), or when the float scales that follow the int8 rows would not be 4-byte aligned
+// (rows * width is not a multiple of 4). The model constructor calls it when the table is mapped, i.e. at model load.
 Qwen38EmbeddingFormat SelectQwen38EmbeddingFormat(const Qwen38Plane& plane, const std::filesystem::path& table_path,
                                                   size_t file_bytes, long long rows, long long width);
 

@@ -356,6 +356,21 @@ TEST(Qwen38PleDescriptionTest, RejectsMalformedTables) {
   std::string too_many = "qwen38_ple_table 1\nn_heads 2\nhead_dim 4\nvocab 1 1\noffset 0 1\n";
   for (int i = 0; i < 257; ++i) too_many += "shard ple/a.bin 0 1\n";
   EXPECT_THROW(parse(too_many), std::runtime_error);
+
+  // The scale picks the decoder of the shards (negative: INT8), so a table without a usable one is refused instead of
+  // decoding every PLE row to zero or NaN.
+  const auto with_scale_line = [&](const std::string& scale_line) {
+    std::string text = kValidPleTable;
+    const std::string valid = "scale 0.5\n";
+    text.replace(text.find(valid), valid.size(), scale_line);
+    return ParseQwen38PleDescription(WriteFile(table, text));
+  };
+  EXPECT_FLOAT_EQ(with_scale_line("scale 0.5\n").params.scale, 0.5f);
+  EXPECT_FLOAT_EQ(with_scale_line("scale -0.000703105776\n").params.scale, -0.000703105776f);
+  for (const char* scale_line :
+       {"", "scale 0\n", "scale -0.0\n", "scale nan\n", "scale inf\n", "scale -inf\n", "scale 1e999\n", "scale abc\n"}) {
+    EXPECT_THROW(with_scale_line(scale_line), std::runtime_error) << "[" << scale_line << "]";
+  }
   std::error_code ec;
   std::filesystem::remove_all(dir, ec);
 }
@@ -719,6 +734,19 @@ TEST(Qwen38EmbeddingTableTest, SelectsTheLayoutOfTheFileForAnyVocabularySize) {
   EXPECT_EQ(select(19999, 1000, 16), Qwen38EmbeddingFormat::kNone);
   EXPECT_EQ(select(0, 1000, 16), Qwen38EmbeddingFormat::kNone);
 
+  // A file between the two sizes is neither layout, in particular not an INT8 table: a bfloat16 table that was cut short
+  // would otherwise gather bfloat16 bytes as int8 codes and float scales. Only the alignment of external data is tolerated.
+  EXPECT_EQ(select(20000 + kQwen38Int8EmbeddingSlackBytes, 1000, 16), Qwen38EmbeddingFormat::kInt8);
+  EXPECT_EQ(select(20000 + kQwen38Int8EmbeddingSlackBytes + 1, 1000, 16), Qwen38EmbeddingFormat::kNone);
+  EXPECT_EQ(select(25000, 1000, 16), Qwen38EmbeddingFormat::kNone);
+  EXPECT_EQ(select(31999, 1000, 16), Qwen38EmbeddingFormat::kNone);
+
+  // The dimensions of a shipped package: 248320 x 2560 is 636692480 bytes as INT8 rows and 1271398400 bytes as bfloat16, and
+  // a bfloat16 table cut to 59 % is not one of them.
+  EXPECT_EQ(select(636692480, 248320, 2560), Qwen38EmbeddingFormat::kInt8);
+  EXPECT_EQ(select(1271398400, 248320, 2560), Qwen38EmbeddingFormat::kBf16);
+  EXPECT_EQ(select(750000000, 248320, 2560), Qwen38EmbeddingFormat::kNone);
+
   // A vocabulary above the 248320 rows that the plane once assumed.
   const long long large = 248320 + 77;
   const size_t large_bf16 = Qwen38EmbeddingTableBytes(Qwen38EmbeddingFormat::kBf16, large, 8);
@@ -752,6 +780,35 @@ TEST(Qwen38EmbeddingTableTest, AnInt8TableNeedsTheInt8EmbeddingCapability) {
   Qwen38Plane capable;
   capable.capabilities = QWEN38_PLANE_CAP_INT8_EMBEDDING;
   EXPECT_EQ(SelectQwen38EmbeddingFormat(capable, file, 20000, 1000, 16), Qwen38EmbeddingFormat::kInt8);
+}
+
+TEST(Qwen38EmbeddingTableTest, ATableTheGatherCannotAddressIsRefusedAtLoad) {
+  Qwen38Plane plane;
+  plane.capabilities = QWEN38_PLANE_ALL_CAPABILITIES;
+  const std::filesystem::path file = std::filesystem::path{"package"} / "embedding.onnx.data";
+  const auto expect_refused = [&](size_t file_bytes, long long rows, long long width, const std::string& reason) {
+    try {
+      SelectQwen38EmbeddingFormat(plane, file, file_bytes, rows, width);
+      ADD_FAILURE() << "expected the table of " << rows << " x " << width << " to be refused";
+    } catch (const std::runtime_error& error) {
+      const std::string message = error.what();
+      EXPECT_NE(message.find(file.string()), std::string::npos) << message;
+      EXPECT_NE(message.find("vocab_size " + std::to_string(rows)), std::string::npos) << message;
+      EXPECT_NE(message.find("hidden_size " + std::to_string(width)), std::string::npos) << message;
+      EXPECT_NE(message.find(reason), std::string::npos) << message;
+    }
+  };
+
+  // A bfloat16 row is copied in 16-byte vectors: the last 4 values of a row of 12 would be left unwritten.
+  expect_refused(2 * 64 * 12, 64, 12, "multiple of 8");
+  // 1001 x 15 int8 values are 15015 bytes, so the float scales that follow them would not be 4-byte aligned.
+  expect_refused(1001 * (15 + 4), 1001, 15, "multiple of 4");
+
+  // What the plane can gather is not refused, and INT8 rows have no vector width.
+  EXPECT_EQ(SelectQwen38EmbeddingFormat(plane, file, 2 * 64 * 16, 64, 16), Qwen38EmbeddingFormat::kBf16);
+  EXPECT_EQ(SelectQwen38EmbeddingFormat(plane, file, 64 * (12 + 4), 64, 12), Qwen38EmbeddingFormat::kInt8);
+  // A table that is cut short is no table, whatever its width.
+  EXPECT_EQ(SelectQwen38EmbeddingFormat(plane, file, 2 * 1000 * 12 - 1, 1000, 12), Qwen38EmbeddingFormat::kNone);
 }
 
 TEST(Qwen38EmbeddingTableTest, EmbedRowsGathersThroughEmbedGatherWithTheRowCountAndLayoutOfTheTable) {
@@ -2403,6 +2460,24 @@ TEST_F(Qwen38PlaneStagedPleTest, Int8ShardsAreDecodedAsInt8ValuesWithTheMagnitud
   rig.ExpectPrepResult(6, 5, 0);
 }
 
+// The scale of the INT8 PLE tables of the packages (-0.000703105776) does not give bf16 values: every product is rounded, and
+// -128 is the most negative code.
+TEST_F(Qwen38PlaneStagedPleTest, Int8ShardsAreRoundedToBf16AtTheScaleOfAShippedPackage) {
+  ASSERT_NE(plane_->capabilities & QWEN38_PLANE_CAP_INT8_PLE, 0ull);
+  const std::array<unsigned char, StagedPleRig::kRows> codes = {0x80, 0x01, 0x7F, 0xFF};  // -128, 1, 127 and -1
+  StagedPleRig rig{*plane_, codes, -0.000703105776f};
+
+  const std::vector<int64_t> tokens = {0, 1, 2, 3};
+  ASSERT_EQ(rig.PleRows(tokens), 0);
+  const std::vector<uint16_t> gathered = rig.ReadPle(tokens.size());
+  EXPECT_EQ(gathered, rig.ExpectedPle(tokens));
+  // The first value of each row: float(code) * 0.000703105776f rounded to bfloat16 (-0.0899975, 0.000703106, 0.0892944, -0.000703106).
+  const std::array<uint16_t, 4> bf16_of_row = {0xBDB8, 0x3A38, 0x3DB7, 0xBA38};
+  for (size_t i = 0; i < tokens.size(); ++i) {
+    EXPECT_EQ(gathered[i * StagedPleRig::kRowWidth], bf16_of_row[static_cast<size_t>(tokens[i])]) << "token=" << tokens[i];
+  }
+}
+
 // The CPU embedding table file of a test: `vocab` rows of `width` values that differ from row to row, as bfloat16 rows or as
 // int8 rows followed by one float scale per row (the layouts that SelectQwen38EmbeddingFormat recognizes).
 uint32_t EmbeddingValueSeed(size_t row, size_t column) {
@@ -2420,7 +2495,7 @@ std::vector<uint8_t> MakeEmbeddingTable(int64_t vocab, int width, bool int8) {
   if (int8) {
     for (size_t row = 0; row < rows; ++row) {
       for (size_t c = 0; c < columns; ++c) {
-        table[row * columns + c] = static_cast<uint8_t>(static_cast<int8_t>(EmbeddingValueSeed(row, c) % 255u - 127u));
+        table[row * columns + c] = static_cast<uint8_t>(EmbeddingValueSeed(row, c) % 256u);  // every int8 code, -128 included
       }
       const float scale = 0.001f * static_cast<float>(1u + EmbeddingValueSeed(row, columns) % 97u);
       std::memcpy(table.data() + rows * columns + row * sizeof(float), &scale, sizeof(scale));
@@ -2547,6 +2622,17 @@ TEST_F(Qwen38PlaneEmbeddingTest, EmbedGatherAddressesABf16TableByItsOwnRowCount)
                                                   {248319, 248320, 248396, kVocab, kVocab + 1000, 0, -7});
 }
 
+// The gather kernels copy a row with the 256 threads of a block, in 16-byte chunks for bfloat16 (so a row takes more than one
+// pass from 2056 values) and one value at a time for int8 (from 257). The hidden size of the model, 2560, takes two passes as
+// bfloat16 and ten as int8; the other widths leave the second pass to a single thread.
+TEST_F(Qwen38PlaneEmbeddingTest, EmbedGatherCopiesRowsThatNeedSeveralPassesOfTheBlock) {
+  const std::vector<int64_t> ids = {0, 1, 599, 300, 600, -1, 17};
+  ExpectEmbedGatherAddressesTheTableByItsRowCount(*plane_, 600, 2560, true, ids);
+  ExpectEmbedGatherAddressesTheTableByItsRowCount(*plane_, 600, 2560, false, ids);
+  ExpectEmbedGatherAddressesTheTableByItsRowCount(*plane_, 300, 257, true, {0, 299, 150, 300});
+  ExpectEmbedGatherAddressesTheTableByItsRowCount(*plane_, 300, 2056, false, {0, 299, 150, 300});
+}
+
 TEST_F(Qwen38PlaneEmbeddingTest, EmbedGatherRejectsArgumentsThatDoNotDescribeATable) {
   PlaneStream stream{*plane_};
   PlaneBuffer table{*plane_, 4096, stream.get()};
@@ -2572,6 +2658,10 @@ TEST_F(Qwen38PlaneEmbeddingTest, EmbedGatherRejectsArgumentsThatDoNotDescribeATa
   EXPECT_EQ(gather(64, -1, 2, 16), kCudaErrorInvalidValue);
   // 3 rows of 6 int8 values are 18 bytes, so the float scales that follow them would not be aligned.
   EXPECT_EQ(gather(3, QWEN38_PLANE_EMBEDDING_INT8_ROW, 2, 6), kCudaErrorInvalidValue);
+  // A BF16 row is copied in 16-byte vectors, which an INT8 row is not.
+  EXPECT_EQ(gather(64, QWEN38_PLANE_EMBEDDING_BF16, 2, 12), kCudaErrorInvalidValue);
+  EXPECT_EQ(gather(64, QWEN38_PLANE_EMBEDDING_BF16, 2, 4), kCudaErrorInvalidValue);
+  EXPECT_EQ(gather(64, QWEN38_PLANE_EMBEDDING_INT8_ROW, 2, 12), 0);
   plane_->Check(plane_->stream_sync(stream.get()), "stream_sync(embed_gather arguments)");
 }
 

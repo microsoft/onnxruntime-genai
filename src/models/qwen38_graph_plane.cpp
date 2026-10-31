@@ -287,14 +287,26 @@ size_t Qwen38EmbeddingTableBytes(Qwen38EmbeddingFormat format, long long rows, l
 Qwen38EmbeddingFormat SelectQwen38EmbeddingFormat(const Qwen38Plane& plane, const std::filesystem::path& table_path,
                                                   size_t file_bytes, long long rows, long long width) {
   if (rows <= 0 || width <= 0) return Qwen38EmbeddingFormat::kNone;
+  const std::string geometry = " (vocab_size " + std::to_string(rows) + ", hidden_size " + std::to_string(width) + ")";
   if (file_bytes >= Qwen38EmbeddingTableBytes(Qwen38EmbeddingFormat::kBf16, rows, width)) {
+    if (width % 8 != 0) {
+      throw std::runtime_error("qwen38_graph: the bfloat16 embedding table " + table_path.string() + geometry +
+                               " cannot be gathered by the plane: it copies a row in 16-byte vectors, so hidden_size must "
+                               "be a multiple of 8");
+    }
     return Qwen38EmbeddingFormat::kBf16;
   }
-  if (file_bytes >= Qwen38EmbeddingTableBytes(Qwen38EmbeddingFormat::kInt8, rows, width)) {
-    plane.RequireCapabilities(QWEN38_PLANE_CAP_INT8_EMBEDDING, "the INT8 embedding table " + table_path.string());
-    return Qwen38EmbeddingFormat::kInt8;
+  const size_t int8_bytes = Qwen38EmbeddingTableBytes(Qwen38EmbeddingFormat::kInt8, rows, width);
+  if (file_bytes < int8_bytes || file_bytes - int8_bytes > kQwen38Int8EmbeddingSlackBytes) {
+    return Qwen38EmbeddingFormat::kNone;
   }
-  return Qwen38EmbeddingFormat::kNone;
+  plane.RequireCapabilities(QWEN38_PLANE_CAP_INT8_EMBEDDING, "the INT8 embedding table " + table_path.string());
+  if (static_cast<size_t>(rows) * static_cast<size_t>(width) % sizeof(float) != 0) {
+    throw std::runtime_error("qwen38_graph: the INT8 embedding table " + table_path.string() + geometry +
+                             " cannot be gathered by the plane: the float row scales that follow the int8 rows must be "
+                             "4-byte aligned, so vocab_size * hidden_size must be a multiple of 4");
+  }
+  return Qwen38EmbeddingFormat::kInt8;
 }
 
 PlaneBuffer::PlaneBuffer(Qwen38Plane& plane, size_t bytes, void* stream) : plane_{&plane}, bytes_{bytes} {
@@ -428,6 +440,11 @@ Qwen38PleDescription ParseQwen38PleDescription(const std::filesystem::path& tabl
       params.heads_per_ngram > params.n_heads || !has_scale || !has_mult || !has_vocab || !has_offset ||
       description.shards.empty() || description.shards.size() > kMaxPleShards)
     throw std::runtime_error("qwen38_graph: malformed PLE table " + table_path.string());
+  // The scale is the FP8 dequantization scale, or the negative of the INT8 one (the sign selects the decoder), so a missing
+  // line (0), a zero or a non-finite scale would decode every PLE row to zero or NaN without a diagnostic.
+  if (params.scale == 0.0f || !std::isfinite(params.scale))
+    throw std::runtime_error("qwen38_graph: the PLE table " + table_path.string() +
+                             " needs a finite, non-zero scale line (positive for FP8 shards, negative for INT8 shards)");
   long long total_rows = 0;
   for (const auto& shard : description.shards) {
     if (shard.rows <= 0 || shard.rows > std::numeric_limits<long long>::max() - total_rows)
