@@ -185,6 +185,61 @@ def test_random_matrix_is_seeded_and_every_prompt_is_referenced():
     }
 
 
+def test_snapshot_policy_plan_revisits_both_endpoints_without_changing_tiers():
+    specs, scenarios = qa.make_plan(profile(), [25], ["growing-chain"], 42, 1, 4)
+    assert [spec.length for spec in specs.values()] == [37, 45, 53, 61]
+    assert [scenario.actions[-1].prompts for scenario in scenarios] == [("chain-0",), ("chain-2",)]
+    assert scenarios[0].actions[:-1] == scenarios[1].actions[:-1]
+
+
+def test_tier_pressure_staggers_prefill_after_decode_and_keeps_uncached_control():
+    specs, scenarios = qa.make_plan(profile(), [25], ["tier-pressure"], 42, 1, 3)
+    assert scenarios[0].uncached_control
+    assert len(scenarios[0].actions) == 4
+    assert all(action.stagger_tokens == 1 for action in scenarios[0].actions[1:])
+    prompts, _ = qa.materialize_prompts(CorpusTokenizer(), specs, "body", "task")
+    assert len({tokens[:4] for name, tokens in prompts.items() if name.startswith("tier-churn-")}) == 3
+
+
+def test_history_capacity_revisits_every_distinct_history_without_requiring_full_retention():
+    specs, scenarios = qa.make_plan(profile(), [25], ["history-capacity"], 42, 1, 4)
+    actions = scenarios[0].actions
+    assert actions[:4] == actions[4:]
+    assert all(action.check == "safe" for action in actions)
+    prompts, _ = qa.materialize_prompts(CorpusTokenizer(), specs, "body", "task")
+    assert len({tokens[:4] for tokens in prompts.values()}) == 4
+
+
+def test_timing_summary_retains_failed_repetitions_and_reports_sample_counts():
+    scenarios = [
+        {
+            "name": "pressure",
+            "status": status,
+            "steps": [
+                {
+                    "rows": [
+                        {
+                            "cancelled": False,
+                            "elapsed_s": duration,
+                            "ttft_s": None,
+                            "inter_token_s": [0.01, duration],
+                            "tokens": [7, 8, 9],
+                        }
+                    ],
+                    "speculative_stats": {"elapsed_s": duration},
+                }
+            ],
+        }
+        for status, duration in (("passed", 1.0), ("failed", 3.0))
+    ]
+    summary = qa.timing_summary(scenarios)["pressure"]
+    assert summary["failed_repetitions"] == 1
+    assert summary["request"] == {"samples": 2, "p50_s": 1.0, "p95_s": 3.0, "p99_s": 3.0}
+    assert summary["inter_token"]["samples"] == 4
+    assert summary["ttft"]["p99_s"] is None
+    assert summary["generated_tokens_per_s"] == 1.5
+
+
 def test_pressure_churn_exceeds_entire_configured_block_budget():
     specs, scenarios = qa.make_plan(profile(), [25], ["pressure"], 42, 1, 2, 2, 20)
     pressure = scenarios[0]
@@ -661,7 +716,7 @@ def test_orchestrator_releases_regular_model_and_collects_independent_failures(
                 wrong_cached = failure == "cached" and self.model.number == 1 and action.check == "cold"
                 wrong_reference = failure == "reference" and self.model.number == 0 and self.reference_runs == 1
                 token = 8 if wrong_cached or wrong_reference else 7
-                rows.append({**row(cached, length, (token,)), "prompt": name})
+                rows.append({**row(cached, length, (token,)), "prompt": name, "elapsed_s": 0.2, "inter_token_s": []})
             if self.model.number == 0:
                 self.reference_runs += 1
             return rows, {"delta": {"draft_tokens_proposed": 0}}
@@ -675,6 +730,7 @@ def test_orchestrator_releases_regular_model_and_collects_independent_failures(
         user_prompt="task",
         generated_tokens=1,
         reference_repeats=reference_repeats,
+        scenario_repeats=2,
         pressure_num_blocks=20,
         output=tmp_path / "report.json",
         max_warm_ttft_ratio=None,
@@ -696,11 +752,14 @@ def test_orchestrator_releases_regular_model_and_collects_independent_failures(
             assert len(prompt["tokens"]) == prompt["length"]
             assert qa.token_digest(prompt["tokens"]) == prompt["sha256"]
     assert len(entry["references"]) == len(entry["prompts"]) * reference_repeats
+    assert len(entry["scenarios"]) == 2 * len(scenarios)
+    assert {scenario["repeat"] for scenario in entry["scenarios"]} == {0, 1}
     if failure == "cached":
         assert entry["scenarios"][0]["status"] == "failed"
         assert len(entry["scenarios"][0]["steps"]) == 3
         assert entry["scenarios"][0]["steps"][0]["rows"][0]["checks"]["parity"] is False
-        assert entry["scenarios"][1]["status"] == "passed"
+        assert entry["scenarios"][1]["status"] == "failed"
+        assert all(scenario["status"] == "passed" for scenario in entry["scenarios"][2:])
     else:
         assert all(scenario["status"] == "passed" for scenario in entry["scenarios"])
     if failure == "reference":
@@ -867,6 +926,23 @@ def test_driver_routes_concurrent_events_to_the_correct_request():
     engine = FakeEngine([lambda current: [event(current, request_index=1, token=8), event(current)]])
     rows, _ = driver(engine).run(qa.Action(("p", "q")))
     assert {item["prompt"]: item["tokens"] for item in rows} == {"p": [7], "q": [8]}
+    assert all(request.closed == 1 for request in engine.requests)
+
+
+def test_driver_admits_prefill_after_first_decode_token_and_records_inter_token_time(monkeypatch):
+    def finish(current):
+        assert len(current.requests) == 2
+        first = event(current)
+        first.usage.generated_tokens = 2
+        return [first, event(current, request_index=1)]
+
+    engine = FakeEngine([lambda current: [event(current, flags=Flags.TOKEN)], finish])
+    ticks = iter(range(100))
+    monkeypatch.setattr(qa.time, "perf_counter", lambda: next(ticks) / 10)
+    rows, _ = driver(engine).run(qa.Action(("p", "q"), stagger_tokens=1))
+    assert rows[0]["tokens"] == [7, 7]
+    assert len(rows[0]["inter_token_s"]) == 1
+    assert rows[0]["inter_token_s"][0] > 0
     assert all(request.closed == 1 for request in engine.requests)
 
 

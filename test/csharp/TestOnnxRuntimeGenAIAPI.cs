@@ -17,19 +17,6 @@ using Microsoft.ML.OnnxRuntime;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 {
-    public sealed class OnnxRuntimeGenAIFixture : IDisposable
-    {
-        private readonly OgaHandle ogaHandle = new OgaHandle();
-
-        public void Dispose() => ogaHandle.Dispose();
-    }
-
-    [CollectionDefinition(nameof(OnnxRuntimeGenAICollection))]
-    public sealed class OnnxRuntimeGenAICollection : ICollectionFixture<OnnxRuntimeGenAIFixture>
-    {
-    }
-
-    [Collection(nameof(OnnxRuntimeGenAICollection))]
     public class OnnxRuntimeGenAITests
     {
         private readonly ITestOutputHelper output;
@@ -206,6 +193,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             CreateCollectibleTestInstances();
 
             using var model = new Model(_tinyRandomGpt2ModelPath);
+            using var tokenizer = new Tokenizer(model);
             using var generatorParams = new GeneratorParams(model);
             generatorParams.SetSearchOption("max_length", 10);
             using var generator = new Generator(model, generatorParams);
@@ -214,6 +202,8 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             GC.Collect();
             GC.WaitForPendingFinalizers();
 
+            using var tokens = tokenizer.Encode("test");
+            Assert.NotEmpty(tokens[0].ToArray());
             generator.GenerateNextToken();
             Assert.Equal(5, generator.GetSequence(0).Length);
         }

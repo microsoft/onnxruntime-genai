@@ -9,7 +9,6 @@ using Xunit;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 {
-    [Collection(nameof(OnnxRuntimeGenAICollection))]
     public class ExampleSearchOptionsTests
     {
         private static readonly string ModelPath = Path.Combine(

@@ -1925,14 +1925,85 @@ struct NativeDecisionSession {
   std::vector<KevStateBinding> state_bindings;
   bool flat{};
   OgaModelResult Decide(const OgaStructuredRequest& request);
+  OgaModelResult DecideImpl(const OgaStructuredRequest& request,
+                            bool allow_cpu_grouping);
 };
 
 OgaModelResult NativeDecisionSession::Decide(const OgaStructuredRequest& request) {
   std::lock_guard operation_lock(operation_mutex);
+  return DecideImpl(request, true);
+}
+
+OgaModelResult NativeDecisionSession::DecideImpl(
+    const OgaStructuredRequest& request, bool allow_cpu_grouping) {
   if (request.questions.empty()) throw std::invalid_argument("questions must be non-empty");
   if (request.temperature != 1.0f)
     throw std::invalid_argument(
         "temperature is supported only by ranking sessions");
+  if (allow_cpu_grouping && !backbone.UsesCuda() &&
+      request.questions.size() >= 4) {
+    const auto state_size = RenderKev(request.state).size();
+    std::vector<size_t> costs;
+    costs.reserve(request.questions.size());
+    for (const auto& [_, question] : request.questions) {
+      size_t cost = state_size + RenderKev(question.instructions).size();
+      const auto candidates = KevCandidates(question);
+      for (const auto& text : candidates.texts) cost += text.size();
+      costs.push_back(cost);
+    }
+    std::vector<size_t> order(request.questions.size());
+    std::iota(order.begin(), order.end(), size_t{});
+    std::stable_sort(
+        order.begin(), order.end(),
+        [&](size_t left, size_t right) {
+          return costs[left] < costs[right];
+        });
+    const auto short_count = order.size() / 2;
+    const auto long_count = order.size() - short_count;
+    const auto original_work =
+        static_cast<long double>(
+            *std::max_element(costs.begin(), costs.end())) *
+        costs.size();
+    const auto grouped_work =
+        static_cast<long double>(costs[order[short_count - 1]]) *
+            short_count +
+        static_cast<long double>(costs[order.back()]) * long_count;
+    const bool worthwhile =
+        original_work > grouped_work &&
+        (original_work - grouped_work) * 10 >= original_work;
+    if (!worthwhile)
+      return DecideImpl(request, false);
+
+    OgaStructuredRequest short_request{
+        request.state, {}, request.temperature};
+    OgaStructuredRequest long_request{
+        request.state, {}, request.temperature};
+    for (size_t rank = 0; rank < order.size(); ++rank) {
+      auto& destination =
+          rank < short_count ? short_request : long_request;
+      destination.questions.push_back(request.questions[order[rank]]);
+    }
+    auto short_result = DecideImpl(short_request, false);
+    auto long_result = DecideImpl(long_request, false);
+    std::vector<std::optional<OgaAnswer>> answers(request.questions.size());
+    for (size_t rank = 0; rank < short_result.answers.size(); ++rank)
+      answers[order[rank]] =
+          std::move(short_result.answers[rank].second);
+    for (size_t rank = 0; rank < long_result.answers.size(); ++rank)
+      answers[order[short_count + rank]] =
+          std::move(long_result.answers[rank].second);
+    OgaModelResult result{"kev", {}};
+    result.answers.reserve(request.questions.size());
+    for (size_t index = 0; index < request.questions.size(); ++index) {
+      if (!answers[index])
+        throw std::runtime_error(
+            "grouped KEV result is missing answer at index " +
+            std::to_string(index));
+      result.answers.emplace_back(
+          request.questions[index].first, std::move(*answers[index]));
+    }
+    return result;
+  }
   auto encode = [&](std::string text) {
     static const std::regex delimiter(R"(<\|([A-Za-z0-9_]+)\|>)");
     text = std::regex_replace(text, delimiter, "<¦$1¦>");
@@ -2043,7 +2114,7 @@ OgaModelResult NativeDecisionSession::Decide(const OgaStructuredRequest& request
         reinterpret_cast<const char*>(state_value.tokens.data()),
         state_value.tokens.size() * sizeof(state_value.tokens.front()));
     CachedKevPrefix prefix;
-    if (!prefix_cache.Get(prefix_key, prefix)) {
+    if (prefix.states.empty() && !prefix_cache.Get(prefix_key, prefix)) {
       TokenBatch prefix_batch;
       prefix_batch.rows = 1;
       prefix_batch.width = state_value.tokens.size();

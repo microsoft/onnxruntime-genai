@@ -772,9 +772,13 @@ class EngineRunTest : public ::testing::Test {
 TEST(EngineSnapshotCacheTest, PolicyPreservesLegacyDefaultsAndIsOwnedByTheEngine) {
   auto model = CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-composite");
   auto& batching = *model->config_->engine.dynamic_batching;
-  EXPECT_TRUE(batching.prefix_caching);
+  EXPECT_FALSE(batching.prefix_caching.has_value());
   auto no_budget = Engine::CreateDependencies(model);
   EXPECT_NE(no_budget.snapshot_cache, nullptr);
+  batching.snapshot_cache.ram_bytes = 1024;
+  auto implicit_enabled = Engine::CreateDependencies(model);
+  EXPECT_NE(implicit_enabled.snapshot_cache, nullptr);
+  batching.snapshot_cache.ram_bytes = 0;
   batching.snapshot_cache.explicitly_set = true;
   auto explicit_zero = Engine::CreateDependencies(model);
   EXPECT_EQ(explicit_zero.snapshot_cache, nullptr);

@@ -829,7 +829,7 @@ std::shared_ptr<const Dflash2PrefixCheckpoint> Dflash2Drafter::CapturePrefix(
     const Request* request, size_t token_count) {
   const auto& batching = model_->config_->engine.dynamic_batching;
   if (!CanCapturePrefix(request, token_count) || !batching ||
-      !batching->prefix_caching || batching->dflash2_max_snapshots == 0 ||
+      !batching->prefix_caching.value_or(true) || batching->dflash2_max_snapshots == 0 ||
       !prefix_snapshot_cache_) {
     return nullptr;
   }

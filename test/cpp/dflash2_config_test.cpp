@@ -1469,8 +1469,12 @@ TEST_P(Dflash2StorageRestoreTest, ExecutesWindowedRestoreAcrossRingWrap) {
         .request = source, .aux_row_count = 8, .first_position = position, .anchor_token = 11, .draft_eligible = true, .wants_drafts = true}};
     ASSERT_TRUE(drafter.Propose(aux, feeds, proposals));
   }
+  model->config_->engine.dynamic_batching->prefix_caching.reset();
   auto checkpoint = drafter.CapturePrefix(source, 24);
   ASSERT_NE(checkpoint, nullptr);
+  model->config_->engine.dynamic_batching->prefix_caching = false;
+  EXPECT_EQ(drafter.CapturePrefix(source, 24), nullptr);
+  model->config_->engine.dynamic_batching->prefix_caching.reset();
   EXPECT_EQ(checkpoint->ring_blocks, ring_blocks);
   Tensor next_aux{GetDeviceInterface(DeviceType::CPU), Ort::TypeToTensorType<float>};
   next_aux.CreateTensor(std::array<int64_t, 2>{1, 1});

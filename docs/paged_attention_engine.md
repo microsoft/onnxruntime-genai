@@ -339,6 +339,10 @@ Adjacent disk ranges share transfer-buffer batches instead of synchronizing per
 ring block, and capture flushes once before publishing the complete snapshot.
 Disk I/O remains synchronous and can increase inference-loop latency; budgets
 are capacity limits, not latency guarantees.
+Treat explicit RAM/disk tiering as a **latency-tolerant opt-in** until the exact
+deployment has been qualified under sustained pressure. Allocation, copies,
+disk I/O, synchronization and source release run on the Engine loop and can
+delay unrelated decoding requests. No bounded pinned-buffer pool is provided.
 An operational disk allocation or demotion failure disables further disk writes
 for that Engine and logs a warning when warning logging is enabled. Recreating the
 Engine is required to re-enable disk writes. Existing disk snapshots remain readable,
@@ -392,6 +396,49 @@ configured and effective budgets, staged peak payload occupancy, transfer
 latencies, and request latency with logging disabled for timing measurements.
 CPU results and measurements from an earlier storage implementation do not
 qualify CUDA transfers or the revised policy.
+
+`examples/python/engine/prefix-cache-qa.py` retains repeatable `growing-chain`
+and `branching` scenarios for eviction-policy comparisons, and `tier-pressure`
+for new prefill admissions after a peer starts decoding. `history-capacity`
+revisits distinct histories after filling the cache without assuming they all
+remain resident. For example:
+
+```bash
+python examples/python/engine/prefix-cache-qa.py --model-path <configured-model> \
+  --suites growing-chain branching tier-pressure history-capacity --scenario-repeats 5 \
+  --lengths 2561 4097 --chunk-sizes 512 --max-batch-size 16 --num-blocks 256 \
+  --pressure-requests 6 --generated-tokens 64 --reference-repeats 2 \
+  --build-label <source-and-policy-identity> --output <report.json>
+```
+
+Each repetition uses a fresh Engine; every output and failing repetition remains
+in the JSON. Reports include raw request/TTFT/inter-token timings, nearest-rank
+p50/p95/p99, sample counts, aggregate generation throughput, cached tokens and
+speculative counters. Inter-token intervals are host-observed event arrival
+gaps, including Engine stalls and event batching, not individual GPU kernel times.
+Small sample counts do not establish a reliable p99 distribution. No warmup
+repetition is silently excluded.
+
+Compare victim selection on otherwise identical binaries at equal **effective**
+snapshot capacity, with `snapshot_cache` omitted; record reservation diagnostics
+separately from logging-disabled timing runs. Compare tier placement separately
+against that device-resident policy, not only against snapshots disabled.
+Under a fixed total KV byte budget, report effective target blocks and retained
+histories alongside throughput and tail latency. These scripts do not by
+themselves establish equal capacities or infer a numerical root cause from
+cache-disabled failures; run base and head on the same prompts and CUDA stack.
+Concurrent exact-output qualification remains tracked separately in #2698.
+
+CUDA graph qualification uses the parameterized
+`SnapshotTiers/Dflash2GraphRestoreTest.*` cases for explicit VRAM, RAM, disk and
+mixed placement. The mixed case creates three boundaries and revisits the older
+RAM/disk snapshots after demotion. Set `D_FLASH2_GRAPH_TEST_MODEL` to a
+graph-enabled Qwen DFlash2 package (256-token blocks, 512-token prefill), and
+`D_FLASH2_GRAPH_TEST_REQUIRED=1` to fail rather than skip if the model is missing.
+The Linux and Windows CUDA build workflows accept the `dflash2_graph_model`
+manual-dispatch input for this qualification. The package must already be
+provisioned on the runner; ordinary CI without it still skips these real-model
+cases and must not be reported as real CUDA graph qualification.
 
 The generic configuration and shared Engine ownership establish the policy for
 future snapshot-producing components without creating component-specific controls.

@@ -2875,7 +2875,6 @@ struct DynamicBatching_Element : JSON::Element {
       v_->max_scheduled_tokens = static_cast<size_t>(parsed_value);
     } else if (name == "prefix_caching") {
       v_->prefix_caching = JSON::Get<bool>(value);
-      v_->prefix_caching_explicitly_set = true;
     } else if (name == "max_snapshots") {
       const auto parsed_value = SafeDoubleToInt(JSON::Get<double>(value), name);
       if (parsed_value < 0) throw std::out_of_range("max_snapshots must be >= 0");
@@ -3726,10 +3725,7 @@ void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device) {
     if (batching.num_blocks) effective.num_blocks = batching.num_blocks;
     if (batching.max_batch_size) effective.max_batch_size = *batching.max_batch_size;
     if (batching.max_scheduled_tokens) effective.max_scheduled_tokens = *batching.max_scheduled_tokens;
-    if (batching.prefix_caching) {
-      effective.prefix_caching = *batching.prefix_caching;
-      effective.prefix_caching_explicitly_set = true;
-    }
+    if (batching.prefix_caching) effective.prefix_caching = *batching.prefix_caching;
     if (batching.max_snapshots) effective.max_snapshots = *batching.max_snapshots;
     if (batching.snapshot_cache) effective.snapshot_cache = *batching.snapshot_cache;
     if (batching.dflash2_max_snapshots) effective.dflash2_max_snapshots = *batching.dflash2_max_snapshots;
