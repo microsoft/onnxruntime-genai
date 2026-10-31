@@ -44,6 +44,36 @@ def host_memory_stats():
     return stats
 
 
+def acceptance_stats(before, after, rounds):
+    """Accepted-prefix-length histogram of one run and the acceptance rates derived from it.
+
+    Bin i of Engine.get_speculative_stats()["acceptance_length_histogram"] counts the rounds that accepted exactly i drafts.
+    Every bin is kept: rounds that propose different numbers of drafts (for example 3 and 7) fill different bins, so the
+    histogram cannot be sized from the average proposal width. pos[k - 1] is the share of all rounds that accepted at least k
+    drafts, cond[k - 1] the share of the rounds that accepted at least k - 1 drafts and also accepted a k-th one.
+    """
+    before_hist = before.get("acceptance_length_histogram")
+    after_hist = after.get("acceptance_length_histogram")
+    if not before_hist or not after_hist or len(before_hist) != len(after_hist):
+        raise RuntimeError(
+            f"acceptance_length_histogram must be present and equally long before and after the run, got {before_hist} and {after_hist}"
+        )
+    accept_hist = [int(end) - int(start) for start, end in zip(before_hist, after_hist, strict=True)]
+    if min(accept_hist) < 0 or sum(accept_hist) != rounds:
+        raise RuntimeError(
+            f"acceptance histogram delta {accept_hist} does not account for the {rounds} rounds of the run"
+        )
+    pos_accept_rates = []
+    cond_accept_rates = []
+    prev_ge = rounds
+    for k_pos in range(1, len(accept_hist)):
+        ge_k = sum(accept_hist[k_pos:])
+        pos_accept_rates.append(ge_k / rounds if rounds else 0.0)
+        cond_accept_rates.append(ge_k / prev_ge if prev_ge else 0.0)
+        prev_ge = ge_k
+    return accept_hist, pos_accept_rates, cond_accept_rates
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("model")
@@ -98,22 +128,7 @@ def main():
             accepted = after["draft_tokens_accepted"] - before["draft_tokens_accepted"]
             proposed = after["draft_tokens_proposed"] - before["draft_tokens_proposed"]
             head_calls = after["draft_forward_passes"] - before["draft_forward_passes"]
-            before_hist = before.get("acceptance_length_histogram", [])
-            after_hist = after.get("acceptance_length_histogram", [])
-            drafts_per_round = round(proposed / rounds) if (rounds and proposed) else 3
-            max_bins = max(4, drafts_per_round + 1)
-            hist_len = min(max_bins, len(after_hist), len(before_hist))
-            accept_hist = [after_hist[i] - before_hist[i] for i in range(hist_len)]
-            while len(accept_hist) < max_bins:
-                accept_hist.append(0)
-            pos_accept_rates = []
-            cond_accept_rates = []
-            prev_ge = rounds
-            for k_pos in range(1, max_bins):
-                ge_k = sum(accept_hist[k_pos:])
-                pos_accept_rates.append(ge_k / rounds if rounds else 0.0)
-                cond_accept_rates.append(ge_k / prev_ge if prev_ge else 0.0)
-                prev_ge = ge_k
+            accept_hist, pos_accept_rates, cond_accept_rates = acceptance_stats(before, after, rounds)
             record = {
                 "label": (
                     "warmup" if index == 0 and not skip_warmup else f"run{index if not skip_warmup else index + 1}"
