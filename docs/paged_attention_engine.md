@@ -2365,10 +2365,14 @@ token. The device holds `model.qwen38_graph.max_batch_size` slots (default 1), o
   `fold.ctx_commit`, `fold.ctx_a` and `fold.ptrs`. The engine owns a device buffer for each of them and for nothing else, so
   when it builds the target it refuses a model with any other `fold.*` input, such as the `fold.ctx_b` of the node of an earlier
   export, with a `std::runtime_error` that names the input; export the model package again for the contract.
-- The compact `state_update` replay rewrites the recurrent, convolution and indexer state of a slot in place after a partial
-  acceptance. A `CausalConvWithState` state is replayed in either physical layout, `[batch, channels, history]` (what the
-  exporter writes) or `[batch, history, channels]`: `ValidateQwen38ReplayDescriptor` takes the channel count from the last
-  dimension of the `state_update` value, finds the layout from the dimension of the state that has it, and
+- The compact `state_update` replay corrects the recurrent, convolution and indexer state of a slot after a partial
+  acceptance. The verify step reads the state bank `k` and writes the state it ends in, after all of its rows, to the other
+  bank `k ^ 1` (the two banks alternate from one cycle to the next); the replay recomputes the state of the rows that were
+  accepted from bank `k`, which the step left untouched, and the updates the step captured, and writes it over the state in
+  bank `k ^ 1`, so it reads and writes different buffers. A `CausalConvWithState` state is replayed in either physical layout,
+  `[batch, channels, history]` (what the exporter writes) or `[batch, history, channels]`: `ValidateQwen38ReplayDescriptor`
+  takes the channel count from the last dimension of the `state_update` value, finds the layout from the dimension of the
+  state that has it, and
   `MakeQwen38ConvReplayDescriptor` passes it to the plane in `Qwen38StateReplayDesc::layout`. A state with as many steps as
   channels cannot be told apart and is taken as channel-first. Only a package with a history-first conv state needs a plane
   library with the `conv_history_first_replay` capability; the model checks it while it builds the target, before any request,
