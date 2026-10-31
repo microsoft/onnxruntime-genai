@@ -21,6 +21,8 @@ namespace Generators {
 
 int64_t SafeDoubleToInt64(double x, std::string_view name);
 
+namespace {
+
 void InheritNamedStrings(const std::vector<Config::NamedString>& parent,
                          std::vector<Config::NamedString>& child) {
   for (const auto& parent_entry : parent) {
@@ -34,8 +36,6 @@ void InheritNamedStrings(const std::vector<Config::NamedString>& parent,
     }
   }
 }
-
-namespace {
 
 void InheritProviderOptions(const Config::SessionOptions& parent,
                             Config::SessionOptions& child) {

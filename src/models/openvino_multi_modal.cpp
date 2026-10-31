@@ -3,8 +3,23 @@
 
 #include "generator/generators.h"
 #include "openvino_multi_modal.h"
+#include <algorithm>
 
 namespace Generators {
+
+namespace {
+
+// Appends vision run-option entries whose keys the stage doesn't set, so stage entries win.
+void InheritRunOptionEntries(const Config::RunOptions& parent, Config::RunOptions& child) {
+  for (const auto& entry : parent) {
+    const bool overridden = std::any_of(child.begin(), child.end(), [&entry](const Config::NamedString& own) {
+      return own.first == entry.first;
+    });
+    if (!overridden) child.push_back(entry);
+  }
+}
+
+}  // namespace
 
 const Config::SessionOptions& GetOpenVINOVisionStageSessionOptions(const Config& config,
                                                                    const Config::Model::Vision::PipelineModel& stage) {
@@ -17,7 +32,7 @@ Config::RunOptions GetOpenVINOVisionStageRunOptions(const Config& config,
                                                     const Config::Model::Vision::PipelineModel& stage) {
   auto options = stage.run_options.value_or(Config::RunOptions{});
   if (config.model.vision.run_options) {
-    InheritNamedStrings(*config.model.vision.run_options, options);
+    InheritRunOptionEntries(*config.model.vision.run_options, options);
   }
   return options;
 }
