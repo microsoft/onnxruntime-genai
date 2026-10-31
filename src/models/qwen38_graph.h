@@ -591,7 +591,7 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
 
   uint8_t* ctl_slot(int slot) const { return ctl_.data() + static_cast<size_t>(slot) * kCtlWordsPerSlot * sizeof(int64_t); }
   uint8_t* ctx_commit_slot(int slot) const { return ctx_commit_.data() + static_cast<size_t>(slot) * 2 * sizeof(int64_t); }
-  uint8_t* ctx_a_slot(int slot) const { return ctx_a_.data() + static_cast<size_t>(slot) * kMaxVerifyRows * 2 * sizeof(int64_t); }
+  uint8_t* ctx_a_slot(int slot) const { return ctx_a_.data() + static_cast<size_t>(slot) * kFoldCtxAWords * sizeof(int64_t); }
   uint8_t* ctx_b_slot(int slot) const { return ctx_b_.data() + static_cast<size_t>(slot) * 2 * sizeof(int64_t); }
   int64_t* result_ring_slot(int slot) const { return result_host_ + static_cast<size_t>(slot) * kRing * 8; }
   uint8_t* d_tokens_slot(int slot) const { return d_tokens_.data() + static_cast<size_t>(slot) * token_slots_ * sizeof(int64_t); }
@@ -637,6 +637,13 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
                 "every request slot needs a bit in the slot mask of a Run");
   static constexpr int kFoldCtlWords = static_cast<int>(kCtlWordsPerSlot);  // int64 words of ctl_ per slot
   static constexpr int kFoldCtxCommitWords = 2;                             // int64 words of ctx_commit_ per slot
+  // int64 words of ctx_a_ per slot (the n-gram contexts of the verify rows, 2 per row): always the room of the largest row
+  // count, so that the stride does not depend on verify_rows_. It is the stride that the plane's batched prep writes slot
+  // s at, that ctx_a_slot() and the per-slot views use, and that SpeculativePrefixCommit derives from the size of its
+  // prefixes input (words / slots), which is why the batched view of fold.ctx_a spans every slot at this width.
+  static constexpr int kFoldCtxAWords = 2 * kMaxVerifyRows;
+  static_assert(kFoldCtxAWords == QWEN38_PLANE_CTX_WORDS_PER_SLOT,
+                "the prep kernels write the contexts of slot s at s * QWEN38_PLANE_CTX_WORDS_PER_SLOT");
   static constexpr int kRing = 64;
   static constexpr int kArgmaxBlocks = 16;
 

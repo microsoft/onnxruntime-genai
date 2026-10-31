@@ -590,9 +590,9 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
   // token, [2] draft_0 and [8] .. [13] draft_1 .. draft_6 for the S=3 .. S=8 multi-draft verify.
   ctl_ = PlaneBuffer(plane_, static_cast<size_t>(max_batch_) * kCtlWordsPerSlot * sizeof(int64_t), stream_);
   ctx_commit_ = PlaneBuffer(plane_, static_cast<size_t>(max_batch_) * 2 * sizeof(int64_t), stream_);
-  // Per slot, ctx_a_ holds kMaxVerifyRows contiguous 2-int64 row contexts (rows 0 .. 7); ctx_b_ is row 1's buffer (also aliased
-  // at ctx_a_ + 16 bytes).
-  ctx_a_ = PlaneBuffer(plane_, static_cast<size_t>(max_batch_) * kMaxVerifyRows * 2 * sizeof(int64_t), stream_);
+  // Per slot, ctx_a_ holds kFoldCtxAWords words, the 2-int64 contexts of the verify rows 0 .. 7; ctx_b_ is row 1's buffer (also
+  // aliased at ctx_a_ + 16 bytes).
+  ctx_a_ = PlaneBuffer(plane_, static_cast<size_t>(max_batch_) * kFoldCtxAWords * sizeof(int64_t), stream_);
   ctx_b_ = PlaneBuffer(plane_, static_cast<size_t>(max_batch_) * 2 * sizeof(int64_t), stream_);
   if (fold_) BuildHeadState();  // the fold model binds the head state
   BuildTarget();
@@ -1405,15 +1405,14 @@ void Qwen38GraphEngine::BuildTarget() {
                            in_bank.tensors[name]->type);
               break;
             case Kind::kFold:
-              // The slots lie kFoldCtlWords, kFoldCtxCommitWords and 2 * kMaxVerifyRows words apart whatever the verify width,
-              // as the plane prepares them (QWEN38_PLANE_CTX_WORDS_PER_SLOT), and the op derives the stride of a slot from the
-              // size of its view.
+              // The slots lie kFoldCtlWords, kFoldCtxCommitWords and kFoldCtxAWords words apart whatever the verify width, as the
+              // plane prepares them (QWEN38_PLANE_CTL_WORDS_PER_SLOT, QWEN38_PLANE_CTX_WORDS_PER_SLOT).
               if (name == "fold.ctl")
                 t = add_view(name, ctl_.data(), {B * kFoldCtlWords}, i64);
               else if (name == "fold.ctx_commit")
                 t = add_view(name, ctx_commit_.data(), {B * kFoldCtxCommitWords}, i64);
-              else if (name == "fold.ctx_a")  // keep it equal to ctx_a_slot()
-                t = add_view(name, ctx_a_.data(), {B * 2 * kMaxVerifyRows}, i64);
+              else if (name == "fold.ctx_a")  // the op derives the per-slot stride from the size: keep it equal to ctx_a_slot()
+                t = add_view(name, ctx_a_.data(), {B * kFoldCtxAWords}, i64);
               else
                 t = fold_tensors_.at(name).get();
               break;

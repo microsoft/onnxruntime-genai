@@ -4378,13 +4378,17 @@ class HashedPleTable {
   }
 
   static constexpr size_t kCtlWords = QWEN38_PLANE_CTL_WORDS_PER_SLOT;
+  static constexpr size_t kCtxWords = QWEN38_PLANE_CTX_WORDS_PER_SLOT;  // of the contexts of one slot, whatever the rows
+  static_assert(kCtxWords == 2 * kMaxRows, "a slot has room for the contexts of the most rows a step prepares");
   static constexpr int64_t kSpareWord = 0x5A5A;  // in the control words past the 14 that a fold step uses
 
   // The first `rows` rows of the fold step of every slot, prepared by one call of prep_batched (`states[b]` are the control
   // words of slot b, `contexts[b]` its n-gram context), read back slot by slot in the layout of Expected(): the rows past `rows`
-  // hold the fill value. A word of the control words that the call has no reason to write is checked to be left alone.
+  // hold the fill value. A word of the control words that the call has no reason to write is checked to be left alone. The
+  // contexts of slot b are read at word b * kCtxWords of the buffer, where the rest of the slot holds the fill value too;
+  // `prefixes`, when given, receives the whole buffer of batch * kCtxWords words as the call left it.
   std::vector<FoldPrepOutputs> PrepBatched(const std::vector<FoldState>& states, const std::vector<FoldContext>& contexts,
-                                           int rows, bool with_committed = true) {
+                                           int rows, bool with_committed = true, std::vector<int64_t>* prefixes = nullptr) {
     const size_t batch = states.size();
     const size_t n = static_cast<size_t>(rows);
     std::vector<int64_t> control(batch * kCtlWords, kSpareWord);
@@ -4395,7 +4399,7 @@ class HashedPleTable {
     }
     const PlaneBuffer state = device_.Upload(control);
     const PlaneBuffer ctx_in = device_.Upload(context_in);
-    const PlaneBuffer ctx_out = device_.Filled(batch * n * 2 * sizeof(int64_t), 0xAB);
+    const PlaneBuffer ctx_out = device_.Filled(batch * kCtxWords * sizeof(int64_t), 0xAB);
     const PlaneBuffer input_ids = device_.Filled(batch * n * sizeof(int64_t), 0xAB);
     const PlaneBuffer position_ids = device_.Filled(batch * n * sizeof(int64_t), 0xAB);
     const PlaneBuffer committed = device_.Filled(batch * sizeof(int32_t), 0xAB);
@@ -4406,13 +4410,14 @@ class HashedPleTable {
                                   with_committed ? committed.data() : nullptr, past_pos.data(), ple.data(), state.data()),
               0);
 
-    const auto contexts_out = device_.Download<int64_t>(ctx_out, batch * n * 2);
+    const auto contexts_out = device_.Download<int64_t>(ctx_out, batch * kCtxWords);
     const auto ids = device_.Download<int64_t>(input_ids, batch * n);
     const auto positions = device_.Download<int64_t>(position_ids, batch * n);
     const auto committed_out = device_.Download<int32_t>(committed, batch);
     const auto past = device_.Download<int64_t>(past_pos, batch * StagedPleRig::kPositions);
     const auto ple_out = device_.Download<uint16_t>(ple, batch * n * kRowValues);
     const auto control_out = device_.Download<int64_t>(state, batch * kCtlWords);
+    if (prefixes != nullptr) *prefixes = contexts_out;
 
     const int64_t filled = static_cast<int64_t>(0xABABABABABABABABull);
     std::vector<FoldPrepOutputs> slots(batch);
@@ -4424,7 +4429,7 @@ class HashedPleTable {
       slot.ple.assign(kMaxRows * kRowValues, 0xABAB);
       std::copy_n(ids.begin() + static_cast<std::ptrdiff_t>(b * n), n, slot.input_ids.begin());
       std::copy_n(positions.begin() + static_cast<std::ptrdiff_t>(b * n), n, slot.position_ids.begin());
-      std::copy_n(contexts_out.begin() + static_cast<std::ptrdiff_t>(b * n * 2), n * 2, slot.contexts.begin());
+      std::copy_n(contexts_out.begin() + static_cast<std::ptrdiff_t>(b * kCtxWords), kCtxWords, slot.contexts.begin());
       std::copy_n(ple_out.begin() + static_cast<std::ptrdiff_t>(b * n * kRowValues), n * kRowValues, slot.ple.begin());
       slot.past_pos.assign(past.begin() + static_cast<std::ptrdiff_t>(b * StagedPleRig::kPositions),
                            past.begin() + static_cast<std::ptrdiff_t>((b + 1) * StagedPleRig::kPositions));
@@ -4464,7 +4469,7 @@ class HashedPleTable {
     constexpr size_t kSlots = QWEN38_PLANE_MAX_PREP_BATCH;
     const PlaneBuffer state = device_.Upload(std::vector<int64_t>(kSlots * kCtlWords, 3));
     const PlaneBuffer ctx_in = device_.Filled(kSlots * 2 * sizeof(int64_t), 0);
-    const PlaneBuffer ctx_out = device_.Filled(kSlots * kMaxRows * 2 * sizeof(int64_t), 0xAB);
+    const PlaneBuffer ctx_out = device_.Filled(kSlots * kCtxWords * sizeof(int64_t), 0xAB);
     const PlaneBuffer input_ids = device_.Filled(kSlots * kMaxRows * sizeof(int64_t), 0xAB);
     const PlaneBuffer position_ids = device_.Filled(kSlots * kMaxRows * sizeof(int64_t), 0xAB);
     const PlaneBuffer committed = device_.Filled(kSlots * sizeof(int32_t), 0xAB);
@@ -4832,6 +4837,118 @@ TEST_F(Qwen38PlaneBatchedPrepKernelTest, TheSingleSlotPrepRefusesABatchPackedInt
     const auto [error, outputs] = table.PrepWithPosAdd(scenario.state, scenario.context, -8);
     EXPECT_EQ(error, 0);
     ExpectSameFoldPrepOutputs(table.Expected(scenario.state, scenario.context, 8), outputs, "pos_add -8");
+  }
+}
+
+// SpeculativePrefixCommit reads the n-gram contexts of the fold rows from one `prefixes` input that spans the slots of the batch:
+// it divides the size of the input by the number of slots and reads slot s at s times that many words. The engine binds a view of
+// batch * 16 words, 2 for each of the 8 rows of the largest verify step, whatever the number of rows of the step, and its
+// per-slot views start at word 16 s as well. So every writer of the contexts has to put slot s at word 16 s: a writer that packs
+// the slots for the rows of its own call (2 * rows words each) is read at the wrong place by every slot but the first as soon as
+// a step has fewer than 8 rows (the verify widths 3 to 7 of the fold stack; 1 and 2 are the plane's own plain and two-row steps).
+class Qwen38PlanePrefixCommitStrideTest : public Qwen38PlaneBatchedPrepKernelTest {
+ protected:
+  static constexpr size_t kViewWordsPerSlot = 2 * 8;  // what the engine binds for each slot of the batched fold.ctx_a view
+  static_assert(kViewWordsPerSlot == QWEN38_PLANE_CTX_WORDS_PER_SLOT, "the stride of the view is the stride of the writers");
+
+  // Every token of every row of every slot is a number of its own (none is the end of sequence), and so is the context of
+  // each slot, so that the pair of words of a row can be found in one place of one slot only.
+  static BatchedFoldSlots MakeSlotsWithUniquePrefixes(size_t batch) {
+    BatchedFoldSlots slots = MakeBatchedFoldSlots(batch, 0);
+    for (size_t b = 0; b < batch; ++b) {
+      const int64_t base = 1000 * static_cast<int64_t>(b + 1);
+      for (size_t r = 0; r < StagedPleRig::kMaxFoldRows; ++r) {
+        slots.states[b][StagedPleRig::kFoldTokenWords[r]] = base + 10 * static_cast<int64_t>(r) + 1;
+      }
+      slots.contexts[b] = {{base + 901, base + 902}};
+    }
+    return slots;
+  }
+
+  // The prefixes of `rows` rows of every slot of `batch`, read the way the op reads them out of the buffer that the writer left:
+  // the stride is the size over the slots, and the words that no row of the slot owns still hold the fill value.
+  void ExpectEverySlotToLandWhereTheViewReadsIt(bool staged, float scale) {
+    KernelTestDevice device{*plane_};
+    HashedPleTable table{*plane_, device, scale, staged};
+    const int64_t filled = static_cast<int64_t>(0xABABABABABABABABull);
+    for (const size_t batch : {size_t{2}, size_t{3}, size_t{5}, size_t{8}}) {
+      const BatchedFoldSlots slots = MakeSlotsWithUniquePrefixes(batch);
+      for (int rows = 1; rows <= static_cast<int>(HashedPleTable::kMaxRows); ++rows) {
+        const std::string what =
+            Describe(staged, scale) + ", " + std::to_string(rows) + " rows of " + std::to_string(batch) + " slots";
+        std::vector<int64_t> prefixes;
+        table.PrepBatched(slots.states, slots.contexts, rows, /*with_committed=*/true, &prefixes);
+        ASSERT_EQ(prefixes.size(), batch * kViewWordsPerSlot) << what;
+        const size_t stride = prefixes.size() / batch;
+        EXPECT_EQ(stride, size_t{16}) << what;
+
+        std::vector<std::pair<int64_t, int64_t>> pairs;
+        for (size_t s = 0; s < batch; ++s) {
+          for (size_t r = 0; r < HashedPleTable::kMaxRows; ++r) {
+            const bool written = r < static_cast<size_t>(rows);
+            const int64_t previous = r == 0 ? slots.contexts[s][1] : slots.states[s][StagedPleRig::kFoldTokenWords[r - 1]];
+            const int64_t token = slots.states[s][StagedPleRig::kFoldTokenWords[r]];
+            EXPECT_EQ(prefixes[s * stride + 2 * r], written ? previous : filled)
+                << what << ", the previous token of row " << r << " of slot " << s;
+            EXPECT_EQ(prefixes[s * stride + 2 * r + 1], written ? token : filled)
+                << what << ", the token of row " << r << " of slot " << s;
+            if (written) pairs.emplace_back(previous, token);
+          }
+        }
+        std::sort(pairs.begin(), pairs.end());
+        EXPECT_EQ(std::adjacent_find(pairs.begin(), pairs.end()), pairs.end()) << what << ": two rows have the same prefix";
+        EXPECT_EQ(pairs.size(), batch * static_cast<size_t>(rows)) << what;
+      }
+    }
+  }
+};
+
+TEST_F(Qwen38PlanePrefixCommitStrideTest, EverySlotOfAnFp8DeviceTableLandsWhereTheViewReadsIt) {
+  ExpectEverySlotToLandWhereTheViewReadsIt(/*staged=*/false, 0.3f);
+}
+
+TEST_F(Qwen38PlanePrefixCommitStrideTest, EverySlotOfAnFp8StagedTableLandsWhereTheViewReadsIt) {
+  ExpectEverySlotToLandWhereTheViewReadsIt(/*staged=*/true, 0.3f);
+}
+
+TEST_F(Qwen38PlanePrefixCommitStrideTest, EverySlotOfAnInt8DeviceTableLandsWhereTheViewReadsIt) {
+  if ((plane_->capabilities & QWEN38_PLANE_CAP_INT8_PLE) == 0) GTEST_SKIP() << "the plane library has no INT8 PLE";
+  ExpectEverySlotToLandWhereTheViewReadsIt(/*staged=*/false, -0.0123f);
+}
+
+TEST_F(Qwen38PlanePrefixCommitStrideTest, EverySlotOfAnInt8StagedTableLandsWhereTheViewReadsIt) {
+  if ((plane_->capabilities & QWEN38_PLANE_CAP_INT8_PLE) == 0) GTEST_SKIP() << "the plane library has no INT8 PLE";
+  ExpectEverySlotToLandWhereTheViewReadsIt(/*staged=*/true, -0.0123f);
+}
+
+// A muted slot of a table the GPU addresses is prepared as an idle slot (eos contexts) by the same kernel that prepares the live
+// slots, at the same place; the slots on both sides of it are not disturbed.
+TEST_F(Qwen38PlanePrefixCommitStrideTest, AMutedSlotKeepsItsPlaceAndItsNeighboursKeepTheirs) {
+  const int64_t filled = static_cast<int64_t>(0xABABABABABABABABull);
+  KernelTestDevice device{*plane_};
+  HashedPleTable table{*plane_, device, 0.3f, /*staged=*/false};
+  constexpr size_t kBatch = 4;
+  constexpr size_t kMuted = 1;
+  for (const int rows : {3, 4, 5, 6, 7}) {
+    BatchedFoldSlots slots = MakeSlotsWithUniquePrefixes(kBatch);
+    slots.states[kMuted][3] = 1;
+    std::vector<int64_t> prefixes;
+    table.PrepBatched(slots.states, slots.contexts, rows, /*with_committed=*/true, &prefixes);
+    ASSERT_EQ(prefixes.size(), kBatch * kViewWordsPerSlot);
+    const size_t stride = prefixes.size() / kBatch;
+    for (size_t s = 0; s < kBatch; ++s) {
+      for (size_t r = 0; r < HashedPleTable::kMaxRows; ++r) {
+        const bool written = r < static_cast<size_t>(rows);
+        int64_t previous = r == 0 ? slots.contexts[s][1] : slots.states[s][StagedPleRig::kFoldTokenWords[r - 1]];
+        int64_t token = slots.states[s][StagedPleRig::kFoldTokenWords[r]];
+        if (s == kMuted) {
+          previous = HashedPleTable::kEos;
+          token = 0;
+        }
+        EXPECT_EQ(prefixes[s * stride + 2 * r], written ? previous : filled) << rows << " rows, row " << r << " of slot " << s;
+        EXPECT_EQ(prefixes[s * stride + 2 * r + 1], written ? token : filled) << rows << " rows, row " << r << " of slot " << s;
+      }
+    }
   }
 }
 

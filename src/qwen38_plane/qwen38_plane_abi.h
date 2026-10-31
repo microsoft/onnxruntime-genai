@@ -133,6 +133,11 @@ typedef int (*Qwen38PlaneReplayStateUpdatesFn)(void* stream, const void* descs, 
 #define QWEN38_PLANE_MAX_PREP_ROWS 8        // rows of one folded verify step
 #define QWEN38_PLANE_MAX_PREP_BATCH 8       // request slots prep_batched prepares in one call
 #define QWEN38_PLANE_CTL_WORDS_PER_SLOT 16  // int64 control words of one request slot (the `state` of prep)
+// int64 words that prep_batched reserves for the n-gram contexts of one request slot in `ctx_out`: two for each of the
+// QWEN38_PLANE_MAX_PREP_ROWS rows, whatever the row count of the call, so slot s starts at word s * 16 and the layout of the
+// buffer does not change with the number of rows. The consumers of the buffer (the engine's per-slot views and the
+// SpeculativePrefixCommit node, which reads slot s at s * (words / slots)) depend on that stride.
+#define QWEN38_PLANE_CTX_WORDS_PER_SLOT (2 * QWEN38_PLANE_MAX_PREP_ROWS)
 
 // X(return type, name, parameter list). The exported symbol is "qwen38_plane_" + name. `stream` is a cudaStream_t.
 // CUDA runtime helpers return the cudaError_t as int (0 = success).
@@ -291,7 +296,9 @@ typedef int (*Qwen38PlaneEmbedGatherFn)(void* stream, const void* table, long lo
 // that every one is the base of an array over the slots, which are numbered 0 .. batch - 1:
 //   state         int64, QWEN38_PLANE_CTL_WORDS_PER_SLOT words per slot, the control words of the slot (prep's `state`)
 //   ctx_in        int64[batch][2]                       the n-gram context in front of row 0
-//   ctx_out       int64[batch][rows][2]                 as for prep, slot after slot
+//   ctx_out       int64[batch][QWEN38_PLANE_CTX_WORDS_PER_SLOT]: slot s starts at word s * QWEN38_PLANE_CTX_WORDS_PER_SLOT
+//                 whatever `rows` is, and row r of it is at words 2r .. 2r + 1 as for prep; the words of a slot beyond
+//                 2 * rows are not written
 //   input_ids, position_ids   int64[batch][rows]
 //   committed     int32[batch], or null to skip         row 0 of the slot writes its committed length
 //   past_pos      int64[batch][Qwen38PleParams::capacity]
