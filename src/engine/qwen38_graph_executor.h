@@ -51,6 +51,7 @@ class Qwen38GraphSession {
   struct Options {
     size_t prefill_chunk_tokens{2048};  // S=2 step prefill: rounded down to an even number (pairs stay aligned), at least 2;
                                         // replaced by Qwen38DecodeDevice::PrefillChunkTokens() when the device names one
+                                        // (the assembly passes EffectiveQwen38PrefillChunkTokens of the configuration)
     std::vector<int32_t> stop_tokens;   // EOS ids of the model: a cycle is not followed by another one after one of them
   };
 
@@ -62,9 +63,10 @@ class Qwen38GraphSession {
   // Longest session (prompt plus generated tokens) the device can hold.
   size_t MaxRequestLength() const;
 
-  // Runs one step for `request`: a new owner or turn first clears the device and starts ingesting the whole history; the
-  // step that ingests its last chunk also returns the first generated token and enqueues the first cycle; every later
-  // step waits for the cycle in flight, commits it and enqueues the next one before returning its tokens.
+  // Runs one step for `request`: a new owner or turn first clears the device, announces the history length to it
+  // (Qwen38DecodeDevice::ExpectPrefillTokens) and starts ingesting the whole history; the step that ingests its last
+  // chunk also returns the first generated token and enqueues the first cycle; every later step waits for the cycle in
+  // flight, commits it and enqueues the next one before returning its tokens.
   Qwen38StepResult Step(const Qwen38StepRequest& request);
 
   // Records the committed token counts after Request::CommitExternalTokens applies EOS, limits, and stop strings.
