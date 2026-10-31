@@ -2607,6 +2607,11 @@ struct Qwen38Graph_Element : JSON::Element {
       v_.kv_capacity = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "max_batch_size") {
       v_.max_batch_size = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (v_.max_batch_size < 1 || v_.max_batch_size > Config::Model::Qwen38Graph::kMaxBatchSize) {
+        throw std::out_of_range("max_batch_size must be in [1, " +
+                                std::to_string(Config::Model::Qwen38Graph::kMaxBatchSize) + "], got " +
+                                std::to_string(v_.max_batch_size));
+      }
     } else if (name == "warmup") {
       v_.warmup = JSON::Get<bool>(value);
     } else {

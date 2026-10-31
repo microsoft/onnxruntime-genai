@@ -114,6 +114,29 @@ void ValidateQwen38PromptTokens(std::span<const int32_t> tokens, int vocab_size)
 // captured graph needs, and a capture that lands in a live request stalls it.
 bool Qwen38HeadR2CapturesGraph(const Config::SessionOptions& decoder, const std::optional<Config::SessionOptions>& head_r2);
 
+// The number of request slots the device hosts: engine.dynamic_batching.max_batch_size, else engine.static_batching, else
+// model.qwen38_graph.max_batch_size, else search.batch_size, else the ORT_QWEN38_MAX_BATCH_SIZE test hook (the first of them
+// that is set, or that asks for more than one slot, where 1 is the default); 1 when none is. Throws std::out_of_range naming the
+// setting unless the value lies in [1, Config::Model::Qwen38Graph::kMaxBatchSize]: the device never clamps a request silently.
+size_t ResolveQwen38MaxBatchSize(const Config& config);
+
+// True when prefill.enabled names a dense prefill graph other than the decoder (model.qwen38_graph.prefill.dense.filename):
+// the prompt then runs through sessions of its own. Otherwise the fold target ingests the prompt itself (unified prefill).
+bool Qwen38HasSeparatePrefillSessions(const Config& config);
+
+// Throws a std::runtime_error at model creation, before the plane library is loaded and before any weight is uploaded, for a
+// configuration that asks for several request slots (ResolveQwen38MaxBatchSize > 1) on a decode stack that cannot serve
+// them: slots are decoded by the batched fold target (model.qwen38_graph.fold.enabled) and their prompts are ingested chunk by
+// chunk through it (unified fast prefill: prefill.enabled without a separate dense graph). A single slot has no restriction.
+void ValidateQwen38MultiSlotConfig(const Config& config);
+
+// Throws a std::runtime_error unless a target graph with these outputs can be run for `request_slots` slots at once: every slot
+// keeps its own accepted prefix of the verify rows, which the batched run restores per slot from the compact state_update.*
+// outputs, so a ring-bank target (present_mid* outputs, one bank per row count for the whole batch) is refused with a
+// diagnostic naming the output. Run as soon as the target session exists, before the other sessions are created and before
+// any device state is allocated; a single slot has no restriction.
+void ValidateQwen38BatchedTargetOutputs(size_t request_slots, const std::vector<std::string>& output_names);
+
 // Checks a model package against the plane library it names, when the model is loaded, before its weights are uploaded and
 // before any session is created: an INT8 PLE table (model.qwen38_graph.ple_table with a negative scale) needs the int8_ple
 // plane capability, an INT8 embedding table (<model.embedding.filename>.data of vocab_size x hidden_size INT8 rows and
@@ -318,8 +341,6 @@ struct Qwen38SuffixDrafter {
 };
 
 // Owns every device-side object of one model. Graphs stay captured across Engines (see Qwen38GraphModel::AcquireDevice).
-size_t ResolveQwen38MaxBatchSize(const Config& config);
-
 struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   explicit Qwen38GraphEngine(Qwen38GraphModel& model);
   ~Qwen38GraphEngine() override;
@@ -366,7 +387,7 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   double ple_register_seconds{};
 
  private:
-  static constexpr int kMaxBatch = 8;
+  static constexpr int kMaxBatch = Config::Model::Qwen38Graph::kMaxBatchSize;
 
   struct Bank {
     PlaneBuffer arena;
@@ -498,6 +519,8 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   static_assert(kMaxBanks <= kQwen38GraphIdMaxPhases && kMaxVerifyRows <= kQwen38GraphIdMaxRows &&
                     kMaxBatch <= kQwen38GraphIdMaxBatch,
                 "every (row count, ring phase, request slots) of the decode graphs needs a CUDA graph id");
+  static_assert(kMaxBatch <= QWEN38_PLANE_MAX_PREP_BATCH && kMaxVerifyRows <= QWEN38_PLANE_MAX_PREP_ROWS,
+                "the plane prepares every slot and row of a step in one call");
   static constexpr int kRing = 64;
   static constexpr int kArgmaxBlocks = 16;
 
