@@ -1709,10 +1709,6 @@ def main() -> int:
             "libs/libqwen_mtp_head.so",
             "libs/libqwen_fold.so",
         ]
-        if "runtime_profiles" in cfg and "consumer-gpu-24g" in cfg["runtime_profiles"]:
-            cfg["runtime_profiles"]["consumer-gpu-24g"]["decoder"]["session_options"]["provider_options"][0]["cuda"][
-                "qmoe.offload_gpu_layers"
-            ] = "2"
         (out / "genai_config.json").write_text(json.dumps(cfg, indent=2) + "\n")
         manifest = {
             "variant": "qwen_flash_next_int4_int8_rc2",
