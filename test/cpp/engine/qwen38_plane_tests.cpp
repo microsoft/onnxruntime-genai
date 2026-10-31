@@ -1858,9 +1858,14 @@ TEST(Qwen38PlaneTest, TheBuiltInLookupUsesTheLibraryThatIsAlreadyLoadedAndNotACo
 #if !defined(QWEN38_GRAPH_NO_POSIX)
 namespace {
 
+// The plane library the GPU tests load: the standalone library when the build has one (ENABLE_QWEN38_PLANE; it alone carries
+// the fault-injection hooks, and the tests that need them skip without), otherwise the plane compiled into
+// onnxruntime-genai-cuda, which is the copy that ships. No CI job builds the standalone library.
 std::filesystem::path GetBuiltPlaneLibraryPath() {
 #if defined(ORTGENAI_TEST_QWEN38_PLANE_LIB_PATH)
   const std::filesystem::path path{ORTGENAI_TEST_QWEN38_PLANE_LIB_PATH};
+#elif defined(ORTGENAI_TEST_GENAI_CUDA_LIB_PATH)
+  const std::filesystem::path path{ORTGENAI_TEST_GENAI_CUDA_LIB_PATH};
 #elif defined(_WIN32)
   const std::filesystem::path path = std::filesystem::current_path() / "qwen38_plane.dll";
 #else
