@@ -213,6 +213,7 @@ def check_extra_options(
         "enable_cuda_fpa_intb_gemm",
         "exclude_mtp",
         "use_device_allocator_for_initializers",
+        "merge_shared_input_projections",
     ]
 
     for key in bools:
@@ -1234,6 +1235,9 @@ def get_args():
                     Each per-layer entry is a scalar (per_tensor) or a length-(num_kv_heads * head_size) vector (per_channel).
                     An optional "qmax" records the divisor the file was calibrated with (128 for int8, 8 for int4, 448 for fp8);
                     the builder then rescales to the requested scheme, so one file can serve several bit widths.
+                merge_shared_input_projections = Qwen3.8 Flash Next only. Merge projections that read the same activation
+                    (linear-attention QKV/Z/A/B, sparse-attention QKV/gate/indexer, and the router with the shared expert's gate/up)
+                    into one MatMul plus Split per group. Default is false. Requires fp32, fp16, or bf16 dense projections; the MTP head is unchanged.
                 use_webgpu_fp32 = Use FP32 I/O precision for WebGPU EP.
                     Use this option to enable GPUs that do not support FP16 on WebGPU (e.g. GTX 10xx).
                 use_cuda_bf16 = Use BF16 I/O precision in quantized ONNX models for CUDA EP.

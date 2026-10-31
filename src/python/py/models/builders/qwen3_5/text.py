@@ -480,9 +480,7 @@ class Qwen35TextModel(Model):
         """
         basename = f"/model/layers.{layer_id}/linear_attn"
 
-        qkv_name, z_name = self.make_linear_attention_qkv_z_proj(layer_id, attention, root_input)
-
-        b_name, a_name = self.make_linear_attention_a_b_proj(layer_id, attention, root_input)
+        qkv_name, z_name, b_name, a_name = self.make_linear_attention_projections(layer_id, attention, root_input)
 
         conv_input = qkv_name
         if not self.use_paged_attention:
@@ -500,6 +498,12 @@ class Qwen35TextModel(Model):
         self.make_initializer(attention.conv1d.weight, conv_weight_name, to=self.io_dtype)
 
         return z_name, b_name, a_name, conv_input, conv_weight_name
+
+    def make_linear_attention_projections(self, layer_id, attention, root_input):
+        """Build the QKV, Z, B and A projections, returning the names of their output values."""
+        qkv_name, z_name = self.make_linear_attention_qkv_z_proj(layer_id, attention, root_input)
+        b_name, a_name = self.make_linear_attention_a_b_proj(layer_id, attention, root_input)
+        return qkv_name, z_name, b_name, a_name
 
     def make_linear_attention_qkv_z_proj(self, layer_id, attention, root_input):
         basename = f"/model/layers.{layer_id}/linear_attn"

@@ -27,7 +27,7 @@ These fields are siblings of `type` in an Olive `ModelBuilder` pass. The builder
 | Field | Owner and purpose |
 | --- | --- |
 | `builder_config_version` | Structured builder schema version, proposed as `2`. Not written to the generated runtime config. |
-| `target_options` | Target text-decoder export policy: `quant_config` and `attention`. |
+| `target_options` | Target text-decoder export policy: `quant_config`, `attention`, and `optimizations`. |
 | `drafter_options` | Drafter selection, source, quantization, attention, `shared_weights`, and type-specific export settings. |
 | `speculative_options` | Graph requirements connecting the target and drafter. |
 | `runtime_config` | Inline runtime JSON fragment or a path/resource referencing one. |
@@ -97,7 +97,13 @@ Explicit selections must not silently fall back. Head counts and other checkpoin
 
 Pool size, scheduler limits, utilization targets, and prefill chunk size belong to `runtime_config`. They remain constrained by the exported graph and supported runtime behavior even though they are not graph-construction options.
 
-Compatible projection optimizations are automatic and are not configuration options. Numeric precision and layouts remain controlled by the existing quantization settings.
+### Graph Optimizations
+
+Compatible projection optimizations are automatic and are not configuration options, with one opt-in exception described below. Numeric precision and layouts remain controlled by the existing quantization settings.
+
+`target_options.optimizations.merge_shared_input_projections` (Qwen3.8 Flash Next only, boolean, default `false`) maps to the legacy `merge_shared_input_projections` extra option. It merges the projections that read the same activation into one `MatMul` over row-concatenated weights plus one `Split` per group: GatedDeltaNet QKV/Z/A/B, sparse-attention packed Q/K/V with the output gate and indexer Q/K, and the MoE router with the shared expert's gate/up. Each `Split` output keeps the name of the unmerged `MatMul` output, so the graph inputs, outputs, and state names are unchanged. The shared expert's one-wide output gate stays separate.
+
+The option requires dense, bias-free projections in an fp32, fp16, or bf16 export and rejects configurations it cannot merge rather than silently skipping them. The one exception is the sparse-attention group, which stays unmerged when its Q/K/V projections are not packed. It applies to the decoder only (the MTP head is exported without it), and other model builders ignore it. When both spellings are present, the structured field takes precedence with a warning.
 
 ## 4. Drafter Configuration
 
@@ -609,6 +615,7 @@ The same component ownership can later accommodate audio without changing the ta
 | `paged_chunk_size` | Runtime `search.chunk_size` |
 | `enable_cuda_graph` | Runtime decoder session/provider settings |
 | `use_device_allocator_for_initializers` | Preserved, default `false`; paged Qwen3.8 sessions enable it automatically |
+| `merge_shared_input_projections` | `target_options.optimizations.merge_shared_input_projections` |
 | Olive `search` | Runtime `search` |
 | Any other `extra_options` key | No canonical destination yet; see rule 8 |
 
