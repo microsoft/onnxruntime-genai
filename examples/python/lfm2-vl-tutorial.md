@@ -37,6 +37,10 @@ The vision and embedding models are newer than onnxruntime-genai 0.18.0. Until t
 clone this repository and run `python3 onnxruntime-genai/src/python/py/models/builder.py` with the
 same arguments instead.
 
+onnxruntime-genai 0.18.0 also cannot read LFM2.5-VL-3B's `tokenizer.json`, and it resizes some images
+one 32-pixel step differently than the Hugging Face processor. With 0.18.0, see the
+[known limitations in an earlier version of this tutorial](https://github.com/microsoft/onnxruntime-genai/blob/7f090db1731887b6a1b3f2715642df4ffe0e7863/examples/python/lfm2-vl-tutorial.md#3-known-limitations).
+
 `exclude_embeds=true` is what makes this a vision pipeline: the decoder then takes `inputs_embeds`
 instead of `input_ids`, so the embedding model can splice image features into the token embeddings
 before the decoder runs. The builder writes `"type": "lfm2_vl"` into `genai_config.json` for this
@@ -116,14 +120,6 @@ a time (a single-entry list is fine, batching is not).
 
 ## 3. Known limitations
 
-**LFM2.5-VL-3B needs a tokenizer regex substitution.** Its `tokenizer.json` pre-tokenizes with the
-`'(?i:[sdmt]|ll|ve|re)|...` pattern, which the tokenizer in onnxruntime-extensions does not parse
-("Invalid '(?...)' zero-width assertion"). Replace that pattern with the equivalent one the other
-models use, `(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+`,
-before loading the model. It selects the same contractions and produces the same tokens on chat
-prompts.
-
-
 **Image splitting (tiling) is not supported.** The Hugging Face processor cuts a large image into up
 to `max_tiles` 512×512 tiles plus a thumbnail, which lets it spend thousands of tokens on a
 high-resolution image. ONNX Runtime GenAI resizes each image once, to at most `max_image_tokens`
@@ -135,11 +131,3 @@ once.
 **Aspect ratios above 200:1 are rejected.** The `Resize` step in onnxruntime-extensions refuses
 an image whose longer side is more than 200 times the shorter one ("Absolute aspect ratio must be
 smaller than 200"); the Hugging Face processor has no such limit.
-
-**Small images may be resized one step differently.** For images below `min_image_tokens` worth of
-pixels, the smart resize in onnxruntime-extensions truncates an intermediate product before rounding
-up to a multiple of `encoder_patch_size * downsample_factor`, so the result can be one 32-pixel step
-smaller on one axis than the Hugging Face processor's. The same one-step difference occurs when a side
-divided by 32 lands exactly on .5 (for example a width of 2000): Python's `round` goes to the even
-neighbour, `std::round` goes away from zero. The token accounting stays consistent in both cases
-because the runtime counts tokens from the size the image actually arrived at.
