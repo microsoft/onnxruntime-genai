@@ -679,9 +679,11 @@ __global__ void k_prep(const PleParams* P, const i64* tok_ptr, const i64* pos_pt
   }
 }
 
+// One block per (row, slot). `honor_mute` is set by prep_batched only: a slot whose control word state[3] is nonzero prepares
+// idle inputs there, while prep (one slot, any control words the caller hands over) never reads that word.
 __global__ void __launch_bounds__(1024) k_prep_fold(const PleParams* P, const i64* ctx_in, i64* ctx_a, i64* input_ids,
                                                     i64* position_ids, int* committed, i64* past_pos,
-                                                    __nv_bfloat16* ple_out, i64* state) {
+                                                    __nv_bfloat16* ple_out, i64* state, int honor_mute) {
   __shared__ i64 s_row[32];
   __shared__ const unsigned char* s_src[32];
   __shared__ i64 s_tok, s_pos, s_c0, s_c1, s_muted;
@@ -701,7 +703,7 @@ __global__ void __launch_bounds__(1024) k_prep_fold(const PleParams* P, const i6
   __nv_bfloat16* row_ple = ple_out + ((size_t)b * rows + row) * total;
 
   if (tid == 0) {
-    s_muted = state_b[3];
+    s_muted = honor_mute != 0 ? state_b[3] : 0;
     if (s_muted != 0) {
       s_tok = 0;
       s_pos = row;
@@ -1363,7 +1365,7 @@ QWEN38_PLANE_EXPORT int qwen38_plane_prep(void* s, const void* P, const void* to
     BeginLaunch();
     k_prep_fold<<<rows, 1024, 0, stream>>>((const PleParams*)P, (const i64*)ctx_in, (i64*)ctx_out, (i64*)input_ids,
                                            (i64*)position_ids, (int*)committed, (i64*)past_pos,
-                                           (__nv_bfloat16*)ple_out, (i64*)state);
+                                           (__nv_bfloat16*)ple_out, (i64*)state, /*honor_mute=*/0);
     return LaunchStatus();
   }
   {
@@ -1830,7 +1832,7 @@ extern "C" QWEN38_PLANE_EXPORT int qwen38_plane_prep_batched(void* s, const void
   k_prep_fold<<<dim3(static_cast<unsigned>(rows), static_cast<unsigned>(batch)), 1024, 0, stream>>>(
       static_cast<const PleParams*>(P), static_cast<const i64*>(ctx_in), static_cast<i64*>(ctx_out),
       static_cast<i64*>(input_ids), static_cast<i64*>(position_ids), static_cast<int*>(committed),
-      static_cast<i64*>(past_pos), static_cast<__nv_bfloat16*>(ple_out), static_cast<i64*>(state));
+      static_cast<i64*>(past_pos), static_cast<__nv_bfloat16*>(ple_out), static_cast<i64*>(state), /*honor_mute=*/1);
   return LaunchStatus();
 }
 
@@ -1940,15 +1942,6 @@ __global__ void k_replay_generic(const Qwen38StateReplayDesc* __restrict__ descs
   const uint64_t start = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
 
   if (descriptor.kind == 4) {
-    if (kept_override == 0) {
-      if (blockIdx.x == 0 && threadIdx.x == 0) {
-        const_cast<int32_t*>(descriptor.source_lengths)[0] = 0;
-        const_cast<int32_t*>(descriptor.source_lengths)[1] = 0;
-        descriptor.destination_lengths[0] = 0;
-        descriptor.destination_lengths[1] = 0;
-      }
-      return;
-    }
     const int32_t old_key_length = descriptor.source_lengths[0];
     const int32_t old_buffer_length = descriptor.source_lengths[1];
     const uint64_t new_block_count =
@@ -2016,22 +2009,13 @@ extern "C" QWEN38_PLANE_EXPORT int qwen38_plane_replay_state_updates(
     void* stream, const void* descs, int fast_count, int generic_count,
     int fast_blocks_per_descriptor, int kept_count) {
   // Counts and block budgets that would skip a launch without a word leave the destination bank stale: they are refused.
-  // kept_count 0 replays no GatedDeltaNet state (it resets the indexer lengths of a muted slot), so it needs no block budget.
-  if (!descs || kept_count < 0 || kept_count > kPlaneMaxReplayTransitions || fast_count < 0 || generic_count < 0 ||
-      (kept_count > 0 && fast_count > 0 && fast_blocks_per_descriptor < 1)) {
+  if (!descs || kept_count < 1 || kept_count > kPlaneMaxReplayTransitions || fast_count < 0 || generic_count < 0 ||
+      (fast_count > 0 && fast_blocks_per_descriptor < 1)) {
     return static_cast<int>(cudaErrorInvalidValue);
   }
   const auto* typed = static_cast<const Qwen38StateReplayDesc*>(descs);
   cudaStream_t cu_stream = static_cast<cudaStream_t>(stream);
   BeginLaunch();
-  if (kept_count == 0) {
-    if (generic_count > 0) {
-      const dim3 grid(1, static_cast<unsigned>(generic_count));
-      k_replay_generic<<<grid, 32, 0, cu_stream>>>(typed + fast_count, 0);
-      if (const int status = LaunchStatus()) return status;
-    }
-    return 0;
-  }
   if (fast_count > 0) {
     const dim3 grid(static_cast<unsigned>(fast_blocks_per_descriptor), static_cast<unsigned>(fast_count));
     k_replay_gdn<<<grid, kPlaneReplayThreads, 0, cu_stream>>>(typed, kept_count);
