@@ -28,6 +28,7 @@ import numpy as np
 import onnx
 import torch
 from onnx import TensorProto, helper, numpy_helper
+from package_config import migrate_qwen38_graph_config
 from package_paths import reject_output_overlap
 
 ALIGN = 4096
@@ -1548,6 +1549,14 @@ def write_weights_pool(out_dir: Path, model_paths: dict[str, Path]) -> dict:
     return info
 
 
+def read_package_config(path: Path) -> dict:
+    """Reads a package's genai_config.json with its `model.qwen38_graph` section migrated to the keys the engine accepts."""
+    cfg = json.loads(path.read_text())
+    for change in migrate_qwen38_graph_config(cfg["model"].get("qwen38_graph", {})):
+        print(f"genai_config: {change}")
+    return cfg
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--hf-dir", type=Path, required=True, help="Qwen3.8-Flash-Next HF checkpoint folder (safetensors)")
@@ -1683,7 +1692,7 @@ def main() -> int:
         prov_src = args.provider_lib or (args.ops_dir / "libonnxruntime_providers_cuda.so")
         if prov_src and prov_src.exists():
             shutil.copy2(prov_src, out / "provider" / "libonnxruntime_providers_cuda.so")
-        cfg = json.loads((args.reuse_embed_from / "genai_config.json").read_text())
+        cfg = read_package_config(args.reuse_embed_from / "genai_config.json")
         cfg["model"]["decoder"]["session_options"]["custom_ops_libraries"] = [
             "libs/libqwen_packed_qsa_indexer_v11.so",
             "libs/libqwen_fused_ops.so",
@@ -1775,7 +1784,7 @@ def main() -> int:
         os.link(prov_src, out / "provider" / "libonnxruntime_providers_cuda.so")
 
     # 9. Write genai_config.json (no Hopper-only custom ops; dense & head_kv need zero custom ops)
-    cfg = json.loads((args.v12d_dir / "genai_config.json").read_text())
+    cfg = read_package_config(args.v12d_dir / "genai_config.json")
     cfg["model"]["decoder"]["session_options"]["custom_ops_libraries"] = [
         "libs/libqwen_packed_qsa_indexer_v11.so",
         "libs/libqwen_fused_ops.so",

@@ -122,6 +122,18 @@ root layout instead of the `target/`, `head_r2/`, `dense/` and `head_kv/` folder
 cache in BF16 while the target KV cache is INT8; `--keep-bf16-router-shared` and `--keep-bf16-shared-down` keep the MoE router and
 the shared-expert projections in BF16.
 
+### Config surface of the built packages
+
+The engine rejects every `model.qwen38_graph` key it does not know when a package is loaded, so the builders only write the keys of the
+current surface and migrate the config of the package they start from (`package_config.py`): `fold.mtp` / `fold.drafter` become
+`fold.head_r2`; the CUDA graph id keys (`target_s1_graph_id`, `target_s2_graph_id`, `head_s1_graph_id`, `head_s2_graph_id`,
+`fold.target_graph_id`, `fold.head_r2.graph_id`), `mtp.skip_refeed` and `fold.force_reject` are dropped (the test hook is the environment
+variable `ORT_QWEN38_FORCE_REJECT`, see above); and `prefill_chunk_tokens` (which only applied with `prefill.enabled` false) becomes
+`prefill.chunk`, the one chunk setting. Every change is
+printed as a `genai_config:` line. `--prefill-chunk-tokens` is the former name of `--prefill-chunk`: both write `prefill.chunk` (at most
+`kv_capacity`), and two different values are an error. The `mtp` / `drafter` / `head_r2` session labels of `weights_pool.txt` are a
+package file format, not config keys, and are unchanged.
+
 ### INT4 + INT8 package for SM80 and newer (`build_package_v12d_int4_int8.py`)
 
 `build_package_v12d_int4_int8.py --hf-dir <checkpoint> --v12b-dir <v12b package> --v12d-dir <v12d package> --ops-dir <custom-op
