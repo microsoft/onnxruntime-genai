@@ -35,6 +35,7 @@
 #include "whisper.h"
 #include "parakeet.h"
 #include "nemotron_speech.h"
+#include "nemotron_bolt.h"
 #include "moonshine_streaming.h"
 #include "multi_modal.h"
 #include "lfm2.h"
@@ -156,7 +157,7 @@ void State::DumpOutputs() {
 }
 
 void State::Run(OrtSession& session, bool graph_capture_this_run, int graph_capture_length,
-                int graph_capture_variant) {
+                int graph_capture_variant, OrtIoBinding* binding) {
   DurationTrace trace{"State::Run"};
 
   if (params_->use_graph_capture) {
@@ -200,8 +201,13 @@ void State::Run(OrtSession& session, bool graph_capture_this_run, int graph_capt
     run_options_->AddConfigEntry("disable_synchronize_execution_providers", "1");
   }
 
-  session.Run(run_options_.get(), input_names_.data(), inputs_.data(), input_names_.size(),
-              output_names_.data(), outputs_.data(), output_names_.size());
+  if (binding) {
+    session.Run(run_options_.get(), *binding);
+    binding->SynchronizeOutputs();
+  } else {
+    session.Run(run_options_.get(), input_names_.data(), inputs_.data(), input_names_.size(),
+                output_names_.data(), outputs_.data(), output_names_.size());
+  }
 
   extra_outputs_.RegisterOutputs();
 
@@ -1070,6 +1076,8 @@ std::unique_ptr<Config> CreateConfig(OrtEnv& ort_env, const char* config_path, c
 }
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
+  if (config->model.type == "nemotron_bolt")
+    return std::make_shared<NemotronBoltModel>(std::move(config), ort_env);
   if (config->model.draft)
     return std::make_shared<SpeculativeDecodingModel>(std::move(config), ort_env);
   if (!config->model.decoder.pipeline.empty() &&
