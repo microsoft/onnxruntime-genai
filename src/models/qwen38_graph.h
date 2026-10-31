@@ -377,7 +377,6 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   int ReservedTail() const override { return std::max(verify_rows_, kReservedTail); }
   bool MtpEnabled() const override { return mtp_enabled_; }
   size_t MaxBatchSize() const override { return static_cast<size_t>(max_batch_); }
-  bool SupportsDynamicBatching() const override { return true; }
   void Reset() override;
   void Drain() noexcept override;
   void MarkContextFailed() noexcept override;
@@ -405,7 +404,6 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   void PrefillChunkSlot(size_t slot, std::span<const int32_t> tokens) override;
   int32_t PendingTokenSlot(size_t slot) const override;
   void BeginDecodeSlot(size_t slot, bool want_more) override;
-  void DraftDeferredSlots(std::span<const size_t> active_slots) override;
   void EnqueueBatchDecode(std::span<const size_t> active_slots) override;
   void WaitBatchDecode(std::span<const size_t> active_slots,
                        std::span<Qwen38CycleRecord> records) override;
@@ -484,6 +482,8 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   void Warmup();
   void Draft(const uint8_t* features, size_t rows, size_t position, int32_t anchor, bool propose);
   void DraftSlot(int slot, const uint8_t* features, size_t rows, size_t position, int32_t anchor, bool propose);
+  // Drafts, one slot after the other, the slots whose previous cycle left aux rows behind (EnqueueBatchDecode).
+  void DraftDeferredSlots(std::span<const size_t> active_slots);
 
   void PrepRow(int rows, int row, const void* tok, const void* pos, int add, const void* ctx_in, void* ctx_out);
   void PrepBatch(int batch);

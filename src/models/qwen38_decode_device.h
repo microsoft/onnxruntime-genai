@@ -114,7 +114,6 @@ class Qwen38DecodeDevice {
 
   // Multi-slot / batched execution contract (defaults to single-slot slot 0).
   virtual size_t MaxBatchSize() const { return 1; }
-  virtual bool SupportsDynamicBatching() const { return false; }
 
   virtual void ResetSlot(size_t slot) {
     if (slot != 0) throw std::logic_error("Single-slot device only supports slot 0.");
@@ -131,9 +130,6 @@ class Qwen38DecodeDevice {
   virtual void BeginDecodeSlot(size_t slot, bool want_more) {
     if (slot != 0) throw std::logic_error("Single-slot device only supports slot 0.");
     BeginDecode(want_more);
-  }
-  virtual void DraftDeferredSlots(std::span<const size_t> active_slots) {
-    (void)active_slots;
   }
   virtual void EnqueueBatchDecode(std::span<const size_t> active_slots) {
     (void)active_slots;

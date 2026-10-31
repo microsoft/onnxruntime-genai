@@ -52,15 +52,15 @@ class Qwen38GraphSession : public FixedSlotSession {
   };
 
   Qwen38GraphSession(std::shared_ptr<Qwen38DecodeDevice> device, Options options);
-  ~Qwen38GraphSession();
+  ~Qwen38GraphSession() override;
   Qwen38GraphSession(const Qwen38GraphSession&) = delete;
   Qwen38GraphSession& operator=(const Qwen38GraphSession&) = delete;
 
   // Longest session (prompt plus generated tokens) the device can hold.
-  size_t MaxRequestLength() const;
+  size_t MaxRequestLength() const override;
 
   // Maximum number of concurrent requests the device can hold.
-  size_t MaxBatchSize() const;
+  size_t MaxBatchSize() const override;
 
   // A new owner or turn announces its authoritative history length before bounded ingestion.
 
@@ -88,8 +88,8 @@ class Qwen38GraphSession : public FixedSlotSession {
 
   // The owner of one slot leaves. A device with a single slot is drained like Release(); with several slots the other
   // slots keep decoding, so only this slot is forgotten and its device state is cleared before it is reused.
-  void ReleaseSlot(size_t slot);
-  void ReleaseSlotForTeardown(size_t slot) noexcept;
+  void ReleaseSlot(size_t slot) override;
+  void ReleaseSlotForTeardown(size_t slot) noexcept override;
 
   void AddStats(SpeculativeStats& stats) const;
   const BackendWorkMetrics& WorkMetrics() const { return work_metrics_; }
