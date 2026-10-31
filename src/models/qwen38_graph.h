@@ -19,6 +19,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "engine/backend_capabilities.h"
@@ -255,6 +256,49 @@ struct Qwen38CacheInput {
 // where ratio is kQwen38IndexKeyRatio. Other inputs (recurrent state, index buffers, ...) do not depend on the
 // capacity and are ignored.
 void ValidateQwen38CacheShapes(const std::vector<Qwen38CacheInput>& inputs, int kv_capacity, const std::string& graph);
+
+// MoE expert offload (ORT QMoE offload v4) as requested by the decoder's "session.moe.offload.*" config entries. A key
+// that is configured more than once counts with its last value, the one the session options end up with. The byte
+// counts are read the way the runtime reads them: decimal digits only (no sign, white space or trailing text), not
+// empty, within 64 bits.
+struct Qwen38MoeOffloadSettings {
+  static constexpr uint64_t kDefaultReserveDeviceBytes = 6442450944ULL;  // 6 GiB
+
+  bool enabled{false};      // mode is required/auto/1/on, or device_expert_bytes is explicit
+  bool constrained{false};  // mode is required/1/on, or device_expert_bytes is explicit: the experts must not all stay on the device
+  bool has_source_root{false};
+  bool has_reserve_device_bytes{false};  // a valid byte count is configured, reserve_device_bytes holds it
+  bool has_device_expert_bytes{false};   // the same for device_expert_bytes, unless it is "auto" or 0 (runtime's call)
+  // The entry is there but is not a byte count (for the reserve: nor "auto"). It is left as configured, so that the
+  // runtime rejects it by name; it is never replaced by a default or an adapted budget. The byte count of the
+  // setting is not meaningful then.
+  bool malformed_device_expert_bytes{false};
+  bool malformed_reserve_device_bytes{false};
+  uint64_t device_expert_bytes{0};
+  uint64_t reserve_device_bytes{kDefaultReserveDeviceBytes};
+};
+
+Qwen38MoeOffloadSettings ParseQwen38MoeOffloadSettings(const std::vector<Config::NamedString>& config_entries);
+
+// KV capacity of the target graph variants that are named after their context tier (model_2k.onnx, model_8k.onnx,
+// model_64k.onnx, model_128k.onnx), known before the session exists. Empty for any other file name. The context length and
+// the generation budget are not part of it: SyncQwen38GraphContext derives them from the graph once the session exists.
+struct Qwen38ContextTier {
+  std::string_view name;  // "2k", "8k", "64k", "128k"
+  int kv_capacity{};
+};
+std::optional<Qwen38ContextTier> Qwen38ContextTierForTarget(const std::string& target_filename);
+
+// "session.moe.offload.*" entries added to the target session once the KV capacity of the selected target graph is known:
+// the model folder as the default source_root, and the reserve (and explicit expert) budgets. With
+// `adaptive_context_budget` the budgets follow the KV cache relative to the 32K-context reference: memory a longer
+// context needs is taken from the expert cache, memory a shorter context frees is given to it (the budgets are 64-bit
+// and saturate instead of wrapping). Empty unless offload is enabled. A budget that is configured but malformed gets
+// no entry in any case, so it stays as configured and the runtime rejects it: a configuration error is never turned
+// into a valid default or adapted value.
+std::vector<Config::NamedString> Qwen38MoeOffloadSessionEntries(const Qwen38MoeOffloadSettings& settings,
+                                                                const std::filesystem::path& model_root, int kv_capacity,
+                                                                bool adaptive_context_budget);
 
 // Constants of the PackedQSAIndexer state conversion (key-norm weights, leading-RoPE tables) for the dense -> packed hand-off.
 struct Qwen38QsaConstants {

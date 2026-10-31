@@ -9,6 +9,7 @@
 #include "qwen38_replay_geometry.h"
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -18,6 +19,7 @@
 #include <random>
 #include <sstream>
 #include <stdexcept>
+#include <system_error>
 #include <thread>
 #if defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
@@ -36,6 +38,14 @@ double SecondsSince(Clock::time_point start) {
 bool StartsWith(const std::string& value, const char* prefix) {
   return value.rfind(prefix, 0) == 0;
 }
+
+struct WarmupFlag {
+  explicit WarmupFlag(Qwen38OrtRunHints& hints) : hints_{hints} { hints_.SetWarmup(true); }
+  ~WarmupFlag() { hints_.SetWarmup(false); }
+  WarmupFlag(const WarmupFlag&) = delete;
+  WarmupFlag& operator=(const WarmupFlag&) = delete;
+  Qwen38OrtRunHints& hints_;
+};
 
 size_t Elements(const std::vector<int64_t>& shape) {
   size_t count = 1;
@@ -573,6 +583,7 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
   if (dflash_) {
     const auto start = Clock::now();
     run_hints_.RequireDeterministicMoe();
+    const WarmupFlag warmup_flag{run_hints_};
     const Qwen38DflashWarmupPlan warmup = PlanQwen38DflashWarmup(q.warmup, verify_rows_, num_banks_);
     if (warmup.drafter && fast_ && fast_->unified) {
       if (max_batch_ > 1) {
@@ -2448,13 +2459,7 @@ void Qwen38GraphEngine::Warmup() {
   // The Runs of the warmup carry ORT_QMOE_IN_WARMUP and, from here on, every Run of the engine asks for deterministic
   // MoE tactics: the engine keeps that state and publishes it around each Run only (qwen38_ort_env.h), also when this
   // throws.
-  struct WarmupFlag {
-    explicit WarmupFlag(Qwen38OrtRunHints& hints) : hints_{hints} { hints_.SetWarmup(true); }
-    ~WarmupFlag() { hints_.SetWarmup(false); }
-    WarmupFlag(const WarmupFlag&) = delete;
-    WarmupFlag& operator=(const WarmupFlag&) = delete;
-    Qwen38OrtRunHints& hints_;
-  } warmup_flag{run_hints_};
+  const WarmupFlag warmup_flag{run_hints_};
   const int R = fold_ ? verify_rows_ : 2;
   const int max_prompt = capacity_ - Qwen38DecodeDevice::kReservedTail - (R + 1);
   if (max_prompt < R) return;
@@ -2631,6 +2636,123 @@ Qwen38EmbeddingFormat RequireQwen38PackageSupportedByPlane(const Qwen38Plane& pl
                                      config.model.vocab_size, config.model.decoder.hidden_size);
 }
 
+namespace {
+
+// A byte count the way the runtime reads one: decimal digits only (no sign, white space or trailing text), not empty,
+// and within 64 bits. std::stoull skips leading white space, takes a sign and ignores whatever follows the digits.
+std::optional<uint64_t> ParseQwen38ByteCount(const std::string& text) {
+  if (text.empty()) return std::nullopt;
+  const char* const end = text.data() + text.size();
+  uint64_t bytes = 0;
+  const auto [last, error] = std::from_chars(text.data(), end, bytes, 10);
+  if (error != std::errc{} || last != end) return std::nullopt;
+  return bytes;
+}
+
+// `bytes` moved by `delta` (of either sign) without wrapping around: the runtime accepts budgets up to UINT64_MAX.
+uint64_t AddBytesSaturating(uint64_t bytes, int64_t delta) {
+  constexpr uint64_t kMaxBytes = std::numeric_limits<uint64_t>::max();
+  if (delta >= 0) {
+    const uint64_t increase = static_cast<uint64_t>(delta);
+    return bytes > kMaxBytes - increase ? kMaxBytes : bytes + increase;
+  }
+  const uint64_t decrease = static_cast<uint64_t>(-delta);
+  return bytes < decrease ? 0 : bytes - decrease;
+}
+
+}  // namespace
+
+Qwen38MoeOffloadSettings ParseQwen38MoeOffloadSettings(const std::vector<Config::NamedString>& config_entries) {
+  // The session options keep the last value of a key that is configured more than once (overlays append entries),
+  // so that is the value that counts here as well.
+  const auto last_value = [&config_entries](const char* key) -> const std::string* {
+    const auto entry = std::find_if(config_entries.rbegin(), config_entries.rend(),
+                                    [key](const Config::NamedString& candidate) { return candidate.first == key; });
+    return entry == config_entries.rend() ? nullptr : &entry->second;
+  };
+
+  Qwen38MoeOffloadSettings settings;
+  const std::string* mode = last_value("session.moe.offload.mode");
+  if (mode != nullptr && (*mode == "required" || *mode == "auto" || *mode == "1" || *mode == "on")) {
+    settings.enabled = true;
+    if (*mode != "auto") settings.constrained = true;
+  }
+
+  // "auto" and a count of 0 leave the expert cache to the runtime. A malformed value still asks for a constrained
+  // offload (it is an attempt to budget the experts), and the runtime reports it.
+  const std::string* expert_bytes = last_value("session.moe.offload.device_expert_bytes");
+  if (expert_bytes != nullptr && *expert_bytes != "auto") {
+    const std::optional<uint64_t> bytes = ParseQwen38ByteCount(*expert_bytes);
+    if (!bytes.has_value() || *bytes != 0) {
+      settings.enabled = true;
+      settings.constrained = true;
+      settings.has_device_expert_bytes = bytes.has_value();
+      settings.malformed_device_expert_bytes = !bytes.has_value();
+      settings.device_expert_bytes = bytes.value_or(0);
+    }
+  }
+
+  const std::string* source_root = last_value("session.moe.offload.source_root");
+  settings.has_source_root = source_root != nullptr && !source_root->empty();
+
+  // Only "auto" takes the default reserve; the empty string is malformed like any other text that is not a byte count.
+  const std::string* reserve_bytes = last_value("session.moe.offload.reserve_device_bytes");
+  if (reserve_bytes != nullptr && *reserve_bytes != "auto") {
+    const std::optional<uint64_t> bytes = ParseQwen38ByteCount(*reserve_bytes);
+    settings.has_reserve_device_bytes = bytes.has_value();
+    settings.malformed_reserve_device_bytes = !bytes.has_value();
+    if (bytes.has_value()) settings.reserve_device_bytes = *bytes;
+  }
+  return settings;
+}
+
+std::optional<Qwen38ContextTier> Qwen38ContextTierForTarget(const std::string& target_filename) {
+  // The tier is a "_<n>k" component of the file stem (model_128k.onnx); "model_32k" must not match "2k".
+  const std::string stem = std::filesystem::path(target_filename).stem().string();
+  for (size_t begin = 0; begin <= stem.size();) {
+    size_t end = stem.find('_', begin);
+    if (end == std::string::npos) end = stem.size();
+    const std::string_view part = std::string_view(stem).substr(begin, end - begin);
+    if (part == "128k") return Qwen38ContextTier{"128k", 133128};
+    if (part == "64k") return Qwen38ContextTier{"64k", 65800};
+    if (part == "8k") return Qwen38ContextTier{"8k", 8456};
+    if (part == "2k") return Qwen38ContextTier{"2k", 2312};
+    begin = end + 1;
+  }
+  return std::nullopt;
+}
+
+std::vector<Config::NamedString> Qwen38MoeOffloadSessionEntries(const Qwen38MoeOffloadSettings& settings,
+                                                                const std::filesystem::path& model_root, int kv_capacity,
+                                                                bool adaptive_context_budget) {
+  constexpr int64_t kReferenceKvCapacity = 33032;  // the 32K-context target graph
+  constexpr int64_t kKvBytesPerToken = 16384;
+  constexpr uint64_t kMinDeviceExpertBytes = 1000000000ULL;
+  constexpr uint64_t kMinReserveDeviceBytes = 2147483648ULL;
+
+  std::vector<Config::NamedString> entries;
+  if (!settings.enabled) return entries;
+  if (!settings.has_source_root) entries.emplace_back("session.moe.offload.source_root", model_root.string());
+
+  // A malformed budget gets no entry, adapted or not: it stays as configured and the runtime rejects it by name.
+  const int64_t delta_kv_bytes = (static_cast<int64_t>(kv_capacity) - kReferenceKvCapacity) * kKvBytesPerToken;
+  if (adaptive_context_budget && delta_kv_bytes != 0) {
+    if (settings.has_device_expert_bytes) {
+      const uint64_t device_expert_bytes =
+          std::max(kMinDeviceExpertBytes, AddBytesSaturating(settings.device_expert_bytes, -delta_kv_bytes));
+      entries.emplace_back("session.moe.offload.device_expert_bytes", std::to_string(device_expert_bytes));
+    }
+    if (!settings.malformed_reserve_device_bytes) {
+      const uint64_t reserve_device_bytes =
+          std::max(kMinReserveDeviceBytes, AddBytesSaturating(settings.reserve_device_bytes, delta_kv_bytes));
+      entries.emplace_back("session.moe.offload.reserve_device_bytes", std::to_string(reserve_device_bytes));
+    }
+  } else if (!settings.has_reserve_device_bytes && !settings.malformed_reserve_device_bytes) {
+    entries.emplace_back("session.moe.offload.reserve_device_bytes", std::to_string(settings.reserve_device_bytes));
+  }
+  return entries;
+}
+
 Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_env) : Model{std::move(config)} {
   const auto& q = config_->model.qwen38_graph;
   if (!q.IsConfigured() || q.plane_library.empty() || q.ple_table.empty())
@@ -2687,8 +2809,17 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
     std::error_code error;
     return !config_->memory_assets_only_ && std::filesystem::is_regular_file(root / file, error);
   };
-  const std::string target_filename = ResolveQwen38TargetGraphFilename(
+  std::string target_filename = ResolveQwen38TargetGraphFilename(
       config_->model.decoder.filename, context_request, drafts_env ? drafts_env : "", package_has_file);
+  const Qwen38MoeOffloadSettings moe_offload =
+      ParseQwen38MoeOffloadSettings(config_->model.decoder.session_options.config_entries);
+  // Expert reads dominate a step when the experts are offloaded: a constrained offload takes the S=4 multi-draft graph, which
+  // commits more tokens per step, unless the environment chose the graph (a context tier or the MTP-drafts hook).
+  const bool graph_chosen_by_environment = !context_request.empty() || (drafts_env != nullptr && *drafts_env != '\0');
+  if (moe_offload.constrained && !graph_chosen_by_environment && target_filename == "model.onnx" &&
+      package_has_file("model_s4.onnx")) {
+    target_filename = "model_s4.onnx";
+  }
   if (!config_->memory_assets_only_ && config_->model_data_spans_.count(target_filename) == 0) {
     ValidateQwen38TargetModelFile(ResolveQwen38MaxBatchSize(*config_), root / target_filename);
   }
@@ -2746,6 +2877,21 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
     }
   }
 
+  // The offload budget below depends on the KV capacity, which is otherwise only read from the session once it exists
+  // (SyncQwen38GraphContext below remains the one place that sets the context settings): a target graph named after its
+  // context tier tells the capacity up front.
+  const auto context_tier = Qwen38ContextTierForTarget(target_filename);
+  if (context_tier && context_tier->name == "64k" && q.fold.head_r2.filename == "mtp.onnx" &&
+      package_has_file("mtp_64k.onnx")) {
+    config_->model.qwen38_graph.fold.head_r2.filename = "mtp_64k.onnx";
+  }
+  const char* adaptive_ctx_budget = std::getenv("ORT_QWEN38_ADAPTIVE_CTX_BUDGET");
+  for (const auto& [key, value] : Qwen38MoeOffloadSessionEntries(
+           moe_offload, root, context_tier ? context_tier->kv_capacity : q.kv_capacity,
+           adaptive_ctx_budget != nullptr && std::string_view(adaptive_ctx_budget) == "1")) {
+    session_options_->AddConfigEntry(key.c_str(), value.c_str());
+  }
+
   session_target_ = CreateSession(ort_env, target_filename, session_options_.get());
   session_info_.Add(*session_target_);
   // The outputs of the session are authoritative (the model file may not be a protobuf one): refuse a ring-bank target for
@@ -2772,6 +2918,8 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
     CreateSessionOptionsFromConfig(options, *result, /*is_primary_session_options=*/false,
                                    /*disable_graph_capture=*/!inherit, /*cloned_from_parent=*/false,
                                    /*append_providers=*/true);
+    // Only the target session offloads experts; the head, drafter and prefill graphs keep theirs on the device.
+    result->AddConfigEntry("session.moe.offload.mode", "disabled");
     if (pool_) pool_->AddTo(*result, label);
     if (!embed_values_.empty() &&
         (std::string(label) == "mtp" || std::string(label) == "drafter" || std::string(label) == "head_r2" ||
