@@ -6,6 +6,26 @@
 
 Install the C# package according to the [installation instructions](https://onnxruntime.ai/docs/genai/howto/install) or [build from source](https://onnxruntime.ai/docs/genai/howto/build-from-source.html).
 
+### NuGet sources
+
+The repository-root `NuGet.config` applies to the C# library, tests, and examples,
+including the `MSBuild.Sdk.Extras` SDK resolver. It maps `Microsoft.ML.OnnxRuntime`
+and `Microsoft.ML.OnnxRuntime.*` to ORT-Nightly; all other packages and their
+transitive dependencies come directly from nuget.org. Exact and prefix mappings
+take precedence over the nuget.org wildcard, so ordinary dependencies do not
+require ORT-Nightly upstream-save permissions.
+
+The `Microsoft.ML.OnnxRuntimeGenAI` packages (including `.Managed`, `.Cuda`, and
+`.DirectML`) do not match the ORT prefix and resolve from nuget.org. Their
+`Microsoft.ML.OnnxRuntime.*` dependencies still resolve from ORT-Nightly.
+Run builds from within the repository without overriding `RestoreSources`.
+CI native-package downloads retain their explicit feeds: Windows downloads skip
+managed dependencies, and Linux/macOS bootstrap projects live outside the
+repository so the managed source mapping does not change those downloads.
+Feed-isolated packaging uses a separate generated configuration that maps all
+packages to its authenticated Lotus source and does not restore test-only
+dependencies.
+
 ## Download a Model
 
 There are many places to obtain a model. Please read through [our download options](https://github.com/microsoft/onnxruntime-genai/blob/main/docs/DownloadModels.md).

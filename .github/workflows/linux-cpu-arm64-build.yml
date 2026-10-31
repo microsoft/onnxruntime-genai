@@ -48,9 +48,10 @@ jobs:
 
       - name: Download build-time and runtime OnnxRuntime
         run: |
-          dotnet new console
-          dotnet add package ${{ env.ORT_PACKAGE_NAME }} --version ${{ env.ORT_BUILD_VERSION }} --source ${{ env.ORT_BUILD_SOURCE }} --package-directory .
-          dotnet add package ${{ env.ORT_PACKAGE_NAME }} --version ${{ env.ORT_RUNTIME_VERSION }} --source ${{ env.ORT_RUNTIME_SOURCE }} --package-directory .
+          # Keep native downloads on their explicit feeds, outside the managed source mapping.
+          dotnet new console --output "$RUNNER_TEMP/ort-native-download" --no-restore
+          dotnet add "$RUNNER_TEMP/ort-native-download" package ${{ env.ORT_PACKAGE_NAME }} --version ${{ env.ORT_BUILD_VERSION }} --source ${{ env.ORT_BUILD_SOURCE }} --package-directory "$GITHUB_WORKSPACE"
+          dotnet add "$RUNNER_TEMP/ort-native-download" package ${{ env.ORT_PACKAGE_NAME }} --version ${{ env.ORT_RUNTIME_VERSION }} --source ${{ env.ORT_RUNTIME_SOURCE }} --package-directory "$GITHUB_WORKSPACE"
 
       - name: list files
         shell: bash
