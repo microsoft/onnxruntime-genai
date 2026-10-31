@@ -2702,7 +2702,7 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
   engine_ = std::make_unique<Qwen38GraphEngine>(*this);
   auto& capabilities = resolved_capabilities_;
   capabilities.token_selection = BackendTokenSelection::Backend;
-  capabilities.admission = BackendAdmission::WholeBatch;
+  capabilities.admission = engine_->MaxBatchSize() > 1 ? BackendAdmission::IndependentSlots : BackendAdmission::WholeBatch;
   capabilities.kv_storage = BackendKvStorage::PersistentContiguous;
   capabilities.additional_state = BackendAdditionalState::PrivateBanks;
   capabilities.continuation = BackendContinuation::ReplayHistory;
@@ -2712,8 +2712,8 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
   capabilities.supports_min_generated_tokens = false;
   capabilities.supports_guidance = false;
   capabilities.supports_stop_strings = true;
-  capabilities.max_slots = 1;
-  capabilities.configured_max_batch_size = 1;
+  capabilities.max_slots = engine_->MaxBatchSize();
+  capabilities.configured_max_batch_size = capabilities.max_slots;
   const uint64_t kv_limit = static_cast<uint64_t>(engine_->MaxSequenceLength());
   capabilities.max_request_length =
       config_->model.context_length > 0

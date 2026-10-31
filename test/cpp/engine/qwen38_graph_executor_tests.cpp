@@ -1932,6 +1932,59 @@ TEST_F(Qwen38GraphEngineTest, MultiSlotEvictsCompletedSlotsForQueuedRequests) {
   EXPECT_EQ(emitted[r2.get()], Expected(7, 3));
 }
 
+// A batched cycle runs the slots 0..max(active) and mutes the ones that sit out, which overwrites their KV rows and state: a
+// slot that is part-way through its prompt must never be part of a cycle, so none is enqueued until every requested slot has
+// ingested its prompt (a known limitation of ragged batches, see docs/paged_attention_engine.md). The slot that is ready
+// first still gets its first token in the step that ingests its prompt. Both slot orders are covered: the long prompt in the
+// slot below the ready one (the ready slot's cycle would mute the long prompt's slot) and above it.
+TEST_F(Qwen38GraphEngineTest, MultiSlotNoBatchedCycleIsEnqueuedWhileASlotIsPartWayThroughItsPrompt) {
+  for (const size_t long_slot : {size_t{0}, size_t{1}}) {
+    SCOPED_TRACE("long prompt in slot " + std::to_string(long_slot));
+    device_ = std::make_shared<ScriptedQwen38Device>(/*capacity=*/68, /*mtp=*/true, /*max_batch_size=*/2);
+    device_->dense_prefill = true;
+    device_->preferred_chunk = 8;
+    auto engine = MakeEngine();
+
+    const size_t short_slot = 1 - long_slot;
+    const auto long_prompt = Prompt(20, 12);  // chunks of 8, 8 and 4
+    const auto short_prompt = Prompt(3, 30);
+    auto first = Begin(*engine, long_slot == 0 ? std::span<const int32_t>{long_prompt} : std::span<const int32_t>{short_prompt},
+                       /*max_generated_tokens=*/4);
+    auto second = Begin(*engine, long_slot == 0 ? std::span<const int32_t>{short_prompt} : std::span<const int32_t>{long_prompt},
+                        /*max_generated_tokens=*/4);
+    const Request* long_request = (long_slot == 0 ? first : second).get();
+    const Request* short_request = (long_slot == 0 ? second : first).get();
+
+    std::array<EngineEvent, 16> buffer;
+    std::map<const Request*, std::vector<int32_t>> emitted;
+    for (size_t runs = 0; engine->HasPendingRequests(); ++runs) {
+      ASSERT_LT(runs, 1000u) << "the Engine did not finish";
+      const size_t count = engine->Run(buffer);
+      for (size_t i = 0; i < count; ++i) {
+        ASSERT_EQ(buffer[i].flags & EngineEventFlagFailed, 0u);
+        if (buffer[i].flags & EngineEventFlagToken) emitted[buffer[i].request.get()].push_back(buffer[i].token);
+      }
+      if (runs == 0) {
+        EXPECT_EQ(emitted[short_request], Expected(3, 1)) << "the short prompt's first token comes with its own prompt";
+        EXPECT_TRUE(emitted[long_request].empty());
+      }
+    }
+    EXPECT_EQ(emitted[long_request], Expected(20, 4));
+    EXPECT_EQ(emitted[short_request], Expected(3, 4));
+
+    const auto& calls = device_->calls;
+    const std::string last_chunk = "prefill_slot:" + std::to_string(long_slot) + ":4";
+    const auto chunk = std::find(calls.begin(), calls.end(), last_chunk);
+    ASSERT_NE(chunk, calls.end());
+    const auto cycle = std::find_if(calls.begin(), calls.end(), [](const std::string& c) { return c.rfind("enqueue_batch:", 0) == 0; });
+    ASSERT_NE(cycle, calls.end());
+    EXPECT_LT(chunk - calls.begin(), cycle - calls.begin())
+        << "a batched cycle was enqueued while slot " << long_slot << " was still ingesting its prompt";
+    EXPECT_EQ(device_->CallCount("prefill_slot:" + std::to_string(short_slot) + ":3"), 1u);
+    EXPECT_EQ(device_->CallCount("prefill_slot:" + std::to_string(long_slot) + ":8"), 2u);
+  }
+}
+
 // The prompt length of a slot is the slot's own state of the device. Slot 0 announces 20 tokens and ingests its first
 // chunk, slot 1 then announces 5 tokens, and slot 0's later chunks must still be told 20 (a process-wide variable would
 // have been overwritten by slot 1). The executor must not touch the process environment at all.
@@ -2165,6 +2218,46 @@ TEST_F(Qwen38GraphEngineTest, DISABLED_RunOverheadPerCycle) {
   std::cout << "Engine::Run: " << runs << " runs, " << tokens << " events in " << seconds * 1e3 << " ms = "
             << seconds / static_cast<double>(runs) * 1e6 << " us per run" << std::endl;
   EXPECT_EQ(tokens, generated);
+}
+
+TEST_F(Qwen38GraphEngineTest, MultiSlotBatchCountsOnePhysicalForwardAndTracksDiscardedCanceledRows) {
+  device_ = std::make_shared<ScriptedQwen38Device>(/*capacity=*/68, /*mtp=*/true, /*max_batch_size=*/2);
+  device_->dense_prefill = true;
+  device_->preferred_chunk = 16;
+  Qwen38GraphSession::Options options;
+  options.prefill_chunk_tokens = 16;
+  options.stop_tokens = {99};
+  auto session = std::make_shared<Qwen38GraphSession>(device_, options);
+  auto cache = std::make_shared<Qwen38GraphCacheManager>(model_, session);
+  auto scheduler = std::make_unique<FixedSlotScheduler>(model_, cache);
+  auto executor = std::make_unique<Qwen38GraphExecutor>(session, cache);
+  auto engine = std::make_shared<Engine>(
+      model_, EngineDependencies{cache, std::move(scheduler), std::move(executor)});
+
+  auto r0 = Begin(*engine, Prompt(4, 10), /*max_generated_tokens=*/5);
+  auto r1 = engine->CreateRequest();
+  TurnOptions turn_options;
+  turn_options.request = r1;
+  turn_options.max_generated_tokens = 5;
+  const uint64_t r1_turn = r1->BeginTurn(Prompt(4, 20), turn_options);
+
+  std::array<EngineEvent, 16> buffer;
+  // Step 1: prefill both slots and enqueue the first 2-slot batch decode cycle.
+  ASSERT_EQ(engine->Run(buffer), 2u);
+  EXPECT_EQ(session->WorkMetrics().prefill_tokens, 8u);
+  EXPECT_EQ(session->WorkMetrics().target_forward_passes, 0u);
+
+  // Cancel r1 while the 2-slot batch decode cycle is in flight.
+  ASSERT_TRUE(engine->CancelRequest(r1, r1_turn));
+  ASSERT_EQ(engine->Run(buffer), 1u);
+  EXPECT_EQ(buffer[0].request, r1);
+  EXPECT_EQ(buffer[0].finish_reason, GenerationFinishReason::Canceled);
+
+  // Next step collects the 2-slot batch: counts 1 physical target forward, discards r1's completion, and advances r0.
+  ASSERT_GE(engine->Run(buffer), 1u);
+  EXPECT_EQ(session->WorkMetrics().target_forward_passes, 1u);
+  EXPECT_EQ(session->WorkMetrics().discarded_completions, 1u);
+  EXPECT_EQ(engine->GetSpeculativeStats().target_forward_passes, 1u);
 }
 
 }  // namespace
