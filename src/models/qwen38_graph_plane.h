@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "qwen38_plane/qwen38_plane_abi.h"
+#include "qwen38_replay_geometry.h"
 
 namespace Generators {
 
@@ -100,6 +101,17 @@ struct Qwen38Plane {
 // The names of the QWEN38_PLANE_CAP_* bits set in `mask`, comma separated ("none" for 0); bits this build has no name for
 // are listed as one hexadecimal value.
 std::string DescribeQwen38PlaneCapabilities(unsigned long long mask);
+
+// The descriptor of the compact replay of one CausalConvWithState state (past_key_values.<layer>.conv_state | ple_conv_state)
+// of a request slot: `request` (kind kConvolution, the batch-1 shapes of the slot) is validated by
+// ValidateQwen38ReplayDescriptor, and `source` (the old state), `destination` (the new state) and `value` (the slot's
+// state_update output) are the device pointers of the slot. The descriptor carries the layout of the state. A history-first
+// state [batch, history, channels] needs the conv_history_first_replay capability of `plane`: a library without it reads every
+// conv state as channel-first and would corrupt that one on a partial acceptance, so this throws a std::runtime_error naming
+// the capability, the state and the library (Qwen38Plane::RequireCapabilities) instead of handing it the descriptor. A
+// channel-first state needs no capability, so such a package keeps loading with a library that predates it.
+Qwen38StateReplayDesc MakeQwen38ConvReplayDescriptor(const Qwen38Plane& plane, const Qwen38ReplayRequest& request,
+                                                     const void* source, void* destination, const void* value);
 
 // Zero-initialised device allocation owned by RAII.
 struct PlaneBuffer {

@@ -29,6 +29,18 @@ typedef struct Qwen38PleParams {
   long long capacity;
 } Qwen38PleParams;
 
+// Physical layout of the state of a CausalConvWithState replay (Qwen38StateReplayDesc::kind 1; `layout` is ignored by the other
+// kinds). The state of one slot holds channel_count channels of state_width positions in either order. Zero is the
+// channel-first layout, which is what every plane that predates the field assumes (the field was tail padding that the host
+// zeroed), so a descriptor that never sets it keeps its meaning. The history-first layout needs a plane that reports
+// QWEN38_PLANE_CAP_CONV_HISTORY_FIRST_REPLAY; the plane reads the `value` input as [capacity, channel_count] in both layouts.
+typedef enum Qwen38PlaneConvStateLayout {
+  // [channel_count, state_width]: (channel, position) is at channel * state_width + position
+  QWEN38_PLANE_CONV_STATE_CHANNEL_FIRST = 0,
+  // [state_width, channel_count]: (channel, position) is at position * channel_count + channel
+  QWEN38_PLANE_CONV_STATE_HISTORY_FIRST = 1,
+} Qwen38PlaneConvStateLayout;
+
 // Device descriptor for compact state-update replay (GatedDeltaNet, CausalConvWithState, PackedSparseAttentionIndexer).
 typedef struct Qwen38StateReplayDesc {
   const void* source_state;
@@ -52,7 +64,21 @@ typedef struct Qwen38StateReplayDesc {
   uint32_t element_size;
   uint32_t compress_ratio;
   uint32_t kind;
+  uint32_t layout;  // a Qwen38PlaneConvStateLayout, for kind 1 (it took the place of the 4 bytes of tail padding)
 } Qwen38StateReplayDesc;
+
+// The new field must not have changed the size of the descriptor that a plane built before it reads: every LP64 and LLP64
+// target lays the 10 pointers, the 6 uint64_t and the 6 uint32_t (this one included; without it there were 5 of them and 4
+// bytes of tail padding) out in 152 bytes, with `layout` in the last 4 bytes. This header is compiled into both the plane and
+// the host loader, so neither side can drift from the other.
+#ifdef __cplusplus
+static_assert(sizeof(void*) != 8 || sizeof(Qwen38StateReplayDesc) == 152, "Qwen38StateReplayDesc must keep its 152 bytes");
+static_assert(sizeof(void*) != 8 || offsetof(Qwen38StateReplayDesc, kind) == 144, "kind must stay where the planes read it");
+static_assert(sizeof(void*) != 8 || offsetof(Qwen38StateReplayDesc, layout) == 148, "layout must take the former tail padding");
+#else
+_Static_assert(sizeof(void*) != 8 || sizeof(Qwen38StateReplayDesc) == 152, "Qwen38StateReplayDesc must keep its 152 bytes");
+_Static_assert(sizeof(void*) != 8 || offsetof(Qwen38StateReplayDesc, layout) == 148, "layout must take the former tail padding");
+#endif
 
 // Limits of the compact state-update replay kernels (k_replay_gdn, k_replay_generic). The plane sizes its shared tiles and its
 // grid from them and the host checks every replay descriptor against them while it builds it (ValidateQwen38ReplayDescriptor),
@@ -65,6 +91,11 @@ typedef struct Qwen38StateReplayDesc {
 #define QWEN38_PLANE_MAX_PREP_ROWS 8        // rows of one folded verify step
 #define QWEN38_PLANE_MAX_PREP_BATCH 8       // request slots prep_batched prepares in one call
 #define QWEN38_PLANE_CTL_WORDS_PER_SLOT 16  // int64 control words of one request slot (the `state` of prep)
+// int64 words that prep_batched reserves for the n-gram contexts of one request slot in `ctx_out`: two for each of the
+// QWEN38_PLANE_MAX_PREP_ROWS rows, whatever the row count of the call, so slot s starts at word s * 16 and the layout of the
+// buffer does not change with the number of rows. The consumers of the buffer (the engine's per-slot views and the
+// SpeculativePrefixCommit node, which reads slot s at s * (words / slots)) depend on that stride.
+#define QWEN38_PLANE_CTX_WORDS_PER_SLOT (2 * QWEN38_PLANE_MAX_PREP_ROWS)
 
 // X(return type, name, parameter list). The exported symbol is "qwen38_plane_" + name. `stream` is a cudaStream_t.
 // CUDA runtime helpers return the cudaError_t as int (0 = success).
@@ -160,13 +191,19 @@ typedef struct Qwen38StateReplayDesc {
 // prep_batched: the optional export "qwen38_plane_prep_batched" (below), the folded prep of several request slots in one call.
 // Only a model with model.qwen38_graph.max_batch_size > 1 needs it, so a library without it still loads every other package.
 #define QWEN38_PLANE_CAP_BATCHED_PREP 0x8ull
+// replay_state_updates: a CausalConvWithState state (descriptor kind 1) in the history-first layout, [history, channels]
+// (Qwen38StateReplayDesc::layout, Qwen38PlaneConvStateLayout). A library without it reads every conv state as channel-first,
+// so a history-first state would be corrupted by a partial acceptance: the host requires the bit only for a package that has
+// such a state, and channel-first packages keep loading with a library that lacks it.
+#define QWEN38_PLANE_CAP_CONV_HISTORY_FIRST_REPLAY 0x10ull
 
 // X(bit, name), in bit order.
 #define QWEN38_PLANE_CAPABILITIES(X)                                   \
   X(QWEN38_PLANE_CAP_INT8_EMBEDDING, "int8_embedding")                 \
   X(QWEN38_PLANE_CAP_INT8_PLE, "int8_ple")                             \
   X(QWEN38_PLANE_CAP_NEGATIVE_POS_ADD_BATCH, "negative_pos_add_batch") \
-  X(QWEN38_PLANE_CAP_BATCHED_PREP, "batched_prep")
+  X(QWEN38_PLANE_CAP_BATCHED_PREP, "batched_prep")                     \
+  X(QWEN38_PLANE_CAP_CONV_HISTORY_FIRST_REPLAY, "conv_history_first_replay")
 
 #define QWEN38_PLANE_CAPABILITY_BIT_(bit, name) | (bit)
 #define QWEN38_PLANE_ALL_CAPABILITIES (0ull QWEN38_PLANE_CAPABILITIES(QWEN38_PLANE_CAPABILITY_BIT_))
@@ -200,7 +237,9 @@ typedef int (*Qwen38PlaneEmbedGatherFn)(void* stream, const void* table, long lo
 // that every one is the base of an array over the slots, which are numbered 0 .. batch - 1:
 //   state         int64, QWEN38_PLANE_CTL_WORDS_PER_SLOT words per slot, the control words of the slot (prep's `state`)
 //   ctx_in        int64[batch][2]                       the n-gram context in front of row 0
-//   ctx_out       int64[batch][rows][2]                 as for prep, slot after slot
+//   ctx_out       int64[batch][QWEN38_PLANE_CTX_WORDS_PER_SLOT]: slot s starts at word s * QWEN38_PLANE_CTX_WORDS_PER_SLOT
+//                 whatever `rows` is, and row r of it is at words 2r .. 2r + 1 as for prep; the words of a slot beyond
+//                 2 * rows are not written
 //   input_ids, position_ids   int64[batch][rows]
 //   committed     int32[batch], or null to skip         row 0 of the slot writes its committed length
 //   past_pos      int64[batch][Qwen38PleParams::capacity]

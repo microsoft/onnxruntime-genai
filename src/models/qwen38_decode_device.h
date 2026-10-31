@@ -10,10 +10,27 @@
 #include <cstdint>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 #include "span.h"
 
 namespace Generators {
+
+// Graph I/O of the fold model's com.microsoft::SpeculativePrefixCommit node (rc4 contract, ORT PR #33474). The op reads the
+// persistent control state (fold.ctl, fold.ctx_commit) and always writes the updated state to two required outputs. The
+// runtime binds each state output to the device buffer of the matching input (in place), otherwise the update is lost.
+// Other fold inputs: fold.ctx_a (prefixes) and fold.ptrs (result ring address, ring size); output fold.tail_done is head_c.
+inline constexpr const char* kQwen38FoldCtl = "fold.ctl";
+inline constexpr const char* kQwen38FoldCtxCommit = "fold.ctx_commit";
+inline constexpr const char* kQwen38FoldCtlOut = "fold.ctl_out";
+inline constexpr const char* kQwen38FoldCtxCommitOut = "fold.ctx_commit_out";
+
+// The fold input a state output is bound in place over; nullptr when `output_name` is not a state output.
+inline const char* Qwen38FoldStateInput(std::string_view output_name) {
+  if (output_name == kQwen38FoldCtlOut) return kQwen38FoldCtl;
+  if (output_name == kQwen38FoldCtxCommitOut) return kQwen38FoldCtxCommit;
+  return nullptr;
+}
 
 // What one draft -> verify -> commit cycle published. The verify step ran the target on [pending token, draft0, (draft1, draft2)]:
 // pred0..pred3 are the target's greedy predictions at each verify row. The longest matching prefix of drafts is accepted

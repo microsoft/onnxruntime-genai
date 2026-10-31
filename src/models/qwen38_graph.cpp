@@ -489,7 +489,7 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
   // Allocated with 16 int64 words per slot so slots [8..13] hold draft_1..draft_6 for S<=8 multi-draft verify.
   ctl_ = PlaneBuffer(plane_, static_cast<size_t>(max_batch_) * 16 * sizeof(int64_t), stream_);
   ctx_commit_ = PlaneBuffer(plane_, static_cast<size_t>(max_batch_) * 2 * sizeof(int64_t), stream_);
-  ctx_a_ = PlaneBuffer(plane_, static_cast<size_t>(max_batch_) * kMaxVerifyRows * 2 * sizeof(int64_t), stream_);
+  ctx_a_ = PlaneBuffer(plane_, static_cast<size_t>(max_batch_) * kFoldCtxAWords * sizeof(int64_t), stream_);
   ctx_b_ = PlaneBuffer(plane_, static_cast<size_t>(max_batch_) * 2 * sizeof(int64_t), stream_);
   if (fold_) BuildHeadState();  // the fold model binds the head state
   BuildTarget();
@@ -941,18 +941,9 @@ void Qwen38GraphEngine::BuildTarget() {
             request.capacity = state_update_capacity_;
             request.state = state_of(state_name, src_t);
             request.update = update_of();
-            const Qwen38ReplayGeometry geometry = ValidateQwen38ReplayDescriptor(request);
-            Qwen38StateReplayDesc d{};
-            d.source_state = src_t.ptr + st_off;
-            d.destination_state = dst_t.ptr + st_off;
-            d.value = su_tensor->ptr + su_off;
-            d.channel_count = geometry.channel_count;
-            d.state_width = geometry.state_width;
-            d.capacity = static_cast<uint32_t>(state_update_capacity_);
-            d.kept_count = 1;
-            d.element_size = geometry.element_size;
-            d.kind = 1;
-            generic_descs.push_back(d);
+            // A history-first state needs the plane capability of its layout; a channel-first one keeps loading without it.
+            generic_descs.push_back(MakeQwen38ConvReplayDescriptor(plane_, request, src_t.ptr + st_off, dst_t.ptr + st_off,
+                                                                   su_tensor->ptr + su_off));
           } else if (kind_str == "indexer_value") {
             const std::string buf_name = "past_key_values." + lid_str + ".index_buffer";
             const std::string len_name = "past_key_values." + lid_str + ".index_lengths";
@@ -1013,16 +1004,18 @@ void Qwen38GraphEngine::BuildTarget() {
   }
 
   if (fold_) {
-    // fold.* control inputs alias the device control block; fold.ptrs = (pinned result ring address, ring size)
+    // fold.* control inputs alias the device control block; fold.ptrs = (pinned result ring address, ring size).
+    // SpeculativePrefixCommit serves head_rows in [3, 8] and reads 16 ctl words and >= 2 * head_rows ctx_a words per slot.
+    if (verify_rows_ < 3 || verify_rows_ > kMaxVerifyRows)
+      throw std::runtime_error("qwen38_graph: the fold stack needs 3..8 verify rows (SpeculativePrefixCommit head_rows)");
     fold_ptrs_ = PlaneBuffer(plane_, 2 * sizeof(int64_t), stream_);
     const int64_t ptrs[2] = {static_cast<int64_t>(reinterpret_cast<intptr_t>(result_host_)), kRing};
     plane_.Check(plane_.memcpy_h2d(fold_ptrs_.data(), ptrs, sizeof(ptrs), stream_), "fold ptrs");
     SyncStream();  // ptrs lives on the stack
     const auto i64 = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64;
-    fold_tensors_["fold.ctl"] = MakeTensor(ctl_.data(), {verify_rows_ > 2 ? 16 : 8}, i64);
-    fold_tensors_["fold.ctx_commit"] = MakeTensor(ctx_commit_.data(), {2}, i64);
-    fold_tensors_["fold.ctx_a"] = MakeTensor(ctx_a_.data(), {verify_rows_ > 2 ? 2 * verify_rows_ : 2}, i64);
-    fold_tensors_["fold.ctx_b"] = MakeTensor(ctx_a_.data() + 16, {2}, i64);
+    fold_tensors_["fold.ctl"] = MakeTensor(ctl_.data(), {kFoldCtlWords}, i64);
+    fold_tensors_["fold.ctx_commit"] = MakeTensor(ctx_commit_.data(), {kFoldCtxCommitWords}, i64);
+    fold_tensors_["fold.ctx_a"] = MakeTensor(ctx_a_.data(), {2 * verify_rows_}, i64);
     fold_tensors_["fold.ptrs"] = MakeTensor(fold_ptrs_.data(), {2}, i64);
   }
 
@@ -1166,6 +1159,8 @@ void Qwen38GraphEngine::BuildTarget() {
           t = add_own(name, {1, 1, 1}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
         else if (fold_ && name == "fold.tail_done")
           t = add_own(name, {1}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+        else if (fold_ && Qwen38FoldStateInput(name))
+          t = fold_tensors_.at(Qwen38FoldStateInput(name)).get();  // updated state lands in the persistent control buffers
         else if (name == "present_position_ids")
           t = max_batch_ == 1 ? store_["past_position_ids"].get()
                               : add_view(name, store_["past_position_ids"]->ptr,
@@ -1279,11 +1274,11 @@ void Qwen38GraphEngine::BuildTarget() {
               break;
             case Kind::kFold:
               if (name == "fold.ctl")
-                t = add_view(name, ctl_.data(), {B * (verify_rows_ > 2 ? 16 : 8)}, i64);
+                t = add_view(name, ctl_.data(), {B * kFoldCtlWords}, i64);
               else if (name == "fold.ctx_commit")
-                t = add_view(name, ctx_commit_.data(), {B * 2}, i64);
-              else if (name == "fold.ctx_a")
-                t = add_view(name, ctx_a_.data(), {B * (verify_rows_ > 2 ? 2 * verify_rows_ : 2)}, i64);
+                t = add_view(name, ctx_commit_.data(), {B * kFoldCtxCommitWords}, i64);
+              else if (name == "fold.ctx_a")  // the op derives the per-slot stride from the size: keep it equal to ctx_a_slot()
+                t = add_view(name, ctx_a_.data(), {B * kFoldCtxAWords}, i64);
               else
                 t = fold_tensors_.at(name).get();
               break;
@@ -1317,6 +1312,10 @@ void Qwen38GraphEngine::BuildTarget() {
           };
           if (name == "fold.tail_done")
             t = add_own(name, {B}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+          else if (name == kQwen38FoldCtlOut)
+            t = add_view(name, ctl_.data(), {B * kFoldCtlWords}, i64);
+          else if (name == kQwen38FoldCtxCommitOut)
+            t = add_view(name, ctx_commit_.data(), {B * kFoldCtxCommitWords}, i64);
           else if (name == "present_position_ids")
             t = add_view(name, store_["past_position_ids"]->ptr,
                          with_batch(store_slot_shape_["past_position_ids"], B), store_["past_position_ids"]->type);
