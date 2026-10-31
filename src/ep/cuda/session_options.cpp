@@ -13,12 +13,17 @@ size_t ParseArenaOptionValue(std::string_view key, const std::string& value) {
   } else if (key == "arena_extend_strategy" && value == "kSameAsRequested") {
     parsed = 1;
   } else {
+    size_t consumed = 0;
     try {
-      parsed = std::stoll(value);
+      parsed = std::stoll(value, &consumed);
     } catch (const std::invalid_argument&) {
       throw std::invalid_argument("CUDA arena option '" + std::string(key) + "' must be an integer, got '" + value + "'.");
     } catch (const std::out_of_range&) {
       throw std::out_of_range("CUDA arena option '" + std::string(key) + "' value '" + value + "' is out of range.");
+    }
+    // stoll stops at the first character that is not part of the number: "1GB" is not a byte count of 1.
+    if (consumed != value.size()) {
+      throw std::invalid_argument("CUDA arena option '" + std::string(key) + "' must be an integer, got '" + value + "'.");
     }
   }
   if (parsed < -1) {
