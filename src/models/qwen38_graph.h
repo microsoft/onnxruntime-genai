@@ -21,7 +21,9 @@
 
 #include "engine/backend_capabilities.h"
 #include "model.h"
+#include "../dflash2_drafter.h"
 #include "qwen38_decode_device.h"
+#include "qwen38_dflash_prompt.h"
 #include "qwen38_graph_plane.h"
 #include "qwen38_ort_env.h"
 #include "span.h"
@@ -96,10 +98,12 @@ void ValidateQwen38PrefillChunk(const Config::Model::Qwen38Graph& q);
 
 // Checks a model package against the plane library it names, when the model is loaded, before its weights are uploaded and
 // before any session is created: an INT8 PLE table (model.qwen38_graph.ple_table with a negative scale) needs the int8_ple
-// plane capability and an INT8 embedding table (<model.embedding.filename>.data of vocab_size x hidden_size INT8 rows and
-// one float scale per row) needs int8_embedding (qwen38_graph_plane.h). Throws a std::runtime_error naming the missing
-// capability, the file and the library when the library lacks one; BF16 and FP8 packages need no capability. Returns the
-// layout of the embedding table the model maps from that file: kNone when the package has no table of that shape.
+// plane capability, an INT8 embedding table (<model.embedding.filename>.data of vocab_size x hidden_size INT8 rows and
+// one float scale per row) needs int8_embedding, and the folded MTP verify path (model.qwen38_graph.fold.enabled), which
+// prepares all the rows of a verify step with one call, needs negative_pos_add_batch (qwen38_graph_plane.h). Throws a
+// std::runtime_error naming the missing capability, what required it and the library when the library lacks one; BF16 and
+// FP8 packages without the fold path need no capability. Returns the layout of the embedding table the model maps from that
+// file: kNone when the package has no table of that shape.
 Qwen38EmbeddingFormat RequireQwen38PackageSupportedByPlane(const Qwen38Plane& plane, const Config& config,
                                                            const std::filesystem::path& model_folder);
 
@@ -108,13 +112,31 @@ Qwen38EmbeddingFormat RequireQwen38PackageSupportedByPlane(const Qwen38Plane& pl
 // fold model), one per (row count, ping-pong direction) for the S=1/S=2 head sessions and one per ring phase for the
 // standalone R=2 head. The ids are derived from the role of the run, they are not configurable, and they are distinct
 // across the sessions of a model. 0 is ORT's default annotation and -1 means "do not capture"; neither is produced.
+// The DFlash2 drafter is a session of its own that numbers the shapes it captures itself (engine/graph_annotation_ids.h),
+// so it takes none of these ids; the S=8 (seven drafts) target of its folded pipeline is a kTarget run of 8 rows.
 enum class Qwen38GraphRun { kTarget,
                             kHead,
                             kHeadR2 };
-inline constexpr int kQwen38GraphIdMaxRows = 4;    // verify rows of the target (S=1 .. S=4)
+inline constexpr int kQwen38GraphRunCount = 3;     // the enumerators above
+inline constexpr int kQwen38GraphIdMaxRows = 8;    // verify rows of the target (S=1 .. S=8)
 inline constexpr int kQwen38GraphIdMaxPhases = 8;  // ring banks / ping-pong directions of any decode mode
-// Throws std::out_of_range for a row count or phase beyond the limits above.
+static_assert(static_cast<int>(Qwen38GraphRun::kHeadR2) + 1 == kQwen38GraphRunCount,
+              "kQwen38GraphRunCount must count every Qwen38GraphRun");
+// Throws std::out_of_range for a run, row count or phase beyond the limits above.
 int Qwen38GraphAnnotationId(Qwen38GraphRun run, int rows, int phase);
+
+// ORT captures a graph after a few eager runs of it: the warm-up of a graph runs it this many times, to be safe.
+inline constexpr int kQwen38WarmupRunsPerGraph = 6;
+
+// What the DFlash engine runs while its model is created. model.qwen38_graph.warmup=false opts out of all of it, as for the
+// other paths: no forward, hence no CUDA graph captured and no startup cost, for the drafter or for the target. With
+// warmup=true the drafter ingests a warm-up prompt and drafts every row width (`drafter`) and `target_tokens` dummy prompt
+// tokens step through the S=verify_rows target graphs, enough runs of every (rows, ring bank) graph to capture it.
+struct Qwen38DflashWarmupPlan {
+  bool drafter{};
+  size_t target_tokens{};
+};
+Qwen38DflashWarmupPlan PlanQwen38DflashWarmup(bool warmup, int verify_rows, int num_banks) noexcept;
 
 // The packed QSA indexer pools kQwen38IndexKeyRatio tokens into one compressed index key.
 inline constexpr int kQwen38IndexKeyRatio = 4;
@@ -286,6 +308,7 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
     uint8_t* tokens{};
     uint8_t* hidden{};
     size_t status_count{};
+    uint8_t* auxiliary{};
   };
   struct RowInputs {  // fixed-address per-row-count inputs of the target
     std::map<std::string, std::unique_ptr<DevTensor>> tensors;
@@ -331,6 +354,7 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   DevTensor* NewDeviceTensor(std::map<std::string, std::unique_ptr<DevTensor>>& owner, const std::string& name,
                              std::vector<int64_t> shape, ONNXTensorElementDataType type);
   void Warmup();
+  void Draft(const uint8_t* features, size_t rows, size_t position, int32_t anchor, bool propose);
 
   void PrepRow(int rows, int row, const void* tok, const void* pos, int add, const void* ctx_in, void* ctx_out);
   void RunTarget(int rows, int phase, const Qwen38PromptRunHints* prompt = nullptr);
@@ -344,6 +368,7 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   void HeadPrefill();
   void RunHeadOnce(HeadSession& head, int rows);
   void ClearHead();
+  void ReplayStateUpdates(int src_bank, size_t kept_count);
   void CheckDeviceStatus(const char* where, const Direction* dir);
   int64_t ReadCtl(int index);
   void WriteCtl(int first, std::span<const int64_t> values);
@@ -364,20 +389,27 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   bool prefill_head_{};
   bool fold_{};
   bool force_reject_{};  // test hook (ORT_QWEN38_FORCE_REJECT): every draft is replaced before its verify
-  int verify_rows_{2};   // rows verified per target forward pass (2 = 1 draft, 3 = 2 drafts, 4 = 3 drafts)
+  bool compact_state_updates_{false};
+  int state_update_capacity_{0};
+  int verify_rows_{2};  // rows verified per target forward pass (2 = 1 draft, 3 = 2 drafts, 4 = 3 drafts, 8 = 7 drafts)
   int num_banks_{Qwen38DecodeLedger::kBanks};
   static constexpr int kBanks = Qwen38DecodeLedger::kBanks;
   static constexpr int kMaxBanks = 5;
-  static constexpr int kMaxVerifyRows = 4;
+  static constexpr int kMaxVerifyRows = 8;
   static_assert(kMaxBanks <= kQwen38GraphIdMaxPhases && kMaxVerifyRows <= kQwen38GraphIdMaxRows,
                 "every (row count, ring phase) of the decode graphs needs a CUDA graph id");
   static constexpr int kRing = 64;
   static constexpr int kArgmaxBlocks = 16;
 
   // target state
-  std::map<std::string, std::unique_ptr<DevTensor>> store_;   // in-place KV / positions
-  std::map<std::string, std::unique_ptr<DevTensor>> shared_;  // index_key buffers
-  Bank banks_[kMaxBanks + 1];                                 // last = scratch sink for S=1 present_mid
+  std::map<std::string, std::unique_ptr<DevTensor>> store_;                 // in-place KV / positions
+  std::map<std::string, std::unique_ptr<DevTensor>> shared_;                // index_key buffers
+  std::map<std::string, std::unique_ptr<DevTensor>> state_update_tensors_;  // compact state_update.* outputs
+  PlaneBuffer replay_descs_dev_[2];
+  int replay_fast_count_{0};
+  int replay_generic_count_{0};
+  int replay_fast_blocks_{0};
+  Bank banks_[kMaxBanks + 1];  // last = scratch sink for S=1 present_mid
   RowInputs inputs_[kMaxVerifyRows];
   Direction dirs_[kMaxVerifyRows][kMaxBanks];  // [rows-1][phase]
   std::vector<std::unique_ptr<DevTensor>> output_tensors_;
@@ -446,6 +478,11 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
     std::unique_ptr<OrtRunOptions> run_options;
   };
   std::unique_ptr<FastPrefillState> fast_;
+  std::shared_ptr<Dflash2Model> dflash_model_;
+  std::unique_ptr<Dflash2Drafter> dflash_;
+  PlaneBuffer d_dflash_prompt_;
+  Qwen38DflashPromptFeatures dflash_prompt_;  // which prompt chunks the drafter ingests; its window is set with dflash_
+  static constexpr size_t kDflashWidth = 12800;
 
   // host state
   Qwen38DecodeLedger ledger_;

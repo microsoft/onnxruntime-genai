@@ -261,6 +261,20 @@ TEST(Qwen38OrtRunHintsTest, WarmupIsAnnouncedOnlyWhileItRunsAndDeterminismStaysF
   EXPECT_NE(Find(after, Qwen38OrtEnv::kForceDeterministicMoe), nullptr);
 }
 
+TEST(Qwen38OrtRunHintsTest, DeterministicMoeCanBeRequiredWithoutAWarmup) {
+  Qwen38OrtRunHints hints;
+  hints.RequireDeterministicMoe();
+  EXPECT_FALSE(hints.InWarmup());
+  const auto variables = hints.Collect(nullptr);
+  EXPECT_EQ(Find(variables, Qwen38OrtEnv::kInWarmup), nullptr);
+  ASSERT_NE(Find(variables, Qwen38OrtEnv::kForceDeterministicMoe), nullptr);
+  EXPECT_EQ(Find(variables, Qwen38OrtEnv::kForceDeterministicMoe)->value, "1");
+  EXPECT_TRUE(Find(variables, Qwen38OrtEnv::kForceDeterministicMoe)->only_if_unset) << "a value of the user wins";
+
+  hints.BeginTurn();  // a new turn does not drop it
+  EXPECT_NE(Find(hints.Collect(nullptr), Qwen38OrtEnv::kForceDeterministicMoe), nullptr);
+}
+
 TEST(Qwen38OrtRunHintsTest, TheWarmupVariablesLeaveNoTraceAfterTheRunAndNeverOverrideTheUser) {
   const auto in_warmup = Read(Qwen38OrtEnv::kInWarmup);
   const auto deterministic = Read(Qwen38OrtEnv::kForceDeterministicMoe);

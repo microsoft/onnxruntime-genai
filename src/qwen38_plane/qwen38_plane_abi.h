@@ -29,6 +29,38 @@ typedef struct Qwen38PleParams {
   long long capacity;
 } Qwen38PleParams;
 
+// Device descriptor for compact state-update replay (GatedDeltaNet, CausalConvWithState, PackedSparseAttentionIndexer).
+typedef struct Qwen38StateReplayDesc {
+  const void* source_state;
+  void* destination_state;
+  const void* value;
+  const float* decay;
+  const float* key;
+  const float* delta;
+  const void* source_aux_state;
+  void* destination_aux_state;
+  const int32_t* source_lengths;
+  int32_t* destination_lengths;
+  uint64_t channel_count;
+  uint64_t state_width;
+  uint64_t key_width;
+  uint64_t key_head_count;
+  uint64_t state_capacity;
+  uint64_t aux_capacity;
+  uint32_t capacity;
+  uint32_t kept_count;
+  uint32_t element_size;
+  uint32_t compress_ratio;
+  uint32_t kind;
+} Qwen38StateReplayDesc;
+
+// Limits of the compact state-update replay kernels (k_replay_gdn, k_replay_generic). The plane sizes its shared tiles and its
+// grid from them and the host checks every replay descriptor against them while it builds it (ValidateQwen38ReplayDescriptor),
+// so a geometry the kernels cannot hold fails the model load instead of silently corrupting the recurrent state.
+#define QWEN38_PLANE_MAX_REPLAY_TRANSITIONS 8  // transitions one replay keeps: the capacity of the state_update outputs
+#define QWEN38_PLANE_MAX_REPLAY_KEY_WIDTH 256  // GatedDeltaNet key width: a row of the key tile (a multiple of 4: float4 loads)
+#define QWEN38_PLANE_REPLAY_ROWS_PER_BLOCK 32  // value rows of a GatedDeltaNet state one thread block of k_replay_gdn replays
+
 // X(return type, name, parameter list). The exported symbol is "qwen38_plane_" + name. `stream` is a cudaStream_t.
 // CUDA runtime helpers return the cudaError_t as int (0 = success).
 //
@@ -37,6 +69,14 @@ typedef struct Qwen38PleParams {
 // (pinned allocation, device alias, copy, synchronisation) is checked; when one fails, or when the table was never
 // registered with set_ple_host_params, the function returns the cudaError_t (cudaErrorInvalidValue for the unregistered
 // table) before it gathers or launches anything, so the outputs are untouched. Callers must check the result.
+//
+// prep prepares the graph inputs of one row: the token is read from tok_ptr and the position from pos_ptr plus pos_add. With
+// QWEN38_PLANE_CAP_NEGATIVE_POS_ADD_BATCH a pos_add in [-8, -2] instead prepares the rows = -pos_add rows of one folded verify
+// step in a single call, from the control words `state` (int64): row r takes its token from word {0, 2, 8, 9, 10, 11, 12, 13}[r]
+// and runs at position state[1] + r, and its n-gram context follows the tokens of the rows before it (row 0 starts from
+// ctx_in). For row r it writes input_ids[r] and position_ids[r] (int64), past_pos[position], ple_out + r * n_heads * head_dim
+// (bfloat16) and ctx_out[2r .. 2r + 1] (the token before it, then its own). Only row 0 writes committed[0] (int32), and a null
+// committed pointer skips it, as for one row; a position outside the table sets bit 0 of state[5], as for one row.
 //
 // The module keeps process-wide state (the staged tables registered through set_ple_host_params) that is shared by every
 // loader of the same library file. A loader calls attach once the module is loaded and validated and detach once before it
@@ -103,11 +143,15 @@ typedef struct Qwen38PleParams {
 // selects it, and cover a library with and a library without the bit in the qwen38_plane tests.
 #define QWEN38_PLANE_CAP_INT8_EMBEDDING 0x1ull  // embed_gather: per-row INT8 embedding tables (any row count)
 #define QWEN38_PLANE_CAP_INT8_PLE 0x2ull        // a negative Qwen38PleParams::scale marks INT8 PLE shards
+// prep: a pos_add in [-8, -2] prepares the -pos_add rows of one folded verify step in a single call (see the notes on prep
+// above). A library without it reads that pos_add as an offset of one row and leaves the other rows of the step stale.
+#define QWEN38_PLANE_CAP_NEGATIVE_POS_ADD_BATCH 0x4ull
 
 // X(bit, name), in bit order.
 #define QWEN38_PLANE_CAPABILITIES(X)                   \
   X(QWEN38_PLANE_CAP_INT8_EMBEDDING, "int8_embedding") \
-  X(QWEN38_PLANE_CAP_INT8_PLE, "int8_ple")
+  X(QWEN38_PLANE_CAP_INT8_PLE, "int8_ple")             \
+  X(QWEN38_PLANE_CAP_NEGATIVE_POS_ADD_BATCH, "negative_pos_add_batch")
 
 #define QWEN38_PLANE_CAPABILITY_BIT_(bit, name) | (bit)
 #define QWEN38_PLANE_ALL_CAPABILITIES (0ull QWEN38_PLANE_CAPABILITIES(QWEN38_PLANE_CAPABILITY_BIT_))

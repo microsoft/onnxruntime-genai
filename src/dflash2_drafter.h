@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <span>
 #include <unordered_map>
@@ -83,7 +84,8 @@ void Dflash2SampleLatticePath(const Dflash2Lattice& lattice, size_t steps, float
  */
 struct Dflash2Model : Model {
   Dflash2Model(std::unique_ptr<Config> config, OrtEnv& ort_env,
-               std::shared_ptr<CpuEmbedding> cpu_embedding = nullptr);
+               std::shared_ptr<CpuEmbedding> cpu_embedding = nullptr,
+               const std::function<void(OrtSessionOptions&)>& configure_session_options = {});
 
   std::unique_ptr<State> CreateState(DeviceSpan<int32_t>, const GeneratorParams&) const override;
 
@@ -198,7 +200,10 @@ struct Dflash2Drafter {
   bool Propose(Tensor& aux_hidden_states, std::span<const Feed> feeds,
                std::vector<std::vector<int32_t>>& drafts,
                std::vector<std::vector<TargetTokenSelection>>* draft_distributions = nullptr,
-               std::vector<Dflash2Lattice>* lattices = nullptr);
+               std::vector<Dflash2Lattice>* lattices = nullptr,
+               bool device_selection = false);
+  const Tensor& CandidateIds() const { return *step_tensors_.candidate_ids; }
+  const Tensor& Scores() const { return *step_tensors_.scores; }
 
   // Returns a request's blocks to the pool. Safe for requests the drafter never saw.
   void Release(const Request* request);
@@ -227,6 +232,7 @@ struct Dflash2Drafter {
   void AllocateCache();
   Tensor& StepTensor(std::unique_ptr<Tensor>& slot, DeviceInterface* device,
                      ONNXTensorElementDataType type, const std::vector<int64_t>& shape);
+  DeviceSpan<uint8_t> Staging(Tensor& tensor);
   void ReleaseCapturedGraphs() noexcept;
 
   std::shared_ptr<Dflash2Model> model_;
@@ -278,6 +284,7 @@ struct Dflash2Drafter {
   std::unordered_map<const Request*, RequestState> requests_;
   size_t admission_misses_{};
 
+  std::unordered_map<const Tensor*, DeviceSpan<uint8_t>> staging_;
   std::unique_ptr<OrtRunOptions> run_options_;
 };
 

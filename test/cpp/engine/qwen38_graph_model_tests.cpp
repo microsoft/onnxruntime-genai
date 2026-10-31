@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -333,6 +334,22 @@ TEST(Qwen38GraphConfigTest, ModelPathsMustStayInsideTheModelFolder) {
 
 // ---- host ledger -----------------------------------------------------------------------------
 
+TEST(Qwen38DecodeLedgerTest, CompactPingPongAlternatesBanksAcrossOneToEightRowSteps) {
+  Qwen38DecodeLedger ledger{64};
+  ledger.SetCompactPingPong(true, 8);
+  EXPECT_EQ(ledger.NumBanks(), 2);
+  EXPECT_EQ(ledger.Bank(), 0);
+  const size_t steps[] = {8, 1, 5, 7, 3, 8, 2};
+  size_t length = 0;
+  for (size_t i = 0; i < std::size(steps); ++i) {
+    ledger.Advance(steps[i]);
+    length += steps[i];
+    EXPECT_EQ(ledger.Bank(), static_cast<int>((i + 1) % 2));
+    EXPECT_EQ(ledger.Length(), length);
+  }
+  EXPECT_THROW(ledger.Advance(9), std::logic_error);
+}
+
 TEST(Qwen38DecodeLedgerTest, RingBankFollowsTheCommittedRows) {
   Qwen38DecodeLedger ledger{64};
   EXPECT_EQ(ledger.Bank(), 0);
@@ -475,26 +492,242 @@ TEST(Qwen38GraphConfigTest, PrefillChunkValidation) {
   EXPECT_THROW(ValidateQwen38PrefillChunk(config.model.qwen38_graph), std::runtime_error);
 }
 
+TEST(Qwen38GraphConfigTest, DflashWarmupAtModelCreationHonorsTheWarmupSetting) {
+  // warmup=false: the engine runs no forward while the model is created, neither the drafter's nor the target's.
+  Config off;
+  OverlayConfig(off, R"({"model":{"type":"qwen38_flash_graph","qwen38_graph":{"warmup":false}}})");
+  ASSERT_FALSE(off.model.qwen38_graph.warmup);
+  const Qwen38DflashWarmupPlan skipped = PlanQwen38DflashWarmup(off.model.qwen38_graph.warmup, 8, 2);
+  EXPECT_FALSE(skipped.drafter);
+  EXPECT_EQ(skipped.target_tokens, 0u);
+
+  // The default warms up: twelve S=8 target forwards (every ring bank of the compact replay, enough runs to capture each).
+  Config on;
+  ASSERT_TRUE(on.model.qwen38_graph.warmup);
+  const Qwen38DflashWarmupPlan s8 = PlanQwen38DflashWarmup(on.model.qwen38_graph.warmup, 8, 2);
+  EXPECT_TRUE(s8.drafter);
+  EXPECT_EQ(s8.target_tokens, 8u * 2u * static_cast<size_t>(kQwen38WarmupRunsPerGraph));
+  EXPECT_EQ(s8.target_tokens / 8, 12u);
+
+  const Qwen38DflashWarmupPlan s4 = PlanQwen38DflashWarmup(true, 4, 5);
+  EXPECT_TRUE(s4.drafter);
+  EXPECT_EQ(s4.target_tokens, 4u * 5u * static_cast<size_t>(kQwen38WarmupRunsPerGraph));
+
+  // A pipeline without verify rows or ring banks has nothing to warm up.
+  EXPECT_FALSE(PlanQwen38DflashWarmup(true, 0, 2).drafter);
+  EXPECT_EQ(PlanQwen38DflashWarmup(true, 8, 0).target_tokens, 0u);
+}
+
+namespace {
+
+using DflashChunk = Qwen38DflashPromptFeatures::Chunk;
+
+struct DflashPromptRun {
+  std::vector<DflashChunk> ingested;  // what the drafter is given while the prompt is prefilled, in order
+  std::optional<DflashChunk> last;    // what decoding takes when it begins
+};
+
+// What Qwen38GraphEngine::FastAppend does with the features of a prompt that arrives in calls of `call_rows` tokens, each
+// run as forwards of at most `forward_rows`. `announced` is the prompt length the executor announces up front, 0 when it is
+// not: a call then knows only the end of its own tokens.
+DflashPromptRun RunDflashPrompt(Qwen38DflashPromptFeatures& features, size_t prompt, size_t call_rows, size_t forward_rows,
+                                size_t announced) {
+  DflashPromptRun run;
+  for (size_t base = 0; base < prompt; base += call_rows) {
+    const size_t n = prompt - base < call_rows ? prompt - base : call_rows;
+    const size_t total_expected = base + n > announced ? base + n : announced;
+    if (const auto saved = features.BeginCall(total_expected)) run.ingested.push_back(*saved);
+    for (size_t lo = 0; lo < n;) {
+      const size_t m = n - lo < forward_rows ? n - lo : forward_rows;
+      if (const auto ingest = features.ChunkDone({base + lo, m}, lo + m == n, total_expected)) run.ingested.push_back(*ingest);
+      lo += m;
+    }
+  }
+  run.last = features.TakeSavedChunk();
+  return run;
+}
+
+// The drafter has the last `window` positions of the prompt without a gap: what it ingested and the chunk decoding takes
+// follow one another and end at the end of the prompt, and the first of them starts no later than the window does.
+void ExpectDrafterHasTheWindow(const DflashPromptRun& run, size_t prompt, size_t window) {
+  ASSERT_TRUE(run.last.has_value());
+  EXPECT_EQ(run.last->position + run.last->rows, prompt);
+  const size_t first = run.ingested.empty() ? run.last->position : run.ingested.front().position;
+  size_t next = first;
+  for (const DflashChunk& chunk : run.ingested) {
+    EXPECT_EQ(chunk.position, next);
+    next = chunk.position + chunk.rows;
+  }
+  EXPECT_EQ(run.last->position, next);
+  EXPECT_LE(first, prompt > window ? prompt - window : size_t{0});
+}
+
+}  // namespace
+
+TEST(Qwen38DflashPromptFeaturesTest, WithoutAWindowEveryChunkButTheLastIsIngestedInOrder) {
+  Qwen38DflashPromptFeatures features;  // the drafter attends to the whole prompt
+  const DflashPromptRun run = RunDflashPrompt(features, 1000, 256, 128, 0);
+  EXPECT_EQ(run.ingested.size(), 7u);
+  ExpectDrafterHasTheWindow(run, 1000, 1000);
+  ASSERT_TRUE(run.last.has_value());
+  EXPECT_EQ(run.last->position, 896u);
+  EXPECT_EQ(run.last->rows, 104u);
+
+  // A window larger than the prompt is the same.
+  Qwen38DflashPromptFeatures wide(5000);
+  EXPECT_EQ(RunDflashPrompt(wide, 1000, 256, 128, 1000).ingested.size(), 7u);
+}
+
+TEST(Qwen38DflashPromptFeaturesTest, ChunksBeforeTheWindowAreSkippedByAbsolutePosition) {
+  // The window of 100 positions at the end of a 1000-token prompt is [900, 1000).
+  Qwen38DflashPromptFeatures features(100);
+  EXPECT_FALSE(features.ChunkDone({700, 100}, false, 1000).has_value());
+  EXPECT_FALSE(features.ChunkDone({800, 100}, false, 1000).has_value());  // [800, 900) ends where the window begins
+  const auto reaching = features.ChunkDone({801, 100}, false, 1000);      // [801, 901) holds position 900
+  ASSERT_TRUE(reaching.has_value());
+  EXPECT_EQ(reaching->position, 801u);
+  EXPECT_EQ(reaching->rows, 100u);
+
+  // A prompt length below the end of a chunk (it is never announced so) is not an unsigned wrap to "far before the window".
+  Qwen38DflashPromptFeatures unsure(50);
+  EXPECT_TRUE(unsure.ChunkDone({0, 500}, false, 100).has_value());
+}
+
+TEST(Qwen38DflashPromptFeaturesTest, IngestionStaysContiguousOnceItHasBegun) {
+  Qwen38DflashPromptFeatures features(100);
+  ASSERT_TRUE(features.ChunkDone({900, 50}, false, 1000).has_value());
+  // The prompt turns out longer than it was known to be. Chunks that now fall before the window are still ingested, as the
+  // context of the drafter would otherwise have a gap.
+  EXPECT_TRUE(features.ChunkDone({950, 50}, false, 1200).has_value());
+  EXPECT_TRUE(features.ChunkDone({1000, 50}, false, 1200).has_value());
+}
+
+TEST(Qwen38DflashPromptFeaturesTest, ALongPromptIngestsOnlyItsWindowHoweverTheExecutorSplitsIt) {
+  // The window is sliding_window 512 plus block 16. The executor calls with prefill chunks (256 tokens here, one forward
+  // per call), and every call ends with a chunk saved for the next one: ingesting that unconditionally began the ingestion
+  // of the whole history.
+  constexpr size_t kPrompt = 4096;
+  constexpr size_t kWindow = 528;
+  constexpr size_t kForward = 256;
+  for (const size_t call_rows : {size_t{256}, size_t{512}, size_t{1024}, size_t{4096}}) {
+    SCOPED_TRACE("call_rows=" + std::to_string(call_rows));
+    Qwen38DflashPromptFeatures features(kWindow);
+    const DflashPromptRun run = RunDflashPrompt(features, kPrompt, call_rows, kForward, kPrompt);
+    // [3328, 3584) and [3584, 3840) reach into the window [3568, 4096); the chunk before them ends at 3328, outside it.
+    ASSERT_EQ(run.ingested.size(), 2u);
+    EXPECT_EQ(run.ingested[0].position, 3328u);
+    EXPECT_EQ(run.ingested[1].position, 3584u);
+    ASSERT_TRUE(run.last.has_value());
+    EXPECT_EQ(run.last->position, 3840u);
+    EXPECT_EQ(run.last->rows, 256u);
+    ExpectDrafterHasTheWindow(run, kPrompt, kWindow);
+  }
+}
+
+TEST(Qwen38DflashPromptFeaturesTest, APromptLengthThatIsNotAnnouncedNeverDropsWhatTheWindowNeeds) {
+  // Without ExpectPrefillTokens a call knows the end of its own tokens, a lower bound of the prompt length: a chunk it
+  // drops is before the window for sure, one it keeps may reach back further than needed.
+  constexpr size_t kWindow = 528;
+  for (const size_t prompt : {size_t{300}, size_t{1000}, size_t{3000}, size_t{4097}}) {
+    for (const size_t call_rows : {size_t{100}, size_t{256}, size_t{700}, size_t{1024}}) {
+      for (const size_t forward_rows : {size_t{64}, size_t{256}, size_t{1024}}) {
+        SCOPED_TRACE("prompt=" + std::to_string(prompt) + " call_rows=" + std::to_string(call_rows) +
+                     " forward_rows=" + std::to_string(forward_rows));
+        Qwen38DflashPromptFeatures features(kWindow);
+        ExpectDrafterHasTheWindow(RunDflashPrompt(features, prompt, call_rows, forward_rows, 0), prompt, kWindow);
+      }
+    }
+  }
+
+  // Calls at least as large as the window prove with their own length that the earlier chunks are outside it, so only the
+  // chunk next to the last one is ingested here.
+  Qwen38DflashPromptFeatures features(kWindow);
+  const DflashPromptRun run = RunDflashPrompt(features, 3000, 700, 700, 0);
+  ASSERT_EQ(run.ingested.size(), 1u);
+  EXPECT_EQ(run.ingested[0].position, 2100u);
+}
+
+TEST(Qwen38DflashPromptFeaturesTest, TheLastChunkOfACallIsSavedForTheNextCallOrForDecoding) {
+  Qwen38DflashPromptFeatures features(100);
+  // Decoding takes the last chunk of the prompt whatever the window says, far before it here.
+  EXPECT_FALSE(features.ChunkDone({0, 10}, true, 10000).has_value());
+  const auto saved = features.TakeSavedChunk();
+  ASSERT_TRUE(saved.has_value());
+  EXPECT_EQ(saved->position, 0u);
+  EXPECT_EQ(saved->rows, 10u);
+  EXPECT_FALSE(features.TakeSavedChunk().has_value());
+}
+
+TEST(Qwen38DflashPromptFeaturesTest, ASavedChunkIsIngestedOnceByTheNextCallAndDroppedBeforeTheWindow) {
+  Qwen38DflashPromptFeatures features(100);
+  EXPECT_FALSE(features.ChunkDone({0, 100}, true, 100).has_value());
+  EXPECT_FALSE(features.BeginCall(1000).has_value());   // [0, 100) is 900 positions short of the end
+  EXPECT_FALSE(features.TakeSavedChunk().has_value());  // and nothing stale is left behind
+
+  EXPECT_FALSE(features.ChunkDone({850, 100}, true, 1000).has_value());
+  const auto reaching = features.BeginCall(1000);  // [850, 950) is within the window [900, 1000)
+  ASSERT_TRUE(reaching.has_value());
+  EXPECT_EQ(reaching->position, 850u);
+  EXPECT_EQ(reaching->rows, 100u);
+  EXPECT_FALSE(features.TakeSavedChunk().has_value());  // the next call ingests a chunk once
+}
+
+TEST(Qwen38DflashPromptFeaturesTest, ResetStartsTheNextTurnFromScratch) {
+  Qwen38DflashPromptFeatures features(528);
+  const DflashPromptRun first = RunDflashPrompt(features, 4096, 256, 256, 4096);
+  ASSERT_EQ(first.ingested.size(), 2u);
+
+  // A turn that ends with a chunk saved and ingestion under way leaves neither behind.
+  features.ChunkDone({3840, 256}, true, 4096);
+  features.Reset();
+  EXPECT_FALSE(features.TakeSavedChunk().has_value());
+  const DflashPromptRun second = RunDflashPrompt(features, 4096, 256, 256, 4096);
+  ASSERT_EQ(second.ingested.size(), first.ingested.size());
+  EXPECT_EQ(second.ingested.front().position, first.ingested.front().position);
+}
+
 TEST(Qwen38GraphIdTest, IdsAreDerivedFromTheRunAndAreDistinct) {
   std::set<int> seen;
   const Qwen38GraphRun runs[] = {Qwen38GraphRun::kTarget, Qwen38GraphRun::kHead, Qwen38GraphRun::kHeadR2};
+  ASSERT_EQ(std::size(runs), static_cast<size_t>(kQwen38GraphRunCount));
   for (const Qwen38GraphRun run : runs) {
     for (int rows = 1; rows <= kQwen38GraphIdMaxRows; ++rows) {
       for (int phase = 0; phase < kQwen38GraphIdMaxPhases; ++phase) {
         const int id = Qwen38GraphAnnotationId(run, rows, phase);
-        EXPECT_GT(id, 0);  // 0 is ORT's default annotation, -1 disables capture
+        EXPECT_GT(id, 0);                                          // 0 is ORT's default annotation, -1 disables capture
+        EXPECT_EQ(id, Qwen38GraphAnnotationId(run, rows, phase));  // a pure function of its arguments
         EXPECT_TRUE(seen.insert(id).second) << "duplicate id " << id;
       }
     }
   }
-  EXPECT_EQ(seen.size(), 3u * kQwen38GraphIdMaxRows * kQwen38GraphIdMaxPhases);
+  EXPECT_EQ(seen.size(), static_cast<size_t>(kQwen38GraphRunCount) * kQwen38GraphIdMaxRows * kQwen38GraphIdMaxPhases);
 }
 
-TEST(Qwen38GraphIdTest, RejectsRowsAndPhasesBeyondTheLimits) {
+TEST(Qwen38GraphIdTest, EveryVerifyWidthUpToSevenDraftsHasAnIdPerRingPhase) {
+  // S=8 verification (seven drafts) runs the target with 8 rows; the S=1 .. S=7 widths stay available too.
+  EXPECT_GE(kQwen38GraphIdMaxRows, 8);
+  std::set<int> target_ids;
+  for (int rows = 1; rows <= 8; ++rows) {
+    for (int phase = 0; phase < 5; ++phase) {  // the non-compact fold rings up to five banks, the compact one two
+      EXPECT_TRUE(target_ids.insert(Qwen38GraphAnnotationId(Qwen38GraphRun::kTarget, rows, phase)).second);
+    }
+  }
+  // Rows or phases of one run never alias another run's ids.
+  EXPECT_NE(Qwen38GraphAnnotationId(Qwen38GraphRun::kTarget, 8, kQwen38GraphIdMaxPhases - 1),
+            Qwen38GraphAnnotationId(Qwen38GraphRun::kHead, 1, 0));
+  EXPECT_LT(Qwen38GraphAnnotationId(Qwen38GraphRun::kTarget, 8, kQwen38GraphIdMaxPhases - 1),
+            Qwen38GraphAnnotationId(Qwen38GraphRun::kHead, 1, 0));
+}
+
+TEST(Qwen38GraphIdTest, RejectsRunsRowsAndPhasesBeyondTheLimits) {
   EXPECT_THROW(Qwen38GraphAnnotationId(Qwen38GraphRun::kTarget, 0, 0), std::out_of_range);
   EXPECT_THROW(Qwen38GraphAnnotationId(Qwen38GraphRun::kTarget, kQwen38GraphIdMaxRows + 1, 0), std::out_of_range);
+  EXPECT_THROW(Qwen38GraphAnnotationId(Qwen38GraphRun::kTarget, 9, 0), std::out_of_range);
+  EXPECT_THROW(Qwen38GraphAnnotationId(Qwen38GraphRun::kTarget, 1, kQwen38GraphIdMaxPhases), std::out_of_range);
   EXPECT_THROW(Qwen38GraphAnnotationId(Qwen38GraphRun::kHead, 1, -1), std::out_of_range);
   EXPECT_THROW(Qwen38GraphAnnotationId(Qwen38GraphRun::kHeadR2, 2, kQwen38GraphIdMaxPhases), std::out_of_range);
+  EXPECT_THROW(Qwen38GraphAnnotationId(static_cast<Qwen38GraphRun>(kQwen38GraphRunCount), 1, 0), std::out_of_range);
+  EXPECT_THROW(Qwen38GraphAnnotationId(static_cast<Qwen38GraphRun>(-1), 1, 0), std::out_of_range);
 }
 
 TEST(Qwen38GraphConfigTest, NonInheritedPrefillSessionOptionsRetainCudaProviderWithoutGraphCapture) {
