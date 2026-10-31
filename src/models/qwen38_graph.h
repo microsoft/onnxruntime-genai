@@ -172,6 +172,14 @@ Qwen38DflashWarmupPlan PlanQwen38DflashWarmup(bool warmup, int verify_rows, int 
 // unless both are positive.
 size_t Qwen38DflashPromptSlotRows(int chunk, int verify_rows);
 
+// Tokens of a prompt that stay allocated once its request is over: a longer prompt gives its buffer back.
+inline constexpr size_t kQwen38RetainedPromptTokens = 8192;
+
+// Forgets the prompt a request slot ingested, as the slot starts its next request (Reset and ResetSlot of slot 0 both call
+// it). The tokens are only kept for the head prefill of that request, so a long-lived engine holds at most the prompt of the
+// request in flight, never those it served before; the buffer of a prompt beyond kQwen38RetainedPromptTokens is released.
+void Qwen38ForgetPromptTokens(std::vector<int32_t>& tokens) noexcept;
+
 // The packed QSA indexer pools kQwen38IndexKeyRatio tokens into one compressed index key.
 inline constexpr int kQwen38IndexKeyRatio = 4;
 

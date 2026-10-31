@@ -702,6 +702,41 @@ TEST(Qwen38DflashPromptBufferTest, EverySlotOwnsAtLeastAChunkAndTheVerifyWidthOf
   EXPECT_THROW(Qwen38DflashPromptSlotRows(-1, 8), std::invalid_argument);
 }
 
+// Reset() and ResetSlot(0) forget the prompt of the request the slot served, so a long-lived engine holds the prompt of the
+// request in flight only and its host memory does not grow with the number of tokens served.
+TEST(Qwen38PromptTokensTest, ForgettingAPromptDropsItsTokensAndTheBufferOfALongOne) {
+  std::vector<int32_t> tokens;
+  Qwen38ForgetPromptTokens(tokens);  // nothing to forget
+  EXPECT_TRUE(tokens.empty());
+
+  // A request whose prompt arrives in 8-token chunks.
+  for (int chunk = 0; chunk < 100; ++chunk) tokens.insert(tokens.end(), 8, chunk);
+  ASSERT_EQ(tokens.size(), 800u);
+  const size_t short_capacity = tokens.capacity();
+  Qwen38ForgetPromptTokens(tokens);
+  EXPECT_TRUE(tokens.empty());
+  EXPECT_EQ(tokens.capacity(), short_capacity) << "a short prompt keeps its buffer for the next request";
+
+  // The next request starts from an empty prompt, not from the previous one.
+  tokens.insert(tokens.end(), {1, 2, 3});
+  EXPECT_EQ(tokens, (std::vector<int32_t>{1, 2, 3}));
+  Qwen38ForgetPromptTokens(tokens);
+
+  tokens.assign(4 * kQwen38RetainedPromptTokens, 7);
+  ASSERT_GT(tokens.capacity(), kQwen38RetainedPromptTokens);
+  Qwen38ForgetPromptTokens(tokens);
+  EXPECT_TRUE(tokens.empty());
+  EXPECT_LE(tokens.capacity(), kQwen38RetainedPromptTokens) << "the buffer of a long prompt is given back";
+
+  // Many requests, none longer than the retained size: the allocation stays where it is.
+  for (int request = 0; request < 1000; ++request) {
+    tokens.assign(kQwen38RetainedPromptTokens, request);
+    Qwen38ForgetPromptTokens(tokens);
+    EXPECT_TRUE(tokens.empty());
+    EXPECT_LE(tokens.capacity(), kQwen38RetainedPromptTokens);
+  }
+}
+
 TEST(Qwen38GraphConfigTest, DflashWarmupAtModelCreationHonorsTheWarmupSetting) {
   // warmup=false: the engine runs no forward while the model is created, neither the drafter's nor the target's.
   Config off;

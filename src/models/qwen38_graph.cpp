@@ -212,6 +212,11 @@ size_t Qwen38DflashPromptSlotRows(int chunk, int verify_rows) {
   return static_cast<size_t>(std::max(chunk, verify_rows));
 }
 
+void Qwen38ForgetPromptTokens(std::vector<int32_t>& tokens) noexcept {
+  tokens.clear();
+  if (tokens.capacity() > kQwen38RetainedPromptTokens) std::vector<int32_t>().swap(tokens);
+}
+
 // ------------------------------------------------------------------------------------------------
 // Engine
 // ------------------------------------------------------------------------------------------------
@@ -1283,7 +1288,7 @@ void Qwen38GraphEngine::Reset() {
   inflight_ = false;
   decode_started_ = false;
   pending_ = -1;
-  prompt_tokens_.clear();
+  Qwen38ForgetPromptTokens(prompt_tokens_);
   suffix_drafter_.Reset();
   last_hidden_ptr_ = nullptr;
 }
@@ -1332,7 +1337,7 @@ void Qwen38GraphEngine::ResetSlot(size_t slot_idx) {
     seq_ = 0;
     ledger_.Reset();
     pending_ = -1;
-    prompt_tokens_.clear();
+    Qwen38ForgetPromptTokens(prompt_tokens_);
     decode_started_ = false;
   }
 }
