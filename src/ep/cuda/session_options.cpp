@@ -6,6 +6,27 @@
 
 namespace Generators::CUDAExecutionProvider {
 
+size_t ParseArenaOptionValue(std::string_view key, const std::string& value) {
+  long long parsed = 0;
+  if (key == "arena_extend_strategy" && value == "kNextPowerOfTwo") {
+    parsed = 0;
+  } else if (key == "arena_extend_strategy" && value == "kSameAsRequested") {
+    parsed = 1;
+  } else {
+    try {
+      parsed = std::stoll(value);
+    } catch (const std::invalid_argument&) {
+      throw std::invalid_argument("CUDA arena option '" + std::string(key) + "' must be an integer, got '" + value + "'.");
+    } catch (const std::out_of_range&) {
+      throw std::out_of_range("CUDA arena option '" + std::string(key) + "' value '" + value + "' is out of range.");
+    }
+  }
+  if (parsed < -1) {
+    throw std::out_of_range("Arena configuration option value is out of range");
+  }
+  return parsed == -1 ? static_cast<size_t>(-1) : static_cast<size_t>(parsed);
+}
+
 namespace {
 
 void AppendProviderBridgeExecutionProvider(
@@ -38,13 +59,7 @@ void AppendProviderBridgeExecutionProvider(
       values.emplace_back(option.second.c_str());
     } else {
       const size_t idx = std::distance(std::begin(arena_keys), it);
-      long long parsed_value = std::stoll(option.second);
-      if (parsed_value < -1) {
-        throw std::out_of_range("Arena configuration option value is out of range");
-      }
-      arena_values[idx] = (parsed_value == -1)
-                              ? static_cast<size_t>(-1)
-                              : static_cast<size_t>(parsed_value);
+      arena_values[idx] = ParseArenaOptionValue(option.first, option.second);
       use_arena_management = true;
     }
   }
