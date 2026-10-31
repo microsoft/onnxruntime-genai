@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <deque>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -219,6 +220,12 @@ inline constexpr size_t kQwen38RetainedPromptTokens = 8192;
 // it). The tokens are only kept for the head prefill of that request, so a long-lived engine holds at most the prompt of the
 // request in flight, never those it served before; the buffer of a prompt beyond kQwen38RetainedPromptTokens is released.
 void Qwen38ForgetPromptTokens(std::vector<int32_t>& tokens) noexcept;
+
+// The decode status of a device with several slots. The validation bits of a decode accumulate in the ctl[5] word of the slot
+// that ran it, so every slot that started a decode (`started[slot]`) is read through `read_bits(slot)`, the slots beyond
+// slot 0 included; a slot that never started is not read. Throws a std::runtime_error naming every slot with bits set (a
+// device with a single slot keeps the message without a slot).
+void CheckQwen38DecodeStatus(std::span<const bool> started, const std::function<int64_t(size_t)>& read_bits);
 
 // The packed QSA indexer pools kQwen38IndexKeyRatio tokens into one compressed index key.
 inline constexpr int kQwen38IndexKeyRatio = 4;
