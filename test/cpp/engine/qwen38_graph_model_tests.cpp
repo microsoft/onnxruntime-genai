@@ -1199,6 +1199,61 @@ TEST(Qwen38ContextTierTest, TheOutputNamesAreReadFromTheGraphThatTheTierSelects)
   RemoveScratchDir(dir);
 }
 
+// Synchronizing the capacity of the target graph is distinct from enlarging the generation budget of a request. Source checks,
+// no Engine allocation run: Engine::CreateRequest takes the budget from search.max_length.
+TEST(Qwen38ContextSyncTest, WithoutAContextRequestASmallerLimitIsKeptAndALargerOneIsClamped) {
+  const int64_t positions = 33032;  // the 32K graph
+  const Qwen38GraphContext limited = SyncQwen38GraphContext(positions, 4096, false);
+  EXPECT_EQ(limited.kv_capacity, 33032);
+  EXPECT_EQ(limited.context_length, 33024);
+  EXPECT_EQ(limited.max_length, 4096);  // not 33024
+
+  EXPECT_EQ(SyncQwen38GraphContext(positions, 1, false).max_length, 1);
+  EXPECT_EQ(SyncQwen38GraphContext(positions, 33023, false).max_length, 33023);
+  EXPECT_EQ(SyncQwen38GraphContext(positions, 33024, false).max_length, 33024);
+  for (const int limit : {33025, 33032, 40000, 131072, std::numeric_limits<int>::max()}) {
+    const Qwen38GraphContext clamped = SyncQwen38GraphContext(positions, limit, false);
+    EXPECT_EQ(clamped.max_length, 33024) << limit;
+    EXPECT_EQ(clamped.kv_capacity, 33032) << limit;
+    EXPECT_EQ(clamped.context_length, 33024) << limit;
+  }
+  // A missing limit has nothing to keep: the whole context.
+  for (const int limit : {0, -1}) EXPECT_EQ(SyncQwen38GraphContext(positions, limit, false).max_length, 33024) << limit;
+}
+
+TEST(Qwen38ContextSyncTest, ARequestedContextTierTakesTheWholeContextAsDocumented) {
+  for (const int limit : {0, 1, 4096, 33024, 40000}) {
+    const Qwen38GraphContext context = SyncQwen38GraphContext(33032, limit, true);
+    EXPECT_EQ(context.kv_capacity, 33032) << limit;
+    EXPECT_EQ(context.context_length, 33024) << limit;
+    EXPECT_EQ(context.max_length, 33024) << limit;
+  }
+}
+
+TEST(Qwen38ContextSyncTest, TheCapacityFollowsEveryGraphWhateverTheLimit) {
+  for (const int64_t positions : {2056, 8200, 16392, 33032, 65544, 131080}) {
+    const int context_length = static_cast<int>(positions) - kQwen38GraphIdMaxRows;
+    for (const bool requested : {false, true}) {
+      for (const int limit : {0, 4096, 70000}) {
+        const Qwen38GraphContext context = SyncQwen38GraphContext(positions, limit, requested);
+        EXPECT_EQ(context.kv_capacity, positions) << positions;
+        EXPECT_EQ(context.context_length, context_length) << positions;
+        EXPECT_LE(context.max_length, context.context_length) << positions << " " << limit << " " << requested;
+        const int expected = requested || limit == 0 ? context_length : std::min(limit, context_length);
+        EXPECT_EQ(context.max_length, expected) << positions << " " << limit << " " << requested;
+      }
+    }
+  }
+  // A graph no wider than the verify rows still leaves one position of context; one that has no positions is no graph.
+  for (const int64_t positions : {1, 8, 9}) {
+    EXPECT_EQ(SyncQwen38GraphContext(positions, 4096, false).kv_capacity, positions);
+    EXPECT_EQ(SyncQwen38GraphContext(positions, 4096, false).context_length, std::max<int64_t>(1, positions - kQwen38GraphIdMaxRows));
+  }
+  EXPECT_THROW(SyncQwen38GraphContext(0, 4096, false), std::invalid_argument);
+  EXPECT_THROW(SyncQwen38GraphContext(-1, 4096, true), std::invalid_argument);
+  EXPECT_EQ(SyncQwen38GraphContext(int64_t{1} << 40, 4096, false).kv_capacity, std::numeric_limits<int>::max());
+}
+
 // The DFlash drafter's prompt-feature buffer gives every slot Qwen38DflashPromptSlotRows rows. The warm-up of the drafter views
 // verify_rows rows of every slot from it, so a prefill.chunk below the verify width (chunk 4 against S=8) must not shrink it.
 TEST(Qwen38DflashPromptBufferTest, EverySlotOwnsAtLeastAChunkAndTheVerifyWidthOfRows) {

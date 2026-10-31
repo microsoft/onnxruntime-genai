@@ -17,6 +17,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <random>
 #include <sstream>
 #include <stdexcept>
@@ -406,6 +407,17 @@ std::string ResolveQwen38TargetGraphFilename(const std::string& decoder_filename
     }
   }
   return decoder_filename;
+}
+
+Qwen38GraphContext SyncQwen38GraphContext(int64_t graph_positions, int configured_max_length, bool context_requested) {
+  if (graph_positions <= 0) throw std::invalid_argument("qwen38_flash_graph: the target graph has no KV positions");
+  Qwen38GraphContext context;
+  context.kv_capacity = static_cast<int>(std::min<int64_t>(graph_positions, std::numeric_limits<int>::max()));
+  context.context_length = std::max(1, context.kv_capacity - kQwen38GraphIdMaxRows);
+  context.max_length = context_requested || configured_max_length <= 0
+                           ? context.context_length
+                           : std::min(configured_max_length, context.context_length);
+  return context;
 }
 
 size_t DevTensor::Bytes() const {
@@ -2908,9 +2920,13 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
   if (session_info_.HasInput("past_position_ids")) {
     const auto pos_shape = session_info_.GetInputShape("past_position_ids");
     if (pos_shape.size() == 2 && pos_shape[1] > 0) {
-      config_->model.qwen38_graph.kv_capacity = static_cast<int>(pos_shape[1]);
-      config_->model.context_length = std::max(1, static_cast<int>(pos_shape[1]) - 8);
-      config_->search.max_length = config_->model.context_length;
+      // The capacity follows the graph. The default generation budget follows it only when a context tier was requested: a
+      // package that limits search.max_length keeps its limit.
+      const Qwen38GraphContext context =
+          SyncQwen38GraphContext(pos_shape[1], config_->search.max_length, !context_request.empty());
+      config_->model.qwen38_graph.kv_capacity = context.kv_capacity;
+      config_->model.context_length = context.context_length;
+      config_->search.max_length = context.max_length;
     }
   }
   if (g_log.enabled) Log("qwen38_graph") << "target session " << SecondsSince(start) << " s" << std::endl;

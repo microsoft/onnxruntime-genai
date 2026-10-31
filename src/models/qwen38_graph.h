@@ -183,6 +183,23 @@ std::string ResolveQwen38TargetGraphFilename(const std::string& decoder_filename
                                              const std::string& mtp_drafts,
                                              const std::function<bool(const std::string&)>& exists);
 
+// The context settings of a package once its target graph is known: model.qwen38_graph.kv_capacity, model.context_length and
+// search.max_length, the default generation budget of a request (Engine::CreateRequest takes the smaller of it and the engine's
+// own ceiling).
+struct Qwen38GraphContext {
+  int kv_capacity{};
+  int context_length{};
+  int max_length{};
+};
+
+// Follows the capacity of a target graph whose past_position_ids input holds `graph_positions` positions: kv_capacity is that
+// count and context_length what is left of it after the rows of the widest verify step. The capacity is always synchronized,
+// the generation budget only when the context asks for it. A request for a context tier (`context_requested`) takes the whole
+// context, search.max_length = context_length. Without one the configured `configured_max_length` stays: a smaller limit is
+// retained, a limit beyond the graph's context is clamped to it, and only a missing limit (<= 0) takes the whole context.
+// Throws std::invalid_argument for graph_positions <= 0.
+Qwen38GraphContext SyncQwen38GraphContext(int64_t graph_positions, int configured_max_length, bool context_requested);
+
 // Checks a model package against the plane library it names, when the model is loaded, before its weights are uploaded and
 // before any session is created: an INT8 PLE table (model.qwen38_graph.ple_table with a negative scale) needs the int8_ple
 // plane capability, an INT8 embedding table (<model.embedding.filename>.data of vocab_size x hidden_size INT8 rows and
