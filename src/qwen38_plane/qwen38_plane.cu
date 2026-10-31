@@ -2322,25 +2322,34 @@ __global__ void k_replay_generic(const Qwen38StateReplayDesc* __restrict__ descs
   }
 
   if (descriptor.kind == 1) {
-    const uint64_t state_elements = descriptor.channel_count * descriptor.state_width;
+    const uint64_t channel_count = descriptor.channel_count;
+    const uint64_t state_width = descriptor.state_width;
+    const bool history_first = descriptor.layout == QWEN38_PLANE_CONV_STATE_HISTORY_FIRST;
+    const uint64_t state_elements = channel_count * state_width;
     for (uint64_t state_index = start; state_index < state_elements; state_index += stride) {
-      const uint64_t channel = state_index / descriptor.state_width;
-      const uint64_t position = state_index - channel * descriptor.state_width;
+      // state_index is the offset of the element in the physical state, which keeps (channel, position) at
+      // channel * state_width + position channel-first and at position * channel_count + channel history-first. The new
+      // state at `position` is the old state (or, past its end, the update) `kept_count` positions later; the update
+      // [capacity, channel_count] has the same layout whatever the state has.
+      const uint64_t channel = history_first ? state_index % channel_count : state_index / state_width;
+      const uint64_t position = history_first ? state_index / channel_count : state_index % state_width;
       const uint64_t shifted_position = position + kept_count;
-      const uint64_t source_index = shifted_position < descriptor.state_width
-                                        ? channel * descriptor.state_width + shifted_position
-                                        : (shifted_position - descriptor.state_width) *
-                                                  descriptor.channel_count +
-                                              channel;
+      const bool from_state = shifted_position < state_width;
+      uint64_t source_index;
+      if (!from_state) {
+        source_index = (shifted_position - state_width) * channel_count + channel;
+      } else if (history_first) {
+        source_index = shifted_position * channel_count + channel;
+      } else {
+        source_index = channel * state_width + shifted_position;
+      }
       if (descriptor.element_size == 2) {
-        const auto* source = shifted_position < descriptor.state_width
-                                 ? static_cast<const uint16_t*>(descriptor.source_state)
-                                 : static_cast<const uint16_t*>(descriptor.value);
+        const auto* source = from_state ? static_cast<const uint16_t*>(descriptor.source_state)
+                                        : static_cast<const uint16_t*>(descriptor.value);
         static_cast<uint16_t*>(descriptor.destination_state)[state_index] = source[source_index];
       } else if (descriptor.element_size == 4) {
-        const auto* source = shifted_position < descriptor.state_width
-                                 ? static_cast<const uint32_t*>(descriptor.source_state)
-                                 : static_cast<const uint32_t*>(descriptor.value);
+        const auto* source = from_state ? static_cast<const uint32_t*>(descriptor.source_state)
+                                        : static_cast<const uint32_t*>(descriptor.value);
         static_cast<uint32_t*>(descriptor.destination_state)[state_index] = source[source_index];
       }
     }

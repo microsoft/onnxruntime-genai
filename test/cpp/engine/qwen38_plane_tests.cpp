@@ -656,8 +656,9 @@ TEST(Qwen38PlaneCapabilityTest, DescribesCapabilitiesByName) {
   EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_CAP_INT8_PLE), "int8_ple");
   EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_CAP_NEGATIVE_POS_ADD_BATCH), "negative_pos_add_batch");
   EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_CAP_BATCHED_PREP), "batched_prep");
+  EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_CAP_CONV_HISTORY_FIRST_REPLAY), "conv_history_first_replay");
   EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_ALL_CAPABILITIES),
-            "int8_embedding, int8_ple, negative_pos_add_batch, batched_prep");
+            "int8_embedding, int8_ple, negative_pos_add_batch, batched_prep, conv_history_first_replay");
   // A bit that this build has no name for is reported, not dropped.
   EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_CAP_INT8_PLE | (1ull << 40)), "int8_ple, unknown bits 0x10000000000");
 }
@@ -690,7 +691,7 @@ TEST(Qwen38PlaneCapabilityTest, RequireCapabilitiesNamesTheMissingCapabilityWhat
   } catch (const std::runtime_error& error) {
     const std::string message = error.what();
     EXPECT_NE(message.find("the fold package requires the plane capability int8_embedding, negative_pos_add_batch, "
-                           "batched_prep, which"),
+                           "batched_prep, conv_history_first_replay, which"),
               std::string::npos)
         << message;
   }
@@ -793,6 +794,161 @@ TEST(Qwen38PlaneBatchedPrepTest, ACudaErrorOfTheLibraryBecomesAnException) {
     EXPECT_NE(std::string{error.what()}.find("prep_batched"), std::string::npos) << error.what();
   }
   BatchedPrepStub::result = 0;
+}
+
+// ---- the replay descriptor of a convolution state, and the plane capability its layout needs -----------------------------
+
+namespace {
+
+// The replay of the convolution state of one layer as ValidateQwen38ReplayDescriptor sees it: the batch-1 shapes of the slot,
+// the state channel-first [channels, history] or history-first [history, channels].
+Qwen38ReplayRequest ConvolutionReplayRequest(bool history_first, int64_t channels = 8192, int64_t history = 3,
+                                             int capacity = 7) {
+  Qwen38ReplayRequest request;
+  request.kind = Qwen38ReplayKind::kConvolution;
+  request.capacity = capacity;
+  request.state = {"past_key_values.5.conv_state",
+                   history_first ? std::vector<int64_t>{1, history, channels} : std::vector<int64_t>{1, channels, history},
+                   2};
+  request.update = {"state_update.5.conv_value", {1, capacity, channels}, 2};
+  return request;
+}
+
+uint32_t ConvLayoutWord(Qwen38PlaneConvStateLayout layout) { return static_cast<uint32_t>(layout); }
+
+}  // namespace
+
+TEST(Qwen38ConvReplayDescriptorTest, TheLayoutTookTheTailPaddingOfTheDescriptor) {
+  // A plane built before the field reads the descriptors at the same stride, and a descriptor that never sets the field is
+  // channel-first, which is what such a plane assumes.
+  if (sizeof(void*) == 8) {
+    EXPECT_EQ(sizeof(Qwen38StateReplayDesc), 152u);
+    EXPECT_EQ(offsetof(Qwen38StateReplayDesc, kind), 144u);
+    EXPECT_EQ(offsetof(Qwen38StateReplayDesc, layout), 148u);
+  }
+  const Qwen38StateReplayDesc zeroed{};
+  EXPECT_EQ(zeroed.layout, ConvLayoutWord(QWEN38_PLANE_CONV_STATE_CHANNEL_FIRST));
+  EXPECT_EQ(ConvLayoutWord(QWEN38_PLANE_CONV_STATE_CHANNEL_FIRST), 0u);
+  EXPECT_EQ(ConvLayoutWord(QWEN38_PLANE_CONV_STATE_HISTORY_FIRST), 1u);
+}
+
+TEST(Qwen38ConvReplayDescriptorTest, TheCapabilityHasTheBitAndTheNameOfItsContract) {
+  EXPECT_EQ(QWEN38_PLANE_CAP_CONV_HISTORY_FIRST_REPLAY, 0x10ull);
+  EXPECT_NE(QWEN38_PLANE_ALL_CAPABILITIES & QWEN38_PLANE_CAP_CONV_HISTORY_FIRST_REPLAY, 0ull);
+  EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_CAP_CONV_HISTORY_FIRST_REPLAY), "conv_history_first_replay");
+}
+
+TEST(Qwen38ConvReplayDescriptorTest, AChannelFirstStateNeedsNoCapabilityOfAnyLibrary) {
+  Qwen38Plane legacy;  // predates the capabilities export
+  InitLegacyStubPlane(legacy);
+  Qwen38Plane without_the_layout;  // everything but the history-first replay
+  InitCurrentStubPlane(without_the_layout);
+  without_the_layout.capabilities = QWEN38_PLANE_ALL_CAPABILITIES & ~QWEN38_PLANE_CAP_CONV_HISTORY_FIRST_REPLAY;
+  Qwen38Plane current;
+  InitCurrentStubPlane(current);
+
+  int source = 0;
+  int destination = 0;
+  int value = 0;
+  for (const Qwen38Plane* plane : {&legacy, &without_the_layout, &current}) {
+    SCOPED_TRACE(plane->library_path);
+    Qwen38StateReplayDesc descriptor{};
+    ASSERT_NO_THROW(descriptor = MakeQwen38ConvReplayDescriptor(*plane, ConvolutionReplayRequest(false), &source,
+                                                                &destination, &value));
+    EXPECT_EQ(descriptor.layout, ConvLayoutWord(QWEN38_PLANE_CONV_STATE_CHANNEL_FIRST));
+    EXPECT_EQ(descriptor.kind, 1u);
+    EXPECT_EQ(descriptor.channel_count, 8192u);
+    EXPECT_EQ(descriptor.state_width, 3u);
+    EXPECT_EQ(descriptor.capacity, 7u);
+    EXPECT_EQ(descriptor.kept_count, 1u);
+    EXPECT_EQ(descriptor.element_size, 2u);
+    EXPECT_EQ(descriptor.source_state, &source);
+    EXPECT_EQ(descriptor.destination_state, &destination);
+    EXPECT_EQ(descriptor.value, &value);
+  }
+}
+
+TEST(Qwen38ConvReplayDescriptorTest, AHistoryFirstStateNeedsTheCapabilityAndTheErrorNamesIt) {
+  int source = 0;
+  int destination = 0;
+  int value = 0;
+  const auto make = [&](const Qwen38Plane& plane) {
+    return MakeQwen38ConvReplayDescriptor(plane, ConvolutionReplayRequest(true), &source, &destination, &value);
+  };
+
+  Qwen38Plane without_the_layout;
+  InitCurrentStubPlane(without_the_layout);
+  without_the_layout.capabilities = QWEN38_PLANE_ALL_CAPABILITIES & ~QWEN38_PLANE_CAP_CONV_HISTORY_FIRST_REPLAY;
+  ExpectMissingCapability([&] { make(without_the_layout); }, "conv_history_first_replay",
+                          "the history-first conv state past_key_values.5.conv_state", "current/libqwen38_plane.so");
+
+  // Another capability does not stand in for it, and a library that predates the capabilities export reports none.
+  Qwen38Plane batched_prep_only;
+  InitCurrentStubPlane(batched_prep_only);
+  batched_prep_only.capabilities = QWEN38_PLANE_CAP_BATCHED_PREP | QWEN38_PLANE_CAP_NEGATIVE_POS_ADD_BATCH;
+  ExpectMissingCapability([&] { make(batched_prep_only); }, "conv_history_first_replay", "past_key_values.5.conv_state",
+                          "current/libqwen38_plane.so");
+  Qwen38Plane legacy;
+  InitLegacyStubPlane(legacy);
+  ExpectMissingCapability([&] { make(legacy); }, "conv_history_first_replay", "past_key_values.5.conv_state",
+                          "legacy/libqwen38_plane.so");
+
+  // A library that has it receives the layout, and every other field is the one of a channel-first descriptor.
+  Qwen38Plane current;
+  InitCurrentStubPlane(current);
+  Qwen38StateReplayDesc descriptor{};
+  ASSERT_NO_THROW(descriptor = make(current));
+  EXPECT_EQ(descriptor.layout, ConvLayoutWord(QWEN38_PLANE_CONV_STATE_HISTORY_FIRST));
+  EXPECT_EQ(descriptor.kind, 1u);
+  EXPECT_EQ(descriptor.channel_count, 8192u) << "the channels, not the history";
+  EXPECT_EQ(descriptor.state_width, 3u) << "the history, not the channels";
+  EXPECT_EQ(descriptor.capacity, 7u);
+  EXPECT_EQ(descriptor.kept_count, 1u);
+  EXPECT_EQ(descriptor.element_size, 2u);
+  EXPECT_EQ(descriptor.source_state, &source);
+  EXPECT_EQ(descriptor.destination_state, &destination);
+  EXPECT_EQ(descriptor.value, &value);
+}
+
+// A state that has as many history steps as channels cannot be told from a channel-first one, so it is replayed as one and
+// needs no capability; a history-first state that is not square is told from the channel count of the update.
+TEST(Qwen38ConvReplayDescriptorTest, ASquareStateIsChannelFirstAndNeedsNoCapability) {
+  Qwen38Plane legacy;
+  InitLegacyStubPlane(legacy);
+  int source = 0;
+  int destination = 0;
+  int value = 0;
+  Qwen38StateReplayDesc descriptor{};
+  ASSERT_NO_THROW(descriptor = MakeQwen38ConvReplayDescriptor(legacy, ConvolutionReplayRequest(true, 16, 16, 7), &source,
+                                                              &destination, &value));
+  EXPECT_EQ(descriptor.layout, ConvLayoutWord(QWEN38_PLANE_CONV_STATE_CHANNEL_FIRST));
+  EXPECT_EQ(descriptor.channel_count, 16u);
+  EXPECT_EQ(descriptor.state_width, 16u);
+}
+
+TEST(Qwen38ConvReplayDescriptorTest, AStateThatDoesNotMatchTheChannelsOfTheUpdateIsRefusedBeforeTheCapability) {
+  Qwen38Plane legacy;
+  InitLegacyStubPlane(legacy);
+  Qwen38ReplayRequest request = ConvolutionReplayRequest(true);
+  request.state.shape = {1, 100, 3};  // neither dimension is the 8192 channels of the update
+  try {
+    MakeQwen38ConvReplayDescriptor(legacy, request, nullptr, nullptr, nullptr);
+    ADD_FAILURE() << "a state of another channel count was accepted";
+  } catch (const std::runtime_error& error) {
+    const std::string message = error.what();
+    EXPECT_NE(message.find("neither the second nor the third dimension"), std::string::npos) << message;
+    EXPECT_EQ(message.find("conv_history_first_replay"), std::string::npos) << message;
+  }
+}
+
+TEST(Qwen38ConvReplayDescriptorTest, OnlyAConvolutionReplayHasAConvolutionDescriptor) {
+  Qwen38Plane current;
+  InitCurrentStubPlane(current);
+  Qwen38ReplayRequest request = ConvolutionReplayRequest(false);
+  request.kind = Qwen38ReplayKind::kIndexer;
+  EXPECT_THROW(MakeQwen38ConvReplayDescriptor(current, request, nullptr, nullptr, nullptr), std::invalid_argument);
+  request.kind = Qwen38ReplayKind::kGatedDeltaNet;
+  EXPECT_THROW(MakeQwen38ConvReplayDescriptor(current, request, nullptr, nullptr, nullptr), std::invalid_argument);
 }
 
 TEST(Qwen38PleDescriptionTest, Int8ShardsNeedTheInt8PleCapability) {
@@ -3388,6 +3544,8 @@ class KernelTestDevice {
 
   void* stream() const { return stream_.get(); }
 
+  const Qwen38Plane& plane() const { return plane_; }
+
   PlaneBuffer UploadBytes(const void* host, size_t bytes) {
     PlaneBuffer buffer{plane_, bytes, stream_.get()};
     plane_.Check(plane_.memcpy_h2d(buffer.data(), host, bytes, stream_.get()), "memcpy_h2d");
@@ -3428,22 +3586,34 @@ class KernelTestDevice {
 };
 
 // How a convolution state of `channels` channels over `history` steps is laid out. The compact replay supports the
-// channel-first [channels, history] layout the exporter writes: a history-first [history, channels] state is refused when the
-// model loads (ValidateQwen38ReplayDescriptor). The change that replays the history-first layout adds its enumerator here, its
-// case in ConvStateIndex, the descriptor it needs in ConvolutionState::Descriptor and an instantiation of
+// channel-first [channels, history] layout the exporter writes and the history-first [history, channels] one (the plane
+// capability conv_history_first_replay, which the descriptor selects with its `layout`). A layout the replay learns adds its
+// enumerator here, its case in ConvStateIndex and ConvStateShape, and its value in the instantiation of
 // Qwen38PlaneConvReplayTest.
-enum class ConvStateLayout { kChannelFirst };
+enum class ConvStateLayout { kChannelFirst,
+                             kHistoryFirst };
 
 const char* ConvStateLayoutName(ConvStateLayout layout) {
   if (layout == ConvStateLayout::kChannelFirst) return "ChannelFirst";
+  if (layout == ConvStateLayout::kHistoryFirst) return "HistoryFirst";
   return "Unknown";
 }
 
 void PrintTo(ConvStateLayout layout, std::ostream* os) { *os << ConvStateLayoutName(layout); }
 
 // The index of the element of `channel` at `step` of the history in a state of `layout`.
-size_t ConvStateIndex(ConvStateLayout layout, size_t history, size_t channel, size_t step) {
+size_t ConvStateIndex(ConvStateLayout layout, size_t channels, size_t history, size_t channel, size_t step) {
   if (layout == ConvStateLayout::kChannelFirst) return channel * history + step;
+  if (layout == ConvStateLayout::kHistoryFirst) return step * channels + channel;
+  throw std::logic_error("unsupported convolution state layout");
+}
+
+// The batch-1 shape of the state of `layout` that the package declares.
+std::vector<int64_t> ConvStateShape(ConvStateLayout layout, size_t channels, size_t history) {
+  const int64_t channel_dimension = static_cast<int64_t>(channels);
+  const int64_t history_dimension = static_cast<int64_t>(history);
+  if (layout == ConvStateLayout::kChannelFirst) return {1, channel_dimension, history_dimension};
+  if (layout == ConvStateLayout::kHistoryFirst) return {1, history_dimension, channel_dimension};
   throw std::logic_error("unsupported convolution state layout");
 }
 
@@ -3608,9 +3778,10 @@ std::vector<uint32_t> ReplayConvolutionOnTheHost(ConvStateLayout layout, const C
   for (size_t channel = 0; channel < shape.channels; ++channel) {
     for (size_t step = 0; step < shape.history; ++step) {
       const size_t source_step = step + static_cast<size_t>(kept);
-      next[ConvStateIndex(layout, shape.history, channel, step)] =
-          source_step < shape.history ? state[ConvStateIndex(layout, shape.history, channel, source_step)]
-                                      : update[(source_step - shape.history) * shape.channels + channel];
+      next[ConvStateIndex(layout, shape.channels, shape.history, channel, step)] =
+          source_step < shape.history
+              ? state[ConvStateIndex(layout, shape.channels, shape.history, channel, source_step)]
+              : update[(source_step - shape.history) * shape.channels + channel];
     }
   }
   return next;
@@ -3623,33 +3794,42 @@ class ConvolutionState final : public ReplayedState {
     WordStream words{seed};
     state_ = RandomElements(words, shape.channels * shape.history, shape.element_size);
     update_ = RandomElements(words, static_cast<size_t>(shape.capacity) * shape.channels, shape.element_size);
-    source_ = device.Upload(PackElements(state_, shape.element_size));
-    update_device_ = device.Upload(PackElements(update_, shape.element_size));
-    destination_ = device.Filled(state_.size() * shape.element_size, 0xAB);
+    Upload();
+  }
+
+  // The state in the order of `layout` and the update as [capacity, channels], element by element.
+  ConvolutionState(KernelTestDevice& device, ConvStateLayout layout, const ConvolutionShape& shape,
+                   std::vector<uint32_t> state, std::vector<uint32_t> update)
+      : device_{device}, layout_{layout}, shape_{shape}, state_{std::move(state)}, update_{std::move(update)} {
+    Upload();
   }
 
   bool IsFast() const override { return false; }
 
-  // The descriptor of a channel-first state, built as the engine builds it.
+  // The descriptor of the state, built as the engine builds it (MakeQwen38ConvReplayDescriptor from the batch-1 shapes of the
+  // package, so the layout is found from the shapes and the plane has to report the capability a history-first state needs).
   Qwen38StateReplayDesc Descriptor() const override {
-    Qwen38StateReplayDesc d{};
-    d.source_state = source_.data();
-    d.destination_state = destination_.data();
-    d.value = update_device_.data();
-    d.channel_count = shape_.channels;
-    d.state_width = shape_.history;
-    d.capacity = static_cast<uint32_t>(shape_.capacity);
-    d.kept_count = 1;
-    d.element_size = static_cast<uint32_t>(shape_.element_size);
-    d.kind = 1;
-    return d;
+    Qwen38ReplayRequest request;
+    request.kind = Qwen38ReplayKind::kConvolution;
+    request.capacity = shape_.capacity;
+    request.state = {"past_key_values.0.conv_state", ConvStateShape(layout_, shape_.channels, shape_.history),
+                     shape_.element_size};
+    request.update = {"state_update.0.conv_value",
+                      {1, static_cast<int64_t>(shape_.capacity), static_cast<int64_t>(shape_.channels)},
+                      shape_.element_size};
+    return MakeQwen38ConvReplayDescriptor(device_.plane(), request, source_.data(), destination_.data(),
+                                          update_device_.data());
   }
 
   void ResetDestination() override { device_.Fill(destination_, 0xAB); }
 
+  // What the replay wrote to the destination, element by element in the order of the layout.
+  std::vector<uint32_t> Replayed() const {
+    return UnpackElements(device_.Download<uint8_t>(destination_, destination_.size()), shape_.element_size);
+  }
+
   void ExpectReplayedAfter(int kept) override {
-    ExpectSameElements(ReplayConvolutionOnTheHost(layout_, shape_, state_, update_, kept),
-                       UnpackElements(device_.Download<uint8_t>(destination_, destination_.size()), shape_.element_size),
+    ExpectSameElements(ReplayConvolutionOnTheHost(layout_, shape_, state_, update_, kept), Replayed(),
                        std::string{ConvStateLayoutName(layout_)} + " convolution state of " + std::to_string(shape_.channels) +
                            " channels over " + std::to_string(shape_.history) + " steps of " +
                            std::to_string(shape_.element_size) + " bytes after " + std::to_string(kept) + " of " +
@@ -3657,6 +3837,12 @@ class ConvolutionState final : public ReplayedState {
   }
 
  private:
+  void Upload() {
+    source_ = device_.Upload(PackElements(state_, shape_.element_size));
+    update_device_ = device_.Upload(PackElements(update_, shape_.element_size));
+    destination_ = device_.Filled(state_.size() * shape_.element_size, 0xAB);
+  }
+
   KernelTestDevice& device_;
   ConvStateLayout layout_;
   ConvolutionShape shape_;
@@ -3905,17 +4091,24 @@ TEST_F(Qwen38PlaneReplayTest, AnErrorAnEarlierCallLeftUnreadDoesNotFailTheLaunch
 }
 
 // The replay of a convolution state in every layout it supports against the host reference; a layout the replay learns is added
-// to the instantiation below.
+// to the instantiation below. The state and the update are random bit patterns, so a channel read at another position, a
+// position of another channel or a transposed state shows as a difference.
 TEST_P(Qwen38PlaneConvReplayTest, ReplaysEveryAcceptanceLengthBitExactly) {
   ASSERT_TRUE(plane_->replay_state_updates != nullptr) << "the plane library has no replay_state_updates";
   KernelTestDevice device{*plane_};
   // The usual kernel of 4 taps (a history of 3), a history of 1 that the first kept step already pushes out, a history shorter
-  // than the acceptance, and more channels than the 128 blocks of 256 threads cover with one element each.
+  // than the acceptance, a history longer than the channels (a state that is not channel-first has its history in the second
+  // dimension, so it is the shape that tells the layouts apart), more channels than the 128 blocks of 256 threads cover with
+  // one element each, and a history that does not divide the channels. No shape is square: the layouts of a square state
+  // cannot be told apart and it is replayed as channel-first (Qwen38ConvReplayDescriptorTest).
   const ConvolutionShape shapes[] = {
       {5, 3, 7, 0},
       {9, 1, 3, 0},
       {64, 2, 7, 0},
+      {3, 5, 7, 0},
+      {2, 9, 6, 0},
       {9000, 4, 7, 0},
+      {1025, 3, 5, 0},
   };
   uint32_t seed = 200;
   for (size_t element_size : {size_t{2}, size_t{4}}) {
@@ -3929,10 +4122,68 @@ TEST_P(Qwen38PlaneConvReplayTest, ReplaysEveryAcceptanceLengthBitExactly) {
   }
 }
 
-INSTANTIATE_TEST_SUITE_P(SupportedLayouts, Qwen38PlaneConvReplayTest, ::testing::Values(ConvStateLayout::kChannelFirst),
+// The state of three channels over a history of two steps, worked out by hand for both layouts (the example the review of the
+// layout gave: a [batch, history = 2, channels = 3] state, where channel 0 at position 1 is element 3 and not element 1).
+// The value of the old state at step s of channel c is 10 * (s + 1) + c, that of the update at step s is 100 + 10 * s + c, and
+// the new state is the last two steps of [old step 0, old step 1, update step 0, update step 1, update step 2] after the
+// first `kept` steps of that sequence are dropped.
+TEST_P(Qwen38PlaneConvReplayTest, ReplaysAStateWorkedOutByHandToTheValuesOfItsLayout) {
+  ASSERT_TRUE(plane_->replay_state_updates != nullptr) << "the plane library has no replay_state_updates";
+  KernelTestDevice device{*plane_};
+  const ConvStateLayout layout = GetParam();
+  const bool history_first = layout == ConvStateLayout::kHistoryFirst;
+
+  const std::vector<uint32_t> state =
+      history_first ? std::vector<uint32_t>{10, 11, 12, 20, 21, 22} : std::vector<uint32_t>{10, 20, 11, 21, 12, 22};
+  const std::vector<uint32_t> update = {100, 101, 102, 110, 111, 112, 120, 121, 122};
+  const std::vector<std::vector<uint32_t>> expected_after_1_2_3_kept =
+      history_first ? std::vector<std::vector<uint32_t>>{{20, 21, 22, 100, 101, 102},
+                                                         {100, 101, 102, 110, 111, 112},
+                                                         {110, 111, 112, 120, 121, 122}}
+                    : std::vector<std::vector<uint32_t>>{{20, 100, 21, 101, 22, 102},
+                                                         {100, 110, 101, 111, 102, 112},
+                                                         {110, 120, 111, 121, 112, 122}};
+
+  for (size_t element_size : {size_t{2}, size_t{4}}) {
+    ConvolutionState replayed{device, layout, {3, 2, 3, element_size}, state, update};
+    for (int kept = 1; kept <= 3; ++kept) {
+      SCOPED_TRACE(std::string{ConvStateLayoutName(layout)} + " state of " + std::to_string(element_size) +
+                   " byte elements after " + std::to_string(kept) + " of 3 steps");
+      ReplayAndExpect(*plane_, device, {&replayed}, kept);
+      EXPECT_EQ(replayed.Replayed(), expected_after_1_2_3_kept[static_cast<size_t>(kept - 1)]);
+    }
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(SupportedLayouts, Qwen38PlaneConvReplayTest,
+                         ::testing::Values(ConvStateLayout::kChannelFirst, ConvStateLayout::kHistoryFirst),
                          [](const ::testing::TestParamInfo<ConvStateLayout>& layout_info) {
                            return std::string{ConvStateLayoutName(layout_info.param)};
                          });
+
+// The states of several layers of one request slot in one launch, as the engine replays them: convolution states of both layouts
+// (the package declares one layout per state, and a model can mix them), different widths and element sizes, among the other
+// kinds of state, and every acceptance length. The two history-first states are replayed beside the channel-first ones, so a
+// descriptor that carries the layout of its neighbour is found.
+TEST_F(Qwen38PlaneReplayTest, OneLaunchReplaysConvolutionStatesOfBothLayoutsAmongTheOtherKinds) {
+  ASSERT_TRUE(plane_->replay_state_updates != nullptr) << "the plane library has no replay_state_updates";
+  KernelTestDevice device{*plane_};
+  constexpr int kCapacity = 7;
+  GatedDeltaNetState gdn{device, {4, 2, 100, 132, kCapacity}, 31};
+  IndexerState index{device, {7, 128, kCapacity, 2, kQwen38IndexKeyRatio, 21, 2}, 32};
+  ConvolutionState channel_first_bf16{device, ConvStateLayout::kChannelFirst, {5, 3, kCapacity, 2}, 33};
+  ConvolutionState history_first_bf16{device, ConvStateLayout::kHistoryFirst, {5, 3, kCapacity, 2}, 34};
+  ConvolutionState history_first_fp32{device, ConvStateLayout::kHistoryFirst, {300, 4, kCapacity, 4}, 35};
+  ConvolutionState channel_first_fp32{device, ConvStateLayout::kChannelFirst, {300, 4, kCapacity, 4}, 36};
+  ConvolutionState history_longer_than_channels{device, ConvStateLayout::kHistoryFirst, {3, 5, kCapacity, 4}, 37};
+  const std::vector<ReplayedState*> states = {&history_first_bf16, &gdn, &channel_first_fp32,
+                                              &history_first_fp32, &index, &channel_first_bf16,
+                                              &history_longer_than_channels};
+  for (int kept = 1; kept <= kCapacity; ++kept) {
+    SCOPED_TRACE("kept " + std::to_string(kept));
+    ReplayAndExpect(*plane_, device, states, kept);
+  }
+}
 
 namespace {
 

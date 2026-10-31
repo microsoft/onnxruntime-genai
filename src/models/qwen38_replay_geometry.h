@@ -17,6 +17,8 @@
 #include <string>
 #include <vector>
 
+#include "qwen38_plane/qwen38_plane_abi.h"
+
 namespace Generators {
 
 // The state a replay rewrites.
@@ -26,8 +28,8 @@ enum class Qwen38ReplayKind {
   // transition, the decays [heads_v], the keys [heads_k, key width] and the deltas [heads_v, value width].
   kGatedDeltaNet,
   // state_update.<layer>.conv_value | ple_conv_value -> past_key_values.<layer>.conv_state | ple_conv_state [batch, channels,
-  // history]: the new state is the last `history` columns of the old state followed by the `kept` accepted columns of the
-  // update [batch, capacity, channels].
+  // history] or [batch, history, channels] (Qwen38PlaneConvStateLayout): the new state is the last `history` columns of the
+  // old state followed by the `kept` accepted columns of the update [batch, capacity, channels].
   kConvolution,
   // state_update.<layer>.indexer_value -> past_key_values.<layer>.index_buffer [batch, entries, width] and index_lengths: the
   // accepted rows of the update [batch, capacity, width] extend the partly filled block of the compressed index keys.
@@ -60,6 +62,9 @@ struct Qwen38ReplayGeometry {
   uint64_t aux_capacity{};    // kIndexer: entries of the buffer
   uint32_t element_size{};
   int blocks{};  // kGatedDeltaNet: thread blocks one launch of k_replay_gdn needs for the descriptor
+  // kConvolution: the physical order of the state, which the descriptor passes to the plane. A history-first state needs the
+  // plane capability QWEN38_PLANE_CAP_CONV_HISTORY_FIRST_REPLAY; the other kinds leave it channel-first (0).
+  Qwen38PlaneConvStateLayout layout{QWEN38_PLANE_CONV_STATE_CHANNEL_FIRST};
 };
 
 // Returns the geometry of the replay `request` describes, or throws a std::runtime_error ("qwen38_graph: the compact replay of
@@ -71,9 +76,10 @@ struct Qwen38ReplayGeometry {
 //     beyond the decays and the deltas is a whole number (>= 1) of keys of the key width, one per key head; the value heads
 //     are a multiple of the key heads.
 //   kConvolution: 2- or 4-byte elements, the same in the state and in the update (the kernel copies nothing else); the update
-//     carries `capacity` transitions; the state is channel-first, i.e. its second dimension is the channel count of the update.
-//     A history-first state [batch, history, channels] is rejected: the replay would shift its channels instead of its history.
-//     A state whose history equals its channel count cannot be told apart and is taken as channel-first.
+//     carries `capacity` transitions; the channel count is the last dimension of the update, and the state has it in its second
+//     dimension (channel-first [batch, channels, history], what the exporter writes) or in its third (history-first [batch,
+//     history, channels]); the geometry carries which one in `layout`. A state whose history equals its channel count cannot be
+//     told apart and is taken as channel-first. A state that has the channel count in neither dimension is rejected.
 //   kIndexer: 2- or 4-byte elements, the same in the buffer and in the update; the update carries `capacity` transitions of the
 //     width of the buffer entries; the buffer holds at least compress_ratio - 1 entries (a partly filled block); the lengths are
 //     int32 words, at least two of them (the number of compressed keys and the entries in the buffer).

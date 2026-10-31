@@ -1073,18 +1073,9 @@ void Qwen38GraphEngine::BuildTarget() {
             request.capacity = state_update_capacity_;
             request.state = state_of(state_name, src_t);
             request.update = update_of();
-            const Qwen38ReplayGeometry geometry = ValidateQwen38ReplayDescriptor(request);
-            Qwen38StateReplayDesc d{};
-            d.source_state = src_t.ptr + st_off;
-            d.destination_state = dst_t.ptr + st_off;
-            d.value = su_tensor->ptr + su_off;
-            d.channel_count = geometry.channel_count;
-            d.state_width = geometry.state_width;
-            d.capacity = static_cast<uint32_t>(state_update_capacity_);
-            d.kept_count = 1;
-            d.element_size = geometry.element_size;
-            d.kind = 1;
-            generic_descs.push_back(d);
+            // A history-first state needs the plane capability of its layout; a channel-first one keeps loading without it.
+            generic_descs.push_back(MakeQwen38ConvReplayDescriptor(plane_, request, src_t.ptr + st_off, dst_t.ptr + st_off,
+                                                                   su_tensor->ptr + su_off));
           } else if (kind_str == "indexer_value") {
             const std::string buf_name = "past_key_values." + lid_str + ".index_buffer";
             const std::string len_name = "past_key_values." + lid_str + ".index_lengths";

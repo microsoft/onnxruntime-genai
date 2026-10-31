@@ -2351,6 +2351,14 @@ token. The device holds `model.qwen38_graph.max_batch_size` slots (default 1), o
   target session, which runs as soon as that session exists, before the other sessions and any device state are created.
   Each failure is a `std::runtime_error` that names the setting. A plane library without `batched_prep` still loads packages
   with one slot.
+- The compact `state_update` replay rewrites the recurrent, convolution and indexer state of a slot in place after a partial
+  acceptance. A `CausalConvWithState` state is replayed in either physical layout, `[batch, channels, history]` (what the
+  exporter writes) or `[batch, history, channels]`: `ValidateQwen38ReplayDescriptor` takes the channel count from the last
+  dimension of the `state_update` value, finds the layout from the dimension of the state that has it, and
+  `MakeQwen38ConvReplayDescriptor` passes it to the plane in `Qwen38StateReplayDesc::layout`. A state with as many steps as
+  channels cannot be told apart and is taken as channel-first. Only a package with a history-first conv state needs a plane
+  library with the `conv_history_first_replay` capability; the model checks it while it builds the target, before any request,
+  and the error names the capability, the state and the library. A channel-first package keeps loading with a library without it.
 - `FixedSlotCacheManager` (`Qwen38GraphCacheManager`, `src/engine/fixed_slot_scheduler.h`) holds one row per slot (`SlotOf`,
   `ResidentRequestCount`). `FixedSlotScheduler` queues further Requests and replaces a slot as soon as its turn is over, so a
   short prompt or answer does not wait for a long one, and `CacheManager::SupportsContinuousMultiSlotDecoding()` lets a
