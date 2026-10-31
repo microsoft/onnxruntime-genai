@@ -16,6 +16,11 @@ namespace Generators {
 
 cudaStream_t GetStream();
 
+// Makes the device the NvTensorRtRtx interface is bound to current on the calling thread. CUDA's current
+// device is per thread, so a thread that did not bind the interface would otherwise allocate or create
+// events on another device than the shared stream's.
+void UseBoundDevice() noexcept;
+
 #define CeilDiv(a, b) ((a + (b - 1)) / b)
 
 class CudaError : public std::runtime_error {
@@ -56,10 +61,12 @@ class CudaError : public std::runtime_error {
 
 struct cuda_event_holder {
   cuda_event_holder() {
+    UseBoundDevice();
     CUDA_CHECK(cudaEventCreate(&v_));
   }
 
   cuda_event_holder(unsigned flags) {
+    UseBoundDevice();
     CUDA_CHECK(cudaEventCreateWithFlags(&v_, flags));
   }
 
@@ -78,6 +85,15 @@ struct cuda_stream_holder {
   void Create() {
     assert(!v_);
     CUDA_CHECK(cudaStreamCreate(&v_));
+  }
+
+  // Replaces the stream with one created on the current device. The old stream is kept if creation fails.
+  void Recreate() {
+    cudaStream_t stream{};
+    CUDA_CHECK(cudaStreamCreate(&stream));
+    if (v_)
+      (void)cudaStreamDestroy(v_);
+    v_ = stream;
   }
 
   ~cuda_stream_holder() {
@@ -110,6 +126,7 @@ using cuda_host_unique_ptr = std::unique_ptr<T, CudaHostDeleter>;
 template <typename T>
 cuda_host_unique_ptr<T> CudaMallocHostArray(size_t count, std::span<T>* p_span = nullptr) {
   T* p;
+  UseBoundDevice();
   CUDA_CHECK(::cudaMallocHost(&p, sizeof(T) * count));
   if (p_span)
     *p_span = std::span<T>(p, count);
@@ -128,6 +145,7 @@ using cuda_unique_ptr = std::unique_ptr<T, CudaDeleter>;
 template <typename T>
 cuda_unique_ptr<T> CudaMallocArray(size_t count, std::span<T>* p_span = nullptr) {
   T* p;
+  UseBoundDevice();
   CUDA_CHECK(::cudaMalloc(&p, sizeof(T) * count));
   if (p_span)
     *p_span = std::span<T>(p, count);

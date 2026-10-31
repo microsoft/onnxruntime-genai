@@ -11,6 +11,7 @@
 #include "cuda_topk.h"
 #include "models/io/kv_cache.h"
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <charconv>
 #include <cstddef>
@@ -36,7 +37,24 @@ Ort::Allocator* ort_allocator_{};
 const char* device_label = "cuda";
 
 cuda_stream_holder g_stream;
-cudaStream_t GetStream() { return g_stream.get(); }
+
+// Device the NvTensorRtRtx interface is bound to, or -1 while unbound.
+std::atomic<int> g_bound_device_id{-1};
+
+void UseBoundDevice() noexcept {
+  const int device_id = g_bound_device_id.load(std::memory_order_acquire);
+  if (device_id < 0)
+    return;
+  int current_device_id{};
+  // Errors are left to the CUDA call that follows, as callers include noexcept paths.
+  if (::cudaGetDevice(&current_device_id) != cudaSuccess || current_device_id != device_id)
+    (void)::cudaSetDevice(device_id);
+}
+
+cudaStream_t GetStream() {
+  UseBoundDevice();
+  return g_stream.get();
+}
 
 namespace {
 
@@ -87,6 +105,7 @@ class PinnedHostPool {
       }
     }
     void* p{};
+    UseBoundDevice();
     CUDA_CHECK(::cudaHostAlloc(&p, capacity, 0));
     return static_cast<uint8_t*>(p);
   }
@@ -207,6 +226,7 @@ class PinnedHostPool {
       }
     }
     cudaEvent_t event{};
+    UseBoundDevice();
     return ::cudaEventCreateWithFlags(&event, cudaEventDisableTiming) == cudaSuccess ? event : nullptr;
   }
 
@@ -262,6 +282,7 @@ struct GpuMemory final : DeviceBuffer {
     if (PinnedHostPool::Pooled(size_in_bytes_)) {
       p_cpu_ = PinnedHostPool::Instance().Acquire(size_in_bytes_, cpu_capacity_);
     } else {
+      UseBoundDevice();
       CUDA_CHECK(::cudaHostAlloc(&p_cpu_, size_in_bytes_, 0));
     }
   }
@@ -298,6 +319,7 @@ struct GpuMemory final : DeviceBuffer {
 
   void CopyFromCpu(const void* source, size_t size_in_bytes) override {
     assert(size_in_bytes == size_in_bytes_);
+    UseBoundDevice();
     CUDA_CHECK(::cudaMemcpy(p_device_, source, size_in_bytes, ::cudaMemcpyHostToDevice));
   }
 
@@ -678,7 +700,7 @@ struct CudaInterfaceImplBase : DeviceInterface {
   std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
     return OrtMemoryInfo::Create("Cuda",
                                  OrtAllocatorType::OrtDeviceAllocator,
-                                 0,
+                                 device_id_,
                                  OrtMemType::OrtMemTypeDefault);
   }
 
@@ -1002,6 +1024,7 @@ struct CudaInterfaceImplBase : DeviceInterface {
   }
 
   void GetAvailableMemory(size_t& free_bytes, size_t& total_bytes) override {
+    UseBoundDevice();
     CUDA_CHECK(cudaMemGetInfo(&free_bytes, &total_bytes));
   }
 
@@ -1021,6 +1044,7 @@ struct CudaInterfaceImplBase : DeviceInterface {
   cuda_unique_ptr<cuda::StateUpdateReplayDescGpu> state_update_replay_descriptors_;
   size_t state_update_replay_capacity_{0};
   std::vector<cuda::StateUpdateReplayDescGpu> ordered_replay_descriptors_;  // host scratch, fast kernel first
+  int device_id_{};                                                         // device the allocator binds to; 0 unless a derived interface binds another
 };
 
 struct CudaInterfaceImpl final : CudaInterfaceImplBase {
@@ -1071,8 +1095,67 @@ struct CudaInterfaceImpl final : CudaInterfaceImplBase {
 };
 
 struct NvTensorRtRtxInterfaceImpl final : CudaInterfaceImplBase {
+  NvTensorRtRtxInterfaceImpl() {
+    // The base constructor created g_stream on the device current at construction.
+    CUDA_CHECK(cudaGetDevice(&stream_device_id_));
+  }
+
   DeviceType GetType() const override { return DeviceType::NvTensorRtRtx; }
   std::string GetExecutionProviderName() const override { return "NvTensorRtRtx"; }
+  int GetDeviceId(const ProviderOptions*) override { return device_id_; }
+
+  void ShapeInitSessionProviderOptions(Config::ProviderOptions& init_options,
+                                       const Config::ProviderOptions* user_options) const override {
+    if (!user_options) return;
+
+    // The trivial init session is used to create the device allocator, so it must run on the same
+    // device as the model session. For the plugin EP, the device is selected through device_filtering_options,
+    // which EnsureDeviceOrtInit already copies. The built-in EP is selected only by its device_id option, so
+    // forward that, otherwise the init session runs on device 0 and does not provide an allocator for the
+    // device this interface is bound to.
+    for (const auto& opt : user_options->options) {
+      if (opt.first == "device_id") {
+        init_options.options.emplace_back(opt);
+        return;
+      }
+    }
+  }
+
+  // The interface, its stream and the global device allocator are shared by every model in the process,
+  // so they can only be bound to one device. Recreate the stream on the selected device if it is not yet
+  // bound, i.e. before it is first handed to an EP. Model inits may run concurrently, so binding is
+  // serialized. Makes the selected device current on the calling thread.
+  void SelectDevice(int device_id) override {
+    std::scoped_lock lock{device_binding_mutex_};
+    if (stream_bound_) {
+      if (device_id != device_id_)
+        throw std::runtime_error("NvTensorRtRtx device interface is already bound to CUDA device " +
+                                 std::to_string(device_id_) + ", but this model requested device " +
+                                 std::to_string(device_id) + ". Models in one process must target the same device.");
+      CUDA_CHECK(cudaSetDevice(device_id));
+      return;
+    }
+    CUDA_CHECK(cudaSetDevice(device_id));
+    if (device_id != stream_device_id_) {
+      g_stream.Recreate();
+      stream_device_id_ = device_id;
+    }
+    device_id_ = device_id;
+    stream_bound_ = true;
+    g_bound_device_id.store(device_id, std::memory_order_release);
+  }
+
+  // Handing the stream to an EP binds the interface to the stream's device: it can no longer be recreated
+  // on another one without invalidating the stream that session holds.
+  void* GetCudaStream() override {
+    std::scoped_lock lock{device_binding_mutex_};
+    if (!stream_bound_) {
+      device_id_ = stream_device_id_;
+      stream_bound_ = true;
+      g_bound_device_id.store(device_id_, std::memory_order_release);
+    }
+    return GetStream();
+  }
 
   int GetWindowedKeyValueCacheSize(const Config::Model::Decoder& decoder,
                                    const Config::Search& /*search*/,
@@ -1112,6 +1195,11 @@ struct NvTensorRtRtxInterfaceImpl final : CudaInterfaceImplBase {
 
     return false;
   }
+
+ private:
+  std::mutex device_binding_mutex_;
+  int stream_device_id_{};  // device g_stream was created on
+  bool stream_bound_{};     // device_id_ and g_stream are fixed once set
 };
 
 std::unique_ptr<DeviceInterface> g_cuda_device;
