@@ -25,6 +25,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -892,6 +893,22 @@ static void release_all_staged_state_locked() {
   hook_cleanup();
 }
 
+// A kernel launch that is rejected (bad launch configuration, no kernel image for the device, a failed lazy module load) is
+// recorded only in the calling thread's last-error slot: the stream stays healthy, so cudaStreamSynchronize still succeeds
+// and the outputs keep whatever they held. The launch exports that return void therefore park the failure here and
+// qwen38_plane_stream_sync reports it; prep and ple_rows return it directly.
+static std::atomic<int> g_parked_launch_error{0};
+
+// Drops a stale error of the thread so that LaunchStatus() reports only the launch that follows.
+static inline void BeginLaunch() { (void)cudaGetLastError(); }
+static inline int LaunchStatus() { return static_cast<int>(cudaGetLastError()); }
+static inline void ParkLaunchStatus() {
+  if (const int err = LaunchStatus()) {
+    int none = 0;
+    g_parked_launch_error.compare_exchange_strong(none, err);
+  }
+}
+
 extern "C" {
 QWEN38_PLANE_EXPORT int qwen38_plane_abi_version(void) { return QWEN38_PLANE_ABI_VERSION; }
 QWEN38_PLANE_EXPORT int qwen38_plane_sizeof_ple_params(void) { return (int)sizeof(PleParams); }
@@ -1057,48 +1074,62 @@ QWEN38_PLANE_EXPORT int qwen38_plane_prep(void* s, const void* P, const void* to
         const unsigned char* slot_dev = ws->prep_ring_dev + slot_offset;
         host_gather_ple_row(*ws, tok, s_c0, s_c1, slot_host);
         hook_launch();
+        BeginLaunch();
         k_prep_staged<<<1, 1024, 0, stream>>>(ws->params.capacity, ws->params.n_heads, ws->params.head_dim,
                                               ws->params.scale, tok, pos, s_c1, slot_dev, (i64*)ctx_out,
                                               (i64*)input_ids, (i64*)position_ids, (int*)committed, (i64*)past_pos,
                                               (__nv_bfloat16*)ple_out, (i64*)state);
-        return 0;
+        return LaunchStatus();
       }
     }
   }
+  BeginLaunch();
   k_prep<<<1, 1024, 0, (cudaStream_t)s>>>((const PleParams*)P, (const i64*)tok_ptr, (const i64*)pos_ptr, pos_add,
                                           (const i64*)ctx_in, (i64*)ctx_out, (i64*)input_ids, (i64*)position_ids,
                                           (int*)committed, (i64*)past_pos, (__nv_bfloat16*)ple_out, (i64*)state);
-  return 0;
+  return LaunchStatus();
 }
 
 QWEN38_PLANE_EXPORT void qwen38_plane_argmax_part(void* s, const void* logits, int n, void* outv, void* outi, int nblocks) {
+  BeginLaunch();
   k_argmax_part<<<nblocks, 256, 0, (cudaStream_t)s>>>((const __nv_bfloat16*)logits, n, (float*)outv, (int*)outi);
+  ParkLaunchStatus();
 }
 
 QWEN38_PLANE_EXPORT void qwen38_plane_post1(void* s, const void* v0, const void* i0, int nb, void* state, void* ctx_commit, const void* ctx_a,
                                             const void* st0, int nst, void* result, int ring) {
+  BeginLaunch();
   k_post1<<<1, 32, 0, (cudaStream_t)s>>>((const float*)v0, (const int*)i0, nb, (i64*)state, (i64*)ctx_commit,
                                          (const i64*)ctx_a, (const int*)st0, nst, (i64*)result, ring);
+  ParkLaunchStatus();
 }
 
 QWEN38_PLANE_EXPORT void qwen38_plane_post_tok(void* s, const void* tok01, void* state, void* ctx_commit, const void* ctx_a, const void* ctx_b,
                                                const void* st0, int nst, void* result, int ring) {
+  BeginLaunch();
   k_post_tok<<<1, 32, 0, (cudaStream_t)s>>>((const i64*)tok01, (i64*)state, (i64*)ctx_commit, (const i64*)ctx_a,
                                             (const i64*)ctx_b, (const int*)st0, nst, (i64*)result, ring);
+  ParkLaunchStatus();
 }
 
 QWEN38_PLANE_EXPORT void qwen38_plane_head_prep(void* s, const void* ctl, int rows, int hlen, int hidden_width, const void* src, void* dst,
                                                 void* tokens, void* positions, void* committed) {
+  BeginLaunch();
   k_head_prep<<<1, 1024, 0, (cudaStream_t)s>>>((const i64*)ctl, rows, hlen, hidden_width, (const uint4*)src, (uint4*)dst,
                                                (i64*)tokens, (i64*)positions, (int*)committed);
+  ParkLaunchStatus();
 }
 
 QWEN38_PLANE_EXPORT void qwen38_plane_head_post(void* s, const void* next_token, void* ctl) {
+  BeginLaunch();
   k_head_post<<<1, 32, 0, (cudaStream_t)s>>>((const i64*)next_token, (i64*)ctl);
+  ParkLaunchStatus();
 }
 
 QWEN38_PLANE_EXPORT void qwen38_plane_or_status(void* s, const void* st, int nst, void* state) {
+  BeginLaunch();
   k_or_status<<<1, 32, 0, (cudaStream_t)s>>>((const int*)st, nst, (i64*)state);
+  ParkLaunchStatus();
 }
 
 /* ---- fast prefill kernels: batched PLE rows, dense -> packed state hand-off ---- */
@@ -1146,43 +1177,53 @@ QWEN38_PLANE_EXPORT int qwen38_plane_ple_rows(void* s, const void* P, const void
         const i64 last_tok = h_toks[n - 1];
         const i64 last_c1 = n >= 2 ? h_toks[n - 2] : ctx1;
         hook_launch();
+        BeginLaunch();
         k_ple_rows_staged<<<n, 1024, 0, stream>>>(ws->params.n_heads, ws->params.head_dim, ws->params.scale,
                                                   ws->prefill_fp8_dev, n, last_c1, last_tok, (i64*)ctx_out,
                                                   (__nv_bfloat16*)ple_out);
-        return 0;
+        return LaunchStatus();
       }
     }
   }
+  BeginLaunch();
   k_ple_rows<<<n, 1024, 0, (cudaStream_t)s>>>((const PleParams*)P, (const i64*)tokens, n, (const i64*)ctx_in, (i64*)ctx_out,
                                               (__nv_bfloat16*)ple_out);
-  return 0;
+  return LaunchStatus();
 }
 
 QWEN38_PLANE_EXPORT void qwen38_plane_pool_keys(void* s, const void* raw, int nb, const void* knorm, const void* cosv, const void* sinv,
                                                 int width, float eps, int first_block, void* out) {
   if (nb <= 0) return;
+  BeginLaunch();
   k_pool_keys<<<nb, 128, 0, (cudaStream_t)s>>>((const __nv_bfloat16*)raw, (const __nv_bfloat16*)knorm,
                                                (const __nv_bfloat16*)cosv, (const __nv_bfloat16*)sinv, width, eps,
                                                first_block, (float*)out);
+  ParkLaunchStatus();
 }
 
 QWEN38_PLANE_EXPORT void qwen38_plane_transpose_f32(void* s, const void* src, void* dst, int n, int batch) {
   if (n <= 0 || batch <= 0) return;
   const unsigned int blocks = static_cast<unsigned int>((n + 31) / 32);
   dim3 grid(blocks, blocks, static_cast<unsigned int>(batch)), block(32, 8);
+  BeginLaunch();
   k_transpose_f32<<<grid, block, 0, (cudaStream_t)s>>>((const float*)src, (float*)dst, n);
+  ParkLaunchStatus();
 }
 
 QWEN38_PLANE_EXPORT void qwen38_plane_quantize_kv(void* s, const void* src, void* dst, const void* scale, int rows, int src_pitch_elems,
                                                   int dst_pitch_elems, int mode) {
   if (rows <= 0) return;
+  BeginLaunch();
   k_quantize_kv<<<rows, 256, 0, (cudaStream_t)s>>>((const __nv_bfloat16*)src, (uint8_t*)dst, (const float*)scale, rows,
                                                    src_pitch_elems, dst_pitch_elems, mode);
+  ParkLaunchStatus();
 }
 
 QWEN38_PLANE_EXPORT void qwen38_plane_embed_rows(void* s, const void* table, const void* ids, void* out, int rows, int width) {
   if (rows <= 0 || width <= 0) return;
+  BeginLaunch();
   k_embed_rows<<<rows, 256, 0, (cudaStream_t)s>>>((const __nv_bfloat16*)table, (const i64*)ids, (__nv_bfloat16*)out, rows, width);
+  ParkLaunchStatus();
 }
 
 /* ---- CUDA runtime helpers (all return cudaError_t as int, 0 = success) ---- */
@@ -1239,7 +1280,13 @@ QWEN38_PLANE_EXPORT int qwen38_plane_memcpy2d_d2d(void* dst, size_t dpitch, cons
 }
 QWEN38_PLANE_EXPORT int qwen38_plane_stream_create(void** s) { return (int)cudaStreamCreateWithFlags((cudaStream_t*)s, cudaStreamNonBlocking); }
 QWEN38_PLANE_EXPORT int qwen38_plane_stream_destroy(void* s) { return (int)cudaStreamDestroy((cudaStream_t)s); }
-QWEN38_PLANE_EXPORT int qwen38_plane_stream_sync(void* s) { return (int)cudaStreamSynchronize((cudaStream_t)s); }
+// Besides the stream's own status this reports a launch that an earlier void export could not enqueue (see
+// g_parked_launch_error), once.
+QWEN38_PLANE_EXPORT int qwen38_plane_stream_sync(void* s) {
+  const cudaError_t err = cudaStreamSynchronize((cudaStream_t)s);
+  if (err != cudaSuccess) return (int)err;
+  return g_parked_launch_error.exchange(0);
+}
 
 #ifdef QWEN38_PLANE_TEST_HOOKS
 QWEN38_PLANE_EXPORT int qwen38_plane_test_inject_staged_fault(int site, int skip, int error) {
@@ -1271,5 +1318,7 @@ QWEN38_PLANE_EXPORT int qwen38_plane_test_stats(Qwen38PlaneTestStats* stats) {
   stats->fault_armed = g_test_hooks.fault_site != QWEN38_PLANE_FAULT_NONE ? 1 : 0;
   return 0;
 }
+
+QWEN38_PLANE_EXPORT int qwen38_plane_test_peek_last_error(void) { return (int)cudaPeekAtLastError(); }
 #endif
 }

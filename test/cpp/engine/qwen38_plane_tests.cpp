@@ -557,6 +557,7 @@ class PlaneModuleReference {
     if (handle_ != nullptr) {
       inject_fault_ = Symbol<Qwen38PlaneTestInjectFaultFn>("qwen38_plane_test_inject_staged_fault");
       stats_ = Symbol<Qwen38PlaneTestStatsFn>("qwen38_plane_test_stats");
+      peek_last_error_ = Symbol<Qwen38PlaneTestPeekLastErrorFn>("qwen38_plane_test_peek_last_error");
     }
   }
 
@@ -572,7 +573,7 @@ class PlaneModuleReference {
   PlaneModuleReference(const PlaneModuleReference&) = delete;
   PlaneModuleReference& operator=(const PlaneModuleReference&) = delete;
 
-  bool HasHooks() const { return inject_fault_ != nullptr && stats_ != nullptr; }
+  bool HasHooks() const { return inject_fault_ != nullptr && stats_ != nullptr && peek_last_error_ != nullptr; }
 
   // The (skip + 1)-th execution of `site` from now on fails once with `error`.
   void Arm(Qwen38PlaneFaultSite site, int skip, int error) const { EXPECT_EQ(inject_fault_(site, skip, error), 0); }
@@ -584,6 +585,9 @@ class PlaneModuleReference {
     EXPECT_EQ(stats_(&stats), 0);
     return stats;
   }
+
+  // The last CUDA error of the calling thread, as the module's CUDA runtime sees it.
+  int PeekLastError() const { return peek_last_error_(); }
 
  private:
   template <typename Function>
@@ -598,6 +602,7 @@ class PlaneModuleReference {
   void* handle_{};
   Qwen38PlaneTestInjectFaultFn inject_fault_{};
   Qwen38PlaneTestStatsFn stats_{};
+  Qwen38PlaneTestPeekLastErrorFn peek_last_error_{};
 };
 
 class PlaneStream {
@@ -1198,6 +1203,38 @@ TEST_F(Qwen38PlaneStagedPleTest, TheLastLoaderToDetachReleasesTheStagedTablesLef
   EXPECT_EQ(end.global_cleanups, start.global_cleanups + 1);
   EXPECT_EQ(end.staged_tables, 0);
   EXPECT_EQ(end.live_pinned_allocations, 0);
+}
+
+// The CUDA runtime records a rejected kernel launch only as the last error of the thread; the stream stays healthy, so a
+// plane that returns void from the launch would otherwise leave the outputs stale without any diagnostic.
+TEST_F(Qwen38PlaneStagedPleTest, ARejectedKernelLaunchIsReportedByTheNextStreamSyncOnce) {
+  PlaneStream stream{*plane_};
+  ASSERT_EQ(plane_->stream_sync(stream.get()), 0);
+
+  // A grid of no blocks is not a valid launch configuration, and nothing runs.
+  plane_->argmax_part(stream.get(), nullptr, 0, nullptr, nullptr, 0);
+  EXPECT_NE(plane_->stream_sync(stream.get()), 0);
+  EXPECT_EQ(plane_->stream_sync(stream.get()), 0);
+  EXPECT_EQ(module_->PeekLastError(), 0) << "the failed launch stayed behind as the last error of the thread";
+}
+
+// Failures the host tolerates (it falls back to another registration or to the staged path) must not stay behind as the last
+// error of the thread, where the next cudaGetLastError() of another CUDA user of the process would report them.
+TEST_F(Qwen38PlaneStagedPleTest, FailuresTheHostToleratesAreNotLeftAsTheLastCudaError) {
+  std::vector<unsigned char> memory(4096);
+  void* device_pointer = nullptr;
+
+  // A registration of no bytes is invalid whatever the flags, so the retry without the read-only flag fails as well.
+  EXPECT_NE(plane_->host_register(memory.data(), 0, 8), 0);
+  EXPECT_EQ(module_->PeekLastError(), 0);
+  EXPECT_NE(plane_->host_register(memory.data(), 0, 1), 0);
+  EXPECT_EQ(module_->PeekLastError(), 0);
+
+  // The memory was never registered.
+  EXPECT_NE(plane_->host_unregister(memory.data()), 0);
+  EXPECT_EQ(module_->PeekLastError(), 0);
+  EXPECT_NE(plane_->host_get_device_pointer(&device_pointer, memory.data(), 0), 0);
+  EXPECT_EQ(module_->PeekLastError(), 0);
 }
 
 }  // namespace

@@ -13,7 +13,12 @@
 // 3: prep and ple_rows return the CUDA error of the staged PLE path (they returned void); attach/detach were added.
 #define QWEN38_PLANE_ABI_VERSION 3
 
-// Host-registered FP8 PLE (per-layer embedding) table description, copied to the device once.
+// Host-registered FP8 PLE (per-layer embedding) table description, copied to the device once. The library trusts the loader
+// for its invariants and does not validate them (ParseQwen38PleDescription enforces them): 1 <= n_heads <= 32,
+// n_heads * head_dim <= 3072 (one 1024-thread block gathers a row, and a staged row must fit an 8192-byte ring slot),
+// 0 <= heads_per_ngram <= n_heads, vocab[h] > 0 with the rows of every head inside the shards, 1 <= n_shards <= 256 with
+// ascending shard_end, and a non-null shard_ptr for every shard.
+// pad_ is not padding: 1 marks a "staged" table, one the GPU cannot address, whose rows the host gathers (see below).
 typedef struct Qwen38PleParams {
   int n_heads, head_dim, heads_per_ngram, n_shards;
   long long mult[4];
@@ -27,6 +32,15 @@ typedef struct Qwen38PleParams {
   long long capacity;
 } Qwen38PleParams;
 
+#ifdef __cplusplus
+// The structure crosses the module boundary by layout, so a change to it must bump QWEN38_PLANE_ABI_VERSION.
+static_assert(sizeof(void*) != 8 || sizeof(Qwen38PleParams) == 4680, "Qwen38PleParams layout changed");
+static_assert(sizeof(void*) != 8 || offsetof(Qwen38PleParams, shard_ptr) == 2608, "Qwen38PleParams layout changed");
+static_assert(sizeof(void*) != 8 || offsetof(Qwen38PleParams, pad_) == 4660, "Qwen38PleParams layout changed");
+static_assert(sizeof(void*) != 8 || offsetof(Qwen38PleParams, eos) == 4664, "Qwen38PleParams layout changed");
+static_assert(sizeof(void*) != 8 || offsetof(Qwen38PleParams, capacity) == 4672, "Qwen38PleParams layout changed");
+#endif
+
 // X(return type, name, parameter list). The exported symbol is "qwen38_plane_" + name. `stream` is a cudaStream_t.
 // CUDA runtime helpers return the cudaError_t as int (0 = success).
 //
@@ -34,7 +48,13 @@ typedef struct Qwen38PleParams {
 // the token and context words are read back to the host and the FP8 rows are gathered there. Every step of that staging
 // (pinned allocation, device alias, copy, synchronisation) is checked; when one fails, or when the table was never
 // registered with set_ple_host_params, the function returns the cudaError_t (cudaErrorInvalidValue for the unregistered
-// table) before it gathers or launches anything, so the outputs are untouched. Callers must check the result.
+// table) before it gathers or launches anything, so the outputs are untouched. Both also return the error of their own
+// kernel launch. Callers must check the result. ple_rows reads ctx_in while its last block writes ctx_out, so the two must
+// not alias.
+//
+// The other kernel exports return void. A launch the CUDA runtime rejects (bad configuration, no kernel image for the
+// device, a failed lazy module load) leaves the stream healthy, so the failure is kept and reported, once, by the next
+// stream_sync.
 //
 // The module keeps process-wide state (the staged tables registered through set_ple_host_params) that is shared by every
 // loader of the same library file. A loader calls attach once the module is loaded and validated and detach once before it
@@ -89,8 +109,8 @@ typedef struct Qwen38PleParams {
 // ---- Test hooks -------------------------------------------------------------------------------------------------------
 // Compiled into the library only when it is built with QWEN38_PLANE_TEST_HOOKS (the CMake option ENABLE_TESTS). They are not
 // part of QWEN38_PLANE_FUNCTIONS and the host loader never resolves them: the unit tests look them up by name
-// ("qwen38_plane_test_inject_staged_fault", "qwen38_plane_test_stats") to fail one CUDA step of the staged PLE path and to
-// observe what the module did.
+// ("qwen38_plane_test_inject_staged_fault", "qwen38_plane_test_stats", "qwen38_plane_test_peek_last_error") to fail one CUDA
+// step of the staged PLE path, to observe what the module did and to see the last CUDA error it left on the calling thread.
 
 // The step of the staged PLE path that an injected fault replaces with an error.
 typedef enum Qwen38PlaneFaultSite {
@@ -118,3 +138,5 @@ typedef struct Qwen38PlaneTestStats {
 typedef int (*Qwen38PlaneTestInjectFaultFn)(int site, int skip, int error);
 // Fills `stats`. Returns 0, or cudaErrorInvalidValue for a null `stats`.
 typedef int (*Qwen38PlaneTestStatsFn)(Qwen38PlaneTestStats* stats);
+// Returns the last CUDA error of the calling thread without clearing it (cudaPeekAtLastError).
+typedef int (*Qwen38PlaneTestPeekLastErrorFn)(void);
