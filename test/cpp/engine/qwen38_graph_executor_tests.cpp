@@ -120,6 +120,15 @@ class Qwen38GraphEngineTest : public ::testing::Test {
     return request;
   }
 
+  std::shared_ptr<Request> BeginWithStopString(Engine& engine, std::span<const int32_t> prompt, size_t max_generated_tokens) {
+    auto request = engine.CreateRequest();
+    auto options = Limit(max_generated_tokens);
+    options.request = request;
+    options.stop_strings = {"STOP"};
+    request->BeginTurn(prompt, options);
+    return request;
+  }
+
   std::shared_ptr<Model> model_;
   std::shared_ptr<ScriptedQwen38Device> device_;
 };
@@ -343,6 +352,174 @@ TEST_F(Qwen38GraphEngineTest, WithoutMtpEveryCycleCommitsOneToken) {
   EXPECT_EQ(stats.draft_tokens_proposed, 0u);
   EXPECT_EQ(stats.target_forward_passes, 4u);
   EXPECT_EQ(stats.tokens_emitted, 5u);
+}
+
+// ---- speculative statistics of multi-draft cycles --------------------------------------------
+//
+// The verify of every cycle proposes 3 drafts and accepts the next entry of the given counts of them. The prompt has 5
+// tokens: position 5 is the first token (it comes from the prompt), the first cycle delivers positions 6.. in order
+// (accepted drafts, then the correction or, with all three accepted, the bonus). Engine::RecordSpeculativeCommit is the
+// reference: a draft counts as evaluated when the turn examined it before its terminal token.
+
+TEST_F(Qwen38GraphEngineTest, ATurnLimitInsideTheAcceptedDraftsOnlyCountsTheDraftItConsumed) {
+  device_->SetDrafts(3, {3});
+  auto engine = MakeEngine();
+  auto request = Begin(*engine, Prompt(5), /*max_generated_tokens=*/2);  // room for one token of the first cycle
+
+  const auto outcome = RunToCompletion(*engine, request);
+
+  EXPECT_EQ(outcome.tokens, Expected(5, 2));
+  EXPECT_EQ(outcome.finish_reason, GenerationFinishReason::TurnLimit);
+  const auto stats = engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.rounds, 1u);
+  EXPECT_EQ(stats.draft_tokens_proposed, 3u);
+  EXPECT_EQ(stats.draft_tokens_evaluated, 1u);  // not accepted + 1: the second draft was never examined
+  EXPECT_EQ(stats.draft_tokens_accepted, 1u);
+  EXPECT_EQ(stats.acceptance_length_histogram[1], 1u);
+  EXPECT_FLOAT_EQ(stats.acceptance_rate, 1.0f);
+  EXPECT_EQ(stats.tokens_discarded, 3u);
+}
+
+TEST_F(Qwen38GraphEngineTest, ATurnLimitAfterSeveralAcceptedDraftsCountsExactlyTheDraftsItConsumed) {
+  device_->SetDrafts(3, {3});
+  auto engine = MakeEngine();
+  auto request = Begin(*engine, Prompt(5), /*max_generated_tokens=*/3);  // room for two tokens of the first cycle
+
+  const auto outcome = RunToCompletion(*engine, request);
+
+  EXPECT_EQ(outcome.tokens, Expected(5, 3));
+  const auto stats = engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.draft_tokens_evaluated, 2u);
+  EXPECT_EQ(stats.draft_tokens_accepted, 2u);
+  EXPECT_EQ(stats.acceptance_length_histogram[2], 1u);
+  EXPECT_FLOAT_EQ(stats.acceptance_rate, 1.0f);
+}
+
+TEST_F(Qwen38GraphEngineTest, ATurnLimitOnTheCorrectionTokenCountsTheRejectedPositionToo) {
+  device_->SetDrafts(3, {1});
+  auto engine = MakeEngine();
+  auto request = Begin(*engine, Prompt(5), /*max_generated_tokens=*/3);  // the accepted draft and the correction
+
+  const auto outcome = RunToCompletion(*engine, request);
+
+  EXPECT_EQ(outcome.tokens, Expected(5, 3));
+  const auto stats = engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.draft_tokens_evaluated, 2u);  // the accepted draft and the position that was rejected
+  EXPECT_EQ(stats.draft_tokens_accepted, 1u);
+  EXPECT_FLOAT_EQ(stats.acceptance_rate, 0.5f);
+}
+
+TEST_F(Qwen38GraphEngineTest, ATurnLimitRightAfterTheLastAcceptedDraftDoesNotReachTheRejectedPosition) {
+  device_->SetDrafts(3, {1});
+  auto engine = MakeEngine();
+  auto request = Begin(*engine, Prompt(5), /*max_generated_tokens=*/2);  // only the accepted draft fits
+
+  const auto outcome = RunToCompletion(*engine, request);
+
+  EXPECT_EQ(outcome.tokens, Expected(5, 2));
+  const auto stats = engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.draft_tokens_evaluated, 1u);
+  EXPECT_EQ(stats.draft_tokens_accepted, 1u);
+  EXPECT_FLOAT_EQ(stats.acceptance_rate, 1.0f);
+}
+
+TEST_F(Qwen38GraphEngineTest, TheSessionLimitTruncatesTheEvaluatedDraftsLikeTheTurnLimit) {
+  device_->SetDrafts(3, {3});
+  auto engine = MakeEngine();
+  // 5 prompt tokens, room for 2 more: the first token and one token of the cycle.
+  auto request = Begin(*engine, Prompt(5), /*max_generated_tokens=*/50, /*max_session_tokens=*/7);
+
+  const auto outcome = RunToCompletion(*engine, request);
+
+  EXPECT_EQ(outcome.tokens, Expected(5, 2));
+  EXPECT_EQ(outcome.finish_reason, GenerationFinishReason::ContextLimit);
+  const auto stats = engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.draft_tokens_evaluated, 1u);
+  EXPECT_EQ(stats.draft_tokens_accepted, 1u);
+  EXPECT_FLOAT_EQ(stats.acceptance_rate, 1.0f);
+}
+
+TEST_F(Qwen38GraphEngineTest, AStopStringInsideTheAcceptedDraftsOnlyCountsTheDraftsUpToTheMatch) {
+  device_->SetDrafts(3, {3});
+  device_->overrides[6] = 5;  // "ST", "OP": the stop string completes on the second accepted draft
+  device_->overrides[7] = 6;
+  auto engine = MakeEngine();
+  auto request = BeginWithStopString(*engine, Prompt(5), /*max_generated_tokens=*/20);
+
+  const auto outcome = RunToCompletion(*engine, request);
+
+  EXPECT_EQ(outcome.finish_reason, GenerationFinishReason::StopString);
+  EXPECT_EQ(outcome.tokens, (std::vector<int32_t>{device_->TokenAt(5), 5, 6}));
+  const auto stats = engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.draft_tokens_evaluated, 2u);
+  EXPECT_EQ(stats.draft_tokens_accepted, 2u);
+  EXPECT_FLOAT_EQ(stats.acceptance_rate, 1.0f);
+  EXPECT_EQ(stats.tokens_discarded, 2u);
+}
+
+TEST_F(Qwen38GraphEngineTest, AStopStringOnTheCorrectionTokenCountsTheRejectedPositionToo) {
+  device_->SetDrafts(3, {1});
+  device_->overrides[6] = 5;  // the accepted draft
+  device_->overrides[7] = 6;  // the correction completes the stop string
+  auto engine = MakeEngine();
+  auto request = BeginWithStopString(*engine, Prompt(5), /*max_generated_tokens=*/20);
+
+  const auto outcome = RunToCompletion(*engine, request);
+
+  EXPECT_EQ(outcome.finish_reason, GenerationFinishReason::StopString);
+  const auto stats = engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.draft_tokens_evaluated, 2u);
+  EXPECT_EQ(stats.draft_tokens_accepted, 1u);
+  EXPECT_FLOAT_EQ(stats.acceptance_rate, 0.5f);
+}
+
+TEST_F(Qwen38GraphEngineTest, AnEndOfSequenceDraftIsExaminedButNotAccepted) {
+  device_->SetDrafts(3, {3});
+  device_->overrides[7] = kEos;  // the second accepted draft
+  auto engine = MakeEngine();
+  auto request = Begin(*engine, Prompt(5), /*max_generated_tokens=*/20);
+
+  const auto outcome = RunToCompletion(*engine, request);
+
+  EXPECT_EQ(outcome.tokens, Expected(5, 2));
+  EXPECT_EQ(outcome.finish_reason, GenerationFinishReason::EosToken);
+  const auto stats = engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.draft_tokens_evaluated, 2u);  // like Request::CommitAcceptedDraftsForTransaction: the EOS was examined
+  EXPECT_EQ(stats.draft_tokens_accepted, 1u);   // ...but nothing was appended for it
+  EXPECT_EQ(stats.acceptance_length_histogram[1], 1u);
+  EXPECT_FLOAT_EQ(stats.acceptance_rate, 0.5f);
+}
+
+TEST_F(Qwen38GraphEngineTest, AnEndOfSequenceCorrectionTokenCountsTheRejectedPositionToo) {
+  device_->SetDrafts(3, {1});
+  device_->overrides[7] = kEos;  // the correction
+  auto engine = MakeEngine();
+  auto request = Begin(*engine, Prompt(5), /*max_generated_tokens=*/20);
+
+  const auto outcome = RunToCompletion(*engine, request);
+
+  EXPECT_EQ(outcome.tokens, Expected(5, 2));
+  EXPECT_EQ(outcome.finish_reason, GenerationFinishReason::EosToken);
+  const auto stats = engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.draft_tokens_evaluated, 2u);
+  EXPECT_EQ(stats.draft_tokens_accepted, 1u);
+  EXPECT_EQ(stats.correction_tokens, 0u);  // it was not delivered
+}
+
+TEST_F(Qwen38GraphEngineTest, AnEndOfSequenceBonusTokenIsNotAnExaminedDraft) {
+  device_->SetDrafts(3, {3});
+  device_->overrides[9] = kEos;  // the bonus token after three accepted drafts
+  auto engine = MakeEngine();
+  auto request = Begin(*engine, Prompt(5), /*max_generated_tokens=*/20);
+
+  const auto outcome = RunToCompletion(*engine, request);
+
+  EXPECT_EQ(outcome.tokens, Expected(5, 4));
+  EXPECT_EQ(outcome.finish_reason, GenerationFinishReason::EosToken);
+  const auto stats = engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.draft_tokens_evaluated, 3u);
+  EXPECT_EQ(stats.draft_tokens_accepted, 3u);
+  EXPECT_FLOAT_EQ(stats.acceptance_rate, 1.0f);
 }
 
 // ---- prefill, cancellation, queueing ---------------------------------------------------------

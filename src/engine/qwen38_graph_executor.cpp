@@ -193,7 +193,12 @@ void Qwen38GraphSession::OnStepCommitted(const RequestStepResult& result) {
   if (step.mtp) {
     const size_t n_prop = step.proposed > 0 ? step.proposed : 1;
     const size_t effective_accepted = std::min(step.accepted, emitted);
-    const size_t n_eval = std::min(n_prop, effective_accepted + 1);
+    // Draft positions the Engine examined before the turn ended, as Engine::RecordSpeculativeCommit counts them: each
+    // accepted draft it consumed (an EOS is consumed without being delivered), plus the rejected position only when it
+    // got as far as the correction token. Whatever follows the terminal token (limit, stop string, EOS) is never examined.
+    const size_t consumed = emitted + (result.finish_reason == GenerationFinishReason::EosToken ? 1 : 0);
+    const size_t n_eval =
+        std::min(consumed, step.accepted) + ((consumed > step.accepted && step.accepted < n_prop) ? 1 : 0);
     ++stats_.target_verify_forward_passes;
     stats_.draft_forward_passes += n_prop;
     stats_.draft_tokens_proposed += n_prop;
