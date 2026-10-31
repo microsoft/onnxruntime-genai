@@ -666,6 +666,11 @@ the same Turn already exists, cancellation merges the terminal fields into that 
 creating a second event. Cancellation is idempotent by Turn ID: the first matching queued or active
 Turn returns true, and later calls return false.
 
+Hosts should cancel superseded or expired Turns rather than retain them for recompute replay.
+Cancellation of a suspended Turn queues its terminal event without waiting for another model
+token; the host must still drain events through `OgaEngineRun`. Scheduling importance, replacement
+identities, useful-output deadlines, and foreground/background handoff are not controls in this API.
+
 `OgaEngineRun` uses an opaque, caller-owned reusable Buffer:
 
 - Buffer creation allocates storage for exactly the requested event capacity.
@@ -767,6 +772,10 @@ only after a Turn and deliberately evicts committed model state for replay.
 Recompute preemption is separate from completed-Turn rewind. It never truncates token history,
 changes Turn identity, or resets Search/RNG state. Its supported layouts and default-off
 configuration are described in [Paged Attention Engine](paged_attention_engine.md#recompute-preemption).
+The implemented policy is age-based capacity recovery, not foreground priority: a fresh invocation
+does not automatically displace older work, and unfinished prefill/replay cannot be selected as a
+victim. See [policy scope and host integration](paged_attention_engine.md#policy-scope-and-host-integration)
+for the boundary between this mechanism and a foreground scheduling contract.
 
 ## Event production and delivery
 

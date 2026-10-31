@@ -2116,6 +2116,34 @@ Both numeric limits must be positive integers representable by the configuration
 victim count is also bounded by resident count. These fields are construction-time policy, not
 mutable per-Request or per-Turn settings.
 
+### Policy scope and host integration
+
+This is **age-based capacity recovery, not host-designated foreground handoff**. Committed service
+age orders waiting work; a fresh interactive request does not automatically outrank an older
+background or suspended request. There are no foreground/background tiers, equal-tier residency
+rules, per-invocation deadlines, replacement identities, or mutable Request importance controls.
+The configuration fields above select this Engine-wide policy, not application urgency.
+
+Preemption is cooperative between complete execution steps; it never interrupts an in-flight
+model call. An unfinished resident still in initial prefill or cache replay is not an eligible
+victim, even at a chunk boundary. Chunk and query-token budgets bound work per step but do not
+provide an interactive latency bound or let a new arrival interrupt lower-priority replay.
+Admission plans retained history and the current execution step, not a foreground output-growth
+entitlement or the entire requested output ceiling.
+
+Hosts should cancel superseded or expired work through the Engine owner using its current Turn ID,
+rather than preserve obsolete work for replay. Cancellation also completes a suspended Turn and
+queues its terminal event without requiring another model token. Suspension itself is not a finish
+reason; a still-valid suspended Turn resumes automatically, whereas an evicted completed session
+remains logically complete until a later `BeginTurn`.
+
+A foreground policy and its host integration require a separate runtime contract for importance,
+deadline/replacement handling, interruption of lower-tier prefill/replay, bounded growth and
+buffering, and consumer backpressure. This opt-in does not supply that contract or make a general
+starvation guarantee. Support for hybrid/windowed reconstruction and hosted auxiliary decoders
+also remains outside the supported subset below; paged-KV reclamation alone does not qualify those
+other state components for eviction.
+
 ### Supported state
 
 This version supports full-attention paged KV and its shared prefix-cache references. Engine
@@ -2155,9 +2183,10 @@ release and the Request replay boundary without allocation or device work. Share
 indexed prefix identities remain intact. Search, RNG, Turn counters and logical tokens are not
 rewound or replaced. The physical cursor alone returns to zero.
 
-The beneficiary's admission priority survives an execution abort until it commits cache progress
+The selected beneficiary's admission preference survives an execution abort until it commits cache progress
 or its Turn is canceled, closed, or replaced. This avoids immediately returning reclaimed capacity
-to the victim on the caller's next `Run()`. It does not add an execution-capacity retry loop.
+to the victim on the caller's next `Run()`. This is an internal planner preference, not application
+priority, and does not add an execution-capacity retry loop.
 
 ### Replay and observable behavior
 
@@ -2189,6 +2218,13 @@ The disabled `RecomputePreemptionBenchmark` lives alongside the existing prefix-
 microbenchmarks. It measures staggered concurrent serving under a fixed KV budget with production
 policy/cache/Search/event code and scripted logits. Model-step latency excludes event-drain-only
 calls. CPU host timings and tokens/s from this instrument are not LLM or GPU throughput.
+
+Production foreground claims need a separate comparison on actual supported models/providers with
+identical arrival traces, including superseded/expired work and arrivals during prefill or replay.
+Measure valid output delivered before expiry, foreground TTFT/inter-token tails, repeated replay
+work, useful background progress, and total throughput. Neither replay volume nor device utilization
+alone establishes useful interactive progress; the current tests and scripted benchmark do not
+qualify a foreground policy or unsupported model layouts.
 
 ## Static engine path
 
