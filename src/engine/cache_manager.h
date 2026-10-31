@@ -90,6 +90,8 @@ struct CacheManager {
 
   virtual bool SupportsDynamicBatching() const = 0;
 
+  virtual bool SupportsContinuousMultiSlotDecoding() const { return SupportsDynamicBatching(); }
+
   virtual size_t MaxBatchSize() const { return 4; }
 
   // Rows a static (non-paged) cache supports at most, or 0 when the configured static batch size applies.

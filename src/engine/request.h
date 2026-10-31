@@ -90,6 +90,9 @@ struct RequestStepResult {
   int32_t matched_stop_string_index{-1};
   std::array<int32_t, kMaxGeneratedTokensPerStep> visible_tokens{};
   size_t visible_token_count{};
+  // Internal commit feedback, independent of stop buffering and caller event-drain rate.
+  size_t candidates_consumed{};
+  size_t tokens_appended{};
 };
 
 struct RequestTurnAdmission {

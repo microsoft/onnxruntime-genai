@@ -82,6 +82,10 @@ struct ModelExecutor {
   virtual void OnStepCommitted(const ScheduledRequests& /*scheduled_requests*/,
                                std::span<const RequestStepResult> /*results*/) {}
 
+  // A nontransactional failure may have changed device state. Mutable contexts must remain
+  // poisoned after this Engine releases its lease.
+  virtual void OnExecutionFailure() noexcept {}
+
   virtual ~ModelExecutor() = default;
 };
 

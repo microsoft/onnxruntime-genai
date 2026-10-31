@@ -1470,6 +1470,33 @@ TEST_F(Qwen38GraphEngineTest, ANewEngineOverAUsedDeviceStartsFromACleanDevice) {
   EXPECT_EQ(outcome.tokens, Expected(6, 3));
 }
 
+TEST_F(Qwen38GraphEngineTest, MalformedCycleWidthFailsBeforeAnyCandidateCanMutateTheRequest) {
+  auto engine = MakeEngine();
+  auto request = Begin(*engine, Prompt(3), 10);
+  std::array<EngineEvent, 16> events;
+  ASSERT_GT(engine->Run(events), 0u);  // prompt prediction
+  const auto retained = request->TokensCpu();
+  const std::vector<int32_t> before(retained.begin(), retained.end());
+  device_->malformed_cycle_count = true;
+  engine->Run(events);
+  const auto after = request->TokensCpu();
+  EXPECT_EQ(std::vector<int32_t>(after.begin(), after.end()), before);
+  EXPECT_FALSE(device_->context_healthy);
+}
+
+TEST_F(Qwen38GraphEngineTest, FailureHealthPersistsWhenANewEngineTriesToLeaseTheSameContext) {
+  auto engine = MakeEngine();
+  auto request = Begin(*engine, Prompt(3), 10);
+  std::array<EngineEvent, 16> events;
+  engine->Run(events);
+  device_->fail_wait = true;
+  engine->Run(events);
+  EXPECT_FALSE(device_->context_healthy);
+  engine.reset();
+  device_->fail_wait = false;
+  EXPECT_THROW(MakeEngine(), std::runtime_error);
+}
+
 // ---- cache manager contract ------------------------------------------------------------------
 
 TEST_F(Qwen38GraphEngineTest, TheCacheManagerHoldsExactlyOneRow) {
@@ -1530,4 +1557,78 @@ TEST_F(Qwen38GraphEngineTest, DISABLED_RunOverheadPerCycle) {
 }
 
 }  // namespace
+
+// Shared host conformance runs independently of graph names and device bank conventions.
+TEST(TokenProducingSessionTest, ProgressSettlesWithoutATokenAndDuplicateAcknowledgementFails) {
+  TokenProducingSession host{1};
+  int owner;
+  const auto plan = host.Plan(0, 0, &owner, 1, 4, false);
+  BackendRowResult progress;
+  progress.key = plan.key;
+  progress.prefill = PrefillProgress{4, false};
+  EXPECT_TRUE(host.Collected(progress));
+  TokenCommitAck ack;
+  ack.key = plan.key;
+  EXPECT_NO_THROW(host.Acknowledge(ack));
+  EXPECT_THROW(host.Acknowledge(ack), std::logic_error);
+}
+
+TEST(TokenProducingSessionTest, RetiringCompletionDiscardsBeforeTheSlotCanBeReused) {
+  TokenProducingSession host{1};
+  int old_owner, new_owner;
+  const auto old = host.Plan(0, 0, &old_owner, 1, 0, false);
+  host.Retire(0);
+  EXPECT_THROW(host.Plan(0, 0, &new_owner, 1, 0, false), std::logic_error);
+  BackendRowResult late;
+  late.key = old.key;
+  late.selected_tokens.emplace();
+  late.selected_tokens->candidate_count = 1;
+  late.selected_tokens->candidates[0] = 12;
+  EXPECT_FALSE(host.Collected(late));
+  const auto current = host.Plan(0, 0, &new_owner, 1, 0, false);
+  EXPECT_FALSE(old.key == current.key);
+  EXPECT_THROW(host.Collected(late), std::logic_error);
+  TokenCommitAck stale;
+  stale.key = old.key;
+  EXPECT_THROW(host.Acknowledge(stale), std::logic_error);
+}
+
+TEST(TokenProducingSessionTest, NewLeasesCannotAliasLocalSlotAndSubmissionCounters) {
+  int owner;
+  TokenProducingSession first{1};
+  TokenProducingSession second{1};
+  const auto old = first.Plan(0, 0, &owner, 1, 0, false);
+  const auto current = second.Plan(0, 0, &owner, 1, 0, false);
+  EXPECT_NE(old.key.context_id, current.key.context_id);
+  EXPECT_EQ(old.key.submission_id, current.key.submission_id);
+  BackendRowResult stale;
+  stale.key = old.key;
+  EXPECT_THROW(second.Collected(stale), std::logic_error);
+}
+
+TEST(TokenProducingSessionTest, ExactCandidateCountsAndDuplicateCompletionsAreValidated) {
+  int owner;
+  TokenProducingSession host{1};
+  const auto plan = host.Plan(0, 0, &owner, 1, 0, false);
+  BackendRowResult result;
+  result.key = plan.key;
+  result.selected_tokens.emplace();
+  result.selected_tokens->candidate_count = 2;
+  result.selected_tokens->candidates[0] = 12;
+  result.selected_tokens->candidates[1] = 1;
+  EXPECT_TRUE(host.Collected(result));
+  EXPECT_THROW(host.Collected(result), std::logic_error);
+  TokenCommitAck ack;
+  ack.key = plan.key;
+  ack.candidates_consumed = 3;
+  EXPECT_THROW(host.Acknowledge(ack), std::logic_error);
+  ack.candidates_consumed = 2;
+  ack.tokens_appended = 1;
+  ack.tokens_staged_for_events = 1;
+  ack.turn_finished = true;
+  ack.finish_reason = GenerationFinishReason::EosToken;
+  ack.disposition = ContinuationDisposition::Invalidate;
+  EXPECT_NO_THROW(host.Acknowledge(ack));
+}
+
 }  // namespace Generators::test
