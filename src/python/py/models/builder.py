@@ -846,7 +846,9 @@ def create_model(
         onnx_model = Qwen3VLTextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         if not onnx_model.exclude_embeds:
             onnx_model.model_type = "qwen3_vl_text"
-    elif config.architectures[0] == "Qwen3_5ForConditionalGeneration":
+    elif config.architectures[0] in ("Qwen3_5ForConditionalGeneration", "Qwen3_5ForCausalLM"):
+        # Qwen3_5ForCausalLM is the text-only checkpoint (e.g. a fine-tune saved without the vision
+        # tower); its decoder weights are the same, so it goes through the same builder.
         onnx_model = Qwen35Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         if not onnx_model.exclude_embeds:
             onnx_model.model_type = "qwen3_5_text"
