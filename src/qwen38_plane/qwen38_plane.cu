@@ -831,7 +831,9 @@ __global__ void k_prep(const PleParams* P, const i64* tok_ptr, const i64* pos_pt
 }
 
 // One block per (row, slot). `honor_mute` is set by prep_batched only: a slot whose control word state[3] is nonzero prepares
-// idle inputs there, while prep (one slot, any control words the caller hands over) never reads that word.
+// idle inputs there, while prep (one slot, any control words the caller hands over) never reads that word. The contexts of
+// slot b are written at ctx_a + b * QWEN38_PLANE_CTX_WORDS_PER_SLOT, not at b * 2 * rows: the buffer is laid out for the
+// largest row count, which is the stride its readers use.
 __global__ void k_prep_fold(const PleParams* P, const i64* ctx_in, i64* ctx_a, i64* input_ids, i64* position_ids,
                             int* committed, i64* past_pos, __nv_bfloat16* ple_out, i64* state, int honor_mute) {
   __shared__ i64 s_row[32];
@@ -843,7 +845,7 @@ __global__ void k_prep_fold(const PleParams* P, const i64* ctx_in, i64* ctx_a, i
   const int tid = threadIdx.x;
   i64* state_b = state + (size_t)b * 16;
   const i64* ctx_in_b = ctx_in + (size_t)b * 2;
-  i64* ctx_a_b = ctx_a + (size_t)b * 2 * rows;
+  i64* ctx_a_b = ctx_a + (size_t)b * QWEN38_PLANE_CTX_WORDS_PER_SLOT;
   i64* input_ids_b = input_ids + (size_t)b * rows;
   i64* position_ids_b = position_ids + (size_t)b * rows;
   int* committed_b = committed != nullptr ? committed + b : nullptr;  // null: the caller keeps no committed length
@@ -1861,7 +1863,7 @@ extern "C" QWEN38_PLANE_EXPORT int qwen38_plane_prep_batched(void* s, const void
     for (int b = 0; b < batch; ++b) {
       i64* state_b = static_cast<i64*>(state) + static_cast<size_t>(b) * QWEN38_PLANE_CTL_WORDS_PER_SLOT;
       const i64* ctx_in_b = static_cast<const i64*>(ctx_in) + static_cast<size_t>(b) * 2;
-      i64* ctx_out_b = static_cast<i64*>(ctx_out) + static_cast<size_t>(b) * 2 * static_cast<size_t>(rows);
+      i64* ctx_out_b = static_cast<i64*>(ctx_out) + static_cast<size_t>(b) * QWEN38_PLANE_CTX_WORDS_PER_SLOT;
       i64* input_ids_b = static_cast<i64*>(input_ids) + static_cast<size_t>(b) * rows;
       i64* position_ids_b = static_cast<i64*>(position_ids) + static_cast<size_t>(b) * rows;
       int* committed_b = committed != nullptr ? static_cast<int*>(committed) + b : nullptr;
