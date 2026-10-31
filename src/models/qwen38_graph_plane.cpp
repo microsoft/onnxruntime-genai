@@ -534,11 +534,6 @@ Qwen38FileMapping::Qwen38FileMapping(Qwen38Plane& plane, const std::filesystem::
         throw;
       }
     }
-  } else if (const char* pin_env = std::getenv("ORTGENAI_PIN_CPU_POOL");
-             pin_env != nullptr && std::string(pin_env) == "1") {
-    if (plane_.host_register(base_, length_, 1 | 8) == 0) {
-      registered_ = base_;
-    }
   }
 }
 
@@ -722,19 +717,6 @@ Qwen38FileMapping::Qwen38FileMapping(Qwen38Plane& plane, const std::filesystem::
       registered_ = nullptr;
       dev_ptr_ = nullptr;
       throw;
-    }
-  } else if (const char* pin_env = std::getenv("ORTGENAI_PIN_CPU_POOL");
-             pin_env != nullptr && std::string(pin_env) == "1") {
-    try {
-      PrepareNumaRange(0, length_);
-    } catch (...) {
-      munmap(base_, length_);
-      base_ = nullptr;
-      length_ = 0;
-      throw;
-    }
-    if (plane_.host_register(base_, length_, 1 | 8) == 0) {
-      registered_ = base_;
     }
   }
 }

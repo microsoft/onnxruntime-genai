@@ -15,6 +15,7 @@
 #include <gtest/gtest.h>
 
 #include "models/qwen38_graph_plane.h"
+#include "scoped-environment-variable.h"
 
 #if !defined(QWEN38_GRAPH_NO_POSIX)
 #if defined(_WIN32)
@@ -310,6 +311,27 @@ TEST(Qwen38PleTableTest, ValidatesShardFileBoundsAndUsesDevicePointer) {
     EXPECT_EQ(StubPlaneState::registered_ptrs.size(), 1u);
     EXPECT_EQ(StubPlaneState::unregistered_ptrs, StubPlaneState::registered_ptrs);
   }
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+// The weight pool registers the page-aligned ranges it uses. A registration of the whole file would make each of them fail with
+// cudaErrorHostMemoryAlreadyRegistered, so a mapping that is not asked to register itself registers nothing, whatever the
+// environment says.
+TEST(Qwen38FileMappingTest, AMappingThatIsNotRegisteredLeavesTheRegistrationToItsOwner) {
+  const auto dir = MakeScratchDir("file_map_unregistered");
+  const auto path = WriteFile(dir / "pool.data", std::string(8192, 'p'));
+  ScopedEnvironmentVariable pin_cpu_pool{"ORTGENAI_PIN_CPU_POOL", "1"};
+  Qwen38Plane plane;
+  InitStubPlane(plane);
+  {
+    Qwen38FileMapping mapping{plane, path, false};
+    EXPECT_NE(mapping.data(), nullptr);
+    EXPECT_EQ(mapping.size(), 8192u);
+    EXPECT_TRUE(StubPlaneState::registered_ptrs.empty());
+  }
+  EXPECT_TRUE(StubPlaneState::unregistered_ptrs.empty());
 
   std::error_code ec;
   std::filesystem::remove_all(dir, ec);

@@ -1206,9 +1206,16 @@ QWEN38_PLANE_EXPORT int qwen38_plane_host_register(void* p, size_t bytes, unsign
     cudaGetLastError();
     err = cudaHostRegister(p, bytes, flags & ~8u);
   }
+  // The caller gets the error as the return value; a failure the host tolerates must not stay behind as the last error of
+  // the thread, where the next cudaGetLastError() of another CUDA user of the process would report it.
+  if (err != cudaSuccess) cudaGetLastError();
   return (int)err;
 }
-QWEN38_PLANE_EXPORT int qwen38_plane_host_unregister(void* p) { return (int)cudaHostUnregister(p); }
+QWEN38_PLANE_EXPORT int qwen38_plane_host_unregister(void* p) {
+  cudaError_t err = cudaHostUnregister(p);
+  if (err != cudaSuccess) cudaGetLastError();
+  return (int)err;
+}
 QWEN38_PLANE_EXPORT int qwen38_plane_host_get_device_pointer(void** dp, void* hp, unsigned flags) {
   cudaError_t err = cudaHostGetDevicePointer(dp, hp, flags);
   if (err != cudaSuccess) cudaGetLastError();
