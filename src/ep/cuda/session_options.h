@@ -9,7 +9,8 @@ namespace Generators::CUDAExecutionProvider {
 // Converts one BFC arena provider option (max_mem, arena_extend_strategy, initial_chunk_size_bytes,
 // max_dead_bytes_per_chunk, initial_growth_chunk_size_bytes) to the integer stored in OrtArenaCfg; -1 keeps the ORT default.
 // Only arena_extend_strategy accepts the names kNextPowerOfTwo (0) and kSameAsRequested (1); every other key is a byte
-// count and must be an integer. Throws std::invalid_argument for a non-numeric value and std::out_of_range below -1.
+// count and must be an integer with nothing after it ("1GB" is rejected, not read as 1). Throws std::invalid_argument for
+// a non-numeric value or trailing text and std::out_of_range below -1.
 size_t ParseArenaOptionValue(std::string_view key, const std::string& value);
 
 // Writes the CUDA compute stream pointer (as a stringified integer) into a

@@ -75,6 +75,22 @@ TEST(CudaArenaOptionTest, ByteFieldsKeepValidatedNumericParsing) {
   }
 }
 
+TEST(CudaArenaOptionTest, ByteFieldsRejectTextAfterTheNumber) {
+  using CUDAExecutionProvider::ParseArenaOptionValue;
+  for (const char* key : {"max_mem", "initial_chunk_size_bytes", "max_dead_bytes_per_chunk",
+                          "initial_growth_chunk_size_bytes", "arena_extend_strategy"}) {
+    for (const char* value : {"1GB", "1073741824 ", "12k", "1.5", "0x10", "1e3", "5-", "1 2"}) {
+      try {
+        ParseArenaOptionValue(key, value);
+        ADD_FAILURE() << key << "='" << value << "' must be rejected";
+      } catch (const std::invalid_argument& error) {
+        EXPECT_TRUE(Contains(error.what(), key)) << error.what();
+        EXPECT_TRUE(Contains(error.what(), value)) << error.what();
+      }
+    }
+  }
+}
+
 TEST(CudaDeviceSelectionTest, MatchesTheRequestedIdWhateverTheEnumerationOrder) {
   const std::vector<std::string> ids = {"2", "0", "3", "1"};
   EXPECT_EQ(SelectCudaDeviceIndex(ids, std::string("0"), false), 1u);
