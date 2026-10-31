@@ -28,9 +28,11 @@
 
 #include <algorithm>
 #include <atomic>
-#include <condition_variable>
+#include <functional>
 #include <memory>
 #include <mutex>
+#include <new>
+#include <system_error>
 #include <thread>
 #include <type_traits>
 #include <unordered_map>
@@ -44,6 +46,7 @@
 #include <memoryapi.h>
 #endif
 
+#include "qwen38_parallel_pool.h"
 #include "qwen38_plane_abi.h"
 
 typedef long long i64;
@@ -475,16 +478,20 @@ struct PleGatherTask {
   std::atomic<int> next_row{0};
 };
 
+// Creates a gather worker. A test build can make the creation fail (QWEN38_PLANE_FAULT_THREAD_START), as std::thread does when
+// the system is out of threads.
+static std::thread start_gather_thread(std::function<void()> entry) {
+  if (hook_fault(QWEN38_PLANE_FAULT_THREAD_START) != cudaSuccess) {
+    throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+  }
+  return std::thread(std::move(entry));
+}
+
+// The worker threads of the staged PLE gather. They run code of this module, so release_all_staged_state_locked stops and
+// joins them before the last loader detaches, i.e. before the host unloads the library.
 struct PleGatherPool {
-  std::mutex mx;
-  std::condition_variable cv_work;
-  std::condition_variable cv_done;
-  PleGatherTask* task = nullptr;
-  int active_workers = 0;
-  int num_threads = 0;
-  uint64_t epoch = 0;
-  bool started = false;
-  std::mutex call_mx;
+  qwen38_plane::ParallelPool pool{qwen38_plane::DefaultParallelWorkerCount(std::thread::hardware_concurrency()),
+                                  start_gather_thread};
 
   static void process_task(PleGatherTask* t) {
     StagedPleWorkspace& ws = *t->ws;
@@ -493,11 +500,13 @@ struct PleGatherPool {
     const int nh = HP.n_heads;
     const size_t total_bytes = (size_t)nh * (size_t)hd;
     const bool use_cache = (ws.ngram_cache_data != nullptr && total_bytes <= StagedPleWorkspace::kMaxRowBytes);
+    // Locals, not thread_local: the caller of the pool is a host thread, and a thread_local with a destructor would leave that
+    // destructor, which is code of this module, to run when the host thread exits, perhaps after the module was unloaded.
 #ifdef _WIN32
-    thread_local std::vector<WIN32_MEMORY_RANGE_ENTRY> ranges;
+    std::vector<WIN32_MEMORY_RANGE_ENTRY> ranges;
 #endif
-    thread_local std::vector<const unsigned char*> miss_srcs;
-    thread_local std::vector<unsigned char*> miss_dsts;
+    std::vector<const unsigned char*> miss_srcs;
+    std::vector<unsigned char*> miss_dsts;
     constexpr int kSpan = 32;
 
     while (true) {
@@ -550,24 +559,10 @@ struct PleGatherPool {
     }
   }
 
-  void worker() {
-    uint64_t my_epoch = 0;
-    std::unique_lock<std::mutex> lk(mx);
-    while (true) {
-      cv_work.wait(lk, [&] { return epoch != my_epoch && task != nullptr; });
-      my_epoch = epoch;
-      PleGatherTask* t = task;
-      lk.unlock();
-      process_task(t);
-      lk.lock();
-      if (--active_workers == 0) {
-        cv_done.notify_all();
-      }
-    }
-  }
-
-  void run(StagedPleWorkspace& ws, const i64* h_toks, i64 ctx0, i64 ctx1, int n, unsigned char* dst_base, size_t row_stride) {
-    std::lock_guard<std::mutex> call_lk(call_mx);
+  // Gathers the PLE rows of the `n` token ids at `h_toks` into `dst_base`, `row_stride` bytes apart, on every worker and on the
+  // calling thread. Returns cudaErrorMemoryAllocation, with nothing gathered, when the worker threads cannot be started.
+  cudaError_t run(StagedPleWorkspace& ws, const i64* h_toks, i64 ctx0, i64 ctx1, int n, unsigned char* dst_base,
+                  size_t row_stride) {
     PleGatherTask t;
     t.ws = &ws;
     t.h_toks = h_toks;
@@ -578,26 +573,7 @@ struct PleGatherPool {
     t.dst_base = dst_base;
     t.next_row.store(0, std::memory_order_relaxed);
 
-    {
-      std::unique_lock<std::mutex> lk(mx);
-      if (!started) {
-        started = true;
-        num_threads = (int)std::min(23u, std::max(3u, std::thread::hardware_concurrency() - 1));
-        for (int i = 0; i < num_threads; ++i) {
-          std::thread(&PleGatherPool::worker, this).detach();
-        }
-      }
-      task = &t;
-      active_workers = num_threads;
-      ++epoch;
-      cv_work.notify_all();
-    }
-    process_task(&t);
-    {
-      std::unique_lock<std::mutex> lk(mx);
-      cv_done.wait(lk, [&] { return active_workers == 0; });
-      task = nullptr;
-    }
+    if (pool.Run([&t] { process_task(&t); })) return cudaErrorMemoryAllocation;
 
     const PleParams& HP = ws.params;
     const size_t total_bytes = (size_t)HP.n_heads * (size_t)HP.head_dim;
@@ -617,12 +593,32 @@ struct PleGatherPool {
         ws.ngram_cache_valid[cache_slot] = 1;
       }
     }
+    return cudaSuccess;
   }
 };
 
-static PleGatherPool* get_ple_gather_pool() {
-  static PleGatherPool* pool = new PleGatherPool();
-  return pool;
+// The pool is created by the first large staged gather and destroyed, its workers stopped and joined, by
+// release_all_staged_state_locked. Guarded by g_staged_ple_mu. It is a plain pointer on purpose: nothing may run (and join
+// threads) when the module is unloaded or the process exits, so a pool is only ever stopped at that explicit teardown.
+static PleGatherPool* g_ple_gather_pool = nullptr;
+
+// Returns nullptr when the pool cannot be allocated. Caller holds g_staged_ple_mu.
+static PleGatherPool* get_ple_gather_pool_locked() {
+  if (g_ple_gather_pool == nullptr) {
+    try {
+      g_ple_gather_pool = new PleGatherPool();
+    } catch (const std::bad_alloc&) {
+      return nullptr;
+    }
+  }
+  return g_ple_gather_pool;
+}
+
+// Stops and joins the gather workers. Caller holds g_staged_ple_mu, which every gather holds for its whole duration, so none is
+// in flight.
+static void stop_ple_gather_pool_locked() {
+  delete g_ple_gather_pool;  // ~ParallelPool() stops and joins the workers
+  g_ple_gather_pool = nullptr;
 }
 
 // Finds the staged workspace of the table `P` (a registered host key or the device copy of its parameters). Returns nullptr
@@ -1387,8 +1383,10 @@ __global__ void k_embed_rows_int8(const int8_t* table, const float* row_scales, 
 #define QWEN38_PLANE_EXPORT
 #endif
 
-// Drops every staged table of the module, whichever loader registered it. Caller holds g_staged_ple_mu.
+// Drops every staged table of the module, whichever loader registered it, and stops the gather workers. Caller holds
+// g_staged_ple_mu.
 static void release_all_staged_state_locked() {
+  stop_ple_gather_pool_locked();
   bool need_sync = false;
   for (const auto& kv : g_host_ple_workspaces) {
     if (kv.second && kv.second->has_cuda_allocations()) {
@@ -1871,7 +1869,12 @@ QWEN38_PLANE_EXPORT int qwen38_plane_ple_rows(void* s, const void* P, const void
       const i64 ctx0 = ws->scalars[2];
       const i64 ctx1 = ws->scalars[3];
       if (n >= 32) {
-        get_ple_gather_pool()->run(*ws, h_toks, ctx0, ctx1, n, ws->prefill_fp8, total);
+        PleGatherPool* gather_pool = get_ple_gather_pool_locked();
+        err = gather_pool != nullptr ? gather_pool->run(*ws, h_toks, ctx0, ctx1, n, ws->prefill_fp8, total)
+                                     : cudaErrorMemoryAllocation;
+        if (err != cudaSuccess) {
+          return (int)err;
+        }
         hook_gather(n);
       } else {
         for (int i = 0; i < n; ++i) {
@@ -2038,7 +2041,7 @@ QWEN38_PLANE_EXPORT int qwen38_plane_stream_sync(void* s) {
 #ifdef QWEN38_PLANE_TEST_HOOKS
 QWEN38_PLANE_EXPORT int qwen38_plane_test_inject_staged_fault(int site, int skip, int error) {
   const bool disarm = site == QWEN38_PLANE_FAULT_NONE;
-  if (site < QWEN38_PLANE_FAULT_NONE || site > QWEN38_PLANE_FAULT_EVENT_RECORD || (!disarm && error == 0)) {
+  if (site < QWEN38_PLANE_FAULT_NONE || site > QWEN38_PLANE_FAULT_THREAD_START || (!disarm && error == 0)) {
     return (int)cudaErrorInvalidValue;
   }
   std::lock_guard<std::mutex> lock(g_staged_ple_mu);
@@ -2064,6 +2067,7 @@ QWEN38_PLANE_EXPORT int qwen38_plane_test_stats(Qwen38PlaneTestStats* stats) {
   stats->attached_loaders = g_attached_loaders;
   stats->fault_armed = g_test_hooks.fault_site != QWEN38_PLANE_FAULT_NONE ? 1 : 0;
   stats->unfenced_drains = g_test_hooks.unfenced_drains;
+  stats->gather_pool_threads = g_ple_gather_pool != nullptr ? g_ple_gather_pool->pool.ThreadCount() : 0;
   return 0;
 }
 

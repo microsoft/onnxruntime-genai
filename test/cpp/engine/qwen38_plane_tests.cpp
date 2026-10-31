@@ -16,6 +16,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -26,6 +27,8 @@
 #include "models/qwen38_graph.h"
 #include "models/qwen38_graph_plane.h"
 #include "models/qwen38_replay_geometry.h"
+#include "process_thread_count.h"
+#include "qwen38_plane/qwen38_parallel_pool.h"
 #include "scoped-environment-variable.h"
 
 #if !defined(QWEN38_GRAPH_NO_POSIX)
@@ -1234,6 +1237,24 @@ TEST(Qwen38PackageSupportTest, AnUnreadablePleDescriptionFailsAtModelLoad) {
   EXPECT_THROW(package.Require(current), std::runtime_error);
 }
 
+#if !defined(QWEN38_GRAPH_NO_POSIX)
+namespace {
+
+// Whether the library file is mapped in the process, without loading it.
+bool IsLibraryMapped(const std::filesystem::path& path) {
+#if defined(_WIN32)
+  return GetModuleHandleW(ResolveWindowsSharedLibraryPath(path).wstring().c_str()) != nullptr;
+#else
+  void* handle = dlopen(path.c_str(), RTLD_NOW | RTLD_NOLOAD);
+  if (handle == nullptr) return false;
+  dlclose(handle);
+  return true;
+#endif
+}
+
+}  // namespace
+#endif
+
 #if defined(ORTGENAI_TEST_QWEN38_LEGACY_PLANE_LIB_PATH) && !defined(QWEN38_GRAPH_NO_POSIX)
 // The fixture library stands for a plane library built before the INT8 embedding table and INT8 PLE shards (see
 // qwen38_legacy_plane_lib.cpp): the loader has to accept it, since BF16 and FP8 packages work with it, and a package that
@@ -1248,6 +1269,17 @@ class Qwen38LegacyPlaneLibraryTest : public ::testing::Test {
   std::filesystem::path library_path_;
   std::unique_ptr<Qwen38Plane> plane_;
 };
+
+// An attached plane library is never unloaded: unloading a library that has launched CUDA kernels and loading it again crashed
+// the CUDA runtime, so the loader that follows shares the copy that is still mapped.
+TEST_F(Qwen38LegacyPlaneLibraryTest, TheLibraryStaysMappedWhenItsLoaderIsDestroyed) {
+  ASSERT_TRUE(IsLibraryMapped(library_path_));
+  plane_.reset();
+  EXPECT_TRUE(IsLibraryMapped(library_path_)) << "the destructor unloaded the plane library";
+
+  const Qwen38Plane again{library_path_};
+  EXPECT_EQ(again.abi_version(), QWEN38_PLANE_ABI_VERSION);
+}
 
 TEST_F(Qwen38LegacyPlaneLibraryTest, LoadsWithoutTheOptionalExportsAndReportsNoCapabilities) {
   EXPECT_EQ(plane_->abi_version(), QWEN38_PLANE_ABI_VERSION);
@@ -1403,21 +1435,6 @@ TEST(Qwen38PlaneTest, LoadingAMissingLibraryFailsWithItsPath) {
 #if !defined(QWEN38_GRAPH_NO_POSIX)
 namespace {
 
-// With CUDA 13.0 and the CUDA add-on loaded in the process, unloading this library and loading it again made the first kernel
-// launch of a later copy crash inside the runtime's lazy module load. The tests create and destroy a loader each, so the first
-// call maps the library for the rest of the process and the loaders after it only ever share that copy.
-void KeepPlaneLibraryMapped(const std::filesystem::path& path) {
-  static const bool mapped = [&path] {
-    if (!std::filesystem::exists(path)) return false;
-#if defined(_WIN32)
-    return LoadLibraryW(ResolveWindowsSharedLibraryPath(path).wstring().c_str()) != nullptr;
-#else
-    return dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL) != nullptr;
-#endif
-  }();
-  static_cast<void>(mapped);
-}
-
 std::filesystem::path GetBuiltPlaneLibraryPath() {
 #if defined(ORTGENAI_TEST_QWEN38_PLANE_LIB_PATH)
   const std::filesystem::path path{ORTGENAI_TEST_QWEN38_PLANE_LIB_PATH};
@@ -1426,20 +1443,7 @@ std::filesystem::path GetBuiltPlaneLibraryPath() {
 #else
   const std::filesystem::path path = std::filesystem::current_path() / "libqwen38_plane.so";
 #endif
-  KeepPlaneLibraryMapped(path);
   return path;
-}
-
-// Whether the library file is mapped in the process, without loading it.
-bool IsLibraryMapped(const std::filesystem::path& path) {
-#if defined(_WIN32)
-  return GetModuleHandleW(ResolveWindowsSharedLibraryPath(path).wstring().c_str()) != nullptr;
-#else
-  void* handle = dlopen(path.c_str(), RTLD_NOW | RTLD_NOLOAD);
-  if (handle == nullptr) return false;
-  dlclose(handle);
-  return true;
-#endif
 }
 
 // The bfloat16 bits of `value` rounded to nearest even, as the plane rounds.
@@ -1764,6 +1768,7 @@ namespace {
 
 constexpr int kCudaErrorInvalidValue = 1;
 constexpr int kCudaErrorStreamCaptureUnsupported = 900;
+constexpr int kCudaErrorMemoryAllocation = 2;
 
 // Keeps the plane library loaded independently of the Qwen38Plane objects that load it, and gives access to the test hooks the
 // library exports when it is built with QWEN38_PLANE_TEST_HOOKS (see qwen38_plane_abi.h). The library holds process-wide state,
@@ -4600,6 +4605,184 @@ TEST_F(Qwen38PlaneStagedBatchedPrepTest, ABatchOfAStagedTableIsGatheredOnTheHost
                                   what + ", slot " + std::to_string(b));
       }
     }
+  }
+}
+
+// The staged table is gathered on the host by threads of the plane library when a prefill has 32 tokens or more. They run code of
+// the library, so they have to be stopped and joined when the last loader of the module goes (a thread that is still alive could
+// return into code the host no longer has), and a loader that follows has to start threads of its own. The host never unloads
+// an attached plane library, so these tests look at what the module does when its last loader detaches.
+class Qwen38PlaneGatherPoolTest : public Qwen38PlaneStagedPleTest {
+ protected:
+  static constexpr size_t kPoolPrefillTokens = 32;
+
+  void SetUp() override {
+    Qwen38PlaneStagedPleTest::SetUp();
+    if (IsSkipped()) return;
+    if (!plane_->release_ple_workspace) GTEST_SKIP() << "the plane library has no qwen38_plane_release_ple_workspace";
+  }
+
+  // Tokens 0, 1, 2, ...: token t gathers row t % 4 of a rig's table.
+  static std::vector<int64_t> Tokens(size_t count) {
+    std::vector<int64_t> tokens(count);
+    for (size_t i = 0; i < count; ++i) tokens[i] = static_cast<int64_t>(i);
+    return tokens;
+  }
+
+  static int GatherWorkers() {
+    return qwen38_plane::DefaultParallelWorkerCount(std::thread::hardware_concurrency());
+  }
+
+  // The threads of the process after the plane did its first staged call and its first teardown, so that the threads CUDA starts
+  // for itself belong to the baseline. The table is registered again afterwards.
+  int ThreadsAtRest(StagedPleRig& rig) {
+    EXPECT_EQ(rig.PleRows(Tokens(2)), 0);
+    plane_->release_ple_workspace();
+    rig.ResetTable();
+    return ProcessThreadCount();
+  }
+};
+
+TEST_F(Qwen38PlaneGatherPoolTest, AShortPrefillIsGatheredOnTheCallerAndThirtyTwoTokensStartTheWorkers) {
+  StagedPleRig rig{*plane_, kAscendingRows};
+  const std::vector<int64_t> few = Tokens(kPoolPrefillTokens - 1);
+  ASSERT_EQ(rig.PleRows(few), 0);
+  EXPECT_EQ(Stats().gather_pool_threads, 0) << "a short prefill started threads";
+  EXPECT_EQ(rig.ReadPle(few.size()), rig.ExpectedPle(few));
+
+  const int before = ProcessThreadCount();
+  const std::vector<int64_t> many = Tokens(kPoolPrefillTokens);
+  ASSERT_EQ(rig.PleRows(many), 0);
+  EXPECT_EQ(Stats().gather_pool_threads, GatherWorkers());
+  if (before >= 0) {
+    EXPECT_GE(ProcessThreadCount(), before + GatherWorkers());
+  }
+  EXPECT_EQ(rig.ReadPle(many.size()), rig.ExpectedPle(many));
+}
+
+TEST_F(Qwen38PlaneGatherPoolTest, TheLastLoaderToDetachStopsAndJoinsTheWorkers) {
+  ASSERT_EQ(Stats().attached_loaders, 1) << "a loader of an earlier test is still attached";
+  int baseline = -1;
+  {
+    StagedPleRig rig{*plane_, kAscendingRows};
+    baseline = ThreadsAtRest(rig);
+    const std::vector<int64_t> tokens = Tokens(64);
+    ASSERT_EQ(rig.PleRows(tokens), 0);
+    ASSERT_GT(Stats().gather_pool_threads, 0);
+    EXPECT_EQ(rig.ReadPle(tokens.size()), rig.ExpectedPle(tokens));
+  }
+  plane_.reset();
+  EXPECT_EQ(Stats().attached_loaders, 0);
+  EXPECT_EQ(Stats().gather_pool_threads, 0) << "the module was released with a gather thread alive";
+  EXPECT_TRUE(ProcessThreadCountSettlesAtOrBelow(baseline)) << "a gather thread of the module is still running";
+
+  // The library is not unloaded with its last loader; the one that follows shares it. The test's own reference goes too, so
+  // nothing else holds the file.
+  module_.reset();
+  EXPECT_TRUE(IsLibraryMapped(library_path_)) << "the plane library was unloaded with its last loader";
+}
+
+// A staged prefill of 32 tokens or more, then the destruction of the loader, then a load of the plane again: every load starts
+// workers of its own, gathers its own table and leaves no thread behind.
+TEST_F(Qwen38PlaneGatherPoolTest, ALoaderThatFollowsTheLastOneStartsItsOwnWorkers) {
+  ASSERT_EQ(Stats().attached_loaders, 1) << "a loader of an earlier test is still attached";
+  int baseline = -1;
+  for (int load = 0; load < 4; ++load) {
+    SCOPED_TRACE(load);
+    if (load > 0) {
+      plane_ = std::make_unique<Qwen38Plane>(library_path_);
+      ASSERT_EQ(plane_->set_device(0), 0);
+    }
+    {
+      // The tables differ: a worker that kept the gather of an earlier load would show.
+      StagedPleRig rig{*plane_, load % 2 == 0 ? kAscendingRows : kDescendingRows};
+      if (load == 0) baseline = ThreadsAtRest(rig);
+      EXPECT_EQ(Stats().gather_pool_threads, 0) << "the workers of the earlier load are still alive";
+
+      const std::vector<int64_t> tokens = Tokens(load == 3 ? StagedPleRig::kMaxTokens : 300);
+      ASSERT_EQ(rig.PleRows(tokens), 0);
+      EXPECT_EQ(Stats().gather_pool_threads, GatherWorkers());
+      EXPECT_EQ(rig.ReadPle(tokens.size()), rig.ExpectedPle(tokens));
+    }
+    plane_.reset();
+    EXPECT_EQ(Stats().gather_pool_threads, 0);
+    EXPECT_TRUE(ProcessThreadCountSettlesAtOrBelow(baseline));
+  }
+}
+
+// The module is shared by every loader of the library file: the first of two to go leaves the workers to the one that stays.
+TEST_F(Qwen38PlaneGatherPoolTest, TheWorkersOutliveAllButTheLastLoader) {
+  ASSERT_EQ(Stats().attached_loaders, 1) << "a loader of an earlier test is still attached";
+  auto second = std::make_unique<Qwen38Plane>(library_path_);
+  ASSERT_EQ(second->set_device(0), 0);
+  ASSERT_EQ(Stats().attached_loaders, 2);
+  int baseline = -1;
+  {
+    StagedPleRig rig{*second, kAscendingRows};
+    baseline = ThreadsAtRest(rig);
+    ASSERT_EQ(rig.PleRows(Tokens(64)), 0);
+    ASSERT_EQ(Stats().gather_pool_threads, GatherWorkers());
+
+    plane_.reset();
+    EXPECT_EQ(Stats().attached_loaders, 1);
+    EXPECT_EQ(Stats().gather_pool_threads, GatherWorkers()) << "the workers went with a loader that was not the last";
+    const std::vector<int64_t> tokens = Tokens(96);
+    ASSERT_EQ(rig.PleRows(tokens), 0);
+    EXPECT_EQ(rig.ReadPle(tokens.size()), rig.ExpectedPle(tokens));
+  }
+  second.reset();
+  EXPECT_EQ(Stats().attached_loaders, 0);
+  EXPECT_EQ(Stats().gather_pool_threads, 0);
+  EXPECT_TRUE(ProcessThreadCountSettlesAtOrBelow(baseline));
+}
+
+TEST_F(Qwen38PlaneGatherPoolTest, ReleasingThePleWorkspaceStopsTheWorkersAndTheNextPrefillStartsThemAgain) {
+  StagedPleRig rig{*plane_, kAscendingRows};
+  const int baseline = ThreadsAtRest(rig);
+  const std::vector<int64_t> tokens = Tokens(200);
+  for (int round = 0; round < 3; ++round) {
+    SCOPED_TRACE(round);
+    ASSERT_EQ(rig.PleRows(tokens), 0);
+    EXPECT_EQ(Stats().gather_pool_threads, GatherWorkers());
+    EXPECT_EQ(rig.ReadPle(tokens.size()), rig.ExpectedPle(tokens));
+
+    plane_->release_ple_workspace();
+    EXPECT_EQ(Stats().gather_pool_threads, 0);
+    EXPECT_TRUE(ProcessThreadCountSettlesAtOrBelow(baseline));
+    plane_->release_ple_workspace();  // nothing is left to stop
+    EXPECT_EQ(Stats().gather_pool_threads, 0);
+
+    rig.ResetTable();
+  }
+}
+
+// A thread that cannot be created is an error of the prefill, which gathers nothing, and the workers that did start are joined,
+// so that a failure never leaves a pool that waits for threads that do not exist. The next prefill tries again.
+TEST_F(Qwen38PlaneGatherPoolTest, AWorkerThatCannotBeStartedIsAnErrorAndLeavesNoThreadBehind) {
+  StagedPleRig rig{*plane_, kAscendingRows};
+  const int baseline = ThreadsAtRest(rig);
+  const int workers = GatherWorkers();
+  const std::vector<int64_t> tokens = Tokens(500);
+  for (const int failing : {0, workers / 2, workers - 1}) {
+    SCOPED_TRACE(failing);
+    rig.FillOutputs(0xAB);
+    const Qwen38PlaneTestStats before = Stats();
+    Arm(QWEN38_PLANE_FAULT_THREAD_START, failing, 5000);
+    EXPECT_EQ(rig.PleRows(tokens), kCudaErrorMemoryAllocation);
+    const Qwen38PlaneTestStats failed = Stats();
+    EXPECT_EQ(failed.fault_armed, 0) << "no thread creation failed";
+    EXPECT_EQ(failed.gather_pool_threads, 0) << "the workers that had started were left running";
+    EXPECT_EQ(failed.gather_rows, before.gather_rows);
+    EXPECT_EQ(failed.staged_launches, before.staged_launches);
+    EXPECT_TRUE(rig.OutputsAre(0xAB));
+    EXPECT_TRUE(ProcessThreadCountSettlesAtOrBelow(baseline));
+
+    ASSERT_EQ(rig.PleRows(tokens), 0);
+    EXPECT_EQ(Stats().gather_pool_threads, workers);
+    EXPECT_EQ(rig.ReadPle(tokens.size()), rig.ExpectedPle(tokens));
+
+    plane_->release_ple_workspace();
+    rig.ResetTable();
   }
 }
 
