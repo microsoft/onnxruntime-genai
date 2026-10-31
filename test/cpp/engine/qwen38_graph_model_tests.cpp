@@ -547,6 +547,32 @@ TEST(Qwen38GraphConfigTest, PrefillChunkValidation) {
   EXPECT_THROW(ValidateQwen38PrefillChunk(config.model.qwen38_graph), std::runtime_error);
 }
 
+TEST(Qwen38GraphConfigTest, DflashWarmupAtModelCreationHonorsTheWarmupSetting) {
+  // warmup=false: the engine runs no forward while the model is created, neither the drafter's nor the target's.
+  Config off;
+  OverlayConfig(off, R"({"model":{"type":"qwen38_flash_graph","qwen38_graph":{"warmup":false}}})");
+  ASSERT_FALSE(off.model.qwen38_graph.warmup);
+  const Qwen38DflashWarmupPlan skipped = PlanQwen38DflashWarmup(off.model.qwen38_graph.warmup, 8, 2);
+  EXPECT_FALSE(skipped.drafter);
+  EXPECT_EQ(skipped.target_tokens, 0u);
+
+  // The default warms up: twelve S=8 target forwards (every ring bank of the compact replay, enough runs to capture each).
+  Config on;
+  ASSERT_TRUE(on.model.qwen38_graph.warmup);
+  const Qwen38DflashWarmupPlan s8 = PlanQwen38DflashWarmup(on.model.qwen38_graph.warmup, 8, 2);
+  EXPECT_TRUE(s8.drafter);
+  EXPECT_EQ(s8.target_tokens, 8u * 2u * static_cast<size_t>(kQwen38WarmupRunsPerGraph));
+  EXPECT_EQ(s8.target_tokens / 8, 12u);
+
+  const Qwen38DflashWarmupPlan s4 = PlanQwen38DflashWarmup(true, 4, 5);
+  EXPECT_TRUE(s4.drafter);
+  EXPECT_EQ(s4.target_tokens, 4u * 5u * static_cast<size_t>(kQwen38WarmupRunsPerGraph));
+
+  // A pipeline without verify rows or ring banks has nothing to warm up.
+  EXPECT_FALSE(PlanQwen38DflashWarmup(true, 0, 2).drafter);
+  EXPECT_EQ(PlanQwen38DflashWarmup(true, 8, 0).target_tokens, 0u);
+}
+
 TEST(Qwen38GraphIdTest, IdsAreDerivedFromTheRunAndAreDistinct) {
   std::set<int> seen;
   const Qwen38GraphRun runs[] = {Qwen38GraphRun::kTarget, Qwen38GraphRun::kHead, Qwen38GraphRun::kHeadR2};
