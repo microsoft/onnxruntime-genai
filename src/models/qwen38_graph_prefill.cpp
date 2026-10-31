@@ -35,11 +35,14 @@ float Bf16ToFloat(uint16_t bits) {
   return value;
 }
 
-void SetQwen38EnvVar(const char* name, const char* value) {
+// Expert-compaction wave of the ORT QMoE kernels for the dense prompt chunk of `m` rows that starts at `pos`.
+int PromptChunkCompactExperts(size_t pos, size_t m) {
 #if defined(_WIN32)
-  _putenv_s(name, value);
+  (void)pos;
+  (void)m;
+  return 64;
 #else
-  setenv(name, value, 1);
+  return (pos + m <= 2048) ? (m <= 1024 ? 128 : 64) : 128;
 #endif
 }
 
@@ -471,9 +474,6 @@ void Qwen38GraphEngine::BuildFastPrefill() {
 }
 
 void Qwen38GraphEngine::FastReset() {
-  SetQwen38EnvVar("ORT_QMOE_PREFILL_HANDOFF_DONE", "0");
-  SetQwen38EnvVar("ORT_QMOE_PREFILL_NEW_TURN", "1");
-  SetQwen38EnvVar("ORT_QMOE_PREFILL_TOTAL_TOKENS", "0");
   if (!fast_) return;
   fast_->states.clear();
   fast_->logits.reset();
@@ -488,17 +488,7 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
   if (n == 0) throw std::logic_error("qwen38_graph: empty prefill chunk");
   ledger_.RequireRoom(n, "the prompt", 3);
   const size_t base = ledger_.Length();
-  size_t total_expected = base + n;
-  if (base == 0) {
-    SetQwen38EnvVar("ORT_QMOE_PREFILL_NEW_TURN", "1");
-  }
-  SetQwen38EnvVar("ORT_QMOE_PREFILL_HANDOFF_DONE", "0");
-  if (const char* env_tot = std::getenv("ORT_QMOE_PREFILL_TOTAL_TOKENS")) {
-    const size_t parsed = static_cast<size_t>(std::strtoull(env_tot, nullptr, 10));
-    if (parsed > total_expected) total_expected = parsed;
-  }
-  const std::string total_str = std::to_string(total_expected);
-  SetQwen38EnvVar("ORT_QMOE_PREFILL_TOTAL_TOKENS", total_str.c_str());
+  const size_t total_expected = run_hints_.BeginPromptChunk(base, n);
   std::vector<int64_t> chunk(n);
   for (size_t i = 0; i < n; ++i) chunk[i] = tokens[i];
   plane_.Check(plane_.memcpy_h2d(d_tokens_.data() + 8 * base, chunk.data(), n * 8, stream_), "upload prompt");
@@ -521,12 +511,7 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
       if (pos >= 16384 && max_m > 2048) max_m = std::min<size_t>(max_m, 2048);
       const size_t m = std::min(max_m, n - lo);
       last_m = m;
-#if defined(_WIN32)
-      const char* compact_cap = "64";
-#else
-      const char* compact_cap = (pos + m <= 2048) ? (m <= 1024 ? "128" : "64") : "128";
-#endif
-      SetQwen38EnvVar("ORT_QMOE_CURRENT_MAX_COMPACT_EXPERTS", compact_cap);
+      const Qwen38PromptRunHints prompt_run{total_expected, PromptChunkCompactExperts(pos, m)};
       plane_.ple_rows(stream_, params_dev_.data(), d_tokens_.data() + 8 * pos, static_cast<int>(m), ctx_commit_.data(),
                       ctx_b_.data(), f.ples.data());
       plane_.Check(plane_.memcpy_d2d(ctx_commit_.data(), ctx_b_.data(), 16, stream_), "ctx commit");
@@ -630,7 +615,7 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
           binding->BindOutput(name.c_str(), *memory_info_);
         }
       }
-      f.dense->Run(f.run_options.get(), *binding);
+      RunSession(*f.dense, f.run_options.get(), *binding, &prompt_run);
       plane_.or_status(stream_, f.scratch.data() + 64, static_cast<int>(status_count_), ctl_.data());
       plane_.Check(plane_.memcpy_d2d(banks_[0].arena.data(), banks_[1].arena.data(), banks_[0].arena.size(), stream_),
                    "commit unified bank 0");
@@ -657,12 +642,7 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
       max_m = std::min<size_t>(max_m, 2048);
     }
     const size_t m = std::min(max_m, n - lo);
-#if defined(_WIN32)
-    const char* compact_cap = "64";
-#else
-    const char* compact_cap = (pos + m <= 2048) ? (m <= 1024 ? "128" : "64") : "128";
-#endif
-    SetQwen38EnvVar("ORT_QMOE_CURRENT_MAX_COMPACT_EXPERTS", compact_cap);
+    const Qwen38PromptRunHints prompt_run{total_expected, PromptChunkCompactExperts(pos, m)};
     plane_.ple_rows(stream_, params_dev_.data(), d_tokens_.data() + 8 * pos, static_cast<int>(m), ctx_commit_.data(),
                     ctx_b_.data(), f.ples.data());
     plane_.Check(plane_.memcpy_d2d(ctx_commit_.data(), ctx_b_.data(), 16, stream_), "ctx commit");
@@ -707,7 +687,7 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
       else
         binding->BindOutput(name.c_str(), *memory_info_);
     }
-    f.dense->Run(f.run_options.get(), *binding);
+    RunSession(*f.dense, f.run_options.get(), *binding, &prompt_run);
     SyncStream();
 
     const auto names = binding->GetOutputNames();
@@ -762,8 +742,7 @@ void Qwen38GraphEngine::FastHandoff() {
   if (ledger_.Bank() != 0) throw std::logic_error("qwen38_graph: the dense hand-off writes bank 0");
   if (f.dense_length != P) throw std::runtime_error("qwen38_graph: dense state length differs from the prompt length");
   if (f.unified) {
-    SetQwen38EnvVar("ORT_QMOE_PREFILL_HANDOFF_DONE", "1");
-    SetQwen38EnvVar("ORT_QMOE_PREFILL_TOTAL_TOKENS", "0");
+    run_hints_.MarkHandoff();
     return;
   }
   auto dense_ptr = [&](const std::string& name) -> uint8_t* {
@@ -831,8 +810,7 @@ void Qwen38GraphEngine::FastHandoff() {
   SyncStream();  // `lengths` lives on the stack
   f.states.clear();
   f.logits.reset();
-  SetQwen38EnvVar("ORT_QMOE_PREFILL_HANDOFF_DONE", "1");
-  SetQwen38EnvVar("ORT_QMOE_PREFILL_TOTAL_TOKENS", "0");
+  run_hints_.MarkHandoff();
 }
 
 // Batched head prompt prefill: KV-only head model over rows p = 1..P-1 = (token p, target hidden p-1) in chunks, written to
@@ -896,7 +874,7 @@ void Qwen38GraphEngine::FastHeadKvPrefill() {
           binding->BindOutput(name.c_str(), *memory_info_);
         }
       }
-      f.head_kv->Run(f.run_options.get(), *binding);
+      RunSession(*f.head_kv, f.run_options.get(), *binding);
       plane_.or_status(stream_, f.scratch.data(), static_cast<int>(head_r2_.status_count), ctl_.data());
       for (auto& entry : head_banks_[1].tensors) {
         plane_.Check(plane_.memcpy_d2d(head_banks_[0].tensors.at(entry.first)->ptr, entry.second->ptr, entry.second->Bytes(), stream_),
@@ -967,7 +945,7 @@ void Qwen38GraphEngine::FastHeadKvPrefill() {
         throw std::runtime_error("qwen38_graph: unsupported head_kv input " + name);
     }
     for (const char* name : {"key", "value", "index_key"}) binding->BindOutput(name, *memory_info_);
-    f.head_kv->Run(f.run_options.get(), *binding);
+    RunSession(*f.head_kv, f.run_options.get(), *binding);
     const auto names = binding->GetOutputNames();
     auto values = binding->GetOutputValues();
     for (size_t i = 0; i < names.size(); ++i) {

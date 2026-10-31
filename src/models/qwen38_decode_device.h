@@ -62,6 +62,11 @@ class Qwen38DecodeDevice {
   // Size of the prompt chunks the device ingests most efficiently (the fast prefill keeps one dense chunk resident); 0 when
   // it has no preference. The executor then delivers prompts in chunks of this size, any chunk size being valid.
   virtual size_t PrefillChunkTokens() const { return 0; }
+  // Announces the total prompt length (0 = unknown) of the turn that the following PrefillChunk() calls ingest in
+  // chunks. Call it after Reset() and before the first chunk; Reset() and BeginDecode() drop it. The device hands it to
+  // the ORT QMoE kernels with every prompt chunk instead of the length seen so far. This replaces publishing
+  // ORT_QMOE_PREFILL_TOTAL_TOKENS from the caller: the device never reads that variable.
+  virtual void ExpectPrefillTokens(size_t total_tokens) { (void)total_tokens; }
 
   // Starts decoding after the prompt: hands the prompt state over to the decode state (fast prefill), prepares the head and,
   // when `run_cycle`, enqueues the first cycle (so that it is running before the first token is returned to the caller).
