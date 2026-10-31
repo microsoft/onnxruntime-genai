@@ -80,7 +80,7 @@ jobs:
             --use_guidance `
             --update --build `
             --skip_examples `
-            --nuget_package_source ${{ env.ORT_NIGHTLY_SOURCE }} `
+            --nuget_config_file "$env:GITHUB_WORKSPACE\NuGet.config" `
             --cmake_extra_defines `
               'CMAKE_CUDA_ARCHITECTURES=86-real' `
               'CMAKE_EXE_LINKER_FLAGS_INIT=/profile /DYNAMICBASE' `
