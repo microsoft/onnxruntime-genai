@@ -74,8 +74,18 @@ class Qwen38DecodeDevice {
   // Announces the total prompt length (0 = unknown) of the turn that the following PrefillChunk() calls ingest in
   // chunks. Call it after Reset() and before the first chunk; Reset() and BeginDecode() drop it. The device hands it to
   // the ORT QMoE kernels with every prompt chunk instead of the length seen so far. This replaces publishing
-  // ORT_QMOE_PREFILL_TOTAL_TOKENS from the caller: the device never reads that variable.
+  // ORT_QMOE_PREFILL_TOTAL_TOKENS from the caller: the device never reads that variable, and the caller never touches
+  // the process environment.
   virtual void ExpectPrefillTokens(size_t total_tokens) { (void)total_tokens; }
+  // The same for the turn of `slot` of a multi-slot device: the length is that slot's own state, so the prompts of
+  // several slots that are ingested in interleaved chunks never see each other's length. Call it after ResetSlot(slot)
+  // and before the first PrefillChunkSlot(slot, ...); ResetSlot(slot) and BeginDecodeSlot(slot, ...) drop it. The device
+  // hands it to ORT only with the Runs that ingest a chunk of that slot. Slot 0 of a single-slot device is
+  // ExpectPrefillTokens().
+  virtual void ExpectPrefillTokensSlot(size_t slot, size_t total_tokens) {
+    if (slot != 0) throw std::logic_error("Single-slot device only supports slot 0.");
+    ExpectPrefillTokens(total_tokens);
+  }
 
   // Starts decoding after the prompt: hands the prompt state over to the decode state (fast prefill), prepares the head and,
   // when `run_cycle`, enqueues the first cycle (so that it is running before the first token is returned to the caller).

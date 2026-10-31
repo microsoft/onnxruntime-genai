@@ -549,7 +549,7 @@ void Qwen38GraphEngine::FastAppendSlot(int slot, std::span<const int32_t> tokens
   if (n == 0) throw std::logic_error("qwen38_graph: empty prefill chunk");
   slot_ledgers_[slot].RequireRoom(n, "the prompt", static_cast<size_t>(verify_rows_ + 1));
   const size_t base = slot_ledgers_[slot].Length();
-  const size_t total_expected = run_hints_.BeginPromptChunk(base, n);
+  const size_t total_expected = run_hints_.BeginPromptChunk(static_cast<size_t>(slot), base, n);
   std::vector<int64_t> chunk(n);
   for (size_t i = 0; i < n; ++i) chunk[i] = tokens[i];
   plane_.Check(plane_.memcpy_h2d(d_tokens_slot(slot) + 8 * base, chunk.data(), n * 8, stream_), "upload slot prompt");
@@ -698,7 +698,7 @@ void Qwen38GraphEngine::FastAppendSlot(int slot, std::span<const int32_t> tokens
         binding->BindOutput(name.c_str(), *memory_info_);
       }
     }
-    RunSession(*f.dense, f.run_options.get(), *binding, &prompt_run);
+    RunSession(*f.dense, f.run_options.get(), *binding, &prompt_run, Qwen38SlotBit(static_cast<size_t>(slot)));
     plane_.or_status(stream_, f.scratch.data() + 64, static_cast<int>(status_count_), ctl_slot(slot));
     if (max_batch_ == 1) {
       plane_.Check(plane_.memcpy_d2d(banks_[cur_bank].arena.data(), banks_[scratch_bank].arena.data(),
@@ -1022,12 +1022,13 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
 // Dense state (KV, positions, GDN / conv / PLE state, raw index keys) -> packed decode state: KV rows into the fixed store,
 // GDN state transposed into ring bank 0, PLE / conv state copied, raw index keys pooled into the shared compressed keys
 // (+ pending rows and lengths). Mirrors handoff.py (HandoffWriter.write).
-void Qwen38GraphEngine::FastHandoff() {
+void Qwen38GraphEngine::FastHandoff(size_t slot_idx) {
   FastPrefillState& f = *fast_;
   if (f.unified) {
-    run_hints_.MarkHandoff();
+    run_hints_.MarkHandoff(slot_idx);
     return;
   }
+  if (slot_idx != 0) throw std::logic_error("qwen38_graph: the non-unified dense hand-off serves slot 0 only");
   const size_t P = ledger_.Length();
   if (ledger_.Bank() != 0) throw std::logic_error("qwen38_graph: the dense hand-off writes bank 0");
   if (f.dense_length != P) throw std::runtime_error("qwen38_graph: dense state length differs from the prompt length");

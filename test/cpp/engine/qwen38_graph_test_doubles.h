@@ -44,6 +44,7 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
     slot_decoding_.assign(max_batch_size_, false);
     slot_pending_.assign(max_batch_size_, -1);
     slot_cycles_.assign(max_batch_size_, 0);
+    slot_expected_prefill_.assign(max_batch_size_, 0);
   }
 
   // ---- script ----
@@ -61,6 +62,8 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
   // Called at the end of ExpectPrefillTokens(), that is between the publication of a turn's prompt length and its first
   // PrefillChunk(): a test that drives several Engines blocks here to interleave their owner threads the worst way.
   std::function<void(size_t)> on_expect_prefill;
+  // The same for ExpectPrefillTokensSlot(): (slot, total).
+  std::function<void(size_t, size_t)> on_expect_prefill_slot;
 
   // Every verify proposes `drafts` tokens and accepts the next entry of `accepted_counts` (cycled, each 0..drafts) of them
   // in order, so the cycle commits that many tokens + 1 (the correction, or the bonus when all were accepted). The record
@@ -84,6 +87,8 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
   std::vector<std::string> calls;      // "reset", "expect:<n>", "prefill:<n>", "begin:<run_cycle>", "wait", "advance:<more>", "drain"
   std::vector<int32_t> ingested;       // tokens received since the last reset, in order
   std::vector<size_t> prefill_totals;  // for every PrefillChunk, the prompt length the device was told to expect (0 = none)
+  // for every PrefillChunkSlot, the slot and the prompt length the device was told to expect for it (0 = none)
+  std::vector<std::pair<size_t, size_t>> slot_prefill_totals;
   size_t cycles_enqueued{};
   size_t handoffs{};                           // dense prefill: hand-offs performed (one per BeginDecode with a cycle)
   size_t handoff_length{};                     // prompt length at the last hand-off
@@ -92,6 +97,7 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
   bool inflight() const { return inflight_; }  // a cycle was enqueued and its record was not consumed by WaitCycle
   bool running() const { return running_; }    // ... and it has not completed on the device yet (nothing synchronized)
   size_t ledger_length() const { return ledger_.Length(); }
+  size_t slot_expected_prefill(size_t s) const { return slot_expected_prefill_.at(s); }
   int ledger_bank() const { return ledger_.Bank(); }
   size_t CallCount(const std::string& name) const { return std::count(calls.begin(), calls.end(), name); }
   const std::vector<int32_t>& slot_ingested(size_t s) const { return slot_ingested_.at(s); }
@@ -131,6 +137,7 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
       slot_decoding_[s] = false;
       slot_pending_[s] = -1;
       slot_cycles_[s] = 0;
+      slot_expected_prefill_[s] = 0;
     }
   }
 
@@ -141,6 +148,7 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
     slot_decoding_.at(slot_idx) = false;
     slot_pending_.at(slot_idx) = -1;
     slot_cycles_.at(slot_idx) = 0;
+    slot_expected_prefill_.at(slot_idx) = 0;
     if (slot_idx == 0) {
       ledger_.Reset();
       ingested.clear();
@@ -161,6 +169,16 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
     if (decoding_ || ledger_.Length() != 0) throw std::logic_error("the prompt length was announced after its ingestion started");
     expected_prefill_ = total_tokens;
     if (on_expect_prefill) on_expect_prefill(total_tokens);
+  }
+
+  // The prompt length of one slot is that slot's own state: announcing it never changes what another slot was told.
+  void ExpectPrefillTokensSlot(size_t slot_idx, size_t total_tokens) override {
+    calls.push_back("expect_slot:" + std::to_string(slot_idx) + ":" + std::to_string(total_tokens));
+    if (slot_decoding_.at(slot_idx) || slot_ledgers_.at(slot_idx).Length() != 0) {
+      throw std::logic_error("the prompt length was announced after its ingestion started");
+    }
+    slot_expected_prefill_.at(slot_idx) = total_tokens;
+    if (on_expect_prefill_slot) on_expect_prefill_slot(slot_idx, total_tokens);
   }
 
   void PrefillChunk(std::span<const int32_t> tokens) override {
@@ -186,6 +204,7 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
     calls.push_back("prefill_slot:" + std::to_string(slot_idx) + ":" + std::to_string(tokens.size()));
     if (slot_decoding_.at(slot_idx)) throw std::logic_error("prefill after decoding started");
     if (tokens.empty()) throw std::logic_error("empty prefill chunk");
+    slot_prefill_totals.emplace_back(slot_idx, slot_expected_prefill_.at(slot_idx));
     auto& sl = slot_ledgers_.at(slot_idx);
     sl.RequireRoom(tokens.size(), "the prompt", 3);
     if (dense_prefill) {
@@ -229,6 +248,7 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
     if (slot_decoding_.at(slot_idx)) throw std::logic_error("decoding already started");
     if (slot_ledgers_.at(slot_idx).Length() == 0) throw std::logic_error("BeginDecodeSlot before prompt was ingested");
     slot_decoding_.at(slot_idx) = true;
+    slot_expected_prefill_.at(slot_idx) = 0;  // spent, like the single-slot BeginDecode()
     if (slot_idx == 0) decoding_ = true;
     if (want_more && dense_prefill) {
       ++handoffs;
@@ -380,7 +400,8 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
   int32_t pending_{-1};
   size_t cycle_{};
   int64_t error_bits_{};
-  size_t expected_prefill_{};  // ExpectPrefillTokens: device-local, dropped by Reset() and BeginDecode()
+  size_t expected_prefill_{};                  // ExpectPrefillTokens: device-local, dropped by Reset() and BeginDecode()
+  std::vector<size_t> slot_expected_prefill_;  // ExpectPrefillTokensSlot: per slot, dropped by Reset(), ResetSlot() and BeginDecodeSlot()
 };
 
 }  // namespace Generators::test

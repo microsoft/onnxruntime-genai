@@ -1847,6 +1847,94 @@ TEST_F(Qwen38GraphEngineTest, MultiSlotEvictsCompletedSlotsForQueuedRequests) {
   EXPECT_EQ(emitted[r2.get()], Expected(7, 3));
 }
 
+// The prompt length of a slot is the slot's own state of the device. Slot 0 announces 20 tokens and ingests its first
+// chunk, slot 1 then announces 5 tokens, and slot 0's later chunks must still be told 20 (a process-wide variable would
+// have been overwritten by slot 1). The executor must not touch the process environment at all.
+TEST_F(Qwen38GraphEngineTest, MultiSlotPromptLengthsAreAnnouncedPerSlotThroughTheDeviceAndNeverThroughTheEnvironment) {
+  device_ = std::make_shared<ScriptedQwen38Device>(/*capacity=*/68, /*mtp=*/true, /*max_batch_size=*/2);
+  device_->dense_prefill = true;
+  device_->preferred_chunk = 8;
+  auto engine = MakeEngine();
+
+  ScopedProcessEnv sentinel{Qwen38OrtEnv::kPrefillTotalTokens, "424242"};
+  const auto p0 = Prompt(20, 12);  // chunks of 8, 8 and 4
+  const auto p1 = Prompt(5, 30);   // one chunk, in the step of slot 0's first one
+  auto r0 = Begin(*engine, p0, /*max_generated_tokens=*/3);
+  auto r1 = Begin(*engine, p1, /*max_generated_tokens=*/3);
+
+  std::array<EngineEvent, 16> buffer;
+  std::map<const Request*, std::vector<int32_t>> emitted;
+  for (size_t runs = 0; engine->HasPendingRequests(); ++runs) {
+    ASSERT_LT(runs, 1000u) << "the Engine did not finish";
+    const size_t count = engine->Run(buffer);
+    for (size_t i = 0; i < count; ++i) {
+      ASSERT_EQ(buffer[i].flags & EngineEventFlagFailed, 0u);
+      if (buffer[i].flags & EngineEventFlagToken) emitted[buffer[i].request.get()].push_back(buffer[i].token);
+    }
+  }
+  EXPECT_EQ(emitted[r0.get()], Expected(20, 3));
+  EXPECT_EQ(emitted[r1.get()], Expected(5, 3));
+  ASSERT_EQ(device_->slot_ingested(0), p0);
+  ASSERT_EQ(device_->slot_ingested(1), p1);
+
+  // Every chunk was told the length of its own slot's prompt, in the order the slots ran.
+  using SlotTotal = std::pair<size_t, size_t>;
+  EXPECT_EQ(device_->slot_prefill_totals, (std::vector<SlotTotal>{{0, 20}, {1, 5}, {0, 20}, {0, 20}}));
+  const auto position = [&](const std::string& call) {
+    return std::find(device_->calls.begin(), device_->calls.end(), call) - device_->calls.begin();
+  };
+  ASSERT_EQ(device_->CallCount("expect_slot:0:20"), 1u);
+  ASSERT_EQ(device_->CallCount("expect_slot:1:5"), 1u);
+  EXPECT_LT(position("expect_slot:0:20"), position("prefill_slot:0:8"));
+  EXPECT_LT(position("expect_slot:1:5"), position("prefill_slot:1:5"));
+  EXPECT_EQ(device_->slot_expected_prefill(0), 0u) << "the length is spent when the slot starts decoding";
+  EXPECT_EQ(device_->slot_expected_prefill(1), 0u);
+
+  const char* published = std::getenv(Qwen38OrtEnv::kPrefillTotalTokens);
+  ASSERT_NE(published, nullptr);
+  EXPECT_STREQ(published, "424242") << "the executor must not publish the prompt length in the process environment";
+}
+
+// A slot that a queued Request takes over is reset first, then told the length of the new prompt before its first chunk.
+TEST_F(Qwen38GraphEngineTest, MultiSlotAReplacedSlotIsAnnouncedTheLengthOfItsNewPromptAfterItsReset) {
+  device_ = std::make_shared<ScriptedQwen38Device>(/*capacity=*/68, /*mtp=*/true, /*max_batch_size=*/2);
+  device_->dense_prefill = true;
+  device_->preferred_chunk = 16;
+  auto engine = MakeEngine();
+
+  ScopedProcessEnv sentinel{Qwen38OrtEnv::kPrefillTotalTokens, "424242"};
+  auto r0 = Begin(*engine, Prompt(4, 10), /*max_generated_tokens=*/2);
+  auto r1 = Begin(*engine, Prompt(5, 20), /*max_generated_tokens=*/6);
+  auto r2 = Begin(*engine, Prompt(7, 30), /*max_generated_tokens=*/3);  // takes slot 0 when r0 is over
+
+  std::array<EngineEvent, 16> buffer;
+  std::map<const Request*, std::vector<int32_t>> emitted;
+  for (size_t runs = 0; engine->HasPendingRequests(); ++runs) {
+    ASSERT_LT(runs, 1000u) << "the Engine did not finish";
+    const size_t count = engine->Run(buffer);
+    for (size_t i = 0; i < count; ++i) {
+      ASSERT_EQ(buffer[i].flags & EngineEventFlagFailed, 0u);
+      if (buffer[i].flags & EngineEventFlagToken) emitted[buffer[i].request.get()].push_back(buffer[i].token);
+    }
+  }
+  EXPECT_EQ(emitted[r0.get()], Expected(4, 2));
+  EXPECT_EQ(emitted[r1.get()], Expected(5, 6));
+  EXPECT_EQ(emitted[r2.get()], Expected(7, 3));
+
+  using SlotTotal = std::pair<size_t, size_t>;
+  EXPECT_EQ(device_->slot_prefill_totals, (std::vector<SlotTotal>{{0, 4}, {1, 5}, {0, 7}}));
+  const auto last = [&](const std::string& call) {
+    return std::find(device_->calls.rbegin(), device_->calls.rend(), call) - device_->calls.rbegin();
+  };
+  ASSERT_EQ(device_->CallCount("expect_slot:0:7"), 1u);
+  EXPECT_GT(last("reset_slot:0"), last("expect_slot:0:7")) << "the reset of the slot comes before the announcement";
+  EXPECT_GT(last("expect_slot:0:7"), last("prefill_slot:0:7")) << "and the announcement before the first chunk";
+
+  const char* published = std::getenv(Qwen38OrtEnv::kPrefillTotalTokens);
+  ASSERT_NE(published, nullptr);
+  EXPECT_STREQ(published, "424242");
+}
+
 // Host cost of one Engine step (Run) with a device that answers instantly: everything the Engine adds around a cycle. Run
 // manually: engine_unit_tests --gtest_also_run_disabled_tests --gtest_filter='*RunOverhead*'.
 TEST_F(Qwen38GraphEngineTest, DISABLED_RunOverheadPerCycle) {
