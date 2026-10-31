@@ -2342,9 +2342,12 @@ token. The device holds `model.qwen38_graph.max_batch_size` slots (default 1), o
   is single-slot); and a plane library with the `batched_prep` capability (`qwen38_plane_prep_batched`, which takes the row
   count and the slot count as arguments). The model checks the first two before the plane library is loaded and any weight is
   uploaded, the plane capability when the library has been loaded and before any weight is uploaded, and the compact-state
-  property as soon as the target session exists (its output names are only known then), before the other sessions and any
-  device state are created. Each failure is a `std::runtime_error` that names the setting. A plane library without
-  `batched_prep` still loads packages with one slot.
+  property on the output names of the target graph, which it reads from the model file (`ReadQwen38OnnxOutputNames`: the
+  protobuf framing of `ModelProto.graph` and `GraphProto.output`, skipping every initializer) before any weight is uploaded
+  too. A model file the reader cannot parse (an ORT-format model, say) is left to the same check on the output names of the
+  target session, which runs as soon as that session exists, before the other sessions and any device state are created.
+  Each failure is a `std::runtime_error` that names the setting. A plane library without `batched_prep` still loads packages
+  with one slot.
 - `FixedSlotCacheManager` (`Qwen38GraphCacheManager`, `src/engine/fixed_slot_scheduler.h`) holds one row per slot (`SlotOf`,
   `ResidentRequestCount`). `FixedSlotScheduler` queues further Requests and replaces a slot as soon as its turn is over, so a
   short prompt or answer does not wait for a long one, and `CacheManager::SupportsContinuousMultiSlotDecoding()` lets a
