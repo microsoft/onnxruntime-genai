@@ -56,8 +56,10 @@ state, pooled compressed index keys; the `qwen38_plane` kernels `ple_rows`, `poo
 prefilled in batches by the KV-only `prefill.head_kv` model. The initializers that several sessions share (`prefill.weights_pool`,
 a text manifest) are loaded once to the device and handed to every session with `AddInitializer` (one copy of the weights).
 `prefill.enabled=false` keeps the bit-exact muted-fold S=2-step prompt path (the token gate reference); the fast prefill is
-tolerance level and not run-to-run reproducible. `fold.force_reject` (default off) is a test hook: every draft is replaced, so the
-stream is the no-MTP greedy stream.
+tolerance level and not run-to-run reproducible. The test hook `ORT_QWEN38_FORCE_REJECT=1` (an environment variable of the process,
+read once when the Engine is constructed; it is not a `genai_config.json` key) replaces every draft, so the stream is the no-MTP greedy
+stream; `engine_gate.py --force-reject` and `mmlu_engine_eval.py --force-reject` set it for their Engine and clear an inherited value
+otherwise.
 
 ### DFlash2 S=8 packages (rc4): `SpeculativePrefixCommit` contract
 

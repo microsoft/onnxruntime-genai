@@ -3,13 +3,15 @@
 
 """Unit tests of the Engine qualification and benchmark scripts in ``tools/qwen38_graph``.
 
-Only the pure logic is exercised (histogram arithmetic, output-file planning, report comparison, prompt verification control flow);
-the Engine, the GPU, ``torch``, the research evaluation libraries and the tokenizers are replaced by small fakes.
+Only the pure logic is exercised (histogram arithmetic, output-file planning, report comparison, prompt verification control flow,
+the config overlays and the force-reject hook); the Engine, the GPU, ``torch``, the research evaluation libraries and the tokenizers
+are replaced by small fakes.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import runpy
 import sys
@@ -17,15 +19,27 @@ import types
 
 import numpy as np
 import pytest
-from _qwen38_tools_test_utils import load_tools, make_kv_calibration_stubs
+from _qwen38_tools_test_utils import (
+    QWEN38_GRAPH_KEYS,
+    REMOVED_QWEN38_GRAPH_KEYS,
+    load_tools,
+    make_kv_calibration_stubs,
+    prefill_chunk_problem,
+    unknown_qwen38_graph_keys,
+)
 
 
 @pytest.fixture(scope="module")
 def tools():
     with load_tools(
-        "bench_engine_mtp", "calibrate_qwen38_kv", "mmlu_engine_eval", stubs=make_kv_calibration_stubs()
-    ) as (bench, calibrate, mmlu):
-        yield types.SimpleNamespace(bench=bench, calibrate=calibrate, mmlu=mmlu)
+        "bench_engine_mtp",
+        "calibrate_qwen38_kv",
+        "engine_gate",
+        "mmlu_engine_eval",
+        "qwen38_engine_util",
+        stubs=make_kv_calibration_stubs(),
+    ) as (bench, calibrate, gate, mmlu, util):
+        yield types.SimpleNamespace(bench=bench, calibrate=calibrate, gate=gate, mmlu=mmlu, util=util)
 
 
 # ---------------------------------------------------------------------------
@@ -572,3 +586,237 @@ def test_run_names_every_mismatching_item_up_to_a_limit(mmlu_run, tmp_path):
     assert shown.split(", ") == [str(index) for index in range(20)] + ["..."]
     assert generated == []
     assert len(json.loads((tmp_path / "mmlu.promptcheck.json").read_text())["mismatch_items"]) == NUM_ITEMS
+
+
+# ---------------------------------------------------------------------------
+# qwen38_flash_graph config surface: the overlays and the force-reject test hook
+# ---------------------------------------------------------------------------
+
+FORCE_REJECT_ENV = "ORT_QWEN38_FORCE_REJECT"
+GRAPH_PREFIX = "model.qwen38_graph."
+
+
+def nested(dotted, value):
+    result = value
+    for key in reversed(dotted.split(".")):
+        result = {key: result}
+    return result
+
+
+def test_config_description_accepts_a_current_package_config():
+    section = {
+        "plane_library": "libs/libqwen38_plane.so",
+        "ple_table": "ple_table.txt",
+        "kv_capacity": 262144,
+        "warmup": True,
+        "head": {"filename_s1": "a.onnx", "filename_s2": "b.onnx", "session_options": {}},
+        "mtp": {"enabled": True, "prefill_head": True},
+        "fold": {"enabled": True, "head_r2": {"filename": "mtp.onnx", "session_options": {}}},
+        "prefill": {
+            "enabled": True,
+            "chunk": 512,
+            "weights_pool": "weights_pool.txt",
+            "constants": "constants.bin",
+            "warmup_lengths": [128, 512],
+            "dense": {"filename": "dense/model.onnx", "session_options": {}},
+            "head_kv": {"filename": "head_kv/model.onnx", "session_options": {}},
+        },
+    }
+    assert set(section) == set(QWEN38_GRAPH_KEYS)
+    assert unknown_qwen38_graph_keys(section) == []
+    assert prefill_chunk_problem(section) is None
+
+
+@pytest.mark.parametrize("removed", REMOVED_QWEN38_GRAPH_KEYS)
+def test_config_description_rejects_every_removed_key(removed):
+    assert unknown_qwen38_graph_keys(nested(removed, 1)) == [GRAPH_PREFIX + removed]
+
+
+@pytest.mark.parametrize(
+    "section, problem",
+    [
+        ({"kv_capacity": 262144, "prefill": {"enabled": True}}, None),
+        ({"kv_capacity": 4096, "prefill": {"enabled": True}}, "exceeds kv_capacity"),
+        ({"kv_capacity": 4096, "prefill": {"enabled": True, "chunk": 512}}, None),
+        ({"kv_capacity": 4096, "prefill": {"enabled": True, "chunk": 5000}}, "exceeds kv_capacity"),
+        ({"kv_capacity": 4096, "prefill": {"enabled": False}}, None),
+        ({"kv_capacity": 4096, "prefill": {"enabled": False, "chunk": 511}}, "odd"),
+        ({"kv_capacity": 4096, "prefill": {"enabled": True, "chunk": -2}}, "negative"),
+    ],
+)
+def test_prefill_chunk_rules_follow_the_engine(section, problem):
+    found = prefill_chunk_problem(section)
+    assert found is None if problem is None else problem in found
+
+
+@pytest.fixture
+def hook_unset(monkeypatch):
+    """Starts a test without $ORT_QWEN38_FORCE_REJECT; whatever the test or the tool sets is undone afterwards."""
+    monkeypatch.setenv(FORCE_REJECT_ENV, "")
+    monkeypatch.delenv(FORCE_REJECT_ENV)
+
+
+def fake_engine_stack(seen):
+    """A model loader and an Engine class that record the overlay and the force-reject variable they run with."""
+
+    def load_model(package, provider=None, overlay=None):
+        seen.overlays.append(overlay)
+        seen.env_at_load.append(os.environ.get(FORCE_REJECT_ENV))
+        return object()
+
+    class Engine:
+        def __init__(self, model):
+            seen.env_at_engine.append(os.environ.get(FORCE_REJECT_ENV))
+
+        def create_event_buffer(self, size):
+            return object()
+
+        def get_speculative_stats(self):
+            return {"rounds": 0, "draft_tokens_proposed": 0, "draft_tokens_accepted": 0, "tokens_emitted": 0}
+
+        def create_request(self):
+            return types.SimpleNamespace(close=lambda: None)
+
+    return load_model, Engine
+
+
+def run_gate(tools, tmp_path, monkeypatch, *flags):
+    """Runs ``engine_gate.main`` on fakes; returns what the loader and the Engine saw, the recorded run and the exit status."""
+    gate = tools.gate
+    seen = types.SimpleNamespace(overlays=[], env_at_load=[], env_at_engine=[])
+    load_model, engine = fake_engine_stack(seen)
+
+    class FakePrompts:
+        @classmethod
+        def from_args(cls, model, args):
+            return cls()
+
+        def make(self, kind, n, seed):
+            return list(range(n))
+
+    def fake_run_turn(engine, buffer, request, prompt, max_new):
+        turn = types.SimpleNamespace(
+            tokens=[5, 6, 7],
+            times=[1.0, 1.1, 1.2],
+            finish_reason="length",
+            usage=types.SimpleNamespace(generated_tokens=3),
+            runs=2,
+        )
+        return turn, 0
+
+    monkeypatch.setattr(gate, "load_model", load_model)
+    monkeypatch.setattr(gate.og, "Engine", engine, raising=False)
+    monkeypatch.setattr(gate, "Prompts", FakePrompts)
+    monkeypatch.setattr(gate, "run_turn", fake_run_turn)
+    out = tmp_path / "gate.json"
+    argv = ["engine_gate.py", "package", "--out", str(out), "--cases", "text", "--context", "16", "--new", "4", *flags]
+    monkeypatch.setattr(sys, "argv", argv)
+    status = gate.main()
+    return seen, json.loads(out.read_text()), status
+
+
+def test_gate_force_reject_sets_the_environment_hook_and_no_config_key(tools, tmp_path, monkeypatch, hook_unset):
+    seen, run, status = run_gate(tools, tmp_path, monkeypatch, "--force-reject")
+    assert status == 0
+    assert seen.overlays == [None]  # in particular no fold.force_reject, which the config parser rejects
+    assert seen.env_at_load == seen.env_at_engine == ["1"]
+    assert run["force_reject"] is True
+
+
+def test_gate_without_force_reject_leaves_the_hook_unset(tools, tmp_path, monkeypatch, hook_unset):
+    seen, run, _ = run_gate(tools, tmp_path, monkeypatch)
+    assert seen.overlays == [None]
+    assert seen.env_at_load == seen.env_at_engine == [None]
+    assert run["force_reject"] is False
+
+
+def test_gate_drops_an_inherited_hook_value_when_the_flag_is_absent(tools, tmp_path, monkeypatch, hook_unset, capsys):
+    monkeypatch.setenv(FORCE_REJECT_ENV, "1")
+    seen, run, _ = run_gate(tools, tmp_path, monkeypatch)
+    assert seen.env_at_load == seen.env_at_engine == [None]
+    assert run["force_reject"] is False
+    assert f"ignoring {FORCE_REJECT_ENV}=1" in capsys.readouterr().err
+
+
+def test_gate_force_reject_replaces_an_inherited_value(tools, tmp_path, monkeypatch, hook_unset):
+    monkeypatch.setenv(FORCE_REJECT_ENV, "0")
+    seen, run, _ = run_gate(tools, tmp_path, monkeypatch, "--force-reject")
+    assert seen.env_at_engine == ["1"]
+    assert run["force_reject"] is True
+
+
+@pytest.mark.parametrize(
+    "flags, expected",
+    [
+        (("--no-mtp",), {"mtp": {"enabled": False}}),
+        (("--prefill", "steps"), {"prefill": {"enabled": False}}),
+        (("--prefill", "fast"), {"prefill": {"enabled": True}}),
+        (
+            ("--no-mtp", "--prefill", "steps", "--force-reject"),
+            {"mtp": {"enabled": False}, "prefill": {"enabled": False}},
+        ),
+    ],
+)
+def test_gate_overlays_only_contain_keys_the_engine_accepts(tools, tmp_path, monkeypatch, hook_unset, flags, expected):
+    seen, _, _ = run_gate(tools, tmp_path, monkeypatch, *flags)
+    assert seen.overlays == [{"model": {"qwen38_graph": expected}}]
+    assert unknown_qwen38_graph_keys(expected) == []
+
+
+@pytest.mark.parametrize("prefill", [False, True])
+@pytest.mark.parametrize("force_reject", [False, True])
+def test_mmlu_engine_runs_with_the_hook_the_flag_asks_for(tools, monkeypatch, hook_unset, prefill, force_reject):
+    mmlu = tools.mmlu
+    seen = types.SimpleNamespace(overlays=[], env_at_load=[], env_at_engine=[])
+    load_model, engine = fake_engine_stack(seen)
+    monkeypatch.setattr(mmlu, "load_model", load_model)
+    monkeypatch.setattr(mmlu.og, "Engine", engine, raising=False)
+    if not force_reject:
+        monkeypatch.setenv(FORCE_REJECT_ENV, "1")  # inherited from the caller
+
+    mmlu.open_engine(types.SimpleNamespace(model="package", provider=None, force_reject=force_reject), prefill)
+
+    assert seen.overlays == [{"model": {"qwen38_graph": {"prefill": {"enabled": prefill}}}}]
+    assert unknown_qwen38_graph_keys(seen.overlays[0]["model"]["qwen38_graph"]) == []
+    expected = ["1"] if force_reject else [None]
+    assert seen.env_at_load == seen.env_at_engine == expected
+
+
+@pytest.mark.parametrize("force_reject", [False, True])
+def test_mmlu_check_records_the_mode_the_engine_ran_in(tools, tmp_path, monkeypatch, hook_unset, force_reject):
+    mmlu = tools.mmlu
+    seen = types.SimpleNamespace(overlays=[], env_at_load=[], env_at_engine=[])
+    load_model, engine = fake_engine_stack(seen)
+    monkeypatch.setattr(mmlu, "load_model", load_model)
+    monkeypatch.setattr(mmlu.og, "Engine", engine, raising=False)
+    monkeypatch.setattr(
+        mmlu,
+        "generate",
+        lambda engine, buffer, prompt, max_new: {
+            "tokens": [1, 2],
+            "cycles": 1,
+            "accepted": 0,
+            "decode_s": 0.1,
+            "ttft_s": 0.1,
+        },
+    )
+    prompts = tmp_path / "prompts.jsonl"
+    prompts.write_text(json.dumps({"index": 4, "prompt_ids": [1, 2, 3]}) + "\n")
+    if not force_reject:
+        monkeypatch.setenv(FORCE_REJECT_ENV, "1")  # inherited from the caller
+    args = types.SimpleNamespace(
+        model="package",
+        provider=None,
+        force_reject=force_reject,
+        prompts=prompts,
+        out=tmp_path / "check.json",
+        check_items="4",
+        check_new=2,
+    )
+
+    mmlu.check(args)
+
+    recorded = json.loads(args.out.read_text())
+    assert recorded["force_reject"] is force_reject
+    assert seen.env_at_engine == (["1"] if force_reject else [None])
+    assert [item["index"] for item in recorded["items"]] == [4]

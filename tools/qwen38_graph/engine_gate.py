@@ -21,6 +21,7 @@ statistics (identical prefix, first token), because the fast prefill is toleranc
 usage: engine_gate.py <package> --out <json> [--no-mtp] [--ignore-eos] [--cases text,prose,random,chat]
                       [--prefill steps|fast] [--reference <json>] [--force-reject]
                       [--text-pool FILE] [--prose-pool FILE]
+       --force-reject sets $ORT_QWEN38_FORCE_REJECT=1 for the engine (a test hook of the process, not a config key).
        --ignore-eos expects a package whose eos_token_id is an ordinary id never generated (config overlays append to the
        stop list, so such a package must be built with build_package.py --stop-token-ids 248319 or
        build_package_engine_v12b.py --stop-token-id 248319).
@@ -32,7 +33,16 @@ import sys
 from pathlib import Path
 
 import onnxruntime_genai as og
-from qwen38_engine_util import EOS_IDS, Prompts, add_prompt_arguments, load_model, run_turn, token_hash
+from qwen38_engine_util import (
+    EOS_IDS,
+    FORCE_REJECT_ENV,
+    Prompts,
+    add_prompt_arguments,
+    load_model,
+    run_turn,
+    set_force_reject,
+    token_hash,
+)
 
 CHAT_QUESTIONS = [
     "What is 2 + 3? Answer with only the number.",
@@ -92,7 +102,9 @@ def main():
         help="minimum identical-prefix length required per case in --prefill fast mode (default: 1, i.e. first token equal)",
     )
     parser.add_argument(
-        "--force-reject", action="store_true", help="test hook fold.force_reject: every draft is replaced"
+        "--force-reject",
+        action="store_true",
+        help=f"test hook: run with {FORCE_REJECT_ENV}=1 so that every draft is replaced (the no-MTP greedy stream)",
     )
     parser.add_argument("--provider")
     add_prompt_arguments(parser)
@@ -106,9 +118,8 @@ def main():
         graph_overlay["mtp"] = {"enabled": False}
     if args.prefill:
         graph_overlay["prefill"] = {"enabled": args.prefill == "fast"}
-    if args.force_reject:
-        graph_overlay["fold"] = {"force_reject": True}
     overlay = {"model": {"qwen38_graph": graph_overlay}} if graph_overlay else None
+    set_force_reject(args.force_reject)
     model = load_model(args.model, args.provider, overlay)
     prompts = Prompts.from_args(model, args)
     engine = og.Engine(model)

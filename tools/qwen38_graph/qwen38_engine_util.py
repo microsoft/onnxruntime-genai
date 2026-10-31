@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import random
+import sys
 import time
 from pathlib import Path
 
@@ -41,6 +42,9 @@ import numpy as np  # noqa: E402 - after the Windows DLL directory setup above
 import onnxruntime_genai as og  # noqa: E402
 
 EOS_IDS = (248046, 248044)
+
+# Test hook of the qwen38_flash_graph engine process; it is not a genai_config key.
+FORCE_REJECT_ENV = "ORT_QWEN38_FORCE_REJECT"
 
 # Chat template switches that turn the default "thinking" generation prompt into the non-thinking one used by the gates.
 _THINKING_ON = "enable_thinking is undefined or enable_thinking is true"
@@ -117,6 +121,24 @@ class Prompts:
 
 def token_hash(tokens):
     return hashlib.sha256(np.asarray(tokens, dtype="<i4").tobytes()).hexdigest()
+
+
+def set_force_reject(enabled):
+    """Selects the draft-rejection test hook (every draft is replaced, so the stream is the no-MTP greedy stream).
+
+    The engine reads $ORT_QWEN38_FORCE_REJECT once, when it is constructed, so this has to run before `load_model` and
+    `og.Engine`. A value inherited from the caller's environment is dropped when `enabled` is false: the mode that a run records
+    must be the mode the engine ran in.
+    """
+    inherited = os.environ.get(FORCE_REJECT_ENV)
+    if enabled:
+        os.environ[FORCE_REJECT_ENV] = "1"
+    elif inherited is not None:
+        del os.environ[FORCE_REJECT_ENV]
+        print(
+            f"note: ignoring {FORCE_REJECT_ENV}={inherited}; pass --force-reject to replace every draft",
+            file=sys.stderr,
+        )
 
 
 def load_model(package, provider=None, overlay=None):

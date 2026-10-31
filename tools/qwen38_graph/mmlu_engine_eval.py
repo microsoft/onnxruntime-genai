@@ -19,7 +19,8 @@ mode run   : --shard K --shards N (round-robin over the 800 items), --out <jsonl
              warm-up and generation.
 mode check : --check-items i,j,... --check-new M --out <json> [--force-reject]: token streams of the given items with
              prefill.enabled=false (bit-exact S=2-step prompt path, so two runs start from identical state); with --force-reject
-             every draft is replaced by a different token (config fold.force_reject: the no-MTP greedy stream).
+             every draft is replaced by a different token ($ORT_QWEN38_FORCE_REJECT=1, a test hook of the engine process and not
+             a config key: the no-MTP greedy stream).
              Compare the MTP run with the --force-reject run via --compare mtp.json forced.json: exit status 0 only if both
              cover the same non-empty set of items and every stream is identical, 1 (with the problems listed) otherwise.
 """
@@ -36,7 +37,7 @@ from pathlib import Path
 
 import numpy as np
 import onnxruntime_genai as og
-from qwen38_engine_util import load_model, run_turn
+from qwen38_engine_util import load_model, run_turn, set_force_reject
 
 for _path in os.environ.get("QWEN38_EVAL_PATHS", "").split(os.pathsep):
     if _path:
@@ -56,11 +57,9 @@ def load_prompts(path):
 
 
 def open_engine(args, prefill: bool):
-    overlay = {"prefill": {"enabled": prefill}}
-    if args.force_reject:
-        overlay["fold"] = {"force_reject": True}
+    set_force_reject(args.force_reject)
     t = time.perf_counter()
-    model = load_model(args.model, args.provider, {"model": {"qwen38_graph": overlay}})
+    model = load_model(args.model, args.provider, {"model": {"qwen38_graph": {"prefill": {"enabled": prefill}}}})
     load_s = time.perf_counter() - t
     engine = og.Engine(model)
     return model, engine, engine.create_event_buffer(16), load_s
