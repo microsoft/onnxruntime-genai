@@ -64,6 +64,19 @@ Qwen38ReplayRequest Convolution(int64_t channels = 8192, int64_t history = 3, in
   return request;
 }
 
+// The same state with its history first: [batch, history, channels].
+Qwen38ReplayRequest HistoryFirstConvolution(int64_t channels = 8192, int64_t history = 3, int capacity = 7,
+                                            size_t element_size = 2) {
+  Qwen38ReplayRequest request = Convolution(channels, history, capacity, element_size);
+  request.state.shape = {1, history, channels};
+  return request;
+}
+
+uint32_t LayoutWord(const Qwen38ReplayGeometry& geometry) { return static_cast<uint32_t>(geometry.layout); }
+
+constexpr uint32_t kChannelFirst = static_cast<uint32_t>(QWEN38_PLANE_CONV_STATE_CHANNEL_FIRST);
+constexpr uint32_t kHistoryFirst = static_cast<uint32_t>(QWEN38_PLANE_CONV_STATE_HISTORY_FIRST);
+
 Qwen38ReplayRequest Indexer(int64_t entries = 7, int64_t width = 128, int capacity = 7, size_t element_size = 2) {
   Qwen38ReplayRequest request;
   request.kind = Qwen38ReplayKind::kIndexer;
@@ -205,11 +218,13 @@ TEST(Qwen38ReplayGeometryTest, ConvolutionGeometryIsChannelFirst) {
   EXPECT_EQ(bf16.channel_count, 8192u);
   EXPECT_EQ(bf16.state_width, 3u);
   EXPECT_EQ(bf16.element_size, 2u);
+  EXPECT_EQ(LayoutWord(bf16), kChannelFirst);
 
   const Qwen38ReplayGeometry fp32 = ValidateQwen38ReplayDescriptor(Convolution(1024, 3, 7, 4));
   EXPECT_EQ(fp32.channel_count, 1024u);
   EXPECT_EQ(fp32.state_width, 3u);
   EXPECT_EQ(fp32.element_size, 4u);
+  EXPECT_EQ(LayoutWord(fp32), kChannelFirst);
 
   // A history longer than the transitions kept, and one shorter.
   EXPECT_EQ(ValidateQwen38ReplayDescriptor(Convolution(512, 15, 7)).state_width, 15u);
@@ -222,12 +237,46 @@ TEST(Qwen38ReplayGeometryTest, ConvolutionGeometryIsChannelFirst) {
   EXPECT_EQ(ValidateQwen38ReplayDescriptor(ple).channel_count, 1024u);
 }
 
-TEST(Qwen38ReplayGeometryTest, ConvolutionRejectsAHistoryFirstState) {
-  // [batch, history, channels]: a replay that took it as [batch, channels, history] would shift 3 of its 8192 channels.
-  Qwen38ReplayRequest request = Convolution();
-  request.state.shape = {1, 3, 8192};
-  ExpectRejected(request, {"past_key_values.5.conv_state [1, 3, 8192]", "state_update.5.conv_value [1, 7, 8192]",
-                           "8192 channels", "history-first conv state is not supported by the compact replay"});
+TEST(Qwen38ReplayGeometryTest, ConvolutionAcceptsAHistoryFirstState) {
+  // [batch, history, channels]: the channels of the update are the last dimension of the state, and the history is the second.
+  const Qwen38ReplayGeometry bf16 = ValidateQwen38ReplayDescriptor(HistoryFirstConvolution());
+  EXPECT_EQ(bf16.channel_count, 8192u);
+  EXPECT_EQ(bf16.state_width, 3u) << "the history, not the channels";
+  EXPECT_EQ(bf16.element_size, 2u);
+  EXPECT_EQ(LayoutWord(bf16), kHistoryFirst);
+
+  const Qwen38ReplayGeometry fp32 = ValidateQwen38ReplayDescriptor(HistoryFirstConvolution(1024, 3, 7, 4));
+  EXPECT_EQ(fp32.channel_count, 1024u);
+  EXPECT_EQ(fp32.state_width, 3u);
+  EXPECT_EQ(fp32.element_size, 4u);
+  EXPECT_EQ(LayoutWord(fp32), kHistoryFirst);
+
+  // A history longer than the transitions kept, one shorter, and one longer than the channels (the state is told from the
+  // channel count of the update, not from which of its dimensions is the larger).
+  EXPECT_EQ(ValidateQwen38ReplayDescriptor(HistoryFirstConvolution(512, 15, 7)).state_width, 15u);
+  EXPECT_EQ(ValidateQwen38ReplayDescriptor(HistoryFirstConvolution(512, 1, 1)).state_width, 1u);
+  const Qwen38ReplayGeometry long_history = ValidateQwen38ReplayDescriptor(HistoryFirstConvolution(3, 5, 7));
+  EXPECT_EQ(long_history.channel_count, 3u);
+  EXPECT_EQ(long_history.state_width, 5u);
+  EXPECT_EQ(LayoutWord(long_history), kHistoryFirst);
+  const Qwen38ReplayGeometry long_history_channel_first = ValidateQwen38ReplayDescriptor(Convolution(3, 5, 7));
+  EXPECT_EQ(long_history_channel_first.channel_count, 3u);
+  EXPECT_EQ(long_history_channel_first.state_width, 5u);
+  EXPECT_EQ(LayoutWord(long_history_channel_first), kChannelFirst);
+
+  // The per-layer-embedding convolution is replayed alike.
+  Qwen38ReplayRequest ple = HistoryFirstConvolution(1024, 3, 7);
+  ple.state.name = "past_key_values.5.ple_conv_state";
+  ple.update.name = "state_update.5.ple_conv_value";
+  const Qwen38ReplayGeometry ple_geometry = ValidateQwen38ReplayDescriptor(ple);
+  EXPECT_EQ(ple_geometry.channel_count, 1024u);
+  EXPECT_EQ(ple_geometry.state_width, 3u);
+  EXPECT_EQ(LayoutWord(ple_geometry), kHistoryFirst);
+}
+
+TEST(Qwen38ReplayGeometryTest, OnlyAConvolutionHasALayout) {
+  EXPECT_EQ(LayoutWord(ValidateQwen38ReplayDescriptor(GatedDeltaNet())), kChannelFirst);
+  EXPECT_EQ(LayoutWord(ValidateQwen38ReplayDescriptor(Indexer())), kChannelFirst);
 }
 
 TEST(Qwen38ReplayGeometryTest, ConvolutionTakesASquareStateAsChannelFirst) {
@@ -235,6 +284,13 @@ TEST(Qwen38ReplayGeometryTest, ConvolutionTakesASquareStateAsChannelFirst) {
   const Qwen38ReplayGeometry geometry = ValidateQwen38ReplayDescriptor(Convolution(16, 16, 7));
   EXPECT_EQ(geometry.channel_count, 16u);
   EXPECT_EQ(geometry.state_width, 16u);
+  EXPECT_EQ(LayoutWord(geometry), kChannelFirst);
+
+  // The state a history-first package declares with as many steps as channels is the same shape, so it is taken alike.
+  const Qwen38ReplayGeometry history_first = ValidateQwen38ReplayDescriptor(HistoryFirstConvolution(16, 16, 7));
+  EXPECT_EQ(history_first.channel_count, 16u);
+  EXPECT_EQ(history_first.state_width, 16u);
+  EXPECT_EQ(LayoutWord(history_first), kChannelFirst);
 }
 
 TEST(Qwen38ReplayGeometryTest, ConvolutionRejectsAStateOfAnotherChannelCount) {
@@ -245,6 +301,24 @@ TEST(Qwen38ReplayGeometryTest, ConvolutionRejectsAStateOfAnotherChannelCount) {
   request.state.shape = {1, 8192, 3};
   request.update.shape = {1, 7, 4096};
   ExpectRejected(request, {"neither the second nor the third dimension", "4096 channels"});
+
+  // Of either layout: the channel count of the update has to be the second or the third dimension of the state.
+  request = HistoryFirstConvolution();
+  request.state.shape = {1, 3, 100};
+  ExpectRejected(request, {"neither the second nor the third dimension", "past_key_values.5.conv_state [1, 3, 100]",
+                           "8192 channels", "[batch, 8192 channels, history] or [batch, history, 8192 channels]"});
+  request.state.shape = {1, 3, 8192};
+  request.update.shape = {1, 7, 4096};
+  ExpectRejected(request, {"neither the second nor the third dimension", "4096 channels"});
+}
+
+TEST(Qwen38ReplayGeometryTest, ConvolutionRejectsAStateThatIsNotBatchedChannelsAndHistory) {
+  Qwen38ReplayRequest request = HistoryFirstConvolution();
+  request.state.shape = {3, 8192};
+  ExpectRejected(request,
+                 {"past_key_values.5.conv_state [3, 8192]", "[batch, channels, history] or [batch, history, channels]"});
+  request.state.shape = {1, 3, 8192, 1};
+  ExpectRejected(request, {"past_key_values.5.conv_state [1, 3, 8192, 1]"});
 }
 
 TEST(Qwen38ReplayGeometryTest, ConvolutionRejectsElementsTheKernelDoesNotCopy) {
