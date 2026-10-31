@@ -5,6 +5,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -33,8 +34,14 @@ std::filesystem::path WriteFile(const std::filesystem::path& path, const std::st
 }
 
 struct MockPlaneTracker {
+  enum class DeviceAlias { kBiased,
+                           kFails,
+                           kNull,
+                           kIdentity };
+
   static inline int alloc_calls = 0;
   static inline int fail_on_alloc_call = -1;
+  static inline DeviceAlias device_alias = DeviceAlias::kBiased;
   static inline std::vector<void*> live_device_ptrs;
   static inline std::vector<void*> registered_host_ptrs;
   static inline std::vector<void*> unregistered_host_ptrs;
@@ -47,6 +54,7 @@ struct MockPlaneTracker {
     unregistered_host_ptrs.clear();
     alloc_calls = 0;
     fail_on_alloc_call = fail_alloc;
+    device_alias = DeviceAlias::kBiased;
   }
 
   static const char* ErrorString(int) { return "mock cuda error"; }
@@ -82,6 +90,18 @@ struct MockPlaneTracker {
     return 0;
   }
   static int HostGetDevicePointer(void** dp, void* hp, unsigned) {
+    switch (device_alias) {
+      case DeviceAlias::kFails:
+        return 1;  // cudaErrorInvalidValue
+      case DeviceAlias::kNull:
+        *dp = nullptr;
+        return 0;
+      case DeviceAlias::kIdentity:
+        *dp = hp;
+        return 0;
+      case DeviceAlias::kBiased:
+        break;
+    }
     *dp = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(hp) + kDevBias);
     return 0;
   }
@@ -453,6 +473,107 @@ TEST(Qwen38GraphConfigTest, NonInheritedPrefillSessionOptionsRetainCudaProviderW
   EXPECT_TRUE(IsGraphCaptureEnabled(resolved_inherited));
 }
 
+TEST(Qwen38CacheShapeTest, AcceptsTheExportedGeometry) {
+  const std::vector<Qwen38CacheInput> target = {
+      {"input_ids", {-1, 1}},
+      {"past_position_ids", {-1, 33028}},
+      {"past_key_values.3.key", {-1, 2, 33028, 256}},
+      {"past_key_values.3.value", {-1, 2, 33028, 256}},
+      {"past_key_values.3.index_key", {-1, 8257, 128}},
+      {"past_key_values.3.index_buffer", {-1, 7, 128}},
+      {"past_key_values.3.index_lengths", {-1, 2}},
+      {"past_key_values.0.conv_state", {-1, 6144, 4}},
+      {"past_key_values.0.recurrent_state", {-1, 32, 128, 128}},
+  };
+  EXPECT_NO_THROW(ValidateQwen38CacheShapes(target, 33028, "target"));
+  // The position and index-key buffers may be longer than needed; only the KV cache length must match exactly.
+  const std::vector<Qwen38CacheInput> padded = {
+      {"past_position_ids", {-1, 33040}},
+      {"past_key_values.0.key", {-1, 2, 33028, 256}},
+      {"past_key_values.0.index_key", {-1, 9000, 128}},
+  };
+  EXPECT_NO_THROW(ValidateQwen38CacheShapes(padded, 33028, "target"));
+  EXPECT_NO_THROW(ValidateQwen38CacheShapes({}, 33028, "target"));
+}
+
+TEST(Qwen38CacheShapeTest, RejectsAnotherKvCapacity) {
+  const std::vector<Qwen38CacheInput> inputs = {
+      {"past_position_ids", {-1, 33028}},
+      {"past_key_values.3.key", {-1, 2, 33028, 256}},
+      {"past_key_values.3.index_key", {-1, 8257, 128}},
+  };
+  const auto message_for = [&](int kv_capacity) {
+    try {
+      ValidateQwen38CacheShapes(inputs, kv_capacity, "target");
+    } catch (const std::runtime_error& e) {
+      return std::string(e.what());
+    }
+    return std::string();
+  };
+
+  // A smaller capacity: the engine would stride the 33028-long buffers as 16384-long.
+  const std::string smaller = message_for(16384);
+  EXPECT_NE(smaller.find("kv_capacity (16384)"), std::string::npos) << smaller;
+  EXPECT_NE(smaller.find("target"), std::string::npos) << smaller;
+  EXPECT_NE(smaller.find("past_key_values.3.key"), std::string::npos) << smaller;
+  EXPECT_NE(smaller.find("[-1, 2, 33028, 256]"), std::string::npos) << smaller;
+
+  // A larger capacity: the position buffer is too short, which is found first.
+  const std::string larger = message_for(65536);
+  EXPECT_NE(larger.find("kv_capacity (65536)"), std::string::npos) << larger;
+  EXPECT_NE(larger.find("past_position_ids"), std::string::npos) << larger;
+
+  // Only the key/value length is exact: with a matching position buffer, a larger capacity fails on the cache.
+  const std::vector<Qwen38CacheInput> longer_positions = {
+      {"past_position_ids", {-1, 65536}},
+      {"past_key_values.3.key", {-1, 2, 33028, 256}},
+  };
+  EXPECT_THROW(ValidateQwen38CacheShapes(longer_positions, 65536, "target"), std::runtime_error);
+}
+
+TEST(Qwen38CacheShapeTest, RejectsUnexpectedCacheDimensions) {
+  const auto rejects = [](const Qwen38CacheInput& input, const char* graph = "target") {
+    try {
+      ValidateQwen38CacheShapes({input}, 33028, graph);
+    } catch (const std::runtime_error& e) {
+      const std::string message = e.what();
+      EXPECT_NE(message.find(input.name), std::string::npos) << message;
+      EXPECT_NE(message.find(graph), std::string::npos) << message;
+      return;
+    }
+    ADD_FAILURE() << "accepted " << input.name;
+  };
+
+  rejects({"past_position_ids", {-1, 33000}});
+  rejects({"past_position_ids", {-1, -1}});  // a dynamic length cannot be checked against the ledger
+  rejects({"past_position_ids", {33028}});
+  rejects({"past_key_values.0.key", {-1, 2, -1, 256}});
+  rejects({"past_key_values.0.value", {-1, 2, 32768, 256}});
+  rejects({"past_key_values.0.key", {-1, 2, 33028}});
+  rejects({"past_key_values.0.key", {-1, 4, 33028, 256}});
+  rejects({"past_key_values.0.value", {-1, 2, 33028, 128}});
+  rejects({"past_key_values.0.index_key", {-1, 8000, 128}});
+  rejects({"past_key_values.0.index_key", {-1, -1, 128}});
+  rejects({"past_key_values.0.index_key", {-1, 8257}});
+  // Auxiliary graphs name themselves in the error.
+  rejects({"head.past_key_values.0.key", {-1, 2, 16384, 256}}, "fold head");
+  rejects({"past_key_values.0.key", {-1, 2, 16384, 256}}, "head (S=2)");
+  rejects({"past_key_values.0.value", {-1, 2, 16384, 256}}, "head_r2");
+}
+
+TEST(Qwen38CacheShapeTest, IgnoresInputsThatDoNotDependOnTheCapacity) {
+  const std::vector<Qwen38CacheInput> inputs = {
+      {"hidden_states", {-1, 1, 2048}},
+      {"attention_mask", {-1, 5}},
+      {"key", {-1, 7}},  // not a cache input
+      {"past_key_values.0.conv_state", {-1, 6144, 4}},
+      {"past_key_values.0.recurrent_state", {-1, 32, 128, 128}},
+      {"past_key_values.0.index_buffer", {-1, 7, 128}},
+      {"past_key_values.0.index_lengths", {-1, 2}},
+  };
+  EXPECT_NO_THROW(ValidateQwen38CacheShapes(inputs, 33028, "target"));
+}
+
 TEST(Qwen38QsaConstantsTest, RequiresBothCosAndSinForTargetAndHead) {
   const auto dir = MakeScratchDir("qsa_complete");
   WriteFile(dir / "qsa_consts.bin", std::string(4096, '\0'));
@@ -497,6 +618,55 @@ TEST(Qwen38QsaConstantsTest, RequiresBothCosAndSinForTargetAndHead) {
   std::filesystem::remove_all(dir, ec);
 }
 
+TEST(Qwen38QsaConstantsTest, KvScalesMustHoldExactly512Floats) {
+  const auto dir = MakeScratchDir("qsa_scales");
+  WriteFile(dir / "qsa_consts.bin", std::string(16384, '\0'));
+
+  const std::string base =
+      "qwen38_qsa_consts 1\nfile qsa_consts.bin\nepsilon 1e-06\nwidth 64\n"
+      "tensor target cos 0 512\n"
+      "tensor target sin 512 512\n"
+      "tensor target knorm.3 1024 256\n"
+      "tensor head cos 1280 512\n"
+      "tensor head sin 1792 512\n"
+      "tensor head knorm.0 2304 256\n";
+  // Returns the error text of a failed construction, empty when it succeeded.
+  const auto construct = [&](const std::string& scale_lines) {
+    Qwen38Plane plane;
+    InitMockPlane(plane);
+    const auto idx = WriteFile(dir / "qsa.txt", base + scale_lines);
+    try {
+      Qwen38QsaConstants consts{plane, idx, dir, nullptr};
+      (void)consts;
+    } catch (const std::runtime_error& e) {
+      return std::string(e.what());
+    }
+    return std::string();
+  };
+
+  EXPECT_EQ(construct(""), "");
+  EXPECT_EQ(construct("tensor target kscale.3 4096 2048\ntensor target vscale.3 6144 2048\n"
+                      "tensor head kscale.0 8192 2048\ntensor head vscale.0 10240 2048\n"),
+            "");
+
+  const auto scale_error = [&](const std::string& line, const std::string& name) {
+    const std::string error = construct(line);
+    EXPECT_NE(error.find("512 floats"), std::string::npos) << line << " -> " << error;
+    EXPECT_NE(error.find(name), std::string::npos) << line << " -> " << error;
+  };
+  scale_error("tensor target kscale.3 4096 4\n", "kscale.3");  // one float
+  scale_error("tensor target vscale.3 4096 4\n", "vscale.3");
+  scale_error("tensor target kscale.3 4096 2044\n", "kscale.3");  // 511 floats
+  scale_error("tensor target vscale.3 4096 2052\n", "vscale.3");  // 513 floats
+  scale_error("tensor head kscale.0 4096 4096\n", "kscale.0");    // 1024 floats
+  scale_error("tensor head vscale.0 4096 2046\n", "vscale.0");    // not a whole number of floats
+  // A valid scale does not make its invalid partner acceptable.
+  scale_error("tensor target kscale.3 4096 2048\ntensor target vscale.3 6144 1024\n", "vscale.3");
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
 #if !defined(_WIN32)
 TEST(Qwen38WeightPoolTest, CleansUpEarlierAllocationsOnConstructorFailureAndSupportsHostPool) {
   const auto dir = MakeScratchDir("weight_pool");
@@ -534,6 +704,113 @@ TEST(Qwen38WeightPoolTest, CleansUpEarlierAllocationsOnConstructorFailureAndSupp
       EXPECT_EQ(MockPlaneTracker::registered_host_ptrs.size(), 1u);
     }
     EXPECT_TRUE(MockPlaneTracker::live_device_ptrs.empty());
+    EXPECT_EQ(MockPlaneTracker::unregistered_host_ptrs, MockPlaneTracker::registered_host_ptrs);
+  }
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+namespace {
+
+// One device entry (#0), one host-mapped entry (#1) of the same file, and (optionally) one CPU entry (#2).
+std::filesystem::path WriteMappedPoolManifest(const std::filesystem::path& dir, bool with_cpu_entry) {
+  WriteFile(dir / "w0.bin", std::string(64, 'a'));
+  WriteFile(dir / "embed.bin", std::string(128, 'e'));
+  std::string manifest =
+      "qwen38_weights_pool 1\n"
+      "pool 0 1 0 32 1 8 w0.bin\n"
+      "host_pool 1 1 32 64 2 2 8 embed.bin\n"
+      "session target w0 0\n"
+      "session target embed 1\n";
+  if (with_cpu_entry) {
+    manifest +=
+        "pool 2 1 0 32 1 8 w0.bin cpu\n"
+        "session dense cpu_weight 2\n";
+  }
+  return WriteFile(dir / "pool.txt", manifest);
+}
+
+}  // namespace
+
+TEST(Qwen38WeightPoolTest, HostMappedEntriesRequireADeviceAlias) {
+  const auto dir = MakeScratchDir("weight_pool_alias");
+  const auto manifest_path = WriteMappedPoolManifest(dir, /*with_cpu_entry=*/false);
+  auto mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+
+  const auto expect_failure = [&](const std::function<void(Qwen38Plane&)>& break_alias) {
+    Qwen38Plane plane;
+    InitMockPlane(plane);
+    break_alias(plane);
+    try {
+      Qwen38WeightPool pool{plane, manifest_path, dir, *mem_info, 1};
+      ADD_FAILURE() << "a host-mapped entry without a device alias must fail the construction";
+    } catch (const std::runtime_error& e) {
+      EXPECT_NE(std::string(e.what()).find("host-mapped weight pool entry 1"), std::string::npos) << e.what();
+    }
+    // The failure goes through the cleanup path: the device copy is freed and the mapped range is unregistered.
+    EXPECT_TRUE(MockPlaneTracker::live_device_ptrs.empty());
+    EXPECT_FALSE(MockPlaneTracker::registered_host_ptrs.empty());
+    EXPECT_EQ(MockPlaneTracker::unregistered_host_ptrs, MockPlaneTracker::registered_host_ptrs);
+  };
+
+  expect_failure([](Qwen38Plane&) { MockPlaneTracker::device_alias = MockPlaneTracker::DeviceAlias::kFails; });
+  expect_failure([](Qwen38Plane&) { MockPlaneTracker::device_alias = MockPlaneTracker::DeviceAlias::kNull; });
+  expect_failure([](Qwen38Plane& plane) { plane.host_get_device_pointer = nullptr; });
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+TEST(Qwen38WeightPoolTest, HostMappedEntriesAcceptAliasesAndUnifiedAddresses) {
+  const auto dir = MakeScratchDir("weight_pool_alias_ok");
+  const auto manifest_path = WriteMappedPoolManifest(dir, /*with_cpu_entry=*/false);
+  auto mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+
+  for (const auto alias : {MockPlaneTracker::DeviceAlias::kBiased, MockPlaneTracker::DeviceAlias::kIdentity}) {
+    Qwen38Plane plane;
+    InitMockPlane(plane);
+    MockPlaneTracker::device_alias = alias;
+    {
+      Qwen38WeightPool pool{plane, manifest_path, dir, *mem_info, 1};
+      EXPECT_EQ(pool.host_mapped_bytes, 64u);
+    }
+    EXPECT_TRUE(MockPlaneTracker::live_device_ptrs.empty());
+    EXPECT_EQ(MockPlaneTracker::unregistered_host_ptrs, MockPlaneTracker::registered_host_ptrs);
+  }
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+TEST(Qwen38WeightPoolTest, CpuEntriesWithoutADeviceAliasStayCpuTensors) {
+  const auto dir = MakeScratchDir("weight_pool_cpu");
+  const auto manifest_path = WriteMappedPoolManifest(dir, /*with_cpu_entry=*/true);
+  auto mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+
+  // The CPU-only fallback is separate from the host-mapped requirement: with every lookup failing, the host-mapped
+  // entry is what fails the construction, and a pool without one still builds.
+  {
+    Qwen38Plane plane;
+    InitMockPlane(plane);
+    MockPlaneTracker::device_alias = MockPlaneTracker::DeviceAlias::kFails;
+    EXPECT_THROW((Qwen38WeightPool{plane, manifest_path, dir, *mem_info, 1}), std::runtime_error);
+  }
+
+  WriteFile(dir / "pool_cpu_only.txt",
+            "qwen38_weights_pool 1\n"
+            "pool 0 1 0 32 1 8 w0.bin cpu\n"
+            "session dense cpu_weight 0\n");
+  for (const auto alias : {MockPlaneTracker::DeviceAlias::kFails, MockPlaneTracker::DeviceAlias::kNull}) {
+    Qwen38Plane plane;
+    InitMockPlane(plane);
+    MockPlaneTracker::device_alias = alias;
+    {
+      Qwen38WeightPool pool{plane, dir / "pool_cpu_only.txt", dir, *mem_info, 1};
+      EXPECT_EQ(pool.cpu_bytes, 32u);
+      auto options = OrtSessionOptions::Create();
+      EXPECT_EQ(pool.AddTo(*options, "dense"), 1u);
+    }
     EXPECT_EQ(MockPlaneTracker::unregistered_host_ptrs, MockPlaneTracker::registered_host_ptrs);
   }
 
