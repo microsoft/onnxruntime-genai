@@ -582,8 +582,9 @@ void Qwen38GraphEngine::FastAppendSlot(int slot, std::span<const int32_t> tokens
     const size_t m = std::min(max_m, n - lo);
     last_m = m;
     const Qwen38PromptRunHints prompt_run{total_expected, PromptChunkCompactExperts(pos, m)};
-    plane_.ple_rows(stream_, params_dev_.data(), d_tokens_slot(slot) + 8 * pos, static_cast<int>(m),
-                    ctx_commit_slot(slot), ctx_b_slot(slot), f.ples.data());
+    plane_.Check(plane_.ple_rows(stream_, params_dev_.data(), d_tokens_slot(slot) + 8 * pos, static_cast<int>(m),
+                                 ctx_commit_slot(slot), ctx_b_slot(slot), f.ples.data()),
+                 "slot ple_rows");
     plane_.Check(plane_.memcpy_d2d(ctx_commit_slot(slot), ctx_b_slot(slot), 16, stream_), "slot ctx commit");
     plane_.Check(plane_.memcpy_d2d(past_pos_slot(slot) + 8 * pos, d_arange64_.data() + 8 * pos, m * 8, stream_), "slot past_pos");
     const int32_t meta32[4] = {
