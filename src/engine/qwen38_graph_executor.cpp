@@ -4,6 +4,7 @@
 #include "qwen38_graph_executor.h"
 
 #include <algorithm>
+#include <limits>
 #include <stdexcept>
 
 #include "../models/qwen38_graph.h"
@@ -19,6 +20,9 @@ Qwen38GraphSession::Qwen38GraphSession(std::shared_ptr<Qwen38DecodeDevice> devic
   if (!device_) {
     throw std::invalid_argument("Qwen38GraphSession requires a device.");
   }
+  if (!device_->ContextIsHealthy()) {
+    throw std::runtime_error("Cannot lease a poisoned token-producing execution context.");
+  }
   // S=2 target steps consume token pairs: an odd chunk would shift the pairing of everything after it.
   options_.prefill_chunk_tokens = std::max<size_t>(2, options_.prefill_chunk_tokens & ~size_t{1});
   // A device with a fast prefill names its own chunk (any size is valid there); a longer chunk is one step without events,
@@ -33,7 +37,28 @@ Qwen38GraphSession::~Qwen38GraphSession() {
 }
 
 size_t Qwen38GraphSession::MaxRequestLength() const {
-  return static_cast<size_t>(device_->Capacity() - Qwen38DecodeDevice::kReservedTail);
+  return static_cast<size_t>(device_->Capacity() - device_->ReservedTail());
+}
+
+void Qwen38GraphSession::Poison() noexcept {
+  device_->MarkContextFailed();
+}
+
+void Qwen38GraphSession::Acknowledge(const TokenCommitAck& ack) {
+  completions_.Acknowledge(ack);
+}
+
+BackendPlannedRow Qwen38GraphSession::Plan(size_t request_row, const Qwen38StepRequest& request) {
+  if (request.tokens.empty() || request.tokens.size() > MaxRequestLength() ||
+      std::min(request.token_budget, request.session_budget) == 0) {
+    throw std::logic_error("Fixed-slot request is outside the negotiated capacity or token budget.");
+  }
+  const bool same_turn = request.owner == owner_ && request.turn_id == turn_id_;
+  const bool needs_prefill = !same_turn || !decoding_;
+  const size_t prefilled = same_turn ? prefilled_ : 0;
+  const size_t remaining = needs_prefill ? request.tokens.size() - prefilled : 0;
+  const size_t chunk = std::min(options_.prefill_chunk_tokens, remaining);
+  return completions_.Plan(request_row, 0, request.owner, request.turn_id, chunk, needs_prefill && chunk == remaining);
 }
 
 bool Qwen38GraphSession::IsStopToken(int32_t token) const {
@@ -72,6 +97,7 @@ void Qwen38GraphSession::Release() {
   prefilled_ = 0;
   decoding_ = false;
   pending_step_ = {};
+  completions_.Retire(0);
   if (deferred_error_) {
     std::rethrow_exception(std::exchange(deferred_error_, nullptr));
   }
@@ -85,10 +111,21 @@ void Qwen38GraphSession::ReleaseForTeardown() noexcept {
   try {
     Release();
   } catch (...) {
+    Poison();
     if (!deferred_error_) {
       deferred_error_ = std::current_exception();
     }
   }
+}
+
+void Qwen38GraphSession::ReleaseSlot(size_t slot) {
+  if (slot != 0) throw std::out_of_range("Fixed-slot retirement index out of range.");
+  Release();
+}
+
+void Qwen38GraphSession::ReleaseSlotForTeardown(size_t slot) noexcept {
+  if (slot != 0) return;
+  ReleaseForTeardown();
 }
 
 Qwen38StepResult Qwen38GraphSession::Step(const Qwen38StepRequest& request) {
@@ -116,6 +153,10 @@ Qwen38StepResult Qwen38GraphSession::Step(const Qwen38StepRequest& request) {
     }
     device_->PrefillChunk(request.tokens.subspan(prefilled_, chunk));
     prefilled_ += chunk;
+    ++work_metrics_.work_records;
+    work_metrics_.prefill_tokens += chunk;
+    result.prompt_tokens_processed = chunk;
+    result.prompt_complete = prefilled_ == request.tokens.size();
     if (prefilled_ < request.tokens.size()) {
       return result;
     }
@@ -136,6 +177,8 @@ Qwen38StepResult Qwen38GraphSession::Step(const Qwen38StepRequest& request) {
   }
 
   const Qwen38CycleRecord record = device_->WaitCycle();
+  ++work_metrics_.work_records;
+  ++work_metrics_.target_forward_passes;
   const std::array<int32_t, 4> predictions{
       static_cast<int32_t>(record.pred0),
       static_cast<int32_t>(record.pred1),
@@ -143,6 +186,17 @@ Qwen38StepResult Qwen38GraphSession::Step(const Qwen38StepRequest& request) {
       static_cast<int32_t>(record.pred3),
   };
   const size_t produced = record.TokenCount();
+  if (produced == 0 || produced > predictions.size() || record.accepted_count < 0 ||
+      record.proposed_count < 0 || record.proposed_count > 3 ||
+      (record.accepted_count > 0 && record.accepted_count > record.proposed_count)) {
+    throw std::logic_error("Qwen backend returned a malformed cycle record.");
+  }
+  const std::array<int64_t, 4> raw{record.pred0, record.pred1, record.pred2, record.pred3};
+  for (size_t i = 0; i < produced; ++i) {
+    if (raw[i] < 0 || raw[i] > std::numeric_limits<int32_t>::max()) {
+      throw std::logic_error("Qwen backend returned an invalid token representation.");
+    }
+  }
   size_t count = produced;
   bool stop_in_cycle = false;
   for (size_t i = 0; i < count; ++i) {
@@ -163,13 +217,14 @@ Qwen38StepResult Qwen38GraphSession::Step(const Qwen38StepRequest& request) {
     device_->CheckDecodeStatus();  // nothing is in flight now: a device that accumulated an error reports it here
   }
 
-  for (size_t i = 0; i < committed; ++i) {
+  for (size_t i = 0; i < produced; ++i) {
     result.tokens[i] = predictions[i];
   }
-  result.count = committed;
+  result.count = produced;
   const size_t n_prop = record.proposed_count > 1 ? static_cast<size_t>(record.proposed_count) : 1;
   const size_t n_acc =
       record.accepted_count > 0 ? static_cast<size_t>(record.accepted_count) : (record.accepted ? 1 : 0);
+  result.speculation = SpeculativeRowMetrics{n_prop, n_acc};
   pending_step_ = PendingStep{/*active=*/true, /*is_decode_cycle=*/true, /*mtp=*/device_->MtpEnabled(),
                               /*proposed=*/n_prop, /*accepted=*/n_acc, /*produced=*/produced};
   return result;
@@ -193,10 +248,8 @@ void Qwen38GraphSession::OnStepCommitted(const RequestStepResult& result) {
   if (step.mtp) {
     const size_t n_prop = step.proposed > 0 ? step.proposed : 1;
     const size_t effective_accepted = std::min(step.accepted, emitted);
-    // Draft positions the Engine examined before the turn ended, as Engine::RecordSpeculativeCommit counts them: each
-    // accepted draft it consumed (an EOS is consumed without being delivered), plus the rejected position only when it
-    // got as far as the correction token. Whatever follows the terminal token (limit, stop string, EOS) is never examined.
-    const size_t consumed = emitted + (result.finish_reason == GenerationFinishReason::EosToken ? 1 : 0);
+    // Count examined draft positions, including a terminal EOS which Request consumes without appending.
+    const size_t consumed = result.candidates_consumed;
     const size_t n_eval =
         std::min(consumed, step.accepted) + ((consumed > step.accepted && step.accepted < n_prop) ? 1 : 0);
     ++stats_.target_verify_forward_passes;
@@ -252,70 +305,6 @@ void Qwen38GraphSession::AddStats(SpeculativeStats& stats) const {
 }
 
 // ------------------------------------------------------------------------------------------------
-// Cache manager
-// ------------------------------------------------------------------------------------------------
-Qwen38GraphCacheManager::Qwen38GraphCacheManager(std::shared_ptr<Model> model, std::shared_ptr<Qwen38GraphSession> session)
-    : CacheManager{std::move(model)}, session_{std::move(session)} {
-  if (!session_) {
-    throw std::invalid_argument("Qwen38GraphCacheManager requires a session.");
-  }
-}
-
-bool Qwen38GraphCacheManager::CanAllocate(const std::vector<std::shared_ptr<Request>>& requests) const {
-  // One slot: more than one row never fits, and the resident row can only be replaced once its turn is over.
-  if (requests.size() != 1) {
-    return false;
-  }
-  return !resident_ || IsTurnComplete(resident_->status_) || IsClosed(resident_->status_);
-}
-
-void Qwen38GraphCacheManager::Allocate(const std::vector<std::shared_ptr<Request>>& requests) {
-  if (!CanAllocate(requests)) {
-    throw std::runtime_error("The qwen38_flash_graph backend serves one Request at a time.");
-  }
-  if (resident_) {
-    session_->ReleaseForTeardown();
-  }
-  resident_ = requests.front();
-}
-
-void Qwen38GraphCacheManager::Deallocate(std::vector<std::shared_ptr<Request>>& requests) {
-  if (!resident_ || requests.size() != 1 || requests.front() != resident_) {
-    throw std::runtime_error("Cannot dynamically deallocate statically batched requests.");
-  }
-  session_->Release();
-  resident_.reset();
-}
-
-void Qwen38GraphCacheManager::ValidateRewind(const std::shared_ptr<Request>&) const {
-  // The sole resident row owns the whole slot, so releasing it for a replay never affects a peer.
-}
-
-void Qwen38GraphCacheManager::ReleaseForRewind(const std::shared_ptr<Request>& request) {
-  if (!IsResident(request)) {
-    return;
-  }
-  session_->Release();
-  resident_.reset();
-}
-
-void Qwen38GraphCacheManager::DetachRequestForTeardown(const std::shared_ptr<Request>& request) noexcept {
-  if (!IsResident(request)) {
-    return;
-  }
-  session_->ReleaseForTeardown();
-  resident_.reset();
-}
-
-std::vector<std::shared_ptr<Request>> Qwen38GraphCacheManager::AllocatedRequests() const {
-  return resident_ ? std::vector<std::shared_ptr<Request>>{resident_} : std::vector<std::shared_ptr<Request>>{};
-}
-
-bool Qwen38GraphCacheManager::IsResident(const std::shared_ptr<Request>& request) const {
-  return resident_ && resident_ == request;
-}
-
-// ------------------------------------------------------------------------------------------------
 // Executor
 // ------------------------------------------------------------------------------------------------
 void Qwen38GraphExecutor::ValidateTurn(const EffectiveTurnPolicy& policy, const TurnOptions& options) const {
@@ -343,8 +332,6 @@ void Qwen38GraphExecutor::ValidateTurn(const EffectiveTurnPolicy& policy, const 
 }
 
 void Qwen38GraphExecutor::Decode(ScheduledRequests& scheduled_requests, ExecutionContext&) {
-  // Selecting its own tokens means the step always reports through the executor path, even when it commits none.
-  scheduled_requests.StageExecutorTokens(0, {});
   for (size_t row = 0; row < scheduled_requests.size(); ++row) {
     const auto& request = scheduled_requests[row];
     if (!IsExecuting(request->status_)) {
@@ -358,14 +345,35 @@ void Qwen38GraphExecutor::Decode(ScheduledRequests& scheduled_requests, Executio
     step.tokens = request->TokensCpu();
     step.token_budget = request->RemainingTurnTokenBudget();
     step.session_budget = static_cast<size_t>(used) < session_limit ? session_limit - static_cast<size_t>(used) : 0;
+    const auto operation = session_->Plan(row, step);
+    scheduled_requests.BeginBackendStep({operation});
     const Qwen38StepResult result = session_->Step(step);
-    scheduled_requests.StageExecutorTokens(row, std::span<const int32_t>{result.tokens.data(), result.count});
+    BackendRowResult backend_row;
+    backend_row.key = operation.key;
+    if (result.prompt_tokens_processed > 0 || result.prompt_complete) {
+      backend_row.prefill = PrefillProgress{result.prompt_tokens_processed, result.prompt_complete};
+    }
+    if (result.count > 0) {
+      SelectedTokenBlock tokens;
+      if (result.count > tokens.candidates.size())
+        throw std::logic_error("Backend candidate block exceeds its negotiated width.");
+      tokens.candidate_count = result.count;
+      tokens.speculation = result.speculation;
+      std::copy_n(result.tokens.begin(), result.count, tokens.candidates.begin());
+      backend_row.selected_tokens = std::move(tokens);
+    }
+    session_->Collected(backend_row);
+    scheduled_requests.StageBackendRow(row, std::move(backend_row));
     return;  // one resident row
   }
+  scheduled_requests.BeginBackendStep({});
 }
 
 void Qwen38GraphExecutor::OnStepCommitted(const ScheduledRequests& scheduled_requests,
                                           std::span<const RequestStepResult> results) {
+  for (const auto& ack : scheduled_requests.CommitAcks()) {
+    session_->Acknowledge(ack);
+  }
   for (size_t row = 0; row < scheduled_requests.size() && row < results.size(); ++row) {
     if (scheduled_requests[row].get() == session_->Owner()) {
       session_->OnStepCommitted(results[row]);

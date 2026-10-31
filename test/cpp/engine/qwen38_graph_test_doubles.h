@@ -84,10 +84,14 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
 
   // ---- fault injection ----
   bool fail_wait{};
+  bool malformed_cycle_count{};
+  bool context_healthy{true};
   bool fail_status_check{};  // every CheckDecodeStatus() of a started decode reports error bits
   size_t fail_cycle{};       // 1-based cycle of a decode that accumulates error bits when it completes (0 = none)
 
   // ---- Qwen38DecodeDevice ----
+  void MarkContextFailed() noexcept override { context_healthy = false; }
+  bool ContextIsHealthy() const noexcept override { return context_healthy; }
   int Capacity() const override { return capacity_; }
   bool MtpEnabled() const override { return mtp_; }
 
@@ -162,6 +166,11 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
     inflight_ = false;
     if (fail_cycle != 0 && cycle_ == fail_cycle) throw std::runtime_error("injected device validation failure");
     Qwen38CycleRecord record;
+    if (malformed_cycle_count) {
+      record.accepted_count = 100;
+      record.proposed_count = 100;
+      return record;
+    }
     const size_t length = ledger_.Length();
     size_t accepted_drafts = 0;
     if (accepted_counts_.empty()) {
