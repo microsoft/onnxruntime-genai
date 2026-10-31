@@ -154,32 +154,31 @@ Qwen38ReplayGeometry ValidateGatedDeltaNet(const Qwen38ReplayRequest& request) {
 Qwen38ReplayGeometry ValidateConvolution(const Qwen38ReplayRequest& request) {
   const Qwen38ReplayTensor& state = request.state;
   const Qwen38ReplayTensor& value = request.update;
-  RequireShape(request, state, 3, "[batch, channels, history]");
+  RequireShape(request, state, 3, "[batch, channels, history] or [batch, history, channels]");
   RequireShape(request, value, 3, "[batch, capacity, channels]");
   RequireCopyableElements(request);
   RequireCapacity(request);
   RequireTransitions(request);
 
-  // The kernel indexes the state as [channels, history]. The channel count is that of the update, which the state has to
-  // match in its second dimension; when it matches in its third instead, the state is history-first and replaying it as
-  // channel-first would shift its channels. When history == channels the layouts cannot be told apart: the exporter writes
-  // channel-first, which is what such a state is taken as.
+  // The channel count is the last dimension of the update. The state has it in its second dimension (channel-first,
+  // [channels, history]: what the exporter writes) or in its third (history-first, [history, channels]); the plane reads the
+  // layout from the descriptor, so both replay correctly. When history == channels the layouts cannot be told apart and the
+  // state is taken as channel-first.
   const int64_t channels = value.shape[2];
-  if (state.shape[1] != channels) {
-    if (state.shape[2] == channels) {
-      Reject(request, Describe(state) + " has the " + std::to_string(channels) + " channels of " + Describe(value) +
-                          " in its last dimension: history-first conv state is not supported by the compact replay, which "
-                          "needs [batch, " +
-                          std::to_string(channels) + " channels, history]");
-    }
-    Reject(request, "neither the second nor the third dimension of " + Describe(state) + " is the " +
-                        std::to_string(channels) + " channels of " + Describe(value) +
-                        ", expected a channel-first [batch, " + std::to_string(channels) + " channels, history] state");
-  }
-
   Qwen38ReplayGeometry geometry;
+  if (state.shape[1] == channels) {
+    geometry.layout = QWEN38_PLANE_CONV_STATE_CHANNEL_FIRST;
+    geometry.state_width = Dimension(state, 2);
+  } else if (state.shape[2] == channels) {
+    geometry.layout = QWEN38_PLANE_CONV_STATE_HISTORY_FIRST;
+    geometry.state_width = Dimension(state, 1);
+  } else {
+    Reject(request, "neither the second nor the third dimension of " + Describe(state) + " is the " +
+                        std::to_string(channels) + " channels of " + Describe(value) + ", expected [batch, " +
+                        std::to_string(channels) + " channels, history] or [batch, history, " + std::to_string(channels) +
+                        " channels]");
+  }
   geometry.channel_count = static_cast<uint64_t>(channels);
-  geometry.state_width = Dimension(state, 2);
   geometry.element_size = static_cast<uint32_t>(state.element_size);
   return geometry;
 }
