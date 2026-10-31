@@ -564,16 +564,13 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
   const std::string ple_name = "ple_embeddings." + std::to_string(ple_layer_);
 
   if (f.unified) {
-    if (dflash_ && dflash_prompt_rows_) {
-      Draft(d_dflash_prompt_.data(), dflash_prompt_rows_, dflash_prompt_position_, 0, false);
-      dflash_prompt_rows_ = 0;
-      dflash_ingested_in_turn_ = true;
+    if (dflash_) {
+      // The chunk the previous call saved is still in the buffer: ingest it now unless it ends before the context window of
+      // the drafter, measured in absolute positions from the end of the prompt announced for the turn.
+      if (const auto saved = dflash_prompt_.BeginCall(total_expected)) {
+        Draft(d_dflash_prompt_.data(), saved->rows, saved->position, 0, false);
+      }
     }
-    const size_t dflash_ctx_win =
-        (dflash_ && model_.config_->model.dflash2.sliding_window > 0)
-            ? static_cast<size_t>(model_.config_->model.dflash2.sliding_window +
-                                  model_.config_->model.dflash2.block_size)
-            : 0;
     MutedPrefill(true);
     size_t last_m = 1;
     for (size_t lo = 0; lo < n;) {
@@ -704,14 +701,9 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
       SyncStream();
       f.dense_length += m;
       if (dflash_) {
-        if (lo + m < n) {
-          if (dflash_ingested_in_turn_ || dflash_ctx_win == 0 || (n - (lo + m) < dflash_ctx_win)) {
-            Draft(d_dflash_prompt_.data(), m, pos, 0, false);
-            dflash_ingested_in_turn_ = true;
-          }
-        } else {
-          dflash_prompt_rows_ = m;
-          dflash_prompt_position_ = pos;
+        const Qwen38DflashPromptFeatures::Chunk produced{pos, m};
+        if (const auto ingest = dflash_prompt_.ChunkDone(produced, lo + m == n, total_expected)) {
+          Draft(d_dflash_prompt_.data(), ingest->rows, ingest->position, 0, false);
         }
       }
       lo += m;

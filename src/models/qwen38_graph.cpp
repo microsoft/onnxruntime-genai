@@ -226,6 +226,9 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
     dflash_ = std::make_unique<Dflash2Drafter>(
         dflash_model_, page_size, Dflash2Drafter::PoolBlocks(*model_.config_, page_size, 1), 1);
     d_dflash_prompt_ = PlaneBuffer(plane_, size_t(fast_->chunk) * kDflashWidth * 2, stream_);
+    const auto& dflash_config = model_.config_->model.dflash2;
+    dflash_prompt_ = Qwen38DflashPromptFeatures{
+        dflash_config.sliding_window > 0 ? static_cast<size_t>(dflash_config.sliding_window + dflash_config.block_size) : 0};
   }
   Reset();
   if (dflash_) {
@@ -242,13 +245,12 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
       FastAppend(prompt);
       FastHandoff();
       size_t pos = 0;
-      if (dflash_prompt_rows_ > 0) {
+      if (const auto saved = dflash_prompt_.TakeSavedChunk()) {
         for (int rep = 0; rep < 5; ++rep) {
           dflash_->ReleaseAll();
-          Draft(d_dflash_prompt_.data(), dflash_prompt_rows_, dflash_prompt_position_, 1000, true);
+          Draft(d_dflash_prompt_.data(), saved->rows, saved->position, 1000, true);
         }
-        pos = dflash_prompt_position_ + dflash_prompt_rows_;
-        dflash_prompt_rows_ = 0;
+        pos = saved->position + saved->rows;
       }
       for (size_t r = 1; r <= static_cast<size_t>(verify_rows_); ++r) {
         for (int rep = 0; rep < 5; ++rep) {
@@ -864,8 +866,7 @@ bool Qwen38GraphEngine::ContextIsHealthy() const noexcept { return model_.IsExec
 void Qwen38GraphEngine::Reset() {
   SyncStream();
   if (dflash_) dflash_->ReleaseAll();
-  dflash_prompt_rows_ = 0;
-  dflash_ingested_in_turn_ = false;
+  dflash_prompt_.Reset();
   for (auto& bank : banks_)
     if (bank.arena.data()) plane_.Check(plane_.device_memset(bank.arena.data(), 0, bank.arena.size(), stream_), "clear bank");
   for (auto& entry : store_) plane_.Check(plane_.device_memset(entry.second->ptr, 0, entry.second->Bytes(), stream_), "clear store");
@@ -1366,9 +1367,9 @@ void Qwen38GraphEngine::BeginDecode(bool run_cycle) {
     FastHandoff();
     const int64_t state[2] = {pending_, static_cast<int64_t>(ledger_.Length())};
     WriteCtl(0, std::span<const int64_t>(state, 2));
-    if (!dflash_prompt_rows_) throw std::runtime_error("DFlash experiment lacks prompt features");
-    Draft(d_dflash_prompt_.data(), dflash_prompt_rows_, dflash_prompt_position_, pending_, true);
-    dflash_prompt_rows_ = 0;
+    const auto last_chunk = dflash_prompt_.TakeSavedChunk();
+    if (!last_chunk) throw std::runtime_error("DFlash experiment lacks prompt features");
+    Draft(d_dflash_prompt_.data(), last_chunk->rows, last_chunk->position, pending_, true);
     EnqueueFold();
     return;
   }
