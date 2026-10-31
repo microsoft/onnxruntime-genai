@@ -1488,15 +1488,18 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
             *p_device_->GetMemoryInfo(), embed_mapping_->device_data(),
             Qwen38EmbeddingTableBytes(embed_format, embed_shape[0], embed_shape[1]), embed_shape,
             ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16));
+        for (const char* name : {"model.embed_tokens.weight", "head.mtp.embed_tokens.weight"}) {
+          session_options_->AddInitializer(name, *embed_values_.back());
+        }
       } else {
         embed_is_int8_ = true;
         const size_t table_i8_bytes = static_cast<size_t>(embed_shape[0]) * static_cast<size_t>(embed_shape[1]);
         embed_values_.push_back(OrtValue::CreateTensor(
             *p_device_->GetMemoryInfo(), embed_mapping_->device_data(), table_i8_bytes, embed_shape,
             ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8));
-      }
-      for (const char* name : {"model.embed_tokens.weight", "head.mtp.embed_tokens.weight"}) {
-        session_options_->AddInitializer(name, *embed_values_.back());
+        for (const char* name : {"model.embed_tokens.weight", "head.mtp.embed_tokens.weight"}) {
+          session_options_->AddInitializer(name, *embed_values_.back());
+        }
       }
     }
   }
