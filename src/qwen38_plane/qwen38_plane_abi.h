@@ -104,8 +104,8 @@ typedef struct Qwen38StateReplayDesc {
 // step in a single call, from the control words `state` (int64): row r takes its token from word {0, 2, 8, 9, 10, 11, 12, 13}[r]
 // and runs at position state[1] + r, and its n-gram context follows the tokens of the rows before it (row 0 starts from
 // ctx_in). For row r it writes input_ids[r] and position_ids[r] (int64), past_pos[position], ple_out + r * n_heads * head_dim
-// (bfloat16) and ctx_out[2r .. 2r + 1] (the token before it, then its own). Only row 0 writes committed[0] (int32); a position
-// outside the table sets bit 0 of state[5], as for one row.
+// (bfloat16) and ctx_out[2r .. 2r + 1] (the token before it, then its own). Only row 0 writes committed[0] (int32), and a null
+// committed pointer skips it, as for one row; a position outside the table sets bit 0 of state[5], as for one row.
 //
 // The module keeps process-wide state (the staged tables registered through set_ple_host_params) that is shared by every
 // loader of the same library file. A loader calls attach once the module is loaded and validated and detach once before it
