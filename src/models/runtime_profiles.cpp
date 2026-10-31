@@ -209,6 +209,12 @@ std::optional<uint64_t> ParseCgroupBytes(std::string_view text) {
   return value;
 }
 
+// Whether `controllers`, the content of cgroup.controllers, lists the controller `name`.
+bool ControllersInclude(std::string_view controllers, std::string_view name) {
+  const std::vector<std::string_view> fields = SplitFields(TrimWhitespace(controllers));
+  return std::find(fields.begin(), fields.end(), name) != fields.end();
+}
+
 }  // namespace
 
 CgroupMemoryLimits ResolveProcessCgroupMemory(const HostFileReader& read_file) {
@@ -257,10 +263,21 @@ CgroupMemoryLimits ResolveProcessCgroupMemory(const HostFileReader& read_file) {
   if (!read_file(JoinPath(directories.back(), "cgroup.controllers"))) return with_status(Status::kUnresolved);
 
   CgroupMemoryLimits limits = with_status(Status::kResolved);
-  for (const std::string& directory : directories) {
-    // The hierarchy root and the cgroups without the memory controller have no memory.max.
+  for (size_t level = 0; level < directories.size(); ++level) {
+    const std::string& directory = directories[level];
     const auto max_text = read_file(JoinPath(directory, "memory.max"));
-    if (!max_text || TrimWhitespace(*max_text) == "max") continue;
+    if (!max_text) {
+      // memory.max does not exist in the hierarchy root or in a cgroup without the memory controller, and neither
+      // bounds the process. A cgroup that lists the controller does have the file, so one that cannot be read there
+      // must not read as unlimited.
+      const bool hierarchy_root = level == 0 && mount_depth == 0;
+      const auto controllers = read_file(JoinPath(directory, "cgroup.controllers"));
+      if (!controllers || (!hierarchy_root && ControllersInclude(*controllers, "memory"))) {
+        return with_status(Status::kUnresolved);
+      }
+      continue;
+    }
+    if (TrimWhitespace(*max_text) == "max") continue;
     const auto max_bytes = ParseCgroupBytes(*max_text);
     if (!max_bytes) return with_status(Status::kUnresolved);
 

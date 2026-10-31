@@ -50,7 +50,9 @@ using HostFileReader = std::function<std::optional<std::string>(const std::strin
 // Resolves the cgroup v2 memory bounds of the calling process. The process's own cgroup comes from /proc/self/cgroup
 // and is located through the cgroup2 mount in /proc/self/mountinfo, whose root may be a sub-cgroup (a container that
 // sees only its own cgroup). The limit and headroom are the tightest over that cgroup and each ancestor up to the
-// mount root; a level whose memory.max is "max" or that has no memory controller does not bound the process. The
+// mount root; a level whose memory.max is "max" or that has no memory controller does not bound the process. A level
+// that has the memory controller (it is listed in its cgroup.controllers) but whose memory.max cannot be read leaves
+// the result unresolved, as the hierarchy root is the only cgroup that has the controller yet no memory.max. The
 // files are read through `read_file` so that the resolution does not depend on the machine it runs on.
 CgroupMemoryLimits ResolveProcessCgroupMemory(const HostFileReader& read_file);
 

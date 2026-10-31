@@ -641,9 +641,11 @@ CgroupMemoryLimits ResolveCgroupMemory(const FakeHostFiles& files) {
   });
 }
 
-// The files every cgroup directory has.
-void AddCgroup(FakeHostFiles& files, const std::string& directory) {
-  files[directory + "/cgroup.controllers"] = "cpuset cpu io memory pids\n";
+// The files every cgroup directory has. cgroup.controllers lists the controllers the cgroup has: a cgroup that has the
+// memory controller also has memory.max and memory.current (see AddMemoryFiles), except for the hierarchy root.
+void AddCgroup(FakeHostFiles& files, const std::string& directory, bool has_memory_controller = true) {
+  files[directory + "/cgroup.controllers"] =
+      has_memory_controller ? "cpuset cpu io memory pids\n" : "cpuset cpu io pids\n";
 }
 
 // The files of a cgroup that has the memory controller. `max` is "max" or a number of bytes.
@@ -792,6 +794,7 @@ TEST(ConfigTest, CgroupMemoryTakesTheTightestAncestorLimitAndHeadroom) {
   // The worker does not have the memory controller of its own: the service's limit is the one that applies.
   files.erase("/sys/fs/cgroup/system.slice/llm.service/worker-1/memory.max");
   files.erase("/sys/fs/cgroup/system.slice/llm.service/worker-1/memory.current");
+  AddCgroup(files, "/sys/fs/cgroup/system.slice/llm.service/worker-1", /*has_memory_controller=*/false);
   AddMemoryFiles(files, "/sys/fs/cgroup/system.slice/llm.service", std::to_string(16 * kGiB), 15 * kGiB);
   cgroup = ResolveCgroupMemory(files);
   EXPECT_EQ(cgroup.status, CgroupStatus::kResolved);
@@ -828,13 +831,55 @@ TEST(ConfigTest, CgroupMemoryIsUnboundedWhenEveryLevelIsUnlimited) {
       "cgroup2 cgroup2 rw,nsdelegate\n"
       "27 25 0:24 / /sys/fs/cgroup/memory rw,nosuid,nodev,noexec,relatime shared:10 - "
       "cgroup cgroup rw,memory\n";
-  AddCgroup(files, "/sys/fs/cgroup/unified");
-  AddCgroup(files, "/sys/fs/cgroup/unified/system.slice");
-  AddCgroup(files, "/sys/fs/cgroup/unified/system.slice/llm.service");
+  AddCgroup(files, "/sys/fs/cgroup/unified", /*has_memory_controller=*/false);
+  AddCgroup(files, "/sys/fs/cgroup/unified/system.slice", /*has_memory_controller=*/false);
+  AddCgroup(files, "/sys/fs/cgroup/unified/system.slice/llm.service", /*has_memory_controller=*/false);
   const CgroupMemoryLimits hybrid = ResolveCgroupMemory(files);
   EXPECT_EQ(hybrid.status, CgroupStatus::kResolved);
   EXPECT_FALSE(hybrid.limit.has_value());
   EXPECT_FALSE(hybrid.headroom.has_value());
+}
+
+TEST(ConfigTest, CgroupMemoryMaxMayBeMissingOnlyFromTheHierarchyRootAndCgroupsWithoutTheMemoryController) {
+  FakeHostFiles files;
+  files["/proc/self/cgroup"] = "0::/app/job\n";
+  files["/proc/self/mountinfo"] = std::string{kHostMountinfo};
+  AddCgroup(files, "/sys/fs/cgroup");  // the hierarchy root lists the memory controller but has no memory.max
+  AddCgroup(files, "/sys/fs/cgroup/app", /*has_memory_controller=*/false);
+  AddCgroup(files, "/sys/fs/cgroup/app/job");
+  AddMemoryFiles(files, "/sys/fs/cgroup/app/job", std::to_string(8 * kGiB), 2 * kGiB);
+  CgroupMemoryLimits cgroup = ResolveCgroupMemory(files);
+  EXPECT_EQ(cgroup.status, CgroupStatus::kResolved);
+  EXPECT_EQ(cgroup.limit, std::optional<uint64_t>{8 * kGiB});
+  EXPECT_EQ(cgroup.headroom, std::optional<uint64_t>{6 * kGiB});
+
+  // memory.max exists wherever the memory controller does, so one that is missing from the process's cgroup, or from
+  // an ancestor, is not an unlimited level.
+  auto without_leaf_max = files;
+  without_leaf_max.erase("/sys/fs/cgroup/app/job/memory.max");
+  EXPECT_EQ(ResolveCgroupMemory(without_leaf_max).status, CgroupStatus::kUnresolved);
+  auto with_ancestor_controller = files;
+  AddCgroup(with_ancestor_controller, "/sys/fs/cgroup/app");
+  EXPECT_EQ(ResolveCgroupMemory(with_ancestor_controller).status, CgroupStatus::kUnresolved);
+
+  // A level without memory.max and without a readable cgroup.controllers cannot be classified.
+  auto without_controllers = files;
+  without_controllers.erase("/sys/fs/cgroup/app/cgroup.controllers");
+  EXPECT_EQ(ResolveCgroupMemory(without_controllers).status, CgroupStatus::kUnresolved);
+
+  // A mount rooted at a sub-cgroup does not show the hierarchy root, so its first level needs memory.max as well.
+  FakeHostFiles sub_mount;
+  sub_mount["/proc/self/cgroup"] = "0::/app/job\n";
+  sub_mount["/proc/self/mountinfo"] =
+      "30 22 0:26 /app /sys/fs/cgroup ro,nosuid,nodev,noexec,relatime - cgroup2 cgroup rw\n";
+  AddCgroup(sub_mount, "/sys/fs/cgroup");
+  AddCgroup(sub_mount, "/sys/fs/cgroup/job");
+  AddMemoryFiles(sub_mount, "/sys/fs/cgroup/job", std::to_string(8 * kGiB), 2 * kGiB);
+  EXPECT_EQ(ResolveCgroupMemory(sub_mount).status, CgroupStatus::kUnresolved);
+  AddMemoryFiles(sub_mount, "/sys/fs/cgroup", std::to_string(16 * kGiB), 4 * kGiB);
+  cgroup = ResolveCgroupMemory(sub_mount);
+  EXPECT_EQ(cgroup.status, CgroupStatus::kResolved);
+  EXPECT_EQ(cgroup.limit, std::optional<uint64_t>{8 * kGiB});
 }
 
 TEST(ConfigTest, CgroupMemoryTreatsAZeroMemoryMaxAsAHardLimit) {
@@ -931,6 +976,7 @@ TEST(ConfigTest, UnreadableOrUnparseableCgroupInputsLeaveTheHostMemoryUnknown) {
     files["/proc/self/mountinfo"] = std::string{kHostMountinfo};
     AddCgroup(files, "/sys/fs/cgroup");
     AddCgroup(files, "/sys/fs/cgroup/app");
+    AddMemoryFiles(files, "/sys/fs/cgroup/app", "max", 3 * kGiB);
     AddCgroup(files, "/sys/fs/cgroup/app/job");
     AddMemoryFiles(files, "/sys/fs/cgroup/app/job", std::to_string(8 * kGiB), 2 * kGiB);
     return files;
@@ -965,6 +1011,16 @@ TEST(ConfigTest, UnreadableOrUnparseableCgroupInputsLeaveTheHostMemoryUnknown) {
       {"memory.max beyond 64 bits", [&](FakeHostFiles& f) { f[job + "/memory.max"] = "18446744073709551616\n"; }},
       {"missing memory.current", [&](FakeHostFiles& f) { f.erase(job + "/memory.current"); }},
       {"unparseable memory.current", [&](FakeHostFiles& f) { f[job + "/memory.current"] = "n/a\n"; }},
+      // The cgroup lists the memory controller, so memory.max exists and not being able to read it is not "unlimited".
+      {"unreadable memory.max in a cgroup with the memory controller",
+       [&](FakeHostFiles& f) { f.erase(job + "/memory.max"); }},
+      {"unreadable memory.max in an ancestor with the memory controller",
+       [](FakeHostFiles& f) { f.erase("/sys/fs/cgroup/app/memory.max"); }},
+      {"unreadable memory.max and cgroup.controllers in an ancestor",
+       [](FakeHostFiles& f) {
+         f.erase("/sys/fs/cgroup/app/memory.max");
+         f.erase("/sys/fs/cgroup/app/cgroup.controllers");
+       }},
   };
   for (const auto& [name, corrupt] : corruptions) {
     auto files = valid_files();

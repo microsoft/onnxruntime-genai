@@ -286,9 +286,10 @@ than the process's own cgroup is honored. A level whose `memory.max` is `max`, o
 controller, does not bound the process, while a `memory.max` of `0` is a limit of zero bytes. cgroup v1
 limits are not consulted, and a system without a cgroup2 mount uses the physical memory unchanged. When
 cgroup v2 applies but the process's cgroup cannot be read or located (an unreadable or malformed
-`/proc/self/cgroup` or `/proc/self/mountinfo`, a cgroup that is not below any cgroup2 mount root, or an
-unparseable `memory.max` or `memory.current`), both host memory facts are unknown rather than falling
-back to the host-wide values.
+`/proc/self/cgroup` or `/proc/self/mountinfo`, a cgroup that is not below any cgroup2 mount root, a
+`memory.max` that cannot be read from a cgroup that lists the memory controller in its
+`cgroup.controllers`, or an unparseable `memory.max` or `memory.current`), both host memory facts are
+unknown rather than falling back to the host-wide values.
 
 A value the platform cannot report (for example the available host memory on macOS) or that could not be
 resolved does not match a profile that bounds it. Because the available host memory never exceeds the
