@@ -83,9 +83,27 @@ Config::SessionOptions ResolveQwen38AuxiliarySessionOptions(const Config::Sessio
                                                             const std::optional<Config::SessionOptions>& configured,
                                                             bool inherit);
 
-// Returns the effective prompt chunk size advertised by a Qwen38Graph configuration (prefill.chunk when fast prefill is
-// enabled, otherwise prefill_chunk_tokens).
+// Returns the effective prompt chunk size of a Qwen38Graph configuration: prefill.chunk, or when that is 0 the default
+// of the prompt path in use (2048 tokens per Engine step through the decode graphs, 8192 per dense chunk when
+// prefill.enabled).
 size_t EffectiveQwen38PrefillChunkTokens(const Config::Model::Qwen38Graph& q);
+
+// Throws a std::runtime_error unless the effective prompt chunk lies in [1, kv_capacity] (dense prefill) or, when the
+// prompt is ingested by the decode graphs (prefill.enabled false), is even so that S=2 pairs stay aligned.
+void ValidateQwen38PrefillChunk(const Config::Model::Qwen38Graph& q);
+
+// The CUDA graphs of the decode stack. ORT keeps one captured graph per annotation id in a session, so every run that
+// binds different buffers needs an id of its own: one per (row count, ring phase) for the target (decode graphs or the
+// fold model), one per (row count, ping-pong direction) for the S=1/S=2 head sessions and one per ring phase for the
+// standalone R=2 head. The ids are derived from the role of the run, they are not configurable, and they are distinct
+// across the sessions of a model. 0 is ORT's default annotation and -1 means "do not capture"; neither is produced.
+enum class Qwen38GraphRun { kTarget,
+                            kHead,
+                            kHeadR2 };
+inline constexpr int kQwen38GraphIdMaxRows = 4;    // verify rows of the target (S=1 .. S=4)
+inline constexpr int kQwen38GraphIdMaxPhases = 8;  // ring banks / ping-pong directions of any decode mode
+// Throws std::out_of_range for a row count or phase beyond the limits above.
+int Qwen38GraphAnnotationId(Qwen38GraphRun run, int rows, int phase);
 
 // The packed QSA indexer pools kQwen38IndexKeyRatio tokens into one compressed index key.
 inline constexpr int kQwen38IndexKeyRatio = 4;
@@ -325,14 +343,15 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   std::vector<std::string> status_labels_;
   bool mtp_enabled_{};
   bool prefill_head_{};
-  bool skip_refeed_{};
   bool fold_{};
-  bool force_reject_{};  // test hook (fold.force_reject): every draft is replaced before its verify
+  bool force_reject_{};  // test hook (ORT_QWEN38_FORCE_REJECT): every draft is replaced before its verify
   int verify_rows_{2};   // rows verified per target forward pass (2 = 1 draft, 3 = 2 drafts, 4 = 3 drafts)
   int num_banks_{Qwen38DecodeLedger::kBanks};
   static constexpr int kBanks = Qwen38DecodeLedger::kBanks;
   static constexpr int kMaxBanks = 5;
   static constexpr int kMaxVerifyRows = 4;
+  static_assert(kMaxBanks <= kQwen38GraphIdMaxPhases && kMaxVerifyRows <= kQwen38GraphIdMaxRows,
+                "every (row count, ring phase) of the decode graphs needs a CUDA graph id");
   static constexpr int kRing = 64;
   static constexpr int kArgmaxBlocks = 16;
 

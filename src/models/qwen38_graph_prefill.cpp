@@ -371,6 +371,7 @@ std::string TailOf(const std::string& name) {
 
 void Qwen38GraphEngine::BuildFastPrefill() {
   const auto& q = model_.config_->model.qwen38_graph;
+  const int configured_chunk = static_cast<int>(EffectiveQwen38PrefillChunkTokens(q));
   auto fast = std::make_unique<FastPrefillState>();
   if (!model_.session_dense_) {
     if (!model_.session_target_ || !model_.session_head_r2_)
@@ -380,7 +381,7 @@ void Qwen38GraphEngine::BuildFastPrefill() {
     fast->head_kv = model_.session_head_r2_.get();
     fast->dense_info.Add(*fast->dense);
     fast->head_kv_info.Add(*fast->head_kv);
-    fast->chunk = (q.prefill.chunk > 0) ? std::min<int>(q.prefill.chunk, 2048) : 512;
+    fast->chunk = std::min(configured_chunk, 2048);
     if (fast->chunk < 1 || fast->chunk > capacity_) throw std::runtime_error("qwen38_graph: invalid prefill.chunk");
     fast->dense_inputs = fast->dense->GetInputNames();
     fast->dense_outputs = fast->dense->GetOutputNames();
@@ -414,7 +415,8 @@ void Qwen38GraphEngine::BuildFastPrefill() {
   fast->head_kv = model_.session_head_kv_.get();
   fast->dense_info.Add(*fast->dense);
   fast->head_kv_info.Add(*fast->head_kv);
-  fast->chunk = (q.prefill.chunk >= 2048) ? std::min<int>(std::max(q.prefill.chunk, 4096), capacity_) : q.prefill.chunk;
+  fast->chunk =
+      (configured_chunk >= 2048) ? std::min<int>(std::max(configured_chunk, 4096), capacity_) : configured_chunk;
   fast->consts = model_.qsa_constants_.get();
   if (fast->chunk < 1 || fast->chunk > capacity_) throw std::runtime_error("qwen38_graph: invalid prefill.chunk");
   fast->dense_inputs = fast->dense->GetInputNames();

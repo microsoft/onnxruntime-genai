@@ -6,6 +6,8 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <set>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -146,15 +148,9 @@ TEST(Qwen38GraphConfigTest, DefaultsAreUnconfigured) {
   Config config;
   EXPECT_FALSE(config.model.qwen38_graph.IsConfigured());
   EXPECT_EQ(config.model.qwen38_graph.kv_capacity, 33028);
-  EXPECT_EQ(config.model.qwen38_graph.target_s1_graph_id, 41);
-  EXPECT_EQ(config.model.qwen38_graph.target_s2_graph_id, 51);
-  EXPECT_EQ(config.model.qwen38_graph.head_s1_graph_id, 61);
-  EXPECT_EQ(config.model.qwen38_graph.head_s2_graph_id, 63);
-  EXPECT_EQ(config.model.qwen38_graph.prefill_chunk_tokens, 2048);
   EXPECT_TRUE(config.model.qwen38_graph.warmup);
   EXPECT_TRUE(config.model.qwen38_graph.mtp.enabled);
   EXPECT_TRUE(config.model.qwen38_graph.mtp.prefill_head);
-  EXPECT_FALSE(config.model.qwen38_graph.mtp.skip_refeed);
 }
 
 TEST(Qwen38GraphConfigTest, ParsesEverySetting) {
@@ -163,13 +159,8 @@ TEST(Qwen38GraphConfigTest, ParsesEverySetting) {
     "plane_library":"libs/libqwen38_plane.so",
     "ple_table":"ple_table.txt",
     "kv_capacity":1024,
-    "target_s1_graph_id":10,
-    "target_s2_graph_id":20,
-    "head_s1_graph_id":30,
-    "head_s2_graph_id":40,
-    "prefill_chunk_tokens":512,
     "warmup":false,
-    "mtp":{"enabled":false,"prefill_head":false,"skip_refeed":true},
+    "mtp":{"enabled":false,"prefill_head":false},
     "head":{"filename_s1":"head/s1.onnx","filename_s2":"head/s2.onnx",
             "session_options":{"custom_ops_libraries":["libs/a.so","libs/b.so"],
                                "provider_options":[{"cuda":{"enable_cuda_graph":"1"}}]}}
@@ -180,15 +171,9 @@ TEST(Qwen38GraphConfigTest, ParsesEverySetting) {
   EXPECT_EQ(q.plane_library, "libs/libqwen38_plane.so");
   EXPECT_EQ(q.ple_table, "ple_table.txt");
   EXPECT_EQ(q.kv_capacity, 1024);
-  EXPECT_EQ(q.target_s1_graph_id, 10);
-  EXPECT_EQ(q.target_s2_graph_id, 20);
-  EXPECT_EQ(q.head_s1_graph_id, 30);
-  EXPECT_EQ(q.head_s2_graph_id, 40);
-  EXPECT_EQ(q.prefill_chunk_tokens, 512);
   EXPECT_FALSE(q.warmup);
   EXPECT_FALSE(q.mtp.enabled);
   EXPECT_FALSE(q.mtp.prefill_head);
-  EXPECT_TRUE(q.mtp.skip_refeed);
   EXPECT_EQ(q.head.filename_s1, "head/s1.onnx");
   EXPECT_EQ(q.head.filename_s2, "head/s2.onnx");
   ASSERT_TRUE(q.head.session_options.has_value());
@@ -199,11 +184,8 @@ TEST(Qwen38GraphConfigTest, FoldAndPrefillDefaultToOff) {
   Config config;
   const auto& q = config.model.qwen38_graph;
   EXPECT_FALSE(q.fold.enabled);
-  EXPECT_FALSE(q.fold.force_reject);
-  EXPECT_EQ(q.fold.target_graph_id, 71);
-  EXPECT_EQ(q.fold.head_r2.graph_id, 81);
   EXPECT_FALSE(q.prefill.enabled);
-  EXPECT_EQ(q.prefill.chunk, 8192);
+  EXPECT_EQ(q.prefill.chunk, 0);
   EXPECT_EQ(q.prefill.warmup_lengths, (std::vector<int>{8192, 2048, 512, 128, 37}));
 }
 
@@ -212,8 +194,8 @@ TEST(Qwen38GraphConfigTest, ParsesTheFoldAndPrefillSections) {
   OverlayConfig(config, R"({"model":{"type":"qwen38_flash_graph","qwen38_graph":{
     "plane_library":"libs/libqwen38_plane.so",
     "ple_table":"ple_table.txt",
-    "fold":{"enabled":true,"target_graph_id":90,"force_reject":true,
-            "head_r2":{"filename":"head_r2/model.onnx","graph_id":95,
+    "fold":{"enabled":true,
+            "head_r2":{"filename":"head_r2/model.onnx",
                        "session_options":{"custom_ops_libraries":["libs/a.so"]}}},
     "prefill":{"enabled":true,"chunk":4096,"weights_pool":"pool.txt","constants":"qsa.txt",
                "dense":{"filename":"dense/model.onnx","session_options":{"provider_options":[{"cuda":{}}]}},
@@ -224,10 +206,7 @@ TEST(Qwen38GraphConfigTest, ParsesTheFoldAndPrefillSections) {
   const auto& q = config.model.qwen38_graph;
   EXPECT_TRUE(q.IsConfigured());  // no head.filename_s1: the fold head_r2 session is enough
   EXPECT_TRUE(q.fold.enabled);
-  EXPECT_TRUE(q.fold.force_reject);
-  EXPECT_EQ(q.fold.target_graph_id, 90);
   EXPECT_EQ(q.fold.head_r2.filename, "head_r2/model.onnx");
-  EXPECT_EQ(q.fold.head_r2.graph_id, 95);
   ASSERT_TRUE(q.fold.head_r2.session_options.has_value());
   EXPECT_EQ(q.fold.head_r2.session_options->custom_ops_libraries, (std::vector<std::string>{"libs/a.so"}));
   EXPECT_TRUE(q.prefill.enabled);
@@ -247,6 +226,27 @@ TEST(Qwen38GraphConfigTest, RejectsUnknownFoldAndPrefillKeys) {
   EXPECT_THROW(OverlayConfig(config, R"({"model":{"qwen38_graph":{"fold":{"head_r2":{"unknown":1}}}}})"), std::exception);
   EXPECT_THROW(OverlayConfig(config, R"({"model":{"qwen38_graph":{"prefill":{"unknown":1}}}})"), std::exception);
   EXPECT_THROW(OverlayConfig(config, R"({"model":{"qwen38_graph":{"prefill":{"dense":{"unknown":1}}}}})"), std::exception);
+}
+
+// Experimental, test-only and derivable settings are not part of the public configuration.
+TEST(Qwen38GraphConfigTest, RejectsKeysThatAreNotPublicConfiguration) {
+  const char* const overlays[] = {
+      R"({"model":{"qwen38_graph":{"mtp":{"skip_refeed":true}}}})",
+      R"({"model":{"qwen38_graph":{"fold":{"force_reject":true}}}})",
+      R"({"model":{"qwen38_graph":{"fold":{"mtp":{"filename":"mtp.onnx"}}}}})",
+      R"({"model":{"qwen38_graph":{"fold":{"drafter":{"filename":"drafter.onnx"}}}}})",
+      R"({"model":{"qwen38_graph":{"prefill_chunk_tokens":512}}})",
+      R"({"model":{"qwen38_graph":{"target_s1_graph_id":41}}})",
+      R"({"model":{"qwen38_graph":{"target_s2_graph_id":51}}})",
+      R"({"model":{"qwen38_graph":{"head_s1_graph_id":61}}})",
+      R"({"model":{"qwen38_graph":{"head_s2_graph_id":63}}})",
+      R"({"model":{"qwen38_graph":{"fold":{"target_graph_id":71}}}})",
+      R"({"model":{"qwen38_graph":{"fold":{"head_r2":{"graph_id":81}}}}})",
+  };
+  for (const char* overlay : overlays) {
+    Config config;
+    EXPECT_THROW(OverlayConfig(config, overlay), std::exception) << overlay;
+  }
 }
 
 TEST(Qwen38GraphConfigTest, FoldAndPrefillPathsMustStayInsideTheModelFolder) {
@@ -419,28 +419,73 @@ TEST(Qwen38SuffixDrafterTest, ProposesMatchingNgramContinuations) {
   EXPECT_EQ(drafts[2], 60);
 }
 
-TEST(Qwen38GraphConfigTest, FoldAcceptsMtpAndDrafterAliases) {
-  Config c1, c2;
-  OverlayConfig(c1, R"({"model":{"qwen38_graph":{"fold":{"enabled":true,"mtp":{"filename":"mtp.onnx","graph_id":85}}}}})");
-  EXPECT_EQ(c1.model.qwen38_graph.fold.head_r2.filename, "mtp.onnx");
-  EXPECT_EQ(c1.model.qwen38_graph.fold.head_r2.graph_id, 85);
-
-  OverlayConfig(c2, R"({"model":{"qwen38_graph":{"fold":{"enabled":true,"drafter":{"filename":"drafter.onnx"}}}}})");
-  EXPECT_EQ(c2.model.qwen38_graph.fold.head_r2.filename, "drafter.onnx");
-}
-
-TEST(Qwen38GraphConfigTest, EffectivePrefillChunkUsesStepOrFastPrefillSetting) {
+TEST(Qwen38GraphConfigTest, EffectivePrefillChunkIsOneSettingWithAPerPathDefault) {
   Config config;
-  EXPECT_EQ(EffectiveQwen38PrefillChunkTokens(config.model.qwen38_graph), 2048u);
+  EXPECT_EQ(config.model.qwen38_graph.prefill.chunk, 0);
+  EXPECT_EQ(EffectiveQwen38PrefillChunkTokens(config.model.qwen38_graph), 2048u);  // decode-graph steps
 
-  OverlayConfig(config, R"({"model":{"qwen38_graph":{"prefill_chunk_tokens":512}}})");
+  OverlayConfig(config, R"({"model":{"qwen38_graph":{"prefill":{"chunk":512}}}})");
   EXPECT_EQ(EffectiveQwen38PrefillChunkTokens(config.model.qwen38_graph), 512u);
 
   OverlayConfig(config, R"({"model":{"qwen38_graph":{"prefill":{"enabled":true,"chunk":4096}}}})");
   EXPECT_EQ(EffectiveQwen38PrefillChunkTokens(config.model.qwen38_graph), 4096u);
 
-  EXPECT_THROW(OverlayConfig(config, R"({"model":{"qwen38_graph":{"prefill_chunk_tokens":0}}})"), std::runtime_error);
-  EXPECT_THROW(OverlayConfig(config, R"({"model":{"qwen38_graph":{"prefill_chunk_tokens":15}}})"), std::runtime_error);
+  Config fast;
+  OverlayConfig(fast, R"({"model":{"qwen38_graph":{"prefill":{"enabled":true}}}})");
+  EXPECT_EQ(EffectiveQwen38PrefillChunkTokens(fast.model.qwen38_graph), 8192u);  // dense prefill
+
+  Config explicit_default;
+  OverlayConfig(explicit_default, R"({"model":{"qwen38_graph":{"prefill":{"chunk":0}}}})");
+  EXPECT_EQ(EffectiveQwen38PrefillChunkTokens(explicit_default.model.qwen38_graph), 2048u);
+
+  EXPECT_THROW(OverlayConfig(config, R"({"model":{"qwen38_graph":{"prefill":{"chunk":-2}}}})"), std::runtime_error);
+}
+
+TEST(Qwen38GraphConfigTest, PrefillChunkValidation) {
+  Config config;
+  config.model.qwen38_graph.kv_capacity = 4096;
+  EXPECT_NO_THROW(ValidateQwen38PrefillChunk(config.model.qwen38_graph));  // default 2048, even, step path
+
+  // Through the decode graphs every chunk but the last must keep the S=2 pairs aligned: even sizes only.
+  config.model.qwen38_graph.prefill.chunk = 15;
+  EXPECT_THROW(ValidateQwen38PrefillChunk(config.model.qwen38_graph), std::runtime_error);
+  config.model.qwen38_graph.prefill.chunk = 16;
+  EXPECT_NO_THROW(ValidateQwen38PrefillChunk(config.model.qwen38_graph));
+  config.model.qwen38_graph.prefill.chunk = -1;
+  EXPECT_THROW(ValidateQwen38PrefillChunk(config.model.qwen38_graph), std::runtime_error);
+
+  // The dense prefill takes any size in [1, kv_capacity].
+  config.model.qwen38_graph.prefill.enabled = true;
+  config.model.qwen38_graph.prefill.chunk = 15;
+  EXPECT_NO_THROW(ValidateQwen38PrefillChunk(config.model.qwen38_graph));
+  config.model.qwen38_graph.prefill.chunk = 4096;
+  EXPECT_NO_THROW(ValidateQwen38PrefillChunk(config.model.qwen38_graph));
+  config.model.qwen38_graph.prefill.chunk = 4097;
+  EXPECT_THROW(ValidateQwen38PrefillChunk(config.model.qwen38_graph), std::runtime_error);
+  config.model.qwen38_graph.prefill.chunk = 0;  // the 8192 default does not fit a 4096 capacity
+  EXPECT_THROW(ValidateQwen38PrefillChunk(config.model.qwen38_graph), std::runtime_error);
+}
+
+TEST(Qwen38GraphIdTest, IdsAreDerivedFromTheRunAndAreDistinct) {
+  std::set<int> seen;
+  const Qwen38GraphRun runs[] = {Qwen38GraphRun::kTarget, Qwen38GraphRun::kHead, Qwen38GraphRun::kHeadR2};
+  for (const Qwen38GraphRun run : runs) {
+    for (int rows = 1; rows <= kQwen38GraphIdMaxRows; ++rows) {
+      for (int phase = 0; phase < kQwen38GraphIdMaxPhases; ++phase) {
+        const int id = Qwen38GraphAnnotationId(run, rows, phase);
+        EXPECT_GT(id, 0);  // 0 is ORT's default annotation, -1 disables capture
+        EXPECT_TRUE(seen.insert(id).second) << "duplicate id " << id;
+      }
+    }
+  }
+  EXPECT_EQ(seen.size(), 3u * kQwen38GraphIdMaxRows * kQwen38GraphIdMaxPhases);
+}
+
+TEST(Qwen38GraphIdTest, RejectsRowsAndPhasesBeyondTheLimits) {
+  EXPECT_THROW(Qwen38GraphAnnotationId(Qwen38GraphRun::kTarget, 0, 0), std::out_of_range);
+  EXPECT_THROW(Qwen38GraphAnnotationId(Qwen38GraphRun::kTarget, kQwen38GraphIdMaxRows + 1, 0), std::out_of_range);
+  EXPECT_THROW(Qwen38GraphAnnotationId(Qwen38GraphRun::kHead, 1, -1), std::out_of_range);
+  EXPECT_THROW(Qwen38GraphAnnotationId(Qwen38GraphRun::kHeadR2, 2, kQwen38GraphIdMaxPhases), std::out_of_range);
 }
 
 TEST(Qwen38GraphConfigTest, NonInheritedPrefillSessionOptionsRetainCudaProviderWithoutGraphCapture) {
