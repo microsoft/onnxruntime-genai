@@ -194,9 +194,10 @@ std::string NormalizeQwen38ContextTier(const std::string& request);
 //    std::runtime_error names every path that was tried. Because the decoder is one of the candidates, a tier that has no graph
 //    of its own is not an error: the model constructor logs the graph it took, with the kv_capacity, context_length and
 //    max_length that graph gave, when logging is enabled.
-//  - Without a context request, `mtp_drafts` (ORT_QWEN38_MTP_DRAFTS, 1..3) takes model_s<drafts + 1>.onnx next to the decoder,
-//    else under target/, else the decoder.
-// With neither, the decoder is returned as configured and nothing is looked up.
+//  - Without a context request, `mtp_drafts` (ORT_QWEN38_MTP_DRAFTS, 1..3; any other value selects nothing) takes
+//    model_s<drafts + 1>.onnx next to the decoder, else under target/, else the decoder.
+// With neither, the decoder is returned as configured and nothing is looked up. A constrained expert offload may then prefer
+// another graph: see SelectQwen38OffloadTargetGraph.
 std::string ResolveQwen38TargetGraphFilename(const std::string& decoder_filename, const std::string& context_request,
                                              const std::string& mtp_drafts,
                                              const std::function<bool(const std::string&)>& exists);
@@ -348,17 +349,29 @@ void ValidateQwen38CacheShapes(const std::vector<Qwen38CacheInput>& inputs, int 
 int64_t ResolveQwen38GraphKvCapacity(const std::vector<Qwen38CacheInput>& inputs);
 
 // MoE expert offload (ORT QMoE offload v4) as requested by the decoder's "session.moe.offload.*" config entries. A key
-// that is configured more than once counts with its last value, the one the session options end up with. The byte
-// counts are read the way the runtime reads them: decimal digits only (no sign, white space or trailing text), not
-// empty, within 64 bits.
+// that is configured more than once counts with its last value, the one the session options end up with. The mode and
+// the value "auto" are read without regard to case, and the byte counts the way the runtime reads them: decimal digits
+// only (no sign, white space or trailing text), not empty, within 64 bits.
+//
+// An explicit mode of disabled (0, off) wins over any budget. Without a mode entry, an explicit expert budget is taken as
+// the request for a constrained offload, although the runtime's own default mode is disabled and a budget alone does
+// nothing there: a package that budgets its experts is expected to set mode=required with it, as its runtime profiles do.
+//
+// device_expert_bytes: "auto" leaves the size of the expert cache to the runtime (the free device memory less its reserve
+// and working bytes). An explicit 0 is a zero budget, not "the runtime's call": under mode=required the runtime raises it to
+// the overhead of its fixed tables, under any other mode it refuses the session. It is the smallest cache there is, so it
+// stays as configured (nothing to adapt) and does not by itself ask for an offload.
+// reserve_device_bytes: the runtime reads it only when device_expert_bytes is "auto", so next to an explicit budget it is
+// inert, and lowering the budget is what frees device memory. Its "auto" is a reserve of 0 for the runtime; here it takes
+// kDefaultReserveDeviceBytes, like an entry that is not there.
 struct Qwen38MoeOffloadSettings {
   static constexpr uint64_t kDefaultReserveDeviceBytes = 6442450944ULL;  // 6 GiB
 
-  bool enabled{false};      // mode is required/auto/1/on, or device_expert_bytes is explicit
-  bool constrained{false};  // mode is required/1/on, or device_expert_bytes is explicit: the experts must not all stay on the device
+  bool enabled{false};      // mode is required/auto/1/on, or device_expert_bytes is explicit and not 0; never with mode disabled
+  bool constrained{false};  // mode is required/1/on, or device_expert_bytes is explicit and not 0: the experts must not all stay on the device
   bool has_source_root{false};
   bool has_reserve_device_bytes{false};  // a valid byte count is configured, reserve_device_bytes holds it
-  bool has_device_expert_bytes{false};   // the same for device_expert_bytes, unless it is "auto" or 0 (runtime's call)
+  bool has_device_expert_bytes{false};   // the same for device_expert_bytes, unless it is "auto" or 0 (see above)
   // The entry is there but is not a byte count (for the reserve: nor "auto"). It is left as configured, so that the
   // runtime rejects it by name; it is never replaced by a default or an adapted budget. The byte count of the
   // setting is not meaningful then.
@@ -371,8 +384,10 @@ struct Qwen38MoeOffloadSettings {
 Qwen38MoeOffloadSettings ParseQwen38MoeOffloadSettings(const std::vector<Config::NamedString>& config_entries);
 
 // KV capacity of the target graph variants that are named after their context tier (model_2k.onnx, model_8k.onnx,
-// model_64k.onnx, model_128k.onnx), known before the session exists. Empty for any other file name. The context length and
-// the generation budget are not part of it: SyncQwen38GraphContext derives them from the graph once the session exists.
+// model_64k.onnx, model_128k.onnx), known before the session exists. Empty for any other file name: the capacity of such a
+// graph is only read from its session, which does not exist yet when the offload budgets are set, so they follow the
+// configured model.qwen38_graph.kv_capacity instead. The context length and the generation budget are not part of it:
+// SyncQwen38GraphContext derives them from the graph once the session exists.
 struct Qwen38ContextTier {
   std::string_view name;  // "2k", "8k", "64k", "128k"
   int kv_capacity{};
@@ -381,14 +396,37 @@ std::optional<Qwen38ContextTier> Qwen38ContextTierForTarget(const std::string& t
 
 // "session.moe.offload.*" entries added to the target session once the KV capacity of the selected target graph is known:
 // the model folder as the default source_root, and the reserve (and explicit expert) budgets. With
-// `adaptive_context_budget` the budgets follow the KV cache relative to the 32K-context reference: memory a longer
-// context needs is taken from the expert cache, memory a shorter context frees is given to it (the budgets are 64-bit
-// and saturate instead of wrapping). Empty unless offload is enabled. A budget that is configured but malformed gets
+// `adaptive_context_budget` the budgets follow the KV cache relative to the 32K-context reference (one slot of 33032
+// positions): memory a longer context needs is taken from the expert cache, memory a shorter context frees is given to it.
+// Every one of the `request_slots` slots (1..8, anything else is clamped to that range) holds `kv_capacity` positions, so
+// the cache grows with the product. The budgets are 64-bit and saturate instead of wrapping. The floors (1 GB for the
+// experts, 2 GiB for the reserve) only keep the adaptation from shrinking a budget too far: a budget that is configured
+// below its floor is never lifted by it. Empty unless offload is enabled. A budget that is configured but malformed gets
 // no entry in any case, so it stays as configured and the runtime rejects it: a configuration error is never turned
-// into a valid default or adapted value.
+// into a valid default or adapted value. The same goes for an expert budget of 0, see Qwen38MoeOffloadSettings.
 std::vector<Config::NamedString> Qwen38MoeOffloadSessionEntries(const Qwen38MoeOffloadSettings& settings,
                                                                 const std::filesystem::path& model_root, int kv_capacity,
-                                                                bool adaptive_context_budget);
+                                                                bool adaptive_context_budget, size_t request_slots = 1);
+
+// The target graph of a package whose decoder offloads experts under a budget (`offload.constrained`), given the graph
+// `target_filename` that ResolveQwen38TargetGraphFilename chose. Every step of such a session reads experts from the host,
+// so a step that commits more tokens pays off more: where the resolver kept the default decoder (model.onnx) and the package
+// ships the S=4 multi-draft graph model_s4.onnx beside it, that graph is taken. Shipping the file is the package's opt-in.
+// The result is `target_filename` itself when
+//  - the offload is not constrained;
+//  - `target_filename` is not the default decoder model.onnx: a context-tier graph, the MTP-drafts graph, or a decoder the
+//    package names differently stays as it is;
+//  - the environment chose the graph: `context_request` (ORT_QWEN38_CONTEXT_LENGTH) or `mtp_drafts` (ORT_QWEN38_MTP_DRAFTS)
+//    is not empty. That holds for any value, also "0" or one the resolver ignores, which is how to opt out of the preference
+//    without removing the file;
+//  - the package drives a DFlash2 drafter (`dflash2`): it verifies as many rows as its draft count asks for (7 drafts, 8 rows),
+//    which the 4-row graph cannot serve;
+//  - there are several request slots: they need a graph with compact state replay (state_update.* outputs), which the ring-bank
+//    form of the S=4 graph lacks (ValidateQwen38BatchedTargetOutputs), so the decoder the package named stays;
+//  - `exists` (as for ResolveQwen38TargetGraphFilename) does not know model_s4.onnx.
+std::string SelectQwen38OffloadTargetGraph(const std::string& target_filename, const Qwen38MoeOffloadSettings& offload,
+                                           const std::string& context_request, const std::string& mtp_drafts, bool dflash2,
+                                           size_t request_slots, const std::function<bool(const std::string&)>& exists);
 
 // Constants of the PackedQSAIndexer state conversion (key-norm weights, leading-RoPE tables) for the dense -> packed hand-off.
 struct Qwen38QsaConstants {
