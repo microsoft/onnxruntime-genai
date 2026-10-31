@@ -44,12 +44,6 @@ class BlockDrafterBuilder(Model):
         self.const_cache = {}
         self.const_prefix = const_prefix
 
-    def make_graph(self, graph_name, const_prefix):
-        Model.make_graph(self, graph_name, opset=21)
-        self.graph.opset_imports["com.microsoft"] = 1
-        self.const_cache: dict[str, str] = {}
-        self.const_prefix = const_prefix
-
     def make_value(self, name, dtype=None, shape=None):
         if name == "":
             return ir.Value(name="")
@@ -118,14 +112,76 @@ class BlockDrafterBuilder(Model):
         self.make_value(output, dtype, shape)
         return output
 
-    def binary(self, op, name, lhs, rhs, dtype, shape):
+    def binary(self, op, name, lhs, rhs, dtype, shape, domain="", **attrs):
         output = self.out(name)
-        self.make_node(op, [lhs, rhs], [output], name=name)
+        self.make_node(op, [lhs, rhs], [output], name=name, domain=domain, **attrs)
         self.make_value(output, dtype, shape)
         return output
 
     def reshape(self, name, root_input, shape_const, dtype, shape):
         return self.binary("Reshape", name, root_input, self.const(shape_const), dtype, shape)
+
+    def make_cast(self, name, root_input, dtype, shape, output=None):
+        output = output or self.out(name)
+        self.make_node("Cast", [root_input], [output], name=name, to=dtype)
+        self.make_value(output, dtype, shape)
+        return output
+
+    def make_slice_range(self, name, root_input, start, end, axis, dtype, shape):
+        self.make_slice(
+            name,
+            [root_input, self.const([start]), self.const([end]), self.const([axis])],
+            dtype,
+            shape,
+        )
+        return self.out(name)
+
+    def make_split_equal(self, name, root_input, outputs, dtype, shape, axis=-1):
+        self.make_split(
+            name, [root_input], outputs, [dtype] * len(outputs), [shape] * len(outputs), axis=axis, num_outputs=len(outputs)
+        )
+        return outputs
+
+    def make_concat(self, name, inputs, dtype, shape, axis=0, output=None):
+        output = output or self.out(name)
+        self.make_node("Concat", inputs, [output], name=name, axis=axis)
+        self.make_value(output, dtype, shape)
+        return output
+
+    def make_silu(self, name, root_input, dtype, shape):
+        sigmoid = self.unary("Sigmoid", f"{name}/Sigmoid", root_input, dtype, shape)
+        return self.binary("Mul", f"{name}/Mul", root_input, sigmoid, dtype, shape)
+
+    def make_linear(self, name, root_input, weight_tensor, bias_tensor, output_shape):
+        out_features, in_features = (int(dim) for dim in weight_tensor.shape)
+        weight_name = f"{name[1:].replace('/', '.')}.weight"
+        output = self.matmul(
+            f"{name}/MatMul",
+            root_input,
+            weight_tensor,
+            in_features,
+            out_features,
+            output_shape[:-1],
+            weight_name=weight_name,
+            quantize=False,
+        )
+        if bias_tensor is not None:
+            bias_name = f"{name[1:].replace('/', '.')}.bias"
+            self.make_initializer(bias_tensor, bias_name, to=self.io_dtype)
+            output = self.binary("Add", f"{name}/Add", output, bias_name, self.io_dtype, output_shape)
+        return output
+
+    def make_layer_norm(
+        self, name, root_input, weight_tensor, bias_tensor, shape, weight_name=None, bias_name=None, epsilon=1e-5
+    ):
+        weight_name = weight_name or (name[1:].replace("/", ".") + ".weight")
+        bias_name = bias_name or (name[1:].replace("/", ".") + ".bias")
+        self.make_initializer(weight_tensor, weight_name, to=self.io_dtype)
+        self.make_initializer(bias_tensor, bias_name, to=self.io_dtype)
+        output = self.out(name)
+        self.make_node("LayerNormalization", [root_input, weight_name, bias_name], [output], name=name, axis=-1, epsilon=epsilon)
+        self.make_value(output, self.io_dtype, shape)
+        return output
 
     def matmul(self, name, root_input, weight_tensor, in_features, out_features, rows, weight_name=None, quantize=True):
         """Emit ``root_input @ weight.T`` for a torch ``[out, in]`` weight."""
@@ -138,8 +194,9 @@ class BlockDrafterBuilder(Model):
         if initializer_name not in self.values:
             self.make_initializer(weight_tensor.T, initializer_name, to=self.io_dtype)
         output = self.out(name)
+        output_shape = [*rows, out_features] if isinstance(rows, (list, tuple)) else [rows, out_features]
         self.make_node("MatMul", [root_input, initializer_name], [output], name=name)
-        self.make_value(output, self.io_dtype, [rows, out_features])
+        self.make_value(output, self.io_dtype, output_shape)
         return output
 
     def matmul_nbits(self, name, root_input, weight_tensor, in_features, out_features, rows, initializer_name):
@@ -193,6 +250,7 @@ class BlockDrafterBuilder(Model):
         if prepack:
             attributes["weight_prepacked"] = prepack
         output = self.out(name)
+        output_shape = [*rows, out_features] if isinstance(rows, (list, tuple)) else [rows, out_features]
         self.make_node(
             "MatMulNBits",
             [root_input, qweight_name, scales_name],
@@ -201,7 +259,7 @@ class BlockDrafterBuilder(Model):
             domain="com.microsoft",
             **attributes,
         )
-        self.make_value(output, self.io_dtype, [rows, out_features])
+        self.make_value(output, self.io_dtype, output_shape)
         return output
 
     def rms_norm(self, name, root_input, weight_tensor, rows, weight_name=None):
@@ -218,7 +276,8 @@ class BlockDrafterBuilder(Model):
             epsilon=self.rms_eps,
             stash_type=1,
         )
-        self.make_value(output, self.io_dtype, [rows, self.hidden_size])
+        output_shape = list(rows) if isinstance(rows, (list, tuple)) else [rows, self.hidden_size]
+        self.make_value(output, self.io_dtype, output_shape)
         return output
 
     def skip_rms_norm(self, name, root, skip, weight_tensor, rows, want_sum=True, dtype=None):
@@ -455,6 +514,46 @@ class BlockDrafterBuilder(Model):
             node.attributes[attribute_name] = attribute
 
     def make_lm_head(self, root, rows="num_block"):
+        if "lm_head.qweight" in self.weights:
+            qweight = self.weights["lm_head.qweight"]
+            scales = self.weights["lm_head.scales"]
+            expected_qweight_shape = (self.vocab_size, self.hidden_size // 32, 32)
+            if tuple(qweight.shape) != expected_qweight_shape:
+                raise ValueError(
+                    f"LM head qweight has shape {tuple(qweight.shape)}, expected {expected_qweight_shape}."
+                )
+            # Q8_0 block scales are FP16. BF16 cannot represent them exactly, so a BF16 graph runs this head in FP16
+            # with explicit boundary casts instead of rounding the scales.
+            head_dtype = ir.DataType.FLOAT16 if self.external_dtype == ir.DataType.BFLOAT16 else self.external_dtype
+            if self.io_dtype != head_dtype:
+                root = self.unary("Cast", "/lm_head/Cast", root, head_dtype, [rows, self.hidden_size], to=head_dtype)
+            name = "/lm_head/MatMul"
+            output = self.out(name)
+            self.make_initializer(qweight, "lm_head.MatMul.weight_Q8")
+            self.make_initializer(scales, "lm_head.MatMul.weight_scales", to=head_dtype)
+            self.make_node(
+                "MatMulNBits",
+                [root, "lm_head.MatMul.weight_Q8", "lm_head.MatMul.weight_scales"],
+                [output],
+                name=name,
+                domain="com.microsoft",
+                bits=8,
+                block_size=32,
+                K=self.hidden_size,
+                N=self.vocab_size,
+            )
+            self.make_value(output, head_dtype, [rows, self.vocab_size])
+            if head_dtype != self.external_dtype:
+                output = self.unary(
+                    "Cast",
+                    "/lm_head/logits/Cast",
+                    output,
+                    self.external_dtype,
+                    [rows, self.vocab_size],
+                    to=self.external_dtype,
+                )
+            return output
+
         weight = self.weights["lm_head.weight"]
         if str(weight.dtype).startswith("torch.float8") and weight.dtype != torch.float8_e4m3fn:
             raise ValueError(f"FP8 LM head weight must be float8_e4m3fn, got {weight.dtype}.")

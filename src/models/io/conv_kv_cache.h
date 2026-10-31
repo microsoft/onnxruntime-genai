@@ -22,7 +22,6 @@ struct ConvKeyValueCache : KeyValueCache {
   void PickPastState(DeviceSpan<int32_t> beam_indices, int index);
   void PickPastState(DeviceSpan<int32_t> beam_indices, int index);
 
-  template <typename T>
   void PickConvState(DeviceSpan<int32_t> beam_indices, int conv_index);
 
   DeviceInterface& Device() { return *model_.p_device_kvcache_; }
@@ -32,7 +31,7 @@ struct ConvKeyValueCache : KeyValueCache {
   const Model& model_{state_.model_};
 
   // Layer type info
-  std::vector<std::string> layer_types_;  // "conv" or "full_attention" per layer
+  std::vector<std::string> layer_types_;  // "conv", "full_attention" or "sliding_attention" per layer
   int layer_count_;
 
   // KV cache (only for attention layers)

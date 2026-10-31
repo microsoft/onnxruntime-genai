@@ -790,6 +790,8 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   // committed sequence before we append on top (nothing for standard decoding + initial
   // prefill; speculative -> reconcile two inner KV caches).
   strategy_->PrepareForAppend(*this);
+  RunGeneratedToken();
+  state_->StartTurn();
 
   auto input_ids_device = AllocateInputIdsOnDevice(input_ids);
   search_->AppendTokens(input_ids_device);
@@ -817,12 +819,27 @@ void Generator::AppendTokens(DeviceSpan<int32_t> input_ids) {
     set_extra_inputs_ = false;
   }
 
+  strategy_->PrepareForAppend(*this);
+  RunGeneratedToken();
+  state_->StartTurn();
   if (!model_->config_->model.engram.filename.empty()) {
     input_ids.CopyDeviceToCpu();
   }
   search_->AppendTokens(input_ids);
   computed_logits_ = false;
   ComputeLogits(input_ids);
+}
+
+void Generator::RunGeneratedToken() {
+  // GenerateNextToken adds its token to the sequence but runs the model on it only in the next
+  // step, so an append right after it has to run that token first. A stop token that ended the
+  // search was never added, so there is nothing to run.
+  if (last_action_ != Action::generated || computed_logits_ || search_->IsDone())
+    return;
+  state_->DiscardNextLogits();
+  ComputeLogits(search_->GetNextTokens());
+  // Keep committing the appended tokens to the guidance grammar, as before.
+  last_action_ = Action::generated;
 }
 
 void Generator::SetInputs(const NamedTensors& named_tensors) {

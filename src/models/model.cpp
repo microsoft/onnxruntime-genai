@@ -82,6 +82,17 @@ bool IsPathValuedSessionOption(std::string_view key) {
          key == kOrtSessionOptionEpContextFilePath;
 }
 
+// Adds a string-valued session config entry, resolving the value of a path-valued key against the model root.
+void AddSessionConfigEntry(const Config& config, OrtSessionOptions& session_options, const std::string& key,
+                           const std::string& value) {
+  if (!value.empty() && IsPathValuedSessionOption(key)) {
+    const std::string resolved = config.ResolvePath(value).string();
+    session_options.AddConfigEntry(key.c_str(), resolved.c_str());
+  } else {
+    session_options.AddConfigEntry(key.c_str(), value.c_str());
+  }
+}
+
 }  // namespace
 
 State::State(const GeneratorParams& params, const Model& model, DeviceInterface* session_device)
@@ -710,13 +721,8 @@ void ApplySessionOptionsFromConfig(
    * Set all session options that are key-value pairs of strings.
    * Reference: https://github.com/microsoft/onnxruntime/blob/main/include/onnxruntime/core/session/onnxruntime_session_options_config_keys.h
    */
-  for (auto& config_entry : config_session_options.config_entries) {
-    if (!config_entry.second.empty() && IsPathValuedSessionOption(config_entry.first)) {
-      const std::string resolved = config.ResolvePath(config_entry.second).string();
-      session_options.AddConfigEntry(config_entry.first.c_str(), resolved.c_str());
-    } else {
-      session_options.AddConfigEntry(config_entry.first.c_str(), config_entry.second.c_str());
-    }
+  for (const auto& [key, value] : config_session_options.config_entries) {
+    AddSessionConfigEntry(config, session_options, key, value);
   }
 
   // Register custom ops libraries only if explicitly configured. custom_ops_library comes first, then every entry of
@@ -923,7 +929,17 @@ void Model::CreateSessionOptions() {
   if (!p_device_)
     p_device_ = GetDeviceInterface(DeviceType::CPU);
 
+  // The runtime profile merges its session options into the decoder config entries, updating an entry in place or
+  // appending a new one. Apply only the entries it changed or added to the primary session options, resolved like the
+  // rest of the config. Replaying the others would undo that resolution and the provider setup above.
+  const auto entries_before_profile = config_->model.decoder.session_options.config_entries;
   ApplyRuntimeProfileForSelectedDevice(*config_, *p_device_);
+  const auto& entries = config_->model.decoder.session_options.config_entries;
+  for (size_t i = 0; i < entries.size(); ++i) {
+    if (i >= entries_before_profile.size() || entries[i] != entries_before_profile[i]) {
+      AddSessionConfigEntry(*config_, *session_options_, entries[i].first, entries[i].second);
+    }
+  }
 }
 
 OrtSessionOptions* Model::GetSessionOptions(const std::string& model_id) const {

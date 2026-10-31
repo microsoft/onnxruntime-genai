@@ -4,6 +4,7 @@
 # license information.
 # --------------------------------------------------------------------------
 
+import glob
 import json
 import os
 from types import SimpleNamespace
@@ -380,7 +381,83 @@ class ModeloptModel(QuantizedModel):
             if scale.numel() != 1:
                 scale = scale.reshape(-1, 1)
             return (weight.float() * scale).to(torch.bfloat16)
+        if weight.dtype == torch.uint8 and weight.ndim == 3 and weight.shape[-1] == 34:
+            return self.dequantize_q8_0(weight, name)
         return weight
+
+    def unpack_q8_0(self, blocks, name="weight"):
+        """Unpack ggml Q8_0 ``uint8 [N, K/32, 34]`` blocks into MatMulNBits ``(qweight, scales)``."""
+        if blocks.dtype != torch.uint8 or blocks.ndim != 3 or blocks.shape[-1] != 34:
+            raise ValueError(
+                f"Q8_0 tensor '{name}' must be uint8 [N, K/32, 34], "
+                f"got dtype={blocks.dtype} shape={tuple(blocks.shape)}."
+            )
+        scales = blocks[..., :2].contiguous().view(torch.float16).squeeze(-1)
+        qweight = (blocks[..., 2:].contiguous().view(torch.int8).to(torch.int16) + 128).to(torch.uint8)
+        return qweight, scales
+
+    def dequantize_q8_0(self, blocks, name="weight"):
+        """Dequantize ggml Q8_0 ``uint8 [N, K/32, 34]`` blocks to a dense ``[N, K]`` bfloat16 tensor."""
+        qweight, scales = self.unpack_q8_0(blocks, name)
+        weight = (qweight.to(torch.float32) - 128.0) * scales.to(torch.float32).unsqueeze(-1)
+        return weight.reshape(blocks.shape[0], -1).to(torch.bfloat16)
+
+    @classmethod
+    def load_lilicorr_weights(cls, draft_dir, target_dir, dequantize_lm_head=False):
+        """Load and decode a ModelOpt LiLiCorr drafter checkpoint plus the target's embedding and LM head."""
+        loader = cls.__new__(cls)
+        loader.quant_type = "modelopt"
+
+        draft_state = {}
+        for shard in sorted(glob.glob(os.path.join(draft_dir, "*.safetensors"))):
+            with safe_open(shard, framework="pt", device="cpu") as handle:
+                for key in handle.keys():  # noqa: SIM118
+                    draft_state[key] = handle.get_tensor(key)
+        weights = loader.dequantize_state(draft_state)
+        if "fc.weight" not in weights or "lilicorr.token_proj.weight" not in weights:
+            raise ValueError(f"'{draft_dir}' does not look like a LiLiCorr draft checkpoint.")
+
+        embed_candidates = (
+            "language_model.backbone.embeddings.weight",
+            "model.embed_tokens.weight",
+            "model.language_model.embed_tokens.weight",
+        )
+        head_candidates = ("language_model.lm_head.weight", "lm_head.weight")
+        index_path = os.path.join(target_dir, "model.safetensors.index.json")
+        if os.path.exists(index_path):
+            with open(index_path) as f:
+                weight_map = json.load(f)["weight_map"]
+            embed_key = next((key for key in embed_candidates if key in weight_map), None)
+            head_key = next((key for key in head_candidates if key in weight_map), None)
+            if embed_key is None or head_key is None:
+                raise ValueError(f"Could not find embedding and LM head weights in '{target_dir}'.")
+            for key, name in ((embed_key, "embed_tokens.weight"), (head_key, "lm_head.weight")):
+                shard_path = os.path.join(target_dir, weight_map[key])
+                with safe_open(shard_path, framework="pt", device="cpu") as handle:
+                    weights[name] = handle.get_tensor(key)
+        else:
+            for shard in sorted(glob.glob(os.path.join(target_dir, "*.safetensors"))):
+                with safe_open(shard, framework="pt", device="cpu") as handle:
+                    keys = set(handle.keys())
+                    for key in embed_candidates:
+                        if key in keys and "embed_tokens.weight" not in weights:
+                            weights["embed_tokens.weight"] = handle.get_tensor(key)
+                    for key in head_candidates:
+                        if key in keys and "lm_head.weight" not in weights:
+                            weights["lm_head.weight"] = handle.get_tensor(key)
+            if "embed_tokens.weight" not in weights or "lm_head.weight" not in weights:
+                raise ValueError(f"Could not find embedding and LM head weights in '{target_dir}'.")
+
+        lm_head = weights["lm_head.weight"]
+        if lm_head.dtype == torch.uint8 and lm_head.ndim == 3:
+            if dequantize_lm_head:
+                weights["lm_head.weight"] = loader.dequantize_q8_0(lm_head, "lm_head.weight")
+            else:
+                qweight, scales = loader.unpack_q8_0(lm_head, "lm_head.weight")
+                weights["lm_head.qweight"] = qweight
+                weights["lm_head.scales"] = scales
+                del weights["lm_head.weight"]
+        return weights
 
     def dequantize_state(self, state):
         result = {}

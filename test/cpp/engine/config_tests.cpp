@@ -1,9 +1,21 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <filesystem>
+#include <fstream>
+#include <functional>
+#include <map>
+#include <optional>
+#include <random>
 #include <string>
+#include <string_view>
+#include <system_error>
 #include <tuple>
 #include <utility>
+#include <vector>
+#if defined(__linux__)
+#include <unistd.h>
+#endif
 
 #include <gtest/gtest.h>
 
@@ -11,6 +23,7 @@
 #include "engine_test_doubles.h"
 #include "models/runtime_profiles.h"
 #include "models/session_options.h"
+#include "scoped-environment-variable.h"
 
 namespace Generators::test {
 
@@ -241,6 +254,62 @@ TEST(ConfigTest, RuntimeProfileUsesBaseWhenNoRangeMatches) {
   EXPECT_EQ(*config.engine.dynamic_batching->num_blocks, 32u);
 }
 
+namespace {
+
+constexpr const char* kForcedRuntimeProfileConfig = R"({
+  "engine":{"dynamic_batching":{"num_blocks":32}},
+  "runtime_profiles":[
+    {"id":"consumer-gpu-24g",
+     "eligibility":{"minimum_total_device_memory_bytes":0,
+                    "maximum_total_device_memory_bytes":25769803776},
+     "overlay":{"engine":{"dynamic_batching":{"num_blocks":24}}}},
+    {"id":"datacenter-gpu",
+     "eligibility":{"minimum_total_device_memory_bytes":85899345920},
+     "overlay":{"engine":{"dynamic_batching":{"num_blocks":128}}}}
+  ]
+})";
+
+constexpr uint64_t kDatacenterTotalDeviceMemoryBytes = 150136356864ULL;
+
+}  // namespace
+
+TEST(ConfigTest, RuntimeProfileEnvOverrideSelectsProfileRegardlessOfEligibility) {
+  Config config;
+  OverlayConfig(config, kForcedRuntimeProfileConfig);
+
+  ScopedEnvironmentVariable forced{"ORTGENAI_ENABLE_RUNTIME_PROFILE", "consumer-gpu-24g"};
+  ApplyRuntimeProfile(config, kDatacenterTotalDeviceMemoryBytes);
+
+  ASSERT_TRUE(config.engine.dynamic_batching);
+  EXPECT_EQ(*config.engine.dynamic_batching->num_blocks, 24u);
+}
+
+TEST(ConfigTest, RuntimeProfileEnvOverrideRejectsUnknownProfileId) {
+  Config config;
+  OverlayConfig(config, kForcedRuntimeProfileConfig);
+
+  ScopedEnvironmentVariable forced{"ORTGENAI_ENABLE_RUNTIME_PROFILE", "consumer-gpu-32g"};
+  try {
+    ApplyRuntimeProfile(config, kDatacenterTotalDeviceMemoryBytes);
+    FAIL() << "An unknown forced profile id must not fall back to device eligibility";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(std::string{error.what()}.find("consumer-gpu-32g"), std::string::npos) << error.what();
+  }
+  EXPECT_EQ(*config.engine.dynamic_batching->num_blocks, 32u);
+}
+
+TEST(ConfigTest, RuntimeProfileEnvOverrideIgnoredWhenEmptyOrUnset) {
+  for (const std::optional<std::string>& value : {std::optional<std::string>{}, std::optional<std::string>{""}}) {
+    Config config;
+    OverlayConfig(config, kForcedRuntimeProfileConfig);
+
+    ScopedEnvironmentVariable forced{"ORTGENAI_ENABLE_RUNTIME_PROFILE", value};
+    ApplyRuntimeProfile(config, kDatacenterTotalDeviceMemoryBytes);
+
+    EXPECT_EQ(*config.engine.dynamic_batching->num_blocks, 128u);
+  }
+}
+
 TEST(ConfigTest, Dflash2SnapshotsDefaultToOneAndAllowZeroOrLargerPools) {
   Config defaults;
   OverlayConfig(defaults, R"({"engine":{"dynamic_batching":{"num_blocks":32}}})");
@@ -291,6 +360,821 @@ TEST(ConfigTest, Dflash2SnapshotOnlyProfileRequiresDynamicBatchingEvenWhenDisabl
   }]})");
   EXPECT_THROW(ApplyRuntimeProfile(config, 0), std::runtime_error);
   EXPECT_FALSE(config.engine.dynamic_batching);
+}
+
+TEST(ConfigTest, RuntimeProfileAppliesDecoderSessionOptionsAndHostMemoryEligibility) {
+  Config config;
+  OverlayConfig(config, R"({
+    "model": {
+      "decoder": {
+        "filename": "model.onnx",
+        "session_options": {
+          "session.moe.offload.mode": "auto",
+          "session.moe.offload.device_expert_bytes": "auto"
+        }
+      }
+    },
+    "runtime_profiles": [
+      {
+        "id": "consumer-gpu-low-ram",
+        "eligibility": {
+          "minimum_total_device_memory_bytes": 0,
+          "maximum_total_device_memory_bytes": 25769803776,
+          "maximum_effective_host_memory_bytes": 68719476735
+        },
+        "overlay": {
+          "model": {
+            "decoder": {
+              "session_options": {
+                "session.moe.offload.mode": "required",
+                "session.moe.offload.device_expert_bytes": "10351636480",
+                "session.moe.offload.host_expert_bytes": "8589934592"
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": "consumer-gpu-more-ram",
+        "eligibility": {
+          "minimum_total_device_memory_bytes": 0,
+          "maximum_total_device_memory_bytes": 25769803776,
+          "minimum_effective_host_memory_bytes": 68719476736
+        },
+        "overlay": {
+          "model": {
+            "decoder": {
+              "session_options": {
+                "session.moe.offload.mode": "required",
+                "session.moe.offload.device_expert_bytes": "10351636480",
+                "session.moe.offload.host_expert_bytes": "42949672960"
+              }
+            }
+          }
+        }
+      }
+    ]
+  })");
+
+  ApplyRuntimeProfile(config, RuntimeProfileDeviceFacts{
+                                  25769803776ULL,
+                                  false,
+                                  20000000000ULL,
+                                  68719476736ULL,
+                                  50000000000ULL,
+                              });
+
+  std::map<std::string, std::string> entries;
+  for (const auto& [k, v] : config.model.decoder.session_options.config_entries) {
+    entries[k] = v;
+  }
+  EXPECT_EQ(entries["session.moe.offload.mode"], "required");
+  EXPECT_EQ(entries["session.moe.offload.device_expert_bytes"], "10351636480");
+  EXPECT_EQ(entries["session.moe.offload.host_expert_bytes"], "42949672960");
+}
+
+TEST(ConfigTest, RuntimeProfileUpdatesEveryDuplicateOfASessionConfigEntry) {
+  // Every overlay appends its decoder session config entries, so one key can be present more than once.
+  Config config;
+  OverlayConfig(config, R"({"model":{"decoder":{"session_options":{"session.moe.offload.mode":"base"}}}})");
+  OverlayConfig(config, R"({"model":{"decoder":{"session_options":{"session.moe.offload.mode":"overlay"}}}})");
+  ASSERT_EQ(config.model.decoder.session_options.config_entries.size(), 2u);
+  OverlayConfig(config, R"({"runtime_profiles":[{"id":"p","eligibility":{"minimum_total_device_memory_bytes":0},
+    "overlay":{"model":{"decoder":{"session_options":{
+      "session.moe.offload.mode":"required","session.moe.offload.host_expert_bytes":"4096"}}}}}]})");
+
+  ApplyRuntimeProfile(config, 100);
+
+  // The entries are applied in order, so an entry that kept an older value would override the profile's.
+  const auto& entries = config.model.decoder.session_options.config_entries;
+  ASSERT_EQ(entries.size(), 3u);
+  for (const auto& [key, value] : entries) {
+    EXPECT_EQ(value, key == "session.moe.offload.mode" ? "required" : "4096") << key;
+  }
+}
+
+TEST(ConfigTest, RuntimeProfileSessionOptionsRejectTypedSessionOptions) {
+  // A profile overlays ORT session config entries. A typed option such as graph_optimization_level would be passed to
+  // ORT as a raw config entry, which ignores it, so it is rejected instead of silently having no effect.
+  for (const char* name : {"log_id", "enable_profiling", "intra_op_num_threads", "inter_op_num_threads",
+                           "log_severity_level", "log_verbosity_level", "enable_cpu_mem_arena", "enable_mem_pattern",
+                           "use_deterministic_compute", "graph_optimization_level", "custom_ops_library",
+                           "custom_ops_libraries"}) {
+    Config config;
+    const std::string json = std::string{R"({"runtime_profiles":[{"id":"p",
+      "eligibility":{"minimum_total_device_memory_bytes":0},
+      "overlay":{"model":{"decoder":{"session_options":{")"} +
+                             name + R"(":"1"}}}}}]})";
+    try {
+      OverlayConfig(config, json);
+      ADD_FAILURE() << name << " was accepted";
+    } catch (const std::runtime_error& error) {
+      EXPECT_NE(std::string{error.what()}.find(name), std::string::npos) << error.what();
+    }
+  }
+}
+
+TEST(ConfigTest, AvailableHostMemoryEligibilityNeedsAKnownValueAtOrAboveTheMinimum) {
+  Config config;
+  OverlayConfig(config, R"({"runtime_profiles":[{
+    "id":"roomy","eligibility":{"minimum_total_device_memory_bytes":0,"minimum_available_host_memory_bytes":100},
+    "overlay":{"search":{"chunk_size":1}}}]})");
+
+  auto at_minimum = config;
+  ApplyRuntimeProfile(at_minimum, RuntimeProfileDeviceFacts{1, false, std::nullopt, 200, 100});
+  EXPECT_EQ(at_minimum.search.chunk_size, 1u);
+
+  auto below_minimum = config;
+  ApplyRuntimeProfile(below_minimum, RuntimeProfileDeviceFacts{1, false, std::nullopt, 200, 99});
+  EXPECT_FALSE(below_minimum.search.chunk_size.has_value());
+
+  auto unknown = config;
+  ApplyRuntimeProfile(unknown, RuntimeProfileDeviceFacts{1, false, std::nullopt, 200, std::nullopt});
+  EXPECT_FALSE(unknown.search.chunk_size.has_value());
+}
+
+TEST(ConfigTest, AvailableHostMemoryMinimumIsCheckedAgainstTheOtherProfilesEffectiveHostMemoryMaximum) {
+  // Available host memory never exceeds the effective host memory, so a profile that needs more available memory than
+  // the other profile's effective maximum cannot match the same device.
+  for (const uint64_t available_minimum : {100ULL, 101ULL}) {
+    Config config;
+    const auto json = std::string{R"({"runtime_profiles":[
+      {"id":"small-host","eligibility":{"minimum_total_device_memory_bytes":0,
+        "maximum_effective_host_memory_bytes":100},"overlay":{"search":{"chunk_size":1}}},
+      {"id":"big-available","eligibility":{"minimum_total_device_memory_bytes":0,
+        "minimum_available_host_memory_bytes":)"} +
+                      std::to_string(available_minimum) + R"(},"overlay":{"search":{"chunk_size":2}}}
+    ]})";
+    if (available_minimum <= 100) {
+      EXPECT_THROW(OverlayConfig(config, json), std::runtime_error) << available_minimum;
+    } else {
+      EXPECT_NO_THROW(OverlayConfig(config, json)) << available_minimum;
+    }
+  }
+}
+
+TEST(ConfigTest, HostMemoryBoundsAreValidatedWithinOneProfile) {
+  const auto load = [](const std::string& eligibility) {
+    Config config;
+    OverlayConfig(config, R"({"runtime_profiles":[{"id":"p","eligibility":{"minimum_total_device_memory_bytes":0,)" +
+                              eligibility + R"(},"overlay":{"search":{"chunk_size":1}}}]})");
+  };
+
+  // Like the device memory bounds, the effective host memory maximum cannot be below its minimum.
+  EXPECT_NO_THROW(load(R"("minimum_effective_host_memory_bytes":100,"maximum_effective_host_memory_bytes":100)"));
+  EXPECT_THROW(load(R"("minimum_effective_host_memory_bytes":101,"maximum_effective_host_memory_bytes":100)"),
+               std::runtime_error);
+
+  // The available host memory never exceeds the effective host memory, so a minimum above the effective maximum can
+  // never be met.
+  EXPECT_NO_THROW(load(R"("minimum_available_host_memory_bytes":100,"maximum_effective_host_memory_bytes":100)"));
+  EXPECT_THROW(load(R"("minimum_available_host_memory_bytes":101,"maximum_effective_host_memory_bytes":100)"),
+               std::runtime_error);
+}
+
+TEST(ConfigTest, ParsesMeminfoValues) {
+  const std::string_view meminfo =
+      "MemTotal:       65843260 kB\n"
+      "MemFree:         1204512 kB\n"
+      "MemAvailable:   48211376 kB\n"
+      "HugePages_Total:       4\n"
+      "Bogus:               abc kB\n"
+      "Scale:                12 MB\n";
+  EXPECT_EQ(ParseMeminfoBytes(meminfo, "MemAvailable"), std::optional<uint64_t>{48211376ULL * 1024});
+  EXPECT_EQ(ParseMeminfoBytes(meminfo, "MemFree"), std::optional<uint64_t>{1204512ULL * 1024});
+  EXPECT_EQ(ParseMeminfoBytes(meminfo, "HugePages_Total"), std::optional<uint64_t>{4});
+  EXPECT_EQ(ParseMeminfoBytes("MemAvailable: 8 kB", "MemAvailable"), std::optional<uint64_t>{8192});
+
+  EXPECT_FALSE(ParseMeminfoBytes(meminfo, "Mem").has_value());  // a key prefix is not a match
+  EXPECT_FALSE(ParseMeminfoBytes(meminfo, "Missing").has_value());
+  EXPECT_FALSE(ParseMeminfoBytes(meminfo, "Bogus").has_value());
+  EXPECT_FALSE(ParseMeminfoBytes(meminfo, "Scale").has_value());
+  EXPECT_FALSE(ParseMeminfoBytes("", "MemAvailable").has_value());
+}
+
+TEST(ConfigTest, ResolvesEffectiveAndAvailableHostMemoryAgainstTheCgroup) {
+  constexpr uint64_t GiB = 1ULL << 30;
+  std::optional<uint64_t> effective;
+  std::optional<uint64_t> available;
+  const auto resolve = [&](HostMemoryReadings readings) {
+    ResolveHostMemoryFacts(readings, effective, available);
+  };
+  // The tightest limit and headroom over the process's cgroup and its ancestors.
+  const auto cgroup = [](std::optional<uint64_t> limit, std::optional<uint64_t> headroom) {
+    return CgroupMemoryLimits{CgroupMemoryLimits::Status::kResolved, limit, headroom};
+  };
+
+  // Without a cgroup the physical readings are used as they are.
+  resolve({128 * GiB, 100 * GiB});
+  EXPECT_EQ(effective, std::optional<uint64_t>{128 * GiB});
+  EXPECT_EQ(available, std::optional<uint64_t>{100 * GiB});
+
+  // The cgroup limit caps the effective memory, and the cgroup headroom caps the available memory.
+  resolve({128 * GiB, 100 * GiB, cgroup(64 * GiB, 54 * GiB)});
+  EXPECT_EQ(effective, std::optional<uint64_t>{64 * GiB});
+  EXPECT_EQ(available, std::optional<uint64_t>{54 * GiB});
+
+  // MemAvailable is the tighter bound when the cgroup has more headroom than the system.
+  resolve({128 * GiB, 20 * GiB, cgroup(64 * GiB, 54 * GiB)});
+  EXPECT_EQ(effective, std::optional<uint64_t>{64 * GiB});
+  EXPECT_EQ(available, std::optional<uint64_t>{20 * GiB});
+
+  // A cgroup that has used all of its limit leaves no headroom.
+  resolve({128 * GiB, 100 * GiB, cgroup(64 * GiB, 0)});
+  EXPECT_EQ(available, std::optional<uint64_t>{0});
+
+  // A cgroup limit above the physical memory does not raise the effective memory.
+  resolve({64 * GiB, 40 * GiB, cgroup(128 * GiB, 118 * GiB)});
+  EXPECT_EQ(effective, std::optional<uint64_t>{64 * GiB});
+  EXPECT_EQ(available, std::optional<uint64_t>{40 * GiB});
+
+  // The cgroup headroom does not stand in for a MemAvailable that cannot be read: the host may have less memory free
+  // than the cgroup has headroom.
+  resolve({128 * GiB, std::nullopt, cgroup(64 * GiB, 54 * GiB)});
+  EXPECT_EQ(effective, std::optional<uint64_t>{64 * GiB});
+  EXPECT_FALSE(available.has_value());
+
+  // The available memory never exceeds the effective memory.
+  resolve({64 * GiB, 100 * GiB});
+  EXPECT_EQ(available, std::optional<uint64_t>{64 * GiB});
+
+  // An unreported availability stays unknown instead of being guessed.
+  resolve({64 * GiB, std::nullopt});
+  EXPECT_EQ(effective, std::optional<uint64_t>{64 * GiB});
+  EXPECT_FALSE(available.has_value());
+
+  // A zero cgroup limit is a hard limit of zero bytes, not an unlimited cgroup.
+  resolve({64 * GiB, 40 * GiB, cgroup(0, 0)});
+  EXPECT_EQ(effective, std::optional<uint64_t>{0});
+  EXPECT_EQ(available, std::optional<uint64_t>{0});
+
+  // A cgroup with no limit anywhere leaves the physical readings alone.
+  resolve({64 * GiB, 40 * GiB, cgroup(std::nullopt, std::nullopt)});
+  EXPECT_EQ(effective, std::optional<uint64_t>{64 * GiB});
+  EXPECT_EQ(available, std::optional<uint64_t>{40 * GiB});
+
+  // An unresolved cgroup leaves both facts unknown, because the physical readings would overstate what the process
+  // may use.
+  const CgroupMemoryLimits unresolved{CgroupMemoryLimits::Status::kUnresolved, std::nullopt, std::nullopt};
+  resolve({128 * GiB, 100 * GiB, unresolved});
+  EXPECT_FALSE(effective.has_value());
+  EXPECT_FALSE(available.has_value());
+
+  resolve({});
+  EXPECT_FALSE(effective.has_value());
+  EXPECT_FALSE(available.has_value());
+}
+
+namespace {
+
+using CgroupStatus = CgroupMemoryLimits::Status;
+using FakeHostFiles = std::map<std::string, std::string>;
+
+constexpr uint64_t kGiB = 1ULL << 30;
+
+// A host that mounts the whole cgroup2 hierarchy next to other filesystems.
+constexpr std::string_view kHostMountinfo =
+    "22 1 8:2 / / rw,relatime shared:1 - ext4 /dev/sda2 rw,errors=remount-ro\n"
+    "23 22 0:21 / /proc rw,nosuid,nodev,noexec,relatime shared:12 - proc proc rw\n"
+    "24 22 0:22 / /sys/fs/cgroup rw,nosuid,nodev,noexec,relatime shared:5 - cgroup2 cgroup2 "
+    "rw,nsdelegate,memory_recursiveprot\n"
+    "25 22 0:25 / /run rw,nosuid,nodev shared:6 - tmpfs tmpfs rw,mode=755\n";
+
+// A path that is not in the fake host does not exist. One that holds this marker exists but cannot be read.
+constexpr std::string_view kUnreadableMarker = "<the file cannot be read>";
+
+void MakeUnreadable(FakeHostFiles& files, const std::string& path) { files[path] = std::string{kUnreadableMarker}; }
+
+CgroupMemoryLimits ResolveCgroupMemory(const FakeHostFiles& files) {
+  return ResolveProcessCgroupMemory([&files](const std::string& path) -> HostFile {
+    const auto file = files.find(path);
+    if (file == files.end()) return {HostFileStatus::kMissing, {}};
+    if (file->second == kUnreadableMarker) return {HostFileStatus::kUnreadable, {}};
+    return {HostFileStatus::kRead, file->second};
+  });
+}
+
+// The files every cgroup directory has. The resolver only needs cgroup.controllers to be there, but the fixture lists
+// the controllers as the kernel does: a cgroup that has the memory controller also has memory.max and memory.current
+// (see AddMemoryFiles), while the hierarchy root and a cgroup without the controller have neither.
+void AddCgroup(FakeHostFiles& files, const std::string& directory, bool has_memory_controller = true) {
+  files[directory + "/cgroup.controllers"] =
+      has_memory_controller ? "cpuset cpu io memory pids\n" : "cpuset cpu io pids\n";
+}
+
+// The files of a cgroup that has the memory controller. `max` is "max" or a number of bytes.
+void AddMemoryFiles(FakeHostFiles& files, const std::string& directory, const std::string& max, uint64_t current) {
+  files[directory + "/memory.max"] = max + "\n";
+  files[directory + "/memory.current"] = std::to_string(current) + "\n";
+}
+
+struct HostFacts {
+  std::optional<uint64_t> effective;
+  std::optional<uint64_t> available;
+};
+
+HostFacts ResolveHostFacts(const CgroupMemoryLimits& cgroup, uint64_t physical_total, uint64_t physical_available) {
+  HostMemoryReadings readings;
+  readings.physical_total = physical_total;
+  readings.physical_available = physical_available;
+  readings.cgroup = cgroup;
+  HostFacts facts;
+  ResolveHostMemoryFacts(readings, facts.effective, facts.available);
+  return facts;
+}
+
+}  // namespace
+
+TEST(ConfigTest, CgroupMemoryComesFromTheProcessCgroupNotTheMountRoot) {
+  // A 128 GiB host whose mounted cgroup root has no limit, and a process in an 8 GiB cgroup that has used 2 GiB.
+  FakeHostFiles files;
+  const std::string scope = "/sys/fs/cgroup/user.slice/user-1000.slice/session-3.scope";
+  files["/proc/self/cgroup"] = "0::/user.slice/user-1000.slice/session-3.scope\n";
+  files["/proc/self/mountinfo"] = std::string{kHostMountinfo};
+  AddCgroup(files, "/sys/fs/cgroup");
+  AddMemoryFiles(files, "/sys/fs/cgroup", "max", 5 * kGiB);
+  AddCgroup(files, "/sys/fs/cgroup/user.slice");
+  AddMemoryFiles(files, "/sys/fs/cgroup/user.slice", "max", 4 * kGiB);
+  AddCgroup(files, "/sys/fs/cgroup/user.slice/user-1000.slice");
+  AddMemoryFiles(files, "/sys/fs/cgroup/user.slice/user-1000.slice", "max", 3 * kGiB);
+  AddCgroup(files, scope);
+  AddMemoryFiles(files, scope, std::to_string(8 * kGiB), 2 * kGiB);
+
+  const CgroupMemoryLimits cgroup = ResolveCgroupMemory(files);
+  EXPECT_EQ(cgroup.status, CgroupStatus::kResolved);
+  EXPECT_EQ(cgroup.limit, std::optional<uint64_t>{8 * kGiB});
+  EXPECT_EQ(cgroup.headroom, std::optional<uint64_t>{6 * kGiB});
+
+  const HostFacts facts = ResolveHostFacts(cgroup, 128 * kGiB, 100 * kGiB);
+  EXPECT_EQ(facts.effective, std::optional<uint64_t>{8 * kGiB});
+  EXPECT_EQ(facts.available, std::optional<uint64_t>{6 * kGiB});
+
+  // A profile that needs a large host is not eligible inside the small cgroup, but is on the unconstrained host.
+  Config config;
+  OverlayConfig(config, R"({"runtime_profiles":[{"id":"large-host",
+    "eligibility":{"minimum_total_device_memory_bytes":0,"minimum_effective_host_memory_bytes":68719476736},
+    "overlay":{"search":{"chunk_size":1}}}]})");
+  auto in_cgroup = config;
+  ApplyRuntimeProfile(in_cgroup, RuntimeProfileDeviceFacts{1, false, std::nullopt, facts.effective, facts.available});
+  EXPECT_FALSE(in_cgroup.search.chunk_size.has_value());
+  auto unconstrained = config;
+  ApplyRuntimeProfile(unconstrained, RuntimeProfileDeviceFacts{1, false, std::nullopt, 128 * kGiB, 100 * kGiB});
+  EXPECT_EQ(unconstrained.search.chunk_size, 1u);
+}
+
+TEST(ConfigTest, CgroupMemoryIsReadRelativeToACgroupMountRootThatIsNotTheHierarchyRoot) {
+  // A container that sees only its own cgroup: /sys/fs/cgroup shows /kubepods/pod-1/app, which has a 15 GiB limit.
+  FakeHostFiles files;
+  files["/proc/self/mountinfo"] =
+      "30 22 0:26 /kubepods/pod-1/app /sys/fs/cgroup ro,nosuid,nodev,noexec,relatime - cgroup2 cgroup rw\n";
+  AddCgroup(files, "/sys/fs/cgroup");
+  AddMemoryFiles(files, "/sys/fs/cgroup", std::to_string(15 * kGiB), 10 * kGiB);
+  AddCgroup(files, "/sys/fs/cgroup/sidecar");
+  AddMemoryFiles(files, "/sys/fs/cgroup/sidecar", "max", 1 * kGiB);
+  // The cgroup path must not be appended to the mount point as a whole.
+  AddCgroup(files, "/sys/fs/cgroup/kubepods/pod-1/app/sidecar");
+  AddMemoryFiles(files, "/sys/fs/cgroup/kubepods/pod-1/app/sidecar", "1048576", 0);
+
+  // A process in a cgroup below the one that is mounted: the mounted cgroup's own limit still applies.
+  files["/proc/self/cgroup"] = "0::/kubepods/pod-1/app/sidecar\n";
+  CgroupMemoryLimits cgroup = ResolveCgroupMemory(files);
+  EXPECT_EQ(cgroup.status, CgroupStatus::kResolved);
+  EXPECT_EQ(cgroup.limit, std::optional<uint64_t>{15 * kGiB});
+  EXPECT_EQ(cgroup.headroom, std::optional<uint64_t>{5 * kGiB});
+
+  // A process in the mounted cgroup itself reads the files at the mount point.
+  files["/proc/self/cgroup"] = "0::/kubepods/pod-1/app\n";
+  cgroup = ResolveCgroupMemory(files);
+  EXPECT_EQ(cgroup.status, CgroupStatus::kResolved);
+  EXPECT_EQ(cgroup.limit, std::optional<uint64_t>{15 * kGiB});
+  EXPECT_EQ(cgroup.headroom, std::optional<uint64_t>{5 * kGiB});
+
+  // In a private cgroup namespace the mount shows the namespace root as "/" and the process path is relative to it.
+  files["/proc/self/mountinfo"] = "30 22 0:26 / /sys/fs/cgroup ro,nosuid,nodev,noexec,relatime - cgroup2 cgroup rw\n";
+  files["/proc/self/cgroup"] = "0::/\n";
+  cgroup = ResolveCgroupMemory(files);
+  EXPECT_EQ(cgroup.status, CgroupStatus::kResolved);
+  EXPECT_EQ(cgroup.limit, std::optional<uint64_t>{15 * kGiB});
+  EXPECT_EQ(cgroup.headroom, std::optional<uint64_t>{5 * kGiB});
+
+  // A sibling cgroup is not below the mounted root, so its limits cannot be read.
+  files["/proc/self/mountinfo"] =
+      "30 22 0:26 /kubepods/pod-1/app /sys/fs/cgroup ro,nosuid,nodev,noexec,relatime - cgroup2 cgroup rw\n";
+  files["/proc/self/cgroup"] = "0::/kubepods/pod-1/other\n";
+  EXPECT_EQ(ResolveCgroupMemory(files).status, CgroupStatus::kUnresolved);
+  // The same name prefix does not make a cgroup a descendant.
+  files["/proc/self/cgroup"] = "0::/kubepods/pod-1/app-2\n";
+  EXPECT_EQ(ResolveCgroupMemory(files).status, CgroupStatus::kUnresolved);
+}
+
+TEST(ConfigTest, CgroupMemoryTakesTheTightestAncestorLimitAndHeadroom) {
+  FakeHostFiles files;
+  files["/proc/self/cgroup"] = "0::/system.slice/llm.service/worker-1\n";
+  files["/proc/self/mountinfo"] = std::string{kHostMountinfo};
+  AddCgroup(files, "/sys/fs/cgroup");
+  AddCgroup(files, "/sys/fs/cgroup/system.slice");
+  AddMemoryFiles(files, "/sys/fs/cgroup/system.slice", "max", 40 * kGiB);
+  AddCgroup(files, "/sys/fs/cgroup/system.slice/llm.service");
+  AddCgroup(files, "/sys/fs/cgroup/system.slice/llm.service/worker-1");
+
+  // The service has used 15 of its 16 GiB, so it leaves less headroom than the worker's own 8 GiB limit with 2 GiB
+  // used.
+  AddMemoryFiles(files, "/sys/fs/cgroup/system.slice/llm.service", std::to_string(16 * kGiB), 15 * kGiB);
+  AddMemoryFiles(files, "/sys/fs/cgroup/system.slice/llm.service/worker-1", std::to_string(8 * kGiB), 2 * kGiB);
+  CgroupMemoryLimits cgroup = ResolveCgroupMemory(files);
+  EXPECT_EQ(cgroup.status, CgroupStatus::kResolved);
+  EXPECT_EQ(cgroup.limit, std::optional<uint64_t>{8 * kGiB});
+  EXPECT_EQ(cgroup.headroom, std::optional<uint64_t>{1 * kGiB});
+  HostFacts facts = ResolveHostFacts(cgroup, 128 * kGiB, 100 * kGiB);
+  EXPECT_EQ(facts.effective, std::optional<uint64_t>{8 * kGiB});
+  EXPECT_EQ(facts.available, std::optional<uint64_t>{1 * kGiB});
+
+  // A parent with a lower limit than the worker caps the effective memory.
+  AddMemoryFiles(files, "/sys/fs/cgroup/system.slice/llm.service", std::to_string(4 * kGiB), 1 * kGiB);
+  cgroup = ResolveCgroupMemory(files);
+  EXPECT_EQ(cgroup.limit, std::optional<uint64_t>{4 * kGiB});
+  EXPECT_EQ(cgroup.headroom, std::optional<uint64_t>{3 * kGiB});
+  facts = ResolveHostFacts(cgroup, 128 * kGiB, 100 * kGiB);
+  EXPECT_EQ(facts.effective, std::optional<uint64_t>{4 * kGiB});
+  EXPECT_EQ(facts.available, std::optional<uint64_t>{3 * kGiB});
+
+  // A worker that has used more than its limit has no headroom.
+  AddMemoryFiles(files, "/sys/fs/cgroup/system.slice/llm.service", "max", 15 * kGiB);
+  AddMemoryFiles(files, "/sys/fs/cgroup/system.slice/llm.service/worker-1", std::to_string(8 * kGiB), 9 * kGiB);
+  cgroup = ResolveCgroupMemory(files);
+  EXPECT_EQ(cgroup.limit, std::optional<uint64_t>{8 * kGiB});
+  EXPECT_EQ(cgroup.headroom, std::optional<uint64_t>{0});
+
+  // The worker does not have the memory controller of its own: the service's limit is the one that applies.
+  files.erase("/sys/fs/cgroup/system.slice/llm.service/worker-1/memory.max");
+  files.erase("/sys/fs/cgroup/system.slice/llm.service/worker-1/memory.current");
+  AddCgroup(files, "/sys/fs/cgroup/system.slice/llm.service/worker-1", /*has_memory_controller=*/false);
+  AddMemoryFiles(files, "/sys/fs/cgroup/system.slice/llm.service", std::to_string(16 * kGiB), 15 * kGiB);
+  cgroup = ResolveCgroupMemory(files);
+  EXPECT_EQ(cgroup.status, CgroupStatus::kResolved);
+  EXPECT_EQ(cgroup.limit, std::optional<uint64_t>{16 * kGiB});
+  EXPECT_EQ(cgroup.headroom, std::optional<uint64_t>{1 * kGiB});
+}
+
+TEST(ConfigTest, CgroupMemoryIsUnboundedWhenEveryLevelIsUnlimited) {
+  FakeHostFiles files;
+  files["/proc/self/cgroup"] = "0::/system.slice/llm.service\n";
+  files["/proc/self/mountinfo"] = std::string{kHostMountinfo};
+  AddCgroup(files, "/sys/fs/cgroup");  // the hierarchy root has no memory files
+  AddCgroup(files, "/sys/fs/cgroup/system.slice");
+  AddMemoryFiles(files, "/sys/fs/cgroup/system.slice", "max", 40 * kGiB);
+  AddCgroup(files, "/sys/fs/cgroup/system.slice/llm.service");
+  AddMemoryFiles(files, "/sys/fs/cgroup/system.slice/llm.service", "max", 30 * kGiB);
+
+  const CgroupMemoryLimits cgroup = ResolveCgroupMemory(files);
+  EXPECT_EQ(cgroup.status, CgroupStatus::kResolved);
+  EXPECT_FALSE(cgroup.limit.has_value());
+  EXPECT_FALSE(cgroup.headroom.has_value());
+
+  const HostFacts facts = ResolveHostFacts(cgroup, 128 * kGiB, 100 * kGiB);
+  EXPECT_EQ(facts.effective, std::optional<uint64_t>{128 * kGiB});
+  EXPECT_EQ(facts.available, std::optional<uint64_t>{100 * kGiB});
+
+  // So is a hierarchy without the memory controller anywhere, such as the unified hierarchy of a hybrid cgroup setup.
+  files.clear();
+  files["/proc/self/cgroup"] =
+      "12:memory:/system.slice/llm.service\n1:name=systemd:/system.slice/llm.service\n"
+      "0::/system.slice/llm.service\n";
+  files["/proc/self/mountinfo"] =
+      "26 25 0:23 / /sys/fs/cgroup/unified rw,nosuid,nodev,noexec,relatime shared:9 - "
+      "cgroup2 cgroup2 rw,nsdelegate\n"
+      "27 25 0:24 / /sys/fs/cgroup/memory rw,nosuid,nodev,noexec,relatime shared:10 - "
+      "cgroup cgroup rw,memory\n";
+  AddCgroup(files, "/sys/fs/cgroup/unified", /*has_memory_controller=*/false);
+  AddCgroup(files, "/sys/fs/cgroup/unified/system.slice", /*has_memory_controller=*/false);
+  AddCgroup(files, "/sys/fs/cgroup/unified/system.slice/llm.service", /*has_memory_controller=*/false);
+  const CgroupMemoryLimits hybrid = ResolveCgroupMemory(files);
+  EXPECT_EQ(hybrid.status, CgroupStatus::kResolved);
+  EXPECT_FALSE(hybrid.limit.has_value());
+  EXPECT_FALSE(hybrid.headroom.has_value());
+}
+
+TEST(ConfigTest, CgroupMemoryMaxThatDoesNotExistDoesNotBoundTheProcess) {
+  // memory.max is absent from the hierarchy root and from a cgroup without the memory controller. Neither limits the
+  // process, so the levels that have the file decide.
+  FakeHostFiles files;
+  files["/proc/self/cgroup"] = "0::/app/job\n";
+  files["/proc/self/mountinfo"] = std::string{kHostMountinfo};
+  AddCgroup(files, "/sys/fs/cgroup");  // the hierarchy root lists the memory controller but has no memory.max
+  AddCgroup(files, "/sys/fs/cgroup/app", /*has_memory_controller=*/false);
+  AddCgroup(files, "/sys/fs/cgroup/app/job");
+  AddMemoryFiles(files, "/sys/fs/cgroup/app/job", std::to_string(8 * kGiB), 2 * kGiB);
+  CgroupMemoryLimits cgroup = ResolveCgroupMemory(files);
+  EXPECT_EQ(cgroup.status, CgroupStatus::kResolved);
+  EXPECT_EQ(cgroup.limit, std::optional<uint64_t>{8 * kGiB});
+  EXPECT_EQ(cgroup.headroom, std::optional<uint64_t>{6 * kGiB});
+
+  // A process in the hierarchy root has no level with a limit.
+  files["/proc/self/cgroup"] = "0::/\n";
+  cgroup = ResolveCgroupMemory(files);
+  EXPECT_EQ(cgroup.status, CgroupStatus::kResolved);
+  EXPECT_FALSE(cgroup.limit.has_value());
+  EXPECT_FALSE(cgroup.headroom.has_value());
+
+  // Nor does one in a cgroup namespace whose root has no memory controller.
+  FakeHostFiles namespace_root;
+  namespace_root["/proc/self/cgroup"] = "0::/\n";
+  namespace_root["/proc/self/mountinfo"] =
+      "30 22 0:26 / /sys/fs/cgroup ro,nosuid,nodev,noexec,relatime - cgroup2 cgroup rw\n";
+  AddCgroup(namespace_root, "/sys/fs/cgroup", /*has_memory_controller=*/false);
+  cgroup = ResolveCgroupMemory(namespace_root);
+  EXPECT_EQ(cgroup.status, CgroupStatus::kResolved);
+  EXPECT_FALSE(cgroup.limit.has_value());
+  EXPECT_FALSE(cgroup.headroom.has_value());
+
+  // A mount rooted at a sub-cgroup shows no hierarchy root, and its mounted cgroup may lack the controller as well.
+  FakeHostFiles sub_mount;
+  sub_mount["/proc/self/cgroup"] = "0::/app/job\n";
+  sub_mount["/proc/self/mountinfo"] =
+      "30 22 0:26 /app /sys/fs/cgroup ro,nosuid,nodev,noexec,relatime - cgroup2 cgroup rw\n";
+  AddCgroup(sub_mount, "/sys/fs/cgroup", /*has_memory_controller=*/false);
+  AddCgroup(sub_mount, "/sys/fs/cgroup/job");
+  AddMemoryFiles(sub_mount, "/sys/fs/cgroup/job", std::to_string(8 * kGiB), 2 * kGiB);
+  cgroup = ResolveCgroupMemory(sub_mount);
+  EXPECT_EQ(cgroup.status, CgroupStatus::kResolved);
+  EXPECT_EQ(cgroup.limit, std::optional<uint64_t>{8 * kGiB});
+  EXPECT_EQ(cgroup.headroom, std::optional<uint64_t>{6 * kGiB});
+}
+
+TEST(ConfigTest, CgroupMemoryMaxThatCannotBeReadLeavesTheHostMemoryUnknownAtEveryLevel) {
+  // A container with its own cgroup namespace: the mount root and /proc/self/cgroup both show "/", exactly as they do
+  // for a process in the hierarchy root of a host, yet the container's cgroup has a memory.max that is its limit.
+  FakeHostFiles files;
+  files["/proc/self/cgroup"] = "0::/\n";
+  files["/proc/self/mountinfo"] = "30 22 0:26 / /sys/fs/cgroup ro,nosuid,nodev,noexec,relatime - cgroup2 cgroup rw\n";
+  AddCgroup(files, "/sys/fs/cgroup");
+  AddMemoryFiles(files, "/sys/fs/cgroup", std::to_string(8 * kGiB), 2 * kGiB);
+  CgroupMemoryLimits cgroup = ResolveCgroupMemory(files);
+  EXPECT_EQ(cgroup.status, CgroupStatus::kResolved);
+  HostFacts facts = ResolveHostFacts(cgroup, 128 * kGiB, 100 * kGiB);
+  EXPECT_EQ(facts.effective, std::optional<uint64_t>{8 * kGiB});
+  EXPECT_EQ(facts.available, std::optional<uint64_t>{6 * kGiB});
+
+  // The same container whose memory.max exists but cannot be read must not look like one without a limit.
+  MakeUnreadable(files, "/sys/fs/cgroup/memory.max");
+  cgroup = ResolveCgroupMemory(files);
+  EXPECT_EQ(cgroup.status, CgroupStatus::kUnresolved);
+  EXPECT_FALSE(cgroup.limit.has_value());
+  EXPECT_FALSE(cgroup.headroom.has_value());
+  facts = ResolveHostFacts(cgroup, 128 * kGiB, 100 * kGiB);
+  EXPECT_FALSE(facts.effective.has_value());
+  EXPECT_FALSE(facts.available.has_value());
+
+  // So the host's memory does not make a profile that needs a large host eligible.
+  Config config;
+  OverlayConfig(config, R"({"runtime_profiles":[{"id":"large-host",
+    "eligibility":{"minimum_total_device_memory_bytes":0,"minimum_effective_host_memory_bytes":68719476736},
+    "overlay":{"search":{"chunk_size":1}}}]})");
+  ApplyRuntimeProfile(config, RuntimeProfileDeviceFacts{1, false, std::nullopt, facts.effective, facts.available});
+  EXPECT_FALSE(config.search.chunk_size.has_value());
+
+  // The root of the namespace can be above the process's own cgroup, and it can hold the tighter limit.
+  files["/proc/self/cgroup"] = "0::/job\n";
+  AddCgroup(files, "/sys/fs/cgroup/job");
+  AddMemoryFiles(files, "/sys/fs/cgroup/job", std::to_string(4 * kGiB), 1 * kGiB);
+  EXPECT_EQ(ResolveCgroupMemory(files).status, CgroupStatus::kUnresolved);
+  files["/sys/fs/cgroup/memory.max"] = "max\n";
+  cgroup = ResolveCgroupMemory(files);
+  EXPECT_EQ(cgroup.status, CgroupStatus::kResolved);
+  EXPECT_EQ(cgroup.limit, std::optional<uint64_t>{4 * kGiB});
+  EXPECT_EQ(cgroup.headroom, std::optional<uint64_t>{3 * kGiB});
+
+  // A mount rooted at a sub-cgroup is no different.
+  FakeHostFiles sub_mount;
+  sub_mount["/proc/self/cgroup"] = "0::/app/job\n";
+  sub_mount["/proc/self/mountinfo"] =
+      "30 22 0:26 /app /sys/fs/cgroup ro,nosuid,nodev,noexec,relatime - cgroup2 cgroup rw\n";
+  AddCgroup(sub_mount, "/sys/fs/cgroup");
+  MakeUnreadable(sub_mount, "/sys/fs/cgroup/memory.max");
+  AddCgroup(sub_mount, "/sys/fs/cgroup/job");
+  AddMemoryFiles(sub_mount, "/sys/fs/cgroup/job", std::to_string(8 * kGiB), 2 * kGiB);
+  EXPECT_EQ(ResolveCgroupMemory(sub_mount).status, CgroupStatus::kUnresolved);
+  AddMemoryFiles(sub_mount, "/sys/fs/cgroup", std::to_string(16 * kGiB), 4 * kGiB);
+  cgroup = ResolveCgroupMemory(sub_mount);
+  EXPECT_EQ(cgroup.status, CgroupStatus::kResolved);
+  EXPECT_EQ(cgroup.limit, std::optional<uint64_t>{8 * kGiB});
+}
+
+#if defined(__linux__)
+TEST(ConfigTest, HostFileReaderTellsAMissingFileFromAnUnreadableOne) {
+  std::error_code ec;
+  const auto directory = std::filesystem::canonical(std::filesystem::temp_directory_path(), ec) /
+                         ("genai_host_file_reader_test_" + std::to_string(std::random_device{}()));
+  ASSERT_TRUE(std::filesystem::create_directories(directory, ec)) << ec.message();
+  struct Cleanup {
+    std::filesystem::path path;
+    ~Cleanup() {
+      std::error_code ignored;
+      std::filesystem::remove_all(path, ignored);
+    }
+  } cleanup{directory};
+  const auto write_file = [&directory](const char* name, const std::string& text) {
+    const std::string path = (directory / name).string();
+    std::ofstream{path, std::ios::binary} << text;
+    return path;
+  };
+
+  // A file is read to its end, however long it is, and an empty file is read as empty.
+  const std::string long_text(10000, 'x');
+  HostFile file = ReadHostFile(write_file("long", long_text));
+  EXPECT_EQ(file.status, HostFileStatus::kRead);
+  EXPECT_EQ(file.text, long_text);
+  file = ReadHostFile(write_file("empty", ""));
+  EXPECT_EQ(file.status, HostFileStatus::kRead);
+  EXPECT_TRUE(file.text.empty());
+  // The files under /proc report no size, so they can only be read to their end.
+  file = ReadHostFile("/proc/self/status");
+  EXPECT_EQ(file.status, HostFileStatus::kRead);
+  EXPECT_FALSE(file.text.empty());
+
+  // A file that is not there is missing, and so is one in a directory that is not there.
+  EXPECT_EQ(ReadHostFile((directory / "absent").string()).status, HostFileStatus::kMissing);
+  EXPECT_EQ(ReadHostFile((directory / "absent" / "file").string()).status, HostFileStatus::kMissing);
+
+  // Whatever else keeps a file from being read says nothing about whether it is there. A directory can be opened but
+  // not read.
+  file = ReadHostFile(directory.string());
+  EXPECT_EQ(file.status, HostFileStatus::kUnreadable);
+  EXPECT_TRUE(file.text.empty());
+  EXPECT_EQ(ReadHostFile((directory / "long" / "file").string()).status, HostFileStatus::kUnreadable);
+  const std::string denied = write_file("denied", "8589934592\n");
+  std::filesystem::permissions(denied, std::filesystem::perms::none, ec);
+  ASSERT_FALSE(ec) << ec.message();
+  // The superuser reads a file whatever its permissions are.
+  if (::geteuid() != 0) {
+    file = ReadHostFile(denied);
+    EXPECT_EQ(file.status, HostFileStatus::kUnreadable);
+    EXPECT_TRUE(file.text.empty());
+  }
+}
+#endif
+
+TEST(ConfigTest, CgroupMemoryTreatsAZeroMemoryMaxAsAHardLimit) {
+  // memory.max is "max" when a cgroup is unlimited, so a number, including zero, is a limit.
+  FakeHostFiles files;
+  files["/proc/self/cgroup"] = "0::/app/job\n";
+  files["/proc/self/mountinfo"] = std::string{kHostMountinfo};
+  AddCgroup(files, "/sys/fs/cgroup");
+  AddCgroup(files, "/sys/fs/cgroup/app");
+  AddMemoryFiles(files, "/sys/fs/cgroup/app", "0", 0);
+  AddCgroup(files, "/sys/fs/cgroup/app/job");
+  AddMemoryFiles(files, "/sys/fs/cgroup/app/job", std::to_string(8 * kGiB), 2 * kGiB);
+
+  const CgroupMemoryLimits cgroup = ResolveCgroupMemory(files);
+  EXPECT_EQ(cgroup.status, CgroupStatus::kResolved);
+  EXPECT_EQ(cgroup.limit, std::optional<uint64_t>{0});
+  EXPECT_EQ(cgroup.headroom, std::optional<uint64_t>{0});
+
+  const HostFacts facts = ResolveHostFacts(cgroup, 128 * kGiB, 100 * kGiB);
+  EXPECT_EQ(facts.effective, std::optional<uint64_t>{0});
+  EXPECT_EQ(facts.available, std::optional<uint64_t>{0});
+
+  // The host-wide memory must not make a profile eligible when the cgroup allows none.
+  Config config;
+  OverlayConfig(config, R"({"runtime_profiles":[{"id":"any-host",
+    "eligibility":{"minimum_total_device_memory_bytes":0,"minimum_effective_host_memory_bytes":1},
+    "overlay":{"search":{"chunk_size":1}}}]})");
+  ApplyRuntimeProfile(config, RuntimeProfileDeviceFacts{1, false, std::nullopt, facts.effective, facts.available});
+  EXPECT_FALSE(config.search.chunk_size.has_value());
+}
+
+TEST(ConfigTest, CgroupMemoryReadsEscapedMountsAndPicksTheMountThatShowsTheMostAncestors) {
+  FakeHostFiles files;
+  files["/proc/self/cgroup"] = "0::/a b/leaf\n";
+  // The cgroup v1 mount is skipped. The spaces in the paths of the cgroup2 mounts are escaped. The first cgroup2 mount
+  // shows the whole hierarchy, the second one starts at "/a b" and the third one at the process's own cgroup.
+  const std::string v1_mount =
+      "26 25 0:23 / /sys/fs/cgroup/memory rw,nosuid shared:9 master:2 - cgroup cgroup rw,memory\n";
+  const std::string whole_mount = "27 25 0:24 / /mnt/cg\\040v2 rw,nosuid shared:5 - cgroup2 cgroup2 rw\n";
+  const std::string sub_mount = "28 25 0:24 /a\\040b /mnt/sub rw,nosuid - cgroup2 cgroup2 rw\n";
+  const std::string leaf_mount = "29 25 0:24 /a\\040b/leaf /mnt/inner rw,nosuid - cgroup2 cgroup2 rw\n";
+
+  AddCgroup(files, "/mnt/cg v2");
+  AddCgroup(files, "/mnt/cg v2/a b");
+  AddCgroup(files, "/mnt/cg v2/a b/leaf");
+  AddMemoryFiles(files, "/mnt/cg v2/a b", std::to_string(32 * kGiB), 16 * kGiB);
+  AddMemoryFiles(files, "/mnt/cg v2/a b/leaf", std::to_string(24 * kGiB), 4 * kGiB);
+  AddCgroup(files, "/mnt/sub");
+  AddCgroup(files, "/mnt/sub/leaf");
+  AddMemoryFiles(files, "/mnt/sub", std::to_string(16 * kGiB), 8 * kGiB);
+  AddMemoryFiles(files, "/mnt/sub/leaf", std::to_string(12 * kGiB), 2 * kGiB);
+  AddCgroup(files, "/mnt/inner");
+  AddMemoryFiles(files, "/mnt/inner", "1048576", 0);
+
+  // The mount of the whole hierarchy shows the most ancestors.
+  files["/proc/self/mountinfo"] = v1_mount + sub_mount + whole_mount + leaf_mount;
+  CgroupMemoryLimits cgroup = ResolveCgroupMemory(files);
+  EXPECT_EQ(cgroup.status, CgroupStatus::kResolved);
+  EXPECT_EQ(cgroup.limit, std::optional<uint64_t>{24 * kGiB});
+  EXPECT_EQ(cgroup.headroom, std::optional<uint64_t>{16 * kGiB});
+
+  // Without it, the mount rooted at "/a b" does.
+  files["/proc/self/mountinfo"] = v1_mount + leaf_mount + sub_mount;
+  cgroup = ResolveCgroupMemory(files);
+  EXPECT_EQ(cgroup.status, CgroupStatus::kResolved);
+  EXPECT_EQ(cgroup.limit, std::optional<uint64_t>{12 * kGiB});
+  EXPECT_EQ(cgroup.headroom, std::optional<uint64_t>{8 * kGiB});
+}
+
+TEST(ConfigTest, CgroupMemoryFallsBackToThePhysicalReadingsWithoutCgroupV2) {
+  FakeHostFiles files;
+  // A cgroup v1 system has no unified hierarchy entry, so the mounts are not consulted.
+  files["/proc/self/cgroup"] = "12:memory:/docker/abc\n11:cpu,cpuacct:/docker/abc\n1:name=systemd:/docker/abc\n";
+  CgroupMemoryLimits cgroup = ResolveCgroupMemory(files);
+  EXPECT_EQ(cgroup.status, CgroupStatus::kNotApplicable);
+  HostFacts facts = ResolveHostFacts(cgroup, 128 * kGiB, 100 * kGiB);
+  EXPECT_EQ(facts.effective, std::optional<uint64_t>{128 * kGiB});
+  EXPECT_EQ(facts.available, std::optional<uint64_t>{100 * kGiB});
+
+  // A unified hierarchy entry without a cgroup2 mount has no files to read.
+  files["/proc/self/cgroup"] = "0::/docker/abc\n";
+  files["/proc/self/mountinfo"] = "22 1 8:2 / / rw,relatime shared:1 - ext4 /dev/sda2 rw\n";
+  cgroup = ResolveCgroupMemory(files);
+  EXPECT_EQ(cgroup.status, CgroupStatus::kNotApplicable);
+  facts = ResolveHostFacts(cgroup, 128 * kGiB, 100 * kGiB);
+  EXPECT_EQ(facts.effective, std::optional<uint64_t>{128 * kGiB});
+  EXPECT_EQ(facts.available, std::optional<uint64_t>{100 * kGiB});
+}
+
+TEST(ConfigTest, UnreadableOrUnparseableCgroupInputsLeaveTheHostMemoryUnknown) {
+  const auto valid_files = [] {
+    FakeHostFiles files;
+    files["/proc/self/cgroup"] = "0::/app/job\n";
+    files["/proc/self/mountinfo"] = std::string{kHostMountinfo};
+    AddCgroup(files, "/sys/fs/cgroup");
+    AddCgroup(files, "/sys/fs/cgroup/app");
+    AddMemoryFiles(files, "/sys/fs/cgroup/app", "max", 3 * kGiB);
+    AddCgroup(files, "/sys/fs/cgroup/app/job");
+    AddMemoryFiles(files, "/sys/fs/cgroup/app/job", std::to_string(8 * kGiB), 2 * kGiB);
+    return files;
+  };
+  ASSERT_EQ(ResolveCgroupMemory(valid_files()).status, CgroupStatus::kResolved);
+
+  const std::string job = "/sys/fs/cgroup/app/job";
+  const auto mountinfo = [](std::string text) {
+    return [text = std::move(text)](FakeHostFiles& f) { f["/proc/self/mountinfo"] = text; };
+  };
+  const std::vector<std::pair<std::string, std::function<void(FakeHostFiles&)>>> corruptions = {
+      {"missing /proc/self/cgroup", [](FakeHostFiles& f) { f.erase("/proc/self/cgroup"); }},
+      {"unreadable /proc/self/cgroup", [](FakeHostFiles& f) { MakeUnreadable(f, "/proc/self/cgroup"); }},
+      {"empty /proc/self/cgroup", [](FakeHostFiles& f) { f["/proc/self/cgroup"] = ""; }},
+      {"malformed /proc/self/cgroup", [](FakeHostFiles& f) { f["/proc/self/cgroup"] = "not a cgroup file\n"; }},
+      {"non-numeric hierarchy id", [](FakeHostFiles& f) { f["/proc/self/cgroup"] = "x::/app/job\n"; }},
+      {"empty cgroup path", [](FakeHostFiles& f) { f["/proc/self/cgroup"] = "0::\n"; }},
+      {"relative cgroup path", [](FakeHostFiles& f) { f["/proc/self/cgroup"] = "0::app/job\n"; }},
+      {"cgroup path outside the namespace root", [](FakeHostFiles& f) { f["/proc/self/cgroup"] = "0::/../app/job\n"; }},
+      {"missing /proc/self/mountinfo", [](FakeHostFiles& f) { f.erase("/proc/self/mountinfo"); }},
+      {"unreadable /proc/self/mountinfo", [](FakeHostFiles& f) { MakeUnreadable(f, "/proc/self/mountinfo"); }},
+      {"empty /proc/self/mountinfo", mountinfo("")},
+      {"malformed /proc/self/mountinfo", mountinfo("garbage\n")},
+      {"mountinfo without a separator", mountinfo("24 22 0:22 / /sys/fs/cgroup rw shared:5 cgroup2 cgroup2 rw\n")},
+      {"bad escape in the mount point", mountinfo("24 22 0:22 / /sys/fs/cg\\9roup rw - cgroup2 cgroup2 rw\n")},
+      {"cgroup outside the cgroup2 mount root",
+       mountinfo("24 22 0:22 /other /sys/fs/cgroup rw - cgroup2 cgroup2 rw\n")},
+      {"cgroup2 mount root outside the namespace root",
+       mountinfo("24 22 0:22 /../.. /sys/fs/cgroup rw - cgroup2 cgroup2 rw\n")},
+      {"cgroup directory that is not visible", [&](FakeHostFiles& f) { f.erase(job + "/cgroup.controllers"); }},
+      {"unreadable cgroup.controllers", [&](FakeHostFiles& f) { MakeUnreadable(f, job + "/cgroup.controllers"); }},
+      {"unparseable memory.max", [&](FakeHostFiles& f) { f[job + "/memory.max"] = "lots\n"; }},
+      {"negative memory.max", [&](FakeHostFiles& f) { f[job + "/memory.max"] = "-1\n"; }},
+      {"empty memory.max", [&](FakeHostFiles& f) { f[job + "/memory.max"] = ""; }},
+      {"memory.max beyond 64 bits", [&](FakeHostFiles& f) { f[job + "/memory.max"] = "18446744073709551616\n"; }},
+      {"missing memory.current", [&](FakeHostFiles& f) { f.erase(job + "/memory.current"); }},
+      {"unreadable memory.current", [&](FakeHostFiles& f) { MakeUnreadable(f, job + "/memory.current"); }},
+      {"unparseable memory.current", [&](FakeHostFiles& f) { f[job + "/memory.current"] = "n/a\n"; }},
+      // A memory.max that exists but cannot be read is an unknown limit, not an unlimited level.
+      {"unreadable memory.max in the process's cgroup", [&](FakeHostFiles& f) { MakeUnreadable(f, job + "/memory.max"); }},
+      {"unreadable memory.max in an ancestor",
+       [](FakeHostFiles& f) { MakeUnreadable(f, "/sys/fs/cgroup/app/memory.max"); }},
+      {"unreadable memory.max in the mounted cgroup root",
+       [](FakeHostFiles& f) { MakeUnreadable(f, "/sys/fs/cgroup/memory.max"); }},
+  };
+  for (const auto& [name, corrupt] : corruptions) {
+    auto files = valid_files();
+    corrupt(files);
+    const CgroupMemoryLimits cgroup = ResolveCgroupMemory(files);
+    EXPECT_EQ(cgroup.status, CgroupStatus::kUnresolved) << name;
+    EXPECT_FALSE(cgroup.limit.has_value()) << name;
+    EXPECT_FALSE(cgroup.headroom.has_value()) << name;
+
+    // Neither the host-wide memory nor the unlimited mount root stands in for the process's cgroup.
+    const HostFacts facts = ResolveHostFacts(cgroup, 128 * kGiB, 100 * kGiB);
+    EXPECT_FALSE(facts.effective.has_value()) << name;
+    EXPECT_FALSE(facts.available.has_value()) << name;
+  }
+
+  // A profile bounded by the host memory is not eligible when the host memory is unknown.
+  Config config;
+  OverlayConfig(config, R"({"runtime_profiles":[{"id":"any-host",
+    "eligibility":{"minimum_total_device_memory_bytes":0,"minimum_effective_host_memory_bytes":0},
+    "overlay":{"search":{"chunk_size":1}}}]})");
+  ApplyRuntimeProfile(config, RuntimeProfileDeviceFacts{1, false, std::nullopt, std::nullopt, std::nullopt});
+  EXPECT_FALSE(config.search.chunk_size.has_value());
 }
 
 TEST(ConfigTest, RuntimeProfileUsesDefaultCudaDevice) {
@@ -368,6 +1252,56 @@ TEST(ConfigTest, IntegratedCapabilityFailureUsesBaseAndReportsError) {
   EXPECT_EQ(*config.engine.dynamic_batching->num_blocks, 32u);
   EXPECT_TRUE(config.runtime_profiles.empty());
   EXPECT_EQ(device.state->integrated_queries, 1u);
+}
+
+namespace {
+
+constexpr const char* kIntegratedRuntimeProfileConfig = R"({
+  "engine":{"dynamic_batching":{"num_blocks":32}},
+  "runtime_profiles":[
+    {"id":"integrated","eligibility":{"minimum_total_device_memory_bytes":0,"is_integrated":true},
+     "overlay":{"engine":{"dynamic_batching":{"num_blocks":40}}}},
+    {"id":"discrete","eligibility":{"minimum_total_device_memory_bytes":0,"is_integrated":false},
+     "overlay":{"engine":{"dynamic_batching":{"num_blocks":80}}}}
+  ]
+})";
+
+}  // namespace
+
+TEST(ConfigTest, ForcedRuntimeProfileDoesNotNeedTheIntegratedCapabilityQuery) {
+  Config config;
+  OverlayConfig(config, kIntegratedRuntimeProfileConfig);
+  CountingCudaDevice device;
+  device.state->total_memory_bytes = 100;
+  device.state->is_integrated = std::nullopt;  // the capability query fails
+
+  ScopedEnvironmentVariable forced{"ORTGENAI_ENABLE_RUNTIME_PROFILE", "integrated"};
+  testing::internal::CaptureStderr();
+  ApplyRuntimeProfileForSelectedDevice(config, device);
+  const auto warning = testing::internal::GetCapturedStderr();
+
+  // The forced profile is applied as written, and eligibility, which is what needs the query, is skipped.
+  EXPECT_EQ(*config.engine.dynamic_batching->num_blocks, 40u);
+  EXPECT_EQ(device.state->integrated_queries, 0u);
+  EXPECT_EQ(warning.find("test integrated-device query failed"), std::string::npos) << warning;
+  EXPECT_TRUE(config.runtime_profiles.empty());
+}
+
+TEST(ConfigTest, UnknownForcedRuntimeProfileIdFailsWhenTheIntegratedCapabilityQueryFails) {
+  Config config;
+  OverlayConfig(config, kIntegratedRuntimeProfileConfig);
+  CountingCudaDevice device;
+  device.state->total_memory_bytes = 100;
+  device.state->is_integrated = std::nullopt;
+
+  ScopedEnvironmentVariable forced{"ORTGENAI_ENABLE_RUNTIME_PROFILE", "no-such-profile"};
+  try {
+    ApplyRuntimeProfileForSelectedDevice(config, device);
+    FAIL() << "An unknown forced profile id must not fall back to the base settings";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(std::string{error.what()}.find("no-such-profile"), std::string::npos) << error.what();
+  }
+  EXPECT_EQ(*config.engine.dynamic_batching->num_blocks, 32u);
 }
 
 TEST(ConfigTest, IntegratedEligibilityRequiresBooleanAndDisjointRanges) {
