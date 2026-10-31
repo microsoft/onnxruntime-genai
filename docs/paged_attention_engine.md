@@ -2334,10 +2334,14 @@ paged, batched or cropped to an arbitrary token. `Engine::CreateDependencies` as
   and the replay after a rewind re-ingest the whole retained history (through the same chunked prefill as a new prompt), because
   the look-ahead cycle and the bank ring cannot be rolled back. There is no prefix cache.
 - `Qwen38GraphExecutor::SelectsOwnTokens()` is true. One Engine step is one prompt chunk (the size the device asks for,
-  `Qwen38DecodeDevice::PrefillChunkTokens()` = `model.qwen38_graph.prefill.chunk` with the fast prefill, otherwise
-  `model.qwen38_graph.prefill_chunk_tokens`, even; a step that only advances the prompt delivers no event, so `CancelRequest`
+  `Qwen38DecodeDevice::PrefillChunkTokens()`: `model.qwen38_graph.prefill.chunk` when set, otherwise 8192 tokens with the
+  dense prefill (`prefill.enabled`) and 2048 per step through the decode graphs, see `EffectiveQwen38PrefillChunkTokens`;
+  the decode-graph path needs an even chunk; a step that only advances the prompt delivers no event, so `CancelRequest`
   stays responsive; the dense prefill state continues across the chunks and is handed over to the decode state in the step that
-  ingests the last one) or one whole cycle (with `fold.enabled`: one CUDA-graph launch). The
+  ingests the last one) or one whole cycle (with `fold.enabled`: one CUDA-graph launch). The executor tells the device the
+  prompt length of the turn (`Qwen38DecodeDevice::ExpectPrefillTokens`, after `Reset()` and before the first chunk); the
+  device hands it to the ORT QMoE kernels with every chunk of that turn and drops it at `Reset()`/`BeginDecode()`. The value
+  is device state: nothing is published through the process environment, so Engines of different models never share it. The
   cycle's one or two committed tokens are handed to `ScheduledRequests::StageExecutorTokens`; `GenerateNextTokens` then calls
   `Request::CommitExternalTokens`, which commits them one by one through `Search::CommitToken` (EOS and the session limit as
   usual), observes stop strings per appended token, and ends the turn at the first token that reaches the turn limit, the

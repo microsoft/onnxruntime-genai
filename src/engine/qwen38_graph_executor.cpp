@@ -4,7 +4,6 @@
 #include "qwen38_graph_executor.h"
 
 #include <algorithm>
-#include <cstdlib>
 #include <stdexcept>
 
 #include "../models/qwen38_graph.h"
@@ -109,15 +108,12 @@ Qwen38StepResult Qwen38GraphSession::Step(const Qwen38StepRequest& request) {
   if (!decoding_) {
     const size_t remaining = request.tokens.size() - prefilled_;
     const size_t chunk = std::min(options_.prefill_chunk_tokens, remaining);
-    if (prefilled_ == 0) {
-      const std::string total_str = std::to_string(request.tokens.size());
-#if defined(_WIN32)
-      _putenv_s("ORT_QMOE_PREFILL_TOTAL_TOKENS", total_str.c_str());
-#else
-      setenv("ORT_QMOE_PREFILL_TOTAL_TOKENS", total_str.c_str(), 1);
-#endif
-    }
     device_dirty_ = true;
+    if (prefilled_ == 0) {
+      // The device keeps the turn's prompt length for its chunks (Reset() and BeginDecode() drop it): the value belongs
+      // to this device, so Engines running in one process never see each other's.
+      device_->ExpectPrefillTokens(request.tokens.size());
+    }
     device_->PrefillChunk(request.tokens.subspan(prefilled_, chunk));
     prefilled_ += chunk;
     if (prefilled_ < request.tokens.size()) {
@@ -379,11 +375,10 @@ EngineDependencies CreateQwen38GraphDependencies(std::shared_ptr<Model> model,
     throw std::runtime_error(
         "The qwen38_flash_graph model type runs on the Engine's static single-slot path; engine.dynamic_batching is not supported.");
   }
-  if (config.model.qwen38_graph.prefill_chunk_tokens < 2) {
-    throw std::runtime_error("model.qwen38_graph.prefill_chunk_tokens must be at least 2.");
-  }
+  const auto& qwen38 = config.model.qwen38_graph;
+  ValidateQwen38PrefillChunk(qwen38);
   Qwen38GraphSession::Options options;
-  options.prefill_chunk_tokens = static_cast<size_t>(config.model.qwen38_graph.prefill_chunk_tokens);
+  options.prefill_chunk_tokens = EffectiveQwen38PrefillChunkTokens(qwen38);
   options.stop_tokens.assign(config.model.eos_token_id.begin(), config.model.eos_token_id.end());
   auto session = std::make_shared<Qwen38GraphSession>(std::move(device), std::move(options));
   auto cache_manager = std::make_shared<Qwen38GraphCacheManager>(model, session);

@@ -7,6 +7,7 @@
 // synthetic-paged one because it carries a tiny tokenizer for the stop-string cases (token 5 -> "ST", 6 -> "OP",
 // 0/1 special, EOS is 1).
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <iostream>
@@ -41,7 +42,7 @@ class Qwen38GraphEngineTest : public ::testing::Test {
   void SetUp() override {
     model_ = LoadSyntheticPagedModel();
     model_->config_->engine.dynamic_batching.reset();
-    model_->config_->model.qwen38_graph.prefill_chunk_tokens = 4;
+    model_->config_->model.qwen38_graph.prefill.chunk = 4;
     device_ = std::make_shared<ScriptedQwen38Device>();
   }
 
@@ -332,9 +333,8 @@ TEST_F(Qwen38GraphEngineTest, WithoutMtpEveryCycleCommitsOneToken) {
 
 // ---- prefill, cancellation, queueing ---------------------------------------------------------
 
-TEST_F(Qwen38GraphEngineTest, ThePromptIsIngestedInEvenChunksOverSeveralSteps) {
-  model_->config_->model.qwen38_graph.prefill_chunk_tokens = 5;  // rounded down to 4: S=2 pairs stay aligned
-  auto engine = MakeEngine();
+TEST_F(Qwen38GraphEngineTest, ThePromptIsIngestedInChunksOverSeveralSteps) {
+  auto engine = MakeEngine();  // prefill.chunk = 4
   const auto prompt = Prompt(11);
   auto request = Begin(*engine, prompt, /*max_generated_tokens=*/2);
 
@@ -348,6 +348,76 @@ TEST_F(Qwen38GraphEngineTest, ThePromptIsIngestedInEvenChunksOverSeveralSteps) {
   EXPECT_EQ(device_->CallCount("prefill:3"), 1u);
   EXPECT_EQ(device_->ingested, prompt);
   EXPECT_EQ(outcome.tokens, Expected(11, 2));
+}
+
+TEST_F(Qwen38GraphEngineTest, AnUnsetChunkUsesTheDefaultOfTheDecodeGraphPath) {
+  device_ = std::make_shared<ScriptedQwen38Device>(/*capacity=*/4200);
+  model_->config_->model.qwen38_graph.prefill.chunk = 0;
+  auto engine = MakeEngine();
+  const auto prompt = Prompt(2050);
+  auto request = Begin(*engine, prompt, /*max_generated_tokens=*/2, /*max_session_tokens=*/4100);
+
+  const auto outcome = RunToCompletion(*engine, request);
+
+  EXPECT_EQ(device_->CallCount("prefill:2048"), 1u);  // EffectiveQwen38PrefillChunkTokens of the unset key
+  EXPECT_EQ(device_->CallCount("prefill:2"), 1u);
+  EXPECT_EQ(outcome.tokens, Expected(2050, 2));
+}
+
+TEST_F(Qwen38GraphEngineTest, AnInvalidChunkConfigurationIsRejectedWhenTheBackendIsAssembled) {
+  auto& prefill = model_->config_->model.qwen38_graph.prefill;
+  for (const int chunk : {1, 5, -2}) {  // an odd chunk would shift the S=2 pairs of everything after it
+    prefill.chunk = chunk;
+    EXPECT_THROW(CreateQwen38GraphDependencies(model_, device_), std::runtime_error) << "prefill.chunk=" << chunk;
+  }
+  prefill.chunk = 0;
+  EXPECT_NO_THROW(CreateQwen38GraphDependencies(model_, device_));
+}
+
+TEST(Qwen38GraphSessionTest, AnOddChunkOfTheOptionsIsRoundedDownToAnEvenOne) {
+  auto device = std::make_shared<ScriptedQwen38Device>();
+  Qwen38GraphSession::Options options;
+  options.prefill_chunk_tokens = 5;  // reachable by direct construction only: the configuration rejects odd chunks
+  Qwen38GraphSession session{device, options};
+  std::vector<int32_t> prompt(11);
+  for (size_t i = 0; i < prompt.size(); ++i) prompt[i] = 12 + static_cast<int32_t>(i);
+  Qwen38StepRequest request;
+  request.owner = &prompt;
+  request.turn_id = 1;
+  request.tokens = prompt;
+  request.token_budget = 2;
+  request.session_budget = 50;
+
+  EXPECT_EQ(session.Step(request).count, 0u);  // chunk 1
+  EXPECT_EQ(session.Step(request).count, 0u);  // chunk 2
+  EXPECT_EQ(session.Step(request).count, 1u);  // the last chunk returns the first token
+
+  EXPECT_EQ(device->CallCount("prefill:4"), 2u);
+  EXPECT_EQ(device->CallCount("prefill:3"), 1u);
+}
+
+TEST_F(Qwen38GraphEngineTest, TheDeviceIsToldThePromptLengthAfterTheResetAndBeforeTheFirstChunkOfEveryTurn) {
+  auto engine = MakeEngine();  // prefill.chunk = 4
+  const auto prompt = Prompt(11);
+  auto request = Begin(*engine, prompt, /*max_generated_tokens=*/3);
+  ASSERT_EQ(RunToCompletion(*engine, request).tokens, Expected(11, 3));
+
+  EXPECT_EQ(device_->CallCount("expect:11"), 1u);
+  EXPECT_EQ(device_->prefill_totals, (std::vector<size_t>{11, 11, 11}));  // chunks 4, 4, 3 all see the whole length
+  const auto position = [&](const std::string& call) {
+    return std::find(device_->calls.begin(), device_->calls.end(), call) - device_->calls.begin();
+  };
+  EXPECT_LT(position("reset"), position("expect:11"));
+  EXPECT_LT(position("expect:11"), position("prefill:4"));
+
+  // The continued turn re-ingests the whole history (11 + 3 + 2 tokens) and announces its new length.
+  const std::vector<int32_t> follow_up{30, 31};
+  TurnOptions options = Limit(2);
+  options.request = request;
+  request->BeginTurn(follow_up, options);
+  ASSERT_EQ(RunToCompletion(*engine, request).tokens, Expected(16, 2));
+  EXPECT_EQ(device_->CallCount("expect:16"), 1u);
+  EXPECT_EQ(device_->prefill_totals, (std::vector<size_t>{11, 11, 11, 16, 16, 16, 16}));
 }
 
 TEST_F(Qwen38GraphEngineTest, CancelDuringPrefillStopsBeforeDecodingAndTheNextRequestStartsClean) {
@@ -373,7 +443,7 @@ TEST_F(Qwen38GraphEngineTest, CancelDuringPrefillStopsBeforeDecodingAndTheNextRe
 }
 
 TEST_F(Qwen38GraphEngineTest, CancelWithACycleInFlightIsSafeAndTheNextRequestWaitsForIt) {
-  model_->config_->model.qwen38_graph.prefill_chunk_tokens = 64;  // the first step ingests the whole prompt
+  model_->config_->model.qwen38_graph.prefill.chunk = 64;  // the first step ingests the whole prompt
   auto engine = MakeEngine();
   auto request = engine->CreateRequest();
   TurnOptions options;
@@ -477,7 +547,7 @@ TEST_F(Qwen38GraphEngineTest, RewindToTheStartOfATurnReleasesTheSlotAndReplaysTh
 
 TEST_F(Qwen38GraphEngineTest, ADeviceWithAPreferredChunkReceivesThePromptInChunksOfThatSizeAndHandsOffOnce) {
   device_->dense_prefill = true;
-  device_->preferred_chunk = 8;  // replaces prefill_chunk_tokens (4) of the configuration
+  device_->preferred_chunk = 8;  // replaces the chunk of the configuration (prefill.chunk = 4)
   auto engine = MakeEngine();
   const auto prompt = Prompt(20);
   auto request = Begin(*engine, prompt, /*max_generated_tokens=*/5);
@@ -655,7 +725,7 @@ TEST_F(Qwen38GraphEngineTest, DeviceErrorBitsAfterAStopStringTurnAreSurfacedBefo
 }
 
 TEST_F(Qwen38GraphEngineTest, DeviceErrorBitsAfterACanceledTurnAreSurfacedOnTheNextRun) {
-  model_->config_->model.qwen38_graph.prefill_chunk_tokens = 64;
+  model_->config_->model.qwen38_graph.prefill.chunk = 64;
   auto engine = MakeEngine();
   auto request = engine->CreateRequest();
   TurnOptions options;
@@ -759,7 +829,7 @@ TEST_F(Qwen38GraphEngineTest, UnsupportedTurnOptionsAreRejectedBeforeTheRequestC
 }
 
 TEST_F(Qwen38GraphEngineTest, ADeviceFailureIsFatalAndReportedThroughTheEngineErrorTaxonomy) {
-  model_->config_->model.qwen38_graph.prefill_chunk_tokens = 64;  // the first step ingests the whole prompt
+  model_->config_->model.qwen38_graph.prefill.chunk = 64;  // the first step ingests the whole prompt
   auto engine = MakeEngine();
   auto request = Begin(*engine, Prompt(5), /*max_generated_tokens=*/10);
   std::array<EngineEvent, 8> buffer;
@@ -780,7 +850,7 @@ TEST_F(Qwen38GraphEngineTest, ADeviceFailureIsFatalAndReportedThroughTheEngineEr
 }
 
 TEST_F(Qwen38GraphEngineTest, DestroyingTheEngineDrainsTheDevice) {
-  model_->config_->model.qwen38_graph.prefill_chunk_tokens = 64;  // the first step ingests the whole prompt
+  model_->config_->model.qwen38_graph.prefill.chunk = 64;  // the first step ingests the whole prompt
   {
     auto engine = MakeEngine();
     auto request = Begin(*engine, Prompt(5), /*max_generated_tokens=*/10);
@@ -793,7 +863,7 @@ TEST_F(Qwen38GraphEngineTest, DestroyingTheEngineDrainsTheDevice) {
 }
 
 TEST_F(Qwen38GraphEngineTest, ANewEngineOverAUsedDeviceStartsFromACleanDevice) {
-  model_->config_->model.qwen38_graph.prefill_chunk_tokens = 64;
+  model_->config_->model.qwen38_graph.prefill.chunk = 64;
   {
     auto engine = MakeEngine();
     auto request = Begin(*engine, Prompt(5), /*max_generated_tokens=*/3);
@@ -846,16 +916,13 @@ TEST_F(Qwen38GraphEngineTest, TheCacheManagerHoldsExactlyOneRow) {
 TEST_F(Qwen38GraphEngineTest, DynamicBatchingConfigurationIsRejected) {
   model_->config_->engine.dynamic_batching = Config::Engine::DynamicBatching{};
   EXPECT_THROW(CreateQwen38GraphDependencies(model_, device_), std::runtime_error);
-  model_->config_->engine.dynamic_batching.reset();
-  model_->config_->model.qwen38_graph.prefill_chunk_tokens = 1;
-  EXPECT_THROW(CreateQwen38GraphDependencies(model_, device_), std::runtime_error);
 }
 
 // Host cost of one Engine step (Run) with a device that answers instantly: everything the Engine adds around a cycle. Run
 // manually: engine_unit_tests --gtest_also_run_disabled_tests --gtest_filter='*RunOverhead*'.
 TEST_F(Qwen38GraphEngineTest, DISABLED_RunOverheadPerCycle) {
   device_ = std::make_shared<ScriptedQwen38Device>(/*capacity=*/33028);
-  model_->config_->model.qwen38_graph.prefill_chunk_tokens = 2048;
+  model_->config_->model.qwen38_graph.prefill.chunk = 2048;
   auto engine = MakeEngine();
   const size_t generated = 20000;
   auto request = Begin(*engine, Prompt(16), generated, /*max_session_tokens=*/33024);
