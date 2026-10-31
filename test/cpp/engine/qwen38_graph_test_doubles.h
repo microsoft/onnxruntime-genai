@@ -26,7 +26,12 @@ namespace Generators::test {
 //    the chunk size the device asks the executor for;
 //  - the pending token / in-flight cycle / ledger bookkeeping follows Qwen38GraphEngine, and misuse (a wait without a
 //    cycle in flight, an advance of something that was not waited for, prefill after decoding started, ...) throws, so the
-//    tests also prove the executor drives the device in a legal order.
+//    tests also prove the executor drives the device in a legal order;
+//  - a cycle runs asynchronously: it is enqueued by BeginDecode/Advance and completes once something synchronizes the
+//    stream (WaitCycle, Drain, CheckDecodeStatus, Reset). Like the real device, Drain() completes it without consuming its
+//    record (the cycle stays "in flight" until WaitCycle), and CheckDecodeStatus() synchronizes itself and reports the
+//    error bits accumulated by every completed cycle, consumed or not, until Reset() clears them. `fail_cycle` makes a cycle
+//    accumulate such bits when it completes, so a failure only becomes visible after the stream was drained.
 class ScriptedQwen38Device final : public Qwen38DecodeDevice {
  public:
   explicit ScriptedQwen38Device(int capacity = 68, bool mtp = true) : capacity_{capacity}, mtp_{mtp}, ledger_{capacity} {}
@@ -48,17 +53,20 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
   std::vector<int32_t> ingested;       // tokens received since the last reset, in order
   std::vector<size_t> prefill_totals;  // for every PrefillChunk, the prompt length the device was told to expect (0 = none)
   size_t cycles_enqueued{};
-  size_t handoffs{};        // dense prefill: hand-offs performed (one per BeginDecode with a cycle)
-  size_t handoff_length{};  // prompt length at the last hand-off
-  size_t status_checks{};   // CheckDecodeStatus calls (not in `calls`, which tests compare by suffix)
-  bool inflight() const { return inflight_; }
+  size_t handoffs{};                           // dense prefill: hand-offs performed (one per BeginDecode with a cycle)
+  size_t handoff_length{};                     // prompt length at the last hand-off
+  size_t status_checks{};                      // CheckDecodeStatus calls (not in `calls`, which tests compare by suffix)
+  std::vector<std::string> order;              // "drain", "status" and "reset" in the order the device saw them
+  bool inflight() const { return inflight_; }  // a cycle was enqueued and its record was not consumed by WaitCycle
+  bool running() const { return running_; }    // ... and it has not completed on the device yet (nothing synchronized)
   size_t ledger_length() const { return ledger_.Length(); }
   int ledger_bank() const { return ledger_.Bank(); }
   size_t CallCount(const std::string& name) const { return std::count(calls.begin(), calls.end(), name); }
 
   // ---- fault injection ----
   bool fail_wait{};
-  bool fail_status_check{};
+  bool fail_status_check{};  // every CheckDecodeStatus() of a started decode reports error bits
+  size_t fail_cycle{};       // 1-based cycle of a decode that accumulates error bits when it completes (0 = none)
 
   // ---- Qwen38DecodeDevice ----
   int Capacity() const override { return capacity_; }
@@ -66,6 +74,8 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
 
   void Reset() override {
     calls.push_back("reset");
+    order.push_back("reset");
+    Complete();  // Reset() waits for every enqueued cycle...
     ledger_.Reset();
     ingested.clear();
     inflight_ = false;
@@ -73,11 +83,13 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
     pending_ = -1;
     cycle_ = 0;
     expected_prefill_ = 0;
+    error_bits_ = 0;  // ...then clears the device state, error bits included
   }
 
   void Drain() noexcept override {
     calls.push_back("drain");
-    inflight_ = false;
+    order.push_back("drain");
+    Complete();  // the cycle in flight finishes, but its record stays unconsumed: inflight_ is not cleared
   }
 
   void ExpectPrefillTokens(size_t total_tokens) override {
@@ -126,7 +138,9 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
     calls.push_back("wait");
     if (fail_wait) throw std::runtime_error("injected device failure");
     if (!inflight_) throw std::logic_error("no cycle in flight");
+    Complete();
     inflight_ = false;
+    if (fail_cycle != 0 && cycle_ == fail_cycle) throw std::runtime_error("injected device validation failure");
     Qwen38CycleRecord record;
     const size_t length = ledger_.Length();
     record.pred0 = TokenAt(length + 1);
@@ -148,26 +162,38 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
   }
 
   void CheckDecodeStatus() override {
-    if (inflight_) throw std::logic_error("status check with a cycle in flight");
     ++status_checks;
-    if (fail_status_check) throw std::runtime_error("injected device error bits");
+    order.push_back("status");
+    if (!decoding_) return;  // like the real device: nothing to check before the decode started
+    Complete();              // it synchronizes the stream itself, also while a cycle is in flight or its record unconsumed
+    if (fail_status_check || error_bits_ != 0) throw std::runtime_error("injected device error bits");
   }
 
  private:
   void Enqueue() {
     ledger_.RequireRoom(2, "the next verify step");
     inflight_ = true;
+    running_ = true;
     ++cycle_;
     ++cycles_enqueued;
+  }
+
+  // The stream was synchronized: the cycle that was running completes and leaves its validation bits behind.
+  void Complete() {
+    if (!running_) return;
+    running_ = false;
+    if (fail_cycle != 0 && cycle_ == fail_cycle) error_bits_ |= 2;
   }
 
   int capacity_;
   bool mtp_;
   Qwen38DecodeLedger ledger_;
   bool inflight_{};
+  bool running_{};
   bool decoding_{};
   int32_t pending_{-1};
   size_t cycle_{};
+  int64_t error_bits_{};
   size_t expected_prefill_{};  // ExpectPrefillTokens: device-local, dropped by Reset() and BeginDecode()
 };
 
