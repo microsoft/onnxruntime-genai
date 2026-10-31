@@ -14,11 +14,14 @@ The research evaluation helpers (eval_lib: extract_choice_letter, extract_final_
 eval_mcq_genai: non_thinking_template) are imported from the directories listed in $QWEN38_EVAL_PATHS (os.pathsep separated).
 
 mode run   : --shard K --shards N (round-robin over the 800 items), --out <jsonl> --prompts <prompts.jsonl> --checkpoint <dir>
-             Also verifies, with the GenAI tokenizer of the model, that the prompt token ids are those of prompts.jsonl.
+             Also verifies, with the GenAI tokenizer of the model, that the prompt token ids and text are the canonical ones of
+             prompts.jsonl; any difference is written to <out>.promptcheck.json and stops the run (exit status 1) before the
+             warm-up and generation.
 mode check : --check-items i,j,... --check-new M --out <json> [--force-reject]: token streams of the given items with
              prefill.enabled=false (bit-exact S=2-step prompt path, so two runs start from identical state); with --force-reject
              every draft is replaced by a different token (config fold.force_reject: the no-MTP greedy stream).
-             Compare the two json files with --compare a.json b.json.
+             Compare the MTP run with the --force-reject run via --compare mtp.json forced.json: exit status 0 only if both
+             cover the same non-empty set of items and every stream is identical, 1 (with the problems listed) otherwise.
 """
 
 from __future__ import annotations
@@ -149,7 +152,16 @@ def run(args):
         if ids != row["prompt_ids"] or text != row["prompt_text"]:
             check["mismatch_items"].append(row["index"])
     print("prompt check", json.dumps(check), flush=True)
-    args.out.with_suffix(".promptcheck.json").write_text(json.dumps(check, indent=1))
+    check_path = args.out.with_suffix(".promptcheck.json")
+    check_path.write_text(json.dumps(check, indent=1))
+    if check["mismatch_items"]:
+        # A stale or wrong prompts file must not yield an accuracy summary: nothing is generated or scored.
+        shown = ", ".join(str(index) for index in check["mismatch_items"][:20])
+        more = ", ..." if len(check["mismatch_items"]) > 20 else ""
+        raise SystemExit(
+            f"prompt check failed: {len(check['mismatch_items'])} of {check['items']} items differ from the canonical "
+            f"prompt ids/text (indices {shown}{more}); see {check_path}"
+        )
 
     # unrecorded warm-up item (first use of the decode path with a real prompt)
     generate(engine, buffer, mine[0]["prompt_ids"], 64)
@@ -257,22 +269,55 @@ def check(args):
         )
 
 
+def _items_by_index(run, label, problems):
+    items = run.get("items") or []
+    by_index = {r["index"]: r for r in items}
+    if not items:
+        problems.append(f"{label} has no items")
+    elif len(by_index) != len(items):
+        problems.append(f"{label} lists an item index more than once")
+    return by_index
+
+
 def compare(a_path, b_path):
+    """Compares the --check-items token streams of an MTP run (a) and a --force-reject, i.e. no-MTP greedy, run (b).
+
+    "all_identical" is true only if both runs cover the same non-empty set of items with the same --check-new and prompt
+    lengths and every stream is non-empty and identical. A missing item or any other discrepancy is listed in "problems" and
+    makes the comparison fail; the report covers every item of either run.
+    """
     a, b = json.loads(Path(a_path).read_text()), json.loads(Path(b_path).read_text())
-    assert a["check_new"] == b["check_new"]
-    ia, ib = {r["index"]: r for r in a["items"]}, {r["index"]: r for r in b["items"]}
+    problems = []
+    if a.get("force_reject") is not False or b.get("force_reject") is not True:
+        problems.append(
+            "expected an MTP run (force_reject false) as a and a --force-reject run (force_reject true) as b, got "
+            f"{a.get('force_reject')} and {b.get('force_reject')}"
+        )
+    if a.get("check_new") != b.get("check_new"):
+        problems.append(f"check_new differs: {a.get('check_new')} vs {b.get('check_new')}")
+    ia, ib = _items_by_index(a, "a", problems), _items_by_index(b, "b", problems)
     out = []
-    for k in sorted(set(ia) & set(ib)):
+    for k in sorted(set(ia) | set(ib)):
+        if k not in ia or k not in ib:
+            problems.append(f"item {k} is only in {'a' if k in ia else 'b'}")
+            out.append({"index": k, "identical": False, "missing_from": "b" if k in ia else "a"})
+            continue
         x, y = ia[k]["stream"], ib[k]["stream"]
         n = min(len(x), len(y))
-        first = next((i for i in range(n) if x[i] != y[i]), None)
+        first = next((i for i in range(n) if x[i] != y[i]), n if len(x) != len(y) else None)
+        if ia[k]["prompt_tokens"] != ib[k]["prompt_tokens"]:
+            problems.append(f"item {k}: prompt lengths differ ({ia[k]['prompt_tokens']} vs {ib[k]['prompt_tokens']})")
+        if not x or not y:
+            problems.append(f"item {k}: empty token stream ({len(x)} vs {len(y)} tokens)")
+        elif x != y:
+            problems.append(f"item {k}: streams differ at token {first} ({len(x)} vs {len(y)} tokens)")
         out.append(
             {
                 "index": k,
                 "prompt_tokens": ia[k]["prompt_tokens"],
                 "mtp_tokens": len(x),
                 "forced_reject_tokens": len(y),
-                "identical": x == y,
+                "identical": x == y and bool(x),
                 "first_diff": first,
                 "mtp_accept_rate": ia[k]["accept_rate"],
                 "forced_reject_accepted": ib[k]["accepted"],
@@ -282,8 +327,9 @@ def compare(a_path, b_path):
                 "forced_decode_s": ib[k]["decode_s"],
             }
         )
-    print(json.dumps({"all_identical": all(r["identical"] for r in out), "items": out}, indent=1))
-    return out
+    report = {"all_identical": not problems, "problems": problems, "items": out}
+    print(json.dumps(report, indent=1))
+    return report
 
 
 def main():
@@ -302,8 +348,13 @@ def main():
     ap.add_argument("--provider", default=os.environ.get("QWEN_PROVIDER"))
     args = ap.parse_args()
     if args.compare:
-        compare(*args.compare)
-        return
+        report = compare(*args.compare)
+        if not report["all_identical"]:
+            print(
+                f"comparison failed with {len(report['problems'])} problem(s), first: {report['problems'][0]}",
+                file=sys.stderr,
+            )
+        return 0 if report["all_identical"] else 1
     assert args.model and args.out and args.prompts
     if args.check_items:
         if args.out.exists():
@@ -312,7 +363,8 @@ def main():
     else:
         assert args.checkpoint
         run(args)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
