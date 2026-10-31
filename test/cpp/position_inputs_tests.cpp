@@ -535,7 +535,7 @@ struct PositionInputsTest : testing::TestWithParam<std::tuple<bool, bool>> {
       model->config_->model.decoder.inputs.attention_mask = "absent_mask";
     params = std::make_shared<GeneratorParams>(*model);
     state = std::make_unique<PositionTestState>(*params, *model);
-    lengths = params->p_device->Allocate<int32_t>(batch_size * num_beams);
+    lengths = params->p_device->Allocate<int32_t>(static_cast<size_t>(batch_size) * num_beams);
     const auto& name = model->config_->model.decoder.inputs.attention_mask;
     if (IsStatic())
       inputs = std::make_unique<DefaultPositionInputs>(*model, *state, lengths, name, 8);

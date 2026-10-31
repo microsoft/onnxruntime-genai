@@ -23,6 +23,35 @@ except ImportError:
     ort = None
 
 
+def _ort_runs_tensor_scatter_on_cpu():
+    """Return whether the installed ONNX Runtime has a CPU kernel for TensorScatter (opset 24)."""
+    if ort is None:
+        return False
+    graph = helper.make_graph(
+        [helper.make_node("TensorScatter", ["past", "updates", "write_indices"], ["present"], axis=1)],
+        "tensor_scatter_probe",
+        [
+            helper.make_tensor_value_info("past", TensorProto.FLOAT, [1, 4, 2]),
+            helper.make_tensor_value_info("updates", TensorProto.FLOAT, [1, 1, 2]),
+            helper.make_tensor_value_info("write_indices", TensorProto.INT64, [1]),
+        ],
+        [helper.make_tensor_value_info("present", TensorProto.FLOAT, [1, 4, 2])],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 24)], ir_version=10)
+    try:
+        ort.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"])
+    except Exception:
+        return False
+    return True
+
+
+ORT_RUNS_TENSOR_SCATTER = _ort_runs_tensor_scatter_on_cpu()
+requires_cpu_tensor_scatter = skipIf(
+    not ORT_RUNS_TENSOR_SCATTER,
+    "installed onnxruntime has no CPU TensorScatter (opset 24) kernel",
+)
+
+
 BUILDERS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "builders"
 REPO_ROOT = Path(__file__).parents[3]
 sys.path.insert(0, str(BUILDERS_DIR.parents[1]))
@@ -723,11 +752,11 @@ class NemotronParseBuilderTests(TestCase):
                         self.assertEqual(output, f"{node.name}/output_{index}")
         onnx.checker.check_model(model)
 
-    @skipIf(ort is None, "onnxruntime is required for numerical graph validation")
+    @requires_cpu_tensor_scatter
     def test_unified_decoder_matches_reference_for_prefill_and_decode(self):
         self.check_unified_decoder_matches_reference(padded=False)
 
-    @skipIf(ort is None, "onnxruntime is required for numerical graph validation")
+    @requires_cpu_tensor_scatter
     def test_unified_decoder_matches_reference_with_padded_prefill(self):
         self.check_unified_decoder_matches_reference(padded=True)
 
@@ -886,7 +915,7 @@ class NemotronParseBuilderTests(TestCase):
                     for initializer in serialized_model.graph.initializer
                 )
             )
-            if ort is not None:
+            if ORT_RUNS_TENSOR_SCATTER:
                 ort.InferenceSession(
                     str(Path(tmp) / "decoder.onnx"),
                     providers=["CPUExecutionProvider"],
@@ -1162,7 +1191,7 @@ class NemotronParseBuilderTests(TestCase):
                 for kind in ("key", "value"):
                     feeds[f"past_key_values.0.{kind}"] = expected[f"present.0.{kind}"]
 
-    @skipIf(ort is None, "onnxruntime is required for numerical graph validation")
+    @requires_cpu_tensor_scatter
     def test_external_weight_exports_preserve_encoder_and_multistep_decoder(self):
         torch.manual_seed(2)
         with tempfile.TemporaryDirectory() as tmp:

@@ -85,6 +85,7 @@ class Model:
         *, graph_name=None, graph_opset=20,
     ):
         if graph_name is not None:
+            self.graph_attrs = {**Model.default_graph_attrs(), "ai.onnx": graph_opset}
             Model.make_graph(self, graph_name, opset=graph_opset)
             return
         if config is None or extra_options is None:

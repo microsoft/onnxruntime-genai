@@ -43,8 +43,8 @@ class NemotronParseModel(Model):
         onnx_dtype = (
             io_dtype if onnx_dtype is None else ir.DataType(onnx_dtype)
         )
-        self.extra_options = dict(extra_options)
-        removed_options = self.extra_options.keys() & {
+        options = dict(extra_options)
+        removed_options = options.keys() & {
             "image_height", "image_width", "prefill_sequence_length",
             "cache_sequence_length", "export_components", "torch_dtype",
         }
@@ -54,9 +54,9 @@ class NemotronParseModel(Model):
                 "Image size and cache capacity come from checkpoint metadata, prefill length "
                 "from the default task prompt, and loading dtype from export precision; both graphs are always exported."
             )
-        self.extra_options.setdefault("block_size", 32)
+        options.setdefault("block_size", 32)
         self.decoder_filename = "decoder.onnx"
-        self.extra_options["filename"] = self.decoder_filename
+        options["filename"] = self.decoder_filename
         self.generation_config = None
         self.processor = None
 
@@ -82,7 +82,7 @@ class NemotronParseModel(Model):
 
         super().__init__(
             make_decoder_config(config, self.cache_sequence_length),
-            io_dtype, onnx_dtype, ep, cache_dir, self.extra_options,
+            io_dtype, onnx_dtype, ep, cache_dir, options,
         )
         self.encoder_filename = "encoder.onnx"
         self.input_names["input_ids"] = "decoder_input_ids"
