@@ -267,13 +267,28 @@ two profiles may share the same memory range with
 Optional `minimum_effective_host_memory_bytes` and `maximum_effective_host_memory_bytes` set inclusive
 bounds on the effective host memory, and optional `minimum_available_host_memory_bytes` sets a lower
 bound on the host memory that is available now. The effective host memory is the physical memory, capped
-by the Linux cgroup v2 `memory.max` limit when one is set. The available host memory is `MemAvailable`
-from `/proc/meminfo` on Linux and the available physical memory reported by `GlobalMemoryStatusEx` on
-Windows, capped by the cgroup headroom (`memory.max` minus `memory.current`) and never above the
-effective host memory. The cgroup headroom counts page cache charged to the cgroup as used, so it
-under-reports rather than over-reports. A value the platform cannot report (for example the available
-host memory on macOS) does not match a profile that bounds it. Because the available host memory never
-exceeds the effective host memory, a `minimum_available_host_memory_bytes` above another profile's
+by the Linux cgroup v2 `memory.max` limit that applies to the process. The available host memory is
+`MemAvailable` from `/proc/meminfo` on Linux and the available physical memory reported by
+`GlobalMemoryStatusEx` on Windows, capped by the cgroup headroom (`memory.max` minus `memory.current`) and
+never above the effective host memory. The cgroup headroom counts page cache charged to the cgroup as
+used, so it under-reports rather than over-reports.
+
+On Linux the cgroup limit and headroom come from the process's own cgroup, not from the root of the
+mounted cgroup hierarchy. The cgroup is the `0::<path>` entry of `/proc/self/cgroup`, located under the
+cgroup2 mount in `/proc/self/mountinfo`. The mount may be rooted at a sub-cgroup, as in a container that
+sees only its own cgroup, in which case the path is taken relative to the mount root. The limit is the
+tightest `memory.max` and the headroom is the tightest `memory.max` minus `memory.current` over that
+cgroup and each ancestor up to the mount root, so a service cgroup with a tighter limit or less headroom
+than the process's own cgroup is honored. A level whose `memory.max` is `max`, or that has no memory
+controller, does not bound the process. cgroup v1 limits are not consulted, and a system without a cgroup2
+mount uses the physical memory unchanged. When cgroup v2 applies but the process's cgroup cannot be read or
+located (an unreadable or malformed `/proc/self/cgroup` or `/proc/self/mountinfo`, a cgroup that is not
+below any cgroup2 mount root, or an unparseable `memory.max` or `memory.current`), both host memory facts
+are unknown rather than falling back to the host-wide values.
+
+A value the platform cannot report (for example the available host memory on macOS) or that could not be
+resolved does not match a profile that bounds it. Because the available host memory never exceeds the
+effective host memory, a `minimum_available_host_memory_bytes` above another profile's
 `maximum_effective_host_memory_bytes` keeps the two profiles from overlapping.
 `overlay` is typed and may contain any subset of these fields:
 

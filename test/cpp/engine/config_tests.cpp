@@ -1,10 +1,14 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <functional>
+#include <map>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <utility>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -488,53 +492,411 @@ TEST(ConfigTest, ResolvesEffectiveAndAvailableHostMemoryAgainstTheCgroup) {
   const auto resolve = [&](HostMemoryReadings readings) {
     ResolveHostMemoryFacts(readings, effective, available);
   };
+  // The tightest limit and headroom over the process's cgroup and its ancestors.
+  const auto cgroup = [](std::optional<uint64_t> limit, std::optional<uint64_t> headroom) {
+    return CgroupMemoryLimits{CgroupMemoryLimits::Status::kResolved, limit, headroom};
+  };
 
   // Without a cgroup the physical readings are used as they are.
-  resolve({128 * GiB, 100 * GiB, std::nullopt, std::nullopt});
+  resolve({128 * GiB, 100 * GiB});
   EXPECT_EQ(effective, std::optional<uint64_t>{128 * GiB});
   EXPECT_EQ(available, std::optional<uint64_t>{100 * GiB});
 
   // The cgroup limit caps the effective memory, and the cgroup headroom caps the available memory.
-  resolve({128 * GiB, 100 * GiB, 64 * GiB, 10 * GiB});
+  resolve({128 * GiB, 100 * GiB, cgroup(64 * GiB, 54 * GiB)});
   EXPECT_EQ(effective, std::optional<uint64_t>{64 * GiB});
   EXPECT_EQ(available, std::optional<uint64_t>{54 * GiB});
 
   // MemAvailable is the tighter bound when the cgroup has more headroom than the system.
-  resolve({128 * GiB, 20 * GiB, 64 * GiB, 10 * GiB});
+  resolve({128 * GiB, 20 * GiB, cgroup(64 * GiB, 54 * GiB)});
   EXPECT_EQ(effective, std::optional<uint64_t>{64 * GiB});
   EXPECT_EQ(available, std::optional<uint64_t>{20 * GiB});
 
-  // Usage above the limit leaves no headroom.
-  resolve({128 * GiB, 100 * GiB, 64 * GiB, 70 * GiB});
+  // A cgroup that has used all of its limit leaves no headroom.
+  resolve({128 * GiB, 100 * GiB, cgroup(64 * GiB, 0)});
   EXPECT_EQ(available, std::optional<uint64_t>{0});
 
   // A cgroup limit above the physical memory does not raise the effective memory.
-  resolve({64 * GiB, 40 * GiB, 128 * GiB, 10 * GiB});
+  resolve({64 * GiB, 40 * GiB, cgroup(128 * GiB, 118 * GiB)});
   EXPECT_EQ(effective, std::optional<uint64_t>{64 * GiB});
   EXPECT_EQ(available, std::optional<uint64_t>{40 * GiB});
 
   // The cgroup headroom stands in when MemAvailable cannot be read.
-  resolve({128 * GiB, std::nullopt, 64 * GiB, 10 * GiB});
+  resolve({128 * GiB, std::nullopt, cgroup(64 * GiB, 54 * GiB)});
   EXPECT_EQ(effective, std::optional<uint64_t>{64 * GiB});
   EXPECT_EQ(available, std::optional<uint64_t>{54 * GiB});
 
   // The available memory never exceeds the effective memory.
-  resolve({64 * GiB, 100 * GiB, std::nullopt, std::nullopt});
+  resolve({64 * GiB, 100 * GiB});
   EXPECT_EQ(available, std::optional<uint64_t>{64 * GiB});
 
   // An unreported availability stays unknown instead of being guessed.
-  resolve({64 * GiB, std::nullopt, std::nullopt, std::nullopt});
+  resolve({64 * GiB, std::nullopt});
   EXPECT_EQ(effective, std::optional<uint64_t>{64 * GiB});
   EXPECT_FALSE(available.has_value());
 
   // A zero cgroup limit is ignored.
-  resolve({64 * GiB, 40 * GiB, 0, 0});
+  resolve({64 * GiB, 40 * GiB, cgroup(0, std::nullopt)});
   EXPECT_EQ(effective, std::optional<uint64_t>{64 * GiB});
   EXPECT_EQ(available, std::optional<uint64_t>{40 * GiB});
 
-  resolve({std::nullopt, std::nullopt, std::nullopt, std::nullopt});
+  // A cgroup with no limit anywhere leaves the physical readings alone.
+  resolve({64 * GiB, 40 * GiB, cgroup(std::nullopt, std::nullopt)});
+  EXPECT_EQ(effective, std::optional<uint64_t>{64 * GiB});
+  EXPECT_EQ(available, std::optional<uint64_t>{40 * GiB});
+
+  // An unresolved cgroup leaves both facts unknown, because the physical readings would overstate what the process
+  // may use.
+  const CgroupMemoryLimits unresolved{CgroupMemoryLimits::Status::kUnresolved, std::nullopt, std::nullopt};
+  resolve({128 * GiB, 100 * GiB, unresolved});
   EXPECT_FALSE(effective.has_value());
   EXPECT_FALSE(available.has_value());
+
+  resolve({});
+  EXPECT_FALSE(effective.has_value());
+  EXPECT_FALSE(available.has_value());
+}
+
+namespace {
+
+using CgroupStatus = CgroupMemoryLimits::Status;
+using FakeHostFiles = std::map<std::string, std::string>;
+
+constexpr uint64_t kGiB = 1ULL << 30;
+
+// A host that mounts the whole cgroup2 hierarchy next to other filesystems.
+constexpr std::string_view kHostMountinfo =
+    "22 1 8:2 / / rw,relatime shared:1 - ext4 /dev/sda2 rw,errors=remount-ro\n"
+    "23 22 0:21 / /proc rw,nosuid,nodev,noexec,relatime shared:12 - proc proc rw\n"
+    "24 22 0:22 / /sys/fs/cgroup rw,nosuid,nodev,noexec,relatime shared:5 - cgroup2 cgroup2 "
+    "rw,nsdelegate,memory_recursiveprot\n"
+    "25 22 0:25 / /run rw,nosuid,nodev shared:6 - tmpfs tmpfs rw,mode=755\n";
+
+CgroupMemoryLimits ResolveCgroupMemory(const FakeHostFiles& files) {
+  return ResolveProcessCgroupMemory([&files](const std::string& path) -> std::optional<std::string> {
+    const auto file = files.find(path);
+    if (file == files.end()) return std::nullopt;
+    return file->second;
+  });
+}
+
+// The files every cgroup directory has.
+void AddCgroup(FakeHostFiles& files, const std::string& directory) {
+  files[directory + "/cgroup.controllers"] = "cpuset cpu io memory pids\n";
+}
+
+// The files of a cgroup that has the memory controller. `max` is "max" or a number of bytes.
+void AddMemoryFiles(FakeHostFiles& files, const std::string& directory, const std::string& max, uint64_t current) {
+  files[directory + "/memory.max"] = max + "\n";
+  files[directory + "/memory.current"] = std::to_string(current) + "\n";
+}
+
+struct HostFacts {
+  std::optional<uint64_t> effective;
+  std::optional<uint64_t> available;
+};
+
+HostFacts ResolveHostFacts(const CgroupMemoryLimits& cgroup, uint64_t physical_total, uint64_t physical_available) {
+  HostMemoryReadings readings;
+  readings.physical_total = physical_total;
+  readings.physical_available = physical_available;
+  readings.cgroup = cgroup;
+  HostFacts facts;
+  ResolveHostMemoryFacts(readings, facts.effective, facts.available);
+  return facts;
+}
+
+}  // namespace
+
+TEST(ConfigTest, CgroupMemoryComesFromTheProcessCgroupNotTheMountRoot) {
+  // A 128 GiB host whose mounted cgroup root has no limit, and a process in an 8 GiB cgroup that has used 2 GiB.
+  FakeHostFiles files;
+  const std::string scope = "/sys/fs/cgroup/user.slice/user-1000.slice/session-3.scope";
+  files["/proc/self/cgroup"] = "0::/user.slice/user-1000.slice/session-3.scope\n";
+  files["/proc/self/mountinfo"] = std::string{kHostMountinfo};
+  AddCgroup(files, "/sys/fs/cgroup");
+  AddMemoryFiles(files, "/sys/fs/cgroup", "max", 5 * kGiB);
+  AddCgroup(files, "/sys/fs/cgroup/user.slice");
+  AddMemoryFiles(files, "/sys/fs/cgroup/user.slice", "max", 4 * kGiB);
+  AddCgroup(files, "/sys/fs/cgroup/user.slice/user-1000.slice");
+  AddMemoryFiles(files, "/sys/fs/cgroup/user.slice/user-1000.slice", "max", 3 * kGiB);
+  AddCgroup(files, scope);
+  AddMemoryFiles(files, scope, std::to_string(8 * kGiB), 2 * kGiB);
+
+  const CgroupMemoryLimits cgroup = ResolveCgroupMemory(files);
+  EXPECT_EQ(cgroup.status, CgroupStatus::kResolved);
+  EXPECT_EQ(cgroup.limit, std::optional<uint64_t>{8 * kGiB});
+  EXPECT_EQ(cgroup.headroom, std::optional<uint64_t>{6 * kGiB});
+
+  const HostFacts facts = ResolveHostFacts(cgroup, 128 * kGiB, 100 * kGiB);
+  EXPECT_EQ(facts.effective, std::optional<uint64_t>{8 * kGiB});
+  EXPECT_EQ(facts.available, std::optional<uint64_t>{6 * kGiB});
+
+  // A profile that needs a large host is not eligible inside the small cgroup, but is on the unconstrained host.
+  Config config;
+  OverlayConfig(config, R"({"runtime_profiles":[{"id":"large-host",
+    "eligibility":{"minimum_total_device_memory_bytes":0,"minimum_effective_host_memory_bytes":68719476736},
+    "overlay":{"search":{"chunk_size":1}}}]})");
+  auto in_cgroup = config;
+  ApplyRuntimeProfile(in_cgroup, RuntimeProfileDeviceFacts{1, false, std::nullopt, facts.effective, facts.available});
+  EXPECT_FALSE(in_cgroup.search.chunk_size.has_value());
+  auto unconstrained = config;
+  ApplyRuntimeProfile(unconstrained, RuntimeProfileDeviceFacts{1, false, std::nullopt, 128 * kGiB, 100 * kGiB});
+  EXPECT_EQ(unconstrained.search.chunk_size, 1u);
+}
+
+TEST(ConfigTest, CgroupMemoryIsReadRelativeToACgroupMountRootThatIsNotTheHierarchyRoot) {
+  // A container that sees only its own cgroup: /sys/fs/cgroup shows /kubepods/pod-1/app, which has a 15 GiB limit.
+  FakeHostFiles files;
+  files["/proc/self/mountinfo"] =
+      "30 22 0:26 /kubepods/pod-1/app /sys/fs/cgroup ro,nosuid,nodev,noexec,relatime - cgroup2 cgroup rw\n";
+  AddCgroup(files, "/sys/fs/cgroup");
+  AddMemoryFiles(files, "/sys/fs/cgroup", std::to_string(15 * kGiB), 10 * kGiB);
+  AddCgroup(files, "/sys/fs/cgroup/sidecar");
+  AddMemoryFiles(files, "/sys/fs/cgroup/sidecar", "max", 1 * kGiB);
+  // The cgroup path must not be appended to the mount point as a whole.
+  AddCgroup(files, "/sys/fs/cgroup/kubepods/pod-1/app/sidecar");
+  AddMemoryFiles(files, "/sys/fs/cgroup/kubepods/pod-1/app/sidecar", "1048576", 0);
+
+  // A process in a cgroup below the one that is mounted: the mounted cgroup's own limit still applies.
+  files["/proc/self/cgroup"] = "0::/kubepods/pod-1/app/sidecar\n";
+  CgroupMemoryLimits cgroup = ResolveCgroupMemory(files);
+  EXPECT_EQ(cgroup.status, CgroupStatus::kResolved);
+  EXPECT_EQ(cgroup.limit, std::optional<uint64_t>{15 * kGiB});
+  EXPECT_EQ(cgroup.headroom, std::optional<uint64_t>{5 * kGiB});
+
+  // A process in the mounted cgroup itself reads the files at the mount point.
+  files["/proc/self/cgroup"] = "0::/kubepods/pod-1/app\n";
+  cgroup = ResolveCgroupMemory(files);
+  EXPECT_EQ(cgroup.status, CgroupStatus::kResolved);
+  EXPECT_EQ(cgroup.limit, std::optional<uint64_t>{15 * kGiB});
+  EXPECT_EQ(cgroup.headroom, std::optional<uint64_t>{5 * kGiB});
+
+  // In a private cgroup namespace the mount shows the namespace root as "/" and the process path is relative to it.
+  files["/proc/self/mountinfo"] = "30 22 0:26 / /sys/fs/cgroup ro,nosuid,nodev,noexec,relatime - cgroup2 cgroup rw\n";
+  files["/proc/self/cgroup"] = "0::/\n";
+  cgroup = ResolveCgroupMemory(files);
+  EXPECT_EQ(cgroup.status, CgroupStatus::kResolved);
+  EXPECT_EQ(cgroup.limit, std::optional<uint64_t>{15 * kGiB});
+  EXPECT_EQ(cgroup.headroom, std::optional<uint64_t>{5 * kGiB});
+
+  // A sibling cgroup is not below the mounted root, so its limits cannot be read.
+  files["/proc/self/mountinfo"] =
+      "30 22 0:26 /kubepods/pod-1/app /sys/fs/cgroup ro,nosuid,nodev,noexec,relatime - cgroup2 cgroup rw\n";
+  files["/proc/self/cgroup"] = "0::/kubepods/pod-1/other\n";
+  EXPECT_EQ(ResolveCgroupMemory(files).status, CgroupStatus::kUnresolved);
+  // The same name prefix does not make a cgroup a descendant.
+  files["/proc/self/cgroup"] = "0::/kubepods/pod-1/app-2\n";
+  EXPECT_EQ(ResolveCgroupMemory(files).status, CgroupStatus::kUnresolved);
+}
+
+TEST(ConfigTest, CgroupMemoryTakesTheTightestAncestorLimitAndHeadroom) {
+  FakeHostFiles files;
+  files["/proc/self/cgroup"] = "0::/system.slice/llm.service/worker-1\n";
+  files["/proc/self/mountinfo"] = std::string{kHostMountinfo};
+  AddCgroup(files, "/sys/fs/cgroup");
+  AddCgroup(files, "/sys/fs/cgroup/system.slice");
+  AddMemoryFiles(files, "/sys/fs/cgroup/system.slice", "max", 40 * kGiB);
+  AddCgroup(files, "/sys/fs/cgroup/system.slice/llm.service");
+  AddCgroup(files, "/sys/fs/cgroup/system.slice/llm.service/worker-1");
+
+  // The service has used 15 of its 16 GiB, so it leaves less headroom than the worker's own 8 GiB limit with 2 GiB
+  // used.
+  AddMemoryFiles(files, "/sys/fs/cgroup/system.slice/llm.service", std::to_string(16 * kGiB), 15 * kGiB);
+  AddMemoryFiles(files, "/sys/fs/cgroup/system.slice/llm.service/worker-1", std::to_string(8 * kGiB), 2 * kGiB);
+  CgroupMemoryLimits cgroup = ResolveCgroupMemory(files);
+  EXPECT_EQ(cgroup.status, CgroupStatus::kResolved);
+  EXPECT_EQ(cgroup.limit, std::optional<uint64_t>{8 * kGiB});
+  EXPECT_EQ(cgroup.headroom, std::optional<uint64_t>{1 * kGiB});
+  HostFacts facts = ResolveHostFacts(cgroup, 128 * kGiB, 100 * kGiB);
+  EXPECT_EQ(facts.effective, std::optional<uint64_t>{8 * kGiB});
+  EXPECT_EQ(facts.available, std::optional<uint64_t>{1 * kGiB});
+
+  // A parent with a lower limit than the worker caps the effective memory.
+  AddMemoryFiles(files, "/sys/fs/cgroup/system.slice/llm.service", std::to_string(4 * kGiB), 1 * kGiB);
+  cgroup = ResolveCgroupMemory(files);
+  EXPECT_EQ(cgroup.limit, std::optional<uint64_t>{4 * kGiB});
+  EXPECT_EQ(cgroup.headroom, std::optional<uint64_t>{3 * kGiB});
+  facts = ResolveHostFacts(cgroup, 128 * kGiB, 100 * kGiB);
+  EXPECT_EQ(facts.effective, std::optional<uint64_t>{4 * kGiB});
+  EXPECT_EQ(facts.available, std::optional<uint64_t>{3 * kGiB});
+
+  // A worker that has used more than its limit has no headroom.
+  AddMemoryFiles(files, "/sys/fs/cgroup/system.slice/llm.service", "max", 15 * kGiB);
+  AddMemoryFiles(files, "/sys/fs/cgroup/system.slice/llm.service/worker-1", std::to_string(8 * kGiB), 9 * kGiB);
+  cgroup = ResolveCgroupMemory(files);
+  EXPECT_EQ(cgroup.limit, std::optional<uint64_t>{8 * kGiB});
+  EXPECT_EQ(cgroup.headroom, std::optional<uint64_t>{0});
+
+  // The worker does not have the memory controller of its own: the service's limit is the one that applies.
+  files.erase("/sys/fs/cgroup/system.slice/llm.service/worker-1/memory.max");
+  files.erase("/sys/fs/cgroup/system.slice/llm.service/worker-1/memory.current");
+  AddMemoryFiles(files, "/sys/fs/cgroup/system.slice/llm.service", std::to_string(16 * kGiB), 15 * kGiB);
+  cgroup = ResolveCgroupMemory(files);
+  EXPECT_EQ(cgroup.status, CgroupStatus::kResolved);
+  EXPECT_EQ(cgroup.limit, std::optional<uint64_t>{16 * kGiB});
+  EXPECT_EQ(cgroup.headroom, std::optional<uint64_t>{1 * kGiB});
+}
+
+TEST(ConfigTest, CgroupMemoryIsUnboundedWhenEveryLevelIsUnlimited) {
+  FakeHostFiles files;
+  files["/proc/self/cgroup"] = "0::/system.slice/llm.service\n";
+  files["/proc/self/mountinfo"] = std::string{kHostMountinfo};
+  AddCgroup(files, "/sys/fs/cgroup");  // the hierarchy root has no memory files
+  AddCgroup(files, "/sys/fs/cgroup/system.slice");
+  AddMemoryFiles(files, "/sys/fs/cgroup/system.slice", "max", 40 * kGiB);
+  AddCgroup(files, "/sys/fs/cgroup/system.slice/llm.service");
+  AddMemoryFiles(files, "/sys/fs/cgroup/system.slice/llm.service", "max", 30 * kGiB);
+
+  const CgroupMemoryLimits cgroup = ResolveCgroupMemory(files);
+  EXPECT_EQ(cgroup.status, CgroupStatus::kResolved);
+  EXPECT_FALSE(cgroup.limit.has_value());
+  EXPECT_FALSE(cgroup.headroom.has_value());
+
+  const HostFacts facts = ResolveHostFacts(cgroup, 128 * kGiB, 100 * kGiB);
+  EXPECT_EQ(facts.effective, std::optional<uint64_t>{128 * kGiB});
+  EXPECT_EQ(facts.available, std::optional<uint64_t>{100 * kGiB});
+
+  // So is a hierarchy without the memory controller anywhere, such as the unified hierarchy of a hybrid cgroup setup.
+  files.clear();
+  files["/proc/self/cgroup"] =
+      "12:memory:/system.slice/llm.service\n1:name=systemd:/system.slice/llm.service\n"
+      "0::/system.slice/llm.service\n";
+  files["/proc/self/mountinfo"] =
+      "26 25 0:23 / /sys/fs/cgroup/unified rw,nosuid,nodev,noexec,relatime shared:9 - "
+      "cgroup2 cgroup2 rw,nsdelegate\n"
+      "27 25 0:24 / /sys/fs/cgroup/memory rw,nosuid,nodev,noexec,relatime shared:10 - "
+      "cgroup cgroup rw,memory\n";
+  AddCgroup(files, "/sys/fs/cgroup/unified");
+  AddCgroup(files, "/sys/fs/cgroup/unified/system.slice");
+  AddCgroup(files, "/sys/fs/cgroup/unified/system.slice/llm.service");
+  const CgroupMemoryLimits hybrid = ResolveCgroupMemory(files);
+  EXPECT_EQ(hybrid.status, CgroupStatus::kResolved);
+  EXPECT_FALSE(hybrid.limit.has_value());
+  EXPECT_FALSE(hybrid.headroom.has_value());
+}
+
+TEST(ConfigTest, CgroupMemoryReadsEscapedMountsAndPicksTheMountThatShowsTheMostAncestors) {
+  FakeHostFiles files;
+  files["/proc/self/cgroup"] = "0::/a b/leaf\n";
+  // The cgroup v1 mount is skipped. The spaces in the paths of the cgroup2 mounts are escaped. The first cgroup2 mount
+  // shows the whole hierarchy, the second one starts at "/a b" and the third one at the process's own cgroup.
+  const std::string v1_mount =
+      "26 25 0:23 / /sys/fs/cgroup/memory rw,nosuid shared:9 master:2 - cgroup cgroup rw,memory\n";
+  const std::string whole_mount = "27 25 0:24 / /mnt/cg\\040v2 rw,nosuid shared:5 - cgroup2 cgroup2 rw\n";
+  const std::string sub_mount = "28 25 0:24 /a\\040b /mnt/sub rw,nosuid - cgroup2 cgroup2 rw\n";
+  const std::string leaf_mount = "29 25 0:24 /a\\040b/leaf /mnt/inner rw,nosuid - cgroup2 cgroup2 rw\n";
+
+  AddCgroup(files, "/mnt/cg v2");
+  AddCgroup(files, "/mnt/cg v2/a b");
+  AddCgroup(files, "/mnt/cg v2/a b/leaf");
+  AddMemoryFiles(files, "/mnt/cg v2/a b", std::to_string(32 * kGiB), 16 * kGiB);
+  AddMemoryFiles(files, "/mnt/cg v2/a b/leaf", std::to_string(24 * kGiB), 4 * kGiB);
+  AddCgroup(files, "/mnt/sub");
+  AddCgroup(files, "/mnt/sub/leaf");
+  AddMemoryFiles(files, "/mnt/sub", std::to_string(16 * kGiB), 8 * kGiB);
+  AddMemoryFiles(files, "/mnt/sub/leaf", std::to_string(12 * kGiB), 2 * kGiB);
+  AddCgroup(files, "/mnt/inner");
+  AddMemoryFiles(files, "/mnt/inner", "1048576", 0);
+
+  // The mount of the whole hierarchy shows the most ancestors.
+  files["/proc/self/mountinfo"] = v1_mount + sub_mount + whole_mount + leaf_mount;
+  CgroupMemoryLimits cgroup = ResolveCgroupMemory(files);
+  EXPECT_EQ(cgroup.status, CgroupStatus::kResolved);
+  EXPECT_EQ(cgroup.limit, std::optional<uint64_t>{24 * kGiB});
+  EXPECT_EQ(cgroup.headroom, std::optional<uint64_t>{16 * kGiB});
+
+  // Without it, the mount rooted at "/a b" does.
+  files["/proc/self/mountinfo"] = v1_mount + leaf_mount + sub_mount;
+  cgroup = ResolveCgroupMemory(files);
+  EXPECT_EQ(cgroup.status, CgroupStatus::kResolved);
+  EXPECT_EQ(cgroup.limit, std::optional<uint64_t>{12 * kGiB});
+  EXPECT_EQ(cgroup.headroom, std::optional<uint64_t>{8 * kGiB});
+}
+
+TEST(ConfigTest, CgroupMemoryFallsBackToThePhysicalReadingsWithoutCgroupV2) {
+  FakeHostFiles files;
+  // A cgroup v1 system has no unified hierarchy entry, so the mounts are not consulted.
+  files["/proc/self/cgroup"] = "12:memory:/docker/abc\n11:cpu,cpuacct:/docker/abc\n1:name=systemd:/docker/abc\n";
+  CgroupMemoryLimits cgroup = ResolveCgroupMemory(files);
+  EXPECT_EQ(cgroup.status, CgroupStatus::kNotApplicable);
+  HostFacts facts = ResolveHostFacts(cgroup, 128 * kGiB, 100 * kGiB);
+  EXPECT_EQ(facts.effective, std::optional<uint64_t>{128 * kGiB});
+  EXPECT_EQ(facts.available, std::optional<uint64_t>{100 * kGiB});
+
+  // A unified hierarchy entry without a cgroup2 mount has no files to read.
+  files["/proc/self/cgroup"] = "0::/docker/abc\n";
+  files["/proc/self/mountinfo"] = "22 1 8:2 / / rw,relatime shared:1 - ext4 /dev/sda2 rw\n";
+  cgroup = ResolveCgroupMemory(files);
+  EXPECT_EQ(cgroup.status, CgroupStatus::kNotApplicable);
+  facts = ResolveHostFacts(cgroup, 128 * kGiB, 100 * kGiB);
+  EXPECT_EQ(facts.effective, std::optional<uint64_t>{128 * kGiB});
+  EXPECT_EQ(facts.available, std::optional<uint64_t>{100 * kGiB});
+}
+
+TEST(ConfigTest, UnreadableOrUnparseableCgroupInputsLeaveTheHostMemoryUnknown) {
+  const auto valid_files = [] {
+    FakeHostFiles files;
+    files["/proc/self/cgroup"] = "0::/app/job\n";
+    files["/proc/self/mountinfo"] = std::string{kHostMountinfo};
+    AddCgroup(files, "/sys/fs/cgroup");
+    AddCgroup(files, "/sys/fs/cgroup/app");
+    AddCgroup(files, "/sys/fs/cgroup/app/job");
+    AddMemoryFiles(files, "/sys/fs/cgroup/app/job", std::to_string(8 * kGiB), 2 * kGiB);
+    return files;
+  };
+  ASSERT_EQ(ResolveCgroupMemory(valid_files()).status, CgroupStatus::kResolved);
+
+  const std::string job = "/sys/fs/cgroup/app/job";
+  const auto mountinfo = [](std::string text) {
+    return [text = std::move(text)](FakeHostFiles& f) { f["/proc/self/mountinfo"] = text; };
+  };
+  const std::vector<std::pair<std::string, std::function<void(FakeHostFiles&)>>> corruptions = {
+      {"missing /proc/self/cgroup", [](FakeHostFiles& f) { f.erase("/proc/self/cgroup"); }},
+      {"empty /proc/self/cgroup", [](FakeHostFiles& f) { f["/proc/self/cgroup"] = ""; }},
+      {"malformed /proc/self/cgroup", [](FakeHostFiles& f) { f["/proc/self/cgroup"] = "not a cgroup file\n"; }},
+      {"non-numeric hierarchy id", [](FakeHostFiles& f) { f["/proc/self/cgroup"] = "x::/app/job\n"; }},
+      {"empty cgroup path", [](FakeHostFiles& f) { f["/proc/self/cgroup"] = "0::\n"; }},
+      {"relative cgroup path", [](FakeHostFiles& f) { f["/proc/self/cgroup"] = "0::app/job\n"; }},
+      {"cgroup path outside the namespace root", [](FakeHostFiles& f) { f["/proc/self/cgroup"] = "0::/../app/job\n"; }},
+      {"missing /proc/self/mountinfo", [](FakeHostFiles& f) { f.erase("/proc/self/mountinfo"); }},
+      {"empty /proc/self/mountinfo", mountinfo("")},
+      {"malformed /proc/self/mountinfo", mountinfo("garbage\n")},
+      {"mountinfo without a separator", mountinfo("24 22 0:22 / /sys/fs/cgroup rw shared:5 cgroup2 cgroup2 rw\n")},
+      {"bad escape in the mount point", mountinfo("24 22 0:22 / /sys/fs/cg\\9roup rw - cgroup2 cgroup2 rw\n")},
+      {"cgroup outside the cgroup2 mount root",
+       mountinfo("24 22 0:22 /other /sys/fs/cgroup rw - cgroup2 cgroup2 rw\n")},
+      {"cgroup2 mount root outside the namespace root",
+       mountinfo("24 22 0:22 /../.. /sys/fs/cgroup rw - cgroup2 cgroup2 rw\n")},
+      {"cgroup directory that is not visible", [&](FakeHostFiles& f) { f.erase(job + "/cgroup.controllers"); }},
+      {"unparseable memory.max", [&](FakeHostFiles& f) { f[job + "/memory.max"] = "lots\n"; }},
+      {"negative memory.max", [&](FakeHostFiles& f) { f[job + "/memory.max"] = "-1\n"; }},
+      {"empty memory.max", [&](FakeHostFiles& f) { f[job + "/memory.max"] = ""; }},
+      {"memory.max beyond 64 bits", [&](FakeHostFiles& f) { f[job + "/memory.max"] = "18446744073709551616\n"; }},
+      {"missing memory.current", [&](FakeHostFiles& f) { f.erase(job + "/memory.current"); }},
+      {"unparseable memory.current", [&](FakeHostFiles& f) { f[job + "/memory.current"] = "n/a\n"; }},
+  };
+  for (const auto& [name, corrupt] : corruptions) {
+    auto files = valid_files();
+    corrupt(files);
+    const CgroupMemoryLimits cgroup = ResolveCgroupMemory(files);
+    EXPECT_EQ(cgroup.status, CgroupStatus::kUnresolved) << name;
+    EXPECT_FALSE(cgroup.limit.has_value()) << name;
+    EXPECT_FALSE(cgroup.headroom.has_value()) << name;
+
+    // Neither the host-wide memory nor the unlimited mount root stands in for the process's cgroup.
+    const HostFacts facts = ResolveHostFacts(cgroup, 128 * kGiB, 100 * kGiB);
+    EXPECT_FALSE(facts.effective.has_value()) << name;
+    EXPECT_FALSE(facts.available.has_value()) << name;
+  }
+
+  // A profile bounded by the host memory is not eligible when the host memory is unknown.
+  Config config;
+  OverlayConfig(config, R"({"runtime_profiles":[{"id":"any-host",
+    "eligibility":{"minimum_total_device_memory_bytes":0,"minimum_effective_host_memory_bytes":0},
+    "overlay":{"search":{"chunk_size":1}}}]})");
+  ApplyRuntimeProfile(config, RuntimeProfileDeviceFacts{1, false, std::nullopt, std::nullopt, std::nullopt});
+  EXPECT_FALSE(config.search.chunk_size.has_value());
 }
 
 TEST(ConfigTest, RuntimeProfileUsesDefaultCudaDevice) {
