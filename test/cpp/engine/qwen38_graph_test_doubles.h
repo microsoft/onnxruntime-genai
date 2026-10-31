@@ -38,7 +38,9 @@ namespace Generators::test {
 //  - the batched cycles of a device with several slots complete the same way (WaitBatchDecode, Drain, CheckDecodeStatus,
 //    Reset and ResetSlot synchronize), but the error bits are the slot's own: `fail_slot_cycle` names, per slot, the batched
 //    cycle of that slot (1-based) that leaves bits in it, ResetSlot() clears only that slot's bits and CheckDecodeStatus()
-//    reports those of every slot that started decoding, not only slot 0's.
+//    reports those of every slot that started decoding, not only slot 0's. EnqueueBatchDecode() refuses a slot that is not
+//    decoding (the real device would run a verify step from garbage), and AdvanceBatchDecode() records in `calls` whether the
+//    executor deferred the next cycle ("advance_batch:<slots that continue>[:deferred]").
 class ScriptedQwen38Device final : public Qwen38DecodeDevice {
  public:
   explicit ScriptedQwen38Device(int capacity = 68, bool mtp = true, size_t max_batch_size = 1)
@@ -271,7 +273,9 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
     if (active_slots.empty()) return;
     calls.push_back("enqueue_batch:" + std::to_string(active_slots.size()));
     for (size_t s : active_slots) {
-      slot_ledgers_.at(s).RequireRoom(2, "the next verify step");
+      // The real device runs a verify step from the pending token of a slot whose prompt was ingested and handed off.
+      if (!slot_decoding_.at(s)) throw std::logic_error("a batched cycle was enqueued for a slot that is not decoding");
+      slot_ledgers_.at(s).RequireRoom(static_cast<size_t>(drafts_) + 1, "the next verify step");
       ++slot_cycles_.at(s);
     }
     inflight_ = true;
@@ -320,7 +324,7 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
         next_slots.push_back(s);
       }
     }
-    calls.push_back("advance_batch:" + std::to_string(next_slots.size()));
+    calls.push_back("advance_batch:" + std::to_string(next_slots.size()) + (defer_next_cycle ? ":deferred" : ""));
     if (!defer_next_cycle && !next_slots.empty()) {
       EnqueueBatchDecode(next_slots);
     }

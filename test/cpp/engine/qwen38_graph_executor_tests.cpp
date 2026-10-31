@@ -1932,6 +1932,115 @@ TEST_F(Qwen38GraphEngineTest, MultiSlotEvictsCompletedSlotsForQueuedRequests) {
   EXPECT_EQ(emitted[r2.get()], Expected(7, 3));
 }
 
+// While a slot of the batch waits for its prompt the next cycle must not start: the executor passes defer_next_cycle to the
+// advance of the finished cycle (the device would otherwise enqueue the next one on its own, over the idle rows of the
+// newcomer's slot) and enqueues the cycle of every slot after the newcomer's prompt. Without a newcomer the device is left to
+// enqueue it during the advance.
+TEST_F(Qwen38GraphEngineTest, MultiSlotTheNextCycleIsDeferredOnlyWhileASlotStillNeedsItsPrompt) {
+  device_ = std::make_shared<ScriptedQwen38Device>(/*capacity=*/68, /*mtp=*/true, /*max_batch_size=*/2);
+  device_->dense_prefill = true;
+  device_->preferred_chunk = 16;
+  auto engine = MakeEngine();
+
+  auto r0 = Begin(*engine, Prompt(4, 10), /*max_generated_tokens=*/2);
+  auto r1 = Begin(*engine, Prompt(5, 20), /*max_generated_tokens=*/6);
+  auto r2 = Begin(*engine, Prompt(7, 30), /*max_generated_tokens=*/3);  // takes the slot of r0 once it has finished
+
+  std::array<EngineEvent, 16> buffer;
+  std::map<const Request*, std::vector<int32_t>> emitted;
+  for (size_t runs = 0; engine->HasPendingRequests(); ++runs) {
+    ASSERT_LT(runs, 1000u) << "the Engine did not finish";
+    const size_t count = engine->Run(buffer);
+    for (size_t i = 0; i < count; ++i) {
+      ASSERT_EQ(buffer[i].flags & EngineEventFlagFailed, 0u);
+      if (buffer[i].flags & EngineEventFlagToken) emitted[buffer[i].request.get()].push_back(buffer[i].token);
+    }
+  }
+  EXPECT_EQ(emitted[r0.get()], Expected(4, 2));
+  EXPECT_EQ(emitted[r1.get()], Expected(5, 6));
+  EXPECT_EQ(emitted[r2.get()], Expected(7, 3));
+
+  const auto& calls = device_->calls;
+  const auto is_enqueue = [](const std::string& call) { return call.rfind("enqueue_batch:", 0) == 0; };
+
+  // r0 finishes while r1 goes on and nobody waits for a prompt yet: the device enqueues r1's next cycle itself.
+  const auto plain = std::find(calls.begin(), calls.end(), "advance_batch:1");
+  ASSERT_NE(plain, calls.end());
+  ASSERT_NE(plain + 1, calls.end());
+  EXPECT_EQ(*(plain + 1), "enqueue_batch:1");
+
+  // r2 has taken the slot of r0: the cycle of r1 is advanced but not followed by another, r2's prompt is ingested, and the
+  // next cycle runs both slots.
+  const auto deferred = std::find(calls.begin(), calls.end(), "advance_batch:1:deferred");
+  ASSERT_NE(deferred, calls.end());
+  EXPECT_EQ(std::count(calls.begin(), calls.end(), "advance_batch:1:deferred"), 1);
+  const auto prompt = std::find(deferred, calls.end(), "prefill_slot:0:7");
+  ASSERT_NE(prompt, calls.end());
+  EXPECT_EQ(std::find_if(deferred, prompt, is_enqueue), prompt) << "a cycle was enqueued before the newcomer's prompt";
+  ASSERT_NE(prompt + 1, calls.end());
+  const auto next_cycle = std::find_if(prompt, calls.end(), is_enqueue);
+  ASSERT_NE(next_cycle, calls.end());
+  EXPECT_EQ(*next_cycle, "enqueue_batch:2");
+}
+
+// Three slots end three different ways (end-of-sequence token, stop string, turn limit) while a fourth request waits for a
+// slot. The scripted stream is a function of the position, so the prompt lengths keep the overrides of the slots apart. The
+// end of a slot must neither change the tokens of the others nor reset a slot that is still decoding, and the cycle that was
+// already running for the slot that stopped by a stop string (the device cannot know about it) is dropped harmlessly.
+TEST_F(Qwen38GraphEngineTest, MultiSlotEosStopStringAndTurnLimitEndsLeaveTheOtherSlotsUntouched) {
+  device_ = std::make_shared<ScriptedQwen38Device>(/*capacity=*/68, /*mtp=*/true, /*max_batch_size=*/3);
+  device_->dense_prefill = true;
+  device_->preferred_chunk = 16;
+  device_->overrides[8] = kEos;  // the request of 5 prompt tokens: positions 5..7 are delivered, 8 ends the turn
+  device_->overrides[15] = 5;    // the request of 12 prompt tokens: tokens 5 and 6 decode to "ST" and "OP"
+  device_->overrides[16] = 6;
+  auto engine = MakeEngine();
+
+  const auto eos_prompt = Prompt(5, 12);
+  const auto stop_prompt = Prompt(12, 20);
+  const auto limit_prompt = Prompt(20, 30);
+  const auto queued_prompt = Prompt(3, 40);
+  auto eos = Begin(*engine, eos_prompt, /*max_generated_tokens=*/20);
+  auto stop = BeginWithStopString(*engine, stop_prompt, /*max_generated_tokens=*/20);
+  auto limit = Begin(*engine, limit_prompt, /*max_generated_tokens=*/10);
+  auto queued = Begin(*engine, queued_prompt, /*max_generated_tokens=*/4);  // takes the slot of the first request to end
+
+  std::array<EngineEvent, 16> buffer;
+  std::map<const Request*, std::vector<int32_t>> emitted;
+  std::map<const Request*, GenerationFinishReason> reasons;
+  std::map<const Request*, int32_t> matched_stop_string;
+  for (size_t runs = 0; engine->HasPendingRequests(); ++runs) {
+    ASSERT_LT(runs, 1000u) << "the Engine did not finish";
+    const size_t count = engine->Run(buffer);
+    for (size_t i = 0; i < count; ++i) {
+      ASSERT_EQ(buffer[i].flags & EngineEventFlagFailed, 0u);
+      if (buffer[i].flags & EngineEventFlagToken) emitted[buffer[i].request.get()].push_back(buffer[i].token);
+      if (buffer[i].flags & EngineEventFlagTurnFinished) {
+        reasons[buffer[i].request.get()] = buffer[i].finish_reason;
+        matched_stop_string[buffer[i].request.get()] = buffer[i].matched_stop_string_index;
+      }
+    }
+  }
+
+  EXPECT_EQ(emitted[eos.get()], Expected(5, 3));
+  EXPECT_EQ(reasons[eos.get()], GenerationFinishReason::EosToken);
+  EXPECT_EQ(emitted[stop.get()],
+            (std::vector<int32_t>{device_->TokenAt(12), device_->TokenAt(13), device_->TokenAt(14), 5, 6}));
+  EXPECT_EQ(reasons[stop.get()], GenerationFinishReason::StopString);
+  EXPECT_EQ(matched_stop_string[stop.get()], 0);
+  EXPECT_EQ(emitted[limit.get()], Expected(20, 10));
+  EXPECT_EQ(reasons[limit.get()], GenerationFinishReason::TurnLimit);
+  EXPECT_EQ(emitted[queued.get()], Expected(3, 4));
+  EXPECT_EQ(reasons[queued.get()], GenerationFinishReason::TurnLimit);
+
+  EXPECT_EQ(device_->slot_ingested(0), queued_prompt) << "the queued request must take the slot of the first one to end";
+  EXPECT_EQ(device_->slot_ingested(1), stop_prompt);
+  EXPECT_EQ(device_->slot_ingested(2), limit_prompt);
+  EXPECT_EQ(device_->CallCount("reset_slot:0"), 1u);
+  EXPECT_EQ(device_->CallCount("reset_slot:1"), 0u) << "a slot that was never handed over is not reset";
+  EXPECT_EQ(device_->CallCount("reset_slot:2"), 0u) << "a slot that was never handed over is not reset";
+}
+
 // A batched cycle runs the slots 0..max(active) and mutes the ones that sit out, which overwrites their KV rows and state: a
 // slot that is part-way through its prompt must never be part of a cycle, so none is enqueued until every requested slot has
 // ingested its prompt (a known limitation of ragged batches, see docs/paged_attention_engine.md). The slot that is ready
