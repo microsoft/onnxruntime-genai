@@ -1153,7 +1153,7 @@ class StagedPleRig {
   static constexpr size_t kRowWidth = 4;
   static constexpr size_t kMaxTokens = 4200;
   static constexpr size_t kPositions = 16;  // the table's capacity: how many positions past_pos has room for
-  static constexpr size_t kStateWords = 10;
+  static constexpr size_t kStateWords = 14;
 
   // `scale` is that of Qwen38PleParams: positive for FP8 shards (row_codes are FP8 E4M3 codes), the negative of the dequantization
   // scale for INT8 shards (row_codes are the int8 values).
@@ -1235,16 +1235,16 @@ class StagedPleRig {
     return Prep(params, d_tok_.data(), d_pos_.data(), pos_add, d_ctx_in_.data());
   }
 
-  // prep for row 0 of a fold: the token and the position are words 0 and 1 of the ten-word state, which also holds the tokens
-  // of the other rows.
+  // prep for row 0 of a fold: the token and the position are words 0 and 1 of the fourteen-word state, which also holds the
+  // tokens of the other rows (word 2 for row 1, words 8..13 for rows 2..7).
   int PrepRowZero(const std::array<int64_t, kStateWords>& state) {
     Upload(d_state_, state.data(), sizeof(state));
     return Prep(nullptr, d_state_.data(), d_state_.data() + sizeof(int64_t), 0, d_ctx_in_.data());
   }
 
-  // prep for row 1..3 of the fold whose row 0 ran last: its context in is the previous row's context out.
+  // prep for row 1..7 of the fold whose row 0 ran last: its context in is the previous row's context out.
   int PrepFoldRow(int pos_add) {
-    const size_t token_word = pos_add == 1 ? 2 : (pos_add == 2 ? 8 : 9);
+    const size_t token_word = pos_add == 1 ? 2 : static_cast<size_t>(6 + pos_add);
     return Prep(nullptr, d_state_.data() + token_word * sizeof(int64_t), d_state_.data() + sizeof(int64_t), pos_add,
                 d_ctx_out_.data());
   }
@@ -1478,7 +1478,7 @@ TEST_F(Qwen38PlaneStagedPleTest, PrepReportsEveryFailedStagingStepOnTheGenericPa
 
 TEST_F(Qwen38PlaneStagedPleTest, PrepReportsEveryFailedStagingStepOnRowZeroOfAFold) {
   StagedPleRig rig{*plane_, kAscendingRows};
-  const std::array<int64_t, StagedPleRig::kStateWords> state = {7, 9, 2, 0, 0, 0, 0, 0, 1, 0};
+  const std::array<int64_t, StagedPleRig::kStateWords> state = {7, 9, 2, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0};
   ColdCall call;
   call.run = [&] { return rig.PrepRowZero(state); };
   call.expect_result = [&] { rig.ExpectPrepResult(7, 9, 0); };
@@ -1569,12 +1569,12 @@ TEST_F(Qwen38PlaneStagedPleTest, PleRowsGrowthIsAllOrNothing) {
   EXPECT_EQ(rig.ReadPle(long_tokens.size()), rig.ExpectedPle(long_tokens));
 }
 
-// Rows 1..3 of a fold reuse what row 0 read back and so run no staging step at all (a CUDA graph capture could not take one);
+// Rows 1..7 of a fold reuse what row 0 read back and so run no staging step at all (a CUDA graph capture could not take one);
 // a row 0 that failed leaves nothing for them to reuse.
 TEST_F(Qwen38PlaneStagedPleTest, FoldRowsReuseTheRowZeroSnapshotOnlyWhenRowZeroSucceeded) {
   StagedPleRig rig{*plane_, kAscendingRows};
   rig.ResetTable();
-  const std::array<int64_t, StagedPleRig::kStateWords> state = {7, 9, 2, 0, 0, 0, 0, 0, 1, 0};
+  const std::array<int64_t, StagedPleRig::kStateWords> state = {7, 9, 2, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0};
 
   const Qwen38PlaneFaultSite staging_sites[] = {QWEN38_PLANE_FAULT_HOST_ALLOC, QWEN38_PLANE_FAULT_HOST_MALLOC,
                                                 QWEN38_PLANE_FAULT_DEVICE_ALIAS, QWEN38_PLANE_FAULT_COPY,

@@ -494,23 +494,45 @@ TEST(Qwen38GraphConfigTest, PrefillChunkValidation) {
 TEST(Qwen38GraphIdTest, IdsAreDerivedFromTheRunAndAreDistinct) {
   std::set<int> seen;
   const Qwen38GraphRun runs[] = {Qwen38GraphRun::kTarget, Qwen38GraphRun::kHead, Qwen38GraphRun::kHeadR2};
+  ASSERT_EQ(std::size(runs), static_cast<size_t>(kQwen38GraphRunCount));
   for (const Qwen38GraphRun run : runs) {
     for (int rows = 1; rows <= kQwen38GraphIdMaxRows; ++rows) {
       for (int phase = 0; phase < kQwen38GraphIdMaxPhases; ++phase) {
         const int id = Qwen38GraphAnnotationId(run, rows, phase);
-        EXPECT_GT(id, 0);  // 0 is ORT's default annotation, -1 disables capture
+        EXPECT_GT(id, 0);                                          // 0 is ORT's default annotation, -1 disables capture
+        EXPECT_EQ(id, Qwen38GraphAnnotationId(run, rows, phase));  // a pure function of its arguments
         EXPECT_TRUE(seen.insert(id).second) << "duplicate id " << id;
       }
     }
   }
-  EXPECT_EQ(seen.size(), 3u * kQwen38GraphIdMaxRows * kQwen38GraphIdMaxPhases);
+  EXPECT_EQ(seen.size(), static_cast<size_t>(kQwen38GraphRunCount) * kQwen38GraphIdMaxRows * kQwen38GraphIdMaxPhases);
 }
 
-TEST(Qwen38GraphIdTest, RejectsRowsAndPhasesBeyondTheLimits) {
+TEST(Qwen38GraphIdTest, EveryVerifyWidthUpToSevenDraftsHasAnIdPerRingPhase) {
+  // S=8 verification (seven drafts) runs the target with 8 rows; the S=1 .. S=7 widths stay available too.
+  EXPECT_GE(kQwen38GraphIdMaxRows, 8);
+  std::set<int> target_ids;
+  for (int rows = 1; rows <= 8; ++rows) {
+    for (int phase = 0; phase < 5; ++phase) {  // the non-compact fold rings up to five banks, the compact one two
+      EXPECT_TRUE(target_ids.insert(Qwen38GraphAnnotationId(Qwen38GraphRun::kTarget, rows, phase)).second);
+    }
+  }
+  // Rows or phases of one run never alias another run's ids.
+  EXPECT_NE(Qwen38GraphAnnotationId(Qwen38GraphRun::kTarget, 8, kQwen38GraphIdMaxPhases - 1),
+            Qwen38GraphAnnotationId(Qwen38GraphRun::kHead, 1, 0));
+  EXPECT_LT(Qwen38GraphAnnotationId(Qwen38GraphRun::kTarget, 8, kQwen38GraphIdMaxPhases - 1),
+            Qwen38GraphAnnotationId(Qwen38GraphRun::kHead, 1, 0));
+}
+
+TEST(Qwen38GraphIdTest, RejectsRunsRowsAndPhasesBeyondTheLimits) {
   EXPECT_THROW(Qwen38GraphAnnotationId(Qwen38GraphRun::kTarget, 0, 0), std::out_of_range);
   EXPECT_THROW(Qwen38GraphAnnotationId(Qwen38GraphRun::kTarget, kQwen38GraphIdMaxRows + 1, 0), std::out_of_range);
+  EXPECT_THROW(Qwen38GraphAnnotationId(Qwen38GraphRun::kTarget, 9, 0), std::out_of_range);
+  EXPECT_THROW(Qwen38GraphAnnotationId(Qwen38GraphRun::kTarget, 1, kQwen38GraphIdMaxPhases), std::out_of_range);
   EXPECT_THROW(Qwen38GraphAnnotationId(Qwen38GraphRun::kHead, 1, -1), std::out_of_range);
   EXPECT_THROW(Qwen38GraphAnnotationId(Qwen38GraphRun::kHeadR2, 2, kQwen38GraphIdMaxPhases), std::out_of_range);
+  EXPECT_THROW(Qwen38GraphAnnotationId(static_cast<Qwen38GraphRun>(kQwen38GraphRunCount), 1, 0), std::out_of_range);
+  EXPECT_THROW(Qwen38GraphAnnotationId(static_cast<Qwen38GraphRun>(-1), 1, 0), std::out_of_range);
 }
 
 TEST(Qwen38GraphConfigTest, NonInheritedPrefillSessionOptionsRetainCudaProviderWithoutGraphCapture) {
