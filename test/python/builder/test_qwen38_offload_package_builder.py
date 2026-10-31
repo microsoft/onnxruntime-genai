@@ -1322,9 +1322,11 @@ def caps_of(entries):
 
 
 def build(monkeypatch, offload, package, tmp_path, *extra, layered=False):
+    """Runs the builder and returns (output folder, config, offload entries, decoder graph, decoder folder)."""
     out = tmp_path / "out"
     run_builder(monkeypatch, offload, package, out, *extra)
-    return (out, *read_output(out, layered))
+    config, entries, model, decoder_dir = read_output(out, layered)
+    return out, config, entries, model, decoder_dir
 
 
 @pytest.mark.parametrize("layered", [False, True])
