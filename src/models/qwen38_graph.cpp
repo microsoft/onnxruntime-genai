@@ -662,6 +662,7 @@ void Qwen38GraphEngine::Reset() {
   if (mtp_enabled_) ClearHead();
   SyncStream();
   FastReset();
+  run_hints_.BeginTurn();
   seq_ = 0;
   ledger_.Reset();
   inflight_ = false;
@@ -685,9 +686,14 @@ void Qwen38GraphEngine::PrepRow(int rows, int row, const void* tok, const void* 
   }
 }
 
-void Qwen38GraphEngine::RunTarget(int rows, int phase) {
+void Qwen38GraphEngine::RunTarget(int rows, int phase, const Qwen38PromptRunHints* prompt) {
   Direction& d = dirs_[rows - 1][phase % num_banks_];
-  model_.session_target_->Run(d.run_options.get(), *d.binding);
+  RunSession(*model_.session_target_, d.run_options.get(), *d.binding, prompt);
+}
+
+void Qwen38GraphEngine::RunSession(OrtSession& session, const OrtRunOptions* run_options, const OrtIoBinding& binding,
+                                   const Qwen38PromptRunHints* prompt) {
+  RunWithQwen38OrtHints(run_hints_, prompt, [&] { session.Run(run_options, binding); });
 }
 
 int64_t Qwen38GraphEngine::ReadCtl(int index) {
@@ -768,6 +774,7 @@ void Qwen38GraphEngine::StepPrefill(std::span<const int32_t> tokens) {
   const int R = fold_ ? verify_rows_ : 2;
   ledger_.RequireRoom(n, "the prompt", static_cast<size_t>(R + 1));
   const size_t base = ledger_.Length();
+  const Qwen38PromptRunHints prompt_run{run_hints_.ExpectedPrefillTokens(), 0};
   {
     std::vector<int64_t> chunk(n + R, 0);  // trailing 0 = dummy rows of a partial tail
     for (size_t i = 0; i < n; ++i) chunk[i] = tokens[i];
@@ -789,7 +796,7 @@ void Qwen38GraphEngine::StepPrefill(std::span<const int32_t> tokens) {
       void* cout = (step == static_cast<size_t>(R) && r == R - 1) ? ctx_commit_.data() : (ctx_a_.data() + 16 * r);
       PrepRow(R, r, tp + 8 * (gi + r), pp + 8 * (gi + r), 0, cin, cout);
     }
-    RunTarget(R, ledger_.Bank());
+    RunTarget(R, ledger_.Bank(), &prompt_run);
     Direction& d = dirs_[R - 1][ledger_.Bank()];
     plane_.or_status(stream_, d.status, static_cast<int>(d.status_count), ctl_.data());
     if (step < static_cast<size_t>(R)) {
@@ -817,7 +824,7 @@ void Qwen38GraphEngine::StepPrefill(std::span<const int32_t> tokens) {
 void Qwen38GraphEngine::RunHeadOnce(HeadSession& head, int rows) {
   (void)rows;
   Direction& d = head.dirs[head_turn_ % 2];
-  head.session->Run(d.run_options.get(), *d.binding);
+  RunSession(*head.session, d.run_options.get(), *d.binding);
 }
 
 void Qwen38GraphEngine::EnqueueHead(int rows, const uint8_t* hidden_src) {
@@ -932,7 +939,7 @@ void Qwen38GraphEngine::CallHeadR2(const int64_t tokens[2], const int64_t positi
   plane_.Check(plane_.memcpy_d2d(h.hidden, hidden0, row_bytes, stream_), "head hidden");
   plane_.Check(plane_.memcpy_d2d(h.hidden + row_bytes, hidden1, row_bytes, stream_), "head hidden");
   Direction& d = h.dirs[head_cur_ % num_banks_];
-  h.session->Run(d.run_options.get(), *d.binding);
+  RunSession(*h.session, d.run_options.get(), *d.binding);
   plane_.or_status(stream_, h.status, static_cast<int>(h.status_count), ctl_.data());
   head_cur_ = (head_cur_ + commit_rows) % num_banks_;
   head_length_ += commit_rows;
@@ -1085,6 +1092,7 @@ void Qwen38GraphEngine::BeginDecode(bool run_cycle) {
   if (decode_started_) throw std::logic_error("qwen38_graph: decoding already started");
   if (ledger_.Length() == 0) throw std::logic_error("qwen38_graph: BeginDecode before the prompt was ingested");
   decode_started_ = true;
+  run_hints_.ExpectPrefillTokens(0);
   if (fold_) {
     if (!run_cycle) return;
     ClearHead();
@@ -1197,21 +1205,16 @@ void Qwen38GraphEngine::Advance(const Qwen38CycleRecord& record, bool want_more)
 
 void Qwen38GraphEngine::Warmup() {
   // ORT captures a graph id after min_num_runs eager runs: touch every (rows, phase) and head direction enough times.
-#if defined(_WIN32)
-  if (std::getenv("ORT_FORCE_DETERMINISTIC_MOE") == nullptr) {
-    _putenv_s("ORT_FORCE_DETERMINISTIC_MOE", "1");
-  }
-  struct WarmupEnvGuard {
-    WarmupEnvGuard() { _putenv_s("ORT_QMOE_IN_WARMUP", "1"); }
-    ~WarmupEnvGuard() { _putenv_s("ORT_QMOE_IN_WARMUP", "0"); }
-  } warmup_guard;
-#else
-  setenv("ORT_FORCE_DETERMINISTIC_MOE", "1", 0);
-  struct WarmupEnvGuard {
-    WarmupEnvGuard() { setenv("ORT_QMOE_IN_WARMUP", "1", 1); }
-    ~WarmupEnvGuard() { setenv("ORT_QMOE_IN_WARMUP", "0", 1); }
-  } warmup_guard;
-#endif
+  // The Runs of the warmup carry ORT_QMOE_IN_WARMUP and, from here on, every Run of the engine asks for deterministic
+  // MoE tactics: the engine keeps that state and publishes it around each Run only (qwen38_ort_env.h), also when this
+  // throws.
+  struct WarmupFlag {
+    explicit WarmupFlag(Qwen38OrtRunHints& hints) : hints_{hints} { hints_.SetWarmup(true); }
+    ~WarmupFlag() { hints_.SetWarmup(false); }
+    WarmupFlag(const WarmupFlag&) = delete;
+    WarmupFlag& operator=(const WarmupFlag&) = delete;
+    Qwen38OrtRunHints& hints_;
+  } warmup_flag{run_hints_};
   const int R = fold_ ? verify_rows_ : 2;
   const int max_prompt = capacity_ - Qwen38DecodeDevice::kReservedTail - (R + 1);
   if (max_prompt < R) return;
