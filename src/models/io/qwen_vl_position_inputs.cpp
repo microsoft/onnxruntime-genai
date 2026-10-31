@@ -32,17 +32,21 @@ struct UpdatePositionIdsFunctor {
   template <typename T>
   void operator()() {
     auto* data = position_ids->GetTensorMutableData<T>();
-    // Qwen3.5 row 0 is the sequential text position (base_pos + s); the 3 vision rows follow.
-    T* vision = data + (rope_rank - 3) * batch_size * seq_len;
-    for (int64_t b = 0; b < batch_size; ++b) {
-      for (int64_t s = 0; s < seq_len; ++s) {
-        if (rope_rank == 4) {
+    // Qwen3.5 (rope_rank 4) prepends a sequential text-position row; the 3 vision rows follow it.
+    if (rope_rank == 4) {
+      for (int64_t b = 0; b < batch_size; ++b) {
+        for (int64_t s = 0; s < seq_len; ++s) {
           data[b * seq_len + s] = static_cast<T>(base_pos) + static_cast<T>(s);
         }
-        T delta = static_cast<T>(base_pos + rope_deltas[b]);
-        T pos = static_cast<T>(s);
-        for (int64_t dim = 0; dim < 3; ++dim) {
-          vision[dim * batch_size * seq_len + b * seq_len + s] = delta + pos;
+      }
+      data += batch_size * seq_len;
+    }
+    for (int64_t dim = 0; dim < 3; ++dim) {
+      for (int64_t b = 0; b < batch_size; ++b) {
+        for (int64_t s = 0; s < seq_len; ++s) {
+          T delta = static_cast<T>(base_pos + rope_deltas[b]);
+          T pos = static_cast<T>(s);
+          data[dim * batch_size * seq_len + b * seq_len + s] = delta + pos;
         }
       }
     }
@@ -194,7 +198,7 @@ void Qwen2VLPositionInputs::CreateAndInitialize3DPositionIDs(DeviceSpan<int32_t>
   auto position_ids = OrtValue::CreateTensor(model_.allocator_cpu_, shape, type_);
   auto* position_data_base = position_ids->GetTensorMutableData<T>();
   // Qwen3.5 (rope_rank_==4) prepends a text-position row; the 3 vision rows are written after it. For the
-  // 3-row families vision_base is 0, so the writes below are byte-for-byte identical.
+  // 3-row families the offset is 0, so the writes below are byte-for-byte identical.
   auto* position_data = position_data_base + (rope_rank_ - 3) * batch_size * seq_len;
 
   // Get spans for grid_thw tensors (on CPU)
