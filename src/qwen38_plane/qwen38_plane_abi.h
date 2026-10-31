@@ -253,14 +253,20 @@ typedef int (*Qwen38PlaneReplayStateUpdatesFn)(void* stream, const void* descs, 
 // so a history-first state would be corrupted by a partial acceptance: the host requires the bit only for a package that has
 // such a state, and channel-first packages keep loading with a library that lacks it.
 #define QWEN38_PLANE_CAP_CONV_HISTORY_FIRST_REPLAY 0x10ull
+// prep_batched: slot s of its ctx_out starts at word s * QWEN38_PLANE_CTX_WORDS_PER_SLOT whatever the row count. A library
+// that has prep_batched but not this bit writes slot s at word s * 2 * rows, which the SpeculativePrefixCommit node reads at
+// the other offset for 1 to 7 rows and several slots, so the n-gram context a slot commits would be wrong without any error
+// (8 rows give both strides the same value). The host requires it with QWEN38_PLANE_CAP_BATCHED_PREP.
+#define QWEN38_PLANE_CAP_CTX_SLOT_STRIDE 0x20ull
 
 // X(bit, name), in bit order.
-#define QWEN38_PLANE_CAPABILITIES(X)                                   \
-  X(QWEN38_PLANE_CAP_INT8_EMBEDDING, "int8_embedding")                 \
-  X(QWEN38_PLANE_CAP_INT8_PLE, "int8_ple")                             \
-  X(QWEN38_PLANE_CAP_NEGATIVE_POS_ADD_BATCH, "negative_pos_add_batch") \
-  X(QWEN38_PLANE_CAP_BATCHED_PREP, "batched_prep")                     \
-  X(QWEN38_PLANE_CAP_CONV_HISTORY_FIRST_REPLAY, "conv_history_first_replay")
+#define QWEN38_PLANE_CAPABILITIES(X)                                         \
+  X(QWEN38_PLANE_CAP_INT8_EMBEDDING, "int8_embedding")                       \
+  X(QWEN38_PLANE_CAP_INT8_PLE, "int8_ple")                                   \
+  X(QWEN38_PLANE_CAP_NEGATIVE_POS_ADD_BATCH, "negative_pos_add_batch")       \
+  X(QWEN38_PLANE_CAP_BATCHED_PREP, "batched_prep")                           \
+  X(QWEN38_PLANE_CAP_CONV_HISTORY_FIRST_REPLAY, "conv_history_first_replay") \
+  X(QWEN38_PLANE_CAP_CTX_SLOT_STRIDE, "ctx_slot_stride")
 
 #define QWEN38_PLANE_CAPABILITY_BIT_(bit, name) | (bit)
 #define QWEN38_PLANE_ALL_CAPABILITIES (0ull QWEN38_PLANE_CAPABILITIES(QWEN38_PLANE_CAPABILITY_BIT_))
@@ -290,10 +296,11 @@ typedef int (*Qwen38PlaneEmbedGatherFn)(void* stream, const void* table, long lo
 // for a width <= 0 (it has no INT8 mode), and its width must be a multiple of 8 (the loader refuses a BF16 table of another
 // width). The loader uses it only for a BF16 table when the library has no embed_gather.
 
-// Optional export "qwen38_plane_prep_batched" (QWEN38_PLANE_CAP_BATCHED_PREP): prep of the `rows` rows of one folded verify
-// step (see prep; rows == 1 is the plain next-token row) for each of `batch` request slots, in one call. `rows` is in
-// [1, QWEN38_PLANE_MAX_PREP_ROWS] and `batch` in [1, QWEN38_PLANE_MAX_PREP_BATCH]; the pointers are those of prep except
-// that every one is the base of an array over the slots, which are numbered 0 .. batch - 1:
+// Optional export "qwen38_plane_prep_batched" (QWEN38_PLANE_CAP_BATCHED_PREP, and QWEN38_PLANE_CAP_CTX_SLOT_STRIDE for the
+// layout of ctx_out below): prep of the `rows` rows of one folded verify step (see prep; rows == 1 is the plain next-token
+// row) for each of `batch` request slots, in one call. `rows` is in [1, QWEN38_PLANE_MAX_PREP_ROWS] and `batch` in
+// [1, QWEN38_PLANE_MAX_PREP_BATCH]; the pointers are those of prep except that every one is the base of an array over the
+// slots, which are numbered 0 .. batch - 1:
 //   state         int64, QWEN38_PLANE_CTL_WORDS_PER_SLOT words per slot, the control words of the slot (prep's `state`)
 //   ctx_in        int64[batch][2]                       the n-gram context in front of row 0
 //   ctx_out       int64[batch][QWEN38_PLANE_CTX_WORDS_PER_SLOT]: slot s starts at word s * QWEN38_PLANE_CTX_WORDS_PER_SLOT

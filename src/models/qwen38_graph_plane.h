@@ -65,8 +65,8 @@ struct Qwen38Plane {
 
   // prep for the `rows` rows of one folded verify step of each of `batch` request slots in one call (the optional export
   // qwen38_plane_prep_batched; the layout of the arrays is documented in the ABI header). Throws std::invalid_argument for a
-  // `rows` or `batch` out of range, std::runtime_error naming the batched_prep capability for a library without it, and
-  // std::runtime_error with the CUDA error the plane returns.
+  // `rows` or `batch` out of range, std::runtime_error naming the batched_prep or ctx_slot_stride capability for a library
+  // without it, and std::runtime_error with the CUDA error the plane returns.
   void PrepBatched(void* stream, const void* params, int rows, int batch, const void* ctx_in, void* ctx_out, void* input_ids,
                    void* position_ids, void* committed, void* past_pos, void* ple_out, void* state) const;
 

@@ -657,8 +657,9 @@ TEST(Qwen38PlaneCapabilityTest, DescribesCapabilitiesByName) {
   EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_CAP_NEGATIVE_POS_ADD_BATCH), "negative_pos_add_batch");
   EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_CAP_BATCHED_PREP), "batched_prep");
   EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_CAP_CONV_HISTORY_FIRST_REPLAY), "conv_history_first_replay");
+  EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_CAP_CTX_SLOT_STRIDE), "ctx_slot_stride");
   EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_ALL_CAPABILITIES),
-            "int8_embedding, int8_ple, negative_pos_add_batch, batched_prep, conv_history_first_replay");
+            "int8_embedding, int8_ple, negative_pos_add_batch, batched_prep, conv_history_first_replay, ctx_slot_stride");
   // A bit that this build has no name for is reported, not dropped.
   EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_CAP_INT8_PLE | (1ull << 40)), "int8_ple, unknown bits 0x10000000000");
 }
@@ -691,7 +692,7 @@ TEST(Qwen38PlaneCapabilityTest, RequireCapabilitiesNamesTheMissingCapabilityWhat
   } catch (const std::runtime_error& error) {
     const std::string message = error.what();
     EXPECT_NE(message.find("the fold package requires the plane capability int8_embedding, negative_pos_add_batch, "
-                           "batched_prep, conv_history_first_replay, which"),
+                           "batched_prep, conv_history_first_replay, ctx_slot_stride, which"),
               std::string::npos)
         << message;
   }
@@ -699,6 +700,15 @@ TEST(Qwen38PlaneCapabilityTest, RequireCapabilitiesNamesTheMissingCapabilityWhat
   plane.capabilities = 0;  // a library that predates the capabilities export reports none
   ExpectMissingCapability([&] { plane.RequireCapabilities(QWEN38_PLANE_CAP_INT8_PLE, "the INT8 PLE table"); }, "int8_ple",
                           "the INT8 PLE table", "model/libqwen38_plane.so");
+}
+
+TEST(Qwen38PlaneCapabilityTest, TheSlotStrideCapabilityHasTheBitAndTheNameOfItsContract) {
+  EXPECT_EQ(QWEN38_PLANE_CAP_CTX_SLOT_STRIDE, 0x20ull);
+  EXPECT_NE(QWEN38_PLANE_ALL_CAPABILITIES & QWEN38_PLANE_CAP_CTX_SLOT_STRIDE, 0ull);
+  EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_CAP_CTX_SLOT_STRIDE), "ctx_slot_stride");
+  // A library that reports every capability of the generation before it (what the plane of the preceding PR reports) lacks it.
+  const unsigned long long before_the_stride = QWEN38_PLANE_ALL_CAPABILITIES & ~QWEN38_PLANE_CAP_CTX_SLOT_STRIDE;
+  EXPECT_EQ(before_the_stride, 0x1full);
 }
 
 // The host validates what it hands to qwen38_plane_prep_batched, whatever the library does with it: the batch size is an
@@ -774,6 +784,12 @@ TEST(Qwen38PlaneBatchedPrepTest, ALibraryWithoutTheCapabilityOrTheExportIsNeverC
 
   plane.capabilities = QWEN38_PLANE_ALL_CAPABILITIES & ~QWEN38_PLANE_CAP_BATCHED_PREP;
   ExpectMissingCapability(prep, "batched_prep", "preparing the inputs of several request slots", "current/libqwen38_plane.so");
+
+  // A library of the generation that has prep_batched but writes slot s of ctx_out at word 2 * rows * s: it would put the
+  // n-gram context of every slot but the first where SpeculativePrefixCommit does not read it, so it is never called.
+  plane.capabilities = QWEN38_PLANE_ALL_CAPABILITIES & ~QWEN38_PLANE_CAP_CTX_SLOT_STRIDE;
+  ExpectMissingCapability(prep, "ctx_slot_stride", "preparing the inputs of several request slots", "current/libqwen38_plane.so");
+  EXPECT_TRUE(BatchedPrepStub::calls.empty());
 
   plane.capabilities = QWEN38_PLANE_ALL_CAPABILITIES;
   plane.prep_batched = nullptr;  // the bit without the export: a broken library
@@ -1301,10 +1317,11 @@ TEST(Qwen38PackageSupportTest, AFoldedPackageNeedsTheBatchedPrepCapabilityAtMode
   EXPECT_EQ(folded.Require(current), Qwen38EmbeddingFormat::kBf16);
 }
 
-// A configuration with several request slots prepares the rows of every slot with qwen38_plane_prep_batched (batched_prep). A
-// library without it must not load the model: the rows would otherwise go through the single-slot entry point, which knows
-// nothing of the slot count. A single-slot package of the same library loads.
-TEST(Qwen38PackageSupportTest, SeveralRequestSlotsNeedTheBatchedPrepCapabilityAtModelLoad) {
+// A configuration with several request slots prepares the rows of every slot with qwen38_plane_prep_batched (batched_prep), which
+// puts slot s of its ctx_out at word s * QWEN38_PLANE_CTX_WORDS_PER_SLOT (ctx_slot_stride). A library without either must not
+// load the model: the rows would otherwise go through the single-slot entry point, which knows nothing of the slot count, or
+// the contexts of the slots would be read from the wrong words. A single-slot package of the same library loads.
+TEST(Qwen38PackageSupportTest, SeveralRequestSlotsNeedTheBatchedPrepAndSlotStrideCapabilitiesAtModelLoad) {
   Qwen38TestPackage slots{/*fold=*/true, /*max_batch_size=*/2};
   slots.Write(kValidPleTable, Qwen38TestPackage::kBf16TableBytes);
 
@@ -1317,23 +1334,36 @@ TEST(Qwen38PackageSupportTest, SeveralRequestSlotsNeedTheBatchedPrepCapabilityAt
   Qwen38Plane one_slot_only;
   InitLegacyStubPlane(one_slot_only);
   one_slot_only.capabilities = QWEN38_PLANE_CAP_NEGATIVE_POS_ADD_BATCH | QWEN38_PLANE_CAP_INT8_EMBEDDING | QWEN38_PLANE_CAP_INT8_PLE;
-  ExpectMissingCapability([&] { slots.Require(one_slot_only); }, "batched_prep", "model.qwen38_graph.max_batch_size",
-                          "legacy/libqwen38_plane.so");
+  ExpectMissingCapability([&] { slots.Require(one_slot_only); }, "batched_prep, ctx_slot_stride",
+                          "model.qwen38_graph.max_batch_size", "legacy/libqwen38_plane.so");
 
   Qwen38TestPackage single{/*fold=*/true, /*max_batch_size=*/1};
   single.Write(kValidPleTable, Qwen38TestPackage::kBf16TableBytes);
   EXPECT_EQ(single.Require(one_slot_only), Qwen38EmbeddingFormat::kBf16);
 
+  // A library that has prep_batched but writes slot s of ctx_out at word 2 * rows * s (it predates ctx_slot_stride) is refused
+  // too, and only the capability it lacks is named: SpeculativePrefixCommit would read the n-gram contexts of the slots but
+  // the first from the wrong words, with no error. One slot never reads another slot's words, so it still loads.
+  Qwen38Plane before_the_stride;
+  InitLegacyStubPlane(before_the_stride);
+  before_the_stride.capabilities = QWEN38_PLANE_CAP_NEGATIVE_POS_ADD_BATCH | QWEN38_PLANE_CAP_BATCHED_PREP;
+  ExpectMissingCapability([&] { slots.Require(before_the_stride); }, "ctx_slot_stride, which",
+                          "model.qwen38_graph.max_batch_size", "legacy/libqwen38_plane.so");
+  EXPECT_EQ(single.Require(before_the_stride), Qwen38EmbeddingFormat::kBf16);
+
   Qwen38Plane with_batched_prep;
   InitLegacyStubPlane(with_batched_prep);
-  with_batched_prep.capabilities = QWEN38_PLANE_CAP_NEGATIVE_POS_ADD_BATCH | QWEN38_PLANE_CAP_BATCHED_PREP;
+  with_batched_prep.capabilities =
+      QWEN38_PLANE_CAP_NEGATIVE_POS_ADD_BATCH | QWEN38_PLANE_CAP_BATCHED_PREP | QWEN38_PLANE_CAP_CTX_SLOT_STRIDE;
   EXPECT_EQ(slots.Require(with_batched_prep), Qwen38EmbeddingFormat::kBf16);
 
-  // Every slot count above one needs it, the other capabilities of the package are still required.
+  // Every slot count above one needs both, the other capabilities of the package are still required.
   for (int count = 3; count <= QWEN38_PLANE_MAX_PREP_BATCH; ++count) {
     Qwen38TestPackage package{/*fold=*/true, count};
     package.Write(kValidPleTable, Qwen38TestPackage::kBf16TableBytes);
-    ExpectMissingCapability([&] { package.Require(one_slot_only); }, "batched_prep", "max_batch_size",
+    ExpectMissingCapability([&] { package.Require(one_slot_only); }, "batched_prep, ctx_slot_stride", "max_batch_size",
+                            "legacy/libqwen38_plane.so");
+    ExpectMissingCapability([&] { package.Require(before_the_stride); }, "ctx_slot_stride, which", "max_batch_size",
                             "legacy/libqwen38_plane.so");
     EXPECT_EQ(package.Require(with_batched_prep), Qwen38EmbeddingFormat::kBf16) << count;
   }

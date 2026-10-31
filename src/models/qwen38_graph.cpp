@@ -2784,9 +2784,10 @@ Qwen38EmbeddingFormat RequireQwen38PackageSupportedByPlane(const Qwen38Plane& pl
                               "the folded MTP verify path (model.qwen38_graph.fold)");
   }
   // The batched prep entry point (qwen38_plane_prep_batched) prepares the rows of every slot of a step with explicit row and
-  // batch arguments; only the packages that run several slots need it.
+  // batch arguments and the n-gram contexts of slot s at word s * QWEN38_PLANE_CTX_WORDS_PER_SLOT (ctx_slot_stride), which
+  // is where SpeculativePrefixCommit reads them; only the packages that run several slots need it.
   if (ResolveQwen38MaxBatchSize(config) > 1) {
-    plane.RequireCapabilities(QWEN38_PLANE_CAP_BATCHED_PREP,
+    plane.RequireCapabilities(QWEN38_PLANE_CAP_BATCHED_PREP | QWEN38_PLANE_CAP_CTX_SLOT_STRIDE,
                               "several request slots (model.qwen38_graph.max_batch_size > 1)");
   }
   const std::filesystem::path ple_table_path = model_folder / config.model.qwen38_graph.ple_table;

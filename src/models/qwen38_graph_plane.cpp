@@ -319,7 +319,8 @@ void Qwen38Plane::PrepBatched(void* stream, const void* params, int rows, int ba
     throw std::invalid_argument("qwen38_graph: batched prep needs 1.." + std::to_string(QWEN38_PLANE_MAX_PREP_BATCH) +
                                 " slots, got " + std::to_string(batch));
   }
-  RequireCapabilities(QWEN38_PLANE_CAP_BATCHED_PREP, "preparing the inputs of several request slots in one call");
+  RequireCapabilities(QWEN38_PLANE_CAP_BATCHED_PREP | QWEN38_PLANE_CAP_CTX_SLOT_STRIDE,
+                      "preparing the inputs of several request slots in one call");
   if (!prep_batched) {
     throw std::runtime_error("qwen38_graph: the plane library " + library_path +
                              " lacks the qwen38_plane_prep_batched export needed to prepare several request slots");

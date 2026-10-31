@@ -2137,8 +2137,9 @@ QWEN38_PLANE_EXPORT int qwen38_plane_test_stream_capture(void* stream, int begin
 #endif
 }
 
-// The graph inputs of the `rows` rows of one folded verify step for each of `batch` request slots (QWEN38_PLANE_CAP_BATCHED_PREP;
-// the contract is in qwen38_plane_abi.h). Both counts are checked before anything is launched.
+// The graph inputs of the `rows` rows of one folded verify step for each of `batch` request slots
+// (QWEN38_PLANE_CAP_BATCHED_PREP and QWEN38_PLANE_CAP_CTX_SLOT_STRIDE; the contract is in qwen38_plane_abi.h). Both counts are
+// checked before anything is launched.
 extern "C" QWEN38_PLANE_EXPORT int qwen38_plane_prep_batched(void* s, const void* P, int rows, int batch, const void* ctx_in,
                                                              void* ctx_out, void* input_ids, void* position_ids,
                                                              void* committed, void* past_pos, void* ple_out, void* state) {

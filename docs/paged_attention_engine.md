@@ -2343,20 +2343,24 @@ token. The device holds `model.qwen38_graph.max_batch_size` slots (default 1), o
   `prefill.enabled` false or with a dense prefill graph is single-slot); a compact-state target (the exporter's
   `state_update.*` outputs; a ring-bank target with `present_mid*` outputs keeps one bank per row count for the whole batch and
   is single-slot); and a plane library with the `batched_prep` capability (`qwen38_plane_prep_batched`, which takes the row
-  count and the slot count as arguments). The model checks the first two before the plane library is loaded and any weight is
-  uploaded, the plane capability when the library has been loaded and before any weight is uploaded, and the compact-state
+  count and the slot count as arguments) and the `ctx_slot_stride` capability (slot `s` of its `ctx_out` is at word `16 * s`,
+  see the next item). The model checks the first two before the plane library is loaded and any weight is
+  uploaded, the plane capabilities when the library has been loaded and before any weight is uploaded, and the compact-state
   property on the output names of the target graph, which it reads from the model file (`ReadQwen38OnnxOutputNames`: the
   protobuf framing of `ModelProto.graph` and `GraphProto.output`, skipping every initializer) before any weight is uploaded
   too. A model file the reader cannot parse (an ORT-format model, say) is left to the same check on the output names of the
   target session, which runs as soon as that session exists, before the other sessions and any device state are created.
-  Each failure is a `std::runtime_error` that names the setting. A plane library without `batched_prep` still loads packages
-  with one slot.
+  Each failure is a `std::runtime_error` that names the setting. A plane library without `batched_prep` or `ctx_slot_stride`
+  still loads packages with one slot.
 - The fold stack reads the n-gram contexts of the verify rows of every slot from one buffer (`ctx_a`) that
   `com.microsoft::SpeculativePrefixCommit` takes as its `prefixes` input. The op divides the size of the input by the slot count
   and reads slot `s` at `s` times that many words, and the engine binds `batch * 16` words (2 words for each of the 8 rows of the
   largest verify step), so every writer of the buffer puts slot `s` at word `16 * s` (`QWEN38_PLANE_CTX_WORDS_PER_SLOT`)
   whatever the number of verify rows (3 to 8): the resident and the host-staged paths of `qwen38_plane_prep_batched` do, and the
-  words of a slot past its `2 * rows` are left untouched. The one-slot prep writes slot 0 only.
+  words of a slot past its `2 * rows` are left untouched. The one-slot prep writes slot 0 only. A plane library from before
+  this layout wrote slot `s` at word `2 * rows * s` (the same offset only for 8 rows) and does not report `ctx_slot_stride`:
+  the model refuses it for several slots, because the n-gram context a slot commits would otherwise be read from the wrong
+  words with no error.
 - The compact `state_update` replay rewrites the recurrent, convolution and indexer state of a slot in place after a partial
   acceptance. A `CausalConvWithState` state is replayed in either physical layout, `[batch, channels, history]` (what the
   exporter writes) or `[batch, history, channels]`: `ValidateQwen38ReplayDescriptor` takes the channel count from the last
