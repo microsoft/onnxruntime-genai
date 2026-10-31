@@ -6,6 +6,12 @@
 
 namespace Generators::CUDAExecutionProvider {
 
+// Converts one BFC arena provider option (max_mem, arena_extend_strategy, initial_chunk_size_bytes,
+// max_dead_bytes_per_chunk, initial_growth_chunk_size_bytes) to the integer stored in OrtArenaCfg; -1 keeps the ORT default.
+// Only arena_extend_strategy accepts the names kNextPowerOfTwo (0) and kSameAsRequested (1); every other key is a byte
+// count and must be an integer. Throws std::invalid_argument for a non-numeric value and std::out_of_range below -1.
+size_t ParseArenaOptionValue(std::string_view key, const std::string& value);
+
 // Writes the CUDA compute stream pointer (as a stringified integer) into a
 // session config entry keyed by |config_key|. This is used by both the CUDA
 // and NvTensorRtRtx providers so that the EP can share the same stream.
