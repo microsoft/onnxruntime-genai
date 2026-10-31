@@ -22,8 +22,24 @@ namespace Generators {
 // Other fold inputs: fold.ctx_a (prefixes) and fold.ptrs (result ring address, ring size); output fold.tail_done is head_c.
 inline constexpr const char* kQwen38FoldCtl = "fold.ctl";
 inline constexpr const char* kQwen38FoldCtxCommit = "fold.ctx_commit";
+inline constexpr const char* kQwen38FoldCtxA = "fold.ctx_a";
+inline constexpr const char* kQwen38FoldPtrs = "fold.ptrs";
 inline constexpr const char* kQwen38FoldCtlOut = "fold.ctl_out";
 inline constexpr const char* kQwen38FoldCtxCommitOut = "fold.ctx_commit_out";
+
+// Throws std::runtime_error unless `input_name`, an input of the fold model, is one of the four inputs of that node. The
+// engine owns a device buffer for each of them and for nothing else, so a package exported for an earlier contract (the rc3 node
+// also took fold.ctx_b) is refused here, naming the input, instead of failing on a container lookup when the target is built.
+inline void RequireQwen38FoldInput(std::string_view input_name) {
+  if (input_name == kQwen38FoldCtl || input_name == kQwen38FoldCtxCommit || input_name == kQwen38FoldCtxA ||
+      input_name == kQwen38FoldPtrs) {
+    return;
+  }
+  throw std::runtime_error("qwen38_graph: the fold model has the input '" + std::string(input_name) +
+                           "', which is not an input of the SpeculativePrefixCommit contract of ORT #33474 (" + kQwen38FoldCtl +
+                           ", " + kQwen38FoldCtxCommit + ", " + kQwen38FoldCtxA + ", " + kQwen38FoldPtrs +
+                           "); export the model package again for that contract");
+}
 
 // The fold input a state output is bound in place over; nullptr when `output_name` is not a state output.
 inline const char* Qwen38FoldStateInput(std::string_view output_name) {
