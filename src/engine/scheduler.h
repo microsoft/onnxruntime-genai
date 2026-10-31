@@ -18,6 +18,11 @@ namespace Generators {
 
 inline constexpr size_t kDefaultStaticBatchSize = 4;
 
+struct NontransactionalSchedulingResult {
+  StepOutcome outcome;
+  std::optional<ScheduledRequests> scheduled;
+};
+
 struct Scheduler {
   /**
    * @brief Constructs a Scheduler instance with the specified model and cache manager.
@@ -67,6 +72,15 @@ struct Scheduler {
    * and returning any requests that have been scheduled.
    */
   virtual ScheduledRequests Schedule() = 0;
+
+  // Expected capacity and phase deferral use a value, never the fatal exception path.
+  // Existing schedulers retain their Schedule implementation through this adapter.
+  virtual NontransactionalSchedulingResult ScheduleStep() {
+    auto scheduled = Schedule();
+    if (!scheduled)
+      return {{StepOutcomeKind::NoWork, 0, nullptr}, std::nullopt};
+    return {{StepOutcomeKind::Committed, 0, nullptr}, std::move(scheduled)};
+  }
 
   virtual StepPlanningResult PlanStep(StepPlan&) {
     throw std::logic_error("Scheduler does not support transactional step planning.");

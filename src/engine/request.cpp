@@ -1147,6 +1147,9 @@ void Request::CommitStep(const RequestStepPlan& plan,
 void Request::StageVisibleTokens(RequestStepResult& result,
                                  size_t committed_count,
                                  std::optional<int32_t> sampled_token) const {
+  result.tokens_appended = committed_count + static_cast<size_t>(sampled_token.has_value());
+  result.candidates_consumed = result.tokens_appended +
+                               static_cast<size_t>(result.finish_reason == GenerationFinishReason::EosToken);
   if (committed_count + (sampled_token ? 1u : 0u) > result.visible_tokens.size()) {
     throw std::logic_error(
         "A single engine step produced more visible tokens than it can report.");
@@ -1400,10 +1403,12 @@ RequestStepResult Request::CommitExternalTokens(std::span<const int32_t> tokens)
   needs_replay_after_rewind_ = false;
 
   size_t appended_count = 0;
+  size_t consumed_count = 0;
   int32_t last_token = 0;
   GenerationFinishReason finish_reason = GenerationFinishReason::None;
   int32_t matched_stop_string_index = -1;
   for (const int32_t token : tokens) {
+    ++consumed_count;
     last_token = token;
     const int64_t sequence_length_before = CurrentSequenceLength();
     search_->CommitToken(token);
@@ -1453,6 +1458,8 @@ RequestStepResult Request::CommitExternalTokens(std::span<const int32_t> tokens)
       matched_stop_string_index,
   };
   StageVisibleTokens(result, appended_count, std::nullopt);
+  result.candidates_consumed = consumed_count;
+  result.tokens_appended = appended_count;
   return result;
 }
 
