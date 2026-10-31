@@ -15,6 +15,8 @@ namespace fs = std::filesystem;
 #include <dlfcn.h>
 #include <sys/resource.h>
 #include <unistd.h>
+#elif defined(__APPLE__)
+#include <sys/resource.h>
 #endif
 
 namespace engine_benchmark {
@@ -146,12 +148,16 @@ uint64_t ReadDeviceBytes(bool* per_process) {
 }
 
 uint64_t ReadPeakHostBytes() {
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
   rusage usage = {};
   if (getrusage(RUSAGE_SELF, &usage) != 0) {
-    return 0;
+    throw std::runtime_error("getrusage failed while sampling host memory");
   }
+#if defined(__APPLE__)
+  return static_cast<uint64_t>(usage.ru_maxrss);  // ru_maxrss is in bytes on macOS.
+#else
   return static_cast<uint64_t>(usage.ru_maxrss) * 1024;  // ru_maxrss is in kilobytes on Linux.
+#endif
 #else
   return 0;
 #endif
@@ -185,6 +191,14 @@ EngineResources::EngineResources(const ScenarioConfig& config) {
   }
   nlohmann::json model_config;
   config_file >> model_config;
+  model_config.merge_patch(config.model_config);
+  const auto engine_overlay = config.model_config.value("engine", nlohmann::json::object());
+  // Overlay() receives sorted JSON keys, so static_batching takes precedence if both are present.
+  if (engine_overlay.contains("static_batching")) {
+    model_config["engine"].erase("dynamic_batching");
+  } else if (engine_overlay.contains("dynamic_batching")) {
+    model_config["engine"].erase("static_batching");
+  }
   const auto context_length = model_config.at("model").at("context_length").get<int64_t>();
   const auto search = model_config.value("search", nlohmann::json::object());
   const auto configured_max_length = search.value("max_length", int64_t{0});
@@ -199,6 +213,7 @@ EngineResources::EngineResources(const ScenarioConfig& config) {
       !engine_config.contains("static_batching");
 
   oga_config = OgaConfig::Create(resolved_model_path.c_str());
+  oga_config->Overlay(config.model_config.dump().c_str());
   oga_config->ClearProviders();
   oga_config->AppendProvider(config.execution_provider.c_str());
   model = OgaModel::Create(*oga_config);
