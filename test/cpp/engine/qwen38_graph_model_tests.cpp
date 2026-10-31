@@ -816,6 +816,200 @@ TEST(Qwen38MultiSlotConfigTest, AFileThatIsNotAnOnnxProtobufIsLeftToTheCheckAgai
   std::filesystem::remove_all(dir, ec);
 }
 
+namespace {
+
+// Creates the empty files of a package folder, relative to `root`.
+void TouchPackageFiles(const std::filesystem::path& root, const std::vector<std::string>& files) {
+  for (const std::string& file : files) {
+    std::filesystem::create_directories((root / file).parent_path());
+    WriteFile(root / file, "");
+  }
+}
+
+// What the model constructor asks of the package folder: a regular file under the model folder.
+std::function<bool(const std::string&)> FilesOf(const std::filesystem::path& root) {
+  return [root](const std::string& file) {
+    std::error_code error;
+    return std::filesystem::is_regular_file(root / file, error);
+  };
+}
+
+std::string ResolveTarget(const std::filesystem::path& root, const std::string& decoder, const std::string& context_request,
+                          const std::string& mtp_drafts = "") {
+  return ResolveQwen38TargetGraphFilename(decoder, context_request, mtp_drafts, FilesOf(root));
+}
+
+std::string ResolveTargetError(const std::filesystem::path& root, const std::string& decoder, const std::string& context_request) {
+  try {
+    const std::string chosen = ResolveTarget(root, decoder, context_request);
+    ADD_FAILURE() << "'" << chosen << "' was chosen for the tier request '" << context_request << "'";
+  } catch (const std::runtime_error& error) {
+    return error.what();
+  }
+  return {};
+}
+
+void RemoveScratchDir(const std::filesystem::path& dir) {
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+}  // namespace
+
+// The tier graphs of a package whose decoder sits in a sub-folder (target/model.onnx) are its siblings, not files of the model
+// folder. Filesystem only: no GPU, no Windows.
+TEST(Qwen38ContextTierTest, TierGraphsAreResolvedNextToTheConfiguredDecoder) {
+  const auto dir = MakeScratchDir("tier_subfolder");
+  TouchPackageFiles(dir, {"target/model.onnx", "target/model_8k.onnx", "target/model_16k.onnx", "target/model_dynamic_ctx.onnx",
+                          "model_128k.onnx", "a/b/model.onnx", "a/b/model_2k.onnx"});
+
+  EXPECT_EQ(ResolveTarget(dir, "target/model.onnx", "8k"), "target/model_8k.onnx");
+  EXPECT_EQ(ResolveTarget(dir, "target/model.onnx", "8192"), "target/model_8k.onnx");
+  EXPECT_EQ(ResolveTarget(dir, "target/model.onnx", "16K"), "target/model_16k.onnx");
+  EXPECT_EQ(ResolveTarget(dir, "a/b/model.onnx", "2048"), "a/b/model_2k.onnx");
+  // No graph of the tier: the dynamic-context graph next to the decoder. The model_128k.onnx of the model folder is not a sibling.
+  EXPECT_EQ(ResolveTarget(dir, "target/model.onnx", "64k"), "target/model_dynamic_ctx.onnx");
+  EXPECT_EQ(ResolveTarget(dir, "target/model.onnx", "128k"), "target/model_dynamic_ctx.onnx");
+  // A decoder in the model folder keeps resolving there.
+  EXPECT_EQ(ResolveTarget(dir, "model.onnx", "128k"), "model_128k.onnx");
+  // The 32k tier is the package graph.
+  EXPECT_EQ(ResolveTarget(dir, "target/model.onnx", "32k"), "target/model.onnx");
+  EXPECT_EQ(ResolveTarget(dir, "target/model.onnx", "32768"), "target/model.onnx");
+
+  // The callable decides what exists: a graph supplied from memory is as good as a file.
+  const auto from_memory = [](const std::string& file) { return file == "target/model_8k.onnx"; };
+  EXPECT_EQ(ResolveQwen38TargetGraphFilename("target/model.onnx", "8k", "", from_memory), "target/model_8k.onnx");
+  RemoveScratchDir(dir);
+}
+
+// A 32K package need not contain the default graph, and the 32k tier is existence-checked like the others.
+TEST(Qwen38ContextTierTest, TheThirtyTwoKTierFollowsTheFallbackChainOfTheOtherTiers) {
+  for (const std::string& folder : {std::string{}, std::string{"target/"}}) {
+    SCOPED_TRACE("folder '" + folder + "'");
+    const std::string decoder = folder + "model.onnx";
+    const auto dir = MakeScratchDir("tier_32k");
+
+    // Only model_32k.onnx.
+    TouchPackageFiles(dir, {folder + "model_32k.onnx"});
+    EXPECT_EQ(ResolveTarget(dir, decoder, "32k"), folder + "model_32k.onnx");
+    EXPECT_EQ(ResolveTarget(dir, decoder, "32768"), folder + "model_32k.onnx");
+    EXPECT_EQ(ResolveTarget(dir, decoder, "32K"), folder + "model_32k.onnx");
+
+    // Only model_dynamic_ctx.onnx.
+    RemoveScratchDir(dir);
+    std::filesystem::create_directories(dir);
+    TouchPackageFiles(dir, {folder + "model_dynamic_ctx.onnx"});
+    EXPECT_EQ(ResolveTarget(dir, decoder, "32k"), folder + "model_dynamic_ctx.onnx");
+    EXPECT_EQ(ResolveTarget(dir, decoder, "8k"), folder + "model_dynamic_ctx.onnx");
+
+    // The package graph is the 32K one, so it is preferred to the dynamic-context graph, but not to an explicit model_32k.onnx.
+    TouchPackageFiles(dir, {decoder});
+    EXPECT_EQ(ResolveTarget(dir, decoder, "32k"), decoder);
+    EXPECT_EQ(ResolveTarget(dir, decoder, "8k"), folder + "model_dynamic_ctx.onnx");
+    TouchPackageFiles(dir, {folder + "model_32k.onnx"});
+    EXPECT_EQ(ResolveTarget(dir, decoder, "32k"), folder + "model_32k.onnx");
+
+    // Only the decoder: the other tiers fall back to it as they always did.
+    RemoveScratchDir(dir);
+    std::filesystem::create_directories(dir);
+    TouchPackageFiles(dir, {decoder});
+    EXPECT_EQ(ResolveTarget(dir, decoder, "32k"), decoder);
+    EXPECT_EQ(ResolveTarget(dir, decoder, "64k"), decoder);
+    RemoveScratchDir(dir);
+  }
+}
+
+TEST(Qwen38ContextTierTest, ARequestThatMatchesNoGraphIsAClearErrorNamingEveryTriedPath) {
+  const auto dir = MakeScratchDir("tier_missing");
+  TouchPackageFiles(dir, {"unrelated.onnx", "model_8k.onnx"});  // not next to target/model.onnx
+
+  const std::string tier_8k = ResolveTargetError(dir, "target/model.onnx", "8k");
+  for (const char* needle : {"ORT_QWEN38_CONTEXT_LENGTH=8k", "'target/model_8k.onnx'", "'target/model_dynamic_ctx.onnx'", "'target/model.onnx'"}) {
+    EXPECT_NE(tier_8k.find(needle), std::string::npos) << needle << " in: " << tier_8k;
+  }
+  EXPECT_EQ(tier_8k.find("'model_8k.onnx'"), std::string::npos) << tier_8k;
+
+  const std::string tier_32k = ResolveTargetError(dir, "model.onnx", "32768");
+  for (const char* needle : {"ORT_QWEN38_CONTEXT_LENGTH=32768", "'32k'", "'model_32k.onnx'", "'model.onnx'", "'model_dynamic_ctx.onnx'"}) {
+    EXPECT_NE(tier_32k.find(needle), std::string::npos) << needle << " in: " << tier_32k;
+  }
+  RemoveScratchDir(dir);
+}
+
+// Without a context request the decoder is the configured one: no file is looked up, so a missing decoder is still reported by
+// the session creation, and an empty request is no request.
+TEST(Qwen38ContextTierTest, WithoutARequestTheDecoderIsKeptAsConfigured) {
+  std::vector<std::string> looked_up;
+  const auto exists = [&looked_up](const std::string& file) {
+    looked_up.push_back(file);
+    return false;
+  };
+  for (const char* drafts : {"", "0", "4", "-1", "x"}) {
+    EXPECT_EQ(ResolveQwen38TargetGraphFilename("target/model.onnx", "", drafts, exists), "target/model.onnx") << drafts;
+    EXPECT_EQ(ResolveQwen38TargetGraphFilename("model.onnx", "", drafts, exists), "model.onnx") << drafts;
+  }
+  EXPECT_TRUE(looked_up.empty());
+}
+
+TEST(Qwen38ContextTierTest, TheMtpDraftsHookPicksTheGraphOfThatWidthNextToTheDecoderOrUnderTarget) {
+  const auto dir = MakeScratchDir("tier_drafts");
+  TouchPackageFiles(dir, {"model.onnx", "model_s3.onnx", "target/model_s3.onnx", "target/model_s2.onnx", "target/model.onnx",
+                          "target/model_s4.onnx", "model_8k.onnx"});
+  EXPECT_EQ(ResolveTarget(dir, "model.onnx", "", "2"), "model_s3.onnx");
+  EXPECT_EQ(ResolveTarget(dir, "model.onnx", "", "1"), "target/model_s2.onnx");  // no model_s2.onnx next to the decoder
+  EXPECT_EQ(ResolveTarget(dir, "model.onnx", "", "3"), "target/model_s4.onnx");
+  EXPECT_EQ(ResolveTarget(dir, "target/model.onnx", "", "2"), "target/model_s3.onnx");
+  // No graph of that width: the decoder.
+  std::filesystem::remove(dir / "target/model_s4.onnx");
+  EXPECT_EQ(ResolveTarget(dir, "model.onnx", "", "3"), "model.onnx");
+  EXPECT_EQ(ResolveTarget(dir, "target/model.onnx", "", "3"), "target/model.onnx");
+  // A context request takes precedence over the hook.
+  EXPECT_EQ(ResolveTarget(dir, "model.onnx", "8k", "2"), "model_8k.onnx");
+  EXPECT_EQ(ResolveTarget(dir, "model.onnx", "", "2"), "model_s3.onnx");
+  RemoveScratchDir(dir);
+}
+
+TEST(Qwen38ContextTierTest, ARequestIsLowerCasedAndTheTierCountsFoldToTheirNames) {
+  EXPECT_EQ(NormalizeQwen38ContextTier(""), "");
+  const std::vector<std::pair<std::string, std::string>> tiers = {
+      {"2k", "2k"}, {"8K", "8k"}, {"128K", "128k"}, {"2048", "2k"}, {"8192", "8k"}, {"16384", "16k"}, {"32768", "32k"}, {"65536", "64k"}, {"131072", "128k"}, {"4096", "4096"}, {"Dynamic", "dynamic"}};
+  for (const auto& [request, tier] : tiers) EXPECT_EQ(NormalizeQwen38ContextTier(request), tier) << request;
+
+  // A tier becomes part of a file name: nothing that could leave the folder or name another file is accepted.
+  for (const char* request : {"../8k", "8 k", "8k\n", "model_8k.onnx", "8k/", "8k\\", "k\xc3\xa9"}) {
+    EXPECT_THROW(NormalizeQwen38ContextTier(request), std::invalid_argument) << request;
+  }
+  bool looked_up = false;
+  const auto exists = [&looked_up](const std::string&) {
+    looked_up = true;
+    return true;
+  };
+  EXPECT_THROW(ResolveQwen38TargetGraphFilename("model.onnx", "../8k", "", exists), std::invalid_argument);
+  EXPECT_FALSE(looked_up);
+}
+
+// The pre-upload reader of the output names must see the graph that CreateSession opens: the constructor resolves the file once
+// and hands the one name to both.
+TEST(Qwen38ContextTierTest, TheOutputNamesAreReadFromTheGraphThatTheTierSelects) {
+  const auto dir = MakeScratchDir("tier_reader");
+  const std::vector<std::string> compact = {"logits", "next_tokens", "present.0.key", "state_update.1.conv_value"};
+  const std::vector<std::string> ring = {"logits", "next_tokens", "present.0.key", "present_mid.0.key"};
+  std::filesystem::create_directories(dir / "target");
+  WriteFile(dir / "target/model.onnx", OnnxModelBytes(ring, 64));
+  WriteFile(dir / "target/model_8k.onnx", OnnxModelBytes(compact, 64));
+
+  const std::string decoder = ResolveTarget(dir, "target/model.onnx", "");
+  EXPECT_EQ(decoder, "target/model.onnx");
+  EXPECT_THROW(ValidateQwen38TargetModelFile(2, dir / decoder), std::runtime_error);  // a ring-bank graph cannot serve 2 slots
+
+  const std::string tier = ResolveTarget(dir, "target/model.onnx", "8k");
+  EXPECT_EQ(tier, "target/model_8k.onnx");
+  EXPECT_NO_THROW(ValidateQwen38TargetModelFile(2, dir / tier));
+  ASSERT_TRUE(ReadQwen38OnnxOutputNames(dir / tier).has_value());
+  EXPECT_EQ(*ReadQwen38OnnxOutputNames(dir / tier), compact);
+  RemoveScratchDir(dir);
+}
+
 // The DFlash drafter's prompt-feature buffer gives every slot Qwen38DflashPromptSlotRows rows. The warm-up of the drafter views
 // verify_rows rows of every slot from it, so a prefill.chunk below the verify width (chunk 4 against S=8) must not shrink it.
 TEST(Qwen38DflashPromptBufferTest, EverySlotOwnsAtLeastAChunkAndTheVerifyWidthOfRows) {

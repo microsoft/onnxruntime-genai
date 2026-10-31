@@ -132,6 +132,27 @@ std::optional<std::vector<std::string>> ReadQwen38OnnxOutputNames(const std::fil
 // file whose outputs cannot be read is accepted here and left to the check against the session.
 void ValidateQwen38TargetModelFile(size_t request_slots, const std::filesystem::path& model_file);
 
+// The context tier an ORT_QWEN38_CONTEXT_LENGTH request names ("2k", "8k", "16k", "32k", "64k", "128k" or a token count): the
+// request lower-cased, with the counts 2048, 8192, 16384, 32768, 65536 and 131072 folded to the tier of that size. Empty when
+// nothing is requested. Throws std::invalid_argument for a value that cannot be part of a graph's file name (anything but
+// letters and digits).
+std::string NormalizeQwen38ContextTier(const std::string& request);
+
+// Chooses the target graph of a package once, as a file name relative to the model folder. The model constructor hands the
+// result to the pre-upload reader of the graph's output names (ValidateQwen38TargetModelFile) and to CreateSession, so both
+// inspect the same file. `exists` tells whether a folder-relative file can be loaded (a file of the package, or a graph supplied
+// from memory). Every candidate lies next to the decoder (model.decoder.filename, which may sit in a sub-folder such as target/):
+//  - `context_request` (ORT_QWEN38_CONTEXT_LENGTH, see NormalizeQwen38ContextTier) takes model_<tier>.onnx, else
+//    model_dynamic_ctx.onnx, else the decoder itself. The graph of a package is the 32K one, so the 32k tier tries
+//    model_32k.onnx, then the decoder, then model_dynamic_ctx.onnx. The first candidate that exists wins; when none does, a
+//    std::runtime_error names every path that was tried.
+//  - Without a context request, `mtp_drafts` (ORT_QWEN38_MTP_DRAFTS, 1..3) takes model_s<drafts + 1>.onnx next to the decoder,
+//    else under target/, else the decoder.
+// With neither, the decoder is returned as configured and nothing is looked up.
+std::string ResolveQwen38TargetGraphFilename(const std::string& decoder_filename, const std::string& context_request,
+                                             const std::string& mtp_drafts,
+                                             const std::function<bool(const std::string&)>& exists);
+
 // Checks a model package against the plane library it names, when the model is loaded, before its weights are uploaded and
 // before any session is created: an INT8 PLE table (model.qwen38_graph.ple_table with a negative scale) needs the int8_ple
 // plane capability, an INT8 embedding table (<model.embedding.filename>.data of vocab_size x hidden_size INT8 rows and
