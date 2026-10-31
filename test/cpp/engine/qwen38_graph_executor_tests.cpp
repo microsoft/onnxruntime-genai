@@ -1514,6 +1514,25 @@ TEST_F(Qwen38GraphEngineTest, MaxRequestLengthIsTheSmallerOfTheModelContextLengt
   EXPECT_EQ(MakeEngine()->GetCapabilities().max_request_length, static_cast<uint64_t>(kv_limit));
 }
 
+// A verify step of several rows keeps a longer tail of the store free than the default one, and a store no longer than that
+// tail holds no request at all: the session reports 0 and not a length that wrapped around from the negative difference.
+TEST_F(Qwen38GraphEngineTest, TheLongestRequestFollowsTheTailTheDeviceKeepsFree) {
+  const auto longest = [](const std::shared_ptr<ScriptedQwen38Device>& device) {
+    return Qwen38GraphSession{device, Qwen38GraphSession::Options{}}.MaxRequestLength();
+  };
+  EXPECT_EQ(longest(device_), 64u);  // capacity 68, the default tail of 4
+  device_->reserved_tail = 8;        // a verify step of 8 rows
+  EXPECT_EQ(longest(device_), 60u);
+
+  const auto small = std::make_shared<ScriptedQwen38Device>(6);
+  small->reserved_tail = 5;
+  EXPECT_EQ(longest(small), 1u);
+  small->reserved_tail = 6;
+  EXPECT_EQ(longest(small), 0u);
+  small->reserved_tail = 8;
+  EXPECT_EQ(longest(small), 0u) << "the store is shorter than the tail";
+}
+
 TEST_F(Qwen38GraphEngineTest, UnsupportedTurnOptionsAreRejectedBeforeTheRequestChanges) {
   auto engine = MakeEngine();
   auto request = engine->CreateRequest();

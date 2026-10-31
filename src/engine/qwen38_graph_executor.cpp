@@ -37,7 +37,7 @@ Qwen38GraphSession::~Qwen38GraphSession() {
 }
 
 size_t Qwen38GraphSession::MaxRequestLength() const {
-  return static_cast<size_t>(device_->Capacity() - device_->ReservedTail());
+  return device_->MaxSequenceLength();
 }
 
 void Qwen38GraphSession::Poison() noexcept {

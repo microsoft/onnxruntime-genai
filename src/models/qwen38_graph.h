@@ -156,6 +156,16 @@ struct Qwen38DflashWarmupPlan {
 };
 Qwen38DflashWarmupPlan PlanQwen38DflashWarmup(bool warmup, int verify_rows, int num_banks) noexcept;
 
+// The rows of target features the engine hands the DFlash drafter (the auxiliary hidden states of the target, five layers of
+// 2560 values) are this many bfloat16 values wide.
+inline constexpr size_t kQwen38DflashFeatureWidth = 12800;
+
+// Dflash2Drafter::Propose reads the packed features with the stride of its own aux_hidden_states input and does not check it
+// against the tensor it is given, so a drafter that declares another width or element type than the engine writes would read
+// outside every row of the feature buffer. Throws std::runtime_error naming both layouts unless the drafter's input is
+// [rows, kQwen38DflashFeatureWidth] of bfloat16.
+void ValidateQwen38DflashFeatureLayout(size_t aux_width, ONNXTensorElementDataType aux_type);
+
 // The packed QSA indexer pools kQwen38IndexKeyRatio tokens into one compressed index key.
 inline constexpr int kQwen38IndexKeyRatio = 4;
 
@@ -503,7 +513,7 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   std::unique_ptr<Dflash2Drafter> dflash_;
   PlaneBuffer d_dflash_prompt_;
   Qwen38DflashPromptFeatures dflash_prompt_;  // which prompt chunks the drafter ingests; its window is set with dflash_
-  static constexpr size_t kDflashWidth = 12800;
+  static constexpr size_t kDflashWidth = kQwen38DflashFeatureWidth;
 
   // host state
   Qwen38DecodeLedger ledger_;
