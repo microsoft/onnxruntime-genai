@@ -11,6 +11,7 @@
 #include "qwen38_replay_geometry.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -172,8 +173,9 @@ class ProtoFieldReader {
 
 }  // namespace
 
-void ValidateQwen38CacheShapes(const std::vector<Qwen38CacheInput>& inputs, int kv_capacity, const std::string& graph) {
-  const auto fail = [&](const Qwen38CacheInput& input, const char* requirement) {
+void ValidateQwen38CacheShapes(const std::vector<Qwen38CacheInput>& inputs, int kv_capacity, const std::string& graph,
+                               size_t request_slots) {
+  const auto fail = [&](const Qwen38CacheInput& input, const std::string& requirement) {
     std::ostringstream message;
     message << "qwen38_graph: model.qwen38_graph.kv_capacity (" << kv_capacity << ") does not match the " << graph
             << " input \"" << input.name << "\", declared as [";
@@ -189,6 +191,11 @@ void ValidateQwen38CacheShapes(const std::vector<Qwen38CacheInput>& inputs, int 
     if (input.name == "past_position_ids") {
       if (shape.size() != 2) fail(input, "expected [batch, kv_capacity]");
       if (shape[1] < kv_capacity) fail(input, "dimension 1 must be static and at least kv_capacity");
+      // The plane fills the position ids of slot b at b * kv_capacity, ORT reads them at b * dimension 1.
+      if (request_slots > 1 && shape[1] != kv_capacity) {
+        fail(input, "with " + std::to_string(request_slots) +
+                        " request slots dimension 1 must be exactly kv_capacity: the slots' rows lie kv_capacity apart");
+      }
     } else if (is_cache && (tail == "key" || tail == "value")) {
       if (shape.size() != 4) fail(input, "expected [batch, 2, kv_capacity, 256]");
       if (shape[1] != 2 || shape[3] != 256) fail(input, "the hand-off copies 2 KV heads of 256 channels");
@@ -227,9 +234,17 @@ size_t ResolveQwen38MaxBatchSize(const Config& config) {
   if (config.search.batch_size > 1) {
     return checked(config.search.batch_size, "search.batch_size");
   }
-  if (const char* env = std::getenv("ORT_QWEN38_MAX_BATCH_SIZE")) {
-    const int parsed = std::atoi(env);
-    if (parsed > 1) return checked(parsed, "ORT_QWEN38_MAX_BATCH_SIZE");
+  // The test hook is read as strictly as the settings above: a value that is not an integer in range is refused, not mapped
+  // to one slot (an empty value counts as unset).
+  if (const char* env = std::getenv("ORT_QWEN38_MAX_BATCH_SIZE"); env != nullptr && *env != '\0') {
+    char* end = nullptr;
+    errno = 0;
+    const long long parsed = std::strtoll(env, &end, 10);
+    if (end == env || *end != '\0' || errno == ERANGE) {
+      throw std::out_of_range(std::string("ORT_QWEN38_MAX_BATCH_SIZE must be an integer in [1, ") + std::to_string(kMaxSlots) +
+                              "] for qwen38_flash_graph, got \"" + env + "\"");
+    }
+    return checked(parsed, "ORT_QWEN38_MAX_BATCH_SIZE");
   }
   return 1;
 }
@@ -277,6 +292,16 @@ void ValidateQwen38BatchedTargetOutputs(size_t request_slots, const std::vector<
   if (!compact_state) {
     throw std::runtime_error(needs + "the target graph has none. Set max_batch_size to 1 or export the target with compact state updates.");
   }
+}
+
+void ValidateQwen38BatchedVerifyRows(size_t request_slots, int verify_rows) {
+  if (request_slots <= 1 || verify_rows > 2) return;
+  throw std::runtime_error("qwen38_flash_graph: " + std::to_string(request_slots) +
+                           " request slots need a target graph that verifies at least 3 rows per step, but this one verifies " +
+                           std::to_string(verify_rows) +
+                           ": the batched fold inputs of a 2-row target keep the single-slot control and context sizes (8 and 2 "
+                           "words), while the plane prepares 16 control words and 2 * rows context words per slot. Set "
+                           "max_batch_size to 1 or export the target with at least 2 draft tokens.");
 }
 
 std::optional<std::vector<std::string>> ReadQwen38OnnxOutputNames(const std::filesystem::path& model_file) {
@@ -437,7 +462,8 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
   if (fold_ && !mtp_enabled_) throw std::runtime_error("qwen38_graph: the fold stack requires model.qwen38_graph.mtp.enabled");
   // The strides of the hand-off and of the head KV prefill come from kv_capacity: reject graphs exported for another
   // capacity before any cache buffer is allocated.
-  ValidateQwen38CacheShapes(CacheInputsOf(model_.session_info_, "past_key_values.", true), capacity_, "target");
+  ValidateQwen38CacheShapes(CacheInputsOf(model_.session_info_, "past_key_values.", true), capacity_, "target",
+                            static_cast<size_t>(max_batch_));
   if (fold_) {
     ValidateQwen38CacheShapes(CacheInputsOf(model_.session_info_, "head.past_key_values.", false), capacity_,
                               "fold head");
@@ -452,9 +478,9 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
   stage_host_ = stage_.data();
 
   // control block (the fold model binds it as input, so it exists before the target bindings)
-  // Allocated with 16 int64 words per slot: the fold model reads the verify tokens from them, [0] the pending token, [2] draft_0
-  // and [8] .. [13] draft_1 .. draft_6 for the S=3 .. S=8 multi-draft verify.
-  ctl_ = PlaneBuffer(plane_, static_cast<size_t>(max_batch_) * 16 * sizeof(int64_t), stream_);
+  // Allocated with kCtlWordsPerSlot (16) int64 words per slot: the fold model reads the verify tokens from them, [0] the pending
+  // token, [2] draft_0 and [8] .. [13] draft_1 .. draft_6 for the S=3 .. S=8 multi-draft verify.
+  ctl_ = PlaneBuffer(plane_, static_cast<size_t>(max_batch_) * kCtlWordsPerSlot * sizeof(int64_t), stream_);
   ctx_commit_ = PlaneBuffer(plane_, static_cast<size_t>(max_batch_) * 2 * sizeof(int64_t), stream_);
   // Per slot, ctx_a_ holds kMaxVerifyRows contiguous 2-int64 row contexts (rows 0 .. 7); ctx_b_ is row 1's buffer (also aliased
   // at ctx_a_ + 16 bytes).
@@ -611,6 +637,9 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
         }
         if (fold_ && max_batch_ > 1) {
           // The batched graphs are captured after the arenas ORT shrinks once the prompt state has moved to the decode graphs.
+          // Each (batch size, bank) graph is run as often as a single-slot graph, enough for ORT to capture it and replay it:
+          // one run would leave the capture to the first live cycle that reaches it.
+          const int runs_per_graph = Qwen38WarmupRuns(IsGraphCaptureEnabled(model_.config_->model.decoder.session_options));
           FastHandoff();
           for (int B = 2; B <= max_batch_; ++B) {
             for (int s = 0; s < B; ++s) {
@@ -618,13 +647,15 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
             }
             PrepBatch(B);
             for (int k = 0; k < num_banks_; ++k) {
-              plane_.Check(plane_.device_memset(banks_[k].arena.data(), 0, banks_[k].arena.size(), stream_),
-                           "clear warmup bank");
-              SyncStream();
               Direction& d = batch_dirs_[B - 1][k];
-              RunSession(*model_.session_target_, d.run_options.get(), *d.binding, nullptr,
-                         Qwen38FirstSlots(static_cast<size_t>(B)));
-              SyncStream();
+              for (int run = 0; run < runs_per_graph; ++run) {
+                plane_.Check(plane_.device_memset(banks_[k].arena.data(), 0, banks_[k].arena.size(), stream_),
+                             "clear warmup bank");
+                SyncStream();
+                RunSession(*model_.session_target_, d.run_options.get(), *d.binding, nullptr,
+                           Qwen38FirstSlots(static_cast<size_t>(B)));
+                SyncStream();
+              }
             }
           }
           Reset();
@@ -828,6 +859,7 @@ void Qwen38GraphEngine::BuildTarget() {
     ledger_.SetNumBanks(num_banks_);
     for (auto& sl : slot_ledgers_) sl.SetNumBanks(num_banks_);
   }
+  ValidateQwen38BatchedVerifyRows(static_cast<size_t>(max_batch_), verify_rows_);
   // A verify step writes verify_rows_ rows past the committed length, so a store no longer than ReservedTail() could not hold
   // even an empty request: model.qwen38_graph.kv_capacity is validated against the smallest tail (kReservedTail) only.
   if (capacity_ <= ReservedTail())
@@ -1269,12 +1301,14 @@ void Qwen38GraphEngine::BuildTarget() {
                            in_bank.tensors[name]->type);
               break;
             case Kind::kFold:
+              // The slots lie kCtlWordsPerSlot and 2 * verify_rows_ words apart, as the plane prepares them
+              // (ValidateQwen38BatchedVerifyRows keeps verify_rows_ above 2 for every batch).
               if (name == "fold.ctl")
-                t = add_view(name, ctl_.data(), {B * (verify_rows_ > 2 ? 16 : 8)}, i64);
+                t = add_view(name, ctl_.data(), {static_cast<int64_t>(B) * static_cast<int64_t>(kCtlWordsPerSlot)}, i64);
               else if (name == "fold.ctx_commit")
                 t = add_view(name, ctx_commit_.data(), {B * 2}, i64);
               else if (name == "fold.ctx_a")
-                t = add_view(name, ctx_a_.data(), {B * (verify_rows_ > 2 ? 2 * verify_rows_ : 2)}, i64);
+                t = add_view(name, ctx_a_.data(), {B * 2 * verify_rows_}, i64);
               else
                 t = fold_tensors_.at(name).get();
               break;
@@ -1543,7 +1577,7 @@ void Qwen38GraphEngine::ResetSlot(size_t slot_idx) {
     const size_t sb = shared_slot_bytes_.at(name);
     plane_.Check(plane_.device_memset(t->ptr + static_cast<size_t>(s) * sb, 0, sb, stream_), "clear slot shared");
   }
-  plane_.Check(plane_.device_memset(ctl_slot(s), 0, 16 * sizeof(int64_t), stream_), "clear slot ctl");
+  plane_.Check(plane_.device_memset(ctl_slot(s), 0, kCtlWordsPerSlot * sizeof(int64_t), stream_), "clear slot ctl");
   std::memset(result_ring_slot(s), 0, kRing * 8 * sizeof(int64_t));
   stage_host_[0] = stage_host_[1] = ple_->params.eos;
   plane_.Check(plane_.memcpy_h2d(ctx_commit_slot(s), stage_host_, 16, stream_), "slot ctx init");
@@ -2477,7 +2511,7 @@ void Qwen38GraphEngine::Warmup() {
       Reset();
     }
   }
-  const int runs_per_phase = target_captures_graph ? kQwen38WarmupRunsPerGraph : 1;
+  const int runs_per_phase = Qwen38WarmupRuns(target_captures_graph);
   int dummy_tok = 1000;
   for (int run = 0; run < runs_per_phase; ++run) {
     for (int phase = 0; phase < num_banks_; ++phase) {
@@ -2494,7 +2528,7 @@ void Qwen38GraphEngine::Warmup() {
     const auto& q = model_.config_->model.qwen38_graph;
     const bool head_captures_graph =
         Qwen38HeadR2CapturesGraph(model_.config_->model.decoder.session_options, q.fold.head_r2.session_options);
-    const int runs_per_head_phase = head_captures_graph ? kQwen38WarmupRunsPerGraph : 1;
+    const int runs_per_head_phase = Qwen38WarmupRuns(head_captures_graph);
     ClearHead();
     SyncStream();
     int head_dummy_tok = 1000;

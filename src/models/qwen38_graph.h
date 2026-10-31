@@ -120,6 +120,7 @@ bool Qwen38HeadR2CapturesGraph(const Config::SessionOptions& decoder, const std:
 // model.qwen38_graph.max_batch_size, else search.batch_size, else the ORT_QWEN38_MAX_BATCH_SIZE test hook (the first of them
 // that is set, or that asks for more than one slot, where 1 is the default); 1 when none is. Throws std::out_of_range naming the
 // setting unless the value lies in [1, Config::Model::Qwen38Graph::kMaxBatchSize]: the device never clamps a request silently.
+// The test hook is held to the same rule: text that is not an integer ("4x", "abc") is refused too, only an empty value is unset.
 size_t ResolveQwen38MaxBatchSize(const Config& config);
 
 // True when prefill.enabled names a dense prefill graph other than the decoder (model.qwen38_graph.prefill.dense.filename):
@@ -139,6 +140,13 @@ void ValidateQwen38MultiSlotConfig(const Config& config);
 // from the model file before any weight is uploaded (ValidateQwen38TargetModelFile), and, authoritatively, on the outputs of
 // the target session as soon as that exists, before the other sessions are created and any device state is allocated.
 void ValidateQwen38BatchedTargetOutputs(size_t request_slots, const std::vector<std::string>& output_names);
+
+// Throws a std::runtime_error when `request_slots` slots are asked of a target that verifies only `verify_rows` <= 2 rows per
+// step. The engine sizes the batched fold.ctl / fold.ctx_a inputs of such a target like the single-slot ones (8 and 2 words
+// per slot), but the plane prepares the slots 16 control words and 2 * rows context words apart: from the second slot on the
+// graph would read the control words of another slot. A single slot has no restriction. The engine constructor runs it once
+// the verify width is known, the only place the exported state_update.* shapes are read.
+void ValidateQwen38BatchedVerifyRows(size_t request_slots, int verify_rows);
 
 // The names of the outputs of the graph of the ONNX model file `model_file`, in order, read from its protobuf encoding
 // (ModelProto.graph, GraphProto.output, ValueInfoProto.name) without reading a single initializer, so that they are known
@@ -186,6 +194,13 @@ int Qwen38GraphAnnotationId(Qwen38GraphRun run, int rows, int phase, int batch =
 
 // ORT captures a graph after a few eager runs of it: the warm-up of a graph runs it this many times, to be safe.
 inline constexpr int kQwen38WarmupRunsPerGraph = 6;
+
+// The runs the warm-up gives one graph of a session: kQwen38WarmupRunsPerGraph when the session captures CUDA graphs (a single
+// run never captures a graph, so the capture would land in the first live request that reaches it), else one, which still pays
+// the first-use costs of the graph.
+inline constexpr int Qwen38WarmupRuns(bool session_captures_graph) noexcept {
+  return session_captures_graph ? kQwen38WarmupRunsPerGraph : 1;
+}
 
 // What the DFlash engine runs while its model is created. model.qwen38_graph.warmup=false opts out of all of it, as for the
 // other paths: no forward, hence no CUDA graph captured and no startup cost, for the drafter or for the target. With
@@ -255,8 +270,11 @@ struct Qwen38CacheInput {
 //   past_position_ids                                                [batch, >= kv_capacity]
 //   past_key_values.<n>.index_key                                    [batch, >= kv_capacity / ratio, 128]
 // where ratio is kQwen38IndexKeyRatio. Other inputs (recurrent state, index buffers, ...) do not depend on the
-// capacity and are ignored.
-void ValidateQwen38CacheShapes(const std::vector<Qwen38CacheInput>& inputs, int kv_capacity, const std::string& graph);
+// capacity and are ignored. With more than one request slot the position ids of the slots are kv_capacity apart in the
+// buffer the plane fills, so past_position_ids must then be exactly [batch, kv_capacity]: a longer row would be read at the
+// wrong offset for every slot but the first, without any error.
+void ValidateQwen38CacheShapes(const std::vector<Qwen38CacheInput>& inputs, int kv_capacity, const std::string& graph,
+                               size_t request_slots = 1);
 
 // Constants of the PackedQSAIndexer state conversion (key-norm weights, leading-RoPE tables) for the dense -> packed hand-off.
 struct Qwen38QsaConstants {
@@ -417,7 +435,9 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
 
  private:
   static constexpr int kMaxBatch = Config::Model::Qwen38Graph::kMaxBatchSize;
-
+  // The int64 control words of one request slot in ctl_ (the `state` of the plane's prep): the slots lie this far apart for
+  // the plane, for the batched fold.ctl views and for every host access.
+  static constexpr size_t kCtlWordsPerSlot = QWEN38_PLANE_CTL_WORDS_PER_SLOT;
   struct Bank {
     PlaneBuffer arena;
     std::map<std::string, std::unique_ptr<DevTensor>> tensors;  // keyed by input name (past_key_values.*)
@@ -508,7 +528,7 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   void WriteCtlSlot(int slot, int first, std::span<const int64_t> values);
   void SyncStream();
 
-  uint8_t* ctl_slot(int slot) const { return ctl_.data() + static_cast<size_t>(slot) * 16 * sizeof(int64_t); }
+  uint8_t* ctl_slot(int slot) const { return ctl_.data() + static_cast<size_t>(slot) * kCtlWordsPerSlot * sizeof(int64_t); }
   uint8_t* ctx_commit_slot(int slot) const { return ctx_commit_.data() + static_cast<size_t>(slot) * 2 * sizeof(int64_t); }
   uint8_t* ctx_a_slot(int slot) const { return ctx_a_.data() + static_cast<size_t>(slot) * kMaxVerifyRows * 2 * sizeof(int64_t); }
   uint8_t* ctx_b_slot(int slot) const { return ctx_b_.data() + static_cast<size_t>(slot) * 2 * sizeof(int64_t); }
@@ -552,6 +572,8 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
                 "every (row count, ring phase, request slots) of the decode graphs needs a CUDA graph id");
   static_assert(kMaxBatch <= QWEN38_PLANE_MAX_PREP_BATCH && kMaxVerifyRows <= QWEN38_PLANE_MAX_PREP_ROWS,
                 "the plane prepares every slot and row of a step in one call");
+  static_assert(static_cast<size_t>(kMaxBatch) <= Qwen38OrtRunHints::kMaxSlots,
+                "every request slot needs a bit in the slot mask of a Run");
   static constexpr int kRing = 64;
   static constexpr int kArgmaxBlocks = 16;
 

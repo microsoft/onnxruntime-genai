@@ -104,6 +104,9 @@ Qwen38SlotMask Qwen38SlotMaskOf(const Slots& slots) noexcept {
 // a single-slot engine.
 class Qwen38OrtRunHints {
  public:
+  // The most slots one engine can have: the width of the Qwen38SlotMask of a Run.
+  static constexpr size_t kMaxSlots = 8;
+
   explicit Qwen38OrtRunHints(size_t slot_count = 1) { SetSlotCount(slot_count); }
 
   // The engine has `slot_count` slots (at least one); the turn state of the ones that exist is kept.
@@ -170,8 +173,6 @@ class Qwen38OrtRunHints {
   void RunReturned(const Qwen38OrtEnvScope& scope, Qwen38SlotMask participants = Qwen38SlotBit(0));
 
  private:
-  static constexpr size_t kMaxSlots = 8;
-
   struct SlotHints {
     bool new_turn{};
     bool handoff_done{};

@@ -639,6 +639,41 @@ TEST(Qwen38GraphConfigTest, TheSlotCountIsResolvedFromItsSettingsAndNeverClamped
   EXPECT_THROW(ResolveQwen38MaxBatchSize(search), std::out_of_range);
 }
 
+// ORT_QWEN38_MAX_BATCH_SIZE, the last source of the slot count, is read as strictly as the settings: text that is not an
+// integer, zero, a negative or an out-of-range value used to map to one slot silently.
+TEST(Qwen38GraphConfigTest, TheSlotCountTestHookIsParsedStrictly) {
+  ScopedEnvironmentVariable hook{"ORT_QWEN38_MAX_BATCH_SIZE", std::nullopt};
+  EXPECT_EQ(ResolveQwen38MaxBatchSize(Config{}), 1u);
+  hook.Set("");  // an empty value is an unset one
+  EXPECT_EQ(ResolveQwen38MaxBatchSize(Config{}), 1u);
+  struct Accepted {
+    const char* text;
+    size_t slots;
+  };
+  for (const Accepted& accepted : {Accepted{"1", 1}, Accepted{"5", 5}, Accepted{"8", 8}}) {
+    hook.Set(std::string{accepted.text});
+    EXPECT_EQ(ResolveQwen38MaxBatchSize(Config{}), accepted.slots) << accepted.text;
+  }
+
+  for (const char* value : {"abc", "4x", "4 ", " ", "0x4", "0", "-3", "9", "99999999999", "99999999999999999999999"}) {
+    hook.Set(std::string{value});
+    try {
+      ResolveQwen38MaxBatchSize(Config{});
+      ADD_FAILURE() << "ORT_QWEN38_MAX_BATCH_SIZE=\"" << value << "\" was resolved";
+    } catch (const std::out_of_range& error) {
+      const std::string message = error.what();
+      EXPECT_NE(message.find("ORT_QWEN38_MAX_BATCH_SIZE"), std::string::npos) << message;
+      EXPECT_NE(message.find("[1, 8]"), std::string::npos) << message;
+    }
+  }
+
+  // The hook is the last source: a setting that is present wins over it, valid or not.
+  Config configured;
+  configured.model.qwen38_graph.max_batch_size = 3;
+  hook.Set(std::string{"abc"});
+  EXPECT_EQ(ResolveQwen38MaxBatchSize(configured), 3u);
+}
+
 namespace {
 
 // A folded package: prefill, the dense graph and the slot count are what the tests vary.
@@ -799,6 +834,30 @@ TEST(Qwen38MultiSlotConfigTest, SeveralSlotsNeedACompactStateTarget) {
   EXPECT_NO_THROW(ValidateQwen38BatchedTargetOutputs(1, plain));
   EXPECT_THROW(ValidateQwen38BatchedTargetOutputs(2, plain), std::runtime_error);
   EXPECT_THROW(ValidateQwen38BatchedTargetOutputs(2, {}), std::runtime_error);
+}
+
+// The batched fold inputs of a target that verifies two rows keep the single-slot control and context sizes, which the
+// plane's per-slot layout does not match: several slots are refused for it, and a single slot or a wider verify step is not.
+TEST(Qwen38MultiSlotConfigTest, SeveralSlotsNeedAtLeastThreeVerifyRows) {
+  for (const int rows : {2, 3, 4, 8}) {
+    EXPECT_NO_THROW(ValidateQwen38BatchedVerifyRows(1, rows)) << rows;
+  }
+  for (size_t slots = 2; slots <= 8; ++slots) {
+    for (const int rows : {3, 4, 8}) {
+      EXPECT_NO_THROW(ValidateQwen38BatchedVerifyRows(slots, rows)) << slots << " slots, " << rows << " rows";
+    }
+    for (const int rows : {1, 2}) {
+      try {
+        ValidateQwen38BatchedVerifyRows(slots, rows);
+        ADD_FAILURE() << slots << " slots accepted a target that verifies " << rows << " rows";
+      } catch (const std::runtime_error& error) {
+        const std::string message = error.what();
+        EXPECT_NE(message.find(std::to_string(slots) + " request slots"), std::string::npos) << message;
+        EXPECT_NE(message.find("verifies " + std::to_string(rows)), std::string::npos) << message;
+        EXPECT_NE(message.find("max_batch_size"), std::string::npos) << message;
+      }
+    }
+  }
 }
 
 // The same check runs on the model file before any weight is uploaded: the output names come from the protobuf framing of the
@@ -1085,6 +1144,15 @@ TEST(Qwen38ReplayCoverageTest, RequiresEveryBankedStateToHaveAStateUpdateOutput)
     EXPECT_NE(msg.find("state_update.0.recurrent_capsule"), std::string::npos) << msg;
     EXPECT_NE(msg.find("past_key_values.0.recurrent_state"), std::string::npos) << msg;
   }
+}
+
+// Every graph the engine warms up (the single-slot target and head graphs and each batched target graph, one per batch size and
+// bank) gets one run when its session does not capture CUDA graphs, and enough runs to be captured and replayed when it does:
+// ORT captures a graph on its third run by default, so a single run would leave the capture to a live request.
+TEST(Qwen38GraphConfigTest, AGraphIsRunEnoughTimesToBeCapturedOnlyWhenItsSessionCaptures) {
+  EXPECT_EQ(Qwen38WarmupRuns(false), 1);
+  EXPECT_EQ(Qwen38WarmupRuns(true), kQwen38WarmupRunsPerGraph);
+  EXPECT_GE(Qwen38WarmupRuns(true), 3 + 1);  // the capture run (the third) and one replay
 }
 
 namespace {
@@ -1634,6 +1702,36 @@ TEST(Qwen38CacheShapeTest, RejectsAnotherKvCapacity) {
       {"past_key_values.3.key", {-1, 2, 33028, 256}},
   };
   EXPECT_THROW(ValidateQwen38CacheShapes(longer_positions, 65536, "target"), std::runtime_error);
+}
+
+// The plane fills the position ids of slot b at b * kv_capacity while ORT reads the tensor by the row length the graph
+// declares, so a padded row only works for one slot: with several, every slot but the first would read the wrong ids.
+TEST(Qwen38CacheShapeTest, SeveralRequestSlotsNeedPositionRowsOfExactlyTheCapacity) {
+  const std::vector<Qwen38CacheInput> exact = {
+      {"past_position_ids", {-1, 33032}},
+      {"past_key_values.3.key", {-1, 2, 33032, 256}},
+  };
+  const std::vector<Qwen38CacheInput> padded = {
+      {"past_position_ids", {-1, 33040}},
+      {"past_key_values.3.key", {-1, 2, 33032, 256}},
+  };
+  for (const size_t slots : {1u, 2u, 8u}) {
+    EXPECT_NO_THROW(ValidateQwen38CacheShapes(exact, 33032, "target", slots)) << slots << " slots";
+  }
+  EXPECT_NO_THROW(ValidateQwen38CacheShapes(padded, 33032, "target", 1));
+  EXPECT_NO_THROW(ValidateQwen38CacheShapes(padded, 33032, "target"));  // one slot unless told otherwise
+  for (const size_t slots : {2u, 8u}) {
+    try {
+      ValidateQwen38CacheShapes(padded, 33032, "target", slots);
+      ADD_FAILURE() << slots << " slots accepted a padded position row";
+    } catch (const std::runtime_error& e) {
+      const std::string message = e.what();
+      EXPECT_NE(message.find("past_position_ids"), std::string::npos) << message;
+      EXPECT_NE(message.find("[-1, 33040]"), std::string::npos) << message;
+      EXPECT_NE(message.find(std::to_string(slots) + " request slots"), std::string::npos) << message;
+      EXPECT_NE(message.find("exactly kv_capacity"), std::string::npos) << message;
+    }
+  }
 }
 
 TEST(Qwen38CacheShapeTest, RejectsUnexpectedCacheDimensions) {
