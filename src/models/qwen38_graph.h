@@ -22,6 +22,7 @@
 #include "model.h"
 #include "qwen38_decode_device.h"
 #include "qwen38_graph_plane.h"
+#include "qwen38_ort_env.h"
 #include "span.h"
 
 namespace Generators {
@@ -249,6 +250,7 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   void PrefillChunk(std::span<const int32_t> tokens) override;
   int32_t PendingToken() const override { return pending_; }
   size_t PrefillChunkTokens() const override;
+  void ExpectPrefillTokens(size_t total_tokens) override { run_hints_.ExpectPrefillTokens(total_tokens); }
 
   void BeginDecode(bool run_cycle) override;
   Qwen38CycleRecord WaitCycle() override;
@@ -318,7 +320,11 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   void Warmup();
 
   void PrepRow(int rows, int row, const void* tok, const void* pos, int add, const void* ctx_in, void* ctx_out);
-  void RunTarget(int rows, int phase);
+  void RunTarget(int rows, int phase, const Qwen38PromptRunHints* prompt = nullptr);
+  // Every ORT Run of the engine goes through here: it publishes the QMoE hints of run_hints_ for exactly this Run
+  // (qwen38_ort_env.h).
+  void RunSession(OrtSession& session, const OrtRunOptions* run_options, const OrtIoBinding& binding,
+                  const Qwen38PromptRunHints* prompt = nullptr);
   void EnqueueVerify();
   void EnqueueStep();
   void EnqueueHead(int rows, const uint8_t* hidden_src);
@@ -439,6 +445,7 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   int32_t pending_{};
   std::vector<int32_t> prompt_tokens_;
   const uint8_t* last_hidden_ptr_{};  // hidden output of the last cycle (rows h0, h1)
+  Qwen38OrtRunHints run_hints_;       // what the ORT QMoE kernels are told with each Run (qwen38_ort_env.h)
 };
 
 struct Qwen38GraphModel : Model {
