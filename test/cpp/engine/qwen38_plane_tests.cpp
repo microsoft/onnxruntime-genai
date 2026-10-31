@@ -453,8 +453,9 @@ TEST(Qwen38PlaneCapabilityTest, DescribesCapabilitiesByName) {
   EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_CAP_INT8_EMBEDDING), "int8_embedding");
   EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_CAP_INT8_PLE), "int8_ple");
   EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_CAP_NEGATIVE_POS_ADD_BATCH), "negative_pos_add_batch");
+  EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_CAP_BATCHED_PREP), "batched_prep");
   EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_ALL_CAPABILITIES),
-            "int8_embedding, int8_ple, negative_pos_add_batch");
+            "int8_embedding, int8_ple, negative_pos_add_batch, batched_prep");
   // A bit that this build has no name for is reported, not dropped.
   EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_CAP_INT8_PLE | (1ull << 40)), "int8_ple, unknown bits 0x10000000000");
 }
@@ -486,7 +487,8 @@ TEST(Qwen38PlaneCapabilityTest, RequireCapabilitiesNamesTheMissingCapabilityWhat
     ADD_FAILURE() << "a missing capability must be refused";
   } catch (const std::runtime_error& error) {
     const std::string message = error.what();
-    EXPECT_NE(message.find("the fold package requires the plane capability int8_embedding, negative_pos_add_batch, which"),
+    EXPECT_NE(message.find("the fold package requires the plane capability int8_embedding, negative_pos_add_batch, "
+                           "batched_prep, which"),
               std::string::npos)
         << message;
   }

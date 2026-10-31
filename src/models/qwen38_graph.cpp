@@ -690,6 +690,11 @@ void Qwen38GraphEngine::BuildTarget() {
             d.compress_ratio = static_cast<uint32_t>(kQwen38IndexKeyRatio);
             d.kind = 4;
             generic_descs.push_back(d);
+            if (k == 0) {
+              // Bank 0 as the source and bank 1 as the destination cover both banks of the slot (see ResetSlotIndexLengths).
+              slot_index_lengths_[s].push_back(reinterpret_cast<int32_t*>(src_len.ptr + len_off));
+              slot_index_lengths_[s].push_back(reinterpret_cast<int32_t*>(dst_len.ptr + len_off));
+            }
           } else {
             throw std::runtime_error("qwen38_graph: unsupported state_update output " + su_name);
           }
@@ -1394,10 +1399,14 @@ void Qwen38GraphEngine::MuteSlot(int slot) {
   if (!fold_ || slot < 0 || slot >= max_batch_) return;
   const int64_t state[4] = {0, 0, 0, 1};
   WriteCtlSlot(slot, 0, std::span<const int64_t>(state, 4));
-  if (compact_state_updates_) {
-    ReplayStateUpdatesSlot(0, slot, 0);
-    ReplayStateUpdatesSlot(1, slot, 0);
-    SyncStream();
+  ResetSlotIndexLengths(slot);
+}
+
+// A muted slot holds no tokens, so the lengths of its indexer buffers are zero in both banks. The replay kernels keep at least
+// one transition (qwen38_plane_replay_state_updates rejects a kept count of zero), so the lengths are cleared here instead.
+void Qwen38GraphEngine::ResetSlotIndexLengths(int slot) {
+  for (int32_t* lengths : slot_index_lengths_[slot]) {
+    plane_.Check(plane_.device_memset(lengths, 0, 2 * sizeof(int32_t), stream_), "clear the indexer lengths of a muted slot");
   }
 }
 

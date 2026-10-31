@@ -376,6 +376,7 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   void MutedPrefill(bool muted);
   void MutedPrefillSlot(int slot, bool muted);
   void MuteSlot(int slot);
+  void ResetSlotIndexLengths(int slot);
   void CallHeadR2(const int64_t tokens[2], const int64_t positions[2], const uint8_t* hidden0, const uint8_t* hidden1,
                   int commit_rows);
   void HeadPrefillFold();
@@ -471,6 +472,8 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   std::map<std::string, std::vector<int64_t>> su_slot_shape_;
   PlaneBuffer replay_descs_dev_[2];
   PlaneBuffer slot_replay_descs_dev_[2][kMaxBatch];
+  // The (source, destination) lengths of every indexer layer of a slot, as bank 0 -> bank 1 replays them.
+  std::vector<int32_t*> slot_index_lengths_[kMaxBatch];
   int replay_fast_count_{0};
   int replay_generic_count_{0};
   int replay_fast_blocks_{0};
