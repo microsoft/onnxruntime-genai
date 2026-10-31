@@ -6,6 +6,7 @@
 #include "generator/generators.h"
 #include "logging.h"
 #include "qwen38_graph.h"
+#include "qwen38_replay_geometry.h"
 
 #include <algorithm>
 #include <chrono>
@@ -54,6 +55,10 @@ std::vector<int64_t> FixedShape(std::vector<int64_t> shape) {
 
 constexpr int kStatusRingSpinCheck = 1 << 16;
 
+// What the replay validation reads of a tensor: its name, shape and element size.
+Qwen38ReplayTensor ReplayTensorOf(const std::string& name, const DevTensor& tensor) {
+  return {name, tensor.shape, Ort::SizeOf(tensor.type)};
+}
 // The cache inputs of `info` that depend on the KV capacity: every input under `prefix` (and past_position_ids).
 std::vector<Qwen38CacheInput> CacheInputsOf(const SessionInfo& info, const char* prefix, bool with_positions) {
   std::vector<Qwen38CacheInput> inputs;
@@ -469,74 +474,95 @@ void Qwen38GraphEngine::BuildTarget() {
         const size_t dot2 = su_name.find('.', dot1 + 1);
         const std::string lid_str = su_name.substr(dot1 + 1, dot2 - dot1 - 1);
         const std::string kind_str = su_name.substr(dot2 + 1);
+        // The tensors the replay of this layer reads from the source bank and writes to the destination bank; a package that
+        // lacks one fails with its name instead of a bare out_of_range.
+        const auto source_tensor = [&](const std::string& name) -> const DevTensor& {
+          return RequireQwen38ReplayTensor(src_bank.tensors, name, lid_str, "bank " + std::to_string(k));
+        };
+        const auto destination_tensor = [&](const std::string& name) -> const DevTensor& {
+          return RequireQwen38ReplayTensor(dst_bank.tensors, name, lid_str, "bank " + std::to_string(k ^ 1));
+        };
         if (kind_str == "recurrent_capsule") {
           const std::string state_name = "past_key_values." + lid_str + ".recurrent_state";
-          const DevTensor& src_t = *src_bank.tensors.at(state_name);
-          const DevTensor& dst_t = *dst_bank.tensors.at(state_name);
-          const uint64_t heads_v = static_cast<uint64_t>(src_t.shape.at(1));
-          const uint64_t width_v = static_cast<uint64_t>(src_t.shape.at(2));
-          const uint64_t width_k = static_cast<uint64_t>(src_t.shape.at(3));
+          const DevTensor& src_t = source_tensor(state_name);
+          const DevTensor& dst_t = destination_tensor(state_name);
+          Qwen38ReplayRequest request;
+          request.kind = Qwen38ReplayKind::kGatedDeltaNet;
+          request.capacity = state_update_capacity_;
+          request.state = ReplayTensorOf(state_name, src_t);
+          request.update = ReplayTensorOf(su_name, *su_tensor);
+          const Qwen38ReplayGeometry geometry = ValidateQwen38ReplayDescriptor(request);
           const uint64_t cap = static_cast<uint64_t>(state_update_capacity_);
-          const uint64_t total_width = static_cast<uint64_t>(su_tensor->shape.at(1));
-          const uint64_t per_step = total_width / cap;
-          const uint64_t heads_k = (per_step - heads_v - heads_v * width_v) / width_k;
           const float* capsule = reinterpret_cast<const float*>(su_tensor->ptr);
           const float* decay = capsule;
-          const float* key = decay + cap * heads_v;
-          const float* delta = key + cap * heads_k * width_k;
+          const float* key = decay + cap * geometry.channel_count;
+          const float* delta = key + cap * geometry.key_head_count * geometry.key_width;
           Qwen38StateReplayDesc d{};
           d.source_state = src_t.ptr;
           d.destination_state = dst_t.ptr;
           d.decay = decay;
           d.key = key;
           d.delta = delta;
-          d.channel_count = heads_v;
-          d.state_width = width_v;
-          d.key_width = width_k;
-          d.key_head_count = heads_k;
+          d.channel_count = geometry.channel_count;
+          d.state_width = geometry.state_width;
+          d.key_width = geometry.key_width;
+          d.key_head_count = geometry.key_head_count;
           d.capacity = static_cast<uint32_t>(state_update_capacity_);
           d.kept_count = 1;
-          d.element_size = 4;
+          d.element_size = geometry.element_size;
           d.kind = 2;
           fast_descs.push_back(d);
-          const int blocks = static_cast<int>(heads_v * ((width_v + 31) / 32));
-          replay_fast_blocks_ = std::max(replay_fast_blocks_, blocks);
+          replay_fast_blocks_ = std::max(replay_fast_blocks_, geometry.blocks);
         } else if (kind_str == "conv_value" || kind_str == "ple_conv_value") {
           const std::string state_tail = (kind_str == "ple_conv_value") ? "ple_conv_state" : "conv_state";
           const std::string state_name = "past_key_values." + lid_str + "." + state_tail;
-          const DevTensor& src_t = *src_bank.tensors.at(state_name);
-          const DevTensor& dst_t = *dst_bank.tensors.at(state_name);
+          const DevTensor& src_t = source_tensor(state_name);
+          const DevTensor& dst_t = destination_tensor(state_name);
+          Qwen38ReplayRequest request;
+          request.kind = Qwen38ReplayKind::kConvolution;
+          request.capacity = state_update_capacity_;
+          request.state = ReplayTensorOf(state_name, src_t);
+          request.update = ReplayTensorOf(su_name, *su_tensor);
+          const Qwen38ReplayGeometry geometry = ValidateQwen38ReplayDescriptor(request);
           Qwen38StateReplayDesc d{};
           d.source_state = src_t.ptr;
           d.destination_state = dst_t.ptr;
           d.value = su_tensor->ptr;
-          d.channel_count = static_cast<uint64_t>(src_t.shape.at(1));
-          d.state_width = static_cast<uint64_t>(src_t.shape.at(2));
+          d.channel_count = geometry.channel_count;
+          d.state_width = geometry.state_width;
           d.capacity = static_cast<uint32_t>(state_update_capacity_);
           d.kept_count = 1;
-          d.element_size = static_cast<uint32_t>(Ort::SizeOf(src_t.type));
+          d.element_size = geometry.element_size;
           d.kind = 1;
           generic_descs.push_back(d);
         } else if (kind_str == "indexer_value") {
           const std::string buf_name = "past_key_values." + lid_str + ".index_buffer";
           const std::string len_name = "past_key_values." + lid_str + ".index_lengths";
-          const DevTensor& src_buf = *src_bank.tensors.at(buf_name);
-          const DevTensor& dst_buf = *dst_bank.tensors.at(buf_name);
-          const DevTensor& src_len = *src_bank.tensors.at(len_name);
-          const DevTensor& dst_len = *dst_bank.tensors.at(len_name);
+          const DevTensor& src_buf = source_tensor(buf_name);
+          const DevTensor& dst_buf = destination_tensor(buf_name);
+          const DevTensor& src_len = source_tensor(len_name);
+          const DevTensor& dst_len = destination_tensor(len_name);
+          Qwen38ReplayRequest request;
+          request.kind = Qwen38ReplayKind::kIndexer;
+          request.capacity = state_update_capacity_;
+          request.state = ReplayTensorOf(buf_name, src_buf);
+          request.update = ReplayTensorOf(su_name, *su_tensor);
+          request.lengths = ReplayTensorOf(len_name, src_len);
+          request.compress_ratio = kQwen38IndexKeyRatio;
+          const Qwen38ReplayGeometry geometry = ValidateQwen38ReplayDescriptor(request);
           Qwen38StateReplayDesc d{};
           d.value = su_tensor->ptr;
           d.source_aux_state = src_buf.ptr;
           d.destination_aux_state = dst_buf.ptr;
           d.source_lengths = reinterpret_cast<const int32_t*>(src_len.ptr);
           d.destination_lengths = reinterpret_cast<int32_t*>(dst_len.ptr);
-          d.state_width = static_cast<uint64_t>(src_buf.shape.at(2));
+          d.state_width = geometry.state_width;
           d.state_capacity = 0;
-          d.aux_capacity = static_cast<uint64_t>(src_buf.shape.at(1));
+          d.aux_capacity = geometry.aux_capacity;
           d.capacity = static_cast<uint32_t>(state_update_capacity_);
           d.kept_count = 1;
-          d.element_size = static_cast<uint32_t>(Ort::SizeOf(src_buf.type));
-          d.compress_ratio = 4;
+          d.element_size = geometry.element_size;
+          d.compress_ratio = static_cast<uint32_t>(kQwen38IndexKeyRatio);
           d.kind = 4;
           generic_descs.push_back(d);
         } else {
