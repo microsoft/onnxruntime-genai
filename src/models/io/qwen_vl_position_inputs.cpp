@@ -114,7 +114,7 @@ Qwen2VLPositionInputs::Qwen2VLPositionInputs(const Model& model, State& state, D
   const auto& history_name = model_.config_->model.decoder.inputs.rotary_position_ids;
   if (!history_name.empty()) {
     const auto shape = model_.session_info_.GetInputShape(history_name);
-    if (!has_posid_input_ || type_ != Ort::TypeToTensorType<int64_t> ||
+    if (!has_posid_input_ || rope_rank_ != 3 || type_ != Ort::TypeToTensorType<int64_t> ||
         model_.session_info_.GetInputDataType(history_name) != Ort::TypeToTensorType<int64_t> ||
         shape.size() != 3 || shape[0] != 3 || state_.params_->search.max_length <= 0) {
       throw std::runtime_error("Rotary history requires int64 [3, batch, history] and current T/H/W positions");

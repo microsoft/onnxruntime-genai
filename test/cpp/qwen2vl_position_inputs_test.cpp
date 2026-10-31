@@ -336,6 +336,24 @@ TEST_P(QwenPositionValuesTest, ImagePrefillAndSuccessiveDecode) {
 
 INSTANTIATE_TEST_SUITE_P(RopeRows, QwenPositionValuesTest, testing::Values<int64_t>(3, 4));
 
+TEST_F(StandardPositionInputsTest, RotaryHistoryRejectsFourRowPositions) {
+  session_ = model_->CreateSession(GetOrtEnv(), "../../qwen-position-inputs/four-row-rotary-history.onnx",
+                                   model_->session_options_.get());
+  model_->session_info_ = SessionInfo{};
+  model_->session_info_.Add(*session_);
+  ASSERT_EQ(model_->session_info_.GetInputShape("position_ids"), (std::vector<int64_t>{4, -1, -1}));
+  model_->config_->model.type = "qwen3_5";
+  model_->config_->model.context_length = 32;
+  params_->search.max_length = 16;
+
+  // Control: the same four-row session builds mRoPE inputs when no rotary history is configured.
+  auto control = CreatePositionInputs();
+  ASSERT_NE(dynamic_cast<Qwen2VLPositionInputs*>(control.get()), nullptr);
+
+  model_->config_->model.decoder.inputs.rotary_position_ids = "rotary_position_ids";
+  EXPECT_THROW(CreatePositionInputs(), std::runtime_error);
+}
+
 TEST_F(StandardPositionInputsTest, QwenVLWith3DPositionIdsUsesMrope) {
   Use3DPositionIds();
   for (const auto* model_type : qwen_model_types_) {
