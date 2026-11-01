@@ -100,8 +100,14 @@ Config::SessionOptions ResolveQwen38AuxiliarySessionOptions(const Config::Sessio
 size_t EffectiveQwen38PrefillChunkTokens(const Config::Model::Qwen38Graph& q);
 
 // Throws a std::runtime_error unless the effective prompt chunk lies in [1, kv_capacity] (dense prefill) or, when the
-// prompt is ingested by the decode graphs (prefill.enabled false), is even so that S=2 pairs stay aligned.
+// prompt is ingested by the decode graphs (prefill.enabled false), is even so that S=2 pairs stay aligned. The model calls it
+// with the kv_capacity of its configuration, before it has loaded its graph.
 void ValidateQwen38PrefillChunk(const Config::Model::Qwen38Graph& q);
+
+// The part of ValidateQwen38PrefillChunk that does not look at kv_capacity: the chunk is not negative and, when the decode
+// graphs ingest the prompt, even. Once the graph is loaded, kv_capacity is that graph's capacity, which a context tier can
+// leave below the chunk of the package; the device clamps the chunk to it, so the Engine's dependencies check only this part.
+void ValidateQwen38PrefillChunkShape(const Config::Model::Qwen38Graph& q);
 
 // Throws std::invalid_argument naming the first prompt id outside [0, vocab_size). The ids are row indices of the
 // embedding gather on the device. embed_gather clamps an id outside the table to row 0, so the model would silently embed
