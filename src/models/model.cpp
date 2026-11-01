@@ -940,6 +940,12 @@ void Model::CreateSessionOptions() {
     p_device_ = GetDeviceInterface(DeviceType::CPU);
 
   ApplyRuntimeProfileForSelectedDevice(*config_, *p_device_);
+
+  // Replay config_entries onto session_options_ so any session.moe.offload.* entries merged by
+  // ApplyRuntimeProfileForSelectedDevice take effect on the primary decoder session.
+  for (const auto& entry : config_->model.decoder.session_options.config_entries) {
+    session_options_->AddConfigEntry(entry.first.c_str(), entry.second.c_str());
+  }
 }
 
 OrtSessionOptions* Model::GetSessionOptions(const std::string& model_id) const {

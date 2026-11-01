@@ -293,6 +293,192 @@ TEST(ConfigTest, Dflash2SnapshotOnlyProfileRequiresDynamicBatchingEvenWhenDisabl
   EXPECT_FALSE(config.engine.dynamic_batching);
 }
 
+TEST(ConfigTest, RuntimeProfileAppliesDecoderSessionOptionsAndHostMemoryEligibility) {
+  Config config;
+  OverlayConfig(config, R"({
+    "model": {
+      "decoder": {
+        "filename": "model.onnx",
+        "session_options": {
+          "session.moe.offload.mode": "auto",
+          "session.moe.offload.device_expert_bytes": "auto"
+        }
+      }
+    },
+    "runtime_profiles": [
+      {
+        "id": "consumer-gpu-low-ram",
+        "eligibility": {
+          "minimum_total_device_memory_bytes": 0,
+          "maximum_total_device_memory_bytes": 25769803776,
+          "maximum_effective_host_memory_bytes": 68719476735
+        },
+        "overlay": {
+          "model": {
+            "decoder": {
+              "session_options": {
+                "session.moe.offload.mode": "required",
+                "session.moe.offload.device_expert_bytes": "10351636480",
+                "session.moe.offload.host_expert_bytes": "8589934592"
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": "consumer-gpu-more-ram",
+        "eligibility": {
+          "minimum_total_device_memory_bytes": 0,
+          "maximum_total_device_memory_bytes": 25769803776,
+          "minimum_effective_host_memory_bytes": 68719476736
+        },
+        "overlay": {
+          "model": {
+            "decoder": {
+              "session_options": {
+                "session.moe.offload.mode": "required",
+                "session.moe.offload.device_expert_bytes": "10351636480",
+                "session.moe.offload.host_expert_bytes": "42949672960"
+              }
+            }
+          }
+        }
+      }
+    ]
+  })");
+
+  ApplyRuntimeProfile(config, RuntimeProfileDeviceFacts{
+                                  25769803776ULL,
+                                  false,
+                                  20000000000ULL,
+                                  68719476736ULL,
+                                  50000000000ULL,
+                              });
+
+  std::map<std::string, std::string> entries;
+  for (const auto& [k, v] : config.model.decoder.session_options.config_entries) {
+    entries[k] = v;
+  }
+  EXPECT_EQ(entries["session.moe.offload.mode"], "required");
+  EXPECT_EQ(entries["session.moe.offload.device_expert_bytes"], "10351636480");
+  EXPECT_EQ(entries["session.moe.offload.host_expert_bytes"], "42949672960");
+}
+
+TEST(ConfigTest, AvailableHostMemoryEligibilityNeedsAKnownValueAtOrAboveTheMinimum) {
+  Config config;
+  OverlayConfig(config, R"({"runtime_profiles":[{
+    "id":"roomy","eligibility":{"minimum_total_device_memory_bytes":0,"minimum_available_host_memory_bytes":100},
+    "overlay":{"search":{"chunk_size":1}}}]})");
+
+  auto at_minimum = config;
+  ApplyRuntimeProfile(at_minimum, RuntimeProfileDeviceFacts{1, false, std::nullopt, 200, 100});
+  EXPECT_EQ(at_minimum.search.chunk_size, 1u);
+
+  auto below_minimum = config;
+  ApplyRuntimeProfile(below_minimum, RuntimeProfileDeviceFacts{1, false, std::nullopt, 200, 99});
+  EXPECT_FALSE(below_minimum.search.chunk_size.has_value());
+
+  auto unknown = config;
+  ApplyRuntimeProfile(unknown, RuntimeProfileDeviceFacts{1, false, std::nullopt, 200, std::nullopt});
+  EXPECT_FALSE(unknown.search.chunk_size.has_value());
+}
+
+TEST(ConfigTest, AvailableHostMemoryMinimumIsCheckedAgainstTheOtherProfilesEffectiveHostMemoryMaximum) {
+  // Available host memory never exceeds the effective host memory, so a profile that needs more available memory than
+  // the other profile's effective maximum cannot match the same device.
+  for (const uint64_t available_minimum : {100ULL, 101ULL}) {
+    Config config;
+    const auto json = std::string{R"({"runtime_profiles":[
+      {"id":"small-host","eligibility":{"minimum_total_device_memory_bytes":0,
+        "maximum_effective_host_memory_bytes":100},"overlay":{"search":{"chunk_size":1}}},
+      {"id":"big-available","eligibility":{"minimum_total_device_memory_bytes":0,
+        "minimum_available_host_memory_bytes":)"} +
+                      std::to_string(available_minimum) + R"(},"overlay":{"search":{"chunk_size":2}}}
+    ]})";
+    if (available_minimum <= 100) {
+      EXPECT_THROW(OverlayConfig(config, json), std::runtime_error) << available_minimum;
+    } else {
+      EXPECT_NO_THROW(OverlayConfig(config, json)) << available_minimum;
+    }
+  }
+}
+
+TEST(ConfigTest, ParsesMeminfoValues) {
+  const std::string_view meminfo =
+      "MemTotal:       65843260 kB\n"
+      "MemFree:         1204512 kB\n"
+      "MemAvailable:   48211376 kB\n"
+      "HugePages_Total:       4\n"
+      "Bogus:               abc kB\n"
+      "Scale:                12 MB\n";
+  EXPECT_EQ(ParseMeminfoBytes(meminfo, "MemAvailable"), std::optional<uint64_t>{48211376ULL * 1024});
+  EXPECT_EQ(ParseMeminfoBytes(meminfo, "MemFree"), std::optional<uint64_t>{1204512ULL * 1024});
+  EXPECT_EQ(ParseMeminfoBytes(meminfo, "HugePages_Total"), std::optional<uint64_t>{4});
+  EXPECT_EQ(ParseMeminfoBytes("MemAvailable: 8 kB", "MemAvailable"), std::optional<uint64_t>{8192});
+
+  EXPECT_FALSE(ParseMeminfoBytes(meminfo, "Mem").has_value());  // a key prefix is not a match
+  EXPECT_FALSE(ParseMeminfoBytes(meminfo, "Missing").has_value());
+  EXPECT_FALSE(ParseMeminfoBytes(meminfo, "Bogus").has_value());
+  EXPECT_FALSE(ParseMeminfoBytes(meminfo, "Scale").has_value());
+  EXPECT_FALSE(ParseMeminfoBytes("", "MemAvailable").has_value());
+}
+
+TEST(ConfigTest, ResolvesEffectiveAndAvailableHostMemoryAgainstTheCgroup) {
+  constexpr uint64_t GiB = 1ULL << 30;
+  std::optional<uint64_t> effective;
+  std::optional<uint64_t> available;
+  const auto resolve = [&](HostMemoryReadings readings) {
+    ResolveHostMemoryFacts(readings, effective, available);
+  };
+
+  // Without a cgroup the physical readings are used as they are.
+  resolve({128 * GiB, 100 * GiB, std::nullopt, std::nullopt});
+  EXPECT_EQ(effective, std::optional<uint64_t>{128 * GiB});
+  EXPECT_EQ(available, std::optional<uint64_t>{100 * GiB});
+
+  // The cgroup limit caps the effective memory, and the cgroup headroom caps the available memory.
+  resolve({128 * GiB, 100 * GiB, 64 * GiB, 10 * GiB});
+  EXPECT_EQ(effective, std::optional<uint64_t>{64 * GiB});
+  EXPECT_EQ(available, std::optional<uint64_t>{54 * GiB});
+
+  // MemAvailable is the tighter bound when the cgroup has more headroom than the system.
+  resolve({128 * GiB, 20 * GiB, 64 * GiB, 10 * GiB});
+  EXPECT_EQ(effective, std::optional<uint64_t>{64 * GiB});
+  EXPECT_EQ(available, std::optional<uint64_t>{20 * GiB});
+
+  // Usage above the limit leaves no headroom.
+  resolve({128 * GiB, 100 * GiB, 64 * GiB, 70 * GiB});
+  EXPECT_EQ(available, std::optional<uint64_t>{0});
+
+  // A cgroup limit above the physical memory does not raise the effective memory.
+  resolve({64 * GiB, 40 * GiB, 128 * GiB, 10 * GiB});
+  EXPECT_EQ(effective, std::optional<uint64_t>{64 * GiB});
+  EXPECT_EQ(available, std::optional<uint64_t>{40 * GiB});
+
+  // The cgroup headroom stands in when MemAvailable cannot be read.
+  resolve({128 * GiB, std::nullopt, 64 * GiB, 10 * GiB});
+  EXPECT_EQ(effective, std::optional<uint64_t>{64 * GiB});
+  EXPECT_EQ(available, std::optional<uint64_t>{54 * GiB});
+
+  // The available memory never exceeds the effective memory.
+  resolve({64 * GiB, 100 * GiB, std::nullopt, std::nullopt});
+  EXPECT_EQ(available, std::optional<uint64_t>{64 * GiB});
+
+  // An unreported availability stays unknown instead of being guessed.
+  resolve({64 * GiB, std::nullopt, std::nullopt, std::nullopt});
+  EXPECT_EQ(effective, std::optional<uint64_t>{64 * GiB});
+  EXPECT_FALSE(available.has_value());
+
+  // A zero cgroup limit is ignored.
+  resolve({64 * GiB, 40 * GiB, 0, 0});
+  EXPECT_EQ(effective, std::optional<uint64_t>{64 * GiB});
+  EXPECT_EQ(available, std::optional<uint64_t>{40 * GiB});
+
+  resolve({std::nullopt, std::nullopt, std::nullopt, std::nullopt});
+  EXPECT_FALSE(effective.has_value());
+  EXPECT_FALSE(available.has_value());
+}
+
 TEST(ConfigTest, RuntimeProfileUsesDefaultCudaDevice) {
   Config config;
   OverlayConfig(config, R"({

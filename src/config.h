@@ -7,6 +7,7 @@
 #include "provider_options.h"
 
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 
@@ -975,12 +976,16 @@ struct Config {
       std::optional<uint64_t> maximum_total_device_memory_bytes;
       std::optional<uint64_t> minimum_free_device_memory_bytes;
       std::optional<uint64_t> maximum_free_device_memory_bytes;
+      std::optional<uint64_t> minimum_effective_host_memory_bytes;
+      std::optional<uint64_t> maximum_effective_host_memory_bytes;
+      std::optional<uint64_t> minimum_available_host_memory_bytes;
       std::optional<bool> is_integrated;
     } eligibility;
 
     struct Overlay {
       struct Model {
         std::optional<std::string> decoder_filename;
+        std::map<std::string, std::string> decoder_session_options;
       } model;
 
       struct DynamicBatching {
@@ -1033,6 +1038,8 @@ struct RuntimeProfileDeviceFacts {
   std::optional<bool> is_integrated;
   // Unset means unknown: profiles with free-memory bounds do not match.
   std::optional<uint64_t> free_device_memory_bytes;
+  std::optional<uint64_t> effective_host_memory_bytes;
+  std::optional<uint64_t> available_host_memory_bytes;
 };
 void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device);
 void ApplyRuntimeProfile(Config& config, uint64_t total_device_memory_bytes);
