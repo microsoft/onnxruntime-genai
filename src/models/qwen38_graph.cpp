@@ -1771,6 +1771,8 @@ void Qwen38GraphEngine::PrefillChunkSlot(size_t slot_idx, std::span<const int32_
   if (!fast_ || !fast_->unified) {
     throw std::runtime_error("qwen38_graph: multi-slot prefill requires unified fast prefill");
   }
+  // Like PrefillChunk, reject an id outside the vocabulary before any device copy or change of the slot's state.
+  ValidateQwen38PromptTokens(tokens, vocab_);
   FastAppendSlot(static_cast<int>(slot_idx), tokens);
 }
 
