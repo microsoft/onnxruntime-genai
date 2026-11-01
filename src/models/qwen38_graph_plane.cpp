@@ -288,7 +288,19 @@ Qwen38EmbeddingFormat SelectQwen38EmbeddingFormat(const Qwen38Plane& plane, cons
                                                   size_t file_bytes, long long rows, long long width) {
   if (rows <= 0 || width <= 0) return Qwen38EmbeddingFormat::kNone;
   const std::string geometry = " (vocab_size " + std::to_string(rows) + ", hidden_size " + std::to_string(width) + ")";
-  if (file_bytes >= Qwen38EmbeddingTableBytes(Qwen38EmbeddingFormat::kBf16, rows, width)) {
+  const size_t bf16_bytes = Qwen38EmbeddingTableBytes(Qwen38EmbeddingFormat::kBf16, rows, width);
+  const size_t int8_bytes = Qwen38EmbeddingTableBytes(Qwen38EmbeddingFormat::kInt8, rows, width);
+  const bool matches_bf16 = file_bytes >= bf16_bytes;
+  const bool matches_int8 =
+      file_bytes >= int8_bytes && file_bytes - int8_bytes <= kQwen38Int8EmbeddingSlackBytes;
+  if ((matches_bf16 && matches_int8) || (width <= 4 && (matches_bf16 || matches_int8))) {
+    throw std::runtime_error(
+        "qwen38_graph: the embedding table " + table_path.string() + geometry + " has an ambiguous byte size (" +
+        std::to_string(file_bytes) + ") that matches both the bfloat16 (" + std::to_string(bf16_bytes) +
+        " bytes) and the INT8 (" + std::to_string(int8_bytes) + ".." +
+        std::to_string(int8_bytes + kQwen38Int8EmbeddingSlackBytes) + " bytes) layouts");
+  }
+  if (matches_bf16) {
     if (width % 8 != 0) {
       throw std::runtime_error("qwen38_graph: the bfloat16 embedding table " + table_path.string() + geometry +
                                " cannot be gathered by the plane: it copies a row in 16-byte vectors, so hidden_size must "
@@ -296,8 +308,7 @@ Qwen38EmbeddingFormat SelectQwen38EmbeddingFormat(const Qwen38Plane& plane, cons
     }
     return Qwen38EmbeddingFormat::kBf16;
   }
-  const size_t int8_bytes = Qwen38EmbeddingTableBytes(Qwen38EmbeddingFormat::kInt8, rows, width);
-  if (file_bytes < int8_bytes || file_bytes - int8_bytes > kQwen38Int8EmbeddingSlackBytes) {
+  if (!matches_int8) {
     return Qwen38EmbeddingFormat::kNone;
   }
   plane.RequireCapabilities(QWEN38_PLANE_CAP_INT8_EMBEDDING, "the INT8 embedding table " + table_path.string());

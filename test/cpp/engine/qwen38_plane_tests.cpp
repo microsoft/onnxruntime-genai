@@ -800,13 +800,18 @@ TEST(Qwen38EmbeddingTableTest, ATableTheGatherCannotAddressIsRefusedAtLoad) {
   };
 
   // A bfloat16 row is copied in 16-byte vectors: the last 4 values of a row of 12 would be left unwritten.
-  expect_refused(2 * 64 * 12, 64, 12, "multiple of 8");
+  expect_refused(2 * 1000 * 12, 1000, 12, "multiple of 8");
   // 1001 x 15 int8 values are 15015 bytes, so the float scales that follow them would not be 4-byte aligned.
   expect_refused(1001 * (15 + 4), 1001, 15, "multiple of 4");
+  // A 512 x 8 INT8 table padded from 6144 to 8192 bytes overlaps the 512 x 8 BF16 table size (8192 bytes).
+  expect_refused(8192, 512, 8, "ambiguous byte size");
+  // A width-4 table has identical BF16 and INT8 byte sizes without padding.
+  expect_refused(1000 * 4 * 2, 1000, 4, "ambiguous byte size");
 
   // What the plane can gather is not refused, and INT8 rows have no vector width.
-  EXPECT_EQ(SelectQwen38EmbeddingFormat(plane, file, 2 * 64 * 16, 64, 16), Qwen38EmbeddingFormat::kBf16);
-  EXPECT_EQ(SelectQwen38EmbeddingFormat(plane, file, 64 * (12 + 4), 64, 12), Qwen38EmbeddingFormat::kInt8);
+  EXPECT_EQ(SelectQwen38EmbeddingFormat(plane, file, 2 * 1000 * 16, 1000, 16), Qwen38EmbeddingFormat::kBf16);
+  EXPECT_EQ(SelectQwen38EmbeddingFormat(plane, file, 1000 * (12 + 4), 1000, 12), Qwen38EmbeddingFormat::kInt8);
+  EXPECT_EQ(SelectQwen38EmbeddingFormat(plane, file, 512 * (8 + 4), 512, 8), Qwen38EmbeddingFormat::kInt8);
   // A table that is cut short is no table, whatever its width.
   EXPECT_EQ(SelectQwen38EmbeddingFormat(plane, file, 2 * 1000 * 12 - 1, 1000, 12), Qwen38EmbeddingFormat::kNone);
 }
@@ -879,7 +884,7 @@ class Qwen38TestPackage {
                              "num_key_value_heads":1,"head_size":16},
                   "embedding":{"filename":"embedding.onnx"},
                   "qwen38_graph":{"plane_library":"plane.so","ple_table":"ple_table.txt",
-                                  "head":{"filename_s1":"head.onnx"}}},
+                                  "head":{"filename_s1":"head.onnx","filename_s2":"head2.onnx"}}},
                   "search":{"max_length":64}})");
     config_ = std::make_unique<Config>(fs::path{dir_.string()}, std::string_view{});
   }
@@ -900,6 +905,26 @@ class Qwen38TestPackage {
 
   std::filesystem::path ple_path() const { return dir_ / "ple_table.txt"; }
   std::filesystem::path embedding_path() const { return dir_ / "embedding.onnx.data"; }
+  std::filesystem::path plane_path() const { return dir_ / "plane.so"; }
+
+  // Copies `source_library` into the package folder as `plane.so` (and its Windows `.dll` sibling when needed) unless the
+  // copy is there already, and returns a Config whose `decoder.shared_initializers` would fail in
+  // `Model::AddSharedInitializers` if the constructor did not run the package capability preflight before
+  // `Model::Model`.
+  std::unique_ptr<Config> MakeConfigWithLibrary(const std::filesystem::path& source_library) const {
+    // The plane library is never unloaded, so a copy that an earlier model of this package mapped stays mapped, and
+    // rewriting it in place would corrupt that mapping: an existing copy is kept.
+    std::error_code ec;
+    std::filesystem::copy_file(source_library, plane_path(), std::filesystem::copy_options::skip_existing, ec);
+#if defined(_WIN32)
+    auto dll_alias = plane_path();
+    dll_alias.replace_extension(".dll");
+    std::filesystem::copy_file(source_library, dll_alias, std::filesystem::copy_options::skip_existing, ec);
+#endif
+    auto cfg = std::make_unique<Config>(fs::path{dir_.string()}, std::string_view{});
+    cfg->model.decoder.shared_initializers.push_back({"missing_shared_weight", "missing_shared.bin", "0", "64"});
+    return cfg;
+  }
 
   Qwen38EmbeddingFormat Require(const Qwen38Plane& plane) const {
     return RequireQwen38PackageSupportedByPlane(plane, *config_, dir_);
@@ -1020,14 +1045,15 @@ TEST_F(Qwen38LegacyPlaneLibraryTest, LoadsWithoutTheOptionalExportsAndReportsNoC
 }
 
 TEST_F(Qwen38LegacyPlaneLibraryTest, Bf16EmbeddingPackagesStayUsable) {
-  std::vector<uint16_t> table(3 * 8);  // a vocabulary of 3 with a width of 8
-  for (size_t i = 0; i < table.size(); ++i) table[i] = static_cast<uint16_t>(0x3F00 + i);
+  constexpr long long kVocab = 1025;
+  std::vector<uint16_t> table(static_cast<size_t>(kVocab) * 8);  // a vocabulary of 1025 with a width of 8
+  for (size_t i = 0; i < table.size(); ++i) table[i] = static_cast<uint16_t>(0x3F00 + (i & 0xFF));
   const std::vector<int64_t> ids = {2, 0};
   std::vector<uint16_t> out(2 * 8, 0xDEAD);
 
-  ASSERT_EQ(SelectQwen38EmbeddingFormat(*plane_, "embedding.onnx.data", table.size() * sizeof(uint16_t), 3, 8),
+  ASSERT_EQ(SelectQwen38EmbeddingFormat(*plane_, "embedding.onnx.data", table.size() * sizeof(uint16_t), kVocab, 8),
             Qwen38EmbeddingFormat::kBf16);
-  const Qwen38EmbeddingTable bf16{table.data(), 3, 8, false};
+  const Qwen38EmbeddingTable bf16{table.data(), kVocab, 8, false};
   plane_->EmbedRows(nullptr, bf16, ids.data(), out.data(), 2);
   EXPECT_TRUE(std::equal(out.begin(), out.begin() + 8, table.begin() + 16));
   EXPECT_TRUE(std::equal(out.begin() + 8, out.end(), table.begin()));
@@ -1056,10 +1082,18 @@ TEST_F(Qwen38LegacyPlaneLibraryTest, ModelPackagesAreCheckedAgainstTheLibraryAtM
   package.Write(Int8PleTable(), Qwen38TestPackage::kBf16TableBytes);
   ExpectMissingCapability([&] { package.Require(*plane_); }, "int8_ple", package.ple_path().string(),
                           library_path_.string());
+  // Also cover the real Qwen38GraphModel constructor: preflight must fail with the missing-capability diagnostic before
+  // Model::Model runs EnsureDeviceOrtInit or AddSharedInitializers.
+  ExpectMissingCapability(
+      [&] { Qwen38GraphModel model{package.MakeConfigWithLibrary(library_path_), GetOrtEnv()}; }, "int8_ple",
+      package.ple_path().filename().string(), package.plane_path().filename().string());
 
   package.Write(kValidPleTable, Qwen38TestPackage::kInt8TableBytes);
   ExpectMissingCapability([&] { package.Require(*plane_); }, "int8_embedding", package.embedding_path().string(),
                           library_path_.string());
+  ExpectMissingCapability(
+      [&] { Qwen38GraphModel model{package.MakeConfigWithLibrary(library_path_), GetOrtEnv()}; }, "int8_embedding",
+      package.embedding_path().filename().string(), package.plane_path().filename().string());
 }
 
 #if !defined(_WIN32)
@@ -2476,6 +2510,104 @@ TEST_F(Qwen38PlaneStagedPleTest, Int8ShardsAreRoundedToBf16AtTheScaleOfAShippedP
   for (size_t i = 0; i < tokens.size(); ++i) {
     EXPECT_EQ(gathered[i * StagedPleRig::kRowWidth], bf16_of_row[static_cast<size_t>(tokens[i])]) << "token=" << tokens[i];
   }
+}
+
+// Resident PLE tables (pad_ == 0, the Linux default where shard_ptr[0] is device-addressable) run k_ple_rows and k_prep
+// directly on the GPU. Verify both entry points against FP8 (scale > 0) and INT8 (scale < 0) reference values.
+TEST_F(Qwen38PlaneStagedPleTest, ResidentPleRowsAndPrepDecodeBothFp8AndInt8ShardsOnDevice) {
+  ASSERT_NE(plane_->capabilities & QWEN38_PLANE_CAP_INT8_PLE, 0ull);
+  PlaneStream stream{*plane_};
+  constexpr size_t kRows = 4;
+  constexpr size_t kRowWidth = 4;
+  constexpr size_t kPositions = 16;
+
+  const auto run_resident_check = [&](const std::array<unsigned char, kRows>& row_codes, float scale,
+                                      const std::array<uint16_t, kRows>& expected_bf16) {
+    std::array<unsigned char, kRows * kRowWidth> h_shard{};
+    for (size_t r = 0; r < kRows; ++r) {
+      std::fill_n(h_shard.begin() + r * kRowWidth, kRowWidth, row_codes[r]);
+    }
+    PlaneBuffer d_shard{*plane_, h_shard.size(), stream.get()};
+    plane_->Check(plane_->memcpy_h2d(d_shard.data(), h_shard.data(), h_shard.size(), stream.get()), "upload shard");
+
+    Qwen38PleParams params{};
+    params.n_heads = 1;
+    params.head_dim = static_cast<int>(kRowWidth);
+    params.heads_per_ngram = 1;
+    params.n_shards = 1;
+    params.mult[0] = 1;
+    params.vocab[0] = static_cast<long long>(kRows);
+    params.shard_end[0] = static_cast<long long>(kRows);
+    params.shard_ptr[0] = d_shard.data();
+    params.scale = scale;
+    params.pad_ = 0;  // resident path
+    params.eos = 99;
+    params.capacity = static_cast<long long>(kPositions);
+
+    PlaneBuffer d_params{*plane_, sizeof(params), stream.get()};
+    plane_->Check(plane_->memcpy_h2d(d_params.data(), &params, sizeof(params), stream.get()), "upload params");
+
+    const std::vector<int64_t> tokens = {0, 1, 2, 3, 6};
+    const int64_t h_ctx_in[2] = {0, 0};
+    PlaneBuffer d_tokens{*plane_, tokens.size() * sizeof(int64_t), stream.get()};
+    PlaneBuffer d_ctx_in{*plane_, sizeof(h_ctx_in), stream.get()};
+    PlaneBuffer d_ctx_out{*plane_, sizeof(h_ctx_in), stream.get()};
+    PlaneBuffer d_ple_out{*plane_, tokens.size() * kRowWidth * sizeof(uint16_t), stream.get()};
+    plane_->Check(plane_->memcpy_h2d(d_tokens.data(), tokens.data(), tokens.size() * sizeof(int64_t), stream.get()), "tokens");
+    plane_->Check(plane_->memcpy_h2d(d_ctx_in.data(), h_ctx_in, sizeof(h_ctx_in), stream.get()), "ctx_in");
+
+    const Qwen38PlaneTestStats before = Stats();
+    ASSERT_EQ(plane_->ple_rows(stream.get(), d_params.data(), d_tokens.data(), static_cast<int>(tokens.size()),
+                               d_ctx_in.data(), d_ctx_out.data(), d_ple_out.data()),
+              0);
+    std::vector<uint16_t> ple_out(tokens.size() * kRowWidth, 0);
+    plane_->Check(plane_->memcpy_d2h(ple_out.data(), d_ple_out.data(), ple_out.size() * sizeof(uint16_t), stream.get()),
+                  "d2h ple_rows");
+    plane_->Check(plane_->stream_sync(stream.get()), "sync ple_rows");
+    EXPECT_EQ(Stats().staged_launches, before.staged_launches);
+    for (size_t i = 0; i < tokens.size(); ++i) {
+      const uint16_t want = expected_bf16[static_cast<size_t>(tokens[i]) % kRows];
+      for (size_t c = 0; c < kRowWidth; ++c) {
+        EXPECT_EQ(ple_out[i * kRowWidth + c], want) << "scale=" << scale << " token=" << tokens[i] << " c=" << c;
+      }
+    }
+
+    // Now test resident k_prep for token 6 (row 2) at position 5.
+    const int64_t h_tok = 6, h_pos = 5;
+    PlaneBuffer d_tok{*plane_, sizeof(int64_t), stream.get()};
+    PlaneBuffer d_pos{*plane_, sizeof(int64_t), stream.get()};
+    PlaneBuffer d_input_ids{*plane_, sizeof(int64_t), stream.get()};
+    PlaneBuffer d_position_ids{*plane_, sizeof(int64_t), stream.get()};
+    PlaneBuffer d_committed{*plane_, sizeof(int), stream.get()};
+    PlaneBuffer d_past_pos{*plane_, kPositions * sizeof(int64_t), stream.get()};
+    PlaneBuffer d_state{*plane_, 10 * sizeof(int64_t), stream.get()};
+    plane_->Check(plane_->memcpy_h2d(d_tok.data(), &h_tok, sizeof(h_tok), stream.get()), "tok");
+    plane_->Check(plane_->memcpy_h2d(d_pos.data(), &h_pos, sizeof(h_pos), stream.get()), "pos");
+    ASSERT_EQ(plane_->prep(stream.get(), d_params.data(), d_tok.data(), d_pos.data(), 0, d_ctx_in.data(), d_ctx_out.data(),
+                           d_input_ids.data(), d_position_ids.data(), d_committed.data(), d_past_pos.data(),
+                           d_ple_out.data(), d_state.data()),
+              0);
+    std::vector<uint16_t> prep_ple(kRowWidth, 0);
+    int64_t out_id = -1, out_pos = -1;
+    int out_committed = -1;
+    plane_->Check(plane_->memcpy_d2h(prep_ple.data(), d_ple_out.data(), kRowWidth * sizeof(uint16_t), stream.get()), "d2h prep ple");
+    plane_->Check(plane_->memcpy_d2h(&out_id, d_input_ids.data(), sizeof(out_id), stream.get()), "d2h id");
+    plane_->Check(plane_->memcpy_d2h(&out_pos, d_position_ids.data(), sizeof(out_pos), stream.get()), "d2h pos");
+    plane_->Check(plane_->memcpy_d2h(&out_committed, d_committed.data(), sizeof(out_committed), stream.get()), "d2h committed");
+    plane_->Check(plane_->stream_sync(stream.get()), "sync prep");
+    EXPECT_EQ(Stats().staged_launches, before.staged_launches);
+    EXPECT_EQ(out_id, h_tok);
+    EXPECT_EQ(out_pos, h_pos);
+    EXPECT_EQ(out_committed, static_cast<int>(h_pos));
+    for (size_t c = 0; c < kRowWidth; ++c) {
+      EXPECT_EQ(prep_ple[c], expected_bf16[2]) << "scale=" << scale << " c=" << c;
+    }
+  };
+
+  // FP8 E4M3 codes {1, 2, 3, 4} at scale +1.0f -> bf16 {1.0, 2.0, 3.0, 4.0}.
+  run_resident_check(kAscendingRows, 1.0f, {0x3F80, 0x4000, 0x4040, 0x4080});
+  // INT8 codes {56, -64, 127, -127} at scale -0.25f -> bf16 {14.0, -16.0, 31.75, -31.75}.
+  run_resident_check({0x38, 0xC0, 0x7F, 0x81}, -0.25f, {0x4160, 0xC180, 0x41FE, 0xC1FE});
 }
 
 // The CPU embedding table file of a test: `vocab` rows of `width` values that differ from row to row, as bfloat16 rows or as
