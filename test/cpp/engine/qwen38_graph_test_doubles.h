@@ -89,7 +89,8 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
   bool context_healthy{true};
   bool fail_status_check{};  // every CheckDecodeStatus() of a started decode reports error bits
   size_t fail_cycle{};       // 1-based cycle of a decode that accumulates error bits when it completes (0 = none)
-  int reserved_tail{Qwen38DecodeDevice::kReservedTail};  // positions at the end of the store a verify step keeps free
+  // Positions at the end of the store that a verify step keeps free.
+  int reserved_tail{Qwen38DecodeDevice::kReservedTail};
 
   // ---- Qwen38DecodeDevice ----
   void MarkContextFailed() noexcept override { context_healthy = false; }
