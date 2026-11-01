@@ -851,6 +851,21 @@ TEST_F(Qwen38GraphEngineTest, AnInvalidChunkConfigurationIsRejectedWhenTheBacken
   EXPECT_NO_THROW(CreateQwen38GraphDependencies(model_, device_));
 }
 
+// A context tier makes the model synchronize model.qwen38_graph.kv_capacity with its graph, which can leave it below the chunk
+// the package asks for (8192 is the default of the dense prefill). The model checked the chunk against the configured
+// capacity and the device clamps it to the capacity of the graph, so assembling the backend leaves it alone.
+TEST_F(Qwen38GraphEngineTest, AChunkAboveTheCapacityOfTheLoadedGraphIsLeftToTheDeviceWhenTheBackendIsAssembled) {
+  auto& q = model_->config_->model.qwen38_graph;
+  q.prefill.enabled = true;
+  q.kv_capacity = 2056;  // the positions of a 2K graph: 2048 of context and the verify rows
+  for (const int chunk : {0, 4096, 8192}) {
+    q.prefill.chunk = chunk;  // 0 is the 8192 default of the dense prefill
+    EXPECT_NO_THROW(CreateQwen38GraphDependencies(model_, device_)) << "prefill.chunk=" << chunk;
+  }
+  q.prefill.chunk = -2;  // what does not depend on the capacity is still refused
+  EXPECT_THROW(CreateQwen38GraphDependencies(model_, device_), std::runtime_error);
+}
+
 TEST(Qwen38GraphSessionTest, AnOddChunkOfTheOptionsIsRoundedDownToAnEvenOne) {
   auto device = std::make_shared<ScriptedQwen38Device>();
   Qwen38GraphSession::Options options;

@@ -112,14 +112,16 @@ typedef int (*Qwen38PlaneReplayStateUpdatesFn)(void* stream, const void* descs, 
 // CUDA runtime helpers return the cudaError_t as int (0 = success).
 //
 // prep and ple_rows return 0 on success. A PLE table that is not GPU-addressable (Qwen38PleParams::pad_ == 1) is "staged":
-// the token and context words are read back to the host and the FP8 rows are gathered there. Every step of that staging
-// (pinned allocation, device alias, creation of the completion event, copy, synchronisation) is checked; when one fails, or
-// when the table was never registered with set_ple_host_params, the function returns the cudaError_t (cudaErrorInvalidValue
-// for the unregistered table) before it gathers or launches anything, so the outputs are untouched. Both also return the
-// error of their own kernel launch. The one step that can fail after the launch is recording the completion event, which
-// fences the staged buffers against a call on another stream: the function then waits for its stream before it returns the
-// error, so the kernel has finished and the outputs are complete. Callers must check the result. ple_rows reads ctx_in while
-// its last block writes ctx_out, so the two must not alias.
+// the token and context words are read back to the host and the FP8 rows are gathered there (a gather of 32 or more
+// rows by worker threads that the module starts when it first needs them). Every step of that staging (pinned
+// allocation, device alias, creation of the completion event, copy, synchronisation, starting the worker threads, which
+// fails with cudaErrorMemoryAllocation) is checked; when one fails, or when the table was never registered with
+// set_ple_host_params, the function returns the cudaError_t (cudaErrorInvalidValue for the unregistered table) before
+// it gathers or launches anything, so the outputs are untouched. Both also return the error of their own kernel
+// launch. The one step that can fail after the launch is recording the completion event, which fences the staged
+// buffers against a call on another stream: the function then waits for its stream before it returns the error, so
+// the kernel has finished and the outputs are complete. Callers must check the result. ple_rows reads ctx_in while its
+// last block writes ctx_out, so the two must not alias.
 //
 // A staged table is not usable while the stream is being captured into a CUDA graph: the host gathers its rows when the call
 // is made, which a replay would not repeat, and the read backs and waits of the call are not allowed on a capturing stream.
@@ -142,9 +144,11 @@ typedef int (*Qwen38PlaneReplayStateUpdatesFn)(void* stream, const void* descs, 
 // below -8 is not a row count: prep returns cudaErrorInvalidValue before it launches anything. Several request slots in one
 // call are prepared by prep_batched (QWEN38_PLANE_CAP_BATCHED_PREP), never by an encoding inside pos_add.
 //
-// The module keeps process-wide state (the staged tables registered through set_ple_host_params) that is shared by every
-// loader of the same library file. A loader calls attach once the module is loaded and validated and detach once before it
-// unloads it; the module drops that state only when the last attached loader detaches.
+// The module keeps process-wide state (the staged tables registered through set_ple_host_params, and the worker threads of the
+// staged gather) that is shared by every loader of the same library file. A loader calls attach once the module is loaded and
+// validated and detach once before it unloads it; the module drops that state, and stops and joins its threads, only when the
+// last attached loader detaches. A host must therefore detach before it releases the library (FreeLibrary / dlclose). The
+// reference host, Qwen38Plane, detaches and then keeps the library mapped until the process exits (see qwen38_graph_plane.h).
 #define QWEN38_PLANE_FUNCTIONS(X)                                                                                  \
   X(int, abi_version, (void))                                                                                      \
   X(int, sizeof_ple_params, (void))                                                                                \
@@ -281,13 +285,16 @@ typedef int (*Qwen38PlanePrepBatchedFn)(void* stream, const void* params, int ro
 // The step of the staged PLE path that an injected fault replaces with an error.
 typedef enum Qwen38PlaneFaultSite {
   QWEN38_PLANE_FAULT_NONE = 0,
-  QWEN38_PLANE_FAULT_HOST_ALLOC = 1,    // pinned cudaHostAlloc of a staging buffer
-  QWEN38_PLANE_FAULT_HOST_MALLOC = 2,   // malloc of the host n-gram row cache
-  QWEN38_PLANE_FAULT_DEVICE_ALIAS = 3,  // cudaHostGetDevicePointer of a mapped staging buffer
-  QWEN38_PLANE_FAULT_COPY = 4,          // device-to-host cudaMemcpyAsync
-  QWEN38_PLANE_FAULT_SYNC = 5,          // cudaStreamSynchronize / cudaDeviceSynchronize
-  QWEN38_PLANE_FAULT_EVENT_CREATE = 6,  // cudaEventCreateWithFlags of a completion event (only when it is created)
-  QWEN38_PLANE_FAULT_EVENT_RECORD = 7,  // cudaEventRecord of a completion event, after the kernel was launched
+  QWEN38_PLANE_FAULT_HOST_ALLOC = 1,       // pinned cudaHostAlloc of a staging buffer
+  QWEN38_PLANE_FAULT_HOST_MALLOC = 2,      // malloc of the host n-gram row cache
+  QWEN38_PLANE_FAULT_DEVICE_ALIAS = 3,     // cudaHostGetDevicePointer of a mapped staging buffer
+  QWEN38_PLANE_FAULT_COPY = 4,             // device-to-host cudaMemcpyAsync
+  QWEN38_PLANE_FAULT_SYNC = 5,             // cudaStreamSynchronize / cudaDeviceSynchronize
+  QWEN38_PLANE_FAULT_EVENT_CREATE = 6,     // cudaEventCreateWithFlags of a completion event (only when it is created)
+  QWEN38_PLANE_FAULT_EVENT_RECORD = 7,     // cudaEventRecord of a completion event, after the kernel was launched
+  QWEN38_PLANE_FAULT_THREAD_START = 8,     // creation of a gather worker thread (std::thread throws std::system_error)
+  QWEN38_PLANE_FAULT_LAUNCH = 9,           // a kernel launch that the CUDA runtime rejects (see Qwen38PlaneTestInjectFaultFn)
+  QWEN38_PLANE_FAULT_GATHER_SCRATCH = 10,  // the scratch lists of a gather thread (std::bad_alloc)
 } Qwen38PlaneFaultSite;
 
 typedef struct Qwen38PlaneTestStats {
@@ -300,10 +307,16 @@ typedef struct Qwen38PlaneTestStats {
   long long attached_loaders;         // loaders currently attached to the module
   long long fault_armed;              // 1 while an injected fault has not fired yet
   long long unfenced_drains;          // waits for a stream because its completion event could not be recorded
+  long long gather_pool_threads;      // live worker threads of the staged PLE gather
 } Qwen38PlaneTestStats;
 
 // Arms one fault: the (skip + 1)-th execution of `site` from now on fails with `error` instead of calling CUDA, once. A site
 // of QWEN38_PLANE_FAULT_NONE disarms. Returns 0, or cudaErrorInvalidValue for an unknown site or an `error` of 0.
+// QWEN38_PLANE_FAULT_LAUNCH does not replace a CUDA call: the (skip + 1)-th kernel launch that the module reports the status of
+// (every export that launches a kernel) is preceded by a launch of no blocks, which the runtime rejects like any bad launch
+// configuration, so what the export reports for its launch is the error that the runtime recorded (its code depends on the CUDA
+// version). The kernel itself still runs, so every argument has to be valid. `error` is not used, but like for every other site
+// it must not be 0.
 typedef int (*Qwen38PlaneTestInjectFaultFn)(int site, int skip, int error);
 // Fills `stats`. Returns 0, or cudaErrorInvalidValue for a null `stats`.
 typedef int (*Qwen38PlaneTestStatsFn)(Qwen38PlaneTestStats* stats);

@@ -2360,7 +2360,9 @@ token. The device holds `model.qwen38_graph.max_batch_size` slots (default 1), o
   cache.
 - `Qwen38GraphExecutor::SelectsOwnTokens()` is true. One Engine step is one prompt chunk (the size the device asks for,
   `Qwen38DecodeDevice::PrefillChunkTokens()`: `model.qwen38_graph.prefill.chunk` when set, otherwise 8192 tokens with the
-  dense prefill (`prefill.enabled`) and 2048 per step through the decode graphs, see `EffectiveQwen38PrefillChunkTokens`;
+  dense prefill (`prefill.enabled`) and 2048 per step through the decode graphs, see `EffectiveQwen38PrefillChunkTokens`; the
+  device clamps it to the capacity of the loaded graph, which a context tier can leave below the configured chunk, so that
+  case is not a configuration error;
   the decode-graph path needs an even chunk; a step that only advances the prompt delivers no event, so `CancelRequest`
   stays responsive; the dense prefill state continues across the chunks and is handed over to the decode state in the step that
   ingests the last one) or one whole cycle (with `fold.enabled`: one CUDA-graph launch). The executor tells the device the

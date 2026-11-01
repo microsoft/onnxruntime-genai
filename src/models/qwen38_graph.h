@@ -100,8 +100,14 @@ Config::SessionOptions ResolveQwen38AuxiliarySessionOptions(const Config::Sessio
 size_t EffectiveQwen38PrefillChunkTokens(const Config::Model::Qwen38Graph& q);
 
 // Throws a std::runtime_error unless the effective prompt chunk lies in [1, kv_capacity] (dense prefill) or, when the
-// prompt is ingested by the decode graphs (prefill.enabled false), is even so that S=2 pairs stay aligned.
+// prompt is ingested by the decode graphs (prefill.enabled false), is even so that S=2 pairs stay aligned. The model calls it
+// with the kv_capacity of its configuration, before it has loaded its graph.
 void ValidateQwen38PrefillChunk(const Config::Model::Qwen38Graph& q);
+
+// The part of ValidateQwen38PrefillChunk that does not look at kv_capacity: the chunk is not negative and, when the decode
+// graphs ingest the prompt, even. Once the graph is loaded, kv_capacity is that graph's capacity, which a context tier can
+// leave below the chunk of the package; the device clamps the chunk to it, so the Engine's dependencies check only this part.
+void ValidateQwen38PrefillChunkShape(const Config::Model::Qwen38Graph& q);
 
 // Throws std::invalid_argument naming the first prompt id outside [0, vocab_size). The ids are row indices of the
 // embedding gather on the device. embed_gather clamps an id outside the table to row 0, so the model would silently embed
@@ -161,6 +167,51 @@ std::optional<std::vector<std::string>> ReadQwen38OnnxOutputNames(const std::fil
 // ValidateQwen38BatchedTargetOutputs on the outputs of `model_file`, for several slots only (a single slot reads nothing). A
 // file whose outputs cannot be read is accepted here and left to the check against the session.
 void ValidateQwen38TargetModelFile(size_t request_slots, const std::filesystem::path& model_file);
+
+// The context tier an ORT_QWEN38_CONTEXT_LENGTH request names ("2k", "8k", "16k", "32k", "64k", "128k" or a token count): the
+// request lower-cased, with the counts 2048, 8192, 16384, 32768, 65536 and 131072 folded to the tier of that size. Empty when
+// nothing is requested. Throws std::invalid_argument for a value that cannot be part of a graph's file name (anything but
+// letters and digits).
+std::string NormalizeQwen38ContextTier(const std::string& request);
+
+// Chooses the target graph of a package once, as a file name relative to the model folder. The model constructor hands the
+// result to the pre-upload reader of the graph's output names (ValidateQwen38TargetModelFile) and to CreateSession, so both
+// inspect the same file. `exists` tells whether a folder-relative file can be loaded (a file of the package, or a graph supplied
+// from memory). Every candidate lies next to the decoder (model.decoder.filename, which may sit in a sub-folder such as target/):
+//  - `context_request` (ORT_QWEN38_CONTEXT_LENGTH, see NormalizeQwen38ContextTier) takes model_<tier>.onnx, else
+//    model_dynamic_ctx.onnx, else the decoder itself. The graph of a package is the 32K one, so the 32k tier tries
+//    model_32k.onnx, then the decoder, then model_dynamic_ctx.onnx. The first candidate that exists wins; when none does, a
+//    std::runtime_error names every path that was tried. Because the decoder is one of the candidates, a tier that has no graph
+//    of its own is not an error: the model constructor logs the graph it took, with the kv_capacity, context_length and
+//    max_length that graph gave, when logging is enabled.
+//  - Without a context request, `mtp_drafts` (ORT_QWEN38_MTP_DRAFTS, 1..3) takes model_s<drafts + 1>.onnx next to the decoder,
+//    else under target/, else the decoder.
+// With neither, the decoder is returned as configured and nothing is looked up.
+std::string ResolveQwen38TargetGraphFilename(const std::string& decoder_filename, const std::string& context_request,
+                                             const std::string& mtp_drafts,
+                                             const std::function<bool(const std::string&)>& exists);
+
+// Resolves a context-tier variant for an auxiliary head graph (e.g. fold.head_r2.filename or head.filename_s1 / filename_s2)
+// using the same <stem>_<tier><ext> / <stem>_dynamic_ctx<ext> / configured fallback chain as the target graph.
+std::string ResolveQwen38AuxiliaryGraphFilename(const std::string& configured_filename, const std::string& context_request,
+                                                const std::function<bool(const std::string&)>& exists);
+
+// The context settings of a package once its target graph is known: model.qwen38_graph.kv_capacity, model.context_length and
+// search.max_length, the default generation budget of a request (Engine::CreateRequest takes the smaller of it and the engine's
+// own ceiling).
+struct Qwen38GraphContext {
+  int kv_capacity{};
+  int context_length{};
+  int max_length{};
+};
+
+// Follows the capacity of a target graph whose past_position_ids input holds `graph_positions` positions: kv_capacity is that
+// count and context_length what is left of it after the rows of the widest verify step. The capacity is always synchronized,
+// the generation budget only when the context asks for it. A request for a context tier (`context_requested`) takes the whole
+// context, search.max_length = context_length. Without one the configured `configured_max_length` stays: a smaller limit is
+// retained, a limit beyond the graph's context is clamped to it, and only a missing limit (<= 0) takes the whole context.
+// Throws std::invalid_argument for graph_positions <= 0.
+Qwen38GraphContext SyncQwen38GraphContext(int64_t graph_positions, int configured_max_length, bool context_requested);
 
 // Checks a model package against the plane library it names, when the model is loaded, before its weights are uploaded and
 // before any session is created: an INT8 PLE table (model.qwen38_graph.ple_table with a negative scale) needs the int8_ple
@@ -279,6 +330,12 @@ struct Qwen38CacheInput {
 // wrong offset for every slot but the first, without any error.
 void ValidateQwen38CacheShapes(const std::vector<Qwen38CacheInput>& inputs, int kv_capacity, const std::string& graph,
                                size_t request_slots = 1);
+
+// Derives the KV capacity of a loaded target graph from its static past_key_values.<n>.key|value cache length (shape[2]),
+// falling back to past_position_ids (shape[1]) only when no static key/value cache input is present. Single-slot graphs may
+// pad past_position_ids beyond the KV cache (e.g. 33040 positions for 33028 KV rows), so using the KV cache length preserves
+// compatibility with ValidateQwen38CacheShapes.
+int64_t ResolveQwen38GraphKvCapacity(const std::vector<Qwen38CacheInput>& inputs);
 
 // Constants of the PackedQSAIndexer state conversion (key-norm weights, leading-RoPE tables) for the dense -> packed hand-off.
 struct Qwen38QsaConstants {
