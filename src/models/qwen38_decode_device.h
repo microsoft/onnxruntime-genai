@@ -112,6 +112,12 @@ class Qwen38DecodeLedger {
   int Bank() const { return bank_; }
   size_t Length() const { return length_; }
 
+  void SetBank(int bank) {
+    if (bank < 0 || bank >= num_banks_)
+      throw std::out_of_range("qwen38_graph: invalid ledger bank " + std::to_string(bank));
+    bank_ = bank;
+  }
+
   // Commits `step` rows (1 .. num_banks_ - 1).
   void Advance(size_t step) {
     const size_t max_step = static_cast<size_t>(num_banks_ - 1);

@@ -103,6 +103,31 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
                                          const Config& /*config*/,
                                          bool /*disable_graph_capture*/) {
   auto device = GetDeviceInterface(DeviceType::CUDA);
+
+  // Resolve the selected CUDA device before creating/attaching the stream or registering the EP,
+  // so the CUDA runtime device, stream, and OrtMemoryInfo agree with the selected EP device.
+  Config::ProviderOptions effective_options = provider_options;
+  auto ep_devices_ptrs = FindRegisteredEpDevices("CUDAExecutionProvider");
+  if (!ep_devices_ptrs.empty()) {
+    auto filtered_ep_device_ptrs = ApplyDeviceFiltering(provider_options, ep_devices_ptrs);
+    std::optional<std::string> requested_id;
+    for (const auto& [k, v] : provider_options.options) {
+      if (k == "device_id" && !v.empty()) {
+        requested_id = v;
+        break;
+      }
+    }
+    std::vector<std::string> cuda_device_ids;
+    cuda_device_ids.reserve(filtered_ep_device_ptrs.size());
+    for (const auto* dev : filtered_ep_device_ptrs) {
+      cuda_device_ids.push_back(GetCudaDeviceIdMetadata(dev));
+    }
+    const size_t selected = SelectCudaDeviceIndex(cuda_device_ids, requested_id, HasDeviceFiltering(provider_options));
+    if (!requested_id && !cuda_device_ids[selected].empty()) {
+      effective_options.options.emplace_back("device_id", cuda_device_ids[selected]);
+    }
+  }
+  (void)device->GetDeviceId(&effective_options);
   AddCudaStreamConfig(session_options, device);
 
   // CUDA EP honors enable_cuda_graph from the config as-is. Non-decoder

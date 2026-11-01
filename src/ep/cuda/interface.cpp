@@ -35,8 +35,17 @@ GenaiInterface* gp_genai{};
 Ort::Allocator* ort_allocator_{};
 const char* device_label = "cuda";
 
+int g_stream_device_id = -1;
 cuda_stream_holder g_stream;
-cudaStream_t GetStream() { return g_stream.get(); }
+cudaStream_t GetStream() {
+  if (!g_stream.has_stream()) {
+    int dev = 0;
+    CUDA_CHECK(cudaGetDevice(&dev));
+    g_stream.Create();
+    g_stream_device_id = dev;
+  }
+  return g_stream.get();
+}
 
 namespace {
 
@@ -659,11 +668,22 @@ struct CudaBatchedSampler final : BatchedSampler {
 };
 
 struct CudaInterfaceImplBase : DeviceInterface {
-  CudaInterfaceImplBase() {
-    g_stream.Create();
-  }
+  CudaInterfaceImplBase() = default;
 
   ~CudaInterfaceImplBase() {
+    ort_allocator_ = nullptr;
+    g_stream.Destroy();
+    g_stream_device_id = -1;
+  }
+
+  void ShapeInitSessionProviderOptions(Config::ProviderOptions& init_options,
+                                       const Config::ProviderOptions* user_options) const override {
+    if (!user_options) return;
+    for (const auto& [name, value] : user_options->options) {
+      if (name == "device_id") {
+        init_options.options.emplace_back(name, value);
+      }
+    }
   }
 
   void InitOrt(const OrtApi& api, Ort::Allocator& allocator) override {
@@ -676,9 +696,13 @@ struct CudaInterfaceImplBase : DeviceInterface {
   }
 
   std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
+    int device_id = g_stream_device_id;
+    if (device_id < 0) {
+      CUDA_CHECK(cudaGetDevice(&device_id));
+    }
     return OrtMemoryInfo::Create("Cuda",
                                  OrtAllocatorType::OrtDeviceAllocator,
-                                 0,
+                                 device_id,
                                  OrtMemType::OrtMemTypeDefault);
   }
 
@@ -1064,7 +1088,43 @@ struct CudaInterfaceImpl final : CudaInterfaceImplBase {
     }
     return integrated != 0;
   }
-  int GetDeviceId(const ProviderOptions*) override {
+  int GetDeviceId(const ProviderOptions* user_options) override {
+    int requested_id = -1;
+    if (user_options) {
+      for (const auto& [name, value] : user_options->options) {
+        if (name == "device_id" && !value.empty()) {
+          size_t consumed = 0;
+          long long parsed = -1;
+          try {
+            parsed = std::stoll(value, &consumed);
+          } catch (...) {
+            parsed = -1;
+          }
+          if (consumed != value.size() || parsed < 0 || parsed > std::numeric_limits<int>::max()) {
+            throw std::invalid_argument("CUDA execution provider device_id must be a non-negative integer, got '" +
+                                        value + "'.");
+          }
+          requested_id = static_cast<int>(parsed);
+          break;
+        }
+      }
+    }
+    if (requested_id >= 0) {
+      if (g_stream.has_stream() && g_stream_device_id != requested_id) {
+        throw std::runtime_error(
+            "CUDA execution provider device_id=" + std::to_string(requested_id) +
+            " conflicts with the active GenAI CUDA stream on device " + std::to_string(g_stream_device_id) + ".");
+      }
+      CUDA_CHECK(cudaSetDevice(requested_id));
+      if (!g_stream.has_stream()) {
+        g_stream.Create();
+        g_stream_device_id = requested_id;
+      }
+      return requested_id;
+    }
+    if (g_stream.has_stream()) {
+      return g_stream_device_id;
+    }
     int device_id{};
     CUDA_CHECK(cudaGetDevice(&device_id));
     return device_id;

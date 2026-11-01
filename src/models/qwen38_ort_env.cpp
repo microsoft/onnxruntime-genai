@@ -31,12 +31,12 @@ void WriteEnvironmentVariable(const std::string& name, const std::string* value)
 
 Qwen38OrtEnvScope::Qwen38OrtEnvScope(const std::vector<Qwen38OrtEnvVariable>& variables) : lock_{EnvironmentMutex()} {
   try {
+    saved_.reserve(variables.size());
     for (const Qwen38OrtEnvVariable& variable : variables) {
       const char* current = std::getenv(variable.name.c_str());
       if (variable.only_if_unset && current != nullptr) continue;
-      Saved saved{variable.name, variable.value, current ? std::optional<std::string>{current} : std::nullopt};
+      saved_.push_back(Saved{variable.name, variable.value, current ? std::optional<std::string>{current} : std::nullopt});
       WriteEnvironmentVariable(variable.name, &variable.value);
-      saved_.push_back(std::move(saved));
     }
   } catch (...) {
     Restore();

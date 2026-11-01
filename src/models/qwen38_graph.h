@@ -134,7 +134,7 @@ struct Qwen38CacheInput {
 // std::runtime_error naming the offending input of `graph` ("target", "head", ...) unless the two agree:
 //   past_key_values.<n>.key|value (also head.past_key_values.<n>.*)  [batch, 2, kv_capacity, 256]
 //   past_position_ids                                                [batch, >= kv_capacity]
-//   past_key_values.<n>.index_key                                    [batch, >= kv_capacity / ratio, width]
+//   past_key_values.<n>.index_key                                    [batch, >= kv_capacity / ratio, 128]
 // where ratio is kQwen38IndexKeyRatio. Other inputs (recurrent state, index buffers, ...) do not depend on the
 // capacity and are ignored.
 void ValidateQwen38CacheShapes(const std::vector<Qwen38CacheInput>& inputs, int kv_capacity, const std::string& graph);
@@ -149,7 +149,10 @@ struct Qwen38QsaConstants {
     std::map<int, const uint8_t*> vscale;  // per QSA layer (fp32 [kKvScaleCount], optional for INT8/FP8 KV)
     const uint8_t* cos{};                  // bf16 [max_pos, width]
     const uint8_t* sin{};
+    size_t cos_rows{};
+    size_t sin_rows{};
     int width{};
+    void RequireRopePositions(size_t blocks, const char* set_name) const;
   };
   Qwen38QsaConstants(Qwen38Plane& plane, const std::filesystem::path& index_path, const std::filesystem::path& root,
                      void* stream);
