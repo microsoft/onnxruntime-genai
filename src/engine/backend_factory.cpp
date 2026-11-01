@@ -372,8 +372,10 @@ BackendCapabilities ResolveBackendCapabilities(
       (explicit_capabilities.supports_delimited_guidance && !resolved.supports_delimited_guidance) ||
       (explicit_capabilities.prefix_reuse && !resolved.prefix_reuse) ||
       (!transactions && explicit_capabilities.recovery == BackendRecovery::TransactionalRollback) ||
-      (explicit_capabilities.max_request_length > resolved.max_request_length &&
-       resolved.max_request_length != 0)) {
+      // Zero declares no limit of its own (the model's search limit applies), which a finite cache cannot honor.
+      (resolved.max_request_length != 0 &&
+       (explicit_capabilities.max_request_length == 0 ||
+        explicit_capabilities.max_request_length > resolved.max_request_length))) {
     throw std::runtime_error("Engine backend capabilities exceed its collaborators' supported features or capacity.");
   }
   return explicit_capabilities;

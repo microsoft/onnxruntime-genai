@@ -79,6 +79,12 @@ TEST(EngineBackendFactoryTest, ExplicitContradictionsFailBeforeAdmission) {
   capabilities.max_request_length = 65;
   EXPECT_THROW(ResolveBackendCapabilities(*model, *cache, *scheduler, *executor, capabilities),
                std::runtime_error);
+  // Zero is no limit: a cache that holds 64 positions cannot declare it.
+  capabilities.max_request_length = 0;
+  EXPECT_THROW(ResolveBackendCapabilities(*model, *cache, *scheduler, *executor, capabilities),
+               std::runtime_error);
+  capabilities.max_request_length = 64;
+  EXPECT_NO_THROW(ResolveBackendCapabilities(*model, *cache, *scheduler, *executor, capabilities));
   capabilities = ResolveBackendCapabilities(*model, *cache, *scheduler, *executor);
   capabilities.token_selection = BackendTokenSelection::Engine;
   EngineDependencies dependencies{cache, std::move(scheduler), std::move(executor)};
