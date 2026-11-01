@@ -766,7 +766,9 @@ EngineDependencies CreateQwen38GraphDependencies(std::shared_ptr<Model> model,
         "The qwen38_flash_graph model type runs on the Engine's static single-slot path; engine.dynamic_batching is not supported.");
   }
   const auto& qwen38 = config.model.qwen38_graph;
-  ValidateQwen38PrefillChunk(qwen38);
+  // Not ValidateQwen38PrefillChunk: the model has checked the chunk against the configured kv_capacity, and kv_capacity is now
+  // that of the loaded graph, which a context tier can leave below the chunk. The device clamps the chunk to it.
+  ValidateQwen38PrefillChunkShape(qwen38);
   Qwen38GraphSession::Options options;
   options.prefill_chunk_tokens = EffectiveQwen38PrefillChunkTokens(qwen38);
   options.stop_tokens.assign(config.model.eos_token_id.begin(), config.model.eos_token_id.end());

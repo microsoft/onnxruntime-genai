@@ -571,6 +571,23 @@ TEST(Qwen38GraphConfigTest, PrefillChunkValidation) {
   EXPECT_THROW(ValidateQwen38PrefillChunk(config.model.qwen38_graph), std::runtime_error);
   config.model.qwen38_graph.prefill.chunk = 0;  // the 8192 default does not fit a 4096 capacity
   EXPECT_THROW(ValidateQwen38PrefillChunk(config.model.qwen38_graph), std::runtime_error);
+
+  // The Engine's dependencies check only the part that does not look at kv_capacity: after a context tier it is the capacity
+  // of the graph (2056 positions for a 2K graph: 2048 of context and the verify rows), and the device clamps the chunk to it.
+  config.model.qwen38_graph.kv_capacity = 2056;
+  for (const int chunk : {0, 4096, 8192}) {
+    config.model.qwen38_graph.prefill.chunk = chunk;
+    EXPECT_THROW(ValidateQwen38PrefillChunk(config.model.qwen38_graph), std::runtime_error) << chunk;
+    EXPECT_NO_THROW(ValidateQwen38PrefillChunkShape(config.model.qwen38_graph)) << chunk;
+  }
+  // What does not depend on the capacity is still refused.
+  config.model.qwen38_graph.prefill.chunk = -1;
+  EXPECT_THROW(ValidateQwen38PrefillChunkShape(config.model.qwen38_graph), std::runtime_error);
+  config.model.qwen38_graph.prefill.enabled = false;
+  config.model.qwen38_graph.prefill.chunk = 15;
+  EXPECT_THROW(ValidateQwen38PrefillChunkShape(config.model.qwen38_graph), std::runtime_error);
+  config.model.qwen38_graph.prefill.chunk = 16;
+  EXPECT_NO_THROW(ValidateQwen38PrefillChunkShape(config.model.qwen38_graph));
 }
 
 // The documented slot range is enforced where the key is parsed, with the key and the value in the message, not by a later

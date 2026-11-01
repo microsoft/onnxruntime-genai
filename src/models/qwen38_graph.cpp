@@ -1761,18 +1761,20 @@ size_t EffectiveQwen38PrefillChunkTokens(const Config::Model::Qwen38Graph& q) {
   return static_cast<size_t>(q.prefill.enabled ? kDenseChunk : kStepChunk);
 }
 
-void ValidateQwen38PrefillChunk(const Config::Model::Qwen38Graph& q) {
+void ValidateQwen38PrefillChunkShape(const Config::Model::Qwen38Graph& q) {
   if (q.prefill.chunk < 0)
     throw std::runtime_error("model.qwen38_graph.prefill.chunk must not be negative (0 selects the default)");
-  const size_t chunk = EffectiveQwen38PrefillChunkTokens(q);
-  if (q.prefill.enabled) {
-    if (chunk > static_cast<size_t>(std::max(q.kv_capacity, 0)))
-      throw std::runtime_error("model.qwen38_graph.prefill.chunk must be in [1, kv_capacity]");
-  } else if ((chunk % 2) != 0) {
+  if (!q.prefill.enabled && (EffectiveQwen38PrefillChunkTokens(q) % 2) != 0) {
     throw std::runtime_error(
         "model.qwen38_graph.prefill.chunk must be even when the prompt is ingested by the decode graphs "
         "(prefill.enabled is false)");
   }
+}
+
+void ValidateQwen38PrefillChunk(const Config::Model::Qwen38Graph& q) {
+  ValidateQwen38PrefillChunkShape(q);
+  if (q.prefill.enabled && EffectiveQwen38PrefillChunkTokens(q) > static_cast<size_t>(std::max(q.kv_capacity, 0)))
+    throw std::runtime_error("model.qwen38_graph.prefill.chunk must be in [1, kv_capacity]");
 }
 
 size_t Qwen38GraphEngine::PrefillChunkTokens() const {
