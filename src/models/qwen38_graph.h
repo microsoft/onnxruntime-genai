@@ -164,6 +164,15 @@ void ValidateQwen38BatchedVerifyRows(size_t request_slots, int verify_rows);
 // say) or has no output: the caller then relies on the outputs of the session.
 std::optional<std::vector<std::string>> ReadQwen38OnnxOutputNames(const std::filesystem::path& model_file);
 
+// Reads the `head_rows` integer attribute of the `SpeculativePrefixCommit` node from the ONNX model file `model_file` without
+// reading any initializer. Returns nullopt when the file cannot be read or contains no `SpeculativePrefixCommit` node with an
+// integer `head_rows` attribute.
+std::optional<int64_t> ReadQwen38OnnxSpeculativePrefixCommitHeadRows(const std::filesystem::path& model_file);
+
+// Throws std::runtime_error if a fold target's `SpeculativePrefixCommit` node declares a `head_rows` attribute that does not
+// match the target's inferred `verify_rows`.
+void ValidateQwen38FoldHeadRows(std::optional<int64_t> head_rows, int verify_rows);
+
 // ValidateQwen38BatchedTargetOutputs on the outputs of `model_file`, for several slots only (a single slot reads nothing). A
 // file whose outputs cannot be read is accepted here and left to the check against the session.
 void ValidateQwen38TargetModelFile(size_t request_slots, const std::filesystem::path& model_file);
@@ -801,6 +810,7 @@ struct Qwen38GraphModel : Model {
   std::unique_ptr<OrtSession> session_head_s1_, session_head_s2_;
   std::unique_ptr<OrtSessionOptions> head_r2_session_options_, dense_session_options_, head_kv_session_options_;
   std::unique_ptr<OrtSession> session_head_r2_, session_dense_, session_head_kv_;
+  std::optional<int64_t> target_head_rows_;
   std::unique_ptr<Qwen38GraphEngine> engine_;
 
   void RunCpuEmbedding(const int64_t* ids_host, size_t num_tokens, void* dst_host) const;

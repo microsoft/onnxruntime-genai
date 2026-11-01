@@ -86,6 +86,7 @@ class ProtoFieldReader {
     bool length_delimited{};
     uint64_t payload_begin{};
     uint64_t payload_size{};
+    uint64_t varint_value{};
   };
 
   ProtoFieldReader(std::istream& in, uint64_t begin, uint64_t end) : in_(in), pos_(begin), end_(end) {}
@@ -99,11 +100,10 @@ class ProtoFieldReader {
     if (!ReadVarint(tag)) return Fail();
     const uint64_t number = tag >> 3;
     if (number == 0 || number > kMaxFieldNumber) return Fail();
-    field = Field{static_cast<uint32_t>(number), false, 0, 0};
+    field = Field{static_cast<uint32_t>(number), false, 0, 0, 0};
     switch (tag & 7u) {
       case 0: {  // varint
-        uint64_t ignored = 0;
-        return ReadVarint(ignored) || Fail();
+        return ReadVarint(field.varint_value) || Fail();
       }
       case 1:  // 64-bit
         return Skip(8);
@@ -349,6 +349,76 @@ std::optional<std::vector<std::string>> ReadQwen38OnnxOutputNames(const std::fil
   }
   if (model.Failed() || !has_graph || names.empty()) return std::nullopt;
   return names;
+}
+
+std::optional<int64_t> ReadQwen38OnnxSpeculativePrefixCommitHeadRows(const std::filesystem::path& model_file) {
+  constexpr uint32_t kModelGraph = 7;     // onnx.ModelProto.graph
+  constexpr uint32_t kGraphNode = 1;      // onnx.GraphProto.node
+  constexpr uint32_t kNodeOpType = 4;     // onnx.NodeProto.op_type
+  constexpr uint32_t kNodeAttribute = 5;  // onnx.NodeProto.attribute
+  constexpr uint32_t kAttrName = 1;       // onnx.AttributeProto.name
+  constexpr uint32_t kAttrInt = 3;        // onnx.AttributeProto.i
+  constexpr uint64_t kMaxNodeBytes = uint64_t{1} << 20;
+
+  std::ifstream file(model_file, std::ios::binary);
+  if (!file) return std::nullopt;
+  file.seekg(0, std::ios::end);
+  const std::streamoff file_size = file.tellg();
+  if (!file || file_size <= 0) return std::nullopt;
+
+  ProtoFieldReader model(file, 0, static_cast<uint64_t>(file_size));
+  ProtoFieldReader::Field field;
+  while (model.Next(field)) {
+    if (field.number != kModelGraph || !field.length_delimited) continue;
+    ProtoFieldReader graph(file, field.payload_begin, field.payload_begin + field.payload_size);
+    ProtoFieldReader::Field node_field;
+    while (graph.Next(node_field)) {
+      if (node_field.number != kGraphNode || !node_field.length_delimited) continue;
+      std::string node_bytes;
+      if (node_field.payload_size > kMaxNodeBytes || !graph.ReadPayload(node_field, node_bytes)) return std::nullopt;
+      std::istringstream node_stream(node_bytes);
+      ProtoFieldReader node(node_stream, 0, node_bytes.size());
+      ProtoFieldReader::Field nf;
+      std::string op_type;
+      std::optional<int64_t> head_rows;
+      while (node.Next(nf)) {
+        if (nf.number == kNodeOpType && nf.length_delimited) {
+          if (!node.ReadPayload(nf, op_type)) return std::nullopt;
+        } else if (nf.number == kNodeAttribute && nf.length_delimited) {
+          std::string attr_bytes;
+          if (!node.ReadPayload(nf, attr_bytes)) return std::nullopt;
+          std::istringstream attr_stream(attr_bytes);
+          ProtoFieldReader attr(attr_stream, 0, attr_bytes.size());
+          ProtoFieldReader::Field af;
+          std::string attr_name;
+          std::optional<int64_t> attr_int;
+          while (attr.Next(af)) {
+            if (af.number == kAttrName && af.length_delimited) {
+              if (!attr.ReadPayload(af, attr_name)) return std::nullopt;
+            } else if (af.number == kAttrInt && !af.length_delimited) {
+              attr_int = static_cast<int64_t>(af.varint_value);
+            }
+          }
+          if (attr.Failed()) return std::nullopt;
+          if (attr_name == "head_rows" && attr_int.has_value()) {
+            head_rows = attr_int;
+          }
+        }
+      }
+      if (node.Failed()) return std::nullopt;
+      if (op_type == "SpeculativePrefixCommit" && head_rows.has_value()) {
+        return head_rows;
+      }
+    }
+    if (graph.Failed()) return std::nullopt;
+  }
+  return std::nullopt;
+}
+
+void ValidateQwen38FoldHeadRows(std::optional<int64_t> head_rows, int verify_rows) {
+  if (!head_rows.has_value() || *head_rows == verify_rows) return;
+  throw std::runtime_error("qwen38_graph: SpeculativePrefixCommit head_rows attribute (" + std::to_string(*head_rows) +
+                           ") does not match the target verify width (" + std::to_string(verify_rows) + ")");
 }
 
 void ValidateQwen38TargetModelFile(size_t request_slots, const std::filesystem::path& model_file) {
@@ -1144,6 +1214,7 @@ void Qwen38GraphEngine::BuildTarget() {
     // SpeculativePrefixCommit serves head_rows in [3, 8] and reads 16 ctl words and >= 2 * head_rows ctx_a words per slot.
     if (verify_rows_ < 3 || verify_rows_ > kMaxVerifyRows)
       throw std::runtime_error("qwen38_graph: the fold stack needs 3..8 verify rows (SpeculativePrefixCommit head_rows)");
+    ValidateQwen38FoldHeadRows(model_.target_head_rows_, verify_rows_);
     fold_ptrs_ = PlaneBuffer(plane_, 2 * sizeof(int64_t), stream_);
     const int64_t ptrs[2] = {static_cast<int64_t>(reinterpret_cast<intptr_t>(result_host_)), kRing};
     plane_.Check(plane_.memcpy_h2d(fold_ptrs_.data(), ptrs, sizeof(ptrs), stream_), "fold ptrs");
@@ -2329,6 +2400,12 @@ Qwen38CycleRecord Qwen38GraphEngine::WaitCycleSlot(int slot_idx) {
     __builtin_ia32_pause();
 #endif
     if (((++spins) & (kStatusRingSpinCheck - 1)) == 0) {
+      if (SecondsSince(start) > 1.0) {
+        if (const int64_t bits = ReadCtlSlot(slot_idx, 5); bits != 0) {
+          throw std::runtime_error("qwen38_graph: device error bits " + std::to_string(bits) +
+                                   " while waiting for the cycle record (slot " + std::to_string(slot_idx) + ")");
+        }
+      }
       if (SecondsSince(start) > 180.0) throw std::runtime_error("qwen38_graph: timeout waiting for the cycle record");
       std::this_thread::yield();
     }
@@ -2904,6 +2981,9 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
   }
   if (!config_->memory_assets_only_ && config_->model_data_spans_.count(target_filename) == 0) {
     ValidateQwen38TargetModelFile(ResolveQwen38MaxBatchSize(*config_), root / target_filename);
+    if (q.fold.enabled) {
+      target_head_rows_ = ReadQwen38OnnxSpeculativePrefixCommitHeadRows(root / target_filename);
+    }
   }
 
   // Device copy of the initializers several sessions have in common (optional)

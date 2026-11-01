@@ -543,6 +543,11 @@ TEST(Qwen38FoldIoTest, TheFoldModelMayOnlyTakeTheInputsOfTheContract) {
   }
   EXPECT_THROW(RequireQwen38FoldContract(valid_inputs, std::vector<std::string>{"logits", "next_tokens"}),
                std::runtime_error);
+
+  // SpeculativePrefixCommit head_rows attribute validation from ONNX protobuf and against verify_rows_.
+  EXPECT_NO_THROW(ValidateQwen38FoldHeadRows(std::nullopt, 4));
+  EXPECT_NO_THROW(ValidateQwen38FoldHeadRows(4, 4));
+  EXPECT_THROW(ValidateQwen38FoldHeadRows(3, 4), std::runtime_error);
 }
 
 TEST(Qwen38CycleRecordTest, AcceptedCyclesCommitTwoTokens) {
@@ -1006,6 +1011,16 @@ TEST(Qwen38MultiSlotConfigTest, TheOutputNamesOfTheModelFileAreReadWithoutParsin
   for (int i = 0; i < 300; ++i) many.push_back("state_update." + std::to_string(i) + ".conv_value");
   EXPECT_EQ(ReadQwen38OnnxOutputNames(WriteFile(dir / "many.onnx", OnnxModelBytes(many, 1000))),
             std::optional<std::vector<std::string>>{many});
+
+  // SpeculativePrefixCommit head_rows attribute is parsed from NodeProto without reading initializers.
+  const std::string attr_head_rows = ProtoBytes(1, "head_rows") + ProtoVarintField(3, 3);
+  const std::string spc_node = ProtoBytes(4, "SpeculativePrefixCommit") + ProtoBytes(5, attr_head_rows);
+  const std::string spc_graph = ProtoBytes(1, spc_node) + ProtoBytes(12, ProtoValueInfo("logits"));
+  const std::string spc_model = ProtoVarintField(1, 9) + ProtoBytes(7, spc_graph);
+  const auto spc_file = WriteFile(dir / "spc.onnx", spc_model);
+  EXPECT_EQ(ReadQwen38OnnxSpeculativePrefixCommitHeadRows(spc_file), std::optional<int64_t>{3});
+  EXPECT_THROW(ValidateQwen38FoldHeadRows(ReadQwen38OnnxSpeculativePrefixCommitHeadRows(spc_file), 4),
+               std::runtime_error);
 
   std::error_code ec;
   std::filesystem::remove_all(dir, ec);
