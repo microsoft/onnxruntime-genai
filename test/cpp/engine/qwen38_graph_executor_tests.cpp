@@ -1298,6 +1298,31 @@ TEST_F(Qwen38GraphEngineTest, DeviceErrorBitsAfterAStopStringTurnAreSurfacedBefo
   EXPECT_EQ(device_->status_checks, 1u);
 }
 
+// The status check of a rewind runs outside a step, where RunStatic's fatal handler does not see its failure. The error bits
+// are erased by the next Reset(), so the failure must outlive the exception the caller caught: the context is marked failed
+// and the next step fails, instead of the context resuming as if the bits had never been read.
+TEST_F(Qwen38GraphEngineTest, ADeviceErrorFoundWhileRewindingStaysFatalAfterTheCallerCaughtIt) {
+  device_->overrides[5] = 5;
+  device_->overrides[6] = 6;
+  device_->fail_status_check = true;
+  auto engine = MakeEngine();
+  auto request = engine->CreateRequest();
+  TurnOptions options;
+  options.request = request;
+  options.max_generated_tokens = 20;
+  options.stop_strings = {"STOP"};
+  const uint64_t turn = request->BeginTurn(Prompt(5), options);
+  ASSERT_EQ(RunToCompletion(*engine, request).finish_reason, GenerationFinishReason::StopString);
+
+  ASSERT_THROW(request->RewindToStartOfTurn(turn), std::runtime_error);
+  EXPECT_FALSE(device_->context_healthy);
+
+  // What a caller that went on would find: bits that no longer exist and a request that is ready to run.
+  device_->fail_status_check = false;
+  auto next = Begin(*engine, Prompt(5, 25), /*max_generated_tokens=*/4);
+  EXPECT_EQ(RunUntilFailure(*engine), EngineErrorCode::EngineExecutionFailure);
+}
+
 TEST_F(Qwen38GraphEngineTest, DeviceErrorBitsAfterACanceledTurnAreSurfacedOnTheNextRun) {
   model_->config_->model.qwen38_graph.prefill.chunk = 64;
   auto engine = MakeEngine();
