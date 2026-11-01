@@ -2179,6 +2179,48 @@ TEST_F(Qwen38GraphEngineTest, MultiSlotCancelingALongPromptThatArrivedWhileASlot
   EXPECT_EQ(device_->CallCount("prefill_slot:1:4"), 0u) << "the canceled prompt went on";
 }
 
+// A request canceled part way through its prompt is displaced when two newcomers need both slots, and its next turn then
+// restarts it from scratch. The scheduler must still know it, or the request would never run again.
+TEST_F(Qwen38GraphEngineTest, MultiSlotACanceledPrefillRequestRunsAgainAfterNewcomersTookItsSlot) {
+  device_ = std::make_shared<ScriptedQwen38Device>(/*capacity=*/68, /*mtp=*/true, /*max_batch_size=*/2);
+  device_->dense_prefill = true;
+  device_->preferred_chunk = 8;
+  auto engine = MakeEngine();
+
+  auto canceled = engine->CreateRequest();
+  auto canceled_options = Limit(3);
+  canceled_options.request = canceled;
+  const uint64_t canceled_turn = canceled->BeginTurn(Prompt(20, 12), canceled_options);
+  std::array<EngineEvent, 16> buffer;
+  ASSERT_EQ(engine->Run(buffer), 0u);  // the first chunk of the prompt
+  ASSERT_TRUE(engine->CancelRequest(canceled, canceled_turn));
+  while (engine->HasPendingRequests()) engine->Run(buffer);
+
+  auto first = Begin(*engine, Prompt(4, 30), /*max_generated_tokens=*/3);
+  auto second = Begin(*engine, Prompt(5, 50), /*max_generated_tokens=*/3);
+  std::map<const Request*, std::vector<int32_t>> emitted;
+  const auto drain = [&] {
+    for (size_t runs = 0; engine->HasPendingRequests(); ++runs) {
+      ASSERT_LT(runs, 1000u) << "the Engine did not finish";
+      const size_t count = engine->Run(buffer);
+      for (size_t i = 0; i < count; ++i) {
+        ASSERT_EQ(buffer[i].flags & EngineEventFlagFailed, 0u) << "the Engine failed";
+        if (buffer[i].flags & EngineEventFlagToken) emitted[buffer[i].request.get()].push_back(buffer[i].token);
+      }
+    }
+  };
+  drain();
+  EXPECT_EQ(emitted[first.get()], Expected(4, 3));
+  EXPECT_EQ(emitted[second.get()], Expected(5, 3));
+
+  auto restart = Limit(3);
+  restart.request = canceled;
+  canceled->BeginTurn(Prompt(5, 40), restart);
+  ASSERT_TRUE(engine->HasPendingRequests()) << "the restarted request is not known to the scheduler";
+  drain();
+  EXPECT_EQ(emitted[canceled.get()], Expected(25, 3));  // the canceled prompt of 20 tokens, then the 5 of the new turn
+}
+
 // The prompt length of a slot is the slot's own state of the device. Slot 0 announces 20 tokens and ingests its first
 // chunk, slot 1 then announces 5 tokens, and slot 0's later chunks must still be told 20 (a process-wide variable would
 // have been overwritten by slot 1). The executor must not touch the process environment at all.
