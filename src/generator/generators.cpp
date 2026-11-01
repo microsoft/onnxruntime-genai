@@ -331,6 +331,12 @@ OrtGlobals::~OrtGlobals() {
   //    non-owning index (cleared first); owned_interfaces_ and cuda_library_ are the real owners.
   device_interfaces_.clear();
   owned_interfaces_.clear();
+  if (cuda_library_ && *cuda_library_) {
+    using ShutdownInterfaceFn = void (*)();
+    if (auto shutdown_interface = reinterpret_cast<ShutdownInterfaceFn>(cuda_library_->GetSymbol("ShutdownInterface"))) {
+      shutdown_interface();
+    }
+  }
   cuda_library_.reset();
 
   // 3. The trivial-session env-derived allocators, now unreferenced by any interface. Within each
