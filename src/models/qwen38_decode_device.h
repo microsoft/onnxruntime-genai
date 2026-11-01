@@ -6,6 +6,7 @@
 // and its tests only see this interface.
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
@@ -39,6 +40,33 @@ inline void RequireQwen38FoldInput(std::string_view input_name) {
                            "', which is not an input of the SpeculativePrefixCommit contract of ORT #33474 (" + kQwen38FoldCtl +
                            ", " + kQwen38FoldCtxCommit + ", " + kQwen38FoldCtxA + ", " + kQwen38FoldPtrs +
                            "); export the model package again for that contract");
+}
+
+// Throws std::runtime_error unless a fold model declares all four required fold.* inputs (fold.ctl, fold.ctx_commit,
+// fold.ctx_a, fold.ptrs), no unknown fold.* inputs, and both required state outputs (fold.ctl_out, fold.ctx_commit_out).
+inline void RequireQwen38FoldContract(std::span<const std::string> input_names,
+                                      std::span<const std::string> output_names) {
+  for (const auto& name : input_names) {
+    if (name.rfind("fold.", 0) == 0) {
+      RequireQwen38FoldInput(name);
+    }
+  }
+  for (const char* required_in : {kQwen38FoldCtl, kQwen38FoldCtxCommit, kQwen38FoldCtxA, kQwen38FoldPtrs}) {
+    if (std::find(input_names.begin(), input_names.end(), required_in) == input_names.end()) {
+      throw std::runtime_error(std::string("qwen38_graph: the fold model is missing the required input '") + required_in +
+                               "' of the SpeculativePrefixCommit contract of ORT #33474 (" + kQwen38FoldCtl + ", " +
+                               kQwen38FoldCtxCommit + ", " + kQwen38FoldCtxA + ", " + kQwen38FoldPtrs +
+                               "); export the model package again for that contract");
+    }
+  }
+  for (const char* required_out : {kQwen38FoldCtlOut, kQwen38FoldCtxCommitOut}) {
+    if (std::find(output_names.begin(), output_names.end(), required_out) == output_names.end()) {
+      throw std::runtime_error(std::string("qwen38_graph: the fold model is missing the required state output '") +
+                               required_out + "' of the SpeculativePrefixCommit contract of ORT #33474 (" +
+                               kQwen38FoldCtlOut + ", " + kQwen38FoldCtxCommitOut +
+                               "); export the model package again for that contract");
+    }
+  }
 }
 
 // The fold input a state output is bound in place over; nullptr when `output_name` is not a state output.
