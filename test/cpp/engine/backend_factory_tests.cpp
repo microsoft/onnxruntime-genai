@@ -138,5 +138,32 @@ TEST(EngineBackendFactoryTest, InjectedSelectedTokenPolicyIsValidatedBeforeMutat
   EXPECT_EQ(request->CurrentSequenceLength(), 0);
 }
 
+TEST(EngineBackendFactoryTest, StaticBatchSchedulerCannotAdvertiseIndependentAdmission) {
+  auto model = LoadDummyDecoderModel();
+  auto cache = std::make_shared<IndependentSlotCache>(model);
+  StaticBatchScheduler static_scheduler{model, cache};
+  SelectedTokenExecutor executor;
+  const auto resolved = ResolveBackendCapabilities(*model, *cache, static_scheduler, executor);
+  EXPECT_FALSE(resolved.SupportsIndependentAdmission());
+  auto declared = resolved;
+  declared.admission = BackendAdmission::IndependentSlots;
+  EXPECT_THROW(ResolveBackendCapabilities(*model, *cache, static_scheduler, executor, declared),
+               std::runtime_error);
+}
+
+TEST(EngineBackendFactoryTest, StaticMaxRequestLengthIsClampedToModelContextLength) {
+  auto model = LoadDummyDecoderModel();
+  model->config_->model.context_length = 32;
+  auto cache = std::make_shared<IndependentSlotCache>(model);  // MaxStaticRequestLength() == 64
+  auto scheduler = Scheduler::Create(model, cache);
+  SelectedTokenExecutor executor;
+  const auto resolved = ResolveBackendCapabilities(*model, *cache, *scheduler, executor);
+  EXPECT_EQ(resolved.max_request_length, 32u);
+  auto declared = resolved;
+  declared.max_request_length = 64;
+  EXPECT_THROW(ResolveBackendCapabilities(*model, *cache, *scheduler, executor, declared),
+               std::runtime_error);
+}
+
 }  // namespace
 }  // namespace Generators::test

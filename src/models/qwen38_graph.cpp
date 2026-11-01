@@ -1548,7 +1548,11 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
   capabilities.supports_stop_strings = true;
   capabilities.max_slots = 1;
   capabilities.configured_max_batch_size = 1;
-  capabilities.max_request_length = static_cast<uint64_t>(engine_->Capacity() - engine_->ReservedTail());
+  const uint64_t kv_limit = static_cast<uint64_t>(engine_->Capacity() - engine_->ReservedTail());
+  capabilities.max_request_length =
+      config_->model.context_length > 0
+          ? std::min<uint64_t>(kv_limit, static_cast<uint64_t>(config_->model.context_length))
+          : kv_limit;
   capabilities.max_result_tokens = kMaxGeneratedTokensPerStep;
   if (config_->engine.dynamic_batching)
     capabilities.max_scheduled_tokens = config_->engine.dynamic_batching->max_scheduled_tokens;

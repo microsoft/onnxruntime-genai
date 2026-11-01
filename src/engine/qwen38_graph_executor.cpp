@@ -69,6 +69,9 @@ void Qwen38GraphSession::Begin(const Qwen38StepRequest& request) {
   if (request.tokens.empty()) {
     throw std::logic_error("A Request must have at least one token before it can be decoded.");
   }
+  if (options_.vocab_size > 0) {
+    ValidateQwen38PromptTokens(request.tokens, options_.vocab_size);
+  }
   // A cycle may still be in flight from a turn that stopped early (stop string, cancellation); drain and check its
   // decode status before Reset clears the device error bits.
   owner_ = nullptr;
@@ -406,9 +409,10 @@ EngineDependencies CreateQwen38GraphDependencies(std::shared_ptr<Model> model,
   Qwen38GraphSession::Options options;
   options.prefill_chunk_tokens = EffectiveQwen38PrefillChunkTokens(qwen38);
   options.stop_tokens.assign(config.model.eos_token_id.begin(), config.model.eos_token_id.end());
+  options.vocab_size = config.model.vocab_size;
   auto session = std::make_shared<Qwen38GraphSession>(std::move(device), std::move(options));
   auto cache_manager = std::make_shared<Qwen38GraphCacheManager>(model, session);
-  auto scheduler = Scheduler::Create(model, cache_manager);
+  auto scheduler = std::make_unique<FixedSlotScheduler>(model, cache_manager);
   auto executor = std::make_unique<Qwen38GraphExecutor>(std::move(session));
   return EngineDependencies{std::move(cache_manager), std::move(scheduler), std::move(executor)};
 }

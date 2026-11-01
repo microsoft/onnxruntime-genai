@@ -1585,6 +1585,16 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
         "Cannot begin a turn for a request that does not belong to this engine.");
   }
   request->ValidateTurnAdmission(tokens, options);
+  if (backend_capabilities_.SelectsOwnTokens()) {
+    const int vocab_size = model_->config_->model.vocab_size;
+    for (size_t i = 0; i < tokens.size(); ++i) {
+      if (tokens[i] < 0 || tokens[i] >= vocab_size) {
+        throw std::invalid_argument("Prompt token " + std::to_string(i) + " has id " +
+                                    std::to_string(tokens[i]) + ", outside [0, " + std::to_string(vocab_size) +
+                                    ") (model.vocab_size).");
+      }
+    }
+  }
 
   // Resolve and validate this turn's complete policy before any Request mutation, so an
   // unsatisfiable combination leaves the previous completed turn entirely reusable.
@@ -1637,6 +1647,7 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
   }
 
   const bool first_turn = request->IsAwaitingFirstTurn();
+  bool allow_nonresident = false;
   if (!first_turn) {
     const bool restartable_canceled_turn =
         request->IsRestartableCanceledTurn() &&
@@ -1644,7 +1655,7 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
     const bool replay_rewound_request =
         request->NeedsReplayAfterRewind() &&
         !cache_manager_->IsResident(request);
-    const bool allow_nonresident =
+    allow_nonresident =
         restartable_canceled_turn || replay_rewound_request;
     ValidateRequestCanContinue(request, allow_nonresident);
     if (!allow_nonresident) {
@@ -1677,9 +1688,9 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
 
   try {
     request->PrepareTurnAdmission(tokens, admission);
-    if (first_turn) {
+    if (first_turn || allow_nonresident) {
       scheduler_->AddRequest(request);
-      added_to_scheduler = true;
+      added_to_scheduler = first_turn;
     }
     return request->CommitTurnAdmission(options, admission);
   } catch (...) {

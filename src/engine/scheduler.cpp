@@ -4,6 +4,7 @@
 #include "engine.h"
 #include "admission.h"
 #include "decode_first_scheduler_policy.h"
+#include "fixed_slot_scheduler.h"
 #include "request_index.h"
 #include "sequence_positions.h"
 
@@ -54,6 +55,9 @@ void StaticBatchScheduler::AddRequest(std::shared_ptr<Request> request) {
     throw std::runtime_error(
         "search.chunk_size requires dynamic batching; the static batch scheduler cannot chunk a "
         "prefill.");
+  }
+  if (std::find(requests_pool_.begin(), requests_pool_.end(), request) != requests_pool_.end()) {
+    return;
   }
   requests_pool_.reserve(requests_pool_.size() + 1);
   auto sampling_state = CreateSamplingState(*request);
@@ -461,6 +465,9 @@ bool DynamicBatchScheduler::HasPendingRequests() const {
 std::unique_ptr<Scheduler> Scheduler::Create(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager) {
   if (cache_manager->SupportsDynamicBatching()) {
     return std::make_unique<DynamicBatchScheduler>(model, cache_manager);
+  }
+  if (cache_manager->SupportsContinuousMultiSlotDecoding()) {
+    return std::make_unique<FixedSlotScheduler>(model, cache_manager);
   }
 
   return std::make_unique<StaticBatchScheduler>(model, cache_manager);

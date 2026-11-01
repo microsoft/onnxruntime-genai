@@ -8,11 +8,12 @@
 #include <cstdint>
 #include <functional>
 #include <map>
-#include <span>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
+
+#include "span.h"
 
 namespace Generators::test {
 

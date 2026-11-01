@@ -53,6 +53,7 @@ class Qwen38GraphSession : public FixedSlotSession {
                                         // replaced by Qwen38DecodeDevice::PrefillChunkTokens() when the device names one
                                         // (the assembly passes EffectiveQwen38PrefillChunkTokens of the configuration)
     std::vector<int32_t> stop_tokens;   // EOS ids of the model: a cycle is not followed by another one after one of them
+    int vocab_size{0};                  // > 0: validates all request token ids at turn start before mutating device state
   };
 
   Qwen38GraphSession(std::shared_ptr<Qwen38DecodeDevice> device, Options options);
