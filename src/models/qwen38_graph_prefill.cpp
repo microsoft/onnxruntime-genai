@@ -254,8 +254,21 @@ Qwen38WeightPool::Qwen38WeightPool(Qwen38Plane& plane, const std::filesystem::pa
   if (!device_indices.empty()) {
     std::vector<std::thread> workers;
     const int active_threads = std::min<int>(std::max(1, threads), static_cast<int>(device_indices.size()));
-    for (int t = 0; t < active_threads; ++t) workers.emplace_back(worker);
-    for (auto& t : workers) t.join();
+    std::exception_ptr launch_exception;
+    try {
+      workers.reserve(active_threads);
+      for (int t = 0; t < active_threads; ++t) workers.emplace_back(worker);
+    } catch (...) {
+      launch_exception = std::current_exception();
+      next.store(device_indices.size());
+    }
+    for (auto& t : workers) {
+      if (t.joinable()) t.join();
+    }
+    if (launch_exception) {
+      Cleanup();
+      std::rethrow_exception(launch_exception);
+    }
   }
   if (!error.empty()) {
     Cleanup();
@@ -321,10 +334,14 @@ Qwen38QsaConstants::Qwen38QsaConstants(Qwen38Plane& plane, const std::filesystem
     if (item.name == "cos" || item.name == "sin") {
       if ((item.bytes % rope_row_bytes) != 0)
         throw std::runtime_error("qwen38_graph: QSA RoPE table byte size is not a multiple of width: " + item.name);
-      if (item.name == "cos")
+      const size_t rows = item.bytes / rope_row_bytes;
+      if (item.name == "cos") {
         set.cos = ptr;
-      else
+        set.cos_rows = rows;
+      } else {
         set.sin = ptr;
+        set.sin_rows = rows;
+      }
     } else if (item.name.rfind("knorm.", 0) == 0) {
       if (item.bytes != 128 * 2)
         throw std::runtime_error("qwen38_graph: unexpected QSA knorm byte size: " + item.name);
@@ -340,6 +357,17 @@ Qwen38QsaConstants::Qwen38QsaConstants(Qwen38Plane& plane, const std::filesystem
   }
   if (!target.cos || !target.sin || !head.cos || !head.sin || target.knorm.empty() || head.knorm.empty())
     throw std::runtime_error("qwen38_graph: incomplete QSA constants " + index_path.string());
+}
+
+void Qwen38QsaConstants::Set::RequireRopePositions(size_t blocks, const char* set_name) const {
+  if (blocks == 0) return;
+  const size_t required_rows = (blocks - 1) * static_cast<size_t>(kQwen38IndexKeyRatio) + 1;
+  if (cos_rows < required_rows || sin_rows < required_rows) {
+    throw std::runtime_error(std::string("qwen38_graph: QSA ") + set_name +
+                             " RoPE tables have too few rows (cos=" + std::to_string(cos_rows) +
+                             ", sin=" + std::to_string(sin_rows) + ", required=" + std::to_string(required_rows) +
+                             ") for " + std::to_string(blocks) + " pooled blocks");
+  }
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -384,7 +412,8 @@ void Qwen38GraphEngine::BuildFastPrefill() {
     fast->head_kv = model_.session_head_r2_.get();
     fast->dense_info.Add(*fast->dense);
     fast->head_kv_info.Add(*fast->head_kv);
-    fast->chunk = std::min(configured_chunk, 2048);
+    fast->chunk = (q.prefill.chunk > 0) ? std::min(configured_chunk, 2048)
+                                        : std::min({configured_chunk, 2048, capacity_});
     if (fast->chunk < 1 || fast->chunk > capacity_) throw std::runtime_error("qwen38_graph: invalid prefill.chunk");
     fast->dense_inputs = fast->dense->GetInputNames();
     fast->dense_outputs = fast->dense->GetOutputNames();
@@ -418,8 +447,7 @@ void Qwen38GraphEngine::BuildFastPrefill() {
   fast->head_kv = model_.session_head_kv_.get();
   fast->dense_info.Add(*fast->dense);
   fast->head_kv_info.Add(*fast->head_kv);
-  fast->chunk =
-      (configured_chunk >= 2048) ? std::min<int>(std::max(configured_chunk, 4096), capacity_) : configured_chunk;
+  fast->chunk = (q.prefill.chunk > 0) ? configured_chunk : std::min<int>(configured_chunk, capacity_);
   fast->consts = model_.qsa_constants_.get();
   if (fast->chunk < 1 || fast->chunk > capacity_) throw std::runtime_error("qwen38_graph: invalid prefill.chunk");
   fast->dense_inputs = fast->dense->GetInputNames();
@@ -795,6 +823,7 @@ void Qwen38GraphEngine::FastHandoff() {
     }
   }
   const int32_t lengths[2] = {static_cast<int32_t>(blocks), static_cast<int32_t>(pending)};
+  if (!shared_.empty()) qc.target.RequireRopePositions(blocks, "target");
   for (auto& [name, shared] : shared_) {
     const int layer = LayerOf(name);
     const uint8_t* raw = dense_ptr(name);  // raw per-token keys bf16 [1, P, 128]
@@ -1001,6 +1030,7 @@ void Qwen38GraphEngine::FastHeadKvPrefill() {
     SyncStream();  // the output values die here
   }
   const size_t blocks = rows / kRatio, pending = rows % kRatio;
+  qc.RequireRopePositions(blocks, "head");
   plane_.pool_keys(stream_, f.raw_keys.data(), static_cast<int>(blocks), qc.knorm.at(0), qc.cos, qc.sin, qc.width,
                    f.consts->epsilon, 0, head_store_.at("past_key_values.0.index_key")->ptr);
   HeadBank& bank = head_banks_[head_cur_];

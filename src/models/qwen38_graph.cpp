@@ -88,7 +88,8 @@ void ValidateQwen38CacheShapes(const std::vector<Qwen38CacheInput>& inputs, int 
       if (shape[1] != 2 || shape[3] != 256) fail(input, "the hand-off copies 2 KV heads of 256 channels");
       if (shape[2] != kv_capacity) fail(input, "dimension 2 (the cache length) must be static and kv_capacity long");
     } else if (is_cache && tail == "index_key") {
-      if (shape.size() != 3) fail(input, "expected [batch, kv_capacity / 4, width]");
+      if (shape.size() != 3) fail(input, "expected [batch, kv_capacity / 4, 128]");
+      if (shape[2] != 128) fail(input, "dimension 2 (the index-key width) must be 128");
       if (shape[1] < kv_capacity / kQwen38IndexKeyRatio)
         fail(input, "dimension 1 must be static and hold one key per 4 positions");
     }
@@ -1250,14 +1251,18 @@ void Qwen38GraphEngine::Warmup() {
       Reset();
     }
   }
-  const int warm_tokens = target_captures_graph ? (R * num_banks_ * 6) : (R * num_banks_);
-  const int chunk_tokens = std::min(warm_tokens, (max_prompt / R) * R);
-  for (int done = 0; done < warm_tokens; done += chunk_tokens) {
-    if (done > 0) Reset();
-    const int n = std::min(chunk_tokens, warm_tokens - done);
-    std::vector<int32_t> dummy(n);
-    for (int i = 0; i < n; ++i) dummy[i] = 1000 + done + i;
-    StepPrefill(dummy);  // S=R target ids; fold: the muted cycle graphs
+  const int runs_per_phase = target_captures_graph ? 6 : 1;
+  int dummy_tok = 1000;
+  for (int run = 0; run < runs_per_phase; ++run) {
+    for (int phase = 0; phase < num_banks_; ++phase) {
+      if (ledger_.Length() + static_cast<size_t>(R) > static_cast<size_t>(max_prompt)) {
+        Reset();
+      }
+      ledger_.SetBank(phase);
+      std::vector<int32_t> dummy(R);
+      for (int i = 0; i < R; ++i) dummy[i] = dummy_tok++;
+      StepPrefill(dummy);  // S=R target ids; fold: the muted cycle graphs
+    }
   }
   if (fold_) {
     const auto& q = model_.config_->model.qwen38_graph;
@@ -1299,11 +1304,13 @@ void Qwen38GraphEngine::Warmup() {
   }
   const size_t max_usable = static_cast<size_t>(capacity_ - Qwen38DecodeDevice::kReservedTail);
   for (int i = 0; i < 24; ++i) {  // S=1 target ids
-    if (ledger_.Length() + 1 > max_usable) {
+    const int target_phase = i % num_banks_;
+    if (ledger_.Length() == 0 || ledger_.Length() + 1 > max_usable) {
       Reset();
       const std::vector<int32_t> pair = {1000 + i, 1001 + i};
       StepPrefill(pair);
     }
+    ledger_.SetBank(target_phase);
     const int64_t state[2] = {pending_, static_cast<int64_t>(ledger_.Length())};
     WriteCtl(0, std::span<const int64_t>(state, 2));
     EnqueueStep();

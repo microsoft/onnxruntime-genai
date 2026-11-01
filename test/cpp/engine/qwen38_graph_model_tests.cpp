@@ -12,7 +12,6 @@
 #include <limits>
 #include <optional>
 #include <set>
-#include <span>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -25,6 +24,7 @@
 #include "models/qwen38_decode_device.h"
 #include "models/qwen38_graph.h"
 #include "scoped-environment-variable.h"
+#include "span.h"
 
 namespace Generators::test {
 
@@ -706,6 +706,7 @@ TEST(Qwen38CacheShapeTest, RejectsUnexpectedCacheDimensions) {
   rejects({"past_key_values.0.index_key", {-1, 8000, 128}});
   rejects({"past_key_values.0.index_key", {-1, -1, 128}});
   rejects({"past_key_values.0.index_key", {-1, 8257}});
+  rejects({"past_key_values.0.index_key", {-1, 8257, 64}});
   // Auxiliary graphs name themselves in the error.
   rejects({"head.past_key_values.0.key", {-1, 2, 16384, 256}}, "fold head");
   rejects({"past_key_values.0.key", {-1, 2, 16384, 256}}, "head (S=2)");
@@ -755,15 +756,28 @@ TEST(Qwen38QsaConstantsTest, RequiresBothCosAndSinForTargetAndHead) {
                            "tensor head knorm.0 1792 256\n"),
                std::runtime_error);
 
-  // Complete index succeeds
-  EXPECT_NO_THROW(check_index(
-      "qwen38_qsa_consts 1\nfile qsa_consts.bin\nepsilon 1e-06\nwidth 64\n"
-      "tensor target cos 0 512\n"
-      "tensor target sin 512 512\n"
-      "tensor target knorm.3 1024 256\n"
-      "tensor head cos 1280 512\n"
-      "tensor head sin 1792 512\n"
-      "tensor head knorm.0 2304 256\n"));
+  // Complete index succeeds and records each RoPE table's row count (512 bytes / (64 * 2) = 4 rows).
+  {
+    Qwen38Plane plane;
+    InitMockPlane(plane);
+    const auto idx = WriteFile(dir / "qsa.txt",
+                               "qwen38_qsa_consts 1\nfile qsa_consts.bin\nepsilon 1e-06\nwidth 64\n"
+                               "tensor target cos 0 512\n"
+                               "tensor target sin 512 512\n"
+                               "tensor target knorm.3 1024 256\n"
+                               "tensor head cos 1280 512\n"
+                               "tensor head sin 1792 512\n"
+                               "tensor head knorm.0 2304 256\n");
+    Qwen38QsaConstants consts{plane, idx, dir, nullptr};
+    EXPECT_EQ(consts.target.cos_rows, 4u);
+    EXPECT_EQ(consts.target.sin_rows, 4u);
+    EXPECT_EQ(consts.head.cos_rows, 4u);
+    EXPECT_EQ(consts.head.sin_rows, 4u);
+    EXPECT_NO_THROW(consts.target.RequireRopePositions(0, "target"));
+    EXPECT_NO_THROW(consts.target.RequireRopePositions(1, "target"));  // 4 tokens -> row 0
+    EXPECT_THROW(consts.target.RequireRopePositions(2, "target"), std::runtime_error);  // 8 tokens -> row 4
+    EXPECT_THROW(consts.head.RequireRopePositions(2, "head"), std::runtime_error);
+  }
 
   std::error_code ec;
   std::filesystem::remove_all(dir, ec);
