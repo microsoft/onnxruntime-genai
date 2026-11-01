@@ -10,6 +10,7 @@
 #include <functional>
 #include <iterator>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <stdexcept>
@@ -56,7 +57,12 @@ struct MockPlaneTracker {
   static inline std::vector<void*> registered_host_ptrs;  // accepted registrations only
   static inline std::vector<void*> unregistered_host_ptrs;
   static inline std::vector<std::pair<uintptr_t, uintptr_t>> live_host_ranges;
+  static inline std::vector<uintptr_t> alias_queries;  // every host pointer a device alias was requested for
   static inline int rejected_host_registrations = 0;
+  // CUDA's current device is per thread; the calls that create CUDA state record the device of the thread they ran on.
+  static inline thread_local int current_device = 0;
+  static inline std::mutex device_uses_mutex;
+  static inline std::vector<std::pair<std::string, int>> device_uses;
   static constexpr uintptr_t kDevBias = 0x200000u;
   static constexpr int kHostMemoryAlreadyRegistered = 712;  // cudaErrorHostMemoryAlreadyRegistered
 
@@ -66,13 +72,28 @@ struct MockPlaneTracker {
     registered_host_ptrs.clear();
     unregistered_host_ptrs.clear();
     live_host_ranges.clear();
+    alias_queries.clear();
     rejected_host_registrations = 0;
+    current_device = 0;
+    {
+      std::lock_guard<std::mutex> lock(device_uses_mutex);
+      device_uses.clear();
+    }
     alloc_calls = 0;
     fail_on_alloc_call = fail_alloc;
     device_alias = DeviceAlias::kBiased;
   }
 
+  static void RecordDeviceUse(const char* call) {
+    std::lock_guard<std::mutex> lock(device_uses_mutex);
+    device_uses.emplace_back(call, current_device);
+  }
+
   static const char* ErrorString(int) { return "mock cuda error"; }
+  static int SetDevice(int device) {
+    current_device = device;
+    return 0;
+  }
   static int DeviceAlloc(void** p, size_t bytes) {
     ++alloc_calls;
     if (fail_on_alloc_call > 0 && alloc_calls == fail_on_alloc_call) return 2;  // cudaErrorMemoryAllocation
@@ -89,6 +110,7 @@ struct MockPlaneTracker {
     return 0;
   }
   static int HostAlloc(void** p, size_t bytes) {
+    RecordDeviceUse("host_alloc");
     *p = std::calloc(1, bytes ? bytes : 16);
     return 0;
   }
@@ -119,6 +141,8 @@ struct MockPlaneTracker {
     return 0;
   }
   static int HostGetDevicePointer(void** dp, void* hp, unsigned) {
+    const auto host = reinterpret_cast<uintptr_t>(hp);
+    alias_queries.push_back(host);
     switch (device_alias) {
       case DeviceAlias::kFails:
         return 1;  // cudaErrorInvalidValue
@@ -126,12 +150,15 @@ struct MockPlaneTracker {
         *dp = nullptr;
         return 0;
       case DeviceAlias::kIdentity:
-        *dp = hp;
-        return 0;
       case DeviceAlias::kBiased:
         break;
     }
-    *dp = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(hp) + kDevBias);
+    // Like the real call, only memory that lies in a registered range has a device address.
+    const bool registered = std::any_of(live_host_ranges.begin(), live_host_ranges.end(), [host](const auto& range) {
+      return range.first <= host && host < range.second;
+    });
+    if (!registered) return 1;
+    *dp = device_alias == DeviceAlias::kIdentity ? hp : reinterpret_cast<void*>(host + kDevBias);
     return 0;
   }
   static int DeviceMemset(void* p, int v, size_t bytes, void*) {
@@ -143,6 +170,7 @@ struct MockPlaneTracker {
     return 0;
   }
   static int StreamCreate(void** s) {
+    RecordDeviceUse("stream_create");
     *s = reinterpret_cast<void*>(uintptr_t{1});
     return 0;
   }
@@ -153,6 +181,7 @@ struct MockPlaneTracker {
 void InitMockPlane(Qwen38Plane& plane, int fail_alloc = -1) {
   MockPlaneTracker::Reset(fail_alloc);
   plane.error_string = &MockPlaneTracker::ErrorString;
+  plane.set_device = &MockPlaneTracker::SetDevice;
   plane.device_alloc = &MockPlaneTracker::DeviceAlloc;
   plane.device_free = &MockPlaneTracker::DeviceFree;
   plane.host_alloc = &MockPlaneTracker::HostAlloc;
@@ -832,6 +861,60 @@ TEST(Qwen38QsaConstantsTest, KvScalesMustHoldExactly512Floats) {
   std::filesystem::remove_all(dir, ec);
 }
 
+TEST(Qwen38QsaConstantsTest, EveryConstantMustStartOnItsElementBoundary) {
+  const auto dir = MakeScratchDir("qsa_alignment");
+  WriteFile(dir / "qsa_consts.bin", std::string(16384, '\0'));
+
+  // Returns the error text of a failed construction, empty when it succeeded. The target set's cos, sin and knorm.3 and
+  // any extra lines are placed by the caller; the head set's constants sit on aligned offsets.
+  const auto construct = [&](size_t cos_offset, size_t sin_offset, size_t knorm_offset, const std::string& extra) {
+    Qwen38Plane plane;
+    InitMockPlane(plane);
+    const auto tensor = [](const char* set, const char* name, size_t offset, size_t bytes) {
+      return "tensor " + std::string(set) + " " + name + " " + std::to_string(offset) + " " + std::to_string(bytes) +
+             "\n";
+    };
+    std::string index = "qwen38_qsa_consts 1\nfile qsa_consts.bin\nepsilon 1e-06\nwidth 64\n";
+    index += tensor("target", "cos", cos_offset, 512);
+    index += tensor("target", "sin", sin_offset, 512);
+    index += tensor("target", "knorm.3", knorm_offset, 256);
+    index += tensor("head", "cos", 1280, 512);
+    index += tensor("head", "sin", 1792, 512);
+    index += tensor("head", "knorm.0", 2304, 256);
+    const auto idx = WriteFile(dir / "qsa.txt", index + extra);
+    try {
+      Qwen38QsaConstants consts{plane, idx, dir, nullptr};
+      (void)consts;
+    } catch (const std::runtime_error& e) {
+      return std::string(e.what());
+    }
+    return std::string();
+  };
+  const auto expect_misaligned = [](const std::string& error, const std::string& name, size_t offset, size_t alignment) {
+    EXPECT_NE(error.find("not aligned to " + std::to_string(alignment) + " bytes"), std::string::npos) << error;
+    EXPECT_NE(error.find("constant " + name + " at offset " + std::to_string(offset)), std::string::npos) << error;
+  };
+
+  EXPECT_EQ(construct(0, 512, 1024, ""), "");
+
+  // The bf16 constants (cos, sin, knorm) need even offsets.
+  expect_misaligned(construct(2561, 512, 1024, ""), "cos", 2561, 2);
+  expect_misaligned(construct(0, 2563, 1024, ""), "sin", 2563, 2);
+  expect_misaligned(construct(0, 512, 3073, ""), "knorm.3", 3073, 2);
+
+  // The fp32 scales need offsets that are a multiple of 4: an even offset is not enough.
+  expect_misaligned(construct(0, 512, 1024, "tensor target kscale.3 4097 2048\n"), "kscale.3", 4097, 4);
+  expect_misaligned(construct(0, 512, 1024, "tensor target vscale.3 4098 2048\n"), "vscale.3", 4098, 4);
+  expect_misaligned(construct(0, 512, 1024, "tensor head kscale.0 6150 2048\n"), "kscale.0", 6150, 4);
+  expect_misaligned(construct(0, 512, 1024, "tensor head vscale.0 8195 2048\n"), "vscale.0", 8195, 4);
+
+  // Each constant is held to its own element size.
+  EXPECT_EQ(construct(0, 512, 1026, "tensor target kscale.3 4100 2048\ntensor target vscale.3 6148 2048\n"), "");
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
 #if !defined(_WIN32)
 TEST(Qwen38WeightPoolTest, CleansUpEarlierAllocationsOnConstructorFailureAndSupportsHostPool) {
   const auto dir = MakeScratchDir("weight_pool");
@@ -1004,6 +1087,156 @@ TEST(Qwen38WeightPoolTest, PinningTheCpuPoolRegistersEachMappedRangeOnce) {
     }
     EXPECT_EQ(MockPlaneTracker::unregistered_host_ptrs, MockPlaneTracker::registered_host_ptrs);
     EXPECT_TRUE(MockPlaneTracker::live_host_ranges.empty());
+  }
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+TEST(Qwen38WeightPoolTest, TheBoundedHostCacheCannotBeCombinedWithPinningTheCpuPool) {
+  const auto dir = MakeScratchDir("weight_pool_env_switches");
+  const auto manifest_path = WriteMappedPoolManifest(dir, /*with_cpu_entry=*/true);
+  auto mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+
+  // Returns the error text of a failed construction, empty when it succeeded.
+  const auto construct = [&](std::optional<std::string> host_cache_mib, std::optional<std::string> pin_cpu_pool) {
+    ScopedEnvironmentVariable host_cache{"ORT_QMOE_HOST_CACHE_MIB", host_cache_mib};
+    ScopedEnvironmentVariable pin{"ORTGENAI_PIN_CPU_POOL", pin_cpu_pool};
+    Qwen38Plane plane;
+    InitMockPlane(plane);
+    try {
+      Qwen38WeightPool pool{plane, manifest_path, dir, *mem_info, 1};
+    } catch (const std::runtime_error& e) {
+      return std::string(e.what());
+    }
+    return std::string();
+  };
+  const auto expect_refused = [&](const std::string& host_cache_mib, const std::string& pin_cpu_pool) {
+    const std::string error = construct(host_cache_mib, pin_cpu_pool);
+    EXPECT_NE(error.find("cannot be combined"), std::string::npos)
+        << "ORT_QMOE_HOST_CACHE_MIB=" << host_cache_mib << " ORTGENAI_PIN_CPU_POOL=" << pin_cpu_pool << ": " << error;
+  };
+
+  // Both switches on is refused, whichever way the boolean is spelled.
+  expect_refused("64", "1");
+  expect_refused("64", "true");
+
+  // The pin switch is a boolean like the other GenAI switches: "false" and "0" leave it off.
+  EXPECT_EQ(construct("64", "false"), "");
+  EXPECT_EQ(construct("64", "0"), "");
+  EXPECT_EQ(construct("64", std::nullopt), "");
+  EXPECT_EQ(construct("64", ""), "");
+
+  // The host cache is off when its variable is unset, empty or "0", so pinning the pool is allowed then.
+  EXPECT_EQ(construct(std::nullopt, "1"), "");
+  EXPECT_EQ(construct("", "1"), "");
+  EXPECT_EQ(construct("0", "true"), "");
+
+  // A value that is not a boolean is an error of its own instead of being read as "on".
+  {
+    ScopedEnvironmentVariable host_cache{"ORT_QMOE_HOST_CACHE_MIB", "64"};
+    ScopedEnvironmentVariable pin{"ORTGENAI_PIN_CPU_POOL", "banana"};
+    Qwen38Plane plane;
+    InitMockPlane(plane);
+    EXPECT_THROW((Qwen38WeightPool{plane, manifest_path, dir, *mem_info, 1}), std::invalid_argument);
+  }
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+TEST(Qwen38WeightPoolTest, ACpuEntryLeftOutOfTheRegistrationGetsNoDeviceAlias) {
+  const auto dir = MakeScratchDir("weight_pool_unpinned_cpu");
+  constexpr uint64_t kLarge = uint64_t{2} << 20;  // CPU entries of 1 MiB and more stay unregistered under the host cache
+  // The large entry starts on the page that the small one registers.
+  WriteFile(dir / "mixed.bin", std::string(64 + kLarge, 'm'));
+  const auto manifest_path = WriteFile(dir / "pool.txt",
+                                       "qwen38_weights_pool 1\n"
+                                       "pool 0 1 0 64 1 16 mixed.bin cpu\n"
+                                       "pool 1 1 64 2097152 1 524288 mixed.bin cpu\n"
+                                       "session dense small 0\n"
+                                       "session dense large 1\n");
+  auto mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+  ScopedEnvironmentVariable pin_cpu_pool{"ORTGENAI_PIN_CPU_POOL", std::nullopt};
+
+  {
+    ScopedEnvironmentVariable host_cache{"ORT_QMOE_HOST_CACHE_MIB", "64"};
+    Qwen38Plane plane;
+    InitMockPlane(plane);
+    MockPlaneTracker::device_alias = MockPlaneTracker::DeviceAlias::kIdentity;
+    {
+      Qwen38WeightPool pool{plane, manifest_path, dir, *mem_info, 1};
+      ASSERT_EQ(MockPlaneTracker::live_host_ranges.size(), 1u);
+      const auto [begin, end] = MockPlaneTracker::live_host_ranges.front();
+      EXPECT_EQ(end - begin, 4096u) << "only the page of the small entry is registered";
+      // The page lookup of the large entry would succeed (it starts on that page) although most of the entry is not
+      // registered, so the pool must not ask for its alias at all.
+      EXPECT_EQ(MockPlaneTracker::alias_queries, std::vector<uintptr_t>{begin});
+      EXPECT_EQ(pool.cpu_bytes, 64u + kLarge);
+      auto options = OrtSessionOptions::Create();
+      EXPECT_EQ(pool.AddTo(*options, "dense"), 2u);
+    }
+    EXPECT_TRUE(MockPlaneTracker::live_host_ranges.empty());
+  }
+
+  // Without the host cache both entries are registered, and both get their alias.
+  {
+    ScopedEnvironmentVariable host_cache{"ORT_QMOE_HOST_CACHE_MIB", std::nullopt};
+    Qwen38Plane plane;
+    InitMockPlane(plane);
+    MockPlaneTracker::device_alias = MockPlaneTracker::DeviceAlias::kIdentity;
+    Qwen38WeightPool pool{plane, manifest_path, dir, *mem_info, 1};
+    ASSERT_EQ(MockPlaneTracker::live_host_ranges.size(), 1u);
+    const auto [begin, end] = MockPlaneTracker::live_host_ranges.front();
+    EXPECT_EQ(end - begin, 64u + kLarge);
+    EXPECT_EQ(MockPlaneTracker::alias_queries, (std::vector<uintptr_t>{begin, begin + 64}));
+  }
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+TEST(Qwen38WeightPoolTest, UploadWorkersSelectTheDeviceOfTheMemoryInfo) {
+  const auto dir = MakeScratchDir("weight_pool_worker_device");
+  WriteFile(dir / "w0.bin", std::string(64, 'a'));
+  WriteFile(dir / "w1.bin", std::string(64, 'b'));
+  const auto manifest_path = WriteFile(dir / "pool.txt",
+                                       "qwen38_weights_pool 1\n"
+                                       "pool 0 1 0 32 1 8 w0.bin\n"
+                                       "pool 1 1 0 32 1 8 w1.bin\n"
+                                       "session target w0 0\n"
+                                       "session target w1 1\n");
+  // The name and the id are all that the pool reads from the memory info; no CUDA runtime is involved.
+  auto mem_info = OrtMemoryInfo::Create("Cuda", OrtDeviceAllocator, /*id=*/1, OrtMemTypeDefault);
+
+  {
+    Qwen38Plane plane;
+    InitMockPlane(plane);
+    {
+      // One worker per device entry. The thread that builds the pool stays on device 0: the workers must not inherit
+      // their device from it (CUDA starts every thread on device 0).
+      Qwen38WeightPool pool{plane, manifest_path, dir, *mem_info, 2};
+      EXPECT_EQ(pool.bytes, 64u);
+    }
+    ASSERT_EQ(MockPlaneTracker::device_uses.size(), 4u);  // host_alloc + stream_create of each of the two workers
+    for (const auto& [call, device] : MockPlaneTracker::device_uses)
+      EXPECT_EQ(device, 1) << call << " ran on device " << device;
+    EXPECT_TRUE(MockPlaneTracker::live_device_ptrs.empty());
+  }
+
+  // A worker that cannot select the device fails the construction and gives back what was allocated.
+  {
+    Qwen38Plane plane;
+    InitMockPlane(plane);
+    plane.set_device = [](int) { return 101; };  // cudaErrorInvalidDevice
+    try {
+      Qwen38WeightPool pool{plane, manifest_path, dir, *mem_info, 2};
+      ADD_FAILURE() << "a failing cudaSetDevice must fail the construction";
+    } catch (const std::runtime_error& e) {
+      EXPECT_NE(std::string(e.what()).find("cudaSetDevice"), std::string::npos) << e.what();
+    }
+    EXPECT_TRUE(MockPlaneTracker::device_uses.empty()) << "nothing may be created on a device that was not selected";
+    EXPECT_TRUE(MockPlaneTracker::live_device_ptrs.empty());
   }
 
   std::error_code ec;

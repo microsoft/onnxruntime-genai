@@ -234,7 +234,7 @@ struct StateUpdateReplayDesc {
 // that boundary (Search, BatchedSampler, BatchedSamplerState, GeneratorParams, or Config).
 // Dynamically loaded add-ons must report this exact version before the host can safely call through
 // the C++ interface.
-inline constexpr uint32_t kDeviceInterfaceVersion = 15;
+inline constexpr uint32_t kDeviceInterfaceVersion = 16;
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}

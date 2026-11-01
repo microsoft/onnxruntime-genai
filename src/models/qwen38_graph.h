@@ -67,6 +67,10 @@ struct Qwen38WeightPool {
     std::filesystem::path file;
     std::string placement{"device"};
     bool host_mapped{false};
+    // The entry's whole page-aligned range was added to the ranges to register with CUDA. A CPU entry left out of them (a
+    // large one under the bounded host cache) is not pinned even when the page it starts on belongs to the range of a
+    // neighbour in the same file, so it must not get a device alias: the alias would reach past that range.
+    bool pinned{false};
     bool owns_device_ptr{false};
     uint8_t* ptr{};
     std::unique_ptr<OrtValue> value;

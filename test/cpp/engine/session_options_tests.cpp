@@ -140,4 +140,65 @@ TEST(CudaDeviceSelectionTest, NoCandidatesIsAnError) {
   EXPECT_THROW(SelectCudaDeviceIndex({}, std::string("0"), false), std::runtime_error);
 }
 
+namespace {
+
+ProviderOptions CudaOptions(std::vector<NamedString> entries) {
+  ProviderOptions options;
+  options.name = "cuda";
+  options.options = std::move(entries);
+  return options;
+}
+
+// The device_id values of the options in order, which is what the stream binding reads (the first non-empty one wins).
+std::vector<std::string> DeviceIds(const ProviderOptions& options) {
+  std::vector<std::string> ids;
+  for (const auto& [key, value] : options.options)
+    if (key == "device_id") ids.push_back(value);
+  return ids;
+}
+
+}  // namespace
+
+TEST(CudaStreamBindingOptionsTest, WithoutAPluginDeviceAnOmittedIdMeansGpuZero) {
+  // The provider-bridge EP puts a session that names no device on GPU 0 whatever the calling thread's device is, so
+  // the shared stream must be bound to GPU 0 too instead of to the device that happens to be current.
+  const auto resolved = CUDAExecutionProvider::ResolveStreamBindingOptions(CudaOptions({}), std::nullopt);
+  EXPECT_EQ(DeviceIds(resolved), std::vector<std::string>{"0"});
+
+  const auto unrelated = CUDAExecutionProvider::ResolveStreamBindingOptions(CudaOptions({{"enable_cuda_graph", "1"}}), std::nullopt);
+  EXPECT_EQ(DeviceIds(unrelated), std::vector<std::string>{"0"});
+  EXPECT_EQ(unrelated.options.size(), 2u) << "the other options are kept";
+  EXPECT_EQ(unrelated.options.front(), (NamedString{"enable_cuda_graph", "1"}));
+}
+
+TEST(CudaStreamBindingOptionsTest, AnExplicitIdIsNeverReplaced) {
+  for (const auto& plugin_id : {std::optional<std::string>{}, std::optional<std::string>{"0"}, std::optional<std::string>{"3"}, std::optional<std::string>{""}}) {
+    const auto resolved = CUDAExecutionProvider::ResolveStreamBindingOptions(CudaOptions({{"device_id", "1"}}), plugin_id);
+    EXPECT_EQ(DeviceIds(resolved), std::vector<std::string>{"1"}) << "plugin id " << plugin_id.value_or("<none>");
+  }
+}
+
+TEST(CudaStreamBindingOptionsTest, AnEmptyIdCountsAsOmitted) {
+  const auto resolved = CUDAExecutionProvider::ResolveStreamBindingOptions(CudaOptions({{"device_id", ""}}), std::nullopt);
+  // The first non-empty value is the one that applies.
+  const auto ids = DeviceIds(resolved);
+  ASSERT_EQ(ids.size(), 2u);
+  EXPECT_EQ(ids.back(), "0");
+
+  const auto plugin = CUDAExecutionProvider::ResolveStreamBindingOptions(CudaOptions({{"device_id", ""}}), std::string("2"));
+  EXPECT_EQ(DeviceIds(plugin).back(), "2");
+}
+
+TEST(CudaStreamBindingOptionsTest, ThePluginDeviceFillsAnOmittedId) {
+  const auto resolved = CUDAExecutionProvider::ResolveStreamBindingOptions(CudaOptions({}), std::string("2"));
+  EXPECT_EQ(DeviceIds(resolved), std::vector<std::string>{"2"});
+}
+
+TEST(CudaStreamBindingOptionsTest, APluginDeviceThatReportsNoIdAddsNothing) {
+  // There is nothing to bind to then; the stream follows the current device as before.
+  const auto resolved = CUDAExecutionProvider::ResolveStreamBindingOptions(CudaOptions({{"enable_cuda_graph", "1"}}), std::string());
+  EXPECT_TRUE(DeviceIds(resolved).empty());
+  EXPECT_EQ(resolved.options.size(), 1u);
+}
+
 }  // namespace Generators::test

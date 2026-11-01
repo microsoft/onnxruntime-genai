@@ -1268,16 +1268,23 @@ void Qwen38GraphEngine::Warmup() {
     const auto& q = model_.config_->model.qwen38_graph;
     const bool head_captures_graph =
         Qwen38HeadR2CapturesGraph(model_.config_->model.decoder.session_options, q.fold.head_r2.session_options);
-    const int head_warm_calls = head_captures_graph ? (num_banks_ * 6) : num_banks_;
+    const int runs_per_head_phase = head_captures_graph ? 6 : 1;
     ClearHead();
     SyncStream();
-    for (int i = 0; i < head_warm_calls; ++i) {
-      if (head_length_ + 2 > capacity_) {
-        ClearHead();
-        SyncStream();
+    int head_dummy_tok = 1000;
+    for (int run = 0; run < runs_per_head_phase; ++run) {
+      for (int phase = 0; phase < num_banks_; ++phase) {
+        // A reset for the capacity restarts the ring at phase 0; pick the phase explicitly so that each one is run
+        // exactly runs_per_head_phase times whatever kv_capacity is.
+        if (head_length_ + 2 > capacity_) {
+          ClearHead();
+          SyncStream();
+        }
+        head_cur_ = phase;
+        const int64_t tokens[2] = {head_dummy_tok, head_dummy_tok}, positions[2] = {head_length_ + 1, head_length_ + 2};
+        ++head_dummy_tok;
+        CallHeadR2(tokens, positions, d_last_hidden_.data(), d_last_hidden_.data(), 1);
       }
-      const int64_t tokens[2] = {1000 + i, 1000 + i}, positions[2] = {head_length_ + 1, head_length_ + 2};
-      CallHeadR2(tokens, positions, d_last_hidden_.data(), d_last_hidden_.data(), 1);
     }
     SyncStream();
     if (ReadCtl(5) != 0) CheckDeviceStatus("warmup (head)", nullptr);
@@ -1580,9 +1587,16 @@ std::shared_ptr<Qwen38DecodeDevice> Qwen38GraphModel::AcquireDevice() {
     throw std::runtime_error(
         "qwen38_flash_graph: the model's CUDA-graph state is already used by another Engine; destroy that Engine first "
         "(one Engine per model).");
-  if (!IsExecutionContextHealthy()) {
+  try {
+    if (!IsExecutionContextHealthy()) {
+      throw std::runtime_error("qwen38_flash_graph: the execution context is poisoned; reload the Model before creating another Engine.");
+    }
+    // CUDA's current device is per thread. The Engine drives the model from the thread that acquires it, which is not the
+    // thread that loaded the model, so select the model's GPU here: its stream and buffers live on that device.
+    plane_->Check(plane_->set_device(p_device_->GetDeviceId(nullptr)), "cudaSetDevice");
+  } catch (...) {
     leased_.store(false);
-    throw std::runtime_error("qwen38_flash_graph: the execution context is poisoned; reload the Model before creating another Engine.");
+    throw;
   }
   Qwen38GraphEngine* engine = engine_.get();
   // The lease keeps the model alive and drains the device before releasing it, so a look-ahead cycle never outlives its Engine.
