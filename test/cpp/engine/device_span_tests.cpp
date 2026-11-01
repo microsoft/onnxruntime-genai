@@ -52,6 +52,15 @@ TEST(DeviceInterfaceVersionTest, IsPastTheDeviceBufferRangedUploadLayout) {
   EXPECT_GE(kDeviceInterfaceVersion, kVersionOfTheRangedUpload);
 }
 
+// Config is built by the host and read by the dynamically loaded add-ons, so the max_batch_size member that Qwen38Graph
+// gained moved the offsets of the members of Config::Model and Config after it. An add-on built before it would read
+// them from the wrong place; the version the host demands must therefore stay past the layout that introduced it. An
+// add-on built from a tree without the member reports at most 17.
+TEST(DeviceInterfaceVersionTest, IsPastTheQwen38GraphMaxBatchSizeConfigLayout) {
+  constexpr uint32_t kVersionOfTheMaxBatchSize = 18;
+  EXPECT_GE(kDeviceInterfaceVersion, kVersionOfTheMaxBatchSize);
+}
+
 TEST(DeviceSpanTest, RangeUploadForwardsTheByteRangeOfTheSubspan) {
   auto buffer = std::make_shared<RangeUploadRecorder>(16 * sizeof(int32_t));
   auto* recorder = buffer.get();

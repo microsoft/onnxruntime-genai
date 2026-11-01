@@ -295,6 +295,8 @@ The rotary-history/configuration and device-span replay interface changes use de
 13. The ranged CPU-to-device upload (`DeviceBuffer::CopyCpuRangeToDevice`, used for the DFlash2 drafter
 staging buffers) adds a virtual method to `DeviceBuffer` and uses version 17, after version 16 added the
 `qwen38_graph` member to `Config::Model` and version 15 added the pinned-host copies to `DeviceInterface`.
+The multi-slot Qwen3.8 graph backend adds `Config::Model::Qwen38Graph::max_batch_size`, which changes the layout
+of `Config`, and uses version 18.
 Rebuild provider add-ons against the matching core; do not reuse a binary compiled against the earlier layout.
 
 ### Hybrid (linear-attention) models
