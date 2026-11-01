@@ -637,6 +637,12 @@ TEST(Qwen38GraphConfigTest, TheSlotCountIsResolvedFromItsSettingsAndNeverClamped
   EXPECT_EQ(ResolveQwen38MaxBatchSize(search), 3u);
   search.search.batch_size = 9;
   EXPECT_THROW(ResolveQwen38MaxBatchSize(search), std::out_of_range);
+  for (const int value : {-1, 0}) {
+    search.search.batch_size = value;
+    EXPECT_THROW(ResolveQwen38MaxBatchSize(search), std::out_of_range) << "search.batch_size " << value;
+  }
+  search.search.batch_size = 1;
+  EXPECT_EQ(ResolveQwen38MaxBatchSize(search), 1u);
 }
 
 // ORT_QWEN38_MAX_BATCH_SIZE, the last source of the slot count, is read as strictly as the settings: text that is not an

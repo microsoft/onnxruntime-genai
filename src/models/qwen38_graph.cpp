@@ -231,7 +231,9 @@ size_t ResolveQwen38MaxBatchSize(const Config& config) {
   if (config.model.qwen38_graph.max_batch_size != 1) {
     return checked(config.model.qwen38_graph.max_batch_size, "model.qwen38_graph.max_batch_size");
   }
-  if (config.search.batch_size > 1) {
+  // search.batch_size defaults to 1 as well. The generic path refuses a batch_size below 1, so 0 or a negative value is not
+  // mapped to one slot here either.
+  if (config.search.batch_size != 1) {
     return checked(config.search.batch_size, "search.batch_size");
   }
   // The test hook is read as strictly as the settings above: a value that is not an integer in range is refused, not mapped
