@@ -82,6 +82,12 @@ Qwen38ReplayGeometry ValidateQwen38ReplayDescriptor(const Qwen38ReplayRequest& r
 // The message of the exception RequireQwen38ReplayTensor throws.
 std::string DescribeMissingQwen38ReplayTensor(const std::string& name, const std::string& layer, const std::string& where);
 
+// Every banked state input in `bank_names` (`past_key_values.<layer>.<suffix>`) is overwritten in the destination bank by a
+// two-bank compact-replay verify step, so on partial acceptance it must be replayed from its `state_update.<layer>.*` output.
+// Throws std::runtime_error naming the banked state and the missing `state_update.*` output when a banked state has no update.
+void RequireQwen38ReplayCoverage(const std::vector<std::string>& bank_names,
+                                 const std::vector<std::string>& state_update_names);
+
 // The tensor `name` of `tensors` (a map from a name to a unique_ptr to a tensor: the state tensors of a bank, ...), which the
 // replay of layer `layer` needs. Throws a std::runtime_error naming the tensor, the layer and `where` (e.g. "bank 1") when the
 // package does not declare it, instead of the bare std::out_of_range of at().

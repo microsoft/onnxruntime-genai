@@ -24,6 +24,7 @@
 #include "models/model_type.h"
 #include "models/qwen38_decode_device.h"
 #include "models/qwen38_graph.h"
+#include "models/qwen38_replay_geometry.h"
 #include "scoped-environment-variable.h"
 #include "span.h"
 
@@ -590,6 +591,34 @@ TEST(Qwen38GraphConfigTest, DflashWarmupAtModelCreationHonorsTheWarmupSetting) {
   // A pipeline without verify rows or ring banks has nothing to warm up.
   EXPECT_FALSE(PlanQwen38DflashWarmup(true, 0, 2).drafter);
   EXPECT_EQ(PlanQwen38DflashWarmup(true, 8, 0).target_tokens, 0u);
+}
+
+TEST(Qwen38ReplayCoverageTest, RequiresEveryBankedStateToHaveAStateUpdateOutput) {
+  const std::vector<std::string> bank_names = {
+      "past_key_values.0.conv_state",
+      "past_key_values.0.recurrent_state",
+      "past_key_values.1.ple_conv_state",
+      "past_key_values.3.index_buffer",
+      "past_key_values.3.index_lengths",
+  };
+  const std::vector<std::string> complete_updates = {
+      "state_update.0.conv_value",
+      "state_update.0.recurrent_capsule",
+      "state_update.1.ple_conv_value",
+      "state_update.3.indexer_value",
+  };
+  EXPECT_NO_THROW(RequireQwen38ReplayCoverage(bank_names, complete_updates));
+
+  // Missing recurrent_capsule for layer 0 must be rejected naming both the missing output and the banked state.
+  try {
+    RequireQwen38ReplayCoverage(
+        bank_names, {"state_update.0.conv_value", "state_update.1.ple_conv_value", "state_update.3.indexer_value"});
+    ADD_FAILURE() << "expected missing state_update.0.recurrent_capsule to be rejected";
+  } catch (const std::runtime_error& e) {
+    const std::string msg = e.what();
+    EXPECT_NE(msg.find("state_update.0.recurrent_capsule"), std::string::npos) << msg;
+    EXPECT_NE(msg.find("past_key_values.0.recurrent_state"), std::string::npos) << msg;
+  }
 }
 
 namespace {

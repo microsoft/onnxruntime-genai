@@ -35,6 +35,20 @@ size_t Dflash2GraphBlockTableColumnLimit(size_t context_length, size_t paged_blo
 bool Dflash2GraphCaptureAllowed(bool enabled, bool uniform_ingest,
                                 size_t max_blocks, size_t max_columns) noexcept;
 
+// A windowed drafter gives every step the full block-table width when it opted into pinned width or
+// is driven by the Qwen38 graph engine with device-side draft selection. The width never changes, so
+// a growing context keeps replaying one captured graph, and the step tensors, once sized for the
+// widest step, are never reallocated (which would retire the captured graphs). Every other drafter,
+// including generic Engine drafters, buckets the width of the steps it captures.
+bool Dflash2PinsBlockTableWidth(bool capture_enabled, bool windowed, bool pinned_policy,
+                                bool device_selection) noexcept;
+
+// A drafter with a pinned width captures decode steps only: the ones that propose drafts from at
+// most one block of fresh context rows per served request and, when they select their drafts on
+// the device, serve a single request.
+bool Dflash2CapturesPinnedStep(bool drafts_wanted, size_t num_ctx_rows, size_t block_size,
+                               size_t served, bool device_selection) noexcept;
+
 // Reshapes a proposal tensor the drafter reuses between steps, replacing its buffer only when a
 // step needs more room than the one it kept. `reallocated` is set when the buffer moved, which
 // invalidates any CUDA graph captured against its old address.
@@ -141,6 +155,10 @@ struct Dflash2Drafter {
 
   // Binds the shared Engine policy once, before tracking requests.
   void InitializeSnapshotCache(std::shared_ptr<PrefixSnapshotCache> snapshot_cache);
+
+  // Opts into pinning the block-table width at max_block_table_columns_ for all steps and capturing
+  // only decode steps (used by Qwen38GraphEngine).
+  void SetPinnedBlockTableWidth(bool pinned) noexcept { pin_block_table_width_ = pinned; }
 
   // Bytes of drafter K/V per paged block, so the main cache pool can budget for it up front.
   static size_t BytesPerBlock(const Config& config, size_t paged_block_size,
@@ -272,6 +290,7 @@ struct Dflash2Drafter {
   // reuses a captured graph instead of retiring one per block boundary.
   size_t max_block_table_columns_{};
   bool graph_capture_enabled_{};
+  bool pin_block_table_width_{false};
   GraphAnnotationIds graph_ids_;
   // Bumped whenever a proposal tensor outgrows its buffer and moves. A captured graph records the
   // old addresses, so anything captured before a move must never be replayed after it.

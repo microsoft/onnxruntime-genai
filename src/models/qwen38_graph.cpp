@@ -215,8 +215,12 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
     BuildHead();
   if (q.prefill.enabled) BuildFastPrefill();
   if (!model_.config_->model.dflash2.filename.empty()) {
+    if (model_.config_->model.dflash2.is_dspark)
+      throw std::runtime_error("qwen38_flash_graph does not support model.dspark");
     if (!fold_ || !fast_ || !fast_->unified)
       throw std::runtime_error("DFlash experiment requires unified folded prefill");
+    if (!model_.session_info_.HasOutput("aux_hidden_states"))
+      throw std::runtime_error("DFlash experiment requires the target graph to expose aux_hidden_states");
     if (model_.config_->model.dflash2.num_draft_tokens != verify_rows_ - 1)
       throw std::runtime_error("DFlash draft count must match target prefix-state width");
     auto draft_config = CreateDflash2Config(*model_.config_);
@@ -241,8 +245,10 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
     const size_t page_size = static_cast<size_t>(cache_shape[1]);
     dflash_ = std::make_unique<Dflash2Drafter>(
         dflash_model_, page_size, Dflash2Drafter::PoolBlocks(*model_.config_, page_size, 1), 1);
+    dflash_->SetPinnedBlockTableWidth(true);
     ValidateQwen38DflashFeatureLayout(dflash_->AuxHiddenSize(), dflash_->AuxType());
-    d_dflash_prompt_ = PlaneBuffer(plane_, size_t(fast_->chunk) * kDflashWidth * 2, stream_);
+    const size_t dflash_prompt_rows = static_cast<size_t>(std::max(fast_->chunk, verify_rows_));
+    d_dflash_prompt_ = PlaneBuffer(plane_, dflash_prompt_rows * kDflashWidth * 2, stream_);
     const auto& dflash_config = model_.config_->model.dflash2;
     dflash_prompt_ = Qwen38DflashPromptFeatures{
         dflash_config.sliding_window > 0 ? static_cast<size_t>(dflash_config.sliding_window + dflash_config.block_size) : 0};
@@ -257,31 +263,42 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
         Draft(d_dflash_prompt_.data(), static_cast<size_t>(fast_->chunk), static_cast<size_t>(capacity_), 1000, false);
         dflash_->ReleaseAll();
       }
-      const int warm_len = std::min<int>(fast_->chunk, 512);
-      std::vector<int32_t> prompt(warm_len, 1000);
-      FastAppend(prompt);
-      FastHandoff();
-      size_t pos = 0;
-      if (const auto saved = dflash_prompt_.TakeSavedChunk()) {
-        for (int rep = 0; rep < 5; ++rep) {
-          dflash_->ReleaseAll();
-          Draft(d_dflash_prompt_.data(), saved->rows, saved->position, 1000, true);
+      const int warm_len = std::min<int>({fast_->chunk, 512, capacity_ - 3});
+      if (warm_len >= 1) {
+        std::vector<int32_t> prompt(warm_len, 1000);
+        FastAppend(prompt);
+        FastHandoff();
+        size_t pos = 0;
+        if (const auto saved = dflash_prompt_.TakeSavedChunk()) {
+          for (int rep = 0; rep < 5; ++rep) {
+            dflash_->ReleaseAll();
+            Draft(d_dflash_prompt_.data(), saved->rows, saved->position, 1000, true);
+          }
+          pos = saved->position + saved->rows;
         }
-        pos = saved->position + saved->rows;
-      }
-      for (size_t r = 1; r <= static_cast<size_t>(verify_rows_); ++r) {
-        for (int rep = 0; rep < 5; ++rep) {
-          Draft(d_dflash_prompt_.data(), r, pos, 1000, true);
-          pos += r;
+        for (size_t r = 1; r <= static_cast<size_t>(verify_rows_); ++r) {
+          for (int rep = 0; rep < 5; ++rep) {
+            Draft(d_dflash_prompt_.data(), r, pos, 1000, true);
+            pos += r;
+          }
         }
+        SyncStream();
+        Reset();
       }
-      SyncStream();
-      Reset();
     }
     if (warmup.target_tokens > 0) {
-      std::vector<int32_t> dummy(warmup.target_tokens, 1000);
-      StepPrefill(dummy);
-      Reset();
+      const size_t rotation_tokens = static_cast<size_t>(verify_rows_) * static_cast<size_t>(num_banks_);
+      const int max_step_prompt = capacity_ - (verify_rows_ + 1);
+      if (max_step_prompt >= static_cast<int>(rotation_tokens)) {
+        const size_t batch_tokens = (static_cast<size_t>(max_step_prompt) / rotation_tokens) * rotation_tokens;
+        for (size_t done = 0; done < warmup.target_tokens; done += batch_tokens) {
+          const size_t n = std::min(batch_tokens, warmup.target_tokens - done);
+          std::vector<int32_t> dummy(n);
+          for (size_t i = 0; i < n; ++i) dummy[i] = static_cast<int32_t>(1000 + done + i);
+          StepPrefill(dummy);
+          Reset();
+        }
+      }
     }
     warmup_seconds = SecondsSince(start);
   }
@@ -480,6 +497,10 @@ void Qwen38GraphEngine::BuildTarget() {
   if (compact_state_updates_) {
     if (!plane_.replay_state_updates)
       throw std::runtime_error("qwen38_graph: plane library lacks qwen38_plane_replay_state_updates");
+    std::vector<std::string> state_update_names;
+    state_update_names.reserve(state_update_tensors_.size());
+    for (const auto& [su_name, _] : state_update_tensors_) state_update_names.push_back(su_name);
+    RequireQwen38ReplayCoverage(bank_names, state_update_names);
     for (int k = 0; k < 2; ++k) {
       const Bank& src_bank = banks_[k];
       const Bank& dst_bank = banks_[k ^ 1];
@@ -1753,7 +1774,7 @@ std::unique_ptr<Config> PreflightQwen38GraphModelConfig(std::unique_ptr<Config> 
         "qwen38_flash_graph requires model.qwen38_graph.{head.filename_s1|fold.head_r2.filename,plane_library,ple_table}");
   if (q.fold.enabled) {
     if (!q.mtp.enabled) throw std::runtime_error("model.qwen38_graph.fold requires model.qwen38_graph.mtp.enabled");
-    if (q.fold.head_r2.filename.empty() && config_->model.dflash2.filename.empty())
+    if (q.fold.head_r2.filename.empty() && config->model.dflash2.filename.empty())
       throw std::runtime_error("model.qwen38_graph.fold.head_r2.filename is required");
   } else if (q.mtp.enabled && q.head.filename_s2.empty()) {
     throw std::runtime_error("model.qwen38_graph.head.filename_s2 is required when MTP is enabled");
@@ -1767,6 +1788,8 @@ std::unique_ptr<Config> PreflightQwen38GraphModelConfig(std::unique_ptr<Config> 
     throw std::runtime_error(
         "model.qwen38_graph.prefill with a separate dense graph requires prefill.{head_kv.filename,constants}");
   ValidateQwen38PrefillChunk(q);
+  if (!config->model.dflash2.filename.empty() && config->model.dflash2.is_dspark)
+    throw std::runtime_error("qwen38_flash_graph does not support model.dspark");
   if (q.kv_capacity <= Qwen38DecodeDevice::kReservedTail)
     throw std::runtime_error("model.qwen38_graph.kv_capacity must exceed " +
                              std::to_string(Qwen38DecodeDevice::kReservedTail));

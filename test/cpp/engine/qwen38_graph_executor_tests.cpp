@@ -727,6 +727,56 @@ TEST_F(Qwen38GraphEngineTest, RoundCountersOfSeveralRequestsAddUp) {
   EXPECT_EQ(stats.draft_tokens_accepted, 2u);
 }
 
+TEST_F(Qwen38GraphEngineTest, SevenDraftVerifyCyclesDeliverFullPartialEosAndBudgetTruncatedPredictions) {
+  // Cycle 1 accepts all 7 drafts (8 tokens emitted, reaching pred7), cycle 2 accepts 5 drafts (6 tokens, reaching pred5).
+  device_->SetDrafts(7, {7, 5});
+  auto engine = MakeEngine();
+  auto request = Begin(*engine, Prompt(4), /*max_generated_tokens=*/15);  // 1 (prompt) + 8 (cycle 1) + 6 (cycle 2)
+
+  const auto outcome = RunToCompletion(*engine, request);
+
+  EXPECT_EQ(outcome.finish_reason, GenerationFinishReason::TurnLimit);
+  EXPECT_EQ(outcome.tokens, Expected(4, 15));
+  EXPECT_EQ(device_->ledger_bank(), 0);  // two ping-pong cycles return to bank 0
+  const auto stats = engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.rounds, 2u);
+  EXPECT_EQ(stats.full_accept_rounds, 1u);
+  EXPECT_EQ(stats.partial_accept_rounds, 1u);
+  EXPECT_EQ(stats.draft_tokens_proposed, 14u);
+  EXPECT_EQ(stats.draft_tokens_accepted, 12u);
+  EXPECT_EQ(stats.draft_tokens_evaluated, 13u);  // 7 in cycle 1 + (5 accepted + 1 rejected) in cycle 2
+  EXPECT_EQ(stats.acceptance_length_histogram[7], 1u);
+  EXPECT_EQ(stats.acceptance_length_histogram[5], 1u);
+  EXPECT_EQ(stats.bonus_tokens, 1u);
+  EXPECT_EQ(stats.correction_tokens, 1u);
+
+  // Token-budget truncation inside pred4..pred7: 7 drafts accepted, but max_generated_tokens=6 stops at pred4 (the 5th draft).
+  device_->overrides.clear();
+  device_->SetDrafts(7, {7});
+  auto budget_engine = MakeEngine();
+  auto budget_req = Begin(*budget_engine, Prompt(4), /*max_generated_tokens=*/6);  // 1 (prompt) + 5 drafts (pred0..pred4)
+  const auto budget_outcome = RunToCompletion(*budget_engine, budget_req);
+  EXPECT_EQ(budget_outcome.finish_reason, GenerationFinishReason::TurnLimit);
+  EXPECT_EQ(budget_outcome.tokens, Expected(4, 6));
+  const auto budget_stats = budget_engine->GetSpeculativeStats();
+  EXPECT_EQ(budget_stats.draft_tokens_accepted, 5u);
+  EXPECT_EQ(budget_stats.draft_tokens_evaluated, 5u);
+  EXPECT_EQ(budget_stats.partial_accept_rounds, 1u);
+  EXPECT_EQ(budget_stats.full_accept_rounds, 0u);
+
+  // EOS at pred6 (position 4 + 1 + 6 = 11, the 7th draft) stops the turn on EOS without delivering pred7.
+  device_->overrides[11] = kEos;
+  auto eos_engine = MakeEngine();
+  auto eos_req = Begin(*eos_engine, Prompt(4), /*max_generated_tokens=*/20);
+  const auto eos_outcome = RunToCompletion(*eos_engine, eos_req);
+  EXPECT_EQ(eos_outcome.finish_reason, GenerationFinishReason::EosToken);
+  EXPECT_EQ(eos_outcome.tokens, Expected(4, 7));  // first token + pred0..pred5 (pred6 is EOS)
+  const auto eos_stats = eos_engine->GetSpeculativeStats();
+  EXPECT_EQ(eos_stats.draft_tokens_accepted, 6u);
+  EXPECT_EQ(eos_stats.draft_tokens_evaluated, 7u);
+  EXPECT_EQ(eos_stats.partial_accept_rounds, 1u);
+}
+
 // ---- prefill, cancellation, queueing ---------------------------------------------------------
 
 TEST_F(Qwen38GraphEngineTest, ThePromptIsIngestedInChunksOverSeveralSteps) {
