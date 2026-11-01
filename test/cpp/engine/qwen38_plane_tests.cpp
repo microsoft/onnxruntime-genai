@@ -995,7 +995,8 @@ class Qwen38TestPackage {
   // request slots it configures (model.qwen38_graph.max_batch_size).
   explicit Qwen38TestPackage(bool fold = false, int max_batch_size = 1)
       : dir_{MakeScratchDir(std::string{fold ? "package_support_fold" : "package_support"} +
-                            (max_batch_size > 1 ? "_slots" + std::to_string(max_batch_size) : ""))} {
+                            (max_batch_size > 1 ? "_slots" + std::to_string(max_batch_size) : "") + "_" +
+                            std::to_string(++next_id_))} {
     std::string fold_stack =
         fold ? R"(,"mtp":{"enabled":true},"fold":{"enabled":true,"head_r2":{"filename":"head_r2.onnx"}})" : "";
     if (max_batch_size > 1) fold_stack += R"(,"max_batch_size":)" + std::to_string(max_batch_size);
@@ -1053,6 +1054,7 @@ class Qwen38TestPackage {
   }
 
  private:
+  inline static std::atomic<int> next_id_{0};
   std::filesystem::path dir_;
   std::unique_ptr<Config> config_;
 };

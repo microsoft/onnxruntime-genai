@@ -1087,6 +1087,16 @@ TEST(Qwen38ContextTierTest, TierGraphsAreResolvedNextToTheConfiguredDecoder) {
   // The callable decides what exists: a graph supplied from memory is as good as a file.
   const auto from_memory = [](const std::string& file) { return file == "target/model_8k.onnx"; };
   EXPECT_EQ(ResolveQwen38TargetGraphFilename("target/model.onnx", "8k", "", from_memory), "target/model_8k.onnx");
+
+  // Auxiliary MTP heads (head_r2, head_s1, head_s2) resolve their matching tier / dynamic_ctx sibling in the same way.
+  TouchPackageFiles(dir, {"mtp/head_r2.onnx", "mtp/head_r2_2k.onnx", "mtp/head_r2_dynamic_ctx.onnx",
+                          "mtp/head_s1.onnx", "mtp/head_s1_8k.onnx", "mtp/head_s2.onnx", "mtp/head_s2_8k.onnx"});
+  EXPECT_EQ(ResolveQwen38AuxiliaryGraphFilename("mtp/head_r2.onnx", "", FilesOf(dir)), "mtp/head_r2.onnx");
+  EXPECT_EQ(ResolveQwen38AuxiliaryGraphFilename("mtp/head_r2.onnx", "2k", FilesOf(dir)), "mtp/head_r2_2k.onnx");
+  EXPECT_EQ(ResolveQwen38AuxiliaryGraphFilename("mtp/head_r2.onnx", "16k", FilesOf(dir)), "mtp/head_r2_dynamic_ctx.onnx");
+  EXPECT_EQ(ResolveQwen38AuxiliaryGraphFilename("mtp/head_r2.onnx", "32k", FilesOf(dir)), "mtp/head_r2.onnx");
+  EXPECT_EQ(ResolveQwen38AuxiliaryGraphFilename("mtp/head_s1.onnx", "8k", FilesOf(dir)), "mtp/head_s1_8k.onnx");
+  EXPECT_EQ(ResolveQwen38AuxiliaryGraphFilename("mtp/head_s2.onnx", "8k", FilesOf(dir)), "mtp/head_s2_8k.onnx");
   RemoveScratchDir(dir);
 }
 
@@ -1271,6 +1281,16 @@ TEST(Qwen38ContextSyncTest, TheCapacityFollowsEveryGraphWhateverTheLimit) {
   EXPECT_THROW(SyncQwen38GraphContext(0, 4096, false), std::invalid_argument);
   EXPECT_THROW(SyncQwen38GraphContext(-1, 4096, true), std::invalid_argument);
   EXPECT_EQ(SyncQwen38GraphContext(int64_t{1} << 40, 4096, false).kv_capacity, std::numeric_limits<int>::max());
+
+  // Padded past_position_ids (e.g. 33040 positions for a 33028 KV cache) must not override the static KV cache capacity.
+  const std::vector<Qwen38CacheInput> padded = {
+      {"past_position_ids", {-1, 33040}},
+      {"past_key_values.3.key", {-1, 2, 33028, 256}},
+      {"past_key_values.3.index_key", {-1, 8260, 128}},
+  };
+  const int64_t kv_cap = ResolveQwen38GraphKvCapacity(padded);
+  EXPECT_EQ(kv_cap, 33028);
+  EXPECT_NO_THROW(ValidateQwen38CacheShapes(padded, static_cast<int>(kv_cap), "target"));
 }
 
 // The DFlash drafter's prompt-feature buffer gives every slot Qwen38DflashPromptSlotRows rows. The warm-up of the drafter views

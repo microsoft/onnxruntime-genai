@@ -409,6 +409,47 @@ std::string ResolveQwen38TargetGraphFilename(const std::string& decoder_filename
   return decoder_filename;
 }
 
+std::string ResolveQwen38AuxiliaryGraphFilename(const std::string& configured_filename, const std::string& context_request,
+                                                const std::function<bool(const std::string&)>& exists) {
+  const std::string tier = NormalizeQwen38ContextTier(context_request);
+  if (tier.empty() || configured_filename.empty()) {
+    return configured_filename;
+  }
+  const std::filesystem::path configured_path{configured_filename};
+  const std::string folder = configured_path.parent_path().generic_string();
+  const std::string stem = configured_path.stem().generic_string();
+  const std::string ext = configured_path.extension().generic_string();
+  const auto in_folder = [&folder](const std::string& name) { return folder.empty() ? name : folder + "/" + name; };
+  const std::string tier_graph = in_folder(stem + "_" + tier + ext);
+  const std::string dynamic_graph = in_folder(stem + "_dynamic_ctx" + ext);
+  const std::vector<std::string> candidates =
+      tier == "32k" ? std::vector<std::string>{tier_graph, configured_filename, dynamic_graph}
+                    : std::vector<std::string>{tier_graph, dynamic_graph, configured_filename};
+  for (const std::string& candidate : candidates) {
+    if (exists(candidate)) return candidate;
+  }
+  std::string tried;
+  for (const std::string& candidate : candidates) tried += (tried.empty() ? "'" : ", '") + candidate + "'";
+  throw std::runtime_error("qwen38_flash_graph: ORT_QWEN38_CONTEXT_LENGTH=" + context_request +
+                           " names the context tier '" + tier + "', but the model folder has none of " + tried);
+}
+
+int64_t ResolveQwen38GraphKvCapacity(const std::vector<Qwen38CacheInput>& inputs) {
+  int64_t pos_rows = 0;
+  for (const auto& input : inputs) {
+    const size_t dot = input.name.rfind('.');
+    const std::string tail = dot == std::string::npos ? input.name : input.name.substr(dot + 1);
+    const bool is_cache = input.name.find("past_key_values.") != std::string::npos;
+    if (is_cache && (tail == "key" || tail == "value") && input.shape.size() == 4 && input.shape[2] > 0) {
+      return input.shape[2];
+    }
+    if (input.name == "past_position_ids" && input.shape.size() == 2 && input.shape[1] > 0) {
+      pos_rows = input.shape[1];
+    }
+  }
+  return pos_rows;
+}
+
 Qwen38GraphContext SyncQwen38GraphContext(int64_t graph_positions, int configured_max_length, bool context_requested) {
   if (graph_positions <= 0) throw std::invalid_argument("qwen38_flash_graph: the target graph has no KV positions");
   Qwen38GraphContext context;
@@ -2848,6 +2889,15 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
   };
   const std::string target_filename = ResolveQwen38TargetGraphFilename(
       config_->model.decoder.filename, context_request, drafts_env ? drafts_env : "", package_has_file);
+  std::string head_r2_filename = q.fold.head_r2.filename;
+  std::string head_s1_filename = q.head.filename_s1;
+  std::string head_s2_filename = q.head.filename_s2;
+  if (q.fold.enabled && !q.fold.head_r2.filename.empty() && config_->model.dflash2.filename.empty()) {
+    head_r2_filename = ResolveQwen38AuxiliaryGraphFilename(q.fold.head_r2.filename, context_request, package_has_file);
+  } else if (!q.fold.enabled && q.mtp.enabled) {
+    head_s1_filename = ResolveQwen38AuxiliaryGraphFilename(q.head.filename_s1, context_request, package_has_file);
+    head_s2_filename = ResolveQwen38AuxiliaryGraphFilename(q.head.filename_s2, context_request, package_has_file);
+  }
   if (!config_->memory_assets_only_ && config_->model_data_spans_.count(target_filename) == 0) {
     ValidateQwen38TargetModelFile(ResolveQwen38MaxBatchSize(*config_), root / target_filename);
   }
@@ -2919,24 +2969,27 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
   // The outputs of the session are authoritative (the model file may not be a protobuf one): refuse a ring-bank target for
   // several slots before anything else is built.
   ValidateQwen38BatchedTargetOutputs(ResolveQwen38MaxBatchSize(*config_), session_target_->GetOutputNames());
-  if (session_info_.HasInput("past_position_ids")) {
-    const auto pos_shape = session_info_.GetInputShape("past_position_ids");
-    if (pos_shape.size() == 2 && pos_shape[1] > 0) {
-      // The capacity follows the graph. The default generation budget follows it only when a context tier was requested: a
-      // package that limits search.max_length keeps its limit.
-      const Qwen38GraphContext context =
-          SyncQwen38GraphContext(pos_shape[1], config_->search.max_length, !context_request.empty());
-      config_->model.qwen38_graph.kv_capacity = context.kv_capacity;
-      config_->model.context_length = context.context_length;
-      config_->search.max_length = context.max_length;
-      // A tier request that no model_<tier>.onnx answers falls back to another graph (see ResolveQwen38TargetGraphFilename), so
-      // the graph that was taken and the context it gave are what tells a mistyped or unsupported tier from a served one.
-      if (g_log.enabled) {
-        Log("qwen38_graph") << "target graph " << target_filename << ": kv_capacity " << context.kv_capacity
-                            << ", context_length " << context.context_length << ", max_length " << context.max_length
-                            << (context_request.empty() ? std::string() : ", ORT_QWEN38_CONTEXT_LENGTH=" + context_request)
-                            << std::endl;
-      }
+  if (const int64_t graph_positions =
+          ResolveQwen38GraphKvCapacity(CacheInputsOf(session_info_, "past_key_values.", true));
+      graph_positions > 0) {
+    // The capacity follows the graph. The default generation budget follows it only when a context tier was requested: a
+    // package that limits search.max_length keeps its limit.
+    const Qwen38GraphContext context =
+        SyncQwen38GraphContext(graph_positions, config_->search.max_length, !context_request.empty());
+    config_->model.qwen38_graph.kv_capacity = context.kv_capacity;
+    if (config_->model.qwen38_graph.prefill.enabled &&
+        EffectiveQwen38PrefillChunkTokens(config_->model.qwen38_graph) > static_cast<size_t>(context.kv_capacity)) {
+      config_->model.qwen38_graph.prefill.chunk = context.kv_capacity;
+    }
+    config_->model.context_length = context.context_length;
+    config_->search.max_length = context.max_length;
+    // A tier request that no model_<tier>.onnx answers falls back to another graph (see ResolveQwen38TargetGraphFilename), so
+    // the graph that was taken and the context it gave are what tells a mistyped or unsupported tier from a served one.
+    if (g_log.enabled) {
+      Log("qwen38_graph") << "target graph " << target_filename << ": kv_capacity " << context.kv_capacity
+                          << ", context_length " << context.context_length << ", max_length " << context.max_length
+                          << (context_request.empty() ? std::string() : ", ORT_QWEN38_CONTEXT_LENGTH=" + context_request)
+                          << std::endl;
     }
   }
   if (g_log.enabled) Log("qwen38_graph") << "target session " << SecondsSince(start) << " s" << std::endl;
@@ -2960,7 +3013,7 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
   if (q.fold.enabled) {
     if (!q.fold.head_r2.filename.empty() && config_->model.dflash2.filename.empty()) {
       head_r2_session_options_ = make_options(q.fold.head_r2.session_options, true, "mtp");
-      session_head_r2_ = CreateSession(ort_env, q.fold.head_r2.filename, head_r2_session_options_.get());
+      session_head_r2_ = CreateSession(ort_env, head_r2_filename, head_r2_session_options_.get());
     }
     if (separate_prefill_sessions) {
       // the dense / head-KV sessions are not graph captured and do not inherit the decoder's provider options
@@ -2973,8 +3026,8 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
     if (g_log.enabled) Log("qwen38_graph") << "head / prefill sessions " << SecondsSince(start) << " s" << std::endl;
   } else if (q.mtp.enabled) {
     head_session_options_ = make_options(q.head.session_options, true, "head");
-    session_head_s1_ = CreateSession(ort_env, q.head.filename_s1, head_session_options_.get());
-    session_head_s2_ = CreateSession(ort_env, q.head.filename_s2, head_session_options_.get());
+    session_head_s1_ = CreateSession(ort_env, head_s1_filename, head_session_options_.get());
+    session_head_s2_ = CreateSession(ort_env, head_s2_filename, head_session_options_.get());
     if (g_log.enabled) Log("qwen38_graph") << "head sessions " << SecondsSince(start) << " s" << std::endl;
   }
 
