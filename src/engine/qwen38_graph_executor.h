@@ -174,6 +174,10 @@ struct Qwen38GraphExecutor final : ModelExecutor {
                        std::span<const RequestStepResult> results) override;
 
  private:
+  // The slot of the request at `row` of a step: its lease with a cache manager, else the row itself. Decode() and
+  // OnStepCommitted() both use it, so the statistics of a row reach the slot state that Decode() planned for it.
+  size_t SlotOf(const std::shared_ptr<Request>& request, size_t row) const;
+
   std::shared_ptr<Qwen38GraphSession> session_;
   std::shared_ptr<Qwen38GraphCacheManager> cache_manager_;
 };

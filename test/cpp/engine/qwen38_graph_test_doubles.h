@@ -23,7 +23,9 @@ namespace Generators::test {
 //    runs it sees the sequence prompt ++ TokenAt(H), TokenAt(H + 1), ... (H = prompt length) regardless of how the steps
 //    were chunked, and re-ingesting a longer history (a continued turn) keeps producing TokenAt of the next position;
 //  - the drafter is right on the cycles named by `accept_pattern` (cycled), so cycles commit 1 or 2 tokens; SetDrafts()
-//    switches to the fold's multi-draft cycles (2..3 drafts per verify, any accepted prefix 0..drafts per cycle);
+//    switches to the fold's multi-draft cycles (1..7 drafts per verify, any accepted prefix 0..drafts per cycle), also
+//    on a device with several slots, where every slot cycles through the accepted counts by its own batched cycles and
+//    SetSlotAcceptedCounts() gives a slot a pattern of its own (the slots of a batch then accept unequal prefixes);
 //  - `dense_prefill` models the fast prefill: chunks of any size advance the ledger at bank 0 (no S=2 pairs), the hand-off
 //    to the decode state happens in BeginDecode(run_cycle = true) and only once all chunks arrived, `preferred_chunk` is
 //    the chunk size the device asks the executor for;
@@ -75,6 +77,7 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
   // Every verify proposes `drafts` tokens and accepts the next entry of `accepted_counts` (cycled, each 0..drafts) of them
   // in order, so the cycle commits that many tokens + 1 (the correction, or the bonus when all were accepted). The record
   // then reports them like the production device does, through `accepted_count`. Call it before the first Reset().
+  // The bank ring of every ledger, the per-slot ones included, follows the verify width, as on the real device.
   void SetDrafts(int drafts, std::vector<int> accepted_counts) {
     if (drafts < 1 || drafts > 7) throw std::invalid_argument("a verify proposes 1..7 drafts");
     for (const int count : accepted_counts) {
@@ -82,12 +85,21 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
     }
     drafts_ = drafts;
     accepted_counts_ = std::move(accepted_counts);
+    slot_accepted_counts_.clear();
     reserved_tail = std::max(reserved_tail, drafts + 1);
-    if (drafts > 3) {
-      ledger_.SetCompactPingPong(true, drafts + 1);
-    } else {
-      ledger_.SetNumBanks(drafts + 2);  // the bank ring of the fold: one more than the rows of a verify
+    ConfigureLedger(ledger_);
+    for (auto& slot_ledger : slot_ledgers_) ConfigureLedger(slot_ledger);
+  }
+
+  // The accepted counts of the batched cycles of one slot (cycled like SetDrafts()'s, each 0..drafts) instead of the
+  // shared ones, so that the slots of one batch accept unequal prefixes in the same cycle. Call it after SetDrafts().
+  void SetSlotAcceptedCounts(size_t slot, std::vector<int> accepted_counts) {
+    if (slot >= max_batch_size_) throw std::out_of_range("no such slot");
+    if (accepted_counts.empty()) throw std::invalid_argument("a slot pattern names at least one accepted count");
+    for (const int count : accepted_counts) {
+      if (count < 0 || count > drafts_) throw std::invalid_argument("a verify accepts 0..drafts drafts");
     }
+    slot_accepted_counts_[slot] = std::move(accepted_counts);
   }
 
   // ---- observation ----
@@ -293,15 +305,9 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
     inflight_ = false;
     for (size_t i = 0; i < active_slots.size(); ++i) {
       const size_t s = active_slots[i];
-      const size_t length = slot_ledgers_.at(s).Length();
-      Qwen38CycleRecord record;
-      record.pred0 = TokenAt(length + 1);
-      record.accepted = mtp_ && accept_pattern[(slot_cycles_.at(s) - 1) % accept_pattern.size()];
-      record.pred1 = record.accepted ? TokenAt(length + 2) : -7;
-      const size_t step = record.TokenCount();
-      record.new_pending = record.accepted ? record.pred1 : record.pred0;
-      record.new_length = static_cast<int64_t>(length + step);
-      records[i] = record;
+      const auto own = slot_accepted_counts_.find(s);
+      records[i] = ScriptedRecord(slot_ledgers_.at(s).Length(), slot_cycles_.at(s),
+                                  own != slot_accepted_counts_.end() ? own->second : accepted_counts_);
     }
   }
 
@@ -337,35 +343,13 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
     Complete();
     inflight_ = false;
     if (fail_cycle != 0 && cycle_ == fail_cycle) throw std::runtime_error("injected device validation failure");
-    Qwen38CycleRecord record;
     if (malformed_cycle_count) {
+      Qwen38CycleRecord record;
       record.accepted_count = 100;
       record.proposed_count = 100;
       return record;
     }
-    const size_t length = ledger_.Length();
-    size_t accepted_drafts = 0;
-    if (accepted_counts_.empty()) {
-      record.accepted = mtp_ && accept_pattern[(cycle_ - 1) % accept_pattern.size()];  // the legacy single-draft flag
-      accepted_drafts = record.accepted ? 1 : 0;
-    } else {
-      accepted_drafts = mtp_ ? static_cast<size_t>(accepted_counts_[(cycle_ - 1) % accepted_counts_.size()]) : 0;
-      record.accepted = accepted_drafts > 0;
-      record.accepted_count = static_cast<int>(accepted_drafts);
-    }
-    record.proposed_count = mtp_ ? drafts_ : 1;
-    // Rows after the first mismatch are meaningless; the cycle commits the accepted drafts and one token more.
-    const size_t step = accepted_drafts + 1;
-    const std::array<int64_t*, 8> predictions{
-        &record.pred0, &record.pred1, &record.pred2, &record.pred3,
-        &record.pred4, &record.pred5, &record.pred6, &record.pred7};
-    for (size_t i = 0; i < predictions.size(); ++i) {
-      *predictions[i] = i < step ? TokenAt(length + 1 + i) : -7;
-    }
-    if (record.TokenCount() != step) throw std::logic_error("the scripted record disagrees with its own token count");
-    record.new_pending = *predictions[step - 1];
-    record.new_length = static_cast<int64_t>(length + step);
-    return record;
+    return ScriptedRecord(ledger_.Length(), cycle_, accepted_counts_);
   }
 
   void Advance(const Qwen38CycleRecord& record, bool want_more) override {
@@ -395,6 +379,45 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
   }
 
  private:
+  // The bank ring of the fold keeps one bank more than the rows of a verify; a verify of more than 4 rows ping-pongs
+  // between two banks (the compact replay).
+  void ConfigureLedger(Qwen38DecodeLedger& ledger) const {
+    if (drafts_ > 3) {
+      ledger.SetCompactPingPong(true, drafts_ + 1);
+    } else {
+      ledger.SetNumBanks(drafts_ + 2);
+    }
+  }
+
+  // The record of the cycle that verifies at `length` committed tokens, the 1-based `cycle` of its decode: it accepts
+  // the next entry of `accepted_counts` (cycled) of the drafts, or the legacy single draft named by `accept_pattern`
+  // when there are none. The slots of a batched cycle build theirs from their own length and cycle count.
+  Qwen38CycleRecord ScriptedRecord(size_t length, size_t cycle, const std::vector<int>& accepted_counts) const {
+    Qwen38CycleRecord record;
+    size_t accepted_drafts = 0;
+    if (accepted_counts.empty()) {
+      record.accepted = mtp_ && accept_pattern[(cycle - 1) % accept_pattern.size()];  // the legacy single-draft flag
+      accepted_drafts = record.accepted ? 1 : 0;
+    } else {
+      accepted_drafts = mtp_ ? static_cast<size_t>(accepted_counts[(cycle - 1) % accepted_counts.size()]) : 0;
+      record.accepted = accepted_drafts > 0;
+      record.accepted_count = static_cast<int>(accepted_drafts);
+    }
+    record.proposed_count = mtp_ ? drafts_ : 1;
+    // Rows after the first mismatch are meaningless; the cycle commits the accepted drafts and one token more.
+    const size_t step = accepted_drafts + 1;
+    const std::array<int64_t*, 8> predictions{
+        &record.pred0, &record.pred1, &record.pred2, &record.pred3,
+        &record.pred4, &record.pred5, &record.pred6, &record.pred7};
+    for (size_t i = 0; i < predictions.size(); ++i) {
+      *predictions[i] = i < step ? TokenAt(length + 1 + i) : -7;
+    }
+    if (record.TokenCount() != step) throw std::logic_error("the scripted record disagrees with its own token count");
+    record.new_pending = *predictions[step - 1];
+    record.new_length = static_cast<int64_t>(length + step);
+    return record;
+  }
+
   void Enqueue() {
     ledger_.RequireRoom(static_cast<size_t>(drafts_) + 1, "the next verify step");
     inflight_ = true;
@@ -419,6 +442,7 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
   bool mtp_;
   int drafts_{1};
   std::vector<int> accepted_counts_;
+  std::map<size_t, std::vector<int>> slot_accepted_counts_;  // SetSlotAcceptedCounts: a slot's own pattern
   size_t max_batch_size_{1};
   Qwen38DecodeLedger ledger_;
   std::vector<Qwen38DecodeLedger> slot_ledgers_;

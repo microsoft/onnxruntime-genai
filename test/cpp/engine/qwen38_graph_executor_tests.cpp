@@ -172,6 +172,35 @@ class Qwen38GraphEngineTest : public ::testing::Test {
     return outcome;
   }
 
+  // The same for several Requests: what each of them produced, in the order given.
+  static std::vector<Outcome> RunAllToCompletion(Engine& engine, const std::vector<std::shared_ptr<Request>>& requests,
+                                                 size_t max_runs = 10000) {
+    std::vector<Outcome> outcomes(requests.size());
+    std::array<EngineEvent, 16> buffer;
+    for (size_t runs = 0; engine.HasPendingRequests(); ++runs) {
+      if (runs >= max_runs) {
+        ADD_FAILURE() << "the Engine did not finish";
+        break;
+      }
+      const size_t count = engine.Run(buffer);
+      for (size_t i = 0; i < count; ++i) {
+        const EngineEvent& event = buffer[i];
+        const auto found = std::find(requests.begin(), requests.end(), event.request);
+        if (found == requests.end()) continue;
+        Outcome& outcome = outcomes[static_cast<size_t>(found - requests.begin())];
+        if (event.flags & EngineEventFlagToken) outcome.tokens.push_back(event.token);
+        if (event.flags & (EngineEventFlagFailed | EngineEventFlagRetryable | EngineEventFlagCapacityBlocked)) {
+          outcome.failure_flags |= event.flags;
+        }
+        if (event.flags & EngineEventFlagTurnFinished) {
+          ++outcome.finished_events;
+          outcome.finish_reason = event.finish_reason;
+        }
+      }
+    }
+    return outcomes;
+  }
+
   std::vector<int32_t> Expected(size_t first_position, size_t count) const {
     std::vector<int32_t> tokens;
     for (size_t i = 0; i < count; ++i) tokens.push_back(device_->TokenAt(first_position + i));
@@ -2494,6 +2523,218 @@ TEST_F(Qwen38GraphEngineTest, MultiSlotBatchCountsOnePhysicalForwardAndTracksDis
   EXPECT_EQ(session->WorkMetrics().target_forward_passes, 1u);
   EXPECT_EQ(session->WorkMetrics().discarded_completions, 1u);
   EXPECT_EQ(engine->GetSpeculativeStats().target_forward_passes, 1u);
+}
+
+// An executor built without a cache manager takes the row of a request as its slot. Decode() and the commit of the step
+// must agree on it: crediting every row to slot 0 drops the statistics of the requests in the other slots, because
+// their owner is not the one that holds slot 0.
+TEST_F(Qwen38GraphEngineTest, MultiSlotWithoutACacheManagerCreditsEveryRowToItsOwnSlot) {
+  struct Run {
+    std::vector<std::vector<int32_t>> tokens;
+    SpeculativeStats stats;
+  };
+  const auto run = [&](bool executor_has_cache_manager) {
+    device_ = std::make_shared<ScriptedQwen38Device>(/*capacity=*/68, /*mtp=*/true, /*max_batch_size=*/2);
+    device_->dense_prefill = true;
+    device_->preferred_chunk = 16;
+    Qwen38GraphSession::Options options;
+    options.prefill_chunk_tokens = 16;
+    options.stop_tokens = {kEos};
+    auto session = std::make_shared<Qwen38GraphSession>(device_, options);
+    auto cache = std::make_shared<Qwen38GraphCacheManager>(model_, session);
+    auto scheduler = std::make_unique<FixedSlotScheduler>(model_, cache);
+    auto executor = executor_has_cache_manager ? std::make_unique<Qwen38GraphExecutor>(session, cache)
+                                               : std::make_unique<Qwen38GraphExecutor>(session);
+    auto engine = std::make_shared<Engine>(
+        model_, EngineDependencies{cache, std::move(scheduler), std::move(executor)});
+
+    const std::array<std::shared_ptr<Request>, 2> requests{Begin(*engine, Prompt(4, 10), /*max_generated_tokens=*/5),
+                                                           Begin(*engine, Prompt(6, 20), /*max_generated_tokens=*/7)};
+    Run result;
+    result.tokens.resize(requests.size());
+    std::array<EngineEvent, 16> buffer;
+    for (size_t runs = 0; engine->HasPendingRequests(); ++runs) {
+      EXPECT_LT(runs, 1000u) << "the Engine did not finish";
+      if (runs >= 1000u) break;
+      const size_t count = engine->Run(buffer);
+      for (size_t i = 0; i < count; ++i) {
+        EXPECT_EQ(buffer[i].flags & EngineEventFlagFailed, 0u);
+        if ((buffer[i].flags & EngineEventFlagToken) == 0) continue;
+        for (size_t r = 0; r < requests.size(); ++r) {
+          if (buffer[i].request == requests[r]) result.tokens[r].push_back(buffer[i].token);
+        }
+      }
+    }
+    result.stats = engine->GetSpeculativeStats();
+    return result;
+  };
+
+  const Run with_manager = run(true);
+  const Run without_manager = run(false);
+
+  EXPECT_EQ(with_manager.tokens[0], Expected(4, 5));
+  EXPECT_EQ(with_manager.tokens[1], Expected(6, 7));
+  EXPECT_EQ(without_manager.tokens, with_manager.tokens);
+  EXPECT_EQ(with_manager.stats.tokens_emitted, 12u);
+  EXPECT_EQ(without_manager.stats.tokens_emitted, 12u) << "the tokens of the request in slot 1 were not counted";
+  EXPECT_EQ(without_manager.stats.rounds, with_manager.stats.rounds);
+  EXPECT_EQ(without_manager.stats.draft_tokens_proposed, with_manager.stats.draft_tokens_proposed);
+  EXPECT_EQ(without_manager.stats.draft_tokens_accepted, with_manager.stats.draft_tokens_accepted);
+  EXPECT_EQ(without_manager.stats.tokens_discarded, with_manager.stats.tokens_discarded);
+  EXPECT_GT(with_manager.stats.rounds, 0u);
+}
+
+// The batched cycles of a device with several slots verify as wide as the single-slot ones do. Every slot accepts a
+// prefix of its own in the same cycle (3, 2, 3 and 0 of 3 drafts in the first one), and ends on its own cycle: the turn
+// limit inside a full verify (slot 0), the limit exactly after a verify (slot 1), an end of sequence in the middle of a
+// full verify (slot 2) and the limit after single-token verifies (slot 3). The counters are the sums of what each slot
+// did:
+//   slot 0 (3 of 3 accepted, 14 tokens): 3 full rounds with their bonus tokens, the 4th cut to 1 token (evaluated
+//          3+3+3+1, its 3 other tokens are discarded);
+//   slot 1 (2 of 3 accepted, 10 tokens): 3 partial rounds with a correction each, evaluated 3 per round;
+//   slot 2 (3 of 3 accepted, the end of sequence is pred2): pred0 and pred1 are delivered, the end of sequence is
+//          examined as the third draft, and it and pred3 are discarded;
+//   slot 3 (0 of 3 accepted, 5 tokens): 4 zero-accept rounds, each examines its rejected draft and delivers a
+//          correction.
+TEST_F(Qwen38GraphEngineTest, MultiSlotVerifiesOfFourRowsLetEverySlotAcceptItsOwnPrefix) {
+  device_ = std::make_shared<ScriptedQwen38Device>(/*capacity=*/96, /*mtp=*/true, /*max_batch_size=*/4);
+  device_->dense_prefill = true;
+  device_->preferred_chunk = 40;  // every prompt in one chunk
+  device_->SetDrafts(3, {0});
+  device_->SetSlotAcceptedCounts(0, {3});
+  device_->SetSlotAcceptedCounts(1, {2});
+  device_->SetSlotAcceptedCounts(2, {3, 1});
+  device_->SetSlotAcceptedCounts(3, {0});
+  device_->overrides[27] = kEos;  // slot 2: the first token is at 24, pred0 at 25, pred2 at 27
+  auto engine = MakeEngine();
+
+  const std::array<std::vector<int32_t>, 4> prompts{Prompt(4, 12), Prompt(12, 20), Prompt(24, 30), Prompt(32, 40)};
+  const std::vector<std::shared_ptr<Request>> requests{Begin(*engine, prompts[0], /*max_generated_tokens=*/14),
+                                                       Begin(*engine, prompts[1], /*max_generated_tokens=*/10),
+                                                       Begin(*engine, prompts[2], /*max_generated_tokens=*/20),
+                                                       Begin(*engine, prompts[3], /*max_generated_tokens=*/5)};
+
+  const auto outcomes = RunAllToCompletion(*engine, requests);
+
+  ASSERT_EQ(outcomes.size(), 4u);
+  for (size_t slot = 0; slot < outcomes.size(); ++slot) {
+    EXPECT_EQ(device_->slot_ingested(slot), prompts[slot]) << "slot " << slot;
+    EXPECT_EQ(outcomes[slot].failure_flags, 0u) << "slot " << slot;
+    EXPECT_EQ(outcomes[slot].finished_events, 1u) << "slot " << slot;
+  }
+  EXPECT_EQ(outcomes[0].tokens, Expected(4, 14));
+  EXPECT_EQ(outcomes[1].tokens, Expected(12, 10));
+  EXPECT_EQ(outcomes[2].tokens, Expected(24, 3));
+  EXPECT_EQ(outcomes[3].tokens, Expected(32, 5));
+  EXPECT_EQ(outcomes[0].finish_reason, GenerationFinishReason::TurnLimit);
+  EXPECT_EQ(outcomes[1].finish_reason, GenerationFinishReason::TurnLimit);
+  EXPECT_EQ(outcomes[2].finish_reason, GenerationFinishReason::EosToken);
+  EXPECT_EQ(outcomes[3].finish_reason, GenerationFinishReason::TurnLimit);
+
+  const auto stats = engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.rounds, 12u);  // 4 + 3 + 1 + 4
+  EXPECT_EQ(stats.draft_tokens_proposed, 36u);
+  EXPECT_EQ(stats.draft_tokens_evaluated, 26u);  // 10 + 9 + 3 + 4
+  EXPECT_EQ(stats.draft_tokens_accepted, 18u);   // 10 + 6 + 2 + 0
+  EXPECT_EQ(stats.acceptance_length_histogram[0], 4u);
+  EXPECT_EQ(stats.acceptance_length_histogram[1], 1u);
+  EXPECT_EQ(stats.acceptance_length_histogram[2], 4u);
+  EXPECT_EQ(stats.acceptance_length_histogram[3], 3u);
+  EXPECT_EQ(stats.full_accept_rounds, 3u);
+  EXPECT_EQ(stats.partial_accept_rounds, 5u);
+  EXPECT_EQ(stats.zero_accept_rounds, 4u);
+  EXPECT_EQ(stats.bonus_tokens, 3u);
+  EXPECT_EQ(stats.correction_tokens, 7u);
+  EXPECT_EQ(stats.tokens_emitted, 32u);  // 14 + 10 + 3 + 5
+  EXPECT_EQ(stats.tokens_discarded, 5u);
+}
+
+// The same with the widest verify, 8 rows (7 drafts, the compact ping-pong bank ring): pred4..pred7 are delivered, cut
+// by the turn limit (slot 1: pred4 is the last token) or by an end of sequence that is the bonus token of a full accept
+// (slot 2).
+//   slot 0 (7 then 5 accepted, 15 tokens): one full round with its bonus token, one partial round with its correction;
+//   slot 1 (7 accepted, 6 tokens): one round cut after 5 drafts, evaluated 5, pred5..pred7 discarded;
+//   slot 2 (7 accepted, EOS is pred7): a full round whose bonus token is the end of sequence, so there is no bonus
+//          token;
+//   slot 3 (3, 0 and 7 accepted, 14 tokens): a partial, a zero-accept and a full round.
+TEST_F(Qwen38GraphEngineTest, MultiSlotVerifiesOfEightRowsLetEverySlotAcceptItsOwnPrefix) {
+  device_ = std::make_shared<ScriptedQwen38Device>(/*capacity=*/96, /*mtp=*/true, /*max_batch_size=*/4);
+  device_->dense_prefill = true;
+  device_->preferred_chunk = 64;  // every prompt in one chunk
+  device_->SetDrafts(7, {0});
+  device_->SetSlotAcceptedCounts(0, {7, 5});
+  device_->SetSlotAcceptedCounts(1, {7});
+  device_->SetSlotAcceptedCounts(2, {7});
+  device_->SetSlotAcceptedCounts(3, {3, 0, 7});
+  device_->overrides[44] = kEos;  // slot 2: the first token is at 36, pred0 at 37, pred7 at 44
+  auto engine = MakeEngine();
+
+  const std::array<std::vector<int32_t>, 4> prompts{Prompt(4, 12), Prompt(20, 20), Prompt(36, 30), Prompt(50, 40)};
+  const std::vector<std::shared_ptr<Request>> requests{Begin(*engine, prompts[0], /*max_generated_tokens=*/15),
+                                                       Begin(*engine, prompts[1], /*max_generated_tokens=*/6),
+                                                       Begin(*engine, prompts[2], /*max_generated_tokens=*/20),
+                                                       Begin(*engine, prompts[3], /*max_generated_tokens=*/14)};
+
+  const auto outcomes = RunAllToCompletion(*engine, requests);
+
+  ASSERT_EQ(outcomes.size(), 4u);
+  for (size_t slot = 0; slot < outcomes.size(); ++slot) {
+    EXPECT_EQ(device_->slot_ingested(slot), prompts[slot]) << "slot " << slot;
+    EXPECT_EQ(outcomes[slot].failure_flags, 0u) << "slot " << slot;
+    EXPECT_EQ(outcomes[slot].finished_events, 1u) << "slot " << slot;
+  }
+  EXPECT_EQ(outcomes[0].tokens, Expected(4, 15));
+  EXPECT_EQ(outcomes[1].tokens, Expected(20, 6));
+  EXPECT_EQ(outcomes[2].tokens, Expected(36, 8));
+  EXPECT_EQ(outcomes[3].tokens, Expected(50, 14));
+  EXPECT_EQ(outcomes[0].finish_reason, GenerationFinishReason::TurnLimit);
+  EXPECT_EQ(outcomes[1].finish_reason, GenerationFinishReason::TurnLimit);
+  EXPECT_EQ(outcomes[2].finish_reason, GenerationFinishReason::EosToken);
+  EXPECT_EQ(outcomes[3].finish_reason, GenerationFinishReason::TurnLimit);
+  EXPECT_EQ(device_->ledger_bank(), 0);  // slot 0 ping-ponged twice
+
+  const auto stats = engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.rounds, 7u);  // 2 + 1 + 1 + 3
+  EXPECT_EQ(stats.draft_tokens_proposed, 49u);
+  EXPECT_EQ(stats.draft_tokens_evaluated, 37u);  // 13 + 5 + 7 + 12
+  EXPECT_EQ(stats.draft_tokens_accepted, 34u);   // 12 + 5 + 7 + 10
+  EXPECT_EQ(stats.acceptance_length_histogram[0], 1u);
+  EXPECT_EQ(stats.acceptance_length_histogram[3], 1u);
+  EXPECT_EQ(stats.acceptance_length_histogram[5], 2u);
+  EXPECT_EQ(stats.acceptance_length_histogram[7], 3u);
+  EXPECT_EQ(stats.full_accept_rounds, 3u);
+  EXPECT_EQ(stats.partial_accept_rounds, 3u);
+  EXPECT_EQ(stats.zero_accept_rounds, 1u);
+  EXPECT_EQ(stats.bonus_tokens, 2u);
+  EXPECT_EQ(stats.correction_tokens, 3u);
+  EXPECT_EQ(stats.tokens_emitted, 43u);  // 15 + 6 + 8 + 14
+  EXPECT_EQ(stats.tokens_discarded, 4u);
+}
+
+// The batched record of a slot follows its own pattern, so a slot without one cycles through the shared pattern of
+// SetDrafts().
+TEST_F(Qwen38GraphEngineTest, MultiSlotSlotsWithoutAPatternOfTheirOwnShareTheDraftsOfTheDevice) {
+  device_ = std::make_shared<ScriptedQwen38Device>(/*capacity=*/96, /*mtp=*/true, /*max_batch_size=*/2);
+  device_->dense_prefill = true;
+  device_->preferred_chunk = 16;
+  device_->SetDrafts(3, {1, 3});
+  device_->SetSlotAcceptedCounts(1, {0});
+  auto engine = MakeEngine();
+
+  const std::vector<std::shared_ptr<Request>> requests{Begin(*engine, Prompt(4, 12), /*max_generated_tokens=*/7),
+                                                       Begin(*engine, Prompt(6, 20), /*max_generated_tokens=*/3)};
+
+  const auto outcomes = RunAllToCompletion(*engine, requests);
+
+  EXPECT_EQ(outcomes[0].tokens, Expected(4, 7));  // the first token, then 2 (1 accepted) and 4 (3 accepted)
+  EXPECT_EQ(outcomes[1].tokens, Expected(6, 3));  // the first token, then 1 and 1
+  const auto stats = engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.rounds, 4u);
+  EXPECT_EQ(stats.draft_tokens_proposed, 12u);
+  EXPECT_EQ(stats.draft_tokens_accepted, 4u);  // 1 + 3 + 0 + 0
+  EXPECT_EQ(stats.acceptance_length_histogram[0], 2u);
+  EXPECT_EQ(stats.acceptance_length_histogram[1], 1u);
+  EXPECT_EQ(stats.acceptance_length_histogram[3], 1u);
 }
 
 }  // namespace

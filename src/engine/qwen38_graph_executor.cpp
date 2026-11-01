@@ -704,7 +704,7 @@ void Qwen38GraphExecutor::Decode(ScheduledRequests& scheduled_requests, Executio
     const auto used = static_cast<size_t>(request->CurrentSequenceLength());
     const size_t session_limit = request->MaxSessionTokens();
     Qwen38StepRequest step;
-    step.slot = cache_manager_ ? cache_manager_->SlotOf(request) : row;
+    step.slot = SlotOf(request, row);
     step.owner = request.get();
     step.turn_id = request->CurrentTurnId();
     step.tokens = request->TokensCpu();
@@ -746,8 +746,12 @@ void Qwen38GraphExecutor::OnStepCommitted(const ScheduledRequests& scheduled_req
   for (const auto& ack : scheduled_requests.CommitAcks()) session_->Acknowledge(ack);
   for (size_t row = 0; row < scheduled_requests.size() && row < results.size(); ++row) {
     const auto& request = scheduled_requests[row];
-    session_->OnStepCommitted(cache_manager_ ? cache_manager_->SlotOf(request) : 0, request.get(), results[row]);
+    session_->OnStepCommitted(SlotOf(request, row), request.get(), results[row]);
   }
+}
+
+size_t Qwen38GraphExecutor::SlotOf(const std::shared_ptr<Request>& request, size_t row) const {
+  return cache_manager_ ? cache_manager_->SlotOf(request) : row;
 }
 
 // ------------------------------------------------------------------------------------------------
