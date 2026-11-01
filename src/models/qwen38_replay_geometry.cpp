@@ -136,8 +136,7 @@ Qwen38ReplayGeometry ValidateGatedDeltaNet(const Qwen38ReplayRequest& request) {
                         " implies");
   }
 
-  constexpr uint64_t kRows = QWEN38_PLANE_REPLAY_ROWS_PER_BLOCK;
-  const uint64_t blocks = heads_v * ((width_v + kRows - 1) / kRows);
+  const uint64_t blocks = heads_v * QWEN38_PLANE_REPLAY_BLOCKS_PER_HEAD(width_v);
   if (blocks > static_cast<uint64_t>(kMaxDimension)) {
     Reject(request, Describe(state) + " needs " + std::to_string(blocks) + " thread blocks, more than a launch holds");
   }

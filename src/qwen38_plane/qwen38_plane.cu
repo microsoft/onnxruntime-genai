@@ -1794,7 +1794,7 @@ __global__ void __launch_bounds__(kPlaneReplayThreads) k_replay_gdn(
   const int heads = static_cast<int>(d.channel_count);
   const int key_heads = static_cast<int>(d.key_head_count);
   const int kept = kept_override > 0 ? kept_override : static_cast<int>(d.kept_count);
-  const int chunks = (value_width + kPlaneReplayRows - 1) / kPlaneReplayRows;
+  const int chunks = QWEN38_PLANE_REPLAY_BLOCKS_PER_HEAD(value_width);
   const int head = blockIdx.x / chunks;
   if (head >= heads) return;
   const int first_row = (blockIdx.x - head * chunks) * kPlaneReplayRows;

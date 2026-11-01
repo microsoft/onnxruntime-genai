@@ -74,6 +74,10 @@ typedef struct Qwen38StateReplayDesc {
 #define QWEN38_PLANE_MAX_REPLAY_TRANSITIONS 8  // transitions one replay keeps: the capacity of the state_update outputs
 #define QWEN38_PLANE_MAX_REPLAY_KEY_WIDTH 256  // GatedDeltaNet key width: a row of the key tile (a multiple of 4: float4 loads)
 #define QWEN38_PLANE_REPLAY_ROWS_PER_BLOCK 32  // value rows of a GatedDeltaNet state one thread block of k_replay_gdn replays
+// Thread blocks per value head of a state of `width` >= 1 value rows: ceil(width / QWEN38_PLANE_REPLAY_ROWS_PER_BLOCK).
+// The kernel counts them in int and the host in uint64_t; the state can be INT32_MAX rows tall, where the usual
+// (width + rows - 1) / rows overflows an int.
+#define QWEN38_PLANE_REPLAY_BLOCKS_PER_HEAD(width) (1 + ((width) - 1) / QWEN38_PLANE_REPLAY_ROWS_PER_BLOCK)
 
 // Optional exports "qwen38_plane_dflash_select" and "qwen38_plane_replay_state_updates": a library that predates them lacks the
 // symbols, the loader leaves the pointers null, and the host then selects the draft chain itself and refuses compact state
@@ -91,7 +95,7 @@ typedef int (*Qwen38PlaneDflashSelectFn)(void* stream, const void* candidates, c
 // of a verify step. descs holds fast_count GatedDeltaNet descriptors (kind 2) followed by generic_count descriptors of the
 // other kinds (1 = CausalConvWithState, 4 = PackedSparseAttentionIndexer; the Snapshot kind 3 of the host is not replayed by
 // the plane). Every GatedDeltaNet descriptor gets fast_blocks_per_descriptor thread blocks, which have to cover its
-// heads * ceil(state_width / QWEN38_PLANE_REPLAY_ROWS_PER_BLOCK) blocks. kept_count replaces the one of every descriptor.
+// heads * QWEN38_PLANE_REPLAY_BLOCKS_PER_HEAD(state_width) blocks. kept_count replaces the one of every descriptor.
 // Negative counts, a missing block budget for GatedDeltaNet descriptors, a null descs and a kept_count out of range are
 // refused: a call that would skip its work and report success would leave the destination state stale. What the descriptors
 // hold lives on the device and cannot be checked by the plane; the host validates it while it builds them

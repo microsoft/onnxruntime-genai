@@ -5,6 +5,7 @@
 // package nor a device: the engine calls it with the shapes of the tensors while it builds the replay descriptors.
 
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <memory>
 #include <stdexcept>
@@ -101,6 +102,27 @@ TEST(Qwen38ReplayGeometryTest, GatedDeltaNetGeometryComesFromTheShapes) {
   EXPECT_EQ(ValidateQwen38ReplayDescriptor(GatedDeltaNet(4, QWEN38_PLANE_REPLAY_ROWS_PER_BLOCK + 1, 128, 2, 7)).blocks, 8);
   EXPECT_NO_THROW(ValidateQwen38ReplayDescriptor(GatedDeltaNet(4, 64, 128, 2, 1)));
   EXPECT_NO_THROW(ValidateQwen38ReplayDescriptor(GatedDeltaNet(4, 64, 128, 4, QWEN38_PLANE_MAX_REPLAY_TRANSITIONS)));
+}
+
+// Every dimension may be INT32_MAX, so a state can be that many value rows tall. The kernel counts the blocks of a head
+// in int, where the usual (width + rows - 1) / rows wraps for the last rows - 1 widths; the host counts in uint64_t.
+TEST(Qwen38ReplayGeometryTest, TheBlocksOfAHeadAreCountedWithoutOverflowAtTheWidestState) {
+  constexpr int64_t kInt32Max = std::numeric_limits<int32_t>::max();
+  constexpr int64_t kRows = QWEN38_PLANE_REPLAY_ROWS_PER_BLOCK;
+  for (const int64_t width : {int64_t{1}, kRows - 1, kRows, kRows + 1, 2 * kRows, int64_t{100}, kInt32Max - kRows,
+                              kInt32Max - kRows + 1, kInt32Max - 1, kInt32Max}) {
+    const int64_t expected = (width + kRows - 1) / kRows;  // in int64_t, which cannot overflow here
+    EXPECT_EQ(QWEN38_PLANE_REPLAY_BLOCKS_PER_HEAD(static_cast<int32_t>(width)), expected)
+        << "width " << width << " in int";
+    EXPECT_EQ(QWEN38_PLANE_REPLAY_BLOCKS_PER_HEAD(static_cast<uint64_t>(width)), static_cast<uint64_t>(expected))
+        << "width " << width << " in uint64_t";
+  }
+
+  // The geometry the validator accepts for the widest state: a capsule of INT32_MAX values is one transition of
+  // 1 decay, 4 key values and 2147483642 deltas. It takes 2^26 blocks, the last holding 26 of its 32 rows.
+  const Qwen38ReplayGeometry widest = ValidateQwen38ReplayDescriptor(GatedDeltaNet(1, 2147483642, 4, 1, 1));
+  EXPECT_EQ(widest.state_width, 2147483642u);
+  EXPECT_EQ(widest.blocks, int{1} << 26);
 }
 
 TEST(Qwen38ReplayGeometryTest, GatedDeltaNetRejectsACapsuleThatIsNotWholeTransitions) {

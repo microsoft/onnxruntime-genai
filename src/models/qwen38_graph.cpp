@@ -3,7 +3,9 @@
 //
 // Qwen3.8-Flash-Next NVFP4 CUDA-graph decode + MTP(1): model and device engine. See qwen38_graph.h.
 #include "engine/step_plan.h"
+#include "env_utils.h"
 #include "generator/generators.h"
+#include "io/kv_cache.h"
 #include "logging.h"
 #include "qwen38_graph.h"
 #include "qwen38_replay_geometry.h"
@@ -121,6 +123,12 @@ Qwen38DflashWarmupPlan PlanQwen38DflashWarmup(bool warmup, int verify_rows, int 
                     static_cast<size_t>(kQwen38WarmupRunsPerGraph)};
 }
 
+bool Qwen38DflashSkipsInputSanitizer() {
+  bool skip = true;
+  GetEnv("ORT_PAGED_ATTENTION_SKIP_SANITIZER", skip);
+  return skip;
+}
+
 void ValidateQwen38DflashFeatureLayout(size_t aux_width, ONNXTensorElementDataType aux_type) {
   if (aux_width == kQwen38DflashFeatureWidth && aux_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16) return;
   throw std::runtime_error("qwen38_graph: the DFlash drafter reads auxiliary hidden states of " + std::to_string(aux_width) +
@@ -129,6 +137,16 @@ void ValidateQwen38DflashFeatureLayout(size_t aux_width, ONNXTensorElementDataTy
                            " bfloat16 values (ONNX element type " +
                            std::to_string(static_cast<int>(ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16)) +
                            "); check model.dflash2.inputs.aux_hidden_states");
+}
+
+size_t Qwen38DflashCachePageSize(const ModelStateMetadata& drafter, const std::string& past_key_names) {
+  const std::string input = ComposeKeyValueName(past_key_names, 0);
+  const std::vector<int64_t> shape = drafter.GetInputShape(input);
+  if (shape.size() != 4 || (shape[1] != 16 && shape[1] != 128 && shape[1] != 256)) {
+    throw std::runtime_error("DFlash experiment requires cache pages of 16, 128, or 256 tokens in the drafter input " +
+                             input);
+  }
+  return static_cast<size_t>(shape[1]);
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -228,9 +246,8 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
     dflash_model_ = std::make_shared<Dflash2Model>(
         std::move(draft_config), GetOrtEnv(), nullptr,
         [this](OrtSessionOptions& opts) {
-          const char* skip_san = std::getenv("ORT_PAGED_ATTENTION_SKIP_SANITIZER");
           opts.AddConfigEntry("session.paged_attention.skip_input_sanitizer",
-                              (skip_san != nullptr && std::string(skip_san) == "0") ? "0" : "1");
+                              Qwen38DflashSkipsInputSanitizer() ? "1" : "0");
           if (model_.pool_) model_.pool_->AddTo(opts, "dflash2");
           if (!model_.embed_values_.empty()) {
             opts.AddInitializer("model.embed_tokens.weight", *model_.embed_values_.front());
@@ -239,10 +256,8 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
             }
           }
         });
-    const auto cache_shape = dflash_model_->session_info_.GetInputShape("past_key_values.0.key");
-    if (cache_shape.size() != 4 || (cache_shape[1] != 16 && cache_shape[1] != 128 && cache_shape[1] != 256))
-      throw std::runtime_error("DFlash experiment requires cache pages of 16, 128, or 256 tokens");
-    const size_t page_size = static_cast<size_t>(cache_shape[1]);
+    const size_t page_size = Qwen38DflashCachePageSize(dflash_model_->session_info_,
+                                                       dflash_model_->config_->model.dflash2.inputs.past_key_names);
     dflash_ = std::make_unique<Dflash2Drafter>(
         dflash_model_, page_size, Dflash2Drafter::PoolBlocks(*model_.config_, page_size, 1), 1);
     dflash_->SetPinnedBlockTableWidth(true);
