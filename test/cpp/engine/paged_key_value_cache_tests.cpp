@@ -998,16 +998,119 @@ TEST(PagedKeyValueCacheManifestTest, RemovalReusesCommittedSlidingWindowCapacity
   EXPECT_TRUE(cache->OwnsRequest(second.get()));
 }
 
-TEST(PagedKeyValueCacheManifestTest, PrefixCachingRejectsSlidingWindowCache) {
-  auto model = LoadSyntheticPagedModel();
-  model->config_->engine.dynamic_batching->prefix_caching = true;
-  auto& decoder = model->config_->model.decoder;
-  decoder.sliding_window = Config::Model::Decoder::SlidingWindow{};
-  decoder.sliding_window->window_size = 4;
-  decoder.sliding_window->layers = {1};
-  decoder.inputs.block_table_windowed = decoder.inputs.block_table;
+TEST(PagedKeyValueCacheManifestTest, PrefixCachingRetainsSlidingLayersAndScalesInFullPagedStorage) {
+  for (const char* path : {MODEL_PATH "engine/synthetic-paged",
+                           MODEL_PATH "engine/synthetic-paged-scales"}) {
+    auto model = CreateModel(GetOrtEnv(), path);
+    const size_t full_block_bytes = PagedKeyValueCacheBytesPerBlock(model);
+    model->config_->engine.dynamic_batching->prefix_caching = true;
+    auto& decoder = model->config_->model.decoder;
+    decoder.sliding_window = Config::Model::Decoder::SlidingWindow{};
+    decoder.sliding_window->window_size = 4;
+    decoder.sliding_window->layers = {1};
+    decoder.inputs.block_table_windowed = decoder.inputs.block_table;
+    model->config_->search.chunk_size.reset();
 
-  EXPECT_THROW(MakePagedCache(model), std::runtime_error);
+    auto cache = MakePagedCache(model);
+    EXPECT_TRUE(cache->PrefixCachingEnabled());
+    EXPECT_EQ(PagedKeyValueCacheBytesPerBlock(model), full_block_bytes);
+    EXPECT_EQ(cache->Snapshot().window_blocks.total_blocks, 0u);
+    EXPECT_EQ(cache->MaxQueryTokensPerRequest(), 0u);
+
+    auto params = CreateGeneratorParams(*model);
+    ModelIO state(*params, *model);
+    cache->UpdateState(state, {});
+    ASSERT_EQ(state.inputs_.size(), state.outputs_.size() + 2);
+    EXPECT_EQ(state.inputs_[state.outputs_.size()], state.inputs_.back());
+    size_t allocated_bytes = 0;
+    for (auto* value : state.outputs_) {
+      const auto info = value->GetTensorTypeAndShapeInfo();
+      EXPECT_EQ(info->GetShape()[0], 128);
+      allocated_bytes += info->GetElementCount() * Ort::SizeOf(info->GetElementType());
+    }
+    EXPECT_EQ(allocated_bytes, full_block_bytes * 128);
+  }
+}
+
+TEST(PagedKeyValueCacheManifestTest, PrefixCachingSharesSlidingKVBeyondRingWrap) {
+  for (bool graph_capture : {false, true}) {
+    SCOPED_TRACE(graph_capture);
+    auto model = LoadSyntheticPagedModel();
+    model->config_->engine.dynamic_batching->prefix_caching = true;
+    auto& decoder = model->config_->model.decoder;
+    decoder.sliding_window = Config::Model::Decoder::SlidingWindow{};
+    decoder.sliding_window->window_size = 4;
+    decoder.sliding_window->layers = {1};
+    decoder.inputs.block_table_windowed = decoder.inputs.block_table;
+    model->config_->search.chunk_size = 4;
+    auto assign_target =
+        MakeDoublesEngine(model, /*capacity=*/2, EosToken(*model)).engine;
+    if (graph_capture) {
+      SetProviderOption(*model->config_, "cuda", "enable_cuda_graph", "1");
+    }
+    auto cache = MakePagedCache(model);
+    EXPECT_EQ(cache->GraphCaptureEnabled(), graph_capture);
+
+    // Twelve positions exceed the eight-slot ring this configuration would otherwise use.
+    const std::array<int32_t, 12> prefix{2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13};
+    auto source = CreateRequestWithPrompt(assign_target, prefix);
+    cache->Add(source);
+    cache->AppendTokens(source);
+    auto params = CreateGeneratorParams(*model);
+    ModelIO state(*params, *model);
+    cache->UpdateState(state, {source});
+    ASSERT_EQ(state.inputs_.size(), 6u);
+    EXPECT_EQ(state.inputs_[4], state.inputs_[5]);
+    const auto source_snapshot = cache->Snapshot();
+    const auto source_blocks = source_snapshot.requests.front().block_ids;
+    ASSERT_EQ(source_blocks.size(), 3u);
+    for (auto* value : state.outputs_) {
+      auto* data = value->GetTensorMutableData<float>();
+      for (size_t position = 0; position < prefix.size(); ++position) {
+        data[source_blocks[position / 4] * 4 + position % 4] =
+            static_cast<float>(prefix[position]);
+      }
+    }
+    cache->SealCommittedBlocks(source.get(), prefix);
+
+    const std::array growth{PagedCacheReservationRequest{source.get(), 16, false}};
+    auto advance = cache->Reserve(growth);
+    advance.Commit();
+    cache->Remove(source);
+
+    std::vector<int32_t> prompt(prefix.begin(), prefix.end());
+    prompt.push_back(14);
+    auto match = cache->MatchPrefix(prompt, prompt.size() - 1);
+    ASSERT_EQ(match.token_count, prefix.size());
+    auto first = CreateRequestWithPrompt(assign_target, prompt);
+    prompt.back() = 15;
+    auto second = CreateRequestWithPrompt(assign_target, prompt);
+    const std::array admissions{
+        PagedCacheReservationRequest{first.get(), 13, true, 13, &match},
+        PagedCacheReservationRequest{second.get(), 13, true, 13, &match}};
+    auto reservation = cache->Reserve(admissions);
+    cache->UpdateState(state, {first, second}, reservation, 4);
+    ASSERT_EQ(state.inputs_[4], state.inputs_[5]);
+    const auto* table = state.inputs_[4]->GetTensorData<int32_t>();
+    for (size_t block = 0; block < source_blocks.size(); ++block) {
+      EXPECT_EQ(table[block], static_cast<int32_t>(source_blocks[block]));
+      EXPECT_EQ(table[block + 4], table[block]);
+    }
+    EXPECT_NE(table[3], table[7]);
+    for (auto* value : state.outputs_) {
+      const auto* data = value->GetTensorData<float>();
+      for (size_t position = 0; position < prefix.size(); ++position) {
+        EXPECT_EQ(data[static_cast<size_t>(table[position / 4]) * 4 + position % 4],
+                  static_cast<float>(prefix[position]));
+      }
+    }
+    reservation.Commit();
+    cache->RecordPrefixAdoptions(reservation);
+    EXPECT_TRUE(ValidateCacheInvariants(cache->Snapshot()).empty());
+    EXPECT_EQ(cache->PrefixMetrics().matched_tokens, 2 * prefix.size());
+    cache->Remove(first);
+    cache->Remove(second);
+  }
 }
 
 TEST(PagedKeyValueCacheManifestTest, OmittedPrefixCachingPreservesSlidingWindowCompatibility) {
