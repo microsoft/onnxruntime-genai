@@ -48,14 +48,21 @@ struct FixedSlotCacheManager final : CacheManager {
 };
 
 struct FixedSlotScheduler final : Scheduler {
-  FixedSlotScheduler(std::shared_ptr<Model> model, std::shared_ptr<FixedSlotCacheManager> cache_manager)
+  FixedSlotScheduler(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager)
       : Scheduler{model}, model_{std::move(model)}, cache_manager_{std::move(cache_manager)} {}
+
+  bool SupportsIndependentSlotAdmission() const override {
+    return cache_manager_->SupportsContinuousMultiSlotDecoding();
+  }
 
   void AddRequest(std::shared_ptr<Request> request) override {
     if (request->PrefillChunkSize().value_or(0) != 0) {
       throw std::runtime_error(
           "search.chunk_size requires dynamic batching; the static batch scheduler cannot chunk a "
           "prefill.");
+    }
+    if (std::find(requests_pool_.begin(), requests_pool_.end(), request) != requests_pool_.end()) {
+      return;
     }
     requests_pool_.reserve(requests_pool_.size() + 1);
     auto sampling_state = CreateSamplingState(*request);
@@ -139,7 +146,7 @@ struct FixedSlotScheduler final : Scheduler {
   }
 
   std::shared_ptr<Model> model_;
-  std::shared_ptr<FixedSlotCacheManager> cache_manager_;
+  std::shared_ptr<CacheManager> cache_manager_;
   std::vector<std::shared_ptr<Request>> requests_pool_;
 };
 

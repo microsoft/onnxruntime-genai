@@ -2329,7 +2329,7 @@ backend: fixed in-place KV, a recurrent-state bank ring and a device-side draft 
 paged, batched or cropped to an arbitrary token. `CreateEngineBackend` (`src/engine/backend_factory.h`) and
 `CreateQwen38GraphDependencies` (`src/engine/qwen38_graph_executor.h`) assemble it:
 
-- `FixedSlotCacheManager` (`Qwen38GraphCacheManager`, `src/engine/fixed_slot_scheduler.h`) holds one row. `StaticBatchScheduler`
+- `FixedSlotCacheManager` (`Qwen38GraphCacheManager`, `src/engine/fixed_slot_scheduler.h`) holds one row. `FixedSlotScheduler`
   queues further Requests and recycles the slot when the resident turn is complete. `RewindToStartOfTurn` releases the slot; a
   continued turn (`BeginTurn` on the resident Request) and the replay after a rewind re-ingest the whole retained history
   (through the same chunked prefill as a new prompt), because the look-ahead cycle and the bank ring cannot be rolled back.
@@ -2341,8 +2341,11 @@ paged, batched or cropped to an arbitrary token. `CreateEngineBackend` (`src/eng
   stays responsive; the dense prefill state continues across the chunks and is handed over to the decode state in the step that
   ingests the last one) or one whole cycle (with `fold.enabled`: one CUDA-graph launch). The executor tells the device the
   prompt length of the turn (`Qwen38DecodeDevice::ExpectPrefillTokens`, after `Reset()` and before the first chunk); the
-  device hands it to the ORT QMoE kernels with every chunk of that turn and drops it at `Reset()`/`BeginDecode()`. The value
-  is device state: nothing is published through the process environment, so Engines of different models never share it. The
+  device hands it to the ORT QMoE kernels with every chunk of that turn and drops it at `Reset()`/`BeginDecode()`. The
+  executor itself stores the expected length on the device instance rather than writing environment variables directly; the
+  production device then publishes `ORT_QMOE_PREFILL_TOTAL_TOKENS` through `Qwen38OrtEnvScope` around each ORT `Run` under a
+  process-wide mutex (isolating participating Qwen runs from each other, though unrelated concurrent ORT sessions in the same
+  process can still observe the process environment; see `src/models/qwen38_ort_env.h`). The
   executor declares its step plan via `ScheduledRequests::BeginBackendStep` and stages owned `BackendRowResult` records
   (`PrefillProgress` and/or `SelectedTokenBlock`) via `ScheduledRequests::StageBackendRow`; `GenerateNextTokens` validates the
   batch before mutating any Request, commits candidates through `Request::CommitExternalTokens` (observing stop strings, EOS,

@@ -298,7 +298,8 @@ BackendCapabilities ResolveBackendCapabilities(
                                              : BackendExecutionProtocol::Nontransactional;
   resolved.token_selection = own_tokens ? BackendTokenSelection::Backend
                                         : BackendTokenSelection::Engine;
-  resolved.admission = cache_manager.SupportsContinuousMultiSlotDecoding()
+  resolved.admission = (cache_manager.SupportsContinuousMultiSlotDecoding() &&
+                        scheduler.SupportsIndependentSlotAdmission())
                            ? BackendAdmission::IndependentSlots
                            : BackendAdmission::WholeBatch;
   resolved.kv_storage = transactions ? BackendKvStorage::Paged
@@ -348,6 +349,11 @@ BackendCapabilities ResolveBackendCapabilities(
       resolved.configured_max_batch_size = rows;
     }
     resolved.max_request_length = cache_manager.MaxStaticRequestLength();
+    if (resolved.max_request_length != 0 && model.config_->model.context_length > 0) {
+      resolved.max_request_length = std::min<uint64_t>(
+          resolved.max_request_length,
+          static_cast<uint64_t>(model.config_->model.context_length));
+    }
   }
 
   if (!declared) return resolved;
@@ -364,7 +370,9 @@ BackendCapabilities ResolveBackendCapabilities(
     throw std::runtime_error("Engine backend capabilities contradict its effective execution limits.");
   }
   if (explicit_capabilities.SupportsIndependentAdmission() &&
-      explicit_capabilities.max_slots > 1 && !cache_manager.SupportsContinuousMultiSlotDecoding()) {
+      explicit_capabilities.max_slots > 1 &&
+      (!cache_manager.SupportsContinuousMultiSlotDecoding() ||
+       !scheduler.SupportsIndependentSlotAdmission())) {
     throw std::runtime_error("Engine backend capabilities require unsupported independent slot admission.");
   }
   if ((explicit_capabilities.supports_per_turn_seed && !resolved.supports_per_turn_seed) ||

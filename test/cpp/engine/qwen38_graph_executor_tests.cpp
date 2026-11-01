@@ -748,6 +748,7 @@ TEST_F(Qwen38GraphEngineTest, ThePromptIsIngestedInChunksOverSeveralSteps) {
 
 TEST_F(Qwen38GraphEngineTest, AnUnsetChunkUsesTheDefaultOfTheDecodeGraphPath) {
   device_ = std::make_shared<ScriptedQwen38Device>(/*capacity=*/4200);
+  model_->config_->model.context_length = 4200;
   model_->config_->model.qwen38_graph.prefill.chunk = 0;
   auto engine = MakeEngine();
   const auto prompt = Prompt(2050);
@@ -1643,10 +1644,34 @@ TEST_F(Qwen38GraphEngineTest, DynamicBatchingConfigurationIsRejected) {
   EXPECT_THROW(CreateQwen38GraphDependencies(model_, device_), std::runtime_error);
 }
 
+TEST_F(Qwen38GraphEngineTest, InvalidPromptTokenIdsAreRejectedAtTurnAdmissionWithoutPoisoningTheDevice) {
+  auto engine = MakeEngine();
+  auto request = engine->CreateRequest();
+  auto options = Limit(3);
+  options.request = request;
+  const int32_t vocab_size = model_->config_->model.vocab_size;
+
+  for (const int32_t bad_id : {int32_t{-1}, vocab_size}) {
+    const std::array<int32_t, 3> bad_prompt = {12, bad_id, 14};
+    EXPECT_THROW(request->BeginTurn(bad_prompt, options), std::invalid_argument) << bad_id;
+    EXPECT_TRUE(request->IsAwaitingFirstTurn());
+    EXPECT_EQ(request->CurrentSequenceLength(), 0);
+    EXPECT_TRUE(device_->ContextIsHealthy());
+    EXPECT_TRUE(device_->calls.empty());
+  }
+
+  // The caller can immediately retry with a valid prompt on the same Request and Engine.
+  request->BeginTurn(Prompt(5), options);
+  const auto outcome = RunToCompletion(*engine, request);
+  EXPECT_EQ(outcome.finish_reason, GenerationFinishReason::TurnLimit);
+  EXPECT_EQ(outcome.tokens, Expected(5, 3));
+}
+
 // Host cost of one Engine step (Run) with a device that answers instantly: everything the Engine adds around a cycle. Run
 // manually: engine_unit_tests --gtest_also_run_disabled_tests --gtest_filter='*RunOverhead*'.
 TEST_F(Qwen38GraphEngineTest, DISABLED_RunOverheadPerCycle) {
   device_ = std::make_shared<ScriptedQwen38Device>(/*capacity=*/33028);
+  model_->config_->model.context_length = 33028;
   model_->config_->model.qwen38_graph.prefill.chunk = 2048;
   auto engine = MakeEngine();
   const size_t generated = 20000;

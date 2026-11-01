@@ -22,7 +22,8 @@ inline constexpr size_t kDefaultStaticBatchSize = 4;
 // took the request's device state, and it enrolls only the first turn of a request. A scheduler that displaces such a
 // request from its slot must therefore keep it in its pool.
 inline bool StaysEnrolledWhenDisplaced(const Request& request) {
-  return request.IsTurnComplete() && request.IsRestartableCanceledTurn();
+  return request.IsTurnComplete() &&
+         (request.IsRestartableCanceledTurn() || request.NeedsReplayAfterRewind());
 }
 
 struct NontransactionalSchedulingResult {
@@ -99,6 +100,8 @@ struct Scheduler {
     return !batched_sampler_ || batched_sampler_->SupportsTransactions();
   }
 
+  virtual bool SupportsIndependentSlotAdmission() const { return false; }
+
   /**
    * @brief Checks if the Scheduler has any pending requests.
    * @return True if there are pending requests, false otherwise.
@@ -157,6 +160,8 @@ struct DynamicBatchScheduler : Scheduler {
   StepPlanningResult PlanStep(StepPlan& plan) override;
 
   bool HasPendingRequests() const override;
+
+  bool SupportsIndependentSlotAdmission() const override { return true; }
 
  private:
   std::shared_ptr<Model> model_;
