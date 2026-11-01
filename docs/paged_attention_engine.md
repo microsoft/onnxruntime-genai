@@ -2360,21 +2360,6 @@ token. The device holds `model.qwen38_graph.max_batch_size` slots (default 1), o
   dense prefill (`prefill.enabled`) and 2048 per step through the decode graphs, see `EffectiveQwen38PrefillChunkTokens`;
   the decode-graph path needs an even chunk; a step that only advances the prompt delivers no event, so `CancelRequest`
   stays responsive; the dense prefill state continues across the chunks and is handed over to the decode state in the step that
-<<<<<<< HEAD
-  ingests the last one) or one whole cycle (with `fold.enabled`: one CUDA-graph launch). With several slots a step advances
-  every slot (`Qwen38GraphSession::StepBatch`): it commits the in-flight batched cycle of the decoding slots, prefills the next
-  chunk of the slots that have not started decoding and enqueues the next batched cycle. The executor itself stores the expected
-  prompt length on the device instance (`Qwen38DecodeDevice::ExpectPrefillTokens`) rather than writing environment variables
-  directly; the production device then publishes `ORT_QMOE_PREFILL_TOTAL_TOKENS` through `Qwen38OrtEnvScope` around each ORT
-  `Run` under a process-wide mutex (isolating participating Qwen runs from each other, though unrelated concurrent ORT sessions
-  in the same process can still observe the process environment; see `src/models/qwen38_ort_env.h`). The executor declares its
-  step plan via `ScheduledRequests::BeginBackendStep` and stages owned `BackendRowResult` records (`PrefillProgress` and/or
-  `SelectedTokenBlock`, up to `kMaxGeneratedTokensPerStep` candidate tokens) via `ScheduledRequests::StageBackendRow`;
-  `GenerateNextTokens` validates the whole batch before mutating any Request, commits candidates through
-  `Request::CommitExternalTokens` (observing stop strings, EOS, turn limit, and context limit in order), and records
-  `TokenCommitAck` counts (consumed, appended, and staged for events) settled through `TokenProducingSession` before events are
-  published.
-=======
   ingests the last one) or one whole cycle (with `fold.enabled`: one CUDA-graph launch). The executor tells the device the
   prompt length of the turn (`Qwen38DecodeDevice::ExpectPrefillTokens`, after `Reset()` and before the first chunk; with
   several slots `ExpectPrefillTokensSlot(slot, total)`, after `ResetSlot(slot)` and before the first `PrefillChunkSlot` of
@@ -2397,7 +2382,6 @@ token. The device holds `model.qwen38_graph.max_batch_size` slots (default 1), o
   and records `TokenCommitAck` counts (consumed, appended, and staged for events) settled through `TokenProducingSession`
   before events are published. Stop strings are therefore accepted on this static path; every other static executor still
   rejects them.
->>>>>>> a3ef7173b (Address PR #2822 review feedback on per-slot ORT run hints)
 - The next cycle is enqueued before a step returns, so the GPU runs it while the Engine delivers the previous tokens. A stop
   string can only be known after delivery, so one cycle may be wasted; the next request and Engine teardown wait for it with
   `Qwen38DecodeDevice::Drain()`, and so does a rewind of a single-slot device. With several slots a rewind's `ReleaseSlot()` only

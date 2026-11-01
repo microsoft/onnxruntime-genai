@@ -547,6 +547,7 @@ void Qwen38GraphEngine::FastAppendSlot(int slot, std::span<const int32_t> tokens
   if (slot_decode_started_[slot]) throw std::logic_error("qwen38_graph: PrefillChunkSlot after decoding started");
   const size_t n = tokens.size();
   if (n == 0) throw std::logic_error("qwen38_graph: empty prefill chunk");
+  ValidateQwen38PromptTokens(tokens, vocab_);
   slot_ledgers_[slot].RequireRoom(n, "the prompt", static_cast<size_t>(verify_rows_ + 1));
   const size_t base = slot_ledgers_[slot].Length();
   const size_t total_expected = run_hints_.BeginPromptChunk(static_cast<size_t>(slot), base, n);
