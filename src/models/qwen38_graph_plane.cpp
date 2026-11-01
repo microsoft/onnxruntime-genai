@@ -591,7 +591,7 @@ Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::filesystem::path& 
       const auto& shard = description.shards[i];
       const std::filesystem::path full = root / shard.path;
       HANDLE hFile = CreateFileW(full.wstring().c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
-                                 OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_RANDOM_ACCESS, nullptr);
+                                 OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
       if (hFile == INVALID_HANDLE_VALUE) {
         throw std::runtime_error("qwen38_graph: cannot open the PLE shard file " + full.string());
       }

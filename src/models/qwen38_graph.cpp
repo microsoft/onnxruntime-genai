@@ -218,7 +218,12 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
         dflash_->ReleaseAll();
         SyncStream();
       }
-      const size_t warm_dflash_chunk = std::min<size_t>(static_cast<size_t>(fast_->chunk), 2048);
+      const size_t dflash_win_cap =
+          model_.config_->model.dflash2.sliding_window > 0
+              ? static_cast<size_t>(model_.config_->model.dflash2.sliding_window +
+                                    model_.config_->model.dflash2.block_size)
+              : 2048;
+      const size_t warm_dflash_chunk = std::min<size_t>(static_cast<size_t>(fast_->chunk), dflash_win_cap);
       if (warm_dflash_chunk > 512) {
         Draft(d_dflash_prompt_.data(), warm_dflash_chunk, static_cast<size_t>(capacity_), 1000, false);
         dflash_->ReleaseAll();
@@ -408,13 +413,21 @@ void Qwen38GraphEngine::BuildTarget() {
   // Store (KV, positions) and shared (index_key): one in-place buffer each, bound as input and output.
   for (const auto& name : in_names) {
     if (kinds[name] == Kind::kStore) {
-      const auto slot_shape = FixedShape(info.GetInputShape(name));
+      auto slot_shape = FixedShape(info.GetInputShape(name));
+      if (name == "past_position_ids" && slot_shape.size() == 2) {
+        slot_shape[1] = capacity_;
+      } else if (slot_shape.size() == 4) {
+        slot_shape[2] = capacity_;
+      }
       const auto dtype = info.GetInputDataType(name);
       store_slot_shape_[name] = slot_shape;
       store_slot_bytes_[name] = Elements(slot_shape) * Ort::SizeOf(dtype);
       NewDeviceTensor(store_, name, with_batch(slot_shape, max_batch_), dtype);
     } else if (kinds[name] == Kind::kShared) {
-      const auto slot_shape = FixedShape(info.GetInputShape(name));
+      auto slot_shape = FixedShape(info.GetInputShape(name));
+      if (slot_shape.size() == 3) {
+        slot_shape[1] = (capacity_ / 4) + 1;
+      }
       const auto dtype = info.GetInputDataType(name);
       shared_slot_shape_[name] = slot_shape;
       shared_slot_bytes_[name] = Elements(slot_shape) * Ort::SizeOf(dtype);
@@ -2178,6 +2191,48 @@ Config::SessionOptions ResolveQwen38AuxiliarySessionOptions(const Config::Sessio
 }
 
 Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_env) : Model{std::move(config)} {
+  bool has_dynamic_batching_kv = false;
+  if (config_->engine.dynamic_batching) {
+    const auto& db = *config_->engine.dynamic_batching;
+    const size_t max_batch = std::max<size_t>(1, db.max_batch_size);
+    const size_t block_size = std::max<size_t>(1, db.block_size);
+    if (db.num_blocks.has_value() && *db.num_blocks > 0) {
+      const size_t configured_blocks = *db.num_blocks;
+      size_t aux_blocks = 0;
+      if (!config_->model.dflash2.filename.empty()) {
+        const size_t pools = max_batch + (db.dflash2_max_snapshots > 0 ? 1 : 0);
+        aux_blocks = (pools * 5012 + 799) / 800;
+      }
+      if (configured_blocks <= aux_blocks) {
+        throw std::runtime_error(
+            "engine.dynamic_batching.num_blocks (" + std::to_string(configured_blocks) +
+            ") is too small to hold the reserved DFlash 2 auxiliary cache (" +
+            std::to_string(aux_blocks) + " blocks).");
+      }
+      const size_t target_blocks_per_slot = (configured_blocks - aux_blocks) / max_batch;
+      if (target_blocks_per_slot == 0) {
+        throw std::runtime_error(
+            "engine.dynamic_batching.num_blocks is too small to allocate at least 1 target block per batch slot.");
+      }
+      const size_t target_tokens = target_blocks_per_slot * block_size;
+      config_->model.qwen38_graph.kv_capacity = static_cast<int>(target_tokens + 8);
+      config_->model.context_length = static_cast<int>(target_tokens);
+      config_->search.max_length = config_->model.context_length;
+      has_dynamic_batching_kv = true;
+    }
+    if (config_->search.chunk_size.has_value() && *config_->search.chunk_size > 0) {
+      config_->model.qwen38_graph.prefill.chunk = static_cast<int>(*config_->search.chunk_size);
+    } else if (db.max_scheduled_tokens > 0) {
+      config_->model.qwen38_graph.prefill.chunk = static_cast<int>(db.max_scheduled_tokens);
+    }
+    config_->search.chunk_size.reset();
+    if (max_batch <= 1) {
+      config_->engine.dynamic_batching.reset();
+    }
+  } else if (config_->search.chunk_size.has_value() && *config_->search.chunk_size > 0) {
+    config_->model.qwen38_graph.prefill.chunk = static_cast<int>(*config_->search.chunk_size);
+    config_->search.chunk_size.reset();
+  }
   const auto& q = config_->model.qwen38_graph;
   if (!q.IsConfigured() || q.ple_table.empty())
     throw std::runtime_error(
@@ -2324,7 +2379,7 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
 
   session_target_ = CreateSession(ort_env, target_filename, session_options_.get());
   session_info_.Add(*session_target_);
-  if (session_info_.HasInput("past_position_ids")) {
+  if (session_info_.HasInput("past_position_ids") && !has_dynamic_batching_kv) {
     const auto pos_shape = session_info_.GetInputShape("past_position_ids");
     if (pos_shape.size() == 2 && pos_shape[1] > 0) {
       config_->model.qwen38_graph.kv_capacity = static_cast<int>(pos_shape[1]);

@@ -170,6 +170,89 @@ static inline const unsigned char* resolve_ple_head_ptr(const PleParams& HP, int
   return HP.shard_ptr[lo] + (size_t)row_idx * (size_t)HP.head_dim;
 }
 
+static inline void host_gather_ple_rows_batch(const PleParams& HP, int rows, const i64* d_toks, const i64* d_c0s,
+                                              const i64* d_c1s, unsigned char* fp8_base, size_t row_stride) {
+  const int hd = HP.head_dim;
+  const int nh = HP.n_heads;
+  const size_t total_bytes = (size_t)nh * (size_t)hd;
+  const bool use_cache = (g_staged_ple.ngram_cache_data != nullptr && total_bytes <= StagedPleWorkspace::kMaxRowBytes);
+  const unsigned char* miss_srcs[256];
+  unsigned char* miss_dsts[256];
+#ifdef _WIN32
+  WIN32_MEMORY_RANGE_ENTRY ranges[256];
+#endif
+  int num_misses = 0;
+  int miss_rows[8];
+  size_t miss_slots[8];
+  i64 miss_c0s[8];
+  int num_miss_rows = 0;
+
+  for (int r = 0; r < rows; ++r) {
+    const i64 tok = d_toks[r];
+    const i64 c1 = d_c1s[r];
+    const i64 c0 = (c1 == HP.eos) ? HP.eos : d_c0s[r];
+    unsigned char* dst_fp8 = fp8_base + (size_t)r * row_stride;
+    size_t cache_slot = 0;
+    if (use_cache) {
+      const unsigned long long h =
+          ((unsigned long long)tok * 11400714819323198485ULL) ^
+          ((unsigned long long)c1 * 14029467366897019727ULL) ^
+          ((unsigned long long)c0 * 1609587929392839161ULL);
+      cache_slot = (size_t)(h & (StagedPleWorkspace::kCacheSlots - 1));
+      if (g_staged_ple.ngram_cache_valid[cache_slot] &&
+          g_staged_ple.ngram_cache_keys[cache_slot][0] == tok &&
+          g_staged_ple.ngram_cache_keys[cache_slot][1] == c0 &&
+          g_staged_ple.ngram_cache_keys[cache_slot][2] == c1) {
+        memcpy(dst_fp8, g_staged_ple.ngram_cache_data + cache_slot * StagedPleWorkspace::kMaxRowBytes, total_bytes);
+        continue;
+      }
+    }
+    for (int h = 0; h < nh; ++h) {
+      const unsigned char* src = resolve_ple_head_ptr(HP, h, tok, c0, c1);
+      miss_srcs[num_misses] = src;
+      miss_dsts[num_misses] = dst_fp8 + (size_t)h * (size_t)hd;
+#ifdef _WIN32
+      ranges[num_misses] = {const_cast<unsigned char*>(src), (SIZE_T)hd};
+#endif
+      ++num_misses;
+    }
+    if (use_cache && num_miss_rows < 8) {
+      miss_rows[num_miss_rows] = r;
+      miss_slots[num_miss_rows] = cache_slot;
+      miss_c0s[num_miss_rows] = c0;
+      ++num_miss_rows;
+    }
+  }
+
+  if (num_misses > 0) {
+#ifdef _WIN32
+    if (num_misses > 1) {
+      (void)PrefetchVirtualMemory(GetCurrentProcess(), (ULONG_PTR)num_misses, ranges, 0);
+    }
+#endif
+    for (int k = 0; k < num_misses; ++k) {
+      memcpy(miss_dsts[k], miss_srcs[k], (size_t)hd);
+    }
+    for (int m = 0; m < num_miss_rows; ++m) {
+      const int r = miss_rows[m];
+      const size_t cache_slot = miss_slots[m];
+      memcpy(g_staged_ple.ngram_cache_data + cache_slot * StagedPleWorkspace::kMaxRowBytes,
+             fp8_base + (size_t)r * row_stride, total_bytes);
+      g_staged_ple.ngram_cache_keys[cache_slot][0] = d_toks[r];
+      g_staged_ple.ngram_cache_keys[cache_slot][1] = miss_c0s[m];
+      g_staged_ple.ngram_cache_keys[cache_slot][2] = d_c1s[r];
+      g_staged_ple.ngram_cache_valid[cache_slot] = 1;
+    }
+#ifdef _WIN32
+    if (HP.pad_ != 0) {
+      for (int k = 0; k < num_misses; ++k) {
+        (void)VirtualUnlock(ranges[k].VirtualAddress, ranges[k].NumberOfBytes);
+      }
+    }
+#endif
+  }
+}
+
 struct PleGatherTask {
   const PleParams* hp = nullptr;
   const i64* h_toks = nullptr;
@@ -248,12 +331,19 @@ struct PleGatherPool {
         }
       }
 
+#ifdef _WIN32
+      if (!ranges.empty()) {
+        (void)PrefetchVirtualMemory(GetCurrentProcess(), (ULONG_PTR)ranges.size(), ranges.data(), 0);
+      }
+#endif
       for (size_t k = 0; k < miss_srcs.size(); ++k) {
         memcpy(miss_dsts[k], miss_srcs[k], (size_t)hd);
       }
 #ifdef _WIN32
-      for (const auto& r : ranges) {
-        (void)VirtualUnlock(r.VirtualAddress, r.NumberOfBytes);
+      if (HP.pad_ != 0) {
+        for (const auto& r : ranges) {
+          (void)VirtualUnlock(r.VirtualAddress, r.NumberOfBytes);
+        }
       }
 #endif
     }
@@ -1054,14 +1144,16 @@ QWEN38_PLANE_EXPORT void qwen38_plane_prep(void* s, const void* P, const void* t
             unsigned char* fp8_base = g_staged_ple.prep_ring + base_ring * 8192u;
             i64* d_toks = g_staged_ple.scalars + 16 + base_ring * 2;
             i64* d_c1s = d_toks + 8;
+            i64 h_c0s[8];
             for (int r = 0; r < rows; ++r) {
               const i64 tok = g_staged_ple.scalars[kSlots[r]];
               d_toks[r] = tok;
               d_c1s[r] = cur_c1;
-              host_gather_ple_row(g_host_ple_params, tok, cur_c0, cur_c1, fp8_base + (size_t)r * 8192u);
+              h_c0s[r] = cur_c0;
               cur_c0 = cur_c1;
               cur_c1 = tok;
             }
+            host_gather_ple_rows_batch(g_host_ple_params, rows, d_toks, h_c0s, d_c1s, fp8_base, 8192u);
             k_prep_fold_staged<<<rows, 1024, 0, stream>>>((const PleParams*)P, d_toks, base_pos, d_c1s, fp8_base,
                                                           ctx_out_b, input_ids_b, position_ids_b,
                                                           committed_b, past_pos_b, ple_out_b, state_b);
