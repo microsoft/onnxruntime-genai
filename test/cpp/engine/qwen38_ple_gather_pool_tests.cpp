@@ -251,7 +251,13 @@ TEST(Qwen38ParallelPoolTest, StopWaitsForARunInFlightSoNoWorkIsLost) {
       ++finished;
     });
   }};
-  ASSERT_TRUE(WaitUntil([&] { return entered.load() == kWorkers + 1; })) << "not every participant entered the body";
+  // A fatal assertion would return with `runner` still joinable, and destroying a joinable thread terminates the whole test
+  // binary instead of reporting this failure (Run returns without running the body when a worker cannot be created).
+  if (!WaitUntil([&] { return entered.load() == kWorkers + 1; })) {
+    gate.set_value();
+    runner.join();
+    FAIL() << "not every participant entered the body (Run returned " << run_error.message() << ")";
+  }
 
   std::future<void> stopped = std::async(std::launch::async, [&] { pool.Stop(); });
   EXPECT_EQ(stopped.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout)
