@@ -101,7 +101,7 @@ struct FixedSlotScheduler final : Scheduler {
         for (const auto& resident : cache_manager_->AllocatedRequests()) {
           if (IsTurnComplete(resident->status_) || IsClosed(resident->status_)) {
             cache_manager_->DetachRequestForTeardown(resident);
-            Forget(resident);
+            if (!StaysEnrolledWhenDisplaced(*resident)) Forget(resident);
             break;
           }
         }
