@@ -104,6 +104,7 @@ Qwen38Plane::Qwen38Plane(const std::filesystem::path& path) {
                              " (Win32 error " + std::to_string(err) + ")");
   }
   handle_ = static_cast<void*>(mod);
+  library_path = actual_path.string();
   auto load = [mod](auto& function, const char* symbol_name) {
     FARPROC symbol = GetProcAddress(mod, symbol_name);
     if (!symbol) {
@@ -124,12 +125,17 @@ Qwen38Plane::Qwen38Plane(const std::filesystem::path& path) {
 #undef QWEN38_PLANE_LOAD
     quantize_kv = reinterpret_cast<decltype(quantize_kv)>(GetProcAddress(mod, "qwen38_plane_quantize_kv"));
     embed_rows = reinterpret_cast<decltype(embed_rows)>(GetProcAddress(mod, "qwen38_plane_embed_rows"));
+    embed_gather = reinterpret_cast<decltype(embed_gather)>(GetProcAddress(mod, "qwen38_plane_embed_gather"));
     set_ple_host_params =
         reinterpret_cast<decltype(set_ple_host_params)>(GetProcAddress(mod, "qwen38_plane_set_ple_host_params"));
     unset_ple_host_params =
         reinterpret_cast<decltype(unset_ple_host_params)>(GetProcAddress(mod, "qwen38_plane_unset_ple_host_params"));
     release_ple_workspace =
         reinterpret_cast<decltype(release_ple_workspace)>(GetProcAddress(mod, "qwen38_plane_release_ple_workspace"));
+    // A library that predates the capabilities export has none: it still loads, for the packages that need none.
+    const auto capabilities_export =
+        reinterpret_cast<Qwen38PlaneCapabilitiesFn>(GetProcAddress(mod, "qwen38_plane_capabilities"));
+    capabilities = capabilities_export ? capabilities_export() : 0ull;
     if (sizeof_ple_params() != static_cast<int>(sizeof(Qwen38PleParams))) {
       throw std::runtime_error("qwen38_graph: the plane library's PLE parameter layout differs from the host definition");
     }
@@ -156,6 +162,7 @@ Qwen38Plane::Qwen38Plane(const std::filesystem::path& path) {
     throw std::runtime_error("qwen38_graph: failed to load the plane library " + path.string() + ": " +
                              (reason ? reason : "unknown error"));
   }
+  library_path = path.string();
   auto load = [this](auto& function, const char* symbol_name) {
     void* symbol = dlsym(handle_, symbol_name);
     if (!symbol) {
@@ -176,12 +183,17 @@ Qwen38Plane::Qwen38Plane(const std::filesystem::path& path) {
 #undef QWEN38_PLANE_LOAD
     quantize_kv = reinterpret_cast<decltype(quantize_kv)>(dlsym(handle_, "qwen38_plane_quantize_kv"));
     embed_rows = reinterpret_cast<decltype(embed_rows)>(dlsym(handle_, "qwen38_plane_embed_rows"));
+    embed_gather = reinterpret_cast<decltype(embed_gather)>(dlsym(handle_, "qwen38_plane_embed_gather"));
     set_ple_host_params =
         reinterpret_cast<decltype(set_ple_host_params)>(dlsym(handle_, "qwen38_plane_set_ple_host_params"));
     unset_ple_host_params =
         reinterpret_cast<decltype(unset_ple_host_params)>(dlsym(handle_, "qwen38_plane_unset_ple_host_params"));
     release_ple_workspace =
         reinterpret_cast<decltype(release_ple_workspace)>(dlsym(handle_, "qwen38_plane_release_ple_workspace"));
+    // A library that predates the capabilities export has none: it still loads, for the packages that need none.
+    const auto capabilities_export =
+        reinterpret_cast<Qwen38PlaneCapabilitiesFn>(dlsym(handle_, "qwen38_plane_capabilities"));
+    capabilities = capabilities_export ? capabilities_export() : 0ull;
     if (sizeof_ple_params() != static_cast<int>(sizeof(Qwen38PleParams))) {
       throw std::runtime_error("qwen38_graph: the plane library's PLE parameter layout differs from the host definition");
     }
@@ -205,6 +217,107 @@ void Qwen38Plane::Check(int error, const char* what) const {
   if (error != 0) {
     throw std::runtime_error(std::string("qwen38_graph: CUDA error in ") + what + ": " + error_string(error));
   }
+}
+
+namespace {
+struct Qwen38PlaneCapabilityName {
+  unsigned long long bit;
+  const char* name;
+};
+
+#define QWEN38_PLANE_CAPABILITY_NAME(bit, name) {bit, name},
+constexpr Qwen38PlaneCapabilityName kQwen38PlaneCapabilityNames[] = {
+    QWEN38_PLANE_CAPABILITIES(QWEN38_PLANE_CAPABILITY_NAME)};
+#undef QWEN38_PLANE_CAPABILITY_NAME
+}  // namespace
+
+std::string DescribeQwen38PlaneCapabilities(unsigned long long mask) {
+  std::string description;
+  unsigned long long named = 0;
+  for (const auto& capability : kQwen38PlaneCapabilityNames) {
+    named |= capability.bit;
+    if ((mask & capability.bit) == 0) continue;
+    if (!description.empty()) description += ", ";
+    description += capability.name;
+  }
+  if ((mask & ~named) != 0) {
+    char unknown[40];
+    std::snprintf(unknown, sizeof(unknown), "unknown bits 0x%llx", mask & ~named);
+    if (!description.empty()) description += ", ";
+    description += unknown;
+  }
+  return description.empty() ? "none" : description;
+}
+
+void Qwen38Plane::RequireCapabilities(unsigned long long required, const std::string& required_by) const {
+  const unsigned long long missing = required & ~capabilities;
+  if (missing == 0) return;
+  throw std::runtime_error(
+      "qwen38_graph: " + required_by + " requires the plane capability " + DescribeQwen38PlaneCapabilities(missing) +
+      ", which the plane library " + library_path + " does not provide (it reports: " +
+      DescribeQwen38PlaneCapabilities(capabilities) +
+      "). Use a plane library built from the same source as this model package.");
+}
+
+void Qwen38Plane::EmbedRows(void* stream, const Qwen38EmbeddingTable& table, const void* ids, void* out, int n) const {
+  if (embed_gather) {
+    const int format = table.int8 ? QWEN38_PLANE_EMBEDDING_INT8_ROW : QWEN38_PLANE_EMBEDDING_BF16;
+    Check(embed_gather(stream, table.data, table.rows, format, ids, out, n, table.width), "embed_gather");
+    return;
+  }
+  if (table.int8) {
+    // The legacy embed_rows has no INT8 mode: it returns without writing anything.
+    RequireCapabilities(QWEN38_PLANE_CAP_INT8_EMBEDDING, "an INT8 embedding table");
+  } else if (embed_rows) {
+    embed_rows(stream, table.data, ids, out, n, table.width);
+    return;
+  }
+  throw std::runtime_error("qwen38_graph: the plane library " + library_path +
+                           " lacks the qwen38_plane_embed_gather export needed to gather embedding rows");
+}
+
+size_t Qwen38EmbeddingTableBytes(Qwen38EmbeddingFormat format, long long rows, long long width) {
+  if (rows <= 0 || width <= 0) return 0;
+  const size_t payload = static_cast<size_t>(rows) * static_cast<size_t>(width);
+  if (format == Qwen38EmbeddingFormat::kBf16) return payload * sizeof(uint16_t);
+  if (format == Qwen38EmbeddingFormat::kInt8) return payload + static_cast<size_t>(rows) * sizeof(float);
+  return 0;
+}
+
+Qwen38EmbeddingFormat SelectQwen38EmbeddingFormat(const Qwen38Plane& plane, const std::filesystem::path& table_path,
+                                                  size_t file_bytes, long long rows, long long width) {
+  if (rows <= 0 || width <= 0) return Qwen38EmbeddingFormat::kNone;
+  const std::string geometry = " (vocab_size " + std::to_string(rows) + ", hidden_size " + std::to_string(width) + ")";
+  const size_t bf16_bytes = Qwen38EmbeddingTableBytes(Qwen38EmbeddingFormat::kBf16, rows, width);
+  const size_t int8_bytes = Qwen38EmbeddingTableBytes(Qwen38EmbeddingFormat::kInt8, rows, width);
+  const bool matches_bf16 = file_bytes >= bf16_bytes;
+  const bool matches_int8 =
+      file_bytes >= int8_bytes && file_bytes - int8_bytes <= kQwen38Int8EmbeddingSlackBytes;
+  if ((matches_bf16 && matches_int8) || (width <= 4 && (matches_bf16 || matches_int8))) {
+    throw std::runtime_error(
+        "qwen38_graph: the embedding table " + table_path.string() + geometry + " has an ambiguous byte size (" +
+        std::to_string(file_bytes) + ") that matches both the bfloat16 (" + std::to_string(bf16_bytes) +
+        " bytes) and the INT8 (" + std::to_string(int8_bytes) + ".." +
+        std::to_string(int8_bytes + kQwen38Int8EmbeddingSlackBytes) + " bytes) layouts");
+  }
+  if (matches_bf16) {
+    if (width % 8 != 0) {
+      throw std::runtime_error("qwen38_graph: the bfloat16 embedding table " + table_path.string() + geometry +
+                               " cannot be gathered by the plane: it copies a row in 16-byte vectors, so hidden_size must "
+                               "be a multiple of 8");
+    }
+    return Qwen38EmbeddingFormat::kBf16;
+  }
+  if (!matches_int8) {
+    return Qwen38EmbeddingFormat::kNone;
+  }
+  plane.RequireCapabilities(QWEN38_PLANE_CAP_INT8_EMBEDDING, "the INT8 embedding table " + table_path.string());
+  if (static_cast<size_t>(rows) * static_cast<size_t>(width) % sizeof(float) != 0) {
+    throw std::runtime_error("qwen38_graph: the INT8 embedding table " + table_path.string() + geometry +
+                             " cannot be gathered by the plane: the float row scales that follow the int8 rows must be "
+                             "4-byte aligned, so vocab_size * hidden_size must be a multiple of 4");
+  }
+  return Qwen38EmbeddingFormat::kInt8;
 }
 
 PlaneBuffer::PlaneBuffer(Qwen38Plane& plane, size_t bytes, void* stream) : plane_{&plane}, bytes_{bytes} {
@@ -338,6 +451,11 @@ Qwen38PleDescription ParseQwen38PleDescription(const std::filesystem::path& tabl
       params.heads_per_ngram > params.n_heads || !has_scale || !has_mult || !has_vocab || !has_offset ||
       description.shards.empty() || description.shards.size() > kMaxPleShards)
     throw std::runtime_error("qwen38_graph: malformed PLE table " + table_path.string());
+  // The scale is the FP8 dequantization scale, or the negative of the INT8 one (the sign selects the decoder), so a missing
+  // line (0), a zero or a non-finite scale would decode every PLE row to zero or NaN without a diagnostic.
+  if (params.scale == 0.0f || !std::isfinite(params.scale))
+    throw std::runtime_error("qwen38_graph: the PLE table " + table_path.string() +
+                             " needs a finite, non-zero scale line (positive for FP8 shards, negative for INT8 shards)");
   long long total_rows = 0;
   for (const auto& shard : description.shards) {
     if (shard.rows <= 0 || shard.rows > std::numeric_limits<long long>::max() - total_rows)
@@ -351,6 +469,14 @@ Qwen38PleDescription ParseQwen38PleDescription(const std::filesystem::path& tabl
   }
   params.n_shards = static_cast<int>(description.shards.size());
   return description;
+}
+
+void RequireQwen38PleTableSupported(const Qwen38Plane& plane, const Qwen38PleDescription& description,
+                                    const std::filesystem::path& table_path) {
+  // A negative scale marks INT8 shards; a library without the capability would decode them as FP8.
+  if (description.params.scale < 0.0f) {
+    plane.RequireCapabilities(QWEN38_PLANE_CAP_INT8_PLE, "the INT8 PLE table " + table_path.string());
+  }
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -604,6 +730,7 @@ Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::filesystem::path& 
                                const std::filesystem::path& root, int capacity)
     : plane_{plane} {
   Qwen38PleDescription description = ParseQwen38PleDescription(table_path);
+  RequireQwen38PleTableSupported(plane, description, table_path);
   params = description.params;
   params.capacity = capacity;
   const auto start = std::chrono::steady_clock::now();
@@ -805,6 +932,7 @@ Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::filesystem::path& 
                                const std::filesystem::path& root, int capacity)
     : plane_{plane} {
   Qwen38PleDescription description = ParseQwen38PleDescription(table_path);
+  RequireQwen38PleTableSupported(plane, description, table_path);
   params = description.params;
   params.capacity = capacity;
   const auto start = std::chrono::steady_clock::now();
@@ -844,6 +972,7 @@ Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::filesystem::path& 
       void* base = mmap(nullptr, map_len, PROT_READ, MAP_SHARED, fd, static_cast<off_t>(aligned));
       close(fd);
       if (base == MAP_FAILED) throw std::runtime_error("qwen38_graph: mmap failed for " + full.string());
+      (void)madvise(base, map_len, MADV_WILLNEED);
       mappings_.push_back(Mapping{base, map_len, nullptr});
       auto* rows = static_cast<unsigned char*>(base) + delta;
       // cudaHostRegisterMapped | cudaHostRegisterReadOnly: the gather kernel reads the table zero-copy over PCIe.

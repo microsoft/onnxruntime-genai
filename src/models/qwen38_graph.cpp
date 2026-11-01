@@ -285,18 +285,19 @@ void Qwen38GraphEngine::BuildTarget() {
     }
   }
   if (ple_layer_ < 0) throw std::runtime_error("qwen38_graph: target has no ple_embeddings input");
-  // PrepRow fills inputs_embeds from the token ids (plane embed_rows over the device-mapped embedding table); a target
-  // that takes them cannot run without either, and must never run on zero embeddings.
+  // PrepRow fills inputs_embeds from the token ids (the plane's embedding gather over the device-mapped embedding table); a
+  // target that takes them cannot run without either, and must never run on zero embeddings.
   if (info.HasInput("inputs_embeds")) {
-    if (!plane_.embed_rows)
+    if (!plane_.embed_gather && (model_.embed_is_int8_ || !plane_.embed_rows))
       throw std::runtime_error(
-          "qwen38_graph: the target takes inputs_embeds but the plane library lacks the "
-          "qwen38_plane_embed_rows export");
+          "qwen38_graph: the target takes inputs_embeds but the plane library lacks the qwen38_plane_embed_gather "
+          "export (a BF16 embedding table can also use the older qwen38_plane_embed_rows export)");
     if (!model_.embed_mapping_)
       throw std::runtime_error(
           "qwen38_graph: the target takes inputs_embeds, which are gathered from the embedding table mapped from "
-          "<model.embedding.filename>.data (at least vocab_size * hidden_size * 2 bytes); that file is missing or too "
-          "small");
+          "<model.embedding.filename>.data (at least vocab_size * hidden_size * 2 bytes, or vocab_size * hidden_size + "
+          "vocab_size * 4 bytes, plus at most 4096, for a per-row INT8 table); that file is missing, truncated or of "
+          "another size");
   }
 
   // Output facts
@@ -687,9 +688,8 @@ void Qwen38GraphEngine::PrepRow(int rows, int row, const void* tok, const void* 
                            in.ple + 2 * static_cast<size_t>(ple_width_) * row, ctl_.data()),
                "prep");
   if (in.inputs_embeds) {
-    const int embed_width = model_.config_->model.decoder.hidden_size;
-    plane_.embed_rows(stream_, model_.embed_mapping_->device_data(), in.input_ids + 8 * row,
-                      in.inputs_embeds + 2 * static_cast<size_t>(embed_width) * row, 1, embed_width);
+    plane_.EmbedRows(stream_, model_.EmbeddingTable(), in.input_ids + 8 * row,
+                     in.inputs_embeds + 2 * static_cast<size_t>(model_.config_->model.decoder.hidden_size) * row, 1);
   }
 }
 
@@ -1403,8 +1403,26 @@ bool Qwen38HeadR2CapturesGraph(const Config::SessionOptions& decoder,
   return IsGraphCaptureEnabled(ResolveQwen38AuxiliarySessionOptions(decoder, head_r2, /*inherit=*/true));
 }
 
-Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_env) : Model{std::move(config)} {
-  const auto& q = config_->model.qwen38_graph;
+Qwen38EmbeddingFormat RequireQwen38PackageSupportedByPlane(const Qwen38Plane& plane, const Config& config,
+                                                           const std::filesystem::path& model_folder) {
+  const std::filesystem::path ple_table_path = model_folder / config.model.qwen38_graph.ple_table;
+  RequireQwen38PleTableSupported(plane, ParseQwen38PleDescription(ple_table_path), ple_table_path);
+  if (config.model.embedding.filename.empty()) return Qwen38EmbeddingFormat::kNone;
+  const std::filesystem::path embed_data_path = model_folder / (config.model.embedding.filename + ".data");
+  std::error_code size_error;
+  const auto embed_file_bytes = std::filesystem::file_size(embed_data_path, size_error);
+  if (size_error) return Qwen38EmbeddingFormat::kNone;
+  return SelectQwen38EmbeddingFormat(plane, embed_data_path, static_cast<size_t>(embed_file_bytes),
+                                     config.model.vocab_size, config.model.decoder.hidden_size);
+}
+
+namespace {
+
+// Validates the qwen38_flash_graph configuration and checks the package's PLE and embedding formats against the plane
+// library before Model::Model runs EnsureDeviceOrtInit or AddSharedInitializers.
+std::unique_ptr<Config> PreflightQwen38GraphModelConfig(std::unique_ptr<Config> config) {
+  if (!config) return config;
+  const auto& q = config->model.qwen38_graph;
   if (!q.IsConfigured() || q.plane_library.empty() || q.ple_table.empty())
     throw std::runtime_error(
         "qwen38_flash_graph requires model.qwen38_graph.{head.filename_s1|fold.head_r2.filename,plane_library,ple_table}");
@@ -1418,13 +1436,39 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
     throw std::runtime_error("model.qwen38_graph.prefill requires fold.enabled");
   const bool separate_prefill_sessions =
       q.prefill.enabled && !q.prefill.dense.filename.empty() &&
-      q.prefill.dense.filename != config_->model.decoder.filename;
+      q.prefill.dense.filename != config->model.decoder.filename;
   if (separate_prefill_sessions && (q.prefill.head_kv.filename.empty() || q.prefill.constants.empty()))
     throw std::runtime_error(
         "model.qwen38_graph.prefill with a separate dense graph requires prefill.{head_kv.filename,constants}");
   ValidateQwen38PrefillChunk(q);
   if (q.kv_capacity <= Qwen38DecodeDevice::kReservedTail)
-    throw std::runtime_error("model.qwen38_graph.kv_capacity must exceed " + std::to_string(Qwen38DecodeDevice::kReservedTail));
+    throw std::runtime_error("model.qwen38_graph.kv_capacity must exceed " +
+                             std::to_string(Qwen38DecodeDevice::kReservedTail));
+
+  const std::filesystem::path root =
+      std::filesystem::weakly_canonical(std::filesystem::path{config->config_path.string()});
+  const std::filesystem::path plane_path = std::filesystem::weakly_canonical(root / q.plane_library);
+  const std::string root_prefix = (root / "").string();
+  if (plane_path.string().compare(0, root_prefix.size(), root_prefix) != 0)
+    throw std::runtime_error("model.qwen38_graph.plane_library must resolve inside the model folder: " +
+                             plane_path.string());
+  std::error_code ec;
+  if (std::filesystem::exists(ResolveWindowsSharedLibraryPath(plane_path), ec) ||
+      std::filesystem::exists(plane_path, ec)) {
+    Qwen38Plane plane{plane_path};
+    (void)RequireQwen38PackageSupportedByPlane(plane, *config, root);
+  }
+  return config;
+}
+
+}  // namespace
+
+Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
+    : Model{PreflightQwen38GraphModelConfig(std::move(config))} {
+  const auto& q = config_->model.qwen38_graph;
+  const bool separate_prefill_sessions =
+      q.prefill.enabled && !q.prefill.dense.filename.empty() &&
+      q.prefill.dense.filename != config_->model.decoder.filename;
   if (!p_device_ || p_device_->GetType() != DeviceType::CUDA)
     throw std::runtime_error("qwen38_flash_graph requires the CUDA execution provider");
 
@@ -1435,11 +1479,12 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
   const auto start = Clock::now();
   const std::filesystem::path root = std::filesystem::weakly_canonical(std::filesystem::path{config_->config_path.string()});
   const std::filesystem::path plane_path = std::filesystem::weakly_canonical(root / q.plane_library);
-  const std::string root_prefix = (root / "").string();
-  if (plane_path.string().compare(0, root_prefix.size(), root_prefix) != 0)
-    throw std::runtime_error("model.qwen38_graph.plane_library must resolve inside the model folder: " + plane_path.string());
   plane_ = std::make_unique<Qwen38Plane>(plane_path);
   plane_->Check(plane_->set_device(p_device_->GetDeviceId(nullptr)), "cudaSetDevice");
+
+  // An INT8 package needs a plane library that can decode it: refuse it now, before the weights are uploaded and the sessions
+  // are created, instead of letting the library read INT8 values as FP8 shards or as a bfloat16 table.
+  const Qwen38EmbeddingFormat embed_format = RequireQwen38PackageSupportedByPlane(*plane_, *config_, root);
 
   // Device copy of the initializers several sessions have in common (optional)
   if (!q.prefill.weights_pool.empty()) {
@@ -1461,21 +1506,38 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
         embedding_run_options_->AddConfigEntry(key.c_str(), value.c_str());
       }
     }
-    const std::filesystem::path embed_data_path = root / (config_->model.embedding.filename + ".data");
-    if (std::filesystem::exists(embed_data_path)) {
+    // Only the BF16 or the INT8 vocab_size x hidden_size table is mapped: nothing may gather rows from any other file.
+    if (embed_format != Qwen38EmbeddingFormat::kNone) {
+      const std::filesystem::path embed_data_path = root / (config_->model.embedding.filename + ".data");
       embed_mapping_ = std::make_unique<Qwen38FileMapping>(*plane_, embed_data_path, true);
       const std::vector<int64_t> embed_shape{config_->model.vocab_size, config_->model.decoder.hidden_size};
-      const size_t expected_bytes =
-          static_cast<size_t>(embed_shape[0]) * static_cast<size_t>(embed_shape[1]) * sizeof(uint16_t);
-      if (embed_mapping_->size() >= expected_bytes) {
+      const Qwen38EmbeddingFormat mapped_format = SelectQwen38EmbeddingFormat(
+          *plane_, embed_data_path, embed_mapping_->size(), embed_shape[0], embed_shape[1]);
+      if (mapped_format != embed_format) {
+        const size_t mapped_bytes = embed_mapping_->size();
+        embed_mapping_.reset();
+        throw std::runtime_error("qwen38_graph: the mapped embedding table " + embed_data_path.string() +
+                                 " changed size (" + std::to_string(mapped_bytes) +
+                                 " bytes) and no longer matches the validated embedding format");
+      }
+      if (embed_format == Qwen38EmbeddingFormat::kBf16) {
+        embed_is_int8_ = false;
         embed_values_.push_back(OrtValue::CreateTensor(
-            *p_device_->GetMemoryInfo(), embed_mapping_->device_data(), expected_bytes, embed_shape,
+            *p_device_->GetMemoryInfo(), embed_mapping_->device_data(),
+            Qwen38EmbeddingTableBytes(embed_format, embed_shape[0], embed_shape[1]), embed_shape,
             ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16));
         for (const char* name : {"model.embed_tokens.weight", "head.mtp.embed_tokens.weight"}) {
           session_options_->AddInitializer(name, *embed_values_.back());
         }
       } else {
-        embed_mapping_.reset();  // not the vocab_size x hidden_size table: nothing may gather rows from it
+        embed_is_int8_ = true;
+        const size_t table_i8_bytes = static_cast<size_t>(embed_shape[0]) * static_cast<size_t>(embed_shape[1]);
+        embed_values_.push_back(OrtValue::CreateTensor(
+            *p_device_->GetMemoryInfo(), embed_mapping_->device_data(), table_i8_bytes, embed_shape,
+            ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8));
+        for (const char* name : {"model.embed_tokens.weight", "head.mtp.embed_tokens.weight"}) {
+          session_options_->AddInitializer(name, *embed_values_.back());
+        }
       }
     }
   }
@@ -1559,6 +1621,15 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
 }
 
 Qwen38GraphModel::~Qwen38GraphModel() = default;
+
+Qwen38EmbeddingTable Qwen38GraphModel::EmbeddingTable() const {
+  Qwen38EmbeddingTable table;
+  table.data = embed_mapping_ ? embed_mapping_->device_data() : nullptr;
+  table.rows = config_->model.vocab_size;
+  table.width = config_->model.decoder.hidden_size;
+  table.int8 = embed_is_int8_;
+  return table;
+}
 
 void Qwen38GraphModel::RunCpuEmbedding(const int64_t* ids_host, size_t num_tokens, void* dst_host) const {
   if (!session_embedding_) throw std::runtime_error("qwen38_graph: model.embedding session is not initialized");
