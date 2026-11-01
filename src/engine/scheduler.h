@@ -18,6 +18,13 @@ namespace Generators {
 
 inline constexpr size_t kDefaultStaticBatchSize = 4;
 
+// Engine::BeginTurn restarts a turn that was canceled before the request made any progress, even after another request
+// took the request's device state, and it enrolls only the first turn of a request. A scheduler that displaces such a
+// request from its slot must therefore keep it in its pool.
+inline bool StaysEnrolledWhenDisplaced(const Request& request) {
+  return request.IsTurnComplete() && request.IsRestartableCanceledTurn();
+}
+
 struct NontransactionalSchedulingResult {
   StepOutcome outcome;
   std::optional<ScheduledRequests> scheduled;

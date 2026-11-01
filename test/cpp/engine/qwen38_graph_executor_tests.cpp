@@ -960,6 +960,62 @@ TEST_F(Qwen38GraphEngineTest, CancelDuringPrefillStopsBeforeDecodingAndTheNextRe
   EXPECT_EQ(device_->ingested, Prompt(6, 20));  // the canceled prompt is gone from the device
 }
 
+// A request canceled while it was still ingesting its prompt made no progress, so its next turn restarts it from scratch,
+// possibly after another request took the device. The Engine does not enroll such a request in the scheduler again, so the
+// scheduler that displaced it must have kept it.
+TEST_F(Qwen38GraphEngineTest, ACanceledPrefillRequestRunsAgainAfterAnotherRequestTookTheSlot) {
+  auto engine = MakeEngine();
+  auto first = engine->CreateRequest();
+  TurnOptions first_options;
+  first_options.request = first;
+  const uint64_t turn = first->BeginTurn(Prompt(11), first_options);
+  std::array<EngineEvent, 8> buffer;
+  ASSERT_EQ(engine->Run(buffer), 0u);  // first chunk only
+  ASSERT_TRUE(engine->CancelRequest(first, turn));
+  while (engine->HasPendingRequests()) engine->Run(buffer);
+
+  auto second = Begin(*engine, Prompt(6, 20), /*max_generated_tokens=*/3);
+  EXPECT_EQ(RunToCompletion(*engine, second).tokens, Expected(6, 3));
+
+  // The restarted turn replays the canceled prompt ahead of its own input.
+  auto restart = Limit(3);
+  restart.request = first;
+  first->BeginTurn(Prompt(5, 40), restart);
+  ASSERT_TRUE(engine->HasPendingRequests()) << "the restarted request is not known to the scheduler";
+  const auto outcome = RunToCompletion(*engine, first);
+  EXPECT_EQ(outcome.finish_reason, GenerationFinishReason::TurnLimit);
+  EXPECT_EQ(outcome.tokens, Expected(16, 3));
+  auto replayed = Prompt(11);
+  const auto input = Prompt(5, 40);
+  replayed.insert(replayed.end(), input.begin(), input.end());
+  EXPECT_EQ(device_->ingested, replayed);
+}
+
+// While the slot is still the canceled request's own the next turn continues from what the request kept, which is the
+// documented behavior of cancellation: the canceled prompt is followed by the new input.
+TEST_F(Qwen38GraphEngineTest, ACanceledPrefillRequestRunsAgainWhileItsSlotIsStillItsOwn) {
+  auto engine = MakeEngine();
+  auto first = engine->CreateRequest();
+  TurnOptions first_options;
+  first_options.request = first;
+  const uint64_t turn = first->BeginTurn(Prompt(11), first_options);
+  std::array<EngineEvent, 8> buffer;
+  ASSERT_EQ(engine->Run(buffer), 0u);  // first chunk only
+  ASSERT_TRUE(engine->CancelRequest(first, turn));
+  while (engine->HasPendingRequests()) engine->Run(buffer);
+
+  auto restart = Limit(3);
+  restart.request = first;
+  first->BeginTurn(Prompt(5, 40), restart);
+  const auto outcome = RunToCompletion(*engine, first);
+  EXPECT_EQ(outcome.finish_reason, GenerationFinishReason::TurnLimit);
+  EXPECT_EQ(outcome.tokens, Expected(16, 3));
+  auto replayed = Prompt(11);
+  const auto input = Prompt(5, 40);
+  replayed.insert(replayed.end(), input.begin(), input.end());
+  EXPECT_EQ(device_->ingested, replayed);
+}
+
 TEST_F(Qwen38GraphEngineTest, CancelWithACycleInFlightIsSafeAndTheNextRequestWaitsForIt) {
   model_->config_->model.qwen38_graph.prefill.chunk = 64;  // the first step ingests the whole prompt
   auto engine = MakeEngine();

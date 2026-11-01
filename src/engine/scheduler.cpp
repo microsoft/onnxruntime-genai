@@ -105,6 +105,7 @@ ScheduledRequests StaticBatchScheduler::Schedule() {
       // Before allocating, we need to ensure that the existing requests in the cache manager
       // are terminal and no longer need to remain in the scheduler pool.
       for (auto& request : allocated_requests) {
+        if (StaysEnrolledWhenDisplaced(*request)) continue;
         requests_pool_.erase(std::remove(requests_pool_.begin(), requests_pool_.end(), request), requests_pool_.end());
       }
 
