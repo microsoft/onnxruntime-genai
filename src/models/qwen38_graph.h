@@ -191,6 +191,11 @@ std::string ResolveQwen38TargetGraphFilename(const std::string& decoder_filename
                                              const std::string& mtp_drafts,
                                              const std::function<bool(const std::string&)>& exists);
 
+// Resolves a context-tier variant for an auxiliary head graph (e.g. fold.head_r2.filename or head.filename_s1 / filename_s2)
+// using the same <stem>_<tier><ext> / <stem>_dynamic_ctx<ext> / configured fallback chain as the target graph.
+std::string ResolveQwen38AuxiliaryGraphFilename(const std::string& configured_filename, const std::string& context_request,
+                                                const std::function<bool(const std::string&)>& exists);
+
 // The context settings of a package once its target graph is known: model.qwen38_graph.kv_capacity, model.context_length and
 // search.max_length, the default generation budget of a request (Engine::CreateRequest takes the smaller of it and the engine's
 // own ceiling).
@@ -334,6 +339,12 @@ size_t Qwen38DenseLogitsElementBytes(ONNXTensorElementDataType type);
 // Index of the largest of the `count` logits at `row` (smallest index on ties, like the device argmax), reading them as
 // `type` (see Qwen38DenseLogitsElementBytes).
 int Qwen38ArgmaxLogits(const void* row, ONNXTensorElementDataType type, size_t count);
+
+// Derives the KV capacity of a loaded target graph from its static past_key_values.<n>.key|value cache length (shape[2]),
+// falling back to past_position_ids (shape[1]) only when no static key/value cache input is present. Single-slot graphs may
+// pad past_position_ids beyond the KV cache (e.g. 33040 positions for 33028 KV rows), so using the KV cache length preserves
+// compatibility with ValidateQwen38CacheShapes.
+int64_t ResolveQwen38GraphKvCapacity(const std::vector<Qwen38CacheInput>& inputs);
 
 // Constants of the PackedQSAIndexer state conversion (key-norm weights, leading-RoPE tables) for the dense -> packed hand-off.
 struct Qwen38QsaConstants {
