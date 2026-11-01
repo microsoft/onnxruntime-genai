@@ -164,6 +164,15 @@ void ValidateQwen38BatchedVerifyRows(size_t request_slots, int verify_rows);
 // say) or has no output: the caller then relies on the outputs of the session.
 std::optional<std::vector<std::string>> ReadQwen38OnnxOutputNames(const std::filesystem::path& model_file);
 
+// Reads the `head_rows` integer attribute of the `SpeculativePrefixCommit` node from the ONNX model file `model_file` without
+// reading any initializer. Returns nullopt when the file cannot be read or contains no `SpeculativePrefixCommit` node with an
+// integer `head_rows` attribute.
+std::optional<int64_t> ReadQwen38OnnxSpeculativePrefixCommitHeadRows(const std::filesystem::path& model_file);
+
+// Throws std::runtime_error if a fold target's `SpeculativePrefixCommit` node declares a `head_rows` attribute that does not
+// match the target's inferred `verify_rows`.
+void ValidateQwen38FoldHeadRows(std::optional<int64_t> head_rows, int verify_rows);
+
 // ValidateQwen38BatchedTargetOutputs on the outputs of `model_file`, for several slots only (a single slot reads nothing). A
 // file whose outputs cannot be read is accepted here and left to the check against the session.
 void ValidateQwen38TargetModelFile(size_t request_slots, const std::filesystem::path& model_file);
@@ -218,10 +227,10 @@ Qwen38GraphContext SyncQwen38GraphContext(int64_t graph_positions, int configure
 // plane capability, an INT8 embedding table (<model.embedding.filename>.data of vocab_size x hidden_size INT8 rows and
 // one float scale per row) needs int8_embedding, the folded MTP verify path (model.qwen38_graph.fold.enabled), which
 // prepares all the rows of a verify step with one call, needs negative_pos_add_batch, and a configuration with several request
-// slots (ResolveQwen38MaxBatchSize > 1), which prepares the rows of every slot with one call too, needs batched_prep
-// (qwen38_graph_plane.h). Throws a std::runtime_error naming the missing capability, what required it and the library when the
-// library lacks one; BF16 and FP8 packages without the fold path or with one slot need no capability. Returns the layout of
-// the embedding table the model maps from that file: kNone when the package has no table of that shape.
+// slots (ResolveQwen38MaxBatchSize > 1), which prepares the rows of every slot with one call too, needs batched_prep and
+// ctx_slot_stride (qwen38_graph_plane.h). Throws a std::runtime_error naming the missing capability, what required it and the
+// library when the library lacks one; BF16 and FP8 packages without the fold path or with one slot need no capability.
+// Returns the layout of the embedding table the model maps from that file: kNone when the package has no table of that shape.
 Qwen38EmbeddingFormat RequireQwen38PackageSupportedByPlane(const Qwen38Plane& plane, const Config& config,
                                                            const std::filesystem::path& model_folder);
 
@@ -591,7 +600,7 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
 
   uint8_t* ctl_slot(int slot) const { return ctl_.data() + static_cast<size_t>(slot) * kCtlWordsPerSlot * sizeof(int64_t); }
   uint8_t* ctx_commit_slot(int slot) const { return ctx_commit_.data() + static_cast<size_t>(slot) * 2 * sizeof(int64_t); }
-  uint8_t* ctx_a_slot(int slot) const { return ctx_a_.data() + static_cast<size_t>(slot) * kMaxVerifyRows * 2 * sizeof(int64_t); }
+  uint8_t* ctx_a_slot(int slot) const { return ctx_a_.data() + static_cast<size_t>(slot) * kFoldCtxAWords * sizeof(int64_t); }
   uint8_t* ctx_b_slot(int slot) const { return ctx_b_.data() + static_cast<size_t>(slot) * 2 * sizeof(int64_t); }
   int64_t* result_ring_slot(int slot) const { return result_host_ + static_cast<size_t>(slot) * kRing * 8; }
   uint8_t* d_tokens_slot(int slot) const { return d_tokens_.data() + static_cast<size_t>(slot) * token_slots_ * sizeof(int64_t); }
@@ -635,6 +644,15 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
                 "the plane prepares every slot and row of a step in one call");
   static_assert(static_cast<size_t>(kMaxBatch) <= Qwen38OrtRunHints::kMaxSlots,
                 "every request slot needs a bit in the slot mask of a Run");
+  static constexpr int kFoldCtlWords = static_cast<int>(kCtlWordsPerSlot);  // int64 words of ctl_ per slot
+  static constexpr int kFoldCtxCommitWords = 2;                             // int64 words of ctx_commit_ per slot
+  // int64 words of ctx_a_ per slot (the n-gram contexts of the verify rows, 2 per row): always the room of the largest row
+  // count, so that the stride does not depend on verify_rows_. It is the stride that the plane's batched prep writes slot
+  // s at, that ctx_a_slot() and the per-slot views use, and that SpeculativePrefixCommit derives from the size of its
+  // prefixes input (words / slots), which is why the batched view of fold.ctx_a spans every slot at this width.
+  static constexpr int kFoldCtxAWords = 2 * kMaxVerifyRows;
+  static_assert(kFoldCtxAWords == QWEN38_PLANE_CTX_WORDS_PER_SLOT,
+                "the prep kernels write the contexts of slot s at s * QWEN38_PLANE_CTX_WORDS_PER_SLOT");
   static constexpr int kRing = 64;
   static constexpr int kArgmaxBlocks = 16;
 
@@ -704,7 +722,7 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
     size_t status_count{};
     Direction dirs[kMaxBanks];
   } head_r2_;
-  std::map<std::string, std::unique_ptr<DevTensor>> fold_tensors_;  // fold.* inputs (the device control block)
+  std::map<std::string, std::unique_ptr<DevTensor>> fold_tensors_;  // fold.* inputs (device control block); the state outputs bind to the same tensors
   PlaneBuffer fold_ptrs_;
 
   // fast prefill (dense session + hand-off + batched head KV prefill, or unified target/head_r2 prefill); null when not configured
@@ -792,6 +810,7 @@ struct Qwen38GraphModel : Model {
   std::unique_ptr<OrtSession> session_head_s1_, session_head_s2_;
   std::unique_ptr<OrtSessionOptions> head_r2_session_options_, dense_session_options_, head_kv_session_options_;
   std::unique_ptr<OrtSession> session_head_r2_, session_dense_, session_head_kv_;
+  std::optional<int64_t> target_head_rows_;
   std::unique_ptr<Qwen38GraphEngine> engine_;
 
   void RunCpuEmbedding(const int64_t* ids_host, size_t num_tokens, void* dst_host) const;

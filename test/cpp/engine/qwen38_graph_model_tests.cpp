@@ -490,6 +490,66 @@ TEST(Qwen38DecodeLedgerTest, DeviceLengthMustMatchTheHost) {
   EXPECT_THROW(ledger.CheckDeviceLength(3), std::runtime_error);
 }
 
+TEST(Qwen38FoldIoTest, StateOutputsBindOverTheMatchingInputs) {
+  EXPECT_STREQ(Qwen38FoldStateInput("fold.ctl_out"), "fold.ctl");
+  EXPECT_STREQ(Qwen38FoldStateInput("fold.ctx_commit_out"), "fold.ctx_commit");
+  EXPECT_EQ(Qwen38FoldStateInput("fold.tail_done"), nullptr);
+  EXPECT_EQ(Qwen38FoldStateInput("fold.ctl"), nullptr);
+  EXPECT_EQ(Qwen38FoldStateInput("fold.ctx_b"), nullptr);
+  EXPECT_EQ(Qwen38FoldStateInput("next_tokens"), nullptr);
+}
+
+// The engine owns a device buffer for each input of the SpeculativePrefixCommit node (rc4 contract) and for nothing else. The
+// rc3 node had a fifth input, fold.ctx_b: the target of such a package has to be refused by name when it is built, not fail with
+// the "map::at" of a container lookup.
+TEST(Qwen38FoldIoTest, TheFoldModelMayOnlyTakeTheInputsOfTheContract) {
+  const char* const contract_inputs[] = {"fold.ctl", "fold.ctx_commit", "fold.ctx_a", "fold.ptrs"};
+  EXPECT_STREQ(kQwen38FoldCtl, contract_inputs[0]);
+  EXPECT_STREQ(kQwen38FoldCtxCommit, contract_inputs[1]);
+  EXPECT_STREQ(kQwen38FoldCtxA, contract_inputs[2]);
+  EXPECT_STREQ(kQwen38FoldPtrs, contract_inputs[3]);
+  for (const char* name : contract_inputs) {
+    EXPECT_NO_THROW(RequireQwen38FoldInput(name)) << name;
+  }
+
+  // The rc3 input, near misses, and the names of the outputs of the node: none of them is an input the engine can bind.
+  for (const char* name : {"fold.ctx_b", "fold.ptrs2", "fold.ctx_a ", "fold.CTL", "fold.", "fold", "fold.tail_done",
+                           "fold.ctl_out", "fold.ctx_commit_out"}) {
+    try {
+      RequireQwen38FoldInput(name);
+      ADD_FAILURE() << "the fold input '" << name << "' was accepted";
+    } catch (const std::runtime_error& error) {
+      const std::string message = error.what();
+      EXPECT_NE(message.find(std::string("the input '") + name + "'"), std::string::npos) << message;
+      EXPECT_NE(message.find("SpeculativePrefixCommit contract of ORT #33474"), std::string::npos) << message;
+      for (const char* valid : contract_inputs) EXPECT_NE(message.find(valid), std::string::npos) << message;
+      EXPECT_EQ(message.find("map::at"), std::string::npos) << message;
+    }
+  }
+
+  // RequireQwen38FoldContract requires all four fold inputs and both state outputs when building the fold target.
+  const std::vector<std::string> valid_inputs = {"input_ids", "fold.ctl", "fold.ctx_commit", "fold.ctx_a", "fold.ptrs"};
+  const std::vector<std::string> valid_outputs = {"logits", "next_tokens", "fold.ctl_out", "fold.ctx_commit_out"};
+  EXPECT_NO_THROW(RequireQwen38FoldContract(valid_inputs, valid_outputs));
+  for (const char* missing_in : contract_inputs) {
+    std::vector<std::string> partial_in = valid_inputs;
+    partial_in.erase(std::remove(partial_in.begin(), partial_in.end(), missing_in), partial_in.end());
+    EXPECT_THROW(RequireQwen38FoldContract(partial_in, valid_outputs), std::runtime_error) << missing_in;
+  }
+  for (const char* missing_out : {kQwen38FoldCtlOut, kQwen38FoldCtxCommitOut}) {
+    std::vector<std::string> partial_out = valid_outputs;
+    partial_out.erase(std::remove(partial_out.begin(), partial_out.end(), missing_out), partial_out.end());
+    EXPECT_THROW(RequireQwen38FoldContract(valid_inputs, partial_out), std::runtime_error) << missing_out;
+  }
+  EXPECT_THROW(RequireQwen38FoldContract(valid_inputs, std::vector<std::string>{"logits", "next_tokens"}),
+               std::runtime_error);
+
+  // SpeculativePrefixCommit head_rows attribute validation from ONNX protobuf and against verify_rows_.
+  EXPECT_NO_THROW(ValidateQwen38FoldHeadRows(std::nullopt, 4));
+  EXPECT_NO_THROW(ValidateQwen38FoldHeadRows(4, 4));
+  EXPECT_THROW(ValidateQwen38FoldHeadRows(3, 4), std::runtime_error);
+}
+
 TEST(Qwen38CycleRecordTest, AcceptedCyclesCommitTwoTokens) {
   Qwen38CycleRecord record;
   EXPECT_EQ(record.TokenCount(), 1u);
@@ -951,6 +1011,16 @@ TEST(Qwen38MultiSlotConfigTest, TheOutputNamesOfTheModelFileAreReadWithoutParsin
   for (int i = 0; i < 300; ++i) many.push_back("state_update." + std::to_string(i) + ".conv_value");
   EXPECT_EQ(ReadQwen38OnnxOutputNames(WriteFile(dir / "many.onnx", OnnxModelBytes(many, 1000))),
             std::optional<std::vector<std::string>>{many});
+
+  // SpeculativePrefixCommit head_rows attribute is parsed from NodeProto without reading initializers.
+  const std::string attr_head_rows = ProtoBytes(1, "head_rows") + ProtoVarintField(3, 3);
+  const std::string spc_node = ProtoBytes(4, "SpeculativePrefixCommit") + ProtoBytes(5, attr_head_rows);
+  const std::string spc_graph = ProtoBytes(1, spc_node) + ProtoBytes(12, ProtoValueInfo("logits"));
+  const std::string spc_model = ProtoVarintField(1, 9) + ProtoBytes(7, spc_graph);
+  const auto spc_file = WriteFile(dir / "spc.onnx", spc_model);
+  EXPECT_EQ(ReadQwen38OnnxSpeculativePrefixCommitHeadRows(spc_file), std::optional<int64_t>{3});
+  EXPECT_THROW(ValidateQwen38FoldHeadRows(ReadQwen38OnnxSpeculativePrefixCommitHeadRows(spc_file), 4),
+               std::runtime_error);
 
   std::error_code ec;
   std::filesystem::remove_all(dir, ec);

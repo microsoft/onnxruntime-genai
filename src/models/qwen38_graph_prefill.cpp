@@ -634,14 +634,12 @@ void Qwen38GraphEngine::FastAppendSlot(int slot, std::span<const int32_t> tokens
         binding->BindInput(name.c_str(), view(f.idx.data() + 8, {1}, i32));
       else if (name == ple_name)
         binding->BindInput(name.c_str(), view(f.ples.data(), {1, int64_t(m), ple_width_}, bf16));
-      else if (name == "fold.ctl")
-        binding->BindInput(name.c_str(), view(ctl_slot(slot), {verify_rows_ > 2 ? 16 : 8}, i64));
-      else if (name == "fold.ctx_commit")
-        binding->BindInput(name.c_str(), view(ctx_commit_slot(slot), {2}, i64));
-      else if (name == "fold.ctx_a")
-        binding->BindInput(name.c_str(), view(ctx_a_slot(slot), {verify_rows_ > 2 ? 2 * verify_rows_ : 2}, i64));
-      else if (name == "fold.ctx_b")
-        binding->BindInput(name.c_str(), view(ctx_a_slot(slot) + 16, {2}, i64));
+      else if (name == kQwen38FoldCtl)
+        binding->BindInput(name.c_str(), view(ctl_slot(slot), {kFoldCtlWords}, i64));
+      else if (name == kQwen38FoldCtxCommit)
+        binding->BindInput(name.c_str(), view(ctx_commit_slot(slot), {kFoldCtxCommitWords}, i64));
+      else if (name == kQwen38FoldCtxA)
+        binding->BindInput(name.c_str(), view(ctx_a_slot(slot), {2 * verify_rows_}, i64));
       else if (fold_tensors_.count(name))
         binding->BindInput(name.c_str(), *fold_tensors_.at(name)->value);
       else if (store_.count(name))
@@ -671,6 +669,10 @@ void Qwen38GraphEngine::FastAppendSlot(int slot, std::span<const int32_t> tokens
         binding->BindOutput(name.c_str(), view(d_dflash_prompt_slot(slot), {1, int64_t(m), int64_t(kDflashWidth)}, bf16));
       } else if (name == "next_tokens")
         binding->BindOutput(name.c_str(), view(f.scratch.data(), {1, int64_t(tok_rows)}, i64));
+      else if (name == kQwen38FoldCtlOut)  // muted during prefill: the op rewrites the unchanged state in place
+        binding->BindOutput(name.c_str(), view(ctl_slot(slot), {kFoldCtlWords}, i64));
+      else if (name == kQwen38FoldCtxCommitOut)
+        binding->BindOutput(name.c_str(), view(ctx_commit_slot(slot), {kFoldCtxCommitWords}, i64));
       else if (name == "validation.aggregate")
         binding->BindOutput(name.c_str(), view(f.scratch.data() + 64, {int64_t(status_count_)}, i32));
       else if (name == "present_position_ids")
@@ -856,6 +858,8 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
           binding->BindOutput(name.c_str(), view(d_dflash_prompt_.data(), {1, int64_t(m), int64_t(kDflashWidth)}, bf16));
         } else if (name == "next_tokens")
           binding->BindOutput(name.c_str(), view(f.scratch.data(), {1, int64_t(tok_rows)}, i64));
+        else if (const char* state_in = Qwen38FoldStateInput(name))
+          binding->BindOutput(name.c_str(), *fold_tensors_.at(state_in)->value);
         else if (name == "validation.aggregate")
           binding->BindOutput(name.c_str(), view(f.scratch.data() + 64, {int64_t(status_count_)}, i32));
         else if (name == "present_position_ids")

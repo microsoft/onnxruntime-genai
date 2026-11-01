@@ -86,6 +86,7 @@ class ProtoFieldReader {
     bool length_delimited{};
     uint64_t payload_begin{};
     uint64_t payload_size{};
+    uint64_t varint_value{};
   };
 
   ProtoFieldReader(std::istream& in, uint64_t begin, uint64_t end) : in_(in), pos_(begin), end_(end) {}
@@ -99,11 +100,10 @@ class ProtoFieldReader {
     if (!ReadVarint(tag)) return Fail();
     const uint64_t number = tag >> 3;
     if (number == 0 || number > kMaxFieldNumber) return Fail();
-    field = Field{static_cast<uint32_t>(number), false, 0, 0};
+    field = Field{static_cast<uint32_t>(number), false, 0, 0, 0};
     switch (tag & 7u) {
       case 0: {  // varint
-        uint64_t ignored = 0;
-        return ReadVarint(ignored) || Fail();
+        return ReadVarint(field.varint_value) || Fail();
       }
       case 1:  // 64-bit
         return Skip(8);
@@ -351,6 +351,76 @@ std::optional<std::vector<std::string>> ReadQwen38OnnxOutputNames(const std::fil
   return names;
 }
 
+std::optional<int64_t> ReadQwen38OnnxSpeculativePrefixCommitHeadRows(const std::filesystem::path& model_file) {
+  constexpr uint32_t kModelGraph = 7;     // onnx.ModelProto.graph
+  constexpr uint32_t kGraphNode = 1;      // onnx.GraphProto.node
+  constexpr uint32_t kNodeOpType = 4;     // onnx.NodeProto.op_type
+  constexpr uint32_t kNodeAttribute = 5;  // onnx.NodeProto.attribute
+  constexpr uint32_t kAttrName = 1;       // onnx.AttributeProto.name
+  constexpr uint32_t kAttrInt = 3;        // onnx.AttributeProto.i
+  constexpr uint64_t kMaxNodeBytes = uint64_t{1} << 20;
+
+  std::ifstream file(model_file, std::ios::binary);
+  if (!file) return std::nullopt;
+  file.seekg(0, std::ios::end);
+  const std::streamoff file_size = file.tellg();
+  if (!file || file_size <= 0) return std::nullopt;
+
+  ProtoFieldReader model(file, 0, static_cast<uint64_t>(file_size));
+  ProtoFieldReader::Field field;
+  while (model.Next(field)) {
+    if (field.number != kModelGraph || !field.length_delimited) continue;
+    ProtoFieldReader graph(file, field.payload_begin, field.payload_begin + field.payload_size);
+    ProtoFieldReader::Field node_field;
+    while (graph.Next(node_field)) {
+      if (node_field.number != kGraphNode || !node_field.length_delimited) continue;
+      std::string node_bytes;
+      if (node_field.payload_size > kMaxNodeBytes || !graph.ReadPayload(node_field, node_bytes)) return std::nullopt;
+      std::istringstream node_stream(node_bytes);
+      ProtoFieldReader node(node_stream, 0, node_bytes.size());
+      ProtoFieldReader::Field nf;
+      std::string op_type;
+      std::optional<int64_t> head_rows;
+      while (node.Next(nf)) {
+        if (nf.number == kNodeOpType && nf.length_delimited) {
+          if (!node.ReadPayload(nf, op_type)) return std::nullopt;
+        } else if (nf.number == kNodeAttribute && nf.length_delimited) {
+          std::string attr_bytes;
+          if (!node.ReadPayload(nf, attr_bytes)) return std::nullopt;
+          std::istringstream attr_stream(attr_bytes);
+          ProtoFieldReader attr(attr_stream, 0, attr_bytes.size());
+          ProtoFieldReader::Field af;
+          std::string attr_name;
+          std::optional<int64_t> attr_int;
+          while (attr.Next(af)) {
+            if (af.number == kAttrName && af.length_delimited) {
+              if (!attr.ReadPayload(af, attr_name)) return std::nullopt;
+            } else if (af.number == kAttrInt && !af.length_delimited) {
+              attr_int = static_cast<int64_t>(af.varint_value);
+            }
+          }
+          if (attr.Failed()) return std::nullopt;
+          if (attr_name == "head_rows" && attr_int.has_value()) {
+            head_rows = attr_int;
+          }
+        }
+      }
+      if (node.Failed()) return std::nullopt;
+      if (op_type == "SpeculativePrefixCommit" && head_rows.has_value()) {
+        return head_rows;
+      }
+    }
+    if (graph.Failed()) return std::nullopt;
+  }
+  return std::nullopt;
+}
+
+void ValidateQwen38FoldHeadRows(std::optional<int64_t> head_rows, int verify_rows) {
+  if (!head_rows.has_value() || *head_rows == verify_rows) return;
+  throw std::runtime_error("qwen38_graph: SpeculativePrefixCommit head_rows attribute (" + std::to_string(*head_rows) +
+                           ") does not match the target verify width (" + std::to_string(verify_rows) + ")");
+}
+
 void ValidateQwen38TargetModelFile(size_t request_slots, const std::filesystem::path& model_file) {
   if (request_slots <= 1) return;
   if (const auto output_names = ReadQwen38OnnxOutputNames(model_file)) {
@@ -590,9 +660,9 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
   // token, [2] draft_0 and [8] .. [13] draft_1 .. draft_6 for the S=3 .. S=8 multi-draft verify.
   ctl_ = PlaneBuffer(plane_, static_cast<size_t>(max_batch_) * kCtlWordsPerSlot * sizeof(int64_t), stream_);
   ctx_commit_ = PlaneBuffer(plane_, static_cast<size_t>(max_batch_) * 2 * sizeof(int64_t), stream_);
-  // Per slot, ctx_a_ holds kMaxVerifyRows contiguous 2-int64 row contexts (rows 0 .. 7); ctx_b_ is row 1's buffer (also aliased
-  // at ctx_a_ + 16 bytes).
-  ctx_a_ = PlaneBuffer(plane_, static_cast<size_t>(max_batch_) * kMaxVerifyRows * 2 * sizeof(int64_t), stream_);
+  // Per slot, ctx_a_ holds kFoldCtxAWords words, the 2-int64 contexts of the verify rows 0 .. 7; ctx_b_ is row 1's buffer (also
+  // aliased at ctx_a_ + 16 bytes).
+  ctx_a_ = PlaneBuffer(plane_, static_cast<size_t>(max_batch_) * kFoldCtxAWords * sizeof(int64_t), stream_);
   ctx_b_ = PlaneBuffer(plane_, static_cast<size_t>(max_batch_) * 2 * sizeof(int64_t), stream_);
   if (fold_) BuildHeadState();  // the fold model binds the head state
   BuildTarget();
@@ -831,6 +901,9 @@ void Qwen38GraphEngine::BuildTarget() {
   const SessionInfo& info = model_.session_info_;
   const auto in_names = session.GetInputNames();
   const auto out_names = session.GetOutputNames();
+  if (fold_) {
+    RequireQwen38FoldContract(in_names, out_names);
+  }
 
   enum class Kind { kStore,
                     kShared,
@@ -843,6 +916,7 @@ void Qwen38GraphEngine::BuildTarget() {
   ple_layer_ = -1;
   for (const auto& name : in_names) {
     if (fold_ && StartsWith(name, "fold.")) {
+      RequireQwen38FoldInput(name);
       kinds[name] = Kind::kFold;
     } else if (fold_ && StartsWith(name, "head.past_key_values.0.")) {
       kinds[name] = Kind::kHeadIn;
@@ -1073,18 +1147,9 @@ void Qwen38GraphEngine::BuildTarget() {
             request.capacity = state_update_capacity_;
             request.state = state_of(state_name, src_t);
             request.update = update_of();
-            const Qwen38ReplayGeometry geometry = ValidateQwen38ReplayDescriptor(request);
-            Qwen38StateReplayDesc d{};
-            d.source_state = src_t.ptr + st_off;
-            d.destination_state = dst_t.ptr + st_off;
-            d.value = su_tensor->ptr + su_off;
-            d.channel_count = geometry.channel_count;
-            d.state_width = geometry.state_width;
-            d.capacity = static_cast<uint32_t>(state_update_capacity_);
-            d.kept_count = 1;
-            d.element_size = geometry.element_size;
-            d.kind = 1;
-            generic_descs.push_back(d);
+            // A history-first state needs the plane capability of its layout; a channel-first one keeps loading without it.
+            generic_descs.push_back(MakeQwen38ConvReplayDescriptor(plane_, request, src_t.ptr + st_off, dst_t.ptr + st_off,
+                                                                   su_tensor->ptr + su_off));
           } else if (kind_str == "indexer_value") {
             const std::string buf_name = "past_key_values." + lid_str + ".index_buffer";
             const std::string len_name = "past_key_values." + lid_str + ".index_lengths";
@@ -1145,17 +1210,20 @@ void Qwen38GraphEngine::BuildTarget() {
   }
 
   if (fold_) {
-    // fold.* control inputs alias the device control block; fold.ptrs = (pinned result ring address, ring size)
+    // fold.* control inputs alias the device control block; fold.ptrs = (pinned result ring address, ring size).
+    // SpeculativePrefixCommit serves head_rows in [3, 8] and reads 16 ctl words and >= 2 * head_rows ctx_a words per slot.
+    if (verify_rows_ < 3 || verify_rows_ > kMaxVerifyRows)
+      throw std::runtime_error("qwen38_graph: the fold stack needs 3..8 verify rows (SpeculativePrefixCommit head_rows)");
+    ValidateQwen38FoldHeadRows(model_.target_head_rows_, verify_rows_);
     fold_ptrs_ = PlaneBuffer(plane_, 2 * sizeof(int64_t), stream_);
     const int64_t ptrs[2] = {static_cast<int64_t>(reinterpret_cast<intptr_t>(result_host_)), kRing};
     plane_.Check(plane_.memcpy_h2d(fold_ptrs_.data(), ptrs, sizeof(ptrs), stream_), "fold ptrs");
     SyncStream();  // ptrs lives on the stack
     const auto i64 = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64;
-    fold_tensors_["fold.ctl"] = MakeTensor(ctl_.data(), {verify_rows_ > 2 ? 16 : 8}, i64);
-    fold_tensors_["fold.ctx_commit"] = MakeTensor(ctx_commit_.data(), {2}, i64);
-    fold_tensors_["fold.ctx_a"] = MakeTensor(ctx_a_.data(), {verify_rows_ > 2 ? 2 * verify_rows_ : 2}, i64);
-    fold_tensors_["fold.ctx_b"] = MakeTensor(ctx_a_.data() + 16, {2}, i64);
-    fold_tensors_["fold.ptrs"] = MakeTensor(fold_ptrs_.data(), {2}, i64);
+    fold_tensors_[kQwen38FoldCtl] = MakeTensor(ctl_.data(), {kFoldCtlWords}, i64);
+    fold_tensors_[kQwen38FoldCtxCommit] = MakeTensor(ctx_commit_.data(), {kFoldCtxCommitWords}, i64);
+    fold_tensors_[kQwen38FoldCtxA] = MakeTensor(ctx_a_.data(), {2 * verify_rows_}, i64);
+    fold_tensors_[kQwen38FoldPtrs] = MakeTensor(fold_ptrs_.data(), {2}, i64);
   }
 
   // Per-row-count inputs
@@ -1298,6 +1366,8 @@ void Qwen38GraphEngine::BuildTarget() {
           t = add_own(name, {1, 1, 1}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
         else if (fold_ && name == "fold.tail_done")
           t = add_own(name, {1}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+        else if (fold_ && Qwen38FoldStateInput(name))
+          t = fold_tensors_.at(Qwen38FoldStateInput(name)).get();  // updated state lands in the persistent control buffers
         else if (name == "present_position_ids")
           t = max_batch_ == 1 ? store_["past_position_ids"].get()
                               : add_view(name, store_["past_position_ids"]->ptr,
@@ -1410,14 +1480,14 @@ void Qwen38GraphEngine::BuildTarget() {
                            in_bank.tensors[name]->type);
               break;
             case Kind::kFold:
-              // The slots lie kCtlWordsPerSlot and 2 * verify_rows_ words apart, as the plane prepares them
-              // (ValidateQwen38BatchedVerifyRows keeps verify_rows_ above 2 for every batch).
-              if (name == "fold.ctl")
-                t = add_view(name, ctl_.data(), {static_cast<int64_t>(B) * static_cast<int64_t>(kCtlWordsPerSlot)}, i64);
-              else if (name == "fold.ctx_commit")
-                t = add_view(name, ctx_commit_.data(), {B * 2}, i64);
-              else if (name == "fold.ctx_a")
-                t = add_view(name, ctx_a_.data(), {B * 2 * verify_rows_}, i64);
+              // The slots lie kFoldCtlWords, kFoldCtxCommitWords and kFoldCtxAWords words apart whatever the verify width, as the
+              // plane prepares them (QWEN38_PLANE_CTL_WORDS_PER_SLOT, QWEN38_PLANE_CTX_WORDS_PER_SLOT).
+              if (name == kQwen38FoldCtl)
+                t = add_view(name, ctl_.data(), {B * kFoldCtlWords}, i64);
+              else if (name == kQwen38FoldCtxCommit)
+                t = add_view(name, ctx_commit_.data(), {B * kFoldCtxCommitWords}, i64);
+              else if (name == kQwen38FoldCtxA)  // the op derives the per-slot stride from the size: keep it equal to ctx_a_slot()
+                t = add_view(name, ctx_a_.data(), {B * kFoldCtxAWords}, i64);
               else
                 t = fold_tensors_.at(name).get();
               break;
@@ -1451,6 +1521,10 @@ void Qwen38GraphEngine::BuildTarget() {
           };
           if (name == "fold.tail_done")
             t = add_own(name, {B}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+          else if (name == kQwen38FoldCtlOut)
+            t = add_view(name, ctl_.data(), {B * kFoldCtlWords}, i64);
+          else if (name == kQwen38FoldCtxCommitOut)
+            t = add_view(name, ctx_commit_.data(), {B * kFoldCtxCommitWords}, i64);
           else if (name == "present_position_ids")
             t = add_view(name, store_["past_position_ids"]->ptr,
                          with_batch(store_slot_shape_["past_position_ids"], B), store_["past_position_ids"]->type);
@@ -2326,6 +2400,12 @@ Qwen38CycleRecord Qwen38GraphEngine::WaitCycleSlot(int slot_idx) {
     __builtin_ia32_pause();
 #endif
     if (((++spins) & (kStatusRingSpinCheck - 1)) == 0) {
+      if (SecondsSince(start) > 1.0) {
+        if (const int64_t bits = ReadCtlSlot(slot_idx, 5); bits != 0) {
+          throw std::runtime_error("qwen38_graph: device error bits " + std::to_string(bits) +
+                                   " while waiting for the cycle record (slot " + std::to_string(slot_idx) + ")");
+        }
+      }
       if (SecondsSince(start) > 180.0) throw std::runtime_error("qwen38_graph: timeout waiting for the cycle record");
       std::this_thread::yield();
     }
@@ -2785,9 +2865,10 @@ Qwen38EmbeddingFormat RequireQwen38PackageSupportedByPlane(const Qwen38Plane& pl
                               "the folded MTP verify path (model.qwen38_graph.fold)");
   }
   // The batched prep entry point (qwen38_plane_prep_batched) prepares the rows of every slot of a step with explicit row and
-  // batch arguments; only the packages that run several slots need it.
+  // batch arguments and the n-gram contexts of slot s at word s * QWEN38_PLANE_CTX_WORDS_PER_SLOT (ctx_slot_stride), which
+  // is where SpeculativePrefixCommit reads them; only the packages that run several slots need it.
   if (ResolveQwen38MaxBatchSize(config) > 1) {
-    plane.RequireCapabilities(QWEN38_PLANE_CAP_BATCHED_PREP,
+    plane.RequireCapabilities(QWEN38_PLANE_CAP_BATCHED_PREP | QWEN38_PLANE_CAP_CTX_SLOT_STRIDE,
                               "several request slots (model.qwen38_graph.max_batch_size > 1)");
   }
   const std::filesystem::path ple_table_path = model_folder / config.model.qwen38_graph.ple_table;
@@ -2900,6 +2981,9 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
   }
   if (!config_->memory_assets_only_ && config_->model_data_spans_.count(target_filename) == 0) {
     ValidateQwen38TargetModelFile(ResolveQwen38MaxBatchSize(*config_), root / target_filename);
+    if (q.fold.enabled) {
+      target_head_rows_ = ReadQwen38OnnxSpeculativePrefixCommitHeadRows(root / target_filename);
+    }
   }
 
   // Device copy of the initializers several sessions have in common (optional)

@@ -941,7 +941,9 @@ __global__ void k_prep(const PleParams* P, const i64* tok_ptr, const i64* pos_pt
 }
 
 // One block per (row, slot). `honor_mute` is set by prep_batched only: a slot whose control word state[3] is nonzero prepares
-// idle inputs there, while prep (one slot, any control words the caller hands over) never reads that word.
+// idle inputs there, while prep (one slot, any control words the caller hands over) never reads that word. The contexts of
+// slot b are written at ctx_a + b * QWEN38_PLANE_CTX_WORDS_PER_SLOT, not at b * 2 * rows: the buffer is laid out for the
+// largest row count, which is the stride its readers use.
 __global__ void __launch_bounds__(1024) k_prep_fold(const PleParams* P, const i64* ctx_in, i64* ctx_a, i64* input_ids,
                                                     i64* position_ids, int* committed, i64* past_pos,
                                                     __nv_bfloat16* ple_out, i64* state, int honor_mute) {
@@ -954,7 +956,7 @@ __global__ void __launch_bounds__(1024) k_prep_fold(const PleParams* P, const i6
   const int tid = threadIdx.x;
   i64* state_b = state + (size_t)b * 16;
   const i64* ctx_in_b = ctx_in + (size_t)b * 2;
-  i64* ctx_a_b = ctx_a + (size_t)b * 2 * rows;
+  i64* ctx_a_b = ctx_a + (size_t)b * QWEN38_PLANE_CTX_WORDS_PER_SLOT;
   i64* input_ids_b = input_ids + (size_t)b * rows;
   i64* position_ids_b = position_ids + (size_t)b * rows;
   int* committed_b = committed != nullptr ? committed + b : nullptr;  // null: the caller keeps no committed length
@@ -2135,8 +2137,9 @@ QWEN38_PLANE_EXPORT int qwen38_plane_test_stream_capture(void* stream, int begin
 #endif
 }
 
-// The graph inputs of the `rows` rows of one folded verify step for each of `batch` request slots (QWEN38_PLANE_CAP_BATCHED_PREP;
-// the contract is in qwen38_plane_abi.h). Both counts are checked before anything is launched.
+// The graph inputs of the `rows` rows of one folded verify step for each of `batch` request slots
+// (QWEN38_PLANE_CAP_BATCHED_PREP and QWEN38_PLANE_CAP_CTX_SLOT_STRIDE; the contract is in qwen38_plane_abi.h). Both counts are
+// checked before anything is launched.
 extern "C" QWEN38_PLANE_EXPORT int qwen38_plane_prep_batched(void* s, const void* P, int rows, int batch, const void* ctx_in,
                                                              void* ctx_out, void* input_ids, void* position_ids,
                                                              void* committed, void* past_pos, void* ple_out, void* state) {
@@ -2157,7 +2160,7 @@ extern "C" QWEN38_PLANE_EXPORT int qwen38_plane_prep_batched(void* s, const void
     for (int b = 0; b < batch; ++b) {
       i64* state_b = static_cast<i64*>(state) + static_cast<size_t>(b) * QWEN38_PLANE_CTL_WORDS_PER_SLOT;
       const i64* ctx_in_b = static_cast<const i64*>(ctx_in) + static_cast<size_t>(b) * 2;
-      i64* ctx_out_b = static_cast<i64*>(ctx_out) + static_cast<size_t>(b) * 2 * static_cast<size_t>(rows);
+      i64* ctx_out_b = static_cast<i64*>(ctx_out) + static_cast<size_t>(b) * QWEN38_PLANE_CTX_WORDS_PER_SLOT;
       i64* input_ids_b = static_cast<i64*>(input_ids) + static_cast<size_t>(b) * rows;
       i64* position_ids_b = static_cast<i64*>(position_ids) + static_cast<size_t>(b) * rows;
       int* committed_b = committed != nullptr ? static_cast<int*>(committed) + b : nullptr;
@@ -2322,25 +2325,34 @@ __global__ void k_replay_generic(const Qwen38StateReplayDesc* __restrict__ descs
   }
 
   if (descriptor.kind == 1) {
-    const uint64_t state_elements = descriptor.channel_count * descriptor.state_width;
+    const uint64_t channel_count = descriptor.channel_count;
+    const uint64_t state_width = descriptor.state_width;
+    const bool history_first = descriptor.layout == QWEN38_PLANE_CONV_STATE_HISTORY_FIRST;
+    const uint64_t state_elements = channel_count * state_width;
     for (uint64_t state_index = start; state_index < state_elements; state_index += stride) {
-      const uint64_t channel = state_index / descriptor.state_width;
-      const uint64_t position = state_index - channel * descriptor.state_width;
+      // state_index is the offset of the element in the physical state, which keeps (channel, position) at
+      // channel * state_width + position channel-first and at position * channel_count + channel history-first. The new
+      // state at `position` is the old state (or, past its end, the update) `kept_count` positions later; the update
+      // [capacity, channel_count] has the same layout whatever the state has.
+      const uint64_t channel = history_first ? state_index % channel_count : state_index / state_width;
+      const uint64_t position = history_first ? state_index / channel_count : state_index % state_width;
       const uint64_t shifted_position = position + kept_count;
-      const uint64_t source_index = shifted_position < descriptor.state_width
-                                        ? channel * descriptor.state_width + shifted_position
-                                        : (shifted_position - descriptor.state_width) *
-                                                  descriptor.channel_count +
-                                              channel;
+      const bool from_state = shifted_position < state_width;
+      uint64_t source_index;
+      if (!from_state) {
+        source_index = (shifted_position - state_width) * channel_count + channel;
+      } else if (history_first) {
+        source_index = shifted_position * channel_count + channel;
+      } else {
+        source_index = channel * state_width + shifted_position;
+      }
       if (descriptor.element_size == 2) {
-        const auto* source = shifted_position < descriptor.state_width
-                                 ? static_cast<const uint16_t*>(descriptor.source_state)
-                                 : static_cast<const uint16_t*>(descriptor.value);
+        const auto* source = from_state ? static_cast<const uint16_t*>(descriptor.source_state)
+                                        : static_cast<const uint16_t*>(descriptor.value);
         static_cast<uint16_t*>(descriptor.destination_state)[state_index] = source[source_index];
       } else if (descriptor.element_size == 4) {
-        const auto* source = shifted_position < descriptor.state_width
-                                 ? static_cast<const uint32_t*>(descriptor.source_state)
-                                 : static_cast<const uint32_t*>(descriptor.value);
+        const auto* source = from_state ? static_cast<const uint32_t*>(descriptor.source_state)
+                                        : static_cast<const uint32_t*>(descriptor.value);
         static_cast<uint32_t*>(descriptor.destination_state)[state_index] = source[source_index];
       }
     }

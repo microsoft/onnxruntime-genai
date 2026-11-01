@@ -267,6 +267,30 @@ void Qwen38Plane::RequireCapabilities(unsigned long long required, const std::st
       "). Use a plane library built from the same source as this model package.");
 }
 
+Qwen38StateReplayDesc MakeQwen38ConvReplayDescriptor(const Qwen38Plane& plane, const Qwen38ReplayRequest& request,
+                                                     const void* source, void* destination, const void* value) {
+  if (request.kind != Qwen38ReplayKind::kConvolution) {
+    throw std::invalid_argument("qwen38_graph: " + request.state.name + " is not the state of a convolution replay");
+  }
+  const Qwen38ReplayGeometry geometry = ValidateQwen38ReplayDescriptor(request);
+  if (geometry.layout == QWEN38_PLANE_CONV_STATE_HISTORY_FIRST) {
+    plane.RequireCapabilities(QWEN38_PLANE_CAP_CONV_HISTORY_FIRST_REPLAY,
+                              "the history-first conv state " + request.state.name);
+  }
+  Qwen38StateReplayDesc descriptor{};
+  descriptor.source_state = source;
+  descriptor.destination_state = destination;
+  descriptor.value = value;
+  descriptor.channel_count = geometry.channel_count;
+  descriptor.state_width = geometry.state_width;
+  descriptor.capacity = static_cast<uint32_t>(request.capacity);
+  descriptor.kept_count = 1;
+  descriptor.element_size = geometry.element_size;
+  descriptor.kind = 1;
+  descriptor.layout = static_cast<uint32_t>(geometry.layout);
+  return descriptor;
+}
+
 void Qwen38Plane::EmbedRows(void* stream, const Qwen38EmbeddingTable& table, const void* ids, void* out, int n) const {
   if (embed_gather) {
     const int format = table.int8 ? QWEN38_PLANE_EMBEDDING_INT8_ROW : QWEN38_PLANE_EMBEDDING_BF16;
@@ -295,7 +319,8 @@ void Qwen38Plane::PrepBatched(void* stream, const void* params, int rows, int ba
     throw std::invalid_argument("qwen38_graph: batched prep needs 1.." + std::to_string(QWEN38_PLANE_MAX_PREP_BATCH) +
                                 " slots, got " + std::to_string(batch));
   }
-  RequireCapabilities(QWEN38_PLANE_CAP_BATCHED_PREP, "preparing the inputs of several request slots in one call");
+  RequireCapabilities(QWEN38_PLANE_CAP_BATCHED_PREP | QWEN38_PLANE_CAP_CTX_SLOT_STRIDE,
+                      "preparing the inputs of several request slots in one call");
   if (!prep_batched) {
     throw std::runtime_error("qwen38_graph: the plane library " + library_path +
                              " lacks the qwen38_plane_prep_batched export needed to prepare several request slots");

@@ -6,14 +6,75 @@
 // and its tests only see this interface.
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 #include "span.h"
 
 namespace Generators {
+
+// Graph I/O of the fold model's com.microsoft::SpeculativePrefixCommit node (rc4 contract, ORT PR #33474). The op reads the
+// persistent control state (fold.ctl, fold.ctx_commit) and always writes the updated state to two required outputs. The
+// runtime binds each state output to the device buffer of the matching input (in place), otherwise the update is lost.
+// Other fold inputs: fold.ctx_a (prefixes) and fold.ptrs (result ring address, ring size); output fold.tail_done is head_c.
+inline constexpr const char* kQwen38FoldCtl = "fold.ctl";
+inline constexpr const char* kQwen38FoldCtxCommit = "fold.ctx_commit";
+inline constexpr const char* kQwen38FoldCtxA = "fold.ctx_a";
+inline constexpr const char* kQwen38FoldPtrs = "fold.ptrs";
+inline constexpr const char* kQwen38FoldCtlOut = "fold.ctl_out";
+inline constexpr const char* kQwen38FoldCtxCommitOut = "fold.ctx_commit_out";
+
+// Throws std::runtime_error unless `input_name`, an input of the fold model, is one of the four inputs of that node. The
+// engine owns a device buffer for each of them and for nothing else, so a package exported for an earlier contract (the rc3 node
+// also took fold.ctx_b) is refused here, naming the input, instead of failing on a container lookup when the target is built.
+inline void RequireQwen38FoldInput(std::string_view input_name) {
+  if (input_name == kQwen38FoldCtl || input_name == kQwen38FoldCtxCommit || input_name == kQwen38FoldCtxA ||
+      input_name == kQwen38FoldPtrs) {
+    return;
+  }
+  throw std::runtime_error("qwen38_graph: the fold model has the input '" + std::string(input_name) +
+                           "', which is not an input of the SpeculativePrefixCommit contract of ORT #33474 (" + kQwen38FoldCtl +
+                           ", " + kQwen38FoldCtxCommit + ", " + kQwen38FoldCtxA + ", " + kQwen38FoldPtrs +
+                           "); export the model package again for that contract");
+}
+
+// Throws std::runtime_error unless a fold model declares all four required fold.* inputs (fold.ctl, fold.ctx_commit,
+// fold.ctx_a, fold.ptrs), no unknown fold.* inputs, and both required state outputs (fold.ctl_out, fold.ctx_commit_out).
+inline void RequireQwen38FoldContract(std::span<const std::string> input_names,
+                                      std::span<const std::string> output_names) {
+  for (const auto& name : input_names) {
+    if (name.rfind("fold.", 0) == 0) {
+      RequireQwen38FoldInput(name);
+    }
+  }
+  for (const char* required_in : {kQwen38FoldCtl, kQwen38FoldCtxCommit, kQwen38FoldCtxA, kQwen38FoldPtrs}) {
+    if (std::find(input_names.begin(), input_names.end(), required_in) == input_names.end()) {
+      throw std::runtime_error(std::string("qwen38_graph: the fold model is missing the required input '") + required_in +
+                               "' of the SpeculativePrefixCommit contract of ORT #33474 (" + kQwen38FoldCtl + ", " +
+                               kQwen38FoldCtxCommit + ", " + kQwen38FoldCtxA + ", " + kQwen38FoldPtrs +
+                               "); export the model package again for that contract");
+    }
+  }
+  for (const char* required_out : {kQwen38FoldCtlOut, kQwen38FoldCtxCommitOut}) {
+    if (std::find(output_names.begin(), output_names.end(), required_out) == output_names.end()) {
+      throw std::runtime_error(std::string("qwen38_graph: the fold model is missing the required state output '") +
+                               required_out + "' of the SpeculativePrefixCommit contract of ORT #33474 (" +
+                               kQwen38FoldCtlOut + ", " + kQwen38FoldCtxCommitOut +
+                               "); export the model package again for that contract");
+    }
+  }
+}
+
+// The fold input a state output is bound in place over; nullptr when `output_name` is not a state output.
+inline const char* Qwen38FoldStateInput(std::string_view output_name) {
+  if (output_name == kQwen38FoldCtlOut) return kQwen38FoldCtl;
+  if (output_name == kQwen38FoldCtxCommitOut) return kQwen38FoldCtxCommit;
+  return nullptr;
+}
 
 // What one draft -> verify -> commit cycle published. The verify step ran the target on [pending token, draft0, ...,
 // draft(R-2)], R = 2 .. 8 rows: pred0..pred7 are the target's greedy predictions at each verify row (those past row R - 1 are
