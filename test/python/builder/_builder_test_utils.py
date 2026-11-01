@@ -111,6 +111,50 @@ def load_builder_module(module_name):
 
 
 @functools.cache
+def ort_runs_tensor_scatter():
+    """Whether the installed onnxruntime has a CPU kernel for the opset-24 TensorScatter node.
+
+    The Nemotron Parse decoder updates its KV cache with TensorScatter. Some CI jobs pin an older
+    onnxruntime: the DirectML job's onnxruntime-directml 1.25.0.dev knows the opset-24 schema but has no
+    CPU kernel for it. This loads a one-node model once, so a load error in the model under test still
+    fails that test instead of skipping it. Without the Python onnxruntime package, assume support.
+    """
+    try:
+        import onnx  # noqa: PLC0415
+        import onnxruntime  # noqa: PLC0415
+    except ImportError:
+        return True
+
+    def value(name, elem_type, shape):
+        return onnx.helper.make_tensor_value_info(name, elem_type, shape)
+
+    graph = onnx.helper.make_graph(
+        [onnx.helper.make_node("TensorScatter", ["past", "updates", "write_indices"], ["present"], axis=1)],
+        "tensor_scatter_probe",
+        [
+            value("past", onnx.TensorProto.FLOAT, [1, 4, 2]),
+            value("updates", onnx.TensorProto.FLOAT, [1, 1, 2]),
+            value("write_indices", onnx.TensorProto.INT64, [1]),
+        ],
+        [value("present", onnx.TensorProto.FLOAT, [1, 4, 2])],
+    )
+    model = onnx.helper.make_model(graph, opset_imports=[onnx.helper.make_opsetid("", 24)], ir_version=10)
+    try:
+        onnxruntime.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"])
+    except Exception as error:
+        message = str(error)
+        if (
+            "Could not find an implementation" in message
+            or "Kernel not found" in message
+            or "is not a registered function/op" in message
+            or "Current official support for domain ai.onnx is till opset" in message
+        ):
+            return False
+        raise
+    return True
+
+
+@functools.cache
 def ort_runs_causal_conv_with_state():
     """Whether the installed onnxruntime can load the CausalConvWithState node the LFM2 builder writes.
 

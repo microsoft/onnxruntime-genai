@@ -21,6 +21,7 @@ This folder contains the model builder for quickly creating optimized and quanti
     - [Config Only](#config-only)
     - [Hugging Face Authentication](#hugging-face-authentication)
     - [Hugging Face Remote Code](#hugging-face-remote-code)
+    - [Nemotron Parse Options](#nemotron-parse-options)
     - [Exclude Embedding Layer](#exclude-embedding-layer)
     - [Exclude Language Modeling Head](#exclude-language-modeling-head)
     - [Prune Language Modeling Head](#prune-language-modeling-head)
@@ -80,6 +81,7 @@ The tool currently supports the following model architectures.
 - Llama
 - Mistral
 - Nemotron
+- Nemotron Parse
 - Phi
 - Qwen
 - SmolLM3
@@ -321,6 +323,11 @@ python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folde
 # From source:
 python builder.py -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files --extra_options hf_remote=true
 ```
+
+#### Nemotron Parse Options
+
+See [Nemotron Parse](docs/nemotron_parse.md) for model-specific export options,
+runtime behavior, and validation commands.
 
 #### Exclude Embedding Layer
 
