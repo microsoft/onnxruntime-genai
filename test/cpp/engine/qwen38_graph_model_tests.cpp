@@ -615,7 +615,8 @@ TEST(Qwen38GraphConfigTest, TheSlotCountIsResolvedFromItsSettingsAndNeverClamped
     }
   }
 
-  // The engine-level settings take precedence, and they are held to the same range.
+  // The dynamic engine's setting takes precedence, and it is held to the same range. The single-slot backend refused a
+  // package with this section, so no configuration that loaded before can carry it.
   Config dynamic;
   dynamic.model.qwen38_graph.max_batch_size = 2;
   dynamic.engine.dynamic_batching.emplace();
@@ -626,11 +627,20 @@ TEST(Qwen38GraphConfigTest, TheSlotCountIsResolvedFromItsSettingsAndNeverClamped
   dynamic.engine.dynamic_batching->max_batch_size = 0;
   EXPECT_THROW(ResolveQwen38MaxBatchSize(dynamic), std::out_of_range);
 
+  // engine.static_batching configures the Engine's static path in general and the single-slot backend always ignored
+  // it, so a package may carry it with any value (the Engine's own default of four included). It never sizes the
+  // device: only a setting that asks for slots does.
   Config fixed;
   fixed.engine.static_batching.emplace();
-  EXPECT_EQ(ResolveQwen38MaxBatchSize(fixed), 4u);
+  EXPECT_EQ(ResolveQwen38MaxBatchSize(fixed), 1u);
   fixed.engine.static_batching->max_batch_size = 9;
-  EXPECT_THROW(ResolveQwen38MaxBatchSize(fixed), std::out_of_range);
+  EXPECT_EQ(ResolveQwen38MaxBatchSize(fixed), 1u);
+  fixed.model.qwen38_graph.max_batch_size = 3;
+  EXPECT_EQ(ResolveQwen38MaxBatchSize(fixed), 3u);
+  fixed.search.batch_size = 2;
+  EXPECT_EQ(ResolveQwen38MaxBatchSize(fixed), 3u);
+  fixed.model.qwen38_graph.max_batch_size = 1;
+  EXPECT_EQ(ResolveQwen38MaxBatchSize(fixed), 2u);
 
   Config search;
   search.search.batch_size = 3;
@@ -793,10 +803,48 @@ TEST(Qwen38MultiSlotConfigTest, TheUnifiedFastPrefillOfTheFoldTargetServesEveryS
 TEST(Qwen38MultiSlotConfigTest, TheSlotCountOfTheEngineSettingsIsValidatedLikeTheModelKey) {
   Config config = FoldedPackageConfig(R"({"fold":{"enabled":true},"prefill":{"enabled":false}})");
   EXPECT_NO_THROW(ValidateQwen38MultiSlotConfig(config));  // one slot
-  config.engine.static_batching.emplace();                 // four slots
+  config.engine.dynamic_batching.emplace();
+  config.engine.dynamic_batching->max_batch_size = 4;
   ExpectConfigDiagnostic(config, "unified fast prefill");
-  config.engine.static_batching->max_batch_size = 9;
+  config.engine.dynamic_batching->max_batch_size = 9;
   EXPECT_THROW(ValidateQwen38MultiSlotConfig(config), std::out_of_range);
+}
+
+// A package that shipped before several slots existed (or that was written for another model type) may carry
+// engine.static_batching with the Engine's default of four or a value of its own. The section is configuration of the
+// Engine's static path, which the single-slot backend ignored: it must neither size the device nor make a package that
+// cannot serve several slots fail to load.
+TEST(Qwen38MultiSlotConfigTest, AnEngineStaticBatchingSectionDoesNotAskForSlots) {
+  const std::vector<std::string> packages = {
+      // no fold stack
+      R"({})",
+      // the prompt goes through the decode graphs
+      R"({"fold":{"enabled":true},"prefill":{"enabled":false}})",
+      // a separate prefill graph
+      R"({"fold":{"enabled":true},"prefill":{"enabled":true,"dense":{"filename":"dense/model.onnx"}}})",
+      // able to serve several slots
+      R"({"fold":{"enabled":true},"prefill":{"enabled":true}})",
+  };
+  for (const std::string& package : packages) {
+    for (const char* section : {R"({"max_batch_size":1})", R"({"max_batch_size":4})", R"({"max_batch_size":9})"}) {
+      Config config = FoldedPackageConfig(package);
+      OverlayConfig(config, std::string{R"({"engine":{"static_batching":)"} + section + "}}");
+      ASSERT_TRUE(config.engine.static_batching.has_value()) << package << " " << section;
+      EXPECT_EQ(ResolveQwen38MaxBatchSize(config), 1u) << package << " " << section;
+      EXPECT_NO_THROW(ValidateQwen38MultiSlotConfig(config)) << package << " " << section;
+    }
+  }
+
+  // The slots a package asks for with its own setting are the ones it gets, whatever the section says.
+  Config config = FoldedPackageConfig(R"({"max_batch_size":3,"fold":{"enabled":true},"prefill":{"enabled":true}})");
+  OverlayConfig(config, R"({"engine":{"static_batching":{"max_batch_size":9}}})");
+  EXPECT_EQ(ResolveQwen38MaxBatchSize(config), 3u);
+  EXPECT_NO_THROW(ValidateQwen38MultiSlotConfig(config));
+  // and a package that cannot serve them is refused for that setting, with the diagnostic that names it.
+  Config refused = FoldedPackageConfig(R"({"max_batch_size":3})");
+  OverlayConfig(refused, R"({"engine":{"static_batching":{"max_batch_size":1}}})");
+  EXPECT_EQ(ResolveQwen38MaxBatchSize(refused), 3u);
+  ExpectConfigDiagnostic(refused, "model.qwen38_graph.fold.enabled");
 }
 
 // A ring-bank target keeps one bank per row count for the whole batch, so it cannot restore the accepted prefix of every slot.
