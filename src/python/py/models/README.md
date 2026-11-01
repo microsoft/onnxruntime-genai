@@ -2,8 +2,6 @@
 
 This folder contains the model builder for quickly creating optimized and quantized ONNX models within a few minutes that run with ONNX Runtime GenAI.
 
-Exported graphs use ONNX opset 24, including support for `TensorScatter`, and require a runtime that supports this opset. The ONNX IR version remains 10 and the `com.microsoft` domain remains at version 1.
-
 # Contents
 
 - [Model-specific Export Options](docs/model-specific-options.md)

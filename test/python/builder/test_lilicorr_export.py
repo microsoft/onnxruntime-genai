@@ -308,7 +308,7 @@ def test_lilicorr_reuses_parent_initialization(tmp_path, monkeypatch, precision,
     assert builder.max_position == 32
     assert builder.block_size == 3
     assert builder.num_draft_tokens == 2
-    assert builder.model.graph.opset_imports[""] == 24
+    assert builder.model.graph.opset_imports[""] == 21
     assert builder.model.graph.opset_imports["com.microsoft"] == 1
 
 

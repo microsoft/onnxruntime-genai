@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License
 
-"""Schema and numerical regressions for the shared ONNX opset-24 default."""
+"""Builder opset defaults, plus schema and numerical regressions for the Nemotron Parse decoder's opset 24."""
 
 import copy
 
@@ -51,21 +51,24 @@ def _builder(tmp_path):
     return base.Model(config, ir.DataType.FLOAT, ir.DataType.FLOAT, "cpu", str(tmp_path), {})
 
 
+# Only the Nemotron Parse decoder opts in to opset 24 (for TensorScatter); see nemotron_parse_decoder.py.
+TENSOR_SCATTER_OPSET = 24
+
+
 @pytest.fixture
 def graph_attrs(tmp_path):
-    return _builder(tmp_path).graph_attrs
+    return {**_builder(tmp_path).graph_attrs, "ai.onnx": TENSOR_SCATTER_OPSET}
 
 
-def test_all_graph_builders_default_to_opset_24(tmp_path):
-    model = _builder(tmp_path)
-    drafter = BlockDrafterBuilder()
-    expected = {"ai.onnx": 24, "com.microsoft": 1, "ir_version": 10, "producer_name": "onnxruntime-genai"}
-    for builder in (model, drafter):
-        assert builder.graph_attrs == expected
-        built = builder.model
-        assert dict(built.graph.opset_imports) == {"": 24, "com.microsoft": 1}
-        assert built.ir_version == 10
-        assert built.producer_name == "onnxruntime-genai"
+@pytest.mark.parametrize("make_builder, opset", [(_builder, 22), (lambda _: BlockDrafterBuilder(), 21)])
+def test_graph_builders_keep_their_default_opsets(tmp_path, make_builder, opset):
+    builder = make_builder(tmp_path)
+    expected = {"ai.onnx": opset, "com.microsoft": 1, "ir_version": 10, "producer_name": "onnxruntime-genai"}
+    assert builder.graph_attrs == expected
+    built = builder.model
+    assert dict(built.graph.opset_imports) == {"": opset, "com.microsoft": 1}
+    assert built.ir_version == 10
+    assert built.producer_name == "onnxruntime-genai"
 
 
 def test_graph_attrs_are_per_instance(tmp_path):
@@ -75,12 +78,13 @@ def test_graph_attrs_are_per_instance(tmp_path):
     second_drafter = BlockDrafterBuilder()
     first.graph_attrs["ai.onnx"] = 25
     first_drafter.graph_attrs["ai.onnx"] = 26
-    assert second.graph_attrs["ai.onnx"] == 24
-    assert second_drafter.graph_attrs["ai.onnx"] == 24
+    assert second.graph_attrs["ai.onnx"] == 22
+    assert second_drafter.graph_attrs["ai.onnx"] == 21
 
 
-def test_tensor_scatter_uses_default_without_changing_imports(tmp_path):
+def test_tensor_scatter_does_not_change_imports(tmp_path):
     builder = _builder(tmp_path)
+    builder.graph.opset_imports[""] = TENSOR_SCATTER_OPSET
     for name, dtype, shape in (
         ("past", ir.DataType.FLOAT, [1, 1, 8, 2]),
         ("updates", ir.DataType.FLOAT, [1, 1, 2, 2]),

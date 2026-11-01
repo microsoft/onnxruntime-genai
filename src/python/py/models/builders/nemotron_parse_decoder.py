@@ -11,6 +11,9 @@ import torch
 
 from .base import Model
 
+# TensorScatter, used for the in-place KV cache update, requires ONNX opset 24.
+TENSOR_SCATTER_OPSET = 24
+
 
 def make_decoder_config(config, cache_sequence_length):
     decoder_config = copy.deepcopy(config.decoder)
@@ -62,6 +65,8 @@ class NemotronParseDecoderComponent(Model):
         )
 
         self.graph.name = "nemotron_parse_decoder"
+        self.graph_attrs["ai.onnx"] = TENSOR_SCATTER_OPSET
+        self.graph.opset_imports[""] = TENSOR_SCATTER_OPSET
         self.input_names["input_ids"] = "decoder_input_ids"
         self.input_names["attention_mask"] = "decoder_attention_mask"
 

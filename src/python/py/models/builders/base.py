@@ -2147,7 +2147,7 @@ class Model:
     def default_graph_attrs():
         """Return the ONNX graph metadata used by the builders' default graphs."""
         return {
-            "ai.onnx": 24,
+            "ai.onnx": 22,
             "com.microsoft": 1,
             "ir_version": 10,
             "producer_name": "onnxruntime-genai",
