@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <fstream>
 #include <limits>
@@ -11,6 +12,7 @@
 #include <stdexcept>
 #include <type_traits>
 
+#include "env_utils.h"
 #include "qwen38_numa.h"
 
 // QWEN38_GRAPH_NO_POSIX forces the unsupported-platform stub variant on any platform (used to compile-check it).
@@ -274,6 +276,8 @@ Qwen38PleDescription ParseQwen38PleDescription(const std::filesystem::path& tabl
 
   Qwen38PleDescription description;
   Qwen38PleParams& params = description.params;
+  bool has_scale = false;
+  bool has_mult = false;
   bool has_vocab = false;
   bool has_offset = false;
   while (std::getline(in, line)) {
@@ -294,10 +298,13 @@ Qwen38PleDescription ParseQwen38PleDescription(const std::filesystem::path& tabl
       if (fields.fail()) throw std::runtime_error("qwen38_graph: malformed PLE eos line: " + line);
     } else if (key == "scale") {
       fields >> params.scale;
-      if (fields.fail()) throw std::runtime_error("qwen38_graph: malformed PLE scale line: " + line);
+      if (fields.fail() || params.scale == 0.0f || !std::isfinite(params.scale))
+        throw std::runtime_error("qwen38_graph: malformed PLE scale line: " + line);
+      has_scale = true;
     } else if (key == "mult") {
       for (long long& m : params.mult) fields >> m;
       if (fields.fail()) throw std::runtime_error("qwen38_graph: malformed PLE mult line: " + line);
+      has_mult = true;
     } else if (key == "vocab" || key == "offset") {
       if (params.n_heads <= 0 || params.n_heads > kMaxPleHeads)
         throw std::runtime_error("qwen38_graph: the PLE table must declare n_heads (1.." + std::to_string(kMaxPleHeads) +
@@ -326,8 +333,8 @@ Qwen38PleDescription ParseQwen38PleDescription(const std::filesystem::path& tabl
   }
   if (params.n_heads <= 0 || params.n_heads > kMaxPleHeads || params.head_dim <= 0 ||
       params.n_heads > kMaxPleLaunchElems / params.head_dim || params.heads_per_ngram < 0 ||
-      params.heads_per_ngram > params.n_heads || !has_vocab || !has_offset || description.shards.empty() ||
-      description.shards.size() > kMaxPleShards)
+      params.heads_per_ngram > params.n_heads || !has_scale || !has_mult || !has_vocab || !has_offset ||
+      description.shards.empty() || description.shards.size() > kMaxPleShards)
     throw std::runtime_error("qwen38_graph: malformed PLE table " + table_path.string());
   long long total_rows = 0;
   for (const auto& shard : description.shards) {
@@ -355,6 +362,35 @@ void RequireInsideModelFolder(const std::string& path, const char* what) {
     throw std::runtime_error(std::string("qwen38_graph: ") + what + " must be relative to the model folder and must not contain '..': " +
                              path);
 }
+
+#if !defined(QWEN38_GRAPH_NO_POSIX)
+bool IsCanonicalPathWithinRoot(const std::filesystem::path& candidate, const std::filesystem::path& canonical_root) {
+  auto root_it = canonical_root.begin();
+  auto cand_it = candidate.begin();
+  for (; root_it != canonical_root.end(); ++root_it, ++cand_it) {
+    if (cand_it == candidate.end() || *cand_it != *root_it) return false;
+  }
+  return true;
+}
+
+std::filesystem::path ResolvePleShardPathWithinRoot(const std::filesystem::path& root,
+                                                    const std::string& shard_rel_path) {
+  std::error_code ec;
+  const std::filesystem::path canonical_root = std::filesystem::canonical(root, ec);
+  if (ec || canonical_root.empty()) {
+    throw std::runtime_error("qwen38_graph: cannot resolve the model folder " + root.string());
+  }
+  const std::filesystem::path full = root / shard_rel_path;
+  const std::filesystem::path canonical_shard = std::filesystem::canonical(full, ec);
+  if (ec || canonical_shard.empty()) {
+    throw std::runtime_error("qwen38_graph: cannot open the PLE shard file " + full.string());
+  }
+  if (!IsCanonicalPathWithinRoot(canonical_shard, canonical_root)) {
+    throw std::runtime_error("qwen38_graph: PLE shard path resolves outside the model folder: " + full.string());
+  }
+  return canonical_shard;
+}
+#endif
 
 }  // namespace
 
@@ -416,13 +452,18 @@ Qwen38QsaConstantsDescription ParseQwen38QsaConstantsIndex(const std::filesystem
   while (std::getline(in, line)) {
     std::istringstream fields(line);
     std::string key;
-    fields >> key;
+    if (!(fields >> key)) continue;
     if (key == "file") {
       fields >> description.file;
+      if (fields.fail()) throw std::runtime_error("qwen38_graph: malformed QSA constants file line: " + line);
     } else if (key == "epsilon") {
       fields >> description.epsilon;
+      if (fields.fail() || !(description.epsilon > 0.0f) || !std::isfinite(description.epsilon))
+        throw std::runtime_error("qwen38_graph: malformed QSA constants epsilon line: " + line);
     } else if (key == "width") {
       fields >> description.width;
+      if (fields.fail() || description.width <= 0)
+        throw std::runtime_error("qwen38_graph: malformed QSA constants width line: " + line);
     } else if (key == "tensor") {
       Qwen38QsaConstantsDescription::Item item;
       fields >> item.set >> item.name >> item.offset >> item.bytes;
@@ -431,6 +472,8 @@ Qwen38QsaConstantsDescription ParseQwen38QsaConstantsIndex(const std::filesystem
     }
   }
   RequireInsideModelFolder(description.file, "the QSA constants file");
+  if (!(description.epsilon > 0.0f) || !std::isfinite(description.epsilon) || description.width <= 0)
+    throw std::runtime_error("qwen38_graph: incomplete QSA constants index " + index_path.string());
   return description;
 }
 
@@ -565,14 +608,14 @@ Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::filesystem::path& 
   SYSTEM_INFO si{};
   GetSystemInfo(&si);
   const size_t page = si.dwAllocationGranularity ? static_cast<size_t>(si.dwAllocationGranularity) : 65536u;
-  const char* pin_ple_env = std::getenv("ORT_QMOE_WIN_PIN_PLE");
-  const bool pin_ple = (pin_ple_env != nullptr && std::string(pin_ple_env) == "1");
+  bool pin_ple = false;
+  GetEnv("ORT_QMOE_WIN_PIN_PLE", pin_ple);
   params.pad_ = pin_ple ? 0 : 1;
   long long first_row = 0;
   try {
     for (size_t i = 0; i < description.shards.size(); ++i) {
       const auto& shard = description.shards[i];
-      const std::filesystem::path full = root / shard.path;
+      const std::filesystem::path full = ResolvePleShardPathWithinRoot(root, shard.path);
       HANDLE hFile = CreateFileW(full.wstring().c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                                  OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
       if (hFile == INVALID_HANDLE_VALUE) {
@@ -764,7 +807,7 @@ Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::filesystem::path& 
   try {
     for (size_t i = 0; i < description.shards.size(); ++i) {
       const auto& shard = description.shards[i];
-      const std::filesystem::path full = root / shard.path;
+      const std::filesystem::path full = ResolvePleShardPathWithinRoot(root, shard.path);
       const int fd = open(full.c_str(), O_RDONLY);
       if (fd < 0) throw std::runtime_error("qwen38_graph: cannot open the PLE shard file " + full.string());
       struct stat st{};

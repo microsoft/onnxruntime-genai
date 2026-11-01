@@ -1,9 +1,41 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 #include <filesystem>
+#include <stdexcept>
 #include <gtest/gtest.h>
 
 #include "models/qwen38_numa.h"
+#include "scoped-environment-variable.h"
+
+namespace Generators::test {
+
+TEST(Qwen38NumaTest, EnabledHonorsBooleanEnvironmentValuesAndDefaults) {
+  constexpr const char* kVar = "ORT_QMOE_NUMA_TEST_SWITCH";
+  {
+    ScopedEnvironmentVariable unset{kVar, std::nullopt};
+    EXPECT_TRUE(qwen38_numa::Enabled(kVar, true));
+    EXPECT_FALSE(qwen38_numa::Enabled(kVar, false));
+  }
+  {
+    ScopedEnvironmentVariable empty{kVar, ""};
+    EXPECT_TRUE(qwen38_numa::Enabled(kVar, true));
+    EXPECT_FALSE(qwen38_numa::Enabled(kVar, false));
+  }
+  for (const char* truthy : {"1", "true"}) {
+    ScopedEnvironmentVariable set_true{kVar, truthy};
+    EXPECT_TRUE(qwen38_numa::Enabled(kVar, false)) << truthy;
+  }
+  for (const char* falsy : {"0", "false"}) {
+    ScopedEnvironmentVariable set_false{kVar, falsy};
+    EXPECT_FALSE(qwen38_numa::Enabled(kVar, true)) << falsy;
+  }
+  {
+    ScopedEnvironmentVariable bad{kVar, "invalid"};
+    EXPECT_THROW(qwen38_numa::Enabled(kVar, false), std::invalid_argument);
+  }
+}
+
+}  // namespace Generators::test
 
 #if defined(__linux__)
 #include <fcntl.h>

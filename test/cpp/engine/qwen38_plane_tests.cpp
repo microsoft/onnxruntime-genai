@@ -175,6 +175,20 @@ TEST(Qwen38QsaConstantsIndexTest, ParsesTheIndex) {
                std::runtime_error);
   EXPECT_THROW(ParseQwen38QsaConstantsIndex(WriteFile(dir / "bad3.txt", "qwen38_qsa_consts 1\nfile x.bin\ntensor target cos 0\n")),
                std::runtime_error);
+  EXPECT_THROW(ParseQwen38QsaConstantsIndex(
+                   WriteFile(dir / "bad_eps1.txt", "qwen38_qsa_consts 1\nfile x.bin\nepsilon bad\nwidth 64\n")),
+               std::runtime_error);
+  EXPECT_THROW(ParseQwen38QsaConstantsIndex(
+                   WriteFile(dir / "bad_eps2.txt", "qwen38_qsa_consts 1\nfile x.bin\nepsilon 0\nwidth 64\n")),
+               std::runtime_error);
+  EXPECT_THROW(ParseQwen38QsaConstantsIndex(
+                   WriteFile(dir / "bad_width1.txt", "qwen38_qsa_consts 1\nfile x.bin\nepsilon 1e-6\nwidth bad\n")),
+               std::runtime_error);
+  EXPECT_THROW(ParseQwen38QsaConstantsIndex(
+                   WriteFile(dir / "bad_width2.txt", "qwen38_qsa_consts 1\nfile x.bin\nepsilon 1e-6\nwidth 0\n")),
+               std::runtime_error);
+  EXPECT_THROW(ParseQwen38QsaConstantsIndex(WriteFile(dir / "missing_meta.txt", "qwen38_qsa_consts 1\nfile x.bin\n")),
+               std::runtime_error);
   std::error_code ec;
   std::filesystem::remove_all(dir, ec);
 }
@@ -205,7 +219,15 @@ TEST(Qwen38PleDescriptionTest, ParsesAValidTable) {
 TEST(Qwen38PleDescriptionTest, RejectsMalformedTables) {
   const auto dir = MakeScratchDir("ple_invalid");
   const auto table = dir / "ple_table.txt";
-  const auto parse = [&](const std::string& text) { return ParseQwen38PleDescription(WriteFile(table, text)); };
+  const auto parse = [&](std::string text) {
+    const std::string header = "qwen38_ple_table 1\n";
+    if (text.rfind(header, 0) == 0) {
+      if (text.find("\nscale ") == std::string::npos) text.insert(header.size(), "scale 0.5\n");
+      if (text.find("\nmult ") == std::string::npos) text.insert(header.size(), "mult 1 2 3 0\n");
+    }
+    return ParseQwen38PleDescription(WriteFile(table, text));
+  };
+  const auto parse_raw = [&](const std::string& text) { return ParseQwen38PleDescription(WriteFile(table, text)); };
 
   EXPECT_THROW(ParseQwen38PleDescription(dir / "missing.txt"), std::runtime_error);
   EXPECT_THROW(parse("qwen38_ple_table 2\n"), std::runtime_error);                         // header
@@ -214,6 +236,17 @@ TEST(Qwen38PleDescriptionTest, RejectsMalformedTables) {
   EXPECT_THROW(parse("qwen38_ple_table 1\nn_heads 33\n"), std::runtime_error);
   EXPECT_THROW(parse("qwen38_ple_table 1\nn_heads 2\nhead_dim 4\nshard ple/a.bin 0\n"), std::runtime_error);  // rows
   EXPECT_THROW(parse("qwen38_ple_table 1\nn_heads 2\nhead_dim 4\nshard ple/a.bin 0 0\n"), std::runtime_error);
+
+  // Missing scale or mult, or zero/non-finite scale.
+  EXPECT_THROW(parse_raw("qwen38_ple_table 1\nn_heads 2\nhead_dim 4\nheads_per_ngram 1\nmult 1 2 3 0\n"
+                         "vocab 4 4\noffset 0 4\nshard ple/a.bin 0 8\n"),
+               std::runtime_error);
+  EXPECT_THROW(parse_raw("qwen38_ple_table 1\nn_heads 2\nhead_dim 4\nheads_per_ngram 1\nscale 0.5\n"
+                         "vocab 4 4\noffset 0 4\nshard ple/a.bin 0 8\n"),
+               std::runtime_error);
+  EXPECT_THROW(parse_raw("qwen38_ple_table 1\nn_heads 2\nhead_dim 4\nheads_per_ngram 1\nscale 0\nmult 1 2 3 0\n"
+                         "vocab 4 4\noffset 0 4\nshard ple/a.bin 0 8\n"),
+               std::runtime_error);
 
   // Missing vocab/offset, zero/negative vocab, negative/out-of-bounds offset, out-of-range heads_per_ngram, or width > 3072.
   EXPECT_THROW(parse("qwen38_ple_table 1\nn_heads 2\nhead_dim 4\nheads_per_ngram 1\noffset 0 4\nshard ple/a.bin 0 8\n"),
@@ -310,6 +343,23 @@ TEST(Qwen38PleTableTest, ValidatesShardFileBoundsAndUsesDevicePointer) {
     EXPECT_THROW((Qwen38FileMapping{plane, dir / "ple" / "a.safetensors", true}), std::runtime_error);
     EXPECT_EQ(StubPlaneState::registered_ptrs.size(), 1u);
     EXPECT_EQ(StubPlaneState::unregistered_ptrs, StubPlaneState::registered_ptrs);
+  }
+
+  // A relative shard path that resolves through a symlink outside the model root must be rejected before opening/registering.
+  {
+    const auto outside_dir = MakeScratchDir("ple_outside");
+    const auto outside_file = WriteFile(outside_dir / "external.safetensors", std::string(256, 'x'));
+    std::error_code sym_ec;
+    std::filesystem::remove(dir / "ple" / "b.safetensors", sym_ec);
+    std::filesystem::create_symlink(outside_file, dir / "ple" / "b.safetensors", sym_ec);
+    if (!sym_ec) {
+      Qwen38Plane plane;
+      InitStubPlane(plane);
+      EXPECT_THROW((Qwen38PleTable{plane, table_path, dir, 64}), std::runtime_error);
+      EXPECT_EQ(StubPlaneState::registered_ptrs.size(), 1u);
+      EXPECT_EQ(StubPlaneState::unregistered_ptrs, StubPlaneState::registered_ptrs);
+    }
+    std::filesystem::remove_all(outside_dir, sym_ec);
   }
 
   std::error_code ec;
@@ -1119,10 +1169,66 @@ TEST_F(Qwen38PlaneStagedPleTest, AStagedTableThatWasNeverRegisteredIsAnErrorNotA
   rig.FillOutputs(0xAB);
   EXPECT_EQ(rig.PleRowsOn(d_unregistered.data(), rig.device_params(), 2), kCudaErrorInvalidValue);
   EXPECT_EQ(rig.PrepGeneric(1, 1, 0, d_unregistered.data()), kCudaErrorInvalidValue);
+  // Fold rows (pos_add 1..3) with one staged table registered must also validate unknown descriptors instead of
+  // assigning them to the single registered staged table.
+  EXPECT_EQ(rig.PrepGeneric(1, 1, 1, d_unregistered.data()), kCudaErrorInvalidValue);
   const Qwen38PlaneTestStats after = Stats();
   EXPECT_EQ(after.gather_rows, registered.gather_rows);
   EXPECT_EQ(after.staged_launches, registered.staged_launches);
   EXPECT_TRUE(rig.OutputsAre(0xAB));
+
+  // Even when the staged registry is completely empty, an unregistered staged descriptor (pad_ == 1) must be rejected
+  // with cudaErrorInvalidValue rather than launching the resident kernel on CPU-only shard pointers.
+  plane_->release_ple_workspace();
+  ASSERT_EQ(Stats().staged_tables, 0);
+  rig.FillOutputs(0xAB);
+  EXPECT_EQ(rig.PleRowsOn(d_unregistered.data(), rig.device_params(), 2), kCudaErrorInvalidValue);
+  EXPECT_EQ(rig.PrepGeneric(1, 1, 0, d_unregistered.data()), kCudaErrorInvalidValue);
+  EXPECT_TRUE(rig.OutputsAre(0xAB));
+}
+
+// Concurrent or back-to-back staged ple_rows calls for the same table across two streams must fence the previous stream's
+// kernel before reusing the shared mapped staging buffer.
+TEST_F(Qwen38PlaneStagedPleTest, StagedPleRowsAcrossMultipleStreamsDoesNotCorruptInFlightReads) {
+  StagedPleRig rig{*plane_, kAscendingRows};
+  PlaneStream stream_a{*plane_};
+  PlaneStream stream_b{*plane_};
+
+  constexpr size_t kCount = 512;
+  std::vector<int64_t> tokens_a(kCount, 0);  // row 0 -> 0x38 -> bf16 1.0f (0x3F80)
+  std::vector<int64_t> tokens_b(kCount, 3);  // row 3 -> 0x48 -> bf16 4.0f (0x4080)
+  const int64_t h_ctx[2] = {0, 0};
+
+  PlaneBuffer d_tokens_a{*plane_, kCount * sizeof(int64_t), stream_a.get()};
+  PlaneBuffer d_tokens_b{*plane_, kCount * sizeof(int64_t), stream_b.get()};
+  PlaneBuffer d_ctx_in_a{*plane_, sizeof(h_ctx), stream_a.get()};
+  PlaneBuffer d_ctx_in_b{*plane_, sizeof(h_ctx), stream_b.get()};
+  PlaneBuffer d_ctx_out_a{*plane_, sizeof(h_ctx), stream_a.get()};
+  PlaneBuffer d_ctx_out_b{*plane_, sizeof(h_ctx), stream_b.get()};
+  PlaneBuffer d_out_a{*plane_, kCount * StagedPleRig::kRowWidth * sizeof(uint16_t), stream_a.get()};
+  PlaneBuffer d_out_b{*plane_, kCount * StagedPleRig::kRowWidth * sizeof(uint16_t), stream_b.get()};
+
+  plane_->Check(plane_->memcpy_h2d(d_tokens_a.data(), tokens_a.data(), kCount * sizeof(int64_t), stream_a.get()), "tok_a");
+  plane_->Check(plane_->memcpy_h2d(d_tokens_b.data(), tokens_b.data(), kCount * sizeof(int64_t), stream_b.get()), "tok_b");
+  plane_->Check(plane_->memcpy_h2d(d_ctx_in_a.data(), h_ctx, sizeof(h_ctx), stream_a.get()), "ctx_a");
+  plane_->Check(plane_->memcpy_h2d(d_ctx_in_b.data(), h_ctx, sizeof(h_ctx), stream_b.get()), "ctx_b");
+
+  ASSERT_EQ(plane_->ple_rows(stream_a.get(), rig.device_params(), d_tokens_a.data(), static_cast<int>(kCount),
+                             d_ctx_in_a.data(), d_ctx_out_a.data(), d_out_a.data()),
+            0);
+  ASSERT_EQ(plane_->ple_rows(stream_b.get(), rig.device_params(), d_tokens_b.data(), static_cast<int>(kCount),
+                             d_ctx_in_b.data(), d_ctx_out_b.data(), d_out_b.data()),
+            0);
+
+  std::vector<uint16_t> out_a(kCount * StagedPleRig::kRowWidth, 0);
+  std::vector<uint16_t> out_b(kCount * StagedPleRig::kRowWidth, 0);
+  plane_->Check(plane_->memcpy_d2h(out_a.data(), d_out_a.data(), out_a.size() * sizeof(uint16_t), stream_a.get()), "d2h_a");
+  plane_->Check(plane_->memcpy_d2h(out_b.data(), d_out_b.data(), out_b.size() * sizeof(uint16_t), stream_b.get()), "d2h_b");
+  plane_->Check(plane_->stream_sync(stream_a.get()), "sync_a");
+  plane_->Check(plane_->stream_sync(stream_b.get()), "sync_b");
+
+  for (uint16_t v : out_a) EXPECT_EQ(v, 0x3F80u);
+  for (uint16_t v : out_b) EXPECT_EQ(v, 0x4080u);
 }
 
 // Errors that CUDA itself reports, not injected ones, are propagated just as exactly.
@@ -1208,13 +1314,17 @@ TEST_F(Qwen38PlaneStagedPleTest, TheLastLoaderToDetachReleasesTheStagedTablesLef
 // The CUDA runtime records a rejected kernel launch only as the last error of the thread; the stream stays healthy, so a
 // plane that returns void from the launch would otherwise leave the outputs stale without any diagnostic.
 TEST_F(Qwen38PlaneStagedPleTest, ARejectedKernelLaunchIsReportedByTheNextStreamSyncOnce) {
-  PlaneStream stream{*plane_};
-  ASSERT_EQ(plane_->stream_sync(stream.get()), 0);
+  PlaneStream stream_a{*plane_};
+  PlaneStream stream_b{*plane_};
+  ASSERT_EQ(plane_->stream_sync(stream_a.get()), 0);
+  ASSERT_EQ(plane_->stream_sync(stream_b.get()), 0);
 
   // A grid of no blocks is not a valid launch configuration, and nothing runs.
-  plane_->argmax_part(stream.get(), nullptr, 0, nullptr, nullptr, 0);
-  EXPECT_NE(plane_->stream_sync(stream.get()), 0);
-  EXPECT_EQ(plane_->stream_sync(stream.get()), 0);
+  plane_->argmax_part(stream_a.get(), nullptr, 0, nullptr, nullptr, 0);
+  // Synchronizing a healthy stream B must not consume stream A's parked launch error.
+  EXPECT_EQ(plane_->stream_sync(stream_b.get()), 0);
+  EXPECT_NE(plane_->stream_sync(stream_a.get()), 0);
+  EXPECT_EQ(plane_->stream_sync(stream_a.get()), 0);
   EXPECT_EQ(module_->PeekLastError(), 0) << "the failed launch stayed behind as the last error of the thread";
 }
 

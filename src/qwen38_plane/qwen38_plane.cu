@@ -155,6 +155,12 @@ struct StagedPleWorkspace {
   const void* cached_ctx_out_ptr = nullptr;
   i64 cached_c0 = 0;
   i64 cached_c1 = 0;
+  cudaEvent_t prep_done_event = nullptr;
+  cudaStream_t last_prep_stream = nullptr;
+  bool prep_in_flight = false;
+  cudaEvent_t prefill_done_event = nullptr;
+  cudaStream_t last_prefill_stream = nullptr;
+  bool prefill_in_flight = false;
   static constexpr size_t kCacheSlots = 2048;
   static constexpr size_t kMaxRowBytes = 8192;
   unsigned char* ngram_cache_data = nullptr;
@@ -170,7 +176,8 @@ struct StagedPleWorkspace {
   }
 
   bool has_cuda_allocations() const {
-    return scalars != nullptr || prep_ring != nullptr || prefill_tokens != nullptr || prefill_fp8 != nullptr;
+    return scalars != nullptr || prep_ring != nullptr || prefill_tokens != nullptr || prefill_fp8 != nullptr ||
+           prep_done_event != nullptr || prefill_done_event != nullptr;
   }
 
   void release(bool sync_device) {
@@ -179,6 +186,22 @@ struct StagedPleWorkspace {
         cudaGetLastError();
       }
     }
+    if (prep_done_event) {
+      if (cudaEventDestroy(prep_done_event) != cudaSuccess) {
+        cudaGetLastError();
+      }
+      prep_done_event = nullptr;
+    }
+    last_prep_stream = nullptr;
+    prep_in_flight = false;
+    if (prefill_done_event) {
+      if (cudaEventDestroy(prefill_done_event) != cudaSuccess) {
+        cudaGetLastError();
+      }
+      prefill_done_event = nullptr;
+    }
+    last_prefill_stream = nullptr;
+    prefill_in_flight = false;
     if (scalars) {
       staged_host_free(scalars);
       scalars = nullptr;
@@ -214,7 +237,6 @@ static std::mutex g_staged_ple_mu;
 static std::unordered_map<const void*, std::unique_ptr<StagedPleWorkspace>> g_host_ple_workspaces;
 static std::unordered_map<const void*, const void*> g_dev_to_host_ple;
 static const void* g_last_staged_host_key = nullptr;
-static bool g_ever_had_staged_ple = false;
 // Loaders (Qwen38Plane objects, possibly several per process) that attach()-ed to this module and have not detached yet.
 static int g_attached_loaders = 0;
 
@@ -276,7 +298,13 @@ static cudaError_t ensure_staged_buffers(StagedPleWorkspace& ws, size_t rows, si
     replaces_buffer = replaces_buffer || ws.prefill_fp8 != nullptr;
   }
   // The buffers being replaced may still be read by kernels of earlier calls: wait for them before they are freed.
-  if (err == cudaSuccess && replaces_buffer) err = staged_device_sync();
+  if (err == cudaSuccess && replaces_buffer) {
+    err = staged_device_sync();
+    if (err == cudaSuccess) {
+      ws.prep_in_flight = false;
+      ws.prefill_in_flight = false;
+    }
+  }
   if (err != cudaSuccess) {
     fresh.discard();
     return err;
@@ -365,9 +393,6 @@ static StagedPleWorkspace* resolve_staged_ple_workspace(const void* P, cudaStrea
                                                         bool* out_unregistered_staged, cudaError_t* out_error) {
   *out_unregistered_staged = false;
   *out_error = cudaSuccess;
-  if (g_host_ple_workspaces.empty() && !g_ever_had_staged_ple) {
-    return nullptr;
-  }
   if (P == nullptr) {
     if (g_last_staged_host_key != nullptr) {
       auto it = g_host_ple_workspaces.find(g_last_staged_host_key);
@@ -393,8 +418,12 @@ static StagedPleWorkspace* resolve_staged_ple_workspace(const void* P, cudaStrea
       g_dev_to_host_ple.erase(dev_it);
     }
   }
-  if (!allow_sync && g_host_ple_workspaces.size() == 1) {
-    return g_host_ple_workspaces.begin()->second.get();
+  if (g_host_ple_workspaces.empty()) {
+    cudaStreamCaptureStatus capture_status = cudaStreamCaptureStatusNone;
+    if (cudaStreamIsCapturing(stream, &capture_status) == cudaSuccess &&
+        capture_status != cudaStreamCaptureStatusNone) {
+      return nullptr;
+    }
   }
   PleParams dev_params{};
   cudaError_t err = staged_copy_to_host(&dev_params, P, sizeof(PleParams), cudaMemcpyDefault, stream);
@@ -889,23 +918,72 @@ static void release_all_staged_state_locked() {
   g_host_ple_workspaces.clear();
   g_dev_to_host_ple.clear();
   g_last_staged_host_key = nullptr;
-  g_ever_had_staged_ple = false;
   hook_cleanup();
 }
 
 // A kernel launch that is rejected (bad launch configuration, no kernel image for the device, a failed lazy module load) is
 // recorded only in the calling thread's last-error slot: the stream stays healthy, so cudaStreamSynchronize still succeeds
-// and the outputs keep whatever they held. The launch exports that return void therefore park the failure here and
-// qwen38_plane_stream_sync reports it; prep and ple_rows return it directly.
-static std::atomic<int> g_parked_launch_error{0};
+// and the outputs keep whatever they held. The launch exports that return void therefore park the failure keyed by its
+// originating (device, stream) and qwen38_plane_stream_sync reports and clears only that stream's entry; prep and ple_rows
+// return the launch status directly.
+struct ParkedStreamKey {
+  int device = 0;
+  cudaStream_t stream = nullptr;
+  bool operator==(const ParkedStreamKey& other) const {
+    return device == other.device && stream == other.stream;
+  }
+};
+
+struct ParkedStreamKeyHash {
+  size_t operator()(const ParkedStreamKey& k) const {
+    return std::hash<int>{}(k.device) ^ (std::hash<void*>{}(reinterpret_cast<void*>(k.stream)) << 1);
+  }
+};
+
+static std::mutex g_parked_launch_mu;
+static std::unordered_map<ParkedStreamKey, int, ParkedStreamKeyHash> g_parked_launch_errors;
+
+static inline ParkedStreamKey CurrentParkedStreamKey(cudaStream_t stream) {
+  int dev = 0;
+  if (cudaGetDevice(&dev) != cudaSuccess) {
+    cudaGetLastError();
+    dev = 0;
+  }
+  return ParkedStreamKey{dev, stream};
+}
 
 // Drops a stale error of the thread so that LaunchStatus() reports only the launch that follows.
 static inline void BeginLaunch() { (void)cudaGetLastError(); }
 static inline int LaunchStatus() { return static_cast<int>(cudaGetLastError()); }
-static inline void ParkLaunchStatus() {
+static inline void ParkLaunchStatus(cudaStream_t stream) {
   if (const int err = LaunchStatus()) {
-    int none = 0;
-    g_parked_launch_error.compare_exchange_strong(none, err);
+    const ParkedStreamKey key = CurrentParkedStreamKey(stream);
+    std::lock_guard<std::mutex> lock(g_parked_launch_mu);
+    auto it = g_parked_launch_errors.find(key);
+    if (it == g_parked_launch_errors.end() || it->second == 0) {
+      g_parked_launch_errors[key] = err;
+    }
+  }
+}
+
+static inline int TakeParkedLaunchStatus(cudaStream_t stream) {
+  const ParkedStreamKey key = CurrentParkedStreamKey(stream);
+  std::lock_guard<std::mutex> lock(g_parked_launch_mu);
+  auto it = g_parked_launch_errors.find(key);
+  if (it == g_parked_launch_errors.end()) return 0;
+  const int err = it->second;
+  g_parked_launch_errors.erase(it);
+  return err;
+}
+
+static inline void ClearParkedLaunchStatusForStream(cudaStream_t stream) {
+  std::lock_guard<std::mutex> lock(g_parked_launch_mu);
+  for (auto it = g_parked_launch_errors.begin(); it != g_parked_launch_errors.end();) {
+    if (it->first.stream == stream) {
+      it = g_parked_launch_errors.erase(it);
+    } else {
+      ++it;
+    }
   }
 }
 
@@ -969,7 +1047,6 @@ QWEN38_PLANE_EXPORT void qwen38_plane_set_ple_host_params(const void* params) {
     ws->params = *hp;
     ws->reset_cache();
     g_last_staged_host_key = params;
-    g_ever_had_staged_ple = true;
   } else {
     auto it = g_host_ple_workspaces.find(params);
     if (it != g_host_ple_workspaces.end()) {
@@ -987,100 +1064,123 @@ QWEN38_PLANE_EXPORT int qwen38_plane_prep(void* s, const void* P, const void* to
                                           void* ple_out, void* state) {
   {
     std::lock_guard<std::mutex> lock(g_staged_ple_mu);
-    if (!g_host_ple_workspaces.empty() || g_ever_had_staged_ple) {
-      cudaStream_t stream = (cudaStream_t)s;
-      const bool allow_sync = !(pos_add >= 1 && pos_add <= 3 && state != nullptr);
-      bool unregistered_staged = false;
-      cudaError_t err = cudaSuccess;
-      StagedPleWorkspace* ws = resolve_staged_ple_workspace(P, stream, allow_sync, &unregistered_staged, &err);
+    cudaStream_t stream = (cudaStream_t)s;
+    const bool allow_sync = !(pos_add >= 1 && pos_add <= 3 && state != nullptr);
+    bool unregistered_staged = false;
+    cudaError_t err = cudaSuccess;
+    StagedPleWorkspace* ws = resolve_staged_ple_workspace(P, stream, allow_sync, &unregistered_staged, &err);
+    if (err != cudaSuccess) {
+      return (int)err;
+    }
+    if (unregistered_staged) {
+      return (int)cudaErrorInvalidValue;
+    }
+    if (ws != nullptr) {
+      err = ensure_staged_buffers(*ws, 0, 0);
       if (err != cudaSuccess) {
         return (int)err;
       }
-      if (unregistered_staged) {
-        return (int)cudaErrorInvalidValue;
+      if (ws->prep_in_flight && ws->last_prep_stream != stream) {
+        err = cudaEventSynchronize(ws->prep_done_event);
+        if (err != cudaSuccess) {
+          cudaGetLastError();
+          return (int)err;
+        }
+        ws->prep_in_flight = false;
       }
-      if (ws != nullptr) {
-        err = ensure_staged_buffers(*ws, 0, 0);
+      const i64* state_i64 = (const i64*)state;
+      i64 tok = 0, pos = 0, s_c0 = 0, s_c1 = 0;
+      const i64* expected_fold_tok_ptr =
+          (pos_add == 1) ? (state_i64 + 2)
+                         : ((pos_add == 2) ? (state_i64 + 8) : ((pos_add == 3) ? (state_i64 + 9) : nullptr));
+      if (pos_add >= 1 && pos_add <= 3 && state != nullptr &&
+          state == ws->cached_state_ptr &&
+          pos_ptr == (state_i64 + 1) &&
+          tok_ptr == expected_fold_tok_ptr &&
+          ctx_in == ws->cached_ctx_out_ptr) {
+        // Fast path for folded multi-draft rows 1..3: reuse the 10-word `ctl` snapshot copied on row 0
+        // with zero additional D2H copies and zero cudaStreamSynchronize calls!
+        const int ctl_idx = (pos_add == 1) ? 2 : ((pos_add == 2) ? 8 : 9);
+        tok = ws->scalars[ctl_idx];
+        pos = ws->scalars[1] + pos_add;
+        s_c0 = ws->cached_c0;
+        s_c1 = ws->cached_c1;
+        ws->cached_ctx_out_ptr = ctx_out;
+        ws->cached_c0 = s_c1;
+        ws->cached_c1 = tok;
+      } else if (pos_add == 0 && state != nullptr && tok_ptr == state_i64 && pos_ptr == (state_i64 + 1)) {
+        // Row 0 of EnqueueFold / EnqueueVerify / EnqueueStep: copy all 10 words of `ctl` (`ctl[0..9]`)
+        // plus `ctx_in[0..1]` in one batch so subsequent draft rows 1..3 need no stream synchronization.
+        err = staged_copy_to_host(&ws->scalars[0], state_i64, 10 * sizeof(i64), cudaMemcpyDeviceToHost, stream);
+        if (err == cudaSuccess) {
+          err = staged_copy_to_host(&ws->scalars[10], ctx_in, 2 * sizeof(i64), cudaMemcpyDeviceToHost, stream);
+        }
+        if (err == cudaSuccess) {
+          err = staged_stream_sync(stream);
+        }
+        if (err != cudaSuccess) {
+          // The snapshot may be half written: rows 1..3 must not reuse it.
+          ws->cached_state_ptr = nullptr;
+          ws->cached_ctx_out_ptr = nullptr;
+          return (int)err;
+        }
+        ws->prep_in_flight = false;
+        tok = ws->scalars[0];
+        pos = ws->scalars[1];
+        s_c0 = ws->scalars[10];
+        s_c1 = ws->scalars[11];
+        ws->cached_state_ptr = state;
+        ws->cached_ctx_out_ptr = ctx_out;
+        ws->cached_c0 = s_c1;
+        ws->cached_c1 = tok;
+      } else {
+        ws->cached_state_ptr = nullptr;
+        ws->cached_ctx_out_ptr = nullptr;
+        err = staged_copy_to_host(&ws->scalars[0], tok_ptr, sizeof(i64), cudaMemcpyDeviceToHost, stream);
+        if (err == cudaSuccess) {
+          err = staged_copy_to_host(&ws->scalars[1], pos_ptr, sizeof(i64), cudaMemcpyDeviceToHost, stream);
+        }
+        if (err == cudaSuccess) {
+          err = staged_copy_to_host(&ws->scalars[2], ctx_in, 2 * sizeof(i64), cudaMemcpyDeviceToHost, stream);
+        }
+        if (err == cudaSuccess) {
+          err = staged_stream_sync(stream);
+        }
         if (err != cudaSuccess) {
           return (int)err;
         }
-        const i64* state_i64 = (const i64*)state;
-        i64 tok = 0, pos = 0, s_c0 = 0, s_c1 = 0;
-        const i64* expected_fold_tok_ptr =
-            (pos_add == 1) ? (state_i64 + 2)
-                           : ((pos_add == 2) ? (state_i64 + 8) : ((pos_add == 3) ? (state_i64 + 9) : nullptr));
-        if (pos_add >= 1 && pos_add <= 3 && state != nullptr &&
-            state == ws->cached_state_ptr &&
-            pos_ptr == (state_i64 + 1) &&
-            tok_ptr == expected_fold_tok_ptr &&
-            ctx_in == ws->cached_ctx_out_ptr) {
-          // Fast path for folded multi-draft rows 1..3: reuse the 10-word `ctl` snapshot copied on row 0
-          // with zero additional D2H copies and zero cudaStreamSynchronize calls!
-          const int ctl_idx = (pos_add == 1) ? 2 : ((pos_add == 2) ? 8 : 9);
-          tok = ws->scalars[ctl_idx];
-          pos = ws->scalars[1] + pos_add;
-          s_c0 = ws->cached_c0;
-          s_c1 = ws->cached_c1;
-          ws->cached_ctx_out_ptr = ctx_out;
-          ws->cached_c0 = s_c1;
-          ws->cached_c1 = tok;
-        } else if (pos_add == 0 && state != nullptr && tok_ptr == state_i64 && pos_ptr == (state_i64 + 1)) {
-          // Row 0 of EnqueueFold / EnqueueVerify / EnqueueStep: copy all 10 words of `ctl` (`ctl[0..9]`)
-          // plus `ctx_in[0..1]` in one batch so subsequent draft rows 1..3 need no stream synchronization.
-          err = staged_copy_to_host(&ws->scalars[0], state_i64, 10 * sizeof(i64), cudaMemcpyDeviceToHost, stream);
-          if (err == cudaSuccess) {
-            err = staged_copy_to_host(&ws->scalars[10], ctx_in, 2 * sizeof(i64), cudaMemcpyDeviceToHost, stream);
-          }
-          if (err == cudaSuccess) {
-            err = staged_stream_sync(stream);
-          }
-          if (err != cudaSuccess) {
-            // The snapshot may be half written: rows 1..3 must not reuse it.
-            ws->cached_state_ptr = nullptr;
-            ws->cached_ctx_out_ptr = nullptr;
-            return (int)err;
-          }
-          tok = ws->scalars[0];
-          pos = ws->scalars[1];
-          s_c0 = ws->scalars[10];
-          s_c1 = ws->scalars[11];
-          ws->cached_state_ptr = state;
-          ws->cached_ctx_out_ptr = ctx_out;
-          ws->cached_c0 = s_c1;
-          ws->cached_c1 = tok;
-        } else {
-          ws->cached_state_ptr = nullptr;
-          ws->cached_ctx_out_ptr = nullptr;
-          err = staged_copy_to_host(&ws->scalars[0], tok_ptr, sizeof(i64), cudaMemcpyDeviceToHost, stream);
-          if (err == cudaSuccess) {
-            err = staged_copy_to_host(&ws->scalars[1], pos_ptr, sizeof(i64), cudaMemcpyDeviceToHost, stream);
-          }
-          if (err == cudaSuccess) {
-            err = staged_copy_to_host(&ws->scalars[2], ctx_in, 2 * sizeof(i64), cudaMemcpyDeviceToHost, stream);
-          }
-          if (err == cudaSuccess) {
-            err = staged_stream_sync(stream);
-          }
-          if (err != cudaSuccess) {
-            return (int)err;
-          }
-          tok = ws->scalars[0];
-          pos = ws->scalars[1] + pos_add;
-          s_c0 = ws->scalars[2];
-          s_c1 = ws->scalars[3];
-        }
-        const size_t slot_offset = (size_t)(ws->ring_idx++ & 63u) * 8192u;
-        unsigned char* slot_host = ws->prep_ring + slot_offset;
-        const unsigned char* slot_dev = ws->prep_ring_dev + slot_offset;
-        host_gather_ple_row(*ws, tok, s_c0, s_c1, slot_host);
-        hook_launch();
-        BeginLaunch();
-        k_prep_staged<<<1, 1024, 0, stream>>>(ws->params.capacity, ws->params.n_heads, ws->params.head_dim,
-                                              ws->params.scale, tok, pos, s_c1, slot_dev, (i64*)ctx_out,
-                                              (i64*)input_ids, (i64*)position_ids, (int*)committed, (i64*)past_pos,
-                                              (__nv_bfloat16*)ple_out, (i64*)state);
-        return LaunchStatus();
+        ws->prep_in_flight = false;
+        tok = ws->scalars[0];
+        pos = ws->scalars[1] + pos_add;
+        s_c0 = ws->scalars[2];
+        s_c1 = ws->scalars[3];
       }
+      const size_t slot_offset = (size_t)(ws->ring_idx++ & 63u) * 8192u;
+      unsigned char* slot_host = ws->prep_ring + slot_offset;
+      const unsigned char* slot_dev = ws->prep_ring_dev + slot_offset;
+      host_gather_ple_row(*ws, tok, s_c0, s_c1, slot_host);
+      if (ws->prep_done_event == nullptr) {
+        if (cudaEventCreateWithFlags(&ws->prep_done_event, cudaEventDisableTiming) != cudaSuccess) {
+          cudaGetLastError();
+          ws->prep_done_event = nullptr;
+        }
+      }
+      hook_launch();
+      BeginLaunch();
+      k_prep_staged<<<1, 1024, 0, stream>>>(ws->params.capacity, ws->params.n_heads, ws->params.head_dim,
+                                            ws->params.scale, tok, pos, s_c1, slot_dev, (i64*)ctx_out,
+                                            (i64*)input_ids, (i64*)position_ids, (int*)committed, (i64*)past_pos,
+                                            (__nv_bfloat16*)ple_out, (i64*)state);
+      const int launch_err = LaunchStatus();
+      if (launch_err == 0 && ws->prep_done_event != nullptr) {
+        if (cudaEventRecord(ws->prep_done_event, stream) == cudaSuccess) {
+          ws->last_prep_stream = stream;
+          ws->prep_in_flight = true;
+        } else {
+          cudaGetLastError();
+        }
+      }
+      return launch_err;
     }
   }
   BeginLaunch();
@@ -1093,7 +1193,7 @@ QWEN38_PLANE_EXPORT int qwen38_plane_prep(void* s, const void* P, const void* to
 QWEN38_PLANE_EXPORT void qwen38_plane_argmax_part(void* s, const void* logits, int n, void* outv, void* outi, int nblocks) {
   BeginLaunch();
   k_argmax_part<<<nblocks, 256, 0, (cudaStream_t)s>>>((const __nv_bfloat16*)logits, n, (float*)outv, (int*)outi);
-  ParkLaunchStatus();
+  ParkLaunchStatus((cudaStream_t)s);
 }
 
 QWEN38_PLANE_EXPORT void qwen38_plane_post1(void* s, const void* v0, const void* i0, int nb, void* state, void* ctx_commit, const void* ctx_a,
@@ -1101,7 +1201,7 @@ QWEN38_PLANE_EXPORT void qwen38_plane_post1(void* s, const void* v0, const void*
   BeginLaunch();
   k_post1<<<1, 32, 0, (cudaStream_t)s>>>((const float*)v0, (const int*)i0, nb, (i64*)state, (i64*)ctx_commit,
                                          (const i64*)ctx_a, (const int*)st0, nst, (i64*)result, ring);
-  ParkLaunchStatus();
+  ParkLaunchStatus((cudaStream_t)s);
 }
 
 QWEN38_PLANE_EXPORT void qwen38_plane_post_tok(void* s, const void* tok01, void* state, void* ctx_commit, const void* ctx_a, const void* ctx_b,
@@ -1109,7 +1209,7 @@ QWEN38_PLANE_EXPORT void qwen38_plane_post_tok(void* s, const void* tok01, void*
   BeginLaunch();
   k_post_tok<<<1, 32, 0, (cudaStream_t)s>>>((const i64*)tok01, (i64*)state, (i64*)ctx_commit, (const i64*)ctx_a,
                                             (const i64*)ctx_b, (const int*)st0, nst, (i64*)result, ring);
-  ParkLaunchStatus();
+  ParkLaunchStatus((cudaStream_t)s);
 }
 
 QWEN38_PLANE_EXPORT void qwen38_plane_head_prep(void* s, const void* ctl, int rows, int hlen, int hidden_width, const void* src, void* dst,
@@ -1117,19 +1217,19 @@ QWEN38_PLANE_EXPORT void qwen38_plane_head_prep(void* s, const void* ctl, int ro
   BeginLaunch();
   k_head_prep<<<1, 1024, 0, (cudaStream_t)s>>>((const i64*)ctl, rows, hlen, hidden_width, (const uint4*)src, (uint4*)dst,
                                                (i64*)tokens, (i64*)positions, (int*)committed);
-  ParkLaunchStatus();
+  ParkLaunchStatus((cudaStream_t)s);
 }
 
 QWEN38_PLANE_EXPORT void qwen38_plane_head_post(void* s, const void* next_token, void* ctl) {
   BeginLaunch();
   k_head_post<<<1, 32, 0, (cudaStream_t)s>>>((const i64*)next_token, (i64*)ctl);
-  ParkLaunchStatus();
+  ParkLaunchStatus((cudaStream_t)s);
 }
 
 QWEN38_PLANE_EXPORT void qwen38_plane_or_status(void* s, const void* st, int nst, void* state) {
   BeginLaunch();
   k_or_status<<<1, 32, 0, (cudaStream_t)s>>>((const int*)st, nst, (i64*)state);
-  ParkLaunchStatus();
+  ParkLaunchStatus((cudaStream_t)s);
 }
 
 /* ---- fast prefill kernels: batched PLE rows, dense -> packed state hand-off ---- */
@@ -1138,51 +1238,73 @@ QWEN38_PLANE_EXPORT int qwen38_plane_ple_rows(void* s, const void* P, const void
   if (n <= 0) return 0;
   {
     std::lock_guard<std::mutex> lock(g_staged_ple_mu);
-    if (!g_host_ple_workspaces.empty() || g_ever_had_staged_ple) {
-      cudaStream_t stream = (cudaStream_t)s;
-      bool unregistered_staged = false;
-      cudaError_t err = cudaSuccess;
-      StagedPleWorkspace* ws = resolve_staged_ple_workspace(P, stream, /*allow_sync=*/true, &unregistered_staged, &err);
+    cudaStream_t stream = (cudaStream_t)s;
+    bool unregistered_staged = false;
+    cudaError_t err = cudaSuccess;
+    StagedPleWorkspace* ws = resolve_staged_ple_workspace(P, stream, /*allow_sync=*/true, &unregistered_staged, &err);
+    if (err != cudaSuccess) {
+      return (int)err;
+    }
+    if (unregistered_staged) {
+      return (int)cudaErrorInvalidValue;
+    }
+    if (ws != nullptr) {
+      const size_t total = (size_t)ws->params.n_heads * (size_t)ws->params.head_dim;
+      err = ensure_staged_buffers(*ws, (size_t)n, total);
       if (err != cudaSuccess) {
         return (int)err;
       }
-      if (unregistered_staged) {
-        return (int)cudaErrorInvalidValue;
-      }
-      if (ws != nullptr) {
-        const size_t total = (size_t)ws->params.n_heads * (size_t)ws->params.head_dim;
-        err = ensure_staged_buffers(*ws, (size_t)n, total);
+      if (ws->prefill_in_flight && ws->last_prefill_stream != stream) {
+        err = cudaEventSynchronize(ws->prefill_done_event);
         if (err != cudaSuccess) {
+          cudaGetLastError();
           return (int)err;
         }
-        err = staged_copy_to_host(ws->prefill_tokens, tokens, (size_t)n * sizeof(i64), cudaMemcpyDeviceToHost, stream);
-        if (err == cudaSuccess) {
-          err = staged_copy_to_host(&ws->scalars[2], ctx_in, 2 * sizeof(i64), cudaMemcpyDeviceToHost, stream);
-        }
-        if (err == cudaSuccess) {
-          err = staged_stream_sync(stream);
-        }
-        if (err != cudaSuccess) {
-          return (int)err;
-        }
-        const i64* h_toks = ws->prefill_tokens;
-        const i64 ctx0 = ws->scalars[2];
-        const i64 ctx1 = ws->scalars[3];
-        for (int i = 0; i < n; ++i) {
-          const i64 tok = h_toks[i];
-          const i64 c1 = i >= 1 ? h_toks[i - 1] : ctx1;
-          const i64 c0raw = i >= 2 ? h_toks[i - 2] : (i == 1 ? ctx1 : ctx0);
-          host_gather_ple_row(*ws, tok, c0raw, c1, ws->prefill_fp8 + (size_t)i * total);
-        }
-        const i64 last_tok = h_toks[n - 1];
-        const i64 last_c1 = n >= 2 ? h_toks[n - 2] : ctx1;
-        hook_launch();
-        BeginLaunch();
-        k_ple_rows_staged<<<n, 1024, 0, stream>>>(ws->params.n_heads, ws->params.head_dim, ws->params.scale,
-                                                  ws->prefill_fp8_dev, n, last_c1, last_tok, (i64*)ctx_out,
-                                                  (__nv_bfloat16*)ple_out);
-        return LaunchStatus();
+        ws->prefill_in_flight = false;
       }
+      err = staged_copy_to_host(ws->prefill_tokens, tokens, (size_t)n * sizeof(i64), cudaMemcpyDeviceToHost, stream);
+      if (err == cudaSuccess) {
+        err = staged_copy_to_host(&ws->scalars[2], ctx_in, 2 * sizeof(i64), cudaMemcpyDeviceToHost, stream);
+      }
+      if (err == cudaSuccess) {
+        err = staged_stream_sync(stream);
+      }
+      if (err != cudaSuccess) {
+        return (int)err;
+      }
+      ws->prefill_in_flight = false;
+      const i64* h_toks = ws->prefill_tokens;
+      const i64 ctx0 = ws->scalars[2];
+      const i64 ctx1 = ws->scalars[3];
+      for (int i = 0; i < n; ++i) {
+        const i64 tok = h_toks[i];
+        const i64 c1 = i >= 1 ? h_toks[i - 1] : ctx1;
+        const i64 c0raw = i >= 2 ? h_toks[i - 2] : (i == 1 ? ctx1 : ctx0);
+        host_gather_ple_row(*ws, tok, c0raw, c1, ws->prefill_fp8 + (size_t)i * total);
+      }
+      const i64 last_tok = h_toks[n - 1];
+      const i64 last_c1 = n >= 2 ? h_toks[n - 2] : ctx1;
+      if (ws->prefill_done_event == nullptr) {
+        if (cudaEventCreateWithFlags(&ws->prefill_done_event, cudaEventDisableTiming) != cudaSuccess) {
+          cudaGetLastError();
+          ws->prefill_done_event = nullptr;
+        }
+      }
+      hook_launch();
+      BeginLaunch();
+      k_ple_rows_staged<<<n, 1024, 0, stream>>>(ws->params.n_heads, ws->params.head_dim, ws->params.scale,
+                                                ws->prefill_fp8_dev, n, last_c1, last_tok, (i64*)ctx_out,
+                                                (__nv_bfloat16*)ple_out);
+      const int launch_err = LaunchStatus();
+      if (launch_err == 0 && ws->prefill_done_event != nullptr) {
+        if (cudaEventRecord(ws->prefill_done_event, stream) == cudaSuccess) {
+          ws->last_prefill_stream = stream;
+          ws->prefill_in_flight = true;
+        } else {
+          cudaGetLastError();
+        }
+      }
+      return launch_err;
     }
   }
   BeginLaunch();
@@ -1198,7 +1320,7 @@ QWEN38_PLANE_EXPORT void qwen38_plane_pool_keys(void* s, const void* raw, int nb
   k_pool_keys<<<nb, 128, 0, (cudaStream_t)s>>>((const __nv_bfloat16*)raw, (const __nv_bfloat16*)knorm,
                                                (const __nv_bfloat16*)cosv, (const __nv_bfloat16*)sinv, width, eps,
                                                first_block, (float*)out);
-  ParkLaunchStatus();
+  ParkLaunchStatus((cudaStream_t)s);
 }
 
 QWEN38_PLANE_EXPORT void qwen38_plane_transpose_f32(void* s, const void* src, void* dst, int n, int batch) {
@@ -1207,7 +1329,7 @@ QWEN38_PLANE_EXPORT void qwen38_plane_transpose_f32(void* s, const void* src, vo
   dim3 grid(blocks, blocks, static_cast<unsigned int>(batch)), block(32, 8);
   BeginLaunch();
   k_transpose_f32<<<grid, block, 0, (cudaStream_t)s>>>((const float*)src, (float*)dst, n);
-  ParkLaunchStatus();
+  ParkLaunchStatus((cudaStream_t)s);
 }
 
 QWEN38_PLANE_EXPORT void qwen38_plane_quantize_kv(void* s, const void* src, void* dst, const void* scale, int rows, int src_pitch_elems,
@@ -1216,14 +1338,14 @@ QWEN38_PLANE_EXPORT void qwen38_plane_quantize_kv(void* s, const void* src, void
   BeginLaunch();
   k_quantize_kv<<<rows, 256, 0, (cudaStream_t)s>>>((const __nv_bfloat16*)src, (uint8_t*)dst, (const float*)scale, rows,
                                                    src_pitch_elems, dst_pitch_elems, mode);
-  ParkLaunchStatus();
+  ParkLaunchStatus((cudaStream_t)s);
 }
 
 QWEN38_PLANE_EXPORT void qwen38_plane_embed_rows(void* s, const void* table, const void* ids, void* out, int rows, int width) {
   if (rows <= 0 || width <= 0) return;
   BeginLaunch();
   k_embed_rows<<<rows, 256, 0, (cudaStream_t)s>>>((const __nv_bfloat16*)table, (const i64*)ids, (__nv_bfloat16*)out, rows, width);
-  ParkLaunchStatus();
+  ParkLaunchStatus((cudaStream_t)s);
 }
 
 /* ---- CUDA runtime helpers (all return cudaError_t as int, 0 = success) ---- */
@@ -1279,13 +1401,18 @@ QWEN38_PLANE_EXPORT int qwen38_plane_memcpy2d_d2d(void* dst, size_t dpitch, cons
   return (int)cudaMemcpy2DAsync(dst, dpitch, src, spitch, width, height, cudaMemcpyDeviceToDevice, (cudaStream_t)s);
 }
 QWEN38_PLANE_EXPORT int qwen38_plane_stream_create(void** s) { return (int)cudaStreamCreateWithFlags((cudaStream_t*)s, cudaStreamNonBlocking); }
-QWEN38_PLANE_EXPORT int qwen38_plane_stream_destroy(void* s) { return (int)cudaStreamDestroy((cudaStream_t)s); }
-// Besides the stream's own status this reports a launch that an earlier void export could not enqueue (see
-// g_parked_launch_error), once.
+QWEN38_PLANE_EXPORT int qwen38_plane_stream_destroy(void* s) {
+  ClearParkedLaunchStatusForStream((cudaStream_t)s);
+  return (int)cudaStreamDestroy((cudaStream_t)s);
+}
+// Besides the stream's own status this reports a launch that an earlier void export could not enqueue on this stream
+// (see g_parked_launch_errors), once.
 QWEN38_PLANE_EXPORT int qwen38_plane_stream_sync(void* s) {
-  const cudaError_t err = cudaStreamSynchronize((cudaStream_t)s);
+  const cudaStream_t stream = (cudaStream_t)s;
+  const int parked = TakeParkedLaunchStatus(stream);
+  const cudaError_t err = cudaStreamSynchronize(stream);
   if (err != cudaSuccess) return (int)err;
-  return g_parked_launch_error.exchange(0);
+  return parked;
 }
 
 #ifdef QWEN38_PLANE_TEST_HOOKS

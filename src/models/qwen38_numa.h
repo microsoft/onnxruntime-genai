@@ -7,9 +7,9 @@
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
-#include <cstring>
 #include <vector>
+
+#include "env_utils.h"
 
 #if defined(__linux__) && !defined(QWEN38_GRAPH_NO_POSIX)
 #include <linux/mempolicy.h>
@@ -20,8 +20,9 @@
 namespace Generators::qwen38_numa {
 
 inline bool Enabled(const char* name, bool default_value) {
-  const char* value = std::getenv(name);
-  return value ? std::strcmp(value, "0") != 0 : default_value;
+  bool enabled = default_value;
+  GetEnv(name, enabled);
+  return enabled;
 }
 
 struct PlacementReport {
