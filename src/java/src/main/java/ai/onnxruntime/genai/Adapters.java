@@ -38,7 +38,7 @@ public final class Adapters implements AutoCloseable {
   }
 
   /**
-   * Unloads the adapter with the given identifier from the previosly loaded adapters. If the
+   * Unloads the adapter with the given identifier from the previously loaded adapters. If the
    * adapter is not found, or if it cannot be unloaded (when it is in use), an error is returned.
    *
    * @param adapterName A unique user supplied adapter identifier.
