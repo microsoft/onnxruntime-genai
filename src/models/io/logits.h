@@ -23,7 +23,7 @@ struct Logits {
   std::array<int64_t, 3> shape_{};
   ONNXTensorElementDataType type_;
 
-  // Tensor to keep the logits of the last tokens. It is used in the 2 cases below. Otherwhise, it is not used.
+  // Tensor to keep the logits of the last tokens. It is used in the 2 cases below. Otherwise, it is not used.
   // 1. prompt: store the last tokens logits from output_raw_
   // 2. token gen: store the converted fp32 logits if output_raw_ is fp16.
   std::unique_ptr<OrtValue> output_last_tokens_;

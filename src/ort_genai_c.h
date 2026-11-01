@@ -1294,14 +1294,14 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyAdapters(OgaAdapters* adapters);
  * \brief Loads the model adapter from the given adapter file path and adapter name.
  * \param[in] adapters The OgaAdapters object to load the adapter.
  * \param[in] adapter_file_path The file path of the adapter to load.
- * \param[in] adapter_name A unique identifier for the adapter chosed by the function invoker.
+ * \param[in] adapter_name A unique identifier for the adapter chosen by the function invoker.
  *                         This name is used for querying the adapter.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaLoadAdapter(OgaAdapters* adapters, const char* adapter_file_path,
                                                   const char* adapter_name);
 
 /**
- * \brief Unloads the adapter with the given identifier from the previosly loaded adapters.
+ * \brief Unloads the adapter with the given identifier from the previously loaded adapters.
           If the adapter is not found, or if it cannot be unloaded (when it is in use), an error is returned.
  * \param[in] adapters The OgaAdapters object to unload the adapter.
  * \param[in] adapter_name The name of the adapter to unload.
