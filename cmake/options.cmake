@@ -24,6 +24,7 @@ option(TEST_QWEN_2_5 "Enable tests for Qwen-2.5 0.5B" OFF)
 # performance
 option(ENABLE_MODEL_BENCHMARK "Build model benchmark program" ON)
 option(ENABLE_ENGINE_BENCHMARK "Build the GenAI engine benchmark program" OFF)
+option(ENABLE_QWEN38_PLANE "Build libqwen38_plane, the CUDA data plane of the qwen38_flash_graph model type (Linux and Windows, CUDA only)" OFF)
 
 # diagnostics
 option(ENABLE_TRACING "Enable recording of tracing data" OFF)

@@ -405,6 +405,12 @@ target_compile_definitions(engine_unit_tests PRIVATE
   ORTGENAI_TEST_CUSTOM_OPS_SECOND_FILENAME="$<TARGET_FILE_NAME:custom_ops_test_second>"
 )
 add_dependencies(engine_unit_tests custom_ops_test_first custom_ops_test_second)
+if(TARGET qwen38_plane)
+  target_compile_definitions(engine_unit_tests PRIVATE
+    ORTGENAI_TEST_QWEN38_PLANE_LIB_PATH="$<TARGET_FILE:qwen38_plane>"
+  )
+  add_dependencies(engine_unit_tests qwen38_plane)
+endif()
 set_target_properties(engine_unit_tests PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>"
     FOLDER "Tests"

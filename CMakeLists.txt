@@ -292,6 +292,22 @@ if((USE_CUDA OR USE_TRT_RTX) AND CMAKE_CUDA_COMPILER)
   else()
     message(FATAL_ERROR "${target} unknown platform, need to specify shared library exports for it")
   endif()
+
+  # CUDA data plane of the "qwen38_flash_graph" model type. It is dlopen-ed by the model from a path inside the model
+  # folder (model.qwen38_graph.plane_library), never linked into GenAI, so the core library keeps no cudart dependency.
+  if(ENABLE_QWEN38_PLANE)
+    if((UNIX AND NOT APPLE) OR WIN32)
+      add_library(qwen38_plane SHARED "${GENERATORS_ROOT}/qwen38_plane/qwen38_plane.cu")
+      target_link_libraries(qwen38_plane PRIVATE cudart)
+      if(ENABLE_TESTS)
+        # Fault-injection and counter exports for test/cpp/engine/qwen38_plane_tests.cpp; packages build with ENABLE_TESTS=OFF.
+        target_compile_definitions(qwen38_plane PRIVATE QWEN38_PLANE_TEST_HOOKS)
+      endif()
+      set_target_properties(qwen38_plane PROPERTIES FOLDER "GenAI" WINDOWS_EXPORT_ALL_SYMBOLS ON)
+    else()
+      message(WARNING "ENABLE_QWEN38_PLANE is only supported on Linux and Windows; skipping the qwen38_plane target.")
+    endif()
+  endif()
 endif()
 
 
