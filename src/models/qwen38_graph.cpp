@@ -2891,7 +2891,8 @@ std::unique_ptr<Config> PreflightQwen38GraphModelConfig(std::unique_ptr<Config> 
   const auto& q = config->model.qwen38_graph;
   if (!q.IsConfigured() || q.ple_table.empty())
     throw std::runtime_error(
-        "qwen38_flash_graph requires model.qwen38_graph.{head.filename_s1|fold.head_r2.filename|dflash2.filename,ple_table}");
+        "qwen38_flash_graph requires model.qwen38_graph.ple_table and one of "
+        "model.qwen38_graph.{head.filename_s1,fold.head_r2.filename,fold.enabled}");
   if (q.fold.enabled) {
     if (!q.mtp.enabled) throw std::runtime_error("model.qwen38_graph.fold requires model.qwen38_graph.mtp.enabled");
     if (q.fold.head_r2.filename.empty() && config->model.dflash2.filename.empty())
