@@ -1755,6 +1755,17 @@ TEST(Qwen38PlaneLibraryPathTest, ASymlinkOutOfTheModelFolderIsRejectedForTheLibr
   // A host that does not look up aliases never follows that link.
   EXPECT_TRUE(ResolveQwen38PlaneLibraryPath(root, "libqwen38_plane.so", false).empty());
 
+  // When a Windows .dll alias is a symlink to a file inside the model folder (even with a .so extension), the canonical
+  // target is validated to stay inside root while the returned path preserves the .dll alias.
+  std::filesystem::remove(root / "qwen38_plane.dll", link_error);
+  WriteFile(root / "libqwen38_plane.so", "so");
+  std::filesystem::create_symlink(root / "libqwen38_plane.so", root / "qwen38_plane.dll", link_error);
+  if (!link_error) {
+    const auto resolved_alias = ResolveQwen38PlaneLibraryPath(root, "libqwen38_plane.so", true);
+    EXPECT_EQ(resolved_alias, root / "qwen38_plane.dll");
+    EXPECT_EQ(ResolveWindowsSharedLibraryPath(resolved_alias), resolved_alias);
+  }
+
   std::error_code ec;
   std::filesystem::remove_all(dir, ec);
 }

@@ -103,7 +103,10 @@ std::filesystem::path ResolveQwen38PlaneLibraryPath(const std::filesystem::path&
   std::filesystem::path library = resolve_inside_root(root / configured);
   if (windows_host) {
     const std::filesystem::path alias = ResolveWindowsSharedLibraryPath(library);
-    if (alias != library) library = resolve_inside_root(alias);
+    if (alias != library) {
+      (void)resolve_inside_root(alias);
+      library = alias;
+    }
   }
   return std::filesystem::exists(library) ? library : std::filesystem::path{};
 }

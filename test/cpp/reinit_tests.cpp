@@ -428,11 +428,8 @@ TEST(ReInitTests, TheCudaAddOnIsEnteredAgainWhenTheBuiltInQwen38PlaneKeepsItMapp
     }
 
     OgaShutdown();
-    if (!CudaAddOnIsMapped()) {
-      if (round == 0)
-        GTEST_SKIP() << "OgaShutdown() unloaded the CUDA add-on in spite of the plane, so there is no re-entry to cover";
-      FAIL() << "OgaShutdown() unloaded the CUDA add-on in round " << round << ", although the plane kept it mapped before";
-    }
+    ASSERT_TRUE(CudaAddOnIsMapped())
+        << "OgaShutdown() unloaded the CUDA add-on in round " << round << " in spite of the built-in plane";
   }
 }
 #endif  // USE_CUDA

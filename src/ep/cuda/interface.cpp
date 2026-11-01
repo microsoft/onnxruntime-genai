@@ -1288,7 +1288,15 @@ uint32_t GetInterfaceVersion() {
   return Generators::kDeviceInterfaceVersion;
 }
 
+void ShutdownInterface() {
+  Generators::g_cuda_device.reset();
+}
+
 Generators::DeviceInterface* GetInterface(GenaiInterface* p_genai, const char* deviceType, const OrtApi* ort_api) {
+  if (!deviceType) {
+    Generators::g_cuda_device.reset();
+    return nullptr;
+  }
   Generators::gp_genai = p_genai;
   // Ensure Ort::api is initialized in this shared library (onnxruntime-genai-cuda add-on) immediately. Delaying the
   // initialization to CudaInterfaceImplBase::InitOrt would be inadequate, as GetMemoryInfo runs before InitOrt.

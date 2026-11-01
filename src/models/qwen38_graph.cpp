@@ -2915,18 +2915,11 @@ std::unique_ptr<Config> PreflightQwen38GraphModelConfig(std::unique_ptr<Config> 
 
   const std::filesystem::path root =
       std::filesystem::weakly_canonical(std::filesystem::path{config->config_path.string()});
-  if (!q.plane_library.empty()) {
-    const std::filesystem::path plane_path = std::filesystem::weakly_canonical(root / q.plane_library);
-    const std::string root_prefix = (root / "").string();
-    if (plane_path.string().compare(0, root_prefix.size(), root_prefix) != 0)
-      throw std::runtime_error("model.qwen38_graph.plane_library must resolve inside the model folder: " +
-                               plane_path.string());
-    std::error_code ec;
-    if (std::filesystem::exists(ResolveWindowsSharedLibraryPath(plane_path), ec) ||
-        std::filesystem::exists(plane_path, ec)) {
-      Qwen38Plane plane{plane_path};
-      (void)RequireQwen38PackageSupportedByPlane(plane, *config, root);
-    }
+  const std::filesystem::path plane_path =
+      ResolveQwen38PlaneLibraryPath(root, q.plane_library, kQwen38WindowsHost);
+  if (!plane_path.empty()) {
+    Qwen38Plane plane{plane_path};
+    (void)RequireQwen38PackageSupportedByPlane(plane, *config, root);
   }
   return config;
 }
