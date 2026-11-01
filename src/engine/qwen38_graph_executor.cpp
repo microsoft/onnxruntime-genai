@@ -61,6 +61,7 @@ void Qwen38GraphSession::Acknowledge(const TokenCommitAck& ack) {
 std::vector<BackendPlannedRow> Qwen38GraphSession::Plan(std::span<const Qwen38StepRequest> requests,
                                                         std::span<const size_t> request_rows) {
   if (requests.size() != request_rows.size()) throw std::logic_error("Backend plan row coverage differs from requests.");
+  const bool resumes_paused_decoders = ResumesPausedDecoders(requests);
   std::vector<BackendPlannedRow> plan;
   plan.reserve(requests.size());
   for (size_t i = 0; i < requests.size(); ++i) {
@@ -87,6 +88,8 @@ std::vector<BackendPlannedRow> Qwen38GraphSession::Plan(std::span<const Qwen38St
           request.turn_id == inflight_turns_[j] &&
           slot_states_.at(request.slot).epoch == inflight_epochs_[j]) collected_cycle = true;
     }
+    // StepBatch() enqueues and collects a cycle for each paused decoder that wants more tokens.
+    if (resumes_paused_decoders && slot_states_.at(request.slot).want_more) collected_cycle = true;
     // A resident decoder paused behind prompt ingestion did not submit work in this step.
     if (!needs_prefill && !collected_cycle) continue;
     const size_t remaining = needs_prefill ? request.tokens.size() - prefilled : 0;
@@ -445,6 +448,41 @@ void Qwen38GraphSession::ApplyCommitted(const PendingStep& step, const RequestSt
   }
 }
 
+bool Qwen38GraphSession::ResumesPausedDecoders(std::span<const Qwen38StepRequest> requests) const {
+  if (MaxBatchSize() == 1 || batch_inflight_) return false;
+  bool wants_more = false;
+  for (const auto& request : requests) {
+    const SlotState& state = slot_states_.at(request.slot);
+    if (request.owner != state.owner || request.turn_id != state.turn_id || !state.decoding) return false;
+    wants_more = wants_more || state.want_more;
+  }
+  return wants_more;
+}
+
+void Qwen38GraphSession::EnqueueDecodeCycle(std::span<const Qwen38StepRequest> requests) {
+  std::vector<size_t> active_slots;
+  std::vector<const void*> active_owners;
+  std::vector<uint64_t> active_turns;
+  std::vector<uint64_t> active_epochs;
+  for (const auto& req : requests) {
+    const SlotState& st = slot_states_.at(req.slot);
+    if (st.decoding && st.want_more) {
+      active_slots.push_back(req.slot);
+      active_owners.push_back(st.owner);
+      active_turns.push_back(st.turn_id);
+      active_epochs.push_back(st.epoch);
+    }
+  }
+  if (active_slots.empty()) return;
+  device_->EnqueueBatchDecode(active_slots);
+  status_checked_ = false;
+  batch_inflight_ = true;
+  inflight_slots_ = std::move(active_slots);
+  inflight_owners_ = std::move(active_owners);
+  inflight_turns_ = std::move(active_turns);
+  inflight_epochs_ = std::move(active_epochs);
+}
+
 void Qwen38GraphSession::StepBatch(std::span<const Qwen38StepRequest> requests, std::span<Qwen38StepResult> results) {
   if (results.size() < requests.size()) {
     throw std::invalid_argument("Qwen38GraphSession::StepBatch requires a result slot per request.");
@@ -467,6 +505,12 @@ void Qwen38GraphSession::StepBatch(std::span<const Qwen38StepRequest> requests, 
       throw std::logic_error("A request with no remaining budget was scheduled for decoding.");
     }
     slot_states_.at(req.slot).pending = {};
+  }
+
+  // The prompt the decoders were paused behind is gone (canceled): nothing would resume them, so the cycle that Plan()
+  // announced is enqueued now and collected by phase 1 below.
+  if (ResumesPausedDecoders(requests)) {
+    EnqueueDecodeCycle(requests);
   }
 
   // Phase 1: if a batched decode cycle is in flight on the GPU, wait for it and commit its tokens.
@@ -596,28 +640,7 @@ void Qwen38GraphSession::StepBatch(std::span<const Qwen38StepRequest> requests, 
   }
 
   if (all_decoding) {
-    std::vector<size_t> active_slots;
-    std::vector<const void*> active_owners;
-    std::vector<uint64_t> active_turns;
-    std::vector<uint64_t> active_epochs;
-    for (const auto& req : requests) {
-      const SlotState& st = slot_states_.at(req.slot);
-      if (st.decoding && st.want_more) {
-        active_slots.push_back(req.slot);
-        active_owners.push_back(st.owner);
-        active_turns.push_back(st.turn_id);
-        active_epochs.push_back(st.epoch);
-      }
-    }
-    if (!active_slots.empty()) {
-      device_->EnqueueBatchDecode(active_slots);
-      status_checked_ = false;
-      batch_inflight_ = true;
-      inflight_slots_ = std::move(active_slots);
-      inflight_owners_ = std::move(active_owners);
-      inflight_turns_ = std::move(active_turns);
-      inflight_epochs_ = std::move(active_epochs);
-    }
+    EnqueueDecodeCycle(requests);
   }
 }
 

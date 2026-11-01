@@ -2094,6 +2094,91 @@ TEST_F(Qwen38GraphEngineTest, MultiSlotNoBatchedCycleIsEnqueuedWhileASlotIsPartW
   }
 }
 
+// The slot that was still ingesting its prompt is canceled after the first step, when the other slot is decoding but has no
+// cycle in flight (the device defers it while a prompt is part way). The survivor must go on without the canceled slot: the
+// step has no prompt left to wait for, so it resumes the survivor itself instead of ending with an empty plan.
+TEST_F(Qwen38GraphEngineTest, MultiSlotCancelingTheOnlySlotStillIngestingItsPromptLetsTheOtherSlotGoOn) {
+  for (const size_t long_slot : {size_t{0}, size_t{1}}) {
+    SCOPED_TRACE("long prompt in slot " + std::to_string(long_slot));
+    device_ = std::make_shared<ScriptedQwen38Device>(/*capacity=*/68, /*mtp=*/true, /*max_batch_size=*/2);
+    device_->dense_prefill = true;
+    device_->preferred_chunk = 8;
+    auto engine = MakeEngine();
+
+    const auto long_prompt = Prompt(20, 12);
+    const auto short_prompt = Prompt(3, 30);
+    std::shared_ptr<Request> requests[2];
+    uint64_t turns[2]{};
+    for (size_t slot = 0; slot < 2; ++slot) {
+      const auto& prompt = slot == long_slot ? long_prompt : short_prompt;
+      requests[slot] = engine->CreateRequest();
+      auto options = Limit(4);
+      options.request = requests[slot];
+      turns[slot] = requests[slot]->BeginTurn(prompt, options);
+    }
+
+    std::array<EngineEvent, 16> buffer;
+    std::map<const Request*, std::vector<int32_t>> emitted;
+    const auto drain = [&](size_t count) {
+      for (size_t i = 0; i < count; ++i) {
+        ASSERT_EQ(buffer[i].flags & EngineEventFlagFailed, 0u) << "the Engine failed";
+        if (buffer[i].flags & EngineEventFlagToken) emitted[buffer[i].request.get()].push_back(buffer[i].token);
+      }
+    };
+    drain(engine->Run(buffer));
+    ASSERT_TRUE(engine->CancelRequest(requests[long_slot], turns[long_slot]));
+    for (size_t runs = 0; engine->HasPendingRequests(); ++runs) {
+      ASSERT_LT(runs, 1000u) << "the Engine did not finish";
+      drain(engine->Run(buffer));
+    }
+    EXPECT_EQ(emitted[requests[1 - long_slot].get()], Expected(3, 4));
+    EXPECT_TRUE(emitted[requests[long_slot].get()].empty());
+    EXPECT_EQ(device_->CallCount("prefill_slot:" + std::to_string(long_slot) + ":8"), 1u);
+    EXPECT_EQ(device_->CallCount("prefill_slot:" + std::to_string(long_slot) + ":4"), 0u) << "the canceled prompt went on";
+    EXPECT_EQ(device_->CallCount("enqueue_batch:2"), 0u) << "the canceled slot was part of a cycle";
+    EXPECT_GE(device_->CallCount("enqueue_batch:1"), 1u);
+  }
+}
+
+// The same cancellation when the survivor has been decoding all along: a long prompt arrives, the device defers the
+// survivor's next cycle until the prompt is in, and the prompt is canceled part way through.
+TEST_F(Qwen38GraphEngineTest, MultiSlotCancelingALongPromptThatArrivedWhileASlotWasDecodingLetsThatSlotGoOn) {
+  device_ = std::make_shared<ScriptedQwen38Device>(/*capacity=*/68, /*mtp=*/true, /*max_batch_size=*/2);
+  device_->dense_prefill = true;
+  device_->preferred_chunk = 8;
+  auto engine = MakeEngine();
+
+  auto decoder = Begin(*engine, Prompt(3, 30), /*max_generated_tokens=*/30);
+  std::array<EngineEvent, 16> buffer;
+  std::map<const Request*, std::vector<int32_t>> emitted;
+  const auto drain = [&](size_t count) {
+    for (size_t i = 0; i < count; ++i) {
+      ASSERT_EQ(buffer[i].flags & EngineEventFlagFailed, 0u) << "the Engine failed";
+      if (buffer[i].flags & EngineEventFlagToken) emitted[buffer[i].request.get()].push_back(buffer[i].token);
+    }
+  };
+  drain(engine->Run(buffer));  // the prompt, its first token and the first cycle
+  drain(engine->Run(buffer));  // that cycle's tokens and the next cycle
+  ASSERT_TRUE(engine->HasPendingRequests());
+
+  auto newcomer = engine->CreateRequest();
+  auto options = Limit(4);
+  options.request = newcomer;
+  const uint64_t newcomer_turn = newcomer->BeginTurn(Prompt(20, 12), options);
+  drain(engine->Run(buffer));  // collects the cycle, defers the next one and ingests the first chunk of the newcomer
+  ASSERT_EQ(device_->CallCount("prefill_slot:1:8"), 1u);
+  ASSERT_EQ(device_->CallCount("advance_batch:1:deferred"), 1u);
+  ASSERT_TRUE(engine->CancelRequest(newcomer, newcomer_turn));
+
+  for (size_t runs = 0; engine->HasPendingRequests(); ++runs) {
+    ASSERT_LT(runs, 1000u) << "the Engine did not finish";
+    drain(engine->Run(buffer));
+  }
+  EXPECT_EQ(emitted[decoder.get()], Expected(3, 30));
+  EXPECT_TRUE(emitted[newcomer.get()].empty());
+  EXPECT_EQ(device_->CallCount("prefill_slot:1:4"), 0u) << "the canceled prompt went on";
+}
+
 // The prompt length of a slot is the slot's own state of the device. Slot 0 announces 20 tokens and ingests its first
 // chunk, slot 1 then announces 5 tokens, and slot 0's later chunks must still be told 20 (a process-wide variable would
 // have been overwritten by slot 1). The executor must not touch the process environment at all.

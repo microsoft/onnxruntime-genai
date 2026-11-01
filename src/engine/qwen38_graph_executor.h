@@ -122,6 +122,11 @@ class Qwen38GraphSession : public FixedSlotSession {
   // Splits a cycle record into the tokens the Engine may commit and the statistics to apply once it has.
   PendingStep ProcessCycleRecord(const Qwen38CycleRecord& record, size_t limit, Qwen38StepResult& result, bool& ended);
   void ApplyCommitted(const PendingStep& step, const RequestStepResult& result);
+  // True when every request of the step is a decoder, none has a cycle in flight, and one of them wants more tokens: the
+  // decoders were paused behind a prompt that is gone (its request was canceled). Plan() and StepBatch() agree on it.
+  bool ResumesPausedDecoders(std::span<const Qwen38StepRequest> requests) const;
+  // Enqueues one batched cycle for every decoder of `requests` that wants more tokens, and records it as in flight.
+  void EnqueueDecodeCycle(std::span<const Qwen38StepRequest> requests);
   void ClearSlot(SlotState& slot) noexcept;
   void RethrowDeferredError();
   void ReportDeferredError() const;
