@@ -235,12 +235,13 @@ size_t ResolveQwen38MaxBatchSize(const Config& config) {
     return checked(config.search.batch_size, "search.batch_size");
   }
   // The test hook is read as strictly as the settings above: a value that is not an integer in range is refused, not mapped
-  // to one slot (an empty value counts as unset).
-  if (const char* env = std::getenv("ORT_QWEN38_MAX_BATCH_SIZE"); env != nullptr && *env != '\0') {
+  // to one slot (an empty value counts as unset). GetEnv reads the process environment: on Windows getenv works on a copy
+  // that SetEnvironmentVariable does not update, so a hook set after startup would not be seen.
+  if (const std::string env = GetEnv("ORT_QWEN38_MAX_BATCH_SIZE"); !env.empty()) {
     char* end = nullptr;
     errno = 0;
-    const long long parsed = std::strtoll(env, &end, 10);
-    if (end == env || *end != '\0' || errno == ERANGE) {
+    const long long parsed = std::strtoll(env.c_str(), &end, 10);
+    if (end == env.c_str() || *end != '\0' || errno == ERANGE) {
       throw std::out_of_range(std::string("ORT_QWEN38_MAX_BATCH_SIZE must be an integer in [1, ") + std::to_string(kMaxSlots) +
                               "] for qwen38_flash_graph, got \"" + env + "\"");
     }
