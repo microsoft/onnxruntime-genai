@@ -14,6 +14,7 @@ from unittest import TestCase, main, mock, skipIf
 import numpy as np
 import onnx
 import torch
+from _builder_test_utils import ort_runs_tensor_scatter
 from onnx import TensorProto, helper
 from transformers import GenerationConfig
 
@@ -23,29 +24,7 @@ except ImportError:
     ort = None
 
 
-def _ort_runs_tensor_scatter_on_cpu():
-    """Return whether the installed ONNX Runtime has a CPU kernel for TensorScatter (opset 24)."""
-    if ort is None:
-        return False
-    graph = helper.make_graph(
-        [helper.make_node("TensorScatter", ["past", "updates", "write_indices"], ["present"], axis=1)],
-        "tensor_scatter_probe",
-        [
-            helper.make_tensor_value_info("past", TensorProto.FLOAT, [1, 4, 2]),
-            helper.make_tensor_value_info("updates", TensorProto.FLOAT, [1, 1, 2]),
-            helper.make_tensor_value_info("write_indices", TensorProto.INT64, [1]),
-        ],
-        [helper.make_tensor_value_info("present", TensorProto.FLOAT, [1, 4, 2])],
-    )
-    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 24)], ir_version=10)
-    try:
-        ort.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"])
-    except Exception:
-        return False
-    return True
-
-
-ORT_RUNS_TENSOR_SCATTER = _ort_runs_tensor_scatter_on_cpu()
+ORT_RUNS_TENSOR_SCATTER = ort is not None and ort_runs_tensor_scatter()
 requires_cpu_tensor_scatter = skipIf(
     not ORT_RUNS_TENSOR_SCATTER,
     "installed onnxruntime has no CPU TensorScatter (opset 24) kernel",

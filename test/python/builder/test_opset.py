@@ -10,7 +10,7 @@ import onnx
 import onnx_ir as ir
 import onnxruntime as ort
 import pytest
-from _builder_test_utils import load_builder_module
+from _builder_test_utils import load_builder_module, ort_runs_tensor_scatter
 from onnx import TensorProto, helper, numpy_helper
 from transformers import LlamaConfig
 
@@ -82,6 +82,7 @@ def test_graph_attrs_are_per_instance(tmp_path):
     assert second_drafter.graph_attrs["ai.onnx"] == 21
 
 
+@pytest.mark.skipif(not ort_runs_tensor_scatter(), reason="onnxruntime has no CPU TensorScatter (opset 24) kernel")
 def test_tensor_scatter_does_not_change_imports(tmp_path):
     builder = _builder(tmp_path)
     builder.graph.opset_imports[""] = TENSOR_SCATTER_OPSET

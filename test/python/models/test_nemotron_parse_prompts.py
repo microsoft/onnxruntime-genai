@@ -1,6 +1,7 @@
 import json
 import os
 import runpy
+import sys
 from argparse import Namespace
 from pathlib import Path
 from unittest.mock import Mock
@@ -30,6 +31,15 @@ def _save_graph(path, nodes, inputs, outputs, initializers=()):
     onnx.save(model, path)
 
 
+def _ort_runs_tensor_scatter():
+    builder_tests_dir = str(Path(__file__).resolve().parents[1] / "builder")
+    if builder_tests_dir not in sys.path:
+        sys.path.insert(0, builder_tests_dir)
+    from _builder_test_utils import ort_runs_tensor_scatter  # noqa: PLC0415
+
+    return ort_runs_tensor_scatter()
+
+
 @pytest.fixture
 def model_factory(tmp_path):
     def create(
@@ -46,6 +56,9 @@ def model_factory(tmp_path):
         add_eos_token=True,
         profile_keys=("min", "opt", "max"),
     ):
+        # The DirectML CI job pins an onnxruntime without a CPU kernel for the decoder's TensorScatter (opset 24).
+        if provider == "cpu" and not _ort_runs_tensor_scatter():
+            pytest.skip("this onnxruntime has no CPU TensorScatter (opset 24) kernel")
         cache_type = helper.np_dtype_to_tensor_dtype(np.dtype(cache_dtype))
         model_dir = tmp_path / f"model_{prefill_length}_{fixed_length}"
         model_dir.mkdir()
