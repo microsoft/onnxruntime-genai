@@ -5,13 +5,15 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <cstdio>
 #include <fstream>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 #include <type_traits>
 
+#include "../logging.h"
 #include "env_utils.h"
 #include "qwen38_numa.h"
 
@@ -141,8 +143,8 @@ Qwen38Plane::Qwen38Plane(const std::filesystem::path& path) {
 }
 
 Qwen38Plane::~Qwen38Plane() {
+  // detach() stops and joins the threads the module started. The module stays loaded: see the comment of the class.
   if (attached_) detach();
-  if (handle_) FreeLibrary(static_cast<HMODULE>(handle_));
 }
 
 #else
@@ -193,8 +195,8 @@ Qwen38Plane::Qwen38Plane(const std::filesystem::path& path) {
 }
 
 Qwen38Plane::~Qwen38Plane() {
+  // detach() stops and joins the threads the module started. The module stays loaded: see the comment of the class.
   if (attached_) detach();
-  if (handle_) dlclose(handle_);
 }
 
 #endif
@@ -768,11 +770,15 @@ void Qwen38FileMapping::PrepareNumaRange(size_t offset, size_t bytes) {
   if (offset > length_ || bytes > length_ - offset)
     throw std::runtime_error("qwen38_graph: NUMA range exceeds weight file");
   const bool interleave = qwen38_numa::Enabled("ORT_QMOE_NUMA_INTERLEAVE", true);
+  // ORT_QMOE_NUMA_DIAGNOSTICS=1 also reports a placement that went well. Reports go through the GenAI logger, so they
+  // appear only when the host enabled logging and follow the destination it chose (SetLogCallback or a log file).
   const bool diagnostics = qwen38_numa::Enabled("ORT_QMOE_NUMA_DIAGNOSTICS", false);
   if ((!interleave && !diagnostics) || bytes == 0 || registered_) return;
   const auto report = qwen38_numa::PrepareFileRange(data() + offset, bytes, offset, interleave,
                                                     qwen38_numa::Enabled("ORT_QMOE_NUMA_MIGRATE", true));
-  if (diagnostics || report.policy_error || report.query_error || report.move_failures || report.restore_error) {
+  const bool failed = report.policy_error || report.query_error || report.move_failures || report.restore_error;
+  const bool warn = failed && g_log.warning;
+  if (g_log.enabled && (diagnostics || warn)) {
     std::ostringstream line;
     line << "[QMoE NUMA] file=" << path_.filename().string() << " offset=" << offset << " bytes=" << bytes
          << " policy_applied=" << report.policy_applied << " pages=" << report.pages;
@@ -783,10 +789,11 @@ void Qwen38FileMapping::PrepareNumaRange(size_t offset, size_t bytes) {
          << " unknown=" << report.unknown_pages << " policy_errno=" << report.policy_error
          << " query_errno=" << report.query_error << " move_errno=" << report.move_error
          << " restore_errno=" << report.restore_error;
-    std::fprintf(stderr, "%s\n", line.str().c_str());
+    Log(warn ? "warning" : "info", line.str());
   }
   if (report.restore_error)
-    throw std::runtime_error("qwen38_graph: failed to restore the loader thread NUMA policy");
+    throw std::runtime_error("qwen38_graph: failed to restore the loader thread NUMA policy (errno " +
+                             std::to_string(report.restore_error) + ")");
 }
 
 Qwen38FileMapping::~Qwen38FileMapping() {

@@ -24,6 +24,14 @@ namespace Generators {
 std::filesystem::path ResolveWindowsSharedLibraryPath(const std::filesystem::path& path);
 
 // The loaded plane library: one function pointer per entry of QWEN38_PLANE_FUNCTIONS, named like the entry.
+//
+// The destructor detaches from the module, which stops and joins the threads the module started and releases the staged
+// tables once the last loader is gone, but it does not unload the module: a plane library that was loaded and attached stays
+// mapped until the process exits, and a loader of the same file that follows (the next model, or the same model loaded again)
+// shares that copy. Unloading a library that has launched CUDA kernels and loading it again made the first kernel launch of the
+// later copy crash inside the CUDA runtime (a SIGSEGV in libcudart 13.0, in its lazy loading of the module of the kernel), so the
+// host never takes that path. A library that is rejected while it loads (a stale ABI, a missing symbol) has launched nothing and
+// is released.
 struct Qwen38Plane {
   Qwen38Plane() = default;
   // Loads `path`, resolves every symbol and checks the ABI version and structure layout.
@@ -48,7 +56,7 @@ struct Qwen38Plane {
   void (*release_ple_workspace)(void){};
 
  private:
-  void* handle_{};
+  void* handle_{};   // the module; never released once the library is attached (see above)
   bool attached_{};  // attach() has been called and detach() has not
 };
 

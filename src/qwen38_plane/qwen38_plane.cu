@@ -48,6 +48,7 @@ struct StagedTestHooks {
   long long staged_launches = 0;
   long long global_cleanups = 0;
   long long live_pinned = 0;
+  long long unfenced_drains = 0;
 };
 static StagedTestHooks g_test_hooks;
 
@@ -64,12 +65,14 @@ static inline void hook_gather() { ++g_test_hooks.gather_rows; }
 static inline void hook_launch() { ++g_test_hooks.staged_launches; }
 static inline void hook_cleanup() { ++g_test_hooks.global_cleanups; }
 static inline void hook_pinned(int delta) { g_test_hooks.live_pinned += delta; }
+static inline void hook_unfenced_drain() { ++g_test_hooks.unfenced_drains; }
 #else
 static inline cudaError_t hook_fault(int) { return cudaSuccess; }
 static inline void hook_gather() {}
 static inline void hook_launch() {}
 static inline void hook_cleanup() {}
 static inline void hook_pinned(int) {}
+static inline void hook_unfenced_drain() {}
 #endif
 
 template <typename T>
@@ -140,6 +143,49 @@ static inline cudaError_t staged_device_sync() {
   return err;
 }
 
+// Whether `stream` is being captured into a CUDA graph. A failed query counts as not capturing: whatever the call does next on
+// the stream then reports the same failure.
+static inline bool staged_stream_is_capturing(cudaStream_t stream) {
+  cudaStreamCaptureStatus status = cudaStreamCaptureStatusNone;
+  if (cudaStreamIsCapturing(stream, &status) != cudaSuccess) {
+    cudaGetLastError();
+    return false;
+  }
+  return status != cudaStreamCaptureStatusNone;
+}
+
+// Creates the completion event of a staged buffer once. A call that cannot get one fails before it touches anything: without
+// the event a call on another stream would not know to wait for the kernel that reads the buffer.
+static inline cudaError_t staged_ensure_done_event(cudaEvent_t* event) {
+  if (*event != nullptr) return cudaSuccess;
+  cudaError_t err = hook_fault(QWEN38_PLANE_FAULT_EVENT_CREATE);
+  if (err == cudaSuccess) err = cudaEventCreateWithFlags(event, cudaEventDisableTiming);
+  if (err != cudaSuccess) {
+    cudaGetLastError();
+    *event = nullptr;
+  }
+  return err;
+}
+
+// Records the completion event after the kernel that reads a staged buffer was launched on `stream`, and marks the buffer in
+// flight. When the event cannot be recorded the kernel cannot be waited for through it later, so the stream is drained here
+// instead, which leaves nothing in flight, and the error is returned: the outputs are complete but the call has failed.
+static inline cudaError_t staged_record_done(cudaEvent_t event, cudaStream_t stream, cudaStream_t* last_stream,
+                                             bool* in_flight) {
+  cudaError_t err = hook_fault(QWEN38_PLANE_FAULT_EVENT_RECORD);
+  if (err == cudaSuccess) err = cudaEventRecord(event, stream);
+  if (err == cudaSuccess) {
+    *last_stream = stream;
+    *in_flight = true;
+    return cudaSuccess;
+  }
+  cudaGetLastError();
+  *in_flight = false;
+  hook_unfenced_drain();
+  static_cast<void>(staged_stream_sync(stream));
+  return err;
+}
+
 struct StagedPleWorkspace {
   PleParams params{};
   i64* scalars = nullptr;                  // pinned [64]: tok/ctl words + ctx_in
@@ -167,9 +213,15 @@ struct StagedPleWorkspace {
   i64 ngram_cache_keys[kCacheSlots][3]{};
   unsigned char ngram_cache_valid[kCacheSlots]{};
 
-  void reset_cache() {
+  // The words of the ten-word `ctl` snapshot that rows 1..3 of a fold read from `scalars` instead of the device. Whatever else
+  // writes `scalars` has to drop the snapshot first, or the next fold row would be prepared from words that are not its own.
+  void invalidate_fold_snapshot() {
     cached_state_ptr = nullptr;
     cached_ctx_out_ptr = nullptr;
+  }
+
+  void reset_cache() {
+    invalidate_fold_snapshot();
     cached_c0 = 0;
     cached_c1 = 0;
     memset(ngram_cache_valid, 0, sizeof(ngram_cache_valid));
@@ -388,7 +440,8 @@ static inline void host_gather_ple_row(StagedPleWorkspace& ws, i64 tok, i64 s_c0
 
 // Finds the staged workspace of the table `P` (a registered host key or the device copy of its parameters). Returns nullptr
 // for a table that is not staged; *out_unregistered_staged is set when `P` is staged but was never registered, and *out_error
-// when the device parameters could not be read back, in which case nothing may be launched for `P`.
+// when the device parameters could not be read back (or, on a capturing stream, could not be told from a resident table's),
+// in which case nothing may be launched for `P`.
 static StagedPleWorkspace* resolve_staged_ple_workspace(const void* P, cudaStream_t stream, bool allow_sync,
                                                         bool* out_unregistered_staged, cudaError_t* out_error) {
   *out_unregistered_staged = false;
@@ -418,12 +471,12 @@ static StagedPleWorkspace* resolve_staged_ple_workspace(const void* P, cudaStrea
       g_dev_to_host_ple.erase(dev_it);
     }
   }
-  if (g_host_ple_workspaces.empty()) {
-    cudaStreamCaptureStatus capture_status = cudaStreamCaptureStatusNone;
-    if (cudaStreamIsCapturing(stream, &capture_status) == cudaSuccess &&
-        capture_status != cudaStreamCaptureStatusNone) {
-      return nullptr;
-    }
+  // Telling a staged table from a resident one takes a read back of the descriptor, which a capturing stream cannot make. A
+  // descriptor that has not been told apart is an error there, not a resident table: a staged table taken for one would reach
+  // kernels that dereference host-only shard pointers on every replay. An eager call has to use a descriptor first.
+  if (staged_stream_is_capturing(stream)) {
+    *out_error = cudaErrorStreamCaptureUnsupported;
+    return nullptr;
   }
   PleParams dev_params{};
   cudaError_t err = staged_copy_to_host(&dev_params, P, sizeof(PleParams), cudaMemcpyDefault, stream);
@@ -871,10 +924,10 @@ __global__ void k_quantize_kv(const __nv_bfloat16* src, uint8_t* dst, const floa
   const float q = s > 0.0f ? (x / s) : 0.0f;
   uint8_t out_byte = 0;
   if (mode == 1) {
-    int qi = __float2int_rn(q);
-    if (qi < -127) qi = -127;
-    if (qi > 127) qi = 127;
-    out_byte = static_cast<uint8_t>(static_cast<int8_t>(qi));
+    // Clamped in floating point before the conversion, so that it never sees a value outside the INT8 range (an overflow to
+    // infinity included) whatever it does with one; a NaN is 0.
+    const float qc = q != q ? 0.0f : fminf(fmaxf(q, -127.0f), 127.0f);
+    out_byte = static_cast<uint8_t>(static_cast<int8_t>(__float2int_rn(qc)));
   } else {
     float qc = fminf(fmaxf(q, -448.0f), 448.0f);
     out_byte = static_cast<uint8_t>(__nv_cvt_float_to_fp8(qc, __NV_SATFINITE, __NV_E4M3));
@@ -886,10 +939,16 @@ __global__ void k_embed_rows(const __nv_bfloat16* table, const i64* ids, __nv_bf
   const int r = blockIdx.x;
   if (r >= rows) return;
   const i64 tok = ids[r];
-  const uint4* src = reinterpret_cast<const uint4*>(table + (size_t)tok * width);
-  uint4* dst = reinterpret_cast<uint4*>(out + (size_t)r * width);
-  const int n8 = width / 8;
-  for (int i = threadIdx.x; i < n8; i += blockDim.x) dst[i] = src[i];
+  const __nv_bfloat16* src = table + (size_t)tok * width;
+  __nv_bfloat16* dst = out + (size_t)r * width;
+  // A row is 2 * width bytes, so the rows are 16-byte aligned for the vector copy only when width is a multiple of 8 (and the
+  // buffers are aligned). Otherwise, and for the elements past the last whole group of 8, the row is copied element by element.
+  const bool aligned = ((reinterpret_cast<uintptr_t>(src) | reinterpret_cast<uintptr_t>(dst)) & 15u) == 0;
+  const int n8 = aligned ? width / 8 : 0;
+  const uint4* src4 = reinterpret_cast<const uint4*>(src);
+  uint4* dst4 = reinterpret_cast<uint4*>(dst);
+  for (int i = threadIdx.x; i < n8; i += blockDim.x) dst4[i] = src4[i];
+  for (int i = n8 * 8 + threadIdx.x; i < width; i += blockDim.x) dst[i] = src[i];
 }
 
 #ifdef _WIN32
@@ -1076,7 +1135,13 @@ QWEN38_PLANE_EXPORT int qwen38_plane_prep(void* s, const void* P, const void* to
       return (int)cudaErrorInvalidValue;
     }
     if (ws != nullptr) {
+      if (staged_stream_is_capturing(stream)) {
+        return (int)cudaErrorStreamCaptureUnsupported;
+      }
       err = ensure_staged_buffers(*ws, 0, 0);
+      if (err == cudaSuccess) {
+        err = staged_ensure_done_event(&ws->prep_done_event);
+      }
       if (err != cudaSuccess) {
         return (int)err;
       }
@@ -1120,8 +1185,7 @@ QWEN38_PLANE_EXPORT int qwen38_plane_prep(void* s, const void* P, const void* to
         }
         if (err != cudaSuccess) {
           // The snapshot may be half written: rows 1..3 must not reuse it.
-          ws->cached_state_ptr = nullptr;
-          ws->cached_ctx_out_ptr = nullptr;
+          ws->invalidate_fold_snapshot();
           return (int)err;
         }
         ws->prep_in_flight = false;
@@ -1134,8 +1198,7 @@ QWEN38_PLANE_EXPORT int qwen38_plane_prep(void* s, const void* P, const void* to
         ws->cached_c0 = s_c1;
         ws->cached_c1 = tok;
       } else {
-        ws->cached_state_ptr = nullptr;
-        ws->cached_ctx_out_ptr = nullptr;
+        ws->invalidate_fold_snapshot();
         err = staged_copy_to_host(&ws->scalars[0], tok_ptr, sizeof(i64), cudaMemcpyDeviceToHost, stream);
         if (err == cudaSuccess) {
           err = staged_copy_to_host(&ws->scalars[1], pos_ptr, sizeof(i64), cudaMemcpyDeviceToHost, stream);
@@ -1159,12 +1222,6 @@ QWEN38_PLANE_EXPORT int qwen38_plane_prep(void* s, const void* P, const void* to
       unsigned char* slot_host = ws->prep_ring + slot_offset;
       const unsigned char* slot_dev = ws->prep_ring_dev + slot_offset;
       host_gather_ple_row(*ws, tok, s_c0, s_c1, slot_host);
-      if (ws->prep_done_event == nullptr) {
-        if (cudaEventCreateWithFlags(&ws->prep_done_event, cudaEventDisableTiming) != cudaSuccess) {
-          cudaGetLastError();
-          ws->prep_done_event = nullptr;
-        }
-      }
       hook_launch();
       BeginLaunch();
       k_prep_staged<<<1, 1024, 0, stream>>>(ws->params.capacity, ws->params.n_heads, ws->params.head_dim,
@@ -1172,15 +1229,10 @@ QWEN38_PLANE_EXPORT int qwen38_plane_prep(void* s, const void* P, const void* to
                                             (i64*)input_ids, (i64*)position_ids, (int*)committed, (i64*)past_pos,
                                             (__nv_bfloat16*)ple_out, (i64*)state);
       const int launch_err = LaunchStatus();
-      if (launch_err == 0 && ws->prep_done_event != nullptr) {
-        if (cudaEventRecord(ws->prep_done_event, stream) == cudaSuccess) {
-          ws->last_prep_stream = stream;
-          ws->prep_in_flight = true;
-        } else {
-          cudaGetLastError();
-        }
+      if (launch_err != 0) {
+        return launch_err;
       }
-      return launch_err;
+      return (int)staged_record_done(ws->prep_done_event, stream, &ws->last_prep_stream, &ws->prep_in_flight);
     }
   }
   BeginLaunch();
@@ -1249,8 +1301,14 @@ QWEN38_PLANE_EXPORT int qwen38_plane_ple_rows(void* s, const void* P, const void
       return (int)cudaErrorInvalidValue;
     }
     if (ws != nullptr) {
+      if (staged_stream_is_capturing(stream)) {
+        return (int)cudaErrorStreamCaptureUnsupported;
+      }
       const size_t total = (size_t)ws->params.n_heads * (size_t)ws->params.head_dim;
       err = ensure_staged_buffers(*ws, (size_t)n, total);
+      if (err == cudaSuccess) {
+        err = staged_ensure_done_event(&ws->prefill_done_event);
+      }
       if (err != cudaSuccess) {
         return (int)err;
       }
@@ -1262,6 +1320,8 @@ QWEN38_PLANE_EXPORT int qwen38_plane_ple_rows(void* s, const void* P, const void
         }
         ws->prefill_in_flight = false;
       }
+      // The context words land in scalars[2..3], which the snapshot of a fold in progress keeps its draft token in.
+      ws->invalidate_fold_snapshot();
       err = staged_copy_to_host(ws->prefill_tokens, tokens, (size_t)n * sizeof(i64), cudaMemcpyDeviceToHost, stream);
       if (err == cudaSuccess) {
         err = staged_copy_to_host(&ws->scalars[2], ctx_in, 2 * sizeof(i64), cudaMemcpyDeviceToHost, stream);
@@ -1284,27 +1344,16 @@ QWEN38_PLANE_EXPORT int qwen38_plane_ple_rows(void* s, const void* P, const void
       }
       const i64 last_tok = h_toks[n - 1];
       const i64 last_c1 = n >= 2 ? h_toks[n - 2] : ctx1;
-      if (ws->prefill_done_event == nullptr) {
-        if (cudaEventCreateWithFlags(&ws->prefill_done_event, cudaEventDisableTiming) != cudaSuccess) {
-          cudaGetLastError();
-          ws->prefill_done_event = nullptr;
-        }
-      }
       hook_launch();
       BeginLaunch();
       k_ple_rows_staged<<<n, 1024, 0, stream>>>(ws->params.n_heads, ws->params.head_dim, ws->params.scale,
                                                 ws->prefill_fp8_dev, n, last_c1, last_tok, (i64*)ctx_out,
                                                 (__nv_bfloat16*)ple_out);
       const int launch_err = LaunchStatus();
-      if (launch_err == 0 && ws->prefill_done_event != nullptr) {
-        if (cudaEventRecord(ws->prefill_done_event, stream) == cudaSuccess) {
-          ws->last_prefill_stream = stream;
-          ws->prefill_in_flight = true;
-        } else {
-          cudaGetLastError();
-        }
+      if (launch_err != 0) {
+        return launch_err;
       }
-      return launch_err;
+      return (int)staged_record_done(ws->prefill_done_event, stream, &ws->last_prefill_stream, &ws->prefill_in_flight);
     }
   }
   BeginLaunch();
@@ -1418,7 +1467,7 @@ QWEN38_PLANE_EXPORT int qwen38_plane_stream_sync(void* s) {
 #ifdef QWEN38_PLANE_TEST_HOOKS
 QWEN38_PLANE_EXPORT int qwen38_plane_test_inject_staged_fault(int site, int skip, int error) {
   const bool disarm = site == QWEN38_PLANE_FAULT_NONE;
-  if (site < QWEN38_PLANE_FAULT_NONE || site > QWEN38_PLANE_FAULT_SYNC || (!disarm && error == 0)) {
+  if (site < QWEN38_PLANE_FAULT_NONE || site > QWEN38_PLANE_FAULT_EVENT_RECORD || (!disarm && error == 0)) {
     return (int)cudaErrorInvalidValue;
   }
   std::lock_guard<std::mutex> lock(g_staged_ple_mu);
@@ -1443,9 +1492,20 @@ QWEN38_PLANE_EXPORT int qwen38_plane_test_stats(Qwen38PlaneTestStats* stats) {
   stats->staged_tables = (long long)g_host_ple_workspaces.size();
   stats->attached_loaders = g_attached_loaders;
   stats->fault_armed = g_test_hooks.fault_site != QWEN38_PLANE_FAULT_NONE ? 1 : 0;
+  stats->unfenced_drains = g_test_hooks.unfenced_drains;
   return 0;
 }
 
 QWEN38_PLANE_EXPORT int qwen38_plane_test_peek_last_error(void) { return (int)cudaPeekAtLastError(); }
+
+// The graph of the capture is thrown away: tests only need the stream to be capturing while they call the module.
+QWEN38_PLANE_EXPORT int qwen38_plane_test_stream_capture(void* stream, int begin) {
+  const cudaStream_t s = (cudaStream_t)stream;
+  if (begin != 0) return (int)cudaStreamBeginCapture(s, cudaStreamCaptureModeThreadLocal);
+  cudaGraph_t graph = nullptr;
+  const cudaError_t err = cudaStreamEndCapture(s, &graph);
+  if (graph != nullptr) cudaGraphDestroy(graph);
+  return (int)err;
+}
 #endif
 }

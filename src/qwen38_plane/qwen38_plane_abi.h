@@ -46,11 +46,20 @@ static_assert(sizeof(void*) != 8 || offsetof(Qwen38PleParams, capacity) == 4672,
 //
 // prep and ple_rows return 0 on success. A PLE table that is not GPU-addressable (Qwen38PleParams::pad_ == 1) is "staged":
 // the token and context words are read back to the host and the FP8 rows are gathered there. Every step of that staging
-// (pinned allocation, device alias, copy, synchronisation) is checked; when one fails, or when the table was never
-// registered with set_ple_host_params, the function returns the cudaError_t (cudaErrorInvalidValue for the unregistered
-// table) before it gathers or launches anything, so the outputs are untouched. Both also return the error of their own
-// kernel launch. Callers must check the result. ple_rows reads ctx_in while its last block writes ctx_out, so the two must
-// not alias.
+// (pinned allocation, device alias, creation of the completion event, copy, synchronisation) is checked; when one fails, or
+// when the table was never registered with set_ple_host_params, the function returns the cudaError_t (cudaErrorInvalidValue
+// for the unregistered table) before it gathers or launches anything, so the outputs are untouched. Both also return the
+// error of their own kernel launch. The one step that can fail after the launch is recording the completion event, which
+// fences the staged buffers against a call on another stream: the function then waits for its stream before it returns the
+// error, so the kernel has finished and the outputs are complete. Callers must check the result. ple_rows reads ctx_in while
+// its last block writes ctx_out, so the two must not alias.
+//
+// A staged table is not usable while the stream is being captured into a CUDA graph: the host gathers its rows when the call
+// is made, which a replay would not repeat, and the read backs and waits of the call are not allowed on a capturing stream.
+// The call returns cudaErrorStreamCaptureUnsupported before it copies, gathers or launches anything. Telling a staged table
+// from a resident one takes a read back of the descriptor, which a capturing stream cannot make either, so the first call
+// that uses a descriptor, and the first one after set_ple_host_params (it forgets what was learnt about every descriptor),
+// has to be made outside a capture; a capture that meets a descriptor not yet told apart fails the same way.
 //
 // The other kernel exports return void. A launch the CUDA runtime rejects (bad configuration, no kernel image for the
 // device, a failed lazy module load) leaves the stream healthy, so the failure is kept and reported, once, by the next
@@ -109,8 +118,9 @@ static_assert(sizeof(void*) != 8 || offsetof(Qwen38PleParams, capacity) == 4672,
 // ---- Test hooks -------------------------------------------------------------------------------------------------------
 // Compiled into the library only when it is built with QWEN38_PLANE_TEST_HOOKS (the CMake option ENABLE_TESTS). They are not
 // part of QWEN38_PLANE_FUNCTIONS and the host loader never resolves them: the unit tests look them up by name
-// ("qwen38_plane_test_inject_staged_fault", "qwen38_plane_test_stats", "qwen38_plane_test_peek_last_error") to fail one CUDA
-// step of the staged PLE path, to observe what the module did and to see the last CUDA error it left on the calling thread.
+// ("qwen38_plane_test_inject_staged_fault", "qwen38_plane_test_stats", "qwen38_plane_test_peek_last_error",
+// "qwen38_plane_test_stream_capture") to fail one CUDA step of the staged PLE path, to observe what the module did, to see the
+// last CUDA error it left on the calling thread and to call it while a stream is being captured.
 
 // The step of the staged PLE path that an injected fault replaces with an error.
 typedef enum Qwen38PlaneFaultSite {
@@ -120,6 +130,8 @@ typedef enum Qwen38PlaneFaultSite {
   QWEN38_PLANE_FAULT_DEVICE_ALIAS = 3,  // cudaHostGetDevicePointer of a mapped staging buffer
   QWEN38_PLANE_FAULT_COPY = 4,          // device-to-host cudaMemcpyAsync
   QWEN38_PLANE_FAULT_SYNC = 5,          // cudaStreamSynchronize / cudaDeviceSynchronize
+  QWEN38_PLANE_FAULT_EVENT_CREATE = 6,  // cudaEventCreateWithFlags of a completion event (only when it is created)
+  QWEN38_PLANE_FAULT_EVENT_RECORD = 7,  // cudaEventRecord of a completion event, after the kernel was launched
 } Qwen38PlaneFaultSite;
 
 typedef struct Qwen38PlaneTestStats {
@@ -131,6 +143,7 @@ typedef struct Qwen38PlaneTestStats {
   long long staged_tables;            // registered staged tables
   long long attached_loaders;         // loaders currently attached to the module
   long long fault_armed;              // 1 while an injected fault has not fired yet
+  long long unfenced_drains;          // waits for a stream because its completion event could not be recorded
 } Qwen38PlaneTestStats;
 
 // Arms one fault: the (skip + 1)-th execution of `site` from now on fails with `error` instead of calling CUDA, once. A site
@@ -140,3 +153,6 @@ typedef int (*Qwen38PlaneTestInjectFaultFn)(int site, int skip, int error);
 typedef int (*Qwen38PlaneTestStatsFn)(Qwen38PlaneTestStats* stats);
 // Returns the last CUDA error of the calling thread without clearing it (cudaPeekAtLastError).
 typedef int (*Qwen38PlaneTestPeekLastErrorFn)(void);
+// Starts (`begin` != 0) or ends the capture of `stream` into a CUDA graph that is thrown away, in the thread-local mode so
+// that only the calling thread is affected. Returns the CUDA error of the call, 0 on success.
+typedef int (*Qwen38PlaneTestStreamCaptureFn)(void* stream, int begin);
