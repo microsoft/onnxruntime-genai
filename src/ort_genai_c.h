@@ -180,7 +180,9 @@ typedef uint32_t OgaErrorCode;
  *
  * \note Re-initialization: OgaShutdown() is a full teardown -- it destroys GenAI's ONNX Runtime environment and unloads
  *       GenAI's add-on libraries. GenAI may be used again after OgaShutdown(); the next GenAI call re-initializes with a
- *       fresh environment.
+ *       fresh environment. The one add-on that is not unloaded is the CUDA add-on of a process that has loaded a
+ *       qwen38_flash_graph model with the plane built into it: that plane is never unloaded, so the add-on stays mapped
+ *       (the next call enters it again). A host that has to replace the add-on file has to restart the process.
  *
  * \note If a host registered execution provider libraries directly on its own OrtEnv reference, it should unregister
  *       them (on that reference) and release the reference after OgaShutdown(), once all GenAI usage is finished.

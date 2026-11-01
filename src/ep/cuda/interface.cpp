@@ -704,6 +704,9 @@ struct CudaBatchedSampler final : BatchedSampler {
 struct CudaInterfaceImplBase : DeviceInterface {
   CudaInterfaceImplBase() = default;
 
+  // The stream and the allocator pointer belong to this interface. The library is not always unloaded when the interface is
+  // destroyed (the qwen38 plane built into it keeps a reference on it, see Qwen38Plane), so it must not be entered again
+  // with them still set.
   ~CudaInterfaceImplBase() {
     ort_allocator_ = nullptr;
     std::lock_guard<std::mutex> lock{g_stream_mutex};
@@ -1285,11 +1288,23 @@ uint32_t GetInterfaceVersion() {
   return Generators::kDeviceInterfaceVersion;
 }
 
+void ShutdownInterface() {
+  Generators::g_cuda_device.reset();
+}
+
 Generators::DeviceInterface* GetInterface(GenaiInterface* p_genai, const char* deviceType, const OrtApi* ort_api) {
+  if (!deviceType) {
+    Generators::g_cuda_device.reset();
+    return nullptr;
+  }
   Generators::gp_genai = p_genai;
   // Ensure Ort::api is initialized in this shared library (onnxruntime-genai-cuda add-on) immediately. Delaying the
   // initialization to CudaInterfaceImplBase::InitOrt would be inadequate, as GetMemoryInfo runs before InitOrt.
   Ort::api = ort_api;
+  // A library that is still mapped from an earlier init (OgaShutdown() does not unload it while a qwen38 plane built into it
+  // is loaded) still holds that init's interface. Destroy it first: it releases the stream and the allocator pointer that the
+  // new interface takes over.
+  Generators::g_cuda_device.reset();
   if (strcasecmp(deviceType, "NvTensorRtRtx") == 0) {
     Generators::g_cuda_device = std::make_unique<Generators::NvTensorRtRtxInterfaceImpl>();
   } else {

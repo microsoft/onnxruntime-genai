@@ -1609,6 +1609,167 @@ TEST(Qwen38PlaneTest, ResolvesWindowsSharedLibraryPathFromSoToDll) {
   std::filesystem::remove_all(dir, ec);
 }
 
+// ---- plane library of a package --------------------------------------------------------------
+
+// A portable package configures the POSIX name of its plane library (`libqwen38_plane.so`) and ships `libqwen38_plane.dll`
+// or `qwen38_plane.dll` for Windows; the loader translates the name. The model judges the library missing, and falls back
+// to the plane built into onnxruntime-genai-cuda, only after the same translation, so a Windows host has to find the
+// standalone DLL.
+TEST(Qwen38PlaneLibraryPathTest, AWindowsHostResolvesTheDllAliasesBeforeFallingBack) {
+  const auto dir = MakeScratchDir("plane_path_windows");
+  const auto root = std::filesystem::weakly_canonical(dir);
+  const auto resolve = [&](const std::string& configured) {
+    return ResolveQwen38PlaneLibraryPath(root, configured, true);
+  };
+
+  // Nothing shipped: the built-in plane, whatever is configured.
+  EXPECT_TRUE(resolve("libqwen38_plane.so").empty());
+  EXPECT_TRUE(resolve("").empty());
+
+  // Only the DLL without the `lib` prefix.
+  WriteFile(root / "qwen38_plane.dll", "dll");
+  EXPECT_EQ(resolve("libqwen38_plane.so"), root / "qwen38_plane.dll");
+  EXPECT_EQ(resolve("qwen38_plane.so"), root / "qwen38_plane.dll");
+  EXPECT_EQ(resolve("qwen38_plane.dll"), root / "qwen38_plane.dll");
+
+  // Both DLLs: the direct replacement wins, as it does in the loader.
+  WriteFile(root / "libqwen38_plane.dll", "dll");
+  EXPECT_EQ(resolve("libqwen38_plane.so"), root / "libqwen38_plane.dll");
+
+  // Only the DLL with the `lib` prefix.
+  std::filesystem::remove(root / "qwen38_plane.dll");
+  EXPECT_EQ(resolve("libqwen38_plane.so"), root / "libqwen38_plane.dll");
+  EXPECT_EQ(resolve("libqwen38_plane.dll"), root / "libqwen38_plane.dll");
+
+  // What the model hands to the loader is a fixed point of the loader's own translation.
+  const auto resolved = resolve("libqwen38_plane.so");
+  EXPECT_EQ(ResolveWindowsSharedLibraryPath(resolved), resolved);
+
+  // A real .so with no DLL is still what the package asked for: the loader reports it, the model does not fall back.
+  std::filesystem::remove(root / "libqwen38_plane.dll");
+  WriteFile(root / "libqwen38_plane.so", "so");
+  EXPECT_EQ(resolve("libqwen38_plane.so"), root / "libqwen38_plane.so");
+
+  // The library may sit in a subfolder of the package.
+  std::filesystem::create_directories(root / "libs");
+  EXPECT_TRUE(resolve("libs/libqwen38_plane.so").empty());
+  WriteFile(root / "libs" / "qwen38_plane.dll", "dll");
+  EXPECT_EQ(resolve("libs/libqwen38_plane.so"), root / "libs" / "qwen38_plane.dll");
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+TEST(Qwen38PlaneLibraryPathTest, ANonWindowsHostKeepsThePosixNameAndIgnoresDlls) {
+  const auto dir = MakeScratchDir("plane_path_posix");
+  const auto root = std::filesystem::weakly_canonical(dir);
+  const auto resolve = [&](const std::string& configured) {
+    return ResolveQwen38PlaneLibraryPath(root, configured, false);
+  };
+
+  EXPECT_TRUE(resolve("").empty());
+  EXPECT_TRUE(resolve("libqwen38_plane.so").empty());
+
+  // This host cannot load a DLL: the aliases are not looked up and the built-in plane is used.
+  WriteFile(root / "qwen38_plane.dll", "dll");
+  WriteFile(root / "libqwen38_plane.dll", "dll");
+  EXPECT_TRUE(resolve("libqwen38_plane.so").empty());
+
+  // A real .so is used as configured, with or without DLLs beside it.
+  WriteFile(root / "libqwen38_plane.so", "so");
+  EXPECT_EQ(resolve("libqwen38_plane.so"), root / "libqwen38_plane.so");
+  std::filesystem::remove(root / "qwen38_plane.dll");
+  std::filesystem::remove(root / "libqwen38_plane.dll");
+  EXPECT_EQ(resolve("libqwen38_plane.so"), root / "libqwen38_plane.so");
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+TEST(Qwen38PlaneLibraryPathTest, ALibraryOutsideTheModelFolderIsRejectedOnEveryHost) {
+  const auto dir = MakeScratchDir("plane_path_escape");
+  const auto base = std::filesystem::weakly_canonical(dir);
+  const auto root = base / "model";
+  std::filesystem::create_directories(root);
+  // Its name starts like the model folder's: a prefix test without the separator would let it through.
+  std::filesystem::create_directories(base / "model_sibling");
+  WriteFile(base / "model_sibling" / "libqwen38_plane.so", "so");
+  WriteFile(base / "model_sibling" / "qwen38_plane.dll", "dll");
+  WriteFile(base / "libqwen38_plane.so", "so");
+
+  const std::pair<std::string, std::filesystem::path> escapes[] = {
+      {"../model_sibling/libqwen38_plane.so", base / "model_sibling" / "libqwen38_plane.so"},
+      {"../libqwen38_plane.so", base / "libqwen38_plane.so"},
+      {"../missing/libqwen38_plane.so", base / "missing" / "libqwen38_plane.so"},  // a missing file is no way out
+  };
+  for (const bool windows_host : {false, true}) {
+    for (const auto& [configured, resolved] : escapes) {
+      try {
+        ResolveQwen38PlaneLibraryPath(root, configured, windows_host);
+        ADD_FAILURE() << configured << " must be rejected (windows_host=" << windows_host << ")";
+      } catch (const std::runtime_error& error) {
+        EXPECT_EQ(std::string{error.what()},
+                  "model.qwen38_graph.plane_library must resolve inside the model folder: " + resolved.string());
+      }
+    }
+  }
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+TEST(Qwen38PlaneLibraryPathTest, ASymlinkOutOfTheModelFolderIsRejectedForTheLibraryAndItsAlias) {
+  const auto dir = MakeScratchDir("plane_path_symlink");
+  const auto base = std::filesystem::weakly_canonical(dir);
+  const auto root = base / "model";
+  const auto outside = base / "outside";
+  std::filesystem::create_directories(root);
+  std::filesystem::create_directories(outside);
+  WriteFile(outside / "libqwen38_plane.so", "so");
+  WriteFile(outside / "evil.dll", "dll");
+
+  std::error_code link_error;
+  std::filesystem::create_directory_symlink(outside, root / "libs", link_error);
+  if (!link_error) std::filesystem::create_symlink(outside / "evil.dll", root / "qwen38_plane.dll", link_error);
+  if (link_error) {
+    const std::string reason = link_error.message();
+    std::filesystem::remove_all(dir, link_error);
+    GTEST_SKIP() << "symbolic links are not available: " << reason;
+  }
+  const auto expect_rejected = [&](const std::string& configured, bool windows_host,
+                                   const std::filesystem::path& resolved) {
+    try {
+      ResolveQwen38PlaneLibraryPath(root, configured, windows_host);
+      ADD_FAILURE() << configured << " must be rejected (windows_host=" << windows_host << ")";
+    } catch (const std::runtime_error& error) {
+      EXPECT_EQ(std::string{error.what()},
+                "model.qwen38_graph.plane_library must resolve inside the model folder: " + resolved.string());
+    }
+  };
+  // The folder of the library is a link out of the model folder.
+  for (const bool windows_host : {false, true}) {
+    expect_rejected("libs/libqwen38_plane.so", windows_host, outside / "libqwen38_plane.so");
+  }
+  // The library is inside the folder, but the DLL a Windows host picks for it is a link to a file outside.
+  expect_rejected("libqwen38_plane.so", true, outside / "evil.dll");
+  // A host that does not look up aliases never follows that link.
+  EXPECT_TRUE(ResolveQwen38PlaneLibraryPath(root, "libqwen38_plane.so", false).empty());
+
+  // When a Windows .dll alias is a symlink to a file inside the model folder (even with a .so extension), the canonical
+  // target is validated to stay inside root while the returned path preserves the .dll alias.
+  std::filesystem::remove(root / "qwen38_plane.dll", link_error);
+  WriteFile(root / "libqwen38_plane.so", "so");
+  std::filesystem::create_symlink(root / "libqwen38_plane.so", root / "qwen38_plane.dll", link_error);
+  if (!link_error) {
+    const auto resolved_alias = ResolveQwen38PlaneLibraryPath(root, "libqwen38_plane.so", true);
+    EXPECT_EQ(resolved_alias, root / "qwen38_plane.dll");
+    EXPECT_EQ(ResolveWindowsSharedLibraryPath(resolved_alias), resolved_alias);
+  }
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
 TEST(Qwen38PlaneTest, LoadingAMissingLibraryFailsWithItsPath) {
   const auto missing = std::filesystem::path{"definitely"} / "missing" / "libqwen38_plane.so";
   try {
@@ -1617,15 +1778,105 @@ TEST(Qwen38PlaneTest, LoadingAMissingLibraryFailsWithItsPath) {
   } catch (const std::runtime_error& error) {
     const std::string message = error.what();
     EXPECT_NE(message.find("qwen38"), std::string::npos) << message;
+#if !defined(QWEN38_GRAPH_NO_POSIX)
+    EXPECT_NE(message.find(missing.string()), std::string::npos) << message;
+#endif
   }
 }
 
 #if !defined(QWEN38_GRAPH_NO_POSIX)
+// A library that loads but is not a plane library is rejected with a message that names it. The diagnostics of the built-in
+// plane are about a file the user did not choose, so each of them says which file it is about; the library here is the
+// custom ops fixture, which has no plane symbol.
+TEST(Qwen38PlaneTest, ALibraryWithoutThePlaneSymbolsIsRejectedByName) {
+  const std::filesystem::path other_library =
+      std::filesystem::path{ORTGENAI_TEST_CUSTOM_OPS_LIB_DIR} / ORTGENAI_TEST_CUSTOM_OPS_FIRST_FILENAME;
+  ASSERT_TRUE(std::filesystem::exists(other_library)) << other_library.string() << " is missing";
+  try {
+    Qwen38Plane plane{other_library};
+    FAIL() << other_library.string() << " has no plane symbol, and loading it must throw";
+  } catch (const std::runtime_error& error) {
+    const std::string message = error.what();
+    EXPECT_NE(message.find(other_library.string()), std::string::npos) << message;
+    EXPECT_NE(message.find("lacks the symbol qwen38_plane_abi_version"), std::string::npos) << message;
+  }
+}
+#endif
+
+#if !defined(QWEN38_GRAPH_NO_POSIX) && !defined(_WIN32)
+// The built-in lookup tries the file beside the module and then the bare name. When both fail, each is reported with the
+// reason of its own attempt: dlerror() describes the latest failed dlopen, so reading it once at the end named the file beside
+// the module with the reason that the bare name was not found.
+TEST(Qwen38PlaneTest, TheBuiltInLookupReportsWhyEachFileItTriedDidNotLoad) {
+  const auto dir = MakeScratchDir("built_in_lookup");
+  const std::string library = "libgenai_qwen38_not_a_plane_library.so";
+  const std::filesystem::path beside = WriteFile(dir / library, "this is not a shared library");
+
+  // The reason the loader gives for each of the two files when it is asked about that file alone.
+  const auto reason_of = [](const std::string& file) {
+    void* module = dlopen(file.c_str(), RTLD_NOW | RTLD_LOCAL);
+    if (module != nullptr) {
+      dlclose(module);
+      return std::string{};
+    }
+    const char* reason = dlerror();
+    return std::string{reason ? reason : "unknown error"};
+  };
+  const std::string beside_reason = reason_of(beside.string());
+  const std::string name_reason = reason_of(library);
+  ASSERT_FALSE(beside_reason.empty()) << beside.string() << " loaded";
+  ASSERT_FALSE(name_reason.empty()) << library << " loaded";
+  ASSERT_NE(beside_reason, name_reason);
+
+  std::string failures = "left over from an earlier call";
+  EXPECT_EQ(OpenQwen38BuiltInPlaneModule(library.c_str(), dir, failures), nullptr);
+  EXPECT_EQ(failures, beside.string() + ": " + beside_reason + "; " + library + ": " + name_reason);
+
+  // Without a directory beside the module (the loader could not tell where it is), only the bare name is tried.
+  EXPECT_EQ(OpenQwen38BuiltInPlaneModule(library.c_str(), {}, failures), nullptr);
+  EXPECT_EQ(failures, library + ": " + name_reason);
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+#endif
+
+#if defined(__linux__) && !defined(QWEN38_GRAPH_NO_POSIX) && defined(ORTGENAI_TEST_QWEN38_LEGACY_PLANE_LIB_PATH)
+// A library that is already loaded (the CUDA execution provider normally loads onnxruntime-genai-cuda before the first model)
+// is the one the lookup returns, found by its name before anything beside the module is opened: a copy of the plane
+// library beside the module would be mapped as a second module, with its own state, next to the one that is running.
+TEST(Qwen38PlaneTest, TheBuiltInLookupUsesTheLibraryThatIsAlreadyLoadedAndNotACopyBesideTheModule) {
+  const std::filesystem::path loaded{ORTGENAI_TEST_QWEN38_LEGACY_PLANE_LIB_PATH};
+  const Qwen38Plane holder{loaded};  // keeps the library mapped
+  void* const mapped = dlopen(loaded.c_str(), RTLD_NOW | RTLD_NOLOAD);
+  ASSERT_NE(mapped, nullptr);
+
+  const auto dir = MakeScratchDir("built_in_loaded");
+  std::error_code ec;
+  std::filesystem::copy_file(loaded, dir / loaded.filename(), ec);
+  ASSERT_FALSE(ec) << ec.message();
+
+  std::string failures;
+  void* module = OpenQwen38BuiltInPlaneModule(loaded.filename().c_str(), dir, failures);
+  EXPECT_EQ(module, mapped) << "the lookup did not return the module that is already loaded: " << failures;
+  if (module != nullptr) dlclose(module);
+  dlclose(mapped);
+
+  std::filesystem::remove_all(dir, ec);
+}
+#endif
+
+#if !defined(QWEN38_GRAPH_NO_POSIX)
 namespace {
 
+// The plane library the GPU tests load: the standalone library when the build has one (ENABLE_QWEN38_PLANE; it alone carries
+// the fault-injection hooks, and the tests that need them skip without), otherwise the plane compiled into
+// onnxruntime-genai-cuda, which is the copy that ships. No CI job builds the standalone library.
 std::filesystem::path GetBuiltPlaneLibraryPath() {
 #if defined(ORTGENAI_TEST_QWEN38_PLANE_LIB_PATH)
   const std::filesystem::path path{ORTGENAI_TEST_QWEN38_PLANE_LIB_PATH};
+#elif defined(ORTGENAI_TEST_GENAI_CUDA_LIB_PATH)
+  const std::filesystem::path path{ORTGENAI_TEST_GENAI_CUDA_LIB_PATH};
 #elif defined(_WIN32)
   const std::filesystem::path path = std::filesystem::current_path() / "qwen38_plane.dll";
 #else
@@ -1795,6 +2046,46 @@ TEST(Qwen38PlaneTest, EmbedRowsCopiesWholeRowsOfAnyWidthAndAlignment) {
     }
   }
   plane.stream_destroy(stream);
+}
+
+// An empty library path loads the plane built into onnxruntime-genai-cuda from beside the module that holds the loader (this
+// binary). test/CMakeLists.txt defines ORTGENAI_TEST_GENAI_CUDA_LIB_PATH exactly when that target is part of the build, and
+// stages it beside the test, so whether the test runs is decided from that, before anything is loaded: with the target in
+// the build, a library that is missing or does not load (a broken sibling lookup, a missing runtime dependency) fails the
+// test with the loader's own message instead of skipping it.
+TEST(Qwen38PlaneTest, LoadsBuiltInGenaiCudaLibraryWhenPathIsEmpty) {
+#if !defined(ORTGENAI_TEST_GENAI_CUDA_LIB_PATH)
+  GTEST_SKIP() << "this build has no onnxruntime-genai-cuda target (no USE_CUDA/USE_TRT_RTX), so there is no built-in plane";
+#else
+  const std::filesystem::path cuda_library{ORTGENAI_TEST_GENAI_CUDA_LIB_PATH};
+  std::error_code exists_error;
+  ASSERT_TRUE(std::filesystem::exists(cuda_library, exists_error))
+      << "the onnxruntime-genai-cuda target is part of this build, but " << cuda_library.string() << " is missing";
+
+  std::unique_ptr<Qwen38Plane> plane;
+  try {
+    plane = std::make_unique<Qwen38Plane>(std::filesystem::path{});
+  } catch (const std::exception& error) {
+    FAIL() << "the built " << cuda_library.string() << " did not load as the built-in plane: " << error.what();
+  }
+  EXPECT_EQ(plane->abi_version(), QWEN38_PLANE_ABI_VERSION);
+  EXPECT_EQ(plane->sizeof_ple_params(), static_cast<int>(sizeof(Qwen38PleParams)));
+  // The diagnostics that name the plane library (the capability and loader messages) name the file it was loaded from, not an
+  // empty string.
+  EXPECT_EQ(std::filesystem::path{plane->library_path}.filename(), cuda_library.filename()) << plane->library_path;
+  // The loader tolerates a standalone library without the optional exports, but the library built from this tree has every
+  // one of them: each has to be in the export lists of onnxruntime-genai-cuda (src/ep/cuda).
+  EXPECT_NE(plane->quantize_kv, nullptr);
+  EXPECT_NE(plane->embed_rows, nullptr);
+  EXPECT_NE(plane->embed_gather, nullptr);
+  EXPECT_NE(plane->prep_batched, nullptr);
+  EXPECT_NE(plane->set_ple_host_params, nullptr);
+  EXPECT_NE(plane->unset_ple_host_params, nullptr);
+  EXPECT_NE(plane->release_ple_workspace, nullptr);
+  EXPECT_NE(plane->dflash_select, nullptr);
+  EXPECT_NE(plane->replay_state_updates, nullptr);
+  EXPECT_EQ(plane->capabilities, QWEN38_PLANE_ALL_CAPABILITIES);
+#endif
 }
 
 TEST(Qwen38PlaneTest, PlaneKernelsHandleEmptyAndNonMultipleOf32Dimensions) {

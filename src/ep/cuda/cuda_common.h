@@ -80,6 +80,7 @@ struct cuda_stream_holder {
     CUDA_CHECK(cudaStreamCreate(&v_));
   }
 
+  // Releases the stream, if there is one; Create() may be called again afterwards.
   void Destroy() noexcept {
     if (v_) {
       (void)cudaStreamDestroy(v_);
@@ -89,9 +90,7 @@ struct cuda_stream_holder {
 
   bool has_stream() const noexcept { return v_ != nullptr; }
 
-  ~cuda_stream_holder() {
-    Destroy();
-  }
+  ~cuda_stream_holder() { Destroy(); }
 
   operator cudaStream_t() const {
     assert(v_);

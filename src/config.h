@@ -776,7 +776,7 @@ struct Config {
         std::optional<SessionOptions> session_options;
       } head;
 
-      std::string plane_library;  // libqwen38_plane.so (CUDA data plane, dlopen-ed)
+      std::string plane_library;  // optional libqwen38_plane.so in the model folder; empty or missing uses onnxruntime-genai-cuda
       std::string ple_table;      // description of the host-registered FP8 PLE shards
 
       int kv_capacity{33028};

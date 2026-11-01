@@ -24,6 +24,33 @@ namespace Generators {
 // (`libfoo.dll` or `foo.dll`) when present alongside `path`; otherwise returns `path` unchanged.
 std::filesystem::path ResolveWindowsSharedLibraryPath(const std::filesystem::path& path);
 
+// True in a Windows build: the host that translates a POSIX library name in a package to the `.dll` the package ships.
+#if defined(_WIN32)
+inline constexpr bool kQwen38WindowsHost = true;
+#else
+inline constexpr bool kQwen38WindowsHost = false;
+#endif
+
+// Resolves model.qwen38_graph.plane_library (`configured`, relative to `model_root`) to the standalone plane library to
+// load, or to an empty path when the plane built into onnxruntime-genai-cuda is to be used: nothing is configured, or the
+// configured library is not in the package. On a Windows host a configured `libfoo.so` / `foo.so` stands for the
+// `libfoo.dll` / `foo.dll` the package ships, so that alias is looked up (ResolveWindowsSharedLibraryPath, the translation
+// the loader applies) before the library is judged missing. The library, and the alias, must resolve inside `model_root`,
+// symlinks included (std::runtime_error otherwise). `windows_host` is a parameter so that the decision of a Windows host
+// can be tested on every platform; the model passes kQwen38WindowsHost.
+std::filesystem::path ResolveQwen38PlaneLibraryPath(const std::filesystem::path& model_root,
+                                                    const std::string& configured, bool windows_host);
+
+#if !defined(QWEN38_GRAPH_NO_POSIX) && !defined(_WIN32)
+// Opens the library built into onnxruntime-genai-cuda, named `library`, for the loader of an empty plane library path: the
+// copy that is already loaded (normally by the CUDA execution provider) if there is one, otherwise `beside / library` (when
+// `beside` is not empty), otherwise `library` through the search path of the dynamic loader. Returns the module, or null with
+// `failures` naming each file that was tried and the loader's reason for it ("<file>: <reason>", joined by "; "), so that every
+// reason is the one of its own file. A declaration of the loader's own steps so that a test can run them on a directory it
+// controls, as with ResolveQwen38PlaneLibraryPath above.
+void* OpenQwen38BuiltInPlaneModule(const char* library, const std::filesystem::path& beside, std::string& failures);
+#endif
+
 // A CPU embedding table that the plane gathers rows from (the model's embed_tokens, mapped from <embedding>.data).
 struct Qwen38EmbeddingTable {
   const void* data{};  // device-addressable base of the table
@@ -39,11 +66,17 @@ struct Qwen38EmbeddingTable {
 // mapped until the process exits, and a loader of the same file that follows (the next model, or the same model loaded again)
 // shares that copy. Unloading a library that has launched CUDA kernels and loading it again made the first kernel launch of the
 // later copy crash inside the CUDA runtime (a SIGSEGV in libcudart 13.0, in its lazy loading of the module of the kernel), so the
-// host never takes that path. A library that is rejected while it loads (a stale ABI, a missing symbol) has launched nothing and
-// is released.
+// host never takes that path. The built-in plane is part of onnxruntime-genai-cuda, so that library stays mapped as well, also
+// across OgaShutdown(): the next init enters it again without a reload. Its device interface (src/ep/cuda/interface.cpp) is
+// written for that: it releases its stream and its allocator pointer when it is destroyed, and GetInterface() destroys the
+// interface of the previous init before it creates the next one. A library that is rejected while it loads (a stale ABI, a
+// missing symbol) has launched nothing and is released.
 struct Qwen38Plane {
+  // An empty plane with no library loaded; the function pointers are filled in by the caller (tests).
   Qwen38Plane() = default;
-  // Loads `path`, resolves every symbol and checks the ABI version and structure layout.
+  // Loads `path` (or the built-in onnxruntime-genai-cuda library when `path` is empty), resolves every symbol and checks
+  // the ABI version and structure layout. Throws std::runtime_error naming each file that was tried and why it did not load,
+  // or the library that lacks a symbol, has another ABI version, or has another structure layout.
   explicit Qwen38Plane(const std::filesystem::path& path);
   ~Qwen38Plane();
   Qwen38Plane(const Qwen38Plane&) = delete;
@@ -89,7 +122,8 @@ struct Qwen38Plane {
 
   // The QWEN38_PLANE_CAP_* bits the library reports; 0 for a library that predates qwen38_plane_capabilities.
   unsigned long long capabilities{};
-  // The file the library was loaded from (named by the capability diagnostics).
+  // The file the library was loaded from, which the diagnostics of the loader and of RequireCapabilities name: the path that
+  // was given or, for the built-in plane, the file the module was found in (the library name when the loader cannot tell).
   std::string library_path;
 
  private:

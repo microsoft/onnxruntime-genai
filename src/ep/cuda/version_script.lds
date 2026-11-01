@@ -3,6 +3,8 @@ VERS_1.0 {
   global:
     GetInterface;
     GetInterfaceVersion;
+    ShutdownInterface;
+    qwen38_plane_*;
 
   # Hide everything else.
   local:

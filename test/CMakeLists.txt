@@ -424,6 +424,15 @@ if(TARGET qwen38_plane)
   )
   add_dependencies(engine_unit_tests qwen38_plane)
 endif()
+# The plane is compiled into onnxruntime-genai-cuda as well, and the built-in lookup of Qwen38Plane (an empty library path) loads
+# that library from beside the module that holds the loader, which is this binary: the loader test is expected to load it
+# exactly when the target is part of the build.
+if(TARGET onnxruntime-genai-cuda)
+  target_compile_definitions(engine_unit_tests PRIVATE
+    ORTGENAI_TEST_GENAI_CUDA_LIB_PATH="$<TARGET_FILE:onnxruntime-genai-cuda>"
+  )
+  add_dependencies(engine_unit_tests onnxruntime-genai-cuda)
+endif()
 set_target_properties(engine_unit_tests PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>"
     FOLDER "Tests"
