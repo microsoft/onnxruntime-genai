@@ -80,9 +80,17 @@ struct cuda_stream_holder {
     CUDA_CHECK(cudaStreamCreate(&v_));
   }
 
-  ~cuda_stream_holder() {
-    if (v_)
+  void Destroy() noexcept {
+    if (v_) {
       (void)cudaStreamDestroy(v_);
+      v_ = nullptr;
+    }
+  }
+
+  bool has_stream() const noexcept { return v_ != nullptr; }
+
+  ~cuda_stream_holder() {
+    Destroy();
   }
 
   operator cudaStream_t() const {

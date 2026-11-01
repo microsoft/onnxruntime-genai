@@ -766,6 +766,62 @@ struct Config {
       bool IsEnabled() const noexcept { return enabled && !filename.empty(); }
     } mtp;
 
+    // Qwen3.8-Flash CUDA-graph decode stack with a built-in MTP(1) self-speculative loop
+    // (model.type "qwen38_flash_graph", served by the Engine). The target session is model.decoder; the head sessions,
+    // the CUDA data-plane library and the PLE table are described here. All paths are relative to the model folder.
+    struct Qwen38Graph {
+      struct Head {
+        std::string filename_s1;  // S=1 draft graph
+        std::string filename_s2;  // S=2 refeed graph
+        std::optional<SessionOptions> session_options;
+      } head;
+
+      std::string plane_library;  // libqwen38_plane.so (CUDA data plane, dlopen-ed)
+      std::string ple_table;      // description of the host-registered FP8 PLE shards
+
+      int kv_capacity{33028};
+
+      bool warmup{true};  // Run the graph warm-up (captures every CUDA graph) when the model is created
+
+      struct Mtp {
+        bool enabled{true};       // false: plain S=1 graph decode (no draft/verify)
+        bool prefill_head{true};  // feed the prompt hidden rows to the head (vLLM does the same)
+      } mtp;
+
+      // Folded decode cycle (v12 stack): the MTP head lives inside the verify graph, one graph launch per cycle.
+      // model.decoder is then the fold model (verify S=2 body + head + glue); head_r2 is the standalone R=2 head
+      // session used for the prompt context (pair calls) and the first draft.
+      struct Fold {
+        bool enabled{false};
+        std::optional<int> legacy_target_graph_id;
+        struct HeadR2 {
+          std::string filename;
+          std::optional<int> legacy_graph_id;
+          std::optional<SessionOptions> session_options;
+        } head_r2;
+      } fold;
+
+      // Prompt ingestion. Without `enabled` the prompt is ingested by the decode graphs, `chunk` prompt tokens per
+      // Engine step (an even number, so S=2 pairs stay aligned). With `enabled` it is ingested by the dense chunked
+      // prefill session, `chunk` tokens per call, and its state is handed over to the packed decode state + a batched
+      // KV-only head prefill. The dense/head_kv/decode sessions share one device copy of every identical initializer
+      // (weights_pool, written by the package builders in tools/qwen38_graph/, e.g. build_package_engine_v12b.py).
+      // `chunk` 0 selects the default of the path in use: 2048 tokens per step, 8192 per dense chunk.
+      struct Prefill {
+        bool enabled{false};
+        int chunk{0};
+        std::string weights_pool;  // text manifest of the shared initializers (qwen38_weights_pool 1)
+        std::string constants;     // text index + binary of the QSA hand-off constants (qwen38_qsa_consts 1)
+        struct Model {
+          std::string filename;
+          std::optional<SessionOptions> session_options;
+        } dense, head_kv;
+        std::vector<int> warmup_lengths{8192, 2048, 512, 128, 37};
+      } prefill;
+
+      bool IsConfigured() const noexcept { return !head.filename_s1.empty() || !fold.head_r2.filename.empty(); }
+    } qwen38_graph;
+
     // DFlash 2/DSpark block-drafter metadata. Unlike MTP the drafter is not decoder-shaped: it
     // reads the main model's auxiliary hidden states, predicts a whole block of tokens at once,
     // and returns a candidate lattice that the Engine walks greedily. model.dspark is a config
