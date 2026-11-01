@@ -75,6 +75,8 @@ struct Qwen38Plane {
   // Drops the staged PLE tables of the whole module, i.e. of every loader of the same library file, not just this one.
   // The destructor does not call it: it detaches from the module, which releases that state when the last loader goes.
   void (*release_ple_workspace)(void){};
+  Qwen38PlaneDflashSelectFn dflash_select{};
+  Qwen38PlaneReplayStateUpdatesFn replay_state_updates{};
 
   // The QWEN38_PLANE_CAP_* bits the library reports; 0 for a library that predates qwen38_plane_capabilities.
   unsigned long long capabilities{};

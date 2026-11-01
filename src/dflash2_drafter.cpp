@@ -466,7 +466,9 @@ ONNXTensorElementDataType ValidateDflash2ModelCompatibility(
       const auto output_type = drafter_metadata.GetOutputDataType(output_name);
       const bool supported_type = input_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
                                   input_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16 ||
-                                  input_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16;
+                                  input_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16 ||
+                                  input_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8 ||
+                                  input_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E4M3FN;
       if (input_type != output_type ||
           (cache_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED && input_type != cache_type) ||
           !supported_type) {
@@ -503,8 +505,12 @@ ONNXTensorElementDataType ValidateDflash2ModelCompatibility(
 }
 
 Dflash2Model::Dflash2Model(std::unique_ptr<Config> config, OrtEnv& ort_env,
-                           std::shared_ptr<CpuEmbedding> cpu_embedding)
+                           std::shared_ptr<CpuEmbedding> cpu_embedding,
+                           const std::function<void(OrtSessionOptions&)>& configure_session_options)
     : Model{std::move(config)}, cpu_embedding_{std::move(cpu_embedding)} {
+  if (configure_session_options && session_options_) {
+    configure_session_options(*session_options_);
+  }
   session_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());
   session_info_.Add(*session_);
   if (cpu_embedding_) {
@@ -717,9 +723,22 @@ Tensor& Dflash2Drafter::StepTensor(std::unique_ptr<Tensor>& slot, DeviceInterfac
   Tensor& tensor = Dflash2StepTensor(slot, device, type, shape, &reallocated, &displaced);
   if (reallocated) {
     ReleaseCapturedGraphs();
+    if (displaced) {
+      model_->p_device_->Synchronize();
+      staging_.erase(displaced.get());
+    }
     ++buffer_generation_;
   }
   return tensor;
+}
+
+DeviceSpan<uint8_t> Dflash2Drafter::Staging(Tensor& tensor) {
+  auto [it, inserted] = staging_.try_emplace(&tensor);
+  if (inserted) {
+    it->second = tensor.p_device_->WrapMemory(
+        std::span<uint8_t>{static_cast<uint8_t*>(tensor.GetMutableRawData()), tensor.bytes_});
+  }
+  return it->second.subspan(0, tensor.GetElementCount() * Ort::SizeOf(tensor.type_));
 }
 
 void Dflash2Drafter::ReleaseCapturedGraphs() noexcept {
@@ -747,6 +766,16 @@ bool Dflash2CanJoin(bool draft_eligible, size_t first_position, size_t context_w
 bool Dflash2GraphCaptureAllowed(bool enabled, bool uniform_ingest,
                                 size_t max_blocks, size_t max_columns) noexcept {
   return enabled && uniform_ingest && max_blocks <= max_columns;
+}
+
+bool Dflash2PinsBlockTableWidth(bool capture_enabled, bool windowed, bool pinned_policy,
+                                bool device_selection) noexcept {
+  return capture_enabled && windowed && (pinned_policy || device_selection);
+}
+
+bool Dflash2CapturesPinnedStep(bool drafts_wanted, size_t num_ctx_rows, size_t block_size,
+                               size_t served, bool device_selection) noexcept {
+  return drafts_wanted && num_ctx_rows <= block_size * served && (!device_selection || served == 1);
 }
 
 void Dflash2Drafter::AllocateCache() {
@@ -959,16 +988,19 @@ void Dflash2Drafter::Release(const Request* request) {
 }
 
 void Dflash2Drafter::ReleaseAll() {
-  for (const auto& [request, state] : requests_) {
-    free_blocks_.insert(free_blocks_.end(), state.blocks.begin(), state.blocks.end());
-  }
   requests_.clear();
+  free_blocks_.resize(num_blocks_);
+  std::iota(free_blocks_.rbegin(), free_blocks_.rend(), int32_t{0});
+  for (auto& cache : caches_) {
+    if (cache) cache->GetByteSpan().Zero();
+  }
 }
 
 bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> feeds,
                              std::vector<std::vector<int32_t>>& drafts,
                              std::vector<std::vector<TargetTokenSelection>>* draft_distributions,
-                             std::vector<Dflash2Lattice>* lattices) {
+                             std::vector<Dflash2Lattice>* lattices,
+                             bool device_selection) {
   drafts.assign(feeds.size(), {});
   if (draft_distributions) {
     draft_distributions->assign(feeds.size(), {});
@@ -1140,16 +1172,24 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   auto device = model_->p_device_inputs_;
   // Bucketing the width lets a growing context keep replaying one captured graph instead of
   // retiring one at every block boundary; columns past the live KV length are never read. Steps
-  // that cannot be captured keep the exact width so their bound inputs are unchanged.
-  const bool graph_eligible = Dflash2GraphCaptureAllowed(
-      graph_capture_enabled_, uniform_ingest, max_blocks, max_block_table_columns_);
+  // that cannot be captured keep the exact width so their bound inputs are unchanged. A pinned
+  // drafter instead uses the full width for every step and captures decode steps only.
+  const bool pinned_width = Dflash2PinsBlockTableWidth(
+      graph_capture_enabled_, ring_blocks_ != 0, pin_block_table_width_, device_selection);
+  const bool graph_eligible =
+      Dflash2GraphCaptureAllowed(graph_capture_enabled_, uniform_ingest, max_blocks,
+                                 max_block_table_columns_) &&
+      (!pinned_width ||
+       Dflash2CapturesPinnedStep(drafts_wanted, num_ctx_rows, block_size, served.size(),
+                                 device_selection));
   const size_t block_table_columns =
-      graph_eligible ? GetGraphBlockTableColumns(max_blocks, max_block_table_columns_)
-                     : max_blocks;
-  auto fill_int32 = [](Tensor& tensor, const std::vector<int32_t>& values) {
-    auto span = tensor.GetDeviceSpan<int32_t>();
-    std::copy(values.begin(), values.end(), span.CpuSpan().begin());
-    span.CopyCpuToDevice();
+      pinned_width ? std::max(max_blocks, max_block_table_columns_)
+                   : (graph_eligible ? GetGraphBlockTableColumns(max_blocks, max_block_table_columns_)
+                                     : max_blocks);
+  auto fill_int32 = [this](Tensor& tensor, const std::vector<int32_t>& values) {
+    auto span = Staging(tensor);
+    std::memcpy(span.CpuSpan().data(), values.data(), values.size() * sizeof(int32_t));
+    span.CopyCpuRangeToDevice();
   };
 
   auto& packed_aux = StepTensor(step_tensors_.packed_aux, device, aux_type_,
@@ -1182,8 +1222,8 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
                              {static_cast<int64_t>(num_block_rows), model_->cpu_embedding_->hidden_size_});
   }
   {
-    auto span = input_ids.GetDeviceSpan<int64_t>();
-    auto cpu = span.CpuSpan();
+    auto span = Staging(input_ids);
+    auto cpu = std::span<int64_t>{reinterpret_cast<int64_t*>(span.CpuSpan().data()), input_ids.GetElementCount()};
     for (size_t slot = 0; slot < block_feed_indices.size(); ++slot) {
       const auto& feed = feeds[block_feed_indices[slot]];
       cpu[slot * block_size] = feed.wants_drafts ? feed.anchor_token : config_.mask_token_id;
@@ -1191,7 +1231,7 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
         cpu[slot * block_size + row] = config_.mask_token_id;
       }
     }
-    span.CopyCpuToDevice();
+    span.CopyCpuRangeToDevice();
     if (embeddings) model_->cpu_embedding_->Run(cpu, *embeddings, step_tensors_.embedding_workspace);
   }
 
@@ -1239,8 +1279,8 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
       step_tensors_.block_table, device, int32_type,
       {static_cast<int64_t>(served.size()), static_cast<int64_t>(block_table_columns)});
   {
-    auto span = block_table.GetDeviceSpan<int32_t>();
-    auto cpu = span.CpuSpan();
+    auto span = Staging(block_table);
+    auto cpu = std::span<int32_t>{reinterpret_cast<int32_t*>(span.CpuSpan().data()), block_table.GetElementCount()};
     for (size_t row = 0; row < served.size(); ++row) {
       const auto& blocks = requests_[feeds[served[row]].request].blocks;
       auto columns = cpu.subspan(row * block_table_columns, block_table_columns);
@@ -1257,7 +1297,7 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
         columns[column] = blocks[column % blocks.size()];
       }
     }
-    span.CopyCpuToDevice();
+    span.CopyCpuRangeToDevice();
   }
 
   auto& metadata = StepTensor(step_tensors_.attention_metadata, GetDeviceInterface(DeviceType::CPU),
@@ -1289,7 +1329,8 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
     // A replayed step that proposes drafts reads its outputs back below with a synchronizing copy,
     // so the run itself need not wait for the device; the copy also drains the uploads from the
     // step tensors' host mirrors before the next step rewrites them.
-    const bool async_run = capture && drafts_wanted && device->GetType() == DeviceType::CUDA;
+    const bool async_run = device_selection ||
+                           (capture && drafts_wanted && device->GetType() == DeviceType::CUDA);
     run_options_->AddConfigEntry("disable_synchronize_execution_providers", async_run ? "1" : "0");
   }
 
@@ -1346,6 +1387,9 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
     outputs.push_back(caches_[i]->GetOrtTensor());
   }
 
+  if (device_selection) {
+    run_options_->AddConfigEntry("disable_synchronize_execution_providers", "1");
+  }
   model_->session_->Run(run_options_.get(), input_names.data(), inputs.data(), input_names.size(),
                         output_names.data(), outputs.data(), output_names.size());
 
@@ -1355,7 +1399,7 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
         feed.first_position, feed.aux_row_count, "DFlash 2 cached positions");
   }
 
-  if (!drafts_wanted) {
+  if (!drafts_wanted || device_selection) {
     return true;
   }
 

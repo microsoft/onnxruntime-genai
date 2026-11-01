@@ -40,6 +40,9 @@ struct DeviceBuffer : std::enable_shared_from_this<DeviceBuffer> {
   virtual void AllocateCpu() = 0;      // Allocates p_cpu_ if necessary (using appropriate memory type for interop)
   virtual void CopyDeviceToCpu() = 0;  // Allocates p_cpu_ if necessary and copies p_device_ memory into it
   virtual void CopyCpuToDevice() = 0;
+  // Uploads only [begin_bytes, begin_bytes + size_in_bytes) of the CPU memory. Backends without a ranged
+  // upload fall back to uploading the whole buffer, which contains that range.
+  virtual void CopyCpuRangeToDevice(size_t /*begin_bytes*/, size_t /*size_in_bytes*/) { CopyCpuToDevice(); }
   virtual void CopyFrom(size_t begin_dest, DeviceBuffer& source, size_t begin_source, size_t size_in_bytes) = 0;
   virtual void Zero() = 0;  // Zero out the device memory
   virtual void CopyFromCpu(const void* source, size_t size_in_bytes) {
@@ -95,6 +98,10 @@ struct DeviceSpan {
 
   // Copy CPU memory to device memory, typically used after calling CpuSpan or CopyDeviceToCpu to update the device memory with the modifications made
   void CopyCpuToDevice() { p_device_memory_->CopyCpuToDevice(); }
+
+  // Like CopyCpuToDevice, but uploads only this span's range of the buffer. Every CPU-side modification must lie
+  // inside the span; use it for a small active subspan of a large reused buffer.
+  void CopyCpuRangeToDevice() { p_device_memory_->CopyCpuRangeToDevice(begin_ * sizeof(T), length_ * sizeof(T)); }
 
   void CopyFromCpu(std::span<const T> source) {
     assert(source.size() == size());
@@ -231,10 +238,13 @@ struct StateUpdateReplayDesc {
 
 // Increment whenever a layout the add-on boundary depends on changes: DeviceInterface's virtual
 // layout, or the virtual or data layout of any type constructed by, passed to, or returned across
-// that boundary (Search, BatchedSampler, BatchedSamplerState, GeneratorParams, or Config).
+// that boundary (DeviceBuffer, Search, BatchedSampler, BatchedSamplerState, GeneratorParams, or Config).
 // Dynamically loaded add-ons must report this exact version before the host can safely call through
 // the C++ interface.
-inline constexpr uint32_t kDeviceInterfaceVersion = 16;
+// Version 15: DeviceInterface gained AllocatePinnedHost, CopyDeviceToHost and CopyHostToDevice.
+// Version 16: Config::Model gained the qwen38_graph member, which changed the layouts of Config::Model and Config.
+// Version 17: DeviceBuffer::CopyCpuRangeToDevice shifted the virtual slots that follow CopyCpuToDevice.
+inline constexpr uint32_t kDeviceInterfaceVersion = 17;
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}

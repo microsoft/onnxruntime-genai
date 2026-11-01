@@ -1776,6 +1776,22 @@ TEST(Dflash2ConfigTest, CapturesUniformShapesWithinBlockTableLimit) {
   EXPECT_FALSE(Dflash2GraphCaptureAllowed(true, true, 9, 8));
 }
 
+TEST(Dflash2ConfigTest, PinsTheBlockTableWidthOnlyWhenOptedInOrDeviceSelected) {
+  // Generic Engine drafters (even with max_requests == 1) keep bucketed widths unless opted in.
+  EXPECT_FALSE(Dflash2PinsBlockTableWidth(/*capture_enabled=*/true, /*windowed=*/true,
+                                          /*pinned_policy=*/false, /*device_selection=*/false));
+  EXPECT_TRUE(Dflash2PinsBlockTableWidth(true, true, /*pinned_policy=*/true, /*device_selection=*/false));
+  EXPECT_TRUE(Dflash2PinsBlockTableWidth(true, true, /*pinned_policy=*/false, /*device_selection=*/true));
+  EXPECT_FALSE(Dflash2PinsBlockTableWidth(false, true, true, true));
+  EXPECT_FALSE(Dflash2PinsBlockTableWidth(true, false, true, true));
+
+  constexpr size_t kBlock = 16;
+  EXPECT_TRUE(Dflash2CapturesPinnedStep(/*drafts_wanted=*/true, /*num_ctx_rows=*/kBlock, kBlock,
+                                        /*served=*/1, /*device_selection=*/true));
+  EXPECT_FALSE(Dflash2CapturesPinnedStep(false, 1, kBlock, 1, true));
+  EXPECT_FALSE(Dflash2CapturesPinnedStep(true, kBlock + 1, kBlock, 1, true));
+}
+
 TEST(Dflash2ConfigTest, TrackedDsparkIngestsSampledTurnsAndResumesDrafting) {
   auto config = MakeDflash2Config();
   config.config_path = fs::path{MODEL_PATH "engine/synthetic-dspark"};

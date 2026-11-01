@@ -215,8 +215,9 @@ struct StagedPleWorkspace {
   i64 ngram_cache_keys[kCacheSlots][3]{};
   unsigned char ngram_cache_valid[kCacheSlots]{};
 
-  // The words of the ten-word `ctl` snapshot that rows 1..3 of a fold read from `scalars` instead of the device. Whatever else
-  // writes `scalars` has to drop the snapshot first, or the next fold row would be prepared from words that are not its own.
+  // The words of the fourteen-word `ctl` snapshot that rows 1..7 of a fold read from `scalars` instead of the device.
+  // Whatever else writes `scalars` has to drop the snapshot first, or the next fold row would be prepared from words
+  // that are not its own.
   void invalidate_fold_snapshot() {
     cached_state_ptr = nullptr;
     cached_ctx_out_ptr = nullptr;
@@ -525,7 +526,7 @@ __global__ void k_prep_staged(i64 capacity, int n_heads, int head_dim, float sca
   if (tid == 0) {
     input_ids[0] = tok;
     position_ids[0] = pos;
-    committed[0] = (int)pos;
+    if (committed != nullptr) committed[0] = (int)pos;
     if (pos >= 0 && pos < capacity)
       past_pos[pos] = pos;
     else
@@ -635,7 +636,7 @@ __global__ void k_prep(const PleParams* P, const i64* tok_ptr, const i64* pos_pt
   if (tid == 0) {
     input_ids[0] = tok;
     position_ids[0] = pos;
-    committed[0] = (int)pos;
+    if (committed != nullptr) committed[0] = (int)pos;
     if (pos >= 0 && pos < P->capacity)
       past_pos[pos] = pos;
     else
@@ -675,6 +676,91 @@ __global__ void k_prep(const PleParams* P, const i64* tok_ptr, const i64* pos_pt
   if (tid == 0) {
     ctx_out[0] = c1;  // history[-2:] = (c1, tok); uses the raw (unmasked) previous token
     ctx_out[1] = tok;
+  }
+}
+
+__global__ void __launch_bounds__(1024) k_prep_fold(const PleParams* P, const i64* ctx_in, i64* ctx_a, i64* input_ids,
+                                                    i64* position_ids, int* committed, i64* past_pos,
+                                                    __nv_bfloat16* ple_out, i64* state) {
+  __shared__ i64 s_row[32];
+  __shared__ const unsigned char* s_src[32];
+  __shared__ i64 s_tok, s_pos, s_c0, s_c1;
+  const int row = blockIdx.x;
+  const int tid = threadIdx.x;
+  if (tid == 0) {
+    constexpr int kSlots[8] = {0, 2, 8, 9, 10, 11, 12, 13};
+    s_tok = state[kSlots[row]];
+    s_pos = state[1] + row;
+    s_c1 = (row == 0) ? ctx_in[1] : state[kSlots[row - 1]];
+    s_c0 = (row == 0) ? ctx_in[0] : ((row == 1) ? ctx_in[1] : state[kSlots[row - 2]]);
+  }
+  __syncthreads();
+  const i64 tok = s_tok, pos = s_pos, c1 = s_c1;
+  const i64 c0 = (c1 == P->eos) ? P->eos : s_c0;
+  if (tid < P->n_heads) {
+    const int h = tid;
+    unsigned long long mixed = (unsigned long long)tok * (unsigned long long)P->mult[0];
+    mixed ^= (unsigned long long)c1 * (unsigned long long)P->mult[1];
+    if (h >= P->heads_per_ngram) mixed ^= (unsigned long long)c0 * (unsigned long long)P->mult[2];
+    const i64 v = P->vocab[h];
+    i64 r = (i64)mixed % v;
+    if (r < 0) r += v;
+    const i64 id = r + P->offset[h];
+    int lo = 0, hi = P->n_shards - 1;
+    while (lo < hi) {
+      const int mid = (lo + hi) >> 1;
+      if (P->shard_end[mid] > id)
+        hi = mid;
+      else
+        lo = mid + 1;
+    }
+    const i64 first = lo == 0 ? 0 : P->shard_end[lo - 1];
+    s_row[h] = id - first;
+    s_src[h] = P->shard_ptr[lo];
+  }
+  if (tid == 0) {
+    input_ids[row] = tok;
+    position_ids[row] = pos;
+    if (row == 0 && committed != nullptr) committed[0] = (int)pos;
+    if (pos >= 0 && pos < P->capacity)
+      past_pos[pos] = pos;
+    else
+      atomicOr((unsigned long long*)&state[5], 1ULL);
+  }
+  __syncthreads();
+  const int hd = P->head_dim;
+  const int total = P->n_heads * hd;
+  unsigned char b[3];
+#pragma unroll
+  for (int u = 0; u < 3; ++u) {
+    const int j = tid + u * blockDim.x;
+    b[u] = 0;
+    if (j < total) {
+      const int h = j / hd, c = j - h * hd;
+      b[u] = s_src[h][s_row[h] * hd + c];
+    }
+  }
+  const float scale = P->scale;
+  const bool is_int8 = (scale < 0.0f);
+  const float abs_scale = is_int8 ? -scale : scale;
+  __nv_bfloat16* row_ple = ple_out + (size_t)row * total;
+#pragma unroll
+  for (int u = 0; u < 3; ++u) {
+    const int j = tid + u * blockDim.x;
+    if (j < total) {
+      float f;
+      if (is_int8) {
+        f = static_cast<float>(static_cast<signed char>(b[u]));
+      } else {
+        const __half_raw hr = __nv_cvt_fp8_to_halfraw(b[u], __NV_E4M3);
+        f = __half2float(*reinterpret_cast<const __half*>(&hr));
+      }
+      row_ple[j] = __float2bfloat16_rn(f * abs_scale);
+    }
+  }
+  if (tid == 0) {
+    ctx_a[2 * row + 0] = c1;
+    ctx_a[2 * row + 1] = tok;
   }
 }
 
@@ -996,6 +1082,28 @@ __global__ void k_embed_rows_int8(const int8_t* table, const float* row_scales, 
   const int8_t* src = table + (size_t)tok * width;
   const float sc = row_scales[tok];
   __nv_bfloat16* dst = out + (size_t)r * width;
+  if ((width & 15) == 0 &&
+      (reinterpret_cast<uintptr_t>(src) & 15) == 0 &&
+      (reinterpret_cast<uintptr_t>(dst) & 15) == 0) {
+    const int n16 = width >> 4;
+    const uint4* src16 = reinterpret_cast<const uint4*>(src);
+    uint4* dst8 = reinterpret_cast<uint4*>(dst);
+    for (int i = threadIdx.x; i < n16; i += blockDim.x) {
+      const uint4 q = src16[i];
+      const int8_t* q8 = reinterpret_cast<const int8_t*>(&q);
+      uint4 lo_u4, hi_u4;
+      __nv_bfloat16* lo_bf = reinterpret_cast<__nv_bfloat16*>(&lo_u4);
+      __nv_bfloat16* hi_bf = reinterpret_cast<__nv_bfloat16*>(&hi_u4);
+#pragma unroll
+      for (int m = 0; m < 8; ++m) {
+        lo_bf[m] = __float2bfloat16_rn(static_cast<float>(q8[m]) * sc);
+        hi_bf[m] = __float2bfloat16_rn(static_cast<float>(q8[m + 8]) * sc);
+      }
+      dst8[2 * i] = lo_u4;
+      dst8[2 * i + 1] = hi_u4;
+    }
+    return;
+  }
   for (int i = threadIdx.x; i < width; i += blockDim.x) {
     dst[i] = __float2bfloat16_rn(static_cast<float>(src[i]) * sc);
   }
@@ -1061,7 +1169,8 @@ static inline ParkedStreamKey CurrentParkedStreamKey(cudaStream_t stream) {
   return ParkedStreamKey{dev, stream};
 }
 
-// Drops a stale error of the thread so that LaunchStatus() reports only the launch that follows.
+// BeginLaunch drops an error that the thread may still hold from an earlier call that nobody read, so that LaunchStatus
+// reports only the launches since then. An error that sticks (a faulted context) is not dropped and still fails the launch.
 static inline void BeginLaunch() { (void)cudaGetLastError(); }
 static inline int LaunchStatus() { return static_cast<int>(cudaGetLastError()); }
 static inline void ParkLaunchStatus(cudaStream_t stream) {
@@ -1173,10 +1282,52 @@ QWEN38_PLANE_EXPORT void qwen38_plane_set_ple_host_params(const void* params) {
 QWEN38_PLANE_EXPORT int qwen38_plane_prep(void* s, const void* P, const void* tok_ptr, const void* pos_ptr, int pos_add, const void* ctx_in,
                                           void* ctx_out, void* input_ids, void* position_ids, void* committed, void* past_pos,
                                           void* ple_out, void* state) {
+  if (pos_add <= -2 && pos_add >= -8) {
+    // Prepares the `rows` = -pos_add rows of one fold/verify step in a single call.
+    const int rows = -pos_add;
+    cudaStream_t stream = (cudaStream_t)s;
+    size_t staged_ple_total = 0;
+    {
+      std::lock_guard<std::mutex> lock(g_staged_ple_mu);
+      bool unregistered_staged = false;
+      cudaError_t err = cudaSuccess;
+      StagedPleWorkspace* ws =
+          resolve_staged_ple_workspace(P, stream, /*allow_sync=*/true, &unregistered_staged, &err);
+      if (err != cudaSuccess) {
+        return (int)err;
+      }
+      if (unregistered_staged) {
+        return (int)cudaErrorInvalidValue;
+      }
+      if (ws != nullptr) {
+        staged_ple_total = (size_t)ws->params.n_heads * (size_t)ws->params.head_dim;
+      }
+    }
+    if (staged_ple_total != 0) {
+      // The host-table gather is per row, so the staged path keeps one prep per row (the mutex is not held here). Row 0 owns
+      // the committed length: the other rows get no committed pointer, so nothing but device memory reaches a kernel.
+      constexpr int kSlots[8] = {0, 2, 8, 9, 10, 11, 12, 13};
+      for (int r = 0; r < rows; ++r) {
+        const void* r_ctx_in = (r == 0) ? ctx_in : ((const i64*)ctx_out + 2 * (r - 1));
+        void* r_ctx_out = (i64*)ctx_out + 2 * r;
+        const int rc = qwen38_plane_prep(s, P, (const i64*)state + kSlots[r], (const i64*)state + 1, r, r_ctx_in,
+                                         r_ctx_out, (i64*)input_ids + r, (i64*)position_ids + r,
+                                         r == 0 ? committed : nullptr, past_pos,
+                                         (__nv_bfloat16*)ple_out + (size_t)r * staged_ple_total, state);
+        if (rc != 0) return rc;
+      }
+      return 0;
+    }
+    BeginLaunch();
+    k_prep_fold<<<rows, 1024, 0, stream>>>((const PleParams*)P, (const i64*)ctx_in, (i64*)ctx_out, (i64*)input_ids,
+                                           (i64*)position_ids, (int*)committed, (i64*)past_pos,
+                                           (__nv_bfloat16*)ple_out, (i64*)state);
+    return LaunchStatus();
+  }
   {
     std::lock_guard<std::mutex> lock(g_staged_ple_mu);
     cudaStream_t stream = (cudaStream_t)s;
-    const bool allow_sync = !(pos_add >= 1 && pos_add <= 3 && state != nullptr);
+    const bool allow_sync = !(pos_add >= 1 && pos_add <= 7 && state != nullptr);
     bool unregistered_staged = false;
     cudaError_t err = cudaSuccess;
     StagedPleWorkspace* ws = resolve_staged_ple_workspace(P, stream, allow_sync, &unregistered_staged, &err);
@@ -1208,16 +1359,15 @@ QWEN38_PLANE_EXPORT int qwen38_plane_prep(void* s, const void* P, const void* to
       const i64* state_i64 = (const i64*)state;
       i64 tok = 0, pos = 0, s_c0 = 0, s_c1 = 0;
       const i64* expected_fold_tok_ptr =
-          (pos_add == 1) ? (state_i64 + 2)
-                         : ((pos_add == 2) ? (state_i64 + 8) : ((pos_add == 3) ? (state_i64 + 9) : nullptr));
-      if (pos_add >= 1 && pos_add <= 3 && state != nullptr &&
+          (pos_add == 1) ? (state_i64 + 2) : ((pos_add >= 2 && pos_add <= 7) ? (state_i64 + 6 + pos_add) : nullptr);
+      if (pos_add >= 1 && pos_add <= 7 && state != nullptr &&
           state == ws->cached_state_ptr &&
           pos_ptr == (state_i64 + 1) &&
           tok_ptr == expected_fold_tok_ptr &&
           ctx_in == ws->cached_ctx_out_ptr) {
-        // Fast path for folded multi-draft rows 1..3: reuse the 10-word `ctl` snapshot copied on row 0
+        // Fast path for folded multi-draft rows 1..7: reuse the 14-word `ctl` snapshot copied on row 0
         // with zero additional D2H copies and zero cudaStreamSynchronize calls!
-        const int ctl_idx = (pos_add == 1) ? 2 : ((pos_add == 2) ? 8 : 9);
+        const int ctl_idx = (pos_add == 1) ? 2 : (6 + pos_add);
         tok = ws->scalars[ctl_idx];
         pos = ws->scalars[1] + pos_add;
         s_c0 = ws->cached_c0;
@@ -1226,25 +1376,25 @@ QWEN38_PLANE_EXPORT int qwen38_plane_prep(void* s, const void* P, const void* to
         ws->cached_c0 = s_c1;
         ws->cached_c1 = tok;
       } else if (pos_add == 0 && state != nullptr && tok_ptr == state_i64 && pos_ptr == (state_i64 + 1)) {
-        // Row 0 of EnqueueFold / EnqueueVerify / EnqueueStep: copy all 10 words of `ctl` (`ctl[0..9]`)
-        // plus `ctx_in[0..1]` in one batch so subsequent draft rows 1..3 need no stream synchronization.
-        err = staged_copy_to_host(&ws->scalars[0], state_i64, 10 * sizeof(i64), cudaMemcpyDeviceToHost, stream);
+        // Row 0 of EnqueueFold / EnqueueVerify / EnqueueStep: copy all 14 words of `ctl` (`ctl[0..13]`)
+        // plus `ctx_in[0..1]` in one batch so subsequent draft rows 1..7 need no stream synchronization.
+        err = staged_copy_to_host(&ws->scalars[0], state_i64, 14 * sizeof(i64), cudaMemcpyDeviceToHost, stream);
         if (err == cudaSuccess) {
-          err = staged_copy_to_host(&ws->scalars[10], ctx_in, 2 * sizeof(i64), cudaMemcpyDeviceToHost, stream);
+          err = staged_copy_to_host(&ws->scalars[14], ctx_in, 2 * sizeof(i64), cudaMemcpyDeviceToHost, stream);
         }
         if (err == cudaSuccess) {
           err = staged_stream_sync(stream);
         }
         if (err != cudaSuccess) {
-          // The snapshot may be half written: rows 1..3 must not reuse it.
+          // The snapshot may be half written: rows 1..7 must not reuse it.
           ws->invalidate_fold_snapshot();
           return (int)err;
         }
         ws->prep_in_flight = false;
         tok = ws->scalars[0];
         pos = ws->scalars[1];
-        s_c0 = ws->scalars[10];
-        s_c1 = ws->scalars[11];
+        s_c0 = ws->scalars[14];
+        s_c1 = ws->scalars[15];
         ws->cached_state_ptr = state;
         ws->cached_ctx_out_ptr = ctx_out;
         ws->cached_c0 = s_c1;
@@ -1593,3 +1743,198 @@ QWEN38_PLANE_EXPORT int qwen38_plane_test_stream_capture(void* stream, int begin
 }
 #endif
 }
+
+__global__ void DflashSelect(const int32_t* candidates, const float* scores, i64* control,
+                             int drafts, int top_k) {
+  const int slots[] = {2, 8, 9, 10, 11, 12, 13};
+  int previous = 0;
+  for (int step = 0; step < drafts; ++step) {
+    const float* row = scores + (step * top_k + previous) * top_k;
+    int best = 0;
+    for (int index = 1; index < top_k; ++index) {
+      if (row[best] < row[index]) best = index;
+    }
+    control[slots[step]] = candidates[step * top_k + best];
+    previous = best;
+  }
+}
+
+extern "C" QWEN38_PLANE_EXPORT int qwen38_plane_dflash_select(
+    void* stream, const void* candidates, const void* scores,
+    void* control, int drafts, int top_k) {
+  if (!candidates || !scores || !control || drafts < 1 || drafts > 7 || top_k < 1)
+    return static_cast<int>(cudaErrorInvalidValue);
+  BeginLaunch();
+  DflashSelect<<<1, 1, 0, static_cast<cudaStream_t>(stream)>>>(
+      static_cast<const int32_t*>(candidates), static_cast<const float*>(scores),
+      static_cast<i64*>(control), drafts, top_k);
+  return LaunchStatus();
+}
+static_assert(std::is_same<decltype(&qwen38_plane_dflash_select), Qwen38PlaneDflashSelectFn>::value,
+              "qwen38_plane_dflash_select must match Qwen38PlaneDflashSelectFn");
+
+namespace {
+
+constexpr int kPlaneReplayThreads = 256;
+constexpr int kPlaneReplayRows = QWEN38_PLANE_REPLAY_ROWS_PER_BLOCK;
+constexpr int kPlaneMaxReplayTransitions = QWEN38_PLANE_MAX_REPLAY_TRANSITIONS;
+constexpr int kPlaneMaxReplayKeyWidth = QWEN38_PLANE_MAX_REPLAY_KEY_WIDTH;
+static_assert(kPlaneMaxReplayKeyWidth % 4 == 0, "k_replay_gdn loads float4 along the key width");
+constexpr int kPlaneGenericBlocksPerDesc = 128;
+
+__global__ void __launch_bounds__(kPlaneReplayThreads) k_replay_gdn(
+    const Qwen38StateReplayDesc* __restrict__ descs, int kept_override) {
+  __shared__ float key_tile[kPlaneMaxReplayTransitions * kPlaneMaxReplayKeyWidth];
+  __shared__ float delta_tile[kPlaneMaxReplayTransitions * kPlaneReplayRows];
+  __shared__ float decay_tile[kPlaneMaxReplayTransitions];
+
+  const Qwen38StateReplayDesc d = descs[blockIdx.y];
+  const int value_width = static_cast<int>(d.state_width);
+  const int key_width = static_cast<int>(d.key_width);
+  const int heads = static_cast<int>(d.channel_count);
+  const int key_heads = static_cast<int>(d.key_head_count);
+  const int kept = kept_override > 0 ? kept_override : static_cast<int>(d.kept_count);
+  const int chunks = QWEN38_PLANE_REPLAY_BLOCKS_PER_HEAD(value_width);
+  const int head = blockIdx.x / chunks;
+  if (head >= heads) return;
+  const int first_row = (blockIdx.x - head * chunks) * kPlaneReplayRows;
+  const int key_head = head / (heads / key_heads);
+
+  for (int i = threadIdx.x; i < kept * key_width; i += blockDim.x) {
+    const int t = i / key_width;
+    const int k = i - t * key_width;
+    key_tile[t * key_width + k] =
+        d.key[(static_cast<size_t>(t) * key_heads + key_head) * key_width + k];
+  }
+  for (int i = threadIdx.x; i < kept * kPlaneReplayRows; i += blockDim.x) {
+    const int t = i / kPlaneReplayRows;
+    const int r = i - t * kPlaneReplayRows;
+    const int v = first_row + r;
+    delta_tile[i] = v < value_width
+                        ? d.delta[(static_cast<size_t>(t) * heads + head) * value_width + v]
+                        : 0.0f;
+  }
+  if (static_cast<int>(threadIdx.x) < kept) {
+    decay_tile[threadIdx.x] = d.decay[static_cast<size_t>(threadIdx.x) * heads + head];
+  }
+  __syncthreads();
+
+  const int lane = threadIdx.x & 31;
+  const int warp = threadIdx.x >> 5;
+  const auto* source = static_cast<const float*>(d.source_state);
+  auto* destination = static_cast<float*>(d.destination_state);
+  for (int r = warp; r < kPlaneReplayRows; r += kPlaneReplayThreads / 32) {
+    const int v = first_row + r;
+    if (v >= value_width) break;
+    const size_t row = (static_cast<size_t>(head) * value_width + v) * key_width;
+    for (int k = lane * 4; k < key_width; k += 128) {
+      float4 s = *reinterpret_cast<const float4*>(source + row + k);
+      for (int t = 0; t < kept; ++t) {
+        const float decay = decay_tile[t];
+        const float delta = delta_tile[t * kPlaneReplayRows + r];
+        const float* key = key_tile + t * key_width + k;
+        s.x = __fmaf_rn(key[0], delta, __fmul_rn(s.x, decay));
+        s.y = __fmaf_rn(key[1], delta, __fmul_rn(s.y, decay));
+        s.z = __fmaf_rn(key[2], delta, __fmul_rn(s.z, decay));
+        s.w = __fmaf_rn(key[3], delta, __fmul_rn(s.w, decay));
+      }
+      *reinterpret_cast<float4*>(destination + row + k) = s;
+    }
+  }
+}
+
+__global__ void k_replay_generic(const Qwen38StateReplayDesc* __restrict__ descs, int kept_override) {
+  const Qwen38StateReplayDesc descriptor = descs[blockIdx.y];
+  const uint32_t kept_count = kept_override > 0 ? static_cast<uint32_t>(kept_override) : descriptor.kept_count;
+  const uint64_t stride = static_cast<uint64_t>(gridDim.x) * blockDim.x;
+  const uint64_t start = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+
+  if (descriptor.kind == 4) {
+    const int32_t old_key_length = descriptor.source_lengths[0];
+    const int32_t old_buffer_length = descriptor.source_lengths[1];
+    const uint64_t new_block_count =
+        (static_cast<uint64_t>(old_buffer_length) + kept_count) / descriptor.compress_ratio;
+    const uint64_t new_buffer_length =
+        (static_cast<uint64_t>(old_buffer_length) + kept_count) % descriptor.compress_ratio;
+    for (uint64_t index = start; index < descriptor.aux_capacity * descriptor.state_width; index += stride) {
+      const uint64_t entry = index / descriptor.state_width;
+      const uint64_t component = index % descriptor.state_width;
+      uint64_t source_index = index;
+      const void* source = descriptor.source_aux_state;
+      if (entry < new_buffer_length) {
+        const uint64_t virtual_position = new_block_count * descriptor.compress_ratio + entry;
+        const bool from_old_buffer = virtual_position < static_cast<uint64_t>(old_buffer_length);
+        source_index =
+            (from_old_buffer ? virtual_position : virtual_position - old_buffer_length) *
+                descriptor.state_width +
+            component;
+        source = from_old_buffer ? descriptor.source_aux_state : descriptor.value;
+      }
+      if (descriptor.element_size == 2) {
+        static_cast<uint16_t*>(descriptor.destination_aux_state)[index] =
+            static_cast<const uint16_t*>(source)[source_index];
+      } else {
+        static_cast<uint32_t*>(descriptor.destination_aux_state)[index] =
+            static_cast<const uint32_t*>(source)[source_index];
+      }
+    }
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
+      descriptor.destination_lengths[0] = old_key_length + static_cast<int32_t>(new_block_count);
+      descriptor.destination_lengths[1] = static_cast<int32_t>(new_buffer_length);
+    }
+    return;
+  }
+
+  if (descriptor.kind == 1) {
+    const uint64_t state_elements = descriptor.channel_count * descriptor.state_width;
+    for (uint64_t state_index = start; state_index < state_elements; state_index += stride) {
+      const uint64_t channel = state_index / descriptor.state_width;
+      const uint64_t position = state_index - channel * descriptor.state_width;
+      const uint64_t shifted_position = position + kept_count;
+      const uint64_t source_index = shifted_position < descriptor.state_width
+                                        ? channel * descriptor.state_width + shifted_position
+                                        : (shifted_position - descriptor.state_width) *
+                                                  descriptor.channel_count +
+                                              channel;
+      if (descriptor.element_size == 2) {
+        const auto* source = shifted_position < descriptor.state_width
+                                 ? static_cast<const uint16_t*>(descriptor.source_state)
+                                 : static_cast<const uint16_t*>(descriptor.value);
+        static_cast<uint16_t*>(descriptor.destination_state)[state_index] = source[source_index];
+      } else if (descriptor.element_size == 4) {
+        const auto* source = shifted_position < descriptor.state_width
+                                 ? static_cast<const uint32_t*>(descriptor.source_state)
+                                 : static_cast<const uint32_t*>(descriptor.value);
+        static_cast<uint32_t*>(descriptor.destination_state)[state_index] = source[source_index];
+      }
+    }
+  }
+}
+
+}  // namespace
+
+extern "C" QWEN38_PLANE_EXPORT int qwen38_plane_replay_state_updates(
+    void* stream, const void* descs, int fast_count, int generic_count,
+    int fast_blocks_per_descriptor, int kept_count) {
+  // Counts and block budgets that would skip a launch without a word leave the destination bank stale: they are refused.
+  if (!descs || kept_count < 1 || kept_count > kPlaneMaxReplayTransitions || fast_count < 0 || generic_count < 0 ||
+      (fast_count > 0 && fast_blocks_per_descriptor < 1)) {
+    return static_cast<int>(cudaErrorInvalidValue);
+  }
+  const auto* typed = static_cast<const Qwen38StateReplayDesc*>(descs);
+  cudaStream_t cu_stream = static_cast<cudaStream_t>(stream);
+  BeginLaunch();
+  if (fast_count > 0) {
+    const dim3 grid(static_cast<unsigned>(fast_blocks_per_descriptor), static_cast<unsigned>(fast_count));
+    k_replay_gdn<<<grid, kPlaneReplayThreads, 0, cu_stream>>>(typed, kept_count);
+    if (const int status = LaunchStatus()) return status;
+  }
+  if (generic_count > 0) {
+    const dim3 grid(kPlaneGenericBlocksPerDesc, static_cast<unsigned>(generic_count));
+    k_replay_generic<<<grid, kPlaneReplayThreads, 0, cu_stream>>>(typed + fast_count, kept_count);
+    if (const int status = LaunchStatus()) return status;
+  }
+  return 0;
+}
+static_assert(std::is_same<decltype(&qwen38_plane_replay_state_updates), Qwen38PlaneReplayStateUpdatesFn>::value,
+              "qwen38_plane_replay_state_updates must match Qwen38PlaneReplayStateUpdatesFn");

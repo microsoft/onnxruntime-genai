@@ -43,6 +43,66 @@ static_assert(sizeof(void*) != 8 || offsetof(Qwen38PleParams, eos) == 4664, "Qwe
 static_assert(sizeof(void*) != 8 || offsetof(Qwen38PleParams, capacity) == 4672, "Qwen38PleParams layout changed");
 #endif
 
+// Device descriptor for compact state-update replay (GatedDeltaNet, CausalConvWithState, PackedSparseAttentionIndexer).
+typedef struct Qwen38StateReplayDesc {
+  const void* source_state;
+  void* destination_state;
+  const void* value;
+  const float* decay;
+  const float* key;
+  const float* delta;
+  const void* source_aux_state;
+  void* destination_aux_state;
+  const int32_t* source_lengths;
+  int32_t* destination_lengths;
+  uint64_t channel_count;
+  uint64_t state_width;
+  uint64_t key_width;
+  uint64_t key_head_count;
+  uint64_t state_capacity;
+  uint64_t aux_capacity;
+  uint32_t capacity;
+  uint32_t kept_count;
+  uint32_t element_size;
+  uint32_t compress_ratio;
+  uint32_t kind;
+} Qwen38StateReplayDesc;
+
+// Limits of the compact state-update replay kernels (k_replay_gdn, k_replay_generic). The plane sizes its shared tiles and its
+// grid from them and the host checks every replay descriptor against them while it builds it (ValidateQwen38ReplayDescriptor),
+// so a geometry the kernels cannot hold fails the model load instead of silently corrupting the recurrent state.
+#define QWEN38_PLANE_MAX_REPLAY_TRANSITIONS 8  // transitions one replay keeps: the capacity of the state_update outputs
+#define QWEN38_PLANE_MAX_REPLAY_KEY_WIDTH 256  // GatedDeltaNet key width: a row of the key tile (a multiple of 4: float4 loads)
+#define QWEN38_PLANE_REPLAY_ROWS_PER_BLOCK 32  // value rows of a GatedDeltaNet state one thread block of k_replay_gdn replays
+// Thread blocks per value head of a state of `width` >= 1 value rows: ceil(width / QWEN38_PLANE_REPLAY_ROWS_PER_BLOCK).
+// The kernel counts them in int and the host in uint64_t; the state can be INT32_MAX rows tall, where the usual
+// (width + rows - 1) / rows overflows an int.
+#define QWEN38_PLANE_REPLAY_BLOCKS_PER_HEAD(width) (1 + ((width) - 1) / QWEN38_PLANE_REPLAY_ROWS_PER_BLOCK)
+
+// Optional exports "qwen38_plane_dflash_select" and "qwen38_plane_replay_state_updates": a library that predates them lacks the
+// symbols, the loader leaves the pointers null, and the host then selects the draft chain itself and refuses compact state
+// updates. Both return 0 or a cudaError_t, including the error of their own launch; cudaErrorInvalidValue comes before anything
+// is launched, for the arguments named below.
+//
+// dflash_select walks the lattice of the drafter on the device: step s takes the best-scoring of the top_k candidates of the
+// branch that step s - 1 chose (branch 0 for s = 0) and writes the token id to control word {2, 8, 9, 10, 11, 12, 13}[s]. The
+// candidates are [drafts, top_k] int32 and the scores [drafts, top_k, top_k] float (the row of step s is that of the branch
+// chosen before it); a tie takes the first of the best. drafts has to be in [1, 7], top_k at least 1, no pointer null.
+typedef int (*Qwen38PlaneDflashSelectFn)(void* stream, const void* candidates, const void* scores, void* control, int drafts,
+                                         int top_k);
+
+// replay_state_updates keeps the first kept_count (1 .. QWEN38_PLANE_MAX_REPLAY_TRANSITIONS) transitions of the state updates
+// of a verify step. descs holds fast_count GatedDeltaNet descriptors (kind 2) followed by generic_count descriptors of the
+// other kinds (1 = CausalConvWithState, 4 = PackedSparseAttentionIndexer; the Snapshot kind 3 of the host is not replayed by
+// the plane). Every GatedDeltaNet descriptor gets fast_blocks_per_descriptor thread blocks, which have to cover its
+// heads * QWEN38_PLANE_REPLAY_BLOCKS_PER_HEAD(state_width) blocks. kept_count replaces the one of every descriptor.
+// Negative counts, a missing block budget for GatedDeltaNet descriptors, a null descs and a kept_count out of range are
+// refused: a call that would skip its work and report success would leave the destination state stale. What the descriptors
+// hold lives on the device and cannot be checked by the plane; the host validates it while it builds them
+// (ValidateQwen38ReplayDescriptor).
+typedef int (*Qwen38PlaneReplayStateUpdatesFn)(void* stream, const void* descs, int fast_count, int generic_count,
+                                               int fast_blocks_per_descriptor, int kept_count);
+
 // X(return type, name, parameter list). The exported symbol is "qwen38_plane_" + name. `stream` is a cudaStream_t.
 // CUDA runtime helpers return the cudaError_t as int (0 = success).
 //
@@ -66,6 +126,14 @@ static_assert(sizeof(void*) != 8 || offsetof(Qwen38PleParams, capacity) == 4672,
 // The other kernel exports return void. A launch the CUDA runtime rejects (bad configuration, no kernel image for the
 // device, a failed lazy module load) leaves the stream healthy, so the failure is kept and reported, once, by the next
 // stream_sync.
+//
+// prep prepares the graph inputs of one row: the token is read from tok_ptr and the position from pos_ptr plus pos_add. With
+// QWEN38_PLANE_CAP_NEGATIVE_POS_ADD_BATCH a pos_add in [-8, -2] instead prepares the rows = -pos_add rows of one folded verify
+// step in a single call, from the control words `state` (int64): row r takes its token from word {0, 2, 8, 9, 10, 11, 12, 13}[r]
+// and runs at position state[1] + r, and its n-gram context follows the tokens of the rows before it (row 0 starts from
+// ctx_in). For row r it writes input_ids[r] and position_ids[r] (int64), past_pos[position], ple_out + r * n_heads * head_dim
+// (bfloat16) and ctx_out[2r .. 2r + 1] (the token before it, then its own). Only row 0 writes committed[0] (int32), and a null
+// committed pointer skips it, as for one row; a position outside the table sets bit 0 of state[5], as for one row.
 //
 // The module keeps process-wide state (the staged tables registered through set_ple_host_params) that is shared by every
 // loader of the same library file. A loader calls attach once the module is loaded and validated and detach once before it
@@ -132,11 +200,15 @@ static_assert(sizeof(void*) != 8 || offsetof(Qwen38PleParams, capacity) == 4672,
 // selects it, and cover a library with and a library without the bit in the qwen38_plane tests.
 #define QWEN38_PLANE_CAP_INT8_EMBEDDING 0x1ull  // embed_gather: per-row INT8 embedding tables (any row count)
 #define QWEN38_PLANE_CAP_INT8_PLE 0x2ull        // a negative Qwen38PleParams::scale marks INT8 PLE shards
+// prep: a pos_add in [-8, -2] prepares the -pos_add rows of one folded verify step in a single call (see the notes on prep
+// above). A library without it reads that pos_add as an offset of one row and leaves the other rows of the step stale.
+#define QWEN38_PLANE_CAP_NEGATIVE_POS_ADD_BATCH 0x4ull
 
 // X(bit, name), in bit order.
 #define QWEN38_PLANE_CAPABILITIES(X)                   \
   X(QWEN38_PLANE_CAP_INT8_EMBEDDING, "int8_embedding") \
-  X(QWEN38_PLANE_CAP_INT8_PLE, "int8_ple")
+  X(QWEN38_PLANE_CAP_INT8_PLE, "int8_ple")             \
+  X(QWEN38_PLANE_CAP_NEGATIVE_POS_ADD_BATCH, "negative_pos_add_batch")
 
 #define QWEN38_PLANE_CAPABILITY_BIT_(bit, name) | (bit)
 #define QWEN38_PLANE_ALL_CAPABILITIES (0ull QWEN38_PLANE_CAPABILITIES(QWEN38_PLANE_CAPABILITY_BIT_))
