@@ -403,7 +403,9 @@ TEST(ReInitTests, ALegacyCudaSessionWithoutAnIdIsBoundToGpuZero) {
 // A leaked stream cannot be seen from the outside (the streams of a process cannot be counted, and a destroyed one must not be
 // queried), so a Release build catches the last case only, as the null stream checked below.
 TEST(ReInitTests, TheCudaAddOnIsEnteredAgainWhenTheBuiltInQwen38PlaneKeepsItMapped) {
-  // A round is what loading a qwen38_flash_graph model and unloading it again does to the add-on.
+  // A round is what loading a qwen38_flash_graph model and unloading it again does to the add-on. Only the first round may
+  // find the setup unusable and skip: a later round that cannot enter the add-on again, or finds it unmapped, is the failure
+  // this test is about.
   for (int round = 0; round < 3; ++round) {
     Generators::DeviceInterface* device = nullptr;
     try {
@@ -411,7 +413,8 @@ TEST(ReInitTests, TheCudaAddOnIsEnteredAgainWhenTheBuiltInQwen38PlaneKeepsItMapp
       device->InitOrt(*Ort::api, Ort::Allocator::GetWithDefaultOptions());
     } catch (const std::exception& e) {
       OgaShutdown();
-      GTEST_SKIP() << "the CUDA add-on is not usable here: " << e.what();
+      if (round == 0) GTEST_SKIP() << "the CUDA add-on is not usable here: " << e.what();
+      FAIL() << "the CUDA add-on could not be entered again in round " << round << ": " << e.what();
     }
     ASSERT_NE(device->GetCudaStream(), nullptr) << "round " << round;
     EXPECT_NO_THROW(device->Synchronize()) << "round " << round;
@@ -420,12 +423,16 @@ TEST(ReInitTests, TheCudaAddOnIsEnteredAgainWhenTheBuiltInQwen38PlaneKeepsItMapp
       Generators::Qwen38Plane plane{std::filesystem::path{}};  // what a qwen38_flash_graph model loads
     } catch (const std::exception& e) {
       OgaShutdown();
-      GTEST_SKIP() << "the CUDA add-on has no qwen38 plane: " << e.what();
+      if (round == 0) GTEST_SKIP() << "the CUDA add-on has no qwen38 plane: " << e.what();
+      FAIL() << "the qwen38 plane could not be loaded again in round " << round << ": " << e.what();
     }
 
     OgaShutdown();
-    if (!CudaAddOnIsMapped())
-      GTEST_SKIP() << "OgaShutdown() unloaded the CUDA add-on in spite of the plane, so there is no re-entry to cover";
+    if (!CudaAddOnIsMapped()) {
+      if (round == 0)
+        GTEST_SKIP() << "OgaShutdown() unloaded the CUDA add-on in spite of the plane, so there is no re-entry to cover";
+      FAIL() << "OgaShutdown() unloaded the CUDA add-on in round " << round << ", although the plane kept it mapped before";
+    }
   }
 }
 #endif  // USE_CUDA
