@@ -245,7 +245,8 @@ struct StateUpdateReplayDesc {
 // Version 16: DeviceInterface gained SelectDevice.
 // Version 17: Config::Model gained the qwen38_graph member, which changed the layouts of Config::Model and Config.
 // Version 18: DeviceBuffer::CopyCpuRangeToDevice shifted the virtual slots that follow CopyCpuToDevice.
-inline constexpr uint32_t kDeviceInterfaceVersion = 18;
+// Version 19: Config::Model::Qwen38Graph gained max_batch_size, which changed the layouts of Config::Model and Config.
+inline constexpr uint32_t kDeviceInterfaceVersion = 19;
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}
