@@ -12,6 +12,7 @@
 
 #include "models/model.h"
 #include "models/cpu_embedding.h"
+#include "dflash2_staging.h"
 #include "engine/graph_annotation_ids.h"
 #include "decoding/speculative_sampling.h"
 #include "engine/prefix_snapshot_cache.h"
@@ -188,6 +189,10 @@ struct Dflash2Drafter {
   // session declares it. Propose slices the caller's tensor with this stride and does not check it against the tensor.
   size_t AuxHiddenSize() const { return aux_hidden_size_; }
   ONNXTensorElementDataType AuxType() const { return aux_type_; }
+  // A caller that proposes for one request after the other without waiting for the device in between (several request slots of
+  // one engine) asks for a fresh host mirror per upload, so a proposal never rewrites the mirror the previous one is still
+  // being uploaded from (Dflash2HostStaging).
+  void SetFreshStagingMirrors(bool fresh) noexcept { staging_.SetFreshMirrorPerUpload(fresh); }
   size_t AdmissionMisses() const { return admission_misses_; }
 
   // A windowed drafter retains only a bounded ring, independently of the target context length.
@@ -299,7 +304,7 @@ struct Dflash2Drafter {
   std::unordered_map<const Request*, RequestState> requests_;
   size_t admission_misses_{};
 
-  std::unordered_map<const Tensor*, DeviceSpan<uint8_t>> staging_;
+  Dflash2HostStaging staging_;
   std::unique_ptr<OrtRunOptions> run_options_;
 };
 

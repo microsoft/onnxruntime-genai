@@ -103,6 +103,11 @@ typedef int (*Qwen38PlaneDflashSelectFn)(void* stream, const void* candidates, c
 typedef int (*Qwen38PlaneReplayStateUpdatesFn)(void* stream, const void* descs, int fast_count, int generic_count,
                                                int fast_blocks_per_descriptor, int kept_count);
 
+// Limits of the folded multi-row prep (prep with a negative pos_add, prep_batched).
+#define QWEN38_PLANE_MAX_PREP_ROWS 8        // rows of one folded verify step
+#define QWEN38_PLANE_MAX_PREP_BATCH 8       // request slots prep_batched prepares in one call
+#define QWEN38_PLANE_CTL_WORDS_PER_SLOT 16  // int64 control words of one request slot (the `state` of prep)
+
 // X(return type, name, parameter list). The exported symbol is "qwen38_plane_" + name. `stream` is a cudaStream_t.
 // CUDA runtime helpers return the cudaError_t as int (0 = success).
 //
@@ -133,7 +138,9 @@ typedef int (*Qwen38PlaneReplayStateUpdatesFn)(void* stream, const void* descs, 
 // and runs at position state[1] + r, and its n-gram context follows the tokens of the rows before it (row 0 starts from
 // ctx_in). For row r it writes input_ids[r] and position_ids[r] (int64), past_pos[position], ple_out + r * n_heads * head_dim
 // (bfloat16) and ctx_out[2r .. 2r + 1] (the token before it, then its own). Only row 0 writes committed[0] (int32), and a null
-// committed pointer skips it, as for one row; a position outside the table sets bit 0 of state[5], as for one row.
+// committed pointer skips it, as for one row; a position outside the table sets bit 0 of state[5], as for one row. A pos_add
+// below -8 is not a row count: prep returns cudaErrorInvalidValue before it launches anything. Several request slots in one
+// call are prepared by prep_batched (QWEN38_PLANE_CAP_BATCHED_PREP), never by an encoding inside pos_add.
 //
 // The module keeps process-wide state (the staged tables registered through set_ple_host_params) that is shared by every
 // loader of the same library file. A loader calls attach once the module is loaded and validated and detach once before it
@@ -203,12 +210,16 @@ typedef int (*Qwen38PlaneReplayStateUpdatesFn)(void* stream, const void* descs, 
 // prep: a pos_add in [-8, -2] prepares the -pos_add rows of one folded verify step in a single call (see the notes on prep
 // above). A library without it reads that pos_add as an offset of one row and leaves the other rows of the step stale.
 #define QWEN38_PLANE_CAP_NEGATIVE_POS_ADD_BATCH 0x4ull
+// prep_batched: the optional export "qwen38_plane_prep_batched" (below), the folded prep of several request slots in one call.
+// Only a model with model.qwen38_graph.max_batch_size > 1 needs it, so a library without it still loads every other package.
+#define QWEN38_PLANE_CAP_BATCHED_PREP 0x8ull
 
 // X(bit, name), in bit order.
-#define QWEN38_PLANE_CAPABILITIES(X)                   \
-  X(QWEN38_PLANE_CAP_INT8_EMBEDDING, "int8_embedding") \
-  X(QWEN38_PLANE_CAP_INT8_PLE, "int8_ple")             \
-  X(QWEN38_PLANE_CAP_NEGATIVE_POS_ADD_BATCH, "negative_pos_add_batch")
+#define QWEN38_PLANE_CAPABILITIES(X)                                   \
+  X(QWEN38_PLANE_CAP_INT8_EMBEDDING, "int8_embedding")                 \
+  X(QWEN38_PLANE_CAP_INT8_PLE, "int8_ple")                             \
+  X(QWEN38_PLANE_CAP_NEGATIVE_POS_ADD_BATCH, "negative_pos_add_batch") \
+  X(QWEN38_PLANE_CAP_BATCHED_PREP, "batched_prep")
 
 #define QWEN38_PLANE_CAPABILITY_BIT_(bit, name) | (bit)
 #define QWEN38_PLANE_ALL_CAPABILITIES (0ull QWEN38_PLANE_CAPABILITIES(QWEN38_PLANE_CAPABILITY_BIT_))
@@ -237,6 +248,28 @@ typedef int (*Qwen38PlaneEmbedGatherFn)(void* stream, const void* table, long lo
 // embed_gather. It reads a BF16 table of an unknown row count, so it applies no upper bound to the ids, it does nothing
 // for a width <= 0 (it has no INT8 mode), and its width must be a multiple of 8 (the loader refuses a BF16 table of another
 // width). The loader uses it only for a BF16 table when the library has no embed_gather.
+
+// Optional export "qwen38_plane_prep_batched" (QWEN38_PLANE_CAP_BATCHED_PREP): prep of the `rows` rows of one folded verify
+// step (see prep; rows == 1 is the plain next-token row) for each of `batch` request slots, in one call. `rows` is in
+// [1, QWEN38_PLANE_MAX_PREP_ROWS] and `batch` in [1, QWEN38_PLANE_MAX_PREP_BATCH]; the pointers are those of prep except
+// that every one is the base of an array over the slots, which are numbered 0 .. batch - 1:
+//   state         int64, QWEN38_PLANE_CTL_WORDS_PER_SLOT words per slot, the control words of the slot (prep's `state`)
+//   ctx_in        int64[batch][2]                       the n-gram context in front of row 0
+//   ctx_out       int64[batch][rows][2]                 as for prep, slot after slot
+//   input_ids, position_ids   int64[batch][rows]
+//   committed     int32[batch], or null to skip         row 0 of the slot writes its committed length
+//   past_pos      int64[batch][Qwen38PleParams::capacity]
+//   ple_out       bfloat16[batch][rows][n_heads * head_dim]
+// A slot whose control word state[3] is nonzero is muted: its rows are token 0 at position r with eos contexts and a zero PLE
+// row, so a slot that takes no part in the step still feeds the graph valid inputs, and its control words are left alone. A
+// table that is staged on the host prepares the rows of every slot from its control words, muted or not (those of a muted
+// slot hold token 0 at position 0 after the engine mutes it, plus the draft tokens it kept, all valid inputs); the caller
+// ignores the rows of a muted slot either way.
+// Returns 0, or the cudaError_t: cudaErrorInvalidValue before anything is launched for a `rows` or `batch` out of range or a
+// null pointer other than `committed`, and, for a PLE table staged on the host, the errors named for prep.
+typedef int (*Qwen38PlanePrepBatchedFn)(void* stream, const void* params, int rows, int batch, const void* ctx_in, void* ctx_out,
+                                        void* input_ids, void* position_ids, void* committed, void* past_pos, void* ple_out,
+                                        void* state);
 
 // ---- Test hooks -------------------------------------------------------------------------------------------------------
 // Compiled into the library only when it is built with QWEN38_PLANE_TEST_HOOKS (the CMake option ENABLE_TESTS). They are not

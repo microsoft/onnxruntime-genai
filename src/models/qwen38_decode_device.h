@@ -74,8 +74,18 @@ class Qwen38DecodeDevice {
   // Announces the total prompt length (0 = unknown) of the turn that the following PrefillChunk() calls ingest in
   // chunks. Call it after Reset() and before the first chunk; Reset() and BeginDecode() drop it. The device hands it to
   // the ORT QMoE kernels with every prompt chunk instead of the length seen so far. This replaces publishing
-  // ORT_QMOE_PREFILL_TOTAL_TOKENS from the caller: the device never reads that variable.
+  // ORT_QMOE_PREFILL_TOTAL_TOKENS from the caller: the device never reads that variable, and the caller never touches
+  // the process environment.
   virtual void ExpectPrefillTokens(size_t total_tokens) { (void)total_tokens; }
+  // The same for the turn of `slot` of a multi-slot device: the length is that slot's own state, so the prompts of
+  // several slots that are ingested in interleaved chunks never see each other's length. Call it after ResetSlot(slot)
+  // and before the first PrefillChunkSlot(slot, ...); ResetSlot(slot) and BeginDecodeSlot(slot, ...) drop it. The device
+  // hands it to ORT only with the Runs that ingest a chunk of that slot. Slot 0 of a single-slot device is
+  // ExpectPrefillTokens().
+  virtual void ExpectPrefillTokensSlot(size_t slot, size_t total_tokens) {
+    if (slot != 0) throw std::logic_error("Single-slot device only supports slot 0.");
+    ExpectPrefillTokens(total_tokens);
+  }
 
   // Starts decoding after the prompt: hands the prompt state over to the decode state (fast prefill), prepares the head and,
   // when `run_cycle`, enqueues the first cycle (so that it is running before the first token is returned to the caller).
@@ -88,7 +98,8 @@ class Qwen38DecodeDevice {
   // stack, from the standalone head, whose status the cycle record does not carry. Valid once BeginDecode ran, also
   // right after Drain() while the record of the last cycle is still unconsumed (cancellation, stop string): it
   // synchronizes the stream itself, so the error of a cycle nobody waited for is reported here instead of being
-  // cleared by the next Reset().
+  // cleared by the next Reset() or ResetSlot(). A device with several slots reports the error of every slot that
+  // started a decode, not only slot 0's; the executor calls it, after Drain(), before it resets a slot.
   virtual void CheckDecodeStatus() {}
 
   // Positions at the end of the KV store that are never filled: a verify step of R rows writes R rows past the committed length,
@@ -99,6 +110,48 @@ class Qwen38DecodeDevice {
   size_t MaxSequenceLength() const {
     const int room = Capacity() - ReservedTail();
     return room > 0 ? static_cast<size_t>(room) : 0;
+  }
+
+  // Multi-slot / batched execution contract (defaults to single-slot slot 0).
+  virtual size_t MaxBatchSize() const { return 1; }
+
+  virtual void ResetSlot(size_t slot) {
+    if (slot != 0) throw std::logic_error("Single-slot device only supports slot 0.");
+    Reset();
+  }
+  virtual void PrefillChunkSlot(size_t slot, std::span<const int32_t> tokens) {
+    if (slot != 0) throw std::logic_error("Single-slot device only supports slot 0.");
+    PrefillChunk(tokens);
+  }
+  virtual int32_t PendingTokenSlot(size_t slot) const {
+    if (slot != 0) throw std::logic_error("Single-slot device only supports slot 0.");
+    return PendingToken();
+  }
+  virtual void BeginDecodeSlot(size_t slot, bool want_more) {
+    if (slot != 0) throw std::logic_error("Single-slot device only supports slot 0.");
+    BeginDecode(want_more);
+  }
+  virtual void EnqueueBatchDecode(std::span<const size_t> active_slots) {
+    (void)active_slots;
+  }
+  virtual void WaitBatchDecode(std::span<const size_t> active_slots,
+                               std::span<Qwen38CycleRecord> records) {
+    if (active_slots.size() == 1 && active_slots[0] == 0 && !records.empty()) {
+      records[0] = WaitCycle();
+      return;
+    }
+    throw std::logic_error("Single-slot device does not implement WaitBatchDecode for multiple slots.");
+  }
+  virtual void AdvanceBatchDecode(std::span<const size_t> active_slots,
+                                  std::span<const Qwen38CycleRecord> records,
+                                  std::span<const uint8_t> want_more,
+                                  bool defer_next_cycle = false) {
+    (void)defer_next_cycle;
+    if (active_slots.size() == 1 && active_slots[0] == 0 && !records.empty() && !want_more.empty()) {
+      Advance(records[0], want_more[0] != 0);
+      return;
+    }
+    throw std::logic_error("Single-slot device does not implement AdvanceBatchDecode for multiple slots.");
   }
 };
 

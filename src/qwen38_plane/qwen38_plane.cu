@@ -679,22 +679,59 @@ __global__ void k_prep(const PleParams* P, const i64* tok_ptr, const i64* pos_pt
   }
 }
 
+// One block per (row, slot). `honor_mute` is set by prep_batched only: a slot whose control word state[3] is nonzero prepares
+// idle inputs there, while prep (one slot, any control words the caller hands over) never reads that word.
 __global__ void __launch_bounds__(1024) k_prep_fold(const PleParams* P, const i64* ctx_in, i64* ctx_a, i64* input_ids,
                                                     i64* position_ids, int* committed, i64* past_pos,
-                                                    __nv_bfloat16* ple_out, i64* state) {
+                                                    __nv_bfloat16* ple_out, i64* state, int honor_mute) {
   __shared__ i64 s_row[32];
   __shared__ const unsigned char* s_src[32];
-  __shared__ i64 s_tok, s_pos, s_c0, s_c1;
+  __shared__ i64 s_tok, s_pos, s_c0, s_c1, s_muted;
   const int row = blockIdx.x;
+  const int rows = gridDim.x;
+  const int b = blockIdx.y;
   const int tid = threadIdx.x;
+  i64* state_b = state + (size_t)b * 16;
+  const i64* ctx_in_b = ctx_in + (size_t)b * 2;
+  i64* ctx_a_b = ctx_a + (size_t)b * 2 * rows;
+  i64* input_ids_b = input_ids + (size_t)b * rows;
+  i64* position_ids_b = position_ids + (size_t)b * rows;
+  int* committed_b = committed != nullptr ? committed + b : nullptr;  // null: the caller keeps no committed length
+  i64* past_pos_b = past_pos + (size_t)b * P->capacity;
+  const int hd = P->head_dim;
+  const int total = P->n_heads * hd;
+  __nv_bfloat16* row_ple = ple_out + ((size_t)b * rows + row) * total;
+
   if (tid == 0) {
-    constexpr int kSlots[8] = {0, 2, 8, 9, 10, 11, 12, 13};
-    s_tok = state[kSlots[row]];
-    s_pos = state[1] + row;
-    s_c1 = (row == 0) ? ctx_in[1] : state[kSlots[row - 1]];
-    s_c0 = (row == 0) ? ctx_in[0] : ((row == 1) ? ctx_in[1] : state[kSlots[row - 2]]);
+    s_muted = honor_mute != 0 ? state_b[3] : 0;
+    if (s_muted != 0) {
+      s_tok = 0;
+      s_pos = row;
+      s_c1 = P->eos;
+      s_c0 = P->eos;
+    } else {
+      constexpr int kSlots[8] = {0, 2, 8, 9, 10, 11, 12, 13};
+      s_tok = state_b[kSlots[row]];
+      s_pos = state_b[1] + row;
+      s_c1 = (row == 0) ? ctx_in_b[1] : state_b[kSlots[row - 1]];
+      s_c0 = (row == 0) ? ctx_in_b[0] : ((row == 1) ? ctx_in_b[1] : state_b[kSlots[row - 2]]);
+    }
   }
   __syncthreads();
+  if (s_muted != 0) {
+    if (tid == 0) {
+      input_ids_b[row] = 0;
+      position_ids_b[row] = row;
+      if (row == 0 && committed_b != nullptr) committed_b[0] = 0;
+      if (row < P->capacity) past_pos_b[row] = row;
+      ctx_a_b[2 * row + 0] = P->eos;
+      ctx_a_b[2 * row + 1] = 0;
+    }
+    for (int j = tid; j < total; j += blockDim.x) {
+      row_ple[j] = __float2bfloat16_rn(0.0f);
+    }
+    return;
+  }
   const i64 tok = s_tok, pos = s_pos, c1 = s_c1;
   const i64 c0 = (c1 == P->eos) ? P->eos : s_c0;
   if (tid < P->n_heads) {
@@ -719,48 +756,45 @@ __global__ void __launch_bounds__(1024) k_prep_fold(const PleParams* P, const i6
     s_src[h] = P->shard_ptr[lo];
   }
   if (tid == 0) {
-    input_ids[row] = tok;
-    position_ids[row] = pos;
-    if (row == 0 && committed != nullptr) committed[0] = (int)pos;
+    input_ids_b[row] = tok;
+    position_ids_b[row] = pos;
+    if (row == 0 && committed_b != nullptr) committed_b[0] = (int)pos;
     if (pos >= 0 && pos < P->capacity)
-      past_pos[pos] = pos;
+      past_pos_b[pos] = pos;
     else
-      atomicOr((unsigned long long*)&state[5], 1ULL);
+      atomicOr((unsigned long long*)&state_b[5], 1ULL);
   }
   __syncthreads();
-  const int hd = P->head_dim;
-  const int total = P->n_heads * hd;
-  unsigned char b[3];
+  unsigned char b_vals[3];
 #pragma unroll
   for (int u = 0; u < 3; ++u) {
     const int j = tid + u * blockDim.x;
-    b[u] = 0;
+    b_vals[u] = 0;
     if (j < total) {
       const int h = j / hd, c = j - h * hd;
-      b[u] = s_src[h][s_row[h] * hd + c];
+      b_vals[u] = s_src[h][s_row[h] * hd + c];
     }
   }
   const float scale = P->scale;
   const bool is_int8 = (scale < 0.0f);
   const float abs_scale = is_int8 ? -scale : scale;
-  __nv_bfloat16* row_ple = ple_out + (size_t)row * total;
 #pragma unroll
   for (int u = 0; u < 3; ++u) {
     const int j = tid + u * blockDim.x;
     if (j < total) {
       float f;
       if (is_int8) {
-        f = static_cast<float>(static_cast<signed char>(b[u]));
+        f = static_cast<float>(static_cast<signed char>(b_vals[u]));
       } else {
-        const __half_raw hr = __nv_cvt_fp8_to_halfraw(b[u], __NV_E4M3);
+        const __half_raw hr = __nv_cvt_fp8_to_halfraw(b_vals[u], __NV_E4M3);
         f = __half2float(*reinterpret_cast<const __half*>(&hr));
       }
       row_ple[j] = __float2bfloat16_rn(f * abs_scale);
     }
   }
   if (tid == 0) {
-    ctx_a[2 * row + 0] = c1;
-    ctx_a[2 * row + 1] = tok;
+    ctx_a_b[2 * row + 0] = c1;
+    ctx_a_b[2 * row + 1] = tok;
   }
 }
 
@@ -1205,6 +1239,25 @@ static inline void ClearParkedLaunchStatusForStream(cudaStream_t stream) {
   }
 }
 
+// Geometry of the staged (host-gathered) PLE table that `P` selects: its row width (n_heads * head_dim) and its position
+// capacity, both 0 when the table is read by the GPU. A staged table that was never registered, or whose parameters cannot
+// be read back, is an error and nothing may be launched for it.
+static cudaError_t resolve_staged_ple_geometry(const void* P, cudaStream_t stream, size_t* row_width, size_t* capacity) {
+  *row_width = 0;
+  *capacity = 0;
+  std::lock_guard<std::mutex> lock(g_staged_ple_mu);
+  bool unregistered_staged = false;
+  cudaError_t err = cudaSuccess;
+  StagedPleWorkspace* ws = resolve_staged_ple_workspace(P, stream, /*allow_sync=*/true, &unregistered_staged, &err);
+  if (err != cudaSuccess) return err;
+  if (unregistered_staged) return cudaErrorInvalidValue;
+  if (ws != nullptr) {
+    *row_width = static_cast<size_t>(ws->params.n_heads) * static_cast<size_t>(ws->params.head_dim);
+    *capacity = static_cast<size_t>(ws->params.capacity);
+  }
+  return cudaSuccess;
+}
+
 extern "C" {
 QWEN38_PLANE_EXPORT int qwen38_plane_abi_version(void) { return QWEN38_PLANE_ABI_VERSION; }
 QWEN38_PLANE_EXPORT int qwen38_plane_sizeof_ple_params(void) { return (int)sizeof(PleParams); }
@@ -1282,27 +1335,18 @@ QWEN38_PLANE_EXPORT void qwen38_plane_set_ple_host_params(const void* params) {
 QWEN38_PLANE_EXPORT int qwen38_plane_prep(void* s, const void* P, const void* tok_ptr, const void* pos_ptr, int pos_add, const void* ctx_in,
                                           void* ctx_out, void* input_ids, void* position_ids, void* committed, void* past_pos,
                                           void* ple_out, void* state) {
-  if (pos_add <= -2 && pos_add >= -8) {
+  // Only [-8, -2] selects the folded multi-row form; a value below it can only come from a caller that packed something else
+  // into pos_add (the batched form has its own entry, qwen38_plane_prep_batched), so it fails instead of acting as a position
+  // offset.
+  if (pos_add < -8) return static_cast<int>(cudaErrorInvalidValue);
+  if (pos_add <= -2) {
     // Prepares the `rows` = -pos_add rows of one fold/verify step in a single call.
     const int rows = -pos_add;
     cudaStream_t stream = (cudaStream_t)s;
     size_t staged_ple_total = 0;
-    {
-      std::lock_guard<std::mutex> lock(g_staged_ple_mu);
-      bool unregistered_staged = false;
-      cudaError_t err = cudaSuccess;
-      StagedPleWorkspace* ws =
-          resolve_staged_ple_workspace(P, stream, /*allow_sync=*/true, &unregistered_staged, &err);
-      if (err != cudaSuccess) {
-        return (int)err;
-      }
-      if (unregistered_staged) {
-        return (int)cudaErrorInvalidValue;
-      }
-      if (ws != nullptr) {
-        staged_ple_total = (size_t)ws->params.n_heads * (size_t)ws->params.head_dim;
-      }
-    }
+    size_t staged_capacity = 0;
+    const cudaError_t resolved = resolve_staged_ple_geometry(P, stream, &staged_ple_total, &staged_capacity);
+    if (resolved != cudaSuccess) return (int)resolved;
     if (staged_ple_total != 0) {
       // The host-table gather is per row, so the staged path keeps one prep per row (the mutex is not held here). Row 0 owns
       // the committed length: the other rows get no committed pointer, so nothing but device memory reaches a kernel.
@@ -1321,7 +1365,7 @@ QWEN38_PLANE_EXPORT int qwen38_plane_prep(void* s, const void* P, const void* to
     BeginLaunch();
     k_prep_fold<<<rows, 1024, 0, stream>>>((const PleParams*)P, (const i64*)ctx_in, (i64*)ctx_out, (i64*)input_ids,
                                            (i64*)position_ids, (int*)committed, (i64*)past_pos,
-                                           (__nv_bfloat16*)ple_out, (i64*)state);
+                                           (__nv_bfloat16*)ple_out, (i64*)state, /*honor_mute=*/0);
     return LaunchStatus();
   }
   {
@@ -1742,6 +1786,54 @@ QWEN38_PLANE_EXPORT int qwen38_plane_test_stream_capture(void* stream, int begin
   return (int)err;
 }
 #endif
+}
+
+// The graph inputs of the `rows` rows of one folded verify step for each of `batch` request slots (QWEN38_PLANE_CAP_BATCHED_PREP;
+// the contract is in qwen38_plane_abi.h). Both counts are checked before anything is launched.
+extern "C" QWEN38_PLANE_EXPORT int qwen38_plane_prep_batched(void* s, const void* P, int rows, int batch, const void* ctx_in,
+                                                             void* ctx_out, void* input_ids, void* position_ids,
+                                                             void* committed, void* past_pos, void* ple_out, void* state) {
+  if (rows < 1 || rows > QWEN38_PLANE_MAX_PREP_ROWS || batch < 1 || batch > QWEN38_PLANE_MAX_PREP_BATCH || P == nullptr ||
+      ctx_in == nullptr || ctx_out == nullptr || input_ids == nullptr || position_ids == nullptr || past_pos == nullptr ||
+      ple_out == nullptr || state == nullptr) {
+    return static_cast<int>(cudaErrorInvalidValue);
+  }
+  const cudaStream_t stream = static_cast<cudaStream_t>(s);
+  size_t staged_row_width = 0;
+  size_t staged_capacity = 0;
+  const cudaError_t resolved = resolve_staged_ple_geometry(P, stream, &staged_row_width, &staged_capacity);
+  if (resolved != cudaSuccess) return static_cast<int>(resolved);
+  if (staged_row_width != 0) {
+    // The host-table gather is per row, so the staged path prepares one row at a time, slot after slot (the snapshot of the
+    // control words that row 0 takes is what rows 1.. of the same slot reuse). Row 0 owns the committed length of its slot:
+    // the other rows get no committed pointer, so nothing but device memory reaches a kernel.
+    constexpr int kSlots[8] = {0, 2, 8, 9, 10, 11, 12, 13};
+    for (int b = 0; b < batch; ++b) {
+      i64* state_b = static_cast<i64*>(state) + static_cast<size_t>(b) * QWEN38_PLANE_CTL_WORDS_PER_SLOT;
+      const i64* ctx_in_b = static_cast<const i64*>(ctx_in) + static_cast<size_t>(b) * 2;
+      i64* ctx_out_b = static_cast<i64*>(ctx_out) + static_cast<size_t>(b) * 2 * static_cast<size_t>(rows);
+      i64* input_ids_b = static_cast<i64*>(input_ids) + static_cast<size_t>(b) * rows;
+      i64* position_ids_b = static_cast<i64*>(position_ids) + static_cast<size_t>(b) * rows;
+      int* committed_b = committed != nullptr ? static_cast<int*>(committed) + b : nullptr;
+      i64* past_pos_b = static_cast<i64*>(past_pos) + static_cast<size_t>(b) * staged_capacity;
+      __nv_bfloat16* ple_out_b =
+          static_cast<__nv_bfloat16*>(ple_out) + static_cast<size_t>(b) * static_cast<size_t>(rows) * staged_row_width;
+      for (int r = 0; r < rows; ++r) {
+        const void* r_ctx_in = r == 0 ? static_cast<const void*>(ctx_in_b) : static_cast<const void*>(ctx_out_b + 2 * (r - 1));
+        const int rc = qwen38_plane_prep(s, P, state_b + kSlots[r], state_b + 1, r, r_ctx_in, ctx_out_b + 2 * r,
+                                         input_ids_b + r, position_ids_b + r, r == 0 ? committed_b : nullptr, past_pos_b,
+                                         ple_out_b + static_cast<size_t>(r) * staged_row_width, state_b);
+        if (rc != 0) return rc;
+      }
+    }
+    return 0;
+  }
+  BeginLaunch();
+  k_prep_fold<<<dim3(static_cast<unsigned>(rows), static_cast<unsigned>(batch)), 1024, 0, stream>>>(
+      static_cast<const PleParams*>(P), static_cast<const i64*>(ctx_in), static_cast<i64*>(ctx_out),
+      static_cast<i64*>(input_ids), static_cast<i64*>(position_ids), static_cast<int*>(committed),
+      static_cast<i64*>(past_pos), static_cast<__nv_bfloat16*>(ple_out), static_cast<i64*>(state), /*honor_mute=*/1);
+  return LaunchStatus();
 }
 
 __global__ void DflashSelect(const int32_t* candidates, const float* scores, i64* control,
