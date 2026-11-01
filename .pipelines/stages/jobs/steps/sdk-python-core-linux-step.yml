@@ -1,0 +1,55 @@
+# Package and repair native-only Linux wheels in the same manylinux image as the CUDA core.
+parameters:
+- name: arch
+  type: string
+  values: [x64, arm64]
+- name: cuda_version
+  type: string
+
+steps:
+- task: Docker@2
+  displayName: 'Login to build cache ACR'
+  inputs:
+    containerRegistry: 'onnxruntimebuildcache'
+    command: 'login'
+    addPipelineData: false
+
+- template: utils/authenticate-pip-lotus.yml
+
+- template: utils/download-core-cmake-package.yml
+  parameters:
+    core_artifact: 'core-linux-${{ parameters.arch }}-cuda-cmake-pkg'
+    target_path: '$(Build.SourcesDirectory)/core_pkg'
+
+- template: utils/pull-manylinux-image.yml
+  parameters:
+    arch: ${{ parameters.arch }}
+    ep: cuda
+    cuda_version: ${{ parameters.cuda_version }}
+
+- bash: |
+    set -e -x
+    docker_image="ortgenaicudabuild${{ parameters.arch }}"
+    docker run --rm \
+      --volume "$(Build.SourcesDirectory):/ort_genai_src" \
+      -w /ort_genai_src \
+      -e PIP_INDEX_URL \
+      -e GENAI_VERSION='$(genai_version)' \
+      "$docker_image" bash -c '
+        set -e -x
+        PY=/opt/python/cp311-cp311/bin/python3.11
+        $PY -m pip install wheel packaging auditwheel
+        $PY tools/python/generate_core_wheel.py \
+          --core_dir /ort_genai_src/core_pkg \
+          --rid linux-${{ parameters.arch }} \
+          --package_version "$GENAI_VERSION" \
+          --output_dir /ort_genai_src/core_wheel_stage
+      '
+  displayName: 'Package and audit native core wheel (manylinux, ${{ parameters.arch }})'
+  workingDirectory: '$(Build.SourcesDirectory)'
+
+- task: 1ES.PublishPipelineArtifact@1
+  displayName: 'Publish repaired native core wheel ($(artifactName))'
+  inputs:
+    artifactName: '$(artifactName)'
+    targetPath: '$(Build.SourcesDirectory)/core_wheel_stage'

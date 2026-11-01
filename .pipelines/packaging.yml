@@ -3,9 +3,10 @@
 #
 # Single entry point that builds the core once per (EP, os, arch) and layers the
 # SDKs (Python, C#, Java) incrementally against the prebuilt core, plus the
-# bespoke Apple (iOS xcframework) and Android (AAR) artifacts and the .Foundry
-# NuGet. Feed-isolated to the internal Lotus feed; every published binary/package
-# is ESRP-signed where the platform supports it.
+# bespoke Apple (iOS xcframework) and Android (AAR) artifacts, the .Foundry
+# NuGet, and native-only onnxruntime-genai-core wheels. Feed-isolated to the
+# internal Lotus feed; every published binary/package is ESRP-signed where
+# the platform supports it.
 #
 # The matrix is fixed per EP; the pipeline inputs only select the EP(s),
 # the build-time ORT versions, and the CUDA toolkit version:
@@ -135,7 +136,7 @@ extends:
         ort_version: ${{ parameters.ort_build_version }}
         enable_cpu: ${{ parameters.enable_cpu }}
 
-    # ---- SDK · Python (CPU + CUDA + WinML wheels) -------------------------
+    # ---- SDK · Python (CPU + CUDA + WinML + native-only core wheels) -------
     - template: stages/sdk-python-stage.yml
       parameters:
         ort_version: ${{ parameters.ort_build_version }}

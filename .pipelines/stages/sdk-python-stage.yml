@@ -1,13 +1,16 @@
 # =============================================================================
 # sdk-python-stage.yml — Python SDK (wheel) stage.
 #
-# ALL Python wheels are produced by this single stage, one job per (os, arch, EP),
+# Python SDK wheels are produced by this stage, one job per (os, arch, EP),
 # incrementally against the prebuilt core. Fixed platform matrix per EP:
 #   CPU   — win-x64, win-arm64, linux-x64, linux-arm64, osx-arm64
 #   CUDA  — win-x64, win-arm64, linux-x64, linux-arm64
 #   WinML — win-x64, win-arm64
-# Wheels are built for every requested Python version (the core is Python-agnostic
-# and built once; only the pybind extension + wheel are rebuilt per version).
+#   Core  — win-x64, win-arm64, linux-x64, linux-arm64 (CUDA core), osx-arm64 (CPU)
+# Native-only core wheels exclude the CUDA add-on and carry no ORT dependency.
+# SDK wheels are built for every requested Python version (the core is
+# Python-agnostic and built once; only the pybind extension + wheel are rebuilt
+# per version). Native-only core wheels use py3-none tags, one wheel per platform.
 #
 # NOTE on granularity: ADO job dependencies are within a stage, so this SDK stage
 # depends on the whole Core stage(s) it consumes (not per-core-job). This keeps
@@ -18,6 +21,7 @@
 #   Stage:    SDK · Python
 #   Jobs:     python · <os>-<arch> · <ep>
 #   Artifact: python-wheel-<os>-<arch>-<ep>
+#             python-wheel-core (all native-only platform wheels)
 # =============================================================================
 
 parameters:
@@ -145,6 +149,12 @@ stages:
         ort_version: '1.30.0'
         python_versions: ${{ parameters.python_versions }}
         python_dependency_version: '1.30.0'
+
+  # ---- Native-only core wheels (same RID/EP mapping as .Foundry) ------------
+  - ${{ if and(eq(parameters.enable_cpu, true), eq(parameters.enable_cuda, true)) }}:
+    - template: jobs/sdk-python-core-job.yml
+      parameters:
+        cuda_version: ${{ parameters.cuda_version }}
 
   # ---- WinML wheels (win-x64 + win-arm64; multi-version, incremental) -------
   - ${{ if eq(parameters.enable_winml, true) }}:
