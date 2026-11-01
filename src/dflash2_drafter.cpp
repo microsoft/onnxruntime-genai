@@ -768,6 +768,16 @@ bool Dflash2GraphCaptureAllowed(bool enabled, bool uniform_ingest,
   return enabled && uniform_ingest && max_blocks <= max_columns;
 }
 
+bool Dflash2PinsBlockTableWidth(bool capture_enabled, bool windowed, bool pinned_policy,
+                                bool device_selection) noexcept {
+  return capture_enabled && windowed && (pinned_policy || device_selection);
+}
+
+bool Dflash2CapturesPinnedStep(bool drafts_wanted, size_t num_ctx_rows, size_t block_size,
+                               size_t served, bool device_selection) noexcept {
+  return drafts_wanted && num_ctx_rows <= block_size * served && (!device_selection || served == 1);
+}
+
 void Dflash2Drafter::AllocateCache() {
   const size_t layers = static_cast<size_t>(config_.num_hidden_layers);
   const std::vector<int64_t> shape{static_cast<int64_t>(num_blocks_),
@@ -1162,18 +1172,20 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   auto device = model_->p_device_inputs_;
   // Bucketing the width lets a growing context keep replaying one captured graph instead of
   // retiring one at every block boundary; columns past the live KV length are never read. Steps
-  // that cannot be captured keep the exact width so their bound inputs are unchanged.
-  const bool single_windowed_decode_only =
-      (graph_capture_enabled_ && ring_blocks_ != 0 && max_requests_ == 1);
-  const bool graph_eligible = Dflash2GraphCaptureAllowed(
-                                  graph_capture_enabled_, uniform_ingest, max_blocks, max_block_table_columns_) &&
-                              (!single_windowed_decode_only ||
-                               (drafts_wanted && num_ctx_rows <= block_size * served.size()));
+  // that cannot be captured keep the exact width so their bound inputs are unchanged. A pinned
+  // drafter instead uses the full width for every step and captures decode steps only.
+  const bool pinned_width = Dflash2PinsBlockTableWidth(
+      graph_capture_enabled_, ring_blocks_ != 0, pin_block_table_width_, device_selection);
+  const bool graph_eligible =
+      Dflash2GraphCaptureAllowed(graph_capture_enabled_, uniform_ingest, max_blocks,
+                                 max_block_table_columns_) &&
+      (!pinned_width ||
+       Dflash2CapturesPinnedStep(drafts_wanted, num_ctx_rows, block_size, served.size(),
+                                 device_selection));
   const size_t block_table_columns =
-      single_windowed_decode_only
-          ? std::max(max_blocks, max_block_table_columns_)
-          : (graph_eligible ? GetGraphBlockTableColumns(max_blocks, max_block_table_columns_)
-                            : max_blocks);
+      pinned_width ? std::max(max_blocks, max_block_table_columns_)
+                   : (graph_eligible ? GetGraphBlockTableColumns(max_blocks, max_block_table_columns_)
+                                     : max_blocks);
   auto fill_int32 = [this](Tensor& tensor, const std::vector<int32_t>& values) {
     auto span = Staging(tensor);
     std::memcpy(span.CpuSpan().data(), values.data(), values.size() * sizeof(int32_t));

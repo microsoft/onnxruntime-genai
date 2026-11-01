@@ -1798,7 +1798,7 @@ __global__ void __launch_bounds__(kPlaneReplayThreads) k_replay_gdn(
   const int head = blockIdx.x / chunks;
   if (head >= heads) return;
   const int first_row = (blockIdx.x - head * chunks) * kPlaneReplayRows;
-  const int key_head = head * key_heads / heads;
+  const int key_head = head / (heads / key_heads);
 
   for (int i = threadIdx.x; i < kept * key_width; i += blockDim.x) {
     const int t = i / key_width;

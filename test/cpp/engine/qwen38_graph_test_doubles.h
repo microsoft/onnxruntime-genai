@@ -59,13 +59,18 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
   // in order, so the cycle commits that many tokens + 1 (the correction, or the bonus when all were accepted). The record
   // then reports them like the production device does, through `accepted_count`. Call it before the first Reset().
   void SetDrafts(int drafts, std::vector<int> accepted_counts) {
-    if (drafts < 1 || drafts > 3) throw std::invalid_argument("a verify proposes 1..3 drafts");
+    if (drafts < 1 || drafts > 7) throw std::invalid_argument("a verify proposes 1..7 drafts");
     for (const int count : accepted_counts) {
       if (count < 0 || count > drafts) throw std::invalid_argument("a verify accepts 0..drafts drafts");
     }
     drafts_ = drafts;
     accepted_counts_ = std::move(accepted_counts);
-    ledger_.SetNumBanks(drafts + 2);  // the bank ring of the fold: one more than the rows of a verify
+    reserved_tail = std::max(reserved_tail, drafts + 1);
+    if (drafts > 3) {
+      ledger_.SetCompactPingPong(true, drafts + 1);
+    } else {
+      ledger_.SetNumBanks(drafts + 2);  // the bank ring of the fold: one more than the rows of a verify
+    }
   }
 
   // ---- observation ----
@@ -188,7 +193,9 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
     record.proposed_count = mtp_ ? drafts_ : 1;
     // Rows after the first mismatch are meaningless; the cycle commits the accepted drafts and one token more.
     const size_t step = accepted_drafts + 1;
-    const std::array<int64_t*, 4> predictions{&record.pred0, &record.pred1, &record.pred2, &record.pred3};
+    const std::array<int64_t*, 8> predictions{
+        &record.pred0, &record.pred1, &record.pred2, &record.pred3,
+        &record.pred4, &record.pred5, &record.pred6, &record.pred7};
     for (size_t i = 0; i < predictions.size(); ++i) {
       *predictions[i] = i < step ? TokenAt(length + 1 + i) : -7;
     }

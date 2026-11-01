@@ -3,6 +3,7 @@
 
 #include "qwen38_replay_geometry.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <limits>
 
@@ -244,6 +245,40 @@ Qwen38ReplayGeometry ValidateQwen38ReplayDescriptor(const Qwen38ReplayRequest& r
 std::string DescribeMissingQwen38ReplayTensor(const std::string& name, const std::string& layer, const std::string& where) {
   return "qwen38_graph: the state replay of layer " + layer + " needs the tensor " + name + " in " + where +
          ", which the target graph does not declare";
+}
+
+void RequireQwen38ReplayCoverage(const std::vector<std::string>& bank_names,
+                                 const std::vector<std::string>& state_update_names) {
+  constexpr const char* kPrefix = "past_key_values.";
+  constexpr size_t kPrefixLen = 16;
+  for (const std::string& bank_name : bank_names) {
+    if (bank_name.rfind(kPrefix, 0) != 0) {
+      throw std::runtime_error("qwen38_graph: banked state " + bank_name + " has no compact replay rule");
+    }
+    const size_t dot = bank_name.find('.', kPrefixLen);
+    if (dot == std::string::npos) {
+      throw std::runtime_error("qwen38_graph: banked state " + bank_name + " has no compact replay rule");
+    }
+    const std::string layer = bank_name.substr(kPrefixLen, dot - kPrefixLen);
+    const std::string suffix = bank_name.substr(dot + 1);
+    std::string expected_update;
+    if (suffix == "recurrent_state") {
+      expected_update = "state_update." + layer + ".recurrent_capsule";
+    } else if (suffix == "conv_state") {
+      expected_update = "state_update." + layer + ".conv_value";
+    } else if (suffix == "ple_conv_state") {
+      expected_update = "state_update." + layer + ".ple_conv_value";
+    } else if (suffix == "index_buffer" || suffix == "index_lengths") {
+      expected_update = "state_update." + layer + ".indexer_value";
+    } else {
+      throw std::runtime_error("qwen38_graph: banked state " + bank_name + " has no compact replay rule");
+    }
+    if (std::find(state_update_names.begin(), state_update_names.end(), expected_update) == state_update_names.end()) {
+      throw std::runtime_error("qwen38_graph: the compact state replay of layer " + layer + " needs the output " +
+                               expected_update + " to replay " + bank_name +
+                               ", which the target graph does not declare");
+    }
+  }
 }
 
 }  // namespace Generators
