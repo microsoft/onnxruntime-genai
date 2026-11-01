@@ -526,6 +526,23 @@ TEST(Qwen38FoldIoTest, TheFoldModelMayOnlyTakeTheInputsOfTheContract) {
       EXPECT_EQ(message.find("map::at"), std::string::npos) << message;
     }
   }
+
+  // RequireQwen38FoldContract requires all four fold inputs and both state outputs when building the fold target.
+  const std::vector<std::string> valid_inputs = {"input_ids", "fold.ctl", "fold.ctx_commit", "fold.ctx_a", "fold.ptrs"};
+  const std::vector<std::string> valid_outputs = {"logits", "next_tokens", "fold.ctl_out", "fold.ctx_commit_out"};
+  EXPECT_NO_THROW(RequireQwen38FoldContract(valid_inputs, valid_outputs));
+  for (const char* missing_in : contract_inputs) {
+    std::vector<std::string> partial_in = valid_inputs;
+    partial_in.erase(std::remove(partial_in.begin(), partial_in.end(), missing_in), partial_in.end());
+    EXPECT_THROW(RequireQwen38FoldContract(partial_in, valid_outputs), std::runtime_error) << missing_in;
+  }
+  for (const char* missing_out : {kQwen38FoldCtlOut, kQwen38FoldCtxCommitOut}) {
+    std::vector<std::string> partial_out = valid_outputs;
+    partial_out.erase(std::remove(partial_out.begin(), partial_out.end(), missing_out), partial_out.end());
+    EXPECT_THROW(RequireQwen38FoldContract(valid_inputs, partial_out), std::runtime_error) << missing_out;
+  }
+  EXPECT_THROW(RequireQwen38FoldContract(valid_inputs, std::vector<std::string>{"logits", "next_tokens"}),
+               std::runtime_error);
 }
 
 TEST(Qwen38CycleRecordTest, AcceptedCyclesCommitTwoTokens) {

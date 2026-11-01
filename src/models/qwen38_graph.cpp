@@ -831,6 +831,9 @@ void Qwen38GraphEngine::BuildTarget() {
   const SessionInfo& info = model_.session_info_;
   const auto in_names = session.GetInputNames();
   const auto out_names = session.GetOutputNames();
+  if (fold_) {
+    RequireQwen38FoldContract(in_names, out_names);
+  }
 
   enum class Kind { kStore,
                     kShared,
