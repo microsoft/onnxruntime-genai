@@ -103,7 +103,16 @@ void Qwen38GraphSession::Release() {
   }
   if (!status_checked_) {
     status_checked_ = true;
-    device_->CheckDecodeStatus();
+    try {
+      device_->CheckDecodeStatus();
+    } catch (...) {
+      // The check also runs outside a step (a rewind, the retirement of a Request), where RunStatic's fatal handler does
+      // not see the error. The next Reset() erases the error bits, so keep the failure for the next step, as
+      // ReleaseForTeardown() does, and mark the context failed: the caller still gets the exception.
+      Poison();
+      if (!deferred_error_) deferred_error_ = std::current_exception();
+      throw;
+    }
   }
 }
 
