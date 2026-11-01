@@ -222,10 +222,11 @@ size_t ResolveQwen38MaxBatchSize(const Config& config) {
     return checked(static_cast<long long>(config.engine.dynamic_batching->max_batch_size),
                    "engine.dynamic_batching.max_batch_size");
   }
-  if (config.engine.static_batching) {
-    return checked(static_cast<long long>(config.engine.static_batching->max_batch_size),
-                   "engine.static_batching.max_batch_size");
-  }
+  // engine.static_batching is not read: it configures the Engine's static path in general, which the single-slot
+  // backend always ignored, so a package may carry it with the Engine's default of four or a value of its own. Taking
+  // that for a request for slots would turn such a package into a multi-slot one, or make it fail to load on a stack
+  // that cannot serve several. engine.dynamic_batching above is no regression only because the single-slot backend
+  // refused it.
   // 1 is the default, which leaves the choice to the settings below; any other value is the one asked for (the parser
   // refuses what lies outside [1, kMaxBatchSize], a programmatically built Config is checked here).
   if (config.model.qwen38_graph.max_batch_size != 1) {
@@ -262,8 +263,8 @@ void ValidateQwen38MultiSlotConfig(const Config& config) {
   if (slots <= 1) return;
   const auto& q = config.model.qwen38_graph;
   const std::string needs = "qwen38_flash_graph: " + std::to_string(slots) +
-                            " request slots (model.qwen38_graph.max_batch_size, engine.dynamic_batching / static_batching "
-                            "max_batch_size or search.batch_size) need ";
+                            " request slots (model.qwen38_graph.max_batch_size, engine.dynamic_batching.max_batch_size "
+                            "or search.batch_size) need ";
   if (!q.fold.enabled) {
     throw std::runtime_error(needs +
                              "the folded verify path (model.qwen38_graph.fold.enabled): every other decode path runs one "

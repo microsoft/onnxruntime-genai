@@ -2333,8 +2333,11 @@ token. The device holds `model.qwen38_graph.max_batch_size` slots (default 1), o
 
 - The slot count is an integer in 1..8 (`Config::Model::Qwen38Graph::kMaxBatchSize`): the JSON parser rejects any other
   `max_batch_size` and names the key and the value, and the other settings that can choose the count
-  (`engine.dynamic_batching.max_batch_size`, `engine.static_batching.max_batch_size`, `search.batch_size`) are held to the same
-  range at model creation instead of being clamped silently. Several slots are served by the batched fold target and only
+  (`engine.dynamic_batching.max_batch_size`, `search.batch_size`) are held to the same range at model creation instead
+  of being clamped silently. `engine.static_batching` never chooses the count: it configures the Engine's static path in
+  general, which this backend has always ignored, so a package that carries it (with the Engine's default of 4 or a
+  value of its own) keeps its single slot and keeps loading on a stack that cannot serve several. Only a setting that
+  asks for slots opts in. Several slots are served by the batched fold target and only
   work with: the folded MTP stack (`fold.enabled`); the unified fast prefill, i.e. `prefill.enabled` without a separate dense
   graph (the prompts are ingested chunk by chunk through the fold target, slot by slot; a configuration with
   `prefill.enabled` false or with a dense prefill graph is single-slot); a compact-state target (the exporter's

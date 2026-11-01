@@ -116,11 +116,15 @@ void ValidateQwen38PromptTokens(std::span<const int32_t> tokens, int vocab_size)
 // captured graph needs, and a capture that lands in a live request stalls it.
 bool Qwen38HeadR2CapturesGraph(const Config::SessionOptions& decoder, const std::optional<Config::SessionOptions>& head_r2);
 
-// The number of request slots the device hosts: engine.dynamic_batching.max_batch_size, else engine.static_batching, else
-// model.qwen38_graph.max_batch_size, else search.batch_size, else the ORT_QWEN38_MAX_BATCH_SIZE test hook (the first of them
-// that is set, or that asks for more than one slot, where 1 is the default); 1 when none is. Throws std::out_of_range naming the
-// setting unless the value lies in [1, Config::Model::Qwen38Graph::kMaxBatchSize]: the device never clamps a request silently.
-// The test hook is held to the same rule: text that is not an integer ("4x", "abc") is refused too, only an empty value is unset.
+// The number of request slots the device hosts: engine.dynamic_batching.max_batch_size, else
+// model.qwen38_graph.max_batch_size, else search.batch_size, else the ORT_QWEN38_MAX_BATCH_SIZE test hook (the first of
+// them that is set, or that asks for more than one slot, where 1 is the default); 1 when none is.
+// engine.static_batching is not consulted: it configures the Engine's static path in general, which the single-slot
+// backend always ignored, so a package that carries it (with the Engine's default of four or a value of its own) keeps
+// its single slot and keeps loading on a stack that cannot serve several. Throws std::out_of_range naming the setting
+// unless the value lies in [1, Config::Model::Qwen38Graph::kMaxBatchSize]: the device never clamps a request silently.
+// The test hook is held to the same rule: text that is not an integer ("4x", "abc") is refused too, only an empty value
+// is unset.
 size_t ResolveQwen38MaxBatchSize(const Config& config);
 
 // True when prefill.enabled names a dense prefill graph other than the decoder (model.qwen38_graph.prefill.dense.filename):
