@@ -36,16 +36,44 @@ GenaiInterface* gp_genai{};
 Ort::Allocator* ort_allocator_{};
 const char* device_label = "cuda";
 
-int g_stream_device_id = -1;
+// The process-wide stream and the device it belongs to (-1 while there is no stream). Every writer holds
+// g_stream_mutex. The device id is stored with release semantics only after the stream exists, so a reader that
+// loads a non-negative id with acquire semantics can use g_stream without taking the mutex.
+std::mutex g_stream_mutex;
+std::atomic<int> g_stream_device_id{-1};
 cuda_stream_holder g_stream;
+
+// Creates the stream on first use and returns the device it belongs to. A negative `requested_device_id` binds a new
+// stream to the calling thread's current device. An explicit id also selects that device on the calling thread, and
+// is rejected when the existing stream belongs to another device, because every session shares one stream.
+int EnsureStream(int requested_device_id) {
+  std::lock_guard<std::mutex> lock{g_stream_mutex};
+  const int bound_device_id = g_stream_device_id.load(std::memory_order_relaxed);
+  if (requested_device_id >= 0) {
+    if (bound_device_id >= 0 && bound_device_id != requested_device_id) {
+      throw std::runtime_error(
+          "CUDA execution provider device_id=" + std::to_string(requested_device_id) +
+          " conflicts with the active GenAI CUDA stream on device " + std::to_string(bound_device_id) + ".");
+    }
+    CUDA_CHECK(cudaSetDevice(requested_device_id));
+  }
+  if (bound_device_id >= 0) {
+    return bound_device_id;
+  }
+
+  int device_id = requested_device_id;
+  if (device_id < 0) {
+    CUDA_CHECK(cudaGetDevice(&device_id));
+  }
+  g_stream.Create();
+  g_stream_device_id.store(device_id, std::memory_order_release);
+  return device_id;
+}
 
 cudaStream_t GetStream() {
   UseBoundDevice();
-  if (!g_stream.has_stream()) {
-    int dev = 0;
-    CUDA_CHECK(cudaGetDevice(&dev));
-    g_stream.Create();
-    g_stream_device_id = dev;
+  if (g_stream_device_id.load(std::memory_order_acquire) < 0) {
+    EnsureStream(-1);
   }
   return g_stream.get();
 }
@@ -679,8 +707,9 @@ struct CudaInterfaceImplBase : DeviceInterface {
 
   ~CudaInterfaceImplBase() {
     ort_allocator_ = nullptr;
+    std::lock_guard<std::mutex> lock{g_stream_mutex};
+    g_stream_device_id.store(-1, std::memory_order_release);
     g_stream.Destroy();
-    g_stream_device_id = -1;
     g_bound_device_id.store(-1, std::memory_order_release);
   }
 
@@ -704,7 +733,7 @@ struct CudaInterfaceImplBase : DeviceInterface {
   }
 
   std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
-    int device_id = g_stream_device_id;
+    int device_id = g_stream_device_id.load(std::memory_order_acquire);
     if (device_id < 0) {
       CUDA_CHECK(cudaGetDevice(&device_id));
     }
@@ -1121,20 +1150,11 @@ struct CudaInterfaceImpl final : CudaInterfaceImplBase {
       }
     }
     if (requested_id >= 0) {
-      if (g_stream.has_stream() && g_stream_device_id != requested_id) {
-        throw std::runtime_error(
-            "CUDA execution provider device_id=" + std::to_string(requested_id) +
-            " conflicts with the active GenAI CUDA stream on device " + std::to_string(g_stream_device_id) + ".");
-      }
-      CUDA_CHECK(cudaSetDevice(requested_id));
-      if (!g_stream.has_stream()) {
-        g_stream.Create();
-        g_stream_device_id = requested_id;
-      }
-      return requested_id;
+      return EnsureStream(requested_id);
     }
-    if (g_stream.has_stream()) {
-      return g_stream_device_id;
+    const int bound_device_id = g_stream_device_id.load(std::memory_order_acquire);
+    if (bound_device_id >= 0) {
+      return bound_device_id;
     }
     int device_id{};
     CUDA_CHECK(cudaGetDevice(&device_id));
@@ -1173,8 +1193,8 @@ struct CudaInterfaceImpl final : CudaInterfaceImplBase {
 
 struct NvTensorRtRtxInterfaceImpl final : CudaInterfaceImplBase {
   NvTensorRtRtxInterfaceImpl() {
-    // g_stream is created lazily, on the device current at construction unless SelectDevice binds another one first.
-    CUDA_CHECK(cudaGetDevice(&stream_device_id_));
+    // Create the stream now, on the device current at construction. SelectDevice moves it to another device if needed.
+    stream_device_id_ = EnsureStream(-1);
   }
 
   DeviceType GetType() const override { return DeviceType::NvTensorRtRtx; }
@@ -1222,9 +1242,12 @@ struct NvTensorRtRtxInterfaceImpl final : CudaInterfaceImplBase {
     }
     CUDA_CHECK(cudaSetDevice(device_id));
     if (device_id != stream_device_id_) {
-      g_stream.Recreate();
+      {
+        std::lock_guard<std::mutex> stream_lock{g_stream_mutex};
+        g_stream.Recreate();
+        g_stream_device_id.store(device_id, std::memory_order_release);
+      }
       stream_device_id_ = device_id;
-      g_stream_device_id = device_id;
     }
     device_id_ = device_id;
     stream_bound_ = true;

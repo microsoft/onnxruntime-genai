@@ -13,11 +13,16 @@
 // discovered (WinML packages and/or --ep_dir) they are additionally registered and torn down each
 // cycle.
 
+#include <atomic>
 #include <cstring>
 
 #include <filesystem>
+#include <functional>
 #include <iostream>
+#include <optional>
+#include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "ort_genai.h"
@@ -25,6 +30,9 @@
 #include "telemetry/telemetry.h"
 #if USE_DML
 #include "ep/dml/interface.h"  // Generators::InitDmlInterface / CloseDmlInterface / GetDmlInterface
+#endif
+#if USE_CUDA
+#include "ep/cuda/session_options.h"  // Generators::CUDAExecutionProvider::ResolveStreamBindingOptions
 #endif
 
 #include <gtest/gtest.h>
@@ -166,6 +174,205 @@ TEST(ReInitTests, SequentialModelLoads) {
 
   OgaShutdown();  // leave process-global state clean for any following test
 }
+
+#if USE_CUDA
+namespace {
+
+// The CUDA add-on owns one compute stream that every session shares, and the first session to name a GPU binds the
+// stream to it. OgaShutdown() destroys the stream together with the interface, so a stream bound by an earlier test
+// cannot survive into this one. Returns nullptr and the reason when the add-on is not installed.
+Generators::DeviceInterface* LoadCudaInterfaceWithoutAStream(std::string& unavailable_reason) {
+  OgaShutdown();
+  try {
+    return Generators::GetDeviceInterface(Generators::DeviceType::CUDA);
+  } catch (const std::exception& e) {
+    unavailable_reason = e.what();
+    return nullptr;
+  }
+}
+
+Generators::ProviderOptions CudaDeviceOptions(const std::string& device_id) {
+  Generators::ProviderOptions options;
+  options.name = "cuda";
+  options.options.emplace_back("device_id", device_id);
+  return options;
+}
+
+// Empty when the add-on is installed and each of GPUs 0..gpu_count-1 can be bound, otherwise why the test cannot run.
+std::string CudaUnavailableReason(int gpu_count) {
+  std::string reason;
+  for (int gpu = 0; gpu < gpu_count && reason.empty(); ++gpu) {
+    Generators::DeviceInterface* cuda = LoadCudaInterfaceWithoutAStream(reason);
+    if (!cuda) break;
+    try {
+      const auto options = CudaDeviceOptions(std::to_string(gpu));
+      cuda->GetDeviceId(&options);
+    } catch (const std::exception& e) {
+      reason = "GPU " + std::to_string(gpu) + " cannot be used: " + e.what();
+    }
+  }
+  OgaShutdown();
+  return reason;
+}
+
+// Runs every job on its own thread, releasing them all at the same moment so that they contend for the stream.
+void RunTogether(const std::vector<std::function<void()>>& jobs) {
+  std::atomic<size_t> ready{0};
+  std::atomic<bool> go{false};
+  std::vector<std::thread> threads;
+  for (size_t i = 0; i < jobs.size(); ++i) {
+    threads.emplace_back([&, i] {
+      ++ready;
+      while (!go.load()) std::this_thread::yield();
+      jobs[i]();
+    });
+  }
+  while (ready.load() < jobs.size()) std::this_thread::yield();
+  go = true;
+  for (auto& thread : threads) thread.join();
+}
+
+bool Contains(const std::string& text, const char* part) { return text.find(part) != std::string::npos; }
+
+constexpr int kStreamRaceRounds = 10;
+
+}  // namespace
+
+// Concurrent first uses of the add-on all target the same GPU before any of them has a stream: half of the threads
+// name GPU 0 the way a session does, the others bind through their first allocation or copy. The stream has to be
+// created once, so every thread must be handed the same handle (a second creation overwrote the stream that earlier
+// sessions had already been given).
+TEST(ReInitTests, ConcurrentCudaBindingsToOneGpuShareOneStream) {
+  if (const std::string reason = CudaUnavailableReason(1); !reason.empty()) GTEST_SKIP() << reason;
+
+  constexpr size_t kThreads = 16;
+  for (int round = 0; round < kStreamRaceRounds; ++round) {
+    SCOPED_TRACE("round " + std::to_string(round));
+    std::string unavailable;
+    Generators::DeviceInterface* cuda = LoadCudaInterfaceWithoutAStream(unavailable);
+    ASSERT_NE(cuda, nullptr) << unavailable;
+
+    std::vector<void*> streams(kThreads, nullptr);
+    std::vector<std::string> errors(kThreads);
+    std::vector<std::function<void()>> jobs;
+    for (size_t t = 0; t < kThreads; ++t) {
+      jobs.push_back([&, t] {
+        try {
+          if (t % 2 == 0) {
+            const auto options = CudaDeviceOptions("0");
+            cuda->GetDeviceId(&options);
+          }
+          streams[t] = cuda->GetCudaStream();
+        } catch (const std::exception& e) {
+          errors[t] = e.what();
+        }
+      });
+    }
+    RunTogether(jobs);
+
+    void* const final_stream = cuda->GetCudaStream();
+    ASSERT_NE(final_stream, nullptr);
+    for (size_t t = 0; t < kThreads; ++t) {
+      EXPECT_TRUE(errors[t].empty()) << "thread " << t << ": " << errors[t];
+      EXPECT_EQ(streams[t], final_stream) << "thread " << t << " was handed a different stream";
+    }
+  }
+  OgaShutdown();
+}
+
+// Every session shares one stream, so the first GPU a session names owns it and a session naming another GPU has to be
+// refused. Two sessions that name different GPUs at the same moment must not both be accepted.
+TEST(ReInitTests, ConcurrentCudaBindingsToDifferentGpusAdmitOnlyOne) {
+  if (const std::string reason = CudaUnavailableReason(2); !reason.empty()) GTEST_SKIP() << reason;
+
+  for (int round = 0; round < kStreamRaceRounds; ++round) {
+    SCOPED_TRACE("round " + std::to_string(round));
+    std::string unavailable;
+    Generators::DeviceInterface* cuda = LoadCudaInterfaceWithoutAStream(unavailable);
+    ASSERT_NE(cuda, nullptr) << unavailable;
+
+    std::vector<int> bound(2, -1);
+    std::vector<std::string> errors(2);
+    std::vector<std::function<void()>> jobs;
+    for (int gpu = 0; gpu < 2; ++gpu) {
+      jobs.push_back([&, gpu] {
+        try {
+          const auto options = CudaDeviceOptions(std::to_string(gpu));
+          bound[gpu] = cuda->GetDeviceId(&options);
+        } catch (const std::exception& e) {
+          errors[gpu] = e.what();
+        }
+      });
+    }
+    RunTogether(jobs);
+
+    ASSERT_NE(errors[0].empty(), errors[1].empty())
+        << "exactly one session must win the stream; GPU 0: '" << errors[0] << "', GPU 1: '" << errors[1] << "'";
+    const int winner = errors[0].empty() ? 0 : 1;
+    EXPECT_EQ(bound[winner], winner);
+    EXPECT_TRUE(Contains(errors[1 - winner], "conflicts")) << errors[1 - winner];
+    EXPECT_EQ(cuda->GetDeviceId(nullptr), winner);
+    EXPECT_EQ(cuda->GetMemoryInfo()->GetDeviceId(), winner);
+  }
+  OgaShutdown();
+}
+
+TEST(ReInitTests, ACudaSessionOnAnotherGpuIsRefusedWhileTheStreamIsBound) {
+  if (const std::string reason = CudaUnavailableReason(2); !reason.empty()) GTEST_SKIP() << reason;
+
+  std::string unavailable;
+  Generators::DeviceInterface* cuda = LoadCudaInterfaceWithoutAStream(unavailable);
+  ASSERT_NE(cuda, nullptr) << unavailable;
+
+  const auto gpu0 = CudaDeviceOptions("0");
+  const auto gpu1 = CudaDeviceOptions("1");
+  ASSERT_EQ(cuda->GetDeviceId(&gpu1), 1);
+  void* const stream = cuda->GetCudaStream();
+  ASSERT_NE(stream, nullptr);
+
+  try {
+    cuda->GetDeviceId(&gpu0);
+    ADD_FAILURE() << "a session on GPU 0 must be refused while the stream belongs to GPU 1";
+  } catch (const std::runtime_error& error) {
+    EXPECT_TRUE(Contains(error.what(), "conflicts")) << error.what();
+  }
+
+  // The refusal leaves the binding alone: the same stream still serves GPU 1, and a session that names no GPU takes it.
+  EXPECT_EQ(cuda->GetDeviceId(&gpu1), 1);
+  EXPECT_EQ(cuda->GetDeviceId(nullptr), 1);
+  EXPECT_EQ(cuda->GetCudaStream(), stream);
+  OgaShutdown();
+}
+
+// On the provider-bridge path a session that names no device is placed on GPU 0 by ONNX Runtime, so the stream
+// binding resolves it to GPU 0 as well. The stream bound to another GPU must then be refused rather than handed to a
+// session that runs on GPU 0.
+TEST(ReInitTests, ALegacyCudaSessionWithoutAnIdIsBoundToGpuZero) {
+  if (const std::string reason = CudaUnavailableReason(2); !reason.empty()) GTEST_SKIP() << reason;
+
+  Generators::ProviderOptions no_device;
+  no_device.name = "cuda";
+  const auto resolved = Generators::CUDAExecutionProvider::ResolveStreamBindingOptions(no_device, std::nullopt);
+
+  std::string unavailable;
+  Generators::DeviceInterface* cuda = LoadCudaInterfaceWithoutAStream(unavailable);
+  ASSERT_NE(cuda, nullptr) << unavailable;
+  const auto gpu1 = CudaDeviceOptions("1");
+  ASSERT_EQ(cuda->GetDeviceId(&gpu1), 1);
+
+  try {
+    cuda->GetDeviceId(&resolved);
+    ADD_FAILURE() << "a legacy session without a device_id must be refused while the stream belongs to GPU 1";
+  } catch (const std::runtime_error& error) {
+    EXPECT_TRUE(Contains(error.what(), "conflicts")) << error.what();
+  }
+
+  cuda = LoadCudaInterfaceWithoutAStream(unavailable);
+  ASSERT_NE(cuda, nullptr) << unavailable;
+  EXPECT_EQ(cuda->GetDeviceId(&resolved), 0);
+  OgaShutdown();
+}
+#endif  // USE_CUDA
 
 #if USE_DML
 // Deterministic white-box guard for the DML branch of OrtGlobals::GetDeviceInterface. DML's

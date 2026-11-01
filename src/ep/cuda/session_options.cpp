@@ -4,6 +4,8 @@
 #include "session_options.h"
 #include "models/session_options.h"
 
+#include <algorithm>
+
 namespace Generators::CUDAExecutionProvider {
 
 size_t ParseArenaOptionValue(std::string_view key, const std::string& value) {
@@ -30,6 +32,18 @@ size_t ParseArenaOptionValue(std::string_view key, const std::string& value) {
     throw std::out_of_range("Arena configuration option value is out of range");
   }
   return parsed == -1 ? static_cast<size_t>(-1) : static_cast<size_t>(parsed);
+}
+
+Config::ProviderOptions ResolveStreamBindingOptions(const Config::ProviderOptions& provider_options,
+                                                    const std::optional<std::string>& selected_plugin_device_id) {
+  Config::ProviderOptions resolved = provider_options;
+  const bool has_device_id = std::any_of(provider_options.options.begin(), provider_options.options.end(),
+                                         [](const auto& option) { return option.first == "device_id" && !option.second.empty(); });
+  const std::string default_device_id = selected_plugin_device_id ? *selected_plugin_device_id : std::string("0");
+  if (!has_device_id && !default_device_id.empty()) {
+    resolved.options.emplace_back("device_id", default_device_id);
+  }
+  return resolved;
 }
 
 namespace {
@@ -106,7 +120,7 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
 
   // Resolve the selected CUDA device before creating/attaching the stream or registering the EP,
   // so the CUDA runtime device, stream, and OrtMemoryInfo agree with the selected EP device.
-  Config::ProviderOptions effective_options = provider_options;
+  std::optional<std::string> selected_plugin_device_id;
   auto ep_devices_ptrs = FindRegisteredEpDevices("CUDAExecutionProvider");
   if (!ep_devices_ptrs.empty()) {
     auto filtered_ep_device_ptrs = ApplyDeviceFiltering(provider_options, ep_devices_ptrs);
@@ -123,10 +137,9 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
       cuda_device_ids.push_back(GetCudaDeviceIdMetadata(dev));
     }
     const size_t selected = SelectCudaDeviceIndex(cuda_device_ids, requested_id, HasDeviceFiltering(provider_options));
-    if (!requested_id && !cuda_device_ids[selected].empty()) {
-      effective_options.options.emplace_back("device_id", cuda_device_ids[selected]);
-    }
+    selected_plugin_device_id = cuda_device_ids[selected];
   }
+  const Config::ProviderOptions effective_options = ResolveStreamBindingOptions(provider_options, selected_plugin_device_id);
   (void)device->GetDeviceId(&effective_options);
   AddCudaStreamConfig(session_options, device);
 

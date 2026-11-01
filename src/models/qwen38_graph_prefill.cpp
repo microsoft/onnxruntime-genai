@@ -3,6 +3,7 @@
 //
 // Qwen3.8-Flash-Next NVFP4 (model.type "qwen38_flash_graph"), fast prefill: shared weight pool, dense chunked prefill,
 // dense -> packed state hand-off, batched KV-only head prefill. See qwen38_graph.h and tools/qwen38_graph/README.md.
+#include "env_utils.h"
 #include "generator/generators.h"
 #include "logging.h"
 #include "qwen38_graph.h"
@@ -11,7 +12,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
-#include <cstdlib>
+#include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <mutex>
@@ -85,10 +86,11 @@ Qwen38WeightPool::Qwen38WeightPool(Qwen38Plane& plane, const std::filesystem::pa
     entries_.push_back(std::move(entry));
   }
 
-  const char* cache_env = std::getenv("ORT_QMOE_HOST_CACHE_MIB");
-  const bool bounded_host_cache = cache_env && std::string(cache_env) != "0";
-  const char* pin_pool = std::getenv("ORTGENAI_PIN_CPU_POOL");
-  if (bounded_host_cache && pin_pool && std::string(pin_pool) != "0")
+  const std::string cache_mib = GetEnv("ORT_QMOE_HOST_CACHE_MIB");
+  const bool bounded_host_cache = !cache_mib.empty() && cache_mib != "0";
+  bool pin_cpu_pool = false;
+  GetEnv("ORTGENAI_PIN_CPU_POOL", pin_cpu_pool);
+  if (bounded_host_cache && pin_cpu_pool)
     throw std::runtime_error("Bounded host cache cannot be combined with ORTGENAI_PIN_CPU_POOL");
   const auto start = Clock::now();
   std::vector<size_t> device_indices;
@@ -114,14 +116,14 @@ Qwen38WeightPool::Qwen38WeightPool(Qwen38Plane& plane, const std::filesystem::pa
         const size_t aligned_end =
             std::min(mapping.size(), ((static_cast<size_t>(entry.offset + entry.length) + kPage - 1) / kPage) * kPage);
 #if defined(_WIN32)
-        const bool skip_large_cpu_pin =
-            (bounded_host_cache || (sessions_.count("dense") == 0 && (!pin_pool || std::string(pin_pool) != "1")));
+        const bool skip_large_cpu_pin = (bounded_host_cache || (sessions_.count("dense") == 0 && !pin_cpu_pool));
 #else
         const bool skip_large_cpu_pin = bounded_host_cache;
 #endif
         if (aligned_end > aligned_start &&
             !(skip_large_cpu_pin && entry.placement == "cpu" && entry.length >= (size_t{1} << 20))) {
           raw_ranges[entry.file].emplace_back(aligned_start, aligned_end);
+          entry.pinned = true;
         }
         if (entry.placement == "host_mapped" || entry.host_mapped) {
           host_mapped_bytes += entry.length;
@@ -147,7 +149,12 @@ Qwen38WeightPool::Qwen38WeightPool(Qwen38Plane& plane, const std::filesystem::pa
       }
     }
 
-    // Register only the merged page-aligned active subranges of cpu/host_mapped files for UVA access.
+    // Register only the merged page-aligned active subranges of cpu/host_mapped files for UVA access. Cleanup() releases
+    // only the ranges it can see, so the room to record them is reserved up front: a failed push_back after a successful
+    // registration would leave that range registered for good. Merging never makes more ranges than there are intervals.
+    size_t range_bound = 0;
+    for (const auto& file_ranges : raw_ranges) range_bound += file_ranges.second.size();
+    registered_ranges_.reserve(range_bound);
     for (auto& [file, intervals] : raw_ranges) {
       if (intervals.empty()) continue;
       std::sort(intervals.begin(), intervals.end());
@@ -178,11 +185,16 @@ Qwen38WeightPool::Qwen38WeightPool(Qwen38Plane& plane, const std::filesystem::pa
     }
     // A host-mapped initializer reaches ORT as a CUDA tensor, so it needs the device alias of its registered range:
     // without one the graph would read through the raw host address. CPU-placed initializers only use an alias for the
-    // dense session; without one they stay plain CPU tensors (see AddTo).
+    // dense session, and only when their whole range is registered (the alias of the page they start on says nothing
+    // about the rest); without one they stay plain CPU tensors (see AddTo).
     for (size_t idx = 0; idx < entries_.size(); ++idx) {
       Entry& entry = entries_[idx];
       const bool host_mapped = entry.placement == "host_mapped" || entry.host_mapped;
       if (!host_mapped && entry.placement != "cpu") continue;
+      if (!host_mapped && !entry.pinned) {
+        entry.gpu_mapped_value.reset();
+        continue;
+      }
       void* dev_ptr = nullptr;
       const bool has_alias = plane_.host_get_device_pointer != nullptr &&
                              plane_.host_get_device_pointer(&dev_ptr, entry.ptr, 0) == 0 && dev_ptr != nullptr;
@@ -212,6 +224,8 @@ Qwen38WeightPool::Qwen38WeightPool(Qwen38Plane& plane, const std::filesystem::pa
   // Copy the device-placed files in parallel: pinned staging buffer per worker, unbuffered reads from the page cache,
   // async H2D on a private stream.
   constexpr size_t kStage = size_t{64} << 20;
+  // CUDA's current device is per thread: a worker starts on device 0 whatever the thread that created the pool selected.
+  const int device_id = memory_info.GetDeviceId();
   std::atomic<size_t> next{0};
   std::mutex error_mutex;
   std::string error;
@@ -220,6 +234,7 @@ Qwen38WeightPool::Qwen38WeightPool(Qwen38Plane& plane, const std::filesystem::pa
     void* stream = nullptr;
     std::map<std::filesystem::path, std::ifstream> files;
     try {
+      plane_.Check(plane_.set_device(device_id), "cudaSetDevice(weight pool worker)");
       plane_.Check(plane_.host_alloc(&stage, kStage), "cudaHostAlloc(pool stage)");
       plane_.Check(plane_.stream_create(&stream), "cudaStreamCreate");
       for (size_t k = next.fetch_add(1); k < device_indices.size(); k = next.fetch_add(1)) {
@@ -320,10 +335,19 @@ Qwen38QsaConstants::Qwen38QsaConstants(Qwen38Plane& plane, const std::filesystem
   std::vector<uint8_t> host(total);
   data.seekg(0);
   data.read(reinterpret_cast<char*>(host.data()), static_cast<std::streamsize>(total));
+  if (static_cast<size_t>(data.gcount()) != total)
+    throw std::runtime_error("qwen38_graph: short read of the QSA constants data " + description.file);
   buffer_ = PlaneBuffer(plane, total, stream);
   plane.Check(plane.memcpy_h2d(buffer_.data(), host.data(), total, stream), "QSA constants upload");
   plane.Check(plane.stream_sync(stream), "QSA constants sync");  // `host` dies here
   const size_t rope_row_bytes = static_cast<size_t>(description.width) * 2;
+  // The kernels read cos, sin and knorm as bf16 and kscale and vscale as fp32, so a constant that does not start on an
+  // element boundary would be read through a misaligned pointer.
+  const auto require_alignment = [](const auto& item, const uint8_t* ptr, size_t alignment) {
+    if (reinterpret_cast<std::uintptr_t>(ptr) % alignment != 0)
+      throw std::runtime_error("qwen38_graph: QSA constant " + item.name + " at offset " + std::to_string(item.offset) +
+                               " is not aligned to " + std::to_string(alignment) + " bytes");
+  };
   for (const auto& item : description.items) {
     if (item.bytes == 0 || item.offset > total || item.bytes > total - item.offset)
       throw std::runtime_error("qwen38_graph: QSA constant outside of the data file: " + item.name);
@@ -334,6 +358,7 @@ Qwen38QsaConstants::Qwen38QsaConstants(Qwen38Plane& plane, const std::filesystem
     if (item.name == "cos" || item.name == "sin") {
       if ((item.bytes % rope_row_bytes) != 0)
         throw std::runtime_error("qwen38_graph: QSA RoPE table byte size is not a multiple of width: " + item.name);
+      require_alignment(item, ptr, sizeof(uint16_t));
       const size_t rows = item.bytes / rope_row_bytes;
       if (item.name == "cos") {
         set.cos = ptr;
@@ -345,12 +370,14 @@ Qwen38QsaConstants::Qwen38QsaConstants(Qwen38Plane& plane, const std::filesystem
     } else if (item.name.rfind("knorm.", 0) == 0) {
       if (item.bytes != 128 * 2)
         throw std::runtime_error("qwen38_graph: unexpected QSA knorm byte size: " + item.name);
+      require_alignment(item, ptr, sizeof(uint16_t));
       set.knorm[std::stoi(item.name.substr(6))] = ptr;
     } else if (item.name.rfind("kscale.", 0) == 0 || item.name.rfind("vscale.", 0) == 0) {
       // Both quantized-KV hand-off paths read one fp32 scale per channel of the 2 KV heads x 256 channels.
       if (item.bytes != Qwen38QsaConstants::kKvScaleCount * sizeof(float))
         throw std::runtime_error("qwen38_graph: a QSA KV scale must hold exactly " +
                                  std::to_string(Qwen38QsaConstants::kKvScaleCount) + " floats: " + item.name);
+      require_alignment(item, ptr, sizeof(float));
       auto& scales = item.name[0] == 'k' ? set.kscale : set.vscale;
       scales[std::stoi(item.name.substr(7))] = ptr;
     }
@@ -496,6 +523,9 @@ void Qwen38GraphEngine::BuildFastPrefill() {
   }
   SyncStream();
   fast->run_options = OrtRunOptions::Create();
+  // The chunk shapes and buffer addresses change from run to run, so these sessions must never capture or replay a CUDA
+  // graph, even when their own provider options enable it (as in the unified path above).
+  fast->run_options->AddConfigEntry("gpu_graph_id", "-1");
   const std::string shrink_cfg = "gpu:" + std::to_string(model_.p_device_->GetDeviceId(nullptr));
   fast->run_options->AddConfigEntry("memory.enable_memory_arena_shrinkage", shrink_cfg.c_str());
   fast_ = std::move(fast);
