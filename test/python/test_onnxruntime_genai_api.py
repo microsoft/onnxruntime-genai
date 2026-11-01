@@ -474,6 +474,7 @@ def test_rewind_into_full_prompt(test_data_path):
     generator = og.Generator(model, search_params)
     prompt = np.array([0, 0, 195, 731, 731, 114, 114, 114, 114, 114], dtype=np.int32)
     generator.append_tokens(prompt[np.newaxis, :])
+    assert generator.is_done()
     generator.rewind_to(9)
 
     # Replaying the last prompt token fills the sequence again, so the token sampled after it is not added.
@@ -584,6 +585,7 @@ ff_tokens_devices = ["cpu", "cuda"] if og.is_cuda_available() else ["cpu"]
 
 
 @pytest.mark.parametrize("device", ff_tokens_devices)
+@pytest.mark.parametrize("next_call", ["generate_next_token", "get_logits"])
 @pytest.mark.parametrize(
     "pattern",
     [
@@ -593,9 +595,9 @@ ff_tokens_devices = ["cpu", "cuda"] if og.is_cuda_available() else ["cpu"]
         r"[0-9] to the and of in[0-9]",
     ],
 )
-def test_guidance_ff_tokens_stop_at_max_length(test_data_path, device, pattern):
+def test_guidance_ff_tokens_stop_at_max_length(test_data_path, device, next_call, pattern):
     tokenizer, generator = _new_ff_tokens_generator(test_data_path, device, pattern)
-    generator.generate_next_token()
+    getattr(generator, next_call)()
     assert generator.is_done()
     sequence = generator.get_sequence(0)
     assert len(sequence) == 10

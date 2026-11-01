@@ -961,7 +961,8 @@ bool Generator::IsDone() {
     return transducer_state_->IsChunkDone();
   }
 
-  if (computed_logits_) {
+  // A full sequence is done even when its logits are computed, as no generated token fits.
+  if (computed_logits_ && search_->GetSequenceLength() < state_->params_->search.max_length) {
     return false;
   }
 
