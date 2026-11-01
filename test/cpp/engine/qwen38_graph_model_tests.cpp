@@ -10,6 +10,7 @@
 #include <functional>
 #include <iterator>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -21,6 +22,8 @@
 #include <gtest/gtest.h>
 
 #include "config.h"
+#include "models/io/kv_cache.h"
+#include "models/model_state_manifest.h"
 #include "models/model_type.h"
 #include "models/qwen38_decode_device.h"
 #include "models/qwen38_graph.h"
@@ -935,6 +938,121 @@ TEST(Qwen38DflashFeatureLayoutTest, ADrafterOfAnotherWidthOrTypeIsRefusedAtLoad)
   EXPECT_FALSE(message_of(kQwen38DflashFeatureWidth, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16).empty());
   EXPECT_FALSE(message_of(kQwen38DflashFeatureWidth, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT).empty());
   EXPECT_FALSE(message_of(kQwen38DflashFeatureWidth, ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED).empty());
+}
+
+namespace {
+
+// The inputs of a DFlash drafter graph by name; an unknown input is reported as SessionInfo reports it.
+class FakeDrafterInputs final : public ModelStateMetadata {
+ public:
+  void AddInput(std::string name, std::vector<int64_t> shape) { inputs_[std::move(name)] = std::move(shape); }
+
+  bool HasInput(const std::string& name) const override { return inputs_.count(name) != 0; }
+  bool HasOutput(const std::string&) const override { return false; }
+  ONNXTensorElementDataType GetInputDataType(const std::string&) const override {
+    return ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16;
+  }
+  ONNXTensorElementDataType GetOutputDataType(const std::string&) const override {
+    return ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16;
+  }
+  std::vector<int64_t> GetInputShape(const std::string& name) const override {
+    const auto input = inputs_.find(name);
+    if (input == inputs_.end()) throw std::runtime_error("Model input was not found: " + name);
+    return input->second;
+  }
+  std::vector<int64_t> GetOutputShape(const std::string& name) const override {
+    throw std::runtime_error("Model output was not found: " + name);
+  }
+
+ private:
+  std::map<std::string, std::vector<int64_t>> inputs_;
+};
+
+}  // namespace
+
+TEST(Qwen38DflashCachePageSizeTest, TheDefaultPastKeyInputGivesThePageSize) {
+  const std::string default_template = Config{}.model.dflash2.inputs.past_key_names;
+  ASSERT_EQ(ComposeKeyValueName(default_template, 0), "past_key_values.0.key");
+  for (const int64_t page : {16, 128, 256}) {
+    FakeDrafterInputs drafter;
+    drafter.AddInput("past_key_values.0.key", {-1, page, 4, 64});
+    EXPECT_EQ(Qwen38DflashCachePageSize(drafter, default_template), static_cast<size_t>(page));
+  }
+}
+
+// A drafter exported with its own cache input names says so in model.dflash2.inputs.past_key_names, and the drafter
+// allocates its cache by that name: the page size must come from the same input, not from "past_key_values.0.key".
+TEST(Qwen38DflashCachePageSizeTest, ACustomPastKeyNameIsHonored) {
+  FakeDrafterInputs drafter;
+  drafter.AddInput("drafter.layers.0.k_cache", {-1, 128, 4, 64});
+  EXPECT_EQ(Qwen38DflashCachePageSize(drafter, "drafter.layers.%d.k_cache"), 128u);
+
+  // The default name is not consulted when the config names another input, even if the graph also has that one.
+  drafter.AddInput("past_key_values.0.key", {-1, 16, 4, 64});
+  EXPECT_EQ(Qwen38DflashCachePageSize(drafter, "drafter.layers.%d.k_cache"), 128u);
+
+  // The first layer's input is the one asked for.
+  FakeDrafterInputs layers;
+  layers.AddInput("kv.0.k", {-1, 256, 2, 128});
+  layers.AddInput("kv.1.k", {-1, 16, 2, 128});
+  EXPECT_EQ(Qwen38DflashCachePageSize(layers, "kv.%d.k"), 256u);
+}
+
+TEST(Qwen38DflashCachePageSizeTest, AnInputTheGraphLacksOrACacheOfAnotherShapeIsRefused) {
+  FakeDrafterInputs drafter;
+  drafter.AddInput("past_key_values.0.key", {-1, 128, 4, 64});
+  EXPECT_THROW(Qwen38DflashCachePageSize(drafter, "drafter.layers.%d.k_cache"), std::runtime_error);
+
+  const auto message_of = [](const std::vector<int64_t>& shape) {
+    FakeDrafterInputs graph;
+    graph.AddInput("kv.0.k", shape);
+    try {
+      Qwen38DflashCachePageSize(graph, "kv.%d.k");
+    } catch (const std::runtime_error& e) {
+      return std::string{e.what()};
+    }
+    return std::string{};
+  };
+  for (const std::vector<int64_t>& shape : {std::vector<int64_t>{-1, 64, 4, 64}, std::vector<int64_t>{-1, 0, 4, 64},
+                                            std::vector<int64_t>{-1, -1, 4, 64}, std::vector<int64_t>{-1, 128, 64},
+                                            std::vector<int64_t>{-1, 128, 4, 64, 1}, std::vector<int64_t>{}}) {
+    const std::string message = message_of(shape);
+    EXPECT_NE(message.find("16, 128, or 256"), std::string::npos) << message;
+    EXPECT_NE(message.find("kv.0.k"), std::string::npos) << message;
+  }
+  EXPECT_TRUE(message_of({-1, 16, 4, 64}).empty());
+}
+
+TEST(Qwen38DflashSanitizerTest, IsSkippedUnlessTheSwitchKeepsIt) {
+  {
+    ScopedEnvironmentVariable unset{"ORT_PAGED_ATTENTION_SKIP_SANITIZER", std::nullopt};
+    EXPECT_TRUE(Qwen38DflashSkipsInputSanitizer());
+  }
+  {
+    ScopedEnvironmentVariable empty{"ORT_PAGED_ATTENTION_SKIP_SANITIZER", std::string{}};
+    EXPECT_TRUE(Qwen38DflashSkipsInputSanitizer());
+  }
+  for (const char* value : {"1", "true"}) {
+    ScopedEnvironmentVariable skip{"ORT_PAGED_ATTENTION_SKIP_SANITIZER", std::string{value}};
+    EXPECT_TRUE(Qwen38DflashSkipsInputSanitizer()) << value;
+  }
+  // "false" used to leave the sanitizer skipped: only the literal "0" kept it.
+  for (const char* value : {"0", "false"}) {
+    ScopedEnvironmentVariable keep{"ORT_PAGED_ATTENTION_SKIP_SANITIZER", std::string{value}};
+    EXPECT_FALSE(Qwen38DflashSkipsInputSanitizer()) << value;
+  }
+}
+
+TEST(Qwen38DflashSanitizerTest, AValueThatIsNotABooleanIsRefusedNamingTheSwitch) {
+  for (const char* value : {"yes", "off", "2", "FALSE", "True"}) {
+    ScopedEnvironmentVariable invalid{"ORT_PAGED_ATTENTION_SKIP_SANITIZER", std::string{value}};
+    try {
+      Qwen38DflashSkipsInputSanitizer();
+      ADD_FAILURE() << "expected " << value << " to be refused";
+    } catch (const std::invalid_argument& e) {
+      EXPECT_NE(std::string{e.what()}.find("ORT_PAGED_ATTENTION_SKIP_SANITIZER"), std::string::npos) << e.what();
+    }
+  }
 }
 
 TEST(Qwen38PromptTokenTest, AcceptsEveryIdOfTheVocabulary) {

@@ -156,6 +156,12 @@ struct Qwen38DflashWarmupPlan {
 };
 Qwen38DflashWarmupPlan PlanQwen38DflashWarmup(bool warmup, int verify_rows, int num_banks) noexcept;
 
+// Whether the DFlash drafter session skips the input sanitizer of ORT's paged attention, which it does by default: the
+// engine hands the drafter well-formed inputs. ORT_PAGED_ATTENTION_SKIP_SANITIZER=0 (or false) keeps the sanitizer and
+// =1 (or true) skips it; any other non-empty value throws std::invalid_argument, as for every boolean switch of
+// models/env_utils.h.
+bool Qwen38DflashSkipsInputSanitizer();
+
 // The rows of target features the engine hands the DFlash drafter (the auxiliary hidden states of the target, five layers of
 // 2560 values) are this many bfloat16 values wide.
 inline constexpr size_t kQwen38DflashFeatureWidth = 12800;
@@ -165,6 +171,12 @@ inline constexpr size_t kQwen38DflashFeatureWidth = 12800;
 // outside every row of the feature buffer. Throws std::runtime_error naming both layouts unless the drafter's input is
 // [rows, kQwen38DflashFeatureWidth] of bfloat16.
 void ValidateQwen38DflashFeatureLayout(size_t aux_width, ONNXTensorElementDataType aux_type);
+
+// The tokens one page of the DFlash drafter's cache holds: the second dimension of the past key input of its first
+// layer, which the drafter graph names by `past_key_names` (model.dflash2.inputs.past_key_names, a layer template) and
+// not necessarily "past_key_values.0.key". Throws std::runtime_error, naming the input, unless it is a 4-D cache of
+// pages of 16, 128 or 256 tokens (std::runtime_error from the metadata when the graph has no such input).
+size_t Qwen38DflashCachePageSize(const ModelStateMetadata& drafter, const std::string& past_key_names);
 
 // The packed QSA indexer pools kQwen38IndexKeyRatio tokens into one compressed index key.
 inline constexpr int kQwen38IndexKeyRatio = 4;
