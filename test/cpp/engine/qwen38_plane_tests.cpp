@@ -1830,7 +1830,7 @@ TEST(Qwen38PlaneTest, TheBuiltInLookupReportsWhyEachFileItTriedDidNotLoad) {
 }
 #endif
 
-#if defined(__linux__) && defined(ORTGENAI_TEST_QWEN38_LEGACY_PLANE_LIB_PATH)
+#if defined(__linux__) && !defined(QWEN38_GRAPH_NO_POSIX) && defined(ORTGENAI_TEST_QWEN38_LEGACY_PLANE_LIB_PATH)
 // A library that is already loaded (the CUDA execution provider normally loads onnxruntime-genai-cuda before the first model)
 // is the one the lookup returns, found by its name before anything beside the module is opened: a copy of the plane
 // library beside the module would be mapped as a second module, with its own state, next to the one that is running.
