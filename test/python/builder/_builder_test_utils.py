@@ -110,6 +110,38 @@ def load_builder_module(module_name):
     return module
 
 
+def check_node_shapes(model):
+    """Run ONNX shape inference on each node of a ModelProto alone, from the shapes the builder declared.
+
+    A whole-graph onnx.shape_inference pass stops reporting errors after the first op it does not know, and
+    builder graphs use onnxruntime-only ops from the start, so it misses shape errors onnxruntime rejects at load.
+    Unknown ops and Constant nodes (make_constant declares them with shape []) are skipped; a node that reads a
+    Constant is checked together with it.
+    """
+    import onnx  # noqa: PLC0415
+
+    graph = model.graph
+    declared = {value.name: value for value in (*graph.input, *graph.value_info, *graph.output)}
+    initializers = {tensor.name: tensor for tensor in graph.initializer}
+    constants = {node.output[0]: node for node in graph.node if node.op_type == "Constant"}
+    for node in graph.node:
+        inputs = [name for name in node.input if name and name not in initializers and name not in constants]
+        if node.op_type == "Constant" or any(name not in declared for name in inputs):
+            continue
+        one_node = onnx.helper.make_graph(
+            [*(constants[name] for name in node.input if name in constants), node],
+            node.name,
+            [declared[name] for name in inputs],
+            [declared[name] for name in node.output if name in declared],
+            initializer=[initializers[name] for name in node.input if name in initializers],
+        )
+        onnx.shape_inference.infer_shapes(
+            onnx.helper.make_model(one_node, opset_imports=model.opset_import, ir_version=model.ir_version),
+            check_type=True,
+            strict_mode=True,
+        )
+
+
 @functools.cache
 def ort_runs_causal_conv_with_state():
     """Whether the installed onnxruntime can load the CausalConvWithState node the LFM2 builder writes.

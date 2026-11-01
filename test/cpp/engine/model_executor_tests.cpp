@@ -77,6 +77,18 @@ TEST_F(ModelExecutorTest, PropagatesUnrelatedOrtFailure) {
   EXPECT_THROW(executor.Decode(scheduled_requests, context), Ort::Exception);
 }
 
+// Paged LFM2, LFM2-MoE and LFM3 exports have decoder state groups, like the composite model, and must
+// load as a DecoderOnly_Model, the only model the executor decodes.
+TEST(ModelExecutorModelTypeTest, DecodesPagedLfmExports) {
+  for (const char* model_type : {"lfm2", "lfm2_moe", "lfm3"}) {
+    auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-composite");
+    config->model.type = model_type;
+    auto model = CreateModel(GetOrtEnv(), std::move(config));
+    auto cache = std::shared_ptr<CacheManager>{CacheManager::Create(model)};
+    EXPECT_NO_THROW(ModelExecutor::Create(model, cache)) << model_type;
+  }
+}
+
 void ExpectPackedHiddenStates(const std::shared_ptr<Model>& model) {
   auto cache = std::shared_ptr<CacheManager>{CacheManager::Create(model)};
   auto scheduler = Scheduler::Create(model, cache);
