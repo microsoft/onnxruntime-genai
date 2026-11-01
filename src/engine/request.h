@@ -90,6 +90,9 @@ struct RequestStepResult {
   int32_t matched_stop_string_index{-1};
   std::array<int32_t, kMaxGeneratedTokensPerStep> visible_tokens{};
   size_t visible_token_count{};
+  // Internal commit feedback, independent of stop buffering and caller event-drain rate.
+  size_t candidates_consumed{};
+  size_t tokens_appended{};
 };
 
 struct RequestTurnAdmission {
@@ -419,6 +422,19 @@ struct Request : std::enable_shared_from_this<Request>,
    * Updates the host-side token mirror and the request status.
    */
   RequestStepResult CompleteGeneration();
+
+  /**
+   * @brief Commits tokens an executor selected itself, in sequence order, and reports the step.
+   * @param tokens One to kMaxGeneratedTokensPerStep tokens the executor decided to commit.
+   *
+   * Each token goes through Search::CommitToken, so EOS and the session limit follow the ordinary
+   * bookkeeping (an EOS token ends the turn and is not appended). Stop strings observe every
+   * appended token. The turn limit, the context limit and a stop match end the turn at the first
+   * token that reaches them, with the same precedence as StageGeneration (stop string, EOS, turn
+   * limit, context limit); tokens after that one are not committed. The returned step lists the
+   * appended tokens only.
+   */
+  RequestStepResult CommitExternalTokens(std::span<const int32_t> tokens);
 
   /**
    * @brief Checks if the current generation turn reached a stopping condition.

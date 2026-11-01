@@ -262,6 +262,24 @@ TEST_F(SchedulerContractTest, DynamicResidentQueuedRequestIsNotReadmitted) {
   EXPECT_EQ(cache->AllocatedCount(), 1u);
 }
 
+// Engine::BeginTurn enrolls a request again when a turn restarts after a rewind or a cancellation. The request never left
+// the pool, so the second enrollment must not queue it twice.
+TEST_F(SchedulerContractTest, DynamicEnrollingAnEnrolledRequestAgainPlansItOnce) {
+  auto cache = std::make_shared<RecordingCacheManager>(model_, /*capacity=*/8);
+  DynamicBatchScheduler scheduler(model_, cache);
+
+  auto request = Assigned(10);
+  scheduler.AddRequest(request);
+  scheduler.AddRequest(request);
+  StepPlan plan;
+
+  const auto result = scheduler.PlanStep(plan);
+
+  ASSERT_TRUE(result.executable);
+  ASSERT_EQ(plan.requests.size(), 1u);
+  EXPECT_EQ(plan.requests[0].request, request);
+}
+
 // Removing a request from the dynamic scheduler deallocates its cache resources immediately.
 TEST_F(SchedulerContractTest, DynamicRemoveReleasesCacheResources) {
   auto cache = std::make_shared<RecordingCacheManager>(model_, /*capacity=*/8);

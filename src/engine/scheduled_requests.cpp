@@ -16,6 +16,10 @@
 
 namespace Generators {
 
+ScheduledRequests::~ScheduledRequests() = default;
+ScheduledRequests::ScheduledRequests(ScheduledRequests&&) noexcept = default;
+ScheduledRequests& ScheduledRequests::operator=(ScheduledRequests&&) noexcept = default;
+
 TargetTokenSelection BuildTopKTargetSelection(
     std::span<const int32_t> tokens, std::span<const float> scores,
     const EffectiveTurnPolicy& policy) {
@@ -214,7 +218,107 @@ Tensor* ScheduledRequests::HiddenStates() const {
   return decoder_state_ ? decoder_state_->HiddenStates() : nullptr;
 }
 
+void ScheduledRequests::BeginBackendStep(std::vector<BackendPlannedRow> plan) {
+  if (output_kind_ != StepOutputKind::DecoderOutputs || decoder_state_)
+    throw std::logic_error("An executor step can select its output protocol only once.");
+  if (plan.empty() && std::any_of(requests_.begin(), requests_.end(),
+                                  [](const auto& request) { return IsExecuting(request->status_); }))
+    throw std::logic_error("Executable backend work requires a nonempty plan; defer idle work in the scheduler.");
+  for (size_t i = 0; i < plan.size(); ++i) {
+    const auto& row = plan[i];
+    if (row.request_row >= requests_.size() || !IsExecuting(requests_[row.request_row]->status_) ||
+        row.key.turn_id != requests_[row.request_row]->CurrentTurnId() ||
+        row.key.context_id == 0 || row.key.lease_epoch == 0 || row.key.slot.epoch == 0 ||
+        row.key.submission_id == 0 || row.key.slot.index >= backend_max_slots_)
+      throw std::logic_error("A backend plan contains an invalid live row identity.");
+    for (size_t j = 0; j < i; ++j) {
+      if (plan[j].request_row == row.request_row || plan[j].key.slot.index == row.key.slot.index ||
+          plan[j].key.context_id != row.key.context_id || plan[j].key.lease_epoch != row.key.lease_epoch)
+        throw std::logic_error("A backend plan schedules the same request or slot twice.");
+    }
+  }
+  output_kind_ = StepOutputKind::BackendRows;
+  backend_plan_ = std::move(plan);
+  backend_rows_.reserve(backend_plan_.size());
+  backend_request_rows_.reserve(backend_plan_.size());
+  commit_acks_.reserve(backend_plan_.size());
+}
+
+void ScheduledRequests::StageBackendRow(size_t request_row, BackendRowResult result) {
+  if (output_kind_ != StepOutputKind::BackendRows)
+    throw std::logic_error("Backend rows require an explicit backend step plan.");
+  for (size_t row : backend_request_rows_) {
+    if (row == request_row)
+      throw std::logic_error("A backend returned duplicate completion rows.");
+  }
+  backend_request_rows_.push_back(request_row);
+  backend_rows_.push_back(std::move(result));
+}
+
+void ScheduledRequests::ValidateBackendRows() const {
+  if (backend_rows_.size() != backend_plan_.size())
+    throw std::logic_error("Backend completion coverage does not match its submitted plan.");
+  for (size_t i = 0; i < backend_rows_.size(); ++i) {
+    const auto& row = backend_rows_[i];
+    const size_t request_row = backend_request_rows_[i];
+    const auto planned = std::find_if(backend_plan_.begin(), backend_plan_.end(),
+                                      [request_row](const BackendPlannedRow& p) { return p.request_row == request_row; });
+    if (planned == backend_plan_.end() || !(planned->key == row.key) ||
+        !IsExecuting(requests_[request_row]->status_) ||
+        requests_[request_row]->CurrentTurnId() != row.key.turn_id)
+      throw std::logic_error("Backend completion does not belong to the planned live request.");
+    if (!row.prefill && !row.selected_tokens)
+      throw std::logic_error("A backend row must report progress or selected tokens.");
+    if (row.prefill) {
+      const auto& progress = *row.prefill;
+      if (progress.prompt_tokens_processed_this_step > planned->max_prompt_tokens ||
+          (progress.prompt_tokens_processed_this_step == 0 &&
+           !(planned->allow_phase_completion && progress.prompt_complete)))
+        throw std::logic_error("Backend prefill progress is outside its planned prompt range.");
+    }
+    if (row.selected_tokens) {
+      const auto& block = *row.selected_tokens;
+      if (block.candidate_count == 0 || block.candidate_count > kMaxGeneratedTokensPerStep ||
+          block.candidate_count > backend_max_result_tokens_ ||
+          block.speculation.accepted > block.speculation.proposed)
+        throw std::logic_error("A backend returned an invalid selected-token block.");
+      for (size_t j = 0; j < block.candidate_count; ++j) {
+        if (block.candidates[j] < 0 || block.candidates[j] >= model_->config_->model.vocab_size)
+          throw std::logic_error("A backend returned a token outside the configured vocabulary.");
+      }
+    }
+  }
+}
+
 void ScheduledRequests::GenerateNextTokens(std::vector<RequestStepResult>& results) {
+  if (output_kind_ == StepOutputKind::BackendRows) {
+    ValidateBackendRows();  // The entire batch is checked before the first Request changes.
+    if (backend_committed_)
+      throw std::logic_error("A backend completion batch was committed more than once.");
+    backend_committed_ = true;  // A partially failed Request commit must never be retried.
+    results.assign(requests_.size(), RequestStepResult{});
+    for (size_t i = 0; i < backend_rows_.size(); ++i) {
+      const auto& row = backend_rows_[i];
+      const size_t request_row = backend_request_rows_[i];
+      auto& request = requests_[request_row];
+      auto& result = results[request_row];
+      if (row.selected_tokens) {
+        const auto& block = *row.selected_tokens;
+        result = request->CommitExternalTokens({block.candidates.data(), block.candidate_count});
+      }
+      TokenCommitAck ack;
+      ack.key = row.key;
+      ack.candidates_consumed = result.candidates_consumed;
+      ack.tokens_appended = result.tokens_appended;
+      ack.tokens_staged_for_events = result.visible_token_count;
+      ack.request_sequence_length_after = static_cast<uint64_t>(request->CurrentSequenceLength());
+      ack.turn_finished = result.done;
+      ack.finish_reason = result.finish_reason;
+      ack.disposition = result.done ? ContinuationDisposition::Invalidate : ContinuationDisposition::Continue;
+      commit_acks_.push_back(std::move(ack));
+    }
+    return;
+  }
   if (!decoder_state_) {
     throw std::runtime_error("Cannot generate next tokens without the decoder state.");
   }

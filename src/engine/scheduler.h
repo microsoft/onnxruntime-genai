@@ -18,6 +18,19 @@ namespace Generators {
 
 inline constexpr size_t kDefaultStaticBatchSize = 4;
 
+// Engine::BeginTurn restarts a turn that was canceled before the request made any progress, even after another request
+// took the request's device state, and it enrolls only the first turn of a request. A scheduler that displaces such a
+// request from its slot must therefore keep it in its pool.
+inline bool StaysEnrolledWhenDisplaced(const Request& request) {
+  return request.IsTurnComplete() &&
+         (request.IsRestartableCanceledTurn() || request.NeedsReplayAfterRewind());
+}
+
+struct NontransactionalSchedulingResult {
+  StepOutcome outcome;
+  std::optional<ScheduledRequests> scheduled;
+};
+
 struct Scheduler {
   /**
    * @brief Constructs a Scheduler instance with the specified model and cache manager.
@@ -68,6 +81,15 @@ struct Scheduler {
    */
   virtual ScheduledRequests Schedule() = 0;
 
+  // Expected capacity and phase deferral use a value, never the fatal exception path.
+  // Existing schedulers retain their Schedule implementation through this adapter.
+  virtual NontransactionalSchedulingResult ScheduleStep() {
+    auto scheduled = Schedule();
+    if (!scheduled)
+      return {{StepOutcomeKind::NoWork, 0, nullptr}, std::nullopt};
+    return {{StepOutcomeKind::Committed, 0, nullptr}, std::move(scheduled)};
+  }
+
   virtual StepPlanningResult PlanStep(StepPlan&) {
     throw std::logic_error("Scheduler does not support transactional step planning.");
   }
@@ -77,6 +99,8 @@ struct Scheduler {
   bool SupportsTransactionalSamplerState() const {
     return !batched_sampler_ || batched_sampler_->SupportsTransactions();
   }
+
+  virtual bool SupportsIndependentSlotAdmission() const { return false; }
 
   /**
    * @brief Checks if the Scheduler has any pending requests.
@@ -136,6 +160,8 @@ struct DynamicBatchScheduler : Scheduler {
   StepPlanningResult PlanStep(StepPlan& plan) override;
 
   bool HasPendingRequests() const override;
+
+  bool SupportsIndependentSlotAdmission() const override { return true; }
 
  private:
   std::shared_ptr<Model> model_;
