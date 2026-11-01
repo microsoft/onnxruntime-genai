@@ -102,7 +102,9 @@ void Qwen38GraphSession::Release() {
   pending_step_ = {};
   completions_.Retire(0);
   if (deferred_error_) {
-    std::rethrow_exception(std::exchange(deferred_error_, nullptr));
+    // Only a step consumes the failure (the Engine then turns it into a fatal error). A retried rewind or retirement must
+    // keep failing: clearing it here would let a later retry succeed on a poisoned device.
+    std::rethrow_exception(deferred_error_);
   }
   if (!status_checked_) {
     status_checked_ = true;

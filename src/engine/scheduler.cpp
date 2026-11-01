@@ -145,6 +145,11 @@ DynamicBatchScheduler::DynamicBatchScheduler(std::shared_ptr<Model> model, std::
     : Scheduler{model}, model_{model}, cache_manager_{cache_manager} {}
 
 void DynamicBatchScheduler::AddRequest(std::shared_ptr<Request> request) {
+  // A rewound request, or one restarted after a cancellation, is still in the pool (it leaves only through RemoveRequest);
+  // enrolling it again would plan it twice in one step.
+  if (std::find(requests_pool_.begin(), requests_pool_.end(), request) != requests_pool_.end()) {
+    return;
+  }
   requests_pool_.reserve(requests_pool_.size() + 1);
   auto sampling_state = CreateSamplingState(*request);
   request->CommitSamplingState(std::move(sampling_state));

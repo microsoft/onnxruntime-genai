@@ -1324,6 +1324,32 @@ TEST_F(Qwen38GraphEngineTest, ADeviceErrorFoundWhileRewindingStaysFatalAfterTheC
   EXPECT_EQ(RunUntilFailure(*engine), EngineErrorCode::EngineExecutionFailure);
 }
 
+// The failure belongs to the device, not to the attempt that found it: a caller that retries the rewind must keep failing
+// instead of consuming the error, or a later retry would succeed on a poisoned device and the next step would reset away
+// the error bits.
+TEST_F(Qwen38GraphEngineTest, RetryingAFailedRewindCannotConsumeTheDeviceFailure) {
+  device_->overrides[5] = 5;
+  device_->overrides[6] = 6;
+  device_->fail_status_check = true;
+  auto engine = MakeEngine();
+  auto request = engine->CreateRequest();
+  TurnOptions options;
+  options.request = request;
+  options.max_generated_tokens = 20;
+  options.stop_strings = {"STOP"};
+  const uint64_t turn = request->BeginTurn(Prompt(5), options);
+  ASSERT_EQ(RunToCompletion(*engine, request).finish_reason, GenerationFinishReason::StopString);
+
+  ASSERT_THROW(request->RewindToStartOfTurn(turn), std::runtime_error);
+  device_->fail_status_check = false;
+  EXPECT_THROW(request->RewindToStartOfTurn(turn), std::runtime_error);
+  EXPECT_THROW(request->RewindToStartOfTurn(turn), std::runtime_error);
+  EXPECT_FALSE(device_->context_healthy);
+
+  auto next = Begin(*engine, Prompt(5, 25), /*max_generated_tokens=*/4);
+  EXPECT_EQ(RunUntilFailure(*engine), EngineErrorCode::EngineExecutionFailure);
+}
+
 TEST_F(Qwen38GraphEngineTest, DeviceErrorBitsAfterACanceledTurnAreSurfacedOnTheNextRun) {
   model_->config_->model.qwen38_graph.prefill.chunk = 64;
   auto engine = MakeEngine();
@@ -1476,6 +1502,16 @@ TEST_F(Qwen38GraphEngineTest, CapabilitiesAreHonest) {
   RequestOptions at_limit;
   at_limit.max_session_tokens = capabilities.max_request_length;
   EXPECT_NO_THROW(engine->CreateRequest(at_limit));
+}
+
+TEST_F(Qwen38GraphEngineTest, MaxRequestLengthIsTheSmallerOfTheModelContextLengthAndTheKvCapacity) {
+  const int kv_limit = device_->Capacity() - Qwen38DecodeDevice::kReservedTail;
+
+  model_->config_->model.context_length = kv_limit - 10;
+  EXPECT_EQ(MakeEngine()->GetCapabilities().max_request_length, static_cast<uint64_t>(kv_limit - 10));
+
+  model_->config_->model.context_length = kv_limit + 10;
+  EXPECT_EQ(MakeEngine()->GetCapabilities().max_request_length, static_cast<uint64_t>(kv_limit));
 }
 
 TEST_F(Qwen38GraphEngineTest, UnsupportedTurnOptionsAreRejectedBeforeTheRequestChanges) {

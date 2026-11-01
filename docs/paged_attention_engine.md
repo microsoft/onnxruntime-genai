@@ -2363,7 +2363,8 @@ paged, batched or cropped to an arbitrary token. `CreateEngineBackend` (`src/eng
   model fails). A fatal execution failure poisons the mutable device context across Engine leases until the model is reloaded.
 - `ModelExecutor::ValidateTurn` and `BackendCapabilities` reject, before any Request mutation, what the device loop cannot do:
   sampling, repetition penalty, no-repeat n-grams, `min_generated_tokens`, seeds and guidance. `MaxDraftTokensPerStep()` is
-  zero (the caller cannot attach drafts). `GetCapabilities()` reports one row and `max_request_length` = KV capacity - 4.
+  zero (the caller cannot attach drafts). `GetCapabilities()` reports one row and `max_request_length` = KV capacity - 4,
+  clamped to `model.context_length` when that is configured, so it is the smaller of the two.
 - `GetSpeculativeStats()` includes the executor's counters (`ModelExecutor::AddSpeculativeStats`): one round per cycle, one
   or more proposed drafts per round (the fold verifies 1..3), accepted drafts, bonus and correction tokens, the
   acceptance-length histogram. The counters describe what the Engine consumed, as `Engine::RecordSpeculativeCommit` does for
