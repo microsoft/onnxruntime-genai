@@ -200,6 +200,23 @@ def test_llava_rank2_features_generation_matches_reference(test_data_path, promp
     _generate_and_check(test_data_path, _model_path(test_data_path, "llava-rank2"), prompt, image_names)
 
 
+def test_llava_renamed_pixel_values_input(test_data_path, tmp_path):
+    onnx = pytest.importorskip("onnx")
+
+    def rename(model):
+        model["vision"]["inputs"]["pixel_values"] = "images"
+
+    model_path = _copy_model(test_data_path, tmp_path, rename)
+    vision_path = os.path.join(model_path, "vision.onnx")
+    vision = onnx.load(vision_path)
+    vision.graph.input[0].name = "images"
+    for node in vision.graph.node:
+        node.input[:] = ["images" if name == "pixel_values" else name for name in node.input]
+    onnx.save(vision, vision_path)
+
+    _generate_and_check(test_data_path, model_path, "<image>5<image>67", ["cars.jpg", "landscape.jpg"])
+
+
 @pytest.mark.parametrize(
     "prompt,image_names,expected",
     [
