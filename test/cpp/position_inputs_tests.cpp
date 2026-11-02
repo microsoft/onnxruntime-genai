@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include "models/io/default_position_inputs.h"
+#include "models/io/windowed_position_inputs.h"
 
 namespace Generators {
 namespace {
@@ -676,6 +677,32 @@ TEST(PositionInputsCapacityTest, UsesExplicitCapacityAndRejectsOverflow) {
   inputs.Update(tokens.subspan(0, 1), 8, 1);
   EXPECT_THROW(inputs.Update(tokens.subspan(0, 1), 9, 1), std::runtime_error);
   EXPECT_THROW(inputs.RewindTo(9), std::runtime_error);
+}
+
+TEST(WindowedPositionInputsTest, RejectsWindowOutsideContextLength) {
+  for (int window_size : {0, -1, 9}) {
+    auto model = std::make_shared<PositionTestModel>(true, 1, 1);
+    auto& sliding_window = model->config_->model.decoder.sliding_window.emplace();
+    sliding_window.window_size = window_size;
+    sliding_window.slide_inputs = true;
+    sliding_window.slide_key_value_cache = false;
+    auto params = std::make_shared<GeneratorParams>(*model);
+    PositionTestState state{*params, *model};
+
+    EXPECT_THROW(WindowedPositionInputs(state), std::runtime_error) << window_size;
+  }
+}
+
+TEST(WindowedPositionInputsTest, AcceptsWindowEqualToContextLength) {
+  auto model = std::make_shared<PositionTestModel>(true, 1, 1);
+  auto& sliding_window = model->config_->model.decoder.sliding_window.emplace();
+  sliding_window.window_size = model->config_->model.context_length;
+  sliding_window.slide_inputs = true;
+  sliding_window.slide_key_value_cache = false;
+  auto params = std::make_shared<GeneratorParams>(*model);
+  PositionTestState state{*params, *model};
+
+  EXPECT_NO_THROW(WindowedPositionInputs(state));
 }
 
 }  // namespace
