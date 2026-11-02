@@ -1,0 +1,68 @@
+{
+    "processor": {
+        "name": "llava_image_processor",
+        "transforms": [
+            {
+                "operation": {
+                    "name": "decode_image",
+                    "type": "DecodeImage",
+                    "attrs": {
+                        "color_space": "RGB"
+                    }
+                }
+            },
+            {
+                "operation": {
+                    "name": "resize",
+                    "type": "Resize",
+                    "attrs": {
+                        "interpolation": "LINEAR",
+                        "width": 8,
+                        "height": 8,
+                        "keep_aspect_ratio": 0
+                    }
+                }
+            },
+            {
+                "operation": {
+                    "name": "rescale",
+                    "type": "Rescale",
+                    "attrs": {
+                        "rescale_factor": 0.00392156862745098
+                    }
+                }
+            },
+            {
+                "operation": {
+                    "name": "normalize",
+                    "type": "Normalize",
+                    "attrs": {
+                        "mean": [
+                            0.5,
+                            0.5,
+                            0.5
+                        ],
+                        "std": [
+                            0.5,
+                            0.5,
+                            0.5
+                        ]
+                    }
+                }
+            },
+            {
+                "operation": {
+                    "name": "to_channel_first",
+                    "type": "Permute3D",
+                    "attrs": {
+                        "dims": [
+                            2,
+                            0,
+                            1
+                        ]
+                    }
+                }
+            }
+        ]
+    }
+}
