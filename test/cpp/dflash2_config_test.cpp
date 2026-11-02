@@ -365,10 +365,15 @@ fs_std::path WriteIncompleteBlockDrafterConfig() {
 //   - draft token 0 reports `anchor_row_index[b]`
 //   - draft token 1 reports `static_cast<int32_t>(aux_hidden_states[anchor_row_index[b], 0])`
 //   - draft token 2 reports `static_cast<int32_t>(past_key_values.0.key[0, 0, 0, 0])`
+// When `block_size == 8` (7 draft tokens), tokens 3..6 additionally report:
+//   - draft token 3: `len(q_row_map) + sum(q_row_map[block_row_index]) - sum(q_row_map outside block_row_index)`
+//   - draft token 4: `sum(qkv_row_map)`
+//   - draft token 5: `sum(block_row_index)`
+//   - draft token 6: `past_sequence_lengths[b] + cumulative_sequence_lengths[1] + input_ids[0]`
 // and `present.0.key[0, 0, 0, 0]` is updated to `aux_hidden_states[anchor_row_index[0], 0]`, so
 // even a non-drafting step (whose lattice is discarded) records the row gathered by its borrowed
 // placeholder block for the next step to observe.
-fs_std::path WriteAnchorRowIndexDrafterModel() {
+fs_std::path WriteAnchorRowIndexDrafterModel(int64_t block_size = 4) {
   auto varint = [](uint64_t v) {
     std::string out;
     while (v >= 0x80u) {
@@ -423,18 +428,49 @@ fs_std::path WriteAnchorRowIndexDrafterModel() {
   };
 
   constexpr uint64_t kFloat = 1, kInt32 = 6, kInt64 = 7;
+  const int64_t num_draft_tokens = block_size - 1;
   std::string graph;
-  for (const auto& n : {
-           node("Gather", {"aux_hidden_states", "anchor_row_index"}, {"aa"}, "axis", 0),
-           node("Cast", {"aa"}, {"ai"}, "to", static_cast<int64_t>(kInt32)),
-           node("Unsqueeze", {"anchor_row_index", "a1"}, {"ac"}),
-           node("Sub", {"ac", "ac"}, {"zc"}),
-           node("GatherND", {"past_key_values.0.key", "i0"}, {"pk"}),
-           node("Cast", {"pk"}, {"pi"}, "to", static_cast<int64_t>(kInt32)),
-           node("Add", {"zc", "pi"}, {"pc"}),
-           node("Concat", {"ac", "ai", "pc"}, {"dv"}, "axis", 1),
+  std::vector<std::string> nodes{
+      node("Gather", {"aux_hidden_states", "anchor_row_index"}, {"aa"}, "axis", 0),
+      node("Cast", {"aa"}, {"ai"}, "to", static_cast<int64_t>(kInt32)),
+      node("Unsqueeze", {"anchor_row_index", "a1"}, {"ac"}),
+      node("Sub", {"ac", "ac"}, {"zc"}),
+      node("GatherND", {"past_key_values.0.key", "i0"}, {"pk"}),
+      node("Cast", {"pk"}, {"pi"}, "to", static_cast<int64_t>(kInt32)),
+      node("Add", {"zc", "pi"}, {"pc"}),
+  };
+  if (block_size == 8) {
+    for (const auto& extra : {
+             node("Shape", {"q_row_map"}, {"qsh"}),
+             node("Cast", {"qsh"}, {"ql"}, "to", static_cast<int64_t>(kInt32)),
+             node("Gather", {"q_row_map", "block_row_index"}, {"qb"}, "axis", 0),
+             node("ReduceSum", {"qb", "a0"}, {"qbs"}),
+             node("ReduceSum", {"q_row_map", "a0"}, {"qs"}),
+             node("Sub", {"qs", "qbs"}, {"qe"}),
+             node("Add", {"ql", "qbs"}, {"qlb"}),
+             node("Sub", {"qlb", "qe"}, {"qv"}),
+             node("Add", {"zc", "qv"}, {"qc"}),
+             node("ReduceSum", {"qkv_row_map", "a0"}, {"qkv_s"}),
+             node("Add", {"zc", "qkv_s"}, {"qkvc"}),
+             node("ReduceSum", {"block_row_index", "a0"}, {"br_s"}),
+             node("Add", {"zc", "br_s"}, {"brc"}),
+             node("Gather", {"cumulative_sequence_lengths", "a1"}, {"csl1"}, "axis", 0),
+             node("Gather", {"input_ids", "a0"}, {"in0"}, "axis", 0),
+             node("Cast", {"in0"}, {"in0_i"}, "to", static_cast<int64_t>(kInt32)),
+             node("Unsqueeze", {"past_sequence_lengths", "a1"}, {"psl_c"}),
+             node("Add", {"psl_c", "csl1"}, {"psl_csl"}),
+             node("Add", {"psl_csl", "in0_i"}, {"slc"}),
+             node("Concat", {"ac", "ai", "pc", "qc", "qkvc", "brc", "slc"}, {"dv"}, "axis", 1),
+         }) {
+      nodes.push_back(extra);
+    }
+  } else {
+    nodes.push_back(node("Concat", {"ac", "ai", "pc"}, {"dv"}, "axis", 1));
+  }
+  for (const auto& tail : {
            node("Unsqueeze", {"dv", "a2"}, {"dc"}),
-           node("Concat", {"dc", "dc"}, {"draft_candidate_ids"}, "axis", 2),
+           node("Sub", {"dc", "dc"}, {"dcz"}),
+           node("Concat", {"dc", "dcz"}, {"draft_candidate_ids"}, "axis", 2),
            node("Sub", {"draft_candidate_ids", "draft_candidate_ids"}, {"zi"}),
            node("Cast", {"zi"}, {"zf"}, "to", static_cast<int64_t>(kFloat)),
            node("Unsqueeze", {"zf", "a3"}, {"zs"}),
@@ -446,6 +482,9 @@ fs_std::path WriteAnchorRowIndexDrafterModel() {
            node("ScatterND", {"past_key_values.0.key", "i0", "fvu"}, {"present.0.key"}),
            node("Identity", {"past_key_values.0.value"}, {"present.0.value"}),
        }) {
+    nodes.push_back(tail);
+  }
+  for (const auto& n : nodes) {
     graph += bf(1, n);
   }
   graph += bf(2, "anchor_dflash2");
@@ -475,8 +514,8 @@ fs_std::path WriteAnchorRowIndexDrafterModel() {
     graph += bf(11, vi);
   }
   for (const auto& vo : {
-           value_info("draft_candidate_ids", kInt32, {-2, 3, 2}),
-           value_info("draft_scores", kFloat, {-2, 3, 2, 2}),
+           value_info("draft_candidate_ids", kInt32, {-2, num_draft_tokens, 2}),
+           value_info("draft_scores", kFloat, {-2, num_draft_tokens, 2, 2}),
            value_info("present.0.key", kFloat, {-1, 4, 1, 1}),
            value_info("present.0.value", kFloat, {-1, 4, 1, 1}),
        }) {
@@ -484,7 +523,8 @@ fs_std::path WriteAnchorRowIndexDrafterModel() {
   }
 
   const std::string model_bytes = vf(1, 8) + bf(7, graph) + bf(8, bf(1, "") + vf(2, 17));
-  const auto root = fs_std::temp_directory_path() / "ortgenai_dflash_anchor_drafter";
+  const auto root = fs_std::temp_directory_path() /
+                    ("ortgenai_dflash_anchor_drafter_b" + std::to_string(block_size));
   std::error_code error;
   fs_std::remove_all(root, error);
   fs_std::create_directories(root);
@@ -1429,6 +1469,125 @@ TEST(Dflash2ConfigTest, RunsDrafterWithAnchorRowIndex) {
         Dflash2Drafter::Feed{.request = req_a, .aux_row_begin = 0, .aux_row_count = 0, .first_position = 16, .anchor_token = 21, .draft_eligible = false, .wants_drafts = false},
     };
     EXPECT_THROW(drafter.Propose(*aux, zero_total_context, drafts), std::logic_error);
+  }
+
+  // 5. Fixed single-request mode (block_size = 8, num_draft_tokens = 7, context_window_ = 16):
+  //    exercises 1..8 context rows with 16-row padded q_row_map/qkv_row_map and packed input/output
+  //    spans, window trimming on a large prefill, a follow-up short proposal, and ReleaseAll reset.
+  {
+    const auto fixed_root = WriteAnchorRowIndexDrafterModel(8);
+    auto fixed_config = config;
+    fixed_config.config_path = fs::path{fixed_root.string()};
+    fixed_config.model.dflash2.block_size = 8;
+    fixed_config.model.dflash2.num_draft_tokens = 7;
+    fixed_config.model.dflash2.sliding_window = 8;  // context_window_ = 8 + 8 = 16.
+    auto fixed_model = std::make_shared<Dflash2Model>(CreateDflash2Config(fixed_config), GetOrtEnv());
+    Dflash2Drafter fixed_drafter{fixed_model, /*paged_block_size=*/4,
+                                 Dflash2Drafter::PoolBlocks(fixed_config, 4, 1),
+                                 /*max_requests=*/1, /*fixed_single_request=*/true};
+
+    size_t pos = 0;
+    int32_t prev_anchor_aux = 0;
+    for (size_t ctx_rows = 1; ctx_rows <= 8; ++ctx_rows) {
+      std::vector<float> values(ctx_rows);
+      for (size_t i = 0; i < ctx_rows; ++i) {
+        values[i] = static_cast<float>(ctx_rows * 100 + i);
+      }
+      auto aux = std::make_unique<Tensor>(device, Ort::TypeToTensorType<float>);
+      aux->CreateTensor(std::array<int64_t, 2>{static_cast<int64_t>(values.size()), 1});
+      aux->GetDeviceSpan<float>().CopyFromCpu(values);
+      const int32_t anchor_token = static_cast<int32_t>(20 + ctx_rows);
+      const std::array feeds{
+          Dflash2Drafter::Feed{.request = req_a,
+                               .aux_row_begin = 0,
+                               .aux_row_count = ctx_rows,
+                               .first_position = pos,
+                               .anchor_token = anchor_token,
+                               .draft_eligible = true,
+                               .wants_drafts = true},
+      };
+      ASSERT_TRUE(fixed_drafter.Propose(*aux, feeds, drafts));
+      ASSERT_EQ(drafts.size(), 1u);
+      const int32_t expected_anchor_row = static_cast<int32_t>(ctx_rows - 1);
+      const int32_t expected_aux = static_cast<int32_t>(ctx_rows * 100 + ctx_rows - 1);
+      const int32_t expected_q_check = 16 + 28;
+      const int32_t expected_qkv_sum =
+          static_cast<int32_t>(92 + ctx_rows * (ctx_rows - 1) / 2);
+      const int32_t expected_block_row_sum = static_cast<int32_t>(8 * ctx_rows + 28);
+      const int32_t expected_seq_check =
+          static_cast<int32_t>(pos + ctx_rows + 8) + anchor_token;
+      EXPECT_EQ(drafts[0], (std::vector<int32_t>{expected_anchor_row, expected_aux, prev_anchor_aux,
+                                                 expected_q_check, expected_qkv_sum,
+                                                 expected_block_row_sum, expected_seq_check}));
+      prev_anchor_aux = expected_aux;
+      pos += ctx_rows;
+    }
+
+    // Window-trimmed large prefill: 20 context rows (> context_window_ = 16) drop the leading 4
+    // rows, advance past_sequence_lengths by 4, and run the 16-row unpadded prefill path.
+    {
+      std::vector<float> prefill_values(20);
+      for (size_t i = 0; i < prefill_values.size(); ++i) {
+        prefill_values[i] = static_cast<float>(900 + i);
+      }
+      auto prefill_aux = std::make_unique<Tensor>(device, Ort::TypeToTensorType<float>);
+      prefill_aux->CreateTensor(std::array<int64_t, 2>{20, 1});
+      prefill_aux->GetDeviceSpan<float>().CopyFromCpu(prefill_values);
+      const std::array prefill_feeds{
+          Dflash2Drafter::Feed{.request = req_a,
+                               .aux_row_begin = 0,
+                               .aux_row_count = 20,
+                               .first_position = pos,
+                               .anchor_token = 30,
+                               .draft_eligible = true,
+                               .wants_drafts = true},
+      };
+      ASSERT_TRUE(fixed_drafter.Propose(*prefill_aux, prefill_feeds, drafts));
+      ASSERT_EQ(drafts.size(), 1u);
+      EXPECT_EQ(drafts[0], (std::vector<int32_t>{
+                               15, 919, prev_anchor_aux, 24 + 28,
+                               28 + 8 * 16 + 16 * 15 / 2, 8 * 16 + 28,
+                               static_cast<int32_t>((pos + 4) + 24 + 30)}));
+      prev_anchor_aux = 919;
+      pos += 20;
+    }
+
+    // Follow-up short proposal after the large prefill switches back to the fixed 16-row padded path.
+    {
+      auto short_aux = make_aux({950.0f, 951.0f, 952.0f});
+      const std::array short_feeds{
+          Dflash2Drafter::Feed{.request = req_a,
+                               .aux_row_begin = 0,
+                               .aux_row_count = 3,
+                               .first_position = pos,
+                               .anchor_token = 31,
+                               .draft_eligible = true,
+                               .wants_drafts = true},
+      };
+      ASSERT_TRUE(fixed_drafter.Propose(*short_aux, short_feeds, drafts));
+      ASSERT_EQ(drafts.size(), 1u);
+      EXPECT_EQ(drafts[0], (std::vector<int32_t>{
+                               2, 952, prev_anchor_aux, 16 + 28, 92 + 3,
+                               8 * 3 + 28, static_cast<int32_t>(pos + 11 + 31)}));
+    }
+
+    // Reset via ReleaseAll() clears the request cursor so a fresh proposal starts from position 0.
+    fixed_drafter.ReleaseAll();
+    {
+      auto reset_aux = make_aux({960.0f, 961.0f});
+      const std::array reset_feeds{
+          Dflash2Drafter::Feed{.request = req_a,
+                               .aux_row_begin = 0,
+                               .aux_row_count = 2,
+                               .first_position = 0,
+                               .anchor_token = 32,
+                               .draft_eligible = true,
+                               .wants_drafts = true},
+      };
+      ASSERT_TRUE(fixed_drafter.Propose(*reset_aux, reset_feeds, drafts));
+      ASSERT_EQ(drafts.size(), 1u);
+      EXPECT_EQ(drafts[0], (std::vector<int32_t>{1, 961, 952, 16 + 28, 92 + 1, 8 * 2 + 28, 10 + 32}));
+    }
   }
 }
 

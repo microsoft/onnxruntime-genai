@@ -35,9 +35,10 @@ qualified reference runtime may be retained. Decoder cache name mappings and
 layer counts are not used: the native state validates the actual graph metadata.
 The standard decoder input keys `past_sequence_length: "seqlens_k"` and
 `total_sequence_length: "total_sequence_length"` are accepted, but do not
-override these native bindings. No decoder `state_groups` or Engine settings
-are needed. Omit Engine batching settings; enabled static/dynamic batching is
-rejected. The drafter's internal paged cache does not make the target paged.
+override these native bindings. No decoder `state_groups`, `sliding_window`, or
+Engine settings are needed; decoder `sliding_window` and enabled static/dynamic
+batching are rejected. The drafter's internal paged cache and sliding window do
+not make the target paged or windowed.
 There are no Bolt-specific JSON fields.
 Set `speculative.max_draft_tokens: 7`; the verify width is fixed, not adaptive.
 

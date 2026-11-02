@@ -1236,12 +1236,11 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   // retiring one at every block boundary; columns past the live KV length are never read. Steps
   // that cannot be captured keep the exact width so their bound inputs are unchanged.
   const bool graph_eligible = (!fixed_single_request_ || fixed_graph_step) &&
-      Dflash2GraphCaptureAllowed(
-          graph_capture_enabled_, uniform_ingest, max_blocks, max_block_table_columns_);
+                              Dflash2GraphCaptureAllowed(
+                                  graph_capture_enabled_, uniform_ingest, max_blocks, max_block_table_columns_);
   const size_t block_table_columns =
-      fixed_single_request_ ? max_block_table_columns_ :
-      graph_eligible ? GetGraphBlockTableColumns(max_blocks, max_block_table_columns_)
-                     : max_blocks;
+      fixed_single_request_ ? max_block_table_columns_ : graph_eligible ? GetGraphBlockTableColumns(max_blocks, max_block_table_columns_)
+                                                                        : max_blocks;
   auto fill_int32 = [](Tensor& tensor, const std::vector<int32_t>& values) {
     auto span = tensor.GetDeviceSpan<int32_t>();
     std::copy(values.begin(), values.end(), span.CpuSpan().begin());

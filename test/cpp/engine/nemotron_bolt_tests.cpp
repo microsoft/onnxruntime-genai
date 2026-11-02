@@ -73,6 +73,8 @@ TEST(NemotronBolt, RejectsInvalidVerificationGeometry) {
 
 TEST(NemotronBolt, RejectsUnsupportedSearchInsteadOfIgnoringIt) {
   Config config;
+  config.model.type = "nemotron_bolt";
+  config.model.dflash2.sliding_window = 1024;
   config.speculative.max_draft_tokens = 7;
   auto params = std::make_shared<GeneratorParams>(config);
   params->use_graph_capture = true;
@@ -104,6 +106,12 @@ TEST(NemotronBolt, RejectsUnsupportedSearchInsteadOfIgnoringIt) {
     change(*invalid);
     EXPECT_THROW(ValidateNemotronBoltSearch(*invalid), std::runtime_error);
   }
+  Config sliding = config;
+  sliding.model.decoder.sliding_window = Config::Model::Decoder::SlidingWindow{8};
+  auto invalid_sliding = std::make_shared<GeneratorParams>(sliding);
+  invalid_sliding->use_graph_capture = true;
+  EXPECT_THROW(ValidateNemotronBoltSearch(*invalid_sliding), std::runtime_error);
+  EXPECT_THROW(CreateSearch(*invalid_sliding), std::runtime_error);
 }
 
 TEST(NemotronBolt, PublicTokenCommitAndResetHaveNoLookaheadLeak) {

@@ -84,7 +84,8 @@ void ValidateNemotronBoltSearch(const GeneratorParams& params) {
               params.speculative.min_adaptive_k == 0 && !params.speculative.cooldown &&
               params.speculative.max_draft_tokens == 7,
           "speculative.max_draft_tokens must be 7; external/adaptive speculative strategies are unsupported");
-  Require(!s.chunk_size, "external prefill chunking is unsupported");
+  Require(!s.chunk_size && !params.config.model.decoder.sliding_window,
+          "external prefill chunking and decoder sliding_window are unsupported");
   Require(params.use_graph_capture, "CUDA graph capture must be enabled");
 }
 
@@ -119,8 +120,9 @@ NemotronBoltModel::NemotronBoltModel(std::unique_ptr<Config> config, OrtEnv& env
   Require(IsGraphCaptureEnabled(config_->model.decoder.session_options),
           "enable_cuda_graph must be 1");
   Require(!config_->engine.dynamic_batching && !config_->engine.static_batching &&
-              !config_->model.draft && !config_->model.mtp.IsEnabled(),
-          "Engine batching, decoder draft, and MTP are unsupported");
+              !config_->model.draft && !config_->model.mtp.IsEnabled() &&
+              !config_->model.decoder.sliding_window,
+          "Engine batching, decoder draft, MTP, and decoder sliding_window are unsupported");
   session_ = CreateSession(env, config_->model.decoder.filename, session_options_.get());
   session_info_.Add(*session_);
   const auto& info = session_info_;
@@ -262,6 +264,9 @@ NemotronBoltState::NemotronBoltState(const NemotronBoltModel& model, const Gener
   for (auto& name : output_storage_) output_names_.push_back(name.c_str());
   const int32_t capacity = static_cast<int32_t>(model.capacity_);
   Upload(*tensors_.at("total_sequence_length"), std::span<const int32_t>{&capacity, 1});
+  if (model.config_->model.decoder.run_options.has_value()) {
+    State::SetRunOptions(model.config_->model.decoder.run_options.value());
+  }
   run_options_->AddConfigEntry("disable_synchronize_execution_providers", "1");
 
   // The view is zero-copy: DFlash2 packs only the committed rows, never the padded/rejected ones.
@@ -461,6 +466,7 @@ std::unique_ptr<DecodingStrategy> MakeNemotronBoltStrategy(Generator& generator)
 }
 
 std::unique_ptr<Search> CreateNemotronBoltSearch(const GeneratorParams& params) {
+  Require(!params.config.model.decoder.sliding_window, "decoder sliding_window is unsupported");
   return std::make_unique<BoltSearch>(params);
 }
 
