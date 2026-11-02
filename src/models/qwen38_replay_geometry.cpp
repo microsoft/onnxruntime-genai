@@ -268,6 +268,8 @@ void RequireQwen38ReplayCoverage(const std::vector<std::string>& bank_names,
       expected_update = "state_update." + layer + ".ple_conv_value";
     } else if (suffix == "index_buffer" || suffix == "index_lengths") {
       expected_update = "state_update." + layer + ".indexer_value";
+    } else if (suffix == "ple_context") {
+      continue;
     } else {
       throw std::runtime_error("qwen38_graph: banked state " + bank_name + " has no compact replay rule");
     }

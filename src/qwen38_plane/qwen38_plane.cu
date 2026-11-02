@@ -526,6 +526,87 @@ static inline void host_gather_ple_row(StagedPleWorkspace& ws, i64 tok, i64 s_c0
   }
 }
 
+static inline void host_gather_ple_rows_batch(StagedPleWorkspace& ws, int rows, const i64* d_toks, const i64* d_c0s,
+                                              const i64* d_c1s, unsigned char* fp8_base, size_t row_stride) {
+  const PleParams& HP = ws.params;
+  const int hd = HP.head_dim;
+  const int nh = HP.n_heads;
+  const size_t total_bytes = (size_t)nh * (size_t)hd;
+  const bool use_cache = (ws.ngram_cache_data != nullptr && total_bytes <= StagedPleWorkspace::kMaxRowBytes);
+  const unsigned char* miss_srcs[256];
+  unsigned char* miss_dsts[256];
+#ifdef _WIN32
+  WIN32_MEMORY_RANGE_ENTRY ranges[256];
+#endif
+  int num_misses = 0;
+  int miss_rows[8];
+  size_t miss_slots[8];
+  i64 miss_c0s[8];
+  int num_miss_rows = 0;
+
+  for (int r = 0; r < rows; ++r) {
+    hook_gather();
+    const i64 tok = d_toks[r];
+    const i64 c1 = d_c1s[r];
+    const i64 c0 = (c1 == HP.eos) ? HP.eos : d_c0s[r];
+    unsigned char* dst_fp8 = fp8_base + (size_t)r * row_stride;
+    size_t cache_slot = 0;
+    if (use_cache) {
+      cache_slot = ple_ngram_cache_slot(tok, c0, c1);
+      if (ws.ngram_cache_valid[cache_slot] &&
+          ws.ngram_cache_keys[cache_slot][0] == tok &&
+          ws.ngram_cache_keys[cache_slot][1] == c0 &&
+          ws.ngram_cache_keys[cache_slot][2] == c1) {
+        memcpy(dst_fp8, ws.ngram_cache_data + cache_slot * StagedPleWorkspace::kMaxRowBytes, total_bytes);
+        continue;
+      }
+    }
+    for (int h = 0; h < nh; ++h) {
+      const unsigned char* src = resolve_ple_head_ptr(HP, h, tok, c0, c1);
+      miss_srcs[num_misses] = src;
+      miss_dsts[num_misses] = dst_fp8 + (size_t)h * (size_t)hd;
+#ifdef _WIN32
+      ranges[num_misses] = {const_cast<unsigned char*>(src), (SIZE_T)hd};
+#endif
+      ++num_misses;
+    }
+    if (use_cache && num_miss_rows < 8) {
+      miss_rows[num_miss_rows] = r;
+      miss_slots[num_miss_rows] = cache_slot;
+      miss_c0s[num_miss_rows] = c0;
+      ++num_miss_rows;
+    }
+  }
+
+  if (num_misses > 0) {
+#ifdef _WIN32
+    if (num_misses > 1) {
+      (void)PrefetchVirtualMemory(GetCurrentProcess(), (ULONG_PTR)num_misses, ranges, 0);
+    }
+#endif
+    for (int k = 0; k < num_misses; ++k) {
+      memcpy(miss_dsts[k], miss_srcs[k], (size_t)hd);
+    }
+    for (int m = 0; m < num_miss_rows; ++m) {
+      const int r = miss_rows[m];
+      const size_t cache_slot = miss_slots[m];
+      memcpy(ws.ngram_cache_data + cache_slot * StagedPleWorkspace::kMaxRowBytes,
+             fp8_base + (size_t)r * row_stride, total_bytes);
+      ws.ngram_cache_keys[cache_slot][0] = d_toks[r];
+      ws.ngram_cache_keys[cache_slot][1] = miss_c0s[m];
+      ws.ngram_cache_keys[cache_slot][2] = d_c1s[r];
+      ws.ngram_cache_valid[cache_slot] = 1;
+    }
+#ifdef _WIN32
+    if (HP.pad_ != 0) {
+      for (int k = 0; k < num_misses; ++k) {
+        (void)VirtualUnlock(ranges[k].VirtualAddress, ranges[k].NumberOfBytes);
+      }
+    }
+#endif
+  }
+}
+
 struct PleGatherTask {
   StagedPleWorkspace* ws = nullptr;
   const i64* h_toks = nullptr;
@@ -627,12 +708,19 @@ struct PleGatherPool {
         }
       }
 
+#ifdef _WIN32
+      if (!ranges.empty()) {
+        (void)PrefetchVirtualMemory(GetCurrentProcess(), (ULONG_PTR)ranges.size(), ranges.data(), 0);
+      }
+#endif
       for (size_t k = 0; k < miss_srcs.size(); ++k) {
         memcpy(miss_dsts[k], miss_srcs[k], (size_t)hd);
       }
 #ifdef _WIN32
-      for (const auto& r : ranges) {
-        (void)VirtualUnlock(r.VirtualAddress, r.NumberOfBytes);
+      if (HP.pad_ != 0) {
+        for (const auto& r : ranges) {
+          (void)VirtualUnlock(r.VirtualAddress, r.NumberOfBytes);
+        }
       }
 #endif
     }
@@ -1631,16 +1719,18 @@ static int prep_staged_fold_rows(cudaStream_t stream, const void* P, int rows, c
   const unsigned char* device_rows = ws->prep_ring_dev + first * kRowBytes;
 
   StagedFoldRows step{};
+  i64 h_c0s[8];
   i64 c0 = ws->scalars[14];
   i64 c1 = ws->scalars[15];
   for (int r = 0; r < rows; ++r) {
     const i64 tok = ws->scalars[kSlots[r]];
     step.tok[r] = tok;
     step.c1[r] = c1;
-    host_gather_ple_row(*ws, tok, c0, c1, host_rows + static_cast<size_t>(r) * kRowBytes);
+    h_c0s[r] = c0;
     c0 = c1;
     c1 = tok;
   }
+  host_gather_ple_rows_batch(*ws, rows, step.tok, h_c0s, step.c1, host_rows, kRowBytes);
   hook_launch();
   BeginLaunch();
   k_prep_fold_staged<<<rows, 1024, 0, stream>>>(ws->params.capacity, ws->params.n_heads, ws->params.head_dim,
