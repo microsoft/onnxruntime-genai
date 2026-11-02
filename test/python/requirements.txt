@@ -1,7 +1,7 @@
 coloredlogs
 flatbuffers
 numpy<2
--r ../../tools/python/requirements-core-packaging.txt
+packaging
 protobuf==6.33.5
 sympy
 pytest
