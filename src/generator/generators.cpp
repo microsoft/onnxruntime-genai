@@ -677,6 +677,15 @@ void Generator::LogGeneratorCreate(const GeneratorParams& params) {
 }
 
 void Generator::InitializePhi3RopeThreshold(const GeneratorParams& params) {
+  const auto* decoder = dynamic_cast<const DecoderOnly_Model*>(model_.get());
+  if (decoder && !decoder->rope_context_input_.empty()) {
+    if (params.BatchBeamSize() != 1)
+      throw std::runtime_error("LongRoPE context selection currently requires batch_size=1 and num_beams=1");
+    has_explicit_rope_context_ = true;
+    phi3_rope_threshold_ = decoder->original_context_length_ + 1;
+    return;
+  }
+
   // Phi3 ROPE factor rewind threshold: 4097 for phi3/phimoe, 8193 for phi3small, 0 otherwise
   // TODO: Extend to support batch size > 1, num beams > 1, and multimodal models
   const auto& model_type = model_->config_->model.type;
@@ -883,7 +892,7 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
     guidance_logits_processor_->CommitTokens(next_tokens_span);
   }
 
-  auto logits = state_->Run(search_->GetSequenceLength(), next_tokens, search_->GetNextIndices());
+  auto logits = RunWithRopeCache(next_tokens);
   if (g_log.enabled && g_log.model_logits) {
     auto& stream = Log("model_logits");
     DumpValues(stream, Ort::TypeToTensorType<float>, logits.CopyDeviceToCpu().data(), logits.size());
@@ -901,7 +910,7 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
 
       std::span<int32_t> new_next_token_span{ff_tokens};
       auto new_next_token = AllocateInputIdsOnDevice(new_next_token_span);
-      logits = state_->Run(search_->GetSequenceLength(), new_next_token, search_->GetNextIndices());
+      logits = RunWithRopeCache(new_next_token);
       if (g_log.enabled && g_log.model_logits) {
         auto& stream_ = Log("model_logits");
         DumpValues(stream_, Ort::TypeToTensorType<float>, logits.CopyDeviceToCpu().data(), logits.size());
@@ -914,6 +923,20 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
 
   last_action_ = Action::standard;
   computed_logits_ = true;
+}
+
+DeviceSpan<float> Generator::RunWithRopeCache(DeviceSpan<int32_t> next_tokens) {
+  const int length = search_->GetSequenceLength();
+  if (has_explicit_rope_context_ && rope_cache_length_ > 0 &&
+      (rope_cache_length_ >= phi3_rope_threshold_) != (length >= phi3_rope_threshold_)) {
+    // Rebuild only model state: search, sampling, guidance and usage already contain these tokens.
+    state_->RewindTo(0);
+    next_tokens = search_->GetSequence(0);
+  }
+
+  auto logits = state_->Run(length, next_tokens, search_->GetNextIndices());
+  rope_cache_length_ = length;
+  return logits;
 }
 
 void Generator::SetRuntimeOption(const char* key, const char* value) {
@@ -1042,6 +1065,8 @@ void Generator::RewindToLength(size_t new_length) {
   state_->ValidateRewindTo(new_length);
   search_->RewindTo(new_length);
   state_->RewindTo(new_length);
+  if (new_length == 0)
+    rope_cache_length_ = 0;
   if (guidance_logits_processor_) {
     guidance_logits_processor_->Reset();
   }

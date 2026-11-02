@@ -4151,8 +4151,7 @@ class Model:
         # For other EPs (CPU, CUDA, WebGPU), create regular If node with multiple outputs
         # Make the following subgraph to decide which cos/sin caches to use in the rotary embeddings
         #
-        # attention_mask --> Shape --> Gather --> Greater --> If --> (cos_cache, sin_cache)
-        #                             (idx=1)
+        # rope_context_length --> Greater --> If --> (cos_cache, sin_cache)
         #
         # Or for PagedAttention (no attention_mask input):
         #
@@ -4161,17 +4160,23 @@ class Model:
         #
 
         basename = "/model/rope_caches_subgraph"
-        gather_name = ""
-        if self.attention_attrs["op_type"] == "GroupQueryAttention":
-            gather_name = "/model/attn_mask_reformat/attn_mask_subgraph/Gather"
+        if not self.use_paged_attention and "input_ids" in self.input_names:
+            self.input_names["rope_context_length"] = "rope_context_length"
+            self.input_types["rope_context_length"] = ir.DataType.INT64
+            self.input_shapes["rope_context_length"] = []
+            self.model.metadata_props["com.microsoft.genai.rope_context_length_input"] = "rope_context_length"
+            self.model.metadata_props["com.microsoft.genai.original_context_length"] = str(self.original_context_length)
+            context_length_input = self.input_names["rope_context_length"]
+        elif self.attention_attrs["op_type"] == "GroupQueryAttention":
+            context_length_input = "/model/attn_mask_reformat/attn_mask_subgraph/Gather/output_0"
         elif self.attention_attrs["op_type"] == "PagedAttention":
             self.make_paged_rotary_multi_cache_subgraph()
-            gather_name = "/model/context_length_subgraph/Mul"
+            context_length_input = "/model/context_length_subgraph/Mul/output_0"
         else:
-            gather_name = "/model/attn_mask_reformat/attn_mask_subgraph/Gather_2"
+            context_length_input = "/model/attn_mask_reformat/attn_mask_subgraph/Gather_2/output_0"
 
         greater_name = f"{basename}/Greater"
-        greater_inputs = [f"{gather_name}/output_0", f"/model/constants/INT64/{self.original_context_length}"]
+        greater_inputs = [context_length_input, f"/model/constants/INT64/{self.original_context_length}"]
         self.make_greater(greater_name, greater_inputs, shape=[])
         if_name = f"{basename}/If"
 

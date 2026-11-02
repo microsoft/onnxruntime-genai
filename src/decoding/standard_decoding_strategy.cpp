@@ -63,7 +63,8 @@ void RunStandardDecodingStep(Generator& g) {
 void StandardDecodingStrategy::Step(Generator& g) {
   // Phi3 models switch rope factors at a threshold token; recompute position
   // IDs and KV cache by rewinding and re-appending the sequence.
-  if (g.phi3_rope_threshold_ != 0 && g.search_->GetSequenceLength() == g.phi3_rope_threshold_) {
+  if (!g.has_explicit_rope_context_ && g.phi3_rope_threshold_ != 0 &&
+      g.search_->GetSequenceLength() == g.phi3_rope_threshold_) {
     auto current_seq = cpu_span<int32_t>(g.GetSequence(0).CopyDeviceToCpu());
     {
       [[maybe_unused]] auto suppress_telemetry_append_tracking =

@@ -31,6 +31,8 @@ struct DecoderOnly_Model : Model {
   std::shared_ptr<CpuEmbedding> cpu_embedding_;
   std::shared_ptr<const CpuEngram> cpu_engram_;
   std::once_flag cpu_engram_init_;
+  std::string rope_context_input_;
+  int original_context_length_{};
 };
 
 struct DecoderOnly_State : State {
@@ -76,6 +78,7 @@ struct DecoderOnly_State : State {
   std::unique_ptr<PleState> ple_state_;
   std::unique_ptr<IndexerCache> indexer_cache_;
   std::unique_ptr<PositionInputs> position_inputs_;
+  std::unique_ptr<OrtValue> rope_context_length_;
   std::unique_ptr<HiddenStatesInputs> hidden_states_;          // Only for models with a hidden_states input (MTP head).
   std::unique_ptr<HiddenStatesOutputs> hidden_states_output_;  // Only for models that emit a hidden_states output (CUDA-graph-safe).
   std::unique_ptr<EngramState> engram_state_;
