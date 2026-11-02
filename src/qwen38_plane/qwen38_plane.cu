@@ -186,9 +186,46 @@ static inline cudaError_t staged_record_done(cudaEvent_t event, cudaStream_t str
   return err;
 }
 
+// Makes `device` the current device of the calling thread for as long as the object lives, then restores the previous one. A
+// negative device, or one that is current already, changes nothing.
+class ScopedCurrentDevice {
+ public:
+  explicit ScopedCurrentDevice(int device) {
+    if (device < 0) return;
+    int current = -1;
+    if (cudaGetDevice(&current) != cudaSuccess) {
+      cudaGetLastError();
+      return;
+    }
+    if (current == device) return;
+    if (cudaSetDevice(device) != cudaSuccess) {
+      cudaGetLastError();
+      return;
+    }
+    previous_ = current;
+  }
+  ~ScopedCurrentDevice() {
+    if (previous_ >= 0 && cudaSetDevice(previous_) != cudaSuccess) cudaGetLastError();
+  }
+  ScopedCurrentDevice(const ScopedCurrentDevice&) = delete;
+  ScopedCurrentDevice& operator=(const ScopedCurrentDevice&) = delete;
+
+ private:
+  int previous_ = -1;
+};
+
+// Row 0 of a fold keeps the whole state buffer (`ctl`) in StagedPleWorkspace::scalars, with its two context words behind it.
+constexpr size_t kStateWords = QWEN38_PLANE_STATE_MIN_WORDS;
+constexpr size_t kScalarWords = 64;
+static_assert(kStateWords >= 10, "rows 1..3 of a fold read their draft tokens from words 2, 8 and 9 of the state");
+static_assert(kStateWords + 2 <= kScalarWords, "the state and the two context words have to fit in the scalars");
+
 struct StagedPleWorkspace {
   PleParams params{};
-  i64* scalars = nullptr;                  // pinned [64]: tok/ctl words + ctx_in
+  // The device the workspace is bound to (see staged_bind_device): the one that was current when a call last found it without
+  // CUDA resources and staged something in it. Meaningful only while has_cuda_allocations().
+  int owner_device = -1;
+  i64* scalars = nullptr;                  // pinned [kScalarWords]: tok/ctl words + ctx_in
   unsigned char* prep_ring = nullptr;      // pinned mapped [64 * 8192]
   unsigned char* prep_ring_dev = nullptr;  // device alias for prep_ring
   unsigned int ring_idx = 0;
@@ -213,7 +250,7 @@ struct StagedPleWorkspace {
   i64 ngram_cache_keys[kCacheSlots][3]{};
   unsigned char ngram_cache_valid[kCacheSlots]{};
 
-  // The words of the ten-word `ctl` snapshot that rows 1..3 of a fold read from `scalars` instead of the device. Whatever else
+  // `scalars` holds the `ctl` snapshot (kStateWords words) that rows 1..3 of a fold read instead of the device. Whatever else
   // writes `scalars` has to drop the snapshot first, or the next fold row would be prepared from words that are not its own.
   void invalidate_fold_snapshot() {
     cached_state_ptr = nullptr;
@@ -233,6 +270,9 @@ struct StagedPleWorkspace {
   }
 
   void release(bool sync_device) {
+    // The kernels that read the buffers run on the device that owns them, and the events and buffers are destroyed there; the
+    // device that is current in the calling thread need not be that one.
+    ScopedCurrentDevice on_owner{has_cuda_allocations() ? owner_device : -1};
     if (sync_device && has_cuda_allocations()) {
       if (cudaDeviceSynchronize() != cudaSuccess) {
         cudaGetLastError();
@@ -279,11 +319,30 @@ struct StagedPleWorkspace {
     ring_idx = 0;
     prefill_cap_rows = 0;
     prefill_cap_bytes = 0;
+    owner_device = -1;
     reset_cache();
   }
 
   ~StagedPleWorkspace() { release(false); }
 };
+
+// Binds the workspace to the device that is current in the calling thread, which it is not yet while it holds no CUDA
+// resources, or checks that this is the device it is bound to. A call on any other device gets cudaErrorInvalidDevice, before
+// it copies, gathers or launches anything: the completion events of the workspace can only be recorded on the streams of the
+// device that created them, and they are what fences its buffers against a call on another stream.
+static inline cudaError_t staged_bind_device(StagedPleWorkspace& ws) {
+  int device = -1;
+  const cudaError_t err = cudaGetDevice(&device);
+  if (err != cudaSuccess) {
+    cudaGetLastError();
+    return err;
+  }
+  if (!ws.has_cuda_allocations()) {
+    ws.owner_device = device;
+    return cudaSuccess;
+  }
+  return ws.owner_device == device ? cudaSuccess : cudaErrorInvalidDevice;
+}
 
 static std::mutex g_staged_ple_mu;
 static std::unordered_map<const void*, std::unique_ptr<StagedPleWorkspace>> g_host_ple_workspaces;
@@ -329,7 +388,7 @@ static cudaError_t ensure_staged_buffers(StagedPleWorkspace& ws, size_t rows, si
   bool replaces_buffer = false;
   cudaError_t err = cudaSuccess;
   if (!ws.scalars) {
-    err = staged_host_alloc(&fresh.scalars, 64 * sizeof(i64), cudaHostAllocPortable);
+    err = staged_host_alloc(&fresh.scalars, kScalarWords * sizeof(i64), cudaHostAllocPortable);
   }
   if (err == cudaSuccess && !ws.prep_ring) {
     err = staged_host_alloc(&fresh.prep_ring, 64 * 8192, cudaHostAllocMapped | cudaHostAllocPortable);
@@ -699,8 +758,9 @@ __device__ int merge_argmax(const float* v, const int* idx, int nb) {
   return bi;
 }
 
-/* state (int64[8]): [0]=pending token, [1]=committed length L, [2]=draft token, [4]=sequence counter,
- * [5]=error bits (1 = position capacity, 2 = nonzero validation status), [6]=last accept flag
+/* state (int64[QWEN38_PLANE_STATE_MIN_WORDS], the `ctl` of a fold): [0]=pending token, [1]=committed length L, [2]=draft token,
+ * [4]=sequence counter, [5]=error bits (1 = position capacity, 2 = nonzero validation status), [6]=last accept flag,
+ * [8]=draft token of row 2 and [9]=draft token of row 3 of a fold ([3] and [7] are not used here)
  * result ring (pinned, 8 int64 per record, `ring` records, slot = seq % ring):
  *   [0]=seq (written last), [1]=pred0, [2]=pred1, [3]=accept, [4]=status OR, [5]=new pending, [6]=new L
  * accept==1 -> commit row 1 (2 tokens), else commit row 0 (1 token). */
@@ -959,20 +1019,9 @@ __global__ void k_embed_rows(const __nv_bfloat16* table, const i64* ids, __nv_bf
 
 // Drops every staged table of the module, whichever loader registered it. Caller holds g_staged_ple_mu.
 static void release_all_staged_state_locked() {
-  bool need_sync = false;
-  for (const auto& kv : g_host_ple_workspaces) {
-    if (kv.second && kv.second->has_cuda_allocations()) {
-      need_sync = true;
-      break;
-    }
-  }
-  if (need_sync) {
-    if (cudaDeviceSynchronize() != cudaSuccess) {
-      cudaGetLastError();
-    }
-  }
+  // Each workspace drains the device that owns it, which may differ from one table to the next, before it frees its buffers.
   for (auto& kv : g_host_ple_workspaces) {
-    if (kv.second) kv.second->release(false);
+    if (kv.second) kv.second->release(true);
   }
   g_host_ple_workspaces.clear();
   g_dev_to_host_ple.clear();
@@ -1138,7 +1187,10 @@ QWEN38_PLANE_EXPORT int qwen38_plane_prep(void* s, const void* P, const void* to
       if (staged_stream_is_capturing(stream)) {
         return (int)cudaErrorStreamCaptureUnsupported;
       }
-      err = ensure_staged_buffers(*ws, 0, 0);
+      err = staged_bind_device(*ws);
+      if (err == cudaSuccess) {
+        err = ensure_staged_buffers(*ws, 0, 0);
+      }
       if (err == cudaSuccess) {
         err = staged_ensure_done_event(&ws->prep_done_event);
       }
@@ -1163,7 +1215,7 @@ QWEN38_PLANE_EXPORT int qwen38_plane_prep(void* s, const void* P, const void* to
           pos_ptr == (state_i64 + 1) &&
           tok_ptr == expected_fold_tok_ptr &&
           ctx_in == ws->cached_ctx_out_ptr) {
-        // Fast path for folded multi-draft rows 1..3: reuse the 10-word `ctl` snapshot copied on row 0
+        // Fast path for folded multi-draft rows 1..3: reuse the `ctl` snapshot copied on row 0
         // with zero additional D2H copies and zero cudaStreamSynchronize calls!
         const int ctl_idx = (pos_add == 1) ? 2 : ((pos_add == 2) ? 8 : 9);
         tok = ws->scalars[ctl_idx];
@@ -1174,11 +1226,12 @@ QWEN38_PLANE_EXPORT int qwen38_plane_prep(void* s, const void* P, const void* to
         ws->cached_c0 = s_c1;
         ws->cached_c1 = tok;
       } else if (pos_add == 0 && state != nullptr && tok_ptr == state_i64 && pos_ptr == (state_i64 + 1)) {
-        // Row 0 of EnqueueFold / EnqueueVerify / EnqueueStep: copy all 10 words of `ctl` (`ctl[0..9]`)
-        // plus `ctx_in[0..1]` in one batch so subsequent draft rows 1..3 need no stream synchronization.
-        err = staged_copy_to_host(&ws->scalars[0], state_i64, 10 * sizeof(i64), cudaMemcpyDeviceToHost, stream);
+        // Row 0 of EnqueueFold / EnqueueVerify / EnqueueStep: copy the words of `ctl` (kStateWords of them, see
+        // QWEN38_PLANE_STATE_MIN_WORDS) plus `ctx_in[0..1]` in one batch so subsequent draft rows 1..3 need no stream
+        // synchronization.
+        err = staged_copy_to_host(&ws->scalars[0], state_i64, kStateWords * sizeof(i64), cudaMemcpyDeviceToHost, stream);
         if (err == cudaSuccess) {
-          err = staged_copy_to_host(&ws->scalars[10], ctx_in, 2 * sizeof(i64), cudaMemcpyDeviceToHost, stream);
+          err = staged_copy_to_host(&ws->scalars[kStateWords], ctx_in, 2 * sizeof(i64), cudaMemcpyDeviceToHost, stream);
         }
         if (err == cudaSuccess) {
           err = staged_stream_sync(stream);
@@ -1191,8 +1244,8 @@ QWEN38_PLANE_EXPORT int qwen38_plane_prep(void* s, const void* P, const void* to
         ws->prep_in_flight = false;
         tok = ws->scalars[0];
         pos = ws->scalars[1];
-        s_c0 = ws->scalars[10];
-        s_c1 = ws->scalars[11];
+        s_c0 = ws->scalars[kStateWords];
+        s_c1 = ws->scalars[kStateWords + 1];
         ws->cached_state_ptr = state;
         ws->cached_ctx_out_ptr = ctx_out;
         ws->cached_c0 = s_c1;
@@ -1305,7 +1358,10 @@ QWEN38_PLANE_EXPORT int qwen38_plane_ple_rows(void* s, const void* P, const void
         return (int)cudaErrorStreamCaptureUnsupported;
       }
       const size_t total = (size_t)ws->params.n_heads * (size_t)ws->params.head_dim;
-      err = ensure_staged_buffers(*ws, (size_t)n, total);
+      err = staged_bind_device(*ws);
+      if (err == cudaSuccess) {
+        err = ensure_staged_buffers(*ws, (size_t)n, total);
+      }
       if (err == cudaSuccess) {
         err = staged_ensure_done_event(&ws->prefill_done_event);
       }
@@ -1506,6 +1562,15 @@ QWEN38_PLANE_EXPORT int qwen38_plane_test_stream_capture(void* stream, int begin
   const cudaError_t err = cudaStreamEndCapture(s, &graph);
   if (graph != nullptr) cudaGraphDestroy(graph);
   return (int)err;
+}
+
+QWEN38_PLANE_EXPORT int qwen38_plane_test_device_count(void) {
+  int count = 0;
+  if (cudaGetDeviceCount(&count) != cudaSuccess) {
+    cudaGetLastError();
+    return 0;
+  }
+  return count;
 }
 #endif
 }

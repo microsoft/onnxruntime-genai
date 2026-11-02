@@ -109,7 +109,8 @@ struct Qwen38PleDescription {
 };
 
 // Reads a "qwen38_ple_table 1" description. Throws std::runtime_error on a wrong header, a malformed table, or a shard
-// path that is absolute or contains "..": shards must live inside the model folder.
+// path that is absolute or contains "..": shards must live inside the model folder. Lines may end in LF or CRLF, here and in
+// the two parsers below.
 Qwen38PleDescription ParseQwen38PleDescription(const std::filesystem::path& table_path);
 
 // Parsed "qwen38_weights_pool 1" manifest: the initializers that several sessions of the stack share, as tensors stored in

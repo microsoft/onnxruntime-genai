@@ -13,6 +13,14 @@
 // 3: prep and ple_rows return the CUDA error of the staged PLE path (they returned void); attach/detach were added.
 #define QWEN38_PLANE_ABI_VERSION 3
 
+// The number of int64 words the `state` buffer of prep (the `ctl` buffer of a fold) must have room for; a larger buffer is fine.
+// The kernels of the plane keep their words in 0..6, and words 8 and 9 hold the draft tokens of rows 2 and 3 of a fold (the
+// layout is in qwen38_plane.cu). With a staged PLE table (see prep below) row 0 of a fold (pos_add == 0, tok_ptr == state,
+// pos_ptr == state + 1) copies all of these words to the host in one go, and rows 1..3 (pos_add 1..3, tok_ptr == state + 2,
+// state + 8, state + 9) are then prepared from that copy. The library is given the buffer as a pointer and cannot check its
+// size: a smaller buffer is an out-of-bounds read of the device allocation.
+#define QWEN38_PLANE_STATE_MIN_WORDS 10
+
 // Host-registered FP8 PLE (per-layer embedding) table description, copied to the device once. The library trusts the loader
 // for its invariants and does not validate them (ParseQwen38PleDescription enforces them): 1 <= n_heads <= 32,
 // n_heads * head_dim <= 3072 (one 1024-thread block gathers a row, and a staged row must fit an 8192-byte ring slot),
@@ -53,6 +61,16 @@ static_assert(sizeof(void*) != 8 || offsetof(Qwen38PleParams, capacity) == 4672,
 // fences the staged buffers against a call on another stream: the function then waits for its stream before it returns the
 // error, so the kernel has finished and the outputs are complete. Callers must check the result. ple_rows reads ctx_in while
 // its last block writes ctx_out, so the two must not alias.
+//
+// A staged table is bound to one GPU. The first call that stages anything for it creates its pinned buffers and its completion
+// events with the device that is current in the calling thread, and every later call that uses the table has to be made with
+// that device current: an event can only be recorded on a stream of its own device, and these events are what fence the
+// buffers against a call on another stream. A call made with another device current returns cudaErrorInvalidDevice before it
+// stages, gathers or launches anything, so its outputs are untouched and the table keeps working on its own GPU. Using one
+// table on several GPUs is not supported. The binding ends when the staged state of the table is dropped (by
+// unset_ple_host_params, by release_ple_workspace or by the detach of the last loader), after which registering the table
+// again with set_ple_host_params lets it bind to another GPU; registering a table that is still registered keeps the binding.
+// A resident table (pad_ != 1) is not bound to a GPU.
 //
 // A staged table is not usable while the stream is being captured into a CUDA graph: the host gathers its rows when the call
 // is made, which a replay would not repeat, and the read backs and waits of the call are not allowed on a capturing stream.
@@ -119,8 +137,9 @@ static_assert(sizeof(void*) != 8 || offsetof(Qwen38PleParams, capacity) == 4672,
 // Compiled into the library only when it is built with QWEN38_PLANE_TEST_HOOKS (the CMake option ENABLE_TESTS). They are not
 // part of QWEN38_PLANE_FUNCTIONS and the host loader never resolves them: the unit tests look them up by name
 // ("qwen38_plane_test_inject_staged_fault", "qwen38_plane_test_stats", "qwen38_plane_test_peek_last_error",
-// "qwen38_plane_test_stream_capture") to fail one CUDA step of the staged PLE path, to observe what the module did, to see the
-// last CUDA error it left on the calling thread and to call it while a stream is being captured.
+// "qwen38_plane_test_stream_capture", "qwen38_plane_test_device_count") to fail one CUDA step of the staged PLE path, to observe
+// what the module did, to see the last CUDA error it left on the calling thread, to call it while a stream is being captured
+// and to count the GPUs.
 
 // The step of the staged PLE path that an injected fault replaces with an error.
 typedef enum Qwen38PlaneFaultSite {
@@ -156,3 +175,6 @@ typedef int (*Qwen38PlaneTestPeekLastErrorFn)(void);
 // Starts (`begin` != 0) or ends the capture of `stream` into a CUDA graph that is thrown away, in the thread-local mode so
 // that only the calling thread is affected. Returns the CUDA error of the call, 0 on success.
 typedef int (*Qwen38PlaneTestStreamCaptureFn)(void* stream, int begin);
+// Returns the number of CUDA devices, 0 when there is none. Unlike set_device, a failure leaves no error behind as the last
+// error of the calling thread, so a test can look before it commits to a device.
+typedef int (*Qwen38PlaneTestDeviceCountFn)(void);

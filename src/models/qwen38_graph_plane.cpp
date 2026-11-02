@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cmath>
 #include <fstream>
+#include <istream>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
@@ -38,6 +39,15 @@ namespace {
 constexpr int kMaxPleHeads = 32;
 constexpr int kMaxPleLaunchElems = 3 * 1024;
 constexpr size_t kMaxPleShards = 256;
+
+// std::getline for the text files of a model package, minus the carriage return a CRLF line leaves at its end: a text stream
+// only translates CRLF on Windows, and the package may have been written on either platform. The header of a file is compared
+// as a whole, so a stray '\r' would make a CRLF file unreadable.
+bool GetTextLine(std::istream& in, std::string& line) {
+  if (!std::getline(in, line)) return false;
+  if (!line.empty() && line.back() == '\r') line.pop_back();
+  return true;
+}
 
 #if defined(QWEN38_GRAPH_NO_POSIX)
 [[noreturn]] void ThrowUnsupportedPlatform() {
@@ -273,7 +283,7 @@ Qwen38PleDescription ParseQwen38PleDescription(const std::filesystem::path& tabl
   std::ifstream in(table_path);
   if (!in) throw std::runtime_error("qwen38_graph: cannot open the PLE table " + table_path.string());
   std::string line;
-  std::getline(in, line);
+  GetTextLine(in, line);
   if (line != "qwen38_ple_table 1") throw std::runtime_error("qwen38_graph: unsupported PLE table header: " + line);
 
   Qwen38PleDescription description;
@@ -282,7 +292,7 @@ Qwen38PleDescription ParseQwen38PleDescription(const std::filesystem::path& tabl
   bool has_mult = false;
   bool has_vocab = false;
   bool has_offset = false;
-  while (std::getline(in, line)) {
+  while (GetTextLine(in, line)) {
     std::istringstream fields(line);
     std::string key;
     if (!(fields >> key)) continue;
@@ -400,11 +410,11 @@ Qwen38WeightPoolManifest ParseQwen38WeightPoolManifest(const std::filesystem::pa
   std::ifstream in(manifest_path);
   if (!in) throw std::runtime_error("qwen38_graph: cannot open the weight pool manifest " + manifest_path.string());
   std::string line;
-  std::getline(in, line);
+  GetTextLine(in, line);
   if (line != "qwen38_weights_pool 1")
     throw std::runtime_error("qwen38_graph: unsupported weight pool manifest header: " + line);
   Qwen38WeightPoolManifest manifest;
-  while (std::getline(in, line)) {
+  while (GetTextLine(in, line)) {
     std::istringstream fields(line);
     std::string key;
     fields >> key;
@@ -448,10 +458,10 @@ Qwen38QsaConstantsDescription ParseQwen38QsaConstantsIndex(const std::filesystem
   std::ifstream in(index_path);
   if (!in) throw std::runtime_error("qwen38_graph: cannot open the QSA constants index " + index_path.string());
   std::string line;
-  std::getline(in, line);
+  GetTextLine(in, line);
   if (line != "qwen38_qsa_consts 1") throw std::runtime_error("qwen38_graph: unsupported QSA constants header: " + line);
   Qwen38QsaConstantsDescription description;
-  while (std::getline(in, line)) {
+  while (GetTextLine(in, line)) {
     std::istringstream fields(line);
     std::string key;
     if (!(fields >> key)) continue;

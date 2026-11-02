@@ -50,6 +50,28 @@ std::filesystem::path WriteFile(const std::filesystem::path& path, const std::st
   return path;
 }
 
+std::string WithCrlfLines(const std::string& text) {
+  std::string crlf;
+  for (const char c : text) {
+    if (c == '\n') crlf += '\r';
+    crlf += c;
+  }
+  return crlf;
+}
+
+// Runs `check` on `text`, whose lines end in LF, and on the same text with CRLF lines: a package that was built on Windows has
+// them, and a text stream leaves the '\r' on every line unless the platform is Windows itself.
+void ForLfAndCrlfLines(const std::string& text, const std::function<void(const std::string&)>& check) {
+  {
+    SCOPED_TRACE("LF lines");
+    check(text);
+  }
+  {
+    SCOPED_TRACE("CRLF lines");
+    check(WithCrlfLines(text));
+  }
+}
+
 constexpr const char* kValidPleTable =
     "qwen38_ple_table 1\n"
     "n_heads 2\n"
@@ -111,36 +133,38 @@ void InitStubPlane(Qwen38Plane& plane) {
 
 TEST(Qwen38WeightPoolManifestTest, ParsesEntriesAndSessions) {
   const auto dir = MakeScratchDir("pool");
-  const auto path = WriteFile(dir / "pool.txt",
-                              "qwen38_weights_pool 1\n"
-                              "pool 0 16 1000 64 2 4 8 target/w0.safetensors\n"
-                              "pool 1 2 0 128 3 2 4 8 target/experts.data\n"
-                              "host_pool 2 16 4096 512 2 16 16 target/embed.safetensors\n"
-                              "session target model.embed.weight 2\n"
-                              "session target experts.w 1\n"
-                              "session dense model.embed.weight 2\n"
-                              "session mtp head.w 0\n"
-                              "session drafter head.w 0\n");
-  const auto manifest = ParseQwen38WeightPoolManifest(path);
-  ASSERT_EQ(manifest.entries.size(), 3u);
-  EXPECT_EQ(manifest.entries[0].dtype, 16);
-  EXPECT_EQ(manifest.entries[0].offset, 1000u);
-  EXPECT_EQ(manifest.entries[0].length, 64u);
-  EXPECT_EQ(manifest.entries[0].shape, (std::vector<int64_t>{4, 8}));
-  EXPECT_EQ(manifest.entries[0].file, "target/w0.safetensors");
-  EXPECT_EQ(manifest.entries[0].placement, "device");
-  EXPECT_FALSE(manifest.entries[0].host_mapped);
-  EXPECT_EQ(manifest.entries[1].shape, (std::vector<int64_t>{2, 4, 8}));
-  EXPECT_FALSE(manifest.entries[1].host_mapped);
-  EXPECT_EQ(manifest.entries[2].file, "target/embed.safetensors");
-  EXPECT_EQ(manifest.entries[2].placement, "host_mapped");
-  EXPECT_TRUE(manifest.entries[2].host_mapped);
-  ASSERT_EQ(manifest.sessions.at("target").size(), 2u);
-  EXPECT_EQ(manifest.sessions.at("target")[1], (std::pair<std::string, int>{"experts.w", 1}));
-  EXPECT_EQ(manifest.sessions.at("dense").size(), 1u);
-  EXPECT_EQ(manifest.sessions.at("mtp").size(), 1u);
-  EXPECT_EQ(manifest.sessions.at("drafter").size(), 1u);
-  EXPECT_EQ(manifest.sessions.count("head_kv"), 0u);
+  const std::string text =
+      "qwen38_weights_pool 1\n"
+      "pool 0 16 1000 64 2 4 8 target/w0.safetensors\n"
+      "pool 1 2 0 128 3 2 4 8 target/experts.data\n"
+      "host_pool 2 16 4096 512 2 16 16 target/embed.safetensors\n"
+      "session target model.embed.weight 2\n"
+      "session target experts.w 1\n"
+      "session dense model.embed.weight 2\n"
+      "session mtp head.w 0\n"
+      "session drafter head.w 0\n";
+  ForLfAndCrlfLines(text, [&](const std::string& lines) {
+    const auto manifest = ParseQwen38WeightPoolManifest(WriteFile(dir / "pool.txt", lines));
+    ASSERT_EQ(manifest.entries.size(), 3u);
+    EXPECT_EQ(manifest.entries[0].dtype, 16);
+    EXPECT_EQ(manifest.entries[0].offset, 1000u);
+    EXPECT_EQ(manifest.entries[0].length, 64u);
+    EXPECT_EQ(manifest.entries[0].shape, (std::vector<int64_t>{4, 8}));
+    EXPECT_EQ(manifest.entries[0].file, "target/w0.safetensors");
+    EXPECT_EQ(manifest.entries[0].placement, "device");
+    EXPECT_FALSE(manifest.entries[0].host_mapped);
+    EXPECT_EQ(manifest.entries[1].shape, (std::vector<int64_t>{2, 4, 8}));
+    EXPECT_FALSE(manifest.entries[1].host_mapped);
+    EXPECT_EQ(manifest.entries[2].file, "target/embed.safetensors");
+    EXPECT_EQ(manifest.entries[2].placement, "host_mapped");
+    EXPECT_TRUE(manifest.entries[2].host_mapped);
+    ASSERT_EQ(manifest.sessions.at("target").size(), 2u);
+    EXPECT_EQ(manifest.sessions.at("target")[1], (std::pair<std::string, int>{"experts.w", 1}));
+    EXPECT_EQ(manifest.sessions.at("dense").size(), 1u);
+    EXPECT_EQ(manifest.sessions.at("mtp").size(), 1u);
+    EXPECT_EQ(manifest.sessions.at("drafter").size(), 1u);
+    EXPECT_EQ(manifest.sessions.count("head_kv"), 0u);
+  });
   std::error_code ec;
   std::filesystem::remove_all(dir, ec);
 }
@@ -157,28 +181,37 @@ TEST(Qwen38WeightPoolManifestTest, RejectsMalformedManifests) {
   EXPECT_THROW(parse("qwen38_weights_pool 1\npool 0 16 0 8 1 4 a.bin invalid_place\n"), std::runtime_error);   // bad placement
   EXPECT_THROW(parse("qwen38_weights_pool 1\npool 0 16 0 8 1 4 a.bin\nsession t n 1\n"), std::runtime_error);  // unknown id
   EXPECT_NO_THROW(parse("qwen38_weights_pool 1\n"));
+
+  // CRLF lines make none of this acceptable.
+  EXPECT_THROW(parse("qwen38_weights_pool 2\r\n"), std::runtime_error);
+  EXPECT_THROW(parse("qwen38_weights_pool 1\r\npool 1 16 0 8 1 4 a.bin\r\n"), std::runtime_error);
+  EXPECT_THROW(parse("qwen38_weights_pool 1\r\npool 0 16 0 8 1 4 ../a.bin\r\n"), std::runtime_error);
+  EXPECT_THROW(parse("qwen38_weights_pool 1\r\npool 0 16 0 8 1 4 a.bin invalid_place\r\n"), std::runtime_error);
+  EXPECT_NO_THROW(parse("qwen38_weights_pool 1\r\n"));
   std::error_code ec;
   std::filesystem::remove_all(dir, ec);
 }
 
 TEST(Qwen38QsaConstantsIndexTest, ParsesTheIndex) {
   const auto dir = MakeScratchDir("qsa");
-  const auto path = WriteFile(dir / "qsa.txt",
-                              "qwen38_qsa_consts 1\n"
-                              "file qsa_consts.bin\n"
-                              "epsilon 1e-06\n"
-                              "width 64\n"
-                              "tensor target cos 0 1024\n"
-                              "tensor head knorm.0 1024 256\n");
-  const auto description = ParseQwen38QsaConstantsIndex(path);
-  EXPECT_EQ(description.file, "qsa_consts.bin");
-  EXPECT_FLOAT_EQ(description.epsilon, 1e-6f);
-  EXPECT_EQ(description.width, 64);
-  ASSERT_EQ(description.items.size(), 2u);
-  EXPECT_EQ(description.items[1].set, "head");
-  EXPECT_EQ(description.items[1].name, "knorm.0");
-  EXPECT_EQ(description.items[1].offset, 1024u);
-  EXPECT_EQ(description.items[1].bytes, 256u);
+  const std::string text =
+      "qwen38_qsa_consts 1\n"
+      "file qsa_consts.bin\n"
+      "epsilon 1e-06\n"
+      "width 64\n"
+      "tensor target cos 0 1024\n"
+      "tensor head knorm.0 1024 256\n";
+  ForLfAndCrlfLines(text, [&](const std::string& lines) {
+    const auto description = ParseQwen38QsaConstantsIndex(WriteFile(dir / "qsa.txt", lines));
+    EXPECT_EQ(description.file, "qsa_consts.bin");
+    EXPECT_FLOAT_EQ(description.epsilon, 1e-6f);
+    EXPECT_EQ(description.width, 64);
+    ASSERT_EQ(description.items.size(), 2u);
+    EXPECT_EQ(description.items[1].set, "head");
+    EXPECT_EQ(description.items[1].name, "knorm.0");
+    EXPECT_EQ(description.items[1].offset, 1024u);
+    EXPECT_EQ(description.items[1].bytes, 256u);
+  });
   EXPECT_THROW(ParseQwen38QsaConstantsIndex(WriteFile(dir / "bad.txt", "qwen38_qsa_consts 2\n")), std::runtime_error);
   EXPECT_THROW(ParseQwen38QsaConstantsIndex(WriteFile(dir / "bad2.txt", "qwen38_qsa_consts 1\nfile ../x.bin\n")),
                std::runtime_error);
@@ -198,6 +231,11 @@ TEST(Qwen38QsaConstantsIndexTest, ParsesTheIndex) {
                std::runtime_error);
   EXPECT_THROW(ParseQwen38QsaConstantsIndex(WriteFile(dir / "missing_meta.txt", "qwen38_qsa_consts 1\nfile x.bin\n")),
                std::runtime_error);
+
+  // CRLF lines make neither a wrong header nor a file outside the model folder acceptable.
+  EXPECT_THROW(ParseQwen38QsaConstantsIndex(WriteFile(dir / "bad_crlf.txt", "qwen38_qsa_consts 2\r\n")), std::runtime_error);
+  EXPECT_THROW(ParseQwen38QsaConstantsIndex(WriteFile(dir / "bad_crlf2.txt", "qwen38_qsa_consts 1\r\nfile ../x.bin\r\n")),
+               std::runtime_error);
   std::error_code ec;
   std::filesystem::remove_all(dir, ec);
 }
@@ -206,21 +244,24 @@ TEST(Qwen38QsaConstantsIndexTest, ParsesTheIndex) {
 
 TEST(Qwen38PleDescriptionTest, ParsesAValidTable) {
   const auto dir = MakeScratchDir("ple_valid");
-  const auto description = ParseQwen38PleDescription(WriteFile(dir / "ple_table.txt", kValidPleTable));
+  ForLfAndCrlfLines(kValidPleTable, [&](const std::string& lines) {
+    const auto description = ParseQwen38PleDescription(WriteFile(dir / "ple_table.txt", lines));
 
-  EXPECT_EQ(description.params.n_heads, 2);
-  EXPECT_EQ(description.params.head_dim, 4);
-  EXPECT_EQ(description.params.heads_per_ngram, 1);
-  EXPECT_EQ(description.params.eos, 7);
-  EXPECT_FLOAT_EQ(description.params.scale, 0.5f);
-  EXPECT_EQ(description.params.mult[2], 3);
-  EXPECT_EQ(description.params.vocab[1], 13);
-  EXPECT_EQ(description.params.offset[1], 11);
-  EXPECT_EQ(description.params.n_shards, 2);
-  ASSERT_EQ(description.shards.size(), 2u);
-  EXPECT_EQ(description.shards[0].path, "ple/a.safetensors");
-  EXPECT_EQ(description.shards[0].offset, 128u);
-  EXPECT_EQ(description.shards[1].rows, 13);
+    EXPECT_EQ(description.params.n_heads, 2);
+    EXPECT_EQ(description.params.head_dim, 4);
+    EXPECT_EQ(description.params.heads_per_ngram, 1);
+    EXPECT_EQ(description.params.eos, 7);
+    EXPECT_FLOAT_EQ(description.params.scale, 0.5f);
+    EXPECT_EQ(description.params.mult[2], 3);
+    EXPECT_EQ(description.params.vocab[1], 13);
+    EXPECT_EQ(description.params.offset[1], 11);
+    EXPECT_EQ(description.params.n_shards, 2);
+    ASSERT_EQ(description.shards.size(), 2u);
+    EXPECT_EQ(description.shards[0].path, "ple/a.safetensors");
+    EXPECT_EQ(description.shards[0].offset, 128u);
+    EXPECT_EQ(description.shards[1].path, "ple/b.safetensors");
+    EXPECT_EQ(description.shards[1].rows, 13);
+  });
   std::error_code ec;
   std::filesystem::remove_all(dir, ec);
 }
@@ -289,6 +330,14 @@ TEST(Qwen38PleDescriptionTest, RejectsMalformedTables) {
   std::string too_many = "qwen38_ple_table 1\nn_heads 2\nhead_dim 4\nvocab 1 1\noffset 0 1\n";
   for (int i = 0; i < 257; ++i) too_many += "shard ple/a.bin 0 1\n";
   EXPECT_THROW(parse(too_many), std::runtime_error);
+
+  // CRLF lines make neither a wrong header nor a shard outside the model folder acceptable.
+  EXPECT_NO_THROW(parse_raw(WithCrlfLines(kValidPleTable)));
+  EXPECT_THROW(parse_raw("qwen38_ple_table 2\r\n"), std::runtime_error);
+  std::string escaping_shard = kValidPleTable;
+  escaping_shard.replace(escaping_shard.find("ple/a.safetensors"), std::string{"ple/a.safetensors"}.size(),
+                         "../a.safetensors");
+  EXPECT_THROW(parse_raw(WithCrlfLines(escaping_shard)), std::runtime_error);
   std::error_code ec;
   std::filesystem::remove_all(dir, ec);
 }
@@ -880,6 +929,7 @@ TEST(Qwen38PlaneTest, StagedPleIsolatesMultipleTablesIgnoresUnrelatedMemcpyAndTe
 namespace {
 
 constexpr int kCudaErrorInvalidValue = 1;
+constexpr int kCudaErrorInvalidDevice = 101;
 constexpr int kCudaErrorStreamCaptureUnsupported = 900;
 
 // Keeps the plane library loaded independently of the Qwen38Plane objects that load it, and gives access to the test hooks the
@@ -898,6 +948,7 @@ class PlaneModuleReference {
       stats_ = Symbol<Qwen38PlaneTestStatsFn>("qwen38_plane_test_stats");
       peek_last_error_ = Symbol<Qwen38PlaneTestPeekLastErrorFn>("qwen38_plane_test_peek_last_error");
       stream_capture_ = Symbol<Qwen38PlaneTestStreamCaptureFn>("qwen38_plane_test_stream_capture");
+      device_count_ = Symbol<Qwen38PlaneTestDeviceCountFn>("qwen38_plane_test_device_count");
     }
   }
 
@@ -914,7 +965,8 @@ class PlaneModuleReference {
   PlaneModuleReference& operator=(const PlaneModuleReference&) = delete;
 
   bool HasHooks() const {
-    return inject_fault_ != nullptr && stats_ != nullptr && peek_last_error_ != nullptr && stream_capture_ != nullptr;
+    return inject_fault_ != nullptr && stats_ != nullptr && peek_last_error_ != nullptr && stream_capture_ != nullptr &&
+           device_count_ != nullptr;
   }
 
   // The (skip + 1)-th execution of `site` from now on fails once with `error`.
@@ -935,6 +987,9 @@ class PlaneModuleReference {
   int BeginCapture(void* stream) const { return stream_capture_(stream, 1); }
   int EndCapture(void* stream) const { return stream_capture_(stream, 0); }
 
+  // The number of GPUs, looked at without leaving an error behind as the last error of the thread.
+  int DeviceCount() const { return device_count_(); }
+
  private:
   template <typename Function>
   Function Symbol(const char* name) const {
@@ -950,6 +1005,7 @@ class PlaneModuleReference {
   Qwen38PlaneTestStatsFn stats_{};
   Qwen38PlaneTestPeekLastErrorFn peek_last_error_{};
   Qwen38PlaneTestStreamCaptureFn stream_capture_{};
+  Qwen38PlaneTestDeviceCountFn device_count_{};
 };
 
 // Captures a stream into a CUDA graph for as long as it lives, so that a failing assertion cannot leave the stream capturing.
@@ -1019,42 +1075,15 @@ class StagedPleRig {
   static constexpr size_t kRowWidth = 4;
   static constexpr size_t kMaxTokens = 4200;
   static constexpr size_t kPositions = 16;  // the table's capacity: how many positions past_pos has room for
-  static constexpr size_t kStateWords = 10;
+  static constexpr size_t kStateWords = QWEN38_PLANE_STATE_MIN_WORDS;
+  static_assert(kStateWords >= 10, "the state has to reach word 9, the draft token of row 3 of a fold");
 
   StagedPleRig(Qwen38Plane& plane, const std::array<unsigned char, kRows>& row_codes)
-      : plane_{plane},
-        codes_{row_codes},
-        stream_{plane},
-        d_params_{plane, sizeof(Qwen38PleParams), stream_.get()},
-        d_tokens_{plane, kMaxTokens * sizeof(int64_t), stream_.get()},
-        d_ctx_in_{plane, 2 * sizeof(int64_t), stream_.get()},
-        d_ctx_out_{plane, 2 * sizeof(int64_t), stream_.get()},
-        d_out_{plane, kMaxTokens * kRowWidth * sizeof(uint16_t), stream_.get()},
-        d_tok_{plane, sizeof(int64_t), stream_.get()},
-        d_pos_{plane, sizeof(int64_t), stream_.get()},
-        d_state_{plane, kStateWords * sizeof(int64_t), stream_.get()},
-        d_input_ids_{plane, sizeof(int64_t), stream_.get()},
-        d_position_ids_{plane, sizeof(int64_t), stream_.get()},
-        d_committed_{plane, sizeof(int), stream_.get()},
-        d_past_pos_{plane, kPositions * sizeof(int64_t), stream_.get()} {
-    for (size_t row = 0; row < kRows; ++row) {
-      std::fill_n(shard_.begin() + row * kRowWidth, kRowWidth, codes_[row]);
-    }
-    params_.n_heads = 1;
-    params_.head_dim = static_cast<int>(kRowWidth);
-    params_.heads_per_ngram = 1;
-    params_.n_shards = 1;
-    params_.mult[0] = 1;
-    params_.vocab[0] = static_cast<long long>(kRows);
-    params_.shard_end[0] = static_cast<long long>(kRows);
-    params_.shard_ptr[0] = shard_.data();
-    params_.scale = 1.0f;
-    params_.pad_ = 1;
-    params_.eos = 99;
-    params_.capacity = static_cast<long long>(kPositions);
-    Upload(d_params_, &params_, sizeof(params_));
-    plane_.set_ple_host_params(&params_);
-  }
+      : StagedPleRig{plane, row_codes, nullptr} {}
+
+  // The table of `table` as the GPU that is current now sees it: the same host table, a descriptor of it in the memory of this
+  // GPU and the buffers and the stream of a call made on this GPU. It registers nothing, so `table` has to outlive it.
+  StagedPleRig(Qwen38Plane& plane, const StagedPleRig& table) : StagedPleRig{plane, table.codes_, &table} {}
 
   ~StagedPleRig() {
     if (unregister_on_destruction_) plane_.unset_ple_host_params(&params_);
@@ -1129,8 +1158,8 @@ class StagedPleRig {
     return Prep(params, d_tok_.data(), d_pos_.data(), pos_add, d_ctx_in_.data());
   }
 
-  // prep for row 0 of a fold: the token and the position are words 0 and 1 of the ten-word state, which also holds the tokens
-  // of the other rows.
+  // prep for row 0 of a fold: the token and the position are words 0 and 1 of the state (kStateWords words), which also holds
+  // the tokens of the other rows.
   int PrepRowZero(const std::array<int64_t, kStateWords>& state) {
     Upload(d_state_, state.data(), sizeof(state));
     return Prep(nullptr, d_state_.data(), d_state_.data() + sizeof(int64_t), 0, d_ctx_in_.data());
@@ -1181,6 +1210,47 @@ class StagedPleRig {
   }
 
  private:
+  StagedPleRig(Qwen38Plane& plane, const std::array<unsigned char, kRows>& row_codes, const StagedPleRig* table)
+      : plane_{plane},
+        codes_{row_codes},
+        stream_{plane},
+        d_params_{plane, sizeof(Qwen38PleParams), stream_.get()},
+        d_tokens_{plane, kMaxTokens * sizeof(int64_t), stream_.get()},
+        d_ctx_in_{plane, 2 * sizeof(int64_t), stream_.get()},
+        d_ctx_out_{plane, 2 * sizeof(int64_t), stream_.get()},
+        d_out_{plane, kMaxTokens * kRowWidth * sizeof(uint16_t), stream_.get()},
+        d_tok_{plane, sizeof(int64_t), stream_.get()},
+        d_pos_{plane, sizeof(int64_t), stream_.get()},
+        d_state_{plane, kStateWords * sizeof(int64_t), stream_.get()},
+        d_input_ids_{plane, sizeof(int64_t), stream_.get()},
+        d_position_ids_{plane, sizeof(int64_t), stream_.get()},
+        d_committed_{plane, sizeof(int), stream_.get()},
+        d_past_pos_{plane, kPositions * sizeof(int64_t), stream_.get()} {
+    if (table != nullptr) {
+      params_ = table->params_;
+      unregister_on_destruction_ = false;
+      Upload(d_params_, &params_, sizeof(params_));
+      return;
+    }
+    for (size_t row = 0; row < kRows; ++row) {
+      std::fill_n(shard_.begin() + row * kRowWidth, kRowWidth, codes_[row]);
+    }
+    params_.n_heads = 1;
+    params_.head_dim = static_cast<int>(kRowWidth);
+    params_.heads_per_ngram = 1;
+    params_.n_shards = 1;
+    params_.mult[0] = 1;
+    params_.vocab[0] = static_cast<long long>(kRows);
+    params_.shard_end[0] = static_cast<long long>(kRows);
+    params_.shard_ptr[0] = shard_.data();
+    params_.scale = 1.0f;
+    params_.pad_ = 1;
+    params_.eos = 99;
+    params_.capacity = static_cast<long long>(kPositions);
+    Upload(d_params_, &params_, sizeof(params_));
+    plane_.set_ple_host_params(&params_);
+  }
+
   int Prep(const void* params, const void* tok_ptr, const void* pos_ptr, int pos_add, const void* ctx_in) {
     return plane_.prep(stream_.get(), params != nullptr ? params : device_params(), tok_ptr, pos_ptr, pos_add, ctx_in,
                        d_ctx_out_.data(), d_input_ids_.data(), d_position_ids_.data(), d_committed_.data(),
@@ -1689,6 +1759,65 @@ TEST_F(Qwen38PlaneStagedPleTest, AResidentTableStaysCapturableOnceItsDescriptorI
   // The kernels were captured, not run, and no staged table took part.
   EXPECT_TRUE(rig.OutputsAre(0xAB));
   EXPECT_EQ(Stats().staged_launches, before.staged_launches);
+}
+
+// The completion events of a staged table's workspace belong to the GPU that was current when the table first staged something,
+// and an event can only be recorded on a stream of its own GPU. With another GPU current the table is refused before anything
+// is staged, gathered or launched, instead of failing at the end of the call; it keeps working on its own GPU, and unregistering
+// it and registering it again lets it be staged on another one.
+TEST_F(Qwen38PlaneStagedPleTest, AStagedTableIsRefusedOnAGpuOtherThanTheOneItWasStagedOn) {
+  if (module_->DeviceCount() < 2) GTEST_SKIP() << "needs two GPUs";
+  struct BackToGpu0 {
+    Qwen38Plane& plane;
+    ~BackToGpu0() { plane.set_device(0); }
+  } back_to_gpu0{*plane_};
+  const Qwen38PlaneTestStats start = Stats();
+  {
+    StagedPleRig rig{*plane_, kAscendingRows};
+    ASSERT_EQ(rig.PleRows({1, 2}), 0);
+    EXPECT_EQ(rig.ReadPle(2), rig.ExpectedPle({1, 2}));
+
+    // The same table, called with GPU 1 current.
+    ASSERT_EQ(plane_->set_device(1), 0);
+    auto on_gpu1 = std::make_unique<StagedPleRig>(*plane_, rig);
+    const std::array<int64_t, StagedPleRig::kStateWords> state = {7, 9, 2, 0, 0, 0, 0, 0, 1, 0};
+    on_gpu1->FillOutputs(0xAB);
+    const Qwen38PlaneTestStats before = Stats();
+    EXPECT_EQ(on_gpu1->PleRows({1, 2}), kCudaErrorInvalidDevice);
+    EXPECT_EQ(on_gpu1->PrepGeneric(6, 5, 0), kCudaErrorInvalidDevice);
+    EXPECT_EQ(on_gpu1->PrepRowZero(state), kCudaErrorInvalidDevice);
+    const Qwen38PlaneTestStats refused = Stats();
+    EXPECT_EQ(refused.gather_rows, before.gather_rows);
+    EXPECT_EQ(refused.staged_launches, before.staged_launches);
+    EXPECT_EQ(refused.live_pinned_allocations, before.live_pinned_allocations);
+    EXPECT_TRUE(on_gpu1->OutputsAre(0xAB));
+    EXPECT_EQ(module_->PeekLastError(), 0);
+
+    ASSERT_EQ(plane_->set_device(0), 0);
+    rig.FillOutputs(0xAB);
+    ASSERT_EQ(rig.PleRows({3, 0}), 0);
+    EXPECT_EQ(rig.ReadPle(2), rig.ExpectedPle({3, 0}));
+
+    // Unregistering the table drops its staged state, here from GPU 1 though the state belongs to GPU 0; after it is
+    // registered again, the next call that stages it binds it anew.
+    ASSERT_EQ(plane_->set_device(1), 0);
+    rig.ResetTable();
+    EXPECT_EQ(Stats().live_pinned_allocations, start.live_pinned_allocations);
+    EXPECT_EQ(module_->PeekLastError(), 0);
+    ASSERT_EQ(on_gpu1->PleRows({2, 3}), 0);
+    EXPECT_EQ(on_gpu1->ReadPle(2), on_gpu1->ExpectedPle({2, 3}));
+    on_gpu1.reset();
+
+    ASSERT_EQ(plane_->set_device(0), 0);
+    rig.FillOutputs(0xAB);
+    EXPECT_EQ(rig.PleRows({1, 2}), kCudaErrorInvalidDevice);
+    EXPECT_TRUE(rig.OutputsAre(0xAB));
+  }
+  // The table went away with GPU 0 current and its state bound to GPU 1.
+  const Qwen38PlaneTestStats end = Stats();
+  EXPECT_EQ(end.live_pinned_allocations, start.live_pinned_allocations);
+  EXPECT_EQ(end.staged_tables, start.staged_tables);
+  EXPECT_EQ(module_->PeekLastError(), 0);
 }
 
 // Concurrent or back-to-back staged ple_rows calls for the same table across two streams must fence the previous stream's
