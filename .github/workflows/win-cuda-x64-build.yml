@@ -35,7 +35,7 @@ env:
 
 jobs:
   windows-cuda-x64-build:
-    runs-on: ort-genai-github-win-6-a10-eus2-ss
+    runs-on: ort-genai-github-win-6-a10-scus-ss
     steps:
       - name: Checkout OnnxRuntime GenAI repo
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
