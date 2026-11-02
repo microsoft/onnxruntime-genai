@@ -102,12 +102,14 @@ OrtGlobals::OrtGlobals()
 
 // The single genai global. Lazily (re)created by GetOrtGlobals() and reset by Shutdown(), so that
 // genai can be torn down and re-initialized in-process (e.g. a host recreating its wrapper).
-static std::unique_ptr<OrtGlobals> g_ort_globals;
+// Allocated once and never destroyed: when genai objects are still alive at process exit, Shutdown()
+// keeps the globals for them, so they must outlive this file's static destructors.
+static std::unique_ptr<OrtGlobals>& g_ort_globals = *new std::unique_ptr<OrtGlobals>;
 // Guards lazy (re)creation and teardown of g_ort_globals so concurrent first-use (or first-use
 // after a shutdown) cannot double-construct the globals, and a concurrent Shutdown() cannot race
 // creation. Re-init after shutdown must remain possible, so this is a plain mutex rather than
-// std::call_once (which is process-once).
-static std::mutex g_ort_globals_mutex;
+// std::call_once (which is process-once). Never destroyed, for the same reason as g_ort_globals.
+static std::mutex& g_ort_globals_mutex = *new std::mutex;
 // Set by the process-exit EnsureShutdown destructor to prevent GetOrtGlobals() from resurrecting
 // the globals during static destruction.
 static bool g_process_exiting = false;
@@ -159,6 +161,11 @@ static bool ShouldReportLeaks() {
 }
 
 template <typename... Types>
+bool LeakTypeList<Types...>::AnyAlive() {
+  return ((LeakChecked<Types>::Count() != 0) || ...);
+}
+
+template <typename... Types>
 bool LeakTypeList<Types...>::Dump() {
   const bool report = ShouldReportLeaks();
   bool any_leaked = false;
@@ -185,6 +192,13 @@ void Shutdown() {
   std::scoped_lock lock{g_ort_globals_mutex};
 
   if (g_ort_globals && g_process_exiting) {
+    // A host can destroy genai objects after this point: an atexit handler that the host registered
+    // before its first genai call runs after the EnsureShutdown static destructor. Those destructors
+    // use the device interfaces and allocators, so while any tracked object is alive the globals are
+    // kept, and the OS reclaims them. OgaShutdown() at run time still tears everything down.
+    if (LeakTypes::AnyAlive())
+      return;
+
     // At process exit (the EnsureShutdown static destructor sets g_process_exiting under this lock),
     // destroying the OrtEnv is unsafe: releasing it from within __cxa_finalize drives ORT's
     // Environment/LoggingManager destructor to lock a mutex whose backing static may already be

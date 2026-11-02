@@ -229,6 +229,18 @@ if (NOT MSVC)
 endif()
 
 add_test(NAME ReInitTests COMMAND reinit_tests)
+
+# Destroys a model from an atexit handler that runs after genai's process-exit teardown (see the
+# source). A crash fails the test. Links the public shared library, like unit_tests.
+add_executable(live_objects_at_exit_test "${CMAKE_CURRENT_SOURCE_DIR}/cpp/exit_teardown/live_objects_at_exit.cpp")
+target_include_directories(live_objects_at_exit_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_directories(live_objects_at_exit_test PRIVATE ${ORT_LIB_DIR})
+target_link_libraries(live_objects_at_exit_test PRIVATE onnxruntime-genai)
+set_target_properties(live_objects_at_exit_test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>"
+    FOLDER "Tests"
+)
+add_test(NAME LiveObjectsAtExitTest COMMAND live_objects_at_exit_test)
 add_executable(parallel_preprocessing_tests
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/parallel_performance_tests.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/parallel_preprocessing_tests.cpp"
