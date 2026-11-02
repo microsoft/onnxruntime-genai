@@ -562,7 +562,6 @@ void GenAiTelemetry::LogHardwareInfo(uint32_t session_id) {
     }
 
     summary.SetProperty("sessionId", static_cast<int64_t>(session_id));
-    summary.SetProperty("availableSystemMemoryMB", info.available_system_memory_mb);
     summary.SetProperty("deviceCount", static_cast<int64_t>(info.devices.size()));
     summary.SetProperty("inventoryTruncated", info.inventory_truncated);
     impl_->logger->LogEvent(summary);
@@ -582,16 +581,7 @@ void GenAiTelemetry::LogHardwareInfo(uint32_t session_id) {
       event.SetProperty("deviceId", device.device_id);
       event.SetProperty("dedicatedMemoryMB", device.dedicated_memory_mb);
       event.SetProperty("sharedMemoryMB", device.shared_memory_mb);
-      event.SetProperty("freeMemoryMB", device.free_memory_mb);
-      event.SetProperty("memoryBudgetMB", device.memory_budget_mb);
-      event.SetProperty("memoryBudgetAvailableMB",
-                        device.memory_budget_available_mb);
-      event.SetProperty("physicalCoreCount", device.physical_core_count);
       event.SetProperty("logicalCoreCount", device.logical_core_count);
-      event.SetProperty("nominalClockMHz", device.nominal_clock_mhz);
-      event.SetProperty("maxClockMHz", device.max_clock_mhz);
-      event.SetProperty("memoryClockMHz", device.memory_clock_mhz);
-      event.SetProperty("memoryBusWidthBits", device.memory_bus_width_bits);
       impl_->logger->LogEvent(event);
     }
     emitted = true;

@@ -24,19 +24,10 @@ struct HardwareDeviceInfo {
   int64_t device_id{-1};
   int64_t dedicated_memory_mb{-1};
   int64_t shared_memory_mb{-1};
-  int64_t free_memory_mb{-1};
-  int64_t memory_budget_mb{-1};
-  int64_t memory_budget_available_mb{-1};
-  int64_t physical_core_count{-1};
   int64_t logical_core_count{-1};
-  int64_t nominal_clock_mhz{-1};
-  int64_t max_clock_mhz{-1};
-  int64_t memory_clock_mhz{-1};
-  int64_t memory_bus_width_bits{-1};
 };
 
 struct HardwareInfo {
-  int64_t available_system_memory_mb{-1};
   bool inventory_truncated{};
   std::vector<HardwareDeviceInfo> devices;
 };
@@ -60,7 +51,6 @@ inline int64_t ProcessCpuTimeDelta(int64_t start, int64_t end) {
 namespace TelemetryInternal {
 
 int64_t ParseHardwareInteger(std::string_view value, int base = 10);
-HardwareDeviceInfo ParseCpuInfo(std::string_view cpu_info);
 
 class ResourceSampleWindow {
  public:

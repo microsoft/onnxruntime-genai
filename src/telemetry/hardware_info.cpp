@@ -22,7 +22,6 @@
 #include <map>
 #include <memory>
 #include <set>
-#include <thread>
 
 #if defined(__linux__)
 #include <sys/stat.h>
@@ -38,7 +37,6 @@
 #elif defined(__APPLE__)
 #include <mach/mach.h>
 #include <sys/resource.h>
-#include <sys/sysctl.h>
 #include <unistd.h>
 #else
 #include <dlfcn.h>
@@ -50,7 +48,6 @@ namespace Generators {
 namespace {
 
 constexpr uint64_t kBytesPerMB = 1024 * 1024;
-constexpr size_t kMaxProbeBytes = 64 * 1024;
 
 void Diagnostic(std::string_view message) noexcept {
   if (!g_log.enabled) {
@@ -98,6 +95,8 @@ void AddDevice(HardwareInfo& info, HardwareDeviceInfo device) {
 }
 
 #if defined(__linux__)
+constexpr size_t kMaxProbeBytes = 64 * 1024;
+
 std::string ReadText(const std::filesystem::path& path, size_t limit = kMaxProbeBytes) {
   std::ifstream file(path, std::ios::binary);
   if (!file) {
@@ -118,66 +117,6 @@ std::string ReadText(const std::filesystem::path& path, size_t limit = kMaxProbe
 #endif
 
 #if defined(_WIN32)
-
-std::string CpuRegistryString(const char* name) {
-  std::array<char, kMaxTelemetryStringLength + 1> value{};
-  DWORD size = static_cast<DWORD>(value.size());
-  if (::RegGetValueA(HKEY_LOCAL_MACHINE, "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0",
-                     name, RRF_RT_REG_SZ, nullptr, value.data(), &size) != ERROR_SUCCESS) {
-    return "unknown";
-  }
-
-  return ScrubStringForTelemetry(TelemetryInternal::TrimAscii(
-      BoundedTelemetryCString(value.data(), value.size())));
-}
-
-HardwareDeviceInfo ReadCpuInfo() {
-  HardwareDeviceInfo cpu;
-  cpu.type = "CPU";
-  cpu.source = "windows";
-  cpu.name = CpuRegistryString("ProcessorNameString");
-  cpu.vendor = CpuRegistryString("VendorIdentifier");
-
-  DWORD mhz = 0;
-  DWORD size = sizeof(mhz);
-  if (::RegGetValueA(HKEY_LOCAL_MACHINE, "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0",
-                     "~MHz", RRF_RT_REG_DWORD, nullptr, &mhz, &size) == ERROR_SUCCESS) {
-    cpu.nominal_clock_mhz = mhz;
-  }
-
-  DWORD bytes = 0;
-  ::GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &bytes);
-  if (bytes > 0 && bytes <= 1024 * 1024) {
-    std::vector<unsigned char> buffer(bytes);
-    if (::GetLogicalProcessorInformationEx(
-            RelationProcessorCore,
-            reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buffer.data()), &bytes)) {
-      int64_t cores = 0;
-      size_t offset = 0;
-      constexpr auto header_size =
-          offsetof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX, Processor);
-      while (offset + header_size <= bytes) {
-        const auto* entry =
-            reinterpret_cast<const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(
-                buffer.data() + offset);
-        if (entry->Size < header_size + sizeof(PROCESSOR_RELATIONSHIP) ||
-            entry->Size > bytes - offset) {
-          cores = -1;
-          break;
-        }
-
-        ++cores;
-        offset += entry->Size;
-      }
-
-      if (offset == bytes && cores > 0) {
-        cpu.physical_core_count = cores;
-      }
-    }
-  }
-
-  return cpu;
-}
 
 class SystemModule {
  public:
@@ -200,7 +139,6 @@ class SystemModule {
 };
 
 struct AdapterMemory {
-  uint64_t local_budget{};
   uint64_t local_used{};
   uint64_t nonlocal_used{};
   bool available{};
@@ -235,7 +173,6 @@ AdapterMemory ReadAdapterMemory(IDXCoreAdapter& adapter) {
       return {};
     }
 
-    memory.local_budget += local.budget;
     memory.local_used += local.currentUsage;
     memory.nonlocal_used += nonlocal.currentUsage;
   }
@@ -372,90 +309,11 @@ void ReadWindowsAccelerators(HardwareInfo& info) {
       device.shared_memory_mb = ToMB(bytes);
     }
 
-    const auto memory = ReadAdapterMemory(*adapter.Get());
-    if (memory.available) {
-      device.memory_budget_mb = ToMB(memory.local_budget);
-      device.memory_budget_available_mb =
-          ToMB(memory.local_budget > memory.local_used
-                   ? memory.local_budget - memory.local_used
-                   : 0);
-    }
-
     AddDevice(info, std::move(device));
   }
 }
 
-#elif defined(__APPLE__)
-
-template <typename T>
-bool ReadSysctl(const char* key, T& value) {
-  size_t size = sizeof(value);
-  return ::sysctlbyname(key, &value, &size, nullptr, 0) == 0 && size == sizeof(value);
-}
-
-HardwareDeviceInfo ReadCpuInfo() {
-  HardwareDeviceInfo cpu;
-  cpu.type = "CPU";
-  cpu.source = "sysctl";
-  std::array<char, kMaxTelemetryStringLength + 1> name{};
-  size_t size = name.size();
-  if (::sysctlbyname("machdep.cpu.brand_string", name.data(), &size, nullptr, 0) == 0) {
-    cpu.name = ScrubStringForTelemetry(BoundedTelemetryCString(name.data(), name.size()));
-  }
-#if defined(__aarch64__)
-  cpu.vendor = "Apple";
-#endif
-  uint32_t cores = 0;
-  if (ReadSysctl("hw.physicalcpu", cores)) {
-    cpu.physical_core_count = cores;
-  }
-  uint64_t frequency = 0;
-  if (ReadSysctl("hw.cpufrequency_max", frequency)) {
-    cpu.max_clock_mhz = static_cast<int64_t>(frequency / 1000000);
-  }
-  return cpu;
-}
-
 #elif defined(__linux__)
-
-int64_t ReadPhysicalCoreCount() {
-  std::error_code error;
-  std::filesystem::directory_iterator it{"/sys/devices/system/cpu", error};
-  std::set<std::pair<int64_t, int64_t>> cores;
-  size_t inspected = 0;
-  for (; !error && it != std::filesystem::directory_iterator{}; it.increment(error)) {
-    if (++inspected > 4096) {
-      return -1;
-    }
-    const auto name = it->path().filename().string();
-    if (name.compare(0, 3, "cpu") != 0 ||
-        TelemetryInternal::ParseHardwareInteger(std::string_view{name}.substr(3)) < 0) {
-      continue;
-    }
-    const auto topology = it->path() / "topology";
-    const auto package =
-        TelemetryInternal::ParseHardwareInteger(ReadText(topology / "physical_package_id"));
-    const auto core =
-        TelemetryInternal::ParseHardwareInteger(ReadText(topology / "core_id"));
-    if (package < 0 || core < 0) {
-      return -1;
-    }
-    cores.emplace(package, core);
-  }
-  return !error && !cores.empty() ? static_cast<int64_t>(cores.size()) : -1;
-}
-
-HardwareDeviceInfo ReadCpuInfo() {
-  auto cpu = TelemetryInternal::ParseCpuInfo(ReadText("/proc/cpuinfo"));
-  cpu.source = "proc_sysfs";
-  cpu.physical_core_count = ReadPhysicalCoreCount();
-  const auto khz = TelemetryInternal::ParseHardwareInteger(
-      ReadText("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq"));
-  if (khz >= 0) {
-    cpu.max_clock_mhz = khz / 1000;
-  }
-  return cpu;
-}
 
 using NvmlDevice = void*;
 struct NvmlMemory {
@@ -513,12 +371,6 @@ class NvmlLibrary {
         Symbol<int (*)(NvmlDevice, NvmlMemory*)>("nvmlDeviceGetMemoryInfo");
     const auto get_driver =
         Symbol<int (*)(char*, unsigned int)>("nvmlSystemGetDriverVersion");
-    const auto get_max_clock =
-        Symbol<int (*)(NvmlDevice, int, unsigned int*)>("nvmlDeviceGetMaxClockInfo");
-    const auto get_clock =
-        Symbol<int (*)(NvmlDevice, int, unsigned int*)>("nvmlDeviceGetClockInfo");
-    const auto get_bus =
-        Symbol<int (*)(NvmlDevice, unsigned int*)>("nvmlDeviceGetMemoryBusWidth");
     std::array<char, kMaxTelemetryStringLength + 1> driver{};
     const bool has_driver = get_driver && get_driver(driver.data(), driver.size()) == 0;
     for (unsigned int index = 0;
@@ -545,17 +397,6 @@ class NvmlLibrary {
       NvmlMemory memory{};
       if (get_memory && get_memory(handle, &memory) == 0) {
         device.dedicated_memory_mb = ToMB(memory.total);
-        device.free_memory_mb = ToMB(memory.free);
-      }
-      unsigned int value = 0;
-      if (get_max_clock && get_max_clock(handle, 0, &value) == 0) {
-        device.max_clock_mhz = value;
-      }
-      if (get_clock && get_clock(handle, 2, &value) == 0) {
-        device.memory_clock_mhz = value;
-      }
-      if (get_bus && get_bus(handle, &value) == 0) {
-        device.memory_bus_width_bits = value;
       }
       AddDevice(info, std::move(device));
     }
@@ -625,15 +466,6 @@ class NvmlLibrary {
   int (*get_count_)(unsigned int*){};
   int (*get_handle_)(unsigned int, NvmlDevice*){};
 };
-
-#else
-
-HardwareDeviceInfo ReadCpuInfo() {
-  HardwareDeviceInfo cpu;
-  cpu.type = "CPU";
-  cpu.source = "unavailable";
-  return cpu;
-}
 
 #endif
 
@@ -715,14 +547,8 @@ void ReadOrtDevices(HardwareInfo& info) {
         }
         const auto total = TelemetryInternal::ParseHardwareInteger(
             ReadText(path / "mem_info_vram_total"));
-        const auto used = TelemetryInternal::ParseHardwareInteger(
-            ReadText(path / "mem_info_vram_used"));
         if (total >= 0) {
           device.dedicated_memory_mb = ToMB(static_cast<uint64_t>(total));
-          if (used >= 0 && used <= total) {
-            device.free_memory_mb =
-                ToMB(static_cast<uint64_t>(total - used));
-          }
         }
       }
 #endif
@@ -809,61 +635,26 @@ int64_t ParseHardwareInteger(std::string_view value, int base) {
              : -1;
 }
 
-HardwareDeviceInfo ParseCpuInfo(std::string_view cpu_info) {
-  HardwareDeviceInfo cpu;
-  cpu.type = "CPU";
-  cpu_info = cpu_info.substr(0, kMaxProbeBytes);
-  while (!cpu_info.empty()) {
-    const auto end = cpu_info.find('\n');
-    const auto line = cpu_info.substr(0, end);
-    const auto colon = line.find(':');
-    if (colon != std::string_view::npos) {
-      const auto key = TrimAscii(line.substr(0, colon));
-      const auto value = TrimAscii(line.substr(colon + 1));
-      if (key == "model name" || (key == "Processor" && cpu.name == "unknown")) {
-        cpu.name = ScrubStringForTelemetry(value);
-      } else if (key == "vendor_id") {
-        cpu.vendor = ScrubStringForTelemetry(value);
-      }
-    }
-    if (end == std::string_view::npos || (line.empty() && cpu.name != "unknown")) {
-      break;
-    }
-    cpu_info.remove_prefix(end + 1);
-  }
-  return cpu;
-}
-
 }  // namespace TelemetryInternal
 
 HardwareInfo CollectHardwareInfo() noexcept {
   HardwareInfo info;
   try {
-    auto cpu = ReadCpuInfo();
-    const auto logical_cores = std::thread::hardware_concurrency();
-    if (logical_cores != 0) {
-      cpu.logical_core_count = logical_cores;
+    const auto& device_info = GetDeviceInfo();
+    HardwareDeviceInfo cpu;
+    cpu.type = "CPU";
+    cpu.source = "device_info";
+    if (!device_info.cpu_model.empty()) {
+      cpu.name = device_info.cpu_model;
+    }
+    if (device_info.processor_count > 0) {
+      cpu.logical_core_count = device_info.processor_count;
     }
     AddDevice(info, std::move(cpu));
 
 #if defined(_WIN32)
-    MEMORYSTATUSEX memory{};
-    memory.dwLength = sizeof(memory);
-    if (::GlobalMemoryStatusEx(&memory)) {
-      info.available_system_memory_mb = ToMB(memory.ullAvailPhys);
-    }
     ReadWindowsAccelerators(info);
 #elif defined(__linux__)
-    const auto meminfo = ReadText("/proc/meminfo");
-    const auto start = meminfo.find("MemAvailable:");
-    if (start != std::string::npos) {
-      const auto line = std::string_view{meminfo}.substr(start + 13);
-      const auto kb = TelemetryInternal::ParseHardwareInteger(
-          line.substr(0, line.find("kB")));
-      if (kb >= 0) {
-        info.available_system_memory_mb = kb / 1024;
-      }
-    }
     NvmlLibrary{}.AddHardware(info);
 #endif
 
@@ -995,10 +786,6 @@ namespace TelemetryInternal {
 
 int64_t ParseHardwareInteger(std::string_view, int) {
   return -1;
-}
-
-HardwareDeviceInfo ParseCpuInfo(std::string_view) {
-  return {};
 }
 
 }  // namespace TelemetryInternal

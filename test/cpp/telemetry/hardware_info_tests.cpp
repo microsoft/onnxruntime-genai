@@ -6,7 +6,9 @@
 #include <limits>
 #include <vector>
 
+#include "telemetry/device_info.h"
 #include "telemetry/hardware_info.h"
+#include "telemetry/telemetry_redaction.h"
 #include "telemetry/telemetry_string.h"
 
 namespace {
@@ -21,26 +23,6 @@ TEST(HardwareInfoTests, StrictIntegerParsingRejectsMalformedAndNegativeValues) {
   EXPECT_EQ(ParseHardwareInteger("-1"), -1);
   EXPECT_EQ(ParseHardwareInteger("12 trailing"), -1);
   EXPECT_EQ(ParseHardwareInteger("xyz", 16), -1);
-}
-
-TEST(HardwareInfoTests, CpuInfoParsingIsBoundedAndRetainsNoUniqueIdentifiers) {
-  const auto cpu = ParseCpuInfo(
-      "processor: 0\nvendor_id: GenuineIntel\nmodel name: Example CPU\n"
-      "serial: private\nHardware: private\n\nprocessor: 1\n");
-  EXPECT_EQ(cpu.type, "CPU");
-  EXPECT_EQ(cpu.vendor, "GenuineIntel");
-  EXPECT_EQ(cpu.name, "Example CPU");
-  EXPECT_LE(cpu.vendor.size(), kMaxTelemetryStringLength);
-  EXPECT_LE(cpu.name.size(), kMaxTelemetryStringLength);
-}
-
-TEST(HardwareInfoTests, CpuInfoParsingRedactsPathsBeforeRetention) {
-  const auto cpu = ParseCpuInfo(
-      "vendor_id: Vendor /private/user/vendor\n"
-      "model name: GPU /private/user/model\n\n");
-
-  EXPECT_EQ(cpu.vendor, "Vendor [path]");
-  EXPECT_EQ(cpu.name, "GPU [path]");
 }
 
 TEST(HardwareInfoTests, OrtFallbackResolvesPlatformUnknownWithoutMergingOrtDevices) {
@@ -158,11 +140,17 @@ TEST(HardwareInfoTests, CurrentProcessSamplesUseExplicitUnknowns) {
   EXPECT_FALSE(usage.accelerator_memory_source.empty());
 }
 
-TEST(HardwareInfoTests, HardwareInventoryIsBoundedAndContainsCpu) {
+TEST(HardwareInfoTests, HardwareInventoryIsBoundedAndReusesCachedCpuInfo) {
+  const auto& cached = GetDeviceInfo();
   const auto info = CollectHardwareInfo();
   EXPECT_LE(info.devices.size(), kMaxHardwareInventoryEntries);
   ASSERT_FALSE(info.devices.empty());
   EXPECT_EQ(info.devices.front().type, "CPU");
+  EXPECT_EQ(info.devices.front().source, "device_info");
+  EXPECT_EQ(info.devices.front().name,
+            cached.cpu_model.empty() ? "unknown" : ScrubStringForTelemetry(cached.cpu_model));
+  EXPECT_EQ(info.devices.front().logical_core_count,
+            cached.processor_count > 0 ? cached.processor_count : -1);
   for (const auto& device : info.devices) {
     EXPECT_LE(device.name.size(), kMaxTelemetryStringLength);
     EXPECT_LE(device.vendor.size(), kMaxTelemetryStringLength);
