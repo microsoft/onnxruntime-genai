@@ -353,6 +353,20 @@ struct OgaModel : OgaAbstract {
     return p;
   }
 
+  // Voice names of a text-to-speech model, default voice first.
+  std::unique_ptr<OgaStringArray> GetVoices() const {
+    OgaStringArray* p;
+    OgaCheckResult(OgaModelGetVoices(this, &p));
+    return std::unique_ptr<OgaStringArray>(p);
+  }
+
+  // "language" or "gender" of a voice.
+  OgaString GetVoiceProperty(const char* voice, const char* property) const {
+    const char* p;
+    OgaCheckResult(OgaModelGetVoiceProperty(this, voice, property, &p));
+    return p;
+  }
+
   static void operator delete(void* p) { OgaDestroyModel(reinterpret_cast<OgaModel*>(p)); }
 };
 

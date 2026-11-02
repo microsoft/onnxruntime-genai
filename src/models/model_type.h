@@ -73,6 +73,13 @@ struct ModelType {
     return std::find(streaming_enc_dec.begin(), streaming_enc_dec.end(), model_type) != streaming_enc_dec.end();
   }
 
+  // Text-to-speech models (e.g. VibeVoice). Like the transducers they bypass the search/logits
+  // pipeline: text arrives through SetInputs and each StepState::StepToken() generates one
+  // speech frame; the waveform is read with generator.get_output("audio").
+  inline static bool IsTTS(const std::string& model_type) {
+    return model_type == "vibevoice";
+  }
+
   inline static bool IsQwenVLFamily(const std::string& model_type) {
     // Qwen-VL family: models requiring 3D mRoPE position IDs
     static constexpr std::array<std::string_view, 12> QwenVL = {"fara", "qwen2_5_vl_text", "qwen2_5_vl", "qwen3_vl", "qwen3_vl_text", "qwen3_5", "qwen3_5_moe", "qwen3_5_moe_text", "qwen3_5_text", "qwen4_exp", "qwen4_exp_text", "videochat_flash_qwen"};

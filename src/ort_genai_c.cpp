@@ -612,6 +612,41 @@ OgaResult* OGA_API_CALL OgaModelGetDeviceType(const OgaModel* model, const char*
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaModelGetVoices(const OgaModel* model, OgaStringArray** out) {
+  OGA_TRY
+  const auto& m = model->config_->model;
+  auto names = std::make_unique<std::vector<std::string>>();
+  if (!m.default_voice.empty())
+    names->push_back(m.default_voice);
+  for (const auto& voice : m.voices) {
+    if (voice.name != m.default_voice)
+      names->push_back(voice.name);
+  }
+  *out = ReturnUnique<OgaStringArray>(std::move(names));
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaModelGetVoiceProperty(const OgaModel* model, const char* voice, const char* property,
+                                                 const char** out) {
+  OGA_TRY
+  if (!voice || !property || !out)
+    throw std::invalid_argument("voice, property and out must not be null.");
+  const auto& voices = model->config_->model.voices;
+  const auto it = std::find_if(voices.begin(), voices.end(), [&](const auto& v) { return v.name == voice; });
+  if (it == voices.end())
+    throw std::runtime_error(std::string{"Unknown voice '"} + voice + "'");
+  const std::string_view key{property};
+  if (key == OgaVoiceProperty_Language)
+    *out = AllocOgaString(it->language);
+  else if (key == OgaVoiceProperty_Gender)
+    *out = AllocOgaString(it->gender);
+  else
+    throw std::runtime_error(std::string{"Unknown voice property '"} + property + "'; use \"" OgaVoiceProperty_Language "\" or \"" OgaVoiceProperty_Gender "\"");
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaCreateGeneratorParams(const OgaModel* model, OgaGeneratorParams** out) {
   OGA_TRY
   auto params = std::make_shared<Generators::GeneratorParams>(*model);

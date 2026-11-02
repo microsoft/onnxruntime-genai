@@ -32,6 +32,7 @@ list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/reinit_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/search_checkpoint_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/state_graph_capture_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/step_driven_model_tests.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/vibevoice_internal_test.cpp")
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER AND ENABLE_CUDA_KERNEL_TESTS)
   message(STATUS "Including CUDA kernel tests in the build.")
@@ -373,6 +374,7 @@ list(APPEND engine_unit_test_srcs
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/search_checkpoint_tests.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/state_graph_capture_tests.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/step_driven_model_tests.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/vibevoice_internal_test.cpp"
 )
 add_executable(engine_unit_tests ${engine_unit_test_srcs})
 target_include_directories(engine_unit_tests PRIVATE

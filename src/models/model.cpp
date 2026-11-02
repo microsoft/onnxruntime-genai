@@ -36,6 +36,7 @@
 #include "parakeet.h"
 #include "nemotron_speech.h"
 #include "moonshine_streaming.h"
+#include "vibevoice.h"
 #include "multi_modal.h"
 #include "lfm2.h"
 #include "marian.h"
@@ -1094,6 +1095,8 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<MoonshineStreamingModel>(std::move(config), ort_env);
   if (ModelType::IsTDT(config->model.type))
     return std::make_shared<ParakeetTdtModel>(std::move(config), ort_env);
+  if (ModelType::IsTTS(config->model.type))
+    return std::make_shared<VibeVoiceModel>(std::move(config), ort_env);
   if (config->model.type == "lfm2_audio")
     return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, /*vision=*/false, /*speech=*/true);
   if (ModelType::IsALM(config->model.type))

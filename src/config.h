@@ -394,6 +394,39 @@ struct Config {
       int interleaved_n_audio{12};    // audio frames per turn of an interleaved answer
     } audio_output;
 
+    // Speaker presets of a text-to-speech model. A generator selects one with the "voice" runtime
+    // option; default_voice (or the first voice when it is empty) is used otherwise.
+    struct Voice {
+      std::string name;
+      std::string file;      // Preset file, relative to the model folder.
+      std::string language;  // BCP 47 tag, for example "en" or "en-in".
+      std::string gender;    // Optional: "female" or "male".
+    };
+    std::vector<Voice> voices;
+    std::string default_voice;
+
+    // VibeVoice-Realtime text to speech: a text LM and a TTS LM (both with an explicit KV cache), a
+    // diffusion head that samples one acoustic latent per speech frame, an acoustic connector that
+    // feeds the latent back to the TTS LM, and a vocoder that turns the latents into 24 kHz audio.
+    struct VibeVoice {
+      struct Graph {
+        std::string filename;
+      };
+      Graph text_lm;
+      Graph tts_lm;
+      Graph diffusion_head;
+      Graph acoustic_connector;
+      Graph vocoder;
+      float speech_scaling_factor{1.0f};  // Latents are divided by this, then reduced by the bias, before the vocoder.
+      float speech_bias_factor{0.0f};
+      int text_window_size{5};    // Text tokens fed to the language models per window.
+      int speech_window_size{6};  // Speech frames generated per window.
+      float cfg_scale{1.5f};      // Classifier-free guidance scale of the diffusion head.
+      // DPM-Solver++ schedule: one diffusion head timestep per step and one sigma more than steps.
+      std::vector<double> diffusion_timesteps;
+      std::vector<double> diffusion_sigmas;
+    } vibevoice;
+
     struct Joiner {
       std::string filename;
       std::optional<SessionOptions> session_options;

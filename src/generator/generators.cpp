@@ -628,11 +628,12 @@ Generator::Generator(const Model& model, const GeneratorParams& params)
   if (params.speculative.ngram_size > 0)
     ValidateNGramDecoding(model, params);
 
-  // RNNT/TDT/streaming-enc-dec-ASR models don't use the traditional
+  // RNNT/TDT/streaming-enc-dec-ASR/TTS models don't use the traditional
   // search/logits pipeline; skip the standard validations and create the
   // StepState-derived state directly.
   const auto& model_type = model.config_->model.type;
-  if (ModelType::IsTransducer(model_type) || ModelType::IsStreamingEncDecASR(model_type)) {
+  if (ModelType::IsTransducer(model_type) || ModelType::IsStreamingEncDecASR(model_type) ||
+      ModelType::IsTTS(model_type)) {
     state_ = model.CreateState({}, params);
     transducer_state_ = dynamic_cast<StepState*>(state_.get());
     strategy_ = MakeDecodingStrategy(*this);
@@ -870,6 +871,7 @@ void Generator::SetInputs(const NamedTensors& named_tensors) {
   }
 
   cpu_span<int32_t> input_ids;
+  const size_t first_new_input = extra_inputs_.size();
   for (const auto& [name, tensor] : named_tensors) {
     if (name == Config::Defaults::InputIdsName) {
       input_ids = cpu_span<int32_t>(tensor->ort_tensor_->GetTensorMutableData<int32_t>(),
@@ -882,10 +884,18 @@ void Generator::SetInputs(const NamedTensors& named_tensors) {
     }
   }
 
-  // Set any extra inputs (those defined in extra_inputs and those defined in the PresetExtraInputs registry)
-  if (set_extra_inputs_) {
-    state_->SetExtraInputs(extra_inputs_);
-    set_extra_inputs_ = false;
+  // The state checks the new inputs, and inputs it rejects are dropped, so the generator can take others.
+  try {
+    state_->ValidateExtraInputs(std::span<const ExtraInput>{extra_inputs_}.subspan(first_new_input));
+
+    // Set any extra inputs (those defined in extra_inputs and those defined in the PresetExtraInputs registry)
+    if (set_extra_inputs_) {
+      state_->SetExtraInputs(extra_inputs_);
+      set_extra_inputs_ = false;
+    }
+  } catch (...) {
+    extra_inputs_.resize(first_new_input);
+    throw;
   }
 
   // Append tokens and run ComputeLogits after setting all other possible inputs

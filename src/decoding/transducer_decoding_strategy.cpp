@@ -20,8 +20,10 @@ TransducerDecodingStrategy::TransducerDecodingStrategy(Generator& g)
     : transducer_state_{RequireStepState(g)} {}
 
 void TransducerDecodingStrategy::Step(Generator& g) {
-  g.state_->SetExtraInputs(g.extra_inputs_);
+  // Take the inputs first, so inputs that the state rejects are not passed again on the next step.
+  const auto extra_inputs = std::move(g.extra_inputs_);
   g.extra_inputs_.clear();
+  g.state_->SetExtraInputs(extra_inputs);
   transducer_state_.StepToken();
 }
 

@@ -92,6 +92,9 @@ struct State {
   virtual void SetRunOption(const char* key, const char* value);
   void SetRunOptions(const Config::RunOptions& config_run_options);
   virtual void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {}
+  // Generator::SetInputs passes the inputs of each call here before it keeps them. Throw to reject
+  // them; the generator then drops them, so it can take other inputs. Default: accept.
+  virtual void ValidateExtraInputs(std::span<const ExtraInput> extra_inputs) { (void)extra_inputs; }
 
   // Generator::AppendTokens calls DiscardNextLogits before it runs the last generated token only to bring
   // the state up to date, and StartTurn before it runs the appended tokens. Default no-op.
