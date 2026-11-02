@@ -645,6 +645,7 @@ def test_sliding_window_prefix_cache_matches_ring_execution(tmp_path, chunk_size
     prompt = list(range(2, 19))
     branch = prompt.copy()
     branch[9] += 1
+    branch[14] += 1
     references = [generate(make_engine(False), [tokens])[0].tokens for tokens in (prompt, branch)]
     engine = make_engine(True)
     for tokens, expected, hit in ((prompt, references[0], 0), (branch, references[1], 8)):
