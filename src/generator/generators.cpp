@@ -761,6 +761,9 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   DurationTrace trace{"Generator::AppendTokens"};
 
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
+  if (transducer_state_)
+    throw std::runtime_error("AppendTokens is not supported for " + model_->config_->model.type +
+                             ". Pass its inputs with SetInputs.");
   if (input_ids.size() == 0)
     throw std::runtime_error("input_ids is empty");
   if ((input_ids.size() / state_->params_->search.batch_size) + search_->GetSequenceLength() > state_->params_->search.max_length)
@@ -820,6 +823,9 @@ void Generator::AppendTokens(DeviceSpan<int32_t> input_ids) {
   DurationTrace trace{"Generator::AppendTokensDevice"};
 
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
+  if (transducer_state_)
+    throw std::runtime_error("AppendTokens is not supported for " + model_->config_->model.type +
+                             ". Pass its inputs with SetInputs.");
   if (input_ids.empty())
     throw std::runtime_error("input_ids is empty");
   if ((input_ids.size() / state_->params_->search.batch_size) + search_->GetSequenceLength() >
