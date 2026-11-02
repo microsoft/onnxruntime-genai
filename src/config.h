@@ -6,7 +6,9 @@
 #include "filesystem.h"
 #include "provider_options.h"
 
+#include <array>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 
@@ -80,6 +82,7 @@ struct Config {
     static constexpr std::string_view CurrentSequenceLengthName = "current_sequence_length";
     static constexpr std::string_view TotalSequenceLengthName = "total_sequence_length";
     static constexpr std::string_view CacheIndirectionName = "cache_indirection";
+    static constexpr std::string_view CacheWriteIndicesName = "cache_write_indices";
     static constexpr std::string_view AlignmentHeadsName = "alignment_heads";
     static constexpr std::string_view TokenTypeIdsName = "token_type_ids";
 
@@ -524,6 +527,8 @@ struct Config {
       std::optional<RunOptions> run_options;
       std::vector<SharedInitializer> shared_initializers;
 
+      int prefill_sequence_length{};
+
       int hidden_size{};          // Not currently used, potentially useful for embeddings in the future
       int num_attention_heads{};  // Not currently used, potentially useful if num_key_value_heads isn't set
       int num_key_value_heads{};
@@ -608,6 +613,7 @@ struct Config {
         std::string current_sequence_length{Defaults::CurrentSequenceLengthName};
         std::string total_sequence_length{Defaults::TotalSequenceLengthName};
         std::string cache_indirection{Defaults::CacheIndirectionName};
+        std::string cache_write_indices{Defaults::CacheWriteIndicesName};
         std::string encoder_hidden_states{Defaults::EncoderHiddenStatesName};
         std::string rnn_prev_states{Defaults::RnnStatesPrevName};
         std::string encoder_attention_mask{Defaults::EncoderAttentionMaskName};
@@ -882,6 +888,16 @@ struct Config {
       size_t max_batch_size{16};                    // Maximum batch size for dynamically batching requests.
       size_t max_scheduled_tokens{2048};            // Maximum tokens in one dynamically batched model run.
       std::optional<bool> prefix_caching;
+      std::optional<size_t> max_snapshots;  // Optional shared Engine-wide snapshot count limit.
+      struct SnapshotCache {
+        size_t vram_bytes{};
+        size_t ram_bytes{};
+        size_t disk_bytes{};
+        std::string directory;
+        bool explicitly_set{};
+        bool Enabled() const noexcept { return vram_bytes != 0 || ram_bytes != 0 || disk_bytes != 0; }
+        bool Configured() const noexcept { return explicitly_set || Enabled() || !directory.empty(); }
+      } snapshot_cache;
       size_t dflash2_max_snapshots{1};  // Budget-limited windowed drafter prefix snapshots; 0 disables.
     };
     std::optional<DynamicBatching> dynamic_batching;  // Dynamic batching settings
@@ -908,18 +924,25 @@ struct Config {
       std::optional<uint64_t> maximum_total_device_memory_bytes;
       std::optional<uint64_t> minimum_free_device_memory_bytes;
       std::optional<uint64_t> maximum_free_device_memory_bytes;
+      std::optional<uint64_t> minimum_effective_host_memory_bytes;
+      std::optional<uint64_t> maximum_effective_host_memory_bytes;
+      std::optional<uint64_t> minimum_available_host_memory_bytes;
       std::optional<bool> is_integrated;
     } eligibility;
 
     struct Overlay {
       struct Model {
         std::optional<std::string> decoder_filename;
+        std::map<std::string, std::string> decoder_session_options;
       } model;
 
       struct DynamicBatching {
         std::optional<size_t> num_blocks;
         std::optional<size_t> max_batch_size;
         std::optional<size_t> max_scheduled_tokens;
+        std::optional<bool> prefix_caching;
+        std::optional<size_t> max_snapshots;
+        std::optional<Engine::DynamicBatching::SnapshotCache> snapshot_cache;
         std::optional<size_t> dflash2_max_snapshots;
       } dynamic_batching;
 
@@ -946,6 +969,16 @@ struct Config {
   std::shared_ptr<const TokenizerMemoryData> tokenizer_memory_data_;
 };
 
+// Native RGB preprocessing settings; ORT Extensions interprets the processor pipeline.
+struct VisionProcessingConfig {
+  std::array<float, 3> image_mean{};
+  std::array<float, 3> image_std{};
+  std::optional<int64_t> image_height;
+  std::optional<int64_t> image_width;
+};
+
+VisionProcessingConfig LoadVisionProcessingConfig(const fs::path& path);
+
 void SetSearchNumber(Config::Search& search, std::string_view name, double value);
 void SetSearchBool(Config::Search& search, std::string_view name, bool value);
 void SetSpeculativeNumber(Config::Speculative& speculative, std::string_view name, double value);
@@ -966,6 +999,8 @@ struct RuntimeProfileDeviceFacts {
   std::optional<bool> is_integrated;
   // Unset means unknown: profiles with free-memory bounds do not match.
   std::optional<uint64_t> free_device_memory_bytes;
+  std::optional<uint64_t> effective_host_memory_bytes;
+  std::optional<uint64_t> available_host_memory_bytes;
 };
 void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device);
 void ApplyRuntimeProfile(Config& config, uint64_t total_device_memory_bytes);
