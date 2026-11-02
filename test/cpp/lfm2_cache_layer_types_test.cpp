@@ -100,12 +100,18 @@ void ExpectLayerTypesValidationMessage(const std::string& message, size_t actual
 
 // LFM2 variants that the exporter labels with their own model type still have to run through the
 // LFM2 runtime: the same conv state cache, and no rewind.
-void ExpectLfm2Runtime(const std::string& model_type, const std::string& temp_suffix) {
+void ExpectLfm2Runtime(const std::string& model_type, const std::string& temp_suffix,
+                       const std::string& layer_types_json = "") {
   const auto src_dir = GetLfm2ModelPath();
   const auto model_dir = MakeTempDir(temp_suffix);
   fs_std::copy(src_dir, model_dir, fs_std::copy_options::recursive | fs_std::copy_options::overwrite_existing);
   std::string config = ReadFile(model_dir / "genai_config.json");
   ReplaceFirst(config, "\"type\": \"lfm2\"", "\"type\": \"" + model_type + "\"");
+  if (!layer_types_json.empty()) {
+    ReplaceFirst(config,
+                 "\"layer_types\": [\"conv\", \"full_attention\", \"conv\", \"full_attention\"]",
+                 "\"layer_types\": " + layer_types_json);
+  }
   WriteFile(model_dir / "genai_config.json", config);
 
   auto model = OgaModel::Create(model_dir.string().c_str());
@@ -159,6 +165,17 @@ TEST(LFM2CacheLayerTypesValidationTest, EmptyLayerTypesArray) {
   ExpectLayerTypesValidationMessage(message, 0, 4);
 }
 
+// A layer type the cache does not know must not be taken for a conv layer.
+TEST(LFM2CacheLayerTypesValidationTest, UnknownLayerType) {
+  SkipIfModelUnavailable();
+
+  const auto model_dir = WriteModelWithLayerTypes(
+      "unknown",
+      "[\"conv\", \"full_attention\", \"linear_attention\", \"full_attention\"]");
+  const std::string message = CaptureRuntimeErrorMessage(model_dir);
+  EXPECT_NE(message.find("LFM2Cache: layer_types[2] is \"linear_attention\""), std::string::npos) << message;
+}
+
 TEST(LFM2CacheLayerTypesValidationTest, ValidMatchingLayers) {
   SkipIfModelUnavailable();
 
@@ -189,4 +206,11 @@ TEST(LFM2CacheLayerTypesValidationTest, Lfm2VlTextTypeUsesLfm2Runtime) {
 TEST(LFM2CacheLayerTypesValidationTest, Lfm2AudioTextTypeUsesLfm2Runtime) {
   SkipIfModelUnavailable();
   ExpectLfm2Runtime("lfm2_audio_text", "audio_text_type");
+}
+
+// LFM3 is exported as "lfm3", and its sliding_attention layers keep a KV cache like the
+// full_attention ones rather than a conv state.
+TEST(LFM2CacheLayerTypesValidationTest, Lfm3TypeUsesLfm2Runtime) {
+  SkipIfModelUnavailable();
+  ExpectLfm2Runtime("lfm3", "lfm3_type", "[\"conv\", \"full_attention\", \"conv\", \"sliding_attention\"]");
 }

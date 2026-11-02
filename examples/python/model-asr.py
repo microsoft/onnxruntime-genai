@@ -139,16 +139,17 @@ def load_audio(audio_path, sample_rate):
 
 
 def format_timestamp_records(result, use_segments):
-    timestamps = result.get_timestamps()
+    timestamps = result.timestamp_result
     if timestamps is None:
         return ""
-    records = timestamps.get_segments() if use_segments else timestamps.get_words()
+    records = timestamps.segments if use_segments else timestamps.words
     formatted = []
     for record in records:
-        text = record.get_text() if use_segments else record.get_text().strip()
+        text = record.text if use_segments else record.text.strip()
         separator = " " if use_segments and not text[:1].isspace() else ""
         suffix = "" if use_segments else " "
-        formatted.append(f"[{record.get_start_time():.2f} - {record.get_stop_time():.2f}]{separator}{text}{suffix}")
+        start, stop = record.time_interval
+        formatted.append(f"[{start:.2f} - {stop:.2f}]{separator}{text}{suffix}")
     return "".join(formatted)
 
 
@@ -158,10 +159,10 @@ def decode_tokens(generator, postprocessor, timestamp_level, all_word_transcript
     timestamps_enabled = timestamp_level != "off"
     while not generator.is_done():
         generator.generate_next_token()
-        postprocessor.process_next_tokens()
-        for result in postprocessor.get_next_token_results():
+        postprocessor.process_next()
+        for result in postprocessor.get_next_results():
             if not timestamps_enabled:
-                token_text = result.get_text()
+                token_text = result.text
                 print(token_text, end="", flush=True)
                 text += token_text
             else:
@@ -212,7 +213,7 @@ def simulate_microphone(model_path, audio_path, execution_provider, use_vad=None
 
     params = og.GeneratorParams(model)
     generator = og.Generator(model, params)
-    postprocessor = og.TokenPostProcessor(generator)
+    postprocessor = og.ASRPostProcessor(generator)
     # Per-generator language selection
     if selected_lang is not None:
         generator.set_runtime_option("lang_id", str(int(selected_lang[0])))
@@ -249,7 +250,7 @@ def simulate_microphone(model_path, audio_path, execution_provider, use_vad=None
 
     postprocessor.finalize()
     if timestamps_enabled:
-        for result in postprocessor.get_next_token_results():
+        for result in postprocessor.get_next_results():
             full_transcript += format_timestamp_records(
                 result, timestamp_level in ("segment", "all")
             )

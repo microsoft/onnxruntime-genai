@@ -95,14 +95,14 @@ def test_asr_example_formats_empty_results(test_data_path, asr_example, use_segm
     model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
     model = og.Model(model_path)
     generator = og.Generator(model, og.GeneratorParams(model))
-    postprocessor = og.TokenPostProcessor(generator)
+    postprocessor = og.ASRPostProcessor(generator)
     postprocessor.finalize()
-    result = postprocessor.get_next_token_results()[0]
-    assert isinstance(result, og.TokenPostProcessorResult)
+    result = postprocessor.get_next_results()[0]
+    assert isinstance(result, og.ASRPostProcessorResult)
     assert asr_example.format_timestamp_records(result, use_segments) == ""
     postprocessor.reset()
     postprocessor.finalize()
-    for result in postprocessor.get_next_token_results():
+    for result in postprocessor.get_next_results():
         assert asr_example.format_timestamp_records(result, use_segments) == ""
 
 
@@ -114,7 +114,7 @@ def test_asr_example_decodes_all_generated_results(test_data_path, asr_example, 
     generator = og.Generator(model, params)
     prompt = np.array([[0, 0, 0, 52]], dtype=np.int32)
     generator.append_tokens(prompt)
-    postprocessor = og.TokenPostProcessor(generator)
+    postprocessor = og.ASRPostProcessor(generator)
     transcript = asr_example.decode_tokens(generator, postprocessor, "off", [])
     tokenizer = og.Tokenizer(model)
     plain = tokenizer.create_stream()
@@ -155,7 +155,7 @@ def test_asr_example_formats_speech_timestamps(test_data_path, asr_example, time
     tokenizer = og.Tokenizer(model)
     plain_stream = tokenizer.create_stream()
     generator = og.Generator(model, og.GeneratorParams(model))
-    postprocessor = og.TokenPostProcessor(generator)
+    postprocessor = og.ASRPostProcessor(generator)
     sample_rate, chunk_samples, _ = asr_example.load_config(model_path)
     audio = asr_example.load_audio(audio_path, sample_rate)[: 2 * sample_rate]
     if use_vad:
@@ -168,35 +168,35 @@ def test_asr_example_formats_speech_timestamps(test_data_path, asr_example, time
     skipped_chunks = 0
 
     def process_result(result):
-        timestamps = result.get_timestamps()
+        timestamps = result.timestamp_result
         if timestamp_level == "off":
             assert timestamps is None
             assert asr_example.format_timestamp_records(result, False) == ""
             assert asr_example.format_timestamp_records(result, True) == ""
             return
-        word_records = timestamps.get_words()
-        segment_records = timestamps.get_segments()
+        word_records = timestamps.words
+        segment_records = timestamps.segments
         assert asr_example.format_timestamp_records(result, False) == "".join(
-            f"[{word.get_start_time():.2f} - {word.get_stop_time():.2f}]{word.get_text().strip()} "
+            f"[{word.time_interval[0]:.2f} - {word.time_interval[1]:.2f}]{word.text.strip()} "
             for word in word_records
         )
         assert asr_example.format_timestamp_records(result, True) == "".join(
-            f"[{segment.get_start_time():.2f} - {segment.get_stop_time():.2f}]"
-            f"{'' if segment.get_text()[:1].isspace() else ' '}{segment.get_text()}"
+            f"[{segment.time_interval[0]:.2f} - {segment.time_interval[1]:.2f}]"
+            f"{'' if segment.text[:1].isspace() else ' '}{segment.text}"
             for segment in segment_records
         )
-        words.extend(word.get_text() for word in word_records)
-        segments.extend(segment.get_text() for segment in segment_records)
-        word_start_times.extend(word.get_start_time() for word in word_records)
+        words.extend(word.text for word in word_records)
+        segments.extend(segment.text for segment in segment_records)
+        word_start_times.extend(word.time_interval[0] for word in word_records)
 
     def decode_inputs(inputs):
         generator.set_inputs(inputs)
         while not generator.is_done():
             generator.generate_next_token()
             text = "".join(plain_stream.decode(int(token_id)) for token_id in generator.get_next_tokens())
-            postprocessor.process_next_tokens()
-            step_results = postprocessor.get_next_token_results()
-            assert "".join(result.get_text() for result in step_results) == text
+            postprocessor.process_next()
+            step_results = postprocessor.get_next_results()
+            assert "".join(result.text for result in step_results) == text
             text_fragments.append(text)
             for result in step_results:
                 process_result(result)
@@ -213,8 +213,8 @@ def test_asr_example_formats_speech_timestamps(test_data_path, asr_example, time
         decode_inputs(inputs)
 
     postprocessor.finalize()
-    for result in postprocessor.get_next_token_results():
-        assert result.get_text() == ""
+    for result in postprocessor.get_next_results():
+        assert result.text == ""
         process_result(result)
     transcript = "".join(text_fragments)
     assert transcript.strip()
@@ -226,12 +226,14 @@ def test_asr_example_formats_speech_timestamps(test_data_path, asr_example, time
         assert skipped_chunks > 0
         assert word_start_times[0] >= 3.0
     postprocessor.finalize()
-    for result in postprocessor.get_next_token_results():
+    for result in postprocessor.get_next_results():
         assert asr_example.format_timestamp_records(result, False) == ""
         assert asr_example.format_timestamp_records(result, True) == ""
 
 
-def test_token_postprocessor_results_are_borrowed_and_reads_are_repeatable(test_data_path):
+def test_asr_postprocessor_results_are_borrowed_and_reads_are_repeatable(test_data_path):
+    assert hasattr(og, "ASRPostProcessorTimestampResult")
+    assert not hasattr(og, "ASRPostProcessorTimestamp")
     model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
     model = og.Model(model_path)
     tokenizer = og.Tokenizer(model)
@@ -239,69 +241,71 @@ def test_token_postprocessor_results_are_borrowed_and_reads_are_repeatable(test_
     params = og.GeneratorParams(model)
     params.set_search_options(max_length=10)
     generator = og.Generator(model, params)
-    processor = og.TokenPostProcessor(generator)
-    assert processor.get_next_token_results() == []
+    processor = og.ASRPostProcessor(generator)
+    assert processor.get_next_results() == []
     processor.finalize()
-    initial = processor.get_next_token_results()[0]
-    assert initial.get_text() == ""
-    assert initial.get_timestamps() is None
+    initial = processor.get_next_results()[0]
+    assert initial.text == ""
+    assert initial.timestamp_result is None
     processor.reset()
     with pytest.raises(RuntimeError, match="expired"):
-        initial.get_text()
+        initial.text
     generator.append_tokens(np.array([[0, 0, 0, 52]], dtype=np.int32))
     retained = []
     for _ in range(2):
         generator.generate_next_token()
         for previous, expected_text in retained:
-            assert previous.get_text() == expected_text
+            assert previous.text == expected_text
         expected = plain.decode(int(generator.get_next_tokens()[0]))
-        processor.process_next_tokens()
+        processor.process_next()
         for previous, _ in retained:
             with pytest.raises(RuntimeError, match="expired"):
-                previous.get_text()
+                previous.text
             with pytest.raises(RuntimeError, match="expired"):
-                previous.get_timestamps()
+                previous.timestamp_result
         retained.clear()
-        results = processor.get_next_token_results()
+        results = processor.get_next_results()
         assert len(results) == 1
         result = results[0]
-        assert isinstance(result, og.TokenPostProcessorResult)
-        assert result.get_text() == expected
-        assert result.get_timestamps() is None
-        assert processor.get_next_token_results()[0].get_text() == expected
+        assert isinstance(result, og.ASRPostProcessorResult)
+        assert result.text == expected
+        assert result.timestamp_result is None
+        assert processor.get_next_results()[0].text == expected
+        with pytest.raises(AttributeError):
+            result.text = "cannot overwrite native text"
         retained.append((result, expected))
     del generator
     processor.finalize()
     with pytest.raises(RuntimeError, match="expired"):
-        result.get_text()
+        result.text
     processor.finalize()
-    final_result = processor.get_next_token_results()[0]
-    assert final_result.get_text() == ""
+    final_result = processor.get_next_results()[0]
+    assert final_result.text == ""
     processor.reset()
-    assert processor.get_next_token_results() == []
+    assert processor.get_next_results() == []
     with pytest.raises(RuntimeError, match="expired"):
-        final_result.get_text()
+        final_result.text
     processor.finalize()
-    before_destruction = processor.get_next_token_results()[0]
-    copied_text = before_destruction.get_text()
+    before_destruction = processor.get_next_results()[0]
+    copied_text = before_destruction.text
     del processor
     with pytest.raises(RuntimeError, match="expired"):
-        before_destruction.get_text()
+        before_destruction.text
     assert copied_text == ""
 
 
 @pytest.mark.parametrize("search", [{"batch_size": 2}, {"num_beams": 2}])
-def test_token_postprocessor_rejects_multiple_sequences(test_data_path, search):
+def test_asr_postprocessor_rejects_multiple_sequences(test_data_path, search):
     model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
     model = og.Model(model_path)
     params = og.GeneratorParams(model)
     params.set_search_options(max_length=10, **search)
     generator = og.Generator(model, params)
     with pytest.raises(RuntimeError, match="batch_size=1 and num_beams=1"):
-        og.TokenPostProcessor(generator)
+        og.ASRPostProcessor(generator)
 
 
-def test_token_postprocessor_uses_generators_model(test_data_path):
+def test_asr_postprocessor_uses_generators_model(test_data_path):
     model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
     model = og.Model(model_path)
     tokenizer = og.Tokenizer(model)
@@ -310,16 +314,16 @@ def test_token_postprocessor_uses_generators_model(test_data_path):
     params.set_search_options(max_length=10)
     generator = og.Generator(model, params)
     del model
-    processor = og.TokenPostProcessor(generator)
+    processor = og.ASRPostProcessor(generator)
     generator.append_tokens(np.array([[0, 0, 0, 52]], dtype=np.int32))
     generator.generate_next_token()
-    processor.process_next_tokens()
-    assert processor.get_next_token_results()[0].get_text() == plain.decode(int(generator.get_next_tokens()[0]))
+    processor.process_next()
+    assert processor.get_next_results()[0].text == plain.decode(int(generator.get_next_tokens()[0]))
 
 
-def test_token_postprocessor_rejects_null_generator():
+def test_asr_postprocessor_rejects_null_generator():
     with pytest.raises(TypeError):
-        og.TokenPostProcessor(None)
+        og.ASRPostProcessor(None)
 
 
 def test_tokenizer_decodes_no_tokens_to_an_empty_string(test_data_path):
@@ -614,6 +618,82 @@ def test_rewind(test_data_path, relative_model_path):
     while not generator.is_done():
         generator.generate_next_token()
     assert np.array_equal(expected_sequence, generator.get_sequence(0))
+
+
+@pytest.mark.parametrize("stop_at_eos", [False, True])
+@pytest.mark.parametrize(
+    "relative_model_path",
+    [Path("hf-internal-testing") / "tiny-random-gpt2-fp32", Path("hf-internal-testing") / "tiny-random-lfm2-fp32"],
+)
+def test_append_tokens_after_generation(test_data_path, relative_model_path, stop_at_eos):
+    model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path)
+    prompt = np.array([[0, 0, 195, 731]], dtype=np.int32)
+
+    def new_generator(model):
+        search_params = og.GeneratorParams(model)
+        search_params.set_search_options(do_sample=False, max_length=20)
+        return og.Generator(model, search_params)
+
+    config = og.Config(model_path)
+    if stop_at_eos:
+        # The third greedy token becomes a stop token, which ends the search without joining the sequence.
+        probe = new_generator(og.Model(model_path))
+        probe.append_tokens(prompt)
+        for _ in range(3):
+            probe.generate_next_token()
+        config.overlay(json.dumps({"model": {"eos_token_id": int(probe.get_sequence(0)[-1])}}))
+    model = og.Model(config)
+
+    generator = new_generator(model)
+    generator.append_tokens(prompt)
+    if stop_at_eos:
+        while not generator.is_done():
+            generator.generate_next_token()
+    else:
+        for _ in range(3):
+            generator.generate_next_token()
+    generator.append_tokens(np.array([[52, 64]], dtype=np.int32))
+
+    # The last generated token, unless it stopped the search, must reach the model before the appended ones.
+    control = new_generator(model)
+    control.append_tokens(generator.get_sequence(0)[np.newaxis, :])
+    assert np.allclose(control.get_logits(), generator.get_logits(), rtol=0, atol=1e-6)
+
+
+def test_append_tokens_after_generation_with_guidance(test_data_path):
+    model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
+    model = og.Model(model_path)
+    tokenizer = og.Tokenizer(model)
+    pattern = r"[0-9]{8}"
+    prompt = np.array([[0, 0, 195, 731]], dtype=np.int32)
+
+    def new_generator(guidance):
+        search_params = og.GeneratorParams(model)
+        search_params.set_search_options(do_sample=False, max_length=20)
+        if guidance:
+            search_params.set_guidance("regex", pattern)
+        return og.Generator(model, search_params)
+
+    try:
+        generator = new_generator(guidance=True)
+    except RuntimeError as error:
+        if "guidance is unavailable" in str(error).lower():
+            pytest.skip("ONNX Runtime GenAI was built without guidance support")
+        raise
+    generator.append_tokens(prompt)
+    for _ in range(2):
+        generator.generate_next_token()
+    generator.append_tokens(np.array([tokenizer.encode("7")], dtype=np.int32))
+
+    control = new_generator(guidance=False)
+    control.append_tokens(generator.get_sequence(0)[np.newaxis, :])
+    assert np.allclose(control.get_logits(), generator.get_logits(), rtol=0, atol=1e-6)
+
+    # The grammar has to count the last generated token too, or the answer comes out too long.
+    while not generator.is_done():
+        generator.generate_next_token()
+    answer = tokenizer.decode(generator.get_sequence(0)[prompt.shape[1] :])
+    assert re.fullmatch(pattern, answer), answer
 
 
 # Test Model Loading with No Chat Template

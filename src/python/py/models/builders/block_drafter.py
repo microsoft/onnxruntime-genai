@@ -5,7 +5,6 @@
 # --------------------------------------------------------------------------
 
 import os
-import tempfile
 
 import numpy as np
 import onnx_ir as ir
@@ -17,9 +16,8 @@ from tqdm import tqdm
 from .base import Model
 
 
-# Deliberately not a `Model` subclass: a block drafter emits a hand-written graph, so it shares
-# only the two stateless `Model` helpers below rather than the decoder builder's contract.
-class BlockDrafterBuilder:
+# Block drafters share Model's graph lifecycle while retaining their packed block I/O.
+class BlockDrafterBuilder(Model):
     """Shared graph, initializer, I/O, and file plumbing for block drafters."""
 
     # Weight-only quantization of the drafter body. ``quant_bits = None`` keeps every
@@ -40,18 +38,10 @@ class BlockDrafterBuilder:
     lm_head_adoption = None
     embed_adoption = None
 
-    def make_graph(self, graph_name, const_prefix):
-        self.values: dict[str, ir.Value] = {}
-        self.node_names: set[str] = set()
-        self.graph = ir.Graph(
-            inputs=(),
-            outputs=(),
-            nodes=(),
-            opset_imports={"": 21, "com.microsoft": 1},
-            name=graph_name,
-        )
-        self.model = ir.Model(self.graph, ir_version=10, producer_name="onnxruntime-genai")
-        self.const_cache: dict[str, str] = {}
+    def __init__(self, graph_name="block_drafter", const_prefix="drafter"):
+        super().__init__(graph_name=graph_name, graph_opset=21)
+        self.graph.opset_imports["com.microsoft"] = 1
+        self.const_cache = {}
         self.const_prefix = const_prefix
 
     def make_value(self, name, dtype=None, shape=None):
@@ -122,14 +112,76 @@ class BlockDrafterBuilder:
         self.make_value(output, dtype, shape)
         return output
 
-    def binary(self, op, name, lhs, rhs, dtype, shape):
+    def binary(self, op, name, lhs, rhs, dtype, shape, domain="", **attrs):
         output = self.out(name)
-        self.make_node(op, [lhs, rhs], [output], name=name)
+        self.make_node(op, [lhs, rhs], [output], name=name, domain=domain, **attrs)
         self.make_value(output, dtype, shape)
         return output
 
     def reshape(self, name, root_input, shape_const, dtype, shape):
         return self.binary("Reshape", name, root_input, self.const(shape_const), dtype, shape)
+
+    def make_cast(self, name, root_input, dtype, shape, output=None):
+        output = output or self.out(name)
+        self.make_node("Cast", [root_input], [output], name=name, to=dtype)
+        self.make_value(output, dtype, shape)
+        return output
+
+    def make_slice_range(self, name, root_input, start, end, axis, dtype, shape):
+        self.make_slice(
+            name,
+            [root_input, self.const([start]), self.const([end]), self.const([axis])],
+            dtype,
+            shape,
+        )
+        return self.out(name)
+
+    def make_split_equal(self, name, root_input, outputs, dtype, shape, axis=-1):
+        self.make_split(
+            name, [root_input], outputs, [dtype] * len(outputs), [shape] * len(outputs), axis=axis, num_outputs=len(outputs)
+        )
+        return outputs
+
+    def make_concat(self, name, inputs, dtype, shape, axis=0, output=None):
+        output = output or self.out(name)
+        self.make_node("Concat", inputs, [output], name=name, axis=axis)
+        self.make_value(output, dtype, shape)
+        return output
+
+    def make_silu(self, name, root_input, dtype, shape):
+        sigmoid = self.unary("Sigmoid", f"{name}/Sigmoid", root_input, dtype, shape)
+        return self.binary("Mul", f"{name}/Mul", root_input, sigmoid, dtype, shape)
+
+    def make_linear(self, name, root_input, weight_tensor, bias_tensor, output_shape):
+        out_features, in_features = (int(dim) for dim in weight_tensor.shape)
+        weight_name = f"{name[1:].replace('/', '.')}.weight"
+        output = self.matmul(
+            f"{name}/MatMul",
+            root_input,
+            weight_tensor,
+            in_features,
+            out_features,
+            output_shape[:-1],
+            weight_name=weight_name,
+            quantize=False,
+        )
+        if bias_tensor is not None:
+            bias_name = f"{name[1:].replace('/', '.')}.bias"
+            self.make_initializer(bias_tensor, bias_name, to=self.io_dtype)
+            output = self.binary("Add", f"{name}/Add", output, bias_name, self.io_dtype, output_shape)
+        return output
+
+    def make_layer_norm(
+        self, name, root_input, weight_tensor, bias_tensor, shape, weight_name=None, bias_name=None, epsilon=1e-5
+    ):
+        weight_name = weight_name or (name[1:].replace("/", ".") + ".weight")
+        bias_name = bias_name or (name[1:].replace("/", ".") + ".bias")
+        self.make_initializer(weight_tensor, weight_name, to=self.io_dtype)
+        self.make_initializer(bias_tensor, bias_name, to=self.io_dtype)
+        output = self.out(name)
+        self.make_node("LayerNormalization", [root_input, weight_name, bias_name], [output], name=name, axis=-1, epsilon=epsilon)
+        self.make_value(output, self.io_dtype, shape)
+        return output
 
     def matmul(self, name, root_input, weight_tensor, in_features, out_features, rows, weight_name=None, quantize=True):
         """Emit ``root_input @ weight.T`` for a torch ``[out, in]`` weight."""
@@ -142,8 +194,9 @@ class BlockDrafterBuilder:
         if initializer_name not in self.values:
             self.make_initializer(weight_tensor.T, initializer_name, to=self.io_dtype)
         output = self.out(name)
+        output_shape = [*rows, out_features] if isinstance(rows, (list, tuple)) else [rows, out_features]
         self.make_node("MatMul", [root_input, initializer_name], [output], name=name)
-        self.make_value(output, self.io_dtype, [rows, out_features])
+        self.make_value(output, self.io_dtype, output_shape)
         return output
 
     def matmul_nbits(self, name, root_input, weight_tensor, in_features, out_features, rows, initializer_name):
@@ -197,6 +250,7 @@ class BlockDrafterBuilder:
         if prepack:
             attributes["weight_prepacked"] = prepack
         output = self.out(name)
+        output_shape = [*rows, out_features] if isinstance(rows, (list, tuple)) else [rows, out_features]
         self.make_node(
             "MatMulNBits",
             [root_input, qweight_name, scales_name],
@@ -205,7 +259,7 @@ class BlockDrafterBuilder:
             domain="com.microsoft",
             **attributes,
         )
-        self.make_value(output, self.io_dtype, [rows, out_features])
+        self.make_value(output, self.io_dtype, output_shape)
         return output
 
     def rms_norm(self, name, root_input, weight_tensor, rows, weight_name=None):
@@ -222,7 +276,8 @@ class BlockDrafterBuilder:
             epsilon=self.rms_eps,
             stash_type=1,
         )
-        self.make_value(output, self.io_dtype, [rows, self.hidden_size])
+        output_shape = list(rows) if isinstance(rows, (list, tuple)) else [rows, self.hidden_size]
+        self.make_value(output, self.io_dtype, output_shape)
         return output
 
     def skip_rms_norm(self, name, root, skip, weight_tensor, rows, want_sum=True, dtype=None):
@@ -265,9 +320,15 @@ class BlockDrafterBuilder:
         No weights are produced for the quantized form: `adopt_target_tensors` copies the
         target's once it has been saved.
         """
+        if self.exclude_embeds:
+            return "inputs_embeds"
+        if self.target_model is not None and self.embed_quant is None:
+            return self.make_decoder_embedding(name, rows)
         output = self.out(name)
         if self.embed_quant is None:
-            self.make_initializer(self.weights["embed_tokens.weight"], "model.embed_tokens.weight", to=self.external_dtype)
+            self.make_initializer(
+                self.weights["embed_tokens.weight"], "model.embed_tokens.weight", to=self.external_dtype
+            )
             self.make_node("Gather", ["model.embed_tokens.weight", "input_ids"], [output], name=name)
         else:
             bits = self.embed_quant["bits"]
@@ -297,11 +358,97 @@ class BlockDrafterBuilder:
         self.make_value(output, self.external_dtype, [rows, self.hidden_size])
         return output
 
+    def make_decoder_embedding(self, name, rows):
+        """Reuse the decoder's lookup, including tied-weight transforms and quantized tables."""
+        nodes = {node.name: node for node in self.target_model.graph}
+        source = next(
+            (
+                nodes[f"/model/embed_tokens/{op}"].outputs[0]
+                for op in ("Slice", "GatherBlockQuantized", "Gather")
+                if f"/model/embed_tokens/{op}" in nodes
+            ),
+            None,
+        )
+        if source is None:
+            raise ValueError("The decoder graph has no token embedding lookup to share.")
+        if source.dtype is not None and source.dtype != self.external_dtype:
+            raise ValueError("The decoder embedding must match the drafter's I/O dtype.")
+        missing = []
+
+        def copy_value(value):
+            producer = value.producer()
+            if producer is None and value.const_value is None and value in self.target_model.graph.inputs:
+                if value.dtype != ir.DataType.INT64:
+                    raise ValueError(f"Unexpected decoder embedding input '{value.name}'.")
+                return "input_ids"
+            if value.name in self.values:
+                return value.name
+            if producer is None:
+                copied = self.make_value(value.name, value.dtype, value.shape)
+                copied.const_value = value.const_value
+                copied.metadata_props.update(value.metadata_props)
+                if copied.const_value is None:
+                    missing.append(value.name)
+                else:
+                    self.graph.register_initializer(copied)
+                return value.name
+            inputs = [copy_value(input_value) if input_value is not None else "" for input_value in producer.inputs]
+            output_names = [output.name for output in producer.outputs]
+            node = self.make_node(
+                producer.op_type,
+                inputs,
+                output_names,
+                name=producer.name,
+                domain=producer.domain,
+                **{key: attribute.value for key, attribute in producer.attributes.items()},
+            )
+            node.metadata_props.update(producer.metadata_props)
+            for output in producer.outputs:
+                shape = (
+                    [
+                        rows if isinstance(dim, ir.SymbolicDim) and dim.value == "num_tokens" else dim
+                        for dim in output.shape
+                    ]
+                    if output.shape is not None
+                    else None
+                )
+                copied = self.make_value(output.name, output.dtype, shape)
+                copied.metadata_props.update(output.metadata_props)
+            return value.name
+
+        root = copy_value(source)
+        if missing:
+            self.embed_adoption = {"initializers": tuple(missing)}
+        output = self.out(name)
+        self.rename_value(root, output)
+        self.make_value(output, self.external_dtype, [rows, self.hidden_size])
+        return output
+
     def pending_adoptions(self):
         """Return the adoption records still waiting on the target's saved bytes."""
         return [adoption for adoption in (self.embed_adoption, self.lm_head_adoption) if adoption is not None]
 
-    def adopt_target_tensors(self, target_model_path):
+    def embedding_initializers(self):
+        """Find the lookup's tensors, including a tied LM-head table."""
+        names = set()
+
+        def visit(value):
+            if value is None:
+                return
+            if value.name in self.graph.initializers:
+                if value.name.startswith(("model.embed_tokens.", "lm_head.MatMul.")):
+                    names.add(value.name)
+            elif value.producer() is not None:
+                for input_value in value.producer().inputs:
+                    visit(input_value)
+
+        for prefix in ("dflash2", "dspark"):
+            output = self.values.get(f"/{prefix}/embed_tokens/Gather/output_0")
+            if output is not None:
+                visit(output)
+        return frozenset(names)
+
+    def adopt_target_tensors(self, target_model_path, embedding_model_path=None):
         """Fill the drafter's shared tensors from the saved target model.
 
         Called between the target's save and the drafter's, so `target_model_path` exists and
@@ -313,7 +460,25 @@ class BlockDrafterBuilder:
             return
         target = ir.load(target_model_path)
         for adoption in pending:
-            self.adopt_target_node(target, adoption, os.path.basename(target_model_path))
+            source = (
+                ir.load(embedding_model_path)
+                if adoption is self.embed_adoption and embedding_model_path is not None
+                else target
+            )
+            if "node" in adoption:
+                self.adopt_target_node(
+                    source,
+                    adoption,
+                    os.path.basename(embedding_model_path or target_model_path)
+                    if adoption is self.embed_adoption
+                    else os.path.basename(target_model_path),
+                )
+            else:
+                for initializer_name in adoption["initializers"]:
+                    tensor = source.graph.initializers[initializer_name].const_value
+                    value = self.make_value(initializer_name, tensor.dtype, tensor.shape)
+                    value.const_value = tensor
+                    self.graph.register_initializer(value)
         self.embed_adoption = None
         self.lm_head_adoption = None
 
@@ -349,6 +514,46 @@ class BlockDrafterBuilder:
             node.attributes[attribute_name] = attribute
 
     def make_lm_head(self, root, rows="num_block"):
+        if "lm_head.qweight" in self.weights:
+            qweight = self.weights["lm_head.qweight"]
+            scales = self.weights["lm_head.scales"]
+            expected_qweight_shape = (self.vocab_size, self.hidden_size // 32, 32)
+            if tuple(qweight.shape) != expected_qweight_shape:
+                raise ValueError(
+                    f"LM head qweight has shape {tuple(qweight.shape)}, expected {expected_qweight_shape}."
+                )
+            # Q8_0 block scales are FP16. BF16 cannot represent them exactly, so a BF16 graph runs this head in FP16
+            # with explicit boundary casts instead of rounding the scales.
+            head_dtype = ir.DataType.FLOAT16 if self.external_dtype == ir.DataType.BFLOAT16 else self.external_dtype
+            if self.io_dtype != head_dtype:
+                root = self.unary("Cast", "/lm_head/Cast", root, head_dtype, [rows, self.hidden_size], to=head_dtype)
+            name = "/lm_head/MatMul"
+            output = self.out(name)
+            self.make_initializer(qweight, "lm_head.MatMul.weight_Q8")
+            self.make_initializer(scales, "lm_head.MatMul.weight_scales", to=head_dtype)
+            self.make_node(
+                "MatMulNBits",
+                [root, "lm_head.MatMul.weight_Q8", "lm_head.MatMul.weight_scales"],
+                [output],
+                name=name,
+                domain="com.microsoft",
+                bits=8,
+                block_size=32,
+                K=self.hidden_size,
+                N=self.vocab_size,
+            )
+            self.make_value(output, head_dtype, [rows, self.vocab_size])
+            if head_dtype != self.external_dtype:
+                output = self.unary(
+                    "Cast",
+                    "/lm_head/logits/Cast",
+                    output,
+                    self.external_dtype,
+                    [rows, self.vocab_size],
+                    to=self.external_dtype,
+                )
+            return output
+
         weight = self.weights["lm_head.weight"]
         if str(weight.dtype).startswith("torch.float8") and weight.dtype != torch.float8_e4m3fn:
             raise ValueError(f"FP8 LM head weight must be float8_e4m3fn, got {weight.dtype}.")
@@ -432,8 +637,7 @@ class BlockDrafterBuilder:
             # `MatMulNBits` takes the activations first and the packed weight second.
             "weight_input": 1,
             "reason": (
-                "Both models run the same head, so a mismatch here means the target would "
-                "reject nearly every draft."
+                "Both models run the same head, so a mismatch here means the target would reject nearly every draft."
             ),
         }
 
@@ -545,7 +749,9 @@ class BlockDrafterBuilder:
             ("past_sequence_lengths", ir.DataType.INT32, ["batch_size"]),
             ("block_table", ir.DataType.INT32, ["batch_size", "max_num_blocks"]),
         ]
-        if self.include_attention_metadata:
+        if self.exclude_embeds:
+            declarations.append(("inputs_embeds", self.external_dtype, ["num_block", self.hidden_size]))
+        if self.ep == "cuda":
             declarations.append(("attention_metadata", ir.DataType.INT32, [3]))
         for name, dtype, shape in declarations:
             if name == "q_row_map" and not self.uses_q_row_map:
@@ -569,51 +775,19 @@ class BlockDrafterBuilder:
         if self.pending_adoptions():
             raise ValueError("adopt_target_tensors must run before saving a drafter that adopts the target's tensors.")
         out_path = os.path.join(out_dir, self.filename)
-        data_path = out_path + ".data"
-        with tempfile.TemporaryDirectory(dir=out_dir, prefix=f".{self.filename}.") as staging_dir:
-            staged_path = os.path.join(staging_dir, self.filename)
-            staged_data_path = staged_path + ".data"
-            with tqdm() as progress:
-                total_set = False
+        with tqdm() as progress:
+            total_set = False
 
-                def callback(tensor, metadata):
-                    nonlocal total_set
-                    if not total_set:
-                        progress.total = metadata.total
-                        total_set = True
-                    progress.update()
-                    progress.set_description(f"Saving {tensor.name} ({tensor.dtype.short_name()}, {tensor.shape})")
+            def callback(tensor, metadata):
+                nonlocal total_set
+                if not total_set:
+                    progress.total = metadata.total
+                    total_set = True
+                progress.update()
+                progress.set_description(f"Saving {tensor.name} ({tensor.dtype.short_name()}, {tensor.shape})")
 
-                Model.stamp_build_metadata(self.model)
-                ir.save(
-                    self.model,
-                    staged_path,
-                    external_data=os.path.basename(staged_data_path),
-                    size_threshold_bytes=0,
-                    callback=callback,
-                )
-            self.replace_model_files(staged_path, staged_data_path, out_path, data_path, staging_dir)
-
-    def replace_model_files(self, staged_path, staged_data_path, out_path, data_path, staging_dir):
-        replacements = ((staged_data_path, data_path), (staged_path, out_path))
-        backups = []
-        installed = []
-        try:
-            for _, destination in replacements:
-                if os.path.exists(destination):
-                    backup = os.path.join(staging_dir, os.path.basename(destination) + ".bak")
-                    os.replace(destination, backup)
-                    backups.append((backup, destination))
-            for source, destination in replacements:
-                os.replace(source, destination)
-                installed.append(destination)
-        except Exception:
-            for path in reversed(installed):
-                if os.path.exists(path):
-                    os.remove(path)
-            for backup, destination in reversed(backups):
-                os.replace(backup, destination)
-            raise
+            Model.stamp_build_metadata(self.model)
+            Model.save_onnx_model(self.model, out_path, callback=callback)
 
     def genai_config_section(self):
         section = {
@@ -637,7 +811,7 @@ class BlockDrafterBuilder:
                 "cumulative_sequence_lengths": "cumulative_sequence_lengths",
                 "past_sequence_lengths": "past_sequence_lengths",
                 "block_table": "block_table",
-                "attention_metadata": "attention_metadata" if self.include_attention_metadata else "",
+                "attention_metadata": "attention_metadata" if self.ep == "cuda" else "",
                 "past_key_names": "past_key_values.%d.key",
                 "past_value_names": "past_key_values.%d.value",
             },
@@ -650,4 +824,6 @@ class BlockDrafterBuilder:
         }
         if not self.uses_q_row_map:
             del section["inputs"]["q_row_map"]
+        if self.exclude_embeds:
+            section["inputs"]["inputs_embeds"] = "inputs_embeds"
         return section

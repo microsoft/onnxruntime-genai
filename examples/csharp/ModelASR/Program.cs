@@ -73,7 +73,7 @@ if (useVad == "true") {
 
 using var genParams = new GeneratorParams(model);
 using var generator = new Generator(model, genParams);
-using var postprocessor = new TokenPostProcessor(generator);
+using var postprocessor = new ASRPostProcessor(generator);
 Console.WriteLine(new string('-', 60));
 string fullTranscript = "";
 var allWordTranscript = new StringBuilder();
@@ -106,7 +106,7 @@ if (flushInputs != null) {
 
 postprocessor.FinalizeProcessing();
 if (timestampsEnabled) {
-  foreach (var result in postprocessor.GetNextTokenResults()) {
+  foreach (var result in postprocessor.GetNextResults()) {
     fullTranscript += FormatTimestampRecords(result, timestampLevel is "segment" or "all");
     if (timestampLevel == "all")
       allWordTranscript.Append(FormatTimestampRecords(result, false));
@@ -124,16 +124,16 @@ if (useVad == "true") {
                     $"{chunksSkipped} skipped ({pctSaved:F1}% compute saved)");
 }
 
-static string DecodeTokens(Generator generator, TokenPostProcessor postprocessor, string timestampLevel,
+static string DecodeTokens(Generator generator, ASRPostProcessor postprocessor, string timestampLevel,
                            StringBuilder allWordTranscript) {
   string text = "";
   bool timestampsEnabled = timestampLevel != "off";
   while (!generator.IsDone()) {
     generator.GenerateNextToken();
-    postprocessor.ProcessNextTokens();
-    foreach (var result in postprocessor.GetNextTokenResults()) {
+    postprocessor.ProcessNext();
+    foreach (var result in postprocessor.GetNextResults()) {
       if (!timestampsEnabled) {
-        string tokenText = result.GetText();
+        string tokenText = result.Text;
         Console.Write(tokenText);
         text += tokenText;
       } else {
@@ -148,15 +148,16 @@ static string DecodeTokens(Generator generator, TokenPostProcessor postprocessor
   return text;
 }
 
-static string FormatTimestampRecords(TokenPostProcessorResult result, bool useSegments) {
-  var timestamps = result.GetTimestamps();
+static string FormatTimestampRecords(ASRPostProcessorResult result, bool useSegments) {
+  var timestamps = result.TimestampResult;
   if (timestamps == null) return "";
-  var records = useSegments ? timestamps.GetSegments() : timestamps.GetWords();
+  var records = useSegments ? timestamps.Segments : timestamps.Words;
   return string.Concat(records.Select(record => {
-    string text = useSegments ? record.GetText() : record.GetText().Trim();
+    string text = useSegments ? record.Text : record.Text.Trim();
     string separator = useSegments && (text.Length == 0 || !char.IsWhiteSpace(text[0])) ? " " : "";
     string suffix = useSegments ? "" : " ";
-    return $"[{record.GetStartTime():F2} - {record.GetStopTime():F2}]{separator}{text}{suffix}";
+    var (start, stop) = record.TimeInterval;
+    return $"[{start:F2} - {stop:F2}]{separator}{text}{suffix}";
   }));
 }
 

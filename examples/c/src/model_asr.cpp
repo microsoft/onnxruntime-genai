@@ -155,16 +155,18 @@ std::vector<float> LoadWav(const std::string& path, int target_sample_rate) {
   throw std::runtime_error("No data chunk found in WAV file");
 }
 
-void AppendTimestampRecords(const OgaTokenPostProcessorResult& result, bool use_segments,
+void AppendTimestampRecords(const OgaASRPostProcessorResult& result, bool use_segments,
                             std::string& transcript, bool print_output = true) {
-  const auto* timestamps = result.GetTimestamps();
+  const auto* timestamps = result.GetTimestampResult();
   if (!timestamps) return;
   const size_t count = use_segments ? timestamps->GetSegmentCount() : timestamps->GetWordCount();
+  const auto kind = use_segments ? OgaTimestampRecordKind_Segments : OgaTimestampRecordKind_Words;
   for (size_t index = 0; index < count; ++index) {
-    const auto& record = use_segments ? timestamps->GetSegment(index) : timestamps->GetWord(index);
-    const char* text = record.GetText();
+    const auto* record = timestamps->GetTimestampRecord(kind, index);
+    const char* text = record->GetText();
+    const auto [start, stop] = record->GetTimestampInterval();
     std::ostringstream output;
-    output << '[' << std::fixed << std::setprecision(2) << record.GetStartTime() << " - " << record.GetStopTime() << ']';
+    output << '[' << std::fixed << std::setprecision(2) << start << " - " << stop << ']';
     if (use_segments) {
       if (text[0] == '\0' || !std::isspace(static_cast<unsigned char>(text[0]))) output << ' ';
       output << text;
@@ -179,15 +181,15 @@ void AppendTimestampRecords(const OgaTokenPostProcessorResult& result, bool use_
   }
 }
 
-std::string DecodeTokens(OgaGenerator& generator, OgaTokenPostProcessor& postprocessor,
+std::string DecodeTokens(OgaGenerator& generator, OgaASRPostProcessor& postprocessor,
                          const std::string& timestamp_level, std::string& all_word_transcript) {
   std::string text;
   const bool timestamps_enabled = timestamp_level != "off";
   const bool use_segments = timestamp_level == "segment" || timestamp_level == "all";
   while (!generator.IsDone()) {
     generator.GenerateNextToken();
-    postprocessor.ProcessNextTokens();
-    for (const auto* result : postprocessor.GetNextTokenResults()) {
+    postprocessor.ProcessNext();
+    for (const auto* result : postprocessor.GetNextResults()) {
       if (!timestamps_enabled) {
         std::cout << result->GetText() << std::flush;
         text += result->GetText();
@@ -233,7 +235,7 @@ void StreamingTranscribe(const std::string& model_path, const std::string& audio
 
   auto params = OgaGeneratorParams::Create(*model);
   auto generator = OgaGenerator::Create(*model, *params);
-  auto postprocessor = OgaTokenPostProcessor::Create(*generator);
+  auto postprocessor = OgaASRPostProcessor::Create(*generator);
 
   std::cout << "  Sample rate: " << sample_rate << ", Chunk: " << chunk_samples << " samples" << std::endl;
   std::cout << "  Audio duration: " << duration << "s" << std::endl;
@@ -271,7 +273,7 @@ void StreamingTranscribe(const std::string& model_path, const std::string& audio
 
   postprocessor->Finalize();
   if (timestamps_enabled) {
-    for (const auto* result : postprocessor->GetNextTokenResults()) {
+    for (const auto* result : postprocessor->GetNextResults()) {
       AppendTimestampRecords(*result, timestamp_level == "segment" || timestamp_level == "all",
                              full_transcript);
       if (timestamp_level == "all") {

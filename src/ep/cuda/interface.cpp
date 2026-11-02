@@ -726,6 +726,36 @@ struct CudaInterfaceImplBase : DeviceInterface {
     CUDA_CHECK(::cudaStreamSynchronize(GetStream()));
   }
 
+  std::shared_ptr<void> AllocatePinnedHost(size_t bytes) override {
+    void* memory = nullptr;
+    const auto status = ::cudaHostAlloc(&memory, bytes, cudaHostAllocPortable);
+    if (status == cudaErrorMemoryAllocation) {
+      throw std::bad_alloc{};
+    }
+    CUDA_CHECK(status);
+    return std::shared_ptr<void>(memory, [](void* pointer) noexcept {
+      const auto release_status = ::cudaFreeHost(pointer);
+      if (release_status != cudaSuccess) {
+        try {
+          const auto& log = GetLogItems();
+          if (log.enabled && log.warning) {
+            Log("warning", "Failed to release pinned host storage: %s", ::cudaGetErrorString(release_status));
+          }
+        } catch (...) {
+          // Cleanup diagnostics must not throw from the deleter.
+        }
+      }
+    });
+  }
+
+  void CopyDeviceToHost(void* host, const void* device, size_t bytes) override {
+    CUDA_CHECK(::cudaMemcpyAsync(host, device, bytes, cudaMemcpyDeviceToHost, GetStream()));
+  }
+
+  void CopyHostToDevice(void* device, const void* host, size_t bytes) override {
+    CUDA_CHECK(::cudaMemcpyAsync(device, host, bytes, cudaMemcpyHostToDevice, GetStream()));
+  }
+
   void* GetCudaStream() override {
     return GetStream();
   }
@@ -835,7 +865,7 @@ struct CudaInterfaceImplBase : DeviceInterface {
       const auto& source = descriptors[index];
       auto& destination = ordered_replay_descriptors_[index];
       destination = cuda::StateUpdateReplayDescGpu{
-          source.source_state.Span().data(),
+          source.source_state.empty() ? nullptr : source.source_state.Span().data(),
           source.destination_state.Span().data(),
           source.value.empty() ? nullptr : source.value.Span().data(),
           source.decay.empty()
@@ -847,13 +877,24 @@ struct CudaInterfaceImplBase : DeviceInterface {
           source.delta.empty()
               ? nullptr
               : reinterpret_cast<const float*>(source.delta.Span().data()),
+          source.source_aux_state.empty() ? nullptr : source.source_aux_state.Span().data(),
+          source.destination_aux_state.empty() ? nullptr : source.destination_aux_state.Span().data(),
+          source.source_lengths.empty()
+              ? nullptr
+              : reinterpret_cast<const int32_t*>(source.source_lengths.Span().data()),
+          source.destination_lengths.empty()
+              ? nullptr
+              : reinterpret_cast<int32_t*>(source.destination_lengths.Span().data()),
           source.channel_count,
           source.state_width,
           source.key_width,
           source.key_head_count,
+          source.state_capacity,
+          source.aux_capacity,
           source.capacity,
           source.kept_count,
           source.element_size,
+          source.compress_ratio,
           static_cast<uint32_t>(source.kind),
       };
     }

@@ -15,12 +15,14 @@ Run with:
 
 from __future__ import annotations
 
+import importlib.util
 import io
 import json
 import math
 import os
 import shutil
 import struct
+import sys
 import zlib
 from pathlib import Path
 
@@ -461,6 +463,112 @@ def test_lfm2_vl_decoder_on_another_provider_matches_cpu(test_data_path, tmp_pat
     tokens, features = _generate_on(model_dir, provider, image_path, num_tokens=8)
     np.testing.assert_array_equal(tokens, expected_tokens)
     np.testing.assert_array_equal(features, expected_features)
+
+
+def test_lfm2_vl_builder_makes_a_working_pipeline(test_data_path, tmp_path):
+    # With exclude_embeds=true the model builder also writes the vision and embedding models. The decoder must get
+    # the checkpoint's table rows, with the vision features (which match transformers') at the image positions.
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    pytest.importorskip("onnx_ir")
+    builder_tests_dir = str(Path(__file__).resolve().parents[1] / "builder")
+    if builder_tests_dir not in sys.path:
+        sys.path.insert(0, builder_tests_dir)
+    from _builder_test_utils import ort_runs_causal_conv_with_state  # noqa: PLC0415
+
+    # The DirectML CI job pins an onnxruntime without the CausalConvWithState op that LFM2 decoders use.
+    if not ort_runs_causal_conv_with_state():
+        pytest.skip("this onnxruntime cannot run com.microsoft:CausalConvWithState")
+    models_dir = Path(__file__).resolve().parents[3] / "src" / "python" / "py" / "models"
+    if str(models_dir) not in sys.path:
+        sys.path.insert(0, str(models_dir))
+    spec = importlib.util.spec_from_file_location("lfm2_vl_model_builder", models_dir / "builder.py")
+    builder = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(builder)
+
+    # A tiny random checkpoint with the fixture's tokenizer. Its 4x4 position table is resized to each image grid.
+    text_config = transformers.Lfm2Config(
+        vocab_size=65536,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=2,
+        layer_types=["conv", "full_attention"],
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        max_position_embeddings=4096,
+        eos_token_id=7,
+    )
+    vision_config = transformers.Siglip2VisionConfig(
+        hidden_size=32,
+        intermediate_size=48,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_patches=16,
+        patch_size=ENCODER_PATCH_SIZE,
+        vision_use_head=False,
+    )
+    model_path = Path(_model_path(test_data_path))
+    tokenizer_config = json.loads((model_path / "tokenizer.json").read_text(encoding="utf-8"))
+    image_token_id = next(t["id"] for t in tokenizer_config["added_tokens"] if t["content"] == IMAGE_TOKEN)
+    config = transformers.Lfm2VlConfig(
+        architectures=["Lfm2VlForConditionalGeneration"],
+        text_config=text_config.to_dict(),
+        vision_config=vision_config.to_dict(),
+        image_token_id=image_token_id,
+        projector_hidden_size=40,
+    )
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(0)
+        hf_model = transformers.Lfm2VlForConditionalGeneration(config).eval()
+    checkpoint = tmp_path / "checkpoint"
+    hf_model.save_pretrained(checkpoint)
+    for name in ("tokenizer.json", "tokenizer_config.json"):
+        shutil.copy(model_path / name, checkpoint / name)
+    image_processor = {
+        "image_processor_type": "Lfm2VlImageProcessorFast",
+        "resample": 2,
+        "size": {"height": 512, "width": 512},
+        "rescale_factor": 1 / 255,
+        "image_mean": [0.5, 0.5, 0.5],
+        "image_std": [0.5, 0.5, 0.5],
+        "min_image_tokens": 64,
+        "max_image_tokens": 256,
+        "max_num_patches": MAX_NUM_PATCHES,
+        "encoder_patch_size": ENCODER_PATCH_SIZE,
+        "downsample_factor": DOWNSAMPLE_FACTOR,
+    }
+    (checkpoint / "processor_config.json").write_text(json.dumps({"image_processor": image_processor}))
+
+    output = tmp_path / "model"
+    arguments = (None, os.fspath(checkpoint), os.fspath(output), "fp32", "cpu", os.fspath(tmp_path / "cache"))
+    builder.create_model(*arguments, **builder.parse_extra_options(*arguments, ["exclude_embeds=true"]))
+
+    model = og.Model(os.fspath(output))
+    params = og.GeneratorParams(model)
+    params.set_search_options(do_sample=False, max_length=2048)
+    generator = og.Generator(model, params)
+    inputs = model.create_multimodal_processor()(
+        "<image>Describe this image.", images=og.Images.open(_image_path(test_data_path, "australia.jpg"))
+    )
+    generator.set_inputs(inputs)
+
+    input_ids = inputs["input_ids"].as_numpy()[0]
+    is_image = input_ids == image_token_id
+    embeds = generator.get_input("inputs_embeds")[0]
+    features = generator.get_input("image_features")
+    with torch.no_grad():
+        expected = hf_model.get_image_features(
+            pixel_values=torch.from_numpy(inputs["pixel_values"].as_numpy()),
+            spatial_shapes=torch.from_numpy(inputs["image_sizes"].as_numpy()),
+            pixel_attention_mask=torch.from_numpy(inputs["image_attention_mask"].as_numpy()),
+        ).pooler_output[0]
+    np.testing.assert_allclose(features, expected.numpy(), rtol=1e-5, atol=1e-5)
+    assert is_image.sum() == len(features) > 0
+    table = hf_model.get_input_embeddings().weight.detach().numpy()
+    np.testing.assert_array_equal(embeds[~is_image], table[input_ids[~is_image]])
+    np.testing.assert_array_equal(embeds[is_image], features)
+    generator.generate_next_token()
+    assert generator.get_sequence(0).shape[0] == len(input_ids) + 1
 
 
 def test_lfm2_vl_rejects_rewind(test_data_path):

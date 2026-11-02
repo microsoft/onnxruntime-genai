@@ -45,9 +45,10 @@ thresholds are rejected while loading the configuration.
 ## Decoding flows
 
 Both paths start with audio processed into features, followed by generated token IDs. Model
-configuration determines whether acoustic timing is produced. `TokenPostProcessor`
-forwards borrowed token and optional timing views to its internal `TokenPostProcessorInternal`, which
-owns decoding and timestamp processing. Ordinary tokenizer decoding is unchanged.
+configuration determines whether acoustic timing is produced. `ASRPostProcessor`
+forwards borrowed token and optional timing views from its public `ProcessNext()`
+to a private `ProcessNext(outputs)` overload and directly owns decoding and
+timestamp processing. Ordinary tokenizer decoding is unchanged.
 `timestamp_level` controls timestamp generation:
 
 ```mermaid
@@ -63,12 +64,12 @@ flowchart TB
 
   subgraph timed[With timestamps: word, segment, or all]
     setup[Processor copies model configuration] --> stream
-    timed_tokens[Private Generator.GetTokenOutputs: IDs + frame intervals] --> stream[TokenPostProcessor.ProcessNextTokens]
-    stream --> internal[Internal TokenPostProcessorInternal.Process]
+    timed_tokens[Private Generator.GetTokenOutputs: IDs + frame intervals] --> stream[ASRPostProcessor.ProcessNext]
+    stream --> internal[Private ASRPostProcessor.ProcessNext with outputs]
     internal --> ortx[Extensions: vocabulary facts + ordinary cached decode]
     ortx --> align[GenAI MetadataCoreState: group words and align buffered frames]
     align --> events[Per-call word / segment events with frame and second bounds]
-    events --> read[GetNextTokenResults: read only]
+    events --> read[GetNextResults: read only]
     stream --> final[Finalize: flush trailing word / segment]
     final --> trailing[Trailing word / segment events]
   end
@@ -89,7 +90,7 @@ For a locally installed Nemotron model outside the test fixtures, set
 `AudioSpeechValidationTests.NemotronProcessorEmitsChunkStartSample`.
 That test uses CPU session options, even when the model package specifies CUDA.
 
-For the timed path, create `TokenPostProcessor(generator)` after configuring
+For the timed path, create `ASRPostProcessor(generator)` after configuring
 the model and creating the generator. The processor obtains its model from the
 generator rather than taking a separate model argument. The generator supplies
 *when* each token occurred; Extensions supplies
@@ -105,31 +106,33 @@ completed event text for the lifetime of the returned per-call result. The gener
 pairs tokens and intervals by emission position, not by token ID.
 
 The private generator getter borrows the existing per-step transducer output;
-Nemotron continues to supply zero or one token per step. The internal stream accepts
+Nemotron continues to supply zero or one token per step. The private overload accepts
 ordered token/timing values and can process a whole offline batch or incremental
 batches with the same finalization rules. This does not add a public offline producer API.
 
-At setup, the generator-facing adapter calculates `seconds_per_frame` and the
+At setup, the processor constructor calculates `seconds_per_frame` and the
 rounded gap threshold once from the existing model configuration. The internal
 timestamp code receives those derived values, not another copy of sample rate,
 hop length, and subsampling factor. Native token input uses an optional
-`AcousticFrameInterval`; public C output handles and layouts are unchanged.
+`std::pair<int64_t, int64_t>`; timestamp records also contain a
+`std::pair<double, double>` for second bounds. Native interval layouts are not
+exposed by the public C output handles or field accessors.
 
 ## Decoding
 
 Configure timestamp level and segment rules before creating the generator and
-`TokenPostProcessor`. After each generation step, call `ProcessNextTokens()`
-(C++/C#) or `process_next_tokens()` (Python), then read `GetNextTokenResults()` or
-`get_next_token_results()`. All sequential emissions are processed in order,
+`ASRPostProcessor`. After each generation step, call `ProcessNext()`
+(C++/C#) or `process_next()` (Python), then read `GetNextResults()` or
+`get_next_results()`. All sequential emissions are processed in order,
 including steps that emit zero or multiple tokens. Reading results repeatedly
 does not change them. The private generator getter is not exposed to applications.
 Enabled timestamps require present, valid acoustic timing. Intervals are half-open
 `[start, stop)` and may span multiple frames. A processor always uses its
 generator's model and requires `batch_size=1` and `num_beams=1`.
 
-`GetText()` / `get_text()` returns the ordinary incremental decoded fragment for partial
-display. Applications that need only stable output can instead append completed word or segment
-event text as it arrives.
+`GetText()` (C++), `Text` (C#), or `text` (Python) returns the ordinary incremental
+decoded fragment for partial display. Applications that need only stable output can
+instead append completed word or segment event text as it arrives.
 
 Completed words retain their original leading whitespace and attached punctuation. Segment text is
 the exact concatenation of its words; no whitespace is trimmed or synthesized. After finalization,
@@ -137,11 +140,24 @@ concatenating all emitted words or all emitted segments reproduces the decoded t
 In every binding, read and copy needed text and scalar values into the application's
 transcript before the next processor mutation. Result wrappers do not retain old native output.
 
-C/C++ expose opaque result and timestamp-record handles with typed accessors.
-C# and Python expose the same borrowed timestamp output through nullable
-`GetTimestamps()` and `get_timestamps()`. Read records using `GetWords()` / `GetSegments()`
-or `get_words()` / `get_segments()`, then the record's text/frame/time accessors.
-The returned objects are opaque wrappers, not dictionaries or copied metadata objects.
+C exposes opaque result, `OgaASRPostProcessorTimestampResult`, and timestamp-record
+handles with typed accessors. `OgaASRPostProcessorResultGetTimestampResult()`
+returns the container; `OgaASRPostProcessorTimestampResultGetTimestampRecord()`
+selects a word or segment by `OgaTimestampRecordKind` and index. C++ exposes the
+same opaque handles through method-only wrappers. Use `GetText()` and
+`GetTimestampResult()` on a result, `GetWordCount()` / `GetSegmentCount()` and
+`GetTimestampRecord(kind, index)` on its timestamp container, and `GetText()`,
+`GetFrameInterval()`, and `GetTimestampInterval()` on a record. Text and handles remain
+borrowed; interval getters return `std::pair` values without exposing native layouts.
+C# and Python expose borrowed timestamp output through nullable read-only
+`TimestampResult` and `timestamp_result` properties. Read records through `Words` / `Segments`
+or `words` / `segments`, then read `Text`, `FrameInterval`, and `TimeInterval`
+(C#) or `text`, `frame_interval`, and `time_interval` (Python). Interval values
+are `(start, stop)` tuples, with named `Start` / `Stop` elements in C#.
+C# properties delegate to the per-field C accessors through P/Invoke. Python
+properties call the C++ wrapper getters, which use those same C accessors; no
+combined-data function signature must grow when a record gains a new field.
+Managed and Python objects are opaque wrappers, not dictionaries or native payload snapshots.
 They are per-call event lists,
 not cumulative history. Each list is
 empty when that call completes no records, and it may contain multiple records when one decoded
@@ -174,15 +190,18 @@ transcript followed by the per-word timestamp transcript.
 
 These examples require officially released GenAI headers, language bindings, and native libraries
 containing the processor APIs. The initial implementation landed in
-[PR #2591](https://github.com/microsoft/onnxruntime-genai/pull/2591), but the examples remain pending
-the planned postprocessor refactor and a new GenAI package release. Existing packages such as
-GenAI `0.17.0` do not provide the required APIs. Once a containing release is available:
+[PR #2591](https://github.com/microsoft/onnxruntime-genai/pull/2591), and the opaque result and ASR
+dispatch refactors have merged in [PR #2797](https://github.com/microsoft/onnxruntime-genai/pull/2797)
+and [PR #2799](https://github.com/microsoft/onnxruntime-genai/pull/2799). The examples still require a
+new GenAI package release containing those APIs; existing packages such as GenAI `0.17.0` do not
+provide them. Once a containing release is available:
 
-- For Python, install the official wheel containing the processor APIs. Call `process_next_tokens()`
+- For Python, install the official wheel containing the processor APIs. Create `ASRPostProcessor(generator)`
+  and call `process_next()`
   after generation and `finalize()` at the end, then read typed objects from
-  `get_next_token_results()`: use nullable `result.get_timestamps()`, then
-  `get_words()` or `get_segments()`, and each record's `get_text()`,
-  `get_start_time()`, and `get_stop_time()` accessors. Append the needed values to
+  `get_next_results()`: use nullable `result.timestamp_result`, then
+  `words` or `segments`, and each record's `text` and `(start, stop)` `time_interval`
+  properties. Append the needed values to
   application-owned transcript storage before the next processing call; the
   returned objects are borrowed, not independent snapshots.
 - For C++, build the `model_asr` target with `MODEL_ASR=ON` and set `OGA_INCLUDE_DIR` and `OGA_LIB_DIR`
