@@ -37,6 +37,120 @@ void ValidatePackedPositionIdsInput(
   }
 }
 
+void ValidatePackedHiddenStatesInputShape(
+    std::span<const int64_t> shape,
+    size_t scheduled_token_rows,
+    std::span<const int64_t> model_shape) {
+  if (model_shape.size() != 2 || model_shape[1] <= 0) {
+    throw std::runtime_error(
+        "The decoder hidden_states input must have a positive static width.");
+  }
+  const std::array<int64_t, 2> expected_shape{
+      static_cast<int64_t>(scheduled_token_rows), model_shape[1]};
+  if (!std::equal(shape.begin(), shape.end(),
+                  expected_shape.begin(), expected_shape.end())) {
+    throw std::runtime_error(
+        "The packed hidden_states input shape does not match the scheduled token rows.");
+  }
+}
+
+struct CpuEngram {
+  explicit CpuEngram(const DecoderOnly_Model& model)
+      : config{model.config_->model.engram}, session{*model.session_engram_}, pad_id{model.config_->model.decoder.ple_token_pad_id} {
+    const auto history_shape = model.session_info_.GetInputShape(config.inputs.past_tokens);
+    const auto output_shape = model.session_info_.GetOutputShape(config.outputs.embeddings);
+    const auto& decoder_input = model.config_->model.decoder.inputs.engram_embeddings;
+    const auto decoder_shape = model.session_info_.GetInputShape(decoder_input);
+    type = model.session_info_.GetOutputDataType(config.outputs.embeddings);
+    if (model.session_info_.GetInputDataType(config.inputs.input_ids) != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64 ||
+        model.session_info_.GetInputDataType(config.inputs.past_tokens) != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64 ||
+        history_shape.size() != 2 || history_shape[1] <= 0 ||
+        output_shape.size() != 3 || output_shape[2] <= 0 ||
+        decoder_shape.size() != 2 || decoder_shape[1] != output_shape[2] ||
+        model.session_info_.GetInputDataType(decoder_input) != type) {
+      throw std::runtime_error("Engine Engram output must match the packed decoder Engram input.");
+    }
+    history_length = history_shape[1];
+    width = output_shape[2];
+    if (model.session_info_.HasInput(config.outputs.present_tokens)) {
+      const auto shape = model.session_info_.GetInputShape(config.outputs.present_tokens);
+      if (model.session_info_.GetInputDataType(config.outputs.present_tokens) != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64 ||
+          shape.size() != 2 || shape[1] != history_length) {
+        throw std::runtime_error("Engram token history must match the packed decoder history input.");
+      }
+    }
+    run_options = OrtRunOptions::Create();
+    if (config.run_options) {
+      for (const auto& [key, value] : *config.run_options) {
+        run_options->AddConfigEntry(key.c_str(), value.c_str());
+      }
+    }
+  }
+
+  void Run(std::span<const std::shared_ptr<Request>> requests, Tensor& output,
+           CpuEmbedding::Workspace& workspace, Tensor* present_tokens) const {
+    auto bytes = workspace.Prepare(output);
+    auto host = bytes.CpuSpan();
+    const size_t row_bytes = static_cast<size_t>(width) * Ort::SizeOf(type);
+    const auto& cpu_memory = GetDeviceInterface(DeviceType::CPU)->GetAllocator().GetInfo();
+    auto output_memory = output.p_device_->GetType() == DeviceType::CUDA
+                             ? OrtMemoryInfo::Create("CudaPinned", OrtDeviceAllocator,
+                                                     output.p_device_->GetMemoryInfo()->GetDeviceId(), OrtMemTypeCPUOutput)
+                             : OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+    size_t offset = 0;
+    size_t history_offset = 0;
+    DeviceSpan<int64_t> present_span;
+    if (present_tokens) present_span = present_tokens->GetDeviceSpan<int64_t>();
+    for (const auto& request : requests) {
+      const auto tokens = request->UnprocessedTokensCpu();
+      const auto history = request->TokensCpu();
+      const auto processed = static_cast<size_t>(request->ProcessedSequenceLength());
+      if (processed > history.size() || (offset + tokens.size()) * row_bytes > host.size_bytes()) {
+        throw std::runtime_error("Engine Engram tokens do not match the packed decoder rows.");
+      }
+      auto& ids = workspace.engram_input_ids;
+      auto& past = workspace.engram_past_tokens;
+      ids.assign(tokens.begin(), tokens.end());
+      past.assign(static_cast<size_t>(history_length), pad_id);
+      const size_t count = std::min(past.size(), processed);
+      std::transform(history.begin() + processed - count, history.begin() + processed,
+                     past.end() - count, [](int32_t token) { return static_cast<int64_t>(token); });
+      const std::array<int64_t, 2> ids_shape{1, static_cast<int64_t>(ids.size())};
+      const std::array<int64_t, 2> past_shape{1, history_length};
+      const std::array<int64_t, 3> embeddings_shape{1, static_cast<int64_t>(ids.size()), width};
+      auto ids_tensor = OrtValue::CreateTensor(cpu_memory, ids.data(), ids.size() * sizeof(int64_t),
+                                               ids_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+      auto past_tensor = OrtValue::CreateTensor(cpu_memory, past.data(), past.size() * sizeof(int64_t),
+                                                past_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+      auto embeddings = OrtValue::CreateTensor(*output_memory, host.data() + offset * row_bytes,
+                                               ids.size() * row_bytes, embeddings_shape, type);
+      auto present = present_tokens
+                         ? OrtValue::CreateTensor(cpu_memory, present_span.CpuSpan().data() + history_offset,
+                                                  static_cast<size_t>(history_length) * sizeof(int64_t),
+                                                  past_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64)
+                         : OrtValue::CreateTensor(GetDeviceInterface(DeviceType::CPU)->GetAllocator(),
+                                                  past_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+      const char* input_names[]{config.inputs.input_ids.c_str(), config.inputs.past_tokens.c_str()};
+      OrtValue* input_values[]{ids_tensor.get(), past_tensor.get()};
+      const char* output_names[]{config.outputs.embeddings.c_str(), config.outputs.present_tokens.c_str()};
+      OrtValue* output_values[]{embeddings.get(), present.get()};
+      session.Run(run_options.get(), input_names, input_values, 2, output_names, output_values, 2);
+      offset += ids.size();
+      history_offset += static_cast<size_t>(history_length);
+    }
+    if (present_tokens) present_span.CopyCpuToDevice();
+    workspace.Upload();
+  }
+
+  const Config::Model::Engram& config;
+  OrtSession& session;
+  std::unique_ptr<OrtRunOptions> run_options;
+  ONNXTensorElementDataType type{};
+  int64_t width{};
+  int64_t history_length{};
+  int64_t pad_id{};
+};
+
 namespace {
 
 int32_t CheckedMetadataLength(size_t value, const char* name) {
@@ -141,6 +255,17 @@ std::array<int32_t, kAttentionMetadataElementCount> PackAttentionMetadata(
   };
 }
 
+std::array<int32_t, kSparseAttentionMetadataElementCount> PackSparseAttentionMetadata(
+    const AttentionMetadataValues& metadata) {
+  return {
+      metadata.max_query_len_bound,
+      0,
+      metadata.max_kv_len_bound,
+      0,
+      metadata.max_kv_len_bound,
+  };
+}
+
 std::vector<size_t> GetSelectedLogitsIndices(const StepPlan& plan) {
   size_t row_count = plan.requests.size();
   for (const auto& entry : plan.requests) {
@@ -203,9 +328,12 @@ struct GraphBufferPlan {
   enum Slot {
     kInputIds,
     kEmbeddings,
+    kEngramEmbeddings,
+    kEngramPresentTokens,
     kCumulativeSequenceLengths,
     kPastSequenceLengths,
     kPositionIds,
+    kRotaryPositionIds,
     kLogitsIndices,
     kLogits,
     kHiddenStatesInput,
@@ -250,14 +378,29 @@ GraphBufferPlan PlanGraphBuffers(const Model& model, size_t position_planes,
   if (!model.config_->model.embedding.filename.empty()) {
     const auto& name = model.config_->model.decoder.inputs.embeddings;
     plan.buffers[GraphBufferPlan::kEmbeddings] = {
-        model.session_info_.GetInputDataType(name), {rows, hidden_size}};
+        model.session_info_.GetInputDataType(name),
+        {rows, hidden_size}};
+  }
+  if (!model.config_->model.engram.filename.empty()) {
+    const auto& name = model.config_->model.decoder.inputs.engram_embeddings;
+    plan.buffers[GraphBufferPlan::kEngramEmbeddings] = {
+        model.session_info_.GetInputDataType(name), {rows, model.session_info_.GetInputShape(name).back()}};
   }
   plan.buffers[GraphBufferPlan::kCumulativeSequenceLengths] = {Ort::TypeToTensorType<int32_t>,
                                                                {batch + 1}};
+  const auto& engram_tokens_name = model.config_->model.engram.outputs.present_tokens;
+  if (!model.config_->model.engram.filename.empty() && model.session_info_.HasInput(engram_tokens_name)) {
+    plan.buffers[GraphBufferPlan::kEngramPresentTokens] = {
+        Ort::TypeToTensorType<int64_t>, {batch, model.session_info_.GetInputShape(engram_tokens_name)[1]}};
+  }
   plan.buffers[GraphBufferPlan::kPastSequenceLengths] = {Ort::TypeToTensorType<int32_t>, {batch}};
   if (position_planes != 0) {
     plan.buffers[GraphBufferPlan::kPositionIds] = {
         Ort::TypeToTensorType<int64_t>, {static_cast<int64_t>(position_planes) * rows}};
+  }
+  if (!model.config_->model.decoder.inputs.rotary_position_ids.empty()) {
+    plan.buffers[GraphBufferPlan::kRotaryPositionIds] = {
+        Ort::TypeToTensorType<int64_t>, {3, batch, model.config_->model.context_length}};
   }
   if (DecoderLogitsAreSelected(model)) {
     plan.buffers[GraphBufferPlan::kLogitsIndices] = {
@@ -269,15 +412,23 @@ GraphBufferPlan PlanGraphBuffers(const Model& model, size_t position_planes,
 
   const auto& hidden_states_input_name = model.config_->model.decoder.inputs.hidden_states;
   if (!hidden_states_input_name.empty() && model.session_info_.HasInput(hidden_states_input_name)) {
+    const auto shape = model.session_info_.GetInputShape(hidden_states_input_name);
+    if (shape.size() != 2 || shape[1] <= 0) {
+      throw std::runtime_error("hidden_states input must be 2-D with a static width.");
+    }
     plan.buffers[GraphBufferPlan::kHiddenStatesInput] = {
-        model.session_info_.GetInputDataType(hidden_states_input_name), {rows, hidden_size}};
+        model.session_info_.GetInputDataType(hidden_states_input_name), {rows, shape[1]}};
   }
 
   const auto& hidden_states_name = model.config_->model.decoder.outputs.hidden_states;
   if (model.config_->engine.hidden_states_output_required &&
       !hidden_states_name.empty() && model.session_info_.HasOutput(hidden_states_name)) {
+    const auto shape = model.session_info_.GetOutputShape(hidden_states_name);
+    if (shape.size() != 2 || shape[1] <= 0) {
+      throw std::runtime_error("hidden_states output must be 2-D with a static width.");
+    }
     plan.buffers[GraphBufferPlan::kHiddenStates] = {
-        model.session_info_.GetOutputDataType(hidden_states_name), {rows, hidden_size}};
+        model.session_info_.GetOutputDataType(hidden_states_name), {rows, shape[1]}};
   }
 
   const auto& aux_hidden_states_name = model.config_->model.decoder.outputs.aux_hidden_states;
@@ -332,9 +483,12 @@ VarlenGraphBuffers::VarlenGraphBuffers(DecoderOnly_Model& model, size_t position
 
   input_ids = make(GraphBufferPlan::kInputIds);
   embeddings = make(GraphBufferPlan::kEmbeddings);
+  engram_embeddings = make(GraphBufferPlan::kEngramEmbeddings);
+  engram_present_tokens = make(GraphBufferPlan::kEngramPresentTokens);
   cumulative_sequence_lengths = make(GraphBufferPlan::kCumulativeSequenceLengths);
   past_sequence_lengths = make(GraphBufferPlan::kPastSequenceLengths);
   position_ids = make(GraphBufferPlan::kPositionIds);
+  rotary_position_ids = make(GraphBufferPlan::kRotaryPositionIds);
   logits_indices = make(GraphBufferPlan::kLogitsIndices);
   logits = make(GraphBufferPlan::kLogits);
   hidden_states_input = make(GraphBufferPlan::kHiddenStatesInput);
@@ -344,7 +498,11 @@ VarlenGraphBuffers::VarlenGraphBuffers(DecoderOnly_Model& model, size_t position
 
 std::optional<GraphAnnotationIds::Key> DecodeGraphKey(size_t batch_size, size_t tokens_per_request,
                                                       size_t block_table_columns,
-                                                      size_t state_binding_key) {
+                                                      size_t state_binding_key,
+                                                      size_t state_binding_domain,
+                                                      const OrtSession* decoder_session,
+                                                      bool indexshare_decode,
+                                                      size_t extra_binding_layout_key) {
   if (batch_size == 0 || tokens_per_request == 0 || block_table_columns == 0) {
     return std::nullopt;
   }
@@ -356,7 +514,9 @@ std::optional<GraphAnnotationIds::Key> DecodeGraphKey(size_t batch_size, size_t 
   while ((size_t{1} << columns_bucket) < block_table_columns) {
     ++columns_bucket;
   }
-  return GraphAnnotationIds::Key{batch_size, tokens_per_request, columns_bucket, state_binding_key};
+  return GraphAnnotationIds::Key{batch_size, tokens_per_request, columns_bucket, state_binding_key,
+                                 state_binding_domain, reinterpret_cast<size_t>(decoder_session),
+                                 static_cast<size_t>(indexshare_decode), extra_binding_layout_key};
 }
 
 VarlenDecoderIO::VarlenDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
@@ -381,6 +541,7 @@ VarlenDecoderIO::VarlenDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
 
   PrepareInputIds(model, scheduled_requests);
   PreparePositionIds(model, scheduled_requests);
+  PrepareRotaryPositionIds(model, scheduled_requests);
   PrepareAttentionMetadata(model, scheduled_requests);
   PrepareHiddenStatesInput(model, scheduled_requests);
   PrepareLogitsIndices(model, scheduled_requests);
@@ -414,13 +575,9 @@ void VarlenDecoderIO::PrepareHiddenStatesInput(
 
   const auto info = hidden_states_input_->GetTensorTypeAndShapeInfo();
   const auto shape = info->GetShape();
-  const std::vector<int64_t> expected_shape = {
-      static_cast<int64_t>(TokenCount(scheduled_requests)),
-      static_cast<int64_t>(model->config_->model.decoder.hidden_size)};
-  if (shape != expected_shape) {
-    throw std::runtime_error(
-        "The packed hidden_states input shape does not match the scheduled token rows.");
-  }
+  const auto model_shape = model->session_info_.GetInputShape(hidden_states_name);
+  ValidatePackedHiddenStatesInputShape(
+      shape, TokenCount(scheduled_requests), model_shape);
   if (info->GetElementType() != model->session_info_.GetInputDataType(hidden_states_name)) {
     throw std::runtime_error(
         "The packed hidden_states input type does not match the decoder input type.");
@@ -432,7 +589,7 @@ void VarlenDecoderIO::PrepareHiddenStatesInput(
       throw std::runtime_error(
           "Captured decoder step has no persistent hidden_states input buffer.");
     }
-    graph_buffers_->hidden_states_input->CreateTensor(expected_shape, /*make_static=*/true);
+    graph_buffers_->hidden_states_input->CreateTensor(shape, /*make_static=*/true);
     graph_buffers_->hidden_states_input->GetByteSpan().CopyFrom(
         ByteWrapTensor(*model->p_device_inputs_, *hidden_states_input_));
     active_hidden_states_input = graph_buffers_->hidden_states_input->GetOrtTensor();
@@ -539,18 +696,47 @@ void VarlenDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, 
   cumulative_sequence_lengths_span.CopyCpuToDevice();
   sequence_lengths_span.CopyCpuToDevice();
 
-  if (model->cpu_embedding_) {
+  if (model->cpu_embedding_ || model->session_engram_) {
     if (!device_input_ids.empty()) {
       device_span.CopyDeviceToCpu();
     }
-    std::unique_ptr<Tensor> owned_embeddings;
-    auto* embeddings = reshape(owned_embeddings, graph_buffers_ ? graph_buffers_->embeddings.get() : nullptr,
-                               model->cpu_embedding_->type_,
-                               {static_cast<int64_t>(num_tokens), model->cpu_embedding_->hidden_size_});
-    model->cpu_embedding_->Run(cpu_span, *embeddings, *embedding_workspace_);
-    input_names_.push_back(model->config_->model.decoder.inputs.embeddings.c_str());
-    inputs_.push_back(embeddings->GetOrtTensor());
-    if (owned_embeddings) owned_inputs_.push_back(std::move(owned_embeddings));
+    if (model->session_engram_) {
+      std::call_once(model->cpu_engram_init_, [&] { model->cpu_engram_ = std::make_shared<CpuEngram>(*model); });
+    }
+    const auto* engram = model->cpu_engram_.get();
+    if (model->cpu_embedding_) {
+      std::unique_ptr<Tensor> owned_embeddings;
+      auto* embeddings = reshape(owned_embeddings, graph_buffers_ ? graph_buffers_->embeddings.get() : nullptr,
+                                 model->cpu_embedding_->type_,
+                                 {static_cast<int64_t>(num_tokens), model->cpu_embedding_->hidden_size_});
+      model->cpu_embedding_->Run(cpu_span, *embeddings, *embedding_workspace_);
+      input_names_.push_back(model->config_->model.decoder.inputs.embeddings.c_str());
+      inputs_.push_back(embeddings->GetOrtTensor());
+      if (owned_embeddings) owned_inputs_.push_back(std::move(owned_embeddings));
+    }
+    if (engram) {
+      std::unique_ptr<Tensor> owned_embeddings;
+      auto* embeddings = reshape(owned_embeddings, graph_buffers_ ? graph_buffers_->engram_embeddings.get() : nullptr,
+                                 engram->type, {static_cast<int64_t>(num_tokens), engram->width});
+      std::unique_ptr<Tensor> owned_present_tokens;
+      Tensor* present_tokens = nullptr;
+      const auto& name = model->config_->model.engram.outputs.present_tokens;
+      if (model->session_info_.HasInput(name)) {
+        present_tokens = reshape(owned_present_tokens,
+                                 graph_buffers_ ? graph_buffers_->engram_present_tokens.get() : nullptr,
+                                 ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64,
+                                 {static_cast<int64_t>(scheduled_requests.size()), engram->history_length});
+      }
+      engram->Run(scheduled_requests.Requests(), *embeddings, *embedding_workspace_, present_tokens);
+      if (present_tokens) {
+        input_names_.push_back(name.c_str());
+        inputs_.push_back(present_tokens->GetOrtTensor());
+        if (owned_present_tokens) owned_inputs_.push_back(std::move(owned_present_tokens));
+      }
+      input_names_.push_back(model->config_->model.decoder.inputs.engram_embeddings.c_str());
+      inputs_.push_back(embeddings->GetOrtTensor());
+      if (owned_embeddings) owned_inputs_.push_back(std::move(owned_embeddings));
+    }
   }
   if (model->session_info_.HasInput(model->config_->model.decoder.inputs.input_ids)) {
     input_names_.push_back(model->config_->model.decoder.inputs.input_ids.c_str());
@@ -641,12 +827,47 @@ void VarlenDecoderIO::PreparePositionIds(
   if (owned_position_ids) owned_inputs_.push_back(std::move(owned_position_ids));
 }
 
-// PagedAttention accepts an optional `attention_metadata` CPU input holding
-// [max_query_len_bound, max_kv_len_bound, max_kv_len_lower_bound]. The first two values are upper
-// bounds and the third value is a lower bound on the longest live KV sequence. The operator
-// uses them only to select a backend and to size its launch dimensions and workspaces, never as a
-// mask boundary. Supplying them lets the operator skip the device-to-host readback of the sequence
-// lengths, which otherwise forces a full stream synchronization inside every attention node.
+void VarlenDecoderIO::PrepareRotaryPositionIds(
+    std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests) {
+  const auto& name = model->config_->model.decoder.inputs.rotary_position_ids;
+  if (name.empty()) return;
+  const auto declared = model->session_info_.GetInputShape(name);
+  if (model->session_info_.GetInputDataType(name) != Ort::TypeToTensorType<int64_t> ||
+      declared.size() != 3 || declared[0] != 3 || model->config_->model.context_length <= 0) {
+    throw std::runtime_error("Packed rotary history requires int64 [3, batch, history] geometry");
+  }
+  const size_t capacity = static_cast<size_t>(model->config_->model.context_length);
+  for (const auto& request : scheduled_requests) {
+    if (request->ProcessedSequenceLength() < 0 ||
+        static_cast<size_t>(request->ProcessedSequenceLength()) + request->ScheduledTokenCount() > capacity) {
+      throw std::runtime_error("Packed request exceeds the rotary history capacity");
+    }
+  }
+  const std::array<int64_t, 3> shape{3, static_cast<int64_t>(scheduled_requests.size()),
+                                     static_cast<int64_t>(capacity)};
+  std::unique_ptr<Tensor> owned;
+  auto* tensor = graph_buffers_ ? graph_buffers_->rotary_position_ids.get() : nullptr;
+  if (!tensor) {
+    owned = std::make_unique<Tensor>(model->p_device_inputs_, Ort::TypeToTensorType<int64_t>);
+    tensor = owned.get();
+  }
+  tensor->CreateTensor(shape, graph_buffers_ != nullptr);
+  auto positions = tensor->GetDeviceSpan<int64_t>();
+  auto cpu = positions.CpuSpan();
+  // Engine requests are currently text-only; multimodal prompts are rejected by SimpleDecoder.
+  for (size_t row = 0; row < 3 * scheduled_requests.size(); ++row) {
+    std::iota(cpu.begin() + row * capacity, cpu.begin() + (row + 1) * capacity, int64_t{0});
+  }
+  positions.CopyCpuToDevice();
+  input_names_.push_back(name.c_str());
+  inputs_.push_back(tensor->GetOrtTensor());
+  if (owned) owned_inputs_.push_back(std::move(owned));
+}
+
+// PagedAttention accepts an optional three-value `attention_metadata` CPU input. Qwen's selected-only
+// SparsePagedAttention uses five values, with local-main and auxiliary bounds set to zero because it
+// selects entries exclusively from the main cache. These values select backends and size launch
+// dimensions and workspaces; they never form a mask boundary.
 //
 // The engine already has both quantities on the host while it builds the sequence length inputs, so
 // this costs nothing. Eager bounds are exact. Captured bounds describe the entire graph bucket so
@@ -681,7 +902,22 @@ void VarlenDecoderIO::PrepareAttentionMetadata(std::shared_ptr<DecoderOnly_Model
     metadata.max_kv_len_lower_bound = metadata.max_kv_len_bound;
   }
 
-  const auto packed_metadata = PackAttentionMetadata(metadata);
+  const auto metadata_shape = model->session_info_.GetInputShape(metadata_name);
+  if (metadata_shape.size() != 1) {
+    throw std::runtime_error("attention_metadata must be a one-dimensional input.");
+  }
+
+  std::vector<int32_t> packed_metadata;
+  if (metadata_shape[0] == static_cast<int64_t>(kAttentionMetadataElementCount)) {
+    const auto values = PackAttentionMetadata(metadata);
+    packed_metadata.assign(values.begin(), values.end());
+  } else if (metadata_shape[0] == static_cast<int64_t>(kSparseAttentionMetadataElementCount)) {
+    const auto values = PackSparseAttentionMetadata(metadata);
+    packed_metadata.assign(values.begin(), values.end());
+  } else {
+    throw std::runtime_error("attention_metadata must contain three or five values.");
+  }
+
   auto metadata_tensor = std::make_unique<Tensor>(GetDeviceInterface(DeviceType::CPU), Ort::TypeToTensorType<int32_t>);
   metadata_tensor->CreateTensor(std::vector<int64_t>{static_cast<int64_t>(packed_metadata.size())});
   auto metadata_span = metadata_tensor->GetDeviceSpan<int32_t>().CpuSpan();
@@ -817,9 +1053,13 @@ void VarlenDecoderIO::PrepareHiddenStates(std::shared_ptr<DecoderOnly_Model> mod
   // Always one row per packed token, matching the packed input order, so a draft head can be fed
   // the hidden state of whichever tokens the verify step accepted. Note this is not necessarily
   // the logits row count: a pruned LM head emits only one logits row per request.
+  const auto shape = model->session_info_.GetOutputShape(hidden_states_name);
+  if (shape.size() != 2 || shape[1] <= 0) {
+    throw std::runtime_error("hidden_states output must be 2-D with a static width.");
+  }
   const std::vector<int64_t> hidden_states_shape = {
       static_cast<int64_t>(TokenCount(scheduled_requests)),
-      static_cast<int64_t>(model->config_->model.decoder.hidden_size)};
+      shape[1]};
   if (graph_buffers_ != nullptr && graph_buffers_->hidden_states != nullptr) {
     graph_buffers_->hidden_states->CreateTensor(hidden_states_shape, /*make_static=*/true);
     active_hidden_states_ = graph_buffers_->hidden_states.get();

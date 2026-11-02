@@ -1,6 +1,8 @@
 #pragma once
 
 #include "position_inputs.h"
+#include "rotary_position_history.h"
+#include <map>
 
 namespace Generators {
 
@@ -47,6 +49,8 @@ struct Qwen2VLPositionInputs : PositionInputs {
   void Add() override;
   void Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) override;
   void RewindTo(size_t index) override;
+  OrtValue* GetRotaryPositionIds() override { return rotary_history_value_.get(); }
+  void SetRotaryPositionIds(OrtValue* positions) override { rotary_source_ = positions; }
 
   void SetGridTensors(const std::shared_ptr<Tensor>& image_grid_thw,
                       const std::shared_ptr<Tensor>& video_grid_thw,
@@ -61,9 +65,13 @@ struct Qwen2VLPositionInputs : PositionInputs {
   template <typename T>
   void CreateAndInitialize3DPositionIDs(DeviceSpan<int32_t> next_tokens, std::array<int64_t, 3> shape);
   void Update3DPositionIDs(int base_pos);
+  void SetPositionIDs(std::unique_ptr<OrtValue> position_ids, int num_beams);
   template <typename T>
   void CreateAndInitializeAttentionMask(DeviceSpan<int32_t> next_tokens, std::array<int64_t, 2> shape);
-  void UpdateAttentionMask();
+  void UpdateRotaryHistory(OrtValue& positions, size_t start, size_t beams);
+  void PublishRotaryHistory();
+  void UpdateFromRotarySource(int total_length, int new_length);
+  void UpdateAttentionMask(int total_length, int new_length);
 
   const Model& model_;
   State& state_;
@@ -76,6 +84,14 @@ struct Qwen2VLPositionInputs : PositionInputs {
   std::unique_ptr<Tensor> position_ids_;
   std::array<int64_t, 2> attention_mask_shape_{};
   std::unique_ptr<Tensor> attention_mask_;
+  std::unique_ptr<RotaryPositionHistory> rotary_history_;
+  std::unique_ptr<OrtValue> rotary_history_value_;
+  std::unique_ptr<Tensor> rotary_history_input_;
+  size_t rotary_input_index_{};
+  OrtValue* rotary_source_{};
+  std::map<int, std::unique_ptr<Tensor>> captured_rotary_positions_;
+  std::unique_ptr<PositionIdsBuffer> position_buffer_;
+  std::unique_ptr<AttentionMaskBuffer> mask_buffer_;
   bool is_first_update_{true};
   std::shared_ptr<Tensor> image_grid_thw_;
   std::shared_ptr<Tensor> video_grid_thw_;

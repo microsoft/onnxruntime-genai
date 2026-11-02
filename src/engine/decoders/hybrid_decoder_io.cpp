@@ -128,10 +128,14 @@ void HybridDecoderIO::BindFixedState(
       continue;
     }
     using StateUpdateKind = Config::Model::Decoder::StateUpdateKind;
-    const bool valid_outputs =
-        binding.state_update_kind == StateUpdateKind::CausalConv
-            ? binding.state_update_value && !binding.state_update_capsule
-            : !binding.state_update_value && binding.state_update_capsule;
+    bool valid_outputs = false;
+    if (binding.state_update_kind == StateUpdateKind::GatedDeltaNet) {
+      valid_outputs = !binding.state_update_value && binding.state_update_capsule;
+    } else if (binding.state_update_kind == StateUpdateKind::CausalConv ||
+               binding.state_update_kind == StateUpdateKind::Ple ||
+               binding.state_update_kind == StateUpdateKind::Indexer) {
+      valid_outputs = binding.state_update_value && !binding.state_update_capsule;
+    }
     if (!valid_outputs) {
       throw std::runtime_error(
           "Hybrid fixed state contains incomplete state_update output tensors.");

@@ -152,37 +152,22 @@ def test_runtime_profile_kv_variants_load_and_decode(tmp_path):
     sys.path.insert(0, str(models_dir))
     try:
         apply_runtime_config = importlib.import_module("builder_config").apply_runtime_config
-        variant_class = importlib.import_module("kv_cache_variant").KVCacheVariant
     finally:
         sys.path.remove(str(models_dir))
 
     source_dir = Path(_MODEL_DIR)
     generated = json.loads((source_dir / "genai_config.json").read_text())
-    source_path = source_dir / generated["model"]["decoder"]["filename"]
-    graph = onnx.load(source_path, load_external_data=False)
-    transformer = variant_class("int8_per_channel")
-    attention_nodes = [node for node in graph.graph.node if node.op_type == "PagedAttention"]
-    if not attention_nodes or any(
-        {attribute.name: attribute.s for attribute in node.attribute}.get("k_quant_type") != b"PER_CHANNEL"
-        for node in attention_nodes
-    ):
-        pytest.skip("runtime-profile variant test requires a static per-channel quantized paged export")
-
-    layer_ids = [int(transformer.layer_pattern.search(node.name).group(1)) for node in attention_nodes]
-    initializers = {tensor.name: tensor for tensor in graph.graph.initializer}
-    scales = {"k_scales": [], "v_scales": []}
-    for layer_id in layer_ids:
-        for kind in ("k", "v"):
-            tensor = initializers[f"model.layers.{layer_id}.attn.{kind}_scale"]
-            values = onnx.numpy_helper.to_array(tensor, base_dir=str(source_path.parent))
-            scales[f"{kind}_scales"].append(values.reshape(-1).tolist())
-    attributes = {attribute.name: attribute.s for attribute in attention_nodes[0].attribute}
-    scale_file = tmp_path / "scales.json"
-    scale_file.write_text(
-        json.dumps(
-            {"layer_ids": layer_ids, "scales": scales, "qmax": 8 if attributes.get("k_cache_dtype") == b"int4" else 128}
-        )
-    )
+    variants = [source_dir / f"model_{scheme}.onnx" for scheme in ("int4_per_channel", "int8_per_channel")]
+    if not all(path.is_file() for path in variants):
+        pytest.skip("runtime-profile test requires independently exported int4/int8 per-channel KV models")
+    for path, cache_dtype in zip(variants, (b"int4", b"int8"), strict=True):
+        graph = onnx.load(path, load_external_data=False)
+        attention_nodes = [node for node in graph.graph.node if node.op_type == "PagedAttention"]
+        assert attention_nodes
+        for node in attention_nodes:
+            attributes = {attribute.name: attribute.s for attribute in node.attribute}
+            assert attributes["k_quant_type"] == b"PER_CHANNEL"
+            assert attributes["k_cache_dtype"] == cache_dtype
 
     package_dir = tmp_path / "package"
     package_dir.mkdir()
@@ -193,11 +178,9 @@ def test_runtime_profile_kv_variants_load_and_decode(tmp_path):
             shutil.copy2(entry, package_dir / entry.name)
         else:
             (package_dir / entry.name).symlink_to(entry.resolve(), target_is_directory=entry.is_dir())
-    source_copy = package_dir / source_path.name
     profiles = []
     for index, scheme in enumerate(("int4_per_channel", "int8_per_channel")):
         variant_path = package_dir / f"model_{scheme}.onnx"
-        variant_class(scheme).create(source_copy, variant_path, scale_file)
         profiles.append(
             {
                 "id": scheme,

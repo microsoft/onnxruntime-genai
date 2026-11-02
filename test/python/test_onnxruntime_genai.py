@@ -28,6 +28,8 @@ def run_onnxruntime_genai_api_tests(
         "-sv",
         "test_onnxruntime_genai_api.py",
         "test_adapter_graph_capture.py",
+        "test_non_generative_runtime.py",
+        "test_component_session_native.py",
         "builder",
         "models",
         "--test_models",

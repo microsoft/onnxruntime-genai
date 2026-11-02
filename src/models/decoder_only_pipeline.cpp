@@ -73,9 +73,11 @@ bool IntermediatePipelineState::SupportsPrimaryDevice() const {
 DeviceSpan<float> IntermediatePipelineState::Run(int total_length, DeviceSpan<int32_t>& next_tokens,
                                                  DeviceSpan<int32_t> next_indices) {
   if (!model_.sessions_[id_]) {
-    const_cast<DecoderOnlyPipelineModel*>(&model_)->sessions_[id_] =
-        OrtSession::Create(model_.ort_env_, (model_.config_->config_path / fs::path(model_.config_->model.decoder.pipeline[id_].filename)).c_str(),
-                           model_.GetSessionOptions(model_.config_->model.decoder.pipeline[id_].model_id));
+    auto* model = const_cast<DecoderOnlyPipelineModel*>(&model_);
+    const auto& stage = model_.config_->model.decoder.pipeline[id_];
+    model->sessions_[id_] =
+        model->CreateSession(model_.ort_env_, stage.filename, model_.GetSessionOptions(stage.model_id),
+                             /*is_session_recreation=*/true);
   }
 
   if (model_.config_->model.decoder.pipeline[id_].run_options.has_value()) {

@@ -3,7 +3,7 @@
 """Opt-in real-model CPU embedding parity, including target and DFlash graph replay.
 
 Set ORTGENAI_CPU_EMBEDDING_SOURCE_MODEL and ORTGENAI_CPU_EMBEDDING_MODEL to the
-original packed model and the output of models/split_cpu_embedding.py.
+original packed model and an independently exported ``exclude_embeds=true`` package.
 """
 
 import gc
@@ -14,15 +14,17 @@ from pathlib import Path
 
 import numpy as np
 import onnx
+import onnx_ir as ir
 import onnxruntime_genai as og
 import pytest
-from onnxruntime_genai.models.split_cpu_embedding import convert
+import torch
+import transformers
 
 SOURCE = os.environ.get("ORTGENAI_CPU_EMBEDDING_SOURCE_MODEL")
-SPLIT = os.environ.get("ORTGENAI_CPU_EMBEDDING_MODEL")
+EXPORTED = os.environ.get("ORTGENAI_CPU_EMBEDDING_MODEL")
 _DEVICES = ["cpu"] + (["cuda"] if og.is_cuda_available() else [])
 real_model = pytest.mark.skipif(
-    not SOURCE or not SPLIT or not og.is_cuda_available(),
+    not SOURCE or not EXPORTED or not og.is_cuda_available(),
     reason="Requires original and CPU-embedding CUDA Engine models",
 )
 
@@ -86,38 +88,71 @@ def generate(path, capture, batch_size, prompt_length):
 @real_model
 def test_cpu_embedding_matches_gpu_and_eager(batch_size, prompt_length):
     expected = generate(SOURCE, True, batch_size, prompt_length)
-    eager = generate(SPLIT, False, batch_size, prompt_length)
-    captured = generate(SPLIT, True, batch_size, prompt_length)
+    eager = generate(EXPORTED, False, batch_size, prompt_length)
+    captured = generate(EXPORTED, True, batch_size, prompt_length)
     assert captured == eager == expected
 
 
 @pytest.mark.parametrize("device", _DEVICES)
-def test_cpu_embedding_engine_synthetic(tmp_path, device):
+def test_cpu_embedding_engine_synthetic(tmp_path, device, monkeypatch):
     """Exercise the native lookup and embedding-only target binding on a tiny model."""
     original = Path(__file__).resolve().parent.parent / "models" / "engine" / "synthetic-paged"
-    source = tmp_path / "source"
-    shutil.copytree(original, source)
-    graph = onnx.load(source / "decoder.onnx")
+    exported = tmp_path / "exported"
+    shutil.copytree(original, exported)
+    graph = onnx.load(original / "decoder.onnx")
     for node in graph.graph.node:
         for index, name in enumerate(node.input):
             if name == "input_ids":
                 node.input[index] = "embedded_ids"
-    graph.graph.initializer.extend(
-        [
-            onnx.numpy_helper.from_array(np.arange(64, dtype=np.float32).reshape(64, 1), "embedding.weight"),
-            onnx.numpy_helper.from_array(np.array([1], dtype=np.int64), "embedding.axis"),
-        ]
+    ids = next(value for value in graph.graph.input if value.name == "input_ids")
+    graph.graph.input.remove(ids)
+    graph.graph.input.append(
+        onnx.helper.make_tensor_value_info("inputs_embeds", onnx.TensorProto.FLOAT16, ["num_tokens", 1])
     )
+    graph.graph.initializer.append(onnx.numpy_helper.from_array(np.array([1], dtype=np.int64), "embedding.axis"))
     for node in reversed(
         [
-            onnx.helper.make_node("Gather", ["embedding.weight", "input_ids"], ["embedding.rows"]),
-            onnx.helper.make_node("Squeeze", ["embedding.rows", "embedding.axis"], ["embedding.ids"]),
+            onnx.helper.make_node("Squeeze", ["inputs_embeds", "embedding.axis"], ["embedding.ids"]),
             onnx.helper.make_node("Cast", ["embedding.ids"], ["embedded_ids"], to=onnx.TensorProto.INT64),
         ]
     ):
         graph.graph.node.insert(0, node)
-    onnx.save(graph, source / "decoder.onnx")
-    split = convert(source, tmp_path / "split")
+    onnx.save(graph, exported / "decoder.onnx")
+
+    builder_root = Path(__file__).resolve().parents[2] / "src" / "python" / "py" / "models"
+    monkeypatch.syspath_prepend(str(builder_root))
+    from builders.base import Model  # noqa: PLC0415
+
+    builder_config = transformers.LlamaConfig(
+        hidden_size=1,
+        intermediate_size=2,
+        num_hidden_layers=1,
+        num_attention_heads=1,
+        num_key_value_heads=1,
+        vocab_size=64,
+        max_position_embeddings=128,
+        architectures=["LlamaForCausalLM"],
+    )
+    builder = Model(
+        builder_config,
+        ir.DataType.FLOAT16,
+        ir.DataType.FLOAT16,
+        "cuda",
+        str(tmp_path / "cache"),
+        {"exclude_embeds": True, "use_paged_attention": True},
+    )
+    embedding = builder.make_embedding_component(torch.arange(64, dtype=torch.float32).reshape(64, 1))
+    embedding.save_model(str(exported))
+    config_path = exported / "genai_config.json"
+    config = json.loads(config_path.read_text())
+    del config["model"]["decoder"]["inputs"]["input_ids"]
+    config["model"]["decoder"]["inputs"]["inputs_embeds"] = "inputs_embeds"
+    config["model"]["embedding"] = {
+        "filename": embedding.filename,
+        "inputs": {"input_ids": "input_ids"},
+        "outputs": {"inputs_embeds": "inputs_embeds"},
+    }
+    config_path.write_text(json.dumps(config))
 
     def run(path):
         config = og.Config(str(path))
@@ -154,10 +189,9 @@ def test_cpu_embedding_engine_synthetic(tmp_path, device):
         return results
 
     expected = run(original)
-    assert run(split) == expected
-    config_path = split / "genai_config.json"
+    assert run(exported) == expected
     config = json.loads(config_path.read_text())
     config["model"]["embedding"]["outputs"]["inputs_embeds"] = "missing_output"
     config_path.write_text(json.dumps(config))
     with pytest.raises(RuntimeError, match="one dynamic int64"):
-        og.Model(str(split))
+        og.Model(str(exported))

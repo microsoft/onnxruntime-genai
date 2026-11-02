@@ -415,7 +415,7 @@ size_t PagedKeyValueCacheBytesPerBlock(const std::shared_ptr<Model>& model) {
 bool ResolvePrefixCachingEnabled(const std::shared_ptr<Model>& model,
                                  size_t auxiliary_bytes_per_block) {
   const auto& batching = *model->config_->engine.dynamic_batching;
-  if (!batching.prefix_caching) {
+  if (!batching.prefix_caching.value_or(true)) {
     return false;
   }
 
@@ -437,7 +437,7 @@ bool ResolvePrefixCachingEnabled(const std::shared_ptr<Model>& model,
   if (!unsupported_layout) {
     return true;
   }
-  if (batching.prefix_caching_explicitly_set) {
+  if (batching.prefix_caching.has_value()) {
     throw std::runtime_error(unsupported_layout);
   }
   return false;
@@ -979,10 +979,6 @@ bool PagedKeyValueCache::AttachDraftCheckpoint(
 
 void PagedKeyValueCache::DropUnleasedDraftCheckpoints() {
   prefix_cache_->DropUnleasedDraftCheckpoints();
-}
-
-bool PagedKeyValueCache::ReclaimDraftCheckpoint() {
-  return prefix_cache_->ReclaimDraftCheckpoint();
 }
 
 size_t PagedKeyValueCache::ReclaimPrefixCheckpoints(

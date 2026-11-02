@@ -218,6 +218,23 @@ namespace CommonUtils
         }
 
         /// <summary>
+        /// Get the example's default user prompt for the model type
+        /// </summary>
+        /// <param name="modelPath">Path to folder containing model</param>
+        /// <param name="fallback">Prompt for model types without an example-specific default</param>
+        /// <returns>
+        /// Model-specific example default or fallback
+        /// </returns>
+        public static string GetDefaultUserPrompt(string modelPath, string fallback)
+        {
+            using var config = JsonDocument.Parse(File.ReadAllText(Path.Combine(modelPath, "genai_config.json")));
+            var model = config.RootElement.GetProperty("model");
+            return model.TryGetProperty("type", out var type) && type.GetString() == "nemotron_parse"
+                ? "</s><s><predict_bbox><predict_classes><output_markdown>"
+                : fallback;
+        }
+
+        /// <summary>
         /// Get prompt for 'user' role in chat template
         /// </summary>
         /// <param name="prompt">Provided prompt</param>
@@ -368,9 +385,9 @@ namespace CommonUtils
         /// <returns>
         /// Combined content for 'user' role
         /// </returns>
-        public static string GetUserContent(string model_type, int num_images, int num_audios, string prompt)
+        public static object GetUserContent(string model_type, int num_images, int num_audios, string prompt)
         {
-            string content;
+            object content;
             // Combine all image tags, audio tags, and text into one user content
             if (model_type == "phi3v")
             {
@@ -423,7 +440,7 @@ namespace CommonUtils
                     ["type"] = "text",
                     ["text"] = prompt
                 });
-                content = JsonSerializer.Serialize(list);
+                content = list;
             }
 
             return content;

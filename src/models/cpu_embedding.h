@@ -16,6 +16,8 @@ struct CpuEmbedding {
     ~Workspace();
     DeviceSpan<uint8_t> Prepare(Tensor& output);
     void Upload();
+    std::vector<int64_t> engram_input_ids;
+    std::vector<int64_t> engram_past_tokens;
 
    private:
     void Wait();

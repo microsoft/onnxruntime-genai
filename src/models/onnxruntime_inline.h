@@ -631,6 +631,11 @@ inline OrtSessionOptions& OrtSessionOptions::SetGraphOptimizationLevel(GraphOpti
   return *this;
 }
 
+inline OrtSessionOptions& OrtSessionOptions::SetDeterministicCompute(bool value) {
+  Ort::ThrowOnError(Ort::api->SetDeterministicCompute(this, value));
+  return *this;
+}
+
 inline OrtSessionOptions& OrtSessionOptions::SetOptimizedModelFilePath(const ORTCHAR_T* optimized_model_filepath) {
   Ort::ThrowOnError(Ort::api->SetOptimizedModelFilePath(this, optimized_model_filepath));
   return *this;
@@ -698,6 +703,13 @@ inline OrtSessionOptions& OrtSessionOptions::Add(OrtCustomOpDomain& custom_op_do
 
 inline OrtSessionOptions& OrtSessionOptions::AddConfigEntry(const char* config_key, const char* config_value) {
   Ort::ThrowOnError(Ort::api->AddSessionConfigEntry(this, config_key, config_value));
+  return *this;
+}
+
+inline OrtSessionOptions& OrtSessionOptions::AddFreeDimensionOverrideByName(
+    const char* dim_name, int64_t dim_value) {
+  Ort::ThrowOnError(
+      Ort::api->AddFreeDimensionOverrideByName(this, dim_name, dim_value));
   return *this;
 }
 
