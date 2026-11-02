@@ -49,6 +49,8 @@ examples/csharp/ModelChat/models
 !test/models/qwen3-5/*
 !test/models/qwen3-vl/*
 !test/models/whisper/*
+!/test/models/vibevoice/
+!test/models/vibevoice/**
 
 !/test/models/engine/
 /test/models/engine/*

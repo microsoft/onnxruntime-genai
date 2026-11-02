@@ -24,6 +24,7 @@ template <typename... Types>
 struct LeakTypeList {
   template <typename T>
   static constexpr bool is_tracked = (std::is_same_v<T, Types> || ...);
+  static bool AnyAlive();  // True while an object of any tracked type exists.
   static bool Dump();
 };
 

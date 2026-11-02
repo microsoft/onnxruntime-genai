@@ -1845,6 +1845,127 @@ struct AudioOutput_Element : JSON::Element {
   AudioOutputGraph_Element embedding_{v_.embedding};
 };
 
+struct DoubleArray_Element : JSON::Element {
+  explicit DoubleArray_Element(std::vector<double>& v) : v_{v} {}
+
+  void OnValue(std::string_view /*name*/, JSON::Value value) override {
+    v_.push_back(JSON::Get<double>(value));
+  }
+
+ private:
+  std::vector<double>& v_;
+};
+
+struct Voice_Element : JSON::Element {
+  explicit Voice_Element(Config::Model::Voice& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "name") {
+      v_.name = JSON::Get<std::string_view>(value);
+    } else if (name == "file") {
+      v_.file = JSON::Get<std::string_view>(value);
+    } else if (name == "language") {
+      v_.language = JSON::Get<std::string_view>(value);
+    } else if (name == "gender") {
+      v_.gender = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Voice& v_;
+};
+
+struct Voices_Element : JSON::Element {
+  explicit Voices_Element(std::vector<Config::Model::Voice>& v) : v_{v} {}
+
+  Element& OnObject(std::string_view /*name*/) override {
+    element_ = std::make_unique<Voice_Element>(v_.emplace_back());
+    return *element_;
+  }
+
+ private:
+  std::vector<Config::Model::Voice>& v_;
+  std::unique_ptr<Voice_Element> element_;
+};
+
+struct VibeVoiceGraph_Element : JSON::Element {
+  explicit VibeVoiceGraph_Element(Config::Model::VibeVoice::Graph& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "filename") {
+      v_.filename = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::VibeVoice::Graph& v_;
+};
+
+struct VibeVoiceDiffusion_Element : JSON::Element {
+  explicit VibeVoiceDiffusion_Element(Config::Model::VibeVoice& v) : v_{v} {}
+
+  // An overlay replaces the schedule instead of appending to it.
+  Element& OnArray(std::string_view name) override {
+    if (name == "timesteps") {
+      v_.diffusion_timesteps.clear();
+      return timesteps_;
+    }
+    if (name == "sigmas") {
+      v_.diffusion_sigmas.clear();
+      return sigmas_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::VibeVoice& v_;
+  DoubleArray_Element timesteps_{v_.diffusion_timesteps};
+  DoubleArray_Element sigmas_{v_.diffusion_sigmas};
+};
+
+struct VibeVoice_Element : JSON::Element {
+  explicit VibeVoice_Element(Config::Model::VibeVoice& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "speech_scaling_factor") {
+      v_.speech_scaling_factor = static_cast<float>(JSON::Get<double>(value));
+    } else if (name == "speech_bias_factor") {
+      v_.speech_bias_factor = static_cast<float>(JSON::Get<double>(value));
+    } else if (name == "text_window_size") {
+      v_.text_window_size = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "speech_window_size") {
+      v_.speech_window_size = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "cfg_scale") {
+      v_.cfg_scale = static_cast<float>(JSON::Get<double>(value));
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "text_lm") return text_lm_;
+    if (name == "tts_lm") return tts_lm_;
+    if (name == "diffusion_head") return diffusion_head_;
+    if (name == "acoustic_connector") return acoustic_connector_;
+    if (name == "vocoder") return vocoder_;
+    if (name == "diffusion") return diffusion_;
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::VibeVoice& v_;
+  VibeVoiceGraph_Element text_lm_{v_.text_lm};
+  VibeVoiceGraph_Element tts_lm_{v_.tts_lm};
+  VibeVoiceGraph_Element diffusion_head_{v_.diffusion_head};
+  VibeVoiceGraph_Element acoustic_connector_{v_.acoustic_connector};
+  VibeVoiceGraph_Element vocoder_{v_.vocoder};
+  VibeVoiceDiffusion_Element diffusion_{v_};
+};
+
 struct JoinerInputs_Element : JSON::Element {
   explicit JoinerInputs_Element(Config::Model::Joiner::Inputs& v) : v_{v} {}
 
@@ -2527,6 +2648,8 @@ struct Model_Element : JSON::Element {
       v_.bor_token_id = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == Config::Defaults::EorTokenIdName) {
       v_.eor_token_id = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "default_voice") {
+      v_.default_voice = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -2540,6 +2663,10 @@ struct Model_Element : JSON::Element {
     if (name == "segment_separators") {
       v_.segment_separators.clear();
       return segment_separators_;
+    }
+    if (name == "voices") {
+      v_.voices.clear();
+      return voices_;
     }
     throw JSON::unknown_value_error{};
   }
@@ -2572,6 +2699,9 @@ struct Model_Element : JSON::Element {
     }
     if (name == "audio_output") {
       return audio_output_;
+    }
+    if (name == "vibevoice") {
+      return vibevoice_;
     }
     if (name == "joiner") {
       return joiner_;
@@ -2612,6 +2742,8 @@ struct Model_Element : JSON::Element {
   Engram_Element engram_{v_.engram};
   Speech_Element speech_{v_.speech};
   AudioOutput_Element audio_output_{v_.audio_output};
+  Voices_Element voices_{v_.voices};
+  VibeVoice_Element vibevoice_{v_.vibevoice};
   Joiner_Element joiner_{v_.joiner};
   VAD_Element vad_{v_.vad};
   Moonshine_Element moonshine_{v_.moonshine};
@@ -3995,6 +4127,15 @@ void ValidateModelPaths(const Config& config) {
   ValidateConfigPath(m.moonshine.adapter_filename, "model.moonshine.adapter_filename");
   ValidateConfigPath(m.moonshine.cross_kv_filename, "model.moonshine.cross_kv_filename");
   ValidateConfigPath(m.moonshine.decoder_kv_filename, "model.moonshine.decoder_kv_filename");
+
+  ValidateConfigPath(m.vibevoice.text_lm.filename, "model.vibevoice.text_lm.filename");
+  ValidateConfigPath(m.vibevoice.tts_lm.filename, "model.vibevoice.tts_lm.filename");
+  ValidateConfigPath(m.vibevoice.diffusion_head.filename, "model.vibevoice.diffusion_head.filename");
+  ValidateConfigPath(m.vibevoice.acoustic_connector.filename, "model.vibevoice.acoustic_connector.filename");
+  ValidateConfigPath(m.vibevoice.vocoder.filename, "model.vibevoice.vocoder.filename");
+  for (const auto& voice : m.voices) {
+    ValidateConfigPath(voice.file, "model.voices.file");
+  }
 
   ValidateConfigPath(m.decoder.filename, "model.decoder.filename");
   for (const auto& stage : m.decoder.pipeline) {

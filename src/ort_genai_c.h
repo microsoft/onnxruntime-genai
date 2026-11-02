@@ -553,6 +553,44 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaModelGetType(const OgaModel* model, const 
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaModelGetDeviceType(const OgaModel* model, const char** out);
 
+/** \addtogroup TextToSpeech
+ * Names for text-to-speech models (model type "vibevoice").
+ * @{
+ */
+/** Input of OgaGenerator_SetInputs: the token ids of one text chunk, int64 or int32, shape [1, n]. The
+ *  multi-modal processor of the model makes it from text. */
+#define OgaInputName_TextIds "text_ids"
+/** Key of OgaGenerator_SetRuntimeOption: the voice name, as OgaModelGetVoices returns it. */
+#define OgaRuntimeOption_Voice "voice"
+/** Output of OgaGenerator_GetOutput once OgaGenerator_IsDone: mono float32 audio, shape [1, samples], 24 kHz. */
+#define OgaOutputName_Audio "audio"
+/** Properties of OgaModelGetVoiceProperty: a BCP 47 language tag (for example "en"), and "female", "male" or
+ *  empty when unknown. */
+#define OgaVoiceProperty_Language "language"
+#define OgaVoiceProperty_Gender "gender"
+//! @}
+
+/**
+ * \brief Returns the voice names of a text-to-speech model (for example "vibevoice"), default voice first.
+ *        Pass a name to OgaGenerator_SetRuntimeOption(generator, OgaRuntimeOption_Voice, name) to select it. The array is empty
+ *        for models without voices.
+ * \param[in] model The model to get the voices from.
+ * \param[out] out The voice names. Must be destroyed with OgaDestroyStringArray.
+ * \return OgaResult containing the error message if the getting of the voices failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaModelGetVoices(const OgaModel* model, OgaStringArray** out);
+
+/**
+ * \brief Returns a property of a voice of a text-to-speech model.
+ * \param[in] model The model that has the voice.
+ * \param[in] voice The voice name, as OgaModelGetVoices returns it.
+ * \param[in] property OgaVoiceProperty_Language or OgaVoiceProperty_Gender.
+ * \param[out] out The property value. Must be destroyed with OgaDestroyString.
+ * \return OgaResult containing the error message for an unknown voice or property.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaModelGetVoiceProperty(const OgaModel* model, const char* voice, const char* property,
+                                                            const char** out);
+
 /**
  * \brief Destroys the given config
  * \param[in] config The config to be destroyed.

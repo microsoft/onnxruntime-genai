@@ -102,12 +102,14 @@ OrtGlobals::OrtGlobals()
 
 // The single genai global. Lazily (re)created by GetOrtGlobals() and reset by Shutdown(), so that
 // genai can be torn down and re-initialized in-process (e.g. a host recreating its wrapper).
-static std::unique_ptr<OrtGlobals> g_ort_globals;
+// Allocated once and never destroyed: when genai objects are still alive at process exit, Shutdown()
+// keeps the globals for them, so they must outlive this file's static destructors.
+static std::unique_ptr<OrtGlobals>& g_ort_globals = *new std::unique_ptr<OrtGlobals>;
 // Guards lazy (re)creation and teardown of g_ort_globals so concurrent first-use (or first-use
 // after a shutdown) cannot double-construct the globals, and a concurrent Shutdown() cannot race
 // creation. Re-init after shutdown must remain possible, so this is a plain mutex rather than
-// std::call_once (which is process-once).
-static std::mutex g_ort_globals_mutex;
+// std::call_once (which is process-once). Never destroyed, for the same reason as g_ort_globals.
+static std::mutex& g_ort_globals_mutex = *new std::mutex;
 // Set by the process-exit EnsureShutdown destructor to prevent GetOrtGlobals() from resurrecting
 // the globals during static destruction.
 static bool g_process_exiting = false;
@@ -159,6 +161,11 @@ static bool ShouldReportLeaks() {
 }
 
 template <typename... Types>
+bool LeakTypeList<Types...>::AnyAlive() {
+  return ((LeakChecked<Types>::Count() != 0) || ...);
+}
+
+template <typename... Types>
 bool LeakTypeList<Types...>::Dump() {
   const bool report = ShouldReportLeaks();
   bool any_leaked = false;
@@ -185,6 +192,13 @@ void Shutdown() {
   std::scoped_lock lock{g_ort_globals_mutex};
 
   if (g_ort_globals && g_process_exiting) {
+    // A host can destroy genai objects after this point: an atexit handler that the host registered
+    // before its first genai call runs after the EnsureShutdown static destructor. Those destructors
+    // use the device interfaces and allocators, so while any tracked object is alive the globals are
+    // kept, and the OS reclaims them. OgaShutdown() at run time still tears everything down.
+    if (LeakTypes::AnyAlive())
+      return;
+
     // At process exit (the EnsureShutdown static destructor sets g_process_exiting under this lock),
     // destroying the OrtEnv is unsafe: releasing it from within __cxa_finalize drives ORT's
     // Environment/LoggingManager destructor to lock a mutex whose backing static may already be
@@ -614,13 +628,14 @@ Generator::Generator(const Model& model, const GeneratorParams& params)
   if (params.speculative.ngram_size > 0)
     ValidateNGramDecoding(model, params);
 
-  // RNNT/TDT/streaming-enc-dec-ASR models don't use the traditional
+  // RNNT/TDT/streaming-enc-dec-ASR/TTS models don't use the traditional
   // search/logits pipeline; skip the standard validations and create the
-  // TransducerState-derived state directly.
+  // StepState-derived state directly.
   const auto& model_type = model.config_->model.type;
-  if (ModelType::IsTransducer(model_type) || ModelType::IsStreamingEncDecASR(model_type)) {
+  if (ModelType::IsTransducer(model_type) || ModelType::IsStreamingEncDecASR(model_type) ||
+      ModelType::IsTTS(model_type)) {
     state_ = model.CreateState({}, params);
-    transducer_state_ = dynamic_cast<TransducerState*>(state_.get());
+    transducer_state_ = dynamic_cast<StepState*>(state_.get());
     strategy_ = MakeDecodingStrategy(*this);
     LogGeneratorCreate(params);
     return;
@@ -747,6 +762,9 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   DurationTrace trace{"Generator::AppendTokens"};
 
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
+  if (transducer_state_)
+    throw std::runtime_error("AppendTokens is not supported for " + model_->config_->model.type +
+                             ". Pass its inputs with SetInputs.");
   if (input_ids.size() == 0)
     throw std::runtime_error("input_ids is empty");
   if ((input_ids.size() / state_->params_->search.batch_size) + search_->GetSequenceLength() > state_->params_->search.max_length)
@@ -806,6 +824,9 @@ void Generator::AppendTokens(DeviceSpan<int32_t> input_ids) {
   DurationTrace trace{"Generator::AppendTokensDevice"};
 
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
+  if (transducer_state_)
+    throw std::runtime_error("AppendTokens is not supported for " + model_->config_->model.type +
+                             ". Pass its inputs with SetInputs.");
   if (input_ids.empty())
     throw std::runtime_error("input_ids is empty");
   if ((input_ids.size() / state_->params_->search.batch_size) + search_->GetSequenceLength() >
@@ -850,6 +871,7 @@ void Generator::SetInputs(const NamedTensors& named_tensors) {
   }
 
   cpu_span<int32_t> input_ids;
+  const size_t first_new_input = extra_inputs_.size();
   for (const auto& [name, tensor] : named_tensors) {
     if (name == Config::Defaults::InputIdsName) {
       input_ids = cpu_span<int32_t>(tensor->ort_tensor_->GetTensorMutableData<int32_t>(),
@@ -862,10 +884,19 @@ void Generator::SetInputs(const NamedTensors& named_tensors) {
     }
   }
 
-  // Set any extra inputs (those defined in extra_inputs and those defined in the PresetExtraInputs registry)
-  if (set_extra_inputs_) {
-    state_->SetExtraInputs(extra_inputs_);
-    set_extra_inputs_ = false;
+  // The state checks the new inputs, and inputs it rejects are dropped, so the generator can take others.
+  try {
+    state_->ValidateExtraInputs(
+        std::span<const ExtraInput>{extra_inputs_}.subspan(first_new_input, extra_inputs_.size() - first_new_input));
+
+    // Set any extra inputs (those defined in extra_inputs and those defined in the PresetExtraInputs registry)
+    if (set_extra_inputs_) {
+      state_->SetExtraInputs(extra_inputs_);
+      set_extra_inputs_ = false;
+    }
+  } catch (...) {
+    extra_inputs_.resize(first_new_input);
+    throw;
   }
 
   // Append tokens and run ComputeLogits after setting all other possible inputs
@@ -997,7 +1028,7 @@ void Generator::GenerateNextToken() {
 }
 
 TokenOutputs Generator::GetTokenOutputs() const {
-  if (const auto* transducer = dynamic_cast<const TransducerState*>(state_.get())) {
+  if (const auto* transducer = dynamic_cast<const StepState*>(state_.get())) {
     const auto tokens = transducer->GetStepTokens();
     if (model_->config_->model.timestamp_level != Config::TimestampLevel::Off) {
       const auto intervals = transducer->GetStepTokenIntervals();
@@ -1017,7 +1048,7 @@ SpeculativeStats Generator::GetSpeculativeStats() const {
 void Generator::RewindToLength(size_t new_length) {
   const auto& model_type = model_->config_->model.type;
   // RNNT/TDT/streaming-enc-dec-ASR models (e.g. Moonshine) take the
-  // TransducerState path and never create search_, so rewind is unsupported.
+  // StepState path and never create search_, so rewind is unsupported.
   // Fail clearly here before search_ is dereferenced below.
   if (ModelType::IsTransducer(model_type) || ModelType::IsStreamingEncDecASR(model_type))
     throw std::runtime_error("RewindTo is not supported for streaming ASR models (" + model_type + ").");

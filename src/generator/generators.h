@@ -45,7 +45,7 @@ void ThrowErrorIfSessionTerminated(bool is_session_terminated);
 namespace Generators {
 struct Model;
 struct State;
-struct TransducerState;
+struct StepState;
 struct Search;
 struct Tokenizer;
 struct ConstrainedLogitsProcessor;
@@ -195,7 +195,7 @@ struct Generator : LeakChecked<Generator> {
 
   // Pre-computed per-token decisions: avoid repeated checks each token
   // Non-null when the model is a transducer (RNNT, TDT); points into state_.
-  TransducerState* transducer_state_{nullptr};
+  StepState* transducer_state_{nullptr};
   int phi3_rope_threshold_{};  // 0 means no ROPE rewind needed
   enum class SamplingMethod { kGreedy,
                               kTopK,

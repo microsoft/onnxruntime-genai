@@ -16,6 +16,7 @@
 #include "models/preprocessing/phi_image_processor.h"
 #include "models/preprocessing/phi_multimodal_processor.h"
 #include "models/preprocessing/qwen2_5_vl_image_processor.h"
+#include "models/preprocessing/vibevoice_processor.h"
 #include "models/preprocessing/videochat_flash_processor.h"
 #include "models/preprocessing/whisper_processor.h"
 #include "models/threadpool.h"
@@ -74,6 +75,7 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
           {"qwen3_5_moe", Processor::Create<QwenImageProcessor>},
           {"qwen4_exp", Processor::Create<QwenImageProcessor>},
           {"nemotron_parse", Processor::Create<NemotronParseProcessor>},
+          {"vibevoice", Processor::Create<VibeVoiceProcessor>},
           {"videochat_flash_qwen", Processor::Create<VideoChatFlashProcessor>}} {
   auto processor = processor_factory_.find(config.model.type);
   if (processor != processor_factory_.end()) {

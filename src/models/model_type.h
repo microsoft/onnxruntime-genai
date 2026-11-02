@@ -58,7 +58,7 @@ struct ModelType {
   }
 
   // Transducer models (RNNT, TDT) bypass the standard search/logits pipeline
-  // and drive a custom encoder/decoder/joiner loop via TransducerState.
+  // and drive a custom encoder/decoder/joiner loop via StepState.
   inline static bool IsTransducer(const std::string& model_type) {
     return IsRNNT(model_type) || IsTDT(model_type);
   }
@@ -67,10 +67,17 @@ struct ModelType {
   // distinct from transducers (audio encoder + auto-regressive transformer
   // decoder with self+cross KV cache) but share the same runtime contract:
   // bypass the search/logits pipeline and drive token emission via
-  // TransducerState::StepToken().
+  // StepState::StepToken().
   inline static bool IsStreamingEncDecASR(const std::string& model_type) {
     static constexpr std::array<std::string_view, 1> streaming_enc_dec = {"streaming_enc_dec_asr"};
     return std::find(streaming_enc_dec.begin(), streaming_enc_dec.end(), model_type) != streaming_enc_dec.end();
+  }
+
+  // Text-to-speech models (e.g. VibeVoice). Like the transducers they bypass the search/logits
+  // pipeline: text arrives through SetInputs and each StepState::StepToken() generates one
+  // speech frame; the waveform is read with generator.get_output("audio").
+  inline static bool IsTTS(const std::string& model_type) {
+    return model_type == "vibevoice";
   }
 
   inline static bool IsQwenVLFamily(const std::string& model_type) {

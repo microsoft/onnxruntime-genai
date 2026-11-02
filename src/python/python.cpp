@@ -747,7 +747,14 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def_property_readonly(
           "device_type", [](const OgaModel& model) -> std::string { return model.GetDeviceType().p_; }, "The device type the model is running on")
       .def("create_multimodal_processor", [](const OgaModel& model) { return OgaMultiModalProcessor::Create(model); })
-      .def("create_streaming_processor", [](OgaModel& model) { return OgaStreamingProcessor::Create(model); }, "Create a StreamingProcessor for mel spectrogram extraction from raw audio.");
+      .def("create_streaming_processor", [](OgaModel& model) { return OgaStreamingProcessor::Create(model); }, "Create a StreamingProcessor for mel spectrogram extraction from raw audio.")
+      .def("get_voices", [](const OgaModel& model) {
+            auto voices = model.GetVoices();
+            std::vector<std::string> names;
+            for (size_t i = 0; i < voices->Count(); ++i)
+              names.emplace_back(voices->Get(i));
+            return names; }, "The voice names of a text-to-speech model, default voice first.")
+      .def("get_voice_property", [](const OgaModel& model, const std::string& voice, const std::string& property) -> std::string { return model.GetVoiceProperty(voice.c_str(), property.c_str()).p_; }, pybind11::arg("voice"), pybind11::arg("property"), "\"language\" or \"gender\" of a voice.");
 
   pybind11::class_<PyGenerator>(m, "Generator")
       .def(pybind11::init<const OgaModel&, PyGeneratorParams&>())

@@ -31,6 +31,8 @@ list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/qwen2vl_position_inp
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/reinit_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/search_checkpoint_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/state_graph_capture_tests.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/step_driven_model_tests.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/vibevoice_internal_test.cpp")
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER AND ENABLE_CUDA_KERNEL_TESTS)
   message(STATUS "Including CUDA kernel tests in the build.")
@@ -229,6 +231,18 @@ if (NOT MSVC)
 endif()
 
 add_test(NAME ReInitTests COMMAND reinit_tests)
+
+# Destroys a model from an atexit handler that runs after genai's process-exit teardown (see the
+# source). A crash fails the test. Links the public shared library, like unit_tests.
+add_executable(live_objects_at_exit_test "${CMAKE_CURRENT_SOURCE_DIR}/cpp/exit_teardown/live_objects_at_exit.cpp")
+target_include_directories(live_objects_at_exit_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_directories(live_objects_at_exit_test PRIVATE ${ORT_LIB_DIR})
+target_link_libraries(live_objects_at_exit_test PRIVATE onnxruntime-genai)
+set_target_properties(live_objects_at_exit_test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>"
+    FOLDER "Tests"
+)
+add_test(NAME LiveObjectsAtExitTest COMMAND live_objects_at_exit_test)
 add_executable(parallel_preprocessing_tests
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/parallel_performance_tests.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/parallel_preprocessing_tests.cpp"
@@ -359,6 +373,8 @@ list(APPEND engine_unit_test_srcs
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/qwen2vl_position_inputs_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/search_checkpoint_tests.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/state_graph_capture_tests.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/step_driven_model_tests.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/vibevoice_internal_test.cpp"
 )
 add_executable(engine_unit_tests ${engine_unit_test_srcs})
 target_include_directories(engine_unit_tests PRIVATE
