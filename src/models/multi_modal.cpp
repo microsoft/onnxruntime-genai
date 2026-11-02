@@ -769,6 +769,10 @@ void MultiModalPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extr
   }
 }
 
+void MultiModalPipelineState::SetActiveAdapter(Adapters* adapters, const std::string& adapter_name) {
+  decoder_state_->SetActiveAdapter(adapters, adapter_name);
+}
+
 DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
   // Pipeline state defines the pipeline of the execution of the models
   // Prompt stage:
