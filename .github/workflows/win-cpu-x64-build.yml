@@ -19,6 +19,7 @@ env:
 
 jobs:
   windows-cpu-x64-build:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ort-genai-github-win-16-amd-eus2-ss
     permissions:
       security-events: write

@@ -20,6 +20,7 @@ env:
 
 jobs:
   linux-cpu-arm64-build:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     permissions:
       contents: read
       packages: write # needed for GHCR push
