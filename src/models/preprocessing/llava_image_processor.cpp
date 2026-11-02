@@ -38,6 +38,31 @@ std::string ResolvePrompt(const Payload& payload) {
   return payload.prompts[0] ? std::string(payload.prompts[0]) : std::string{};
 }
 
+std::string TypeToString(extDataType_t type) {
+  switch (type) {
+    case kOrtxUint8:
+      return "uint8";
+    case kOrtxFloat16:
+      return "float16";
+    case kOrtxBFloat16:
+      return "bfloat16";
+    case kOrtxDouble:
+      return "float64";
+    case kOrtxInt64:
+      return "int64";
+    default:
+      return "ort-extensions type " + std::to_string(static_cast<int>(type));
+  }
+}
+
+std::string ShapeToString(const int64_t* shape, size_t num_dims) {
+  std::string result = "[";
+  for (size_t i = 0; i < num_dims; ++i) {
+    result += (i ? ", " : "") + std::to_string(shape[i]);
+  }
+  return result + "]";
+}
+
 }  // namespace
 
 std::vector<int32_t> ExpandLlavaImageTokens(const std::vector<int32_t>& input_ids, int32_t image_token_id,
@@ -77,6 +102,10 @@ LlavaImageProcessor::LlavaImageProcessor(Config& config, const SessionInfo& sess
                              "\". Point model.vision.inputs.pixel_values in genai_config.json at its name.");
   }
   pixel_values_type_ = session_info.GetInputDataType(pixel_values);
+  const auto pixel_values_shape = session_info.GetInputShape(pixel_values);
+  if (pixel_values_shape.size() == 4) {
+    std::copy(pixel_values_shape.begin() + 1, pixel_values_shape.end(), pixel_values_chw_.begin());
+  }
 
   const auto& image_features = config.model.vision.outputs.image_features;
   if (!session_info.HasOutput(image_features)) {
@@ -123,12 +152,34 @@ std::unique_ptr<NamedTensors> LlavaImageProcessor::Process(const Tokenizer& toke
     const int64_t* shape{};
     size_t num_dims{};
     CheckResult(OrtxGetTensorData(pixel_values.get(), &data, &shape, &num_dims));
+    extDataType_t pixel_values_type{};
+    CheckResult(OrtxGetTensorType(pixel_values.get(), &pixel_values_type));
+    if (pixel_values_type != kOrtxFloat) {
+      throw std::runtime_error(
+          "LlavaImageProcessor: the image preprocessor produced " + TypeToString(pixel_values_type) +
+          " pixel_values, expected float32. The pipeline in the processor config must convert the image to float32 "
+          "(e.g. Rescale and Normalize) and end with a channel-first Permute3D.");
+    }
     if (num_dims != 4) {
       throw std::runtime_error(
           "LlavaImageProcessor: expected 4D pixel_values [N, C, H, W] from the image "
           "preprocessor, got " +
           std::to_string(num_dims) +
           "D. The pipeline in the processor config must end with a channel-first Permute3D.");
+    }
+    const auto [channels, height, width] = pixel_values_chw_;
+    if (channels > 0 && shape[1] != channels) {
+      throw std::runtime_error("LlavaImageProcessor: the image preprocessor produced pixel_values " +
+                               ShapeToString(shape, num_dims) + " but the vision model expects " +
+                               std::to_string(channels) +
+                               " channels in dimension 1 ([N, C, H, W]). The pipeline in the processor "
+                               "config must end with a channel-first Permute3D (dims [2, 0, 1]).");
+    }
+    if ((height > 0 && shape[2] != height) || (width > 0 && shape[3] != width)) {
+      throw std::runtime_error("LlavaImageProcessor: the image preprocessor produced pixel_values " +
+                               ShapeToString(shape, num_dims) + " but the vision model expects " +
+                               std::to_string(height) + " x " + std::to_string(width) +
+                               " images. Check the image size the processor config resizes or crops to.");
     }
     num_images = shape[0];
     EmplaceProcessedTensor(thread_pool_, *named_tensors, Config::Defaults::PixelValuesName, pixel_values.get(),

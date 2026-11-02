@@ -253,6 +253,29 @@ def test_llava_requires_image_token_id(test_data_path, tmp_path):
         og.Model(model_path).create_multimodal_processor()
 
 
+@pytest.mark.parametrize(
+    "transforms,expected",
+    [
+        (["decode_image", "resize"], "produced uint8 pixel_values, expected float32"),
+        (
+            ["decode_image", "resize", "rescale", "normalize"],
+            r"produced pixel_values \[1, 8, 8, 3\] but the vision model expects 3 channels in dimension 1",
+        ),
+    ],
+    ids=["uint8-without-rescale", "channel-last-without-permute"],
+)
+def test_llava_rejects_pixels_the_vision_model_cannot_take(test_data_path, tmp_path, transforms, expected):
+    model_path = _copy_model(test_data_path, tmp_path, lambda model: None)
+    config_path = Path(model_path) / "processor_config.json"
+    config = json.loads(config_path.read_text())
+    steps = config["processor"]["transforms"]
+    config["processor"]["transforms"] = [step for step in steps if step["operation"]["name"] in transforms]
+    config_path.write_text(json.dumps(config))
+
+    with pytest.raises(RuntimeError, match=expected):
+        _process(model_path, IMAGE_TOKEN, _images(test_data_path, ["cars.jpg"]))
+
+
 def test_llava_active_adapter_reaches_the_decoder(test_data_path, tmp_path):
     ort = pytest.importorskip("onnxruntime")
     onnx = pytest.importorskip("onnx")

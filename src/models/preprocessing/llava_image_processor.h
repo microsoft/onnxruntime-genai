@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <vector>
 
@@ -34,6 +35,8 @@ struct LlavaImageProcessor : Processor {
   ort_extensions::OrtxObjectPtr<OrtxProcessor> processor_;
 
   ONNXTensorElementDataType pixel_values_type_;
+  // The vision input's static [C, H, W]; a dynamic dimension is <= 0 and not checked.
+  std::array<int64_t, 3> pixel_values_chw_{-1, -1, -1};
   int32_t image_token_id_{};
   int64_t tokens_per_image_{};
   // Whether the vision model emits [num_images, num_tokens, hidden] (true) or [total_tokens, hidden].
