@@ -5810,19 +5810,26 @@ class Model:
         up = self.values[f"{up_name}/output_0"].producer()
         if gate.op_type != up.op_type or gate.domain != up.domain or gate.inputs[0] is not up.inputs[0]:
             return
-        if (gate.domain, gate.op_type) not in (("", "MatMul"), ("com.microsoft", "MatMulNBits")):
+        if (gate.domain, gate.op_type) not in (
+            ("", "MatMul"),
+            ("com.microsoft", "MatMulNBits"),
+            ("com.microsoft", "MatMulBlockQuantizedFp8Weight"),
+        ):
             return
         if gate.attributes != up.attributes or len(gate.inputs) != len(up.inputs):
             return
         nbits = gate.op_type == "MatMulNBits"
+        fp8_block = gate.op_type == "MatMulBlockQuantizedFp8Weight"
         if nbits and (
             len(gate.inputs) > 5
             or gate.attributes["N"].as_int() != self.intermediate_size
             or ("weight_prepacked" in gate.attributes and gate.attributes["weight_prepacked"].as_int() != 0)
         ):
             return
-        # MatMulNBits initializers are output-channel major; g_idx is shared across channels.
-        packed_inputs = 4 if nbits else 2
+        if fp8_block and len(gate.inputs) > 4:
+            return
+        # MatMulNBits and MatMulBlockQuantizedFp8Weight initializers are output-channel major; g_idx/input_scale are shared.
+        packed_inputs = 4 if nbits else (3 if fp8_block else 2)
         tensors = []
         for index, (left, right) in enumerate(zip(gate.inputs[1:], up.inputs[1:], strict=True), 1):
             if left is None or right is None or left.const_value is None or right.const_value is None:
@@ -5834,17 +5841,19 @@ class Model:
                     return
                 tensors.append(None)
                 continue
-            axis = 0 if nbits else 1
+            axis = 0 if (nbits or fp8_block) else 1
             if len(left.shape) <= axis:
                 return
-            if not nbits and (len(left.shape) != 2 or left.shape[1] != self.intermediate_size):
+            if not (nbits or fp8_block) and (len(left.shape) != 2 or left.shape[1] != self.intermediate_size):
                 return
-            if nbits and left.shape[0] != self.intermediate_size:
+            if (nbits or fp8_block) and left.shape[0] != self.intermediate_size:
                 return
             tensors.append((axis, left, right))
 
         if nbits:
             fused_name += "NBits"
+        elif fp8_block:
+            fused_name += "Fp8"
         inputs = [gate.inputs[0].name]
         for index, tensor in enumerate(tensors, 1):
             if tensor is None:
@@ -5852,9 +5861,15 @@ class Model:
             else:
                 axis, left, right = tensor
                 name = f"{fused_name[1:].replace('/', '.')}.input_{index}"
-                self.make_initializer(
-                    np.concatenate((left.const_value.numpy(), right.const_value.numpy()), axis=axis), name
-                )
+                arr = np.concatenate((left.const_value.numpy(), right.const_value.numpy()), axis=axis)
+                if left.dtype == ir.DataType.FLOAT8E4M3FN:
+                    self.make_initializer(
+                        torch.from_numpy(arr.view(np.uint8)).view(torch.float8_e4m3fn),
+                        name,
+                        to=ir.DataType.FLOAT8E4M3FN,
+                    )
+                else:
+                    self.make_initializer(arr, name)
                 inputs.append(name)
         attributes = {name: attribute.value for name, attribute in gate.attributes.items()}
         if nbits:

@@ -204,7 +204,7 @@ class _BailingWeights(torch.nn.Module):
             k_proj = self.make_linear(f"{ap}.k_proj")
             v_proj = self.make_linear(f"{ap}.v_proj")
             la.in_proj_qkv = self.concat_linears([q_proj, k_proj, v_proj])
-            la.in_proj_a = self.make_linear(f"{ap}.f_proj", dense=True)
+            la.in_proj_a = self.make_linear(f"{ap}.f_proj")
             la.in_proj_b = self.make_linear(f"{ap}.b_proj", dense=True)
             if self.get_tensor(f"{ap}.g_proj.weight") is not None:
                 la.in_proj_z = self.make_linear(f"{ap}.g_proj")
@@ -314,6 +314,14 @@ class BailingMoeV3Model(Qwen35TextModel):
         config.linear_value_head_dim = self.kda_head_dim
         config.linear_conv_kernel_dim = getattr(config, "short_conv_kernel_size", 4)
 
+        if (
+            ep == "cuda"
+            and io_dtype == ir.DataType.FLOAT16
+            and str(getattr(config, "torch_dtype", "")).endswith("bfloat16")
+            and "io_dtype" not in extra_options
+        ):
+            io_dtype = ir.DataType.BFLOAT16
+
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
         # Standard RMSNorm (not Qwen's (1 + weight) OffsetRMSNorm) and standard 2D position_ids.
@@ -323,11 +331,13 @@ class BailingMoeV3Model(Qwen35TextModel):
         self.rope_attrs["interleaved"] = 0
         self.rope_attrs["rotary_embedding_dim"] = self.qk_rope_head_dim
         self.rope_attrs["partial_rotary_factor"] = float(self.qk_rope_head_dim) / float(self.head_size)
+        self.rope_attrs["cast"]["use_fp32"] = False
         self.attention_attrs["use_rope_in_attn"] = 0
         self.attention_attrs["scale"] = 1.0 / math.sqrt(float(self.head_size))
 
         # MoE configuration
-        self.intermediate_size = getattr(config, "intermediate_size", 4608)
+        self.dense_intermediate_size = getattr(config, "intermediate_size", 4608)
+        self.intermediate_size = getattr(config, "moe_intermediate_size", 512)
         self.first_k_dense_replace = getattr(config, "first_k_dense_replace", 1)
         self.moe_intermediate_size = getattr(config, "moe_intermediate_size", 512)
         self.shared_expert_intermediate_size = getattr(
@@ -342,6 +352,12 @@ class BailingMoeV3Model(Qwen35TextModel):
         self.moe_attrs["activation_type"] = "swiglu"
         self.moe_attrs["swiglu_fusion"] = 1
         self.moe_attrs["normalize_routing_weights"] = True
+
+        if self.ep == "cuda" and self.use_paged_attention:
+            self.ep_attrs["cuda"]["enable_cuda_graph"] = (
+                "1" if str(extra_options.get("enable_cuda_graph", "1")).lower() not in ("0", "false") else "0"
+            )
+            self.extra_options.setdefault("max_scheduled_tokens", 8192)
 
         # Check if checkpoint is block-FP8 and we are not re-quantizing to INT4/INT8
         quant_cfg = getattr(config, "quantization_config", None) or {}
@@ -482,6 +498,21 @@ class BailingMoeV3Model(Qwen35TextModel):
             [*token_shape, value_dim],
         )
         return f"{reshape_name}/output_0"
+
+    def make_gated_delta_net_gates(self, name, kwargs):
+        return kwargs["decay"], kwargs["beta"]
+
+    def make_linear_attention_a_b_proj(self, layer_id, attention, root_input):
+        basename = f"/model/layers.{layer_id}/linear_attn"
+        b_name = f"{basename}/b_proj/MatMul"
+        self.require_dense_linear_attention_gate(attention.in_proj_b, b_name)
+        self.exclude_node_from_quantization(b_name)
+        b_name = self.make_matmul(attention.in_proj_b, b_name, root_input)
+
+        # In KDA, f_proj (in_proj_a) has full head dimension (num_heads * head_dim = 2048),
+        # so it uses the model's quantized linear representation (e.g. FP8 or INT8).
+        a_name = self.make_matmul(attention.in_proj_a, f"{basename}/a_proj/MatMul", root_input)
+        return f"{b_name}/output_0", f"{a_name}/output_0"
 
     def make_linear_attention_qkv_z_proj(self, layer_id, attention, root_input):
         basename = f"/model/layers.{layer_id}/linear_attn"
@@ -824,7 +855,12 @@ class BailingMoeV3Model(Qwen35TextModel):
 
     def make_moe(self, layer_id, moe, root_input):
         if layer_id < self.first_k_dense_replace:
-            self.make_mlp(layer_id, moe, root_input=root_input)
+            prev_inter = self.intermediate_size
+            try:
+                self.intermediate_size = self.dense_intermediate_size
+                self.make_mlp(layer_id, moe, root_input=root_input)
+            finally:
+                self.intermediate_size = prev_inter
             return
         self.make_moe_preprocessing(layer_id, moe, root_input)
         router_probs, output_scale = self.make_moe_router(layer_id, moe, root_input)
@@ -835,172 +871,32 @@ class BailingMoeV3Model(Qwen35TextModel):
         self.make_interleaved_swiglu_moe_preprocessing(layer_id, moe)
 
     def make_moe_router(self, layer_id, moe, root_input):
-        """Emit BailingMoeV3's group_limited_topk (noaux_tc) + sigmoid + expert_bias routing."""
+        """Emit BailingMoeV3's fused MoEGroupRouter (noaux_tc group-limited sigmoid + expert_bias routing)."""
         basename = f"/model/layers.{layer_id}/moe/router"
-        num_experts = self.moe_attrs["num_experts"]
         top_k = self.moe_attrs["top_k"]
         n_group = self.moe_attrs["n_group"]
         topk_group = self.moe_attrs["topk_group"]
-        experts_per_group = num_experts // n_group
         logits_shape = self.make_moe_router_shape()
-        rows_dim = logits_shape[0]
 
         matmul_name = self.make_matmul(moe.gate, f"{basename}/MatMul", root_input)
-        reshape_name = f"{basename}/Reshape"
-        self.make_reshape(
-            reshape_name,
-            [f"{matmul_name}/output_0", f"/model/constants/INT64/{[-1, num_experts]}"],
-            dtype=self.io_dtype,
-            shape=logits_shape,
-        )
-        logits_name = f"{reshape_name}/output_0"
-        if self.io_dtype != ir.DataType.FLOAT:
-            cast_name = f"{basename}/Cast"
-            self.make_cast(cast_name, logits_name, ir.DataType.FLOAT, shape=logits_shape)
-            logits_name = f"{cast_name}/output_0"
-
-        sig_name = f"{basename}/Sigmoid"
-        self.make_sigmoid(sig_name, logits_name, ir.DataType.FLOAT, shape=logits_shape)
-        scores_name = f"{sig_name}/output_0"
-
         expert_bias_name = f"model.layers.{layer_id}.moe.expert_bias"
         self.make_initializer(moe.expert_bias, expert_bias_name, to=ir.DataType.FLOAT)
-        biased_name = f"{basename}/Add_bias"
-        self.make_add(biased_name, [scores_name, expert_bias_name], dtype=ir.DataType.FLOAT, shape=logits_shape)
 
-        # Group-limited top-k: [rows, n_group, experts_per_group] -> topk(2) -> sum -> topk(topk_group)
-        grp_reshape = f"{basename}/group/Reshape"
-        self.make_reshape(
-            grp_reshape,
-            [f"{biased_name}/output_0", f"/model/constants/INT64/{[-1, n_group, experts_per_group]}"],
-            dtype=ir.DataType.FLOAT,
-            shape=[rows_dim, n_group, experts_per_group],
+        router_name = f"{basename}/MoEGroupRouter"
+        router_probs_name = f"{router_name}/output_0"
+        self.make_node(
+            "MoEGroupRouter",
+            inputs=[f"{matmul_name}/output_0", expert_bias_name],
+            outputs=[router_probs_name],
+            name=router_name,
+            domain="com.microsoft",
+            top_k=top_k,
+            n_group=n_group,
+            topk_group=topk_group,
+            group_topk=2,
+            router_sentinel=float(self.moe_attrs["router_sentinel"]),
         )
-        grp_topk2 = f"{basename}/group/TopK2"
-        self.make_topk(
-            grp_topk2,
-            [f"{grp_reshape}/output_0", "/model/constants/INT64/[2]"],
-            dtype=ir.DataType.FLOAT,
-            shape=[rows_dim, n_group, 2],
-        )
-        grp_sum = f"{basename}/group/ReduceSum"
-        self.make_reduce_sum(
-            grp_sum,
-            [f"{grp_topk2}/output_0", "/model/constants/INT64/[-1]"],
-            dtype=ir.DataType.FLOAT,
-            shape=[rows_dim, n_group],
-            keepdims=False,
-        )
-        grp_select = f"{basename}/group/TopKGroup"
-        self.make_topk(
-            grp_select,
-            [f"{grp_sum}/output_0", f"/model/constants/INT64/[{topk_group}]"],
-            dtype=ir.DataType.FLOAT,
-            shape=[rows_dim, topk_group],
-        )
-        # Build group mask: start with -1e9, scatter 0.0 at selected groups, broadcast to [rows, num_experts]
-        grp_shape = f"{basename}/group/Shape"
-        self.make_shape(grp_shape, f"{grp_sum}/output_0", shape=[2])
-        grp_init = f"{basename}/group/ConstantOfShape"
-        self.make_constant_of_shape(
-            grp_init,
-            f"{grp_shape}/output_0",
-            value=ir.tensor([-1e9], dtype=ir.DataType.FLOAT),
-            dtype=ir.DataType.FLOAT,
-            shape=[rows_dim, n_group],
-        )
-        sel_shape = f"{basename}/group/SelShape"
-        self.make_shape(sel_shape, f"{grp_select}/output_0", shape=[2])
-        sel_zeros = f"{basename}/group/SelZeros"
-        self.make_constant_of_shape(
-            sel_zeros,
-            f"{sel_shape}/output_0",
-            value=ir.tensor([0.0], dtype=ir.DataType.FLOAT),
-            dtype=ir.DataType.FLOAT,
-            shape=[rows_dim, topk_group],
-        )
-        grp_scatter = f"{basename}/group/ScatterElements"
-        self.make_scatter_elements(
-            grp_scatter,
-            [f"{grp_init}/output_0", f"{grp_select}/output_1", f"{sel_zeros}/output_0"],
-            dtype=ir.DataType.FLOAT,
-            shape=[rows_dim, n_group],
-            axis=1,
-        )
-        grp_unsq = f"{basename}/group/Unsqueeze"
-        self.make_unsqueeze(
-            grp_unsq,
-            [f"{grp_scatter}/output_0", "/model/constants/INT64/[-1]"],
-            dtype=ir.DataType.FLOAT,
-            shape=[rows_dim, n_group, 1],
-        )
-        masked_3d = f"{basename}/group/Add_mask"
-        self.make_add(
-            masked_3d,
-            [f"{grp_reshape}/output_0", f"{grp_unsq}/output_0"],
-            dtype=ir.DataType.FLOAT,
-            shape=[rows_dim, n_group, experts_per_group],
-        )
-        masked_2d = f"{basename}/group/Reshape_flat"
-        self.make_reshape(
-            masked_2d,
-            [f"{masked_3d}/output_0", f"/model/constants/INT64/{[-1, num_experts]}"],
-            dtype=ir.DataType.FLOAT,
-            shape=logits_shape,
-        )
-        topk_name = f"{basename}/TopK"
-        self.make_topk(
-            topk_name,
-            [f"{masked_2d}/output_0", f"/model/constants/INT64/[{top_k}]"],
-            dtype=ir.DataType.FLOAT,
-            shape=self.make_moe_router_shape(last_dim=top_k),
-        )
-        indices_name = f"{topk_name}/output_1"
-
-        gather_name = f"{basename}/GatherElements"
-        self.make_gather_elements(
-            gather_name,
-            [scores_name, indices_name],
-            dtype=ir.DataType.FLOAT,
-            shape=self.make_moe_router_shape(last_dim=top_k),
-            axis=1,
-        )
-        selected_name = f"{gather_name}/output_0"
-
-        # Emit log(selected_scores) at topk_idx and sentinel (-10000) elsewhere so MoE/QMoE's internal
-        # top-k + softmax produces selected_scores / sum(selected_scores).
-        clip_name = f"{basename}/Clip"
-        self.make_clip(
-            clip_name,
-            [selected_name, f"/model/constants/FLOAT/{1e-20}", ""],
-            dtype=ir.DataType.FLOAT,
-            shape=self.make_moe_router_shape(last_dim=top_k),
-        )
-        log_name = f"{basename}/Log"
-        self.make_log(log_name, f"{clip_name}/output_0", ir.DataType.FLOAT, shape=self.make_moe_router_shape(last_dim=top_k))
-        full_shape = f"{basename}/Shape"
-        self.make_shape(full_shape, scores_name, shape=[2])
-        sentinel_name = f"{basename}/ConstantOfShape"
-        self.make_constant_of_shape(
-            sentinel_name,
-            f"{full_shape}/output_0",
-            value=ir.tensor([self.moe_attrs["router_sentinel"]], dtype=ir.DataType.FLOAT),
-            dtype=ir.DataType.FLOAT,
-            shape=logits_shape,
-        )
-        scatter_name = f"{basename}/ScatterElements"
-        self.make_scatter_elements(
-            scatter_name,
-            [f"{sentinel_name}/output_0", indices_name, f"{log_name}/output_0"],
-            dtype=ir.DataType.FLOAT,
-            shape=logits_shape,
-            axis=1,
-        )
-        router_probs_name = f"{scatter_name}/output_0"
-        if self.io_dtype != ir.DataType.FLOAT:
-            cast_out = f"{basename}/Cast_out"
-            self.make_cast(cast_out, router_probs_name, self.io_dtype, shape=logits_shape)
-            router_probs_name = f"{cast_out}/output_0"
+        self.make_value(router_probs_name, self.io_dtype, shape=logits_shape)
 
         routed_scale = self.moe_attrs["routed_scaling_factor"]
         scale_const = f"/model/constants/{self.io_dtype}/{routed_scale}"
@@ -1047,6 +943,21 @@ class BailingMoeV3Model(Qwen35TextModel):
             shape=self.make_hidden_state_shape(),
         )
         self.layernorm_attrs["skip_input"] = f"{add_name}/output_0"
+
+    def make_genai_config(self, config, extra_kwargs, out_dir):
+        super().make_genai_config(config, extra_kwargs, out_dir)
+        if self.ep == "cuda" and self.use_paged_attention:
+            config_path = os.path.join(out_dir, "genai_config.json")
+            if os.path.exists(config_path):
+                with open(config_path, encoding="utf-8") as f:
+                    genai_config = json.load(f)
+                sess_opts = genai_config.get("model", {}).get("decoder", {}).setdefault("session_options", {})
+                sess_opts.setdefault(
+                    "ep.cuda.gated_delta_net_bf16_precision",
+                    str(self.extra_options.get("gated_delta_net_bf16_precision", "bf16")),
+                )
+                with open(config_path, "w", encoding="utf-8") as f:
+                    json.dump(genai_config, f, indent=4)
 
     def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
         super().save_processing(model_name_or_path, extra_kwargs, out_dir)
