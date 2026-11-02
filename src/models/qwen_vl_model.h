@@ -61,6 +61,7 @@ struct Qwen2_5_VL_PipelineState : public DecoderOnlyPipelineState {
                            const GeneratorParams& params);
 
   void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) override;
+  void SetRunOption(const char* key, const char* value) override;
 
   DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens,
                         DeviceSpan<int32_t> next_indices) override;
@@ -90,6 +91,7 @@ struct Qwen2_5_VL_PipelineState : public DecoderOnlyPipelineState {
   int32_t GetImageTokenId() const;
 
   const Qwen2_5_VL_PipelineModel& vl_model_;
+  std::unique_ptr<OrtRunOptions> vision_run_options_{OrtRunOptions::Create()};
   bool vision_ran_{false};
   std::unique_ptr<OrtValue> image_features_value_;
   std::vector<float> image_features_buffer_;       // backing storage for OrtValue
