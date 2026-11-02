@@ -10,7 +10,7 @@ namespace Generators {
 namespace {
 
 std::string ComposePleName(const std::string& name_template, int layer_index) {
-  return ComposeIndexedName(name_template, layer_index, 128, "PLE state name");
+  return ComposeKeyValueName(name_template, layer_index, 128, "PLE state name");
 }
 
 void FixAndValidateBatchDimension(

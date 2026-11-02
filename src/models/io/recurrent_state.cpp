@@ -11,7 +11,7 @@
 namespace Generators {
 
 std::string ComposeCacheName(const std::string& template_string, int index) {
-  return ComposeIndexedName(template_string, index, 64, "cache name");
+  return ComposeKeyValueName(template_string, index, 64, "cache name");
 }
 
 RecurrentState::RecurrentState(State& state, bool graph_capture_variants_supported)

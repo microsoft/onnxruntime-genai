@@ -17,8 +17,8 @@
 
 namespace Generators {
 
-std::string ComposeIndexedName(const std::string& template_string, int index,
-                               size_t max_length, std::string_view name_kind) {
+std::string ComposeKeyValueName(const std::string& template_string, int index,
+                                size_t max_length, std::string_view name_kind) {
   const auto placeholder = template_string.find("%d");
   if (placeholder == std::string::npos ||
       template_string.find('%') != placeholder ||
@@ -39,10 +39,6 @@ std::string ComposeIndexedName(const std::string& template_string, int index,
                              "; the expanded name is too long.");
   }
   return result;
-}
-
-std::string ComposeKeyValueName(const std::string& template_string, int index) {
-  return ComposeIndexedName(template_string, index, 64, "key value name");
 }
 
 namespace {

@@ -11,7 +11,7 @@ namespace Generators {
 namespace {
 
 std::string ComposeIndexerName(const std::string& name_template, int layer_index) {
-  return ComposeIndexedName(name_template, layer_index, 128, "indexer cache name");
+  return ComposeKeyValueName(name_template, layer_index, 128, "indexer cache name");
 }
 
 }  // namespace

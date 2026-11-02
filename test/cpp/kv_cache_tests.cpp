@@ -43,12 +43,12 @@ TEST(KvCacheTests, IgnoresTopLevelDeviceWindowSizeForPipelineModel) {
   EXPECT_EQ(Generators::GetWindowedKeyValueCacheSize(model, search, 4096), 0);
 }
 
-TEST(KvCacheTests, ComposeIndexedNameAcceptsExactlyOneDecimalPlaceholder) {
-  EXPECT_EQ(Generators::ComposeIndexedName("past.%d.key", 3, 64, "test name"), "past.3.key");
-  EXPECT_EQ(Generators::ComposeIndexedName("%d_suffix", -7, 64, "test name"), "-7_suffix");
+TEST(KvCacheTests, ComposeKeyValueNameAcceptsExactlyOneDecimalPlaceholder) {
+  EXPECT_EQ(Generators::ComposeKeyValueName("past.%d.key", 3), "past.3.key");
+  EXPECT_EQ(Generators::ComposeKeyValueName("%d_suffix", -7), "-7_suffix");
 }
 
-TEST(KvCacheTests, ComposeIndexedNameRejectsUnsafeFormatSyntax) {
+TEST(KvCacheTests, ComposeKeyValueNameRejectsUnsafeFormatSyntax) {
   for (const std::string_view value : {
            "past",
            "past_%",
@@ -62,17 +62,18 @@ TEST(KvCacheTests, ComposeIndexedNameRejectsUnsafeFormatSyntax) {
            "past_%d_%d",
        }) {
     EXPECT_THROW(
-        Generators::ComposeIndexedName(std::string{value}, 3, 64, "test name"),
+        Generators::ComposeKeyValueName(std::string{value}, 3),
         std::runtime_error)
         << value;
   }
 }
 
-TEST(KvCacheTests, ComposeIndexedNamePreservesLengthLimits) {
-  EXPECT_EQ(Generators::ComposeIndexedName(std::string(62, 'a') + "%d", 3, 64, "test name").size(), 63u);
+TEST(KvCacheTests, ComposeKeyValueNamePreservesLengthLimits) {
+  EXPECT_EQ(Generators::ComposeKeyValueName(std::string(62, 'a') + "%d", 3).size(), 63u);
   EXPECT_THROW(
-      Generators::ComposeIndexedName(std::string(63, 'a') + "%d", 3, 64, "test name"),
+      Generators::ComposeKeyValueName(std::string(63, 'a') + "%d", 3),
       std::runtime_error);
+  EXPECT_EQ(Generators::ComposeKeyValueName(std::string(126, 'a') + "%d", 3, 128, "test name").size(), 127u);
 }
 
 }  // namespace
