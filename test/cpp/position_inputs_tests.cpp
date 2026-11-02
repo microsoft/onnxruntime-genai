@@ -689,7 +689,7 @@ TEST(WindowedPositionInputsTest, RejectsWindowOutsideContextLength) {
     auto params = std::make_shared<GeneratorParams>(*model);
     PositionTestState state{*params, *model};
 
-    EXPECT_THROW(WindowedPositionInputs(state), std::runtime_error) << window_size;
+    EXPECT_THROW(WindowedPositionInputs{state}, std::runtime_error) << window_size;
   }
 }
 
@@ -702,7 +702,7 @@ TEST(WindowedPositionInputsTest, AcceptsWindowEqualToContextLength) {
   auto params = std::make_shared<GeneratorParams>(*model);
   PositionTestState state{*params, *model};
 
-  EXPECT_NO_THROW(WindowedPositionInputs(state));
+  EXPECT_NO_THROW(WindowedPositionInputs{state});
 }
 
 }  // namespace
