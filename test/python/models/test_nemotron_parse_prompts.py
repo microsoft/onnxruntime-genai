@@ -55,6 +55,7 @@ def model_factory(tmp_path):
         add_bos_token=True,
         add_eos_token=True,
         profile_keys=("min", "opt", "max"),
+        cpu_vision=False,
     ):
         # The DirectML CI job pins an onnxruntime without a CPU kernel for the decoder's TensorScatter (opset 24).
         if provider == "cpu" and not _ort_runs_tensor_scatter():
@@ -93,6 +94,8 @@ def model_factory(tmp_path):
                 key = f"ep.nvtensorrtrtxexecutionprovider.nv_profile_{kind}_shapes"
                 config["model"]["decoder"]["session_options"][key] = "decoder_input_ids:1x1"
                 config["model"]["vision"]["session_options"][key] = "pixel_values:1x3x2x2"
+        if cpu_vision:
+            config["model"]["vision"]["session_options"] = {"intra_op_num_threads": 1}
         if decoder_run_options:
             config["model"]["decoder"]["run_options"] = decoder_run_options
         (model_dir / "genai_config.json").write_text(json.dumps(config))
@@ -608,6 +611,13 @@ def test_runtime_profiling_reaches_inner_sessions(model_factory, images, tmp_pat
     assert profiles, "Run-level profiling did not reach either inner session"
     events = [event for path in profiles for event in json.loads(path.read_text())]
     assert any("TensorScatter" in event.get("name", "") for event in events)
+
+
+def test_rejects_encoder_on_different_device(model_factory):
+    if not og.is_cuda_available():
+        pytest.skip("CUDA is not available")
+    with pytest.raises(RuntimeError, match="encoder and decoder must run on the same device"):
+        model_factory(provider="cuda", cpu_vision=True)
 
 
 @pytest.mark.parametrize("provider", ["cpu", "cuda"])

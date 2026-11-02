@@ -362,9 +362,16 @@ NemotronParseModel::NemotronParseModel(std::unique_ptr<Config> config,
       config_->model.vision.session_options.has_value()
           ? *config_->model.vision.session_options
           : decoder.session_options;
-  CreateSessionOptionsFromConfig(encoder_session_config,
-                                 *encoder_session_options_, true,
-                                 /*disable_graph_capture=*/true);
+  auto* encoder_device = CreateSessionOptionsFromConfig(encoder_session_config,
+                                                        *encoder_session_options_, true,
+                                                        /*disable_graph_capture=*/true);
+  // The encoder's cross-attention KV feeds the decoder directly; a provider-less vision config would
+  // otherwise silently run the encoder on CPU next to a GPU decoder.
+  if (encoder_device->GetType() != p_device_->GetType()) {
+    throw std::runtime_error("Nemotron Parse encoder and decoder must run on the same device (encoder: " +
+                             to_string(encoder_device->GetType()) + ", decoder: " +
+                             to_string(p_device_->GetType()) + ")");
+  }
 
   if (p_device_->GetType() == DeviceType::NvTensorRtRtx) {
     // Preserve static default-prompt and Q=1 decode performance. Custom prompts
