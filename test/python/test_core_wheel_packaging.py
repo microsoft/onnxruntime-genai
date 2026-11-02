@@ -6,6 +6,7 @@ import csv
 import hashlib
 import importlib.util
 import io
+import struct
 import subprocess
 import sys
 from email.parser import Parser
@@ -20,6 +21,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location("generate_core_wheel", REPO_ROOT / "tools/python/generate_core_wheel.py")
 core_wheel = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(core_wheel)
+spec = importlib.util.spec_from_file_location("verify_core_wheel", REPO_ROOT / "tools/python/verify_core_wheel.py")
+verify_core_wheel = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(verify_core_wheel)
 
 
 def make_core(core_dir, library_name, use_cuda=True):
@@ -36,8 +40,8 @@ def make_core(core_dir, library_name, use_cuda=True):
     return library
 
 
-@pytest.fixture
-def auditwheel_repair(monkeypatch):
+@pytest.fixture(params=[False, True], ids=["single-tag", "compound-tags"])
+def auditwheel_repair(monkeypatch, request):
     commands = []
 
     def run(command, check):
@@ -45,8 +49,18 @@ def auditwheel_repair(monkeypatch):
         source = Path(command[-1])
         output_dir = Path(command[command.index("--wheel-dir") + 1])
         platform_tag = command[command.index("--plat") + 1]
+        platforms = [platform_tag]
+        if request.param:
+            platforms += (
+                ["manylinux1_x86_64", "manylinux_2_5_x86_64"]
+                if platform_tag.endswith("x86_64")
+                else [
+                    "manylinux2014_aarch64",
+                    "manylinux_2_17_aarch64",
+                ]
+            )
         _, version, _, _ = parse_wheel_filename(source.name)
-        repaired = output_dir / f"onnxruntime_genai_core-{version}-py3-none-{platform_tag}.whl"
+        repaired = output_dir / f"onnxruntime_genai_core-{version}-py3-none-{'.'.join(platforms)}.whl"
         with ZipFile(source) as original, WheelFile(str(repaired), "w") as wheel:
             for path in original.namelist():
                 if path.endswith("/RECORD"):
@@ -54,7 +68,10 @@ def auditwheel_repair(monkeypatch):
                 content = original.read(path)
                 if path.endswith("/WHEEL"):
                     old_tag = Parser().parsestr(content.decode("utf-8"))["Tag"]
-                    content = content.replace(old_tag.encode(), f"py3-none-{platform_tag}".encode())
+                    content = content.replace(
+                        f"Tag: {old_tag}".encode(),
+                        "\n".join(f"Tag: py3-none-{platform}" for platform in platforms).encode(),
+                    )
                 wheel.writestr(path, content)
             wheel.writestr("onnxruntime_genai_core.libs/libsupport-123.so", b"vendored supporting library")
         return subprocess.CompletedProcess(command, 0)
@@ -101,6 +118,8 @@ def test_core_wheel_contents_and_metadata(tmp_path, rid, platform_tag, library_n
         assert metadata["Name"] == "onnxruntime-genai-core"
         assert metadata["Version"] == str(version)
         assert metadata["Requires-Dist"] is None
+        assert metadata["Author"] == "Microsoft Corporation"
+        assert "Applications must supply ONNX Runtime" in metadata.get_payload()
         wheel_metadata = Parser().parsestr(wheel.read(f"{dist_info}/WHEEL").decode("utf-8"))
         assert wheel_metadata["Root-Is-Purelib"] == "false"
         assert wheel_metadata["Tag"] == f"py3-none-{platform_tag}"
@@ -158,7 +177,7 @@ def test_core_wheel_cli_packages_stable_version(tmp_path, monkeypatch, capsys, a
         ],
     )
     core_wheel.main()
-    wheel = output_dir / "onnxruntime_genai_core-0.15.0-py3-none-manylinux_2_34_aarch64.whl"
+    wheel = next(output_dir.glob("*.whl"))
     assert wheel.is_file()
     assert capsys.readouterr().out.strip() == str(wheel)
     assert len(auditwheel_repair) == 1
@@ -191,10 +210,15 @@ def test_manylinux_repair_enforces_policy_and_preserves_support_libraries(
     assert {path.name for path in output_dir.iterdir()} == {repaired.name}
     _, version, _, tags = parse_wheel_filename(repaired.name)
     assert str(version) == "0.15.0.dev1001393122"
-    assert {str(tag) for tag in tags} == {f"py3-none-{platform_tag}"}
+    assert any(str(tag) == f"py3-none-{platform_tag}" for tag in tags)
+    assert all(tag.interpreter == "py3" and tag.abi == "none" for tag in tags)
     with ZipFile(repaired) as wheel:
         assert wheel.read("onnxruntime_genai_core/bin/libonnxruntime-genai.so") == library.read_bytes()
         assert wheel.read("onnxruntime_genai_core.libs/libsupport-123.so") == b"vendored supporting library"
+        wheel_metadata = Parser().parsestr(
+            wheel.read(f"onnxruntime_genai_core-{version}.dist-info/WHEEL").decode("utf-8")
+        )
+        assert set(wheel_metadata.get_all("Tag")) == {str(tag) for tag in tags}
 
 
 @pytest.mark.parametrize(
@@ -263,3 +287,158 @@ def test_core_wheel_cli_does_not_publish_when_audit_fails(tmp_path, monkeypatch)
     with pytest.raises(subprocess.CalledProcessError):
         core_wheel.main()
     assert not output_dir.exists()
+
+
+def make_elf(machine=62, needed=()):
+    strings = b"\0"
+    offsets = []
+    for name in needed:
+        offsets.append(len(strings))
+        strings += name.encode("ascii") + b"\0"
+    dynamic = b"".join(struct.pack("<qQ", 1, offset) for offset in offsets) + struct.pack("<qQ", 0, 0)
+    names = b"\0.dynamic\0.dynstr\0.shstrtab\0"
+    section_offset = 64 + len(dynamic) + len(strings) + len(names)
+    header = struct.pack(
+        "<16sHHIQQQIHHHHHH",
+        b"\x7fELF\x02\x01\x01" + b"\0" * 9,
+        3,
+        machine,
+        1,
+        0,
+        0,
+        section_offset,
+        0,
+        64,
+        0,
+        0,
+        64,
+        4,
+        3,
+    )
+    sections = bytes(64)
+    sections += struct.pack("<IIQQQQIIQQ", names.index(b".dynamic"), 6, 2, 0, 64, len(dynamic), 2, 0, 8, 16)
+    sections += struct.pack(
+        "<IIQQQQIIQQ", names.index(b".dynstr"), 3, 2, 0, 64 + len(dynamic), len(strings), 0, 0, 1, 0
+    )
+    sections += struct.pack(
+        "<IIQQQQIIQQ",
+        names.index(b".shstrtab"),
+        3,
+        0,
+        0,
+        64 + len(dynamic) + len(strings),
+        len(names),
+        0,
+        0,
+        1,
+        0,
+    )
+    return header + dynamic + strings + names + sections
+
+
+@pytest.mark.parametrize("arch,machine", [("x64", 62), ("arm64", 183)])
+def test_verify_linux_elf_payload(tmp_path, arch, machine):
+    wheel_path = tmp_path / "core.whl"
+    with ZipFile(wheel_path, "w") as wheel:
+        wheel.writestr(verify_core_wheel.CORE_PATH, make_elf(machine, ("libc.so.6",)))
+        wheel.writestr("onnxruntime_genai_core.libs/libcurl-123abc.so.4", make_elf(machine, ("libc.so.6",)))
+    verify_core_wheel.verify_elf_payload(wheel_path, arch)
+
+
+@pytest.mark.parametrize("path", [verify_core_wheel.CORE_PATH, "onnxruntime_genai_core.libs/libsupport-123abc.so.1"])
+def test_verify_linux_elf_rejects_wrong_architecture(tmp_path, path):
+    wheel_path = tmp_path / "core.whl"
+    with ZipFile(wheel_path, "w") as wheel:
+        if path != verify_core_wheel.CORE_PATH:
+            wheel.writestr(verify_core_wheel.CORE_PATH, make_elf(183))
+        wheel.writestr(path, make_elf(62))
+    with pytest.raises(ValueError, match="Unexpected ELF architecture"):
+        verify_core_wheel.verify_elf_payload(wheel_path, "arm64")
+
+
+@pytest.mark.parametrize(
+    "dependency",
+    [
+        "libonnxruntime.so.1",
+        "libonnxruntime-genai-cuda.so",
+        "libonnxruntime_providers_cuda.so",
+        "libcuda.so.1",
+        "libcudart.so.13",
+        "libcudart-123abc.so.13",
+        "libcublas.so.13",
+        "libnvrtc.so.13",
+    ],
+)
+def test_verify_linux_elf_rejects_runtime_dependencies(tmp_path, dependency):
+    wheel_path = tmp_path / "core.whl"
+    with ZipFile(wheel_path, "w") as wheel:
+        wheel.writestr(verify_core_wheel.CORE_PATH, make_elf(183, (dependency,)))
+    with pytest.raises(ValueError, match="Runtime-managed DT_NEEDED"):
+        verify_core_wheel.verify_elf_payload(wheel_path, "arm64")
+
+
+def test_verify_linux_elf_rejects_bundled_cuda_library(tmp_path):
+    wheel_path = tmp_path / "core.whl"
+    with ZipFile(wheel_path, "w") as wheel:
+        wheel.writestr(verify_core_wheel.CORE_PATH, make_elf())
+        wheel.writestr("onnxruntime_genai_core.libs/libcudart-123abc.so.13", make_elf())
+    with pytest.raises(ValueError, match="bundles a runtime-managed library"):
+        verify_core_wheel.verify_elf_payload(wheel_path, "x64")
+
+
+def test_verify_native_loading_uses_installed_wheel_and_explicit_ort(tmp_path, monkeypatch):
+    ort_home = tmp_path / "ort"
+    (ort_home / "lib").mkdir(parents=True)
+    runtime = ort_home / "lib/libonnxruntime.so.1"
+    runtime.write_bytes(b"runtime")
+    commands = []
+
+    def run(command, **kwargs):
+        commands.append((command, kwargs))
+
+    monkeypatch.setattr(verify_core_wheel.subprocess, "run", run)
+    wheel_path = tmp_path / "core.whl"
+    verify_core_wheel.verify_native_loading(wheel_path, ort_home)
+    install, load = commands
+    assert install[0][:4] == [sys.executable, "-m", "pip", "install"]
+    assert "--no-index" in install[0] and "--no-deps" in install[0]
+    assert install[0][-1] == str(wheel_path)
+    assert install[1]["check"] is True
+    assert load[0][:3] == [sys.executable, "-I", "-c"]
+    assert load[1]["env"]["ORT_LIB_PATH"] == str(runtime.resolve())
+    assert load[1]["check"] is True
+    assert not Path(load[0][-1]).exists()
+
+
+def test_verify_native_loading_propagates_load_failure(tmp_path, monkeypatch):
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "lib/libonnxruntime.so").write_bytes(b"runtime")
+
+    def run(command, **kwargs):
+        if "-I" in command:
+            raise subprocess.CalledProcessError(1, command)
+
+    monkeypatch.setattr(verify_core_wheel.subprocess, "run", run)
+    with pytest.raises(subprocess.CalledProcessError):
+        verify_core_wheel.verify_native_loading(tmp_path / "core.whl", tmp_path)
+
+
+@pytest.mark.parametrize("valid", [False, True])
+def test_verify_cli_checks_elf_before_loading(tmp_path, monkeypatch, valid):
+    wheel_path = tmp_path / "onnxruntime_genai_core-0.15.0-py3-none-manylinux_2_34_aarch64.whl"
+    with ZipFile(wheel_path, "w") as wheel:
+        wheel.writestr(verify_core_wheel.CORE_PATH, make_elf(183 if valid else 62))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["verify_core_wheel.py", "--wheel_dir", str(tmp_path), "--arch", "arm64", "--ort_home", str(tmp_path / "ort")],
+    )
+    loads = []
+    monkeypatch.setattr(verify_core_wheel, "verify_native_loading", lambda *args: loads.append(args))
+    if valid:
+        verify_core_wheel.main()
+        assert loads == [(wheel_path, tmp_path / "ort")]
+    else:
+        with pytest.raises(ValueError, match="Unexpected ELF architecture"):
+            verify_core_wheel.main()
+        assert loads == []

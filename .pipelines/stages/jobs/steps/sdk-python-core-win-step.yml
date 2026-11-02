@@ -12,7 +12,7 @@ steps:
 
 - template: utils/authenticate-pip-lotus.yml
 
-- script: python -m pip install wheel packaging
+- script: python -m pip install -r tools/python/requirements-core-packaging.txt
   displayName: 'Install core wheel packaging dependencies'
 
 - ${{ each platform in parameters.platforms }}:

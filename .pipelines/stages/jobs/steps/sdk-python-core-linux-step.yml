@@ -5,6 +5,8 @@ parameters:
   values: [x64, arm64]
 - name: cuda_version
   type: string
+- name: ort_version
+  type: string
 
 steps:
 - task: Docker@2
@@ -27,6 +29,14 @@ steps:
     ep: cuda
     cuda_version: ${{ parameters.cuda_version }}
 
+- template: utils/download-ort-desktop.yml
+  parameters:
+    os: linux
+    arch: ${{ parameters.arch }}
+    ep: cuda
+    ort_version: ${{ parameters.ort_version }}
+    ort_home: '$(Build.SourcesDirectory)/ort_home'
+
 - bash: |
     set -e -x
     docker_image="ortgenaicudabuild${{ parameters.arch }}"
@@ -38,12 +48,16 @@ steps:
       "$docker_image" bash -c '
         set -e -x
         PY=/opt/python/cp311-cp311/bin/python3.11
-        $PY -m pip install wheel packaging auditwheel
+        $PY -m pip install -r tools/python/requirements-core-packaging.txt
         $PY tools/python/generate_core_wheel.py \
           --core_dir /ort_genai_src/core_pkg \
           --rid linux-${{ parameters.arch }} \
           --package_version "$GENAI_VERSION" \
           --output_dir /ort_genai_src/core_wheel_stage
+        $PY tools/python/verify_core_wheel.py \
+          --wheel_dir /ort_genai_src/core_wheel_stage \
+          --arch ${{ parameters.arch }} \
+          --ort_home /ort_genai_src/ort_home
       '
   displayName: 'Package and audit native core wheel (manylinux, ${{ parameters.arch }})'
   workingDirectory: '$(Build.SourcesDirectory)'

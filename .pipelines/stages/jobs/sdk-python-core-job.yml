@@ -4,6 +4,8 @@
 parameters:
 - name: cuda_version
   type: string
+- name: ort_version
+  type: string
 - name: platforms
   type: object
   default:
@@ -30,6 +32,7 @@ jobs:
     parameters:
       arch: x64
       cuda_version: ${{ parameters.cuda_version }}
+      ort_version: ${{ parameters.ort_version }}
 
 - job: python_linux_arm64_core
   displayName: 'python · linux-arm64 · core'
@@ -50,6 +53,7 @@ jobs:
     parameters:
       arch: arm64
       cuda_version: '13.1'
+      ort_version: '1.30.0'
 
 - job: python_core_wheels
   displayName: 'python · wheels · core'

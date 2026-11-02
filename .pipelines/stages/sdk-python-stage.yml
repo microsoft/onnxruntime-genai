@@ -155,6 +155,7 @@ stages:
     - template: jobs/sdk-python-core-job.yml
       parameters:
         cuda_version: ${{ parameters.cuda_version }}
+        ort_version: ${{ parameters.ort_version }}
 
   # ---- WinML wheels (win-x64 + win-arm64; multi-version, incremental) -------
   - ${{ if eq(parameters.enable_winml, true) }}:

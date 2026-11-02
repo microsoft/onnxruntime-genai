@@ -146,6 +146,7 @@ jobs:
       - name: Run the Python tests
         run: |
           export ORTGENAI_LOG_ORT_LIB=1
+          python3 -m pytest -q test/python/test_core_wheel_packaging.py
           python3 test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/models
 
       - name: Build the C# API and Run the C# Tests

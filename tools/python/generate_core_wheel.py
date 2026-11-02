@@ -58,7 +58,13 @@ def generate_wheel(core_dir: Path, rid: str, package_version: str, output_dir: P
             "Name: onnxruntime-genai-core\n"
             f"Version: {version}\n"
             "Summary: ONNX Runtime GenAI native core for dynamic execution providers\n"
-            "License: MIT\n",
+            "Author: Microsoft Corporation\n"
+            "Author-email: onnxruntime-genai@microsoft.com\n"
+            "License: MIT\n"
+            "Description-Content-Type: text/plain\n"
+            "\n"
+            "Native ONNX Runtime GenAI library. Applications must supply ONNX Runtime "
+            "and, when using CUDA, the matching CUDA add-on at runtime.\n",
         )
         wheel.writestr(
             f"{dist_info}/WHEEL",
@@ -82,7 +88,7 @@ def repair_manylinux_wheel(wheel_path: Path, rid: str, output_dir: Path) -> Path
                 "repair",
                 "--plat",
                 platform_tag,
-                # These libraries are supplied by the application, not bundled in the core wheel.
+                # Defensive exclusions: the core loads these dynamically, without DT_NEEDED links.
                 "--exclude",
                 "libonnxruntime.so*",
                 "--exclude",
