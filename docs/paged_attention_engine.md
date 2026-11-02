@@ -210,11 +210,18 @@ Unleased retained blocks remain charged so selecting one request cannot let a la
 request plan against capacity that the first request's adoption has protected.
 
 The implementation applies only to newly admitted requests and does not splice
-a prefix into resident continuation turns. It still rejects target
-sliding-window KV rings and auxiliary caches that mirror every target block when
-`prefix_caching` is explicitly set to `true`. Existing configurations that omit
-the setting keep loading with caching disabled for those layouts, and builders
-emit an explicit `false` opt-out. A fixed-size Engine-hosted auxiliary pool
+a prefix into resident continuation turns. For target sliding-window paged models,
+explicit `prefix_caching: true` retains every layer in full-sequence paged storage
+instead of a mutable ring. Both block-table inputs use the same physical block IDs;
+the model's sliding attention mask is unchanged. This costs more KV memory per
+retained token but allows reuse at every complete block, including prefixes older
+than a ring could retain. Omitting the setting or setting it to `false` preserves
+ring storage with prefix caching disabled. Builders emit an explicit `false`
+opt-out for these models.
+
+Auxiliary caches that mirror every target block are still rejected when caching
+is explicitly enabled, and default to caching disabled when the setting is omitted.
+A fixed-size Engine-hosted auxiliary pool
 can coexist with target prefix caching. For a windowed DFlash 2 drafter, an
 optional ring checkpoint can be attached to the exact indexed target boundary
 after its fixed-state checkpoint and the complete drafter proposal succeed.
@@ -1802,7 +1809,13 @@ The resulting per-block cost feeds `ComputePagedBlockCapacityFromBytes()`, which
 
 Scale caches follow their layer's mapping. A windowed layer's scale tensor is allocated with `num_window_blocks` leading entries and a full-attention layer's with `num_blocks`, matching that layer's key and value tensors, and each is indexed by the block table that layer already uses — the windowed block table for ring layers, the primary block table for the rest.
 
-The two budgets stay separate in the same way. `PagedKeyValueCacheBytesPerBlock()` skips windowed layers entirely, and the windowed reservation is computed as `num_window_blocks * BytesPerBlock(layer)` per windowed layer, which includes that layer's scale bytes. Windowed storage is taken off the top before the full-attention block count is derived, so a quantized windowed layer shrinks the ring's budget rather than the full-attention pool's per-block cost.
+In ring mode, the two budgets stay separate in the same way. `PagedKeyValueCacheBytesPerBlock()` skips ring-backed windowed layers, and the windowed reservation is computed as `num_window_blocks * BytesPerBlock(layer)` per windowed layer, which includes that layer's scale bytes. Windowed storage is taken off the top before the full-attention block count is derived, so a quantized windowed layer shrinks the ring's budget rather than the full-attention pool's per-block cost.
+
+With explicit `prefix_caching: true`, there is no separate ring allocation:
+windowed payloads and scales use full paged storage and are included in
+`PagedKeyValueCacheBytesPerBlock()`. Automatic memory sizing therefore yields
+fewer blocks for the same byte budget. An explicit `num_blocks` still specifies
+the number of target blocks, so keeping that count increases allocated bytes.
 
 ## Sliding-window paged layers
 
@@ -1813,6 +1826,8 @@ cache through the full context. This path is enabled only when all of the follow
 - `model.decoder.inputs.block_table_windowed` is configured and is an input of the exported model.
 - `search.chunk_size` is configured to a value greater than zero.
 - At least one decoder layer keeps the full sequence.
+- `engine.dynamic_batching.prefix_caching` is omitted or `false`. Explicit `true`
+  uses full paged storage for all layers to make retained prefix blocks immutable.
 
 Models without the windowed block-table input continue to use the normal full-sequence paged cache
 for every layer. The layer indices must be within the decoder layer range and the window size must be
