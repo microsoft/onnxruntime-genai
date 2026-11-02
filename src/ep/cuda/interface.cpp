@@ -38,19 +38,6 @@ const char* device_label = "cuda";
 
 cuda_stream_holder g_stream;
 
-// Device the NvTensorRtRtx interface is bound to, or -1 while unbound.
-std::atomic<int> g_bound_device_id{-1};
-
-void UseBoundDevice() noexcept {
-  const int device_id = g_bound_device_id.load(std::memory_order_acquire);
-  if (device_id < 0)
-    return;
-  int current_device_id{};
-  // Errors are left to the CUDA call that follows, as callers include noexcept paths.
-  if (::cudaGetDevice(&current_device_id) != cudaSuccess || current_device_id != device_id)
-    (void)::cudaSetDevice(device_id);
-}
-
 cudaStream_t GetStream() {
   UseBoundDevice();
   return g_stream.get();
