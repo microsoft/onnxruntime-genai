@@ -1432,7 +1432,7 @@ def test_qwen3_5_openvino_partitioned_embedding_provider(
 def test_qwen3_5_openvino_partitioned_vision_dtype(test_data_path, tmp_path, source_dtype, profile):
     half_boundaries = _QWEN35_HALF_BOUNDARIES[profile]
     grid_cases = [[[1, 4, 6], [1, 2, 4]]]
-    if profile == "all_half":
+    if "merger_mask" in half_boundaries:
         grid_cases.append([[2, 2, 4]])
     for case_index, grids in enumerate(grid_cases):
         model_path = tmp_path / f"qwen35-dtype-{case_index}"

@@ -416,17 +416,18 @@ std::vector<float> BuildRotaryPosEmb(int64_t t, int64_t h, int64_t w, int64_t me
   return rope;
 }
 
-// Block-diagonal attention mask [1, N, N]: 0.0 inside each per-frame block, -inf elsewhere. A single
-// image (t=1) yields one full-attention block. (Qwen3.5 does not use windowed attention.)
-std::vector<float> BuildAttentionMask(int64_t t, int64_t h, int64_t w) {
+// Block-diagonal attention mask [1, N, N]: `open` (0) inside each per-frame block, `blocked` (-inf) elsewhere. A
+// single image (t=1) yields one full-attention block. (Qwen3.5 does not use windowed attention.)
+template <typename T>
+std::vector<T> BuildAttentionMask(int64_t t, int64_t h, int64_t w, T open, T blocked) {
   const int64_t num_positions = t * h * w;
-  std::vector<float> mask(num_positions * num_positions, -std::numeric_limits<float>::infinity());
+  std::vector<T> mask(num_positions * num_positions, blocked);
   const int64_t slice_len = h * w;
   for (int64_t frame = 0; frame < t; ++frame) {
     const int64_t start = frame * slice_len;
     const int64_t end = start + slice_len;
     for (int64_t row = start; row < end; ++row) {
-      for (int64_t col = start; col < end; ++col) mask[row * num_positions + col] = 0.0f;
+      for (int64_t col = start; col < end; ++col) mask[row * num_positions + col] = open;
     }
   }
   return mask;
@@ -455,6 +456,8 @@ struct Qwen3_5OpenVINOVisionMerger : OpenVINOVisionMerger {
   int64_t spatial_merge_size_{2};
   int64_t rotary_dim_{};           // read from the merger's rotary_pos_emb input width
   int64_t num_grid_per_side_{48};  // sqrt(num_position_embeddings): 2304 -> 48 for qwen3_5
+  // Declared element type of the merger's attention_mask input.
+  ONNXTensorElementDataType merger_mask_type_{ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT};
 
   std::unique_ptr<OrtValue> image_features_;  // produced for the current prompt (null when no image)
 };
@@ -503,12 +506,14 @@ Qwen3_5OpenVINOVisionMerger::Qwen3_5OpenVINOVisionMerger(const OpenVINOMultiModa
   pos_session_ = &model_.GetVisionPipelineSession("pos");
   merger_session_ = &model_.GetVisionPipelineSession("merger");
 
-  // Rotary width comes from the merger's rotary_pos_emb input (e.g. 32).
+  // Rotary width comes from the merger's rotary_pos_emb input (e.g. 32); the mask is built in its input's type.
   for (size_t i = 0; i < merger_session_->GetInputCount(); ++i) {
-    if (merger_session_->GetInputName(i) == merger_rope_input_) {
+    const auto name = merger_session_->GetInputName(i);
+    if (name == merger_mask_input_) {
+      merger_mask_type_ = merger_session_->GetInputTypeInfo(i)->GetTensorTypeAndShapeInfo().GetElementType();
+    } else if (name == merger_rope_input_) {
       auto shape = merger_session_->GetInputTypeInfo(i)->GetTensorTypeAndShapeInfo().GetShape();
       if (shape.size() >= 2 && shape[1] > 0) rotary_dim_ = shape[1];
-      break;
     }
   }
   if (rotary_dim_ <= 0) {
@@ -649,11 +654,22 @@ void Qwen3_5OpenVINOVisionMerger::RunVision(const std::vector<ExtraInput>& extra
                                   spatial_merge_size_, embed_dim);
 
     auto rope = BuildRotaryPosEmb(slice.temporal, slice.height, slice.width, spatial_merge_size_, rotary_dim_);
-    auto mask = BuildAttentionMask(slice.temporal, slice.height, slice.width);
     const std::array<int64_t, 2> rope_shape{slice.num_patches, rotary_dim_};
     const std::array<int64_t, 3> mask_shape{1, slice.num_patches, slice.num_patches};
     auto rope_tensor = WrapCpuTensor(rope, rope_shape);
-    auto mask_tensor = WrapCpuTensor(mask, mask_shape);
+    // Write FLOAT16 masks directly so -inf does not depend on the CPU float->half cast.
+    std::vector<float> mask;
+    std::vector<Ort::Float16_t> half_mask;
+    std::unique_ptr<OrtValue> mask_tensor;
+    if (merger_mask_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+      half_mask = BuildAttentionMask(slice.temporal, slice.height, slice.width, Ort::Float16_t{0x0000},
+                                     Ort::Float16_t{0xFC00});
+      mask_tensor = WrapCpuTensor(half_mask, mask_shape);
+    } else {
+      mask = BuildAttentionMask(slice.temporal, slice.height, slice.width, 0.0f,
+                                -std::numeric_limits<float>::infinity());
+      mask_tensor = WrapCpuTensor(mask, mask_shape);
+    }
 
     const char* merger_in[] = {merger_hidden_input_.c_str(), merger_mask_input_.c_str(), merger_rope_input_.c_str()};
     std::unique_ptr<OrtValue> converted_hidden, converted_mask, converted_rope;
