@@ -1037,11 +1037,61 @@ def test_non_fp16_precision_policy_is_unchanged(tmp_path, ep, io_dtype):
     assert builder.io_dtype == builder.layernorm_attrs["residual_dtype"] == io_dtype
 
 
-def test_shared_skip_norm_default_keeps_existing_dtype():
+def test_block_drafter_supports_model_slice_and_split_signatures():
     builder = BlockDrafterBuilder()
+    builder.graph.inputs.append(builder.make_value("input", ir.DataType.FLOAT, [2, 6]))
+    builder.make_slice(
+        "/slice",
+        ["input", builder.const([1]), builder.const([5]), builder.const([1])],
+        ir.DataType.FLOAT,
+        [2, 4],
+    )
+    builder.make_split(
+        "/split",
+        ["/slice/output_0"],
+        ["left", "right"],
+        [ir.DataType.FLOAT, ir.DataType.FLOAT],
+        [[2, 2], [2, 2]],
+        axis=1,
+        num_outputs=2,
+    )
+    builder.graph.outputs.extend([builder.values["left"], builder.values["right"]])
+    model = ir.serde.serialize_model(builder.model)
+    onnx.checker.check_model(model)
+    session = ort.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"])
+    data = np.arange(12, dtype=np.float32).reshape(2, 6)
+    left, right = session.run(None, {"input": data})
+    np.testing.assert_array_equal(left, data[:, 1:3])
+    np.testing.assert_array_equal(right, data[:, 3:5])
+
+
+@pytest.mark.parametrize("axis", [0, -1])
+@pytest.mark.parametrize("largest", [False, True])
+@pytest.mark.parametrize("dtype", [np.float16, np.float32])
+def test_block_drafter_supports_model_topk_signature(axis, largest, dtype):
+    builder = BlockDrafterBuilder()
+    data = np.array([[2, 9, 1, 7], [8, 3, 6, 0], [4, 5, 11, 10]], dtype=dtype)
+    onnx_dtype = ir.DataType.FLOAT16 if dtype == np.float16 else ir.DataType.FLOAT
+    builder.graph.inputs.append(builder.make_value("input", onnx_dtype, list(data.shape)))
+    output_shape = list(data.shape)
+    output_shape[axis] = 2
+    builder.make_topk("/topk", ["input", builder.const([2])], onnx_dtype, output_shape, axis=axis, largest=largest)
+    builder.graph.outputs.extend([builder.values["/topk/output_0"], builder.values["/topk/output_1"]])
+    model = ir.serde.serialize_model(builder.model)
+    onnx.checker.check_model(model)
+    session = ort.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"])
+    values, indices = session.run(None, {"input": data})
+    expected_indices = np.take(np.argsort(-data if largest else data, axis=axis), [0, 1], axis=axis)
+    np.testing.assert_array_equal(indices, expected_indices)
+    np.testing.assert_array_equal(values, np.take_along_axis(data, expected_indices, axis=axis))
+    assert values.dtype == dtype
+    assert indices.dtype == np.int64
+
+
+def test_shared_skip_norm_default_keeps_existing_dtype():
+    builder = BlockDrafterBuilder("skip_norm", "test")
     builder.io_dtype = ir.DataType.BFLOAT16
     builder.hidden_size, builder.rms_eps = 8, 1e-6
-    builder.make_graph("skip_norm", "test")
     for name in ("root", "skip"):
         builder.graph.inputs.append(builder.make_value(name, builder.io_dtype, [5, 8]))
     output, residual = builder.skip_rms_norm("/norm", "root", "skip", torch.ones(8), 5)

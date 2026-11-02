@@ -467,6 +467,82 @@ def test_rewind(test_data_path, relative_model_path):
     assert np.array_equal(expected_sequence, generator.get_sequence(0))
 
 
+@pytest.mark.parametrize("stop_at_eos", [False, True])
+@pytest.mark.parametrize(
+    "relative_model_path",
+    [Path("hf-internal-testing") / "tiny-random-gpt2-fp32", Path("hf-internal-testing") / "tiny-random-lfm2-fp32"],
+)
+def test_append_tokens_after_generation(test_data_path, relative_model_path, stop_at_eos):
+    model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path)
+    prompt = np.array([[0, 0, 195, 731]], dtype=np.int32)
+
+    def new_generator(model):
+        search_params = og.GeneratorParams(model)
+        search_params.set_search_options(do_sample=False, max_length=20)
+        return og.Generator(model, search_params)
+
+    config = og.Config(model_path)
+    if stop_at_eos:
+        # The third greedy token becomes a stop token, which ends the search without joining the sequence.
+        probe = new_generator(og.Model(model_path))
+        probe.append_tokens(prompt)
+        for _ in range(3):
+            probe.generate_next_token()
+        config.overlay(json.dumps({"model": {"eos_token_id": int(probe.get_sequence(0)[-1])}}))
+    model = og.Model(config)
+
+    generator = new_generator(model)
+    generator.append_tokens(prompt)
+    if stop_at_eos:
+        while not generator.is_done():
+            generator.generate_next_token()
+    else:
+        for _ in range(3):
+            generator.generate_next_token()
+    generator.append_tokens(np.array([[52, 64]], dtype=np.int32))
+
+    # The last generated token, unless it stopped the search, must reach the model before the appended ones.
+    control = new_generator(model)
+    control.append_tokens(generator.get_sequence(0)[np.newaxis, :])
+    assert np.allclose(control.get_logits(), generator.get_logits(), rtol=0, atol=1e-6)
+
+
+def test_append_tokens_after_generation_with_guidance(test_data_path):
+    model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
+    model = og.Model(model_path)
+    tokenizer = og.Tokenizer(model)
+    pattern = r"[0-9]{8}"
+    prompt = np.array([[0, 0, 195, 731]], dtype=np.int32)
+
+    def new_generator(guidance):
+        search_params = og.GeneratorParams(model)
+        search_params.set_search_options(do_sample=False, max_length=20)
+        if guidance:
+            search_params.set_guidance("regex", pattern)
+        return og.Generator(model, search_params)
+
+    try:
+        generator = new_generator(guidance=True)
+    except RuntimeError as error:
+        if "guidance is unavailable" in str(error).lower():
+            pytest.skip("ONNX Runtime GenAI was built without guidance support")
+        raise
+    generator.append_tokens(prompt)
+    for _ in range(2):
+        generator.generate_next_token()
+    generator.append_tokens(np.array([tokenizer.encode("7")], dtype=np.int32))
+
+    control = new_generator(guidance=False)
+    control.append_tokens(generator.get_sequence(0)[np.newaxis, :])
+    assert np.allclose(control.get_logits(), generator.get_logits(), rtol=0, atol=1e-6)
+
+    # The grammar has to count the last generated token too, or the answer comes out too long.
+    while not generator.is_done():
+        generator.generate_next_token()
+    answer = tokenizer.decode(generator.get_sequence(0)[prompt.shape[1] :])
+    assert re.fullmatch(pattern, answer), answer
+
+
 # Test Model Loading with No Chat Template
 @pytest.mark.parametrize("device", devices)
 @pytest.mark.parametrize("batch", [True, False])

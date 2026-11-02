@@ -116,8 +116,9 @@ bool AppendExecutionProviderV2(
 
   auto filtered_ep_device_ptrs = ApplyDeviceFiltering(provider_options, ep_devices_ptrs);
   if (device_type == DeviceType::WEBGPU ||
-      device_type == DeviceType::CUDA) {
-    // WebGPU EP factory and CUDA EP factory currently only support one device at a time.
+      device_type == DeviceType::CUDA ||
+      device_type == DeviceType::NvTensorRtRtx) {
+    // WebGPU, CUDA and NvTensorRtRtx EP factories currently only support one device at a time.
     filtered_ep_device_ptrs = {filtered_ep_device_ptrs.front()};
   }
 

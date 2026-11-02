@@ -141,6 +141,32 @@ TEST(RecomputePreemptionConfigTest, RuntimeProfileSupportsEnableAndExplicitDisab
   EXPECT_FALSE(disabled.engine.dynamic_batching->enable_recompute_preemption);
 }
 
+TEST(RecomputePreemptionConfigTest, RuntimeProfileCombinesPreemptionAndSnapshotOptOuts) {
+  Config config{fs::path{MODEL_PATH "engine/dummy-decoder"}, R"({
+    "engine":{"dynamic_batching":{"num_blocks":4,"enable_recompute_preemption":true,
+      "prefix_caching":true,"max_snapshots":4,"snapshot_cache":{"ram_bytes":64}}},
+    "runtime_profiles":[{"id":"no-replay","eligibility":{"minimum_total_device_memory_bytes":1},
+      "overlay":{"engine":{"dynamic_batching":{"enable_recompute_preemption":false,
+        "prefix_caching":false,"max_snapshots":0,"snapshot_cache":{},
+        "max_preemptions_per_step":2,"min_decode_steps_before_preemption":3}}}}]
+  })"};
+
+  const auto& overlay = config.runtime_profiles.front().overlay.dynamic_batching;
+  ASSERT_EQ(overlay.enable_recompute_preemption, false);
+  ASSERT_EQ(overlay.prefix_caching, false);
+  ApplyRuntimeProfile(config, uint64_t{100});
+
+  const auto& batching = *config.engine.dynamic_batching;
+  EXPECT_FALSE(batching.enable_recompute_preemption);
+  ASSERT_TRUE(batching.prefix_caching.has_value());
+  EXPECT_FALSE(*batching.prefix_caching);
+  EXPECT_EQ(batching.max_snapshots, 0u);
+  EXPECT_TRUE(batching.snapshot_cache.explicitly_set);
+  EXPECT_FALSE(batching.snapshot_cache.Enabled());
+  EXPECT_EQ(batching.max_preemptions_per_step, 2u);
+  EXPECT_EQ(batching.min_decode_steps_before_preemption, 3u);
+}
+
 TEST(RecomputePreemptionTest, DefaultOffPreservesWaitOnlyAdmission) {
   auto test = MakeCompositeDoublesEngine(PreemptionModel(1, false), 5);
   auto resident = Queue(test.engine);

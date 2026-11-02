@@ -45,11 +45,13 @@ from builders import (
     LFM2Model,
     LFM2MoEModel,
     LFM2VLModel,
+    LFM3Model,
     LlamaModel,
     Mistral3TextModel,
     MistralModel,
     Model,
     NemotronModel,
+    NemotronParseModel,
     OLMoModel,
     Phi3MiniLongRoPEModel,
     Phi3MiniModel,
@@ -787,6 +789,14 @@ def create_model(
         onnx_model = LFM2AudioModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         # Same split as LFM2-VL: the decoder stage of the lfm2_audio pipeline, or a plain text model.
         onnx_model.model_type = "lfm2_audio" if onnx_model.exclude_embeds else "lfm2_audio_text"
+    elif config.architectures[0] == "Lfm3ForCausalLM":
+        onnx_model = LFM3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] in LFM3Model.MULTIMODAL:
+        onnx_model = LFM3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        # With the embedding layer excluded the decoder is one stage of the lfm3_vl / lfm3_audio /
+        # lfm3_omni pipeline (which the runtime does not have yet); otherwise a plain LFM3 text model.
+        _, pipeline = LFM3Model.MULTIMODAL[config.architectures[0]]
+        onnx_model.model_type = pipeline if onnx_model.exclude_embeds else "lfm3"
     elif config.architectures[0] == "LlamaForCausalLM":
         onnx_model = LlamaModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "MistralForCausalLM":
@@ -799,6 +809,8 @@ def create_model(
             onnx_model.model_type = "mistral3_text"
     elif config.architectures[0] == "NemotronForCausalLM":
         onnx_model = NemotronModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "NemotronParseForConditionalGeneration":
+        onnx_model = NemotronParseModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "OlmoForCausalLM":
         onnx_model = OLMoModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "PhiForCausalLM":
