@@ -1037,11 +1037,61 @@ def test_non_fp16_precision_policy_is_unchanged(tmp_path, ep, io_dtype):
     assert builder.io_dtype == builder.layernorm_attrs["residual_dtype"] == io_dtype
 
 
-def test_shared_skip_norm_default_keeps_existing_dtype():
+def test_block_drafter_supports_model_slice_and_split_signatures():
     builder = BlockDrafterBuilder()
+    builder.graph.inputs.append(builder.make_value("input", ir.DataType.FLOAT, [2, 6]))
+    builder.make_slice(
+        "/slice",
+        ["input", builder.const([1]), builder.const([5]), builder.const([1])],
+        ir.DataType.FLOAT,
+        [2, 4],
+    )
+    builder.make_split(
+        "/split",
+        ["/slice/output_0"],
+        ["left", "right"],
+        [ir.DataType.FLOAT, ir.DataType.FLOAT],
+        [[2, 2], [2, 2]],
+        axis=1,
+        num_outputs=2,
+    )
+    builder.graph.outputs.extend([builder.values["left"], builder.values["right"]])
+    model = ir.serde.serialize_model(builder.model)
+    onnx.checker.check_model(model)
+    session = ort.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"])
+    data = np.arange(12, dtype=np.float32).reshape(2, 6)
+    left, right = session.run(None, {"input": data})
+    np.testing.assert_array_equal(left, data[:, 1:3])
+    np.testing.assert_array_equal(right, data[:, 3:5])
+
+
+@pytest.mark.parametrize("axis", [0, -1])
+@pytest.mark.parametrize("largest", [False, True])
+@pytest.mark.parametrize("dtype", [np.float16, np.float32])
+def test_block_drafter_supports_model_topk_signature(axis, largest, dtype):
+    builder = BlockDrafterBuilder()
+    data = np.array([[2, 9, 1, 7], [8, 3, 6, 0], [4, 5, 11, 10]], dtype=dtype)
+    onnx_dtype = ir.DataType.FLOAT16 if dtype == np.float16 else ir.DataType.FLOAT
+    builder.graph.inputs.append(builder.make_value("input", onnx_dtype, list(data.shape)))
+    output_shape = list(data.shape)
+    output_shape[axis] = 2
+    builder.make_topk("/topk", ["input", builder.const([2])], onnx_dtype, output_shape, axis=axis, largest=largest)
+    builder.graph.outputs.extend([builder.values["/topk/output_0"], builder.values["/topk/output_1"]])
+    model = ir.serde.serialize_model(builder.model)
+    onnx.checker.check_model(model)
+    session = ort.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"])
+    values, indices = session.run(None, {"input": data})
+    expected_indices = np.take(np.argsort(-data if largest else data, axis=axis), [0, 1], axis=axis)
+    np.testing.assert_array_equal(indices, expected_indices)
+    np.testing.assert_array_equal(values, np.take_along_axis(data, expected_indices, axis=axis))
+    assert values.dtype == dtype
+    assert indices.dtype == np.int64
+
+
+def test_shared_skip_norm_default_keeps_existing_dtype():
+    builder = BlockDrafterBuilder("skip_norm", "test")
     builder.io_dtype = ir.DataType.BFLOAT16
     builder.hidden_size, builder.rms_eps = 8, 1e-6
-    builder.make_graph("skip_norm", "test")
     for name in ("root", "skip"):
         builder.graph.inputs.append(builder.make_value(name, builder.io_dtype, [5, 8]))
     output, residual = builder.skip_rms_norm("/norm", "root", "skip", torch.ones(8), 5)
@@ -1147,8 +1197,9 @@ def _quant_composite(
             Model.make_tied_quantized_embedding_input_names, model.decoder
         )
     else:
-        model.decoder.make_tied_quantized_embedding_input_names = lambda: (
+        model.decoder.make_tied_quantized_embedding_input_names = lambda _lm_head: (
             4,
+            32,
             weight_name,
             scales_name,
             zero_point_name,
@@ -1301,14 +1352,14 @@ def test_drafter_resolves_the_actual_target_lm_head_bit_width(onnx_dtype, last_m
         last_matmul_type=last_matmul_type,
     )
 
-    head_bits, *_ = model.decoder.make_tied_quantized_embedding_input_names()
+    head_bits, *_ = model.decoder.make_tied_quantized_embedding_input_names(None)
     head_quant = model.block_drafter_lm_head_quant()
 
     assert head_bits == expected_bits
     if expected_bits == 4:
         assert head_quant["bits"] == expected_bits
     else:
-        # The block-drafter quantizer cannot reproduce the target's Q8G initializer layout.
+        # Only a 4-bit target LM head is reused.
         assert head_quant is None
 
 
@@ -1334,6 +1385,20 @@ def test_prepacked_bf16_target_keeps_a_private_raw_quantized_drafter_head():
         "block_size": 32,
         "prepack": 0,
         "adopt_target": False,
+    }
+
+
+@pytest.mark.parametrize("io_dtype", [ir.DataType.FLOAT16, ir.DataType.BFLOAT16])
+def test_tied_prepacked_target_shares_its_raw_lm_head_with_the_drafter(io_dtype):
+    # The prepack pass leaves an LM head the tied embedding also reads raw, so any drafter can adopt it.
+    model = _quant_composite(io_dtype=io_dtype)
+    model.decoder.tied_quantized_embeddings = True
+
+    assert model.block_drafter_lm_head_quant() == {
+        "bits": 4,
+        "block_size": 32,
+        "prepack": 0,
+        "adopt_target": True,
     }
 
 
@@ -1374,6 +1439,14 @@ def test_quantized_target_table_is_adopted_by_the_drafter():
 )
 def test_an_unadoptable_target_table_leaves_the_drafter_embedding_dense(overrides):
     assert _embed_quant_composite(**overrides).block_drafter_embed_quant() is None
+
+
+def test_int8_target_table_leaves_the_drafter_embedding_dense():
+    # embedding_quant_type=int8 writes model.embed_tokens.weight_Q8, not the weight_Q4 the drafter adopts.
+    model = _embed_quant_composite()
+    model.decoder.quant_attrs["embedding_bits"] = 8
+
+    assert model.block_drafter_embed_quant() is None
 
 
 def test_private_quantized_drafter_head_is_not_shared(tmp_path):
@@ -1869,11 +1942,11 @@ def test_qkv_fusion_matches_unfused_projections(tmp_path, bits):
         np.testing.assert_allclose(packed[:, q_dim + kv_dim :], v, rtol=1e-5, atol=1e-5)
 
 
-def _quantized_head_builder(tmp_path, bits=4, block_size=8):
+def _quantized_head_builder(tmp_path, bits=4, block_size=8, io_dtype=ir.DataType.FLOAT16):
     builder = DFlash2Builder(
         _draft_checkpoint(tmp_path),
         str(tmp_path),
-        ir.DataType.FLOAT16,
+        io_dtype,
         paged_block_size=256,
         max_position_embeddings=128,
         quant={
@@ -1960,6 +2033,19 @@ def test_quantized_lm_head_adopts_the_targets_bytes_and_attributes(tmp_path):
     assert node.attributes["K"].value == builder.hidden_size
     assert node.attributes["N"].value == builder.vocab_size
     assert builder.lm_head_adoption is None
+
+
+def test_bf16_drafter_adopts_an_unpacked_target_lm_head(tmp_path):
+    builder = _quantized_head_builder(tmp_path, io_dtype=ir.DataType.BFLOAT16)
+    builder.make_lm_head("hidden_states", "num_sample")
+    target_path, qweight, _ = _save_quantized_target(tmp_path, builder, weight_prepacked=None)
+
+    builder.adopt_target_tensors(target_path)
+
+    adopted = builder.graph.initializers["lm_head.MatMul.weight_Q4"].const_value.numpy()
+    np.testing.assert_array_equal(adopted, qweight)
+    node = next(node for node in builder.graph if node.name == "/lm_head/MatMul")
+    assert "weight_prepacked" not in node.attributes
 
 
 def test_adopted_lm_head_survives_a_round_trip_to_disk(tmp_path):

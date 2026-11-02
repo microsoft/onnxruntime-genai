@@ -87,10 +87,11 @@ typedef struct OgaRequestOptions OgaRequestOptions;
 typedef struct OgaTurnOptions OgaTurnOptions;
 typedef struct OgaTurnUsage OgaTurnUsage;
 typedef struct OgaStreamingProcessor OgaStreamingProcessor;
-typedef struct OgaTokenPostProcessor OgaTokenPostProcessor;
-typedef struct OgaTokenPostProcessorResult OgaTokenPostProcessorResult;
-typedef struct OgaTokenPostProcessorTimestampResult OgaTokenPostProcessorTimestampResult;
-typedef struct OgaTokenPostProcessorTimestampRecord OgaTokenPostProcessorTimestampRecord;
+typedef struct OgaPostProcessor OgaPostProcessor;
+typedef struct OgaASRPostProcessor OgaASRPostProcessor;
+typedef struct OgaASRPostProcessorResult OgaASRPostProcessorResult;
+typedef struct OgaASRPostProcessorTimestampResult OgaASRPostProcessorTimestampResult;
+typedef struct OgaASRPostProcessorTimestampRecord OgaASRPostProcessorTimestampRecord;
 
 typedef enum OgaTimestampRecordKind {
   OgaTimestampRecordKind_Words,
@@ -99,23 +100,29 @@ typedef enum OgaTimestampRecordKind {
 
 /** Configuration and tokenizer come from the generator's model.
  * The generator must outlive the processor. Results are borrowed until its next mutation. */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateTokenPostProcessor(const OgaGenerator* generator, OgaTokenPostProcessor** out);
-OGA_EXPORT void OGA_API_CALL OgaDestroyTokenPostProcessor(OgaTokenPostProcessor* processor);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenPostProcessorProcessNextTokens(OgaTokenPostProcessor* processor);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenPostProcessorFinalize(OgaTokenPostProcessor* processor);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenPostProcessorReset(OgaTokenPostProcessor* processor);
-OGA_EXPORT size_t OGA_API_CALL OgaTokenPostProcessorGetResultCount(const OgaTokenPostProcessor* processor);
-OGA_EXPORT const OgaTokenPostProcessorResult* OGA_API_CALL OgaTokenPostProcessorGetResult(const OgaTokenPostProcessor* processor, size_t index);
-OGA_EXPORT const char* OGA_API_CALL OgaTokenPostProcessorResultGetText(const OgaTokenPostProcessorResult* result);
-OGA_EXPORT const OgaTokenPostProcessorTimestampResult* OGA_API_CALL OgaTokenPostProcessorResultGetTimestampResult(const OgaTokenPostProcessorResult* result);
-OGA_EXPORT size_t OGA_API_CALL OgaTokenPostProcessorTimestampResultGetWordCount(const OgaTokenPostProcessorTimestampResult* timestamps);
-OGA_EXPORT size_t OGA_API_CALL OgaTokenPostProcessorTimestampResultGetSegmentCount(const OgaTokenPostProcessorTimestampResult* timestamps);
-OGA_EXPORT const OgaTokenPostProcessorTimestampRecord* OGA_API_CALL OgaTokenPostProcessorTimestampResultGetTimestampRecord(const OgaTokenPostProcessorTimestampResult* timestamps, OgaTimestampRecordKind kind, size_t index);
-OGA_EXPORT const char* OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetText(const OgaTokenPostProcessorTimestampRecord* record);
-OGA_EXPORT int64_t OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStartFrame(const OgaTokenPostProcessorTimestampRecord* record);
-OGA_EXPORT int64_t OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStopFrame(const OgaTokenPostProcessorTimestampRecord* record);
-OGA_EXPORT double OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStartTime(const OgaTokenPostProcessorTimestampRecord* record);
-OGA_EXPORT double OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStopTime(const OgaTokenPostProcessorTimestampRecord* record);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateASRPostProcessor(const OgaGenerator* generator, OgaASRPostProcessor** out);
+/** Returns a base view of the same processor without transferring or duplicating ownership.
+ * Returns null for a null processor. Both handles become invalid when the processor is destroyed. */
+OGA_EXPORT OgaPostProcessor* OGA_API_CALL OgaASRPostProcessorAsPostProcessor(OgaASRPostProcessor* processor);
+/** Destroys the concrete processor through its virtual destructor. Accepts null.
+ * Destroy each processor exactly once; subtype and base handles refer to the same object. */
+OGA_EXPORT void OGA_API_CALL OgaDestroyPostProcessor(OgaPostProcessor* processor);
+/** Processes the generator's current output using the concrete processor implementation. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaPostProcessorProcessNext(OgaPostProcessor* processor);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaPostProcessorFinalize(OgaPostProcessor* processor);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaPostProcessorReset(OgaPostProcessor* processor);
+OGA_EXPORT size_t OGA_API_CALL OgaASRPostProcessorGetResultCount(const OgaASRPostProcessor* processor);
+OGA_EXPORT const OgaASRPostProcessorResult* OGA_API_CALL OgaASRPostProcessorGetResult(const OgaASRPostProcessor* processor, size_t index);
+OGA_EXPORT const char* OGA_API_CALL OgaASRPostProcessorResultGetText(const OgaASRPostProcessorResult* result);
+OGA_EXPORT const OgaASRPostProcessorTimestampResult* OGA_API_CALL OgaASRPostProcessorResultGetTimestampResult(const OgaASRPostProcessorResult* result);
+OGA_EXPORT size_t OGA_API_CALL OgaASRPostProcessorTimestampResultGetWordCount(const OgaASRPostProcessorTimestampResult* timestamps);
+OGA_EXPORT size_t OGA_API_CALL OgaASRPostProcessorTimestampResultGetSegmentCount(const OgaASRPostProcessorTimestampResult* timestamps);
+OGA_EXPORT const OgaASRPostProcessorTimestampRecord* OGA_API_CALL OgaASRPostProcessorTimestampResultGetTimestampRecord(const OgaASRPostProcessorTimestampResult* timestamps, OgaTimestampRecordKind kind, size_t index);
+OGA_EXPORT const char* OGA_API_CALL OgaASRPostProcessorTimestampRecordGetText(const OgaASRPostProcessorTimestampRecord* record);
+OGA_EXPORT int64_t OGA_API_CALL OgaASRPostProcessorTimestampRecordGetStartFrame(const OgaASRPostProcessorTimestampRecord* record);
+OGA_EXPORT int64_t OGA_API_CALL OgaASRPostProcessorTimestampRecordGetStopFrame(const OgaASRPostProcessorTimestampRecord* record);
+OGA_EXPORT double OGA_API_CALL OgaASRPostProcessorTimestampRecordGetStartTime(const OgaASRPostProcessorTimestampRecord* record);
+OGA_EXPORT double OGA_API_CALL OgaASRPostProcessorTimestampRecordGetStopTime(const OgaASRPostProcessorTimestampRecord* record);
 
 typedef struct OgaNonGenerativeSession OgaNonGenerativeSession;
 

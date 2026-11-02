@@ -45,9 +45,10 @@ thresholds are rejected while loading the configuration.
 ## Decoding flows
 
 Both paths start with audio processed into features, followed by generated token IDs. Model
-configuration determines whether acoustic timing is produced. `TokenPostProcessor`
-forwards borrowed token and optional timing views to its internal `TokenPostProcessorInternal`, which
-owns decoding and timestamp processing. Ordinary tokenizer decoding is unchanged.
+configuration determines whether acoustic timing is produced. `ASRPostProcessor`
+forwards borrowed token and optional timing views from its public `ProcessNext()`
+to a private `ProcessNext(outputs)` overload and directly owns decoding and
+timestamp processing. Ordinary tokenizer decoding is unchanged.
 `timestamp_level` controls timestamp generation:
 
 ```mermaid
@@ -63,12 +64,12 @@ flowchart TB
 
   subgraph timed[With timestamps: word, segment, or all]
     setup[Processor copies model configuration] --> stream
-    timed_tokens[Private Generator.GetTokenOutputs: IDs + frame intervals] --> stream[TokenPostProcessor.ProcessNextTokens]
-    stream --> internal[Internal TokenPostProcessorInternal.Process]
+    timed_tokens[Private Generator.GetTokenOutputs: IDs + frame intervals] --> stream[ASRPostProcessor.ProcessNext]
+    stream --> internal[Private ASRPostProcessor.ProcessNext with outputs]
     internal --> ortx[Extensions: vocabulary facts + ordinary cached decode]
     ortx --> align[GenAI MetadataCoreState: group words and align buffered frames]
     align --> events[Per-call word / segment events with frame and second bounds]
-    events --> read[GetNextTokenResults: read only]
+    events --> read[GetNextResults: read only]
     stream --> final[Finalize: flush trailing word / segment]
     final --> trailing[Trailing word / segment events]
   end
@@ -89,7 +90,7 @@ For a locally installed Nemotron model outside the test fixtures, set
 `AudioSpeechValidationTests.NemotronProcessorEmitsChunkStartSample`.
 That test uses CPU session options, even when the model package specifies CUDA.
 
-For the timed path, create `TokenPostProcessor(generator)` after configuring
+For the timed path, create `ASRPostProcessor(generator)` after configuring
 the model and creating the generator. The processor obtains its model from the
 generator rather than taking a separate model argument. The generator supplies
 *when* each token occurred; Extensions supplies
@@ -105,11 +106,11 @@ completed event text for the lifetime of the returned per-call result. The gener
 pairs tokens and intervals by emission position, not by token ID.
 
 The private generator getter borrows the existing per-step transducer output;
-Nemotron continues to supply zero or one token per step. The internal stream accepts
+Nemotron continues to supply zero or one token per step. The private overload accepts
 ordered token/timing values and can process a whole offline batch or incremental
 batches with the same finalization rules. This does not add a public offline producer API.
 
-At setup, the generator-facing adapter calculates `seconds_per_frame` and the
+At setup, the processor constructor calculates `seconds_per_frame` and the
 rounded gap threshold once from the existing model configuration. The internal
 timestamp code receives those derived values, not another copy of sample rate,
 hop length, and subsampling factor. Native token input uses an optional
@@ -120,9 +121,9 @@ exposed by the public C output handles or field accessors.
 ## Decoding
 
 Configure timestamp level and segment rules before creating the generator and
-`TokenPostProcessor`. After each generation step, call `ProcessNextTokens()`
-(C++/C#) or `process_next_tokens()` (Python), then read `GetNextTokenResults()` or
-`get_next_token_results()`. All sequential emissions are processed in order,
+`ASRPostProcessor`. After each generation step, call `ProcessNext()`
+(C++/C#) or `process_next()` (Python), then read `GetNextResults()` or
+`get_next_results()`. All sequential emissions are processed in order,
 including steps that emit zero or multiple tokens. Reading results repeatedly
 does not change them. The private generator getter is not exposed to applications.
 Enabled timestamps require present, valid acoustic timing. Intervals are half-open
@@ -139,9 +140,9 @@ concatenating all emitted words or all emitted segments reproduces the decoded t
 In every binding, read and copy needed text and scalar values into the application's
 transcript before the next processor mutation. Result wrappers do not retain old native output.
 
-C exposes opaque result, `OgaTokenPostProcessorTimestampResult`, and timestamp-record
-handles with typed accessors. `OgaTokenPostProcessorResultGetTimestampResult()`
-returns the container; `OgaTokenPostProcessorTimestampResultGetTimestampRecord()`
+C exposes opaque result, `OgaASRPostProcessorTimestampResult`, and timestamp-record
+handles with typed accessors. `OgaASRPostProcessorResultGetTimestampResult()`
+returns the container; `OgaASRPostProcessorTimestampResultGetTimestampRecord()`
 selects a word or segment by `OgaTimestampRecordKind` and index. C++ exposes the
 same opaque handles through method-only wrappers. Use `GetText()` and
 `GetTimestampResult()` on a result, `GetWordCount()` / `GetSegmentCount()` and

@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <stdexcept>
 #include <string>
 #include <sstream>
@@ -15,6 +16,23 @@
 namespace Generators {
 
 cudaStream_t GetStream();
+
+// Device the NvTensorRtRtx interface is bound to, or -1 while unbound. Defined inline so that targets
+// using these helpers without the add-on's interface.cpp still link.
+inline std::atomic<int> g_bound_device_id{-1};
+
+// Makes the device the NvTensorRtRtx interface is bound to current on the calling thread. CUDA's current
+// device is per thread, so a thread that did not bind the interface would otherwise allocate or create
+// events on another device than the shared stream's.
+inline void UseBoundDevice() noexcept {
+  const int device_id = g_bound_device_id.load(std::memory_order_acquire);
+  if (device_id < 0)
+    return;
+  int current_device_id{};
+  // Errors are left to the CUDA call that follows, as callers include noexcept paths.
+  if (::cudaGetDevice(&current_device_id) != cudaSuccess || current_device_id != device_id)
+    (void)::cudaSetDevice(device_id);
+}
 
 #define CeilDiv(a, b) ((a + (b - 1)) / b)
 
@@ -56,10 +74,12 @@ class CudaError : public std::runtime_error {
 
 struct cuda_event_holder {
   cuda_event_holder() {
+    UseBoundDevice();
     CUDA_CHECK(cudaEventCreate(&v_));
   }
 
   cuda_event_holder(unsigned flags) {
+    UseBoundDevice();
     CUDA_CHECK(cudaEventCreateWithFlags(&v_, flags));
   }
 
@@ -78,6 +98,15 @@ struct cuda_stream_holder {
   void Create() {
     assert(!v_);
     CUDA_CHECK(cudaStreamCreate(&v_));
+  }
+
+  // Replaces the stream with one created on the current device. The old stream is kept if creation fails.
+  void Recreate() {
+    cudaStream_t stream{};
+    CUDA_CHECK(cudaStreamCreate(&stream));
+    if (v_)
+      (void)cudaStreamDestroy(v_);
+    v_ = stream;
   }
 
   ~cuda_stream_holder() {
@@ -110,6 +139,7 @@ using cuda_host_unique_ptr = std::unique_ptr<T, CudaHostDeleter>;
 template <typename T>
 cuda_host_unique_ptr<T> CudaMallocHostArray(size_t count, std::span<T>* p_span = nullptr) {
   T* p;
+  UseBoundDevice();
   CUDA_CHECK(::cudaMallocHost(&p, sizeof(T) * count));
   if (p_span)
     *p_span = std::span<T>(p, count);
@@ -128,6 +158,7 @@ using cuda_unique_ptr = std::unique_ptr<T, CudaDeleter>;
 template <typename T>
 cuda_unique_ptr<T> CudaMallocArray(size_t count, std::span<T>* p_span = nullptr) {
   T* p;
+  UseBoundDevice();
   CUDA_CHECK(::cudaMalloc(&p, sizeof(T) * count));
   if (p_span)
     *p_span = std::span<T>(p, count);

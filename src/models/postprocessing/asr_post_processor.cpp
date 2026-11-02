@@ -1,4 +1,4 @@
-#include "token_post_processor.h"
+#include "asr_post_processor.h"
 
 #include "generator/token_outputs.h"
 #include "models/model.h"
@@ -10,7 +10,7 @@ MetadataCoreConfig GetPostProcessorConfig(const Generator& generator) {
   const auto& model = *generator.model_;
   const auto& search = generator.state_->params_->search;
   if (search.batch_size != 1 || search.num_beams != 1)
-    throw std::runtime_error("TokenPostProcessor requires batch_size=1 and num_beams=1");
+    throw std::runtime_error("ASRPostProcessor requires batch_size=1 and num_beams=1");
   ValidateTimestampConfiguration(model.config_->model);
   const auto& source = model.config_->model;
   MetadataCoreConfig config;
@@ -24,28 +24,17 @@ MetadataCoreConfig GetPostProcessorConfig(const Generator& generator) {
 }
 }  // namespace
 
-TokenPostProcessor::TokenPostProcessor(const Generator& generator)
-    : PostProcessor{generator}, internal_{generator_.model_->CreateTokenizer(), GetPostProcessorConfig(generator_)} {}
-
-void TokenPostProcessor::ProcessNextTokens() {
-  internal_.Process(generator_.GetTokenOutputs());
-}
-
-void TokenPostProcessor::Finalize() {
-  internal_.Finalize();
-}
-
-void TokenPostProcessor::Reset() {
-  internal_.Reset();
-}
-
-TokenPostProcessorInternal::TokenPostProcessorInternal(std::shared_ptr<Tokenizer> tokenizer, MetadataCoreConfig config)
-    : tokenizer_{std::move(tokenizer)}, config_{std::move(config)} {
+ASRPostProcessor::ASRPostProcessor(const Generator& generator)
+    : PostProcessor{generator}, tokenizer_{generator_.model_->CreateTokenizer()}, config_{GetPostProcessorConfig(generator_)} {
   stream_ = tokenizer_->CreateStream();
   metadata_state_ = std::unique_ptr<MetadataCoreState>(new MetadataCoreState(config_));
 }
 
-void TokenPostProcessorInternal::Process(const TokenOutputs& outputs) {
+void ASRPostProcessor::ProcessNext() {
+  ProcessNext(generator_.GetTokenOutputs());
+}
+
+void ASRPostProcessor::ProcessNext(const TokenOutputs& outputs) {
   results_.clear();
   const auto tokens = outputs.GetTokens();
   const auto* timestamps = outputs.GetAcousticFrameIntervals();
@@ -66,12 +55,12 @@ void TokenPostProcessorInternal::Process(const TokenOutputs& outputs) {
   }
 }
 
-void TokenPostProcessorInternal::Finalize() {
+void ASRPostProcessor::Finalize() {
   results_.clear();
   metadata_state_->ProcessFinalized(results_.emplace_back());
 }
 
-void TokenPostProcessorInternal::Reset() {
+void ASRPostProcessor::Reset() {
   results_.clear();
   stream_->Reset();
   metadata_state_ = std::unique_ptr<MetadataCoreState>(new MetadataCoreState(config_));

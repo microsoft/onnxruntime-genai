@@ -521,7 +521,6 @@ TEST(PagedKeyValueCacheManifestTest, HybridExactFitPrefixAdmissionMakesBoundedEn
     batching.num_blocks = 2;
     batching.max_batch_size = 3;
     batching.prefix_caching = prefix_caching;
-    batching.prefix_caching_explicitly_set = true;
     return CreateModel(GetOrtEnv(), std::move(config));
   };
   const auto begin = [&](const std::shared_ptr<Engine>& engine) {
@@ -999,16 +998,119 @@ TEST(PagedKeyValueCacheManifestTest, RemovalReusesCommittedSlidingWindowCapacity
   EXPECT_TRUE(cache->OwnsRequest(second.get()));
 }
 
-TEST(PagedKeyValueCacheManifestTest, PrefixCachingRejectsSlidingWindowCache) {
-  auto model = LoadSyntheticPagedModel();
-  model->config_->engine.dynamic_batching->prefix_caching_explicitly_set = true;
-  auto& decoder = model->config_->model.decoder;
-  decoder.sliding_window = Config::Model::Decoder::SlidingWindow{};
-  decoder.sliding_window->window_size = 4;
-  decoder.sliding_window->layers = {1};
-  decoder.inputs.block_table_windowed = decoder.inputs.block_table;
+TEST(PagedKeyValueCacheManifestTest, PrefixCachingRetainsSlidingLayersAndScalesInFullPagedStorage) {
+  for (const char* path : {MODEL_PATH "engine/synthetic-paged",
+                           MODEL_PATH "engine/synthetic-paged-scales"}) {
+    auto model = CreateModel(GetOrtEnv(), path);
+    const size_t full_block_bytes = PagedKeyValueCacheBytesPerBlock(model);
+    model->config_->engine.dynamic_batching->prefix_caching = true;
+    auto& decoder = model->config_->model.decoder;
+    decoder.sliding_window = Config::Model::Decoder::SlidingWindow{};
+    decoder.sliding_window->window_size = 4;
+    decoder.sliding_window->layers = {1};
+    decoder.inputs.block_table_windowed = decoder.inputs.block_table;
+    model->config_->search.chunk_size.reset();
 
-  EXPECT_THROW(MakePagedCache(model), std::runtime_error);
+    auto cache = MakePagedCache(model);
+    EXPECT_TRUE(cache->PrefixCachingEnabled());
+    EXPECT_EQ(PagedKeyValueCacheBytesPerBlock(model), full_block_bytes);
+    EXPECT_EQ(cache->Snapshot().window_blocks.total_blocks, 0u);
+    EXPECT_EQ(cache->MaxQueryTokensPerRequest(), 0u);
+
+    auto params = CreateGeneratorParams(*model);
+    ModelIO state(*params, *model);
+    cache->UpdateState(state, {});
+    ASSERT_EQ(state.inputs_.size(), state.outputs_.size() + 2);
+    EXPECT_EQ(state.inputs_[state.outputs_.size()], state.inputs_.back());
+    size_t allocated_bytes = 0;
+    for (auto* value : state.outputs_) {
+      const auto info = value->GetTensorTypeAndShapeInfo();
+      EXPECT_EQ(info->GetShape()[0], 128);
+      allocated_bytes += info->GetElementCount() * Ort::SizeOf(info->GetElementType());
+    }
+    EXPECT_EQ(allocated_bytes, full_block_bytes * 128);
+  }
+}
+
+TEST(PagedKeyValueCacheManifestTest, PrefixCachingSharesSlidingKVBeyondRingWrap) {
+  for (bool graph_capture : {false, true}) {
+    SCOPED_TRACE(graph_capture);
+    auto model = LoadSyntheticPagedModel();
+    model->config_->engine.dynamic_batching->prefix_caching = true;
+    auto& decoder = model->config_->model.decoder;
+    decoder.sliding_window = Config::Model::Decoder::SlidingWindow{};
+    decoder.sliding_window->window_size = 4;
+    decoder.sliding_window->layers = {1};
+    decoder.inputs.block_table_windowed = decoder.inputs.block_table;
+    model->config_->search.chunk_size = 4;
+    auto assign_target =
+        MakeDoublesEngine(model, /*capacity=*/2, EosToken(*model)).engine;
+    if (graph_capture) {
+      SetProviderOption(*model->config_, "cuda", "enable_cuda_graph", "1");
+    }
+    auto cache = MakePagedCache(model);
+    EXPECT_EQ(cache->GraphCaptureEnabled(), graph_capture);
+
+    // Twelve positions exceed the eight-slot ring this configuration would otherwise use.
+    const std::array<int32_t, 12> prefix{2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13};
+    auto source = CreateRequestWithPrompt(assign_target, prefix);
+    cache->Add(source);
+    cache->AppendTokens(source);
+    auto params = CreateGeneratorParams(*model);
+    ModelIO state(*params, *model);
+    cache->UpdateState(state, {source});
+    ASSERT_EQ(state.inputs_.size(), 6u);
+    EXPECT_EQ(state.inputs_[4], state.inputs_[5]);
+    const auto source_snapshot = cache->Snapshot();
+    const auto source_blocks = source_snapshot.requests.front().block_ids;
+    ASSERT_EQ(source_blocks.size(), 3u);
+    for (auto* value : state.outputs_) {
+      auto* data = value->GetTensorMutableData<float>();
+      for (size_t position = 0; position < prefix.size(); ++position) {
+        data[source_blocks[position / 4] * 4 + position % 4] =
+            static_cast<float>(prefix[position]);
+      }
+    }
+    cache->SealCommittedBlocks(source.get(), prefix);
+
+    const std::array growth{PagedCacheReservationRequest{source.get(), 16, false}};
+    auto advance = cache->Reserve(growth);
+    advance.Commit();
+    cache->Remove(source);
+
+    std::vector<int32_t> prompt(prefix.begin(), prefix.end());
+    prompt.push_back(14);
+    auto match = cache->MatchPrefix(prompt, prompt.size() - 1);
+    ASSERT_EQ(match.token_count, prefix.size());
+    auto first = CreateRequestWithPrompt(assign_target, prompt);
+    prompt.back() = 15;
+    auto second = CreateRequestWithPrompt(assign_target, prompt);
+    const std::array admissions{
+        PagedCacheReservationRequest{first.get(), 13, true, 13, &match},
+        PagedCacheReservationRequest{second.get(), 13, true, 13, &match}};
+    auto reservation = cache->Reserve(admissions);
+    cache->UpdateState(state, {first, second}, reservation, 4);
+    ASSERT_EQ(state.inputs_[4], state.inputs_[5]);
+    const auto* table = state.inputs_[4]->GetTensorData<int32_t>();
+    for (size_t block = 0; block < source_blocks.size(); ++block) {
+      EXPECT_EQ(table[block], static_cast<int32_t>(source_blocks[block]));
+      EXPECT_EQ(table[block + 4], table[block]);
+    }
+    EXPECT_NE(table[3], table[7]);
+    for (auto* value : state.outputs_) {
+      const auto* data = value->GetTensorData<float>();
+      for (size_t position = 0; position < prefix.size(); ++position) {
+        EXPECT_EQ(data[static_cast<size_t>(table[position / 4]) * 4 + position % 4],
+                  static_cast<float>(prefix[position]));
+      }
+    }
+    reservation.Commit();
+    cache->RecordPrefixAdoptions(reservation);
+    EXPECT_TRUE(ValidateCacheInvariants(cache->Snapshot()).empty());
+    EXPECT_EQ(cache->PrefixMetrics().matched_tokens, 2 * prefix.size());
+    cache->Remove(first);
+    cache->Remove(second);
+  }
 }
 
 TEST(PagedKeyValueCacheManifestTest, OmittedPrefixCachingPreservesSlidingWindowCompatibility) {
@@ -1020,7 +1122,7 @@ TEST(PagedKeyValueCacheManifestTest, OmittedPrefixCachingPreservesSlidingWindowC
   decoder.inputs.block_table_windowed = decoder.inputs.block_table;
   model->config_->search.chunk_size = 4;
 
-  EXPECT_TRUE(model->config_->engine.dynamic_batching->prefix_caching);
+  EXPECT_FALSE(model->config_->engine.dynamic_batching->prefix_caching.has_value());
   EXPECT_FALSE(ResolvePrefixCachingEnabled(model, /*auxiliary_bytes_per_block=*/0));
   auto cache = MakePagedCache(model);
 
@@ -1041,6 +1143,7 @@ TEST(PagedKeyValueCacheManifestTest, SingleBlockPoolKeepsPrefixCachingEnabled) {
   auto model = LoadSyntheticPagedModel();
   auto& batching = *model->config_->engine.dynamic_batching;
   batching.num_blocks = 1;
+  EXPECT_TRUE(batching.prefix_caching.value_or(true));
 
   auto cache = MakePagedCache(model);
 
@@ -1050,7 +1153,7 @@ TEST(PagedKeyValueCacheManifestTest, SingleBlockPoolKeepsPrefixCachingEnabled) {
 TEST(PagedKeyValueCacheManifestTest, PrefixCachingRejectsDsparkAuxiliaryState) {
   auto model = LoadSyntheticPagedModel();
   auto& batching = *model->config_->engine.dynamic_batching;
-  batching.prefix_caching_explicitly_set = true;
+  batching.prefix_caching = true;
   model->config_->model.dflash2.filename = "dspark.onnx";
   model->config_->model.dflash2.is_dspark = true;
 
@@ -1060,7 +1163,6 @@ TEST(PagedKeyValueCacheManifestTest, PrefixCachingRejectsDsparkAuxiliaryState) {
 TEST(PagedKeyValueCacheManifestTest, PrefixCachingSupportsFixedAuxiliaryPool) {
   auto model = LoadSyntheticPagedModel();
   model->config_->engine.dynamic_batching->prefix_caching = true;
-  model->config_->engine.dynamic_batching->prefix_caching_explicitly_set = true;
 
   EXPECT_THROW(
       PagedKeyValueCache(
@@ -1100,9 +1202,10 @@ TEST(PagedKeyValueCacheManifestTest, OptionalDraftCheckpointDoesNotExhaustHybrid
   EXPECT_EQ(manager->Snapshot().total_blocks, 4u);
   manager.reset();
 
+  batching.snapshot_cache.ram_bytes = 2 * block_bytes;
   manager = CacheManager::Create(model, 0, 0, 2 * block_bytes, &enabled);
   EXPECT_TRUE(enabled);
-  EXPECT_EQ(manager->Snapshot().total_blocks, 2u);
+  EXPECT_EQ(manager->Snapshot().total_blocks, 4u);
 }
 
 TEST(PagedKeyValueCacheManifestTest, DraftSnapshotCountIsLimitedByConfigBudgetAndTargetCheckpoints) {
@@ -1112,60 +1215,61 @@ TEST(PagedKeyValueCacheManifestTest, DraftSnapshotCountIsLimitedByConfigBudgetAn
   batching.max_batch_size = 4;
   batching.num_blocks = 8;
   const size_t block_bytes = PagedKeyValueCacheBytesPerBlock(model);
-  for (const auto [requested, expected] :
-       {std::pair<size_t, size_t>{0, 0}, {1, 1}, {3, 3}, {100, 4}}) {
-    batching.dflash2_max_snapshots = requested;
-    auto manager = CacheManager::Create(model, 0, 0, block_bytes);
-    EXPECT_EQ(manager->DraftCheckpointCapacity(), expected);
-    EXPECT_EQ(manager->Snapshot().total_blocks, 8u - expected);
-  }
-  batching.dflash2_max_snapshots = 100;
-  auto manager = CacheManager::Create(model, 0, 0, 3 * block_bytes);
-  EXPECT_EQ(manager->DraftCheckpointCapacity(), 2u);
-  EXPECT_EQ(manager->Snapshot().total_blocks, 2u);
-  manager.reset();
+  batching.snapshot_cache.ram_bytes = 2 * block_bytes;
+  batching.dflash2_max_snapshots = 1;
+  auto count_limited = CacheManager::Create(model, 0, 0, block_bytes);
+  EXPECT_EQ(count_limited->DraftCheckpointCapacity(), 1u);
+  EXPECT_EQ(count_limited->Snapshot().total_blocks, 8u);
 
-  batching.prefix_caching = false;
-  manager = CacheManager::Create(model, 0, 0, block_bytes);
-  EXPECT_EQ(manager->DraftCheckpointCapacity(), 0u);
-  EXPECT_EQ(manager->Snapshot().total_blocks, 8u);
+  batching.snapshot_cache.ram_bytes = block_bytes;
+  batching.dflash2_max_snapshots = 3;
+  auto byte_limited = CacheManager::Create(model, 0, 0, block_bytes);
+  EXPECT_EQ(byte_limited->DraftCheckpointCapacity(), 1u);
+  EXPECT_EQ(byte_limited->Snapshot().total_blocks, 8u);
+
+  batching.dflash2_max_snapshots = 0;
+  auto count_disabled = CacheManager::Create(model, 0, 0, block_bytes);
+  EXPECT_EQ(count_disabled->DraftCheckpointCapacity(), 0u);
+
+  batching.dflash2_max_snapshots = 3;
+  batching.snapshot_cache.ram_bytes = 0;
+  batching.snapshot_cache.explicitly_set = true;
+  auto budgets_disabled = CacheManager::Create(model, 0, 0, block_bytes);
+  EXPECT_EQ(budgets_disabled->DraftCheckpointCapacity(), 0u);
+  EXPECT_EQ(budgets_disabled->Snapshot().total_blocks, 8u);
 }
 
-TEST(PagedKeyValueCacheManifestTest, SnapshotSizingReportsOneBlockMinimumAndBudgetReduction) {
+TEST(PagedKeyValueCacheManifestTest, LegacySnapshotReservationRequiresNoNewBudgetFields) {
   auto model = LoadSyntheticCompositeModel();
   auto& batching = *model->config_->engine.dynamic_batching;
   batching.prefix_caching = true;
   batching.max_batch_size = 4;
-  batching.num_blocks = 9;
-  const size_t block_bytes = PagedKeyValueCacheBytesPerBlock(model);
-  const auto previous_logging = g_log.enabled;
-  SetLogBool("enabled", true);
-  testing::internal::CaptureStderr();
-  batching.dflash2_max_snapshots = 1;
-  auto smaller = CacheManager::Create(model, 0, 0, 2 * block_bytes);
-  batching.dflash2_max_snapshots = 4;
-  auto larger = CacheManager::Create(model, 0, 0, 2 * block_bytes);
-  auto reduced = CacheManager::Create(model, 0, 0, 3 * block_bytes);
-  const auto log = testing::internal::GetCapturedStderr();
-  SetLogBool("enabled", previous_logging);
+  batching.num_blocks = 8;
+  const size_t snapshot_bytes = 2 * PagedKeyValueCacheBytesPerBlock(model);
+  auto legacy = CacheManager::Create(model, 0, 0, snapshot_bytes);
+  EXPECT_EQ(legacy->DraftCheckpointCapacity(), 1u);
+  EXPECT_EQ(legacy->Snapshot().total_blocks, 6u);
+  legacy.reset();
 
-  EXPECT_EQ(smaller->DraftCheckpointCapacity(), 1u);
-  EXPECT_EQ(smaller->Snapshot().total_blocks, 7u);
-  EXPECT_EQ(larger->DraftCheckpointCapacity(), 4u);
-  EXPECT_EQ(larger->Snapshot().total_blocks, 1u);
-  EXPECT_EQ(reduced->DraftCheckpointCapacity(), 2u);
-  EXPECT_EQ(reduced->Snapshot().total_blocks, 3u);
-  EXPECT_NE(log.find("requested=1, effective=1; target cache: blocks=7, block_size=4, bytes=" +
-                     std::to_string(7 * block_bytes)),
-            std::string::npos);
-  EXPECT_NE(log.find("requested=4, effective=4; target cache: blocks=1, block_size=4, bytes=" +
-                     std::to_string(block_bytes)),
-            std::string::npos);
-  EXPECT_NE(log.find("requested=4, effective=2; target cache: blocks=3, block_size=4, bytes=" +
-                     std::to_string(3 * block_bytes)),
-            std::string::npos);
-  EXPECT_NE(log.find("draft snapshot reservation: bytes=" + std::to_string(8 * block_bytes)),
-            std::string::npos);
+  OverlayConfig(*model->config_, R"({"engine":{"dynamic_batching":{"snapshot_cache":{}}}})");
+  auto disabled = CacheManager::Create(model, 0, 0, snapshot_bytes);
+  EXPECT_EQ(disabled->DraftCheckpointCapacity(), 0u);
+  EXPECT_EQ(disabled->Snapshot().total_blocks, 8u);
+  disabled.reset();
+
+  OverlayConfig(*model->config_, R"({"engine":{"dynamic_batching":{"snapshot_cache":{"ram_bytes":1048576}}}})");
+  auto host = CacheManager::Create(model, 0, 0, snapshot_bytes);
+  EXPECT_EQ(host->DraftCheckpointCapacity(), 1u);
+  EXPECT_EQ(host->Snapshot().total_blocks, 8u);
+  host.reset();
+
+  OverlayConfig(*model->config_, R"({"runtime_profiles":[{
+    "id":"disable-snapshots","eligibility":{"minimum_total_device_memory_bytes":0},
+    "overlay":{"engine":{"dynamic_batching":{"snapshot_cache":{}}}}
+  }]})");
+  ApplyRuntimeProfile(*model->config_, uint64_t{0});
+  auto profile_disabled = CacheManager::Create(model, 0, 0, snapshot_bytes);
+  EXPECT_EQ(profile_disabled->DraftCheckpointCapacity(), 0u);
 }
 
 TEST(PagedKeyValueCacheManifestTest, SnapshotRuntimeProfileOverridesBaseConfiguration) {
@@ -1174,6 +1278,7 @@ TEST(PagedKeyValueCacheManifestTest, SnapshotRuntimeProfileOverridesBaseConfigur
   batching.prefix_caching = true;
   batching.max_batch_size = 4;
   batching.num_blocks = 8;
+  batching.snapshot_cache.ram_bytes = 4 * PagedKeyValueCacheBytesPerBlock(model);
   batching.dflash2_max_snapshots = 1;
   OverlayConfig(*model->config_, R"({"runtime_profiles":[{
     "id":"snapshot-default","eligibility":{"minimum_total_device_memory_bytes":0},
@@ -1184,7 +1289,7 @@ TEST(PagedKeyValueCacheManifestTest, SnapshotRuntimeProfileOverridesBaseConfigur
 
   auto cache = CacheManager::Create(model, 0, 0, block_bytes);
   EXPECT_EQ(cache->DraftCheckpointCapacity(), 2u);
-  EXPECT_EQ(cache->Snapshot().total_blocks, 6u);
+  EXPECT_EQ(cache->Snapshot().total_blocks, 8u);
   EXPECT_EQ(model->config_->engine.dynamic_batching->dflash2_max_snapshots, 2u);
 }
 
@@ -1194,6 +1299,7 @@ TEST(PagedKeyValueCacheManifestTest, SnapshotRuntimeProfileHonorsBudgetAndTarget
   batching.prefix_caching = true;
   batching.max_batch_size = 4;
   batching.num_blocks = 8;
+  batching.snapshot_cache.ram_bytes = 4 * PagedKeyValueCacheBytesPerBlock(model);
   batching.dflash2_max_snapshots = 0;
   OverlayConfig(*model->config_, R"({"runtime_profiles":[{
     "id":"large-snapshot-pool","eligibility":{"minimum_total_device_memory_bytes":0},
@@ -1203,16 +1309,19 @@ TEST(PagedKeyValueCacheManifestTest, SnapshotRuntimeProfileHonorsBudgetAndTarget
   const size_t block_bytes = PagedKeyValueCacheBytesPerBlock(model);
   auto target_limited = CacheManager::Create(model, 0, 0, block_bytes);
   EXPECT_EQ(target_limited->DraftCheckpointCapacity(), 4u);
-  EXPECT_EQ(target_limited->Snapshot().total_blocks, 4u);
+  EXPECT_EQ(target_limited->Snapshot().total_blocks, 8u);
 
+  batching.snapshot_cache.ram_bytes = 6 * block_bytes;
   auto budget_limited = CacheManager::Create(model, 0, 0, 3 * block_bytes);
   EXPECT_EQ(budget_limited->DraftCheckpointCapacity(), 2u);
-  EXPECT_EQ(budget_limited->Snapshot().total_blocks, 2u);
+  EXPECT_EQ(budget_limited->Snapshot().total_blocks, 8u);
   EXPECT_EQ(model->config_->engine.dynamic_batching->dflash2_max_snapshots, 100u);
 }
 
 TEST(PagedKeyValueCacheManifestTest, EngineConstructionAppliesSnapshotConfigurationToCacheAndDrafter) {
   auto model = LoadSyntheticCompositeModel();
+  model->config_->engine.dynamic_batching->prefix_caching = true;
+  model->config_->engine.dynamic_batching->snapshot_cache.ram_bytes = 1024 * 1024;
   auto& draft = model->config_->model.dflash2;
   draft.filename = (fs::path{".."} / "synthetic-dspark" / "dflash2-fp16-aux.onnx").string();
   draft.num_hidden_layers = 1;
@@ -1228,24 +1337,19 @@ TEST(PagedKeyValueCacheManifestTest, EngineConstructionAppliesSnapshotConfigurat
   auto defaults = Engine::CreateDependencies(model);
   ASSERT_NE(defaults.dflash2_drafter, nullptr);
   EXPECT_EQ(defaults.cache_manager->DraftCheckpointCapacity(), 1u);
-  EXPECT_EQ(defaults.dflash2_drafter->AvailablePrefixCheckpoints(), 1u);
 
   OverlayConfig(*model->config_, R"({"engine":{"dynamic_batching":{"dflash2_max_snapshots":3}}})");
   auto larger = Engine::CreateDependencies(model);
   ASSERT_NE(larger.dflash2_drafter, nullptr);
   EXPECT_EQ(larger.cache_manager->DraftCheckpointCapacity(), 3u);
-  EXPECT_EQ(larger.dflash2_drafter->AvailablePrefixCheckpoints(), 3u);
 
   OverlayConfig(*model->config_, R"({"engine":{"dynamic_batching":{"dflash2_max_snapshots":0}}})");
   auto disabled = Engine::CreateDependencies(model);
   ASSERT_NE(disabled.dflash2_drafter, nullptr);
   EXPECT_EQ(disabled.cache_manager->DraftCheckpointCapacity(), 0u);
-  EXPECT_EQ(disabled.dflash2_drafter->AvailablePrefixCheckpoints(), 0u);
 
   EXPECT_EQ(larger.cache_manager->DraftCheckpointCapacity(), 3u);
-  EXPECT_EQ(larger.dflash2_drafter->AvailablePrefixCheckpoints(), 3u);
   EXPECT_EQ(defaults.cache_manager->DraftCheckpointCapacity(), 1u);
-  EXPECT_EQ(defaults.dflash2_drafter->AvailablePrefixCheckpoints(), 1u);
   EXPECT_EQ(model->config_->engine.dynamic_batching->dflash2_max_snapshots, 0u);
 }
 
@@ -1257,6 +1361,8 @@ class Dflash2SnapshotEngineTest : public ::testing::TestWithParam<size_t> {
     config->model.decoder.filename = "decoder-per-token.onnx";
     auto model = CreateModel(GetOrtEnv(), std::move(config));
     if (with_drafter) {
+      model->config_->engine.dynamic_batching->prefix_caching = true;
+      model->config_->engine.dynamic_batching->snapshot_cache.ram_bytes = 1024 * 1024;
       auto& draft = model->config_->model.dflash2;
       draft.filename = (fs::path{".."} / "synthetic-dspark" / "dflash2-fp16-aux.onnx").string();
       draft.num_hidden_layers = 1;
@@ -1317,10 +1423,10 @@ class Dflash2SnapshotEngineTest : public ::testing::TestWithParam<size_t> {
 
 TEST_P(Dflash2SnapshotEngineTest, ReusesMultiplePromptsWithFullLeasedPoolAndCancellation) {
   const size_t limit = GetParam();
-  const std::array<std::array<int32_t, 5>, 4> prompts{
-      std::array<int32_t, 5>{5, 9, 13, 7, 8}, {7, 2, 20, 4, 6}, {3, 8, 2, 15, 6}, {11, 12, 13, 14, 15}};
+  const std::array<std::array<int32_t, 5>, 5> prompts{
+      std::array<int32_t, 5>{5, 9, 13, 7, 8}, {7, 2, 20, 4, 6}, {3, 8, 2, 15, 6}, {11, 12, 13, 14, 15}, {17, 6, 18, 3, 9}};
   auto baseline = std::make_shared<Engine>(LoadModel(false));
-  std::array<std::vector<int32_t>, 4> expected;
+  std::array<std::vector<int32_t>, prompts.size()> expected;
   for (size_t i = 0; i < prompts.size(); ++i) {
     auto request = Submit(baseline, prompts[i]);
     std::vector<std::vector<int32_t>> outputs;
@@ -1352,7 +1458,6 @@ TEST_P(Dflash2SnapshotEngineTest, ReusesMultiplePromptsWithFullLeasedPoolAndCanc
     EXPECT_EQ(outputs[0], expected[i]);
     request->Close();
   }
-  ASSERT_EQ(drafter->AvailablePrefixCheckpoints(), 0u);
 
   std::vector<std::shared_ptr<Request>> requests;
   std::vector<std::shared_ptr<const PrefixCacheMatch>> leases;
@@ -1365,7 +1470,8 @@ TEST_P(Dflash2SnapshotEngineTest, ReusesMultiplePromptsWithFullLeasedPoolAndCanc
     EXPECT_EQ(match->draft_checkpoint != nullptr, limit != 0);
     leases.push_back(std::move(match));
   }
-  requests.push_back(Submit(engine, prompts[2]));
+  const size_t overflow_index = std::max(size_t{2}, warm_count);
+  requests.push_back(Submit(engine, prompts[overflow_index]));
   std::vector<std::vector<int32_t>> outputs;
   std::vector<GenerationFinishReason> reasons;
   Drain(*engine, requests, outputs, reasons);
@@ -1377,7 +1483,7 @@ TEST_P(Dflash2SnapshotEngineTest, ReusesMultiplePromptsWithFullLeasedPoolAndCanc
     EXPECT_EQ(match->draft_checkpoint, leases[i]->draft_checkpoint);
     EXPECT_EQ(requests[i]->TurnCachedPromptTokens(), 4u);
   }
-  EXPECT_EQ(outputs.back(), expected[2]);
+  EXPECT_EQ(outputs.back(), expected[overflow_index]);
   {
     const auto match = cache->MatchPrefix(*requests.back());
     ASSERT_NE(match, nullptr);
@@ -1389,18 +1495,17 @@ TEST_P(Dflash2SnapshotEngineTest, ReusesMultiplePromptsWithFullLeasedPoolAndCanc
     request->Close();
   }
 
-  auto replacement = Submit(engine, prompts[3]);
+  auto replacement = Submit(engine, prompts.back());
   outputs.clear();
   reasons.clear();
   Drain(*engine, {replacement}, outputs, reasons);
   ASSERT_FALSE(HasFatalFailure());
-  EXPECT_EQ(outputs[0], expected[3]);
+  EXPECT_EQ(outputs[0], expected.back());
   {
     const auto match = cache->MatchPrefix(*replacement);
     ASSERT_NE(match, nullptr);
     EXPECT_EQ(match->draft_checkpoint != nullptr, limit != 0);
   }
-  EXPECT_EQ(drafter->AvailablePrefixCheckpoints(), 0u);
   replacement->Close();
 
   const std::array<int32_t, 9> cancel_prompt{21, 22, 23, 24, 25, 26, 27, 28, 29};
@@ -1438,12 +1543,12 @@ TEST_P(Dflash2SnapshotEngineTest, ReusesMultiplePromptsWithFullLeasedPoolAndCanc
   canceled_match.reset();
   canceled_replay->Close();
 
-  auto after_cancel = Submit(engine, prompts[3]);
+  auto after_cancel = Submit(engine, prompts.back());
   outputs.clear();
   reasons.clear();
   Drain(*engine, {after_cancel}, outputs, reasons);
   ASSERT_FALSE(HasFatalFailure());
-  EXPECT_EQ(outputs[0], expected[3]);
+  EXPECT_EQ(outputs[0], expected.back());
   EXPECT_EQ(after_cancel->TurnCachedPromptTokens(), 4u);
   after_cancel->Close();
   EXPECT_FALSE(engine->HasPendingRequests());
@@ -1455,7 +1560,7 @@ TEST_P(Dflash2SnapshotEngineTest, ReusesMultiplePromptsWithFullLeasedPoolAndCanc
   EXPECT_EQ(stats.dflash2_failures, 0u);
 }
 
-INSTANTIATE_TEST_SUITE_P(SnapshotLimits, Dflash2SnapshotEngineTest, ::testing::Values(0u, 1u, 2u));
+INSTANTIATE_TEST_SUITE_P(SnapshotLimits, Dflash2SnapshotEngineTest, ::testing::Values(0u, 1u, 2u, 3u));
 
 TEST(PagedKeyValueCacheManifestTest, RejectsSlidingWindowLayersOutsidePagedGroup) {
   auto model = LoadSyntheticPagedModel();

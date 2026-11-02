@@ -176,7 +176,8 @@ bool ParseArgs(
     bool& interactive,
     bool& rewind,
     std::vector<std::string>& image_paths,
-    std::vector<std::string>& audio_paths) {
+    std::vector<std::string>& audio_paths,
+    bool use_model_prompt_default) {
   CLI::App app{"Command-line arguments for ORT GenAI C/C++ examples"};
   argv = app.ensure_utf8(argv);
 
@@ -209,7 +210,8 @@ bool ParseArgs(
 
   app.add_option("--ep_path", ep_path, "Path to execution provider DLL/SO for plug-in providers (ex: onnxruntime_providers_cuda.dll or onnxruntime_providers_tensorrt.dll)");
   app.add_option("--system_prompt", system_prompt, "System prompt to use for the model.");
-  app.add_option("--user_prompt", user_prompt, "User prompt to use for the model.");
+  auto* user_prompt_option = app.add_option("--user_prompt", user_prompt,
+                                            "User prompt. Multimodal examples choose a default for the model type when omitted. Model prompt restrictions apply.");
   app.add_flag("--rewind", rewind, "Rewind to the system prompt after each generation. Defaults to false. Only used in model_chat.");
   app.add_flag_callback(
       "--non_interactive", [&] { interactive = false; }, "Disable interactive mode");
@@ -222,6 +224,14 @@ bool ParseArgs(
   } catch (...) {
     std::cout << app.help() << std::endl;
     return false;
+  }
+  if (use_model_prompt_default && user_prompt_option->count() == 0) {
+    try {
+      user_prompt = GetDefaultUserPrompt(model_path, user_prompt);
+    } catch (const std::exception& e) {
+      std::cerr << "Error selecting the default user prompt: " << e.what() << std::endl;
+      return false;
+    }
   }
   return true;
 }
@@ -373,6 +383,14 @@ std::string ApplyChatTemplate(const std::string& model_path, OgaTokenizer& token
 
   std::string prompt = std::string(tokenizer.ApplyChatTemplate(template_str.c_str(), messages.c_str(), tools.c_str(), add_generation_prompt));
   return prompt;
+}
+
+std::string GetDefaultUserPrompt(const std::string& model_path, const std::string& fallback) {
+  std::ifstream file{std::filesystem::path(model_path) / "genai_config.json"};
+  const auto config = nlohmann::json::parse(file);
+  return config.at("model").value("type", "") == "nemotron_parse"
+             ? "</s><s><predict_bbox><predict_classes><output_markdown>"
+             : fallback;
 }
 
 std::string GetUserPrompt(const std::string& prompt, bool interactive) {

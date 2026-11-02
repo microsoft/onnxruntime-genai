@@ -1,6 +1,11 @@
 name: "Windows CUDA x64 Build"
 on:
   workflow_dispatch:
+    inputs:
+      dflash2_graph_model:
+        description: "Graph-enabled Qwen DFlash2 model directory on the runner (256-token blocks, 512-token prefill)"
+        type: string
+        default: ""
   push:
     branches:
       - main
@@ -31,20 +36,20 @@ env:
 jobs:
   windows-cuda-x64-build:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Win2022-GPU-A10", "JobId=windows-cuda-x64-build-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}"]
+    runs-on: ort-genai-github-win-6-a10-eus2-ss
     steps:
       - name: Checkout OnnxRuntime GenAI repo
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: true
 
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.11.x'
           architecture: 'x64'
 
       - name: Setup VCPKG
-        uses: microsoft/onnxruntime-github-actions/setup-build-tools@47a55233e7a9e40e8ade1a71d1b6141be5044924 # v0.0.8
+        uses: microsoft/onnxruntime-github-actions/setup-build-tools@efa14f1fd8b27f52a47d9f0cacdbf642972c6090 # v0.0.14
         with:
           vcpkg-version: '2025.03.19'
           vcpkg-hash: '17e96169cd3f266c4716fcdc1bb728e6a64f103941ece463a2834d50694eba4fb48f30135503fd466402afa139abc847ef630733c442595d1c34979f261b0114'
@@ -57,7 +62,7 @@ jobs:
         run: |
           azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v${{ env.cuda_version }}" ${{ env.cuda_dir}}
 
-      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: '8.0.x'
 
@@ -90,7 +95,7 @@ jobs:
       # restore-keys allow a partial match from any prior run on this branch or main.
       - name: Restore sccache
         id: restore-sccache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ github.workspace }}\sccache
           key: sccache-win-cuda-${{ hashFiles('.github/workflows/win-cuda-x64-build.yml', 'build.py', '**/CMakeLists.txt', 'cmake/**/*.cmake') }}
@@ -160,7 +165,7 @@ jobs:
       # a later step kills the runner. Skip if we had a full key hit (nothing new to store).
       - name: Save sccache
         if: steps.restore-sccache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ github.workspace }}\sccache
           key: sccache-win-cuda-${{ hashFiles('.github/workflows/win-cuda-x64-build.yml', 'build.py', '**/CMakeLists.txt', 'cmake/**/*.cmake') }}
@@ -234,6 +239,8 @@ jobs:
           .\examples\csharp\ModelChat\bin\Release\net8.0\ModelChat.exe -m test\models\qwen-2.5-0.5b\int4\cpu\ -e cpu --response_format lark_grammar --tools_file test\models\tool-definitions\weather.json --tool_call_start "<tool_call>" --tool_call_end "</tool_call>" --user_prompt "What is the weather in Redmond, WA?" --tool_output --non_interactive --verbose
 
       - name: Prepend CUDA to PATH and Run tests
+        env:
+          D_FLASH2_GRAPH_TEST_MODEL: ${{ inputs.dflash2_graph_model }}
         run: |-
           $env:PATH = "$env:GITHUB_WORKSPACE\ort\ep;$env:GITHUB_WORKSPACE\ort\lib;${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin;" + $env:PATH
           echo "Current PATH variable is: $env:PATH"

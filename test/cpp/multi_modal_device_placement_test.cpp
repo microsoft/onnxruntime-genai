@@ -4,12 +4,14 @@
 // Each state allocates against the device of the session it drives, never the decoder's
 // (see SessionCanAccess).
 
+#include <algorithm>
 #include <memory>
 
 #include <gtest/gtest.h>
 
 #include "models/model.h"
 #include "models/io/embeddings.h"
+#include "models/io/hidden_states.h"
 
 namespace {
 
@@ -32,6 +34,39 @@ struct PlacementTestState : Generators::State {
     return {};
   }
 };
+
+TEST(MultiModalDevicePlacementTests, HiddenStateWidthUsesGraphOrLegacyConfigFallback) {
+  for (const auto* variant : {"symbolic", "static"}) {
+    auto model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
+    auto session = model->CreateSession(
+        Generators::GetOrtEnv(), std::string{"../synthetic-rotary-history/hidden-"} + variant + ".onnx",
+        model->session_options_.get());
+    model->session_info_ = Generators::SessionInfo{};
+    model->session_info_.Add(*session);
+    model->config_->model.decoder.inputs.hidden_states = "hidden_states";
+    model->config_->model.decoder.outputs.hidden_states = "hidden_states_out";
+    model->config_->model.decoder.hidden_size = 8;
+    auto params = Generators::CreateGeneratorParams(*model);
+    PlacementTestState state{*params, *model, nullptr};
+    Generators::HiddenStatesInputs input{state};
+    Generators::HiddenStatesOutputs output{state};
+    input.Add();
+    output.Add();
+    const int64_t width = std::string_view{variant} == "symbolic" ? 8 : 16;
+    auto source = OrtValue::CreateTensor<float>(model->allocator_cpu_, std::array<int64_t, 3>{1, 2, width});
+    std::fill_n(source->GetTensorMutableData<float>(), 2 * width, 0.0f);
+    input.SetValue(source.get());
+    input.Update(2);
+    output.Update(2);
+    EXPECT_EQ(state.inputs_.back()->GetTensorTypeAndShapeInfo()->GetShape(), (std::vector<int64_t>{1, 2, width}));
+    EXPECT_EQ(state.outputs_.back()->GetTensorTypeAndShapeInfo()->GetShape(), (std::vector<int64_t>{1, 2, width}));
+    if (width == 8) {
+      model->config_->model.decoder.hidden_size = 0;
+      EXPECT_THROW(Generators::HiddenStatesInputs{state}, std::runtime_error);
+      EXPECT_THROW(Generators::HiddenStatesOutputs{state}, std::runtime_error);
+    }
+  }
+}
 
 TEST(MultiModalDevicePlacementTests, SessionCanAccessOnlyHostOrItsOwnMemory) {
   auto& cpu = *Generators::GetDeviceInterface(Generators::DeviceType::CPU);
@@ -86,6 +121,7 @@ TEST(MultiModalDevicePlacementTests, EmbeddingsPreserveCapturedDecodeBufferAcros
   auto model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
   auto params = Generators::CreateGeneratorParams(*model);
   params->use_graph_capture = true;
+  params->max_graph_capture_length = 3;
   PlacementTestState state{*params, *model, nullptr};
   const auto& name = model->config_->model.decoder.inputs.input_ids;
 
@@ -93,6 +129,11 @@ TEST(MultiModalDevicePlacementTests, EmbeddingsPreserveCapturedDecodeBufferAcros
     Generators::Embeddings embeddings(state, Generators::Embeddings::Mode::Input, name, hidden_size);
     embeddings.Add();
     embeddings.UpdateSequenceLength(8);
+    std::array<void*, 3> captured_buffers{};
+    for (size_t length = 1; length <= captured_buffers.size(); ++length) {
+      embeddings.UpdateSequenceLength(length);
+      captured_buffers[length - 1] = embeddings.Get()->GetTensorMutableRawData();
+    }
     embeddings.UpdateSequenceLength(1);
     void* decode_buffer = embeddings.Get()->GetTensorMutableRawData();
 
@@ -112,6 +153,10 @@ TEST(MultiModalDevicePlacementTests, EmbeddingsPreserveCapturedDecodeBufferAcros
       embeddings.UpdateSequenceLength(1);
       EXPECT_EQ(embeddings.Get()->GetTensorMutableRawData(), decode_buffer);
       EXPECT_EQ(state.inputs_.back(), embeddings.Get());
+      for (size_t length = 1; length <= captured_buffers.size(); ++length) {
+        embeddings.UpdateSequenceLength(length);
+        EXPECT_EQ(embeddings.Get()->GetTensorMutableRawData(), captured_buffers[length - 1]);
+      }
     }
   }
 }

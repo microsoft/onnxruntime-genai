@@ -12,6 +12,7 @@
 #include "config.h"
 #include "dflash2_drafter.h"
 #include "generator/generators.h"
+#include "models/io/kv_cache.h"
 #include "ort_genai.h"
 
 namespace Generators::test {
@@ -69,9 +70,13 @@ TurnResult RunGraphRestoreTurn(OgaEngine& engine, const OgaSequences& prompt) {
   return result;
 }
 
-TEST(Dflash2GraphRestoreTest, ExtendedCachedPrefixReplaysWithoutStaleGraphOrLostDrafts) {
+class Dflash2GraphRestoreTest : public ::testing::TestWithParam<const char*> {};
+
+TEST_P(Dflash2GraphRestoreTest, ExtendedCachedPrefixReplaysWithoutStaleGraphOrLostDrafts) {
   const char* model_path = std::getenv("D_FLASH2_GRAPH_TEST_MODEL");
-  if (!model_path) {
+  if (!model_path || !*model_path) {
+    ASSERT_EQ(std::getenv("D_FLASH2_GRAPH_TEST_REQUIRED"), nullptr)
+        << "CUDA qualification requires D_FLASH2_GRAPH_TEST_MODEL.";
     GTEST_SKIP() << "Set D_FLASH2_GRAPH_TEST_MODEL to a graph-enabled Qwen model with 256-token "
                     "blocks and 512-token prefill, and pass --ep_dir with its CUDA plugin.";
   }
@@ -79,7 +84,25 @@ TEST(Dflash2GraphRestoreTest, ExtendedCachedPrefixReplaysWithoutStaleGraphOrLost
   ASSERT_TRUE(IsGraphCaptureEnabled(config->model.decoder.session_options));
   ASSERT_TRUE(IsGraphCaptureEnabled(CreateDflash2Config(*config)->model.decoder.session_options));
   auto oga_config = OgaConfig::Create(model_path);
-  oga_config->Overlay(R"({"engine":{"dynamic_batching":{"prefix_caching":true,"max_scheduled_tokens":512}}})");
+  oga_config->Overlay(R"({"engine":{"dynamic_batching":{"prefix_caching":true,"max_scheduled_tokens":512,"max_batch_size":4,"dflash2_max_snapshots":3,"max_snapshots":3}}})");
+  {
+    auto draft_model = std::make_shared<Dflash2Model>(CreateDflash2Config(*config), GetOrtEnv());
+    const auto type = draft_model->session_info_.GetInputDataType(
+        ComposeKeyValueName(config->model.dflash2.inputs.past_key_names, 0));
+    const size_t bytes = Dflash2Drafter::PrefixCheckpointBytes(
+        *config, config->engine.dynamic_batching->block_size, type);
+    ASSERT_GT(bytes, 0u);
+    const std::string policy = std::string{GetParam()} == "Vram"
+                                   ? "\"vram_bytes\":" + std::to_string(3 * bytes)
+                               : std::string{GetParam()} == "Ram"
+                                   ? "\"ram_bytes\":" + std::to_string(3 * bytes)
+                               : std::string{GetParam()} == "Disk"
+                                   ? "\"disk_bytes\":" + std::to_string(3 * bytes)
+                                   : "\"vram_bytes\":" + std::to_string(bytes) +
+                                         ",\"ram_bytes\":" + std::to_string(bytes) +
+                                         ",\"disk_bytes\":" + std::to_string(bytes);
+    oga_config->Overlay(("{\"engine\":{\"dynamic_batching\":{\"snapshot_cache\":{" + policy + "}}}}").c_str());
+  }
   auto model = OgaModel::Create(*oga_config);
   auto tokenizer = OgaTokenizer::Create(*model);
 
@@ -103,9 +126,9 @@ TEST(Dflash2GraphRestoreTest, ExtendedCachedPrefixReplaysWithoutStaleGraphOrLost
   tokenizer->Encode((prompt + ending).c_str(), *extended);
   if (initial->SequenceCount(0) <= 512 || initial->SequenceCount(0) >= 768 ||
       extended->SequenceCount(0) <= 1024 || extended->SequenceCount(0) >= 1280) {
-    GTEST_SKIP() << "The tokenizer must place the initial prompt between 512 and 768 tokens and "
-                    "the extended prompt between 1024 and 1280 tokens; got "
-                 << initial->SequenceCount(0) << " and " << extended->SequenceCount(0) << ".";
+    FAIL() << "The tokenizer must place the initial prompt between 512 and 768 tokens and "
+              "the extended prompt between 1024 and 1280 tokens; got "
+           << initial->SequenceCount(0) << " and " << extended->SequenceCount(0) << ".";
   }
 
   auto engine = OgaEngine::Create(*model);
@@ -126,7 +149,31 @@ TEST(Dflash2GraphRestoreTest, ExtendedCachedPrefixReplaysWithoutStaleGraphOrLost
   EXPECT_EQ(repeated_replay.accepted, replay.accepted);
   EXPECT_EQ(replay.output, extension.output);
   EXPECT_EQ(repeated_replay.output, extension.output);
+
+  // A third boundary forces the two earlier snapshots into RAM and disk in the mixed policy.
+  for (int i = 0; i < 12; ++i) {
+    prompt += patch;
+  }
+  auto longest = OgaSequences::Create();
+  tokenizer->Encode((prompt + ending).c_str(), *longest);
+  ASSERT_GT(longest->SequenceCount(0), 1536u);
+  ASSERT_LT(longest->SequenceCount(0), 1792u);
+  const auto growth = RunGraphRestoreTurn(*engine, *longest);
+  EXPECT_EQ(growth.cached, 1024u);
+  const auto ram_replay = RunGraphRestoreTurn(*engine, *extended);
+  const auto disk_replay = RunGraphRestoreTurn(*engine, *initial);
+  EXPECT_EQ(ram_replay.cached, 1024u);
+  EXPECT_EQ(disk_replay.cached, 512u);
+  EXPECT_GT(ram_replay.proposed, 0u);
+  EXPECT_GT(disk_replay.proposed, 0u);
+  EXPECT_EQ(ram_replay.output, extension.output);
+  EXPECT_EQ(disk_replay.output, cold.output);
 }
+
+INSTANTIATE_TEST_SUITE_P(
+    SnapshotTiers, Dflash2GraphRestoreTest,
+    ::testing::Values("Vram", "Ram", "Disk", "Mixed"),
+    [](const ::testing::TestParamInfo<const char*>& info) { return info.param; });
 
 }  // namespace
 }  // namespace Generators::test

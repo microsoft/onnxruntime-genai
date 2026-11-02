@@ -210,9 +210,11 @@ def _export_attention_graph(tmp_path, monkeypatch, *, drafter):
     if drafter:
         cls = importlib.import_module(f"{package_name}.dflash2").DFlash2Builder
         builder = cls.__new__(cls)
+        block.BlockDrafterBuilder.__init__(builder, "attention_regression", "regression")
     else:
         builder = base.Model.__new__(base.Model)
-    block.BlockDrafterBuilder.make_graph(builder, "attention_regression", "regression")
+        base.Model.make_graph(builder, "attention_regression", opset=21)
+        builder.graph.opset_imports["com.microsoft"] = 1
     builder.io_dtype = ir.DataType.FLOAT16
     builder.head_size = head_size
     builder.num_kv_heads = kv_heads

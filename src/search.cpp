@@ -404,15 +404,16 @@ std::span<float> Search_Cpu::GetScores(int batch_beam_index) {
   return next_token_scores_.CpuSpan().subspan(static_cast<size_t>(batch_beam_index) * params_->config.model.vocab_size, params_->config.model.vocab_size);
 }
 
-void Search_Cpu::ApplyMinLength(int min_length) {
-  if (sequences_.GetSequenceLength() >= min_length) {
+void Search_Cpu::ApplyMinLength(int min_length, std::optional<int> sequence_length) {
+  const int length = sequence_length.value_or(sequences_.GetSequenceLength());
+  if (length >= min_length) {
     return;
   }
 
   const int batch_beam_size = params_->BatchBeamSize();
   for (int i = 0; i < batch_beam_size; i++) {
     std::span<float> const beam_token_scores = GetScores(i);
-    ApplyMinLengthToLogits(beam_token_scores, sequences_.GetSequenceLength(), min_length,
+    ApplyMinLengthToLogits(beam_token_scores, length, min_length,
                            params_->config.model.eos_token_id);
   }
 }

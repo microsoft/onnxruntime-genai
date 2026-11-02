@@ -40,6 +40,7 @@
 #include "lfm2.h"
 #include "marian.h"
 #include "decoder_only_pipeline.h"
+#include "qwen38_graph_plane.h"
 #include "qwen_vl_model.h"
 #include "ep/amdgpu/interface.h"
 #include "ep/dml/interface.h"
@@ -80,6 +81,17 @@ std::string SharedInitializerFileIdentity(const fs::path& path) {
 bool IsPathValuedSessionOption(std::string_view key) {
   return key == kOrtSessionOptionsModelExternalInitializersFileFolderPath ||
          key == kOrtSessionOptionEpContextFilePath;
+}
+
+// Adds a string-valued session config entry, resolving the value of a path-valued key against the model root.
+void AddSessionConfigEntry(const Config& config, OrtSessionOptions& session_options, const std::string& key,
+                           const std::string& value) {
+  if (!value.empty() && IsPathValuedSessionOption(key)) {
+    const std::string resolved = config.ResolvePath(value).string();
+    session_options.AddConfigEntry(key.c_str(), resolved.c_str());
+  } else {
+    session_options.AddConfigEntry(key.c_str(), value.c_str());
+  }
 }
 
 }  // namespace
@@ -671,6 +683,10 @@ void ApplySessionOptionsFromConfig(
     session_options.SetInterOpNumThreads(config_session_options.inter_op_num_threads.value());
   }
 
+  if (config_session_options.use_deterministic_compute.has_value()) {
+    session_options.SetDeterministicCompute(config_session_options.use_deterministic_compute.value());
+  }
+
   if (config_session_options.enable_cpu_mem_arena.has_value()) {
     if (config_session_options.enable_cpu_mem_arena.value())
       session_options.EnableCpuMemArena();
@@ -706,13 +722,8 @@ void ApplySessionOptionsFromConfig(
    * Set all session options that are key-value pairs of strings.
    * Reference: https://github.com/microsoft/onnxruntime/blob/main/include/onnxruntime/core/session/onnxruntime_session_options_config_keys.h
    */
-  for (auto& config_entry : config_session_options.config_entries) {
-    if (!config_entry.second.empty() && IsPathValuedSessionOption(config_entry.first)) {
-      const std::string resolved = config.ResolvePath(config_entry.second).string();
-      session_options.AddConfigEntry(config_entry.first.c_str(), resolved.c_str());
-    } else {
-      session_options.AddConfigEntry(config_entry.first.c_str(), config_entry.second.c_str());
-    }
+  for (const auto& [key, value] : config_session_options.config_entries) {
+    AddSessionConfigEntry(config, session_options, key, value);
   }
 
   // Register custom ops libraries only if explicitly configured. custom_ops_library comes first, then every entry of
@@ -793,6 +804,9 @@ void ApplySessionOptionsFromConfig(
     if (custom_library_path.is_relative()) {
       for (const auto& dir : allowed_dirs) {
         std::filesystem::path candidate = dir / custom_library_path;
+#if defined(_WIN32)
+        candidate = ResolveWindowsSharedLibraryPath(candidate);
+#endif
         if (std::filesystem::exists(candidate, ec)) {
           custom_library_file_prefix = std::filesystem::canonical(candidate).string();
           resolved = true;
@@ -919,7 +933,17 @@ void Model::CreateSessionOptions() {
   if (!p_device_)
     p_device_ = GetDeviceInterface(DeviceType::CPU);
 
+  // The runtime profile merges its session options into the decoder config entries, updating an entry in place or
+  // appending a new one. Apply only the entries it changed or added to the primary session options, resolved like the
+  // rest of the config. Replaying the others would undo that resolution and the provider setup above.
+  const auto entries_before_profile = config_->model.decoder.session_options.config_entries;
   ApplyRuntimeProfileForSelectedDevice(*config_, *p_device_);
+  const auto& entries = config_->model.decoder.session_options.config_entries;
+  for (size_t i = 0; i < entries.size(); ++i) {
+    if (i >= entries_before_profile.size() || entries[i] != entries_before_profile[i]) {
+      AddSessionConfigEntry(*config_, *session_options_, entries[i].first, entries[i].second);
+    }
+  }
 }
 
 OrtSessionOptions* Model::GetSessionOptions(const std::string& model_id) const {
@@ -1075,7 +1099,7 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
   if (ModelType::IsALM(config->model.type))
     return std::make_shared<WhisperModel>(std::move(config), ort_env);
   if (ModelType::IsVLM(config->model.type))
-    return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, false);
+    return MultiModalLanguageModel::Create(std::move(config), ort_env, true, false);
   if (ModelType::IsMMM(config->model.type)) {
     // Auto-detect speech support: require both the speech ONNX model filename
     // and the preprocessing config to be present. If only one is set, throw
@@ -1092,7 +1116,7 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
           "speech.config_filename is set but speech.filename is missing. "
           "Both are required for audio support.");
     }
-    return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, has_speech_model);
+    return MultiModalLanguageModel::Create(std::move(config), ort_env, true, has_speech_model);
   }
   if (ModelType::IsPipe(config->model.type))
     return std::make_shared<DecoderOnlyPipelineModel>(std::move(config), ort_env);

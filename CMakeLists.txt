@@ -210,6 +210,22 @@ endif()
 # The genai library itself is always embedded in the shared library
 list(APPEND ortgenai_embed_libs "$<TARGET_FILE:onnxruntime-genai>")
 
+if(WIN32 AND NOT USE_WINML AND ENABLE_TESTS)
+  file(GLOB ort_runtime_dlls "${ORT_LIB_DIR}/*.dll")
+  if(ort_runtime_dlls)
+    add_custom_target(onnxruntime-genai-ort-runtime
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+            "$<TARGET_FILE_DIR:onnxruntime-genai>"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${ort_runtime_dlls}
+            "$<TARGET_FILE_DIR:onnxruntime-genai>"
+    DEPENDS ${ort_runtime_dlls}
+    COMMAND_EXPAND_LISTS
+  )
+    add_dependencies(onnxruntime-genai onnxruntime-genai-ort-runtime)
+  endif()
+endif()
+
 # we keep the shared libraries disconnected on Android as they will come from separate AARs and we don't want to force
 # the ORT version to match in both.
 if(CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR (CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND (NOT BUILD_APPLE_FRAMEWORK) AND (NOT MAC_CATALYST)))
@@ -275,6 +291,22 @@ if((USE_CUDA OR USE_TRT_RTX) AND CMAKE_CUDA_COMPILER)
     set_property(TARGET onnxruntime-genai-cuda APPEND_STRING PROPERTY LINK_FLAGS "-DEF:\"${GENERATORS_ROOT}/ep/cuda/symbols.def\"")
   else()
     message(FATAL_ERROR "${target} unknown platform, need to specify shared library exports for it")
+  endif()
+
+  # CUDA data plane of the "qwen38_flash_graph" model type. It is dlopen-ed by the model from a path inside the model
+  # folder (model.qwen38_graph.plane_library), never linked into GenAI, so the core library keeps no cudart dependency.
+  if(ENABLE_QWEN38_PLANE)
+    if((UNIX AND NOT APPLE) OR WIN32)
+      add_library(qwen38_plane SHARED "${GENERATORS_ROOT}/qwen38_plane/qwen38_plane.cu")
+      target_link_libraries(qwen38_plane PRIVATE cudart)
+      if(ENABLE_TESTS)
+        # Fault-injection and counter exports for test/cpp/engine/qwen38_plane_tests.cpp; packages build with ENABLE_TESTS=OFF.
+        target_compile_definitions(qwen38_plane PRIVATE QWEN38_PLANE_TEST_HOOKS)
+      endif()
+      set_target_properties(qwen38_plane PROPERTIES FOLDER "GenAI" WINDOWS_EXPORT_ALL_SYMBOLS ON)
+    else()
+      message(WARNING "ENABLE_QWEN38_PLANE is only supported on Linux and Windows; skipping the qwen38_plane target.")
+    endif()
   endif()
 endif()
 

@@ -140,6 +140,14 @@ std::set<int> WindowedLayers(const std::shared_ptr<Model>& model,
     }
     layers.insert(layer);
   }
+  if (!layers.empty() && decoder.sliding_window->window_size <= 0) {
+    throw std::runtime_error("Sliding-window size must be greater than zero.");
+  }
+  // Prefix retention needs immutable KV for every indexed block, including windowed layers.
+  // Keep the smaller rings by default; full paged storage requires an explicit opt-in.
+  if (model->config_->engine.dynamic_batching->prefix_caching.value_or(false)) {
+    return {};
+  }
   return layers;
 }
 
@@ -415,7 +423,7 @@ size_t PagedKeyValueCacheBytesPerBlock(const std::shared_ptr<Model>& model) {
 bool ResolvePrefixCachingEnabled(const std::shared_ptr<Model>& model,
                                  size_t auxiliary_bytes_per_block) {
   const auto& batching = *model->config_->engine.dynamic_batching;
-  if (!batching.prefix_caching) {
+  if (!batching.prefix_caching.value_or(true)) {
     return false;
   }
 
@@ -431,13 +439,12 @@ bool ResolvePrefixCachingEnabled(const std::shared_ptr<Model>& model,
     unsupported_layout =
         "Prefix caching does not yet support an auxiliary cache that mirrors target blocks.";
   } else if (!windowed.empty()) {
-    unsupported_layout =
-        "Prefix caching does not yet support sliding-window paged KV rings.";
+    return false;
   }
   if (!unsupported_layout) {
     return true;
   }
-  if (batching.prefix_caching_explicitly_set) {
+  if (batching.prefix_caching.has_value()) {
     throw std::runtime_error(unsupported_layout);
   }
   return false;
@@ -450,6 +457,9 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model,
                                        size_t max_prefix_checkpoints)
     : model_(model) {
   const auto& decoder = model->config_->model.decoder;
+  window_block_table_required_ =
+      !decoder.inputs.block_table_windowed.empty() &&
+      model->session_info_.HasInput(decoder.inputs.block_table_windowed);
   const size_t block_size = model->config_->engine.dynamic_batching->block_size;
   const size_t max_batch_size = model->config_->engine.dynamic_batching->max_batch_size;
   const auto paged_group = ResolvePagedKeyValueGroup(decoder);
@@ -461,9 +471,6 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model,
   const auto windowed = WindowedLayers(model, paged_group);
   size_t num_window_blocks = 0;
   if (!windowed.empty()) {
-    if (decoder.sliding_window->window_size <= 0) {
-      throw std::runtime_error("Sliding-window size must be greater than zero.");
-    }
     window_size_ = static_cast<size_t>(decoder.sliding_window->window_size);
 
     // A step covers positions [past, past + scheduled) and each of those queries reaches back
@@ -981,10 +988,6 @@ void PagedKeyValueCache::DropUnleasedDraftCheckpoints() {
   prefix_cache_->DropUnleasedDraftCheckpoints();
 }
 
-bool PagedKeyValueCache::ReclaimDraftCheckpoint() {
-  return prefix_cache_->ReclaimDraftCheckpoint();
-}
-
 size_t PagedKeyValueCache::ReclaimPrefixCheckpoints(
     size_t checkpoints_needed) {
   return prefix_cache_->ReclaimCheckpoints(checkpoints_needed);
@@ -1454,6 +1457,10 @@ std::pair<OrtValue*, const char*> PagedKeyValueCache::BlockTables(
 }
 
 std::pair<OrtValue*, const char*> PagedKeyValueCache::WindowBlockTables(const std::vector<std::shared_ptr<Request>>& requests) {
+  if (!Windowed()) {
+    return {graph_capture_ ? block_tables_tensor_->GetOrtTensor() : block_tables_value_.get(),
+            model_->config_->model.decoder.inputs.block_table_windowed.c_str()};
+  }
   // Must run after BlockTables(), which is what settles the column count for this step. Both
   // tables carry the same columns so that a position resolves through the same index in each.
   const size_t columns = block_table_columns_;
@@ -1484,6 +1491,10 @@ std::pair<OrtValue*, const char*> PagedKeyValueCache::WindowBlockTables(
     const std::vector<std::shared_ptr<Request>>& requests,
     const PagedCacheReservation& reservation,
     size_t columns) {
+  if (!Windowed()) {
+    return {graph_capture_ ? block_tables_tensor_->GetOrtTensor() : block_tables_value_.get(),
+            model_->config_->model.decoder.inputs.block_table_windowed.c_str()};
+  }
   const std::vector<int64_t> shape = {static_cast<int64_t>(requests.size()),
                                       static_cast<int64_t>(columns)};
   int32_t* data = nullptr;
@@ -1521,7 +1532,7 @@ void PagedKeyValueCache::BindCache(State& state) {
   auto cache_names = Names();
   auto cache_output_names = OutputNames();
 
-  const size_t num_block_tables = Windowed() ? 2 : 1;
+  const size_t num_block_tables = window_block_table_required_ ? 2 : 1;
   // Every scale cache is bound on both sides, so the output layout mirrors the input layout minus
   // the block tables. Sizing both up front keeps the indices below stable across steps.
   const size_t num_state_outputs = cache.size() * 2 + scale_cache_.size();
@@ -1572,7 +1583,7 @@ void PagedKeyValueCache::UpdateState(State& state, const std::vector<std::shared
   state.inputs_[block_table_index] = block_tables.first;
   state.input_names_[block_table_index] = block_tables.second;
 
-  if (Windowed()) {
+  if (window_block_table_required_) {
     // Depends on the column count BlockTables() just settled, so it has to follow it.
     auto window_block_tables = WindowBlockTables(requests);
     state.inputs_[block_table_index + 1] = window_block_tables.first;
@@ -1590,7 +1601,7 @@ void PagedKeyValueCache::UpdateState(
   const size_t block_table_index = cache_.size() * 2 + scale_cache_.size();
   state.inputs_[block_table_index] = block_tables.first;
   state.input_names_[block_table_index] = block_tables.second;
-  if (Windowed()) {
+  if (window_block_table_required_) {
     auto window_block_tables = WindowBlockTables(requests, reservation, columns);
     state.inputs_[block_table_index + 1] = window_block_tables.first;
     state.input_names_[block_table_index + 1] = window_block_tables.second;
