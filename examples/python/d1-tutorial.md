@@ -61,7 +61,7 @@ it with the equivalent pattern, as for LFM2.5-VL-3B. Run this once for every exp
 import json
 from pathlib import Path
 
-export = Path("./d1-3b/cpu")  # also ./d1-3b/cuda and ./d1-3b/cpu-vl
+export = Path("./d1-3b/cpu")  # also ./d1-3b/cuda, ./d1-3b/cpu-vl and ./d1-3b/cuda-vl
 path = export / "tokenizer.json"
 tokenizer = json.loads(path.read_text(encoding="utf-8"))
 old = r"'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s"
@@ -147,117 +147,33 @@ model's context, or images for a model without a vision model. The command line 
 
 ## 6. Images
 
-To answer questions about images, run d1-3B as an `lfm2_vl` pipeline; the
-[LFM2-VL tutorial](lfm2-vl-tutorial.md) explains the parts. These steps are for the CPU export (the
-embedding model below is float32).
+To answer questions about images, build d1-3B with `exclude_embeds=true`. The builder then also writes
+the vision model, the embedding model and their configs; the [LFM2-VL tutorial](lfm2-vl-tutorial.md)
+explains the parts. This is newer than onnxruntime-genai 0.18.0, so until the next release run the
+builder from a clone of this repository (with a newer wheel, run `python -m onnxruntime_genai.models.builder`
+with the same arguments):
 
-1. Build the decoder without the embeddings, then fix its tokenizer as in [step 3](#3-fix-the-tokenizer):
+```bash
+git clone --depth 1 https://github.com/microsoft/onnxruntime-genai
 
-   ```bash
-   python -m onnxruntime_genai.models.builder -i ./d1-3b/pytorch -o ./d1-3b/cpu-vl -p int8 -e cpu \
-       --extra_options exclude_embeds=true prune_lm_head=true
-   ```
+# CPU
+python onnxruntime-genai/src/python/py/models/builder.py -i ./d1-3b/pytorch -o ./d1-3b/cpu-vl -p int8 -e cpu \
+    --extra_options exclude_embeds=true prune_lm_head=true
 
-2. Reuse the vision model of LFM2.5-VL-3B: d1-3B's vision tower and projector are bit-identical to it.
+# NVIDIA GPU
+python onnxruntime-genai/src/python/py/models/builder.py -i ./d1-3b/pytorch -o ./d1-3b/cuda-vl -p fp16 -e cuda \
+    --extra_options exclude_embeds=true prune_lm_head=true
+```
 
-   ```bash
-   hf download LiquidAI/LFM2.5-VL-3B-ONNX --revision 020f9311343b8f3c6d9789b4dd300e749ec52cd1 \
-       --include "onnx/vision_encoder.onnx*" --local-dir ./lfm2.5-vl-3b-onnx
-   cp ./lfm2.5-vl-3b-onnx/onnx/vision_encoder.onnx* ./d1-3b/cpu-vl/
-   ```
+Then fix the tokenizer of each export as in [step 3](#3-fix-the-tokenizer).
 
-3. Build `embeddings.onnx` from d1-3B's own embedding table (d1-3B retrained it). It looks up
-   `input_ids` and puts `image_features` where the image token (id 124907) is:
-
-   ```python
-   import numpy as np
-   import onnx
-   from onnx import TensorProto, helper, numpy_helper
-   from safetensors import safe_open
-
-   hidden_size, image_token_id = 2048, 124907
-   with safe_open("./d1-3b/pytorch/model.safetensors", "pt") as f:
-       table = f.get_tensor("model.language_model.embed_tokens.weight").float().numpy()
-
-
-   def const(name, value):
-       value = numpy_helper.from_array(np.array(value, np.int64))
-       return helper.make_node("Constant", [], [name], value=value)
-
-
-   nodes = [
-       helper.make_node("Gather", ["embed_tokens.weight", "input_ids"], ["embeds"], axis=0),
-       helper.make_node("Shape", ["embeds"], ["embeds_shape"]),
-       const("rows", [-1, hidden_size]),
-       helper.make_node("Reshape", ["embeds", "rows"], ["flat_embeds"]),
-       const("image_token_id", image_token_id),
-       helper.make_node("Equal", ["input_ids", "image_token_id"], ["is_image"]),
-       const("flat", [-1]),
-       helper.make_node("Reshape", ["is_image", "flat"], ["flat_is_image"]),
-       helper.make_node("NonZero", ["flat_is_image"], ["positions"]),
-       helper.make_node("Transpose", ["positions"], ["indices"], perm=[1, 0]),
-       helper.make_node("ScatterND", ["flat_embeds", "indices", "image_features"], ["flat_out"]),
-       helper.make_node("Reshape", ["flat_out", "embeds_shape"], ["inputs_embeds"]),
-   ]
-   inputs = [
-       helper.make_tensor_value_info("input_ids", TensorProto.INT64, ["batch_size", "sequence_length"]),
-       helper.make_tensor_value_info("image_features", TensorProto.FLOAT, ["num_tokens", hidden_size]),
-   ]
-   embeds_shape = ["batch_size", "sequence_length", hidden_size]
-   outputs = [helper.make_tensor_value_info("inputs_embeds", TensorProto.FLOAT, embeds_shape)]
-   weights = [numpy_helper.from_array(table, "embed_tokens.weight")]
-   graph = helper.make_graph(nodes, "d1_embedding", inputs, outputs, weights)
-   model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)], ir_version=9)
-   path = "./d1-3b/cpu-vl/embeddings.onnx"
-   onnx.save(model, path, save_as_external_data=True, location="embeddings.onnx.data")
-   ```
-
-4. Add the `embedding` and `vision` sections to the `genai_config.json` the builder wrote, and write
-   `processor_config.json` (the LFM2.5-VL-3B values, with d1-3B's bicubic resize):
-
-   ```python
-   import json
-   from pathlib import Path
-
-   model = Path("./d1-3b/cpu-vl")
-   config = json.loads((model / "genai_config.json").read_text(encoding="utf-8"))
-   session_options = {"log_id": "onnxruntime-genai", "provider_options": []}
-   config["model"]["embedding"] = {
-       "filename": "embeddings.onnx", "session_options": session_options,
-       "inputs": {"input_ids": "input_ids", "image_features": "image_features"},
-       "outputs": {"inputs_embeds": "inputs_embeds"},
-   }
-   config["model"]["vision"] = {
-       "filename": "vision_encoder.onnx",
-       "config_filename": "processor_config.json",
-       "session_options": session_options,
-       "patch_size": 16, "spatial_merge_size": 2, "max_num_patches": 1024,
-       "inputs": {
-           "pixel_values": "pixel_values",
-           "attention_mask": "pixel_attention_mask",
-           "image_sizes": "spatial_shapes",
-       },
-       "outputs": {"image_features": "image_features"},
-   }
-   (model / "genai_config.json").write_text(json.dumps(config, indent=4), encoding="utf-8")
-
-
-   def step(name, kind, **attrs):
-       return {"operation": {"name": name, "type": kind, **({"attrs": attrs} if attrs else {})}}
-
-
-   transforms = [
-       step("decode_image", "DecodeImage", color_space="RGB"),
-       step("resize", "Resize", height=512, width=512, interpolation="CUBIC", smart_resize=1,
-            min_pixels=65536, max_pixels=262144, patch_size=16, merge_size=2),
-       step("rescale", "Rescale", rescale_factor=1 / 255),
-       step("normalize", "Normalize", mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
-       step("to_channel_first", "Permute3D", dims=[2, 0, 1]),
-       step("image_sizes", "PixtralImageSizes"),
-   ]
-   processor = {"processor": {"name": "lfm2_vl_image_processor", "transforms": transforms}}
-   (model / "processor_config.json").write_text(json.dumps(processor, indent=2), encoding="utf-8")
-   ```
+The embedding model uses d1-3B's own embedding table (d1-3B retrained it) and puts the image features
+where the image token (id 124907) is. `processor_config.json` uses d1-3B's bicubic resize. The vision
+and embedding models are not quantized: they are float32 in the CPU export and float16 in the CUDA one,
+and they run on the decoder's execution provider. The same steps work for a WebGPU export
+(`-p fp32 -e webgpu`, with `onnxruntime-ep-webgpu` installed). Use fp32 on WebGPU: the plug-in's fp16
+kernels drift more. With the fp16 vision model, the image features of `cats.jpg` below have a smallest
+per-token cosine similarity to transformers of 0.832 on WebGPU, against 0.990 for the same file on the CPU.
 
 Then pass images with `--image`. Use `"state": null` when the images are the whole state. For example,
 with the two-cats picture from the model card and a `cats.json` that asks one `choice`, "How many cats
@@ -268,7 +184,7 @@ curl -o cats.jpg http://images.cocodataset.org/val2017/000000039769.jpg
 python d1-decisions.py -m ./d1-3b/cpu-vl -r cats.json --image cats.jpg
 ```
 
-The answer is `two` with a probability of about 0.985, as in transformers.
+The answer is `two` (transformers gives it a probability of 0.986).
 
 ## 7. Limitations
 
@@ -301,6 +217,6 @@ On the first 1000 items of public sets, GenAI gave the same top answer as transf
 
 - BoolQ: 998 (fp16, CUDA) and 995 (int8, CPU);
 - MNLI (matched): 997 (fp16, CUDA) and 995 (int8, CPU);
-- POPE (images, int8 CPU pipeline from [Images](#6-images)): 998.
+- POPE (images, built as in [Images](#6-images)): 1000 (fp16, CUDA) and 999 (int8, CPU).
 
 Use fp16 on CUDA, not bf16: bf16 gave fewer same top answers (BoolQ 994, MNLI 988) and more exact ties.

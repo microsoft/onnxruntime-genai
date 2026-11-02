@@ -260,10 +260,10 @@ class QuantizedModel:
         self.lm_head = lm_head if lm_head is not None else TensorModule()
         self.layers = {} if load_weights else []
         self.num_layers = num_layers
+        self.quant_attrs = quant_attrs
         if not load_weights:
             return
 
-        self.quant_attrs = quant_attrs
         self.global_group_size = (
             quant_attrs["config"]["group_size"] if global_group_size is None else global_group_size
         )
@@ -1185,4 +1185,3 @@ class QuantizedModel:
             module.qzeros = intzeros_pt.contiguous().byte()
         else:
             module.qzeros = intzeros_pt.contiguous()
-

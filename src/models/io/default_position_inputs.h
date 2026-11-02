@@ -15,7 +15,6 @@ struct DefaultPositionInputs : PositionInputs {
   void AddAttentionMask();
   void AddPositionIDs();
   void CreateNextPositionIDsTensor();
-  void CreateNextAttentionMaskTensor(int total_length);
   void UpdatePositionIDs(int total_length, int new_length);
   void UpdateAttentionMask(int total_length, int new_length);
 
@@ -25,11 +24,6 @@ struct DefaultPositionInputs : PositionInputs {
   void CreateAndInitializePositionIDs(DeviceSpan<int32_t> next_tokens, std::array<int64_t, 2> shape);
   template <typename T>
   void CreateAndInitializeAttentionMask(DeviceSpan<int32_t> next_tokens, std::array<int64_t, 2> shape);
-  template <typename T>
-  void InitializeStaticMask(OrtValue& cpu_attention_mask);
-
-  void RewindMask(size_t index);
-  bool ShouldUseStaticMaskHandling() const;
 
   const Model& model_;
   State& state_;
@@ -44,7 +38,8 @@ struct DefaultPositionInputs : PositionInputs {
   std::unique_ptr<Tensor> position_ids_next_;
   std::array<int64_t, 2> attention_mask_shape_{};
   std::unique_ptr<Tensor> attention_mask_;
-  std::unique_ptr<Tensor> attention_mask_next_;
+  std::unique_ptr<PositionIdsBuffer> position_buffer_;
+  std::unique_ptr<AttentionMaskBuffer> mask_buffer_;
   bool is_first_update_{true};
 };
 

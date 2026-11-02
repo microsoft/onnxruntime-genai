@@ -42,6 +42,7 @@ std::string DeriveModelFamily(const std::string& model_type) {
       {"gptoss", "gptoss"},
       {"gpt2", "gpt2"},
       {"lfm2", "lfm2"},
+      {"lfm3", "lfm3"},
       {"hunyuan", "hunyuan"},
   };
   for (const auto& prefix : kPrefixes) {

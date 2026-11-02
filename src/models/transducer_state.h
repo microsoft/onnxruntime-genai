@@ -10,6 +10,7 @@
 #pragma once
 
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 #include "model.h"
@@ -31,7 +32,7 @@ struct TransducerState : State {
 
   bool IsChunkDone() const { return chunk_done_; }
   std::span<const int32_t> GetStepTokens() const { return last_tokens_; }
-  std::span<const AcousticFrameInterval> GetStepTokenIntervals() const { return last_token_intervals_; }
+  std::span<const std::pair<int64_t, int64_t>> GetStepTokenIntervals() const { return last_token_intervals_; }
   bool TimestampsEnabled() const { return timestamps_enabled_; }
   std::span<const int32_t> GetAllTokens() const { return all_tokens_; }
   size_t TokenCount() const { return all_tokens_.size(); }
@@ -43,7 +44,7 @@ struct TransducerState : State {
   std::vector<int32_t> last_tokens_;
   // Allocated and populated only when timestamp output is enabled.
   bool timestamps_enabled_{false};
-  std::vector<AcousticFrameInterval> last_token_intervals_;
+  std::vector<std::pair<int64_t, int64_t>> last_token_intervals_;
   // Set to true when the current chunk has been fully consumed.
   bool chunk_done_{false};
 };

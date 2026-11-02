@@ -526,10 +526,8 @@ const char* Request::DraftTokenValidationError() const noexcept {
   if (!turn_policy_.IsGreedy() && turn_policy_.top_k <= 0) {
     return "Sampled speculative draft tokens require a positive top_k.";
   }
-  if (turn_policy_.repetition_penalty != 1.0f || turn_policy_.no_repeat_ngram_size > 0 ||
-      TurnEosFloor() > CurrentSequenceLength()) {
-    return "Speculative draft tokens require repetition_penalty 1, no_repeat_ngram_size 0, and a "
-           "turn already past its minimum generated token count.";
+  if (turn_policy_.repetition_penalty != 1.0f || turn_policy_.no_repeat_ngram_size > 0) {
+    return "Speculative draft tokens require repetition_penalty 1 and no_repeat_ngram_size 0.";
   }
   return nullptr;
 }

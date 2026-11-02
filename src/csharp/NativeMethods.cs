@@ -8,6 +8,12 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 {
     internal static class NativeMethods
     {
+        internal enum TimestampRecordKind
+        {
+            Words = 0,
+            Segments = 1
+        }
+
         internal class NativeLib
         {
 #if __ANDROID__
@@ -378,41 +384,41 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                               out IntPtr /* const char** */ outStr);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr OgaCreateTokenPostProcessor(IntPtr generator, out IntPtr processor);
+        public static extern IntPtr OgaCreateASRPostProcessor(IntPtr generator, out IntPtr processor);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern void OgaDestroyTokenPostProcessor(IntPtr processor);
+        public static extern void OgaDestroyPostProcessor(IntPtr processor);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr OgaTokenPostProcessorProcessNextTokens(IntPtr processor);
+        public static extern IntPtr OgaASRPostProcessorAsPostProcessor(IntPtr processor);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr OgaTokenPostProcessorFinalize(IntPtr processor);
+        public static extern IntPtr OgaPostProcessorProcessNext(IntPtr processor);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr OgaTokenPostProcessorReset(IntPtr processor);
+        public static extern IntPtr OgaPostProcessorFinalize(IntPtr processor);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern UIntPtr OgaTokenPostProcessorGetResultCount(IntPtr processor);
+        public static extern IntPtr OgaPostProcessorReset(IntPtr processor);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr OgaTokenPostProcessorGetResult(IntPtr processor, UIntPtr index);
+        public static extern UIntPtr OgaASRPostProcessorGetResultCount(IntPtr processor);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr OgaTokenPostProcessorResultGetText(IntPtr result);
+        public static extern IntPtr OgaASRPostProcessorGetResult(IntPtr processor, UIntPtr index);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr OgaTokenPostProcessorResultGetTimestamps(IntPtr result);
+        public static extern IntPtr OgaASRPostProcessorResultGetText(IntPtr result);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern UIntPtr OgaTokenPostProcessorTimestampGetWordCount(IntPtr timestamps);
+        public static extern IntPtr OgaASRPostProcessorResultGetTimestampResult(IntPtr result);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern UIntPtr OgaTokenPostProcessorTimestampGetSegmentCount(IntPtr timestamps);
+        public static extern UIntPtr OgaASRPostProcessorTimestampResultGetWordCount(IntPtr timestamps);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr OgaTokenPostProcessorTimestampGetWord(IntPtr timestamps, UIntPtr index);
+        public static extern UIntPtr OgaASRPostProcessorTimestampResultGetSegmentCount(IntPtr timestamps);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr OgaTokenPostProcessorTimestampGetSegment(IntPtr timestamps, UIntPtr index);
+        public static extern IntPtr OgaASRPostProcessorTimestampResultGetTimestampRecord(IntPtr timestamps, TimestampRecordKind kind, UIntPtr index);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr OgaTokenPostProcessorTimestampRecordGetText(IntPtr record);
+        public static extern IntPtr OgaASRPostProcessorTimestampRecordGetText(IntPtr record);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern long OgaTokenPostProcessorTimestampRecordGetStartFrame(IntPtr record);
+        public static extern long OgaASRPostProcessorTimestampRecordGetStartFrame(IntPtr record);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern long OgaTokenPostProcessorTimestampRecordGetStopFrame(IntPtr record);
+        public static extern long OgaASRPostProcessorTimestampRecordGetStopFrame(IntPtr record);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern double OgaTokenPostProcessorTimestampRecordGetStartTime(IntPtr record);
+        public static extern double OgaASRPostProcessorTimestampRecordGetStartTime(IntPtr record);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern double OgaTokenPostProcessorTimestampRecordGetStopTime(IntPtr record);
+        public static extern double OgaASRPostProcessorTimestampRecordGetStopTime(IntPtr record);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaTokenizerStreamReset(IntPtr /* OgaTokenizerStream* */ tokenizerStream);

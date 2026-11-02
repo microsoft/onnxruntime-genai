@@ -291,6 +291,9 @@ Because the add-on is loaded dynamically, `kDeviceInterfaceVersion` in
 [src/smartptrs.h](../src/smartptrs.h) is exported as `GetInterfaceVersion` and checked in
 `OrtGlobals::LoadCudaInterface` *before* `GetInterface` is resolved, so a mismatched
 `onnxruntime-genai-cuda` package fails loudly instead of calling through a shifted vtable.
+The rotary-history/configuration and device-span replay interface changes use device-interface version
+13. Rebuild provider add-ons against the matching core; do not reuse a binary
+compiled against the earlier layout.
 
 ### Hybrid (linear-attention) models
 
@@ -312,10 +315,67 @@ absorbed every token of the forward. `RecurrentState`
 `Generator` exposes this as `SnapshotState()`, `CanCropRecurrentState()` and
 `CropToAccepted(new_length, recurrent_position)`
 ([src/generator/generators.h](../src/generator/generators.h)). `MtpGenerator` snapshots before each wide greedy verify
-so a partial rejection can always replay the committed prefix with decode-consistent numerics.
+when a replay or compact-state baseline is required. Legacy windowed states can
+commit directly without the snapshot copies; compact capsules require a saved
+baseline in both greedy and sampling paths. A rejected single-token draft is
+replayed through a single-token target forward to preserve decode-consistent
+numerics for existing Qwen3.5/3.6 models.
+
+Legacy rank-5 recurrent windows remain supported alongside rank-4 recurrent
+state with compact update capsules. Convolution and recurrent window widths
+must agree for the legacy format. Crop validation happens before search, KV,
+position, or convolution state is changed.
+Unsupported recurrent/PLE/indexer rewinds are likewise validated before the
+Generator rewinds search or any decoder cache, so a rejected rewind leaves the
+existing sequence and its state usable.
 
 `RecurrentState::GraphCaptureVariant()` feeds the graph-capture annotation id so a double-buffered
 recurrent state never replays a graph bound to the other buffer.
+The CPU `state_update_active` control is also part of the annotation variant:
+capturing without updates cannot replay the same graph after a snapshot enables
+them. Dense indexers whose `past_sequence_length` is read on the host run
+eagerly, with a warning, instead of replaying a stale cache position; paged
+execution retains CUDA graph support.
+
+### Qwen3.8 multimodal rotary history
+
+Multimodal decoder and MTP exports use `inputs.rotary_position_ids` for the full
+T/H/W coordinate history in addition to current-step `position_ids`. The
+Generator retains a fixed-capacity `[3, batch_beam_size, search.max_length]`
+history with stable device storage. Actual image/video prompt coordinates are
+retained across decoding; unused rows forecast ordinary generated-token
+coordinates and remain within the model's rotary-table bounds. Rewinding keeps
+the retained prefix and regenerates the forecast. Rewind to zero resets the
+multimodal position state for a new prompt.
+
+MTP receives the main state's history, including the prompt's actual spatial
+coordinates and the generated-coordinate forecast. It must not independently
+reconstruct the image prompt as text token indices. The graph recomposes
+request-specific indexer rotary tables from this history, while current Q/K
+are normalized and rotated before sparse attention.
+
+The dynamic Engine's existing text-only packed-position restriction is
+unchanged. For packed text execution requiring the history binding, each T/H/W
+plane is the chronological token-index sequence; its persistent history buffer
+is included in the graph-buffer memory budget. Multimodal packed graph callers
+must supply actual per-request coordinates rather than using the Engine's
+text-only position producer.
+
+### IndexShare runtime contract
+
+Index sharing is a property of the exported main/MTP graphs, not an enable
+flag. The host control names `mode`, `projection_rows`, `base_row_indices`,
+`range_starts`, and `range_ends` are fixed graph ABI names. The configurable
+selection bindings remain mapped by the MTP `inputs`/`outputs` sections.
+The runtime derives the supported draft capacity from the graph's output
+shape and clamps each request's budget to it; there is no second user-supplied
+IndexShare draft limit. Nonzero device merge status rejects the tentative
+drafts and follows the recoverable MTP fallback path, without marking the
+Engine unhealthy.
+
+IndexShare stage scratch is included before KV auto-sizing. Stage views and
+layout identities are retained across decode rounds, and failure paths
+synchronize queued device work before destroying per-step tensor views.
 
 ### CUDA graph capture across two shapes
 

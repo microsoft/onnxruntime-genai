@@ -88,6 +88,10 @@ extends:
       name: 'onnxruntime-Win-CPU-2022'
       os: windows
     sdl:
+      componentgovernance:
+        # These upstream docs/tests are not built or shipped; retain native dependency coverage.
+        ignoreDirectories: >-
+          $(Build.SourcesDirectory)/build/core/Release/_deps/nlohmann_json-src/docs/mkdocs,$(Build.SourcesDirectory)/build/core/Release/_deps/matsdk_mbedtls-src/docs,$(Build.SourcesDirectory)/build/core/Release/_deps/matsdk_curl-src/tests
       policheck:
         enabled: true
         break: true

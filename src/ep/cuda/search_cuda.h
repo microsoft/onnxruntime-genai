@@ -31,7 +31,7 @@ struct Search_Cuda : Search {
   DeviceSpan<float> GetLogits() const override;
   void SetLogits(DeviceSpan<float> logits) override;
 
-  void ApplyMinLength(int min_length) override;
+  void ApplyMinLength(int min_length, std::optional<int> sequence_length = std::nullopt) override;
   void ApplyRepetitionPenalty(float penalty) override;
 
   std::span<float> GetScores(int batch_beam_index);
