@@ -170,7 +170,9 @@ std::vector<float> SampleDpmSolver(std::span<const double> sigmas, const std::ve
     }
     previous_x0 = std::move(x0);
   }
-  return std::vector<float>(sample.begin(), sample.end());
+  std::vector<float> result(sample.size());
+  std::transform(sample.begin(), sample.end(), result.begin(), [](double v) { return static_cast<float>(v); });
+  return result;
 }
 
 void ValidateVibeVoiceConfig(const Config& config) {
@@ -212,7 +214,7 @@ void ValidateVibeVoiceConfig(const Config& config) {
     if (voice.name.empty() || voice.file.empty() || voice.language.empty() || !names.insert(voice.name).second)
       Invalid("every voice needs a unique name, a file and a language (voice '" + voice.name + "')");
   }
-  if (!m.default_voice.empty() && !names.contains(m.default_voice))
+  if (!m.default_voice.empty() && names.count(m.default_voice) == 0)
     Invalid("default_voice '" + m.default_voice + "' is not in model.voices");
 }
 

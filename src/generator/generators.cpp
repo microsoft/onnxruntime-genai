@@ -886,7 +886,8 @@ void Generator::SetInputs(const NamedTensors& named_tensors) {
 
   // The state checks the new inputs, and inputs it rejects are dropped, so the generator can take others.
   try {
-    state_->ValidateExtraInputs(std::span<const ExtraInput>{extra_inputs_}.subspan(first_new_input));
+    state_->ValidateExtraInputs(
+        std::span<const ExtraInput>{extra_inputs_}.subspan(first_new_input, extra_inputs_.size() - first_new_input));
 
     // Set any extra inputs (those defined in extra_inputs and those defined in the PresetExtraInputs registry)
     if (set_extra_inputs_) {

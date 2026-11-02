@@ -10,6 +10,7 @@
 #include <thread>
 #include <vector>
 
+#include "span.h"
 #define OGA_USE_SPAN 1
 #include "ort_genai.h"
 
