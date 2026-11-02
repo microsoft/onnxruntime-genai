@@ -2,6 +2,14 @@
 // Licensed under the MIT License.
 
 #include "session_options.h"
+
+#include <filesystem>
+
+#if !defined(_WIN32)
+#include <dlfcn.h>
+#endif
+
+#include "models/env_utils.h"
 #include "models/session_options.h"
 
 #include <algorithm>
@@ -47,6 +55,34 @@ Config::ProviderOptions ResolveStreamBindingOptions(const Config::ProviderOption
 }
 
 namespace {
+
+void EnsureCudaPluginEpRegistered(bool force_Adjacent_probe = false) {
+  if (!FindRegisteredEpDevices("CUDAExecutionProvider").empty()) {
+    return;
+  }
+  std::error_code ec;
+  std::filesystem::path ep_path = GetEnv("ORT_CUDA_PLUGIN_EP_PATH");
+#if !defined(_WIN32)
+  if (ep_path.empty() && force_Adjacent_probe) {
+    Dl_info info{};
+    if (dladdr(reinterpret_cast<const void*>(Ort::api->RegisterExecutionProviderLibrary), &info) != 0 &&
+        info.dli_fname != nullptr) {
+      auto candidate = std::filesystem::path(info.dli_fname).parent_path() / "libonnxruntime_providers_cuda.so";
+      if (std::filesystem::exists(candidate, ec)) {
+        ep_path = std::move(candidate);
+      }
+    }
+  }
+  if (!ep_path.empty() && std::filesystem::exists(ep_path, ec)) {
+    try {
+      Ort::RegisterExecutionProviderLibrary(&GetOrtEnv(), "CUDAExecutionProvider", ep_path.c_str());
+    } catch (const Ort::Exception&) {
+    }
+  }
+#else
+  (void)force_Adjacent_probe;
+#endif
+}
 
 void AppendProviderBridgeExecutionProvider(
     OrtSessionOptions& session_options,
@@ -148,11 +184,20 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
   // in their own session_options in genai_config.json.
 
   // Try pre-registered plugin path first
+  EnsureCudaPluginEpRegistered(false);
   if (!AppendExecutionProviderV2(session_options, provider_options,
                                  DeviceType::CUDA, "CUDAExecutionProvider")) {
-    // Register the CUDA execution provider as a provider-bridge provider.
-    CUDAExecutionProvider::AppendProviderBridgeExecutionProvider(
-        session_options, provider_options, device);
+    try {
+      // Register the CUDA execution provider as a provider-bridge provider.
+      CUDAExecutionProvider::AppendProviderBridgeExecutionProvider(
+          session_options, provider_options, device);
+    } catch (const Ort::Exception&) {
+      EnsureCudaPluginEpRegistered(true);
+      if (!AppendExecutionProviderV2(session_options, provider_options,
+                                     DeviceType::CUDA, "CUDAExecutionProvider")) {
+        throw;
+      }
+    }
   }
 
   return device;

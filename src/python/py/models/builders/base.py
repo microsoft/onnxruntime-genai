@@ -497,7 +497,7 @@ class Model:
             rope_scaling = config.rope_scaling
             for key in rope_scaling:
                 if not hasattr(config, "rope_parameters"):
-                    setattr(config, "rope_parameters", dict())
+                    config.rope_parameters = dict()
                 if not hasattr(config.rope_parameters, key):
                     config.rope_parameters[key] = rope_scaling[key]
 
@@ -1589,7 +1589,6 @@ class Model:
         """
         Override in subclasses to modify genai_config before it is written to disk.
         """
-        pass
 
     def make_hidden_state_shape(self, seq_dim="sequence_length", last_dim=None):
         """Return a standard 3D shape or a 2D paged-attention shape."""
@@ -2918,15 +2917,18 @@ class Model:
         if state_update_capacity:
             self.make_value(kwargs["state_update_value"], self.io_dtype, shape=kwargs["state_update_value_shape"])
 
-    def make_gated_rms_norm(self, name, root_input, scale, gate, shape, epsilon=1e-5):
+    def make_gated_rms_norm(self, name, root_input, scale, gate, shape, epsilon=1e-5, activation=None):
         output = f"{name}/output_0"
+        attrs = {"epsilon": epsilon}
+        if activation is not None:
+            attrs["activation"] = activation
         self.make_node(
             "GatedRMSNorm",
             inputs=[root_input, scale, gate],
             outputs=[output],
             name=name,
             domain="com.microsoft",
-            epsilon=epsilon,
+            **attrs,
         )
         self.make_value(output, self.io_dtype, shape=shape)
 
@@ -3070,12 +3072,26 @@ class Model:
             raise ValueError(f"FP8 weight for '{basename}' must have shape [N, K], got {tuple(weight.shape)}.")
 
         out_features = int(weight.shape[0])
-        block_size = int(weight.shape[1])
-        scale = self.prepare_matmul_block_quantized_scales(weight_scale, out_features, 1)
+        in_features = int(weight.shape[1])
+        block_size = kwargs.pop("block_size", None)
+        if block_size is None:
+            if weight_scale.ndim == 2 and weight_scale.shape[1] > 1 and in_features % int(weight_scale.shape[1]) == 0:
+                block_size = in_features // int(weight_scale.shape[1])
+            else:
+                block_size = in_features
+        block_count = (in_features + block_size - 1) // block_size
+        if (
+            weight_scale.ndim == 2
+            and weight_scale.shape[1] == block_count
+            and weight_scale.shape[0] != out_features
+            and weight_scale.shape[0] * block_size >= out_features
+        ):
+            weight_scale = weight_scale.float().repeat_interleave(block_size, dim=0)[:out_features]
+        scale = self.prepare_matmul_block_quantized_scales(weight_scale, out_features, block_count)
         if scale is None:
             raise ValueError(
                 f"FP8 weight scale for '{basename}' has shape {tuple(weight_scale.shape)}, "
-                f"expected a scalar or [{out_features}, 1]."
+                f"expected a scalar or [{out_features}, {block_count}]."
             )
 
         prefix = basename[1:].replace("/", ".")
@@ -4896,7 +4912,7 @@ class Model:
 
     def make_gated_delta_net_attributes(self, kwargs):
         """Attribute policy shared by the dense and packed emitters so both layouts stay equivalent."""
-        return {
+        attrs = {
             "update_rule": kwargs.get("update_rule", "gated_delta"),
             "scale": kwargs.get("scale", 0.0),
             "gate_activation": kwargs.get("gate_activation", "none"),
@@ -4904,13 +4920,18 @@ class Model:
             "qk_l2_norm": kwargs.get("qk_l2_norm", 0),
             "chunk_size": kwargs.get("chunk_size", 64),
         }
+        if "gate_lower_bound" in kwargs:
+            attrs["gate_lower_bound"] = kwargs["gate_lower_bound"]
+        return attrs
 
     def make_gated_delta_net_gates(self, name, kwargs):
         """Cast the decay/beta gates to the float32 the kernel accumulates in."""
         decay_cast = f"{name}/decay_fp32/Cast"
         beta_cast = f"{name}/beta_fp32/Cast"
-        self.make_cast(decay_cast, kwargs["decay"], ir.DataType.FLOAT, kwargs["gate_shape"])
-        self.make_cast(beta_cast, kwargs["beta"], ir.DataType.FLOAT, kwargs["gate_shape"])
+        decay_shape = kwargs.get("decay_shape", kwargs.get("gate_shape"))
+        beta_shape = kwargs.get("beta_shape", kwargs.get("gate_shape"))
+        self.make_cast(decay_cast, kwargs["decay"], ir.DataType.FLOAT, decay_shape)
+        self.make_cast(beta_cast, kwargs["beta"], ir.DataType.FLOAT, beta_shape)
         return f"{decay_cast}/output_0", f"{beta_cast}/output_0"
 
     def make_gated_delta_net(self, name, **kwargs):
