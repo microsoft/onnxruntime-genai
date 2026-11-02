@@ -803,7 +803,7 @@ TEST(Qwen38QsaConstantsTest, RequiresBothCosAndSinForTargetAndHead) {
     EXPECT_EQ(consts.head.cos_rows, 4u);
     EXPECT_EQ(consts.head.sin_rows, 4u);
     EXPECT_NO_THROW(consts.target.RequireRopePositions(0, "target"));
-    EXPECT_NO_THROW(consts.target.RequireRopePositions(1, "target"));  // 4 tokens -> row 0
+    EXPECT_NO_THROW(consts.target.RequireRopePositions(1, "target"));                   // 4 tokens -> row 0
     EXPECT_THROW(consts.target.RequireRopePositions(2, "target"), std::runtime_error);  // 8 tokens -> row 4
     EXPECT_THROW(consts.head.RequireRopePositions(2, "head"), std::runtime_error);
   }
