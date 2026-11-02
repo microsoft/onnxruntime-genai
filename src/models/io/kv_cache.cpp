@@ -17,15 +17,32 @@
 
 namespace Generators {
 
-std::string ComposeKeyValueName(const std::string& template_string, int index) {
-  constexpr int32_t KeyValueNameLength = 64;
-  char key_value_name[KeyValueNameLength];
-  if (auto length = snprintf(key_value_name, std::size(key_value_name), template_string.c_str(), index);
-      length < 0 || length >= KeyValueNameLength) {
-    throw std::runtime_error("Unable to compose key value name from the provided template " + template_string +
-                             ". This could be either due to an encoding error or the name being too long.");
+std::string ComposeIndexedName(const std::string& template_string, int index,
+                               size_t max_length, std::string_view name_kind) {
+  const auto placeholder = template_string.find("%d");
+  if (placeholder == std::string::npos ||
+      template_string.find('%') != placeholder ||
+      template_string.find('%', placeholder + 2) != std::string::npos) {
+    throw std::runtime_error("Unable to compose " + std::string{name_kind} +
+                             " from malformed template " + template_string +
+                             "; expected exactly one %d.");
   }
-  return std::string(key_value_name);
+
+  std::string result;
+  result.reserve(template_string.size() + 10);
+  result.append(template_string, 0, placeholder);
+  result.append(std::to_string(index));
+  result.append(template_string, placeholder + 2);
+  if (result.size() >= max_length) {
+    throw std::runtime_error("Unable to compose " + std::string{name_kind} +
+                             " from template " + template_string +
+                             "; the expanded name is too long.");
+  }
+  return result;
+}
+
+std::string ComposeKeyValueName(const std::string& template_string, int index) {
+  return ComposeIndexedName(template_string, index, 64, "key value name");
 }
 
 namespace {

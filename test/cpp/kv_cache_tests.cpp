@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include <gtest/gtest.h>
+#include <string_view>
 
 #include "models/io/static_kv_cache.h"
 #include "telemetry_test_environment.h"
@@ -40,6 +41,38 @@ TEST(KvCacheTests, IgnoresTopLevelDeviceWindowSizeForPipelineModel) {
   EXPECT_FALSE(Generators::UsesNonRewindableWindowedKeyValueCache(
       model, model.config_->model.decoder));
   EXPECT_EQ(Generators::GetWindowedKeyValueCacheSize(model, search, 4096), 0);
+}
+
+TEST(KvCacheTests, ComposeIndexedNameAcceptsExactlyOneDecimalPlaceholder) {
+  EXPECT_EQ(Generators::ComposeIndexedName("past.%d.key", 3, 64, "test name"), "past.3.key");
+  EXPECT_EQ(Generators::ComposeIndexedName("%d_suffix", -7, 64, "test name"), "-7_suffix");
+}
+
+TEST(KvCacheTests, ComposeIndexedNameRejectsUnsafeFormatSyntax) {
+  for (const std::string_view value : {
+           "past",
+           "past_%",
+           "past_%n",
+           "past_%s",
+           "past_%p",
+           "past_%i",
+           "past_%03d",
+           "past_%d%s",
+           "past_%d%n",
+           "past_%d_%d",
+       }) {
+    EXPECT_THROW(
+        Generators::ComposeIndexedName(std::string{value}, 3, 64, "test name"),
+        std::runtime_error)
+        << value;
+  }
+}
+
+TEST(KvCacheTests, ComposeIndexedNamePreservesLengthLimits) {
+  EXPECT_EQ(Generators::ComposeIndexedName(std::string(62, 'a') + "%d", 3, 64, "test name").size(), 63u);
+  EXPECT_THROW(
+      Generators::ComposeIndexedName(std::string(63, 'a') + "%d", 3, 64, "test name"),
+      std::runtime_error);
 }
 
 }  // namespace

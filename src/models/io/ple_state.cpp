@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "generator/generators.h"
+#include "models/io/kv_cache.h"
 #include "models/io/ple_state.h"
 #include <algorithm>
 
@@ -9,12 +10,7 @@ namespace Generators {
 namespace {
 
 std::string ComposePleName(const std::string& name_template, int layer_index) {
-  constexpr size_t buffer_size = 128;
-  char name[buffer_size];
-  const int length = snprintf(name, buffer_size, name_template.c_str(), layer_index);
-  if (length < 0 || static_cast<size_t>(length) >= buffer_size)
-    throw std::runtime_error("Unable to compose PLE state name from template " + name_template);
-  return name;
+  return ComposeIndexedName(name_template, layer_index, 128, "PLE state name");
 }
 
 void FixAndValidateBatchDimension(
