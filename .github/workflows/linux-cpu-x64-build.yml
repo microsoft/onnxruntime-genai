@@ -18,7 +18,7 @@ env:
   DOTNET_INSTALL_DIR: "${{ github.workspace }}/dotnet"
 jobs:
   linux_cpu_x64:
-    runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU", "JobId=linux_cpu_x64-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}"]
+    runs-on: ort-genai-github-linux-16-amd-wcus-ss
     steps:
       - name: Checkout OnnxRuntime GenAI repo
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
