@@ -825,7 +825,7 @@ OgaResult* OGA_API_CALL OgaGenerator_GetNextTokens(const OgaGenerator* generator
   OGA_TRY
   // Transducer models (RNNT, TDT) bypass the standard search; return tokens
   // emitted by the most recent StepToken() call.
-  if (auto* transducer = dynamic_cast<Generators::TransducerState*>(generator->state_.get())) {
+  if (auto* transducer = dynamic_cast<Generators::StepState*>(generator->state_.get())) {
     auto tokens = transducer->GetStepTokens();
     *out = tokens.data();
     *out_count = tokens.size();
@@ -921,14 +921,14 @@ OgaResult* OGA_API_CALL OgaGenerator_SetLogits(OgaGenerator* generator, OgaTenso
 size_t OGA_API_CALL OgaGenerator_GetSequenceCount(const OgaGenerator* generator, size_t index) {
   // Transducer models (RNNT, TDT) bypass the standard search; the orchestrator
   // state owns the accumulated transcript directly.
-  if (auto* transducer = dynamic_cast<Generators::TransducerState*>(generator->state_.get())) {
+  if (auto* transducer = dynamic_cast<Generators::StepState*>(generator->state_.get())) {
     return transducer->GetAllTokens().size();
   }
   return generator->GetSequence(static_cast<int>(index)).size();
 }
 
 const int32_t* OGA_API_CALL OgaGenerator_GetSequenceData(const OgaGenerator* generator, size_t index) {
-  if (auto* transducer = dynamic_cast<Generators::TransducerState*>(generator->state_.get())) {
+  if (auto* transducer = dynamic_cast<Generators::StepState*>(generator->state_.get())) {
     return transducer->GetAllTokens().data();
   }
   return generator->GetSequence(static_cast<int>(index)).CopyDeviceToCpu().data();

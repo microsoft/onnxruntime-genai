@@ -630,11 +630,11 @@ Generator::Generator(const Model& model, const GeneratorParams& params)
 
   // RNNT/TDT/streaming-enc-dec-ASR models don't use the traditional
   // search/logits pipeline; skip the standard validations and create the
-  // TransducerState-derived state directly.
+  // StepState-derived state directly.
   const auto& model_type = model.config_->model.type;
   if (ModelType::IsTransducer(model_type) || ModelType::IsStreamingEncDecASR(model_type)) {
     state_ = model.CreateState({}, params);
-    transducer_state_ = dynamic_cast<TransducerState*>(state_.get());
+    transducer_state_ = dynamic_cast<StepState*>(state_.get());
     strategy_ = MakeDecodingStrategy(*this);
     LogGeneratorCreate(params);
     return;
@@ -1017,7 +1017,7 @@ void Generator::GenerateNextToken() {
 }
 
 TokenOutputs Generator::GetTokenOutputs() const {
-  if (const auto* transducer = dynamic_cast<const TransducerState*>(state_.get())) {
+  if (const auto* transducer = dynamic_cast<const StepState*>(state_.get())) {
     const auto tokens = transducer->GetStepTokens();
     if (model_->config_->model.timestamp_level != Config::TimestampLevel::Off) {
       const auto intervals = transducer->GetStepTokenIntervals();
@@ -1037,7 +1037,7 @@ SpeculativeStats Generator::GetSpeculativeStats() const {
 void Generator::RewindToLength(size_t new_length) {
   const auto& model_type = model_->config_->model.type;
   // RNNT/TDT/streaming-enc-dec-ASR models (e.g. Moonshine) take the
-  // TransducerState path and never create search_, so rewind is unsupported.
+  // StepState path and never create search_, so rewind is unsupported.
   // Fail clearly here before search_ is dereferenced below.
   if (ModelType::IsTransducer(model_type) || ModelType::IsStreamingEncDecASR(model_type))
     throw std::runtime_error("RewindTo is not supported for streaming ASR models (" + model_type + ").");

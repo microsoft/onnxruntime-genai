@@ -24,7 +24,7 @@ SpeculativeStats DecodingStrategy::GetStats() const {
 std::unique_ptr<DecodingStrategy> MakeDecodingStrategy(Generator& generator) {
   const auto& model = generator.model_->config_->model;
   // Transducer (RNNT/TDT) and streaming encoder-decoder ASR (e.g. Moonshine)
-  // models drive token emission via TransducerState::StepToken() and never
+  // models drive token emission via StepState::StepToken() and never
   // build the search_/logits pipeline, so they must not read generator.search_.
   if (ModelType::IsTransducer(model.type) || ModelType::IsStreamingEncDecASR(model.type))
     return std::make_unique<TransducerDecodingStrategy>(generator);

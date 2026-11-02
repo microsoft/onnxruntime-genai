@@ -6,7 +6,7 @@
 namespace Generators {
 
 struct Generator;
-struct TransducerState;
+struct StepState;
 
 // TransducerDecodingStrategy
 // Drives RNNT / TDT models that bypass the search / logits pipeline entirely.
@@ -15,7 +15,7 @@ struct TransducerDecodingStrategy final : DecodingStrategy {
   void Step(Generator& g) override;
 
  private:
-  TransducerState& transducer_state_;
+  StepState& transducer_state_;
 };
 
 }  // namespace Generators
