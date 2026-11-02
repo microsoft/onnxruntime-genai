@@ -1851,6 +1851,21 @@ TEST(ConfigTest, PartitioningDefaultsToEmpty) {
   EXPECT_TRUE(config.model.partitioning.empty());
 }
 
+TEST(ConfigTest, RejectsUnknownPartitioning) {
+  Config config;
+  for (const auto& overlay : {R"({"model":{"partitioning":"OpenVINO"}})",
+                              R"({"model":{"partitioning":"openvino_npu"}})",
+                              R"({"model":{"partitioning":"qnn"}})"}) {
+    EXPECT_THROW(OverlayConfig(config, overlay), std::runtime_error);
+    EXPECT_TRUE(config.model.partitioning.empty());
+  }
+
+  OverlayConfig(config, R"({"model":{"partitioning":"openvino"}})");
+  EXPECT_EQ(config.model.partitioning, "openvino");
+  OverlayConfig(config, R"({"model":{"partitioning":""}})");
+  EXPECT_TRUE(config.model.partitioning.empty());
+}
+
 TEST(ConfigTest, ParsesDecoderTokenTypeIdsInput) {
   Config config;
   EXPECT_EQ(config.model.decoder.inputs.token_type_ids, "token_type_ids");

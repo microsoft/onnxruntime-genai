@@ -2654,7 +2654,11 @@ struct Model_Element : JSON::Element {
     } else if (name == "tokenizer_dir") {
       v_.tokenizer_dir = JSON::Get<std::string_view>(value);
     } else if (name == "partitioning") {
-      v_.partitioning = JSON::Get<std::string_view>(value);
+      const auto partitioning = JSON::Get<std::string_view>(value);
+      if (!partitioning.empty() && partitioning != "openvino") {
+        throw std::runtime_error("partitioning must be empty or openvino");
+      }
+      v_.partitioning = partitioning;
     } else if (name == "vocab_size") {
       v_.vocab_size = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "context_length") {
