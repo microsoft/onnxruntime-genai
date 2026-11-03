@@ -683,8 +683,7 @@ void Generator::InitializePhi3RopeThreshold(const GeneratorParams& params) {
       throw std::runtime_error("N-gram decoding does not support the explicit LongRoPE context contract");
     if (params.BatchBeamSize() != 1)
       throw std::runtime_error("LongRoPE context selection currently requires batch_size=1 and num_beams=1");
-    has_explicit_rope_context_ = true;
-    phi3_rope_threshold_ = decoder->original_context_length_ + 1;
+    rope_context_threshold_ = decoder->original_context_length_ + 1;
     return;
   }
 
@@ -929,8 +928,8 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
 
 DeviceSpan<float> Generator::RunWithRopeCache(DeviceSpan<int32_t> next_tokens) {
   const int length = search_->GetSequenceLength();
-  if (has_explicit_rope_context_ && rope_cache_length_ > 0 &&
-      (rope_cache_length_ >= phi3_rope_threshold_) != (length >= phi3_rope_threshold_)) {
+  if (rope_context_threshold_ != 0 && rope_cache_length_ > 0 &&
+      (rope_cache_length_ >= rope_context_threshold_) != (length >= rope_context_threshold_)) {
     // Rebuild only model state: search, sampling, guidance and usage already contain these tokens.
     state_->RewindTo(0);
     next_tokens = search_->GetSequence(0);

@@ -193,7 +193,7 @@ struct Generator : LeakChecked<Generator> {
   void RunGeneratedToken();
   DeviceSpan<float> RunWithRopeCache(DeviceSpan<int32_t> next_tokens);
   int rope_cache_length_{};
-  bool has_explicit_rope_context_{};
+  int rope_context_threshold_{};
   Action last_action_{Action::standard};
 
   // Pre-computed per-token decisions: avoid repeated checks each token
