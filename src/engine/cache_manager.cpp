@@ -724,14 +724,18 @@ bool PagedCacheManager::IsResident(const std::shared_ptr<Request>& request) cons
 StepPlanningResult PagedCacheManager::PlanStepResources(StepPlan& plan) const {
   plan.fixed_state = {};
   if (fixed_state_pool_) {
-    const bool has_prefill = std::any_of(
+    // A prefill chunk, or a decode row reading several committed tokens, runs a multi-token query
+    // without draft checkpoints.
+    const bool has_chunk = std::any_of(
         plan.requests.begin(), plan.requests.end(),
-        [](const RequestStepPlan& entry) { return entry.is_prefill; });
+        [](const RequestStepPlan& entry) {
+          return entry.is_prefill || entry.unprocessed_token_count > entry.draft_token_count + 1;
+        });
     const bool has_drafts = std::any_of(
         plan.requests.begin(), plan.requests.end(),
         [](const RequestStepPlan& entry) { return entry.draft_token_count != 0; });
-    if (has_prefill && has_drafts) {
-      // Packed recurrent operators cannot capture intermediate draft checkpoints while a prefill
+    if (has_chunk && has_drafts) {
+      // Packed recurrent operators cannot capture intermediate draft checkpoints while such a chunk
       // shares the step. Remove those optional rows before paged capacity planning so they cannot
       // displace a request that the actual mixed step has room to execute.
       for (auto& entry : plan.requests) {

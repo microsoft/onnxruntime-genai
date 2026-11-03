@@ -238,6 +238,29 @@ TEST_F(GuidanceFastForwardTest, StopStringCompletedByAForcedTokenEndsTheTurnAtTh
   EXPECT_TRUE(ValidateRequestInvariants(request->Snapshot()).empty());
 }
 
+TEST_F(GuidanceFastForwardTest, HybridStepReadingForcedTokensDefersAnotherRequestsDrafts) {
+  model_ = LoadSyntheticCompositeModel();
+  auto engine = MakeCompositeDoublesEngine(model_, /*forced_token=*/11);
+  auto drafting = CreateRequestWithPrompt(engine.engine, Prompt());
+  auto forcing = CreateRequestWithPrompt(engine.engine, Prompt());
+  InstallForcingGrammar(*forcing, /*trigger=*/11, {12, 13});
+  std::array<EngineEvent, 8> storage;
+  ASSERT_EQ(engine.engine->Run(storage), 4u);  // drafting: 11; forcing: 11, 12, 13
+  drafting->SetDraftTokens(std::array<int32_t, 1>{11});
+
+  // Recurrent state cannot capture draft checkpoints while a multi-token row shares the step.
+  engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
+    ASSERT_NE(context.plan, nullptr);
+    ASSERT_EQ(context.plan->requests.size(), 2u);
+    for (const auto& entry : context.plan->requests) {
+      const bool is_forcing = entry.request_id == forcing.get();
+      EXPECT_EQ(entry.unprocessed_token_count, is_forcing ? 3u : 1u);
+      EXPECT_EQ(entry.draft_token_count, 0u);
+    }
+  });
+  ASSERT_GT(engine.engine->Run(storage), 0u);
+}
+
 TEST_F(GuidanceFastForwardTest, RollbackDiscardsForcedTokensAndTheRetryCommitsThemOnce) {
   for (const bool queued_restore : {false, true}) {
     SCOPED_TRACE(::testing::Message() << "queued restore " << queued_restore);
