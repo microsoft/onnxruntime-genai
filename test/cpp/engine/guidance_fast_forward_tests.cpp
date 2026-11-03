@@ -356,17 +356,19 @@ TEST_F(GuidanceFastForwardTest, StaticBatchingRejectsAFastForwardTurnWithoutCons
 }
 
 #if USE_GUIDANCE
-// With a real llguidance grammar, fast-forward yields the same text as step-by-step decoding, in
-// fewer model executions.
-TEST(GuidanceFastForwardRealGrammarTest, ForcedTextMatchesStepByStepDecodingInFewerSteps) {
+// With a real llguidance grammar, step-by-step decoding reads the literal's tokens one model step
+// each, while fast-forward forces everything after the first token and reads it in one step. Both
+// emit the literal's exact token IDs.
+TEST(GuidanceFastForwardRealGrammarTest, ForcedTextMatchesStepByStepDecodingInOneReadStep) {
   auto model = CreateModel(GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
   auto tokenizer = model->CreateTokenizer();
   // Every token of this text is inside the fixture model's 1000-token vocabulary.
   constexpr const char* kText = "on and on and on";
-  const int32_t first_token = tokenizer->Encode(kText).front();
+  const auto text_tokens = tokenizer->Encode(kText);
+  ASSERT_GT(text_tokens.size(), 2u);
 
   const auto run = [&](bool fast_forward) {
-    auto engine = MakeDoublesEngine(model, /*capacity=*/8, first_token);
+    auto engine = MakeDoublesEngine(model, /*capacity=*/8, text_tokens.front());
     auto request = CreateEngineRequest(engine.engine);
     TurnOptions options;
     options.guidance_type = "regex";
@@ -389,14 +391,19 @@ TEST(GuidanceFastForwardRealGrammarTest, ForcedTextMatchesStepByStepDecodingInFe
     }
     EXPECT_TRUE(finished);
     EXPECT_EQ(request->FinishReason(), GenerationFinishReason::EosToken);
-    return std::pair{tokenizer->Decode(tokens), engine.executor->decode_calls};
+    return std::pair{tokens, engine.executor->decoded_token_counts};
   };
 
-  const auto [step_text, step_calls] = run(false);
-  const auto [forward_text, forward_calls] = run(true);
-  EXPECT_EQ(step_text, kText);
-  EXPECT_EQ(forward_text, kText);
-  EXPECT_LT(forward_calls, step_calls);
+  const auto [step_tokens, step_reads] = run(false);
+  const auto [forward_tokens, forward_reads] = run(true);
+  EXPECT_EQ(step_tokens, text_tokens);
+  EXPECT_EQ(forward_tokens, text_tokens);
+  // Step-by-step: the prompt, then one model step per generated token before EOS is sampled.
+  std::vector<size_t> expected_step_reads(text_tokens.size() + 1, 1);
+  expected_step_reads.front() = Prompt().size();
+  EXPECT_EQ(step_reads, expected_step_reads);
+  // Fast-forward: the prompt, then the sampled token and every forced token in one step.
+  EXPECT_EQ(forward_reads, (std::vector<size_t>{Prompt().size(), text_tokens.size()}));
 }
 #endif
 
