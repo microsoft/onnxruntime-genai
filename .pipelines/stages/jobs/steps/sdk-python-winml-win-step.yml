@@ -32,6 +32,8 @@ parameters:
   type: string
 - name: winml_sdk_version
   type: string
+- name: python_dependency_version
+  type: string
 - name: core_artifact
   type: string
 - name: python_versions
@@ -117,8 +119,7 @@ steps:
     displayName: 'Build WinML Python ${{ pyVer }} wheel (incremental)'
     workingDirectory: '$(Build.SourcesDirectory)'
     env:
-      # Pin the wheel's runtime onnxruntime dependency to the WinML SDK version.
-      ONNXRUNTIME_VERSION: '${{ parameters.winml_sdk_version }}'
+      ONNXRUNTIME_VERSION: '${{ parameters.python_dependency_version }}'
 
   - task: BinSkim@4
     displayName: 'Run BinSkim (winml python ${{ pyVer }} extension)'
@@ -152,6 +153,25 @@ steps:
       $cpTag = 'cp' + '${{ pyVer }}'.Replace('.', '')
       if ($whl.Name -notmatch $cpTag) {
         Write-Error "ASSERT FAIL: wheel for ${{ pyVer }} not tagged $cpTag : $($whl.Name)"; exit 1
+      }
+      Add-Type -AssemblyName System.IO.Compression.FileSystem
+      $archive = [System.IO.Compression.ZipFile]::OpenRead($whl.FullName)
+      try {
+        if ($archive.Entries | Where-Object { $_.Name -match '^(lib)?onnxruntime(?:\.|_(?!genai(?:[._]|$)))' }) {
+          throw 'WinML Python wheel must not bundle ONNX Runtime binaries'
+        }
+      }
+      finally { $archive.Dispose() }
+      if ('${{ parameters.arch }}' -eq 'x64') {
+        python -m pip install onnxruntime==${{ parameters.python_dependency_version }}
+        if ($LASTEXITCODE -ne 0) { throw 'Could not install the external ONNX Runtime package' }
+        python -m pip install --force-reinstall --no-deps $whl.FullName
+        if ($LASTEXITCODE -ne 0) { throw 'Could not install the WinML Python wheel' }
+        $expected = (Get-Content "$(Build.SourcesDirectory)/VERSION_INFO" -Raw).Trim()
+        $actual = python -c "import onnxruntime_genai as og; print(og.__version__)"
+        if ($LASTEXITCODE -ne 0 -or "$actual".Trim() -ne $expected) {
+          throw 'WinML wheel failed to import with external ONNX Runtime'
+        }
       }
       Write-Host "ASSERT OK: WinML wheel produced ($($whl.Name))"
       $stage = "$(Build.ArtifactStagingDirectory)/wheel"

@@ -107,3 +107,32 @@ def test_foundry_nuspec_excludes_ort_and_addon(tmp_path, generators, rid, core, 
     entries = ElementTree.fromstring("\n".join(lines)).findall("file")
     payload = [entry.attrib["target"] for entry in entries if entry.attrib["target"].startswith("runtimes")]
     assert payload == [f"runtimes/{rid}/native/{core}"]
+
+
+@pytest.mark.parametrize("rid", ["win-x64", "win-arm64"])
+def test_winml_nuspec_excludes_ort_and_keeps_sdk_dependency(tmp_path, generators, rid):
+    winml = importlib.import_module("generate_nuspec_for_winml_nuget")
+    directory = tmp_path / rid / "lib"
+    directory.mkdir(parents=True)
+    for name in ["onnxruntime-genai.dll", "onnxruntime.dll", "onnxruntime.lib", "onnxruntime_providers_shared.dll"]:
+        (directory / name).touch()
+    args = argparse.Namespace(
+        root_dir=str(tmp_path),
+        package_name="Microsoft.ML.OnnxRuntimeGenAI.WinML",
+        package_version="1.0.0",
+        ort_package_name="Microsoft.Windows.AI.MachineLearning",
+        ort_package_version="2.0.0",
+        win_x64=str(tmp_path / "win-x64"),
+        win_arm64=str(tmp_path / "win-arm64"),
+    )
+    package = ElementTree.fromstring("\n".join(winml.generate_nuspec(args)))
+    payload = [
+        entry.attrib["target"]
+        for entry in package.findall("files/file")
+        if entry.attrib["target"].startswith("runtimes")
+    ]
+    assert payload == [f"runtimes/{rid}/native/onnxruntime-genai.dll"]
+    dependencies = package.findall("metadata/dependencies/group/dependency")
+    assert any(
+        entry.attrib == {"id": "Microsoft.Windows.AI.MachineLearning", "version": "2.0.0"} for entry in dependencies
+    )

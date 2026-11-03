@@ -126,6 +126,12 @@ ONNX Runtime is an open source project. See:
 
 See [ONNX Runtime GenAI Documentation](https://onnxruntime.ai/docs/genai)
 
+## ONNX Runtime dependency
+
+GenAI NuGet packages do not bundle ONNX Runtime binaries. ONNX Runtime is
+supplied by separate runtime packages. The WinML NuGet depends on
+`Microsoft.Windows.AI.MachineLearning` for its runtime.
+
 ## Linux ARM64 CUDA
 
 The CUDA NuGet contains the Linux ARM64 GenAI core and CUDA add-on under
