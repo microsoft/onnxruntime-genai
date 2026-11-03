@@ -115,6 +115,10 @@ std::vector<int32_t> NemotronBoltRoundTokens(std::span<const int32_t> drafts,
 
 NemotronBoltModel::NemotronBoltModel(std::unique_ptr<Config> config, OrtEnv& env)
     : Model{std::move(config)} {
+#if ORT_API_VERSION < 27
+  // Each generator captures fresh graph ids in model-owned sessions; releasing them needs ORT 27.
+  Require(false, "ONNX Runtime API 27 or later is required to release captured graphs");
+#endif
   Require(p_device_->GetType() == DeviceType::CUDA, "a CUDA execution provider is required");
   p_device_scoring_ = GetDeviceInterface(DeviceType::CPU);
   Require(IsGraphCaptureEnabled(config_->model.decoder.session_options),
@@ -326,6 +330,11 @@ void NemotronBoltState::SetExtraInputs(const std::vector<ExtraInput>& inputs) {
   Require(inputs.empty(), "extra inputs are unsupported");
 }
 
+void NemotronBoltState::SetActiveAdapter(Adapters*, const std::string&) {
+  // Adapters would select a new graph identity that is never warmed on disposable state.
+  throw std::runtime_error("nemotron_bolt: adapters are unsupported");
+}
+
 std::vector<int64_t> NemotronBoltState::Verify(std::span<const int32_t> tokens, bool want_predictions) {
   Require(tokens.size() == kBoltVerifyRows && length_ + kBoltVerifyRows <= bolt_.capacity_,
           "verify block exceeds fixed capacity");
@@ -364,39 +373,49 @@ void NemotronBoltState::Prefill(std::span<const int32_t> tokens) {
   Require(!prefilled_ && !tokens.empty(), "AppendTokens requires a fresh or reset generator");
   for (const auto token : tokens)
     Require(token >= 0 && token < model_.config_->model.vocab_size, "token id outside vocabulary");
-  const size_t window = drafter_->ContextWindow();
-  const size_t draft_start =
-      (window != 0 && tokens.size() > window)
-          ? ((tokens.size() - window) / kBoltVerifyRows) * kBoltVerifyRows
-          : 0;
-  const size_t draft_rows = tokens.size() - draft_start;
-  const bool single_chunk = draft_rows <= kBoltVerifyRows;
-  const size_t aux_row_bytes = bolt_.aux_width_ * sizeof(uint16_t);
-  auto aux_src = aux_view_->GetByteSpan();
-  auto prefill_dst = prefill_aux_->GetByteSpan();
-  for (size_t pos = 0; pos < tokens.size(); pos += kBoltVerifyRows) {
-    const size_t valid = std::min(kBoltVerifyRows, tokens.size() - pos);
-    const bool last_chunk = pos + kBoltVerifyRows >= tokens.size();
-    std::vector<int32_t> block(kBoltVerifyRows, tokens[pos + valid - 1]);
-    std::copy_n(tokens.begin() + pos, valid, block.begin());
-    const auto predictions = Verify(block, last_chunk);
-    if (!single_chunk && pos >= draft_start) {
-      prefill_dst.subspan((pos - draft_start) * aux_row_bytes, valid * aux_row_bytes)
-          .CopyFrom(aux_src.subspan(0, valid * aux_row_bytes));
+  // A failure after the first chunk leaves advanced caches and a native cursor that the public
+  // sequence (still empty) cannot rewind, so discard all partial state before propagating.
+  try {
+    const size_t window = drafter_->ContextWindow();
+    const size_t draft_start =
+        (window != 0 && tokens.size() > window)
+            ? ((tokens.size() - window) / kBoltVerifyRows) * kBoltVerifyRows
+            : 0;
+    const size_t draft_rows = tokens.size() - draft_start;
+    const bool single_chunk = draft_rows <= kBoltVerifyRows;
+    const size_t aux_row_bytes = bolt_.aux_width_ * sizeof(uint16_t);
+    auto aux_src = aux_view_->GetByteSpan();
+    auto prefill_dst = prefill_aux_->GetByteSpan();
+    for (size_t pos = 0; pos < tokens.size(); pos += kBoltVerifyRows) {
+      const size_t valid = std::min(kBoltVerifyRows, tokens.size() - pos);
+      const bool last_chunk = pos + kBoltVerifyRows >= tokens.size();
+      std::vector<int32_t> block(kBoltVerifyRows, tokens[pos + valid - 1]);
+      std::copy_n(tokens.begin() + pos, valid, block.begin());
+      const auto predictions = Verify(block, last_chunk);
+      if (!single_chunk && pos >= draft_start) {
+        prefill_dst.subspan((pos - draft_start) * aux_row_bytes, valid * aux_row_bytes)
+            .CopyFrom(aux_src.subspan(0, valid * aux_row_bytes));
+      }
+      if (last_chunk) {
+        anchor_ = static_cast<int32_t>(predictions[valid - 1]);
+      }
+      length_ += valid;
+      state_row_ = static_cast<int32_t>(valid - 1);
     }
-    if (last_chunk) {
-      anchor_ = static_cast<int32_t>(predictions[valid - 1]);
+    Propose(draft_rows, draft_start, anchor_, single_chunk ? aux_view_.get() : prefill_aux_.get());
+    if (tokens.size() < static_cast<size_t>(params_->search.max_length)) {
+      pending_.push_back(anchor_);
+      stats_.tokens_queued = 1;
     }
-    length_ += valid;
-    state_row_ = static_cast<int32_t>(valid - 1);
+    stats_.effective_k = 7;
+    prefilled_ = true;
+  } catch (...) {
+    try {
+      Reset();
+    } catch (...) {
+    }
+    throw;
   }
-  Propose(draft_rows, draft_start, anchor_, single_chunk ? aux_view_.get() : prefill_aux_.get());
-  if (tokens.size() < static_cast<size_t>(params_->search.max_length)) {
-    pending_.push_back(anchor_);
-    stats_.tokens_queued = 1;
-  }
-  stats_.effective_k = 7;
-  prefilled_ = true;
 }
 
 int32_t NemotronBoltState::NextToken(size_t public_length) {

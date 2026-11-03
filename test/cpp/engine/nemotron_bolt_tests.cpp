@@ -107,6 +107,12 @@ TEST(NemotronBolt, RejectsUnsupportedSearchInsteadOfIgnoringIt) {
     EXPECT_THROW(ValidateNemotronBoltSearch(*invalid), std::runtime_error);
   }
   Config sliding = config;
+  sliding.model.vocab_size = 128;
+  sliding.model.context_length = 16;
+  sliding.search.max_length = 16;
+  auto valid_sliding_free = std::make_shared<GeneratorParams>(sliding);
+  valid_sliding_free->use_graph_capture = true;
+  EXPECT_NO_THROW(CreateSearch(*valid_sliding_free));
   sliding.model.decoder.sliding_window = Config::Model::Decoder::SlidingWindow{8};
   auto invalid_sliding = std::make_shared<GeneratorParams>(sliding);
   invalid_sliding->use_graph_capture = true;

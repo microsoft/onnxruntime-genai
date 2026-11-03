@@ -39,6 +39,7 @@ struct NemotronBoltState : State {
   DeviceSpan<float> Run(int, DeviceSpan<int32_t>&, DeviceSpan<int32_t>) override;
   void RewindTo(size_t length) override;
   void SetExtraInputs(const std::vector<ExtraInput>& inputs) override;
+  void SetActiveAdapter(Adapters* adapters, const std::string& adapter_name) override;
   void Prefill(std::span<const int32_t> tokens);
   int32_t NextToken(size_t public_length);
   SpeculativeStats Stats() const;
