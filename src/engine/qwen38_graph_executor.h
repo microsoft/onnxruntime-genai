@@ -100,6 +100,7 @@ class Qwen38GraphSession : public FixedSlotSession {
     bool is_decode_cycle{};
     bool mtp{};
     size_t proposed{};
+    size_t draft_forwards{};
     size_t accepted{};
     size_t produced{};
   };

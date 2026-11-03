@@ -4358,6 +4358,32 @@ TEST_F(Qwen38PlaneDflashSelectTest, MatchesTheHostWalkForRandomLatticesWithManyT
   }
 }
 
+// The scores of seven drafts of 20000 candidates are 2.8 billion floats: the offset of the row of step 6 does not fit 32 bits.
+TEST_F(Qwen38PlaneDflashSelectTest, ReadsTheRowsOfALatticeWhoseOffsetsExceedTheInt32Range) {
+  ASSERT_TRUE(plane_->dflash_select != nullptr) << "the plane library has no dflash_select";
+  KernelTestDevice device{*plane_};
+  constexpr int kDrafts = 7;
+  constexpr int kTopK = 20000;
+  constexpr size_t kLast = kDrafts - 1;
+  constexpr size_t kWinner = 5;
+  const size_t scores_bytes = static_cast<size_t>(kDrafts) * kTopK * kTopK * sizeof(float);
+  ASSERT_GT(scores_bytes / sizeof(float), static_cast<size_t>(std::numeric_limits<int32_t>::max()));
+  std::vector<int32_t> candidates(static_cast<size_t>(kDrafts) * kTopK);
+  for (size_t i = 0; i < candidates.size(); ++i) candidates[i] = static_cast<int32_t>(i);
+  const PlaneBuffer candidates_dev = device.Upload(candidates);
+  const PlaneBuffer scores = device.Filled(scores_bytes, 0);
+  // Every score is zero (each step takes candidate 0 and reads the row of candidate 0) except one in the row of step 6.
+  const float peak = 1.0f;
+  plane_->Check(plane_->memcpy_h2d(scores.data() + (kLast * kTopK) * kTopK * sizeof(float) + kWinner * sizeof(float), &peak,
+                                   sizeof(peak), device.stream()),
+                "plant the peak");
+  const PlaneBuffer control = device.Upload(DflashControlSentinels());
+  ASSERT_EQ(plane_->dflash_select(device.stream(), candidates_dev.data(), scores.data(), control.data(), kDrafts, kTopK), 0);
+  const std::vector<int64_t> words = device.Download<int64_t>(control, kDflashControlWords);
+  for (size_t step = 0; step < kLast; ++step) EXPECT_EQ(words[kDflashDraftSlots[step]], static_cast<int64_t>(step * kTopK));
+  EXPECT_EQ(words[kDflashDraftSlots[kLast]], static_cast<int64_t>(kLast * kTopK + kWinner));
+}
+
 // Only the words of the drafts that were asked for are written (the words between them are not the selector's), and a call it
 // cannot serve writes none.
 TEST_F(Qwen38PlaneDflashSelectTest, WritesOnlyTheWordsOfTheRequestedDraftsAndRejectsWhatItCannotServe) {

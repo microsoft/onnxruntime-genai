@@ -1812,13 +1812,15 @@ __global__ void DflashSelect(const int32_t* candidates, const float* scores, i64
                              int drafts, int top_k) {
   const int slots[] = {2, 8, 9, 10, 11, 12, 13};
   int previous = 0;
+  const size_t width = static_cast<size_t>(top_k);
   for (int step = 0; step < drafts; ++step) {
-    const float* row = scores + (step * top_k + previous) * top_k;
+    // The flattened lattice holds drafts * top_k * top_k scores, which exceeds the int range for a large top_k.
+    const float* row = scores + (static_cast<size_t>(step) * width + static_cast<size_t>(previous)) * width;
     int best = 0;
     for (int index = 1; index < top_k; ++index) {
       if (row[best] < row[index]) best = index;
     }
-    control[slots[step]] = candidates[step * top_k + best];
+    control[slots[step]] = candidates[static_cast<size_t>(step) * width + static_cast<size_t>(best)];
     previous = best;
   }
 }

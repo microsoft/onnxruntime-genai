@@ -280,4 +280,36 @@ void RequireQwen38ReplayCoverage(const std::vector<std::string>& bank_names,
   }
 }
 
+void RequireQwen38CompactReplayExecution(bool fold, int state_update_capacity) {
+  if (!fold) {
+    throw std::runtime_error(
+        "qwen38_graph: the target graph exports compact state_update outputs (capacity " +
+        std::to_string(state_update_capacity) +
+        ") but model.qwen38_graph.fold.enabled is false; the non-fold path verifies at most 2 rows, so the compact replay "
+        "would read transitions that were never captured");
+  }
+}
+
+size_t RequireQwen38TensorFits(const std::string& name, const std::vector<int64_t>& shape, size_t element_size,
+                               size_t available_bytes) {
+  size_t count = 1;
+  for (int64_t dim : shape) {
+    if (dim <= 0) {
+      throw std::runtime_error("qwen38_graph: " + name + " has the shape " + ShapeText(shape) +
+                               ", which is not static and positive");
+    }
+    const size_t extent = static_cast<size_t>(dim);
+    if (count > std::numeric_limits<size_t>::max() / extent) {
+      throw std::runtime_error("qwen38_graph: the shape " + ShapeText(shape) + " of " + name + " overflows");
+    }
+    count *= extent;
+  }
+  if (element_size == 0 || count > available_bytes / element_size) {
+    throw std::runtime_error("qwen38_graph: " + name + " declares the shape " + ShapeText(shape) + " (" +
+                             std::to_string(count) + " elements of " + std::to_string(element_size) +
+                             " bytes), which does not fit its buffer of " + std::to_string(available_bytes) + " bytes");
+  }
+  return count;
+}
+
 }  // namespace Generators

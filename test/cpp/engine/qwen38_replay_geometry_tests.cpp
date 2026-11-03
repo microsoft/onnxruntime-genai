@@ -355,4 +355,48 @@ TEST(Qwen38ReplayGeometryTest, MissingTensorsAreNamedWithTheirLayerAndBank) {
   }
 }
 
+TEST(Qwen38ReplayGeometryTest, CompactReplayNeedsTheFoldVerifyWidth) {
+  EXPECT_NO_THROW(RequireQwen38CompactReplayExecution(/*fold=*/true, 7));
+  // A non-fold target that exports capacity-7 updates verifies S<=2: it must not enable the replay of seven transitions.
+  for (const int capacity : {1, 3, 7}) {
+    SCOPED_TRACE(capacity);
+    try {
+      RequireQwen38CompactReplayExecution(/*fold=*/false, capacity);
+      FAIL() << "a non-fold path was allowed to replay compact updates";
+    } catch (const std::runtime_error& error) {
+      const std::string message = error.what();
+      EXPECT_NE(message.find("capacity " + std::to_string(capacity)), std::string::npos) << message;
+      EXPECT_NE(message.find("fold"), std::string::npos) << message;
+    }
+  }
+}
+
+TEST(Qwen38ReplayGeometryTest, AViewMustFitTheBufferItIsBuiltOver) {
+  constexpr size_t kBytes = 16 * sizeof(int64_t);
+  EXPECT_EQ(RequireQwen38TensorFits("fold.ctl", {16}, sizeof(int64_t), kBytes), 16u);
+  EXPECT_EQ(RequireQwen38TensorFits("fold.ctl", {2, 8}, sizeof(int64_t), kBytes), 16u);
+  EXPECT_EQ(RequireQwen38TensorFits("fold.ctl", {4}, sizeof(int64_t), kBytes), 4u);
+
+  const std::vector<std::vector<int64_t>> rejected = {
+      {17},                                      // one word too many
+      {4, 5},                                    // a product that is too large
+      {0},                                       // not positive
+      {-1},                                      // dynamic
+      {16, 0},                                   // a zero dimension anywhere
+      {std::numeric_limits<int64_t>::max()},     // far beyond the buffer
+      {std::numeric_limits<int64_t>::max(), 3},  // the product overflows
+      {int64_t{1} << 40, int64_t{1} << 40},      // the product overflows size_t
+  };
+  for (const auto& shape : rejected) {
+    SCOPED_TRACE(::testing::PrintToString(shape));
+    try {
+      RequireQwen38TensorFits("fold.ctl", shape, sizeof(int64_t), kBytes);
+      FAIL() << "a view larger than its buffer was accepted";
+    } catch (const std::runtime_error& error) {
+      EXPECT_NE(std::string(error.what()).find("fold.ctl"), std::string::npos) << error.what();
+    }
+  }
+  EXPECT_THROW(RequireQwen38TensorFits("fold.ctl", {1}, 0, kBytes), std::runtime_error);
+}
+
 }  // namespace Generators::test

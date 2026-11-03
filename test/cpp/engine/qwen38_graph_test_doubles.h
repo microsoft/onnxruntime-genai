@@ -91,6 +91,7 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
   // ---- fault injection ----
   bool fail_wait{};
   bool malformed_cycle_count{};
+  bool single_drafter_forward{};  // one drafter execution proposes the whole block, as the DFlash drafter does
   bool context_healthy{true};
   bool fail_status_check{};  // every CheckDecodeStatus() of a started decode reports error bits
   size_t fail_cycle{};       // 1-based cycle of a decode that accumulates error bits when it completes (0 = none)
@@ -191,6 +192,7 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
       record.accepted_count = static_cast<int>(accepted_drafts);
     }
     record.proposed_count = mtp_ ? drafts_ : 1;
+    record.draft_forward_count = single_drafter_forward ? 1 : record.proposed_count;
     // Rows after the first mismatch are meaningless; the cycle commits the accepted drafts and one token more.
     const size_t step = accepted_drafts + 1;
     const std::array<int64_t*, 8> predictions{

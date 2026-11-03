@@ -476,6 +476,7 @@ void Qwen38GraphEngine::BuildTarget() {
     }
   }
   if (compact_state_updates_) {
+    RequireQwen38CompactReplayExecution(fold_, state_update_capacity_);
     if (state_update_capacity_ <= 0 || state_update_capacity_ + 1 > kMaxVerifyRows)
       throw std::runtime_error("qwen38_graph: invalid compact state_update_capacity " +
                                std::to_string(state_update_capacity_));
@@ -640,7 +641,10 @@ void Qwen38GraphEngine::BuildTarget() {
     plane_.Check(plane_.memcpy_h2d(fold_ptrs_.data(), ptrs, sizeof(ptrs), stream_), "fold ptrs");
     SyncStream();  // ptrs lives on the stack
     const auto i64 = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64;
-    fold_tensors_["fold.ctl"] = MakeTensor(ctl_.data(), info.GetInputShape("fold.ctl"), i64);
+    // The view must not be larger than the 16 words that ctl_ owns.
+    const std::vector<int64_t> ctl_shape = info.GetInputShape("fold.ctl");
+    RequireQwen38TensorFits("fold.ctl", ctl_shape, sizeof(int64_t), ctl_.size());
+    fold_tensors_["fold.ctl"] = MakeTensor(ctl_.data(), ctl_shape, i64);
     fold_tensors_["fold.ctx_commit"] = MakeTensor(ctx_commit_.data(), {2}, i64);
     fold_tensors_["fold.ctx_a"] = MakeTensor(ctx_a_.data(), {verify_rows_ > 2 ? 2 * verify_rows_ : 2}, i64);
     fold_tensors_["fold.ctx_b"] = MakeTensor(ctx_a_.data() + 16, {2}, i64);
@@ -1511,6 +1515,7 @@ Qwen38CycleRecord Qwen38GraphEngine::WaitCycle() {
   result.accepted = acc_count > 0;
   result.accepted_count = static_cast<int>(acc_count);
   result.proposed_count = mtp_enabled_ ? (verify_rows_ - 1) : 1;
+  result.draft_forward_count = dflash_ ? 1 : result.proposed_count;
   const int64_t status = record[4];
   result.new_pending = static_cast<int64_t>(static_cast<int32_t>(raw5 & 0xFFFFFFFFu));
   result.new_length = record[6];

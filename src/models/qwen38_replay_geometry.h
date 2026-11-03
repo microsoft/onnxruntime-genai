@@ -88,6 +88,18 @@ std::string DescribeMissingQwen38ReplayTensor(const std::string& name, const std
 void RequireQwen38ReplayCoverage(const std::vector<std::string>& bank_names,
                                  const std::vector<std::string>& state_update_names);
 
+// A compact replay needs a verify step that is as wide as the update capacity: the replay reads `capacity` captured
+// transitions of a step. Only the fold stack runs a verify step of capacity + 1 rows; the non-fold path runs S=1 and S=2 steps,
+// which capture one transition at most, so a full acceptance of two tokens would replay uncaptured rows. Throws
+// std::runtime_error when `fold` is false.
+void RequireQwen38CompactReplayExecution(bool fold, int state_update_capacity);
+
+// The number of elements of a tensor of `shape` that is viewed over a buffer of `available_bytes`, for a tensor `name` whose
+// elements are `element_size` bytes. Throws std::runtime_error when a dimension is not positive, when the number of bytes
+// overflows, or when the view is larger than the buffer (a larger declared shape would let the graph read or write past it).
+size_t RequireQwen38TensorFits(const std::string& name, const std::vector<int64_t>& shape, size_t element_size,
+                               size_t available_bytes);
+
 // The tensor `name` of `tensors` (a map from a name to a unique_ptr to a tensor: the state tensors of a bank, ...), which the
 // replay of layer `layer` needs. Throws a std::runtime_error naming the tensor, the layer and `where` (e.g. "bank 1") when the
 // package does not declare it, instead of the bare std::out_of_range of at().

@@ -509,6 +509,33 @@ TEST_F(Qwen38GraphEngineTest, ATurnLimitAfterSeveralAcceptedDraftsCountsExactlyT
   EXPECT_FLOAT_EQ(stats.acceptance_rate, 1.0f);
 }
 
+TEST_F(Qwen38GraphEngineTest, AChainOfDraftsCountsOneDrafterForwardPerProposedToken) {
+  device_->SetDrafts(7, {7});
+  auto engine = MakeEngine();
+  auto request = Begin(*engine, Prompt(5), /*max_generated_tokens=*/8);
+
+  RunToCompletion(*engine, request);
+
+  const auto stats = engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.rounds, 1u);
+  EXPECT_EQ(stats.draft_tokens_proposed, 7u);
+  EXPECT_EQ(stats.draft_forward_passes, 7u);
+}
+
+TEST_F(Qwen38GraphEngineTest, ABlockDrafterCountsOneDrafterForwardPerCycleWhateverItProposes) {
+  device_->SetDrafts(7, {7, 3});
+  device_->single_drafter_forward = true;
+  auto engine = MakeEngine();
+  auto request = Begin(*engine, Prompt(5), /*max_generated_tokens=*/12);
+
+  RunToCompletion(*engine, request);
+
+  const auto stats = engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.rounds, 2u);
+  EXPECT_EQ(stats.draft_tokens_proposed, 14u);
+  EXPECT_EQ(stats.draft_forward_passes, 2u);
+}
+
 TEST_F(Qwen38GraphEngineTest, ATurnLimitOnTheCorrectionTokenCountsTheRejectedPositionToo) {
   device_->SetDrafts(3, {1});
   auto engine = MakeEngine();

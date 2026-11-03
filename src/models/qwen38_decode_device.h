@@ -31,7 +31,8 @@ struct Qwen38CycleRecord {
   bool accepted{};
   int accepted_count{};
   int proposed_count{1};
-  int64_t new_pending{};  // device view after the commit (checked against the host ledger)
+  int draft_forward_count{1};  // drafter executions behind the proposals: one per token for an MTP chain, one per block for DFlash
+  int64_t new_pending{};       // device view after the commit (checked against the host ledger)
   int64_t new_length{};
 
   size_t TokenCount() const {

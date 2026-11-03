@@ -186,7 +186,7 @@ Qwen38StepResult Qwen38GraphSession::Step(const Qwen38StepRequest& request) {
     result.tokens[0] = first;
     result.count = 1;
     pending_step_ = PendingStep{/*active=*/true, /*is_decode_cycle=*/false, /*mtp=*/false,
-                                /*proposed=*/0, /*accepted=*/0, /*produced=*/1};
+                                /*proposed=*/0, /*draft_forwards=*/0, /*accepted=*/0, /*produced=*/1};
     return result;
   }
 
@@ -244,8 +244,10 @@ Qwen38StepResult Qwen38GraphSession::Step(const Qwen38StepRequest& request) {
   const size_t n_acc =
       record.accepted_count > 0 ? static_cast<size_t>(record.accepted_count) : (record.accepted ? 1 : 0);
   result.speculation = SpeculativeRowMetrics{n_prop, n_acc};
+  const size_t draft_forwards = record.draft_forward_count > 0 ? static_cast<size_t>(record.draft_forward_count) : 1;
   pending_step_ = PendingStep{/*active=*/true, /*is_decode_cycle=*/true, /*mtp=*/device_->MtpEnabled(),
-                              /*proposed=*/n_prop, /*accepted=*/n_acc, /*produced=*/produced};
+                              /*proposed=*/n_prop, /*draft_forwards=*/draft_forwards, /*accepted=*/n_acc,
+                              /*produced=*/produced};
   return result;
 }
 
@@ -272,7 +274,7 @@ void Qwen38GraphSession::OnStepCommitted(const RequestStepResult& result) {
     const size_t n_eval =
         std::min(consumed, step.accepted) + ((consumed > step.accepted && step.accepted < n_prop) ? 1 : 0);
     ++stats_.target_verify_forward_passes;
-    stats_.draft_forward_passes += n_prop;
+    stats_.draft_forward_passes += step.draft_forwards;
     stats_.draft_tokens_proposed += n_prop;
     stats_.draft_tokens_evaluated += n_eval;
     if (effective_accepted < stats_.acceptance_length_histogram.size()) {
