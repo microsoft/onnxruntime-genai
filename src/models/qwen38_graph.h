@@ -153,6 +153,15 @@ struct Qwen38CacheInput {
 // capacity and are ignored.
 void ValidateQwen38CacheShapes(const std::vector<Qwen38CacheInput>& inputs, int kv_capacity, const std::string& graph);
 
+// Size in bytes of one element of the dense prefill `logits` output. Only BFLOAT16 and FLOAT are supported; any other
+// type throws a std::runtime_error, so an exported graph with another logits type fails when the prefill is built
+// instead of producing a wrong first token.
+size_t Qwen38DenseLogitsElementBytes(ONNXTensorElementDataType type);
+
+// Index of the largest of the `count` logits at `row` (smallest index on ties, like the device argmax), reading them as
+// `type` (see Qwen38DenseLogitsElementBytes).
+int Qwen38ArgmaxLogits(const void* row, ONNXTensorElementDataType type, size_t count);
+
 // Constants of the PackedQSAIndexer state conversion (key-norm weights, leading-RoPE tables) for the dense -> packed hand-off.
 struct Qwen38QsaConstants {
   // fp32 scales per quantized-KV layer: one per channel of the 2 KV heads x 256 channels.

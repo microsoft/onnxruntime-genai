@@ -653,6 +653,32 @@ TEST(Qwen38PromptTokenTest, RejectsIdsOutsideTheVocabularyAndNamesTheOffender) {
   EXPECT_FALSE(message_of({0}, 0).empty());  // an empty vocabulary accepts nothing
 }
 
+TEST(Qwen38DenseLogitsTest, ReadsBfloat16AndFloatRowsAsTheirOwnType) {
+  EXPECT_EQ(Qwen38DenseLogitsElementBytes(ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16), 2u);
+  EXPECT_EQ(Qwen38DenseLogitsElementBytes(ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT), 4u);
+
+  // bfloat16 is the upper half of a float: 5, 1, 10, 0.
+  const std::vector<uint16_t> bf16 = {0x40A0, 0x3F80, 0x4120, 0x0000};
+  EXPECT_EQ(Qwen38ArgmaxLogits(bf16.data(), ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16, bf16.size()), 2);
+
+  // The same values as float32 must not be reinterpreted as two-byte rows (which would select token 1).
+  const std::vector<float> fp32 = {5.0f, 1.0f, 10.0f, 0.0f};
+  EXPECT_EQ(Qwen38ArgmaxLogits(fp32.data(), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, fp32.size()), 2);
+
+  // Ties resolve to the smallest index, like the device argmax.
+  const std::vector<float> tie = {1.0f, 3.0f, 3.0f};
+  EXPECT_EQ(Qwen38ArgmaxLogits(tie.data(), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, tie.size()), 1);
+}
+
+TEST(Qwen38DenseLogitsTest, RejectsOtherElementTypes) {
+  for (const auto type : {ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16, ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE,
+                          ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32, ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED}) {
+    EXPECT_THROW(Qwen38DenseLogitsElementBytes(type), std::runtime_error) << type;
+    const std::vector<float> row = {1.0f, 2.0f};
+    EXPECT_THROW(Qwen38ArgmaxLogits(row.data(), type, row.size()), std::runtime_error) << type;
+  }
+}
+
 TEST(Qwen38CacheShapeTest, AcceptsTheExportedGeometry) {
   const std::vector<Qwen38CacheInput> target = {
       {"input_ids", {-1, 1}},

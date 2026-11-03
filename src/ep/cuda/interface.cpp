@@ -37,10 +37,10 @@ Ort::Allocator* ort_allocator_{};
 const char* device_label = "cuda";
 
 // The process-wide stream and the device it belongs to (-1 while there is no stream). Every writer holds
-// g_stream_mutex. The device id is stored with release semantics only after the stream exists, so a reader that
-// loads a non-negative id with acquire semantics can use g_stream without taking the mutex.
+// g_stream_mutex. The device id (g_stream_device_id, declared in cuda_common.h) is stored with release semantics only
+// after the stream exists, so a reader that loads a non-negative id with acquire semantics can use g_stream without
+// taking the mutex.
 std::mutex g_stream_mutex;
-std::atomic<int> g_stream_device_id{-1};
 cuda_stream_holder g_stream;
 
 // Creates the stream on first use and returns the device it belongs to. A negative `requested_device_id` binds a new

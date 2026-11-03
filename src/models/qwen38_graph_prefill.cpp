@@ -427,6 +427,40 @@ std::string TailOf(const std::string& name) {
 
 }  // namespace
 
+size_t Qwen38DenseLogitsElementBytes(ONNXTensorElementDataType type) {
+  switch (type) {
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16:
+      return sizeof(uint16_t);
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
+      return sizeof(float);
+    default:
+      throw std::runtime_error("qwen38_graph: the dense prefill logits must be bfloat16 or float32, got element type " +
+                               std::to_string(static_cast<int>(type)));
+  }
+}
+
+int Qwen38ArgmaxLogits(const void* row, ONNXTensorElementDataType type, size_t count) {
+  const size_t element_bytes = Qwen38DenseLogitsElementBytes(type);
+  const auto* bytes = static_cast<const uint8_t*>(row);
+  int best = 0;
+  float best_value = -INFINITY;
+  for (size_t i = 0; i < count; ++i) {
+    float v;
+    if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+      std::memcpy(&v, bytes + i * element_bytes, sizeof(v));
+    } else {
+      uint16_t bits;
+      std::memcpy(&bits, bytes + i * element_bytes, sizeof(bits));
+      v = Bf16ToFloat(bits);
+    }
+    if (v > best_value) {
+      best_value = v;
+      best = static_cast<int>(i);
+    }
+  }
+  return best;
+}
+
 void Qwen38GraphEngine::BuildFastPrefill() {
   const auto& q = model_.config_->model.qwen38_graph;
   const int configured_chunk = static_cast<int>(EffectiveQwen38PrefillChunkTokens(q));
@@ -479,6 +513,7 @@ void Qwen38GraphEngine::BuildFastPrefill() {
   if (fast->chunk < 1 || fast->chunk > capacity_) throw std::runtime_error("qwen38_graph: invalid prefill.chunk");
   fast->dense_inputs = fast->dense->GetInputNames();
   fast->dense_outputs = fast->dense->GetOutputNames();
+  if (fast->dense_info.HasOutput("logits")) Qwen38DenseLogitsElementBytes(fast->dense_info.GetOutputDataType("logits"));
 
   const size_t slots = static_cast<size_t>(capacity_) + 8;
   {
@@ -773,24 +808,17 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
   size_t rows = 1;
   for (size_t d = 0; d + 1 < shape.size(); ++d) rows *= static_cast<size_t>(shape[d]);
   if (shape.back() != vocab_) throw std::runtime_error("qwen38_graph: unexpected dense logits shape");
-  std::vector<uint16_t> raw(static_cast<size_t>(vocab_));
-  plane_.Check(plane_.memcpy_d2h(raw.data(), static_cast<uint8_t*>(f.logits->GetTensorMutableRawData()) + (rows - 1) * static_cast<size_t>(vocab_) * 2,
-                                 raw.size() * 2, stream_),
+  const auto logits_type = shape_info->GetElementType();
+  const size_t logits_row_bytes = static_cast<size_t>(vocab_) * Qwen38DenseLogitsElementBytes(logits_type);
+  std::vector<uint8_t> raw(logits_row_bytes);
+  plane_.Check(plane_.memcpy_d2h(raw.data(), static_cast<uint8_t*>(f.logits->GetTensorMutableRawData()) + (rows - 1) * logits_row_bytes,
+                                 raw.size(), stream_),
                "read logits");
   plane_.Check(plane_.memcpy_d2d(d_last_hidden_.data(), d_prompt_hidden_.data() + (ledger_.Length() - 1) * row_bytes, row_bytes, stream_),
                "last hidden");
   SyncStream();
-  int best = 0;
-  float best_value = -INFINITY;
-  for (size_t i = 0; i < raw.size(); ++i) {
-    const float v = Bf16ToFloat(raw[i]);
-    if (v > best_value) {
-      best_value = v;
-      best = static_cast<int>(i);
-    }
-  }
   f.logits.reset();
-  pending_ = best;
+  pending_ = Qwen38ArgmaxLogits(raw.data(), logits_type, static_cast<size_t>(vocab_));
 }
 
 // Dense state (KV, positions, GDN / conv / PLE state, raw index keys) -> packed decode state: KV rows into the fixed store,

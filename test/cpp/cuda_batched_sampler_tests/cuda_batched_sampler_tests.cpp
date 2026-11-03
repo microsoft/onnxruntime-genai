@@ -9,6 +9,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -194,6 +195,36 @@ TEST(DeviceSpanTests, ReleasingMirrorsPastPoolLimitsDoesNotWaitCuda) {
           << "round " << round << " destination " << i;
     }
   }
+}
+
+TEST(DeviceSpanTests, FreshThreadUsesTheStreamDeviceCuda) {
+  int device_count = 0;
+  if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count < 2) GTEST_SKIP() << "needs two CUDA devices";
+  [[maybe_unused]] auto model = CreateCudaModel();
+  auto* device = Generators::GetDeviceInterface(Generators::DeviceType::CUDA);
+
+  constexpr size_t count = 16;
+  auto input = device->Allocate<int32_t>(count);
+  auto output = device->Allocate<int64_t>(count);
+  // The shared stream belongs to the device that owns the buffers allocated through the interface.
+  cudaPointerAttributes attributes{};
+  ASSERT_EQ(cudaPointerGetAttributes(&attributes, output.Span().data()), cudaSuccess);
+  const int stream_device = attributes.device;
+  const int other_device = (stream_device + 1) % device_count;
+
+  int device_after_cast = -1;
+  bool cast_succeeded = false;
+  // A host thread that selected another device than the shared stream's, as a fresh thread does by default.
+  std::thread worker{[&] {
+    ASSERT_EQ(cudaSetDevice(other_device), cudaSuccess);
+    cast_succeeded = device->Cast(input.Span().data(), output.Span().data(), Ort::TypeToTensorType<int32_t>,
+                                  Ort::TypeToTensorType<int64_t>, count);
+    ASSERT_EQ(cudaGetDevice(&device_after_cast), cudaSuccess);
+  }};
+  worker.join();
+  EXPECT_TRUE(cast_succeeded);
+  EXPECT_EQ(device_after_cast, stream_device);
+  device->Synchronize();
 }
 
 TEST(SamplingTests, SchedulerOwnedSamplerHandlesHeterogeneousRowsCuda) {
