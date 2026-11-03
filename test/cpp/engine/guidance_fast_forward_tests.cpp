@@ -179,6 +179,24 @@ TEST_F(GuidanceFastForwardTest, ContextLimitCutsTheForcedSpanAndEndsTheTurn) {
   EXPECT_TRUE(ValidateRequestInvariants(request->Snapshot()).empty());
 }
 
+TEST_F(GuidanceFastForwardTest, ForcedEosEndsTheTurnWithoutBeingEmitted) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
+  auto request = CreateEngineRequest(engine.engine);
+  request->BeginTurn(Prompt());
+  InstallForcingGrammar(*request, /*trigger=*/11, {12, EosToken(*model_), 13});
+
+  std::array<EngineEvent, 8> storage;
+  const size_t events = engine.engine->Run(storage);
+  ASSERT_EQ(events, 2u);
+  EXPECT_EQ(EventTokens(std::span{storage}.first(events)), (std::vector<int32_t>{11, 12}));
+  EXPECT_NE(storage[1].flags & EngineEventFlagTurnFinished, 0u);
+  EXPECT_EQ(storage[1].finish_reason, GenerationFinishReason::EosToken);
+  EXPECT_EQ(request->TurnGeneratedTokens(), 2u);
+  const auto tokens = request->TokensCpu();
+  EXPECT_EQ(std::vector<int32_t>(tokens.begin(), tokens.end()), Concat(Prompt(), {11, 12}));
+  EXPECT_TRUE(ValidateRequestInvariants(request->Snapshot()).empty());
+}
+
 TEST_F(GuidanceFastForwardTest, StopStringCompletedByAForcedTokenEndsTheTurnAtThatToken) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/5 /* "ST" */);
   auto request = CreateEngineRequest(engine.engine);

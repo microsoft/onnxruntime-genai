@@ -1279,7 +1279,7 @@ void Request::CommitGuidanceToken(const RequestStepResult& result) {
 }
 
 // Stages the continuation the grammar forced after this step's sampled token, applying
-// StageGeneration()'s stop-string, turn and context checks in the same order. A limit cuts the
+// StageGeneration()'s stop-string, EOS, turn and context checks in the same order. A limit cuts the
 // span and ends the turn, which releases the cursor that already advanced past all of it.
 void Request::StageForcedTokens(RequestStepResult& result) {
   if (!guidance_logits_processor_ || !result.token_appended || result.done) {
@@ -1299,6 +1299,12 @@ void Request::StageForcedTokens(RequestStepResult& result) {
     const int64_t sequence_length_before = CurrentSequenceLength();
     search_->CommitToken(forced_token);
     if (CurrentSequenceLength() != sequence_length_before + 1) {
+      // Search marks EOS done without appending it, exactly as for a sampled EOS.
+      if (search_->IsDone() && contains(params_->config.model.eos_token_id, forced_token)) {
+        result.done = true;
+        result.finish_reason = GenerationFinishReason::EosToken;
+        return;
+      }
       throw std::logic_error(
           "Committing a grammar-forced token produced an invalid sequence transition.");
     }
