@@ -955,6 +955,14 @@ class Qwen38TestPackage {
   std::filesystem::path ple_path() const { return dir_ / "ple_table.txt"; }
   std::filesystem::path embedding_path() const { return dir_ / "embedding.onnx.data"; }
   std::filesystem::path plane_path() const { return dir_ / "plane.so"; }
+  // The library file the model loads from the package: Windows resolves `plane.so` to its `.dll` sibling.
+  std::filesystem::path loaded_plane_path() const {
+    auto path = plane_path();
+#if defined(_WIN32)
+    path.replace_extension(".dll");
+#endif
+    return path;
+  }
 
   // Copies `source_library` into the package folder as `plane.so` (and its Windows `.dll` sibling when needed) unless the
   // copy is there already, and returns a Config whose `decoder.shared_initializers` would fail in
@@ -1135,14 +1143,14 @@ TEST_F(Qwen38LegacyPlaneLibraryTest, ModelPackagesAreCheckedAgainstTheLibraryAtM
   // Model::Model runs EnsureDeviceOrtInit or AddSharedInitializers.
   ExpectMissingCapability(
       [&] { Qwen38GraphModel model{package.MakeConfigWithLibrary(library_path_), GetOrtEnv()}; }, "int8_ple",
-      package.ple_path().filename().string(), package.plane_path().filename().string());
+      package.ple_path().filename().string(), package.loaded_plane_path().filename().string());
 
   package.Write(kValidPleTable, Qwen38TestPackage::kInt8TableBytes);
   ExpectMissingCapability([&] { package.Require(*plane_); }, "int8_embedding", package.embedding_path().string(),
                           library_path_.string());
   ExpectMissingCapability(
       [&] { Qwen38GraphModel model{package.MakeConfigWithLibrary(library_path_), GetOrtEnv()}; }, "int8_embedding",
-      package.embedding_path().filename().string(), package.plane_path().filename().string());
+      package.embedding_path().filename().string(), package.loaded_plane_path().filename().string());
 }
 
 #if !defined(_WIN32)
