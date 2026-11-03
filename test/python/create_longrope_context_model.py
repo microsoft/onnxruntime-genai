@@ -31,8 +31,9 @@ def create_model(output_dir, declare_context=True):
         helper.make_tensor("zero", TensorProto.FLOAT, [], [0.0]),
         helper.make_tensor("cache_axes", TensorProto.INT64, [2], [1, 3]),
         helper.make_tensor("reduce_axes", TensorProto.INT64, [3], [1, 2, 3]),
-        helper.make_tensor("logits_axes", TensorProto.INT64, [2], [1, 2]),
-        helper.make_tensor("vocab_shape", TensorProto.INT64, [1], [3]),
+        helper.make_tensor("logits_axis", TensorProto.INT64, [1], [2]),
+        helper.make_tensor("batch_axis", TensorProto.INT64, [1], [1]),
+        helper.make_tensor("sequence_axis", TensorProto.INT64, [], [1]),
     ]
     nodes = [
         helper.make_node("Greater", ["rope_context_length", "boundary"], ["long_mode"]),
@@ -42,16 +43,16 @@ def create_model(output_dir, declare_context=True):
         helper.make_node("Unsqueeze", ["scaled_tokens", "cache_axes"], ["new_keys"]),
         helper.make_node("Concat", ["past_key_values.0.key", "new_keys"], ["present.0.key"], axis=2),
         helper.make_node("Concat", ["past_key_values.0.value", "new_keys"], ["present.0.value"], axis=2),
-        helper.make_node("ReduceSum", ["present.0.key", "reduce_axes"], ["sum"], keepdims=0),
+        helper.make_node("ReduceSum", ["past_key_values.0.key", "reduce_axes"], ["past_sum"], keepdims=0),
+        helper.make_node("Unsqueeze", ["past_sum", "batch_axis"], ["past_sum_column"]),
+        helper.make_node("CumSum", ["scaled_tokens", "sequence_axis"], ["token_sums"]),
+        helper.make_node("Add", ["past_sum_column", "token_sums"], ["sum"]),
         helper.make_node("Neg", ["sum"], ["negative"]),
         helper.make_node("Mul", ["sum", "zero"], ["zeros"]),
-        helper.make_node("Unsqueeze", ["sum", "logits_axes"], ["positive_logit"]),
-        helper.make_node("Unsqueeze", ["negative", "logits_axes"], ["negative_logit"]),
-        helper.make_node("Unsqueeze", ["zeros", "logits_axes"], ["zero_logit"]),
-        helper.make_node("Concat", ["positive_logit", "negative_logit", "zero_logit"], ["last_logits"], axis=2),
-        helper.make_node("Shape", ["input_ids"], ["input_shape"]),
-        helper.make_node("Concat", ["input_shape", "vocab_shape"], ["logits_shape"], axis=0),
-        helper.make_node("Expand", ["last_logits", "logits_shape"], ["logits"]),
+        helper.make_node("Unsqueeze", ["sum", "logits_axis"], ["positive_logit"]),
+        helper.make_node("Unsqueeze", ["negative", "logits_axis"], ["negative_logit"]),
+        helper.make_node("Unsqueeze", ["zeros", "logits_axis"], ["zero_logit"]),
+        helper.make_node("Concat", ["positive_logit", "negative_logit", "zero_logit"], ["logits"], axis=2),
     ]
     graph = helper.make_graph(nodes, "longrope-context", inputs, outputs, initializer=constants)
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 18)], ir_version=9)

@@ -1,7 +1,10 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <fstream>
+#include <iterator>
 #include <numeric>
+#include <string>
 #include <vector>
 #include <gtest/gtest.h>
 #include "ort_genai.h"
@@ -42,6 +45,52 @@ TEST_F(LongRopeContextTest, ChunkedPrefillUsesOneModeForAllChunks) {
 
 TEST_F(LongRopeContextTest, MissingMetadataDoesNotPreventModelLoading) {
   EXPECT_NO_THROW(OgaModel::Create(MODEL_PATH "longrope-context-without-metadata"));
+}
+
+TEST_F(LongRopeContextTest, RuntimeCapacityAtOrBelowBoundaryUsesShortCache) {
+  for (int capacity : {7, 8}) {
+    auto config = OgaConfig::Create(MODEL_PATH "longrope-context");
+    const auto overlay = "{\"model\":{\"context_length\":" + std::to_string(capacity) +
+                         "},\"search\":{\"max_length\":" + std::to_string(capacity) + "}}";
+    config->Overlay(overlay.c_str());
+    model = OgaModel::Create(*config);
+    auto generator = CreateGenerator();
+    generator->AppendTokens(std::vector<int32_t>(capacity, 1));
+    ExpectConsistentCache(*generator);
+  }
+}
+
+TEST_F(LongRopeContextTest, EngineRejectsExplicitContextContractAtConstruction) {
+  try {
+    auto engine = OgaEngine::Create(*model);
+    FAIL() << "Engine accepted the unsupported LongRoPE context contract";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(std::string(error.what()).find("Engine does not support the explicit LongRoPE context contract"),
+              std::string::npos);
+  }
+}
+
+TEST_F(LongRopeContextTest, SpeculativeDecodingRejectsContextContractInEitherModel) {
+  for (bool target_has_metadata : {false, true}) {
+    auto config = OgaConfig::Create(target_has_metadata ? MODEL_PATH "longrope-context"
+                                                        : MODEL_PATH "longrope-context-without-metadata");
+    config->Overlay(R"({"model":{"draft":{"filename":"draft.onnx","num_hidden_layers":1,
+                      "num_attention_heads":1,"num_key_value_heads":1,"head_size":1,"hidden_size":1,
+                      "session_options":{"intra_op_num_threads":1}}}})");
+    std::ifstream input(target_has_metadata ? MODEL_PATH "longrope-context-without-metadata/model.onnx"
+                                            : MODEL_PATH "longrope-context/model.onnx",
+                        std::ios::binary);
+    ASSERT_TRUE(input);
+    const std::string graph{std::istreambuf_iterator<char>{input}, {}};
+    config->AddModelData("draft.onnx", graph.data(), graph.size());
+    try {
+      auto speculative_model = OgaModel::Create(*config);
+      FAIL() << "Speculative decoding accepted the unsupported LongRoPE context contract";
+    } catch (const std::runtime_error& error) {
+      EXPECT_NE(std::string(error.what()).find("explicit LongRoPE context contract in target or draft models"),
+                std::string::npos);
+    }
+  }
 }
 
 TEST_F(LongRopeContextTest, AppendJumpingOverBoundaryRebuildsCachedPrefix) {
@@ -100,6 +149,25 @@ TEST_F(LongRopeContextTest, RewindToZeroAllowsReuseInBothModes) {
     ExpectConsistentCache(*generator);
   }
 }
+
+#if USE_CUDA
+TEST_F(LongRopeContextTest, CudaReplaySynchronizesReusedSequenceBeforeSelectingLogits) {
+  auto config = OgaConfig::Create(MODEL_PATH "longrope-context");
+  config->AppendProvider("cuda");
+  model = OgaModel::Create(*config);
+  for (int chunk_size : {0, 4}) {
+    auto generator = CreateGenerator(chunk_size);
+    auto padded_prompt = std::vector<int32_t>(10, 1);
+    padded_prompt.back() = 2;
+    generator->AppendTokens(padded_prompt);
+    ASSERT_EQ(generator->GetSequenceData(0)[9], 2);
+    generator->RewindTo(0);
+    generator->AppendTokens(std::vector<int32_t>(7, 1));
+    generator->AppendTokens(std::vector<int32_t>(3, 1));
+    ExpectConsistentCache(*generator);
+  }
+}
+#endif
 
 TEST_F(LongRopeContextTest, UnsupportedBatchingFailsInsteadOfMixingCacheModes) {
   auto params = OgaGeneratorParams::Create(*model);

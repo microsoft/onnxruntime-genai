@@ -25,9 +25,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-QUANTIZATION_DIR = (
-    Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "quantization"
-)
+QUANTIZATION_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "quantization"
 
 
 def _load_calibration_module():
@@ -374,10 +372,14 @@ class _FakeInput:
 
 
 class _FakeSession:
-    def __init__(self, inputs, outputs=None, run=None):
+    def __init__(self, inputs, outputs=None, run=None, metadata=None):
         self._inputs = inputs
         self._outputs = outputs or []
         self._run = run
+        self.metadata = metadata or {}
+
+    def get_modelmeta(self):
+        return types.SimpleNamespace(custom_metadata_map=self.metadata)
 
     def get_inputs(self):
         return self._inputs
@@ -423,7 +425,8 @@ def test_detect_kv_shape_raises_when_undetectable(tmp_path):
         kvc._detect_kv_shape(sess, str(model_path))
 
 
-def test_calibrate_kv_scales_feeds_model_metadata_and_writes_scales(tmp_path, monkeypatch):
+@pytest.mark.parametrize("rope_context_input", [None, "rope_context_length", "custom_context_length"])
+def test_calibrate_kv_scales_feeds_model_metadata_and_writes_scales(tmp_path, monkeypatch, rope_context_input):
     target_seq = 4
     inputs = [
         _FakeInput("input_ids", ["batch", "sequence"], "tensor(int64)"),
@@ -434,6 +437,10 @@ def test_calibrate_kv_scales_feeds_model_metadata_and_writes_scales(tmp_path, mo
         _FakeInput("past_key_values.1.conv_state", ["batch", 8, 3], "tensor(float16)"),
         _FakeInput("past_key_values.1.recurrent_state", ["batch", 2, 4, 4], "tensor(float)"),
     ]
+    metadata = {}
+    if rope_context_input is not None:
+        inputs.append(_FakeInput(rope_context_input, [], "tensor(int64)"))
+        metadata["com.microsoft.genai.rope_context_length_input"] = rope_context_input
     outputs = [
         types.SimpleNamespace(name="present.3.key"),
         types.SimpleNamespace(name="present.3.value"),
@@ -441,6 +448,10 @@ def test_calibrate_kv_scales_feeds_model_metadata_and_writes_scales(tmp_path, mo
 
     def run(output_names, feeds):
         assert output_names == ["present.3.key", "present.3.value"]
+        if rope_context_input is not None:
+            assert feeds[rope_context_input].shape == ()
+            assert feeds[rope_context_input].dtype == np.int64
+            assert feeds[rope_context_input] == target_seq
         np.testing.assert_array_equal(feeds["position_ids"], np.arange(target_seq).reshape(1, target_seq))
         assert feeds["past_key_values.3.key"].dtype == np.float32
         assert feeds["past_key_values.3.value"].dtype == np.float32
@@ -453,7 +464,7 @@ def test_calibrate_kv_scales_feeds_model_metadata_and_writes_scales(tmp_path, mo
         shape = (1, 1, target_seq, 4)
         return [np.full(shape, 2.0, dtype=np.float32), np.full(shape, 4.0, dtype=np.float32)]
 
-    session = _FakeSession(inputs, outputs, run)
+    session = _FakeSession(inputs, outputs, run, metadata)
     session_options = types.SimpleNamespace(log_severity_level=None)
     requested_providers = []
 
@@ -495,3 +506,27 @@ def test_calibrate_kv_scales_feeds_model_metadata_and_writes_scales(tmp_path, mo
     scales = scale_data["scales"]
     np.testing.assert_allclose(scales["k_scales"], [[2.0 / 128.0] * 4])
     np.testing.assert_allclose(scales["v_scales"], [[4.0 / 128.0] * 4])
+
+
+@pytest.mark.parametrize("target_seq", [7, 8, 9])
+def test_calibrate_longrope_fixture_uses_sample_context(tmp_path, monkeypatch, target_seq):
+    tokenizer = _FakeTokenizer(tokens_per_call=target_seq)
+    transformers = types.SimpleNamespace(AutoTokenizer=types.SimpleNamespace(from_pretrained=lambda path: tokenizer))
+    monkeypatch.setitem(sys.modules, "transformers", transformers)
+    model_path = Path(__file__).parents[2] / "models" / "longrope-context" / "model.onnx"
+    output_path = tmp_path / "scales.json"
+
+    kvc.calibrate_kv_scales(
+        model_path=str(model_path),
+        tokenizer_path="tokenizer",
+        out_json=str(output_path),
+        method="minmax",
+        target_seq=target_seq,
+        num_seqs=1,
+        k_rotary_envelope=False,
+    )
+
+    scales = json.loads(output_path.read_text())["scales"]
+    expected_scale = (target_seq - 1) * (2 if target_seq > 8 else 1) / 128.0
+    np.testing.assert_allclose(scales["k_scales"], [[expected_scale]])
+    np.testing.assert_allclose(scales["v_scales"], [[expected_scale]])

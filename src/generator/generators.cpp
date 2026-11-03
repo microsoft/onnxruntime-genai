@@ -932,6 +932,7 @@ DeviceSpan<float> Generator::RunWithRopeCache(DeviceSpan<int32_t> next_tokens) {
     // Rebuild only model state: search, sampling, guidance and usage already contain these tokens.
     state_->RewindTo(0);
     next_tokens = search_->GetSequence(0);
+    next_tokens.CopyDeviceToCpu();
   }
 
   auto logits = state_->Run(length, next_tokens, search_->GetNextIndices());

@@ -2,6 +2,7 @@
 #include "decoder_only.h"
 #include "engram.h"
 #include <charconv>
+#include <limits>
 
 namespace Generators {
 DecoderOnly_Model::DecoderOnly_Model(std::unique_ptr<Config> config, OrtEnv& ort_env)
@@ -19,7 +20,7 @@ DecoderOnly_Model::DecoderOnly_Model(std::unique_ptr<Config> config, OrtEnv& ort
                                         original_context_length_);
     if (rope_context_input_.empty() || error != std::errc{} ||
         end != original_context.data() + original_context.size() ||
-        original_context_length_ <= 0 || original_context_length_ >= config_->model.context_length) {
+        original_context_length_ <= 0 || original_context_length_ == std::numeric_limits<int>::max()) {
       throw std::runtime_error("LongRoPE metadata requires an input name and a valid original context length");
     }
 
