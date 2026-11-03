@@ -135,6 +135,10 @@ OgaResult* OgaTurnOptionsSetGuidance(
     const char* guidance_type,
     const char* guidance_data);
 
+OgaResult* OgaTurnOptionsSetGuidanceFastForward(
+    OgaTurnOptions* options,
+    bool enable);
+
 OgaResult* OgaTurnOptionsSetDelimitedGuidance(
     OgaTurnOptions* options,
     int32_t opening_token,
@@ -254,6 +258,14 @@ rolled-back step restores it.
 
 A turn with whole-turn guidance does not accept speculative drafts; the next unguided turn is
 draft-eligible again. Guidance and stop strings can be enabled together.
+
+`OgaTurnOptionsSetGuidanceFastForward` lets whole-turn guidance append the tokens the grammar forces
+after a sampled token instead of sampling them one decode step at a time. The forced tokens become
+visible in the same step and the model reads them together on a later step. Fast-forward is off by
+default: the forced text is the grammar's, but its token IDs follow the grammar's tokenization, so
+token IDs and later output can differ from a turn without it. Admission rejects it without
+whole-turn guidance (including with delimited guidance) or on an Engine without dynamic batching.
+`OgaTurnOptionsClearGuidance` and `OgaTurnOptionsReset` turn it off.
 
 `OgaTurnOptionsSetDelimitedGuidance` instead copies a Lark grammar for the body after a committed
 opening token and before a closing token. Admission checks that the distinct marker IDs are
@@ -566,7 +578,7 @@ destruction are serialized; getters may read immutable views but must not race a
 Request creation takes no generation parameters. The Engine derives each Request's private search
 configuration from its own model and forces the single-sequence invariants the Engine depends on:
 `batch_size` and `num_beams` are one, the search length limit is the Request's `max_session_tokens`,
-and guidance is off (guidance is per Turn, and fast-forward tokens are never enabled). Nothing about
+and guidance is off (guidance, including fast-forward, is per Turn). Nothing about
 sampling, guidance, or stop strings is fixed at creation.
 
 Creation validates the model configuration it is about to derive from, before minting a Request:
@@ -775,12 +787,14 @@ staged_events_.reserve(max_step_events);
 fatal_events_.reserve(max_step_events + 1);
 ```
 
-`reserve` allocates capacity without constructing events. A committed step produces at most
-`kMaxGeneratedTokensPerStep` events per affected Request, so normal retained output is bounded by
-that limit times the scheduled batch size. Request creation grows dedicated fatal-event capacity
-for that complete retained step plus every tracked Request because fatal handling may publish a
-terminal event for executable Turns outside the failed batch. This keeps event publication
-allocation-free after model/cache commit and after the Engine becomes unhealthy.
+`reserve` allocates capacity without constructing events. A speculative step produces at most
+`kMaxGeneratedTokensPerStep` events per affected Request; a guidance fast-forward step can produce
+more. Before its commit boundary, a step counts its events and grows `pending_events_`,
+`staged_events_`, and `fatal_events_` (with the tracked-Request headroom) when they would not fit.
+Request creation grows dedicated fatal-event capacity for the largest retained step plus every
+tracked Request because fatal handling may publish a terminal event for executable Turns outside
+the failed batch. This keeps event publication allocation-free after model/cache commit and after
+the Engine becomes unhealthy.
 
 Conceptual positive-capacity `Run` flow:
 
@@ -863,7 +877,8 @@ and remove their internal unseen-index FIFO bookkeeping.
 At successful step commit, the Engine already knows the Request, Turn ID, selected tokens, terminal
 state, finish reason, and usage. It captures those values in ordered `PendingEngineEvent` objects.
 A speculative transaction emits accepted drafts followed by its correction or bonus token, up to
-`kMaxGeneratedTokensPerStep` events per affected Request. Only the final event carries terminal
+`kMaxGeneratedTokensPerStep` events per affected Request; a guidance fast-forward transaction emits
+its sampled token followed by every forced token. Only the final event carries terminal
 state when the Turn finishes. `OgaEngineRun` moves the available FIFO prefix into the reusable
 Buffer storage and retains overflow.
 
