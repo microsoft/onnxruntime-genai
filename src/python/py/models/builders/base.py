@@ -786,8 +786,9 @@ class Model:
         )
 
     def is_fused_rope_supported(self):
-        # DML EP requires separate RoPE op, so fused RoPE is not supported on DML.
-        return self.ep not in ["dml"]
+        # DML requires a separate RoPE op. CPU GQA only supports fused RoPE when
+        # head_size is a multiple of 16; standalone RoPE supports multiples of 8.
+        return self.ep != "dml" and not (self.ep == "cpu" and self.head_size % 16 != 0)
 
     def is_fused_qk_norm_gqa_supported(self):
         return (
@@ -837,6 +838,12 @@ class Model:
             self.make_paged_attention_init()
 
         elif self.is_gqa_supported():
+            if self.ep == "cpu" and self.head_size % 8 != 0:
+                raise ValueError(
+                    "CPU GroupQueryAttention requires head_size to be a multiple of 8, "
+                    f"got {self.head_size}."
+                )
+
             # Change model settings for GroupQueryAttention
             self.attention_attrs["op_type"] = "GroupQueryAttention"
             print("GroupQueryAttention (GQA) is used in this model.")
