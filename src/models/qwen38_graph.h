@@ -100,9 +100,10 @@ size_t EffectiveQwen38PrefillChunkTokens(const Config::Model::Qwen38Graph& q);
 void ValidateQwen38PrefillChunk(const Config::Model::Qwen38Graph& q);
 
 // Throws std::invalid_argument naming the first prompt id outside [0, vocab_size). The ids are row indices of the
-// embedding gather on the device, which has no bound check of its own: an id outside the table reads past the mapped
-// file (a sticky CUDA error that takes the whole context down, or another row's data), so the engine rejects them
-// before it touches any state.
+// embedding gather on the device. embed_gather clamps an id outside the table to row 0, so the model would silently embed
+// the wrong token; the legacy embed_rows of a library without embed_gather has no bound at all and reads past the mapped
+// file (a sticky CUDA error that takes the whole context down, or another row's data). The engine rejects such ids before
+// it touches any state.
 void ValidateQwen38PromptTokens(std::span<const int32_t> tokens, int vocab_size);
 
 // Whether the session of the standalone R=2 head captures CUDA graphs. That session is created from the decoder's
@@ -110,6 +111,15 @@ void ValidateQwen38PromptTokens(std::span<const int32_t> tokens, int vocab_size)
 // answer comes from the merged options, not from the configured ones: Warmup() runs the head the number of times a
 // captured graph needs, and a capture that lands in a live request stalls it.
 bool Qwen38HeadR2CapturesGraph(const Config::SessionOptions& decoder, const std::optional<Config::SessionOptions>& head_r2);
+
+// Checks a model package against the plane library it names, when the model is loaded, before its weights are uploaded and
+// before any session is created: an INT8 PLE table (model.qwen38_graph.ple_table with a negative scale) needs the int8_ple
+// plane capability and an INT8 embedding table (<model.embedding.filename>.data of vocab_size x hidden_size INT8 rows and
+// one float scale per row) needs int8_embedding (qwen38_graph_plane.h). Throws a std::runtime_error naming the missing
+// capability, the file and the library when the library lacks one; BF16 and FP8 packages need no capability. Returns the
+// layout of the embedding table the model maps from that file: kNone when the package has no table of that shape.
+Qwen38EmbeddingFormat RequireQwen38PackageSupportedByPlane(const Qwen38Plane& plane, const Config& config,
+                                                           const std::filesystem::path& model_folder);
 
 // The CUDA graphs of the decode stack. ORT keeps one captured graph per annotation id in a session, so every run that
 // binds different buffers needs an id of its own: one per (row count, ring phase) for the target (decode graphs or the
@@ -486,11 +496,15 @@ struct Qwen38GraphModel : Model {
   bool IsExecutionContextHealthy() const noexcept { return context_healthy_.load(); }
   const BackendCapabilities& ResolvedBackendCapabilities() const noexcept { return resolved_capabilities_; }
 
+  // The CPU embedding table that PrepRow gathers rows from (data is null when the model has none; see embed_mapping_).
+  Qwen38EmbeddingTable EmbeddingTable() const;
+
   // Declaration order = reverse destruction order: the engine and the sessions go first, then the shared weights / constants
   // they were given, then the plane library.
   std::unique_ptr<Qwen38Plane> plane_;
   std::unique_ptr<Qwen38WeightPool> pool_;
   std::unique_ptr<Qwen38FileMapping> embed_mapping_;
+  bool embed_is_int8_{false};
   std::vector<std::unique_ptr<OrtValue>> embed_values_;
   std::unique_ptr<OrtSessionOptions> embedding_session_options_;
   std::unique_ptr<OrtSession> session_embedding_;
