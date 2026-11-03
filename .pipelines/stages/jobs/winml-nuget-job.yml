@@ -105,7 +105,7 @@ jobs:
         --win_arm64 '$(ridRoot)/win-arm64' `
         --commit_id $(Build.SourceVersion)
       cat $(Build.Repository.LocalPath)/nuget/$(genai_nuget_package_name).nuspec
-      if ((Get-Content '$(Build.Repository.LocalPath)/nuget/$(genai_nuget_package_name).nuspec' -Raw) -match 'runtimes/[^"]*/native/(lib)?onnxruntime[._]') {
+      if ((Get-Content '$(Build.Repository.LocalPath)/nuget/$(genai_nuget_package_name).nuspec' -Raw) -match 'runtimes/[^"]*/native/(?:lib)?onnxruntime(?:\.|_(?!genai(?:[._]|$)))') {
         throw 'WinML NuGet must not bundle ONNX Runtime binaries'
       }
       Write-Host "##vso[task.setvariable variable=nuspec_path;]$(Build.Repository.LocalPath)/nuget/$(genai_nuget_package_name).nuspec"

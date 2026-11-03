@@ -4,6 +4,7 @@
 import argparse
 import glob
 import os
+import re
 
 from generate_nuspec_for_native_nuget import generate_metadata
 
@@ -31,7 +32,7 @@ def generate_files(lines, args):
                 continue
             if cuda_keyword in file_name:
                 continue
-            if file_name.startswith(("onnxruntime.", "onnxruntime_", "libonnxruntime.", "libonnxruntime_")):
+            if re.match(r"(?:lib)?onnxruntime(?:\.|_(?!genai(?:[._]|$)))", file_name):
                 continue
 
             files_list.append(f'<file src="{file}" target="runtimes/{platform}/native/{file_name}" />')

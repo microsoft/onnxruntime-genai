@@ -140,6 +140,8 @@ steps:
       if ($LASTEXITCODE -ne 0) { Write-Error "wheel re-pack failed"; exit 1 }
     displayName: 'Re-pack WinML Python ${{ pyVer }} wheel with signed extension'
     workingDirectory: '$(Build.SourcesDirectory)'
+    env:
+      ONNXRUNTIME_VERSION: '${{ parameters.python_dependency_version }}'
 
   - powershell: |
       $ErrorActionPreference = 'Stop'
@@ -160,18 +162,25 @@ steps:
         if ($archive.Entries | Where-Object { $_.Name -match '^(lib)?onnxruntime(?:\.|_(?!genai(?:[._]|$)))' }) {
           throw 'WinML Python wheel must not bundle ONNX Runtime binaries'
         }
+        $metadataEntries = @($archive.Entries | Where-Object { $_.FullName -like '*.dist-info/METADATA' })
+        if ($metadataEntries.Count -ne 1) { throw 'WinML wheel must contain exactly one METADATA file' }
+        $reader = [System.IO.StreamReader]::new($metadataEntries[0].Open())
+        try { $metadata = $reader.ReadToEnd() }
+        finally { $reader.Dispose() }
+        $dependencyVersion = [regex]::Escape('${{ parameters.python_dependency_version }}')
+        if ($metadata -notmatch "(?m)^Requires-Dist: onnxruntime\s*\(?\s*>=\s*$dependencyVersion\s*\)?\s*$") {
+          throw 'WinML wheel has an incorrect ONNX Runtime dependency'
+        }
       }
       finally { $archive.Dispose() }
-      if ('${{ parameters.arch }}' -eq 'x64') {
-        python -m pip install onnxruntime==${{ parameters.python_dependency_version }}
-        if ($LASTEXITCODE -ne 0) { throw 'Could not install the external ONNX Runtime package' }
-        python -m pip install --force-reinstall --no-deps $whl.FullName
-        if ($LASTEXITCODE -ne 0) { throw 'Could not install the WinML Python wheel' }
-        $expected = (Get-Content "$(Build.SourcesDirectory)/VERSION_INFO" -Raw).Trim()
-        $actual = python -c "import onnxruntime_genai as og; print(og.__version__)"
-        if ($LASTEXITCODE -ne 0 -or "$actual".Trim() -ne $expected) {
-          throw 'WinML wheel failed to import with external ONNX Runtime'
-        }
+      python -m pip install onnxruntime==${{ parameters.python_dependency_version }}
+      if ($LASTEXITCODE -ne 0) { throw 'Could not install the external ONNX Runtime package' }
+      python -m pip install --force-reinstall --no-deps $whl.FullName
+      if ($LASTEXITCODE -ne 0) { throw 'Could not install the WinML Python wheel' }
+      $expected = (Get-Content "$(Build.SourcesDirectory)/VERSION_INFO" -Raw).Trim()
+      $actual = python -c "import onnxruntime_genai as og; print(og.__version__)"
+      if ($LASTEXITCODE -ne 0 -or "$actual".Trim() -ne $expected) {
+        throw 'WinML wheel failed to import with external ONNX Runtime'
       }
       Write-Host "ASSERT OK: WinML wheel produced ($($whl.Name))"
       $stage = "$(Build.ArtifactStagingDirectory)/wheel"

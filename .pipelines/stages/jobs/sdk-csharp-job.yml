@@ -340,7 +340,7 @@ jobs:
       if (-not $nupkg) { Write-Error "ASSERT FAIL: native nupkg not produced"; exit 1 }
       Add-Type -AssemblyName System.IO.Compression.FileSystem
       $names = [System.IO.Compression.ZipFile]::OpenRead($nupkg.FullName).Entries.FullName
-      if ($names | Where-Object { ($_ -replace '\\','/') -match '^runtimes/[^/]+/native/(lib)?onnxruntime[._]' }) {
+      if ($names | Where-Object { ($_ -replace '\\','/') -match '^runtimes/[^/]+/native/(?:lib)?onnxruntime(?:\.|_(?!genai(?:[._]|$)))' }) {
         throw 'GenAI NuGet must not bundle ONNX Runtime binaries'
       }
       $expectRids = @()

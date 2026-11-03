@@ -92,7 +92,8 @@ def test_foundry_nuspec_excludes_ort_and_addon(tmp_path, generators, rid, core, 
     _, custom = generators
     directory = tmp_path / rid / "lib"
     directory.mkdir(parents=True)
-    for name in [core, addon, *ort_files]:
+    core_alias = core.replace("onnxruntime-genai", "onnxruntime_genai")
+    for name in [core, core_alias, addon, *ort_files]:
         (directory / name).touch()
     args = argparse.Namespace(
         root_dir=str(tmp_path),
@@ -106,7 +107,7 @@ def test_foundry_nuspec_excludes_ort_and_addon(tmp_path, generators, rid, core, 
     custom.generate_files(lines, args)
     entries = ElementTree.fromstring("\n".join(lines)).findall("file")
     payload = [entry.attrib["target"] for entry in entries if entry.attrib["target"].startswith("runtimes")]
-    assert payload == [f"runtimes/{rid}/native/{core}"]
+    assert set(payload) == {f"runtimes/{rid}/native/{core}", f"runtimes/{rid}/native/{core_alias}"}
 
 
 @pytest.mark.parametrize("rid", ["win-x64", "win-arm64"])
@@ -114,7 +115,13 @@ def test_winml_nuspec_excludes_ort_and_keeps_sdk_dependency(tmp_path, generators
     winml = importlib.import_module("generate_nuspec_for_winml_nuget")
     directory = tmp_path / rid / "lib"
     directory.mkdir(parents=True)
-    for name in ["onnxruntime-genai.dll", "onnxruntime.dll", "onnxruntime.lib", "onnxruntime_providers_shared.dll"]:
+    for name in [
+        "onnxruntime-genai.dll",
+        "onnxruntime_genai.dll",
+        "onnxruntime.dll",
+        "onnxruntime.lib",
+        "onnxruntime_providers_shared.dll",
+    ]:
         (directory / name).touch()
     args = argparse.Namespace(
         root_dir=str(tmp_path),
@@ -131,7 +138,10 @@ def test_winml_nuspec_excludes_ort_and_keeps_sdk_dependency(tmp_path, generators
         for entry in package.findall("files/file")
         if entry.attrib["target"].startswith("runtimes")
     ]
-    assert payload == [f"runtimes/{rid}/native/onnxruntime-genai.dll"]
+    assert set(payload) == {
+        f"runtimes/{rid}/native/onnxruntime-genai.dll",
+        f"runtimes/{rid}/native/onnxruntime_genai.dll",
+    }
     dependencies = package.findall("metadata/dependencies/group/dependency")
     assert any(
         entry.attrib == {"id": "Microsoft.Windows.AI.MachineLearning", "version": "2.0.0"} for entry in dependencies

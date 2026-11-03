@@ -33,18 +33,22 @@ def test_sdk_wheel_excludes_ort_and_declares_runtime_dependency(tmp_path, packag
         "onnxruntime-genai.dll",
         "onnxruntime-genai-cuda.dll",
         "onnxruntime_genai.pyd",
+        "onnxruntime_genai.dll",
         "libonnxruntime-genai.so",
         "libonnxruntime-genai-cuda.so",
         "libonnxruntime-genai.dylib",
+        "libonnxruntime_genai.so",
     }
     ort_files = {
         "onnxruntime.dll",
         "onnxruntime_providers_shared.dll",
         "onnxruntime_providers_cuda.dll",
+        "onnxruntime_training.dll",
         "libonnxruntime.so",
         "libonnxruntime.so.1.30.0",
         "libonnxruntime_providers_shared.so",
         "libonnxruntime_providers_cuda.so",
+        "libonnxruntime_training.so",
         "libonnxruntime.dylib",
         "libonnxruntime.1.dylib",
     }
@@ -52,8 +56,9 @@ def test_sdk_wheel_excludes_ort_and_declares_runtime_dependency(tmp_path, packag
         (package_dir / name).write_bytes(b"native payload")
     environment = os.environ.copy()
     environment["ONNXRUNTIME_VERSION"] = "1.30.0"
+    environment["PIP_NO_INDEX"] = "1"
     subprocess.run(
-        [sys.executable, "-m", "pip", "wheel", "--no-deps", "--wheel-dir", "dist", "."],
+        [sys.executable, "-m", "pip", "wheel", "--no-deps", "--no-build-isolation", "--wheel-dir", "dist", "."],
         cwd=tmp_path,
         env=environment,
         check=True,
