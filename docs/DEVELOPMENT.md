@@ -56,17 +56,17 @@ Files must remain immutable. Metadata must contain a JSON object and no embedded
 NUL bytes. Nested names, packages and external tensor attributes are outside this
 contract.
 
-Build against an ORT SDK that exposes `GetExperimentalFunction` (API version 28
-or newer), and use a runtime with the experimental
-`OrtApi_SessionOptionsSetExternalInitializerFileHandles_SinceV32` entry.
-Older SDKs can still build the library, but descriptor registration fails explicitly.
-An unavailable API, missing file or invalid range is an explicit error, not
-filesystem or CPU fallback. ORT maps initializer ranges rather than entire weight
-files; small or unaligned tensors may be copied. Full ONNX loading with external
-initializers is required, including on mobile; minimal ORT builds do not advertise
-the entry. Execution-provider selection is unchanged, and Windows/D3D12
-accelerated weight loading can consume the registered handles without resolving
-filesystem paths. Ordinary path-based loading remains unchanged.
+Build against an ORT SDK and runtime that expose
+`OrtApi::SessionOptionsSetExternalInitializerFileHandles` (API version 32 or
+newer). Older SDKs can still build the library, but descriptor registration fails
+explicitly. An unavailable API, missing file or invalid range is an explicit
+error, not filesystem or CPU fallback. ORT maps initializer ranges rather than
+entire weight files; small or unaligned tensors may be copied. Full ONNX loading
+with external initializers is required, including on mobile; minimal ORT builds
+return `ORT_NOT_IMPLEMENTED`. Execution-provider selection is unchanged, and
+Windows/D3D12 accelerated weight loading can consume the registered handles
+without resolving filesystem paths. Ordinary path-based loading remains
+unchanged.
 File-source graph buffers are consumed during session creation. The ORT-format
 options `session.use_ort_model_bytes_directly=1` and
 `session.use_ort_model_bytes_for_initializers=1` are rejected in this mode rather
