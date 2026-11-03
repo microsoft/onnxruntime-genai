@@ -31,6 +31,8 @@ def generate_files(lines, args):
                 continue
             if cuda_keyword in file_name:
                 continue
+            if file_name.startswith(("onnxruntime.", "onnxruntime_", "libonnxruntime.", "libonnxruntime_")):
+                continue
 
             files_list.append(f'<file src="{file}" target="runtimes/{platform}/native/{file_name}" />')
 

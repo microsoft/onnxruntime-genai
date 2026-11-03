@@ -24,6 +24,8 @@ def generate_files(lines, args):
             if any(keyword in file for keyword in avoid_keywords):
                 continue
             file_name = os.path.basename(file)
+            if file_name.startswith(("onnxruntime.", "onnxruntime_", "libonnxruntime.", "libonnxruntime_")):
+                continue
 
             files_list.append(f'<file src="{file}" target="runtimes/{platform}/native/{file_name}" />')
 

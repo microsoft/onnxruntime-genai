@@ -130,6 +130,9 @@ jobs:
       if ($contents -match 'runtimes/linux-arm64/native/libonnxruntime-genai-cuda.so') {
         throw '.Foundry must exclude the separately distributed CUDA shim'
       }
+      if ($contents -match 'runtimes/[^"]*/native/(lib)?onnxruntime[._]') {
+        throw '.Foundry must not bundle ONNX Runtime binaries'
+      }
       $archives = @(Get-ChildItem '$(downloadsDir)/linux-arm64' -Filter '*-linux-arm64-cuda.tar.gz' -Recurse -File)
       if ($archives.Count -ne 1) { throw "Expected one ARM64 CUDA source archive; found $($archives.Count)" }
     displayName: 'Assert .Foundry ARM64 CUDA payload'

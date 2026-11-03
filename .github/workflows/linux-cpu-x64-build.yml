@@ -144,7 +144,7 @@ jobs:
       - name: Run core packaging tests
         run: |
           python3 -m pip install --user wheel==0.47.0 pyelftools==0.32
-          python3 -m pytest -q test/python/test_core_wheel_packaging.py
+          python3 -m pytest -q test/python/test_core_wheel_packaging.py test/python/test_nuget_packaging.py test/python/test_python_wheel_packaging.py
 
       # This will also download all the test models to the test/models directory
       # These models are used by the python tests as well as C#, C++ and others.
