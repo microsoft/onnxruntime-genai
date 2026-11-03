@@ -72,6 +72,12 @@ TEST(DecodeFirstSchedulerPolicyTest, UnreadCommittedTokensConsumeBudgetBeforePre
             (std::vector<size_t>{2, 1, 1}));
   EXPECT_EQ(AllocateDecodeFirstTokenBudget(selected, 9),
             (std::vector<size_t>{4, 2, 3}));
+
+  const std::array drafts_with_unread_tokens{
+      DecodeFirstBudgetCandidate{false, 2, std::nullopt, 1},
+  };
+  EXPECT_THROW(AllocateDecodeFirstTokenBudget(drafts_with_unread_tokens, 8),
+               std::invalid_argument);
 }
 
 TEST(DecodeFirstSchedulerPolicyTest, PrefillsRespectPendingCapAndGlobalBudget) {

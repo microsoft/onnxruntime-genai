@@ -58,8 +58,11 @@ std::vector<size_t> AllocateDecodeFirstTokenBudget(
     if (candidate.is_prefill)
       continue;
 
-    // Beyond its next token, a decode row reads its drafts or, when the model has not read every
-    // token it committed, as many of those as one chunk allows. A row never has both.
+    if (candidate.decode_extra_token_count != 0 && candidate.pending_token_count > 1)
+      throw std::invalid_argument("A decode row cannot verify drafts before reading its committed tokens.");
+
+    // Beyond its first token, a decode row reads its drafts or up to one chunk of its unread
+    // committed tokens.
     const size_t additional_tokens =
         std::min(candidate.decode_extra_token_count + ChunkLimit(candidate) - 1,
                  remaining_budget);
