@@ -20,7 +20,7 @@ import types
 
 import numpy as np
 import pytest
-from _builder_test_utils import BUILDERS_DIR, load_builder_module, ort_runs_causal_conv_with_state
+from _builder_test_utils import BUILDERS_DIR, check_node_shapes, load_builder_module, ort_runs_causal_conv_with_state
 
 torch = pytest.importorskip("torch")
 pytest.importorskip("onnx")
@@ -194,24 +194,36 @@ def _stand_in_lfm3(config, use_sandwich_norm):
     return hf_model
 
 
-@pytest.mark.parametrize("use_sandwich_norm", [True, False])
-@pytest.mark.parametrize("ep,io_dtype", [("cpu", ir.DataType.FLOAT), ("cuda", ir.DataType.FLOAT16)])
-def test_lfm3_graph_wiring(ep, io_dtype, use_sandwich_norm):
+def _build_stand_in_lfm3(ep, io_dtype, extra_options, use_sandwich_norm=True):
     config = _stand_in_config()
-    model = LFM3Model(config, io_dtype, io_dtype, ep, None, {})
+    model = LFM3Model(config, io_dtype, io_dtype, ep, None, extra_options)
     model.load_weights = lambda input_path: _stand_in_lfm3(config, use_sandwich_norm)
     model.make_model("")
+    return model
+
+
+@pytest.mark.parametrize("use_sandwich_norm", [True, False])
+@pytest.mark.parametrize(
+    "ep,io_dtype,extra_options",
+    [
+        ("cpu", ir.DataType.FLOAT, {}),
+        ("cuda", ir.DataType.FLOAT16, {}),
+        ("cuda", ir.DataType.FLOAT16, {"use_paged_attention": True}),
+    ],
+    ids=["cpu-FLOAT", "cuda-FLOAT16", "cuda-FLOAT16-paged"],
+)
+def test_lfm3_graph_wiring(ep, io_dtype, extra_options, use_sandwich_norm):
+    model = _build_stand_in_lfm3(ep, io_dtype, extra_options, use_sandwich_norm)
     graph = model.model.graph
     nodes = {node.name: node for node in graph}
+    attention_op = "PagedAttention" if extra_options.get("use_paged_attention") else "GroupQueryAttention"
 
     for layer_id, layer_type in enumerate(LAYER_TYPES):
         if layer_type == "conv":
             continue
         prefix = f"/model/layers.{layer_id}/attn"
         (attention,) = [
-            node
-            for name, node in nodes.items()
-            if name.startswith(f"{prefix}/") and node.op_type == "GroupQueryAttention"
+            node for name, node in nodes.items() if name.startswith(f"{prefix}/") and node.op_type == attention_op
         ]
         # The window applies to the sliding layers only, and each layer rotates with its own type's RoPE caches.
         window = SLIDING_WINDOW if layer_type == "sliding_attention" else -1
@@ -373,11 +385,32 @@ def test_lfm3_needs_an_attention_op_with_a_sliding_window(ep, io_dtype, error):
             build()
 
 
-def test_lfm3_refuses_paged_attention_with_conv_layers():
-    # Paged inputs pack the tokens of every sequence into one axis, which the batched conv op would mix.
-    with pytest.raises(NotImplementedError, match="conv layers"):
+def test_lfm3_paged_conv_layers_keep_each_sequence_apart():
+    model = _build_stand_in_lfm3("cuda", ir.DataType.FLOAT16, {"use_paged_attention": True})
+
+    graph = model.model.graph
+    conv_layers = [layer_id for layer_id, layer_type in enumerate(LAYER_TYPES) if layer_type == "conv"]
+    conv_nodes = [
+        ("in_proj/MatMul", "MatMul"),
+        ("Split", "Split"),
+        ("Mul_1", "Mul"),
+        ("VarlenCausalConvWithState", "VarlenCausalConvWithState"),
+        ("Mul_2", "Mul"),
+        ("out_proj/MatMul", "MatMul"),
+    ]
+    assert [(node.name, node.op_type) for node in graph if "/conv/" in node.name] == [
+        (f"/model/layers.{layer_id}/conv/{name}", op_type) for layer_id in conv_layers for name, op_type in conv_nodes
+    ]
+    for layer_id in conv_layers:
+        conv = graph.node(f"/model/layers.{layer_id}/conv/VarlenCausalConvWithState")
+        assert conv.attributes["activation"].value == "none"
+    check_node_shapes(ir.serde.serialize_model(model.model))
+
+
+def test_lfm3_paged_conv_layers_need_cuda():
+    with pytest.raises(NotImplementedError, match="CUDA only"):
         LFM3Model(
-            _stand_in_config(), ir.DataType.FLOAT16, ir.DataType.FLOAT16, "cuda", None, {"use_paged_attention": True}
+            _stand_in_config(), ir.DataType.FLOAT16, ir.DataType.FLOAT16, "webgpu", None, {"use_paged_attention": True}
         )
 
 
