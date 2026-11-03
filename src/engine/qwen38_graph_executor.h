@@ -39,7 +39,7 @@ struct Qwen38StepRequest {
 };
 
 struct Qwen38StepResult {
-  std::array<int32_t, 4> tokens{};
+  std::array<int32_t, kMaxGeneratedTokensPerStep> tokens{};
   size_t count{};  // 0 for a step that only advanced the prompt
   size_t prompt_tokens_processed{};
   bool prompt_complete{};
@@ -100,6 +100,7 @@ class Qwen38GraphSession : public FixedSlotSession {
     bool is_decode_cycle{};
     bool mtp{};
     size_t proposed{};
+    size_t draft_forwards{};
     size_t accepted{};
     size_t produced{};
   };
