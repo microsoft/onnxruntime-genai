@@ -264,7 +264,9 @@ def test_lfm2_vl_casts_pixel_values_to_the_vision_input_type(test_data_path, tmp
     onnx = pytest.importorskip("onnx")
     model_dir = _copy_model(test_data_path, tmp_path)
     vision = onnx.load(os.fspath(model_dir / "dummy_vision.onnx"))
-    next(i for i in vision.graph.input if i.name == "pixel_values").type.tensor_type.elem_type = onnx.TensorProto.FLOAT16
+    next(
+        i for i in vision.graph.input if i.name == "pixel_values"
+    ).type.tensor_type.elem_type = onnx.TensorProto.FLOAT16
     onnx.save(vision, os.fspath(model_dir / "dummy_vision.onnx"))
 
     images = og.Images.open(_image_path(test_data_path, "cars.jpg"))
