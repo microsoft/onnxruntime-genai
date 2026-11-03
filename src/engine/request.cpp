@@ -1279,8 +1279,8 @@ void Request::CommitGuidanceToken(const RequestStepResult& result) {
 }
 
 // Stages the continuation the grammar forced after this step's sampled token, applying
-// StageGeneration()'s turn and context checks in the same order. A limit cuts the span and ends the
-// turn, which releases the cursor that already advanced past all of it.
+// StageGeneration()'s stop-string, turn and context checks in the same order. A limit cuts the
+// span and ends the turn, which releases the cursor that already advanced past all of it.
 void Request::StageForcedTokens(RequestStepResult& result) {
   if (!guidance_logits_processor_ || !result.token_appended || result.done) {
     return;
@@ -1304,6 +1304,14 @@ void Request::StageForcedTokens(RequestStepResult& result) {
     }
     staged_forced_tokens_.push_back(forced_token);
 
+    if (stop_controller_) {
+      if (const auto& match = stop_controller_->ObserveToken(forced_token)) {
+        result.done = true;
+        result.finish_reason = GenerationFinishReason::StopString;
+        result.matched_stop_string_index = static_cast<int32_t>(match->index);
+        return;
+      }
+    }
     // The sampled token this step already counts as one generated token.
     const size_t generated_tokens = turn_generated_tokens_ + 1 + staged_forced_tokens_.size();
     if (turn_policy_.max_generated_tokens &&

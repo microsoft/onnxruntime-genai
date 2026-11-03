@@ -179,6 +179,28 @@ TEST_F(GuidanceFastForwardTest, ContextLimitCutsTheForcedSpanAndEndsTheTurn) {
   EXPECT_TRUE(ValidateRequestInvariants(request->Snapshot()).empty());
 }
 
+TEST_F(GuidanceFastForwardTest, StopStringCompletedByAForcedTokenEndsTheTurnAtThatToken) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/5 /* "ST" */);
+  auto request = CreateEngineRequest(engine.engine);
+  TurnOptions options;
+  options.stop_strings = {"STOP"};
+  // "OP" also exhausts the turn budget; the stop string must still win.
+  options.max_generated_tokens = 2;
+  request->BeginTurn(Prompt(), options);
+  InstallForcingGrammar(*request, /*trigger=*/5, {6 /* "OP" */, 12});
+
+  std::array<EngineEvent, 8> storage;
+  const size_t events = engine.engine->Run(storage);
+  ASSERT_EQ(events, 2u);
+  EXPECT_EQ(EventTokens(std::span{storage}.first(events)), (std::vector<int32_t>{5, 6}));
+  EXPECT_EQ(storage[1].finish_reason, GenerationFinishReason::StopString);
+  EXPECT_EQ(storage[1].matched_stop_string_index, 0);
+  EXPECT_EQ(request->TurnGeneratedTokens(), 2u);
+  const auto tokens = request->TokensCpu();
+  EXPECT_EQ(std::vector<int32_t>(tokens.begin(), tokens.end()), Concat(Prompt(), {5, 6}));
+  EXPECT_TRUE(ValidateRequestInvariants(request->Snapshot()).empty());
+}
+
 TEST_F(GuidanceFastForwardTest, RollbackDiscardsForcedTokensAndTheRetryCommitsThemOnce) {
   for (const bool queued_restore : {false, true}) {
     SCOPED_TRACE(::testing::Message() << "queued restore " << queued_restore);
