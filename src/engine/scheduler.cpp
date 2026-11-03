@@ -4,6 +4,7 @@
 #include "engine.h"
 #include "admission.h"
 #include "decode_first_scheduler_policy.h"
+#include "fixed_slot_scheduler.h"
 #include "request_index.h"
 #include "sequence_positions.h"
 
@@ -57,6 +58,9 @@ void StaticBatchScheduler::AddRequest(std::shared_ptr<Request> request) {
         "search.chunk_size requires dynamic batching; the static batch scheduler cannot chunk a "
         "prefill.");
   }
+  if (std::find(requests_pool_.begin(), requests_pool_.end(), request) != requests_pool_.end()) {
+    return;
+  }
   requests_pool_.reserve(requests_pool_.size() + 1);
   auto sampling_state = CreateSamplingState(*request);
   request->CommitSamplingState(std::move(sampling_state));
@@ -107,6 +111,7 @@ ScheduledRequests StaticBatchScheduler::Schedule() {
       // Before allocating, we need to ensure that the existing requests in the cache manager
       // are terminal and no longer need to remain in the scheduler pool.
       for (auto& request : allocated_requests) {
+        if (StaysEnrolledWhenDisplaced(*request)) continue;
         requests_pool_.erase(std::remove(requests_pool_.begin(), requests_pool_.end(), request), requests_pool_.end());
       }
 
@@ -152,6 +157,11 @@ DynamicBatchScheduler::DynamicBatchScheduler(std::shared_ptr<Model> model, std::
 }
 
 void DynamicBatchScheduler::AddRequest(std::shared_ptr<Request> request) {
+  // A rewound request, or one restarted after a cancellation, is still in the pool (it leaves only through RemoveRequest);
+  // enrolling it again would plan it twice in one step.
+  if (std::find(requests_pool_.begin(), requests_pool_.end(), request) != requests_pool_.end()) {
+    return;
+  }
   requests_pool_.reserve(requests_pool_.size() + 1);
   auto sampling_state = CreateSamplingState(*request);
   request->CommitSamplingState(std::move(sampling_state));
@@ -649,6 +659,9 @@ bool DynamicBatchScheduler::HasPendingRequests() const {
 std::unique_ptr<Scheduler> Scheduler::Create(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager) {
   if (cache_manager->SupportsDynamicBatching()) {
     return std::make_unique<DynamicBatchScheduler>(model, cache_manager);
+  }
+  if (cache_manager->SupportsContinuousMultiSlotDecoding()) {
+    return std::make_unique<FixedSlotScheduler>(model, cache_manager);
   }
 
   return std::make_unique<StaticBatchScheduler>(model, cache_manager);

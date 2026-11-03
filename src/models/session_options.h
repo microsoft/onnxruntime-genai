@@ -13,6 +13,21 @@ namespace Generators {
 std::vector<const OrtEpDevice*> ApplyDeviceFiltering(const Config::ProviderOptions& provider_options,
                                                      const std::vector<const OrtEpDevice*>& devices);
 
+// True when provider_options sets at least one hardware filtering criterion.
+bool HasDeviceFiltering(const Config::ProviderOptions& provider_options);
+
+// Returns EpMetadata["cuda_device_id"] of |device|, or an empty string when the device does not report it.
+std::string GetCudaDeviceIdMetadata(const OrtEpDevice* device);
+
+// Returns the index of the CUDA EP device a session must use. |cuda_device_ids| lists EpMetadata["cuda_device_id"] of the
+// devices that survived hardware filtering, in enumeration order (which need not be CUDA device_id order).
+// Hardware filtering takes precedence: an explicit |requested_id| selects only among the surviving devices and throws
+// std::runtime_error, naming the requested and the available ids, when none matches. Without a requested id the CUDA
+// default device "0" is used when it survived, otherwise the first surviving device.
+size_t SelectCudaDeviceIndex(const std::vector<std::string>& cuda_device_ids,
+                             const std::optional<std::string>& requested_id,
+                             bool hardware_filtered);
+
 // Returns all OrtEpDevice instances whose EP name matches |ep_name|.
 // Returns an empty vector if the provider is not registered as a plugin.
 std::vector<const OrtEpDevice*> FindRegisteredEpDevices(const std::string& ep_name);
