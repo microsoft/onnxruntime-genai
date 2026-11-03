@@ -27,6 +27,7 @@
 #include "../search.h"
 #include "../tracing.h"
 #include "model.h"
+#include "models/env_utils.h"
 #include "runtime_profiles.h"
 #include "model_package.h"
 #include "gpt.h"
@@ -48,6 +49,24 @@
 #include "session_options.h"
 
 namespace Generators {
+
+namespace {
+bool WebGpuGreedyArgMaxEnabled() {
+  static const bool enabled = []() {
+    bool value = false;
+    GetEnv("ORT_GENAI_WEBGPU_GREEDY_ARGMAX", value);
+    if (value) {
+      bool shader = false;
+      GetEnv("ORT_WEBGPU_ARGMAX_PARALLEL_BITWISE", shader);
+      if (!shader)
+        throw std::runtime_error("ORT_GENAI_WEBGPU_GREEDY_ARGMAX=1 requires ORT_WEBGPU_ARGMAX_PARALLEL_BITWISE=1");
+    }
+    return value;
+  }();
+  return enabled;
+}
+}
+
 
 namespace {
 
@@ -512,11 +531,14 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
 
   // Logits are read back on the CPU every step, which is slow from a host-accessible allocation.
   p_device_logits_ = (p_device_->GetType() == DeviceType::AMDGPU) ? GetDeviceInterface(DeviceType::CPU) : p_device_inputs_;
+  if (p_device_->GetType() == DeviceType::WEBGPU && WebGpuGreedyArgMaxEnabled())
+    p_device_logits_ = p_device_;
 
   // Search and sampling are performed on the CPU for all device types,
   // except for CUDA and NvTensorRtRtx, where this is performed on the device.
   if (p_device_->GetType() == DeviceType::CUDA ||
-      p_device_->GetType() == DeviceType::NvTensorRtRtx)
+      p_device_->GetType() == DeviceType::NvTensorRtRtx ||
+      (p_device_->GetType() == DeviceType::WEBGPU && WebGpuGreedyArgMaxEnabled()))
     p_device_scoring_ = p_device_;
   else
     p_device_scoring_ = GetDeviceInterface(DeviceType::CPU);

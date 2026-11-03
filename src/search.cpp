@@ -2,12 +2,56 @@
 #include "softmax.h"
 #include "sampling_distribution.h"
 #include "search.h"
+#include "models/env_utils.h"
 #include "beam_search_scorer.h"
 #include <queue>
 #include <algorithm>
 #include <limits>
 
 namespace Generators {
+namespace {
+
+int32_t ArgMaxCpuLanes8(std::span<const float> values) {
+  if (values.empty()) throw std::runtime_error("ArgMax requires non-empty values");
+  float maxima[8];
+  int32_t indices[8]{};
+  // Seeding every lane from index zero retains the original sticky first-NaN behavior.
+  std::fill_n(maxima, 8, values[0]);
+  size_t i = 1;
+  for (; values.size() - i >= 8; i += 8) {
+    for (size_t lane = 0; lane < 8; ++lane) {
+      const float value = values[i + lane];
+      const bool greater = value > maxima[lane];
+      maxima[lane] = greater ? value : maxima[lane];
+      indices[lane] = greater ? static_cast<int32_t>(i + lane) : indices[lane];
+    }
+  }
+  float best = values[0];
+  int32_t index = 0;
+  for (size_t lane = 0; lane < 8; ++lane) {
+    if (maxima[lane] > best || (maxima[lane] == best && indices[lane] < index)) {
+      best = maxima[lane];
+      index = indices[lane];
+    }
+  }
+  for (; i < values.size(); ++i) {
+    if (values[i] > best) {
+      best = values[i];
+      index = static_cast<int32_t>(i);
+    }
+  }
+  return index;
+}
+
+bool CpuGreedyArgMaxLanes8Enabled() {
+  static const bool enabled = []() {
+    bool value = false;
+    GetEnv("ORT_GENAI_CPU_GREEDY_ARGMAX_LANES8", value);
+    return value;
+  }();
+  return enabled;
+}
+}
 
 Search_Cpu::Search_Cpu(const GeneratorParams& params)
     : Search{params},
@@ -183,7 +227,9 @@ void GreedySearch_Cpu::SelectTop() {
     }
 
     std::span<float> const scores = next_token_scores_.CpuSpan().subspan(batch_id * params_->config.model.vocab_size, params_->config.model.vocab_size);
-    auto const token = ArgMax<float>(scores);
+    auto const token = CpuGreedyArgMaxLanes8Enabled()
+                           ? ArgMaxCpuLanes8(scores)
+                           : ArgMax<float>(scores);
     SetNextToken(batch_id, token);
   }
 

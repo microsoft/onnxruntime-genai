@@ -5,6 +5,10 @@
 #include "config_utils.h"
 #include "search.h"
 #include "interface.h"
+#include "models/env_utils.h"
+#include "models/graph_builder.h"
+#include <iostream>
+#include <limits>
 #include "models/graph_executor.h"
 #include "models/io/kv_cache.h"
 
@@ -12,9 +16,40 @@ namespace Generators {
 namespace WebGPU {
 
 namespace {
+bool WebGpuGreedyArgMaxEnabled() {
+  static const bool enabled = []() {
+    bool value = false;
+    GetEnv("ORT_GENAI_WEBGPU_GREEDY_ARGMAX", value);
+    if (value) {
+      bool shader = false;
+      GetEnv("ORT_WEBGPU_ARGMAX_PARALLEL_BITWISE", shader);
+      if (!shader)
+        throw std::runtime_error("ORT_GENAI_WEBGPU_GREEDY_ARGMAX=1 requires ORT_WEBGPU_ARGMAX_PARALLEL_BITWISE=1");
+    }
+    return value;
+  }();
+  return enabled;
+}
+}
+
+
+namespace {
 const char* device_label = "WebGPU";
 const char* label_cpu = "cpu";
 }  // namespace
+
+
+static bool WebGpuGreedyArgMaxTraceEnabled();
+static bool WebGpuGpuSliceCopyEnabled() {
+  static const bool enabled = []() {
+    bool value = false;
+    GetEnv("ORT_GENAI_WEBGPU_GPU_SLICE_COPY", value);
+    if (value && !WebGpuGreedyArgMaxEnabled())
+      throw std::runtime_error("ORT_GENAI_WEBGPU_GPU_SLICE_COPY=1 requires ORT_GENAI_WEBGPU_GREEDY_ARGMAX=1");
+    return value;
+  }();
+  return enabled;
+}
 
 struct WebGPUMemory final : DeviceBuffer {
   WebGPUMemory(size_t size, Ort::Allocator* allocator, const OrtMemoryInfo* memory_info)
@@ -106,6 +141,37 @@ struct WebGPUMemory final : DeviceBuffer {
       const std::vector<const OrtValue*> src_ptrs = {src_tensor.get()};
       const std::vector<OrtValue*> dst_ptrs = {dst_tensor.get()};
       GetOrtEnv().CopyTensors(src_ptrs, dst_ptrs, nullptr);
+    } else if (source.GetType() == device_label && begin_dest == 0 && begin_source != 0 &&
+               dynamic_cast<WebGPUMemory*>(&source) != nullptr &&
+               WebGpuGpuSliceCopyEnabled() && size_in_bytes != 0 &&
+               p_device_ != source.p_device_ && begin_source % 4 == 0 && size_in_bytes % 4 == 0 &&
+               source.size_in_bytes_ % 4 == 0 &&
+               source.size_in_bytes_ / 4 <= std::numeric_limits<uint32_t>::max()) {
+      if (size_in_bytes > size_in_bytes_ || begin_source > source.size_in_bytes_ ||
+          size_in_bytes > source.size_in_bytes_ - begin_source)
+        throw std::runtime_error("WebGPU sliced copy exceeds source or destination buffer bounds");
+      const int64_t source_words = static_cast<int64_t>(source.size_in_bytes_ / 4);
+      const int64_t output_words = static_cast<int64_t>(size_in_bytes / 4);
+      int64_t start = static_cast<int64_t>(begin_source / 4);
+      int64_t end = start + output_words;
+      ModelConfig config("WebGpuSliceCopyU32");
+      config.inputs.push_back(TensorConfig("source", Ort::TypeToTensorType<uint32_t>, {-1}));
+      config.inputs.push_back(TensorConfig("starts", Ort::TypeToTensorType<int64_t>, {1}));
+      config.inputs.push_back(TensorConfig("ends", Ort::TypeToTensorType<int64_t>, {1}));
+      config.outputs.push_back(TensorConfig("output", Ort::TypeToTensorType<uint32_t>, {-1}));
+      ExecutionParams params(DeviceType::WEBGPU, "WebGpuExecutionProvider", ort_memory_info_);
+      params.inputs.push_back(TensorSpec(source.p_device_, Ort::TypeToTensorType<uint32_t>,
+                                        {source_words}, source.size_in_bytes_));
+      params.inputs.push_back(TensorSpec(&start, Ort::TypeToTensorType<int64_t>, {1}, sizeof(start)));
+      params.inputs.push_back(TensorSpec(&end, Ort::TypeToTensorType<int64_t>, {1}, sizeof(end)));
+      params.outputs.push_back(TensorSpec(p_device_, Ort::TypeToTensorType<uint32_t>,
+                                         {output_words}, size_in_bytes));
+      params.session_config_keys = {"ep.webgpuexecutionprovider.enableInt64", "session.disable_cpu_ep_fallback"};
+      params.session_config_values = {"1", "1"};
+      GraphExecutor::Execute(config, params);
+      if (WebGpuGreedyArgMaxTraceEnabled())
+        std::cerr << "WEBGPU_GPU_SLICE_COPY source_bytes=" << source.size_in_bytes_
+                  << " offset_bytes=" << begin_source << " copied_bytes=" << size_in_bytes << std::endl;
     } else if (strcmp(source.GetType(), label_cpu) == 0 && begin_source == 0 && begin_dest == 0) {
       // Fast path: CPU-to-WebGPU copy with zero offsets
       // IMPORTANT: Only use this path for actual CPU buffers. For other device types
@@ -155,6 +221,204 @@ struct WebGPUMemory final : DeviceBuffer {
   bool owned_;
   Ort::Allocator* ort_allocator_;
   const OrtMemoryInfo* ort_memory_info_;
+};
+
+
+
+static bool WebGpuGreedyArgMaxTraceEnabled() {
+  static const bool enabled = []() {
+    bool value = false;
+    GetEnv("ORT_GENAI_WEBGPU_GREEDY_ARGMAX_TRACE", value);
+    return value;
+  }();
+  return enabled;
+}
+
+
+static bool WebGpuGreedyFusedMinLengthEnabled() {
+  static const bool enabled = []() {
+    bool value = false;
+    GetEnv("ORT_GENAI_WEBGPU_GREEDY_ARGMAX_FUSED_MIN_LENGTH", value);
+    return value;
+  }();
+  return enabled;
+}
+
+struct LazyWebGpuLogits final : DeviceBuffer {
+  explicit LazyWebGpuLogits(DeviceSpan<float> logits) : logits_{logits} {
+    p_device_ = reinterpret_cast<uint8_t*>(logits_.Span().data());
+    size_in_bytes_ = logits_.size() * sizeof(float);
+  }
+  const char* GetType() const override { return device_label; }
+  void AllocateCpu() override {
+    if (!cpu_ready_) {
+      const auto cpu = logits_.CopyDeviceToCpu();
+      p_cpu_ = reinterpret_cast<uint8_t*>(cpu.data());
+      cpu_ready_ = true;
+    }
+    cpu_accessed_ = true;
+  }
+  void CopyDeviceToCpu() override {
+    // Materialized CPU scores are authoritative for this search step.
+    AllocateCpu();
+  }
+  void CopyCpuToDevice() override {
+    if (!cpu_ready_)
+      throw std::runtime_error("WebGPU greedy CPU scores have not been materialized");
+    logits_.CopyCpuToDevice();
+    cpu_accessed_ = true;
+  }
+  void CopyFrom(size_t begin_dest, DeviceBuffer& source, size_t begin_source, size_t size) override {
+    CopyThroughCpu(*this, begin_dest, source, begin_source, size);
+  }
+  void Zero() override {
+    logits_.Zero();
+    cpu_ready_ = cpu_accessed_ = false;
+    p_cpu_ = nullptr;
+  }
+  bool CpuAccessed() const { return cpu_accessed_; }
+ private:
+  DeviceSpan<float> logits_;
+  bool cpu_ready_{}, cpu_accessed_{};
+};
+
+struct GreedySearch_WebGpu final : GreedySearch_Cpu {
+  GreedySearch_WebGpu(const GeneratorParams& params, DeviceInterface& device)
+      : GreedySearch_Cpu{params}, device_{device} {}
+  void SetLogits(DeviceSpan<float> logits) override {
+    lazy_.reset();
+    gpu_min_length_applied_ = false;
+    masked_tokens_ready_ = false;
+    if (logits.empty())
+      throw std::runtime_error("WebGPU greedy requires nonempty logits");
+    if (logits.CpuSpan().data() == logits.Span().data()) {
+      GreedySearch_Cpu::SetLogits(logits);
+      return;
+    }
+    lazy_ = std::make_shared<LazyWebGpuLogits>(logits);
+    next_token_scores_ = DeviceSpan<float>{std::shared_ptr<DeviceBuffer>{lazy_}};
+  }
+
+  void ApplyMinLength(int min_length, std::optional<int> sequence_length = std::nullopt) override {
+    const int length = sequence_length.value_or(sequences_.GetSequenceLength());
+    if (length >= min_length)
+      return;
+    const int vocab = params_->config.model.vocab_size;
+    const int rows = params_->search.batch_size;
+    const auto& eos = params_->config.model.eos_token_id;
+    if (!lazy_ || lazy_->CpuAccessed() || vocab < 32 || vocab > 1048576) {
+      GreedySearch_Cpu::ApplyMinLength(min_length, sequence_length);
+      return;
+    }
+    if (gpu_min_length_applied_) {
+      if (cached_eos_ != eos)
+        GreedySearch_Cpu::ApplyMinLength(min_length, sequence_length);
+      return;
+    }
+    if (next_token_scores_.size() != static_cast<size_t>(rows) * vocab)
+      throw std::runtime_error("WebGPU min-length logits shape mismatch");
+    if (eos_mask_.size() != static_cast<size_t>(vocab) || cached_eos_ != eos) {
+      std::vector<uint8_t> mask(vocab, 0);
+      for (auto token : eos) {
+        if (token >= 0 && token < vocab)
+          mask[token] = 1;
+      }
+      eos_mask_ = device_.Allocate<uint8_t>(static_cast<size_t>(vocab));
+      eos_mask_.CopyFromCpu(mask);
+      cached_eos_ = eos;
+    }
+    if (lowest_.empty()) {
+      const float lowest = std::numeric_limits<float>::lowest();
+      lowest_ = device_.Allocate<float>(1);
+      lowest_.CopyFromCpu(std::span<const float>{&lowest, 1});
+    }
+    if (masked_.size() != static_cast<size_t>(rows) * vocab)
+      masked_ = device_.Allocate<float>(static_cast<size_t>(rows) * vocab);
+    const bool fused = WebGpuGreedyFusedMinLengthEnabled() &&
+                       rows <= 65535 / ((vocab + 2047) / 2048);
+    ModelConfig config(fused ? "WebGpuGreedyWhereArgMax" : "Where");
+    config.inputs.push_back(TensorConfig("condition", Ort::TypeToTensorType<bool>, {-1}));
+    config.inputs.push_back(TensorConfig("lowest", Ort::TypeToTensorType<float>, {1}));
+    config.inputs.push_back(TensorConfig("scores", Ort::TypeToTensorType<float>, {-1, -1}));
+    config.outputs.push_back(TensorConfig("masked", Ort::TypeToTensorType<float>, {-1, -1}));
+    if (fused) {
+      if (masked_tokens_.size() != static_cast<size_t>(rows))
+        masked_tokens_ = device_.Allocate<int64_t>(static_cast<size_t>(rows));
+      config.outputs.push_back(TensorConfig("tokens", Ort::TypeToTensorType<int64_t>, {-1}));
+      config.attributes.push_back(AttributeValue::Int("axis", -1));
+      config.attributes.push_back(AttributeValue::Int("keepdims", 0));
+      config.attributes.push_back(AttributeValue::Int("select_last_index", 0));
+    }
+    auto memory = device_.GetMemoryInfo();
+    ExecutionParams params(DeviceType::WEBGPU, "WebGpuExecutionProvider", memory.get());
+    params.inputs.push_back(TensorSpec(eos_mask_.Span().data(), Ort::TypeToTensorType<bool>,
+                                      {vocab}, static_cast<size_t>(vocab)));
+    params.inputs.push_back(TensorSpec(lowest_.Span().data(), Ort::TypeToTensorType<float>, {1}, sizeof(float)));
+    params.inputs.push_back(TensorSpec(next_token_scores_.Span().data(), Ort::TypeToTensorType<float>,
+                                      {rows, vocab}, static_cast<size_t>(rows) * vocab * sizeof(float)));
+    params.outputs.push_back(TensorSpec(masked_.Span().data(), Ort::TypeToTensorType<float>,
+                                       {rows, vocab}, static_cast<size_t>(rows) * vocab * sizeof(float)));
+    if (fused) {
+      params.outputs.push_back(TensorSpec(masked_tokens_.Span().data(), Ort::TypeToTensorType<int64_t>,
+                                         {rows}, static_cast<size_t>(rows) * sizeof(int64_t)));
+      params.session_config_keys = {"ep.webgpuexecutionprovider.enableInt64"};
+      params.session_config_values = {"1"};
+    }
+    GraphExecutor::Execute(config, params);
+    masked_tokens_ready_ = fused;
+    if (fused && WebGpuGreedyArgMaxTraceEnabled())
+      std::cerr << "WEBGPU_GREEDY_MIN_LENGTH_FUSED" << std::endl;
+    lazy_ = std::make_shared<LazyWebGpuLogits>(masked_);
+    next_token_scores_ = DeviceSpan<float>{std::shared_ptr<DeviceBuffer>{lazy_}};
+    gpu_min_length_applied_ = true;
+    if (WebGpuGreedyArgMaxTraceEnabled())
+      std::cerr << "WEBGPU_GREEDY_MIN_LENGTH rows=" << rows << " vocabulary=" << vocab << std::endl;
+  }
+
+  void SelectTop() override {
+    const int vocab = params_->config.model.vocab_size;
+    const int rows = params_->search.batch_size;
+    if (!lazy_ || lazy_->CpuAccessed() || vocab < 32 || vocab > 1048576 ||
+        rows > 65535 / ((vocab + 2047) / 2048)) {
+      if (WebGpuGreedyArgMaxTraceEnabled())
+        std::cerr << "WEBGPU_GREEDY_ARGMAX_CPU_FALLBACK" << std::endl;
+      GreedySearch_Cpu::SelectTop();
+      return;
+    }
+    if (next_token_scores_.size() != static_cast<size_t>(rows) * vocab)
+      throw std::runtime_error("WebGPU greedy logits shape does not match batch/vocabulary");
+    std::vector<int32_t> tokens(rows);
+    if (masked_tokens_ready_) {
+      const auto cached = masked_tokens_.CopyDeviceToCpu();
+      for (size_t row = 0; row < static_cast<size_t>(rows); ++row) {
+        if (cached[row] < 0 || cached[row] >= vocab)
+          throw std::runtime_error("WebGPU cached ArgMax returned an invalid token ID");
+        tokens[row] = static_cast<int32_t>(cached[row]);
+      }
+      if (WebGpuGreedyArgMaxTraceEnabled())
+        std::cerr << "WEBGPU_GREEDY_ARGMAX_CACHED" << std::endl;
+    } else if (!device_.ArgMax(next_token_scores_.Span().data(), Ort::TypeToTensorType<float>,
+                               rows, vocab, tokens.data())) {
+      throw std::runtime_error("WebGPU greedy ArgMax was not admitted");
+    }
+    if (WebGpuGreedyArgMaxTraceEnabled())
+      std::cerr << "WEBGPU_GREEDY_ARGMAX rows=" << rows << " vocabulary=" << vocab
+                << " token_bytes=" << rows * sizeof(int64_t) << std::endl;
+    for (size_t row = 0; row < static_cast<size_t>(rows); ++row) {
+      if (!PadIfAlreadyEOS(row))
+        SetNextToken(row, tokens[row]);
+    }
+    if (!done_)
+      AppendNextTokensToSequences();
+  }
+ private:
+  DeviceInterface& device_;
+  std::shared_ptr<LazyWebGpuLogits> lazy_;
+  DeviceSpan<uint8_t> eos_mask_;
+  DeviceSpan<float> lowest_, masked_;
+  std::vector<int32_t> cached_eos_;
+  DeviceSpan<int64_t> masked_tokens_;
+  bool gpu_min_length_applied_{}, masked_tokens_ready_{};
 };
 
 struct InterfaceImpl : DeviceInterface {
@@ -212,7 +476,10 @@ struct InterfaceImpl : DeviceInterface {
     return std::make_shared<WebGPUMemory>(p, size, ort_allocator_, ort_memory_info_);
   }
 
-  std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) override { return std::make_unique<GreedySearch_Cpu>(params); }
+  std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) override {
+    if (WebGpuGreedyArgMaxEnabled()) return std::make_unique<GreedySearch_WebGpu>(params, *this);
+    return std::make_unique<GreedySearch_Cpu>(params);
+  }
   std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) override { return std::make_unique<BeamSearch_Cpu>(params); }
   std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state) override {
     return CreateStandardKeyValueCache(state);
@@ -266,6 +533,43 @@ struct InterfaceImpl : DeviceInterface {
     const std::vector<OrtValue*> dst_ptrs = {dst_tensor.get()};
     GetOrtEnv().CopyTensors(src_ptrs, dst_ptrs, nullptr);
 
+    return true;
+  }
+
+
+  bool ArgMax(const void* logits, ONNXTensorElementDataType type, int rows, int vocab,
+              int32_t* out_tokens) override {
+    if (!WebGpuGreedyArgMaxEnabled())
+      return false;
+    if (type != Ort::TypeToTensorType<float> && type != Ort::TypeToTensorType<Ort::Float16_t>)
+      return false;
+    if (!logits || !out_tokens || rows <= 0 || vocab <= 0)
+      throw std::runtime_error("Invalid WebGPU ArgMax input/output dimensions");
+    if (vocab < 32 || vocab > 1048576 || rows > 65535 / ((vocab + 2047) / 2048))
+      return false;
+    if (!ort_allocator_)
+      throw std::runtime_error("WebGPU allocator not initialized");
+    ModelConfig config("ArgMax");
+    config.inputs.push_back(TensorConfig("input", type, {-1, -1}));
+    config.outputs.push_back(TensorConfig("output", Ort::TypeToTensorType<int64_t>, {-1}));
+    config.attributes.push_back(AttributeValue::Int("axis", -1));
+    config.attributes.push_back(AttributeValue::Int("keepdims", 0));
+    config.attributes.push_back(AttributeValue::Int("select_last_index", 0));
+    auto tokens = Allocate<int64_t>(static_cast<size_t>(rows));
+    ExecutionParams params(GetType(), "WebGpuExecutionProvider", ort_memory_info_);
+    params.inputs.push_back(TensorSpec(const_cast<void*>(logits), type, {rows, vocab},
+                                      static_cast<size_t>(rows) * vocab * Ort::SizeOf(type)));
+    params.outputs.push_back(TensorSpec(tokens.Span().data(), Ort::TypeToTensorType<int64_t>,
+                                       {rows}, static_cast<size_t>(rows) * sizeof(int64_t)));
+    params.session_config_keys = {"ep.webgpuexecutionprovider.enableInt64"};
+    params.session_config_values = {"1"};
+    GraphExecutor::Execute(config, params);
+    const auto cpu_tokens = tokens.CopyDeviceToCpu();
+    for (size_t row = 0; row < static_cast<size_t>(rows); ++row) {
+      if (cpu_tokens[row] < 0 || cpu_tokens[row] >= vocab)
+        throw std::runtime_error("WebGPU ArgMax returned an invalid token ID");
+      out_tokens[row] = static_cast<int32_t>(cpu_tokens[row]);
+    }
     return true;
   }
 

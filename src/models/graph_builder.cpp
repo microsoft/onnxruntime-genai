@@ -164,9 +164,22 @@ std::unique_ptr<OrtModel> Build(const ModelConfig& config) {
     output_names.push_back(output.name.c_str());
   }
 
+  std::unique_ptr<OrtNode> node;
+  if (config.op_type == "WebGpuGreedyWhereArgMax") {
+    if (config.inputs.size() != 3 || config.outputs.size() != 2)
+      throw std::runtime_error("Invalid WebGPU greedy Where/ArgMax graph signature");
+    const char* masked[] = {config.outputs[0].name.c_str()};
+    const char* tokens[] = {config.outputs[1].name.c_str()};
+    auto where = OrtNode::Create("Where", "", "greedy_where",
+                                input_names.data(), input_names.size(), masked, 1, nullptr, 0);
+    graph->AddNode(where.get());
+    where.release();
+    node = OrtNode::Create("ArgMax", "", "greedy_argmax", masked, 1, tokens, 1,
+                          node_attr_ptrs.data(), node_attr_ptrs.size());
+  } else {
   // Create node using RAII wrapper
-  auto node = OrtNode::Create(
-      config.op_type.c_str(),
+  node = OrtNode::Create(
+      config.op_type == "WebGpuSliceCopyU32" ? "Slice" : config.op_type.c_str(),
       "",  // empty domain = ONNX domain
       (config.op_type + "_node").c_str(),
       input_names.data(),
@@ -175,6 +188,8 @@ std::unique_ptr<OrtModel> Build(const ModelConfig& config) {
       output_names.size(),
       node_attr_ptrs.empty() ? nullptr : node_attr_ptrs.data(),
       node_attr_ptrs.size());
+
+  }
 
   // Add node to graph (graph takes ownership of node)
   graph->AddNode(node.get());

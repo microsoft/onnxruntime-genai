@@ -1371,7 +1371,7 @@ TEST_F(FixedStatePoolTest, GenericDeviceRejectsCompactStateReplay) {
   } catch (const std::runtime_error& error) {
     EXPECT_STREQ(
         error.what(),
-        "Compact fixed state replay currently supports only CPU and CUDA devices.");
+        "Compact fixed state replay is unavailable for this device.");
   }
 }
 
@@ -1628,6 +1628,50 @@ TEST_F(FixedStatePoolTest, CompactPartialAcceptanceReplaysConvAndGdn) {
   ExpectInputRow(reservation.Bindings()[1], 0, expected_conv);
   ExpectInputRow(reservation.Bindings()[2], 0, expected_gdn);
   ExpectInputRow(reservation.Bindings()[3], 0, expected_gdn);
+}
+
+TEST_F(FixedStatePoolTest, WebGpuHostMirrorsReplayWithoutPublishingOtherRows) {
+  auto replay_model = LoadSyntheticHybridModel();
+  FixedStateTestDevice webgpu_device{
+      *replay_model->p_device_kvcache_, DeviceType::WEBGPU, true, false};
+  ScopedKeyValueCacheDevice scoped_device{*replay_model, webgpu_device};
+  FixedStatePool pool{replay_model, 2};
+  MakeResident(pool, kRequestA, 4.0f);
+  MakeResident(pool, kRequestB, 8.0f);
+  const auto old_tokens = pool.CommittedTokens(pool.HandleFor(kRequestA));
+  {
+    auto reservation = pool.Reserve(One(kRequestA, 4, 3));
+    ASSERT_FALSE(reservation.UsesDirectBindings());
+    FillStagedRows(reservation, 0, 99.0f);
+    const std::array<float, 6> conv{10.0f, 11.0f, 20.0f, 21.0f, 30.0f, 31.0f};
+    const std::array<float, 6> decay{0.5f, 0.25f, 1.0f, 0.5f, 1.0f, 1.0f};
+    const std::array<float, 6> key{2.0f, 3.0f, 4.0f, 5.0f, 1.0f, 1.0f};
+    const std::array<float, 12> delta{1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f,
+                                      7.0f, 8.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    for (const auto& binding : reservation.Bindings()) {
+      if (binding.state_update_kind == Config::Model::Decoder::StateUpdateKind::CausalConv) {
+        FillConvUpdates(binding, 0, conv);
+      } else {
+        FillGdnUpdates(binding, 0, decay, key, delta);
+      }
+    }
+    reservation.CommitPrefix(0, 4, 2);
+    reservation.PrepareCommit();
+    EXPECT_EQ(pool.CommittedTokens(pool.HandleFor(kRequestA)), old_tokens);
+    reservation.PublishCommit();
+  }
+  {
+    auto reservation = pool.Reserve(One(kRequestA, 2));
+    const std::array<float, 6> conv{4.0f, 10.0f, 20.0f, 4.0f, 11.0f, 21.0f};
+    const std::array<float, 8> gdn{24.0f, 30.0f, 30.0f, 38.0f, 31.5f, 40.0f, 36.5f, 46.5f};
+    ExpectInputRow(reservation.Bindings()[0], 0, conv);
+    ExpectInputRow(reservation.Bindings()[1], 0, conv);
+    ExpectInputRow(reservation.Bindings()[2], 0, gdn);
+    ExpectInputRow(reservation.Bindings()[3], 0, gdn);
+    reservation.Discard();
+  }
+  auto other = pool.Reserve(One(kRequestB, 2));
+  ExpectInputRows(other, 0, 8.0f);
 }
 
 // The compact replay of a partial commit is launched by the next pool operation, so a checkpoint

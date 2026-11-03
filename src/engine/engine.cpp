@@ -936,7 +936,7 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
       selection_buffers.status.Zero();
     }
     const auto selection_view = [&](DeviceSpan<int32_t> values, std::initializer_list<int64_t> shape) {
-      auto tensor = OrtValue::CreateTensor(*mtp_model_->p_device_inputs_->GetMemoryInfo(),
+      auto tensor = OrtValue::CreateTensor(mtp_model_->p_device_inputs_->GetAllocator().GetInfo(),
                                            values.Span().data(), values.size() * sizeof(int32_t),
                                            {shape.begin(), shape.size()}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
       auto* result = tensor.get();
@@ -945,7 +945,7 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
     };
     const auto projection_view = [&](DeviceSpan<int64_t> values) {
       const std::array<int64_t, 1> shape{static_cast<int64_t>(values.size())};
-      auto tensor = OrtValue::CreateTensor(*mtp_model_->p_device_inputs_->GetMemoryInfo(),
+      auto tensor = OrtValue::CreateTensor(mtp_model_->p_device_inputs_->GetAllocator().GetInfo(),
                                            values.Span().data(), values.size() * sizeof(int64_t), shape,
                                            ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
       auto* result = tensor.get();
@@ -1363,7 +1363,7 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
             const size_t row_bytes = info->GetElementCount() / static_cast<size_t>(shape[0]) * Ort::SizeOf(info->GetElementType());
             if (buffer.size() == 0) buffer = mtp_model_->p_device_inputs_->Allocate<uint8_t>(selection_buffers.max_batch * row_bytes);
             shape[0] = query_count;
-            auto tensor = OrtValue::CreateTensor(*mtp_model_->p_device_inputs_->GetMemoryInfo(), buffer.Span().data(),
+            auto tensor = OrtValue::CreateTensor(mtp_model_->p_device_inputs_->GetAllocator().GetInfo(), buffer.Span().data(),
                                                  row_indices.size() * row_bytes, shape, info->GetElementType());
             auto* result = tensor.get();
             step->indexshare_views.push_back(std::move(tensor));

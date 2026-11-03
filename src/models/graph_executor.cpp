@@ -10,8 +10,27 @@
 #include <unordered_map>
 #include <cstring>
 #include "session_options.h"
+#include "models/env_utils.h"
 
 namespace Generators {
+
+namespace {
+bool WebGpuGreedyArgMaxEnabled() {
+  static const bool enabled = []() {
+    bool value = false;
+    GetEnv("ORT_GENAI_WEBGPU_GREEDY_ARGMAX", value);
+    if (value) {
+      bool shader = false;
+      GetEnv("ORT_WEBGPU_ARGMAX_PARALLEL_BITWISE", shader);
+      if (!shader)
+        throw std::runtime_error("ORT_GENAI_WEBGPU_GREEDY_ARGMAX=1 requires ORT_WEBGPU_ARGMAX_PARALLEL_BITWISE=1");
+    }
+    return value;
+  }();
+  return enabled;
+}
+}
+
 
 namespace {
 
@@ -48,6 +67,8 @@ std::unique_ptr<OrtSession> CreateSession(
     const std::vector<const char*>& session_config_keys,
     const std::vector<const char*>& session_config_values) {
   auto session_options = OrtSessionOptions::Create();
+  if (device_type == DeviceType::WEBGPU && WebGpuGreedyArgMaxEnabled())
+    session_options->SetIntraOpNumThreads(1);
   session_options->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
   // Apply session configuration entries
@@ -125,13 +146,17 @@ void GraphExecutor::Execute(
   // Create IOBinding for efficient execution
   auto io_binding = OrtIoBinding::Create(*session);
 
+  std::unique_ptr<OrtMemoryInfo> cpu_memory;
+  if (model_config.op_type == "WebGpuSliceCopyU32")
+    cpu_memory = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
   // Bind inputs
   for (size_t i = 0; i < exec_params.inputs.size(); i++) {
     const auto& input_spec = exec_params.inputs[i];
     const auto& input_config = model_config.inputs[i];
 
+    const OrtMemoryInfo* input_memory = cpu_memory && i != 0 ? cpu_memory.get() : exec_params.memory_info;
     auto input_tensor = OrtValue::CreateTensor(
-        *exec_params.memory_info,
+        *input_memory,
         input_spec.data,
         input_spec.size_in_bytes,
         input_spec.shape,

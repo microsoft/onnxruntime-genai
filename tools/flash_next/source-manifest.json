@@ -1,0 +1,26 @@
+{
+  "status": "source_snapshot_not_windows_build_qualified",
+  "runtime_reference_sha256": "d061518f7523417dacff57a6e69e77a0558fe6ec237b35433edac9ce8776b8d9",
+  "sources": {
+    "src/models/model.cpp": {
+      "origin": "qwen38-int4-gpu-greedy-argmax/build-v6-r2/models_model.cpp",
+      "sha256": "2353274b30528162e1b64a03527d1165a124e6e4642d0e1179ca1c557bff9b6a"
+    },
+    "src/models/graph_builder.cpp": {
+      "origin": "qwen38-int4-gpu-greedy-argmax/build-v6-r2/models_graph_builder.cpp",
+      "sha256": "4a107074d8bc303b7f650a53a267fb902cec7cb7174c04191760d432e56b91e4"
+    },
+    "src/models/graph_executor.cpp": {
+      "origin": "qwen38-int4-gpu-greedy-argmax/build-v6-r2/models_graph_executor.cpp",
+      "sha256": "98686655360d5c2cd3c58d14bca4bafcb80f9a108f0d5d67b00cc3b52a9fccd6"
+    },
+    "src/ep/webgpu/interface.cpp": {
+      "origin": "qwen38-int4-gpu-greedy-argmax/build-v6-r2/ep_webgpu_interface.cpp",
+      "sha256": "6d79546339088bc61b80a1d2680af17704302d9903c57736fd1087fd20758e51"
+    },
+    "src/search.cpp": {
+      "origin": "qwen38-int4-cpu-greedy-argmax/build-v1/search.cpp",
+      "sha256": "94366a94e402968cd82c4f890004d05d38cca9a73cb8465782dfa8da1914370c"
+    }
+  }
+}

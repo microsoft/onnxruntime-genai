@@ -88,12 +88,13 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #define ORT_GENAI_HAS_EXPERIMENTAL_C_API 1
 #endif
 
-// Single gate for OrtModelPackageApi support: API version 28+ and the experimental header
-// available. The OrtModelPackage* wrappers below and model_package.{h,cpp} key off this.
+// CMake probes the actual model-package declarations, not just the experimental header.
+#ifndef ORT_GENAI_HAS_MODEL_PACKAGE
 #if defined(ORT_API_VERSION) && ORT_API_VERSION >= 28 && ORT_GENAI_HAS_EXPERIMENTAL_C_API
 #define ORT_GENAI_HAS_MODEL_PACKAGE 1
 #else
 #define ORT_GENAI_HAS_MODEL_PACKAGE 0
+#endif
 #endif
 
 #include "../span.h"

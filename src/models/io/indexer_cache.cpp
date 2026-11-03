@@ -73,7 +73,10 @@ IndexerCache::IndexerCache(State& state) : state_{state} {
   if (shape_[2] <= 0)
     throw std::runtime_error("IndexerCache: head dimension must be static");
   const int64_t fixed_sequence_length = shape_[1] > 0 ? shape_[1] : 0;
-  share_buffer_ = ShouldUseSharedPastPresentKeyValueCache(state_);
+  const auto& length_name = inputs.past_sequence_length;
+  const bool has_length_input = !length_name.empty() && model_.session_info_.HasInput(length_name);
+  // Legacy growing indexers can coexist with fixed-capacity attention KV caches.
+  share_buffer_ = has_length_input && ShouldUseSharedPastPresentKeyValueCache(state_);
   if (fixed_sequence_length > 0) {
     if (state_.params_->search.num_beams != 1)
       throw std::runtime_error("IndexerCache: beam search is not supported with a fixed cache shape");
@@ -101,8 +104,7 @@ IndexerCache::IndexerCache(State& state) : state_{state} {
   for (size_t index = 0; index < layer_indices_.size(); ++index)
     empty_pasts_.push_back(OrtValue::CreateTensor(allocator, shape_, type_));
 
-  const auto& length_name = inputs.past_sequence_length;
-  if (!length_name.empty() && model_.session_info_.HasInput(length_name)) {
+  if (has_length_input) {
     if (model_.session_info_.GetInputDataType(length_name) != Ort::TypeToTensorType<int32_t>)
       throw std::runtime_error("IndexerCache: past_sequence_length input must be int32");
     past_sequence_length_ = OrtValue::CreateTensor(

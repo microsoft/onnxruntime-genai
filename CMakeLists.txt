@@ -135,6 +135,31 @@ include(cmake/shared-library-exports.cmake)
 ortgenai_configure_shared_library_exports(onnxruntime-genai)
 
 target_include_directories(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} ${ORT_HEADER_DIR})
+include(CheckCXXSourceCompiles)
+include(CMakePushCheckState)
+cmake_push_check_state(RESET)
+set(CMAKE_REQUIRED_INCLUDES "${ORT_HEADER_DIR}")
+check_cxx_source_compiles("
+  #include \"onnxruntime_c_api.h\"
+  #include \"onnxruntime_experimental_c_api.h\"
+  using OptionsCreate = OrtExperimental_OrtModelPackageApi_CreateModelPackageOptionsFromSessionOptions_SinceV28_Fn;
+  using OptionsRelease = OrtExperimental_OrtModelPackageApi_ReleaseModelPackageOptions_SinceV28_Fn;
+  using ContextCreate = OrtExperimental_OrtModelPackageApi_CreateModelPackageContext_SinceV28_Fn;
+  using ContextRelease = OrtExperimental_OrtModelPackageApi_ReleaseModelPackageContext_SinceV28_Fn;
+  using ComponentCount = OrtExperimental_OrtModelPackageApi_ModelPackage_GetComponentCount_SinceV28_Fn;
+  using ComponentNames = OrtExperimental_OrtModelPackageApi_ModelPackage_GetComponentNames_SinceV28_Fn;
+  using VariantCount = OrtExperimental_OrtModelPackageApi_ModelPackage_GetVariantCount_SinceV28_Fn;
+  using VariantNames = OrtExperimental_OrtModelPackageApi_ModelPackage_GetVariantNames_SinceV28_Fn;
+  using VariantEp = OrtExperimental_OrtModelPackageApi_ModelPackage_GetVariantEpName_SinceV28_Fn;
+  using ResolveString = OrtExperimental_OrtModelPackageApi_ModelPackage_ResolveStringRef_SinceV28_Fn;
+  using SelectComponent = OrtExperimental_OrtModelPackageApi_SelectComponent_SinceV28_Fn;
+  using ComponentRelease = OrtExperimental_OrtModelPackageApi_ReleaseModelPackageComponentContext_SinceV28_Fn;
+  using ComponentFolder = OrtExperimental_OrtModelPackageApi_ModelPackageComponent_GetSelectedVariantFolderPath_SinceV28_Fn;
+  int main() { return 0; }
+" ORTGENAI_HAS_MODEL_PACKAGE_API)
+cmake_pop_check_state()
+message(STATUS "Model-package experimental API headers available: ${ORTGENAI_HAS_MODEL_PACKAGE_API}")
+add_compile_definitions(ORT_GENAI_HAS_MODEL_PACKAGE=$<BOOL:${ORTGENAI_HAS_MODEL_PACKAGE_API}>)
 target_include_directories(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} ${onnxruntime_extensions_SOURCE_DIR}/shared/api)
 target_include_directories(${ORTGENAI_COMPILE_TARGET} PRIVATE ${GENERATORS_ROOT})
 target_link_libraries(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} onnxruntime_extensions)

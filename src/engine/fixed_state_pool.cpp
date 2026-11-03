@@ -9,6 +9,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
@@ -1015,9 +1016,10 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity,
   }
   if (SupportsStateUpdates() &&
       impl_->device->GetType() != DeviceType::CPU &&
-      impl_->device->GetType() != DeviceType::CUDA) {
+      impl_->device->GetType() != DeviceType::CUDA &&
+      impl_->device->GetType() != DeviceType::WEBGPU) {
     throw std::runtime_error(
-        "Compact fixed state replay currently supports only CPU and CUDA devices.");
+        "Compact fixed state replay is unavailable for this device.");
   }
   if (impl_->state_update_capacity != 0) {
     impl_->persistent_bytes = CheckedAdd(
@@ -1820,6 +1822,24 @@ void FixedStatePool::PrepareCommit(FixedStateReservation& reservation) {
   try {
     impl_->FlushDeferredReplay();
     auto& views = *storage.views;
+    const bool host_replay = impl_->device->GetType() == DeviceType::WEBGPU;
+    std::unordered_map<OrtValue*, DeviceSpan<uint8_t>> mirrors;
+    std::unordered_set<OrtValue*> upload_targets;
+    const auto replay_data = [&](OrtValue& tensor, bool destination = false) -> uint8_t* {
+      if (!host_replay) {
+        return tensor.GetTensorMutableData<uint8_t>();
+      }
+      auto found = mirrors.find(&tensor);
+      if (found == mirrors.end()) {
+        auto span = ByteWrapTensor(*impl_->device, tensor);
+        span.CopyDeviceToCpu();
+        found = mirrors.emplace(&tensor, std::move(span)).first;
+      }
+      if (destination) {
+        upload_targets.insert(&tensor);
+      }
+      return found->second.CpuSpan().data();
+    };
     std::vector<StateUpdateReplayDesc> replay_descriptors;
     if (storage.captures_state_updates) {
       replay_descriptors.reserve(impl_->tensors.size() * storage.handles.size());
@@ -1856,15 +1876,15 @@ void FixedStatePool::PrepareCommit(FixedStateReservation& reservation) {
         // Raw data pointers: wrapping each tensor in a DeviceSpan allocates, and this loop runs for
         // every fixed tensor on every partially accepted step.
         const auto& updates = views.state_update_tensors[tensor_index];
-        const auto row_pointer = [row](const std::unique_ptr<OrtValue>& tensor,
-                                       size_t row_bytes) -> const uint8_t* {
+        const auto row_pointer = [row, &replay_data](const std::unique_ptr<OrtValue>& tensor,
+                                                     size_t row_bytes) -> const uint8_t* {
           if (!tensor) {
             return nullptr;
           }
-          return tensor->GetTensorMutableData<uint8_t>() + row * row_bytes;
+          return replay_data(*tensor) + row * row_bytes;
         };
         const uint8_t* source = row_pointer(views.gathered_inputs[tensor_index], spec.row_bytes);
-        uint8_t* destination = spec.banks[inactive_bank]->GetTensorMutableData<uint8_t>() +
+        uint8_t* destination = replay_data(*spec.banks[inactive_bank], true) +
                                storage.handles[row].slot * spec.row_bytes;
         const auto* capsule = reinterpret_cast<const float*>(
             row_pointer(updates.capsule, spec.state_update_capsule.row_bytes));
@@ -1889,13 +1909,13 @@ void FixedStatePool::PrepareCommit(FixedStateReservation& reservation) {
         }
         const auto sibling_source = [&](size_t index, const Impl::TensorSpec* sibling) -> const uint8_t* {
           return sibling
-                     ? ByteWrapTensor(*impl_->device, *views.gathered_inputs[index]).Span().data() +
+                     ? replay_data(*views.gathered_inputs[index]) +
                            row * sibling->row_bytes
                      : nullptr;
         };
         const auto sibling_destination = [&](const Impl::TensorSpec* sibling) -> uint8_t* {
           return sibling
-                     ? ByteWrapTensor(*impl_->device, *sibling->banks[inactive_bank]).Span().data() +
+                     ? replay_data(*sibling->banks[inactive_bank], true) +
                            storage.handles[row].slot * sibling->row_bytes
                      : nullptr;
         };
@@ -1929,6 +1949,15 @@ void FixedStatePool::PrepareCommit(FixedStateReservation& reservation) {
                 : StateUpdateReplayKind::Indexer,
         });
       }
+    }
+    if (host_replay && !replay_descriptors.empty()) {
+      // WebGPU buffers are opaque handles. Replay on owned host mirrors, then upload only
+      // destination banks before publishing; never apply byte offsets to a device handle.
+      GetDeviceInterface(DeviceType::CPU)->ReplayStateUpdates(replay_descriptors.data(), replay_descriptors.size());
+      for (OrtValue* tensor : upload_targets) {
+        mirrors.at(tensor).CopyCpuToDevice();
+      }
+      replay_descriptors.clear();
     }
     impl_->device->Synchronize();
     // The replay reads only this step's inputs and captured updates, which stay untouched until the

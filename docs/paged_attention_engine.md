@@ -914,6 +914,15 @@ Requests that appended a token or became complete produce staged events. Events 
 The commit order in `Engine::RunDynamic()` is deliberate:
 
 1. Prepare the reservation: validate every ownership and capacity precondition of both sub-reservations. A fallback reservation copies each fixed staged output into its slot's inactive persistent bank. A direct reservation has already written full-step outputs there; if speculative verification keeps only a prefix, compact replay reconstructs the accepted state from the untouched active bank into that same inactive bank. Preparation synchronizes without publishing anything. This is the last step that performs fallible device work, and a failure here is fatal even though committed state is intact, because a partially written inactive bank cannot be proven consistent for a retry. The publish steps below do only host-side work; they can still throw on a state-machine misuse (for example a double publish), and the Engine treats any such throw as fatal too.
+
+   On WebGPU, compact replay uses owned CPU mirrors and the existing CPU replay
+   implementation. Tensor copies complete before row offsets are applied;
+   opaque WebGPU buffer handles are never treated as host pointers. Complete
+   destination banks are mirrored to preserve other resident rows, then uploaded
+   synchronously before publication. Replay descriptors are not deferred beyond
+   the mirrors' lifetime. This correctness path adds host transfers and is not
+   evidence of device-native replay or graph-capture support. CPU/CUDA retain
+   their existing replay paths.
 2. Commit the request search checkpoints and sampler checkpoint.
 3. Publish the reservation: paged occupancy first, then the fixed bank flip.
 4. Commit each request's lightweight bookkeeping.
