@@ -363,11 +363,19 @@ GraphBufferPlan PlanGraphBuffers(const Model& model, size_t position_planes,
   // one row per request cannot verify drafts at all, so its steps are always one token wide.
   plan.max_query_tokens =
       logits_are_per_token ? std::max<size_t>(max_query_tokens_per_request, 1) : 1;
+  const auto max_dimension = static_cast<size_t>(std::numeric_limits<int64_t>::max());
+  if (plan.max_batch_size == 0 || plan.max_batch_size >= max_dimension ||
+      plan.max_batch_size > max_dimension / plan.max_query_tokens) {
+    throw std::runtime_error("CUDA graph packed row count is invalid or exceeds int64_t.");
+  }
   plan.max_token_rows = plan.max_batch_size * plan.max_query_tokens;
   const size_t scheduled_token_cap = model.config_->engine.dynamic_batching->max_scheduled_tokens;
   if (scheduled_token_cap != 0) {
     plan.max_token_rows =
         std::max(plan.max_batch_size, std::min(plan.max_token_rows, scheduled_token_cap));
+  }
+  if (position_planes > max_dimension / plan.max_token_rows) {
+    throw std::runtime_error("CUDA graph position row count exceeds int64_t.");
   }
 
   const auto rows = static_cast<int64_t>(plan.max_token_rows);
