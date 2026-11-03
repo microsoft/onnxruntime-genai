@@ -466,15 +466,13 @@ OgaResult* OGA_API_CALL OgaConfigAddExternalInitializerData(
 OgaResult* OGA_API_CALL OgaConfigSetModelFileHandles(
     OgaConfig* config, const char* const* names, const OgaFileHandle* handles, size_t count) {
   OGA_TRY
-#if (defined(_WIN32) || defined(__linux__) || defined(__ANDROID__) || defined(__APPLE__)) && ORT_API_VERSION >= 28
+#if defined(_WIN32) || defined(__linux__) || defined(__ANDROID__) || defined(__APPLE__)
   if (!config || !config->memory_assets_only_ || !config->external_data_spans_.empty() ||
       (count != 0 && (!names || !handles))) {
     throw std::invalid_argument("Expected initializer file sources and a memory-only config without weight buffers.");
   }
   (void)Generators::GetOrtEnv();
-  if (Ort::api_version < 28 ||
-      !Ort::api->GetExperimentalFunction(
-          "OrtApi_SessionOptionsSetExternalInitializerFileHandles_SinceV32")) {
+  if (!Ort::IsExternalInitializerFileHandlesApiAvailable()) {
     throw std::runtime_error("ORT lacks the required initializer file-source API.");
   }
   auto sources = std::make_shared<Generators::ExternalInitializerFileSources>();
@@ -525,8 +523,6 @@ OgaResult* OGA_API_CALL OgaConfigSetModelFileHandles(
   }
   config->external_file_sources_ = std::move(sources);
   return nullptr;
-#elif ORT_API_VERSION < 28
-  throw std::runtime_error("ORT lacks the required initializer file-source API.");
 #else
   throw std::runtime_error("External initializer file handles are unsupported on this platform.");
 #endif

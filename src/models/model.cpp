@@ -988,15 +988,7 @@ std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::str
   if (config_->memory_assets_only_) {
     auto graph = config_->model_data_spans_.find(model_filename);
     if (config_->external_file_sources_) {
-#if ORT_API_VERSION >= 28
-      if (Ort::api_version < 28) {
-        throw std::runtime_error("ORT does not support experimental initializer file sources.");
-      }
-      using RegisterFiles = OrtStatus*(ORT_API_CALL*)(OrtSessionOptions*, const char* const*, const OgaFileHandle*, size_t) noexcept;
-      const auto register_files = reinterpret_cast<RegisterFiles>(
-          Ort::api->GetExperimentalFunction(
-              "OrtApi_SessionOptionsSetExternalInitializerFileHandles_SinceV32"));
-      if (!register_files) {
+      if (!Ort::IsExternalInitializerFileHandlesApiAvailable()) {
         throw std::runtime_error("ORT lacks the required initializer file-source API.");
       }
       for (const char* key : {"session.use_ort_model_bytes_directly",
@@ -1019,16 +1011,14 @@ std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::str
       for (const auto& name : sources.names) {
         names.push_back(name.c_str());
       }
-      Ort::ThrowOnError(register_files(options.get(), names.data(), sources.handles.data(), names.size()));
+      Ort::ThrowOnError(Ort::SetExternalInitializerFileHandles(
+          options.get(), names.data(), sources.handles.data(), names.size()));
       if (graph != config_->model_data_spans_.end() && !graph->second.empty()) {
         session = OrtSession::Create(ort_env, graph->second.data(), graph->second.size(), options.get());
       } else {
         auto mapping = sources.Map(model_filename);
         session = OrtSession::Create(ort_env, mapping->data, mapping->size, options.get());
       }
-#else
-      throw std::runtime_error("ORT lacks the required initializer file-source API.");
-#endif
     } else {
       if (graph == config_->model_data_spans_.end() || graph->second.empty()) {
         throw std::runtime_error("Memory asset bundle is missing graph: " + model_filename);
