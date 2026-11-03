@@ -2935,6 +2935,31 @@ TEST_F(Qwen38PlaneEmbeddingTest, EmbedGatherRejectsArgumentsThatDoNotDescribeATa
   plane_->Check(plane_->stream_sync(stream.get()), "stream_sync(embed_gather arguments)");
 }
 
+TEST_F(Qwen38PlaneEmbeddingTest, EmbedGatherRejectsNullBuffersWithoutDamagingTheStream) {
+  constexpr int64_t kVocab = 64;
+  constexpr int kWidth = 16;
+  const std::vector<int64_t> ids = {3, 63, 0};
+  for (const bool int8 : {false, true}) {
+    SCOPED_TRACE(int8 ? "int8" : "bfloat16");
+    const int format = int8 ? QWEN38_PLANE_EMBEDDING_INT8_ROW : QWEN38_PLANE_EMBEDDING_BF16;
+    const std::vector<uint8_t> table = MakeEmbeddingTable(kVocab, kWidth, int8);
+    const std::vector<uint16_t> untouched = RunEmbeddingGather(
+        *plane_, table, ids, kWidth, [&](void* stream, const void* d_table, const void* d_ids, void* d_out) {
+          EXPECT_EQ(plane_->embed_gather(stream, nullptr, kVocab, format, d_ids, d_out, static_cast<int>(ids.size()), kWidth),
+                    kCudaErrorInvalidValue);
+          plane_->Check(plane_->stream_sync(stream), "stream_sync(null embedding table)");
+          EXPECT_EQ(plane_->embed_gather(stream, d_table, kVocab, format, nullptr, d_out, static_cast<int>(ids.size()), kWidth),
+                    kCudaErrorInvalidValue);
+          plane_->Check(plane_->stream_sync(stream), "stream_sync(null embedding ids)");
+          EXPECT_EQ(plane_->embed_gather(stream, d_table, kVocab, format, d_ids, nullptr, static_cast<int>(ids.size()), kWidth),
+                    kCudaErrorInvalidValue);
+          plane_->Check(plane_->stream_sync(stream), "stream_sync(null embedding output)");
+        });
+    EXPECT_EQ(untouched, std::vector<uint16_t>(untouched.size(), static_cast<uint16_t>(0xABAB)));
+    ExpectEmbedGatherAddressesTheTableByItsRowCount(*plane_, kVocab, kWidth, int8, ids);
+  }
+}
+
 TEST_F(Qwen38PlaneEmbeddingTest, EmbedRowsOfALibraryBeforeEmbedGatherStillGathersBf16RowsAndHasNoInt8Mode) {
   if (!plane_->embed_rows) {
     GTEST_SKIP() << "the plane library has no embed_rows";

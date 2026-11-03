@@ -1510,7 +1510,8 @@ QWEN38_PLANE_EXPORT void qwen38_plane_embed_rows(void* s, const void* table, con
 QWEN38_PLANE_EXPORT int qwen38_plane_embed_gather(void* s, const void* table, long long table_rows, int format, const void* ids,
                                                   void* out, int n, int width) {
   if (n <= 0) return 0;
-  if (table_rows <= 0 || width <= 0) return (int)cudaErrorInvalidValue;
+  if (table == nullptr || ids == nullptr || out == nullptr || table_rows <= 0 || width <= 0)
+    return (int)cudaErrorInvalidValue;
   if (format == QWEN38_PLANE_EMBEDDING_INT8_ROW) {
     // The row scales follow the int8 payload, whose size comes from the row count of the table.
     const size_t payload_bytes = (size_t)table_rows * (size_t)width;

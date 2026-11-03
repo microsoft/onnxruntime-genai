@@ -1234,6 +1234,8 @@ void Qwen38GraphEngine::Warmup() {
     WarmupFlag& operator=(const WarmupFlag&) = delete;
     Qwen38OrtRunHints& hints_;
   } warmup_flag{run_hints_};
+  // The device embedding gather does not bound-check, so every dummy id must stay inside the vocabulary.
+  const auto warm_token = [this](int64_t id) { return static_cast<int32_t>(id % std::max(vocab_, 1)); };
   const int R = fold_ ? verify_rows_ : 2;
   const int max_prompt = capacity_ - Qwen38DecodeDevice::kReservedTail - (R + 1);
   if (max_prompt < R) return;
@@ -1241,7 +1243,7 @@ void Qwen38GraphEngine::Warmup() {
   if (fast_ && fast_->unified) {
     const int warm_len = std::min<int>({fast_->chunk, 512, max_prompt});
     if (warm_len >= 2) {
-      std::vector<int32_t> prompt(warm_len, 1000);
+      std::vector<int32_t> prompt(warm_len, warm_token(1000));
       FastAppend(prompt);
       ClearHead();
       SyncStream();
@@ -1260,7 +1262,7 @@ void Qwen38GraphEngine::Warmup() {
       }
       ledger_.SetBank(phase);
       std::vector<int32_t> dummy(R);
-      for (int i = 0; i < R; ++i) dummy[i] = dummy_tok++;
+      for (int i = 0; i < R; ++i) dummy[i] = warm_token(dummy_tok++);
       StepPrefill(dummy);  // S=R target ids; fold: the muted cycle graphs
     }
   }
@@ -1281,7 +1283,8 @@ void Qwen38GraphEngine::Warmup() {
           SyncStream();
         }
         head_cur_ = phase;
-        const int64_t tokens[2] = {head_dummy_tok, head_dummy_tok}, positions[2] = {head_length_ + 1, head_length_ + 2};
+        const int64_t tokens[2] = {warm_token(head_dummy_tok), warm_token(head_dummy_tok)},
+                      positions[2] = {head_length_ + 1, head_length_ + 2};
         ++head_dummy_tok;
         CallHeadR2(tokens, positions, d_last_hidden_.data(), d_last_hidden_.data(), 1);
       }
@@ -1297,7 +1300,7 @@ void Qwen38GraphEngine::Warmup() {
         if (length < 2 || length > max_prompt) continue;
         Reset();
         std::vector<int32_t> prompt(length);
-        for (auto& t : prompt) t = static_cast<int32_t>(1000 + rng() % 199000);
+        for (auto& t : prompt) t = warm_token(1000 + rng() % 199000);
         FastAppend(prompt);
         ClearHead();
         SyncStream();
@@ -1314,7 +1317,7 @@ void Qwen38GraphEngine::Warmup() {
     const int target_phase = i % num_banks_;
     if (ledger_.Length() == 0 || ledger_.Length() + 1 > max_usable) {
       Reset();
-      const std::vector<int32_t> pair = {1000 + i, 1001 + i};
+      const std::vector<int32_t> pair = {warm_token(1000 + i), warm_token(1001 + i)};
       StepPrefill(pair);
     }
     ledger_.SetBank(target_phase);

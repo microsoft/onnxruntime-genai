@@ -173,7 +173,7 @@ typedef enum Qwen38PlaneEmbeddingFormat {
 // token ids on the device, and an id outside [0, table_rows) reads row 0. Both that bound and the start of the INT8 row
 // scales (table + table_rows * width bytes) come from table_rows, the vocabulary size of the model, so the plane has no
 // vocabulary size of its own. Returns 0, including for n <= 0 (nothing is launched), or cudaErrorInvalidValue before it
-// launches anything for table_rows <= 0, width <= 0, an unknown format, a BF16 table whose width is not a multiple of 8
+// launches anything for a null table, ids or out, table_rows <= 0, width <= 0, an unknown format, a BF16 table whose width is not a multiple of 8
 // (a row is copied in 16-byte vectors; an INT8 row has no such limit), or an INT8 table whose scales would not be 4-byte
 // aligned (table_rows * width not a multiple of 4).
 typedef int (*Qwen38PlaneEmbedGatherFn)(void* stream, const void* table, long long table_rows, int format, const void* ids,

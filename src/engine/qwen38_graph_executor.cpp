@@ -76,6 +76,7 @@ void Qwen38GraphSession::Begin(const Qwen38StepRequest& request) {
   // decode status before Reset clears the device error bits.
   owner_ = nullptr;
   pending_step_ = {};
+  const bool had_cycle_in_flight = std::exchange(cycle_in_flight_, false);
   if (deferred_error_) {
     std::rethrow_exception(std::exchange(deferred_error_, nullptr));
   }
@@ -83,6 +84,11 @@ void Qwen38GraphSession::Begin(const Qwen38StepRequest& request) {
     device_->Drain();
     status_checked_ = true;
     device_->CheckDecodeStatus();
+  }
+  if (had_cycle_in_flight) {
+    ++work_metrics_.work_records;
+    ++work_metrics_.target_forward_passes;
+    ++work_metrics_.discarded_completions;
   }
   if (device_dirty_) {
     device_->Reset();
@@ -100,6 +106,7 @@ void Qwen38GraphSession::Release() {
   prefilled_ = 0;
   decoding_ = false;
   pending_step_ = {};
+  const bool had_cycle_in_flight = std::exchange(cycle_in_flight_, false);
   completions_.Retire(0);
   if (deferred_error_) {
     // Only a step consumes the failure (the Engine then turns it into a fatal error). A retried rewind or retirement must
@@ -118,6 +125,11 @@ void Qwen38GraphSession::Release() {
       if (!deferred_error_) deferred_error_ = std::current_exception();
       throw;
     }
+  }
+  if (had_cycle_in_flight) {
+    ++work_metrics_.work_records;
+    ++work_metrics_.target_forward_passes;
+    ++work_metrics_.discarded_completions;
   }
 }
 
@@ -180,6 +192,7 @@ Qwen38StepResult Qwen38GraphSession::Step(const Qwen38StepRequest& request) {
     const bool run_cycle = !IsStopToken(first) && limit > 1;
     device_->BeginDecode(run_cycle);
     if (run_cycle) {
+      cycle_in_flight_ = true;
       status_checked_ = false;
     }
     decoding_ = true;
@@ -190,6 +203,7 @@ Qwen38StepResult Qwen38GraphSession::Step(const Qwen38StepRequest& request) {
     return result;
   }
 
+  cycle_in_flight_ = false;
   const Qwen38CycleRecord record = device_->WaitCycle();
   ++work_metrics_.work_records;
   ++work_metrics_.target_forward_passes;
@@ -229,6 +243,9 @@ Qwen38StepResult Qwen38GraphSession::Step(const Qwen38StepRequest& request) {
   if (ended) {
     status_checked_ = true;
     device_->CheckDecodeStatus();  // nothing is in flight now: a device that accumulated an error reports it here
+  } else {
+    cycle_in_flight_ = true;
+    status_checked_ = false;
   }
 
   for (size_t i = 0; i < produced; ++i) {

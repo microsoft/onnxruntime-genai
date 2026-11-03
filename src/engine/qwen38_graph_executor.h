@@ -116,6 +116,7 @@ class Qwen38GraphSession : public FixedSlotSession {
   // Unknown until proven otherwise: the device may hold a previous Engine's state (it outlives its Engine), so the first
   // request always starts with a Reset.
   bool device_dirty_{true};
+  bool cycle_in_flight_{};
   bool status_checked_{true};
   std::exception_ptr deferred_error_;
   PendingStep pending_step_{};
