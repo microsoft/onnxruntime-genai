@@ -855,11 +855,9 @@ A committed step emits zero or more ordered token events and may emit a terminal
 `TurnFinished` with its final visible token event. EOS can emit terminal completion without a
 visible token. Event delivery does not mutate the Request's retained logical sequence. A
 speculative step emits each accepted draft and its correction or bonus as a separate token event,
-up to `kMaxGeneratedTokensPerStep` events per affected Request. A guidance fast-forward step emits
-its sampled token followed by each grammar-forced token, with no fixed per-step limit. If
-speculative verification accepts a visible draft immediately before an accepted EOS ends the Turn,
-the accepted visible token and terminal completion share that combined event; the EOS itself is
-never emitted as a token.
+up to `kMaxGeneratedTokensPerStep` events per affected Request. If speculative verification accepts
+a visible draft immediately before an accepted EOS ends the Turn, the accepted visible token and
+terminal completion share that combined event; the EOS itself is never emitted as a token.
 
 A chunked partial-prefill transaction can commit cache and Request progress without producing an
 event. `Run()` then returns count zero while `HasPendingRequests()` remains true. It does not loop
@@ -924,8 +922,7 @@ must process all returned events before reusing the buffer.
 Draft rows are optional scheduler work. Admission first reserves one mandatory token for every
 selected request, then distributes remaining `max_scheduled_tokens` and cache capacity to drafts.
 If the optimistic draft width does not fit, the scheduler shortens or removes draft work without
-dropping another selected request's mandatory decode. Neither a prefill nor a decode row with more
-than one unread committed token verifies drafts, because a verify step must end at the sequence tail.
+dropping another selected request's mandatory decode. Prefill never verifies drafts.
 
 A committed decode consumes the complete proposal, including drafts omitted by budgeting. A
 retryable rollback restores the request and leaves the proposal pending for retry. During commit,
@@ -1073,11 +1070,12 @@ If at least one request fits, the step is executable even when other requests we
 
 ### 4. Finalize the packed token layout
 
-After cache planning selects the batch, every selected request keeps its one-token contribution.
-Decode rows then expand in decode-first order by their drafts or, after a guidance fast-forward
-step, by up to one chunk of unread committed tokens; prefills expand next in stable order while
-tokens remain. A chunk is bounded by the request's remaining tokens, the model-configured
-`search.chunk_size` when present, the cache's per-request query cap, and `max_scheduled_tokens`.
+After cache planning selects the batch, each decode keeps its one-token
+contribution. Every selected prefill also keeps its provisional token, then
+prefills expand in stable order while tokens remain. A prefill contribution is
+bounded by its remaining prompt, the model-configured `search.chunk_size` when present, and
+`max_scheduled_tokens`. A decode row with unread guidance fast-forward tokens expands before
+prefills, by up to one chunk under the same bounds and the cache's per-request query cap.
 
 The scheduler recomputes cache targets and assigns each request:
 
@@ -1099,7 +1097,7 @@ Only the logits for the last input token of each request are used to sample its 
 the request's remaining tokens, then binds those counts before decoder input or
 chunk-completion logic reads the request.
 
-The scheduler also marks whether the step is eligible for CUDA graph capture. A capturable step must be past prefill and must give every request the same number of tokens, each request contributing one token plus its drafts. Prefill, chunked prefill, mixed prefill/decode, decode rows reading several committed tokens, and steps whose requests carry different draft widths all run eagerly.
+The scheduler also marks whether the step is eligible for CUDA graph capture. A capturable step must be past prefill and must give every request the same number of tokens. Prefill, chunked prefill, mixed prefill/decode, and steps whose requests carry different draft widths all run eagerly.
 
 ### 5. Reserve the complete cache transaction
 
@@ -1296,38 +1294,22 @@ on rollback. Draining an already-pending event does not advance the cursor again
 The model caches immutable tokenizer and compiled-grammar assets, while requests retain independent
 copy-on-write cursors. After a dynamic step commits, the Engine submits one parallel llguidance job
 for dirty cursors so CPU mask work overlaps the next model forward. Contiguous CUDA logits rows use
-one host-to-device mask transfer and one mask kernel; unguided rows and rows still reading a prefill
-or fast-forward chunk receive pass-through masks. If speculative mask submission fails, the
-committed step remains valid and the dirty cursor retries mask construction when the next step needs
-it. Transient submission and future-delivery failures can recover this way; an error reported by
-llguidance permanently poisons that cursor and continues to fail rather than allowing generation
-with a stale mask.
+one host-to-device mask transfer and one mask kernel; unguided and partial-prefill rows receive
+pass-through masks. If speculative mask submission fails, the committed step remains valid and the
+dirty cursor retries mask construction when the next step needs it. Transient submission and
+future-delivery failures can recover this way; an error reported by llguidance permanently poisons
+that cursor and continues to fail rather than allowing generation with a stale mask.
 
 A guided turn does not accept speculative drafts, because a draft's proposals are not produced under
 the grammar; the next unguided turn is draft-eligible again. Guidance and stop strings can be
 enabled together.
 
-### Guidance fast-forward
-
-`OgaTurnOptionsSetGuidanceFastForward` lets a turn's whole-turn grammar append the tokens it forces.
-When committing a sampled token leaves the grammar exactly one continuation, the step stages those
-forced tokens after the sampled token, checks each against the same stop-string, EOS, turn-limit,
-and context-limit rules as a sampled token, and makes all of them visible in that step. A limit
-cuts the span and ends the turn. The forced tokens are committed output that the model has not yet
-read, so `processed_sequence_length_` stops short of them; rollback discards them with the rest of
-the step.
-
-On a later step the scheduler treats such a row like a chunk: after every selected request receives
-its first token, the row reads up to one chunk of its unread committed tokens, ahead of prefill
-chunks and within `max_scheduled_tokens`, `search.chunk_size`, and the cache's per-request query
-cap. The row samples only once it has read all of them. It plans no drafts. A step in which it reads
-more than one token runs eagerly and, on a model with fixed recurrent state, drops every other row's
-drafts, as a prefill chunk does.
-
-Fast-forward is off by default because forced token IDs follow the grammar's tokenization, so token
-IDs and later output can differ from a turn without it. Admission rejects it without whole-turn
-guidance, including with delimited guidance, and on an Engine without dynamic batching, because
-neither path appends forced tokens.
+`OgaTurnOptionsSetGuidanceFastForward` lets whole-turn guidance append the tokens its grammar forces
+after a sampled token. They pass the same stop-string, EOS, and length checks as sampled tokens and
+become visible in that step; the model reads them on later steps (step 4), so the row plans no
+drafts and, on a model with fixed recurrent state, other rows defer theirs. Rollback discards them
+with the step. Fast-forward is off by default because forced token IDs follow the grammar's
+tokenization, and admission rejects it without whole-turn guidance or dynamic batching.
 
 ## Per-turn generation policy
 
@@ -1505,11 +1487,10 @@ replay its full current-turn token history, so one retryable abort's recovery co
 stop-string component alone is `O(active stop-enabled requests in the batch x each request's
 generated current-turn token count)` -- linear in the number of such requests, and, per request,
 linear in how deep into the turn it already is. This follows from the required per-request replay;
-speculative draft verification can observe up to `kMaxGeneratedTokensPerStep` tokens for one request
-in a single step, and a guidance fast-forward step its sampled token plus every forced token, rather
-than the ordinary path's one, but this does not change the bound above: it is already stated in
-terms of the replayed turn depth (the checkpoint the step began at), not the number of tokens
-observed within the failing step itself. This repository does not include
+speculative draft verification can observe up to `kMaxGeneratedTokensPerStep` tokens for one
+request in a single step rather than the ordinary path's one, but this does not change the bound
+above: it is already stated in terms of the replayed turn depth (the checkpoint the step began at),
+not the number of tokens observed within the failing step itself. This repository does not include
 a replay benchmark or publish a measured per-token constant. A Request many thousands of tokens
 into a long turn pays a proportionally larger replay on every retryable abort that touches it, and
 a batch with several such requests pays that cost once per request, every time. No batching or
@@ -2077,8 +2058,6 @@ from taking the capacity needed to finish an admitted partial prefill.
 ### Decode
 
 An active request normally contributes one token: the token sampled by its previous committed step.
-After a guidance fast-forward step it instead contributes the sampled token and its forced tokens,
-up to one chunk per step (see [Guidance fast-forward](#guidance-fast-forward)).
 
 ### Mixed batch
 
@@ -2116,13 +2095,11 @@ A dynamic step is graph-capture eligible only when every selected request:
 
 - Is past prefill.
 - Contributes the same number of tokens as every other request in the step.
-- Contributes one token plus its drafts, rather than several unread committed tokens.
 
-Those conditions are what a single captured graph can describe: one token per request for plain
+That second condition is what a single captured graph can describe: one token per request for plain
 decode, or `1 + drafts` for a speculative verify step whose requests all carry the same draft width.
-A step that mixes widths runs eagerly, and so does a step in which a row reads several unread
-committed tokens, such as guidance fast-forward tokens: it selects one logits row per request, where
-a verify step of the same width selects one per token.
+A step that mixes widths runs eagerly, as does one in which a row reads several guidance
+fast-forward tokens: it needs one logits row per request, not one per token.
 
 ### Graph identity
 
