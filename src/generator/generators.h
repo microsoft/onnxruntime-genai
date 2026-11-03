@@ -191,6 +191,7 @@ struct Generator : LeakChecked<Generator> {
   DeviceSpan<int32_t> AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids);
   void ComputeLogits(DeviceSpan<int32_t> next_tokens);
   void RunGeneratedToken();
+  void ThrowIfAppendExceedsMaxLength(size_t input_ids_count);
   Action last_action_{Action::standard};
 
   // Pre-computed per-token decisions: avoid repeated checks each token
