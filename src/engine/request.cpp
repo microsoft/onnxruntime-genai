@@ -1147,6 +1147,9 @@ void Request::CommitStep(const RequestStepPlan& plan,
 void Request::StageVisibleTokens(RequestStepResult& result,
                                  size_t committed_count,
                                  std::optional<int32_t> sampled_token) const {
+  result.tokens_appended = committed_count + static_cast<size_t>(sampled_token.has_value());
+  result.candidates_consumed = result.tokens_appended +
+                               static_cast<size_t>(result.finish_reason == GenerationFinishReason::EosToken);
   if (committed_count + (sampled_token ? 1u : 0u) > result.visible_tokens.size()) {
     throw std::logic_error(
         "A single engine step produced more visible tokens than it can report.");
@@ -1385,6 +1388,78 @@ RequestStepResult Request::CompleteGeneration() {
       finish_reason_,
   };
   StageVisibleTokens(result, new_token_count, std::nullopt);
+  return result;
+}
+
+RequestStepResult Request::CommitExternalTokens(std::span<const int32_t> tokens) {
+  if (tokens.empty() || tokens.size() > kMaxGeneratedTokensPerStep) {
+    throw std::logic_error("An executor must commit between one and the per-step maximum of tokens.");
+  }
+  if (!IsExecuting(status_)) {
+    throw std::logic_error("Tokens can only be committed to an active request.");
+  }
+  // Everything before this step has been processed by the model, exactly as for sampled steps.
+  processed_sequence_length_ = CurrentSequenceLength();
+  needs_replay_after_rewind_ = false;
+
+  size_t appended_count = 0;
+  size_t consumed_count = 0;
+  int32_t last_token = 0;
+  GenerationFinishReason finish_reason = GenerationFinishReason::None;
+  int32_t matched_stop_string_index = -1;
+  for (const int32_t token : tokens) {
+    ++consumed_count;
+    last_token = token;
+    const int64_t sequence_length_before = CurrentSequenceLength();
+    search_->CommitToken(token);
+    const bool appended = CurrentSequenceLength() > sequence_length_before;
+    if (appended) {
+      tokens_host_.push_back(token);
+      ++turn_generated_tokens_;
+      ++appended_count;
+      if (stop_controller_) {
+        if (const auto& match = stop_controller_->ObserveToken(token)) {
+          finish_reason = GenerationFinishReason::StopString;
+          matched_stop_string_index = static_cast<int32_t>(match->index);
+          break;
+        }
+      }
+    }
+    const bool search_done = search_->IsDone();
+    const bool turn_limit_reached =
+        turn_policy_.max_generated_tokens &&
+        turn_generated_tokens_ >= *turn_policy_.max_generated_tokens;
+    const bool context_limit_reached =
+        static_cast<size_t>(CurrentSequenceLength()) >= max_session_tokens_;
+    if (search_done && contains(params_->config.model.eos_token_id, token)) {
+      finish_reason = GenerationFinishReason::EosToken;
+    } else if (turn_limit_reached) {
+      finish_reason = GenerationFinishReason::TurnLimit;
+    } else if (context_limit_reached || search_done) {
+      finish_reason = GenerationFinishReason::ContextLimit;
+    }
+    if (finish_reason != GenerationFinishReason::None) {
+      break;
+    }
+  }
+
+  const bool done = finish_reason != GenerationFinishReason::None;
+  if (done) {
+    status_ = RequestStatus::TurnComplete;
+    finish_reason_ = finish_reason;
+    matched_stop_string_index_ = matched_stop_string_index;
+    ReleaseTurnResources();
+  }
+  RequestStepResult result{
+      last_token,
+      appended_count != 0,
+      done,
+      finish_reason,
+      matched_stop_string_index,
+  };
+  StageVisibleTokens(result, appended_count, std::nullopt);
+  result.candidates_consumed = consumed_count;
+  result.tokens_appended = appended_count;
   return result;
 }
 
