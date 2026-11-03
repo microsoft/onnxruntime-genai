@@ -137,6 +137,33 @@ TEST_F(GuidanceFastForwardTest, ForcedTokensFollowTheSampledTokenAndReachTheMode
   EXPECT_TRUE(ValidateRequestInvariants(request->Snapshot()).empty());
 }
 
+TEST_F(GuidanceFastForwardTest, ForcedSpanLongerThanADraftStepIsEmittedAndReadInOneStep) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
+  auto request = CreateEngineRequest(engine.engine);
+  request->BeginTurn(Prompt());
+  const std::vector<int32_t> forced{12, 13, 14, 15, 16, 17, 18, 19, 20};
+  InstallForcingGrammar(*request, /*trigger=*/11, forced);
+
+  // Ten events from one step, delivered through a smaller caller buffer without running another
+  // step.
+  std::array<EngineEvent, 4> storage;
+  std::vector<int32_t> tokens;
+  while (tokens.size() < forced.size() + 1) {
+    const size_t events = engine.engine->Run(storage);
+    ASSERT_NE(events, 0u);
+    const auto drained = EventTokens(std::span{storage}.first(events));
+    tokens.insert(tokens.end(), drained.begin(), drained.end());
+    ASSERT_EQ(engine.executor->decode_calls, 1);
+  }
+  EXPECT_EQ(tokens, Concat({11}, forced));
+
+  engine.executor->SetForcedToken(EosToken(*model_));
+  ASSERT_EQ(engine.engine->Run(storage), 1u);
+  EXPECT_EQ(storage[0].finish_reason, GenerationFinishReason::EosToken);
+  EXPECT_EQ(engine.executor->decoded_token_counts.back(), forced.size() + 1);
+  EXPECT_TRUE(ValidateRequestInvariants(request->Snapshot()).empty());
+}
+
 TEST_F(GuidanceFastForwardTest, StepBudgetSplitsForcedTokensAndSamplesOnlyAfterTheLastChunk) {
   model_->config_->engine.dynamic_batching->max_scheduled_tokens = 2;
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);

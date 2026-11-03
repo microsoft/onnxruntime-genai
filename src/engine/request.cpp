@@ -1042,7 +1042,7 @@ RequestStepResult Request::StageDraftCompletionForTransaction() {
       finish_reason,
       matched_stop_string_index,
   };
-  StageVisibleTokens(result, accepted_draft_count_, std::nullopt);
+  StageVisibleTokens(result, accepted_draft_count_, 0);
   return result;
 }
 
@@ -1150,34 +1150,21 @@ void Request::CommitStep(const RequestStepPlan& plan,
   draft_verification_.Reset();
 }
 
-// Records the tokens this step makes externally visible, in sequence order. Accepted drafts are
-// already in tokens_host_; a freshly sampled token and the grammar-forced tokens that follow it are
-// only appended by CommitStep.
+// Counts the tokens this step makes externally visible. Accepted drafts are already in tokens_host_;
+// a freshly sampled token and the grammar-forced tokens that follow it are only appended by
+// CommitStep, so all of them are the mirror's tail once the step commits.
 void Request::StageVisibleTokens(RequestStepResult& result,
                                  size_t committed_count,
-                                 std::optional<int32_t> sampled_token,
-                                 std::span<const int32_t> forced_tokens) const {
-  result.tokens_appended = committed_count + static_cast<size_t>(sampled_token.has_value()) + forced_tokens.size();
-  result.candidates_consumed = result.tokens_appended +
-                               static_cast<size_t>(result.finish_reason == GenerationFinishReason::EosToken);
-  if (committed_count + (sampled_token ? 1u : 0u) + forced_tokens.size() >
-      result.visible_tokens.size()) {
-    throw std::logic_error(
-        "A single engine step produced more visible tokens than it can report.");
-  }
+                                 size_t appended_count) const {
   if (committed_count > tokens_host_.size()) {
     throw std::logic_error(
         "The host token mirror is missing tokens this step committed.");
   }
-  const auto committed = std::span<const int32_t>{tokens_host_}.last(committed_count);
-  std::copy(committed.begin(), committed.end(), result.visible_tokens.begin());
-  result.visible_token_count = committed.size();
-  if (sampled_token) {
-    result.visible_tokens[result.visible_token_count++] = *sampled_token;
-  }
-  std::copy(forced_tokens.begin(), forced_tokens.end(),
-            result.visible_tokens.begin() + static_cast<ptrdiff_t>(result.visible_token_count));
-  result.visible_token_count += forced_tokens.size();
+  result.visible_token_count = committed_count + appended_count;
+  result.tokens_appended = result.visible_token_count;
+  result.candidates_consumed =
+      result.tokens_appended +
+      static_cast<size_t>(result.finish_reason == GenerationFinishReason::EosToken);
 }
 
 void Request::ApplyLogitsProcessors(DeviceSpan<float> logits,
@@ -1264,10 +1251,8 @@ RequestStepResult Request::StageGeneration(int64_t sequence_length_before) {
   };
   CommitGuidanceToken(result);
   StageForcedTokens(result);
-  StageVisibleTokens(
-      result, accepted_draft_count_,
-      token_appended ? std::optional<int32_t>{token} : std::nullopt,
-      staged_forced_tokens_);
+  StageVisibleTokens(result, accepted_draft_count_,
+                     static_cast<size_t>(token_appended) + staged_forced_tokens_.size());
   return result;
 }
 
@@ -1460,7 +1445,7 @@ RequestStepResult Request::CompleteGeneration() {
       Generators::IsTurnComplete(status_),
       finish_reason_,
   };
-  StageVisibleTokens(result, new_token_count, std::nullopt);
+  StageVisibleTokens(result, new_token_count, 0);
   return result;
 }
 
@@ -1530,7 +1515,7 @@ RequestStepResult Request::CommitExternalTokens(std::span<const int32_t> tokens)
       finish_reason,
       matched_stop_string_index,
   };
-  StageVisibleTokens(result, appended_count, std::nullopt);
+  StageVisibleTokens(result, appended_count, 0);
   result.candidates_consumed = consumed_count;
   result.tokens_appended = appended_count;
   return result;

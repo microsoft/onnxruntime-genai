@@ -3,7 +3,6 @@
 
 #pragma once
 
-#include <array>
 #include <limits>
 #include <string>
 #include <vector>
@@ -88,7 +87,8 @@ struct RequestStepResult {
   // Caller-facing index into the turn's stop-string list, or -1 unless this step's committing
   // token completed a match (finish_reason == StopString).
   int32_t matched_stop_string_index{-1};
-  std::array<int32_t, kMaxGeneratedTokensPerStep> visible_tokens{};
+  // Tokens this step makes visible: the last this many tokens of the Request's host mirror once
+  // the step commits.
   size_t visible_token_count{};
   // Internal commit feedback, independent of stop buffering and caller event-drain rate.
   size_t candidates_consumed{};
@@ -746,8 +746,7 @@ struct Request : std::enable_shared_from_this<Request>,
   void SelectNextToken();
   void StageVisibleTokens(RequestStepResult& result,
                           size_t committed_count,
-                          std::optional<int32_t> sampled_token,
-                          std::span<const int32_t> forced_tokens = {}) const;
+                          size_t appended_count) const;
   RequestStepResult StageGeneration(int64_t sequence_length_before);
   void CommitGuidanceToken(const RequestStepResult& result);
   void StageForcedTokens(RequestStepResult& result);
