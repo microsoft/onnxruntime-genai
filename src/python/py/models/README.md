@@ -97,7 +97,7 @@ switch boundary. The runtime keeps the input constant across a chunked prefill
 and replays cached tokens when the sequence switches factors, including after
 a rewind. These exports require a runtime supporting this contract; cache replay
 currently requires a single Generator sequence without beam search. Engine and
-speculative decoding reject this contract. KV-cache calibration reads the
+speculative decoding (including n-gram decoding) reject this contract. KV-cache calibration reads the
 metadata and supplies each sample's context length. Paged, multimodal,
 and in-kernel cache-selection exports retain their existing interfaces.
 

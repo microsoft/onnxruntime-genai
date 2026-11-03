@@ -679,6 +679,8 @@ void Generator::LogGeneratorCreate(const GeneratorParams& params) {
 void Generator::InitializePhi3RopeThreshold(const GeneratorParams& params) {
   const auto* decoder = dynamic_cast<const DecoderOnly_Model*>(model_.get());
   if (decoder && !decoder->rope_context_input_.empty()) {
+    if (params.speculative.ngram_size > 0)
+      throw std::runtime_error("N-gram decoding does not support the explicit LongRoPE context contract");
     if (params.BatchBeamSize() != 1)
       throw std::runtime_error("LongRoPE context selection currently requires batch_size=1 and num_beams=1");
     has_explicit_rope_context_ = true;

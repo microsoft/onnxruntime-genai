@@ -93,6 +93,25 @@ TEST_F(LongRopeContextTest, SpeculativeDecodingRejectsContextContractInEitherMod
   }
 }
 
+TEST_F(LongRopeContextTest, NGramDecodingRejectsContextContractAtConstruction) {
+  for (bool configure_model : {false, true}) {
+    auto config = OgaConfig::Create(MODEL_PATH "longrope-context");
+    if (configure_model)
+      config->Overlay(R"({"speculative":{"ngram_size":2}})");
+    model = OgaModel::Create(*config);
+    auto params = OgaGeneratorParams::Create(*model);
+    if (!configure_model)
+      params->SetSpeculativeNumber("ngram_size", 2);
+    try {
+      auto generator = OgaGenerator::Create(*model, *params);
+      FAIL() << "N-gram decoding accepted the unsupported LongRoPE context contract";
+    } catch (const std::runtime_error& error) {
+      EXPECT_NE(std::string(error.what()).find("N-gram decoding does not support the explicit LongRoPE context contract"),
+                std::string::npos);
+    }
+  }
+}
+
 TEST_F(LongRopeContextTest, AppendJumpingOverBoundaryRebuildsCachedPrefix) {
   auto generator = CreateGenerator();
   generator->AppendTokens(std::vector<int32_t>(7, 1));
