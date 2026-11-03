@@ -76,7 +76,7 @@ void ParallelTransformStridedRows(ThreadPool* thread_pool, const Source* source,
               std::min(end - offset, copy_row_elements - offset_in_row);
           std::transform(source + row * source_row_elements + offset_in_row,
                          source + row * source_row_elements + offset_in_row + count,
-                         destination + offset,
+                         destination + row * destination_row_elements + offset_in_row,
                          [](Source value) { return static_cast<Destination>(value); });
           offset += count;
         }
