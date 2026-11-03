@@ -32,7 +32,6 @@ def create_model(output_dir, declare_context=True):
         helper.make_tensor("cache_axes", TensorProto.INT64, [2], [1, 3]),
         helper.make_tensor("reduce_axes", TensorProto.INT64, [3], [1, 2, 3]),
         helper.make_tensor("logits_axis", TensorProto.INT64, [1], [2]),
-        helper.make_tensor("batch_axis", TensorProto.INT64, [1], [1]),
         helper.make_tensor("sequence_axis", TensorProto.INT64, [], [1]),
     ]
     nodes = [
@@ -43,8 +42,8 @@ def create_model(output_dir, declare_context=True):
         helper.make_node("Unsqueeze", ["scaled_tokens", "cache_axes"], ["new_keys"]),
         helper.make_node("Concat", ["past_key_values.0.key", "new_keys"], ["present.0.key"], axis=2),
         helper.make_node("Concat", ["past_key_values.0.value", "new_keys"], ["present.0.value"], axis=2),
-        helper.make_node("ReduceSum", ["past_key_values.0.key", "reduce_axes"], ["past_sum"], keepdims=0),
-        helper.make_node("Unsqueeze", ["past_sum", "batch_axis"], ["past_sum_column"]),
+        helper.make_node("ReduceSum", ["past_key_values.0.key", "reduce_axes"], ["past_sum"], keepdims=1),
+        helper.make_node("Squeeze", ["past_sum", "cache_axes"], ["past_sum_column"]),
         helper.make_node("CumSum", ["scaled_tokens", "sequence_axis"], ["token_sums"]),
         helper.make_node("Add", ["past_sum_column", "token_sums"], ["sum"]),
         helper.make_node("Neg", ["sum"], ["negative"]),
