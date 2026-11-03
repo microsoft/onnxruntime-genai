@@ -66,6 +66,7 @@ def _model(model_type, extra_options, use_paged_attention=True):
         "use_packed_matmul": False,
         "use_matmul_in_attn": False,
         "use_rope_in_attn": False,
+        "rope": False,
         "q_path": "",
         "k_path": "",
         "v_path": "",
@@ -166,6 +167,54 @@ def test_qwen35_fused_qkv_splits_gated_q_before_the_q_gate_split():
 
 SEPARATE = ["q_proj", "k_proj", "v_proj"]
 PACKED = ["qkv_proj"]
+
+
+@pytest.mark.parametrize("head_size", [8, 24])
+@pytest.mark.parametrize("bias", [False, True])
+def test_cpu_packed_projection_splits_before_standalone_rope(head_size, bias):
+    model = _model(Model, {}, use_paged_attention=False)
+    model.ep = "cpu"
+    model.io_dtype = ir.DataType.FLOAT
+    model.head_size = head_size
+    model.input_names = {"position_ids": "position_ids"}
+    model.attention_attrs["rope"] = True
+    model.make_attention_init(config=None)
+    model.rope_attrs["op_type"] = "RotaryEmbedding"
+    attention = SimpleNamespace(
+        q_proj=torch.nn.Linear(HIDDEN, HEADS * head_size, bias=bias),
+        k_proj=torch.nn.Linear(HIDDEN, KV_HEADS * head_size, bias=bias),
+        v_proj=torch.nn.Linear(HIDDEN, KV_HEADS * head_size, bias=bias),
+    )
+    splits, rotary = [], []
+    model.make_packed_matmul = lambda q, k, v, name, root: name
+    model.make_packed_add = lambda *args, **kwargs: None
+    model.make_split = lambda name, inputs, outputs, dtypes, shapes, axis: splits.append((inputs, outputs))
+    model.make_rotary_embedding_op = lambda name, root_input, **kwargs: rotary.append((name, root_input))
+
+    model.make_attention_input_proj(3, attention, "root")
+    model.make_attention_qk_rope(3)
+
+    [(inputs, outputs)] = splits
+    assert inputs[0].endswith("/qkv_proj/Add/output_0" if bias else "/qkv_proj/MatMul/output_0")
+    assert inputs[1] == f"/model/constants/INT64/[{HEADS * head_size}, {KV_HEADS * head_size}, {KV_HEADS * head_size}]"
+    assert [root for _, root in rotary] == outputs[:2]
+    assert model.attention_attrs["v_path"] == outputs[2]
+
+
+@pytest.mark.parametrize("rope,fused", [(False, False), (True, True)])
+def test_packed_projection_stays_packed_without_standalone_rope(rope, fused):
+    model = _model(Model, {})
+    model.attention_attrs.update(use_packed_matmul=True, rope=rope, use_rope_in_attn=fused)
+    model.make_packed_matmul = lambda q, k, v, name, root: name
+    model.make_split = lambda *args, **kwargs: pytest.fail("packed QKV should not be split")
+    attention = SimpleNamespace(
+        q_proj=torch.nn.Linear(HIDDEN, Q_SIZE, bias=False),
+        k_proj=torch.nn.Linear(HIDDEN, KV_SIZE, bias=False),
+        v_proj=torch.nn.Linear(HIDDEN, KV_SIZE, bias=False),
+    )
+
+    model.make_attention_input_proj(3, attention, "root")
+    assert model.attention_attrs["q_path"].endswith("/qkv_proj/MatMul/output_0")
 
 
 def _float_attention():

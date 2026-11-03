@@ -5300,13 +5300,14 @@ class Model:
                     self.make_add_bias(attention.v_proj.bias, v_add_name, root_input=self.attention_attrs["v_path"])
                     self.attention_attrs["v_path"] = f"{v_add_name}/output_0"
 
-        # When q_norm/k_norm are present, the packed-QKV path inside GQA cannot be used
-        # (norm runs per-head before attention). Split here so downstream sees Q/K/V separately.
+        # Per-head Q/K norm and standalone RoPE require separate Q/K/V inputs.
         # Placed after the (optional) packed Add so packed bias fusion is preserved.
         if (
             pack_qkv
-            and self.attention_attrs["q_norm"]
-            and self.attention_attrs["k_norm"]
+            and (
+                (self.attention_attrs["q_norm"] and self.attention_attrs["k_norm"])
+                or (self.attention_attrs["rope"] and not self.attention_attrs["use_rope_in_attn"])
+            )
         ):
             split_name = f"/model/layers.{layer_id}/attn/qkv_proj/Split"
             split_outputs = [f"{split_name}/output_{i}" for i in range(3)]
