@@ -504,12 +504,14 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
       // Trim in float32 (source is always float32 from the preprocessor)
       auto trimmed_fp32 = OrtValue::CreateTensor<float>(allocator, trimmed_shape);
       float* dst = trimmed_fp32->GetTensorMutableData<float>();
-      if (target_patches > num_padded_patches) {
-        std::fill_n(dst, batch * target_patches * patch_dim, 0.0f);
-      }
       const float* src = pv_data;
       const size_t src_row = static_cast<size_t>(num_padded_patches * patch_dim);
       const size_t dst_row = static_cast<size_t>(target_patches * patch_dim);
+      if (target_patches > num_padded_patches) {
+        for (int64_t row = 0; row < batch; ++row) {
+          std::fill_n(dst + row * dst_row + src_row, dst_row - src_row, 0.0f);
+        }
+      }
       ParallelCopyStridedRows(thread_pool_, src, src_row, dst, dst_row,
                               static_cast<size_t>(batch), sizeof(float));
 
@@ -559,7 +561,9 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
       if (pixel_position_ids_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
         auto* dst = output_pos->GetTensorMutableData<int32_t>();
         if (output_patches > num_padded_pos) {
-          std::fill_n(dst, pos_batch * output_patches * pos_last_dim, int32_t{-1});
+          for (int64_t row = 0; row < pos_batch; ++row) {
+            std::fill_n(dst + row * dst_stride + src_stride, dst_stride - src_stride, int32_t{-1});
+          }
         }
         ParallelTransformStridedRows(
             thread_pool_, src, src_stride, dst, dst_stride,
@@ -567,7 +571,9 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
       } else if (pixel_position_ids_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
         auto* dst = output_pos->GetTensorMutableData<int64_t>();
         if (output_patches > num_padded_pos) {
-          std::fill_n(dst, pos_batch * output_patches * pos_last_dim, int64_t{-1});
+          for (int64_t row = 0; row < pos_batch; ++row) {
+            std::fill_n(dst + row * dst_stride + src_stride, dst_stride - src_stride, int64_t{-1});
+          }
         }
         ParallelCopyStridedRows(
             thread_pool_, src, src_stride, dst, dst_stride,
