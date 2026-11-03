@@ -614,6 +614,9 @@ void Qwen2_5_VL_PipelineState::RunSingleSessionVision(const std::vector<ExtraInp
       if (num_images == 1) {
         owner = std::move(output);
       } else {
+        if (image == 0 && layout) {
+          combined.reserve(VisionOutputBytes(layout->total_tokens, hidden_size, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) / sizeof(float));
+        }
         output = VisionOutputToFloat(std::move(output));
         const float* data = output->GetTensorData<float>();
         const size_t elements = VisionOutputBytes(rows, hidden_size, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) / sizeof(float);
