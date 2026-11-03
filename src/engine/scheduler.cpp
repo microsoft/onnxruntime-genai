@@ -225,10 +225,11 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     candidate.entry.request_id = request.get();
     candidate.entry.sequence_length_before = snapshot.current_sequence_length;
     candidate.entry.prefix_match = std::move(prefix_match);
-    // Drafts extend a decode step, which by definition ends at the sequence tail. A prefill chunk
-    // has committed tokens of its own left to push through, so it can never verify one.
+    // Drafts extend a decode step, which by definition ends at the sequence tail. A prefill chunk,
+    // or a decode row the model has not yet read every committed token of, has committed tokens of
+    // its own left to push through, so it can never verify one.
     candidate.entry.draft_token_count =
-        snapshot.is_prefill
+        snapshot.is_prefill || remaining_token_count > 1
             ? 0
             : std::min(request->PendingDraftTokenCount(), max_draft_token_count);
     candidate.entry.unprocessed_token_count = 1 + candidate.entry.draft_token_count;
@@ -239,15 +240,15 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
         SlotsForWholeSequence(snapshot.current_sequence_length);
     candidate.entry.is_prefill = snapshot.is_prefill;
     candidate.entry.newly_admitted = newly_admitted;
-    auto prefill_token_cap = request->PrefillChunkSize();
+    auto chunk_token_cap = request->PrefillChunkSize();
     if (cache_query_token_cap != 0 &&
-        (prefill_token_cap.value_or(0) == 0 || *prefill_token_cap > cache_query_token_cap)) {
-      prefill_token_cap = cache_query_token_cap;
+        (chunk_token_cap.value_or(0) == 0 || *chunk_token_cap > cache_query_token_cap)) {
+      chunk_token_cap = cache_query_token_cap;
     }
     candidate.budget = DecodeFirstBudgetCandidate{
         snapshot.is_prefill,
         static_cast<size_t>(remaining_token_count),
-        prefill_token_cap,
+        chunk_token_cap,
         candidate.entry.draft_token_count,
     };
     candidate.processed_sequence_length =
@@ -349,7 +350,8 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     auto& entry = plan.requests[index];
     entry.scheduling_order = index;
     entry.unprocessed_token_count = token_counts[index];
-    entry.draft_token_count = entry.is_prefill ? 0 : token_counts[index] - 1;
+    entry.draft_token_count =
+        std::min(token_counts[index] - 1, selected_candidates[index].decode_extra_token_count);
     entry.target_cache_slots = RequiredSlots(
         selected_processed_lengths[index],
         entry.unprocessed_token_count);

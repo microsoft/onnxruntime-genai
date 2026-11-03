@@ -61,6 +61,19 @@ TEST(DecodeFirstSchedulerPolicyTest, SpeculativeRowsConsumeBudgetAfterEveryReque
             (std::vector<size_t>{4, 3, 1}));
 }
 
+TEST(DecodeFirstSchedulerPolicyTest, UnreadCommittedTokensConsumeBudgetBeforePrefillsWithinTheChunkCap) {
+  const std::array selected{
+      DecodeFirstBudgetCandidate{false, 4, std::nullopt},
+      DecodeFirstBudgetCandidate{false, 6, 2},
+      DecodeFirstBudgetCandidate{true, 8, std::nullopt},
+  };
+
+  EXPECT_EQ(AllocateDecodeFirstTokenBudget(selected, 4),
+            (std::vector<size_t>{2, 1, 1}));
+  EXPECT_EQ(AllocateDecodeFirstTokenBudget(selected, 9),
+            (std::vector<size_t>{4, 2, 3}));
+}
+
 TEST(DecodeFirstSchedulerPolicyTest, PrefillsRespectPendingCapAndGlobalBudget) {
   const std::array selected{
       DecodeFirstBudgetCandidate{true, 2, std::nullopt},

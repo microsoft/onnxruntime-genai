@@ -8,6 +8,16 @@
 
 namespace Generators {
 
+namespace {
+
+size_t ChunkLimit(const DecodeFirstBudgetCandidate& candidate) {
+  if (candidate.chunk_token_cap.value_or(0) == 0)
+    return candidate.pending_token_count;
+  return std::min(candidate.pending_token_count, *candidate.chunk_token_cap);
+}
+
+}  // namespace
+
 std::vector<size_t> DecodeFirstCandidateOrder(
     std::span<const DecodeFirstBudgetCandidate> candidates) {
   std::vector<size_t> order;
@@ -48,8 +58,11 @@ std::vector<size_t> AllocateDecodeFirstTokenBudget(
     if (candidate.is_prefill)
       continue;
 
+    // Beyond its next token, a decode row reads its drafts or, when the model has not read every
+    // token it committed, as many of those as one chunk allows. A row never has both.
     const size_t additional_tokens =
-        std::min(candidate.decode_extra_token_count, remaining_budget);
+        std::min(candidate.decode_extra_token_count + ChunkLimit(candidate) - 1,
+                 remaining_budget);
     token_counts[i] += additional_tokens;
     remaining_budget -= additional_tokens;
   }
@@ -58,11 +71,8 @@ std::vector<size_t> AllocateDecodeFirstTokenBudget(
     if (!candidate.is_prefill)
       continue;
 
-    size_t prefill_limit = candidate.pending_token_count;
-    if (candidate.prefill_token_cap.value_or(0) != 0)
-      prefill_limit = std::min(prefill_limit, *candidate.prefill_token_cap);
     const size_t additional_tokens =
-        std::min(prefill_limit - 1, remaining_budget);
+        std::min(ChunkLimit(candidate) - 1, remaining_budget);
     token_counts[i] += additional_tokens;
     remaining_budget -= additional_tokens;
   }

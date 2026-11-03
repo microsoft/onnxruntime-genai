@@ -14,7 +14,9 @@ namespace Generators {
 struct DecodeFirstBudgetCandidate {
   bool is_prefill{};
   size_t pending_token_count{};
-  std::optional<size_t> prefill_token_cap;
+  // Bounds the tokens one step reads from a prefill, or from a decode row whose committed tokens
+  // the model has not read yet.
+  std::optional<size_t> chunk_token_cap;
   size_t decode_extra_token_count{};
 };
 
