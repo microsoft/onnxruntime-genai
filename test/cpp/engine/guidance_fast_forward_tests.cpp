@@ -138,6 +138,32 @@ TEST_F(GuidanceFastForwardTest, ForcedTokensFollowTheSampledTokenAndReachTheMode
   EXPECT_TRUE(ValidateRequestInvariants(request->Snapshot()).empty());
 }
 
+TEST_F(GuidanceFastForwardTest, TurnLimitCutsTheForcedSpanAndEndsTheTurn) {
+  // A limit of 1 is reached by the sampled token itself, so no forced token may follow it.
+  constexpr int32_t kEmitted[] = {11, 12};
+  for (const size_t limit : {size_t{1}, size_t{2}}) {
+    SCOPED_TRACE(::testing::Message() << "limit " << limit);
+    auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
+    auto request = CreateEngineRequest(engine.engine);
+    TurnOptions options;
+    options.max_generated_tokens = limit;
+    request->BeginTurn(Prompt(), options);
+    InstallForcingGrammar(*request, /*trigger=*/11, {12, 13, 14});
+
+    std::array<EngineEvent, 8> storage;
+    const size_t events = engine.engine->Run(storage);
+    const std::vector<int32_t> expected(std::begin(kEmitted), std::begin(kEmitted) + limit);
+    ASSERT_EQ(events, limit);
+    EXPECT_EQ(EventTokens(std::span{storage}.first(events)), expected);
+    EXPECT_NE(storage[limit - 1].flags & EngineEventFlagTurnFinished, 0u);
+    EXPECT_EQ(storage[limit - 1].finish_reason, GenerationFinishReason::TurnLimit);
+    EXPECT_EQ(request->TurnGeneratedTokens(), limit);
+    const auto tokens = request->TokensCpu();
+    EXPECT_EQ(std::vector<int32_t>(tokens.begin(), tokens.end()), Concat(Prompt(), expected));
+    EXPECT_TRUE(ValidateRequestInvariants(request->Snapshot()).empty());
+  }
+}
+
 TEST_F(GuidanceFastForwardTest, ContextLimitCutsTheForcedSpanAndEndsTheTurn) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
   auto request = CreateEngineRequest(engine.engine, Prompt().size() + 3);
