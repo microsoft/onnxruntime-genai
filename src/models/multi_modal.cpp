@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <future>
 #include <numeric>
+#include <utility>
 
 namespace Generators {
 
