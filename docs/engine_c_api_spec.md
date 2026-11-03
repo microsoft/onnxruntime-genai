@@ -261,11 +261,11 @@ draft-eligible again. Guidance and stop strings can be enabled together.
 
 `OgaTurnOptionsSetGuidanceFastForward` lets whole-turn guidance append the tokens the grammar forces
 after a sampled token instead of sampling them one decode step at a time. The forced tokens become
-visible in the same step and the model reads them together on a later step. Fast-forward is off by
-default: the forced text is the grammar's, but its token IDs follow the grammar's tokenization, so
-token IDs and later output can differ from a turn without it. Admission rejects it without
-whole-turn guidance (including with delimited guidance) or on an Engine without dynamic batching.
-`OgaTurnOptionsClearGuidance` and `OgaTurnOptionsReset` turn it off.
+visible in the same step, and the model reads them on later steps, up to one chunk per step.
+Fast-forward is off by default: the forced text is the grammar's, but its token IDs follow the
+grammar's tokenization, so token IDs and later output can differ from a turn without it. Admission
+rejects it without whole-turn guidance (including with delimited guidance) or on an Engine without
+dynamic batching. `OgaTurnOptionsClearGuidance` and `OgaTurnOptionsReset` turn it off.
 
 `OgaTurnOptionsSetDelimitedGuidance` instead copies a Lark grammar for the body after a committed
 opening token and before a closing token. Admission checks that the distinct marker IDs are
@@ -578,8 +578,8 @@ destruction are serialized; getters may read immutable views but must not race a
 Request creation takes no generation parameters. The Engine derives each Request's private search
 configuration from its own model and forces the single-sequence invariants the Engine depends on:
 `batch_size` and `num_beams` are one, the search length limit is the Request's `max_session_tokens`,
-and guidance is off (guidance, including fast-forward, is per Turn). Nothing about
-sampling, guidance, or stop strings is fixed at creation.
+and guidance is off (guidance, including fast-forward, is per Turn). Nothing about sampling,
+guidance, or stop strings is fixed at creation.
 
 Creation validates the model configuration it is about to derive from, before minting a Request:
 
@@ -972,7 +972,7 @@ comparison. No separate Request ID or lookup API is planned.
 - `TurnOptions` mirrors the C setters: `set_max_generated_tokens`, `set_min_generated_tokens`,
   `set_do_sample`, `set_temperature`, `set_top_p`, `set_top_k`, `set_repetition_penalty`,
   `set_no_repeat_ngram_size`, `set_seed`, `clear_seed`, `set_stop_strings`, `set_guidance`,
-  `clear_guidance`, and `reset`.
+  `set_guidance_fast_forward`, `clear_guidance`, and `reset`.
 - `TurnOptions.set_stop_strings(strings)` converts a Python list of `str` to a temporary
   `OgaStringArray` and rejects (raises `ValueError`) any entry containing an embedded NUL byte
   before conversion, since the C string-array surface cannot represent bytes after one. An empty
