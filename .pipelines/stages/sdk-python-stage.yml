@@ -195,6 +195,7 @@ stages:
           ep: winml
           build_config: ${{ parameters.build_config }}
           winml_sdk_version: ${{ parameters.winml_sdk_version }}
+          python_dependency_version: ${{ parameters.ort_dependency_version }}
           core_artifact: 'core-win-x64-winml-cmake-pkg'
           python_versions: ${{ parameters.python_versions }}
 
@@ -235,5 +236,6 @@ stages:
           ep: winml
           build_config: ${{ parameters.build_config }}
           winml_sdk_version: ${{ parameters.winml_sdk_version }}
+          python_dependency_version: ${{ parameters.ort_dependency_version }}
           core_artifact: 'core-win-arm64-winml-cmake-pkg'
           python_versions: ${{ parameters.python_versions }}
