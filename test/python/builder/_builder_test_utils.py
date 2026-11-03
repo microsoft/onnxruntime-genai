@@ -115,8 +115,9 @@ def check_node_shapes(model):
 
     A whole-graph onnx.shape_inference pass stops reporting errors after the first op it does not know, and
     builder graphs use onnxruntime-only ops from the start, so it misses shape errors onnxruntime rejects at load.
-    Unknown ops and Constant nodes (make_constant declares them with shape []) are skipped; a node that reads a
-    Constant is checked together with it.
+    Constant nodes (make_constant declares them with shape []) are skipped; a node that reads a Constant is
+    checked together with it. Any other input without a declared shape is an error. onnx has no schema for
+    onnxruntime-only ops, so their output shapes are not checked.
     """
     import onnx  # noqa: PLC0415
 
@@ -125,9 +126,13 @@ def check_node_shapes(model):
     initializers = {tensor.name: tensor for tensor in graph.initializer}
     constants = {node.output[0]: node for node in graph.node if node.op_type == "Constant"}
     for node in graph.node:
-        inputs = [name for name in node.input if name and name not in initializers and name not in constants]
-        if node.op_type == "Constant" or any(name not in declared for name in inputs):
+        if node.op_type == "Constant":
             continue
+        inputs = [name for name in node.input if name and name not in initializers and name not in constants]
+        undeclared = [
+            name for name in inputs if name not in declared or not declared[name].type.tensor_type.HasField("shape")
+        ]
+        assert not undeclared, f"{node.name} ({node.op_type}) reads inputs with no declared shape: {undeclared}"
         one_node = onnx.helper.make_graph(
             [*(constants[name] for name in node.input if name in constants), node],
             node.name,
