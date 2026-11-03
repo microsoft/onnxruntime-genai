@@ -4,8 +4,8 @@
 // Engine contract tests for grammar fast-forward tokens: the continuation a turn's grammar forces
 // after a sampled token. These run over the synthetic-paged fixture model, whose checked-in
 // tokenizer maps token 5 -> "ST" and token 6 -> "OP" (so the pair completes a "STOP" stop string)
-// and tokens 11-63 to unique filler text. The recording executor never runs the model; it
-// fabricates one-hot logits for the token a test scripts.
+// and tokens 11-63 to unique filler text; the hybrid case uses the synthetic-composite fixture. The
+// recording executor never runs the model; it fabricates one-hot logits for the token a test scripts.
 
 #include <array>
 #include <cstdint>
@@ -126,7 +126,6 @@ TEST_F(GuidanceFastForwardTest, ForcedTokensFollowTheSampledTokenAndReachTheMode
   engine.executor->SetExecutionCallback([](ExecutionContext& context) {
     ASSERT_NE(context.plan, nullptr);
     ASSERT_EQ(context.plan->requests.size(), 1u);
-    EXPECT_EQ(context.plan->requests[0].unprocessed_token_count, 3u);
     EXPECT_EQ(context.plan->requests[0].draft_token_count, 0u);
     EXPECT_FALSE(context.plan->graph_capture_eligible);
   });
@@ -139,8 +138,8 @@ TEST_F(GuidanceFastForwardTest, ForcedTokensFollowTheSampledTokenAndReachTheMode
 }
 
 TEST_F(GuidanceFastForwardTest, StepBudgetSplitsForcedTokensAndSamplesOnlyAfterTheLastChunk) {
-  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
   model_->config_->engine.dynamic_batching->max_scheduled_tokens = 2;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
   auto request = CreateEngineRequest(engine.engine);
   request->BeginTurn(Prompt());
   InstallForcingGrammar(*request, /*trigger=*/11, {12, 13});

@@ -724,8 +724,6 @@ bool PagedCacheManager::IsResident(const std::shared_ptr<Request>& request) cons
 StepPlanningResult PagedCacheManager::PlanStepResources(StepPlan& plan) const {
   plan.fixed_state = {};
   if (fixed_state_pool_) {
-    // A prefill chunk, or a decode row reading several committed tokens, runs a multi-token query
-    // without draft checkpoints.
     const bool has_chunk = std::any_of(
         plan.requests.begin(), plan.requests.end(),
         [](const RequestStepPlan& entry) {
@@ -735,9 +733,10 @@ StepPlanningResult PagedCacheManager::PlanStepResources(StepPlan& plan) const {
         plan.requests.begin(), plan.requests.end(),
         [](const RequestStepPlan& entry) { return entry.draft_token_count != 0; });
     if (has_chunk && has_drafts) {
-      // Packed recurrent operators cannot capture intermediate draft checkpoints while such a chunk
-      // shares the step. Remove those optional rows before paged capacity planning so they cannot
-      // displace a request that the actual mixed step has room to execute.
+      // Packed recurrent operators cannot capture intermediate draft checkpoints while a prefill
+      // chunk or a decode row reading several committed tokens shares the step. Remove those
+      // optional rows before paged capacity planning so they cannot displace a request that the
+      // actual mixed step has room to execute.
       for (auto& entry : plan.requests) {
         entry.unprocessed_token_count -= entry.draft_token_count;
         entry.target_cache_slots -= entry.draft_token_count;

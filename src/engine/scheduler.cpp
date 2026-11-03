@@ -225,9 +225,8 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     candidate.entry.request_id = request.get();
     candidate.entry.sequence_length_before = snapshot.current_sequence_length;
     candidate.entry.prefix_match = std::move(prefix_match);
-    // Drafts extend a decode step, which by definition ends at the sequence tail. A prefill chunk,
-    // or a decode row the model has not yet read every committed token of, has committed tokens of
-    // its own left to push through, so it can never verify one.
+    // Drafts extend a step that ends at the sequence tail. A prefill chunk or a decode row with
+    // unread committed tokens still has its own tokens to push through, so it never verifies drafts.
     candidate.entry.draft_token_count =
         snapshot.is_prefill || remaining_token_count > 1
             ? 0
@@ -357,9 +356,10 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
         entry.unprocessed_token_count);
   }
 
-  // Only drafts push a request's reserved slots past the probe that was just validated: a prefill
-  // chunk reserves its whole sequence either way, and a draft-free decode still takes one slot. So
-  // a plan without drafts needs no second planning pass, and must not pay for one every step.
+  // Only drafts push a request's reserved slots past the probe that was just validated: every
+  // draft-free row, prefill chunk or decode, ends within the whole sequence the probe already
+  // reserved. So a plan without drafts needs no second planning pass, and must not pay for one
+  // every step.
   const bool plans_drafts = std::any_of(
       plan.requests.begin(), plan.requests.end(),
       [](const RequestStepPlan& entry) { return entry.draft_token_count != 0; });
@@ -441,8 +441,8 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     }
     // One captured graph bakes in every tensor shape it was recorded with, so a step qualifies only
     // when each request contributes the same number of tokens. A row reading several committed
-    // tokens selects one logits row where a verify row of the same width selects one per token,
-    // so only single-token and verify rows qualify.
+    // tokens selects one logits row, whereas a verify row of the same width selects one per token;
+    // only single-token and verify rows qualify.
     plan.graph_capture_eligible &=
         !entry.is_prefill && entry.unprocessed_token_count == uniform_token_count &&
         entry.unprocessed_token_count == entry.draft_token_count + 1;
