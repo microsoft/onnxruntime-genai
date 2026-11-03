@@ -138,14 +138,14 @@ TEST_F(GuidanceFastForwardTest, ForcedTokensFollowTheSampledTokenAndReachTheMode
 }
 
 TEST_F(GuidanceFastForwardTest, ForcedSpanLongerThanADraftStepIsEmittedAndReadInOneStep) {
-  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/1, /*forced_token=*/11);
   auto request = CreateEngineRequest(engine.engine);
   request->BeginTurn(Prompt());
   const std::vector<int32_t> forced{12, 13, 14, 15, 16, 17, 18, 19, 20};
   InstallForcingGrammar(*request, /*trigger=*/11, forced);
 
-  // Ten events from one step, delivered through a smaller caller buffer without running another
-  // step.
+  // Ten events from one step, more than the Engine preallocates for a batch of one, delivered
+  // through a smaller caller buffer without running another step.
   std::array<EngineEvent, 4> storage;
   std::vector<int32_t> tokens;
   while (tokens.size() < forced.size() + 1) {
