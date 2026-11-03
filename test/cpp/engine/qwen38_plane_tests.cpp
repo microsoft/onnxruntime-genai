@@ -45,7 +45,8 @@ namespace {
 
 std::filesystem::path MakeScratchDir(const std::string& suffix) {
   const auto dir = std::filesystem::temp_directory_path() / ("genai_qwen38_graph_" + suffix);
-  std::filesystem::remove_all(dir);
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
   std::filesystem::create_directories(dir);
   return dir;
 }
@@ -940,8 +941,16 @@ class Qwen38TestPackage {
   static constexpr size_t kBf16TableBytes = 1000 * 16 * 2;
   static constexpr size_t kInt8TableBytes = 1000 * 16 + 1000 * 4;  // INT8 rows, then one float scale per row
 
+  static int NextPackageId() {
+    static int next_id = 0;
+    return next_id++;
+  }
+
   // `fold` makes it a package of the folded MTP stack (model.qwen38_graph.fold.enabled).
-  explicit Qwen38TestPackage(bool fold = false) : dir_{MakeScratchDir(fold ? "package_support_fold" : "package_support")} {
+  // Each package has its own directory: on Windows the plane library a test loaded from one stays locked, and the next test
+  // could not clear the directory of the same name.
+  explicit Qwen38TestPackage(bool fold = false)
+      : dir_{MakeScratchDir(std::string{fold ? "package_support_fold_" : "package_support_"} + std::to_string(NextPackageId()))} {
     const std::string fold_stack =
         fold ? R"(,"mtp":{"enabled":true},"fold":{"enabled":true,"head_r2":{"filename":"head_r2.onnx"}})" : "";
     WriteFile(dir_ / "genai_config.json",
@@ -4371,7 +4380,13 @@ TEST_F(Qwen38PlaneDflashSelectTest, ReadsTheRowsOfALatticeWhoseOffsetsExceedTheI
   std::vector<int32_t> candidates(static_cast<size_t>(kDrafts) * kTopK);
   for (size_t i = 0; i < candidates.size(); ++i) candidates[i] = static_cast<int32_t>(i);
   const PlaneBuffer candidates_dev = device.Upload(candidates);
-  const PlaneBuffer scores = device.Filled(scores_bytes, 0);
+  PlaneBuffer scores;
+  try {
+    scores = device.Filled(scores_bytes, 0);
+  } catch (const std::exception& e) {
+    if (std::string_view{e.what()}.find("out of memory") == std::string_view::npos) throw;
+    GTEST_SKIP() << "the device cannot hold " << scores_bytes << " bytes of scores";
+  }
   // Every score is zero (each step takes candidate 0 and reads the row of candidate 0) except one in the row of step 6.
   const float peak = 1.0f;
   plane_->Check(plane_->memcpy_h2d(scores.data() + (kLast * kTopK) * kTopK * sizeof(float) + kWinner * sizeof(float), &peak,
