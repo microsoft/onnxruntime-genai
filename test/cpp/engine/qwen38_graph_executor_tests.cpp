@@ -793,6 +793,89 @@ TEST(Qwen38GraphSessionTest, AnOddChunkOfTheOptionsIsRoundedDownToAnEvenOne) {
   EXPECT_EQ(device->CallCount("prefill:3"), 1u);
 }
 
+TEST(Qwen38GraphSessionTest, DrainedLookAheadCycleIsAccountedExactlyOnceInWorkMetrics) {
+  auto device = std::make_shared<ScriptedQwen38Device>();
+  Qwen38GraphSession::Options options;
+  options.prefill_chunk_tokens = 64;
+  Qwen38GraphSession session{device, options};
+  const std::vector<int32_t> prompt{12, 13, 14, 15};
+  Qwen38StepRequest request;
+  request.owner = &prompt;
+  request.turn_id = 1;
+  request.tokens = prompt;
+  request.token_budget = 4;
+  request.session_budget = 50;
+
+  // Prefill completes and launches the first look-ahead cycle via BeginDecode(true).
+  const auto first = session.Step(request);
+  EXPECT_EQ(first.count, 1u);
+  EXPECT_TRUE(device->running());
+  EXPECT_EQ(session.WorkMetrics().work_records, 1u);
+  EXPECT_EQ(session.WorkMetrics().target_forward_passes, 0u);
+  EXPECT_EQ(session.WorkMetrics().prefill_tokens, 4u);
+  EXPECT_EQ(session.WorkMetrics().discarded_completions, 0u);
+
+  // Release() before WaitCycle() drains and accounts for the unconsumed look-ahead cycle once.
+  session.Release();
+  EXPECT_FALSE(device->running());
+  EXPECT_EQ(session.WorkMetrics().work_records, 2u);
+  EXPECT_EQ(session.WorkMetrics().target_forward_passes, 1u);
+  EXPECT_EQ(session.WorkMetrics().prefill_tokens, 4u);
+  EXPECT_EQ(session.WorkMetrics().discarded_completions, 1u);
+
+  // A repeated Release() or a subsequent Begin() must not double-count the already-retired cycle.
+  session.Release();
+  EXPECT_EQ(session.WorkMetrics().work_records, 2u);
+  EXPECT_EQ(session.WorkMetrics().target_forward_passes, 1u);
+  EXPECT_EQ(session.WorkMetrics().discarded_completions, 1u);
+
+  request.turn_id = 2;
+  request.token_budget = 1;  // BeginDecode(false): no look-ahead cycle launched
+  EXPECT_EQ(session.Step(request).count, 1u);
+  EXPECT_EQ(session.WorkMetrics().work_records, 3u);
+  EXPECT_EQ(session.WorkMetrics().target_forward_passes, 1u);
+  EXPECT_EQ(session.WorkMetrics().prefill_tokens, 8u);
+  EXPECT_EQ(session.WorkMetrics().discarded_completions, 1u);
+
+  // API-visible speculative stats remain separate from raw backend work metrics.
+  SpeculativeStats stats;
+  session.AddStats(stats);
+  EXPECT_EQ(stats.rounds, 0u);
+  EXPECT_EQ(stats.completed_rounds, 0u);
+  EXPECT_EQ(stats.target_forward_passes, 0u);
+}
+
+TEST(Qwen38GraphSessionTest, BeginRetiresAndAccountsForAnUnconsumedLookAheadCycleFromThePreviousTurn) {
+  auto device = std::make_shared<ScriptedQwen38Device>();
+  Qwen38GraphSession::Options options;
+  options.prefill_chunk_tokens = 64;
+  Qwen38GraphSession session{device, options};
+  const std::vector<int32_t> prompt{12, 13, 14, 15};
+  Qwen38StepRequest request;
+  request.owner = &prompt;
+  request.turn_id = 1;
+  request.tokens = prompt;
+  request.token_budget = 4;
+  request.session_budget = 50;
+
+  // Turn 1 prefills, launches cycle 1, then consumes cycle 1 in Step() and launches look-ahead cycle 2.
+  ASSERT_EQ(session.Step(request).count, 1u);
+  ASSERT_GE(session.Step(request).count, 1u);
+  EXPECT_TRUE(device->running());
+  EXPECT_EQ(session.WorkMetrics().work_records, 2u);
+  EXPECT_EQ(session.WorkMetrics().target_forward_passes, 1u);
+  EXPECT_EQ(session.WorkMetrics().discarded_completions, 0u);
+
+  // Turn 2 starts directly without an intervening Release() (e.g. a stop-string match on the same resident Request).
+  request.turn_id = 2;
+  request.token_budget = 1;
+  ASSERT_EQ(session.Step(request).count, 1u);
+  EXPECT_EQ(session.WorkMetrics().work_records, 4u);
+  EXPECT_EQ(session.WorkMetrics().target_forward_passes, 2u);
+  EXPECT_EQ(session.WorkMetrics().prefill_tokens, 8u);
+  EXPECT_EQ(session.WorkMetrics().discarded_completions, 1u);
+}
+
 TEST_F(Qwen38GraphEngineTest, TheDeviceIsToldThePromptLengthAfterTheResetAndBeforeTheFirstChunkOfEveryTurn) {
   auto engine = MakeEngine();  // prefill.chunk = 4
   const auto prompt = Prompt(11);
