@@ -110,6 +110,43 @@ def load_builder_module(module_name):
     return module
 
 
+def check_node_shapes(model):
+    """Run ONNX shape inference on each node of a ModelProto alone, from the shapes the builder declared.
+
+    A whole-graph onnx.shape_inference pass stops reporting errors after the first op it does not know, and
+    builder graphs use onnxruntime-only ops from the start, so it misses shape errors onnxruntime rejects at load.
+    Constant nodes (make_constant declares them with shape []) are skipped; a node that reads a Constant is
+    checked together with it. Any other input without a declared shape is an error. onnx has no schema for
+    onnxruntime-only ops, so their output shapes are not checked.
+    """
+    import onnx  # noqa: PLC0415
+
+    graph = model.graph
+    declared = {value.name: value for value in (*graph.input, *graph.value_info, *graph.output)}
+    initializers = {tensor.name: tensor for tensor in graph.initializer}
+    constants = {node.output[0]: node for node in graph.node if node.op_type == "Constant"}
+    for node in graph.node:
+        if node.op_type == "Constant":
+            continue
+        inputs = [name for name in node.input if name and name not in initializers and name not in constants]
+        undeclared = [
+            name for name in inputs if name not in declared or not declared[name].type.tensor_type.HasField("shape")
+        ]
+        assert not undeclared, f"{node.name} ({node.op_type}) reads inputs with no declared shape: {undeclared}"
+        one_node = onnx.helper.make_graph(
+            [*(constants[name] for name in node.input if name in constants), node],
+            node.name,
+            [declared[name] for name in inputs],
+            [declared[name] for name in node.output if name in declared],
+            initializer=[initializers[name] for name in node.input if name in initializers],
+        )
+        onnx.shape_inference.infer_shapes(
+            onnx.helper.make_model(one_node, opset_imports=model.opset_import, ir_version=model.ir_version),
+            check_type=True,
+            strict_mode=True,
+        )
+
+
 @functools.cache
 def ort_runs_tensor_scatter():
     """Whether the installed onnxruntime has a CPU kernel for the opset-24 TensorScatter node.

@@ -2,6 +2,7 @@ from setuptools import setup, find_packages
 from setuptools.dist import Distribution
 import sys
 import os
+import re
 from os import path
 
 if sys.version_info < (3, 0):
@@ -28,7 +29,7 @@ def _onnxruntime_dependency() -> str:
     # Use stable version as default
     ort_version = os.environ.get("ONNXRUNTIME_VERSION", "1.20.1")
 
-    if package_name == "onnxruntime-genai":
+    if package_name in ("onnxruntime-genai", "onnxruntime-genai-winml"):
         dependency = "onnxruntime"
     elif package_name == "onnxruntime-genai-cuda":
         dependency = "onnxruntime-gpu"
@@ -46,8 +47,7 @@ def _get_install_requires():
     install_requires = [
         'numpy>=1.21.6',
     ]
-    if package_name != "onnxruntime-genai-winml":
-        install_requires.append(_onnxruntime_dependency())
+    install_requires.append(_onnxruntime_dependency())
     return install_requires
 
 setup(
@@ -59,6 +59,10 @@ setup(
     packages=find_packages(include=['onnxruntime_genai', 'onnxruntime_genai.*']),
     include_package_data=True,
     package_data={'': ['*.pyd', '*.dll', '*.so*', '*.dylib'] + extras},
+    exclude_package_data={'': [
+        name for name in os.listdir('onnxruntime_genai')
+        if re.match(r'(?:lib)?onnxruntime(?:\.|_(?!genai(?:[._]|$)))', name)
+    ]},
     install_requires=_get_install_requires(),
     distclass=BinaryDistribution,
     author="Microsoft Corporation",
