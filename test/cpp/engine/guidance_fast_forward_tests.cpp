@@ -106,7 +106,7 @@ class GuidanceFastForwardTest : public ::testing::Test {
   std::shared_ptr<Model> model_;
 };
 
-TEST_F(GuidanceFastForwardTest, ForcedTokensFollowTheSampledTokenAndReachTheModelBeforeTheNextSample) {
+TEST_F(GuidanceFastForwardTest, ForcedTokensFollowTheSampledTokenAndReachTheModelInOneStep) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
   auto request = CreateEngineRequest(engine.engine);
   request->BeginTurn(Prompt());
@@ -120,21 +120,40 @@ TEST_F(GuidanceFastForwardTest, ForcedTokensFollowTheSampledTokenAndReachTheMode
   EXPECT_EQ(storage[2].flags & EngineEventFlagTurnFinished, 0u);
   EXPECT_EQ(request->TurnGeneratedTokens(), 3u);
 
-  // The next token is sampled only after the model has read every forced token.
+  // The sampled token and both forced tokens reach the model together, and the next token is
+  // sampled from that same step.
   engine.executor->SetForcedToken(EosToken(*model_));
-  size_t events = 0;
-  for (int step = 0; step < 4 && events == 0; ++step) {
-    events = engine.engine->Run(storage);
-  }
-  ASSERT_EQ(events, 1u);
+  engine.executor->SetExecutionCallback([](ExecutionContext& context) {
+    ASSERT_NE(context.plan, nullptr);
+    ASSERT_EQ(context.plan->requests.size(), 1u);
+    EXPECT_EQ(context.plan->requests[0].unprocessed_token_count, 3u);
+    EXPECT_EQ(context.plan->requests[0].draft_token_count, 0u);
+    EXPECT_FALSE(context.plan->graph_capture_eligible);
+  });
+  ASSERT_EQ(engine.engine->Run(storage), 1u);
   EXPECT_EQ(storage[0].finish_reason, GenerationFinishReason::EosToken);
-  size_t decoded_tokens = 0;
-  for (const size_t count : engine.executor->decoded_token_counts) {
-    decoded_tokens += count;
-  }
-  EXPECT_EQ(decoded_tokens, Prompt().size() + 3);
+  EXPECT_EQ(engine.executor->decoded_token_counts, (std::vector<size_t>{Prompt().size(), 3}));
   const auto tokens = request->TokensCpu();
   EXPECT_EQ(std::vector<int32_t>(tokens.begin(), tokens.end()), Concat(Prompt(), {11, 12, 13}));
+  EXPECT_TRUE(ValidateRequestInvariants(request->Snapshot()).empty());
+}
+
+TEST_F(GuidanceFastForwardTest, StepBudgetSplitsForcedTokensAndSamplesOnlyAfterTheLastChunk) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
+  model_->config_->engine.dynamic_batching->max_scheduled_tokens = 2;
+  auto request = CreateEngineRequest(engine.engine);
+  request->BeginTurn(Prompt());
+  InstallForcingGrammar(*request, /*trigger=*/11, {12, 13});
+
+  std::array<EngineEvent, 8> storage;
+  ASSERT_EQ(engine.engine->Run(storage), 0u);  // first 2 prompt tokens
+  ASSERT_EQ(engine.engine->Run(storage), 3u);  // last prompt token; samples 11, forces 12 and 13
+
+  engine.executor->SetForcedToken(EosToken(*model_));
+  EXPECT_EQ(engine.engine->Run(storage), 0u);  // 11 and 12: the row is not caught up yet
+  ASSERT_EQ(engine.engine->Run(storage), 1u);  // 13, then samples EOS
+  EXPECT_EQ(storage[0].finish_reason, GenerationFinishReason::EosToken);
+  EXPECT_EQ(engine.executor->decoded_token_counts, (std::vector<size_t>{2, 1, 2, 1}));
   EXPECT_TRUE(ValidateRequestInvariants(request->Snapshot()).empty());
 }
 

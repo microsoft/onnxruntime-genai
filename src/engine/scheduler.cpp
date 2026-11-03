@@ -440,10 +440,12 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
       uniform_token_count = entry.unprocessed_token_count;
     }
     // One captured graph bakes in every tensor shape it was recorded with, so a step qualifies only
-    // when each request contributes the same number of tokens.
+    // when each request contributes the same number of tokens. A row reading several committed
+    // tokens selects one logits row where a verify row of the same width selects one per token,
+    // so only single-token and verify rows qualify.
     plan.graph_capture_eligible &=
         !entry.is_prefill && entry.unprocessed_token_count == uniform_token_count &&
-        entry.unprocessed_token_count != 0;
+        entry.unprocessed_token_count == entry.draft_token_count + 1;
   }
   try {
     for (const auto& entry : plan.requests) {
