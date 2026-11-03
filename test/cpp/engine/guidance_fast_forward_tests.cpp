@@ -11,6 +11,8 @@
 #include <cstdint>
 #include <memory>
 #include <span>
+#include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -22,6 +24,7 @@
 #include "constrained_logits_processor.h"
 #include "engine/engine_invariants.h"
 #include "engine/step_plan.h"
+#include "models/preprocessing/genai_tokenizer.h"
 
 namespace Generators {
 namespace test {
@@ -328,6 +331,69 @@ TEST_F(GuidanceFastForwardTest, RollbackDiscardsForcedTokensAndTheRetryCommitsTh
     EXPECT_EQ(grammar->CommittedTokens(), (std::vector<int32_t>{11}));
   }
 }
+
+TEST_F(GuidanceFastForwardTest, StaticBatchingRejectsAFastForwardTurnWithoutConsumingIt) {
+  model_->config_->engine.dynamic_batching.reset();
+  auto cache = std::make_shared<RecordingCacheManager>(
+      model_, /*capacity=*/4, nullptr, /*supports_dynamic_batching=*/false);
+  auto scheduler = Scheduler::Create(model_, cache);
+  auto executor = std::make_unique<RecordingModelExecutor>(model_, cache, EosToken(*model_));
+  EngineDependencies dependencies{cache, std::move(scheduler), std::move(executor)};
+  auto engine = std::make_shared<Engine>(model_, std::move(dependencies));
+  auto request = CreateEngineRequest(engine);
+  TurnOptions options;
+  options.guidance_type = "regex";
+  options.guidance_data = "ok";
+  options.guidance_fast_forward = true;
+
+  EXPECT_THROW(request->BeginTurn(Prompt(), options), std::runtime_error);
+  EXPECT_TRUE(request->IsAwaitingFirstTurn());
+}
+
+#if USE_GUIDANCE
+// With a real llguidance grammar, fast-forward yields the same text as step-by-step decoding, in
+// fewer model executions.
+TEST(GuidanceFastForwardRealGrammarTest, ForcedTextMatchesStepByStepDecodingInFewerSteps) {
+  auto model = CreateModel(GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto tokenizer = model->CreateTokenizer();
+  // Every token of this text is inside the fixture model's 1000-token vocabulary.
+  constexpr const char* kText = "on and on and on";
+  const int32_t first_token = tokenizer->Encode(kText).front();
+
+  const auto run = [&](bool fast_forward) {
+    auto engine = MakeDoublesEngine(model, /*capacity=*/8, first_token);
+    auto request = CreateEngineRequest(engine.engine);
+    TurnOptions options;
+    options.guidance_type = "regex";
+    options.guidance_data = kText;
+    options.guidance_fast_forward = fast_forward;
+    options.max_generated_tokens = 32;
+    request->BeginTurn(Prompt(), options);
+
+    std::array<EngineEvent, 8> storage;
+    std::vector<int32_t> tokens;
+    bool finished = false;
+    for (int step = 0; step < 64 && !finished; ++step) {
+      const size_t events = engine.engine->Run(storage);
+      for (const auto& event : std::span{storage}.first(events)) {
+        if (event.flags & EngineEventFlagToken) {
+          tokens.push_back(event.token);
+        }
+        finished |= (event.flags & EngineEventFlagTurnFinished) != 0;
+      }
+    }
+    EXPECT_TRUE(finished);
+    EXPECT_EQ(request->FinishReason(), GenerationFinishReason::EosToken);
+    return std::pair{tokenizer->Decode(tokens), engine.executor->decode_calls};
+  };
+
+  const auto [step_text, step_calls] = run(false);
+  const auto [forward_text, forward_calls] = run(true);
+  EXPECT_EQ(step_text, kText);
+  EXPECT_EQ(forward_text, kText);
+  EXPECT_LT(forward_calls, step_calls);
+}
+#endif
 
 }  // namespace
 }  // namespace test

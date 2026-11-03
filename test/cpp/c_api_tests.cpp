@@ -1653,6 +1653,32 @@ TEST(CAPITests, EngineTurnOptionsDelimitedGuidanceSetters) {
   request->Close();
 }
 
+// Fast-forward only modifies whole-turn guidance. Admission rejects it alone or with delimited
+// guidance without consuming the Turn, and ClearGuidance turns it off with the grammar.
+TEST(CAPITests, EngineTurnOptionsGuidanceFastForwardRequiresWholeTurnGuidance) {
+  auto model = OgaModel::Create(MODEL_PATH "engine/synthetic-paged");
+  auto engine = OgaEngine::Create(*model);
+  const std::array<int32_t, 3> input_tokens{2, 3, 4};
+  std::unique_ptr<OgaResult> null_options{OgaTurnOptionsSetGuidanceFastForward(nullptr, true)};
+  EXPECT_NE(null_options, nullptr);
+
+  for (const bool delimited : {false, true}) {
+    SCOPED_TRACE(::testing::Message() << "delimited " << delimited);
+    auto request = engine->CreateRequest();
+    auto options = request->CreateTurnOptions();
+    options->SetGuidanceFastForward(true);
+    if (delimited) {
+      options->SetDelimitedGuidance(11, 12, "start: \"ok\"");
+    }
+    EXPECT_THROW(request->BeginTurn(input_tokens, options.get()), std::runtime_error);
+
+    options->ClearGuidance();
+    options->SetMaxGeneratedTokens(1);
+    EXPECT_EQ(request->BeginTurn(input_tokens, options.get()), 1u);
+    request->Close();
+  }
+}
+
 // A model whose own search defaults keep every turn greedy silently overrides an explicit
 // do_sample. The caller cannot see those defaults through the options handle, so admission rejects
 // the turn and names the model-supplied cause instead of quietly selecting the top logit. One
