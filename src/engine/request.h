@@ -65,6 +65,10 @@ struct TurnOptions {
   // inherited from a previous turn or from model/Request state.
   std::string guidance_type;
   std::string guidance_data;
+  // Appends the continuation the whole-turn grammar forces instead of sampling it one token per
+  // step. Opt-in because the grammar tokenizes forced text itself, so token IDs may differ from what
+  // the model would sample even though the text is the same.
+  bool guidance_fast_forward{};
   // The marker-scoped grammar is owned by these options and is mutually exclusive with
   // whole-turn guidance. Keeping all three values together prevents partial configurations.
   struct DelimitedGuidance {

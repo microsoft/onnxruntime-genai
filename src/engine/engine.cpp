@@ -1625,6 +1625,10 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
     if (options.delimited_guidance) {
       throw std::runtime_error("Delimited guidance requires an Engine configured for dynamic batching.");
     }
+    if (options.guidance_fast_forward) {
+      throw std::runtime_error(
+          "Guidance fast-forward requires an Engine configured for dynamic batching.");
+    }
     // An executor that commits its own tokens runs them through Request::CommitExternalTokens, which
     // observes stop strings token by token and only ever ends the turn, so it has nothing to roll back.
     if (!options.stop_strings.empty() && !backend_capabilities_.supports_stop_strings) {
@@ -2901,6 +2905,9 @@ const std::shared_ptr<Tokenizer>& Engine::GetOrCreateStopTokenizer() {
 
 std::unique_ptr<ConstrainedLogitsProcessor> Engine::CreateTurnGuidance(
     const TurnOptions& options) const {
+  if (options.guidance_fast_forward && options.guidance_type.empty()) {
+    throw std::invalid_argument("Guidance fast-forward requires whole-turn guidance.");
+  }
   if (options.delimited_guidance) {
     if (!options.guidance_type.empty() || !options.guidance_data.empty()) {
       throw std::invalid_argument("Delimited and whole-turn guidance cannot be combined.");
@@ -2922,7 +2929,7 @@ std::unique_ptr<ConstrainedLogitsProcessor> Engine::CreateTurnGuidance(
   // nothing about a previous turn's grammar can leak into this one.
   auto params = std::make_shared<GeneratorParams>(*model_);
   params->search.batch_size = 1;
-  params->SetGuidance(options.guidance_type, options.guidance_data, false);
+  params->SetGuidance(options.guidance_type, options.guidance_data, options.guidance_fast_forward);
   return CreateGuidanceLogitsProcessor(std::move(params));
 }
 

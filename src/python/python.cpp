@@ -1004,7 +1004,12 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
            "Constrains this turn's output to a grammar ('json_schema', 'regex', or "
            "'lark_grammar'), copying both strings immediately. Guidance is strictly turn-scoped: a "
            "following turn that sets none is unguided.")
-      .def("clear_guidance", &OgaTurnOptions::ClearGuidance, "Removes the configured grammar, so the turn is unguided.")
+      .def("set_guidance_fast_forward", &OgaTurnOptions::SetGuidanceFastForward,
+           "Lets the whole-turn grammar append the tokens it forces instead of sampling them. Off "
+           "by default; the text is unchanged but token IDs may differ from sampled ones.")
+      .def("clear_guidance", &OgaTurnOptions::ClearGuidance,
+           "Removes the configured grammar, so the turn is unguided, and turns off guidance "
+           "fast-forward.")
       .def("reset", &OgaTurnOptions::Reset, "Restores every turn option to its unset state.");
 
   pybind11::class_<OgaRequest>(m, "Request")

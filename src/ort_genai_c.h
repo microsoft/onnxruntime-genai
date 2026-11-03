@@ -1636,7 +1636,21 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetStopStrings(
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetGuidance(
     OgaTurnOptions* options, const char* guidance_type,
     const char* guidance_data);
-/** \brief Removes either whole-turn or delimited guidance, so the Turn is unguided. */
+/**
+ * \brief Lets this Turn's whole-turn grammar append the tokens it forces instead of sampling them.
+ *
+ * When the grammar allows only one continuation, those tokens are committed directly and read by
+ * the model in one step rather than one decode step each. The decoded text is unchanged, but token
+ * IDs follow the grammar's tokenization and may differ from what the model would sample. Off by
+ * default. Admission rejects a Turn that enables it without whole-turn guidance
+ * (OgaTurnOptionsSetGuidance) or on an Engine without dynamic batching.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetGuidanceFastForward(
+    OgaTurnOptions* options, bool enable);
+/**
+ * \brief Removes either whole-turn or delimited guidance, so the Turn is unguided, and turns off
+ * guidance fast-forward.
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsClearGuidance(
     OgaTurnOptions* options);
 /** \brief Restores every Turn option to its unset state. */
