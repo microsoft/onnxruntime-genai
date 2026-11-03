@@ -758,7 +758,10 @@ class Model:
             ("trt-rtx", ir.DataType.FLOAT16),
             ("trt-rtx", ir.DataType.BFLOAT16),
         }
-        return (self.ep, self.io_dtype) in valid_gqa_configurations
+        # CPU GQA requires head_size to be divisible by 8; unsupported sizes use packed Attention.
+        return (self.ep, self.io_dtype) in valid_gqa_configurations and not (
+            self.ep == "cpu" and self.head_size % 8 != 0
+        )
 
     def is_packed_attn_supported(self) -> bool:
         valid_packed_attn_configurations = {
@@ -838,12 +841,6 @@ class Model:
             self.make_paged_attention_init()
 
         elif self.is_gqa_supported():
-            if self.ep == "cpu" and self.head_size % 8 != 0:
-                raise ValueError(
-                    "CPU GroupQueryAttention requires head_size to be a multiple of 8, "
-                    f"got {self.head_size}."
-                )
-
             # Change model settings for GroupQueryAttention
             self.attention_attrs["op_type"] = "GroupQueryAttention"
             print("GroupQueryAttention (GQA) is used in this model.")

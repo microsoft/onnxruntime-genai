@@ -30,7 +30,9 @@ Model = base_module.Model
 
 
 class _FakeGQAModel:
+    input_names: dict[str, str]
     is_gqa_supported = Model.is_gqa_supported
+    is_packed_attn_supported = Model.is_packed_attn_supported
     is_packed_matmul_supported = Model.is_packed_matmul_supported
     is_fused_rope_supported = Model.is_fused_rope_supported
     make_attention_init = Model.make_attention_init
@@ -54,6 +56,7 @@ class _FakeGQAModel:
         self.num_attn_heads = 8
         self.num_kv_heads = 2
         self.head_size = 16
+        self.input_names = {}
         self.matmul_attrs = {"use_lora": False}
         self.window_size = -1
         self.attention_attrs = {
@@ -79,6 +82,7 @@ def _initialize_cpu_gqa(head_size):
     model = _FakeGQAModel("cpu")
     model.io_dtype = base_module.ir.DataType.FLOAT
     model.head_size = head_size
+    model.attention_attrs["use_rope_in_attn"] = False
     model.input_names = {"position_ids": "position_ids"}
     model.make_attention_init(config=None)
     return model
@@ -96,9 +100,12 @@ def test_cpu_gqa_uses_fused_rope_only_for_head_sizes_multiple_of_16(head_size, e
 
 
 @pytest.mark.parametrize("head_size", [4, 12, 20])
-def test_cpu_gqa_rejects_head_sizes_not_multiple_of_8(head_size):
-    with pytest.raises(ValueError, match="CPU GroupQueryAttention requires head_size to be a multiple of 8"):
-        _initialize_cpu_gqa(head_size)
+def test_cpu_uses_packed_attention_when_gqa_head_size_is_not_multiple_of_8(head_size):
+    model = _initialize_cpu_gqa(head_size)
+
+    assert model.attention_attrs["op_type"] == "Attention"
+    assert model.attention_attrs["use_rope_in_attn"] is False
+    assert "position_ids" in model.input_names
 
 
 @pytest.mark.parametrize(("ep", "expected_fused_rope"), [("dml", False), ("cuda", True), ("webgpu", True)])
