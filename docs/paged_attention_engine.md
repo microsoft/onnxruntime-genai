@@ -1909,9 +1909,10 @@ their bytes from the automatic free-memory budget before the paged cache is size
 `engine.dynamic_batching.num_blocks` is left alone: pinning the pool means owning that budget.
 
 Before allocation or byte reservation, the shared graph-buffer planner rejects zero or
-overflowing packed batch-row counts and position-plane products exceeding `int64_t`
-tensor dimensions. These checks protect both sizing paths and do not change graph capture
-behavior for valid configurations.
+overflowing packed batch-row counts before applying the scheduled-token cap, and rejects
+position-plane products exceeding `int64_t` tensor dimensions after applying the cap.
+These checks protect both sizing paths and do not change graph capture behavior for valid
+configurations.
 
 ### Buffers and lifetime
 

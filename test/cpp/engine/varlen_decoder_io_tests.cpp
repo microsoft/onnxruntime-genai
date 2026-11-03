@@ -443,6 +443,20 @@ TEST(VarlenDecoderIOTest, GraphBuffersRejectInvalidPackedRowCounts) {
   EXPECT_THROW((VarlenGraphBuffers{*model, 3, width}), std::runtime_error);
 }
 
+TEST(VarlenDecoderIOTest, GraphBuffersRejectPackedRowOverflowBeforeScheduledTokenCap) {
+  auto model = std::dynamic_pointer_cast<DecoderOnly_Model>(LoadSyntheticPagedPerTokenModel());
+  ASSERT_TRUE(model);
+  const size_t planes = PackedPositionIdPlanes(*model);
+  const size_t width = static_cast<size_t>(std::numeric_limits<int64_t>::max()) / 2 + 1;
+  model->config_->engine.dynamic_batching->max_batch_size = 2;
+  model->config_->engine.dynamic_batching->max_scheduled_tokens = 2;
+
+  EXPECT_NO_THROW(VarlenGraphBufferBytes(*model, planes, width - 1));
+  EXPECT_NO_THROW((VarlenGraphBuffers{*model, planes, width - 1}));
+  EXPECT_THROW(VarlenGraphBufferBytes(*model, planes, width), std::runtime_error);
+  EXPECT_THROW((VarlenGraphBuffers{*model, planes, width}), std::runtime_error);
+}
+
 TEST(VarlenDecoderIOTest, GraphIdSeparatesEveryCapturedShape) {
   GraphAnnotationIds ids;
   const auto id = [&](size_t batch, size_t tokens, size_t columns, size_t binding) {
