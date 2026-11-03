@@ -1248,10 +1248,10 @@ RequestStepResult Request::StageGeneration(int64_t sequence_length_before) {
       finish_reason,
       matched_stop_string_index,
   };
+  CommitGuidanceToken(result);
   StageVisibleTokens(
       result, accepted_draft_count_,
       token_appended ? std::optional<int32_t>{token} : std::nullopt);
-  CommitGuidanceToken(result);
   return result;
 }
 
