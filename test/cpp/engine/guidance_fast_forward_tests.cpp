@@ -346,7 +346,12 @@ TEST_F(GuidanceFastForwardTest, StaticBatchingRejectsAFastForwardTurnWithoutCons
   options.guidance_data = "ok";
   options.guidance_fast_forward = true;
 
-  EXPECT_THROW(request->BeginTurn(Prompt(), options), std::runtime_error);
+  try {
+    request->BeginTurn(Prompt(), options);
+    FAIL() << "Static batching admitted a fast-forward turn.";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(std::string(error.what()).find("dynamic batching"), std::string::npos);
+  }
   EXPECT_TRUE(request->IsAwaitingFirstTurn());
 }
 

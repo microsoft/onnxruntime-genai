@@ -1618,9 +1618,10 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
     throw std::runtime_error("The selected execution backend does not support the requested turn policy.");
   }
   // Static batching completes generation through a non-transactional path (RunStatic) that cannot
-  // stage, roll back, or replay a stop match, and its sampler RNG state is created once when the
-  // Request joins the batch rather than inside a rollback-capable step. Reject both before any
-  // Request mutation rather than letting a turn run without the guarantee its options promise.
+  // stage, roll back, or replay a stop match, never appends grammar-forced tokens, and creates its
+  // sampler RNG state once when the Request joins the batch rather than inside a rollback-capable
+  // step. Reject these options before any Request mutation rather than letting a turn run without
+  // the guarantee its options promise.
   if (!dynamic_batching) {
     if (options.delimited_guidance) {
       throw std::runtime_error("Delimited guidance requires an Engine configured for dynamic batching.");

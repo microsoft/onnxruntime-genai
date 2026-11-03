@@ -1659,8 +1659,6 @@ TEST(CAPITests, EngineTurnOptionsGuidanceFastForwardRequiresWholeTurnGuidance) {
   auto model = OgaModel::Create(MODEL_PATH "engine/synthetic-paged");
   auto engine = OgaEngine::Create(*model);
   const std::array<int32_t, 3> input_tokens{2, 3, 4};
-  std::unique_ptr<OgaResult> null_options{OgaTurnOptionsSetGuidanceFastForward(nullptr, true)};
-  EXPECT_NE(null_options, nullptr);
 
   for (const bool delimited : {false, true}) {
     SCOPED_TRACE(::testing::Message() << "delimited " << delimited);
@@ -1670,7 +1668,13 @@ TEST(CAPITests, EngineTurnOptionsGuidanceFastForwardRequiresWholeTurnGuidance) {
     if (delimited) {
       options->SetDelimitedGuidance(11, 12, "start: \"ok\"");
     }
-    EXPECT_THROW(request->BeginTurn(input_tokens, options.get()), std::runtime_error);
+    try {
+      request->BeginTurn(input_tokens, options.get());
+      FAIL() << "Fast-forward without whole-turn guidance was admitted.";
+    } catch (const std::runtime_error& error) {
+      EXPECT_NE(std::string(error.what()).find("fast-forward requires whole-turn guidance"),
+                std::string::npos);
+    }
 
     options->ClearGuidance();
     options->SetMaxGeneratedTokens(1);
