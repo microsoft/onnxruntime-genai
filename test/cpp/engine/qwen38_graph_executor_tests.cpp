@@ -1025,7 +1025,7 @@ class TwoSlotSession {
   // is the one that resets the slot.
   void ReplaceAndStep(size_t replaced) {
     const size_t calls_before = device->calls.size();
-    session->ReleaseSlot(replaced);
+    session->ReleaseSlotForTeardown(replaced);
     EXPECT_EQ(device->calls.size(), calls_before);
     EXPECT_TRUE(device->running()) << "a cancellation does not wait for the device";
     Step({replaced == 0 ? size_t{2} : size_t{0}, replaced == 1 ? size_t{2} : size_t{1}});
@@ -1620,6 +1620,32 @@ TEST_F(Qwen38GraphEngineTest, RetryingAFailedRewindCannotConsumeTheDeviceFailure
   EXPECT_THROW(request->RewindToStartOfTurn(turn), std::runtime_error);
   EXPECT_FALSE(device_->context_healthy);
 
+  auto next = Begin(*engine, Prompt(5, 25), /*max_generated_tokens=*/4);
+  EXPECT_EQ(RunUntilFailure(*engine), EngineErrorCode::EngineExecutionFailure);
+}
+
+// The same rewind of a slot of a batch: the look-ahead cycle of the stopped turn fails, and the rewind must fail before it
+// mutates the Request, not at the next BeginSlot.
+TEST_F(Qwen38GraphEngineTest, MultiSlotAFailingLookAheadFailsAnExplicitRewindBeforeTheRequestIsMutated) {
+  device_ = std::make_shared<ScriptedQwen38Device>(/*capacity=*/68, /*mtp=*/true, /*max_batch_size=*/2);
+  device_->overrides[5] = 5;
+  device_->overrides[6] = 6;
+  device_->fail_status_check = true;
+  auto engine = MakeEngine();
+  auto request = engine->CreateRequest();
+  TurnOptions options;
+  options.request = request;
+  options.max_generated_tokens = 20;
+  options.stop_strings = {"STOP"};
+  const uint64_t turn = request->BeginTurn(Prompt(5), options);
+  ASSERT_EQ(RunToCompletion(*engine, request).finish_reason, GenerationFinishReason::StopString);
+
+  ASSERT_THROW(request->RewindToStartOfTurn(turn), std::runtime_error);
+  EXPECT_FALSE(device_->context_healthy);
+
+  // A retry keeps failing, and so does the next step.
+  device_->fail_status_check = false;
+  EXPECT_THROW(request->RewindToStartOfTurn(turn), std::runtime_error);
   auto next = Begin(*engine, Prompt(5, 25), /*max_generated_tokens=*/4);
   EXPECT_EQ(RunUntilFailure(*engine), EngineErrorCode::EngineExecutionFailure);
 }

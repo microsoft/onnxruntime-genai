@@ -257,19 +257,39 @@ void Qwen38GraphSession::ReleaseForTeardown() noexcept {
   }
 }
 
+void Qwen38GraphSession::RetireSlot(size_t slot) {
+  if (slot >= slot_states_.size()) throw std::out_of_range("Fixed-slot retirement index out of range.");
+  ClearSlot(slot_states_[slot]);
+  completions_.Retire(slot);
+}
+
+// An explicit retirement (the rewind of a Request) quiesces the device and reads its status before it returns the slot. A
+// look-ahead cycle of the retired turn (stop string) may still be running with an error nobody has reported, and the rewind
+// must fail before the Request is mutated, not at the next BeginSlot(). Like Release(), the failure is kept for the retries
+// and the next step.
 void Qwen38GraphSession::ReleaseSlot(size_t slot) {
   if (slot >= slot_states_.size()) throw std::out_of_range("Fixed-slot retirement index out of range.");
   if (MaxBatchSize() == 1) {
     Release();
     return;
   }
-  ClearSlot(slot_states_[slot]);
-  completions_.Retire(slot);
+  if (!status_checked_) {
+    device_->Drain();
+  }
+  RetireSlot(slot);
+  ReportDeferredError();
+  CheckStatusIfPending();
 }
 
+// The replacement of a slot (a cancellation, a new Request taking over a finished turn's slot) does not wait for the device:
+// BeginSlot() drains it and reads the status before it resets the slot.
 void Qwen38GraphSession::ReleaseSlotForTeardown(size_t slot) noexcept {
   try {
-    ReleaseSlot(slot);
+    if (MaxBatchSize() == 1) {
+      Release();
+    } else {
+      RetireSlot(slot);
+    }
   } catch (...) {
     Poison();
     if (!deferred_error_) deferred_error_ = std::current_exception();

@@ -2365,7 +2365,8 @@ token. The device holds `model.qwen38_graph.max_batch_size` slots (default 1), o
   general, which this backend has always ignored, so a package that carries it (with the Engine's default of 4 or a
   value of its own) keeps its single slot and keeps loading on a stack that cannot serve several. Only a setting that
   asks for slots opts in. Several slots are served by the batched fold target and only
-  work with: the folded MTP stack (`fold.enabled`); the unified fast prefill, i.e. `prefill.enabled` without a separate dense
+  work with: the folded MTP stack (`fold.enabled`), drafted by the DFlash2 drafter (`model.dflash2.filename`) when the stack has an
+  internal head (`fold.head_r2.filename`), whose state and drafting are not slot-addressed; the unified fast prefill, i.e. `prefill.enabled` without a separate dense
   graph (the prompts are ingested chunk by chunk through the fold target, slot by slot; a configuration with
   `prefill.enabled` false or with a dense prefill graph is single-slot); a compact-state target (the exporter's
   `state_update.*` outputs; a ring-bank target with `present_mid*` outputs keeps one bank per row count for the whole batch and
@@ -2414,8 +2415,11 @@ token. The device holds `model.qwen38_graph.max_batch_size` slots (default 1), o
   rejects them.
 - The next cycle is enqueued before a step returns, so the GPU runs it while the Engine delivers the previous tokens. A stop
   string can only be known after delivery, so one cycle may be wasted; the next request and Engine teardown wait for it with
-  `Qwen38DecodeDevice::Drain()`, and so does a rewind of a single-slot device. With several slots a rewind's `ReleaseSlot()` only
-  forgets the slot; the replayed prompt waits for the device in `BeginSlot()`, before it resets the slot. The record of such a
+  `Qwen38DecodeDevice::Drain()`, and so does a rewind of a single-slot device. With several slots a rewind's `ReleaseSlot()` does
+  the same when a cycle is unchecked: it drains the device and reads the status of every slot before the slot is returned, so a
+  failing look-ahead fails the rewind before the Request is mutated (the failure is kept for retries and the next step). The
+  replacement of a slot (`ReleaseSlotForTeardown()`: a cancellation, a new Request taking over a finished turn) does not wait;
+  the new prompt waits for the device in `BeginSlot()`, before it resets the slot. The record of such a
   cycle is never consumed, so its status is read from the device instead: `CheckDecodeStatus()` right after `Drain()` reports
   the error bits accumulated by every cycle since the last
   `Reset()`, also when a record was left unconsumed. The executor always runs `Drain()` and then `CheckDecodeStatus()` before

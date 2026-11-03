@@ -278,6 +278,13 @@ void ValidateQwen38MultiSlotConfig(const Config& config) {
                              "the decode-graph prompt path (prefill.enabled=false) nor a separate dense prefill graph can. "
                              "Set max_batch_size to 1 or enable the unified prefill.");
   }
+  if (!q.fold.head_r2.filename.empty() && config.model.dflash2.filename.empty()) {
+    throw std::runtime_error(needs +
+                             "the DFlash2 drafter (model.dflash2.filename) when the folded stack has an internal MTP head "
+                             "(model.qwen38_graph.fold.head_r2.filename): the head state and its drafting are not "
+                             "slot-addressed, so only the DFlash2 drafter proposes drafts for several slots. Set "
+                             "max_batch_size to 1 or configure model.dflash2.");
+  }
 }
 
 void ValidateQwen38BatchedTargetOutputs(size_t request_slots, const std::vector<std::string>& output_names) {
@@ -1050,7 +1057,7 @@ void Qwen38GraphEngine::BuildTarget() {
     // The view must not be larger than the 16 words of slot 0 of ctl_.
     const std::vector<int64_t> ctl_shape = info.GetInputShape("fold.ctl");
     RequireQwen38TensorFits("fold.ctl", ctl_shape, sizeof(int64_t),
-                           16 * sizeof(int64_t));
+                            16 * sizeof(int64_t));
     fold_tensors_["fold.ctl"] = MakeTensor(ctl_.data(), ctl_shape, i64);
     fold_tensors_["fold.ctx_commit"] = MakeTensor(ctx_commit_.data(), {2}, i64);
     fold_tensors_["fold.ctx_a"] = MakeTensor(ctx_a_.data(), {verify_rows_ > 2 ? 2 * verify_rows_ : 2}, i64);

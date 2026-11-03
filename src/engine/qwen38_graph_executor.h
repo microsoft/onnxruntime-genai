@@ -129,6 +129,8 @@ class Qwen38GraphSession : public FixedSlotSession {
   // Enqueues one batched cycle for every decoder of `requests` that wants more tokens, and records it as in flight.
   void EnqueueDecodeCycle(std::span<const Qwen38StepRequest> requests);
   void ClearSlot(SlotState& slot) noexcept;
+  // Returns a slot of a multi-slot session to the pool without touching the device.
+  void RetireSlot(size_t slot);
   void RethrowDeferredError();
   void ReportDeferredError() const;
   void CheckStatusIfPending();

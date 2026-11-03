@@ -800,6 +800,20 @@ TEST(Qwen38MultiSlotConfigTest, TheUnifiedFastPrefillOfTheFoldTargetServesEveryS
   EXPECT_NO_THROW(ValidateQwen38MultiSlotConfig(same));
 }
 
+TEST(Qwen38MultiSlotConfigTest, SeveralSlotsWithAnInternalMtpHeadNeedTheDflash2Drafter) {
+  const std::string overlay =
+      R"({"max_batch_size":2,"fold":{"enabled":true,"head_r2":{"filename":"head_r2.onnx"}},"prefill":{"enabled":true}})";
+  Config config = FoldedPackageConfig(overlay);
+  ExpectConfigDiagnostic(config, "model.dflash2.filename");
+  config.model.dflash2.filename = "dflash2.onnx";
+  EXPECT_NO_THROW(ValidateQwen38MultiSlotConfig(config));
+
+  // One slot keeps the internal head.
+  Config single = FoldedPackageConfig(
+      R"({"max_batch_size":1,"fold":{"enabled":true,"head_r2":{"filename":"head_r2.onnx"}},"prefill":{"enabled":true}})");
+  EXPECT_NO_THROW(ValidateQwen38MultiSlotConfig(single));
+}
+
 TEST(Qwen38MultiSlotConfigTest, TheSlotCountOfTheEngineSettingsIsValidatedLikeTheModelKey) {
   Config config = FoldedPackageConfig(R"({"fold":{"enabled":true},"prefill":{"enabled":false}})");
   EXPECT_NO_THROW(ValidateQwen38MultiSlotConfig(config));  // one slot
