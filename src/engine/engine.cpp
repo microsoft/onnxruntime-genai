@@ -6,7 +6,10 @@
 #include "../search.h"
 #include "../constrained_logits_processor.h"
 #include "../models/preprocessing/genai_tokenizer.h"
+#include "../models/preprocessing/multi_modal_processor.h"
+#include "../models/preprocessing/processor.h"
 #include "../stop_string_controller.h"
+#include "../stop_string_matcher.h"
 #include "decoders/varlen_decoder_io.h"
 #include "backend_factory.h"
 
@@ -206,6 +209,11 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
   // Fail fast on a missing collaborator rather than crashing later on first use.
   if (!model_) {
     throw std::runtime_error("Engine requires a non-null model.");
+  }
+  if (auto packed = std::dynamic_pointer_cast<DecoderOnly_Model>(model_); packed && packed->vision_) {
+    stop_tokenizer_ = packed->vision_->processor->tokenizer_;
+    const auto& batching = *model_->config_->engine.dynamic_batching;
+    media_store_ = std::make_unique<MediaStore>(std::move(packed), batching.media_host_bytes, batching.media_device_bytes);
   }
   if (!cache_manager_) {
     throw std::runtime_error("Engine requires a non-null cache manager.");
@@ -1571,6 +1579,33 @@ std::shared_ptr<Request> Engine::CreateRequest(const RequestOptions& options) {
   return request;
 }
 
+uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request, const std::string& prompt,
+                           const TurnOptions& options, const Images* images) {
+  ValidateOwnerThread();
+  CompleteNonresidentClosedRequests();
+  ReclaimAbandonedRequests();
+  if (health_ == EngineHealth::Unhealthy) std::rethrow_exception(fatal_error_);
+  if (!request || !request->BelongsTo(*this))
+    throw std::invalid_argument("Cannot begin a turn for a request that does not belong to this engine.");
+  if (prompt.find('\0') != std::string::npos) throw std::invalid_argument("A formatted prompt must not contain embedded NUL.");
+  if (!IsValidUtf8(prompt)) throw std::invalid_argument("A formatted prompt must be valid UTF-8.");
+  if (!media_store_) {
+    if (images && images->num_images_ != 0) throw std::invalid_argument("This Engine model does not support image inputs.");
+    const auto tokens = GetOrCreateStopTokenizer()->Encode(prompt.c_str());
+    return BeginTurn(request, tokens, options);
+  }
+  const auto raw = GetOrCreateStopTokenizer()->Encode(prompt.c_str());
+  request->ValidateTurnAdmission(raw, options);
+  const size_t first_row = static_cast<size_t>(request->CurrentSequenceLength());
+  auto prepared = media_store_->Prepare(prompt, images, first_row, request->MaxSessionTokens() - first_row);
+  request->ReserveMedia(prepared.media.size());
+  media_store_->ReserveItems(prepared.media.size());
+  const auto turn_id = BeginTurn(request, prepared.tokens, options);
+  media_store_->Retain(prepared.media);
+  request->AppendMedia(prepared.media);
+  return turn_id;
+}
+
 uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
                            std::span<const int32_t> tokens,
                            const TurnOptions& options) {
@@ -2206,6 +2241,32 @@ void Engine::RunDynamic() {
     }
     if (!planning_result.executable) {
       const auto outcome = planning_result.outcome;
+      if (outcome.kind == StepOutcomeKind::PreparationProgress) {
+        try {
+          if (!media_store_ || !planning_result.preparation_item || !planning_result.preparation_request)
+            throw std::logic_error("The media preparation plan has no owning resources.");
+          media_store_->Encode(planning_result.preparation_item);
+          planning_result.preparation_request->ClearMediaPreparationFailure();
+        } catch (const Ort::Exception& error) {
+          if (ClassifyOrtExecutionFailure(error.what()) == ExecutionFailureKind::CapacityExceeded) {
+            try {
+              media_store_->ReleaseFeatures();
+            } catch (...) {
+              MarkUnhealthyAndThrow(StepOutcomeKind::FatalExecutionFailure, step_plan_.transaction_id,
+                                    outcome.request_id, "Failed to release encoder resources.", std::current_exception());
+            }
+            if (!planning_result.preparation_request->RetryMediaPreparation(planning_result.preparation_item))
+              RetainEvent(FailUnserviceableRequest(outcome.request_id));
+            return;
+          }
+          MarkUnhealthyAndThrow(StepOutcomeKind::FatalExecutionFailure, step_plan_.transaction_id,
+                                outcome.request_id, "Unclassified encoder execution failure.", std::current_exception());
+        } catch (...) {
+          MarkUnhealthyAndThrow(StepOutcomeKind::FatalExecutionFailure, step_plan_.transaction_id,
+                                outcome.request_id, "Encoder preparation violated its execution contract.", std::current_exception());
+        }
+        return;
+      }
       if (outcome.kind == StepOutcomeKind::NoWork &&
           !scheduler_->HasPendingRequests()) {
         return;
@@ -2732,6 +2793,7 @@ EngineEvent Engine::EventFromStepError(
       break;
     case StepOutcomeKind::UnserviceableRequest:
     case StepOutcomeKind::NoWork:
+    case StepOutcomeKind::PreparationProgress:
     case StepOutcomeKind::Committed:
       // These outcomes must be handled before throwing EngineStepError. Reaching this catch path is
       // itself an Engine contract failure; do not call a helper that can throw while translating it.

@@ -2,6 +2,8 @@
 // Licensed under the MIT License.
 #pragma once
 
+#include <cstdint>
+
 #include "image_processor.h"
 #include "ortx_cpp_helper.h"
 #include "speech_extractor.h"
@@ -12,12 +14,18 @@
 namespace Generators {
 
 struct Images {
+  struct Info {
+    size_t encoded_bytes{};
+    uint32_t width{};
+    uint32_t height{};
+  };
   Images() = delete;
-  Images(ort_extensions::OrtxObjectPtr<OrtxRawImages> images, size_t num_images)
-      : images_(std::move(images)), num_images_{num_images} {}
+  Images(ort_extensions::OrtxObjectPtr<OrtxRawImages> images, size_t num_images, std::vector<Info> info = {})
+      : images_(std::move(images)), num_images_{num_images}, info_{std::move(info)} {}
 
   ort_extensions::OrtxObjectPtr<OrtxRawImages> images_;
   size_t num_images_{};
+  std::vector<Info> info_;
 };
 
 std::unique_ptr<Images> LoadImages(std::span<const char* const> image_paths);

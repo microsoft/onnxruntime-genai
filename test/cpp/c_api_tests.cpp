@@ -1465,6 +1465,35 @@ TEST(CAPITests, EngineRequestTurnAndEventContracts) {
   EXPECT_EQ(idle_buffer->Get(0), nullptr);
 }
 
+TEST(CAPITests, EngineFormattedPromptAdmissionContracts) {
+  auto model = OgaModel::Create(MODEL_PATH "engine/synthetic-paged");
+  auto engine = OgaEngine::Create(*model);
+  auto request = engine->CreateRequest();
+  auto options = request->CreateTurnOptions();
+  options->SetMaxGeneratedTokens(1);
+  auto other = engine->CreateRequest();
+  auto foreign_options = other->CreateTurnOptions();
+  EXPECT_THROW(request->BeginTurn("ABC", foreign_options.get()), std::runtime_error);
+  const char invalid_utf8[]{static_cast<char>(0xff), '\0'};
+  EXPECT_THROW(request->BeginTurn(invalid_utf8, options.get()), std::runtime_error);
+  EXPECT_THROW(request->BeginTurn(nullptr, options.get()), std::runtime_error);
+  std::exception_ptr owner_error;
+  std::thread thread([&] {
+    try {
+      request->BeginTurn("ABC", options.get());
+    } catch (...) {
+      owner_error = std::current_exception();
+    }
+  });
+  thread.join();
+  ASSERT_NE(owner_error, nullptr);
+  EXPECT_THROW(std::rethrow_exception(owner_error), std::runtime_error);
+  EXPECT_EQ(request->BeginTurn("ABC", options.get()), 1u);
+  EXPECT_EQ(RunOne(*engine).turn_id, 1u);
+  request->Close();
+  other->Close();
+}
+
 TEST(CAPITests, EngineMaxRequestLengthUsesResolvedCacheCapacity) {
   auto config = OgaConfig::Create(MODEL_PATH "engine/synthetic-paged");
   config->Overlay(R"({
