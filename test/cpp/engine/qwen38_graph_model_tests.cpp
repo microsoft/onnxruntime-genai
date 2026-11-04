@@ -2031,6 +2031,30 @@ TEST(Qwen38GraphIdTest, OnlyTheTargetRunsBatchedAndTheBatchStaysWithinTheLimits)
   EXPECT_NO_THROW(Qwen38GraphAnnotationId(Qwen38GraphRun::kHead, 1, 0, 1));
 }
 
+TEST(Qwen38GraphIdTest, OffsetSlotIntervalsHaveDistinctGraphIds) {
+  std::set<int> ids;
+  for (const Qwen38GraphRun run : {Qwen38GraphRun::kTarget, Qwen38GraphRun::kHead, Qwen38GraphRun::kHeadR2}) {
+    for (int rows = 1; rows <= kQwen38GraphIdMaxRows; ++rows) {
+      for (int phase = 0; phase < kQwen38GraphIdMaxPhases; ++phase) {
+        EXPECT_TRUE(ids.insert(Qwen38GraphAnnotationId(run, rows, phase)).second);
+      }
+    }
+  }
+  for (int first = 0; first < kQwen38GraphIdMaxBatch; ++first) {
+    for (int batch = 1; first + batch <= kQwen38GraphIdMaxBatch; ++batch) {
+      if (first == 0 && batch == 1) continue;
+      for (int rows = 1; rows <= kQwen38GraphIdMaxRows; ++rows) {
+        for (int phase = 0; phase < kQwen38GraphIdMaxPhases; ++phase) {
+          EXPECT_TRUE(ids.insert(Qwen38GraphAnnotationId(Qwen38GraphRun::kTarget, rows, phase, batch, first)).second);
+        }
+      }
+    }
+  }
+  EXPECT_THROW(Qwen38GraphAnnotationId(Qwen38GraphRun::kTarget, 8, 0, 1, -1), std::out_of_range);
+  EXPECT_THROW(Qwen38GraphAnnotationId(Qwen38GraphRun::kTarget, 8, 0, 2, 7), std::out_of_range);
+  EXPECT_THROW(Qwen38GraphAnnotationId(Qwen38GraphRun::kHead, 1, 0, 1, 1), std::out_of_range);
+}
+
 TEST(Qwen38GraphConfigTest, NonInheritedPrefillSessionOptionsRetainCudaProviderWithoutGraphCapture) {
   Config config;
   OverlayConfig(config, R"({"model":{"decoder":{"session_options":{
