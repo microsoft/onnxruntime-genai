@@ -85,24 +85,32 @@ def test_llama_without_rope_scaling():
     assert "rescale_inv_freq" not in model.rope_attrs
 
 
-def test_rope_scaling_does_not_overwrite_rope_parameters():
-    # Transformers 5.x configs already carry rope_parameters (rope_scaling aliases it).
+def test_rope_scaling_aliasing_rope_parameters_is_unchanged():
+    # Transformers 5.x: rope_scaling is an alias of rope_parameters (the same dict).
     rope_parameters = {"rope_type": "default", "rope_theta": 500000.0, "partial_rotary_factor": 1.0}
     config = SimpleNamespace(
-        rope_parameters=rope_parameters,
-        rope_scaling={"type": "linear", "rope_theta": 10000.0},
-        max_position_embeddings=4096,
+        rope_parameters=rope_parameters, rope_scaling=rope_parameters, max_position_embeddings=4096
     )
     base.Model.make_config_init(base.Model.__new__(base.Model), config)
 
     assert config.rope_parameters is rope_parameters
-    assert rope_parameters == {
-        "rope_type": "default",
-        "rope_theta": 500000.0,
-        "partial_rotary_factor": 1.0,
-        "type": "linear",
-    }
+    assert rope_parameters == {"rope_type": "default", "rope_theta": 500000.0, "partial_rotary_factor": 1.0}
     assert config.rope_theta == 500000.0
+
+
+def test_legacy_type_in_rope_scaling_takes_precedence():
+    # rope_scaling values override rope_parameters (see test_yarn_rope_parity.py); a legacy
+    # "type" key must also replace a stale rope_type rather than leave the two disagreeing.
+    config = SimpleNamespace(
+        rope_parameters={"rope_type": "default", "rope_theta": 10000.0},
+        rope_scaling={"type": "linear", "factor": 4.0},
+        max_position_embeddings=4096,
+    )
+    base.Model.make_config_init(base.Model.__new__(base.Model), config)
+
+    assert config.rope_parameters == {"rope_type": "linear", "rope_theta": 10000.0, "type": "linear", "factor": 4.0}
+    assert config.rope_type == "linear"
+    assert config.factor == 4.0
 
 
 @pytest.mark.parametrize("rope_scaling", [None, {"type": "longrope"}])

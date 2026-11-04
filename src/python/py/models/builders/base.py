@@ -497,11 +497,10 @@ class Model:
             # Transformers 4.x configs have no rope_parameters and may use the legacy "type" key instead of "rope_type".
             if not isinstance(getattr(config, "rope_parameters", None), dict):
                 config.rope_parameters = {}
-            for key, value in config.rope_scaling.items():
-                if key not in config.rope_parameters:
-                    config.rope_parameters[key] = value
-            if "type" in config.rope_parameters and "rope_type" not in config.rope_parameters:
-                config.rope_parameters["rope_type"] = config.rope_parameters["type"]
+            # rope_scaling values take precedence, as before.
+            config.rope_parameters.update(config.rope_scaling)
+            if "type" in config.rope_scaling and "rope_type" not in config.rope_scaling:
+                config.rope_parameters["rope_type"] = config.rope_scaling["type"]
 
         if hasattr(config, "rope_parameters") and isinstance(config.rope_parameters, dict):
             # Collapse all options inside rope_parameters to the top-level config for easier access.
