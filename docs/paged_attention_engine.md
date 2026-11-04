@@ -1309,7 +1309,8 @@ after a sampled token. They pass the same stop-string, EOS, and length checks as
 become visible in that step; the model reads them on later steps (step 4), so the row plans no
 drafts and, on a model with fixed recurrent state, other rows defer theirs. Rollback discards them
 with the step. Fast-forward is off by default because forced token IDs follow the grammar's
-tokenization, and admission rejects it without whole-turn guidance or dynamic batching.
+tokenization, and admission rejects it without whole-turn guidance or dynamic batching, or with a
+nonzero `no_repeat_ngram_size`, which forced tokens would bypass.
 
 ## Per-turn generation policy
 

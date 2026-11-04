@@ -111,6 +111,12 @@ void ValidateTurnPolicy(const EffectiveTurnPolicy& policy,
         "no_repeat_ngram_size is not supported on the selected scoring device type (" +
         to_string(scoring_device_type) + ").");
   }
+  // Forced tokens are appended without sampling, so the no-repeat-ngram mask never sees them.
+  if (policy.no_repeat_ngram_size > 0 && options.guidance_fast_forward) {
+    throw std::runtime_error(
+        "Guidance fast-forward cannot be combined with no_repeat_ngram_size (" +
+        std::to_string(policy.no_repeat_ngram_size) + ").");
+  }
 
   // A greedy resolution draws from no distribution at all. An explicitly set scalar that only
   // makes sense for a distribution is a caller mistake, not a preference: reject it instead of

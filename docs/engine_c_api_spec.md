@@ -261,7 +261,8 @@ draft-eligible again. Guidance and stop strings can be enabled together.
 
 `OgaTurnOptionsSetGuidanceFastForward` lets whole-turn guidance append the tokens the grammar forces
 after a sampled token, visible in the same step. It is off by default because forced token IDs
-follow the grammar's tokenization, and requires whole-turn guidance and dynamic batching.
+follow the grammar's tokenization, and requires whole-turn guidance and dynamic batching. Forced
+tokens bypass `no_repeat_ngram_size`, so admission rejects a nonzero resolved value.
 
 `OgaTurnOptionsSetDelimitedGuidance` instead copies a Lark grammar for the body after a committed
 opening token and before a closing token. Admission checks that the distinct marker IDs are

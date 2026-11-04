@@ -355,6 +355,34 @@ TEST_F(GuidanceFastForwardTest, StaticBatchingRejectsAFastForwardTurnWithoutCons
   EXPECT_TRUE(request->IsAwaitingFirstTurn());
 }
 
+// Forced tokens skip the no-repeat-ngram mask, so admission must reject the combination whether the
+// turn or the model's search defaults supply the size.
+TEST_F(GuidanceFastForwardTest, NoRepeatNgramRejectsAFastForwardTurnWithoutConsumingIt) {
+  for (const bool from_model_default : {false, true}) {
+    SCOPED_TRACE(::testing::Message() << "from model default " << from_model_default);
+    model_ = LoadSyntheticPagedModel();
+    TurnOptions options;
+    options.guidance_type = "regex";
+    options.guidance_data = "ok";
+    options.guidance_fast_forward = true;
+    if (from_model_default) {
+      model_->config_->search.no_repeat_ngram_size = 1;
+    } else {
+      options.no_repeat_ngram_size = 1;
+    }
+    auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
+    auto request = CreateEngineRequest(engine.engine);
+
+    try {
+      request->BeginTurn(Prompt(), options);
+      FAIL() << "A fast-forward turn was admitted with no_repeat_ngram_size.";
+    } catch (const std::runtime_error& error) {
+      EXPECT_NE(std::string(error.what()).find("no_repeat_ngram_size"), std::string::npos);
+    }
+    EXPECT_TRUE(request->IsAwaitingFirstTurn());
+  }
+}
+
 #if USE_GUIDANCE
 // With a real llguidance grammar, step-by-step decoding reads the literal's tokens one model step
 // each, while fast-forward forces everything after the first token and reads it in one step. Both
