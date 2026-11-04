@@ -36,7 +36,7 @@ SMALL_CONFIG = {
     ],
 )
 def test_default_layer_type(config, expected):
-    assert base.Model.default_layer_type(config) == expected
+    assert base.Model.__new__(base.Model).default_layer_type(config) == expected
 
 
 def transformers_config(class_name, architecture, **kwargs):

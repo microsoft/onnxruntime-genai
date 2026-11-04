@@ -1599,8 +1599,7 @@ class Model:
             return [first_dim, last_dim]
         return ["batch_size", seq_dim, last_dim]
 
-    @staticmethod
-    def default_layer_type(config):
+    def default_layer_type(self, config):
         """Return the attention type of every layer when the config has no `layer_types`.
 
         Configs such as Mistral and Phi-3 only carry `sliding_window`, which Hugging Face
