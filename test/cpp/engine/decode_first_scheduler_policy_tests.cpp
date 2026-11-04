@@ -75,8 +75,9 @@ TEST(DecodeFirstSchedulerPolicyTest, UnreadCommittedTokensAreChunkWorkWithinThei
             (std::vector<size_t>{4, 2, 3}));
 }
 
-// Reading several unread tokens beside a verify row would make it a chunk step, which on a model with
-// fixed recurrent state costs the peer its drafts, so the row reads one and the prefill gets the rest.
+// Reading several unread tokens beside a verify row would make it a chunk step, which on a model
+// with fixed recurrent state costs the peer its drafts, so the row reads one and the prefill gets
+// the rest.
 TEST(DecodeFirstSchedulerPolicyTest, UnreadCommittedTokensReadOneWhileAPeerVerifiesDrafts) {
   const std::array selected{
       DecodeFirstBudgetCandidate{false, 1, std::nullopt, 3},

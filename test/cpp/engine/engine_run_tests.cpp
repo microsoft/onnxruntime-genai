@@ -2833,6 +2833,8 @@ TEST_F(EngineRunTest, ContinuationTurnQueuesBehindAWaitingPrefill) {
   });
   RunOne(*engine.engine);
   EXPECT_EQ(reads, (std::vector<size_t>{1, 1, 3}));
+  RunOne(*engine.engine);  // the new turn keeps its turn-start stamp, so served goes next
+  EXPECT_EQ(reads, (std::vector<size_t>{1, 3, 1}));
 }
 
 // When capacity planning drops a draft, the token it would have used goes to the prefill.
