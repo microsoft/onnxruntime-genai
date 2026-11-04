@@ -1073,9 +1073,9 @@ If at least one request fits, the step is executable even when other requests we
 After cache planning selects the batch, each decode keeps its one-token
 contribution. Every selected prefill also keeps its provisional token, then
 prefills expand in stable order while tokens remain. A prefill contribution is
-bounded by its remaining prompt, the model-configured `search.chunk_size` when present, and
-`max_scheduled_tokens`. A decode row with unread guidance fast-forward tokens expands before
-prefills, by up to one chunk under the same bounds and the cache's per-request query cap.
+bounded by its remaining prompt, the model-configured `search.chunk_size` when present, the cache's
+per-request query cap, and `max_scheduled_tokens`. A decode row with unread guidance fast-forward
+tokens expands first, under the same bounds with its unread tokens in place of the remaining prompt.
 
 The scheduler recomputes cache targets and assigns each request:
 
@@ -1097,7 +1097,7 @@ Only the logits for the last input token of each request are used to sample its 
 the request's remaining tokens, then binds those counts before decoder input or
 chunk-completion logic reads the request.
 
-The scheduler also marks whether the step is eligible for CUDA graph capture. A capturable step must be past prefill and must give every request the same number of tokens. Prefill, chunked prefill, mixed prefill/decode, and steps whose requests carry different draft widths all run eagerly.
+The scheduler also marks whether the step is eligible for CUDA graph capture. A capturable step must be past prefill and give every request the same number of tokens: one, or one plus its drafts. Prefill, chunked prefill, mixed prefill/decode, rows reading several guidance fast-forward tokens, and steps whose requests carry different draft widths all run eagerly.
 
 ### 5. Reserve the complete cache transaction
 
@@ -1307,17 +1307,16 @@ enabled together.
 `OgaTurnOptionsSetGuidanceFastForward` lets whole-turn guidance append the tokens its grammar forces
 after a sampled token. They pass the same stop-string, EOS, and length checks as sampled tokens. A
 step publishes at most `kMaxGeneratedTokensPerStep` tokens per Request, counting the sampled token;
-the rest of the span stays private to the Request, which publishes the next of them, instead of
-sampling, on each later step that reads to its tail. The cap does not bound discovery: llguidance
-computes the whole span while committing the sampled token, limited by its per-commit parser budget
-(`step_max_items`, 50,000 Earley items by default), and the guidance processor copies it once out of
-llguidance's buffer, after which the Request takes it without copying. The model reads published
-tokens on later steps (step 4), so the row plans no drafts and, on a model with fixed recurrent
-state, other rows defer theirs. Rollback restores the private span together with the grammar cursor;
-a finished or canceled turn drops it and keeps everything already published. Fast-forward is off by
-default because forced token IDs follow the grammar's tokenization, and admission rejects it without
-whole-turn guidance or dynamic batching, or with a nonzero `no_repeat_ngram_size`, which forced
-tokens would bypass.
+the rest of the forced span stays private to the Request, which publishes up to that many more of
+it, instead of sampling, on each later step that reads to its tail. The cap does not bound
+discovery: llguidance computes the whole span while committing the sampled token, limited only by
+its per-commit parser budget (`step_max_items`). The model reads published tokens on later steps
+(see [step 4](#4-finalize-the-packed-token-layout)), so the row plans no drafts and, on a model
+with fixed recurrent state, other rows defer theirs. Rollback restores the private span together
+with the grammar cursor; a finished or canceled turn drops it and keeps everything already
+published. Fast-forward is off by default because forced token IDs follow the grammar's
+tokenization, and admission rejects it without whole-turn guidance or dynamic batching, or with a
+nonzero `no_repeat_ngram_size`, which forced tokens would bypass.
 
 ## Per-turn generation policy
 
@@ -2103,11 +2102,12 @@ A dynamic step is graph-capture eligible only when every selected request:
 
 - Is past prefill.
 - Contributes the same number of tokens as every other request in the step.
+- Reads one committed token, plus its drafts on a verify step: a row reading several guidance
+  fast-forward tokens needs one logits row, not one per token.
 
 That second condition is what a single captured graph can describe: one token per request for plain
 decode, or `1 + drafts` for a speculative verify step whose requests all carry the same draft width.
-A step that mixes widths runs eagerly, as does one in which a row reads several guidance
-fast-forward tokens: it needs one logits row per request, not one per token.
+A step that mixes widths runs eagerly.
 
 ### Graph identity
 

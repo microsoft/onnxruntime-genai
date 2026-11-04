@@ -1189,8 +1189,8 @@ void Request::CommitStep(const RequestStepPlan& plan,
 }
 
 // Records the tokens this step makes externally visible, in sequence order. Accepted drafts are
-// already in tokens_host_; a freshly sampled token and the grammar-forced tokens that follow it are
-// only appended by CommitStep.
+// already in tokens_host_; a freshly sampled token and any staged forced tokens are only appended by
+// CommitStep.
 void Request::StageVisibleTokens(RequestStepResult& result,
                                  size_t committed_count,
                                  std::optional<int32_t> sampled_token,
@@ -1304,10 +1304,10 @@ RequestStepResult Request::StageGeneration(int64_t sequence_length_before) {
   if (guidance_logits_processor_ && token_appended && !done) {
     if (!forced_tokens_.empty()) {
       throw std::logic_error(
-          "A Request sampled before publishing the continuation its grammar forced.");
+          "A Request sampled before publishing its whole forced span.");
     }
-    // The grammar computed the whole forced span when it committed the sampled token; taking it
-    // moves the buffer rather than copying it. Only the first tokens become visible this step.
+    // The grammar computed the whole forced span when it committed the sampled token; only its first
+    // tokens become visible this step.
     forced_tokens_ = guidance_logits_processor_->GetFFTokens(0);
     StageForcedTokens(result, kMaxGeneratedTokensPerStep - 1);
   }
@@ -1324,9 +1324,9 @@ void Request::CommitGuidanceToken(const RequestStepResult& result) {
   }
 }
 
-// Stages up to `limit` more of the grammar's forced continuation, applying StageGeneration()'s
-// stop-string, EOS, turn and context checks in the same order. A limit cuts the span and ends the
-// turn, which releases the cursor and drops the unpublished rest of the span.
+// Stages up to `limit` more of the forced span with StageGeneration()'s stop-string, EOS, turn and
+// context checks. Reaching `limit` leaves the rest for a later step; a check that ends the turn
+// releases the cursor and drops the unpublished rest of the span.
 void Request::StageForcedTokens(RequestStepResult& result, size_t limit) {
   const auto pending = std::span<const int32_t>{forced_tokens_}.subspan(
       published_forced_token_count_ + staged_forced_token_count_);

@@ -66,7 +66,7 @@ struct TurnOptions {
   // inherited from a previous turn or from model/Request state.
   std::string guidance_type;
   std::string guidance_data;
-  // Appends the continuation the whole-turn grammar forces instead of sampling it one token per
+  // Appends the forced span the whole-turn grammar produces instead of sampling it one token per
   // step. Opt-in because the grammar tokenizes forced text itself, so token IDs, and therefore later
   // output, may differ from a turn without it.
   bool guidance_fast_forward{};
@@ -413,7 +413,7 @@ struct Request : std::enable_shared_from_this<Request>,
   RequestStepResult StageGenerationForTransaction(
       const RequestStepPlan& plan);
   RequestStepResult StageDraftCompletionForTransaction();
-  // Stages the next of the forced tokens the grammar already advanced past, instead of sampling.
+  // Stages up to kMaxGeneratedTokensPerStep more of the forced span instead of sampling.
   // Only valid when PublishesForcedTokens() holds for this step.
   RequestStepResult StageForcedTokensForTransaction();
   void RestoreStateForTransaction();
@@ -533,8 +533,8 @@ struct Request : std::enable_shared_from_this<Request>,
   bool IsChunkComplete() const;
 
   /**
-   * @brief True when this step reads to the end of the sequence while the grammar's forced
-   * continuation is not yet fully published, so the step publishes more of it instead of sampling.
+   * @brief True when this step reads to the end of the sequence while part of the forced span is
+   * not yet published, so the step publishes more of it instead of sampling.
    */
   bool PublishesForcedTokens() const;
 
