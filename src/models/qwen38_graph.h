@@ -403,6 +403,13 @@ struct Qwen38ContextTier {
 };
 std::optional<Qwen38ContextTier> Qwen38ContextTierForTarget(const std::string& target_filename);
 
+// The fold head graph that matches a 64k target: a head still named mtp.onnx becomes mtp_64k.onnx when the package has it,
+// because the head's cache capacity must equal the target's. Any other head, or another tier, is returned unchanged. The
+// caller applies it both to the config field and to the filename the head session is created from.
+std::string SelectQwen38TierHeadR2Filename(const std::string& head_r2_filename,
+                                           const std::optional<Qwen38ContextTier>& target_tier,
+                                           const std::function<bool(const std::string&)>& exists);
+
 // "session.moe.offload.*" entries added to the target session once the KV capacity of the selected target graph is known:
 // the model folder as the default source_root, and the reserve (and explicit expert) budgets. With
 // `adaptive_context_budget` the budgets follow the KV cache relative to the 32K-context reference (one slot of 33032
@@ -670,8 +677,10 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   void PrepBatch(int batch);
   void RunTarget(int rows, int phase, const Qwen38PromptRunHints* prompt = nullptr);
   // Every ORT Run of the engine goes through here: it publishes the QMoE hints of run_hints_ for exactly this Run
-  // (qwen38_ort_env.h). `participants` are the slots the Run serves: only their notices are published and consumed.
-  void RunSession(OrtSession& session, const OrtRunOptions* run_options, const OrtIoBinding& binding,
+  // (qwen38_ort_env.h) and attaches its per-run config entries (the warm-up flag) to `run_options`, which the Run may
+  // share with the other Runs of its graph. `participants` are the slots the Run serves: only their notices are
+  // published and consumed.
+  void RunSession(OrtSession& session, OrtRunOptions* run_options, const OrtIoBinding& binding,
                   const Qwen38PromptRunHints* prompt = nullptr, Qwen38SlotMask participants = Qwen38SlotBit(0));
   void EnqueueVerify();
   void EnqueueStep();

@@ -262,6 +262,22 @@ TEST(Qwen38OrtRunHintsTest, WarmupIsAnnouncedOnlyWhileItRunsAndDeterminismStaysF
   EXPECT_NE(Find(after, Qwen38OrtEnv::kForceDeterministicMoe), nullptr);
 }
 
+TEST(Qwen38OrtRunHintsTest, TheWarmupFlagIsAlsoAPerRunConfigEntryThatIsClearedAfterTheWarmup) {
+  Qwen38OrtRunHints hints;
+  const auto entry = [&hints]() {
+    const auto entries = hints.RunConfigEntries();
+    EXPECT_EQ(entries.size(), 1u);
+    EXPECT_EQ(entries.front().first, "ep.cuda.qmoe_in_warmup");
+    return entries.front().second;
+  };
+  EXPECT_EQ(entry(), "0");
+  hints.SetWarmup(true);
+  EXPECT_EQ(entry(), "1");
+  // The run options of a graph are shared by its Runs: a live Run after the warmup writes "0" over the "1".
+  hints.SetWarmup(false);
+  EXPECT_EQ(entry(), "0");
+}
+
 TEST(Qwen38OrtRunHintsTest, DeterministicMoeCanBeRequiredWithoutAWarmup) {
   Qwen38OrtRunHints hints;
   hints.RequireDeterministicMoe();

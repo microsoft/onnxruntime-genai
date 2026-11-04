@@ -2463,6 +2463,22 @@ TEST(Qwen38MoeOffloadTest, ParsesTheModeAndBudgetEntries) {
   EXPECT_FALSE(parse({{"session.moe.offload.reserve_device_bytes", "auto"}}).has_reserve_device_bytes);
 }
 
+TEST(Qwen38MoeOffloadTest, ASixtyFourKTargetTakesTheMatchingHeadGraphForTheConfigAndTheSession) {
+  const auto has_both = [](const std::string& file) { return file == "mtp.onnx" || file == "mtp_64k.onnx"; };
+  const auto has_default_only = [](const std::string& file) { return file == "mtp.onnx"; };
+  const auto tier_of = [](const char* target) { return Qwen38ContextTierForTarget(target); };
+
+  // A tier-named decoder without a context request: the head that is created follows the target's tier.
+  EXPECT_EQ(SelectQwen38TierHeadR2Filename("mtp.onnx", tier_of("model_64k.onnx"), has_both), "mtp_64k.onnx");
+  EXPECT_EQ(SelectQwen38TierHeadR2Filename("mtp.onnx", tier_of("target/model_s4_64k.onnx"), has_both), "mtp_64k.onnx");
+  // Nothing to switch to, another tier, no tier, or a head the package or the context request already chose.
+  EXPECT_EQ(SelectQwen38TierHeadR2Filename("mtp.onnx", tier_of("model_64k.onnx"), has_default_only), "mtp.onnx");
+  EXPECT_EQ(SelectQwen38TierHeadR2Filename("mtp.onnx", tier_of("model_8k.onnx"), has_both), "mtp.onnx");
+  EXPECT_EQ(SelectQwen38TierHeadR2Filename("mtp.onnx", tier_of("model.onnx"), has_both), "mtp.onnx");
+  EXPECT_EQ(SelectQwen38TierHeadR2Filename("mtp_64k.onnx", tier_of("model_64k.onnx"), has_both), "mtp_64k.onnx");
+  EXPECT_EQ(SelectQwen38TierHeadR2Filename("mtp/head_r2.onnx", tier_of("model_64k.onnx"), has_both), "mtp/head_r2.onnx");
+}
+
 TEST(Qwen38MoeOffloadTest, ContextTierFollowsTheTargetFileName) {
   const auto tier = Qwen38ContextTierForTarget("model_128k.onnx");
   ASSERT_TRUE(tier.has_value());

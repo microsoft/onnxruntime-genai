@@ -1830,8 +1830,11 @@ void Qwen38GraphEngine::RunTarget(int rows, int phase, const Qwen38PromptRunHint
   RunSession(*model_.session_target_, d.run_options.get(), *d.binding, prompt);
 }
 
-void Qwen38GraphEngine::RunSession(OrtSession& session, const OrtRunOptions* run_options, const OrtIoBinding& binding,
+void Qwen38GraphEngine::RunSession(OrtSession& session, OrtRunOptions* run_options, const OrtIoBinding& binding,
                                    const Qwen38PromptRunHints* prompt, Qwen38SlotMask participants) {
+  if (run_options != nullptr) {
+    for (const auto& [key, value] : run_hints_.RunConfigEntries()) run_options->AddConfigEntry(key.c_str(), value.c_str());
+  }
   RunWithQwen38OrtHints(run_hints_, prompt, [&] { session.Run(run_options, binding); }, participants);
 }
 
@@ -2697,9 +2700,9 @@ void Qwen38GraphEngine::Advance(const Qwen38CycleRecord& record, bool want_more)
 
 void Qwen38GraphEngine::Warmup() {
   // ORT captures a graph id after min_num_runs eager runs: touch every (rows, phase) and head direction enough times.
-  // The Runs of the warmup carry ORT_QMOE_IN_WARMUP and, from here on, every Run of the engine asks for deterministic
-  // MoE tactics: the engine keeps that state and publishes it around each Run only (qwen38_ort_env.h), also when this
-  // throws.
+  // The Runs of the warmup carry ep.cuda.qmoe_in_warmup (and ORT_QMOE_IN_WARMUP) and, from here on, every Run of the
+  // engine asks for deterministic MoE tactics: the engine keeps that state and publishes it around each Run only
+  // (qwen38_ort_env.h), also when this throws.
   const WarmupFlag warmup_flag{run_hints_};
   // The device embedding gather does not bound-check, so every dummy id must stay inside the vocabulary.
   const auto warm_token = [this](int64_t id) { return static_cast<int32_t>(id % std::max(vocab_, 1)); };
@@ -3001,6 +3004,15 @@ std::optional<Qwen38ContextTier> Qwen38ContextTierForTarget(const std::string& t
   return std::nullopt;
 }
 
+std::string SelectQwen38TierHeadR2Filename(const std::string& head_r2_filename,
+                                           const std::optional<Qwen38ContextTier>& target_tier,
+                                           const std::function<bool(const std::string&)>& exists) {
+  if (target_tier && target_tier->name == "64k" && head_r2_filename == "mtp.onnx" && exists("mtp_64k.onnx")) {
+    return "mtp_64k.onnx";
+  }
+  return head_r2_filename;
+}
+
 std::vector<Config::NamedString> Qwen38MoeOffloadSessionEntries(const Qwen38MoeOffloadSettings& settings,
                                                                 const std::filesystem::path& model_root, int kv_capacity,
                                                                 bool adaptive_context_budget, size_t request_slots) {
@@ -3235,10 +3247,10 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
   // (SyncQwen38GraphContext below remains the one place that sets the context settings): a target graph named after its
   // context tier tells the capacity up front.
   const auto context_tier = Qwen38ContextTierForTarget(target_filename);
-  if (context_tier && context_tier->name == "64k" && q.fold.head_r2.filename == "mtp.onnx" &&
-      package_has_file("mtp_64k.onnx")) {
-    config_->model.qwen38_graph.fold.head_r2.filename = "mtp_64k.onnx";
-  }
+  // The config field and the filename CreateSession opens below must name the same head graph.
+  config_->model.qwen38_graph.fold.head_r2.filename =
+      SelectQwen38TierHeadR2Filename(q.fold.head_r2.filename, context_tier, package_has_file);
+  head_r2_filename = SelectQwen38TierHeadR2Filename(head_r2_filename, context_tier, package_has_file);
   const char* adaptive_ctx_budget = std::getenv("ORT_QWEN38_ADAPTIVE_CTX_BUDGET");
   const bool adaptive_budget = adaptive_ctx_budget != nullptr && std::string_view(adaptive_ctx_budget) == "1";
   if (g_log.enabled && moe_offload.enabled && adaptive_ctx_budget != nullptr && *adaptive_ctx_budget != '\0') {
