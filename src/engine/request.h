@@ -523,7 +523,8 @@ struct Request : std::enable_shared_from_this<Request>,
    */
   size_t ScheduledTokenCount() const;
 
-  // The scheduler clock value at which this request was admitted or last read spare chunk tokens.
+  // The scheduler clock value at which this request started its turn or last counted as served for
+  // spare chunk tokens.
   uint64_t ChunkServiceStamp() const noexcept { return chunk_service_stamp_; }
 
   /**

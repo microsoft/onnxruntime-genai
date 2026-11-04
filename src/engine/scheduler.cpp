@@ -440,8 +440,10 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     // Draft-free rows end within the sequence the probe reserved, so chunk work can take the tokens
     // the dropped drafts would have used without another cache pass.
     if (released_draft_tokens) {
-      for (const auto& entry : plan.requests)
-        selected_candidates[entry.scheduling_order].decode_extra_token_count = entry.draft_token_count;
+      for (const auto& entry : plan.requests) {
+        selected_candidates[entry.scheduling_order].decode_extra_token_count =
+            entry.draft_token_count;
+      }
       allocate_token_budget();
     }
   }

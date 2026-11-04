@@ -19,7 +19,8 @@ struct DecodeFirstBudgetCandidate {
   // the model has not read yet.
   std::optional<size_t> chunk_token_cap;
   size_t decode_extra_token_count{};
-  // When this row last read spare tokens as chunk work, or was admitted; smaller waited longer.
+  // When this row last counted as served for spare chunk tokens, or started its turn; smaller
+  // waited longer.
   uint64_t last_chunk_service{};
 };
 
@@ -31,9 +32,9 @@ size_t DecodeFirstProvisionalRequestLimit(
     size_t max_batch_size);
 
 // Gives every selected row one token, then drafts their extra tokens, then shares the rest among
-// prefill chunks and decode rows reading unread committed tokens, longest-waiting first. When given,
-// `chunk_service` marks the rows that count as served: the first to read spare tokens and any that
-// read their whole chunk. A row cut short behind them keeps its place in line.
+// prefill chunks and decode rows reading unread committed tokens, longest-waiting first. When
+// given, `chunk_service` marks the rows that count as served: the first to read spare tokens and
+// any that read their whole chunk. A row cut short behind them keeps its place in line.
 std::vector<size_t> AllocateDecodeFirstTokenBudget(
     std::span<const DecodeFirstBudgetCandidate> selected_candidates,
     size_t max_scheduled_tokens,

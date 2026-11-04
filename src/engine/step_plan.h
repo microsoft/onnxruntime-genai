@@ -71,7 +71,8 @@ struct RequestStepPlan {
   bool is_prefill{};
   bool newly_admitted{};
   size_t scheduling_order{};  // Logical scheduler order before physical execution ordering.
-  // Nonzero when this row is admitted or reads spare chunk tokens; CommitStep() records it.
+  // Nonzero when this row starts a turn or counts as served for spare chunk tokens; CommitStep()
+  // records it.
   uint64_t chunk_service_stamp{};
   std::shared_ptr<const PrefixCacheMatch> prefix_match;
 
