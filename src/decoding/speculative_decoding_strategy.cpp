@@ -159,11 +159,11 @@ void SpeculativeDecodingStrategy::Step(Generator& g) {
         if (g.last_action_ == Generator::Action::rewound)
           g.search_->AppendTokens(next_tokens);
         g.ComputeLogits(next_tokens);
-        // As below, the guided standard step cannot read logits once the generation has ended.
-        if (g.search_->IsDone() || g.search_->GetSequenceLength() >= g.search_->params_->search.max_length) {
-          g.computed_logits_ = false;
-          return;
-        }
+      }
+      // As below, the guided standard step cannot read logits once the generation has ended.
+      if (g.search_->IsDone() || g.search_->GetSequenceLength() >= g.search_->params_->search.max_length) {
+        g.computed_logits_ = false;
+        return;
       }
       RunStandardDecodingStep(g);
       cooldown_.CompleteStandardStep();
@@ -184,11 +184,11 @@ void SpeculativeDecodingStrategy::Step(Generator& g) {
       if (g.last_action_ == Generator::Action::rewound)
         g.search_->AppendTokens(next_tokens);
       g.ComputeLogits(next_tokens);
-      // Forced tokens or a rewind replay can fill the sequence or end the search, which ends the generation as in DrainOne.
-      if (g.search_->IsDone() || g.search_->GetSequenceLength() >= g.search_->params_->search.max_length) {
-        g.computed_logits_ = false;
-        return;
-      }
+    }
+    // Forced tokens, here or in a rejected append, or a rewind replay can end the generation, as in DrainOne.
+    if (g.search_->IsDone() || g.search_->GetSequenceLength() >= g.search_->params_->search.max_length) {
+      g.computed_logits_ = false;
+      return;
     }
     RunRound(g);
   }

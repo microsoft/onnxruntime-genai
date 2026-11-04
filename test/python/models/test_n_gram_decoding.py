@@ -3287,7 +3287,10 @@ class TestNGramGuidance:
         assert len(tail) == 6
         assert re.fullmatch(r"[0-9] to the and of in", _decode_tokens(model_path, tail))
 
-    def test_fast_forward_tokens_stop_at_padded_max_length_after_lookup_miss(self, gpt2_tokenizer_source, tmp_path):
+    @pytest.mark.parametrize("append_after_digit", [False, True], ids=["step", "rejected-append"])
+    def test_fast_forward_tokens_stop_at_padded_max_length_after_lookup_miss(
+        self, gpt2_tokenizer_source, tmp_path, append_after_digit
+    ):
         model_path = _make_constant_guidance_model(tmp_path / "ff_padded_max_length", gpt2_tokenizer_source, 0)
         config_path = Path(model_path) / "genai_config.json"
         config = json.loads(config_path.read_text())
@@ -3312,6 +3315,10 @@ class TestNGramGuidance:
             raise
         generator.generate_next_token()
         # The ten forced words pad to 12 with 5 slots left, so one window of four is kept and no round starts.
+        if append_after_digit:
+            # The append runs the digit first, and its forced words leave no room for the appended token.
+            with pytest.raises(RuntimeError, match="exceeds max length"):
+                generator.append_tokens(np.array([[1]], dtype=np.int32))
         generator.generate_next_token()
         assert generator.is_done()
         tail = [int(token) for token in generator.get_sequence(0)][len(prompt) :]
