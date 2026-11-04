@@ -38,6 +38,18 @@ inline size_t GetGraphBlockTableColumns(size_t max_blocks, size_t max_columns) {
 // Shared automatic-sizing budget, including the fragmentation allowance.
 size_t PagedCacheMemoryBudget(size_t available_memory_bytes, float gpu_utilization_factor);
 
+// Remaining startup allowance, clamped to free device memory, minus explicit profiled headroom.
+size_t DeviceMemoryBudgetAvailableBytes(uint64_t budget_bytes,
+                                        size_t initial_free_bytes,
+                                        size_t available_memory_bytes,
+                                        std::optional<uint64_t> headroom_bytes);
+
+// Block capacity from an already resolved cache budget, without another fragmentation allowance.
+size_t ComputePagedBlockCapacityFromBudget(size_t budget_bytes,
+                                           size_t reserved_memory_bytes,
+                                           size_t primary_bytes_per_block,
+                                           size_t auxiliary_bytes_per_block = 0);
+
 // Blocks the target pool can hold in `available_memory_bytes`, after a fragmentation allowance and
 // the caller's utilization factor. `primary_bytes_per_block` is the target's own cost for one block
 // across all full-attention layers -- use PagedKeyValueCacheBytesPerBlock() to obtain it, so that
@@ -222,6 +234,9 @@ struct PagedKeyValueCache {
 
  private:
   struct LayerCache {
+    // Budgeted payload storage outlives its non-owning tensor views.
+    std::unique_ptr<void, Ort::AllocatorDeleter> key_storage;
+    std::unique_ptr<void, Ort::AllocatorDeleter> value_storage;
     // Shape: [num_blocks, block_size, num_kv_heads, head_width], where head_width is the trailing
     // dimension the graph declares for this layer's cache input, not config head_size. They differ
     // whenever the cache is packed: a 4-bit cache stores two elements per uint8, so head_width is

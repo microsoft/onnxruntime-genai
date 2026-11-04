@@ -519,6 +519,13 @@ std::vector<const char*> SessionInfo::GetOutputSymbolicShape(const std::string& 
 Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   CreateSessionOptions();
   EnsureDeviceOrtInit(*p_device_, *config_);
+  if (config_->engine.dynamic_batching &&
+      config_->engine.dynamic_batching->device_memory_budget_bytes &&
+      p_device_->GetType() == DeviceType::CUDA) {
+    size_t free_bytes, total_bytes;
+    p_device_->GetAvailableMemory(free_bytes, total_bytes);
+    device_memory_budget_initial_free_bytes_ = free_bytes;
+  }
   AddSharedInitializers();
 
   // Inputs-only interface backed by a host-accessible allocation, so the CPU updates the small

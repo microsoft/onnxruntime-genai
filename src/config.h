@@ -952,6 +952,8 @@ struct Config {
       // Baseline target blocks; Engine auxiliary caches share the equivalent byte budget.
       std::optional<size_t> num_blocks;
       std::optional<float> gpu_utilization_factor;  // Fraction of free GPU memory to use for key-value cache.
+      std::optional<uint64_t> device_memory_budget_bytes;    // GPU sizing allowance for one CUDA Model/Engine.
+      std::optional<uint64_t> device_memory_headroom_bytes;  // Additional profiled GPU memory reserved when budgeting.
       size_t max_batch_size{16};                    // Maximum batch size for dynamically batching requests.
       size_t max_scheduled_tokens{2048};            // Maximum tokens in one dynamically batched model run.
       std::optional<bool> prefix_caching;
@@ -1005,6 +1007,7 @@ struct Config {
 
       struct DynamicBatching {
         std::optional<size_t> num_blocks;
+        std::optional<uint64_t> device_memory_headroom_bytes;
         std::optional<size_t> max_batch_size;
         std::optional<size_t> max_scheduled_tokens;
         std::optional<bool> prefix_caching;

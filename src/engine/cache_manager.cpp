@@ -418,7 +418,17 @@ PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model,
     } else {
       size_t free_bytes = 0, total_bytes = 0;
       model_->p_device_kvcache_->GetAvailableMemory(free_bytes, total_bytes);
-      budget = PagedCacheMemoryBudget(free_bytes, *batching.gpu_utilization_factor);
+      if (batching.device_memory_budget_bytes) {
+        if (!model_->device_memory_budget_initial_free_bytes_) {
+          throw std::runtime_error("device_memory_budget_bytes must be configured before loading the model.");
+        }
+        budget = DeviceMemoryBudgetAvailableBytes(
+            *batching.device_memory_budget_bytes,
+            *model_->device_memory_budget_initial_free_bytes_, free_bytes,
+            batching.device_memory_headroom_bytes);
+      } else {
+        budget = PagedCacheMemoryBudget(free_bytes, *batching.gpu_utilization_factor);
+      }
     }
     const size_t available = budget > auxiliary_reserved_memory_bytes &&
                                      budget - auxiliary_reserved_memory_bytes >= target_block_bytes

@@ -1,9 +1,12 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <limits>
+
 #include <gtest/gtest.h>
 
 #include "engine/backend_factory.h"
+#include "engine/paged_key_value_cache.h"
 #include "engine_test_doubles.h"
 #include "engine_test_helpers.h"
 
@@ -44,6 +47,163 @@ TEST(EngineBackendFactoryTest, DefaultDecoderBundleKeepsItsExecutionProtocol) {
   EXPECT_EQ(engine->GetCapabilities().configured_max_batch_size,
             bundle.capabilities.configured_max_batch_size);
 }
+
+TEST(EngineBackendFactoryTest, DeviceMemoryBudgetRejectsUnsupportedDeviceWithoutChangingSizing) {
+  auto model = LoadSyntheticPagedModel();
+  auto& batching = *model->config_->engine.dynamic_batching;
+  const auto original_blocks = batching.num_blocks;
+  batching.device_memory_budget_bytes = 1024;
+  EXPECT_THROW(CreateEngineBackend(model), std::runtime_error);
+  EXPECT_EQ(batching.num_blocks, original_blocks);
+  EXPECT_FALSE(batching.gpu_utilization_factor);
+}
+
+TEST(EngineBackendFactoryTest, HeadroomDoesNotChangeSizingWithoutDeviceMemoryBudget) {
+  auto model = LoadSyntheticPagedModel();
+  auto& batching = *model->config_->engine.dynamic_batching;
+  const auto original_blocks = batching.num_blocks;
+  ASSERT_TRUE(original_blocks);
+  batching.device_memory_headroom_bytes = std::numeric_limits<uint64_t>::max();
+  const auto bundle = CreateEngineBackend(model);
+  EXPECT_EQ(bundle.dependencies.cache_manager->TargetBlockCount(), *original_blocks);
+  EXPECT_EQ(batching.num_blocks, original_blocks);
+}
+
+#if USE_CUDA
+TEST(EngineBackendFactoryTest, DeviceMemoryBudgetRequiresExplicitHeadroomBeforeChangingSizing) {
+  if (!GetDeviceInterface(DeviceType::CUDA)) {
+    GTEST_SKIP() << "CUDA device is unavailable";
+  }
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged");
+  ClearProviders(*config);
+  SetProviderOption(*config, "cuda", "enable_cuda_graph", "0");
+  config->engine.dynamic_batching->device_memory_budget_bytes = 64 * 1024 * 1024;
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  const auto original_blocks = model->config_->engine.dynamic_batching->num_blocks;
+  try {
+    (void)CreateEngineBackend(model);
+    FAIL() << "A budget requires explicit profiled headroom";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(std::string{error.what()}.find("device_memory_headroom_bytes"), std::string::npos);
+  }
+  EXPECT_EQ(model->config_->engine.dynamic_batching->num_blocks, original_blocks);
+  EXPECT_FALSE(model->config_->engine.dynamic_batching->gpu_utilization_factor);
+}
+
+TEST(EngineBackendFactoryTest, DeviceMemoryBudgetOverridesProfileBlocksWithoutUtilization) {
+  if (!GetDeviceInterface(DeviceType::CUDA)) {
+    GTEST_SKIP() << "CUDA device is unavailable";
+  }
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged");
+  ClearProviders(*config);
+  SetProviderOption(*config, "cuda", "enable_cuda_graph", "0");
+  config->engine.dynamic_batching->device_memory_budget_bytes = 64 * 1024 * 1024;
+  Config::RuntimeProfile profile;
+  profile.id = "budget-regression";
+  profile.eligibility.minimum_total_device_memory_bytes = 0;
+  profile.overlay.dynamic_batching.num_blocks = 1;
+  profile.overlay.dynamic_batching.device_memory_headroom_bytes = 32 * 1024 * 1024;
+  config->runtime_profiles.push_back(std::move(profile));
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  ASSERT_EQ(model->config_->engine.dynamic_batching->num_blocks, 1u);
+  ASSERT_FALSE(model->config_->engine.dynamic_batching->gpu_utilization_factor);
+  auto bundle = CreateEngineBackend(model);
+  EXPECT_FALSE(model->config_->engine.dynamic_batching->num_blocks);
+  EXPECT_EQ(model->config_->engine.dynamic_batching->gpu_utilization_factor, 1.0f);
+  EXPECT_GT(bundle.dependencies.cache_manager->TargetBlockCount(), 1u);
+  EXPECT_LE(bundle.dependencies.cache_manager->TargetBlockCount() * PagedKeyValueCacheBytesPerBlock(model),
+            32u * 1024 * 1024);
+  EXPECT_GT(bundle.capabilities.max_request_length, 4u);
+}
+
+TEST(EngineBackendFactoryTest, DeviceMemoryBudgetRejectsMtpDsparkAndLateConfiguration) {
+  if (!GetDeviceInterface(DeviceType::CUDA)) {
+    GTEST_SKIP() << "CUDA device is unavailable";
+  }
+  auto model = LoadSyntheticPagedCudaModel();
+  model->config_->engine.dynamic_batching->device_memory_budget_bytes = 64 * 1024 * 1024;
+  model->config_->engine.dynamic_batching->device_memory_headroom_bytes = 0;
+  EXPECT_THROW(CreateEngineBackend(model), std::runtime_error);
+  for (const bool dspark : {false, true}) {
+    model->config_->model.mtp.filename = dspark ? "" : "not-loaded.onnx";
+    model->config_->model.dflash2.filename = dspark ? "not-loaded.onnx" : "";
+    model->config_->model.dflash2.is_dspark = dspark;
+    try {
+      (void)CreateEngineBackend(model);
+      FAIL() << "Unsupported auxiliaries must be rejected before loading";
+    } catch (const std::runtime_error& error) {
+      EXPECT_NE(std::string{error.what()}.find("auxiliary models"), std::string::npos);
+    }
+  }
+}
+
+TEST(EngineBackendFactoryTest, DeviceMemoryBudgetSupportsWindowedDflash) {
+  if (!GetDeviceInterface(DeviceType::CUDA)) {
+    GTEST_SKIP() << "CUDA device is unavailable";
+  }
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-composite");
+  ClearProviders(*config);
+  SetProviderOption(*config, "cuda", "enable_cuda_graph", "0");
+  auto& batching = *config->engine.dynamic_batching;
+  batching.device_memory_budget_bytes = 64 * 1024 * 1024;
+  batching.device_memory_headroom_bytes = 16 * 1024 * 1024;
+  batching.max_batch_size = 1;
+  auto& draft = config->model.dflash2;
+  draft.filename = (fs::path{".."} / "synthetic-dspark" / "dflash2-fp16-aux.onnx").string();
+  draft.num_hidden_layers = 1;
+  draft.num_key_value_heads = 1;
+  draft.head_size = 1;
+  draft.block_size = 4;
+  draft.num_draft_tokens = 3;
+  draft.selector_top_k = 2;
+  draft.mask_token_id = 31;
+  draft.sliding_window = 8;
+  draft.main_aux_hidden_states = "hidden_states";
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  auto bundle = CreateEngineBackend(model);
+  ASSERT_NE(bundle.dependencies.dflash2_drafter, nullptr);
+  EXPECT_FALSE(model->config_->engine.dynamic_batching->num_blocks);
+  EXPECT_GT(bundle.dependencies.cache_manager->TargetBlockCount(), 0u);
+  EXPECT_EQ(bundle.dependencies.cache_manager->DraftCheckpointCapacity(), 1u);
+}
+
+TEST(EngineBackendFactoryTest, DeviceMemoryBudgetBoundsOptionalDraftSnapshots) {
+  if (!GetDeviceInterface(DeviceType::CUDA)) {
+    GTEST_SKIP() << "CUDA device is unavailable";
+  }
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-composite");
+  ClearProviders(*config);
+  SetProviderOption(*config, "cuda", "enable_cuda_graph", "0");
+  auto& batching = *config->engine.dynamic_batching;
+  batching.device_memory_budget_bytes = 64 * 1024 * 1024;
+  batching.device_memory_headroom_bytes = 32 * 1024 * 1024;
+  batching.num_blocks.reset();
+  batching.gpu_utilization_factor = 1.0f;
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  auto cache = CacheManager::Create(model, 0, 0, 40 * 1024 * 1024);
+  EXPECT_EQ(cache->DraftCheckpointCapacity(), 0u);
+  EXPECT_GT(cache->TargetBlockCount(), 0u);
+}
+
+TEST(EngineBackendFactoryTest, DeviceMemoryBudgetReservesCaptureBlockTablesBeforeAllocation) {
+  if (!GetDeviceInterface(DeviceType::CUDA)) {
+    GTEST_SKIP() << "CUDA device is unavailable";
+  }
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged");
+  ClearProviders(*config);
+  SetProviderOption(*config, "cuda", "enable_cuda_graph", "1");
+  config->model.context_length = 1 << 25;
+  config->engine.dynamic_batching->device_memory_budget_bytes = 64 * 1024 * 1024;
+  config->engine.dynamic_batching->device_memory_headroom_bytes = 0;
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  try {
+    (void)CreateEngineBackend(model);
+    FAIL() << "The context-bounded capture tables exceed this startup budget";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(std::string{error.what()}.find("reserved decoder state"), std::string::npos);
+  }
+}
+#endif
 
 TEST(EngineBackendFactoryTest, InjectedIndependentSlotsRemainNontransactional) {
   auto model = LoadDummyDecoderModel();
