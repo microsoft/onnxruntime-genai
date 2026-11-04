@@ -13,7 +13,7 @@ class LlamaModel(Model):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
     def make_rope_init(self, config):
-        if config.rope_parameters["rope_type"] == "llama3":
+        if getattr(config, "rope_parameters", {}).get("rope_type") == "llama3":
             # For models that rescale `inv_freq` using `low_freq_factor` and `high_freq_factor` (e.g. LLaMA-3.1)
             factor = config.rope_parameters["factor"] if "factor" in config.rope_parameters else 0
             low_freq_factor = config.rope_parameters["low_freq_factor"] if "low_freq_factor" in config.rope_parameters else 0

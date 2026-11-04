@@ -492,14 +492,16 @@ class Model:
                 if not hasattr(config, key):
                     setattr(config, key, getattr(text_config, key))
 
-        if hasattr(config, "rope_scaling"):
+        if getattr(config, "rope_scaling", None):
             # Collapse all options inside rope_scaling to rope_parameters for easier access.
-            rope_scaling = config.rope_scaling
-            for key in rope_scaling:
-                if not hasattr(config, "rope_parameters"):
-                    setattr(config, "rope_parameters", dict())
-                if not hasattr(config.rope_parameters, key):
-                    config.rope_parameters[key] = rope_scaling[key]
+            # Transformers 4.x configs have no rope_parameters and may use the legacy "type" key instead of "rope_type".
+            if not isinstance(getattr(config, "rope_parameters", None), dict):
+                config.rope_parameters = {}
+            for key, value in config.rope_scaling.items():
+                if key not in config.rope_parameters:
+                    config.rope_parameters[key] = value
+            if "type" in config.rope_parameters and "rope_type" not in config.rope_parameters:
+                config.rope_parameters["rope_type"] = config.rope_parameters["type"]
 
         if hasattr(config, "rope_parameters") and isinstance(config.rope_parameters, dict):
             # Collapse all options inside rope_parameters to the top-level config for easier access.
