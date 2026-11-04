@@ -1632,6 +1632,11 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetStopStrings(
  * validated before the Turn mutates the Request, so an invalid grammar leaves the Request exactly
  * as it was. Guidance is strictly Turn-scoped: a following Turn that sets none is unguided. A
  * guided Turn does not accept speculative drafts; the next unguided Turn does again.
+ *
+ * Only an OgaFinishReason_Eos finish means the grammar accepted the output. A Turn that finished
+ * for any other reason (MaxGeneratedTokens, MaxSessionTokens, StopString, Cancelled, or Failed) can
+ * hold incomplete JSON or tool arguments, so check the finish reason, parse, and validate the
+ * result before acting on it.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetGuidance(
     OgaTurnOptions* options, const char* guidance_type,
@@ -1651,12 +1656,12 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetGuidance(
  * without dynamic batching.
  *
  * Other requests on the Engine see only scheduling effects: a step in which this Turn reads several
- * forced tokens runs the whole batch without CUDA graph replay, and while another request verifies
- * speculative drafts this Turn reads one forced token per step.
+ * unread tokens runs the whole batch without CUDA graph replay; while another request verifies
+ * speculative drafts this Turn reads one unread token per step; otherwise its unread tokens share
+ * the step's spare token budget with other requests' prefill chunks, longest-waiting first.
  *
- * As for any guided Turn, only an end-of-sequence finish means the grammar accepted the output. A
- * Turn that ended on a turn or context limit, a stop string, or cancellation can hold incomplete
- * JSON or tool arguments, so check the finish reason and validate the result before acting on it.
+ * As for any guided Turn, check the finish reason before trusting the output (see
+ * OgaTurnOptionsSetGuidance).
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetGuidanceFastForward(
     OgaTurnOptions* options, bool enable);

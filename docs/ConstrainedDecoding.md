@@ -46,7 +46,7 @@ punctuation, instead of running a decode step for each. It is off by default bec
 token IDs, random-number consumption, and later values, both inside and after the grammar. It is
 not available with delimited guidance, a nonzero `no_repeat_ngram_size`, or static batching.
 
-For any guided Engine turn, only an end-of-sequence finish means the grammar accepted the output. A
-turn that stopped on a turn or context limit or a stop string, or was canceled, can end with
-incomplete JSON or tool arguments: check the turn's finish reason, then parse and validate the
-result before calling a tool.
+For any guided Engine turn, only an `Eos` finish means the grammar accepted the output. A turn that
+finished for any other reason (`MaxGeneratedTokens`, `MaxSessionTokens`, `StopString`,
+`Cancelled`, or `Failed`) can hold incomplete JSON or tool arguments: check the turn's finish
+reason, then parse and validate the result before calling a tool.

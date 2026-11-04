@@ -504,6 +504,10 @@ TEST_F(GuidanceFastForwardTest, SmallEventBuffersDeliverForcedTokensInOrderWitho
     auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
     auto forcing = CreateRequestWithPrompt(engine.engine, Prompt(), Limit(12));
     InstallForcingGrammar(*forcing, /*trigger=*/11, LongForcedSpan());
+    // The forcing row's events come first, so the peer's token can only wait behind them.
+    engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
+      ASSERT_EQ(context.plan->requests.front().request_id, forcing.get());
+    });
     auto peer = CreateRequestWithPrompt(engine.engine, Prompt(), Limit(2));
 
     std::vector<EngineEvent> storage(capacity);
@@ -518,6 +522,9 @@ TEST_F(GuidanceFastForwardTest, SmallEventBuffersDeliverForcedTokensInOrderWitho
         if (!(event.flags & EngineEventFlagToken))
           continue;
         if (event.request == peer) {
+          // The peer's first token is step 1's last event: no step ran while draining it.
+          if (peer_tokens.empty())
+            EXPECT_EQ(engine.executor->decode_calls, 1);
           peer_tokens.push_back(event.token);
         } else {
           forcing_tokens.push_back(event.token);
@@ -659,8 +666,13 @@ TEST_F(GuidanceFastForwardTest, FailureAfterForcedTokensAreStagedRollsThemBackFo
     const auto before = forcing->Snapshot();
     const auto generated_before = GeneratedTokens(*forcing);
 
+    // The forcing row stages its tokens before the peer's commit throws.
+    engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
+      ASSERT_EQ(context.plan->requests.front().request_id, forcing.get());
+    });
     peer_grammar.FailNextCommit();
     ASSERT_EQ(RunOne(*engine.engine).flags, EngineEventFlagRetryable);
+    engine.executor->SetExecutionCallback({});
     EXPECT_EQ(forcing->CurrentSequenceLength(), before.current_sequence_length);
     EXPECT_EQ(forcing->ProcessedSequenceLength(), before.processed_sequence_length);
     EXPECT_EQ(GeneratedTokens(*forcing), generated_before);
@@ -680,7 +692,7 @@ TEST_F(GuidanceFastForwardTest, FailureAfterForcedTokensAreStagedRollsThemBackFo
 }
 
 // A fatal failure after a publish step staged forced tokens ends the turn with only the output that
-// earlier steps published; the staged and still-private tokens are dropped.
+// earlier steps published; the tokens that step staged are dropped.
 TEST_F(GuidanceFastForwardTest, FatalFailureAfterForcedTokensAreStagedKeepsOnlyPublishedOutput) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
   auto forcing = CreateRequestWithPrompt(engine.engine, Prompt());

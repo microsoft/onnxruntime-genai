@@ -1320,8 +1320,9 @@ its per-commit parser budget (`step_max_items`). The model reads published token
 verifies drafts it reads one published token per step, so peers keep theirs. Rollback restores the
 private span together with the grammar cursor; a finished or canceled turn drops it and keeps
 everything already published. Fast-forward is off by default because forced token IDs follow the
-grammar's tokenization, and admission rejects it without whole-turn guidance or dynamic batching, or
-with a nonzero `no_repeat_ngram_size`, which forced tokens would bypass.
+grammar's tokenization and draw no random numbers, and admission rejects it without whole-turn
+guidance or dynamic batching, or with a nonzero `no_repeat_ngram_size`, which forced tokens would
+bypass.
 
 ## Per-turn generation policy
 

@@ -266,9 +266,9 @@ follow the grammar's tokenization and draw no random numbers, so token IDs, rand
 consumption, and later values inside and after the grammar can differ from a turn without it. It
 requires whole-turn guidance and dynamic batching, admission rejects a nonzero resolved
 `no_repeat_ngram_size` (forced tokens would bypass it), and `OgaTurnOptionsClearGuidance` turns it
-off. Other requests see only scheduling effects: a step that reads several forced tokens runs
-without CUDA graph replay, and while a peer verifies drafts the turn reads one forced token per
-step.
+off. Other requests see only scheduling effects: a step that reads several unread tokens runs
+without CUDA graph replay; while a peer verifies drafts the turn reads one unread token per step;
+otherwise its unread tokens share the step's spare token budget with prefill chunks.
 
 `OgaTurnOptionsSetDelimitedGuidance` instead copies a Lark grammar for the body after a committed
 opening token and before a closing token. Admission checks that the distinct marker IDs are
