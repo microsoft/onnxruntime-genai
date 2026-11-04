@@ -2443,12 +2443,10 @@ void Engine::RunDynamic() {
           }
         }
       }
-      size_t step_event_count = 0;
       for (size_t i = 0; i < step_plan_.requests.size(); ++i) {
         if (step_results_[i].visible_token_count != 0 ||
             step_results_[i].done) {
           staged_event_order_.push_back(i);
-          step_event_count += std::max<size_t>(step_results_[i].visible_token_count, 1);
         }
       }
       std::sort(
@@ -2457,7 +2455,6 @@ void Engine::RunDynamic() {
             return step_plan_.requests[left].scheduling_order <
                    step_plan_.requests[right].scheduling_order;
           });
-      ReserveStepEventCapacity(step_event_count);
     } catch (const MtpRollbackError&) {
       const auto rollback_error = std::current_exception();
       rollback_transaction();
@@ -2642,13 +2639,12 @@ void Engine::AppendEventsFromStep(
         request->TurnCachedPromptTokens()};
   };
 
-  const auto visible_tokens = request->TokensCpu().last(result.visible_token_count);
-  for (size_t i = 0; i < visible_tokens.size(); ++i) {
+  for (size_t i = 0; i < result.visible_token_count; ++i) {
     EngineEvent event;
     event.request = request;
     event.turn_id = request->CurrentTurnId();
     event.flags = EngineEventFlagToken;
-    event.token = visible_tokens[i];
+    event.token = result.visible_tokens[i];
     if (result.done && i + 1 == result.visible_token_count) {
       finish_turn(event);
     }
@@ -2662,23 +2658,6 @@ void Engine::AppendEventsFromStep(
     finish_turn(event);
     staged_events_.push_back(std::move(event));
   }
-}
-
-void Engine::ReserveStepEventCapacity(size_t event_count) {
-  if (event_count <= max_step_event_count_) {
-    return;
-  }
-  if (fatal_events_.max_size() < kFatalEventOverhead ||
-      event_count > fatal_events_.max_size() - kFatalEventOverhead ||
-      tracked_requests_.size() >
-          fatal_events_.max_size() - kFatalEventOverhead - event_count) {
-    throw std::overflow_error("Engine event capacity exceeds the supported size.");
-  }
-  // Steps run only once earlier events are drained, so growing these copies no events.
-  pending_events_.reserve(event_count);
-  staged_events_.reserve(event_count);
-  fatal_events_.reserve(event_count + tracked_requests_.size() + kFatalEventOverhead);
-  max_step_event_count_ = event_count;
 }
 
 std::shared_ptr<Request> Engine::FindTrackedRequest(const void* request_id) const {

@@ -52,7 +52,7 @@ struct ConstrainedLogitsProcessor {
   // Reset is used to reset the constraints of the logits processor and then recompute the mask, used after rewinding
   virtual void Reset() = 0;
 
-  // Return a clone of the ff_tokens for the given index
+  // Moves out the tokens the last commit forced for the given index, leaving none behind
   virtual std::vector<int32_t> GetFFTokens(size_t index) = 0;
 
   // Clone as an independent grammar cursor at the current state. Speculative decoding uses this to

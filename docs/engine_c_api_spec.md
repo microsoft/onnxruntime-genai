@@ -260,9 +260,10 @@ A turn with whole-turn guidance does not accept speculative drafts; the next ung
 draft-eligible again. Guidance and stop strings can be enabled together.
 
 `OgaTurnOptionsSetGuidanceFastForward` lets whole-turn guidance append the tokens the grammar forces
-after a sampled token, visible in the same step. It is off by default because forced token IDs
-follow the grammar's tokenization, and requires whole-turn guidance and dynamic batching. Forced
-tokens bypass `no_repeat_ngram_size`, so admission rejects a nonzero resolved value.
+after a sampled token, up to `kMaxGeneratedTokensPerStep` visible per step including the sampled
+token. It is off by default because forced token IDs follow the grammar's tokenization, and requires
+whole-turn guidance and dynamic batching. Forced tokens bypass `no_repeat_ngram_size`, so admission
+rejects a nonzero resolved value.
 
 `OgaTurnOptionsSetDelimitedGuidance` instead copies a Lark grammar for the body after a committed
 opening token and before a closing token. Admission checks that the distinct marker IDs are
@@ -784,12 +785,12 @@ staged_events_.reserve(max_step_events);
 fatal_events_.reserve(max_step_events + 1);
 ```
 
-`reserve` allocates capacity without constructing events. A committed step normally produces at most
-`kMaxGeneratedTokensPerStep` events per affected Request; a guidance fast-forward step can produce
-more, and grows these stores before its commit boundary. Request creation grows dedicated
-fatal-event capacity for that complete retained step plus every tracked Request because fatal
-handling may publish a terminal event for executable Turns outside the failed batch. This keeps
-event publication allocation-free after model/cache commit and after the Engine becomes unhealthy.
+`reserve` allocates capacity without constructing events. A committed step produces at most
+`kMaxGeneratedTokensPerStep` events per affected Request, so normal retained output is bounded by
+that limit times the scheduled batch size. Request creation grows dedicated fatal-event capacity
+for that complete retained step plus every tracked Request because fatal handling may publish a
+terminal event for executable Turns outside the failed batch. This keeps event publication
+allocation-free after model/cache commit and after the Engine becomes unhealthy.
 
 Conceptual positive-capacity `Run` flow:
 

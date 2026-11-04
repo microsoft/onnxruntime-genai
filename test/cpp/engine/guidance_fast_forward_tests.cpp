@@ -140,30 +140,34 @@ TEST_F(GuidanceFastForwardTest, ForcedTokensFollowTheSampledTokenAndReachTheMode
   EXPECT_TRUE(ValidateRequestInvariants(request->Snapshot()).empty());
 }
 
-TEST_F(GuidanceFastForwardTest, ForcedSpanLongerThanADraftStepIsEmittedAndReadInOneStep) {
-  auto engine = MakeDoublesEngine(model_, /*capacity=*/1, /*forced_token=*/11);
+// The sampling step and each later step publish at most kMaxGeneratedTokensPerStep tokens. The rest
+// of the span stays private, and the row publishes the next of it, instead of sampling, as it reads
+// to its tail.
+TEST_F(GuidanceFastForwardTest, LongForcedSpanIsPublishedAtMostEightTokensPerStepBeforeSampling) {
+  static_assert(kMaxGeneratedTokensPerStep == 8);
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
   auto request = CreateEngineRequest(engine.engine);
   request->BeginTurn(Prompt());
-  const std::vector<int32_t> forced{12, 13, 14, 15, 16, 17, 18, 19, 20};
+  const std::vector<int32_t> forced{12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22};
   InstallForcingGrammar(*request, /*trigger=*/11, forced);
 
-  // Ten events from one step, more than the Engine preallocates for a batch of one, delivered
-  // through a smaller caller buffer without running another step.
-  std::array<EngineEvent, 4> storage;
-  std::vector<int32_t> tokens;
-  while (tokens.size() < forced.size() + 1) {
-    const size_t events = engine.engine->Run(storage);
-    ASSERT_NE(events, 0u);
-    const auto drained = EventTokens(std::span{storage}.first(events));
-    tokens.insert(tokens.end(), drained.begin(), drained.end());
-    ASSERT_EQ(engine.executor->decode_calls, 1);
-  }
-  EXPECT_EQ(tokens, Concat({11}, forced));
+  std::array<EngineEvent, 16> storage;
+  ASSERT_EQ(engine.engine->Run(storage), 8u);
+  EXPECT_EQ(EventTokens(std::span{storage}.first(8)),
+            (std::vector<int32_t>{11, 12, 13, 14, 15, 16, 17, 18}));
 
+  // Sampling now would end the turn on EOS.
   engine.executor->SetForcedToken(EosToken(*model_));
+  ASSERT_EQ(engine.engine->Run(storage), 4u);
+  EXPECT_EQ(EventTokens(std::span{storage}.first(4)), (std::vector<int32_t>{19, 20, 21, 22}));
+  EXPECT_EQ(storage[3].flags & EngineEventFlagTurnFinished, 0u);
+
   ASSERT_EQ(engine.engine->Run(storage), 1u);
   EXPECT_EQ(storage[0].finish_reason, GenerationFinishReason::EosToken);
-  EXPECT_EQ(engine.executor->decoded_token_counts.back(), forced.size() + 1);
+  EXPECT_EQ(engine.executor->decoded_token_counts, (std::vector<size_t>{Prompt().size(), 8, 4}));
+  const auto tokens = request->TokensCpu();
+  EXPECT_EQ(std::vector<int32_t>(tokens.begin(), tokens.end()), Concat(Prompt(), Concat({11}, forced)));
+  EXPECT_EQ(request->TurnGeneratedTokens(), forced.size() + 1);
   EXPECT_TRUE(ValidateRequestInvariants(request->Snapshot()).empty());
 }
 
@@ -210,6 +214,24 @@ TEST_F(GuidanceFastForwardTest, TurnLimitCutsTheForcedSpanAndEndsTheTurn) {
     EXPECT_EQ(std::vector<int32_t>(tokens.begin(), tokens.end()), Concat(Prompt(), expected));
     EXPECT_TRUE(ValidateRequestInvariants(request->Snapshot()).empty());
   }
+}
+
+// A later published batch carries no sampled token, so only its forced tokens count toward the limit.
+TEST_F(GuidanceFastForwardTest, TurnLimitInsideTheUnpublishedSpanEndsTheTurnThere) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
+  auto request = CreateEngineRequest(engine.engine);
+  TurnOptions options;
+  options.max_generated_tokens = 10;
+  request->BeginTurn(Prompt(), options);
+  InstallForcingGrammar(*request, /*trigger=*/11, {12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22});
+
+  std::array<EngineEvent, 16> storage;
+  ASSERT_EQ(engine.engine->Run(storage), 8u);
+  ASSERT_EQ(engine.engine->Run(storage), 2u);
+  EXPECT_EQ(EventTokens(std::span{storage}.first(2)), (std::vector<int32_t>{19, 20}));
+  EXPECT_EQ(storage[1].finish_reason, GenerationFinishReason::TurnLimit);
+  EXPECT_EQ(request->TurnGeneratedTokens(), 10u);
+  EXPECT_TRUE(ValidateRequestInvariants(request->Snapshot()).empty());
 }
 
 TEST_F(GuidanceFastForwardTest, ContextLimitCutsTheForcedSpanAndEndsTheTurn) {
@@ -290,46 +312,88 @@ TEST_F(GuidanceFastForwardTest, HybridStepReadingForcedTokensDefersAnotherReques
   ASSERT_GT(engine.engine->Run(storage), 0u);
 }
 
-TEST_F(GuidanceFastForwardTest, RollbackDiscardsForcedTokensAndTheRetryCommitsThemOnce) {
+// Rolling back the sampling step restores the private span together with the grammar cursor, and
+// rolling back a step that publishes from it restores what that step staged.
+TEST_F(GuidanceFastForwardTest, RollbackRestoresTheUnpublishedSpanAndTheRetryPublishesItOnce) {
   for (const bool queued_restore : {false, true}) {
     SCOPED_TRACE(::testing::Message() << "queued restore " << queued_restore);
     auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
     auto request = CreateEngineRequest(engine.engine);
     request->BeginTurn(Prompt());
-    InstallForcingGrammar(*request, /*trigger=*/11, {12, 13});
-    const auto before = request->Snapshot();
+    InstallForcingGrammar(*request, /*trigger=*/11, {12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22});
+    const auto restore = [&] {
+      if (queued_restore) {
+        request->QueueStateRestoreForTransaction();
+        request->CompleteStateRestoreForTransaction();
+      } else {
+        request->RestoreStateForTransaction();
+      }
+    };
+    const auto plan_step = [&] {
+      RequestStepPlan plan;
+      plan.request = request;
+      plan.request_id = request.get();
+      plan.sequence_length_before = request->CurrentSequenceLength();
+      plan.target_cache_slots = static_cast<size_t>(plan.sequence_length_before);
+      PrepareRequestStep(model_, plan);
+      return plan;
+    };
 
-    RequestStepPlan plan;
-    plan.request = request;
-    plan.request_id = request.get();
-    plan.sequence_length_before = before.current_sequence_length;
-    plan.target_cache_slots = static_cast<size_t>(before.current_sequence_length);
-    PrepareRequestStep(model_, plan);
-
+    auto plan = plan_step();
     request->SaveStateForTransaction();
-    const auto staged = request->ApplyLogitsForTransaction(LogitsForToken(*model_, 11));
-    ASSERT_EQ(staged.visible_token_count, 3u);
-    EXPECT_EQ(request->CurrentSequenceLength(), before.current_sequence_length + 3);
-    if (queued_restore) {
-      request->QueueStateRestoreForTransaction();
-      request->CompleteStateRestoreForTransaction();
-    } else {
-      request->RestoreStateForTransaction();
-    }
-    EXPECT_EQ(request->CurrentSequenceLength(), before.current_sequence_length);
-
+    ASSERT_EQ(request->ApplyLogitsForTransaction(LogitsForToken(*model_, 11)).visible_token_count, 8u);
+    restore();
+    EXPECT_EQ(request->CurrentSequenceLength(), static_cast<int64_t>(Prompt().size()));
     request->SaveStateForTransaction();
-    const auto retried = request->ApplyLogitsForTransaction(LogitsForToken(*model_, 11));
-    ASSERT_EQ(retried.visible_token_count, 3u);
+    const auto sampled = request->ApplyLogitsForTransaction(LogitsForToken(*model_, 11));
+    ASSERT_EQ(sampled.visible_token_count, 8u);
     request->CommitStateForTransaction();
-    request->CommitStep(plan, retried);
+    request->CommitStep(plan, sampled);
+
+    plan = plan_step();
+    ASSERT_TRUE(request->PublishesForcedTokens());
+    request->SaveStateForTransaction();
+    ASSERT_EQ(request->StageForcedTokensForTransaction().visible_token_count, 4u);
+    restore();
+    plan = plan_step();
+    request->SaveStateForTransaction();
+    const auto published = request->StageForcedTokensForTransaction();
+    ASSERT_EQ(published.visible_token_count, 4u);
+    request->CommitStateForTransaction();
+    request->CommitStep(plan, published);
 
     const auto tokens = request->TokensCpu();
-    EXPECT_EQ(std::vector<int32_t>(tokens.begin(), tokens.end()), Concat(Prompt(), {11, 12, 13}));
-    EXPECT_EQ(request->TurnGeneratedTokens(), 3u);
+    EXPECT_EQ(std::vector<int32_t>(tokens.begin(), tokens.end()),
+              Concat(Prompt(), {11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22}));
+    EXPECT_EQ(request->TurnGeneratedTokens(), 12u);
     auto* grammar = static_cast<ForcingGrammar*>(RequestGuidanceTestAccess::Get(*request));
     EXPECT_EQ(grammar->CommittedTokens(), (std::vector<int32_t>{11}));
   }
+}
+
+// Cancellation ends the turn with what it already published and drops the rest of the span, so the
+// next turn samples instead of publishing the canceled turn's leftovers.
+TEST_F(GuidanceFastForwardTest, CancelKeepsPublishedTokensAndDropsTheUnpublishedSpan) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
+  auto request = CreateEngineRequest(engine.engine);
+  request->BeginTurn(Prompt());
+  InstallForcingGrammar(*request, /*trigger=*/11, {12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22});
+
+  std::array<EngineEvent, 16> storage;
+  ASSERT_EQ(engine.engine->Run(storage), 8u);
+  ASSERT_TRUE(request->Cancel(request->CurrentTurnId()));
+  ASSERT_EQ(engine.engine->Run(storage), 1u);
+  EXPECT_EQ(storage[0].finish_reason, GenerationFinishReason::Canceled);
+  const auto published = Concat(Prompt(), {11, 12, 13, 14, 15, 16, 17, 18});
+  const auto tokens = request->TokensCpu();
+  EXPECT_EQ(std::vector<int32_t>(tokens.begin(), tokens.end()), published);
+
+  engine.executor->SetForcedToken(30);
+  request->BeginTurn(std::vector<int32_t>{5});
+  ASSERT_EQ(engine.engine->Run(storage), 1u);
+  EXPECT_EQ(storage[0].token, 30);
+  const auto continued = request->TokensCpu();
+  EXPECT_EQ(std::vector<int32_t>(continued.begin(), continued.end()), Concat(published, {5, 30}));
 }
 
 TEST_F(GuidanceFastForwardTest, StaticBatchingRejectsAFastForwardTurnWithoutConsumingIt) {

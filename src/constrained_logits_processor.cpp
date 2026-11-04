@@ -690,9 +690,7 @@ std::vector<int32_t> GuidanceLogitsProcessor::GetFFTokens(size_t index) {
     return std::vector<int32_t>();
   }
 
-  auto v = std::vector<int32_t>(ff_tokens_batch_[index]);
-  ff_tokens_batch_[index].clear();
-  return v;
+  return std::exchange(ff_tokens_batch_[index], {});
 }
 
 void GuidanceLogitsProcessor::CommitTokens(std::span<int32_t> tokens) {

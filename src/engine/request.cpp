@@ -351,6 +351,9 @@ void Request::MarkClosedFromEngine(const Engine& engine) noexcept {
   accepted_draft_count_ = 0;
   evaluated_draft_count_ = 0;
   draft_verification_.Reset();
+  std::vector<int32_t>{}.swap(forced_tokens_);
+  forced_tokens_published_ = 0;
+  staged_forced_token_count_ = 0;
 }
 
 void Request::CompleteCloseFromEngine(const Engine& engine) noexcept {
@@ -404,6 +407,10 @@ void Request::ReleaseTurnResources() noexcept {
   // reseeded step was rolled back), so it is discarded without touching the durable basis.
   pending_reseed_.reset();
   pending_reseed_applied_ = false;
+  // The grammar cursor that forced these tokens is gone; output already published stays committed.
+  forced_tokens_.clear();
+  forced_tokens_published_ = 0;
+  staged_forced_token_count_ = 0;
 }
 
 void Request::Schedule() {
@@ -820,8 +827,16 @@ void Request::BindScheduledTokenCount(size_t token_count) {
   scheduled_token_count_ = token_count;
 }
 
-bool Request::IsChunkComplete() const {
+bool Request::ReadsToSequenceEnd() const {
   return processed_sequence_length_ + static_cast<int64_t>(ScheduledTokenCount()) >= CurrentSequenceLength();
+}
+
+bool Request::IsChunkComplete() const {
+  return ReadsToSequenceEnd() && forced_tokens_.empty();
+}
+
+bool Request::PublishesForcedTokens() const {
+  return ReadsToSequenceEnd() && !forced_tokens_.empty();
 }
 
 void Request::AdvanceChunk() {
@@ -950,6 +965,7 @@ void Request::SaveStateForTransaction() {
   transaction_rng_ = rng_;
   transaction_processed_sequence_length_ = processed_sequence_length_;
   transaction_tokens_host_size_ = tokens_host_.size();
+  transaction_forced_tokens_size_ = forced_tokens_.size();
   stop_controller_transaction_checkpoint_ =
       stop_controller_ ? stop_controller_->TurnTokens().size() : 0;
 }
@@ -970,6 +986,7 @@ void Request::SaveStateForNewTurnTransaction() {
   transaction_rng_ = rng_;
   transaction_processed_sequence_length_ = processed_sequence_length_;
   transaction_tokens_host_size_ = tokens_host_.size();
+  transaction_forced_tokens_size_ = forced_tokens_.size();
   stop_controller_transaction_checkpoint_ = 0;
 }
 
@@ -982,6 +999,7 @@ void Request::SaveStateForExternalSamplingTransaction() {
   transaction_rng_ = rng_;
   transaction_processed_sequence_length_ = processed_sequence_length_;
   transaction_tokens_host_size_ = tokens_host_.size();
+  transaction_forced_tokens_size_ = forced_tokens_.size();
   stop_controller_transaction_checkpoint_ =
       stop_controller_ ? stop_controller_->TurnTokens().size() : 0;
 }
@@ -1042,7 +1060,17 @@ RequestStepResult Request::StageDraftCompletionForTransaction() {
       finish_reason,
       matched_stop_string_index,
   };
-  StageVisibleTokens(result, accepted_draft_count_, 0);
+  StageVisibleTokens(result, accepted_draft_count_, std::nullopt);
+  return result;
+}
+
+RequestStepResult Request::StageForcedTokensForTransaction() {
+  if (!PublishesForcedTokens()) {
+    throw std::logic_error("Forced tokens were staged for a step that does not publish them.");
+  }
+  RequestStepResult result;
+  StageForcedTokens(result, kMaxGeneratedTokensPerStep);
+  StageVisibleTokens(result, 0, std::nullopt, StagedForcedTokens());
   return result;
 }
 
@@ -1056,7 +1084,8 @@ void Request::RestoreStateForTransaction() {
   evaluated_draft_count_ = 0;
   scheduled_token_count_ = 0;
   draft_verification_.Reset();
-  staged_forced_tokens_.clear();
+  staged_forced_token_count_ = 0;
+  forced_tokens_.resize(transaction_forced_tokens_size_);
   // The pending reseed itself is deliberately kept so the retry reseeds identically; only its
   // "already applied to the live streams" marker is undone, because rng_ was just rolled back.
   pending_reseed_applied_ = false;
@@ -1081,7 +1110,8 @@ void Request::QueueStateRestoreForTransaction() {
   evaluated_draft_count_ = 0;
   scheduled_token_count_ = 0;
   draft_verification_.Reset();
-  staged_forced_tokens_.clear();
+  staged_forced_token_count_ = 0;
+  forced_tokens_.resize(transaction_forced_tokens_size_);
   pending_reseed_applied_ = false;
   // Deliberately does not replay the stop controller yet: like the guidance checkpoint swap below,
   // that work is deferred to CompleteStateRestoreForTransaction() so this stays lightweight
@@ -1128,10 +1158,15 @@ void Request::CommitStep(const RequestStepPlan& plan,
   }
   // Forced tokens are committed output the model has not read, so processed_sequence_length_ below
   // stops short of them.
-  tokens_host_.insert(tokens_host_.end(), staged_forced_tokens_.begin(),
-                      staged_forced_tokens_.end());
-  turn_generated_tokens_ += staged_forced_tokens_.size();
-  staged_forced_tokens_.clear();
+  const auto forced_tokens = StagedForcedTokens();
+  tokens_host_.insert(tokens_host_.end(), forced_tokens.begin(), forced_tokens.end());
+  turn_generated_tokens_ += forced_tokens.size();
+  forced_tokens_published_ += forced_tokens.size();
+  staged_forced_token_count_ = 0;
+  if (forced_tokens_published_ == forced_tokens_.size()) {
+    forced_tokens_.clear();
+    forced_tokens_published_ = 0;
+  }
   // A verify step reserved cache slots for every draft; the rejected ones were never committed.
   processed_sequence_length_ =
       static_cast<int64_t>(plan.target_cache_slots - (plan.draft_token_count - accepted_drafts));
@@ -1150,21 +1185,34 @@ void Request::CommitStep(const RequestStepPlan& plan,
   draft_verification_.Reset();
 }
 
-// Counts the tokens this step makes externally visible. Accepted drafts are already in tokens_host_;
-// a freshly sampled token and the grammar-forced tokens that follow it are only appended by
-// CommitStep, so all of them are the mirror's tail once the step commits.
+// Records the tokens this step makes externally visible, in sequence order. Accepted drafts are
+// already in tokens_host_; a freshly sampled token and the grammar-forced tokens that follow it are
+// only appended by CommitStep.
 void Request::StageVisibleTokens(RequestStepResult& result,
                                  size_t committed_count,
-                                 size_t appended_count) const {
+                                 std::optional<int32_t> sampled_token,
+                                 std::span<const int32_t> forced_tokens) const {
+  result.tokens_appended =
+      committed_count + static_cast<size_t>(sampled_token.has_value()) + forced_tokens.size();
+  result.candidates_consumed = result.tokens_appended +
+                               static_cast<size_t>(result.finish_reason == GenerationFinishReason::EosToken);
+  if (result.tokens_appended > result.visible_tokens.size()) {
+    throw std::logic_error(
+        "A single engine step produced more visible tokens than it can report.");
+  }
   if (committed_count > tokens_host_.size()) {
     throw std::logic_error(
         "The host token mirror is missing tokens this step committed.");
   }
-  result.visible_token_count = committed_count + appended_count;
-  result.tokens_appended = result.visible_token_count;
-  result.candidates_consumed =
-      result.tokens_appended +
-      static_cast<size_t>(result.finish_reason == GenerationFinishReason::EosToken);
+  const auto committed = std::span<const int32_t>{tokens_host_}.last(committed_count);
+  std::copy(committed.begin(), committed.end(), result.visible_tokens.begin());
+  result.visible_token_count = committed.size();
+  if (sampled_token) {
+    result.visible_tokens[result.visible_token_count++] = *sampled_token;
+  }
+  std::copy(forced_tokens.begin(), forced_tokens.end(),
+            result.visible_tokens.begin() + static_cast<ptrdiff_t>(result.visible_token_count));
+  result.visible_token_count += forced_tokens.size();
 }
 
 void Request::ApplyLogitsProcessors(DeviceSpan<float> logits,
@@ -1250,9 +1298,19 @@ RequestStepResult Request::StageGeneration(int64_t sequence_length_before) {
       matched_stop_string_index,
   };
   CommitGuidanceToken(result);
-  StageForcedTokens(result);
+  if (guidance_logits_processor_ && token_appended && !done) {
+    if (!forced_tokens_.empty()) {
+      throw std::logic_error(
+          "A Request sampled before publishing the continuation its grammar forced.");
+    }
+    // The grammar computed the whole forced span when it committed the sampled token; taking it
+    // moves the buffer rather than copying it. Only the first tokens become visible this step.
+    forced_tokens_ = guidance_logits_processor_->GetFFTokens(0);
+    StageForcedTokens(result, kMaxGeneratedTokensPerStep - 1);
+  }
   StageVisibleTokens(result, accepted_draft_count_,
-                     static_cast<size_t>(token_appended) + staged_forced_tokens_.size());
+                     token_appended ? std::optional<int32_t>{token} : std::nullopt,
+                     StagedForcedTokens());
   return result;
 }
 
@@ -1263,24 +1321,21 @@ void Request::CommitGuidanceToken(const RequestStepResult& result) {
   }
 }
 
-// Stages the continuation the grammar forced after this step's sampled token, applying
-// StageGeneration()'s stop-string, EOS, turn and context checks in the same order. A limit cuts the
-// span and ends the turn, which releases the cursor that already advanced past all of it.
-void Request::StageForcedTokens(RequestStepResult& result) {
-  if (!guidance_logits_processor_ || !result.token_appended || result.done) {
+// Stages up to `limit` more of the grammar's forced continuation, applying StageGeneration()'s
+// stop-string, EOS, turn and context checks in the same order. A limit cuts the span and ends the
+// turn, which releases the cursor and drops the unpublished rest of the span.
+void Request::StageForcedTokens(RequestStepResult& result, size_t limit) {
+  const auto pending = std::span<const int32_t>{forced_tokens_}.subspan(
+      forced_tokens_published_ + staged_forced_token_count_);
+  if (pending.empty()) {
     return;
   }
-  const auto forced_tokens = guidance_logits_processor_->GetFFTokens(0);
-  if (forced_tokens.empty()) {
-    return;
-  }
-  if (!staged_forced_tokens_.empty() || staged_draft_count_ != 0 ||
-      accepted_draft_count_ != 0) {
+  if (staged_draft_count_ != 0 || accepted_draft_count_ != 0) {
     throw std::logic_error(
         "Grammar fast-forward tokens can only follow a single sampled token.");
   }
 
-  for (const int32_t forced_token : forced_tokens) {
+  for (const int32_t forced_token : pending.first(std::min(limit, pending.size()))) {
     const int64_t sequence_length_before = CurrentSequenceLength();
     search_->CommitToken(forced_token);
     if (CurrentSequenceLength() != sequence_length_before + 1) {
@@ -1293,7 +1348,7 @@ void Request::StageForcedTokens(RequestStepResult& result) {
       throw std::logic_error(
           "Committing a grammar-forced token produced an invalid sequence transition.");
     }
-    staged_forced_tokens_.push_back(forced_token);
+    ++staged_forced_token_count_;
 
     if (stop_controller_) {
       if (const auto& match = stop_controller_->ObserveToken(forced_token)) {
@@ -1303,8 +1358,8 @@ void Request::StageForcedTokens(RequestStepResult& result) {
         return;
       }
     }
-    // The sampled token this step already counts as one generated token.
-    const size_t generated_tokens = turn_generated_tokens_ + 1 + staged_forced_tokens_.size();
+    const size_t generated_tokens =
+        turn_generated_tokens_ + static_cast<size_t>(result.token_appended) + staged_forced_token_count_;
     if (turn_policy_.max_generated_tokens &&
         generated_tokens >= *turn_policy_.max_generated_tokens) {
       result.done = true;
@@ -1318,6 +1373,11 @@ void Request::StageForcedTokens(RequestStepResult& result) {
       return;
     }
   }
+}
+
+std::span<const int32_t> Request::StagedForcedTokens() const {
+  return std::span<const int32_t>{forced_tokens_}.subspan(forced_tokens_published_,
+                                                          staged_forced_token_count_);
 }
 
 void Request::PrepareGeneration(DeviceSpan<float> logits,
@@ -1445,7 +1505,7 @@ RequestStepResult Request::CompleteGeneration() {
       Generators::IsTurnComplete(status_),
       finish_reason_,
   };
-  StageVisibleTokens(result, new_token_count, 0);
+  StageVisibleTokens(result, new_token_count, std::nullopt);
   return result;
 }
 
@@ -1515,7 +1575,7 @@ RequestStepResult Request::CommitExternalTokens(std::span<const int32_t> tokens)
       finish_reason,
       matched_stop_string_index,
   };
-  StageVisibleTokens(result, appended_count, 0);
+  StageVisibleTokens(result, appended_count, std::nullopt);
   result.candidates_consumed = consumed_count;
   result.tokens_appended = appended_count;
   return result;

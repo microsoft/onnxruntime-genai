@@ -242,9 +242,6 @@ struct Engine : std::enable_shared_from_this<Engine>,
   void RunStatic();
   void AppendEventsFromStep(const std::shared_ptr<Request>& request,
                             const RequestStepResult& result);
-  // Grows every event store so a step producing `event_count` events can publish them after its
-  // commit, and fatal handling can still preserve them, without allocating.
-  void ReserveStepEventCapacity(size_t event_count);
   EngineEvent EventFromStepError(
       const EngineStepError& error,
       std::exception_ptr caught_error) noexcept;

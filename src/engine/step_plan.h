@@ -26,8 +26,6 @@ struct StepPlanningConsistencyError : std::runtime_error {
 // packed recurrent-state operators checkpoint at most eight tokens, so no cache can roll back
 // further than a step of that length.
 inline constexpr size_t kMaxDraftTokensPerStep = 7;
-// Tokens one speculative step can commit: its drafts plus the correction or bonus token. A grammar
-// fast-forward step can make more visible.
 inline constexpr size_t kMaxGeneratedTokensPerStep = kMaxDraftTokensPerStep + 1;
 
 enum class StepOutcomeKind {

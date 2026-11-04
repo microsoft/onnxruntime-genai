@@ -1639,13 +1639,13 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetGuidance(
 /**
  * \brief Lets this Turn's whole-turn grammar append the tokens it forces instead of sampling them.
  *
- * When the grammar allows only one continuation, those tokens are committed directly and the model
- * reads them on later steps, up to one chunk per step, rather than in one decode step each. The
- * forced text is the same, but its token IDs follow the grammar's tokenization and may differ from
- * what the model would sample, so later unconstrained output can differ from a Turn without
- * fast-forward. Off by default. Admission rejects a Turn that enables it without whole-turn guidance
- * (OgaTurnOptionsSetGuidance), with a nonzero no_repeat_ngram_size, or on an Engine without dynamic
- * batching.
+ * When the grammar allows only one continuation, those tokens are committed directly, at most eight
+ * per step together with the sampled token, and the model reads them on later steps, up to one
+ * chunk per step, rather than in one decode step each. The forced text is the same, but its token
+ * IDs follow the grammar's tokenization and may differ from what the model would sample, so later
+ * unconstrained output can differ from a Turn without fast-forward. Off by default. Admission
+ * rejects a Turn that enables it without whole-turn guidance (OgaTurnOptionsSetGuidance), with a
+ * nonzero no_repeat_ngram_size, or on an Engine without dynamic batching.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetGuidanceFastForward(
     OgaTurnOptions* options, bool enable);
