@@ -5,7 +5,7 @@
 //
 // Those kernels (ORT contrib_ops/cuda/moe and the CUDA plugin EP) read their hints from process environment variables.
 // Current ORT reads the warm-up flag from the per-run config entry `ep.cuda.qmoe_in_warmup` instead and no longer reads
-// ORT_QMOE_IN_WARMUP, so every Run also carries that entry (Qwen38OrtRunHints::RunConfigEntries); the variable stays for
+// ORT_QMOE_IN_WARMUP, so every Run also carries that entry (Qwen38OrtRunHints::ApplyRunConfigEntries); the variable stays for
 // the older prototype. The other hints follow the same way, as the engine already does for `gpu_graph_id` and
 // `memory.enable_memory_arena_shrinkage`; this file then goes away.
 //   ORT_QMOE_PREFILL_NEW_TURN             "1" for the first Run of a turn (ORT resets it to "0" once it consumed it)
@@ -32,7 +32,6 @@
 #pragma once
 
 #include <algorithm>
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
@@ -41,6 +40,8 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+struct OrtRunOptions;
 
 namespace Generators {
 
@@ -168,12 +169,9 @@ class Qwen38OrtRunHints {
   }
   bool InWarmup() const noexcept { return warmup_; }
 
-  // The per-run config entries the next Run carries (OrtRunOptions::AddConfigEntry). The run options of a graph are
-  // reused by every Run of it, so the entries are always written, "0" included: an eager Run after the warmup must not
-  // inherit the "1" of an earlier one. A Run that replays a captured CUDA graph never reads them.
-  std::array<std::pair<const char*, const char*>, 1> RunConfigEntries() const noexcept {
-    return {{{Qwen38OrtRunEntry::kInWarmup, warmup_ ? "1" : "0"}}};
-  }
+  // Update reused run options only when the value changes, including the reset to "0" after warmup. Captured CUDA
+  // graph replays do not read these entries. Returns whether an entry was written.
+  bool ApplyRunConfigEntries(OrtRunOptions& options) const;
 
   // Every Run of this engine asks for deterministic MoE tactics from now on, without being a warmup Run: the DFlash
   // pipeline verifies at S=8 under CUDA graphs from its first decode on, whether or not the model warms up.

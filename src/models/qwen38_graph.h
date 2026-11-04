@@ -363,22 +363,21 @@ int64_t ResolveQwen38GraphKvCapacity(const std::vector<Qwen38CacheInput>& inputs
 // the value "auto" are read without regard to case, and the byte counts the way the runtime reads them: decimal digits
 // only (no sign, white space or trailing text), not empty, within 64 bits.
 //
-// An explicit mode of disabled (0, off) wins over any budget. Without a mode entry, an explicit expert budget is taken as
-// the request for a constrained offload, although the runtime's own default mode is disabled and a budget alone does
-// nothing there: a package that budgets its experts is expected to set mode=required with it, as its runtime profiles do.
+// Only mode=required/auto/1/on enables offload, matching ORT. A missing mode or an explicit disabled (0, off) mode leaves
+// offload disabled regardless of the budgets. An unrecognized mode stays configured for ORT to reject.
 //
 // device_expert_bytes: "auto" leaves the size of the expert cache to the runtime (the free device memory less its reserve
 // and working bytes). An explicit 0 is a zero budget, not "the runtime's call": under mode=required the runtime raises it to
 // the overhead of its fixed tables, under any other mode it refuses the session. It is the smallest cache there is, so it
-// stays as configured (nothing to adapt) and does not by itself ask for an offload.
+// stays as configured (nothing to adapt) and does not make an auto offload constrained.
 // reserve_device_bytes: the runtime reads it only when device_expert_bytes is "auto", so next to an explicit budget it is
 // inert, and lowering the budget is what frees device memory. Its "auto" is a reserve of 0 for the runtime; here it takes
 // kDefaultReserveDeviceBytes, like an entry that is not there.
 struct Qwen38MoeOffloadSettings {
   static constexpr uint64_t kDefaultReserveDeviceBytes = 6442450944ULL;  // 6 GiB
 
-  bool enabled{false};      // mode is required/auto/1/on, or device_expert_bytes is explicit and not 0; never with mode disabled
-  bool constrained{false};  // mode is required/1/on, or device_expert_bytes is explicit and not 0: the experts must not all stay on the device
+  bool enabled{false};      // mode is required/auto/1/on
+  bool constrained{false};  // enabled, and mode is required/1/on or device_expert_bytes is explicit and not 0
   bool has_source_root{false};
   bool has_reserve_device_bytes{false};  // a valid byte count is configured, reserve_device_bytes holds it
   bool has_device_expert_bytes{false};   // the same for device_expert_bytes, unless it is "auto" or 0 (see above)
@@ -397,13 +396,12 @@ Qwen38MoeOffloadSettings ParseQwen38MoeOffloadSettings(const std::vector<Config:
 // own graph ids and capture normally. Null when offload is disabled, so other packages keep capturing during warmup.
 std::unique_ptr<OrtRunOptions> CreateQwen38OffloadWarmupRunOptions(const Qwen38MoeOffloadSettings& settings);
 
-// KV capacity of the target graph variants that are named after their context tier (model_2k.onnx, model_8k.onnx,
-// model_64k.onnx, model_128k.onnx), known before the session exists. Empty for any other file name: the capacity of such a
-// graph is only read from its session, which does not exist yet when the offload budgets are set, so they follow the
-// configured model.qwen38_graph.kv_capacity instead. The context length and the generation budget are not part of it:
-// SyncQwen38GraphContext derives them from the graph once the session exists.
+// Estimated KV capacity of the Flash-Next package's tier-named target graphs (2k, 8k, 16k, 32k, 64k, 128k), available
+// before the session exists. These fixed padded capacities are not read from the graph. Other file names fall back to
+// model.qwen38_graph.kv_capacity for budget estimation. SyncQwen38GraphContext derives the actual capacity, context length
+// and generation budget from the loaded graph; model logging reports a capacity mismatch when adaptive offload is enabled.
 struct Qwen38ContextTier {
-  std::string_view name;  // "2k", "8k", "64k", "128k"
+  std::string_view name;  // "2k", "8k", "16k", "32k", "64k", "128k"
   int kv_capacity{};
 };
 std::optional<Qwen38ContextTier> Qwen38ContextTierForTarget(const std::string& target_filename);
@@ -415,10 +413,12 @@ std::string SelectQwen38TierHeadR2Filename(const std::string& head_r2_filename,
                                            const std::optional<Qwen38ContextTier>& target_tier,
                                            const std::function<bool(const std::string&)>& exists);
 
-// "session.moe.offload.*" entries added to the target session once the KV capacity of the selected target graph is known:
+// "session.moe.offload.*" entries added before target-session creation using an estimated KV capacity:
 // the model folder as the default source_root, and the reserve (and explicit expert) budgets. With
 // `adaptive_context_budget` the budgets follow the KV cache relative to the 32K-context reference (one slot of 33032
 // positions): memory a longer context needs is taken from the expert cache, memory a shorter context frees is given to it.
+// The fixed 16 KiB per position assumes the Flash-Next NVFP4 package's cache layout, not arbitrary graph shapes or dtypes;
+// this estimate does not account for all graph allocations and does not guarantee that the session fits device memory.
 // Every one of the `request_slots` slots (1..8, anything else is clamped to that range) holds `kv_capacity` positions, so
 // the cache grows with the product. The budgets are 64-bit and saturate instead of wrapping. The floors (1 GB for the
 // experts, 2 GiB for the reserve) only keep the adaptation from shrinking a budget too far: a budget that is configured

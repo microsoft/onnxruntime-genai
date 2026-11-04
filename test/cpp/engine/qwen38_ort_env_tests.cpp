@@ -13,6 +13,7 @@
 
 #include <gtest/gtest.h>
 
+#include "models/onnxruntime_api.h"
 #include "models/qwen38_ort_env.h"
 
 namespace Generators::test {
@@ -264,18 +265,38 @@ TEST(Qwen38OrtRunHintsTest, WarmupIsAnnouncedOnlyWhileItRunsAndDeterminismStaysF
 
 TEST(Qwen38OrtRunHintsTest, TheWarmupFlagIsAlsoAPerRunConfigEntryThatIsClearedAfterTheWarmup) {
   Qwen38OrtRunHints hints;
-  const auto entry = [&hints]() {
-    const auto entries = hints.RunConfigEntries();
-    EXPECT_EQ(entries.size(), 1u);
-    EXPECT_STREQ(entries.front().first, "ep.cuda.qmoe_in_warmup");
-    return std::string(entries.front().second);
+  auto options = OrtRunOptions::Create();
+  const auto entry = [&]() {
+    EXPECT_TRUE(hints.ApplyRunConfigEntries(*options));
+    return Ort::api->GetRunConfigEntry(options.get(), Qwen38OrtRunEntry::kInWarmup);
   };
-  EXPECT_EQ(entry(), "0");
+  EXPECT_STREQ(entry(), "0");
   hints.SetWarmup(true);
-  EXPECT_EQ(entry(), "1");
+  EXPECT_STREQ(entry(), "1");
   // The run options of a graph are shared by its Runs: a live Run after the warmup writes "0" over the "1".
   hints.SetWarmup(false);
-  EXPECT_EQ(entry(), "0");
+  EXPECT_STREQ(entry(), "0");
+}
+
+TEST(Qwen38OrtRunHintsTest, ReusedRunOptionsDoNotWarnWhenTheWarmupEntryIsUnchanged) {
+  Qwen38OrtRunHints hints;
+  for (const bool warmup : {false, true}) {
+    SCOPED_TRACE(warmup);
+    auto options = OrtRunOptions::Create();
+    if (warmup) options->AddConfigEntry(Qwen38OrtRunEntry::kInWarmup, "1");
+    hints.SetWarmup(warmup);
+    EXPECT_EQ(hints.ApplyRunConfigEntries(*options), !warmup);
+
+    testing::internal::CaptureStderr();
+    for (int run = 0; run < 3; ++run) {
+      bool written = true;
+      EXPECT_NO_THROW(written = hints.ApplyRunConfigEntries(*options));
+      EXPECT_FALSE(written);
+    }
+    const std::string warnings = testing::internal::GetCapturedStderr();
+    EXPECT_EQ(warnings.find("already exists"), std::string::npos) << warnings;
+    EXPECT_STREQ(Ort::api->GetRunConfigEntry(options.get(), Qwen38OrtRunEntry::kInWarmup), warmup ? "1" : "0");
+  }
 }
 
 TEST(Qwen38OrtRunHintsTest, DeterministicMoeCanBeRequiredWithoutAWarmup) {

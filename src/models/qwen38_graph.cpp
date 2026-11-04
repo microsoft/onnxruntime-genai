@@ -1841,9 +1841,7 @@ void Qwen38GraphEngine::RunTarget(Direction& direction, const Qwen38PromptRunHin
 
 void Qwen38GraphEngine::RunSession(OrtSession& session, OrtRunOptions* run_options, const OrtIoBinding& binding,
                                    const Qwen38PromptRunHints* prompt, Qwen38SlotMask participants) {
-  if (run_options != nullptr) {
-    for (const auto& [key, value] : run_hints_.RunConfigEntries()) run_options->AddConfigEntry(key, value);
-  }
+  if (run_options != nullptr) run_hints_.ApplyRunConfigEntries(*run_options);
   RunWithQwen38OrtHints(run_hints_, prompt, [&] { session.Run(run_options, binding); }, participants);
 }
 
@@ -2962,15 +2960,13 @@ Qwen38MoeOffloadSettings ParseQwen38MoeOffloadSettings(const std::vector<Config:
     if (mode != "auto") settings.constrained = true;
   }
 
-  // "auto" leaves the expert cache to the runtime, and a count of 0 is the smallest cache there is (see
-  // Qwen38MoeOffloadSettings): neither asks for an offload on its own, and neither is ever adapted. A malformed value
-  // still asks for a constrained offload (it is an attempt to budget the experts), and the runtime reports it.
+  // A budget only constrains an enabled offload; it never changes the mode, whose runtime default is disabled.
+  // "auto" and 0 are not adapted. Malformed budgets stay configured so the runtime can report them.
   const std::string* expert_bytes = last_value("session.moe.offload.device_expert_bytes");
   if (expert_bytes != nullptr && AsciiLowerCase(*expert_bytes) != "auto") {
     const std::optional<uint64_t> bytes = ParseQwen38ByteCount(*expert_bytes);
     if (!bytes.has_value() || *bytes != 0) {
-      settings.enabled = true;
-      settings.constrained = true;
+      settings.constrained = settings.enabled;
       settings.has_device_expert_bytes = bytes.has_value();
       settings.malformed_device_expert_bytes = !bytes.has_value();
       settings.device_expert_bytes = bytes.value_or(0);
@@ -2989,11 +2985,6 @@ Qwen38MoeOffloadSettings ParseQwen38MoeOffloadSettings(const std::vector<Config:
     if (bytes.has_value()) settings.reserve_device_bytes = *bytes;
   }
 
-  // An explicit mode of disabled wins over the budgets: the runtime offloads nothing then.
-  if (mode == "disabled" || mode == "0" || mode == "off") {
-    settings.enabled = false;
-    settings.constrained = false;
-  }
   return settings;
 }
 
@@ -3015,6 +3006,8 @@ std::optional<Qwen38ContextTier> Qwen38ContextTierForTarget(const std::string& t
     const std::string_view part = std::string_view(stem).substr(begin, end - begin);
     if (part == "128k") return Qwen38ContextTier{"128k", 133128};
     if (part == "64k") return Qwen38ContextTier{"64k", 65800};
+    if (part == "32k") return Qwen38ContextTier{"32k", 33032};
+    if (part == "16k") return Qwen38ContextTier{"16k", 16648};
     if (part == "8k") return Qwen38ContextTier{"8k", 8456};
     if (part == "2k") return Qwen38ContextTier{"2k", 2312};
     begin = end + 1;
@@ -3035,9 +3028,9 @@ std::vector<Config::NamedString> Qwen38MoeOffloadSessionEntries(const Qwen38MoeO
                                                                 const std::filesystem::path& model_root, int kv_capacity,
                                                                 bool adaptive_context_budget, size_t request_slots) {
   constexpr int64_t kReferenceKvCapacity = 33032;  // the 32K-context target graph, with one request slot
-  // Device memory one cached position is charged, for each slot. The cache inputs of the target graph take 13,832 bytes of
-  // it: 12 attention layers x K and V x 2 heads x 256 channels at one byte, an int64 position id, and per layer one
-  // 128-float index-key row for every 4 positions.
+  // Fixed-layout estimate for the Flash-Next NVFP4 package, not a measurement of the selected graph. Its cache inputs take
+  // 13,832 bytes per position: 12 attention layers x K and V x 2 heads x 256 channels at one byte, an int64 position id,
+  // and per layer one 128-float index-key row for every 4 positions. Charge 16 KiB including margin.
   constexpr int64_t kKvBytesPerToken = 16384;
   constexpr uint64_t kMinDeviceExpertBytes = 1000000000ULL;
   constexpr uint64_t kMinReserveDeviceBytes = 2147483648ULL;
@@ -3261,10 +3254,10 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
     }
   }
 
-  // The offload budget below depends on the KV capacity, which is otherwise only read from the session once it exists
-  // (SyncQwen38GraphContext below remains the one place that sets the context settings): a target graph named after its
-  // context tier tells the capacity up front.
+  // Estimate the capacity before session creation using the package's tier padding or the configured fallback.
+  // SyncQwen38GraphContext below still derives the execution settings from the loaded graph.
   const auto context_tier = Qwen38ContextTierForTarget(target_filename);
+  const int budget_kv_capacity = context_tier ? context_tier->kv_capacity : q.kv_capacity;
   // The config field and the filename CreateSession opens below must name the same head graph.
   config_->model.qwen38_graph.fold.head_r2.filename =
       SelectQwen38TierHeadR2Filename(q.fold.head_r2.filename, context_tier, package_has_file);
@@ -3282,7 +3275,7 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
     }
   }
   for (const auto& [key, value] : Qwen38MoeOffloadSessionEntries(
-           moe_offload, root, context_tier ? context_tier->kv_capacity : q.kv_capacity, adaptive_budget, request_slots)) {
+           moe_offload, root, budget_kv_capacity, adaptive_budget, request_slots)) {
     session_options_->AddConfigEntry(key.c_str(), value.c_str());
   }
 
@@ -3294,6 +3287,13 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
   if (const int64_t graph_positions =
           ResolveQwen38GraphKvCapacity(CacheInputsOf(session_info_, "past_key_values.", true));
       graph_positions > 0) {
+    if (g_log.enabled && moe_offload.enabled && adaptive_budget && graph_positions != budget_kv_capacity) {
+      Log("qwen38_graph") << "warning: offload budget estimate used kv_capacity " << budget_kv_capacity
+                          << ", but target graph " << target_filename << " reports " << graph_positions
+                          << "; the session budgets are already set. Check the package layout or disable "
+                             "ORT_QWEN38_ADAPTIVE_CTX_BUDGET and configure explicit budgets."
+                          << std::endl;
+    }
     // The capacity follows the graph. The default generation budget follows it only when a context tier was requested: a
     // package that limits search.max_length keeps its limit.
     const Qwen38GraphContext context =

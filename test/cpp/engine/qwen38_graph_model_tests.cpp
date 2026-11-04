@@ -23,6 +23,7 @@
 #include <gtest/gtest.h>
 
 #include "config.h"
+#include "engine_test_helpers.h"
 #include "models/io/kv_cache.h"
 #include "models/model_state_manifest.h"
 #include "models/model_type.h"
@@ -2438,11 +2439,10 @@ TEST(Qwen38MoeOffloadTest, ParsesTheModeAndBudgetEntries) {
     EXPECT_TRUE(settings.constrained) << mode;
   }
 
-  // An explicit expert budget is a constrained offload on its own. "auto" leaves the size of the cache to the runtime and 0 is
-  // a zero budget, the smallest cache there is: neither asks for an offload by itself, and neither is a budget to adapt.
+  // Budgets do not enable offload without a mode. "auto" and 0 are not budgets to adapt.
   settings = parse({{"session.moe.offload.device_expert_bytes", "21474836480"}});
-  EXPECT_TRUE(settings.enabled);
-  EXPECT_TRUE(settings.constrained);
+  EXPECT_FALSE(settings.enabled);
+  EXPECT_FALSE(settings.constrained);
   EXPECT_TRUE(settings.has_device_expert_bytes);
   EXPECT_EQ(settings.device_expert_bytes, 21474836480ULL);
   for (const char* unset : {"auto", "0"}) {
@@ -2451,7 +2451,7 @@ TEST(Qwen38MoeOffloadTest, ParsesTheModeAndBudgetEntries) {
     EXPECT_FALSE(settings.has_device_expert_bytes) << unset;
   }
   settings = parse({{"session.moe.offload.device_expert_bytes", "not-a-number"}});
-  EXPECT_TRUE(settings.constrained);
+  EXPECT_FALSE(settings.constrained);
   EXPECT_FALSE(settings.has_device_expert_bytes);
 
   EXPECT_FALSE(parse({{"session.moe.offload.source_root", ""}}).has_source_root);
@@ -2498,10 +2498,20 @@ TEST(Qwen38MoeOffloadTest, ContextTierFollowsTheTargetFileName) {
   ASSERT_TRUE(two.has_value());
   EXPECT_EQ(two->kv_capacity, 2312);
 
-  // The context settings are not part of the tier: the capacity gives them through the one shared rule, so the tier never
-  // disagrees with what SyncQwen38GraphContext sets once the session exists.
+  const auto sixteen = Qwen38ContextTierForTarget("target/model_s4_16k.onnx");
+  ASSERT_TRUE(sixteen.has_value());
+  EXPECT_EQ(sixteen->name, "16k");
+  EXPECT_EQ(sixteen->kv_capacity, 16648);
+
+  const auto thirty_two = Qwen38ContextTierForTarget("model_32k.onnx");
+  ASSERT_TRUE(thirty_two.has_value());
+  EXPECT_EQ(thirty_two->name, "32k");
+  EXPECT_EQ(thirty_two->kv_capacity, 33032);
+
+  // The tier table includes padding; the shared context rule subtracts the reserved tail. Execution applies that rule
+  // to the loaded graph's actual capacity, not to this estimate.
   const std::pair<const char*, int> context_lengths[] = {
-      {"model_128k.onnx", 133120}, {"model_64k.onnx", 65792}, {"model_8k.onnx", 8448}, {"model_2k.onnx", 2304}};
+      {"model_128k.onnx", 133120}, {"model_64k.onnx", 65792}, {"model_32k.onnx", 33024}, {"model_16k.onnx", 16640}, {"model_8k.onnx", 8448}, {"model_2k.onnx", 2304}};
   for (const auto& [file, context_length] : context_lengths) {
     const auto of_file = Qwen38ContextTierForTarget(file);
     ASSERT_TRUE(of_file.has_value()) << file;
@@ -2512,7 +2522,7 @@ TEST(Qwen38MoeOffloadTest, ContextTierFollowsTheTargetFileName) {
 
   // Any other file has no tier: the capacity of such a graph is only read from its session, which does not exist yet when the
   // offload budgets are set, so they follow the configured kv_capacity. "model_32k" must not be read as "2k" or "128k" as "8k".
-  for (const char* other : {"model.onnx", "model_s4.onnx", "model_dynamic_ctx.onnx", "model_16k.onnx", "model_32k.onnx"}) {
+  for (const char* other : {"model.onnx", "model_s4.onnx", "model_dynamic_ctx.onnx", "model_132k.onnx", "model_2kextra.onnx"}) {
     EXPECT_FALSE(Qwen38ContextTierForTarget(other).has_value()) << other;
   }
 }
@@ -2569,6 +2579,7 @@ TEST(Qwen38MoeOffloadTest, AdaptiveBudgetMovesWithTheKvCapacity) {
   EXPECT_EQ(budget(settings, 133128, true), entries("19834863616", "8082423808"));
   EXPECT_EQ(budget(settings, 65800, true), entries("20937965568", "6979321856"));
   // ... and the memory a shorter one frees goes to it.
+  EXPECT_EQ(budget(settings, 16648, true), entries("21743271936", "6174015488"));
   EXPECT_EQ(budget(settings, 8456, true), entries("21877489664", "6039797760"));
   EXPECT_EQ(budget(settings, 2312, true), entries("21978152960", "5939134464"));
 
@@ -2634,7 +2645,7 @@ const std::vector<std::string>& NotByteCounts() {
   return values;
 }
 
-constexpr int kBudgetCapacities[] = {133128, 65800, 33032, 8456, 2312};
+constexpr int kBudgetCapacities[] = {133128, 65800, 33032, 16648, 8456, 2312};
 
 }  // namespace
 
@@ -2651,8 +2662,8 @@ TEST(Qwen38MoeOffloadTest, ByteCountsAreReadAsDecimalDigitsOnly) {
     // budget.
     const bool zero = std::stoull(valid) == 0;
     EXPECT_EQ(expert.has_device_expert_bytes, !zero) << valid;
-    EXPECT_EQ(expert.constrained, !zero) << valid;
-    EXPECT_EQ(expert.enabled, !zero) << valid;
+    EXPECT_FALSE(expert.constrained) << valid;
+    EXPECT_FALSE(expert.enabled) << valid;
   }
 
   for (const std::string& text : NotByteCounts()) {
@@ -2662,9 +2673,7 @@ TEST(Qwen38MoeOffloadTest, ByteCountsAreReadAsDecimalDigitsOnly) {
     EXPECT_FALSE(reserve.has_reserve_device_bytes);
     EXPECT_EQ(reserve.reserve_device_bytes, 6442450944ULL);  // nothing is taken from the text
 
-    // A malformed budget is still an attempt to budget the experts: the offload stays constrained, and the runtime
-    // reports the value.
-    const auto expert = ParseQwen38MoeOffloadSettings({{kExpert, text}});
+    const auto expert = ParseQwen38MoeOffloadSettings({{kMode, "required"}, {kExpert, text}});
     EXPECT_TRUE(expert.malformed_device_expert_bytes);
     EXPECT_FALSE(expert.has_device_expert_bytes);
     EXPECT_TRUE(expert.enabled);
@@ -2708,7 +2717,7 @@ TEST(Qwen38MoeOffloadTest, AMalformedExpertBudgetIsNeverReplacedWhetherOrNotTheB
     for (const int kv_capacity : kBudgetCapacities) {
       for (const bool adaptive : {true, false}) {
         SCOPED_TRACE("'" + text + "' kv_capacity=" + std::to_string(kv_capacity) + (adaptive ? " adaptive" : " fixed"));
-        const auto entries = SessionEntries({{kExpert, text}}, kv_capacity, adaptive);
+        const auto entries = SessionEntries({{kMode, "required"}, {kExpert, text}}, kv_capacity, adaptive);
         EXPECT_FALSE(HasEntry(entries, kExpert));
         // It is still a constrained offload, so the other entries are added.
         EXPECT_TRUE(HasEntry(entries, kRoot));
@@ -2717,8 +2726,8 @@ TEST(Qwen38MoeOffloadTest, AMalformedExpertBudgetIsNeverReplacedWhetherOrNotTheB
     }
     SCOPED_TRACE("'" + text + "'");
     // The reserve follows the context as ever.
-    EXPECT_EQ(SessionEntries({{kExpert, text}}, 133128, true), adapted);
-    EXPECT_EQ(SessionEntries({{kExpert, text}}, 133128, false), defaulted);
+    EXPECT_EQ(SessionEntries({{kMode, "required"}, {kExpert, text}}, 133128, true), adapted);
+    EXPECT_EQ(SessionEntries({{kMode, "required"}, {kExpert, text}}, 133128, false), defaulted);
   }
 }
 
@@ -2839,14 +2848,52 @@ TEST(Qwen38MoeOffloadTest, AnExplicitDisabledModeWinsOverTheBudgets) {
     EXPECT_FALSE(ParseQwen38MoeOffloadSettings({{kMode, mode}, {kExpert, "oops"}}).constrained);
   }
 
-  // A budget without a mode, or next to the other modes, asks for a constrained offload: that is how the packages write it
-  // (the runtime's own default mode is disabled, which this deliberately does not follow).
-  EXPECT_TRUE(ParseQwen38MoeOffloadSettings({{kExpert, "21474836480"}}).constrained);
+  EXPECT_FALSE(ParseQwen38MoeOffloadSettings({{kExpert, "21474836480"}}).constrained);
   EXPECT_TRUE(ParseQwen38MoeOffloadSettings({{kMode, "auto"}, {kExpert, "21474836480"}}).constrained);
   EXPECT_TRUE(ParseQwen38MoeOffloadSettings({{kMode, "required"}, {kExpert, "21474836480"}}).constrained);
   // The last mode is the one that counts.
   EXPECT_TRUE(ParseQwen38MoeOffloadSettings({{kMode, "disabled"}, {kMode, "required"}}).constrained);
   EXPECT_FALSE(ParseQwen38MoeOffloadSettings({{kMode, "required"}, {kMode, "disabled"}, {kExpert, "1"}}).enabled);
+}
+
+TEST(Qwen38MoeOffloadTest, OffloadDecisionsAgreeWithTheFinalNativeSessionOptions) {
+  const auto model = LoadDummyDecoderModel();
+  struct Case {
+    const char* mode;
+    bool enabled;
+  };
+  const Case cases[] = {{nullptr, false}, {"disabled", false}, {"off", false}, {"0", false}, {"OFF", false}, {"", false}, {"sometimes", false}, {"required", true}, {"auto", true}, {"ON", true}};
+  for (const auto& [mode, enabled] : cases) {
+    SCOPED_TRACE(mode ? mode : "<missing mode>");
+    Config::SessionOptions configured;
+    configured.config_entries = {{kExpert, "21474836480"}, {kReserve, "6442450944"}};
+    if (mode != nullptr) configured.config_entries.emplace_back(kMode, mode);
+    auto options = OrtSessionOptions::Create();
+    model->CreateSessionOptionsFromConfig(configured, *options, false, false, false, false);
+    const auto settings = ParseQwen38MoeOffloadSettings(configured.config_entries);
+    for (const auto& [key, value] : Qwen38MoeOffloadSessionEntries(settings, "/models/pkg", 133128, true)) {
+      options->AddConfigEntry(key.c_str(), value.c_str());
+    }
+    const auto read = [&options](const char* key) {
+      size_t size = 0;
+      Ort::ThrowOnError(Ort::api->GetSessionConfigEntry(options.get(), key, nullptr, &size));
+      std::string value(size, '\0');
+      Ort::ThrowOnError(Ort::api->GetSessionConfigEntry(options.get(), key, value.data(), &size));
+      if (!value.empty() && value.back() == '\0') value.pop_back();
+      return value;
+    };
+    EXPECT_EQ(options->HasConfigEntry(kMode), mode != nullptr);
+    if (mode != nullptr) EXPECT_EQ(read(kMode), mode);
+    EXPECT_EQ(settings.enabled, enabled);
+    EXPECT_EQ(settings.constrained, enabled);
+    EXPECT_EQ(read(kExpert), enabled ? "19834863616" : "21474836480");
+    EXPECT_EQ(read(kReserve), enabled ? "8082423808" : "6442450944");
+    EXPECT_EQ(options->HasConfigEntry(kRoot), enabled);
+    EXPECT_EQ(CreateQwen38OffloadWarmupRunOptions(settings) != nullptr, enabled);
+    EXPECT_EQ(SelectQwen38OffloadTargetGraph("model.onnx", settings, "", "", false, 1,
+                                             [](const std::string& file) { return file == "model_s4.onnx"; }),
+              enabled ? "model_s4.onnx" : "model.onnx");
+  }
 }
 
 TEST(Qwen38MoeOffloadTest, AZeroExpertBudgetIsAZeroBudgetThatIsNeverAdapted) {
@@ -2948,8 +2995,8 @@ TEST(Qwen38MoeOffloadTest, AConstrainedOffloadPrefersTheMultiDraftGraphOnlyWhere
   EXPECT_EQ(select(offload({{kMode, "auto"}})), "model.onnx");
   EXPECT_EQ(select(offload({{kMode, "disabled"}, {kExpert, "21474836480"}})), "model.onnx");
   EXPECT_EQ(select(offload({{kExpert, "0"}})), "model.onnx");
-  // An explicit budget is a constrained offload, mode or not.
-  EXPECT_EQ(select(offload({{kExpert, "21474836480"}})), "model_s4.onnx");
+  EXPECT_EQ(select(offload({{kExpert, "21474836480"}})), "model.onnx");
+  EXPECT_EQ(select(offload({{kMode, "auto"}, {kExpert, "21474836480"}})), "model_s4.onnx");
 
   // The environment that chooses the graph wins, whatever it says: a context request, or any value of the MTP-drafts hook
   // (the value 0 is the way to keep the decoder, and a value the resolver does not read is still the user's choice).
