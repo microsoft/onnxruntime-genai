@@ -496,47 +496,58 @@ TEST_F(GuidanceFastForwardTest, PublishingRowLeavesThePeerOwnedSamplerSlotIntact
 }
 
 // A caller may drain fewer events per Run than a step produces. Tokens still arrive in order,
-// exactly once, without another model step until they are drained, and a peer's token waits behind
-// at most one capped batch of forced tokens.
+// exactly once, without another model step until they are drained. The cap is per request, not per
+// batch: a peer's first token waits behind at most one capped batch from each forcing request.
 TEST_F(GuidanceFastForwardTest, SmallEventBuffersDeliverForcedTokensInOrderWithoutStarvingAPeer) {
-  for (const size_t capacity : {size_t{1}, size_t{3}}) {
-    SCOPED_TRACE(::testing::Message() << "capacity " << capacity);
-    auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
-    auto forcing = CreateRequestWithPrompt(engine.engine, Prompt(), Limit(12));
-    InstallForcingGrammar(*forcing, /*trigger=*/11, LongForcedSpan());
-    // The forcing row's events come first, so the peer's token can only wait behind them.
-    engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
-      ASSERT_EQ(context.plan->requests.front().request_id, forcing.get());
-    });
-    auto peer = CreateRequestWithPrompt(engine.engine, Prompt(), Limit(2));
+  for (const size_t forcing_count : {size_t{1}, size_t{7}}) {
+    for (const size_t capacity : {size_t{1}, size_t{3}}) {
+      SCOPED_TRACE(::testing::Message() << forcing_count << " forcing, capacity " << capacity);
+      auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
+      std::vector<std::shared_ptr<Request>> forcing;
+      for (size_t i = 0; i < forcing_count; ++i) {
+        forcing.push_back(CreateRequestWithPrompt(engine.engine, Prompt(), Limit(12)));
+        InstallForcingGrammar(*forcing.back(), /*trigger=*/11, LongForcedSpan());
+      }
+      auto peer = CreateRequestWithPrompt(engine.engine, Prompt(), Limit(2));
+      // Every forcing row's events come before the peer's, so the bound below is the worst case.
+      engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
+        if (engine.executor->decode_calls == 1)
+          ASSERT_EQ(context.plan->requests.back().request_id, peer.get());
+      });
 
-    std::vector<EngineEvent> storage(capacity);
-    std::vector<int32_t> forcing_tokens;
-    std::vector<int32_t> peer_tokens;
-    size_t events_before_peer = 0;
-    for (int call = 0; call < 64; ++call) {
-      const size_t count = engine.engine->Run(storage);
-      if (count == 0 && forcing->IsTurnComplete() && peer->IsTurnComplete())
-        break;
-      for (const auto& event : std::span{storage}.first(count)) {
-        if (!(event.flags & EngineEventFlagToken))
-          continue;
-        if (event.request == peer) {
-          // The peer's first token is step 1's last event: no step ran while draining it.
-          if (peer_tokens.empty())
-            EXPECT_EQ(engine.executor->decode_calls, 1);
-          peer_tokens.push_back(event.token);
-        } else {
-          forcing_tokens.push_back(event.token);
+      std::vector<EngineEvent> storage(capacity);
+      std::vector<std::vector<int32_t>> forcing_tokens(forcing_count);
+      std::vector<int32_t> peer_tokens;
+      size_t events_before_peer = 0;
+      for (int call = 0; call < 512; ++call) {
+        const size_t count = engine.engine->Run(storage);
+        const bool all_complete =
+            peer->IsTurnComplete() &&
+            std::ranges::all_of(forcing, [](const auto& request) { return request->IsTurnComplete(); });
+        if (count == 0 && all_complete)
+          break;
+        for (const auto& event : std::span{storage}.first(count)) {
+          if (!(event.flags & EngineEventFlagToken))
+            continue;
+          if (event.request == peer) {
+            // The peer's first token is step 1's last event: no step ran while draining it.
+            if (peer_tokens.empty())
+              EXPECT_EQ(engine.executor->decode_calls, 1);
+            peer_tokens.push_back(event.token);
+            continue;
+          }
+          const auto row = std::ranges::find(forcing, event.request);
+          ASSERT_NE(row, forcing.end());
+          forcing_tokens[static_cast<size_t>(row - forcing.begin())].push_back(event.token);
           events_before_peer += peer_tokens.empty();
         }
       }
-    }
 
-    EXPECT_EQ(forcing_tokens, Concat({11}, LongForcedSpan()));
-    EXPECT_EQ(peer_tokens, (std::vector<int32_t>{11, 11}));
-    EXPECT_LE(events_before_peer, kMaxGeneratedTokensPerStep);
-    EXPECT_EQ(engine.executor->decode_calls, 2);
+      for (const auto& tokens : forcing_tokens)
+        EXPECT_EQ(tokens, Concat({11}, LongForcedSpan()));
+      EXPECT_EQ(peer_tokens, (std::vector<int32_t>{11, 11}));
+      EXPECT_LE(events_before_peer, forcing_count * kMaxGeneratedTokensPerStep);
+    }
   }
 }
 
