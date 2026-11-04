@@ -1308,8 +1308,10 @@ enabled together.
 after a sampled token. They pass the same stop-string, EOS, and length checks as sampled tokens. A
 step publishes at most `kMaxGeneratedTokensPerStep` tokens per Request, counting the sampled token;
 the rest of the span stays private to the Request, which publishes the next of them, instead of
-sampling, on each later step that reads to its tail. The grammar computes the whole span once, when
-the sampled token commits, and the Request takes it without copying. The model reads published
+sampling, on each later step that reads to its tail. The cap does not bound discovery: llguidance
+computes the whole span while committing the sampled token, limited by its per-commit parser budget
+(`step_max_items`, 50,000 Earley items by default), and the guidance processor copies it once out of
+llguidance's buffer, after which the Request takes it without copying. The model reads published
 tokens on later steps (step 4), so the row plans no drafts and, on a model with fixed recurrent
 state, other rows defer theirs. Rollback restores the private span together with the grammar cursor;
 a finished or canceled turn drops it and keeps everything already published. Fast-forward is off by
