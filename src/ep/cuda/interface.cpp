@@ -171,6 +171,30 @@ class PinnedHostPool {
     if (has_overflow) TrimOverflow();
   }
 
+  // Frees every pooled mirror and destroys the cached events. The events belong to the device that was current when they
+  // were created, so they must not outlive the binding of the stream to that device: the add-on can stay mapped across
+  // OgaShutdown() and be bound to another GPU by the next init. Called with the stream's device still bound, and only
+  // once no mirror is in use any more.
+  void Reset() noexcept {
+    std::lock_guard<std::mutex> lock{mutex_};
+    UseBoundDevice();
+    auto drain = [](std::vector<Entry>& entries) {
+      for (Entry& entry : entries) {
+        if (entry.event) {
+          ::cudaEventSynchronize(entry.event);
+          ::cudaEventDestroy(entry.event);
+        }
+        ::cudaFreeHost(entry.p);
+      }
+      entries.clear();
+    };
+    for (auto& entries : free_) drain(entries);
+    drain(overflow_);
+    for (cudaEvent_t event : events_) ::cudaEventDestroy(event);
+    events_.clear();
+    retained_bytes_ = 0;
+  }
+
  private:
   struct Entry {
     uint8_t* p;
@@ -714,6 +738,7 @@ struct CudaInterfaceImplBase : DeviceInterface {
   // with them still set.
   ~CudaInterfaceImplBase() {
     ort_allocator_ = nullptr;
+    PinnedHostPool::Instance().Reset();
     std::lock_guard<std::mutex> lock{g_stream_mutex};
     g_stream_device_id.store(-1, std::memory_order_release);
     g_stream.Destroy();
@@ -1320,6 +1345,14 @@ struct NvTensorRtRtxInterfaceImpl final : CudaInterfaceImplBase {
 
 std::unique_ptr<DeviceInterface> g_cuda_device;
 
+// Set once this library's statics are being destroyed, which happens before ShutdownInterface() is called by a host that
+// exits without OgaShutdown(). g_cuda_device is already destroyed then and must not be reset again. The marker is defined
+// after g_cuda_device so that it is destroyed first. The flag is constant-initialized, so it stays valid during teardown.
+bool g_statics_destroyed = false;
+struct StaticsDestroyedMarker {
+  ~StaticsDestroyedMarker() { g_statics_destroyed = true; }
+} g_statics_destroyed_marker;
+
 DeviceInterface& GetCudaDeviceInterface() { return *g_cuda_device; }
 
 LogItems& GetLogItems() { return gp_genai->GetLogItems(); }
@@ -1374,6 +1407,7 @@ uint32_t GetInterfaceVersion() {
 }
 
 void ShutdownInterface() {
+  if (Generators::g_statics_destroyed) return;
   Generators::g_cuda_device.reset();
 }
 

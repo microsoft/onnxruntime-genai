@@ -403,6 +403,9 @@ TEST(ReInitTests, ALegacyCudaSessionWithoutAnIdIsBoundToGpuZero) {
 // A leaked stream cannot be seen from the outside (the streams of a process cannot be counted, and a destroyed one must not be
 // queried), so a Release build catches the last case only, as the null stream checked below.
 TEST(ReInitTests, TheCudaAddOnIsEnteredAgainWhenTheBuiltInQwen38PlaneKeepsItMapped) {
+  // Without a usable GPU the first device operation (the stream) throws outside the setup guards below, so probe it up front.
+  if (const std::string reason = CudaUnavailableReason(1); !reason.empty()) GTEST_SKIP() << reason;
+
   // A round is what loading a qwen38_flash_graph model and unloading it again does to the add-on. Only the first round may
   // find the setup unusable and skip: a later round that cannot enter the add-on again, or finds it unmapped, is the failure
   // this test is about.
