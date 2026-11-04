@@ -2781,6 +2781,30 @@ TEST_F(EngineRunTest, RolledBackStepDoesNotChangeWhoGetsSpareTokens) {
   EXPECT_EQ(reads, (std::vector<std::vector<size_t>>{{3, 1}, {1, 3}, {1, 3}}));
 }
 
+// A newly admitted prompt counts as just served, so it queues behind a prefill already waiting.
+TEST_F(EngineRunTest, NewArrivalQueuesBehindAWaitingPrefill) {
+  model_->config_->engine.dynamic_batching->max_scheduled_tokens = 5;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
+  std::vector<int32_t> long_prompt(20);
+  std::iota(long_prompt.begin(), long_prompt.end(), 11);
+  auto first = CreateRequestWithPrompt(engine.engine, long_prompt);
+  auto waiting = CreateRequestWithPrompt(engine.engine, long_prompt);
+  RunOne(*engine.engine);  // first takes the spare tokens; waiting reads one
+
+  auto arrival = CreateRequestWithPrompt(engine.engine, long_prompt);
+  std::vector<size_t> reads(3);  // {first, waiting, arrival}
+  engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
+    ASSERT_NE(context.plan, nullptr);
+    for (const auto& entry : context.plan->requests) {
+      const size_t row =
+          entry.request_id == first.get() ? 0 : (entry.request_id == waiting.get() ? 1 : 2);
+      reads[row] = entry.unprocessed_token_count;
+    }
+  });
+  RunOne(*engine.engine);
+  EXPECT_EQ(reads, (std::vector<size_t>{1, 3, 1}));
+}
+
 TEST_F(EngineRunTest, SpeculativeRunKeepsAcceptedPrefixAndEmitsAllTokens) {
   const int32_t eos = EosToken(*model_);
   const int32_t filler = eos == 5 ? 6 : 5;
