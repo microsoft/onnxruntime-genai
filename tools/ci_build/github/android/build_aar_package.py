@@ -82,6 +82,25 @@ def _parse_build_settings(args):
     return build_settings
 
 
+def _strip_library(source, destination, strip_tool):
+    readelf_tool = strip_tool.with_name("llvm-readelf" + strip_tool.suffix)
+
+    def load_segments(library):
+        output = subprocess.run(
+            [readelf_tool, "--program-headers", "--wide", library], check=True, capture_output=True, text=True
+        ).stdout
+        segments = [line.split() for line in output.splitlines() if line.lstrip().startswith("LOAD ")]
+        if not segments:
+            raise RuntimeError(f"No LOAD segments found in {library}")
+        return segments
+
+    original_segments = load_segments(source)
+    shutil.copy2(source, destination)
+    subprocess.run([strip_tool, destination], shell=False, check=True)
+    if load_segments(destination) != original_segments:
+        raise RuntimeError(f"Stripping changed LOAD segments in {destination}")
+
+
 def _build_aar(args):
     build_settings = _parse_build_settings(args)
     build_dir = Path(args.build_dir).resolve()
@@ -138,8 +157,7 @@ def _build_aar(args):
             src_lib_name = abi_build_dir / build_config / "src" / "java" / "android" / abi / lib_name
             target_lib_name = abi_jnilibs_dir / lib_name
             if strip_tool is not None:
-                shutil.copy2(src_lib_name, target_lib_name)
-                subprocess.run([strip_tool, target_lib_name], shell=False, check=True)
+                _strip_library(src_lib_name, target_lib_name, strip_tool)
             else:
                 target_lib_name.symlink_to(src_lib_name)
 
