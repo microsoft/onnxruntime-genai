@@ -430,10 +430,11 @@ PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model,
         budget = PagedCacheMemoryBudget(free_bytes, *batching.gpu_utilization_factor);
       }
     }
-    const size_t available = budget > auxiliary_reserved_memory_bytes &&
-                                     budget - auxiliary_reserved_memory_bytes >= target_block_bytes
-                                 ? budget - auxiliary_reserved_memory_bytes - target_block_bytes
-                                 : 0;
+    size_t available = budget;
+    for (const size_t reserved : {auxiliary_reserved_memory_bytes,
+                                  PagedCacheCaptureBlockTableBytes(model_), target_block_bytes}) {
+      available -= std::min(available, reserved);
+    }
     const size_t device_count = std::min(count, available / optional_draft_checkpoint_bytes);
     const size_t vram_count = device_resident ? device_count
                                               : std::min(device_count, limits.vram_bytes / optional_draft_checkpoint_bytes);

@@ -79,6 +79,8 @@ size_t ResolveConfiguredPagedBlockCount(size_t configured_num_blocks,
 // prefix caching retains windowed layers in full paged storage and includes them in this cost.
 size_t PagedKeyValueCacheBytesPerBlock(const std::shared_ptr<Model>& model);
 
+size_t PagedCacheCaptureBlockTableBytes(const std::shared_ptr<Model>& model);
+
 // Resolves the configured prefix-cache flag, retention capacity, and target/auxiliary layout into
 // one policy shared by paged block retention and hybrid fixed-state checkpoint allocation.
 bool ResolvePrefixCachingEnabled(const std::shared_ptr<Model>& model,

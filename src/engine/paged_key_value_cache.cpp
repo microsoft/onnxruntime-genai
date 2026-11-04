@@ -473,6 +473,23 @@ size_t PagedKeyValueCacheBytesPerBlock(const std::shared_ptr<Model>& model) {
   return bytes;
 }
 
+size_t PagedCacheCaptureBlockTableBytes(const std::shared_ptr<Model>& model) {
+  const auto& batching = *model->config_->engine.dynamic_batching;
+  const auto& decoder = model->config_->model.decoder;
+  if (!batching.device_memory_budget_bytes || !IsGraphCaptureEnabled(decoder.session_options)) {
+    return 0;
+  }
+  const size_t context_length = static_cast<size_t>(model->config_->model.context_length);
+  const size_t columns = std::max(size_t{1}, context_length / batching.block_size +
+                                                 (context_length % batching.block_size != 0));
+  size_t table_bytes = CheckedMultiply(batching.max_batch_size, columns, "Capture block-table allocation");
+  table_bytes = CheckedMultiply(table_bytes, sizeof(int32_t), "Capture block-table allocation");
+  if (!WindowedLayers(model, ResolvePagedKeyValueGroup(decoder)).empty()) {
+    table_bytes = CheckedMultiply(table_bytes, 2, "Capture block-table allocation");
+  }
+  return table_bytes;
+}
+
 bool ResolvePrefixCachingEnabled(const std::shared_ptr<Model>& model,
                                  size_t auxiliary_bytes_per_block) {
   const auto& batching = *model->config_->engine.dynamic_batching;
@@ -556,22 +573,11 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model,
     }
     windowed_bytes += layer_bytes;
   }
-  size_t reserved_bytes = windowed_bytes;
-  if (model->config_->engine.dynamic_batching->device_memory_budget_bytes &&
-      IsGraphCaptureEnabled(decoder.session_options)) {
-    const size_t context_length = static_cast<size_t>(model->config_->model.context_length);
-    const size_t columns = std::max(size_t{1}, context_length / block_size +
-                                                   (context_length % block_size != 0));
-    size_t table_bytes = CheckedMultiply(max_batch_size, columns, "Capture block-table allocation");
-    table_bytes = CheckedMultiply(table_bytes, sizeof(int32_t), "Capture block-table allocation");
-    if (!windowed.empty()) {
-      table_bytes = CheckedMultiply(table_bytes, 2, "Capture block-table allocation");
-    }
-    if (table_bytes > std::numeric_limits<size_t>::max() - reserved_bytes) {
-      throw std::overflow_error("Paged cache reserved memory overflows size_t");
-    }
-    reserved_bytes += table_bytes;
+  const size_t table_bytes = PagedCacheCaptureBlockTableBytes(model);
+  if (table_bytes > std::numeric_limits<size_t>::max() - windowed_bytes) {
+    throw std::overflow_error("Paged cache reserved memory overflows size_t");
   }
+  const size_t reserved_bytes = windowed_bytes + table_bytes;
   const auto num_blocks = ComputeNumBlocks(model_, PagedKeyValueCacheBytesPerBlock(model),
                                            reserved_bytes,
                                            auxiliary_bytes_per_block,
