@@ -1,11 +1,12 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-// Engine contract tests for grammar fast-forward tokens: the continuation a turn's grammar forces
+// Engine contract tests for grammar fast-forward tokens: the forced span a turn's grammar produces
 // after a sampled token. These run over the synthetic-paged fixture model, whose checked-in
 // tokenizer maps token 5 -> "ST" and token 6 -> "OP" (so the pair completes a "STOP" stop string)
-// and tokens 11-63 to unique filler text; the hybrid case uses the synthetic-composite fixture. The
-// recording executor never runs the model; it fabricates one-hot logits for the token a test scripts.
+// and tokens 11-63 to unique filler text; the hybrid case uses the synthetic-composite fixture, and
+// the USE_GUIDANCE case a real llguidance grammar over tiny-random-gpt2. The recording executor
+// never runs the model; it fabricates one-hot logits for the token a test scripts.
 
 #include <array>
 #include <cstdint>
@@ -31,6 +32,10 @@ namespace test {
 namespace {
 
 std::vector<int32_t> Prompt() { return {2, 3, 4}; }
+
+// Long-span tests trigger on token 11 and expect it plus 7 forced tokens, then the remaining 4.
+static_assert(kMaxGeneratedTokensPerStep == 8);
+std::vector<int32_t> LongForcedSpan() { return {12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22}; }
 
 DeviceSpan<float> LogitsForToken(Model& model, int32_t token) {
   auto logits = model.p_device_inputs_->Allocate<float>(
@@ -141,14 +146,13 @@ TEST_F(GuidanceFastForwardTest, ForcedTokensFollowTheSampledTokenAndReachTheMode
 }
 
 // The sampling step and each later step publish at most kMaxGeneratedTokensPerStep tokens. The rest
-// of the span stays private, and the row publishes the next of it, instead of sampling, as it reads
-// to its tail.
+// of the span stays private, and the row publishes up to that many more of it, instead of sampling,
+// as it reads to its tail.
 TEST_F(GuidanceFastForwardTest, LongForcedSpanIsPublishedAtMostEightTokensPerStepBeforeSampling) {
-  static_assert(kMaxGeneratedTokensPerStep == 8);
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
   auto request = CreateEngineRequest(engine.engine);
   request->BeginTurn(Prompt());
-  const std::vector<int32_t> forced{12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22};
+  const auto forced = LongForcedSpan();
   InstallForcingGrammar(*request, /*trigger=*/11, forced);
 
   std::array<EngineEvent, 16> storage;
@@ -223,7 +227,7 @@ TEST_F(GuidanceFastForwardTest, TurnLimitInsideTheUnpublishedSpanEndsTheTurnTher
   TurnOptions options;
   options.max_generated_tokens = 10;
   request->BeginTurn(Prompt(), options);
-  InstallForcingGrammar(*request, /*trigger=*/11, {12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22});
+  InstallForcingGrammar(*request, /*trigger=*/11, LongForcedSpan());
 
   std::array<EngineEvent, 16> storage;
   ASSERT_EQ(engine.engine->Run(storage), 8u);
@@ -320,7 +324,7 @@ TEST_F(GuidanceFastForwardTest, RollbackRestoresTheUnpublishedSpanAndTheRetryPub
     auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
     auto request = CreateEngineRequest(engine.engine);
     request->BeginTurn(Prompt());
-    InstallForcingGrammar(*request, /*trigger=*/11, {12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22});
+    InstallForcingGrammar(*request, /*trigger=*/11, LongForcedSpan());
     const auto restore = [&] {
       if (queued_restore) {
         request->QueueStateRestoreForTransaction();
@@ -364,7 +368,7 @@ TEST_F(GuidanceFastForwardTest, RollbackRestoresTheUnpublishedSpanAndTheRetryPub
 
     const auto tokens = request->TokensCpu();
     EXPECT_EQ(std::vector<int32_t>(tokens.begin(), tokens.end()),
-              Concat(Prompt(), {11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22}));
+              Concat(Prompt(), Concat({11}, LongForcedSpan())));
     EXPECT_EQ(request->TurnGeneratedTokens(), 12u);
     auto* grammar = static_cast<ForcingGrammar*>(RequestGuidanceTestAccess::Get(*request));
     EXPECT_EQ(grammar->CommittedTokens(), (std::vector<int32_t>{11}));
@@ -377,7 +381,7 @@ TEST_F(GuidanceFastForwardTest, CancelKeepsPublishedTokensAndDropsTheUnpublished
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
   auto request = CreateEngineRequest(engine.engine);
   request->BeginTurn(Prompt());
-  InstallForcingGrammar(*request, /*trigger=*/11, {12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22});
+  InstallForcingGrammar(*request, /*trigger=*/11, LongForcedSpan());
 
   std::array<EngineEvent, 16> storage;
   ASSERT_EQ(engine.engine->Run(storage), 8u);
@@ -407,7 +411,7 @@ TEST_F(GuidanceFastForwardTest, PublishingRowLeavesThePeerOwnedSamplerSlotIntact
   auto forcing = CreateEngineRequest(engine.engine);
   peer->BeginTurn(Prompt());
   forcing->BeginTurn(Prompt());
-  InstallForcingGrammar(*forcing, /*trigger=*/11, {12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22});
+  InstallForcingGrammar(*forcing, /*trigger=*/11, LongForcedSpan());
   std::array<EngineEvent, 16> storage;
   ASSERT_EQ(engine.engine->Run(storage), 9u);  // peer: 11; forcing: 11 through 18
 
@@ -482,6 +486,7 @@ TEST(GuidanceFastForwardRealGrammarTest, ForcedTextMatchesStepByStepDecodingInOn
   constexpr const char* kText = "on and on and on";
   const auto text_tokens = tokenizer->Encode(kText);
   ASSERT_GT(text_tokens.size(), 2u);
+  ASSERT_LE(text_tokens.size(), kMaxGeneratedTokensPerStep);  // published in one step
 
   const auto run = [&](bool fast_forward) {
     auto engine = MakeDoublesEngine(model, /*capacity=*/8, text_tokens.front());
