@@ -1,10 +1,21 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
+include(FetchContent)
+
+FetchContent_Declare(
+  nlohmann_json
+  GIT_REPOSITORY https://github.com/nlohmann/json.git
+  GIT_TAG v3.12.0
+)
+FetchContent_MakeAvailable(nlohmann_json)
+
 set(model_benchmark_srcs
   ${CMAKE_CURRENT_SOURCE_DIR}/main.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/options.h
   ${CMAKE_CURRENT_SOURCE_DIR}/options.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/adapter_loader.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/adapter_loader.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/resource_utils.h
 )
 
@@ -24,9 +35,14 @@ add_executable(model_benchmark ${model_benchmark_srcs})
 target_include_directories(model_benchmark PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${CMAKE_SOURCE_DIR}/src  # directory containing the ort_genai headers
+  ${nlohmann_json_SOURCE_DIR}/include
+  ${ORT_HEADER_DIR}
 )
 
-target_link_libraries(model_benchmark PRIVATE onnxruntime-genai ${ONNXRUNTIME_LIB})
+target_link_libraries(model_benchmark PRIVATE
+  onnxruntime-genai
+  ${ONNXRUNTIME_LIB}
+)
 
 target_link_directories(model_benchmark PRIVATE ${ORT_LIB_DIR})
 
