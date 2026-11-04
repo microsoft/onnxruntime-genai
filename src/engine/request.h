@@ -699,13 +699,13 @@ struct Request : std::enable_shared_from_this<Request>,
   // MarkFinalStageAsEvaluatedNonAcceptedDraft/CommitAcceptedDraftsForTransaction for how each path
   // advances it.
   size_t evaluated_draft_count_{};
-  // The continuation the turn's grammar forced after its last sampled token. The grammar cursor is
-  // already past all of it, but a step publishes at most kMaxGeneratedTokensPerStep tokens, so the
-  // unpublished tail stays private here and the Request samples nothing until it is empty. A step
-  // stages [forced_tokens_published_, forced_tokens_published_ + staged_forced_token_count_), which
-  // CommitStep() appends to tokens_host_ and Search already holds. Cleared when the turn ends.
+  // The forced span: tokens the turn's grammar forced after its last sampled token. The grammar
+  // cursor is already past all of it, but a step publishes at most kMaxGeneratedTokensPerStep tokens,
+  // so the unpublished rest stays private here and the Request samples nothing until it is empty. A
+  // step stages [published_forced_token_count_, + staged_forced_token_count_), which CommitStep()
+  // appends to tokens_host_ and Search already holds. Cleared once fully published or the turn ends.
   std::vector<int32_t> forced_tokens_;
-  size_t forced_tokens_published_{};
+  size_t published_forced_token_count_{};
   size_t staged_forced_token_count_{};
   struct DraftVerificationState {
     bool completed_generation{};

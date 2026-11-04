@@ -352,7 +352,7 @@ void Request::MarkClosedFromEngine(const Engine& engine) noexcept {
   evaluated_draft_count_ = 0;
   draft_verification_.Reset();
   std::vector<int32_t>{}.swap(forced_tokens_);
-  forced_tokens_published_ = 0;
+  published_forced_token_count_ = 0;
   staged_forced_token_count_ = 0;
 }
 
@@ -409,7 +409,7 @@ void Request::ReleaseTurnResources() noexcept {
   pending_reseed_applied_ = false;
   // The grammar cursor that forced these tokens is gone; output already published stays committed.
   forced_tokens_.clear();
-  forced_tokens_published_ = 0;
+  published_forced_token_count_ = 0;
   staged_forced_token_count_ = 0;
 }
 
@@ -464,6 +464,9 @@ void Request::CompleteClose() noexcept {
   accepted_draft_count_ = 0;
   evaluated_draft_count_ = 0;
   draft_verification_.Reset();
+  std::vector<int32_t>{}.swap(forced_tokens_);
+  published_forced_token_count_ = 0;
+  staged_forced_token_count_ = 0;
   std::vector<int32_t>{}.swap(tokens_host_);
   std::vector<TurnBoundary>{}.swap(turn_boundaries_);
 }
@@ -1161,11 +1164,11 @@ void Request::CommitStep(const RequestStepPlan& plan,
   const auto forced_tokens = StagedForcedTokens();
   tokens_host_.insert(tokens_host_.end(), forced_tokens.begin(), forced_tokens.end());
   turn_generated_tokens_ += forced_tokens.size();
-  forced_tokens_published_ += forced_tokens.size();
+  published_forced_token_count_ += forced_tokens.size();
   staged_forced_token_count_ = 0;
-  if (forced_tokens_published_ == forced_tokens_.size()) {
+  if (published_forced_token_count_ == forced_tokens_.size()) {
     forced_tokens_.clear();
-    forced_tokens_published_ = 0;
+    published_forced_token_count_ = 0;
   }
   // A verify step reserved cache slots for every draft; the rejected ones were never committed.
   processed_sequence_length_ =
@@ -1326,13 +1329,13 @@ void Request::CommitGuidanceToken(const RequestStepResult& result) {
 // turn, which releases the cursor and drops the unpublished rest of the span.
 void Request::StageForcedTokens(RequestStepResult& result, size_t limit) {
   const auto pending = std::span<const int32_t>{forced_tokens_}.subspan(
-      forced_tokens_published_ + staged_forced_token_count_);
+      published_forced_token_count_ + staged_forced_token_count_);
   if (pending.empty()) {
     return;
   }
   if (staged_draft_count_ != 0 || accepted_draft_count_ != 0) {
     throw std::logic_error(
-        "Grammar fast-forward tokens can only follow a single sampled token.");
+        "Grammar-forced tokens cannot be staged in a step that verifies drafts.");
   }
 
   for (const int32_t forced_token : pending.first(std::min(limit, pending.size()))) {
@@ -1376,7 +1379,7 @@ void Request::StageForcedTokens(RequestStepResult& result, size_t limit) {
 }
 
 std::span<const int32_t> Request::StagedForcedTokens() const {
-  return std::span<const int32_t>{forced_tokens_}.subspan(forced_tokens_published_,
+  return std::span<const int32_t>{forced_tokens_}.subspan(published_forced_token_count_,
                                                           staged_forced_token_count_);
 }
 

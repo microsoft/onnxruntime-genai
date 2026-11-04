@@ -1086,8 +1086,7 @@ void ScheduledRequests::GenerateNextTokensForTransaction(
       } else {
         results[i] = requests_[i]->ApplyLogitsForTransaction(logits[i], guidance_applied);
       }
-    } else if (selected_tokens[i].empty() && !sampled_by_batched_sampler[i] &&
-               requests_[i]->PublishesForcedTokens()) {
+    } else if (requests_[i]->PublishesForcedTokens()) {
       // The grammar already forced what follows, so this row's logits are not sampled.
       results[i] = requests_[i]->StageForcedTokensForTransaction();
     }

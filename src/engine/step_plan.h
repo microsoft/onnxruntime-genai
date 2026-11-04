@@ -72,6 +72,10 @@ struct RequestStepPlan {
   bool newly_admitted{};
   size_t scheduling_order{};  // Logical scheduler order before physical execution ordering.
   std::shared_ptr<const PrefixCacheMatch> prefix_match;
+
+  // A decode row reading the sampled token plus forced tokens it has not read yet, rather than one
+  // token and its drafts.
+  bool ReadsSeveralCommittedTokens() const { return unprocessed_token_count > draft_token_count + 1; }
 };
 
 // Fixed decoder-state demand for a step, planned atomically with the paged-block demand so the

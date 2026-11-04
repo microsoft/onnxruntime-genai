@@ -445,7 +445,7 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     // only single-token and verify rows qualify.
     plan.graph_capture_eligible &=
         !entry.is_prefill && entry.unprocessed_token_count == uniform_token_count &&
-        entry.unprocessed_token_count == entry.draft_token_count + 1;
+        !entry.ReadsSeveralCommittedTokens();
   }
   try {
     for (const auto& entry : plan.requests) {

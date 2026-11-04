@@ -727,7 +727,7 @@ StepPlanningResult PagedCacheManager::PlanStepResources(StepPlan& plan) const {
     const bool has_chunk = std::any_of(
         plan.requests.begin(), plan.requests.end(),
         [](const RequestStepPlan& entry) {
-          return entry.is_prefill || entry.unprocessed_token_count > entry.draft_token_count + 1;
+          return entry.is_prefill || entry.ReadsSeveralCommittedTokens();
         });
     const bool has_drafts = std::any_of(
         plan.requests.begin(), plan.requests.end(),
