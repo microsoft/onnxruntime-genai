@@ -8,9 +8,11 @@
 // the USE_GUIDANCE case a real llguidance grammar over tiny-random-gpt2. The recording executor
 // never runs the model; it fabricates one-hot logits for the token a test scripts.
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -55,6 +57,9 @@ class ForcingGrammar final : public ConstrainedLogitsProcessor {
       : trigger_{trigger}, continuation_{std::move(continuation)} {}
 
   void CommitTokens(std::span<int32_t> tokens) override {
+    if (std::exchange(*fail_next_commit_, false)) {
+      throw std::runtime_error("Injected grammar commit failure.");
+    }
     committed_tokens_.insert(committed_tokens_.end(), tokens.begin(), tokens.end());
     pending_forced_tokens_.clear();
     if (!tokens.empty() && tokens.back() == trigger_) {
@@ -74,22 +79,28 @@ class ForcingGrammar final : public ConstrainedLogitsProcessor {
     auto clone = std::make_unique<ForcingGrammar>(trigger_, continuation_);
     clone->committed_tokens_ = committed_tokens_;
     clone->pending_forced_tokens_ = pending_forced_tokens_;
+    clone->fail_next_commit_ = fail_next_commit_;
     return clone;
   }
 
   const std::vector<int32_t>& CommittedTokens() const { return committed_tokens_; }
+  // Shared with every clone, so restoring a rolled-back step's checkpoint cannot re-arm it.
+  void FailNextCommit() { *fail_next_commit_ = true; }
 
  private:
   int32_t trigger_;
   std::vector<int32_t> continuation_;
   std::vector<int32_t> committed_tokens_;
   std::vector<int32_t> pending_forced_tokens_;
+  std::shared_ptr<bool> fail_next_commit_ = std::make_shared<bool>(false);
 };
 
-void InstallForcingGrammar(Request& request, int32_t trigger,
-                           std::vector<int32_t> continuation) {
-  RequestGuidanceTestAccess::Install(
-      request, std::make_unique<ForcingGrammar>(trigger, std::move(continuation)));
+ForcingGrammar& InstallForcingGrammar(Request& request, int32_t trigger,
+                                      std::vector<int32_t> continuation) {
+  auto grammar = std::make_unique<ForcingGrammar>(trigger, std::move(continuation));
+  auto& installed = *grammar;
+  RequestGuidanceTestAccess::Install(request, std::move(grammar));
+  return installed;
 }
 
 std::vector<int32_t> EventTokens(std::span<const EngineEvent> events) {
@@ -105,6 +116,17 @@ std::vector<int32_t> EventTokens(std::span<const EngineEvent> events) {
 std::vector<int32_t> Concat(std::vector<int32_t> head, const std::vector<int32_t>& tail) {
   head.insert(head.end(), tail.begin(), tail.end());
   return head;
+}
+
+TurnOptions Limit(size_t max_generated_tokens) {
+  TurnOptions options;
+  options.max_generated_tokens = max_generated_tokens;
+  return options;
+}
+
+std::vector<int32_t> GeneratedTokens(const Request& request) {
+  const auto tokens = request.TokensCpu();
+  return {tokens.begin() + static_cast<ptrdiff_t>(Prompt().size()), tokens.end()};
 }
 
 class GuidanceFastForwardTest : public ::testing::Test {
@@ -471,6 +493,208 @@ TEST_F(GuidanceFastForwardTest, PublishingRowLeavesThePeerOwnedSamplerSlotIntact
   ASSERT_EQ(engine.engine->Run(storage), 5u);  // peer: 30; forcing: 19 through 22
   EXPECT_EQ(EventTokens(std::span{storage}.first(5)), (std::vector<int32_t>{30, 19, 20, 21, 22}));
   EXPECT_EQ(slot.CpuSpan()[0], 30);
+}
+
+// A caller may drain fewer events per Run than a step produces. Tokens still arrive in order,
+// exactly once, without another model step until they are drained, and a peer's token waits behind
+// at most one capped batch of forced tokens.
+TEST_F(GuidanceFastForwardTest, SmallEventBuffersDeliverForcedTokensInOrderWithoutStarvingAPeer) {
+  for (const size_t capacity : {size_t{1}, size_t{3}}) {
+    SCOPED_TRACE(::testing::Message() << "capacity " << capacity);
+    auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
+    auto forcing = CreateRequestWithPrompt(engine.engine, Prompt(), Limit(12));
+    InstallForcingGrammar(*forcing, /*trigger=*/11, LongForcedSpan());
+    auto peer = CreateRequestWithPrompt(engine.engine, Prompt(), Limit(2));
+
+    std::vector<EngineEvent> storage(capacity);
+    std::vector<int32_t> forcing_tokens;
+    std::vector<int32_t> peer_tokens;
+    size_t events_before_peer = 0;
+    for (int call = 0; call < 64; ++call) {
+      const size_t count = engine.engine->Run(storage);
+      if (count == 0 && forcing->IsTurnComplete() && peer->IsTurnComplete())
+        break;
+      for (const auto& event : std::span{storage}.first(count)) {
+        if (!(event.flags & EngineEventFlagToken))
+          continue;
+        if (event.request == peer) {
+          peer_tokens.push_back(event.token);
+        } else {
+          forcing_tokens.push_back(event.token);
+          events_before_peer += peer_tokens.empty();
+        }
+      }
+    }
+
+    EXPECT_EQ(forcing_tokens, Concat({11}, LongForcedSpan()));
+    EXPECT_EQ(peer_tokens, (std::vector<int32_t>{11, 11}));
+    EXPECT_LE(events_before_peer, kMaxGeneratedTokensPerStep);
+    EXPECT_EQ(engine.executor->decode_calls, 2);
+  }
+}
+
+// The peer's second draft is rejected in the step where the forcing row reads one unread token; the
+// peer keeps its accepted prefix and correction, and the forcing row's tokens are unaffected.
+TEST_F(GuidanceFastForwardTest, PartialDraftAcceptanceBesideACatchUpReadKeepsBothRowsExact) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
+  engine.cache->SetMaxDraftTokensPerStep(2);
+  auto peer = CreateRequestWithPrompt(engine.engine, Prompt());
+  auto forcing = CreateRequestWithPrompt(engine.engine, Prompt());
+  InstallForcingGrammar(*forcing, /*trigger=*/11, LongForcedSpan());
+  std::array<EngineEvent, 16> storage;
+  ASSERT_EQ(engine.engine->Run(storage), 9u);  // peer: 11; forcing: 11 through 18
+
+  peer->SetDraftTokens(std::array<int32_t, 2>{11, 12});
+  // Packed rows: the peer's two draft rows and its final row, then the forcing row.
+  engine.executor->SetVerifyRowTokens({11, 20, 30, 40});
+  engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
+    ASSERT_NE(context.plan, nullptr);
+    for (const auto& entry : context.plan->requests) {
+      const bool is_forcing = entry.request_id == forcing.get();
+      EXPECT_EQ(entry.unprocessed_token_count, is_forcing ? 1u : 3u);
+      EXPECT_EQ(entry.draft_token_count, is_forcing ? 0u : 2u);
+    }
+  });
+  ASSERT_EQ(engine.engine->Run(storage), 2u);
+  EXPECT_EQ(EventTokens(std::span{storage}.first(2)), (std::vector<int32_t>{11, 20}));
+
+  engine.executor->SetExecutionCallback(nullptr);
+  engine.executor->SetVerifyRowTokens({});
+  engine.executor->SetForcedToken(EosToken(*model_));
+  while (!(forcing->IsTurnComplete() && peer->IsTurnComplete()))
+    ASSERT_GT(engine.engine->Run(storage), 0u);
+  EXPECT_EQ(GeneratedTokens(*peer), (std::vector<int32_t>{11, 11, 20}));
+  EXPECT_EQ(GeneratedTokens(*forcing), Concat({11}, LongForcedSpan()));
+  EXPECT_TRUE(ValidateRequestInvariants(peer->Snapshot()).empty());
+  EXPECT_TRUE(ValidateRequestInvariants(forcing->Snapshot()).empty());
+}
+
+// Turns that start on different steps, one of them while another row is catching up, generate
+// exactly what each generates alone.
+TEST_F(GuidanceFastForwardTest, StaggeredTurnsGenerateWhatEachGeneratesAlone) {
+  struct TurnSpec {
+    std::optional<std::vector<int32_t>> forced_after_11;
+    size_t limit;
+  };
+  const std::array<TurnSpec, 3> specs{
+      TurnSpec{LongForcedSpan(), 20}, TurnSpec{std::nullopt, 5}, TurnSpec{{{30, 31, 32}}, 9}};
+  const auto start_turn = [&](DoublesEngine& engine, const TurnSpec& spec) {
+    auto request = CreateRequestWithPrompt(engine.engine, Prompt(), Limit(spec.limit));
+    if (spec.forced_after_11)
+      InstallForcingGrammar(*request, /*trigger=*/11, *spec.forced_after_11);
+    return request;
+  };
+  const auto run_until_complete = [](DoublesEngine& engine, const auto& requests) {
+    std::array<EngineEvent, 16> storage;
+    for (int step = 0; step < 64; ++step) {
+      engine.engine->Run(storage);
+      if (std::all_of(requests.begin(), requests.end(),
+                      [](const auto& request) { return request->IsTurnComplete(); }))
+        return;
+    }
+    FAIL() << "Turns did not complete.";
+  };
+
+  std::vector<std::vector<int32_t>> alone;
+  for (const auto& spec : specs) {
+    auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
+    const std::array requests{start_turn(engine, spec)};
+    run_until_complete(engine, requests);
+    alone.push_back(GeneratedTokens(*requests[0]));
+  }
+
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
+  std::vector<std::shared_ptr<Request>> requests;
+  std::array<EngineEvent, 16> storage;
+  for (const auto& spec : specs) {  // a new turn each step
+    requests.push_back(start_turn(engine, spec));
+    engine.engine->Run(storage);
+  }
+  run_until_complete(engine, requests);
+  for (size_t i = 0; i < requests.size(); ++i) {
+    SCOPED_TRACE(::testing::Message() << "turn " << i);
+    EXPECT_EQ(GeneratedTokens(*requests[i]), alone[i]);
+    EXPECT_TRUE(ValidateRequestInvariants(requests[i]->Snapshot()).empty());
+  }
+}
+
+// Cache pressure that defers the row holding unpublished forced tokens leaves them private and
+// intact; the row publishes them once it runs again.
+TEST_F(GuidanceFastForwardTest, CapacityDeferralKeepsTheUnpublishedSpanUntilTheRowRuns) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
+  auto forcing = CreateRequestWithPrompt(engine.engine, Prompt(), Limit(12));
+  InstallForcingGrammar(*forcing, /*trigger=*/11, LongForcedSpan());
+  auto peer = CreateRequestWithPrompt(engine.engine, Prompt(), Limit(3));
+  std::array<EngineEvent, 16> storage;
+  ASSERT_EQ(engine.engine->Run(storage), 9u);  // forcing: 11 through 18; peer: 11
+  const auto deferred = forcing->Snapshot();
+
+  engine.cache->SetCapacityDeferredRequest(forcing);
+  ASSERT_EQ(engine.engine->Run(storage), 1u);
+  EXPECT_EQ(storage[0].request, peer);
+  EXPECT_EQ(forcing->CurrentSequenceLength(), deferred.current_sequence_length);
+  EXPECT_EQ(forcing->ProcessedSequenceLength(), deferred.processed_sequence_length);
+
+  engine.cache->SetCapacityDeferredRequest(nullptr);
+  ASSERT_EQ(engine.engine->Run(storage), 5u);  // forcing: 19 through 22; peer: 11
+  EXPECT_TRUE(forcing->IsTurnComplete());
+  EXPECT_EQ(GeneratedTokens(*forcing), Concat({11}, LongForcedSpan()));
+  EXPECT_TRUE(ValidateRequestInvariants(forcing->Snapshot()).empty());
+}
+
+// A failure after this step staged forced tokens, on the step that samples and forces them or on
+// one that publishes held-back ones, rolls them all back; the retry publishes them exactly once.
+TEST_F(GuidanceFastForwardTest, FailureAfterForcedTokensAreStagedRollsThemBackForAnExactRetry) {
+  for (const bool on_publish_step : {false, true}) {
+    SCOPED_TRACE(::testing::Message() << "on publish step " << on_publish_step);
+    auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
+    auto forcing = CreateRequestWithPrompt(engine.engine, Prompt(), Limit(12));
+    InstallForcingGrammar(*forcing, /*trigger=*/11, LongForcedSpan());
+    // Staged after the forcing row; its grammar throws while committing its sampled token.
+    auto peer = CreateRequestWithPrompt(engine.engine, Prompt(), Limit(3));
+    auto& peer_grammar = InstallForcingGrammar(*peer, /*trigger=*/99, {});
+    std::array<EngineEvent, 16> storage;
+    if (on_publish_step)
+      ASSERT_EQ(engine.engine->Run(storage), 9u);
+    const auto before = forcing->Snapshot();
+    const auto generated_before = GeneratedTokens(*forcing);
+
+    peer_grammar.FailNextCommit();
+    ASSERT_EQ(RunOne(*engine.engine).flags, EngineEventFlagRetryable);
+    EXPECT_EQ(forcing->CurrentSequenceLength(), before.current_sequence_length);
+    EXPECT_EQ(forcing->ProcessedSequenceLength(), before.processed_sequence_length);
+    EXPECT_EQ(GeneratedTokens(*forcing), generated_before);
+    // The restored grammar cursor has seen only the tokens committed before the failed step.
+    auto* grammar = static_cast<ForcingGrammar*>(RequestGuidanceTestAccess::Get(*forcing));
+    ASSERT_NE(grammar, nullptr);
+    EXPECT_EQ(grammar->CommittedTokens(),
+              on_publish_step ? std::vector<int32_t>{11} : std::vector<int32_t>{});
+
+    const size_t published = on_publish_step ? 4 : 8;
+    ASSERT_EQ(engine.engine->Run(storage), published + 1);
+    while (!forcing->IsTurnComplete())
+      ASSERT_GT(engine.engine->Run(storage), 0u);
+    EXPECT_EQ(GeneratedTokens(*forcing), Concat({11}, LongForcedSpan()));
+    EXPECT_EQ(forcing->TurnGeneratedTokens(), 12u);
+  }
+}
+
+// A fatal failure after a publish step staged forced tokens ends the turn with only the output that
+// earlier steps published; the staged and still-private tokens are dropped.
+TEST_F(GuidanceFastForwardTest, FatalFailureAfterForcedTokensAreStagedKeepsOnlyPublishedOutput) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
+  auto forcing = CreateRequestWithPrompt(engine.engine, Prompt());
+  InstallForcingGrammar(*forcing, /*trigger=*/11, LongForcedSpan());
+  std::array<EngineEvent, 16> storage;
+  ASSERT_EQ(engine.engine->Run(storage), 8u);
+
+  engine.cache->ThrowPrepareFailureOnce();
+  const auto failure = RunOne(*engine.engine);
+  EXPECT_EQ(failure.request, forcing);
+  EXPECT_EQ(failure.flags, EngineEventFlagTurnFinished | EngineEventFlagFailed);
+  EXPECT_EQ(forcing->FinishReason(), GenerationFinishReason::Failed);
+  EXPECT_EQ(GeneratedTokens(*forcing), (std::vector<int32_t>{11, 12, 13, 14, 15, 16, 17, 18}));
+  EXPECT_EQ(forcing->TurnGeneratedTokens(), 8u);
 }
 
 TEST_F(GuidanceFastForwardTest, StaticBatchingRejectsAFastForwardTurnWithoutConsumingIt) {
