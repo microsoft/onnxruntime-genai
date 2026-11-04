@@ -373,6 +373,7 @@ typedef struct Qwen38PlaneTestStats {
   long long fault_armed;              // 1 while an injected fault has not fired yet
   long long unfenced_drains;          // waits for a stream because its completion event could not be recorded
   long long gather_pool_threads;      // live worker threads of the staged PLE gather
+  long long ple_cache_slots;          // PLE n-gram cache slots summed over the staged workspaces
 } Qwen38PlaneTestStats;
 
 // Arms one fault: the (skip + 1)-th execution of `site` from now on fails with `error` instead of calling CUDA, once. A site

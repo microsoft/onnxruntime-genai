@@ -3109,6 +3109,34 @@ TEST_F(Qwen38PlaneStagedPleTest, PleRowsBetweenTheRowsOfAFoldLeavesNothingForARo
   rig.ExpectPrepResult(2, 10, 3);
 }
 
+TEST_F(Qwen38PlaneStagedPleTest, PleCacheSlotsHonorsClampedOverridesAndFallsBackOnInvalidValues) {
+  StagedPleRig rig{*plane_, kAscendingRows};
+  const auto slots_for = [&](std::optional<std::string> env_value) -> long long {
+    Generators::test::ScopedEnvironmentVariable env{"ORT_QWEN38_PLE_CACHE_SLOTS", std::move(env_value)};
+    rig.ResetTable();
+    EXPECT_EQ(rig.PleRows({1}), 0);
+    return Stats().ple_cache_slots;
+  };
+
+  // Positive values below 1024 clamp to the 1024-slot floor instead of the 65536-slot ceiling.
+  EXPECT_EQ(slots_for("1"), 1024);
+  EXPECT_EQ(slots_for("512"), 1024);
+  EXPECT_EQ(slots_for("1024"), 1024);
+  // Larger positive values round down to a power of two in [1024, 65536].
+  EXPECT_EQ(slots_for("2048"), 2048);
+  EXPECT_EQ(slots_for("3000"), 2048);
+  EXPECT_EQ(slots_for("16384"), 16384);
+  EXPECT_EQ(slots_for("65536"), 65536);
+  EXPECT_EQ(slots_for("131072"), 65536);
+
+  // Empty, non-numeric, or non-positive values fall back to the normal free-memory heuristic.
+  const long long heuristic_slots = slots_for(std::nullopt);
+  EXPECT_TRUE(heuristic_slots == 16384 || heuristic_slots == 65536) << heuristic_slots;
+  for (const char* invalid : {"", "abc", "1024x", "0", "-512"}) {
+    EXPECT_EQ(slots_for(invalid), heuristic_slots) << invalid;
+  }
+}
+
 // A table that is staged but was never registered has no host rows to gather from: it has to be an error, not a silent no-op.
 TEST_F(Qwen38PlaneStagedPleTest, AStagedTableThatWasNeverRegisteredIsAnErrorNotASilentSkip) {
   StagedPleRig rig{*plane_, kAscendingRows};

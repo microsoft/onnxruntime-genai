@@ -90,7 +90,11 @@ std::string DescribeMissingQwen38ReplayTensor(const std::string& name, const std
 
 // Every banked state input in `bank_names` (`past_key_values.<layer>.<suffix>`) is overwritten in the destination bank by a
 // two-bank compact-replay verify step, so on partial acceptance it must be replayed from its `state_update.<layer>.*` output.
-// Throws std::runtime_error naming the banked state and the missing `state_update.*` output when a banked state has no update.
+// `past_key_values.<layer>.ple_context` is exempt: in folded targets with `ple_embeddings.<layer>` and
+// `com.microsoft::SpeculativePrefixCommit` (RC4/RC5), the plane prepares the PLE rows before the graph runs and
+// `SpeculativePrefixCommit` commits the accepted n-gram context directly into `fold.ctx_commit_out`, so `ple_context` is an
+// unused legacy binding that needs no `state_update` output. Throws std::runtime_error naming the banked state and the
+// missing `state_update.*` output when any other banked state has no update.
 void RequireQwen38ReplayCoverage(const std::vector<std::string>& bank_names,
                                  const std::vector<std::string>& state_update_names);
 
