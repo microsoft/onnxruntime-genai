@@ -457,6 +457,8 @@ void DefaultKeyValueCacheBase::PickPastState(DeviceSpan<int32_t> beam_indices, i
     PickPastState<int8_t>(beam_indices, index);
   } else if (type_ == Ort::TypeToTensorType<uint8_t> || type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E4M3FN) {
     PickPastState<uint8_t>(beam_indices, index);
+  } else if (type_ == Ort::TypeToTensorType<Ort::BFloat16_t>) {
+    PickPastState<Ort::BFloat16_t>(beam_indices, index);
   } else {
     PickPastState<Ort::Float16_t>(beam_indices, index);
   }
