@@ -188,15 +188,14 @@ transcript followed by the per-word timestamp transcript.
 
 ### Building the examples
 
-These examples require officially released GenAI headers, language bindings, and native libraries
-containing the processor APIs. The initial implementation landed in
+These examples require the officially released GenAI `0.19.0` headers, language bindings, and native
+libraries containing the processor APIs. The initial implementation landed in
 [PR #2591](https://github.com/microsoft/onnxruntime-genai/pull/2591), and the opaque result and ASR
 dispatch refactors have merged in [PR #2797](https://github.com/microsoft/onnxruntime-genai/pull/2797)
-and [PR #2799](https://github.com/microsoft/onnxruntime-genai/pull/2799). The examples still require a
-new GenAI package release containing those APIs; existing packages such as GenAI `0.17.0` do not
-provide them. Once a containing release is available:
+and [PR #2799](https://github.com/microsoft/onnxruntime-genai/pull/2799). These APIs are available in
+GenAI `0.19.0`:
 
-- For Python, install the official wheel containing the processor APIs. Create `ASRPostProcessor(generator)`
+- For Python, install the official wheel with `pip install onnxruntime-genai==0.19.0`. Create `ASRPostProcessor(generator)`
   and call `process_next()`
   after generation and `finalize()` at the end, then read typed objects from
   `get_next_results()`: use nullable `result.timestamp_result`, then
@@ -205,16 +204,15 @@ provide them. Once a containing release is available:
   application-owned transcript storage before the next processing call; the
   returned objects are borrowed, not independent snapshots.
 - For C++, build the `model_asr` target with `MODEL_ASR=ON` and set `OGA_INCLUDE_DIR` and `OGA_LIB_DIR`
-  to the headers and native library from the corresponding official release archive.
-- For C#, update both the CPU and CUDA NuGet references to the containing release and use the normal
-  package-based build. See the [ASR sample](../examples/csharp/ModelASR/README.md), including its
+  to the headers and native library from the official `0.19.0` release archive.
+- For C#, the CPU and CUDA NuGet references both use `0.19.0`; use the normal package-based build.
+  See the [ASR sample](../examples/csharp/ModelASR/README.md), including its
   segment-timestamp configuration instructions.
 
-The C# package references remain at the common `0.17.0` baseline and must be updated to a release
-containing these APIs before using package-based builds. Selecting `timestamp_level: "off"` does not
+GenAI `0.19.0` is required even for plain-text mode. Selecting `timestamp_level: "off"` does not
 remove the timestamp API references from the C++ or C# example source.
 
-With a feature-enabled Python package installed, run the example regressions from the repository root:
+With the `0.19.0` Python package installed, run the example regressions from the repository root:
 
 ```bash
 python -m pytest test/python/test_onnxruntime_genai_api.py --test_models test/models -k asr_example

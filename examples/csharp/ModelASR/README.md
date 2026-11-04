@@ -13,7 +13,7 @@ and transcribed text is printed incrementally as it becomes available.
 ## Prerequisites
 
 - .NET 8.0 SDK or later
-- ONNX Runtime GenAI C# package ([installation instructions](https://onnxruntime.ai/docs/genai/howto/install))
+- ONNX Runtime GenAI C# package v0.19.0 ([installation instructions](https://onnxruntime.ai/docs/genai/howto/install))
 - A supported streaming ASR ONNX model, for example:
   - `nvidia/nemotron-speech-streaming-en-0.6b` (Nemotron)
   - a Moonshine streaming export (`streaming_enc_dec_asr`)
@@ -25,10 +25,8 @@ cd examples/csharp/
 dotnet build ModelASR -c Release
 ```
 
-This example uses officially released GenAI packages only. The current `0.17.0` package references
-do not contain the required `ASRPostProcessor` APIs, even for plain-text mode. The runtime refactor
-has merged, but this example still requires a new GenAI package release containing those APIs. Both
-the CPU and CUDA package references must be updated to that release before the example can build and run.
+This example uses the officially released GenAI `0.19.0` CPU and CUDA packages, which contain the
+required `ASRPostProcessor` APIs for plain-text and timestamped output.
 No local project reference or local-build switch is provided.
 
 ## Run
