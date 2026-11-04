@@ -196,8 +196,11 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
   const size_t cache_query_token_cap = cache_manager_->MaxQueryTokensPerRequest();
   const size_t max_draft_token_count = cache_manager_->MaxDraftTokensPerStep();
 
-  const uint64_t service_clock = ++chunk_service_clock_;
-  const auto add_candidate = [&candidates, cache_query_token_cap, max_draft_token_count, service_clock,
+  // Within a step, an admission stamps before a share of spare tokens, so a row admitted now waits
+  // ahead of one served now and behind one served earlier.
+  const uint64_t admitted_stamp = 2 * ++chunk_service_clock_;
+  const uint64_t served_stamp = admitted_stamp + 1;
+  const auto add_candidate = [&candidates, cache_query_token_cap, max_draft_token_count, admitted_stamp,
                               this](
                                  const std::shared_ptr<Request>& request,
                                  bool newly_admitted) {
@@ -254,7 +257,7 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
         chunk_token_cap,
         candidate.entry.draft_token_count,
         // An admission waits behind every row already in line for spare tokens.
-        newly_admitted ? service_clock : request->ChunkServiceStamp(),
+        newly_admitted ? admitted_stamp : request->ChunkServiceStamp(),
     };
     candidate.processed_sequence_length =
         effective_processed_sequence_length;
@@ -371,8 +374,10 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     const auto& budget = selected_candidates[index];
     const bool read_spare_chunk_tokens =
         (budget.is_prefill || budget.pending_token_count > 1) && token_counts[index] > 1;
-    if (entry.newly_admitted || read_spare_chunk_tokens) {
-      entry.chunk_service_stamp = service_clock;
+    if (read_spare_chunk_tokens) {
+      entry.chunk_service_stamp = served_stamp;
+    } else if (entry.newly_admitted) {
+      entry.chunk_service_stamp = admitted_stamp;
     }
   }
 
