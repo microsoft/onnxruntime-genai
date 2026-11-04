@@ -22,11 +22,15 @@ WindowedPositionInputs::WindowedPositionInputs(State& state)
     if (!model_.config_->model.decoder.sliding_window.has_value()) {
       throw std::runtime_error("Sliding a window over position_ids and attention_mask requires sliding_window to be set in the genai_config.json.");
     }
-    window_size_ = model_.config_->model.decoder.sliding_window->window_size;
-
-    if (window_size_ == 0) {
-      throw std::runtime_error("Window size must be greater than 0");
+    const int window_size = model_.config_->model.decoder.sliding_window->window_size;
+    const int context_length = model_.config_->model.context_length;
+    if (window_size <= 0 || window_size > context_length) {
+      throw std::runtime_error(
+          "Invalid sliding window configuration: window_size (" +
+          std::to_string(window_size) + ") must be in [1, context_length (" +
+          std::to_string(context_length) + ")].");
     }
+    window_size_ = static_cast<size_t>(window_size);
   }
 
   if (has_posid_input_) {
