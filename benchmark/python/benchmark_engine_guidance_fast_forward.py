@@ -18,6 +18,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import jsonschema
 import numpy as np
 import onnxruntime_genai as og
 from benchmark_engine_guidance import percentile, require_request_event
@@ -144,6 +145,8 @@ class Scenario:
         # filled the buffer can have left some behind; one that returned fewer left none.
         self.maybe_buffered = False
         self.backlog = []  # Closed loop: callbacks that begin a guided turn when one finishes.
+        self.guided_expected = 0
+        self.replenish_peer = None  # With --replenish_peers: begins a peer when one finishes.
 
     def begin(self, kind, workload, tokens, max_new_tokens, arrived_at, configure=None, reference=None):
         request_options = og.RequestOptions()
@@ -157,6 +160,10 @@ class Scenario:
             configure(turn_options)
         turn_id = request.begin_turn(tokens, turn_options)
         self.turns.append(Turn(kind, workload, request, turn_id, arrived_at, reference, self.run_calls))
+
+    def guided_outstanding(self):
+        guided = [turn for turn in self.turns if turn.kind == "guided"]
+        return len(guided) < self.guided_expected or any(turn.finished_at is None for turn in guided)
 
     def _turn_for(self, request):
         return next(turn for turn in self.turns if turn.request is request)
@@ -230,6 +237,8 @@ class Scenario:
                     turn.request.close()
                     if turn.kind == "guided" and self.backlog:
                         self.backlog.pop(0)(now)
+                    elif turn.kind == "peer" and self.replenish_peer and self.guided_outstanding():
+                        self.replenish_peer(now)
             if self.args.cancel_after:
                 self._cancel_due_turns()
         stats = self.engine.get_speculative_stats()
@@ -266,6 +275,9 @@ def run_scenario(engine, args, max_draft_tokens, prompts, peer_reference, fast_f
         arrivals.append((at, start))
         if args.arrival_rate:
             at += rng.expovariate(args.arrival_rate)
+    scenario.guided_expected = args.requests
+    if args.replenish_peers:
+        scenario.replenish_peer = start_peer
     wall_seconds = scenario.run(arrivals)
     if args.peers and peer_reference is not None and scenario.drafts["draft_tokens_evaluated"] == 0:
         # Otherwise the scenario would silently measure ordinary peer decoding.
@@ -273,12 +285,13 @@ def run_scenario(engine, args, max_draft_tokens, prompts, peer_reference, fast_f
     return scenario, wall_seconds
 
 
-def controlled_peer_reference(engine, args, prompts, max_draft_tokens, max_passes=8):
-    """The peer's solo greedy output when verifying drafts of that same output.
+def peer_reference_tokens(engine, args, prompts, max_draft_tokens, controlled, max_passes=8):
+    """The peer's solo greedy output, to check peers against and, when controlled, to draft from.
 
-    Verifying drafts changes the target's numerics, so greedy output with drafts can differ from
-    output without them; drafts taken from the latter stop matching after the first difference.
-    Each pass proposes the previous pass's output until the output stops changing.
+    Without controlled drafts this is one solo run (the model's own drafter, if any, still runs).
+    With them, verifying drafts changes the target's numerics, so greedy output with drafts can
+    differ from output without them, and drafts taken from the latter stop matching after the first
+    difference. Each pass then proposes the previous pass's output until the output stops changing.
     """
     reference = None
     for passes in range(1, max_passes + 1):
@@ -288,23 +301,84 @@ def controlled_peer_reference(engine, args, prompts, max_draft_tokens, max_passe
         )
         scenario.run([])
         tokens = scenario.turns[0].tokens
+        if not controlled:
+            return tokens, {"drafts": "model", "passes": 1, "converged": None}
         if tokens == reference:
-            return reference, {"passes": passes, "converged": True}
+            return reference, {"drafts": "controlled", "passes": passes, "converged": True}
         reference = tokens
-    return reference, {"passes": max_passes, "converged": False}
+    return reference, {"drafts": "controlled", "passes": max_passes, "converged": False}
 
 
-def valid_json(tokenizer, turn):
+SCHEMA_VALIDATORS = {name: jsonschema.Draft202012Validator(spec["schema"]) for name, spec in WORKLOADS.items()}
+
+
+def schema_valid(tokenizer, turn):
+    """Whether the turn ended by EOS with output valid against its workload's full JSON schema."""
     if turn.finish_reason != "EOS":
         return False
     try:
         parsed = json.loads(tokenizer.decode(np.asarray(turn.tokens, dtype=np.int32)))
     except json.JSONDecodeError:
         return False
-    return isinstance(parsed, dict) and set(WORKLOADS[turn.workload]["schema"]["required"]) <= set(parsed)
+    return SCHEMA_VALIDATORS[turn.workload].is_valid(parsed)
 
 
-def measure(scenario, wall_seconds, tokenizer):
+def first_difference(a, b):
+    return next((k for k, (x, y) in enumerate(zip(a, b, strict=False)) if x != y), min(len(a), len(b)))
+
+
+def _merge(intervals):
+    merged = []
+    for start, end in sorted(intervals):
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return merged
+
+
+def _intersect(a, b):
+    both, i, j = [], 0, 0
+    while i < len(a) and j < len(b):
+        start, end = max(a[i][0], b[j][0]), min(a[i][1], b[j][1])
+        if start < end:
+            both.append((start, end))
+        if a[i][1] < b[j][1]:
+            i += 1
+        else:
+            j += 1
+    return both
+
+
+def overlap(guided, peers):
+    """Throughput and peer gaps only while guided turns and peers were both present."""
+    window = _intersect(
+        _merge([(turn.arrived_at, turn.finished_at) for turn in guided]),
+        _merge([(turn.arrived_at, turn.finished_at) for turn in peers]),
+    )
+    seconds = sum(end - start for start, end in window)
+
+    def interval_of(moment):
+        return next((index for index, (start, end) in enumerate(window) if start <= moment <= end), None)
+
+    def tokens_per_s(turns):
+        inside = sum(interval_of(moment) is not None for turn in turns for moment in turn.token_times)
+        return inside / seconds if seconds else None
+
+    return {
+        "overlap_ms": seconds * 1000,
+        "overlap_guided_tokens_per_s": tokens_per_s(guided),
+        "overlap_peer_tokens_per_s": tokens_per_s(peers),
+        "overlap_peer_gap_ms": [
+            (later - earlier) * 1000
+            for turn in peers
+            for earlier, later in zip(turn.token_times, turn.token_times[1:], strict=False)
+            if interval_of(earlier) is not None and interval_of(earlier) == interval_of(later)
+        ],
+    }
+
+
+def measure(scenario, wall_seconds, tokenizer, peer_reference):
     guided = [turn for turn in scenario.turns if turn.kind == "guided"]
     peers = [turn for turn in scenario.turns if turn.kind == "peer"]
     first_token = [(turn.token_times[0] - turn.arrived_at) * 1000 for turn in guided if turn.tokens]
@@ -313,6 +387,7 @@ def measure(scenario, wall_seconds, tokenizer):
         "drafts": scenario.drafts,
         "run_calls": scenario.run_calls,
         "wall_ms": wall_seconds * 1000,
+        **overlap(guided, peers),
         "guided_turns_per_s": len(guided) / wall_seconds,
         "guided_tokens_per_s": sum(len(turn.tokens) for turn in guided) / wall_seconds,
         "peer_tokens_per_s": sum(len(turn.tokens) for turn in peers) / wall_seconds,
@@ -321,7 +396,7 @@ def measure(scenario, wall_seconds, tokenizer):
         "guided_first_token_ms": first_token,
         "guided_end_to_end_ms": [(turn.finished_at - turn.arrived_at) * 1000 for turn in guided],
         "guided_finish_reasons": [turn.finish_reason for turn in guided],
-        "guided_valid_json": [valid_json(tokenizer, turn) for turn in guided],
+        "guided_schema_valid": [schema_valid(tokenizer, turn) for turn in guided],
         "cancel_latency_ms": [
             (turn.finished_at - turn.cancel_requested_at) * 1000
             for turn in guided
@@ -333,6 +408,10 @@ def measure(scenario, wall_seconds, tokenizer):
             for earlier, later in zip(turn.token_times, turn.token_times[1:], strict=False)
         ],
         "peer_run_calls_to_first_token": [turn.run_calls_to_first_token for turn in peers],
+        "peer_reference_first_diff": [
+            first_difference(turn.tokens, peer_reference) for turn in peers if turn.tokens != peer_reference
+        ],
+        "peers": len(peers),
     }
 
 
@@ -341,12 +420,22 @@ def aggregate(runs):
         return [value for run in runs for value in run[name]]
 
     reasons = flat("guided_finish_reasons")
-    valid = sum(flat("guided_valid_json"))
+    valid = sum(flat("guided_schema_valid"))
+    peers = sum(run["peers"] for run in runs)
     return {
         "model_steps": summarize([run["model_steps"] for run in runs]),
         **{key: summarize([run["drafts"][key] for run in runs]) for key in DRAFT_COUNTERS},
         "run_calls": summarize([run["run_calls"] for run in runs]),
         "wall_ms": summarize([run["wall_ms"] for run in runs]),
+        "overlap_ms": summarize([run["overlap_ms"] for run in runs]),
+        "overlap_fraction": summarize([run["overlap_ms"] / run["wall_ms"] for run in runs]),
+        "overlap_guided_tokens_per_s": summarize(
+            [run["overlap_guided_tokens_per_s"] for run in runs if run["overlap_guided_tokens_per_s"] is not None]
+        ),
+        "overlap_peer_tokens_per_s": summarize(
+            [run["overlap_peer_tokens_per_s"] for run in runs if run["overlap_peer_tokens_per_s"] is not None]
+        ),
+        "overlap_peer_gap_ms": summarize(flat("overlap_peer_gap_ms")),
         "guided_turns_per_s": summarize([run["guided_turns_per_s"] for run in runs]),
         "guided_tokens_per_s": summarize([run["guided_tokens_per_s"] for run in runs]),
         "peer_tokens_per_s": summarize([run["peer_tokens_per_s"] for run in runs]),
@@ -354,12 +443,15 @@ def aggregate(runs):
         "guided_first_token_ms": summarize(flat("guided_first_token_ms")),
         "guided_end_to_end_ms": summarize(flat("guided_end_to_end_ms")),
         "guided_finish_reasons": {reason: reasons.count(reason) for reason in sorted(set(reasons))},
-        "guided_valid_json": valid,
+        "guided_schema_valid": valid,
         "guided_turns": len(reasons),
-        "guided_valid_json_rate": valid / len(reasons) if reasons else None,
+        "guided_schema_valid_rate": valid / len(reasons) if reasons else None,
         "cancel_latency_ms": summarize(flat("cancel_latency_ms")),
         "peer_gap_ms": summarize(flat("peer_gap_ms")),
         "peer_run_calls_to_first_token": summarize(flat("peer_run_calls_to_first_token")),
+        "peers": peers,
+        "peers_matching_reference": peers - len(flat("peer_reference_first_diff")),
+        "peer_reference_first_diff": summarize(flat("peer_reference_first_diff")),
     }
 
 
@@ -385,7 +477,7 @@ def compare(off_runs, on_runs, tokenizer, max_diffs=20):
         }
 
     def diff(iteration, index, workload, off, on):
-        first = next((k for k, (x, y) in enumerate(zip(off, on, strict=False)) if x != y), min(len(off), len(on)))
+        first = first_difference(off, on)
         return {
             "iteration": iteration,
             "turn": index,
@@ -435,23 +527,29 @@ def run(args):
     prompts = {name: encode_prompt(tokenizer, WORKLOADS[name]["prompt"]) for name in args.workloads}
     prompts["peer"] = encode_prompt(tokenizer, PEER_PROMPT)
     peer_reference, reference_status = None, None
-    if args.peer_drafts == "controlled" and args.peers:
-        peer_reference, reference_status = controlled_peer_reference(engine, args, prompts, max_draft_tokens)
+    if args.peers:
+        peer_reference, reference_status = peer_reference_tokens(
+            engine, args, prompts, max_draft_tokens, controlled=args.peer_drafts == "controlled"
+        )
+    # Peers propose drafts only when they are controlled; otherwise the reference is only checked.
+    draft_reference = peer_reference if args.peer_drafts == "controlled" else None
 
     for _ in range(args.warmup):
         for fast_forward in (False, True):
-            run_scenario(engine, args, max_draft_tokens, prompts, peer_reference, fast_forward)
+            run_scenario(engine, args, max_draft_tokens, prompts, draft_reference, fast_forward)
     runs = {False: [], True: []}
     for iteration in range(args.iterations):
         # Alternate which mode runs first so warm-cache effects do not favor either.
         for fast_forward in (False, True) if iteration % 2 == 0 else (True, False):
-            scenario, wall_seconds = run_scenario(engine, args, max_draft_tokens, prompts, peer_reference, fast_forward)
-            runs[fast_forward].append(measure(scenario, wall_seconds, tokenizer))
+            scenario, wall_seconds = run_scenario(
+                engine, args, max_draft_tokens, prompts, draft_reference, fast_forward
+            )
+            runs[fast_forward].append(measure(scenario, wall_seconds, tokenizer, peer_reference))
 
     summary = {
         "settings": {key: value for key, value in vars(args).items() if key != "output"},
         "max_draft_tokens": max_draft_tokens,
-        "controlled_peer_reference": reference_status,
+        "peer_reference": reference_status,
         "off": aggregate(runs[False]),
         "on": aggregate(runs[True]),
         "comparison": compare(runs[False], runs[True], tokenizer),
@@ -487,7 +585,12 @@ def parse_args(argv=None):
         default=0.0,
         help="Guided turns per second as a Poisson process; 0 starts them all at once",
     )
-    parser.add_argument("--peers", type=int, default=0, help="Unguided peer turns running throughout")
+    parser.add_argument("--peers", type=int, default=0, help="Unguided peer turns started with the scenario")
+    parser.add_argument(
+        "--replenish_peers",
+        action="store_true",
+        help="Start a new peer whenever one finishes while guided work remains, so peers stay present",
+    )
     parser.add_argument(
         "--peer_delay_ms",
         type=float,
