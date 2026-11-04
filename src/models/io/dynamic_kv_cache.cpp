@@ -66,8 +66,12 @@ void DynamicKeyValueCache::RewindTo(size_t index) {
     RewindPastTensorsTo<int8_t>(index);
   } else if (type_ == Ort::TypeToTensorType<uint8_t> || type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E4M3FN) {
     RewindPastTensorsTo<uint8_t>(index);
-  } else {
+  } else if (type_ == Ort::TypeToTensorType<Ort::Float16_t>) {
     RewindPastTensorsTo<Ort::Float16_t>(index);
+  } else if (type_ == Ort::TypeToTensorType<Ort::BFloat16_t>) {
+    RewindPastTensorsTo<Ort::BFloat16_t>(index);
+  } else {
+    throw std::runtime_error("Unsupported KV cache tensor type during rewind");
   }
 }
 

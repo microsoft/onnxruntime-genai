@@ -200,8 +200,16 @@ DefaultKeyValueCacheBase::DefaultKeyValueCacheBase(State& state)
     }
   }
 
-  // Derive the KV data type from the first KV input
   type_ = model_.session_info_.GetInputDataType(input_name_strings_[0]);
+  if (type_ != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT &&
+      type_ != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16 &&
+      type_ != ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16 &&
+      type_ != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8 &&
+      type_ != ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8 &&
+      type_ != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E4M3FN) {
+    throw std::runtime_error("Unsupported KV cache tensor type: " +
+                             std::to_string(static_cast<int>(type_)));
+  }
 
   // Detect KV cache quantization configuration from the active provider's options.
   const int kv_cache_quantization_bits = Device().GetKeyValueCacheQuantizationBits(model_.config_->model.decoder.session_options);
@@ -457,8 +465,12 @@ void DefaultKeyValueCacheBase::PickPastState(DeviceSpan<int32_t> beam_indices, i
     PickPastState<int8_t>(beam_indices, index);
   } else if (type_ == Ort::TypeToTensorType<uint8_t> || type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E4M3FN) {
     PickPastState<uint8_t>(beam_indices, index);
-  } else {
+  } else if (type_ == Ort::TypeToTensorType<Ort::Float16_t>) {
     PickPastState<Ort::Float16_t>(beam_indices, index);
+  } else if (type_ == Ort::TypeToTensorType<Ort::BFloat16_t>) {
+    PickPastState<Ort::BFloat16_t>(beam_indices, index);
+  } else {
+    throw std::runtime_error("Unsupported KV cache tensor type during beam reorder");
   }
 }
 
