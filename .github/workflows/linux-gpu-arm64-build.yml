@@ -19,7 +19,7 @@ jobs:
   linux-cuda-arm64-build:
     permissions:
       contents: read
-    runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2004-ARM-CPU", "JobId=linux-cuda-arm64-build-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}"]
+    runs-on: ort-genai-github-linux-8-arm64-eus2-ss
     steps:
       - name: Checkout OnnxRuntime GenAI repo
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

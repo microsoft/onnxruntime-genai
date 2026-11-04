@@ -331,6 +331,12 @@ OrtGlobals::~OrtGlobals() {
   //    non-owning index (cleared first); owned_interfaces_ and cuda_library_ are the real owners.
   device_interfaces_.clear();
   owned_interfaces_.clear();
+  if (cuda_library_ && *cuda_library_) {
+    using ShutdownInterfaceFn = void (*)();
+    if (auto shutdown_interface = reinterpret_cast<ShutdownInterfaceFn>(cuda_library_->GetSymbol("ShutdownInterface"))) {
+      shutdown_interface();
+    }
+  }
   cuda_library_.reset();
 
   // 3. The trivial-session env-derived allocators, now unreferenced by any interface. Within each
@@ -743,14 +749,18 @@ DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> 
   return input_ids_device;
 }
 
+void Generator::ThrowIfAppendExceedsMaxLength(size_t input_ids_count) {
+  if ((input_ids_count / state_->params_->search.batch_size) + search_->GetSequenceLength() > state_->params_->search.max_length)
+    throw std::runtime_error("input_ids size (" + std::to_string(input_ids_count) + ") + current sequence length (" + std::to_string(search_->GetSequenceLength()) + ") exceeds max length (" + std::to_string(state_->params_->search.max_length) + ")");
+}
+
 void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   DurationTrace trace{"Generator::AppendTokens"};
 
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (input_ids.size() == 0)
     throw std::runtime_error("input_ids is empty");
-  if ((input_ids.size() / state_->params_->search.batch_size) + search_->GetSequenceLength() > state_->params_->search.max_length)
-    throw std::runtime_error("input_ids size (" + std::to_string(input_ids.size()) + ") + current sequence length (" + std::to_string(search_->GetSequenceLength()) + ") exceeds max length (" + std::to_string(state_->params_->search.max_length) + ")");
+  ThrowIfAppendExceedsMaxLength(input_ids.size());
   if (search_->GetSequenceLength() != 0 && state_->params_->search.batch_size > 1)
     throw std::runtime_error("AppendTokens can only be called once for batch_size > 1. To call AppendTokens again, use RewindToLength(0)");
 
@@ -791,6 +801,8 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   // prefill; speculative -> reconcile two inner KV caches).
   strategy_->PrepareForAppend(*this);
   RunGeneratedToken();
+  // Running the last generated token can append the tokens the grammar forces after it.
+  ThrowIfAppendExceedsMaxLength(input_ids.size());
   state_->StartTurn();
 
   auto input_ids_device = AllocateInputIdsOnDevice(input_ids);
@@ -808,9 +820,7 @@ void Generator::AppendTokens(DeviceSpan<int32_t> input_ids) {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (input_ids.empty())
     throw std::runtime_error("input_ids is empty");
-  if ((input_ids.size() / state_->params_->search.batch_size) + search_->GetSequenceLength() >
-      state_->params_->search.max_length)
-    throw std::runtime_error("device input_ids + current sequence length exceeds max length");
+  ThrowIfAppendExceedsMaxLength(input_ids.size());
   if (search_->GetSequenceLength() != 0 && state_->params_->search.batch_size > 1)
     throw std::runtime_error("AppendTokens can only be called once for batch_size > 1. To call AppendTokens again, use RewindToLength(0)");
 
@@ -821,6 +831,8 @@ void Generator::AppendTokens(DeviceSpan<int32_t> input_ids) {
 
   strategy_->PrepareForAppend(*this);
   RunGeneratedToken();
+  // Running the last generated token can append the tokens the grammar forces after it.
+  ThrowIfAppendExceedsMaxLength(input_ids.size());
   state_->StartTurn();
   if (!model_->config_->model.engram.filename.empty()) {
     input_ids.CopyDeviceToCpu();
@@ -838,6 +850,11 @@ void Generator::RunGeneratedToken() {
     return;
   state_->DiscardNextLogits();
   ComputeLogits(search_->GetNextTokens());
+  // Forced tokens that fill the sequence end the generation, as in GenerateNextToken.
+  if (search_->GetSequenceLength() >= state_->params_->search.max_length) {
+    computed_logits_ = false;
+    return;
+  }
   // Keep committing the appended tokens to the guidance grammar, as before.
   last_action_ = Action::generated;
 }
@@ -893,6 +910,9 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
 
   if (guidance_logits_processor_ && last_action_ == Action::generated) {
     auto ff_tokens = guidance_logits_processor_->GetFFTokens(0);
+    // The sequence holds max_length tokens, so forced tokens past it are dropped.
+    const int room = std::max(0, state_->params_->search.max_length - search_->GetSequenceLength());
+    ff_tokens.resize(std::min(ff_tokens.size(), static_cast<size_t>(room)));
     if (!ff_tokens.empty()) {
       // process fast-forward tokens
       std::span<int32_t> forced_tokens_span{ff_tokens};
@@ -949,7 +969,8 @@ bool Generator::IsDone() {
     return transducer_state_->IsChunkDone();
   }
 
-  if (computed_logits_) {
+  // A full sequence is done even when its logits are computed, as no generated token fits.
+  if (computed_logits_ && search_->GetSequenceLength() < state_->params_->search.max_length) {
     return false;
   }
 
@@ -1021,6 +1042,8 @@ void Generator::RewindToLength(size_t new_length) {
   // Fail clearly here before search_ is dereferenced below.
   if (ModelType::IsTransducer(model_type) || ModelType::IsStreamingEncDecASR(model_type))
     throw std::runtime_error("RewindTo is not supported for streaming ASR models (" + model_type + ").");
+  if (!state_->SupportsRewind())
+    throw std::runtime_error("RewindTo is not supported for " + model_type + ".");
   if (model_type == "whisper" || model_type == "phi3v" || model_type == "decoder-pipeline" ||
       ModelType::IsLFM2(model_type) || model_type == "lfm2_vl" || model_type == "lfm2_audio")
     throw std::runtime_error("RewindTo is currently not supported for " + model_type + ".");

@@ -19,6 +19,7 @@ list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/dflash2_config_test.
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/environment-tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/kv_cache_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/lfm2_audio_frames_test.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/position_inputs_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/lfm2_vl_image_geometry_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/multi_modal_device_placement_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/parallel_performance_tests.cpp")
@@ -347,6 +348,7 @@ file(GLOB engine_unit_test_srcs CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/engine/*.cpp"
 )
 list(APPEND engine_unit_test_srcs
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/position_inputs_tests.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/audio_speech_validation_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/dflash2_config_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/mtp_config_test.cpp"
@@ -405,6 +407,34 @@ target_compile_definitions(engine_unit_tests PRIVATE
   ORTGENAI_TEST_CUSTOM_OPS_SECOND_FILENAME="$<TARGET_FILE_NAME:custom_ops_test_second>"
 )
 add_dependencies(engine_unit_tests custom_ops_test_first custom_ops_test_second)
+# A plane library as it shipped before the INT8 embedding table and INT8 PLE shards (no qwen38_plane_capabilities export), for
+# the loader tests in qwen38_plane_tests.cpp: it does no GPU work, so they need neither CUDA nor ENABLE_QWEN38_PLANE.
+add_library(qwen38_legacy_plane_test_lib SHARED
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/engine/qwen38_legacy_plane_lib/qwen38_legacy_plane_lib.cpp")
+target_include_directories(qwen38_legacy_plane_test_lib PRIVATE ${CMAKE_SOURCE_DIR}/src)
+set_target_properties(qwen38_legacy_plane_test_lib PROPERTIES FOLDER "Tests")
+if (NOT MSVC)
+  target_compile_options(qwen38_legacy_plane_test_lib PRIVATE "-fvisibility=hidden")
+endif()
+target_compile_definitions(engine_unit_tests PRIVATE
+  ORTGENAI_TEST_QWEN38_LEGACY_PLANE_LIB_PATH="$<TARGET_FILE:qwen38_legacy_plane_test_lib>"
+)
+add_dependencies(engine_unit_tests qwen38_legacy_plane_test_lib)
+if(TARGET qwen38_plane)
+  target_compile_definitions(engine_unit_tests PRIVATE
+    ORTGENAI_TEST_QWEN38_PLANE_LIB_PATH="$<TARGET_FILE:qwen38_plane>"
+  )
+  add_dependencies(engine_unit_tests qwen38_plane)
+endif()
+# The plane is compiled into onnxruntime-genai-cuda as well, and the built-in lookup of Qwen38Plane (an empty library path) loads
+# that library from beside the module that holds the loader, which is this binary: the loader test is expected to load it
+# exactly when the target is part of the build.
+if(TARGET onnxruntime-genai-cuda)
+  target_compile_definitions(engine_unit_tests PRIVATE
+    ORTGENAI_TEST_GENAI_CUDA_LIB_PATH="$<TARGET_FILE:onnxruntime-genai-cuda>"
+  )
+  add_dependencies(engine_unit_tests onnxruntime-genai-cuda)
+endif()
 set_target_properties(engine_unit_tests PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>"
     FOLDER "Tests"

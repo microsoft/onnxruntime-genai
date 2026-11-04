@@ -63,7 +63,8 @@ size_t ResolveConfiguredPagedBlockCount(size_t configured_num_blocks,
 // Bytes one block costs across every full-attention layer of the target's paged group: the key and
 // value caches at the physical trailing width the graph declares (which is head_size/2 for a
 // 4-bit packed cache, not head_size), plus the per-token scale caches when the model binds them.
-// Windowed layers are excluded because their ring is sized separately.
+// Ring-backed windowed layers are excluded because their storage is sized separately. Explicit
+// prefix caching retains windowed layers in full paged storage and includes them in this cost.
 size_t PagedKeyValueCacheBytesPerBlock(const std::shared_ptr<Model>& model);
 
 // Resolves the configured prefix-cache flag, retention capacity, and target/auxiliary layout into
@@ -187,7 +188,8 @@ struct PagedKeyValueCache {
   //   ring = [5, 9], block_size = 4, so the table is
   //   [5, 9, 5, 9, 5, 9, ...]
   //
-  // Only valid when WindowedLayers() is non-empty.
+  // With explicit prefix caching, returns the primary table under the windowed input name instead:
+  // both layer types retain the same immutable prefix blocks.
   std::pair<OrtValue*, const char*> WindowBlockTables(const std::vector<std::shared_ptr<Request>>& requests);
   std::pair<OrtValue*, const char*> WindowBlockTables(
       const std::vector<std::shared_ptr<Request>>& requests,
@@ -294,6 +296,7 @@ struct PagedKeyValueCache {
   // and a chunked prefill advances by up to `chunk_size` at once, so it must cover
   // `chunk_size + window_size - 1` positions. Zero when the model has no windowed layers.
   size_t window_size_{};
+  bool window_block_table_required_{};
   size_t window_ring_blocks_{};
   size_t window_live_span_{};  // chunk_size + window_size - 1, checked against each step
   std::unique_ptr<BlockPool> window_block_pool_;

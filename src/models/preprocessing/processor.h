@@ -77,6 +77,7 @@ struct Processor {
     return processor;
   }
 
+  virtual void ConfigureTokenizer(Tokenizer&) const {}
   virtual std::unique_ptr<NamedTensors> Process(const Tokenizer& tokenizer, const Payload& payload) const = 0;
 
  protected:

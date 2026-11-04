@@ -220,6 +220,63 @@ TEST(ModelStateManifestTest, ValidatesPleAndPackedIndexerBindings) {
   EXPECT_NO_THROW(manifest.ValidateSession(MakePleAndIndexerMetadata()));
 }
 
+TEST(ModelStateManifestTest, DisabledIndexerCapacityRejectsMalformedSessionWithoutMutation) {
+  for (int malformed = 0; malformed < 8; ++malformed) {
+    auto decoder = MakePleAndIndexerDecoder();
+    decoder.state_groups->erase(decoder.state_groups->begin());
+    decoder.state_groups->front().state_update->enabled = false;
+    decoder.state_groups->front().state_update->capacity = 8;
+    auto metadata = MakePleAndIndexerMetadata();
+    const auto half = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16;
+    metadata.AddOutput("state_update.1.indexer", half, {-1, 4, 128});
+    if (malformed == 0)
+      metadata.AddOutput("state_update.1.indexer", half, {-1, 0, 128});
+    if (malformed == 1)
+      metadata.AddOutput("state_update.1.indexer", half, {-1, -1, 128});
+    if (malformed == 2)
+      metadata.AddOutput("state_update.1.indexer", half, {-1, 9, 128});
+    if (malformed == 3)
+      metadata.AddOutput("state_update.1.indexer", half, {-1, 4});
+    if (malformed == 4)
+      metadata.AddOutput("state_update.1.indexer", ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, {-1, 4, 128});
+    if (malformed == 5)
+      metadata.AddOutput("state_update.1.indexer", half, {-1, 4, 127});
+    if (malformed == 6)
+      decoder.outputs.state_update_indexer_names = "missing.%d.indexer";
+    if (malformed == 7)
+      metadata.AddInput("state_update_capture_count", ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, {-1});
+    EXPECT_THROW(ModelStateManifest::ResolveDisabledIndexerCapacity(decoder, metadata),
+                 std::runtime_error);
+    EXPECT_EQ(decoder.state_groups->front().state_update->capacity, 8);
+  }
+}
+
+TEST(ModelStateManifestTest, DisabledIndexerCapacityRejectsInconsistentHeadLayers) {
+  auto decoder = MakePleAndIndexerDecoder();
+  decoder.state_groups->erase(decoder.state_groups->begin());
+  auto& group = decoder.state_groups->front();
+  group.state_update->enabled = false;
+  group.state_update->capacity = 8;
+  group.layer_ids = {0, 1};
+  auto metadata = MakePleAndIndexerMetadata();
+  metadata.AddOutput("state_update.0.indexer", ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16, {-1, 3, 128});
+  metadata.AddOutput("state_update.1.indexer", ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16, {-1, 4, 128});
+  EXPECT_THROW(ModelStateManifest::ResolveDisabledIndexerCapacity(decoder, metadata),
+               std::runtime_error);
+  EXPECT_EQ(group.state_update->capacity, 8);
+}
+
+TEST(ModelStateManifestTest, EnabledIndexerCapacityMismatchRemainsRejected) {
+  auto decoder = MakePleAndIndexerDecoder();
+  decoder.state_groups->erase(decoder.state_groups->begin());
+  decoder.state_groups->front().state_update->capacity = 8;
+  auto metadata = MakePleAndIndexerMetadata();
+  metadata.AddOutput("state_update.1.indexer", ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16, {-1, 4, 128});
+  EXPECT_NO_THROW(ModelStateManifest::ResolveDisabledIndexerCapacity(decoder, metadata));
+  EXPECT_EQ(decoder.state_groups->front().state_update->capacity, 8);
+  EXPECT_THROW(ModelStateManifest{decoder}.ValidateSession(metadata), std::runtime_error);
+}
+
 TEST(ModelStateManifestTest, RejectsMissingPackedIndexerComponent) {
   const ModelStateManifest manifest{MakePleAndIndexerDecoder()};
   FakeModelStateMetadata metadata;

@@ -31,6 +31,7 @@
 #include "model_package.h"
 #include "gpt.h"
 #include "decoder_only.h"
+#include "qwen38_graph.h"
 #include "speculative_decoding.h"
 #include "whisper.h"
 #include "parakeet.h"
@@ -40,6 +41,7 @@
 #include "lfm2.h"
 #include "marian.h"
 #include "decoder_only_pipeline.h"
+#include "qwen38_graph_plane.h"
 #include "qwen_vl_model.h"
 #include "ep/amdgpu/interface.h"
 #include "ep/dml/interface.h"
@@ -803,6 +805,9 @@ void ApplySessionOptionsFromConfig(
     if (custom_library_path.is_relative()) {
       for (const auto& dir : allowed_dirs) {
         std::filesystem::path candidate = dir / custom_library_path;
+#if defined(_WIN32)
+        candidate = ResolveWindowsSharedLibraryPath(candidate);
+#endif
         if (std::filesystem::exists(candidate, ec)) {
           custom_library_file_prefix = std::filesystem::canonical(candidate).string();
           resolved = true;
@@ -1008,6 +1013,8 @@ std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::str
       model_filename == config_->model.decoder.filename) {
     SessionInfo decoder_session_info;
     decoder_session_info.Add(*session);
+    ModelStateManifest::ResolveDisabledIndexerCapacity(
+        config_->model.decoder, decoder_session_info);
     ModelStateManifest{config_->model.decoder}.ValidateSession(decoder_session_info);
   }
 
@@ -1078,10 +1085,13 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
       throw std::runtime_error("Pipelined decoder is not supported for model type '" + config->model.type + "'");
     return std::make_shared<Qwen2_5_VL_PipelineModel>(std::move(config), ort_env);
   }
-  if (ModelType::IsLFM2(config->model.type))
+  // Only paged exports have state groups; they run in the Engine, which takes a DecoderOnly_Model.
+  if (ModelType::IsLFM2(config->model.type) && !config->model.decoder.state_groups)
     return std::make_shared<LFM2_Model>(std::move(config), ort_env);
   if (config->model.type == "gpt2")
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
+  if (config->model.type == "qwen38_flash_graph")
+    return std::make_shared<Qwen38GraphModel>(std::move(config), ort_env);
   if (ModelType::IsLLM(config->model.type))
     return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
   if (ModelType::IsRNNT(config->model.type))
@@ -1095,7 +1105,7 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
   if (ModelType::IsALM(config->model.type))
     return std::make_shared<WhisperModel>(std::move(config), ort_env);
   if (ModelType::IsVLM(config->model.type))
-    return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, false);
+    return MultiModalLanguageModel::Create(std::move(config), ort_env, true, false);
   if (ModelType::IsMMM(config->model.type)) {
     // Auto-detect speech support: require both the speech ONNX model filename
     // and the preprocessing config to be present. If only one is set, throw
@@ -1112,7 +1122,7 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
           "speech.config_filename is set but speech.filename is missing. "
           "Both are required for audio support.");
     }
-    return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, has_speech_model);
+    return MultiModalLanguageModel::Create(std::move(config), ort_env, true, has_speech_model);
   }
   if (ModelType::IsPipe(config->model.type))
     return std::make_shared<DecoderOnlyPipelineModel>(std::move(config), ort_env);
