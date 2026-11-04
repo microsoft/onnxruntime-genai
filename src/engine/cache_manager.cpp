@@ -734,9 +734,9 @@ StepPlanningResult PagedCacheManager::PlanStepResources(StepPlan& plan) const {
         [](const RequestStepPlan& entry) { return entry.draft_token_count != 0; });
     if (has_chunk && has_drafts) {
       // Packed recurrent operators cannot capture intermediate draft checkpoints while a prefill
-      // chunk or a decode row reading several committed tokens shares the step. Remove those
-      // optional rows before paged capacity planning so they cannot displace a request that the
-      // actual mixed step has room to execute.
+      // chunk or a decode row reading several committed tokens shares the step. The dynamic
+      // scheduler already plans such steps without drafts; removing them here keeps any other plan
+      // from displacing a request that the actual mixed step has room to execute.
       for (auto& entry : plan.requests) {
         entry.unprocessed_token_count -= entry.draft_token_count;
         entry.target_cache_slots -= entry.draft_token_count;
