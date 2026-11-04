@@ -2358,6 +2358,29 @@ token. The device holds `model.qwen38_graph.max_batch_size` slots (default 1), o
 `CreateEngineBackend` (`src/engine/backend_factory.h`) and `CreateQwen38GraphDependencies`
 (`src/engine/qwen38_graph_executor.h`) assemble it:
 
+- MoE offload requires an explicit `session.moe.offload.mode` of `required`, `auto`, `1` or `on` (case-insensitive).
+  A budget alone does not enable offload, matching ORT's disabled default; `disabled`, `0` and `off` preserve that behavior.
+  Only enabled offload changes target-graph selection, synthetic warmup options or session budgets.
+  `ORT_QWEN38_ADAPTIVE_CTX_BUDGET=1` opts into a fixed-layout estimate for the Flash-Next NVFP4 package: 12 attention layers,
+  two KV heads of 256 channels, one-byte K/V caches, int64 position IDs, and a 128-float index-key row per four positions
+  per layer. It charges 16 KiB per position per request slot, relative to one slot of 33032 positions. These are not bytes
+  measured from the selected graph, and do not account for every state tensor, workspace or allocator overhead.
+  The filename tier estimates include the package's padding:
+
+  | Filename component | Estimated KV positions |
+  | --- | ---: |
+  | `_2k` | 2312 |
+  | `_8k` | 8456 |
+  | `_16k` | 16648 |
+  | `_32k` | 33032 |
+  | `_64k` | 65800 |
+  | `_128k` | 133128 |
+
+  Other names, including `model_dynamic_ctx.onnx`, use the configured `model.qwen38_graph.kv_capacity` for the estimate.
+  The loaded graph remains authoritative for execution capacity. With model logging enabled, adaptive offload reports
+  a capacity mismatch, but cannot resize budgets on an already-created session. Different cache layouts/dtypes or padding
+  require disabling adaptive budgets and configuring suitable explicit budgets; this estimate does not guarantee that a
+  model fits in device memory.
 - The slot count is an integer in 1..8 (`Config::Model::Qwen38Graph::kMaxBatchSize`): the JSON parser rejects any other
   `max_batch_size` and names the key and the value, and the other settings that can choose the count
   (`engine.dynamic_batching.max_batch_size`, `search.batch_size`) are held to the same range at model creation instead
@@ -2427,11 +2450,15 @@ token. The device holds `model.qwen38_graph.max_batch_size` slots (default 1), o
   the slot: nothing is published through the process environment by the executor, so Engines of different models and slots
   that ingest their prompts in interleaved chunks never see each other's value. The device itself publishes the QMoE hints
   (`ORT_QMOE_PREFILL_NEW_TURN`, `ORT_QMOE_PREFILL_TOTAL_TOKENS`, `ORT_QMOE_CURRENT_MAX_COMPACT_EXPERTS`,
-  `ORT_QMOE_PREFILL_HANDOFF_DONE`, `ORT_QMOE_IN_WARMUP`), because ORT's QMoE kernels read them from the process environment
-  until per-run config entries exist, and only for the duration of one ORT Run (`Qwen38OrtEnvScope`, one process-wide lock,
+  `ORT_QMOE_PREFILL_HANDOFF_DONE`, `ORT_QMOE_IN_WARMUP`), only for the duration of one ORT Run (`Qwen38OrtEnvScope`, one process-wide lock,
   the previous values are restored): the values of a prompt chunk are computed from that chunk's slot alone, never kept or
   max-merged across Runs, and a Run publishes the new-turn and hand-off notices of the slots it serves only (a prompt chunk
   serves its slot, a batched decode the slots that decode in it).
+  Every Run also carries `ep.cuda.qmoe_in_warmup=1` during synthetic warmup and `0` afterwards; current ORT reads that entry
+  rather than `ORT_QMOE_IN_WARMUP`. Reused run options are updated only when the value changes, including the reset to `0`
+  before live runs. Offloaded target decode warmup uses `gpu_graph_id=-1`, including all batched shapes:
+  captured replays bypass the per-run control and would otherwise score and promote dummy-token experts. These targets
+  pay graph capture costs during their first live runs; non-offloaded targets and auxiliary heads still capture during warmup.
   With several slots a step advances every slot (`Qwen38GraphSession::StepBatch`): it commits the in-flight batched cycle of
   the decoding slots, prefills the next chunk of the slots that have not started decoding and enqueues the next batched
   cycle. The executor declares its step plan via `ScheduledRequests::BeginBackendStep` and stages owned `BackendRowResult`
