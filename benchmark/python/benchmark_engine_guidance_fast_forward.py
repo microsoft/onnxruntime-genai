@@ -11,6 +11,7 @@ generated the same tokens. See benchmark/python/README.
 
 import argparse
 import contextlib
+import hashlib
 import json
 import random
 import statistics
@@ -109,6 +110,21 @@ def encode_prompt(tokenizer, text):
     with contextlib.suppress(Exception):
         text = tokenizer.apply_chat_template(messages=json.dumps(messages), add_generation_prompt=True)
     return np.asarray(tokenizer.encode(text), dtype=np.int32)
+
+
+def guided_prompt_text(args, index, workload):
+    """The workload's prompt, after --context_sentences of background when that is set.
+
+    The background starts with the turn's index, so no two turns share a cacheable prompt prefix and
+    each one prefills in full, competing with the others for the step's token budget.
+    """
+    if not args.context_sentences:
+        return WORKLOADS[workload]["prompt"]
+    notes = " ".join(
+        f"Log entry {entry}: the station recorded routine readings and no faults."
+        for entry in range(args.context_sentences)
+    )
+    return f"Request {index}. Background notes: {notes}\n\n{WORKLOADS[workload]['prompt']}"
 
 
 @dataclass
@@ -251,17 +267,19 @@ class Scenario:
         return time.perf_counter() - started
 
 
-def run_scenario(engine, args, max_draft_tokens, prompts, peer_reference, fast_forward):
+def run_scenario(engine, args, max_draft_tokens, guided_prompts, prompts, peer_reference, fast_forward):
     scenario = Scenario(engine, args, max_draft_tokens)
 
-    def start_guided(workload, arrived_at):
+    def start_guided(index, workload, arrived_at):
         spec = WORKLOADS[workload]
 
         def configure(turn_options):
             turn_options.set_guidance(spec["type"], spec["data"])
-            turn_options.set_guidance_fast_forward(fast_forward)
+            # Off is the default, so --modes off also runs on builds without fast-forward.
+            if fast_forward:
+                turn_options.set_guidance_fast_forward(True)
 
-        scenario.begin("guided", workload, prompts[workload], args.max_new_tokens, arrived_at, configure)
+        scenario.begin("guided", workload, guided_prompts[index], args.max_new_tokens, arrived_at, configure)
 
     def start_peer(arrived_at):
         scenario.begin("peer", "peer", prompts["peer"], args.peer_max_new_tokens, arrived_at, reference=peer_reference)
@@ -272,7 +290,7 @@ def run_scenario(engine, args, max_draft_tokens, prompts, peer_reference, fast_f
     at = 0.0
     for index in range(args.requests):
         workload = args.workloads[index % len(args.workloads)]
-        start = lambda arrived_at, workload=workload: start_guided(workload, arrived_at)  # noqa: E731
+        start = lambda arrived_at, index=index, workload=workload: start_guided(index, workload, arrived_at)  # noqa: E731
         if args.concurrency and index >= args.concurrency:
             scenario.backlog.append(start)
             continue
@@ -402,6 +420,8 @@ def measure(scenario, wall_seconds, tokenizer, peer_reference):
         "peer_tokens_per_s": sum(len(turn.tokens) for turn in peers) / wall_seconds,
         "guided_workloads": [turn.workload for turn in guided],
         "guided_tokens": [turn.tokens for turn in guided],
+        # Compares guided output across separate runs or builds (e.g. base versus head).
+        "guided_outputs_sha256": hashlib.sha256(json.dumps([turn.tokens for turn in guided]).encode()).hexdigest(),
         "guided_first_token_ms": first_token,
         "guided_end_to_end_ms": [(turn.finished_at - turn.arrived_at) * 1000 for turn in guided],
         "guided_finish_reasons": [turn.finish_reason for turn in guided],
@@ -417,6 +437,7 @@ def measure(scenario, wall_seconds, tokenizer, peer_reference):
             for earlier, later in zip(turn.token_times, turn.token_times[1:], strict=False)
         ],
         "peer_run_calls_to_first_token": [turn.run_calls_to_first_token for turn in peers],
+        "peer_first_token_ms": [(turn.token_times[0] - turn.arrived_at) * 1000 for turn in peers if turn.tokens],
         "peer_reference_first_diff": [
             first_difference(turn.tokens, peer_reference) for turn in peers if turn.tokens != peer_reference
         ],
@@ -459,6 +480,8 @@ def aggregate(runs):
         "cancel_latency_ms": summarize(flat("cancel_latency_ms")),
         "peer_gap_ms": summarize(flat("peer_gap_ms")),
         "peer_run_calls_to_first_token": summarize(flat("peer_run_calls_to_first_token")),
+        "peer_first_token_ms": summarize(flat("peer_first_token_ms")),
+        "guided_outputs_sha256": sorted({run["guided_outputs_sha256"] for run in runs}),
         "peers": peers,
         "peers_matching_reference": peers - len(flat("peer_reference_first_diff")),
         "peer_reference_first_diff": summarize(flat("peer_reference_first_diff")),
@@ -538,8 +561,11 @@ def run(args):
         if args.peer_max_new_tokens < 3:
             raise SystemExit("--peer_drafts controlled needs --peer_max_new_tokens >= 3 to leave room for a draft.")
 
-    prompts = {name: encode_prompt(tokenizer, WORKLOADS[name]["prompt"]) for name in args.workloads}
-    prompts["peer"] = encode_prompt(tokenizer, PEER_PROMPT)
+    guided_prompts = [
+        encode_prompt(tokenizer, guided_prompt_text(args, index, args.workloads[index % len(args.workloads)]))
+        for index in range(args.requests)
+    ]
+    prompts = {"peer": encode_prompt(tokenizer, PEER_PROMPT)}
     peer_reference, reference_status = None, None
     if args.peers:
         peer_reference, reference_status = peer_reference_tokens(
@@ -548,15 +574,16 @@ def run(args):
     # Peers propose drafts only when they are controlled; otherwise the reference is only checked.
     draft_reference = peer_reference if args.peer_drafts == "controlled" else None
 
+    modes = {"off": (False,), "on": (True,), "both": (False, True)}[args.modes]
     for _ in range(args.warmup):
-        for fast_forward in (False, True):
-            run_scenario(engine, args, max_draft_tokens, prompts, draft_reference, fast_forward)
+        for fast_forward in modes:
+            run_scenario(engine, args, max_draft_tokens, guided_prompts, prompts, draft_reference, fast_forward)
     runs = {False: [], True: []}
     for iteration in range(args.iterations):
         # Alternate which mode runs first so warm-cache effects do not favor either.
-        for fast_forward in (False, True) if iteration % 2 == 0 else (True, False):
+        for fast_forward in modes if iteration % 2 == 0 else modes[::-1]:
             scenario, wall_seconds = run_scenario(
-                engine, args, max_draft_tokens, prompts, draft_reference, fast_forward
+                engine, args, max_draft_tokens, guided_prompts, prompts, draft_reference, fast_forward
             )
             runs[fast_forward].append(measure(scenario, wall_seconds, tokenizer, peer_reference))
 
@@ -564,9 +591,13 @@ def run(args):
         "settings": {key: value for key, value in vars(args).items() if key != "output"},
         "max_draft_tokens": max_draft_tokens,
         "peer_reference": reference_status,
-        "off": aggregate(runs[False]),
-        "on": aggregate(runs[True]),
-        "comparison": compare(runs[False], runs[True], tokenizer),
+        "guided_prompt_tokens": summarize([len(tokens) for tokens in guided_prompts]),
+        **{
+            name: aggregate(runs[fast_forward])
+            for name, fast_forward in (("off", False), ("on", True))
+            if runs[fast_forward]
+        },
+        "comparison": compare(runs[False], runs[True], tokenizer) if args.modes == "both" else None,
     }
     output = json.dumps(summary, indent=2)
     print(output)
@@ -625,6 +656,18 @@ def parse_args(argv=None):
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--iterations", type=int, default=5)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--modes",
+        choices=["both", "off", "on"],
+        default="both",
+        help="Fast-forward modes to run; off also runs on builds without fast-forward, for base-versus-head checks",
+    )
+    parser.add_argument(
+        "--context_sentences",
+        type=int,
+        default=0,
+        help="Put this many sentences of background before each guided prompt, so prefills compete for budget",
+    )
     parser.add_argument("--output", help="Optional path for the JSON summary")
     args = parser.parse_args(argv)
     if args.concurrency and args.arrival_rate:
