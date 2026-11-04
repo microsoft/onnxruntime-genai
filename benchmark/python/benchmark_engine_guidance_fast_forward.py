@@ -547,6 +547,9 @@ def compare(off_runs, on_runs, tokenizer, max_diffs=20):
 
 def run(args):
     config = og.Config(args.model_path)
+    if args.no_prefix_caching:
+        # Every iteration repeats the same prompts; cached prefixes would skip their prefill.
+        config.overlay(json.dumps({"engine": {"dynamic_batching": {"prefix_caching": False}}}))
     if args.execution_provider != "follow_config":
         config.clear_providers()
         if args.execution_provider != "cpu":
@@ -667,6 +670,11 @@ def parse_args(argv=None):
         type=int,
         default=0,
         help="Put this many sentences of background before each guided prompt, so prefills compete for budget",
+    )
+    parser.add_argument(
+        "--no_prefix_caching",
+        action="store_true",
+        help="Disable the Engine's prefix cache, so repeated prompts are prefilled every iteration",
     )
     parser.add_argument("--output", help="Optional path for the JSON summary")
     args = parser.parse_args(argv)
