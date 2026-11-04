@@ -9,16 +9,18 @@
 from .base import Model
 from .chatglm import ChatGLMModel
 from .ernie import ErnieModel
-from .gemma import Gemma2Model, Gemma3Model, GemmaModel
+from .gemma import Gemma2Model, Gemma3Model, Gemma4MoEModel, Gemma4Model, GemmaModel
 from .gptoss import GPTOSSModel
 from .granite import GraniteModel, GraniteMoEHybridModel
 from .hunyuan import HunyuanDenseV1Model
 from .internlm import InternLM2Model
-from .lfm2 import LFM2Model
+from .lfm2 import LFM2AudioModel, LFM2Model, LFM2MoEModel, LFM3Model
+from .lfm2_vl import LFM2VLModel
 from .llama import LlamaModel
 from .mistral import Mistral3TextModel, MistralModel
 from .mtp import MTPModel
 from .nemotron import NemotronModel
+from .nemotron_parse import NemotronParseModel
 from .olmo import OLMoModel
 from .phi import (
     Phi3MiniLongRoPEModel,
@@ -34,14 +36,22 @@ from .qwen import (
     Qwen3Model,
     Qwen3VLTextModel,
     Qwen25VLTextModel,
+    QwenModel,
+    VideoChatFlashQwenModel,
+)
+from .qwen3_5 import (
     Qwen35DenseMTPModel,
     Qwen35Model,
     Qwen35MoEModel,
     Qwen35MoETextModel,
     Qwen35MTPModel,
     Qwen35TextModel,
-    QwenModel,
-    VideoChatFlashQwenModel,
+)
+from .qwen3_8 import (
+    Qwen4ExpEmbeddingModel,
+    Qwen4ExpModel,
+    Qwen4ExpTextModel,
+    Qwen4ExpVisionModel,
 )
 from .smollm import SmolLM3Model
 from .whisper import WhisperModel
@@ -52,18 +62,25 @@ __all__ = [
     "GPTOSSModel",
     "Gemma2Model",
     "Gemma3Model",
+    "Gemma4MoEModel",
+    "Gemma4Model",
     "GemmaModel",
     "GraniteMoEHybridModel",
     "GraniteModel",
     "HunyuanDenseV1Model",
     "InternLM2Model",
+    "LFM2AudioModel",
+    "LFM2MoEModel",
     "LFM2Model",
+    "LFM2VLModel",
+    "LFM3Model",
     "LlamaModel",
     "MTPModel",
     "Mistral3TextModel",
     "MistralModel",
     "Model",
     "NemotronModel",
+    "NemotronParseModel",
     "OLMoModel",
     "Phi3MiniLongRoPEModel",
     "Phi3MiniModel",
@@ -75,12 +92,16 @@ __all__ = [
     "PhiModel",
     "Qwen3Model",
     "Qwen3VLTextModel",
+    "Qwen4ExpEmbeddingModel",
+    "Qwen4ExpModel",
+    "Qwen4ExpTextModel",
+    "Qwen4ExpVisionModel",
     "Qwen25VLTextModel",
     "Qwen35DenseMTPModel",
-    "Qwen35Model",
+    "Qwen35MTPModel",
     "Qwen35MoEModel",
     "Qwen35MoETextModel",
-    "Qwen35MTPModel",
+    "Qwen35Model",
     "Qwen35TextModel",
     "QwenModel",
     "SmolLM3Model",

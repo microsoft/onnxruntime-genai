@@ -129,6 +129,11 @@ else()
   target_link_libraries(onnxruntime-genai PRIVATE onnxruntime-genai-obj)
 endif()
 
+# Keep bundled dependencies (including curl) and C++ internals private so a
+# host cannot interpose their calls with incompatible implementations.
+include(cmake/shared-library-exports.cmake)
+ortgenai_configure_shared_library_exports(onnxruntime-genai)
+
 target_include_directories(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} ${ORT_HEADER_DIR})
 target_include_directories(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} ${onnxruntime_extensions_SOURCE_DIR}/shared/api)
 target_include_directories(${ORTGENAI_COMPILE_TARGET} PRIVATE ${GENERATORS_ROOT})
@@ -205,6 +210,22 @@ endif()
 # The genai library itself is always embedded in the shared library
 list(APPEND ortgenai_embed_libs "$<TARGET_FILE:onnxruntime-genai>")
 
+if(WIN32 AND NOT USE_WINML AND ENABLE_TESTS)
+  file(GLOB ort_runtime_dlls "${ORT_LIB_DIR}/*.dll")
+  if(ort_runtime_dlls)
+    add_custom_target(onnxruntime-genai-ort-runtime
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+            "$<TARGET_FILE_DIR:onnxruntime-genai>"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${ort_runtime_dlls}
+            "$<TARGET_FILE_DIR:onnxruntime-genai>"
+    DEPENDS ${ort_runtime_dlls}
+    COMMAND_EXPAND_LISTS
+  )
+    add_dependencies(onnxruntime-genai onnxruntime-genai-ort-runtime)
+  endif()
+endif()
+
 # we keep the shared libraries disconnected on Android as they will come from separate AARs and we don't want to force
 # the ORT version to match in both.
 if(CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR (CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND (NOT BUILD_APPLE_FRAMEWORK) AND (NOT MAC_CATALYST)))
@@ -260,7 +281,7 @@ if((USE_CUDA OR USE_TRT_RTX) AND CMAKE_CUDA_COMPILER)
   set_target_properties(onnxruntime-genai-cuda PROPERTIES LINKER_LANGUAGE CUDA)
   set_target_properties(onnxruntime-genai-cuda PROPERTIES FOLDER "GenAI")
   add_dependencies(onnxruntime-genai onnxruntime-genai-cuda)
-  source_group(TREE ${GENERATORS_ROOT}/ep/cuda FILES ${generator_cudalib_srcs})
+  source_group(TREE ${GENERATORS_ROOT} FILES ${generator_cudalib_srcs})
   list(APPEND ortgenai_embed_libs "$<TARGET_FILE:onnxruntime-genai-cuda>")
   if(APPLE)
     set_property(TARGET onnxruntime-genai-cuda APPEND_STRING PROPERTY LINK_FLAGS "-Xlinker -exported_symbols_list ${GENERATORS_ROOT}/ep/cuda/exported_symbols.lst")
@@ -270,6 +291,24 @@ if((USE_CUDA OR USE_TRT_RTX) AND CMAKE_CUDA_COMPILER)
     set_property(TARGET onnxruntime-genai-cuda APPEND_STRING PROPERTY LINK_FLAGS "-DEF:\"${GENERATORS_ROOT}/ep/cuda/symbols.def\"")
   else()
     message(FATAL_ERROR "${target} unknown platform, need to specify shared library exports for it")
+  endif()
+
+  # CUDA data plane of the "qwen38_flash_graph" model type. The sources are compiled into onnxruntime-genai-cuda (see
+  # cmake/check_cuda.cmake), which the model uses unless model.qwen38_graph.plane_library names an existing library inside the
+  # model folder. ENABLE_QWEN38_PLANE additionally builds that standalone library; it is dlopen-ed, never linked into GenAI,
+  # so the core library keeps no cudart dependency.
+  if(ENABLE_QWEN38_PLANE)
+    if((UNIX AND NOT APPLE) OR WIN32)
+      add_library(qwen38_plane SHARED "${GENERATORS_ROOT}/qwen38_plane/qwen38_plane.cu")
+      target_link_libraries(qwen38_plane PRIVATE cudart)
+      if(ENABLE_TESTS)
+        # Fault-injection and counter exports for test/cpp/engine/qwen38_plane_tests.cpp; packages build with ENABLE_TESTS=OFF.
+        target_compile_definitions(qwen38_plane PRIVATE QWEN38_PLANE_TEST_HOOKS)
+      endif()
+      set_target_properties(qwen38_plane PROPERTIES FOLDER "GenAI" WINDOWS_EXPORT_ALL_SYMBOLS ON)
+    else()
+      message(WARNING "ENABLE_QWEN38_PLANE is only supported on Linux and Windows; skipping the qwen38_plane target.")
+    endif()
   endif()
 endif()
 
@@ -342,6 +381,10 @@ if(USE_DML)
   if(NUGET_PACKAGE_SOURCE)
     list(APPEND NUGET_RESTORE_COMMAND -Source "${NUGET_PACKAGE_SOURCE}")
   endif()
+  if(NUGET_CONFIG_FILE)
+    list(APPEND NUGET_RESTORE_COMMAND -ConfigFile "${NUGET_CONFIG_FILE}")
+  endif()
+  list(APPEND NUGET_RESTORE_COMMAND -NonInteractive)
 
   add_custom_command(
     OUTPUT

@@ -34,6 +34,10 @@ function(install_nuget_package NUGET_PACKAGE_NAME NUGET_PACKAGE_VERSION NUGET_PA
         if(NUGET_PACKAGE_SOURCE)
             list(APPEND NUGET_COMMAND -Source ${NUGET_PACKAGE_SOURCE})
         endif()
+        if(NUGET_CONFIG_FILE)
+            list(APPEND NUGET_COMMAND -ConfigFile ${NUGET_CONFIG_FILE})
+        endif()
+        list(APPEND NUGET_COMMAND -NonInteractive)
 
         message(STATUS "Downloading ${NUGET_PACKAGE_NAME} ${NUGET_PACKAGE_VERSION}")
         message(VERBOSE "install_nuget_package: NUGET_COMMAND = ${NUGET_COMMAND}")

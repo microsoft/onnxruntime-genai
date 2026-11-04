@@ -58,7 +58,20 @@ def mtp_decoder_overlay(model_dir: Path):
     decoder["inputs"] = copy.deepcopy(mtp["inputs"])
     decoder["outputs"] = copy.deepcopy(mtp["outputs"])
     decoder["outputs"]["hidden_states"] = "hidden_states_out"
-    return {"model": {"decoder": decoder}}
+    decoder["layer_types"] = []
+    decoder["conv_cache_size"] = 0
+    decoder["session_options"] = copy.deepcopy(mtp.get("session_options", {}))
+    decoder["shared_initializers"] = copy.deepcopy(mtp.get("shared_initializers", []))
+    model_type = config["model"]["type"]
+    if model_type in ("qwen2_5_vl", "qwen3_vl", "qwen3_5", "qwen3_5_moe", "qwen4_exp"):
+        model_type += "_text"
+    return {
+        "model": {
+            "type": model_type,
+            "decoder": decoder,
+            **{name: {"filename": ""} for name in ("embedding", "vision", "engram")},
+        }
+    }
 
 
 def cuda_config(model_dir: Path, overlay=None):

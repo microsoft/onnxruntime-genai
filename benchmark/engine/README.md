@@ -53,6 +53,24 @@ Delete the `dependencies/` folder to force a re-download after changing the pinn
 `patchelf` must be on `PATH` (`pip install patchelf`) so the staged GenAI libraries load the pinned
 ONNX Runtime rather than the one baked into their build-time RPATH.
 
+### Prefix-cache and scheduler microbenchmark
+
+The model-free prefix-cache benchmark and CPU scheduler benchmark are built into
+`engine_unit_tests` and disabled during normal test runs. Build the tests in `Release` or
+`RelWithDebInfo`, then run:
+
+```bash
+build/Linux/Release/engine_unit_tests \
+  --gtest_also_run_disabled_tests \
+  --gtest_filter='PrefixCacheBenchmark.*:SchedulerBenchmark.*'
+```
+
+`PrefixCacheBenchmark` fills a 16,384-block cache with 128 independent 4,096-token prefixes before
+timing cold misses, partial hits, and full hits. `SchedulerBenchmark` reports the CPU time spent
+planning steady-state decode steps at batch sizes 1, 8, and 32. That planning time is one component
+of inter-token latency; use the model-backed `decode_baseline` scenario for end-to-end inter-token
+latency, which also includes model execution, sampling, synchronization, and event delivery.
+
 ## Run
 
 ```bash

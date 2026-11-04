@@ -29,7 +29,8 @@ def main(args):
         print("Loading model...")
 
     # Create model
-    config = get_config(args.model_path, args.execution_provider, args.ep_path)
+    search_options = get_search_options(args)
+    config = get_config(args.model_path, args.execution_provider, args.ep_path, search_options=search_options)
     model = og.Model(config)
     if args.verbose:
         print("Model loaded")
@@ -39,9 +40,6 @@ def main(args):
     stream = tokenizer.create_stream()
     if args.verbose:
         print("Tokenizer created")
-
-    # Get search options for generator params
-    search_options = get_search_options(args)
 
     # Create running list of messages
     input_list = [

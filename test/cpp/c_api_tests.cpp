@@ -1,6 +1,9 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+// M_PI is not part of ISO C++; MSVC only exposes it via <cmath> when this
+// macro is defined before the header is first included. Must precede <cmath>.
+#define _USE_MATH_DEFINES
 #include <array>
 #include <cmath>
 #include <cstdlib>
@@ -16,6 +19,7 @@
 #include <unordered_map>
 #include <vector>
 #include <regex>
+#include <algorithm>
 #include "span.h"
 #include <list>
 
@@ -183,7 +187,6 @@ TEST(CAPITests, TokenizerCAPI) {
 TEST(CAPITests, TokenizerCreateFromConfigAndPath) {
 #if TEST_PHI2
   const char* input_string = "She sells sea shells by the sea shore.";
-
   auto config = OgaConfig::Create(PHI2_PATH);
   auto tokenizer_from_config = OgaTokenizer::Create(*config);
   auto tokenizer_from_path = OgaTokenizer::Create(PHI2_PATH);
@@ -197,6 +200,89 @@ TEST(CAPITests, TokenizerCreateFromConfigAndPath) {
   auto out_string = tokenizer_from_path->Decode(input_sequences->SequenceData(0), input_sequences->SequenceCount(0));
   ASSERT_STREQ(input_string, out_string);
 #endif
+}
+
+TEST(CAPITests, ASRPostProcessorOpaqueResults) {
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 10);
+  auto generator = OgaGenerator::Create(*model, *params);
+  auto tokenizer = OgaTokenizer::Create(*model);
+  auto plain = OgaTokenizerStream::Create(*tokenizer);
+  model.reset();
+  auto processor = OgaASRPostProcessor::Create(*generator);
+  EXPECT_TRUE(processor->GetNextResults().empty());
+  const std::array<int32_t, 4> prompt{0, 0, 0, 52};
+  generator->AppendTokens(prompt.data(), prompt.size());
+  generator->GenerateNextToken();
+  auto* base = OgaASRPostProcessorAsPostProcessor(processor.get());
+  ASSERT_NE(base, nullptr);
+  OgaCheckResult(OgaPostProcessorProcessNext(base));
+  const auto results = processor->GetNextResults();
+  ASSERT_EQ(results.size(), 1U);
+  const OgaASRPostProcessorResult* result = results[0];
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(processor->GetNextResults()[0], result);
+  const std::string expected = plain->Decode(generator->GetNextTokens()[0]);
+  EXPECT_STREQ(result->GetText(), expected.c_str());
+  EXPECT_EQ(result->GetTimestampResult(), nullptr);
+  const auto* native_result = OgaASRPostProcessorGetResult(processor.get(), 0);
+  EXPECT_EQ(result, native_result);
+  EXPECT_EQ(result->GetText(), OgaASRPostProcessorResultGetText(native_result));
+  EXPECT_EQ(OgaASRPostProcessorResultGetTimestampResult(native_result), nullptr);
+  EXPECT_EQ(OgaASRPostProcessorResultGetTimestampResult(nullptr), nullptr);
+  EXPECT_EQ(OgaASRPostProcessorTimestampResultGetWordCount(nullptr), 0U);
+  EXPECT_EQ(OgaASRPostProcessorTimestampResultGetSegmentCount(nullptr), 0U);
+  EXPECT_EQ(OgaASRPostProcessorTimestampResultGetTimestampRecord(nullptr, OgaTimestampRecordKind_Words, 0), nullptr);
+  EXPECT_EQ(OgaASRPostProcessorTimestampResultGetTimestampRecord(nullptr, OgaTimestampRecordKind_Segments, 0), nullptr);
+  EXPECT_EQ(OgaASRPostProcessorGetResult(processor.get(), 1), nullptr);
+  generator->GenerateNextToken();
+  EXPECT_STREQ(result->GetText(), expected.c_str());
+  processor->ProcessNext();
+  EXPECT_EQ(processor->GetNextResults()[0]->GetText(), std::string{plain->Decode(generator->GetNextTokens()[0])});
+  processor->Finalize();
+  processor->Finalize();
+  ASSERT_EQ(processor->GetNextResults().size(), 1U);
+  EXPECT_STREQ(processor->GetNextResults()[0]->GetText(), "");
+  processor->Reset();
+  EXPECT_TRUE(processor->GetNextResults().empty());
+  processor.reset();
+  generator.reset();
+}
+
+TEST(CAPITests, ASRPostProcessorBaseLifecycle) {
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 10);
+  auto generator = OgaGenerator::Create(*model, *params);
+  auto processor = OgaASRPostProcessor::Create(*generator);
+  const auto* asr = processor.get();
+  std::unique_ptr<OgaPostProcessor> base{OgaASRPostProcessorAsPostProcessor(processor.release())};
+  const std::array<int32_t, 4> prompt{0, 0, 0, 52};
+  generator->AppendTokens(prompt.data(), prompt.size());
+  generator->GenerateNextToken();
+  base->ProcessNext();
+  ASSERT_EQ(asr->GetNextResults().size(), 1U);
+  base->Finalize();
+  ASSERT_EQ(asr->GetNextResults().size(), 1U);
+  EXPECT_STREQ(asr->GetNextResults()[0]->GetText(), "");
+  base->Reset();
+  EXPECT_TRUE(asr->GetNextResults().empty());
+  base.reset();
+}
+
+TEST(CAPITests, ASRPostProcessorRejectsInvalidCreation) {
+  OgaASRPostProcessor* processor = nullptr;
+  EXPECT_THROW(OgaCheckResult(OgaCreateASRPostProcessor(nullptr, &processor)), std::runtime_error);
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto params = OgaGeneratorParams::Create(*model);
+  auto generator = OgaGenerator::Create(*model, *params);
+  EXPECT_THROW(OgaCheckResult(OgaCreateASRPostProcessor(generator.get(), nullptr)), std::runtime_error);
+  EXPECT_EQ(OgaASRPostProcessorAsPostProcessor(nullptr), nullptr);
+  EXPECT_THROW(OgaCheckResult(OgaPostProcessorProcessNext(nullptr)), std::runtime_error);
+  EXPECT_THROW(OgaCheckResult(OgaPostProcessorFinalize(nullptr)), std::runtime_error);
+  EXPECT_THROW(OgaCheckResult(OgaPostProcessorReset(nullptr)), std::runtime_error);
+  EXPECT_NO_THROW(OgaDestroyPostProcessor(nullptr));
 }
 
 TEST(CAPITests, EncodeBatchEmptyInputThrows) {
@@ -274,6 +360,291 @@ TEST(CAPITests, TokenizerUpdateOptions) {
       throw std::runtime_error("Stream token decoding mismatch");
   }
 #endif
+}
+
+namespace {
+
+class LiteralTokenizerApiTest : public testing::Test {
+ protected:
+  void SetUp() override {
+    if (const char* path = std::getenv("ORT_GENAI_LITERAL_TEST_MODEL_PATH"); path && *path) {
+      model_path_ = path;
+    } else {
+#if TEST_PHI2
+      model_path_ = PHI2_PATH;
+#else
+      GTEST_SKIP() << "Set ORT_GENAI_LITERAL_TEST_MODEL_PATH to a staged real model pack.";
+#endif
+    }
+    ASSERT_TRUE(std::filesystem::exists(std::filesystem::path(model_path_) / "genai_config.json"));
+    tokenizer_ = OgaTokenizer::Create(model_path_.c_str());
+    const char* keys[] = {"skip_special_tokens"};
+    const char* values[] = {"false"};
+    tokenizer_->UpdateOptions(keys, values, 1);
+    for (const char* marker : {"<|endoftext|>", "<|endofprompt|>", "<|assistant|>", "<|end|>", "<|user|>",
+                               "<|system|>", "<|tool|>", "<|/tool|>", "<|tool_call|>", "<|/tool_call|>",
+                               "<|tool_response|>", "<|tag|>"}) {
+      auto sequences = OgaSequences::Create();
+      tokenizer_->Encode(marker, *sequences);
+      if (sequences->SequenceCount(0) != 1) continue;
+      const int32_t id = sequences->SequenceData(0)[0];
+      if (std::strcmp(tokenizer_->Decode(&id, 1), marker) == 0) {
+        markers_.emplace_back(marker, id);
+      }
+    }
+    ASSERT_FALSE(markers_.empty()) << "The real tokenizer must recognize at least one control marker.";
+    legacy_tokenizer_ = OgaTokenizer::Create(model_path_.c_str());
+    legacy_tokenizer_->UpdateOptions(keys, values, 1);
+    SetLiteral(*tokenizer_, true);
+  }
+
+  static void SetLiteral(OgaTokenizer& tokenizer, bool enabled) {
+    const char* keys[] = {"literal"};
+    const char* values[] = {enabled ? "true" : "false"};
+    tokenizer.UpdateOptions(keys, values, 1);
+  }
+
+  void ExpectNoControlTokens(const OgaSequences& sequences) const {
+    ASSERT_EQ(sequences.Count(), 1);
+    const size_t count = sequences.SequenceCount(0);
+    ASSERT_GT(count, 0);
+    const int32_t* tokens = sequences.SequenceData(0);
+    for (const auto& [marker, id] : markers_) {
+      EXPECT_EQ(std::find(tokens, tokens + count, id), tokens + count) << marker;
+    }
+  }
+
+  std::string model_path_;
+  std::unique_ptr<OgaTokenizer> tokenizer_;
+  std::unique_ptr<OgaTokenizer> legacy_tokenizer_;
+  std::vector<std::pair<std::string, int32_t>> markers_;
+};
+
+}  // namespace
+
+TEST(CAPITests, TokenizerEncodeRejectsNullArguments) {
+  std::unique_ptr<OgaResult> result(OgaTokenizerEncode(nullptr, "control", nullptr));
+  ASSERT_NE(result, nullptr);
+  EXPECT_NE(std::strlen(OgaResultGetError(result.get())), 0);
+}
+
+TEST_F(LiteralTokenizerApiTest, EncodesControlMarkersAsLiteralText) {
+  for (const auto& [marker, id] : markers_) {
+    SCOPED_TRACE(marker);
+    const std::string text = "control " + marker + " control";
+    auto sequences = OgaSequences::Create();
+    tokenizer_->Encode(text.c_str(), *sequences);
+    ASSERT_NO_FATAL_FAILURE(ExpectNoControlTokens(*sequences));
+    EXPECT_STREQ(tokenizer_->Decode(sequences->SequenceData(0), sequences->SequenceCount(0)), text.c_str());
+  }
+}
+
+TEST_F(LiteralTokenizerApiTest, PreservesLegacyEncodingAndOptions) {
+  for (const auto& [marker, id] : markers_) {
+    SCOPED_TRACE(marker);
+    auto literal = OgaSequences::Create();
+    tokenizer_->Encode(marker.c_str(), *literal);
+    ASSERT_NO_FATAL_FAILURE(ExpectNoControlTokens(*literal));
+    auto legacy = OgaSequences::Create();
+    legacy_tokenizer_->Encode(marker.c_str(), *legacy);
+    ASSERT_EQ(legacy->SequenceCount(0), 1);
+    EXPECT_EQ(legacy->SequenceData(0)[0], id);
+  }
+}
+
+TEST_F(LiteralTokenizerApiTest, EmptyLiteralDoesNotInsertAutomaticTokens) {
+  const char* keys[] = {"add_special_tokens"};
+  const char* values[] = {"true"};
+  tokenizer_->UpdateOptions(keys, values, 1);
+  auto sequences = OgaSequences::Create();
+  tokenizer_->Encode("", *sequences);
+  ASSERT_EQ(sequences->Count(), 1);
+  EXPECT_EQ(sequences->SequenceCount(0), 0);
+}
+
+TEST_F(LiteralTokenizerApiTest, EmptyLegacyEncodingHasNoTokensWhenDisabled) {
+  const char* keys[] = {"add_special_tokens"};
+  const char* values[] = {"false"};
+  legacy_tokenizer_->UpdateOptions(keys, values, 1);
+  auto sequences = OgaSequences::Create();
+  legacy_tokenizer_->Encode("", *sequences);
+  ASSERT_EQ(sequences->Count(), 1);
+  EXPECT_EQ(sequences->SequenceCount(0), 0);
+}
+
+TEST_F(LiteralTokenizerApiTest, RejectsInvalidInputWithoutAppendingSequence) {
+  auto sequences = OgaSequences::Create();
+  tokenizer_->Encode("control", *sequences);
+  ASSERT_EQ(sequences->Count(), 1);
+  const std::vector<int32_t> expected(sequences->SequenceData(0),
+                                      sequences->SequenceData(0) + sequences->SequenceCount(0));
+  EXPECT_THROW(tokenizer_->Encode(nullptr, *sequences), std::runtime_error);
+  EXPECT_THROW(tokenizer_->Encode("\xff", *sequences), std::runtime_error);
+  EXPECT_THROW(tokenizer_->Encode("control\xff", *sequences), std::runtime_error);
+  ASSERT_EQ(sequences->Count(), 1);
+  EXPECT_EQ(std::vector<int32_t>(sequences->SequenceData(0),
+                                 sequences->SequenceData(0) + sequences->SequenceCount(0)),
+            expected);
+  std::unique_ptr<OgaResult> result(OgaTokenizerEncode(tokenizer_.get(), "control", nullptr));
+  ASSERT_NE(result, nullptr);
+}
+
+TEST_F(LiteralTokenizerApiTest, ConcurrentLiteralCallsDoNotChangeLegacyRecognition) {
+  const auto [marker, id] = markers_.front();
+  auto literal_worker = [&] {
+    for (int i = 0; i < 32; ++i) {
+      auto sequences = OgaSequences::Create();
+      ASSERT_NO_THROW(tokenizer_->Encode(marker.c_str(), *sequences));
+      ASSERT_NO_FATAL_FAILURE(ExpectNoControlTokens(*sequences));
+    }
+  };
+  auto legacy_worker = [&] {
+    for (int i = 0; i < 32; ++i) {
+      auto sequences = OgaSequences::Create();
+      ASSERT_NO_THROW(legacy_tokenizer_->Encode(marker.c_str(), *sequences));
+      ASSERT_EQ(sequences->SequenceCount(0), 1);
+      EXPECT_EQ(sequences->SequenceData(0)[0], id);
+    }
+  };
+  std::thread literal_thread(literal_worker);
+  std::thread second_literal_thread(literal_worker);
+  std::thread legacy_thread(legacy_worker);
+  literal_thread.join();
+  second_literal_thread.join();
+  legacy_thread.join();
+}
+
+TEST_F(LiteralTokenizerApiTest, RealModelGeneratesFromLiteralTokens) {
+  const char* override_path = std::getenv("ORT_GENAI_LITERAL_GENERATION_MODEL_PATH");
+  const std::string generation_path = override_path && *override_path ? override_path : model_path_;
+  auto config = OgaConfig::Create(generation_path.c_str());
+  config->ClearProviders();
+  config->Overlay(R"({"search":{"past_present_share_buffer":false}})");
+  auto model = OgaModel::Create(*config);
+  auto generation_tokenizer = OgaTokenizer::Create(*model);
+  SetLiteral(*generation_tokenizer, true);
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 512.0);
+  params->SetSearchOptionBool("do_sample", false);
+  auto generator = OgaGenerator::Create(*model, *params);
+  auto input = OgaSequences::Create();
+  generation_tokenizer->Encode("!", *input);
+  ASSERT_EQ(input->Count(), 1);
+  ASSERT_GT(input->SequenceCount(0), 0);
+  EXPECT_STREQ(generation_tokenizer->Decode(input->SequenceData(0), input->SequenceCount(0)), "!");
+  generator->AppendTokenSequences(*input);
+  const size_t before = OgaGenerator_GetSequenceCount(generator.get(), 0);
+  int iterations = 0;
+  while (!generator->IsDone() && iterations < 4) {
+    generator->GenerateNextToken();
+    ++iterations;
+  }
+  EXPECT_GT(iterations, 0);
+  EXPECT_GT(OgaGenerator_GetSequenceCount(generator.get(), 0), before);
+}
+
+TEST_F(LiteralTokenizerApiTest, LiteralOptionAcceptsBooleanValuesAndCanBeDisabled) {
+  const auto& [marker, id] = markers_.front();
+  const char* keys[] = {"literal"};
+  for (const char* value : {"false", "true", "0", "1"}) {
+    SCOPED_TRACE(value);
+    const char* values[] = {value};
+    tokenizer_->UpdateOptions(keys, values, 1);
+    auto sequences = OgaSequences::Create();
+    tokenizer_->Encode(marker.c_str(), *sequences);
+    if (std::strcmp(value, "true") == 0 || std::strcmp(value, "1") == 0) {
+      ASSERT_NO_FATAL_FAILURE(ExpectNoControlTokens(*sequences));
+    } else {
+      ASSERT_EQ(sequences->SequenceCount(0), 1);
+      EXPECT_EQ(sequences->SequenceData(0)[0], id);
+    }
+  }
+}
+
+TEST_F(LiteralTokenizerApiTest, RejectedOptionUpdatesLeaveModeAndOtherOptionsUnchanged) {
+  const char* literal_keys[] = {"literal", "skip_special_tokens"};
+  for (const char* value : {"", "yes", "TRUE"}) {
+    SCOPED_TRACE(value);
+    const char* values[] = {value, "true"};
+    EXPECT_THROW(tokenizer_->UpdateOptions(literal_keys, values, 2), std::runtime_error);
+  }
+  const char* invalid_keys[] = {"literal", "not_a_tokenizer_option"};
+  const char* invalid_values[] = {"false", "true"};
+  EXPECT_THROW(tokenizer_->UpdateOptions(invalid_keys, invalid_values, 2), std::runtime_error);
+  const char* null_keys[] = {"literal", nullptr};
+  EXPECT_THROW(tokenizer_->UpdateOptions(null_keys, invalid_values, 2), std::runtime_error);
+
+  const auto& [marker, id] = markers_.front();
+  auto sequences = OgaSequences::Create();
+  tokenizer_->Encode(marker.c_str(), *sequences);
+  ASSERT_NO_FATAL_FAILURE(ExpectNoControlTokens(*sequences));
+  EXPECT_STREQ(tokenizer_->Decode(&id, 1), marker.c_str());
+}
+
+TEST_F(LiteralTokenizerApiTest, MixedOptionsPreserveAutomaticInsertionWhenLiteralIsDisabled) {
+  const char* keys[] = {"literal", "add_special_tokens"};
+  const char* values[] = {"true", "true"};
+  tokenizer_->UpdateOptions(keys, values, 2);
+  const char* legacy_keys[] = {"add_special_tokens"};
+  const char* legacy_values[] = {"true"};
+  legacy_tokenizer_->UpdateOptions(legacy_keys, legacy_values, 1);
+
+  auto empty = OgaSequences::Create();
+  tokenizer_->Encode("", *empty);
+  ASSERT_EQ(empty->Count(), 1);
+  EXPECT_EQ(empty->SequenceCount(0), 0);
+  SetLiteral(*tokenizer_, false);
+  const auto& marker = markers_.front().first;
+  auto actual = OgaSequences::Create();
+  auto expected = OgaSequences::Create();
+  tokenizer_->Encode(marker.c_str(), *actual);
+  legacy_tokenizer_->Encode(marker.c_str(), *expected);
+  ASSERT_GT(expected->SequenceCount(0), 0);
+  EXPECT_EQ(std::vector<int32_t>(actual->SequenceData(0), actual->SequenceData(0) + actual->SequenceCount(0)),
+            std::vector<int32_t>(expected->SequenceData(0), expected->SequenceData(0) + expected->SequenceCount(0)));
+}
+
+TEST_F(LiteralTokenizerApiTest, RejectsNullOptionArraysAndValues) {
+  const char* keys[] = {"literal"};
+  const char* values[] = {"false"};
+  const char* null_values[] = {nullptr};
+  EXPECT_THROW(tokenizer_->UpdateOptions(nullptr, values, 1), std::runtime_error);
+  EXPECT_THROW(tokenizer_->UpdateOptions(keys, nullptr, 1), std::runtime_error);
+  EXPECT_THROW(tokenizer_->UpdateOptions(keys, null_values, 1), std::runtime_error);
+  EXPECT_THROW(tokenizer_->UpdateOptions(nullptr, nullptr, 0), std::runtime_error);
+  std::unique_ptr<OgaResult> result(OgaUpdateTokenizerOptions(nullptr, keys, values, 1));
+  ASSERT_NE(result, nullptr);
+  EXPECT_NE(std::strlen(OgaResultGetError(result.get())), 0);
+}
+
+TEST_F(LiteralTokenizerApiTest, BatchEncodingUsesTheConfiguredModeAndRetainsPadding) {
+  const std::string text = "control " + markers_.front().first + " control";
+  const char* strings[] = {text.c_str(), "!"};
+  for (OgaTokenizer* tokenizer : {tokenizer_.get(), legacy_tokenizer_.get()}) {
+    auto single = OgaSequences::Create();
+    tokenizer->Encode(strings[0], *single);
+    tokenizer->Encode(strings[1], *single);
+    auto batch = tokenizer->EncodeBatch(strings, 2);
+    const size_t width = std::max(single->SequenceCount(0), single->SequenceCount(1));
+    EXPECT_EQ(batch->Type(), OgaElementType_int32);
+    EXPECT_EQ(batch->Shape(), (std::vector<int64_t>{2, static_cast<int64_t>(width)}));
+    const auto* ids = static_cast<const int32_t*>(batch->Data());
+    ASSERT_NE(ids, nullptr);
+    for (size_t i = 0; i < 2; ++i) {
+      const size_t count = single->SequenceCount(i);
+      EXPECT_EQ(std::vector<int32_t>(ids + i * width, ids + i * width + count),
+                std::vector<int32_t>(single->SequenceData(i), single->SequenceData(i) + count));
+      for (size_t j = count; j < width; ++j) {
+        EXPECT_EQ(ids[i * width + j], tokenizer->GetPadTokenId());
+      }
+    }
+  }
+  const char* invalid_strings[] = {text.c_str(), "\xff"};
+  OgaTensor* output = nullptr;
+  std::unique_ptr<OgaResult> result(OgaTokenizerEncodeBatch(tokenizer_.get(), invalid_strings, 2, &output));
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(output, nullptr);
+  EXPECT_NE(std::strlen(OgaResultGetError(result.get())), 0);
 }
 
 TEST(CAPITests, ChatTemplate) {
@@ -563,6 +934,7 @@ TEST(CAPITests, MarianBatchWithBeamsIOContract) {
   ASSERT_EQ(next_tokens.size(), expected_tokens.size());
   for (size_t beam = 0; beam < expected_tokens.size(); ++beam)
     EXPECT_EQ(next_tokens[beam], expected_tokens[beam]) << "beam " << beam;
+  EXPECT_THROW(OgaASRPostProcessor::Create(*generator), std::runtime_error);
 }
 
 TEST(CAPITests, EndToEndPhi) {
@@ -949,6 +1321,22 @@ TEST(CAPITests, SetTerminate) {
 TEST(CAPITests, EngineRequestTurnAndEventContracts) {
   auto model = OgaModel::Create(MODEL_PATH "engine/synthetic-paged");
   auto engine = OgaEngine::Create(*model);
+  auto capabilities = engine->GetCapabilities();
+  EXPECT_EQ(capabilities->ConfiguredMaxBatchSize(), 8u);
+  EXPECT_EQ(capabilities->MaxScheduledTokens(), 2048u);
+  EXPECT_EQ(capabilities->MaxRequestLength(), 128u);
+  EXPECT_EQ(OgaEngineCapabilitiesGetMaxRequestLength(nullptr), 0u);
+  std::exception_ptr off_thread_capabilities_error;
+  std::thread off_owner_capabilities_thread([&] {
+    try {
+      static_cast<void>(engine->GetCapabilities());
+    } catch (...) {
+      off_thread_capabilities_error = std::current_exception();
+    }
+  });
+  off_owner_capabilities_thread.join();
+  ASSERT_NE(off_thread_capabilities_error, nullptr);
+  EXPECT_THROW(std::rethrow_exception(off_thread_capabilities_error), std::runtime_error);
   auto session_options = OgaRequestOptions::Create();
   session_options->SetMaxSessionTokens(16);
   auto request = engine->CreateRequest(session_options.get());
@@ -967,9 +1355,18 @@ TEST(CAPITests, EngineRequestTurnAndEventContracts) {
   EXPECT_EQ(event.generated_tokens, 1u);
   EXPECT_EQ(event.cached_prompt_tokens, 0u);
 
-  const std::array<int32_t, 1> continuation{5};
+  const std::array<int32_t, 1> discarded_continuation{5};
+  const auto discarded_turn =
+      request->BeginTurn(discarded_continuation, turn_options.get());
+  EXPECT_EQ(discarded_turn, 2u);
+  EXPECT_EQ(RunOne(*engine).turn_id, discarded_turn);
+
+  request->RewindToStartOfTurn(discarded_turn);
+  EXPECT_FALSE(engine->HasPendingRequests());
+
+  const std::array<int32_t, 1> continuation{6};
   const auto second_turn = request->BeginTurn(continuation);
-  EXPECT_EQ(second_turn, 2u);
+  EXPECT_EQ(second_turn, 3u);
   EXPECT_TRUE(request->CancelTurn(second_turn));
   EXPECT_FALSE(request->CancelTurn(second_turn));
   const auto cancelled = RunOne(*engine);
@@ -978,12 +1375,19 @@ TEST(CAPITests, EngineRequestTurnAndEventContracts) {
   EXPECT_EQ(cancelled.flags, OgaEngineEventFlag_TurnFinished);
   EXPECT_EQ(cancelled.finish_reason, OgaFinishReason_Cancelled);
 
+  std::unique_ptr<OgaResult> null_rewind_result{
+      OgaRequestRewindToStartOfTurn(nullptr, 1)};
+  ASSERT_NE(null_rewind_result, nullptr);
+  EXPECT_NE(
+      std::string(null_rewind_result->GetError()).find("request must not be null"),
+      std::string::npos);
+
   auto request_options = OgaRequestOptions::Create();
   request_options->SetMaxSessionTokens(8);
   auto options_request = engine->CreateRequest(request_options.get());
   options_request->Close();
 
-  // Omitting the option (or clearing it with zero) uses the model-configured ceiling.
+  // Omitting the option (or clearing it with zero) uses the configured default within the Engine ceiling.
   request_options->SetMaxSessionTokens(0);
   auto default_limit_request = engine->CreateRequest(request_options.get());
   default_limit_request->Close();
@@ -993,13 +1397,13 @@ TEST(CAPITests, EngineRequestTurnAndEventContracts) {
   try {
     static_cast<void>(
         engine->CreateRequest(excessive_request_options.get()));
-    FAIL() << "Expected max_session_tokens above the model ceiling to fail.";
+    FAIL() << "Expected max_session_tokens above the Engine ceiling to fail.";
   } catch (const std::runtime_error& error) {
     EXPECT_NE(
         std::string(error.what()).find("max_session_tokens (129)"),
         std::string::npos);
     EXPECT_NE(
-        std::string(error.what()).find("search.max_length (128)"),
+        std::string(error.what()).find("max_request_length (128)"),
         std::string::npos);
   }
 
@@ -1059,6 +1463,39 @@ TEST(CAPITests, EngineRequestTurnAndEventContracts) {
   EXPECT_EQ(engine->Run(*idle_buffer), 0u);
   EXPECT_EQ(idle_buffer->Count(), 0u);
   EXPECT_EQ(idle_buffer->Get(0), nullptr);
+}
+
+TEST(CAPITests, EngineMaxRequestLengthUsesResolvedCacheCapacity) {
+  auto config = OgaConfig::Create(MODEL_PATH "engine/synthetic-paged");
+  config->Overlay(R"({
+    "search":{"max_length":4},
+    "engine":{"dynamic_batching":{"num_blocks":2}}
+  })");
+  auto model = OgaModel::Create(*config);
+  auto engine = OgaEngine::Create(*model);
+
+  auto capabilities = engine->GetCapabilities();
+  EXPECT_EQ(capabilities->MaxRequestLength(), 9u);
+
+  auto request_options = OgaRequestOptions::Create();
+  request_options->SetMaxSessionTokens(8);
+  EXPECT_NO_THROW(engine->CreateRequest(request_options.get()));
+
+  request_options->SetMaxSessionTokens(9);
+  auto boundary_request = engine->CreateRequest(request_options.get());
+  const std::array<int32_t, 8> fitting_prompt{2, 3, 4, 5, 6, 7, 8, 9};
+  const auto boundary_turn = boundary_request->BeginTurn(fitting_prompt);
+  EXPECT_TRUE(boundary_request->CancelTurn(boundary_turn));
+  const auto boundary_event = RunOne(*engine);
+  EXPECT_EQ(boundary_event.flags, OgaEngineEventFlag_TurnFinished);
+  EXPECT_EQ(boundary_event.finish_reason, OgaFinishReason_Cancelled);
+
+  auto full_request = engine->CreateRequest(request_options.get());
+  const std::array<int32_t, 9> full_prompt{2, 3, 4, 5, 6, 7, 8, 9, 10};
+  EXPECT_THROW(full_request->BeginTurn(full_prompt), std::runtime_error);
+
+  request_options->SetMaxSessionTokens(10);
+  EXPECT_THROW(engine->CreateRequest(request_options.get()), std::runtime_error);
 }
 
 TEST(CAPITests, EngineTurnOptionsGenerationPolicy) {
@@ -1177,6 +1614,43 @@ TEST(CAPITests, EngineTurnOptionsGenerationPolicy) {
     EXPECT_EQ(request->BeginTurn(input_tokens, turn_options.get()), 1u);
     request->Close();
   }
+}
+
+TEST(CAPITests, EngineTurnOptionsDelimitedGuidanceSetters) {
+  auto config = OgaConfig::Create(MODEL_PATH "engine/synthetic-paged");
+  auto model = OgaModel::Create(*config);
+  auto engine = OgaEngine::Create(*model);
+  auto request = engine->CreateRequest();
+  auto options = request->CreateTurnOptions();
+  constexpr const char* grammar = "start: \"ok\"";
+
+  auto expect_error = [](OgaResult* result) {
+    std::unique_ptr<OgaResult> error{result};
+    EXPECT_NE(error, nullptr);
+  };
+
+  expect_error(OgaTurnOptionsSetDelimitedGuidance(nullptr, 11, 12, grammar));
+  expect_error(OgaTurnOptionsSetDelimitedGuidance(options.get(), 11, 12, nullptr));
+  expect_error(OgaTurnOptionsSetDelimitedGuidance(options.get(), -1, 12, grammar));
+  expect_error(OgaTurnOptionsSetDelimitedGuidance(options.get(), 11, 11, grammar));
+  expect_error(OgaTurnOptionsSetDelimitedGuidance(options.get(), 11, 12, ""));
+
+  // Both C and C++ entry points accept and copy a nonempty grammar. Invalid replacements leave
+  // the delimited configuration in place, so switching to whole-turn guidance still fails.
+  EXPECT_NO_THROW(options->SetDelimitedGuidance(11, 12, grammar));
+  expect_error(OgaTurnOptionsSetDelimitedGuidance(options.get(), 11, 11, grammar));
+  expect_error(OgaTurnOptionsSetGuidance(options.get(), "regex", "ok"));
+  EXPECT_NO_THROW(options->SetDelimitedGuidance(13, 14, grammar));
+
+  options->ClearGuidance();
+  EXPECT_NO_THROW(options->SetGuidance("regex", "ok"));
+  expect_error(OgaTurnOptionsSetDelimitedGuidance(options.get(), 11, 12, grammar));
+
+  options->Reset();
+  EXPECT_NO_THROW(options->SetDelimitedGuidance(11, 12, grammar));
+  options->ClearGuidance();
+  EXPECT_NO_THROW(options->SetGuidance("regex", "ok"));
+  request->Close();
 }
 
 // A model whose own search defaults keep every turn greedy silently overrides an explicit
@@ -2357,13 +2831,37 @@ TEST(CAPITests, RewindQwen25CAPI) {
 }
 #endif  // TEST_QWEN_2_5
 
-#ifndef STREAMING_ASR_PATH
-#define STREAMING_ASR_PATH MODEL_PATH "nemotron-speech-streaming"
-#endif
+// Streaming ASR models exercised by the StreamingASR* tests below, each paired
+// with its chunk size (samples per Process() call).
+struct StreamingASRModel {
+  std::string subdir;
+  size_t chunk_samples;
+};
 
-#ifndef STREAMING_ASR_CHUNK_SAMPLES
-constexpr size_t STREAMING_ASR_CHUNK_SAMPLES = 8960;
-#endif
+// Value-parameterized fixture so each StreamingASR test runs once per model.
+// This must be a distinct fixture from the non-parameterized CAPITests tests:
+// gtest requires all tests in a suite to share the same fixture class, so we
+// use a separate suite name here. Instantiated test names look like
+// "StreamingASR/StreamingASRParamTests.StreamingASRCreate/nemotron_speech_streaming".
+class StreamingASRParamTests : public ::testing::TestWithParam<StreamingASRModel> {
+ protected:
+  std::string ModelPath() const { return std::string(MODEL_PATH) + GetParam().subdir; }
+  size_t ChunkSamples() const { return GetParam().chunk_samples; }
+};
+
+// Helper: a streaming ASR model has VAD enabled by default only when its genai_config.json
+// declares a "vad" section AND the referenced silero_vad.onnx file is present in the model dir.
+static bool ModelHasVad(const std::string& model_path) {
+  const auto vad_path = std::filesystem::path(model_path) / "silero_vad.onnx";
+  if (!std::filesystem::exists(vad_path))
+    return false;
+  std::ifstream config_file(std::filesystem::path(model_path) / "genai_config.json");
+  if (!config_file)
+    return false;
+  const std::string config_json((std::istreambuf_iterator<char>(config_file)),
+                                std::istreambuf_iterator<char>());
+  return std::regex_search(config_json, std::regex(R"("vad"\s*:\s*\{)"));
+}
 
 // Helper: if mel is not null, set inputs and run the decode loop
 static void DecodeInputs(OgaGenerator& generator, OgaNamedTensors* mel) {
@@ -2375,11 +2873,30 @@ static void DecodeInputs(OgaGenerator& generator, OgaNamedTensors* mel) {
   }
 }
 
-// Test creating a Generator + StreamingProcessor from a nemotron_speech model
-TEST(CAPITests, StreamingASRCreate) {
-  if (!std::filesystem::exists(STREAMING_ASR_PATH))
-    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
-  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+// Helper: generate a synthetic sine wave of num_samples at the given frequency and sample rate.
+// Uses frequency and sample_rate to produce the minimum length of speech detectable by the model.
+static std::vector<float> GenerateSineWave(size_t num_samples, float frequency, float sample_rate) {
+  const float two_pi = 2.0f * static_cast<float>(M_PI);
+  std::vector<float> samples(num_samples);
+  for (size_t i = 0; i < num_samples; ++i)
+    samples[i] = 0.5f * std::sin(two_pi * frequency * static_cast<float>(i) / sample_rate);
+  return samples;
+}
+
+#ifndef STREAMING_ASR_PATH
+#define STREAMING_ASR_PATH MODEL_PATH "nemotron-speech-streaming"
+#endif
+
+#ifndef STREAMING_ASR_CHUNK_SAMPLES
+constexpr size_t STREAMING_ASR_CHUNK_SAMPLES = 8960;
+#endif
+
+// Test creating a Generator + StreamingProcessor from a streaming ASR model
+TEST_P(StreamingASRParamTests, StreamingASRCreate) {
+  const std::string model_path = ModelPath();
+  if (!std::filesystem::exists(model_path))
+    GTEST_SKIP() << "Streaming ASR model not found at " << model_path;
+  auto model = OgaModel::Create(model_path.c_str());
   auto processor = OgaStreamingProcessor::Create(*model);
   ASSERT_NE(processor, nullptr);
   auto params = OgaGeneratorParams::Create(*model);
@@ -2412,15 +2929,16 @@ TEST(CAPITests, StreamingASRProcessReturnsAudioFeaturesTensor) {
 }
 
 // Test transcribing silence (all zeros) via GenerateNextToken
-TEST(CAPITests, StreamingASRTranscribeSilence) {
-  if (!std::filesystem::exists(STREAMING_ASR_PATH))
-    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
-  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+TEST_P(StreamingASRParamTests, StreamingASRTranscribeSilence) {
+  const std::string model_path = ModelPath();
+  if (!std::filesystem::exists(model_path))
+    GTEST_SKIP() << "Streaming ASR model not found at " << model_path;
+  auto model = OgaModel::Create(model_path.c_str());
   auto processor = OgaStreamingProcessor::Create(*model);
   auto params = OgaGeneratorParams::Create(*model);
   auto generator = OgaGenerator::Create(*model, *params);
 
-  constexpr size_t chunk_samples = 8960;
+  const size_t chunk_samples = ChunkSamples();
   std::vector<float> silence(chunk_samples, 0.0f);
 
   auto mel = processor->Process(silence.data(), silence.size());
@@ -2429,15 +2947,16 @@ TEST(CAPITests, StreamingASRTranscribeSilence) {
 }
 
 // Test feeding multiple chunks and decoding via GenerateNextToken
-TEST(CAPITests, StreamingASRMultipleChunks) {
-  if (!std::filesystem::exists(STREAMING_ASR_PATH))
-    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
-  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+TEST_P(StreamingASRParamTests, StreamingASRMultipleChunks) {
+  const std::string model_path = ModelPath();
+  if (!std::filesystem::exists(model_path))
+    GTEST_SKIP() << "Streaming ASR model not found at " << model_path;
+  auto model = OgaModel::Create(model_path.c_str());
   auto processor = OgaStreamingProcessor::Create(*model);
   auto params = OgaGeneratorParams::Create(*model);
   auto generator = OgaGenerator::Create(*model, *params);
 
-  constexpr size_t chunk_samples = 8960;
+  const size_t chunk_samples = ChunkSamples();
   std::vector<float> silence(chunk_samples, 0.0f);
 
   for (int i = 0; i < 5; ++i) {
@@ -2448,15 +2967,16 @@ TEST(CAPITests, StreamingASRMultipleChunks) {
 }
 
 // Test flush processes remaining buffered audio
-TEST(CAPITests, StreamingASRFlush) {
-  if (!std::filesystem::exists(STREAMING_ASR_PATH))
-    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
-  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+TEST_P(StreamingASRParamTests, StreamingASRFlush) {
+  const std::string model_path = ModelPath();
+  if (!std::filesystem::exists(model_path))
+    GTEST_SKIP() << "Streaming ASR model not found at " << model_path;
+  auto model = OgaModel::Create(model_path.c_str());
   auto processor = OgaStreamingProcessor::Create(*model);
   auto params = OgaGeneratorParams::Create(*model);
   auto generator = OgaGenerator::Create(*model, *params);
 
-  constexpr size_t chunk_samples = 8960;
+  const size_t chunk_samples = ChunkSamples();
   std::vector<float> silence(chunk_samples, 0.0f);
   processor->Process(silence.data(), silence.size());
 
@@ -2466,22 +2986,25 @@ TEST(CAPITests, StreamingASRFlush) {
 }
 
 // Test transcribing a synthetic sine wave via GenerateNextToken
-TEST(CAPITests, StreamingASRSineWave) {
-  if (!std::filesystem::exists(STREAMING_ASR_PATH))
-    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
-  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+TEST_P(StreamingASRParamTests, StreamingASRSineWave) {
+  const std::string model_path = ModelPath();
+  if (!std::filesystem::exists(model_path))
+    GTEST_SKIP() << "Streaming ASR model not found at " << model_path;
+  auto model = OgaModel::Create(model_path.c_str());
   auto processor = OgaStreamingProcessor::Create(*model);
   auto params = OgaGeneratorParams::Create(*model);
   auto generator = OgaGenerator::Create(*model, *params);
 
-  constexpr size_t chunk_samples = 8960;
+  // Silero VAD does not recognize a synthetic tone as speech, so with VAD enabled the tone would
+  // be dropped as silence. Disable VAD to exercise the audio->tensor->decode pipeline itself
+  // (VAD behavior is covered by the dedicated StreamingASRVad* tests).
+  processor->SetOption("use_vad", "false");
+
+  const size_t chunk_samples = ChunkSamples();
   constexpr float sample_rate = 16000.0f;
   constexpr float frequency = 440.0f;
 
-  std::vector<float> audio(chunk_samples);
-  for (size_t i = 0; i < chunk_samples; ++i) {
-    audio[i] = 0.5f * std::sin(2.0f * 3.14159265f * frequency * static_cast<float>(i) / sample_rate);
-  }
+  std::vector<float> audio = GenerateSineWave(chunk_samples, frequency, sample_rate);
 
   for (int i = 0; i < 4; ++i) {
     auto mel = processor->Process(audio.data(), audio.size());
@@ -2495,16 +3018,21 @@ TEST(CAPITests, StreamingASRSineWave) {
 }
 
 // Test raw C API for StreamingProcessor + Generator
-TEST(CAPITests, StreamingASRRawCAPI) {
-  if (!std::filesystem::exists(STREAMING_ASR_PATH))
-    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
+TEST_P(StreamingASRParamTests, StreamingASRRawCAPI) {
+  const std::string model_path = ModelPath();
+  if (!std::filesystem::exists(model_path))
+    GTEST_SKIP() << "Streaming ASR model not found at " << model_path;
   OgaModel* model = nullptr;
-  ASSERT_EQ(OgaCreateModel(STREAMING_ASR_PATH, &model), nullptr);
+  ASSERT_EQ(OgaCreateModel(model_path.c_str(), &model), nullptr);
   ASSERT_NE(model, nullptr);
 
   OgaStreamingProcessor* processor = nullptr;
   ASSERT_EQ(OgaCreateStreamingProcessor(model, &processor), nullptr);
   ASSERT_NE(processor, nullptr);
+
+  // Disable VAD so the synthetic silence flows through the pipeline instead of being dropped
+  // (Silero VAD treats it as non-speech). VAD behavior is covered by the StreamingASRVad* tests.
+  ASSERT_EQ(OgaStreamingProcessorSetOption(processor, "use_vad", "false"), nullptr);
 
   OgaGeneratorParams* params = nullptr;
   ASSERT_EQ(OgaCreateGeneratorParams(model, &params), nullptr);
@@ -2512,7 +3040,7 @@ TEST(CAPITests, StreamingASRRawCAPI) {
   ASSERT_EQ(OgaCreateGenerator(model, params, &generator), nullptr);
   ASSERT_NE(generator, nullptr);
 
-  constexpr size_t chunk_samples = 8960;
+  const size_t chunk_samples = ChunkSamples();
   std::vector<float> silence(chunk_samples, 0.0f);
 
   OgaNamedTensors* inputs = nullptr;
@@ -2531,22 +3059,36 @@ TEST(CAPITests, StreamingASRRawCAPI) {
 }
 
 // Test VAD set_option/get_option on StreamingProcessor
-TEST(CAPITests, StreamingASRVadSetGetOption) {
-  if (!std::filesystem::exists(STREAMING_ASR_PATH))
-    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
-  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+TEST_P(StreamingASRParamTests, StreamingASRVadSetGetOption) {
+  const std::string model_path = ModelPath();
+  if (!std::filesystem::exists(model_path))
+    GTEST_SKIP() << "Streaming ASR model not found at " << model_path;
+  auto model = OgaModel::Create(model_path.c_str());
   auto processor = OgaStreamingProcessor::Create(*model);
 
-  // Default: VAD disabled
-  ASSERT_EQ(std::string(processor->GetOption("use_vad")), "false");
+  // Checking whether or not the model has the components necessary to run VAD. If not, skip the test.
+  // VAD requires having a "vad" section in the genai_config.json and the silero_vad.onnx file in the model directory.
+  // For VAD-capable models, InitVadFromConfig automatically enables VAD (via EnableVadFromModel())
+  // when the config's vad.filename is non-empty, so use_vad starts out "true".
+  const bool model_has_vad = ModelHasVad(model_path);
 
-  // Set and get threshold
-  processor->SetOption("silence_duration_ms", "1000");
-  ASSERT_EQ(std::string(processor->GetOption("silence_duration_ms")), "1000");
+  if (!model_has_vad) {
+    GTEST_SKIP() << "Streaming ASR model is not set up for VAD, skipping test";
+  }
 
-  // Enable VAD if silero_vad.onnx is available
-  auto vad_path = std::filesystem::path(STREAMING_ASR_PATH) / "silero_vad.onnx";
-  if (std::filesystem::exists(vad_path)) {
+  // VAD is enabled by default when possible from InitializeVadFromConfig
+  ASSERT_EQ(std::string(processor->GetOption("use_vad")), "true");
+
+  // silence_duration_ms round-trips exactly only when it is an integer multiple of the model's
+  // chunk duration (chunk_samples / sample_rate * 1000). Use two chunks' worth: 1000 ms for the
+  // 8000-sample moonshine models (500 ms/chunk) and 1120 ms for the 8960-sample nemotron model
+  // (560 ms/chunk).
+  const char* silence_duration_ms = (GetParam().subdir == "nemotron-speech-streaming") ? "1120" : "1000";
+  processor->SetOption("silence_duration_ms", silence_duration_ms);
+  ASSERT_EQ(std::string(processor->GetOption("silence_duration_ms")), silence_duration_ms);
+
+  // Enable VAD if the model declares a VAD config
+  if (model_has_vad) {
     processor->SetOption("use_vad", "true");
     ASSERT_EQ(std::string(processor->GetOption("use_vad")), "true");
 
@@ -2560,35 +3102,318 @@ TEST(CAPITests, StreamingASRVadSetGetOption) {
   SUCCEED();
 }
 
-// Test consecutive silence logic: VAD should not drop chunks until min_silence_chunks exceeded
-TEST(CAPITests, StreamingASRVadConsecutiveSilence) {
-  if (!std::filesystem::exists(STREAMING_ASR_PATH))
-    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
+// Test consecutive silence logic for nemotron: VAD keeps silence chunks for context until the
+// consecutive-silence threshold is reached, then drops. This is nemotron-specific; moonshine
+// uses VAD for utterance segmentation instead (see MoonshineVadSegmentation).
+TEST(StreamingASRTests, VadConsecutiveSilence) {
+  const std::string model_path = std::string(MODEL_PATH) + "nemotron-speech-streaming";
+  if (!std::filesystem::exists(model_path))
+    GTEST_SKIP() << "Nemotron streaming model not found at " << model_path;
 
-  auto vad_path = std::filesystem::path(STREAMING_ASR_PATH) / "silero_vad.onnx";
-  if (!std::filesystem::exists(vad_path))
-    GTEST_SKIP() << "silero_vad.onnx not found in model dir";
+  // VAD requires a "vad" section in genai_config.json and the silero_vad.onnx file. Skip if absent.
+  if (!ModelHasVad(model_path))
+    GTEST_SKIP() << "Nemotron model is not set up for VAD, skipping test";
 
-  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+  auto model = OgaModel::Create(model_path.c_str());
   auto processor = OgaStreamingProcessor::Create(*model);
   processor->SetOption("use_vad", "true");
-  processor->SetOption("silence_duration_ms", "1000");  // ~2 chunks at 560ms each
+  // silence_duration_ms must be an integer multiple of the chunk duration; 1680 ms / 560 ms = 3
+  // chunks, so the first 2 silence chunks are kept and the 3rd dropped.
+  processor->SetOption("silence_duration_ms", "1680");
 
-  constexpr size_t chunk_samples = STREAMING_ASR_CHUNK_SAMPLES;
+  const size_t chunk_samples = 8960;  // nemotron chunk size
   std::vector<float> silence(chunk_samples, 0.0f);
 
-  // First 2 silence chunks should still be processed (not dropped)
+  // First 2 silence chunks are preserved (within the tolerance), the 3rd is dropped.
   auto mel1 = processor->Process(silence.data(), silence.size());
-  ASSERT_NE(mel1, nullptr);  // Chunk 1: processed (only 1 consecutive silence)
+  ASSERT_NE(mel1, nullptr);  // Chunk 1: processed
 
   auto mel2 = processor->Process(silence.data(), silence.size());
-  ASSERT_NE(mel2, nullptr);  // Chunk 2: processed (only 2 consecutive)
+  ASSERT_NE(mel2, nullptr);  // Chunk 2: processed
 
-  // Third silence chunk should be dropped (> min_silence_chunks)
   auto mel3 = processor->Process(silence.data(), silence.size());
-  ASSERT_EQ(mel3, nullptr);  // Chunk 3: dropped
+  ASSERT_EQ(mel3, nullptr);  // Chunk 3: dropped (>= threshold of 3)
   SUCCEED();
 }
+
+// Helper: read a numeric field ("key": <number>) from a model's genai_config.json. Returns the
+// fallback if the file can't be read or the key is not found.
+static double ReadConfigNumber(const std::string& model_path, const std::string& key, double fallback) {
+  std::ifstream config_file(std::filesystem::path(model_path) / "genai_config.json");
+  if (!config_file)
+    return fallback;
+  const std::string config_json((std::istreambuf_iterator<char>(config_file)),
+                                std::istreambuf_iterator<char>());
+  std::smatch match;
+  if (std::regex_search(config_json, match, std::regex("\"" + key + R"("\s*:\s*([0-9.eE+-]+))")))
+    return std::stod(match[1].str());
+  return fallback;
+}
+
+// Test moonshine's VAD-driven utterance segmentation under our thin-processor architecture.
+//
+// The older "fat processor" accumulated encoder memory inside Process() and returned nullptr to
+// drop pre-utterance silence, so segmentation was observable at the processor boundary. Our
+// processor is thin: for every full chunk it ALWAYS emits a NamedTensors bundle
+// (audio_chunk + is_silent + is_final) and never drops. The per-chunk VAD verdict rides in the
+// is_silent flag, and ALL segmentation (accumulate / flush past min_segment / reset / drop
+// pre-utterance silence) happens downstream in the State's RunPipeline. This test therefore:
+//   * asserts the thin-processor contract  (a full chunk is never dropped -> Process() != nullptr),
+//   * checks the is_silent verdict that drives segmentation (speech -> 0, silence -> 1), and
+//   * drives the speech -> silence -> speech pattern through the Generator so the State's
+//     segmentation routing actually runs end to end (flush + reset + restart).
+// Silero VAD only fires on real human speech, so "speech" uses a synthetic tone with VAD disabled
+// (forces is_silent=0, routing through the same accumulation path real speech would) while VAD is
+// enabled for the silence that drives the segment boundary.
+TEST(StreamingASRTests, MoonshineVadSegmentation) {
+  const std::string model_path = std::string(MODEL_PATH) + "moonshine-streaming-small";
+  if (!std::filesystem::exists(model_path))
+    GTEST_SKIP() << "Moonshine streaming model not found at " << model_path;
+  if (!ModelHasVad(model_path))
+    GTEST_SKIP() << "Moonshine model is not set up for VAD, skipping test";
+
+  auto model = OgaModel::Create(model_path.c_str());
+  auto processor = OgaStreamingProcessor::Create(*model);
+  auto params = OgaGeneratorParams::Create(*model);
+  auto generator = OgaGenerator::Create(*model, *params);
+
+  // Read a scalar int64 flag ("is_silent" / "is_final") emitted alongside the audio chunk.
+  auto read_flag = [](OgaNamedTensors& tensors, const char* name) {
+    return *static_cast<const int64_t*>(tensors.Get(name)->Data());
+  };
+
+  // Read the chunking / segmentation parameters straight from the model config.
+  const size_t chunk_samples = static_cast<size_t>(ReadConfigNumber(model_path, "chunk_samples", 8000));
+  const float sample_rate = static_cast<float>(ReadConfigNumber(model_path, "sample_rate", 16000));
+  const double seconds_per_memory_frame = ReadConfigNumber(model_path, "seconds_per_memory_frame", 0.02);
+  const int min_segment_memory_frames =
+      static_cast<int>(ReadConfigNumber(model_path, "min_segment_memory_frames", 250));
+
+  constexpr float frequency = 440.0f;
+  std::vector<float> speech = GenerateSineWave(chunk_samples, frequency, sample_rate);
+  std::vector<float> silence(chunk_samples, 0.0f);
+
+  // 1) Initial speech (VAD disabled): the tone routes through the same accumulation path real
+  //    speech would. Every full chunk is emitted (never dropped), tagged non-silent + non-final,
+  //    and the State accumulates it into the in-progress segment.
+  processor->SetOption("use_vad", "false");
+  for (int i = 0; i < 4; ++i) {
+    auto chunk = processor->Process(speech.data(), speech.size());
+    ASSERT_NE(chunk, nullptr) << "Speech chunk " << i << " must always be emitted (thin processor)";
+    EXPECT_EQ(read_flag(*chunk, "is_silent"), 0) << "VAD-off speech chunk should not be silent";
+    EXPECT_EQ(read_flag(*chunk, "is_final"), 0) << "Streaming chunks are never is_final";
+    DecodeInputs(*generator, chunk.get());
+  }
+
+  // 2) Silence (VAD enabled): the processor still emits EVERY chunk (never nullptr), now tagged
+  //    silent. Downstream, the State encodes mid-segment silence until the accumulated frames pass
+  //    min_segment_memory_frames, then flushes the utterance and resets; after the reset further
+  //    silence is pre-utterance and produces no tokens. On the old fat processor these surfaced as
+  //    Process()==nullptr; here they are is_silent=1 chunks whose segmentation lives in the State.
+  processor->SetOption("use_vad", "true");
+
+  // Each chunk contributes (chunk_samples / sample_rate) / seconds_per_memory_frame memory frames.
+  // Feeding min_segment_memory_frames / frames_per_chunk + 2 chunks accumulates past the threshold
+  // (flush + reset) and then drives at least one post-reset pre-utterance chunk.
+  const int frames_per_chunk =
+      static_cast<int>((static_cast<double>(chunk_samples) / sample_rate) / seconds_per_memory_frame);
+  const int silence_chunks = min_segment_memory_frames / frames_per_chunk + 2;
+  for (int i = 0; i < silence_chunks; ++i) {
+    auto chunk = processor->Process(silence.data(), silence.size());
+    ASSERT_NE(chunk, nullptr) << "Silence chunk " << i << " is still emitted (never dropped here)";
+    EXPECT_EQ(read_flag(*chunk, "is_silent"), 1) << "VAD-on silence chunk should be tagged silent";
+    DecodeInputs(*generator, chunk.get());
+  }
+
+  // 3) New speech after the reset (VAD disabled): the State rebuilds memory and the chunk is
+  //    emitted + tagged non-silent again, confirming the pipeline recovered from the flush/reset.
+  processor->SetOption("use_vad", "false");
+  auto resumed = processor->Process(speech.data(), speech.size());
+  ASSERT_NE(resumed, nullptr) << "New speech after the reset should be emitted";
+  EXPECT_EQ(read_flag(*resumed, "is_silent"), 0) << "Resumed speech should not be silent";
+  DecodeInputs(*generator, resumed.get());
+
+  // Flush drains the tail with is_final=1 so the State releases held-back lookahead and commits
+  // the final segment.
+  auto tail = processor->Flush();
+  ASSERT_NE(tail, nullptr);
+  EXPECT_EQ(read_flag(*tail, "is_final"), 1) << "Flush tail must be is_final";
+  DecodeInputs(*generator, tail.get());
+  SUCCEED();
+}
+
+TEST(StreamingASRTests, MoonshineSegmentResetEmitsSecondSegment) {
+  const std::string model_path = std::string(MODEL_PATH) + "moonshine-streaming-small";
+  if (!std::filesystem::exists(model_path))
+    GTEST_SKIP() << "Moonshine streaming model not found at " << model_path;
+
+  auto model = OgaModel::Create(model_path.c_str());
+  auto processor = OgaStreamingProcessor::Create(*model);
+  auto params = OgaGeneratorParams::Create(*model);
+  auto generator = OgaGenerator::Create(*model, *params);
+
+  // Same synthetic tone in both phases; VAD off so it routes through the speech
+  // accumulation path (Silero VAD would otherwise drop a sine wave as non-speech).
+  // Any deterministic input works as long as Flush() commits at least one token.
+  processor->SetOption("use_vad", "false");
+
+  const size_t chunk_samples =
+      static_cast<size_t>(ReadConfigNumber(model_path, "chunk_samples", 8000));
+  const float sample_rate =
+      static_cast<float>(ReadConfigNumber(model_path, "sample_rate", 16000));
+  const std::vector<float> speech =
+      GenerateSineWave(chunk_samples, /*frequency=*/440.0f, sample_rate);
+
+  // Phase A: one chunk + Flush(). Segment closes with previous_memory_frames_
+  // set to exactly one chunk's worth of memory frames — the pre-fix `<` heuristic
+  // in DecodeAndQueue will fail to trigger on any equal-sized second segment.
+  {
+    auto chunk = processor->Process(speech.data(), speech.size());
+    ASSERT_NE(chunk, nullptr);
+    DecodeInputs(*generator, chunk.get());
+
+    auto tail = processor->Flush();
+    ASSERT_NE(tail, nullptr);
+    DecodeInputs(*generator, tail.get());
+  }
+
+  const size_t count_after_A = generator->GetSequenceCount(0);
+  if (count_after_A == 0) {
+    GTEST_SKIP() << "Model emitted 0 tokens for the synthetic tone; cannot exercise the reset path.";
+  }
+  const std::vector<int32_t> segment_A(generator->GetSequenceData(0),
+                                       generator->GetSequenceData(0) + count_after_A);
+
+  // Phase B: identical audio, identical chunk size. Under the fix, ResetAccumulation()
+  // has already cleared previous_pass_tokens_ and emitted_count_ atomically with the
+  // rest of the segment state, so segment B decodes from BOS and — because the audio
+  // is identical — produces the same tokens as segment A. Under the pre-fix code the
+  // stale prefix teacher-forces segment A's tokens on segment B's cross-KV and either
+  // suppresses emission entirely or corrupts the token sequence.
+  {
+    auto chunk = processor->Process(speech.data(), speech.size());
+    ASSERT_NE(chunk, nullptr);
+    DecodeInputs(*generator, chunk.get());
+
+    auto tail = processor->Flush();
+    ASSERT_NE(tail, nullptr);
+    DecodeInputs(*generator, tail.get());
+  }
+
+  const size_t count_after_B = generator->GetSequenceCount(0);
+  ASSERT_GT(count_after_B, count_after_A)
+      << "Segment B produced no committed tokens — likely suppressed by stale "
+         "emitted_count_/previous_pass_tokens_ from segment A.";
+
+  const std::vector<int32_t> segment_B(generator->GetSequenceData(0) + count_after_A,
+                                       generator->GetSequenceData(0) + count_after_B);
+
+  // Same audio + same starting state (BOS) => same tokens. This is the strong
+  // assertion that catches the "polluted prefix" failure mode where segment B's
+  // decoder pass was teacher-forced by segment A's committed sequence.
+  EXPECT_EQ(segment_A, segment_B)
+      << "Segment B decoded differently from segment A on identical audio — "
+         "the segment-reset bookkeeping was not fully reset.";
+}
+
+// Test that reaching the hard segment-memory cap keeps the boundary audio.
+//
+// On the normal (non-final) encode path the State holds back the last
+// total_lookahead frames. When memory crosses max_segment_memory_frames the
+// segment must close like Flush/VAD: drain those held-back frames with a final
+// encode, refresh cross-KV, decode and commit, THEN reset. If it instead reset
+// without draining, the last ~total_lookahead frames of audio would be lost.
+//
+// The check is model-agnostic: a hard-cap close over a given audio must commit
+// the SAME tokens as a Flush over the same audio (both drain the lookahead).
+// max_segment_memory_frames is overlaid onto the config so the cap trips on the
+// second chunk; the buggy path would commit fewer tokens than the Flush baseline.
+TEST(StreamingASRTests, MoonshineHardCapKeepsBoundaryAudio) {
+  const std::string model_path = std::string(MODEL_PATH) + "moonshine-streaming-small";
+  if (!std::filesystem::exists(model_path))
+    GTEST_SKIP() << "Moonshine streaming model not found at " << model_path;
+
+  const size_t chunk_samples =
+      static_cast<size_t>(ReadConfigNumber(model_path, "chunk_samples", 8000));
+  const float sample_rate =
+      static_cast<float>(ReadConfigNumber(model_path, "sample_rate", 16000));
+  const double seconds_per_memory_frame =
+      ReadConfigNumber(model_path, "seconds_per_memory_frame", 0.02);
+  const int lookahead =
+      static_cast<int>(ReadConfigNumber(model_path, "total_lookahead", 16));
+
+  // Committed memory grows ~frames_per_chunk per chunk behind a constant
+  // total_lookahead holdback, so committed(1) ~= fpc - lookahead and
+  // committed(2) ~= 2*fpc - lookahead. Put the cap at the midpoint so it trips
+  // on the second chunk (never the first) with ~half a chunk of margin either way.
+  const int frames_per_chunk = static_cast<int>(
+      (static_cast<double>(chunk_samples) / sample_rate) / seconds_per_memory_frame);
+  const int hard_cap = std::max(1, (3 * frames_per_chunk) / 2 - lookahead);
+
+  // Synthetic tone routed through the speech path (Silero VAD would drop it).
+  const std::vector<float> speech =
+      GenerateSineWave(chunk_samples, /*frequency=*/440.0f, sample_rate);
+
+  // Build a fresh generator from a config with max_segment_memory_frames overlaid,
+  // feed two speech chunks, optionally Flush, and return the committed tokens.
+  auto run = [&](int cap_frames, bool flush_after) {
+    auto config = OgaConfig::Create(model_path.c_str());
+    const std::string overlay =
+        "{\"model\":{\"moonshine\":{\"max_segment_memory_frames\":" +
+        std::to_string(cap_frames) + "}}}";
+    config->Overlay(overlay.c_str());
+    auto model = OgaModel::Create(*config);
+    auto processor = OgaStreamingProcessor::Create(*model);
+    auto params = OgaGeneratorParams::Create(*model);
+    auto generator = OgaGenerator::Create(*model, *params);
+    processor->SetOption("use_vad", "false");
+    for (int i = 0; i < 2; ++i) {
+      auto chunk = processor->Process(speech.data(), speech.size());
+      DecodeInputs(*generator, chunk.get());
+    }
+    if (flush_after) {
+      auto tail = processor->Flush();
+      DecodeInputs(*generator, tail.get());
+    }
+    const size_t count = generator->GetSequenceCount(0);
+    const int32_t* data = generator->GetSequenceData(0);
+    return std::vector<int32_t>(data, data + count);
+  };
+
+  // Baseline: cap effectively disabled; Flush() drains the held-back lookahead
+  // and commits every token for the two-chunk audio.
+  const std::vector<int32_t> flush_tokens =
+      run(/*cap_frames=*/frames_per_chunk * 100, /*flush_after=*/true);
+
+  // Hard cap trips on the second chunk (no Flush). With the fix it drains the
+  // same lookahead and commits the same tokens; the pre-fix code drops them.
+  const std::vector<int32_t> cap_tokens =
+      run(/*cap_frames=*/hard_cap, /*flush_after=*/false);
+
+  if (flush_tokens.empty() && cap_tokens.empty())
+    GTEST_SKIP() << "Model emitted 0 tokens for the synthetic tone; cannot check boundary retention.";
+
+  EXPECT_EQ(cap_tokens, flush_tokens)
+      << "Hard-cap segment close dropped boundary audio: committed " << cap_tokens.size()
+      << " tokens vs. " << flush_tokens.size() << " for the same audio drained via Flush.";
+}
+
+// Run every StreamingASR* test above once per streaming ASR model. The
+// instantiation prefix "StreamingASR" combined with the StreamingASRParamTests
+// fixture yields test names like
+// "StreamingASR/StreamingASRParamTests.StreamingASRCreate/nemotron_speech_streaming",
+// with the model appended as the parameter suffix.
+INSTANTIATE_TEST_SUITE_P(
+    StreamingASR, StreamingASRParamTests,
+    ::testing::Values(
+        StreamingASRModel{"nemotron-speech-streaming", 8960},
+        StreamingASRModel{"moonshine-streaming-small", 8000},
+        StreamingASRModel{"moonshine-streaming-tiny", 8000}),
+    [](const ::testing::TestParamInfo<StreamingASRModel>& info) {
+      std::string name = info.param.subdir;
+      std::replace(name.begin(), name.end(), '-', '_');
+      return name;
+    });
 
 #ifndef PARAKEET_TDT_PATH
 #define PARAKEET_TDT_PATH MODEL_PATH "parakeet-tdt"
@@ -2686,7 +3511,7 @@ TEST(CAPITests, TokenId_FromConfig) {
   // Copy minimal model files from tiny-random-gpt2
   std::string src_dir = MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32";
   for (const auto& entry : std::filesystem::directory_iterator(src_dir)) {
-    if (entry.path().filename() != "genai_config.json") {
+    if (entry.is_regular_file() && entry.path().filename() != "genai_config.json") {
       std::filesystem::copy_file(entry.path(), temp_dir / entry.path().filename(),
                                  std::filesystem::copy_options::overwrite_existing);
     }

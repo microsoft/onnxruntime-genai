@@ -11,10 +11,12 @@ HybridDecoderIO::HybridDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
                                  ScheduledRequests& scheduled_requests,
                                  std::shared_ptr<CacheManager> cache_manager,
                                  const ExecutionContext& execution_context,
-                                 size_t position_planes)
+                                 VarlenGraphBuffers* graph_buffers,
+                                 size_t position_planes,
+                                 CpuEmbedding::Workspace* embedding_workspace)
     : DecoderIO(model, scheduled_requests, cache_manager),
       varlen_io_{model, scheduled_requests, cache_manager,
-                 &execution_context, nullptr, position_planes} {
+                 &execution_context, graph_buffers, position_planes, embedding_workspace} {
   input_names_ = varlen_io_.input_names_;
   inputs_ = varlen_io_.inputs_;
   output_names_ = varlen_io_.output_names_;
@@ -126,10 +128,14 @@ void HybridDecoderIO::BindFixedState(
       continue;
     }
     using StateUpdateKind = Config::Model::Decoder::StateUpdateKind;
-    const bool valid_outputs =
-        binding.state_update_kind == StateUpdateKind::CausalConv
-            ? binding.state_update_value && !binding.state_update_capsule
-            : !binding.state_update_value && binding.state_update_capsule;
+    bool valid_outputs = false;
+    if (binding.state_update_kind == StateUpdateKind::GatedDeltaNet) {
+      valid_outputs = !binding.state_update_value && binding.state_update_capsule;
+    } else if (binding.state_update_kind == StateUpdateKind::CausalConv ||
+               binding.state_update_kind == StateUpdateKind::Ple ||
+               binding.state_update_kind == StateUpdateKind::Indexer) {
+      valid_outputs = binding.state_update_value && !binding.state_update_capsule;
+    }
     if (!valid_outputs) {
       throw std::runtime_error(
           "Hybrid fixed state contains incomplete state_update output tensors.");

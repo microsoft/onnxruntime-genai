@@ -18,6 +18,14 @@ struct DeviceInfo {
   int64_t total_memory_mb;       // System RAM in MB
   std::string cpu_model;         // Processor model string
   std::string device_id_status;  // Provenance of device_id: "New"/"Existing"/"Corrupted"/"Failed"/"Platform"
+  bool is_container{};
+  bool is_virtual_machine{};
+  bool is_emulator{};
+  std::string container_type;
+  std::string virtualization_type;
+  std::string host_environment;
+  std::string environment_detection_confidence;
+  std::string device_id_scope;
 };
 
 // Collect device information. Thread-safe, results are cached after first call.

@@ -81,3 +81,154 @@ graph = helper.make_graph(nodes, "synthetic-dspark", inputs, outputs, initialize
 model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)], ir_version=8)
 onnx.checker.check_model(model)
 onnx.save(model, Path(__file__).with_name("dspark.onnx"))
+
+# A packed-QKV drafter has no q_row_map input; its checksum column reports qkv_row_map instead.
+packed_qkv = onnx.ModelProto()
+packed_qkv.CopyFrom(model)
+for index, graph_input in enumerate(packed_qkv.graph.input):
+    if graph_input.name == "q_row_map":
+        del packed_qkv.graph.input[index]
+        break
+for node in packed_qkv.graph.node:
+    if "q_checksum" in node.output:
+        node.input[0] = "qkv_row_map"
+onnx.checker.check_model(packed_qkv)
+onnx.save(packed_qkv, Path(__file__).with_name("dspark_packed_qkv.onnx"))
+
+# The windowed variant uses DFlash2's anchor row plus three draft rows.
+windowed = onnx.ModelProto()
+windowed.CopyFrom(model)
+for initializer in windowed.graph.initializer:
+    if initializer.name == "candidate_tail":
+        initializer.CopyFrom(helper.make_tensor("candidate_tail", TensorProto.INT64, [2], [3, 2]))
+    elif initializer.name == "score_tail":
+        initializer.CopyFrom(helper.make_tensor("score_tail", TensorProto.INT64, [3], [3, 2, 2]))
+for output in windowed.graph.output:
+    if output.name in ("draft_candidate_ids", "draft_scores"):
+        output.type.tensor_type.shape.dim[1].dim_value = 3
+windowed.graph.initializer.extend(
+    [
+        helper.make_tensor("zero_i32", TensorProto.INT32, [], [0]),
+        helper.make_tensor("one_i32", TensorProto.INT32, [], [1]),
+        helper.make_tensor("four_i32", TensorProto.INT32, [], [4]),
+        helper.make_tensor("five_i32", TensorProto.INT32, [], [5]),
+        helper.make_tensor("one_float", TensorProto.FLOAT, [], [1.0]),
+    ]
+)
+for index, node in enumerate(windowed.graph.node):
+    if "draft_values_col" in node.output:
+        node.input[0] = "draft_values_with_cache"
+        cache_nodes = [
+            helper.make_node("Cast", ["batch"], ["batch_i32"], to=TensorProto.INT32),
+            helper.make_node("Range", ["zero_i32", "batch_i32", "one_i32"], ["batch_rows"]),
+            helper.make_node("Sub", ["row_length", "five_i32"], ["last_context_offset"]),
+            helper.make_node("Add", ["past_sequence_lengths", "last_context_offset"], ["last_position"]),
+            helper.make_node("Div", ["last_position", "four_i32"], ["last_column"]),
+            helper.make_node("Mod", ["last_position", "four_i32"], ["last_slot"]),
+            helper.make_node("Sub", ["past_sequence_lengths", "one_i32"], ["previous_unclamped"]),
+            helper.make_node("Max", ["previous_unclamped", "zero_i32"], ["previous_position"]),
+            helper.make_node("Div", ["previous_position", "four_i32"], ["previous_column"]),
+            helper.make_node("Mod", ["previous_position", "four_i32"], ["previous_slot"]),
+            helper.make_node("Unsqueeze", ["batch_rows", "axis1"], ["batch_rows_col"]),
+            helper.make_node("Unsqueeze", ["last_column", "axis1"], ["last_column_col"]),
+            helper.make_node("Unsqueeze", ["previous_column", "axis1"], ["previous_column_col"]),
+            helper.make_node("Concat", ["batch_rows_col", "previous_column_col"], ["read_table_indices"], axis=1),
+            helper.make_node("Cast", ["read_table_indices"], ["read_table_indices_i64"], to=TensorProto.INT64),
+            helper.make_node("GatherND", ["block_table", "read_table_indices_i64"], ["previous_block"]),
+            helper.make_node("Unsqueeze", ["previous_block", "axis1"], ["previous_block_col"]),
+            helper.make_node("Unsqueeze", ["previous_slot", "axis1"], ["previous_slot_col"]),
+            helper.make_node("Concat", ["batch_rows_col", "last_column_col"], ["write_table_indices"], axis=1),
+            helper.make_node("Cast", ["write_table_indices"], ["write_table_indices_i64"], to=TensorProto.INT64),
+            helper.make_node("GatherND", ["block_table", "write_table_indices_i64"], ["last_block"]),
+            helper.make_node("Unsqueeze", ["last_block", "axis1"], ["last_block_col"]),
+            helper.make_node("Unsqueeze", ["last_slot", "axis1"], ["last_slot_col"]),
+            helper.make_node("Sub", ["past_col", "past_col"], ["zero_col"]),
+            helper.make_node(
+                "Concat",
+                ["previous_block_col", "previous_slot_col", "zero_col", "zero_col"],
+                ["read_cache_indices"],
+                axis=1,
+            ),
+            helper.make_node("Cast", ["read_cache_indices"], ["read_cache_indices_i64"], to=TensorProto.INT64),
+            helper.make_node("GatherND", ["past_key_values.0.key", "read_cache_indices_i64"], ["cached_key"]),
+            helper.make_node(
+                "Concat",
+                ["last_block_col", "last_slot_col", "zero_col", "zero_col"],
+                ["write_cache_indices"],
+                axis=1,
+            ),
+            helper.make_node("Cast", ["write_cache_indices"], ["write_cache_indices_i64"], to=TensorProto.INT64),
+            helper.make_node("Cast", ["cached_key"], ["cached_key_int"], to=TensorProto.INT32),
+            helper.make_node("Unsqueeze", ["cached_key_int", "axis1"], ["cached_key_col"]),
+            helper.make_node(
+                "Concat", ["cached_key_col", "past_col", "row_length_col"], ["draft_values_with_cache"], axis=1
+            ),
+            helper.make_node("Cast", ["last_position"], ["last_position_float"], to=TensorProto.FLOAT),
+            helper.make_node("Add", ["last_position_float", "one_float"], ["cache_updates"]),
+            helper.make_node(
+                "ScatterND",
+                ["past_key_values.0.key", "write_cache_indices_i64", "cache_updates"],
+                ["present.0.key"],
+            ),
+        ]
+        for cache_node in reversed(cache_nodes):
+            windowed.graph.node.insert(index, cache_node)
+        break
+for index, node in enumerate(windowed.graph.node):
+    if "present.0.key" in node.output and node.op_type == "Identity":
+        del windowed.graph.node[index]
+        break
+onnx.checker.check_model(windowed)
+onnx.save(windowed, Path(__file__).with_name("dflash2.onnx"))
+
+# The composite target exposes FP16 auxiliary hidden states.
+fp16_aux = onnx.ModelProto()
+fp16_aux.CopyFrom(windowed)
+fp16_aux.graph.input[0].type.tensor_type.elem_type = TensorProto.FLOAT16
+# Engine batches can mix context-only feeds with feeds requesting query blocks.
+# Candidate/score rows describe only query-block feeds, not every served request.
+fp16_aux.graph.initializer.extend(
+    [
+        helper.make_tensor("four_i64", TensorProto.INT64, [1], [4]),
+        helper.make_tensor("four_scalar_i64", TensorProto.INT64, [], [4]),
+        helper.make_tensor("zero_scalar_i64", TensorProto.INT64, [], [0]),
+    ]
+)
+query_nodes = [
+    helper.make_node("Shape", ["block_row_index"], ["query_rows_shape"]),
+    helper.make_node("Div", ["query_rows_shape", "four_i64"], ["query_batch"]),
+    helper.make_node("Squeeze", ["query_rows_shape"], ["query_rows_count"]),
+    helper.make_node("Range", ["zero_scalar_i64", "query_rows_count", "four_scalar_i64"], ["query_anchor_indices"]),
+    helper.make_node("Gather", ["block_row_index", "query_anchor_indices"], ["query_anchor_rows"], axis=0),
+    helper.make_node("Slice", ["cumulative_sequence_lengths", "start1", "end_all", "axis0"], ["query_boundaries"]),
+    helper.make_node("Unsqueeze", ["query_anchor_rows", "axis1"], ["query_anchor_columns"]),
+    helper.make_node("Unsqueeze", ["query_boundaries", "axis0"], ["query_boundaries_row"]),
+    helper.make_node("GreaterOrEqual", ["query_anchor_columns", "query_boundaries_row"], ["query_after"]),
+    helper.make_node("Cast", ["query_after"], ["query_after_i32"], to=TensorProto.INT32),
+    helper.make_node("ReduceSum", ["query_after_i32", "axis1"], ["query_request_rows"], keepdims=0),
+    helper.make_node("Cast", ["query_request_rows"], ["query_request_rows_i64"], to=TensorProto.INT64),
+    helper.make_node("Unsqueeze", ["query_request_rows_i64", "axis1"], ["query_request_indices"]),
+    helper.make_node("Sub", ["past_sequence_lengths", "past_sequence_lengths"], ["no_query"]),
+    helper.make_node("Add", ["no_query", "one_i32"], ["one_per_request"]),
+    helper.make_node("Gather", ["one_per_request", "query_request_rows_i64"], ["one_per_query"], axis=0),
+    helper.make_node("ScatterND", ["no_query", "query_request_indices", "one_per_query"], ["has_query_i32"]),
+    helper.make_node("Greater", ["has_query_i32", "zero_i32"], ["has_query"]),
+    helper.make_node("Where", ["has_query", "five_i32", "one_i32"], ["context_tail_offset"]),
+]
+for node in fp16_aux.graph.node:
+    if node.output[0] in ("candidate_shape", "score_shape"):
+        node.input[0] = "query_batch"
+    elif node.output[0] == "last_context_offset":
+        node.input[1] = "context_tail_offset"
+    elif node.output[0] == "draft_values_col":
+        node.input[0] = "query_draft_values"
+nodes = list(fp16_aux.graph.node)
+draft_index = next(index for index, node in enumerate(nodes) if node.output[0] == "draft_values_col")
+nodes.insert(
+    draft_index,
+    helper.make_node("Gather", ["draft_values_with_cache", "query_request_rows_i64"], ["query_draft_values"], axis=0),
+)
+fp16_aux.graph.ClearField("node")
+fp16_aux.graph.node.extend([*query_nodes, *nodes])
+onnx.checker.check_model(fp16_aux)
+onnx.save(fp16_aux, Path(__file__).with_name("dflash2-fp16-aux.onnx"))

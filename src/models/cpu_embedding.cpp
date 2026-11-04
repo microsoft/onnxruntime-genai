@@ -1,0 +1,164 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+#include "generator/generators.h"
+#include "cpu_embedding.h"
+
+#include <algorithm>
+#include <array>
+#include <numeric>
+
+namespace Generators {
+
+CpuEmbedding::CpuEmbedding(Model& model, OrtEnv& env) : config_{model.config_->model.embedding} {
+  auto options = OrtSessionOptions::Create();
+  Config::SessionOptions cpu_options = config_.session_options.value_or(Config::SessionOptions{});
+  if (!cpu_options.provider_options.empty() || !cpu_options.providers.empty()) {
+    throw std::runtime_error("Engine model.embedding must use CPU (no provider_options).");
+  }
+  // Tiny decode lookups do not benefit from a thread pool. Explicit config can override this.
+  if (!cpu_options.intra_op_num_threads) cpu_options.intra_op_num_threads = 1;
+  model.CreateSessionOptionsFromConfig(cpu_options, *options, false, true, false, false);
+  session_ = model.CreateSession(env, config_.filename, options.get());
+  SessionInfo info;
+  info.Add(*session_);
+  if (session_->GetInputNames().size() != 1 || session_->GetOutputNames().size() != 1 ||
+      !info.HasInput(config_.inputs.input_ids) || !info.HasOutput(config_.outputs.embeddings) ||
+      info.GetInputDataType(config_.inputs.input_ids) != Ort::TypeToTensorType<int64_t> ||
+      info.GetInputShape(config_.inputs.input_ids) != std::vector<int64_t>{-1}) {
+    throw std::runtime_error("Engine CPU embedding requires one dynamic int64[num_tokens] input and one output.");
+  }
+  const auto shape = info.GetOutputShape(config_.outputs.embeddings);
+  type_ = info.GetOutputDataType(config_.outputs.embeddings);
+  if (shape.size() != 2 || shape[0] >= 0 || shape[1] <= 0 ||
+      (type_ != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16 && type_ != ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16 &&
+       type_ != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)) {
+    throw std::runtime_error("Engine CPU embedding output must be floating point [num_tokens, hidden_size].");
+  }
+  hidden_size_ = shape[1];
+  if (hidden_size_ != model.config_->model.decoder.hidden_size) {
+    throw std::runtime_error("CPU embedding width must match model.decoder.hidden_size.");
+  }
+  run_options_ = OrtRunOptions::Create();
+  if (config_.run_options) {
+    for (const auto& [key, value] : *config_.run_options) {
+      run_options_->AddConfigEntry(key.c_str(), value.c_str());
+    }
+  }
+  if (config_.prefault) Prefault(model.config_->model.vocab_size);
+}
+
+void CpuEmbedding::Prefault(int vocab_size) const {
+  // ORT maps a CPU initializer stored as external data straight from its file, so the first lookup
+  // of each token row takes page faults: hundreds of microseconds per decode step for a large
+  // vocabulary. Looking every row up once at load leaves decode reading resident memory only.
+  if (vocab_size <= 0) return;
+  constexpr int64_t kChunk = 1024;
+  std::vector<int64_t> ids(static_cast<size_t>(kChunk));
+  std::vector<uint8_t> output(static_cast<size_t>(kChunk * hidden_size_) * Ort::SizeOf(type_));
+  const auto& cpu_memory = GetDeviceInterface(DeviceType::CPU)->GetAllocator().GetInfo();
+  const char* input_name = config_.inputs.input_ids.c_str();
+  const char* output_name = config_.outputs.embeddings.c_str();
+  try {
+    for (int64_t begin = 0; begin < vocab_size; begin += kChunk) {
+      const int64_t count = std::min<int64_t>(kChunk, vocab_size - begin);
+      std::iota(ids.begin(), ids.begin() + count, begin);
+      const std::array<int64_t, 1> id_shape{count};
+      const std::array<int64_t, 2> shape{count, hidden_size_};
+      auto input = OrtValue::CreateTensor(cpu_memory, ids.data(), static_cast<size_t>(count) * sizeof(int64_t),
+                                          id_shape, Ort::TypeToTensorType<int64_t>);
+      auto result = OrtValue::CreateTensor(cpu_memory, output.data(),
+                                           static_cast<size_t>(count * hidden_size_) * Ort::SizeOf(type_),
+                                           shape, type_);
+      OrtValue* input_value = input.get();
+      OrtValue* output_value = result.get();
+      session_->Run(run_options_.get(), &input_name, &input_value, 1, &output_name, &output_value, 1);
+    }
+  } catch (const std::exception& e) {
+    // Only a warm-up: a table smaller than the configured vocabulary just stops it early.
+    if (g_log.enabled && g_log.warning) Log("warning") << "CPU embedding prefault stopped early: " << e.what() << std::endl;
+  }
+}
+
+void CpuEmbedding::ValidateConsumer(const SessionInfo& info, const std::string& name) const {
+  if (!info.HasInput(name) || info.GetInputDataType(name) != type_ ||
+      info.GetInputShape(name) != std::vector<int64_t>{-1, hidden_size_}) {
+    throw std::runtime_error("CPU embedding output does not match consumer input '" + name + "'.");
+  }
+}
+
+CpuEmbedding::Workspace::~Workspace() {
+  try {
+    Wait();
+  } catch (...) {
+    if (g_log.enabled) Log("cpu_embedding") << "Failed to synchronize embedding upload during teardown." << std::endl;
+  }
+}
+
+void CpuEmbedding::Workspace::Wait() {
+  if (pending_) {
+    device_->Synchronize();
+    pending_ = false;
+  }
+}
+
+DeviceSpan<uint8_t> CpuEmbedding::Workspace::Prepare(Tensor& output) {
+  const size_t bytes = output.GetByteSpan().size();
+  if (output.p_device_->RecyclesHostMirrorsAfterUpload(bytes)) {
+    // Dropping the previous mirror hands it back to a pool that reuses it only once its upload has
+    // completed, so taking a fresh one never waits for the device. Reusing one mirror instead has to
+    // drain the whole stream, including any work queued after that upload.
+    pending_ = false;
+    buffer_ = output.p_device_->WrapMemoryBase(output.GetMutableRawData(), bytes);
+    buffer_->AllocateCpu();
+    capacity_ = 0;  // Never reused: the next lookup takes a fresh mirror again.
+    device_ = output.p_device_;
+    return DeviceSpan<uint8_t>{std::shared_ptr<DeviceBuffer>{buffer_}};
+  }
+  Wait();
+  if (device_ != output.p_device_ || capacity_ < bytes || !buffer_ ||
+      device_->GetType() != DeviceType::CUDA) {
+    auto replacement = output.p_device_->WrapMemoryBase(output.GetMutableRawData(), bytes);
+    replacement->AllocateCpu();
+    buffer_ = std::move(replacement);
+    capacity_ = bytes;
+    device_ = output.p_device_;
+  }
+  buffer_->p_device_ = static_cast<uint8_t*>(output.GetMutableRawData());
+  buffer_->size_in_bytes_ = bytes;
+  return DeviceSpan<uint8_t>{std::shared_ptr<DeviceBuffer>{buffer_}};
+}
+
+void CpuEmbedding::Workspace::Upload() {
+  if (device_->GetType() == DeviceType::CUDA) {
+    pending_ = true;
+    buffer_->CopyCpuToDevice();
+  } else if (device_->GetType() != DeviceType::CPU) {
+    buffer_->CopyFromCpu(buffer_->p_cpu_, buffer_->size_in_bytes_);
+  }
+}
+
+void CpuEmbedding::Run(std::span<const int64_t> ids, Tensor& output, Workspace& workspace) const {
+  const std::array<int64_t, 1> id_shape{static_cast<int64_t>(ids.size())};
+  const std::vector<int64_t> shape{static_cast<int64_t>(ids.size()), hidden_size_};
+  if (output.GetType() != type_ || output.GetShape() != shape) {
+    throw std::runtime_error("CPU embedding destination has an incompatible shape or type.");
+  }
+  const auto& cpu_memory = GetDeviceInterface(DeviceType::CPU)->GetAllocator().GetInfo();
+  auto input = OrtValue::CreateTensor(cpu_memory, const_cast<int64_t*>(ids.data()), ids.size_bytes(),
+                                      id_shape, Ort::TypeToTensorType<int64_t>);
+  auto bytes = workspace.Prepare(output);
+  auto host = bytes.CpuSpan();
+  auto output_memory = output.p_device_->GetType() == DeviceType::CUDA
+                           ? OrtMemoryInfo::Create("CudaPinned", OrtDeviceAllocator,
+                                                   output.p_device_->GetMemoryInfo()->GetDeviceId(), OrtMemTypeCPUOutput)
+                           : OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+  auto result = OrtValue::CreateTensor(*output_memory, host.data(), host.size_bytes(), shape, type_);
+  const char* input_name = config_.inputs.input_ids.c_str();
+  const char* output_name = config_.outputs.embeddings.c_str();
+  OrtValue* input_value = input.get();
+  OrtValue* output_value = result.get();
+  session_->Run(run_options_.get(), &input_name, &input_value, 1, &output_name, &output_value, 1);
+  workspace.Upload();
+}
+
+}  // namespace Generators

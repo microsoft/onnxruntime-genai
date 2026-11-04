@@ -4,6 +4,8 @@ VERS_1.0 {
     GetInterface;
     GetInterfaceVersion;
     ReleaseInterfaceResources;
+    ShutdownInterface;
+    qwen38_plane_*;
 
   # Hide everything else.
   local:

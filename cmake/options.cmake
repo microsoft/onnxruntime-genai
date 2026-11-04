@@ -6,7 +6,9 @@ option(USE_TRT_RTX "Build with TensorRT-RTX support" OFF)
 option(USE_DML "Build with DML support" OFF)
 option(USE_WINML "Build with WinML support" OFF)
 option(USE_GUIDANCE "Build with guidance support" OFF)
+option(ENABLE_MSVC_SPECTRE "Enable MSVC Spectre variant 1 mitigations" ON)
 set(NUGET_PACKAGE_SOURCE "" CACHE STRING "Override the NuGet package source used by the build")
+set(NUGET_CONFIG_FILE "" CACHE FILEPATH "Use a custom NuGet configuration file")
 
 # bindings
 option(ENABLE_JAVA "Build the Java API." OFF)
@@ -22,6 +24,7 @@ option(TEST_QWEN_2_5 "Enable tests for Qwen-2.5 0.5B" OFF)
 # performance
 option(ENABLE_MODEL_BENCHMARK "Build model benchmark program" ON)
 option(ENABLE_ENGINE_BENCHMARK "Build the GenAI engine benchmark program" OFF)
+option(ENABLE_QWEN38_PLANE "Build libqwen38_plane, the CUDA data plane of the qwen38_flash_graph model type (Linux and Windows, CUDA only)" OFF)
 
 # diagnostics
 option(ENABLE_TRACING "Enable recording of tracing data" OFF)

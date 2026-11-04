@@ -491,6 +491,7 @@ def test_calibrate_kv_scales_feeds_model_metadata_and_writes_scales(tmp_path, mo
     assert requested_providers == ["CPUExecutionProvider"]
     scale_data = json.loads(output_path.read_text())
     assert scale_data["layer_ids"] == [3]
+    assert scale_data["qmax"] == 128.0
     scales = scale_data["scales"]
     np.testing.assert_allclose(scales["k_scales"], [[2.0 / 128.0] * 4])
     np.testing.assert_allclose(scales["v_scales"], [[4.0 / 128.0] * 4])

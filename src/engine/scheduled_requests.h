@@ -6,6 +6,7 @@
 #include <random>
 
 #include "execution_context.h"
+#include "executor_result.h"
 #include "request.h"
 
 namespace Generators {
@@ -17,6 +18,10 @@ enum class BatchedGuidanceMaskStatus {
   Ready,
   FallbackRequired,
 };
+
+TargetTokenSelection BuildTopKTargetSelection(
+    std::span<const int32_t> tokens, std::span<const float> scores,
+    const EffectiveTurnPolicy& policy);
 
 BatchedGuidanceMaskStatus CollectBatchedGuidanceMasks(
     std::span<const std::shared_ptr<Request>> requests,
@@ -58,6 +63,11 @@ struct BatchedSamplingPlan {
 };
 
 struct ScheduledRequests {
+  ~ScheduledRequests();
+  ScheduledRequests(ScheduledRequests&&) noexcept;
+  ScheduledRequests& operator=(ScheduledRequests&&) noexcept;
+  ScheduledRequests(const ScheduledRequests&) = delete;
+  ScheduledRequests& operator=(const ScheduledRequests&) = delete;
   ScheduledRequests(std::vector<std::shared_ptr<Request>> requests,
                     std::shared_ptr<Model> model,
                     BatchedSampler* batched_sampler,
@@ -101,6 +111,18 @@ struct ScheduledRequests {
   std::vector<DeviceSpan<float>> ProcessLogits();
 
   void GenerateNextTokens(std::vector<RequestStepResult>& results);
+  // For a ModelExecutor that selects its own tokens (ModelExecutor::SelectsOwnTokens): BeginBackendStep declares the
+  // rows of the step and StageBackendRow hands over each row's result. GenerateNextTokens validates the whole batch
+  // and commits the selected tokens through Request::CommitExternalTokens instead of sampling logits.
+  void BeginBackendStep(std::vector<BackendPlannedRow> plan);
+  void StageBackendRow(size_t request_row, BackendRowResult result);
+  void SetBackendLimits(size_t max_slots, size_t max_result_tokens) {
+    backend_max_slots_ = max_slots;
+    backend_max_result_tokens_ = max_result_tokens;
+  }
+  StepOutputKind OutputKind() const { return output_kind_; }
+  const std::vector<BackendRowResult>& BackendRows() const { return backend_rows_; }
+  const std::vector<TokenCommitAck>& CommitAcks() const { return commit_acks_; }
   void ScheduleGuidanceMasks() noexcept;
   void BeginTransaction();
   void GenerateNextTokensForTransaction(
@@ -110,7 +132,10 @@ struct ScheduledRequests {
   void CommitStateForTransaction();
 
  private:
+  friend struct test::EngineRunTestAccess;
+
   bool PrepareBatchedSamplingPlan(bool require_transaction_support);
+  void ValidateBackendRows() const;
   bool TryGenerateNextTokensBatched(std::vector<DeviceSpan<float>>& logits,
                                     bool guidance_applied,
                                     std::vector<RequestStepResult>* results = nullptr);
@@ -121,17 +146,28 @@ struct ScheduledRequests {
   // plus the target-distributed correction or bonus token to commit; confirmed_draft_counts[i] is
   // that same request's confirmed prefix length alone (excluding the trailing correction/bonus),
   // used by the caller to tell a confirmed final draft apart from a replacement/bonus token when a
-  // stop match or the turn/context limit ends verification on the request's last staged token.
+  // stop match or the turn/context limit ends verification on the request's last staged token. For a
+  // greedy drafted request, greedy_tokens[i] is the target's argmax on the row after the accepted
+  // prefix (the correction or bonus token); it is -1 for every other request.
   std::vector<DeviceSpan<float>> SelectSampledRows(
       std::vector<DeviceSpan<float>>& verify_rows,
       std::vector<std::vector<int32_t>>& selected_tokens,
       std::vector<size_t>& confirmed_draft_counts,
-      std::vector<std::vector<std::mt19937>>& rng_checkpoints);
+      std::vector<std::vector<std::mt19937>>& rng_checkpoints,
+      std::vector<int32_t>& greedy_tokens);
 
   std::vector<std::shared_ptr<Request>> requests_;
   // Drafts the transaction stages onto each request's sequence, in scheduled row order. Empty
   // outside a dynamic step plan.
   std::vector<size_t> draft_token_counts_;
+  StepOutputKind output_kind_{StepOutputKind::DecoderOutputs};
+  std::vector<BackendPlannedRow> backend_plan_;
+  std::vector<BackendRowResult> backend_rows_;
+  std::vector<size_t> backend_request_rows_;
+  std::vector<TokenCommitAck> commit_acks_;
+  size_t backend_max_slots_{std::numeric_limits<size_t>::max()};
+  size_t backend_max_result_tokens_{kMaxGeneratedTokensPerStep};
+  bool backend_committed_{};
   std::shared_ptr<Model> model_;
   std::unique_ptr<DecoderIO> decoder_state_;
   std::unique_ptr<ExecutionContext> execution_context_;

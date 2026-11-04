@@ -25,15 +25,20 @@ namespace Generators {
 // Providers that are not in the dispatch table are treated as generic and
 // attempted via V2 (plugin) then V1 (legacy) API paths.
 
+bool HasDeviceFiltering(const Config::ProviderOptions& provider_options) {
+  const auto& filtering_options = provider_options.device_filtering_options;
+  return filtering_options &&
+         (filtering_options->hardware_device_id ||
+          filtering_options->hardware_vendor_id ||
+          filtering_options->hardware_device_type);
+}
+
 std::vector<const OrtEpDevice*> ApplyDeviceFiltering(const Config::ProviderOptions& provider_options,
                                                      const std::vector<const OrtEpDevice*>& devices) {
-  const auto& filtering_options = provider_options.device_filtering_options;
-  if (!filtering_options ||
-      (!filtering_options->hardware_device_id &&
-       !filtering_options->hardware_vendor_id &&
-       !filtering_options->hardware_device_type)) {
+  if (!HasDeviceFiltering(provider_options)) {
     return devices;
   }
+  const auto& filtering_options = provider_options.device_filtering_options;
 
   std::vector<const OrtEpDevice*> filtered_devices;
 
@@ -97,6 +102,51 @@ std::vector<const OrtEpDevice*> FindRegisteredEpDevices(const std::string& ep_na
   return ep_devices_ptrs;
 }
 
+std::string GetCudaDeviceIdMetadata(const OrtEpDevice* device) {
+  const OrtKeyValuePairs* kv = Ort::GetEpDeviceMetadata(device);
+  if (!kv) return {};
+  const char* const* keys = nullptr;
+  const char* const* vals = nullptr;
+  size_t n = 0;
+  Ort::GetKeyValuePairs(kv, &keys, &vals, &n);
+  for (size_t i = 0; i < n; ++i) {
+    if (keys[i] && vals[i] && std::string_view(keys[i]) == "cuda_device_id") {
+      return vals[i];
+    }
+  }
+  return {};
+}
+
+size_t SelectCudaDeviceIndex(const std::vector<std::string>& cuda_device_ids,
+                             const std::optional<std::string>& requested_id,
+                             bool hardware_filtered) {
+  if (cuda_device_ids.empty()) {
+    throw std::runtime_error("No CUDA execution provider device is available.");
+  }
+
+  const std::string wanted = requested_id ? *requested_id : std::string("0");
+  for (size_t i = 0; i < cuda_device_ids.size(); ++i) {
+    if (cuda_device_ids[i] == wanted) return i;
+  }
+  if (!requested_id) {
+    // No explicit device_id: CUDA's default device 0 is not among the candidates (a hardware filter excluded it, or the
+    // plugin reports no cuda_device_id), so the first device that survived filtering is the one to use.
+    return 0;
+  }
+
+  std::string available = "[";
+  for (size_t i = 0; i < cuda_device_ids.size(); ++i) {
+    if (i > 0) available += ", ";
+    available += cuda_device_ids[i].empty() ? "<not reported>" : cuda_device_ids[i];
+  }
+  available += "]";
+  throw std::runtime_error(
+      "CUDA execution provider device_id=" + *requested_id + " does not match any available device; available cuda_device_id values: " +
+      available + (hardware_filtered ? " (after applying device_filtering_options, which takes precedence over device_id)" : "") +
+      ". Set device_id to one of the available values" +
+      (hardware_filtered ? " or adjust the device filtering options" : "") + ".");
+}
+
 // If an execution provider is plugged-in via the registered plugin mechanism,
 // this function appends the provider using the V2 API.
 // Returns true if the provider was appended via the plugin path, false if the
@@ -115,9 +165,23 @@ bool AppendExecutionProviderV2(
   }
 
   auto filtered_ep_device_ptrs = ApplyDeviceFiltering(provider_options, ep_devices_ptrs);
-  if (device_type == DeviceType::WEBGPU ||
-      device_type == DeviceType::CUDA) {
-    // WebGPU EP factory and CUDA EP factory currently only support one device at a time.
+  if (device_type == DeviceType::CUDA) {
+    // Match the requested CUDA device_id against EpMetadata["cuda_device_id"] because GetEpDevices() enumerates
+    // multi-GPU cards in sysfs order rather than CUDA device_id order.
+    std::optional<std::string> requested_id;
+    if (auto it = options.find("device_id"); it != options.end() && !it->second.empty()) {
+      requested_id = it->second;
+    }
+    std::vector<std::string> cuda_device_ids;
+    cuda_device_ids.reserve(filtered_ep_device_ptrs.size());
+    for (const auto* dev : filtered_ep_device_ptrs) {
+      cuda_device_ids.push_back(GetCudaDeviceIdMetadata(dev));
+    }
+    const size_t selected = SelectCudaDeviceIndex(cuda_device_ids, requested_id, HasDeviceFiltering(provider_options));
+    filtered_ep_device_ptrs = {filtered_ep_device_ptrs[selected]};
+  } else if (device_type == DeviceType::WEBGPU ||
+             device_type == DeviceType::NvTensorRtRtx) {
+    // WebGPU and NvTensorRtRtx EP factories currently only support one device at a time.
     filtered_ep_device_ptrs = {filtered_ep_device_ptrs.front()};
   }
 
@@ -134,6 +198,11 @@ void AppendExecutionProviderV1(OrtSessionOptions& session_options,
   }
   session_options.AppendExecutionProvider(provider_options.name.c_str(), keys.data(),
                                           values.data(), keys.size());
+}
+
+DeviceInterface* SelectPrimarySessionDevice(DeviceInterface* selected_device,
+                                            DeviceInterface* candidate_device) {
+  return selected_device ? selected_device : candidate_device;
 }
 
 DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
@@ -203,8 +272,8 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
     const auto append_provider_it = append_execution_provider.find(provider_options.name);
     if (append_provider_it != append_execution_provider.end()) {
       auto session_device = append_provider_it->second(session_options, provider_options, config, disable_graph_capture);
-      if (is_primary_session_options && session_device && !device) {
-        device = session_device;  // Set the device if not already set by a previous provider
+      if (is_primary_session_options) {
+        device = SelectPrimarySessionDevice(device, session_device);
       }
     } else {
       if (!AppendExecutionProviderV2(session_options, provider_options,

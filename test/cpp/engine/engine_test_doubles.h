@@ -82,6 +82,25 @@ struct RecordingCacheManager : CacheManager {
     }
   }
 
+  void ValidateRewind(
+      const std::shared_ptr<Request>& request) const override {
+    if (!supports_dynamic_batching_ && IsResident(request) &&
+        allocated_.size() != 1) {
+      throw std::runtime_error(
+          "Static Engine Request rewind requires exactly one resident Request.");
+    }
+  }
+
+  void ReleaseForRewind(
+      const std::shared_ptr<Request>& request) override {
+    ValidateRewind(request);
+    if (!IsResident(request)) {
+      return;
+    }
+    std::vector<std::shared_ptr<Request>> requests{request};
+    Deallocate(requests);
+  }
+
   void DetachRequestForTeardown(
       const std::shared_ptr<Request>& request) noexcept override {
     deallocate_calls++;
@@ -214,6 +233,7 @@ struct RecordingCacheManager : CacheManager {
         // Replay any scripted fixed-state slots so a test can force the Engine's plan/reservation
         // consistency guard to fire without a real fixed-state pool.
         fixed_state_slots_ = cache.scripted_fixed_slots_;
+        fixed_state_bindings_ = cache.scripted_fixed_bindings_;
         fixed_state_staging_bytes_ = cache.scripted_fixed_staging_bytes_;
         fixed_state_new_slot_count_ =
             cache.scripted_fixed_new_slot_count_;
@@ -225,6 +245,10 @@ struct RecordingCacheManager : CacheManager {
 
       std::span<const FixedStateSlotHandle> FixedStateSlots() const override {
         return fixed_state_slots_;
+      }
+
+      std::span<const FixedStateBinding> FixedStateBindings() const override {
+        return fixed_state_bindings_;
       }
 
       size_t FixedStateStagingBytes() const override {
@@ -274,6 +298,7 @@ struct RecordingCacheManager : CacheManager {
       RecordingCacheManager& cache_;
       std::vector<std::shared_ptr<Request>> newly_admitted_;
       std::vector<FixedStateSlotHandle> fixed_state_slots_;
+      std::vector<FixedStateBinding> fixed_state_bindings_;
       size_t fixed_state_staging_bytes_{};
       size_t fixed_state_new_slot_count_{};
       bool throw_prepare_{};
@@ -290,6 +315,23 @@ struct RecordingCacheManager : CacheManager {
     return std::make_unique<Reservation>(*this, plan);
   }
 
+  void SealCommittedBlocks(const StepPlan&) override {
+    if (std::exchange(throw_seal_bad_alloc_, false)) {
+      throw std::bad_alloc{};
+    }
+    if (std::exchange(throw_seal_invariant_failure_, false)) {
+      throw std::logic_error("Injected prefix publication invariant failure.");
+    }
+  }
+
+  void RecordPrefixPublicationRefusal() noexcept override {
+    ++prefix_metrics_.publication_refusals;
+  }
+
+  const PrefixCacheMetrics* PrefixMetrics() const override {
+    return &prefix_metrics_;
+  }
+
   // Scriptable knobs.
   void SetCanAllocate(bool verdict) { can_allocate_verdict_ = verdict; }
   void SetUnserviceableRequest(const std::shared_ptr<Request>& request) {
@@ -303,6 +345,9 @@ struct RecordingCacheManager : CacheManager {
   }
   void SetMaxDraftTokensPerStep(size_t token_count) {
     max_draft_tokens_per_step_ = token_count;
+  }
+  void SetFixedStateBindings(std::vector<FixedStateBinding> bindings) {
+    scripted_fixed_bindings_ = std::move(bindings);
   }
   void ThrowPlanningBadAllocOnce() { throw_planning_bad_alloc_ = true; }
   void ThrowPlanningBadAllocAlways() { always_throw_planning_bad_alloc_ = true; }
@@ -318,6 +363,10 @@ struct RecordingCacheManager : CacheManager {
     throw_deallocate_invariant_failure_ = true;
   }
   void ThrowReleaseFailureOnce() { throw_release_failure_ = true; }
+  void ThrowSealBadAllocOnce() { throw_seal_bad_alloc_ = true; }
+  void ThrowSealInvariantFailureOnce() {
+    throw_seal_invariant_failure_ = true;
+  }
   // Forces the composite plan/reservation consistency guard in Engine::StepDynamic. PlanStepResources
   // publishes `plan`, and every reservation reports slots, new-slot count, and staging bytes, so a
   // test can make the planned resources disagree with the reservation the Engine actually receives.
@@ -365,6 +414,9 @@ struct RecordingCacheManager : CacheManager {
   bool throw_deallocate_failure_{};
   bool throw_deallocate_invariant_failure_{};
   bool throw_release_failure_{};
+  bool throw_seal_bad_alloc_{};
+  bool throw_seal_invariant_failure_{};
+  PrefixCacheMetrics prefix_metrics_;
   std::shared_ptr<CallTrace> trace_;
   bool can_allocate_verdict_{true};
   const void* unserviceable_request_id_{};
@@ -373,6 +425,7 @@ struct RecordingCacheManager : CacheManager {
   std::vector<std::shared_ptr<Request>> allocated_;
   std::optional<FixedStateResourcePlan> scripted_fixed_plan_;
   std::vector<FixedStateSlotHandle> scripted_fixed_slots_;
+  std::vector<FixedStateBinding> scripted_fixed_bindings_;
   size_t scripted_fixed_staging_bytes_{};
   size_t scripted_fixed_new_slot_count_{};
 };
@@ -389,6 +442,7 @@ struct ScriptedDecoderIO : DecoderIO {
                     const StepPlan* plan = nullptr,
                     std::span<const int32_t> row_tokens = {},
                     std::span<const int32_t> sampling_candidate_tokens = {},
+                    std::span<const std::vector<float>> verify_row_logits = {},
                     int64_t hidden_size = 0,
                     ONNXTensorElementDataType hidden_type = Ort::TypeToTensorType<float>)
       : DecoderIO(model, scheduled_requests, cache_manager),
@@ -406,8 +460,14 @@ struct ScriptedDecoderIO : DecoderIO {
     if (!row_tokens.empty() && row_tokens.size() != rows) {
       throw std::runtime_error("ScriptedDecoderIO: row token script does not cover every row.");
     }
-    if (!row_tokens.empty() && !sampling_candidate_tokens.empty()) {
-      throw std::runtime_error("ScriptedDecoderIO: row tokens and sampling candidates are mutually exclusive.");
+    const int scripted_modes = static_cast<int>(!row_tokens.empty()) +
+                               static_cast<int>(!sampling_candidate_tokens.empty()) +
+                               static_cast<int>(!verify_row_logits.empty());
+    if (scripted_modes > 1) {
+      throw std::runtime_error("ScriptedDecoderIO: logits scripts are mutually exclusive.");
+    }
+    if (!verify_row_logits.empty() && verify_row_logits.size() != rows) {
+      throw std::runtime_error("ScriptedDecoderIO: logits script does not cover every row.");
     }
     row_count_ = rows;
     logits_ = std::make_unique<Tensor>(model->p_device_inputs_, Ort::TypeToTensorType<float>);
@@ -417,6 +477,15 @@ struct ScriptedDecoderIO : DecoderIO {
     auto cpu_span = device_span.CpuSpan();
     std::fill(cpu_span.begin(), cpu_span.end(), 0.0f);
     for (size_t row = 0; row < rows; ++row) {
+      if (!verify_row_logits.empty()) {
+        const auto& scripted_logits = verify_row_logits[row];
+        if (scripted_logits.size() != static_cast<size_t>(vocab_size_)) {
+          throw std::runtime_error("ScriptedDecoderIO: logits row has the wrong vocabulary size.");
+        }
+        const size_t offset = row * static_cast<size_t>(vocab_size_);
+        std::copy(scripted_logits.begin(), scripted_logits.end(), cpu_span.begin() + offset);
+        continue;
+      }
       if (!sampling_candidate_tokens.empty()) {
         for (const int32_t token : sampling_candidate_tokens) {
           if (token < 0 || token >= vocab_size_) {
@@ -531,7 +600,7 @@ struct RecordingModelExecutor : ModelExecutor {
             model_, scheduled_requests, cache_manager_, forced_token_,
             failure == ScriptedExecutionFailure::PostProcessing,
             context.plan, verify_row_tokens_, sampling_candidate_tokens_,
-            hidden_size_, hidden_type_));
+            verify_row_logits_, hidden_size_, hidden_type_));
     static_cast<void>(context);
   }
 
@@ -545,6 +614,9 @@ struct RecordingModelExecutor : ModelExecutor {
   }
   void SetSamplingCandidateTokens(std::vector<int32_t> tokens) {
     sampling_candidate_tokens_ = std::move(tokens);
+  }
+  void SetVerifyRowLogits(std::vector<std::vector<float>> logits) {
+    verify_row_logits_ = std::move(logits);
   }
   bool SupportsDraftVerification() const override {
     return supports_draft_verification_;
@@ -575,6 +647,7 @@ struct RecordingModelExecutor : ModelExecutor {
   std::function<void(ExecutionContext&)> on_execute_;
   std::vector<int32_t> verify_row_tokens_;
   std::vector<int32_t> sampling_candidate_tokens_;
+  std::vector<std::vector<float>> verify_row_logits_;
   bool supports_draft_verification_{true};
   int64_t hidden_size_{};
   ONNXTensorElementDataType hidden_type_{Ort::TypeToTensorType<float>};
@@ -582,7 +655,18 @@ struct RecordingModelExecutor : ModelExecutor {
 
 struct CountingCudaDeviceState {
   size_t device_to_host_copies{};
+  size_t host_to_device_copies{};
+  bool separate_host_mirror{};
+  bool recycles_host_mirrors{};
   size_t synchronize_calls{};
+  size_t memory_queries{};
+  size_t integrated_queries{};
+  size_t device_id_queries{};
+  size_t total_memory_bytes{};
+  std::optional<size_t> free_memory_bytes;
+  std::optional<bool> is_integrated{false};
+  int device_id{};
+  bool fail_memory_query{};
   std::vector<int> argmax_rows;
 };
 
@@ -601,9 +685,21 @@ struct CountingCudaMemory final : DeviceBuffer {
   }
 
   const char* GetType() const override { return "test_cuda"; }
-  void AllocateCpu() override {}
-  void CopyDeviceToCpu() override { ++state_->device_to_host_copies; }
-  void CopyCpuToDevice() override {}
+  void AllocateCpu() override {
+    if (state_->separate_host_mirror && !host_storage_) {
+      host_storage_ = std::make_unique<uint8_t[]>(size_in_bytes_);
+      p_cpu_ = host_storage_.get();
+    }
+  }
+  void CopyDeviceToCpu() override {
+    ++state_->device_to_host_copies;
+    AllocateCpu();
+    if (host_storage_) std::memcpy(p_cpu_, p_device_, size_in_bytes_);
+  }
+  void CopyCpuToDevice() override {
+    ++state_->host_to_device_copies;
+    if (host_storage_) std::memcpy(p_device_, p_cpu_, size_in_bytes_);
+  }
   void CopyFrom(size_t begin_dest, DeviceBuffer& source,
                 size_t begin_source, size_t size_in_bytes) override {
     std::memmove(p_device_ + begin_dest, source.p_device_ + begin_source, size_in_bytes);
@@ -612,14 +708,19 @@ struct CountingCudaMemory final : DeviceBuffer {
 
  private:
   std::unique_ptr<uint8_t[]> storage_;
+  std::unique_ptr<uint8_t[]> host_storage_;
   std::shared_ptr<CountingCudaDeviceState> state_;
 };
 
 struct CountingCudaDevice final : DeviceInterface {
-  CountingCudaDevice()
-      : state{std::make_shared<CountingCudaDeviceState>()} {}
+  explicit CountingCudaDevice(DeviceType device_type = DeviceType::CUDA)
+      : device_type_{device_type}, state{std::make_shared<CountingCudaDeviceState>()} {}
 
-  DeviceType GetType() const override { return DeviceType::CUDA; }
+  DeviceType GetType() const override { return device_type_; }
+  int GetDeviceId(const ProviderOptions*) override {
+    ++state->device_id_queries;
+    return state->device_id;
+  }
   void InitOrt(const OrtApi&, Ort::Allocator&) override {}
   Ort::Allocator& GetAllocator() override {
     return GetDeviceInterface(DeviceType::CPU)->GetAllocator();
@@ -640,6 +741,22 @@ struct CountingCudaDevice final : DeviceInterface {
   }
   std::unique_ptr<KeyValueCache> CreateKeyValueCache(State&) override { return {}; }
   void Synchronize() override { ++state->synchronize_calls; }
+  bool RecyclesHostMirrorsAfterUpload(size_t) const override { return state->recycles_host_mirrors; }
+  void GetAvailableMemory(size_t& free_bytes, size_t& total_bytes) override {
+    ++state->memory_queries;
+    if (state->fail_memory_query) {
+      throw std::runtime_error("test device memory query failed");
+    }
+    free_bytes = state->free_memory_bytes.value_or(state->total_memory_bytes);
+    total_bytes = state->total_memory_bytes;
+  }
+  std::optional<bool> GetIsIntegrated(std::string& error) override {
+    ++state->integrated_queries;
+    if (!state->is_integrated) {
+      error = "test integrated-device query failed";
+    }
+    return state->is_integrated;
+  }
 
   bool ArgMaxDevice(const void* logits, ONNXTensorElementDataType logits_type,
                     int num_rows, int vocab_size,
@@ -659,6 +776,7 @@ struct CountingCudaDevice final : DeviceInterface {
     return true;
   }
 
+  DeviceType device_type_;
   std::shared_ptr<CountingCudaDeviceState> state;
 };
 
@@ -711,6 +829,23 @@ inline DoublesEngine MakeDoublesEngine(std::shared_ptr<Model> model, size_t capa
   return DoublesEngine{std::move(engine), cache_observer, executor_observer, std::move(trace)};
 }
 
+inline DoublesEngine MakeStaticDoublesEngine(std::shared_ptr<Model> model, size_t capacity,
+                                             int32_t forced_token) {
+  auto trace = std::make_shared<CallTrace>();
+  auto cache = std::make_shared<RecordingCacheManager>(model, capacity, trace,
+                                                       /*supports_dynamic_batching=*/false);
+  auto scheduler = Scheduler::Create(model, cache);
+  auto executor = std::make_unique<RecordingModelExecutor>(model, cache, forced_token, trace);
+
+  RecordingCacheManager* cache_observer = cache.get();
+  RecordingModelExecutor* executor_observer = executor.get();
+
+  EngineDependencies dependencies{std::move(cache), std::move(scheduler), std::move(executor)};
+  auto engine = std::make_shared<Engine>(std::move(model), std::move(dependencies));
+
+  return DoublesEngine{std::move(engine), cache_observer, executor_observer, std::move(trace)};
+}
+
 inline CompositeDoublesEngine MakeCompositeDoublesEngine(std::shared_ptr<Model> model,
                                                          int32_t forced_token) {
   // Use a recording executor so these tests can inspect composite transaction behavior without
@@ -727,25 +862,38 @@ inline CompositeDoublesEngine MakeCompositeDoublesEngine(std::shared_ptr<Model> 
 }
 
 inline MtpDoublesEngine MakeMtpDoublesEngine(std::shared_ptr<Model> model,
-                                             int32_t forced_token) {
+                                             int32_t forced_token,
+                                             int64_t hidden_states_width = 0,
+                                             int indexshare_draft_capacity = 0) {
+  if (hidden_states_width == 0) {
+    hidden_states_width = model->config_->model.decoder.hidden_size;
+  }
   auto cache = std::make_shared<RecordingCacheManager>(model, /*capacity=*/8);
   cache->SetMaxDraftTokensPerStep(3);
   auto* cache_observer = cache.get();
   auto scheduler = Scheduler::Create(model, cache);
   auto executor = std::make_unique<RecordingModelExecutor>(
       model, cache, forced_token);
-  executor->EnableHiddenStatesOutput(model->config_->model.decoder.hidden_size);
+  executor->EnableHiddenStatesOutput(hidden_states_width);
   auto* executor_observer = executor.get();
 
   auto mtp_model = std::make_shared<DecoderOnly_Model>(
       CreateMtpDecoderConfig(*model->config_), GetOrtEnv());
+  if (indexshare_draft_capacity > 0) {
+    // The recording executor supplies selection outputs without needing a second ONNX fixture.
+    auto& indexshare = mtp_model->index_share_config_;
+    indexshare.enabled = true;
+    indexshare.base_capacity = 4;
+    indexshare.max_draft_tokens = indexshare_draft_capacity;
+    indexshare.indices_output = "indices";
+    indexshare.counts_output = "counts";
+  }
   auto mtp_cache = std::make_shared<RecordingCacheManager>(
       mtp_model, /*capacity=*/8);
   auto* mtp_cache_observer = mtp_cache.get();
   auto mtp_executor = std::make_unique<RecordingModelExecutor>(
       mtp_model, mtp_cache, forced_token);
-  mtp_executor->EnableHiddenStatesOutput(
-      mtp_model->config_->model.decoder.hidden_size);
+  mtp_executor->EnableHiddenStatesOutput(hidden_states_width);
   auto* mtp_executor_observer = mtp_executor.get();
 
   EngineDependencies dependencies{
@@ -755,6 +903,27 @@ inline MtpDoublesEngine MakeMtpDoublesEngine(std::shared_ptr<Model> model,
   return MtpDoublesEngine{
       nullptr, std::move(engine), cache_observer, executor_observer,
       mtp_cache_observer, mtp_executor_observer, nullptr};
+}
+
+// Simulates the exported selection outputs, including a per-query status. The Engine still executes
+// its real packing, persistent stage bindings, selection seeding, and transaction rollback paths.
+inline void WriteIndexShareOutputs(ExecutionContext& context, int32_t status = 0) {
+  if (context.extra_outputs.empty()) return;
+  auto* indices = context.extra_outputs[0];
+  auto* counts = context.extra_outputs[1];
+  auto* statuses = context.extra_outputs[2];
+  const auto shape = indices->GetTensorTypeAndShapeInfo()->GetShape();
+  const size_t rows = static_cast<size_t>(shape[0]);
+  const size_t capacity = static_cast<size_t>(shape[1]);
+  auto* index_data = indices->GetTensorMutableData<int32_t>();
+  auto* count_data = counts->GetTensorMutableData<int32_t>();
+  auto* status_data = statuses->GetTensorMutableData<int32_t>();
+  for (size_t row = 0; row < rows; ++row) {
+    count_data[row] = static_cast<int32_t>(std::min(size_t{4}, capacity));
+    status_data[row] = status;
+    for (size_t column = 0; column < capacity; ++column)
+      index_data[row * capacity + column] = static_cast<int32_t>(100 * row + column);
+  }
 }
 
 }  // namespace test

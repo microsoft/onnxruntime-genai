@@ -36,7 +36,12 @@ def _const(name, array):
     return tensor
 
 
-def _decoder_graph(logits_per_token=False):
+def _decoder_graph(
+    logits_per_token=False,
+    scale_caches=False,
+    selected_logits=False,
+    num_blocks=NUM_BLOCKS,
+):
     i64 = lambda v: np.asarray(v, dtype=np.int64)  # noqa: E731
     initializers = [
         _const("c0", i64(0)),
@@ -48,7 +53,7 @@ def _decoder_graph(logits_per_token=False):
         _const("start1", i64([1])),
         _const("end_all", i64([np.iinfo(np.int64).max])),
         _const("flat", i64([-1])),
-        _const("cache_shape", i64([NUM_BLOCKS, BLOCK_SIZE, 1, 1])),
+        _const("cache_shape", i64([num_blocks, BLOCK_SIZE, 1, 1])),
         _const("vocab_range", np.arange(VOCAB_SIZE, dtype=np.int64).reshape(1, VOCAB_SIZE)),
     ]
 
@@ -122,7 +127,12 @@ def _decoder_graph(logits_per_token=False):
     node("Unsqueeze", ["next_token", "axis1"], ["next_token_col"])
     node("Equal", ["next_token_col", "vocab_range"], ["is_next_per_token"])
 
-    if logits_per_token:
+    if selected_logits:
+        # Emit only the packed rows named by the Engine-supplied logits_indices.
+        node("Gather", ["is_next_per_token", "logits_indices"], ["is_next_selected"], axis=0)
+        node("Cast", ["is_next_selected"], ["logits"], to=TensorProto.FLOAT16)
+        logits_shape = ["num_logits", VOCAB_SIZE]
+    elif logits_per_token:
         node("Cast", ["is_next_per_token"], ["logits"], to=TensorProto.FLOAT16)
         logits_shape = ["num_tokens", VOCAB_SIZE]
     else:
@@ -134,7 +144,7 @@ def _decoder_graph(logits_per_token=False):
         node("Cast", ["is_next_per_request"], ["logits"], to=TensorProto.FLOAT16)
         logits_shape = ["batch_size", VOCAB_SIZE]
 
-    cache_shape = [NUM_BLOCKS, BLOCK_SIZE, 1, 1]
+    cache_shape = [num_blocks, BLOCK_SIZE, 1, 1]
     inputs = [
         helper.make_tensor_value_info("input_ids", TensorProto.INT64, ["num_tokens"]),
         helper.make_tensor_value_info("cumulative_sequence_lengths", TensorProto.INT32, ["batch_plus_1"]),
@@ -150,6 +160,8 @@ def _decoder_graph(logits_per_token=False):
             for layer in PAGED_LAYERS
         ],
     ]
+    if selected_logits:
+        inputs.append(helper.make_tensor_value_info("logits_indices", TensorProto.INT32, ["num_logits"]))
     outputs = [
         helper.make_tensor_value_info("logits", TensorProto.FLOAT16, logits_shape),
         helper.make_tensor_value_info("hidden_states", TensorProto.FLOAT16, ["num_tokens", 1]),
@@ -162,12 +174,27 @@ def _decoder_graph(logits_per_token=False):
             for layer in PAGED_LAYERS
         ],
     ]
+    if scale_caches:
+        for layer in PAGED_LAYERS:
+            for side in ("key", "value"):
+                input_name = f"past_key_values.{layer}.{side}_scale"
+                output_name = f"present.{layer}.{side}_scale"
+                shape = [num_blocks, BLOCK_SIZE, 1]
+                inputs.append(helper.make_tensor_value_info(input_name, TensorProto.FLOAT16, shape))
+                outputs.append(helper.make_tensor_value_info(output_name, TensorProto.FLOAT16, shape))
+                node("Identity", [input_name], [output_name])
     return helper.make_graph(nodes, "synthetic_paged_decoder", inputs, outputs, initializer=initializers)
 
 
-def create_decoder(output_dir, logits_per_token=False):
+def create_decoder(
+    output_dir,
+    logits_per_token=False,
+    scale_caches=False,
+    selected_logits=False,
+    num_blocks=NUM_BLOCKS,
+):
     model = helper.make_model(
-        _decoder_graph(logits_per_token),
+        _decoder_graph(logits_per_token, scale_caches, selected_logits, num_blocks),
         opset_imports=[helper.make_operatorsetid("", 17)],
         ir_version=9,
         producer_name="onnxruntime-genai",
@@ -178,7 +205,13 @@ def create_decoder(output_dir, logits_per_token=False):
     onnx.save_model(model, path)
 
 
-def create_config(output_dir):
+def create_config(
+    output_dir,
+    scale_caches=False,
+    selected_logits=False,
+    num_blocks=NUM_BLOCKS,
+    max_batch_size=MAX_BATCH_SIZE,
+):
     config = {
         "model": {
             "type": "decoder",
@@ -225,11 +258,18 @@ def create_config(output_dir):
         "engine": {
             "dynamic_batching": {
                 "block_size": BLOCK_SIZE,
-                "num_blocks": NUM_BLOCKS,
-                "max_batch_size": MAX_BATCH_SIZE,
+                "num_blocks": num_blocks,
+                "max_batch_size": max_batch_size,
             },
         },
     }
+    if scale_caches:
+        decoder = config["model"]["decoder"]
+        for side in ("key", "value"):
+            decoder["inputs"][f"past_{side}_scale_names"] = f"past_key_values.%d.{side}_scale"
+            decoder["outputs"][f"present_{side}_scale_names"] = f"present.%d.{side}_scale"
+    if selected_logits:
+        config["model"]["decoder"]["inputs"]["logits_indices"] = "logits_indices"
     path = os.path.join(output_dir, "genai_config.json")
     with open(path, "w") as f:
         json.dump(config, f, indent=2)
@@ -242,11 +282,13 @@ def main():
         default=os.path.join(os.path.dirname(__file__), "..", "..", "models", "engine", "synthetic-paged"),
     )
     parser.add_argument("--logits_per_token", action="store_true")
+    parser.add_argument("--scale_caches", action="store_true")
+    parser.add_argument("--selected_logits", action="store_true")
     args = parser.parse_args()
     output_dir = os.path.normpath(args.output_dir)
     os.makedirs(output_dir, exist_ok=True)
-    create_decoder(output_dir, args.logits_per_token)
-    create_config(output_dir)
+    create_decoder(output_dir, args.logits_per_token, args.scale_caches, args.selected_logits)
+    create_config(output_dir, args.scale_caches, args.selected_logits)
 
 
 if __name__ == "__main__":

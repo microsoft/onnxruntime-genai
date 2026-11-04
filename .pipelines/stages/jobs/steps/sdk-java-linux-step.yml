@@ -46,6 +46,10 @@ steps:
     ort_version: ${{ parameters.ort_version }}
     ort_home: '$(ortHome)'
 
+# --- Authenticate to the Lotus Maven feed -----------------------------------
+- template: utils/authenticate-maven.yml
+
+
 # --- Resolve JAVA_HOME (arm64) ----------------------------------------------
 # On the arm64 pool CMake's FindJNI can't locate the JDK headers via the
 # update-alternatives /bin/java symlink, so it fails with "Could NOT find JNI".

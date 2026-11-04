@@ -20,12 +20,22 @@ struct ModelStateMetadata {
   virtual std::vector<int64_t> GetOutputShape(const std::string& name) const = 0;
 };
 
+// Shape comparison for model-state bindings that share one buffer. A negative dimension is a
+// symbolic dimension the graph did not resolve, so it matches anything; two concrete dimensions
+// have to be equal. Used for every paged binding, including the per-token scale caches, so that a
+// symbolic `past` dimension and a shape-inferred concrete `present` dimension still pair up.
+bool StateShapesCompatible(const std::vector<int64_t>& left, const std::vector<int64_t>& right);
+
 class ModelStateManifest {
  public:
   explicit ModelStateManifest(const Config::Model::Decoder& decoder);
 
   static void ValidateConfig(const Config::Model::Decoder& decoder);
   static void ValidateDynamicEngineCompatibility(const Config::Model::Decoder& decoder);
+  // Disabled indexer replay still binds full state and capture-control tensors. Resolve its
+  // unused payload capacity from this session, not an independently exported target's manifest.
+  static void ResolveDisabledIndexerCapacity(
+      Config::Model::Decoder& decoder, const ModelStateMetadata& metadata);
   void ValidateSession(const ModelStateMetadata& metadata) const;
 
   // Read-only access to the validated decoder state groups, in declaration order. Owners of a

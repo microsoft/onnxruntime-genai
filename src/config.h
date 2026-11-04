@@ -6,16 +6,25 @@
 #include "filesystem.h"
 #include "provider_options.h"
 
+#include <array>
 #include <functional>
+#include <map>
 #include <memory>
+#include <optional>
 
 namespace Generators {
 
 struct RuntimeSettings;
 
+struct TokenizerMemoryData {
+  std::string config_json;
+  std::string tokenizer_json;
+};
+
 struct Config {
   Config() = default;
-  Config(const fs::path& path, std::string_view json_overlay);
+  Config(const fs::path& path, std::string_view json_overlay,
+         std::optional<std::string_view> memory_json = std::nullopt);
 
   struct Defaults {
     // Decoder names
@@ -48,6 +57,7 @@ struct Config {
     // Speech encoder names
     static constexpr std::string_view AudioAttentionMaskName = "audio_attention_mask";
     static constexpr std::string_view AudioSizesName = "audio_sizes";
+    static constexpr std::string_view AudioLengthsName = "audio_lengths";
     static constexpr std::string_view AudioProjectionModeName = "audio_projection_mode";
     static constexpr std::string_view AudioFeaturesName = "audio_features";
     static constexpr std::string_view NumAudioTokens = "num_audio_tokens";
@@ -72,6 +82,7 @@ struct Config {
     static constexpr std::string_view CurrentSequenceLengthName = "current_sequence_length";
     static constexpr std::string_view TotalSequenceLengthName = "total_sequence_length";
     static constexpr std::string_view CacheIndirectionName = "cache_indirection";
+    static constexpr std::string_view CacheWriteIndicesName = "cache_write_indices";
     static constexpr std::string_view AlignmentHeadsName = "alignment_heads";
     static constexpr std::string_view TokenTypeIdsName = "token_type_ids";
 
@@ -132,11 +143,18 @@ struct Config {
     std::optional<int> inter_op_num_threads;
     std::optional<bool> enable_cpu_mem_arena;
     std::optional<bool> enable_mem_pattern;
+    std::optional<bool> use_deterministic_compute;
     std::optional<std::string> log_id;
     std::optional<int> log_severity_level;
     std::optional<int> log_verbosity_level;
     std::optional<std::string> enable_profiling;
+    // Custom-op library or libraries registered on the session options: custom_ops_library is registered first,
+    // followed by custom_ops_libraries in order, with duplicate resolved paths registered once. Every entry must
+    // resolve to an existing file in the model folder, a registered EP library directory, or the current working
+    // directory (entries are not searched via LD_LIBRARY_PATH / PATH). OverlayConfig appends to custom_ops_libraries
+    // (an empty [] overlay leaves existing entries unchanged).
     std::optional<std::string> custom_ops_library;
+    std::vector<std::string> custom_ops_libraries;
     std::optional<GraphOptimizationLevel> graph_optimization_level;
 
     // TODO(baijumeswani): Sharing env allocators across sessions leads to crashes on windows and iOS.
@@ -148,6 +166,13 @@ struct Config {
   };
 
   using RunOptions = std::vector<NamedString>;  // Entries go into OrtRunOptions::AddConfigEntry
+
+  enum class TimestampLevel {
+    Off,      // Do not collect or return timestamp metadata.
+    Word,     // Return completed word records.
+    Segment,  // Return completed segment records while constructing words internally.
+    All,      // Return completed word and segment records; character records are out of scope.
+  };
 
   struct Model {
     std::string type;
@@ -196,6 +221,13 @@ struct Config {
     int blank_id{};
     int max_symbols_per_step{};
 
+    // Controls timestamp output: off, completed words, completed segments, or words and segments.
+    TimestampLevel timestamp_level{TimestampLevel::Off};
+    // Punctuation strings that complete a segment. An empty list disables punctuation segmentation.
+    std::vector<std::string> segment_separators{".", "?", "!"};
+    // Optional minimum inter-word gap in seconds that starts a new segment.
+    std::optional<double> segment_gap_threshold_seconds;
+
     // Parakeet TDT (Token-and-Duration Transducer) parameters
     int left_context_samples{};
     int right_context_samples{};
@@ -242,6 +274,7 @@ struct Config {
       std::string filename;
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
+      bool prefault{true};
 
       struct Inputs {
         std::string input_ids{Defaults::InputIdsName};
@@ -254,6 +287,23 @@ struct Config {
         std::string per_layer_inputs;  // Gemma4: per-layer conditioning from embedding to decoder
       } outputs;
     } embedding;
+
+    struct Engram {
+      std::string filename;
+      size_t cache_capacity{4096};
+      std::optional<SessionOptions> session_options;
+      std::optional<RunOptions> run_options;
+
+      struct Inputs {
+        std::string input_ids{Defaults::InputIdsName};
+        std::string past_tokens{"past_ple_tokens"};
+      } inputs;
+
+      struct Outputs {
+        std::string embeddings{"engram_embeddings"};
+        std::string present_tokens{"present_ple_tokens"};
+      } outputs;
+    } engram;
 
     struct Vision {
       std::string filename;
@@ -272,6 +322,10 @@ struct Config {
       int window_size{0};        // Used by CalculateWindowIndex() in QNN pipeline only.
                                  // 0 = auto-compute as patch_size * spatial_merge_size * 2
                                  // Qwen2.5-VL default: 56 (14*4), Qwen3-VL default: 64 (16*4)
+
+      // LFM2-VL: patch-sequence length every image is padded to so one batch shares a vision run.
+      // 0 = pad to the longest image in the batch. Shipped models: max_image_tokens * downsample_factor^2 = 1024.
+      int max_num_patches{0};
 
       std::string config_filename{"processor_config.json"};
       std::optional<std::string> adapter_filename{};
@@ -313,6 +367,7 @@ struct Config {
         std::string audio_embeds{Defaults::AudioEmbedsName};
         std::string attention_mask{Defaults::AudioAttentionMaskName};
         std::string audio_sizes{Defaults::AudioSizesName};
+        std::string audio_lengths{Defaults::AudioLengthsName};  // per-clip valid frame count of audio_embeds (LFM2-Audio)
         std::string audio_projection_mode{Defaults::AudioProjectionModeName};
       } inputs;
 
@@ -320,6 +375,24 @@ struct Config {
         std::string audio_features{Defaults::AudioFeaturesName};
       } outputs;
     } speech;
+
+    // Speech output of LFM2-Audio: the depthformer turns one decoder hidden state into a frame of
+    // audio codes, one per codebook, and the audio embedding turns that frame back into the decoder's
+    // next input. Empty filenames leave the model answering in text only.
+    struct AudioOutput {
+      struct Graph {
+        std::string filename;
+        std::optional<SessionOptions> session_options;
+      };
+      Graph depthformer;
+      Graph embedding;
+      int num_codebooks{8};
+      int codebook_size{2049};        // entries per codebook; the last one is the end-of-audio code
+      int audio_start_token_id{128};  // <|audio_start|>: the rest of a sequential answer is speech
+      int text_end_token_id{130};     // <|text_end|>: the text of an interleaved answer is over
+      int interleaved_n_text{6};      // text tokens per turn of an interleaved answer
+      int interleaved_n_audio{12};    // audio frames per turn of an interleaved answer
+    } audio_output;
 
     struct Joiner {
       std::string filename;
@@ -345,6 +418,100 @@ struct Config {
       std::optional<RunOptions> run_options;
     } vad;
 
+    struct Moonshine {
+      std::string frontend_filename;
+      std::string encoder_filename;
+      std::string adapter_filename;
+      std::string cross_kv_filename;
+      std::string decoder_kv_filename;
+
+      int sample_buffer_size{};
+      int conv1_buffer_size{};
+      int conv2_buffer_size{};
+
+      // Encoder sliding-window geometry.
+      int total_lookahead{};
+      int left_context_frames{};
+
+      // Decoder token-emission cap & frame rate.
+      int max_seq_len{};
+      float tokens_per_second{};
+      float seconds_per_memory_frame{};
+
+      // Segmentation limits (hard cap + VAD-silence min duration), in memory frames.
+      int max_segment_memory_frames{};
+      int min_segment_memory_frames{};
+
+      // Optional per-submodel ORT graph I/O name overrides. If a field is left
+      // empty in genai_config.json, the runtime falls back to the built-in
+      // Moonshine default (see MoonshineConfig::PopulateFromConfig). This
+      // lets a future model rename an input/output without a rebuild.
+      struct Frontend {
+        struct Inputs {
+          std::string audio_chunk;
+          std::string sample_buffer;
+          std::string sample_len;
+          std::string conv1_buffer;
+          std::string conv2_buffer;
+          std::string frame_count;
+        } inputs;
+        struct Outputs {
+          std::string features;
+          std::string sample_buffer;
+          std::string sample_len;
+          std::string conv1_buffer;
+          std::string conv2_buffer;
+          std::string frame_count;
+        } outputs;
+      } frontend;
+
+      struct Encoder {
+        struct Inputs {
+          std::string features;
+        } inputs;
+        struct Outputs {
+          std::string encoded;
+        } outputs;
+      } encoder;
+
+      struct Adapter {
+        struct Inputs {
+          std::string encoded;
+          std::string pos_offset;
+        } inputs;
+        struct Outputs {
+          std::string memory;
+        } outputs;
+      } adapter;
+
+      struct CrossKv {
+        struct Inputs {
+          std::string memory;
+        } inputs;
+        struct Outputs {
+          std::string k_cross;
+          std::string v_cross;
+        } outputs;
+      } cross_kv;
+
+      struct DecoderKv {
+        struct Inputs {
+          std::string token;
+          std::string k_self;
+          std::string v_self;
+          std::string k_cross;
+          std::string v_cross;
+        } inputs;
+        struct Outputs {
+          std::string logits;
+          std::string k_self;
+          std::string v_self;
+          std::string k_cross;
+          std::string v_cross;
+        } outputs;
+      } decoder_kv;
+    } moonshine;
+
     struct SharedInitializer {
       std::string name;
       std::string data_file;
@@ -360,6 +527,8 @@ struct Config {
       std::optional<RunOptions> run_options;
       std::vector<SharedInitializer> shared_initializers;
 
+      int prefill_sequence_length{};
+
       int hidden_size{};          // Not currently used, potentially useful for embeddings in the future
       int num_attention_heads{};  // Not currently used, potentially useful if num_key_value_heads isn't set
       int num_key_value_heads{};
@@ -370,8 +539,10 @@ struct Config {
       int state_update_capacity{};
 
       // Hybrid SSM+Attention (LFM2) parameters
-      std::vector<std::string> layer_types;  // Per-layer type: "conv" or "full_attention"
+      std::vector<std::string> layer_types;  // Per-layer type: "conv", "full_attention" or "sliding_attention"
       int conv_cache_size{};                 // Convolution cache width (conv_L_cache from HF config)
+      int64_t ple_token_pad_id{-1};
+      int indexer_compress_ratio{};  // Zero means unspecified by an older export.
 
       struct SlidingWindow {               // Sliding window parameters for models that process input prompt in chunks
         int window_size{};                 // The size of the window to slide over the input prompt
@@ -394,12 +565,16 @@ struct Config {
         PagedKeyValue,
         FixedConv,
         FixedRecurrent,
+        FixedPle,
+        FixedIndexer,
       };
 
       enum class StateUpdateKind {
         Invalid,
         CausalConv,
         GatedDeltaNet,
+        Ple,
+        Indexer,
       };
 
       static constexpr int MaxStateUpdateCapacity = 8;
@@ -408,6 +583,7 @@ struct Config {
         int capacity{};
         bool enabled{true};
         int key_head_count{};
+        int compress_ratio{};
       };
 
       struct StateGroup {
@@ -422,10 +598,14 @@ struct Config {
       struct Inputs {
         std::string input_ids{Defaults::InputIdsName};
         std::string embeddings{Defaults::InputsEmbedsName};
+        std::string engram_embeddings;
         std::string attention_mask{Defaults::AttentionMaskName};
         std::string position_ids{Defaults::PositionIdsName};
+        std::string rotary_position_ids;
         std::string past_key_names{Defaults::PastKeyName};
         std::string past_value_names{Defaults::PastValueName};
+        std::string past_key_scale_names;
+        std::string past_value_scale_names;
         std::string past_names;  // When key/value pairs are combined
         std::string cross_past_key_names, cross_past_value_names;
         std::string past_key_values_length{Defaults::PastKeyValuesLengthName};
@@ -433,6 +613,7 @@ struct Config {
         std::string current_sequence_length{Defaults::CurrentSequenceLengthName};
         std::string total_sequence_length{Defaults::TotalSequenceLengthName};
         std::string cache_indirection{Defaults::CacheIndirectionName};
+        std::string cache_write_indices{Defaults::CacheWriteIndicesName};
         std::string encoder_hidden_states{Defaults::EncoderHiddenStatesName};
         std::string rnn_prev_states{Defaults::RnnStatesPrevName};
         std::string encoder_attention_mask{Defaults::EncoderAttentionMaskName};
@@ -444,8 +625,15 @@ struct Config {
         // ones. Empty when the model has no windowed paged layers.
         std::string block_table_windowed{Defaults::BlockTableWindowedName};
         std::string attention_metadata{Defaults::AttentionMetadataName};
+        // Packed token rows to project through the LM head. Empty for legacy full-logits models.
+        std::string logits_indices;
         std::string past_conv_names{Defaults::PastConvName};  // Conv cache input name template (LFM2)
         std::string past_recurrent_names{Defaults::PastRecurrentName};
+        std::string past_ple_token_names;
+        std::string past_ple_conv_names;
+        std::string past_indexer_names;
+        std::string past_indexer_kv_buffer_names;
+        std::string past_indexer_state_lengths_names;
         std::string state_update_capture_count{Defaults::StateUpdateCaptureCountName};  // Per-sequence capture count
         std::string state_update_active{Defaults::StateUpdateActiveName};               // Capture enable flag
 
@@ -469,13 +657,25 @@ struct Config {
         std::string logits{Defaults::LogitsName};
         std::string present_key_names{Defaults::PresentKeyName};
         std::string present_value_names{Defaults::PresentValueName};
+        std::string present_key_scale_names;
+        std::string present_value_scale_names;
         std::string present_names;  // When key/value pairs are combined
         std::string output_cross_qk_names{Defaults::OutputCrossQKName};
         std::string rnn_states{Defaults::RnnStatesName};
         std::string present_conv_names{Defaults::PresentConvName};  // Conv cache output name template (LFM2)
         std::string present_recurrent_names{Defaults::PresentRecurrentName};
+        std::string present_ple_token_names;
+        std::string present_ple_conv_names;
+        std::string present_indexer_names;
+        std::string present_indexer_kv_buffer_names;
+        std::string present_indexer_state_lengths_names;
+        std::string state_update_indexer_value_names;
+        std::string state_update_indexer_row_names;
         std::string state_update_conv_value_names{Defaults::StateUpdateConvValueName};
         std::string state_update_recurrent_capsule_names{Defaults::StateUpdateRecurrentCapsuleName};
+        std::string state_update_ple_token_names;
+        std::string state_update_ple_conv_value_names;
+        std::string state_update_indexer_names;
         std::string hidden_states;  // Last hidden state output (when exported with include_hidden_states; e.g. fed to the MTP head)
         // Residual streams tapped at model.dflash2.aux_hidden_state_layers, concatenated on the
         // last axis. Empty unless the model was exported with aux_hidden_state_layers.
@@ -519,6 +719,17 @@ struct Config {
     // loads the head as a separate Model; MtpGenerator uses this block to map the main model's
     // hidden-state output and the head's feedback output.
     struct Mtp {
+      bool enabled{true};
+      struct IndexShare {
+        bool enabled{false};
+        int base_capacity{};
+        int max_draft_tokens{};
+        std::string indices_input{"past_indices"};
+        std::string counts_input{"past_counts"};
+        std::string indices_output;
+        std::string counts_output;
+        std::string status_output{"indexer_status"};
+      } index_share;
       std::string filename;  // e.g. "mtp.onnx"; used by model packaging/building tools
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
@@ -533,13 +744,20 @@ struct Config {
       // The main model must be exported with this output exposed (include_hidden_states).
       std::string main_hidden_states{Defaults::HiddenStatesName};
 
+      // The head's paged cache is built from a projection of model.decoder. The head is always an
+      // unquantized full-attention layer: it owns no per-token scale caches, and the projection
+      // clears the target's scale name templates rather than letting the head inherit them.
       struct Inputs {
         std::string input_ids{Defaults::InputIdsName};
         std::string hidden_states{Defaults::HiddenStatesName};
         std::string attention_mask{Defaults::AttentionMaskName};
         std::string position_ids{Defaults::PositionIdsName};
+        std::string rotary_position_ids;
         std::string past_key_names{Defaults::PastKeyName};
         std::string past_value_names{Defaults::PastValueName};
+        std::string past_indexer_names;
+        std::string past_sequence_length;
+        std::string logits_indices;
       } inputs;
 
       struct Outputs {
@@ -547,8 +765,78 @@ struct Config {
         std::string hidden_states{"hidden_states_out"};
         std::string present_key_names{Defaults::PresentKeyName};
         std::string present_value_names{Defaults::PresentValueName};
+        std::string present_indexer_names;
       } outputs;
+
+      bool IsEnabled() const noexcept { return enabled && !filename.empty(); }
     } mtp;
+
+    // Qwen3.8-Flash CUDA-graph decode stack with a built-in MTP(1) self-speculative loop
+    // (model.type "qwen38_flash_graph", served by the Engine). The target session is model.decoder; the head sessions,
+    // the CUDA data-plane library and the PLE table are described here. All paths are relative to the model folder.
+    struct Qwen38Graph {
+      struct Head {
+        std::string filename_s1;  // S=1 draft graph
+        std::string filename_s2;  // S=2 refeed graph
+        std::optional<SessionOptions> session_options;
+      } head;
+
+      std::string plane_library;  // optional libqwen38_plane.so in the model folder; empty or missing uses onnxruntime-genai-cuda
+      std::string ple_table;      // description of the host-registered FP8 PLE shards
+
+      int kv_capacity{33028};
+
+      bool warmup{true};  // Run the graph warm-up (captures every CUDA graph) when the model is created
+
+      // Concurrent request slots of the Engine-hosted decode device, in [1, kMaxBatchSize]. Values above 1 need the fold
+      // stack with unified fast prefill (see ValidateQwen38MultiSlotConfig).
+      static constexpr int kMaxBatchSize{8};
+      int max_batch_size{1};
+      // Set when engine.dynamic_batching resolved to one slot and was cleared for the static Engine path, so
+      // ResolveQwen38MaxBatchSize preserves that authoritative single-slot choice over model.qwen38_graph.max_batch_size,
+      // search.batch_size, and ORT_QWEN38_MAX_BATCH_SIZE.
+      std::optional<int> resolved_max_batch_size;
+
+      struct Mtp {
+        bool enabled{true};       // false: plain S=1 graph decode (no draft/verify)
+        bool prefill_head{true};  // feed the prompt hidden rows to the head (vLLM does the same)
+      } mtp;
+
+      // Folded decode cycle (v12 stack): the MTP head lives inside the verify graph, one graph launch per cycle.
+      // model.decoder is then the fold model (verify S=2 body + head + glue); head_r2 is the standalone R=2 head
+      // session used for the prompt context (pair calls) and the first draft.
+      struct Fold {
+        bool enabled{false};
+        std::optional<int> legacy_target_graph_id;
+        struct HeadR2 {
+          std::string filename;
+          std::optional<int> legacy_graph_id;
+          std::optional<SessionOptions> session_options;
+        } head_r2;
+      } fold;
+
+      // Prompt ingestion. Without `enabled` the prompt is ingested by the decode graphs, `chunk` prompt tokens per
+      // Engine step (an even number, so S=2 pairs stay aligned). With `enabled` it is ingested by the dense chunked
+      // prefill session, `chunk` tokens per call, and its state is handed over to the packed decode state + a batched
+      // KV-only head prefill. The dense/head_kv/decode sessions share one device copy of every identical initializer
+      // (weights_pool, written by the package builders in tools/qwen38_graph/, e.g. build_package_engine_v12b.py).
+      // `chunk` 0 selects the default of the path in use: 2048 tokens per step, 8192 per dense chunk.
+      struct Prefill {
+        bool enabled{false};
+        int chunk{0};
+        std::string weights_pool;  // text manifest of the shared initializers (qwen38_weights_pool 1)
+        std::string constants;     // text index + binary of the QSA hand-off constants (qwen38_qsa_consts 1)
+        struct Model {
+          std::string filename;
+          std::optional<SessionOptions> session_options;
+        } dense, head_kv;
+        std::vector<int> warmup_lengths{8192, 2048, 512, 128, 37};
+      } prefill;
+
+      bool IsConfigured() const noexcept {
+        return !head.filename_s1.empty() || !fold.head_r2.filename.empty() || fold.enabled;
+      }
+    } qwen38_graph;
 
     // DFlash 2/DSpark block-drafter metadata. Unlike MTP the drafter is not decoder-shaped: it
     // reads the main model's auxiliary hidden states, predicts a whole block of tokens at once,
@@ -570,6 +858,18 @@ struct Config {
       int selector_top_k{};
       int mask_token_id{};
       int sliding_window{-1};
+      // How a sampled (non-greedy) turn drafts. Greedy turns always walk the lattice greedily.
+      enum class SampledProposal {
+        None,         // Sampled turns decode without block drafts.
+        GreedyPath,   // Greedy lattice path, verified by sampling the target and matching.
+        Independent,  // Each slot sampled from its own proposal; ratio-verified.
+        Lattice,      // Path sampled through the lattice at the turn's policy; ratio-verified.
+      };
+      SampledProposal sampled_proposal{SampledProposal::Lattice};
+      bool independent_sampling{};
+      float sampling_temperature{0.1f};
+      float sampling_top_p{0.95f};
+      float sampling_min_p{0.3f};
       std::vector<int> aux_hidden_state_layers;
 
       // Name of the main decoder's auxiliary hidden-states output that feeds the drafter.
@@ -578,15 +878,22 @@ struct Config {
       struct Inputs {
         std::string aux_hidden_states{"aux_hidden_states"};
         std::string input_ids{Defaults::InputIdsName};
+        std::string embeddings{Defaults::InputsEmbedsName};
         std::string q_row_map{"q_row_map"};
         std::string qkv_row_map{"qkv_row_map"};
         std::string block_row_index{"block_row_index"};
+        // Optional (LiLiCorr): packed aux_hidden_states row of each request's last context row.
+        std::string anchor_row_index;
         std::string cumulative_sequence_lengths{Defaults::CumulativeSequenceLengthsName};
         std::string past_sequence_lengths{Defaults::PastSequenceLengthsName};
         std::string block_table{Defaults::BlockTableName};
         std::string attention_metadata{Defaults::AttentionMetadataName};
         std::string past_key_names{Defaults::PastKeyName};
         std::string past_value_names{Defaults::PastValueName};
+        // Parsed but not yet implemented: the block drafter owns its own unquantized K/V pool, so a
+        // non-empty value is rejected by ValidateDflash2ModelCompatibility rather than ignored.
+        std::string past_key_scale_names;
+        std::string past_value_scale_names;
       } inputs;
 
       struct Outputs {
@@ -594,6 +901,8 @@ struct Config {
         std::string scores{"draft_scores"};
         std::string present_key_names{Defaults::PresentKeyName};
         std::string present_value_names{Defaults::PresentValueName};
+        std::string present_key_scale_names;
+        std::string present_value_scale_names;
       } outputs;
     } dflash2;
 
@@ -620,6 +929,9 @@ struct Config {
     int random_seed{-1};               // -1 = Seed with random device, otherwise use value to seed RNG
     std::optional<size_t> chunk_size;  // Chunk size for prefill chunking during context processing. If present, chunking is enabled with the chunk size > 0.
     float blank_penalty{};             // Penalty applied to blank token logits in CTC/RNNT decoding. Default 0 means no penalty.
+    bool audio_interleaved{};          // LFM2-Audio: alternate text tokens and audio frames by count (interleaved mode) rather than switching on <|audio_start|>.
+    float audio_temperature{1.0f};     // LFM2-Audio: temperature the audio codes are sampled with. 0 takes the most likely code.
+    int audio_top_k{4};                // LFM2-Audio: number of most likely audio codes kept when sampling. 1 takes the most likely code.
   } search;
 
   struct Speculative {
@@ -636,11 +948,24 @@ struct Config {
 
   struct Engine {
     struct DynamicBatching {
-      size_t block_size{256};                       // Total number of slots per block.
-      std::optional<size_t> num_blocks;             // Total number of blocks per layer.
+      size_t block_size{256};  // Total number of slots per block.
+      // Baseline target blocks; Engine auxiliary caches share the equivalent byte budget.
+      std::optional<size_t> num_blocks;
       std::optional<float> gpu_utilization_factor;  // Fraction of free GPU memory to use for key-value cache.
       size_t max_batch_size{16};                    // Maximum batch size for dynamically batching requests.
       size_t max_scheduled_tokens{2048};            // Maximum tokens in one dynamically batched model run.
+      std::optional<bool> prefix_caching;
+      std::optional<size_t> max_snapshots;  // Optional shared Engine-wide snapshot count limit.
+      struct SnapshotCache {
+        size_t vram_bytes{};
+        size_t ram_bytes{};
+        size_t disk_bytes{};
+        std::string directory;
+        bool explicitly_set{};
+        bool Enabled() const noexcept { return vram_bytes != 0 || ram_bytes != 0 || disk_bytes != 0; }
+        bool Configured() const noexcept { return explicitly_set || Enabled() || !directory.empty(); }
+      } snapshot_cache;
+      size_t dflash2_max_snapshots{1};  // Budget-limited windowed drafter prefix snapshots; 0 disables.
     };
     std::optional<DynamicBatching> dynamic_batching;  // Dynamic batching settings
 
@@ -658,6 +983,47 @@ struct Config {
     bool aux_hidden_states_output_required{};
   } engine;  // Engine settings
 
+  struct RuntimeProfile {
+    std::string id;
+
+    struct Eligibility {
+      std::optional<uint64_t> minimum_total_device_memory_bytes;
+      std::optional<uint64_t> maximum_total_device_memory_bytes;
+      std::optional<uint64_t> minimum_free_device_memory_bytes;
+      std::optional<uint64_t> maximum_free_device_memory_bytes;
+      std::optional<uint64_t> minimum_effective_host_memory_bytes;
+      std::optional<uint64_t> maximum_effective_host_memory_bytes;
+      std::optional<uint64_t> minimum_available_host_memory_bytes;
+      std::optional<bool> is_integrated;
+    } eligibility;
+
+    struct Overlay {
+      struct Model {
+        std::optional<std::string> decoder_filename;
+        std::map<std::string, std::string> decoder_session_options;
+      } model;
+
+      struct DynamicBatching {
+        std::optional<size_t> num_blocks;
+        std::optional<size_t> max_batch_size;
+        std::optional<size_t> max_scheduled_tokens;
+        std::optional<bool> prefix_caching;
+        std::optional<size_t> max_snapshots;
+        std::optional<Engine::DynamicBatching::SnapshotCache> snapshot_cache;
+        std::optional<size_t> dflash2_max_snapshots;
+      } dynamic_batching;
+
+      struct Search {
+        std::optional<size_t> chunk_size;
+      } search;
+
+      struct Speculative {
+        std::optional<int> max_draft_tokens;
+      } speculative;
+    } overlay;
+  };
+  std::vector<RuntimeProfile> runtime_profiles;
+
   void AddMapping(const std::string& nominal_name, const std::string& graph_name);
   // Returns graph name and true if the nominal name is found in the mapping
   // otherwise returns the nominal name and false
@@ -665,7 +1031,20 @@ struct Config {
 
   std::unordered_map<std::string, std::string> nominal_names_to_graph_names_;     // Mapping of nominal input/output names to graph input/output names
   std::unordered_map<std::string, std::span<const std::byte>> model_data_spans_;  // Model bytes to support loading a model from memory
+  bool memory_assets_only_{};
+  std::unordered_map<std::string, std::span<const std::byte>> external_data_spans_;
+  std::shared_ptr<const TokenizerMemoryData> tokenizer_memory_data_;
 };
+
+// Native RGB preprocessing settings; ORT Extensions interprets the processor pipeline.
+struct VisionProcessingConfig {
+  std::array<float, 3> image_mean{};
+  std::array<float, 3> image_std{};
+  std::optional<int64_t> image_height;
+  std::optional<int64_t> image_width;
+};
+
+VisionProcessingConfig LoadVisionProcessingConfig(const fs::path& path);
 
 void SetSearchNumber(Config::Search& search, std::string_view name, double value);
 void SetSearchBool(Config::Search& search, std::string_view name, bool value);
@@ -675,10 +1054,34 @@ void SetSpeculativeBool(Config::Speculative& speculative, std::string_view name,
 // the main model's device, batching and paged-attention contract, but replaces model-specific
 // decoder state with the single MTP attention layer.
 std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config);
+// Fills unset fields of `child` session options from `parent` (providers, provider options, config entries, custom ops).
+// custom_ops_library and custom_ops_libraries are inherited together only when the child sets neither; because
+// custom_ops_libraries is stored as a vector, an explicit `"custom_ops_libraries": []` leaves it empty and still inherits.
+void InheritSessionOptionsFromParent(const Config::SessionOptions& parent, Config::SessionOptions& child);
 void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
 void OverlayConfig(Config& config, std::string_view json);
+struct RuntimeProfileDeviceFacts {
+  uint64_t total_device_memory_bytes{};
+  std::optional<bool> is_integrated;
+  // Unset means unknown: profiles with free-memory bounds do not match.
+  std::optional<uint64_t> free_device_memory_bytes;
+  std::optional<uint64_t> effective_host_memory_bytes;
+  std::optional<uint64_t> available_host_memory_bytes;
+};
+void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device);
+void ApplyRuntimeProfile(Config& config, uint64_t total_device_memory_bytes);
 int SafeDoubleToInt(double x, std::string_view name);
+void ValidateTimestampConfiguration(const Config::Model& model);
+std::optional<int> GetSegmentGapThresholdFrames(const Config::Model& model);
+std::optional<int> GetSegmentGapThresholdFrames(std::optional<double> seconds, int sample_rate,
+                                                int hop_length, int subsampling_factor);
+
+// Logs a warning when the drafter's exported geometry is narrower than
+// speculative.max_draft_tokens. The engine clamps to the smallest bound at dispatch rather than
+// failing, so this is the only signal that a configured width will not be used. Bounds that
+// depend on how the model is hosted are reported by the engine instead.
+void WarnOnClampedDraftWidth(const Config& config);
 
 // Normalizes historical casings, short aliases, and full ORT names (e.g.
 // "CUDAExecutionProvider") to the canonical dispatch-table name; unknown names pass through.

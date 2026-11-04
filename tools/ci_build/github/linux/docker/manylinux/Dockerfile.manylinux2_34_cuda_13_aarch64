@@ -1,0 +1,20 @@
+FROM onnxruntimebuildcache.azurecr.io/public/azureml/onnxruntime_build_cuda13_aarch64_almalinux9_gcc14:20260323.1
+
+ADD scripts /tmp/scripts
+RUN --mount=type=secret,id=pip_index_url,required=true \
+    export PIP_INDEX_URL="$(cat /run/secrets/pip_index_url)" && \
+    cd /tmp/scripts && \
+    /tmp/scripts/install_centos.sh && \
+    /tmp/scripts/install_deps.sh && \
+    rm -rf /tmp/scripts
+ENV PATH="/usr/.cargo/bin:$PATH"
+ENV RUSTUP_HOME="/usr/.rustup"
+ENV CARGO_HOME="/usr/.cargo"
+ARG BUILD_UID=1001
+ARG BUILD_USER=onnxruntimedev
+RUN adduser --uid $BUILD_UID $BUILD_USER
+WORKDIR /home/$BUILD_USER
+USER $BUILD_USER
+ENV PATH="/usr/local/dotnet:$PATH"
+ENV CUDAHOSTCXX=/opt/rh/gcc-toolset-14/root/usr/bin/g++
+ENV CUDA_MODULE_LOADING="LAZY"

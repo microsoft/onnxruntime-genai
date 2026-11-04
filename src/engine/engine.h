@@ -6,10 +6,17 @@
 #include "request.h"
 #include "model_executor.h"
 #include "scheduler.h"
+#include "backend_capabilities.h"
 #include "../decoding/speculative_stats.h"
 #include "../dflash2_drafter.h"
 
+#include <algorithm>
+#include <array>
+#include <functional>
+#include <map>
+#include <random>
 #include <thread>
+#include <utility>
 
 /**
  * @file engine.h
@@ -19,10 +26,19 @@
  */
 
 namespace Generators {
+namespace test {
+struct EngineRunTestAccess;
+}
 
 enum class EngineHealth {
   Healthy,
   Unhealthy,
+};
+
+struct EngineCapabilities {
+  size_t configured_max_batch_size{};
+  size_t max_scheduled_tokens{};
+  uint64_t max_request_length{};
 };
 
 enum class EngineErrorCode : uint32_t {
@@ -71,7 +87,7 @@ using EngineStepErrorFactory =
  * @struct EngineDependencies
  * @brief Bundle of the collaborators the Engine drives.
  *
- * The Engine constructor assembles these from the model via CreateDependencies and forwards them
+ * The Engine constructor assembles these from the model via CreateEngineBackend and forwards them
  * to the dependency-injecting constructor, so there is a single construction flow. The injecting
  * constructor accepts a pre-assembled bundle, which also lets a caller supply alternative
  * collaborators. The cache manager, scheduler, and model executor are all abstract interfaces, so
@@ -87,8 +103,11 @@ struct EngineDependencies {
   std::shared_ptr<CacheManager> mtp_cache_manager;
   std::unique_ptr<ModelExecutor> mtp_model_executor;
   std::unique_ptr<Dflash2Drafter> dflash2_drafter;
+  bool dflash2_prefix_checkpoints_enabled{};
   // Test-only fault injection for allocation-sensitive durable error construction.
   EngineStepErrorFactory make_step_error{};
+  std::shared_ptr<PrefixSnapshotCache> snapshot_cache;
+  std::optional<BackendCapabilities> backend_capabilities;
 };
 
 void ValidateMtpModelCompatibility(const Config& config,
@@ -123,7 +142,7 @@ struct Engine : std::enable_shared_from_this<Engine>,
    *              and its components.
    *
    * Assembles the Engine's scheduler, cache manager, and model executor for the model via
-   * CreateDependencies and delegates to the dependency-injecting constructor. Behavior is identical
+   * CreateEngineBackend and delegates to the dependency-injecting constructor. Behavior is identical
    * to constructing those collaborators inline.
    */
   Engine(std::shared_ptr<Model> model);
@@ -189,15 +208,32 @@ struct Engine : std::enable_shared_from_this<Engine>,
    */
   SpeculativeStats GetSpeculativeStats() const;
 
+  EngineCapabilities GetCapabilities() const;
+
+  /**
+   * @brief Returns a snapshot of cumulative prefix-cache activity, when available.
+   *
+   * Must be called from the Engine owner thread: the counters are updated by Run() without
+   * synchronization.
+   */
+  std::optional<PrefixCacheMetrics> PrefixCacheStats() const;
+
   uint64_t BeginTurn(const std::shared_ptr<Request>& request,
                      std::span<const int32_t> tokens,
                      const TurnOptions& options);
+  void RewindRequestToStartOfTurn(
+      const std::shared_ptr<Request>& request, uint64_t turn_id);
   void CloseRequest(const std::shared_ptr<Request>& request);
   bool CancelRequest(const std::shared_ptr<Request>& request, uint64_t turn_id);
 
  private:
+  friend struct test::EngineRunTestAccess;
   void DetachRequestForTeardown(
       const std::shared_ptr<Request>& request) noexcept;
+  // Logs one warning when the hosted speculative path cannot deliver the configured
+  // speculative.max_draft_tokens. Only known once the cache manager and drafter exist, so it
+  // complements the config-time drafter geometry check in WarnOnClampedDraftWidth().
+  void WarnOnClampedDraftWidth() const;
   void ReclaimAbandonedRequests();
   void CompleteNonresidentClosedRequests();
   size_t DrainPendingEvents(std::span<EngineEvent> events);
@@ -240,6 +276,8 @@ struct Engine : std::enable_shared_from_this<Engine>,
   // feeds are captured before Request::CommitStep clears the accepted-draft counts they depend on.
   void PrepareDflash2Feeds(const StepPlan& plan, const std::vector<RequestStepResult>& results);
   void PublishDflash2Drafts(ScheduledRequests& scheduled_requests);
+  void ReleaseConsumedDflash2Checkpoints() noexcept;
+  void PublishDflash2DraftResults();
   // Accounts for a recoverable DFlash 2 failure and decides whether the drafter stays enabled.
   void RecordDflash2Failure(std::exception_ptr error, bool contract_error);
   void RecordSpeculativeCommit(const StepPlan& plan) noexcept;
@@ -254,10 +292,12 @@ struct Engine : std::enable_shared_from_this<Engine>,
                                           std::string_view message,
                                           std::exception_ptr error);
 
-  std::shared_ptr<Model> model_;                   // The model used by the Engine.
-  std::shared_ptr<CacheManager> cache_manager_;    // The cache manager for handling cached data.
+  std::shared_ptr<Model> model_;                 // The model used by the Engine.
+  std::shared_ptr<CacheManager> cache_manager_;  // The cache manager for handling cached data.
+  std::shared_ptr<PrefixSnapshotCache> snapshot_cache_;
   std::unique_ptr<Scheduler> scheduler_;           // The scheduler responsible for managing execution order.
   std::unique_ptr<ModelExecutor> model_executor_;  // The executor responsible for running the model.
+  BackendCapabilities backend_capabilities_;
   // Lazily created on the first stop-enabled BeginTurn (the no-stop fast path never touches this).
   // Shared by every Request's StopStringController so the tokenizer's underlying vocabulary/config
   // is loaded once per Engine rather than once per Request.
@@ -266,15 +306,75 @@ struct Engine : std::enable_shared_from_this<Engine>,
   // the Engine so both cache pools share one memory budget; draft orchestration is added separately.
   std::shared_ptr<DecoderOnly_Model> mtp_model_;
   std::shared_ptr<CacheManager> mtp_cache_manager_;
+  struct MtpChainState {
+    using Banks = std::array<std::unique_ptr<OrtValue>, 2>;
+    std::vector<Banks> buffers;
+    std::map<size_t, std::vector<Banks>> views;
+  } mtp_chain_state_;
+  struct IndexShareBuffers {
+    size_t max_batch{};
+    DeviceSpan<int32_t> extend_indices;
+    DeviceSpan<int32_t> extend_counts;
+    DeviceSpan<int32_t> indices;
+    DeviceSpan<int32_t> counts;
+    DeviceSpan<int32_t> capture_ends;
+    DeviceSpan<int32_t> extend_row_indices;
+    std::vector<DeviceSpan<int32_t>> row_indices;
+    DeviceSpan<int32_t> status;
+    std::array<int32_t, 2> modes{0, 1};
+    DeviceSpan<int64_t> projection_rows;
+    std::vector<DeviceSpan<int64_t>> stage_projection_rows;
+    std::vector<DeviceSpan<int32_t>> range_starts;
+    std::vector<DeviceSpan<int32_t>> range_ends;
+    DeviceSpan<int32_t> stage_indices;
+    DeviceSpan<int32_t> stage_counts;
+    std::vector<std::vector<DeviceSpan<uint8_t>>> stage_state_inputs;
+    std::vector<std::vector<DeviceSpan<uint8_t>>> stage_state_outputs;
+    std::vector<std::vector<DeviceSpan<uint8_t>>> stage_state_updates;
+    std::vector<DeviceSpan<int32_t>> stage_capture_counts;
+    struct ViewKey {
+      void* data{};
+      ONNXTensorElementDataType type{};
+      std::vector<int64_t> shape;
+    };
+    struct ViewLookup {
+      void* data{};
+      ONNXTensorElementDataType type{};
+      std::span<const int64_t> shape;
+    };
+    struct ViewLess {
+      using is_transparent = void;
+      template <typename Left, typename Right>
+      bool operator()(const Left& left, const Right& right) const {
+        if (left.data != right.data) return std::less<void*>{}(left.data, right.data);
+        if (left.type != right.type) return left.type < right.type;
+        return std::lexicographical_compare(left.shape.begin(), left.shape.end(),
+                                            right.shape.begin(), right.shape.end());
+      }
+    };
+    std::map<ViewKey, std::unique_ptr<OrtValue>, ViewLess> views;
+    std::vector<std::vector<FixedStateSlotHandle>> stage_slots;
+    std::vector<std::vector<FixedStateBinding>> stage_bindings;
+    struct ExtraBindingLayout {
+      std::vector<const void*> tensor_addresses;
+    };
+    // The tuple names views of this owner's fixed buffers. A layout object is never replaced,
+    // so its address is an exact, owner-lifetime graph identity rather than a pointer hash.
+    std::map<std::array<size_t, 6>, std::unique_ptr<ExtraBindingLayout>> extra_layouts;
+  } mtp_indexshare_buffers_;
   std::unique_ptr<ModelExecutor> mtp_model_executor_;
   std::unordered_map<const Request*, std::shared_ptr<Request>> mtp_requests_;
   size_t mtp_consecutive_failures_{};
   bool mtp_disabled_{};
   // Present only when model.dflash2 names a block drafter. Owns its own session and paged cache.
   std::unique_ptr<Dflash2Drafter> dflash2_drafter_;
+  bool dflash2_prefix_checkpoints_enabled_{};
   std::vector<Dflash2Drafter::Feed> dflash2_feeds_;
   std::vector<std::vector<int32_t>> dflash2_drafts_;
+  std::vector<std::vector<TargetTokenSelection>> dflash2_draft_distributions_;
+  std::vector<Dflash2Lattice> dflash2_lattices_;
   std::vector<size_t> dflash2_draft_widths_;
+  std::vector<std::pair<Request*, std::mt19937>> dflash2_rng_checkpoints_;
   size_t dflash2_consecutive_failures_{};
   bool dflash2_disabled_{};
   DeviceSpan<int32_t> mtp_device_drafts_;

@@ -3,14 +3,15 @@
 #
 # Single entry point that builds the core once per (EP, os, arch) and layers the
 # SDKs (Python, C#, Java) incrementally against the prebuilt core, plus the
-# bespoke Apple (iOS xcframework) and Android (AAR) artifacts and the .Foundry
-# NuGet. Feed-isolated to the internal Lotus feed; every published binary/package
-# is ESRP-signed where the platform supports it.
+# bespoke Apple (iOS xcframework) and Android (AAR) artifacts, the .Foundry
+# NuGet, and native-only onnxruntime-genai-core wheels. Feed-isolated to the
+# internal Lotus feed; every published binary/package is ESRP-signed where
+# the platform supports it.
 #
-# The matrix is fixed per EP (goal 8); the pipeline inputs only select the EP(s),
+# The matrix is fixed per EP; the pipeline inputs only select the EP(s),
 # the build-time ORT versions, and the CUDA toolkit version:
 #   CPU  : win-x64, win-arm64, macos-arm64, linux-x64, linux-arm64, android, ios
-#   CUDA : win-x64, win-arm64, linux-x64
+#   CUDA : win-x64, win-arm64, linux-x64, linux-arm64
 # =============================================================================
 
 parameters:
@@ -48,7 +49,10 @@ parameters:
   default: '2.1.1'
 
 # ---- CUDA toolkit version --------------------------------------------------
-# Windows ARM64 core builds always use CUDA 13.1 because CUDA 12.8 is unsupported.
+# Windows and Linux ARM64 CUDA builds use CUDA 13.1 regardless of this setting.
+# Linux ARM64 also uses ORT 1.30.0 regardless of ort_build_version or
+# ort_runtime_version: GPU.Linux NuGet releases have no ARM64 binaries, while
+# onnxruntime-gpu 1.30.0 publishes a CUDA 13 manylinux ARM64 runtime.
 - name: cuda_version
   displayName: 'CUDA toolkit version'
   type: string
@@ -85,6 +89,10 @@ extends:
       name: 'onnxruntime-Win-CPU-2022'
       os: windows
     sdl:
+      componentgovernance:
+        # These upstream docs/tests are not built or shipped; retain native dependency coverage.
+        ignoreDirectories: >-
+          $(Build.SourcesDirectory)/build/core/Release/_deps/nlohmann_json-src/docs/mkdocs,$(Build.SourcesDirectory)/build/core/Release/_deps/matsdk_mbedtls-src/docs,$(Build.SourcesDirectory)/build/core/Release/_deps/matsdk_curl-src/tests
       policheck:
         enabled: true
         break: true
@@ -92,6 +100,8 @@ extends:
       tsa:
         enabled: true
         configFile: '$(Build.SourcesDirectory)/.config/tsaoptions.json'
+    settings:
+      networkIsolationPolicy: CFSClean,CFSClean2,CFSClean3,DefaultDeny
     stages:
     # ---- Version (compute the shared package version once) -----------------
     - template: stages/version-stage.yml
@@ -126,7 +136,7 @@ extends:
         ort_version: ${{ parameters.ort_build_version }}
         enable_cpu: ${{ parameters.enable_cpu }}
 
-    # ---- SDK · Python (CPU + CUDA + WinML wheels) -------------------------
+    # ---- SDK · Python (CPU + CUDA + WinML + native-only core wheels) -------
     - template: stages/sdk-python-stage.yml
       parameters:
         ort_version: ${{ parameters.ort_build_version }}
