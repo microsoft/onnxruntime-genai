@@ -196,7 +196,8 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
   const size_t cache_query_token_cap = cache_manager_->MaxQueryTokensPerRequest();
   const size_t max_draft_token_count = cache_manager_->MaxDraftTokensPerStep();
 
-  const auto add_candidate = [&candidates, cache_query_token_cap, max_draft_token_count,
+  const uint64_t service_clock = ++chunk_service_clock_;
+  const auto add_candidate = [&candidates, cache_query_token_cap, max_draft_token_count, service_clock,
                               this](
                                  const std::shared_ptr<Request>& request,
                                  bool newly_admitted) {
@@ -252,6 +253,8 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
         static_cast<size_t>(remaining_token_count),
         chunk_token_cap,
         candidate.entry.draft_token_count,
+        // An admission waits behind every row already in line for spare tokens.
+        newly_admitted ? service_clock : request->ChunkServiceStamp(),
     };
     candidate.processed_sequence_length =
         effective_processed_sequence_length;
@@ -351,7 +354,7 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
   std::vector<size_t> token_counts;
   try {
     token_counts = AllocateDecodeFirstTokenBudget(
-        selected_candidates, dynamic_batching.max_scheduled_tokens, chunk_budget_rotation_++);
+        selected_candidates, dynamic_batching.max_scheduled_tokens);
   } catch (const std::invalid_argument& error) {
     throw StepPlanningConsistencyError(error.what());
   }
@@ -365,6 +368,12 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     entry.target_cache_slots = RequiredSlots(
         selected_processed_lengths[index],
         entry.unprocessed_token_count);
+    const auto& budget = selected_candidates[index];
+    const bool read_spare_chunk_tokens =
+        (budget.is_prefill || budget.pending_token_count > 1) && token_counts[index] > 1;
+    if (entry.newly_admitted || read_spare_chunk_tokens) {
+      entry.chunk_service_stamp = service_clock;
+    }
   }
 
   // Only drafts push a request's reserved slots past the probe that was just validated: every

@@ -43,8 +43,7 @@ size_t DecodeFirstProvisionalRequestLimit(
 
 std::vector<size_t> AllocateDecodeFirstTokenBudget(
     std::span<const DecodeFirstBudgetCandidate> selected_candidates,
-    size_t max_scheduled_tokens,
-    size_t rotation) {
+    size_t max_scheduled_tokens) {
   if (max_scheduled_tokens == 0)
     throw std::invalid_argument("The scheduled token budget must be positive.");
   if (selected_candidates.size() > max_scheduled_tokens)
@@ -69,17 +68,19 @@ std::vector<size_t> AllocateDecodeFirstTokenBudget(
     verifies_drafts |= additional_tokens != 0;
   }
 
-  // Chunk work shares what drafts leave, starting from a different row each step so no position in
-  // the order always comes first. A decode row reading its unread committed tokens reads only one
-  // while a peer verifies drafts, so it never holds that verification back.
+  // Chunk work shares what drafts leave, the row that has waited longest first, so a steady stream
+  // of other rows cannot keep any one of them from spare tokens. A decode row reading its unread
+  // committed tokens reads only one while a peer verifies drafts, so it never holds that back.
   std::vector<size_t> chunk_rows;
   for (size_t i = 0; i < selected_candidates.size(); ++i) {
     const auto& candidate = selected_candidates[i];
     if (candidate.is_prefill || (candidate.pending_token_count > 1 && !verifies_drafts))
       chunk_rows.push_back(i);
   }
-  for (size_t k = 0; k < chunk_rows.size(); ++k) {
-    const size_t i = chunk_rows[(rotation + k) % chunk_rows.size()];
+  std::stable_sort(chunk_rows.begin(), chunk_rows.end(), [&](size_t left, size_t right) {
+    return selected_candidates[left].last_chunk_service < selected_candidates[right].last_chunk_service;
+  });
+  for (const size_t i : chunk_rows) {
     const size_t additional_tokens =
         std::min(ChunkLimit(selected_candidates[i]) - 1, remaining_budget);
     token_counts[i] += additional_tokens;

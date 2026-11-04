@@ -523,6 +523,9 @@ struct Request : std::enable_shared_from_this<Request>,
    */
   size_t ScheduledTokenCount() const;
 
+  // The scheduler clock value at which this request was admitted or last read spare chunk tokens.
+  uint64_t ChunkServiceStamp() const noexcept { return chunk_service_stamp_; }
+
   /**
    * @brief True when this step's tokens run to the end of the sequence and the Request samples.
    *
@@ -668,6 +671,7 @@ struct Request : std::enable_shared_from_this<Request>,
   // request is still prefilling while processed_sequence_length_ has not caught up with it.
   int64_t prompt_sequence_length_{};
   size_t scheduled_token_count_{};
+  uint64_t chunk_service_stamp_{};
   // The committed turn's resolved policy. The constructor resolves it from the model's own search
   // defaults so an unadmitted Request already has a complete one.
   EffectiveTurnPolicy turn_policy_;

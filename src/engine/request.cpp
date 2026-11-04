@@ -1155,6 +1155,9 @@ void Request::CommitStep(const RequestStepPlan& plan,
   // at this commit boundary.
   const size_t accepted_drafts = accepted_draft_count_;
   turn_generated_tokens_ += accepted_drafts;
+  if (plan.chunk_service_stamp != 0) {
+    chunk_service_stamp_ = plan.chunk_service_stamp;
+  }
   if (result.token_appended) {
     tokens_host_.push_back(result.token);
     ++turn_generated_tokens_;

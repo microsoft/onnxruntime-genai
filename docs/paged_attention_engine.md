@@ -1074,11 +1074,11 @@ If at least one request fits, the step is executable even when other requests we
 
 After cache planning selects the batch, every selected request keeps its one-token contribution and
 decode rows add their drafts. The remaining tokens go to chunk work (prefill chunks and decode rows
-with unread guidance fast-forward tokens), starting from a row that rotates every step. A prefill
-chunk is bounded by its remaining prompt, the model-configured `search.chunk_size` when present,
-the cache's per-request query cap, and `max_scheduled_tokens`; a fast-forward row by its unread
-tokens and the same query cap and budget. In a step that verifies drafts, a fast-forward row reads
-one unread token.
+with unread guidance fast-forward tokens), the row that has waited longest for spare tokens first;
+an admission counts as service, so new requests queue behind waiting ones. A prefill chunk is
+bounded by its remaining prompt, the model-configured `search.chunk_size` when present, the cache's
+per-request query cap, and `max_scheduled_tokens`; a fast-forward row by its unread tokens and the
+same query cap and budget. In a step that verifies drafts, a fast-forward row reads one unread token.
 
 The scheduler recomputes cache targets and assigns each request:
 
@@ -2325,10 +2325,10 @@ The current ordering policy is:
 1. Consider decodes first, preserving their resident order.
 2. Consider prefills afterward, preserving resident order and then scheduler-pool order.
 3. Give every feasible selected row one token, then decode drafts their tokens.
-4. Share the remaining tokens among selected prefills and fast-forward rows, starting from a row
-   that rotates every step.
+4. Share the remaining tokens among selected prefills and fast-forward rows, the one that has
+   waited longest since its admission or its last share first.
 
-Requests skipped because of token, row, or temporary cache capacity remain pending for a later step. Selection does not rotate or promote waiting prefills, so sustained decode demand can keep a prefill from being selected; a selected one always receives a share of spare tokens within as many steps as there are chunk-work rows.
+Requests skipped because of token, row, or temporary cache capacity remain pending for a later step. Selection does not rotate or promote waiting prefills, so sustained decode demand can keep a prefill from being selected. Once selected, a chunk-work row is served before every row that read spare tokens or was admitted after its own last share, so new arrivals cannot keep it waiting.
 
 If no request can run because of temporary capacity, `RunDynamic()` reports `CapacityDeferred` instead of returning `nullptr`. Returning `nullptr` would incorrectly tell the caller that no work remains.
 
