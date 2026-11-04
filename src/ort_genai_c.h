@@ -1641,11 +1641,22 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetGuidance(
  *
  * When the grammar allows only one continuation, its tokens are committed without sampling, at most
  * eight per step counting the sampled token, and the model reads them on later steps rather than in
- * one decode step each. The forced text is the same, but its token IDs follow the grammar's
- * tokenization and may differ from what the model would sample, so later unconstrained output can
- * differ from a Turn without fast-forward. Off by default. Admission rejects a Turn that enables it
- * without whole-turn guidance (OgaTurnOptionsSetGuidance), with a nonzero no_repeat_ngram_size, or
- * on an Engine without dynamic batching.
+ * one decode step each. Off by default because it changes what the Turn generates: forced token
+ * IDs follow the grammar's tokenization rather than the model's choice, and forced tokens draw no
+ * random numbers, so token IDs, random-number consumption, and later values both inside and after
+ * the grammar can differ from a Turn without fast-forward.
+ *
+ * Admission rejects a Turn that enables it without whole-turn guidance (OgaTurnOptionsSetGuidance;
+ * delimited guidance is not supported), with a nonzero no_repeat_ngram_size, or on an Engine
+ * without dynamic batching.
+ *
+ * Other requests on the Engine see only scheduling effects: a step in which this Turn reads several
+ * forced tokens runs the whole batch without CUDA graph replay, and while another request verifies
+ * speculative drafts this Turn reads one forced token per step.
+ *
+ * As for any guided Turn, only an end-of-sequence finish means the grammar accepted the output. A
+ * Turn that ended on a turn or context limit, a stop string, or cancellation can hold incomplete
+ * JSON or tool arguments, so check the finish reason and validate the result before acting on it.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetGuidanceFastForward(
     OgaTurnOptions* options, bool enable);

@@ -1244,7 +1244,8 @@ struct OgaTurnOptions : OgaAbstract {
     OgaCheckResult(OgaTurnOptionsSetGuidance(this, type, data));
   }
   /** Lets the whole-turn grammar append the tokens it forces instead of sampling them. Off by
-   *  default; the forced text is the same, but its token IDs (and so later output) may differ. */
+   *  default: forced token IDs follow the grammar's tokenization and draw no random numbers, so
+   *  token IDs and later output may differ. See OgaTurnOptionsSetGuidanceFastForward. */
   void SetGuidanceFastForward(bool enable) {
     OgaCheckResult(OgaTurnOptionsSetGuidanceFastForward(this, enable));
   }

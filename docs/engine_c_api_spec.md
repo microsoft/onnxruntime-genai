@@ -261,10 +261,14 @@ draft-eligible again. Guidance and stop strings can be enabled together.
 
 `OgaTurnOptionsSetGuidanceFastForward` lets whole-turn guidance append the tokens the grammar forces
 after a sampled token, at most `kMaxGeneratedTokensPerStep` per step including the sampled token;
-the rest are published, instead of sampling, on later steps. It is off by default because forced
-token IDs follow the grammar's tokenization, requires whole-turn guidance and dynamic batching, and
-is turned off by `OgaTurnOptionsClearGuidance`. Forced tokens bypass `no_repeat_ngram_size`, so
-admission rejects a nonzero resolved value.
+the rest are published, instead of sampling, on later steps. It is off by default: forced token IDs
+follow the grammar's tokenization and draw no random numbers, so token IDs, random-number
+consumption, and later values inside and after the grammar can differ from a turn without it. It
+requires whole-turn guidance and dynamic batching, admission rejects a nonzero resolved
+`no_repeat_ngram_size` (forced tokens would bypass it), and `OgaTurnOptionsClearGuidance` turns it
+off. Other requests see only scheduling effects: a step that reads several forced tokens runs
+without CUDA graph replay, and while a peer verifies drafts the turn reads one forced token per
+step.
 
 `OgaTurnOptionsSetDelimitedGuidance` instead copies a Lark grammar for the body after a committed
 opening token and before a closing token. Admission checks that the distinct marker IDs are
