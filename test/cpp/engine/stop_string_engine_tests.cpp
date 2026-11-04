@@ -137,52 +137,6 @@ class StopStringEngineTest : public ::testing::Test {
 // Request-level transactional behavior (direct Search/logits driving, no Engine::Run involved).
 // ---------------------------------------------------------------------------------------------
 
-// Exercise CUDA's shared next-token-slot lifetime with real CPU EOS/search semantics.
-class SharedSlotSearch final : public GreedySearch_Cpu {
- public:
-  using GreedySearch_Cpu::GreedySearch_Cpu;
-  bool BindNextTokensSlot(DeviceSpan<int32_t> slot) override {
-    if (params_->BatchBeamSize() != 1 || slot.size() != 1)
-      return false;
-    next_tokens_ptr_ = slot;
-    next_tokens_ = cpu_span<int32_t>(slot.Span());
-    return true;
-  }
-};
-
-class SharedSlotDevice final : public DeviceInterface {
- public:
-  explicit SharedSlotDevice(DeviceInterface& inner) : inner_{inner} {}
-  DeviceType GetType() const override { return inner_.GetType(); }
-  void InitOrt(const OrtApi& api, Ort::Allocator& allocator) override {
-    inner_.InitOrt(api, allocator);
-  }
-  Ort::Allocator& GetAllocator() override { return inner_.GetAllocator(); }
-  std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
-    return inner_.GetMemoryInfo();
-  }
-  std::string GetExecutionProviderName() const override {
-    return inner_.GetExecutionProviderName();
-  }
-  std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
-    return inner_.AllocateBase(size);
-  }
-  std::shared_ptr<DeviceBuffer> WrapMemoryBase(void* memory, size_t size) override {
-    return inner_.WrapMemoryBase(memory, size);
-  }
-  std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) override {
-    return std::make_unique<SharedSlotSearch>(params);
-  }
-  std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) override {
-    return inner_.CreateBeam(params);
-  }
-  std::unique_ptr<KeyValueCache> CreateKeyValueCache(State&) override { return {}; }
-  void Synchronize() override { inner_.Synchronize(); }
-
- private:
-  DeviceInterface& inner_;
-};
-
 TEST_F(StopStringEngineTest, AcceptedDraftEosSurvivesCompactedSharedSlotAndRollback) {
   SharedSlotDevice device{*model_->p_device_scoring_};
   ScopedScoringDevice scoring{*model_, device};

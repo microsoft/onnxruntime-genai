@@ -396,6 +396,30 @@ TEST_F(GuidanceFastForwardTest, CancelKeepsPublishedTokensAndDropsTheUnpublished
   EXPECT_EQ(std::vector<int32_t>(continued.begin(), continued.end()), Concat(published, {5, 30}));
 }
 
+// A batched sampler hands its output slots to whichever requests sample next. A row publishing
+// forced tokens commits them without sampling, so it must stop writing the slot it was last bound to
+// before a sampling peer that now owns that slot reads it.
+TEST_F(GuidanceFastForwardTest, PublishingRowLeavesThePeerOwnedSamplerSlotIntact) {
+  SharedSlotDevice device{*model_->p_device_scoring_, /*reports_batched_sampling=*/true};
+  ScopedScoringDevice scoring{*model_, device};
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
+  auto peer = CreateEngineRequest(engine.engine);
+  auto forcing = CreateEngineRequest(engine.engine);
+  peer->BeginTurn(Prompt());
+  forcing->BeginTurn(Prompt());
+  InstallForcingGrammar(*forcing, /*trigger=*/11, {12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22});
+  std::array<EngineEvent, 16> storage;
+  ASSERT_EQ(engine.engine->Run(storage), 9u);  // peer: 11; forcing: 11 through 18
+
+  auto slot = model_->p_device_scoring_->Allocate<int32_t>(1);
+  ASSERT_TRUE(forcing->BindNextTokensSlot(slot));
+  ASSERT_TRUE(peer->BindNextTokensSlot(slot));
+  engine.executor->SetForcedToken(30);
+  ASSERT_EQ(engine.engine->Run(storage), 5u);  // peer: 30; forcing: 19 through 22
+  EXPECT_EQ(EventTokens(std::span{storage}.first(5)), (std::vector<int32_t>{30, 19, 20, 21, 22}));
+  EXPECT_EQ(slot.CpuSpan()[0], 30);
+}
+
 TEST_F(GuidanceFastForwardTest, StaticBatchingRejectsAFastForwardTurnWithoutConsumingIt) {
   model_->config_->engine.dynamic_batching.reset();
   auto cache = std::make_shared<RecordingCacheManager>(

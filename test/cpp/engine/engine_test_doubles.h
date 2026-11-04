@@ -653,6 +653,60 @@ struct RecordingModelExecutor : ModelExecutor {
   ONNXTensorElementDataType hidden_type_{Ort::TypeToTensorType<float>};
 };
 
+// Exercises CUDA's shared next-token-slot lifetime with real CPU EOS/search semantics: like
+// GreedySearch_Cuda, every token this search selects or commits is written into its bound slot.
+class SharedSlotSearch final : public GreedySearch_Cpu {
+ public:
+  SharedSlotSearch(const GeneratorParams& params, bool reports_batched_sampling)
+      : GreedySearch_Cpu{params}, reports_batched_sampling_{reports_batched_sampling} {}
+  bool BindNextTokensSlot(DeviceSpan<int32_t> slot) override {
+    if (params_->BatchBeamSize() != 1 || slot.size() != 1)
+      return false;
+    next_tokens_ptr_ = slot;
+    next_tokens_ = cpu_span<int32_t>(slot.Span());
+    return true;
+  }
+  bool SupportsBatchedSampling() const override { return reports_batched_sampling_; }
+
+ private:
+  bool reports_batched_sampling_;
+};
+
+class SharedSlotDevice final : public DeviceInterface {
+ public:
+  explicit SharedSlotDevice(DeviceInterface& inner, bool reports_batched_sampling = false)
+      : inner_{inner}, reports_batched_sampling_{reports_batched_sampling} {}
+  DeviceType GetType() const override { return inner_.GetType(); }
+  void InitOrt(const OrtApi& api, Ort::Allocator& allocator) override {
+    inner_.InitOrt(api, allocator);
+  }
+  Ort::Allocator& GetAllocator() override { return inner_.GetAllocator(); }
+  std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
+    return inner_.GetMemoryInfo();
+  }
+  std::string GetExecutionProviderName() const override {
+    return inner_.GetExecutionProviderName();
+  }
+  std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
+    return inner_.AllocateBase(size);
+  }
+  std::shared_ptr<DeviceBuffer> WrapMemoryBase(void* memory, size_t size) override {
+    return inner_.WrapMemoryBase(memory, size);
+  }
+  std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) override {
+    return std::make_unique<SharedSlotSearch>(params, reports_batched_sampling_);
+  }
+  std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) override {
+    return inner_.CreateBeam(params);
+  }
+  std::unique_ptr<KeyValueCache> CreateKeyValueCache(State&) override { return {}; }
+  void Synchronize() override { inner_.Synchronize(); }
+
+ private:
+  DeviceInterface& inner_;
+  bool reports_batched_sampling_;
+};
+
 struct CountingCudaDeviceState {
   size_t device_to_host_copies{};
   size_t host_to_device_copies{};
