@@ -806,34 +806,37 @@ void ScheduledRequests::BeginTransaction() {
   transaction_uses_batched_sampler_ = PrepareBatchedSamplingPlan(true);
   checkpointed_sampler_states_.clear();
   try {
-    std::vector<size_t> greedy_drafted_rows;
+    std::vector<size_t> external_commit_rows;
     for (size_t i = 0; i < requests_.size(); ++i) {
       const auto& request = requests_[i];
       const bool uses_batched_sampler =
           transaction_uses_batched_sampler_ &&
           std::find(sampling_plan_->requests.begin(), sampling_plan_->requests.end(),
                     request.get()) != sampling_plan_->requests.end();
-      // A greedy drafted request selects its tokens from the verification argmax and commits them
-      // into a slot this transaction owns (bound below), so like a batched-sampled request its
-      // Search owns no RNG or next-token scratch worth checkpointing.
+      // A greedy drafted request selects its tokens from the verification argmax, and a request
+      // publishing forced tokens commits them without sampling. Either commits into a slot this
+      // transaction owns (bound below), so like a batched-sampled request its Search owns no RNG or
+      // next-token scratch worth checkpointing.
       const bool commits_external_tokens =
-          i < draft_token_counts_.size() && draft_token_counts_[i] != 0 &&
-          request->TurnPolicy().IsGreedy() && request->SupportsBatchedSampling();
+          request->SupportsBatchedSampling() &&
+          ((i < draft_token_counts_.size() && draft_token_counts_[i] != 0 &&
+            request->TurnPolicy().IsGreedy()) ||
+           request->PublishesForcedTokens());
       if (uses_batched_sampler || commits_external_tokens)
         request->SaveStateForExternalSamplingTransaction();
       else
         request->SaveStateForTransaction();
       ++transaction_checkpoint_count_;
       if (commits_external_tokens)
-        greedy_drafted_rows.push_back(i);
+        external_commit_rows.push_back(i);
     }
     // Such a Search may still be bound to a batched-sampler slot from an earlier step, which the
     // sampler now hands to another request. Give it a private slot before it commits any token.
-    if (!greedy_drafted_rows.empty()) {
-      auto slots = model_->p_device_->Allocate<int32_t>(greedy_drafted_rows.size());
-      for (size_t row = 0; row < greedy_drafted_rows.size(); ++row) {
-        if (!requests_[greedy_drafted_rows[row]]->BindNextTokensSlot(slots.subspan(row, 1)))
-          throw std::logic_error("A greedy drafted request lost batched-search support.");
+    if (!external_commit_rows.empty()) {
+      auto slots = model_->p_device_->Allocate<int32_t>(external_commit_rows.size());
+      for (size_t row = 0; row < external_commit_rows.size(); ++row) {
+        if (!requests_[external_commit_rows[row]]->BindNextTokensSlot(slots.subspan(row, 1)))
+          throw std::logic_error("A request committing its own tokens lost batched-search support.");
       }
     }
     // Drafts join the sequence only after every checkpoint exists, so an abort rewinds them for
