@@ -3168,6 +3168,54 @@ class TestStoragePathSafety(unittest.TestCase):
         self.assertIsNone(store._db_fd)
         connect.assert_not_called()
 
+    @unittest.skipIf(os.name == "nt", "POSIX no-follow chmod compatibility")
+    def test_private_storage_works_without_nofollow_chmod(self):
+        from telemetry.offline_store import OfflineEventStore
+
+        database = self.root / "queue.db"
+        with patch(
+            "telemetry.storage_paths.os.chmod",
+            side_effect=NotImplementedError("chmod: follow_symlinks unavailable on this platform"),
+        ):
+            store = OfflineEventStore(str(database))
+            try:
+                self.assertTrue(store.is_open)
+                self.assertTrue(store.store(b'{"event":1}'))
+                self.assertEqual([payload for _, payload in store.get_batch(10)], [b'{"event":1}'])
+            finally:
+                store.close()
+            reopened = OfflineEventStore(str(database))
+            try:
+                self.assertTrue(reopened.is_open)
+                self.assertEqual([payload for _, payload in reopened.get_batch(10)], [b'{"event":1}'])
+            finally:
+                reopened.close()
+        self.assertEqual(stat.S_IMODE(database.stat().st_mode), 0o600)
+
+    @unittest.skipIf(os.name == "nt", "POSIX file permission hardening")
+    def test_existing_database_still_requires_private_permissions(self):
+        from telemetry.offline_store import OfflineEventStore
+
+        database = self.root / "queue.db"
+        database.touch(mode=0o600)
+        database.chmod(0o644)
+        with patch(
+            "telemetry.storage_paths.os.chmod",
+            side_effect=NotImplementedError("chmod: follow_symlinks unavailable on this platform"),
+        ):
+            store = OfflineEventStore(str(database))
+        self.assertFalse(store.is_open)
+        self.assertIsNone(store._directory)
+        self.assertIsNone(store._db_fd)
+        self.assertEqual(stat.S_IMODE(database.stat().st_mode), 0o644)
+
+        store = OfflineEventStore(str(database))
+        try:
+            self.assertTrue(store.is_open)
+            self.assertEqual(stat.S_IMODE(database.stat().st_mode), 0o600)
+        finally:
+            store.close()
+
     @unittest.skipIf(os.name == "nt", "Windows pinned handles prevent replacing the open database")
     def test_database_replacement_cannot_create_a_redirected_file(self):
         import sqlite3

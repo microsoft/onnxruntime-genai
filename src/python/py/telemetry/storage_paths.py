@@ -277,7 +277,10 @@ class StorageDirectory:
     def harden_file(self, name):
         self.validate_file(name)
         if self._fd is not None:
-            os.chmod(name, 0o600, dir_fd=self._fd, follow_symlinks=False)
+            info = os.stat(name, dir_fd=self._fd, follow_symlinks=False)
+            # Older libc versions cannot chmod without following symlinks.
+            if stat.S_IMODE(info.st_mode) != 0o600:
+                os.chmod(name, 0o600, dir_fd=self._fd, follow_symlinks=False)
         else:
             fd = self.open_file(name, os.O_RDONLY)
             os.close(fd)
