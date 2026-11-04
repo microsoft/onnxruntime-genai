@@ -206,7 +206,7 @@ class Scenario:
 
     def run(self, arrivals):
         """`arrivals` holds (seconds after start, callback that begins a turn arriving at a time)."""
-        started = time.perf_counter()
+        started = self.started = time.perf_counter()
         stats_before = self.engine.get_speculative_stats()
         pending = sorted(arrivals, key=lambda arrival: arrival[0])
         while pending or self.maybe_buffered or self.engine.has_pending_requests():
@@ -222,6 +222,7 @@ class Scenario:
             events = self.engine.run(self.buffer)
             self.run_calls += 1
             self.maybe_buffered = len(events) == self.args.event_buffer
+            finished_peers = 0
             for event in events:
                 turn = self._turn_for(require_request_event(event))
                 now = time.perf_counter()
@@ -237,8 +238,11 @@ class Scenario:
                     turn.request.close()
                     if turn.kind == "guided" and self.backlog:
                         self.backlog.pop(0)(now)
-                    elif turn.kind == "peer" and self.replenish_peer and self.guided_outstanding():
-                        self.replenish_peer(now)
+                    finished_peers += turn.kind == "peer"
+            # Decided after the whole batch, so a peer finishing beside the last guided turn starts none.
+            if self.replenish_peer and self.guided_outstanding():
+                for _ in range(finished_peers):
+                    self.replenish_peer(time.perf_counter())
             if self.args.cancel_after:
                 self._cancel_due_turns()
         stats = self.engine.get_speculative_stats()
@@ -382,14 +386,19 @@ def measure(scenario, wall_seconds, tokenizer, peer_reference):
     guided = [turn for turn in scenario.turns if turn.kind == "guided"]
     peers = [turn for turn in scenario.turns if turn.kind == "peer"]
     first_token = [(turn.token_times[0] - turn.arrived_at) * 1000 for turn in guided if turn.tokens]
+    guided_seconds = (
+        max((turn.finished_at for turn in guided), default=scenario.started + wall_seconds) - scenario.started
+    )
     return {
         "model_steps": scenario.model_steps,
         "drafts": scenario.drafts,
         "run_calls": scenario.run_calls,
         "wall_ms": wall_seconds * 1000,
+        # Start to last guided finish: peers can outlive the guided work, so wall time can be longer.
+        "guided_span_ms": guided_seconds * 1000,
         **overlap(guided, peers),
-        "guided_turns_per_s": len(guided) / wall_seconds,
-        "guided_tokens_per_s": sum(len(turn.tokens) for turn in guided) / wall_seconds,
+        "guided_turns_per_s": len(guided) / guided_seconds,
+        "guided_tokens_per_s": sum(len(turn.tokens) for turn in guided) / guided_seconds,
         "peer_tokens_per_s": sum(len(turn.tokens) for turn in peers) / wall_seconds,
         "guided_workloads": [turn.workload for turn in guided],
         "guided_tokens": [turn.tokens for turn in guided],
@@ -427,6 +436,7 @@ def aggregate(runs):
         **{key: summarize([run["drafts"][key] for run in runs]) for key in DRAFT_COUNTERS},
         "run_calls": summarize([run["run_calls"] for run in runs]),
         "wall_ms": summarize([run["wall_ms"] for run in runs]),
+        "guided_span_ms": summarize([run["guided_span_ms"] for run in runs]),
         "overlap_ms": summarize([run["overlap_ms"] for run in runs]),
         "overlap_fraction": summarize([run["overlap_ms"] / run["wall_ms"] for run in runs]),
         "overlap_guided_tokens_per_s": summarize(
@@ -491,8 +501,11 @@ def compare(off_runs, on_runs, tokenizer, max_diffs=20):
         }
 
     def ratio(name, numerator, denominator):
-        bottom = statistics.median(run[name] for run in denominator)
-        return statistics.median(run[name] for run in numerator) / bottom if bottom else None
+        top = [run[name] for run in numerator if run[name] is not None]
+        bottom = [run[name] for run in denominator if run[name] is not None]
+        if not top or not bottom or not statistics.median(bottom):
+            return None
+        return statistics.median(top) / statistics.median(bottom)
 
     return {
         "off_vs_on": identical(off_runs, on_runs),
@@ -504,7 +517,8 @@ def compare(off_runs, on_runs, tokenizer, max_diffs=20):
         "model_steps_on_over_off": ratio("model_steps", on_runs, off_runs),
         "run_calls_on_over_off": ratio("run_calls", on_runs, off_runs),
         "guided_turns_per_s_on_over_off": ratio("guided_turns_per_s", on_runs, off_runs),
-        "wall_speedup_p50": ratio("wall_ms", off_runs, on_runs),
+        "overlap_guided_tokens_per_s_on_over_off": ratio("overlap_guided_tokens_per_s", on_runs, off_runs),
+        "guided_span_speedup_p50": ratio("guided_span_ms", off_runs, on_runs),
     }
 
 
