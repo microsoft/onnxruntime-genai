@@ -521,11 +521,30 @@ struct Config {
       std::vector<int64_t> shape;
     };
 
+    struct GgufTensorMapping {
+      std::string onnx_name;
+      std::string gguf_name;
+      std::string file;
+      int data_type{};
+      std::vector<int64_t> shape;
+      bool share{};
+      bool has_share{};
+    };
+
+    struct GgufInitializers {
+      std::string config_file;
+      std::vector<std::string> files;
+      std::vector<GgufTensorMapping> tensors;
+      bool share{};
+      bool has_share{};
+    };
+
     struct Decoder {
       std::string filename;
       SessionOptions session_options;
       std::optional<RunOptions> run_options;
       std::vector<SharedInitializer> shared_initializers;
+      GgufInitializers gguf_initializers;
 
       int prefill_sequence_length{};
 
@@ -735,6 +754,7 @@ struct Config {
       std::optional<RunOptions> run_options;
       // Empty intentionally means the head does not share the main decoder's initializers.
       std::vector<SharedInitializer> shared_initializers;
+      GgufInitializers gguf_initializers;
 
       int num_hidden_layers{1};  // The MTP head has a single decoder layer.
       int num_key_value_heads{};
@@ -849,6 +869,7 @@ struct Config {
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
       std::vector<SharedInitializer> shared_initializers;
+      GgufInitializers gguf_initializers;
 
       int num_hidden_layers{};
       int num_key_value_heads{};
@@ -1052,6 +1073,7 @@ struct VisionProcessingConfig {
 };
 
 VisionProcessingConfig LoadVisionProcessingConfig(const fs::path& path);
+void LoadGgufInitializersConfig(const fs::path& path, Config::Model::GgufInitializers& v);
 
 void SetSearchNumber(Config::Search& search, std::string_view name, double value);
 void SetSearchBool(Config::Search& search, std::string_view name, bool value);
