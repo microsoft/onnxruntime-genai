@@ -44,7 +44,9 @@ Whole-turn Engine guidance can also fast-forward: `OgaTurnOptionsSetGuidanceFast
 (`set_guidance_fast_forward` in Python) appends the tokens the grammar forces, such as JSON keys and
 punctuation, instead of running a decode step for each. It is off by default because it can change
 token IDs, random-number consumption, and later values, both inside and after the grammar. It is
-not available with delimited guidance, a nonzero `no_repeat_ngram_size`, or static batching.
+not available with delimited guidance, a nonzero `no_repeat_ngram_size`, or static batching. It
+saves model steps for the guided turn but is not latency-neutral for other requests sharing the
+Engine, so enable it per workload after checking their latency targets.
 
 For any guided Engine turn, only an `Eos` finish means the grammar accepted the output. A turn that
 finished for any other reason (`MaxGeneratedTokens`, `MaxSessionTokens`, `StopString`,
