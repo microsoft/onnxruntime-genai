@@ -723,18 +723,17 @@ void Generator::InitializeSamplingMethod(const GeneratorParams& params) {
 
 Generator::~Generator() = default;
 
+// With slide_inputs, input ids are padded to whole windows for the model, and the sequence keeps the padding.
+size_t Generator::PaddedInputIdsSize(size_t input_ids_count) const {
+  const auto& sliding_window = model_->config_->model.decoder.sliding_window;
+  if (!sliding_window.has_value() || !sliding_window->slide_inputs)
+    return input_ids_count;
+  const auto window_size = static_cast<size_t>(sliding_window->window_size);
+  return (input_ids_count + window_size - 1) / window_size * window_size;
+}
+
 DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids) {
-  size_t padded_input_ids_size = input_ids.size();
-  if (model_->config_->model.decoder.sliding_window.has_value()) {
-    // If the model has a sliding window, pad the input_ids to the next multiple of the window size
-    // so that the input_ids can be divided into window size chunks.
-    const auto window_size = model_->config_->model.decoder.sliding_window->window_size;
-
-    if (model_->config_->model.decoder.sliding_window->slide_inputs) {
-      padded_input_ids_size = ((input_ids.size() + window_size - 1) / window_size) * window_size;
-    }
-  }
-
+  const size_t padded_input_ids_size = PaddedInputIdsSize(input_ids.size());
   auto input_ids_device = state_->params_->p_device->Allocate<int32_t>(padded_input_ids_size);
   auto cpu_span = input_ids_device.CpuSpan();
   auto padding_begin = cpu_span.begin();
@@ -760,7 +759,7 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (input_ids.size() == 0)
     throw std::runtime_error("input_ids is empty");
-  ThrowIfAppendExceedsMaxLength(input_ids.size());
+  ThrowIfAppendExceedsMaxLength(PaddedInputIdsSize(input_ids.size()));
   if (search_->GetSequenceLength() != 0 && state_->params_->search.batch_size > 1)
     throw std::runtime_error("AppendTokens can only be called once for batch_size > 1. To call AppendTokens again, use RewindToLength(0)");
 
@@ -802,7 +801,7 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   strategy_->PrepareForAppend(*this);
   RunGeneratedToken();
   // Running the last generated token can append the tokens the grammar forces after it.
-  ThrowIfAppendExceedsMaxLength(input_ids.size());
+  ThrowIfAppendExceedsMaxLength(PaddedInputIdsSize(input_ids.size()));
   state_->StartTurn();
 
   auto input_ids_device = AllocateInputIdsOnDevice(input_ids);
@@ -910,9 +909,11 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
 
   if (guidance_logits_processor_ && last_action_ == Action::generated) {
     auto ff_tokens = guidance_logits_processor_->GetFFTokens(0);
-    // The sequence holds max_length tokens, so forced tokens past it are dropped.
+    const size_t forced_count = ff_tokens.size();
+    // The sequence holds max_length tokens, padding included, so forced tokens past it are dropped.
     const int room = std::max(0, state_->params_->search.max_length - search_->GetSequenceLength());
-    ff_tokens.resize(std::min(ff_tokens.size(), static_cast<size_t>(room)));
+    while (PaddedInputIdsSize(ff_tokens.size()) > static_cast<size_t>(room))
+      ff_tokens.pop_back();
     if (!ff_tokens.empty()) {
       // process fast-forward tokens
       std::span<int32_t> forced_tokens_span{ff_tokens};
@@ -930,6 +931,9 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
       SetLogits(logits);
       generation_telemetry_.OnTokenGenerated(static_cast<int64_t>(ff_tokens.size()));
     }
+    // The grammar has accepted the dropped tokens, so end the search like a stop token rather than skip them.
+    if (ff_tokens.size() < forced_count)
+      search_->MarkDone();
   }
 
   last_action_ = Action::standard;
