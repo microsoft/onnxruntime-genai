@@ -922,9 +922,9 @@ must process all returned events before reusing the buffer.
 Draft rows are optional scheduler work. Admission first reserves one mandatory token for every
 selected request, then distributes remaining `max_scheduled_tokens` and cache capacity to drafts.
 If the optimistic draft width does not fit, the scheduler shortens or removes draft work without
-dropping another selected request's mandatory decode. Prefill never verifies drafts. On a model with
-fixed recurrent state, a step with a selected prefill plans no drafts at all, and the tokens they
-would have used go to chunk work instead.
+dropping another selected request's mandatory decode, and gives the tokens it releases to chunk
+work. Prefill never verifies drafts. On a model with fixed recurrent state, a step with a selected
+prefill plans no drafts at all, and the tokens they would have used go to chunk work instead.
 
 A committed decode consumes the complete proposal, including drafts omitted by budgeting. A
 retryable rollback restores the request and leaves the proposal pending for retry. During commit,
@@ -1074,11 +1074,13 @@ If at least one request fits, the step is executable even when other requests we
 
 After cache planning selects the batch, every selected request keeps its one-token contribution and
 decode rows add their drafts. The remaining tokens go to chunk work (prefill chunks and decode rows
-with unread guidance fast-forward tokens), the row that has waited longest for spare tokens first;
-an admission counts as service, so new requests queue behind waiting ones. A prefill chunk is
-bounded by its remaining prompt, the model-configured `search.chunk_size` when present, the cache's
-per-request query cap, and `max_scheduled_tokens`; a fast-forward row by its unread tokens and the
-same query cap and budget. In a step that verifies drafts, a fast-forward row reads one unread token.
+with unread guidance fast-forward tokens), the row that has waited longest for spare tokens first.
+Starting a turn counts as service, so new prompts queue behind waiting ones, and only the first row
+served and rows that read their whole chunk count as served; a row cut short keeps its place. A
+prefill chunk is bounded by its remaining prompt, the model-configured `search.chunk_size` when
+present, the cache's per-request query cap, and `max_scheduled_tokens`; a fast-forward row by its
+unread tokens and the same query cap and budget. In a step that verifies drafts, a fast-forward row
+reads one unread token.
 
 The scheduler recomputes cache targets and assigns each request:
 
@@ -1315,11 +1317,11 @@ it, instead of sampling, on each later step that reads to its tail. The cap does
 discovery: llguidance computes the whole span while committing the sampled token, limited only by
 its per-commit parser budget (`step_max_items`). The model reads published tokens on later steps
 (see [step 4](#4-finalize-the-packed-token-layout)), so the row plans no drafts; while a peer
-verifies drafts it reads one of them per step, so peers keep theirs. Rollback restores the private
-span together with the grammar cursor; a finished or canceled turn drops it and keeps everything
-already published. Fast-forward is off by default because forced token IDs follow the grammar's
-tokenization, and admission rejects it without whole-turn guidance or dynamic batching, or with a
-nonzero `no_repeat_ngram_size`, which forced tokens would bypass.
+verifies drafts it reads one published token per step, so peers keep theirs. Rollback restores the
+private span together with the grammar cursor; a finished or canceled turn drops it and keeps
+everything already published. Fast-forward is off by default because forced token IDs follow the
+grammar's tokenization, and admission rejects it without whole-turn guidance or dynamic batching, or
+with a nonzero `no_repeat_ngram_size`, which forced tokens would bypass.
 
 ## Per-turn generation policy
 
@@ -2324,11 +2326,11 @@ The current ordering policy is:
 
 1. Consider decodes first, preserving their resident order.
 2. Consider prefills afterward, preserving resident order and then scheduler-pool order.
-3. Give every feasible selected row one token, then decode drafts their tokens.
+3. Give every feasible selected row one token, then decode rows their drafts.
 4. Share the remaining tokens among selected prefills and fast-forward rows, the one that has
-   waited longest since its admission or its last share first.
+   waited longest since its turn started or it was last served first.
 
-Requests skipped because of token, row, or temporary cache capacity remain pending for a later step. Selection does not rotate or promote waiting prefills, so sustained decode demand can keep a prefill from being selected. Once selected, a chunk-work row is served before every row that read spare tokens or was admitted after its own last share, so new arrivals cannot keep it waiting.
+Requests skipped because of token, row, or temporary cache capacity remain pending for a later step. Selection does not rotate or promote waiting prefills, so sustained decode demand can keep a prefill from being selected. Once selected, a chunk-work row is served before every row that was served or started a turn after it last was, so new prompts cannot keep it waiting.
 
 If no request can run because of temporary capacity, `RunDynamic()` reports `CapacityDeferred` instead of returning `nullptr`. Returning `nullptr` would incorrectly tell the caller that no work remains.
 
