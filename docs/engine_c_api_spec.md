@@ -772,6 +772,11 @@ only after a Turn and deliberately evicts committed model state for replay.
 Recompute preemption is separate from completed-Turn rewind. It never truncates token history,
 changes Turn identity, or resets Search/RNG state. Its supported layouts and default-off
 configuration are described in [Paged Attention Engine](paged_attention_engine.md#recompute-preemption).
+The existing manifest/profile controls permanently select construction-time age-based recovery,
+not foreground scheduling. A selected profile overrides the base settings before Engine creation;
+conflicting explicit legacy and future runtime policy selections must be rejected, not silently
+reinterpreted. No runtime scheduling-policy selector is implemented here. See the
+[policy compatibility contract](paged_attention_engine.md#policy-selection-and-compatibility).
 The implemented policy is age-based capacity recovery, not foreground priority: a fresh invocation
 does not automatically displace older work, and unfinished prefill/replay cannot be selected as a
 victim. See [policy scope and host integration](paged_attention_engine.md#policy-scope-and-host-integration)
@@ -922,6 +927,10 @@ Callers must never consume the token getter merely because an event was returned
 - Capacity, retryable, unserviceable, contract-failure, and first fatal-execution outcomes remain
   typed events. After all fatal events are delivered, later `Run` calls return the stored fatal
   error.
+
+On the recompute-preemption path, planning can first commit a separate suspension boundary.
+Model-step rollback restores the post-planning state, leaving those victims valid, cold, and
+marked for replay; it does not restore released KV or undo their suspension counters.
 
 The required mapping is:
 

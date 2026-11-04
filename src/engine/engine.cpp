@@ -2184,16 +2184,16 @@ void Engine::RunStatic() {
 
 void Engine::RunDynamic() {
   if (scheduler_->HasPendingRequests()) {
-    // A dynamic step is a transaction with six phases:
-    // plan -> reserve state -> checkpoint request state -> execute -> stage sampled tokens -> commit.
-    // Nothing becomes externally visible until the final commit succeeds.
+    // Planning may publish validated KV suspensions as a separate committed boundary.
+    // The following model transaction is reserve -> checkpoint -> execute -> stage tokens -> commit.
+    // Generated-token progress becomes externally visible only after that final commit.
     step_plan_.transaction_id = next_transaction_id_++;
     StepPlanningResult planning_result;
     try {
       // Planning must report ordinary non-executable outcomes through its result. A composite
       // cache consistency failure proves that paged and fixed committed ownership disagree and is
-      // fatal. Incidental failures such as allocation errors have not mutated Engine state and may
-      // propagate without poisoning the Engine.
+      // fatal. Incidental preflight allocation failures publish no suspensions and need not poison
+      // the Engine. Successful planning may already have committed a suspension boundary.
       planning_result = scheduler_->PlanStep(step_plan_);
     } catch (const StepPlanningConsistencyError&) {
       MarkUnhealthyAndThrow(
@@ -2314,10 +2314,10 @@ void Engine::RunDynamic() {
     bool request_transaction_active = false;
     std::unique_ptr<MtpStep> mtp_step;
     const auto rollback_transaction = [&]() {
-      // Request/search state and composite cache state are checkpointed separately. Both must be
-      // restored so a retry observes exactly the state that existed before this Run() call. The
-      // reservation's Release() discards fixed provisional slots and staged banks as well as the
-      // reserved paged blocks.
+      // Request/search state and composite cache state are checkpointed separately. Restore the
+      // post-planning boundary, not the state before Run(): preempted victims remain valid, cold,
+      // and marked for replay. Release() discards the model transaction's fixed provisional slots,
+      // staged banks, and reserved paged blocks without undoing those committed suspensions.
       std::exception_ptr rollback_error;
       if (mtp_step) {
         try {

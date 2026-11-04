@@ -90,6 +90,9 @@ struct Scheduler {
     return {{StepOutcomeKind::Committed, 0, nullptr}, std::move(scheduled)};
   }
 
+  // Plans the next model transaction. Recompute preemption may first commit validated cache
+  // releases and mark victims for replay. Those suspensions are a separate commit boundary:
+  // a later reservation or execution rollback must not restore the victims' released KV.
   virtual StepPlanningResult PlanStep(StepPlan&) {
     throw std::logic_error("Scheduler does not support transactional step planning.");
   }

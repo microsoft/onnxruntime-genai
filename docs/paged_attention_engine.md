@@ -69,7 +69,7 @@ At a high level, one dynamic engine step is:
 ```text
 drain pending Engine events up to caller capacity, if any exist
     |
-plan a runnable batch
+plan a runnable batch, possibly committing validated recompute suspensions
     |
 reserve all paged and fixed decoder state needed by that plan
     |
@@ -88,7 +88,7 @@ commit search state, cache state, and request bookkeeping
 write committed events up to caller capacity and retain overflow
 ```
 
-The step is transactional before publication. Planning, reservation, execution, and fixed-state
+The model step is transactional after planning. Reservation, execution, and fixed-state
 preparation do not change committed state; recoverable failure restores request/search state and
 releases all reservations. Once publication begins, containment is **fail-stop**, not rollback:
 request/search, paged, fixed, and request-bookkeeping publication is ordered and prevalidated, but
@@ -1029,9 +1029,10 @@ every other Engine query, it must be called from the Engine's owner thread and t
 `DynamicBatchScheduler::PlanStep()` skips `TurnComplete` residents and builds candidates from
 executable residents plus waiting requests.
 
-The cache manager checks whether those candidates fit alongside dormant turn-complete requests. If
-retained residency prevents admission or cache growth, the plan reports capacity backpressure; the
-application decides which conversation to release with `Close()`.
+The cache manager checks whether those candidates fit alongside dormant turn-complete requests.
+Without recompute preemption, retained residency that prevents admission or cache growth reports
+capacity backpressure; the application decides which conversation to release with `Close()`.
+Enabled preemption may instead commit validated suspensions during planning as described below.
 
 ### 2. Build the initial step plan
 
@@ -1084,7 +1085,8 @@ residents, including omitted ones, count toward residency capacity. A new
 admission is allowed only when the committed resident count plus selected new
 admissions remains within `max_batch_size`.
 
-Selected entries are compacted to the beginning of the plan. Deferred entries remain unchanged in committed state:
+Selected entries are compacted to the beginning of the plan. Apart from explicitly selected
+preemption victims, deferred entries remain unchanged in committed state:
 
 - An existing request keeps its current block table and stays `Active`.
 - A new request stays `Assigned` and owns no cache blocks.
@@ -1126,6 +1128,13 @@ the request's remaining tokens, then binds those counts before decoder input or
 chunk-completion logic reads the request.
 
 The scheduler also marks whether the step is eligible for CUDA graph capture. A capturable step must be past prefill and must give every request the same number of tokens. Prefill, chunked prefill, mixed prefill/decode, and steps whose requests carry different draft widths all run eagerly.
+
+Before `PlanStep()` returns, enabled recompute preemption validates every selected victim and
+stages prefix adoption before publishing the no-throw cache releases and replay markers. This is
+a separate committed suspension boundary, not part of the model transaction that follows.
+Reservation, checkpointing, and execution start from that post-planning state. A subsequent
+recoverable execution failure leaves victims valid, cold, and marked for replay; rollback neither
+restores their discarded KV nor reverses their suspension counters.
 
 ### 5. Reserve the complete cache transaction
 
@@ -2361,6 +2370,29 @@ Both numeric limits must be positive integers representable by the configuration
 victim count is also bounded by resident count. These fields are construction-time policy, not
 mutable per-Request or per-Turn settings.
 
+### Policy selection and compatibility
+
+These are permanent age-based scheduling controls, not temporary aliases for a future foreground
+policy. With `enable_recompute_preemption=false`, the existing default ordering and wait-only
+capacity behavior remain in effect. With `true`, the Engine selects committed-service aging plus
+bounded recompute reclamation (`AgeBasedRecovery`), not just an independently enabled cache
+mechanism. The numeric controls tune only that policy; they remain validated but do not enable
+aging or reclamation when the flag is false.
+
+The base configuration is resolved first, then the selected runtime-profile overlay overrides
+its supplied fields, including an explicit `false`. The Engine fixes the resulting policy at
+construction. `Default` and `AgeBasedRecovery` are descriptive policy names here, not new JSON
+enum values or runtime API options.
+
+Any future explicit runtime policy selector must preserve that meaning and resolve after the
+model/profile settings. If explicit legacy policy controls and an explicit runtime selection
+disagree, construction must reject the combination rather than silently override or reinterpret
+either one. For example, an explicit `true` cannot become `Default` or `ForegroundFirst` through
+another option. With no explicit legacy policy selection, a future runtime option may select a
+supported policy directly. Unsupported choices must be rejected, and an API introducing such a
+selector must report its effective policy and capabilities. No runtime policy selector or
+foreground mode is implemented by this revision.
+
 ### Policy scope and host integration
 
 This is **age-based capacity recovery, not host-designated foreground handoff**. Committed service
@@ -2427,6 +2459,9 @@ publication. `CommitPreemption()` reuses the validated rewind-release primitives
 release and the Request replay boundary without allocation or device work. Shared owners and
 indexed prefix identities remain intact. Search, RNG, Turn counters and logical tokens are not
 rewound or replaced. The physical cursor alone returns to zero.
+
+`PlanStep()` publishes that suspension boundary before returning to the Engine. It is not a
+read-only planning API: a later model-step rollback preserves these committed suspensions.
 
 The selected beneficiary's admission preference survives an execution abort until it commits cache progress
 or its Turn is canceled, closed, or replaced. This avoids immediately returning reclaimed capacity
