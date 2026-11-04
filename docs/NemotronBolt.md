@@ -108,3 +108,14 @@ EOS, budget, search-option, public-token, and reset tests. To additionally check
 sequential generators and resets with the real CUDA graphs, set
 `ORTGENAI_BOLT_TEST_MODEL` to the package directory and run
 `engine_unit_tests --ep_dir /runtime --gtest_filter='NemotronBoltGPU.*'`.
+
+## Direct GGUF weight loading (`gguf_initializers`)
+
+A Bolt package can omit `model.onnx.data` entirely and map all 843 target weight
+tensors directly from `NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB.gguf` by setting
+`"gguf_initializers": "gguf_initializers.json"` under `model.decoder` and
+`"gguf_initializers": "dflash2_gguf_initializers.json"` under `model.dflash2`.
+Shared tensors (`token_embd.weight` and `output.weight`) marked with `"share": true`
+are uploaded once to GPU memory and shared across the target and drafter sessions.
+See [GGUFInitializers.md](./GGUFInitializers.md) for the complete schema and format details.
+

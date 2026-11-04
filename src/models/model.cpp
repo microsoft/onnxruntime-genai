@@ -19,7 +19,10 @@
 #include <unordered_map>
 
 #ifndef _WIN32
+#include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 #include "generator/generators.h"
@@ -67,6 +70,426 @@ struct SharedInitializerEntry {
 std::mutex g_shared_initializers_mutex;
 std::unordered_map<std::string, std::weak_ptr<SharedInitializerEntry>> g_shared_initializers;
 
+struct GgufTensorInfo {
+  std::string name;
+  uint32_t ggml_type{};
+  std::vector<uint64_t> ggml_dims;
+  ONNXTensorElementDataType default_dtype{ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED};
+  std::vector<int64_t> default_shape;
+  uint64_t rel_offset{};
+  uint64_t data_offset{};
+  size_t n_bytes{};
+};
+
+void GetGgmlTypeGeometry(uint32_t ggml_type, size_t& blck_size, size_t& type_size,
+                         ONNXTensorElementDataType& default_dtype) {
+  default_dtype = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8;
+  switch (ggml_type) {
+    case 0:  // F32
+      blck_size = 1;
+      type_size = 4;
+      default_dtype = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
+      return;
+    case 1:  // F16
+      blck_size = 1;
+      type_size = 2;
+      default_dtype = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16;
+      return;
+    case 2:  // Q4_0
+      blck_size = 32;
+      type_size = 18;
+      return;
+    case 3:  // Q4_1
+      blck_size = 32;
+      type_size = 20;
+      return;
+    case 6:  // Q5_0
+      blck_size = 32;
+      type_size = 22;
+      return;
+    case 7:  // Q5_1
+      blck_size = 32;
+      type_size = 24;
+      return;
+    case 8:  // Q8_0
+      blck_size = 32;
+      type_size = 34;
+      return;
+    case 9:  // Q8_1
+      blck_size = 32;
+      type_size = 36;
+      return;
+    case 10:  // Q2_K
+      blck_size = 256;
+      type_size = 84;
+      return;
+    case 11:  // Q3_K
+      blck_size = 256;
+      type_size = 110;
+      return;
+    case 12:  // Q4_K
+      blck_size = 256;
+      type_size = 144;
+      return;
+    case 13:  // Q5_K
+      blck_size = 256;
+      type_size = 176;
+      return;
+    case 14:  // Q6_K
+      blck_size = 256;
+      type_size = 210;
+      return;
+    case 15:  // Q8_K
+      blck_size = 256;
+      type_size = 292;
+      return;
+    case 16:  // IQ2_XXS
+      blck_size = 256;
+      type_size = 66;
+      return;
+    case 17:  // IQ2_XS
+      blck_size = 256;
+      type_size = 74;
+      return;
+    case 18:  // IQ3_XXS
+      blck_size = 256;
+      type_size = 98;
+      return;
+    case 19:  // IQ1_S
+      blck_size = 256;
+      type_size = 50;
+      return;
+    case 20:  // IQ4_NL
+      blck_size = 32;
+      type_size = 18;
+      return;
+    case 21:  // IQ3_S
+      blck_size = 256;
+      type_size = 110;
+      return;
+    case 22:  // IQ2_S
+      blck_size = 256;
+      type_size = 82;
+      return;
+    case 23:  // IQ4_XS
+      blck_size = 256;
+      type_size = 136;
+      return;
+    case 24:  // I8
+      blck_size = 1;
+      type_size = 1;
+      default_dtype = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8;
+      return;
+    case 25:  // I16
+      blck_size = 1;
+      type_size = 2;
+      default_dtype = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16;
+      return;
+    case 26:  // I32
+      blck_size = 1;
+      type_size = 4;
+      default_dtype = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32;
+      return;
+    case 27:  // I64
+      blck_size = 1;
+      type_size = 8;
+      default_dtype = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64;
+      return;
+    case 28:  // F64
+      blck_size = 1;
+      type_size = 8;
+      default_dtype = ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE;
+      return;
+    case 29:  // IQ1_M
+      blck_size = 256;
+      type_size = 56;
+      return;
+    case 30:  // BF16
+      blck_size = 1;
+      type_size = 2;
+      default_dtype = ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16;
+      return;
+    case 39:  // MXFP4
+      blck_size = 32;
+      type_size = 17;
+      return;
+    case 40:  // NVFP4
+      blck_size = 64;
+      type_size = 36;
+      return;
+    default:
+      throw std::runtime_error("Unsupported GGUF tensor type: " + std::to_string(ggml_type));
+  }
+}
+
+size_t OrtElementByteSize(ONNXTensorElementDataType dt) {
+  switch (dt) {
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8:
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL:
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E4M3FN:
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E4M3FNUZ:
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E5M2:
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E5M2FNUZ:
+      return 1;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16:
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16:
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16:
+      return 2;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32:
+      return 4;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE:
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64:
+      return 8;
+    default:
+      throw std::runtime_error("Unsupported ONNX tensor element data type: " + std::to_string(dt));
+  }
+}
+
+struct GgufFileEntry {
+  fs::path path;
+  std::string identity;
+  uint8_t* mmap_base{nullptr};
+  size_t mmap_size{0};
+  std::vector<uint8_t> fallback_buffer;
+  uint64_t tensor_data_offset{0};
+  std::unordered_map<std::string, GgufTensorInfo> tensors;
+
+  explicit GgufFileEntry(const fs::path& file_path, std::string file_identity)
+      : path{file_path}, identity{std::move(file_identity)} {
+#ifndef _WIN32
+    const int fd = ::open(path.c_str(), O_RDONLY);
+    if (fd < 0) {
+      throw std::runtime_error("Failed to open GGUF file: " + path.string());
+    }
+    struct stat st = {};
+    if (::fstat(fd, &st) != 0 || st.st_size <= 0) {
+      ::close(fd);
+      throw std::runtime_error("Failed to stat GGUF file: " + path.string());
+    }
+    mmap_size = static_cast<size_t>(st.st_size);
+    void* mapped = ::mmap(nullptr, mmap_size, PROT_READ, MAP_SHARED, fd, 0);
+    ::close(fd);
+    if (mapped == MAP_FAILED) {
+      throw std::runtime_error("Failed to mmap GGUF file: " + path.string());
+    }
+    mmap_base = static_cast<uint8_t*>(mapped);
+#else
+    std::ifstream in(path, std::ios::binary | std::ios::ate);
+    if (!in) {
+      throw std::runtime_error("Failed to open GGUF file: " + path.string());
+    }
+    mmap_size = static_cast<size_t>(in.tellg());
+    in.seekg(0, std::ios::beg);
+    fallback_buffer.resize(mmap_size);
+    if (mmap_size > 0 && !in.read(reinterpret_cast<char*>(fallback_buffer.data()), mmap_size)) {
+      throw std::runtime_error("Failed to read GGUF file: " + path.string());
+    }
+    mmap_base = fallback_buffer.data();
+#endif
+    try {
+      ParseHeader();
+    } catch (...) {
+#ifndef _WIN32
+      if (mmap_base) {
+        ::munmap(mmap_base, mmap_size);
+        mmap_base = nullptr;
+      }
+#endif
+      throw;
+    }
+  }
+
+  ~GgufFileEntry() {
+#ifndef _WIN32
+    if (mmap_base) {
+      ::munmap(mmap_base, mmap_size);
+    }
+#endif
+  }
+
+  GgufFileEntry(const GgufFileEntry&) = delete;
+  GgufFileEntry& operator=(const GgufFileEntry&) = delete;
+
+ private:
+  void ParseHeader() {
+    size_t cursor = 0;
+    auto require_bytes = [&](size_t n) {
+      if (cursor > mmap_size || n > mmap_size - cursor) {
+        throw std::runtime_error("Truncated GGUF header in " + path.string());
+      }
+    };
+    auto read_u32 = [&]() -> uint32_t {
+      require_bytes(4);
+      uint32_t v = 0;
+      std::memcpy(&v, mmap_base + cursor, 4);
+      cursor += 4;
+      return v;
+    };
+    auto read_u64 = [&]() -> uint64_t {
+      require_bytes(8);
+      uint64_t v = 0;
+      std::memcpy(&v, mmap_base + cursor, 8);
+      cursor += 8;
+      return v;
+    };
+    auto read_str = [&]() -> std::string {
+      const uint64_t len = read_u64();
+      if (len > mmap_size - cursor) {
+        throw std::runtime_error("Truncated GGUF string in " + path.string());
+      }
+      const size_t slen = static_cast<size_t>(len);
+      std::string s(reinterpret_cast<const char*>(mmap_base + cursor), slen);
+      cursor += slen;
+      return s;
+    };
+    std::function<uint64_t(uint32_t, int)> skip_or_read_val = [&](uint32_t vtype, int depth) -> uint64_t {
+      if (depth > 4) {
+        throw std::runtime_error("GGUF metadata array nesting too deep in " + path.string());
+      }
+      switch (vtype) {
+        case 0:
+        case 1:
+        case 7: {
+          require_bytes(1);
+          uint8_t v = mmap_base[cursor];
+          cursor += 1;
+          return v;
+        }
+        case 2:
+        case 3: {
+          require_bytes(2);
+          uint16_t v = 0;
+          std::memcpy(&v, mmap_base + cursor, 2);
+          cursor += 2;
+          return v;
+        }
+        case 4:
+        case 5:
+        case 6:
+          return read_u32();
+        case 8: {
+          const uint64_t len = read_u64();
+          if (len > mmap_size - cursor) {
+            throw std::runtime_error("Truncated GGUF metadata string in " + path.string());
+          }
+          cursor += static_cast<size_t>(len);
+          return 0;
+        }
+        case 9: {
+          const uint32_t elem_type = read_u32();
+          const uint64_t count = read_u64();
+          for (uint64_t i = 0; i < count; ++i) {
+            skip_or_read_val(elem_type, depth + 1);
+          }
+          return 0;
+        }
+        case 10:
+        case 11:
+        case 12:
+          return read_u64();
+        default:
+          throw std::runtime_error("Unsupported GGUF metadata value type " + std::to_string(vtype) + " in " +
+                                   path.string());
+      }
+    };
+
+    require_bytes(4);
+    if (std::memcmp(mmap_base, "GGUF", 4) != 0) {
+      throw std::runtime_error("Invalid GGUF magic in " + path.string());
+    }
+    cursor += 4;
+    const uint32_t version = read_u32();
+    if (version < 2 || version > 3) {
+      throw std::runtime_error("Unsupported GGUF version " + std::to_string(version) + " in " + path.string());
+    }
+    const uint64_t tensor_count = read_u64();
+    const uint64_t kv_count = read_u64();
+    uint64_t alignment = 32;
+    for (uint64_t i = 0; i < kv_count; ++i) {
+      const std::string key = read_str();
+      const uint32_t vtype = read_u32();
+      const uint64_t val = skip_or_read_val(vtype, 0);
+      if (key == "general.alignment") {
+        if (val == 0 || (val & (val - 1)) != 0 || val > (1ULL << 20)) {
+          throw std::runtime_error("Invalid GGUF general.alignment in " + path.string());
+        }
+        alignment = val;
+      }
+    }
+
+    if (tensor_count > mmap_size / 16) {
+      throw std::runtime_error("GGUF tensor_count exceeds file bounds in " + path.string());
+    }
+    std::vector<GgufTensorInfo> parsed;
+    parsed.reserve(static_cast<size_t>(tensor_count));
+    for (uint64_t i = 0; i < tensor_count; ++i) {
+      GgufTensorInfo info;
+      info.name = read_str();
+      const uint32_t n_dims = read_u32();
+      if (n_dims == 0 || n_dims > 8) {
+        throw std::runtime_error("Invalid GGUF tensor rank for '" + info.name + "' in " + path.string());
+      }
+      info.ggml_dims.resize(n_dims);
+      for (uint32_t d = 0; d < n_dims; ++d) {
+        info.ggml_dims[d] = read_u64();
+      }
+      info.ggml_type = read_u32();
+      info.rel_offset = read_u64();
+
+      size_t blck_size = 1, type_size = 1;
+      GetGgmlTypeGeometry(info.ggml_type, blck_size, type_size, info.default_dtype);
+      if (info.ggml_dims[0] % blck_size != 0) {
+        throw std::runtime_error("GGUF tensor '" + info.name + "' dim[0] is not divisible by block size");
+      }
+      info.default_shape.resize(n_dims);
+      const uint64_t n_blocks = info.ggml_dims[0] / blck_size;
+      if (n_blocks > std::numeric_limits<size_t>::max() / type_size) {
+        throw std::runtime_error("GGUF tensor '" + info.name + "' byte size overflow in " + path.string());
+      }
+      size_t total_bytes = static_cast<size_t>(n_blocks) * type_size;
+      for (uint32_t d = 1; d < n_dims; ++d) {
+        const uint64_t dim = info.ggml_dims[d];
+        if (dim > std::numeric_limits<size_t>::max() ||
+            (dim > 0 && total_bytes > std::numeric_limits<size_t>::max() / static_cast<size_t>(dim))) {
+          throw std::runtime_error("GGUF tensor '" + info.name + "' byte size overflow in " + path.string());
+        }
+        total_bytes *= static_cast<size_t>(dim);
+      }
+      for (uint32_t d = 0; d < n_dims - 1; ++d) {
+        info.default_shape[d] = static_cast<int64_t>(info.ggml_dims[n_dims - 1 - d]);
+      }
+      info.default_shape[n_dims - 1] =
+          static_cast<int64_t>(n_blocks * (blck_size == 1 ? 1 : type_size));
+      info.n_bytes = total_bytes;
+      parsed.push_back(std::move(info));
+    }
+
+    if (cursor > std::numeric_limits<uint64_t>::max() - (alignment - 1)) {
+      throw std::runtime_error("GGUF tensor_data_offset overflow in " + path.string());
+    }
+    tensor_data_offset = ((cursor + alignment - 1) / alignment) * alignment;
+    tensors.reserve(parsed.size());
+    for (auto& info : parsed) {
+      if (tensor_data_offset > mmap_size || info.rel_offset > mmap_size - tensor_data_offset) {
+        throw std::runtime_error("GGUF tensor '" + info.name + "' offset exceeds file bounds in " + path.string());
+      }
+      info.data_offset = tensor_data_offset + info.rel_offset;
+      if (info.n_bytes > mmap_size - info.data_offset) {
+        throw std::runtime_error("GGUF tensor '" + info.name + "' exceeds file bounds in " + path.string());
+      }
+      auto name = info.name;
+      if (!tensors.emplace(std::move(name), std::move(info)).second) {
+        throw std::runtime_error("Duplicate GGUF tensor name in " + path.string());
+      }
+    }
+  }
+};
+
 std::string SharedInitializerFileIdentity(const fs::path& path) {
 #ifndef _WIN32
   struct stat file_info = {};
@@ -75,6 +498,22 @@ std::string SharedInitializerFileIdentity(const fs::path& path) {
   }
 #endif
   return path.string();
+}
+
+std::mutex g_gguf_files_mutex;
+std::unordered_map<std::string, std::weak_ptr<GgufFileEntry>> g_gguf_files;
+
+std::shared_ptr<GgufFileEntry> GetOrOpenGgufFile(const fs::path& path) {
+  const std::string key = SharedInitializerFileIdentity(path);
+  std::lock_guard lock{g_gguf_files_mutex};
+  if (auto it = g_gguf_files.find(key); it != g_gguf_files.end()) {
+    if (auto existing = it->second.lock()) {
+      return existing;
+    }
+  }
+  auto entry = std::make_shared<GgufFileEntry>(path, key);
+  g_gguf_files[key] = entry;
+  return entry;
 }
 
 // Session-option config keys whose values are file/folder path references. When a model is loaded
@@ -526,6 +965,7 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   CreateSessionOptions();
   EnsureDeviceOrtInit(*p_device_, *config_);
   AddSharedInitializers();
+  AddGgufInitializers();
 
   // Inputs-only interface backed by a host-accessible allocation, so the CPU updates the small
   // decode inputs in place with no per-step roundtrip. Null if the device offers no such allocator.
@@ -622,6 +1062,144 @@ void Model::AddSharedInitializers() {
   }
 }
 
+void Model::AddGgufInitializers() {
+  auto gguf_cfg = config_->model.decoder.gguf_initializers;
+  if (!gguf_cfg.config_file.empty()) {
+    if (config_->memory_assets_only_) {
+      throw std::runtime_error("Memory-only loading does not support GGUF initializer files.");
+    }
+    const fs::path cfg_path = config_->ResolvePath(gguf_cfg.config_file);
+    Config::Model::GgufInitializers loaded;
+    LoadGgufInitializersConfig(cfg_path, loaded);
+    if (gguf_cfg.has_share) {
+      loaded.share = gguf_cfg.share;
+      loaded.has_share = true;
+    }
+    loaded.files.insert(loaded.files.end(), gguf_cfg.files.begin(), gguf_cfg.files.end());
+    loaded.tensors.insert(loaded.tensors.end(), gguf_cfg.tensors.begin(), gguf_cfg.tensors.end());
+    gguf_cfg = std::move(loaded);
+  }
+  if (gguf_cfg.tensors.empty()) {
+    return;
+  }
+  if (config_->memory_assets_only_) {
+    throw std::runtime_error("Memory-only loading does not support GGUF initializers.");
+  }
+
+  std::unordered_map<std::string, std::shared_ptr<GgufFileEntry>> opened_files;
+  std::vector<std::shared_ptr<GgufFileEntry>> ordered_files;
+  auto open_file = [&](const std::string& rel_file) -> std::shared_ptr<GgufFileEntry> {
+    if (auto it = opened_files.find(rel_file); it != opened_files.end()) {
+      return it->second;
+    }
+    const fs::path resolved = config_->ResolvePath(rel_file);
+    auto entry = GetOrOpenGgufFile(resolved);
+    opened_files.emplace(rel_file, entry);
+    ordered_files.push_back(entry);
+    shared_initializer_entries_.push_back(entry);
+    return entry;
+  };
+
+  for (const auto& f : gguf_cfg.files) {
+    open_file(f);
+  }
+
+  auto cpu_memory_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
+  std::vector<std::string> ext_names;
+  ext_names.reserve(gguf_cfg.tensors.size());
+  gguf_external_values_.reserve(gguf_cfg.tensors.size());
+
+  for (const auto& mapping : gguf_cfg.tensors) {
+    if (mapping.onnx_name.empty() || mapping.gguf_name.empty()) {
+      throw std::runtime_error("Invalid GGUF tensor mapping: onnx_name and gguf_name must be non-empty.");
+    }
+    const GgufFileEntry* matched_file = nullptr;
+    const GgufTensorInfo* matched_info = nullptr;
+    if (!mapping.file.empty()) {
+      auto file_entry = open_file(mapping.file);
+      if (auto it = file_entry->tensors.find(mapping.gguf_name); it != file_entry->tensors.end()) {
+        matched_file = file_entry.get();
+        matched_info = &it->second;
+      }
+    } else {
+      for (const auto& file_entry : ordered_files) {
+        if (auto it = file_entry->tensors.find(mapping.gguf_name); it != file_entry->tensors.end()) {
+          if (matched_info != nullptr) {
+            throw std::runtime_error("Ambiguous GGUF tensor '" + mapping.gguf_name +
+                                     "' found in multiple GGUF files; specify 'file' in mapping.");
+          }
+          matched_file = file_entry.get();
+          matched_info = &it->second;
+        }
+      }
+    }
+    if (matched_info == nullptr) {
+      throw std::runtime_error("GGUF tensor '" + mapping.gguf_name + "' for ONNX initializer '" +
+                               mapping.onnx_name + "' was not found in configured GGUF file(s).");
+    }
+
+    const auto data_type = mapping.data_type != 0
+                               ? static_cast<ONNXTensorElementDataType>(mapping.data_type)
+                               : matched_info->default_dtype;
+    const auto& shape = !mapping.shape.empty() ? mapping.shape : matched_info->default_shape;
+    size_t expected_bytes = OrtElementByteSize(data_type);
+    for (int64_t d : shape) {
+      if (d < 0) {
+        throw std::runtime_error("Negative dimension in GGUF initializer shape for '" + mapping.onnx_name + "'");
+      }
+      const size_t dim = static_cast<size_t>(d);
+      if (dim > 0 && expected_bytes > std::numeric_limits<size_t>::max() / dim) {
+        throw std::runtime_error("Byte size overflow in GGUF initializer shape for '" + mapping.onnx_name + "'");
+      }
+      expected_bytes *= dim;
+    }
+    if (expected_bytes != matched_info->n_bytes) {
+      throw std::runtime_error("Byte size mismatch for GGUF initializer '" + mapping.onnx_name + "' -> '" +
+                               mapping.gguf_name + "': expected " + std::to_string(expected_bytes) +
+                               " bytes from shape/type, GGUF tensor has " + std::to_string(matched_info->n_bytes) +
+                               " bytes.");
+    }
+
+    void* tensor_ptr = matched_file->mmap_base + matched_info->data_offset;
+    auto cpu_view = OrtValue::CreateTensor(*cpu_memory_info, tensor_ptr, matched_info->n_bytes, shape, data_type);
+    ext_names.push_back(mapping.onnx_name);
+    gguf_external_values_.push_back(std::move(cpu_view));
+
+    const bool share_tensor = mapping.has_share ? mapping.share : gguf_cfg.share;
+    if (share_tensor && p_device_ && p_device_->GetType() != DeviceType::CPU) {
+      auto memory_info = p_device_->GetMemoryInfo();
+      std::ostringstream key;
+      key << matched_file->identity << ':' << matched_info->data_offset << ':' << matched_info->n_bytes << ':'
+          << static_cast<int>(data_type) << ':' << memory_info->GetDeviceType() << ':' << memory_info->GetDeviceId();
+      for (int64_t dimension : shape) {
+        key << ':' << dimension;
+      }
+
+      std::shared_ptr<SharedInitializerEntry> shared_entry;
+      {
+        std::lock_guard lock{g_shared_initializers_mutex};
+        if (auto it = g_shared_initializers.find(key.str()); it != g_shared_initializers.end()) {
+          shared_entry = it->second.lock();
+        }
+        if (!shared_entry) {
+          shared_entry = std::make_shared<SharedInitializerEntry>();
+          shared_entry->device_data = p_device_->Allocate<uint8_t>(matched_info->n_bytes);
+          shared_entry->device_data.CopyFromCpu(
+              std::span<const uint8_t>(static_cast<const uint8_t*>(tensor_ptr), matched_info->n_bytes));
+          shared_entry->shared_view = OrtValue::CreateTensor(
+              *memory_info, shared_entry->device_data.Span().data(), matched_info->n_bytes, shape, data_type);
+          g_shared_initializers[key.str()] = shared_entry;
+        }
+      }
+      session_options_->AddInitializer(mapping.onnx_name.c_str(), *shared_entry->shared_view);
+      shared_initializer_entries_.push_back(std::move(shared_entry));
+    }
+  }
+
+  session_options_->AddConfigEntry("session.use_external_initializer_file_buffers_directly", "1");
+  session_options_->AddExternalInitializers(ext_names, gguf_external_values_);
+}
+
 Model::~Model() {
   // Snapshot the type before teardown: CloseDmlInterface() frees the singleton p_device_ points to,
   // so reading p_device_->GetType() afterwards would be a use-after-free.
@@ -644,6 +1222,7 @@ Model::~Model() {
     // initializers while the AMDGPU allocator is still alive.
     pipeline_session_options_.clear();
     session_options_.reset();
+    gguf_external_values_.clear();
     shared_initializer_entries_.clear();
     CloseAMDGPUInterface();
   }
