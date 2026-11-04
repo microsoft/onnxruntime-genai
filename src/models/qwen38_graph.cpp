@@ -12,14 +12,17 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <charconv>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <random>
 #include <sstream>
 #include <stdexcept>
+#include <system_error>
 #include <thread>
 #if defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
@@ -38,6 +41,14 @@ double SecondsSince(Clock::time_point start) {
 bool StartsWith(const std::string& value, const char* prefix) {
   return value.rfind(prefix, 0) == 0;
 }
+
+struct WarmupFlag {
+  explicit WarmupFlag(Qwen38OrtRunHints& hints) : hints_{hints} { hints_.SetWarmup(true); }
+  ~WarmupFlag() { hints_.SetWarmup(false); }
+  WarmupFlag(const WarmupFlag&) = delete;
+  WarmupFlag& operator=(const WarmupFlag&) = delete;
+  Qwen38OrtRunHints& hints_;
+};
 
 size_t Elements(const std::vector<int64_t>& shape) {
   size_t count = 1;
@@ -85,6 +96,7 @@ class ProtoFieldReader {
     bool length_delimited{};
     uint64_t payload_begin{};
     uint64_t payload_size{};
+    uint64_t varint_value{};
   };
 
   ProtoFieldReader(std::istream& in, uint64_t begin, uint64_t end) : in_(in), pos_(begin), end_(end) {}
@@ -98,11 +110,10 @@ class ProtoFieldReader {
     if (!ReadVarint(tag)) return Fail();
     const uint64_t number = tag >> 3;
     if (number == 0 || number > kMaxFieldNumber) return Fail();
-    field = Field{static_cast<uint32_t>(number), false, 0, 0};
+    field = Field{static_cast<uint32_t>(number), false, 0, 0, 0};
     switch (tag & 7u) {
       case 0: {  // varint
-        uint64_t ignored = 0;
-        return ReadVarint(ignored) || Fail();
+        return ReadVarint(field.varint_value) || Fail();
       }
       case 1:  // 64-bit
         return Skip(8);
@@ -190,23 +201,38 @@ void ValidateQwen38CacheShapes(const std::vector<Qwen38CacheInput>& inputs, int 
     const bool is_cache = input.name.find("past_key_values.") != std::string::npos;
     if (input.name == "past_position_ids") {
       if (shape.size() != 2) fail(input, "expected [batch, kv_capacity]");
-      if (shape[1] < kv_capacity) fail(input, "dimension 1 must be static and at least kv_capacity");
+      if (shape[1] >= 0 && shape[1] < kv_capacity) fail(input, "dimension 1 must be static and at least kv_capacity");
       // The plane fills the position ids of slot b at b * kv_capacity, ORT reads them at b * dimension 1.
-      if (request_slots > 1 && shape[1] != kv_capacity) {
+      if (request_slots > 1 && shape[1] >= 0 && shape[1] != kv_capacity) {
         fail(input, "with " + std::to_string(request_slots) +
                         " request slots dimension 1 must be exactly kv_capacity: the slots' rows lie kv_capacity apart");
       }
     } else if (is_cache && (tail == "key" || tail == "value")) {
       if (shape.size() != 4) fail(input, "expected [batch, 2, kv_capacity, 256]");
       if (shape[1] != 2 || shape[3] != 256) fail(input, "the hand-off copies 2 KV heads of 256 channels");
-      if (shape[2] != kv_capacity) fail(input, "dimension 2 (the cache length) must be static and kv_capacity long");
+      if (shape[2] >= 0 && shape[2] != kv_capacity)
+        fail(input, "dimension 2 (the cache length) must be static and kv_capacity long");
     } else if (is_cache && tail == "index_key") {
       if (shape.size() != 3) fail(input, "expected [batch, kv_capacity / 4, 128]");
       if (shape[2] != 128) fail(input, "dimension 2 (the index-key width) must be 128");
-      if (shape[1] < kv_capacity / kQwen38IndexKeyRatio)
+      if (shape[1] >= 0 && shape[1] < kv_capacity / kQwen38IndexKeyRatio)
         fail(input, "dimension 1 must be static and hold one key per 4 positions");
     }
   }
+}
+
+std::vector<int64_t> ResolveQwen38CacheSlotShape(const std::string& name, std::vector<int64_t> shape, int kv_capacity) {
+  const size_t dot = name.rfind('.');
+  const std::string tail = dot == std::string::npos ? name : name.substr(dot + 1);
+  const bool is_cache = name.find("past_key_values.") != std::string::npos;
+  if (name == "past_position_ids" && shape.size() == 2) {
+    if (shape[1] <= 0) shape[1] = kv_capacity;
+  } else if (is_cache && (tail == "key" || tail == "value") && shape.size() == 4) {
+    if (shape[2] <= 0) shape[2] = kv_capacity;
+  } else if (is_cache && tail == "index_key" && shape.size() == 3) {
+    if (shape[1] <= 0) shape[1] = (kv_capacity / kQwen38IndexKeyRatio) + 1;
+  }
+  return FixedShape(std::move(shape));
 }
 
 size_t ResolveQwen38MaxBatchSize(const Config& config) {
@@ -220,6 +246,10 @@ size_t ResolveQwen38MaxBatchSize(const Config& config) {
   };
   if (config.engine.dynamic_batching) {
     return checked(static_cast<long long>(config.engine.dynamic_batching->max_batch_size),
+                   "engine.dynamic_batching.max_batch_size");
+  }
+  if (config.model.qwen38_graph.resolved_max_batch_size.has_value()) {
+    return checked(static_cast<long long>(*config.model.qwen38_graph.resolved_max_batch_size),
                    "engine.dynamic_batching.max_batch_size");
   }
   // engine.static_batching is not read: it configures the Engine's static path in general, which the single-slot
@@ -357,11 +387,184 @@ std::optional<std::vector<std::string>> ReadQwen38OnnxOutputNames(const std::fil
   return names;
 }
 
+std::optional<int64_t> ReadQwen38OnnxSpeculativePrefixCommitHeadRows(const std::filesystem::path& model_file) {
+  constexpr uint32_t kModelGraph = 7;     // onnx.ModelProto.graph
+  constexpr uint32_t kGraphNode = 1;      // onnx.GraphProto.node
+  constexpr uint32_t kNodeOpType = 4;     // onnx.NodeProto.op_type
+  constexpr uint32_t kNodeAttribute = 5;  // onnx.NodeProto.attribute
+  constexpr uint32_t kAttrName = 1;       // onnx.AttributeProto.name
+  constexpr uint32_t kAttrInt = 3;        // onnx.AttributeProto.i
+  constexpr uint64_t kMaxNodeBytes = uint64_t{1} << 20;
+
+  std::ifstream file(model_file, std::ios::binary);
+  if (!file) return std::nullopt;
+  file.seekg(0, std::ios::end);
+  const std::streamoff file_size = file.tellg();
+  if (!file || file_size <= 0) return std::nullopt;
+
+  ProtoFieldReader model(file, 0, static_cast<uint64_t>(file_size));
+  ProtoFieldReader::Field field;
+  while (model.Next(field)) {
+    if (field.number != kModelGraph || !field.length_delimited) continue;
+    ProtoFieldReader graph(file, field.payload_begin, field.payload_begin + field.payload_size);
+    ProtoFieldReader::Field node_field;
+    while (graph.Next(node_field)) {
+      if (node_field.number != kGraphNode || !node_field.length_delimited) continue;
+      std::string node_bytes;
+      if (node_field.payload_size > kMaxNodeBytes || !graph.ReadPayload(node_field, node_bytes)) return std::nullopt;
+      std::istringstream node_stream(node_bytes);
+      ProtoFieldReader node(node_stream, 0, node_bytes.size());
+      ProtoFieldReader::Field nf;
+      std::string op_type;
+      std::optional<int64_t> head_rows;
+      while (node.Next(nf)) {
+        if (nf.number == kNodeOpType && nf.length_delimited) {
+          if (!node.ReadPayload(nf, op_type)) return std::nullopt;
+        } else if (nf.number == kNodeAttribute && nf.length_delimited) {
+          std::string attr_bytes;
+          if (!node.ReadPayload(nf, attr_bytes)) return std::nullopt;
+          std::istringstream attr_stream(attr_bytes);
+          ProtoFieldReader attr(attr_stream, 0, attr_bytes.size());
+          ProtoFieldReader::Field af;
+          std::string attr_name;
+          std::optional<int64_t> attr_int;
+          while (attr.Next(af)) {
+            if (af.number == kAttrName && af.length_delimited) {
+              if (!attr.ReadPayload(af, attr_name)) return std::nullopt;
+            } else if (af.number == kAttrInt && !af.length_delimited) {
+              attr_int = static_cast<int64_t>(af.varint_value);
+            }
+          }
+          if (attr.Failed()) return std::nullopt;
+          if (attr_name == "head_rows" && attr_int.has_value()) {
+            head_rows = attr_int;
+          }
+        }
+      }
+      if (node.Failed()) return std::nullopt;
+      if (op_type == "SpeculativePrefixCommit" && head_rows.has_value()) {
+        return head_rows;
+      }
+    }
+    if (graph.Failed()) return std::nullopt;
+  }
+  return std::nullopt;
+}
+
+void ValidateQwen38FoldHeadRows(std::optional<int64_t> head_rows, int verify_rows) {
+  if (!head_rows.has_value() || *head_rows == verify_rows) return;
+  throw std::runtime_error("qwen38_graph: SpeculativePrefixCommit head_rows attribute (" + std::to_string(*head_rows) +
+                           ") does not match the target verify width (" + std::to_string(verify_rows) + ")");
+}
+
 void ValidateQwen38TargetModelFile(size_t request_slots, const std::filesystem::path& model_file) {
   if (request_slots <= 1) return;
   if (const auto output_names = ReadQwen38OnnxOutputNames(model_file)) {
     ValidateQwen38BatchedTargetOutputs(request_slots, *output_names);
   }
+}
+
+std::string NormalizeQwen38ContextTier(const std::string& request) {
+  std::string tier;
+  tier.reserve(request.size());
+  for (const char c : request) {
+    const bool upper = c >= 'A' && c <= 'Z';
+    if (!upper && !(c >= 'a' && c <= 'z') && !(c >= '0' && c <= '9')) {
+      throw std::invalid_argument("ORT_QWEN38_CONTEXT_LENGTH='" + request +
+                                  "' is not a context tier: use 2k, 8k, 16k, 32k, 64k, 128k or a token count");
+    }
+    tier.push_back(upper ? static_cast<char>(c - 'A' + 'a') : c);
+  }
+  static constexpr std::pair<const char*, const char*> kTierOfCount[] = {
+      {"2048", "2k"}, {"8192", "8k"}, {"16384", "16k"}, {"32768", "32k"}, {"65536", "64k"}, {"131072", "128k"}, {"262144", "256k"}};
+  for (const auto& [count, name] : kTierOfCount) {
+    if (tier == count) return name;
+  }
+  return tier;
+}
+
+std::string ResolveQwen38TargetGraphFilename(const std::string& decoder_filename, const std::string& context_request,
+                                             const std::string& mtp_drafts,
+                                             const std::function<bool(const std::string&)>& exists) {
+  const std::string tier = NormalizeQwen38ContextTier(context_request);
+  // Config paths are validated to be relative and free of "..", so the folder of the decoder stays inside the model folder.
+  const std::string folder = std::filesystem::path(decoder_filename).parent_path().generic_string();
+  const auto next_to_decoder = [&folder](const std::string& name) { return folder.empty() ? name : folder + "/" + name; };
+
+  if (!tier.empty()) {
+    const std::string tier_graph = next_to_decoder("model_" + tier + ".onnx");
+    const std::string dynamic_graph = next_to_decoder("model_dynamic_ctx.onnx");
+    const std::vector<std::string> candidates = tier == "32k" ? std::vector<std::string>{tier_graph, decoder_filename, dynamic_graph}
+                                                              : std::vector<std::string>{tier_graph, dynamic_graph, decoder_filename};
+    for (const std::string& candidate : candidates) {
+      if (exists(candidate)) return candidate;
+    }
+    std::string tried;
+    for (const std::string& candidate : candidates) tried += (tried.empty() ? "'" : ", '") + candidate + "'";
+    throw std::runtime_error("qwen38_flash_graph: ORT_QWEN38_CONTEXT_LENGTH=" + context_request +
+                             " names the context tier '" + tier + "', but the model folder has none of " + tried);
+  }
+
+  const int drafts = std::atoi(mtp_drafts.c_str());
+  if (drafts >= 1 && drafts <= 3) {
+    const std::string name = "model_s" + std::to_string(drafts + 1) + ".onnx";
+    for (const std::string& candidate : {next_to_decoder(name), "target/" + name}) {
+      if (exists(candidate)) return candidate;
+    }
+  }
+  return decoder_filename;
+}
+
+std::string ResolveQwen38AuxiliaryGraphFilename(const std::string& configured_filename, const std::string& context_request,
+                                                const std::function<bool(const std::string&)>& exists) {
+  const std::string tier = NormalizeQwen38ContextTier(context_request);
+  if (tier.empty() || configured_filename.empty()) {
+    return configured_filename;
+  }
+  const std::filesystem::path configured_path{configured_filename};
+  const std::string folder = configured_path.parent_path().generic_string();
+  const std::string stem = configured_path.stem().generic_string();
+  const std::string ext = configured_path.extension().generic_string();
+  const auto in_folder = [&folder](const std::string& name) { return folder.empty() ? name : folder + "/" + name; };
+  const std::string tier_graph = in_folder(stem + "_" + tier + ext);
+  const std::string dynamic_graph = in_folder(stem + "_dynamic_ctx" + ext);
+  const std::vector<std::string> candidates =
+      tier == "32k" ? std::vector<std::string>{tier_graph, configured_filename, dynamic_graph}
+                    : std::vector<std::string>{tier_graph, dynamic_graph, configured_filename};
+  for (const std::string& candidate : candidates) {
+    if (exists(candidate)) return candidate;
+  }
+  std::string tried;
+  for (const std::string& candidate : candidates) tried += (tried.empty() ? "'" : ", '") + candidate + "'";
+  throw std::runtime_error("qwen38_flash_graph: ORT_QWEN38_CONTEXT_LENGTH=" + context_request +
+                           " names the context tier '" + tier + "', but the model folder has none of " + tried);
+}
+
+int64_t ResolveQwen38GraphKvCapacity(const std::vector<Qwen38CacheInput>& inputs) {
+  int64_t pos_rows = 0;
+  for (const auto& input : inputs) {
+    const size_t dot = input.name.rfind('.');
+    const std::string tail = dot == std::string::npos ? input.name : input.name.substr(dot + 1);
+    const bool is_cache = input.name.find("past_key_values.") != std::string::npos;
+    if (is_cache && (tail == "key" || tail == "value") && input.shape.size() == 4 && input.shape[2] > 0) {
+      return input.shape[2];
+    }
+    if (input.name == "past_position_ids" && input.shape.size() == 2 && input.shape[1] > 0) {
+      pos_rows = input.shape[1];
+    }
+  }
+  return pos_rows;
+}
+
+Qwen38GraphContext SyncQwen38GraphContext(int64_t graph_positions, int configured_max_length, bool context_requested) {
+  if (graph_positions <= 0) throw std::invalid_argument("qwen38_flash_graph: the target graph has no KV positions");
+  Qwen38GraphContext context;
+  context.kv_capacity = static_cast<int>(std::min<int64_t>(graph_positions, std::numeric_limits<int>::max()));
+  context.context_length = std::max(1, context.kv_capacity - kQwen38GraphIdMaxRows);
+  context.max_length = context_requested || configured_max_length <= 0
+                           ? context.context_length
+                           : std::min(configured_max_length, context.context_length);
+  return context;
 }
 
 size_t DevTensor::Bytes() const {
@@ -459,6 +662,8 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
       ledger_{model.config_->model.qwen38_graph.kv_capacity},
       run_hints_{static_cast<size_t>(max_batch_)} {
   const auto& q = model_.config_->model.qwen38_graph;
+  offload_warmup_run_options_ = CreateQwen38OffloadWarmupRunOptions(
+      ParseQwen38MoeOffloadSettings(model_.config_->model.decoder.session_options.config_entries));
   mtp_enabled_ = q.mtp.enabled;
   prefill_head_ = q.mtp.prefill_head;
   keep_hidden_ = mtp_enabled_ && prefill_head_ && model_.config_->model.dflash2.filename.empty();
@@ -493,9 +698,9 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
   // token, [2] draft_0 and [8] .. [13] draft_1 .. draft_6 for the S=3 .. S=8 multi-draft verify.
   ctl_ = PlaneBuffer(plane_, static_cast<size_t>(max_batch_) * kCtlWordsPerSlot * sizeof(int64_t), stream_);
   ctx_commit_ = PlaneBuffer(plane_, static_cast<size_t>(max_batch_) * 2 * sizeof(int64_t), stream_);
-  // Per slot, ctx_a_ holds kMaxVerifyRows contiguous 2-int64 row contexts (rows 0 .. 7); ctx_b_ is row 1's buffer (also aliased
-  // at ctx_a_ + 16 bytes).
-  ctx_a_ = PlaneBuffer(plane_, static_cast<size_t>(max_batch_) * kMaxVerifyRows * 2 * sizeof(int64_t), stream_);
+  // Per slot, ctx_a_ holds kFoldCtxAWords words, the 2-int64 contexts of the verify rows 0 .. 7; ctx_b_ is row 1's buffer (also
+  // aliased at ctx_a_ + 16 bytes).
+  ctx_a_ = PlaneBuffer(plane_, static_cast<size_t>(max_batch_) * kFoldCtxAWords * sizeof(int64_t), stream_);
   ctx_b_ = PlaneBuffer(plane_, static_cast<size_t>(max_batch_) * 2 * sizeof(int64_t), stream_);
   if (fold_) BuildHeadState();  // the fold model binds the head state
   BuildTarget();
@@ -582,6 +787,7 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
   if (dflash_) {
     const auto start = Clock::now();
     run_hints_.RequireDeterministicMoe();
+    const WarmupFlag warmup_flag{run_hints_};
     const Qwen38DflashWarmupPlan warmup = PlanQwen38DflashWarmup(q.warmup, verify_rows_, num_banks_);
     if (warmup.drafter && fast_ && fast_->unified) {
       if (max_batch_ > 1) {
@@ -607,8 +813,14 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
         dflash_->ReleaseAll();
         SyncStream();
       }
-      if (fast_->chunk > 512) {
-        Draft(d_dflash_prompt_.data(), static_cast<size_t>(fast_->chunk), static_cast<size_t>(capacity_), 1000, false);
+      const size_t dflash_win_cap =
+          model_.config_->model.dflash2.sliding_window > 0
+              ? static_cast<size_t>(model_.config_->model.dflash2.sliding_window +
+                                    model_.config_->model.dflash2.block_size)
+              : 2048;
+      const size_t warm_dflash_chunk = std::min<size_t>(static_cast<size_t>(fast_->chunk), dflash_win_cap);
+      if (warm_dflash_chunk > 512) {
+        Draft(d_dflash_prompt_.data(), warm_dflash_chunk, static_cast<size_t>(capacity_), 1000, false);
         dflash_->ReleaseAll();
       }
       const int warm_len = std::min<int>({fast_->chunk, 512, capacity_ - 3});
@@ -648,8 +860,8 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
         }
         if (fold_ && max_batch_ > 1) {
           // The batched graphs are captured after the arenas ORT shrinks once the prompt state has moved to the decode graphs.
-          // Each (batch size, bank) graph is run as often as a single-slot graph, enough for ORT to capture it and replay it:
-          // one run would leave the capture to the first live cycle that reaches it.
+          // Each (batch size, bank) graph is run as often as a single-slot graph. Offloaded targets stay eager so synthetic
+          // replays cannot bypass ORT's warmup control; their graphs are captured by live runs instead.
           const int runs_per_graph = Qwen38WarmupRuns(IsGraphCaptureEnabled(model_.config_->model.decoder.session_options));
           FastHandoff();
           for (int B = 2; B <= max_batch_; ++B) {
@@ -663,8 +875,7 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
                 plane_.Check(plane_.device_memset(banks_[k].arena.data(), 0, banks_[k].arena.size(), stream_),
                              "clear warmup bank");
                 SyncStream();
-                RunSession(*model_.session_target_, d.run_options.get(), *d.binding, nullptr,
-                           Qwen38FirstSlots(static_cast<size_t>(B)));
+                RunTarget(d, nullptr, Qwen38FirstSlots(static_cast<size_t>(B)));
                 SyncStream();
               }
             }
@@ -733,6 +944,9 @@ void Qwen38GraphEngine::BuildTarget() {
   const SessionInfo& info = model_.session_info_;
   const auto in_names = session.GetInputNames();
   const auto out_names = session.GetOutputNames();
+  if (fold_) {
+    RequireQwen38FoldContract(in_names, out_names);
+  }
 
   enum class Kind { kStore,
                     kShared,
@@ -745,6 +959,7 @@ void Qwen38GraphEngine::BuildTarget() {
   ple_layer_ = -1;
   for (const auto& name : in_names) {
     if (fold_ && StartsWith(name, "fold.")) {
+      RequireQwen38FoldInput(name);
       kinds[name] = Kind::kFold;
     } else if (fold_ && StartsWith(name, "head.past_key_values.0.")) {
       kinds[name] = Kind::kHeadIn;
@@ -818,13 +1033,13 @@ void Qwen38GraphEngine::BuildTarget() {
   // Store (KV, positions) and shared (index_key): one in-place buffer each, bound as input and output.
   for (const auto& name : in_names) {
     if (kinds[name] == Kind::kStore) {
-      const auto slot_shape = FixedShape(info.GetInputShape(name));
+      const auto slot_shape = ResolveQwen38CacheSlotShape(name, info.GetInputShape(name), capacity_);
       const auto dtype = info.GetInputDataType(name);
       store_slot_shape_[name] = slot_shape;
       store_slot_bytes_[name] = Elements(slot_shape) * Ort::SizeOf(dtype);
       NewDeviceTensor(store_, name, with_batch(slot_shape, max_batch_), dtype);
     } else if (kinds[name] == Kind::kShared) {
-      const auto slot_shape = FixedShape(info.GetInputShape(name));
+      const auto slot_shape = ResolveQwen38CacheSlotShape(name, info.GetInputShape(name), capacity_);
       const auto dtype = info.GetInputDataType(name);
       shared_slot_shape_[name] = slot_shape;
       shared_slot_bytes_[name] = Elements(slot_shape) * Ort::SizeOf(dtype);
@@ -976,18 +1191,9 @@ void Qwen38GraphEngine::BuildTarget() {
             request.capacity = state_update_capacity_;
             request.state = state_of(state_name, src_t);
             request.update = update_of();
-            const Qwen38ReplayGeometry geometry = ValidateQwen38ReplayDescriptor(request);
-            Qwen38StateReplayDesc d{};
-            d.source_state = src_t.ptr + st_off;
-            d.destination_state = dst_t.ptr + st_off;
-            d.value = su_tensor->ptr + su_off;
-            d.channel_count = geometry.channel_count;
-            d.state_width = geometry.state_width;
-            d.capacity = static_cast<uint32_t>(state_update_capacity_);
-            d.kept_count = 1;
-            d.element_size = geometry.element_size;
-            d.kind = 1;
-            generic_descs.push_back(d);
+            // A history-first state needs the plane capability of its layout; a channel-first one keeps loading without it.
+            generic_descs.push_back(MakeQwen38ConvReplayDescriptor(plane_, request, src_t.ptr + st_off, dst_t.ptr + st_off,
+                                                                   su_tensor->ptr + su_off));
           } else if (kind_str == "indexer_value") {
             const std::string buf_name = "past_key_values." + lid_str + ".index_buffer";
             const std::string len_name = "past_key_values." + lid_str + ".index_lengths";
@@ -1048,21 +1254,20 @@ void Qwen38GraphEngine::BuildTarget() {
   }
 
   if (fold_) {
-    // fold.* control inputs alias the device control block; fold.ptrs = (pinned result ring address, ring size)
+    // fold.* control inputs alias the device control block; fold.ptrs = (pinned result ring address, ring size).
+    // SpeculativePrefixCommit serves head_rows in [3, 8] and reads 16 ctl words and >= 2 * head_rows ctx_a words per slot.
+    if (verify_rows_ < 3 || verify_rows_ > kMaxVerifyRows)
+      throw std::runtime_error("qwen38_graph: the fold stack needs 3..8 verify rows (SpeculativePrefixCommit head_rows)");
+    ValidateQwen38FoldHeadRows(model_.target_head_rows_, verify_rows_);
     fold_ptrs_ = PlaneBuffer(plane_, 2 * sizeof(int64_t), stream_);
     const int64_t ptrs[2] = {static_cast<int64_t>(reinterpret_cast<intptr_t>(result_host_)), kRing};
     plane_.Check(plane_.memcpy_h2d(fold_ptrs_.data(), ptrs, sizeof(ptrs), stream_), "fold ptrs");
     SyncStream();  // ptrs lives on the stack
     const auto i64 = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64;
-    // The view must not be larger than the 16 words of slot 0 of ctl_.
-    const std::vector<int64_t> ctl_shape = info.GetInputShape("fold.ctl");
-    RequireQwen38TensorFits("fold.ctl", ctl_shape, sizeof(int64_t),
-                            16 * sizeof(int64_t));
-    fold_tensors_["fold.ctl"] = MakeTensor(ctl_.data(), ctl_shape, i64);
-    fold_tensors_["fold.ctx_commit"] = MakeTensor(ctx_commit_.data(), {2}, i64);
-    fold_tensors_["fold.ctx_a"] = MakeTensor(ctx_a_.data(), {verify_rows_ > 2 ? 2 * verify_rows_ : 2}, i64);
-    fold_tensors_["fold.ctx_b"] = MakeTensor(ctx_a_.data() + 16, {2}, i64);
-    fold_tensors_["fold.ptrs"] = MakeTensor(fold_ptrs_.data(), {2}, i64);
+    fold_tensors_[kQwen38FoldCtl] = MakeTensor(ctl_.data(), {kFoldCtlWords}, i64);
+    fold_tensors_[kQwen38FoldCtxCommit] = MakeTensor(ctx_commit_.data(), {kFoldCtxCommitWords}, i64);
+    fold_tensors_[kQwen38FoldCtxA] = MakeTensor(ctx_a_.data(), {2 * verify_rows_}, i64);
+    fold_tensors_[kQwen38FoldPtrs] = MakeTensor(fold_ptrs_.data(), {2}, i64);
   }
 
   // Per-row-count inputs
@@ -1205,6 +1410,8 @@ void Qwen38GraphEngine::BuildTarget() {
           t = add_own(name, {1, 1, 1}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
         else if (fold_ && name == "fold.tail_done")
           t = add_own(name, {1}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+        else if (fold_ && Qwen38FoldStateInput(name))
+          t = fold_tensors_.at(Qwen38FoldStateInput(name)).get();  // updated state lands in the persistent control buffers
         else if (name == "present_position_ids")
           t = max_batch_ == 1 ? store_["past_position_ids"].get()
                               : add_view(name, store_["past_position_ids"]->ptr,
@@ -1317,14 +1524,14 @@ void Qwen38GraphEngine::BuildTarget() {
                            in_bank.tensors[name]->type);
               break;
             case Kind::kFold:
-              // The slots lie kCtlWordsPerSlot and 2 * verify_rows_ words apart, as the plane prepares them
-              // (ValidateQwen38BatchedVerifyRows keeps verify_rows_ above 2 for every batch).
-              if (name == "fold.ctl")
-                t = add_view(name, ctl_.data(), {static_cast<int64_t>(B) * static_cast<int64_t>(kCtlWordsPerSlot)}, i64);
-              else if (name == "fold.ctx_commit")
-                t = add_view(name, ctx_commit_.data(), {B * 2}, i64);
-              else if (name == "fold.ctx_a")
-                t = add_view(name, ctx_a_.data(), {B * 2 * verify_rows_}, i64);
+              // The slots lie kFoldCtlWords, kFoldCtxCommitWords and kFoldCtxAWords words apart whatever the verify width, as the
+              // plane prepares them (QWEN38_PLANE_CTL_WORDS_PER_SLOT, QWEN38_PLANE_CTX_WORDS_PER_SLOT).
+              if (name == kQwen38FoldCtl)
+                t = add_view(name, ctl_.data(), {B * kFoldCtlWords}, i64);
+              else if (name == kQwen38FoldCtxCommit)
+                t = add_view(name, ctx_commit_.data(), {B * kFoldCtxCommitWords}, i64);
+              else if (name == kQwen38FoldCtxA)  // the op derives the per-slot stride from the size: keep it equal to ctx_a_slot()
+                t = add_view(name, ctx_a_.data(), {B * kFoldCtxAWords}, i64);
               else
                 t = fold_tensors_.at(name).get();
               break;
@@ -1358,6 +1565,10 @@ void Qwen38GraphEngine::BuildTarget() {
           };
           if (name == "fold.tail_done")
             t = add_own(name, {B}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+          else if (name == kQwen38FoldCtlOut)
+            t = add_view(name, ctl_.data(), {B * kFoldCtlWords}, i64);
+          else if (name == kQwen38FoldCtxCommitOut)
+            t = add_view(name, ctx_commit_.data(), {B * kFoldCtxCommitWords}, i64);
           else if (name == "present_position_ids")
             t = add_view(name, store_["past_position_ids"]->ptr,
                          with_batch(store_slot_shape_["past_position_ids"], B), store_["past_position_ids"]->type);
@@ -1504,9 +1715,12 @@ void Qwen38GraphEngine::BuildHeadState() {
   const SessionInfo& info = fold_ ? model_.session_info_ : head_[0].info;
   const std::string prefix = fold_ ? "head.past_key_values.0." : "past_key_values.0.";
   if (!model_.config_->model.dflash2.filename.empty() && !info.HasInput(prefix + "key")) return;
-  for (const char* tail : {"key", "value", "index_key"})
-    NewDeviceTensor(head_store_, std::string("past_key_values.0.") + tail, FixedShape(info.GetInputShape(prefix + tail)),
-                    info.GetInputDataType(prefix + tail));
+  for (const char* tail : {"key", "value", "index_key"}) {
+    const std::string input_name = prefix + tail;
+    NewDeviceTensor(head_store_, std::string("past_key_values.0.") + tail,
+                    ResolveQwen38CacheSlotShape(input_name, info.GetInputShape(input_name), capacity_),
+                    info.GetInputDataType(input_name));
+  }
   const int banks = fold_ ? kMaxBanks : 2;
   for (int b = 0; b < banks; ++b) {
     for (const char* tail : {"index_buffer", "index_lengths"})
@@ -1641,11 +1855,20 @@ void Qwen38GraphEngine::PrepBatch(int batch) {
 
 void Qwen38GraphEngine::RunTarget(int rows, int phase, const Qwen38PromptRunHints* prompt) {
   Direction& d = dirs_[rows - 1][phase % num_banks_];
-  RunSession(*model_.session_target_, d.run_options.get(), *d.binding, prompt);
+  RunTarget(d, prompt);
 }
 
-void Qwen38GraphEngine::RunSession(OrtSession& session, const OrtRunOptions* run_options, const OrtIoBinding& binding,
+void Qwen38GraphEngine::RunTarget(Direction& direction, const Qwen38PromptRunHints* prompt,
+                                  Qwen38SlotMask participants) {
+  OrtRunOptions* options = run_hints_.InWarmup() && offload_warmup_run_options_
+                               ? offload_warmup_run_options_.get()
+                               : direction.run_options.get();
+  RunSession(*model_.session_target_, options, *direction.binding, prompt, participants);
+}
+
+void Qwen38GraphEngine::RunSession(OrtSession& session, OrtRunOptions* run_options, const OrtIoBinding& binding,
                                    const Qwen38PromptRunHints* prompt, Qwen38SlotMask participants) {
+  if (run_options != nullptr) run_hints_.ApplyRunConfigEntries(*run_options);
   RunWithQwen38OrtHints(run_hints_, prompt, [&] { session.Run(run_options, binding); }, participants);
 }
 
@@ -1709,18 +1932,20 @@ size_t EffectiveQwen38PrefillChunkTokens(const Config::Model::Qwen38Graph& q) {
   return static_cast<size_t>(q.prefill.enabled ? kDenseChunk : kStepChunk);
 }
 
-void ValidateQwen38PrefillChunk(const Config::Model::Qwen38Graph& q) {
+void ValidateQwen38PrefillChunkShape(const Config::Model::Qwen38Graph& q) {
   if (q.prefill.chunk < 0)
     throw std::runtime_error("model.qwen38_graph.prefill.chunk must not be negative (0 selects the default)");
-  const size_t chunk = EffectiveQwen38PrefillChunkTokens(q);
-  if (q.prefill.enabled) {
-    if (chunk > static_cast<size_t>(std::max(q.kv_capacity, 0)))
-      throw std::runtime_error("model.qwen38_graph.prefill.chunk must be in [1, kv_capacity]");
-  } else if ((chunk % 2) != 0) {
+  if (!q.prefill.enabled && (EffectiveQwen38PrefillChunkTokens(q) % 2) != 0) {
     throw std::runtime_error(
         "model.qwen38_graph.prefill.chunk must be even when the prompt is ingested by the decode graphs "
         "(prefill.enabled is false)");
   }
+}
+
+void ValidateQwen38PrefillChunk(const Config::Model::Qwen38Graph& q) {
+  ValidateQwen38PrefillChunkShape(q);
+  if (q.prefill.enabled && EffectiveQwen38PrefillChunkTokens(q) > static_cast<size_t>(std::max(q.kv_capacity, 0)))
+    throw std::runtime_error("model.qwen38_graph.prefill.chunk must be in [1, kv_capacity]");
 }
 
 size_t Qwen38GraphEngine::PrefillChunkTokens() const {
@@ -2231,6 +2456,12 @@ Qwen38CycleRecord Qwen38GraphEngine::WaitCycleSlot(int slot_idx) {
     __builtin_ia32_pause();
 #endif
     if (((++spins) & (kStatusRingSpinCheck - 1)) == 0) {
+      if (SecondsSince(start) > 1.0) {
+        if (const int64_t bits = ReadCtlSlot(slot_idx, 5); bits != 0) {
+          throw std::runtime_error("qwen38_graph: device error bits " + std::to_string(bits) +
+                                   " while waiting for the cycle record (slot " + std::to_string(slot_idx) + ")");
+        }
+      }
       if (SecondsSince(start) > 180.0) throw std::runtime_error("qwen38_graph: timeout waiting for the cycle record");
       std::this_thread::yield();
     }
@@ -2326,7 +2557,7 @@ void Qwen38GraphEngine::EnqueueBatchDecode(std::span<const size_t> active_slots)
   PrepBatch(B);
   Direction& d = (B == 1) ? dirs_[verify_rows_ - 1][bank_phase_ % num_banks_]
                           : batch_dirs_[B - 1][bank_phase_ % num_banks_];
-  RunSession(*model_.session_target_, d.run_options.get(), *d.binding, nullptr, Qwen38SlotMaskOf(active_slots));
+  RunTarget(d, nullptr, Qwen38SlotMaskOf(active_slots));
   last_hidden_ptr_ = d.hidden;
   inflight_dir_ = &d;
   inflight_batch_ = B;
@@ -2502,17 +2733,11 @@ void Qwen38GraphEngine::Advance(const Qwen38CycleRecord& record, bool want_more)
 }
 
 void Qwen38GraphEngine::Warmup() {
-  // ORT captures a graph id after min_num_runs eager runs: touch every (rows, phase) and head direction enough times.
-  // The Runs of the warmup carry ORT_QMOE_IN_WARMUP and, from here on, every Run of the engine asks for deterministic
-  // MoE tactics: the engine keeps that state and publishes it around each Run only (qwen38_ort_env.h), also when this
-  // throws.
-  struct WarmupFlag {
-    explicit WarmupFlag(Qwen38OrtRunHints& hints) : hints_{hints} { hints_.SetWarmup(true); }
-    ~WarmupFlag() { hints_.SetWarmup(false); }
-    WarmupFlag(const WarmupFlag&) = delete;
-    WarmupFlag& operator=(const WarmupFlag&) = delete;
-    Qwen38OrtRunHints& hints_;
-  } warmup_flag{run_hints_};
+  // Touch every (rows, phase) and head direction enough times for first-use costs and, except on offloaded targets, capture.
+  // The Runs of the warmup carry ep.cuda.qmoe_in_warmup (and ORT_QMOE_IN_WARMUP) and, from here on, every Run of the
+  // engine asks for deterministic MoE tactics: the engine keeps that state and publishes it around each Run only
+  // (qwen38_ort_env.h), also when this throws.
+  const WarmupFlag warmup_flag{run_hints_};
   // The device embedding gather does not bound-check, so every dummy id must stay inside the vocabulary.
   const auto warm_token = [this](int64_t id) { return static_cast<int32_t>(id % std::max(vocab_, 1)); };
   const int R = fold_ ? verify_rows_ : 2;
@@ -2694,9 +2919,10 @@ Qwen38EmbeddingFormat RequireQwen38PackageSupportedByPlane(const Qwen38Plane& pl
                               "the folded MTP verify path (model.qwen38_graph.fold)");
   }
   // The batched prep entry point (qwen38_plane_prep_batched) prepares the rows of every slot of a step with explicit row and
-  // batch arguments; only the packages that run several slots need it.
+  // batch arguments and the n-gram contexts of slot s at word s * QWEN38_PLANE_CTX_WORDS_PER_SLOT (ctx_slot_stride), which
+  // is where SpeculativePrefixCommit reads them; only the packages that run several slots need it.
   if (ResolveQwen38MaxBatchSize(config) > 1) {
-    plane.RequireCapabilities(QWEN38_PLANE_CAP_BATCHED_PREP,
+    plane.RequireCapabilities(QWEN38_PLANE_CAP_BATCHED_PREP | QWEN38_PLANE_CAP_CTX_SLOT_STRIDE,
                               "several request slots (model.qwen38_graph.max_batch_size > 1)");
   }
   const std::filesystem::path ple_table_path = model_folder / config.model.qwen38_graph.ple_table;
@@ -2712,14 +2938,184 @@ Qwen38EmbeddingFormat RequireQwen38PackageSupportedByPlane(const Qwen38Plane& pl
 
 namespace {
 
+// A byte count the way the runtime reads one: decimal digits only (no sign, white space or trailing text), not empty,
+// and within 64 bits. std::stoull skips leading white space, takes a sign and ignores whatever follows the digits.
+std::optional<uint64_t> ParseQwen38ByteCount(const std::string& text) {
+  if (text.empty()) return std::nullopt;
+  const char* const end = text.data() + text.size();
+  uint64_t bytes = 0;
+  const auto [last, error] = std::from_chars(text.data(), end, bytes, 10);
+  if (error != std::errc{} || last != end) return std::nullopt;
+  return bytes;
+}
+
+// `bytes` moved by `delta` (of either sign) without wrapping around: the runtime accepts budgets up to UINT64_MAX.
+uint64_t AddBytesSaturating(uint64_t bytes, int64_t delta) {
+  constexpr uint64_t kMaxBytes = std::numeric_limits<uint64_t>::max();
+  if (delta >= 0) {
+    const uint64_t increase = static_cast<uint64_t>(delta);
+    return bytes > kMaxBytes - increase ? kMaxBytes : bytes + increase;
+  }
+  const uint64_t decrease = static_cast<uint64_t>(-delta);
+  return bytes < decrease ? 0 : bytes - decrease;
+}
+
+// `text` in ASCII lower case, the way the runtime reads the offload mode and the value "auto" (whatever the locale).
+std::string AsciiLowerCase(std::string text) {
+  for (char& c : text) {
+    if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+  }
+  return text;
+}
+
+}  // namespace
+
+Qwen38MoeOffloadSettings ParseQwen38MoeOffloadSettings(const std::vector<Config::NamedString>& config_entries) {
+  // The session options keep the last value of a key that is configured more than once (overlays append entries),
+  // so that is the value that counts here as well.
+  const auto last_value = [&config_entries](const char* key) -> const std::string* {
+    const auto entry = std::find_if(config_entries.rbegin(), config_entries.rend(),
+                                    [key](const Config::NamedString& candidate) { return candidate.first == key; });
+    return entry == config_entries.rend() ? nullptr : &entry->second;
+  };
+
+  Qwen38MoeOffloadSettings settings;
+  const std::string* mode_entry = last_value("session.moe.offload.mode");
+  const std::string mode = mode_entry != nullptr ? AsciiLowerCase(*mode_entry) : std::string();
+  if (mode == "required" || mode == "auto" || mode == "1" || mode == "on") {
+    settings.enabled = true;
+    if (mode != "auto") settings.constrained = true;
+  }
+
+  // A budget only constrains an enabled offload; it never changes the mode, whose runtime default is disabled.
+  // "auto" and 0 are not adapted. Malformed budgets stay configured so the runtime can report them.
+  const std::string* expert_bytes = last_value("session.moe.offload.device_expert_bytes");
+  if (expert_bytes != nullptr && AsciiLowerCase(*expert_bytes) != "auto") {
+    const std::optional<uint64_t> bytes = ParseQwen38ByteCount(*expert_bytes);
+    if (!bytes.has_value() || *bytes != 0) {
+      settings.constrained = settings.enabled;
+      settings.has_device_expert_bytes = bytes.has_value();
+      settings.malformed_device_expert_bytes = !bytes.has_value();
+      settings.device_expert_bytes = bytes.value_or(0);
+    }
+  }
+
+  const std::string* source_root = last_value("session.moe.offload.source_root");
+  settings.has_source_root = source_root != nullptr && !source_root->empty();
+
+  // Only "auto" takes the default reserve; the empty string is malformed like any other text that is not a byte count.
+  const std::string* reserve_bytes = last_value("session.moe.offload.reserve_device_bytes");
+  if (reserve_bytes != nullptr && AsciiLowerCase(*reserve_bytes) != "auto") {
+    const std::optional<uint64_t> bytes = ParseQwen38ByteCount(*reserve_bytes);
+    settings.has_reserve_device_bytes = bytes.has_value();
+    settings.malformed_reserve_device_bytes = !bytes.has_value();
+    if (bytes.has_value()) settings.reserve_device_bytes = *bytes;
+  }
+
+  return settings;
+}
+
+std::unique_ptr<OrtRunOptions> CreateQwen38OffloadWarmupRunOptions(const Qwen38MoeOffloadSettings& settings) {
+  if (!settings.enabled) return nullptr;
+  auto options = OrtRunOptions::Create();
+  options->AddConfigEntry("gpu_graph_id", "-1");
+  options->AddConfigEntry("disable_synchronize_execution_providers", "1");
+  options->AddConfigEntry(Qwen38OrtRunEntry::kInWarmup, "1");
+  return options;
+}
+
+std::optional<Qwen38ContextTier> Qwen38ContextTierForTarget(const std::string& target_filename) {
+  // The tier is a "_<n>k" component of the file stem (model_128k.onnx); "model_32k" must not match "2k".
+  const std::string stem = std::filesystem::path(target_filename).stem().string();
+  for (size_t begin = 0; begin <= stem.size();) {
+    size_t end = stem.find('_', begin);
+    if (end == std::string::npos) end = stem.size();
+    const std::string_view part = std::string_view(stem).substr(begin, end - begin);
+    if (part == "128k") return Qwen38ContextTier{"128k", 133128};
+    if (part == "64k") return Qwen38ContextTier{"64k", 65800};
+    if (part == "32k") return Qwen38ContextTier{"32k", 33032};
+    if (part == "16k") return Qwen38ContextTier{"16k", 16648};
+    if (part == "8k") return Qwen38ContextTier{"8k", 8456};
+    if (part == "2k") return Qwen38ContextTier{"2k", 2312};
+    begin = end + 1;
+  }
+  return std::nullopt;
+}
+
+std::string SelectQwen38TierHeadR2Filename(const std::string& head_r2_filename,
+                                           const std::optional<Qwen38ContextTier>& target_tier,
+                                           const std::function<bool(const std::string&)>& exists) {
+  if (target_tier && target_tier->name == "64k" && head_r2_filename == "mtp.onnx" && exists("mtp_64k.onnx")) {
+    return "mtp_64k.onnx";
+  }
+  return head_r2_filename;
+}
+
+std::vector<Config::NamedString> Qwen38MoeOffloadSessionEntries(const Qwen38MoeOffloadSettings& settings,
+                                                                const std::filesystem::path& model_root, int kv_capacity,
+                                                                bool adaptive_context_budget, size_t request_slots) {
+  constexpr int64_t kReferenceKvCapacity = 33032;  // the 32K-context target graph, with one request slot
+  // Fixed-layout estimate for the Flash-Next NVFP4 package, not a measurement of the selected graph. Its cache inputs take
+  // 13,832 bytes per position: 12 attention layers x K and V x 2 heads x 256 channels at one byte, an int64 position id,
+  // and per layer one 128-float index-key row for every 4 positions. Charge 16 KiB including margin.
+  constexpr int64_t kKvBytesPerToken = 16384;
+  constexpr uint64_t kMinDeviceExpertBytes = 1000000000ULL;
+  constexpr uint64_t kMinReserveDeviceBytes = 2147483648ULL;
+
+  std::vector<Config::NamedString> entries;
+  if (!settings.enabled) return entries;
+  if (!settings.has_source_root) entries.emplace_back("session.moe.offload.source_root", model_root.string());
+
+  // A malformed budget gets no entry, adapted or not: it stays as configured and the runtime rejects it by name.
+  // Every slot holds kv_capacity positions: at most 2^31 x 8 x 16384 = 2^48 bytes, which fits an int64.
+  const int64_t slots = static_cast<int64_t>(
+      std::clamp<size_t>(request_slots, 1, static_cast<size_t>(Config::Model::Qwen38Graph::kMaxBatchSize)));
+  const int64_t delta_kv_bytes = (slots * kv_capacity - kReferenceKvCapacity) * kKvBytesPerToken;
+  if (adaptive_context_budget && delta_kv_bytes != 0) {
+    // The floors only keep the adaptation from shrinking a budget too far; a budget configured below its floor is never
+    // lifted by it.
+    if (settings.has_device_expert_bytes) {
+      const uint64_t lowest = std::min(settings.device_expert_bytes, kMinDeviceExpertBytes);
+      const uint64_t device_expert_bytes =
+          std::max(lowest, AddBytesSaturating(settings.device_expert_bytes, -delta_kv_bytes));
+      entries.emplace_back("session.moe.offload.device_expert_bytes", std::to_string(device_expert_bytes));
+    }
+    if (!settings.malformed_reserve_device_bytes) {
+      const uint64_t lowest = std::min(settings.reserve_device_bytes, kMinReserveDeviceBytes);
+      const uint64_t reserve_device_bytes =
+          std::max(lowest, AddBytesSaturating(settings.reserve_device_bytes, delta_kv_bytes));
+      entries.emplace_back("session.moe.offload.reserve_device_bytes", std::to_string(reserve_device_bytes));
+    }
+  } else if (!settings.has_reserve_device_bytes && !settings.malformed_reserve_device_bytes) {
+    entries.emplace_back("session.moe.offload.reserve_device_bytes", std::to_string(settings.reserve_device_bytes));
+  }
+  return entries;
+}
+
+std::string SelectQwen38OffloadTargetGraph(const std::string& target_filename, const Qwen38MoeOffloadSettings& offload,
+                                           const std::string& context_request, const std::string& mtp_drafts, bool dflash2,
+                                           size_t request_slots, const std::function<bool(const std::string&)>& exists) {
+  constexpr const char* kDecoder = "model.onnx";
+  constexpr const char* kMultiDraft = "model_s4.onnx";
+  const bool graph_chosen_by_environment = !context_request.empty() || !mtp_drafts.empty();
+  if (!offload.constrained || graph_chosen_by_environment || dflash2 || request_slots > 1 || target_filename != kDecoder ||
+      !exists(kMultiDraft)) {
+    return target_filename;
+  }
+  return kMultiDraft;
+}
+
+namespace {
+
 // Validates the qwen38_flash_graph configuration and checks the package's PLE and embedding formats against the plane
 // library before Model::Model runs EnsureDeviceOrtInit or AddSharedInitializers.
 std::unique_ptr<Config> PreflightQwen38GraphModelConfig(std::unique_ptr<Config> config) {
   if (!config) return config;
   const auto& q = config->model.qwen38_graph;
-  if (!q.IsConfigured() || q.plane_library.empty() || q.ple_table.empty())
+  if (!q.IsConfigured() || q.ple_table.empty())
     throw std::runtime_error(
-        "qwen38_flash_graph requires model.qwen38_graph.{head.filename_s1|fold.head_r2.filename,plane_library,ple_table}");
+        "qwen38_flash_graph requires model.qwen38_graph.ple_table and one of "
+        "model.qwen38_graph.{head.filename_s1,fold.head_r2.filename,fold.enabled}");
   if (q.fold.enabled) {
     if (!q.mtp.enabled) throw std::runtime_error("model.qwen38_graph.fold requires model.qwen38_graph.mtp.enabled");
     if (q.fold.head_r2.filename.empty() && config->model.dflash2.filename.empty())
@@ -2742,14 +3138,9 @@ std::unique_ptr<Config> PreflightQwen38GraphModelConfig(std::unique_ptr<Config> 
 
   const std::filesystem::path root =
       std::filesystem::weakly_canonical(std::filesystem::path{config->config_path.string()});
-  const std::filesystem::path plane_path = std::filesystem::weakly_canonical(root / q.plane_library);
-  const std::string root_prefix = (root / "").string();
-  if (plane_path.string().compare(0, root_prefix.size(), root_prefix) != 0)
-    throw std::runtime_error("model.qwen38_graph.plane_library must resolve inside the model folder: " +
-                             plane_path.string());
-  std::error_code ec;
-  if (std::filesystem::exists(ResolveWindowsSharedLibraryPath(plane_path), ec) ||
-      std::filesystem::exists(plane_path, ec)) {
+  const std::filesystem::path plane_path =
+      ResolveQwen38PlaneLibraryPath(root, q.plane_library, kQwen38WindowsHost);
+  if (!plane_path.empty()) {
     Qwen38Plane plane{plane_path};
     (void)RequireQwen38PackageSupportedByPlane(plane, *config, root);
   }
@@ -2758,8 +3149,148 @@ std::unique_ptr<Config> PreflightQwen38GraphModelConfig(std::unique_ptr<Config> 
 
 }  // namespace
 
+size_t ResolveQwen38DflashReservedBlocks(const Config& config, size_t block_size, size_t max_batch) {
+  if (config.model.dflash2.filename.empty()) return 0;
+  if (block_size == 0) {
+    throw std::runtime_error("engine.dynamic_batching.block_size must be positive.");
+  }
+  Config dflash_cfg = config;
+  auto& dflash = dflash_cfg.model.dflash2;
+  if (dflash.num_hidden_layers <= 0) dflash.num_hidden_layers = 5;
+  if (dflash.num_key_value_heads <= 0) dflash.num_key_value_heads = 8;
+  if (dflash.head_size <= 0) dflash.head_size = 128;
+  if (dflash.block_size <= 0) dflash.block_size = 8;
+  if (dflash.sliding_window <= 0) dflash.sliding_window = 2048;
+
+  const size_t active_pools = std::max<size_t>(1, max_batch);
+  size_t snapshot_pools = 0;
+  if (config.engine.dynamic_batching) {
+    const auto& db = *config.engine.dynamic_batching;
+    if (db.prefix_caching.value_or(true) && db.dflash2_max_snapshots > 0) {
+      snapshot_pools = std::min(db.dflash2_max_snapshots, active_pools);
+      if (db.max_snapshots.has_value()) {
+        snapshot_pools = std::min(snapshot_pools, *db.max_snapshots);
+      }
+    }
+  }
+  const size_t pools = active_pools + snapshot_pools;
+  constexpr size_t kDrafterPageSize = 128;
+  const size_t ring_blocks_per_pool = Dflash2Drafter::PoolBlocks(dflash_cfg, kDrafterPageSize, 1);
+  const size_t pool_kv_bytes = Dflash2Drafter::PoolBytes(
+      dflash_cfg, kDrafterPageSize, ring_blocks_per_pool, ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16);
+  const size_t hidden_size =
+      config.model.decoder.hidden_size > 0 ? static_cast<size_t>(config.model.decoder.hidden_size) : 2560;
+  const size_t embed_bytes = Dflash2Drafter::EmbeddingReservedBytes(
+      active_pools, static_cast<size_t>(dflash.block_size), hidden_size,
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16);
+  if (pools != 0 && pool_kv_bytes > std::numeric_limits<size_t>::max() / pools) {
+    throw std::runtime_error("DFlash 2 reserved pool bytes overflow size_t.");
+  }
+  const size_t total_pool_kv_bytes = pools * pool_kv_bytes;
+  if (embed_bytes > std::numeric_limits<size_t>::max() - total_pool_kv_bytes) {
+    throw std::runtime_error("DFlash 2 reserved memory bytes overflow size_t.");
+  }
+  const size_t aux_bytes = total_pool_kv_bytes + embed_bytes;
+
+  const size_t qsa_layers =
+      config.model.decoder.num_hidden_layers >= kQwen38IndexKeyRatio
+          ? static_cast<size_t>(config.model.decoder.num_hidden_layers / kQwen38IndexKeyRatio)
+          : 12;
+  const size_t kv_heads =
+      config.model.decoder.num_key_value_heads > 0 ? static_cast<size_t>(config.model.decoder.num_key_value_heads) : 2;
+  const size_t head_size =
+      config.model.decoder.head_size > 0 ? static_cast<size_t>(config.model.decoder.head_size) : 256;
+  constexpr size_t kIndexKeyWidth = 128;
+  const size_t layer_kv_bytes_per_token = 2 * kv_heads * head_size * sizeof(uint16_t);
+  const size_t layer_index_bytes_per_token = kIndexKeyWidth * sizeof(float);
+  const size_t target_bytes_per_token = qsa_layers * (layer_kv_bytes_per_token + layer_index_bytes_per_token);
+  if (target_bytes_per_token == 0 || block_size > std::numeric_limits<size_t>::max() / target_bytes_per_token) {
+    throw std::runtime_error("Target cache bytes per block overflow size_t.");
+  }
+  const size_t target_block_bytes = block_size * target_bytes_per_token;
+  return aux_bytes / target_block_bytes + static_cast<size_t>(aux_bytes % target_block_bytes != 0);
+}
+
+bool ApplyQwen38DynamicBatchingConfig(Config& config) {
+  bool has_dynamic_batching_kv = false;
+  if (config.engine.dynamic_batching) {
+    const auto& db = *config.engine.dynamic_batching;
+    if (db.enable_recompute_preemption) {
+      throw std::runtime_error(
+          "qwen38_flash_graph does not support engine.dynamic_batching.enable_recompute_preemption.");
+    }
+    const size_t max_batch = ResolveQwen38MaxBatchSize(config);
+    if (db.block_size == 0) {
+      throw std::runtime_error("engine.dynamic_batching.block_size must be positive.");
+    }
+    const size_t block_size = db.block_size;
+    if (db.num_blocks.has_value() && *db.num_blocks > 0) {
+      const size_t configured_blocks = *db.num_blocks;
+      const size_t aux_blocks = ResolveQwen38DflashReservedBlocks(config, block_size, max_batch);
+      if (configured_blocks <= aux_blocks) {
+        throw std::runtime_error(
+            "engine.dynamic_batching.num_blocks (" + std::to_string(configured_blocks) +
+            ") is too small to hold the reserved DFlash 2 auxiliary cache (" +
+            std::to_string(aux_blocks) + " blocks).");
+      }
+      const size_t target_blocks_per_slot = (configured_blocks - aux_blocks) / max_batch;
+      if (target_blocks_per_slot == 0) {
+        throw std::runtime_error(
+            "engine.dynamic_batching.num_blocks is too small to allocate at least 1 target block per batch slot.");
+      }
+      constexpr size_t kMaxTargetTokens =
+          static_cast<size_t>(std::numeric_limits<int>::max() - kQwen38GraphIdMaxRows);
+      if (target_blocks_per_slot > kMaxTargetTokens / block_size) {
+        throw std::runtime_error(
+            "engine.dynamic_batching.num_blocks (" + std::to_string(configured_blocks) +
+            ") with block_size (" + std::to_string(block_size) +
+            ") exceeds the maximum supported kv_capacity.");
+      }
+      const size_t target_tokens = target_blocks_per_slot * block_size;
+      config.model.qwen38_graph.kv_capacity =
+          static_cast<int>(target_tokens + static_cast<size_t>(kQwen38GraphIdMaxRows));
+      config.model.context_length = static_cast<int>(target_tokens);
+      config.search.max_length = config.model.context_length;
+      has_dynamic_batching_kv = true;
+    }
+    if (config.search.chunk_size.has_value() && *config.search.chunk_size > 0) {
+      if (*config.search.chunk_size > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        throw std::runtime_error("search.chunk_size exceeds the maximum supported prefill chunk.");
+      }
+      config.model.qwen38_graph.prefill.chunk = static_cast<int>(*config.search.chunk_size);
+    } else if (config.model.qwen38_graph.prefill.chunk == 0 && db.max_scheduled_tokens > 0) {
+      if (db.max_scheduled_tokens > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        throw std::runtime_error(
+            "engine.dynamic_batching.max_scheduled_tokens exceeds the maximum supported prefill chunk.");
+      }
+      config.model.qwen38_graph.prefill.chunk = static_cast<int>(db.max_scheduled_tokens);
+    }
+    config.search.chunk_size.reset();
+    if (max_batch <= 1) {
+      config.model.qwen38_graph.resolved_max_batch_size = 1;
+      config.model.qwen38_graph.max_batch_size = 1;
+      config.search.batch_size = 1;
+      config.engine.dynamic_batching.reset();
+    }
+  } else if (config.search.chunk_size.has_value() && *config.search.chunk_size > 0) {
+    if (*config.search.chunk_size > static_cast<size_t>(std::numeric_limits<int>::max())) {
+      throw std::runtime_error("search.chunk_size exceeds the maximum supported prefill chunk.");
+    }
+    config.model.qwen38_graph.prefill.chunk = static_cast<int>(*config.search.chunk_size);
+    config.search.chunk_size.reset();
+  }
+  if (has_dynamic_batching_kv && config.model.qwen38_graph.prefill.enabled &&
+      EffectiveQwen38PrefillChunkTokens(config.model.qwen38_graph) >
+          static_cast<size_t>(config.model.qwen38_graph.kv_capacity)) {
+    config.model.qwen38_graph.prefill.chunk = config.model.qwen38_graph.kv_capacity;
+  }
+  ValidateQwen38PrefillChunkShape(config.model.qwen38_graph);
+  return has_dynamic_batching_kv;
+}
+
 Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{PreflightQwen38GraphModelConfig(std::move(config))} {
+  const bool has_dynamic_batching_kv = ApplyQwen38DynamicBatchingConfig(*config_);
   const auto& q = config_->model.qwen38_graph;
   const bool separate_prefill_sessions =
       q.prefill.enabled && !q.prefill.dense.filename.empty() &&
@@ -2775,8 +3306,9 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
 
   const auto start = Clock::now();
   const std::filesystem::path root = std::filesystem::weakly_canonical(std::filesystem::path{config_->config_path.string()});
-  const std::filesystem::path plane_path = std::filesystem::weakly_canonical(root / q.plane_library);
-  plane_ = std::make_unique<Qwen38Plane>(plane_path);
+  // An empty or missing plane_library falls back to the plane built into onnxruntime-genai-cuda; a Windows host resolves
+  // the POSIX name of the package to the .dll it ships first.
+  plane_ = std::make_unique<Qwen38Plane>(ResolveQwen38PlaneLibraryPath(root, q.plane_library, kQwen38WindowsHost));
   plane_->Check(plane_->set_device(p_device_->GetDeviceId(nullptr)), "cudaSetDevice");
 
   // An INT8 package needs a plane library that can decode it: refuse it now, before the weights are uploaded and the sessions
@@ -2786,22 +3318,48 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
   // The target graph decides how the slots are batched: choose it now (the MTP-drafts test hook may pick another one), and for
   // several slots read its output names from the model file, so that a target the batched device cannot serve is refused
   // before any weight is uploaded. The check against the session below stays authoritative.
-  std::string target_filename = config_->model.decoder.filename;
-  if (const char* drafts_env = std::getenv("ORT_QWEN38_MTP_DRAFTS")) {
-    const int d = std::atoi(drafts_env);
-    if (d >= 1 && d <= 3) {
-      const std::filesystem::path parent = std::filesystem::path(target_filename).parent_path();
-      const std::string alt_name = "model_s" + std::to_string(d + 1) + ".onnx";
-      const std::string alt = (parent.empty() ? std::filesystem::path(alt_name) : (parent / alt_name)).string();
-      if (std::filesystem::exists(root / alt)) {
-        target_filename = alt;
-      } else if (std::filesystem::exists(root / ("target/" + alt_name))) {
-        target_filename = "target/" + alt_name;
-      }
-    }
+  // The graph is chosen once, and the pre-upload reader below and CreateSession open that same file. ORT_QWEN38_CONTEXT_LENGTH
+  // is read once as well: it also decides how the context settings follow the graph.
+  const char* context_env = std::getenv("ORT_QWEN38_CONTEXT_LENGTH");
+  const char* drafts_env = std::getenv("ORT_QWEN38_MTP_DRAFTS");
+  const bool explicit_context_env = context_env != nullptr && *context_env != '\0';
+  const std::string context_request =
+      explicit_context_env ? std::string{context_env}
+                           : (has_dynamic_batching_kv ? std::to_string(config_->model.context_length) : std::string{});
+  const auto package_has_file = [&](const std::string& file) {
+    if (config_->model_data_spans_.count(file) != 0) return true;
+    std::error_code error;
+    return !config_->memory_assets_only_ && std::filesystem::is_regular_file(root / file, error);
+  };
+  const std::string mtp_drafts = drafts_env ? drafts_env : "";
+  std::string target_filename = ResolveQwen38TargetGraphFilename(
+      config_->model.decoder.filename, context_request, mtp_drafts, package_has_file);
+  std::string head_r2_filename = q.fold.head_r2.filename;
+  std::string head_s1_filename = q.head.filename_s1;
+  std::string head_s2_filename = q.head.filename_s2;
+  if (q.fold.enabled && !q.fold.head_r2.filename.empty() && config_->model.dflash2.filename.empty()) {
+    head_r2_filename = ResolveQwen38AuxiliaryGraphFilename(q.fold.head_r2.filename, context_request, package_has_file);
+  } else if (!q.fold.enabled && q.mtp.enabled) {
+    head_s1_filename = ResolveQwen38AuxiliaryGraphFilename(q.head.filename_s1, context_request, package_has_file);
+    head_s2_filename = ResolveQwen38AuxiliaryGraphFilename(q.head.filename_s2, context_request, package_has_file);
+  }
+  const Qwen38MoeOffloadSettings moe_offload =
+      ParseQwen38MoeOffloadSettings(config_->model.decoder.session_options.config_entries);
+  const size_t request_slots = ResolveQwen38MaxBatchSize(*config_);
+  // Expert reads dominate a step when the experts are offloaded: a constrained offload takes the package's S=4 multi-draft
+  // graph, which commits more tokens per step, where that graph can run (see SelectQwen38OffloadTargetGraph).
+  const std::string resolved_filename = target_filename;
+  target_filename = SelectQwen38OffloadTargetGraph(resolved_filename, moe_offload, context_request, mtp_drafts,
+                                                   !config_->model.dflash2.filename.empty(), request_slots, package_has_file);
+  if (g_log.enabled && target_filename != resolved_filename) {
+    Log("qwen38_graph") << "the decoder offloads experts under a budget: target graph " << target_filename << " instead of "
+                        << resolved_filename << " (ORT_QWEN38_MTP_DRAFTS=0 keeps " << resolved_filename << ")" << std::endl;
   }
   if (!config_->memory_assets_only_ && config_->model_data_spans_.count(target_filename) == 0) {
-    ValidateQwen38TargetModelFile(ResolveQwen38MaxBatchSize(*config_), root / target_filename);
+    ValidateQwen38TargetModelFile(request_slots, root / target_filename);
+    if (q.fold.enabled) {
+      target_head_rows_ = ReadQwen38OnnxSpeculativePrefixCommitHeadRows(root / target_filename);
+    }
   }
 
   // Device copy of the initializers several sessions have in common (optional)
@@ -2866,11 +3424,66 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
     }
   }
 
+  // Estimate the capacity before session creation using the package's tier padding or the configured fallback.
+  // SyncQwen38GraphContext below still derives the execution settings from the loaded graph.
+  const auto context_tier = Qwen38ContextTierForTarget(target_filename);
+  const int budget_kv_capacity = context_tier ? context_tier->kv_capacity : q.kv_capacity;
+  // The config field and the filename CreateSession opens below must name the same head graph.
+  config_->model.qwen38_graph.fold.head_r2.filename =
+      SelectQwen38TierHeadR2Filename(q.fold.head_r2.filename, context_tier, package_has_file);
+  head_r2_filename = SelectQwen38TierHeadR2Filename(head_r2_filename, context_tier, package_has_file);
+  const std::string adaptive_ctx_budget = GetEnv("ORT_QWEN38_ADAPTIVE_CTX_BUDGET");
+  const bool adaptive_budget = adaptive_ctx_budget == "1";
+  if (g_log.enabled && moe_offload.enabled && !adaptive_ctx_budget.empty()) {
+    if (!adaptive_budget) {
+      Log("qwen38_graph") << "ORT_QWEN38_ADAPTIVE_CTX_BUDGET=" << adaptive_ctx_budget << " is ignored: only 1 turns it on"
+                          << std::endl;
+    } else if (!context_tier) {
+      Log("qwen38_graph") << "ORT_QWEN38_ADAPTIVE_CTX_BUDGET=1: " << target_filename
+                          << " is not named after a context tier, so the offload budgets follow the configured kv_capacity "
+                          << q.kv_capacity << std::endl;
+    }
+  }
+  for (const auto& [key, value] : Qwen38MoeOffloadSessionEntries(
+           moe_offload, root, budget_kv_capacity, adaptive_budget, request_slots)) {
+    session_options_->AddConfigEntry(key.c_str(), value.c_str());
+  }
+
   session_target_ = CreateSession(ort_env, target_filename, session_options_.get());
   session_info_.Add(*session_target_);
   // The outputs of the session are authoritative (the model file may not be a protobuf one): refuse a ring-bank target for
   // several slots before anything else is built.
   ValidateQwen38BatchedTargetOutputs(ResolveQwen38MaxBatchSize(*config_), session_target_->GetOutputNames());
+  if (const int64_t graph_positions =
+          ResolveQwen38GraphKvCapacity(CacheInputsOf(session_info_, "past_key_values.", true));
+      graph_positions > 0 && !has_dynamic_batching_kv) {
+    if (g_log.enabled && moe_offload.enabled && adaptive_budget && graph_positions != budget_kv_capacity) {
+      Log("qwen38_graph") << "warning: offload budget estimate used kv_capacity " << budget_kv_capacity
+                          << ", but target graph " << target_filename << " reports " << graph_positions
+                          << "; the session budgets are already set. Check the package layout or disable "
+                             "ORT_QWEN38_ADAPTIVE_CTX_BUDGET and configure explicit budgets."
+                          << std::endl;
+    }
+    // The capacity follows the graph. The default generation budget follows it only when a context tier was requested: a
+    // package that limits search.max_length keeps its limit.
+    const Qwen38GraphContext context =
+        SyncQwen38GraphContext(graph_positions, config_->search.max_length, !context_request.empty());
+    config_->model.qwen38_graph.kv_capacity = context.kv_capacity;
+    if (config_->model.qwen38_graph.prefill.enabled &&
+        EffectiveQwen38PrefillChunkTokens(config_->model.qwen38_graph) > static_cast<size_t>(context.kv_capacity)) {
+      config_->model.qwen38_graph.prefill.chunk = context.kv_capacity;
+    }
+    config_->model.context_length = context.context_length;
+    config_->search.max_length = context.max_length;
+    // A tier request that no model_<tier>.onnx answers falls back to another graph (see ResolveQwen38TargetGraphFilename), so
+    // the graph that was taken and the context it gave are what tells a mistyped or unsupported tier from a served one.
+    if (g_log.enabled) {
+      Log("qwen38_graph") << "target graph " << target_filename << ": kv_capacity " << context.kv_capacity
+                          << ", context_length " << context.context_length << ", max_length " << context.max_length
+                          << (context_request.empty() ? std::string() : ", ORT_QWEN38_CONTEXT_LENGTH=" + context_request)
+                          << std::endl;
+    }
+  }
   if (g_log.enabled) Log("qwen38_graph") << "target session " << SecondsSince(start) << " s" << std::endl;
 
   auto make_options = [&](const std::optional<Config::SessionOptions>& configured, bool inherit, const char* label) {
@@ -2880,6 +3493,10 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
     CreateSessionOptionsFromConfig(options, *result, /*is_primary_session_options=*/false,
                                    /*disable_graph_capture=*/!inherit, /*cloned_from_parent=*/false,
                                    /*append_providers=*/true);
+    // Only the target session offloads experts. The head sessions inherit the decoder's config entries, the offload ones
+    // included, so every session made here is told to keep its experts on the device. (The DFlash2 drafter is not made here:
+    // CreateDflash2Config builds its session, which has no MoE layer to offload.)
+    result->AddConfigEntry("session.moe.offload.mode", "disabled");
     if (pool_) pool_->AddTo(*result, label);
     if (!embed_values_.empty() &&
         (std::string(label) == "mtp" || std::string(label) == "drafter" || std::string(label) == "head_r2" ||
@@ -2892,7 +3509,7 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
   if (q.fold.enabled) {
     if (!q.fold.head_r2.filename.empty() && config_->model.dflash2.filename.empty()) {
       head_r2_session_options_ = make_options(q.fold.head_r2.session_options, true, "mtp");
-      session_head_r2_ = CreateSession(ort_env, q.fold.head_r2.filename, head_r2_session_options_.get());
+      session_head_r2_ = CreateSession(ort_env, head_r2_filename, head_r2_session_options_.get());
     }
     if (separate_prefill_sessions) {
       // the dense / head-KV sessions are not graph captured and do not inherit the decoder's provider options
@@ -2905,8 +3522,8 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
     if (g_log.enabled) Log("qwen38_graph") << "head / prefill sessions " << SecondsSince(start) << " s" << std::endl;
   } else if (q.mtp.enabled) {
     head_session_options_ = make_options(q.head.session_options, true, "head");
-    session_head_s1_ = CreateSession(ort_env, q.head.filename_s1, head_session_options_.get());
-    session_head_s2_ = CreateSession(ort_env, q.head.filename_s2, head_session_options_.get());
+    session_head_s1_ = CreateSession(ort_env, head_s1_filename, head_session_options_.get());
+    session_head_s2_ = CreateSession(ort_env, head_s2_filename, head_session_options_.get());
     if (g_log.enabled) Log("qwen38_graph") << "head sessions " << SecondsSince(start) << " s" << std::endl;
   }
 

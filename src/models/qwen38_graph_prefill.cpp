@@ -474,8 +474,14 @@ void Qwen38GraphEngine::BuildFastPrefill() {
     fast->head_kv = model_.session_head_r2_.get();
     fast->dense_info.Add(*fast->dense);
     if (fast->head_kv) fast->head_kv_info.Add(*fast->head_kv);
-    fast->chunk = (q.prefill.chunk > 0) ? std::min(configured_chunk, 2048)
-                                        : std::min({configured_chunk, 2048, capacity_});
+    // An explicit prefill.chunk is honored up to the cap below; without one the prompt goes through in the step-sized chunk.
+    int requested_chunk = (q.prefill.chunk > 0) ? configured_chunk : std::min(configured_chunk, 2048);
+    if (const char* env_chunk = std::getenv("ORT_QWEN38_PREFILL_CHUNK")) {
+      const int parsed = std::atoi(env_chunk);
+      if (parsed > 0) requested_chunk = parsed;
+    }
+    const int max_prefill_chunk = (capacity_ > 65536) ? 4096 : 8192;
+    fast->chunk = std::clamp(requested_chunk, 1, std::min<int>(capacity_, max_prefill_chunk));
     if (fast->chunk < 1 || fast->chunk > capacity_) throw std::runtime_error("qwen38_graph: invalid prefill.chunk");
     fast->dense_inputs = fast->dense->GetInputNames();
     fast->dense_outputs = fast->dense->GetOutputNames();
@@ -613,8 +619,7 @@ void Qwen38GraphEngine::FastAppendSlot(int slot, std::span<const int32_t> tokens
   size_t last_m = 1;
   for (size_t lo = 0; lo < n;) {
     const size_t pos = base + lo;
-    size_t max_m = static_cast<size_t>(f.chunk);
-    if (pos >= 16384 && max_m > 2048) max_m = std::min<size_t>(max_m, 2048);
+    const size_t max_m = static_cast<size_t>(f.chunk);
     const size_t m = std::min(max_m, n - lo);
     last_m = m;
     const Qwen38PromptRunHints prompt_run{total_expected, PromptChunkCompactExperts(pos, m)};
@@ -664,14 +669,12 @@ void Qwen38GraphEngine::FastAppendSlot(int slot, std::span<const int32_t> tokens
         binding->BindInput(name.c_str(), view(f.idx.data() + 8, {1}, i32));
       else if (name == ple_name)
         binding->BindInput(name.c_str(), view(f.ples.data(), {1, int64_t(m), ple_width_}, bf16));
-      else if (name == "fold.ctl")
-        binding->BindInput(name.c_str(), view(ctl_slot(slot), {verify_rows_ > 2 ? 16 : 8}, i64));
-      else if (name == "fold.ctx_commit")
-        binding->BindInput(name.c_str(), view(ctx_commit_slot(slot), {2}, i64));
-      else if (name == "fold.ctx_a")
-        binding->BindInput(name.c_str(), view(ctx_a_slot(slot), {verify_rows_ > 2 ? 2 * verify_rows_ : 2}, i64));
-      else if (name == "fold.ctx_b")
-        binding->BindInput(name.c_str(), view(ctx_a_slot(slot) + 16, {2}, i64));
+      else if (name == kQwen38FoldCtl)
+        binding->BindInput(name.c_str(), view(ctl_slot(slot), {kFoldCtlWords}, i64));
+      else if (name == kQwen38FoldCtxCommit)
+        binding->BindInput(name.c_str(), view(ctx_commit_slot(slot), {kFoldCtxCommitWords}, i64));
+      else if (name == kQwen38FoldCtxA)
+        binding->BindInput(name.c_str(), view(ctx_a_slot(slot), {2 * verify_rows_}, i64));
       else if (fold_tensors_.count(name))
         binding->BindInput(name.c_str(), *fold_tensors_.at(name)->value);
       else if (store_.count(name))
@@ -701,6 +704,10 @@ void Qwen38GraphEngine::FastAppendSlot(int slot, std::span<const int32_t> tokens
         binding->BindOutput(name.c_str(), view(d_dflash_prompt_slot(slot), {1, int64_t(m), int64_t(kDflashWidth)}, bf16));
       } else if (name == "next_tokens")
         binding->BindOutput(name.c_str(), view(f.scratch.data(), {1, int64_t(tok_rows)}, i64));
+      else if (name == kQwen38FoldCtlOut)  // muted during prefill: the op rewrites the unchanged state in place
+        binding->BindOutput(name.c_str(), view(ctl_slot(slot), {kFoldCtlWords}, i64));
+      else if (name == kQwen38FoldCtxCommitOut)
+        binding->BindOutput(name.c_str(), view(ctx_commit_slot(slot), {kFoldCtxCommitWords}, i64));
       else if (name == "validation.aggregate")
         binding->BindOutput(name.c_str(), view(f.scratch.data() + 64, {int64_t(status_count_)}, i32));
       else if (name == "present_position_ids")
@@ -809,8 +816,7 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
     size_t last_m = 1;
     for (size_t lo = 0; lo < n;) {
       const size_t pos = base + lo;
-      size_t max_m = static_cast<size_t>(f.chunk);
-      if (pos >= 16384 && max_m > 2048) max_m = std::min<size_t>(max_m, 2048);
+      const size_t max_m = static_cast<size_t>(f.chunk);
       const size_t m = std::min(max_m, n - lo);
       last_m = m;
       const Qwen38PromptRunHints prompt_run{total_expected, PromptChunkCompactExperts(pos, m)};
@@ -887,6 +893,8 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
           binding->BindOutput(name.c_str(), view(d_dflash_prompt_.data(), {1, int64_t(m), int64_t(kDflashWidth)}, bf16));
         } else if (name == "next_tokens")
           binding->BindOutput(name.c_str(), view(f.scratch.data(), {1, int64_t(tok_rows)}, i64));
+        else if (const char* state_in = Qwen38FoldStateInput(name))
+          binding->BindOutput(name.c_str(), *fold_tensors_.at(state_in)->value);
         else if (name == "validation.aggregate")
           binding->BindOutput(name.c_str(), view(f.scratch.data() + 64, {int64_t(status_count_)}, i32));
         else if (name == "present_position_ids")

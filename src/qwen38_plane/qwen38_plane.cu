@@ -26,12 +26,30 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cerrno>
+#include <exception>
+#include <functional>
 #include <memory>
 #include <mutex>
+#include <new>
+#include <string>
+#include <system_error>
+#include <thread>
 #include <type_traits>
 #include <unordered_map>
+#include <vector>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <memoryapi.h>
+#endif
+
+#include "qwen38_parallel_pool.h"
 #include "qwen38_plane_abi.h"
 
 typedef long long i64;
@@ -63,14 +81,14 @@ static inline cudaError_t hook_fault(int site) {
   g_test_hooks.fault_site = QWEN38_PLANE_FAULT_NONE;
   return (cudaError_t)g_test_hooks.fault_error;
 }
-static inline void hook_gather() { ++g_test_hooks.gather_rows; }
+static inline void hook_gather(long long rows = 1) { g_test_hooks.gather_rows += rows; }
 static inline void hook_launch() { ++g_test_hooks.staged_launches; }
 static inline void hook_cleanup() { ++g_test_hooks.global_cleanups; }
 static inline void hook_pinned(int delta) { g_test_hooks.live_pinned += delta; }
 static inline void hook_unfenced_drain() { ++g_test_hooks.unfenced_drains; }
 #else
 static inline cudaError_t hook_fault(int) { return cudaSuccess; }
-static inline void hook_gather() {}
+static inline void hook_gather(long long = 1) {}
 static inline void hook_launch() {}
 static inline void hook_cleanup() {}
 static inline void hook_pinned(int) {}
@@ -228,7 +246,7 @@ struct StagedPleWorkspace {
   // CUDA resources and staged something in it. Meaningful only while has_cuda_allocations().
   int owner_device = -1;
   i64* scalars = nullptr;                  // pinned [kScalarWords]: tok/ctl words + ctx_in
-  unsigned char* prep_ring = nullptr;      // pinned mapped [64 * 8192]
+  unsigned char* prep_ring = nullptr;      // pinned mapped [kPrepRingRows * kPrepRingRowBytes]
   unsigned char* prep_ring_dev = nullptr;  // device alias for prep_ring
   unsigned int ring_idx = 0;
   i64* prefill_tokens = nullptr;             // pinned [cap_rows]
@@ -246,8 +264,17 @@ struct StagedPleWorkspace {
   cudaEvent_t prefill_done_event = nullptr;
   cudaStream_t last_prefill_stream = nullptr;
   bool prefill_in_flight = false;
-  static constexpr size_t kCacheSlots = 2048;
-  static constexpr size_t kMaxRowBytes = 8192;
+  // Host PLE n-gram row cache budget per staged workspace: up to kCacheSlots (65,536) rows of kMaxRowBytes (3,072 bytes =
+  // 192 MiB of ngram_cache_data plus 1.56 MiB of key/validity arrays), sized down to kMinCacheSlots (16,384 rows = 48 MiB)
+  // when cudaMemGetInfo reports < 12 GiB free memory, or overridden to a power-of-two in
+  // [kMinOverrideCacheSlots (1,024 rows = 3 MiB), kCacheSlots] via ORT_QWEN38_PLE_CACHE_SLOTS.
+  static constexpr size_t kCacheSlots = 65536;
+  static constexpr size_t kMinCacheSlots = 16384;
+  static constexpr size_t kMinOverrideCacheSlots = 1024;
+  static constexpr size_t kMaxRowBytes = 3072;
+  static constexpr size_t kPrepRingRows = 64;        // rows of the prep ring (a power of two)
+  static constexpr size_t kPrepRingRowBytes = 8192;  // bytes of one row of the prep ring
+  size_t cache_slots = kCacheSlots;
   unsigned char* ngram_cache_data = nullptr;
   i64 ngram_cache_keys[kCacheSlots][3]{};
   unsigned char ngram_cache_valid[kCacheSlots]{};
@@ -318,6 +345,7 @@ struct StagedPleWorkspace {
       free(ngram_cache_data);
       ngram_cache_data = nullptr;
     }
+    cache_slots = kCacheSlots;
     ring_idx = 0;
     prefill_cap_rows = 0;
     prefill_cap_bytes = 0;
@@ -373,6 +401,52 @@ struct PendingStagedBuffers {
   }
 };
 
+static std::string read_ple_env(const char* name) {
+#ifdef _WIN32
+  char buf[128]{};
+  ::SetLastError(ERROR_SUCCESS);
+  const DWORD n = ::GetEnvironmentVariableA(name, buf, static_cast<DWORD>(sizeof(buf)));
+  if (n > 0 && n < sizeof(buf)) {
+    return std::string(buf, n);
+  }
+  if (::GetLastError() == ERROR_SUCCESS && n == 0) {
+    return {};
+  }
+#endif
+  if (const char* val = std::getenv(name)) {
+    return std::string(val);
+  }
+  return {};
+}
+
+static size_t resolve_ple_cache_slots() {
+  const std::string env_slots = read_ple_env("ORT_QWEN38_PLE_CACHE_SLOTS");
+  if (!env_slots.empty()) {
+    char* end = nullptr;
+    errno = 0;
+    const long long parsed = std::strtoll(env_slots.c_str(), &end, 10);
+    if (end != env_slots.c_str() && *end == '\0' && parsed > 0) {
+      if (parsed <= static_cast<long long>(StagedPleWorkspace::kMinOverrideCacheSlots)) {
+        return StagedPleWorkspace::kMinOverrideCacheSlots;
+      }
+      size_t pow2 = StagedPleWorkspace::kMinOverrideCacheSlots;
+      while (pow2 * 2 <= static_cast<size_t>(parsed) && pow2 * 2 <= StagedPleWorkspace::kCacheSlots) {
+        pow2 *= 2;
+      }
+      return pow2;
+    }
+  }
+  size_t free_mem = 0, total_mem = 0;
+  if (cudaMemGetInfo(&free_mem, &total_mem) == cudaSuccess) {
+    if (free_mem < (12ULL << 30)) {
+      return StagedPleWorkspace::kMinCacheSlots;
+    }
+  } else {
+    cudaGetLastError();
+  }
+  return StagedPleWorkspace::kCacheSlots;
+}
+
 // Gives the workspace the pinned buffers one call needs: the scalar words and the prep ring and, for rows > 0, a token buffer
 // and a mapped FP8 buffer for `rows` rows of `row_bytes` bytes. All or nothing: every new buffer is allocated, and its
 // device alias verified, before any of them is published, so on failure what was allocated is freed and the workspace,
@@ -385,6 +459,7 @@ static cudaError_t ensure_staged_buffers(StagedPleWorkspace& ws, size_t rows, si
   }
   const size_t need_bytes = rows * row_bytes;
   PendingStagedBuffers fresh;
+  size_t new_cache_slots = ws.cache_slots;
   size_t new_rows = ws.prefill_cap_rows;
   size_t new_bytes = ws.prefill_cap_bytes;
   bool replaces_buffer = false;
@@ -393,11 +468,13 @@ static cudaError_t ensure_staged_buffers(StagedPleWorkspace& ws, size_t rows, si
     err = staged_host_alloc(&fresh.scalars, kScalarWords * sizeof(i64), cudaHostAllocPortable);
   }
   if (err == cudaSuccess && !ws.prep_ring) {
-    err = staged_host_alloc(&fresh.prep_ring, 64 * 8192, cudaHostAllocMapped | cudaHostAllocPortable);
+    err = staged_host_alloc(&fresh.prep_ring, StagedPleWorkspace::kPrepRingRows * StagedPleWorkspace::kPrepRingRowBytes,
+                            cudaHostAllocMapped | cudaHostAllocPortable);
     if (err == cudaSuccess) err = staged_device_alias(&fresh.prep_ring_dev, fresh.prep_ring);
   }
   if (err == cudaSuccess && !ws.ngram_cache_data) {
-    err = staged_malloc(&fresh.ngram_cache_data, StagedPleWorkspace::kCacheSlots * StagedPleWorkspace::kMaxRowBytes);
+    new_cache_slots = resolve_ple_cache_slots();
+    err = staged_malloc(&fresh.ngram_cache_data, new_cache_slots * StagedPleWorkspace::kMaxRowBytes);
   }
   if (err == cudaSuccess && rows != 0 && (!ws.prefill_tokens || rows > ws.prefill_cap_rows)) {
     new_rows = rows < kMinPrefillRows ? kMinPrefillRows : rows;
@@ -430,6 +507,7 @@ static cudaError_t ensure_staged_buffers(StagedPleWorkspace& ws, size_t rows, si
   }
   if (fresh.ngram_cache_data) {
     ws.ngram_cache_data = fresh.ngram_cache_data;
+    ws.cache_slots = new_cache_slots;
     memset(ws.ngram_cache_valid, 0, sizeof(ws.ngram_cache_valid));
   }
   if (fresh.prefill_tokens) {
@@ -446,6 +524,39 @@ static cudaError_t ensure_staged_buffers(StagedPleWorkspace& ws, size_t rows, si
   return cudaSuccess;
 }
 
+// Where head `h` of the PLE row for the n-gram (c0, c1, tok) sits in the host table.
+static inline const unsigned char* resolve_ple_head_ptr(const PleParams& HP, int h, i64 tok, i64 c0, i64 c1) {
+  unsigned long long mixed = (unsigned long long)tok * (unsigned long long)HP.mult[0];
+  mixed ^= (unsigned long long)c1 * (unsigned long long)HP.mult[1];
+  if (h >= HP.heads_per_ngram) mixed ^= (unsigned long long)c0 * (unsigned long long)HP.mult[2];
+  const i64 v = HP.vocab[h];
+  i64 r = (i64)mixed % v;
+  if (r < 0) r += v;
+  const i64 id = r + HP.offset[h];
+  int lo = 0, hi = HP.n_shards - 1;
+  while (lo < hi) {
+    const int mid = (lo + hi) >> 1;
+    if (HP.shard_end[mid] > id)
+      hi = mid;
+    else
+      lo = mid + 1;
+  }
+  const i64 first = lo == 0 ? 0 : HP.shard_end[lo - 1];
+  const i64 row_idx = id - first;
+  return HP.shard_ptr[lo] + (size_t)row_idx * (size_t)HP.head_dim;
+}
+
+static inline size_t ple_ngram_cache_slot(const StagedPleWorkspace& ws, i64 tok, i64 c0, i64 c1) {
+  const unsigned long long h =
+      ((unsigned long long)tok * 11400714819323198485ULL) ^
+      ((unsigned long long)c1 * 14029467366897019727ULL) ^
+      ((unsigned long long)c0 * 1609587929392839161ULL);
+  const size_t mask = (ws.cache_slots > 0 && ws.cache_slots <= StagedPleWorkspace::kCacheSlots)
+                          ? (ws.cache_slots - 1)
+                          : (StagedPleWorkspace::kCacheSlots - 1);
+  return (size_t)(h & mask);
+}
+
 static inline void host_gather_ple_row(StagedPleWorkspace& ws, i64 tok, i64 s_c0, i64 s_c1, unsigned char* dst_fp8) {
   hook_gather();
   const PleParams& HP = ws.params;
@@ -456,11 +567,7 @@ static inline void host_gather_ple_row(StagedPleWorkspace& ws, i64 tok, i64 s_c0
   size_t cache_slot = 0;
   const bool use_cache = (ws.ngram_cache_data != nullptr && total_bytes <= StagedPleWorkspace::kMaxRowBytes);
   if (use_cache) {
-    const unsigned long long h =
-        ((unsigned long long)tok * 11400714819323198485ULL) ^
-        ((unsigned long long)c1 * 14029467366897019727ULL) ^
-        ((unsigned long long)c0 * 1609587929392839161ULL);
-    cache_slot = (size_t)(h & (StagedPleWorkspace::kCacheSlots - 1));
+    cache_slot = ple_ngram_cache_slot(ws, tok, c0, c1);
     if (ws.ngram_cache_valid[cache_slot] &&
         ws.ngram_cache_keys[cache_slot][0] == tok &&
         ws.ngram_cache_keys[cache_slot][1] == c0 &&
@@ -470,25 +577,7 @@ static inline void host_gather_ple_row(StagedPleWorkspace& ws, i64 tok, i64 s_c0
     }
   }
   for (int h = 0; h < HP.n_heads; ++h) {
-    unsigned long long mixed = (unsigned long long)tok * (unsigned long long)HP.mult[0];
-    mixed ^= (unsigned long long)c1 * (unsigned long long)HP.mult[1];
-    if (h >= HP.heads_per_ngram) mixed ^= (unsigned long long)c0 * (unsigned long long)HP.mult[2];
-    const i64 v = HP.vocab[h];
-    i64 r = (i64)mixed % v;
-    if (r < 0) r += v;
-    const i64 id = r + HP.offset[h];
-    int lo = 0, hi = HP.n_shards - 1;
-    while (lo < hi) {
-      const int mid = (lo + hi) >> 1;
-      if (HP.shard_end[mid] > id)
-        hi = mid;
-      else
-        lo = mid + 1;
-    }
-    const i64 first = lo == 0 ? 0 : HP.shard_end[lo - 1];
-    const i64 row_idx = id - first;
-    const unsigned char* src = HP.shard_ptr[lo] + (size_t)row_idx * (size_t)hd;
-    memcpy(dst_fp8 + (size_t)h * (size_t)hd, src, (size_t)hd);
+    memcpy(dst_fp8 + (size_t)h * (size_t)hd, resolve_ple_head_ptr(HP, h, tok, c0, c1), (size_t)hd);
   }
   if (use_cache) {
     memcpy(ws.ngram_cache_data + cache_slot * StagedPleWorkspace::kMaxRowBytes, dst_fp8, total_bytes);
@@ -497,6 +586,275 @@ static inline void host_gather_ple_row(StagedPleWorkspace& ws, i64 tok, i64 s_c0
     ws.ngram_cache_keys[cache_slot][2] = c1;
     ws.ngram_cache_valid[cache_slot] = 1;
   }
+}
+
+static inline void host_gather_ple_rows_batch(StagedPleWorkspace& ws, int rows, const i64* d_toks, const i64* d_c0s,
+                                              const i64* d_c1s, unsigned char* fp8_base, size_t row_stride) {
+  const PleParams& HP = ws.params;
+  const int hd = HP.head_dim;
+  const int nh = HP.n_heads;
+  const size_t total_bytes = (size_t)nh * (size_t)hd;
+  const bool use_cache = (ws.ngram_cache_data != nullptr && total_bytes <= StagedPleWorkspace::kMaxRowBytes);
+  const unsigned char* miss_srcs[256];
+  unsigned char* miss_dsts[256];
+#ifdef _WIN32
+  WIN32_MEMORY_RANGE_ENTRY ranges[256];
+#endif
+  int num_misses = 0;
+  int miss_rows[8];
+  size_t miss_slots[8];
+  i64 miss_c0s[8];
+  int num_miss_rows = 0;
+
+  for (int r = 0; r < rows; ++r) {
+    hook_gather();
+    const i64 tok = d_toks[r];
+    const i64 c1 = d_c1s[r];
+    const i64 c0 = (c1 == HP.eos) ? HP.eos : d_c0s[r];
+    unsigned char* dst_fp8 = fp8_base + (size_t)r * row_stride;
+    size_t cache_slot = 0;
+    if (use_cache) {
+      cache_slot = ple_ngram_cache_slot(ws, tok, c0, c1);
+      if (ws.ngram_cache_valid[cache_slot] &&
+          ws.ngram_cache_keys[cache_slot][0] == tok &&
+          ws.ngram_cache_keys[cache_slot][1] == c0 &&
+          ws.ngram_cache_keys[cache_slot][2] == c1) {
+        memcpy(dst_fp8, ws.ngram_cache_data + cache_slot * StagedPleWorkspace::kMaxRowBytes, total_bytes);
+        continue;
+      }
+    }
+    for (int h = 0; h < nh; ++h) {
+      const unsigned char* src = resolve_ple_head_ptr(HP, h, tok, c0, c1);
+      miss_srcs[num_misses] = src;
+      miss_dsts[num_misses] = dst_fp8 + (size_t)h * (size_t)hd;
+#ifdef _WIN32
+      ranges[num_misses] = {const_cast<unsigned char*>(src), (SIZE_T)hd};
+#endif
+      ++num_misses;
+    }
+    if (use_cache && num_miss_rows < 8) {
+      miss_rows[num_miss_rows] = r;
+      miss_slots[num_miss_rows] = cache_slot;
+      miss_c0s[num_miss_rows] = c0;
+      ++num_miss_rows;
+    }
+  }
+
+  if (num_misses > 0) {
+#ifdef _WIN32
+    if (num_misses > 1) {
+      (void)PrefetchVirtualMemory(GetCurrentProcess(), (ULONG_PTR)num_misses, ranges, 0);
+    }
+#endif
+    for (int k = 0; k < num_misses; ++k) {
+      memcpy(miss_dsts[k], miss_srcs[k], (size_t)hd);
+    }
+    for (int m = 0; m < num_miss_rows; ++m) {
+      const int r = miss_rows[m];
+      const size_t cache_slot = miss_slots[m];
+      memcpy(ws.ngram_cache_data + cache_slot * StagedPleWorkspace::kMaxRowBytes,
+             fp8_base + (size_t)r * row_stride, total_bytes);
+      ws.ngram_cache_keys[cache_slot][0] = d_toks[r];
+      ws.ngram_cache_keys[cache_slot][1] = miss_c0s[m];
+      ws.ngram_cache_keys[cache_slot][2] = d_c1s[r];
+      ws.ngram_cache_valid[cache_slot] = 1;
+    }
+#ifdef _WIN32
+    if (HP.pad_ != 0) {
+      for (int k = 0; k < num_misses; ++k) {
+        (void)VirtualUnlock(ranges[k].VirtualAddress, ranges[k].NumberOfBytes);
+      }
+    }
+#endif
+  }
+}
+
+struct PleGatherTask {
+  StagedPleWorkspace* ws = nullptr;
+  const i64* h_toks = nullptr;
+  i64 ctx0 = 0;
+  i64 ctx1 = 0;
+  int n = 0;
+  size_t row_stride = 0;
+  unsigned char* dst_base = nullptr;
+  std::atomic<int> next_row{0};
+  // Set by a thread that could not allocate its scratch lists. The rows it had claimed are not gathered, so the gather failed.
+  std::atomic<bool> failed{false};
+#ifdef QWEN38_PLANE_TEST_HOOKS
+  // QWEN38_PLANE_FAULT_GATHER_SCRATCH: the next thread to size its scratch lists fails, as if the allocation threw.
+  std::atomic<bool> fail_next_scratch{false};
+#endif
+};
+
+// Creates a gather worker. A test build can make the creation fail (QWEN38_PLANE_FAULT_THREAD_START), as std::thread does when
+// the system is out of threads.
+static std::thread start_gather_thread(std::function<void()> entry) {
+  if (hook_fault(QWEN38_PLANE_FAULT_THREAD_START) != cudaSuccess) {
+    throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+  }
+  return std::thread(std::move(entry));
+}
+
+// The worker threads of the staged PLE gather. They run code of this module, so release_all_staged_state_locked stops and
+// joins them before the last loader detaches, i.e. before the host unloads the library.
+struct PleGatherPool {
+  qwen38_plane::ParallelPool pool{qwen38_plane::DefaultParallelWorkerCount(std::thread::hardware_concurrency()),
+                                  start_gather_thread};
+
+  // The body that every thread of the pool runs. A body must not throw (a worker that did would terminate the process, and the
+  // calling thread's exception would leave through the C interface), and the scratch lists of GatherSpans are the one thing in
+  // it that allocates, so a thread that cannot make them is stopped here, the others carry on, and run() reports the failure.
+  static void process_task(PleGatherTask* t) {
+    try {
+      GatherSpans(t);
+    } catch (const std::exception&) {
+      t->failed.store(true, std::memory_order_relaxed);
+    }
+  }
+
+  static void GatherSpans(PleGatherTask* t) {
+    StagedPleWorkspace& ws = *t->ws;
+    const PleParams& HP = ws.params;
+    const int hd = HP.head_dim;
+    const int nh = HP.n_heads;
+    const size_t total_bytes = (size_t)nh * (size_t)hd;
+    const bool use_cache = (ws.ngram_cache_data != nullptr && total_bytes <= StagedPleWorkspace::kMaxRowBytes);
+    // Locals, not thread_local: the caller of the pool is a host thread, and a thread_local with a destructor would leave that
+    // destructor, which is code of this module, to run when the host thread exits, perhaps after the module was unloaded.
+#ifdef _WIN32
+    std::vector<WIN32_MEMORY_RANGE_ENTRY> ranges;
+#endif
+    std::vector<const unsigned char*> miss_srcs;
+    std::vector<unsigned char*> miss_dsts;
+    constexpr int kSpan = 32;
+
+    while (true) {
+      const int i0 = t->next_row.fetch_add(kSpan, std::memory_order_relaxed);
+      if (i0 >= t->n) break;
+      const int i1 = (i0 + kSpan < t->n) ? (i0 + kSpan) : t->n;
+#ifdef QWEN38_PLANE_TEST_HOOKS
+      if (t->fail_next_scratch.exchange(false)) throw std::bad_alloc();
+#endif
+#ifdef _WIN32
+      ranges.clear();
+      ranges.reserve((size_t)(i1 - i0) * (size_t)nh);
+#endif
+      miss_srcs.clear();
+      miss_dsts.clear();
+      miss_srcs.reserve((size_t)(i1 - i0) * (size_t)nh);
+      miss_dsts.reserve((size_t)(i1 - i0) * (size_t)nh);
+
+      for (int i = i0; i < i1; ++i) {
+        const i64 tok = t->h_toks[i];
+        const i64 c1 = i >= 1 ? t->h_toks[i - 1] : t->ctx1;
+        const i64 c0raw = i >= 2 ? t->h_toks[i - 2] : (i == 1 ? t->ctx1 : t->ctx0);
+        const i64 c0 = (c1 == HP.eos) ? HP.eos : c0raw;
+        unsigned char* dst_fp8 = t->dst_base + (size_t)i * t->row_stride;
+        if (use_cache) {
+          const size_t cache_slot = ple_ngram_cache_slot(ws, tok, c0, c1);
+          if (ws.ngram_cache_valid[cache_slot] &&
+              ws.ngram_cache_keys[cache_slot][0] == tok &&
+              ws.ngram_cache_keys[cache_slot][1] == c0 &&
+              ws.ngram_cache_keys[cache_slot][2] == c1) {
+            memcpy(dst_fp8, ws.ngram_cache_data + cache_slot * StagedPleWorkspace::kMaxRowBytes, total_bytes);
+            continue;
+          }
+        }
+        for (int h = 0; h < nh; ++h) {
+          const unsigned char* src = resolve_ple_head_ptr(HP, h, tok, c0, c1);
+          miss_srcs.push_back(src);
+          miss_dsts.push_back(dst_fp8 + (size_t)h * (size_t)hd);
+#ifdef _WIN32
+          ranges.push_back({const_cast<unsigned char*>(src), (SIZE_T)hd});
+#endif
+        }
+      }
+
+#ifdef _WIN32
+      if (!ranges.empty()) {
+        (void)PrefetchVirtualMemory(GetCurrentProcess(), (ULONG_PTR)ranges.size(), ranges.data(), 0);
+      }
+#endif
+      for (size_t k = 0; k < miss_srcs.size(); ++k) {
+        memcpy(miss_dsts[k], miss_srcs[k], (size_t)hd);
+      }
+#ifdef _WIN32
+      if (HP.pad_ != 0) {
+        for (const auto& r : ranges) {
+          (void)VirtualUnlock(r.VirtualAddress, r.NumberOfBytes);
+        }
+      }
+#endif
+    }
+  }
+
+  // Gathers the PLE rows of the `n` token ids at `h_toks` into `dst_base`, `row_stride` bytes apart, on every worker and on the
+  // calling thread. Returns cudaErrorMemoryAllocation when the worker threads cannot be started, in which case nothing is
+  // gathered, or when a thread cannot allocate its scratch lists, in which case the rows are incomplete and the n-gram cache
+  // is left as it was. The workers are alive after either, so the next call gathers as usual.
+  cudaError_t run(StagedPleWorkspace& ws, const i64* h_toks, i64 ctx0, i64 ctx1, int n, unsigned char* dst_base,
+                  size_t row_stride) {
+    PleGatherTask t;
+    t.ws = &ws;
+    t.h_toks = h_toks;
+    t.ctx0 = ctx0;
+    t.ctx1 = ctx1;
+    t.n = n;
+    t.row_stride = row_stride;
+    t.dst_base = dst_base;
+    t.next_row.store(0, std::memory_order_relaxed);
+#ifdef QWEN38_PLANE_TEST_HOOKS
+    t.fail_next_scratch.store(hook_fault(QWEN38_PLANE_FAULT_GATHER_SCRATCH) != cudaSuccess, std::memory_order_relaxed);
+#endif
+
+    if (pool.Run([&t] { process_task(&t); })) return cudaErrorMemoryAllocation;
+    if (t.failed.load(std::memory_order_relaxed)) return cudaErrorMemoryAllocation;
+
+    const PleParams& HP = ws.params;
+    const size_t total_bytes = (size_t)HP.n_heads * (size_t)HP.head_dim;
+    if (ws.ngram_cache_data != nullptr && total_bytes <= StagedPleWorkspace::kMaxRowBytes) {
+      const int max_cache_rows = static_cast<int>(ws.cache_slots / 4);
+      const int start_i = (n > max_cache_rows) ? (n - max_cache_rows) : 0;
+      for (int i = start_i; i < n; ++i) {
+        const i64 tok = h_toks[i];
+        const i64 c1 = i >= 1 ? h_toks[i - 1] : ctx1;
+        const i64 c0raw = i >= 2 ? h_toks[i - 2] : (i == 1 ? ctx1 : ctx0);
+        const i64 c0 = (c1 == HP.eos) ? HP.eos : c0raw;
+        const size_t cache_slot = ple_ngram_cache_slot(ws, tok, c0, c1);
+        memcpy(ws.ngram_cache_data + cache_slot * StagedPleWorkspace::kMaxRowBytes, dst_base + (size_t)i * row_stride,
+               total_bytes);
+        ws.ngram_cache_keys[cache_slot][0] = tok;
+        ws.ngram_cache_keys[cache_slot][1] = c0;
+        ws.ngram_cache_keys[cache_slot][2] = c1;
+        ws.ngram_cache_valid[cache_slot] = 1;
+      }
+    }
+    return cudaSuccess;
+  }
+};
+
+// The pool is created by the first large staged gather and destroyed, its workers stopped and joined, by
+// release_all_staged_state_locked. Guarded by g_staged_ple_mu. It is a plain pointer on purpose: nothing may run (and join
+// threads) when the module is unloaded or the process exits, so a pool is only ever stopped at that explicit teardown.
+static PleGatherPool* g_ple_gather_pool = nullptr;
+
+// Returns nullptr when the pool cannot be allocated. Caller holds g_staged_ple_mu.
+static PleGatherPool* get_ple_gather_pool_locked() {
+  if (g_ple_gather_pool == nullptr) {
+    try {
+      g_ple_gather_pool = new PleGatherPool();
+    } catch (const std::bad_alloc&) {
+      return nullptr;
+    }
+  }
+  return g_ple_gather_pool;
+}
+
+// Stops and joins the gather workers. Caller holds g_staged_ple_mu, which every gather holds for its whole duration, so none is
+// in flight.
+static void stop_ple_gather_pool_locked() {
+  delete g_ple_gather_pool;  // ~ParallelPool() stops and joins the workers
+  g_ple_gather_pool = nullptr;
 }
 
 // Finds the staged workspace of the table `P` (a registered host key or the device copy of its parameters). Returns nullptr
@@ -619,6 +977,60 @@ __global__ void k_prep_staged(i64 capacity, int n_heads, int head_dim, float sca
   }
 }
 
+// The tokens of the `rows` rows of one folded step and the token in front of each of them (the c1 of its n-gram context).
+// They are passed to the kernel by value, so the kernel reads nothing from host memory but the gathered rows.
+struct StagedFoldRows {
+  i64 tok[QWEN38_PLANE_MAX_PREP_ROWS];
+  i64 c1[QWEN38_PLANE_MAX_PREP_ROWS];
+};
+
+// One block per row of a folded step of a staged table: the graph inputs, the context and the PLE row of row `blockIdx.x`.
+// Only row 0 writes the committed length, and not at all for a null `committed`.
+__global__ void k_prep_fold_staged(i64 capacity, int n_heads, int head_dim, float scale, StagedFoldRows step, i64 base_pos,
+                                   const unsigned char* fp8_rows, i64* ctx_out, i64* input_ids, i64* position_ids,
+                                   int* committed, i64* past_pos, __nv_bfloat16* ple_out, i64* state) {
+  const int row = blockIdx.x;
+  const int tid = threadIdx.x;
+  const i64 tok = step.tok[row];
+  const i64 pos = base_pos + row;
+  if (tid == 0) {
+    input_ids[row] = tok;
+    position_ids[row] = pos;
+    if (row == 0 && committed != nullptr) committed[0] = (int)pos;
+    if (pos >= 0 && pos < capacity)
+      past_pos[pos] = pos;
+    else
+      atomicOr((unsigned long long*)&state[5], 1ULL);
+    ctx_out[2 * row + 0] = step.c1[row];
+    ctx_out[2 * row + 1] = tok;
+  }
+  const int total = n_heads * head_dim;
+  const unsigned char* fp8_row = fp8_rows + (size_t)row * StagedPleWorkspace::kPrepRingRowBytes;
+  __nv_bfloat16* out_row = ple_out + (size_t)row * total;
+  unsigned char b[3];
+#pragma unroll
+  for (int u = 0; u < 3; ++u) {
+    const int j = tid + u * blockDim.x;
+    b[u] = (j < total) ? fp8_row[j] : 0;
+  }
+  const bool is_int8 = (scale < 0.0f);
+  const float abs_scale = is_int8 ? -scale : scale;
+#pragma unroll
+  for (int u = 0; u < 3; ++u) {
+    const int j = tid + u * blockDim.x;
+    if (j < total) {
+      float f;
+      if (is_int8) {
+        f = static_cast<float>(static_cast<signed char>(b[u]));
+      } else {
+        const __half_raw hr = __nv_cvt_fp8_to_halfraw(b[u], __NV_E4M3);
+        f = __half2float(*reinterpret_cast<const __half*>(&hr));
+      }
+      out_row[j] = __float2bfloat16_rn(f * abs_scale);
+    }
+  }
+}
+
 __global__ void k_ple_rows_staged(int n_heads, int head_dim, float scale, const unsigned char* fp8_rows, int n,
                                   i64 last_c1, i64 last_tok, i64* ctx_out, __nv_bfloat16* ple_out) {
   const int tid = threadIdx.x;
@@ -738,7 +1150,9 @@ __global__ void k_prep(const PleParams* P, const i64* tok_ptr, const i64* pos_pt
 }
 
 // One block per (row, slot). `honor_mute` is set by prep_batched only: a slot whose control word state[3] is nonzero prepares
-// idle inputs there, while prep (one slot, any control words the caller hands over) never reads that word.
+// idle inputs there, while prep (one slot, any control words the caller hands over) never reads that word. The contexts of
+// slot b are written at ctx_a + b * QWEN38_PLANE_CTX_WORDS_PER_SLOT, not at b * 2 * rows: the buffer is laid out for the
+// largest row count, which is the stride its readers use.
 __global__ void __launch_bounds__(1024) k_prep_fold(const PleParams* P, const i64* ctx_in, i64* ctx_a, i64* input_ids,
                                                     i64* position_ids, int* committed, i64* past_pos,
                                                     __nv_bfloat16* ple_out, i64* state, int honor_mute) {
@@ -751,7 +1165,7 @@ __global__ void __launch_bounds__(1024) k_prep_fold(const PleParams* P, const i6
   const int tid = threadIdx.x;
   i64* state_b = state + (size_t)b * 16;
   const i64* ctx_in_b = ctx_in + (size_t)b * 2;
-  i64* ctx_a_b = ctx_a + (size_t)b * 2 * rows;
+  i64* ctx_a_b = ctx_a + (size_t)b * QWEN38_PLANE_CTX_WORDS_PER_SLOT;
   i64* input_ids_b = input_ids + (size_t)b * rows;
   i64* position_ids_b = position_ids + (size_t)b * rows;
   int* committed_b = committed != nullptr ? committed + b : nullptr;  // null: the caller keeps no committed length
@@ -1208,8 +1622,10 @@ __global__ void k_embed_rows_int8(const int8_t* table, const float* row_scales, 
 #define QWEN38_PLANE_EXPORT
 #endif
 
-// Drops every staged table of the module, whichever loader registered it. Caller holds g_staged_ple_mu.
+// Drops every staged table of the module, whichever loader registered it, and stops the gather workers. Caller holds
+// g_staged_ple_mu.
 static void release_all_staged_state_locked() {
+  stop_ple_gather_pool_locked();
   // Each workspace drains the device that owns it, which may differ from one table to the next, before it frees its buffers.
   for (auto& kv : g_host_ple_workspaces) {
     if (kv.second) kv.second->release(true);
@@ -1251,9 +1667,29 @@ static inline ParkedStreamKey CurrentParkedStreamKey(cudaStream_t stream) {
   return ParkedStreamKey{dev, stream};
 }
 
+#ifdef QWEN38_PLANE_TEST_HOOKS
+// QWEN38_PLANE_FAULT_LAUNCH: the number of launches to let through before the next one is made to look rejected, -1 when
+// disarmed. It is not part of g_test_hooks because BeginLaunch is reached with and without g_staged_ple_mu.
+static std::atomic<int> g_test_launch_skip{-1};
+
+// A launch of no blocks is refused by the runtime, which records the error like it does for any rejected launch, in the
+// last-error slot that LaunchStatus reads; nothing runs. The launch that follows is not affected.
+static inline void RejectLaunchForTest() {
+  int skip = g_test_launch_skip.load();
+  while (skip >= 0 && !g_test_launch_skip.compare_exchange_weak(skip, skip > 0 ? skip - 1 : -1)) {
+  }
+  if (skip == 0) k_or_status<<<0, 32>>>(nullptr, 0, nullptr);
+}
+#endif
+
 // BeginLaunch drops an error that the thread may still hold from an earlier call that nobody read, so that LaunchStatus
 // reports only the launches since then. An error that sticks (a faulted context) is not dropped and still fails the launch.
-static inline void BeginLaunch() { (void)cudaGetLastError(); }
+static inline void BeginLaunch() {
+  (void)cudaGetLastError();
+#ifdef QWEN38_PLANE_TEST_HOOKS
+  RejectLaunchForTest();
+#endif
+}
 static inline int LaunchStatus() { return static_cast<int>(cudaGetLastError()); }
 static inline void ParkLaunchStatus(cudaStream_t stream) {
   if (const int err = LaunchStatus()) {
@@ -1304,6 +1740,67 @@ static cudaError_t resolve_staged_ple_geometry(const void* P, cudaStream_t strea
     *capacity = static_cast<size_t>(ws->params.capacity);
   }
   return cudaSuccess;
+}
+
+// Prepares the `rows` (2 .. QWEN38_PLANE_MAX_PREP_ROWS) rows of one folded step of one request slot of a staged table with a
+// single launch. The pointers are those of prep for the slot; `committed` is null or the slot's own int. The control words and
+// the context in are read back once, as row 0 of the one-row form does; the PLE rows are gathered on the host and one block per
+// row prepares the rest, only row 0 getting the committed length. A step that fails returns its cudaError_t before it gathers
+// or launches anything, and a launch that the runtime rejects returns its error too.
+static int prep_staged_fold_rows(cudaStream_t stream, const void* P, int rows, const void* ctx_in, void* ctx_out,
+                                 void* input_ids, void* position_ids, void* committed, void* past_pos, void* ple_out,
+                                 void* state) {
+  if (rows < 2 || rows > QWEN38_PLANE_MAX_PREP_ROWS) return (int)cudaErrorInvalidValue;
+  constexpr int kSlots[QWEN38_PLANE_MAX_PREP_ROWS] = {0, 2, 8, 9, 10, 11, 12, 13};
+  constexpr size_t kRowBytes = StagedPleWorkspace::kPrepRingRowBytes;
+  std::lock_guard<std::mutex> lock(g_staged_ple_mu);
+  bool unregistered_staged = false;
+  cudaError_t err = cudaSuccess;
+  StagedPleWorkspace* ws = resolve_staged_ple_workspace(P, stream, /*allow_sync=*/true, &unregistered_staged, &err);
+  if (err != cudaSuccess) return (int)err;
+  if (unregistered_staged || ws == nullptr) return (int)cudaErrorInvalidValue;
+  err = ensure_staged_buffers(*ws, 0, 0);
+  if (err != cudaSuccess) return (int)err;
+
+  // The words that the one-row form keeps a snapshot of are overwritten here, so that snapshot, a half-written one included,
+  // must not be reused by a row that follows.
+  ws->cached_state_ptr = nullptr;
+  ws->cached_ctx_out_ptr = nullptr;
+  err = staged_copy_to_host(&ws->scalars[0], state, 14 * sizeof(i64), cudaMemcpyDeviceToHost, stream);
+  if (err == cudaSuccess) {
+    err = staged_copy_to_host(&ws->scalars[14], ctx_in, 2 * sizeof(i64), cudaMemcpyDeviceToHost, stream);
+  }
+  if (err == cudaSuccess) err = staged_stream_sync(stream);
+  if (err != cudaSuccess) return (int)err;
+
+  // The rows of one step are contiguous in the ring. Writing over rows of earlier steps is safe: the wait above has retired
+  // every kernel that read them.
+  size_t first = ws->ring_idx % StagedPleWorkspace::kPrepRingRows;
+  if (first + static_cast<size_t>(rows) > StagedPleWorkspace::kPrepRingRows) first = 0;
+  ws->ring_idx = static_cast<unsigned int>(first + static_cast<size_t>(rows));
+  unsigned char* host_rows = ws->prep_ring + first * kRowBytes;
+  const unsigned char* device_rows = ws->prep_ring_dev + first * kRowBytes;
+
+  StagedFoldRows step{};
+  i64 h_c0s[8];
+  i64 c0 = ws->scalars[14];
+  i64 c1 = ws->scalars[15];
+  for (int r = 0; r < rows; ++r) {
+    const i64 tok = ws->scalars[kSlots[r]];
+    step.tok[r] = tok;
+    step.c1[r] = c1;
+    h_c0s[r] = c0;
+    c0 = c1;
+    c1 = tok;
+  }
+  host_gather_ple_rows_batch(*ws, rows, step.tok, h_c0s, step.c1, host_rows, kRowBytes);
+  hook_launch();
+  BeginLaunch();
+  k_prep_fold_staged<<<rows, 1024, 0, stream>>>(ws->params.capacity, ws->params.n_heads, ws->params.head_dim,
+                                                ws->params.scale, step, ws->scalars[1], device_rows, (i64*)ctx_out,
+                                                (i64*)input_ids, (i64*)position_ids, (int*)committed, (i64*)past_pos,
+                                                (__nv_bfloat16*)ple_out, (i64*)state);
+  return LaunchStatus();
 }
 
 extern "C" {
@@ -1396,19 +1893,10 @@ QWEN38_PLANE_EXPORT int qwen38_plane_prep(void* s, const void* P, const void* to
     const cudaError_t resolved = resolve_staged_ple_geometry(P, stream, &staged_ple_total, &staged_capacity);
     if (resolved != cudaSuccess) return (int)resolved;
     if (staged_ple_total != 0) {
-      // The host-table gather is per row, so the staged path keeps one prep per row (the mutex is not held here). Row 0 owns
-      // the committed length: the other rows get no committed pointer, so nothing but device memory reaches a kernel.
-      constexpr int kSlots[8] = {0, 2, 8, 9, 10, 11, 12, 13};
-      for (int r = 0; r < rows; ++r) {
-        const void* r_ctx_in = (r == 0) ? ctx_in : ((const i64*)ctx_out + 2 * (r - 1));
-        void* r_ctx_out = (i64*)ctx_out + 2 * r;
-        const int rc = qwen38_plane_prep(s, P, (const i64*)state + kSlots[r], (const i64*)state + 1, r, r_ctx_in,
-                                         r_ctx_out, (i64*)input_ids + r, (i64*)position_ids + r,
-                                         r == 0 ? committed : nullptr, past_pos,
-                                         (__nv_bfloat16*)ple_out + (size_t)r * staged_ple_total, state);
-        if (rc != 0) return rc;
-      }
-      return 0;
+      // The host-table gather is per row, so the staged path gathers every row on the host and prepares them all with one
+      // launch (the mutex is not held here). Row 0 owns the committed length: no other row is handed a committed pointer.
+      return prep_staged_fold_rows(stream, P, rows, ctx_in, ctx_out, input_ids, position_ids, committed, past_pos, ple_out,
+                                   state);
     }
     BeginLaunch();
     k_prep_fold<<<rows, 1024, 0, stream>>>((const PleParams*)P, (const i64*)ctx_in, (i64*)ctx_out, (i64*)input_ids,
@@ -1516,7 +2004,8 @@ QWEN38_PLANE_EXPORT int qwen38_plane_prep(void* s, const void* P, const void* to
         s_c0 = ws->scalars[2];
         s_c1 = ws->scalars[3];
       }
-      const size_t slot_offset = (size_t)(ws->ring_idx++ & 63u) * 8192u;
+      const size_t slot_offset = (size_t)(ws->ring_idx++ % StagedPleWorkspace::kPrepRingRows) *
+                                 StagedPleWorkspace::kPrepRingRowBytes;
       unsigned char* slot_host = ws->prep_ring + slot_offset;
       const unsigned char* slot_dev = ws->prep_ring_dev + slot_offset;
       host_gather_ple_row(*ws, tok, s_c0, s_c1, slot_host);
@@ -1637,11 +2126,21 @@ QWEN38_PLANE_EXPORT int qwen38_plane_ple_rows(void* s, const void* P, const void
       const i64* h_toks = ws->prefill_tokens;
       const i64 ctx0 = ws->scalars[2];
       const i64 ctx1 = ws->scalars[3];
-      for (int i = 0; i < n; ++i) {
-        const i64 tok = h_toks[i];
-        const i64 c1 = i >= 1 ? h_toks[i - 1] : ctx1;
-        const i64 c0raw = i >= 2 ? h_toks[i - 2] : (i == 1 ? ctx1 : ctx0);
-        host_gather_ple_row(*ws, tok, c0raw, c1, ws->prefill_fp8 + (size_t)i * total);
+      if (n >= 32) {
+        PleGatherPool* gather_pool = get_ple_gather_pool_locked();
+        err = gather_pool != nullptr ? gather_pool->run(*ws, h_toks, ctx0, ctx1, n, ws->prefill_fp8, total)
+                                     : cudaErrorMemoryAllocation;
+        if (err != cudaSuccess) {
+          return (int)err;
+        }
+        hook_gather(n);
+      } else {
+        for (int i = 0; i < n; ++i) {
+          const i64 tok = h_toks[i];
+          const i64 c1 = i >= 1 ? h_toks[i - 1] : ctx1;
+          const i64 c0raw = i >= 2 ? h_toks[i - 2] : (i == 1 ? ctx1 : ctx0);
+          host_gather_ple_row(*ws, tok, c0raw, c1, ws->prefill_fp8 + (size_t)i * total);
+        }
       }
       const i64 last_tok = h_toks[n - 1];
       const i64 last_c1 = n >= 2 ? h_toks[n - 2] : ctx1;
@@ -1801,11 +2300,13 @@ QWEN38_PLANE_EXPORT int qwen38_plane_stream_sync(void* s) {
 #ifdef QWEN38_PLANE_TEST_HOOKS
 QWEN38_PLANE_EXPORT int qwen38_plane_test_inject_staged_fault(int site, int skip, int error) {
   const bool disarm = site == QWEN38_PLANE_FAULT_NONE;
-  if (site < QWEN38_PLANE_FAULT_NONE || site > QWEN38_PLANE_FAULT_EVENT_RECORD || (!disarm && error == 0)) {
+  if (site < QWEN38_PLANE_FAULT_NONE || site > QWEN38_PLANE_FAULT_GATHER_SCRATCH || (!disarm && error == 0)) {
     return (int)cudaErrorInvalidValue;
   }
   std::lock_guard<std::mutex> lock(g_staged_ple_mu);
-  g_test_hooks.fault_site = site;
+  const bool launch = site == QWEN38_PLANE_FAULT_LAUNCH;
+  g_test_launch_skip.store(launch ? (skip < 0 ? 0 : skip) : -1);
+  g_test_hooks.fault_site = launch ? QWEN38_PLANE_FAULT_NONE : site;
   g_test_hooks.fault_skip = skip < 0 ? 0 : skip;
   g_test_hooks.fault_error = error;
   return 0;
@@ -1815,8 +2316,12 @@ QWEN38_PLANE_EXPORT int qwen38_plane_test_stats(Qwen38PlaneTestStats* stats) {
   if (stats == nullptr) return (int)cudaErrorInvalidValue;
   std::lock_guard<std::mutex> lock(g_staged_ple_mu);
   long long capacity_rows = 0;
+  long long ple_cache_slots = 0;
   for (const auto& kv : g_host_ple_workspaces) {
-    if (kv.second) capacity_rows += (long long)kv.second->prefill_cap_rows;
+    if (kv.second) {
+      capacity_rows += (long long)kv.second->prefill_cap_rows;
+      if (kv.second->ngram_cache_data) ple_cache_slots += (long long)kv.second->cache_slots;
+    }
   }
   stats->gather_rows = g_test_hooks.gather_rows;
   stats->staged_launches = g_test_hooks.staged_launches;
@@ -1825,8 +2330,10 @@ QWEN38_PLANE_EXPORT int qwen38_plane_test_stats(Qwen38PlaneTestStats* stats) {
   stats->prefill_capacity_rows = capacity_rows;
   stats->staged_tables = (long long)g_host_ple_workspaces.size();
   stats->attached_loaders = g_attached_loaders;
-  stats->fault_armed = g_test_hooks.fault_site != QWEN38_PLANE_FAULT_NONE ? 1 : 0;
+  stats->fault_armed = (g_test_hooks.fault_site != QWEN38_PLANE_FAULT_NONE || g_test_launch_skip.load() >= 0) ? 1 : 0;
   stats->unfenced_drains = g_test_hooks.unfenced_drains;
+  stats->gather_pool_threads = g_ple_gather_pool != nullptr ? g_ple_gather_pool->pool.ThreadCount() : 0;
+  stats->ple_cache_slots = ple_cache_slots;
   return 0;
 }
 
@@ -1853,8 +2360,9 @@ QWEN38_PLANE_EXPORT int qwen38_plane_test_device_count(void) {
 #endif
 }
 
-// The graph inputs of the `rows` rows of one folded verify step for each of `batch` request slots (QWEN38_PLANE_CAP_BATCHED_PREP;
-// the contract is in qwen38_plane_abi.h). Both counts are checked before anything is launched.
+// The graph inputs of the `rows` rows of one folded verify step for each of `batch` request slots
+// (QWEN38_PLANE_CAP_BATCHED_PREP and QWEN38_PLANE_CAP_CTX_SLOT_STRIDE; the contract is in qwen38_plane_abi.h). Both counts are
+// checked before anything is launched.
 extern "C" QWEN38_PLANE_EXPORT int qwen38_plane_prep_batched(void* s, const void* P, int rows, int batch, const void* ctx_in,
                                                              void* ctx_out, void* input_ids, void* position_ids,
                                                              void* committed, void* past_pos, void* ple_out, void* state) {
@@ -1869,27 +2377,24 @@ extern "C" QWEN38_PLANE_EXPORT int qwen38_plane_prep_batched(void* s, const void
   const cudaError_t resolved = resolve_staged_ple_geometry(P, stream, &staged_row_width, &staged_capacity);
   if (resolved != cudaSuccess) return static_cast<int>(resolved);
   if (staged_row_width != 0) {
-    // The host-table gather is per row, so the staged path prepares one row at a time, slot after slot (the snapshot of the
-    // control words that row 0 takes is what rows 1.. of the same slot reuse). Row 0 owns the committed length of its slot:
-    // the other rows get no committed pointer, so nothing but device memory reaches a kernel.
-    constexpr int kSlots[8] = {0, 2, 8, 9, 10, 11, 12, 13};
+    // The host-table gather is per row, so the staged path gathers the rows of one slot on the host and prepares them with one
+    // launch (the plain next-token row, rows == 1, is the one-row prep), slot after slot. Row 0 owns the committed length of
+    // its slot: no other row is handed a committed pointer, so nothing but device memory reaches a kernel.
     for (int b = 0; b < batch; ++b) {
       i64* state_b = static_cast<i64*>(state) + static_cast<size_t>(b) * QWEN38_PLANE_CTL_WORDS_PER_SLOT;
       const i64* ctx_in_b = static_cast<const i64*>(ctx_in) + static_cast<size_t>(b) * 2;
-      i64* ctx_out_b = static_cast<i64*>(ctx_out) + static_cast<size_t>(b) * 2 * static_cast<size_t>(rows);
+      i64* ctx_out_b = static_cast<i64*>(ctx_out) + static_cast<size_t>(b) * QWEN38_PLANE_CTX_WORDS_PER_SLOT;
       i64* input_ids_b = static_cast<i64*>(input_ids) + static_cast<size_t>(b) * rows;
       i64* position_ids_b = static_cast<i64*>(position_ids) + static_cast<size_t>(b) * rows;
       int* committed_b = committed != nullptr ? static_cast<int*>(committed) + b : nullptr;
       i64* past_pos_b = static_cast<i64*>(past_pos) + static_cast<size_t>(b) * staged_capacity;
       __nv_bfloat16* ple_out_b =
           static_cast<__nv_bfloat16*>(ple_out) + static_cast<size_t>(b) * static_cast<size_t>(rows) * staged_row_width;
-      for (int r = 0; r < rows; ++r) {
-        const void* r_ctx_in = r == 0 ? static_cast<const void*>(ctx_in_b) : static_cast<const void*>(ctx_out_b + 2 * (r - 1));
-        const int rc = qwen38_plane_prep(s, P, state_b + kSlots[r], state_b + 1, r, r_ctx_in, ctx_out_b + 2 * r,
-                                         input_ids_b + r, position_ids_b + r, r == 0 ? committed_b : nullptr, past_pos_b,
-                                         ple_out_b + static_cast<size_t>(r) * staged_row_width, state_b);
-        if (rc != 0) return rc;
-      }
+      const int rc = rows >= 2 ? prep_staged_fold_rows(stream, P, rows, ctx_in_b, ctx_out_b, input_ids_b, position_ids_b,
+                                                       committed_b, past_pos_b, ple_out_b, state_b)
+                               : qwen38_plane_prep(s, P, state_b, state_b + 1, 0, ctx_in_b, ctx_out_b, input_ids_b,
+                                                   position_ids_b, committed_b, past_pos_b, ple_out_b, state_b);
+      if (rc != 0) return rc;
     }
     return 0;
   }
@@ -2045,25 +2550,34 @@ __global__ void k_replay_generic(const Qwen38StateReplayDesc* __restrict__ descs
   }
 
   if (descriptor.kind == 1) {
-    const uint64_t state_elements = descriptor.channel_count * descriptor.state_width;
+    const uint64_t channel_count = descriptor.channel_count;
+    const uint64_t state_width = descriptor.state_width;
+    const bool history_first = descriptor.layout == QWEN38_PLANE_CONV_STATE_HISTORY_FIRST;
+    const uint64_t state_elements = channel_count * state_width;
     for (uint64_t state_index = start; state_index < state_elements; state_index += stride) {
-      const uint64_t channel = state_index / descriptor.state_width;
-      const uint64_t position = state_index - channel * descriptor.state_width;
+      // state_index is the offset of the element in the physical state, which keeps (channel, position) at
+      // channel * state_width + position channel-first and at position * channel_count + channel history-first. The new
+      // state at `position` is the old state (or, past its end, the update) `kept_count` positions later; the update
+      // [capacity, channel_count] has the same layout whatever the state has.
+      const uint64_t channel = history_first ? state_index % channel_count : state_index / state_width;
+      const uint64_t position = history_first ? state_index / channel_count : state_index % state_width;
       const uint64_t shifted_position = position + kept_count;
-      const uint64_t source_index = shifted_position < descriptor.state_width
-                                        ? channel * descriptor.state_width + shifted_position
-                                        : (shifted_position - descriptor.state_width) *
-                                                  descriptor.channel_count +
-                                              channel;
+      const bool from_state = shifted_position < state_width;
+      uint64_t source_index;
+      if (!from_state) {
+        source_index = (shifted_position - state_width) * channel_count + channel;
+      } else if (history_first) {
+        source_index = shifted_position * channel_count + channel;
+      } else {
+        source_index = channel * state_width + shifted_position;
+      }
       if (descriptor.element_size == 2) {
-        const auto* source = shifted_position < descriptor.state_width
-                                 ? static_cast<const uint16_t*>(descriptor.source_state)
-                                 : static_cast<const uint16_t*>(descriptor.value);
+        const auto* source = from_state ? static_cast<const uint16_t*>(descriptor.source_state)
+                                        : static_cast<const uint16_t*>(descriptor.value);
         static_cast<uint16_t*>(descriptor.destination_state)[state_index] = source[source_index];
       } else if (descriptor.element_size == 4) {
-        const auto* source = shifted_position < descriptor.state_width
-                                 ? static_cast<const uint32_t*>(descriptor.source_state)
-                                 : static_cast<const uint32_t*>(descriptor.value);
+        const auto* source = from_state ? static_cast<const uint32_t*>(descriptor.source_state)
+                                        : static_cast<const uint32_t*>(descriptor.value);
         static_cast<uint32_t*>(descriptor.destination_state)[state_index] = source[source_index];
       }
     }

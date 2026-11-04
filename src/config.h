@@ -781,7 +781,7 @@ struct Config {
         std::optional<SessionOptions> session_options;
       } head;
 
-      std::string plane_library;  // libqwen38_plane.so (CUDA data plane, dlopen-ed)
+      std::string plane_library;  // optional libqwen38_plane.so in the model folder; empty or missing uses onnxruntime-genai-cuda
       std::string ple_table;      // description of the host-registered FP8 PLE shards
 
       int kv_capacity{33028};
@@ -792,6 +792,10 @@ struct Config {
       // stack with unified fast prefill (see ValidateQwen38MultiSlotConfig).
       static constexpr int kMaxBatchSize{8};
       int max_batch_size{1};
+      // Set when engine.dynamic_batching resolved to one slot and was cleared for the static Engine path, so
+      // ResolveQwen38MaxBatchSize preserves that authoritative single-slot choice over model.qwen38_graph.max_batch_size,
+      // search.batch_size, and ORT_QWEN38_MAX_BATCH_SIZE.
+      std::optional<int> resolved_max_batch_size;
 
       struct Mtp {
         bool enabled{true};       // false: plain S=1 graph decode (no draft/verify)

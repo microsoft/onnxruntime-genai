@@ -51,6 +51,18 @@ static_assert(sizeof(void*) != 8 || offsetof(Qwen38PleParams, eos) == 4664, "Qwe
 static_assert(sizeof(void*) != 8 || offsetof(Qwen38PleParams, capacity) == 4672, "Qwen38PleParams layout changed");
 #endif
 
+// Physical layout of the state of a CausalConvWithState replay (Qwen38StateReplayDesc::kind 1; `layout` is ignored by the other
+// kinds). The state of one slot holds channel_count channels of state_width positions in either order. Zero is the
+// channel-first layout, which is what every plane that predates the field assumes (the field was tail padding that the host
+// zeroed), so a descriptor that never sets it keeps its meaning. The history-first layout needs a plane that reports
+// QWEN38_PLANE_CAP_CONV_HISTORY_FIRST_REPLAY; the plane reads the `value` input as [capacity, channel_count] in both layouts.
+typedef enum Qwen38PlaneConvStateLayout {
+  // [channel_count, state_width]: (channel, position) is at channel * state_width + position
+  QWEN38_PLANE_CONV_STATE_CHANNEL_FIRST = 0,
+  // [state_width, channel_count]: (channel, position) is at position * channel_count + channel
+  QWEN38_PLANE_CONV_STATE_HISTORY_FIRST = 1,
+} Qwen38PlaneConvStateLayout;
+
 // Device descriptor for compact state-update replay (GatedDeltaNet, CausalConvWithState, PackedSparseAttentionIndexer).
 typedef struct Qwen38StateReplayDesc {
   const void* source_state;
@@ -74,7 +86,21 @@ typedef struct Qwen38StateReplayDesc {
   uint32_t element_size;
   uint32_t compress_ratio;
   uint32_t kind;
+  uint32_t layout;  // a Qwen38PlaneConvStateLayout, for kind 1 (it took the place of the 4 bytes of tail padding)
 } Qwen38StateReplayDesc;
+
+// The new field must not have changed the size of the descriptor that a plane built before it reads: every LP64 and LLP64
+// target lays the 10 pointers, the 6 uint64_t and the 6 uint32_t (this one included; without it there were 5 of them and 4
+// bytes of tail padding) out in 152 bytes, with `layout` in the last 4 bytes. This header is compiled into both the plane and
+// the host loader, so neither side can drift from the other.
+#ifdef __cplusplus
+static_assert(sizeof(void*) != 8 || sizeof(Qwen38StateReplayDesc) == 152, "Qwen38StateReplayDesc must keep its 152 bytes");
+static_assert(sizeof(void*) != 8 || offsetof(Qwen38StateReplayDesc, kind) == 144, "kind must stay where the planes read it");
+static_assert(sizeof(void*) != 8 || offsetof(Qwen38StateReplayDesc, layout) == 148, "layout must take the former tail padding");
+#else
+_Static_assert(sizeof(void*) != 8 || sizeof(Qwen38StateReplayDesc) == 152, "Qwen38StateReplayDesc must keep its 152 bytes");
+_Static_assert(sizeof(void*) != 8 || offsetof(Qwen38StateReplayDesc, layout) == 148, "layout must take the former tail padding");
+#endif
 
 // Limits of the compact state-update replay kernels (k_replay_gdn, k_replay_generic). The plane sizes its shared tiles and its
 // grid from them and the host checks every replay descriptor against them while it builds it (ValidateQwen38ReplayDescriptor),
@@ -115,19 +141,26 @@ typedef int (*Qwen38PlaneReplayStateUpdatesFn)(void* stream, const void* descs, 
 #define QWEN38_PLANE_MAX_PREP_ROWS 8        // rows of one folded verify step
 #define QWEN38_PLANE_MAX_PREP_BATCH 8       // request slots prep_batched prepares in one call
 #define QWEN38_PLANE_CTL_WORDS_PER_SLOT 16  // int64 control words of one request slot (the `state` of prep)
+// int64 words that prep_batched reserves for the n-gram contexts of one request slot in `ctx_out`: two for each of the
+// QWEN38_PLANE_MAX_PREP_ROWS rows, whatever the row count of the call, so slot s starts at word s * 16 and the layout of the
+// buffer does not change with the number of rows. The consumers of the buffer (the engine's per-slot views and the
+// SpeculativePrefixCommit node, which reads slot s at s * (words / slots)) depend on that stride.
+#define QWEN38_PLANE_CTX_WORDS_PER_SLOT (2 * QWEN38_PLANE_MAX_PREP_ROWS)
 
 // X(return type, name, parameter list). The exported symbol is "qwen38_plane_" + name. `stream` is a cudaStream_t.
 // CUDA runtime helpers return the cudaError_t as int (0 = success).
 //
 // prep and ple_rows return 0 on success. A PLE table that is not GPU-addressable (Qwen38PleParams::pad_ == 1) is "staged":
-// the token and context words are read back to the host and the FP8 rows are gathered there. Every step of that staging
-// (pinned allocation, device alias, creation of the completion event, copy, synchronisation) is checked; when one fails, or
-// when the table was never registered with set_ple_host_params, the function returns the cudaError_t (cudaErrorInvalidValue
-// for the unregistered table) before it gathers or launches anything, so the outputs are untouched. Both also return the
-// error of their own kernel launch. The one step that can fail after the launch is recording the completion event, which
-// fences the staged buffers against a call on another stream: the function then waits for its stream before it returns the
-// error, so the kernel has finished and the outputs are complete. Callers must check the result. ple_rows reads ctx_in while
-// its last block writes ctx_out, so the two must not alias.
+// the token and context words are read back to the host and the FP8 rows are gathered there (a gather of 32 or more
+// rows by worker threads that the module starts when it first needs them). Every step of that staging (pinned
+// allocation, device alias, creation of the completion event, copy, synchronisation, starting the worker threads, which
+// fails with cudaErrorMemoryAllocation) is checked; when one fails, or when the table was never registered with
+// set_ple_host_params, the function returns the cudaError_t (cudaErrorInvalidValue for the unregistered table) before
+// it gathers or launches anything, so the outputs are untouched. Both also return the error of their own kernel
+// launch. The one step that can fail after the launch is recording the completion event, which fences the staged
+// buffers against a call on another stream: the function then waits for its stream before it returns the error, so
+// the kernel has finished and the outputs are complete. Callers must check the result. ple_rows reads ctx_in while its
+// last block writes ctx_out, so the two must not alias.
 //
 // A staged table is bound to one GPU. The first call that stages anything for it creates its pinned buffers and its completion
 // events with the device that is current in the calling thread, and every later call that uses the table has to be made with
@@ -160,9 +193,11 @@ typedef int (*Qwen38PlaneReplayStateUpdatesFn)(void* stream, const void* descs, 
 // below -8 is not a row count: prep returns cudaErrorInvalidValue before it launches anything. Several request slots in one
 // call are prepared by prep_batched (QWEN38_PLANE_CAP_BATCHED_PREP), never by an encoding inside pos_add.
 //
-// The module keeps process-wide state (the staged tables registered through set_ple_host_params) that is shared by every
-// loader of the same library file. A loader calls attach once the module is loaded and validated and detach once before it
-// unloads it; the module drops that state only when the last attached loader detaches.
+// The module keeps process-wide state (the staged tables registered through set_ple_host_params, and the worker threads of the
+// staged gather) that is shared by every loader of the same library file. A loader calls attach once the module is loaded and
+// validated and detach once before it unloads it; the module drops that state, and stops and joins its threads, only when the
+// last attached loader detaches. A host must therefore detach before it releases the library (FreeLibrary / dlclose). The
+// reference host, Qwen38Plane, detaches and then keeps the library mapped until the process exits (see qwen38_graph_plane.h).
 #define QWEN38_PLANE_FUNCTIONS(X)                                                                                  \
   X(int, abi_version, (void))                                                                                      \
   X(int, sizeof_ple_params, (void))                                                                                \
@@ -231,13 +266,25 @@ typedef int (*Qwen38PlaneReplayStateUpdatesFn)(void* stream, const void* descs, 
 // prep_batched: the optional export "qwen38_plane_prep_batched" (below), the folded prep of several request slots in one call.
 // Only a model with model.qwen38_graph.max_batch_size > 1 needs it, so a library without it still loads every other package.
 #define QWEN38_PLANE_CAP_BATCHED_PREP 0x8ull
+// replay_state_updates: a CausalConvWithState state (descriptor kind 1) in the history-first layout, [history, channels]
+// (Qwen38StateReplayDesc::layout, Qwen38PlaneConvStateLayout). A library without it reads every conv state as channel-first,
+// so a history-first state would be corrupted by a partial acceptance: the host requires the bit only for a package that has
+// such a state, and channel-first packages keep loading with a library that lacks it.
+#define QWEN38_PLANE_CAP_CONV_HISTORY_FIRST_REPLAY 0x10ull
+// prep_batched: slot s of its ctx_out starts at word s * QWEN38_PLANE_CTX_WORDS_PER_SLOT whatever the row count. A library
+// that has prep_batched but not this bit writes slot s at word s * 2 * rows, which the SpeculativePrefixCommit node reads at
+// the other offset for 1 to 7 rows and several slots, so the n-gram context a slot commits would be wrong without any error
+// (8 rows give both strides the same value). The host requires it with QWEN38_PLANE_CAP_BATCHED_PREP.
+#define QWEN38_PLANE_CAP_CTX_SLOT_STRIDE 0x20ull
 
 // X(bit, name), in bit order.
-#define QWEN38_PLANE_CAPABILITIES(X)                                   \
-  X(QWEN38_PLANE_CAP_INT8_EMBEDDING, "int8_embedding")                 \
-  X(QWEN38_PLANE_CAP_INT8_PLE, "int8_ple")                             \
-  X(QWEN38_PLANE_CAP_NEGATIVE_POS_ADD_BATCH, "negative_pos_add_batch") \
-  X(QWEN38_PLANE_CAP_BATCHED_PREP, "batched_prep")
+#define QWEN38_PLANE_CAPABILITIES(X)                                         \
+  X(QWEN38_PLANE_CAP_INT8_EMBEDDING, "int8_embedding")                       \
+  X(QWEN38_PLANE_CAP_INT8_PLE, "int8_ple")                                   \
+  X(QWEN38_PLANE_CAP_NEGATIVE_POS_ADD_BATCH, "negative_pos_add_batch")       \
+  X(QWEN38_PLANE_CAP_BATCHED_PREP, "batched_prep")                           \
+  X(QWEN38_PLANE_CAP_CONV_HISTORY_FIRST_REPLAY, "conv_history_first_replay") \
+  X(QWEN38_PLANE_CAP_CTX_SLOT_STRIDE, "ctx_slot_stride")
 
 #define QWEN38_PLANE_CAPABILITY_BIT_(bit, name) | (bit)
 #define QWEN38_PLANE_ALL_CAPABILITIES (0ull QWEN38_PLANE_CAPABILITIES(QWEN38_PLANE_CAPABILITY_BIT_))
@@ -267,13 +314,16 @@ typedef int (*Qwen38PlaneEmbedGatherFn)(void* stream, const void* table, long lo
 // for a width <= 0 (it has no INT8 mode), and its width must be a multiple of 8 (the loader refuses a BF16 table of another
 // width). The loader uses it only for a BF16 table when the library has no embed_gather.
 
-// Optional export "qwen38_plane_prep_batched" (QWEN38_PLANE_CAP_BATCHED_PREP): prep of the `rows` rows of one folded verify
-// step (see prep; rows == 1 is the plain next-token row) for each of `batch` request slots, in one call. `rows` is in
-// [1, QWEN38_PLANE_MAX_PREP_ROWS] and `batch` in [1, QWEN38_PLANE_MAX_PREP_BATCH]; the pointers are those of prep except
-// that every one is the base of an array over the slots, which are numbered 0 .. batch - 1:
+// Optional export "qwen38_plane_prep_batched" (QWEN38_PLANE_CAP_BATCHED_PREP, and QWEN38_PLANE_CAP_CTX_SLOT_STRIDE for the
+// layout of ctx_out below): prep of the `rows` rows of one folded verify step (see prep; rows == 1 is the plain next-token
+// row) for each of `batch` request slots, in one call. `rows` is in [1, QWEN38_PLANE_MAX_PREP_ROWS] and `batch` in
+// [1, QWEN38_PLANE_MAX_PREP_BATCH]; the pointers are those of prep except that every one is the base of an array over the
+// slots, which are numbered 0 .. batch - 1:
 //   state         int64, QWEN38_PLANE_CTL_WORDS_PER_SLOT words per slot, the control words of the slot (prep's `state`)
 //   ctx_in        int64[batch][2]                       the n-gram context in front of row 0
-//   ctx_out       int64[batch][rows][2]                 as for prep, slot after slot
+//   ctx_out       int64[batch][QWEN38_PLANE_CTX_WORDS_PER_SLOT]: slot s starts at word s * QWEN38_PLANE_CTX_WORDS_PER_SLOT
+//                 whatever `rows` is, and row r of it is at words 2r .. 2r + 1 as for prep; the words of a slot beyond
+//                 2 * rows are not written
 //   input_ids, position_ids   int64[batch][rows]
 //   committed     int32[batch], or null to skip         row 0 of the slot writes its committed length
 //   past_pos      int64[batch][Qwen38PleParams::capacity]
@@ -300,13 +350,16 @@ typedef int (*Qwen38PlanePrepBatchedFn)(void* stream, const void* params, int ro
 // The step of the staged PLE path that an injected fault replaces with an error.
 typedef enum Qwen38PlaneFaultSite {
   QWEN38_PLANE_FAULT_NONE = 0,
-  QWEN38_PLANE_FAULT_HOST_ALLOC = 1,    // pinned cudaHostAlloc of a staging buffer
-  QWEN38_PLANE_FAULT_HOST_MALLOC = 2,   // malloc of the host n-gram row cache
-  QWEN38_PLANE_FAULT_DEVICE_ALIAS = 3,  // cudaHostGetDevicePointer of a mapped staging buffer
-  QWEN38_PLANE_FAULT_COPY = 4,          // device-to-host cudaMemcpyAsync
-  QWEN38_PLANE_FAULT_SYNC = 5,          // cudaStreamSynchronize / cudaDeviceSynchronize
-  QWEN38_PLANE_FAULT_EVENT_CREATE = 6,  // cudaEventCreateWithFlags of a completion event (only when it is created)
-  QWEN38_PLANE_FAULT_EVENT_RECORD = 7,  // cudaEventRecord of a completion event, after the kernel was launched
+  QWEN38_PLANE_FAULT_HOST_ALLOC = 1,       // pinned cudaHostAlloc of a staging buffer
+  QWEN38_PLANE_FAULT_HOST_MALLOC = 2,      // malloc of the host n-gram row cache
+  QWEN38_PLANE_FAULT_DEVICE_ALIAS = 3,     // cudaHostGetDevicePointer of a mapped staging buffer
+  QWEN38_PLANE_FAULT_COPY = 4,             // device-to-host cudaMemcpyAsync
+  QWEN38_PLANE_FAULT_SYNC = 5,             // cudaStreamSynchronize / cudaDeviceSynchronize
+  QWEN38_PLANE_FAULT_EVENT_CREATE = 6,     // cudaEventCreateWithFlags of a completion event (only when it is created)
+  QWEN38_PLANE_FAULT_EVENT_RECORD = 7,     // cudaEventRecord of a completion event, after the kernel was launched
+  QWEN38_PLANE_FAULT_THREAD_START = 8,     // creation of a gather worker thread (std::thread throws std::system_error)
+  QWEN38_PLANE_FAULT_LAUNCH = 9,           // a kernel launch that the CUDA runtime rejects (see Qwen38PlaneTestInjectFaultFn)
+  QWEN38_PLANE_FAULT_GATHER_SCRATCH = 10,  // the scratch lists of a gather thread (std::bad_alloc)
 } Qwen38PlaneFaultSite;
 
 typedef struct Qwen38PlaneTestStats {
@@ -319,10 +372,17 @@ typedef struct Qwen38PlaneTestStats {
   long long attached_loaders;         // loaders currently attached to the module
   long long fault_armed;              // 1 while an injected fault has not fired yet
   long long unfenced_drains;          // waits for a stream because its completion event could not be recorded
+  long long gather_pool_threads;      // live worker threads of the staged PLE gather
+  long long ple_cache_slots;          // PLE n-gram cache slots summed over the staged workspaces
 } Qwen38PlaneTestStats;
 
 // Arms one fault: the (skip + 1)-th execution of `site` from now on fails with `error` instead of calling CUDA, once. A site
 // of QWEN38_PLANE_FAULT_NONE disarms. Returns 0, or cudaErrorInvalidValue for an unknown site or an `error` of 0.
+// QWEN38_PLANE_FAULT_LAUNCH does not replace a CUDA call: the (skip + 1)-th kernel launch that the module reports the status of
+// (every export that launches a kernel) is preceded by a launch of no blocks, which the runtime rejects like any bad launch
+// configuration, so what the export reports for its launch is the error that the runtime recorded (its code depends on the CUDA
+// version). The kernel itself still runs, so every argument has to be valid. `error` is not used, but like for every other site
+// it must not be 0.
 typedef int (*Qwen38PlaneTestInjectFaultFn)(int site, int skip, int error);
 // Fills `stats`. Returns 0, or cudaErrorInvalidValue for a null `stats`.
 typedef int (*Qwen38PlaneTestStatsFn)(Qwen38PlaneTestStats* stats);
