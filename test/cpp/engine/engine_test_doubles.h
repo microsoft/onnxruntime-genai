@@ -151,6 +151,10 @@ struct RecordingCacheManager : CacheManager {
     size_t selected_requests = 0;
     size_t selected_new_requests = 0;
     bool capacity_deferred = false;
+    const bool defer_drafted =
+        std::any_of(plan.requests.begin(), plan.requests.end(),
+                    [](const RequestStepPlan& entry) { return entry.draft_token_count != 0; }) &&
+        std::exchange(defer_drafted_requests_once_, false);
     const void* unserviceable_request_id = nullptr;
     std::vector<const void*> request_ids;
     request_ids.reserve(plan.requests.size());
@@ -171,6 +175,7 @@ struct RecordingCacheManager : CacheManager {
         continue;
       }
       if (entry.request_id == capacity_deferred_request_id_ ||
+          (defer_drafted && entry.draft_token_count != 0) ||
           selected_requests >= request_limit ||
           (entry.newly_admitted &&
            (!can_allocate_verdict_ ||
@@ -357,6 +362,9 @@ struct RecordingCacheManager : CacheManager {
   void OverselectPlanningOnce() {
     overselect_planning_once_ = true;
   }
+  // The next planning pass that carries drafts defers every row that has them, as a paged cache
+  // short of blocks for the drafts would.
+  void DeferDraftedRequestsOnce() { defer_drafted_requests_once_ = true; }
   void ThrowPrepareFailureOnce() { throw_prepare_failure_ = true; }
   void ThrowDeallocateFailureOnce() { throw_deallocate_failure_ = true; }
   void ThrowDeallocateInvariantFailureOnce() {
@@ -410,6 +418,7 @@ struct RecordingCacheManager : CacheManager {
   mutable bool always_throw_planning_bad_alloc_{};
   mutable bool throw_planning_consistency_{};
   mutable bool overselect_planning_once_{};
+  mutable bool defer_drafted_requests_once_{};
   bool throw_prepare_failure_{};
   bool throw_deallocate_failure_{};
   bool throw_deallocate_invariant_failure_{};
