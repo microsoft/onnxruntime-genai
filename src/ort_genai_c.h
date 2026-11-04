@@ -1659,10 +1659,9 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetGuidance(
  * reads several unread tokens runs the whole batch without CUDA graph replay; while another request
  * verifies speculative drafts this Turn reads one unread token per step; otherwise its unread
  * tokens share the step's spare token budget with other requests' prefill chunks, longest-waiting
- * first. The publication cap is per Turn, so N fast-forward Turns can place up to
- * N * kMaxGeneratedTokensPerStep events ahead of another request's token. This trades fewer model
- * steps for possibly longer gaps between other requests' tokens; it is off by default, and enabling
- * it should be checked against the workload's latency targets.
+ * first. The publication cap is per Turn, so N fast-forward Turns can place up to 8 * N events
+ * ahead of another request's token. This trades fewer model steps for possibly longer gaps between
+ * other requests' tokens, so check it against the workload's latency targets before enabling it.
  *
  * As for any guided Turn, check the finish reason before trusting the output (see
  * OgaTurnOptionsSetGuidance).

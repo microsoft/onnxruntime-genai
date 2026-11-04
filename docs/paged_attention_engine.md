@@ -1325,11 +1325,12 @@ guidance or dynamic batching, or with a nonzero `no_repeat_ngram_size`, which fo
 bypass.
 
 Keeping peers' drafts does not make fast-forward latency-neutral for peers. The publication cap is
-per Request, not per batch: with N fast-forward turns in one step, up to
-N × `kMaxGeneratedTokensPerStep` events can precede a peer's token, and with a small event buffer
-each takes a `Run` call to deliver (no model step runs while they drain). Steps that read several
-tokens also run eagerly. Fast-forward trades fewer model steps for that bounded extra delivery work
-and step cost, so enable it per workload after checking it against that workload's latency targets.
+per Request, not per batch: with N fast-forward turns in one step, their events, up to
+N × `kMaxGeneratedTokensPerStep`, can precede a peer's token, and a caller whose event buffer is
+smaller than that needs several `Run` calls to reach it (no model step runs while they drain). Steps
+that read several tokens also run eagerly. Fast-forward trades fewer model steps for that bounded
+extra delivery work and step cost, so enable it per workload after checking it against that
+workload's latency targets.
 
 ## Per-turn generation policy
 

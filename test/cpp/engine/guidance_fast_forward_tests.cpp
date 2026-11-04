@@ -509,11 +509,6 @@ TEST_F(GuidanceFastForwardTest, SmallEventBuffersDeliverForcedTokensInOrderWitho
         InstallForcingGrammar(*forcing.back(), /*trigger=*/11, LongForcedSpan());
       }
       auto peer = CreateRequestWithPrompt(engine.engine, Prompt(), Limit(2));
-      // Every forcing row's events come before the peer's, so the bound below is the worst case.
-      engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
-        if (engine.executor->decode_calls == 1)
-          ASSERT_EQ(context.plan->requests.back().request_id, peer.get());
-      });
 
       std::vector<EngineEvent> storage(capacity);
       std::vector<std::vector<int32_t>> forcing_tokens(forcing_count);
@@ -546,7 +541,10 @@ TEST_F(GuidanceFastForwardTest, SmallEventBuffersDeliverForcedTokensInOrderWitho
       for (const auto& tokens : forcing_tokens)
         EXPECT_EQ(tokens, Concat({11}, LongForcedSpan()));
       EXPECT_EQ(peer_tokens, (std::vector<int32_t>{11, 11}));
-      EXPECT_LE(events_before_peer, forcing_count * kMaxGeneratedTokensPerStep);
+      // All rows run in step 1 and the peer was admitted last, so every forcing row's first capped
+      // batch is delivered before the peer's token: exactly the per-request bound times N.
+      EXPECT_EQ(events_before_peer, forcing_count * kMaxGeneratedTokensPerStep);
+      EXPECT_EQ(engine.executor->decode_calls, 2);
     }
   }
 }
