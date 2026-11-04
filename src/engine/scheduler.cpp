@@ -239,7 +239,10 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
         SlotsForWholeSequence(snapshot.current_sequence_length);
     candidate.entry.is_prefill = snapshot.is_prefill;
     candidate.entry.newly_admitted = newly_admitted;
-    auto chunk_token_cap = request->PrefillChunkSize();
+    // search.chunk_size tunes prompt throughput. A decode row's unread committed tokens are at most
+    // one published batch, so only the cache's query cap bounds them.
+    auto chunk_token_cap =
+        snapshot.is_prefill ? request->PrefillChunkSize() : std::optional<size_t>{};
     if (cache_query_token_cap != 0 &&
         (chunk_token_cap.value_or(0) == 0 || *chunk_token_cap > cache_query_token_cap)) {
       chunk_token_cap = cache_query_token_cap;
