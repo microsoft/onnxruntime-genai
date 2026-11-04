@@ -33,7 +33,7 @@ namespace {
 
 std::vector<int32_t> Prompt() { return {2, 3, 4}; }
 
-// Long-span tests trigger on token 11 and expect it plus 7 forced tokens, then the remaining 4.
+// Long-span tests trigger on token 11 and expect it plus the first 7 forced tokens in one step.
 static_assert(kMaxGeneratedTokensPerStep == 8);
 std::vector<int32_t> LongForcedSpan() { return {12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22}; }
 

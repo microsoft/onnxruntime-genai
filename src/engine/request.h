@@ -702,8 +702,9 @@ struct Request : std::enable_shared_from_this<Request>,
   // The forced span: tokens the turn's grammar forced after its last sampled token. The grammar
   // cursor is already past all of it, but a step publishes at most kMaxGeneratedTokensPerStep tokens,
   // so the unpublished rest stays private here and the Request samples nothing until it is empty. A
-  // step stages [published_forced_token_count_, + staged_forced_token_count_), which CommitStep()
-  // appends to tokens_host_ and Search already holds. Cleared once fully published or the turn ends.
+  // step stages the staged_forced_token_count_ tokens after the first published_forced_token_count_,
+  // which CommitStep() appends to tokens_host_ and Search already holds. Cleared once fully published
+  // or the turn ends.
   std::vector<int32_t> forced_tokens_;
   size_t published_forced_token_count_{};
   size_t staged_forced_token_count_{};

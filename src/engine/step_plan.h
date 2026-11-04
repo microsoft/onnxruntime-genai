@@ -73,8 +73,9 @@ struct RequestStepPlan {
   size_t scheduling_order{};  // Logical scheduler order before physical execution ordering.
   std::shared_ptr<const PrefixCacheMatch> prefix_match;
 
-  // A decode row reading the sampled token plus forced tokens it has not read yet, rather than one
-  // token and its drafts.
+  // Reads more than one token plus its drafts: a prefill chunk, or a decode row reading committed
+  // tokens (guidance fast-forward) it has not read yet. Such a row selects one logits row, not one
+  // per token.
   bool ReadsSeveralCommittedTokens() const { return unprocessed_token_count > draft_token_count + 1; }
 };
 
