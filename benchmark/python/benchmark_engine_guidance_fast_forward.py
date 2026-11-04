@@ -87,6 +87,7 @@ WORKLOADS = {
     ),
 }
 PEER_PROMPT = "Write a short paragraph about why reproducible benchmarks matter."
+DRAFT_COUNTERS = ("draft_tokens_proposed", "draft_tokens_evaluated", "draft_tokens_accepted")
 
 
 def summarize(values):
@@ -138,8 +139,10 @@ class Scenario:
         self.turns = []
         self.run_calls = 0
         self.model_steps = 0
-        # Run hands out a step's events before stepping again; a full buffer may leave some behind.
-        self.drained = True
+        self.drafts = {}  # draft_tokens_proposed/evaluated/accepted over this scenario
+        # Run hands out a previous step's leftover events before it steps again. Only a Run that
+        # filled the buffer can have left some behind; one that returned fewer left none.
+        self.maybe_buffered = False
         self.backlog = []  # Closed loop: callbacks that begin a guided turn when one finishes.
 
     def begin(self, kind, workload, tokens, max_new_tokens, arrived_at, configure=None, reference=None):
@@ -159,17 +162,26 @@ class Scenario:
         return next(turn for turn in self.turns if turn.request is request)
 
     def _propose_peer_drafts(self):
-        # Until the previous step's events are drained, the peer's token count lags its sequence.
-        if not self.drained:
-            return
+        """Re-proposes each running peer's drafts from the tokens delivered so far, before every Run.
+
+        Run steps only once every earlier event has been delivered, so the proposal in place when
+        a Run steps was made from the complete output and is exact. A proposal made after a full
+        buffer may lag and be rejected (the turn already finished, or its session cap is closer than
+        the delivered tokens show); such a proposal would only precede a Run that drains, so it is
+        cleared instead.
+        """
         for turn in self.turns:
             if turn.reference is None or turn.finished_at is not None or not turn.tokens:
                 continue
             # Drafts must leave room for the token the verifying step adds.
             width = min(self.max_draft_tokens, self.args.peer_max_new_tokens - len(turn.tokens) - 1)
             proposal = turn.reference[len(turn.tokens) : len(turn.tokens) + max(width, 0)]
-            if proposal:
+            try:
                 turn.request.set_draft_tokens(np.asarray(proposal, dtype=np.int32))
+            except RuntimeError:
+                if not self.maybe_buffered:
+                    raise
+                turn.request.set_draft_tokens(np.asarray([], dtype=np.int32))
 
     def _cancel_due_turns(self):
         for turn in self.turns:
@@ -188,21 +200,21 @@ class Scenario:
     def run(self, arrivals):
         """`arrivals` holds (seconds after start, callback that begins a turn arriving at a time)."""
         started = time.perf_counter()
-        steps_before = self.engine.get_speculative_stats()["target_forward_passes"]
+        stats_before = self.engine.get_speculative_stats()
         pending = sorted(arrivals, key=lambda arrival: arrival[0])
-        while pending or not self.drained or self.engine.has_pending_requests():
+        while pending or self.maybe_buffered or self.engine.has_pending_requests():
             elapsed = time.perf_counter() - started
             while pending and pending[0][0] <= elapsed:
                 # A turn that came due during a Run call still counts from when it was due.
                 due, start = pending.pop(0)
                 start(started + due)
-            if self.drained and not self.engine.has_pending_requests():
+            if not self.maybe_buffered and not self.engine.has_pending_requests():
                 time.sleep(max(0.0, pending[0][0] - elapsed))
                 continue
             self._propose_peer_drafts()
             events = self.engine.run(self.buffer)
             self.run_calls += 1
-            self.drained = len(events) < self.args.event_buffer
+            self.maybe_buffered = len(events) == self.args.event_buffer
             for event in events:
                 turn = self._turn_for(require_request_event(event))
                 now = time.perf_counter()
@@ -220,7 +232,9 @@ class Scenario:
                         self.backlog.pop(0)(now)
             if self.args.cancel_after:
                 self._cancel_due_turns()
-        self.model_steps = self.engine.get_speculative_stats()["target_forward_passes"] - steps_before
+        stats = self.engine.get_speculative_stats()
+        self.model_steps = stats["target_forward_passes"] - stats_before["target_forward_passes"]
+        self.drafts = {key: stats[key] - stats_before[key] for key in DRAFT_COUNTERS}
         return time.perf_counter() - started
 
 
@@ -253,15 +267,31 @@ def run_scenario(engine, args, max_draft_tokens, prompts, peer_reference, fast_f
         if args.arrival_rate:
             at += rng.expovariate(args.arrival_rate)
     wall_seconds = scenario.run(arrivals)
+    if args.peers and peer_reference is not None and scenario.drafts["draft_tokens_evaluated"] == 0:
+        # Otherwise the scenario would silently measure ordinary peer decoding.
+        raise RuntimeError("A --peer_drafts controlled scenario evaluated no draft tokens.")
     return scenario, wall_seconds
 
 
-def solo_peer_tokens(engine, args, prompts):
-    """The peer's own greedy output, used as perfectly accurate controlled drafts."""
-    scenario = Scenario(engine, args, max_draft_tokens=0)
-    scenario.begin("peer", "peer", prompts["peer"], args.peer_max_new_tokens, time.perf_counter())
-    scenario.run([])
-    return scenario.turns[0].tokens
+def controlled_peer_reference(engine, args, prompts, max_draft_tokens, max_passes=8):
+    """The peer's solo greedy output when verifying drafts of that same output.
+
+    Verifying drafts changes the target's numerics, so greedy output with drafts can differ from
+    output without them; drafts taken from the latter stop matching after the first difference.
+    Each pass proposes the previous pass's output until the output stops changing.
+    """
+    reference = None
+    for passes in range(1, max_passes + 1):
+        scenario = Scenario(engine, args, max_draft_tokens if reference else 0)
+        scenario.begin(
+            "peer", "peer", prompts["peer"], args.peer_max_new_tokens, time.perf_counter(), reference=reference
+        )
+        scenario.run([])
+        tokens = scenario.turns[0].tokens
+        if tokens == reference:
+            return reference, {"passes": passes, "converged": True}
+        reference = tokens
+    return reference, {"passes": max_passes, "converged": False}
 
 
 def valid_json(tokenizer, turn):
@@ -280,6 +310,7 @@ def measure(scenario, wall_seconds, tokenizer):
     first_token = [(turn.token_times[0] - turn.arrived_at) * 1000 for turn in guided if turn.tokens]
     return {
         "model_steps": scenario.model_steps,
+        "drafts": scenario.drafts,
         "run_calls": scenario.run_calls,
         "wall_ms": wall_seconds * 1000,
         "guided_turns_per_s": len(guided) / wall_seconds,
@@ -313,6 +344,7 @@ def aggregate(runs):
     valid = sum(flat("guided_valid_json"))
     return {
         "model_steps": summarize([run["model_steps"] for run in runs]),
+        **{key: summarize([run["drafts"][key] for run in runs]) for key in DRAFT_COUNTERS},
         "run_calls": summarize([run["run_calls"] for run in runs]),
         "wall_ms": summarize([run["wall_ms"] for run in runs]),
         "guided_turns_per_s": summarize([run["guided_turns_per_s"] for run in runs]),
@@ -399,7 +431,9 @@ def run(args):
 
     prompts = {name: encode_prompt(tokenizer, WORKLOADS[name]["prompt"]) for name in args.workloads}
     prompts["peer"] = encode_prompt(tokenizer, PEER_PROMPT)
-    peer_reference = solo_peer_tokens(engine, args, prompts) if args.peer_drafts == "controlled" else None
+    peer_reference, reference_status = None, None
+    if args.peer_drafts == "controlled":
+        peer_reference, reference_status = controlled_peer_reference(engine, args, prompts, max_draft_tokens)
 
     for _ in range(args.warmup):
         for fast_forward in (False, True):
@@ -414,6 +448,7 @@ def run(args):
     summary = {
         "settings": {key: value for key, value in vars(args).items() if key != "output"},
         "max_draft_tokens": max_draft_tokens,
+        "controlled_peer_reference": reference_status,
         "off": aggregate(runs[False]),
         "on": aggregate(runs[True]),
         "comparison": compare(runs[False], runs[True], tokenizer),
