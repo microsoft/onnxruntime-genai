@@ -1571,7 +1571,7 @@ TEST(Dflash2ConfigTest, RunsDrafterWithAnchorRowIndex) {
                                8 * 3 + 28, static_cast<int32_t>(pos + 11 + 31)}));
     }
 
-    // Reset via ReleaseAll() clears the request cursor so a fresh proposal starts from position 0.
+    // Reset via ReleaseAll() clears the request cursor and cache bytes before a fresh proposal at position 0.
     fixed_drafter.ReleaseAll();
     {
       auto reset_aux = make_aux({960.0f, 961.0f});
@@ -1586,7 +1586,7 @@ TEST(Dflash2ConfigTest, RunsDrafterWithAnchorRowIndex) {
       };
       ASSERT_TRUE(fixed_drafter.Propose(*reset_aux, reset_feeds, drafts));
       ASSERT_EQ(drafts.size(), 1u);
-      EXPECT_EQ(drafts[0], (std::vector<int32_t>{1, 961, 952, 16 + 28, 92 + 1, 8 * 2 + 28, 10 + 32}));
+      EXPECT_EQ(drafts[0], (std::vector<int32_t>{1, 961, 0, 16 + 28, 92 + 1, 8 * 2 + 28, 10 + 32}));
     }
   }
 }
@@ -1933,6 +1933,22 @@ TEST(Dflash2ConfigTest, CapturesUniformShapesWithinBlockTableLimit) {
   EXPECT_FALSE(Dflash2GraphCaptureAllowed(true, false, 8, 8));
   EXPECT_FALSE(Dflash2GraphCaptureAllowed(false, true, 8, 8));
   EXPECT_FALSE(Dflash2GraphCaptureAllowed(true, true, 9, 8));
+}
+
+TEST(Dflash2ConfigTest, PinsTheBlockTableWidthOnlyWhenOptedInOrDeviceSelected) {
+  // Generic Engine drafters (even with max_requests == 1) keep bucketed widths unless opted in.
+  EXPECT_FALSE(Dflash2PinsBlockTableWidth(/*capture_enabled=*/true, /*windowed=*/true,
+                                          /*pinned_policy=*/false, /*device_selection=*/false));
+  EXPECT_TRUE(Dflash2PinsBlockTableWidth(true, true, /*pinned_policy=*/true, /*device_selection=*/false));
+  EXPECT_TRUE(Dflash2PinsBlockTableWidth(true, true, /*pinned_policy=*/false, /*device_selection=*/true));
+  EXPECT_FALSE(Dflash2PinsBlockTableWidth(false, true, true, true));
+  EXPECT_FALSE(Dflash2PinsBlockTableWidth(true, false, true, true));
+
+  constexpr size_t kBlock = 16;
+  EXPECT_TRUE(Dflash2CapturesPinnedStep(/*drafts_wanted=*/true, /*num_ctx_rows=*/kBlock, kBlock,
+                                        /*served=*/1, /*device_selection=*/true));
+  EXPECT_FALSE(Dflash2CapturesPinnedStep(false, 1, kBlock, 1, true));
+  EXPECT_FALSE(Dflash2CapturesPinnedStep(true, kBlock + 1, kBlock, 1, true));
 }
 
 TEST(Dflash2ConfigTest, TrackedDsparkIngestsSampledTurnsAndResumesDrafting) {

@@ -16,12 +16,40 @@
 #include <vector>
 
 #include "qwen38_plane/qwen38_plane_abi.h"
+#include "qwen38_replay_geometry.h"
 
 namespace Generators {
 
 // Resolves a POSIX-named shared library path (`libfoo.so` / `foo.so`) to an existing Windows `.dll` sibling
 // (`libfoo.dll` or `foo.dll`) when present alongside `path`; otherwise returns `path` unchanged.
 std::filesystem::path ResolveWindowsSharedLibraryPath(const std::filesystem::path& path);
+
+// True in a Windows build: the host that translates a POSIX library name in a package to the `.dll` the package ships.
+#if defined(_WIN32)
+inline constexpr bool kQwen38WindowsHost = true;
+#else
+inline constexpr bool kQwen38WindowsHost = false;
+#endif
+
+// Resolves model.qwen38_graph.plane_library (`configured`, relative to `model_root`) to the standalone plane library to
+// load, or to an empty path when the plane built into onnxruntime-genai-cuda is to be used: nothing is configured, or the
+// configured library is not in the package. On a Windows host a configured `libfoo.so` / `foo.so` stands for the
+// `libfoo.dll` / `foo.dll` the package ships, so that alias is looked up (ResolveWindowsSharedLibraryPath, the translation
+// the loader applies) before the library is judged missing. The library, and the alias, must resolve inside `model_root`,
+// symlinks included (std::runtime_error otherwise). `windows_host` is a parameter so that the decision of a Windows host
+// can be tested on every platform; the model passes kQwen38WindowsHost.
+std::filesystem::path ResolveQwen38PlaneLibraryPath(const std::filesystem::path& model_root,
+                                                    const std::string& configured, bool windows_host);
+
+#if !defined(QWEN38_GRAPH_NO_POSIX) && !defined(_WIN32)
+// Opens the library built into onnxruntime-genai-cuda, named `library`, for the loader of an empty plane library path: the
+// copy that is already loaded (normally by the CUDA execution provider) if there is one, otherwise `beside / library` (when
+// `beside` is not empty), otherwise `library` through the search path of the dynamic loader. Returns the module, or null with
+// `failures` naming each file that was tried and the loader's reason for it ("<file>: <reason>", joined by "; "), so that every
+// reason is the one of its own file. A declaration of the loader's own steps so that a test can run them on a directory it
+// controls, as with ResolveQwen38PlaneLibraryPath above.
+void* OpenQwen38BuiltInPlaneModule(const char* library, const std::filesystem::path& beside, std::string& failures);
+#endif
 
 // A CPU embedding table that the plane gathers rows from (the model's embed_tokens, mapped from <embedding>.data).
 struct Qwen38EmbeddingTable {
@@ -38,11 +66,17 @@ struct Qwen38EmbeddingTable {
 // mapped until the process exits, and a loader of the same file that follows (the next model, or the same model loaded again)
 // shares that copy. Unloading a library that has launched CUDA kernels and loading it again made the first kernel launch of the
 // later copy crash inside the CUDA runtime (a SIGSEGV in libcudart 13.0, in its lazy loading of the module of the kernel), so the
-// host never takes that path. A library that is rejected while it loads (a stale ABI, a missing symbol) has launched nothing and
-// is released.
+// host never takes that path. The built-in plane is part of onnxruntime-genai-cuda, so that library stays mapped as well, also
+// across OgaShutdown(): the next init enters it again without a reload. Its device interface (src/ep/cuda/interface.cpp) is
+// written for that: it releases its stream and its allocator pointer when it is destroyed, and GetInterface() destroys the
+// interface of the previous init before it creates the next one. A library that is rejected while it loads (a stale ABI, a
+// missing symbol) has launched nothing and is released.
 struct Qwen38Plane {
+  // An empty plane with no library loaded; the function pointers are filled in by the caller (tests).
   Qwen38Plane() = default;
-  // Loads `path`, resolves every symbol and checks the ABI version and structure layout.
+  // Loads `path` (or the built-in onnxruntime-genai-cuda library when `path` is empty), resolves every symbol and checks
+  // the ABI version and structure layout. Throws std::runtime_error naming each file that was tried and why it did not load,
+  // or the library that lacks a symbol, has another ABI version, or has another structure layout.
   explicit Qwen38Plane(const std::filesystem::path& path);
   ~Qwen38Plane();
   Qwen38Plane(const Qwen38Plane&) = delete;
@@ -62,6 +96,13 @@ struct Qwen38Plane {
   // throws (naming the int8_embedding capability) for an INT8 table.
   void EmbedRows(void* stream, const Qwen38EmbeddingTable& table, const void* ids, void* out, int n) const;
 
+  // prep for the `rows` rows of one folded verify step of each of `batch` request slots in one call (the optional export
+  // qwen38_plane_prep_batched; the layout of the arrays is documented in the ABI header). Throws std::invalid_argument for a
+  // `rows` or `batch` out of range, std::runtime_error naming the batched_prep or ctx_slot_stride capability for a library
+  // without it, and std::runtime_error with the CUDA error the plane returns.
+  void PrepBatched(void* stream, const void* params, int rows, int batch, const void* ctx_in, void* ctx_out, void* input_ids,
+                   void* position_ids, void* committed, void* past_pos, void* ple_out, void* state) const;
+
 #define QWEN38_PLANE_DECLARE(ret, name, args) ret(*name) args{};
   QWEN38_PLANE_FUNCTIONS(QWEN38_PLANE_DECLARE)
 #undef QWEN38_PLANE_DECLARE
@@ -70,15 +111,19 @@ struct Qwen38Plane {
                       int dst_pitch_elems, int mode){};
   void (*embed_rows)(void* stream, const void* table, const void* ids, void* out, int rows, int width){};
   Qwen38PlaneEmbedGatherFn embed_gather{};
+  Qwen38PlanePrepBatchedFn prep_batched{};
   void (*set_ple_host_params)(const void* params){};
   void (*unset_ple_host_params)(const void* params){};
   // Drops the staged PLE tables of the whole module, i.e. of every loader of the same library file, not just this one.
   // The destructor does not call it: it detaches from the module, which releases that state when the last loader goes.
   void (*release_ple_workspace)(void){};
+  Qwen38PlaneDflashSelectFn dflash_select{};
+  Qwen38PlaneReplayStateUpdatesFn replay_state_updates{};
 
   // The QWEN38_PLANE_CAP_* bits the library reports; 0 for a library that predates qwen38_plane_capabilities.
   unsigned long long capabilities{};
-  // The file the library was loaded from (named by the capability diagnostics).
+  // The file the library was loaded from, which the diagnostics of the loader and of RequireCapabilities name: the path that
+  // was given or, for the built-in plane, the file the module was found in (the library name when the loader cannot tell).
   std::string library_path;
 
  private:
@@ -89,6 +134,17 @@ struct Qwen38Plane {
 // The names of the QWEN38_PLANE_CAP_* bits set in `mask`, comma separated ("none" for 0); bits this build has no name for
 // are listed as one hexadecimal value.
 std::string DescribeQwen38PlaneCapabilities(unsigned long long mask);
+
+// The descriptor of the compact replay of one CausalConvWithState state (past_key_values.<layer>.conv_state | ple_conv_state)
+// of a request slot: `request` (kind kConvolution, the batch-1 shapes of the slot) is validated by
+// ValidateQwen38ReplayDescriptor, and `source` (the old state), `destination` (the new state) and `value` (the slot's
+// state_update output) are the device pointers of the slot. The descriptor carries the layout of the state. A history-first
+// state [batch, history, channels] needs the conv_history_first_replay capability of `plane`: a library without it reads every
+// conv state as channel-first and would corrupt that one on a partial acceptance, so this throws a std::runtime_error naming
+// the capability, the state and the library (Qwen38Plane::RequireCapabilities) instead of handing it the descriptor. A
+// channel-first state needs no capability, so such a package keeps loading with a library that predates it.
+Qwen38StateReplayDesc MakeQwen38ConvReplayDescriptor(const Qwen38Plane& plane, const Qwen38ReplayRequest& request,
+                                                     const void* source, void* destination, const void* value);
 
 // Zero-initialised device allocation owned by RAII.
 struct PlaneBuffer {

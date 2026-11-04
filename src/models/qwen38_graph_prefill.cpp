@@ -466,15 +466,22 @@ void Qwen38GraphEngine::BuildFastPrefill() {
   const int configured_chunk = static_cast<int>(EffectiveQwen38PrefillChunkTokens(q));
   auto fast = std::make_unique<FastPrefillState>();
   if (!model_.session_dense_) {
-    if (!model_.session_target_ || !model_.session_head_r2_)
+    const bool dflash = !model_.config_->model.dflash2.filename.empty();
+    if (!model_.session_target_ || (!dflash && !model_.session_head_r2_))
       throw std::runtime_error("qwen38_graph: unified prefill requires target and head_r2 sessions");
     fast->unified = true;
     fast->dense = model_.session_target_.get();
     fast->head_kv = model_.session_head_r2_.get();
     fast->dense_info.Add(*fast->dense);
-    fast->head_kv_info.Add(*fast->head_kv);
-    fast->chunk = (q.prefill.chunk > 0) ? std::min(configured_chunk, 2048)
-                                        : std::min({configured_chunk, 2048, capacity_});
+    if (fast->head_kv) fast->head_kv_info.Add(*fast->head_kv);
+    // An explicit prefill.chunk is honored up to the cap below; without one the prompt goes through in the step-sized chunk.
+    int requested_chunk = (q.prefill.chunk > 0) ? configured_chunk : std::min(configured_chunk, 2048);
+    if (const char* env_chunk = std::getenv("ORT_QWEN38_PREFILL_CHUNK")) {
+      const int parsed = std::atoi(env_chunk);
+      if (parsed > 0) requested_chunk = parsed;
+    }
+    const int max_prefill_chunk = (capacity_ > 65536) ? 4096 : 8192;
+    fast->chunk = std::clamp(requested_chunk, 1, std::min<int>(capacity_, max_prefill_chunk));
     if (fast->chunk < 1 || fast->chunk > capacity_) throw std::runtime_error("qwen38_graph: invalid prefill.chunk");
     fast->dense_inputs = fast->dense->GetInputNames();
     fast->dense_outputs = fast->dense->GetOutputNames();
@@ -488,14 +495,16 @@ void Qwen38GraphEngine::BuildFastPrefill() {
     fast->idx = PlaneBuffer(plane_, 64, stream_);
     fast->ples = PlaneBuffer(plane_, static_cast<size_t>(fast->chunk) * ple_width_ * 2, stream_);
     fast->scratch = PlaneBuffer(plane_, 4096, stream_);
-    if (fast->dense_info.HasInput("inputs_embeds") || fast->head_kv_info.HasInput("inputs_embeds")) {
+    if (fast->dense_info.HasInput("inputs_embeds") ||
+        (fast->head_kv && fast->head_kv_info.HasInput("inputs_embeds"))) {
       RequireCpuEmbeddingSession(model_);
       const size_t max_emb_bytes =
           static_cast<size_t>(fast->chunk) * static_cast<size_t>(model_.config_->model.decoder.hidden_size) * 2;
       fast->embeds = PlaneBuffer(plane_, max_emb_bytes, stream_);
       fast->embeds_host = PlaneHostBuffer(plane_, max_emb_bytes);
     }
-    if (d_prompt_hidden_.size() == 0) d_prompt_hidden_ = PlaneBuffer(plane_, slots * hidden_width_ * 2, stream_);
+    if (d_prompt_hidden_.size() == 0)
+      d_prompt_hidden_ = PlaneBuffer(plane_, (dflash ? size_t(fast->chunk) : slots) * hidden_width_ * 2, stream_);
     SyncStream();
     fast->run_options = OrtRunOptions::Create();
     fast->run_options->AddConfigEntry("gpu_graph_id", "-1");
@@ -574,7 +583,207 @@ void Qwen38GraphEngine::FastReset() {
 }
 
 // One call = whole chunk loop over `tokens`, continuing the dense state of earlier calls (chunked AppendTokens).
+void Qwen38GraphEngine::FastAppendSlot(int slot, std::span<const int32_t> tokens) {
+  FastPrefillState& f = *fast_;
+  if (slot_decode_started_[slot]) throw std::logic_error("qwen38_graph: PrefillChunkSlot after decoding started");
+  const size_t n = tokens.size();
+  if (n == 0) throw std::logic_error("qwen38_graph: empty prefill chunk");
+  ValidateQwen38PromptTokens(tokens, vocab_);
+  slot_ledgers_[slot].RequireRoom(n, "the prompt", static_cast<size_t>(verify_rows_ + 1));
+  const size_t base = slot_ledgers_[slot].Length();
+  const size_t total_expected = run_hints_.BeginPromptChunk(static_cast<size_t>(slot), base, n);
+  std::vector<int64_t> chunk(n);
+  for (size_t i = 0; i < n; ++i) chunk[i] = tokens[i];
+  plane_.Check(plane_.memcpy_h2d(d_tokens_slot(slot) + 8 * base, chunk.data(), n * 8, stream_), "upload slot prompt");
+  SyncStream();
+  if (slot == 0) {
+    prompt_tokens_.insert(prompt_tokens_.end(), tokens.begin(), tokens.end());
+  }
+  const int embed_width = model_.config_->model.decoder.hidden_size;
+  const size_t embed_row_bytes = static_cast<size_t>(embed_width) * 2;
+  const auto i64 = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64;
+  const auto i32 = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32;
+  const auto bf16 = ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16;
+  const std::string ple_name = "ple_embeddings." + std::to_string(ple_layer_);
+
+  if (dflash_) {
+    // The chunk the previous call saved is still in the slot's buffer: ingest it now unless it ends before the context
+    // window of the drafter, measured from the end of the prompt announced for the turn.
+    if (const auto saved = slot_dflash_prompt_[slot].BeginCall(total_expected)) {
+      DraftSlot(slot, d_dflash_prompt_slot(slot), saved->rows, saved->position, 0, false);
+    }
+  }
+  MutedPrefillSlot(slot, true);
+  const int cur_bank = bank_phase_ % num_banks_;
+  const int scratch_bank = (bank_phase_ + 1) % num_banks_;
+  size_t last_m = 1;
+  for (size_t lo = 0; lo < n;) {
+    const size_t pos = base + lo;
+    const size_t max_m = static_cast<size_t>(f.chunk);
+    const size_t m = std::min(max_m, n - lo);
+    last_m = m;
+    const Qwen38PromptRunHints prompt_run{total_expected, PromptChunkCompactExperts(pos, m)};
+    plane_.Check(plane_.ple_rows(stream_, params_dev_.data(), d_tokens_slot(slot) + 8 * pos, static_cast<int>(m),
+                                 ctx_commit_slot(slot), ctx_b_slot(slot), f.ples.data()),
+                 "slot ple_rows");
+    plane_.Check(plane_.memcpy_d2d(ctx_commit_slot(slot), ctx_b_slot(slot), 16, stream_), "slot ctx commit");
+    plane_.Check(plane_.memcpy_d2d(past_pos_slot(slot) + 8 * pos, d_arange64_.data() + 8 * pos, m * 8, stream_), "slot past_pos");
+    const int32_t meta32[4] = {
+        static_cast<int32_t>(pos),
+        static_cast<int32_t>(m - 1),
+        0,
+        static_cast<int32_t>(m),
+    };
+    plane_.Check(plane_.memcpy_h2d(f.idx.data(), meta32, sizeof(meta32), stream_), "unified slot prefill meta");
+    if (f.dense_info.HasInput("inputs_embeds")) {
+      model_.RunCpuEmbedding(chunk.data() + lo, m, f.embeds_host.data());
+      plane_.Check(plane_.memcpy_h2d(f.embeds.data(), f.embeds_host.data(), m * embed_row_bytes, stream_),
+                   "upload slot inputs_embeds");
+    }
+    SyncStream();
+
+    auto binding = OrtIoBinding::Create(*f.dense);
+    std::vector<std::unique_ptr<OrtValue>> views;
+    auto view = [&](void* ptr, std::vector<int64_t> shape, ONNXTensorElementDataType type) -> OrtValue& {
+      size_t count = 1;
+      for (int64_t d : shape) count *= static_cast<size_t>(d);
+      views.push_back(OrtValue::CreateTensor(*memory_info_, ptr, count * Ort::SizeOf(type), shape, type));
+      return *views.back();
+    };
+    for (const auto& name : f.dense_inputs) {
+      if (name == "input_ids")
+        binding->BindInput(name.c_str(), view(d_tokens_slot(slot) + 8 * pos, {1, int64_t(m)}, i64));
+      else if (name == "inputs_embeds")
+        binding->BindInput(name.c_str(), view(f.embeds.data(), {1, int64_t(m), embed_width}, bf16));
+      else if (name == "attention_mask")
+        binding->BindInput(name.c_str(), view(f.ones.data(), {1, int64_t(m)}, i64));
+      else if (name == "position_ids")
+        binding->BindInput(name.c_str(), view(d_arange64_.data() + 8 * pos, {1, int64_t(m)}, i64));
+      else if (name == "committed_length")
+        binding->BindInput(name.c_str(), view(f.idx.data() + 0, {1}, i32));
+      else if (name == "sequence_length_minus_one")
+        binding->BindInput(name.c_str(), view(f.idx.data() + 4, {1}, i32));
+      else if (name == "cumulative_sequence_lengths")
+        binding->BindInput(name.c_str(), view(f.idx.data() + 8, {2}, i32));
+      else if (name == "state_update_capture_count")
+        binding->BindInput(name.c_str(), view(f.idx.data() + 8, {1}, i32));
+      else if (name == ple_name)
+        binding->BindInput(name.c_str(), view(f.ples.data(), {1, int64_t(m), ple_width_}, bf16));
+      else if (name == kQwen38FoldCtl)
+        binding->BindInput(name.c_str(), view(ctl_slot(slot), {kFoldCtlWords}, i64));
+      else if (name == kQwen38FoldCtxCommit)
+        binding->BindInput(name.c_str(), view(ctx_commit_slot(slot), {kFoldCtxCommitWords}, i64));
+      else if (name == kQwen38FoldCtxA)
+        binding->BindInput(name.c_str(), view(ctx_a_slot(slot), {2 * verify_rows_}, i64));
+      else if (fold_tensors_.count(name))
+        binding->BindInput(name.c_str(), *fold_tensors_.at(name)->value);
+      else if (store_.count(name))
+        binding->BindInput(
+            name.c_str(),
+            view(store_.at(name)->ptr + static_cast<size_t>(slot) * store_slot_bytes_.at(name),
+                 store_slot_shape_.at(name), store_.at(name)->type));
+      else if (shared_.count(name))
+        binding->BindInput(
+            name.c_str(),
+            view(shared_.at(name)->ptr + static_cast<size_t>(slot) * shared_slot_bytes_.at(name),
+                 shared_slot_shape_.at(name), shared_.at(name)->type));
+      else if (banks_[cur_bank].tensors.count(name))
+        binding->BindInput(
+            name.c_str(),
+            view(banks_[cur_bank].tensors.at(name)->ptr + static_cast<size_t>(slot) * bank_slot_bytes_.at(name),
+                 bank_slot_shape_.at(name), banks_[cur_bank].tensors.at(name)->type));
+      else
+        throw std::runtime_error("qwen38_graph: unsupported unified slot prefill input " + name);
+    }
+    const size_t tok_rows = std::min<size_t>(m, static_cast<size_t>(verify_rows_));
+    for (const auto& name : f.dense_outputs) {
+      if (name == "hidden_states" || name == "hidden_states_out")
+        binding->BindOutput(name.c_str(), view(d_prompt_hidden_.data(), {1, int64_t(m), hidden_width_}, bf16));
+      else if (name == "aux_hidden_states") {
+        if (!dflash_) throw std::runtime_error("Unexpected DFlash auxiliary prefill output");
+        binding->BindOutput(name.c_str(), view(d_dflash_prompt_slot(slot), {1, int64_t(m), int64_t(kDflashWidth)}, bf16));
+      } else if (name == "next_tokens")
+        binding->BindOutput(name.c_str(), view(f.scratch.data(), {1, int64_t(tok_rows)}, i64));
+      else if (name == kQwen38FoldCtlOut)  // muted during prefill: the op rewrites the unchanged state in place
+        binding->BindOutput(name.c_str(), view(ctl_slot(slot), {kFoldCtlWords}, i64));
+      else if (name == kQwen38FoldCtxCommitOut)
+        binding->BindOutput(name.c_str(), view(ctx_commit_slot(slot), {kFoldCtxCommitWords}, i64));
+      else if (name == "validation.aggregate")
+        binding->BindOutput(name.c_str(), view(f.scratch.data() + 64, {int64_t(status_count_)}, i32));
+      else if (name == "present_position_ids")
+        binding->BindOutput(
+            name.c_str(),
+            view(store_.at("past_position_ids")->ptr + static_cast<size_t>(slot) * store_slot_bytes_.at("past_position_ids"),
+                 store_slot_shape_.at("past_position_ids"), store_.at("past_position_ids")->type));
+      else if (name.rfind("state_update.", 0) == 0) {
+        binding->BindOutput(
+            name.c_str(),
+            view(state_update_tensors_.at(name)->ptr + static_cast<size_t>(slot) * su_slot_bytes_.at(name),
+                 su_slot_shape_.at(name), state_update_tensors_.at(name)->type));
+      } else if (name.rfind("present.", 0) == 0) {
+        const std::string in_n = "past_key_values." + name.substr(8);
+        if (store_.count(in_n)) {
+          binding->BindOutput(
+              name.c_str(),
+              view(store_.at(in_n)->ptr + static_cast<size_t>(slot) * store_slot_bytes_.at(in_n),
+                   store_slot_shape_.at(in_n), store_.at(in_n)->type));
+        } else if (shared_.count(in_n)) {
+          binding->BindOutput(
+              name.c_str(),
+              view(shared_.at(in_n)->ptr + static_cast<size_t>(slot) * shared_slot_bytes_.at(in_n),
+                   shared_slot_shape_.at(in_n), shared_.at(in_n)->type));
+        } else {
+          binding->BindOutput(
+              name.c_str(),
+              view(banks_[scratch_bank].tensors.at(in_n)->ptr + static_cast<size_t>(slot) * bank_slot_bytes_.at(in_n),
+                   bank_slot_shape_.at(in_n), banks_[scratch_bank].tensors.at(in_n)->type));
+        }
+      } else {
+        binding->BindOutput(name.c_str(), *memory_info_);
+      }
+    }
+    RunSession(*f.dense, f.run_options.get(), *binding, &prompt_run, Qwen38SlotBit(static_cast<size_t>(slot)));
+    plane_.or_status(stream_, f.scratch.data() + 64, static_cast<int>(status_count_), ctl_slot(slot));
+    if (max_batch_ == 1) {
+      plane_.Check(plane_.memcpy_d2d(banks_[cur_bank].arena.data(), banks_[scratch_bank].arena.data(),
+                                     banks_[cur_bank].arena.size(), stream_),
+                   "commit unified bank");
+    } else {
+      for (const auto& [bname, t_dst] : banks_[cur_bank].tensors) {
+        const size_t sb = bank_slot_bytes_.at(bname);
+        const uint8_t* src_ptr = banks_[scratch_bank].tensors.at(bname)->ptr + static_cast<size_t>(slot) * sb;
+        plane_.Check(plane_.memcpy_d2d(t_dst->ptr + static_cast<size_t>(slot) * sb, src_ptr, sb, stream_),
+                     "commit unified slot bank");
+      }
+    }
+    SyncStream();
+    if (slot == 0) f.dense_length += m;
+    if (dflash_) {
+      const Qwen38DflashPromptFeatures::Chunk produced{pos, m};
+      if (const auto ingest = slot_dflash_prompt_[slot].ChunkDone(produced, lo + m == n, total_expected)) {
+        DraftSlot(slot, d_dflash_prompt_slot(slot), ingest->rows, ingest->position, 0, false);
+      }
+    }
+    lo += m;
+  }
+  slot_ledgers_[slot].AdvancePrompt(n);
+  const size_t last_tok_idx = std::min<size_t>(last_m, static_cast<size_t>(verify_rows_)) - 1;
+  plane_.Check(plane_.memcpy_d2h(stage_host_ + 4, f.scratch.data() + 8 * last_tok_idx, 8, stream_), "read slot prediction");
+  SyncStream();
+  if (ReadCtlSlot(slot, 5) != 0) CheckDeviceStatus("unified prefill", nullptr);
+  slot_pending_[slot] = static_cast<int32_t>(stage_host_[4]);
+  MutedPrefillSlot(slot, false);
+  if (slot == 0) {
+    ledger_ = slot_ledgers_[0];
+    pending_ = slot_pending_[0];
+  }
+}
+
 void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
+  if (fast_ && fast_->unified && max_batch_ > 1) {
+    FastAppendSlot(0, tokens);
+    return;
+  }
   FastPrefillState& f = *fast_;
   if (decode_started_) throw std::logic_error("qwen38_graph: PrefillChunk after decoding started");
   const size_t n = tokens.size();
@@ -596,12 +805,18 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
   const std::string ple_name = "ple_embeddings." + std::to_string(ple_layer_);
 
   if (f.unified) {
+    if (dflash_) {
+      // The chunk the previous call saved is still in the buffer: ingest it now unless it ends before the context window of
+      // the drafter, measured in absolute positions from the end of the prompt announced for the turn.
+      if (const auto saved = slot_dflash_prompt_[0].BeginCall(total_expected)) {
+        Draft(d_dflash_prompt_.data(), saved->rows, saved->position, 0, false);
+      }
+    }
     MutedPrefill(true);
     size_t last_m = 1;
     for (size_t lo = 0; lo < n;) {
       const size_t pos = base + lo;
-      size_t max_m = static_cast<size_t>(f.chunk);
-      if (pos >= 16384 && max_m > 2048) max_m = std::min<size_t>(max_m, 2048);
+      const size_t max_m = static_cast<size_t>(f.chunk);
       const size_t m = std::min(max_m, n - lo);
       last_m = m;
       const Qwen38PromptRunHints prompt_run{total_expected, PromptChunkCompactExperts(pos, m)};
@@ -650,6 +865,8 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
           binding->BindInput(name.c_str(), view(f.idx.data() + 4, {1}, i32));
         else if (name == "cumulative_sequence_lengths")
           binding->BindInput(name.c_str(), view(f.idx.data() + 8, {2}, i32));
+        else if (name == "state_update_capture_count")
+          binding->BindInput(name.c_str(), view(f.idx.data() + 8, {1}, i32));
         else if (name == ple_name)
           binding->BindInput(name.c_str(), view(f.ples.data(), {1, int64_t(m), ple_width_}, bf16));
         else if (fold_tensors_.count(name))
@@ -670,9 +887,14 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
       const size_t tok_rows = std::min<size_t>(m, static_cast<size_t>(verify_rows_));
       for (const auto& name : f.dense_outputs) {
         if (name == "hidden_states" || name == "hidden_states_out")
-          binding->BindOutput(name.c_str(), view(d_prompt_hidden_.data() + pos * row_bytes, {1, int64_t(m), hidden_width_}, bf16));
-        else if (name == "next_tokens")
+          binding->BindOutput(name.c_str(), view(d_prompt_hidden_.data() + (dflash_ ? 0 : pos * row_bytes), {1, int64_t(m), hidden_width_}, bf16));
+        else if (name == "aux_hidden_states") {
+          if (!dflash_) throw std::runtime_error("Unexpected DFlash auxiliary prefill output");
+          binding->BindOutput(name.c_str(), view(d_dflash_prompt_.data(), {1, int64_t(m), int64_t(kDflashWidth)}, bf16));
+        } else if (name == "next_tokens")
           binding->BindOutput(name.c_str(), view(f.scratch.data(), {1, int64_t(tok_rows)}, i64));
+        else if (const char* state_in = Qwen38FoldStateInput(name))
+          binding->BindOutput(name.c_str(), *fold_tensors_.at(state_in)->value);
         else if (name == "validation.aggregate")
           binding->BindOutput(name.c_str(), view(f.scratch.data() + 64, {int64_t(status_count_)}, i32));
         else if (name == "present_position_ids")
@@ -680,9 +902,14 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
         else if (name.rfind("present_mid.", 0) == 0) {
           const std::string in_n = "past_key_values." + name.substr(12);
           binding->BindOutput(name.c_str(), *banks_[2].tensors.at(in_n)->value);
-        } else if (name.rfind("present_mid2.", 0) == 0 || name.rfind("present_mid3.", 0) == 0) {
+        } else if (name.rfind("present_mid2.", 0) == 0) {
           const std::string in_n = "past_key_values." + name.substr(13);
-          binding->BindOutput(name.c_str(), *banks_[2].tensors.at(in_n)->value);
+          binding->BindOutput(name.c_str(), *banks_[3].tensors.at(in_n)->value);
+        } else if (name.rfind("present_mid3.", 0) == 0) {
+          const std::string in_n = "past_key_values." + name.substr(13);
+          binding->BindOutput(name.c_str(), *banks_[4].tensors.at(in_n)->value);
+        } else if (name.rfind("state_update.", 0) == 0) {
+          binding->BindOutput(name.c_str(), *state_update_tensors_.at(name)->value);
         } else if (name.rfind("present.", 0) == 0) {
           const std::string in_n = "past_key_values." + name.substr(8);
           OrtValue& val = store_.count(in_n)    ? *store_.at(in_n)->value
@@ -715,17 +942,26 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
                    "commit unified bank 0");
       SyncStream();
       f.dense_length += m;
+      if (dflash_) {
+        const Qwen38DflashPromptFeatures::Chunk produced{pos, m};
+        if (const auto ingest = slot_dflash_prompt_[0].ChunkDone(produced, lo + m == n, total_expected)) {
+          Draft(d_dflash_prompt_.data(), ingest->rows, ingest->position, 0, false);
+        }
+      }
       lo += m;
     }
     ledger_.AdvancePrompt(n);
     const size_t last_tok_idx = std::min<size_t>(last_m, static_cast<size_t>(verify_rows_)) - 1;
-    plane_.Check(plane_.memcpy_d2d(d_last_hidden_.data(), d_prompt_hidden_.data() + (ledger_.Length() - 1) * row_bytes, row_bytes, stream_),
+    const size_t last_hidden_row = dflash_ ? (last_m - 1) : (ledger_.Length() - 1);
+    plane_.Check(plane_.memcpy_d2d(d_last_hidden_.data(), d_prompt_hidden_.data() + last_hidden_row * row_bytes, row_bytes, stream_),
                  "last hidden");
     plane_.Check(plane_.memcpy_d2h(stage_host_ + 4, f.scratch.data() + 8 * last_tok_idx, 8, stream_), "read prediction");
     SyncStream();
     if (ReadCtl(5) != 0) CheckDeviceStatus("unified prefill", nullptr);
     pending_ = static_cast<int32_t>(stage_host_[4]);
     MutedPrefill(false);
+    slot_ledgers_[0] = ledger_;
+    slot_pending_[0] = pending_;
     return;
   }
 
@@ -824,15 +1060,16 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
 // Dense state (KV, positions, GDN / conv / PLE state, raw index keys) -> packed decode state: KV rows into the fixed store,
 // GDN state transposed into ring bank 0, PLE / conv state copied, raw index keys pooled into the shared compressed keys
 // (+ pending rows and lengths). Mirrors handoff.py (HandoffWriter.write).
-void Qwen38GraphEngine::FastHandoff() {
+void Qwen38GraphEngine::FastHandoff(size_t slot_idx) {
   FastPrefillState& f = *fast_;
+  if (f.unified) {
+    run_hints_.MarkHandoff(slot_idx);
+    return;
+  }
+  if (slot_idx != 0) throw std::logic_error("qwen38_graph: the non-unified dense hand-off serves slot 0 only");
   const size_t P = ledger_.Length();
   if (ledger_.Bank() != 0) throw std::logic_error("qwen38_graph: the dense hand-off writes bank 0");
   if (f.dense_length != P) throw std::runtime_error("qwen38_graph: dense state length differs from the prompt length");
-  if (f.unified) {
-    run_hints_.MarkHandoff();
-    return;
-  }
   auto dense_ptr = [&](const std::string& name) -> uint8_t* {
     auto it = f.states.find(name);
     if (it == f.states.end()) throw std::runtime_error("qwen38_graph: dense state lacks " + name);

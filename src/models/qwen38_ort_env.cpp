@@ -66,10 +66,19 @@ void Qwen38OrtEnvScope::Restore() noexcept {
   saved_.clear();
 }
 
-std::vector<Qwen38OrtEnvVariable> Qwen38OrtRunHints::Collect(const Qwen38PromptRunHints* prompt) const {
+std::vector<Qwen38OrtEnvVariable> Qwen38OrtRunHints::Collect(const Qwen38PromptRunHints* prompt,
+                                                             Qwen38SlotMask participants) const {
+  CheckParticipants(participants);
+  bool new_turn = false;
+  bool handoff_done = false;
+  for (size_t slot = 0; slot < slots_.size(); ++slot) {
+    if ((participants & Qwen38SlotBit(slot)) == 0) continue;
+    new_turn = new_turn || slots_[slot].new_turn;
+    handoff_done = handoff_done || slots_[slot].handoff_done;
+  }
   std::vector<Qwen38OrtEnvVariable> variables;
-  if (new_turn_) variables.push_back({Qwen38OrtEnv::kNewTurn, "1", false});
-  if (handoff_done_) variables.push_back({Qwen38OrtEnv::kHandoffDone, "1", false});
+  if (new_turn) variables.push_back({Qwen38OrtEnv::kNewTurn, "1", false});
+  if (handoff_done) variables.push_back({Qwen38OrtEnv::kHandoffDone, "1", false});
   if (prompt != nullptr) {
     if (prompt->total_tokens > 0)
       variables.push_back({Qwen38OrtEnv::kPrefillTotalTokens, std::to_string(prompt->total_tokens), false});
@@ -81,6 +90,17 @@ std::vector<Qwen38OrtEnvVariable> Qwen38OrtRunHints::Collect(const Qwen38PromptR
   if (warmup_) variables.push_back({Qwen38OrtEnv::kInWarmup, "1", false});
   if (deterministic_moe_) variables.push_back({Qwen38OrtEnv::kForceDeterministicMoe, "1", true});
   return variables;
+}
+
+void Qwen38OrtRunHints::RunReturned(const Qwen38OrtEnvScope& scope, Qwen38SlotMask participants) {
+  CheckParticipants(participants);
+  const bool new_turn_consumed = !scope.StillPublished(Qwen38OrtEnv::kNewTurn);
+  const bool handoff_consumed = !scope.StillPublished(Qwen38OrtEnv::kHandoffDone);
+  for (size_t slot = 0; slot < slots_.size(); ++slot) {
+    if ((participants & Qwen38SlotBit(slot)) == 0) continue;
+    if (slots_[slot].new_turn && new_turn_consumed) slots_[slot].new_turn = false;
+    if (slots_[slot].handoff_done && handoff_consumed) slots_[slot].handoff_done = false;
+  }
 }
 
 }  // namespace Generators

@@ -6,27 +6,94 @@
 // and its tests only see this interface.
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 #include "span.h"
 
 namespace Generators {
 
-// What one draft -> verify -> commit cycle published. The verify step ran the target on [pending token, draft0, (draft1, draft2)]:
-// pred0..pred3 are the target's greedy predictions at each verify row. The longest matching prefix of drafts is accepted
-// (accepted_count in 0..3; 1 + accepted_count tokens are committed, and the bank ring advances by 1 + accepted_count).
+// Graph I/O of the fold model's com.microsoft::SpeculativePrefixCommit node (rc4 contract, ORT PR #33474). The op reads the
+// persistent control state (fold.ctl, fold.ctx_commit) and always writes the updated state to two required outputs. The
+// runtime binds each state output to the device buffer of the matching input (in place), otherwise the update is lost.
+// Other fold inputs: fold.ctx_a (prefixes) and fold.ptrs (result ring address, ring size); output fold.tail_done is head_c.
+inline constexpr const char* kQwen38FoldCtl = "fold.ctl";
+inline constexpr const char* kQwen38FoldCtxCommit = "fold.ctx_commit";
+inline constexpr const char* kQwen38FoldCtxA = "fold.ctx_a";
+inline constexpr const char* kQwen38FoldPtrs = "fold.ptrs";
+inline constexpr const char* kQwen38FoldCtlOut = "fold.ctl_out";
+inline constexpr const char* kQwen38FoldCtxCommitOut = "fold.ctx_commit_out";
+
+// Throws std::runtime_error unless `input_name`, an input of the fold model, is one of the four inputs of that node. The
+// engine owns a device buffer for each of them and for nothing else, so a package exported for an earlier contract (the rc3 node
+// also took fold.ctx_b) is refused here, naming the input, instead of failing on a container lookup when the target is built.
+inline void RequireQwen38FoldInput(std::string_view input_name) {
+  if (input_name == kQwen38FoldCtl || input_name == kQwen38FoldCtxCommit || input_name == kQwen38FoldCtxA ||
+      input_name == kQwen38FoldPtrs) {
+    return;
+  }
+  throw std::runtime_error("qwen38_graph: the fold model has the input '" + std::string(input_name) +
+                           "', which is not an input of the SpeculativePrefixCommit contract of ORT #33474 (" + kQwen38FoldCtl +
+                           ", " + kQwen38FoldCtxCommit + ", " + kQwen38FoldCtxA + ", " + kQwen38FoldPtrs +
+                           "); export the model package again for that contract");
+}
+
+// Throws std::runtime_error unless a fold model declares all four required fold.* inputs (fold.ctl, fold.ctx_commit,
+// fold.ctx_a, fold.ptrs), no unknown fold.* inputs, and both required state outputs (fold.ctl_out, fold.ctx_commit_out).
+inline void RequireQwen38FoldContract(std::span<const std::string> input_names,
+                                      std::span<const std::string> output_names) {
+  for (const auto& name : input_names) {
+    if (name.rfind("fold.", 0) == 0) {
+      RequireQwen38FoldInput(name);
+    }
+  }
+  for (const char* required_in : {kQwen38FoldCtl, kQwen38FoldCtxCommit, kQwen38FoldCtxA, kQwen38FoldPtrs}) {
+    if (std::find(input_names.begin(), input_names.end(), required_in) == input_names.end()) {
+      throw std::runtime_error(std::string("qwen38_graph: the fold model is missing the required input '") + required_in +
+                               "' of the SpeculativePrefixCommit contract of ORT #33474 (" + kQwen38FoldCtl + ", " +
+                               kQwen38FoldCtxCommit + ", " + kQwen38FoldCtxA + ", " + kQwen38FoldPtrs +
+                               "); export the model package again for that contract");
+    }
+  }
+  for (const char* required_out : {kQwen38FoldCtlOut, kQwen38FoldCtxCommitOut}) {
+    if (std::find(output_names.begin(), output_names.end(), required_out) == output_names.end()) {
+      throw std::runtime_error(std::string("qwen38_graph: the fold model is missing the required state output '") +
+                               required_out + "' of the SpeculativePrefixCommit contract of ORT #33474 (" +
+                               kQwen38FoldCtlOut + ", " + kQwen38FoldCtxCommitOut +
+                               "); export the model package again for that contract");
+    }
+  }
+}
+
+// The fold input a state output is bound in place over; nullptr when `output_name` is not a state output.
+inline const char* Qwen38FoldStateInput(std::string_view output_name) {
+  if (output_name == kQwen38FoldCtlOut) return kQwen38FoldCtl;
+  if (output_name == kQwen38FoldCtxCommitOut) return kQwen38FoldCtxCommit;
+  return nullptr;
+}
+
+// What one draft -> verify -> commit cycle published. The verify step ran the target on [pending token, draft0, ...,
+// draft(R-2)], R = 2 .. 8 rows: pred0..pred7 are the target's greedy predictions at each verify row (those past row R - 1 are
+// unused). The longest matching prefix of drafts is accepted (accepted_count in 0 .. R - 1; 1 + accepted_count tokens are
+// committed, and the bank ring advances by 1 + accepted_count, or by one bank when the compact replay ping-pongs between two).
 struct Qwen38CycleRecord {
   int64_t pred0{};
   int64_t pred1{};
   int64_t pred2{};
   int64_t pred3{};
+  int64_t pred4{};
+  int64_t pred5{};
+  int64_t pred6{};
+  int64_t pred7{};
   bool accepted{};
   int accepted_count{};
   int proposed_count{1};
-  int64_t new_pending{};  // device view after the commit (checked against the host ledger)
+  int draft_forward_count{1};  // drafter executions behind the proposals: one per token for an MTP chain, one per block for DFlash
+  int64_t new_pending{};       // device view after the commit (checked against the host ledger)
   int64_t new_length{};
 
   size_t TokenCount() const {
@@ -49,7 +116,7 @@ class Qwen38DecodeDevice {
   virtual void MarkContextFailed() noexcept {}
   virtual bool ContextIsHealthy() const noexcept { return true; }
 
-  // Largest sequence (prompt + generated) the fixed KV store holds is Capacity() - kReservedTail.
+  // Largest sequence (prompt + generated) the fixed KV store holds is MaxSequenceLength() = Capacity() - ReservedTail().
   virtual int Capacity() const = 0;
   virtual bool MtpEnabled() const = 0;
 
@@ -69,8 +136,18 @@ class Qwen38DecodeDevice {
   // Announces the total prompt length (0 = unknown) of the turn that the following PrefillChunk() calls ingest in
   // chunks. Call it after Reset() and before the first chunk; Reset() and BeginDecode() drop it. The device hands it to
   // the ORT QMoE kernels with every prompt chunk instead of the length seen so far. This replaces publishing
-  // ORT_QMOE_PREFILL_TOTAL_TOKENS from the caller: the device never reads that variable.
+  // ORT_QMOE_PREFILL_TOTAL_TOKENS from the caller: the device never reads that variable, and the caller never touches
+  // the process environment.
   virtual void ExpectPrefillTokens(size_t total_tokens) { (void)total_tokens; }
+  // The same for the turn of `slot` of a multi-slot device: the length is that slot's own state, so the prompts of
+  // several slots that are ingested in interleaved chunks never see each other's length. Call it after ResetSlot(slot)
+  // and before the first PrefillChunkSlot(slot, ...); ResetSlot(slot) and BeginDecodeSlot(slot, ...) drop it. The device
+  // hands it to ORT only with the Runs that ingest a chunk of that slot. Slot 0 of a single-slot device is
+  // ExpectPrefillTokens().
+  virtual void ExpectPrefillTokensSlot(size_t slot, size_t total_tokens) {
+    if (slot != 0) throw std::logic_error("Single-slot device only supports slot 0.");
+    ExpectPrefillTokens(total_tokens);
+  }
 
   // Starts decoding after the prompt: hands the prompt state over to the decode state (fast prefill), prepares the head and,
   // when `run_cycle`, enqueues the first cycle (so that it is running before the first token is returned to the caller).
@@ -83,25 +160,85 @@ class Qwen38DecodeDevice {
   // stack, from the standalone head, whose status the cycle record does not carry. Valid once BeginDecode ran, also
   // right after Drain() while the record of the last cycle is still unconsumed (cancellation, stop string): it
   // synchronizes the stream itself, so the error of a cycle nobody waited for is reported here instead of being
-  // cleared by the next Reset().
+  // cleared by the next Reset() or ResetSlot(). A device with several slots reports the error of every slot that
+  // started a decode, not only slot 0's; the executor calls it, after Drain(), before it resets a slot.
   virtual void CheckDecodeStatus() {}
 
-  // Positions at the end of the KV store that are never filled: a verify step writes two rows past the committed length.
+  // Positions at the end of the KV store that are never filled: a verify step of R rows writes R rows past the committed length,
+  // and no device keeps fewer than kReservedTail free. A device that verifies more rows reports a larger ReservedTail().
   static constexpr int kReservedTail = 4;
   virtual int ReservedTail() const { return kReservedTail; }
+  // The tail can leave nothing (a store smaller than the rows one verify step writes): 0 then, never a wrapped negative count.
+  size_t MaxSequenceLength() const {
+    const int room = Capacity() - ReservedTail();
+    return room > 0 ? static_cast<size_t>(room) : 0;
+  }
+
+  // Multi-slot / batched execution contract (defaults to single-slot slot 0).
+  virtual size_t MaxBatchSize() const { return 1; }
+
+  virtual void ResetSlot(size_t slot) {
+    if (slot != 0) throw std::logic_error("Single-slot device only supports slot 0.");
+    Reset();
+  }
+  virtual void PrefillChunkSlot(size_t slot, std::span<const int32_t> tokens) {
+    if (slot != 0) throw std::logic_error("Single-slot device only supports slot 0.");
+    PrefillChunk(tokens);
+  }
+  virtual int32_t PendingTokenSlot(size_t slot) const {
+    if (slot != 0) throw std::logic_error("Single-slot device only supports slot 0.");
+    return PendingToken();
+  }
+  virtual void BeginDecodeSlot(size_t slot, bool want_more) {
+    if (slot != 0) throw std::logic_error("Single-slot device only supports slot 0.");
+    BeginDecode(want_more);
+  }
+  virtual void EnqueueBatchDecode(std::span<const size_t> active_slots) {
+    (void)active_slots;
+  }
+  virtual void WaitBatchDecode(std::span<const size_t> active_slots,
+                               std::span<Qwen38CycleRecord> records) {
+    if (active_slots.size() == 1 && active_slots[0] == 0 && !records.empty()) {
+      records[0] = WaitCycle();
+      return;
+    }
+    throw std::logic_error("Single-slot device does not implement WaitBatchDecode for multiple slots.");
+  }
+  virtual void AdvanceBatchDecode(std::span<const size_t> active_slots,
+                                  std::span<const Qwen38CycleRecord> records,
+                                  std::span<const uint8_t> want_more,
+                                  bool defer_next_cycle = false) {
+    (void)defer_next_cycle;
+    if (active_slots.size() == 1 && active_slots[0] == 0 && !records.empty() && !want_more.empty()) {
+      Advance(records[0], want_more[0] != 0);
+      return;
+    }
+    throw std::logic_error("Single-slot device does not implement AdvanceBatchDecode for multiple slots.");
+  }
 };
 
 // Host mirror of the device loop's committed state: how many tokens are committed and which recurrent bank of the ring the
-// next target step reads. A target step reading bank k writes its committed state into bank (k + step) % kBanks (step = rows
-// committed: 1 or 2), which is why three banks suffice: the bank being read, the mid-state (S=2) and the result.
+// next target step reads. A target step reading bank k writes its committed state into bank (k + step) % num_banks (step = rows
+// committed, 1 .. max_step), so a ring of max_step + 1 banks holds the bank being read, the mid-states of the step and the
+// result (kBanks = 3 for the S=2 verify). The compact replay (SetCompactPingPong) instead reads the committed state of one bank
+// and writes the state after the accepted rows into the other, so two banks that swap on every step suffice for any row count.
 class Qwen38DecodeLedger {
  public:
   static constexpr int kBanks = 3;
 
   explicit Qwen38DecodeLedger(int capacity, int num_banks = kBanks)
-      : capacity_{capacity}, num_banks_{num_banks} {}
+      : capacity_{capacity}, num_banks_{num_banks}, max_step_{static_cast<size_t>(num_banks - 1)} {}
 
-  void SetNumBanks(int num_banks) { num_banks_ = num_banks; }
+  void SetNumBanks(int num_banks) {
+    num_banks_ = num_banks;
+    max_step_ = static_cast<size_t>(num_banks - 1);
+    ping_pong_ = false;
+  }
+  void SetCompactPingPong(bool enabled, int max_step) {
+    ping_pong_ = enabled;
+    num_banks_ = enabled ? 2 : (max_step + 1);
+    max_step_ = static_cast<size_t>(max_step);
+  }
   int NumBanks() const { return num_banks_; }
 
   void Reset() {
@@ -118,12 +255,14 @@ class Qwen38DecodeLedger {
     bank_ = bank;
   }
 
-  // Commits `step` rows (1 .. num_banks_ - 1).
+  // Commits `step` rows (1 .. max_step_).
   void Advance(size_t step) {
-    const size_t max_step = static_cast<size_t>(num_banks_ - 1);
-    if (step < 1 || step > max_step)
-      throw std::logic_error("qwen38_graph: a step commits 1 or 2 rows, not " + std::to_string(step));
-    bank_ = static_cast<int>((static_cast<size_t>(bank_) + step) % static_cast<size_t>(num_banks_));
+    if (step < 1 || step > max_step_)
+      throw std::logic_error("qwen38_graph: a step commits 1 to " + std::to_string(max_step_) + " rows, not " +
+                             std::to_string(step));
+    bank_ = ping_pong_
+                ? static_cast<int>((static_cast<size_t>(bank_) + 1) % static_cast<size_t>(num_banks_))
+                : static_cast<int>((static_cast<size_t>(bank_) + step) % static_cast<size_t>(num_banks_));
     length_ += step;
   }
 
@@ -149,6 +288,8 @@ class Qwen38DecodeLedger {
  private:
   int capacity_;
   int num_banks_{kBanks};
+  size_t max_step_{kBanks - 1};
+  bool ping_pong_{false};
   int bank_{};
   size_t length_{};
 };

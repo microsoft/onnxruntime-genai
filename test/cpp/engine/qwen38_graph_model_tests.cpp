@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -10,6 +11,7 @@
 #include <functional>
 #include <iterator>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -21,9 +23,14 @@
 #include <gtest/gtest.h>
 
 #include "config.h"
+#include "models/io/kv_cache.h"
+#include "models/model_state_manifest.h"
 #include "models/model_type.h"
 #include "models/qwen38_decode_device.h"
+#include "models/qwen38_dflash_prompt.h"
 #include "models/qwen38_graph.h"
+#include "models/qwen38_ort_env.h"
+#include "models/qwen38_replay_geometry.h"
 #include "scoped-environment-variable.h"
 #include "span.h"
 
@@ -389,6 +396,22 @@ TEST(Qwen38GraphConfigTest, ModelPathsMustStayInsideTheModelFolder) {
 
 // ---- host ledger -----------------------------------------------------------------------------
 
+TEST(Qwen38DecodeLedgerTest, CompactPingPongAlternatesBanksAcrossOneToEightRowSteps) {
+  Qwen38DecodeLedger ledger{64};
+  ledger.SetCompactPingPong(true, 8);
+  EXPECT_EQ(ledger.NumBanks(), 2);
+  EXPECT_EQ(ledger.Bank(), 0);
+  const size_t steps[] = {8, 1, 5, 7, 3, 8, 2};
+  size_t length = 0;
+  for (size_t i = 0; i < std::size(steps); ++i) {
+    ledger.Advance(steps[i]);
+    length += steps[i];
+    EXPECT_EQ(ledger.Bank(), static_cast<int>((i + 1) % 2));
+    EXPECT_EQ(ledger.Length(), length);
+  }
+  EXPECT_THROW(ledger.Advance(9), std::logic_error);
+}
+
 TEST(Qwen38DecodeLedgerTest, RingBankFollowsTheCommittedRows) {
   Qwen38DecodeLedger ledger{64};
   EXPECT_EQ(ledger.Bank(), 0);
@@ -430,6 +453,25 @@ TEST(Qwen38DecodeLedgerTest, AStepCommitsOneOrTwoRows) {
   EXPECT_EQ(ledger.Length(), 0u);
 }
 
+// The refusal names the rows the ledger does commit, whatever the verify width, not the 1 or 2 of the S=2 ring.
+TEST(Qwen38DecodeLedgerTest, TheRefusalOfAStepNamesTheRowsTheLedgerCommits) {
+  const auto message_of = [](Qwen38DecodeLedger& ledger, size_t step) {
+    try {
+      ledger.Advance(step);
+    } catch (const std::logic_error& e) {
+      return std::string{e.what()};
+    }
+    return std::string{};
+  };
+  Qwen38DecodeLedger ring{64};
+  EXPECT_NE(message_of(ring, 3).find("commits 1 to 2 rows, not 3"), std::string::npos);
+  Qwen38DecodeLedger ping_pong{64};
+  ping_pong.SetCompactPingPong(true, 8);
+  EXPECT_NE(message_of(ping_pong, 9).find("commits 1 to 8 rows, not 9"), std::string::npos);
+  EXPECT_NE(message_of(ping_pong, 0).find("commits 1 to 8 rows, not 0"), std::string::npos);
+  EXPECT_TRUE(message_of(ping_pong, 8).empty());
+}
+
 TEST(Qwen38DecodeLedgerTest, CapacityIncludesTheReservedTail) {
   Qwen38DecodeLedger ledger{10};
   EXPECT_NO_THROW(ledger.RequireRoom(10, "x"));
@@ -446,6 +488,66 @@ TEST(Qwen38DecodeLedgerTest, DeviceLengthMustMatchTheHost) {
   ledger.Advance(2);
   EXPECT_NO_THROW(ledger.CheckDeviceLength(2));
   EXPECT_THROW(ledger.CheckDeviceLength(3), std::runtime_error);
+}
+
+TEST(Qwen38FoldIoTest, StateOutputsBindOverTheMatchingInputs) {
+  EXPECT_STREQ(Qwen38FoldStateInput("fold.ctl_out"), "fold.ctl");
+  EXPECT_STREQ(Qwen38FoldStateInput("fold.ctx_commit_out"), "fold.ctx_commit");
+  EXPECT_EQ(Qwen38FoldStateInput("fold.tail_done"), nullptr);
+  EXPECT_EQ(Qwen38FoldStateInput("fold.ctl"), nullptr);
+  EXPECT_EQ(Qwen38FoldStateInput("fold.ctx_b"), nullptr);
+  EXPECT_EQ(Qwen38FoldStateInput("next_tokens"), nullptr);
+}
+
+// The engine owns a device buffer for each input of the SpeculativePrefixCommit node (rc4 contract) and for nothing else. The
+// rc3 node had a fifth input, fold.ctx_b: the target of such a package has to be refused by name when it is built, not fail with
+// the "map::at" of a container lookup.
+TEST(Qwen38FoldIoTest, TheFoldModelMayOnlyTakeTheInputsOfTheContract) {
+  const char* const contract_inputs[] = {"fold.ctl", "fold.ctx_commit", "fold.ctx_a", "fold.ptrs"};
+  EXPECT_STREQ(kQwen38FoldCtl, contract_inputs[0]);
+  EXPECT_STREQ(kQwen38FoldCtxCommit, contract_inputs[1]);
+  EXPECT_STREQ(kQwen38FoldCtxA, contract_inputs[2]);
+  EXPECT_STREQ(kQwen38FoldPtrs, contract_inputs[3]);
+  for (const char* name : contract_inputs) {
+    EXPECT_NO_THROW(RequireQwen38FoldInput(name)) << name;
+  }
+
+  // The rc3 input, near misses, and the names of the outputs of the node: none of them is an input the engine can bind.
+  for (const char* name : {"fold.ctx_b", "fold.ptrs2", "fold.ctx_a ", "fold.CTL", "fold.", "fold", "fold.tail_done",
+                           "fold.ctl_out", "fold.ctx_commit_out"}) {
+    try {
+      RequireQwen38FoldInput(name);
+      ADD_FAILURE() << "the fold input '" << name << "' was accepted";
+    } catch (const std::runtime_error& error) {
+      const std::string message = error.what();
+      EXPECT_NE(message.find(std::string("the input '") + name + "'"), std::string::npos) << message;
+      EXPECT_NE(message.find("SpeculativePrefixCommit contract of ORT #33474"), std::string::npos) << message;
+      for (const char* valid : contract_inputs) EXPECT_NE(message.find(valid), std::string::npos) << message;
+      EXPECT_EQ(message.find("map::at"), std::string::npos) << message;
+    }
+  }
+
+  // RequireQwen38FoldContract requires all four fold inputs and both state outputs when building the fold target.
+  const std::vector<std::string> valid_inputs = {"input_ids", "fold.ctl", "fold.ctx_commit", "fold.ctx_a", "fold.ptrs"};
+  const std::vector<std::string> valid_outputs = {"logits", "next_tokens", "fold.ctl_out", "fold.ctx_commit_out"};
+  EXPECT_NO_THROW(RequireQwen38FoldContract(valid_inputs, valid_outputs));
+  for (const char* missing_in : contract_inputs) {
+    std::vector<std::string> partial_in = valid_inputs;
+    partial_in.erase(std::remove(partial_in.begin(), partial_in.end(), missing_in), partial_in.end());
+    EXPECT_THROW(RequireQwen38FoldContract(partial_in, valid_outputs), std::runtime_error) << missing_in;
+  }
+  for (const char* missing_out : {kQwen38FoldCtlOut, kQwen38FoldCtxCommitOut}) {
+    std::vector<std::string> partial_out = valid_outputs;
+    partial_out.erase(std::remove(partial_out.begin(), partial_out.end(), missing_out), partial_out.end());
+    EXPECT_THROW(RequireQwen38FoldContract(valid_inputs, partial_out), std::runtime_error) << missing_out;
+  }
+  EXPECT_THROW(RequireQwen38FoldContract(valid_inputs, std::vector<std::string>{"logits", "next_tokens"}),
+               std::runtime_error);
+
+  // SpeculativePrefixCommit head_rows attribute validation from ONNX protobuf and against verify_rows_.
+  EXPECT_NO_THROW(ValidateQwen38FoldHeadRows(std::nullopt, 4));
+  EXPECT_NO_THROW(ValidateQwen38FoldHeadRows(4, 4));
+  EXPECT_THROW(ValidateQwen38FoldHeadRows(3, 4), std::runtime_error);
 }
 
 TEST(Qwen38CycleRecordTest, AcceptedCyclesCommitTwoTokens) {
@@ -529,28 +631,1404 @@ TEST(Qwen38GraphConfigTest, PrefillChunkValidation) {
   EXPECT_THROW(ValidateQwen38PrefillChunk(config.model.qwen38_graph), std::runtime_error);
   config.model.qwen38_graph.prefill.chunk = 0;  // the 8192 default does not fit a 4096 capacity
   EXPECT_THROW(ValidateQwen38PrefillChunk(config.model.qwen38_graph), std::runtime_error);
+
+  // The Engine's dependencies check only the part that does not look at kv_capacity: after a context tier it is the capacity
+  // of the graph (2056 positions for a 2K graph: 2048 of context and the verify rows), and the device clamps the chunk to it.
+  config.model.qwen38_graph.kv_capacity = 2056;
+  for (const int chunk : {0, 4096, 8192}) {
+    config.model.qwen38_graph.prefill.chunk = chunk;
+    EXPECT_THROW(ValidateQwen38PrefillChunk(config.model.qwen38_graph), std::runtime_error) << chunk;
+    EXPECT_NO_THROW(ValidateQwen38PrefillChunkShape(config.model.qwen38_graph)) << chunk;
+  }
+  // What does not depend on the capacity is still refused.
+  config.model.qwen38_graph.prefill.chunk = -1;
+  EXPECT_THROW(ValidateQwen38PrefillChunkShape(config.model.qwen38_graph), std::runtime_error);
+  config.model.qwen38_graph.prefill.enabled = false;
+  config.model.qwen38_graph.prefill.chunk = 15;
+  EXPECT_THROW(ValidateQwen38PrefillChunkShape(config.model.qwen38_graph), std::runtime_error);
+  config.model.qwen38_graph.prefill.chunk = 16;
+  EXPECT_NO_THROW(ValidateQwen38PrefillChunkShape(config.model.qwen38_graph));
+}
+
+// The documented slot range is enforced where the key is parsed, with the key and the value in the message, not by a later
+// resolution that would map the value to one slot or clamp it.
+TEST(Qwen38GraphConfigTest, MaxBatchSizeMustLieInTheDocumentedSlotRange) {
+  const auto parse = [](const std::string& value) {
+    Config config;
+    OverlayConfig(config, R"({"model":{"qwen38_graph":{"max_batch_size":)" + value + "}}}");
+    return config.model.qwen38_graph.max_batch_size;
+  };
+  EXPECT_EQ(Config{}.model.qwen38_graph.max_batch_size, 1);
+  EXPECT_EQ(parse("1"), 1);
+  EXPECT_EQ(parse("2"), 2);
+  EXPECT_EQ(parse("8"), Config::Model::Qwen38Graph::kMaxBatchSize);
+  for (const char* value : {"-1", "0", "9", "16", "1000"}) {
+    try {
+      parse(value);
+      ADD_FAILURE() << "max_batch_size " << value << " was accepted";
+    } catch (const std::exception& error) {  // the JSON reader reports it with the position in the file
+      const std::string message = error.what();
+      EXPECT_NE(message.find("max_batch_size"), std::string::npos) << message;
+      EXPECT_NE(message.find("[1, 8]"), std::string::npos) << message;
+      EXPECT_NE(message.find(std::string{"got "} + value), std::string::npos) << message;
+    }
+  }
+}
+
+TEST(Qwen38GraphConfigTest, TheSlotCountIsResolvedFromItsSettingsAndNeverClampedSilently) {
+  Config config;
+  EXPECT_EQ(ResolveQwen38MaxBatchSize(config), 1u);
+  config.model.qwen38_graph.max_batch_size = 4;
+  EXPECT_EQ(ResolveQwen38MaxBatchSize(config), 4u);
+  config.model.qwen38_graph.max_batch_size = Config::Model::Qwen38Graph::kMaxBatchSize;
+  EXPECT_EQ(ResolveQwen38MaxBatchSize(config), 8u);
+
+  // A programmatically built Config is checked like a parsed one: no value maps to one slot or to the maximum.
+  for (const int value : {-1, 0, 9, 64}) {
+    config.model.qwen38_graph.max_batch_size = value;
+    try {
+      ResolveQwen38MaxBatchSize(config);
+      ADD_FAILURE() << "max_batch_size " << value << " was resolved";
+    } catch (const std::out_of_range& error) {
+      EXPECT_NE(std::string{error.what()}.find("model.qwen38_graph.max_batch_size"), std::string::npos) << error.what();
+    }
+  }
+
+  // The dynamic engine's setting takes precedence, and it is held to the same range. The single-slot backend refused a
+  // package with this section, so no configuration that loaded before can carry it.
+  Config dynamic;
+  dynamic.model.qwen38_graph.max_batch_size = 2;
+  dynamic.engine.dynamic_batching.emplace();
+  dynamic.engine.dynamic_batching->max_batch_size = 3;
+  EXPECT_EQ(ResolveQwen38MaxBatchSize(dynamic), 3u);
+  dynamic.engine.dynamic_batching->max_batch_size = 16;  // the default of the dynamic engine
+  EXPECT_THROW(ResolveQwen38MaxBatchSize(dynamic), std::out_of_range);
+  dynamic.engine.dynamic_batching->max_batch_size = 0;
+  EXPECT_THROW(ResolveQwen38MaxBatchSize(dynamic), std::out_of_range);
+
+  // engine.static_batching configures the Engine's static path in general and the single-slot backend always ignored
+  // it, so a package may carry it with any value (the Engine's own default of four included). It never sizes the
+  // device: only a setting that asks for slots does.
+  Config fixed;
+  fixed.engine.static_batching.emplace();
+  EXPECT_EQ(ResolveQwen38MaxBatchSize(fixed), 1u);
+  fixed.engine.static_batching->max_batch_size = 9;
+  EXPECT_EQ(ResolveQwen38MaxBatchSize(fixed), 1u);
+  fixed.model.qwen38_graph.max_batch_size = 3;
+  EXPECT_EQ(ResolveQwen38MaxBatchSize(fixed), 3u);
+  fixed.search.batch_size = 2;
+  EXPECT_EQ(ResolveQwen38MaxBatchSize(fixed), 3u);
+  fixed.model.qwen38_graph.max_batch_size = 1;
+  EXPECT_EQ(ResolveQwen38MaxBatchSize(fixed), 2u);
+
+  Config search;
+  search.search.batch_size = 3;
+  EXPECT_EQ(ResolveQwen38MaxBatchSize(search), 3u);
+  search.search.batch_size = 9;
+  EXPECT_THROW(ResolveQwen38MaxBatchSize(search), std::out_of_range);
+  for (const int value : {-1, 0}) {
+    search.search.batch_size = value;
+    EXPECT_THROW(ResolveQwen38MaxBatchSize(search), std::out_of_range) << "search.batch_size " << value;
+  }
+  search.search.batch_size = 1;
+  EXPECT_EQ(ResolveQwen38MaxBatchSize(search), 1u);
+}
+
+// ORT_QWEN38_MAX_BATCH_SIZE, the last source of the slot count, is read as strictly as the settings: text that is not an
+// integer, zero, a negative or an out-of-range value used to map to one slot silently.
+TEST(Qwen38GraphConfigTest, TheSlotCountTestHookIsParsedStrictly) {
+  ScopedEnvironmentVariable hook{"ORT_QWEN38_MAX_BATCH_SIZE", std::nullopt};
+  EXPECT_EQ(ResolveQwen38MaxBatchSize(Config{}), 1u);
+  hook.Set("");  // an empty value is an unset one
+  EXPECT_EQ(ResolveQwen38MaxBatchSize(Config{}), 1u);
+  struct Accepted {
+    const char* text;
+    size_t slots;
+  };
+  for (const Accepted& accepted : {Accepted{"1", 1}, Accepted{"5", 5}, Accepted{"8", 8}}) {
+    hook.Set(std::string{accepted.text});
+    EXPECT_EQ(ResolveQwen38MaxBatchSize(Config{}), accepted.slots) << accepted.text;
+  }
+
+  for (const char* value : {"abc", "4x", "4 ", " ", "0x4", "0", "-3", "9", "99999999999", "99999999999999999999999"}) {
+    hook.Set(std::string{value});
+    try {
+      ResolveQwen38MaxBatchSize(Config{});
+      ADD_FAILURE() << "ORT_QWEN38_MAX_BATCH_SIZE=\"" << value << "\" was resolved";
+    } catch (const std::out_of_range& error) {
+      const std::string message = error.what();
+      EXPECT_NE(message.find("ORT_QWEN38_MAX_BATCH_SIZE"), std::string::npos) << message;
+      EXPECT_NE(message.find("[1, 8]"), std::string::npos) << message;
+    }
+  }
+
+  // The hook is the last source: a setting that is present wins over it, valid or not.
+  Config configured;
+  configured.model.qwen38_graph.max_batch_size = 3;
+  hook.Set(std::string{"abc"});
+  EXPECT_EQ(ResolveQwen38MaxBatchSize(configured), 3u);
+}
+
+namespace {
+
+// A folded package: prefill, the dense graph and the slot count are what the tests vary.
+Config FoldedPackageConfig(const std::string& qwen38_graph_overlay) {
+  Config config;
+  OverlayConfig(config,
+                R"({"model":{"type":"qwen38_flash_graph","decoder":{"filename":"model.onnx"},"qwen38_graph":)" +
+                    qwen38_graph_overlay + "}}");
+  return config;
+}
+
+void ExpectConfigDiagnostic(const Config& config, const std::string& needle) {
+  try {
+    ValidateQwen38MultiSlotConfig(config);
+    ADD_FAILURE() << "the configuration was accepted, expected a diagnostic with '" << needle << "'";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(std::string{error.what()}.find(needle), std::string::npos) << error.what();
+  }
+}
+
+// Hand-encoded protobuf: the framing of the few ONNX fields the output-name reader walks (onnx.ModelProto.graph = 7,
+// GraphProto.{node = 1, name = 2, initializer = 5, input = 11, output = 12, value_info = 13}, ValueInfoProto.{name = 1,
+// type = 2}).
+std::string ProtoVarint(uint64_t value) {
+  std::string bytes;
+  while (value >= 0x80) {
+    bytes.push_back(static_cast<char>((value & 0x7F) | 0x80));
+    value >>= 7;
+  }
+  bytes.push_back(static_cast<char>(value));
+  return bytes;
+}
+
+std::string ProtoBytes(uint32_t field, const std::string& payload) {
+  return ProtoVarint((uint64_t{field} << 3) | 2) + ProtoVarint(payload.size()) + payload;
+}
+
+std::string ProtoVarintField(uint32_t field, uint64_t value) {
+  return ProtoVarint(uint64_t{field} << 3) + ProtoVarint(value);
+}
+
+std::string ProtoValueInfo(const std::string& name) {
+  return ProtoBytes(1, name) + ProtoBytes(2, std::string(40, '\x08')) + ProtoBytes(3, "doc");
+}
+
+std::string OnnxModelBytes(const std::vector<std::string>& outputs, size_t initializer_bytes = 0) {
+  std::string graph;
+  graph += ProtoBytes(1, "node payload");
+  graph += ProtoBytes(2, "main_graph");
+  graph += ProtoBytes(5, std::string(initializer_bytes, '\x7f'));
+  graph += ProtoBytes(11, ProtoValueInfo("input_ids"));
+  for (const std::string& name : outputs) graph += ProtoBytes(12, ProtoValueInfo(name));
+  graph += ProtoBytes(13, ProtoValueInfo("intermediate"));
+
+  std::string model;
+  model += ProtoVarintField(1, 9);  // ir_version
+  model += ProtoBytes(2, "tests");  // producer_name
+  model += ProtoBytes(7, graph);
+  model += ProtoBytes(8, ProtoVarintField(2, 21));                // opset_import
+  model += ProtoVarint((15u << 3) | 1) + std::string(8, '\x01');  // a fixed64 field
+  model += ProtoVarint((16u << 3) | 5) + std::string(4, '\x02');  // a fixed32 field
+  return model;
+}
+
+}  // namespace
+
+// Several slots are decoded by the batched fold target and prefilled chunk by chunk through it. Everything else is refused when
+// the model is created (source validation, no GPU), not at the first decode of an admitted request.
+TEST(Qwen38MultiSlotConfigTest, ASingleSlotHasNoRestriction) {
+  for (const char* overlay : {R"({"max_batch_size":1})",
+                              R"({"max_batch_size":1,"fold":{"enabled":true},"prefill":{"enabled":false}})",
+                              R"({"fold":{"enabled":true},"prefill":{"enabled":true,"dense":{"filename":"dense.onnx"}}})"}) {
+    EXPECT_NO_THROW(ValidateQwen38MultiSlotConfig(FoldedPackageConfig(overlay))) << overlay;
+  }
+}
+
+TEST(Qwen38MultiSlotConfigTest, SeveralSlotsNeedTheFoldStack) {
+  ExpectConfigDiagnostic(FoldedPackageConfig(R"({"max_batch_size":2})"), "model.qwen38_graph.fold.enabled");
+  ExpectConfigDiagnostic(FoldedPackageConfig(R"({"max_batch_size":8,"prefill":{"enabled":true}})"),
+                         "model.qwen38_graph.fold.enabled");
+}
+
+TEST(Qwen38MultiSlotConfigTest, SeveralSlotsNeedTheUnifiedFastPrefill) {
+  // prefill.enabled=false: the prompt would go through the decode graphs, which cannot address a slot.
+  ExpectConfigDiagnostic(FoldedPackageConfig(R"({"max_batch_size":2,"fold":{"enabled":true}})"),
+                         "unified fast prefill");
+  ExpectConfigDiagnostic(FoldedPackageConfig(R"({"max_batch_size":2,"fold":{"enabled":true},"prefill":{"enabled":false}})"),
+                         "prefill.enabled");
+  // A separate dense prefill graph is not slot-addressed either.
+  ExpectConfigDiagnostic(
+      FoldedPackageConfig(R"({"max_batch_size":4,"fold":{"enabled":true},
+                              "prefill":{"enabled":true,"dense":{"filename":"dense/model.onnx"}}})"),
+      "separate prefill.dense.filename");
+  EXPECT_TRUE(Qwen38HasSeparatePrefillSessions(
+      FoldedPackageConfig(R"({"fold":{"enabled":true},"prefill":{"enabled":true,"dense":{"filename":"dense/model.onnx"}}})")));
+}
+
+TEST(Qwen38MultiSlotConfigTest, TheUnifiedFastPrefillOfTheFoldTargetServesEverySlotCount) {
+  for (int slots = 2; slots <= Config::Model::Qwen38Graph::kMaxBatchSize; ++slots) {
+    const std::string overlay = R"({"max_batch_size":)" + std::to_string(slots) +
+                                R"(,"fold":{"enabled":true},"prefill":{"enabled":true}})";
+    EXPECT_NO_THROW(ValidateQwen38MultiSlotConfig(FoldedPackageConfig(overlay))) << slots;
+  }
+  // Naming the decoder itself as the dense graph is still the unified prefill.
+  const Config same = FoldedPackageConfig(
+      R"({"max_batch_size":2,"fold":{"enabled":true},"prefill":{"enabled":true,"dense":{"filename":"model.onnx"}}})");
+  EXPECT_FALSE(Qwen38HasSeparatePrefillSessions(same));
+  EXPECT_NO_THROW(ValidateQwen38MultiSlotConfig(same));
+}
+
+TEST(Qwen38MultiSlotConfigTest, SeveralSlotsWithAnInternalMtpHeadNeedTheDflash2Drafter) {
+  const std::string overlay =
+      R"({"max_batch_size":2,"fold":{"enabled":true,"head_r2":{"filename":"head_r2.onnx"}},"prefill":{"enabled":true}})";
+  Config config = FoldedPackageConfig(overlay);
+  ExpectConfigDiagnostic(config, "model.dflash2.filename");
+  config.model.dflash2.filename = "dflash2.onnx";
+  EXPECT_NO_THROW(ValidateQwen38MultiSlotConfig(config));
+
+  // One slot keeps the internal head.
+  Config single = FoldedPackageConfig(
+      R"({"max_batch_size":1,"fold":{"enabled":true,"head_r2":{"filename":"head_r2.onnx"}},"prefill":{"enabled":true}})");
+  EXPECT_NO_THROW(ValidateQwen38MultiSlotConfig(single));
+}
+
+TEST(Qwen38MultiSlotConfigTest, TheSlotCountOfTheEngineSettingsIsValidatedLikeTheModelKey) {
+  Config config = FoldedPackageConfig(R"({"fold":{"enabled":true},"prefill":{"enabled":false}})");
+  EXPECT_NO_THROW(ValidateQwen38MultiSlotConfig(config));  // one slot
+  config.engine.dynamic_batching.emplace();
+  config.engine.dynamic_batching->max_batch_size = 4;
+  ExpectConfigDiagnostic(config, "unified fast prefill");
+  config.engine.dynamic_batching->max_batch_size = 9;
+  EXPECT_THROW(ValidateQwen38MultiSlotConfig(config), std::out_of_range);
+}
+
+// A package that shipped before several slots existed (or that was written for another model type) may carry
+// engine.static_batching with the Engine's default of four or a value of its own. The section is configuration of the
+// Engine's static path, which the single-slot backend ignored: it must neither size the device nor make a package that
+// cannot serve several slots fail to load.
+TEST(Qwen38MultiSlotConfigTest, AnEngineStaticBatchingSectionDoesNotAskForSlots) {
+  const std::vector<std::string> packages = {
+      // no fold stack
+      R"({})",
+      // the prompt goes through the decode graphs
+      R"({"fold":{"enabled":true},"prefill":{"enabled":false}})",
+      // a separate prefill graph
+      R"({"fold":{"enabled":true},"prefill":{"enabled":true,"dense":{"filename":"dense/model.onnx"}}})",
+      // able to serve several slots
+      R"({"fold":{"enabled":true},"prefill":{"enabled":true}})",
+  };
+  for (const std::string& package : packages) {
+    for (const char* section : {R"({"max_batch_size":1})", R"({"max_batch_size":4})", R"({"max_batch_size":9})"}) {
+      Config config = FoldedPackageConfig(package);
+      OverlayConfig(config, std::string{R"({"engine":{"static_batching":)"} + section + "}}");
+      ASSERT_TRUE(config.engine.static_batching.has_value()) << package << " " << section;
+      EXPECT_EQ(ResolveQwen38MaxBatchSize(config), 1u) << package << " " << section;
+      EXPECT_NO_THROW(ValidateQwen38MultiSlotConfig(config)) << package << " " << section;
+    }
+  }
+
+  // The slots a package asks for with its own setting are the ones it gets, whatever the section says.
+  Config config = FoldedPackageConfig(R"({"max_batch_size":3,"fold":{"enabled":true},"prefill":{"enabled":true}})");
+  OverlayConfig(config, R"({"engine":{"static_batching":{"max_batch_size":9}}})");
+  EXPECT_EQ(ResolveQwen38MaxBatchSize(config), 3u);
+  EXPECT_NO_THROW(ValidateQwen38MultiSlotConfig(config));
+  // and a package that cannot serve them is refused for that setting, with the diagnostic that names it.
+  Config refused = FoldedPackageConfig(R"({"max_batch_size":3})");
+  OverlayConfig(refused, R"({"engine":{"static_batching":{"max_batch_size":1}}})");
+  EXPECT_EQ(ResolveQwen38MaxBatchSize(refused), 3u);
+  ExpectConfigDiagnostic(refused, "model.qwen38_graph.fold.enabled");
+}
+
+// A ring-bank target keeps one bank per row count for the whole batch, so it cannot restore the accepted prefix of every slot.
+// The check names the output and runs before the engine binds anything.
+TEST(Qwen38MultiSlotConfigTest, SeveralSlotsNeedACompactStateTarget) {
+  const std::vector<std::string> compact = {"logits",
+                                            "hidden_states_out",
+                                            "next_tokens",
+                                            "validation.aggregate",
+                                            "aux_hidden_states",
+                                            "fold.tail_done",
+                                            "present_position_ids",
+                                            "present.0.key",
+                                            "present.1.recurrent_state",
+                                            "state_update.1.conv_value",
+                                            "state_update.1.recurrent_value"};
+  for (size_t slots = 1; slots <= 8; ++slots) {
+    EXPECT_NO_THROW(ValidateQwen38BatchedTargetOutputs(slots, compact)) << slots;
+  }
+
+  for (const char* ring_output : {"present_mid.0.key", "present_mid2.1.recurrent_state", "present_mid3.1.conv_state",
+                                  "head.present_mid.0.key"}) {
+    std::vector<std::string> ring = compact;
+    ring.emplace_back(ring_output);
+    EXPECT_NO_THROW(ValidateQwen38BatchedTargetOutputs(1, ring)) << ring_output;  // single-slot ring targets stay supported
+    for (size_t slots = 2; slots <= 8; ++slots) {
+      try {
+        ValidateQwen38BatchedTargetOutputs(slots, ring);
+        ADD_FAILURE() << slots << " slots accepted " << ring_output;
+      } catch (const std::runtime_error& error) {
+        const std::string message = error.what();
+        EXPECT_NE(message.find(ring_output), std::string::npos) << message;
+        EXPECT_NE(message.find(std::to_string(slots) + " request slots"), std::string::npos) << message;
+        EXPECT_NE(message.find("state_update"), std::string::npos) << message;
+      }
+    }
+  }
+
+  // No state_update.* outputs and no ring outputs: nothing restores the accepted prefix either.
+  const std::vector<std::string> plain = {"logits", "hidden_states_out", "next_tokens", "present.0.key"};
+  EXPECT_NO_THROW(ValidateQwen38BatchedTargetOutputs(1, plain));
+  EXPECT_THROW(ValidateQwen38BatchedTargetOutputs(2, plain), std::runtime_error);
+  EXPECT_THROW(ValidateQwen38BatchedTargetOutputs(2, {}), std::runtime_error);
+}
+
+// The batched fold inputs of a target that verifies two rows keep the single-slot control and context sizes, which the
+// plane's per-slot layout does not match: several slots are refused for it, and a single slot or a wider verify step is not.
+TEST(Qwen38MultiSlotConfigTest, SeveralSlotsNeedAtLeastThreeVerifyRows) {
+  for (const int rows : {2, 3, 4, 8}) {
+    EXPECT_NO_THROW(ValidateQwen38BatchedVerifyRows(1, rows)) << rows;
+  }
+  for (size_t slots = 2; slots <= 8; ++slots) {
+    for (const int rows : {3, 4, 8}) {
+      EXPECT_NO_THROW(ValidateQwen38BatchedVerifyRows(slots, rows)) << slots << " slots, " << rows << " rows";
+    }
+    for (const int rows : {1, 2}) {
+      try {
+        ValidateQwen38BatchedVerifyRows(slots, rows);
+        ADD_FAILURE() << slots << " slots accepted a target that verifies " << rows << " rows";
+      } catch (const std::runtime_error& error) {
+        const std::string message = error.what();
+        EXPECT_NE(message.find(std::to_string(slots) + " request slots"), std::string::npos) << message;
+        EXPECT_NE(message.find("verifies " + std::to_string(rows)), std::string::npos) << message;
+        EXPECT_NE(message.find("max_batch_size"), std::string::npos) << message;
+      }
+    }
+  }
+}
+
+// The same check runs on the model file before any weight is uploaded: the output names come from the protobuf framing of the
+// graph, whose initializers are skipped, not parsed.
+TEST(Qwen38MultiSlotConfigTest, TheOutputNamesOfTheModelFileAreReadWithoutParsingItsInitializers) {
+  const auto dir = MakeScratchDir("onnx_outputs");
+  const std::vector<std::string> outputs = {"logits", "present_mid.0.key", "state_update.1.conv_value", "next_tokens"};
+
+  const auto small = WriteFile(dir / "small.onnx", OnnxModelBytes(outputs));
+  ASSERT_TRUE(ReadQwen38OnnxOutputNames(small).has_value());
+  EXPECT_EQ(*ReadQwen38OnnxOutputNames(small), outputs);  // the input and value_info entries are not outputs
+
+  const auto big = WriteFile(dir / "big.onnx", OnnxModelBytes(outputs, size_t{3} << 20));
+  ASSERT_GT(std::filesystem::file_size(big), size_t{3} << 20);
+  EXPECT_EQ(ReadQwen38OnnxOutputNames(big), std::optional<std::vector<std::string>>{outputs});
+
+  std::vector<std::string> many;
+  for (int i = 0; i < 300; ++i) many.push_back("state_update." + std::to_string(i) + ".conv_value");
+  EXPECT_EQ(ReadQwen38OnnxOutputNames(WriteFile(dir / "many.onnx", OnnxModelBytes(many, 1000))),
+            std::optional<std::vector<std::string>>{many});
+
+  // SpeculativePrefixCommit head_rows attribute is parsed from NodeProto without reading initializers.
+  const std::string attr_head_rows = ProtoBytes(1, "head_rows") + ProtoVarintField(3, 3);
+  const std::string spc_node = ProtoBytes(4, "SpeculativePrefixCommit") + ProtoBytes(5, attr_head_rows);
+  const std::string spc_graph = ProtoBytes(1, spc_node) + ProtoBytes(12, ProtoValueInfo("logits"));
+  const std::string spc_model = ProtoVarintField(1, 9) + ProtoBytes(7, spc_graph);
+  const auto spc_file = WriteFile(dir / "spc.onnx", spc_model);
+  EXPECT_EQ(ReadQwen38OnnxSpeculativePrefixCommitHeadRows(spc_file), std::optional<int64_t>{3});
+  EXPECT_THROW(ValidateQwen38FoldHeadRows(ReadQwen38OnnxSpeculativePrefixCommitHeadRows(spc_file), 4),
+               std::runtime_error);
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+TEST(Qwen38MultiSlotConfigTest, ARingBankTargetFileIsRefusedForSeveralSlotsBeforeAnyWeightIsUploaded) {
+  const auto dir = MakeScratchDir("onnx_ring_target");
+  const std::vector<std::string> compact = {"logits", "next_tokens", "present.0.key", "state_update.1.conv_value"};
+  const auto compact_file = WriteFile(dir / "compact.onnx", OnnxModelBytes(compact, 4096));
+  for (size_t slots = 1; slots <= 8; ++slots) EXPECT_NO_THROW(ValidateQwen38TargetModelFile(slots, compact_file)) << slots;
+
+  for (const char* ring_output : {"present_mid.0.key", "present_mid2.1.recurrent_state", "present_mid3.1.conv_state"}) {
+    std::vector<std::string> ring = compact;
+    ring.emplace_back(ring_output);
+    const auto ring_file = WriteFile(dir / "ring.onnx", OnnxModelBytes(ring, 4096));
+    EXPECT_NO_THROW(ValidateQwen38TargetModelFile(1, ring_file)) << ring_output;
+    for (size_t slots = 2; slots <= 8; ++slots) {
+      try {
+        ValidateQwen38TargetModelFile(slots, ring_file);
+        ADD_FAILURE() << slots << " slots accepted " << ring_output;
+      } catch (const std::runtime_error& error) {
+        const std::string message = error.what();
+        EXPECT_NE(message.find(ring_output), std::string::npos) << message;
+        EXPECT_NE(message.find(std::to_string(slots) + " request slots"), std::string::npos) << message;
+      }
+    }
+  }
+
+  const auto plain_file = WriteFile(dir / "plain.onnx", OnnxModelBytes({"logits", "present.0.key"}));
+  EXPECT_THROW(ValidateQwen38TargetModelFile(2, plain_file), std::runtime_error);  // no state_update.* outputs
+
+  // A single slot has no restriction and reads nothing: not even a file that does not exist.
+  EXPECT_NO_THROW(ValidateQwen38TargetModelFile(1, dir / "missing.onnx"));
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+// A file the reader cannot make sense of (an ORT-format model, a truncated or damaged one) is not an error of its own: the
+// outputs of the session, which ORT loads and checks anyway, stay authoritative.
+TEST(Qwen38MultiSlotConfigTest, AFileThatIsNotAnOnnxProtobufIsLeftToTheCheckAgainstTheSession) {
+  const auto dir = MakeScratchDir("onnx_malformed");
+  const std::string model = OnnxModelBytes({"logits", "present_mid.0.key"}, 256);
+
+  std::map<std::string, std::string> files;
+  files["empty"] = "";
+  files["text"] = "this is not a model";
+  files["ort_format"] = std::string("\x1c\x00\x00\x00ORTM\x00\x00\x00\x00", 12);
+  files["truncated_in_the_graph"] = model.substr(0, model.size() / 2);
+  files["truncated_in_a_varint"] = ProtoVarint(1u << 3) + ProtoVarint(7) + std::string(1, '\x80');
+  files["no_graph"] = ProtoVarintField(1, 9) + ProtoBytes(2, "tests");
+  files["a_graph_without_outputs"] = ProtoBytes(7, ProtoBytes(2, "main_graph") + ProtoBytes(11, ProtoValueInfo("x")));
+  files["two_graphs"] = model + model;
+  files["a_name_that_leaves_its_message"] =
+      ProtoBytes(7, ProtoBytes(12, ProtoVarint((1u << 3) | 2) + ProtoVarint(100) + "short"));
+  files["an_output_without_a_name"] = ProtoBytes(7, ProtoBytes(12, ProtoBytes(2, "type only")));
+  files["a_group"] = ProtoBytes(7, ProtoBytes(12, ProtoValueInfo("logits")) + ProtoVarint((9u << 3) | 3));
+  files["an_endless_varint"] = ProtoVarint((7u << 3) | 2) + std::string(12, '\xff');
+  files["a_huge_value_info"] = ProtoBytes(7, ProtoBytes(12, ProtoBytes(2, std::string((size_t{1} << 20) + 1, '\x08'))));
+
+  for (const auto& [label, bytes] : files) {
+    const auto file = WriteFile(dir / (label + ".onnx"), bytes);
+    EXPECT_FALSE(ReadQwen38OnnxOutputNames(file).has_value()) << label;
+    EXPECT_NO_THROW(ValidateQwen38TargetModelFile(8, file)) << label;
+  }
+  EXPECT_FALSE(ReadQwen38OnnxOutputNames(dir / "missing.onnx").has_value());
+  EXPECT_NO_THROW(ValidateQwen38TargetModelFile(8, dir / "missing.onnx"));
+  EXPECT_FALSE(ReadQwen38OnnxOutputNames(dir).has_value());  // a directory
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+namespace {
+
+// Creates the empty files of a package folder, relative to `root`.
+void TouchPackageFiles(const std::filesystem::path& root, const std::vector<std::string>& files) {
+  for (const std::string& file : files) {
+    std::filesystem::create_directories((root / file).parent_path());
+    WriteFile(root / file, "");
+  }
+}
+
+// What the model constructor asks of the package folder: a regular file under the model folder.
+std::function<bool(const std::string&)> FilesOf(const std::filesystem::path& root) {
+  return [root](const std::string& file) {
+    std::error_code error;
+    return std::filesystem::is_regular_file(root / file, error);
+  };
+}
+
+std::string ResolveTarget(const std::filesystem::path& root, const std::string& decoder, const std::string& context_request,
+                          const std::string& mtp_drafts = "") {
+  return ResolveQwen38TargetGraphFilename(decoder, context_request, mtp_drafts, FilesOf(root));
+}
+
+std::string ResolveTargetError(const std::filesystem::path& root, const std::string& decoder, const std::string& context_request) {
+  try {
+    const std::string chosen = ResolveTarget(root, decoder, context_request);
+    ADD_FAILURE() << "'" << chosen << "' was chosen for the tier request '" << context_request << "'";
+  } catch (const std::runtime_error& error) {
+    return error.what();
+  }
+  return {};
+}
+
+void RemoveScratchDir(const std::filesystem::path& dir) {
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+}  // namespace
+
+// The tier graphs of a package whose decoder sits in a sub-folder (target/model.onnx) are its siblings, not files of the model
+// folder. Filesystem only: no GPU, no Windows.
+TEST(Qwen38ContextTierTest, TierGraphsAreResolvedNextToTheConfiguredDecoder) {
+  const auto dir = MakeScratchDir("tier_subfolder");
+  TouchPackageFiles(dir, {"target/model.onnx", "target/model_8k.onnx", "target/model_16k.onnx", "target/model_dynamic_ctx.onnx",
+                          "model_128k.onnx", "a/b/model.onnx", "a/b/model_2k.onnx"});
+
+  EXPECT_EQ(ResolveTarget(dir, "target/model.onnx", "8k"), "target/model_8k.onnx");
+  EXPECT_EQ(ResolveTarget(dir, "target/model.onnx", "8192"), "target/model_8k.onnx");
+  EXPECT_EQ(ResolveTarget(dir, "target/model.onnx", "16K"), "target/model_16k.onnx");
+  EXPECT_EQ(ResolveTarget(dir, "a/b/model.onnx", "2048"), "a/b/model_2k.onnx");
+  // No graph of the tier: the dynamic-context graph next to the decoder. The model_128k.onnx of the model folder is not a sibling.
+  EXPECT_EQ(ResolveTarget(dir, "target/model.onnx", "64k"), "target/model_dynamic_ctx.onnx");
+  EXPECT_EQ(ResolveTarget(dir, "target/model.onnx", "128k"), "target/model_dynamic_ctx.onnx");
+  // A decoder in the model folder keeps resolving there.
+  EXPECT_EQ(ResolveTarget(dir, "model.onnx", "128k"), "model_128k.onnx");
+  // The 32k tier is the package graph.
+  EXPECT_EQ(ResolveTarget(dir, "target/model.onnx", "32k"), "target/model.onnx");
+  EXPECT_EQ(ResolveTarget(dir, "target/model.onnx", "32768"), "target/model.onnx");
+
+  // The callable decides what exists: a graph supplied from memory is as good as a file.
+  const auto from_memory = [](const std::string& file) { return file == "target/model_8k.onnx"; };
+  EXPECT_EQ(ResolveQwen38TargetGraphFilename("target/model.onnx", "8k", "", from_memory), "target/model_8k.onnx");
+
+  // Auxiliary MTP heads (head_r2, head_s1, head_s2) resolve their matching tier / dynamic_ctx sibling in the same way.
+  TouchPackageFiles(dir, {"mtp/head_r2.onnx", "mtp/head_r2_2k.onnx", "mtp/head_r2_dynamic_ctx.onnx",
+                          "mtp/head_s1.onnx", "mtp/head_s1_8k.onnx", "mtp/head_s2.onnx", "mtp/head_s2_8k.onnx"});
+  EXPECT_EQ(ResolveQwen38AuxiliaryGraphFilename("mtp/head_r2.onnx", "", FilesOf(dir)), "mtp/head_r2.onnx");
+  EXPECT_EQ(ResolveQwen38AuxiliaryGraphFilename("mtp/head_r2.onnx", "2k", FilesOf(dir)), "mtp/head_r2_2k.onnx");
+  EXPECT_EQ(ResolveQwen38AuxiliaryGraphFilename("mtp/head_r2.onnx", "16k", FilesOf(dir)), "mtp/head_r2_dynamic_ctx.onnx");
+  EXPECT_EQ(ResolveQwen38AuxiliaryGraphFilename("mtp/head_r2.onnx", "32k", FilesOf(dir)), "mtp/head_r2.onnx");
+  EXPECT_EQ(ResolveQwen38AuxiliaryGraphFilename("mtp/head_s1.onnx", "8k", FilesOf(dir)), "mtp/head_s1_8k.onnx");
+  EXPECT_EQ(ResolveQwen38AuxiliaryGraphFilename("mtp/head_s2.onnx", "8k", FilesOf(dir)), "mtp/head_s2_8k.onnx");
+  RemoveScratchDir(dir);
+}
+
+// A 32K package need not contain the default graph, and the 32k tier is existence-checked like the others.
+TEST(Qwen38ContextTierTest, TheThirtyTwoKTierFollowsTheFallbackChainOfTheOtherTiers) {
+  for (const std::string& folder : {std::string{}, std::string{"target/"}}) {
+    SCOPED_TRACE("folder '" + folder + "'");
+    const std::string decoder = folder + "model.onnx";
+    const auto dir = MakeScratchDir("tier_32k");
+
+    // Only model_32k.onnx.
+    TouchPackageFiles(dir, {folder + "model_32k.onnx"});
+    EXPECT_EQ(ResolveTarget(dir, decoder, "32k"), folder + "model_32k.onnx");
+    EXPECT_EQ(ResolveTarget(dir, decoder, "32768"), folder + "model_32k.onnx");
+    EXPECT_EQ(ResolveTarget(dir, decoder, "32K"), folder + "model_32k.onnx");
+
+    // Only model_dynamic_ctx.onnx.
+    RemoveScratchDir(dir);
+    std::filesystem::create_directories(dir);
+    TouchPackageFiles(dir, {folder + "model_dynamic_ctx.onnx"});
+    EXPECT_EQ(ResolveTarget(dir, decoder, "32k"), folder + "model_dynamic_ctx.onnx");
+    EXPECT_EQ(ResolveTarget(dir, decoder, "8k"), folder + "model_dynamic_ctx.onnx");
+
+    // The package graph is the 32K one, so it is preferred to the dynamic-context graph, but not to an explicit model_32k.onnx.
+    TouchPackageFiles(dir, {decoder});
+    EXPECT_EQ(ResolveTarget(dir, decoder, "32k"), decoder);
+    EXPECT_EQ(ResolveTarget(dir, decoder, "8k"), folder + "model_dynamic_ctx.onnx");
+    TouchPackageFiles(dir, {folder + "model_32k.onnx"});
+    EXPECT_EQ(ResolveTarget(dir, decoder, "32k"), folder + "model_32k.onnx");
+
+    // Only the decoder: the other tiers fall back to it as they always did.
+    RemoveScratchDir(dir);
+    std::filesystem::create_directories(dir);
+    TouchPackageFiles(dir, {decoder});
+    EXPECT_EQ(ResolveTarget(dir, decoder, "32k"), decoder);
+    EXPECT_EQ(ResolveTarget(dir, decoder, "64k"), decoder);
+    RemoveScratchDir(dir);
+  }
+}
+
+TEST(Qwen38ContextTierTest, ARequestThatMatchesNoGraphIsAClearErrorNamingEveryTriedPath) {
+  const auto dir = MakeScratchDir("tier_missing");
+  TouchPackageFiles(dir, {"unrelated.onnx", "model_8k.onnx"});  // not next to target/model.onnx
+
+  const std::string tier_8k = ResolveTargetError(dir, "target/model.onnx", "8k");
+  for (const char* needle : {"ORT_QWEN38_CONTEXT_LENGTH=8k", "'target/model_8k.onnx'", "'target/model_dynamic_ctx.onnx'", "'target/model.onnx'"}) {
+    EXPECT_NE(tier_8k.find(needle), std::string::npos) << needle << " in: " << tier_8k;
+  }
+  EXPECT_EQ(tier_8k.find("'model_8k.onnx'"), std::string::npos) << tier_8k;
+
+  const std::string tier_32k = ResolveTargetError(dir, "model.onnx", "32768");
+  for (const char* needle : {"ORT_QWEN38_CONTEXT_LENGTH=32768", "'32k'", "'model_32k.onnx'", "'model.onnx'", "'model_dynamic_ctx.onnx'"}) {
+    EXPECT_NE(tier_32k.find(needle), std::string::npos) << needle << " in: " << tier_32k;
+  }
+  RemoveScratchDir(dir);
+}
+
+// Without a context request the decoder is the configured one: no file is looked up, so a missing decoder is still reported by
+// the session creation, and an empty request is no request.
+TEST(Qwen38ContextTierTest, WithoutARequestTheDecoderIsKeptAsConfigured) {
+  std::vector<std::string> looked_up;
+  const auto exists = [&looked_up](const std::string& file) {
+    looked_up.push_back(file);
+    return false;
+  };
+  for (const char* drafts : {"", "0", "4", "-1", "x"}) {
+    EXPECT_EQ(ResolveQwen38TargetGraphFilename("target/model.onnx", "", drafts, exists), "target/model.onnx") << drafts;
+    EXPECT_EQ(ResolveQwen38TargetGraphFilename("model.onnx", "", drafts, exists), "model.onnx") << drafts;
+  }
+  EXPECT_TRUE(looked_up.empty());
+}
+
+TEST(Qwen38ContextTierTest, TheMtpDraftsHookPicksTheGraphOfThatWidthNextToTheDecoderOrUnderTarget) {
+  const auto dir = MakeScratchDir("tier_drafts");
+  TouchPackageFiles(dir, {"model.onnx", "model_s3.onnx", "target/model_s3.onnx", "target/model_s2.onnx", "target/model.onnx",
+                          "target/model_s4.onnx", "model_8k.onnx"});
+  EXPECT_EQ(ResolveTarget(dir, "model.onnx", "", "2"), "model_s3.onnx");
+  EXPECT_EQ(ResolveTarget(dir, "model.onnx", "", "1"), "target/model_s2.onnx");  // no model_s2.onnx next to the decoder
+  EXPECT_EQ(ResolveTarget(dir, "model.onnx", "", "3"), "target/model_s4.onnx");
+  EXPECT_EQ(ResolveTarget(dir, "target/model.onnx", "", "2"), "target/model_s3.onnx");
+  // No graph of that width: the decoder.
+  std::filesystem::remove(dir / "target/model_s4.onnx");
+  EXPECT_EQ(ResolveTarget(dir, "model.onnx", "", "3"), "model.onnx");
+  EXPECT_EQ(ResolveTarget(dir, "target/model.onnx", "", "3"), "target/model.onnx");
+  // A context request takes precedence over the hook.
+  EXPECT_EQ(ResolveTarget(dir, "model.onnx", "8k", "2"), "model_8k.onnx");
+  EXPECT_EQ(ResolveTarget(dir, "model.onnx", "", "2"), "model_s3.onnx");
+  RemoveScratchDir(dir);
+}
+
+TEST(Qwen38ContextTierTest, ARequestIsLowerCasedAndTheTierCountsFoldToTheirNames) {
+  EXPECT_EQ(NormalizeQwen38ContextTier(""), "");
+  const std::vector<std::pair<std::string, std::string>> tiers = {
+      {"2k", "2k"}, {"8K", "8k"}, {"128K", "128k"}, {"256K", "256k"}, {"2048", "2k"}, {"8192", "8k"}, {"16384", "16k"}, {"32768", "32k"}, {"65536", "64k"}, {"131072", "128k"}, {"262144", "256k"}, {"4096", "4096"}, {"Dynamic", "dynamic"}};
+  for (const auto& [request, tier] : tiers) EXPECT_EQ(NormalizeQwen38ContextTier(request), tier) << request;
+
+  // A tier becomes part of a file name: nothing that could leave the folder or name another file is accepted.
+  for (const char* request : {"../8k", "8 k", "8k\n", "model_8k.onnx", "8k/", "8k\\", "k\xc3\xa9"}) {
+    EXPECT_THROW(NormalizeQwen38ContextTier(request), std::invalid_argument) << request;
+  }
+  bool looked_up = false;
+  const auto exists = [&looked_up](const std::string&) {
+    looked_up = true;
+    return true;
+  };
+  EXPECT_THROW(ResolveQwen38TargetGraphFilename("model.onnx", "../8k", "", exists), std::invalid_argument);
+  EXPECT_FALSE(looked_up);
+}
+
+// The pre-upload reader of the output names must see the graph that CreateSession opens: the constructor resolves the file once
+// and hands the one name to both.
+TEST(Qwen38ContextTierTest, TheOutputNamesAreReadFromTheGraphThatTheTierSelects) {
+  const auto dir = MakeScratchDir("tier_reader");
+  const std::vector<std::string> compact = {"logits", "next_tokens", "present.0.key", "state_update.1.conv_value"};
+  const std::vector<std::string> ring = {"logits", "next_tokens", "present.0.key", "present_mid.0.key"};
+  std::filesystem::create_directories(dir / "target");
+  WriteFile(dir / "target/model.onnx", OnnxModelBytes(ring, 64));
+  WriteFile(dir / "target/model_8k.onnx", OnnxModelBytes(compact, 64));
+
+  const std::string decoder = ResolveTarget(dir, "target/model.onnx", "");
+  EXPECT_EQ(decoder, "target/model.onnx");
+  EXPECT_THROW(ValidateQwen38TargetModelFile(2, dir / decoder), std::runtime_error);  // a ring-bank graph cannot serve 2 slots
+
+  const std::string tier = ResolveTarget(dir, "target/model.onnx", "8k");
+  EXPECT_EQ(tier, "target/model_8k.onnx");
+  EXPECT_NO_THROW(ValidateQwen38TargetModelFile(2, dir / tier));
+  ASSERT_TRUE(ReadQwen38OnnxOutputNames(dir / tier).has_value());
+  EXPECT_EQ(*ReadQwen38OnnxOutputNames(dir / tier), compact);
+  RemoveScratchDir(dir);
+}
+
+// Synchronizing the capacity of the target graph is distinct from enlarging the generation budget of a request. Source checks,
+// no Engine allocation run: Engine::CreateRequest takes the budget from search.max_length.
+TEST(Qwen38ContextSyncTest, WithoutAContextRequestASmallerLimitIsKeptAndALargerOneIsClamped) {
+  const int64_t positions = 33032;  // the 32K graph
+  const Qwen38GraphContext limited = SyncQwen38GraphContext(positions, 4096, false);
+  EXPECT_EQ(limited.kv_capacity, 33032);
+  EXPECT_EQ(limited.context_length, 33024);
+  EXPECT_EQ(limited.max_length, 4096);  // not 33024
+
+  EXPECT_EQ(SyncQwen38GraphContext(positions, 1, false).max_length, 1);
+  EXPECT_EQ(SyncQwen38GraphContext(positions, 33023, false).max_length, 33023);
+  EXPECT_EQ(SyncQwen38GraphContext(positions, 33024, false).max_length, 33024);
+  for (const int limit : {33025, 33032, 40000, 131072, std::numeric_limits<int>::max()}) {
+    const Qwen38GraphContext clamped = SyncQwen38GraphContext(positions, limit, false);
+    EXPECT_EQ(clamped.max_length, 33024) << limit;
+    EXPECT_EQ(clamped.kv_capacity, 33032) << limit;
+    EXPECT_EQ(clamped.context_length, 33024) << limit;
+  }
+  // A missing limit has nothing to keep: the whole context.
+  for (const int limit : {0, -1}) EXPECT_EQ(SyncQwen38GraphContext(positions, limit, false).max_length, 33024) << limit;
+}
+
+TEST(Qwen38ContextSyncTest, ARequestedContextTierTakesTheWholeContextAsDocumented) {
+  for (const int limit : {0, 1, 4096, 33024, 40000}) {
+    const Qwen38GraphContext context = SyncQwen38GraphContext(33032, limit, true);
+    EXPECT_EQ(context.kv_capacity, 33032) << limit;
+    EXPECT_EQ(context.context_length, 33024) << limit;
+    EXPECT_EQ(context.max_length, 33024) << limit;
+  }
+}
+
+TEST(Qwen38ContextSyncTest, TheCapacityFollowsEveryGraphWhateverTheLimit) {
+  for (const int64_t positions : {2056, 8200, 16392, 33032, 65544, 131080}) {
+    const int context_length = static_cast<int>(positions) - kQwen38GraphIdMaxRows;
+    for (const bool requested : {false, true}) {
+      for (const int limit : {0, 4096, 70000}) {
+        const Qwen38GraphContext context = SyncQwen38GraphContext(positions, limit, requested);
+        EXPECT_EQ(context.kv_capacity, positions) << positions;
+        EXPECT_EQ(context.context_length, context_length) << positions;
+        EXPECT_LE(context.max_length, context.context_length) << positions << " " << limit << " " << requested;
+        const int expected = requested || limit == 0 ? context_length : std::min(limit, context_length);
+        EXPECT_EQ(context.max_length, expected) << positions << " " << limit << " " << requested;
+      }
+    }
+  }
+  // A graph no wider than the verify rows still leaves one position of context; one that has no positions is no graph.
+  for (const int64_t positions : {1, 8, 9}) {
+    EXPECT_EQ(SyncQwen38GraphContext(positions, 4096, false).kv_capacity, positions);
+    EXPECT_EQ(SyncQwen38GraphContext(positions, 4096, false).context_length, std::max<int64_t>(1, positions - kQwen38GraphIdMaxRows));
+  }
+  EXPECT_THROW(SyncQwen38GraphContext(0, 4096, false), std::invalid_argument);
+  EXPECT_THROW(SyncQwen38GraphContext(-1, 4096, true), std::invalid_argument);
+  EXPECT_EQ(SyncQwen38GraphContext(int64_t{1} << 40, 4096, false).kv_capacity, std::numeric_limits<int>::max());
+
+  // Padded past_position_ids (e.g. 33040 positions for a 33028 KV cache) must not override the static KV cache capacity.
+  const std::vector<Qwen38CacheInput> padded = {
+      {"past_position_ids", {-1, 33040}},
+      {"past_key_values.3.key", {-1, 2, 33028, 256}},
+      {"past_key_values.3.index_key", {-1, 8260, 128}},
+  };
+  const int64_t kv_cap = ResolveQwen38GraphKvCapacity(padded);
+  EXPECT_EQ(kv_cap, 33028);
+  EXPECT_NO_THROW(ValidateQwen38CacheShapes(padded, static_cast<int>(kv_cap), "target"));
+}
+
+// The DFlash drafter's prompt-feature buffer gives every slot Qwen38DflashPromptSlotRows rows. The warm-up of the drafter views
+// verify_rows rows of every slot from it, so a prefill.chunk below the verify width (chunk 4 against S=8) must not shrink it.
+TEST(Qwen38DflashPromptBufferTest, EverySlotOwnsAtLeastAChunkAndTheVerifyWidthOfRows) {
+  EXPECT_EQ(Qwen38DflashPromptSlotRows(4, 8), 8u);
+  EXPECT_EQ(Qwen38DflashPromptSlotRows(1, 2), 2u);
+  EXPECT_EQ(Qwen38DflashPromptSlotRows(8, 8), 8u);
+  EXPECT_EQ(Qwen38DflashPromptSlotRows(9, 8), 9u);
+  EXPECT_EQ(Qwen38DflashPromptSlotRows(2048, 8), 2048u);
+  for (const int chunk : {1, 2, 3, 4, 7, 8, 9, 16, 512, 2048}) {
+    for (int verify_rows = 2; verify_rows <= 8; ++verify_rows) {
+      const size_t slot_rows = Qwen38DflashPromptSlotRows(chunk, verify_rows);
+      EXPECT_GE(slot_rows, static_cast<size_t>(chunk));
+      EXPECT_GE(slot_rows, static_cast<size_t>(verify_rows));
+      for (size_t batch = 1; batch <= 8; ++batch) {
+        // The rows of the warm-up view (batch x verify_rows) fit the buffer (batch x slot_rows).
+        EXPECT_LE(batch * static_cast<size_t>(verify_rows), batch * slot_rows) << chunk << "/" << verify_rows << "/" << batch;
+      }
+    }
+  }
+  EXPECT_THROW(Qwen38DflashPromptSlotRows(0, 8), std::invalid_argument);
+  EXPECT_THROW(Qwen38DflashPromptSlotRows(4, 0), std::invalid_argument);
+  EXPECT_THROW(Qwen38DflashPromptSlotRows(-1, 8), std::invalid_argument);
+}
+
+// Reset() and ResetSlot(0) forget the prompt of the request the slot served, so a long-lived engine holds the prompt of the
+// request in flight only and its host memory does not grow with the number of tokens served.
+TEST(Qwen38PromptTokensTest, ForgettingAPromptDropsItsTokensAndTheBufferOfALongOne) {
+  std::vector<int32_t> tokens;
+  Qwen38ForgetPromptTokens(tokens);  // nothing to forget
+  EXPECT_TRUE(tokens.empty());
+
+  // A request whose prompt arrives in 8-token chunks.
+  for (int chunk = 0; chunk < 100; ++chunk) tokens.insert(tokens.end(), 8, chunk);
+  ASSERT_EQ(tokens.size(), 800u);
+  const size_t short_capacity = tokens.capacity();
+  Qwen38ForgetPromptTokens(tokens);
+  EXPECT_TRUE(tokens.empty());
+  EXPECT_EQ(tokens.capacity(), short_capacity) << "a short prompt keeps its buffer for the next request";
+
+  // The next request starts from an empty prompt, not from the previous one.
+  tokens.insert(tokens.end(), {1, 2, 3});
+  EXPECT_EQ(tokens, (std::vector<int32_t>{1, 2, 3}));
+  Qwen38ForgetPromptTokens(tokens);
+
+  tokens.assign(4 * kQwen38RetainedPromptTokens, 7);
+  ASSERT_GT(tokens.capacity(), kQwen38RetainedPromptTokens);
+  Qwen38ForgetPromptTokens(tokens);
+  EXPECT_TRUE(tokens.empty());
+  EXPECT_LE(tokens.capacity(), kQwen38RetainedPromptTokens) << "the buffer of a long prompt is given back";
+
+  // Many requests, none longer than the retained size: the allocation stays where it is.
+  for (int request = 0; request < 1000; ++request) {
+    tokens.assign(kQwen38RetainedPromptTokens, request);
+    Qwen38ForgetPromptTokens(tokens);
+    EXPECT_TRUE(tokens.empty());
+    EXPECT_LE(tokens.capacity(), kQwen38RetainedPromptTokens);
+  }
+}
+
+// A device with several slots keeps the validation bits of a decode in the slot that ran it. Its decode status is the status of
+// every slot that started a decode, slot 0 or not, and a slot that never started is not even read.
+namespace {
+
+struct ScriptedStatusBits {
+  std::map<size_t, int64_t> bits;
+  std::vector<size_t> read;
+  std::function<int64_t(size_t)> Reader() {
+    return [this](size_t slot) {
+      read.push_back(slot);
+      const auto found = bits.find(slot);
+      return found == bits.end() ? int64_t{0} : found->second;
+    };
+  }
+};
+
+std::string StatusMessage(std::span<const bool> started, const std::function<int64_t(size_t)>& reader) {
+  try {
+    CheckQwen38DecodeStatus(started, reader);
+  } catch (const std::runtime_error& e) {
+    return e.what();
+  }
+  return {};
+}
+
+}  // namespace
+
+TEST(Qwen38DecodeStatusTest, OnlySlotsThatStartedADecodeAreReadAndCleanBitsPass) {
+  ScriptedStatusBits device;
+  const std::array<bool, 4> started{true, true, false, true};
+  const auto reader = device.Reader();
+  EXPECT_NO_THROW(CheckQwen38DecodeStatus(started, reader));
+  EXPECT_EQ(device.read, (std::vector<size_t>{0, 1, 3}));
+
+  device.read.clear();
+  device.bits[2] = 8;  // bits of a slot that never started a decode (stale memory) are not looked at
+  EXPECT_NO_THROW(CheckQwen38DecodeStatus(started, reader));
+  EXPECT_EQ(device.read, (std::vector<size_t>{0, 1, 3}));
+
+  const std::array<bool, 3> none{false, false, false};
+  device.read.clear();
+  EXPECT_NO_THROW(CheckQwen38DecodeStatus(none, reader));
+  EXPECT_TRUE(device.read.empty());
+  EXPECT_NO_THROW(CheckQwen38DecodeStatus(std::span<const bool>{}, reader));
+}
+
+TEST(Qwen38DecodeStatusTest, ErrorBitsOfANonZeroSlotAreReportedAndNameTheSlot) {
+  const std::array<bool, 4> started{true, true, false, true};
+  for (const size_t failing : {size_t{1}, size_t{3}}) {
+    ScriptedStatusBits device;
+    device.bits[failing] = 4;
+    const std::string message = StatusMessage(started, device.Reader());
+    EXPECT_NE(message.find("slot " + std::to_string(failing) + "=4"), std::string::npos) << message;
+    EXPECT_NE(message.find("device error bits"), std::string::npos) << message;
+    EXPECT_EQ(message.find("slot 0"), std::string::npos) << message;
+  }
+}
+
+TEST(Qwen38DecodeStatusTest, EverySlotWithErrorBitsIsNamedAndEveryStartedSlotIsStillRead) {
+  ScriptedStatusBits device;
+  device.bits[0] = 1;
+  device.bits[3] = 6;
+  const std::array<bool, 4> started{true, true, false, true};
+  const std::string message = StatusMessage(started, device.Reader());
+  EXPECT_NE(message.find("slot 0=1"), std::string::npos) << message;
+  EXPECT_NE(message.find("slot 3=6"), std::string::npos) << message;
+  EXPECT_EQ(message.find("slot 1"), std::string::npos) << message;
+  EXPECT_EQ(device.read, (std::vector<size_t>{0, 1, 3}));
+}
+
+TEST(Qwen38DecodeStatusTest, ADeviceWithASingleSlotKeepsItsMessage) {
+  ScriptedStatusBits device;
+  device.bits[0] = 2;
+  const std::array<bool, 1> started{true};
+  EXPECT_EQ(StatusMessage(started, device.Reader()), "qwen38_graph: device error bits 2 after decode");
+
+  const std::array<bool, 1> not_started{false};
+  device.read.clear();
+  EXPECT_EQ(StatusMessage(not_started, device.Reader()), "");  // nothing to check before the decode started
+  EXPECT_TRUE(device.read.empty());
+}
+
+TEST(Qwen38GraphConfigTest, DflashWarmupAtModelCreationHonorsTheWarmupSetting) {
+  // warmup=false: the engine runs no forward while the model is created, neither the drafter's nor the target's.
+  Config off;
+  OverlayConfig(off, R"({"model":{"type":"qwen38_flash_graph","qwen38_graph":{"warmup":false}}})");
+  ASSERT_FALSE(off.model.qwen38_graph.warmup);
+  const Qwen38DflashWarmupPlan skipped = PlanQwen38DflashWarmup(off.model.qwen38_graph.warmup, 8, 2);
+  EXPECT_FALSE(skipped.drafter);
+  EXPECT_EQ(skipped.target_tokens, 0u);
+
+  // The default warms up: twelve S=8 target forwards (every ring bank of the compact replay, enough runs to capture each).
+  Config on;
+  ASSERT_TRUE(on.model.qwen38_graph.warmup);
+  const Qwen38DflashWarmupPlan s8 = PlanQwen38DflashWarmup(on.model.qwen38_graph.warmup, 8, 2);
+  EXPECT_TRUE(s8.drafter);
+  EXPECT_EQ(s8.target_tokens, 8u * 2u * static_cast<size_t>(kQwen38WarmupRunsPerGraph));
+  EXPECT_EQ(s8.target_tokens / 8, 12u);
+
+  const Qwen38DflashWarmupPlan s4 = PlanQwen38DflashWarmup(true, 4, 5);
+  EXPECT_TRUE(s4.drafter);
+  EXPECT_EQ(s4.target_tokens, 4u * 5u * static_cast<size_t>(kQwen38WarmupRunsPerGraph));
+
+  // A pipeline without verify rows or ring banks has nothing to warm up.
+  EXPECT_FALSE(PlanQwen38DflashWarmup(true, 0, 2).drafter);
+  EXPECT_EQ(PlanQwen38DflashWarmup(true, 8, 0).target_tokens, 0u);
+}
+
+TEST(Qwen38ReplayCoverageTest, RequiresEveryBankedStateToHaveAStateUpdateOutput) {
+  const std::vector<std::string> bank_names = {
+      "past_key_values.0.conv_state",
+      "past_key_values.0.recurrent_state",
+      "past_key_values.1.ple_conv_state",
+      "past_key_values.1.ple_context",
+      "past_key_values.3.index_buffer",
+      "past_key_values.3.index_lengths",
+  };
+  const std::vector<std::string> complete_updates = {
+      "state_update.0.conv_value",
+      "state_update.0.recurrent_capsule",
+      "state_update.1.ple_conv_value",
+      "state_update.3.indexer_value",
+  };
+  // ple_context is exempt in folded SpeculativePrefixCommit targets because the plane prepares PLE rows from
+  // fold.ctx_commit / fold.ctx_a and SpeculativePrefixCommit commits the accepted n-gram context to fold.ctx_commit_out.
+  EXPECT_NO_THROW(RequireQwen38ReplayCoverage(bank_names, complete_updates));
+  EXPECT_NO_THROW(RequireQwen38ReplayCoverage({"past_key_values.1.ple_context"}, {}));
+
+  // Missing recurrent_capsule, conv_value, ple_conv_value, or indexer_value must still be rejected naming both tensors.
+  try {
+    RequireQwen38ReplayCoverage(
+        bank_names, {"state_update.0.conv_value", "state_update.1.ple_conv_value", "state_update.3.indexer_value"});
+    ADD_FAILURE() << "expected missing state_update.0.recurrent_capsule to be rejected";
+  } catch (const std::runtime_error& e) {
+    const std::string msg = e.what();
+    EXPECT_NE(msg.find("state_update.0.recurrent_capsule"), std::string::npos) << msg;
+    EXPECT_NE(msg.find("past_key_values.0.recurrent_state"), std::string::npos) << msg;
+  }
+  EXPECT_THROW(RequireQwen38ReplayCoverage(
+                   bank_names, {"state_update.0.recurrent_capsule", "state_update.1.ple_conv_value", "state_update.3.indexer_value"}),
+               std::runtime_error);
+  EXPECT_THROW(RequireQwen38ReplayCoverage(
+                   bank_names, {"state_update.0.conv_value", "state_update.0.recurrent_capsule", "state_update.3.indexer_value"}),
+               std::runtime_error);
+  EXPECT_THROW(RequireQwen38ReplayCoverage(
+                   bank_names, {"state_update.0.conv_value", "state_update.0.recurrent_capsule", "state_update.1.ple_conv_value"}),
+               std::runtime_error);
+  EXPECT_THROW(RequireQwen38ReplayCoverage({"past_key_values.1.unknown_state"}, complete_updates), std::runtime_error);
+}
+
+// Every graph the engine warms up (the single-slot target and head graphs and each batched target graph, one per batch size and
+// bank) gets one run when its session does not capture CUDA graphs, and enough runs to be captured and replayed when it does:
+// ORT captures a graph on its third run by default, so a single run would leave the capture to a live request.
+TEST(Qwen38GraphConfigTest, AGraphIsRunEnoughTimesToBeCapturedOnlyWhenItsSessionCaptures) {
+  EXPECT_EQ(Qwen38WarmupRuns(false), 1);
+  EXPECT_EQ(Qwen38WarmupRuns(true), kQwen38WarmupRunsPerGraph);
+  EXPECT_GE(Qwen38WarmupRuns(true), 3 + 1);  // the capture run (the third) and one replay
+}
+
+namespace {
+
+using DflashChunk = Qwen38DflashPromptFeatures::Chunk;
+
+struct DflashPromptRun {
+  std::vector<DflashChunk> ingested;  // what the drafter is given while the prompt is prefilled, in order
+  std::optional<DflashChunk> last;    // what decoding takes when it begins
+};
+
+// What Qwen38GraphEngine::FastAppend does with the features of a prompt that arrives in calls of `call_rows` tokens, each
+// run as forwards of at most `forward_rows`. `announced` is the prompt length the executor announces up front, 0 when it is
+// not: a call then knows only the end of its own tokens.
+DflashPromptRun RunDflashPrompt(Qwen38DflashPromptFeatures& features, size_t prompt, size_t call_rows, size_t forward_rows,
+                                size_t announced) {
+  DflashPromptRun run;
+  for (size_t base = 0; base < prompt; base += call_rows) {
+    const size_t n = prompt - base < call_rows ? prompt - base : call_rows;
+    const size_t total_expected = base + n > announced ? base + n : announced;
+    if (const auto saved = features.BeginCall(total_expected)) run.ingested.push_back(*saved);
+    for (size_t lo = 0; lo < n;) {
+      const size_t m = n - lo < forward_rows ? n - lo : forward_rows;
+      if (const auto ingest = features.ChunkDone({base + lo, m}, lo + m == n, total_expected)) run.ingested.push_back(*ingest);
+      lo += m;
+    }
+  }
+  run.last = features.TakeSavedChunk();
+  return run;
+}
+
+// The drafter has the last `window` positions of the prompt without a gap: what it ingested and the chunk decoding takes
+// follow one another and end at the end of the prompt, and the first of them starts no later than the window does.
+void ExpectDrafterHasTheWindow(const DflashPromptRun& run, size_t prompt, size_t window) {
+  ASSERT_TRUE(run.last.has_value());
+  EXPECT_EQ(run.last->position + run.last->rows, prompt);
+  const size_t first = run.ingested.empty() ? run.last->position : run.ingested.front().position;
+  size_t next = first;
+  for (const DflashChunk& chunk : run.ingested) {
+    EXPECT_EQ(chunk.position, next);
+    next = chunk.position + chunk.rows;
+  }
+  EXPECT_EQ(run.last->position, next);
+  EXPECT_LE(first, prompt > window ? prompt - window : size_t{0});
+}
+
+}  // namespace
+
+TEST(Qwen38DflashPromptFeaturesTest, WithoutAWindowEveryChunkButTheLastIsIngestedInOrder) {
+  Qwen38DflashPromptFeatures features;  // the drafter attends to the whole prompt
+  const DflashPromptRun run = RunDflashPrompt(features, 1000, 256, 128, 0);
+  EXPECT_EQ(run.ingested.size(), 7u);
+  ExpectDrafterHasTheWindow(run, 1000, 1000);
+  ASSERT_TRUE(run.last.has_value());
+  EXPECT_EQ(run.last->position, 896u);
+  EXPECT_EQ(run.last->rows, 104u);
+
+  // A window larger than the prompt is the same.
+  Qwen38DflashPromptFeatures wide(5000);
+  EXPECT_EQ(RunDflashPrompt(wide, 1000, 256, 128, 1000).ingested.size(), 7u);
+}
+
+TEST(Qwen38DflashPromptFeaturesTest, ChunksBeforeTheWindowAreSkippedByAbsolutePosition) {
+  // The window of 100 positions at the end of a 1000-token prompt is [900, 1000).
+  Qwen38DflashPromptFeatures features(100);
+  EXPECT_FALSE(features.ChunkDone({700, 100}, false, 1000).has_value());
+  EXPECT_FALSE(features.ChunkDone({800, 100}, false, 1000).has_value());  // [800, 900) ends where the window begins
+  const auto reaching = features.ChunkDone({801, 100}, false, 1000);      // [801, 901) holds position 900
+  ASSERT_TRUE(reaching.has_value());
+  EXPECT_EQ(reaching->position, 801u);
+  EXPECT_EQ(reaching->rows, 100u);
+
+  // A prompt length below the end of a chunk (it is never announced so) is not an unsigned wrap to "far before the window".
+  Qwen38DflashPromptFeatures unsure(50);
+  EXPECT_TRUE(unsure.ChunkDone({0, 500}, false, 100).has_value());
+}
+
+TEST(Qwen38DflashPromptFeaturesTest, IngestionStaysContiguousOnceItHasBegun) {
+  Qwen38DflashPromptFeatures features(100);
+  ASSERT_TRUE(features.ChunkDone({900, 50}, false, 1000).has_value());
+  // The prompt turns out longer than it was known to be. Chunks that now fall before the window are still ingested, as the
+  // context of the drafter would otherwise have a gap.
+  EXPECT_TRUE(features.ChunkDone({950, 50}, false, 1200).has_value());
+  EXPECT_TRUE(features.ChunkDone({1000, 50}, false, 1200).has_value());
+}
+
+TEST(Qwen38DflashPromptFeaturesTest, ALongPromptIngestsOnlyItsWindowHoweverTheExecutorSplitsIt) {
+  // The window is sliding_window 512 plus block 16. The executor calls with prefill chunks (256 tokens here, one forward
+  // per call), and every call ends with a chunk saved for the next one: ingesting that unconditionally began the ingestion
+  // of the whole history.
+  constexpr size_t kPrompt = 4096;
+  constexpr size_t kWindow = 528;
+  constexpr size_t kForward = 256;
+  for (const size_t call_rows : {size_t{256}, size_t{512}, size_t{1024}, size_t{4096}}) {
+    SCOPED_TRACE("call_rows=" + std::to_string(call_rows));
+    Qwen38DflashPromptFeatures features(kWindow);
+    const DflashPromptRun run = RunDflashPrompt(features, kPrompt, call_rows, kForward, kPrompt);
+    // [3328, 3584) and [3584, 3840) reach into the window [3568, 4096); the chunk before them ends at 3328, outside it.
+    ASSERT_EQ(run.ingested.size(), 2u);
+    EXPECT_EQ(run.ingested[0].position, 3328u);
+    EXPECT_EQ(run.ingested[1].position, 3584u);
+    ASSERT_TRUE(run.last.has_value());
+    EXPECT_EQ(run.last->position, 3840u);
+    EXPECT_EQ(run.last->rows, 256u);
+    ExpectDrafterHasTheWindow(run, kPrompt, kWindow);
+  }
+}
+
+TEST(Qwen38DflashPromptFeaturesTest, APromptLengthThatIsNotAnnouncedNeverDropsWhatTheWindowNeeds) {
+  // Without ExpectPrefillTokens a call knows the end of its own tokens, a lower bound of the prompt length: a chunk it
+  // drops is before the window for sure, one it keeps may reach back further than needed.
+  constexpr size_t kWindow = 528;
+  for (const size_t prompt : {size_t{300}, size_t{1000}, size_t{3000}, size_t{4097}}) {
+    for (const size_t call_rows : {size_t{100}, size_t{256}, size_t{700}, size_t{1024}}) {
+      for (const size_t forward_rows : {size_t{64}, size_t{256}, size_t{1024}}) {
+        SCOPED_TRACE("prompt=" + std::to_string(prompt) + " call_rows=" + std::to_string(call_rows) +
+                     " forward_rows=" + std::to_string(forward_rows));
+        Qwen38DflashPromptFeatures features(kWindow);
+        ExpectDrafterHasTheWindow(RunDflashPrompt(features, prompt, call_rows, forward_rows, 0), prompt, kWindow);
+      }
+    }
+  }
+
+  // Calls at least as large as the window prove with their own length that the earlier chunks are outside it, so only the
+  // chunk next to the last one is ingested here.
+  Qwen38DflashPromptFeatures features(kWindow);
+  const DflashPromptRun run = RunDflashPrompt(features, 3000, 700, 700, 0);
+  ASSERT_EQ(run.ingested.size(), 1u);
+  EXPECT_EQ(run.ingested[0].position, 2100u);
+}
+
+TEST(Qwen38DflashPromptFeaturesTest, TheLastChunkOfACallIsSavedForTheNextCallOrForDecoding) {
+  Qwen38DflashPromptFeatures features(100);
+  // Decoding takes the last chunk of the prompt whatever the window says, far before it here.
+  EXPECT_FALSE(features.ChunkDone({0, 10}, true, 10000).has_value());
+  const auto saved = features.TakeSavedChunk();
+  ASSERT_TRUE(saved.has_value());
+  EXPECT_EQ(saved->position, 0u);
+  EXPECT_EQ(saved->rows, 10u);
+  EXPECT_FALSE(features.TakeSavedChunk().has_value());
+}
+
+TEST(Qwen38DflashPromptFeaturesTest, ASavedChunkIsIngestedOnceByTheNextCallAndDroppedBeforeTheWindow) {
+  Qwen38DflashPromptFeatures features(100);
+  EXPECT_FALSE(features.ChunkDone({0, 100}, true, 100).has_value());
+  EXPECT_FALSE(features.BeginCall(1000).has_value());   // [0, 100) is 900 positions short of the end
+  EXPECT_FALSE(features.TakeSavedChunk().has_value());  // and nothing stale is left behind
+
+  EXPECT_FALSE(features.ChunkDone({850, 100}, true, 1000).has_value());
+  const auto reaching = features.BeginCall(1000);  // [850, 950) is within the window [900, 1000)
+  ASSERT_TRUE(reaching.has_value());
+  EXPECT_EQ(reaching->position, 850u);
+  EXPECT_EQ(reaching->rows, 100u);
+  EXPECT_FALSE(features.TakeSavedChunk().has_value());  // the next call ingests a chunk once
+}
+
+TEST(Qwen38DflashPromptFeaturesTest, ResetStartsTheNextTurnFromScratch) {
+  Qwen38DflashPromptFeatures features(528);
+  const DflashPromptRun first = RunDflashPrompt(features, 4096, 256, 256, 4096);
+  ASSERT_EQ(first.ingested.size(), 2u);
+
+  // A turn that ends with a chunk saved and ingestion under way leaves neither behind.
+  features.ChunkDone({3840, 256}, true, 4096);
+  features.Reset();
+  EXPECT_FALSE(features.TakeSavedChunk().has_value());
+  const DflashPromptRun second = RunDflashPrompt(features, 4096, 256, 256, 4096);
+  ASSERT_EQ(second.ingested.size(), first.ingested.size());
+  EXPECT_EQ(second.ingested.front().position, first.ingested.front().position);
+}
+
+namespace {
+
+// One slot of a multi-slot engine while its prompt is prefilled, driven as Qwen38GraphExecutor and FastAppendSlot do: the
+// first call of the slot announces the prompt length, every call prefills a chunk of at most `call_rows` tokens as forwards
+// of at most `forward_rows`, and the last chunk of the prompt goes to decoding with the slot's hand-off.
+struct DflashSlotPrompt {
+  DflashSlotPrompt(size_t prompt_tokens, size_t window) : prompt{prompt_tokens}, features{window} {}
+
+  size_t prompt;
+  Qwen38DflashPromptFeatures features;
+  size_t prefilled{0};
+  DflashPromptRun run;
+};
+
+// `hint_slot` is the slot of `hints` that holds the prompt length of the slot: its own, unless a test shares one.
+void PrefillDflashSlotCall(Qwen38OrtRunHints& hints, size_t hint_slot, DflashSlotPrompt& slot, size_t call_rows,
+                           size_t forward_rows) {
+  const size_t base = slot.prefilled;
+  const size_t n = std::min(call_rows, slot.prompt - base);
+  if (base == 0) hints.ExpectPrefillTokens(hint_slot, slot.prompt);
+  const size_t total_expected = hints.BeginPromptChunk(hint_slot, base, n);
+  if (const auto saved = slot.features.BeginCall(total_expected)) slot.run.ingested.push_back(*saved);
+  for (size_t lo = 0; lo < n;) {
+    const size_t m = std::min(forward_rows, n - lo);
+    if (const auto ingest = slot.features.ChunkDone({base + lo, m}, lo + m == n, total_expected)) {
+      slot.run.ingested.push_back(*ingest);
+    }
+    lo += m;
+  }
+  slot.prefilled += n;
+  if (slot.prefilled == slot.prompt) {
+    slot.run.last = slot.features.TakeSavedChunk();
+    hints.MarkHandoff(hint_slot);
+  }
+}
+
+struct DflashPromptMix {
+  size_t short_prompt;  // slot 0
+  size_t long_prompt;   // slot 1
+  size_t window;
+  size_t call_rows;
+  size_t forward_rows;
+
+  size_t Calls(size_t prompt) const { return (prompt + call_rows - 1) / call_rows; }
+  size_t ShortCalls() const { return Calls(short_prompt); }
+  size_t LongCalls() const { return Calls(long_prompt); }
+};
+
+// The prompts of both slots when the executor hands the slots their calls in `order` (the slot each next call is for).
+// `shared_length` has the slots read one prompt length, as the process-wide variable they used to did.
+std::array<DflashPromptRun, 2> RunInterleavedDflashPrompts(const std::vector<size_t>& order, const DflashPromptMix& mix,
+                                                           bool shared_length) {
+  Qwen38OrtRunHints hints(2);
+  std::array<DflashSlotPrompt, 2> slots = {DflashSlotPrompt{mix.short_prompt, mix.window},
+                                           DflashSlotPrompt{mix.long_prompt, mix.window}};
+  for (const size_t s : order) {
+    PrefillDflashSlotCall(hints, shared_length ? 0 : s, slots[s], mix.call_rows, mix.forward_rows);
+  }
+  return {slots[0].run, slots[1].run};
+}
+
+// Every order of the calls of the two slots, each slot's own calls staying in sequence.
+std::vector<std::vector<size_t>> EveryInterleaving(const DflashPromptMix& mix) {
+  std::vector<size_t> order(mix.ShortCalls(), 0);
+  order.insert(order.end(), mix.LongCalls(), 1);  // sorted, so next_permutation visits each distinct order once
+  std::vector<std::vector<size_t>> orders;
+  do {
+    orders.push_back(order);
+  } while (std::next_permutation(order.begin(), order.end()));
+  return orders;
+}
+
+void ExpectSameDflashRun(const DflashPromptRun& actual, const DflashPromptRun& expected) {
+  ASSERT_EQ(actual.ingested.size(), expected.ingested.size());
+  for (size_t i = 0; i < expected.ingested.size(); ++i) {
+    EXPECT_EQ(actual.ingested[i].position, expected.ingested[i].position) << "ingested chunk " << i;
+    EXPECT_EQ(actual.ingested[i].rows, expected.ingested[i].rows) << "ingested chunk " << i;
+  }
+  ASSERT_EQ(actual.last.has_value(), expected.last.has_value());
+  if (expected.last) {
+    EXPECT_EQ(actual.last->position, expected.last->position);
+    EXPECT_EQ(actual.last->rows, expected.last->rows);
+  }
+}
+
+size_t RowsOfDflashRun(const DflashPromptRun& run) {
+  size_t rows = run.last ? run.last->rows : 0;
+  for (const DflashChunk& chunk : run.ingested) rows += chunk.rows;
+  return rows;
+}
+
+// 9000- and 32768-token prompts, the drafter window of 2056 positions (sliding window 2048 plus a block of 8).
+constexpr DflashPromptMix kTwoPrompts8192{9000, 32768, 2056, 8192, 8192};
+
+}  // namespace
+
+TEST(Qwen38DflashPromptFeaturesTest, TwoSlotsThatInterleaveTheirChunksEachKeepTheirOwnPromptLength) {
+  const DflashPromptMix mix = kTwoPrompts8192;
+  // Slot 0 holds back its first 8192 rows until its second chunk, and reaches decoding with the 808 rows of its tail: that
+  // is short of the window, so the held-back rows are needed and ingested, whatever the other slot announced meanwhile.
+  const std::vector<std::vector<size_t>> orders = {{0, 1, 0, 1, 1, 1}, {1, 0, 1, 0, 1, 1}};
+  for (const std::vector<size_t>& order : orders) {
+    SCOPED_TRACE("first call for slot " + std::to_string(order.front()));
+    const auto runs = RunInterleavedDflashPrompts(order, mix, false);
+
+    ASSERT_EQ(runs[0].ingested.size(), 1u);
+    EXPECT_EQ(runs[0].ingested[0].position, 0u);
+    EXPECT_EQ(runs[0].ingested[0].rows, 8192u);
+    ASSERT_TRUE(runs[0].last.has_value());
+    EXPECT_EQ(runs[0].last->position, 8192u);
+    EXPECT_EQ(runs[0].last->rows, 808u);
+    EXPECT_EQ(RowsOfDflashRun(runs[0]), 8192u + 808u);
+    ExpectDrafterHasTheWindow(runs[0], mix.short_prompt, mix.window);
+
+    // The 32768-token prompt is past its window until its last chunk, which alone holds more than the window.
+    EXPECT_TRUE(runs[1].ingested.empty());
+    ASSERT_TRUE(runs[1].last.has_value());
+    EXPECT_EQ(runs[1].last->position, 24576u);
+    EXPECT_EQ(runs[1].last->rows, 8192u);
+    ExpectDrafterHasTheWindow(runs[1], mix.long_prompt, mix.window);
+  }
+}
+
+TEST(Qwen38DflashPromptFeaturesTest, EveryInterleavingOfTwoSlotsGivesEachPromptItsOwnOutcome) {
+  // Whole 8192-token calls decide the held-back chunk of a slot when its next call begins; the small forwards of the other
+  // chunkings make the calls decide chunks while they run, so both predicates meet every order of the calls of the slots.
+  const DflashPromptMix mixes[] = {kTwoPrompts8192,
+                                   {9000, 32768, 2056, 8192, 2048},
+                                   {9000, 32768, 2056, 4096, 1024},
+                                   {9000, 32768, 2056, 3000, 3000},
+                                   {2057, 9000, 2056, 1024, 512}};
+  for (const DflashPromptMix& mix : mixes) {
+    SCOPED_TRACE("call_rows=" + std::to_string(mix.call_rows) + " forward_rows=" + std::to_string(mix.forward_rows) +
+                 " prompts=" + std::to_string(mix.short_prompt) + "/" + std::to_string(mix.long_prompt));
+    Qwen38DflashPromptFeatures alone_short(mix.window), alone_long(mix.window);
+    const DflashPromptRun short_alone =
+        RunDflashPrompt(alone_short, mix.short_prompt, mix.call_rows, mix.forward_rows, mix.short_prompt);
+    const DflashPromptRun long_alone =
+        RunDflashPrompt(alone_long, mix.long_prompt, mix.call_rows, mix.forward_rows, mix.long_prompt);
+    ExpectDrafterHasTheWindow(short_alone, mix.short_prompt, mix.window);
+    ExpectDrafterHasTheWindow(long_alone, mix.long_prompt, mix.window);
+
+    const auto orders = EveryInterleaving(mix);
+    ASSERT_GE(orders.size(), 2u);
+    for (const std::vector<size_t>& order : orders) {
+      std::string trace;
+      for (const size_t s : order) trace += static_cast<char>('0' + s);
+      SCOPED_TRACE("order " + trace);
+      const auto runs = RunInterleavedDflashPrompts(order, mix, false);
+      ExpectSameDflashRun(runs[0], short_alone);
+      ExpectSameDflashRun(runs[1], long_alone);
+    }
+  }
+
+  // A 4096-token call is run as forwards of 1024: the forward [6144, 7168) of the second call of the 9000-token prompt
+  // reaches into its window [6944, 9000), is ingested while the call runs, and starts the contiguous ingestion.
+  const DflashPromptMix inner = {9000, 32768, 2056, 4096, 1024};
+  const auto runs = RunInterleavedDflashPrompts({0, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1}, inner, false);
+  ASSERT_EQ(runs[0].ingested.size(), 2u);
+  EXPECT_EQ(runs[0].ingested[0].position, 6144u);
+  EXPECT_EQ(runs[0].ingested[1].position, 7168u);
+  ASSERT_TRUE(runs[0].last.has_value());
+  EXPECT_EQ(runs[0].last->position, 8192u);
+  EXPECT_EQ(runs[0].last->rows, 808u);
+}
+
+TEST(Qwen38DflashPromptFeaturesTest, APromptLengthSharedBetweenSlotsLetsTheLongerPromptDropRowsOfTheShorterOne) {
+  // What the process-wide prompt length did: the 32768 announced by the longer prompt after the first chunk of the 9000-token
+  // one is what its second chunk then sees, so its held-back 8192 rows look 24576 positions short of the end and are
+  // dropped, leaving the 808 rows of its tail for a window of 2056.
+  const auto whole = RunInterleavedDflashPrompts({0, 1, 0, 1, 1, 1}, kTwoPrompts8192, true);
+  EXPECT_TRUE(whole[0].ingested.empty());
+  EXPECT_EQ(RowsOfDflashRun(whole[0]), 808u);
+  EXPECT_LT(RowsOfDflashRun(whole[0]), kTwoPrompts8192.window);
+
+  // The forwards of a call decide the same way: the forward the second call ingested, and the chunk held back for the third,
+  // are both dropped.
+  const DflashPromptMix inner = {9000, 32768, 2056, 4096, 1024};
+  const auto forwards = RunInterleavedDflashPrompts({0, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1}, inner, true);
+  EXPECT_TRUE(forwards[0].ingested.empty());
+  EXPECT_EQ(RowsOfDflashRun(forwards[0]), 808u);
+
+  // With a length of their own the same order loses nothing.
+  const auto own = RunInterleavedDflashPrompts({0, 1, 0, 1, 1, 1}, kTwoPrompts8192, false);
+  EXPECT_EQ(RowsOfDflashRun(own[0]), 8192u + 808u);
 }
 
 TEST(Qwen38GraphIdTest, IdsAreDerivedFromTheRunAndAreDistinct) {
   std::set<int> seen;
   const Qwen38GraphRun runs[] = {Qwen38GraphRun::kTarget, Qwen38GraphRun::kHead, Qwen38GraphRun::kHeadR2};
+  ASSERT_EQ(std::size(runs), static_cast<size_t>(kQwen38GraphRunCount));
   for (const Qwen38GraphRun run : runs) {
     for (int rows = 1; rows <= kQwen38GraphIdMaxRows; ++rows) {
       for (int phase = 0; phase < kQwen38GraphIdMaxPhases; ++phase) {
         const int id = Qwen38GraphAnnotationId(run, rows, phase);
-        EXPECT_GT(id, 0);  // 0 is ORT's default annotation, -1 disables capture
+        EXPECT_GT(id, 0);                                          // 0 is ORT's default annotation, -1 disables capture
+        EXPECT_EQ(id, Qwen38GraphAnnotationId(run, rows, phase));  // a pure function of its arguments
         EXPECT_TRUE(seen.insert(id).second) << "duplicate id " << id;
       }
     }
   }
-  EXPECT_EQ(seen.size(), 3u * kQwen38GraphIdMaxRows * kQwen38GraphIdMaxPhases);
+  EXPECT_EQ(seen.size(), static_cast<size_t>(kQwen38GraphRunCount) * kQwen38GraphIdMaxRows * kQwen38GraphIdMaxPhases);
 }
 
-TEST(Qwen38GraphIdTest, RejectsRowsAndPhasesBeyondTheLimits) {
+TEST(Qwen38GraphIdTest, EveryVerifyWidthUpToSevenDraftsHasAnIdPerRingPhase) {
+  // S=8 verification (seven drafts) runs the target with 8 rows; the S=1 .. S=7 widths stay available too.
+  EXPECT_GE(kQwen38GraphIdMaxRows, 8);
+  std::set<int> target_ids;
+  for (int rows = 1; rows <= 8; ++rows) {
+    for (int phase = 0; phase < 5; ++phase) {  // the non-compact fold rings up to five banks, the compact one two
+      EXPECT_TRUE(target_ids.insert(Qwen38GraphAnnotationId(Qwen38GraphRun::kTarget, rows, phase)).second);
+    }
+  }
+  // Rows or phases of one run never alias another run's ids.
+  EXPECT_NE(Qwen38GraphAnnotationId(Qwen38GraphRun::kTarget, 8, kQwen38GraphIdMaxPhases - 1),
+            Qwen38GraphAnnotationId(Qwen38GraphRun::kHead, 1, 0));
+  EXPECT_LT(Qwen38GraphAnnotationId(Qwen38GraphRun::kTarget, 8, kQwen38GraphIdMaxPhases - 1),
+            Qwen38GraphAnnotationId(Qwen38GraphRun::kHead, 1, 0));
+}
+
+TEST(Qwen38GraphIdTest, RejectsRunsRowsAndPhasesBeyondTheLimits) {
   EXPECT_THROW(Qwen38GraphAnnotationId(Qwen38GraphRun::kTarget, 0, 0), std::out_of_range);
   EXPECT_THROW(Qwen38GraphAnnotationId(Qwen38GraphRun::kTarget, kQwen38GraphIdMaxRows + 1, 0), std::out_of_range);
+  EXPECT_THROW(Qwen38GraphAnnotationId(Qwen38GraphRun::kTarget, 9, 0), std::out_of_range);
+  EXPECT_THROW(Qwen38GraphAnnotationId(Qwen38GraphRun::kTarget, 1, kQwen38GraphIdMaxPhases), std::out_of_range);
   EXPECT_THROW(Qwen38GraphAnnotationId(Qwen38GraphRun::kHead, 1, -1), std::out_of_range);
   EXPECT_THROW(Qwen38GraphAnnotationId(Qwen38GraphRun::kHeadR2, 2, kQwen38GraphIdMaxPhases), std::out_of_range);
+  EXPECT_THROW(Qwen38GraphAnnotationId(static_cast<Qwen38GraphRun>(kQwen38GraphRunCount), 1, 0), std::out_of_range);
+  EXPECT_THROW(Qwen38GraphAnnotationId(static_cast<Qwen38GraphRun>(-1), 1, 0), std::out_of_range);
+}
+
+// The batched runs of the fold target (B = 2 .. 8 request slots) have ids of their own: none is shared with a single-slot run
+// or with a run of another width, and the ids of a single slot do not depend on the batch dimension.
+TEST(Qwen38GraphIdTest, BatchedTargetRunsHaveTheirOwnIds) {
+  std::set<int> seen;
+  for (const Qwen38GraphRun run : {Qwen38GraphRun::kTarget, Qwen38GraphRun::kHead, Qwen38GraphRun::kHeadR2}) {
+    for (int rows = 1; rows <= kQwen38GraphIdMaxRows; ++rows) {
+      for (int phase = 0; phase < kQwen38GraphIdMaxPhases; ++phase) {
+        const int single = Qwen38GraphAnnotationId(run, rows, phase);
+        EXPECT_EQ(single, Qwen38GraphAnnotationId(run, rows, phase, 1));
+        EXPECT_TRUE(seen.insert(single).second);
+      }
+    }
+  }
+  const size_t single_slot_ids = seen.size();
+  for (int batch = 2; batch <= kQwen38GraphIdMaxBatch; ++batch) {
+    for (int rows = 1; rows <= kQwen38GraphIdMaxRows; ++rows) {
+      for (int phase = 0; phase < kQwen38GraphIdMaxPhases; ++phase) {
+        const int id = Qwen38GraphAnnotationId(Qwen38GraphRun::kTarget, rows, phase, batch);
+        EXPECT_GT(id, 0);
+        EXPECT_EQ(id, Qwen38GraphAnnotationId(Qwen38GraphRun::kTarget, rows, phase, batch));
+        EXPECT_TRUE(seen.insert(id).second) << "duplicate id " << id << " for batch " << batch;
+      }
+    }
+  }
+  EXPECT_EQ(seen.size() - single_slot_ids,
+            static_cast<size_t>(kQwen38GraphIdMaxBatch - 1) * kQwen38GraphIdMaxRows * kQwen38GraphIdMaxPhases);
+}
+
+TEST(Qwen38GraphIdTest, OnlyTheTargetRunsBatchedAndTheBatchStaysWithinTheLimits) {
+  EXPECT_THROW(Qwen38GraphAnnotationId(Qwen38GraphRun::kTarget, 2, 0, 0), std::out_of_range);
+  EXPECT_THROW(Qwen38GraphAnnotationId(Qwen38GraphRun::kTarget, 2, 0, kQwen38GraphIdMaxBatch + 1), std::out_of_range);
+  EXPECT_THROW(Qwen38GraphAnnotationId(Qwen38GraphRun::kTarget, 2, 0, -1), std::out_of_range);
+  EXPECT_THROW(Qwen38GraphAnnotationId(Qwen38GraphRun::kHead, 1, 0, 2), std::out_of_range);
+  EXPECT_THROW(Qwen38GraphAnnotationId(Qwen38GraphRun::kHeadR2, 2, 0, 2), std::out_of_range);
+  EXPECT_NO_THROW(Qwen38GraphAnnotationId(Qwen38GraphRun::kHead, 1, 0, 1));
 }
 
 TEST(Qwen38GraphConfigTest, NonInheritedPrefillSessionOptionsRetainCudaProviderWithoutGraphCapture) {
@@ -628,6 +2106,148 @@ TEST(Qwen38GraphConfigTest, HeadR2CapturesGraphsWhenItsMergedSessionOptionsDo) {
   EXPECT_FALSE(Qwen38HeadR2CapturesGraph(eager, std::nullopt));
   EXPECT_FALSE(Qwen38HeadR2CapturesGraph(eager, unrelated));
   EXPECT_FALSE(Qwen38HeadR2CapturesGraph(eager, device_only));
+}
+
+TEST(Qwen38DflashFeatureLayoutTest, OnlyTheRowsTheEngineProducesAreAccepted) {
+  EXPECT_NO_THROW(ValidateQwen38DflashFeatureLayout(kQwen38DflashFeatureWidth, ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16));
+  EXPECT_NO_THROW(ValidateQwen38DflashFeatureLayout(12800, ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16));
+}
+
+// Propose slices the engine's feature buffer with the stride of the drafter's own input, so any other width or element type
+// would read outside every row. The message names what the drafter declares and what the engine produces.
+TEST(Qwen38DflashFeatureLayoutTest, ADrafterOfAnotherWidthOrTypeIsRefusedAtLoad) {
+  const auto message_of = [](size_t width, ONNXTensorElementDataType type) {
+    try {
+      ValidateQwen38DflashFeatureLayout(width, type);
+    } catch (const std::runtime_error& e) {
+      return std::string{e.what()};
+    }
+    return std::string{};
+  };
+  const std::string wider = message_of(kQwen38DflashFeatureWidth * 2, ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16);
+  EXPECT_NE(wider.find("25600"), std::string::npos) << wider;
+  EXPECT_NE(wider.find("12800"), std::string::npos) << wider;
+  EXPECT_FALSE(message_of(kQwen38DflashFeatureWidth - 1, ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16).empty());
+  EXPECT_FALSE(message_of(kQwen38DflashFeatureWidth + 1, ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16).empty());
+  EXPECT_FALSE(message_of(0, ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16).empty());
+  EXPECT_FALSE(message_of(kQwen38DflashFeatureWidth, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16).empty());
+  EXPECT_FALSE(message_of(kQwen38DflashFeatureWidth, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT).empty());
+  EXPECT_FALSE(message_of(kQwen38DflashFeatureWidth, ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED).empty());
+}
+
+namespace {
+
+// The inputs of a DFlash drafter graph by name; an unknown input is reported as SessionInfo reports it.
+class FakeDrafterInputs final : public ModelStateMetadata {
+ public:
+  void AddInput(std::string name, std::vector<int64_t> shape) { inputs_[std::move(name)] = std::move(shape); }
+
+  bool HasInput(const std::string& name) const override { return inputs_.count(name) != 0; }
+  bool HasOutput(const std::string&) const override { return false; }
+  ONNXTensorElementDataType GetInputDataType(const std::string&) const override {
+    return ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16;
+  }
+  ONNXTensorElementDataType GetOutputDataType(const std::string&) const override {
+    return ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16;
+  }
+  std::vector<int64_t> GetInputShape(const std::string& name) const override {
+    const auto input = inputs_.find(name);
+    if (input == inputs_.end()) throw std::runtime_error("Model input was not found: " + name);
+    return input->second;
+  }
+  std::vector<int64_t> GetOutputShape(const std::string& name) const override {
+    throw std::runtime_error("Model output was not found: " + name);
+  }
+
+ private:
+  std::map<std::string, std::vector<int64_t>> inputs_;
+};
+
+}  // namespace
+
+TEST(Qwen38DflashCachePageSizeTest, TheDefaultPastKeyInputGivesThePageSize) {
+  const std::string default_template = Config{}.model.dflash2.inputs.past_key_names;
+  ASSERT_EQ(ComposeKeyValueName(default_template, 0), "past_key_values.0.key");
+  for (const int64_t page : {16, 128, 256}) {
+    FakeDrafterInputs drafter;
+    drafter.AddInput("past_key_values.0.key", {-1, page, 4, 64});
+    EXPECT_EQ(Qwen38DflashCachePageSize(drafter, default_template), static_cast<size_t>(page));
+  }
+}
+
+// A drafter exported with its own cache input names says so in model.dflash2.inputs.past_key_names, and the drafter
+// allocates its cache by that name: the page size must come from the same input, not from "past_key_values.0.key".
+TEST(Qwen38DflashCachePageSizeTest, ACustomPastKeyNameIsHonored) {
+  FakeDrafterInputs drafter;
+  drafter.AddInput("drafter.layers.0.k_cache", {-1, 128, 4, 64});
+  EXPECT_EQ(Qwen38DflashCachePageSize(drafter, "drafter.layers.%d.k_cache"), 128u);
+
+  // The default name is not consulted when the config names another input, even if the graph also has that one.
+  drafter.AddInput("past_key_values.0.key", {-1, 16, 4, 64});
+  EXPECT_EQ(Qwen38DflashCachePageSize(drafter, "drafter.layers.%d.k_cache"), 128u);
+
+  // The first layer's input is the one asked for.
+  FakeDrafterInputs layers;
+  layers.AddInput("kv.0.k", {-1, 256, 2, 128});
+  layers.AddInput("kv.1.k", {-1, 16, 2, 128});
+  EXPECT_EQ(Qwen38DflashCachePageSize(layers, "kv.%d.k"), 256u);
+}
+
+TEST(Qwen38DflashCachePageSizeTest, AnInputTheGraphLacksOrACacheOfAnotherShapeIsRefused) {
+  FakeDrafterInputs drafter;
+  drafter.AddInput("past_key_values.0.key", {-1, 128, 4, 64});
+  EXPECT_THROW(Qwen38DflashCachePageSize(drafter, "drafter.layers.%d.k_cache"), std::runtime_error);
+
+  const auto message_of = [](const std::vector<int64_t>& shape) {
+    FakeDrafterInputs graph;
+    graph.AddInput("kv.0.k", shape);
+    try {
+      Qwen38DflashCachePageSize(graph, "kv.%d.k");
+    } catch (const std::runtime_error& e) {
+      return std::string{e.what()};
+    }
+    return std::string{};
+  };
+  for (const std::vector<int64_t>& shape : {std::vector<int64_t>{-1, 64, 4, 64}, std::vector<int64_t>{-1, 0, 4, 64},
+                                            std::vector<int64_t>{-1, -1, 4, 64}, std::vector<int64_t>{-1, 128, 64},
+                                            std::vector<int64_t>{-1, 128, 4, 64, 1}, std::vector<int64_t>{}}) {
+    const std::string message = message_of(shape);
+    EXPECT_NE(message.find("16, 128, or 256"), std::string::npos) << message;
+    EXPECT_NE(message.find("kv.0.k"), std::string::npos) << message;
+  }
+  EXPECT_TRUE(message_of({-1, 16, 4, 64}).empty());
+}
+
+TEST(Qwen38DflashSanitizerTest, IsSkippedUnlessTheSwitchKeepsIt) {
+  {
+    ScopedEnvironmentVariable unset{"ORT_PAGED_ATTENTION_SKIP_SANITIZER", std::nullopt};
+    EXPECT_TRUE(Qwen38DflashSkipsInputSanitizer());
+  }
+  {
+    ScopedEnvironmentVariable empty{"ORT_PAGED_ATTENTION_SKIP_SANITIZER", std::string{}};
+    EXPECT_TRUE(Qwen38DflashSkipsInputSanitizer());
+  }
+  for (const char* value : {"1", "true"}) {
+    ScopedEnvironmentVariable skip{"ORT_PAGED_ATTENTION_SKIP_SANITIZER", std::string{value}};
+    EXPECT_TRUE(Qwen38DflashSkipsInputSanitizer()) << value;
+  }
+  // "false" used to leave the sanitizer skipped: only the literal "0" kept it.
+  for (const char* value : {"0", "false"}) {
+    ScopedEnvironmentVariable keep{"ORT_PAGED_ATTENTION_SKIP_SANITIZER", std::string{value}};
+    EXPECT_FALSE(Qwen38DflashSkipsInputSanitizer()) << value;
+  }
+}
+
+TEST(Qwen38DflashSanitizerTest, AValueThatIsNotABooleanIsRefusedNamingTheSwitch) {
+  for (const char* value : {"yes", "off", "2", "FALSE", "True"}) {
+    ScopedEnvironmentVariable invalid{"ORT_PAGED_ATTENTION_SKIP_SANITIZER", std::string{value}};
+    try {
+      Qwen38DflashSkipsInputSanitizer();
+      ADD_FAILURE() << "expected " << value << " to be refused";
+    } catch (const std::invalid_argument& e) {
+      EXPECT_NE(std::string{e.what()}.find("ORT_PAGED_ATTENTION_SKIP_SANITIZER"), std::string::npos) << e.what();
+    }
+  }
 }
 
 TEST(Qwen38PromptTokenTest, AcceptsEveryIdOfTheVocabulary) {
@@ -737,6 +2357,36 @@ TEST(Qwen38CacheShapeTest, RejectsAnotherKvCapacity) {
   EXPECT_THROW(ValidateQwen38CacheShapes(longer_positions, 65536, "target"), std::runtime_error);
 }
 
+// The plane fills the position ids of slot b at b * kv_capacity while ORT reads the tensor by the row length the graph
+// declares, so a padded row only works for one slot: with several, every slot but the first would read the wrong ids.
+TEST(Qwen38CacheShapeTest, SeveralRequestSlotsNeedPositionRowsOfExactlyTheCapacity) {
+  const std::vector<Qwen38CacheInput> exact = {
+      {"past_position_ids", {-1, 33032}},
+      {"past_key_values.3.key", {-1, 2, 33032, 256}},
+  };
+  const std::vector<Qwen38CacheInput> padded = {
+      {"past_position_ids", {-1, 33040}},
+      {"past_key_values.3.key", {-1, 2, 33032, 256}},
+  };
+  for (const size_t slots : {1u, 2u, 8u}) {
+    EXPECT_NO_THROW(ValidateQwen38CacheShapes(exact, 33032, "target", slots)) << slots << " slots";
+  }
+  EXPECT_NO_THROW(ValidateQwen38CacheShapes(padded, 33032, "target", 1));
+  EXPECT_NO_THROW(ValidateQwen38CacheShapes(padded, 33032, "target"));  // one slot unless told otherwise
+  for (const size_t slots : {2u, 8u}) {
+    try {
+      ValidateQwen38CacheShapes(padded, 33032, "target", slots);
+      ADD_FAILURE() << slots << " slots accepted a padded position row";
+    } catch (const std::runtime_error& e) {
+      const std::string message = e.what();
+      EXPECT_NE(message.find("past_position_ids"), std::string::npos) << message;
+      EXPECT_NE(message.find("[-1, 33040]"), std::string::npos) << message;
+      EXPECT_NE(message.find(std::to_string(slots) + " request slots"), std::string::npos) << message;
+      EXPECT_NE(message.find("exactly kv_capacity"), std::string::npos) << message;
+    }
+  }
+}
+
 TEST(Qwen38CacheShapeTest, RejectsUnexpectedCacheDimensions) {
   const auto rejects = [](const Qwen38CacheInput& input, const char* graph = "target") {
     try {
@@ -750,22 +2400,145 @@ TEST(Qwen38CacheShapeTest, RejectsUnexpectedCacheDimensions) {
     ADD_FAILURE() << "accepted " << input.name;
   };
 
+  // Supported symbolic cache-length dimensions on dynamic-context graphs are accepted and materialized from kv_capacity.
+  EXPECT_NO_THROW(ValidateQwen38CacheShapes({{"past_position_ids", {-1, -1}}}, 33028, "target", 4));
+  EXPECT_NO_THROW(ValidateQwen38CacheShapes({{"past_key_values.0.key", {-1, 2, -1, 256}}}, 33028, "target"));
+  EXPECT_NO_THROW(ValidateQwen38CacheShapes({{"past_key_values.0.value", {-1, 2, -1, 256}}}, 33028, "target"));
+  EXPECT_NO_THROW(ValidateQwen38CacheShapes({{"past_key_values.0.index_key", {-1, -1, 128}}}, 33028, "target"));
+  EXPECT_NO_THROW(ValidateQwen38CacheShapes({{"head.past_key_values.0.key", {-1, 2, -1, 256}}}, 33028, "fold head"));
+  EXPECT_NO_THROW(ValidateQwen38CacheShapes({{"head.past_key_values.0.index_key", {-1, -1, 128}}}, 33028, "fold head"));
+
   rejects({"past_position_ids", {-1, 33000}});
-  rejects({"past_position_ids", {-1, -1}});  // a dynamic length cannot be checked against the ledger
+  rejects({"past_position_ids", {-1, 0}});
   rejects({"past_position_ids", {33028}});
-  rejects({"past_key_values.0.key", {-1, 2, -1, 256}});
+  rejects({"past_key_values.0.key", {-1, 2, 0, 256}});
   rejects({"past_key_values.0.value", {-1, 2, 32768, 256}});
   rejects({"past_key_values.0.key", {-1, 2, 33028}});
   rejects({"past_key_values.0.key", {-1, 4, 33028, 256}});
   rejects({"past_key_values.0.value", {-1, 2, 33028, 128}});
   rejects({"past_key_values.0.index_key", {-1, 8000, 128}});
-  rejects({"past_key_values.0.index_key", {-1, -1, 128}});
+  rejects({"past_key_values.0.index_key", {-1, 0, 128}});
   rejects({"past_key_values.0.index_key", {-1, 8257}});
   rejects({"past_key_values.0.index_key", {-1, 8257, 64}});
   // Auxiliary graphs name themselves in the error.
   rejects({"head.past_key_values.0.key", {-1, 2, 16384, 256}}, "fold head");
   rejects({"past_key_values.0.key", {-1, 2, 16384, 256}}, "head (S=2)");
   rejects({"past_key_values.0.value", {-1, 2, 16384, 256}}, "head_r2");
+}
+
+TEST(Qwen38CacheShapeTest, MaterializesSymbolicCacheDimensionsAndPreservesStaticOnes) {
+  // Static dimensions (including padded past_position_ids and exact kv_capacity / 4 index_key) are preserved verbatim.
+  EXPECT_EQ(ResolveQwen38CacheSlotShape("past_position_ids", {-1, 33040}, 33028), (std::vector<int64_t>{1, 33040}));
+  EXPECT_EQ(ResolveQwen38CacheSlotShape("past_key_values.3.key", {-1, 2, 33028, 256}, 33028),
+            (std::vector<int64_t>{1, 2, 33028, 256}));
+  EXPECT_EQ(ResolveQwen38CacheSlotShape("past_key_values.3.index_key", {-1, 8257, 128}, 33028),
+            (std::vector<int64_t>{1, 8257, 128}));
+  EXPECT_EQ(ResolveQwen38CacheSlotShape("head.past_key_values.0.index_key", {-1, 8257, 128}, 33028),
+            (std::vector<int64_t>{1, 8257, 128}));
+
+  // Symbolic dimensions on target and auxiliary head caches materialize from kv_capacity.
+  EXPECT_EQ(ResolveQwen38CacheSlotShape("past_position_ids", {-1, -1}, 262152), (std::vector<int64_t>{1, 262152}));
+  EXPECT_EQ(ResolveQwen38CacheSlotShape("past_key_values.3.key", {-1, 2, -1, 256}, 262152),
+            (std::vector<int64_t>{1, 2, 262152, 256}));
+  EXPECT_EQ(ResolveQwen38CacheSlotShape("past_key_values.3.value", {-1, 2, -1, 256}, 262152),
+            (std::vector<int64_t>{1, 2, 262152, 256}));
+  EXPECT_EQ(ResolveQwen38CacheSlotShape("past_key_values.3.index_key", {-1, -1, 128}, 262152),
+            (std::vector<int64_t>{1, 65539, 128}));
+  EXPECT_EQ(ResolveQwen38CacheSlotShape("head.past_key_values.0.key", {-1, 2, -1, 256}, 262152),
+            (std::vector<int64_t>{1, 2, 262152, 256}));
+  EXPECT_EQ(ResolveQwen38CacheSlotShape("head.past_key_values.0.index_key", {-1, -1, 128}, 262152),
+            (std::vector<int64_t>{1, 65539, 128}));
+}
+
+TEST(Qwen38DynamicBatchingConfigTest, DflashReservationScalesWithConfiguredBlockSizeAndSnapshots) {
+  Config config;
+  config.model.dflash2.filename = "dflash2.onnx";
+  config.engine.dynamic_batching.emplace();
+  config.engine.dynamic_batching->block_size = 256;
+  config.engine.dynamic_batching->max_batch_size = 1;
+  config.engine.dynamic_batching->dflash2_max_snapshots = 1;
+  config.engine.dynamic_batching->num_blocks = 1037;
+
+  // At block_size=256 with 1 slot + 1 snapshot, DFlash2 reserves 13 target-equivalent blocks, leaving 1024 blocks (256K).
+  EXPECT_EQ(ResolveQwen38DflashReservedBlocks(config, 256, 1), 13u);
+  // Halving block_size to 128 halves the target bytes per block, so the same drafter buffers reserve 25 blocks (~double).
+  EXPECT_EQ(ResolveQwen38DflashReservedBlocks(config, 128, 1), 25u);
+
+  EXPECT_TRUE(ApplyQwen38DynamicBatchingConfig(config));
+  EXPECT_EQ(config.model.context_length, 262144);
+  EXPECT_EQ(config.model.qwen38_graph.kv_capacity, 262144 + kQwen38GraphIdMaxRows);
+  EXPECT_EQ(config.search.max_length, 262144);
+  EXPECT_EQ(NormalizeQwen38ContextTier(std::to_string(config.model.context_length)), "256k");
+
+  // Disabling snapshots reserves only the active drafter ring.
+  Config no_snapshots;
+  no_snapshots.model.dflash2.filename = "dflash2.onnx";
+  no_snapshots.engine.dynamic_batching.emplace();
+  no_snapshots.engine.dynamic_batching->dflash2_max_snapshots = 0;
+  EXPECT_EQ(ResolveQwen38DflashReservedBlocks(no_snapshots, 256, 1), 7u);
+  EXPECT_EQ(ResolveQwen38DflashReservedBlocks(no_snapshots, 128, 1), 13u);
+}
+
+TEST(Qwen38DynamicBatchingConfigTest, SingleSlotDynamicBatchingPreservesPrecedenceAfterReset) {
+  ScopedEnvironmentVariable env_batch{"ORT_QWEN38_MAX_BATCH_SIZE", std::string{"4"}};
+  Config config;
+  config.model.qwen38_graph.max_batch_size = 4;
+  config.search.batch_size = 4;
+  config.engine.dynamic_batching.emplace();
+  config.engine.dynamic_batching->max_batch_size = 1;
+  config.engine.dynamic_batching->block_size = 256;
+  config.engine.dynamic_batching->num_blocks = 128;
+
+  EXPECT_EQ(ResolveQwen38MaxBatchSize(config), 1u);
+  EXPECT_TRUE(ApplyQwen38DynamicBatchingConfig(config));
+  EXPECT_FALSE(config.engine.dynamic_batching.has_value());
+  // Even after dynamic_batching is cleared for the static Engine path, its single-slot choice overrides
+  // qwen38_graph.max_batch_size, search.batch_size, and ORT_QWEN38_MAX_BATCH_SIZE.
+  EXPECT_EQ(ResolveQwen38MaxBatchSize(config), 1u);
+}
+
+TEST(Qwen38DynamicBatchingConfigTest, RejectsTargetCapacityOverflowingIntRange) {
+  Config config;
+  config.engine.dynamic_batching.emplace();
+  config.engine.dynamic_batching->max_batch_size = 1;
+  config.engine.dynamic_batching->block_size = 256;
+  // 8,388,608 * 256 = 2,147,483,648 > INT_MAX - kQwen38GraphIdMaxRows.
+  config.engine.dynamic_batching->num_blocks = 8388608;
+  EXPECT_THROW(ApplyQwen38DynamicBatchingConfig(config), std::runtime_error);
+}
+
+TEST(Qwen38DynamicBatchingConfigTest, MaxScheduledTokensOnlyAppliesWhenPrefillChunkIsUnset) {
+  // Explicit model.qwen38_graph.prefill.chunk is preserved when search.chunk_size is absent.
+  Config explicit_chunk;
+  explicit_chunk.model.qwen38_graph.prefill.enabled = true;
+  explicit_chunk.model.qwen38_graph.prefill.chunk = 8192;
+  explicit_chunk.engine.dynamic_batching.emplace();
+  explicit_chunk.engine.dynamic_batching->max_batch_size = 2;
+  explicit_chunk.engine.dynamic_batching->max_scheduled_tokens = 2048;
+  EXPECT_FALSE(ApplyQwen38DynamicBatchingConfig(explicit_chunk));
+  EXPECT_EQ(explicit_chunk.model.qwen38_graph.prefill.chunk, 8192);
+
+  // When prefill.chunk is unset (0), max_scheduled_tokens supplies the prefill chunk.
+  Config unset_chunk;
+  unset_chunk.model.qwen38_graph.prefill.enabled = true;
+  unset_chunk.model.qwen38_graph.prefill.chunk = 0;
+  unset_chunk.engine.dynamic_batching.emplace();
+  unset_chunk.engine.dynamic_batching->max_batch_size = 2;
+  unset_chunk.engine.dynamic_batching->max_scheduled_tokens = 2048;
+  EXPECT_FALSE(ApplyQwen38DynamicBatchingConfig(unset_chunk));
+  EXPECT_EQ(unset_chunk.model.qwen38_graph.prefill.chunk, 2048);
+
+  // Explicit search.chunk_size overrides prefill.chunk and is then cleared.
+  Config search_override;
+  search_override.model.qwen38_graph.prefill.enabled = true;
+  search_override.model.qwen38_graph.prefill.chunk = 8192;
+  search_override.search.chunk_size = 4096;
+  search_override.engine.dynamic_batching.emplace();
+  search_override.engine.dynamic_batching->max_batch_size = 1;
+  search_override.engine.dynamic_batching->max_scheduled_tokens = 2048;
+  EXPECT_FALSE(ApplyQwen38DynamicBatchingConfig(search_override));
+  EXPECT_EQ(search_override.model.qwen38_graph.prefill.chunk, 4096);
+  EXPECT_FALSE(search_override.search.chunk_size.has_value());
 }
 
 TEST(Qwen38CacheShapeTest, IgnoresInputsThatDoNotDependOnTheCapacity) {
