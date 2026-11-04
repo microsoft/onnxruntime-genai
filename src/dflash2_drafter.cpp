@@ -322,6 +322,7 @@ std::unique_ptr<Config> CreateDflash2Config(const Config& config) {
   }
   decoder.run_options = dflash2.run_options;
   decoder.shared_initializers = dflash2.shared_initializers;
+  decoder.gguf_initializers = dflash2.gguf_initializers;
   decoder.num_hidden_layers = dflash2.num_hidden_layers;
   decoder.num_key_value_heads = dflash2.num_key_value_heads;
   decoder.head_size = dflash2.head_size;
