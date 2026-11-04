@@ -426,13 +426,16 @@ def run(args):
     tokenizer = og.Tokenizer(model)
     engine = og.Engine(model)
     max_draft_tokens = engine.max_draft_tokens_per_proposal()
-    if args.peer_drafts == "controlled" and args.peers and max_draft_tokens == 0:
-        raise SystemExit("--peer_drafts controlled needs an Engine that verifies draft tokens.")
+    if args.peer_drafts == "controlled" and args.peers:
+        if max_draft_tokens == 0:
+            raise SystemExit("--peer_drafts controlled needs an Engine that verifies draft tokens.")
+        if args.peer_max_new_tokens < 3:
+            raise SystemExit("--peer_drafts controlled needs --peer_max_new_tokens >= 3 to leave room for a draft.")
 
     prompts = {name: encode_prompt(tokenizer, WORKLOADS[name]["prompt"]) for name in args.workloads}
     prompts["peer"] = encode_prompt(tokenizer, PEER_PROMPT)
     peer_reference, reference_status = None, None
-    if args.peer_drafts == "controlled":
+    if args.peer_drafts == "controlled" and args.peers:
         peer_reference, reference_status = controlled_peer_reference(engine, args, prompts, max_draft_tokens)
 
     for _ in range(args.warmup):
