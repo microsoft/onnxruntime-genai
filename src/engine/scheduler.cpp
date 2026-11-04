@@ -340,7 +340,7 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
   std::vector<size_t> token_counts;
   try {
     token_counts = AllocateDecodeFirstTokenBudget(
-        selected_candidates, dynamic_batching.max_scheduled_tokens);
+        selected_candidates, dynamic_batching.max_scheduled_tokens, chunk_budget_rotation_++);
   } catch (const std::invalid_argument& error) {
     throw StepPlanningConsistencyError(error.what());
   }

@@ -167,6 +167,9 @@ struct DynamicBatchScheduler : Scheduler {
   std::shared_ptr<Model> model_;
   std::shared_ptr<CacheManager> cache_manager_;
   std::vector<std::shared_ptr<Request>> requests_pool_;
+  // Where chunk work starts in the spare token budget. Advances with every planned step, a
+  // rolled-back one included: it only orders who reads first, never what any request reads.
+  size_t chunk_budget_rotation_{};
 };
 
 std::unique_ptr<Scheduler> CreateScheduler(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager);

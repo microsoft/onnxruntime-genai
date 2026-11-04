@@ -43,7 +43,8 @@ size_t DecodeFirstProvisionalRequestLimit(
 
 std::vector<size_t> AllocateDecodeFirstTokenBudget(
     std::span<const DecodeFirstBudgetCandidate> selected_candidates,
-    size_t max_scheduled_tokens) {
+    size_t max_scheduled_tokens,
+    size_t rotation) {
   if (max_scheduled_tokens == 0)
     throw std::invalid_argument("The scheduled token budget must be positive.");
   if (selected_candidates.size() > max_scheduled_tokens)
@@ -51,31 +52,36 @@ std::vector<size_t> AllocateDecodeFirstTokenBudget(
 
   std::vector<size_t> token_counts(selected_candidates.size(), 1);
   size_t remaining_budget = max_scheduled_tokens - selected_candidates.size();
+  bool verifies_drafts = false;
   for (size_t i = 0; i < selected_candidates.size(); ++i) {
     const auto& candidate = selected_candidates[i];
     if (candidate.pending_token_count == 0)
       throw std::invalid_argument("A scheduling candidate must have pending tokens.");
     if (candidate.is_prefill)
       continue;
-
     if (candidate.decode_extra_token_count != 0 && candidate.pending_token_count > 1)
       throw std::invalid_argument("A decode row cannot verify drafts before reading its committed tokens.");
 
-    // Beyond its first token, a decode row reads its drafts or up to one chunk of its unread
-    // committed tokens.
     const size_t additional_tokens =
-        std::min(candidate.decode_extra_token_count + ChunkLimit(candidate) - 1,
-                 remaining_budget);
+        std::min(candidate.decode_extra_token_count, remaining_budget);
     token_counts[i] += additional_tokens;
     remaining_budget -= additional_tokens;
+    verifies_drafts |= additional_tokens != 0;
   }
+
+  // Chunk work shares what drafts leave, starting from a different row each step so no position in
+  // the order always comes first. A decode row reading its unread committed tokens reads only one
+  // while a peer verifies drafts, so it never holds that verification back.
+  std::vector<size_t> chunk_rows;
   for (size_t i = 0; i < selected_candidates.size(); ++i) {
     const auto& candidate = selected_candidates[i];
-    if (!candidate.is_prefill)
-      continue;
-
+    if (candidate.is_prefill || (candidate.pending_token_count > 1 && !verifies_drafts))
+      chunk_rows.push_back(i);
+  }
+  for (size_t k = 0; k < chunk_rows.size(); ++k) {
+    const size_t i = chunk_rows[(rotation + k) % chunk_rows.size()];
     const size_t additional_tokens =
-        std::min(ChunkLimit(candidate) - 1, remaining_budget);
+        std::min(ChunkLimit(selected_candidates[i]) - 1, remaining_budget);
     token_counts[i] += additional_tokens;
     remaining_budget -= additional_tokens;
   }
