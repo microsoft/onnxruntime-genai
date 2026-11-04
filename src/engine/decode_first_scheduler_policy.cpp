@@ -43,7 +43,8 @@ size_t DecodeFirstProvisionalRequestLimit(
 
 std::vector<size_t> AllocateDecodeFirstTokenBudget(
     std::span<const DecodeFirstBudgetCandidate> selected_candidates,
-    size_t max_scheduled_tokens) {
+    size_t max_scheduled_tokens,
+    std::vector<bool>* chunk_service) {
   if (max_scheduled_tokens == 0)
     throw std::invalid_argument("The scheduled token budget must be positive.");
   if (selected_candidates.size() > max_scheduled_tokens)
@@ -80,11 +81,19 @@ std::vector<size_t> AllocateDecodeFirstTokenBudget(
   std::stable_sort(chunk_rows.begin(), chunk_rows.end(), [&](size_t left, size_t right) {
     return selected_candidates[left].last_chunk_service < selected_candidates[right].last_chunk_service;
   });
+  if (chunk_service)
+    chunk_service->assign(selected_candidates.size(), false);
+  bool first_share = true;
   for (const size_t i : chunk_rows) {
-    const size_t additional_tokens =
-        std::min(ChunkLimit(selected_candidates[i]) - 1, remaining_budget);
+    const size_t wanted_tokens = ChunkLimit(selected_candidates[i]) - 1;
+    const size_t additional_tokens = std::min(wanted_tokens, remaining_budget);
+    if (additional_tokens == 0)
+      continue;
     token_counts[i] += additional_tokens;
     remaining_budget -= additional_tokens;
+    if (chunk_service)
+      (*chunk_service)[i] = first_share || additional_tokens == wanted_tokens;
+    first_share = false;
   }
   return token_counts;
 }
