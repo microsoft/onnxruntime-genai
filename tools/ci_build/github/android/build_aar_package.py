@@ -77,11 +77,28 @@ def _parse_build_settings(args):
         )
 
     build_settings["build_params"] = build_params
-    build_settings["telemetry_enabled"] = not any(
-        param.split("=", 1)[0] == "--no_telemetry" for param in build_params
-    )
+    build_settings["telemetry_enabled"] = not any(param.split("=", 1)[0] == "--no_telemetry" for param in build_params)
 
     return build_settings
+
+
+def _strip_library(source, destination, strip_tool):
+    readelf_tool = strip_tool.with_name("llvm-readelf" + strip_tool.suffix)
+
+    def load_segments(library):
+        output = subprocess.run(
+            [readelf_tool, "--program-headers", "--wide", library], check=True, capture_output=True, text=True
+        ).stdout
+        segments = [line.split() for line in output.splitlines() if line.lstrip().startswith("LOAD ")]
+        if not segments:
+            raise RuntimeError(f"No LOAD segments found in {library}")
+        return segments
+
+    original_segments = load_segments(source)
+    shutil.copy2(source, destination)
+    subprocess.run([strip_tool, destination], shell=False, check=True)
+    if load_segments(destination) != original_segments:
+        raise RuntimeError(f"Stripping changed LOAD segments in {destination}")
 
 
 def _build_aar(args):
@@ -98,6 +115,18 @@ def _build_aar(args):
     build_config = args.config
     aar_dir = intermediates_dir / "aar" / build_config
     jnilibs_dir = intermediates_dir / "jnilibs" / build_config
+    strip_tool = None
+    if build_config in ("Release", "MinSizeRel"):
+        strip_tool_name = "llvm-strip.exe" if util.is_windows() else "llvm-strip"
+        strip_tools = [
+            tool
+            for tool in args.android_ndk_path.resolve().glob(f"toolchains/llvm/prebuilt/*/bin/{strip_tool_name}")
+            if tool.is_file()
+        ]
+        if len(strip_tools) != 1:
+            raise FileNotFoundError(f"Expected exactly one {strip_tool_name} in Android NDK {args.android_ndk_path}")
+        strip_tool = strip_tools[0]
+
     base_build_command = [sys.executable, str(BUILD_PY), f"--config={build_config}"]
     if args.ort_home:
         base_build_command += [f"--ort_home={args.ort_home!s}"]
@@ -118,8 +147,7 @@ def _build_aar(args):
 
         subprocess.run(abi_build_command, env=temp_env, shell=False, check=True, cwd=REPO_ROOT)
 
-        # create symbolic links for libonnxruntime-genai.so and libonnxruntime-genai-jni.so
-        # to jnilibs/[abi] for later compiling the aar package
+        # Strip staging copies, not the original build outputs.
         abi_jnilibs_dir = jnilibs_dir / abi
         abi_jnilibs_dir.mkdir()
         native_lib_names = ["libonnxruntime-genai.so", "libonnxruntime-genai-jni.so"]
@@ -128,7 +156,10 @@ def _build_aar(args):
         for lib_name in native_lib_names:
             src_lib_name = abi_build_dir / build_config / "src" / "java" / "android" / abi / lib_name
             target_lib_name = abi_jnilibs_dir / lib_name
-            target_lib_name.symlink_to(src_lib_name)
+            if strip_tool is not None:
+                _strip_library(src_lib_name, target_lib_name, strip_tool)
+            else:
+                target_lib_name.symlink_to(src_lib_name)
 
         # we only need to define the header files path once
         if not header_files_path:
