@@ -340,6 +340,14 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     selected_processed_lengths.push_back(
         candidate.processed_sequence_length);
   }
+  // Decide before budgeting, so the tokens drafts would have taken go to chunk work instead of
+  // being dropped later by cache planning.
+  if (cache_manager_->PrefillDefersDrafts() &&
+      std::any_of(selected_candidates.begin(), selected_candidates.end(),
+                  [](const DecodeFirstBudgetCandidate& candidate) { return candidate.is_prefill; })) {
+    for (auto& candidate : selected_candidates)
+      candidate.decode_extra_token_count = 0;
+  }
   std::vector<size_t> token_counts;
   try {
     token_counts = AllocateDecodeFirstTokenBudget(
