@@ -28,11 +28,13 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <exception>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <new>
+#include <string>
 #include <system_error>
 #include <thread>
 #include <type_traits>
@@ -262,8 +264,13 @@ struct StagedPleWorkspace {
   cudaEvent_t prefill_done_event = nullptr;
   cudaStream_t last_prefill_stream = nullptr;
   bool prefill_in_flight = false;
+  // Host PLE n-gram row cache budget per staged workspace: up to kCacheSlots (65,536) rows of kMaxRowBytes (3,072 bytes =
+  // 192 MiB of ngram_cache_data plus 1.56 MiB of key/validity arrays), sized down to kMinCacheSlots (16,384 rows = 48 MiB)
+  // when cudaMemGetInfo reports < 12 GiB free memory, or overridden to a power-of-two in
+  // [kMinOverrideCacheSlots (1,024 rows = 3 MiB), kCacheSlots] via ORT_QWEN38_PLE_CACHE_SLOTS.
   static constexpr size_t kCacheSlots = 65536;
   static constexpr size_t kMinCacheSlots = 16384;
+  static constexpr size_t kMinOverrideCacheSlots = 1024;
   static constexpr size_t kMaxRowBytes = 3072;
   static constexpr size_t kPrepRingRows = 64;        // rows of the prep ring (a power of two)
   static constexpr size_t kPrepRingRowBytes = 8192;  // bytes of one row of the prep ring
@@ -338,6 +345,7 @@ struct StagedPleWorkspace {
       free(ngram_cache_data);
       ngram_cache_data = nullptr;
     }
+    cache_slots = kCacheSlots;
     ring_idx = 0;
     prefill_cap_rows = 0;
     prefill_cap_bytes = 0;
@@ -393,6 +401,52 @@ struct PendingStagedBuffers {
   }
 };
 
+static std::string read_ple_env(const char* name) {
+#ifdef _WIN32
+  char buf[128]{};
+  ::SetLastError(ERROR_SUCCESS);
+  const DWORD n = ::GetEnvironmentVariableA(name, buf, static_cast<DWORD>(sizeof(buf)));
+  if (n > 0 && n < sizeof(buf)) {
+    return std::string(buf, n);
+  }
+  if (::GetLastError() == ERROR_SUCCESS && n == 0) {
+    return {};
+  }
+#endif
+  if (const char* val = std::getenv(name)) {
+    return std::string(val);
+  }
+  return {};
+}
+
+static size_t resolve_ple_cache_slots() {
+  const std::string env_slots = read_ple_env("ORT_QWEN38_PLE_CACHE_SLOTS");
+  if (!env_slots.empty()) {
+    char* end = nullptr;
+    errno = 0;
+    const long long parsed = std::strtoll(env_slots.c_str(), &end, 10);
+    if (end != env_slots.c_str() && *end == '\0' && parsed > 0) {
+      if (parsed <= static_cast<long long>(StagedPleWorkspace::kMinOverrideCacheSlots)) {
+        return StagedPleWorkspace::kMinOverrideCacheSlots;
+      }
+      size_t pow2 = StagedPleWorkspace::kMinOverrideCacheSlots;
+      while (pow2 * 2 <= static_cast<size_t>(parsed) && pow2 * 2 <= StagedPleWorkspace::kCacheSlots) {
+        pow2 *= 2;
+      }
+      return pow2;
+    }
+  }
+  size_t free_mem = 0, total_mem = 0;
+  if (cudaMemGetInfo(&free_mem, &total_mem) == cudaSuccess) {
+    if (free_mem < (12ULL << 30)) {
+      return StagedPleWorkspace::kMinCacheSlots;
+    }
+  } else {
+    cudaGetLastError();
+  }
+  return StagedPleWorkspace::kCacheSlots;
+}
+
 // Gives the workspace the pinned buffers one call needs: the scalar words and the prep ring and, for rows > 0, a token buffer
 // and a mapped FP8 buffer for `rows` rows of `row_bytes` bytes. All or nothing: every new buffer is allocated, and its
 // device alias verified, before any of them is published, so on failure what was allocated is freed and the workspace,
@@ -405,6 +459,7 @@ static cudaError_t ensure_staged_buffers(StagedPleWorkspace& ws, size_t rows, si
   }
   const size_t need_bytes = rows * row_bytes;
   PendingStagedBuffers fresh;
+  size_t new_cache_slots = ws.cache_slots;
   size_t new_rows = ws.prefill_cap_rows;
   size_t new_bytes = ws.prefill_cap_bytes;
   bool replaces_buffer = false;
@@ -418,28 +473,8 @@ static cudaError_t ensure_staged_buffers(StagedPleWorkspace& ws, size_t rows, si
     if (err == cudaSuccess) err = staged_device_alias(&fresh.prep_ring_dev, fresh.prep_ring);
   }
   if (err == cudaSuccess && !ws.ngram_cache_data) {
-    size_t target_slots = StagedPleWorkspace::kCacheSlots;
-    if (const char* env_slots = std::getenv("ORT_QWEN38_PLE_CACHE_SLOTS")) {
-      const long long parsed = std::strtoll(env_slots, nullptr, 10);
-      if (parsed >= 1024) {
-        size_t pow2 = 1024;
-        while (pow2 * 2 <= static_cast<size_t>(parsed) && pow2 * 2 <= StagedPleWorkspace::kCacheSlots) {
-          pow2 *= 2;
-        }
-        target_slots = pow2;
-      }
-    } else {
-      size_t free_mem = 0, total_mem = 0;
-      if (cudaMemGetInfo(&free_mem, &total_mem) == cudaSuccess) {
-        if (free_mem < (12ULL << 30)) {
-          target_slots = StagedPleWorkspace::kMinCacheSlots;
-        }
-      } else {
-        cudaGetLastError();
-      }
-    }
-    ws.cache_slots = target_slots;
-    err = staged_malloc(&fresh.ngram_cache_data, ws.cache_slots * StagedPleWorkspace::kMaxRowBytes);
+    new_cache_slots = resolve_ple_cache_slots();
+    err = staged_malloc(&fresh.ngram_cache_data, new_cache_slots * StagedPleWorkspace::kMaxRowBytes);
   }
   if (err == cudaSuccess && rows != 0 && (!ws.prefill_tokens || rows > ws.prefill_cap_rows)) {
     new_rows = rows < kMinPrefillRows ? kMinPrefillRows : rows;
@@ -472,6 +507,7 @@ static cudaError_t ensure_staged_buffers(StagedPleWorkspace& ws, size_t rows, si
   }
   if (fresh.ngram_cache_data) {
     ws.ngram_cache_data = fresh.ngram_cache_data;
+    ws.cache_slots = new_cache_slots;
     memset(ws.ngram_cache_valid, 0, sizeof(ws.ngram_cache_valid));
   }
   if (fresh.prefill_tokens) {
@@ -2280,8 +2316,12 @@ QWEN38_PLANE_EXPORT int qwen38_plane_test_stats(Qwen38PlaneTestStats* stats) {
   if (stats == nullptr) return (int)cudaErrorInvalidValue;
   std::lock_guard<std::mutex> lock(g_staged_ple_mu);
   long long capacity_rows = 0;
+  long long ple_cache_slots = 0;
   for (const auto& kv : g_host_ple_workspaces) {
-    if (kv.second) capacity_rows += (long long)kv.second->prefill_cap_rows;
+    if (kv.second) {
+      capacity_rows += (long long)kv.second->prefill_cap_rows;
+      if (kv.second->ngram_cache_data) ple_cache_slots += (long long)kv.second->cache_slots;
+    }
   }
   stats->gather_rows = g_test_hooks.gather_rows;
   stats->staged_launches = g_test_hooks.staged_launches;
@@ -2293,6 +2333,7 @@ QWEN38_PLANE_EXPORT int qwen38_plane_test_stats(Qwen38PlaneTestStats* stats) {
   stats->fault_armed = (g_test_hooks.fault_site != QWEN38_PLANE_FAULT_NONE || g_test_launch_skip.load() >= 0) ? 1 : 0;
   stats->unfenced_drains = g_test_hooks.unfenced_drains;
   stats->gather_pool_threads = g_ple_gather_pool != nullptr ? g_ple_gather_pool->pool.ThreadCount() : 0;
+  stats->ple_cache_slots = ple_cache_slots;
   return 0;
 }
 

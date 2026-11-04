@@ -191,24 +191,38 @@ void ValidateQwen38CacheShapes(const std::vector<Qwen38CacheInput>& inputs, int 
     const bool is_cache = input.name.find("past_key_values.") != std::string::npos;
     if (input.name == "past_position_ids") {
       if (shape.size() != 2) fail(input, "expected [batch, kv_capacity]");
-      if (shape[1] > 0 && shape[1] < kv_capacity) fail(input, "dimension 1 must be static and at least kv_capacity");
+      if (shape[1] >= 0 && shape[1] < kv_capacity) fail(input, "dimension 1 must be static and at least kv_capacity");
       // The plane fills the position ids of slot b at b * kv_capacity, ORT reads them at b * dimension 1.
-      if (request_slots > 1 && shape[1] > 0 && shape[1] != kv_capacity) {
+      if (request_slots > 1 && shape[1] >= 0 && shape[1] != kv_capacity) {
         fail(input, "with " + std::to_string(request_slots) +
                         " request slots dimension 1 must be exactly kv_capacity: the slots' rows lie kv_capacity apart");
       }
     } else if (is_cache && (tail == "key" || tail == "value")) {
       if (shape.size() != 4) fail(input, "expected [batch, 2, kv_capacity, 256]");
       if (shape[1] != 2 || shape[3] != 256) fail(input, "the hand-off copies 2 KV heads of 256 channels");
-      if (shape[2] > 0 && shape[2] != kv_capacity)
+      if (shape[2] >= 0 && shape[2] != kv_capacity)
         fail(input, "dimension 2 (the cache length) must be static and kv_capacity long");
     } else if (is_cache && tail == "index_key") {
       if (shape.size() != 3) fail(input, "expected [batch, kv_capacity / 4, 128]");
       if (shape[2] != 128) fail(input, "dimension 2 (the index-key width) must be 128");
-      if (shape[1] > 0 && shape[1] < kv_capacity / kQwen38IndexKeyRatio)
+      if (shape[1] >= 0 && shape[1] < kv_capacity / kQwen38IndexKeyRatio)
         fail(input, "dimension 1 must be static and hold one key per 4 positions");
     }
   }
+}
+
+std::vector<int64_t> ResolveQwen38CacheSlotShape(const std::string& name, std::vector<int64_t> shape, int kv_capacity) {
+  const size_t dot = name.rfind('.');
+  const std::string tail = dot == std::string::npos ? name : name.substr(dot + 1);
+  const bool is_cache = name.find("past_key_values.") != std::string::npos;
+  if (name == "past_position_ids" && shape.size() == 2) {
+    if (shape[1] <= 0) shape[1] = kv_capacity;
+  } else if (is_cache && (tail == "key" || tail == "value") && shape.size() == 4) {
+    if (shape[2] <= 0) shape[2] = kv_capacity;
+  } else if (is_cache && tail == "index_key" && shape.size() == 3) {
+    if (shape[1] <= 0) shape[1] = (kv_capacity / kQwen38IndexKeyRatio) + 1;
+  }
+  return FixedShape(std::move(shape));
 }
 
 size_t ResolveQwen38MaxBatchSize(const Config& config) {
@@ -222,6 +236,10 @@ size_t ResolveQwen38MaxBatchSize(const Config& config) {
   };
   if (config.engine.dynamic_batching) {
     return checked(static_cast<long long>(config.engine.dynamic_batching->max_batch_size),
+                   "engine.dynamic_batching.max_batch_size");
+  }
+  if (config.model.qwen38_graph.resolved_max_batch_size.has_value()) {
+    return checked(static_cast<long long>(*config.model.qwen38_graph.resolved_max_batch_size),
                    "engine.dynamic_batching.max_batch_size");
   }
   // engine.static_batching is not read: it configures the Engine's static path in general, which the single-slot
@@ -448,7 +466,7 @@ std::string NormalizeQwen38ContextTier(const std::string& request) {
     tier.push_back(upper ? static_cast<char>(c - 'A' + 'a') : c);
   }
   static constexpr std::pair<const char*, const char*> kTierOfCount[] = {
-      {"2048", "2k"}, {"8192", "8k"}, {"16384", "16k"}, {"32768", "32k"}, {"65536", "64k"}, {"131072", "128k"}};
+      {"2048", "2k"}, {"8192", "8k"}, {"16384", "16k"}, {"32768", "32k"}, {"65536", "64k"}, {"131072", "128k"}, {"262144", "256k"}};
   for (const auto& [count, name] : kTierOfCount) {
     if (tier == count) return name;
   }
@@ -1003,21 +1021,13 @@ void Qwen38GraphEngine::BuildTarget() {
   // Store (KV, positions) and shared (index_key): one in-place buffer each, bound as input and output.
   for (const auto& name : in_names) {
     if (kinds[name] == Kind::kStore) {
-      auto slot_shape = FixedShape(info.GetInputShape(name));
-      if (name == "past_position_ids" && slot_shape.size() == 2) {
-        slot_shape[1] = capacity_;
-      } else if (slot_shape.size() == 4) {
-        slot_shape[2] = capacity_;
-      }
+      const auto slot_shape = ResolveQwen38CacheSlotShape(name, info.GetInputShape(name), capacity_);
       const auto dtype = info.GetInputDataType(name);
       store_slot_shape_[name] = slot_shape;
       store_slot_bytes_[name] = Elements(slot_shape) * Ort::SizeOf(dtype);
       NewDeviceTensor(store_, name, with_batch(slot_shape, max_batch_), dtype);
     } else if (kinds[name] == Kind::kShared) {
-      auto slot_shape = FixedShape(info.GetInputShape(name));
-      if (slot_shape.size() == 3) {
-        slot_shape[1] = (capacity_ / 4) + 1;
-      }
+      const auto slot_shape = ResolveQwen38CacheSlotShape(name, info.GetInputShape(name), capacity_);
       const auto dtype = info.GetInputDataType(name);
       shared_slot_shape_[name] = slot_shape;
       shared_slot_bytes_[name] = Elements(slot_shape) * Ort::SizeOf(dtype);
@@ -1693,9 +1703,12 @@ void Qwen38GraphEngine::BuildHeadState() {
   const SessionInfo& info = fold_ ? model_.session_info_ : head_[0].info;
   const std::string prefix = fold_ ? "head.past_key_values.0." : "past_key_values.0.";
   if (!model_.config_->model.dflash2.filename.empty() && !info.HasInput(prefix + "key")) return;
-  for (const char* tail : {"key", "value", "index_key"})
-    NewDeviceTensor(head_store_, std::string("past_key_values.0.") + tail, FixedShape(info.GetInputShape(prefix + tail)),
-                    info.GetInputDataType(prefix + tail));
+  for (const char* tail : {"key", "value", "index_key"}) {
+    const std::string input_name = prefix + tail;
+    NewDeviceTensor(head_store_, std::string("past_key_values.0.") + tail,
+                    ResolveQwen38CacheSlotShape(input_name, info.GetInputShape(input_name), capacity_),
+                    info.GetInputDataType(input_name));
+  }
   const int banks = fold_ ? kMaxBanks : 2;
   for (int b = 0; b < banks; ++b) {
     for (const char* tail : {"index_buffer", "index_lengths"})
@@ -2952,20 +2965,80 @@ std::unique_ptr<Config> PreflightQwen38GraphModelConfig(std::unique_ptr<Config> 
 
 }  // namespace
 
-Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
-    : Model{PreflightQwen38GraphModelConfig(std::move(config))} {
+size_t ResolveQwen38DflashReservedBlocks(const Config& config, size_t block_size, size_t max_batch) {
+  if (config.model.dflash2.filename.empty()) return 0;
+  if (block_size == 0) {
+    throw std::runtime_error("engine.dynamic_batching.block_size must be positive.");
+  }
+  Config dflash_cfg = config;
+  auto& dflash = dflash_cfg.model.dflash2;
+  if (dflash.num_hidden_layers <= 0) dflash.num_hidden_layers = 5;
+  if (dflash.num_key_value_heads <= 0) dflash.num_key_value_heads = 8;
+  if (dflash.head_size <= 0) dflash.head_size = 128;
+  if (dflash.block_size <= 0) dflash.block_size = 8;
+  if (dflash.sliding_window <= 0) dflash.sliding_window = 2048;
+
+  const size_t active_pools = std::max<size_t>(1, max_batch);
+  size_t snapshot_pools = 0;
+  if (config.engine.dynamic_batching) {
+    const auto& db = *config.engine.dynamic_batching;
+    if (db.prefix_caching.value_or(true) && db.dflash2_max_snapshots > 0) {
+      snapshot_pools = std::min(db.dflash2_max_snapshots, active_pools);
+      if (db.max_snapshots.has_value()) {
+        snapshot_pools = std::min(snapshot_pools, *db.max_snapshots);
+      }
+    }
+  }
+  const size_t pools = active_pools + snapshot_pools;
+  constexpr size_t kDrafterPageSize = 128;
+  const size_t ring_blocks_per_pool = Dflash2Drafter::PoolBlocks(dflash_cfg, kDrafterPageSize, 1);
+  const size_t pool_kv_bytes = Dflash2Drafter::PoolBytes(
+      dflash_cfg, kDrafterPageSize, ring_blocks_per_pool, ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16);
+  const size_t hidden_size =
+      config.model.decoder.hidden_size > 0 ? static_cast<size_t>(config.model.decoder.hidden_size) : 2560;
+  const size_t embed_bytes = Dflash2Drafter::EmbeddingReservedBytes(
+      active_pools, static_cast<size_t>(dflash.block_size), hidden_size,
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16);
+  if (pools != 0 && pool_kv_bytes > std::numeric_limits<size_t>::max() / pools) {
+    throw std::runtime_error("DFlash 2 reserved pool bytes overflow size_t.");
+  }
+  const size_t total_pool_kv_bytes = pools * pool_kv_bytes;
+  if (embed_bytes > std::numeric_limits<size_t>::max() - total_pool_kv_bytes) {
+    throw std::runtime_error("DFlash 2 reserved memory bytes overflow size_t.");
+  }
+  const size_t aux_bytes = total_pool_kv_bytes + embed_bytes;
+
+  const size_t qsa_layers =
+      config.model.decoder.num_hidden_layers >= kQwen38IndexKeyRatio
+          ? static_cast<size_t>(config.model.decoder.num_hidden_layers / kQwen38IndexKeyRatio)
+          : 12;
+  const size_t kv_heads =
+      config.model.decoder.num_key_value_heads > 0 ? static_cast<size_t>(config.model.decoder.num_key_value_heads) : 2;
+  const size_t head_size =
+      config.model.decoder.head_size > 0 ? static_cast<size_t>(config.model.decoder.head_size) : 256;
+  constexpr size_t kIndexKeyWidth = 128;
+  const size_t layer_kv_bytes_per_token = 2 * kv_heads * head_size * sizeof(uint16_t);
+  const size_t layer_index_bytes_per_token = kIndexKeyWidth * sizeof(float);
+  const size_t target_bytes_per_token = qsa_layers * (layer_kv_bytes_per_token + layer_index_bytes_per_token);
+  if (target_bytes_per_token == 0 || block_size > std::numeric_limits<size_t>::max() / target_bytes_per_token) {
+    throw std::runtime_error("Target cache bytes per block overflow size_t.");
+  }
+  const size_t target_block_bytes = block_size * target_bytes_per_token;
+  return aux_bytes / target_block_bytes + static_cast<size_t>(aux_bytes % target_block_bytes != 0);
+}
+
+bool ApplyQwen38DynamicBatchingConfig(Config& config) {
   bool has_dynamic_batching_kv = false;
-  if (config_->engine.dynamic_batching) {
-    const auto& db = *config_->engine.dynamic_batching;
-    const size_t max_batch = std::max<size_t>(1, db.max_batch_size);
-    const size_t block_size = std::max<size_t>(1, db.block_size);
+  if (config.engine.dynamic_batching) {
+    const size_t max_batch = ResolveQwen38MaxBatchSize(config);
+    const auto& db = *config.engine.dynamic_batching;
+    if (db.block_size == 0) {
+      throw std::runtime_error("engine.dynamic_batching.block_size must be positive.");
+    }
+    const size_t block_size = db.block_size;
     if (db.num_blocks.has_value() && *db.num_blocks > 0) {
       const size_t configured_blocks = *db.num_blocks;
-      size_t aux_blocks = 0;
-      if (!config_->model.dflash2.filename.empty()) {
-        const size_t pools = max_batch + (db.dflash2_max_snapshots > 0 ? 1 : 0);
-        aux_blocks = (pools * 5012 + 799) / 800;
-      }
+      const size_t aux_blocks = ResolveQwen38DflashReservedBlocks(config, block_size, max_batch);
       if (configured_blocks <= aux_blocks) {
         throw std::runtime_error(
             "engine.dynamic_batching.num_blocks (" + std::to_string(configured_blocks) +
@@ -2977,25 +3050,59 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
         throw std::runtime_error(
             "engine.dynamic_batching.num_blocks is too small to allocate at least 1 target block per batch slot.");
       }
+      constexpr size_t kMaxTargetTokens =
+          static_cast<size_t>(std::numeric_limits<int>::max() - kQwen38GraphIdMaxRows);
+      if (target_blocks_per_slot > kMaxTargetTokens / block_size) {
+        throw std::runtime_error(
+            "engine.dynamic_batching.num_blocks (" + std::to_string(configured_blocks) +
+            ") with block_size (" + std::to_string(block_size) +
+            ") exceeds the maximum supported kv_capacity.");
+      }
       const size_t target_tokens = target_blocks_per_slot * block_size;
-      config_->model.qwen38_graph.kv_capacity = static_cast<int>(target_tokens + 8);
-      config_->model.context_length = static_cast<int>(target_tokens);
-      config_->search.max_length = config_->model.context_length;
+      config.model.qwen38_graph.kv_capacity =
+          static_cast<int>(target_tokens + static_cast<size_t>(kQwen38GraphIdMaxRows));
+      config.model.context_length = static_cast<int>(target_tokens);
+      config.search.max_length = config.model.context_length;
       has_dynamic_batching_kv = true;
     }
-    if (config_->search.chunk_size.has_value() && *config_->search.chunk_size > 0) {
-      config_->model.qwen38_graph.prefill.chunk = static_cast<int>(*config_->search.chunk_size);
-    } else if (db.max_scheduled_tokens > 0) {
-      config_->model.qwen38_graph.prefill.chunk = static_cast<int>(db.max_scheduled_tokens);
+    if (config.search.chunk_size.has_value() && *config.search.chunk_size > 0) {
+      if (*config.search.chunk_size > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        throw std::runtime_error("search.chunk_size exceeds the maximum supported prefill chunk.");
+      }
+      config.model.qwen38_graph.prefill.chunk = static_cast<int>(*config.search.chunk_size);
+    } else if (config.model.qwen38_graph.prefill.chunk == 0 && db.max_scheduled_tokens > 0) {
+      if (db.max_scheduled_tokens > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        throw std::runtime_error(
+            "engine.dynamic_batching.max_scheduled_tokens exceeds the maximum supported prefill chunk.");
+      }
+      config.model.qwen38_graph.prefill.chunk = static_cast<int>(db.max_scheduled_tokens);
     }
-    config_->search.chunk_size.reset();
+    config.search.chunk_size.reset();
     if (max_batch <= 1) {
-      config_->engine.dynamic_batching.reset();
+      config.model.qwen38_graph.resolved_max_batch_size = 1;
+      config.model.qwen38_graph.max_batch_size = 1;
+      config.search.batch_size = 1;
+      config.engine.dynamic_batching.reset();
     }
-  } else if (config_->search.chunk_size.has_value() && *config_->search.chunk_size > 0) {
-    config_->model.qwen38_graph.prefill.chunk = static_cast<int>(*config_->search.chunk_size);
-    config_->search.chunk_size.reset();
+  } else if (config.search.chunk_size.has_value() && *config.search.chunk_size > 0) {
+    if (*config.search.chunk_size > static_cast<size_t>(std::numeric_limits<int>::max())) {
+      throw std::runtime_error("search.chunk_size exceeds the maximum supported prefill chunk.");
+    }
+    config.model.qwen38_graph.prefill.chunk = static_cast<int>(*config.search.chunk_size);
+    config.search.chunk_size.reset();
   }
+  if (has_dynamic_batching_kv && config.model.qwen38_graph.prefill.enabled &&
+      EffectiveQwen38PrefillChunkTokens(config.model.qwen38_graph) >
+          static_cast<size_t>(config.model.qwen38_graph.kv_capacity)) {
+    config.model.qwen38_graph.prefill.chunk = config.model.qwen38_graph.kv_capacity;
+  }
+  ValidateQwen38PrefillChunkShape(config.model.qwen38_graph);
+  return has_dynamic_batching_kv;
+}
+
+Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
+    : Model{PreflightQwen38GraphModelConfig(std::move(config))} {
+  const bool has_dynamic_batching_kv = ApplyQwen38DynamicBatchingConfig(*config_);
   const auto& q = config_->model.qwen38_graph;
   const bool separate_prefill_sessions =
       q.prefill.enabled && !q.prefill.dense.filename.empty() &&
@@ -3027,7 +3134,10 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
   // is read once as well: it also decides how the context settings follow the graph.
   const char* context_env = std::getenv("ORT_QWEN38_CONTEXT_LENGTH");
   const char* drafts_env = std::getenv("ORT_QWEN38_MTP_DRAFTS");
-  const std::string context_request = context_env ? context_env : "";
+  const bool explicit_context_env = context_env != nullptr && *context_env != '\0';
+  const std::string context_request =
+      explicit_context_env ? std::string{context_env}
+                           : (has_dynamic_batching_kv ? std::to_string(config_->model.context_length) : std::string{});
   const auto package_has_file = [&](const std::string& file) {
     if (config_->model_data_spans_.count(file) != 0) return true;
     std::error_code error;

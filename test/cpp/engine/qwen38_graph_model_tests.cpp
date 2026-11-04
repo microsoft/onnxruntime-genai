@@ -1274,7 +1274,7 @@ TEST(Qwen38ContextTierTest, TheMtpDraftsHookPicksTheGraphOfThatWidthNextToTheDec
 TEST(Qwen38ContextTierTest, ARequestIsLowerCasedAndTheTierCountsFoldToTheirNames) {
   EXPECT_EQ(NormalizeQwen38ContextTier(""), "");
   const std::vector<std::pair<std::string, std::string>> tiers = {
-      {"2k", "2k"}, {"8K", "8k"}, {"128K", "128k"}, {"2048", "2k"}, {"8192", "8k"}, {"16384", "16k"}, {"32768", "32k"}, {"65536", "64k"}, {"131072", "128k"}, {"4096", "4096"}, {"Dynamic", "dynamic"}};
+      {"2k", "2k"}, {"8K", "8k"}, {"128K", "128k"}, {"256K", "256k"}, {"2048", "2k"}, {"8192", "8k"}, {"16384", "16k"}, {"32768", "32k"}, {"65536", "64k"}, {"131072", "128k"}, {"262144", "256k"}, {"4096", "4096"}, {"Dynamic", "dynamic"}};
   for (const auto& [request, tier] : tiers) EXPECT_EQ(NormalizeQwen38ContextTier(request), tier) << request;
 
   // A tier becomes part of a file name: nothing that could leave the folder or name another file is accepted.
@@ -1549,6 +1549,7 @@ TEST(Qwen38ReplayCoverageTest, RequiresEveryBankedStateToHaveAStateUpdateOutput)
       "past_key_values.0.conv_state",
       "past_key_values.0.recurrent_state",
       "past_key_values.1.ple_conv_state",
+      "past_key_values.1.ple_context",
       "past_key_values.3.index_buffer",
       "past_key_values.3.index_lengths",
   };
@@ -1558,9 +1559,12 @@ TEST(Qwen38ReplayCoverageTest, RequiresEveryBankedStateToHaveAStateUpdateOutput)
       "state_update.1.ple_conv_value",
       "state_update.3.indexer_value",
   };
+  // ple_context is exempt in folded SpeculativePrefixCommit targets because the plane prepares PLE rows from
+  // fold.ctx_commit / fold.ctx_a and SpeculativePrefixCommit commits the accepted n-gram context to fold.ctx_commit_out.
   EXPECT_NO_THROW(RequireQwen38ReplayCoverage(bank_names, complete_updates));
+  EXPECT_NO_THROW(RequireQwen38ReplayCoverage({"past_key_values.1.ple_context"}, {}));
 
-  // Missing recurrent_capsule for layer 0 must be rejected naming both the missing output and the banked state.
+  // Missing recurrent_capsule, conv_value, ple_conv_value, or indexer_value must still be rejected naming both tensors.
   try {
     RequireQwen38ReplayCoverage(
         bank_names, {"state_update.0.conv_value", "state_update.1.ple_conv_value", "state_update.3.indexer_value"});
@@ -1570,6 +1574,16 @@ TEST(Qwen38ReplayCoverageTest, RequiresEveryBankedStateToHaveAStateUpdateOutput)
     EXPECT_NE(msg.find("state_update.0.recurrent_capsule"), std::string::npos) << msg;
     EXPECT_NE(msg.find("past_key_values.0.recurrent_state"), std::string::npos) << msg;
   }
+  EXPECT_THROW(RequireQwen38ReplayCoverage(
+                   bank_names, {"state_update.0.recurrent_capsule", "state_update.1.ple_conv_value", "state_update.3.indexer_value"}),
+               std::runtime_error);
+  EXPECT_THROW(RequireQwen38ReplayCoverage(
+                   bank_names, {"state_update.0.conv_value", "state_update.0.recurrent_capsule", "state_update.3.indexer_value"}),
+               std::runtime_error);
+  EXPECT_THROW(RequireQwen38ReplayCoverage(
+                   bank_names, {"state_update.0.conv_value", "state_update.0.recurrent_capsule", "state_update.1.ple_conv_value"}),
+               std::runtime_error);
+  EXPECT_THROW(RequireQwen38ReplayCoverage({"past_key_values.1.unknown_state"}, complete_updates), std::runtime_error);
 }
 
 // Every graph the engine warms up (the single-slot target and head graphs and each batched target graph, one per batch size and
@@ -2386,22 +2400,145 @@ TEST(Qwen38CacheShapeTest, RejectsUnexpectedCacheDimensions) {
     ADD_FAILURE() << "accepted " << input.name;
   };
 
+  // Supported symbolic cache-length dimensions on dynamic-context graphs are accepted and materialized from kv_capacity.
+  EXPECT_NO_THROW(ValidateQwen38CacheShapes({{"past_position_ids", {-1, -1}}}, 33028, "target", 4));
+  EXPECT_NO_THROW(ValidateQwen38CacheShapes({{"past_key_values.0.key", {-1, 2, -1, 256}}}, 33028, "target"));
+  EXPECT_NO_THROW(ValidateQwen38CacheShapes({{"past_key_values.0.value", {-1, 2, -1, 256}}}, 33028, "target"));
+  EXPECT_NO_THROW(ValidateQwen38CacheShapes({{"past_key_values.0.index_key", {-1, -1, 128}}}, 33028, "target"));
+  EXPECT_NO_THROW(ValidateQwen38CacheShapes({{"head.past_key_values.0.key", {-1, 2, -1, 256}}}, 33028, "fold head"));
+  EXPECT_NO_THROW(ValidateQwen38CacheShapes({{"head.past_key_values.0.index_key", {-1, -1, 128}}}, 33028, "fold head"));
+
   rejects({"past_position_ids", {-1, 33000}});
-  rejects({"past_position_ids", {-1, -1}});  // a dynamic length cannot be checked against the ledger
+  rejects({"past_position_ids", {-1, 0}});
   rejects({"past_position_ids", {33028}});
-  rejects({"past_key_values.0.key", {-1, 2, -1, 256}});
+  rejects({"past_key_values.0.key", {-1, 2, 0, 256}});
   rejects({"past_key_values.0.value", {-1, 2, 32768, 256}});
   rejects({"past_key_values.0.key", {-1, 2, 33028}});
   rejects({"past_key_values.0.key", {-1, 4, 33028, 256}});
   rejects({"past_key_values.0.value", {-1, 2, 33028, 128}});
   rejects({"past_key_values.0.index_key", {-1, 8000, 128}});
-  rejects({"past_key_values.0.index_key", {-1, -1, 128}});
+  rejects({"past_key_values.0.index_key", {-1, 0, 128}});
   rejects({"past_key_values.0.index_key", {-1, 8257}});
   rejects({"past_key_values.0.index_key", {-1, 8257, 64}});
   // Auxiliary graphs name themselves in the error.
   rejects({"head.past_key_values.0.key", {-1, 2, 16384, 256}}, "fold head");
   rejects({"past_key_values.0.key", {-1, 2, 16384, 256}}, "head (S=2)");
   rejects({"past_key_values.0.value", {-1, 2, 16384, 256}}, "head_r2");
+}
+
+TEST(Qwen38CacheShapeTest, MaterializesSymbolicCacheDimensionsAndPreservesStaticOnes) {
+  // Static dimensions (including padded past_position_ids and exact kv_capacity / 4 index_key) are preserved verbatim.
+  EXPECT_EQ(ResolveQwen38CacheSlotShape("past_position_ids", {-1, 33040}, 33028), (std::vector<int64_t>{1, 33040}));
+  EXPECT_EQ(ResolveQwen38CacheSlotShape("past_key_values.3.key", {-1, 2, 33028, 256}, 33028),
+            (std::vector<int64_t>{1, 2, 33028, 256}));
+  EXPECT_EQ(ResolveQwen38CacheSlotShape("past_key_values.3.index_key", {-1, 8257, 128}, 33028),
+            (std::vector<int64_t>{1, 8257, 128}));
+  EXPECT_EQ(ResolveQwen38CacheSlotShape("head.past_key_values.0.index_key", {-1, 8257, 128}, 33028),
+            (std::vector<int64_t>{1, 8257, 128}));
+
+  // Symbolic dimensions on target and auxiliary head caches materialize from kv_capacity.
+  EXPECT_EQ(ResolveQwen38CacheSlotShape("past_position_ids", {-1, -1}, 262152), (std::vector<int64_t>{1, 262152}));
+  EXPECT_EQ(ResolveQwen38CacheSlotShape("past_key_values.3.key", {-1, 2, -1, 256}, 262152),
+            (std::vector<int64_t>{1, 2, 262152, 256}));
+  EXPECT_EQ(ResolveQwen38CacheSlotShape("past_key_values.3.value", {-1, 2, -1, 256}, 262152),
+            (std::vector<int64_t>{1, 2, 262152, 256}));
+  EXPECT_EQ(ResolveQwen38CacheSlotShape("past_key_values.3.index_key", {-1, -1, 128}, 262152),
+            (std::vector<int64_t>{1, 65539, 128}));
+  EXPECT_EQ(ResolveQwen38CacheSlotShape("head.past_key_values.0.key", {-1, 2, -1, 256}, 262152),
+            (std::vector<int64_t>{1, 2, 262152, 256}));
+  EXPECT_EQ(ResolveQwen38CacheSlotShape("head.past_key_values.0.index_key", {-1, -1, 128}, 262152),
+            (std::vector<int64_t>{1, 65539, 128}));
+}
+
+TEST(Qwen38DynamicBatchingConfigTest, DflashReservationScalesWithConfiguredBlockSizeAndSnapshots) {
+  Config config;
+  config.model.dflash2.filename = "dflash2.onnx";
+  config.engine.dynamic_batching.emplace();
+  config.engine.dynamic_batching->block_size = 256;
+  config.engine.dynamic_batching->max_batch_size = 1;
+  config.engine.dynamic_batching->dflash2_max_snapshots = 1;
+  config.engine.dynamic_batching->num_blocks = 1037;
+
+  // At block_size=256 with 1 slot + 1 snapshot, DFlash2 reserves 13 target-equivalent blocks, leaving 1024 blocks (256K).
+  EXPECT_EQ(ResolveQwen38DflashReservedBlocks(config, 256, 1), 13u);
+  // Halving block_size to 128 halves the target bytes per block, so the same drafter buffers reserve 25 blocks (~double).
+  EXPECT_EQ(ResolveQwen38DflashReservedBlocks(config, 128, 1), 25u);
+
+  EXPECT_TRUE(ApplyQwen38DynamicBatchingConfig(config));
+  EXPECT_EQ(config.model.context_length, 262144);
+  EXPECT_EQ(config.model.qwen38_graph.kv_capacity, 262144 + kQwen38GraphIdMaxRows);
+  EXPECT_EQ(config.search.max_length, 262144);
+  EXPECT_EQ(NormalizeQwen38ContextTier(std::to_string(config.model.context_length)), "256k");
+
+  // Disabling snapshots reserves only the active drafter ring.
+  Config no_snapshots;
+  no_snapshots.model.dflash2.filename = "dflash2.onnx";
+  no_snapshots.engine.dynamic_batching.emplace();
+  no_snapshots.engine.dynamic_batching->dflash2_max_snapshots = 0;
+  EXPECT_EQ(ResolveQwen38DflashReservedBlocks(no_snapshots, 256, 1), 7u);
+  EXPECT_EQ(ResolveQwen38DflashReservedBlocks(no_snapshots, 128, 1), 13u);
+}
+
+TEST(Qwen38DynamicBatchingConfigTest, SingleSlotDynamicBatchingPreservesPrecedenceAfterReset) {
+  ScopedEnvironmentVariable env_batch{"ORT_QWEN38_MAX_BATCH_SIZE", std::string{"4"}};
+  Config config;
+  config.model.qwen38_graph.max_batch_size = 4;
+  config.search.batch_size = 4;
+  config.engine.dynamic_batching.emplace();
+  config.engine.dynamic_batching->max_batch_size = 1;
+  config.engine.dynamic_batching->block_size = 256;
+  config.engine.dynamic_batching->num_blocks = 128;
+
+  EXPECT_EQ(ResolveQwen38MaxBatchSize(config), 1u);
+  EXPECT_TRUE(ApplyQwen38DynamicBatchingConfig(config));
+  EXPECT_FALSE(config.engine.dynamic_batching.has_value());
+  // Even after dynamic_batching is cleared for the static Engine path, its single-slot choice overrides
+  // qwen38_graph.max_batch_size, search.batch_size, and ORT_QWEN38_MAX_BATCH_SIZE.
+  EXPECT_EQ(ResolveQwen38MaxBatchSize(config), 1u);
+}
+
+TEST(Qwen38DynamicBatchingConfigTest, RejectsTargetCapacityOverflowingIntRange) {
+  Config config;
+  config.engine.dynamic_batching.emplace();
+  config.engine.dynamic_batching->max_batch_size = 1;
+  config.engine.dynamic_batching->block_size = 256;
+  // 8,388,608 * 256 = 2,147,483,648 > INT_MAX - kQwen38GraphIdMaxRows.
+  config.engine.dynamic_batching->num_blocks = 8388608;
+  EXPECT_THROW(ApplyQwen38DynamicBatchingConfig(config), std::runtime_error);
+}
+
+TEST(Qwen38DynamicBatchingConfigTest, MaxScheduledTokensOnlyAppliesWhenPrefillChunkIsUnset) {
+  // Explicit model.qwen38_graph.prefill.chunk is preserved when search.chunk_size is absent.
+  Config explicit_chunk;
+  explicit_chunk.model.qwen38_graph.prefill.enabled = true;
+  explicit_chunk.model.qwen38_graph.prefill.chunk = 8192;
+  explicit_chunk.engine.dynamic_batching.emplace();
+  explicit_chunk.engine.dynamic_batching->max_batch_size = 2;
+  explicit_chunk.engine.dynamic_batching->max_scheduled_tokens = 2048;
+  EXPECT_FALSE(ApplyQwen38DynamicBatchingConfig(explicit_chunk));
+  EXPECT_EQ(explicit_chunk.model.qwen38_graph.prefill.chunk, 8192);
+
+  // When prefill.chunk is unset (0), max_scheduled_tokens supplies the prefill chunk.
+  Config unset_chunk;
+  unset_chunk.model.qwen38_graph.prefill.enabled = true;
+  unset_chunk.model.qwen38_graph.prefill.chunk = 0;
+  unset_chunk.engine.dynamic_batching.emplace();
+  unset_chunk.engine.dynamic_batching->max_batch_size = 2;
+  unset_chunk.engine.dynamic_batching->max_scheduled_tokens = 2048;
+  EXPECT_FALSE(ApplyQwen38DynamicBatchingConfig(unset_chunk));
+  EXPECT_EQ(unset_chunk.model.qwen38_graph.prefill.chunk, 2048);
+
+  // Explicit search.chunk_size overrides prefill.chunk and is then cleared.
+  Config search_override;
+  search_override.model.qwen38_graph.prefill.enabled = true;
+  search_override.model.qwen38_graph.prefill.chunk = 8192;
+  search_override.search.chunk_size = 4096;
+  search_override.engine.dynamic_batching.emplace();
+  search_override.engine.dynamic_batching->max_batch_size = 1;
+  search_override.engine.dynamic_batching->max_scheduled_tokens = 2048;
+  EXPECT_FALSE(ApplyQwen38DynamicBatchingConfig(search_override));
+  EXPECT_EQ(search_override.model.qwen38_graph.prefill.chunk, 4096);
+  EXPECT_FALSE(search_override.search.chunk_size.has_value());
 }
 
 TEST(Qwen38CacheShapeTest, IgnoresInputsThatDoNotDependOnTheCapacity) {
