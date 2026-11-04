@@ -171,6 +171,30 @@ class PinnedHostPool {
     if (has_overflow) TrimOverflow();
   }
 
+  // Frees every pooled mirror and destroys the cached events. The events belong to the device that was current when they
+  // were created, so they must not outlive the binding of the stream to that device: the add-on can stay mapped across
+  // OgaShutdown() and be bound to another GPU by the next init. Called with the stream's device still bound, and only
+  // once no mirror is in use any more.
+  void Reset() noexcept {
+    std::lock_guard<std::mutex> lock{mutex_};
+    UseBoundDevice();
+    auto drain = [](std::vector<Entry>& entries) {
+      for (Entry& entry : entries) {
+        if (entry.event) {
+          ::cudaEventSynchronize(entry.event);
+          ::cudaEventDestroy(entry.event);
+        }
+        ::cudaFreeHost(entry.p);
+      }
+      entries.clear();
+    };
+    for (auto& entries : free_) drain(entries);
+    drain(overflow_);
+    for (cudaEvent_t event : events_) ::cudaEventDestroy(event);
+    events_.clear();
+    retained_bytes_ = 0;
+  }
+
  private:
   struct Entry {
     uint8_t* p;
@@ -709,8 +733,12 @@ struct CudaBatchedSampler final : BatchedSampler {
 struct CudaInterfaceImplBase : DeviceInterface {
   CudaInterfaceImplBase() = default;
 
+  // The stream and the allocator pointer belong to this interface. The library is not always unloaded when the interface is
+  // destroyed (the qwen38 plane built into it keeps a reference on it, see Qwen38Plane), so it must not be entered again
+  // with them still set.
   ~CudaInterfaceImplBase() {
     ort_allocator_ = nullptr;
+    PinnedHostPool::Instance().Reset();
     std::lock_guard<std::mutex> lock{g_stream_mutex};
     g_stream_device_id.store(-1, std::memory_order_release);
     g_stream.Destroy();
@@ -1317,6 +1345,14 @@ struct NvTensorRtRtxInterfaceImpl final : CudaInterfaceImplBase {
 
 std::unique_ptr<DeviceInterface> g_cuda_device;
 
+// Set once this library's statics are being destroyed, which happens before ShutdownInterface() is called by a host that
+// exits without OgaShutdown(). g_cuda_device is already destroyed then and must not be reset again. The marker is defined
+// after g_cuda_device so that it is destroyed first. The flag is constant-initialized, so it stays valid during teardown.
+bool g_statics_destroyed = false;
+struct StaticsDestroyedMarker {
+  ~StaticsDestroyedMarker() { g_statics_destroyed = true; }
+} g_statics_destroyed_marker;
+
 DeviceInterface& GetCudaDeviceInterface() { return *g_cuda_device; }
 
 LogItems& GetLogItems() { return gp_genai->GetLogItems(); }
@@ -1370,11 +1406,24 @@ uint32_t GetInterfaceVersion() {
   return Generators::kDeviceInterfaceVersion;
 }
 
+void ShutdownInterface() {
+  if (Generators::g_statics_destroyed) return;
+  Generators::g_cuda_device.reset();
+}
+
 Generators::DeviceInterface* GetInterface(GenaiInterface* p_genai, const char* deviceType, const OrtApi* ort_api) {
+  if (!deviceType) {
+    Generators::g_cuda_device.reset();
+    return nullptr;
+  }
   Generators::gp_genai = p_genai;
   // Ensure Ort::api is initialized in this shared library (onnxruntime-genai-cuda add-on) immediately. Delaying the
   // initialization to CudaInterfaceImplBase::InitOrt would be inadequate, as GetMemoryInfo runs before InitOrt.
   Ort::api = ort_api;
+  // A library that is still mapped from an earlier init (OgaShutdown() does not unload it while a qwen38 plane built into it
+  // is loaded) still holds that init's interface. Destroy it first: it releases the stream and the allocator pointer that the
+  // new interface takes over.
+  Generators::g_cuda_device.reset();
   if (strcasecmp(deviceType, "NvTensorRtRtx") == 0) {
     Generators::g_cuda_device = std::make_unique<Generators::NvTensorRtRtxInterfaceImpl>();
   } else {
