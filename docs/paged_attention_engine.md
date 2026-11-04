@@ -2427,11 +2427,14 @@ token. The device holds `model.qwen38_graph.max_batch_size` slots (default 1), o
   the slot: nothing is published through the process environment by the executor, so Engines of different models and slots
   that ingest their prompts in interleaved chunks never see each other's value. The device itself publishes the QMoE hints
   (`ORT_QMOE_PREFILL_NEW_TURN`, `ORT_QMOE_PREFILL_TOTAL_TOKENS`, `ORT_QMOE_CURRENT_MAX_COMPACT_EXPERTS`,
-  `ORT_QMOE_PREFILL_HANDOFF_DONE`, `ORT_QMOE_IN_WARMUP`), because ORT's QMoE kernels read them from the process environment
-  until per-run config entries exist, and only for the duration of one ORT Run (`Qwen38OrtEnvScope`, one process-wide lock,
+  `ORT_QMOE_PREFILL_HANDOFF_DONE`, `ORT_QMOE_IN_WARMUP`), only for the duration of one ORT Run (`Qwen38OrtEnvScope`, one process-wide lock,
   the previous values are restored): the values of a prompt chunk are computed from that chunk's slot alone, never kept or
   max-merged across Runs, and a Run publishes the new-turn and hand-off notices of the slots it serves only (a prompt chunk
   serves its slot, a batched decode the slots that decode in it).
+  Every Run also carries `ep.cuda.qmoe_in_warmup=1` during synthetic warmup and `0` afterwards; current ORT reads that entry
+  rather than `ORT_QMOE_IN_WARMUP`. Offloaded target decode warmup uses `gpu_graph_id=-1`, including all batched shapes:
+  captured replays bypass the per-run control and would otherwise score and promote dummy-token experts. These targets
+  pay graph capture costs during their first live runs; non-offloaded targets and auxiliary heads still capture during warmup.
   With several slots a step advances every slot (`Qwen38GraphSession::StepBatch`): it commits the in-flight batched cycle of
   the decoding slots, prefills the next chunk of the slots that have not started decoding and enqueues the next batched
   cycle. The executor declares its step plan via `ScheduledRequests::BeginBackendStep` and stages owned `BackendRowResult`

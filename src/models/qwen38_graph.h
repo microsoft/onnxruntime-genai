@@ -271,7 +271,8 @@ inline constexpr int Qwen38WarmupRuns(bool session_captures_graph) noexcept {
 // What the DFlash engine runs while its model is created. model.qwen38_graph.warmup=false opts out of all of it, as for the
 // other paths: no forward, hence no CUDA graph captured and no startup cost, for the drafter or for the target. With
 // warmup=true the drafter ingests a warm-up prompt and drafts every row width (`drafter`) and `target_tokens` dummy prompt
-// tokens step through the S=verify_rows target graphs, enough runs of every (rows, ring bank) graph to capture it.
+// tokens step through the S=verify_rows target graphs, enough runs of every (rows, ring bank) graph to capture it unless
+// the target offloads experts (its warmup stays eager; see CreateQwen38OffloadWarmupRunOptions).
 struct Qwen38DflashWarmupPlan {
   bool drafter{};
   size_t target_tokens{};
@@ -391,6 +392,10 @@ struct Qwen38MoeOffloadSettings {
 };
 
 Qwen38MoeOffloadSettings ParseQwen38MoeOffloadSettings(const std::vector<Config::NamedString>& config_entries);
+
+// Offloaded target warmup must stay eager: CUDA graph replays bypass ORT's per-run warmup control. Live runs keep their
+// own graph ids and capture normally. Null when offload is disabled, so other packages keep capturing during warmup.
+std::unique_ptr<OrtRunOptions> CreateQwen38OffloadWarmupRunOptions(const Qwen38MoeOffloadSettings& settings);
 
 // KV capacity of the target graph variants that are named after their context tier (model_2k.onnx, model_8k.onnx,
 // model_64k.onnx, model_128k.onnx), known before the session exists. Empty for any other file name: the capacity of such a
@@ -676,6 +681,8 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   void PrepRow(int rows, int row, const void* tok, const void* pos, int add, const void* ctx_in, void* ctx_out);
   void PrepBatch(int batch);
   void RunTarget(int rows, int phase, const Qwen38PromptRunHints* prompt = nullptr);
+  void RunTarget(Direction& direction, const Qwen38PromptRunHints* prompt = nullptr,
+                 Qwen38SlotMask participants = Qwen38SlotBit(0));
   // Every ORT Run of the engine goes through here: it publishes the QMoE hints of run_hints_ for exactly this Run
   // (qwen38_ort_env.h) and attaches its per-run config entries (the warm-up flag) to `run_options`, which the Run may
   // share with the other Runs of its graph. `participants` are the slots the Run serves: only their notices are
@@ -875,6 +882,7 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   std::vector<int32_t> prompt_tokens_;
   const uint8_t* last_hidden_ptr_{};  // hidden output of the last cycle (rows h0, h1)
   Qwen38OrtRunHints run_hints_;       // per slot: what the ORT QMoE kernels are told with each Run (qwen38_ort_env.h)
+  std::unique_ptr<OrtRunOptions> offload_warmup_run_options_;
 };
 
 struct Qwen38GraphModel : Model {

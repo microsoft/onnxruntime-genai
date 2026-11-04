@@ -643,6 +643,8 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
       ledger_{model.config_->model.qwen38_graph.kv_capacity},
       run_hints_{static_cast<size_t>(max_batch_)} {
   const auto& q = model_.config_->model.qwen38_graph;
+  offload_warmup_run_options_ = CreateQwen38OffloadWarmupRunOptions(
+      ParseQwen38MoeOffloadSettings(model_.config_->model.decoder.session_options.config_entries));
   mtp_enabled_ = q.mtp.enabled;
   prefill_head_ = q.mtp.prefill_head;
   keep_hidden_ = mtp_enabled_ && prefill_head_ && model_.config_->model.dflash2.filename.empty();
@@ -834,8 +836,8 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
         }
         if (fold_ && max_batch_ > 1) {
           // The batched graphs are captured after the arenas ORT shrinks once the prompt state has moved to the decode graphs.
-          // Each (batch size, bank) graph is run as often as a single-slot graph, enough for ORT to capture it and replay it:
-          // one run would leave the capture to the first live cycle that reaches it.
+          // Each (batch size, bank) graph is run as often as a single-slot graph. Offloaded targets stay eager so synthetic
+          // replays cannot bypass ORT's warmup control; their graphs are captured by live runs instead.
           const int runs_per_graph = Qwen38WarmupRuns(IsGraphCaptureEnabled(model_.config_->model.decoder.session_options));
           FastHandoff();
           for (int B = 2; B <= max_batch_; ++B) {
@@ -849,8 +851,7 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
                 plane_.Check(plane_.device_memset(banks_[k].arena.data(), 0, banks_[k].arena.size(), stream_),
                              "clear warmup bank");
                 SyncStream();
-                RunSession(*model_.session_target_, d.run_options.get(), *d.binding, nullptr,
-                           Qwen38FirstSlots(static_cast<size_t>(B)));
+                RunTarget(d, nullptr, Qwen38FirstSlots(static_cast<size_t>(B)));
                 SyncStream();
               }
             }
@@ -1827,13 +1828,21 @@ void Qwen38GraphEngine::PrepBatch(int batch) {
 
 void Qwen38GraphEngine::RunTarget(int rows, int phase, const Qwen38PromptRunHints* prompt) {
   Direction& d = dirs_[rows - 1][phase % num_banks_];
-  RunSession(*model_.session_target_, d.run_options.get(), *d.binding, prompt);
+  RunTarget(d, prompt);
+}
+
+void Qwen38GraphEngine::RunTarget(Direction& direction, const Qwen38PromptRunHints* prompt,
+                                  Qwen38SlotMask participants) {
+  OrtRunOptions* options = run_hints_.InWarmup() && offload_warmup_run_options_
+                               ? offload_warmup_run_options_.get()
+                               : direction.run_options.get();
+  RunSession(*model_.session_target_, options, *direction.binding, prompt, participants);
 }
 
 void Qwen38GraphEngine::RunSession(OrtSession& session, OrtRunOptions* run_options, const OrtIoBinding& binding,
                                    const Qwen38PromptRunHints* prompt, Qwen38SlotMask participants) {
   if (run_options != nullptr) {
-    for (const auto& [key, value] : run_hints_.RunConfigEntries()) run_options->AddConfigEntry(key.c_str(), value.c_str());
+    for (const auto& [key, value] : run_hints_.RunConfigEntries()) run_options->AddConfigEntry(key, value);
   }
   RunWithQwen38OrtHints(run_hints_, prompt, [&] { session.Run(run_options, binding); }, participants);
 }
@@ -2523,7 +2532,7 @@ void Qwen38GraphEngine::EnqueueBatchDecode(std::span<const size_t> active_slots)
   PrepBatch(B);
   Direction& d = (B == 1) ? dirs_[verify_rows_ - 1][bank_phase_ % num_banks_]
                           : batch_dirs_[B - 1][bank_phase_ % num_banks_];
-  RunSession(*model_.session_target_, d.run_options.get(), *d.binding, nullptr, Qwen38SlotMaskOf(active_slots));
+  RunTarget(d, nullptr, Qwen38SlotMaskOf(active_slots));
   last_hidden_ptr_ = d.hidden;
   inflight_dir_ = &d;
   inflight_batch_ = B;
@@ -2699,7 +2708,7 @@ void Qwen38GraphEngine::Advance(const Qwen38CycleRecord& record, bool want_more)
 }
 
 void Qwen38GraphEngine::Warmup() {
-  // ORT captures a graph id after min_num_runs eager runs: touch every (rows, phase) and head direction enough times.
+  // Touch every (rows, phase) and head direction enough times for first-use costs and, except on offloaded targets, capture.
   // The Runs of the warmup carry ep.cuda.qmoe_in_warmup (and ORT_QMOE_IN_WARMUP) and, from here on, every Run of the
   // engine asks for deterministic MoE tactics: the engine keeps that state and publishes it around each Run only
   // (qwen38_ort_env.h), also when this throws.
@@ -2988,6 +2997,15 @@ Qwen38MoeOffloadSettings ParseQwen38MoeOffloadSettings(const std::vector<Config:
   return settings;
 }
 
+std::unique_ptr<OrtRunOptions> CreateQwen38OffloadWarmupRunOptions(const Qwen38MoeOffloadSettings& settings) {
+  if (!settings.enabled) return nullptr;
+  auto options = OrtRunOptions::Create();
+  options->AddConfigEntry("gpu_graph_id", "-1");
+  options->AddConfigEntry("disable_synchronize_execution_providers", "1");
+  options->AddConfigEntry(Qwen38OrtRunEntry::kInWarmup, "1");
+  return options;
+}
+
 std::optional<Qwen38ContextTier> Qwen38ContextTierForTarget(const std::string& target_filename) {
   // The tier is a "_<n>k" component of the file stem (model_128k.onnx); "model_32k" must not match "2k".
   const std::string stem = std::filesystem::path(target_filename).stem().string();
@@ -3251,9 +3269,9 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
   config_->model.qwen38_graph.fold.head_r2.filename =
       SelectQwen38TierHeadR2Filename(q.fold.head_r2.filename, context_tier, package_has_file);
   head_r2_filename = SelectQwen38TierHeadR2Filename(head_r2_filename, context_tier, package_has_file);
-  const char* adaptive_ctx_budget = std::getenv("ORT_QWEN38_ADAPTIVE_CTX_BUDGET");
-  const bool adaptive_budget = adaptive_ctx_budget != nullptr && std::string_view(adaptive_ctx_budget) == "1";
-  if (g_log.enabled && moe_offload.enabled && adaptive_ctx_budget != nullptr && *adaptive_ctx_budget != '\0') {
+  const std::string adaptive_ctx_budget = GetEnv("ORT_QWEN38_ADAPTIVE_CTX_BUDGET");
+  const bool adaptive_budget = adaptive_ctx_budget == "1";
+  if (g_log.enabled && moe_offload.enabled && !adaptive_ctx_budget.empty()) {
     if (!adaptive_budget) {
       Log("qwen38_graph") << "ORT_QWEN38_ADAPTIVE_CTX_BUDGET=" << adaptive_ctx_budget << " is ignored: only 1 turns it on"
                           << std::endl;

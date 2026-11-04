@@ -267,8 +267,8 @@ TEST(Qwen38OrtRunHintsTest, TheWarmupFlagIsAlsoAPerRunConfigEntryThatIsClearedAf
   const auto entry = [&hints]() {
     const auto entries = hints.RunConfigEntries();
     EXPECT_EQ(entries.size(), 1u);
-    EXPECT_EQ(entries.front().first, "ep.cuda.qmoe_in_warmup");
-    return entries.front().second;
+    EXPECT_STREQ(entries.front().first, "ep.cuda.qmoe_in_warmup");
+    return std::string(entries.front().second);
   };
   EXPECT_EQ(entry(), "0");
   hints.SetWarmup(true);

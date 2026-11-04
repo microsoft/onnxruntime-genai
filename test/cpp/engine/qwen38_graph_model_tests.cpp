@@ -2521,6 +2521,26 @@ TEST(Qwen38MoeOffloadTest, SessionEntriesAreEmptyUnlessOffloadIsEnabled) {
   EXPECT_TRUE(Qwen38MoeOffloadSessionEntries(Qwen38MoeOffloadSettings{}, "/models/pkg", 133128, true).empty());
 }
 
+TEST(Qwen38MoeOffloadTest, OffloadedTargetWarmupNeverCapturesOrReplaysACudaGraph) {
+  for (const char* mode : {"required", "auto", "ON"}) {
+    const auto settings = ParseQwen38MoeOffloadSettings({{"session.moe.offload.mode", mode}});
+    auto warmup = CreateQwen38OffloadWarmupRunOptions(settings);
+    ASSERT_NE(warmup, nullptr) << mode;
+    EXPECT_STREQ(Ort::api->GetRunConfigEntry(warmup.get(), "gpu_graph_id"), "-1");
+    EXPECT_STREQ(Ort::api->GetRunConfigEntry(warmup.get(), Qwen38OrtRunEntry::kInWarmup), "1");
+    EXPECT_STREQ(Ort::api->GetRunConfigEntry(warmup.get(), "disable_synchronize_execution_providers"), "1");
+  }
+}
+
+TEST(Qwen38MoeOffloadTest, NonOffloadedTargetsKeepTheirConfiguredWarmupGraphIds) {
+  EXPECT_EQ(CreateQwen38OffloadWarmupRunOptions(ParseQwen38MoeOffloadSettings({})), nullptr);
+  for (const char* mode : {"disabled", "off", "0"}) {
+    const auto settings = ParseQwen38MoeOffloadSettings(
+        {{"session.moe.offload.mode", mode}, {"session.moe.offload.device_expert_bytes", "21474836480"}});
+    EXPECT_EQ(CreateQwen38OffloadWarmupRunOptions(settings), nullptr) << mode;
+  }
+}
+
 TEST(Qwen38MoeOffloadTest, SessionEntriesDefaultTheSourceRootAndReserve) {
   const auto settings = ParseQwen38MoeOffloadSettings({{"session.moe.offload.mode", "required"}});
   EXPECT_EQ(Qwen38MoeOffloadSessionEntries(settings, "/models/pkg", 33032, false),

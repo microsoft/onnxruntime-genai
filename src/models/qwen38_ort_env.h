@@ -32,6 +32,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
@@ -170,8 +171,8 @@ class Qwen38OrtRunHints {
   // The per-run config entries the next Run carries (OrtRunOptions::AddConfigEntry). The run options of a graph are
   // reused by every Run of it, so the entries are always written, "0" included: an eager Run after the warmup must not
   // inherit the "1" of an earlier one. A Run that replays a captured CUDA graph never reads them.
-  std::vector<std::pair<std::string, std::string>> RunConfigEntries() const {
-    return {{Qwen38OrtRunEntry::kInWarmup, warmup_ ? "1" : "0"}};
+  std::array<std::pair<const char*, const char*>, 1> RunConfigEntries() const noexcept {
+    return {{{Qwen38OrtRunEntry::kInWarmup, warmup_ ? "1" : "0"}}};
   }
 
   // Every Run of this engine asks for deterministic MoE tactics from now on, without being a warmup Run: the DFlash
