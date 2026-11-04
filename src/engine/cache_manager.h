@@ -90,7 +90,16 @@ struct CacheManager {
 
   virtual bool SupportsDynamicBatching() const = 0;
 
+  virtual bool SupportsContinuousMultiSlotDecoding() const { return SupportsDynamicBatching(); }
+
   virtual size_t MaxBatchSize() const { return 4; }
+
+  // Rows a static (non-paged) cache supports at most, or 0 when the configured static batch size applies.
+  virtual size_t MaxStaticBatchSize() const { return 0; }
+
+  // Longest session (prompt plus generated tokens) a static (non-paged) cache can hold, or 0 when only the
+  // model-configured search.max_length limits it. Feeds EngineCapabilities::max_request_length.
+  virtual size_t MaxStaticRequestLength() const { return 0; }
 
   virtual std::vector<std::shared_ptr<Request>> AllocatedRequests() const = 0;
 

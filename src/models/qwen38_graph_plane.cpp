@@ -98,6 +98,29 @@ std::filesystem::path ResolveWindowsSharedLibraryPath(const std::filesystem::pat
   return path;
 }
 
+std::filesystem::path ResolveQwen38PlaneLibraryPath(const std::filesystem::path& model_root,
+                                                    const std::string& configured, bool windows_host) {
+  if (configured.empty()) return {};
+  const std::filesystem::path root = std::filesystem::weakly_canonical(model_root);
+  const std::string root_prefix = (root / "").string();
+  const auto resolve_inside_root = [&](const std::filesystem::path& candidate) {
+    std::filesystem::path resolved = std::filesystem::weakly_canonical(candidate);
+    if (resolved.string().compare(0, root_prefix.size(), root_prefix) != 0)
+      throw std::runtime_error("model.qwen38_graph.plane_library must resolve inside the model folder: " +
+                               resolved.string());
+    return resolved;
+  };
+  std::filesystem::path library = resolve_inside_root(root / configured);
+  if (windows_host) {
+    const std::filesystem::path alias = ResolveWindowsSharedLibraryPath(library);
+    if (alias != library) {
+      (void)resolve_inside_root(alias);
+      library = alias;
+    }
+  }
+  return std::filesystem::exists(library) ? library : std::filesystem::path{};
+}
+
 #if defined(QWEN38_GRAPH_NO_POSIX)
 
 Qwen38Plane::Qwen38Plane(const std::filesystem::path&) { ThrowUnsupportedPlatform(); }
@@ -106,18 +129,55 @@ Qwen38Plane::~Qwen38Plane() = default;
 #elif defined(_WIN32)
 
 Qwen38Plane::Qwen38Plane(const std::filesystem::path& path) {
-  const std::filesystem::path actual_path = ResolveWindowsSharedLibraryPath(path);
-  HMODULE mod = LoadLibraryW(actual_path.wstring().c_str());
+  HMODULE mod = nullptr;
+  std::filesystem::path actual_path = path;
+  // "<file> (Win32 error N)" for each file that did not load, in the order tried. The error is read right after its own
+  // LoadLibraryW: GetLastError() after a second attempt would report that attempt for the file of the first.
+  std::string failures;
+  const auto open = [&failures](const std::filesystem::path& name) -> HMODULE {
+    HMODULE module = LoadLibraryW(name.wstring().c_str());
+    if (!module) {
+      const DWORD err = GetLastError();
+      if (!failures.empty()) failures += "; ";
+      failures += name.string() + " (Win32 error " + std::to_string(err) + ")";
+    }
+    return module;
+  };
+  if (actual_path.empty()) {
+    const std::filesystem::path built_in_name = "onnxruntime-genai-cuda.dll";
+    actual_path = built_in_name;
+    HMODULE self_mod = nullptr;
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCWSTR>(&ParseQwen38PleDescription), &self_mod) &&
+        self_mod) {
+      wchar_t self_buf[MAX_PATH]{};
+      if (GetModuleFileNameW(self_mod, self_buf, MAX_PATH) > 0) {
+        auto candidate = std::filesystem::path(self_buf).parent_path() / built_in_name;
+        std::error_code ec;
+        if (std::filesystem::exists(candidate, ec)) {
+          actual_path = candidate;
+        }
+      }
+    }
+    mod = open(actual_path);
+    // Then by name, through the DLL search path, unless that was the name that has just been tried.
+    if (!mod && actual_path != built_in_name) {
+      actual_path = built_in_name;
+      mod = open(actual_path);
+    }
+  } else {
+    actual_path = ResolveWindowsSharedLibraryPath(actual_path);
+    mod = open(actual_path);
+  }
   if (!mod) {
-    const DWORD err = GetLastError();
-    throw std::runtime_error("qwen38_graph: failed to load the plane library " + actual_path.string() +
-                             " (Win32 error " + std::to_string(err) + ")");
+    throw std::runtime_error("qwen38_graph: failed to load the plane library " + failures);
   }
   handle_ = static_cast<void*>(mod);
-  auto load = [mod](auto& function, const char* symbol_name) {
+  library_path = actual_path.string();
+  auto load = [this, mod](auto& function, const char* symbol_name) {
     FARPROC symbol = GetProcAddress(mod, symbol_name);
     if (!symbol) {
-      throw std::runtime_error(std::string("qwen38_graph: the plane library lacks the symbol ") + symbol_name);
+      throw std::runtime_error("qwen38_graph: the plane library " + library_path + " lacks the symbol " + symbol_name);
     }
     function = reinterpret_cast<std::remove_reference_t<decltype(function)> >(symbol);
   };
@@ -126,22 +186,32 @@ Qwen38Plane::Qwen38Plane(const std::filesystem::path& path) {
     // as lacking a symbol that a newer ABI added.
     load(abi_version, "qwen38_plane_abi_version");
     if (abi_version() != QWEN38_PLANE_ABI_VERSION) {
-      throw std::runtime_error("qwen38_graph: the plane library has ABI version " + std::to_string(abi_version()) +
-                               ", expected " + std::to_string(QWEN38_PLANE_ABI_VERSION));
+      throw std::runtime_error("qwen38_graph: the plane library " + library_path + " has ABI version " +
+                               std::to_string(abi_version()) + ", expected " + std::to_string(QWEN38_PLANE_ABI_VERSION));
     }
 #define QWEN38_PLANE_LOAD(ret, name, args) load(name, "qwen38_plane_" #name);
     QWEN38_PLANE_FUNCTIONS(QWEN38_PLANE_LOAD)
 #undef QWEN38_PLANE_LOAD
     quantize_kv = reinterpret_cast<decltype(quantize_kv)>(GetProcAddress(mod, "qwen38_plane_quantize_kv"));
     embed_rows = reinterpret_cast<decltype(embed_rows)>(GetProcAddress(mod, "qwen38_plane_embed_rows"));
+    embed_gather = reinterpret_cast<decltype(embed_gather)>(GetProcAddress(mod, "qwen38_plane_embed_gather"));
+    prep_batched = reinterpret_cast<decltype(prep_batched)>(GetProcAddress(mod, "qwen38_plane_prep_batched"));
     set_ple_host_params =
         reinterpret_cast<decltype(set_ple_host_params)>(GetProcAddress(mod, "qwen38_plane_set_ple_host_params"));
     unset_ple_host_params =
         reinterpret_cast<decltype(unset_ple_host_params)>(GetProcAddress(mod, "qwen38_plane_unset_ple_host_params"));
     release_ple_workspace =
         reinterpret_cast<decltype(release_ple_workspace)>(GetProcAddress(mod, "qwen38_plane_release_ple_workspace"));
+    dflash_select = reinterpret_cast<decltype(dflash_select)>(GetProcAddress(mod, "qwen38_plane_dflash_select"));
+    replay_state_updates =
+        reinterpret_cast<decltype(replay_state_updates)>(GetProcAddress(mod, "qwen38_plane_replay_state_updates"));
+    // A library that predates the capabilities export has none: it still loads, for the packages that need none.
+    const auto capabilities_export =
+        reinterpret_cast<Qwen38PlaneCapabilitiesFn>(GetProcAddress(mod, "qwen38_plane_capabilities"));
+    capabilities = capabilities_export ? capabilities_export() : 0ull;
     if (sizeof_ple_params() != static_cast<int>(sizeof(Qwen38PleParams))) {
-      throw std::runtime_error("qwen38_graph: the plane library's PLE parameter layout differs from the host definition");
+      throw std::runtime_error("qwen38_graph: the PLE parameter layout of the plane library " + library_path +
+                               " differs from the host definition");
     }
     attach();
     attached_ = true;
@@ -159,17 +229,71 @@ Qwen38Plane::~Qwen38Plane() {
 
 #else
 
+namespace {
+
+// Appends "<name>: <why dlopen(name) failed>" to `failures`. Call it right after the failed dlopen: dlerror() reports the
+// latest failed call, so the reason read after a later attempt would be paired with the wrong file.
+void NoteDlopenFailure(std::string& failures, const std::string& name) {
+  const char* reason = dlerror();
+  if (!failures.empty()) failures += "; ";
+  failures += name + ": " + (reason ? reason : "unknown error");
+}
+
+}  // namespace
+
+void* OpenQwen38BuiltInPlaneModule(const char* library, const std::filesystem::path& beside, std::string& failures) {
+  failures.clear();
+  // The CUDA library is normally already loaded by the CUDA execution provider, and that copy is the one to use. A miss is
+  // the expected case here and not a failure, so its pending error is dropped.
+  if (void* module = dlopen(library, RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD)) return module;
+  (void)dlerror();
+  if (!beside.empty()) {
+    const std::string candidate = (beside / library).string();
+    if (void* module = dlopen(candidate.c_str(), RTLD_NOW | RTLD_LOCAL)) return module;
+    NoteDlopenFailure(failures, candidate);
+  }
+  if (void* module = dlopen(library, RTLD_NOW | RTLD_LOCAL)) return module;
+  NoteDlopenFailure(failures, library);
+  return nullptr;
+}
+
 Qwen38Plane::Qwen38Plane(const std::filesystem::path& path) {
-  handle_ = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+  const bool built_in = path.empty();
+  const char* default_lib =
+#if defined(__APPLE__)
+      "libonnxruntime-genai-cuda.dylib";
+#else
+      "libonnxruntime-genai-cuda.so";
+#endif
+  std::string failures;
+  if (built_in) {
+    // Look next to the module that holds this loader (GenAI) unless the library is already loaded.
+    std::filesystem::path beside;
+    Dl_info info{};
+    if (dladdr(reinterpret_cast<const void*>(&ParseQwen38PleDescription), &info) != 0 && info.dli_fname) {
+      beside = std::filesystem::path(info.dli_fname).parent_path();
+    }
+    handle_ = OpenQwen38BuiltInPlaneModule(default_lib, beside, failures);
+  } else {
+    handle_ = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+    if (!handle_) NoteDlopenFailure(failures, path.string());
+  }
   if (!handle_) {
-    const char* reason = dlerror();
-    throw std::runtime_error("qwen38_graph: failed to load the plane library " + path.string() + ": " +
-                             (reason ? reason : "unknown error"));
+    throw std::runtime_error("qwen38_graph: failed to load the plane library " + failures);
+  }
+  library_path = path.string();
+  if (built_in) {
+    // The file the module was loaded from: the diagnostics that name the library are about it, and the lookup above
+    // does not say which of its steps found it.
+    library_path = default_lib;
+    Dl_info loaded{};
+    const void* symbol = dlsym(handle_, "qwen38_plane_abi_version");
+    if (symbol && dladdr(symbol, &loaded) != 0 && loaded.dli_fname) library_path = loaded.dli_fname;
   }
   auto load = [this](auto& function, const char* symbol_name) {
     void* symbol = dlsym(handle_, symbol_name);
     if (!symbol) {
-      throw std::runtime_error(std::string("qwen38_graph: the plane library lacks the symbol ") + symbol_name);
+      throw std::runtime_error("qwen38_graph: the plane library " + library_path + " lacks the symbol " + symbol_name);
     }
     function = reinterpret_cast<std::remove_reference_t<decltype(function)> >(symbol);
   };
@@ -178,22 +302,32 @@ Qwen38Plane::Qwen38Plane(const std::filesystem::path& path) {
     // as lacking a symbol that a newer ABI added.
     load(abi_version, "qwen38_plane_abi_version");
     if (abi_version() != QWEN38_PLANE_ABI_VERSION) {
-      throw std::runtime_error("qwen38_graph: the plane library has ABI version " + std::to_string(abi_version()) +
-                               ", expected " + std::to_string(QWEN38_PLANE_ABI_VERSION));
+      throw std::runtime_error("qwen38_graph: the plane library " + library_path + " has ABI version " +
+                               std::to_string(abi_version()) + ", expected " + std::to_string(QWEN38_PLANE_ABI_VERSION));
     }
 #define QWEN38_PLANE_LOAD(ret, name, args) load(name, "qwen38_plane_" #name);
     QWEN38_PLANE_FUNCTIONS(QWEN38_PLANE_LOAD)
 #undef QWEN38_PLANE_LOAD
     quantize_kv = reinterpret_cast<decltype(quantize_kv)>(dlsym(handle_, "qwen38_plane_quantize_kv"));
     embed_rows = reinterpret_cast<decltype(embed_rows)>(dlsym(handle_, "qwen38_plane_embed_rows"));
+    embed_gather = reinterpret_cast<decltype(embed_gather)>(dlsym(handle_, "qwen38_plane_embed_gather"));
+    prep_batched = reinterpret_cast<decltype(prep_batched)>(dlsym(handle_, "qwen38_plane_prep_batched"));
     set_ple_host_params =
         reinterpret_cast<decltype(set_ple_host_params)>(dlsym(handle_, "qwen38_plane_set_ple_host_params"));
     unset_ple_host_params =
         reinterpret_cast<decltype(unset_ple_host_params)>(dlsym(handle_, "qwen38_plane_unset_ple_host_params"));
     release_ple_workspace =
         reinterpret_cast<decltype(release_ple_workspace)>(dlsym(handle_, "qwen38_plane_release_ple_workspace"));
+    dflash_select = reinterpret_cast<decltype(dflash_select)>(dlsym(handle_, "qwen38_plane_dflash_select"));
+    replay_state_updates =
+        reinterpret_cast<decltype(replay_state_updates)>(dlsym(handle_, "qwen38_plane_replay_state_updates"));
+    // A library that predates the capabilities export has none: it still loads, for the packages that need none.
+    const auto capabilities_export =
+        reinterpret_cast<Qwen38PlaneCapabilitiesFn>(dlsym(handle_, "qwen38_plane_capabilities"));
+    capabilities = capabilities_export ? capabilities_export() : 0ull;
     if (sizeof_ple_params() != static_cast<int>(sizeof(Qwen38PleParams))) {
-      throw std::runtime_error("qwen38_graph: the plane library's PLE parameter layout differs from the host definition");
+      throw std::runtime_error("qwen38_graph: the PLE parameter layout of the plane library " + library_path +
+                               " differs from the host definition");
     }
     attach();
     attached_ = true;
@@ -215,6 +349,153 @@ void Qwen38Plane::Check(int error, const char* what) const {
   if (error != 0) {
     throw std::runtime_error(std::string("qwen38_graph: CUDA error in ") + what + ": " + error_string(error));
   }
+}
+
+namespace {
+struct Qwen38PlaneCapabilityName {
+  unsigned long long bit;
+  const char* name;
+};
+
+#define QWEN38_PLANE_CAPABILITY_NAME(bit, name) {bit, name},
+constexpr Qwen38PlaneCapabilityName kQwen38PlaneCapabilityNames[] = {
+    QWEN38_PLANE_CAPABILITIES(QWEN38_PLANE_CAPABILITY_NAME)};
+#undef QWEN38_PLANE_CAPABILITY_NAME
+}  // namespace
+
+std::string DescribeQwen38PlaneCapabilities(unsigned long long mask) {
+  std::string description;
+  unsigned long long named = 0;
+  for (const auto& capability : kQwen38PlaneCapabilityNames) {
+    named |= capability.bit;
+    if ((mask & capability.bit) == 0) continue;
+    if (!description.empty()) description += ", ";
+    description += capability.name;
+  }
+  if ((mask & ~named) != 0) {
+    char unknown[40];
+    std::snprintf(unknown, sizeof(unknown), "unknown bits 0x%llx", mask & ~named);
+    if (!description.empty()) description += ", ";
+    description += unknown;
+  }
+  return description.empty() ? "none" : description;
+}
+
+void Qwen38Plane::RequireCapabilities(unsigned long long required, const std::string& required_by) const {
+  const unsigned long long missing = required & ~capabilities;
+  if (missing == 0) return;
+  throw std::runtime_error(
+      "qwen38_graph: " + required_by + " requires the plane capability " + DescribeQwen38PlaneCapabilities(missing) +
+      ", which the plane library " + library_path + " does not provide (it reports: " +
+      DescribeQwen38PlaneCapabilities(capabilities) +
+      "). Use a plane library built from the same source as this model package.");
+}
+
+Qwen38StateReplayDesc MakeQwen38ConvReplayDescriptor(const Qwen38Plane& plane, const Qwen38ReplayRequest& request,
+                                                     const void* source, void* destination, const void* value) {
+  if (request.kind != Qwen38ReplayKind::kConvolution) {
+    throw std::invalid_argument("qwen38_graph: " + request.state.name + " is not the state of a convolution replay");
+  }
+  const Qwen38ReplayGeometry geometry = ValidateQwen38ReplayDescriptor(request);
+  if (geometry.layout == QWEN38_PLANE_CONV_STATE_HISTORY_FIRST) {
+    plane.RequireCapabilities(QWEN38_PLANE_CAP_CONV_HISTORY_FIRST_REPLAY,
+                              "the history-first conv state " + request.state.name);
+  }
+  Qwen38StateReplayDesc descriptor{};
+  descriptor.source_state = source;
+  descriptor.destination_state = destination;
+  descriptor.value = value;
+  descriptor.channel_count = geometry.channel_count;
+  descriptor.state_width = geometry.state_width;
+  descriptor.capacity = static_cast<uint32_t>(request.capacity);
+  descriptor.kept_count = 1;
+  descriptor.element_size = geometry.element_size;
+  descriptor.kind = 1;
+  descriptor.layout = static_cast<uint32_t>(geometry.layout);
+  return descriptor;
+}
+
+void Qwen38Plane::EmbedRows(void* stream, const Qwen38EmbeddingTable& table, const void* ids, void* out, int n) const {
+  if (embed_gather) {
+    const int format = table.int8 ? QWEN38_PLANE_EMBEDDING_INT8_ROW : QWEN38_PLANE_EMBEDDING_BF16;
+    Check(embed_gather(stream, table.data, table.rows, format, ids, out, n, table.width), "embed_gather");
+    return;
+  }
+  if (table.int8) {
+    // The legacy embed_rows has no INT8 mode: it returns without writing anything.
+    RequireCapabilities(QWEN38_PLANE_CAP_INT8_EMBEDDING, "an INT8 embedding table");
+  } else if (embed_rows) {
+    embed_rows(stream, table.data, ids, out, n, table.width);
+    return;
+  }
+  throw std::runtime_error("qwen38_graph: the plane library " + library_path +
+                           " lacks the qwen38_plane_embed_gather export needed to gather embedding rows");
+}
+
+void Qwen38Plane::PrepBatched(void* stream, const void* params, int rows, int batch, const void* ctx_in, void* ctx_out,
+                              void* input_ids, void* position_ids, void* committed, void* past_pos, void* ple_out,
+                              void* state) const {
+  if (rows < 1 || rows > QWEN38_PLANE_MAX_PREP_ROWS) {
+    throw std::invalid_argument("qwen38_graph: batched prep needs 1.." + std::to_string(QWEN38_PLANE_MAX_PREP_ROWS) +
+                                " rows per slot, got " + std::to_string(rows));
+  }
+  if (batch < 1 || batch > QWEN38_PLANE_MAX_PREP_BATCH) {
+    throw std::invalid_argument("qwen38_graph: batched prep needs 1.." + std::to_string(QWEN38_PLANE_MAX_PREP_BATCH) +
+                                " slots, got " + std::to_string(batch));
+  }
+  RequireCapabilities(QWEN38_PLANE_CAP_BATCHED_PREP | QWEN38_PLANE_CAP_CTX_SLOT_STRIDE,
+                      "preparing the inputs of several request slots in one call");
+  if (!prep_batched) {
+    throw std::runtime_error("qwen38_graph: the plane library " + library_path +
+                             " lacks the qwen38_plane_prep_batched export needed to prepare several request slots");
+  }
+  Check(prep_batched(stream, params, rows, batch, ctx_in, ctx_out, input_ids, position_ids, committed, past_pos, ple_out,
+                     state),
+        "prep_batched");
+}
+
+size_t Qwen38EmbeddingTableBytes(Qwen38EmbeddingFormat format, long long rows, long long width) {
+  if (rows <= 0 || width <= 0) return 0;
+  const size_t payload = static_cast<size_t>(rows) * static_cast<size_t>(width);
+  if (format == Qwen38EmbeddingFormat::kBf16) return payload * sizeof(uint16_t);
+  if (format == Qwen38EmbeddingFormat::kInt8) return payload + static_cast<size_t>(rows) * sizeof(float);
+  return 0;
+}
+
+Qwen38EmbeddingFormat SelectQwen38EmbeddingFormat(const Qwen38Plane& plane, const std::filesystem::path& table_path,
+                                                  size_t file_bytes, long long rows, long long width) {
+  if (rows <= 0 || width <= 0) return Qwen38EmbeddingFormat::kNone;
+  const std::string geometry = " (vocab_size " + std::to_string(rows) + ", hidden_size " + std::to_string(width) + ")";
+  const size_t bf16_bytes = Qwen38EmbeddingTableBytes(Qwen38EmbeddingFormat::kBf16, rows, width);
+  const size_t int8_bytes = Qwen38EmbeddingTableBytes(Qwen38EmbeddingFormat::kInt8, rows, width);
+  const bool matches_bf16 = file_bytes >= bf16_bytes;
+  const bool matches_int8 =
+      file_bytes >= int8_bytes && file_bytes - int8_bytes <= kQwen38Int8EmbeddingSlackBytes;
+  if ((matches_bf16 && matches_int8) || (width <= 4 && (matches_bf16 || matches_int8))) {
+    throw std::runtime_error(
+        "qwen38_graph: the embedding table " + table_path.string() + geometry + " has an ambiguous byte size (" +
+        std::to_string(file_bytes) + ") that matches both the bfloat16 (" + std::to_string(bf16_bytes) +
+        " bytes) and the INT8 (" + std::to_string(int8_bytes) + ".." +
+        std::to_string(int8_bytes + kQwen38Int8EmbeddingSlackBytes) + " bytes) layouts");
+  }
+  if (matches_bf16) {
+    if (width % 8 != 0) {
+      throw std::runtime_error("qwen38_graph: the bfloat16 embedding table " + table_path.string() + geometry +
+                               " cannot be gathered by the plane: it copies a row in 16-byte vectors, so hidden_size must "
+                               "be a multiple of 8");
+    }
+    return Qwen38EmbeddingFormat::kBf16;
+  }
+  if (!matches_int8) {
+    return Qwen38EmbeddingFormat::kNone;
+  }
+  plane.RequireCapabilities(QWEN38_PLANE_CAP_INT8_EMBEDDING, "the INT8 embedding table " + table_path.string());
+  if (static_cast<size_t>(rows) * static_cast<size_t>(width) % sizeof(float) != 0) {
+    throw std::runtime_error("qwen38_graph: the INT8 embedding table " + table_path.string() + geometry +
+                             " cannot be gathered by the plane: the float row scales that follow the int8 rows must be "
+                             "4-byte aligned, so vocab_size * hidden_size must be a multiple of 4");
+  }
+  return Qwen38EmbeddingFormat::kInt8;
 }
 
 PlaneBuffer::PlaneBuffer(Qwen38Plane& plane, size_t bytes, void* stream) : plane_{&plane}, bytes_{bytes} {
@@ -348,6 +629,11 @@ Qwen38PleDescription ParseQwen38PleDescription(const std::filesystem::path& tabl
       params.heads_per_ngram > params.n_heads || !has_scale || !has_mult || !has_vocab || !has_offset ||
       description.shards.empty() || description.shards.size() > kMaxPleShards)
     throw std::runtime_error("qwen38_graph: malformed PLE table " + table_path.string());
+  // The scale is the FP8 dequantization scale, or the negative of the INT8 one (the sign selects the decoder), so a missing
+  // line (0), a zero or a non-finite scale would decode every PLE row to zero or NaN without a diagnostic.
+  if (params.scale == 0.0f || !std::isfinite(params.scale))
+    throw std::runtime_error("qwen38_graph: the PLE table " + table_path.string() +
+                             " needs a finite, non-zero scale line (positive for FP8 shards, negative for INT8 shards)");
   long long total_rows = 0;
   for (const auto& shard : description.shards) {
     if (shard.rows <= 0 || shard.rows > std::numeric_limits<long long>::max() - total_rows)
@@ -361,6 +647,14 @@ Qwen38PleDescription ParseQwen38PleDescription(const std::filesystem::path& tabl
   }
   params.n_shards = static_cast<int>(description.shards.size());
   return description;
+}
+
+void RequireQwen38PleTableSupported(const Qwen38Plane& plane, const Qwen38PleDescription& description,
+                                    const std::filesystem::path& table_path) {
+  // A negative scale marks INT8 shards; a library without the capability would decode them as FP8.
+  if (description.params.scale < 0.0f) {
+    plane.RequireCapabilities(QWEN38_PLANE_CAP_INT8_PLE, "the INT8 PLE table " + table_path.string());
+  }
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -614,6 +908,7 @@ Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::filesystem::path& 
                                const std::filesystem::path& root, int capacity)
     : plane_{plane} {
   Qwen38PleDescription description = ParseQwen38PleDescription(table_path);
+  RequireQwen38PleTableSupported(plane, description, table_path);
   params = description.params;
   params.capacity = capacity;
   const auto start = std::chrono::steady_clock::now();
@@ -815,6 +1110,7 @@ Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::filesystem::path& 
                                const std::filesystem::path& root, int capacity)
     : plane_{plane} {
   Qwen38PleDescription description = ParseQwen38PleDescription(table_path);
+  RequireQwen38PleTableSupported(plane, description, table_path);
   params = description.params;
   params.capacity = capacity;
   const auto start = std::chrono::steady_clock::now();
@@ -854,6 +1150,7 @@ Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::filesystem::path& 
       void* base = mmap(nullptr, map_len, PROT_READ, MAP_SHARED, fd, static_cast<off_t>(aligned));
       close(fd);
       if (base == MAP_FAILED) throw std::runtime_error("qwen38_graph: mmap failed for " + full.string());
+      (void)madvise(base, map_len, MADV_WILLNEED);
       mappings_.push_back(Mapping{base, map_len, nullptr});
       auto* rows = static_cast<unsigned char*>(base) + delta;
       // cudaHostRegisterMapped | cudaHostRegisterReadOnly: the gather kernel reads the table zero-copy over PCIe.

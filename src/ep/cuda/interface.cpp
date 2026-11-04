@@ -36,10 +36,45 @@ GenaiInterface* gp_genai{};
 Ort::Allocator* ort_allocator_{};
 const char* device_label = "cuda";
 
+// The process-wide stream and the device it belongs to (-1 while there is no stream). Every writer holds
+// g_stream_mutex. The device id (g_stream_device_id, declared in cuda_common.h) is stored with release semantics only
+// after the stream exists, so a reader that loads a non-negative id with acquire semantics can use g_stream without
+// taking the mutex.
+std::mutex g_stream_mutex;
 cuda_stream_holder g_stream;
+
+// Creates the stream on first use and returns the device it belongs to. A negative `requested_device_id` binds a new
+// stream to the calling thread's current device. An explicit id also selects that device on the calling thread, and
+// is rejected when the existing stream belongs to another device, because every session shares one stream.
+int EnsureStream(int requested_device_id) {
+  std::lock_guard<std::mutex> lock{g_stream_mutex};
+  const int bound_device_id = g_stream_device_id.load(std::memory_order_relaxed);
+  if (requested_device_id >= 0) {
+    if (bound_device_id >= 0 && bound_device_id != requested_device_id) {
+      throw std::runtime_error(
+          "CUDA execution provider device_id=" + std::to_string(requested_device_id) +
+          " conflicts with the active GenAI CUDA stream on device " + std::to_string(bound_device_id) + ".");
+    }
+    CUDA_CHECK(cudaSetDevice(requested_device_id));
+  }
+  if (bound_device_id >= 0) {
+    return bound_device_id;
+  }
+
+  int device_id = requested_device_id;
+  if (device_id < 0) {
+    CUDA_CHECK(cudaGetDevice(&device_id));
+  }
+  g_stream.Create();
+  g_stream_device_id.store(device_id, std::memory_order_release);
+  return device_id;
+}
 
 cudaStream_t GetStream() {
   UseBoundDevice();
+  if (g_stream_device_id.load(std::memory_order_acquire) < 0) {
+    EnsureStream(-1);
+  }
   return g_stream.get();
 }
 
@@ -134,6 +169,30 @@ class PinnedHostPool {
       return;
     }
     if (has_overflow) TrimOverflow();
+  }
+
+  // Frees every pooled mirror and destroys the cached events. The events belong to the device that was current when they
+  // were created, so they must not outlive the binding of the stream to that device: the add-on can stay mapped across
+  // OgaShutdown() and be bound to another GPU by the next init. Called with the stream's device still bound, and only
+  // once no mirror is in use any more.
+  void Reset() noexcept {
+    std::lock_guard<std::mutex> lock{mutex_};
+    UseBoundDevice();
+    auto drain = [](std::vector<Entry>& entries) {
+      for (Entry& entry : entries) {
+        if (entry.event) {
+          ::cudaEventSynchronize(entry.event);
+          ::cudaEventDestroy(entry.event);
+        }
+        ::cudaFreeHost(entry.p);
+      }
+      entries.clear();
+    };
+    for (auto& entries : free_) drain(entries);
+    drain(overflow_);
+    for (cudaEvent_t event : events_) ::cudaEventDestroy(event);
+    events_.clear();
+    retained_bytes_ = 0;
   }
 
  private:
@@ -289,17 +348,21 @@ struct GpuMemory final : DeviceBuffer {
     copy_to_device_pending_ = false;
   }
 
-  void CopyCpuToDevice() override {
+  void CopyCpuToDevice() override { CopyCpuRangeToDevice(0, size_in_bytes_); }
+
+  void CopyCpuRangeToDevice(size_t begin_bytes, size_t bytes) override {
     assert(p_cpu_);
-    if (size_in_bytes_ <= cuda::kMaxStoreBytes) {
+    assert(begin_bytes + bytes <= size_in_bytes_);
+    if (bytes <= cuda::kMaxStoreBytes) {
       // The launch captures the bytes, so the mirror is free again as soon as this returns.
-      cuda::LaunchStoreBytes(p_device_, p_cpu_, size_in_bytes_, GetStream());
+      cuda::LaunchStoreBytes(p_device_ + begin_bytes, p_cpu_ + begin_bytes, bytes, GetStream());
       return;
     }
-    if (size_in_bytes_ <= kKernelCopyMaxBytes) {
-      cuda::LaunchCopyBytes(p_device_, p_cpu_, size_in_bytes_, GetStream());
+    if (bytes <= kKernelCopyMaxBytes) {
+      cuda::LaunchCopyBytes(p_device_ + begin_bytes, p_cpu_ + begin_bytes, bytes, GetStream());
     } else {
-      CUDA_CHECK(::cudaMemcpyAsync(p_device_, p_cpu_, size_in_bytes_, ::cudaMemcpyHostToDevice, GetStream()));
+      CUDA_CHECK(::cudaMemcpyAsync(p_device_ + begin_bytes, p_cpu_ + begin_bytes, bytes,
+                                   ::cudaMemcpyHostToDevice, GetStream()));
     }
     copy_to_device_pending_ = true;
   }
@@ -668,11 +731,28 @@ struct CudaBatchedSampler final : BatchedSampler {
 };
 
 struct CudaInterfaceImplBase : DeviceInterface {
-  CudaInterfaceImplBase() {
-    g_stream.Create();
+  CudaInterfaceImplBase() = default;
+
+  // The stream and the allocator pointer belong to this interface. The library is not always unloaded when the interface is
+  // destroyed (the qwen38 plane built into it keeps a reference on it, see Qwen38Plane), so it must not be entered again
+  // with them still set.
+  ~CudaInterfaceImplBase() {
+    ort_allocator_ = nullptr;
+    PinnedHostPool::Instance().Reset();
+    std::lock_guard<std::mutex> lock{g_stream_mutex};
+    g_stream_device_id.store(-1, std::memory_order_release);
+    g_stream.Destroy();
+    g_bound_device_id.store(-1, std::memory_order_release);
   }
 
-  ~CudaInterfaceImplBase() {
+  void ShapeInitSessionProviderOptions(Config::ProviderOptions& init_options,
+                                       const Config::ProviderOptions* user_options) const override {
+    if (!user_options) return;
+    for (const auto& [name, value] : user_options->options) {
+      if (name == "device_id") {
+        init_options.options.emplace_back(name, value);
+      }
+    }
   }
 
   void InitOrt(const OrtApi& api, Ort::Allocator& allocator) override {
@@ -685,9 +765,13 @@ struct CudaInterfaceImplBase : DeviceInterface {
   }
 
   std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
+    int device_id = g_stream_device_id.load(std::memory_order_acquire);
+    if (device_id < 0) {
+      CUDA_CHECK(cudaGetDevice(&device_id));
+    }
     return OrtMemoryInfo::Create("Cuda",
                                  OrtAllocatorType::OrtDeviceAllocator,
-                                 device_id_,
+                                 device_id,
                                  OrtMemType::OrtMemTypeDefault);
   }
 
@@ -1076,7 +1160,34 @@ struct CudaInterfaceImpl final : CudaInterfaceImplBase {
     }
     return integrated != 0;
   }
-  int GetDeviceId(const ProviderOptions*) override {
+  int GetDeviceId(const ProviderOptions* user_options) override {
+    int requested_id = -1;
+    if (user_options) {
+      for (const auto& [name, value] : user_options->options) {
+        if (name == "device_id" && !value.empty()) {
+          size_t consumed = 0;
+          long long parsed = -1;
+          try {
+            parsed = std::stoll(value, &consumed);
+          } catch (...) {
+            parsed = -1;
+          }
+          if (consumed != value.size() || parsed < 0 || parsed > std::numeric_limits<int>::max()) {
+            throw std::invalid_argument("CUDA execution provider device_id must be a non-negative integer, got '" +
+                                        value + "'.");
+          }
+          requested_id = static_cast<int>(parsed);
+          break;
+        }
+      }
+    }
+    if (requested_id >= 0) {
+      return EnsureStream(requested_id);
+    }
+    const int bound_device_id = g_stream_device_id.load(std::memory_order_acquire);
+    if (bound_device_id >= 0) {
+      return bound_device_id;
+    }
     int device_id{};
     CUDA_CHECK(cudaGetDevice(&device_id));
     return device_id;
@@ -1114,13 +1225,21 @@ struct CudaInterfaceImpl final : CudaInterfaceImplBase {
 
 struct NvTensorRtRtxInterfaceImpl final : CudaInterfaceImplBase {
   NvTensorRtRtxInterfaceImpl() {
-    // The base constructor created g_stream on the device current at construction.
-    CUDA_CHECK(cudaGetDevice(&stream_device_id_));
+    // Create the stream now, on the device current at construction. SelectDevice moves it to another device if needed.
+    stream_device_id_ = EnsureStream(-1);
   }
 
   DeviceType GetType() const override { return DeviceType::NvTensorRtRtx; }
   std::string GetExecutionProviderName() const override { return "NvTensorRtRtx"; }
   int GetDeviceId(const ProviderOptions*) override { return device_id_; }
+
+  // The allocator binds to the device selected for this interface, which need not be the calling thread's current one.
+  std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
+    return OrtMemoryInfo::Create("Cuda",
+                                 OrtAllocatorType::OrtDeviceAllocator,
+                                 device_id_,
+                                 OrtMemType::OrtMemTypeDefault);
+  }
 
   void ShapeInitSessionProviderOptions(Config::ProviderOptions& init_options,
                                        const Config::ProviderOptions* user_options) const override {
@@ -1155,7 +1274,11 @@ struct NvTensorRtRtxInterfaceImpl final : CudaInterfaceImplBase {
     }
     CUDA_CHECK(cudaSetDevice(device_id));
     if (device_id != stream_device_id_) {
-      g_stream.Recreate();
+      {
+        std::lock_guard<std::mutex> stream_lock{g_stream_mutex};
+        g_stream.Recreate();
+        g_stream_device_id.store(device_id, std::memory_order_release);
+      }
       stream_device_id_ = device_id;
     }
     device_id_ = device_id;
@@ -1222,6 +1345,14 @@ struct NvTensorRtRtxInterfaceImpl final : CudaInterfaceImplBase {
 
 std::unique_ptr<DeviceInterface> g_cuda_device;
 
+// Set once this library's statics are being destroyed, which happens before ShutdownInterface() is called by a host that
+// exits without OgaShutdown(). g_cuda_device is already destroyed then and must not be reset again. The marker is defined
+// after g_cuda_device so that it is destroyed first. The flag is constant-initialized, so it stays valid during teardown.
+bool g_statics_destroyed = false;
+struct StaticsDestroyedMarker {
+  ~StaticsDestroyedMarker() { g_statics_destroyed = true; }
+} g_statics_destroyed_marker;
+
 DeviceInterface& GetCudaDeviceInterface() { return *g_cuda_device; }
 
 LogItems& GetLogItems() { return gp_genai->GetLogItems(); }
@@ -1275,11 +1406,24 @@ uint32_t GetInterfaceVersion() {
   return Generators::kDeviceInterfaceVersion;
 }
 
+void ShutdownInterface() {
+  if (Generators::g_statics_destroyed) return;
+  Generators::g_cuda_device.reset();
+}
+
 Generators::DeviceInterface* GetInterface(GenaiInterface* p_genai, const char* deviceType, const OrtApi* ort_api) {
+  if (!deviceType) {
+    Generators::g_cuda_device.reset();
+    return nullptr;
+  }
   Generators::gp_genai = p_genai;
   // Ensure Ort::api is initialized in this shared library (onnxruntime-genai-cuda add-on) immediately. Delaying the
   // initialization to CudaInterfaceImplBase::InitOrt would be inadequate, as GetMemoryInfo runs before InitOrt.
   Ort::api = ort_api;
+  // A library that is still mapped from an earlier init (OgaShutdown() does not unload it while a qwen38 plane built into it
+  // is loaded) still holds that init's interface. Destroy it first: it releases the stream and the allocator pointer that the
+  // new interface takes over.
+  Generators::g_cuda_device.reset();
   if (strcasecmp(deviceType, "NvTensorRtRtx") == 0) {
     Generators::g_cuda_device = std::make_unique<Generators::NvTensorRtRtxInterfaceImpl>();
   } else {

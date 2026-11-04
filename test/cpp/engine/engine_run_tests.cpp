@@ -4338,6 +4338,28 @@ TEST_F(EngineRunTest, FailedReplayCannotBeginAnotherTurn) {
   EXPECT_FALSE(engine.engine->HasPendingRequests());
 }
 
+// A turn canceled before it made progress restarts through Engine::BeginTurn, which enrolls the request with the scheduler
+// again. The dynamic scheduler still holds it, so the restarted turn must run once and not fail on a duplicate candidate.
+TEST_F(EngineRunTest, DynamicCanceledUnstartedTurnRestartsAndRunsOnce) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/5);
+  auto request = CreateRequestWithPrompt(engine.engine, Prompt(10));
+  ASSERT_TRUE(request->Cancel(request->CurrentTurnId()));
+  const auto canceled = RunOne(*engine.engine);
+  ASSERT_EQ(canceled.request, request);
+  ASSERT_EQ(canceled.finish_reason, GenerationFinishReason::Canceled);
+  ASSERT_TRUE(request->IsRestartableCanceledTurn());
+
+  request->BeginTurn(Prompt(20), std::optional<size_t>{1});
+
+  const auto event = RunOne(*engine.engine);
+  ASSERT_EQ(event.request, request);
+  EXPECT_EQ(event.flags & EngineEventFlagFailed, 0u);
+  EXPECT_EQ(event.token, 5);
+  EXPECT_NE(event.flags & EngineEventFlagTurnFinished, 0u);
+  EXPECT_EQ(engine.cache->AllocatedCount(), 1u);
+  EXPECT_FALSE(engine.engine->HasPendingRequests());
+}
+
 TEST_F(EngineRunTest, DynamicCompositeRewindReleasesAndRebuildsAllState) {
   model_ = LoadSyntheticCompositeModel();
   auto engine =

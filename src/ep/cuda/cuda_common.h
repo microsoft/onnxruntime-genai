@@ -21,11 +21,17 @@ cudaStream_t GetStream();
 // using these helpers without the add-on's interface.cpp still link.
 inline std::atomic<int> g_bound_device_id{-1};
 
-// Makes the device the NvTensorRtRtx interface is bound to current on the calling thread. CUDA's current
-// device is per thread, so a thread that did not bind the interface would otherwise allocate or create
-// events on another device than the shared stream's.
+// Device of the process-wide stream, or -1 while there is no stream. Writers hold g_stream_mutex (interface.cpp) and
+// store the id with release semantics only after the stream exists.
+inline std::atomic<int> g_stream_device_id{-1};
+
+// Makes the device of the shared stream current on the calling thread: the device the NvTensorRtRtx interface is bound
+// to, otherwise the device the stream was created on. CUDA's current device is per thread, so a thread that did not
+// bind the interface would otherwise allocate or create events on another device than the shared stream's.
 inline void UseBoundDevice() noexcept {
-  const int device_id = g_bound_device_id.load(std::memory_order_acquire);
+  int device_id = g_bound_device_id.load(std::memory_order_acquire);
+  if (device_id < 0)
+    device_id = g_stream_device_id.load(std::memory_order_acquire);
   if (device_id < 0)
     return;
   int current_device_id{};
@@ -109,10 +115,17 @@ struct cuda_stream_holder {
     v_ = stream;
   }
 
-  ~cuda_stream_holder() {
-    if (v_)
+  // Releases the stream, if there is one; Create() may be called again afterwards.
+  void Destroy() noexcept {
+    if (v_) {
       (void)cudaStreamDestroy(v_);
+      v_ = nullptr;
+    }
   }
+
+  bool has_stream() const noexcept { return v_ != nullptr; }
+
+  ~cuda_stream_holder() { Destroy(); }
 
   operator cudaStream_t() const {
     assert(v_);
