@@ -87,6 +87,9 @@ def test_rope_scaling_does_not_overwrite_rope_parameters():
 @pytest.mark.parametrize("rope_scaling", [None, {"type": "longrope"}])
 def test_phi3_config_from_installed_transformers(rope_scaling):
     transformers = pytest.importorskip("transformers")
+    # _builder_test_utils installs an importable transformers stub when the package is absent.
+    if not hasattr(transformers, "Phi3Config"):
+        pytest.skip("transformers does not provide Phi3Config")
     kwargs = {"hidden_size": 256, "num_attention_heads": 4, "max_position_embeddings": 131072}
     if rope_scaling:
         rope_scaling = {**rope_scaling, "short_factor": [1.0] * 32, "long_factor": [2.0] * 32}
