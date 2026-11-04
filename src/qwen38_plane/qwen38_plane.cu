@@ -28,11 +28,13 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <exception>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <new>
+#include <string>
 #include <system_error>
 #include <thread>
 #include <type_traits>
@@ -262,10 +264,17 @@ struct StagedPleWorkspace {
   cudaEvent_t prefill_done_event = nullptr;
   cudaStream_t last_prefill_stream = nullptr;
   bool prefill_in_flight = false;
-  static constexpr size_t kCacheSlots = 16384;
+  // Host PLE n-gram row cache budget per staged workspace: up to kCacheSlots (65,536) rows of kMaxRowBytes (3,072 bytes =
+  // 192 MiB of ngram_cache_data plus 1.56 MiB of key/validity arrays), sized down to kMinCacheSlots (16,384 rows = 48 MiB)
+  // when cudaMemGetInfo reports < 12 GiB free memory, or overridden to a power-of-two in
+  // [kMinOverrideCacheSlots (1,024 rows = 3 MiB), kCacheSlots] via ORT_QWEN38_PLE_CACHE_SLOTS.
+  static constexpr size_t kCacheSlots = 65536;
+  static constexpr size_t kMinCacheSlots = 16384;
+  static constexpr size_t kMinOverrideCacheSlots = 1024;
   static constexpr size_t kMaxRowBytes = 3072;
   static constexpr size_t kPrepRingRows = 64;        // rows of the prep ring (a power of two)
   static constexpr size_t kPrepRingRowBytes = 8192;  // bytes of one row of the prep ring
+  size_t cache_slots = kCacheSlots;
   unsigned char* ngram_cache_data = nullptr;
   i64 ngram_cache_keys[kCacheSlots][3]{};
   unsigned char ngram_cache_valid[kCacheSlots]{};
@@ -336,6 +345,7 @@ struct StagedPleWorkspace {
       free(ngram_cache_data);
       ngram_cache_data = nullptr;
     }
+    cache_slots = kCacheSlots;
     ring_idx = 0;
     prefill_cap_rows = 0;
     prefill_cap_bytes = 0;
@@ -391,6 +401,52 @@ struct PendingStagedBuffers {
   }
 };
 
+static std::string read_ple_env(const char* name) {
+#ifdef _WIN32
+  char buf[128]{};
+  ::SetLastError(ERROR_SUCCESS);
+  const DWORD n = ::GetEnvironmentVariableA(name, buf, static_cast<DWORD>(sizeof(buf)));
+  if (n > 0 && n < sizeof(buf)) {
+    return std::string(buf, n);
+  }
+  if (::GetLastError() == ERROR_SUCCESS && n == 0) {
+    return {};
+  }
+#endif
+  if (const char* val = std::getenv(name)) {
+    return std::string(val);
+  }
+  return {};
+}
+
+static size_t resolve_ple_cache_slots() {
+  const std::string env_slots = read_ple_env("ORT_QWEN38_PLE_CACHE_SLOTS");
+  if (!env_slots.empty()) {
+    char* end = nullptr;
+    errno = 0;
+    const long long parsed = std::strtoll(env_slots.c_str(), &end, 10);
+    if (end != env_slots.c_str() && *end == '\0' && parsed > 0) {
+      if (parsed <= static_cast<long long>(StagedPleWorkspace::kMinOverrideCacheSlots)) {
+        return StagedPleWorkspace::kMinOverrideCacheSlots;
+      }
+      size_t pow2 = StagedPleWorkspace::kMinOverrideCacheSlots;
+      while (pow2 * 2 <= static_cast<size_t>(parsed) && pow2 * 2 <= StagedPleWorkspace::kCacheSlots) {
+        pow2 *= 2;
+      }
+      return pow2;
+    }
+  }
+  size_t free_mem = 0, total_mem = 0;
+  if (cudaMemGetInfo(&free_mem, &total_mem) == cudaSuccess) {
+    if (free_mem < (12ULL << 30)) {
+      return StagedPleWorkspace::kMinCacheSlots;
+    }
+  } else {
+    cudaGetLastError();
+  }
+  return StagedPleWorkspace::kCacheSlots;
+}
+
 // Gives the workspace the pinned buffers one call needs: the scalar words and the prep ring and, for rows > 0, a token buffer
 // and a mapped FP8 buffer for `rows` rows of `row_bytes` bytes. All or nothing: every new buffer is allocated, and its
 // device alias verified, before any of them is published, so on failure what was allocated is freed and the workspace,
@@ -403,6 +459,7 @@ static cudaError_t ensure_staged_buffers(StagedPleWorkspace& ws, size_t rows, si
   }
   const size_t need_bytes = rows * row_bytes;
   PendingStagedBuffers fresh;
+  size_t new_cache_slots = ws.cache_slots;
   size_t new_rows = ws.prefill_cap_rows;
   size_t new_bytes = ws.prefill_cap_bytes;
   bool replaces_buffer = false;
@@ -416,7 +473,8 @@ static cudaError_t ensure_staged_buffers(StagedPleWorkspace& ws, size_t rows, si
     if (err == cudaSuccess) err = staged_device_alias(&fresh.prep_ring_dev, fresh.prep_ring);
   }
   if (err == cudaSuccess && !ws.ngram_cache_data) {
-    err = staged_malloc(&fresh.ngram_cache_data, StagedPleWorkspace::kCacheSlots * StagedPleWorkspace::kMaxRowBytes);
+    new_cache_slots = resolve_ple_cache_slots();
+    err = staged_malloc(&fresh.ngram_cache_data, new_cache_slots * StagedPleWorkspace::kMaxRowBytes);
   }
   if (err == cudaSuccess && rows != 0 && (!ws.prefill_tokens || rows > ws.prefill_cap_rows)) {
     new_rows = rows < kMinPrefillRows ? kMinPrefillRows : rows;
@@ -449,6 +507,7 @@ static cudaError_t ensure_staged_buffers(StagedPleWorkspace& ws, size_t rows, si
   }
   if (fresh.ngram_cache_data) {
     ws.ngram_cache_data = fresh.ngram_cache_data;
+    ws.cache_slots = new_cache_slots;
     memset(ws.ngram_cache_valid, 0, sizeof(ws.ngram_cache_valid));
   }
   if (fresh.prefill_tokens) {
@@ -487,12 +546,15 @@ static inline const unsigned char* resolve_ple_head_ptr(const PleParams& HP, int
   return HP.shard_ptr[lo] + (size_t)row_idx * (size_t)HP.head_dim;
 }
 
-static inline size_t ple_ngram_cache_slot(i64 tok, i64 c0, i64 c1) {
+static inline size_t ple_ngram_cache_slot(const StagedPleWorkspace& ws, i64 tok, i64 c0, i64 c1) {
   const unsigned long long h =
       ((unsigned long long)tok * 11400714819323198485ULL) ^
       ((unsigned long long)c1 * 14029467366897019727ULL) ^
       ((unsigned long long)c0 * 1609587929392839161ULL);
-  return (size_t)(h & (StagedPleWorkspace::kCacheSlots - 1));
+  const size_t mask = (ws.cache_slots > 0 && ws.cache_slots <= StagedPleWorkspace::kCacheSlots)
+                          ? (ws.cache_slots - 1)
+                          : (StagedPleWorkspace::kCacheSlots - 1);
+  return (size_t)(h & mask);
 }
 
 static inline void host_gather_ple_row(StagedPleWorkspace& ws, i64 tok, i64 s_c0, i64 s_c1, unsigned char* dst_fp8) {
@@ -505,7 +567,7 @@ static inline void host_gather_ple_row(StagedPleWorkspace& ws, i64 tok, i64 s_c0
   size_t cache_slot = 0;
   const bool use_cache = (ws.ngram_cache_data != nullptr && total_bytes <= StagedPleWorkspace::kMaxRowBytes);
   if (use_cache) {
-    cache_slot = ple_ngram_cache_slot(tok, c0, c1);
+    cache_slot = ple_ngram_cache_slot(ws, tok, c0, c1);
     if (ws.ngram_cache_valid[cache_slot] &&
         ws.ngram_cache_keys[cache_slot][0] == tok &&
         ws.ngram_cache_keys[cache_slot][1] == c0 &&
@@ -523,6 +585,87 @@ static inline void host_gather_ple_row(StagedPleWorkspace& ws, i64 tok, i64 s_c0
     ws.ngram_cache_keys[cache_slot][1] = c0;
     ws.ngram_cache_keys[cache_slot][2] = c1;
     ws.ngram_cache_valid[cache_slot] = 1;
+  }
+}
+
+static inline void host_gather_ple_rows_batch(StagedPleWorkspace& ws, int rows, const i64* d_toks, const i64* d_c0s,
+                                              const i64* d_c1s, unsigned char* fp8_base, size_t row_stride) {
+  const PleParams& HP = ws.params;
+  const int hd = HP.head_dim;
+  const int nh = HP.n_heads;
+  const size_t total_bytes = (size_t)nh * (size_t)hd;
+  const bool use_cache = (ws.ngram_cache_data != nullptr && total_bytes <= StagedPleWorkspace::kMaxRowBytes);
+  const unsigned char* miss_srcs[256];
+  unsigned char* miss_dsts[256];
+#ifdef _WIN32
+  WIN32_MEMORY_RANGE_ENTRY ranges[256];
+#endif
+  int num_misses = 0;
+  int miss_rows[8];
+  size_t miss_slots[8];
+  i64 miss_c0s[8];
+  int num_miss_rows = 0;
+
+  for (int r = 0; r < rows; ++r) {
+    hook_gather();
+    const i64 tok = d_toks[r];
+    const i64 c1 = d_c1s[r];
+    const i64 c0 = (c1 == HP.eos) ? HP.eos : d_c0s[r];
+    unsigned char* dst_fp8 = fp8_base + (size_t)r * row_stride;
+    size_t cache_slot = 0;
+    if (use_cache) {
+      cache_slot = ple_ngram_cache_slot(ws, tok, c0, c1);
+      if (ws.ngram_cache_valid[cache_slot] &&
+          ws.ngram_cache_keys[cache_slot][0] == tok &&
+          ws.ngram_cache_keys[cache_slot][1] == c0 &&
+          ws.ngram_cache_keys[cache_slot][2] == c1) {
+        memcpy(dst_fp8, ws.ngram_cache_data + cache_slot * StagedPleWorkspace::kMaxRowBytes, total_bytes);
+        continue;
+      }
+    }
+    for (int h = 0; h < nh; ++h) {
+      const unsigned char* src = resolve_ple_head_ptr(HP, h, tok, c0, c1);
+      miss_srcs[num_misses] = src;
+      miss_dsts[num_misses] = dst_fp8 + (size_t)h * (size_t)hd;
+#ifdef _WIN32
+      ranges[num_misses] = {const_cast<unsigned char*>(src), (SIZE_T)hd};
+#endif
+      ++num_misses;
+    }
+    if (use_cache && num_miss_rows < 8) {
+      miss_rows[num_miss_rows] = r;
+      miss_slots[num_miss_rows] = cache_slot;
+      miss_c0s[num_miss_rows] = c0;
+      ++num_miss_rows;
+    }
+  }
+
+  if (num_misses > 0) {
+#ifdef _WIN32
+    if (num_misses > 1) {
+      (void)PrefetchVirtualMemory(GetCurrentProcess(), (ULONG_PTR)num_misses, ranges, 0);
+    }
+#endif
+    for (int k = 0; k < num_misses; ++k) {
+      memcpy(miss_dsts[k], miss_srcs[k], (size_t)hd);
+    }
+    for (int m = 0; m < num_miss_rows; ++m) {
+      const int r = miss_rows[m];
+      const size_t cache_slot = miss_slots[m];
+      memcpy(ws.ngram_cache_data + cache_slot * StagedPleWorkspace::kMaxRowBytes,
+             fp8_base + (size_t)r * row_stride, total_bytes);
+      ws.ngram_cache_keys[cache_slot][0] = d_toks[r];
+      ws.ngram_cache_keys[cache_slot][1] = miss_c0s[m];
+      ws.ngram_cache_keys[cache_slot][2] = d_c1s[r];
+      ws.ngram_cache_valid[cache_slot] = 1;
+    }
+#ifdef _WIN32
+    if (HP.pad_ != 0) {
+      for (int k = 0; k < num_misses; ++k) {
+        (void)VirtualUnlock(ranges[k].VirtualAddress, ranges[k].NumberOfBytes);
+      }
+    }
+#endif
   }
 }
 
@@ -608,7 +751,7 @@ struct PleGatherPool {
         const i64 c0 = (c1 == HP.eos) ? HP.eos : c0raw;
         unsigned char* dst_fp8 = t->dst_base + (size_t)i * t->row_stride;
         if (use_cache) {
-          const size_t cache_slot = ple_ngram_cache_slot(tok, c0, c1);
+          const size_t cache_slot = ple_ngram_cache_slot(ws, tok, c0, c1);
           if (ws.ngram_cache_valid[cache_slot] &&
               ws.ngram_cache_keys[cache_slot][0] == tok &&
               ws.ngram_cache_keys[cache_slot][1] == c0 &&
@@ -627,12 +770,19 @@ struct PleGatherPool {
         }
       }
 
+#ifdef _WIN32
+      if (!ranges.empty()) {
+        (void)PrefetchVirtualMemory(GetCurrentProcess(), (ULONG_PTR)ranges.size(), ranges.data(), 0);
+      }
+#endif
       for (size_t k = 0; k < miss_srcs.size(); ++k) {
         memcpy(miss_dsts[k], miss_srcs[k], (size_t)hd);
       }
 #ifdef _WIN32
-      for (const auto& r : ranges) {
-        (void)VirtualUnlock(r.VirtualAddress, r.NumberOfBytes);
+      if (HP.pad_ != 0) {
+        for (const auto& r : ranges) {
+          (void)VirtualUnlock(r.VirtualAddress, r.NumberOfBytes);
+        }
       }
 #endif
     }
@@ -663,13 +813,14 @@ struct PleGatherPool {
     const PleParams& HP = ws.params;
     const size_t total_bytes = (size_t)HP.n_heads * (size_t)HP.head_dim;
     if (ws.ngram_cache_data != nullptr && total_bytes <= StagedPleWorkspace::kMaxRowBytes) {
-      const int start_i = (n > 2048) ? (n - 2048) : 0;
+      const int max_cache_rows = static_cast<int>(ws.cache_slots / 4);
+      const int start_i = (n > max_cache_rows) ? (n - max_cache_rows) : 0;
       for (int i = start_i; i < n; ++i) {
         const i64 tok = h_toks[i];
         const i64 c1 = i >= 1 ? h_toks[i - 1] : ctx1;
         const i64 c0raw = i >= 2 ? h_toks[i - 2] : (i == 1 ? ctx1 : ctx0);
         const i64 c0 = (c1 == HP.eos) ? HP.eos : c0raw;
-        const size_t cache_slot = ple_ngram_cache_slot(tok, c0, c1);
+        const size_t cache_slot = ple_ngram_cache_slot(ws, tok, c0, c1);
         memcpy(ws.ngram_cache_data + cache_slot * StagedPleWorkspace::kMaxRowBytes, dst_base + (size_t)i * row_stride,
                total_bytes);
         ws.ngram_cache_keys[cache_slot][0] = tok;
@@ -1631,16 +1782,18 @@ static int prep_staged_fold_rows(cudaStream_t stream, const void* P, int rows, c
   const unsigned char* device_rows = ws->prep_ring_dev + first * kRowBytes;
 
   StagedFoldRows step{};
+  i64 h_c0s[8];
   i64 c0 = ws->scalars[14];
   i64 c1 = ws->scalars[15];
   for (int r = 0; r < rows; ++r) {
     const i64 tok = ws->scalars[kSlots[r]];
     step.tok[r] = tok;
     step.c1[r] = c1;
-    host_gather_ple_row(*ws, tok, c0, c1, host_rows + static_cast<size_t>(r) * kRowBytes);
+    h_c0s[r] = c0;
     c0 = c1;
     c1 = tok;
   }
+  host_gather_ple_rows_batch(*ws, rows, step.tok, h_c0s, step.c1, host_rows, kRowBytes);
   hook_launch();
   BeginLaunch();
   k_prep_fold_staged<<<rows, 1024, 0, stream>>>(ws->params.capacity, ws->params.n_heads, ws->params.head_dim,
@@ -2163,8 +2316,12 @@ QWEN38_PLANE_EXPORT int qwen38_plane_test_stats(Qwen38PlaneTestStats* stats) {
   if (stats == nullptr) return (int)cudaErrorInvalidValue;
   std::lock_guard<std::mutex> lock(g_staged_ple_mu);
   long long capacity_rows = 0;
+  long long ple_cache_slots = 0;
   for (const auto& kv : g_host_ple_workspaces) {
-    if (kv.second) capacity_rows += (long long)kv.second->prefill_cap_rows;
+    if (kv.second) {
+      capacity_rows += (long long)kv.second->prefill_cap_rows;
+      if (kv.second->ngram_cache_data) ple_cache_slots += (long long)kv.second->cache_slots;
+    }
   }
   stats->gather_rows = g_test_hooks.gather_rows;
   stats->staged_launches = g_test_hooks.staged_launches;
@@ -2176,6 +2333,7 @@ QWEN38_PLANE_EXPORT int qwen38_plane_test_stats(Qwen38PlaneTestStats* stats) {
   stats->fault_armed = (g_test_hooks.fault_site != QWEN38_PLANE_FAULT_NONE || g_test_launch_skip.load() >= 0) ? 1 : 0;
   stats->unfenced_drains = g_test_hooks.unfenced_drains;
   stats->gather_pool_threads = g_ple_gather_pool != nullptr ? g_ple_gather_pool->pool.ThreadCount() : 0;
+  stats->ple_cache_slots = ple_cache_slots;
   return 0;
 }
 

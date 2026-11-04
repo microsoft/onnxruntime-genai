@@ -268,6 +268,12 @@ void RequireQwen38ReplayCoverage(const std::vector<std::string>& bank_names,
       expected_update = "state_update." + layer + ".ple_conv_value";
     } else if (suffix == "index_buffer" || suffix == "index_lengths") {
       expected_update = "state_update." + layer + ".indexer_value";
+    } else if (suffix == "ple_context") {
+      // In folded targets with ple_embeddings.<layer> and com.microsoft::SpeculativePrefixCommit, the plane gathers PLE rows
+      // from fold.ctx_commit / fold.ctx_a before the graph runs and SpeculativePrefixCommit writes the accepted n-gram
+      // context to fold.ctx_commit_out, so past_key_values.<layer>.ple_context is an unused pass-through binding and does not
+      // emit or require a state_update output on partial acceptance.
+      continue;
     } else {
       throw std::runtime_error("qwen38_graph: banked state " + bank_name + " has no compact replay rule");
     }

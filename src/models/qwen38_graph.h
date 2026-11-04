@@ -178,10 +178,10 @@ void ValidateQwen38FoldHeadRows(std::optional<int64_t> head_rows, int verify_row
 // file whose outputs cannot be read is accepted here and left to the check against the session.
 void ValidateQwen38TargetModelFile(size_t request_slots, const std::filesystem::path& model_file);
 
-// The context tier an ORT_QWEN38_CONTEXT_LENGTH request names ("2k", "8k", "16k", "32k", "64k", "128k" or a token count): the
-// request lower-cased, with the counts 2048, 8192, 16384, 32768, 65536 and 131072 folded to the tier of that size. Empty when
-// nothing is requested. Throws std::invalid_argument for a value that cannot be part of a graph's file name (anything but
-// letters and digits).
+// The context tier an ORT_QWEN38_CONTEXT_LENGTH request names ("2k", "8k", "16k", "32k", "64k", "128k", "256k" or a token
+// count): the request lower-cased, with the counts 2048, 8192, 16384, 32768, 65536, 131072 and 262144 folded to the tier of
+// that size. Empty when nothing is requested. Throws std::invalid_argument for a value that cannot be part of a graph's file
+// name (anything but letters and digits).
 std::string NormalizeQwen38ContextTier(const std::string& request);
 
 // Chooses the target graph of a package once, as a file name relative to the model folder. The model constructor hands the
@@ -330,18 +330,39 @@ struct Qwen38CacheInput {
   std::vector<int64_t> shape;
 };
 
-// The engine allocates every KV / position / index-key buffer from the shapes the graphs declare, but its ledger and
-// the strides of the dense hand-off and of the head KV prefill come from model.qwen38_graph.kv_capacity. Throws a
-// std::runtime_error naming the offending input of `graph` ("target", "head", ...) unless the two agree:
-//   past_key_values.<n>.key|value (also head.past_key_values.<n>.*)  [batch, 2, kv_capacity, 256]
-//   past_position_ids                                                [batch, >= kv_capacity]
-//   past_key_values.<n>.index_key                                    [batch, >= kv_capacity / ratio, 128]
+// The engine allocates every KV / position / index-key buffer from the shapes the graphs declare (materializing symbolic
+// cache-length dimensions from model.qwen38_graph.kv_capacity via ResolveQwen38CacheSlotShape), and its ledger and the
+// strides of the dense hand-off and of the head KV prefill come from model.qwen38_graph.kv_capacity. Throws a
+// std::runtime_error naming the offending input of `graph` ("target", "head", ...) unless the declared shapes agree:
+//   past_key_values.<n>.key|value (also head.past_key_values.<n>.*)  [batch, 2, kv_capacity (or symbolic), 256]
+//   past_position_ids                                                [batch, >= kv_capacity (or symbolic)]
+//   past_key_values.<n>.index_key                                    [batch, >= kv_capacity / ratio (or symbolic), 128]
 // where ratio is kQwen38IndexKeyRatio. Other inputs (recurrent state, index buffers, ...) do not depend on the
 // capacity and are ignored. With more than one request slot the position ids of the slots are kv_capacity apart in the
-// buffer the plane fills, so past_position_ids must then be exactly [batch, kv_capacity]: a longer row would be read at the
-// wrong offset for every slot but the first, without any error.
+// buffer the plane fills, so a static past_position_ids must then be exactly [batch, kv_capacity]: a longer row would be
+// read at the wrong offset for every slot but the first, without any error.
 void ValidateQwen38CacheShapes(const std::vector<Qwen38CacheInput>& inputs, int kv_capacity, const std::string& graph,
                                size_t request_slots = 1);
+
+// Materializes the single-slot tensor shape of a target or head cache input (`past_position_ids`,
+// `[head.]past_key_values.<n>.key|value|index_key`) from its declared ONNX shape and `kv_capacity`. Static positive
+// cache-length dimensions are preserved (including padded `past_position_ids` or exact `kv_capacity / 4` `index_key`
+// lengths); symbolic dimensions (<= 0) are materialized to `kv_capacity` for `past_position_ids` and `key`/`value`, and to
+// `(kv_capacity / kQwen38IndexKeyRatio) + 1` for `index_key`. The leading batch dimension and any remaining symbolic
+// dimension become 1.
+std::vector<int64_t> ResolveQwen38CacheSlotShape(const std::string& name, std::vector<int64_t> shape, int kv_capacity);
+
+// Target-cache-equivalent blocks reserved out of `engine.dynamic_batching.num_blocks` for the DFlash 2 drafter's paged KV
+// rings, optional prefix snapshot rings, and embedding scratch across `max_batch` request slots at `block_size` tokens per
+// target block. Returns 0 when `model.dflash2.filename` is empty.
+size_t ResolveQwen38DflashReservedBlocks(const Config& config, size_t block_size, size_t max_batch);
+
+// Maps `engine.dynamic_batching` (`block_size`, `num_blocks`, `max_batch_size`, `max_scheduled_tokens`,
+// `dflash2_max_snapshots`) and `search.chunk_size` onto `model.qwen38_graph.kv_capacity`, `model.context_length`,
+// `search.max_length`, and `model.qwen38_graph.prefill.chunk`. When `dynamic_batching` resolves to a single slot, records
+// that authoritative choice in `model.qwen38_graph.resolved_max_batch_size` before clearing `engine.dynamic_batching` for the
+// static Engine path. Returns true when `dynamic_batching.num_blocks` configured the KV capacity and context length.
+bool ApplyQwen38DynamicBatchingConfig(Config& config);
 
 // Size in bytes of one element of the dense prefill `logits` output. Only BFLOAT16 and FLOAT are supported; any other
 // type throws a std::runtime_error, so an exported graph with another logits type fails when the prefill is built
