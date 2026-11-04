@@ -86,7 +86,8 @@ class Phi3MiniLongRoPEModel(Phi3MiniModel):
     def make_rope_init(self, config):
         if config.rope_parameters["rope_type"] == "longrope":
             # For models with multiple rotary embedding caches (e.g. Phi-3 mini 128K)
-            self.rope_attrs["mscale_policy"] = config.rope_parameters["type"]
+            # Legacy configs carry "type"; configs written for Transformers 5.x may only have "rope_type".
+            self.rope_attrs["mscale_policy"] = config.rope_parameters.get("type", config.rope_parameters["rope_type"])
             short_factor = torch.tensor(config.rope_parameters["short_factor"], dtype=torch.float32)
             long_factor = torch.tensor(config.rope_parameters["long_factor"], dtype=torch.float32)
 

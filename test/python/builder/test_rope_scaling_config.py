@@ -56,6 +56,27 @@ def test_phi4_mini_longrope_with_legacy_type_key():
     assert model.rope_attrs["multi_cache"]["long_mscale"] > 1.0
 
 
+def test_phi4_mini_longrope_with_rope_type_only():
+    # Configs written for Transformers 5.x may carry only {"rope_type": "longrope", ...}, without the legacy "type" key.
+    short_factor, long_factor = [1.0] * NUM_FACTORS, [2.0] * NUM_FACTORS
+    rope_parameters = {
+        "rope_type": "longrope",
+        "rope_theta": 10000.0,
+        "short_factor": short_factor,
+        "long_factor": long_factor,
+    }
+    config = SimpleNamespace(
+        rope_parameters=rope_parameters,
+        max_position_embeddings=131072,
+        original_max_position_embeddings=4096,
+    )
+    model = make_rope_model(phi.Phi3MiniLongRoPEModel, config)
+
+    assert model.rope_attrs["mscale_policy"] == "longrope"
+    assert model.rope_attrs["multi_cache"]["long_factor"].tolist() == long_factor
+    assert model.rope_attrs["multi_cache"]["long_mscale"] > 1.0
+
+
 def test_llama_without_rope_scaling():
     # Transformers 4.x Llama-2-style configs set rope_scaling=None and have no rope_parameters.
     config = SimpleNamespace(rope_scaling=None, rope_theta=10000.0, max_position_embeddings=4096)
