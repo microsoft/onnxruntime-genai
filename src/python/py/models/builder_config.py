@@ -1445,6 +1445,8 @@ def validate_runtime_config(runtime_config: dict[str, Any], generated_config: di
             "max_scheduled_tokens",
             "num_blocks",
             "gpu_utilization_factor",
+            "media_host_bytes",
+            "media_device_bytes",
             "prefix_caching",
             "max_snapshots",
             "snapshot_cache",
@@ -1468,6 +1470,14 @@ def validate_runtime_config(runtime_config: dict[str, Any], generated_config: di
             raise ValueError(f"runtime_config.engine.dynamic_batching.{field_name} must be at most 2147483647")
     if dynamic_batching.get("max_batch_size", 1) > 256:
         raise ValueError("runtime_config.engine.dynamic_batching.max_batch_size must be at most 256")
+    for field_name in ("media_host_bytes", "media_device_bytes"):
+        if field_name in dynamic_batching:
+            value = dynamic_batching[field_name]
+            if isinstance(value, bool) or not isinstance(value, int) or not 0 < value <= 9_007_199_254_740_991:
+                raise ValueError(
+                    f"runtime_config.engine.dynamic_batching.{field_name} must be a positive integer byte count "
+                    "no greater than 9007199254740991"
+                )
     if "prefix_caching" in dynamic_batching and not isinstance(dynamic_batching["prefix_caching"], bool):
         raise ValueError("runtime_config.engine.dynamic_batching.prefix_caching must be a boolean")
     if dynamic_batching.get("prefix_caching") is True:
@@ -1712,6 +1722,8 @@ def validate_runtime_profiles(runtime_profiles: Any, generated_config: dict[str,
                 "num_blocks",
                 "max_batch_size",
                 "max_scheduled_tokens",
+                "media_host_bytes",
+                "media_device_bytes",
                 "prefix_caching",
                 "max_snapshots",
                 "snapshot_cache",

@@ -628,6 +628,7 @@ class Model:
         # Manage the inputs for paged attention
         if self.use_paged_attention:
             self.input_shapes["input_ids"] = ["num_tokens"]
+            self.input_shapes["inputs_embeds"] = ["num_tokens", self.hidden_size]
             self.input_shapes["past_key_values.key"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
             self.input_shapes["past_key_values.value"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
             if "attention_mask" in self.input_names:
@@ -2891,7 +2892,8 @@ class Model:
         state_update_capacity = kwargs.get("state_update_capacity", 0)
         if state_update_capacity:
             inputs.append(kwargs["state_update_capture_count"])
-            inputs.append(kwargs.get("state_update_active", ""))
+            if kwargs.get("state_update_active"):
+                inputs.append(kwargs["state_update_active"])
 
         output = f"{name}/output_0"
         present_conv = kwargs["present_conv_state"]
@@ -6930,7 +6932,7 @@ class Model:
                     self.make_embedding(module.weight)
                 else:
                     # Exclude embedding layer from model
-                    if self.extra_options.get("dflash2_path"):
+                    if self.use_paged_attention or self.extra_options.get("dflash2_path"):
                         self.embedding_model = self.make_embedding_component(module.weight)
                     self.layernorm_attrs["root_input"] = "inputs_embeds"
                     self.layernorm_attrs["skip_input"] = "inputs_embeds"

@@ -1026,6 +1026,17 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
           },
           pybind11::arg("tokens"),
           pybind11::arg("turn_options") = pybind11::none())
+      .def(
+          "begin_turn",
+          [](OgaRequest& request, const std::string& prompt, OgaTurnOptions* options, OgaImages* images) {
+            if (prompt.find('\0') != std::string::npos)
+              throw pybind11::value_error("A formatted prompt must not contain embedded NUL.");
+            return request.BeginTurn(prompt.c_str(), options, images);
+          },
+          pybind11::arg("prompt"), pybind11::arg("turn_options") = pybind11::none(),
+          pybind11::kw_only(), pybind11::arg("images") = pybind11::none(),
+          "Admit an already formatted incremental prompt and ordered images. CPU preprocessing "
+          "is synchronous; encoding is scheduled by Engine.run. No chat template is applied.")
       .def("cancel_turn", &OgaRequest::CancelTurn)
       .def("rewind_to_start_of_turn", &OgaRequest::RewindToStartOfTurn,
            pybind11::arg("turn_id"),

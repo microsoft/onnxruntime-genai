@@ -17,6 +17,14 @@ namespace Generators {
 struct EngramState;
 struct CpuEngram;
 
+struct PackedVision {
+  std::unique_ptr<OrtSessionOptions> session_options;
+  std::unique_ptr<OrtSession> session;
+  DeviceInterface* device{};
+  SessionInfo session_info;
+  std::shared_ptr<MultiModalProcessor> processor;
+};
+
 struct DecoderOnly_Model : Model {
   DecoderOnly_Model(std::unique_ptr<Config> config, OrtEnv& ort_env);
 
@@ -29,6 +37,7 @@ struct DecoderOnly_Model : Model {
   std::unique_ptr<OrtSession> session_engram_;
   std::unique_ptr<OrtSessionOptions> engram_session_options_;
   std::shared_ptr<CpuEmbedding> cpu_embedding_;
+  std::unique_ptr<PackedVision> vision_;
   std::shared_ptr<const CpuEngram> cpu_engram_;
   std::once_flag cpu_engram_init_;
 };

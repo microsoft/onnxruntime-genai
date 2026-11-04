@@ -1665,6 +1665,18 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestBeginTurn(
     uint64_t* out_turn_id);
 
 /**
+ * \brief Begins a Turn from an already formatted incremental UTF-8 prompt and ordered images.
+ *
+ * images may be null for text-only input. The model's image markers must match the supplied
+ * images in order. CPU preprocessing completes before return; neural encoding is scheduled by
+ * OgaEngineRun. The caller may release images after success. No chat template is applied.
+ * Invalid input leaves the Request's prior history and Turn ID unchanged.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestBeginTurnWithImages(
+    OgaRequest* request, const OgaTurnOptions* turn_options,
+    const char* formatted_prompt, const OgaImages* images, uint64_t* out_turn_id);
+
+/**
  * \brief Cancels the named queued or active Turn.
  *
  * Cancellation is synchronous and owner-thread-only. A matching queued or active Turn produces one
