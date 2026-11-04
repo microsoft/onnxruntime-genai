@@ -256,8 +256,8 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
         static_cast<size_t>(remaining_token_count),
         chunk_token_cap,
         candidate.entry.draft_token_count,
-        // An admission waits behind every row already in line for spare tokens.
-        newly_admitted ? admitted_stamp : request->ChunkServiceStamp(),
+        // A request starting a turn waits behind every row already in line for spare tokens.
+        IsQueued(snapshot.status) ? admitted_stamp : request->ChunkServiceStamp(),
     };
     candidate.processed_sequence_length =
         effective_processed_sequence_length;
@@ -355,12 +355,16 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
       candidate.decode_extra_token_count = 0;
   }
   std::vector<size_t> token_counts;
-  try {
-    token_counts = AllocateDecodeFirstTokenBudget(
-        selected_candidates, dynamic_batching.max_scheduled_tokens);
-  } catch (const std::invalid_argument& error) {
-    throw StepPlanningConsistencyError(error.what());
-  }
+  std::vector<bool> chunk_service;
+  const auto allocate_token_budget = [&] {
+    try {
+      token_counts = AllocateDecodeFirstTokenBudget(
+          selected_candidates, dynamic_batching.max_scheduled_tokens, &chunk_service);
+    } catch (const std::invalid_argument& error) {
+      throw StepPlanningConsistencyError(error.what());
+    }
+  };
+  allocate_token_budget();
 
   for (size_t index = 0; index < plan.requests.size(); ++index) {
     auto& entry = plan.requests[index];
@@ -371,14 +375,6 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     entry.target_cache_slots = RequiredSlots(
         selected_processed_lengths[index],
         entry.unprocessed_token_count);
-    const auto& budget = selected_candidates[index];
-    const bool read_spare_chunk_tokens =
-        (budget.is_prefill || budget.pending_token_count > 1) && token_counts[index] > 1;
-    if (read_spare_chunk_tokens) {
-      entry.chunk_service_stamp = served_stamp;
-    } else if (entry.newly_admitted) {
-      entry.chunk_service_stamp = admitted_stamp;
-    }
   }
 
   // Only drafts push a request's reserved slots past the probe that was just validated: every
@@ -391,6 +387,7 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
   if (plans_drafts) {
     const size_t selected_request_count = plan.requests.size();
     auto budgeted_requests = plan.requests;
+    bool released_draft_tokens = false;
     while (true) {
       const auto resource_result = cache_manager_->PlanStepResources(plan);
       if (resource_result.executable &&
@@ -416,6 +413,7 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
         entry.target_cache_slots = RequiredSlots(
             selected_processed_lengths[entry.scheduling_order],
             entry.unprocessed_token_count);
+        released_draft_tokens = true;
       };
       bool reduced_draft_count = false;
       for (auto& entry : budgeted_requests) {
@@ -438,6 +436,20 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
         reduce_draft_count(*optional_work);
       }
       plan.requests = budgeted_requests;
+    }
+    // Draft-free rows end within the sequence the probe reserved, so chunk work can take the tokens
+    // the dropped drafts would have used without another cache pass.
+    if (released_draft_tokens) {
+      for (const auto& entry : plan.requests)
+        selected_candidates[entry.scheduling_order].decode_extra_token_count = entry.draft_token_count;
+      allocate_token_budget();
+    }
+  }
+  for (auto& entry : plan.requests) {
+    if (chunk_service[entry.scheduling_order]) {
+      entry.chunk_service_stamp = served_stamp;
+    } else if (IsQueued(entry.request->status_)) {
+      entry.chunk_service_stamp = admitted_stamp;
     }
   }
   record_deferred_prefix_matches();
