@@ -141,7 +141,7 @@ class Model:
         self.layer_types = (
             list(config.layer_types[: self.num_layers])
             if getattr(config, "layer_types", None) is not None
-            else ["full_attention"] * self.num_layers
+            else [self.default_layer_type(config)] * self.num_layers
         )
         self.vocab_size = config.vocab_size
         self.activation = (
@@ -1598,6 +1598,19 @@ class Model:
             first_dim = self.hidden_rows_dim if seq_dim == "sequence_length" else seq_dim
             return [first_dim, last_dim]
         return ["batch_size", seq_dim, last_dim]
+
+    @staticmethod
+    def default_layer_type(config):
+        """Return the attention type of every layer when the config has no `layer_types`.
+
+        Configs such as Mistral and Phi-3 only carry `sliding_window`, which Hugging Face
+        applies to every layer. `use_sliding_window=False` (Qwen) or a missing/non-positive window
+        means full attention.
+        """
+        sliding_window = getattr(config, "sliding_window", None)
+        if getattr(config, "use_sliding_window", True) and isinstance(sliding_window, int) and sliding_window > 0:
+            return "sliding_attention"
+        return "full_attention"
 
     def is_local(self, layer_id):
         """Return whether Hugging Face marks this layer as sliding-window attention."""
