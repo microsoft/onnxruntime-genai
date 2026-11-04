@@ -18,9 +18,11 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <new>
+#include <numeric>
 #include <optional>
 #include <random>
 #include <sstream>
@@ -2710,6 +2712,75 @@ TEST_F(EngineRunTest, MixedRunRollbackPreservesProgressAndCacheResidents) {
   EXPECT_EQ(engine.cache->AllocatedCount(), 2u);
 }
 
+// While new prompts keep arriving, spare tokens go to the selected prefill that waited longest, so
+// no prefill is passed over for more steps than there are other prefills.
+TEST_F(EngineRunTest, SustainedArrivalsCannotKeepAPrefillFromSpareTokens) {
+  model_->config_->engine.dynamic_batching->max_scheduled_tokens = 10;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
+  std::vector<int32_t> long_prompt(40);
+  std::iota(long_prompt.begin(), long_prompt.end(), 11);
+
+  std::map<const void*, size_t> passed_over;
+  size_t max_passed_over = 0;
+  size_t max_prefills = 0;
+  engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
+    ASSERT_NE(context.plan, nullptr);
+    size_t prefills = 0;
+    for (const auto& entry : context.plan->requests) {
+      if (!entry.is_prefill)
+        continue;
+      ++prefills;
+      const auto& request = *entry.request;
+      if (entry.unprocessed_token_count > 1) {
+        passed_over[entry.request_id] = 0;
+      } else if (request.CurrentSequenceLength() - request.ProcessedSequenceLength() > 1) {
+        max_passed_over = std::max(max_passed_over, ++passed_over[entry.request_id]);
+      }
+    }
+    max_prefills = std::max(max_prefills, prefills);
+  });
+
+  std::vector<std::shared_ptr<Request>> requests;
+  const auto prompts_read = [&] {
+    return std::none_of(requests.begin(), requests.end(),
+                        [](const auto& request) { return request->IsPrefill(); });
+  };
+  std::array<EngineEvent, 16> storage;
+  for (int step = 0; step < 80 && (requests.size() < 6 || !prompts_read()); ++step) {
+    if (requests.size() < 6)  // one arrival per step
+      requests.push_back(CreateRequestWithPrompt(engine.engine, long_prompt));
+    engine.engine->Run(storage);
+  }
+  ASSERT_TRUE(prompts_read());
+  ASSERT_GE(max_prefills, 4u);
+  EXPECT_LE(max_passed_over, max_prefills - 1);
+}
+
+// A rolled-back step records no service, so its retry shares spare tokens exactly as it did.
+TEST_F(EngineRunTest, RolledBackStepDoesNotChangeWhoGetsSpareTokens) {
+  model_->config_->engine.dynamic_batching->max_scheduled_tokens = 4;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
+  std::vector<int32_t> long_prompt(20);
+  std::iota(long_prompt.begin(), long_prompt.end(), 11);
+  auto first = CreateRequestWithPrompt(engine.engine, long_prompt);
+  auto second = CreateRequestWithPrompt(engine.engine, long_prompt);
+
+  std::vector<std::vector<size_t>> reads;  // {first, second} per attempt
+  engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
+    ASSERT_NE(context.plan, nullptr);
+    std::vector<size_t> attempt(2);
+    for (const auto& entry : context.plan->requests)
+      attempt[entry.request_id == first.get() ? 0 : 1] = entry.unprocessed_token_count;
+    reads.push_back(attempt);
+  });
+
+  RunOne(*engine.engine);
+  engine.executor->SetNextFailure(ScriptedExecutionFailure::RetryableDuringExecution);
+  ASSERT_EQ(RunOne(*engine.engine).flags, EngineEventFlagRetryable);
+  RunOne(*engine.engine);
+  EXPECT_EQ(reads, (std::vector<std::vector<size_t>>{{3, 1}, {1, 3}, {1, 3}}));
+}
+
 TEST_F(EngineRunTest, SpeculativeRunKeepsAcceptedPrefixAndEmitsAllTokens) {
   const int32_t eos = EosToken(*model_);
   const int32_t filler = eos == 5 ? 6 : 5;
@@ -5304,10 +5375,11 @@ TEST_F(EngineRunTest, CompositeMixedPrefillDefersResidentDraft) {
   auto prefill = CreateRequestWithPrompt(
       engine.engine, long_prompt);
 
+  // The deferred draft's token goes to the prefill instead of going unused.
   engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
     ASSERT_NE(context.plan, nullptr);
     ASSERT_EQ(context.plan->requests.size(), 2u);
-    EXPECT_EQ(context.plan->token_count, 2u);
+    EXPECT_EQ(context.plan->token_count, 3u);
     const auto& decode_entry = context.plan->requests[0];
     EXPECT_EQ(decode_entry.request_id, decode.get());
     EXPECT_EQ(decode_entry.unprocessed_token_count, 1u);
@@ -5316,7 +5388,7 @@ TEST_F(EngineRunTest, CompositeMixedPrefillDefersResidentDraft) {
               static_cast<size_t>(decode->CurrentSequenceLength()));
     const auto& prefill_entry = context.plan->requests[1];
     EXPECT_EQ(prefill_entry.request_id, prefill.get());
-    EXPECT_EQ(prefill_entry.unprocessed_token_count, 1u);
+    EXPECT_EQ(prefill_entry.unprocessed_token_count, 2u);
     for (const auto& binding : context.fixed_state_bindings) {
       for (size_t row = 0; row < context.plan->requests.size(); ++row) {
         FillFixedOutputRow(binding, row, static_cast<float>(row + 1));
@@ -5327,7 +5399,7 @@ TEST_F(EngineRunTest, CompositeMixedPrefillDefersResidentDraft) {
   EXPECT_EQ(RunOne(*engine.engine).request, decode);
   EXPECT_EQ(decode->ProcessedSequenceLength(),
             decode_before_mixed.processed_sequence_length + 1);
-  EXPECT_EQ(prefill->ProcessedSequenceLength(), 1);
+  EXPECT_EQ(prefill->ProcessedSequenceLength(), 2);
   EXPECT_TRUE(prefill->IsPrefill());
 }
 

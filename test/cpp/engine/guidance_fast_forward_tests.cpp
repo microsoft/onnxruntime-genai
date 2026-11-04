@@ -194,6 +194,54 @@ TEST_F(GuidanceFastForwardTest, StepBudgetSplitsForcedTokensAndSamplesOnlyAfterT
   EXPECT_TRUE(ValidateRequestInvariants(request->Snapshot()).empty());
 }
 
+// search.chunk_size bounds prompt chunks only; a row's unread forced tokens are read in one step.
+TEST_F(GuidanceFastForwardTest, PrefillChunkSizeDoesNotSplitTheUnreadForcedTokens) {
+  model_->config_->search.chunk_size = 2;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
+  auto request = CreateEngineRequest(engine.engine);
+  request->BeginTurn(Prompt());
+  InstallForcingGrammar(*request, /*trigger=*/11, LongForcedSpan());
+
+  std::array<EngineEvent, 16> storage;
+  ASSERT_EQ(engine.engine->Run(storage), 0u);  // first 2 prompt tokens
+  ASSERT_EQ(engine.engine->Run(storage), 8u);  // last prompt token; samples 11, publishes 7
+  engine.executor->SetForcedToken(EosToken(*model_));
+  ASSERT_EQ(engine.engine->Run(storage), 4u);
+  ASSERT_EQ(engine.engine->Run(storage), 1u);
+  EXPECT_EQ(engine.executor->decoded_token_counts, (std::vector<size_t>{2, 1, 8, 4}));
+}
+
+// While a peer verifies drafts, the row reads one unread token per step, so the peer keeps them;
+// once nobody drafts, it reads the rest together.
+TEST_F(GuidanceFastForwardTest, UnreadForcedTokensAreReadOneAtATimeWhileAPeerVerifiesDrafts) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
+  engine.cache->SetMaxDraftTokensPerStep(1);
+  auto drafting = CreateRequestWithPrompt(engine.engine, Prompt());
+  auto forcing = CreateRequestWithPrompt(engine.engine, Prompt());
+  InstallForcingGrammar(*forcing, /*trigger=*/11, {12, 13});
+  std::array<EngineEvent, 8> storage;
+  ASSERT_EQ(engine.engine->Run(storage), 4u);  // drafting: 11; forcing: 11, 12, 13
+
+  std::vector<std::vector<std::pair<size_t, size_t>>> forcing_and_drafting_reads;
+  engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
+    ASSERT_NE(context.plan, nullptr);
+    std::pair<size_t, size_t> forcing_read{};
+    std::pair<size_t, size_t> drafting_read{};
+    for (const auto& entry : context.plan->requests) {
+      auto& read = entry.request_id == forcing.get() ? forcing_read : drafting_read;
+      read = {entry.unprocessed_token_count, entry.draft_token_count};
+    }
+    forcing_and_drafting_reads.push_back({forcing_read, drafting_read});
+  });
+  drafting->SetDraftTokens(std::array<int32_t, 1>{11});
+  ASSERT_GT(engine.engine->Run(storage), 0u);
+  ASSERT_GT(engine.engine->Run(storage), 0u);
+
+  using Read = std::pair<size_t, size_t>;  // {tokens read, of which drafts}
+  EXPECT_EQ(forcing_and_drafting_reads,
+            (std::vector<std::vector<Read>>{{Read{1, 0}, Read{2, 1}}, {Read{2, 0}, Read{1, 0}}}));
+}
+
 TEST_F(GuidanceFastForwardTest, TurnLimitCutsTheForcedSpanAndEndsTheTurn) {
   // A limit of 1 is reached by the sampled token itself, so no forced token may follow it.
   constexpr int32_t kEmitted[] = {11, 12};
@@ -293,7 +341,9 @@ TEST_F(GuidanceFastForwardTest, StopStringCompletedByAForcedTokenEndsTheTurnAtTh
   EXPECT_TRUE(ValidateRequestInvariants(request->Snapshot()).empty());
 }
 
-TEST_F(GuidanceFastForwardTest, HybridStepReadingForcedTokensDefersAnotherRequestsDrafts) {
+// Recurrent state cannot checkpoint drafts beside a row reading several tokens, so on a hybrid model
+// the row reads one unread token and the peer's draft is still verified.
+TEST_F(GuidanceFastForwardTest, HybridPeerKeepsItsDraftWhileTheRowReadsOneUnreadToken) {
   model_ = LoadSyntheticCompositeModel();
   auto engine = MakeCompositeDoublesEngine(model_, /*forced_token=*/11);
   auto drafting = CreateRequestWithPrompt(engine.engine, Prompt());
@@ -303,14 +353,13 @@ TEST_F(GuidanceFastForwardTest, HybridStepReadingForcedTokensDefersAnotherReques
   ASSERT_EQ(engine.engine->Run(storage), 4u);  // drafting: 11; forcing: 11, 12, 13
   drafting->SetDraftTokens(std::array<int32_t, 1>{11});
 
-  // Recurrent state cannot capture draft checkpoints while a multi-token row shares the step.
   engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
     ASSERT_NE(context.plan, nullptr);
     ASSERT_EQ(context.plan->requests.size(), 2u);
     for (const auto& entry : context.plan->requests) {
       const bool is_forcing = entry.request_id == forcing.get();
-      EXPECT_EQ(entry.unprocessed_token_count, is_forcing ? 3u : 1u);
-      EXPECT_EQ(entry.draft_token_count, 0u);
+      EXPECT_EQ(entry.unprocessed_token_count, is_forcing ? 1u : 2u);
+      EXPECT_EQ(entry.draft_token_count, is_forcing ? 0u : 1u);
     }
   });
   ASSERT_GT(engine.engine->Run(storage), 0u);
