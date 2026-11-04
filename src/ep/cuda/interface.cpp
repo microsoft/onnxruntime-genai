@@ -37,10 +37,10 @@ Ort::Allocator* ort_allocator_{};
 const char* device_label = "cuda";
 
 // The process-wide stream and the device it belongs to (-1 while there is no stream). Every writer holds
-// g_stream_mutex. The device id is stored with release semantics only after the stream exists, so a reader that
-// loads a non-negative id with acquire semantics can use g_stream without taking the mutex.
+// g_stream_mutex. The device id (g_stream_device_id, declared in cuda_common.h) is stored with release semantics only
+// after the stream exists, so a reader that loads a non-negative id with acquire semantics can use g_stream without
+// taking the mutex.
 std::mutex g_stream_mutex;
-std::atomic<int> g_stream_device_id{-1};
 cuda_stream_holder g_stream;
 
 // Creates the stream on first use and returns the device it belongs to. A negative `requested_device_id` binds a new
@@ -324,17 +324,21 @@ struct GpuMemory final : DeviceBuffer {
     copy_to_device_pending_ = false;
   }
 
-  void CopyCpuToDevice() override {
+  void CopyCpuToDevice() override { CopyCpuRangeToDevice(0, size_in_bytes_); }
+
+  void CopyCpuRangeToDevice(size_t begin_bytes, size_t bytes) override {
     assert(p_cpu_);
-    if (size_in_bytes_ <= cuda::kMaxStoreBytes) {
+    assert(begin_bytes + bytes <= size_in_bytes_);
+    if (bytes <= cuda::kMaxStoreBytes) {
       // The launch captures the bytes, so the mirror is free again as soon as this returns.
-      cuda::LaunchStoreBytes(p_device_, p_cpu_, size_in_bytes_, GetStream());
+      cuda::LaunchStoreBytes(p_device_ + begin_bytes, p_cpu_ + begin_bytes, bytes, GetStream());
       return;
     }
-    if (size_in_bytes_ <= kKernelCopyMaxBytes) {
-      cuda::LaunchCopyBytes(p_device_, p_cpu_, size_in_bytes_, GetStream());
+    if (bytes <= kKernelCopyMaxBytes) {
+      cuda::LaunchCopyBytes(p_device_ + begin_bytes, p_cpu_ + begin_bytes, bytes, GetStream());
     } else {
-      CUDA_CHECK(::cudaMemcpyAsync(p_device_, p_cpu_, size_in_bytes_, ::cudaMemcpyHostToDevice, GetStream()));
+      CUDA_CHECK(::cudaMemcpyAsync(p_device_ + begin_bytes, p_cpu_ + begin_bytes, bytes,
+                                   ::cudaMemcpyHostToDevice, GetStream()));
     }
     copy_to_device_pending_ = true;
   }

@@ -179,6 +179,11 @@ void SpeculativeDecodingStrategy::Step(Generator& g) {
       if (g.last_action_ == Generator::Action::rewound)
         g.search_->AppendTokens(next_tokens);
       g.ComputeLogits(next_tokens);
+      // Forced tokens or a rewind replay can fill the sequence, which ends the generation as in DrainOne.
+      if (g.search_->GetSequenceLength() >= g.search_->params_->search.max_length) {
+        g.computed_logits_ = false;
+        return;
+      }
     }
     RunRound(g);
   }

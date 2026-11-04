@@ -1013,6 +1013,8 @@ std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::str
       model_filename == config_->model.decoder.filename) {
     SessionInfo decoder_session_info;
     decoder_session_info.Add(*session);
+    ModelStateManifest::ResolveDisabledIndexerCapacity(
+        config_->model.decoder, decoder_session_info);
     ModelStateManifest{config_->model.decoder}.ValidateSession(decoder_session_info);
   }
 
@@ -1083,7 +1085,8 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
       throw std::runtime_error("Pipelined decoder is not supported for model type '" + config->model.type + "'");
     return std::make_shared<Qwen2_5_VL_PipelineModel>(std::move(config), ort_env);
   }
-  if (ModelType::IsLFM2(config->model.type))
+  // Only paged exports have state groups; they run in the Engine, which takes a DecoderOnly_Model.
+  if (ModelType::IsLFM2(config->model.type) && !config->model.decoder.state_groups)
     return std::make_shared<LFM2_Model>(std::move(config), ort_env);
   if (config->model.type == "gpt2")
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
