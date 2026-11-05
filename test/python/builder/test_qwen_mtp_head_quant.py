@@ -16,6 +16,7 @@ from loaders.qwen import Qwen4ExpMTPModel, QwenMTPModel
 from safetensors.torch import save_file
 
 from models.builders.qwen import Qwen4ExpModel, Qwen35DenseMTPModel, Qwen35Model, Qwen35MoEModel
+from models.builders.qwen3_8 import vision as qwen_vision
 
 
 def _resolve(extra_options, main_onnx_dtype=ir.DataType.INT4):
@@ -40,6 +41,7 @@ class FakeComponent:
         self.hf_remote = False
         self.context_length = 128
         self.exclude_embeds = False
+        self.use_paged_attention = extra_options.get("use_paged_attention", False)
         self.model_type = "qwen3_5_moe"
 
 
@@ -236,8 +238,8 @@ def test_qwen4_exp_composite_saves_image_processor_config(monkeypatch, tmp_path)
     }
     preprocessor_path = tmp_path / "preprocessor_config.json"
     preprocessor_path.write_text(json.dumps(image_processor))
-    monkeypatch.setitem(
-        Qwen4ExpModel.save_processing.__globals__,
+    monkeypatch.setattr(
+        qwen_vision,
         "hf_hub_download",
         lambda *args, **kwargs: preprocessor_path,
     )

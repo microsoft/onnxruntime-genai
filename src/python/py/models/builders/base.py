@@ -628,7 +628,8 @@ class Model:
         # Manage the inputs for paged attention
         if self.use_paged_attention:
             self.input_shapes["input_ids"] = ["num_tokens"]
-            self.input_shapes["inputs_embeds"] = ["num_tokens", self.hidden_size]
+            if self.exclude_embeds:
+                self.input_shapes["inputs_embeds"] = ["num_tokens", self.hidden_size]
             self.input_shapes["past_key_values.key"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
             self.input_shapes["past_key_values.value"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
             if "attention_mask" in self.input_names:

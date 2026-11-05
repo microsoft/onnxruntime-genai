@@ -229,7 +229,6 @@ class Qwen35MoEModel(MTPModel):
         with open(config_path) as config_file:
             genai_config = json.load(config_file)
         model_config = genai_config["model"]
-        model_config["type"] = "qwen3_5_text"
         model_config["image_token_id"] = config.image_token_id
         model_config["vision_start_token_id"] = config.vision_start_token_id
         model_config["vision"] = {

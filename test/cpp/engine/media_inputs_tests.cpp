@@ -44,6 +44,61 @@ TEST(MediaInputsTest, RejectsInvalidImageBufferBeforeCopying) {
   EXPECT_THROW(LoadImagesFromBuffers(buffers, sizes), std::runtime_error);
 }
 
+TEST(MediaInputsTest, TextOnlyModelTypesRejectVisionComponents) {
+  for (const char* type : {"qwen3_5_text", "qwen3_5_moe_text", "gpt2"}) {
+    auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
+    config->model.type = type;
+    config->model.vision.filename = "vision.onnx";
+    try {
+      CreateModel(GetOrtEnv(), std::move(config));
+      FAIL() << type << " accepted a vision encoder";
+    } catch (const std::runtime_error& error) {
+      EXPECT_NE(std::string{error.what()}.find("Text-only model type"), std::string::npos);
+    }
+  }
+}
+
+TEST(MediaInputsTest, VisionModelTypeWithoutEncoderDoesNotEnableVision) {
+  for (const char* type : {"qwen3_5", "qwen3_5_moe"}) {
+    auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
+    config->model.type = type;
+    config->engine.dynamic_batching.emplace();
+    try {
+      CreateModel(GetOrtEnv(), std::move(config));
+      FAIL() << type << " accepted an incomplete vision package";
+    } catch (const std::runtime_error& error) {
+      EXPECT_NE(std::string{error.what()}.find("exported vision encoder"), std::string::npos);
+    }
+  }
+}
+
+TEST(MediaInputsTest, TextOnlyImageRejectionPreservesTheNextTurn) {
+  auto model = LoadDummyDecoderModel();
+  auto engine = MakeDoublesEngine(model, 1024, EosToken(*model)).engine;
+  auto request = engine->CreateRequest();
+  const std::string path = std::string{MODEL_PATH} + "../images/cars.jpg";
+  const std::array paths{path.c_str()};
+  auto images = LoadImages(paths);
+  const TurnOptions options;
+  EXPECT_THROW(request->BeginTurn("Describe the image.", options, images.get()), std::invalid_argument);
+  EXPECT_TRUE(request->IsAwaitingFirstTurn());
+  const std::array<int32_t, 3> tokens{2, 3, 4};
+  EXPECT_EQ(request->BeginTurn(tokens), 1u);
+}
+
+TEST(MediaInputsTest, PackedVisionRequiresTheCpuEmbeddingComponent) {
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
+  config->model.type = "qwen3_5";
+  config->model.vision.filename = "vision.onnx";
+  config->engine.dynamic_batching.emplace();
+  try {
+    CreateModel(GetOrtEnv(), std::move(config));
+    FAIL() << "Packed vision accepted a package without a CPU embedding component";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(std::string{error.what()}.find("pure CPU embeddings"), std::string::npos);
+  }
+}
+
 TEST(MediaInputsTest, LeavesUnknownHeaderDimensionsUnavailable) {
   const std::array<uint8_t, 24> invalid{};
   std::array<const void*, 1> buffers{invalid.data()};

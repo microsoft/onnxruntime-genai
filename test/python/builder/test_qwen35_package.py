@@ -262,7 +262,7 @@ def test_qwen35_packed_vision_emits_pure_lookup_without_drafter(monkeypatch, tmp
     expected = weights.model.language_model.embed_tokens(torch.from_numpy(ids)).detach().numpy()
     np.testing.assert_array_equal(actual, expected.astype(np.float16))
     metadata = json.loads((tmp_path / "genai_config.json").read_text())["model"]
-    assert metadata["type"] == "qwen3_5_text"
+    assert metadata["type"] == "qwen3_5"
     assert metadata["embedding"]["inputs"] == {"input_ids": "input_ids"}
     assert metadata["vision"]["patch_size"] == 2
     assert metadata["decoder"]["inputs"]["inputs_embeds"] == "inputs_embeds"
@@ -274,6 +274,56 @@ def test_qwen35_packed_vision_emits_pure_lookup_without_drafter(monkeypatch, tmp
         recurrent = next(node for node in decoder.graph if node.op_type == "GatedDeltaNet")
         assert len(conv.inputs) == 6
         assert len(recurrent.inputs) == 11
+
+
+@pytest.mark.parametrize("exclude_embeds", [False, True])
+@pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_moe"])
+def test_qwen35_export_type_distinguishes_text_from_complete_vision(monkeypatch, tmp_path, exclude_embeds, model_type):
+    from models import builder as builder_module  # noqa: PLC0415
+
+    config = tiny_qwen35_config()
+    builder_class = builder_module.Qwen35Model
+    if model_type == "qwen3_5_moe":
+        transformers = pytest.importorskip("transformers")
+        options = config.to_dict()
+        options.pop("model_type")
+        options["text_config"].pop("model_type")
+        options["architectures"] = ["Qwen3_5MoeForConditionalGeneration"]
+        config = transformers.Qwen3_5MoeConfig(**options)
+        builder_class = builder_module.Qwen35MoEModel
+    source_path = tmp_path / "source"
+    config.save_pretrained(str(source_path))
+    output_path = tmp_path / "output"
+    monkeypatch.setattr(builder_class, "save_processing", lambda *args: None)
+    builder_module.create_model(
+        str(source_path),
+        str(source_path),
+        str(output_path),
+        "fp16",
+        "cuda",
+        str(tmp_path / "cache"),
+        config_only=True,
+        use_paged_attention=True,
+        exclude_embeds=exclude_embeds,
+        hf_details={"extra_kwargs": {}, "hf_name": str(source_path), "hf_config": config},
+    )
+    metadata = json.loads((output_path / "genai_config.json").read_text())["model"]
+    assert metadata["type"] == (model_type if exclude_embeds else model_type + "_text")
+    assert ("vision" in metadata) == exclude_embeds
+    assert ("embedding" in metadata) == exclude_embeds
+
+
+def test_qwen35_text_only_cannot_export_packed_vision(tmp_path):
+    owner = load_builder_module("qwen3_5")
+    with pytest.raises(ValueError, match="cannot use text_only"):
+        owner.Qwen35Model(
+            tiny_qwen35_config(),
+            ir.DataType.FLOAT16,
+            ir.DataType.FLOAT16,
+            "cuda",
+            str(tmp_path),
+            {"use_paged_attention": True, "exclude_embeds": True, "text_only": True},
+        )
 
 
 @pytest.mark.parametrize("exclude_embeds", [False, True])

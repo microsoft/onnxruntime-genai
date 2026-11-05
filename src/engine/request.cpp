@@ -1550,7 +1550,9 @@ void Request::CommitRewind(RequestRewindState&& state) noexcept {
   assert(state.sequence_length <= tokens_host_.size());
   search_ = std::move(state.search);
   tokens_host_.resize(state.sequence_length);
-  std::erase_if(media_, [&](const MediaSpan& span) { return span.start >= state.sequence_length; });
+  media_.erase(std::remove_if(media_.begin(), media_.end(),
+                              [&](const MediaSpan& span) { return span.start >= state.sequence_length; }),
+               media_.end());
   turn_boundaries_.resize(state.retained_turn_count);
   processed_sequence_length_ = 0;
   prompt_sequence_length_ = 0;

@@ -26,7 +26,7 @@ def vision_package():
     if not og.is_cuda_available():
         pytest.fail("Real Engine vision qualification requires CUDA")
     manifest = json.loads(Path(directory, "genai_config.json").read_text())
-    assert manifest["model"]["type"] == "qwen3_5_text"
+    assert manifest["model"]["type"] == "qwen3_5"
     assert manifest["model"]["vision"]["filename"]
     assert manifest["model"]["embedding"]["filename"]
     return directory, manifest
@@ -148,6 +148,30 @@ def test_formatted_admission_reclaims_abandoned_media_before_host_preflight(visi
     gc.collect()
     assert begin(survivor, value, images, maximum=1) == 1
     survivor.close()
+
+
+def test_text_only_export_rejects_images_without_consuming_the_turn(vision_package):
+    directory, _ = vision_package
+    config = og.Config(directory)
+    config.overlay(
+        json.dumps(
+            {
+                "model": {"type": "qwen3_5_text", "vision": {"filename": ""}, "dflash2": {"filename": ""}},
+                "engine": {"dynamic_batching": {"num_blocks": 64, "max_batch_size": 1}},
+            }
+        )
+    )
+    config.set_provider_option("cuda", "enable_cuda_graph", "0")
+    model = og.Model(config)
+    engine, tokenizer = og.Engine(model), og.Tokenizer(model)
+    request = new_request(engine)
+    images = og.Images.open(str(IMAGE_DIR / "cars.jpg"))
+    with pytest.raises(RuntimeError, match="does not support image inputs"):
+        begin(request, prompt(tokenizer, 1), images, maximum=1)
+    assert begin(request, prompt(tokenizer, 0), maximum=1) == 1
+    _, finishes, _ = drain(engine)
+    assert len(finishes) == 1
+    request.close()
 
 
 def test_image_input_lifetime_and_real_draft_activity(vision_model):
