@@ -2995,7 +2995,8 @@ struct Search_Element : JSON::Element {
 };
 
 struct Speculative_Element : JSON::Element {
-  explicit Speculative_Element(Config::Speculative& v) : v_{v} {}
+  explicit Speculative_Element(Config::Speculative& v, bool allow_target_only = false)
+      : v_{v}, allow_target_only_{allow_target_only} {}
 
   // Draft widths (max_draft_tokens, min_adaptive_k) must be within [kMinK, kMaxDraftTokens].
   // This is a parse-time sanity bound, not a capability: the engine clamps the width again at
@@ -3008,7 +3009,7 @@ struct Speculative_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "max_draft_tokens") {
       int k = SafeDoubleToInt(JSON::Get<double>(value), name);
-      if (k < kMinK || k > kMaxDraftTokens)
+      if (k < (allow_target_only_ ? 0 : kMinK) || k > kMaxDraftTokens)
         throw std::runtime_error(
             "speculative.max_draft_tokens must be between " + std::to_string(kMinK) + " and " +
             std::to_string(kMaxDraftTokens) + " Got: " + std::to_string(k) + ".");
@@ -3039,6 +3040,7 @@ struct Speculative_Element : JSON::Element {
 
  private:
   Config::Speculative& v_;
+  bool allow_target_only_{};
 };
 
 uint64_t ParseRuntimeProfileMemoryBytes(JSON::Value& value, std::string_view name);
@@ -3877,6 +3879,12 @@ void ClearDecoderProviderOptionsHardwareVendorId(Config& config, std::string_vie
 struct Root_Element : JSON::Element {
   explicit Root_Element(Config& config) : config_{config} {}
 
+  void OnComplete(bool) override {
+    // The speculative object may precede model.type in JSON.
+    if (config_.speculative.max_draft_tokens == 0 && config_.model.type != "nemotron_bolt")
+      throw std::runtime_error("speculative.max_draft_tokens must be between 1 and 16. Got: 0.");
+  }
+
   void OnValue(std::string_view /*name*/, JSON::Value /*value*/) override {
     // No top-level scalar values currently supported
   }
@@ -3897,7 +3905,7 @@ struct Root_Element : JSON::Element {
   Config& config_;
   Model_Element model_element_{config_.model};
   Search_Element search_element_{config_.search};
-  Speculative_Element speculative_element_{config_.speculative};
+  Speculative_Element speculative_element_{config_.speculative, true};
   Engine_Element engine_element_{config_.engine};
   RuntimeProfiles_Element runtime_profiles_element_{config_.runtime_profiles};
 };
