@@ -195,6 +195,205 @@ TEST(NemotronBolt, PromptAtBudgetIsImmediatelyDone) {
   EXPECT_THROW(search->CommitToken(21), std::runtime_error);
 }
 
+TEST(NemotronBolt, PrefillAuxiliaryRowsPreserveOrderAndIgnorePadding) {
+  auto* device = GetDeviceInterface(DeviceType::CPU);
+  Tensor chunk(device, Ort::TypeToTensorType<float>);
+  Tensor prompt(device, Ort::TypeToTensorType<float>);
+  chunk.CreateTensor(std::vector<int64_t>{8, 3});
+  prompt.CreateTensor(std::vector<int64_t>{19, 3});
+  for (size_t start = 0; start < 19; start += 8) {
+    auto values = chunk.GetDeviceSpan<float>().CpuSpan();
+    for (size_t i = 0; i < values.size(); ++i)
+      values[i] = static_cast<float>(start * 3 + i);
+    CopyNemotronBoltPrefillAuxRows(prompt, chunk, start, std::min(size_t{8}, 19 - start));
+  }
+  const auto result = prompt.GetDeviceSpan<float>().CopyDeviceToCpu();
+  for (size_t i = 0; i < result.size(); ++i)
+    EXPECT_EQ(result[i], static_cast<float>(i));
+  EXPECT_THROW(CopyNemotronBoltPrefillAuxRows(prompt, chunk, 18, 2), std::runtime_error);
+  EXPECT_THROW(CopyNemotronBoltPrefillAuxRows(prompt, chunk, 0, 9), std::runtime_error);
+  EXPECT_THROW(CopyNemotronBoltPrefillAuxRows(prompt, chunk, 0, 0), std::runtime_error);
+}
+
+TEST(NemotronBolt, BoundedAuxiliaryMatchesExactFullPromptSuffixAcrossBoundaries) {
+  auto* device = GetDeviceInterface(DeviceType::CPU);
+  for (size_t count : {size_t{1}, size_t{7}, size_t{8}, size_t{9}, size_t{57},
+                       size_t{1031}, size_t{1032}, size_t{1033}, size_t{4099}, size_t{32768}}) {
+    const size_t retained = NemotronBoltPrefillAuxRowsToRetain(count, 1024, 8);
+    const size_t omitted = count - retained;
+    EXPECT_EQ(retained, std::min(count, size_t{1032}));
+    Tensor chunk(device, Ort::TypeToTensorType<float>);
+    Tensor full(device, Ort::TypeToTensorType<float>);
+    Tensor bounded(device, Ort::TypeToTensorType<float>);
+    chunk.CreateTensor(std::vector<int64_t>{8, 3});
+    full.CreateTensor(std::vector<int64_t>{static_cast<int64_t>(count), 3});
+    bounded.CreateTensor(std::vector<int64_t>{static_cast<int64_t>(retained), 3});
+    std::fill(bounded.GetDeviceSpan<float>().CpuSpan().begin(),
+              bounded.GetDeviceSpan<float>().CpuSpan().end(), -1.0f);
+    for (size_t position = 0; position < count; position += 8) {
+      auto input = chunk.GetDeviceSpan<float>().CpuSpan();
+      for (size_t i = 0; i < input.size(); ++i)
+        input[i] = static_cast<float>(position * 3 + i);
+      const size_t valid = std::min(size_t{8}, count - position);
+      CopyNemotronBoltPrefillAuxRows(full, chunk, position, valid);
+      CopyNemotronBoltPrefillAuxRows(bounded, chunk, position, valid, omitted);
+    }
+    const auto expected = full.GetDeviceSpan<float>().CopyDeviceToCpu().subspan(omitted * 3);
+    const auto actual = bounded.GetDeviceSpan<float>().CopyDeviceToCpu();
+    ASSERT_EQ(actual.size(), expected.size());
+    for (size_t i = 0; i < actual.size(); ++i)
+      EXPECT_EQ(actual[i], expected[i]) << "N=" << count << ", physical row=" << i / 3;
+  }
+}
+
+TEST(NemotronBolt, BoundedAuxiliaryKeepsFullAttentionAndRejectsInvalidRanges) {
+  EXPECT_EQ(NemotronBoltPrefillAuxRowsToRetain(4099, 0, 8), 4099u);
+  EXPECT_THROW(NemotronBoltPrefillAuxRowsToRetain(0, 1024, 8), std::runtime_error);
+  EXPECT_THROW(NemotronBoltPrefillAuxRowsToRetain(4099, 1024, 0), std::runtime_error);
+  auto* device = GetDeviceInterface(DeviceType::CPU);
+  Tensor chunk(device, Ort::TypeToTensorType<float>);
+  Tensor bounded(device, Ort::TypeToTensorType<float>);
+  chunk.CreateTensor(std::vector<int64_t>{8, 3});
+  bounded.CreateTensor(std::vector<int64_t>{1032, 3});
+  EXPECT_THROW(CopyNemotronBoltPrefillAuxRows(bounded, chunk, 1033, 1, 1), std::runtime_error);
+  EXPECT_THROW(CopyNemotronBoltPrefillAuxRows(bounded, chunk, 0, 9, 1), std::runtime_error);
+  EXPECT_THROW(CopyNemotronBoltPrefillAuxRows(bounded, chunk, 0, 0, 1), std::runtime_error);
+}
+
+TEST(NemotronBolt, TargetRowContractAcceptsFixedR8AndSymbolicRAndRejectsUnsupportedWidths) {
+  const auto fixed = ValidateNemotronBoltTargetRowContract(
+      {1, 8}, {"", ""}, {1, 8}, {"", ""}, {1, 8, 131072}, {"", "", ""},
+      {1, 8, 24576}, {"", "", ""}, 131072);
+  EXPECT_FALSE(fixed.dynamic_r);
+  EXPECT_EQ(fixed.aux_width, 24576u);
+
+  const auto dynamic = ValidateNemotronBoltTargetRowContract(
+      {1, -1}, {"", "R"}, {1, -1}, {"", "R"}, {1, -1, 131072}, {"", "R", ""},
+      {1, -1, 24576}, {"", "R", ""}, 131072);
+  EXPECT_TRUE(dynamic.dynamic_r);
+  EXPECT_EQ(dynamic.aux_width, 24576u);
+
+  // Reject static 16 without symbolic R
+  EXPECT_THROW(ValidateNemotronBoltTargetRowContract(
+                   {1, 16}, {"", ""}, {1, 16}, {"", ""}, {1, 16, 131072}, {"", "", ""},
+                   {1, 16, 24576}, {"", "", ""}, 131072),
+               std::runtime_error);
+  // Reject mismatched symbolic / static
+  EXPECT_THROW(ValidateNemotronBoltTargetRowContract(
+                   {1, -1}, {"", "R"}, {1, 8}, {"", ""}, {1, -1, 131072}, {"", "R", ""},
+                   {1, -1, 24576}, {"", "R", ""}, 131072),
+               std::runtime_error);
+  // Reject wrong symbolic dimension name
+  EXPECT_THROW(ValidateNemotronBoltTargetRowContract(
+                   {1, -1}, {"", "seq"}, {1, -1}, {"", "seq"}, {1, -1, 131072}, {"", "seq", ""},
+                   {1, -1, 24576}, {"", "seq", ""}, 131072),
+               std::runtime_error);
+  // Reject wrong vocab size
+  EXPECT_THROW(ValidateNemotronBoltTargetRowContract(
+                   {1, -1}, {"", "R"}, {1, -1}, {"", "R"}, {1, -1, 1000}, {"", "R", ""},
+                   {1, -1, 24576}, {"", "R", ""}, 131072),
+               std::runtime_error);
+}
+
+TEST(NemotronBolt, PlanPrefillChunksCoversR16AndR8TailsAndCapacityGuards) {
+  std::vector<size_t> lengths{1, 7, 8, 9, 15, 16, 32, 33, 57, 1031, 1032, 1033, 4099, 32768};
+  for (size_t rem = 1; rem <= 15; ++rem) lengths.push_back(16 + rem);
+  for (size_t n : lengths) {
+    const auto steps = PlanNemotronBoltPrefillChunks(n, 135168, true, 0, 0);
+    ASSERT_FALSE(steps.empty());
+    size_t expected_r16 = n / 16;
+    size_t rem = n % 16;
+    size_t expected_r8 = (rem == 0) ? 0 : (rem <= 8 ? 1 : 2);
+    size_t actual_r16 = 0, actual_r8 = 0;
+    size_t pos = 0;
+    int32_t expected_state_in = 0;
+    for (size_t i = 0; i < steps.size(); ++i) {
+      const auto& s = steps[i];
+      EXPECT_EQ(s.pos, pos);
+      EXPECT_EQ(s.state_row_in, expected_state_in);
+      if (s.profile_rows == 16) {
+        ++actual_r16;
+        EXPECT_EQ(s.valid_rows, 16u);
+        EXPECT_EQ(s.seqlens_k, static_cast<int32_t>(pos + 15));
+        EXPECT_EQ(s.state_row_out, 7);
+      } else {
+        ++actual_r8;
+        EXPECT_EQ(s.profile_rows, 8u);
+        EXPECT_GE(s.valid_rows, 1u);
+        EXPECT_LE(s.valid_rows, 8u);
+        EXPECT_EQ(s.seqlens_k, static_cast<int32_t>(pos + 7));
+        EXPECT_EQ(s.state_row_out, static_cast<int32_t>(s.valid_rows - 1));
+      }
+      pos += s.valid_rows;
+      EXPECT_EQ(s.length_after, pos);
+      expected_state_in = s.state_row_out;
+    }
+    EXPECT_EQ(pos, n);
+    EXPECT_EQ(actual_r16, expected_r16) << "n=" << n;
+    EXPECT_EQ(actual_r8, expected_r8) << "n=" << n;
+  }
+  // Capacity guards
+  EXPECT_THROW(PlanNemotronBoltPrefillChunks(16, 15, true, 0, 0), std::runtime_error);
+  EXPECT_THROW(PlanNemotronBoltPrefillChunks(17, 23, true, 0, 0), std::runtime_error);
+  EXPECT_NO_THROW(PlanNemotronBoltPrefillChunks(17, 24, true, 0, 0));
+}
+
+TEST(NemotronBolt, PlanPrefillChunksSupportsNonzeroPrefixSplitAndFinalStateMatch) {
+  struct PrefixCase {
+    size_t prefix_r8;
+    int32_t expected_mid_state_row;
+    size_t total_rows;
+  };
+  const std::vector<PrefixCase> cases{{9, 0, 25}, {12, 3, 28}, {8, 7, 24}};
+  for (const auto& tc : cases) {
+    const auto r16_steps = PlanNemotronBoltPrefillChunks(tc.total_rows, 135168, true, 0, 0, tc.prefix_r8);
+    const auto r8_steps = PlanNemotronBoltPrefillChunks(tc.total_rows, 135168, false, 0, 0, tc.prefix_r8);
+    ASSERT_GE(r16_steps.size(), 2u);
+    EXPECT_EQ(r16_steps.back().profile_rows, 16u);
+    EXPECT_EQ(r16_steps.back().pos, tc.prefix_r8);
+    EXPECT_EQ(r16_steps.back().state_row_in, tc.expected_mid_state_row);
+    EXPECT_EQ(r16_steps.back().state_row_out, 7);
+    EXPECT_EQ(r16_steps.back().length_after, tc.total_rows);
+    EXPECT_EQ(r8_steps.back().state_row_out, r16_steps.back().state_row_out);
+    EXPECT_EQ(r8_steps.back().length_after, r16_steps.back().length_after);
+  }
+  EXPECT_THROW(PlanNemotronBoltPrefillChunks(16, 135168, true, 0, 0, 16), std::runtime_error);
+}
+
+TEST(NemotronBolt, MixedR16AndR8BoundedAuxiliaryMatchesExactFullPromptSuffixAcrossAllRemainders) {
+  auto* device = GetDeviceInterface(DeviceType::CPU);
+  std::vector<size_t> lengths{1, 7, 8, 9, 15, 16, 32, 33, 57, 1031, 1032, 1033, 4099, 32768};
+  for (size_t rem = 1; rem <= 15; ++rem) lengths.push_back(16 + rem);
+  for (size_t count : lengths) {
+    const size_t retained = NemotronBoltPrefillAuxRowsToRetain(count, 1024, 8);
+    const size_t omitted = count - retained;
+    Tensor chunk8(device, Ort::TypeToTensorType<float>);
+    Tensor chunk16(device, Ort::TypeToTensorType<float>);
+    Tensor full(device, Ort::TypeToTensorType<float>);
+    Tensor bounded(device, Ort::TypeToTensorType<float>);
+    chunk8.CreateTensor(std::vector<int64_t>{8, 3});
+    chunk16.CreateTensor(std::vector<int64_t>{16, 3});
+    full.CreateTensor(std::vector<int64_t>{static_cast<int64_t>(count), 3});
+    bounded.CreateTensor(std::vector<int64_t>{static_cast<int64_t>(retained), 3});
+    std::fill(bounded.GetDeviceSpan<float>().CpuSpan().begin(),
+              bounded.GetDeviceSpan<float>().CpuSpan().end(), -1.0f);
+    const auto steps = PlanNemotronBoltPrefillChunks(count, 135168, true, 0, 0);
+    for (const auto& step : steps) {
+      Tensor& chunk = (step.profile_rows == 16) ? chunk16 : chunk8;
+      auto input = chunk.GetDeviceSpan<float>().CpuSpan();
+      for (size_t i = 0; i < input.size(); ++i)
+        input[i] = static_cast<float>(step.pos * 3 + i);
+      CopyNemotronBoltPrefillAuxRows(full, chunk, step.pos, step.valid_rows);
+      CopyNemotronBoltPrefillAuxRows(bounded, chunk, step.pos, step.valid_rows, omitted);
+    }
+    const auto expected = full.GetDeviceSpan<float>().CopyDeviceToCpu().subspan(omitted * 3);
+    const auto actual = bounded.GetDeviceSpan<float>().CopyDeviceToCpu();
+    ASSERT_EQ(actual.size(), expected.size());
+    for (size_t i = 0; i < actual.size(); ++i)
+      EXPECT_EQ(actual[i], expected[i]) << "N=" << count << ", physical row=" << i / 3;
+  }
+}
+
 // Optional real-graph correctness coverage. No models or GPU are needed for the tests above.
 TEST(NemotronBoltGPU, SequentialGeneratorsResetAndPublicBoundaries) {
   const char* path = std::getenv("ORTGENAI_BOLT_TEST_MODEL");
