@@ -3650,8 +3650,63 @@ void SetSpeculativeBool(Config::Speculative& speculative, std::string_view name,
   }
 }
 
+void ClearProviders(Config::SessionOptions& session_options) {
+  session_options.providers.clear();
+  session_options.provider_options.clear();
+}
+
 void ClearProviders(Config& config) {
-  config.model.decoder.session_options.providers.clear();
+  ClearProviders(config.model.decoder.session_options);
+}
+
+void PopulateProvidersFromProviderOptions(Config::SessionOptions& session_options) {
+  session_options.providers.clear();
+  for (const auto& provider_option : session_options.provider_options) {
+    session_options.providers.push_back(provider_option.name);
+  }
+}
+
+void PopulateModelProvidersFromProviderOptions(Config::Model& model) {
+  PopulateProvidersFromProviderOptions(model.decoder.session_options);
+
+  if (model.draft) {
+    PopulateProvidersFromProviderOptions(model.draft->session_options);
+  }
+
+  if (model.qwen38_graph.head.session_options.has_value()) {
+    PopulateProvidersFromProviderOptions(*model.qwen38_graph.head.session_options);
+  }
+
+  for (auto* extra : {&model.qwen38_graph.fold.head_r2.session_options, &model.qwen38_graph.prefill.dense.session_options,
+                      &model.qwen38_graph.prefill.head_kv.session_options}) {
+    if (extra->has_value()) {
+      PopulateProvidersFromProviderOptions(**extra);
+    }
+  }
+
+  if (model.encoder.session_options.has_value()) {
+    PopulateProvidersFromProviderOptions(*model.encoder.session_options);
+  }
+
+  if (model.vision.session_options.has_value()) {
+    PopulateProvidersFromProviderOptions(*model.vision.session_options);
+  }
+
+  if (model.speech.session_options.has_value()) {
+    PopulateProvidersFromProviderOptions(*model.speech.session_options);
+  }
+
+  if (model.embedding.session_options.has_value()) {
+    PopulateProvidersFromProviderOptions(*model.embedding.session_options);
+  }
+
+  if (model.joiner.session_options.has_value()) {
+    PopulateProvidersFromProviderOptions(*model.joiner.session_options);
+  }
+
+  if (model.vad.session_options.has_value()) {
+    PopulateProvidersFromProviderOptions(*model.vad.session_options);
+  }
 }
 
 // Escape a string for safe embedding inside a JSON string literal. Prevents JSON
@@ -4063,6 +4118,7 @@ void OverlayConfig(Config& config, std::string_view json) {
   Root_Element root{candidate};
   RootObject_Element element{root};
   JSON::Parse(element, json);
+  PopulateModelProvidersFromProviderOptions(candidate.model);
   RefreshEngramProviders(candidate);
   ValidateRuntimeProfiles(candidate);
   ModelStateManifest::ValidateConfig(candidate.model.decoder);
@@ -4296,54 +4352,7 @@ Config::Config(const fs::path& path, std::string_view json_overlay,
     model.eos_token_id.push_back(model.pad_token_id);
   }
 
-  for (const auto& provider_option : model.decoder.session_options.provider_options) {
-    model.decoder.session_options.providers.push_back(provider_option.name);
-  }
-
-  if (model.draft) {
-    for (const auto& provider_option : model.draft->session_options.provider_options) {
-      model.draft->session_options.providers.push_back(provider_option.name);
-    }
-  }
-
-  if (model.qwen38_graph.head.session_options.has_value()) {
-    for (const auto& provider_option : model.qwen38_graph.head.session_options->provider_options) {
-      model.qwen38_graph.head.session_options->providers.push_back(provider_option.name);
-    }
-  }
-
-  for (auto* extra : {&model.qwen38_graph.fold.head_r2.session_options, &model.qwen38_graph.prefill.dense.session_options,
-                      &model.qwen38_graph.prefill.head_kv.session_options}) {
-    if (extra->has_value()) {
-      for (const auto& provider_option : (*extra)->provider_options) {
-        (*extra)->providers.push_back(provider_option.name);
-      }
-    }
-  }
-
-  if (model.encoder.session_options.has_value()) {
-    for (const auto& provider_option : model.encoder.session_options->provider_options) {
-      model.encoder.session_options->providers.push_back(provider_option.name);
-    }
-  }
-
-  if (model.vision.session_options.has_value()) {
-    for (const auto& provider_option : model.vision.session_options->provider_options) {
-      model.vision.session_options->providers.push_back(provider_option.name);
-    }
-  }
-
-  if (model.speech.session_options.has_value()) {
-    for (const auto& provider_option : model.speech.session_options->provider_options) {
-      model.speech.session_options->providers.push_back(provider_option.name);
-    }
-  }
-
-  if (model.embedding.session_options.has_value()) {
-    for (const auto& provider_option : model.embedding.session_options->provider_options) {
-      model.embedding.session_options->providers.push_back(provider_option.name);
-    }
-  }
+  PopulateModelProvidersFromProviderOptions(model);
   RefreshEngramProviders(*this);
 
   if ((!model.engram.filename.empty() || !model.decoder.inputs.past_ple_token_names.empty()) &&

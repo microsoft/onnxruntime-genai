@@ -350,6 +350,15 @@ def test_qwen_vl_emits_layout_specific_mrotary_embedding(layout, sections):
     assert model.values == [("q_rotated", ir.DataType.FLOAT, ["batch_size", "sequence_length", 2048])]
 
 
+def test_trt_rtx_mrotary_embedding_rejects_paged_inputs():
+    model = Model.__new__(Model)
+    model.ep = "trt-rtx"
+    model.make_ep_expansions_init()
+    model.use_paged_attention = True
+    with pytest.raises(ValueError, match="requires non-paged attention"):
+        model.make_mrotary_embedding("rope", "q", "rotated")
+
+
 def test_qwen35_paged_mrotary_embedding_runs_with_merged_ort_abi(tmp_path):
     model = Model.__new__(Model)
     model.use_paged_attention = True

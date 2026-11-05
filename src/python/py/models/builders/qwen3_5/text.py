@@ -13,6 +13,14 @@ from ..expansions.standard import Standard
 class Qwen35TextModel(Model):
     make_l2_normalize = Standard.make_l2_normalize
 
+    def make_quant_init(self, config):
+        super().make_quant_init(config)
+        if self.extra_options.get("exclude_embeds", False) and self.quant_attrs["use_qdq"]:
+            # Tied-embedding defaults also request Gather quantization, which ORT cannot emit as QDQ.
+            self.quant_attrs["op_types_to_quantize"] = tuple(
+                op for op in self.quant_attrs["op_types_to_quantize"] if op != "Gather"
+            )
+
     def validate_gated_delta_net_options(self, state_window, ep):
         if self.use_paged_attention and ep not in {"cuda", "webgpu"}:
             raise ValueError("Paged GatedDeltaNet exports require the CUDA or WebGPU execution provider")
