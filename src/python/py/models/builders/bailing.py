@@ -8,9 +8,11 @@ from types import SimpleNamespace
 
 import onnx_ir as ir
 import torch
+from huggingface_hub import snapshot_download
 from loaders.base import QuantizedExperts, TensorModule
 from safetensors import safe_open
 
+from .base import Model
 from .qwen3_5.text import Qwen35TextModel
 
 COMPATIBLE_LING_REGEX = (
@@ -128,7 +130,9 @@ class _BailingWeights(torch.nn.Module):
                     return mod
                 mod = TensorModule(weight=weight, bias=bias)
                 mod.quant_type = "fp8"
-                mod.weight_scale = scale_inv.float()
+                mod.block_size = 128
+                # The ONNX kernel expects one scale row per output channel.
+                mod.weight_scale = scale_inv.float().repeat_interleave(mod.block_size, dim=0)[: weight.shape[0]].contiguous()
                 mod.can_reuse_as_embedding = False
                 return mod
             mod = TensorModule(weight=weight, bias=bias)
@@ -153,6 +157,7 @@ class _BailingWeights(torch.nn.Module):
                 bias=torch.cat([m.bias for m in linears], dim=0).contiguous() if first.bias is not None else None,
             )
             mod.quant_type = "fp8"
+            mod.block_size = first.block_size
             mod.weight_scale = torch.cat([m.weight_scale for m in linears], dim=0).contiguous()
             mod.can_reuse_as_embedding = False
             return mod
@@ -337,7 +342,6 @@ class BailingMoeV3Model(Qwen35TextModel):
 
         # MoE configuration
         self.dense_intermediate_size = getattr(config, "intermediate_size", 4608)
-        self.intermediate_size = getattr(config, "moe_intermediate_size", 512)
         self.first_k_dense_replace = getattr(config, "first_k_dense_replace", 1)
         self.moe_intermediate_size = getattr(config, "moe_intermediate_size", 512)
         self.shared_expert_intermediate_size = getattr(
@@ -362,6 +366,9 @@ class BailingMoeV3Model(Qwen35TextModel):
         # Check if checkpoint is block-FP8 and we are not re-quantizing to INT4/INT8
         quant_cfg = getattr(config, "quantization_config", None) or {}
         target_is_int = self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4, ir.DataType.INT8, ir.DataType.UINT8}
+        if target_is_int:
+            # The streaming loader dequantizes source weights; save_model must still run to_nbits for QDQ.
+            self.quant_type = None
         if isinstance(quant_cfg, dict) and quant_cfg.get("quant_method") == "fp8" and not target_is_int:
             self.moe_attrs["op_type"] = "QMoE"
             self.moe_attrs["quant_type"] = "fp8"
@@ -369,27 +376,20 @@ class BailingMoeV3Model(Qwen35TextModel):
             self.moe_attrs["block_size"] = 128
             self.moe_attrs["swiglu_fusion"] = 2
 
-        # For KDA, compact state_update capsule includes per-key-dim decay (Hv * K instead of Hv).
-        capacity = self.context_length_attrs["state_update_capacity"]
-        if capacity:
-            capsule_width = capacity * (
-                self.linear_num_value_heads * self.linear_key_head_dim
-                + self.linear_num_key_heads * self.linear_key_head_dim
-                + self.linear_num_value_heads * self.linear_value_head_dim
-            )
-            self.output_shapes["state_update.recurrent_capsule"] = ["batch_size", capsule_width]
-
     def validate_gated_delta_net_options(self, state_window, ep):
         if self.use_paged_attention and ep not in {"cuda", "webgpu", "cpu"}:
             raise ValueError("Paged GatedDeltaNet exports require the CUDA, WebGPU, or CPU execution provider")
+        if self.context_length_attrs["state_update_capacity"] or state_window:
+            raise ValueError(
+                "BailingMoeV3 does not support state_update_capacity or state_window: "
+                "compact state capture and replay do not support per-key decay"
+            )
 
     def make_inputs_and_outputs(self):
         # Use 1D [num_tokens] position_ids for paged attention and 2D [batch_size, sequence_length] otherwise.
         self.input_shapes["position_ids"] = (
             ["num_tokens"] if self.use_paged_attention else ["batch_size", "sequence_length"]
         )
-        base_model_cls = Qwen35TextModel.__bases__[0]
-        base_model_cls.make_inputs_and_outputs(self)
         if self.ep == "cpu":
             recurrent_shape = [
                 "batch_size",
@@ -405,10 +405,21 @@ class BailingMoeV3Model(Qwen35TextModel):
                 conv_shape = ["batch_size", self.linear_conv_dim, self.linear_conv_kernel_dim - 1]
                 self.input_shapes["past.conv"] = conv_shape
                 self.output_shapes["present.conv"] = conv_shape
+        Model.make_inputs_and_outputs(self)
 
     def load_weights(self, input_path):
+        if self.adapter_path:
+            raise ValueError("BailingMoeV3 does not support adapter_path with the streaming weight loader")
         target_is_int = self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4, ir.DataType.INT8, ir.DataType.UINT8}
         src_path = input_path if os.path.isdir(input_path) else self.model_name_or_path
+        if not os.path.isdir(src_path):
+            src_path = snapshot_download(
+                repo_id=src_path,
+                cache_dir=self.cache_dir,
+                token=self.hf_token,
+                revision=self.revision,
+                allow_patterns=["*.safetensors", "*.safetensors.index.json"],
+            )
         return _BailingWeights(src_path, self.config, target_is_int, self.io_dtype)
 
     def is_layer(self, module):

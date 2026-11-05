@@ -137,15 +137,10 @@ def get_hf_details(model_name, input_path, cache_dir, extra_options):
     try:
         config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
     except ValueError:
-        try:
-            config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=True, **extra_kwargs)
-            hf_remote = True
-            extra_options["hf_remote"] = True
-        except ValueError:
-            # LFM2-Audio checkpoints have no model_type; their LFM2 decoder config is nested.
-            config = LFM2AudioModel.load_config(hf_name, token=hf_token, **extra_kwargs)
-            if config is None:
-                raise
+        # LFM2-Audio checkpoints have no model_type; their LFM2 decoder config is nested.
+        config = LFM2AudioModel.load_config(hf_name, token=hf_token, **extra_kwargs)
+        if config is None:
+            raise
     tokenizer_name = model_specific_hf.get("tokenizer", hf_name)
     tokenizer = AutoTokenizer.from_pretrained(
         tokenizer_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs
@@ -1122,7 +1117,7 @@ def get_args():
                     small dynamic-convolution and candidate-selector projections dense. The body
                     uses the target's automatic hardware-specific packing policy. CUDA emits
                     the corresponding fpA-intB layout for
-                    projections the kernel supports (N %% 64 for int4, N %% 32 for int8); other
+                    projections the kernel supports (N % 64 for int4, N % 32 for int8); other
                     projections stay raw, and the drafter session disables fpA-intB selection for them.
                     CUDA body activations and KV caches default to bf16. WebGPU uses FP16,
                     with FP32 residual/skip normalization and convolution-finish accumulation for FP16

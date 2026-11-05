@@ -3019,6 +3019,7 @@ class Model:
     def make_matmul_fp8(self, matmul, basename, root_input, **kwargs):
         input_scale_tensor = getattr(matmul, "input_scale", None)
         input_scale = float(input_scale_tensor.float().item()) if input_scale_tensor is not None else None
+        kwargs.setdefault("block_size", getattr(matmul, "block_size", None))
         return self.make_matmul_block_quantized_fp8_weight(
             basename, root_input, matmul.weight, matmul.weight_scale, input_scale, **kwargs
         )
@@ -3075,18 +3076,10 @@ class Model:
         in_features = int(weight.shape[1])
         block_size = kwargs.pop("block_size", None)
         if block_size is None:
-            if weight_scale.ndim == 2 and weight_scale.shape[1] > 1 and in_features % int(weight_scale.shape[1]) == 0:
-                block_size = in_features // int(weight_scale.shape[1])
-            else:
-                block_size = in_features
+            block_size = in_features
+        if block_size <= 0:
+            raise ValueError(f"FP8 block size for '{basename}' must be positive, got {block_size}.")
         block_count = (in_features + block_size - 1) // block_size
-        if (
-            weight_scale.ndim == 2
-            and weight_scale.shape[1] == block_count
-            and weight_scale.shape[0] != out_features
-            and weight_scale.shape[0] * block_size >= out_features
-        ):
-            weight_scale = weight_scale.float().repeat_interleave(block_size, dim=0)[:out_features]
         scale = self.prepare_matmul_block_quantized_scales(weight_scale, out_features, block_count)
         if scale is None:
             raise ValueError(
