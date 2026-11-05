@@ -8,7 +8,7 @@
 namespace JSON {
 static constexpr const char* value_names[] = {"string", "number", "bool", "null"};
 static_assert(std::size(value_names) == std::variant_size_v<Value>);
-static constexpr size_t kMaxNestingDepth = 128;
+static constexpr size_t kMaxNestingDepth = 64;
 
 struct JSON {
   JSON(Element& element, std::string_view document);

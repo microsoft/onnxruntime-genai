@@ -47,10 +47,10 @@ TEST(ConfigTest, LimitsJsonNestingDepth) {
     json.append(depth, '}');
     return json;
   };
-  EXPECT_NO_THROW(JSON::Parse(element, nested_array(128)));
-  EXPECT_THROW(JSON::Parse(element, nested_array(129)), std::runtime_error);
-  EXPECT_NO_THROW(JSON::Parse(element, nested_object(128)));
-  EXPECT_THROW(JSON::Parse(element, nested_object(129)), std::runtime_error);
+  EXPECT_NO_THROW(JSON::Parse(element, nested_array(64)));
+  EXPECT_THROW(JSON::Parse(element, nested_array(65)), std::runtime_error);
+  EXPECT_NO_THROW(JSON::Parse(element, nested_object(64)));
+  EXPECT_THROW(JSON::Parse(element, nested_object(65)), std::runtime_error);
 }
 
 TEST(ConfigTest, ParsesDeterministicCompute) {
