@@ -14,7 +14,7 @@ namespace {
 std::unique_ptr<Config> MakeConfig() {
   auto config = std::make_unique<Config>();
   config->model.type = "qwen3";
-  config->model.context_length = 64;
+  config->model.context_length = 4096;
   config->model.vocab_size = 32;
   config->model.decoder.num_hidden_layers = 1;
   config->model.decoder.num_attention_heads = 3;
@@ -24,7 +24,7 @@ std::unique_ptr<Config> MakeConfig() {
   config->model.decoder.session_options.providers = {"WebGPU"};
   config->model.decoder.session_options.provider_options.push_back(
       {"WebGPU", {{"enableGraphCapture", "1"}, {"validationMode", "basic"}}});
-  config->search.max_length = 53;
+  config->search.max_length = 4093;
   config->search.batch_size = 2;
   config->search.past_present_share_buffer = true;
   return config;
@@ -77,10 +77,10 @@ void CheckGrowth(const std::shared_ptr<TestModel>& model) {
   cache.Add();
   ASSERT_EQ(cache.GetShape()[2], 1);
   cache.Update({}, 3);
-  ASSERT_EQ(cache.GetShape()[2], 4);
+  ASSERT_EQ(cache.GetShape()[2], 512);
   auto& device = *model->p_device_kvcache_;
   auto before = state.inputs_[0];
-  std::vector<float> values(2 * 3 * 4 * 4);
+  std::vector<float> values(2 * 3 * 512 * 4);
   std::iota(values.begin(), values.end(), 1.0f);
   auto span = WrapTensor<float>(device, *state.outputs_[0]);
   std::copy(values.begin(), values.end(), span.CpuSpan().begin());
@@ -88,22 +88,22 @@ void CheckGrowth(const std::shared_ptr<TestModel>& model) {
   cache.Update({}, 4);
   EXPECT_EQ(before, state.inputs_[0]);
   EXPECT_EQ(state.inputs_[0], state.outputs_[0]);
-  cache.Update({}, 9);  // A multi-token append crosses several capacity boundaries.
-  ASSERT_EQ(cache.GetShape()[2], 16);
+  cache.Update({}, 1025);  // A multi-token append crosses several capacity boundaries.
+  ASSERT_EQ(cache.GetShape()[2], 2048);
   EXPECT_NE(before, state.inputs_[0]);
   EXPECT_EQ(state.inputs_[0], state.outputs_[0]);
   auto migrated = Read(device, *state.inputs_[0]);
   for (size_t head = 0; head < 6; ++head) {
-    for (size_t i = 0; i < 16; ++i) EXPECT_EQ(migrated[head * 64 + i], values[head * 16 + i]);
-    for (size_t i = 16; i < 64; ++i) EXPECT_EQ(migrated[head * 64 + i], 0);
+    for (size_t i = 0; i < 2048; ++i) EXPECT_EQ(migrated[head * 8192 + i], values[head * 2048 + i]);
+    for (size_t i = 2048; i < 8192; ++i) EXPECT_EQ(migrated[head * 8192 + i], 0);
   }
   cache.RewindTo(2);
   cache.Update({}, 5);
-  EXPECT_EQ(cache.GetShape()[2], 16);
-  cache.Update({}, 50);
-  EXPECT_EQ(cache.GetShape()[2], 53);  // Clamp doubling to a non-power-of-two limit.
-  EXPECT_THROW(cache.Update({}, 54), std::runtime_error);
-  EXPECT_EQ(cache.GetShape()[2], 53);
+  EXPECT_EQ(cache.GetShape()[2], 2048);
+  cache.Update({}, 4090);
+  EXPECT_EQ(cache.GetShape()[2], 4093);  // Clamp doubling to a non-power-of-two limit.
+  EXPECT_THROW(cache.Update({}, 4094), std::runtime_error);
+  EXPECT_EQ(cache.GetShape()[2], 4093);
 }
 
 TEST(SharedCacheGrowth, MigratesBatchesAndHeadsAndRetainsAliasing) {
@@ -116,11 +116,43 @@ TEST(SharedCacheGrowth, PrefillReservesFirstDecodeToken) {
   TestState state{*model, *params};
   SharedKeyValueCache cache{state};
   cache.Add();
-  cache.Update({}, 4);
-  EXPECT_EQ(cache.GetShape()[2], 8);
+  cache.Update({}, 512);
+  EXPECT_EQ(cache.GetShape()[2], 1024);
   const auto* original = state.inputs_[0];
-  cache.Update({}, 5);
+  cache.Update({}, 513);
   EXPECT_EQ(state.inputs_[0], original);
+}
+
+TEST(SharedCacheGrowth, InitialReserveAvoidsShortDecodeMigration) {
+  auto model = std::make_shared<TestModel>();
+  auto params = CreateGeneratorParams(*model);
+  TestState state{*model, *params};
+  SharedKeyValueCache cache{state};
+  cache.Add();
+  EXPECT_EQ(cache.GetShape()[2], 1);  // Defer the reserve until prefill.
+  cache.Update({}, 128);
+  ASSERT_EQ(cache.GetShape()[2], 512);
+  const auto* original = state.inputs_[0];
+  const auto epoch = state.GraphCaptureEpoch();
+  cache.Update({}, 320);
+  EXPECT_EQ(state.inputs_[0], original);
+  EXPECT_EQ(state.inputs_[0], state.outputs_[0]);
+  EXPECT_EQ(state.GraphCaptureEpoch(), epoch);
+}
+
+TEST(SharedCacheGrowth, InitialReserveRespectsSmallSearchLimit) {
+  auto model = std::make_shared<TestModel>();
+  auto params = CreateGeneratorParams(*model);
+  params->search.max_length = 257;
+  TestState state{*model, *params};
+  SharedKeyValueCache cache{state};
+  cache.Add();
+  cache.Update({}, 128);
+  ASSERT_EQ(cache.GetShape()[2], 257);
+  const auto* original = state.inputs_[0];
+  cache.Update({}, 257);
+  EXPECT_EQ(state.inputs_[0], original);
+  EXPECT_THROW(cache.Update({}, 258), std::runtime_error);
 }
 
 TEST(SharedCacheGrowth, DeclaredZeroDimensionIsNotGrowable) {

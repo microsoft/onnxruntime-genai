@@ -74,7 +74,10 @@ int64_t SharedCacheGrowth::EnsureCapacity(int total_length, bool has_content,
   }
   // Reserve the first decode token with prefill so an exact capacity boundary
   // does not immediately require copying the cache and invalidating capture.
-  const int64_t required_capacity = total_length + (!has_content && total_length < limit ? 1 : 0);
+  int64_t required_capacity = total_length + (!has_content && total_length < limit ? 1 : 0);
+  // Keep short decodes within their initial allocation to avoid migration and
+  // recapture, while leaving large prompts on the existing geometric policy.
+  if (!has_content) required_capacity = std::max(required_capacity, std::min<int64_t>(512, limit));
   const int64_t old_capacity = tensors.front()->GetTensorTypeAndShapeInfo()->GetShape()[2];
   if (required_capacity <= old_capacity) return old_capacity;
 
