@@ -366,9 +366,6 @@ class BailingMoeV3Model(Qwen35TextModel):
         # Check if checkpoint is block-FP8 and we are not re-quantizing to INT4/INT8
         quant_cfg = getattr(config, "quantization_config", None) or {}
         target_is_int = self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4, ir.DataType.INT8, ir.DataType.UINT8}
-        if target_is_int:
-            # The streaming loader dequantizes source weights; save_model must still run to_nbits for QDQ.
-            self.quant_type = None
         if isinstance(quant_cfg, dict) and quant_cfg.get("quant_method") == "fp8" and not target_is_int:
             self.moe_attrs["op_type"] = "QMoE"
             self.moe_attrs["quant_type"] = "fp8"
@@ -420,7 +417,11 @@ class BailingMoeV3Model(Qwen35TextModel):
                 revision=self.revision,
                 allow_patterns=["*.safetensors", "*.safetensors.index.json"],
             )
-        return _BailingWeights(src_path, self.config, target_is_int, self.io_dtype)
+        weights = _BailingWeights(src_path, self.config, target_is_int, self.io_dtype)
+        if target_is_int:
+            # The loader emits dequantized weights; save_model must still run to_nbits for QDQ.
+            self.quant_type = None
+        return weights
 
     def is_layer(self, module):
         return isinstance(module, _BailingLayerModule)
