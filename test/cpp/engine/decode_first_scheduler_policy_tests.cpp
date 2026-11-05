@@ -89,7 +89,8 @@ TEST(DecodeFirstSchedulerPolicyTest, UnreadCommittedTokensReadOneWhileAPeerVerif
             (std::vector<size_t>{4, 1, 10}));
 }
 
-// Spare tokens go to the chunk-work row that waited longest, whatever order the rows arrive in.
+// Spare tokens go to the chunk-work row that waited longest, whatever order the rows arrive in,
+// when one of them is catching up on fast-forward tokens.
 TEST(DecodeFirstSchedulerPolicyTest, ChunkWorkIsServedLongestWaitingFirstInAnyOrder) {
   const std::array rows{
       DecodeFirstBudgetCandidate{true, 10, 4, 0, /*last_chunk_service=*/7},
@@ -108,6 +109,16 @@ TEST(DecodeFirstSchedulerPolicyTest, ChunkWorkIsServedLongestWaitingFirstInAnyOr
     for (size_t i = 0; i < order.size(); ++i)
       EXPECT_EQ(counts[i], expected[order[i]]) << "row " << order[i];
   } while (std::next_permutation(order.begin(), order.end()));
+}
+
+// Without a catch-up row, prompts share spare tokens in selection order, whatever their stamps.
+TEST(DecodeFirstSchedulerPolicyTest, PromptsShareSpareTokensInSelectionOrderWithoutACatchUpRow) {
+  const DecodeFirstBudgetCandidate waited_longer{true, 10, std::nullopt, 0, /*last_chunk_service=*/3};
+  const DecodeFirstBudgetCandidate served_recently{true, 10, std::nullopt, 0, /*last_chunk_service=*/7};
+  EXPECT_EQ(AllocateDecodeFirstTokenBudget(std::array{served_recently, waited_longer}, 8),
+            (std::vector<size_t>{7, 1}));
+  EXPECT_EQ(AllocateDecodeFirstTokenBudget(std::array{waited_longer, served_recently}, 8),
+            (std::vector<size_t>{7, 1}));
 }
 
 // Only the first row to read spare tokens and rows that read their whole chunk count as served; a

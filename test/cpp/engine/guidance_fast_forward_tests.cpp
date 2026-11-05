@@ -12,6 +12,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <numeric>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -231,6 +232,102 @@ TEST_F(GuidanceFastForwardTest, PrefillChunkSizeDoesNotSplitTheUnreadForcedToken
   ASSERT_EQ(engine.engine->Run(storage), 4u);
   ASSERT_EQ(engine.engine->Run(storage), 1u);
   EXPECT_EQ(engine.executor->decoded_token_counts, (std::vector<size_t>{2, 1, 8, 4}));
+}
+
+std::vector<int32_t> LongPrompt(size_t length) {
+  std::vector<int32_t> prompt(length);
+  std::iota(prompt.begin(), prompt.end(), 11);
+  return prompt;
+}
+
+// A forcing turn that has sampled 11 and published 7 forced tokens: a catch-up row with 8 unread.
+std::shared_ptr<Request> CatchingUpRequest(DoublesEngine& engine) {
+  auto forcing = CreateRequestWithPrompt(engine.engine, Prompt());
+  InstallForcingGrammar(*forcing, /*trigger=*/11, LongForcedSpan());
+  std::array<EngineEvent, 16> storage;
+  EXPECT_EQ(engine.engine->Run(storage), kMaxGeneratedTokensPerStep);
+  return forcing;
+}
+
+// Beside a catch-up row, it and a waiting prompt take turns at spare tokens, whichever waited
+// longer since it was last served going first, so neither keeps the other waiting.
+TEST_F(GuidanceFastForwardTest, CatchUpRowAndPromptTakeTurnsAtSpareTokens) {
+  model_->config_->engine.dynamic_batching->max_scheduled_tokens = 6;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
+  auto forcing = CatchingUpRequest(engine);
+  auto prompt = CreateRequestWithPrompt(engine.engine, LongPrompt(20));
+
+  std::vector<std::vector<size_t>> reads;  // {forcing, prompt} per step
+  engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
+    std::vector<size_t> step(2);
+    for (const auto& entry : context.plan->requests)
+      step[entry.request_id == forcing.get() ? 0 : 1] = entry.unprocessed_token_count;
+    reads.push_back(step);
+  });
+  std::array<EngineEvent, 16> storage;
+  for (int step = 0; step < 3; ++step)
+    engine.engine->Run(storage);
+  EXPECT_EQ(reads, (std::vector<std::vector<size_t>>{{5, 1}, {1, 5}, {2, 4}}));
+}
+
+// A rolled-back step records no service, so its retry shares spare tokens exactly as it did.
+TEST_F(GuidanceFastForwardTest, RolledBackStepDoesNotChangeWhoGetsSpareTokens) {
+  model_->config_->engine.dynamic_batching->max_scheduled_tokens = 6;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
+  auto forcing = CatchingUpRequest(engine);
+  auto prompt = CreateRequestWithPrompt(engine.engine, LongPrompt(20));
+
+  std::vector<std::vector<size_t>> reads;  // {forcing, prompt} per attempt
+  engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
+    std::vector<size_t> attempt(2);
+    for (const auto& entry : context.plan->requests)
+      attempt[entry.request_id == forcing.get() ? 0 : 1] = entry.unprocessed_token_count;
+    reads.push_back(attempt);
+  });
+  std::array<EngineEvent, 16> storage;
+  engine.engine->Run(storage);
+  engine.executor->SetNextFailure(ScriptedExecutionFailure::RetryableDuringExecution);
+  ASSERT_EQ(engine.engine->Run(storage), 1u);
+  ASSERT_EQ(storage[0].flags, EngineEventFlagRetryable);
+  engine.engine->Run(storage);
+  EXPECT_EQ(reads, (std::vector<std::vector<size_t>>{{5, 1}, {1, 5}, {1, 5}}));
+}
+
+// Fast-forward turns arriving every step cannot keep a long prompt from spare tokens: arrivals
+// queue behind it, and catch-up rows that waited longer take one turn each before it goes again.
+TEST_F(GuidanceFastForwardTest, SustainedFastForwardArrivalsCannotKeepAPromptWaiting) {
+  model_->config_->engine.dynamic_batching->max_scheduled_tokens = 10;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
+  auto prompt = CreateRequestWithPrompt(engine.engine, LongPrompt(40));
+
+  size_t passed_over = 0;
+  size_t max_passed_over = 0;
+  size_t catch_up_steps = 0;
+  engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
+    for (const auto& entry : context.plan->requests) {
+      catch_up_steps += entry.ReadsSeveralCommittedTokens();
+      if (entry.request_id != prompt.get())
+        continue;
+      const auto& request = *entry.request;
+      const bool waiting = request.CurrentSequenceLength() - request.ProcessedSequenceLength() > 1;
+      passed_over = waiting && entry.unprocessed_token_count == 1 ? passed_over + 1 : 0;
+      max_passed_over = std::max(max_passed_over, passed_over);
+    }
+  });
+  std::vector<std::shared_ptr<Request>> forcing;
+  std::array<EngineEvent, 64> storage;
+  for (int step = 0; step < 60 && prompt->IsPrefill(); ++step) {
+    if (forcing.size() < 6) {  // one fast-forward arrival per step
+      forcing.push_back(CreateRequestWithPrompt(engine.engine, Prompt()));
+      InstallForcingGrammar(*forcing.back(), /*trigger=*/11, LongForcedSpan());
+    }
+    engine.engine->Run(storage);
+  }
+  ASSERT_FALSE(prompt->IsPrefill());
+  ASSERT_GT(catch_up_steps, 0u);
+  // Each step's spare tokens fill one catch-up row's share, so the prompt waits at most one turn
+  // for each other forcing turn.
+  EXPECT_LE(max_passed_over, forcing.size() - 1);
 }
 
 // While a peer verifies drafts, the row reads one unread token per step, so the peer keeps them;

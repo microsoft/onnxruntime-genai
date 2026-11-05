@@ -2712,78 +2712,38 @@ TEST_F(EngineRunTest, MixedRunRollbackPreservesProgressAndCacheResidents) {
   EXPECT_EQ(engine.cache->AllocatedCount(), 2u);
 }
 
-// While prompts keep arriving, prefills take turns at spare tokens instead of the first one in plan
-// order taking them all, so none is passed over for more steps than there are other prefills.
-TEST_F(EngineRunTest, SustainedArrivalsCannotKeepAPrefillFromSpareTokens) {
-  model_->config_->engine.dynamic_batching->max_scheduled_tokens = 10;
-  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
-  std::vector<int32_t> long_prompt(40);
-  std::iota(long_prompt.begin(), long_prompt.end(), 11);
-
-  std::map<const void*, size_t> passed_over;
-  size_t max_passed_over = 0;
-  size_t max_prefills = 0;
-  engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
-    ASSERT_NE(context.plan, nullptr);
-    size_t prefills = 0;
-    for (const auto& entry : context.plan->requests) {
-      if (!entry.is_prefill)
-        continue;
-      ++prefills;
-      const auto& request = *entry.request;
-      if (entry.unprocessed_token_count > 1) {
-        passed_over[entry.request_id] = 0;
-      } else if (request.CurrentSequenceLength() - request.ProcessedSequenceLength() > 1) {
-        max_passed_over = std::max(max_passed_over, ++passed_over[entry.request_id]);
-      }
-    }
-    max_prefills = std::max(max_prefills, prefills);
-  });
-
-  std::vector<std::shared_ptr<Request>> requests;
-  const auto prompts_read = [&] {
-    return std::none_of(requests.begin(), requests.end(),
-                        [](const auto& request) { return request->IsPrefill(); });
-  };
-  std::array<EngineEvent, 16> storage;
-  for (int step = 0; step < 80 && (requests.size() < 6 || !prompts_read()); ++step) {
-    if (requests.size() < 6)  // one arrival per step
-      requests.push_back(CreateRequestWithPrompt(engine.engine, long_prompt));
-    engine.engine->Run(storage);
-  }
-  ASSERT_TRUE(prompts_read());
-  ASSERT_GE(max_prefills, 4u);
-  EXPECT_LE(max_passed_over, max_prefills - 1);
-}
-
-// A rolled-back step records no service, so its retry shares spare tokens exactly as it did.
-TEST_F(EngineRunTest, RolledBackStepDoesNotChangeWhoGetsSpareTokens) {
-  model_->config_->engine.dynamic_batching->max_scheduled_tokens = 4;
+// Without fast-forward, prompts take spare tokens in arrival order: each finishes its prefill
+// before the next reads more than its one token, so a burst of long prompts frees cache blocks as
+// early as possible instead of every prompt holding its blocks until all of them finish together.
+TEST_F(EngineRunTest, PromptsTakeSpareTokensInArrivalOrder) {
+  model_->config_->engine.dynamic_batching->max_scheduled_tokens = 8;
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
   std::vector<int32_t> long_prompt(20);
   std::iota(long_prompt.begin(), long_prompt.end(), 11);
-  auto first = CreateRequestWithPrompt(engine.engine, long_prompt);
-  auto second = CreateRequestWithPrompt(engine.engine, long_prompt);
+  std::vector<std::shared_ptr<Request>> prompts;
+  for (int i = 0; i < 3; ++i)
+    prompts.push_back(CreateRequestWithPrompt(engine.engine, long_prompt));
 
-  std::vector<std::vector<size_t>> reads;  // {first, second} per attempt
+  std::vector<std::vector<size_t>> reads;  // per step, in arrival order
   engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
     ASSERT_NE(context.plan, nullptr);
-    std::vector<size_t> attempt(2);
-    for (const auto& entry : context.plan->requests)
-      attempt[entry.request_id == first.get() ? 0 : 1] = entry.unprocessed_token_count;
-    reads.push_back(attempt);
+    std::vector<size_t> step(prompts.size());
+    for (const auto& entry : context.plan->requests) {
+      const auto row = std::ranges::find(prompts, entry.request_id, &std::shared_ptr<Request>::get);
+      step[static_cast<size_t>(row - prompts.begin())] = entry.unprocessed_token_count;
+    }
+    reads.push_back(step);
   });
+  std::array<EngineEvent, 16> storage;
+  for (int step = 0; step < 20 && std::ranges::any_of(prompts, [](const auto& r) { return r->IsPrefill(); }); ++step)
+    engine.engine->Run(storage);
 
-  RunOne(*engine.engine);
-  engine.executor->SetNextFailure(ScriptedExecutionFailure::RetryableDuringExecution);
-  ASSERT_EQ(RunOne(*engine.engine).flags, EngineEventFlagRetryable);
-  RunOne(*engine.engine);
-  EXPECT_EQ(reads, (std::vector<std::vector<size_t>>{{3, 1}, {1, 3}, {1, 3}}));
+  EXPECT_EQ(reads, (std::vector<std::vector<size_t>>{
+                       {6, 1, 1}, {6, 1, 1}, {6, 1, 1}, {2, 5, 1}, {1, 6, 1}, {1, 6, 1}, {1, 1, 6}, {1, 1, 6}, {1, 1, 2}}));
 }
 
-// Under a chunk cap, the row cut short in one step goes first in the next, so capped prompts
-// alternate instead of the same one always getting the larger share.
-TEST_F(EngineRunTest, CappedPrefillsAlternateTheLargerShare) {
+// Under a chunk cap too, the earlier prompt keeps the larger share until it is read.
+TEST_F(EngineRunTest, CappedPromptsTakeSpareTokensInArrivalOrder) {
   model_->config_->search.chunk_size = 4;
   model_->config_->engine.dynamic_batching->max_scheduled_tokens = 6;
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
@@ -2802,39 +2762,7 @@ TEST_F(EngineRunTest, CappedPrefillsAlternateTheLargerShare) {
   });
   for (int step = 0; step < 3; ++step)
     RunOne(*engine.engine);
-  EXPECT_EQ(reads, (std::vector<std::vector<size_t>>{{4, 2}, {2, 4}, {4, 2}}));
-}
-
-// A resident request starting a new turn queues behind a prefill already waiting, like an arrival.
-TEST_F(EngineRunTest, ContinuationTurnQueuesBehindAWaitingPrefill) {
-  model_->config_->engine.dynamic_batching->max_scheduled_tokens = 5;
-  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
-  std::vector<int32_t> long_prompt(20);
-  std::iota(long_prompt.begin(), long_prompt.end(), 11);
-  TurnOptions one_token;
-  one_token.max_generated_tokens = 1;
-  auto resident = CreateRequestWithPrompt(engine.engine, Prompt(10), one_token);
-  RunOne(*engine.engine);
-  ASSERT_EQ(resident->Status(), RequestStatus::TurnComplete);
-
-  auto served = CreateRequestWithPrompt(engine.engine, long_prompt);
-  auto waiting = CreateRequestWithPrompt(engine.engine, long_prompt);
-  RunOne(*engine.engine);  // served takes the spare tokens; waiting reads one
-  resident->BeginTurn(long_prompt);
-
-  std::vector<size_t> reads(3);  // {resident, served, waiting}
-  engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
-    ASSERT_NE(context.plan, nullptr);
-    for (const auto& entry : context.plan->requests) {
-      const size_t row =
-          entry.request_id == resident.get() ? 0 : (entry.request_id == served.get() ? 1 : 2);
-      reads[row] = entry.unprocessed_token_count;
-    }
-  });
-  RunOne(*engine.engine);
-  EXPECT_EQ(reads, (std::vector<size_t>{1, 1, 3}));
-  RunOne(*engine.engine);  // the new turn keeps its turn-start stamp, so served goes next
-  EXPECT_EQ(reads, (std::vector<size_t>{1, 3, 1}));
+  EXPECT_EQ(reads, (std::vector<std::vector<size_t>>{{4, 2}, {4, 2}, {4, 2}}));
 }
 
 // When capacity planning drops a draft, the token it would have used goes to the prefill.
@@ -2860,30 +2788,6 @@ TEST_F(EngineRunTest, DraftDroppedByCapacityPlanningGivesItsTokenToThePrefill) {
     }
   });
   RunOne(*engine.engine);
-}
-
-// A newly admitted prompt counts as just served, so it queues behind a prefill already waiting.
-TEST_F(EngineRunTest, NewArrivalQueuesBehindAWaitingPrefill) {
-  model_->config_->engine.dynamic_batching->max_scheduled_tokens = 5;
-  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
-  std::vector<int32_t> long_prompt(20);
-  std::iota(long_prompt.begin(), long_prompt.end(), 11);
-  auto first = CreateRequestWithPrompt(engine.engine, long_prompt);
-  auto waiting = CreateRequestWithPrompt(engine.engine, long_prompt);
-  RunOne(*engine.engine);  // first takes the spare tokens; waiting reads one
-
-  auto arrival = CreateRequestWithPrompt(engine.engine, long_prompt);
-  std::vector<size_t> reads(3);  // {first, waiting, arrival}
-  engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
-    ASSERT_NE(context.plan, nullptr);
-    for (const auto& entry : context.plan->requests) {
-      const size_t row =
-          entry.request_id == first.get() ? 0 : (entry.request_id == waiting.get() ? 1 : 2);
-      reads[row] = entry.unprocessed_token_count;
-    }
-  });
-  RunOne(*engine.engine);
-  EXPECT_EQ(reads, (std::vector<size_t>{1, 3, 1}));
 }
 
 TEST_F(EngineRunTest, SpeculativeRunKeepsAcceptedPrefixAndEmitsAllTokens) {

@@ -69,18 +69,26 @@ std::vector<size_t> AllocateDecodeFirstTokenBudget(
     verifies_drafts |= additional_tokens != 0;
   }
 
-  // Chunk work shares what drafts leave, the row that has waited longest first, so a steady stream
-  // of other rows cannot keep any one of them from spare tokens. A decode row reading its unread
-  // committed tokens reads only one while a peer verifies drafts, so it never holds that back.
+  // Chunk work shares what drafts leave, in plan order, so prompts finish in the order they came.
+  // With a decode row catching up on fast-forward tokens among them, the row that has waited
+  // longest goes first instead, so neither catch-up nor prompt work can keep the other from spare
+  // tokens. A catch-up row reads only one token while a peer verifies drafts, so it never holds
+  // that back.
   std::vector<size_t> chunk_rows;
+  bool has_catch_up = false;
   for (size_t i = 0; i < selected_candidates.size(); ++i) {
     const auto& candidate = selected_candidates[i];
-    if (candidate.is_prefill || (candidate.pending_token_count > 1 && !verifies_drafts))
+    const bool catches_up =
+        !candidate.is_prefill && candidate.pending_token_count > 1 && !verifies_drafts;
+    if (candidate.is_prefill || catches_up)
       chunk_rows.push_back(i);
+    has_catch_up |= catches_up;
   }
-  std::stable_sort(chunk_rows.begin(), chunk_rows.end(), [&](size_t left, size_t right) {
-    return selected_candidates[left].last_chunk_service < selected_candidates[right].last_chunk_service;
-  });
+  if (has_catch_up) {
+    std::stable_sort(chunk_rows.begin(), chunk_rows.end(), [&](size_t left, size_t right) {
+      return selected_candidates[left].last_chunk_service < selected_candidates[right].last_chunk_service;
+    });
+  }
   if (chunk_service)
     chunk_service->assign(selected_candidates.size(), false);
   bool first_share = true;
