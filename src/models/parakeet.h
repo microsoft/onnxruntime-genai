@@ -31,6 +31,7 @@
 #pragma once
 
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -46,9 +47,33 @@ inline void ValidateParakeetEncoderOutputShape(const std::vector<int64_t>& enc_s
     throw std::runtime_error("Encoder output must have rank 3 [batch, channels, time], got rank " + std::to_string(enc_shape.size()));
   }
 
-  if (enc_shape[1] != hidden_dim) {
-    throw std::runtime_error("Encoder output channel dimension (" + std::to_string(enc_shape[1]) +
-                             ") does not match config hidden_dim (" + std::to_string(hidden_dim) + ")");
+  if (enc_shape[0] != 1 || enc_shape[1] != hidden_dim || enc_shape[2] < 0) {
+    throw std::runtime_error("Encoder output must have shape [1, hidden_dim=" + std::to_string(hidden_dim) +
+                             ", time], got [" + std::to_string(enc_shape[0]) + ", " +
+                             std::to_string(enc_shape[1]) + ", " + std::to_string(enc_shape[2]) + "]");
+  }
+}
+
+inline void ValidateParakeetEncoderLength(int64_t length, int64_t encoder_time) {
+  if (length < 0 || length > encoder_time) {
+    throw std::runtime_error("Encoder output length (" + std::to_string(length) +
+                             ") must be between 0 and the encoder time dimension (" +
+                             std::to_string(encoder_time) + ")");
+  }
+}
+
+inline void ValidateParakeetJoinerOutputSize(size_t element_count, int vocab_size, size_t duration_count) {
+  if (vocab_size <= 0 || duration_count == 0)
+    throw std::runtime_error("Joiner output requires a positive vocabulary size and at least one duration");
+
+  const auto token_count = static_cast<size_t>(vocab_size);
+  if (duration_count > std::numeric_limits<size_t>::max() - token_count)
+    throw std::runtime_error("Joiner output size overflows size_t");
+
+  const size_t expected_count = token_count + duration_count;
+  if (element_count != expected_count) {
+    throw std::runtime_error("Joiner output must contain " + std::to_string(expected_count) +
+                             " elements, got " + std::to_string(element_count));
   }
 }
 

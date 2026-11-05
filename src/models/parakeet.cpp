@@ -360,11 +360,13 @@ void ParakeetTdtState::EncodeNextChunk() {
   // to copy back via the session's own allocator; with our CPU-resident inputs
   // ORT typically routes outputs back to CPU via MemcpyToHost. Handle both
   // just in case.
-  auto enc_shape = enc_output->GetTensorTypeAndShapeInfo()->GetShape();
+  auto enc_info = enc_output->GetTensorTypeAndShapeInfo();
+  if (enc_info->GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)
+    throw std::runtime_error("Encoder output must be float32");
+  auto enc_shape = enc_info->GetShape();
   ValidateParakeetEncoderOutputShape(enc_shape, cfg_.hidden_dim);
   current_enc_time_ = enc_shape[2];
-  size_t enc_elems = 1;
-  for (auto d : enc_shape) enc_elems *= static_cast<size_t>(d);
+  const size_t enc_elems = enc_info->GetElementCount();
 
   auto& enc_mi = enc_output->GetTensorMemoryInfo();
   bool enc_on_cpu = (enc_mi.GetDeviceType() == OrtMemoryInfoDeviceType_CPU);
@@ -378,6 +380,11 @@ void ParakeetTdtState::EncodeNextChunk() {
     current_encoder_cpu_.assign(enc_cpu.begin(), enc_cpu.end());
   }
 
+  auto enc_len_info = enc_length->GetTensorTypeAndShapeInfo();
+  if (enc_len_info->GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64 ||
+      enc_len_info->GetElementCount() != 1)
+    throw std::runtime_error("Encoder length output must contain one int64 element");
+
   auto& enc_len_mi = enc_length->GetTensorMemoryInfo();
   bool enc_len_on_cpu = (enc_len_mi.GetDeviceType() == OrtMemoryInfoDeviceType_CPU);
   int64_t enc_total;
@@ -388,6 +395,7 @@ void ParakeetTdtState::EncodeNextChunk() {
     auto enc_len_span = WrapTensor<int64_t>(inference_device, *enc_length);
     enc_total = enc_len_span.CopyDeviceToCpu()[0];
   }
+  ValidateParakeetEncoderLength(enc_total, current_enc_time_);
 
   // Map chunk start/end (sample-space) to encoder-frame indices within this
   // window. encoder_frame_index = mel_frame_index / subsampling_factor.
@@ -423,6 +431,8 @@ int32_t ParakeetTdtState::EmitNextToken() {
     // encoder output. Allocated once, reused.
     const float* enc_data = current_encoder_cpu_.data();
     const int64_t enc_time = current_enc_time_;
+    if (current_t_ < 0 || current_t_ >= enc_time)
+      throw std::runtime_error("Encoder frame index is outside the encoder output time dimension");
     auto frame_shape = std::array<int64_t, 3>{1, 1, hidden_dim};
     if (!encoder_frame_) {
       encoder_frame_ = OrtValue::CreateTensor(cpu_allocator, frame_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
@@ -449,6 +459,13 @@ int32_t ParakeetTdtState::EmitNextToken() {
     joiner_state_->Run(0, dummy_tokens, {});
 
     OrtValue* join_logits = joiner_state_->outputs_[0];
+    auto join_logits_info = join_logits->GetTensorTypeAndShapeInfo();
+    if (join_logits_info->GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)
+      throw std::runtime_error("Joiner output must be float32");
+    ValidateParakeetJoinerOutputSize(join_logits_info->GetElementCount(),
+                                     model_.config_->model.vocab_size,
+                                     cfg_.tdt_durations.size());
+
     const float* logits_data;
     std::vector<float> logits_buf;
     auto& mi_jout = join_logits->GetTensorMemoryInfo();
