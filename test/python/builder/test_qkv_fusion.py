@@ -201,6 +201,38 @@ def test_cpu_packed_projection_splits_before_standalone_rope(head_size, bias):
     assert model.attention_attrs["v_path"] == outputs[2]
 
 
+@pytest.mark.parametrize("head_size", [4, 12])
+def test_cpu_non_aligned_head_size_uses_mha_rope_cache_path(head_size):
+    model = _model(Model, {}, use_paged_attention=False)
+    model.ep = "cpu"
+    model.io_dtype = ir.DataType.FLOAT
+    model.head_size = head_size
+    model.input_names = {"position_ids": "position_ids"}
+    model.attention_attrs["rope"] = True
+    model.make_attention_init(config=None)
+    model.rope_attrs["op_type"] = "RotaryEmbedding"
+
+    attention = SimpleNamespace(
+        q_proj=torch.nn.Linear(HIDDEN, HEADS * head_size, bias=False),
+        k_proj=torch.nn.Linear(HIDDEN, KV_HEADS * head_size, bias=False),
+        v_proj=torch.nn.Linear(HIDDEN, KV_HEADS * head_size, bias=False),
+    )
+    projections, rotary = [], []
+    model.make_matmul = lambda proj, name, root, **kwargs: projections.append(name) or name
+    model.make_rotary_embedding_op = lambda name, root_input, **kwargs: rotary.append(root_input)
+
+    model.make_attention_input_proj(3, attention, "root")
+    model.make_attention_qk_rope(3)
+
+    assert model.attention_attrs["op_type"] == "MultiHeadAttention"
+    assert projections == [
+        "/model/layers.3/attn/q_proj/MatMul",
+        "/model/layers.3/attn/k_proj/MatMul",
+        "/model/layers.3/attn/v_proj/MatMul",
+    ]
+    assert rotary == projections[:2]
+
+
 @pytest.mark.parametrize("rope,fused", [(False, False), (True, True)])
 def test_packed_projection_stays_packed_without_standalone_rope(rope, fused):
     model = _model(Model, {})
