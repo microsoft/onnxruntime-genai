@@ -89,6 +89,18 @@ The tool currently supports the following model architectures.
 
 It is intended for supporting the latest, popular state-of-the-art models.
 
+Dense text LongRoPE exports using an `If` node declare an int64 scalar
+`rope_context_length` input. ONNX metadata entries
+`com.microsoft.genai.rope_context_length_input` and
+`com.microsoft.genai.original_context_length` identify that input and the cache
+switch boundary. The runtime keeps the input constant across a chunked prefill
+and replays cached tokens when the sequence switches factors, including after
+a rewind. These exports require a runtime supporting this contract; cache replay
+currently requires a single Generator sequence without beam search. Engine and
+speculative decoding (including n-gram decoding) reject this contract. KV-cache calibration reads the
+metadata and supplies each sample's context length. Paged, multimodal,
+and in-kernel cache-selection exports retain their existing interfaces.
+
 ## Usage
 
 ### Full Usage
