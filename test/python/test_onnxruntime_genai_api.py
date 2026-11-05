@@ -115,7 +115,7 @@ def test_asr_example_decodes_all_generated_results(test_data_path, asr_example, 
     prompt = np.array([[0, 0, 0, 52]], dtype=np.int32)
     generator.append_tokens(prompt)
     postprocessor = og.ASRPostProcessor(generator)
-    transcript = asr_example.decode_tokens(generator, postprocessor, "off", [])
+    transcript = asr_example.decode_tokens(generator, postprocessor, "off")
     tokenizer = og.Tokenizer(model)
     plain = tokenizer.create_stream()
     expected = "".join(plain.decode(int(token_id)) for token_id in generator.get_sequence(0)[prompt.size:])

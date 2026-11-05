@@ -46,7 +46,6 @@ int chunkSize = modelConfig.GetProperty("chunk_samples").GetInt32();
 string timestampLevel = modelConfig.TryGetProperty("timestamp_level", out var timestampLevelElement)
   ? timestampLevelElement.GetString() ?? "off"
   : "off";
-bool timestampsEnabled = timestampLevel != "off";
 
 // Load audio, convert to mono, and resample to match the model's expected sample rate
 float[] audio = LoadAudio(audioFile, sampleRate);
@@ -76,7 +75,6 @@ using var generator = new Generator(model, genParams);
 using var postprocessor = new ASRPostProcessor(generator);
 Console.WriteLine(new string('-', 60));
 string fullTranscript = "";
-var allWordTranscript = new StringBuilder();
 int chunksTotal = 0;
 int chunksProcessed = 0;
 int chunksSkipped = 0;
@@ -91,32 +89,27 @@ for (int i = 0; i < audio.Length; i += chunkSize) {
   if (inputs != null) {
     chunksProcessed++;
     generator.SetInputs(inputs);
-    fullTranscript += DecodeTokens(generator, postprocessor, timestampLevel, allWordTranscript);
+    fullTranscript += DecodeTokens(generator, postprocessor, timestampLevel);
   } else {
     chunksSkipped++;
   }
 }
 
 // Flush remaining buffered audio
-using var flushInputs = processor.Flush();
-if (flushInputs != null) {
+while (true) {
+  using var flushInputs = processor.Flush();
+  if (flushInputs == null) break;
   generator.SetInputs(flushInputs);
-  fullTranscript += DecodeTokens(generator, postprocessor, timestampLevel, allWordTranscript);
+  fullTranscript += DecodeTokens(generator, postprocessor, timestampLevel);
 }
 
 postprocessor.FinalizeProcessing();
-if (timestampsEnabled) {
-  foreach (var result in postprocessor.GetNextResults()) {
-    fullTranscript += FormatTimestampRecords(result, timestampLevel is "segment" or "all");
-    if (timestampLevel == "all")
-      allWordTranscript.Append(FormatTimestampRecords(result, false));
-  }
+foreach (var result in postprocessor.GetNextResults()) {
+  Console.Write(FormatTimestampRecords(result, timestampLevel != "word"));
 }
 
 Console.WriteLine($"\n{new string('=', 60)}");
 Console.WriteLine($"  {fullTranscript.Trim()}");
-if (timestampLevel == "all")
-  Console.WriteLine($"  Word timestamps: {allWordTranscript}");
 Console.WriteLine(new string('=', 60));
 if (useVad == "true") {
   double pctSaved = chunksTotal > 0 ? (double)chunksSkipped / chunksTotal * 100.0 : 0.0;
@@ -124,24 +117,19 @@ if (useVad == "true") {
                     $"{chunksSkipped} skipped ({pctSaved:F1}% compute saved)");
 }
 
-static string DecodeTokens(Generator generator, ASRPostProcessor postprocessor, string timestampLevel,
-                           StringBuilder allWordTranscript) {
+static string DecodeTokens(Generator generator, ASRPostProcessor postprocessor, string timestampLevel) {
   string text = "";
-  bool timestampsEnabled = timestampLevel != "off";
   while (!generator.IsDone()) {
     generator.GenerateNextToken();
     postprocessor.ProcessNext();
     foreach (var result in postprocessor.GetNextResults()) {
-      if (!timestampsEnabled) {
+      text += result.Text;
+      if (result.TimestampResult == null) {
         string tokenText = result.Text;
         Console.Write(tokenText);
-        text += tokenText;
       } else {
-        string timestampedText = FormatTimestampRecords(result, timestampLevel is "segment" or "all");
-        if (timestampLevel == "all")
-          allWordTranscript.Append(FormatTimestampRecords(result, false));
+        string timestampedText = FormatTimestampRecords(result, timestampLevel != "word");
         Console.Write(timestampedText);
-        text += timestampedText;
       }
     }
   }
@@ -156,8 +144,9 @@ static string FormatTimestampRecords(ASRPostProcessorResult result, bool useSegm
     string text = useSegments ? record.Text : record.Text.Trim();
     string separator = useSegments && (text.Length == 0 || !char.IsWhiteSpace(text[0])) ? " " : "";
     string suffix = useSegments ? "" : " ";
-    var (start, stop) = record.TimeInterval;
-    return $"[{start:F2} - {stop:F2}]{separator}{text}{suffix}";
+    string prefix = record.TimeInterval is { } interval ? $"[{interval.Start:F2} - {interval.Stop:F2}]" : "";
+    if (record.SpeakerLabel is string speaker) prefix += $"[{speaker}]";
+    return $"{prefix}{separator}{text}{suffix}";
   }));
 }
 

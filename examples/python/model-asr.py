@@ -148,31 +148,32 @@ def format_timestamp_records(result, use_segments):
         text = record.text if use_segments else record.text.strip()
         separator = " " if use_segments and not text[:1].isspace() else ""
         suffix = "" if use_segments else " "
-        start, stop = record.time_interval
-        formatted.append(f"[{start:.2f} - {stop:.2f}]{separator}{text}{suffix}")
+        prefix = ""
+        if record.time_interval is not None:
+            start, stop = record.time_interval
+            prefix = f"[{start:.2f} - {stop:.2f}]"
+        if record.speaker_label is not None:
+            prefix += f"[{record.speaker_label}]"
+        formatted.append(f"{prefix}{separator}{text}{suffix}")
     return "".join(formatted)
 
 
-def decode_tokens(generator, postprocessor, timestamp_level, all_word_transcript):
+def decode_tokens(generator, postprocessor, timestamp_level):
     """Decode all available tokens from the generator, returning the text."""
     text = ""
-    timestamps_enabled = timestamp_level != "off"
     while not generator.is_done():
         generator.generate_next_token()
         postprocessor.process_next()
         for result in postprocessor.get_next_results():
-            if not timestamps_enabled:
+            text += result.text
+            if result.timestamp_result is None:
                 token_text = result.text
                 print(token_text, end="", flush=True)
-                text += token_text
             else:
                 timestamped_text = format_timestamp_records(
-                    result, timestamp_level in ("segment", "all")
+                    result, timestamp_level != "word"
                 )
-                if timestamp_level == "all":
-                    all_word_transcript.append(format_timestamp_records(result, False))
                 print(timestamped_text, end="", flush=True)
-                text += timestamped_text
     return text
 
 
@@ -180,7 +181,6 @@ def simulate_microphone(model_path, audio_path, execution_provider, use_vad=None
                         ep_path="", use_winml=False):
     """Stream audio through Generator + StreamingProcessor API."""
     sample_rate, chunk_samples, timestamp_level = load_config(model_path)
-    timestamps_enabled = timestamp_level != "off"
     audio = load_audio(audio_path, sample_rate)
     duration = len(audio) / sample_rate
 
@@ -221,7 +221,6 @@ def simulate_microphone(model_path, audio_path, execution_provider, use_vad=None
     print("-" * 60)
     stream_start = time.perf_counter()
     full_transcript = ""
-    all_word_transcript = []
     vad_enabled = vad_status == "true"
     chunks_total = 0
     chunks_processed = 0
@@ -235,34 +234,26 @@ def simulate_microphone(model_path, audio_path, execution_provider, use_vad=None
             chunks_processed += 1
             generator.set_inputs(inputs)
             full_transcript += decode_tokens(
-                generator, postprocessor, timestamp_level, all_word_transcript
+                generator, postprocessor, timestamp_level
             )
         else:
             chunks_skipped += 1
 
     # Flush remaining audio
-    inputs = processor.flush()
-    if inputs is not None:
+    while (inputs := processor.flush()) is not None:
         generator.set_inputs(inputs)
         full_transcript += decode_tokens(
-            generator, postprocessor, timestamp_level, all_word_transcript
+            generator, postprocessor, timestamp_level
         )
 
     postprocessor.finalize()
-    if timestamps_enabled:
-        for result in postprocessor.get_next_results():
-            full_transcript += format_timestamp_records(
-                result, timestamp_level in ("segment", "all")
-            )
-            if timestamp_level == "all":
-                all_word_transcript.append(format_timestamp_records(result, False))
+    for result in postprocessor.get_next_results():
+        print(format_timestamp_records(result, timestamp_level != "word"), end="", flush=True)
 
     total_wall = time.perf_counter() - stream_start
 
     print(f"\n{'=' * 60}")
     print(f"  {full_transcript.strip()}")
-    if timestamp_level == "all":
-        print(f"  Word timestamps: {''.join(all_word_transcript)}")
     print(f"{'=' * 60}")
     print(f"  Audio: {duration:.2f}s | Wall: {total_wall:.2f}s | RTF: {duration / total_wall:.2f}x")
     if vad_enabled:
