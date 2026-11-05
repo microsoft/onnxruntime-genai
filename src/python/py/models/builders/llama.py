@@ -13,7 +13,8 @@ class LlamaModel(Model):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
     def make_rope_init(self, config):
-        if config.rope_parameters["rope_type"] == "llama3":
+        rope_parameters = getattr(config, "rope_parameters", None)
+        if isinstance(rope_parameters, Mapping) and rope_parameters.get("rope_type") == "llama3":
             # For models that rescale `inv_freq` using `low_freq_factor` and `high_freq_factor` (e.g. LLaMA-3.1)
             factor = config.rope_parameters["factor"] if "factor" in config.rope_parameters else 0
             low_freq_factor = config.rope_parameters["low_freq_factor"] if "low_freq_factor" in config.rope_parameters else 0
@@ -24,4 +25,8 @@ class LlamaModel(Model):
                 "low_freq_factor": low_freq_factor,    # Low freq factor when calculating `low_freq_wavelen` in rotary embeddings
                 "high_freq_factor": high_freq_factor,  # High freq factor when calculating `high_freq_wavelen` in rotary embeddings
             }
+        else:
+            # Delegate linear / YARN / MRoPE scaling to the base implementation
+            # (e.g. DeepSeek-Coder uses rope_scaling {"type": "linear", "factor": 4.0}).
+            super().make_rope_init(config)
 

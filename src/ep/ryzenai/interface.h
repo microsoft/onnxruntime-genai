@@ -13,6 +13,10 @@ namespace Generators {
 struct RyzenAIInterface : DeviceInterface {
   using ProviderOptions = std::vector<std::pair<std::string, std::string>>;
 
+  // RyzenAI buffers are host memory under this CPU memory info, so they would qualify for
+  // IsHostAccessible(). It stays false until that is verified on RyzenAI hardware: a RyzenAI
+  // decoder's inputs don't need it, since each buffer is its own host mirror, and only a RyzenAI
+  // encoder feeding a CPU embedding still stages its features through a copy.
   std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
     return OrtMemoryInfo::Create("Cpu",
                                  OrtAllocatorType::OrtDeviceAllocator,

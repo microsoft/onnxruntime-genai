@@ -80,6 +80,7 @@ def _kernel_dequant_from_qmoe_layout(packed_kn2, scale_nk16, global_scale, n, k)
 
 def test_nvfp4_repack_roundtrip_matches_modelopt():
     model = object.__new__(ModeloptModel)
+    model.quant_attrs = {"qmoe_weights_prepacked": 0}
     for seed, (n, k) in enumerate([(8, 64), (16, 128), (32, 512), (2048, 512)]):
         packed_nk2, scale_bytes, global_scale, ref = _make_modelopt_nvfp4_projection(n, k, seed)
 

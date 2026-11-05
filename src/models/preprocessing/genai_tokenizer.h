@@ -16,6 +16,7 @@
 namespace Generators {
 
 struct Config;
+struct TokenizerMemoryData;
 struct Tensor;
 
 struct Tokenizer;
@@ -45,6 +46,8 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenize
 
   void UpdateOptions(const char* const* keys, const char* const* values, size_t num_options);
   std::vector<int32_t> Encode(const char* text) const;
+  std::vector<std::vector<int32_t>> EncodeBatchRows(
+      std::span<const char*> strings) const;
   std::string Decode(std::span<const int32_t> tokens) const;
   std::string ApplyChatTemplate(const char* template_str, const char* messages, const char* tools, bool add_generation_prompt) const;
   std::string ApplyChatTemplateWithOptions(const char* template_str, const char* messages, const char* tools,
@@ -64,12 +67,16 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenize
   int32_t GetBorTokenId() const;
   int32_t GetEorTokenId() const;
 
+ private:
+  std::shared_ptr<const TokenizerMemoryData> memory_data_;
+  std::optional<OrtxTokenizerBlob> memory_blob_;
+
+ public:
   OrtxPtr<OrtxTokenizer> tokenizer_;
 
  private:
   friend struct TokenizerStream;
-  friend class TokenPostProcessor;
-  friend class TokenPostProcessorInternal;
+  friend class ASRPostProcessor;
   OrtxWordPieceInfo GetWordPieceInfo(int32_t vocab_id) const;
 
   bool literal_ = false;
