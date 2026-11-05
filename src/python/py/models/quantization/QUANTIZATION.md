@@ -151,5 +151,6 @@ Runtime support for the exported block size is required.
 
 If `Gather` is also in `op_types`, the token embedding table is quantized per-channel too:
 one scale per vocab row, using a block size equal to the hidden size rounded up to a power
-of two (at least 16). `GatherBlockQuantized` only supports 4-bit weights, so this applies
-when `weights.type=int4`; with `int8`, `Gather` nodes are left unquantized.
+of two (at least 16). INT4 tables go through ORT's Gather quantizer; INT8 tables go through
+the builder's own direct `GatherBlockQuantized(bits=8)` path, which reads the same
+per-channel block size and requires a runtime that supports that encoding.
