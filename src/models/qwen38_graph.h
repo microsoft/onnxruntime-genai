@@ -812,7 +812,7 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   std::vector<std::unique_ptr<DevTensor>> output_tensors_;
   std::vector<std::unique_ptr<DevTensor>> head_views_;
   std::deque<PlaneBuffer> owned_;  // individually allocated tensors
-  const Direction* inflight_dir_{};
+  const Direction* slot_inflight_dirs_[kMaxBatch]{};
   size_t slot_target_group_[kMaxBatch]{};
 
   // control block / plane buffers

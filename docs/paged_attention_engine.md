@@ -2498,7 +2498,9 @@ token. The device holds `model.qwen38_graph.max_batch_size` slots (default 1), o
   current decode bank before it joins the ready slots. Target graph ids include the first slot as well as batch size and
   bank phase, and warm-up covers those offset bindings. Contiguous ready slots still share one target forward; separated
   intervals run separately, without waiting for the prompts between them. Auxiliary features are bound directly to persistent
-  per-slot slices, so both shared and deferred DFlash proposals consume the right slot's features.
+  per-slot slices, so both shared and deferred DFlash proposals consume the right slot's features. Each interval binding owns
+  its validation aggregate, and each slot retains the direction of its in-flight target Run so completion errors report that
+  Run's status codes even after later intervals execute.
 - With several slots the DFlash2 drafter proposes for one slot after the other without waiting for the device in between.
   A step tensor larger than a launch can carry (4032 bytes: the block table of a long context) is uploaded from its host
   mirror when the device reaches the copy, so one shared mirror per tensor would be rewritten by the next slot's proposal

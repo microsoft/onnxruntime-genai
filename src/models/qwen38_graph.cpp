@@ -1522,8 +1522,8 @@ void Qwen38GraphEngine::BuildTarget() {
           Bank& in_bank = banks_[k];
           Bank& out_bank = compact_state_updates_ ? banks_[k ^ 1] : banks_[(k + rows) % num_banks_];
           std::map<std::string, std::unique_ptr<DevTensor>> own;
-          auto add_own = [&](const std::string& name, std::vector<int64_t> shape, ONNXTensorElementDataType type) {
-            // These scratch outputs are consumed by the fold within the Run, not by the host after it.
+          auto add_scratch = [&](const std::string& name, std::vector<int64_t> shape, ONNXTensorElementDataType type) {
+            // Only fold-internal scratch may be shared across interval offsets.
             auto& shared_output = common_outputs[name];
             if (!shared_output) {
               shared_output = NewDeviceTensor(own, name, std::move(shape), type);
@@ -1598,7 +1598,7 @@ void Qwen38GraphEngine::BuildTarget() {
                               bank.tensors[input_name]->type);
             };
             if (name == "fold.tail_done")
-              t = add_own(name, {B}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+              t = add_scratch(name, {B}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
             else if (name == kQwen38FoldCtlOut)
               t = add_view(name, ctl_slot(first_slot), {B * kFoldCtlWords}, i64);
             else if (name == kQwen38FoldCtxCommitOut)
@@ -1613,13 +1613,13 @@ void Qwen38GraphEngine::BuildTarget() {
             else if (StartsWith(name, "present."))
               t = state_for(name.substr(8), out_bank, name);
             else if (name == "logits")
-              t = add_own(name, {B, rows, vocab_}, dtype_logits);
+              t = add_scratch(name, {B, rows, vocab_}, dtype_logits);
             else if (name == hidden_name)
-              t = add_own(name, {B, rows, hidden_width_}, ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16);
+              t = add_scratch(name, {B, rows, hidden_width_}, ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16);
             else if (name == "validation.aggregate")
-              t = add_own(name, {static_cast<int64_t>(batch_status_count)}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+              t = NewDeviceTensor(own, name, {static_cast<int64_t>(batch_status_count)}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
             else if (name == "next_tokens")
-              t = add_own(name, {B, rows}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+              t = add_scratch(name, {B, rows}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
             else if (name == "aux_hidden_states") {
               t = add_view(name, d_dflash_step_aux_slot(first_slot), {B, rows, int64_t(kDflashWidth)},
                            ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16);
@@ -1810,6 +1810,7 @@ void Qwen38GraphEngine::Reset() {
     slot_decode_started_[s] = false;
     slot_draft_shared_[s] = false;
     slot_target_group_[s] = 0;
+    slot_inflight_dirs_[s] = nullptr;
   }
   inflight_ = false;
   decode_started_ = false;
@@ -1862,6 +1863,7 @@ void Qwen38GraphEngine::ResetSlot(size_t slot_idx) {
   slot_decode_started_[s] = false;
   slot_draft_shared_[s] = false;
   slot_target_group_[s] = 0;
+  slot_inflight_dirs_[s] = nullptr;
   if (s == 0) {
     seq_ = 0;
     ledger_.Reset();
@@ -2343,7 +2345,7 @@ void Qwen38GraphEngine::EnqueueFold() {
   RunTarget(verify_rows_, ledger_.Bank());
   Direction& d = dirs_[verify_rows_ - 1][ledger_.Bank()];
   last_hidden_ptr_ = d.hidden;
-  inflight_dir_ = &d;
+  slot_inflight_dirs_[0] = &d;
   ++seq_;
   inflight_ = true;
 }
@@ -2372,7 +2374,7 @@ void Qwen38GraphEngine::EnqueueVerify() {
   plane_.post_tok(stream_, d.tokens, ctl_.data(), ctx_commit_.data(), ctx_a_.data(), ctx_b_.data(), d.status,
                   static_cast<int>(d.status_count), result_host_, kRing);
   last_hidden_ptr_ = d.hidden;
-  inflight_dir_ = &d;
+  slot_inflight_dirs_[0] = &d;
   ++seq_;
   inflight_ = true;
 }
@@ -2387,7 +2389,7 @@ void Qwen38GraphEngine::EnqueueStep() {
   plane_.post1(stream_, part_v_.data(), part_i_.data(), kArgmaxBlocks, ctl_.data(), ctx_commit_.data(), ctx_a_.data(),
                d.status, static_cast<int>(d.status_count), result_host_, kRing);
   last_hidden_ptr_ = d.hidden;
-  inflight_dir_ = &d;
+  slot_inflight_dirs_[0] = &d;
   ++seq_;
   inflight_ = true;
 }
@@ -2541,7 +2543,7 @@ Qwen38CycleRecord Qwen38GraphEngine::WaitCycleSlot(int slot_idx) {
     result.pred6 = static_cast<int64_t>(static_cast<int32_t>(raw3 >> 32));
     result.pred7 = static_cast<int64_t>(static_cast<int32_t>(raw5 >> 32));
   }
-  if (status != 0) CheckDeviceStatus("decode", inflight_dir_);
+  if (status != 0) CheckDeviceStatus("decode", slot_inflight_dirs_[slot_idx]);
   return result;
 }
 
@@ -2619,8 +2621,10 @@ void Qwen38GraphEngine::EnqueueBatchDecode(std::span<const size_t> active_slots)
     Direction& d = BatchDirection(first, batch, bank_phase_);
     RunTarget(d, nullptr, Qwen38FirstSlots(static_cast<size_t>(batch)) << first);
     last_hidden_ptr_ = d.hidden;
-    inflight_dir_ = &d;
-    for (int s = first; s < end; ++s) slot_target_group_[s] = static_cast<size_t>(first);
+    for (int s = first; s < end; ++s) {
+      slot_inflight_dirs_[s] = &d;
+      slot_target_group_[s] = static_cast<size_t>(first);
+    }
     first = end;
   }
   for (const size_t s : active_slots) {
@@ -2764,7 +2768,7 @@ void Qwen38GraphEngine::Advance(const Qwen38CycleRecord& record, bool want_more)
   if (!want_more) return;
   if (dflash_) {
     pending_ = static_cast<int32_t>(record.new_pending);
-    Draft(inflight_dir_->auxiliary, step, ledger_.Length() - step, pending_, true);
+    Draft(slot_inflight_dirs_[0]->auxiliary, step, ledger_.Length() - step, pending_, true);
     EnqueueFold();
     return;
   }
