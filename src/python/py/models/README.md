@@ -403,6 +403,8 @@ Paged attention supports CUDA with `fp16` or `bf16` precision and WebGPU with `f
 
 Vision-bearing `Qwen3_5ForConditionalGeneration` and `Qwen3_5MoeForConditionalGeneration` checkpoints can combine `use_paged_attention=true` with `exclude_embeds=true`. This includes the reference Qwen3.8-27B checkpoint whose actual architecture is `Qwen3_5ForConditionalGeneration`, not `Qwen4Exp`. The composite emits a floating-point vision encoder, processor/tokenizer/template assets, a pure CPU embedding lookup, and the packed decoder; the lookup does not require a drafter. `text_only=true` cannot be combined with this excluded-embedding vision path. Existing text-only exports remain unchanged, and other paged/excluded-embedding combinations remain rejected.
 
+Complete vision exports retain the source model type (`qwen3_5` or `qwen3_5_moe`). Text-only exports use `qwen3_5_text` or `qwen3_5_moe_text` and reject images. The Engine selects the packed execution path from the dynamic-batching configuration and validates the exported components; renaming an existing text-only package does not make it vision-capable.
+
 ```bash
 # From wheel:
 python -m onnxruntime_genai.models.builder -i path_to_qwen_checkpoint -o output -p int4 -e cuda \

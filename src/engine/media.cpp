@@ -230,8 +230,6 @@ PreparedMediaTurn MediaStore::Prepare(const std::string& prompt, const Images* i
     if (result.tokens[index] != config.image_token_id) continue;
     if (image_index >= count) throw std::runtime_error("Expanded image rows have no corresponding grid.");
     const auto* grid = grids->GetData<int64_t>() + image_index * 3;
-    if (grid[0] != 1 || grid[1] <= 0 || grid[2] <= 0 || grid[1] % merge != 0 || grid[2] % merge != 0)
-      throw std::runtime_error("Packed vision supports complete spatially merged image grids, not video.");
     const size_t patches = MultiplyBytes(static_cast<size_t>(grid[1]), static_cast<size_t>(grid[2]));
     const size_t rows = patches / MultiplyBytes(merge, merge);
     const size_t stride = compact ? patches : physical_patches / count;

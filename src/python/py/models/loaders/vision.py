@@ -54,7 +54,8 @@ def load_qwen35_visual(model_class, config, model_name_or_path, **kwargs):
     with torch.device("meta"):
         visual = model_class(config)
     visual.load_state_dict(state, strict=True, assign=True)
-    visual.rotary_pos_emb = type(visual.rotary_pos_emb)(config.hidden_size // config.num_heads // 2)
+    rotary_config = config if hasattr(visual.rotary_pos_emb, "config") else config.hidden_size // config.num_heads // 2
+    visual.rotary_pos_emb = type(visual.rotary_pos_emb)(rotary_config)
     return visual
 
 

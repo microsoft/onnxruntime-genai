@@ -24,8 +24,7 @@ DecoderOnly_Model::DecoderOnly_Model(std::unique_ptr<Config> config, OrtEnv& ort
     cpu_embedding_->ValidateConsumer(session_info_, config_->model.decoder.inputs.embeddings);
   }
   if (!config_->model.vision.filename.empty()) {
-    if (config_->model.type != "qwen3_5_text" || !cpu_embedding_ ||
-        !config_->engine.dynamic_batching || !config_->model.vision.pipeline.empty() ||
+    if (!cpu_embedding_ || !config_->engine.dynamic_batching || !config_->model.vision.pipeline.empty() ||
         !config_->model.speech.filename.empty()) {
       throw std::runtime_error(
           "Packed vision requires a Qwen3.5 dynamic-batching decoder with pure CPU embeddings.");
