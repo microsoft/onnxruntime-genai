@@ -16,6 +16,7 @@ file(GLOB test_srcs CONFIGURE_DEPENDS
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/dflash2_config_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/reinit_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/search_checkpoint_tests.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/shared_cache_growth_tests.cpp")
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER AND ENABLE_CUDA_KERNEL_TESTS)
   message(STATUS "Including CUDA kernel tests in the build.")
@@ -129,6 +130,18 @@ if (NOT MSVC)
 endif()
 
 add_test(NAME ReInitTests COMMAND reinit_tests)
+
+if(USE_WEBGPU)
+  add_executable(shared_cache_growth_tests "${CMAKE_CURRENT_SOURCE_DIR}/cpp/shared_cache_growth_tests.cpp")
+  target_include_directories(shared_cache_growth_tests PRIVATE ${ORT_HEADER_DIR} ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(shared_cache_growth_tests PRIVATE onnxruntime-genai-obj GTest::gtest)
+  add_dependencies(shared_cache_growth_tests onnxruntime-genai)
+  set_target_properties(shared_cache_growth_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>")
+  if(NOT MSVC)
+    target_compile_options(shared_cache_growth_tests PRIVATE "-fvisibility=hidden")
+  endif()
+  add_test(NAME SharedCacheGrowthTests COMMAND shared_cache_growth_tests)
+endif()
 
 if (ENABLE_TELEMETRY AND NOT WIN32 AND NOT ANDROID AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
   add_executable(telemetry_device_info_tests

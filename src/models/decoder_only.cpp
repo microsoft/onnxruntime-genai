@@ -72,6 +72,10 @@ DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& 
   // ORT captures by re-running the model inside this one Run(), which over-applies an
   // in-place recurrent state. Let the capture happen, then undo it and replay.
   const int graph_id = seq_len * 2 + graph_capture_variant;
+  if (recurrent_state_ && recurrent_capture_epoch_ != GraphCaptureEpoch()) {
+    recurrent_state_->InvalidateCapturedGraphs();
+    recurrent_capture_epoch_ = GraphCaptureEpoch();
+  }
   if (graph_capture_this_run && recurrent_state_ && recurrent_state_->ShouldFixUpGraphCapture(graph_id)) {
     recurrent_state_->SaveForGraphCapture();
     State::Run(*model_.session_decoder_, true, seq_len, graph_capture_variant);

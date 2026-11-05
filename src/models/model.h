@@ -61,6 +61,9 @@ struct State {
 
   void ClearIO();  // Clear all inputs/outputs
 
+  void InvalidateCapturedGraphs();
+  uint64_t GraphCaptureEpoch() const { return graph_capture_epoch_; }
+
   virtual void SetActiveAdapter(Adapters* adapters, const std::string& adapter_name);
   virtual void SetRunOption(const char* key, const char* value);
   void SetRunOptions(const Config::RunOptions& config_run_options);
@@ -101,6 +104,7 @@ struct State {
   // outlives this State because State is owned by Generator, and Generator is
   // destroyed before the Model (and its session) that produced it.
   OrtSession* graph_capture_session_{nullptr};
+  uint64_t graph_capture_epoch_{0};
   std::shared_ptr<Adapters> adapters_;
   ExtraOutputs extra_outputs_;
 };

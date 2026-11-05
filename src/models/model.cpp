@@ -262,6 +262,21 @@ void State::SetActiveAdapter(Adapters* adapters, const std::string& adapter_name
   adapter_names_.push_back(adapter_name);
 }
 
+void State::InvalidateCapturedGraphs() {
+#if ORT_API_VERSION >= 27
+  if (graph_capture_session_) {
+    for (auto it = graph_ids_.begin(); it != graph_ids_.end();) {
+      graph_capture_session_->ReleaseCapturedGraph(it->second.value);
+      it = graph_ids_.erase(it);
+    }
+  }
+#else
+  if (graph_capture_session_) throw std::runtime_error("Graph invalidation requires ORT 1.27 or newer.");
+#endif
+  graph_ids_.clear();
+  ++graph_capture_epoch_;
+}
+
 State::~State() {
   // Release captured graph resources in the EP.
   // Note: the EP contract is to no-op when the id was never captured (e.g., when
