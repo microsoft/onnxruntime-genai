@@ -10,7 +10,6 @@
 #include <functional>
 #include <fstream>
 #include <mutex>
-#include <random>
 #include <set>
 #include <sstream>
 #include <string>
@@ -27,19 +26,23 @@
 #include "../search.h"
 #include "../tracing.h"
 #include "model.h"
+#include "threadpool.h"
 #include "runtime_profiles.h"
 #include "model_package.h"
 #include "gpt.h"
 #include "decoder_only.h"
+#include "qwen38_graph.h"
 #include "speculative_decoding.h"
 #include "whisper.h"
 #include "parakeet.h"
 #include "nemotron_speech.h"
+#include "nemotron_bolt.h"
 #include "moonshine_streaming.h"
 #include "multi_modal.h"
 #include "lfm2.h"
 #include "marian.h"
 #include "decoder_only_pipeline.h"
+#include "qwen38_graph_plane.h"
 #include "qwen_vl_model.h"
 #include "ep/amdgpu/interface.h"
 #include "ep/dml/interface.h"
@@ -82,6 +85,17 @@ bool IsPathValuedSessionOption(std::string_view key) {
          key == kOrtSessionOptionEpContextFilePath;
 }
 
+// Adds a string-valued session config entry, resolving the value of a path-valued key against the model root.
+void AddSessionConfigEntry(const Config& config, OrtSessionOptions& session_options, const std::string& key,
+                           const std::string& value) {
+  if (!value.empty() && IsPathValuedSessionOption(key)) {
+    const std::string resolved = config.ResolvePath(value).string();
+    session_options.AddConfigEntry(key.c_str(), resolved.c_str());
+  } else {
+    session_options.AddConfigEntry(key.c_str(), value.c_str());
+  }
+}
+
 }  // namespace
 
 State::State(const GeneratorParams& params, const Model& model, DeviceInterface* session_device)
@@ -93,24 +107,33 @@ State::State(const GeneratorParams& params, const Model& model, DeviceInterface*
       p_session_device_inputs_{p_session_device_ == model.p_device_ ? model.p_device_inputs_ : p_session_device_},
       run_options_{OrtRunOptions::Create()},
       extra_outputs_{*this} {
-  // Generate a random id for graph capture of the default (1-token) decode shape.
+  // Reserve the default (1-token) decode capture identity.
   if (params_->use_graph_capture) {
     GraphIdForLength(1, 0);
   }
 }
 
-const std::string& State::GraphIdForLength(int graph_capture_length, int graph_capture_variant) {
-  const int graph_key = graph_capture_length * 2 + graph_capture_variant;
-  auto it = graph_ids_.find(graph_key);
-  if (it != graph_ids_.end()) {
-    return it->second.text;
+int State::GraphIdForLength(int graph_capture_length, int graph_capture_variant) {
+  // Activation is additive: each successful SetActiveAdapter appends one name.
+  // Replaying an older adapter set would bypass the new inputs and kernel selection.
+  const auto known_ids = graph_ids_.size();
+  const int id = graph_ids_.Id({static_cast<size_t>(graph_capture_length), static_cast<size_t>(graph_capture_variant),
+                                adapter_names_.size()});
+  if (g_log.enabled && g_log.graph_capture) {
+    if (graph_ids_.size() != known_ids) {
+      Log("graph_capture") << "State graph id=" << id << " length=" << graph_capture_length
+                           << " variant=" << graph_capture_variant << " adapters=" << adapter_names_.size() << std::endl;
+    } else if (id < 0 && !graph_capture_fallback_logged_) {
+      Log("graph_capture") << "State graph capture fallback: "
+                           << (graph_ids_.size() >= GraphAnnotationIds::kMaxCapturedShapes
+                                   ? "capture budget exhausted"
+                                   : "annotation IDs exhausted")
+                           << "; running new keys without capture (" << graph_ids_.size() << "/"
+                           << GraphAnnotationIds::kMaxCapturedShapes << " keys assigned)" << std::endl;
+      graph_capture_fallback_logged_ = true;
+    }
   }
-  // Distinct random annotation id per captured length (ORT captures one graph per id).
-  std::random_device rd;
-  std::mt19937 gen(rd());
-  std::uniform_int_distribution<> dis(1, INT_MAX);
-  const int id_value = dis(gen);
-  return graph_ids_.emplace(graph_key, GraphId{id_value, std::to_string(id_value)}).first->second.text;
+  return id;
 }
 
 void State::DumpInputs() {
@@ -136,13 +159,14 @@ void State::DumpOutputs() {
 }
 
 void State::Run(OrtSession& session, bool graph_capture_this_run, int graph_capture_length,
-                int graph_capture_variant) {
+                int graph_capture_variant, OrtIoBinding* binding) {
   DurationTrace trace{"State::Run"};
 
   if (params_->use_graph_capture) {
     graph_capture_session_ = &session;
     if (graph_capture_this_run) {
-      run_options_->AddConfigEntry("gpu_graph_id", GraphIdForLength(graph_capture_length, graph_capture_variant).c_str());
+      run_options_->AddConfigEntry("gpu_graph_id",
+                                   std::to_string(GraphIdForLength(graph_capture_length, graph_capture_variant)).c_str());
     } else {
       run_options_->AddConfigEntry("gpu_graph_id", "-1");
     }
@@ -179,8 +203,13 @@ void State::Run(OrtSession& session, bool graph_capture_this_run, int graph_capt
     run_options_->AddConfigEntry("disable_synchronize_execution_providers", "1");
   }
 
-  session.Run(run_options_.get(), input_names_.data(), inputs_.data(), input_names_.size(),
-              output_names_.data(), outputs_.data(), output_names_.size());
+  if (binding) {
+    session.Run(run_options_.get(), *binding);
+    binding->SynchronizeOutputs();
+  } else {
+    session.Run(run_options_.get(), input_names_.data(), inputs_.data(), input_names_.size(),
+                output_names_.data(), outputs_.data(), output_names_.size());
+  }
 
   extra_outputs_.RegisterOutputs();
 
@@ -277,13 +306,8 @@ State::~State() {
   // would call std::terminate.
 #if ORT_API_VERSION >= 27
   if (graph_capture_session_) {
-    // Speculative decoding (MTP) may capture more than one input length, each with its
-    // own annotation id, so release every id that was handed out.
-    for (const auto& length_and_id : graph_ids_) {
-      const int id_value = length_and_id.second.value;
-      if (id_value <= 0) {
-        continue;
-      }
+    // Include captures from earlier adapter sets, as well as all input lengths.
+    graph_ids_.ForEachAssignedId([&](int id_value) {
       try {
         graph_capture_session_->ReleaseCapturedGraph(id_value);
       } catch (...) {
@@ -293,7 +317,7 @@ State::~State() {
                          << ") failed: unknown exception" << std::endl;
         }
       }
-    }
+    });
   }
 #endif
 
@@ -349,6 +373,10 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
     init_session_provider_options.device_filtering_options = user_provider_options->device_filtering_options;
 
   device.ShapeInitSessionProviderOptions(init_session_provider_options, user_provider_options);
+  if (type == DeviceType::WEBGPU) {
+    // Native provider factories capture this option when appended, before options are cloned.
+    init_session_provider_options.options.emplace_back("enableGraphCapture", "0");
+  }
 
   provider_options_list.emplace_back(std::move(init_session_provider_options));
   const std::vector<std::string> providers{provider_name};
@@ -376,6 +404,9 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   // decode inputs). Devices that offer none leave the defaults in place.
   device.InitDeviceAllocators(user_provider_options, allocator.device_id_);
   allocator.host_accessible_allocator_ = device.GetHostAccessibleAllocator();
+  if (type == DeviceType::WEBGPU) {
+    allocator.session_options_ = std::move(session_options);
+  }
 }
 
 // Update provider options using values from a parent if they are not already specified in the child.
@@ -494,6 +525,13 @@ std::vector<const char*> SessionInfo::GetOutputSymbolicShape(const std::string& 
 Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   CreateSessionOptions();
   EnsureDeviceOrtInit(*p_device_, *config_);
+  if (config_->engine.dynamic_batching &&
+      config_->engine.dynamic_batching->device_memory_budget_bytes &&
+      p_device_->GetType() == DeviceType::CUDA) {
+    size_t free_bytes, total_bytes;
+    p_device_->GetAvailableMemory(free_bytes, total_bytes);
+    device_memory_budget_initial_free_bytes_ = free_bytes;
+  }
   AddSharedInitializers();
 
   // Inputs-only interface backed by a host-accessible allocation, so the CPU updates the small
@@ -532,6 +570,10 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
 }
 
 void Model::AddSharedInitializers() {
+  if (config_->memory_assets_only_ && !config_->model.decoder.shared_initializers.empty()) {
+    throw std::runtime_error("Memory-only loading does not support shared initializer descriptors.");
+  }
+
   for (const auto& initializer : config_->model.decoder.shared_initializers) {
     if (initializer.name.empty() || initializer.data_file.empty() || initializer.length.empty() ||
         initializer.shape.empty() || initializer.data_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED) {
@@ -635,12 +677,10 @@ static DeviceInterface* AppendSessionProviders(Model& model,
   return session_device ? session_device : GetDeviceInterface(DeviceType::CPU);
 }
 
-DeviceInterface* Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
-                                                       OrtSessionOptions& session_options,
-                                                       bool is_primary_session_options,
-                                                       bool disable_graph_capture,
-                                                       bool cloned_from_parent,
-                                                       bool append_providers) {
+void ApplySessionOptionsFromConfig(
+    const Config& config,
+    const Config::SessionOptions& config_session_options,
+    OrtSessionOptions& session_options, bool cloned_from_parent) {
   // Default to a limit of 16 threads to optimize performance
   constexpr int min_thread_nums = 1;
   constexpr int max_thread_nums = 16;
@@ -655,6 +695,10 @@ DeviceInterface* Model::CreateSessionOptionsFromConfig(const Config::SessionOpti
 
   if (config_session_options.inter_op_num_threads.has_value()) {
     session_options.SetInterOpNumThreads(config_session_options.inter_op_num_threads.value());
+  }
+
+  if (config_session_options.use_deterministic_compute.has_value()) {
+    session_options.SetDeterministicCompute(config_session_options.use_deterministic_compute.value());
   }
 
   if (config_session_options.enable_cpu_mem_arena.has_value()) {
@@ -692,13 +736,8 @@ DeviceInterface* Model::CreateSessionOptionsFromConfig(const Config::SessionOpti
    * Set all session options that are key-value pairs of strings.
    * Reference: https://github.com/microsoft/onnxruntime/blob/main/include/onnxruntime/core/session/onnxruntime_session_options_config_keys.h
    */
-  for (auto& config_entry : config_session_options.config_entries) {
-    if (!config_entry.second.empty() && IsPathValuedSessionOption(config_entry.first)) {
-      const std::string resolved = config_->ResolvePath(config_entry.second).string();
-      session_options.AddConfigEntry(config_entry.first.c_str(), resolved.c_str());
-    } else {
-      session_options.AddConfigEntry(config_entry.first.c_str(), config_entry.second.c_str());
-    }
+  for (const auto& [key, value] : config_session_options.config_entries) {
+    AddSessionConfigEntry(config, session_options, key, value);
   }
 
   // Register custom ops libraries only if explicitly configured. custom_ops_library comes first, then every entry of
@@ -715,12 +754,16 @@ DeviceInterface* Model::CreateSessionOptionsFromConfig(const Config::SessionOpti
   // within one of these to prevent loading arbitrary libraries from disk.
   std::vector<std::filesystem::path> allowed_dirs;
   if (!custom_ops_libraries.empty()) {
+    if (config.memory_assets_only_) {
+      throw std::runtime_error("Memory-only loading does not support custom-ops library paths.");
+    }
     // Reference: https://github.com/microsoft/onnxruntime/blob/main/include/onnxruntime/core/session/onnxruntime_ep_device_ep_metadata_keys.h
     constexpr const char* const library_path_metadata_key_name = "library_path";
 
     // 1. GenAI model folder
     std::error_code ec;
-    auto model_dir = std::filesystem::canonical(std::filesystem::path(config_->config_path.string()), ec);
+    auto model_dir = std::filesystem::canonical(
+        std::filesystem::path(config.config_path.string()), ec);
     if (!ec) allowed_dirs.push_back(model_dir);
 
     // 2. EP library directories
@@ -775,6 +818,9 @@ DeviceInterface* Model::CreateSessionOptionsFromConfig(const Config::SessionOpti
     if (custom_library_path.is_relative()) {
       for (const auto& dir : allowed_dirs) {
         std::filesystem::path candidate = dir / custom_library_path;
+#if defined(_WIN32)
+        candidate = ResolveWindowsSharedLibraryPath(candidate);
+#endif
         if (std::filesystem::exists(candidate, ec)) {
           custom_library_file_prefix = std::filesystem::canonical(candidate).string();
           resolved = true;
@@ -842,7 +888,15 @@ DeviceInterface* Model::CreateSessionOptionsFromConfig(const Config::SessionOpti
   if (config_session_options.graph_optimization_level.has_value()) {
     session_options.SetGraphOptimizationLevel(config_session_options.graph_optimization_level.value());
   }
+}
 
+DeviceInterface* Model::CreateSessionOptionsFromConfig(
+    const Config::SessionOptions& config_session_options,
+    OrtSessionOptions& session_options, bool is_primary_session_options,
+    bool disable_graph_capture, bool cloned_from_parent,
+    bool append_providers) {
+  ApplySessionOptionsFromConfig(*config_, config_session_options,
+                                session_options, cloned_from_parent);
   if (!append_providers) {
     return nullptr;
   }
@@ -893,7 +947,17 @@ void Model::CreateSessionOptions() {
   if (!p_device_)
     p_device_ = GetDeviceInterface(DeviceType::CPU);
 
+  // The runtime profile merges its session options into the decoder config entries, updating an entry in place or
+  // appending a new one. Apply only the entries it changed or added to the primary session options, resolved like the
+  // rest of the config. Replaying the others would undo that resolution and the provider setup above.
+  const auto entries_before_profile = config_->model.decoder.session_options.config_entries;
   ApplyRuntimeProfileForSelectedDevice(*config_, *p_device_);
+  const auto& entries = config_->model.decoder.session_options.config_entries;
+  for (size_t i = 0; i < entries.size(); ++i) {
+    if (i >= entries_before_profile.size() || entries[i] != entries_before_profile[i]) {
+      AddSessionConfigEntry(*config_, *session_options_, entries[i].first, entries[i].second);
+    }
+  }
 }
 
 OrtSessionOptions* Model::GetSessionOptions(const std::string& model_id) const {
@@ -906,10 +970,39 @@ OrtSessionOptions* Model::GetSessionOptions(const std::string& model_id) const {
   return session_options_.get();
 }
 
-std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::string& model_filename, OrtSessionOptions* session_options) {
+std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::string& model_filename,
+                                                 OrtSessionOptions* session_options, bool is_session_recreation) {
   std::unique_ptr<OrtSession> session;
-  if (auto model_data_it = config_->model_data_spans_.find(model_filename);
-      model_data_it != config_->model_data_spans_.end()) {
+  if (config_->memory_assets_only_) {
+    auto graph = config_->model_data_spans_.find(model_filename);
+    if (graph == config_->model_data_spans_.end() || graph->second.empty()) {
+      throw std::runtime_error("Memory asset bundle is missing graph: " + model_filename);
+    }
+    if (config_->external_data_spans_.empty()) {
+      throw std::runtime_error("Memory asset bundle is missing external initializer buffers.");
+    }
+    auto options = session_options->Clone();
+    std::vector<fs::path> paths;
+    std::vector<char*> buffers;
+    std::vector<size_t> lengths;
+    paths.reserve(config_->external_data_spans_.size());
+    for (const auto& [name, data] : config_->external_data_spans_) {
+      paths.emplace_back(name);
+      // ORT's C API takes char*, but direct-buffer mode does not modify inputs.
+      buffers.push_back(const_cast<char*>(reinterpret_cast<const char*>(data.data())));
+      lengths.push_back(data.size());
+    }
+    std::vector<const ORTCHAR_T*> names;
+    for (const auto& path : paths) {
+      names.push_back(path.c_str());
+    }
+    Ort::ThrowOnError(Ort::api->AddExternalInitializersFromFilesInMemory(
+        options.get(), names.data(), buffers.data(), lengths.data(), names.size()));
+    options->AddConfigEntry("session.use_external_initializer_file_buffers_directly", "1");
+    session = OrtSession::Create(ort_env, graph->second.data(),
+                                 graph->second.size(), options.get());
+  } else if (auto model_data_it = config_->model_data_spans_.find(model_filename);
+             !is_session_recreation && model_data_it != config_->model_data_spans_.end()) {
     // If model data was provided, load the model from memory
     if (model_data_it->second.empty()) {
       throw std::runtime_error("Failed to load model data from memory for " + model_filename);
@@ -933,6 +1026,8 @@ std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::str
       model_filename == config_->model.decoder.filename) {
     SessionInfo decoder_session_info;
     decoder_session_info.Add(*session);
+    ModelStateManifest::ResolveDisabledIndexerCapacity(
+        config_->model.decoder, decoder_session_info);
     ModelStateManifest{config_->model.decoder}.ValidateSession(decoder_session_info);
   }
 
@@ -995,6 +1090,8 @@ std::unique_ptr<Config> CreateConfig(OrtEnv& ort_env, const char* config_path, c
 }
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
+  if (config->model.type == "nemotron_bolt")
+    return std::make_shared<NemotronBoltModel>(std::move(config), ort_env);
   if (config->model.draft)
     return std::make_shared<SpeculativeDecodingModel>(std::move(config), ort_env);
   if (!config->model.decoder.pipeline.empty() &&
@@ -1003,10 +1100,13 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
       throw std::runtime_error("Pipelined decoder is not supported for model type '" + config->model.type + "'");
     return std::make_shared<Qwen2_5_VL_PipelineModel>(std::move(config), ort_env);
   }
-  if (ModelType::IsLFM2(config->model.type))
+  // Only paged exports have state groups; they run in the Engine, which takes a DecoderOnly_Model.
+  if (ModelType::IsLFM2(config->model.type) && !config->model.decoder.state_groups)
     return std::make_shared<LFM2_Model>(std::move(config), ort_env);
   if (config->model.type == "gpt2")
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
+  if (config->model.type == "qwen38_flash_graph")
+    return std::make_shared<Qwen38GraphModel>(std::move(config), ort_env);
   if (ModelType::IsLLM(config->model.type))
     return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
   if (ModelType::IsRNNT(config->model.type))
@@ -1020,7 +1120,7 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
   if (ModelType::IsALM(config->model.type))
     return std::make_shared<WhisperModel>(std::move(config), ort_env);
   if (ModelType::IsVLM(config->model.type))
-    return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, false);
+    return MultiModalLanguageModel::Create(std::move(config), ort_env, true, false);
   if (ModelType::IsMMM(config->model.type)) {
     // Auto-detect speech support: require both the speech ONNX model filename
     // and the preprocessing config to be present. If only one is set, throw
@@ -1037,7 +1137,7 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
           "speech.config_filename is set but speech.filename is missing. "
           "Both are required for audio support.");
     }
-    return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, has_speech_model);
+    return MultiModalLanguageModel::Create(std::move(config), ort_env, true, has_speech_model);
   }
   if (ModelType::IsPipe(config->model.type))
     return std::make_shared<DecoderOnlyPipelineModel>(std::move(config), ort_env);

@@ -12,13 +12,18 @@ from __future__ import annotations
 import types
 
 import numpy as np
-import onnxruntime as ort
 import pytest
 from _builder_test_utils import load_builder_module, ort_runs_causal_conv_with_state
 
+torch = pytest.importorskip("torch")
+pytest.importorskip("onnx")
+ort = pytest.importorskip("onnxruntime")
+if not hasattr(ort, "InferenceSession"):
+    # _builder_test_utils puts an empty onnxruntime module in place when the package is missing.
+    pytest.skip("onnxruntime is not installed", allow_module_level=True)
+
 base_module = load_builder_module("base")
 ir = base_module.ir
-torch = base_module.torch
 Model = base_module.Model
 # The real transformers, or the stub that `load_builder_module` puts in its place when it is missing.
 transformers = base_module.transformers

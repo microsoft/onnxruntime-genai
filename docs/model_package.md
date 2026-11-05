@@ -263,9 +263,47 @@ and must not overlap another reachable profile. No match uses the base settings.
 two profiles may share the same memory range with
 `"eligibility":{"minimum_total_device_memory_bytes":0,"is_integrated":true}` and
 `"eligibility":{"minimum_total_device_memory_bytes":0,"is_integrated":false}`.
+
+Optional `minimum_effective_host_memory_bytes` and `maximum_effective_host_memory_bytes` set inclusive
+bounds on the effective host memory, and optional `minimum_available_host_memory_bytes` sets a lower
+bound on the host memory that is available now. The effective host memory is the physical memory, capped
+by the Linux cgroup v2 `memory.max` limit that applies to the process. The available host memory is
+`MemAvailable` from `/proc/meminfo` on Linux and the available physical memory reported by
+`GlobalMemoryStatusEx` on Windows, capped by the cgroup headroom (`memory.max` minus `memory.current`) and
+never above the effective host memory. The cgroup headroom only tightens an available memory that was read:
+when `MemAvailable` cannot be read, the available host memory is unknown. The cgroup headroom counts page
+cache charged to the cgroup as used, so it under-reports rather than over-reports. Within one profile, a
+`maximum_effective_host_memory_bytes` below its own `minimum_effective_host_memory_bytes` or
+`minimum_available_host_memory_bytes` is invalid, since the profile could never match.
+
+On Linux the cgroup limit and headroom come from the process's own cgroup, not from the root of the
+mounted cgroup hierarchy. The cgroup is the `0::<path>` entry of `/proc/self/cgroup`, located under the
+cgroup2 mount in `/proc/self/mountinfo`. The mount may be rooted at a sub-cgroup, as in a container that
+sees only its own cgroup, in which case the path is taken relative to the mount root. The limit is the
+tightest `memory.max` and the headroom is the tightest `memory.max` minus `memory.current` over that
+cgroup and each ancestor up to the mount root, so a service cgroup with a tighter limit or less headroom
+than the process's own cgroup is honored. A level whose `memory.max` is `max`, or that has no `memory.max`
+(the hierarchy root, or a cgroup without the memory controller), does not bound the process, while a
+`memory.max` of `0` is a limit of zero bytes. cgroup v1 limits are not consulted, and a system without a
+cgroup2 mount uses the physical memory unchanged. When cgroup v2 applies but the process's cgroup cannot be
+read or located (an unreadable or malformed `/proc/self/cgroup` or `/proc/self/mountinfo`, a cgroup that is
+not below any cgroup2 mount root, a `memory.max` that exists but cannot be read at any level, including the
+root of a container's cgroup namespace, which looks like the hierarchy root but has the file, or an
+unparseable `memory.max` or `memory.current`), both host memory facts are unknown rather than falling back to
+the host-wide values.
+
+A value the platform cannot report (for example the available host memory on macOS) or that could not be
+resolved does not match a profile that bounds it. Because the available host memory never exceeds the
+effective host memory, a `minimum_available_host_memory_bytes` above another profile's
+`maximum_effective_host_memory_bytes` keeps the two profiles from overlapping.
 `overlay` is typed and may contain any subset of these fields:
 
 - `model.decoder.filename`
+- `model.decoder.session_options`: an object of string-valued ORT session config entries (for example
+  `"session.moe.offload.mode": "required"`) that replace or add to the entries of the same name in
+  the base `model.decoder.session_options`. A path-valued entry is resolved the same way as in the base
+  `session_options`. The typed session options (for example `intra_op_num_threads` or
+  `graph_optimization_level`) are rejected here.
 - `engine.dynamic_batching.num_blocks`
 - `engine.dynamic_batching.max_batch_size`
 - `engine.dynamic_batching.max_scheduled_tokens`
@@ -306,6 +344,13 @@ model and Engine allocation remains the authoritative fit check, not the free-me
 When GenAI logging is enabled, Model creation reports the chosen profile (or base configuration)
 and the total/free device memory and integrated status used for selection. An unknown free-memory
 value does not match a profile with free-memory bounds.
+
+Setting `ORTGENAI_ENABLE_RUNTIME_PROFILE=<id>` applies the profile with that `id` and skips
+eligibility matching, so the profile of a smaller GPU can be tried on a larger one. An id that is
+not in `runtime_profiles` fails Model creation instead of falling back to the base settings; an
+empty value is ignored. The override only takes effect for models that declare `runtime_profiles`.
+The forced profile's overlay is applied as written, even if the device is too small for it, and the
+integrated-status query is skipped, so a device that cannot report it does not drop the forced profile.
 
 ## Authoring notes
 

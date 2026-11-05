@@ -13,7 +13,7 @@ and transcribed text is printed incrementally as it becomes available.
 ## Prerequisites
 
 - .NET 8.0 SDK or later
-- ONNX Runtime GenAI C# package ([installation instructions](https://onnxruntime.ai/docs/genai/howto/install))
+- ONNX Runtime GenAI C# package v0.19.0 ([installation instructions](https://onnxruntime.ai/docs/genai/howto/install))
 - A supported streaming ASR ONNX model, for example:
   - `nvidia/nemotron-speech-streaming-en-0.6b` (Nemotron)
   - a Moonshine streaming export (`streaming_enc_dec_asr`)
@@ -25,6 +25,10 @@ cd examples/csharp/
 dotnet build ModelASR -c Release
 ```
 
+This example uses the officially released GenAI `0.19.0` CPU and CUDA packages, which contain the
+required `ASRPostProcessor` APIs for plain-text and timestamped output.
+No local project reference or local-build switch is provided.
+
 ## Run
 
 ```bash
@@ -35,7 +39,7 @@ cd ./ModelASR/bin/Release/net8.0/
 ### Arguments
 
 | Argument | Description |
-|---|---|
+| --- | --- |
 | `model_path` | Path to the streaming ASR ONNX model directory |
 | `audio_file.wav` | Path to a WAV audio file (any sample rate — resampled automatically) |
 | `execution_provider` | *(Optional)* Execution provider: `cpu`, `cuda`, `dml`, or `follow_config` (default: `follow_config`) |
@@ -57,7 +61,37 @@ The example prints transcribed text incrementally as each audio chunk is process
 followed by a summary with the full transcript, audio duration, wall-clock time,
 and real-time factor (RTFx).
 
+For Nemotron, configure `model.timestamp_level` in `genai_config.json` as `word`, `segment`, or `all`
+to print completed timestamp records instead of incremental token text. `ASRPostProcessor`
+owns decoding and grouping, consumes every sequential emission through `ProcessNext()`,
+and exposes read-only per-call results through `GetNextResults()`.
+Results expose `Text` and nullable `TimestampResult` properties; timestamps expose
+`Words` and `Segments`. Records expose `Text` and a `TimeInterval` tuple with `Start` and `Stop` elements.
+These objects borrow the processor's current output. The sample appends needed
+values to its own transcript before the next processing or finalization call.
+`FinalizeProcessing()` completes trailing records. `off` (the default) returns ordinary text
+without timestamps; Moonshine supports only this plain-text path. See
+[Nemotron streaming timestamps](../../../docs/nemotron_speech_timestamps.md) for configuration and
+output formats.
+
+### Segment timestamps
+
+Set the existing `model.timestamp_level` field to `segment` in the model's
+`genai_config.json` before loading the model, then use the same ModelASR executable:
+
+```bash
+./ModelASR /path/to/nemotron-model /path/to/audio.wav cuda
 ```
+
+The sample builds the timestamped transcript from completed segments, formatted as
+`[StartTime - StopTime] SegmentText`, rather than concatenating token fragments.
+It flushes remaining audio and calls `FinalizeProcessing()` to complete the trailing
+segment. Timestamp state is initialized by `ASRPostProcessor(generator)`; no
+explicit metadata-state initialization is needed. The generator must outlive the
+processor, and the sample copies each formatted record into its own transcript
+before the next processing or finalization call.
+
+```text
 ------------------------------------------------------------
  This is an example of streaming speech recognition...
 ============================================================

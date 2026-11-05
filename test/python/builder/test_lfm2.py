@@ -8,7 +8,8 @@ epsilon falls back to 1e-6 and `LFM2Model` must set the checkpoint's value. Stan
 the layernorm epsilon; a GroupQueryAttention node that fuses the Q/K norms (CUDA and WebGPU) carries its
 own `qk_norm_epsilon` attribute.
 
-In a padded batch, each row must keep the conv state of its own last real tokens, not of the pads.
+In a padded batch, each row must keep the conv state of its own last real tokens, not of the pads. In a paged
+export, each packed sequence must keep its own conv state.
 """
 
 from __future__ import annotations
@@ -17,13 +18,16 @@ import re
 
 import numpy as np
 import pytest
-from _builder_test_utils import load_builder_module, ort_runs_causal_conv_with_state
+from _builder_test_utils import check_node_shapes, load_builder_module, ort_runs_causal_conv_with_state
 
 torch = pytest.importorskip("torch")
 onnx = pytest.importorskip("onnx")
 # Extractor runs a part of a graph.
 onnx_utils = pytest.importorskip("onnx.utils")
 ort = pytest.importorskip("onnxruntime")
+if not hasattr(ort, "InferenceSession"):
+    # _builder_test_utils puts an empty onnxruntime module in place when the package is missing.
+    pytest.skip("onnxruntime is not installed", allow_module_level=True)
 
 lfm2_module = load_builder_module("lfm2")
 ir = lfm2_module.ir
@@ -304,6 +308,8 @@ def test_lfm2_conv_state_of_each_row(tmp_path):
     ir.save(model.model, tmp_path / "model.onnx")
     (shape_node,) = [node for node in model.model.graph if node.name == "/model/last_real_token/seq_len/Shape"]
     hidden_states = shape_node.inputs[0].name
+    # S comes from layer 0's [B, S, H] input. A Shape of the [B, C, S] conv input stops WebGPU graph capture.
+    assert hidden_states == "/model/layers.0/operator_layernorm/output_0"
     conv_input = "/model/layers.0/conv/Mul_1/output_0"
     subgraph = onnx_utils.Extractor(onnx.load(tmp_path / "model.onnx")).extract_model(
         ["attention_mask", hidden_states, conv_input, "past.0.conv"], ["present.0.conv"]
@@ -426,13 +432,36 @@ def test_lfm2_last_real_token_with_a_static_mask(tmp_path):
     assert position([[0, 0, 1, 1], [1, 0, 1, 1], [1, 1, 0, 0]], sequence_length=4) == [4, 4, 2]
 
 
-def test_lfm2_paged_export_keeps_the_conv_op_state():
-    # Paged exports have no attention mask to find the last real token with.
-    model, _ = _build_tiny_lfm2({"use_paged_attention": True}, "cuda", ir.DataType.FLOAT16)
+@pytest.mark.parametrize("kind", sorted(TINY_MODELS))
+def test_lfm2_paged_conv_layers_keep_each_sequence_apart(kind):
+    # CausalConvWithState would run the packed tokens of all sequences as one sequence.
+    model, _ = _build_tiny_lfm2({"use_paged_attention": True}, "cuda", ir.DataType.FLOAT16, kind=kind)
 
     graph = model.model.graph
     assert _conv_state_producers(graph) == {
-        "present.0.conv": "CausalConvWithState",
-        "present.2.conv": "CausalConvWithState",
+        "present.0.conv": "VarlenCausalConvWithState",
+        "present.2.conv": "VarlenCausalConvWithState",
     }
-    assert not [node.name for node in graph if node.op_type == "GatherElements"]
+    for layer_id in _conv_layers(model):
+        conv = graph.node(f"/model/layers.{layer_id}/conv/VarlenCausalConvWithState")
+        assert [value.name if value is not None else "" for value in conv.inputs] == [
+            f"/model/layers.{layer_id}/conv/Mul_1/output_0",
+            f"model.layers.{layer_id}.conv.conv.weight",
+            "cumulative_sequence_lengths",
+            "",
+            f"past.{layer_id}.conv",
+        ]
+        assert conv.attributes["activation"].value == "none"
+    assert model.make_decoder_state_groups({}, {}) == [
+        {"kind": "paged_kv", "layer_ids": [1, 3]},
+        {"kind": "fixed_conv", "layer_ids": [0, 2]},
+    ]
+    # A rank-3 Transpose of the packed rank-2 tokens fails to load in onnxruntime.
+    assert not [node.name for node in graph if "/conv/" in node.name and node.op_type == "Transpose"]
+    check_node_shapes(ir.serde.serialize_model(model.model))
+
+
+@pytest.mark.parametrize("kind", sorted(TINY_MODELS))
+def test_lfm2_paged_conv_layers_need_cuda(kind):
+    with pytest.raises(NotImplementedError, match="CUDA only"):
+        _build_tiny_lfm2({"use_paged_attention": True}, "webgpu", ir.DataType.FLOAT16, kind=kind)

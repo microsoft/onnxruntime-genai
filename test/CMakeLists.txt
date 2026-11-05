@@ -13,17 +13,24 @@ file(GLOB test_srcs CONFIGURE_DEPENDS
 )
 
 # Keep tests with dedicated white-box executables out of the public-API unit_tests target.
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/audio_speech_validation_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/cpu_cast_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/dflash2_config_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/environment-tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/kv_cache_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/lfm2_audio_frames_test.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/position_inputs_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/lfm2_vl_image_geometry_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/multi_modal_device_placement_test.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/parallel_performance_tests.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/parallel_preprocessing_tests.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/parallel_utils_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/model_package_test.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/mtp_config_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/qwen2vl_position_inputs_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/reinit_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/search_checkpoint_tests.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/state_graph_capture_tests.cpp")
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER AND ENABLE_CUDA_KERNEL_TESTS)
   message(STATUS "Including CUDA kernel tests in the build.")
@@ -106,6 +113,29 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER AND ENABLE_CUDA_KERNEL_TESTS)
     target_compile_options(cuda_batched_sampler_tests PRIVATE "-fvisibility=hidden")
   endif()
   add_test(NAME CudaBatchedSamplerTests COMMAND cuda_batched_sampler_tests)
+
+  # Runs the Engine's DFlash 2 / LiLiCorr drafter against a real exported drafter (skipped without LILICORR_TEST_DIR).
+  add_executable(lilicorr_drafter_tests
+    "${CMAKE_CURRENT_SOURCE_DIR}/cpp/lilicorr_drafter_tests/lilicorr_drafter_tests.cpp")
+  target_include_directories(lilicorr_drafter_tests PRIVATE
+    ${ORT_HEADER_DIR}
+    ${onnxruntime_extensions_SOURCE_DIR}/shared/api
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/cpp
+  )
+  target_link_libraries(lilicorr_drafter_tests PRIVATE
+    onnxruntime-genai-obj
+    GTest::gtest
+  )
+  add_dependencies(lilicorr_drafter_tests onnxruntime-genai)
+  set_target_properties(lilicorr_drafter_tests PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>"
+    FOLDER "Tests"
+  )
+  if(NOT MSVC)
+    target_compile_options(lilicorr_drafter_tests PRIVATE "-fvisibility=hidden")
+  endif()
+  add_test(NAME LiLiCorrDrafterTests COMMAND lilicorr_drafter_tests)
 endif()
 
 set(TEST_MODEL_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/models/")
@@ -199,6 +229,36 @@ if (NOT MSVC)
 endif()
 
 add_test(NAME ReInitTests COMMAND reinit_tests)
+add_executable(parallel_preprocessing_tests
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/parallel_performance_tests.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/parallel_preprocessing_tests.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/parallel_utils_tests.cpp")
+target_include_directories(parallel_preprocessing_tests PRIVATE
+  ${ORT_HEADER_DIR}
+  ${onnxruntime_extensions_SOURCE_DIR}/shared/api
+  ${CMAKE_SOURCE_DIR}/src
+)
+target_link_libraries(parallel_preprocessing_tests PRIVATE
+  onnxruntime-genai-obj
+  GTest::gtest
+)
+add_dependencies(parallel_preprocessing_tests onnxruntime-genai)
+set_target_properties(parallel_preprocessing_tests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>"
+  FOLDER "Tests"
+)
+if(NOT MSVC)
+  target_compile_options(parallel_preprocessing_tests PRIVATE "-fvisibility=hidden")
+endif()
+add_test(NAME ParallelPreprocessingTests
+  COMMAND parallel_preprocessing_tests --gtest_filter=-ParallelPerformanceTests.*)
+option(ENABLE_PREPROCESSING_PERFORMANCE_TESTS
+  "Register preprocessing timing checks; requires an idle, known CPU setup" OFF)
+if(ENABLE_PREPROCESSING_PERFORMANCE_TESTS)
+  add_test(NAME ParallelPreprocessingPerformanceTests
+    COMMAND parallel_preprocessing_tests --gtest_filter=ParallelPerformanceTests.*)
+  set_tests_properties(ParallelPreprocessingPerformanceTests PROPERTIES LABELS "performance")
+endif()
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/telemetry-shutdown-tests.cmake")
 
@@ -288,13 +348,17 @@ file(GLOB engine_unit_test_srcs CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/engine/*.cpp"
 )
 list(APPEND engine_unit_test_srcs
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/position_inputs_tests.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/audio_speech_validation_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/dflash2_config_test.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/mtp_config_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/model_package_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/lfm2_audio_frames_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/lfm2_vl_image_geometry_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/multi_modal_device_placement_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/qwen2vl_position_inputs_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/search_checkpoint_tests.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/state_graph_capture_tests.cpp"
 )
 add_executable(engine_unit_tests ${engine_unit_test_srcs})
 target_include_directories(engine_unit_tests PRIVATE
@@ -343,6 +407,34 @@ target_compile_definitions(engine_unit_tests PRIVATE
   ORTGENAI_TEST_CUSTOM_OPS_SECOND_FILENAME="$<TARGET_FILE_NAME:custom_ops_test_second>"
 )
 add_dependencies(engine_unit_tests custom_ops_test_first custom_ops_test_second)
+# A plane library as it shipped before the INT8 embedding table and INT8 PLE shards (no qwen38_plane_capabilities export), for
+# the loader tests in qwen38_plane_tests.cpp: it does no GPU work, so they need neither CUDA nor ENABLE_QWEN38_PLANE.
+add_library(qwen38_legacy_plane_test_lib SHARED
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/engine/qwen38_legacy_plane_lib/qwen38_legacy_plane_lib.cpp")
+target_include_directories(qwen38_legacy_plane_test_lib PRIVATE ${CMAKE_SOURCE_DIR}/src)
+set_target_properties(qwen38_legacy_plane_test_lib PROPERTIES FOLDER "Tests")
+if (NOT MSVC)
+  target_compile_options(qwen38_legacy_plane_test_lib PRIVATE "-fvisibility=hidden")
+endif()
+target_compile_definitions(engine_unit_tests PRIVATE
+  ORTGENAI_TEST_QWEN38_LEGACY_PLANE_LIB_PATH="$<TARGET_FILE:qwen38_legacy_plane_test_lib>"
+)
+add_dependencies(engine_unit_tests qwen38_legacy_plane_test_lib)
+if(TARGET qwen38_plane)
+  target_compile_definitions(engine_unit_tests PRIVATE
+    ORTGENAI_TEST_QWEN38_PLANE_LIB_PATH="$<TARGET_FILE:qwen38_plane>"
+  )
+  add_dependencies(engine_unit_tests qwen38_plane)
+endif()
+# The plane is compiled into onnxruntime-genai-cuda as well, and the built-in lookup of Qwen38Plane (an empty library path) loads
+# that library from beside the module that holds the loader, which is this binary: the loader test is expected to load it
+# exactly when the target is part of the build.
+if(TARGET onnxruntime-genai-cuda)
+  target_compile_definitions(engine_unit_tests PRIVATE
+    ORTGENAI_TEST_GENAI_CUDA_LIB_PATH="$<TARGET_FILE:onnxruntime-genai-cuda>"
+  )
+  add_dependencies(engine_unit_tests onnxruntime-genai-cuda)
+endif()
 set_target_properties(engine_unit_tests PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>"
     FOLDER "Tests"

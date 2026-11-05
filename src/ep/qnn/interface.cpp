@@ -53,6 +53,7 @@ struct QnnInterfaceBase : DeviceInterface {
   }
 
   std::string GetExecutionProviderName() const override { return "QNN"; }
+  bool IsHostAccessible() const override { return true; }  // Shared memory, see QnnMemory
 
   void InitOrt(const OrtApi& /*api*/, Ort::Allocator& allocator) override {
     assert(!ort_allocator_);
