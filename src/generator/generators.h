@@ -223,6 +223,8 @@ struct OrtGlobals {
   OrtGlobals();
   ~OrtGlobals();
 
+  // Updated under g_ort_globals_mutex; shutdown waits for zero before taking ownership for teardown.
+  std::atomic<size_t> active_resource_releases_{0};
   std::unique_ptr<OrtEnv> env_;
 
   // True when genai (not a host) registered the AMDGPU umbrella EP library on env_. Scoped to this

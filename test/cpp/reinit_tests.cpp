@@ -14,10 +14,13 @@
 // cycle.
 
 #include <atomic>
+#include <condition_variable>
+#include <cstdlib>
 #include <cstring>
 
 #include <filesystem>
 #include <functional>
+#include <future>
 #include <iostream>
 #include <optional>
 #include <stdexcept>
@@ -27,6 +30,9 @@
 
 #include "ort_genai.h"
 #include "generator/generators.h"  // Generators::GetDeviceInterface / DeviceType (from the genai object library)
+#include "models/graph_executor.h"
+#include "models/io/kv_cache.h"
+#include "search.h"
 #include "telemetry/telemetry.h"
 #if USE_DML
 #include "ep/dml/interface.h"  // Generators::InitDmlInterface / CloseDmlInterface / GetDmlInterface
@@ -182,6 +188,311 @@ TEST(ReInitTests, SequentialModelLoads) {
   RunGenerateOnce("");  // second load after the first was fully destroyed -- must not dangle
 
   OgaShutdown();  // leave process-global state clean for any following test
+}
+
+namespace {
+
+constexpr auto kConcurrencyTimeout = std::chrono::seconds(10);
+
+void ConcurrencyTimeout(const char* operation) {
+  std::cerr << "Timed out waiting for " << operation << std::endl;
+  std::abort();  // Joining a deadlocked worker would otherwise hang the test executable.
+}
+
+class TestEvent {
+ public:
+  void Set() {
+    std::scoped_lock lock{mutex_};
+    set_ = true;
+    cv_.notify_all();
+  }
+
+  bool WaitFor(std::chrono::milliseconds timeout) {
+    std::unique_lock lock{mutex_};
+    return cv_.wait_for(lock, timeout, [&] { return set_; });
+  }
+
+  void Wait() {
+    if (!WaitFor(kConcurrencyTimeout))
+      ConcurrencyTimeout("test barrier");
+  }
+
+ private:
+  std::mutex mutex_;
+  std::condition_variable cv_;
+  bool set_{};
+};
+
+class ConcurrentOperation {
+ public:
+  explicit ConcurrentOperation(std::function<void()> operation) {
+    std::packaged_task<void()> task{std::move(operation)};
+    result_ = task.get_future();
+    thread_ = std::thread{std::move(task)};
+  }
+
+  ~ConcurrentOperation() { Join(); }
+
+  bool WaitFor(std::chrono::milliseconds timeout) {
+    return result_.wait_for(timeout) == std::future_status::ready;
+  }
+
+  void Get() {
+    Join();
+    result_.get();
+  }
+
+ private:
+  void Join() {
+    if (!thread_.joinable())
+      return;
+    if (!WaitFor(kConcurrencyTimeout))
+      ConcurrencyTimeout("concurrent operation");
+    thread_.join();
+  }
+
+  std::future<void> result_;
+  std::thread thread_;
+};
+
+// Intercept only the synchronization points; all sessions, allocators and their destruction are real ORT operations.
+class ScopedOrtCallbacks {
+ public:
+  ScopedOrtCallbacks() : original_{Ort::api}, api_{*original_} {
+    current_ = this;
+    api_.CreateSessionOptions = CreateSessionOptions;
+    api_.ReleaseAllocator = ReleaseAllocator;
+    api_.ReleaseSession = ReleaseSession;
+    api_.ReleaseEnv = ReleaseEnv;
+    Ort::api = &api_;
+  }
+
+  ~ScopedOrtCallbacks() {
+    Ort::api = original_;
+    current_ = nullptr;
+  }
+
+  std::function<void()> on_session_options;
+  std::function<void()> on_release_allocator;
+  std::function<void(OrtSession*)> on_release_session;
+  std::function<void()> on_release_env;
+
+ private:
+  static OrtStatus* ORT_API_CALL CreateSessionOptions(OrtSessionOptions** options) noexcept {
+    if (current_->on_session_options)
+      current_->on_session_options();
+    return current_->original_->CreateSessionOptions(options);
+  }
+
+  static void ORT_API_CALL ReleaseAllocator(OrtAllocator* allocator) noexcept {
+    if (current_->on_release_allocator)
+      current_->on_release_allocator();
+    current_->original_->ReleaseAllocator(allocator);
+  }
+
+  static void ORT_API_CALL ReleaseSession(OrtSession* session) noexcept {
+    if (current_->on_release_session)
+      current_->on_release_session(session);
+    current_->original_->ReleaseSession(session);
+  }
+
+  static void ORT_API_CALL ReleaseEnv(OrtEnv* env) noexcept {
+    if (current_->on_release_env)
+      current_->on_release_env();
+    current_->original_->ReleaseEnv(env);
+  }
+
+  const OrtApi* original_;
+  OrtApi api_;
+  inline static ScopedOrtCallbacks* current_{};
+};
+
+// A CPU-backed stand-in for a second device: exercises the full non-CPU EnsureDeviceOrtInit path
+// without requiring an installed plugin EP. No device allocations or inference are mocked.
+struct InitTestDevice : Generators::DeviceInterface {
+  Generators::DeviceType GetType() const override { return Generators::DeviceType::QnnHtp; }
+  std::string GetExecutionProviderName() const override { return "CPU"; }
+  std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
+    return OrtMemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+  }
+  void InitOrt(const OrtApi&, Ort::Allocator& allocator) override { allocator_ = &allocator; }
+  Ort::Allocator& GetAllocator() override { return *allocator_; }
+  std::shared_ptr<Generators::DeviceBuffer> AllocateBase(size_t) override { return {}; }
+  std::shared_ptr<Generators::DeviceBuffer> WrapMemoryBase(void*, size_t) override { return {}; }
+  std::unique_ptr<Generators::Search> CreateGreedy(const Generators::GeneratorParams&) override { return {}; }
+  std::unique_ptr<Generators::Search> CreateBeam(const Generators::GeneratorParams&) override { return {}; }
+  std::unique_ptr<Generators::KeyValueCache> CreateKeyValueCache(Generators::State&) override { return {}; }
+  void Synchronize() override {}
+  Ort::Allocator* allocator_{};
+};
+
+class DeviceResourceReleaseConcurrencyTests : public testing::Test {
+ protected:
+  void SetUp() override {
+    OgaShutdown();
+    globals_ = Generators::GetOrtGlobals().get();
+  }
+
+  void TearDown() override { OgaShutdown(); }
+
+  std::unique_ptr<OrtSession> CreateCpuSession() {
+    auto options = OrtSessionOptions::Create();
+    options->SetIntraOpNumThreads(1);
+    const std::filesystem::path path{MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32/past.onnx"};
+    return OrtSession::Create(Generators::GetOrtEnv(), path.c_str(), options.get());
+  }
+
+  void SeedCudaResources() {
+    // Tag real CPU resources as CUDA so the production cleanup and locks run on CPU-only CI too.
+    globals_->graph_session_cache_.sessions_.emplace(
+        0, Generators::OrtGlobals::SessionCache::Entry{Generators::DeviceType::CUDA, CreateCpuSession()});
+    auto& allocator = globals_->device_allocators_[static_cast<int>(Generators::DeviceType::CUDA)];
+    allocator.session_ = CreateCpuSession();
+    auto memory_info = OrtMemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+    allocator.allocator_ = Ort::Allocator::Create(*allocator.session_, *memory_info);
+  }
+
+  void WaitForReleasePin() {
+    const auto deadline = std::chrono::steady_clock::now() + kConcurrencyTimeout;
+    while (globals_->active_resource_releases_.load() == 0) {
+      if (std::chrono::steady_clock::now() >= deadline)
+        ConcurrencyTimeout("resource-release lifetime pin");
+      std::this_thread::yield();
+    }
+  }
+
+  Generators::OrtGlobals* globals_{};
+};
+
+}  // namespace
+
+TEST_F(DeviceResourceReleaseConcurrencyTests, CudaReleaseWithWebGpuCacheMiss) {
+  SeedCudaResources();
+  TestEvent cache_miss, continue_cache_miss;
+  ScopedOrtCallbacks callbacks;
+  callbacks.on_session_options = [&] {
+    // GetOrCreateSession holds graph_session_cache_.mutex_, before CreateSession calls GetOrtEnv.
+    cache_miss.Set();
+    continue_cache_miss.Wait();
+  };
+  float input[]{1.0f, -2.0f};
+  int32_t output[2]{};
+  auto memory_info = OrtMemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+  ConcurrentOperation graph{[&] {
+    // Use the real WebGPU cache/creation path with CPU execution to avoid a WebGPU runtime dependency.
+    Generators::ExecuteCastOp(input, output, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32,
+                              2, Generators::DeviceType::WEBGPU, "", memory_info.get());
+  }};
+  cache_miss.Wait();
+  ConcurrentOperation release{[] { Oga::ReleaseDeviceResources("CUDA"); }};
+  WaitForReleasePin();
+  continue_cache_miss.Set();
+  EXPECT_NO_THROW(graph.Get());
+  EXPECT_NO_THROW(release.Get());
+
+  EXPECT_EQ(output[0], 1);
+  EXPECT_EQ(output[1], -2);
+  ASSERT_EQ(globals_->graph_session_cache_.sessions_.size(), 1u);
+  EXPECT_EQ(globals_->graph_session_cache_.sessions_.begin()->second.device_type, Generators::DeviceType::WEBGPU);
+  EXPECT_FALSE(globals_->device_allocators_[static_cast<int>(Generators::DeviceType::CUDA)].allocator_);
+}
+
+TEST_F(DeviceResourceReleaseConcurrencyTests, CudaReleaseWithOtherDeviceInitialization) {
+  SeedCudaResources();
+  TestEvent initializing, continue_initialization;
+  ScopedOrtCallbacks callbacks;
+  callbacks.on_session_options = [&] {
+    // EnsureDeviceOrtInit holds device_interfaces_mutex_, before provider setup/GetOrtEnv.
+    initializing.Set();
+    continue_initialization.Wait();
+  };
+  InitTestDevice device;
+  Generators::Config config;
+  ConcurrentOperation initialize{[&] { Generators::EnsureDeviceOrtInit(device, config); }};
+  initializing.Wait();
+  ConcurrentOperation release{[] { Oga::ReleaseDeviceResources("CUDA"); }};
+  WaitForReleasePin();
+  continue_initialization.Set();
+  EXPECT_NO_THROW(initialize.Get());
+  EXPECT_NO_THROW(release.Get());
+
+  auto& allocator = globals_->device_allocators_[static_cast<int>(device.GetType())];
+  ASSERT_NE(device.allocator_, nullptr);
+  EXPECT_EQ(device.allocator_, allocator.allocator_.get());
+  EXPECT_NE(allocator.session_, nullptr);
+  EXPECT_FALSE(globals_->device_allocators_[static_cast<int>(Generators::DeviceType::CUDA)].allocator_);
+  EXPECT_TRUE(globals_->graph_session_cache_.sessions_.empty());
+}
+
+TEST_F(DeviceResourceReleaseConcurrencyTests, ShutdownWaitsForEntireCudaRelease) {
+  SeedCudaResources();
+  auto* env = globals_->env_.get();
+  auto* backing_session = globals_->device_allocators_[static_cast<int>(Generators::DeviceType::CUDA)].session_.get();
+  TestEvent releasing_session, continue_release, shutdown_started;
+  std::atomic<int> destruction_stage{0};
+  ScopedOrtCallbacks callbacks;
+  callbacks.on_release_allocator = [&] { EXPECT_EQ(destruction_stage.exchange(1), 0); };
+  callbacks.on_release_session = [&](OrtSession* session) {
+    if (session != backing_session)
+      return;
+    EXPECT_EQ(destruction_stage.exchange(2), 1);  // Allocator must precede its backing session.
+    releasing_session.Set();
+    continue_release.Wait();
+    EXPECT_EQ(&Generators::GetOrtEnv(), env);
+    EXPECT_EQ(Generators::GetOrtGlobals().get(), globals_);
+  };
+  callbacks.on_release_env = [&] { EXPECT_EQ(destruction_stage.exchange(3), 2); };
+  ConcurrentOperation release{[] { Oga::ReleaseDeviceResources("CUDA"); }};
+  releasing_session.Wait();
+  ASSERT_EQ(globals_->active_resource_releases_.load(), 1u);
+  ConcurrentOperation shutdown{[&] {
+    shutdown_started.Set();
+    OgaShutdown();
+  }};
+  shutdown_started.Wait();
+  EXPECT_FALSE(shutdown.WaitFor(std::chrono::milliseconds(100)));
+  EXPECT_EQ(destruction_stage.load(), 2);
+
+  // Shutdown must not retain the global mutex while waiting: both unrelated lookups and release's
+  // own teardown callback must still be able to obtain the pinned globals/environment.
+  ConcurrentOperation lookup{[&] {
+    EXPECT_EQ(&Generators::GetOrtEnv(), env);
+    EXPECT_EQ(Generators::GetOrtGlobals().get(), globals_);
+  }};
+  EXPECT_NO_THROW(lookup.Get());
+  continue_release.Set();
+  EXPECT_NO_THROW(release.Get());
+  EXPECT_NO_THROW(shutdown.Get());
+  EXPECT_EQ(destruction_stage.load(), 3);
+
+  EXPECT_NE(Generators::GetOrtGlobals()->env_, nullptr);  // Lazy recreation still works after shutdown.
+}
+
+TEST_F(DeviceResourceReleaseConcurrencyTests, ReleaseAndRecreationWaitForShutdownTeardown) {
+  TestEvent tearing_down, continue_teardown, release_started, lookup_started;
+  ScopedOrtCallbacks callbacks;
+  callbacks.on_release_env = [&] {
+    tearing_down.Set();
+    continue_teardown.Wait();
+  };
+  ConcurrentOperation shutdown{[] { OgaShutdown(); }};
+  tearing_down.Wait();
+  ConcurrentOperation release{[&] {
+    release_started.Set();
+    Oga::ReleaseDeviceResources("CUDA");
+  }};
+  ConcurrentOperation lookup{[&] {
+    lookup_started.Set();
+    EXPECT_NE(Generators::GetOrtGlobals()->env_, nullptr);
+  }};
+  release_started.Wait();
+  lookup_started.Wait();
+  EXPECT_FALSE(release.WaitFor(std::chrono::milliseconds(50)));
+  EXPECT_FALSE(lookup.WaitFor(std::chrono::milliseconds(50)));
+  continue_teardown.Set();
+  EXPECT_NO_THROW(shutdown.Get());
+  EXPECT_NO_THROW(release.Get());
+  EXPECT_NO_THROW(lookup.Get());
 }
 
 #if USE_CUDA
