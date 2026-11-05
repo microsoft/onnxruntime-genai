@@ -26,6 +26,8 @@ def add_onnxruntime_dependency(package_id: str):
     On Windows, this function adds the onnxruntime DLL directory to the DLL search path.
     On Linux, this function loads the onnxruntime shared library and its dependencies
     so that they can be found by the dynamic linker.
+    On Linux and macOS, an explicit ORT_LIB_PATH selects the runtime instead of
+    the installed onnxruntime package. Empty or unloadable overrides raise an error.
     """
     if _is_windows():
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -55,6 +57,13 @@ def add_onnxruntime_dependency(package_id: str):
                 _ = ctypes.CDLL(ort_path)
 
     elif _is_linux() or _is_macos():
+        target_lib_path = os.environ.get("ORT_LIB_PATH")
+        if target_lib_path is not None:
+            if not target_lib_path:
+                raise ImportError("ORT_LIB_PATH must not be empty.")
+            _ = ctypes.CDLL(target_lib_path)
+            return
+
         ort_package = importlib.util.find_spec("onnxruntime")
         if not ort_package:
             raise ImportError("Could not find the onnxruntime package.")
