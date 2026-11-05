@@ -21,12 +21,37 @@
 
 #include "config.h"
 #include "engine_test_doubles.h"
+#include "json.h"
 #include "models/model_type.h"
 #include "models/runtime_profiles.h"
 #include "models/session_options.h"
 #include "scoped-environment-variable.h"
 
 namespace Generators::test {
+
+TEST(ConfigTest, LimitsJsonNestingDepth) {
+  struct RecursiveElement : JSON::Element {
+    void OnValue(std::string_view, JSON::Value) override {}
+    Element& OnArray(std::string_view) override { return *this; }
+    Element& OnObject(std::string_view) override { return *this; }
+  } element;
+
+  const auto nested_array = [](size_t depth) {
+    return std::string(depth, '[') + "null" + std::string(depth, ']');
+  };
+  const auto nested_object = [](size_t depth) {
+    std::string json;
+    for (size_t i = 0; i < depth; ++i)
+      json += R"({"value":)";
+    json += "null";
+    json.append(depth, '}');
+    return json;
+  };
+  EXPECT_NO_THROW(JSON::Parse(element, nested_array(64)));
+  EXPECT_THROW(JSON::Parse(element, nested_array(65)), std::runtime_error);
+  EXPECT_NO_THROW(JSON::Parse(element, nested_object(64)));
+  EXPECT_THROW(JSON::Parse(element, nested_object(65)), std::runtime_error);
+}
 
 TEST(ConfigTest, ParsesDeterministicCompute) {
   Config config;
