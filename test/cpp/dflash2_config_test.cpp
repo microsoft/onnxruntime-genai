@@ -1162,7 +1162,7 @@ TEST(Dflash2ConfigTest, ProjectsDrafterWithoutTargetState) {
 }
 
 TEST(Dflash2ConfigTest, PagedAttentionPaddingRequiresCompatiblePolicy) {
-#if ORT_API_VERSION >= 27
+#if ORT_API_VERSION >= 32
   if (!std::getenv("ORTGENAI_TEST_CUDA_PAGED_ATTENTION")) {
     GTEST_SKIP() << "Set ORTGENAI_TEST_CUDA_PAGED_ATTENTION with an admitted CUDA device";
   }
@@ -1232,7 +1232,7 @@ TEST(Dflash2ConfigTest, PagedAttentionPaddingRequiresCompatiblePolicy) {
   EXPECT_EQ(ordinary[9 * 64 + 9 * 64], 0);
   EXPECT_EQ(sanitized_padding[9 * 64 + 9 * 64], 0x4400);
 #else
-  GTEST_SKIP() << "PagedAttention sanitizer opt-out requires ONNX Runtime API 27 or later";
+  GTEST_SKIP() << "PagedAttention sanitizer opt-out requires ONNX Runtime API 32 or later";
 #endif
 }
 
@@ -1614,7 +1614,7 @@ TEST(Dflash2ConfigTest, RunsDrafterWithAnchorRowIndex) {
     fixed_config.model.dflash2.session_options.emplace();
     fixed_config.model.dflash2.session_options->config_entries.emplace_back(
         "session.paged_attention.skip_input_sanitizer", skip_sanitizer ? "1" : "0");
-#if ORT_API_VERSION >= 27
+#if ORT_API_VERSION >= 32
     const bool padding_enabled = skip_sanitizer;
 #else
     const bool padding_enabled = false;
