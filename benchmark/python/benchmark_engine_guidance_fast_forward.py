@@ -437,6 +437,7 @@ def measure(scenario, wall_seconds, tokenizer, peer_reference):
             for earlier, later in zip(turn.token_times, turn.token_times[1:], strict=False)
         ],
         "peer_run_calls_to_first_token": [turn.run_calls_to_first_token for turn in peers],
+        "guided_run_calls_to_first_token": [turn.run_calls_to_first_token for turn in guided if turn.tokens],
         "peer_first_token_ms": [(turn.token_times[0] - turn.arrived_at) * 1000 for turn in peers if turn.tokens],
         "peer_reference_first_diff": [
             first_difference(turn.tokens, peer_reference) for turn in peers if turn.tokens != peer_reference
@@ -480,6 +481,7 @@ def aggregate(runs):
         "cancel_latency_ms": summarize(flat("cancel_latency_ms")),
         "peer_gap_ms": summarize(flat("peer_gap_ms")),
         "peer_run_calls_to_first_token": summarize(flat("peer_run_calls_to_first_token")),
+        "guided_run_calls_to_first_token": summarize(flat("guided_run_calls_to_first_token")),
         "peer_first_token_ms": summarize(flat("peer_first_token_ms")),
         "guided_outputs_sha256": sorted({run["guided_outputs_sha256"] for run in runs}),
         "peers": peers,
@@ -548,6 +550,10 @@ def compare(off_runs, on_runs, tokenizer, max_diffs=20):
 def run(args):
     config = og.Config(args.model_path)
     if args.no_prefix_caching:
+        # Overlaying dynamic_batching onto a model without it would switch it to the paged Engine.
+        genai_config = json.loads((Path(args.model_path) / "genai_config.json").read_text(encoding="utf-8"))
+        if "dynamic_batching" not in genai_config.get("engine", {}):
+            raise SystemExit("--no_prefix_caching needs engine.dynamic_batching in genai_config.json")
         # Every iteration repeats the same prompts; cached prefixes would skip their prefill.
         config.overlay(json.dumps({"engine": {"dynamic_batching": {"prefix_caching": False}}}))
     if args.execution_provider != "follow_config":
@@ -592,6 +598,8 @@ def run(args):
 
     summary = {
         "settings": {key: value for key, value in vars(args).items() if key != "output"},
+        # Which onnxruntime_genai was measured, for comparisons across builds.
+        "build": {"version": og.__version__, "module": og.__file__},
         "max_draft_tokens": max_draft_tokens,
         "peer_reference": reference_status,
         "guided_prompt_tokens": summarize([len(tokens) for tokens in guided_prompts]),
