@@ -733,6 +733,8 @@ struct OgaGenerator : OgaAbstract {
 
 struct OgaASRPostProcessorTimestampRecord : OgaAbstract {
   const char* GetText() const { return OgaASRPostProcessorTimestampRecordGetText(this); }
+  bool HasTimestamp() const { return OgaASRPostProcessorTimestampRecordHasTimestamp(this); }
+  const char* GetSpeakerLabel() const { return OgaASRPostProcessorTimestampRecordGetSpeakerLabel(this); }
   std::pair<int64_t, int64_t> GetFrameInterval() const {
     return {OgaASRPostProcessorTimestampRecordGetStartFrame(this), OgaASRPostProcessorTimestampRecordGetStopFrame(this)};
   }

@@ -553,8 +553,19 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 
   pybind11::class_<PyASRPostProcessorTimestampRecord>(m, "ASRPostProcessorTimestampRecord")
       .def_property_readonly("text", [](const PyASRPostProcessorTimestampRecord& record) { return record.Get().GetText(); })
-      .def_property_readonly("frame_interval", [](const PyASRPostProcessorTimestampRecord& record) { return record.Get().GetFrameInterval(); })
-      .def_property_readonly("time_interval", [](const PyASRPostProcessorTimestampRecord& record) { return record.Get().GetTimestampInterval(); });
+      .def_property_readonly("has_timestamp", [](const PyASRPostProcessorTimestampRecord& record) { return record.Get().HasTimestamp(); })
+      .def_property_readonly("speaker_label", [](const PyASRPostProcessorTimestampRecord& record) -> std::optional<std::string> {
+        const auto* label = record.Get().GetSpeakerLabel();
+        return label ? std::optional<std::string>{label} : std::nullopt;
+      })
+      .def_property_readonly("frame_interval", [](const PyASRPostProcessorTimestampRecord& record) -> std::optional<std::pair<int64_t, int64_t>> {
+        const auto& value = record.Get();
+        return value.HasTimestamp() ? std::optional{value.GetFrameInterval()} : std::nullopt;
+      })
+      .def_property_readonly("time_interval", [](const PyASRPostProcessorTimestampRecord& record) -> std::optional<std::pair<double, double>> {
+        const auto& value = record.Get();
+        return value.HasTimestamp() ? std::optional{value.GetTimestampInterval()} : std::nullopt;
+      });
 
   pybind11::class_<PyASRPostProcessorTimestampResult>(m, "ASRPostProcessorTimestampResult")
       .def_property_readonly("words", [](const PyASRPostProcessorTimestampResult& result) {

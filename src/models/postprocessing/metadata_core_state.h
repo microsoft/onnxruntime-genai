@@ -18,12 +18,14 @@ namespace Generators {
 struct TokenMetadataInput {
   int32_t token_id;
   std::optional<std::pair<int64_t, int64_t>> token_acoustic_frame_interval;
+  std::optional<TokenSpeakerEvidence> speaker_evidence;
 };
 
 struct TimestampRecord {
   std::string text;
-  std::pair<int64_t, int64_t> frame_interval;
-  std::pair<double, double> time_interval;
+  std::optional<std::pair<int64_t, int64_t>> frame_interval;
+  std::optional<std::pair<double, double>> time_interval;
+  std::optional<std::string> speaker_label;
 };
 
 struct TimestampResult {
@@ -47,6 +49,7 @@ struct TimestampPostProcessorConfig {
 struct MetadataCoreConfig {
   TimestampPostProcessorConfig timestamps;
   std::optional<double> seconds_per_frame;
+  bool diarization{};
 };
 
 class MetadataCoreState {
@@ -57,24 +60,27 @@ class MetadataCoreState {
   MetadataCoreState(const MetadataCoreState&) = delete;
   MetadataCoreState& operator=(const MetadataCoreState&) = delete;
   bool TimestampsEnabled() const { return config_.timestamps.level != Config::TimestampLevel::Off; }
+  bool AlignmentEnabled() const { return TimestampsEnabled() || config_.diarization; }
   void ValidateInput(const TokenMetadataInput& token) const;
   void ProcessDecoded(const TokenMetadataInput& token, const OrtxWordPieceInfo& piece, ASRPostProcessorResult& result);
   void ProcessFinalized(ASRPostProcessorResult& result);
   void ProcessCompletedWords(TimestampResult& result);
-  void PublishWord(std::string_view text, std::pair<int64_t, int64_t> interval, TimestampResult& result);
+  void PublishWord(std::string_view text, std::pair<int64_t, int64_t> interval, int speaker, TimestampResult& result);
   void CompleteSegment(TimestampResult& result);
   void AddRecord(std::vector<TimestampRecord>& records, std::string_view text,
-                 std::pair<int64_t, int64_t> interval);
+                 std::pair<int64_t, int64_t> interval, int speaker);
 
   const MetadataCoreConfig& config_;
   TokenWordGroupingState word_grouping_;
   std::optional<int> segment_gap_threshold_frames_;
   double seconds_per_frame_{};
   // Keep intervals until the word grouper's pending-token watermark releases them.
-  std::deque<std::pair<int64_t, int64_t>> pending_token_intervals_;
+  std::deque<TokenMetadataInput> pending_tokens_;
+  std::optional<TokenSpeakerEvidence> last_speaker_evidence_;
   size_t first_pending_token_index_{};
   std::optional<std::string> pending_segment_text_;
   std::pair<int64_t, int64_t> pending_segment_interval_{};
+  int pending_segment_speaker_{-1};
 };
 
 }  // namespace Generators

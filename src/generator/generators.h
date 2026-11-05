@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "leakcheck.h"
+#include "ort_genai_c.h"
 #include "make_string.h"
 #include "models/onnxruntime_api.h"
 #include "smartptrs.h"

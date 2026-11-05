@@ -27,6 +27,46 @@ ASR-specific `ASRPostProcessorResult` values; other subclasses can expose their
 own result types. This processor also supports untimed text when timestamps
 are disabled.
 
+## Speaker attribution
+
+The same generator runs ASR and optional Nemotron diarization for each retained
+central audio chunk. Its private `GetTokenOutputs()` includes optional cumulative
+speaker-probability boundary evidence alongside token IDs and acoustic frame pairs.
+With diarization disabled, the evidence is `std::nullopt`, the generator never asks
+for it, and no diarization session, preprocessing, aggregation, or speaker buffering runs.
+
+`ASRPostProcessor.ProcessNext()` handles evidence through the same private overload,
+word grouper, and `MetadataCoreState` as timestamps. The first and last contributing
+token boundaries define each word's probability window; `TokenDiarization` validates
+stream-wide monotonic evidence and computes the speaker from per-channel means.
+Zero-token chunks still advance the inference cache and cumulative probabilities.
+All grouping, alignment, aggregation, and turn assembly live in GenAI's
+`models/postprocessing/`; Extensions only provides lexical facts and ordinary decoding.
+
+`TimestampRecord` uses optional paired frame/time intervals and an optional speaker
+label. The borrowed `TimestampResult` / `timestamp_result` is present when either
+timestamps or diarization is enabled. Timestamp modes remain `off`, `word`, and
+`segment`; `all` is not supported on this feature branch.
+
+| Timestamps | Diarization output |
+| --- | --- |
+| `off` | Speaker-turn segments with absent frame/time pairs |
+| `word` | Timed words, each with a speaker label |
+| `segment` | Timed speaker-turn segments |
+
+With diarization enabled, turns split only on speaker changes or finalization,
+not punctuation or configured gaps. Timestamp-only segmentation is unchanged.
+C/C++ callers check `HasTimestamp()` before reading timing pairs/scalars; absent
+native scalar values return zero. Python `frame_interval` / `time_interval` and C#
+`FrameInterval` / `TimeInterval` are nullable pairs. Speaker labels use
+`GetSpeakerLabel()`, `speaker_label`, and `SpeakerLabel`, respectively. All new
+properties retain the existing stale-result checks.
+
+Flush all audio and generate the remaining tokens before finalizing the processor.
+Reset clears decoding, grouping, evidence validation, turns, and current results;
+it does not reset the generator or either model's inference cache. If either model
+fails, generation fails rather than publishing an incomplete combined result.
+
 ## Processing Loop
 
 Configure the model's timestamp level before creating the generator, then create
@@ -209,7 +249,7 @@ flowchart TD
 
 ## Configuration
 
-Timestamp levels are `off` (default), `word`, `segment`, and `all`. Enabled
+Timestamp levels are `off` (default), `word`, and `segment`; `all` is rejected. Enabled
 timestamps require a model that produces acoustic intervals, currently
 `nemotron_speech`, with positive `sample_rate`, `hop_length`, and
 `subsampling_factor`. Being an ASR model alone is not sufficient. Missing or
@@ -225,11 +265,11 @@ timebases are rejected when timestamps are enabled.
 `segment_separators` defaults to `.`, `?`, and `!`. The optional
 `segment_gap_threshold_seconds` is non-negative or `null`; it is rounded to the
 nearest acoustic frame. Zero and positive gaps below half a frame split each word
-into its own segment. When timestamps are off, ordinary text is still returned,
+into its own segment in timestamp-only mode. When both timestamps and diarization are off, ordinary text is returned,
 without timestamp records, interval buffering, or word/segment accumulation.
 
 See [Nemotron speech timestamps](nemotron_speech_timestamps.md) for acoustic
-origins and interval semantics. Diarization is not implemented by this processor.
+origins and interval semantics, including optional speaker attribution.
 
 ## Bindings and Lifetime
 

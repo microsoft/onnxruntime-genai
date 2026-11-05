@@ -10,7 +10,7 @@ Add timestamp options under `model` in `genai_config.json`:
 ```json
 {
   "model": {
-    "timestamp_level": "all",
+    "timestamp_level": "segment",
     "segment_separators": [".", "?", "!"],
     "segment_gap_threshold_seconds": 1.0
   }
@@ -24,7 +24,8 @@ Add timestamp options under `model` in `genai_config.json`:
 | `off` | None (default) |
 | `word` | Words |
 | `segment` | Segments |
-| `all` | Words and segments |
+
+The diarization branch supports `off`, `word`, and `segment`; `all` is rejected.
 
 `segment_separators` is an optional array of decoded text suffixes that complete a segment. When
 present, it replaces the default separators (`.`, `?`, and `!`). An empty array disables
@@ -62,12 +63,12 @@ flowchart TB
     decode --> transcript[Plain-text transcript]
   end
 
-  subgraph timed[With timestamps: word, segment, or all]
+  subgraph timed[With timestamps or diarization]
     setup[Processor copies model configuration] --> stream
-    timed_tokens[Private Generator.GetTokenOutputs: IDs + frame intervals] --> stream[ASRPostProcessor.ProcessNext]
+    timed_tokens[Private Generator.GetTokenOutputs: IDs, optional frame pairs and speaker evidence] --> stream[ASRPostProcessor.ProcessNext]
     stream --> internal[Private ASRPostProcessor.ProcessNext with outputs]
     internal --> ortx[Extensions: vocabulary facts + ordinary cached decode]
-    ortx --> align[GenAI MetadataCoreState: group words and align buffered frames]
+    ortx --> align[GenAI MetadataCoreState: group words, align frames and aggregate optional speaker evidence]
     align --> events[Per-call word / segment events with frame and second bounds]
     events --> read[GetNextResults: read only]
     stream --> final[Finalize: flush trailing word / segment]
@@ -78,13 +79,13 @@ flowchart TB
   generator --> timed_tokens
 ```
 
-When timestamps are enabled, the streaming processor includes a scalar int64
+When timestamps or diarization are enabled, the streaming processor includes a scalar int64
 `chunk_start_sample` tensor alongside `audio_features` in `NamedTensors`.
 The origin counts samples in chunks dropped by VAD; `Flush()` pads the final chunk
 for feature extraction but advances the origin by only the actual input samples.
 This is a processor-to-generator signal, not an ONNX model input. Pass the complete
 processor result to the generator: omitting or renaming `chunk_start_sample` is an
-error when timestamps are enabled.
+error when timestamps or diarization are enabled.
 For a locally installed Nemotron model outside the test fixtures, set
 `NEMOTRON_STREAMING_MODEL_PATH` when running
 `AudioSpeechValidationTests.NemotronProcessorEmitsChunkStartSample`.
@@ -117,6 +118,42 @@ hop length, and subsampling factor. Native token input uses an optional
 `std::pair<int64_t, int64_t>`; timestamp records also contain a
 `std::pair<double, double>` for second bounds. Native interval layouts are not
 exposed by the public C output handles or field accessors.
+
+## Diarization
+
+Configure `model.diarization.filename` to enable the stateful Nemotron diarization
+ONNX model in the same generator as ASR. For example:
+
+```json
+{
+  "model": {
+    "timestamp_level": "word",
+    "diarization": {
+      "filename": "diarization/model.onnx",
+      "right_context": 4
+    }
+  }
+}
+```
+
+`right_context` counts diarization encoder frames (four frames are 320 ms with
+the default geometry). Both models share retained central audio and VAD decisions;
+the diarizer receives future right-context without changing the ASR chunk origin.
+ASR and diarization sample rates must match; their declared frame strides and
+chunk size must align. The ONNX export must expose persistent past/present caches.
+
+`ASRPostProcessor` returns a speaker label for each completed word in word mode.
+Segment mode returns speaker turns, splitting only on a speaker change or finalization.
+With timestamps off and diarization on, the same result contains untimed speaker
+turns: frame/time pairs are absent, not zero-duration timestamps. Without
+diarization, speaker labels are absent. Read the label through `GetSpeakerLabel()`
+(C++), `SpeakerLabel` (C#), or `speaker_label` (Python).
+
+Flush repeatedly until no buffered audio remains before finalizing the processor,
+including the diarization look-ahead tail. Do not mix ordinary incremental text
+and completed records into the same transcript. See
+[ASR post-processing](metadata_decode.md#speaker-attribution) for output presence,
+lifetimes, disabled-path behavior, and the paired interval contract.
 
 ## Decoding
 
@@ -183,8 +220,8 @@ concatenate token fragments.
 
 The general Nemotron examples render word mode as `[StartTime - StopTime]WordText` followed by one
 space, with no space after the interval. Segment mode renders
-`[StartTime - StopTime] SegmentText`. All mode reports both views separately: the segment-timestamp
-transcript followed by the per-word timestamp transcript.
+`[StartTime - StopTime] SegmentText`. Diarization-aware examples add `[speaker_N]`;
+diarization-only records omit the interval. The final summary is the plain transcript.
 
 ### Building the examples
 

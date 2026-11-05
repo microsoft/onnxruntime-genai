@@ -72,7 +72,7 @@ TEST(AudioSpeechValidationTests, NemotronEncoderOutputRankValidation) {
 TEST(AudioSpeechValidationTests, NemotronTimestampConfiguration) {
   Generators::Config config;
   config.model.type = "nemotron_speech";
-  config.model.timestamp_level = Generators::Config::TimestampLevel::All;
+  config.model.timestamp_level = Generators::Config::TimestampLevel::Word;
   config.model.sample_rate = 16000;
   config.model.hop_length = 160;
   config.model.subsampling_factor = 8;
@@ -81,7 +81,7 @@ TEST(AudioSpeechValidationTests, NemotronTimestampConfiguration) {
 
   Generators::NemotronConfig nemotron_config;
   EXPECT_NO_THROW(nemotron_config.PopulateFromConfig(config));
-  EXPECT_EQ(nemotron_config.timestamp_level, Generators::Config::TimestampLevel::All);
+  EXPECT_EQ(nemotron_config.timestamp_level, Generators::Config::TimestampLevel::Word);
   EXPECT_EQ(Generators::GetSegmentGapThresholdFrames(config.model), 13);
 }
 
@@ -161,7 +161,7 @@ TEST(AudioSpeechValidationTests, NemotronProcessorEmitsChunkStartSample) {
     GTEST_SKIP() << "Streaming ASR model not found at " << model_path.string();
 
   auto config = std::make_unique<Generators::Config>(model_path, "");
-  config->model.timestamp_level = Generators::Config::TimestampLevel::All;
+  config->model.timestamp_level = Generators::Config::TimestampLevel::Segment;
   const auto chunk_samples = static_cast<size_t>(config->model.chunk_samples);
   ASSERT_GT(chunk_samples, 1U);
   // The downloaded CUDA export uses standard ONNX operators; run this metadata test on CPU too.
@@ -229,7 +229,7 @@ TEST(AudioSpeechValidationTests, NemotronProcessorEmitsChunkStartSample) {
   results.insert(results.end(), final_results.begin(), final_results.end());
   for (const auto& result : results) {
     for (const auto& word : result.timestamps->words) {
-      EXPECT_GE(word.frame_interval.first,
+      EXPECT_GE(word.frame_interval->first,
                 2 * static_cast<int64_t>(chunk_samples) /
                     (model->config_->model.hop_length * model->config_->model.subsampling_factor));
     }
@@ -306,7 +306,7 @@ class MetadataCoreStateTests : public testing::Test {
   void SetUp() override {
     Generators::Config config{fs::path{MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32"}, ""};
     config.model.type = "nemotron_speech";
-    config.model.timestamp_level = Generators::Config::TimestampLevel::All;
+    config.model.timestamp_level = Generators::Config::TimestampLevel::Segment;
     config.model.sample_rate = 100;
     config.model.hop_length = 10;
     config.model.subsampling_factor = 1;
@@ -315,7 +315,7 @@ class MetadataCoreStateTests : public testing::Test {
     tokens = tokenizer->Encode("Hello world.");
     ASSERT_GT(tokens.size(), 1U);
     model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
-    model->config_->model.timestamp_level = Generators::Config::TimestampLevel::All;
+    model->config_->model.timestamp_level = Generators::Config::TimestampLevel::Word;
     params = std::make_shared<Generators::GeneratorParams>(*model);
     generator = std::make_unique<Generators::Generator>(*model, *params);
     auto transducer = std::make_unique<TestTransducerState>(*params, *model);
@@ -340,56 +340,61 @@ class MetadataCoreStateTests : public testing::Test {
 };
 
 TEST_F(MetadataCoreStateTests, BatchMatchesIncrementalProcessing) {
-  const std::string text = "Hello world. Next.";
-  const auto batch_tokens = tokenizer->Encode(text.c_str());
-  ASSERT_GT(batch_tokens.size(), 1U);
-  std::vector<std::pair<int64_t, int64_t>> intervals;
-  for (size_t index = 0; index < batch_tokens.size(); ++index)
-    intervals.push_back({static_cast<int64_t>(index), static_cast<int64_t>(index + 1)});
+  for (const auto level : {Generators::Config::TimestampLevel::Word, Generators::Config::TimestampLevel::Segment}) {
+    model->config_->model.timestamp_level = level;
+    const std::string text = "Hello world. Next.";
+    const auto batch_tokens = tokenizer->Encode(text.c_str());
+    ASSERT_GT(batch_tokens.size(), 1U);
+    std::vector<std::pair<int64_t, int64_t>> intervals;
+    for (size_t index = 0; index < batch_tokens.size(); ++index)
+      intervals.push_back({static_cast<int64_t>(index), static_cast<int64_t>(index + 1)});
 
-  const auto process = [&](size_t batch_size) {
-    Generators::ASRPostProcessor processor{*generator};
-    Generators::ASRPostProcessorResult transcript;
-    transcript.timestamps.emplace();
-    const auto collect = [&] {
-      for (const auto& result : processor.GetNextResults()) {
-        transcript.text += result.text;
-        EXPECT_TRUE(result.timestamps.has_value());
-        if (!result.timestamps) continue;
-        const auto& timestamps = *result.timestamps;
-        auto& output = *transcript.timestamps;
-        output.words.insert(output.words.end(), timestamps.words.begin(), timestamps.words.end());
-        output.segments.insert(output.segments.end(), timestamps.segments.begin(), timestamps.segments.end());
+    const auto process = [&](size_t batch_size) {
+      Generators::ASRPostProcessor processor{*generator};
+      Generators::ASRPostProcessorResult transcript;
+      transcript.timestamps.emplace();
+      const auto collect = [&] {
+        for (const auto& result : processor.GetNextResults()) {
+          transcript.text += result.text;
+          EXPECT_TRUE(result.timestamps.has_value());
+          if (!result.timestamps) continue;
+          const auto& timestamps = *result.timestamps;
+          auto& output = *transcript.timestamps;
+          output.words.insert(output.words.end(), timestamps.words.begin(), timestamps.words.end());
+          output.segments.insert(output.segments.end(), timestamps.segments.begin(), timestamps.segments.end());
+        }
+      };
+      for (size_t offset = 0; offset < batch_tokens.size(); offset += batch_size) {
+        const auto count = std::min(batch_size, batch_tokens.size() - offset);
+        source->SetStep(std::vector<int32_t>{batch_tokens.begin() + offset, batch_tokens.begin() + offset + count}, 0);
+        source->last_token_intervals_.assign(intervals.begin() + offset, intervals.begin() + offset + count);
+        processor.ProcessNext();
+        collect();
+      }
+      processor.Finalize();
+      collect();
+      return transcript;
+    };
+
+    const auto batch = process(batch_tokens.size());
+    const auto incremental = process(1);
+    EXPECT_EQ(batch.text, text);
+    EXPECT_EQ(batch.text, incremental.text);
+    const auto expect_records = [](const auto& actual, const auto& expected) {
+      ASSERT_FALSE(actual.empty());
+      ASSERT_EQ(actual.size(), expected.size());
+      for (size_t index = 0; index < actual.size(); ++index) {
+        EXPECT_EQ(actual[index].text, expected[index].text);
+        EXPECT_EQ(actual[index].frame_interval, expected[index].frame_interval);
+        EXPECT_DOUBLE_EQ(actual[index].time_interval->first, expected[index].time_interval->first);
+        EXPECT_DOUBLE_EQ(actual[index].time_interval->second, expected[index].time_interval->second);
       }
     };
-    for (size_t offset = 0; offset < batch_tokens.size(); offset += batch_size) {
-      const auto count = std::min(batch_size, batch_tokens.size() - offset);
-      source->SetStep(std::vector<int32_t>{batch_tokens.begin() + offset, batch_tokens.begin() + offset + count}, 0);
-      source->last_token_intervals_.assign(intervals.begin() + offset, intervals.begin() + offset + count);
-      processor.ProcessNext();
-      collect();
-    }
-    processor.Finalize();
-    collect();
-    return transcript;
-  };
-
-  const auto batch = process(batch_tokens.size());
-  const auto incremental = process(1);
-  EXPECT_EQ(batch.text, text);
-  EXPECT_EQ(batch.text, incremental.text);
-  const auto expect_records = [](const auto& actual, const auto& expected) {
-    ASSERT_FALSE(actual.empty());
-    ASSERT_EQ(actual.size(), expected.size());
-    for (size_t index = 0; index < actual.size(); ++index) {
-      EXPECT_EQ(actual[index].text, expected[index].text);
-      EXPECT_EQ(actual[index].frame_interval, expected[index].frame_interval);
-      EXPECT_DOUBLE_EQ(actual[index].time_interval.first, expected[index].time_interval.first);
-      EXPECT_DOUBLE_EQ(actual[index].time_interval.second, expected[index].time_interval.second);
-    }
-  };
-  expect_records(batch.timestamps->words, incremental.timestamps->words);
-  expect_records(batch.timestamps->segments, incremental.timestamps->segments);
+    if (level == Generators::Config::TimestampLevel::Word)
+      expect_records(batch.timestamps->words, incremental.timestamps->words);
+    else
+      expect_records(batch.timestamps->segments, incremental.timestamps->segments);
+  }
 }
 
 TEST_F(MetadataCoreStateTests, OptionalTimingAndCountValidation) {
@@ -550,69 +555,80 @@ TEST_F(MetadataCoreStateTests, RepeatedVocabularyIdsKeepPositionSpecificInterval
   ASSERT_EQ(words.size(), 2U);
   EXPECT_EQ(words[0].text, " Hello");
   EXPECT_EQ(words[1].text, words[0].text);
-  EXPECT_EQ(words[0].frame_interval.first, 2);
-  EXPECT_EQ(words[0].frame_interval.second, 7);
-  EXPECT_DOUBLE_EQ(words[0].time_interval.first, 0.2);
-  EXPECT_DOUBLE_EQ(words[0].time_interval.second, 0.7);
-  EXPECT_EQ(words[1].frame_interval.first, 20);
-  EXPECT_EQ(words[1].frame_interval.second, 23);
+  EXPECT_EQ(words[0].frame_interval->first, 2);
+  EXPECT_EQ(words[0].frame_interval->second, 7);
+  EXPECT_DOUBLE_EQ(words[0].time_interval->first, 0.2);
+  EXPECT_DOUBLE_EQ(words[0].time_interval->second, 0.7);
+  EXPECT_EQ(words[1].frame_interval->first, 20);
+  EXPECT_EQ(words[1].frame_interval->second, 23);
 }
 
 TEST_F(MetadataCoreStateTests, OpaqueFieldGettersReturnBorrowedRecords) {
-  auto processor = OgaASRPostProcessor::Create(*reinterpret_cast<const OgaGenerator*>(generator.get()));
-  size_t record_count = 0;
-  std::string words;
-  std::string segments;
-  const auto check_records = [&] {
-    size_t result_index = 0;
-    for (const auto* result : processor->GetNextResults()) {
-      const auto* native_result = OgaASRPostProcessorGetResult(processor.get(), result_index);
-      ASSERT_NE(result, nullptr);
-      EXPECT_EQ(result, native_result);
-      EXPECT_EQ(result->GetText(), OgaASRPostProcessorResultGetText(native_result));
-      const auto* timestamps = result->GetTimestampResult();
-      ASSERT_NE(timestamps, nullptr);
-      EXPECT_EQ(timestamps, OgaASRPostProcessorResultGetTimestampResult(native_result));
-      ++result_index;
-      EXPECT_EQ(timestamps->GetTimestampRecord(static_cast<OgaTimestampRecordKind>(99), 0), nullptr);
-      for (auto kind : {OgaTimestampRecordKind_Words, OgaTimestampRecordKind_Segments}) {
-        const bool use_segments = kind == OgaTimestampRecordKind_Segments;
-        const auto count = use_segments ? timestamps->GetSegmentCount() : timestamps->GetWordCount();
-        EXPECT_EQ(count, use_segments ? OgaASRPostProcessorTimestampResultGetSegmentCount(timestamps)
-                                      : OgaASRPostProcessorTimestampResultGetWordCount(timestamps));
-        for (size_t index = 0; index < count; ++index) {
-          const auto* record = timestamps->GetTimestampRecord(kind, index);
-          const auto* native_record = OgaASRPostProcessorTimestampResultGetTimestampRecord(timestamps, kind, index);
-          ASSERT_NE(record, nullptr);
-          EXPECT_EQ(record, native_record);
-          ++record_count;
-          const auto frames = record->GetFrameInterval();
-          EXPECT_EQ(frames.first, 4);
-          EXPECT_EQ(frames.second, 5);
-          const auto times = record->GetTimestampInterval();
-          EXPECT_DOUBLE_EQ(times.first, 0.4);
-          EXPECT_DOUBLE_EQ(times.second, 0.5);
-          (use_segments ? segments : words).append(record->GetText());
-          EXPECT_EQ(record->GetText(), OgaASRPostProcessorTimestampRecordGetText(native_record));
-          EXPECT_EQ(frames.first, OgaASRPostProcessorTimestampRecordGetStartFrame(native_record));
-          EXPECT_EQ(frames.second, OgaASRPostProcessorTimestampRecordGetStopFrame(native_record));
-          EXPECT_DOUBLE_EQ(times.first, OgaASRPostProcessorTimestampRecordGetStartTime(native_record));
-          EXPECT_DOUBLE_EQ(times.second, OgaASRPostProcessorTimestampRecordGetStopTime(native_record));
+  for (const auto level : {Generators::Config::TimestampLevel::Word, Generators::Config::TimestampLevel::Segment}) {
+    model->config_->model.timestamp_level = level;
+    auto processor = OgaASRPostProcessor::Create(*reinterpret_cast<const OgaGenerator*>(generator.get()));
+    size_t record_count = 0;
+    std::string words;
+    std::string segments;
+    const auto check_records = [&] {
+      size_t result_index = 0;
+      for (const auto* result : processor->GetNextResults()) {
+        const auto* native_result = OgaASRPostProcessorGetResult(processor.get(), result_index);
+        ASSERT_NE(result, nullptr);
+        EXPECT_EQ(result, native_result);
+        EXPECT_EQ(result->GetText(), OgaASRPostProcessorResultGetText(native_result));
+        const auto* timestamps = result->GetTimestampResult();
+        ASSERT_NE(timestamps, nullptr);
+        EXPECT_EQ(timestamps, OgaASRPostProcessorResultGetTimestampResult(native_result));
+        ++result_index;
+        EXPECT_EQ(timestamps->GetTimestampRecord(static_cast<OgaTimestampRecordKind>(99), 0), nullptr);
+        for (auto kind : {OgaTimestampRecordKind_Words, OgaTimestampRecordKind_Segments}) {
+          const bool use_segments = kind == OgaTimestampRecordKind_Segments;
+          const auto count = use_segments ? timestamps->GetSegmentCount() : timestamps->GetWordCount();
+          EXPECT_EQ(count, use_segments ? OgaASRPostProcessorTimestampResultGetSegmentCount(timestamps)
+                                        : OgaASRPostProcessorTimestampResultGetWordCount(timestamps));
+          for (size_t index = 0; index < count; ++index) {
+            const auto* record = timestamps->GetTimestampRecord(kind, index);
+            const auto* native_record = OgaASRPostProcessorTimestampResultGetTimestampRecord(timestamps, kind, index);
+            ASSERT_NE(record, nullptr);
+            EXPECT_TRUE(record->HasTimestamp());
+            EXPECT_EQ(record->GetSpeakerLabel(), nullptr);
+            EXPECT_EQ(record, native_record);
+            ++record_count;
+            const auto frames = record->GetFrameInterval();
+            EXPECT_EQ(frames.first, 4);
+            EXPECT_EQ(frames.second, 5);
+            const auto times = record->GetTimestampInterval();
+            EXPECT_DOUBLE_EQ(times.first, 0.4);
+            EXPECT_DOUBLE_EQ(times.second, 0.5);
+            (use_segments ? segments : words).append(record->GetText());
+            EXPECT_EQ(record->GetText(), OgaASRPostProcessorTimestampRecordGetText(native_record));
+            EXPECT_EQ(frames.first, OgaASRPostProcessorTimestampRecordGetStartFrame(native_record));
+            EXPECT_EQ(frames.second, OgaASRPostProcessorTimestampRecordGetStopFrame(native_record));
+            EXPECT_DOUBLE_EQ(times.first, OgaASRPostProcessorTimestampRecordGetStartTime(native_record));
+            EXPECT_DOUBLE_EQ(times.second, OgaASRPostProcessorTimestampRecordGetStopTime(native_record));
+          }
+          EXPECT_EQ(timestamps->GetTimestampRecord(kind, count), nullptr);
         }
-        EXPECT_EQ(timestamps->GetTimestampRecord(kind, count), nullptr);
       }
+    };
+    processor->ProcessNext();
+    check_records();
+    processor->Finalize();
+    check_records();
+    EXPECT_GT(record_count, 0U);
+    if (level == Generators::Config::TimestampLevel::Word) {
+      EXPECT_EQ(words, "Hello world.");
+      EXPECT_TRUE(segments.empty());
+    } else {
+      EXPECT_EQ(segments, "Hello world.");
+      EXPECT_TRUE(words.empty());
     }
-  };
-  processor->ProcessNext();
-  check_records();
-  processor->Finalize();
-  check_records();
-  EXPECT_GT(record_count, 0U);
-  EXPECT_EQ(words, "Hello world.");
-  EXPECT_EQ(segments, words);
+  }
 }
 
 TEST_F(MetadataCoreStateTests, SegmentGapsAndFinalizationPreserveExactText) {
+  model->config_->model.timestamp_level = Generators::Config::TimestampLevel::Segment;
   for (double threshold : {0.0, 0.01, 1.0}) {
     model->config_->model.segment_gap_threshold_seconds = threshold;
     Generators::ASRPostProcessor processor{*generator};
@@ -639,7 +655,7 @@ TEST_F(MetadataCoreStateTests, SegmentGapsAndFinalizationPreserveExactText) {
 
 TEST_F(MetadataCoreStateTests, TimestampLevelsControlOnlyPublishedRecords) {
   using Level = Generators::Config::TimestampLevel;
-  for (auto level : {Level::Off, Level::Word, Level::Segment, Level::All}) {
+  for (auto level : {Level::Off, Level::Word, Level::Segment}) {
     model->config_->model.timestamp_level = level;
     source->SetTimestampsEnabled(level != Level::Off);
     Generators::ASRPostProcessor processor{*generator};
@@ -656,8 +672,8 @@ TEST_F(MetadataCoreStateTests, TimestampLevelsControlOnlyPublishedRecords) {
     collect();
     processor.Finalize();
     collect();
-    EXPECT_EQ(words, level == Level::Word || level == Level::All ? 2U : 0U);
-    EXPECT_EQ(segments, level == Level::Segment || level == Level::All ? 1U : 0U);
+    EXPECT_EQ(words, level == Level::Word ? 2U : 0U);
+    EXPECT_EQ(segments, level == Level::Segment ? 1U : 0U);
   }
 }
 
@@ -680,7 +696,7 @@ TEST_F(MetadataCoreStateTests, ResetClearsPendingStateAndResultsAreReadOnly) {
   EXPECT_EQ(text, "Hello world.");
   processor.Finalize();
   ASSERT_FALSE(processor.GetNextResults()[0].timestamps->words.empty());
-  EXPECT_EQ(processor.GetNextResults()[0].timestamps->words.back().frame_interval.first, 8);
+  EXPECT_EQ(processor.GetNextResults()[0].timestamps->words.back().frame_interval->first, 8);
   EXPECT_EQ(owned.size(), tokens.size());
 }
 
