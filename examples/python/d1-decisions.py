@@ -109,6 +109,8 @@ def option_codes(labels, letter_pairs=False):
     if len(labels) <= 26:
         return LETTERS[: len(labels)]
     if letter_pairs:
+        if len(labels) > len(LETTERS) + len(LETTER_PAIRS):
+            raise ValueError(f"a choice has {len(labels)} options; d1-2B's codes stop at 702 (A to Z, then AA to ZZ)")
         return (LETTERS + LETTER_PAIRS)[: len(labels)]
     return [f"{i:02d}" for i in range(len(labels))]
 

@@ -511,6 +511,12 @@ def test_d1_2b_option_codes_use_letter_pairs(tokenizer):
     assert len({token for _, token in codes}) == len(labels)
 
 
+def test_d1_2b_option_codes_stop_at_zz():
+    assert d1.option_codes([f"option {i}" for i in range(702)], letter_pairs=True)[-1] == "ZZ"
+    with pytest.raises(ValueError, match="703 options; d1-2B's codes stop at 702"):
+        d1.option_codes([f"option {i}" for i in range(703)], letter_pairs=True)
+
+
 def test_only_d1_model_types_are_read():
     with pytest.raises(ValueError, match="model type 'qwen2' is not a d1 model"):
         d1.D1Decisions(types.SimpleNamespace(type="qwen2"), "unused")
