@@ -125,7 +125,7 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
 };
 
 class TokenOutputs;
-class TokenPostProcessor;
+class ASRPostProcessor;
 
 struct Generator : LeakChecked<Generator> {
   enum class Action {
@@ -180,7 +180,7 @@ struct Generator : LeakChecked<Generator> {
   bool IsGreedySampling() const;
 
  private:
-  friend class TokenPostProcessor;
+  friend class ASRPostProcessor;
   TokenOutputs GetTokenOutputs() const;
 #if defined(_MSC_VER)
   [[msvc::no_unique_address]]
@@ -189,8 +189,11 @@ struct Generator : LeakChecked<Generator> {
 #endif
   GenerationTelemetry generation_telemetry_;
   void LogGeneratorCreate(const GeneratorParams& params);
+  size_t PaddedInputIdsSize(size_t input_ids_count) const;
   DeviceSpan<int32_t> AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids);
   void ComputeLogits(DeviceSpan<int32_t> next_tokens);
+  void RunGeneratedToken();
+  void ThrowIfAppendExceedsMaxLength(size_t input_ids_count);
   Action last_action_{Action::standard};
 
   // Pre-computed per-token decisions: avoid repeated checks each token

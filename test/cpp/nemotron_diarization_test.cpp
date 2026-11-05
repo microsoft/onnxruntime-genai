@@ -7,8 +7,8 @@
 #include "models/nemotron_speech.h"
 #include "models/preprocessing/genai_tokenizer.h"
 #include "models/preprocessing/nemotron_streaming_processor.h"
-#include "models/preprocessing/token_post_processor.h"
-#include "models/preprocessing/token_diarization.h"
+#include "models/postprocessing/asr_post_processor.h"
+#include "models/postprocessing/token_diarization.h"
 
 TEST(NemotronDiarization, ConfigurationRequiresAlignedGeometry) {
   Generators::Config config;
@@ -101,7 +101,7 @@ struct DiarizationTestPipeline {
   std::shared_ptr<Generators::GeneratorParams> params;
   std::unique_ptr<Generators::Generator> generator;
   DiarizationTestState* state{};
-  std::unique_ptr<Generators::TokenPostProcessor> processor;
+  std::unique_ptr<Generators::ASRPostProcessor> processor;
 
   DiarizationTestPipeline(bool diarization, Generators::Config::TimestampLevel level) {
     model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
@@ -119,7 +119,7 @@ struct DiarizationTestPipeline {
     state = source.get();
     generator->state_ = std::move(source);
     config.type = "nemotron_speech";
-    processor = std::make_unique<Generators::TokenPostProcessor>(*generator);
+    processor = std::make_unique<Generators::ASRPostProcessor>(*generator);
   }
 };
 }  // namespace
@@ -134,7 +134,7 @@ TEST(NemotronDiarization, MetadataConfigurationsAndTurnBoundaries) {
       const auto tokens = tokenizer->Encode("Hello world.");
       std::string transcript, records;
       size_t count = 0;
-      const auto collect = [&](const Generators::PostProcessorResult& result) {
+      const auto collect = [&](const Generators::ASRPostProcessorResult& result) {
         transcript += result.text;
         if (!diarization && level == Generators::Config::TimestampLevel::Off) {
           EXPECT_FALSE(result.timestamps);
@@ -147,7 +147,7 @@ TEST(NemotronDiarization, MetadataConfigurationsAndTurnBoundaries) {
         for (const auto& record : data) {
           records += record.text;
           ++count;
-          EXPECT_EQ(record.start_time.has_value(), level != Generators::Config::TimestampLevel::Off);
+          EXPECT_EQ(record.time_interval.has_value(), level != Generators::Config::TimestampLevel::Off);
           if (diarization)
             EXPECT_EQ(record.speaker_label, "speaker_2");
           else
@@ -164,35 +164,35 @@ TEST(NemotronDiarization, MetadataConfigurationsAndTurnBoundaries) {
           evidence->stop_probability_sums[2] = static_cast<double>(i + 1);
         }
         pipeline.state->SetStep(tokens[i], static_cast<int64_t>(i), evidence);
-        pipeline.processor->ProcessNextTokens();
-        for (const auto& result : pipeline.processor->GetNextTokenResults()) collect(result);
+        pipeline.processor->ProcessNext();
+        for (const auto& result : pipeline.processor->GetNextResults()) collect(result);
       }
       pipeline.processor->Finalize();
-      for (const auto& result : pipeline.processor->GetNextTokenResults()) collect(result);
+      for (const auto& result : pipeline.processor->GetNextResults()) collect(result);
       EXPECT_EQ(transcript, "Hello world.");
       if (diarization || level != Generators::Config::TimestampLevel::Off) EXPECT_EQ(records, transcript);
       if (diarization && level != Generators::Config::TimestampLevel::Word) EXPECT_EQ(count, 1U);
       EXPECT_EQ(pipeline.state->speaker_evidence_reads, diarization ? tokens.size() : 0U);
       pipeline.processor->Finalize();
-      const auto& repeated = pipeline.processor->GetNextTokenResults()[0];
+      const auto& repeated = pipeline.processor->GetNextResults()[0];
       if (repeated.timestamps) {
         EXPECT_TRUE(repeated.timestamps->words.empty());
         EXPECT_TRUE(repeated.timestamps->segments.empty());
       }
       pipeline.processor->Reset();
       pipeline.state->SetStep(tokens[0], 0, std::nullopt);
-      if (diarization) EXPECT_THROW(pipeline.processor->ProcessNextTokens(), std::runtime_error);
+      if (diarization) EXPECT_THROW(pipeline.processor->ProcessNext(), std::runtime_error);
     }
   }
 }
 
-TEST(NemotronDiarization, InternalProcessorAlignsBatchAndIncrementalSpeakerEvidence) {
+TEST(NemotronDiarization, ASRProcessorAlignsBatchAndIncrementalSpeakerEvidence) {
   using namespace Generators;
   DiarizationTestPipeline pipeline{true, Config::TimestampLevel::Word};
   auto tokenizer = pipeline.model->CreateTokenizer();
   const auto tokens = tokenizer->Encode("Hello world.");
   const auto first_word_tokens = tokenizer->Encode("Hello").size();
-  std::vector<AcousticFrameInterval> intervals;
+  std::vector<std::pair<int64_t, int64_t>> intervals;
   std::vector<TokenSpeakerEvidence> evidence;
   TokenSpeakerEvidence snapshot{};
   for (size_t index = 0; index < tokens.size(); ++index) {
@@ -205,24 +205,16 @@ TEST(NemotronDiarization, InternalProcessorAlignsBatchAndIncrementalSpeakerEvide
     evidence.push_back(snapshot);
   }
   for (const auto level : {Config::TimestampLevel::Off, Config::TimestampLevel::Word, Config::TimestampLevel::Segment}) {
-    MetadataCoreConfig config;
-    config.timestamps.level = level;
-    config.timestamps.segment_separators = {"."};
-    config.timestamps.segment_gap_threshold_frames = 0;
-    if (level != Config::TimestampLevel::Off) config.seconds_per_frame = 0.1;
-    config.diarization = true;
     const auto process = [&](size_t batch_size) {
-      TokenPostProcessorInternal processor{tokenizer, config};
-      const auto token_span = std::span<const int32_t>{tokens};
-      const auto interval_span = std::span<const AcousticFrameInterval>{intervals};
-      const auto evidence_span = std::span<const TokenSpeakerEvidence>{evidence};
-      EXPECT_THROW(processor.Process(TokenOutputs{token_span, interval_span}), std::runtime_error);
-      EXPECT_THROW(processor.Process(TokenOutputs{token_span, interval_span, evidence_span.first(evidence.size() - 1)}),
-                   std::runtime_error);
+      DiarizationTestPipeline current{true, level};
+      auto& processor = *current.processor;
+      PostProcessor& base = processor;
+      current.state->SetStep(tokens[0], 0, std::nullopt);
+      EXPECT_THROW(base.ProcessNext(), std::runtime_error);
       std::string text;
       std::vector<TimestampRecord> records;
       const auto collect = [&] {
-        for (const auto& result : processor.GetNextTokenResults()) {
+        for (const auto& result : processor.GetNextResults()) {
           text += result.text;
           EXPECT_TRUE(result.timestamps);
           if (!result.timestamps) continue;
@@ -234,16 +226,22 @@ TEST(NemotronDiarization, InternalProcessorAlignsBatchAndIncrementalSpeakerEvide
       };
       for (size_t offset = 0; offset < tokens.size(); offset += batch_size) {
         const auto count = std::min(batch_size, tokens.size() - offset);
-        processor.Process(TokenOutputs{token_span.subspan(offset, count), interval_span.subspan(offset, count),
-                                       evidence_span.subspan(offset, count)});
+        current.state->EmptyStep();
+        for (size_t index = offset; index < offset + count; ++index)
+          current.state->AppendStep(tokens[index], intervals[index].first, evidence[index]);
+        const auto last = current.state->evidence.back();
+        current.state->evidence.pop_back();
+        EXPECT_THROW(base.ProcessNext(), std::runtime_error);
+        current.state->evidence.push_back(last);
+        base.ProcessNext();
         collect();
       }
-      processor.Finalize();
+      base.Finalize();
       collect();
       EXPECT_EQ(text, "Hello world.");
       EXPECT_EQ(records.size(), 2U);
-      processor.Reset();
-      EXPECT_TRUE(processor.GetNextTokenResults().empty());
+      base.Reset();
+      EXPECT_TRUE(processor.GetNextResults().empty());
       return records;
     };
     const auto batch = process(tokens.size());
@@ -253,11 +251,9 @@ TEST(NemotronDiarization, InternalProcessorAlignsBatchAndIncrementalSpeakerEvide
       EXPECT_EQ(batch[index].text, incremental[index].text);
       EXPECT_EQ(batch[index].speaker_label, "speaker_" + std::to_string(index));
       EXPECT_EQ(batch[index].speaker_label, incremental[index].speaker_label);
-      EXPECT_EQ(batch[index].start_frame, incremental[index].start_frame);
-      EXPECT_EQ(batch[index].stop_frame, incremental[index].stop_frame);
-      EXPECT_EQ(batch[index].start_time, incremental[index].start_time);
-      EXPECT_EQ(batch[index].stop_time, incremental[index].stop_time);
-      EXPECT_EQ(batch[index].start_time.has_value(), level != Config::TimestampLevel::Off);
+      EXPECT_EQ(batch[index].frame_interval, incremental[index].frame_interval);
+      EXPECT_EQ(batch[index].time_interval, incremental[index].time_interval);
+      EXPECT_EQ(batch[index].time_interval.has_value(), level != Config::TimestampLevel::Off);
     }
   }
 }
@@ -307,19 +303,19 @@ TEST(NemotronDiarization, OnePrivateGeneratorOutputCarriesMultipleSequentialEmis
   // The private getter validates all field counts before any decoding occurs.
   const auto saved = pipeline.state->evidence.back();
   pipeline.state->evidence.pop_back();
-  EXPECT_THROW(pipeline.processor->ProcessNextTokens(), std::runtime_error);
+  EXPECT_THROW(pipeline.processor->ProcessNext(), std::runtime_error);
   pipeline.state->evidence.push_back(saved);
-  pipeline.processor->ProcessNextTokens();
-  ASSERT_EQ(pipeline.processor->GetNextTokenResults().size(), tokens.size());
+  pipeline.processor->ProcessNext();
+  ASSERT_EQ(pipeline.processor->GetNextResults().size(), tokens.size());
   std::string text;
   std::vector<std::string> speakers;
-  for (const auto& result : pipeline.processor->GetNextTokenResults()) {
+  for (const auto& result : pipeline.processor->GetNextResults()) {
     text += result.text;
     for (const auto& word : result.timestamps->words) speakers.push_back(*word.speaker_label);
   }
   EXPECT_EQ(text, "Hello world.");
   pipeline.processor->Finalize();
-  for (const auto& result : pipeline.processor->GetNextTokenResults())
+  for (const auto& result : pipeline.processor->GetNextResults())
     for (const auto& word : result.timestamps->words) speakers.push_back(*word.speaker_label);
   EXPECT_EQ(speakers, (std::vector<std::string>{"speaker_0", "speaker_1"}));
 }
@@ -332,12 +328,12 @@ TEST(NemotronDiarization, SpeakerChangesCompleteTurnsAndInvalidInputConsumesNoth
   std::array<double, 8> sums{};
   std::vector<std::string> texts, speakers;
   const auto collect = [&]() {
-    for (const auto& result : pipeline.processor->GetNextTokenResults()) {
+    for (const auto& result : pipeline.processor->GetNextResults()) {
       ASSERT_TRUE(result.timestamps);
       for (const auto& record : result.timestamps->segments) {
         texts.emplace_back(record.text);
         speakers.emplace_back(*record.speaker_label);
-        EXPECT_FALSE(record.start_time);
+        EXPECT_FALSE(record.time_interval);
       }
     }
   };
@@ -352,10 +348,10 @@ TEST(NemotronDiarization, SpeakerChangesCompleteTurnsAndInvalidInputConsumesNoth
       auto invalid = evidence;
       invalid.stop_frame_count = 0;
       pipeline.state->SetStep(tokens[i], static_cast<int64_t>(i), invalid);
-      EXPECT_THROW(pipeline.processor->ProcessNextTokens(), std::runtime_error);
+      EXPECT_THROW(pipeline.processor->ProcessNext(), std::runtime_error);
     }
     pipeline.state->SetStep(tokens[i], static_cast<int64_t>(i), evidence);
-    pipeline.processor->ProcessNextTokens();
+    pipeline.processor->ProcessNext();
     collect();
   }
   pipeline.processor->Finalize();
@@ -470,11 +466,11 @@ TEST(NemotronDiarization, EvidenceOrderingSurvivesReleasedWordsAndReset) {
   evidence.stop_probability_sums[0] = 3;
   const auto process = [&](const Generators::TokenSpeakerEvidence& value) {
     pipeline.state->SetStep(42, 4, value);
-    pipeline.processor->ProcessNextTokens();
+    pipeline.processor->ProcessNext();
   };
   const auto finish = [&]() {
     pipeline.processor->Finalize();
-    EXPECT_EQ(pipeline.processor->GetNextTokenResults()[0].timestamps->words.size(), 1U);
+    EXPECT_EQ(pipeline.processor->GetNextResults()[0].timestamps->words.size(), 1U);
   };
   process(evidence);
   finish();
@@ -499,8 +495,8 @@ TEST(NemotronDiarization, EvidenceOrderingSurvivesReleasedWordsAndReset) {
 
   // Frames with no tokens can advance counts and sums before the next token.
   pipeline.state->EmptyStep();
-  pipeline.processor->ProcessNextTokens();
-  EXPECT_TRUE(pipeline.processor->GetNextTokenResults().empty());
+  pipeline.processor->ProcessNext();
+  EXPECT_TRUE(pipeline.processor->GetNextResults().empty());
   evidence.start_frame_count = 9;
   evidence.stop_frame_count = 10;
   evidence.start_probability_sums[0] = 4;

@@ -201,6 +201,23 @@ def apply_chat_template(
     return prompt
 
 
+def get_default_user_prompt(model_path: str, fallback: str) -> str:
+    """
+    Get the example's default user prompt for the model type
+
+    Args:
+        model_path (str): path to folder containing model
+        fallback (str): prompt for model types without an example-specific default
+    Returns:
+        str: model-specific example default or fallback
+    """
+    with open(os.path.join(model_path, "genai_config.json"), encoding="utf-8") as f:
+        model_config = json.load(f)["model"]
+    if model_config.get("type") == "nemotron_parse":
+        return "</s><s><predict_bbox><predict_classes><output_markdown>"
+    return fallback
+
+
 def get_user_prompt(prompt: str, non_interactive: bool) -> str:
     """
     Get prompt for 'user' role in chat template

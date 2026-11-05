@@ -50,6 +50,7 @@ struct CpuInterface : DeviceInterface {
   }
 
   DeviceType GetType() const override { return DeviceType::CPU; }
+  bool IsHostAccessible() const override { return true; }
   bool SupportsOffsetTensorViews() const override { return true; }
   bool SupportsTransactionalFixedState() const override { return true; }
   bool SupportsCompactStateReplay() const override { return true; }

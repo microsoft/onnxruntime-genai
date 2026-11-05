@@ -18,6 +18,8 @@ from quantization import QuantConfig, desugar_algo_config  # noqa: E402
 
 
 def _load_builder_module(module_name):
+    if f"models.builders.{module_name}" in sys.modules:
+        return sys.modules[f"models.builders.{module_name}"]
     spec = importlib.util.spec_from_file_location(f"models.builders.{module_name}", BUILDERS_DIR / f"{module_name}.py")
     module = importlib.util.module_from_spec(spec)
     sys.modules[f"models.builders.{module_name}"] = module
@@ -246,7 +248,7 @@ def test_shared_embeddings_prefers_quantized_path_only_when_both_layers_are_quan
 # fmt: off
 _TIED_QUANTIZED_EMBEDDING_WEIGHT_NAME_CASES = [
     ("default", 32, True, 4, "lm_head.MatMul.weight_Q4", "lm_head.MatMul.weight_scales", ""),
-    ("default", 32, False, 4, "lm_head.MatMul.weight", "", ""),
+    ("default", 32, False, 4, "lm_head.MatMul.weight_Q4", "lm_head.MatMul.weight_scales", "lm_head.MatMul.weight_zero_points"),
     ("rtn", 32, True, 4, "lm_head.MatMul.weight_Q4G32", "lm_head.MatMul.weight_scale", ""),
     ("rtn", 32, False, 4, "lm_head.MatMul.weight_Q4G32", "lm_head.MatMul.weight_scale", "lm_head.MatMul.weight_zp"),
     ("rtn_last", 32, True, 8, "lm_head.MatMul.weight_Q8G32", "lm_head.MatMul.weight_scale", ""),
@@ -281,9 +283,10 @@ def test_tied_quantized_embedding_weight_names_cover_all_supported_algorithms(
     model.quantization_algo, model.matmul_mixed_precision = desugar_algo_config(model.extra_options)
     model.quant_attrs = {"is_symmetric": is_symmetric, "matmul_block_size": matmul_block_size}
 
-    bits, weight_name, scale_name, zp_name = model.make_tied_quantized_embedding_input_names()
+    bits, block_size, weight_name, scale_name, zp_name = model.make_tied_quantized_embedding_input_names(None)
 
     assert bits == expected_bits
+    assert block_size == matmul_block_size
     assert weight_name == expected_weight
     assert scale_name == expected_scale
     assert zp_name == expected_zp
@@ -296,18 +299,18 @@ def test_tied_quantized_embedding_weight_names_raise_for_unknown_algorithm():
     model.quant_attrs = {"is_symmetric": True, "matmul_block_size": 32}
 
     with pytest.raises(AssertionError, match="Unknown quantization algo config name detected"):
-        model.make_tied_quantized_embedding_input_names()
+        model.make_tied_quantized_embedding_input_names(None)
 
 
 def test_prequantized_lm_head_returns_matmul_nbits_names_with_zeros():
-    """Pre-quantized lm_head (e.g. quant_auto) returns MatMulNBits initializer names."""
-    lm_head = types.SimpleNamespace(qweight=object(), qzeros=object(), bits=4)
+    """Pre-quantized lm_head (e.g. quant_auto) returns MatMulNBits initializer names and its group size."""
+    lm_head = types.SimpleNamespace(qweight=object(), qzeros=object(), bits=4, group_size=64)
     model = Model.__new__(Model)
-    model.weights = types.SimpleNamespace(lm_head=lm_head)
 
-    bits, weight_name, scale_name, zp_name = model.make_tied_quantized_embedding_input_names()
+    bits, block_size, weight_name, scale_name, zp_name = model.make_tied_quantized_embedding_input_names(lm_head)
 
     assert bits == 4
+    assert block_size == 64
     assert weight_name == "lm_head.MatMulNBits.qweight"
     assert scale_name == "lm_head.MatMulNBits.scales"
     assert zp_name == "lm_head.MatMulNBits.qzeros"
@@ -315,35 +318,36 @@ def test_prequantized_lm_head_returns_matmul_nbits_names_with_zeros():
 
 def test_prequantized_lm_head_returns_matmul_nbits_names_without_zeros():
     """Pre-quantized lm_head without zero-points returns empty zp name."""
-    lm_head = types.SimpleNamespace(qweight=object(), qzeros=None, bits=4)
+    lm_head = types.SimpleNamespace(qweight=object(), qzeros=None, bits=4, group_size=64)
     model = Model.__new__(Model)
-    model.weights = types.SimpleNamespace(lm_head=lm_head)
 
-    bits, weight_name, scale_name, zp_name = model.make_tied_quantized_embedding_input_names()
+    bits, block_size, weight_name, scale_name, zp_name = model.make_tied_quantized_embedding_input_names(lm_head)
 
     assert bits == 4
+    assert block_size == 64
     assert weight_name == "lm_head.MatMulNBits.qweight"
     assert scale_name == "lm_head.MatMulNBits.scales"
     assert zp_name == ""
 
 
-def test_prequantized_lm_head_check_is_skipped_when_weights_not_loaded():
-    """make_tied_quantized_embedding_input_names falls through to algo-based names when
-    self.weights hasn't been set yet (unit-test context without make_model)."""
+def test_tied_quantized_embedding_names_come_from_the_given_lm_head():
+    # The MTP graph passes its own LM head, which need not be the one in self.weights.
     model = Model.__new__(Model)
     model.extra_options = {"algo_config": "rtn"}
     model.quantization_algo, model.matmul_mixed_precision = desugar_algo_config(model.extra_options)
     model.quant_attrs = {"is_symmetric": True, "matmul_block_size": 32}
-    # No model.weights set — simulates unit-test call without make_model
+    prequantized_head = types.SimpleNamespace(qweight=object(), qzeros=None, bits=4, group_size=64)
+    model.weights = types.SimpleNamespace(lm_head=prequantized_head)
 
-    bits, weight_name, _, _ = model.make_tied_quantized_embedding_input_names()
+    names = model.make_tied_quantized_embedding_input_names(types.SimpleNamespace(weight=object()))
 
-    assert weight_name == "lm_head.MatMul.weight_Q4G32"
+    assert names == (4, 32, "lm_head.MatMul.weight_Q4G32", "lm_head.MatMul.weight_scale", "")
 
 
 def _make_minimal_model_for_quantized_tied_embedding(*, algo_config, is_symmetric=True, quant_type=None):
     model = Model.__new__(Model)
     model.use_paged_attention = False
+    model.use_cpu_embedding_gather = True
     model.extra_options = {"algo_config": algo_config}
     model.quantization_algo, model.matmul_mixed_precision = desugar_algo_config(model.extra_options)
     model.hidden_size = 64
@@ -384,7 +388,15 @@ def _make_minimal_model_for_quantized_tied_embedding(*, algo_config, is_symmetri
     "algo_config, is_symmetric, quant_type, expected_weight_name, expected_scale_name, expected_zp_name, expect_zp_input",
     [
         ("default", True, None, "lm_head.MatMul.weight_Q4", "lm_head.MatMul.weight_scales", None, False),
-        ("default", False, None, "lm_head.MatMul.weight", "", None, False),
+        (
+            "default",
+            False,
+            None,
+            "lm_head.MatMul.weight_Q4",
+            "lm_head.MatMul.weight_scales",
+            "lm_head.MatMul.weight_zero_points",
+            True,
+        ),
         ("rtn", True, None, "lm_head.MatMul.weight_Q4G32", "lm_head.MatMul.weight_scale", None, False),
         (
             "rtn",
@@ -409,6 +421,15 @@ def _make_minimal_model_for_quantized_tied_embedding(*, algo_config, is_symmetri
             False,
             None,
             "lm_head.MatMul.weight_Q4G32",
+            "lm_head.MatMul.weight_scale",
+            "lm_head.MatMul.weight_zp",
+            True,
+        ),
+        (
+            "k_quant_linear",
+            False,
+            None,
+            "lm_head.MatMul.weight_Q8G32",
             "lm_head.MatMul.weight_scale",
             "lm_head.MatMul.weight_zp",
             True,
@@ -444,6 +465,10 @@ def test_make_embedding_uses_algo_specific_lm_head_initializer_names_for_tied_qu
     else:
         assert "lm_head.MatMul.weight_zp" not in gather_inputs
         assert "lm_head.MatMul.weight_zero_points" not in gather_inputs
+    gather_kwargs = gather_calls[0][4]
+    if algo_config == "k_quant_linear":
+        assert gather_kwargs["bits"] == 8
+    assert gather_kwargs["metadata_props"] == {"layer_ann": "cpu_embedding"}
 
 
 def _make_tied_embedding_model(*, vocab_size, hidden_size, quant_attrs):
@@ -456,6 +481,37 @@ def _make_tied_embedding_model(*, vocab_size, hidden_size, quant_attrs):
     model.quant_attrs = quant_attrs
     model.tied_quantized_embeddings = True
     model.tied_unquantized_embeddings = False
+    return model
+
+
+def _make_builder_quantized_tied_embedding_model(
+    *, vocab_size, hidden_size, block_size, extra_options, ep="cpu", weights_prepacked=0
+):
+    # A float LM head that `to_nbits` quantizes, with the tied embedding lookup reading it.
+    quant_config = QuantConfig.from_extra_options(
+        {**extra_options, "block_size": block_size}, precision="int4", execution_provider=ep
+    )
+    model = _make_tied_embedding_model(
+        vocab_size=vocab_size,
+        hidden_size=hidden_size,
+        quant_attrs={
+            "accuracy_level": 0,
+            "matmul_block_size": block_size,
+            "bits": 4,
+            "is_symmetric": quant_config.weights.symmetric,
+            "op_types_to_quantize": ("MatMul",),
+            "nodes_to_exclude": [],
+            "algo_config": None,
+            "use_qdq": False,
+        },
+    )
+    model.ep = ep
+    model.matmul_attrs = {"weights_prepacked": weights_prepacked}
+    model.quant_type = None
+    model.quant_config = quant_config
+    model.make_quant_init(config=None)
+    weight = torch.randn(vocab_size, hidden_size, generator=torch.Generator().manual_seed(0))
+    _add_lm_head_and_tied_embeddings(model, types.SimpleNamespace(weight=weight, bias=None), model.make_matmul_float)
     return model
 
 
@@ -492,47 +548,68 @@ def _assert_embeddings_are_lm_head_rows(onnx_model, tmp_path, *, vocab_size, hid
     "extra_options",
     [
         {},
+        {"is_symmetric": False},
+        {"matmul_mixed_precision": "last_matmul:int8"},
+        {"matmul_mixed_precision": "last_matmul:int8", "is_symmetric": False},
         {"algo_config": "rtn"},
         {"algo_config": "rtn", "is_symmetric": False},
-        {"algo_config": "k_quant"},
         {"algo_config": "rtn_last"},
+        {"algo_config": "rtn_last", "is_symmetric": False},
+        {"algo_config": "k_quant"},
+        {"algo_config": "k_quant", "is_symmetric": False},
+        {"algo_config": "k_quant_last"},
     ],
-    ids=["default", "rtn", "rtn_asymmetric", "k_quant", "rtn_last"],
+    ids=[
+        "default",
+        "default_asymmetric",
+        "default_int8_head",
+        "default_int8_head_asymmetric",
+        "rtn",
+        "rtn_asymmetric",
+        "rtn_last",
+        "rtn_last_asymmetric",
+        "k_quant",
+        "k_quant_asymmetric",
+        "k_quant_last",
+    ],
 )
 @pytest.mark.parametrize("hidden_size, block_size", [(64, 32), (96, 64)])
 def test_tied_quantized_embeddings_read_the_quantized_lm_head_rows(tmp_path, extra_options, hidden_size, block_size):
     # (96, 64) pads each quantized LM head row to whole blocks, which the lookup has to slice off.
     vocab_size = 256
-    quant_config = QuantConfig.from_extra_options(
-        {**extra_options, "block_size": block_size}, precision="int4", execution_provider="cpu"
+    model = _make_builder_quantized_tied_embedding_model(
+        vocab_size=vocab_size, hidden_size=hidden_size, block_size=block_size, extra_options=extra_options
     )
-    model = _make_tied_embedding_model(
-        vocab_size=vocab_size,
-        hidden_size=hidden_size,
-        quant_attrs={
-            "accuracy_level": 0,
-            "matmul_block_size": block_size,
-            "bits": 4,
-            "is_symmetric": quant_config.weights.symmetric,
-            "op_types_to_quantize": ("MatMul",),
-            "nodes_to_exclude": [],
-            "algo_config": None,
-            "use_qdq": False,
-        },
-    )
-    model.ep = "cpu"
-    model.matmul_attrs = {"weights_prepacked": 0}
-    model.quant_type = None
-    model.quant_config = quant_config
-    model.make_quant_init(config=None)
-    weight = torch.randn(vocab_size, hidden_size, generator=torch.Generator().manual_seed(0))
-    _add_lm_head_and_tied_embeddings(model, types.SimpleNamespace(weight=weight, bias=None), model.make_matmul_float)
 
     quantized = model.to_nbits()
 
     _assert_embeddings_are_lm_head_rows(quantized, tmp_path, vocab_size=vocab_size, hidden_size=hidden_size)
     slices = [node for node in quantized.graph if node.op_type == "Slice"]
     assert len(slices) == (0 if hidden_size % block_size == 0 else 1)
+
+
+@pytest.mark.parametrize(
+    "extra_options", [{}, {"matmul_mixed_precision": "last_matmul:int8"}], ids=["int4_head", "int8_head"]
+)
+def test_cuda_prepacking_keeps_the_tied_lm_head_weight_raw(tmp_path, extra_options):
+    # The tied embedding reads the LM head weight in the raw blockwise layout.
+    vocab_size, hidden_size = 256, 64
+    model = _make_builder_quantized_tied_embedding_model(
+        vocab_size=vocab_size,
+        hidden_size=hidden_size,
+        block_size=32,
+        extra_options=extra_options,
+        ep="cuda",
+        weights_prepacked=1,
+    )
+
+    quantized = model.to_nbits()
+
+    lm_head = next(node for node in quantized.graph if node.op_type == "MatMulNBits")
+    assert "weight_prepacked" not in lm_head.attributes
+    # Block drafters read this to know the LM head stays raw.
+    assert model.tied_quantized_embeddings is True
+    _assert_embeddings_are_lm_head_rows(quantized, tmp_path, vocab_size=vocab_size, hidden_size=hidden_size)
 
 
 @pytest.mark.parametrize("with_zero_points", [False, True], ids=["symmetric", "asymmetric"])
@@ -556,7 +633,6 @@ def test_tied_embeddings_use_the_group_size_of_a_prequantized_lm_head(tmp_path, 
     model = _make_tied_embedding_model(
         vocab_size=vocab_size, hidden_size=hidden_size, quant_attrs={"accuracy_level": 0, "matmul_block_size": 32}
     )
-    model.weights = types.SimpleNamespace(lm_head=lm_head)
 
     _add_lm_head_and_tied_embeddings(model, lm_head, model.make_matmul_nbits)
 
@@ -652,6 +728,45 @@ def test_make_embedding_non_tied_path_uses_embed_tokens_initializer_and_gather()
     assert model._transpose_calls == []
 
 
+def test_make_embedding_non_tied_int8_path_emits_cpu_gather_block_quantized():
+    model = _make_minimal_model_for_embedding_branches(
+        tied_quantized_embeddings=False,
+        tied_unquantized_embeddings=False,
+    )
+    model.use_cpu_embedding_gather = True
+    model.quant_attrs = {
+        "bits": 4,
+        "embedding_bits": 8,
+        "is_symmetric": True,
+        "matmul_block_size": 32,
+        "nodes_to_exclude": [],
+        "op_types_to_quantize": ("MatMul", "Gather"),
+    }
+    embedding = torch.tensor([[-1.0, 0.0, 0.5, 1.0] * 8], dtype=torch.float16)
+
+    model.make_embedding(embedding)
+
+    assert len(model._initializer_calls) == 2
+    quantized_weight, weight_name, weight_type = model._initializer_calls[0]
+    scales, scales_name, scales_type = model._initializer_calls[1]
+    assert weight_name == "model.embed_tokens.weight_Q8"
+    assert weight_type is None
+    assert quantized_weight.dtype == torch.uint8
+    assert quantized_weight.shape == embedding.shape
+    assert scales_name == "model.embed_tokens.weight_scales"
+    assert scales_type == ir.DataType.FLOAT16
+    assert scales.shape == (1, 1)
+
+    gather_calls = [call for call in model._node_calls if call[0] == "GatherBlockQuantized"]
+    assert len(gather_calls) == 1
+    gather = gather_calls[0][1]
+    assert gather["inputs"] == [weight_name, "input_ids", scales_name]
+    assert gather["bits"] == 8
+    assert gather["block_size"] == 32
+    assert gather["metadata_props"] == {"layer_ann": "cpu_embedding"}
+    assert not [call for call in model._node_calls if call[0] == "Gather"]
+
+
 @pytest.mark.parametrize("tied_quantized, tied_unquantized", [(True, False), (False, True)])
 def test_make_embedding_incompatible_lm_head_keeps_checkpoint_embedding(tied_quantized, tied_unquantized):
     model = _make_minimal_model_for_embedding_branches(
@@ -668,6 +783,9 @@ def test_make_embedding_incompatible_lm_head_keeps_checkpoint_embedding(tied_qua
     assert len(gather_calls) == 1
     assert gather_calls[0][1]["inputs"] == ["model.embed_tokens.weight", "input_ids"]
     assert model._transpose_calls == []
+    # Block drafters read the flags, so the veto has to land in them.
+    assert model.tied_quantized_embeddings is False
+    assert model.tied_unquantized_embeddings is False
 
 
 def _make_minimal_model_for_int4_matmul():

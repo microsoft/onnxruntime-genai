@@ -75,7 +75,7 @@ struct NemotronConfig {
   int subsampling_factor{};
   int max_symbols_per_step{};
 
-  // Acoustic alignment production; segment policy belongs to TokenPostProcessor.
+  // Acoustic alignment production; segment policy belongs to ASRPostProcessor.
   Config::TimestampLevel timestamp_level{Config::TimestampLevel::Off};
   bool diarization_enabled{};
 

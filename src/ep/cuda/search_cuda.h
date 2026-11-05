@@ -31,7 +31,7 @@ struct Search_Cuda : Search {
   DeviceSpan<float> GetLogits() const override;
   void SetLogits(DeviceSpan<float> logits) override;
 
-  void ApplyMinLength(int min_length) override;
+  void ApplyMinLength(int min_length, std::optional<int> sequence_length = std::nullopt) override;
   void ApplyRepetitionPenalty(float penalty) override;
 
   std::span<float> GetScores(int batch_beam_index);
@@ -74,6 +74,7 @@ struct GreedySearch_Cuda : Search_Cuda {
   void SampleTopP(float p, float t, std::mt19937& rng) override { SampleTopKTopP(-1, p, t, rng); }
   void SampleTopKTopP(int k, float p, float t, std::mt19937& rng) override;
   void CommitToken(int32_t token) override;
+  void MarkDone() override { *done_cpu_ = true; }
   void AppendTokens(DeviceSpan<int32_t>& next_tokens) override;  // shape (batch_size, sequence_length)
   void RewindTo(size_t index) override;
 

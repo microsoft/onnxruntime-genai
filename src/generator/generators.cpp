@@ -10,9 +10,10 @@
 #include <cstring>
 #include "config_utils.h"
 #include "models/preprocessing/genai_tokenizer.h"
-#include "models/preprocessing/token_post_processor.h"
+#include "models/postprocessing/asr_post_processor.h"
 #include "models/preprocessing/streaming_processor.h"
 #include "models/nemotron_speech.h"
+#include "models/nemotron_bolt.h"
 #include "models/parakeet.h"
 #include "sequences.h"
 #include "models/env_utils.h"
@@ -331,6 +332,12 @@ OrtGlobals::~OrtGlobals() {
   //    non-owning index (cleared first); owned_interfaces_ and cuda_library_ are the real owners.
   device_interfaces_.clear();
   owned_interfaces_.clear();
+  if (cuda_library_ && *cuda_library_) {
+    using ShutdownInterfaceFn = void (*)();
+    if (auto shutdown_interface = reinterpret_cast<ShutdownInterfaceFn>(cuda_library_->GetSymbol("ShutdownInterface"))) {
+      shutdown_interface();
+    }
+  }
   cuda_library_.reset();
 
   // 3. The trivial-session env-derived allocators, now unreferenced by any interface. Within each
@@ -586,6 +593,8 @@ std::unique_ptr<Search> CreateSearch(const GeneratorParams& params) {
       throw std::runtime_error("eos_token_id (" + std::to_string(eos_token_id) + ") must be in range [0, " + std::to_string(params.config.model.vocab_size) + ") (vocab_size)");
   }
 
+  if (params.config.model.type == "nemotron_bolt")
+    return CreateNemotronBoltSearch(params);
   if (params.search.num_beams > 1)
     return params.p_device->CreateBeam(params);
   return params.p_device->CreateGreedy(params);
@@ -618,6 +627,8 @@ Generator::Generator(const Model& model, const GeneratorParams& params)
   // search/logits pipeline; skip the standard validations and create the
   // TransducerState-derived state directly.
   const auto& model_type = model.config_->model.type;
+  if (model_type == "nemotron_bolt")
+    ValidateNemotronBoltSearch(params);
   if (ModelType::IsTransducer(model_type) || ModelType::IsStreamingEncDecASR(model_type)) {
     state_ = model.CreateState({}, params);
     transducer_state_ = dynamic_cast<TransducerState*>(state_.get());
@@ -717,18 +728,17 @@ void Generator::InitializeSamplingMethod(const GeneratorParams& params) {
 
 Generator::~Generator() = default;
 
+// With slide_inputs, input ids are padded to whole windows for the model, and the sequence keeps the padding.
+size_t Generator::PaddedInputIdsSize(size_t input_ids_count) const {
+  const auto& sliding_window = model_->config_->model.decoder.sliding_window;
+  if (!sliding_window.has_value() || !sliding_window->slide_inputs)
+    return input_ids_count;
+  const auto window_size = static_cast<size_t>(sliding_window->window_size);
+  return (input_ids_count + window_size - 1) / window_size * window_size;
+}
+
 DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids) {
-  size_t padded_input_ids_size = input_ids.size();
-  if (model_->config_->model.decoder.sliding_window.has_value()) {
-    // If the model has a sliding window, pad the input_ids to the next multiple of the window size
-    // so that the input_ids can be divided into window size chunks.
-    const auto window_size = model_->config_->model.decoder.sliding_window->window_size;
-
-    if (model_->config_->model.decoder.sliding_window->slide_inputs) {
-      padded_input_ids_size = ((input_ids.size() + window_size - 1) / window_size) * window_size;
-    }
-  }
-
+  const size_t padded_input_ids_size = PaddedInputIdsSize(input_ids.size());
   auto input_ids_device = state_->params_->p_device->Allocate<int32_t>(padded_input_ids_size);
   auto cpu_span = input_ids_device.CpuSpan();
   auto padding_begin = cpu_span.begin();
@@ -743,14 +753,18 @@ DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> 
   return input_ids_device;
 }
 
+void Generator::ThrowIfAppendExceedsMaxLength(size_t input_ids_count) {
+  if ((input_ids_count / state_->params_->search.batch_size) + search_->GetSequenceLength() > state_->params_->search.max_length)
+    throw std::runtime_error("input_ids size (" + std::to_string(input_ids_count) + ") + current sequence length (" + std::to_string(search_->GetSequenceLength()) + ") exceeds max length (" + std::to_string(state_->params_->search.max_length) + ")");
+}
+
 void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   DurationTrace trace{"Generator::AppendTokens"};
 
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (input_ids.size() == 0)
     throw std::runtime_error("input_ids is empty");
-  if ((input_ids.size() / state_->params_->search.batch_size) + search_->GetSequenceLength() > state_->params_->search.max_length)
-    throw std::runtime_error("input_ids size (" + std::to_string(input_ids.size()) + ") + current sequence length (" + std::to_string(search_->GetSequenceLength()) + ") exceeds max length (" + std::to_string(state_->params_->search.max_length) + ")");
+  ThrowIfAppendExceedsMaxLength(PaddedInputIdsSize(input_ids.size()));
   if (search_->GetSequenceLength() != 0 && state_->params_->search.batch_size > 1)
     throw std::runtime_error("AppendTokens can only be called once for batch_size > 1. To call AppendTokens again, use RewindToLength(0)");
 
@@ -773,6 +787,7 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
       else if (name.find("audio") != std::string::npos)
         used_audio = true;
     }
+
     append_input_modality = (used_vision && used_audio) ? "multimodal"
                             : used_vision               ? "vision"
                             : used_audio                ? "audio"
@@ -789,11 +804,20 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   // committed sequence before we append on top (nothing for standard decoding + initial
   // prefill; speculative -> reconcile two inner KV caches).
   strategy_->PrepareForAppend(*this);
+  RunGeneratedToken();
+  // Running the last generated token can append the tokens the grammar forces after it.
+  ThrowIfAppendExceedsMaxLength(PaddedInputIdsSize(input_ids.size()));
+  state_->StartTurn();
 
   auto input_ids_device = AllocateInputIdsOnDevice(input_ids);
-  search_->AppendTokens(input_ids_device);
   computed_logits_ = false;
-  ComputeLogits(input_ids_device);
+  if (auto* bolt = dynamic_cast<NemotronBoltState*>(state_.get())) {
+    bolt->Prefill(input_ids);
+    search_->AppendTokens(input_ids_device);
+  } else {
+    search_->AppendTokens(input_ids_device);
+    ComputeLogits(input_ids_device);
+  }
 
   generation_telemetry_.CompleteAppend(
       input_ids.size(), state_->params_->search.num_beams, append_input_modality);
@@ -805,9 +829,12 @@ void Generator::AppendTokens(DeviceSpan<int32_t> input_ids) {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (input_ids.empty())
     throw std::runtime_error("input_ids is empty");
-  if ((input_ids.size() / state_->params_->search.batch_size) + search_->GetSequenceLength() >
-      state_->params_->search.max_length)
-    throw std::runtime_error("device input_ids + current sequence length exceeds max length");
+  ThrowIfAppendExceedsMaxLength(input_ids.size());
+  if (model_->config_->model.type == "nemotron_bolt") {
+    auto cpu = input_ids.CopyDeviceToCpu();
+    AppendTokens(cpu_span<const int32_t>{cpu.data(), cpu.size()});
+    return;
+  }
   if (search_->GetSequenceLength() != 0 && state_->params_->search.batch_size > 1)
     throw std::runtime_error("AppendTokens can only be called once for batch_size > 1. To call AppendTokens again, use RewindToLength(0)");
 
@@ -816,9 +843,34 @@ void Generator::AppendTokens(DeviceSpan<int32_t> input_ids) {
     set_extra_inputs_ = false;
   }
 
+  strategy_->PrepareForAppend(*this);
+  RunGeneratedToken();
+  // Running the last generated token can append the tokens the grammar forces after it.
+  ThrowIfAppendExceedsMaxLength(input_ids.size());
+  state_->StartTurn();
+  if (!model_->config_->model.engram.filename.empty()) {
+    input_ids.CopyDeviceToCpu();
+  }
   search_->AppendTokens(input_ids);
   computed_logits_ = false;
   ComputeLogits(input_ids);
+}
+
+void Generator::RunGeneratedToken() {
+  // GenerateNextToken adds its token to the sequence but runs the model on it only in the next
+  // step, so an append right after it has to run that token first. A stop token that ended the
+  // search was never added, so there is nothing to run.
+  if (last_action_ != Action::generated || computed_logits_ || search_->IsDone())
+    return;
+  state_->DiscardNextLogits();
+  ComputeLogits(search_->GetNextTokens());
+  // Forced tokens that fill the sequence end the generation, as in GenerateNextToken.
+  if (search_->GetSequenceLength() >= state_->params_->search.max_length) {
+    computed_logits_ = false;
+    return;
+  }
+  // Keep committing the appended tokens to the guidance grammar, as before.
+  last_action_ = Action::generated;
 }
 
 void Generator::SetInputs(const NamedTensors& named_tensors) {
@@ -872,6 +924,11 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
 
   if (guidance_logits_processor_ && last_action_ == Action::generated) {
     auto ff_tokens = guidance_logits_processor_->GetFFTokens(0);
+    const size_t forced_count = ff_tokens.size();
+    // The sequence holds max_length tokens, padding included, so forced tokens past it are dropped.
+    const int room = std::max(0, state_->params_->search.max_length - search_->GetSequenceLength());
+    while (PaddedInputIdsSize(ff_tokens.size()) > static_cast<size_t>(room))
+      ff_tokens.pop_back();
     if (!ff_tokens.empty()) {
       // process fast-forward tokens
       std::span<int32_t> forced_tokens_span{ff_tokens};
@@ -889,6 +946,9 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
       SetLogits(logits);
       generation_telemetry_.OnTokenGenerated(static_cast<int64_t>(ff_tokens.size()));
     }
+    // The grammar has accepted the dropped tokens, so end the search like a stop token rather than skip them.
+    if (ff_tokens.size() < forced_count)
+      search_->MarkDone();
   }
 
   last_action_ = Action::standard;
@@ -928,7 +988,8 @@ bool Generator::IsDone() {
     return transducer_state_->IsChunkDone();
   }
 
-  if (computed_logits_) {
+  // A full sequence is done even when its logits are computed, as no generated token fits.
+  if (computed_logits_ && search_->GetSequenceLength() < state_->params_->search.max_length) {
     return false;
   }
 
@@ -949,6 +1010,8 @@ bool Generator::IsSessionTerminated() const {
 }
 
 void Generator::SetLogits(DeviceSpan<float> logits) {
+  if (model_->config_->model.type == "nemotron_bolt")
+    throw std::runtime_error("nemotron_bolt: SetLogits is unsupported");
   search_->SetLogits(logits);
   computed_logits_ = true;
 }
@@ -978,7 +1041,7 @@ void Generator::GenerateNextToken() {
 TokenOutputs Generator::GetTokenOutputs() const {
   if (const auto* transducer = dynamic_cast<const TransducerState*>(state_.get())) {
     const auto tokens = transducer->GetStepTokens();
-    std::optional<std::span<const AcousticFrameInterval>> intervals;
+    std::optional<std::span<const std::pair<int64_t, int64_t>>> intervals;
     std::optional<std::span<const TokenSpeakerEvidence>> evidence;
     if (model_->config_->model.timestamp_level != Config::TimestampLevel::Off ||
         model_->config_->model.diarization.Enabled()) {
@@ -1002,11 +1065,15 @@ SpeculativeStats Generator::GetSpeculativeStats() const {
 
 void Generator::RewindToLength(size_t new_length) {
   const auto& model_type = model_->config_->model.type;
+  if (model_type == "nemotron_bolt" && new_length != 0)
+    throw std::runtime_error("nemotron_bolt: only reset-to-zero rewind is supported");
   // RNNT/TDT/streaming-enc-dec-ASR models (e.g. Moonshine) take the
   // TransducerState path and never create search_, so rewind is unsupported.
   // Fail clearly here before search_ is dereferenced below.
   if (ModelType::IsTransducer(model_type) || ModelType::IsStreamingEncDecASR(model_type))
     throw std::runtime_error("RewindTo is not supported for streaming ASR models (" + model_type + ").");
+  if (!state_->SupportsRewind())
+    throw std::runtime_error("RewindTo is not supported for " + model_type + ".");
   if (model_type == "whisper" || model_type == "phi3v" || model_type == "decoder-pipeline" ||
       ModelType::IsLFM2(model_type) || model_type == "lfm2_vl" || model_type == "lfm2_audio")
     throw std::runtime_error("RewindTo is currently not supported for " + model_type + ".");
@@ -1023,6 +1090,7 @@ void Generator::RewindToLength(size_t new_length) {
   const int64_t rewound_token_count =
       static_cast<int64_t>(current_length - new_length) *
       static_cast<int64_t>(search_->params_->BatchBeamSize());
+  state_->ValidateRewindTo(new_length);
   search_->RewindTo(new_length);
   state_->RewindTo(new_length);
   if (guidance_logits_processor_) {
@@ -1070,6 +1138,7 @@ void Generator::CropToAccepted(size_t new_length, size_t recurrent_position) {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (new_length > search_->GetSequenceLength())
     throw std::runtime_error("CropToAccepted: new_length exceeds current sequence length");
+  state_->ValidateCropToAccepted(new_length, recurrent_position);
   search_->RewindTo(new_length);
   state_->CropToAccepted(new_length, recurrent_position);
   if (guidance_logits_processor_) {
