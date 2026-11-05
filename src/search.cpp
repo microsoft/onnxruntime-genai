@@ -299,7 +299,13 @@ void GreedySearch_Cpu::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
   // Set user-defined next tokens
   auto next_tokens_cpu = next_tokens.CpuSpan();
   auto batch_size = params_->search.batch_size;
+  if (next_tokens_cpu.size() % batch_size != 0)
+    throw std::runtime_error("User-defined token count must be divisible by batch_size.");
   auto tokens_count_per_batch = next_tokens_cpu.size() / batch_size;
+  const size_t current_length = static_cast<size_t>(sequences_.GetSequenceLength());
+  const size_t max_length = static_cast<size_t>(sequences_.max_length_);
+  if (current_length > max_length || tokens_count_per_batch > max_length - current_length)
+    throw std::runtime_error("User-defined tokens exceed remaining sequence capacity.");
   for (size_t j = 0; j < tokens_count_per_batch; j++) {
     for (size_t i = 0; i < batch_size; i++) {
       SetNextToken(i, next_tokens_cpu[i * tokens_count_per_batch + j]);

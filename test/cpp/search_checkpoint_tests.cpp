@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <limits>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -76,6 +77,23 @@ TEST_F(CpuSearchCheckpointTest, SamplingRollbackRestoresRandomState) {
     retried_tokens.insert(retried_tokens.end(), next_tokens.begin(), next_tokens.end());
   }
   EXPECT_EQ(retried_tokens, first_tokens);
+}
+
+TEST_F(CpuSearchCheckpointTest, RejectsAppendBeyondRemainingSequenceCapacity) {
+  auto initial = Tokens({1, 2});
+  search->AppendTokens(initial);
+
+  auto too_many = params->p_device->Allocate<int32_t>(16);
+  EXPECT_THROW(search->AppendTokens(too_many), std::runtime_error);
+  EXPECT_EQ(search->GetSequenceLength(), 1);
+}
+
+TEST(InputPaddingTest, CheckedSlidingWindowRoundUp) {
+  EXPECT_EQ(GetPaddedInputIdsSize(5, 4), 8U);
+  EXPECT_EQ(GetPaddedInputIdsSize(8, 4), 8U);
+  EXPECT_THROW(GetPaddedInputIdsSize(5, 0), std::runtime_error);
+  EXPECT_THROW(GetPaddedInputIdsSize(5, -1), std::runtime_error);
+  EXPECT_THROW(GetPaddedInputIdsSize(std::numeric_limits<size_t>::max(), 2), std::runtime_error);
 }
 
 TEST_F(CpuSearchCheckpointTest, RollbackRestoresDoneEosAndLengthState) {

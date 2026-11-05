@@ -303,5 +303,6 @@ float Float16ToFloat32(uint16_t v);  // v is a IEEE 752-2008 binary16 format, 1 
 
 std::unique_ptr<Search> CreateSearch(const GeneratorParams& params);
 std::mt19937 CreateRandomGenerator(int random_seed);
+size_t GetPaddedInputIdsSize(size_t input_ids_size, int window_size);
 
 }  // namespace Generators
