@@ -620,6 +620,10 @@ Model::~Model() {
   // Snapshot the type before teardown: CloseDmlInterface() frees the singleton p_device_ points to,
   // so reading p_device_->GetType() afterwards would be a use-after-free.
   const DeviceType device_type = p_device_ ? p_device_->GetType() : DeviceType::CPU;
+  // A host can destroy a model after genai's static destructors, which destroy the device statics
+  // that the close calls below reset. The OS reclaims the device at process exit.
+  if (IsProcessExiting())
+    return;
 #if USE_DML
   if (device_type == DeviceType::DML) {
     auto& allocator = GetOrtGlobals()->device_allocators_[static_cast<int>(DeviceType::DML)];

@@ -158,6 +158,7 @@ struct Generator : LeakChecked<Generator> {
   void LogAdapterActivated() { generation_telemetry_.LogAdapterActivated(); }
 
   DeviceSpan<int32_t> GetSequence(size_t index) const;
+  void ThrowIfStepDriven(const char* operation) const;
 
   // A list of extra model inputs that will be matched at runtime based on name
   std::vector<ExtraInput> extra_inputs_;
@@ -279,7 +280,8 @@ struct OrtGlobals {
 };
 
 std::unique_ptr<OrtGlobals>& GetOrtGlobals();
-void Shutdown();  // Do this once at exit, Ort code will fail after this call
+void Shutdown();          // Do this once at exit, Ort code will fail after this call
+bool IsProcessExiting();  // True once genai's static destructors have run
 OrtEnv& GetOrtEnv();
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const RuntimeSettings* settings = nullptr);

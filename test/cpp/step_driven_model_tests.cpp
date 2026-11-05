@@ -61,5 +61,30 @@ TEST(StepDrivenModelTest, AppendTokensAsksForSetInputs) {
   }
 }
 
+TEST(StepDrivenModelTest, SearchOperationsFailClearly) {
+  auto config = std::make_unique<Config>(fs::path{MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32"},
+                                         R"({"model": {"type": "nemotron_speech"}})");
+  auto model = std::make_shared<FakeStepModel>(std::move(config));
+  auto params = std::make_shared<GeneratorParams>(*model);
+  Generator generator{*model, *params};
+
+  auto expect_error = [](const char* operation, auto&& call) {
+    try {
+      call();
+      ADD_FAILURE() << operation << " was accepted";
+    } catch (const std::runtime_error& e) {
+      EXPECT_NE(std::string{e.what()}.find(std::string{operation} + " is not supported for nemotron_speech"),
+                std::string::npos)
+          << e.what();
+    }
+  };
+  expect_error("GetLogits", [&] { generator.GetLogits(); });
+  expect_error("SetLogits", [&] { generator.PrepareForSetLogits(); });
+  expect_error("SetLogits", [&] { generator.SetLogits({}); });
+  expect_error("SnapshotState", [&] { generator.SnapshotState(); });
+  expect_error("CropToAccepted", [&] { generator.CropToAccepted(0, 0); });
+  expect_error("GetSequence", [&] { generator.GetSequence(0); });
+}
+
 }  // namespace
 }  // namespace Generators

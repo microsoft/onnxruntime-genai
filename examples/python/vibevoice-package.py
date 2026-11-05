@@ -150,6 +150,8 @@ def main():
     args = parser.parse_args()
 
     source, output = args.source.resolve(), args.output.resolve()
+    if source == output:
+        raise SystemExit("--output must be a different folder than --source")
     output.mkdir(parents=True, exist_ok=True)
     for filename in GRAPHS.values():
         place(source / filename, output / filename)

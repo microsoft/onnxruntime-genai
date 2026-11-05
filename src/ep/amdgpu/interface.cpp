@@ -367,8 +367,10 @@ struct PinnedInputsImpl : DeviceInterface {
 
 }  // namespace AMDGPU
 
-static std::unique_ptr<AMDGPU::InterfaceImpl> g_amdgpu_device;
-static std::unique_ptr<AMDGPU::PinnedInputsImpl> g_amdgpu_pinned_inputs;
+// Never destroyed, like g_dml_device: models that a host destroys after genai's static destructors still use them.
+static std::unique_ptr<AMDGPU::InterfaceImpl>& g_amdgpu_device = *new std::unique_ptr<AMDGPU::InterfaceImpl>;
+static std::unique_ptr<AMDGPU::PinnedInputsImpl>& g_amdgpu_pinned_inputs =
+    *new std::unique_ptr<AMDGPU::PinnedInputsImpl>;
 
 // Live Models sharing the process-global AMDGPU interface singleton. Several can be alive at once
 // (e.g. a target + draft decoder pair), so the full teardown must run only when the last one goes away.

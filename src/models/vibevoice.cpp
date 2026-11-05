@@ -222,9 +222,6 @@ VibeVoiceModel::VibeVoiceModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)}, memory_info_{OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault)} {
   ValidateVibeVoiceConfig(*config_);
 
-  session_options_ = OrtSessionOptions::Create();
-  CreateSessionOptionsFromConfig(config_->model.decoder.session_options, *session_options_, true);
-
   // Each graph must have exactly these inputs and outputs, plus a KV cache for the language models.
   auto load = [&](VibeVoiceGraph& graph, const char* label, const std::string& filename,
                   std::initializer_list<TensorSpec> inputs, std::initializer_list<TensorSpec> outputs, bool kv_cache) {
@@ -364,6 +361,8 @@ VibeVoiceState::VibeVoiceState(const VibeVoiceModel& model, const GeneratorParam
       voice_{&model.GetVoice({})},
       rng_{params.search.random_seed >= 0 ? static_cast<uint32_t>(params.search.random_seed) : std::random_device{}()} {
   chunk_done_ = true;  // Idle until SetInputs supplies text.
+  if (model.config_->model.decoder.run_options.has_value())
+    State::SetRunOptions(*model.config_->model.decoder.run_options);
 }
 
 DeviceSpan<float> VibeVoiceState::Run(int /*total_length*/, DeviceSpan<int32_t>& /*next_tokens*/,

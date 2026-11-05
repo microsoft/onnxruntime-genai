@@ -178,6 +178,11 @@ TEST(VibeVoiceTests, AppliesTheVoiceOption) {
   auto params = OgaGeneratorParams::Create(*model);
   auto generator = OgaGenerator::Create(*model, *params);
   EXPECT_THROW(generator->SetRuntimeOption(OgaRuntimeOption_Voice, "Nobody"), std::runtime_error);
+
+  // Every new generator applies model.decoder.run_options.
+  auto beta_model = LoadModel(R"({"model": {"decoder": {"run_options": {"voice": "Beta"}}}})");
+  auto beta_processor = OgaMultiModalProcessor::Create(*beta_model);
+  ExpectSpeech(Synthesize(*beta_model, *beta_processor, "Hello world.").samples, TinySpeech("Hello world.", kBeta));
 }
 
 TEST(VibeVoiceTests, GeneratesOneFrameAndOnePlaceholderPerStep) {

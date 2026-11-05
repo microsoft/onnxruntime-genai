@@ -233,7 +233,8 @@ struct InterfaceImpl : DeviceInterface {
 
 }  // namespace Dml
 
-std::unique_ptr<Dml::InterfaceImpl> g_dml_device;
+// Never destroyed: a model that a host destroys after genai's static destructors still reads its device type.
+std::unique_ptr<Dml::InterfaceImpl>& g_dml_device = *new std::unique_ptr<Dml::InterfaceImpl>;
 
 void InitDmlInterface(LUID* p_device_luid, uint32_t* p_device_index) {
   if (!g_dml_device)

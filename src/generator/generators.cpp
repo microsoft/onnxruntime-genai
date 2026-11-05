@@ -148,6 +148,11 @@ std::unique_ptr<OrtGlobals>& GetOrtGlobals() {
   return g_ort_globals;
 }
 
+bool IsProcessExiting() {
+  std::scoped_lock lock{g_ort_globals_mutex};
+  return g_process_exiting;
+}
+
 // Used by Shutdown() to display the counts and types of any leaked objects.
 // Leak reporting is gated to debug builds or when logging is enabled, since
 // consuming applications often cannot guarantee model teardown before process
@@ -1001,11 +1006,13 @@ bool Generator::IsSessionTerminated() const {
 }
 
 void Generator::SetLogits(DeviceSpan<float> logits) {
+  ThrowIfStepDriven("SetLogits");
   search_->SetLogits(logits);
   computed_logits_ = true;
 }
 
 void Generator::PrepareForSetLogits() {
+  ThrowIfStepDriven("SetLogits");
   strategy_->PrepareForSetLogits(*this);
 }
 
@@ -1083,6 +1090,7 @@ void Generator::RewindToLength(size_t new_length) {
 }
 
 DeviceSpan<float> Generator::GetLogits() {
+  ThrowIfStepDriven("GetLogits");
   DeviceSpan<float> strategy_logits;
   if (strategy_->TryGetExternalLogits(*this, strategy_logits)) {
     return strategy_logits;
@@ -1103,6 +1111,7 @@ DeviceSpan<float> Generator::GetLogits() {
 
 void Generator::SnapshotState() {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
+  ThrowIfStepDriven("SnapshotState");
   state_->SnapshotState(search_->GetSequenceLength());
 }
 
@@ -1116,6 +1125,7 @@ int64_t Generator::RecurrentStateWindow() const {
 
 void Generator::CropToAccepted(size_t new_length, size_t recurrent_position) {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
+  ThrowIfStepDriven("CropToAccepted");
   if (new_length > search_->GetSequenceLength())
     throw std::runtime_error("CropToAccepted: new_length exceeds current sequence length");
   state_->ValidateCropToAccepted(new_length, recurrent_position);
@@ -1135,7 +1145,15 @@ void Generator::SetHiddenStates(std::shared_ptr<Tensor> hidden_states) {
 }
 
 DeviceSpan<int32_t> Generator::GetSequence(size_t index) const {
+  ThrowIfStepDriven("GetSequence");
   return search_->GetSequence(index);
+}
+
+// Step-driven models (transducer, streaming ASR, text to speech) have no search, so the operations
+// that read or change the search sequence or logits do not apply to them.
+void Generator::ThrowIfStepDriven(const char* operation) const {
+  if (transducer_state_)
+    throw std::runtime_error(std::string{operation} + " is not supported for " + model_->config_->model.type + ".");
 }
 
 }  // namespace Generators
