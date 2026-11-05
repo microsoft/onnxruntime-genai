@@ -22,7 +22,6 @@
 #include <memory>
 #include <mutex>
 #include <new>
-#include <numeric>
 #include <optional>
 #include <random>
 #include <sstream>
@@ -2718,8 +2717,7 @@ TEST_F(EngineRunTest, MixedRunRollbackPreservesProgressAndCacheResidents) {
 TEST_F(EngineRunTest, PromptsTakeSpareTokensInArrivalOrder) {
   model_->config_->engine.dynamic_batching->max_scheduled_tokens = 8;
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
-  std::vector<int32_t> long_prompt(20);
-  std::iota(long_prompt.begin(), long_prompt.end(), 11);
+  const auto long_prompt = SequentialPrompt(20);
   std::vector<std::shared_ptr<Request>> prompts;
   for (int i = 0; i < 3; ++i)
     prompts.push_back(CreateRequestWithPrompt(engine.engine, long_prompt));
@@ -2747,8 +2745,7 @@ TEST_F(EngineRunTest, CappedPromptsTakeSpareTokensInArrivalOrder) {
   model_->config_->search.chunk_size = 4;
   model_->config_->engine.dynamic_batching->max_scheduled_tokens = 6;
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
-  std::vector<int32_t> long_prompt(20);
-  std::iota(long_prompt.begin(), long_prompt.end(), 11);
+  const auto long_prompt = SequentialPrompt(20);
   auto first = CreateRequestWithPrompt(engine.engine, long_prompt);
   auto second = CreateRequestWithPrompt(engine.engine, long_prompt);
 
@@ -2773,8 +2770,7 @@ TEST_F(EngineRunTest, DraftDroppedByCapacityPlanningGivesItsTokenToThePrefill) {
   auto decode = CreateRequestWithPrompt(engine.engine, Prompt(10));
   RunOne(*engine.engine);
   decode->SetDraftTokens(std::array<int32_t, 1>{11});
-  std::vector<int32_t> long_prompt(20);
-  std::iota(long_prompt.begin(), long_prompt.end(), 11);
+  const auto long_prompt = SequentialPrompt(20);
   auto prefill = CreateRequestWithPrompt(engine.engine, long_prompt);
 
   engine.cache->DeferDraftedRequestsOnce();

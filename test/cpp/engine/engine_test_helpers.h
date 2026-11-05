@@ -5,6 +5,7 @@
 
 #include <array>
 #include <memory>
+#include <numeric>
 #include <span>
 #include <vector>
 
@@ -171,6 +172,13 @@ inline std::shared_ptr<Request> CreateRequestWithPrompt(
   options.request = request;
   request->BeginTurn(prompt_tokens, options);
   return request;
+}
+
+// A prompt of `length` distinct tokens 11, 12, ..., long enough to span several prefill steps.
+inline std::vector<int32_t> SequentialPrompt(size_t length) {
+  std::vector<int32_t> prompt(length);
+  std::iota(prompt.begin(), prompt.end(), 11);
+  return prompt;
 }
 
 // The model's end-of-stream token, used to script a request to completion.

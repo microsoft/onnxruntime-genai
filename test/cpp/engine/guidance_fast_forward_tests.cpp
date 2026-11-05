@@ -12,7 +12,6 @@
 #include <array>
 #include <cstdint>
 #include <memory>
-#include <numeric>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -234,12 +233,6 @@ TEST_F(GuidanceFastForwardTest, PrefillChunkSizeDoesNotSplitTheUnreadForcedToken
   EXPECT_EQ(engine.executor->decoded_token_counts, (std::vector<size_t>{2, 1, 8, 4}));
 }
 
-std::vector<int32_t> LongPrompt(size_t length) {
-  std::vector<int32_t> prompt(length);
-  std::iota(prompt.begin(), prompt.end(), 11);
-  return prompt;
-}
-
 // A forcing turn that has sampled 11 and published 7 forced tokens: a catch-up row with 8 unread.
 std::shared_ptr<Request> CatchingUpRequest(DoublesEngine& engine) {
   auto forcing = CreateRequestWithPrompt(engine.engine, Prompt());
@@ -255,7 +248,7 @@ TEST_F(GuidanceFastForwardTest, CatchUpRowAndPromptTakeTurnsAtSpareTokens) {
   model_->config_->engine.dynamic_batching->max_scheduled_tokens = 6;
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
   auto forcing = CatchingUpRequest(engine);
-  auto prompt = CreateRequestWithPrompt(engine.engine, LongPrompt(20));
+  auto prompt = CreateRequestWithPrompt(engine.engine, SequentialPrompt(20));
 
   std::vector<std::vector<size_t>> reads;  // {forcing, prompt} per step
   engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
@@ -275,7 +268,7 @@ TEST_F(GuidanceFastForwardTest, RolledBackStepDoesNotChangeWhoGetsSpareTokens) {
   model_->config_->engine.dynamic_batching->max_scheduled_tokens = 6;
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
   auto forcing = CatchingUpRequest(engine);
-  auto prompt = CreateRequestWithPrompt(engine.engine, LongPrompt(20));
+  auto prompt = CreateRequestWithPrompt(engine.engine, SequentialPrompt(20));
 
   std::vector<std::vector<size_t>> reads;  // {forcing, prompt} per attempt
   engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
@@ -299,7 +292,7 @@ TEST_F(GuidanceFastForwardTest, RolledBackStepDoesNotChangeWhoGetsSpareTokens) {
 TEST_F(GuidanceFastForwardTest, SustainedFastForwardArrivalsCannotKeepAPromptWaiting) {
   model_->config_->engine.dynamic_batching->max_scheduled_tokens = 10;
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
-  auto prompt = CreateRequestWithPrompt(engine.engine, LongPrompt(40));
+  auto prompt = CreateRequestWithPrompt(engine.engine, SequentialPrompt(40));
 
   size_t passed_over = 0;
   size_t max_passed_over = 0;
@@ -359,15 +352,15 @@ TEST_F(GuidanceFastForwardTest, NewArrivalQueuesBehindAWaitingPrompt) {
   model_->config_->engine.dynamic_batching->max_scheduled_tokens = 8;
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
   auto forcing = AlwaysCatchingUpRequest(engine);
-  std::vector<std::shared_ptr<Request>> prompts{CreateRequestWithPrompt(engine.engine, LongPrompt(20)),
-                                                CreateRequestWithPrompt(engine.engine, LongPrompt(20))};
+  std::vector<std::shared_ptr<Request>> prompts{CreateRequestWithPrompt(engine.engine, SequentialPrompt(20)),
+                                                CreateRequestWithPrompt(engine.engine, SequentialPrompt(20))};
   std::vector<std::optional<size_t>> leaders;
   engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
     leaders.push_back(Leader(context, prompts));
   });
   std::array<EngineEvent, 16> storage;
   engine.engine->Run(storage);
-  prompts.push_back(CreateRequestWithPrompt(engine.engine, LongPrompt(20)));
+  prompts.push_back(CreateRequestWithPrompt(engine.engine, SequentialPrompt(20)));
   for (int step = 0; step < 4; ++step)
     engine.engine->Run(storage);
   EXPECT_EQ(leaders, (std::vector<std::optional<size_t>>{0, 0, 1, 2, 2}));
@@ -384,14 +377,14 @@ TEST_F(GuidanceFastForwardTest, ContinuationTurnQueuesBehindAWaitingPrompt) {
   engine.engine->Run(storage);
   ASSERT_EQ(resident->Status(), RequestStatus::TurnComplete);
   auto forcing = AlwaysCatchingUpRequest(engine);
-  std::vector<std::shared_ptr<Request>> prompts{resident, CreateRequestWithPrompt(engine.engine, LongPrompt(20)),
-                                                CreateRequestWithPrompt(engine.engine, LongPrompt(20))};
+  std::vector<std::shared_ptr<Request>> prompts{resident, CreateRequestWithPrompt(engine.engine, SequentialPrompt(20)),
+                                                CreateRequestWithPrompt(engine.engine, SequentialPrompt(20))};
   std::vector<std::optional<size_t>> leaders;
   engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
     leaders.push_back(Leader(context, prompts));
   });
   engine.engine->Run(storage);
-  resident->BeginTurn(LongPrompt(20));
+  resident->BeginTurn(SequentialPrompt(20));
   for (int step = 0; step < 4; ++step)
     engine.engine->Run(storage);
   EXPECT_EQ(leaders, (std::vector<std::optional<size_t>>{1, 1, 2, 0, 0}));

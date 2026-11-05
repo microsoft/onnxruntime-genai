@@ -4,8 +4,8 @@
 """Paired off/on benchmark for Engine guidance fast-forward.
 
 Each iteration runs the same guided turns with fast-forward off and on, on one Engine and in an
-alternating order, optionally beside unguided peer turns. It reports Run calls, arrival-to-first-
-token and end-to-end latency, peer inter-token gaps, cancellation latency, and whether off and on
+alternating order, optionally beside unguided peer turns. It reports model steps, draft counts,
+throughput, latencies, peer gaps, cancellation latency, schema validity, and whether off and on
 generated the same tokens. See benchmark/python/README.
 """
 

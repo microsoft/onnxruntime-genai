@@ -1006,8 +1006,9 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
            "following turn that sets none is unguided.")
       .def("set_guidance_fast_forward", &OgaTurnOptions::SetGuidanceFastForward,
            "Lets the whole-turn grammar append the tokens it forces instead of sampling them. Off "
-           "by default: forced token IDs follow the grammar's tokenization and draw no random "
-           "numbers, so token IDs and later output may differ.")
+           "by default: token IDs, random-number use and later values inside and after the grammar "
+           "may differ, and other requests' token gaps may grow. Only an EOS finish means the "
+           "grammar accepted the output; check the finish reason and validate the result.")
       .def("clear_guidance", &OgaTurnOptions::ClearGuidance,
            "Removes the configured grammar, so the turn is unguided, and turns off guidance "
            "fast-forward.")
