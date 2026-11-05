@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "model.h"
@@ -120,6 +121,7 @@ struct NemotronConfig {
 
 int NemotronArgMax(const OrtValue& logits, int blank_id, float blank_penalty);
 ONNXTensorElementDataType ValidateNemotronFloatType(std::span<const ONNXTensorElementDataType> types);
+void ValidateNemotronInt64Type(std::string_view name, ONNXTensorElementDataType type);
 
 /// Holds the rolling encoder cache state between streaming chunks.
 struct NemotronEncoderCache {

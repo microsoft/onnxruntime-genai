@@ -22,6 +22,27 @@ DeviceSpan<T> WrapKvCacheTensor(DeviceInterface& device, OrtValue& value, ONNXTe
   }
   return WrapTensor<T>(device, value);
 }
+
+template <typename T>
+void CopyReorderedBlocks(DeviceSpan<T>& destination, DeviceSpan<T>& source,
+                         std::span<const int32_t> indices, size_t block_size) {
+  for (size_t destination_index = 0; destination_index < indices.size(); ++destination_index) {
+    const size_t source_index = static_cast<size_t>(indices[destination_index]);
+    auto source_block = source.subspan(source_index * block_size, block_size);
+    auto destination_block = destination.subspan(destination_index * block_size, block_size);
+    destination_block.CopyFrom(source_block);
+  }
+}
+
+template <typename T>
+void CopyRows(DeviceSpan<T>& destination, DeviceSpan<T>& source, size_t row_count,
+              size_t source_stride, size_t copy_count) {
+  for (size_t row = 0; row < row_count; ++row) {
+    auto source_row = source.subspan(row * source_stride, copy_count);
+    auto destination_row = destination.subspan(row * copy_count, copy_count);
+    destination_row.CopyFrom(source_row);
+  }
+}
 }  // namespace KeyValueCacheDetail
 
 struct KeyValueCache {
