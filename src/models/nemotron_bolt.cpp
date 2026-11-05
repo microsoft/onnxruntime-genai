@@ -82,11 +82,12 @@ void ValidateNemotronBoltSearch(const GeneratorParams& params) {
           "guidance is unsupported");
   Require(params.speculative.ngram_size == 0 && !params.speculative.ngram_chained_lookup &&
               params.speculative.min_adaptive_k == 0 && !params.speculative.cooldown &&
-              params.speculative.max_draft_tokens == 7,
-          "speculative.max_draft_tokens must be 7; external/adaptive speculative strategies are unsupported");
+              (params.speculative.max_draft_tokens == 0 || params.speculative.max_draft_tokens == 7),
+          "speculative.max_draft_tokens must be 0 or 7; external/adaptive speculative strategies are unsupported");
   Require(!s.chunk_size && !params.config.model.decoder.sliding_window,
           "external prefill chunking and decoder sliding_window are unsupported");
-  Require(params.use_graph_capture, "CUDA graph capture must be enabled");
+  Require(params.speculative.max_draft_tokens == 0 || params.use_graph_capture,
+          "CUDA graph capture must be enabled for speculative decoding");
 }
 
 size_t NemotronBoltAcceptedPrefix(std::span<const int32_t> drafts,
@@ -113,16 +114,36 @@ std::vector<int32_t> NemotronBoltRoundTokens(std::span<const int32_t> drafts,
   return result;
 }
 
+std::unique_ptr<Config> CreateNemotronBoltDrafterConfig(const Config& config) {
+  auto drafter = CreateDflash2Config(config);
+  auto& entries = drafter->model.decoder.session_options.config_entries;
+  const auto entry = std::find_if(entries.rbegin(), entries.rend(), [](const auto& option) {
+    return option.first == "optimization.disable_specified_optimizers";
+  });
+  if (entry == entries.rend()) {
+    entries.emplace_back("optimization.disable_specified_optimizers", "GatherSliceToSplitFusion");
+  } else if (("," + entry->second + ",").find(",GatherSliceToSplitFusion,") == std::string::npos) {
+    if (!entry->second.empty()) entry->second += ',';
+    entry->second += "GatherSliceToSplitFusion";
+  }
+  return drafter;
+}
+
 NemotronBoltModel::NemotronBoltModel(std::unique_ptr<Config> config, OrtEnv& env)
     : Model{std::move(config)} {
+  Require(config_->speculative.max_draft_tokens == 0 ||
+              config_->speculative.max_draft_tokens == 7,
+          "speculative.max_draft_tokens must be 0 or 7");
 #if ORT_API_VERSION < 27
   // Each generator captures fresh graph ids in model-owned sessions; releasing them needs ORT 27.
-  Require(false, "ONNX Runtime API 27 or later is required to release captured graphs");
+  Require(!IsGraphCaptureEnabled(config_->model.decoder.session_options),
+          "ONNX Runtime API 27 or later is required to release captured graphs");
 #endif
   Require(p_device_->GetType() == DeviceType::CUDA, "a CUDA execution provider is required");
   p_device_scoring_ = GetDeviceInterface(DeviceType::CPU);
-  Require(IsGraphCaptureEnabled(config_->model.decoder.session_options),
-          "enable_cuda_graph must be 1");
+  Require(config_->speculative.max_draft_tokens == 0 ||
+              IsGraphCaptureEnabled(config_->model.decoder.session_options),
+          "enable_cuda_graph must be 1 for speculative decoding");
   Require(!config_->engine.dynamic_batching && !config_->engine.static_batching &&
               !config_->model.draft && !config_->model.mtp.IsEnabled() &&
               !config_->model.decoder.sliding_window,
@@ -181,14 +202,14 @@ NemotronBoltModel::NemotronBoltModel(std::unique_ptr<Config> config, OrtEnv& env
               capacity_ <= static_cast<size_t>(std::numeric_limits<int32_t>::max()) &&
               static_cast<size_t>(config_->model.context_length) <= capacity_ - kBoltVerifyRows,
           "context_length must leave eight scratch slots in the fixed KV capacity");
+  if (config_->speculative.max_draft_tokens == 0)
+    return;
   const auto& d = config_->model.dflash2;
   Require(d.block_size == 8 && d.num_draft_tokens == 7 && !d.is_dspark &&
               !d.independent_sampling && !d.inputs.anchor_row_index.empty() &&
               d.main_aux_hidden_states == "aux_hidden_states",
           "a greedy LiLiCorr DFlash2 block8 drafter with anchor_row_index is required");
-  auto drafter_config = CreateDflash2Config(*config_);
-  drafter_config->model.decoder.session_options.config_entries.emplace_back(
-      "optimization.disable_specified_optimizers", "GatherSliceToSplitFusion");
+  auto drafter_config = CreateNemotronBoltDrafterConfig(*config_);
   drafter_model_ = std::make_shared<Dflash2Model>(std::move(drafter_config), env);
   // The shared validator expects the Engine's packed 2-D auxiliary output. Present an equivalent
   // metadata view without changing the actual fixed-R8 target graph or its buffers.
@@ -211,6 +232,10 @@ NemotronBoltModel::NemotronBoltModel(std::unique_ptr<Config> config, OrtEnv& env
 
 std::unique_ptr<State> NemotronBoltModel::CreateState(DeviceSpan<int32_t>, const GeneratorParams& params) const {
   ValidateNemotronBoltSearch(params);
+  Require(!params.use_graph_capture || IsGraphCaptureEnabled(config_->model.decoder.session_options),
+          "graph capture is disabled in the target session");
+  Require(params.speculative.max_draft_tokens == 0 || drafter_model_,
+          "speculative decoding requires a model configured with a drafter");
   return std::make_unique<NemotronBoltState>(*this, params);
 }
 
@@ -272,32 +297,39 @@ NemotronBoltState::NemotronBoltState(const NemotronBoltModel& model, const Gener
     State::SetRunOptions(model.config_->model.decoder.run_options.value());
   }
   run_options_->AddConfigEntry("disable_synchronize_execution_providers", "1");
+  if (!params.use_graph_capture)
+    run_options_->AddConfigEntry("gpu_graph_id", "-1");
 
-  // The view is zero-copy: DFlash2 packs only the committed rows, never the padded/rejected ones.
-  auto& aux = *tensors_.at("aux_hidden_states");
-  const std::array<int64_t, 2> shape{8, static_cast<int64_t>(model.aux_width_)};
-  aux_view_ = std::make_unique<Tensor>(OrtValue::CreateTensor(
-      *model.p_device_->GetMemoryInfo(), aux.GetMutableRawData(), aux.GetByteSpan().size(),
-      shape, aux.GetType()));
-  aux_view_->p_device_ = model.p_device_;
-  size_t blocks = Dflash2Drafter::PoolBlocks(*model.config_, 256, 1);
-  if (blocks == 0) blocks = (model.capacity_ + 255) / 256 + 1;
-  drafter_ = std::make_unique<Dflash2Drafter>(model.drafter_model_, 256, blocks, 1, true);
-  const size_t max_prefill_rows =
-      ((std::max(drafter_->ContextWindow(), kBoltVerifyRows) + kBoltVerifyRows - 1) / kBoltVerifyRows + 1) *
-      kBoltVerifyRows;
-  const std::array<int64_t, 2> prefill_shape{static_cast<int64_t>(max_prefill_rows),
-                                             static_cast<int64_t>(model.aux_width_)};
-  prefill_aux_ = std::make_unique<Tensor>(model.p_device_, aux.GetType());
-  prefill_aux_->CreateTensor(prefill_shape, true);
+  if (params.speculative.max_draft_tokens != 0) {
+    // DFlash2 packs only committed rows from this zero-copy view.
+    auto& aux = *tensors_.at("aux_hidden_states");
+    const std::array<int64_t, 2> shape{8, static_cast<int64_t>(model.aux_width_)};
+    aux_view_ = std::make_unique<Tensor>(OrtValue::CreateTensor(
+        *model.p_device_->GetMemoryInfo(), aux.GetMutableRawData(), aux.GetByteSpan().size(),
+        shape, aux.GetType()));
+    aux_view_->p_device_ = model.p_device_;
+    size_t blocks = Dflash2Drafter::PoolBlocks(*model.config_, 256, 1);
+    if (blocks == 0) blocks = (model.capacity_ + 255) / 256 + 1;
+    drafter_ = std::make_unique<Dflash2Drafter>(model.drafter_model_, 256, blocks, 1, true);
+    const size_t max_prefill_rows =
+        ((std::max(drafter_->ContextWindow(), kBoltVerifyRows) + kBoltVerifyRows - 1) / kBoltVerifyRows + 1) *
+        kBoltVerifyRows;
+    const std::array<int64_t, 2> prefill_shape{static_cast<int64_t>(max_prefill_rows),
+                                               static_cast<int64_t>(model.aux_width_)};
+    prefill_aux_ = std::make_unique<Tensor>(model.p_device_, aux.GetType());
+    prefill_aux_->CreateTensor(prefill_shape, true);
+  }
   Reset();
   std::vector<int32_t> dummy(kBoltVerifyRows, 1);
-  // Initial graph-enabled executions are not trustworthy. Capture on dummy zero state and discard
-  // everything, including the recurrent row selection, before any real prompt is processed.
-  for (int i = 0; i < 4; ++i) Verify(dummy, i == 3);
-  for (int i = 0; i < 4; ++i) {
-    drafter_->ReleaseAll();
-    Propose(8, 0, 1);
+  // Capture on disposable state: warmup may execute in-place aliases more than once.
+  if (params.use_graph_capture) {
+    for (int i = 0; i < 4; ++i) Verify(dummy, i == 3);
+  }
+  if (drafter_) {
+    for (int i = 0; i < 4; ++i) {
+      drafter_->ReleaseAll();
+      Propose(8, 0, 1);
+    }
   }
   Reset();
 }
@@ -311,7 +343,7 @@ DeviceSpan<float> NemotronBoltState::Run(int, DeviceSpan<int32_t>&, DeviceSpan<i
 void NemotronBoltState::Reset() {
   for (auto* cache : caches_) cache->GetByteSpan().Zero();
   model_.p_device_->Synchronize();
-  drafter_->ReleaseAll();
+  if (drafter_) drafter_->ReleaseAll();
   length_ = 0;
   state_row_ = 0;
   anchor_ = 0;
@@ -344,7 +376,7 @@ std::vector<int64_t> NemotronBoltState::Verify(std::span<const int32_t> tokens, 
   cpu_in[2 * kBoltVerifyRows] = static_cast<int32_t>(length_ + kBoltVerifyRows - 1);
   cpu_in[2 * kBoltVerifyRows + 4] = state_row_;
   verify_inputs_span_.CopyCpuToDevice();
-  State::Run(*bolt_.session_, true, 8, 0, nullptr);
+  State::Run(*bolt_.session_, params_->use_graph_capture, 8, 0, nullptr);
   ++stats_.target_forward_passes;
   if (!want_predictions) return {};
   auto cpu = pred_ids_span_.CopyDeviceToCpu();
@@ -376,7 +408,7 @@ void NemotronBoltState::Prefill(std::span<const int32_t> tokens) {
   // A failure after the first chunk leaves advanced caches and a native cursor that the public
   // sequence (still empty) cannot rewind, so discard all partial state before propagating.
   try {
-    const size_t window = drafter_->ContextWindow();
+    const size_t window = drafter_ ? drafter_->ContextWindow() : 0;
     const size_t draft_start =
         (window != 0 && tokens.size() > window)
             ? ((tokens.size() - window) / kBoltVerifyRows) * kBoltVerifyRows
@@ -384,15 +416,15 @@ void NemotronBoltState::Prefill(std::span<const int32_t> tokens) {
     const size_t draft_rows = tokens.size() - draft_start;
     const bool single_chunk = draft_rows <= kBoltVerifyRows;
     const size_t aux_row_bytes = bolt_.aux_width_ * sizeof(uint16_t);
-    auto aux_src = aux_view_->GetByteSpan();
-    auto prefill_dst = prefill_aux_->GetByteSpan();
     for (size_t pos = 0; pos < tokens.size(); pos += kBoltVerifyRows) {
       const size_t valid = std::min(kBoltVerifyRows, tokens.size() - pos);
       const bool last_chunk = pos + kBoltVerifyRows >= tokens.size();
       std::vector<int32_t> block(kBoltVerifyRows, tokens[pos + valid - 1]);
       std::copy_n(tokens.begin() + pos, valid, block.begin());
       const auto predictions = Verify(block, last_chunk);
-      if (!single_chunk && pos >= draft_start) {
+      if (drafter_ && !single_chunk && pos >= draft_start) {
+        auto aux_src = aux_view_->GetByteSpan();
+        auto prefill_dst = prefill_aux_->GetByteSpan();
         prefill_dst.subspan((pos - draft_start) * aux_row_bytes, valid * aux_row_bytes)
             .CopyFrom(aux_src.subspan(0, valid * aux_row_bytes));
       }
@@ -402,12 +434,13 @@ void NemotronBoltState::Prefill(std::span<const int32_t> tokens) {
       length_ += valid;
       state_row_ = static_cast<int32_t>(valid - 1);
     }
-    Propose(draft_rows, draft_start, anchor_, single_chunk ? aux_view_.get() : prefill_aux_.get());
+    if (drafter_)
+      Propose(draft_rows, draft_start, anchor_, single_chunk ? aux_view_.get() : prefill_aux_.get());
     if (tokens.size() < static_cast<size_t>(params_->search.max_length)) {
       pending_.push_back(anchor_);
       stats_.tokens_queued = 1;
     }
-    stats_.effective_k = 7;
+    stats_.effective_k = drafter_ ? 7 : 0;
     prefilled_ = true;
   } catch (...) {
     try {
@@ -420,6 +453,15 @@ void NemotronBoltState::Prefill(std::span<const int32_t> tokens) {
 
 int32_t NemotronBoltState::NextToken(size_t public_length) {
   Require(prefilled_, "AppendTokens must precede GenerateNextToken");
+  if (pending_.empty() && !drafter_) {
+    // Only row zero is committed; later rows are causal scratch and are overwritten.
+    const auto predictions = Verify(std::vector<int32_t>(kBoltVerifyRows, anchor_));
+    anchor_ = static_cast<int32_t>(predictions[0]);
+    ++length_;
+    state_row_ = 0;
+    pending_.push_back(anchor_);
+    ++stats_.tokens_queued;
+  }
   if (pending_.empty()) {
     std::vector<int32_t> block{anchor_};
     block.insert(block.end(), drafts_.begin(), drafts_.end());
@@ -449,8 +491,12 @@ int32_t NemotronBoltState::NextToken(size_t public_length) {
     if (tokens.size() == accepted + 1) {
       accepted == 7 ? ++stats_.bonus_tokens : ++stats_.correction_tokens;
     }
-    accepted == 7 ? ++stats_.full_accept_rounds : ++stats_.partial_accept_rounds;
-    if (accepted == 0) ++stats_.zero_accept_rounds;
+    if (accepted == 0)
+      ++stats_.zero_accept_rounds;
+    else if (accepted == 7)
+      ++stats_.full_accept_rounds;
+    else
+      ++stats_.partial_accept_rounds;
     anchor_ = static_cast<int32_t>(predictions[accepted]);
     const size_t first_position = length_;
     length_ += accepted + 1;
