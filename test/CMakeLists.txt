@@ -30,6 +30,7 @@ list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/mtp_config_test.cpp"
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/qwen2vl_position_inputs_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/reinit_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/search_checkpoint_tests.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/shared_cache_growth_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/state_graph_capture_tests.cpp")
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER AND ENABLE_CUDA_KERNEL_TESTS)
@@ -261,6 +262,18 @@ if(ENABLE_PREPROCESSING_PERFORMANCE_TESTS)
 endif()
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/telemetry-shutdown-tests.cmake")
+
+if(USE_WEBGPU)
+  add_executable(shared_cache_growth_tests "${CMAKE_CURRENT_SOURCE_DIR}/cpp/shared_cache_growth_tests.cpp")
+  target_include_directories(shared_cache_growth_tests PRIVATE ${ORT_HEADER_DIR} ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(shared_cache_growth_tests PRIVATE onnxruntime-genai-obj GTest::gtest)
+  add_dependencies(shared_cache_growth_tests onnxruntime-genai)
+  set_target_properties(shared_cache_growth_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>")
+  if(NOT MSVC)
+    target_compile_options(shared_cache_growth_tests PRIVATE "-fvisibility=hidden")
+  endif()
+  add_test(NAME SharedCacheGrowthTests COMMAND shared_cache_growth_tests)
+endif()
 
 add_executable(kv_cache_unit_tests "${CMAKE_CURRENT_SOURCE_DIR}/cpp/kv_cache_tests.cpp")
 target_include_directories(kv_cache_unit_tests PRIVATE

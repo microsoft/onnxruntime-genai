@@ -5,6 +5,7 @@
 #pragma once
 
 #include "kv_cache.h"
+#include "shared_cache_growth.h"
 
 namespace Generators {
 
@@ -66,6 +67,7 @@ struct DefaultKeyValueCacheBase : KeyValueCache {
   // how far RewindTo can go back.
   int windowed_cache_size_{0};
   int current_length_{0};  // Total sequence length seen by the most recent Update()
+  std::unique_ptr<SharedCacheGrowth> shared_cache_growth_;
 
   std::unique_ptr<OrtValue> empty_past_;
   std::vector<std::unique_ptr<OrtValue>> empty_pasts_;  // Per-layer empty past tensors (for varying head_dim)
