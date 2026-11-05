@@ -758,7 +758,7 @@ class Model:
             ("trt-rtx", ir.DataType.FLOAT16),
             ("trt-rtx", ir.DataType.BFLOAT16),
         }
-        # CPU GQA requires head_size to be divisible by 8; unsupported sizes use packed Attention.
+        # CPU GQA requires head_size to be divisible by 8; unsupported sizes use the MHA fallback.
         return (self.ep, self.io_dtype) in valid_gqa_configurations and not (
             self.ep == "cpu" and self.head_size % 8 != 0
         )
