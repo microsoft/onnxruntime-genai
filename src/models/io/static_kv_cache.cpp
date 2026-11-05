@@ -201,15 +201,7 @@ DefaultKeyValueCacheBase::DefaultKeyValueCacheBase(State& state)
   }
 
   type_ = model_.session_info_.GetInputDataType(input_name_strings_[0]);
-  if (type_ != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT &&
-      type_ != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16 &&
-      type_ != ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16 &&
-      type_ != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8 &&
-      type_ != ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8 &&
-      type_ != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E4M3FN) {
-    throw std::runtime_error("Unsupported KV cache tensor type: " +
-                             std::to_string(static_cast<int>(type_)));
-  }
+  (void)Ort::SizeOf(type_);
 
   // Detect KV cache quantization configuration from the active provider's options.
   const int kv_cache_quantization_bits = Device().GetKeyValueCacheQuantizationBits(model_.config_->model.decoder.session_options);
@@ -448,12 +440,8 @@ void DefaultKeyValueCacheBase::PickPastState(DeviceSpan<int32_t> beam_indices_de
   auto past_span = KeyValueCacheDetail::WrapKvCacheTensor<ScoreType>(Device(), *past_value, type_);
   auto present_span = KeyValueCacheDetail::WrapKvCacheTensor<ScoreType>(Device(), present_value, type_);
 
-  for (size_t j = 0; j < beam_indices.size(); j++) {
-    int32_t beam_index = beam_indices[j];
-    auto present = present_span.subspan(beam_index * block_size_per_beam, block_size_per_beam);
-    auto past = past_span.subspan(j * block_size_per_beam, block_size_per_beam);
-    past.CopyFrom(present);
-  }
+  KeyValueCacheDetail::CopyReorderedBlocks(past_span, present_span, beam_indices,
+                                           static_cast<size_t>(block_size_per_beam));
 
   pasts_[index] = std::move(past_value);
 }

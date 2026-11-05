@@ -4,6 +4,8 @@
 
 namespace Generators {
 
+void ValidateLogitsType(ONNXTensorElementDataType type);
+
 struct Logits {
   Logits(State& state);
 

@@ -13,6 +13,11 @@
 
 namespace Generators {
 
+void ValidateNemotronInt64Type(std::string_view name, ONNXTensorElementDataType type) {
+  if (type != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64)
+    throw std::runtime_error(std::string{name} + " input must be int64");
+}
+
 namespace {
 // Picks the DeviceInterface that matches the OrtValue's actual memory location.
 // Required because ORT may place outputs on CPU even when the EP is on a device
@@ -132,8 +137,7 @@ void NemotronEncoderCache::Initialize(const NemotronConfig& cfg, const SessionIn
   auto cache_channel_type = session_info.GetInputDataType(cfg.enc_in_cache_channel);
   auto cache_time_type = session_info.GetInputDataType(cfg.enc_in_cache_time);
   auto cache_channel_len_type = session_info.GetInputDataType(cfg.enc_in_cache_channel_len);
-  if (cache_channel_len_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64)
-    throw std::runtime_error("Encoder cache_last_channel_len input must be int64");
+  ValidateNemotronInt64Type("Encoder cache_last_channel_len", cache_channel_len_type);
 
   // cache_last_channel: [batch, num_layers, left_context, hidden_dim] (device memory)
   auto ch_shape = std::array<int64_t, 4>{1, cfg.num_encoder_layers, cfg.left_context, cfg.hidden_dim};
@@ -265,8 +269,7 @@ NemotronEncoderSubState::NemotronEncoderSubState(const NemotronSpeechModel& mode
 
   if (has_length_input_) {
     auto len_type = model_.session_info_.GetInputDataType(cfg.enc_in_length);
-    if (len_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64)
-      throw std::runtime_error("Encoder input_lengths input must be int64");
+    ValidateNemotronInt64Type("Encoder input_lengths", len_type);
     auto len_shape = std::array<int64_t, 1>{1};
     signal_length_ = OrtValue::CreateTensor(cpu_alloc, len_shape, len_type);
   }
@@ -300,8 +303,7 @@ NemotronEncoderSubState::NemotronEncoderSubState(const NemotronSpeechModel& mode
   has_lang_id_input_ = !cfg.enc_in_lang_id.empty() && model_.session_info_.HasInput(cfg.enc_in_lang_id);
   if (has_lang_id_input_) {
     auto lang_id_type = model_.session_info_.GetInputDataType(cfg.enc_in_lang_id);
-    if (lang_id_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64)
-      throw std::runtime_error("Encoder lang_id input must be int64");
+    ValidateNemotronInt64Type("Encoder lang_id", lang_id_type);
     auto lang_id_shape = std::array<int64_t, 1>{1};
     lang_id_tensor_ = OrtValue::CreateTensor(cpu_alloc, lang_id_shape, lang_id_type);
     // Default to language index 0; callers can change it per-generator at runtime
@@ -366,8 +368,7 @@ NemotronPredictionSubState::NemotronPredictionSubState(const NemotronSpeechModel
   lstm_state_.Initialize(cfg, model_.session_info_, cpu_alloc, cpu_dev);
 
   auto targets_type = model_.session_info_.GetInputDataType(cfg.dec_in_targets);
-  if (targets_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64)
-    throw std::runtime_error("Decoder targets input must be int64");
+  ValidateNemotronInt64Type("Decoder targets", targets_type);
   auto targets_shape = std::array<int64_t, 2>{1, 1};
   targets_ = OrtValue::CreateTensor(cpu_alloc, targets_shape, targets_type);
 

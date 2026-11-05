@@ -9,15 +9,19 @@
 
 namespace Generators {
 
+void ValidateLogitsType(ONNXTensorElementDataType type) {
+  if (type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT &&
+      type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16 &&
+      type != ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16) {
+    throw std::runtime_error("Logits output must use float32, float16, or bfloat16");
+  }
+}
+
 Logits::Logits(State& state)
     : state_{state},
       shape_{static_cast<int64_t>(state_.params_->BatchBeamSize()), 0, model_.config_->model.vocab_size},
       type_{model_.session_info_.GetOutputDataType(model_.config_->model.decoder.outputs.logits)} {
-  if (type_ != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT &&
-      type_ != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16 &&
-      type_ != ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16) {
-    throw std::runtime_error("Logits output must use float32, float16, or bfloat16");
-  }
+  ValidateLogitsType(type_);
   output_raw_ = std::make_unique<Tensor>(model_.p_device_logits_, type_);
 
   input_sequence_lengths.resize(state_.params_->search.batch_size);
