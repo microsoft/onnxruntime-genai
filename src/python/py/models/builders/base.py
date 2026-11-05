@@ -29,6 +29,7 @@ from onnxruntime.quantization.matmul_nbits_quantizer import (
     RTNWeightOnlyQuantConfig,
 )
 from quantization import KV_CACHE_CALIBRATION_QMAX, CudaQuantizer, QuantConfig, resolve_dtype
+from quantization.per_channel import make_per_channel_quantizer, per_channel_block_size
 from tqdm import tqdm
 from transformers import AutoTokenizer, GenerationConfig
 
@@ -457,11 +458,28 @@ class Model:
         # keep the raw blockwise layout. The execution provider and active NVIDIA GPU SM determine the mode.
         self.matmul_attrs["weights_prepacked"] = self.quant_config.runtime.matmulnbits_weights_prepacked
 
+        per_channel = self.quant_config.weights.block_size == 0
+        if per_channel and (
+            self.quant_config.weights.type not in ("int4", "int8")
+            or not self.quant_config.weights.symmetric
+            or self.quant_config.weights.method != "default"
+            or self.quant_config.runtime.use_qdq
+            or self.quant_type is not None
+            or self.matmul_attrs["weights_prepacked"]
+            or any(o.type not in (None, self.quant_config.weights.type) for o in self.quant_config.weights.overrides)
+        ):
+            raise ValueError(
+                "Per-channel MatMul requires unquantized input weights, symmetric INT4 or INT8, "
+                "default method, QOperator, and unpacked weights"
+            )
+
         self.quant_attrs = {
             "accuracy_level": self.quant_config.weights.accuracy_level,                    # ORT quantization accuracy level for MatMulNBits
             "qmoe_block_size": self.quant_config.moe.block_size,                           # QMoE block size (MXFP4 is pinned to 32 and NVFP4 to 16 inside MoEConfig)
             "qmoe_weights_prepacked": self.quant_config.moe.weights_prepacked,
-            "matmul_block_size": int(self.quant_config.weights.block_size),                # MatMulNBits block size
+            "matmul_block_size": (
+                per_channel_block_size(self.hidden_size) if per_channel else int(self.quant_config.weights.block_size)
+            ),  # MatMul recomputes its own per-node block; Gather (if selected) uses this one directly
             "bits": 8 if self.onnx_dtype in {ir.DataType.INT8, ir.DataType.UINT8} else 4,  # Dense MatMulNBits weight bit-width (int4 vs int8 precision)
             "is_symmetric": self.quant_config.weights.symmetric,                           # Use symmetric zero-centered weight quantization
             "op_types_to_quantize": self.quant_config.weights.op_types,                    # Operator types eligible for weight quantization
@@ -470,6 +488,7 @@ class Model:
             else (8 if self.onnx_dtype in {ir.DataType.INT8, ir.DataType.UINT8} else 4),
             "nodes_to_exclude": nodes_to_exclude,                                          # Node names excluded from weight quantization
             "use_qdq": self.quant_config.runtime.use_qdq,                                  # Create QuantizeLinear/DequantizeLinear nodes for quantized weights instead of using MatMulNBits.
+            "per_channel": per_channel,                                                    # Single full-K block with one scale per output channel (see quantization/per_channel.py)
         }
         self.make_quant_init(config)
 
@@ -1847,6 +1866,9 @@ class Model:
         )
 
     def to_nbits(self) -> ir.Model:
+        quantizer_factory = (
+            make_per_channel_quantizer if self.quant_attrs.get("per_channel", False) else MatMulNBitsQuantizer
+        )
         exact_quant_override_names = getattr(self, "exact_quant_override_names", set())
         if exact_quant_override_names:
             emitted_nodes = {node.name: node for node in self.model.graph}
@@ -1902,7 +1924,7 @@ class Model:
             for node, node_config in customized_weight_config.items():
                 nodes_by_bits.setdefault(node_config["bits"], []).append(node)
 
-            quant_int4 = MatMulNBitsQuantizer(
+            quant_int4 = quantizer_factory(
                 model=ir.to_proto(self.model),
                 bits=self.quant_attrs["bits"],
                 block_size=self.quant_attrs["matmul_block_size"],
@@ -1917,7 +1939,7 @@ class Model:
             model_proto = quant_int4.model.model
 
             for bits, include_nodes in nodes_by_bits.items():
-                quant_upgraded = MatMulNBitsQuantizer(
+                quant_upgraded = quantizer_factory(
                     model=model_proto,
                     bits=bits,
                     block_size=self.quant_attrs["matmul_block_size"],
@@ -1941,7 +1963,7 @@ class Model:
                     if node.op_type == "MatMul"
                 }
                 algo_config = self.make_algo_config(base_method, {**weight_config, **customized_weight_config})
-            quant = MatMulNBitsQuantizer(
+            quant = quantizer_factory(
                 model=ir.to_proto(self.model),
                 bits=self.quant_attrs["bits"],
                 block_size=self.quant_attrs["matmul_block_size"],

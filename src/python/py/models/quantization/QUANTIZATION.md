@@ -137,3 +137,19 @@ python -m onnxruntime_genai.models.builder -m <model> -o <out> -p int4 -e cuda \
 python -m onnxruntime_genai.models.builder -m <model> -o <out> -p int4 -e cuda \
   --extra_options algo_config=rtn matmul_mixed_precision=last_matmul:int8
 ```
+
+## Per-channel MatMulNBits
+
+Use `--precision int4|int8 --extra_options block_size=0` for per-channel quantization.
+Each output channel stores one scale (`[N, 1]`) and uses the implicit zero point at the
+range midpoint (8 for INT4, 128 for INT8). Weights use one full-K block, padded to a
+power of two of at least 16.
+
+Supports unquantized input weights, symmetric INT4 or INT8, the default method, and
+QOperator output without weight prepacking or mixed bit-width overrides.
+Runtime support for the exported block size is required.
+
+If `Gather` is also in `op_types`, the token embedding table is quantized per-channel too:
+one scale per vocab row, using a block size equal to the hidden size rounded up to a power
+of two (at least 16). `GatherBlockQuantized` only supports 4-bit weights, so this applies
+when `weights.type=int4`; with `int8`, `Gather` nodes are left unquantized.

@@ -161,13 +161,11 @@ class Override:
 
 
 def _normalize_block_size(value: Any) -> int:
-    """Normalize a block size. ``0`` / ``"per_channel"`` both mean per-channel."""
+    """Normalize a numeric block size; zero means per-channel."""
     if isinstance(value, str):
-        if value.strip().lower() == "per_channel":
-            return 0
         value = int(value)
     if not isinstance(value, int) or isinstance(value, bool):
-        raise ValueError(f"block_size must be an int or 'per_channel', got {value!r}")
+        raise ValueError(f"block_size must be an int, got {value!r}")
     if value < 0:
         raise ValueError(f"block_size must be >= 0 (0 == per_channel), got {value}")
     return value

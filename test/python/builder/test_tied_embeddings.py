@@ -15,6 +15,7 @@ BUILDERS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / 
 sys.path.insert(0, str(BUILDERS_DIR.parent))
 
 from quantization import QuantConfig, desugar_algo_config  # noqa: E402
+from quantization.per_channel import per_channel_block_size  # noqa: E402
 
 
 def _load_builder_module(module_name):
@@ -586,6 +587,43 @@ def test_tied_quantized_embeddings_read_the_quantized_lm_head_rows(tmp_path, ext
     _assert_embeddings_are_lm_head_rows(quantized, tmp_path, vocab_size=vocab_size, hidden_size=hidden_size)
     slices = [node for node in quantized.graph if node.op_type == "Slice"]
     assert len(slices) == (0 if hidden_size % block_size == 0 else 1)
+
+
+@pytest.mark.parametrize("hidden_size", [64, 100])
+def test_tied_quantized_embeddings_read_the_per_channel_lm_head_rows(tmp_path, hidden_size):
+    # Per-channel (block_size=0) pads each LM head row up to the next power of two, which the
+    # lookup has to slice off whenever hidden_size isn't already one (same mechanism as above).
+    vocab_size = 256
+    block_size = per_channel_block_size(hidden_size)
+    quant_config = QuantConfig.from_extra_options({"block_size": 0}, precision="int4", execution_provider="cpu")
+    model = _make_tied_embedding_model(
+        vocab_size=vocab_size,
+        hidden_size=hidden_size,
+        quant_attrs={
+            "accuracy_level": 0,
+            "matmul_block_size": block_size,
+            "bits": 4,
+            "is_symmetric": True,
+            "op_types_to_quantize": ("MatMul",),
+            "nodes_to_exclude": [],
+            "algo_config": None,
+            "use_qdq": False,
+            "per_channel": True,
+        },
+    )
+    model.ep = "cpu"
+    model.matmul_attrs = {"weights_prepacked": 0}
+    model.quant_type = None
+    model.quant_config = quant_config
+    model.make_quant_init(config=None)
+    weight = torch.randn(vocab_size, hidden_size, generator=torch.Generator().manual_seed(0))
+    _add_lm_head_and_tied_embeddings(model, types.SimpleNamespace(weight=weight, bias=None), model.make_matmul_float)
+
+    quantized = model.to_nbits()
+
+    _assert_embeddings_are_lm_head_rows(quantized, tmp_path, vocab_size=vocab_size, hidden_size=hidden_size)
+    slices = [node for node in quantized.graph if node.op_type == "Slice"]
+    assert len(slices) == (0 if hidden_size == block_size else 1)
 
 
 @pytest.mark.parametrize(
