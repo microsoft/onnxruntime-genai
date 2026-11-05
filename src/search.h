@@ -115,6 +115,9 @@ struct Search : LeakChecked<Search> {
   // bookkeeping. Used by speculative decoding, which chooses the token itself (there is no logits
   // row to sample). Default asserts: only the greedy searches implement it.
   virtual void CommitToken(int32_t /*token*/) { assert(false); }
+  // Ends the search without adding a token, as a stop token does. Default asserts: only the greedy
+  // searches implement it.
+  virtual void MarkDone() { assert(false); }
   virtual void SampleTopP(float /*p*/, float /*temperature*/, std::mt19937& /*rng*/) { assert(false); }
   virtual void SampleTopK(int /*k*/, float /*temperature*/, std::mt19937& /*rng*/) { assert(false); }
   virtual void SampleTopKTopP(int /*k*/, float /*p*/, float /*temperature*/, std::mt19937& /*rng*/) { assert(false); }
@@ -208,6 +211,7 @@ struct GreedySearch_Cpu : Search_Cpu {
 
   void SelectTop() override;
   void CommitToken(int32_t token) override;
+  void MarkDone() override { done_ = true; }
   void SampleTopK(int k, float temperature, std::mt19937& rng) override;
   void SampleTopP(float p, float temperature, std::mt19937& rng) override;
   void SampleTopKTopP(int k, float p, float temperature, std::mt19937& rng) override;
