@@ -47,6 +47,7 @@ struct State {
   virtual DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices = {}) = 0;
   virtual void Finalize(int current_length) {}
 
+  virtual bool SupportsRewind() const { return true; }
   virtual void RewindTo(size_t index) { (void)index; };
   virtual void ValidateRewindTo(size_t index) const { (void)index; }
 
@@ -91,6 +92,11 @@ struct State {
   virtual void SetRunOption(const char* key, const char* value);
   void SetRunOptions(const Config::RunOptions& config_run_options);
   virtual void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {}
+
+  // Generator::AppendTokens calls DiscardNextLogits before it runs the last generated token only to bring
+  // the state up to date, and StartTurn before it runs the appended tokens. Default no-op.
+  virtual void DiscardNextLogits() {}
+  virtual void StartTurn() {}
 
   void DumpInputs();
   void DumpOutputs();

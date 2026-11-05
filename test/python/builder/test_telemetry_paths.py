@@ -20,7 +20,7 @@ def _load_builder_entrypoint_module():
     def _getattr(name):
         if name.startswith("__"):
             raise AttributeError(name)
-        return type(name, (), {})
+        return type(name, (), {"MULTIMODAL": {}} if name == "LFM3Model" else {})
 
     builders_stub.__getattr__ = _getattr
     builder_modules = {

@@ -411,6 +411,52 @@ bool ModelStateManifest::HasStateGroupKind(StateGroupKind kind) const {
       });
 }
 
+void ModelStateManifest::ResolveDisabledIndexerCapacity(
+    Decoder& decoder, const ModelStateMetadata& metadata) {
+  if (!decoder.state_groups ||
+      std::none_of(decoder.state_groups->begin(), decoder.state_groups->end(),
+                   [](const StateGroup& group) {
+                     return group.kind == StateGroupKind::FixedIndexer &&
+                            group.state_update && !group.state_update->enabled;
+                   })) {
+    return;
+  }
+  auto candidate = decoder;
+  bool resolved = false;
+  for (auto& group : *candidate.state_groups) {
+    if (group.kind != StateGroupKind::FixedIndexer ||
+        !group.state_update || group.state_update->enabled) {
+      continue;
+    }
+    std::optional<int64_t> capacity;
+    for (const int layer : group.layer_ids) {
+      const auto name = ExpandBinding(candidate.outputs.state_update_indexer_names, layer);
+      if (!metadata.HasOutput(name)) {
+        throw std::runtime_error("Disabled indexer state_update output was not found: " + name);
+      }
+      const auto shape = metadata.GetOutputShape(name);
+      if (shape.size() != 3 || shape[1] < 1 ||
+          shape[1] > Decoder::MaxStateUpdateCapacity ||
+          (capacity && *capacity != shape[1])) {
+        throw std::runtime_error(
+            "Disabled indexer state_update outputs require a consistent positive bounded "
+            "session capacity: " +
+            name);
+      }
+      capacity = shape[1];
+    }
+    if (capacity) {
+      group.state_update->capacity = static_cast<int>(*capacity);
+      resolved = true;
+    }
+  }
+  if (resolved) {
+    // Keep every dtype/state/buffer/control check, and publish nothing on malformed metadata.
+    ModelStateManifest{candidate}.ValidateSession(metadata);
+    decoder = std::move(candidate);
+  }
+}
+
 bool ModelStateManifest::HasFixedStateGroups() const {
   return HasStateGroupKind(StateGroupKind::FixedConv) ||
          HasStateGroupKind(StateGroupKind::FixedRecurrent) ||

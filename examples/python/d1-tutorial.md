@@ -24,6 +24,10 @@ For an NVIDIA GPU, install `onnxruntime-genai-cuda` instead, in its own virtual 
 package brings its own ONNX Runtime). Version 0.18.0 needs the CUDA 13 runtime libraries and an NVIDIA
 driver 580 or newer.
 
+onnxruntime-genai 0.18.0 cannot read d1-3B's `tokenizer.json`, and it resizes some images one 32-pixel
+step differently than d1 (for example a 400-pixel side). With 0.18.0, patch the file after each export
+as in [step 3 of an earlier version of this tutorial](https://github.com/microsoft/onnxruntime-genai/blob/7f090db1731887b6a1b3f2715642df4ffe0e7863/examples/python/d1-tutorial.md#3-fix-the-tokenizer).
+
 `d1-decisions.py` imports `common.py` from the same folder. Take both from the same commit of
 [`examples/python`](https://github.com/microsoft/onnxruntime-genai/tree/main/examples/python):
 
@@ -52,27 +56,7 @@ prompt needs gigabytes for logits that a decision never reads.
 The int8 export logs `[ERROR] Gather only supports 4 bits quantization.` a few times; the export still
 succeeds. int4 also works but is not recommended: it can flip the answer when two options are close.
 
-## 3. Fix the tokenizer
-
-The tokenizer in GenAI cannot parse the pre-tokenizer pattern in d1-3B's `tokenizer.json` yet. Replace
-it with the equivalent pattern, as for LFM2.5-VL-3B. Run this once for every export folder:
-
-```python
-import json
-from pathlib import Path
-
-export = Path("./d1-3b/cpu")  # also ./d1-3b/cuda, ./d1-3b/cpu-vl and ./d1-3b/cuda-vl
-path = export / "tokenizer.json"
-tokenizer = json.loads(path.read_text(encoding="utf-8"))
-old = r"'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s"
-new = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"
-split = tokenizer["pre_tokenizer"]["pretokenizers"][0]
-assert split["pattern"]["Regex"] == old
-split["pattern"]["Regex"] = new
-path.write_text(json.dumps(tokenizer, ensure_ascii=False), encoding="utf-8")
-```
-
-## 4. Run a request
+## 3. Run a request
 
 `request.json`:
 
@@ -120,7 +104,7 @@ in the other examples. Output from the int8 CPU model (rounded):
 }
 ```
 
-## 5. Request and response format
+## 4. Request and response format
 
 The request and the answers have the same shape as d1's own `system_one()`.
 
@@ -145,7 +129,7 @@ an unknown `type`, missing `instructions`, bad `criteria`, a NUL character, a pr
 model's context, or images for a model without a vision model. The command line then prints one
 `error: ...` line and exits with code 2.
 
-## 6. Images
+## 5. Images
 
 To answer questions about images, build d1-3B with `exclude_embeds=true`. The builder then also writes
 the vision model, the embedding model and their configs; the [LFM2-VL tutorial](lfm2-vl-tutorial.md)
@@ -164,8 +148,6 @@ python onnxruntime-genai/src/python/py/models/builder.py -i ./d1-3b/pytorch -o .
 python onnxruntime-genai/src/python/py/models/builder.py -i ./d1-3b/pytorch -o ./d1-3b/cuda-vl -p fp16 -e cuda \
     --extra_options exclude_embeds=true prune_lm_head=true
 ```
-
-Then fix the tokenizer of each export as in [step 3](#3-fix-the-tokenizer).
 
 The embedding model uses d1-3B's own embedding table (d1-3B retrained it) and puts the image features
 where the image token (id 124907) is. `processor_config.json` uses d1-3B's bicubic resize. The vision
@@ -186,12 +168,11 @@ python d1-decisions.py -m ./d1-3b/cpu-vl -r cats.json --image cats.jpg
 
 The answer is `two` (transformers gives it a probability of 0.986).
 
-## 7. Limitations
+## 6. Limitations
 
 - One prefill per question: with several questions, the state is processed again for each question.
 - No image tiling: GenAI resizes each image once, while d1 cuts images above about 0.5 megapixels into
-  tiles, so answers on large images differ. When an image side falls exactly halfway between two
-  32-pixel steps (for example 400 pixels), GenAI rounds up and d1 rounds to the even step.
+  tiles, so answers on large images differ.
 - No escaping: special tokens such as `<|im_end|>` in caller text are read as special tokens, as in d1
   and llama.cpp.
 - A few rare whitespace runs (for example a line of only spaces) tokenize differently than in
@@ -199,7 +180,7 @@ The answer is `two` (transformers gives it a probability of 0.986).
 - The script refuses some requests that d1's own code answers, for example an unknown `type`, a choice
   with one option, or a score with more than 10 levels.
 
-## 8. Accuracy and speed
+## 7. Accuracy and speed
 
 Measured with `d1-decisions.py` (onnxruntime-genai 0.18.0, ONNX Runtime 1.31.0) against d1-3B in
 transformers fp32, on 32 hand-written decisions (all three types; text, JSON, log and code states).
@@ -217,6 +198,6 @@ On the first 1000 items of public sets, GenAI gave the same top answer as transf
 
 - BoolQ: 998 (fp16, CUDA) and 995 (int8, CPU);
 - MNLI (matched): 997 (fp16, CUDA) and 995 (int8, CPU);
-- POPE (images, built as in [Images](#6-images)): 1000 (fp16, CUDA) and 999 (int8, CPU).
+- POPE (images, built as in [Images](#5-images)): 1000 (fp16, CUDA) and 999 (int8, CPU).
 
 Use fp16 on CUDA, not bf16: bf16 gave fewer same top answers (BoolQ 994, MNLI 988) and more exact ties.

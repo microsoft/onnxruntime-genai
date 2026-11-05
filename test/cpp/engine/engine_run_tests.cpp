@@ -43,6 +43,10 @@ namespace Generators {
 namespace test {
 
 struct EngineRunTestAccess {
+  static PrefixSnapshotCache* SnapshotCache(const Engine& engine) {
+    return engine.snapshot_cache_.get();
+  }
+
   static EngineHealth Health(const Engine& engine) { return engine.health_; }
   static std::pair<int64_t, int64_t> MtpShadowLengths(const Engine& engine, const Request& target) {
     const auto& shadow = engine.mtp_requests_.at(&target);
@@ -764,6 +768,37 @@ class EngineRunTest : public ::testing::Test {
 
   std::shared_ptr<Model> model_;
 };
+
+TEST(EngineSnapshotCacheTest, PolicyPreservesLegacyDefaultsAndIsOwnedByTheEngine) {
+  auto model = CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-composite");
+  auto& batching = *model->config_->engine.dynamic_batching;
+  EXPECT_FALSE(batching.prefix_caching.has_value());
+  auto no_budget = Engine::CreateDependencies(model);
+  EXPECT_NE(no_budget.snapshot_cache, nullptr);
+  batching.snapshot_cache.ram_bytes = 1024;
+  auto implicit_enabled = Engine::CreateDependencies(model);
+  EXPECT_NE(implicit_enabled.snapshot_cache, nullptr);
+  batching.snapshot_cache.ram_bytes = 0;
+  batching.snapshot_cache.explicitly_set = true;
+  auto explicit_zero = Engine::CreateDependencies(model);
+  EXPECT_EQ(explicit_zero.snapshot_cache, nullptr);
+  batching.prefix_caching = false;
+  batching.snapshot_cache.ram_bytes = 1024;
+  auto disabled = Engine::CreateDependencies(model);
+  EXPECT_EQ(disabled.snapshot_cache, nullptr);
+  batching.prefix_caching = true;
+  auto dependencies = Engine::CreateDependencies(model);
+  ASSERT_NE(dependencies.snapshot_cache, nullptr);
+  std::weak_ptr<PrefixSnapshotCache> policy = dependencies.snapshot_cache;
+  {
+    Engine engine{model, std::move(dependencies)};
+    EXPECT_EQ(EngineRunTestAccess::SnapshotCache(engine), policy.lock().get());
+  }
+  EXPECT_TRUE(policy.expired());
+  batching.max_snapshots = 0;
+  auto no_snapshots = Engine::CreateDependencies(model);
+  EXPECT_EQ(no_snapshots.snapshot_cache, nullptr);
+}
 
 TEST_F(EngineRunTest, ReleasesConsumedRestoreLeasesBeforeTheNextCapture) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/2, EosToken(*model_));
@@ -4300,6 +4335,28 @@ TEST_F(EngineRunTest, FailedReplayCannotBeginAnotherTurn) {
 
   engine.cache->SetUnserviceableRequest({});
   EXPECT_THROW(request->BeginTurn(Prompt(30)), std::runtime_error);
+  EXPECT_FALSE(engine.engine->HasPendingRequests());
+}
+
+// A turn canceled before it made progress restarts through Engine::BeginTurn, which enrolls the request with the scheduler
+// again. The dynamic scheduler still holds it, so the restarted turn must run once and not fail on a duplicate candidate.
+TEST_F(EngineRunTest, DynamicCanceledUnstartedTurnRestartsAndRunsOnce) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/5);
+  auto request = CreateRequestWithPrompt(engine.engine, Prompt(10));
+  ASSERT_TRUE(request->Cancel(request->CurrentTurnId()));
+  const auto canceled = RunOne(*engine.engine);
+  ASSERT_EQ(canceled.request, request);
+  ASSERT_EQ(canceled.finish_reason, GenerationFinishReason::Canceled);
+  ASSERT_TRUE(request->IsRestartableCanceledTurn());
+
+  request->BeginTurn(Prompt(20), std::optional<size_t>{1});
+
+  const auto event = RunOne(*engine.engine);
+  ASSERT_EQ(event.request, request);
+  EXPECT_EQ(event.flags & EngineEventFlagFailed, 0u);
+  EXPECT_EQ(event.token, 5);
+  EXPECT_NE(event.flags & EngineEventFlagTurnFinished, 0u);
+  EXPECT_EQ(engine.cache->AllocatedCount(), 1u);
   EXPECT_FALSE(engine.engine->HasPendingRequests());
 }
 

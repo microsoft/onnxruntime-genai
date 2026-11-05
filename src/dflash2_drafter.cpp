@@ -10,18 +10,44 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <new>
 #include <numeric>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <unordered_set>
 #include <utility>
 
 namespace Generators {
 
 namespace {
+
+void WarnSnapshotFailure(const char* operation, const std::system_error& error) noexcept {
+  if (!g_log.enabled || !g_log.warning) return;
+  try {
+    Log("warning", "DFlash prefix snapshot %s failed; continuing without that snapshot: %s",
+        operation, error.what());
+  } catch (...) {
+    // Diagnostics must not turn optional storage failures into drafter failures.
+  }
+}
+
+void LogSnapshotTransfer(const char* operation, const PrefixSnapshotCache::Entry& entry,
+                         std::chrono::steady_clock::time_point start) noexcept {
+  if (!g_log.enabled) return;
+  const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                           std::chrono::steady_clock::now() - start)
+                           .count();
+  try {
+    Log("engine_snapshot_cache", "action=%s tier=%zu bytes=%zu elapsed_us=%lld",
+        operation, static_cast<size_t>(entry.tier), entry.bytes, static_cast<long long>(elapsed));
+  } catch (...) {
+    // Diagnostics must not turn successful optional transfers into request failures.
+  }
+}
 
 // The drafter's packed stream is [context rows of request 0, its block rows, context rows of
 // request 1, ...]. PagedAttention derives each row's position from past_sequence_lengths plus its
@@ -440,7 +466,9 @@ ONNXTensorElementDataType ValidateDflash2ModelCompatibility(
       const auto output_type = drafter_metadata.GetOutputDataType(output_name);
       const bool supported_type = input_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
                                   input_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16 ||
-                                  input_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16;
+                                  input_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16 ||
+                                  input_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8 ||
+                                  input_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E4M3FN;
       if (input_type != output_type ||
           (cache_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED && input_type != cache_type) ||
           !supported_type) {
@@ -477,8 +505,12 @@ ONNXTensorElementDataType ValidateDflash2ModelCompatibility(
 }
 
 Dflash2Model::Dflash2Model(std::unique_ptr<Config> config, OrtEnv& ort_env,
-                           std::shared_ptr<CpuEmbedding> cpu_embedding)
+                           std::shared_ptr<CpuEmbedding> cpu_embedding,
+                           const std::function<void(OrtSessionOptions&)>& configure_session_options)
     : Model{std::move(config)}, cpu_embedding_{std::move(cpu_embedding)} {
+  if (configure_session_options && session_options_) {
+    configure_session_options(*session_options_);
+  }
   session_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());
   session_info_.Add(*session_);
   if (cpu_embedding_) {
@@ -541,57 +573,6 @@ size_t Dflash2Drafter::PoolBytes(const Config& config, size_t paged_block_size,
 size_t Dflash2Drafter::PrefixCheckpointBytes(const Config& config, size_t paged_block_size,
                                              ONNXTensorElementDataType cache_type) {
   return PoolBytes(config, paged_block_size, PoolBlocks(config, paged_block_size, 1), cache_type);
-}
-
-bool CanReserveDflash2PrefixCheckpoint(size_t target_budget_bytes, size_t reserved_bytes,
-                                       size_t snapshot_bytes, size_t target_block_bytes) {
-  return Dflash2PrefixCheckpointCapacity(
-             target_budget_bytes, reserved_bytes, snapshot_bytes, target_block_bytes, 1) != 0;
-}
-
-size_t Dflash2PrefixCheckpointCapacity(size_t target_budget_bytes, size_t reserved_bytes,
-                                       size_t snapshot_bytes, size_t target_block_bytes,
-                                       size_t max_checkpoints) {
-  if (snapshot_bytes == 0 || target_block_bytes == 0 ||
-      target_budget_bytes <= reserved_bytes ||
-      target_budget_bytes - reserved_bytes < target_block_bytes) {
-    return 0;
-  }
-  const size_t available = target_budget_bytes - reserved_bytes - target_block_bytes;
-  return std::min(max_checkpoints, available / snapshot_bytes);
-}
-
-void CopyDflash2RingBlocks(Tensor& destination, std::span<const int32_t> destination_blocks,
-                           Tensor& source, std::span<const int32_t> source_blocks) {
-  const auto source_shape = source.GetShape();
-  const auto destination_shape = destination.GetShape();
-  if (source_shape.empty() || destination_shape.size() != source_shape.size() ||
-      !std::equal(source_shape.begin() + 1, source_shape.end(), destination_shape.begin() + 1)) {
-    throw std::logic_error("DFlash 2 ring checkpoint has incompatible cache shape.");
-  }
-  auto source_bytes = source.GetByteSpan();
-  auto destination_bytes = destination.GetByteSpan();
-  const size_t source_pool_blocks = static_cast<size_t>(source_shape.front());
-  const size_t destination_pool_blocks = static_cast<size_t>(destination_shape.front());
-  if (source_blocks.size() != destination_blocks.size() ||
-      source_pool_blocks == 0 || destination_pool_blocks == 0 ||
-      source_bytes.size() % source_pool_blocks != 0 ||
-      destination_bytes.size() % destination_pool_blocks != 0 ||
-      source.GetType() != destination.GetType() ||
-      destination_bytes.size() / destination_pool_blocks != source_bytes.size() / source_pool_blocks ||
-      std::any_of(source_blocks.begin(), source_blocks.end(), [source_pool_blocks](int32_t id) {
-        return id < 0 || static_cast<size_t>(id) >= source_pool_blocks;
-      }) ||
-      std::any_of(destination_blocks.begin(), destination_blocks.end(), [destination_pool_blocks](int32_t id) {
-        return id < 0 || static_cast<size_t>(id) >= destination_pool_blocks;
-      })) {
-    throw std::logic_error("DFlash 2 ring checkpoint has incompatible cache blocks.");
-  }
-  const size_t block_bytes = source_bytes.size() / source_pool_blocks;
-  for (size_t i = 0; i < source_blocks.size(); ++i) {
-    destination_bytes.subspan(static_cast<size_t>(destination_blocks[i]) * block_bytes, block_bytes)
-        .CopyFrom(source_bytes.subspan(static_cast<size_t>(source_blocks[i]) * block_bytes, block_bytes));
-  }
 }
 
 size_t Dflash2Drafter::FullAttentionPoolBlocks(size_t target_blocks, size_t paged_block_size,
@@ -689,6 +670,16 @@ Dflash2Drafter::~Dflash2Drafter() {
   ReleaseCapturedGraphs();
 }
 
+void Dflash2Drafter::InitializeSnapshotCache(std::shared_ptr<PrefixSnapshotCache> snapshot_cache) {
+  if (!snapshot_cache) {
+    throw std::invalid_argument("DFlash prefix snapshots require a non-null snapshot cache.");
+  }
+  if (prefix_snapshot_cache_ || !requests_.empty()) {
+    throw std::logic_error("The DFlash snapshot cache must be initialized once before tracking requests.");
+  }
+  prefix_snapshot_cache_ = std::move(snapshot_cache);
+}
+
 Tensor& Dflash2StepTensor(std::unique_ptr<Tensor>& slot, DeviceInterface* device,
                           ONNXTensorElementDataType type, const std::vector<int64_t>& shape,
                           bool* reallocated, std::unique_ptr<Tensor>* displaced) {
@@ -732,9 +723,18 @@ Tensor& Dflash2Drafter::StepTensor(std::unique_ptr<Tensor>& slot, DeviceInterfac
   Tensor& tensor = Dflash2StepTensor(slot, device, type, shape, &reallocated, &displaced);
   if (reallocated) {
     ReleaseCapturedGraphs();
+    if (displaced) {
+      model_->p_device_->Synchronize();
+      staging_.Forget(displaced.get());
+    }
     ++buffer_generation_;
   }
   return tensor;
+}
+
+DeviceSpan<uint8_t> Dflash2Drafter::Staging(Tensor& tensor) {
+  return staging_.Acquire(*tensor.p_device_, &tensor, tensor.GetMutableRawData(), tensor.bytes_,
+                          tensor.GetElementCount() * Ort::SizeOf(tensor.type_));
 }
 
 void Dflash2Drafter::ReleaseCapturedGraphs() noexcept {
@@ -762,6 +762,16 @@ bool Dflash2CanJoin(bool draft_eligible, size_t first_position, size_t context_w
 bool Dflash2GraphCaptureAllowed(bool enabled, bool uniform_ingest,
                                 size_t max_blocks, size_t max_columns) noexcept {
   return enabled && uniform_ingest && max_blocks <= max_columns;
+}
+
+bool Dflash2PinsBlockTableWidth(bool capture_enabled, bool windowed, bool pinned_policy,
+                                bool device_selection) noexcept {
+  return capture_enabled && windowed && (pinned_policy || device_selection);
+}
+
+bool Dflash2CapturesPinnedStep(bool drafts_wanted, size_t num_ctx_rows, size_t block_size,
+                               size_t served, bool device_selection) noexcept {
+  return drafts_wanted && num_ctx_rows <= block_size * served && (!device_selection || served == 1);
 }
 
 void Dflash2Drafter::AllocateCache() {
@@ -792,7 +802,8 @@ bool Dflash2Drafter::Admit(const Feed& feed) {
   if (feed.draft_eligible && feed.first_position != 0 && RestorePrefix(feed)) {
     return true;
   }
-  if (feed.first_position != 0 && feed.prefix_checkpoint) {
+  if (feed.first_position != 0 && feed.prefix_checkpoint &&
+      feed.prefix_checkpoint->state != PrefixSnapshotCache::State::Evicted) {
     return false;
   }
   if (!Dflash2CanJoin(feed.draft_eligible, feed.first_position,
@@ -839,68 +850,61 @@ bool Dflash2Drafter::CanCapturePrefix(const Request* request, size_t token_count
          it->second.blocks.size() == ring_blocks_;
 }
 
-void Dflash2Drafter::SetPrefixCheckpointCapacity(size_t capacity) {
-  if (AvailablePrefixCheckpoints() != prefix_checkpoints_.size()) {
-    throw std::logic_error("Cannot resize the DFlash 2 prefix snapshot pool while snapshots are leased.");
-  }
-  prefix_checkpoints_.resize(capacity);
-}
-
-size_t Dflash2Drafter::AvailablePrefixCheckpoints() const noexcept {
-  return static_cast<size_t>(std::count_if(
-      prefix_checkpoints_.begin(), prefix_checkpoints_.end(),
-      [](const auto& checkpoint) { return checkpoint.expired(); }));
-}
-
 std::shared_ptr<const Dflash2PrefixCheckpoint> Dflash2Drafter::CapturePrefix(
     const Request* request, size_t token_count) {
-  const auto slot = std::find_if(
-      prefix_checkpoints_.begin(), prefix_checkpoints_.end(),
-      [](const auto& checkpoint) { return checkpoint.expired(); });
-  if (!CanCapturePrefix(request, token_count) || slot == prefix_checkpoints_.end()) {
+  const auto& batching = model_->config_->engine.dynamic_batching;
+  if (!CanCapturePrefix(request, token_count) || !batching ||
+      !batching->prefix_caching.value_or(true) || batching->dflash2_max_snapshots == 0 ||
+      !prefix_snapshot_cache_) {
     return nullptr;
   }
   const auto it = requests_.find(request);
   auto checkpoint = std::make_shared<Dflash2PrefixCheckpoint>();
   checkpoint->token_count = token_count;
   checkpoint->ring_blocks = ring_blocks_;
-  checkpoint->caches.reserve(caches_.size());
-  std::vector<int32_t> contiguous(ring_blocks_);
-  std::iota(contiguous.begin(), contiguous.end(), 0);
+  checkpoint->type = cache_type_;
   for (const auto& cache : caches_) {
-    auto copy = std::make_unique<Tensor>(model_->p_device_kvcache_, cache_type_);
     auto shape = cache->GetShape();
     shape.front() = static_cast<int64_t>(ring_blocks_);
-    try {
-      copy->CreateTensor(shape);
-    } catch (const Ort::Exception& error) {
-      // ORT reports allocator failures through its status API, not std::bad_alloc.
-      if (error.GetOrtErrorCode() != ORT_FAIL &&
-          error.GetOrtErrorCode() != ORT_RUNTIME_EXCEPTION) {
-        throw;
-      }
-      throw std::bad_alloc{};
-    }
-    checkpoint->caches.push_back(std::move(copy));
+    checkpoint->shapes.push_back(std::move(shape));
   }
+  const size_t component_limit =
+      std::min(batching->dflash2_max_snapshots, batching->max_batch_size);
+  const auto start = std::chrono::steady_clock::now();
   try {
-    for (size_t layer = 0; layer < caches_.size(); ++layer) {
-      CopyDflash2RingBlocks(*checkpoint->caches[layer], contiguous,
-                            *caches_[layer], it->second.blocks);
+    if (!prefix_snapshot_cache_->Allocate(
+            checkpoint, model_->p_device_kvcache_, "dflash2", component_limit)) {
+      return nullptr;
     }
+    std::vector<PrefixSnapshotCache::Entry::Range> ranges(ring_blocks_);
+    for (size_t layer = 0; layer < caches_.size(); ++layer) {
+      const size_t block_bytes = caches_[layer]->GetByteSpan().size() / num_blocks_;
+      for (size_t block = 0; block < ring_blocks_; ++block) {
+        ranges[block] = {block * block_bytes,
+                         static_cast<size_t>(it->second.blocks[block]) * block_bytes, block_bytes};
+      }
+      checkpoint->Write(layer, *caches_[layer], ranges);
+    }
+    checkpoint->Flush();
+  } catch (const std::system_error& error) {
+    model_->p_device_kvcache_->Synchronize();
+    WarnSnapshotFailure("capture", error);
+    return nullptr;
   } catch (...) {
     model_->p_device_kvcache_->Synchronize();
     throw;
   }
   model_->p_device_kvcache_->Synchronize();
-  *slot = checkpoint;
+  LogSnapshotTransfer("capture", *checkpoint, start);
   return checkpoint;
 }
 
 bool Dflash2Drafter::RestorePrefix(const Feed& feed) {
   const auto& checkpoint = feed.prefix_checkpoint;
-  if (!checkpoint || checkpoint->token_count != feed.first_position ||
-      checkpoint->ring_blocks != ring_blocks_ || checkpoint->caches.size() != caches_.size() ||
+  if (!checkpoint || checkpoint->state != PrefixSnapshotCache::State::Resident ||
+      checkpoint->token_count != feed.first_position ||
+      checkpoint->ring_blocks != ring_blocks_ ||
+      checkpoint->shapes.size() != caches_.size() ||
       free_blocks_.size() < ring_blocks_) {
     if (checkpoint && free_blocks_.size() < ring_blocks_) {
       ++admission_misses_;
@@ -908,31 +912,53 @@ bool Dflash2Drafter::RestorePrefix(const Feed& feed) {
     return false;
   }
   for (size_t layer = 0; layer < caches_.size(); ++layer) {
-    if (!checkpoint->caches[layer] ||
-        checkpoint->caches[layer]->GetShape().empty()) {
+    auto shape = caches_[layer]->GetShape();
+    shape.front() = static_cast<int64_t>(ring_blocks_);
+    if (checkpoint->type != cache_type_ || checkpoint->shapes[layer] != shape) {
+      throw std::logic_error("DFlash 2 prefix checkpoint has incompatible cache geometry.");
+    }
+    if (checkpoint->tier != PrefixSnapshotCache::Tier::Disk &&
+        (checkpoint->caches.size() != caches_.size() || !checkpoint->caches[layer] ||
+         checkpoint->caches[layer]->GetShape().empty())) {
       throw std::logic_error("DFlash 2 prefix checkpoint has an invalid cache tensor.");
     }
   }
+  const auto start = std::chrono::steady_clock::now();
   try {
     RequestState state;
     state.blocks.reserve(ring_blocks_);
     for (size_t i = 0; i < ring_blocks_; ++i) {
       state.blocks.push_back(free_blocks_[free_blocks_.size() - ring_blocks_ + i]);
     }
-    std::vector<int32_t> contiguous(ring_blocks_);
-    std::iota(contiguous.begin(), contiguous.end(), 0);
+    std::vector<PrefixSnapshotCache::Entry::Range> ranges(ring_blocks_);
     for (size_t layer = 0; layer < caches_.size(); ++layer) {
-      CopyDflash2RingBlocks(*caches_[layer], state.blocks, *checkpoint->caches[layer], contiguous);
+      const size_t block_bytes = caches_[layer]->GetByteSpan().size() / num_blocks_;
+      for (size_t block = 0; block < ring_blocks_; ++block) {
+        ranges[block] = {block * block_bytes,
+                         static_cast<size_t>(state.blocks[block]) * block_bytes, block_bytes};
+      }
+      checkpoint->Read(layer, *caches_[layer], ranges);
     }
     model_->p_device_kvcache_->Synchronize();
+    if (prefix_snapshot_cache_) prefix_snapshot_cache_->Touch(*checkpoint);
     state.cached_positions = feed.first_position;
     requests_.emplace(feed.request, std::move(state));
     free_blocks_.resize(free_blocks_.size() - ring_blocks_);
+    LogSnapshotTransfer("restore", *checkpoint, start);
     return true;
+  } catch (const std::system_error& error) {
+    model_->p_device_kvcache_->Synchronize();
+    if (prefix_snapshot_cache_) prefix_snapshot_cache_->Discard(*checkpoint);
+    WarnSnapshotFailure("restore", error);
+    ++admission_misses_;
+    return false;
   } catch (const std::bad_alloc&) {
     model_->p_device_kvcache_->Synchronize();
     ++admission_misses_;
     return false;
+  } catch (...) {
+    model_->p_device_kvcache_->Synchronize();
+    throw;
   }
 }
 
@@ -958,16 +984,19 @@ void Dflash2Drafter::Release(const Request* request) {
 }
 
 void Dflash2Drafter::ReleaseAll() {
-  for (const auto& [request, state] : requests_) {
-    free_blocks_.insert(free_blocks_.end(), state.blocks.begin(), state.blocks.end());
-  }
   requests_.clear();
+  free_blocks_.resize(num_blocks_);
+  std::iota(free_blocks_.rbegin(), free_blocks_.rend(), int32_t{0});
+  for (auto& cache : caches_) {
+    if (cache) cache->GetByteSpan().Zero();
+  }
 }
 
 bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> feeds,
                              std::vector<std::vector<int32_t>>& drafts,
                              std::vector<std::vector<TargetTokenSelection>>* draft_distributions,
-                             std::vector<Dflash2Lattice>* lattices) {
+                             std::vector<Dflash2Lattice>* lattices,
+                             bool device_selection) {
   drafts.assign(feeds.size(), {});
   if (draft_distributions) {
     draft_distributions->assign(feeds.size(), {});
@@ -1139,16 +1168,24 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   auto device = model_->p_device_inputs_;
   // Bucketing the width lets a growing context keep replaying one captured graph instead of
   // retiring one at every block boundary; columns past the live KV length are never read. Steps
-  // that cannot be captured keep the exact width so their bound inputs are unchanged.
-  const bool graph_eligible = Dflash2GraphCaptureAllowed(
-      graph_capture_enabled_, uniform_ingest, max_blocks, max_block_table_columns_);
+  // that cannot be captured keep the exact width so their bound inputs are unchanged. A pinned
+  // drafter instead uses the full width for every step and captures decode steps only.
+  const bool pinned_width = Dflash2PinsBlockTableWidth(
+      graph_capture_enabled_, ring_blocks_ != 0, pin_block_table_width_, device_selection);
+  const bool graph_eligible =
+      Dflash2GraphCaptureAllowed(graph_capture_enabled_, uniform_ingest, max_blocks,
+                                 max_block_table_columns_) &&
+      (!pinned_width ||
+       Dflash2CapturesPinnedStep(drafts_wanted, num_ctx_rows, block_size, served.size(),
+                                 device_selection));
   const size_t block_table_columns =
-      graph_eligible ? GetGraphBlockTableColumns(max_blocks, max_block_table_columns_)
-                     : max_blocks;
-  auto fill_int32 = [](Tensor& tensor, const std::vector<int32_t>& values) {
-    auto span = tensor.GetDeviceSpan<int32_t>();
-    std::copy(values.begin(), values.end(), span.CpuSpan().begin());
-    span.CopyCpuToDevice();
+      pinned_width ? std::max(max_blocks, max_block_table_columns_)
+                   : (graph_eligible ? GetGraphBlockTableColumns(max_blocks, max_block_table_columns_)
+                                     : max_blocks);
+  auto fill_int32 = [this](Tensor& tensor, const std::vector<int32_t>& values) {
+    auto span = Staging(tensor);
+    std::memcpy(span.CpuSpan().data(), values.data(), values.size() * sizeof(int32_t));
+    span.CopyCpuRangeToDevice();
   };
 
   auto& packed_aux = StepTensor(step_tensors_.packed_aux, device, aux_type_,
@@ -1181,8 +1218,8 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
                              {static_cast<int64_t>(num_block_rows), model_->cpu_embedding_->hidden_size_});
   }
   {
-    auto span = input_ids.GetDeviceSpan<int64_t>();
-    auto cpu = span.CpuSpan();
+    auto span = Staging(input_ids);
+    auto cpu = std::span<int64_t>{reinterpret_cast<int64_t*>(span.CpuSpan().data()), input_ids.GetElementCount()};
     for (size_t slot = 0; slot < block_feed_indices.size(); ++slot) {
       const auto& feed = feeds[block_feed_indices[slot]];
       cpu[slot * block_size] = feed.wants_drafts ? feed.anchor_token : config_.mask_token_id;
@@ -1190,7 +1227,7 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
         cpu[slot * block_size + row] = config_.mask_token_id;
       }
     }
-    span.CopyCpuToDevice();
+    span.CopyCpuRangeToDevice();
     if (embeddings) model_->cpu_embedding_->Run(cpu, *embeddings, step_tensors_.embedding_workspace);
   }
 
@@ -1238,8 +1275,8 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
       step_tensors_.block_table, device, int32_type,
       {static_cast<int64_t>(served.size()), static_cast<int64_t>(block_table_columns)});
   {
-    auto span = block_table.GetDeviceSpan<int32_t>();
-    auto cpu = span.CpuSpan();
+    auto span = Staging(block_table);
+    auto cpu = std::span<int32_t>{reinterpret_cast<int32_t*>(span.CpuSpan().data()), block_table.GetElementCount()};
     for (size_t row = 0; row < served.size(); ++row) {
       const auto& blocks = requests_[feeds[served[row]].request].blocks;
       auto columns = cpu.subspan(row * block_table_columns, block_table_columns);
@@ -1256,7 +1293,7 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
         columns[column] = blocks[column % blocks.size()];
       }
     }
-    span.CopyCpuToDevice();
+    span.CopyCpuRangeToDevice();
   }
 
   auto& metadata = StepTensor(step_tensors_.attention_metadata, GetDeviceInterface(DeviceType::CPU),
@@ -1287,8 +1324,11 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
     run_options_->AddConfigEntry("gpu_graph_id", std::to_string(annotation_id).c_str());
     // A replayed step that proposes drafts reads its outputs back below with a synchronizing copy,
     // so the run itself need not wait for the device; the copy also drains the uploads from the
-    // step tensors' host mirrors before the next step rewrites them.
-    const bool async_run = capture && drafts_wanted && device->GetType() == DeviceType::CUDA;
+    // step tensors' host mirrors before the next step rewrites them. A step that selects its drafts on
+    // the device has no such copy: a caller that proposes again without waiting for the device takes
+    // fresh mirrors (SetFreshStagingMirrors).
+    const bool async_run = device_selection ||
+                           (capture && drafts_wanted && device->GetType() == DeviceType::CUDA);
     run_options_->AddConfigEntry("disable_synchronize_execution_providers", async_run ? "1" : "0");
   }
 
@@ -1345,6 +1385,9 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
     outputs.push_back(caches_[i]->GetOrtTensor());
   }
 
+  if (device_selection) {
+    run_options_->AddConfigEntry("disable_synchronize_execution_providers", "1");
+  }
   model_->session_->Run(run_options_.get(), input_names.data(), inputs.data(), input_names.size(),
                         output_names.data(), outputs.data(), output_names.size());
 
@@ -1354,7 +1397,7 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
         feed.first_position, feed.aux_row_count, "DFlash 2 cached positions");
   }
 
-  if (!drafts_wanted) {
+  if (!drafts_wanted || device_selection) {
     return true;
   }
 

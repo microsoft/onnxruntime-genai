@@ -92,16 +92,6 @@ if(NOT DEFINED REPO_ROOT)
   else()
     file(GLOB ortgenai_embed_libs "${_genai_install_lib_dir}/*genai*.so")
   endif()
-
-  # WinML wheels bundle the WinML SDK runtime DLLs directly — unlike CPU/CUDA
-  # wheels there is no `onnxruntime` PyPI dependency to deliver them. The pipeline
-  # copies the SDK's runtimes/win-<arch>/native/* into ORT_HOME/lib. On ARM64
-  # Windows WinML is an OS inbox component, so only x64 wheels bundle them
-  # (matches the published onnxruntime-genai-winml wheel).
-  if(USE_WINML AND WIN32 AND genai_target_platform STREQUAL "x64")
-    file(GLOB _winml_sdk_dlls "${ORT_LIB_DIR}/*.dll")
-    list(APPEND ortgenai_embed_libs ${_winml_sdk_dlls})
-  endif()
 endif()
 
 include(${REPO_ROOT}/cmake/cxx_standard.cmake)
@@ -179,6 +169,8 @@ if(BUILD_WHEEL)
     COMMENT "Copying files to wheel directory: ${WHEEL_TARGET_NAME}"
   )
   set(auditwheel_exclude_list
+    "libonnxruntime.so*"
+    "libonnxruntime_providers_*.so*"
     "libcuda.so.1"
     "libcublas.so.11"
     "libcublas.so.12"
