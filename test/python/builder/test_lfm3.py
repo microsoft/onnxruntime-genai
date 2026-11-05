@@ -427,7 +427,6 @@ def _load_builder_entrypoint_module():
         # builder.py leaves the architecture as the model type of a text checkpoint, which the genai config
         # shortens to "lfm3".
         ("Lfm3ForCausalLM", "AutoModelForCausalLM", "Lfm3ForCausalLM", "Lfm3ForCausalLM"),
-        ("Lfm3VlForConditionalGeneration", "AutoModelForImageTextToText", "lfm3", "lfm3_vl"),
         ("Lfm3AudioForConditionalGeneration", "AutoModelForMultimodalLM", "lfm3", "lfm3_audio"),
         ("Lfm3OmniForConditionalGeneration", "AutoModelForMultimodalLM", "lfm3", "lfm3_omni"),
     ],

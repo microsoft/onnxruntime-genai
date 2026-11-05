@@ -46,6 +46,7 @@ from builders import (
     LFM2MoEModel,
     LFM2VLModel,
     LFM3Model,
+    LFM3VLModel,
     LlamaModel,
     Mistral3TextModel,
     MistralModel,
@@ -791,10 +792,13 @@ def create_model(
         onnx_model.model_type = "lfm2_audio" if onnx_model.exclude_embeds else "lfm2_audio_text"
     elif config.architectures[0] == "Lfm3ForCausalLM":
         onnx_model = LFM3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "Lfm3VlForConditionalGeneration" and extra_options.get("exclude_embeds", False):
+        # The decoder, embedding and vision models of the lfm3_vl pipeline
+        onnx_model = LFM3VLModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] in LFM3Model.MULTIMODAL:
         onnx_model = LFM3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-        # With the embedding layer excluded the decoder is one stage of the lfm3_vl / lfm3_audio /
-        # lfm3_omni pipeline (which the runtime does not have yet); otherwise a plain LFM3 text model.
+        # With the embedding layer excluded the decoder is one stage of the lfm3_audio or lfm3_omni
+        # pipeline (which the runtime does not have yet); otherwise a plain LFM3 text model.
         _, pipeline = LFM3Model.MULTIMODAL[config.architectures[0]]
         onnx_model.model_type = pipeline if onnx_model.exclude_embeds else "lfm3"
     elif config.architectures[0] == "LlamaForCausalLM":
@@ -1067,8 +1071,9 @@ def get_args():
                 exclude_embeds = Remove embedding layer from your ONNX model.
                     Use this option when you want to remove the embedding layer from within your ONNX model.
                     Instead of `input_ids`, you will have `inputs_embeds` as the input to your ONNX model.
-                    For LFM2-VL models (Lfm2VlForConditionalGeneration), the builder also writes the embedding model
-                    (embeddings.onnx), the vision model (vision.onnx) and processor_config.json.
+                    For LFM2-VL models (Lfm2VlForConditionalGeneration) and LFM3-VL models
+                    (Lfm3VlForConditionalGeneration, which need hf_remote=true), the builder also writes the embedding
+                    model (embeddings.onnx), the vision model (vision.onnx) and processor_config.json.
                 exclude_lm_head = Remove language modeling head from your ONNX model.
                     Use this option when you want to remove the language modeling head from within your ONNX model.
                     Instead of `logits`, you will have `hidden_states` as the output to your ONNX model.

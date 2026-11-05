@@ -314,7 +314,7 @@ class LFM3Model(LFM2Model):
 
     # VL, Audio and Omni checkpoints nest the decoder under model.language_model, and their remote code
     # registers the first auto class rather than AutoModelForCausalLM. With the embedding layer excluded the
-    # decoder is a stage of the second, a pipeline the runtime does not have yet.
+    # decoder is a stage of the second: LFM3VLModel builds lfm3_vl, and the runtime does not have the others yet.
     MULTIMODAL: ClassVar[dict[str, tuple[str, str]]] = {
         "Lfm3VlForConditionalGeneration": ("AutoModelForImageTextToText", "lfm3_vl"),
         "Lfm3AudioForConditionalGeneration": ("AutoModelForMultimodalLM", "lfm3_audio"),

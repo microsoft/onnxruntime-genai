@@ -75,8 +75,8 @@ The tool currently supports the following model architectures.
 - InternLM2
 - LFM2 (text, LFM2-VL / LFM2.5-VL / d1-3B with their vision models, and the decoders of LFM2-Audio / LFM2.5-Audio)
 - LFM2 MoE
-- LFM3 (text and the decoders of LFM3-VL / LFM3-Audio / LFM3-Omni)
-  - With `exclude_embeds=true` the LFM3-VL / LFM3-Audio / LFM3-Omni decoders are stages of the `lfm3_vl`, `lfm3_audio` and `lfm3_omni` pipelines, which the runtime cannot load yet.
+- LFM3 (text, LFM3-VL with its vision model, and the decoders of LFM3-Audio / LFM3-Omni)
+  - With `exclude_embeds=true` the LFM3-Audio / LFM3-Omni decoders are stages of the `lfm3_audio` and `lfm3_omni` pipelines, which the runtime cannot load yet.
   - LFM3-1.7B has a 262144-token context. Its RoPE caches take about 134 MB in a model with fp16 inputs and outputs and 268 MB with fp32 ones (CPU exports, int4 included). Every attention layer, the sliding-window ones included, keeps a KV cache of `search.max_length` tokens, which defaults to that context, so set `search.max_length` to the length you need.
 - Llama
 - Mistral
@@ -334,6 +334,8 @@ runtime behavior, and validation commands.
 This scenario is for when you want to exclude the embedding layer from your ONNX model.
 
 For LFM2-VL models (`Lfm2VlForConditionalGeneration`, such as LFM2-VL, LFM2.5-VL and d1-3B), this option builds the whole image pipeline: next to the decoder, the builder writes the embedding model (`embeddings.onnx`), the vision model (`vision.onnx`) and `processor_config.json`, and adds their sections to `genai_config.json`. The vision and embedding models are never quantized. The vision model uses the decoder's input/output precision, except that it uses FP16 when the decoder uses BF16.
+
+LFM3-VL models (`Lfm3VlForConditionalGeneration`) get the same pipeline on CPU, CUDA and WebGPU, for images only. No transformers release has their classes yet, so they also need `hf_remote=true`. On WebGPU the vision model is always FP32, because WebGPU sums FP16 MatMul products in FP16 and the features move far from FP32. A WebGPU prompt of more than about 8,000 tokens with an FP32 decoder, which one large image can reach, needs the `chunk_size` search option. Other execution providers and `use_paged_attention=true` are refused.
 
 ```bash
 # From wheel:

@@ -3,6 +3,7 @@
 
 #include "generator/generators.h"
 #include "gemma4_vision_state.h"
+#include "lfm3_vl_vision_state.h"
 #include "multi_modal.h"
 #include "nemotron_parse.h"
 #include "models/io/default_position_inputs.h"
@@ -177,6 +178,9 @@ std::unique_ptr<VisionState> CreateVisionState(const MultiModalLanguageModel& mo
   }
   if (ModelType::IsPixtralFamily(model.config_->model.type)) {
     return std::make_unique<PixtralVisionState>(model, params);
+  }
+  if (model.config_->model.type == "lfm3_vl") {
+    return std::make_unique<Lfm3VlVisionState>(model, params);
   }
   return std::make_unique<VisionState>(model, params);
 }

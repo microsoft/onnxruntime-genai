@@ -166,6 +166,7 @@ def _load_builder_cli_module(monkeypatch):
         "LFM2MoEModel",
         "LFM2VLModel",
         "LFM3Model",
+        "LFM3VLModel",
         "LlamaModel",
         "Mistral3TextModel",
         "MistralModel",
