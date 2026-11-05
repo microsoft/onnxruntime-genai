@@ -65,6 +65,7 @@ class _FakeGQAModel:
             "softcap": 0.0,
             "rope": True,
             "use_rope_in_attn": True,
+            "use_packed_matmul": False,
             "qk_norm_epsilon": 1e-6,
         }
         self.rope_attrs = {"interleaved": 0}

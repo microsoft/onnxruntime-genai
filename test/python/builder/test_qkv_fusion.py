@@ -230,7 +230,32 @@ def test_cpu_non_aligned_head_size_uses_mha_rope_cache_path(head_size):
         "/model/layers.3/attn/k_proj/MatMul",
         "/model/layers.3/attn/v_proj/MatMul",
     ]
-    assert rotary == [f"{projection}/output_0" for projection in projections[:2]]
+    assert rotary == [f"{name}/output_0" for name in projections[:2]]
+
+
+@pytest.mark.parametrize("feature", ["window", "softcap", "sinks"])
+def test_cpu_mha_rejects_unsupported_attention_features(feature):
+    model = _model(Model, {}, use_paged_attention=False)
+    model.ep = "cpu"
+    model.attention_attrs.update(op_type="MultiHeadAttention", softcap=0.0, sinks=False)
+    model.window_size = 16 if feature == "window" else -1
+    model.is_local = lambda layer_id: True
+    if feature == "softcap":
+        model.attention_attrs["softcap"] = 1.0
+    elif feature == "sinks":
+        model.attention_attrs["sinks"] = True
+    with pytest.raises(ValueError, match="fallback does not support"):
+        model.make_attention(0, None, "root")
+
+
+def test_mha_mask_uses_first_attention_layer_cache():
+    model = _model(Model, {}, use_paged_attention=False)
+    model.input_names = {"past_key_values.key": {2: "past_key_values.2.key"}}
+    shapes = []
+    model.make_shape = lambda name, root, **kwargs: shapes.append(root)
+    model.make_gather = lambda *args, **kwargs: None
+    model.make_past_key_subgraph("/mask")
+    assert shapes == ["past_key_values.2.key"]
 
 
 @pytest.mark.parametrize("rope,fused", [(False, False), (True, True)])

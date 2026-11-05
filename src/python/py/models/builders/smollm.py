@@ -17,6 +17,7 @@ class SmolLM3Model(LlamaModel):
         # So, we temporarily modify the model's attributes before calling the
         # base `make_attention` method, then restore them immediately after.
         original_use_rope = self.attention_attrs["use_rope_in_attn"]
+        original_rope = self.attention_attrs["rope"]
         original_window_size = self.window_size
 
         # Enable/disable RoPE for the current layer.
@@ -31,8 +32,9 @@ class SmolLM3Model(LlamaModel):
             self.window_size = -1
 
         # Call the original `make_attention` with the temporarily-modified settings.
-        super().make_attention(layer_id, attention, root_input, **kwargs)
-
-        # Restore original values
-        self.attention_attrs["use_rope_in_attn"] = original_use_rope
-        self.window_size = original_window_size
+        try:
+            super().make_attention(layer_id, attention, root_input, **kwargs)
+        finally:
+            self.attention_attrs["rope"] = original_rope
+            self.attention_attrs["use_rope_in_attn"] = original_use_rope
+            self.window_size = original_window_size
