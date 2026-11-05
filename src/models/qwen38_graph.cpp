@@ -1907,14 +1907,8 @@ void Qwen38GraphEngine::RunTarget(int rows, int phase, const Qwen38PromptRunHint
 
 void Qwen38GraphEngine::RunTarget(Direction& direction, const Qwen38PromptRunHints* prompt,
                                   Qwen38SlotMask participants) {
-  OrtRunOptions* options = direction.run_options.get();
-  if (run_hints_.InWarmup() && offload_warmup_run_options_) {
-    if (direction.warmup_captured) {
-      options = offload_warmup_run_options_.get();
-    } else {
-      direction.warmup_captured = true;
-    }
-  }
+  OrtRunOptions* options = SelectQwen38TargetRunOptions(
+      run_hints_, direction.run_options.get(), offload_warmup_run_options_.get(), direction.warmup_captured);
   RunSession(*model_.session_target_, options, *direction.binding, prompt, participants);
 }
 
@@ -3089,6 +3083,20 @@ std::unique_ptr<OrtRunOptions> CreateQwen38OffloadWarmupRunOptions(const Qwen38M
   options->AddConfigEntry("gpu_graph_id", "-1");
   options->AddConfigEntry("disable_synchronize_execution_providers", "1");
   options->AddConfigEntry(Qwen38OrtRunEntry::kInWarmup, "1");
+  return options;
+}
+
+OrtRunOptions* SelectQwen38TargetRunOptions(const Qwen38OrtRunHints& hints, OrtRunOptions* direction_options,
+                                            OrtRunOptions* offload_warmup_options, bool& warmup_captured) {
+  OrtRunOptions* options = direction_options;
+  if (hints.InWarmup() && offload_warmup_options != nullptr) {
+    if (warmup_captured) {
+      options = offload_warmup_options;
+    } else {
+      warmup_captured = true;
+    }
+  }
+  if (options != nullptr) hints.ApplyRunConfigEntries(*options);
   return options;
 }
 
