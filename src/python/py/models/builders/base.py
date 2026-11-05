@@ -858,6 +858,7 @@ class Model:
             # CPU GQA does not support these head sizes. Use the MHA fallback,
             # which expands K/V heads before invoking the general attention op.
             self.attention_attrs["op_type"] = "MultiHeadAttention"
+            self.attention_attrs["use_packed_matmul"] = False
             print("MultiHeadAttention (fallback) is used in this model.")
 
         elif self.is_packed_attn_supported():

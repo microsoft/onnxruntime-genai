@@ -230,7 +230,7 @@ def test_cpu_non_aligned_head_size_uses_mha_rope_cache_path(head_size):
         "/model/layers.3/attn/k_proj/MatMul",
         "/model/layers.3/attn/v_proj/MatMul",
     ]
-    assert rotary == projections[:2]
+    assert rotary == [f"{projection}/output_0" for projection in projections[:2]]
 
 
 @pytest.mark.parametrize("rope,fused", [(False, False), (True, True)])
