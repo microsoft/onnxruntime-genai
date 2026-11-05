@@ -13,10 +13,13 @@ CpuEmbedding::CpuEmbedding(Model& model, OrtEnv& env) : config_{model.config_->m
   auto options = OrtSessionOptions::Create();
   Config::SessionOptions cpu_options = config_.session_options.value_or(Config::SessionOptions{});
   if (cpu_options.providers_explicitly_selected) {
-    std::erase_if(cpu_options.provider_options, [&cpu_options](const auto& provider) {
-      return std::find(cpu_options.providers.begin(), cpu_options.providers.end(), provider.name) ==
-             cpu_options.providers.end();
-    });
+    cpu_options.provider_options.erase(
+        std::remove_if(cpu_options.provider_options.begin(), cpu_options.provider_options.end(),
+                       [&cpu_options](const auto& provider) {
+                         return std::find(cpu_options.providers.begin(), cpu_options.providers.end(), provider.name) ==
+                                cpu_options.providers.end();
+                       }),
+        cpu_options.provider_options.end());
   }
 
   if (std::any_of(cpu_options.providers.begin(), cpu_options.providers.end(),
