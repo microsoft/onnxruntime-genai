@@ -1826,6 +1826,25 @@ OgaResult* OgaEngineEventGetToken(
   OGA_CATCH
 }
 
+OgaResult* OgaEngineEventGetTerminalTokenId(
+    const OgaEngineEvent* event,
+    int32_t* out) {
+  OGA_TRY
+  if (!out) {
+    throw std::runtime_error("out must not be null.");
+  }
+  *out = -1;
+  if (!event) {
+    throw std::runtime_error("event must not be null.");
+  }
+  if ((event->flags & Generators::EngineEventFlagTurnFinished) &&
+      event->finish_reason == Generators::GenerationFinishReason::EosToken) {
+    *out = event->terminal_token_id;
+  }
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OgaEngineEventGetFinishReason(
     const OgaEngineEvent* event,
     OgaFinishReason* out) {

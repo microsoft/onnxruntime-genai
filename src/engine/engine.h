@@ -71,6 +71,7 @@ struct EngineEvent {
   uint64_t turn_id{};
   uint32_t flags{};
   int32_t token{};
+  int32_t terminal_token_id{-1};
   GenerationFinishReason finish_reason{GenerationFinishReason::None};
   EngineErrorCode error_code{EngineErrorCode::None};
   // Caller-facing index into the turn's stop-string list, valid only when finish_reason ==

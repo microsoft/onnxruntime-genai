@@ -708,6 +708,9 @@ void Request::CommitAcceptedDraftsForTransaction(size_t accepted_count) {
       draft_verification_.completed_generation = true;
       draft_verification_.eos =
           search_->IsDone() && contains(params_->config.model.eos_token_id, token);
+      if (draft_verification_.eos) {
+        draft_verification_.eos_token_id = token;
+      }
       break;
     }
   }
@@ -1036,7 +1039,7 @@ RequestStepResult Request::StageDraftCompletionForTransaction() {
     }
   }
   RequestStepResult result{
-      0,
+      draft_verification_.eos_token_id,
       false,
       true,
       finish_reason,
