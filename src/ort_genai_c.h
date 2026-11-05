@@ -745,6 +745,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SetModelInput(OgaGenerator* gene
 
 /**
  * \brief For additional model inputs that genai does not handle, this lets the user set their values.
+ * Images or audio with a num_image_tokens or audio_sizes count are refused after a SetInputs or AppendTokens call.
  * \param[in] generator The generator to add the inputs to.
  * \param[in] named_tensors The named tensors to set the inputs as.
  */
