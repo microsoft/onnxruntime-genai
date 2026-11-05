@@ -1907,9 +1907,14 @@ void Qwen38GraphEngine::RunTarget(int rows, int phase, const Qwen38PromptRunHint
 
 void Qwen38GraphEngine::RunTarget(Direction& direction, const Qwen38PromptRunHints* prompt,
                                   Qwen38SlotMask participants) {
-  OrtRunOptions* options = run_hints_.InWarmup() && offload_warmup_run_options_
-                               ? offload_warmup_run_options_.get()
-                               : direction.run_options.get();
+  OrtRunOptions* options = direction.run_options.get();
+  if (run_hints_.InWarmup() && offload_warmup_run_options_) {
+    if (direction.warmup_captured) {
+      options = offload_warmup_run_options_.get();
+    } else {
+      direction.warmup_captured = true;
+    }
+  }
   RunSession(*model_.session_target_, options, *direction.binding, prompt, participants);
 }
 
@@ -3496,10 +3501,10 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
       SelectQwen38TierHeadR2Filename(q.fold.head_r2.filename, context_tier, package_has_file);
   head_r2_filename = SelectQwen38TierHeadR2Filename(head_r2_filename, context_tier, package_has_file);
   const std::string adaptive_ctx_budget = GetEnv("ORT_QWEN38_ADAPTIVE_CTX_BUDGET");
-  const bool adaptive_budget = adaptive_ctx_budget == "1";
+  const bool adaptive_budget = adaptive_ctx_budget.empty() || adaptive_ctx_budget == "1";
   if (g_log.enabled && moe_offload.enabled && !adaptive_ctx_budget.empty()) {
     if (!adaptive_budget) {
-      Log("qwen38_graph") << "ORT_QWEN38_ADAPTIVE_CTX_BUDGET=" << adaptive_ctx_budget << " is ignored: only 1 turns it on"
+      Log("qwen38_graph") << "ORT_QWEN38_ADAPTIVE_CTX_BUDGET=" << adaptive_ctx_budget << " disables adaptive context budget"
                           << std::endl;
     } else if (!context_tier) {
       Log("qwen38_graph") << "ORT_QWEN38_ADAPTIVE_CTX_BUDGET=1: " << target_filename
