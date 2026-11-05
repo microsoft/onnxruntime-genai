@@ -942,15 +942,17 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
 
 DeviceSpan<float> Generator::RunWithRopeCache(DeviceSpan<int32_t> next_tokens) {
   const int length = search_->GetSequenceLength();
-  if (rope_context_threshold_ != 0 && rope_cache_length_ > 0 &&
-      (rope_cache_length_ >= rope_context_threshold_) != (length >= rope_context_threshold_)) {
+  const bool replay = rope_context_threshold_ != 0 && rope_cache_length_ > 0 &&
+                      (rope_cache_length_ >= rope_context_threshold_) != (length >= rope_context_threshold_);
+  if (replay) {
     // Rebuild only model state: search, sampling, guidance and usage already contain these tokens.
     state_->RewindTo(0);
     next_tokens = search_->GetSequence(0);
     next_tokens.CopyDeviceToCpu();
   }
 
-  auto logits = state_->Run(length, next_tokens, search_->GetNextIndices());
+  auto logits = replay ? static_cast<DecoderOnly_State&>(*state_).Run(length, next_tokens, search_->GetNextIndices(), true)
+                       : state_->Run(length, next_tokens, search_->GetNextIndices());
   rope_cache_length_ = length;
   return logits;
 }

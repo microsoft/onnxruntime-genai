@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <array>
 #include <fstream>
 #include <iterator>
 #include <numeric>
@@ -43,8 +44,66 @@ TEST_F(LongRopeContextTest, ChunkedPrefillUsesOneModeForAllChunks) {
   }
 }
 
-TEST_F(LongRopeContextTest, MissingMetadataDoesNotPreventModelLoading) {
-  EXPECT_NO_THROW(OgaModel::Create(MODEL_PATH "longrope-context-without-metadata"));
+TEST_F(LongRopeContextTest, LegacyGraphRunsWithoutContextInput) {
+  model = OgaModel::Create(MODEL_PATH "longrope-context-without-metadata");
+  for (int length : {7, 8, 9}) {
+    SCOPED_TRACE(testing::Message() << "length=" << length);
+    auto generator = CreateGenerator(0);
+    generator->AppendTokens(std::vector<int32_t>(length, 1));
+    ExpectConsistentCache(*generator);
+    generator->GenerateNextToken();
+    EXPECT_EQ(generator->GetSequenceCount(0), static_cast<size_t>(length + 1));
+    EXPECT_EQ(generator->GetSequenceData(0)[length], 0);
+  }
+}
+
+TEST_F(LongRopeContextTest, LegacyGraphSupportsSameRegimeContinuation) {
+  model = OgaModel::Create(MODEL_PATH "longrope-context-without-metadata");
+  for (int length : {7, 9}) {
+    SCOPED_TRACE(testing::Message() << "length=" << length);
+    auto generator = CreateGenerator(0);
+    generator->AppendTokens(std::vector<int32_t>(length, 1));
+    generator->AppendTokens(std::vector<int32_t>{1});
+    ExpectConsistentCache(*generator);
+    generator->GenerateNextToken();
+    EXPECT_EQ(generator->GetSequenceCount(0), static_cast<size_t>(length + 2));
+    EXPECT_EQ(generator->GetSequenceData(0)[length + 1], 0);
+  }
+}
+
+TEST_F(LongRopeContextTest, ReplayUsesLogitsOfCommittedPadToken) {
+  auto config = OgaConfig::Create(MODEL_PATH "longrope-context");
+  config->Overlay(R"({"model":{"pad_token_id":1,"eos_token_id":2}})");
+  model = OgaModel::Create(*config);
+  for (int chunk : {0, 3, 4}) {
+    SCOPED_TRACE(testing::Message() << "chunk=" << chunk);
+    auto generator = CreateGenerator(chunk);
+    generator->AppendTokens(std::vector<int32_t>(8, 0));
+    std::array<float, 3> forced_logits{0, 10, -10};
+    generator->SetLogits(*OgaTensor::Create(forced_logits.data(), std::array<int64_t, 2>{1, 3}));
+    generator->GenerateNextToken();
+    ASSERT_EQ(generator->GetSequenceCount(0), 9u);
+    ASSERT_EQ(generator->GetSequenceData(0)[8], 1);
+    ExpectConsistentCache(*generator);
+    generator->GenerateNextToken();
+    EXPECT_EQ(generator->GetSequenceData(0)[9], 0);
+  }
+}
+
+TEST_F(LongRopeContextTest, OrdinaryPromptStillIgnoresTrailingPadding) {
+  auto config = OgaConfig::Create(MODEL_PATH "longrope-context");
+  config->Overlay(R"({"model":{"pad_token_id":1,"eos_token_id":2}})");
+  model = OgaModel::Create(*config);
+  for (int chunk : {0, 3, 4}) {
+    SCOPED_TRACE(testing::Message() << "chunk=" << chunk);
+    auto generator = CreateGenerator(chunk);
+    generator->AppendTokens(std::vector<int32_t>{0, 0, 0, 0, 0, 0, 0, 1});
+    auto tensor = generator->GetLogits();
+    const auto* logits = static_cast<const float*>(tensor->Data());
+    EXPECT_FLOAT_EQ(logits[0], 0);
+    EXPECT_FLOAT_EQ(logits[1], 0);
+    EXPECT_FLOAT_EQ(logits[2], 0);
+  }
 }
 
 TEST_F(LongRopeContextTest, RuntimeCapacityAtOrBelowBoundaryUsesShortCache) {

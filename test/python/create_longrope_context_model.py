@@ -15,10 +15,11 @@ def create_model(output_dir, declare_context=True):
         helper.make_tensor_value_info("input_ids", TensorProto.INT64, ["batch", "sequence"]),
         helper.make_tensor_value_info("attention_mask", TensorProto.INT64, ["batch", "total"]),
         helper.make_tensor_value_info("position_ids", TensorProto.INT64, ["batch", "sequence"]),
-        helper.make_tensor_value_info("rope_context_length", TensorProto.INT64, []),
         helper.make_tensor_value_info("past_key_values.0.key", TensorProto.FLOAT, ["batch", 1, "past", 1]),
         helper.make_tensor_value_info("past_key_values.0.value", TensorProto.FLOAT, ["batch", 1, "past", 1]),
     ]
+    if declare_context:
+        inputs.insert(3, helper.make_tensor_value_info("rope_context_length", TensorProto.INT64, []))
     outputs = [
         helper.make_tensor_value_info("logits", TensorProto.FLOAT, ["batch", "sequence", 3]),
         helper.make_tensor_value_info("present.0.key", TensorProto.FLOAT, ["batch", 1, "total", 1]),
@@ -34,7 +35,15 @@ def create_model(output_dir, declare_context=True):
         helper.make_tensor("logits_axis", TensorProto.INT64, [1], [2]),
         helper.make_tensor("sequence_axis", TensorProto.INT64, [], [1]),
     ]
-    nodes = [
+    nodes = (
+        []
+        if declare_context
+        else [
+            helper.make_node("Shape", ["attention_mask"], ["attention_shape"]),
+            helper.make_node("Gather", ["attention_shape", "sequence_axis"], ["rope_context_length"], axis=0),
+        ]
+    )
+    nodes += [
         helper.make_node("Greater", ["rope_context_length", "boundary"], ["long_mode"]),
         helper.make_node("Where", ["long_mode", "long_factor", "short_factor"], ["factor"]),
         helper.make_node("Cast", ["input_ids"], ["tokens"], to=TensorProto.FLOAT),
