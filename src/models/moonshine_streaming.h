@@ -34,6 +34,7 @@
 #pragma once
 
 #include <span>
+#include <string_view>
 
 #include "model.h"
 #include "transducer_state.h"
@@ -176,6 +177,19 @@ struct MoonshineStreamingModel : Model {
 ONNXTensorElementDataType ValidateMoonshineFloatType(std::span<const ONNXTensorElementDataType> types);
 
 void ValidateMoonshineInt64Input(const std::string& name, ONNXTensorElementDataType type);
+
+int ValidateMoonshineSequenceOutputShape(std::string_view name,
+                                         const std::vector<int64_t>& shape,
+                                         size_t element_count,
+                                         int expected_width);
+
+void ValidateMoonshineCrossKvOutputShape(std::string_view name,
+                                         const std::vector<int64_t>& shape,
+                                         size_t element_count,
+                                         int layers,
+                                         int heads,
+                                         int frames,
+                                         int head_size);
 
 /// frontend: audio to new feature frames + updated causal state buffers.
 struct MoonshineFrontendSubState : State {

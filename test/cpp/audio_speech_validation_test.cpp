@@ -12,6 +12,7 @@
 #include <utility>
 
 #include "models/nemotron_speech.h"
+#include "models/moonshine_streaming.h"
 #include "models/parakeet.h"
 #include "models/preprocessing/genai_tokenizer.h"
 #include "models/postprocessing/asr_post_processor.h"
@@ -701,6 +702,22 @@ TEST(AudioSpeechValidationTests, ParakeetEncoderChannelDimensionValidation) {
   EXPECT_NE(dim_error.find("hidden_dim"), std::string::npos);
 }
 
+TEST(AudioSpeechValidationTests, ParakeetEncoderOutputBoundsValidation) {
+  EXPECT_THROW(Generators::ValidateParakeetEncoderOutputShape({0, 512, 64}, 512), std::runtime_error);
+  EXPECT_THROW(Generators::ValidateParakeetEncoderOutputShape({1, 512, -1}, 512), std::runtime_error);
+
+  EXPECT_NO_THROW(Generators::ValidateParakeetEncoderLength(64, 64));
+  EXPECT_THROW(Generators::ValidateParakeetEncoderLength(-1, 64), std::runtime_error);
+  EXPECT_THROW(Generators::ValidateParakeetEncoderLength(65, 64), std::runtime_error);
+}
+
+TEST(AudioSpeechValidationTests, ParakeetJoinerOutputSizeValidation) {
+  EXPECT_NO_THROW(Generators::ValidateParakeetJoinerOutputSize(15, 10, 5));
+  EXPECT_THROW(Generators::ValidateParakeetJoinerOutputSize(14, 10, 5), std::runtime_error);
+  EXPECT_THROW(Generators::ValidateParakeetJoinerOutputSize(15, 0, 5), std::runtime_error);
+  EXPECT_THROW(Generators::ValidateParakeetJoinerOutputSize(10, 10, 0), std::runtime_error);
+}
+
 TEST(AudioSpeechValidationTests, ParakeetDecoderDimensionValidation) {
   EXPECT_NO_THROW(Generators::ValidateParakeetDecoderOutputShape({1, 1024, 1}, 1024));
 
@@ -708,6 +725,32 @@ TEST(AudioSpeechValidationTests, ParakeetDecoderDimensionValidation) {
     Generators::ValidateParakeetDecoderOutputShape({1, 1024, 2}, 1024);
   });
   EXPECT_NE(shape_error.find("must have shape"), std::string::npos);
+}
+
+TEST(AudioSpeechValidationTests, MoonshineSequenceOutputShapeValidation) {
+  EXPECT_EQ(Generators::ValidateMoonshineSequenceOutputShape(
+                "frontend", {1, 8, 64}, 512, 64),
+            8);
+  EXPECT_THROW(Generators::ValidateMoonshineSequenceOutputShape(
+                   "frontend", {0, 8, 64}, 0, 64),
+               std::runtime_error);
+  EXPECT_THROW(Generators::ValidateMoonshineSequenceOutputShape(
+                   "frontend", {1, 8, 63}, 504, 64),
+               std::runtime_error);
+  EXPECT_THROW(Generators::ValidateMoonshineSequenceOutputShape(
+                   "frontend", {1, 8, 64}, 511, 64),
+               std::runtime_error);
+}
+
+TEST(AudioSpeechValidationTests, MoonshineCrossKvOutputShapeValidation) {
+  EXPECT_NO_THROW(Generators::ValidateMoonshineCrossKvOutputShape(
+      "cross-KV", {2, 1, 4, 8, 16}, 1024, 2, 4, 8, 16));
+  EXPECT_THROW(Generators::ValidateMoonshineCrossKvOutputShape(
+                   "cross-KV", {1, 1, 4, 8, 16}, 512, 2, 4, 8, 16),
+               std::runtime_error);
+  EXPECT_THROW(Generators::ValidateMoonshineCrossKvOutputShape(
+                   "cross-KV", {2, 1, 4, 8, 16}, 1023, 2, 4, 8, 16),
+               std::runtime_error);
 }
 
 TEST(AudioSpeechValidationTests, Rank1TensorsRejected) {
