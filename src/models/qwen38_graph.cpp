@@ -3111,6 +3111,10 @@ namespace {
 // library before Model::Model runs EnsureDeviceOrtInit or AddSharedInitializers.
 std::unique_ptr<Config> PreflightQwen38GraphModelConfig(std::unique_ptr<Config> config) {
   if (!config) return config;
+  if (config->engine.dynamic_batching &&
+      config->engine.dynamic_batching->device_memory_budget_bytes) {
+    throw std::runtime_error("device_memory_budget_bytes does not support qwen38_flash_graph.");
+  }
   const auto& q = config->model.qwen38_graph;
   if (!q.IsConfigured() || q.ple_table.empty())
     throw std::runtime_error(
