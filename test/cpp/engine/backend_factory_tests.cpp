@@ -91,6 +91,14 @@ TEST(EngineBackendFactoryTest, Qwen38RejectsDeviceMemoryBudgetBeforeModelInitial
 }
 
 #if USE_CUDA
+void SetDeviceMemoryBudgetAfterStartup(const std::shared_ptr<Model>& model, uint64_t remaining_bytes) {
+  size_t free_bytes, total_bytes;
+  model->p_device_kvcache_->GetAvailableMemory(free_bytes, total_bytes);
+  const size_t initial_free_bytes = model->device_memory_budget_initial_free_bytes_.value();
+  const size_t startup_bytes = initial_free_bytes > free_bytes ? initial_free_bytes - free_bytes : 0;
+  model->config_->engine.dynamic_batching->device_memory_budget_bytes = startup_bytes + remaining_bytes;
+}
+
 TEST(EngineBackendFactoryTest, DeviceMemoryBudgetRequiresExplicitHeadroomBeforeChangingSizing) {
   if (!GetDeviceInterface(DeviceType::CUDA)) {
     GTEST_SKIP() << "CUDA device is unavailable";
@@ -126,6 +134,9 @@ TEST(EngineBackendFactoryTest, DeviceMemoryBudgetOverridesProfileBlocksWithoutUt
   profile.overlay.dynamic_batching.device_memory_headroom_bytes = 32 * 1024 * 1024;
   config->runtime_profiles.push_back(std::move(profile));
   auto model = CreateModel(GetOrtEnv(), std::move(config));
+  // Exercise startup usage larger than the cache allowance even on low-overhead CUDA runtimes.
+  auto startup_allocation = model->p_device_kvcache_->Allocate<uint8_t>(80 * 1024 * 1024);
+  SetDeviceMemoryBudgetAfterStartup(model, 64 * 1024 * 1024);
   ASSERT_EQ(model->config_->engine.dynamic_batching->num_blocks, 1u);
   ASSERT_FALSE(model->config_->engine.dynamic_batching->gpu_utilization_factor);
   auto bundle = CreateEngineBackend(model);
@@ -181,6 +192,7 @@ TEST(EngineBackendFactoryTest, DeviceMemoryBudgetSupportsWindowedDflash) {
   draft.sliding_window = 8;
   draft.main_aux_hidden_states = "hidden_states";
   auto model = CreateModel(GetOrtEnv(), std::move(config));
+  SetDeviceMemoryBudgetAfterStartup(model, 64 * 1024 * 1024);
   auto bundle = CreateEngineBackend(model);
   ASSERT_NE(bundle.dependencies.dflash2_drafter, nullptr);
   EXPECT_FALSE(model->config_->engine.dynamic_batching->num_blocks);
@@ -201,6 +213,7 @@ TEST(EngineBackendFactoryTest, DeviceMemoryBudgetBoundsOptionalDraftSnapshots) {
   batching.num_blocks.reset();
   batching.gpu_utilization_factor = 1.0f;
   auto model = CreateModel(GetOrtEnv(), std::move(config));
+  SetDeviceMemoryBudgetAfterStartup(model, 64 * 1024 * 1024);
   auto cache = CacheManager::Create(model, 0, 0, 40 * 1024 * 1024);
   EXPECT_EQ(cache->DraftCheckpointCapacity(), 0u);
   EXPECT_GT(cache->TargetBlockCount(), 0u);
@@ -223,6 +236,7 @@ TEST(EngineBackendFactoryTest, DeviceMemoryBudgetBoundsOptionalDraftSnapshotsWit
     batching.num_blocks.reset();
     batching.gpu_utilization_factor = 1.0f;
     auto model = CreateModel(GetOrtEnv(), std::move(config));
+    SetDeviceMemoryBudgetAfterStartup(model, 64 * 1024 * 1024);
     auto cache = CacheManager::Create(model, 0, 0, checkpoint_mib * 1024 * 1024);
     EXPECT_EQ(cache->DraftCheckpointCapacity(), checkpoint_mib == 48 ? 0u : 1u);
     EXPECT_GT(cache->TargetBlockCount(), 0u);
@@ -240,6 +254,7 @@ TEST(EngineBackendFactoryTest, DeviceMemoryBudgetReservesCaptureBlockTablesBefor
   config->engine.dynamic_batching->device_memory_budget_bytes = 64 * 1024 * 1024;
   config->engine.dynamic_batching->device_memory_headroom_bytes = 0;
   auto model = CreateModel(GetOrtEnv(), std::move(config));
+  SetDeviceMemoryBudgetAfterStartup(model, 64 * 1024 * 1024);
   try {
     (void)CreateEngineBackend(model);
     FAIL() << "The context-bounded capture tables exceed this startup budget";
