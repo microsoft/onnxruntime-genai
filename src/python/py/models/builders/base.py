@@ -459,19 +459,6 @@ class Model:
         self.matmul_attrs["weights_prepacked"] = self.quant_config.runtime.matmulnbits_weights_prepacked
 
         per_channel = self.quant_config.weights.block_size == 0
-        if per_channel and (
-            self.quant_config.weights.type not in ("int4", "int8")
-            or not self.quant_config.weights.symmetric
-            or self.quant_config.weights.method != "default"
-            or self.quant_config.runtime.use_qdq
-            or self.quant_type is not None
-            or self.matmul_attrs["weights_prepacked"]
-            or any(o.type not in (None, self.quant_config.weights.type) for o in self.quant_config.weights.overrides)
-        ):
-            raise ValueError(
-                "Per-channel MatMul requires unquantized input weights, symmetric INT4 or INT8, "
-                "default method, QOperator, and unpacked weights"
-            )
 
         self.quant_attrs = {
             "accuracy_level": self.quant_config.weights.accuracy_level,                    # ORT quantization accuracy level for MatMulNBits
@@ -1176,6 +1163,20 @@ class Model:
         pass
 
     def make_quant_init(self, config):
+        if getattr(self, "quant_attrs", {}).get("per_channel", False) and (
+            self.quant_config.weights.type not in ("int4", "int8")
+            or not self.quant_config.weights.symmetric
+            or self.quant_config.weights.method != "default"
+            or self.quant_config.runtime.use_qdq
+            or self.quant_type is not None
+            or self.matmul_attrs["weights_prepacked"]
+            or any(o.type not in (None, self.quant_config.weights.type) for o in self.quant_config.weights.overrides)
+        ):
+            raise ValueError(
+                "Per-channel MatMul requires unquantized input weights, symmetric INT4 or INT8, "
+                "default method, QOperator, and unpacked weights"
+            )
+
         # Decouple the int4 quantization *method* (how weights are rounded) from the
         # *mixed-precision placement* (which MatMuls use a different quant type than the
         # int4 body). The base method is one of {"default", "rtn", "k_quant"}. Legacy
