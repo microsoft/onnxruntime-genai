@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <limits>
 #include "config_utils.h"
 #include "models/preprocessing/genai_tokenizer.h"
 #include "models/postprocessing/asr_post_processor.h"
@@ -609,6 +610,21 @@ std::mt19937 CreateRandomGenerator(int random_seed) {
   return std::mt19937{seed_sequence};
 }
 
+size_t GetPaddedInputIdsSize(size_t input_ids_size, int window_size) {
+  if (window_size <= 0)
+    throw std::runtime_error("sliding window size must be greater than 0");
+
+  const size_t window = static_cast<size_t>(window_size);
+  const size_t remainder = input_ids_size % window;
+  if (remainder == 0)
+    return input_ids_size;
+
+  const size_t padding = window - remainder;
+  if (input_ids_size > std::numeric_limits<size_t>::max() - padding)
+    throw std::runtime_error("padded input_ids size overflows size_t");
+  return input_ids_size + padding;
+}
+
 Generator::Generator(const Model& model, const GeneratorParams& params)
     : model_{model.shared_from_this()},
       generation_telemetry_{model.telemetry_session_id_, ModelType::IsTransducer(model.config_->model.type)},
@@ -731,10 +747,11 @@ DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> 
     const auto window_size = model_->config_->model.decoder.sliding_window->window_size;
 
     if (model_->config_->model.decoder.sliding_window->slide_inputs) {
-      padded_input_ids_size = ((input_ids.size() + window_size - 1) / window_size) * window_size;
+      padded_input_ids_size = GetPaddedInputIdsSize(input_ids.size(), window_size);
     }
   }
 
+  ThrowIfAppendExceedsMaxLength(padded_input_ids_size);
   auto input_ids_device = state_->params_->p_device->Allocate<int32_t>(padded_input_ids_size);
   auto cpu_span = input_ids_device.CpuSpan();
   auto padding_begin = cpu_span.begin();
@@ -750,7 +767,14 @@ DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> 
 }
 
 void Generator::ThrowIfAppendExceedsMaxLength(size_t input_ids_count) {
-  if ((input_ids_count / state_->params_->search.batch_size) + search_->GetSequenceLength() > state_->params_->search.max_length)
+  const size_t batch_size = static_cast<size_t>(state_->params_->search.batch_size);
+  if (input_ids_count % batch_size != 0)
+    throw std::runtime_error("input_ids size must be divisible by batch_size");
+
+  const size_t input_count_per_batch = input_ids_count / batch_size;
+  const size_t current_length = search_->GetSequenceLength();
+  const size_t max_length = static_cast<size_t>(state_->params_->search.max_length);
+  if (current_length > max_length || input_count_per_batch > max_length - current_length)
     throw std::runtime_error("input_ids size (" + std::to_string(input_ids_count) + ") + current sequence length (" + std::to_string(search_->GetSequenceLength()) + ") exceeds max length (" + std::to_string(state_->params_->search.max_length) + ")");
 }
 

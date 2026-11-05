@@ -37,7 +37,7 @@ fs_std::path WriteConfigWithSlidingWindow(const std::string& suffix, const std::
   const auto root = MakeTempDir(suffix);
   const std::string config =
       "{ \"model\": { \"type\": \"tiny-test-model\","
-      " \"vocab_size\": 16, \"context_length\": 32,"
+      " \"vocab_size\": 16, \"context_length\": 256,"
       " \"decoder\": { \"filename\": \"model.onnx\","
       " \"sliding_window\": " +
       sliding_window_json +
@@ -76,6 +76,22 @@ TEST(SlidingWindowConfigTest, AcceptsSlidingWindowWithoutCacheSlack) {
   // cache_slack is optional; older configs that predate it must keep loading.
   const auto root = WriteConfigWithSlidingWindow("no_slack", "{ \"window_size\": 128 }");
   EXPECT_NO_THROW(OgaConfig::Create(root.string().c_str()));
+}
+
+TEST(SlidingWindowConfigTest, RejectsNonPositiveWindowSize) {
+  for (const char* window_size : {"0", "-1"}) {
+    const auto root = WriteConfigWithSlidingWindow(
+        "non_positive_" + std::string{window_size},
+        "{ \"window_size\": " + std::string{window_size} + " }");
+    const std::string message = CaptureThrowMessage([&] { OgaConfig::Create(root.string().c_str()); });
+    EXPECT_NE(message.find("window_size must be greater than 0"), std::string::npos) << message;
+  }
+}
+
+TEST(SlidingWindowConfigTest, RejectsWindowSizeBeyondContextLength) {
+  const auto root = WriteConfigWithSlidingWindow("beyond_context", "{ \"window_size\": 257 }");
+  const std::string message = CaptureThrowMessage([&] { OgaConfig::Create(root.string().c_str()); });
+  EXPECT_NE(message.find("window_size cannot exceed model.context_length"), std::string::npos) << message;
 }
 
 TEST(SlidingWindowConfigTest, RejectsMisspelledCacheSlack) {
