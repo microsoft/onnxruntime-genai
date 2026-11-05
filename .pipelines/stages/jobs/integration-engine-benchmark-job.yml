@@ -20,6 +20,13 @@ jobs:
     clean: true
     submodules: recursive
 
+  - bash: |
+      set -euo pipefail
+      image=$(python3 tools/ci_build/resolve_docker_base_image.py --family cuda12_x64_almalinux8_gcc14)
+      echo "##vso[task.setvariable variable=cuda_docker_image]$image"
+    displayName: 'Resolve CUDA benchmark base image'
+    workingDirectory: '$(Build.Repository.LocalPath)'
+
   - bash: mkdir -p '$(Build.ArtifactStagingDirectory)/engine-benchmark' '$(Build.Repository.LocalPath)/build/engine-benchmark-home/models'
     displayName: 'Initialize benchmark directories'
 
@@ -36,7 +43,7 @@ jobs:
       docker run --rm \
         -v '$(Build.Repository.LocalPath):/ort_genai_src' \
         -w /ort_genai_src \
-        onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda12_x64_almalinux8_gcc14:20251017.1 \
+        "$(cuda_docker_image)" \
         /bin/bash -c '
           set -e -x
           PYTHON_EXE=/opt/python/cp312-cp312/bin/python3.12
@@ -120,7 +127,7 @@ jobs:
         -v '$(Build.Repository.LocalPath):/ort_genai_src' \
         -v '$(Build.ArtifactStagingDirectory)/engine-benchmark:/benchmark-out' \
         -w /ort_genai_src \
-        onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda12_x64_almalinux8_gcc14:20251017.1 \
+        "$(cuda_docker_image)" \
         /bin/bash -c "
           set -e -x
           PYTHON_EXE=/opt/python/cp312-cp312/bin/python3.12
