@@ -28,6 +28,88 @@
 
 namespace Generators::test {
 
+TEST(ConfigTest, ModelProviderOverridesPrimarySessionsWithoutReplacingTheirOptions) {
+  Config config{fs::path{MODEL_PATH "engine/dummy-decoder"}, {}};
+  auto& model = config.model;
+  model.decoder.pipeline.resize(2);
+  model.vision.pipeline.resize(2);
+  std::vector<Config::SessionOptions*> sessions{&model.decoder.session_options};
+  for (auto* options : {&model.encoder.session_options, &model.embedding.session_options,
+                        &model.engram.session_options, &model.vision.session_options,
+                        &model.speech.session_options, &model.joiner.session_options,
+                        &model.vad.session_options, &model.audio_output.depthformer.session_options,
+                        &model.audio_output.embedding.session_options, &model.qwen38_graph.head.session_options,
+                        &model.qwen38_graph.fold.head_r2.session_options,
+                        &model.qwen38_graph.prefill.dense.session_options,
+                        &model.qwen38_graph.prefill.head_kv.session_options,
+                        &model.decoder.pipeline[0].session_options, &model.vision.pipeline[0].session_options}) {
+    sessions.push_back(&options->emplace());
+  }
+
+  for (size_t i = 0; i < sessions.size(); ++i) {
+    auto& options = *sessions[i];
+    options.providers = {"WebGPU"};
+    options.provider_options = {{"WebGPU", {{"validationMode", "basic"}}},
+                                {"cuda", {{"enable_cuda_graph", "1"}}}};
+    options.provider_options[1].device_filtering_options.emplace().hardware_device_id = 7;
+    options.intra_op_num_threads = 2;
+    options.log_id = std::to_string(i);
+    options.config_entries = {{"session.disable_cpu_ep_fallback", "1"}};
+  }
+
+  SetModelProvider(config, "CUDAExecutionProvider");
+  SetModelProvider(config, "cuda");
+
+  for (size_t i = 0; i < sessions.size(); ++i) {
+    const auto& options = *sessions[i];
+    EXPECT_EQ(options.providers, (std::vector<std::string>{"cuda"}));
+    ASSERT_EQ(options.provider_options.size(), 2u);
+    EXPECT_EQ(options.provider_options[0].name, "WebGPU");
+    EXPECT_EQ(options.provider_options[0].options, (std::vector<Config::NamedString>{{"validationMode", "basic"}}));
+    EXPECT_EQ(options.provider_options[1].options, (std::vector<Config::NamedString>{{"enable_cuda_graph", "1"}}));
+    ASSERT_TRUE(options.provider_options[1].device_filtering_options);
+    EXPECT_EQ(options.provider_options[1].device_filtering_options->hardware_device_id, 7u);
+    EXPECT_EQ(options.intra_op_num_threads, 2);
+    EXPECT_EQ(options.log_id, std::to_string(i));
+    EXPECT_EQ(options.config_entries, (std::vector<Config::NamedString>{{"session.disable_cpu_ep_fallback", "1"}}));
+  }
+
+  EXPECT_FALSE(model.decoder.pipeline[1].session_options);
+  EXPECT_FALSE(model.vision.pipeline[1].session_options);
+}
+
+TEST(ConfigTest, ModelProviderSupportsCpuAndMissingProviderOptions) {
+  Config config{fs::path{MODEL_PATH "engine/dummy-decoder"}, {}};
+  config.model.vision.session_options.emplace();
+  for (const auto* provider : {"WebGpuExecutionProvider", "CPUExecutionProvider", "webgpu"}) {
+    SetModelProvider(config, provider);
+    const std::string expected = std::string_view{provider} == "CPUExecutionProvider" ? "CPU" : "WebGPU";
+    EXPECT_EQ(config.model.decoder.session_options.providers, (std::vector<std::string>{expected}));
+    EXPECT_EQ(config.model.vision.session_options->providers, (std::vector<std::string>{expected}));
+  }
+
+  ASSERT_EQ(config.model.vision.session_options->provider_options.size(), 2u);
+  EXPECT_TRUE(config.model.vision.session_options->provider_options[0].options.empty());
+  EXPECT_FALSE(config.model.embedding.session_options);
+  EXPECT_FALSE(config.model.speech.session_options);
+  EXPECT_THROW(SetModelProvider(config, ""), std::runtime_error);
+  EXPECT_EQ(config.model.decoder.session_options.providers, (std::vector<std::string>{"WebGPU"}));
+}
+
+TEST(ConfigTest, LegacyProviderApisRemainDecoderOnly) {
+  Config config{fs::path{MODEL_PATH "engine/dummy-decoder"}, {}};
+  config.model.vision.session_options.emplace();
+  config.model.vision.session_options->providers = {"WebGPU"};
+  config.model.draft.emplace().session_options.providers = {"WebGPU"};
+
+  ClearProviders(config);
+  SetProviderOption(config, "cuda", "enable_cuda_graph", "0");
+
+  EXPECT_EQ(config.model.vision.session_options->providers, (std::vector<std::string>{"WebGPU"}));
+  SetModelProvider(config, "cuda");
+  EXPECT_EQ(config.model.draft->session_options.providers, (std::vector<std::string>{"WebGPU"}));
+}
+
 TEST(ConfigTest, ParsesDeterministicCompute) {
   Config config;
   EXPECT_FALSE(config.model.decoder.session_options.use_deterministic_compute.has_value());

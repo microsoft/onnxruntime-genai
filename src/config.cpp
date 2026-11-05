@@ -3643,6 +3643,51 @@ void ClearProviders(Config& config) {
   config.model.decoder.session_options.providers.clear();
 }
 
+void SetModelProvider(Config& config, std::string_view provider_name) {
+  if (provider_name.empty()) {
+    throw std::runtime_error("Model provider name must not be empty. Use CPU for CPU execution.");
+  }
+
+  const auto normalized_provider = NormalizeProviderName(provider_name);
+  const auto set_provider = [normalized_provider](Config::SessionOptions& session_options) {
+    session_options.providers = {std::string{normalized_provider}};
+    if (std::none_of(session_options.provider_options.begin(), session_options.provider_options.end(),
+                     [normalized_provider](const Config::ProviderOptions& options) {
+                       return options.name == normalized_provider;
+                     })) {
+      session_options.provider_options.push_back({std::string{normalized_provider}, {}});
+    }
+  };
+
+  auto& model = config.model;
+  set_provider(model.decoder.session_options);
+  // Absent component options inherit the decoder. Independently configured speculative models are not changed.
+  for (auto* options : {&model.encoder.session_options, &model.embedding.session_options,
+                        &model.engram.session_options, &model.vision.session_options,
+                        &model.speech.session_options, &model.joiner.session_options,
+                        &model.vad.session_options, &model.audio_output.depthformer.session_options,
+                        &model.audio_output.embedding.session_options, &model.qwen38_graph.head.session_options,
+                        &model.qwen38_graph.fold.head_r2.session_options,
+                        &model.qwen38_graph.prefill.dense.session_options,
+                        &model.qwen38_graph.prefill.head_kv.session_options}) {
+    if (*options) {
+      set_provider(**options);
+    }
+  }
+
+  for (auto& stage : model.decoder.pipeline) {
+    if (stage.session_options) {
+      set_provider(*stage.session_options);
+    }
+  }
+
+  for (auto& stage : model.vision.pipeline) {
+    if (stage.session_options) {
+      set_provider(*stage.session_options);
+    }
+  }
+}
+
 // Escape a string for safe embedding inside a JSON string literal. Prevents JSON
 // injection when caller-supplied values are concatenated into a JSON document that
 // will subsequently be parsed (e.g. in SetProviderOption below). Handles the

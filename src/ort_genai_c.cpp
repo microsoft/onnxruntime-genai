@@ -499,6 +499,16 @@ OgaResult* OGA_API_CALL OgaConfigAppendProvider(OgaConfig* config, const char* p
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaConfigSetModelProvider(OgaConfig* config, const char* provider) {
+  OGA_TRY
+  if (config == nullptr || provider == nullptr) {
+    throw std::runtime_error("Config and model provider must not be null.");
+  }
+  Generators::SetModelProvider(*config, provider);
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaConfigSetProviderOption(OgaConfig* config, const char* provider, const char* key, const char* value) {
   OGA_TRY
   Generators::SetProviderOption(*config, provider, key, value);

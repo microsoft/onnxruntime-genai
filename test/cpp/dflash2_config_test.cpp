@@ -792,6 +792,31 @@ TEST(Dflash2ConfigTest, PreservesTargetProviderOptions) {
             Config::NamedString("device_id", "1"));
 }
 
+TEST(Dflash2ConfigTest, ModelProviderOverridePreservesDrafterInheritanceAndGraphCapture) {
+  for (bool explicit_provider : {false, true}) {
+    auto config = MakeDflash2Config();
+    SetProviderOption(config, "webgpu", {}, {});
+    auto& draft_options = config.model.dflash2.session_options.emplace();
+    draft_options.provider_options = {{"cuda", {{"enable_cuda_graph", "1"}}}};
+    if (explicit_provider) {
+      draft_options.providers = {"CPU"};
+    }
+
+    SetModelProvider(config, "CUDAExecutionProvider");
+    SetProviderOption(config, "cuda", "enable_cuda_graph", "0");
+
+    const auto projected = CreateDflash2Config(config);
+    EXPECT_EQ(projected->model.decoder.session_options.providers,
+              (std::vector<std::string>{explicit_provider ? "CPU" : "cuda"}));
+    EXPECT_EQ(draft_options.providers,
+              (explicit_provider ? std::vector<std::string>{"CPU"} : std::vector<std::string>{}));
+    ASSERT_EQ(projected->model.decoder.session_options.provider_options.front().options.size(), 1u);
+    EXPECT_EQ(projected->model.decoder.session_options.provider_options.front().options.front(),
+              Config::NamedString("enable_cuda_graph", "1"));
+    EXPECT_FALSE(IsGraphCaptureEnabled(config.model.decoder.session_options));
+  }
+}
+
 TEST(Dflash2ConfigTest, WebGpuMatmulAccumulationDefaultsAndOverrides) {
   if (FindRegisteredEpDevices("WebGpuExecutionProvider").empty()) {
     GTEST_SKIP() << "No WebGPU EP device is registered.";
