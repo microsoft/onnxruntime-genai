@@ -20,6 +20,12 @@ The graph also consumes packed absolute ``position_ids``. The paged portion reus
 identically to the paged fixture. ``HybridDecoderIO`` binds the fixed tensors
 alongside the packed inputs, making the graph useful for both ownership tests
 with a recording executor and end-to-end dynamic Engine tests.
+The ``decoder-per-token.onnx`` variant returns logits for every packed token
+so Engine-hosted speculative decoding can execute against the same manifest.
+Its fixed outputs are pass-throughs: the original per-run counter is not a
+token transition and cannot be rolled back with compact speculative updates.
+``--num_blocks`` and ``--max_batch_size`` can export smaller graph-compatible
+fixtures for bounded-capacity Engine tests.
 
 Layer assignment (disjoint cover of 6 layers):
 
@@ -65,7 +71,7 @@ def _const(name, array):
     return tensor
 
 
-def _fixed_group(prefix, layer_ids, row_dims):
+def _fixed_group(prefix, layer_ids, row_dims, logits_per_token=False):
     inputs = []
     outputs = []
     nodes = []
@@ -75,7 +81,7 @@ def _fixed_group(prefix, layer_ids, row_dims):
         shape = ["batch_size", *row_dims]
         inputs.append(helper.make_tensor_value_info(input_name, TensorProto.FLOAT, shape))
         outputs.append(helper.make_tensor_value_info(output_name, TensorProto.FLOAT, shape))
-        if prefix == "conv" and layer == 0:
+        if prefix == "conv" and layer == 0 and not logits_per_token:
             nodes.append(helper.make_node("Add", [input_name, "state_one"], [output_name]))
         else:
             nodes.append(helper.make_node("Identity", [input_name], [output_name]))
@@ -129,8 +135,15 @@ def _fixed_group(prefix, layer_ids, row_dims):
     return inputs, outputs, nodes
 
 
-def _decoder_graph():
-    graph = _paged_decoder_graph()
+def _decoder_graph(logits_per_token=False, num_blocks=NUM_BLOCKS):
+    graph = _paged_decoder_graph(logits_per_token=logits_per_token, num_blocks=num_blocks)
+    if logits_per_token:
+        for value in [*graph.input, *graph.output]:
+            if value.name.startswith(("past_key_values.", "present.")):
+                value.type.tensor_type.shape.dim[0].dim_param = "num_blocks"
+        cache_shape = next(value for value in graph.initializer if value.name == "cache_shape")
+        graph.initializer.remove(cache_shape)
+        graph.node.insert(0, helper.make_node("Shape", [f"past_key_values.{PAGED_LAYERS[0]}.key"], ["cache_shape"]))
     graph.name = "synthetic_composite_decoder"
     graph.input.extend(
         [
@@ -151,7 +164,7 @@ def _decoder_graph():
         ]
     )
 
-    conv_inputs, conv_outputs, conv_nodes = _fixed_group("conv", CONV_LAYERS, CONV_ROW)
+    conv_inputs, conv_outputs, conv_nodes = _fixed_group("conv", CONV_LAYERS, CONV_ROW, logits_per_token)
     recurrent_inputs, recurrent_outputs, recurrent_nodes = _fixed_group("recurrent", RECURRENT_LAYERS, RECURRENT_ROW)
     graph.input.extend([*conv_inputs, *recurrent_inputs])
     graph.output.extend([*conv_outputs, *recurrent_outputs])
@@ -182,19 +195,20 @@ def _decoder_graph():
     return graph
 
 
-def create_decoder(output_dir):
+def create_decoder(output_dir, logits_per_token=False, num_blocks=NUM_BLOCKS):
     model = helper.make_model(
-        _decoder_graph(),
+        _decoder_graph(logits_per_token, num_blocks),
         opset_imports=[helper.make_operatorsetid("", 17)],
         ir_version=9,
         producer_name="onnxruntime-genai",
         producer_version="0.0.0",
     )
     onnx.checker.check_model(model)
-    onnx.save_model(model, os.path.join(output_dir, "decoder.onnx"))
+    filename = "decoder-per-token.onnx" if logits_per_token else "decoder.onnx"
+    onnx.save_model(model, os.path.join(output_dir, filename))
 
 
-def create_config(output_dir):
+def create_config(output_dir, num_blocks=NUM_BLOCKS, max_batch_size=MAX_BATCH_SIZE):
     state_groups = [
         {
             "kind": "fixed_conv",
@@ -263,8 +277,8 @@ def create_config(output_dir):
         "engine": {
             "dynamic_batching": {
                 "block_size": BLOCK_SIZE,
-                "num_blocks": NUM_BLOCKS,
-                "max_batch_size": MAX_BATCH_SIZE,
+                "num_blocks": num_blocks,
+                "max_batch_size": max_batch_size,
             }
         },
     }
@@ -278,10 +292,16 @@ def main():
         "--output_dir",
         default=os.path.join(os.path.dirname(__file__), "..", "..", "models", "engine", "synthetic-composite"),
     )
-    output_dir = os.path.normpath(parser.parse_args().output_dir)
+    parser.add_argument("--num_blocks", type=int, default=NUM_BLOCKS)
+    parser.add_argument("--max_batch_size", type=int, default=MAX_BATCH_SIZE)
+    args = parser.parse_args()
+    if args.num_blocks <= 0 or args.max_batch_size <= 0:
+        parser.error("--num_blocks and --max_batch_size must be positive")
+    output_dir = os.path.normpath(args.output_dir)
     os.makedirs(output_dir, exist_ok=True)
-    create_decoder(output_dir)
-    create_config(output_dir)
+    create_decoder(output_dir, num_blocks=args.num_blocks)
+    create_decoder(output_dir, logits_per_token=True, num_blocks=args.num_blocks)
+    create_config(output_dir, args.num_blocks, args.max_batch_size)
 
 
 if __name__ == "__main__":

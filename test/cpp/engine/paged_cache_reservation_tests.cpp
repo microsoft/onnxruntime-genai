@@ -4,12 +4,13 @@
 #include <array>
 #include <limits>
 #include <type_traits>
-#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
 
 #include "engine/paged_cache_reservation.h"
+#include "engine/prefix_cache.h"
 
 namespace Generators {
 namespace {
@@ -17,28 +18,62 @@ namespace {
 constexpr size_t kBlockSize = 4;
 const char kRequestStorageA{};
 const char kRequestStorageB{};
+const char kRequestStorageC{};
 const void* const kRequestA = &kRequestStorageA;
 const void* const kRequestB = &kRequestStorageB;
+const void* const kRequestC = &kRequestStorageC;
+
+static_assert(!std::is_copy_constructible_v<PagedCacheBlockTable>);
+static_assert(!std::is_copy_assignable_v<PagedCacheBlockTable>);
+
+template <typename... Tables>
+std::vector<PagedCacheBlockTable> MakeTables(Tables&&... tables) {
+  std::vector<PagedCacheBlockTable> result;
+  result.reserve(sizeof...(tables));
+  (result.emplace_back(std::forward<Tables>(tables)), ...);
+  return result;
+}
+
+PrefixCacheMatch MakeRetainedPrefix(
+    BlockPool& pool,
+    PrefixCache& cache,
+    std::span<const int32_t> block_tokens,
+    std::span<const int32_t> prompt_tokens) {
+  auto blocks = pool.AllocateBlocks(kBlockSize);
+  std::shared_ptr<const BlockIdentity> parent;
+  EXPECT_NE(
+      cache.Register(blocks.front(), block_tokens, parent).identity,
+      nullptr);
+  pool.Free(blocks);
+  return cache.Match(prompt_tokens, prompt_tokens.size() - 1);
+}
 
 void ReplaceTable(
-    PagedCacheBlockTable& table,
+    std::vector<PagedCacheBlockTable>& tables,
+    size_t table_index,
     size_t committed_slots,
     std::vector<std::shared_ptr<Block>> blocks,
     std::vector<std::shared_ptr<Block>> window_blocks = {}) {
-  table = PagedCacheBlockTable{
-      table.RequestId(), committed_slots, std::move(blocks),
-      std::move(window_blocks)};
+  std::vector<PagedCacheBlockTable> replacement;
+  replacement.reserve(tables.size());
+  for (size_t index = 0; index < tables.size(); ++index) {
+    if (index == table_index) {
+      replacement.emplace_back(
+          tables[index].RequestId(), committed_slots,
+          std::move(blocks), std::move(window_blocks));
+    } else {
+      replacement.emplace_back(std::move(tables[index]));
+    }
+  }
+  tables = std::move(replacement);
 }
 
-TEST(PagedCacheReservationTest, TableReplacementAdvancesGeneration) {
-  PagedCacheBlockTable table{kRequestA, 0};
+TEST(PagedCacheReservationTest, MoveAssignmentRejectsOwnedDestination) {
+  BlockPool pool{kBlockSize, 2};
+  PagedCacheBlockTable table{kRequestA, 1, pool.AllocateBlocks(1)};
+  PagedCacheBlockTable replacement{kRequestB, 1, pool.AllocateBlocks(1)};
 
-  EXPECT_EQ(table.MutationGeneration(), 0u);
-  ReplaceTable(table, 1, {});
-  EXPECT_EQ(table.MutationGeneration(), 1u);
-  PagedCacheBlockTable replacement{kRequestA, 2};
-  table = replacement;
-  EXPECT_EQ(table.MutationGeneration(), 2u);
+  EXPECT_DEATH_IF_SUPPORTED(table = std::move(replacement), "");
 }
 
 TEST(PagedCacheReservationTest, SumsPerRequestBlockCeilings) {
@@ -87,9 +122,8 @@ TEST(PagedCacheReservationTest, ReservationRejectsBlockCapacityOverflow) {
 
 TEST(PagedCacheReservationTest, CommitConsumesExistingTailWithoutNewBlock) {
   BlockPool pool{kBlockSize, 2};
-  std::vector<PagedCacheBlockTable> tables{
-      PagedCacheBlockTable{kRequestA, 3, pool.AllocateBlocks(3)},
-  };
+  auto tables = MakeTables(
+      PagedCacheBlockTable{kRequestA, 3, pool.AllocateBlocks(3)});
   const std::array requests{
       PagedCacheReservationRequest{kRequestA, 4, false},
   };
@@ -107,9 +141,8 @@ TEST(PagedCacheReservationTest, CommitConsumesExistingTailWithoutNewBlock) {
 
 TEST(PagedCacheReservationTest, CommitPrefixCommitsOnlyTheAcceptedSlots) {
   BlockPool pool{kBlockSize, 4};
-  std::vector<PagedCacheBlockTable> tables{
-      PagedCacheBlockTable{kRequestA, 4, pool.AllocateBlocks(4)},
-  };
+  auto tables = MakeTables(
+      PagedCacheBlockTable{kRequestA, 4, pool.AllocateBlocks(4)});
   const std::array requests{
       PagedCacheReservationRequest{kRequestA, 8, false},
   };
@@ -129,9 +162,8 @@ TEST(PagedCacheReservationTest, CommitPrefixCommitsOnlyTheAcceptedSlots) {
 
 TEST(PagedCacheReservationTest, CommitPrefixRejectsArgumentsOutsideThePlannedStep) {
   BlockPool pool{kBlockSize, 4};
-  std::vector<PagedCacheBlockTable> tables{
-      PagedCacheBlockTable{kRequestA, 4, pool.AllocateBlocks(4)},
-  };
+  auto tables = MakeTables(
+      PagedCacheBlockTable{kRequestA, 4, pool.AllocateBlocks(4)});
   const std::array requests{
       PagedCacheReservationRequest{kRequestA, 8, false},
   };
@@ -147,9 +179,8 @@ TEST(PagedCacheReservationTest, CommitPrefixRejectsArgumentsOutsideThePlannedSte
 
 TEST(PagedCacheReservationTest, ProposedBlockTableIncludesReservationsAndPadding) {
   BlockPool pool{kBlockSize, 4};
-  std::vector<PagedCacheBlockTable> tables{
-      PagedCacheBlockTable{kRequestA, 4, pool.AllocateBlocks(4)},
-  };
+  auto tables = MakeTables(
+      PagedCacheBlockTable{kRequestA, 4, pool.AllocateBlocks(4)});
   const std::array requests{
       PagedCacheReservationRequest{kRequestA, 5, false},
       PagedCacheReservationRequest{kRequestB, 1, true},
@@ -214,6 +245,101 @@ TEST(PagedCacheReservationTest, ReleaseIsIdempotentAndBlocksCanBeReused) {
   const std::array request_b_id{kRequestB};
   second.FillBlockTable(request_b_id, 1, second_table);
   EXPECT_EQ(second_table[0], first_table[0]);
+}
+
+TEST(PagedCacheReservationTest, AdoptedBlocksLeadNewTableAndReleaseEveryReference) {
+  BlockPool pool{kBlockSize, 3};
+  PrefixCacheOptions options;
+  options.enabled = true;
+  options.max_blocks = 3;
+  PrefixCache cache{pool, options};
+  const std::array<int32_t, 4> block_tokens{1, 2, 3, 4};
+  const std::array<int32_t, 5> prompt_tokens{1, 2, 3, 4, 5};
+  const auto match =
+      MakeRetainedPrefix(pool, cache, block_tokens, prompt_tokens);
+  ASSERT_EQ(match.blocks.size(), 1u);
+  ASSERT_EQ(match.blocks.front()->RefCount(), 1u);
+  const size_t adopted_id = match.blocks.front()->Id();
+
+  std::vector<PagedCacheBlockTable> tables;
+  const std::array requests{
+      PagedCacheReservationRequest{
+          kRequestA, prompt_tokens.size(), true, prompt_tokens.size(), &match},
+  };
+  PagedCacheReservation reservation{pool, tables, requests};
+
+  ASSERT_EQ(reservation.AdoptedBlocks().size(), 1u);
+  EXPECT_EQ(match.blocks.front()->RefCount(), 2u);
+  std::array<int32_t, 2> block_table;
+  const std::array request_ids{kRequestA};
+  reservation.FillBlockTable(request_ids, 2, block_table);
+  EXPECT_EQ(block_table[0], static_cast<int32_t>(adopted_id));
+  EXPECT_NE(block_table[1], static_cast<int32_t>(adopted_id));
+
+  reservation.Release();
+
+  EXPECT_EQ(match.blocks.front()->RefCount(), 1u);
+  EXPECT_TRUE(tables.empty());
+  EXPECT_EQ(pool.AvailableBlocks(), 2u);
+}
+
+TEST(PagedCacheReservationTest, CommitTransfersAdoptedReferenceToNewTable) {
+  BlockPool pool{kBlockSize, 3};
+  PrefixCacheOptions options;
+  options.enabled = true;
+  options.max_blocks = 3;
+  PrefixCache cache{pool, options};
+  const std::array<int32_t, 4> block_tokens{1, 2, 3, 4};
+  const std::array<int32_t, 5> prompt_tokens{1, 2, 3, 4, 5};
+  const auto match =
+      MakeRetainedPrefix(pool, cache, block_tokens, prompt_tokens);
+  std::vector<PagedCacheBlockTable> tables;
+  const std::array requests{
+      PagedCacheReservationRequest{
+          kRequestA, prompt_tokens.size(), true, prompt_tokens.size(), &match},
+  };
+
+  PagedCacheReservation reservation{pool, tables, requests};
+  reservation.Commit();
+
+  ASSERT_EQ(reservation.AdoptedBlocks().size(), 1u);
+  EXPECT_EQ(reservation.AdoptedBlocks().front(), match.blocks.front());
+  ASSERT_EQ(tables.size(), 1u);
+  ASSERT_EQ(tables.front().Blocks().size(), 2u);
+  EXPECT_EQ(tables.front().Blocks().front(), match.blocks.front());
+  EXPECT_EQ(match.blocks.front()->RefCount(), 2u);
+  EXPECT_EQ(tables.front().CommittedSlots(), prompt_tokens.size());
+}
+
+TEST(PagedCacheReservationTest, DuplicateAdoptersHoldAndReleaseOneReferenceEach) {
+  BlockPool pool{kBlockSize, 4};
+  PrefixCacheOptions options;
+  options.enabled = true;
+  options.max_blocks = 4;
+  PrefixCache cache{pool, options};
+  const std::array<int32_t, 4> block_tokens{1, 2, 3, 4};
+  const std::array<int32_t, 5> prompt_tokens{1, 2, 3, 4, 5};
+  const auto match =
+      MakeRetainedPrefix(pool, cache, block_tokens, prompt_tokens);
+  std::vector<PagedCacheBlockTable> tables;
+  const std::array requests{
+      PagedCacheReservationRequest{
+          kRequestA, prompt_tokens.size(), true, prompt_tokens.size(), &match},
+      PagedCacheReservationRequest{
+          kRequestB, prompt_tokens.size(), true, prompt_tokens.size(), &match},
+  };
+
+  PagedCacheReservation reservation{pool, tables, requests};
+
+  EXPECT_EQ(match.blocks.front()->RefCount(), 3u);
+  ASSERT_EQ(reservation.AdoptedBlocks().size(), 2u);
+  EXPECT_EQ(reservation.AdoptedBlocks()[0], match.blocks.front());
+  EXPECT_EQ(reservation.AdoptedBlocks()[1], match.blocks.front());
+
+  reservation.Release();
+  EXPECT_EQ(match.blocks.front()->RefCount(), 1u);
+  EXPECT_TRUE(tables.empty());
+  EXPECT_EQ(pool.AvailableBlocks(), 3u);
 }
 
 TEST(PagedCacheReservationTest, DestructorDoesNotReleaseReissuedBlocks) {
@@ -326,9 +452,8 @@ TEST(PagedCacheReservationTest, AliasReservationInvalidatesOriginalPublication) 
 
   std::vector<std::shared_ptr<Block>> alias_blocks{
       original.ReservedBlocks().begin(), original.ReservedBlocks().end()};
-  std::vector<PagedCacheBlockTable> alias_tables{
-      PagedCacheBlockTable{kRequestB, kBlockSize, std::move(alias_blocks)},
-  };
+  auto alias_tables = MakeTables(
+      PagedCacheBlockTable{kRequestB, kBlockSize, std::move(alias_blocks)});
   const std::array alias_requests{
       PagedCacheReservationRequest{
           kRequestB, /*target_slots=*/kBlockSize + 1,
@@ -364,10 +489,9 @@ TEST(PagedCacheReservationTest, ReleaseReturnsWindowRingBlocks) {
 TEST(PagedCacheReservationTest, RollbackReturnsBothPoolsForMixedExistingAndNewRequests) {
   BlockPool pool{kBlockSize, 3};
   BlockPool window_pool{kBlockSize, 4};
-  std::vector<PagedCacheBlockTable> tables{
+  auto tables = MakeTables(
       PagedCacheBlockTable{kRequestA, 4, pool.AllocateBlocks(4),
-                           window_pool.AllocateBlocks(2 * kBlockSize)},
-  };
+                           window_pool.AllocateBlocks(2 * kBlockSize)});
   const std::array requests{
       PagedCacheReservationRequest{kRequestA, 5, false},
       PagedCacheReservationRequest{kRequestB, 1, true},
@@ -386,78 +510,6 @@ TEST(PagedCacheReservationTest, RollbackReturnsBothPoolsForMixedExistingAndNewRe
   EXPECT_EQ(tables[0].WindowBlocks().size(), 2u);
   EXPECT_EQ(pool.AvailableBlocks(), 2u);
   EXPECT_EQ(window_pool.AvailableBlocks(), 2u);
-}
-
-TEST(PagedCacheReservationTest, CommittedWindowBlocksCanBeRemovedAndReused) {
-  BlockPool pool{kBlockSize, 1};
-  BlockPool window_pool{kBlockSize, 2};
-  std::vector<PagedCacheBlockTable> tables;
-  const std::array request_a{
-      PagedCacheReservationRequest{kRequestA, 1, true},
-  };
-  PagedCacheReservation first{pool, tables, request_a, &window_pool, 2};
-  first.Commit();
-  ASSERT_EQ(tables.size(), 1u);
-  const auto first_window_blocks = tables[0].WindowBlocks();
-
-  RemovePagedCacheBlockTable(pool, &window_pool, tables, kRequestA);
-
-  const std::array request_b{
-      PagedCacheReservationRequest{kRequestB, 1, true},
-  };
-  PagedCacheReservation second{pool, tables, request_b, &window_pool, 2};
-  second.Commit();
-  ASSERT_EQ(tables.size(), 1u);
-  EXPECT_EQ(tables[0].WindowBlocks()[0]->Id(), first_window_blocks[0]->Id());
-  EXPECT_EQ(tables[0].WindowBlocks()[1]->Id(), first_window_blocks[1]->Id());
-}
-
-TEST(PagedCacheReservationTest, RemovalPreflightValidatesBothPoolsBeforeMutation) {
-  BlockPool pool{kBlockSize, 1};
-  BlockPool window_pool{kBlockSize, 1};
-  auto blocks = pool.AllocateBlocks(kBlockSize);
-  const auto block = blocks[0];
-  const auto foreign_window =
-      std::make_shared<Block>(0, kBlockSize, kBlockSize);
-  std::vector<PagedCacheBlockTable> tables{
-      PagedCacheBlockTable{
-          kRequestA, kBlockSize, std::move(blocks), {foreign_window}},
-  };
-
-  EXPECT_THROW(
-      ValidateRemovePagedCacheBlockTable(
-          pool, &window_pool, tables, kRequestA),
-      std::runtime_error);
-  EXPECT_TRUE(pool.Owns(block));
-  EXPECT_EQ(pool.AvailableBlocks(), 0u);
-  EXPECT_EQ(window_pool.AvailableBlocks(), 1u);
-  EXPECT_EQ(tables.size(), 1u);
-
-  EXPECT_DEATH_IF_SUPPORTED(
-      RemoveValidatedPagedCacheBlockTable(
-          pool, &window_pool, tables, kRequestA),
-      "");
-  EXPECT_TRUE(pool.Owns(block));
-  EXPECT_EQ(tables.size(), 1u);
-}
-
-TEST(PagedCacheReservationTest, ValidatedRemovalPublishesBothPoolsNoexcept) {
-  BlockPool pool{kBlockSize, 1};
-  BlockPool window_pool{kBlockSize, 1};
-  std::vector<PagedCacheBlockTable> tables{
-      PagedCacheBlockTable{
-          kRequestA, kBlockSize, pool.AllocateBlocks(kBlockSize),
-          window_pool.AllocateBlocks(kBlockSize)},
-  };
-
-  ValidateRemovePagedCacheBlockTable(
-      pool, &window_pool, tables, kRequestA);
-  RemoveValidatedPagedCacheBlockTable(
-      pool, &window_pool, tables, kRequestA);
-
-  EXPECT_TRUE(tables.empty());
-  EXPECT_EQ(pool.AvailableBlocks(), 1u);
-  EXPECT_EQ(window_pool.AvailableBlocks(), 1u);
 }
 
 TEST(PagedCacheReservationTest, WindowTableUsesReservedRingBeforeCommit) {
@@ -513,9 +565,8 @@ TEST(PagedCacheReservationTest, ValidateCommitDoesNotMutateAndIsRepeatable) {
 // the same committed state as the single-call Commit wrapper.
 TEST(PagedCacheReservationTest, CommitValidatedPublishesPreviouslyValidatedReservation) {
   BlockPool pool{kBlockSize, 2};
-  std::vector<PagedCacheBlockTable> tables{
-      PagedCacheBlockTable{kRequestA, 4, pool.AllocateBlocks(4)},
-  };
+  auto tables = MakeTables(
+      PagedCacheBlockTable{kRequestA, 4, pool.AllocateBlocks(4)});
   const std::array requests{
       PagedCacheReservationRequest{kRequestA, 5, false},
   };
@@ -536,10 +587,9 @@ TEST(PagedCacheReservationTest, CommitValidatedPublishesPreviouslyValidatedReser
 
 TEST(PagedCacheReservationTest, CommitValidatedPreflightsAllRequestsBeforePublication) {
   BlockPool pool{kBlockSize, 4};
-  std::vector<PagedCacheBlockTable> tables{
+  auto tables = MakeTables(
       PagedCacheBlockTable{kRequestA, 4, pool.AllocateBlocks(4)},
-      PagedCacheBlockTable{kRequestB, 4, pool.AllocateBlocks(4)},
-  };
+      PagedCacheBlockTable{kRequestB, 4, pool.AllocateBlocks(4)});
   const std::array requests{
       PagedCacheReservationRequest{kRequestA, 5, false},
       PagedCacheReservationRequest{kRequestB, 5, false},
@@ -551,7 +601,7 @@ TEST(PagedCacheReservationTest, CommitValidatedPreflightsAllRequestsBeforePublic
   // Invalidate only the later request after validation. Publication must reject this before the
   // first request consumes or appends any reserved state.
   ReplaceTable(
-      tables[1], 3, tables[1].Blocks(), tables[1].WindowBlocks());
+      tables, 1, 3, tables[1].Blocks(), tables[1].WindowBlocks());
 
   EXPECT_THROW(reservation.CommitValidated(), std::logic_error);
   EXPECT_EQ(tables[0].CommittedSlots(), 4u);
@@ -565,10 +615,9 @@ TEST(PagedCacheReservationTest, CommitValidatedPreflightsAllRequestsBeforePublic
 
 TEST(PagedCacheReservationTest, CommitValidatedRejectsTailAliasingBeforePublication) {
   BlockPool pool{kBlockSize, 4};
-  std::vector<PagedCacheBlockTable> tables{
+  auto tables = MakeTables(
       PagedCacheBlockTable{kRequestA, 3, pool.AllocateBlocks(3)},
-      PagedCacheBlockTable{kRequestB, 3, pool.AllocateBlocks(3)},
-  };
+      PagedCacheBlockTable{kRequestB, 3, pool.AllocateBlocks(3)});
   const std::array requests{
       PagedCacheReservationRequest{kRequestA, 4, false},
       PagedCacheReservationRequest{kRequestB, 4, false},
@@ -580,7 +629,7 @@ TEST(PagedCacheReservationTest, CommitValidatedRejectsTailAliasingBeforePublicat
   // first request to publish.
   auto aliased_blocks = tables[1].Blocks();
   aliased_blocks[0] = tables[0].Blocks()[0];
-  ReplaceTable(tables[1], 3, std::move(aliased_blocks));
+  ReplaceTable(tables, 1, 3, std::move(aliased_blocks));
 
   EXPECT_THROW(reservation.CommitValidated(), std::logic_error);
   EXPECT_EQ(tables[0].CommittedSlots(), 3u);
@@ -592,10 +641,9 @@ TEST(PagedCacheReservationTest, CommitValidatedRejectsTailAliasingBeforePublicat
 
 TEST(PagedCacheReservationTest, CommitValidatedRejectsOmittedResidentMutationBeforePublication) {
   BlockPool pool{kBlockSize, 4};
-  std::vector<PagedCacheBlockTable> tables{
+  auto tables = MakeTables(
       PagedCacheBlockTable{kRequestA, 4, pool.AllocateBlocks(4)},
-      PagedCacheBlockTable{kRequestB, 4, pool.AllocateBlocks(4)},
-  };
+      PagedCacheBlockTable{kRequestB, 4, pool.AllocateBlocks(4)});
   const std::array requests{
       PagedCacheReservationRequest{kRequestA, 5, false},
   };
@@ -606,7 +654,7 @@ TEST(PagedCacheReservationTest, CommitValidatedRejectsOmittedResidentMutationBef
   // B is omitted from this step, but it must not be allowed to claim A's reserved block without
   // invalidating the publication preflight after the earlier validation succeeded.
   ReplaceTable(
-      tables[1], 4, {reservation.ReservedBlocks()[0]});
+      tables, 1, 4, {reservation.ReservedBlocks()[0]});
 
   EXPECT_THROW(reservation.CommitValidated(), std::logic_error);
   EXPECT_EQ(tables[0].CommittedSlots(), 4u);
@@ -616,17 +664,16 @@ TEST(PagedCacheReservationTest, CommitValidatedRejectsOmittedResidentMutationBef
 
 TEST(PagedCacheReservationTest, ValidateCommitRejectsOmittedResidentMutation) {
   BlockPool pool{kBlockSize, 4};
-  std::vector<PagedCacheBlockTable> tables{
+  auto tables = MakeTables(
       PagedCacheBlockTable{kRequestA, 4, pool.AllocateBlocks(4)},
-      PagedCacheBlockTable{kRequestB, 4, pool.AllocateBlocks(4)},
-  };
+      PagedCacheBlockTable{kRequestB, 4, pool.AllocateBlocks(4)});
   const std::array requests{
       PagedCacheReservationRequest{kRequestA, 5, false},
   };
   PagedCacheReservation reservation{pool, tables, requests};
 
   ReplaceTable(
-      tables[1], 4, {reservation.ReservedBlocks()[0]});
+      tables, 1, 4, {reservation.ReservedBlocks()[0]});
 
   EXPECT_THROW(reservation.ValidateCommit(), std::logic_error);
   EXPECT_EQ(tables[0].CommittedSlots(), 4u);
@@ -635,10 +682,9 @@ TEST(PagedCacheReservationTest, ValidateCommitRejectsOmittedResidentMutation) {
 
 TEST(PagedCacheReservationTest, OmittedResidentUnchangedAllowsMovedReservationCommit) {
   BlockPool pool{kBlockSize, 3};
-  std::vector<PagedCacheBlockTable> tables{
+  auto tables = MakeTables(
       PagedCacheBlockTable{kRequestA, 4, pool.AllocateBlocks(4)},
-      PagedCacheBlockTable{kRequestB, 4, pool.AllocateBlocks(4)},
-  };
+      PagedCacheBlockTable{kRequestB, 4, pool.AllocateBlocks(4)});
   const std::array requests{
       PagedCacheReservationRequest{kRequestA, 5, false},
   };
@@ -652,56 +698,11 @@ TEST(PagedCacheReservationTest, OmittedResidentUnchangedAllowsMovedReservationCo
   EXPECT_EQ(moved.State(), PagedCacheReservationState::Committed);
 }
 
-TEST(PagedCacheReservationTest, RejectsSameScalarResidentTableReplacement) {
-  BlockPool pool{kBlockSize, 3};
-  std::vector<PagedCacheBlockTable> tables{
-      PagedCacheBlockTable{kRequestA, 4, pool.AllocateBlocks(4)},
-      PagedCacheBlockTable{kRequestB, 4, pool.AllocateBlocks(4)},
-  };
-  const std::array requests{
-      PagedCacheReservationRequest{kRequestA, 5, false},
-  };
-  PagedCacheReservation reservation{pool, tables, requests};
-  const size_t block_id = tables[1].Blocks()[0]->Id();
-
-  // Preserve request ID, vector sizes, block ID, capacity, and occupancy. Only the mapping storage
-  // and physical block identity change; move assignment also advances the destination generation.
-  tables[1] = PagedCacheBlockTable{
-      kRequestB, 4, {std::make_shared<Block>(block_id, kBlockSize, kBlockSize)}};
-
-  EXPECT_THROW(reservation.ValidateCommit(), std::logic_error);
-  EXPECT_EQ(tables[0].CommittedSlots(), 4u);
-  EXPECT_EQ(reservation.State(), PagedCacheReservationState::Reserved);
-}
-
-TEST(PagedCacheReservationTest, RejectsCopyAssignedOmittedResidentMapping) {
-  BlockPool pool{kBlockSize, 4};
-  std::vector<PagedCacheBlockTable> tables{
-      PagedCacheBlockTable{kRequestA, 4, pool.AllocateBlocks(4)},
-      PagedCacheBlockTable{kRequestB, 4, pool.AllocateBlocks(4)},
-  };
-  const std::array requests{
-      PagedCacheReservationRequest{kRequestA, 5, false},
-  };
-  PagedCacheReservation reservation{pool, tables, requests};
-  PagedCacheBlockTable replacement{
-      kRequestB, 4, {reservation.ReservedBlocks()[0]}};
-
-  // Copy assignment may reuse the destination vector's storage. Its explicit generation advance
-  // must still invalidate the omitted resident snapshot.
-  tables[1] = replacement;
-
-  EXPECT_THROW(reservation.ValidateCommit(), std::logic_error);
-  EXPECT_EQ(tables[0].CommittedSlots(), 4u);
-  EXPECT_EQ(reservation.State(), PagedCacheReservationState::Reserved);
-}
-
 TEST(PagedCacheReservationTest, RejectsOmittedResidentBoundaryReplacement) {
   BlockPool pool{kBlockSize, 2};
-  std::vector<PagedCacheBlockTable> tables{
+  auto tables = MakeTables(
       PagedCacheBlockTable{kRequestA, 0, {}},
-      PagedCacheBlockTable{kRequestB, 0, {}},
-  };
+      PagedCacheBlockTable{kRequestB, 0, {}});
   const std::array requests{
       PagedCacheReservationRequest{kRequestA, 1, false},
   };
@@ -717,10 +718,9 @@ TEST(PagedCacheReservationTest, RejectsOmittedResidentBoundaryReplacement) {
 
 TEST(PagedCacheReservationTest, ReservationRejectsStableMalformedLaterTail) {
   BlockPool pool{kBlockSize, 4};
-  std::vector<PagedCacheBlockTable> tables{
+  auto tables = MakeTables(
       PagedCacheBlockTable{kRequestA, 3, pool.AllocateBlocks(3)},
-      PagedCacheBlockTable{kRequestB, 3, pool.AllocateBlocks(4)},
-  };
+      PagedCacheBlockTable{kRequestB, 3, pool.AllocateBlocks(4)});
   const std::array requests{
       PagedCacheReservationRequest{kRequestA, 4, false},
       PagedCacheReservationRequest{kRequestB, 4, false},
@@ -737,10 +737,9 @@ TEST(PagedCacheReservationTest, ReservationRejectsStableMalformedLaterTail) {
 TEST(PagedCacheReservationTest, ReservationRejectsSharedTouchedBlockBeforePublication) {
   BlockPool pool{kBlockSize, 3};
   auto shared_tail = pool.AllocateBlocks(3);
-  std::vector<PagedCacheBlockTable> tables{
+  auto tables = MakeTables(
       PagedCacheBlockTable{kRequestA, 3, shared_tail},
-      PagedCacheBlockTable{kRequestB, 3, shared_tail},
-  };
+      PagedCacheBlockTable{kRequestB, 3, shared_tail});
   const std::array requests{
       PagedCacheReservationRequest{kRequestA, 4, false},
       PagedCacheReservationRequest{kRequestB, 4, false},
@@ -782,9 +781,8 @@ TEST(PagedCacheReservationTest, ValidateCommitRejectsOwnershipChangeBeforePublic
 // ValidateCommit rejects it before publication rather than publishing against stale state.
 TEST(PagedCacheReservationTest, ValidateCommitRejectsTokenBoundaryChangeBeforePublication) {
   BlockPool pool{kBlockSize, 2};
-  std::vector<PagedCacheBlockTable> tables{
-      PagedCacheBlockTable{kRequestA, 3, pool.AllocateBlocks(3)},
-  };
+  auto tables = MakeTables(
+      PagedCacheBlockTable{kRequestA, 3, pool.AllocateBlocks(3)});
   const std::array requests{
       PagedCacheReservationRequest{kRequestA, 4, false},
   };
@@ -793,7 +791,7 @@ TEST(PagedCacheReservationTest, ValidateCommitRejectsTokenBoundaryChangeBeforePu
   // Another transaction moved this request's committed boundary backward after the reservation
   // planned against committed_slots == 3.
   ReplaceTable(
-      tables[0], 2, tables[0].Blocks(), tables[0].WindowBlocks());
+      tables, 0, 2, tables[0].Blocks(), tables[0].WindowBlocks());
   const size_t blocks_before = tables[0].Blocks().size();
 
   EXPECT_THROW(reservation.ValidateCommit(), std::logic_error);
@@ -806,9 +804,8 @@ TEST(PagedCacheReservationTest, ValidateCommitRejectsTokenBoundaryChangeBeforePu
 
 TEST(PagedCacheReservationTest, ValidateCommitRejectsReorderedCommittedBlocks) {
   BlockPool pool{kBlockSize, 4};
-  std::vector<PagedCacheBlockTable> tables{
-      PagedCacheBlockTable{kRequestA, 8, pool.AllocateBlocks(8)},
-  };
+  auto tables = MakeTables(
+      PagedCacheBlockTable{kRequestA, 8, pool.AllocateBlocks(8)});
   const std::array requests{
       PagedCacheReservationRequest{kRequestA, 9, false},
   };
@@ -819,7 +816,7 @@ TEST(PagedCacheReservationTest, ValidateCommitRejectsReorderedCommittedBlocks) {
 
   auto reordered_blocks = tables[0].Blocks();
   std::swap(reordered_blocks[0], reordered_blocks[1]);
-  ReplaceTable(tables[0], 8, std::move(reordered_blocks));
+  ReplaceTable(tables, 0, 8, std::move(reordered_blocks));
 
   EXPECT_THROW(reservation.ValidateCommit(), std::logic_error);
   EXPECT_EQ(tables[0].Blocks()[0]->Id(), second_id);
@@ -830,9 +827,8 @@ TEST(PagedCacheReservationTest, ValidateCommitRejectsReorderedCommittedBlocks) {
 
 TEST(PagedCacheReservationTest, ValidateCommitRejectsDuplicateCommittedBlocks) {
   BlockPool pool{kBlockSize, 4};
-  std::vector<PagedCacheBlockTable> tables{
-      PagedCacheBlockTable{kRequestA, 8, pool.AllocateBlocks(8)},
-  };
+  auto tables = MakeTables(
+      PagedCacheBlockTable{kRequestA, 8, pool.AllocateBlocks(8)});
   const std::array requests{
       PagedCacheReservationRequest{kRequestA, 9, false},
   };
@@ -841,7 +837,7 @@ TEST(PagedCacheReservationTest, ValidateCommitRejectsDuplicateCommittedBlocks) {
 
   auto duplicate_blocks = tables[0].Blocks();
   duplicate_blocks[1] = duplicate_blocks[0];
-  ReplaceTable(tables[0], 8, std::move(duplicate_blocks));
+  ReplaceTable(tables, 0, 8, std::move(duplicate_blocks));
 
   EXPECT_THROW(reservation.ValidateCommit(), std::logic_error);
   EXPECT_EQ(tables[0].Blocks()[0], tables[0].Blocks()[1]);
@@ -851,9 +847,8 @@ TEST(PagedCacheReservationTest, ValidateCommitRejectsDuplicateCommittedBlocks) {
 
 TEST(PagedCacheReservationTest, ValidateCommitRejectsForeignSameIdCommittedBlock) {
   BlockPool pool{kBlockSize, 4};
-  std::vector<PagedCacheBlockTable> tables{
-      PagedCacheBlockTable{kRequestA, 8, pool.AllocateBlocks(8)},
-  };
+  auto tables = MakeTables(
+      PagedCacheBlockTable{kRequestA, 8, pool.AllocateBlocks(8)});
   const std::array requests{
       PagedCacheReservationRequest{kRequestA, 9, false},
   };
@@ -864,7 +859,7 @@ TEST(PagedCacheReservationTest, ValidateCommitRejectsForeignSameIdCommittedBlock
   auto foreign_blocks = tables[0].Blocks();
   foreign_blocks[1] =
       std::make_shared<Block>(second_id, kBlockSize, kBlockSize);
-  ReplaceTable(tables[0], 8, std::move(foreign_blocks));
+  ReplaceTable(tables, 0, 8, std::move(foreign_blocks));
 
   EXPECT_THROW(reservation.ValidateCommit(), std::logic_error);
   EXPECT_EQ(tables[0].Blocks()[1]->Id(), second_id);
@@ -875,9 +870,8 @@ TEST(PagedCacheReservationTest, ValidateCommitRejectsForeignSameIdCommittedBlock
 
 TEST(PagedCacheReservationTest, ValidateCommitRejectsReallocatedSameIdCommittedBlock) {
   BlockPool pool{kBlockSize, 3};
-  std::vector<PagedCacheBlockTable> tables{
-      PagedCacheBlockTable{kRequestA, 4, pool.AllocateBlocks(4)},
-  };
+  auto tables = MakeTables(
+      PagedCacheBlockTable{kRequestA, 4, pool.AllocateBlocks(4)});
   const std::array requests{
       PagedCacheReservationRequest{kRequestA, 5, false},
   };
@@ -888,7 +882,7 @@ TEST(PagedCacheReservationTest, ValidateCommitRejectsReallocatedSameIdCommittedB
   auto replacement = pool.AllocateBlocks(4);
   ASSERT_EQ(replacement.size(), 1u);
   ASSERT_EQ(replacement[0]->Id(), original_id);
-  ReplaceTable(tables[0], 4, std::move(replacement));
+  ReplaceTable(tables, 0, 4, std::move(replacement));
 
   EXPECT_THROW(reservation.ValidateCommit(), std::logic_error);
   EXPECT_EQ(tables[0].Blocks()[0]->Id(), original_id);
@@ -898,9 +892,8 @@ TEST(PagedCacheReservationTest, ValidateCommitRejectsReallocatedSameIdCommittedB
 
 TEST(PagedCacheReservationTest, ValidateCommitRejectsDuplicateCommittedRequestTable) {
   BlockPool pool{kBlockSize, 4};
-  std::vector<PagedCacheBlockTable> tables{
-      PagedCacheBlockTable{kRequestA, 4, pool.AllocateBlocks(4)},
-  };
+  auto tables = MakeTables(
+      PagedCacheBlockTable{kRequestA, 4, pool.AllocateBlocks(4)});
   const std::array requests{
       PagedCacheReservationRequest{kRequestA, 5, false},
   };
@@ -920,10 +913,9 @@ TEST(PagedCacheReservationTest, ValidateCommitRejectsDuplicateCommittedRequestTa
 TEST(PagedCacheReservationTest, ValidateCommitRejectsReorderedResidentWindowRing) {
   BlockPool pool{kBlockSize, 2};
   BlockPool window_pool{kBlockSize, 3};
-  std::vector<PagedCacheBlockTable> tables{
+  auto tables = MakeTables(
       PagedCacheBlockTable{kRequestA, 4, pool.AllocateBlocks(4),
-                           window_pool.AllocateBlocks(2 * kBlockSize)},
-  };
+                           window_pool.AllocateBlocks(2 * kBlockSize)});
   const std::array requests{
       PagedCacheReservationRequest{kRequestA, 5, false},
   };
@@ -935,7 +927,7 @@ TEST(PagedCacheReservationTest, ValidateCommitRejectsReorderedResidentWindowRing
   auto reordered_window_blocks = tables[0].WindowBlocks();
   std::swap(reordered_window_blocks[0], reordered_window_blocks[1]);
   ReplaceTable(
-      tables[0], 4, tables[0].Blocks(),
+      tables, 0, 4, tables[0].Blocks(),
       std::move(reordered_window_blocks));
 
   EXPECT_THROW(reservation.ValidateCommit(), std::logic_error);
@@ -948,10 +940,9 @@ TEST(PagedCacheReservationTest, ValidateCommitRejectsReorderedResidentWindowRing
 TEST(PagedCacheReservationTest, ValidateCommitRejectsReallocatedResidentWindowRing) {
   BlockPool pool{kBlockSize, 2};
   BlockPool window_pool{kBlockSize, 2};
-  std::vector<PagedCacheBlockTable> tables{
+  auto tables = MakeTables(
       PagedCacheBlockTable{kRequestA, 4, pool.AllocateBlocks(4),
-                           window_pool.AllocateBlocks(2 * kBlockSize)},
-  };
+                           window_pool.AllocateBlocks(2 * kBlockSize)});
   const std::array requests{
       PagedCacheReservationRequest{kRequestA, 5, false},
   };
@@ -967,7 +958,7 @@ TEST(PagedCacheReservationTest, ValidateCommitRejectsReallocatedResidentWindowRi
   ASSERT_EQ(replacements[0]->Id(), original_ids[0]);
   ASSERT_EQ(replacements[1]->Id(), original_ids[1]);
   ReplaceTable(
-      tables[0], 4, tables[0].Blocks(), std::move(replacements));
+      tables, 0, 4, tables[0].Blocks(), std::move(replacements));
 
   EXPECT_THROW(reservation.ValidateCommit(), std::logic_error);
   EXPECT_EQ(tables[0].WindowBlocks()[0]->Id(), original_ids[0]);
@@ -981,10 +972,9 @@ TEST(PagedCacheReservationTest, ReservationRejectsSharedResidentWindowBlock) {
   BlockPool window_pool{kBlockSize, 3};
   auto shared_window = window_pool.AllocateBlocks(kBlockSize);
   auto other_window = window_pool.AllocateBlocks(kBlockSize);
-  std::vector<PagedCacheBlockTable> tables{
+  auto tables = MakeTables(
       PagedCacheBlockTable{kRequestA, 3, pool.AllocateBlocks(3), {shared_window[0], other_window[0]}},
-      PagedCacheBlockTable{kRequestB, 3, pool.AllocateBlocks(3), {shared_window[0], other_window[0]}},
-  };
+      PagedCacheBlockTable{kRequestB, 3, pool.AllocateBlocks(3), {shared_window[0], other_window[0]}});
   const std::array requests{
       PagedCacheReservationRequest{kRequestA, 4, false},
       PagedCacheReservationRequest{kRequestB, 4, false},

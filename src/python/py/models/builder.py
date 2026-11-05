@@ -11,29 +11,47 @@ Run the model builder to create the desired ONNX model.
 """
 
 import argparse
+import json
 import os
 import textwrap
+from pathlib import Path
 from typing import Any
 
 import onnx_ir as ir
 import torch
+from builder_config import (
+    apply_runtime_config,
+    export_component_package,
+    load_json_object,
+    normalize_builder_config,
+    plan_component_package,
+    validate_component_backbone_destination,
+    validate_model_dependent_config,
+)
 from builders import (
     ChatGLMModel,
     ErnieModel,
     Gemma2Model,
     Gemma3Model,
+    Gemma4Model,
+    Gemma4MoEModel,
     GemmaModel,
     GPTOSSModel,
     GraniteModel,
     GraniteMoEHybridModel,
     HunyuanDenseV1Model,
     InternLM2Model,
+    LFM2AudioModel,
     LFM2Model,
+    LFM2MoEModel,
+    LFM2VLModel,
+    LFM3Model,
     LlamaModel,
     Mistral3TextModel,
     MistralModel,
     Model,
     NemotronModel,
+    NemotronParseModel,
     OLMoModel,
     Phi3MiniLongRoPEModel,
     Phi3MiniModel,
@@ -45,14 +63,22 @@ from builders import (
     PhiModel,
     Qwen3Model,
     Qwen3VLTextModel,
+    Qwen4ExpModel,
+    Qwen4ExpTextModel,
     Qwen25VLTextModel,
     QwenModel,
     SmolLM3Model,
     VideoChatFlashQwenModel,
     WhisperModel,
 )
-from builders.qwen import Qwen35Model, Qwen35MoEModel
-from quantization import KV_CACHE_QUANT_SCHEMES, QuantConfig
+from builders.non_generative import (
+    configure_model_specific_export,
+    prepare_model_specific_hf,
+    validate_model_specific_components,
+)
+from builders.qwen3_5 import Qwen35Model, Qwen35MoEModel
+from loaders.resolver import resolve_input
+from quantization import KV_CACHE_QUANT_SCHEMES, QuantConfig, default_io_dtype
 from transformers import AutoConfig, AutoTokenizer
 
 
@@ -94,23 +120,45 @@ def get_hf_details(model_name, input_path, cache_dir, extra_options):
     """
     Get Hugging Face details based on the provided inputs
     """
+    # Resolve URI sources (e.g. oci://) to local paths, once
+    model_name, input_path = resolve_input(model_name), resolve_input(input_path)
+
     # Load model config
     extra_kwargs = {} if os.path.isdir(input_path) else {"cache_dir": cache_dir}
+    if revision := extra_options.get("base_revision"):
+        extra_kwargs["revision"] = revision
     hf_name = input_path if os.path.isdir(input_path) else model_name
+    model_specific_hf = extra_options.get("_model_specific_hf", {})
+    if model_specific_hf:
+        hf_name = model_specific_hf["base_model"]
     hf_token = extra_options.get("hf_token", True)
     hf_remote = extra_options.get("hf_remote", False)
 
-    config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
-    tokenizer = AutoTokenizer.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
+    try:
+        config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
+    except ValueError:
+        # LFM2-Audio checkpoints have no model_type; their LFM2 decoder config is nested.
+        config = LFM2AudioModel.load_config(hf_name, token=hf_token, **extra_kwargs)
+        if config is None:
+            raise
+    tokenizer_name = model_specific_hf.get("tokenizer", hf_name)
+    tokenizer = AutoTokenizer.from_pretrained(
+        tokenizer_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs
+    )
     add_special_token_ids(config, tokenizer)
     if extra_options.get("adapter_path", False):
         from peft import PeftConfig
 
+        adapter_source = (
+            model_specific_hf.get("adapter")
+            or extra_options["adapter_path"]
+        )
+        adapter_kwargs = {} if os.path.isdir(adapter_source) else {"cache_dir": cache_dir}
         peft_config = PeftConfig.from_pretrained(
-            extra_options["adapter_path"],
+            adapter_source,
             token=hf_token,
             trust_remote_code=hf_remote,
-            **extra_kwargs,
+            **adapter_kwargs,
         )
         config.update(peft_config.__dict__)
 
@@ -119,8 +167,19 @@ def get_hf_details(model_name, input_path, cache_dir, extra_options):
         "extra_kwargs": extra_kwargs,
         "hf_name": hf_name,
         "hf_config": config,
+        "input_path": input_path,
     }
     return hf_details
+
+
+def validate_paged_cache_config(dynamic_batching, execution_provider):
+    # An explicit capacity and a utilization factor select incompatible cache-sizing policies.
+    if "num_blocks" in dynamic_batching and "gpu_utilization_factor" in dynamic_batching:
+        raise ValueError("num_blocks and gpu_utilization_factor are mutually exclusive.")
+    if execution_provider == "webgpu":
+        num_blocks = dynamic_batching.get("num_blocks")
+        if isinstance(num_blocks, bool) or not isinstance(num_blocks, int) or num_blocks <= 0:
+            raise ValueError("WebGPU paged attention requires num_blocks to be a positive integer.")
 
 
 def check_extra_options(
@@ -149,17 +208,19 @@ def check_extra_options(
         "use_cuda_bf16",
         "shared_embeddings",
         "hf_remote",
-        "disable_qkv_fusion",
-        "fuse_qk_norm_gqa",
         "prune_lm_head",
         "use_paged_attention",
         "windowed_kv_cache",
-        "use_device_allocator_for_initializers",
+        "text_only",
+        "enable_cuda_fpa_intb_gemm",
         "exclude_mtp",
+        "use_device_allocator_for_initializers",
     ]
 
     for key in bools:
         if key in extra_options:
+            if isinstance(extra_options[key], bool):
+                continue
             if extra_options[key] in {"false", "False", "0"}:
                 extra_options[key] = False
             elif extra_options[key] in {"true", "True", "1"}:
@@ -192,10 +253,25 @@ def check_extra_options(
             raise ValueError("state_update_capacity requires use_paged_attention=true.")
         extra_options["state_update_capacity"] = state_update_capacity
 
+    if "max_draft_tokens" in extra_options:
+        message = "max_draft_tokens must be an integer between 1 and 16."
+        try:
+            max_draft_tokens = int(str(extra_options["max_draft_tokens"]).strip())
+        except (TypeError, ValueError) as e:
+            raise ValueError(message) from e
+        if not 1 <= max_draft_tokens <= 16:
+            raise ValueError(message)
+        extra_options["max_draft_tokens"] = max_draft_tokens
+
     if "mtp_quant_config" in extra_options:
         mtp_quant_config = extra_options["mtp_quant_config"]
         if not isinstance(mtp_quant_config, QuantConfig):
-            mtp_quant_config = QuantConfig.from_json(mtp_quant_config)
+            mtp_quant_data = load_json_object(mtp_quant_config, "mtp_quant_config")
+            wrapped_data = mtp_quant_data.get("quantization", mtp_quant_data)
+            checkpoint_policy_explicit = "checkpoint_policy" in wrapped_data
+            mtp_quant_config = QuantConfig.from_dict(mtp_quant_data)
+            if not checkpoint_policy_explicit:
+                mtp_quant_config.checkpoint_policy = "requantize"
         extra_options["mtp_quant_config"] = mtp_quant_config
 
     if extra_options.get("use_paged_attention", False):
@@ -220,11 +296,19 @@ def check_extra_options(
                 raise ValueError(f"{key} must be a positive integer.")
             extra_options[key] = value
 
-        if "paged_block_size" in extra_options and extra_options["paged_block_size"] % 256 != 0:
-            raise ValueError("paged_block_size must be a multiple of 256.")
+        # Mirrors CheckInputs in onnxruntime paged_attention_helper.h, which is the only hard
+        # bound. ORT's FlashAttention path wants block_size % tile == 0 on top of it, where tile
+        # is 256 for head_size <= 64, 128 for head_size <= 128 and 64 above that, and falls back
+        # to another backend otherwise. That is a throughput choice per head size, not a validity
+        # rule, and the head sizes involved are not known here, so only the op-level rule is
+        # enforced.
+        # TODO: give a block drafter its own block size, so a target can take a small vLLM-style
+        # page (16 tokens) without moving the drafter off its own FlashAttention tile.
+        block_size = extra_options.get("paged_block_size")
+        if block_size is not None and (block_size < 16 or block_size & (block_size - 1) != 0):
+            raise ValueError("paged_block_size must be a power of two and at least 16.")
         if extra_options.get("max_batch_size", 1) > 256:
             raise ValueError("max_batch_size must be at most 256.")
-
         if "gpu_utilization_factor" in extra_options:
             try:
                 gpu_utilization_factor = float(extra_options["gpu_utilization_factor"])
@@ -234,10 +318,12 @@ def check_extra_options(
                 raise ValueError("gpu_utilization_factor must be greater than 0 and at most 1.")
             extra_options["gpu_utilization_factor"] = gpu_utilization_factor
 
-        # `num_blocks` pins the cache instead of deriving it from free memory, so a
-        # utilization factor would be silently ignored.
-        if "num_blocks" in extra_options and "gpu_utilization_factor" in extra_options:
-            raise ValueError("num_blocks and gpu_utilization_factor are mutually exclusive.")
+        runtime_batching = extra_options.get("_runtime_config", {}).get("engine", {}).get("dynamic_batching", {})
+        cache_config = {
+            key: extra_options[key] for key in ("num_blocks", "gpu_utilization_factor") if key in extra_options
+        }
+        cache_config.update(runtime_batching)
+        validate_paged_cache_config(cache_config, execution_provider)
     else:
         engine_only_options = [
             key for key in ("max_scheduled_tokens", "num_blocks") if key in extra_options
@@ -251,29 +337,24 @@ def check_extra_options(
         extra_options["hf_token"] = parse_hf_token(extra_options["hf_token"])
 
     if extra_options.get("op_types_to_quantize", False):
-        op_types_to_quantize = ()
-        for op_type in extra_options["op_types_to_quantize"].split("/"):
-            op_types_to_quantize += (op_type,)
-        extra_options["op_types_to_quantize"] = op_types_to_quantize
+        op_types = extra_options["op_types_to_quantize"]
+        extra_options["op_types_to_quantize"] = (
+            tuple(op_types.split("/")) if isinstance(op_types, str) else tuple(op_types)
+        )
 
     if extra_options.get("nodes_to_exclude", False):
-        extra_options["nodes_to_exclude"] = extra_options["nodes_to_exclude"].split(",")
+        excluded = extra_options["nodes_to_exclude"]
+        extra_options["nodes_to_exclude"] = excluded.split(",") if isinstance(excluded, str) else list(excluded)
 
-    for key in ("qmoe_weights_prepacked", "matmulnbits_weights_prepacked"):
+    for key, allowed in (("qmoe_weights_prepacked", (-1, 0, 1)), ("matmulnbits_weights_prepacked", (0, 1, 2))):
         if key in extra_options:
             extra_options[key] = int(extra_options[key])
-
-    if extra_options.get("qmoe_weights_prepacked", -1) not in (-1, 0, 1):
-        raise ValueError(f"qmoe_weights_prepacked must be -1, 0, or 1, got {extra_options['qmoe_weights_prepacked']}.")
-
-    if extra_options.get("matmulnbits_weights_prepacked", 0) not in (0, 1, 2):
-        raise ValueError(
-            f"matmulnbits_weights_prepacked must be 0, 1, or 2, got {extra_options['matmulnbits_weights_prepacked']}."
-        )
+            if extra_options[key] not in allowed:
+                raise ValueError(f"{key} must be one of {allowed}.")
 
     # `moe_quant_type` is the single option that selects the MoE quantization scheme. It replaces the
     # older per-type flags (`use_8bits_moe``) so new schemes can be added without a new flag.
-    supported_moe_quant_types = {"int4", "int8", "mxfp4", "nvfp4"}
+    supported_moe_quant_types = {"int2", "int4", "int8", "mxfp4", "nvfp4"}
 
     # Backward compatibility: `use_8bits_moe` is deprecated in favor of `moe_quant_type`.
     if "use_8bits_moe" in extra_options:
@@ -293,12 +374,19 @@ def check_extra_options(
                     f"moe_quant_type={moe_quant_type} is only supported on the CUDA EP, got ep='{execution_provider}'."
                 )
         if moe_quant_type == "mxfp4":
-            if not (precision == "int4" and extra_options.get("is_symmetric", True)):
+            if not (precision in ("int4", "int8") and extra_options.get("is_symmetric", True)):
                 raise ValueError(
-                    "moe_quant_type=mxfp4 requires building with precision=int4 (symmetric int4): the "
-                    "int4 build precision is what exports the quantized QMoE op, and the FP4 scheme only sets the "
-                    "MoE expert weights to the FP4 encoding."
+                    "moe_quant_type=mxfp4 requires building with symmetric int4 or int8 precision: the integer "
+                    "build precision exports the quantized QMoE op, and the FP4 scheme sets only the MoE expert "
+                    "weights to the FP4 encoding."
                 )
+
+    if extra_options.get("moe_quant_type") == "int2":
+        if execution_provider != "cuda":
+            raise ValueError("INT2 QMoE is only supported on the CUDA EP.")
+        qmoe_block_size = int(extra_options.get("qmoe_block_size", 32))
+        if qmoe_block_size not in (64, 128):
+            raise ValueError("INT2 CUDA QMoE requires qmoe_block_size=64 or 128.")
 
     if extra_options.get("exclude_lm_head", False) and extra_options.get("include_hidden_states", False):
         # 'exclude_lm_head' is for when 'hidden_states' are outputted and 'logits' are not outputted
@@ -339,6 +427,13 @@ def check_extra_options(
     config = hf_details["hf_config"]
     extra_options["hf_details"] = hf_details
 
+    if (
+        execution_provider == "webgpu"
+        and extra_options.get("use_paged_attention", False)
+        and getattr(config, "attn_logit_softcapping", 0.0) not in (None, 0.0)
+    ):
+        raise ValueError("WebGPU paged attention does not support non-zero attention softcap.")
+
     if "num_hidden_layers" in extra_options:
         num_hidden_layers = int(extra_options["num_hidden_layers"])
         layer_types = getattr(config, "layer_types", None)
@@ -349,6 +444,11 @@ def check_extra_options(
         extra_options["num_hidden_layers"] = num_hidden_layers
 
     quantization_config = getattr(config, "quantization_config", {})
+    if quantization_config.get("quant_method") == "fp8":
+        if getattr(config, "model_type", None) not in {"qwen4_exp", "qwen4_exp_text"}:
+            raise ValueError("Native FP8 checkpoint export is currently supported only for Qwen3.8.")
+        if execution_provider not in {"cuda", "webgpu"}:
+            raise ValueError("Native Qwen3.8 FP8 checkpoint export requires the CUDA or WebGPU EP.")
     if quantization_config.get("quant_method") in {"modelopt", "compressed-tensors"}:
         if execution_provider != "cuda":
             raise ValueError("ModelOpt FP8/NVFP4 checkpoints are only supported on the CUDA EP.")
@@ -383,6 +483,11 @@ def check_extra_options(
                 "shared_embeddings=true from --extra_options for this model."
             )
 
+    embedding_quant_type = extra_options.get("embedding_quant_type")
+    if embedding_quant_type is not None and embedding_quant_type not in {"int4", "int8"}:
+        raise ValueError("embedding_quant_type must be one of: int4, int8")
+
+    if extra_options["shared_embeddings"] or embedding_quant_type is not None:
         op_types_to_quantize = extra_options.get("op_types_to_quantize", ())
 
         if "MatMul" not in op_types_to_quantize:
@@ -402,9 +507,21 @@ def parse_extra_options(
     execution_provider,
     cache_dir,
     extra_options,
+    builder_config_version=None,
+    target_options=None,
+    drafter_options=None,
+    speculative_options=None,
+    runtime_config=None,
+    search=None,
+    component_options=None,
 ):
     """
-    Parse key-value pairs that are separated by '='
+    Parse CLI KEY=VALUE options and normalize the structured envelope.
+
+    Structured keyword arguments may be dictionaries, inline JSON, or JSON file
+    paths. extra_options itself remains a list of KEY=VALUE strings. This step
+    also loads Hugging Face metadata required by create_model; it is not a
+    checkpoint-free validation API.
     """
     kv_pairs = {}
 
@@ -415,16 +532,35 @@ def parse_extra_options(
             key, value = kv_str.split("=", 1)
             kv_pairs[key.strip()] = value.strip()
 
+    effective_config = normalize_builder_config(
+        precision,
+        execution_provider,
+        kv_pairs,
+        builder_config_version=builder_config_version,
+        target_options=target_options,
+        drafter_options=drafter_options,
+        speculative_options=speculative_options,
+        runtime_config=runtime_config,
+        search=search,
+        component_options=component_options,
+    )
+    kv_pairs = effective_config.extra_options
+    if effective_config.component_options is not None and effective_config.component_options.model_source is not None:
+        base_source = input_path if os.path.isdir(input_path) else model_name
+        prepare_model_specific_hf(effective_config.component_options, kv_pairs, base_source)
     print(f"Extra options: {kv_pairs}")
     check_extra_options(
         model_name,
         input_path,
         output_dir,
-        precision,
+        effective_config.precision,
         execution_provider,
         cache_dir,
         kv_pairs
     )
+    if "hf_details" in kv_pairs:
+        validate_model_dependent_config(effective_config, kv_pairs["hf_details"]["hf_config"])
+    kv_pairs["_effective_builder_config"] = effective_config
     return kv_pairs
 
 
@@ -432,20 +568,11 @@ def set_io_dtype(precision, execution_provider, extra_options) -> ir.DataType:
     """
     Set the input/output precision of the ONNX model based on the provided precision and execution provider.
     """
-    cpu_quant = precision in {"int4", "int8"} and execution_provider == "cpu"
-    fp32_webgpu = execution_provider == "webgpu" and extra_options.get("use_webgpu_fp32", False)
-    bf16_cuda = precision == "int4" and execution_provider in {"cuda", "trt-rtx"} and extra_options.get("use_cuda_bf16", False)
-
-    if precision == "fp32" or cpu_quant or fp32_webgpu:
-        # FP32 precision
-        return ir.DataType.FLOAT
-
-    if precision == "bf16" or bf16_cuda:
-        # BF16 precision
-        return ir.DataType.BFLOAT16
-
-    # FP16 precision
-    return ir.DataType.FLOAT16
+    return {
+        "fp32": ir.DataType.FLOAT,
+        "bf16": ir.DataType.BFLOAT16,
+        "fp16": ir.DataType.FLOAT16,
+    }[default_io_dtype(precision, execution_provider, extra_options)]
 
 
 def set_onnx_dtype(precision: str, extra_options: dict[str, Any]) -> ir.DataType:
@@ -466,6 +593,63 @@ def set_onnx_dtype(precision: str, extra_options: dict[str, Any]) -> ir.DataType
     return to_onnx_dtype[precision]
 
 
+def checkpoint_weight_formats(quantization_config) -> set[tuple[int, str]]:
+    """Return the weight formats a prequantized checkpoint declares, as ``{(bits, kind)}``.
+
+    ``kind`` is ``"int"`` or ``"float"``. An empty set means the checkpoint states its format
+    in a shape this function does not read, in which case callers must not infer a mismatch.
+    """
+    # ModelOpt names the whole checkpoint's format in `quant_algo` instead of per-group metadata.
+    modelopt_algos = {
+        "FP8": (8, "float"),
+        "FP8_PB_WO": (8, "float"),
+        "NVFP4": (4, "float"),
+        "NVFP4_AWQ": (4, "float"),
+        "W4A8_AWQ": (4, "int"),
+        "INT4_AWQ": (4, "int"),
+        "INT8_SQ": (8, "int"),
+    }
+    formats = set()
+    for group in (quantization_config.get("config_groups") or {}).values():
+        weights = (group or {}).get("weights") or {}
+        if "num_bits" in weights:
+            formats.add((int(weights["num_bits"]), str(weights.get("type") or "int")))
+    if not formats:
+        algo = modelopt_algos.get(str(quantization_config.get("quant_algo") or "").upper())
+        if algo:
+            formats.add(algo)
+    if not formats and "bits" in quantization_config:
+        formats.add((int(quantization_config["bits"]), "int"))
+    return formats
+
+
+def warn_if_checkpoint_overrides_precision(config, precision, onnx_dtype):
+    """Say so when ``--precision`` cannot reach weights the checkpoint already quantized.
+
+    Model Builder re-exports a prequantized checkpoint's tensors in their own format, so
+    ``--precision int4`` against, say, an FP8/NVFP4 checkpoint only quantizes whatever that
+    checkpoint left in floating point. That is a legitimate mixed build rather than an error,
+    but it is otherwise silent: the only giveaway is an artifact far larger than an int4 model.
+    """
+    quantization_config = getattr(config, "quantization_config", None)
+    quantized_dtypes = {ir.DataType.INT4, ir.DataType.UINT4, ir.DataType.INT8, ir.DataType.UINT8}
+    if not quantization_config or onnx_dtype not in quantized_dtypes:
+        return
+    requested_bits = 4 if onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4} else 8
+    formats = checkpoint_weight_formats(quantization_config)
+    if not formats or formats == {(requested_bits, "int")}:
+        return
+
+    described = ", ".join(f"{bits}-bit {kind}" for bits, kind in sorted(formats))
+    method = quantization_config.get("quant_method", "prequantized")
+    print(
+        f"WARNING: this is a '{method}' checkpoint whose weights are already {described}. Model Builder "
+        f"re-exports those tensors unchanged, so `--precision {precision}` reaches only the parts of the "
+        f"model the checkpoint left unquantized. Build from an unquantized checkpoint to quantize "
+        f"everything to {precision}."
+    )
+
+
 @torch.no_grad
 def create_model(
     model_name,
@@ -476,6 +660,37 @@ def create_model(
     cache_dir,
     **extra_options,
 ):
+    """Export using options prepared by parse_extra_options.
+
+    A standalone structured call still needs prepared hf_details. Python callers
+    must supply the positional precision argument (None is allowed for an
+    explicit target weight type), even when the CLI permits omitting it.
+    """
+    effective_config = extra_options.pop("_effective_builder_config", None)
+    structured = {
+        key: extra_options.pop(key)
+        for key in (
+            "builder_config_version",
+            "target_options",
+            "drafter_options",
+            "speculative_options",
+            "runtime_config",
+            "search",
+            "component_options",
+        )
+        if key in extra_options
+    }
+    if effective_config is None and structured:
+        effective_config = normalize_builder_config(
+            precision,
+            execution_provider,
+            extra_options,
+            **structured,
+        )
+        extra_options = effective_config.extra_options
+    if effective_config is not None:
+        precision = effective_config.precision
+
     # Update name alias for TRT-RTX
     if execution_provider == "NvTensorRtRtx":
         execution_provider = "trt-rtx"
@@ -492,10 +707,23 @@ def create_model(
     extra_kwargs = hf_details.pop("extra_kwargs")
     hf_name = hf_details.pop("hf_name")
     config = hf_details.pop("hf_config")
+    # Local path from `get_hf_details`, after any URI resolution
+    input_path = hf_details.pop("input_path", input_path)
+    if effective_config is not None:
+        validate_model_dependent_config(effective_config, config)
+        if (
+            effective_config.component_options is not None
+            and effective_config.component_options.model_source is not None
+        ):
+            configure_model_specific_export(effective_config.component_options, config, extra_options)
 
     # Set input/output precision of ONNX model
-    io_dtype = set_io_dtype(precision, execution_provider, extra_options)
-    onnx_dtype = set_onnx_dtype(precision, extra_options)
+    quant_config = extra_options.get("_quant_config")
+    if quant_config is not None:
+        io_dtype, onnx_dtype = quant_config.to_onnx_dtypes()
+    else:
+        io_dtype = set_io_dtype(precision, execution_provider, extra_options)
+        onnx_dtype = set_onnx_dtype(precision, extra_options)
     config_only = extra_options.get("config_only", False)
 
     # List architecture options in alphabetical order
@@ -521,6 +749,16 @@ def create_model(
         onnx_model = Gemma3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         if not onnx_model.exclude_embeds:
             onnx_model.model_type = "gemma3_vl_text"
+    elif config.architectures[0] == "Gemma4ForConditionalGeneration":
+        print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
+        print("WARNING: This is only generating the text component of the model. The vision and audio components are not supported.")
+        onnx_model = Gemma4MoEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        onnx_model.model_type = "gemma4_text"
+    elif config.architectures[0] == "Gemma4UnifiedForConditionalGeneration":
+        print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
+        print("WARNING: This is only generating the text component of the model. The vision and audio components are not supported.")
+        onnx_model = Gemma4Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        onnx_model.model_type = "gemma4_text"
     elif config.architectures[0] == "GptOssForCausalLM":
         print("WARNING: This model only supports symmetric quantization for `QMoE`.")
         if hasattr(config, "quantization_config") and config.quantization_config.get("quant_method") != "quark":
@@ -536,6 +774,29 @@ def create_model(
         onnx_model = InternLM2Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Lfm2ForCausalLM":
         onnx_model = LFM2Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "Lfm2MoeForCausalLM":
+        onnx_model = LFM2MoEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        onnx_model.model_type = "lfm2_moe"
+    elif config.architectures[0] == "Lfm2VlForConditionalGeneration":
+        if extra_options.get("exclude_embeds", False):
+            # The decoder, embedding and vision models of the lfm2_vl pipeline
+            onnx_model = LFM2VLModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        else:
+            # A standalone text model that happens to come from a VLM checkpoint
+            onnx_model = LFM2Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+            onnx_model.model_type = "lfm2_vl_text"
+    elif config.architectures[0] == "Lfm2AudioForConditionalGeneration":
+        onnx_model = LFM2AudioModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        # Same split as LFM2-VL: the decoder stage of the lfm2_audio pipeline, or a plain text model.
+        onnx_model.model_type = "lfm2_audio" if onnx_model.exclude_embeds else "lfm2_audio_text"
+    elif config.architectures[0] == "Lfm3ForCausalLM":
+        onnx_model = LFM3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] in LFM3Model.MULTIMODAL:
+        onnx_model = LFM3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        # With the embedding layer excluded the decoder is one stage of the lfm3_vl / lfm3_audio /
+        # lfm3_omni pipeline (which the runtime does not have yet); otherwise a plain LFM3 text model.
+        _, pipeline = LFM3Model.MULTIMODAL[config.architectures[0]]
+        onnx_model.model_type = pipeline if onnx_model.exclude_embeds else "lfm3"
     elif config.architectures[0] == "LlamaForCausalLM":
         onnx_model = LlamaModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "MistralForCausalLM":
@@ -548,6 +809,8 @@ def create_model(
             onnx_model.model_type = "mistral3_text"
     elif config.architectures[0] == "NemotronForCausalLM":
         onnx_model = NemotronModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "NemotronParseForConditionalGeneration":
+        onnx_model = NemotronParseModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "OlmoForCausalLM":
         onnx_model = OLMoModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "PhiForCausalLM":
@@ -596,6 +859,8 @@ def create_model(
             onnx_model.model_type = "qwen3_5_moe_text"
         else:
             onnx_model.model_type = "qwen3_5_moe"
+    elif config.architectures[0] == "Qwen4ExpForConditionalGeneration":
+        onnx_model = Qwen4ExpModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "SmolLM3ForCausalLM":
         onnx_model = SmolLM3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "VideoChatFlashQwenForCausalLM":
@@ -609,6 +874,25 @@ def create_model(
     else:
         raise NotImplementedError(f"The {hf_name} model is not currently supported.")
 
+    # Checked after the architecture dispatch above, which is where a checkpoint's quantization
+    # metadata is dropped when the builder does not honor it.
+    warn_if_checkpoint_overrides_precision(config, precision, onnx_dtype)
+
+    if effective_config is not None and effective_config.component_options is not None:
+        validate_component_backbone_destination(
+            effective_config.component_options,
+            output_dir,
+            require_exists=config_only,
+        )
+        if effective_config.component_options.model_source is not None:
+            validate_model_specific_components(
+                effective_config.component_options, Path(output_dir).resolve()
+            )
+        else:
+            plan_component_package(
+                effective_config.component_options, Path(output_dir).resolve()
+            )
+
     if not config_only:
         # Make ONNX model
         onnx_model.make_model(input_path)
@@ -618,6 +902,24 @@ def create_model(
 
     # Make GenAI config
     onnx_model.make_genai_config(config, extra_kwargs, output_dir)
+    if effective_config is not None and effective_config.component_options is not None:
+        export_component_package(effective_config.component_options, output_dir)
+
+    # Composite exporters append MTP/block-drafter sections after the decoder.
+    # Applying a profile earlier would reject valid component names or lose it
+    # when a component rewrites the generated configuration.
+    runtime_config = effective_config.runtime_config if effective_config is not None else extra_options.get("_runtime_config", {})
+    if runtime_config:
+        config_path = os.path.join(output_dir, "genai_config.json")
+        with open(config_path, encoding="utf-8") as config_file:
+            genai_config = json.load(config_file)
+        genai_config = apply_runtime_config(genai_config, runtime_config)
+        if extra_options.get("use_paged_attention", False):
+            validate_paged_cache_config(
+                genai_config.get("engine", {}).get("dynamic_batching", {}), execution_provider
+            )
+        with open(config_path, "w", encoding="utf-8") as config_file:
+            json.dump(genai_config, config_file, indent=4)
 
     # Copy Hugging Face processing files to output folder
     onnx_model.save_processing(hf_name, extra_kwargs, output_dir)
@@ -631,7 +933,7 @@ def get_args():
         "--model_name",
         required=False,
         default=None,
-        help="Model name in Hugging Face. Do not use if providing an input path to a Hugging Face directory in -i/--input.",
+        help="Model name in Hugging Face, or an oci://<registry>/<repo>:<tag> reference. Do not use if providing an input path to a Hugging Face directory in -i/--input.",
     )
 
     parser.add_argument(
@@ -643,6 +945,7 @@ def get_args():
             Input model source. Currently supported options are:
                 hf_path: Path to folder on disk containing the Hugging Face config, model, tokenizer, etc.
                 gguf_path: Path to float16/float32 GGUF file on disk containing the GGUF model
+                oci://<registry>/<repo>:<tag>: CNCF ModelPack artifact, pulled via an llmman daemon
             """),
     )
 
@@ -656,9 +959,10 @@ def get_args():
     parser.add_argument(
         "-p",
         "--precision",
-        required=True,
+        required=False,
+        default=None,
         choices=["int4", "int8", "bf16", "fp16", "fp32"],
-        help="Precision of model",
+        help="Precision of model. Optional when target_options.quant_config specifies the target weight type.",
     )
 
     parser.add_argument(
@@ -697,15 +1001,18 @@ def get_args():
                     Default value is 32.
                 qmoe_block_size = <=0/16/32/64/128/256: Specify the block size for QMoE expert weights quantization.
                     Set <= 0 for per-channel quantization. Default is 128 for TRT-RTX, 32 for others.
-                    CUDA block-wise QMoE supports 32/64/128 only.
+                    CPU, CUDA, and WebGPU block-wise QMoE support 32/64/128 only; TRT-RTX also accepts 16/256.
+                    WebGPU requires hidden_size and moe_intermediate_size to be divisible by qmoe_block_size.
+                    Raw block-wise INT4 QMoE requires both dimensions to be even.
                     Supported EPs: CPU, CUDA, WebGPU, TRT-RTX.
-                qmoe_weights_prepacked = -1/0/1: Specify the CUDA QMoE expert weight layout.
-                    -1 lets the builder choose automatically, 0 exports raw weights for runtime prepacking, and 1 exports CUTLASS-prepacked weights.
-                    Default is -1.
-                matmulnbits_weights_prepacked = 0/1/2: Specify the CUDA MatMulNBits (int4/int8) weight layout.
-                    0 exports raw blockwise weights, 1 exports the SM80/Ampere fpA_intB prepacked layout, and 2 exports the SM90/Hopper fpA_intB prepacked layout.
-                    Only applies to the CUDA EP. Eligible prepacked nodes select fpA_intB automatically; the builder enables it for any ineligible nodes left in raw layout.
-                    Default is 0.
+                qmoe_weights_prepacked = -1/0/1: CUDA integer QMoE defaults to -1 (offline CUTLASS layout).
+                    0 selects raw integer weights; 1 selects packed weights. Other EPs keep their original layouts.
+                    NVFP4: -1/0 selects legacy N-packed bytes; explicit 1 selects K-packed bytes and requires newer ORT.
+                matmulnbits_weights_prepacked = 0/1/2: Default 0 (raw). CUDA-only target layout:
+                    1 for SM80, 2 for exact SM90 (not Blackwell). Requires FP16/BF16 inputs without g_idx.
+                    Unsupported shapes, non-default zero points, and shared weight buffers stay raw.
+                use_device_allocator_for_initializers = true/false: Default false; opt into device allocation.
+                    Paged Qwen3.8 sessions enable this automatically.
                 is_symmetric = Quantize the weights symmetrically. Default is true.
                     If true, quantization is done to int4/int8. If false, quantization is done to uint4/uint8.
                 op_types_to_quantize = MatMul/Gather: Specify op types to target for int4/int8 weight-only quantization.
@@ -742,6 +1049,9 @@ def get_args():
                     For models with multiple components, each component is exported to its own ONNX model.
                 config_only = Generate config and pre/post processing files only.
                     Use this option when you already have your optimized and/or quantized ONNX model.
+                text_only = Export only the text component of any supported multi-modal model.
+                    The text component may consist of one or more ONNX models, including auxiliary
+                    text models where applicable; non-text components are omitted.
                 hf_token = false/token: Use this to manage authentication with Hugging Face.
                     Default behavior is to use the authentication token stored by `huggingface-cli login`.
                     If false, authentication with Hugging Face will be disabled.
@@ -757,6 +1067,8 @@ def get_args():
                 exclude_embeds = Remove embedding layer from your ONNX model.
                     Use this option when you want to remove the embedding layer from within your ONNX model.
                     Instead of `input_ids`, you will have `inputs_embeds` as the input to your ONNX model.
+                    For LFM2-VL models (Lfm2VlForConditionalGeneration), the builder also writes the embedding model
+                    (embeddings.onnx), the vision model (vision.onnx) and processor_config.json.
                 exclude_lm_head = Remove language modeling head from your ONNX model.
                     Use this option when you want to remove the language modeling head from within your ONNX model.
                     Instead of `logits`, you will have `hidden_states` as the output to your ONNX model.
@@ -766,9 +1078,12 @@ def get_args():
                     exclude_lm_head. A block drafter (dflash2_path/dspark_path) already supersedes the head
                     and does not need this option.
                 prune_lm_head = Prune the LM head to only compute last-token logits during prefill. Default is false.
-                    When enabled for standard models, inserts Gather+Unsqueeze so the MatMul input is [B,1,H] instead
-                    of [B,S,H]. For paged-attention models, gathers the final packed hidden state for each sequence so
-                    the MatMul input is [B,H] instead of [num_tokens,H].
+                    When enabled for standard models, takes each row's last real token (the last 1 in
+                    attention_mask), so padded batches work, and the MatMul input is [B,1,H] instead of [B,S,H].
+                    Pruned models exported by older builders take the last column instead, which is wrong for
+                    the shorter rows of a right-padded batch, so export them again if you run padded batches.
+                    For paged-attention models, gathers the final packed hidden state for each sequence so the
+                    MatMul input is [B,H] instead of [num_tokens,H].
                     Ignored when exclude_lm_head is true.
                 include_hidden_states = Include hidden states as output from your ONNX model.
                     Use this option when you want to have the hidden states as an output from your ONNX model.
@@ -785,25 +1100,32 @@ def get_args():
                 dflash2_num_draft_tokens = Override the number of draft tokens the DFlash 2 block
                     drafter proposes per step. Must be positive and no greater than the draft checkpoint's
                     block size minus its anchor token. That checkpoint limit is the default.
-                dflash2_fuse_gate_up = Experimental DFlash 2 MLP gate/up projection fusion.
-                    Accepts true or false (default). Requires dflash2_path. Combines gate/up
-                    weights into one MatMul or MatMulNBits followed by Split. Preserves BF16
-                    activations and body quantization; does not change the target or LM head.
-                    Requires re-export and workload-specific performance/quality validation.
+                max_draft_tokens = Write `speculative.max_draft_tokens` into genai_config.json, capping how
+                    many drafted tokens the engine verifies per step. Must be between 1 and 16. Unlike
+                    dflash2_num_draft_tokens this does not change the exported drafter, so a model built
+                    once can be re-tuned by editing the config. Default is unset, which leaves the runtime
+                    default of 4 in effect.
                 dflash2_precision = Weight precision for the DFlash 2 drafter body: bf16 (default),
                     int4, or int8. bf16 keeps every projection dense. int4/int8 emit `MatMulNBits`
                     at the target's block size for the attention and MLP projections, leaving the
-                    small dynamic-convolution and candidate-selector projections dense. The BF16
-                    body uses plain blockwise weights because fpA-intB requires FP16 activations.
-                    Body activations and KV caches remain bf16; this option does not quantize the
-                    drafter's KV cache. When the target LM head uses a reproducible symmetric default
+                    small dynamic-convolution and candidate-selector projections dense. The body
+                    uses the target's automatic hardware-specific packing policy. CUDA emits
+                    the corresponding fpA-intB layout for
+                    projections the kernel supports (N % 64 for int4, N % 32 for int8); other
+                    projections stay raw, and the drafter session disables fpA-intB selection for them.
+                    CUDA body activations and KV caches default to bf16. WebGPU uses FP16,
+                    with FP32 residual/skip normalization and convolution-finish accumulation for FP16
+                    models. Finish outputs stay FP32 until after normalization; normalized outputs
+                    return to FP16. This option does not quantize the drafter's KV cache.
+                    When the target LM head uses a reproducible symmetric default
                     layout, the drafter head uses its actual bit width, block size, initializer names,
                     and prepack mode when eligible so `share_initializers` can fold it onto the target's
                     copy. Dense or unsupported target LM-head layouts keep the drafter head dense.
                 dspark_path = Path to a DSpark draft checkpoint. Exports an auxiliary `dspark.onnx`
                     block drafter beside the target model and adds a `dspark` section to
                     genai_config.json. Mutually exclusive with dflash2_path. Requires
-                    use_paged_attention=true. SpecForge taps each target layer's output, so
+                    use_paged_attention=true. Unsupported on WebGPU because the drafter requires BF16.
+                    SpecForge taps each target layer's output, so
                     aux_hidden_state_layers must be the drafter's `target_layer_ids` each plus one.
                 dspark_num_draft_tokens = Override the number of draft tokens the DSpark block
                     drafter proposes per step. Must be at least 2 and no greater than the draft checkpoint's
@@ -813,18 +1135,18 @@ def get_args():
                     quadratically with this value, so larger values should be benchmarked carefully.
                 mtp_quant_config = JSON object/file: Configure MTP I/O, dense weights, MoE, and runtime using the
                     structured QuantConfig schema independently from the main model.
-                linear_attn_op = linear_attention/gated_delta_net: Select the recurrent operator for non-paged
-                    Qwen3.5/3.8 exports. Default is linear_attention. Paged exports always use GatedDeltaNet and
-                    ignore this option. gated_delta_net is CUDA-only, requires state_window=0, and supports fp16
-                    or bf16 I/O.
                 state_update_capacity = Number of compact Qwen3.5/3.8 state updates to capture. Default is 0 (disabled).
-                    Must be an integer from 0 through 8 and requires use_paged_attention=true. This experimental
-                    contract requires Engine runtime work beyond the current onnxruntime-genai#2454 head.
+                    Must be an integer from 0 through 8 and requires use_paged_attention=true. Engine compact
+                    replay supports CPU, CUDA, and WebGPU; WebGPU stages partial-acceptance replay through CPU.
                 state_window = Configure hybrid Qwen recurrent/conv state history. Default is 0 (disabled).
                     Must be a non-negative integer. For MTP verification, W must be at least num_speculative_tokens + 1.
-                    Qwen3.5/3.8 exports using GatedDeltaNet (paged, or linear_attn_op=gated_delta_net) require
-                    state_window=0.
+                    GatedDeltaNet accepts 0 or 2..9. A nonzero window sets state_update_capacity=W-1;
+                    an explicit capacity must agree. Dense CPU/DML/TRT-RTX retain LinearAttention.
                     Requires ONNX Runtime kernels that implement this attribute.
+                enable_cuda_fpa_intb_gemm = Select the CUDA fpA_intB MatMulNBits kernel family
+                    for weights exported in the default raw blockwise layout. Default is false.
+                    Writes ep.cuda.fpa_intb_gemm=1 to the decoder session options and only
+                    applies to the CUDA EP. Prepacked exports enable this automatically.
                 use_paged_attention = Build the model with PagedAttention for the continuous-batching engine. Default is false.
                     Replaces GroupQueryAttention with the PagedAttention contrib op, packs all sequences into a single
                     flattened token axis (`input_ids` becomes 1D), stores the KV-cache in paged
@@ -832,17 +1154,32 @@ def get_args():
                     It also removes `position_ids` when RoPE is fused; architectures with external MRoPE retain packed
                     position IDs (for example, Qwen3.5/3.8 uses [3, num_tokens]). The block_table,
                     cumulative_sequence_lengths, and past_sequence_lengths metadata inputs are added. With
-                    prune_lm_head=true, selects the final packed hidden state for each sequence so the model outputs
-                    [batch_size, vocab_size] logits. By default, the model outputs [num_tokens, vocab_size] logits.
-                    Currently only supported for the CUDA execution provider with fp16 or bf16 precision. Cannot be
-                    combined with exclude_embeds or exclude_lm_head.
-                paged_block_size = 256/512/768/...: Paged KV-cache block size used when use_paged_attention is set.
-                    Must be a positive multiple of 256 (required by the ONNX Runtime PagedAttention CUDA kernel).
-                    Default is 256. Also written to the `engine.dynamic_batching` section of genai_config.json.
+                    prune_lm_head=true, adds a logits_indices input that selects the packed hidden states consumed
+                    by generation or draft verification, so the model outputs [num_logits, vocab_size] logits.
+                    By default, the model outputs [num_tokens, vocab_size] logits.
+                    Supports CUDA with fp16 or bf16 precision. WebGPU supports fp16 only for causal, full-context
+                    attention with zero softcap, FP16 KV caches, and no Q/K normalization inputs; for example,
+                    Gemma2's non-zero attention softcap is unsupported. Cannot be combined with exclude_embeds or
+                    exclude_lm_head.
+                paged_block_size = 16/32/64/128/256/...: Paged KV-cache block size used when use_paged_attention is set.
+                    Must be a power of two and at least 16, which is what the ONNX Runtime PagedAttention op
+                    accepts. Default is 256. Also written to the `engine.dynamic_batching` section of
+                    genai_config.json. The vendored FlashAttention paged kernel additionally needs the block
+                    to be a multiple of its tile (256 for head_size <= 64, 128 for head_size <= 128, else 64);
+                    a smaller block is still valid but makes ORT fall back to another attention backend. A
+                    quantized KV cache is exempt from the tile requirement alone: FlashAttention still serves
+                    it, through a dense dequantized path that has no page alignment to satisfy. A block
+                    drafter (dflash2_path/dspark_path) shares this block size and usually has a smaller head
+                    size, so it reaches its tile at a larger block than the target does.
                 paged_chunk_size = Prefill chunk size written to `search.chunk_size` in genai_config.json.
-                    Only used when use_paged_attention is set and the model's sliding-window layers are served
-                    from a ring of blocks; those layers hold only `paged_chunk_size + window_size - 1` positions,
-                    so prefill must be chunked. Must be a positive integer. Default is paged_block_size.
+                    Applies only when use_paged_attention is set; it is ignored otherwise. Caps the
+                    prompt tokens ONE request contributes to a
+                    step, where max_scheduled_tokens caps the whole step, so a value at or above
+                    max_scheduled_tokens has no effect and a smaller one lets concurrent prefills
+                    interleave instead of running one request at a time. Models whose sliding-window
+                    layers are served from a ring of blocks hold only `paged_chunk_size +
+                    window_size - 1` positions, so they require chunking and default to
+                    paged_block_size. Must be a positive integer. Default is unset otherwise.
                 windowed_kv_cache = Use a reduced KV cache for sliding-window layers. Default is true.
                     With paged attention, eligible local layers use a ring of blocks while at least one full-context
                     layer remains. Without paged attention, supported execution providers use their windowed-cache
@@ -866,6 +1203,10 @@ def get_args():
                     Shares quantized weights using GatherBlockQuantized and shares unquantized weights using Gather.
                     Only valid for models that tie their input and output embeddings (tie_word_embeddings=true in
                     config.json). Setting shared_embeddings=true for a model with tie_word_embeddings=false raises a ValueError.
+                embedding_quant_type = Quantization type for an independent token embedding: int4 or int8.
+                    Defaults to model precision. int4 currently requires int4 model precision; int8 requires symmetric weights.
+                    Explicit precision conflicts with embedding exclusions are rejected, not silently ignored.
+                    This does not tie the token embedding to the LM head. Defaults to the model precision.
                 enable_cuda_graph = Enable CUDA graph capture during inference. Default is false.
                     If enabled, all nodes being placed on the CUDA EP is the prerequisite for the CUDA graph to be used correctly.
                     It is not guaranteed that CUDA graph be enabled as it depends on the model and the graph structure.
@@ -875,19 +1216,16 @@ def get_args():
                 enable_webgpu_graph = Enable WebGPU graph capture during inference. Default is false.
                     If enabled, the model structure will be optimized for WebGPU graph execution.
                     This affects attention mask reformatting and position IDs handling.
-                use_device_allocator_for_initializers = Write `session.use_device_allocator_for_initializers=1` into
-                    the decoder's session options. Default is false. Initializers then bypass the arena, so the
-                    originals a kernel replaces during PrePack (notably the fpA_intB MatMulNBits layout conversion)
-                    are returned to the driver instead of being retained as free arena blocks.
                 use_qdq = Use the QDQ decomposition for ops.
                     Use this option when you want to use quantize-dequantize ops. For example, you will have a quantized MatMul op instead of the MatMulNBits op.
-                moe_quant_type = int4/int8/mxfp4/nvfp4: Quantization scheme for MoE (QMoE) layers. Default is int4.
+                moe_quant_type = int2/int4/int8/mxfp4/nvfp4: Quantization scheme for MoE (QMoE) layers. Default is int4.
+                    int2 = 2-bit integer QMoE weights on CUDA. Requires qmoe_block_size=64 or 128.
                     int4 = 4-bit integer QMoE weights (expert_weight_bits=4, quant_type="int").
                     int8 = 8-bit integer QMoE weights (expert_weight_bits=8, quant_type="int").
                     mxfp4 = MXFP4 QMoE weights on the CUDA EP (quant_type="fp4", expert_weight_bits=4, block_size=32):
                         4-bit e2m1 weights with ue8m0 (float8e8m0) block scales and a per-expert float32 global scale.
-                        Requires an ONNX Runtime build with onnxruntime_USE_FP4_QMOE=ON, precision=int4 with symmetric
-                        INT4 quantization, and is only supported on the CUDA EP.
+                        Requires an ONNX Runtime build with onnxruntime_USE_FP4_QMOE=ON, precision=int4 or int8 with
+                        symmetric integer quantization, and is only supported on the CUDA EP.
                     nvfp4 = NVFP4 QMoE weights on the CUDA EP (quant_type="nvfp4", expert_weight_bits=4, block_size=16):
                         4-bit e2m1 weights with FP8-E4M3 block scales and a per-expert float32 global scale.
                         Requires an ONNX Runtime build with NVFP4 QMoE support. The graph precision controls
@@ -908,10 +1246,6 @@ def get_args():
                     Each per-layer entry is a scalar (per_tensor) or a length-(num_kv_heads * head_size) vector (per_channel).
                     An optional "qmax" records the divisor the file was calibrated with (128 for int8, 8 for int4, 448 for fp8);
                     the builder then rescales to the requested scheme, so one file can serve several bit widths.
-                disable_qkv_fusion = Disable QKV fusion in the model. Default is false.
-                    If true, the model will not fuse the Q, K, and V projections. Automatically assumed for certain EPs.
-                fuse_qk_norm_gqa = Enable QK Norm GQA fusion for CUDA and WebGPU. Default is true.
-                    Set to false to keep explicit Q/K normalization nodes instead of passing Q/K norm weights into GroupQueryAttention.
                 use_webgpu_fp32 = Use FP32 I/O precision for WebGPU EP.
                     Use this option to enable GPUs that do not support FP16 on WebGPU (e.g. GTX 10xx).
                 use_cuda_bf16 = Use BF16 I/O precision in quantized ONNX models for CUDA EP.
@@ -919,6 +1253,49 @@ def get_args():
                 adapter_path = Path to folder on disk containing the adapter files (adapter_config.json and adapter model weights).
                     Use this option for LoRA models.
             """),
+    )
+
+    parser.add_argument(
+        "--builder_config_version",
+        type=int,
+        default=None,
+        help="Structured model-builder configuration version. Version 2 enables the shared configuration envelope.",
+    )
+    parser.add_argument(
+        "--target_options",
+        default=None,
+        help="Target export options as an inline JSON object or JSON file path.",
+    )
+    parser.add_argument(
+        "--component_options",
+        default=None,
+        help=(
+            "Optional hidden-state backbone plus generic pre-built heads or one "
+            "pinned model_source, as inline JSON or a JSON file. Generic heads "
+            "require unique safe names/files and valid graph bindings; "
+            "model_source requires artifact_revision and base_revision. "
+            "Cannot be combined with drafter_options; omitted by default."
+        ),
+    )
+    parser.add_argument(
+        "--drafter_options",
+        default=None,
+        help="Drafter export options as an inline JSON object or JSON file path.",
+    )
+    parser.add_argument(
+        "--speculative_options",
+        default=None,
+        help="Speculative graph options as an inline JSON object or JSON file path.",
+    )
+    parser.add_argument(
+        "--runtime_config",
+        default=None,
+        help="Runtime configuration fragment as an inline JSON object or JSON file path.",
+    )
+    parser.add_argument(
+        "--search",
+        default=None,
+        help="Legacy search settings as an inline JSON object or JSON file path.",
     )
 
     args = parser.parse_args()
@@ -938,6 +1315,13 @@ if __name__ == "__main__":
         args.execution_provider,
         args.cache_dir,
         args.extra_options,
+        builder_config_version=args.builder_config_version,
+        target_options=args.target_options,
+        component_options=args.component_options,
+        drafter_options=args.drafter_options,
+        speculative_options=args.speculative_options,
+        runtime_config=args.runtime_config,
+        search=args.search,
     )
     create_model(
         args.model_name,

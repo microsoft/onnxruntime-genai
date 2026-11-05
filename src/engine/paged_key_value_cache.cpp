@@ -3,10 +3,12 @@
 
 #include "cache_manager.h"
 
+#include <algorithm>
 #include <limits>
 #include <numeric>
 #include <set>
 #include <string_view>
+#include <unordered_set>
 
 #include "../models/model_state_manifest.h"
 #include "sequence_positions.h"
@@ -137,6 +139,14 @@ std::set<int> WindowedLayers(const std::shared_ptr<Model>& model,
           "Every sliding-window layer must belong to the paged_kv decoder state group.");
     }
     layers.insert(layer);
+  }
+  if (!layers.empty() && decoder.sliding_window->window_size <= 0) {
+    throw std::runtime_error("Sliding-window size must be greater than zero.");
+  }
+  // Prefix retention needs immutable KV for every indexed block, including windowed layers.
+  // Keep the smaller rings by default; full paged storage requires an explicit opt-in.
+  if (model->config_->engine.dynamic_batching->prefix_caching.value_or(false)) {
+    return {};
   }
   return layers;
 }
@@ -303,17 +313,40 @@ size_t ComputeNumBlocks(std::shared_ptr<Model> model,
 
   size_t free_bytes, total_bytes;
   model->p_device_kvcache_->GetAvailableMemory(free_bytes, total_bytes);
+  const size_t physical_free_bytes = free_bytes;
+  const auto& batching = *model->config_->engine.dynamic_batching;
+  if (batching.device_memory_budget_bytes) {
+    if (!model->device_memory_budget_initial_free_bytes_) {
+      throw std::runtime_error("device_memory_budget_bytes must be configured before loading the model.");
+    }
+    free_bytes = DeviceMemoryBudgetAvailableBytes(
+        *batching.device_memory_budget_bytes,
+        *model->device_memory_budget_initial_free_bytes_, free_bytes,
+        batching.device_memory_headroom_bytes);
+  }
 
   if (auxiliary_reserved_memory_bytes > std::numeric_limits<size_t>::max() - windowed_bytes) {
     throw std::overflow_error("Combined paged cache reserved memory overflows size_t");
   }
 
-  return ComputePagedBlockCapacityFromBytes(
-      free_bytes,
-      *model->config_->engine.dynamic_batching->gpu_utilization_factor,
+  const size_t cache_budget = batching.device_memory_budget_bytes
+                                  ? free_bytes
+                                  : PagedCacheMemoryBudget(free_bytes, *batching.gpu_utilization_factor);
+  const size_t blocks = ComputePagedBlockCapacityFromBudget(
+      cache_budget,
       windowed_bytes + auxiliary_reserved_memory_bytes,
       full_bytes_per_block,
       auxiliary_bytes_per_block);
+  if (batching.device_memory_budget_bytes && g_log.enabled) {
+    Log("engine_cache",
+        "Device memory budget: bytes=%llu, initial_free=%zu, physical_free=%zu, "
+        "headroom=%llu, sizing_available=%zu, reserved=%zu, target_blocks=%zu",
+        static_cast<unsigned long long>(*batching.device_memory_budget_bytes),
+        *model->device_memory_budget_initial_free_bytes_, physical_free_bytes,
+        static_cast<unsigned long long>(*batching.device_memory_headroom_bytes), free_bytes,
+        windowed_bytes + auxiliary_reserved_memory_bytes, blocks);
+  }
+  return blocks;
 }
 
 size_t UsedSlots(const std::vector<std::shared_ptr<Block>>& blocks) {
@@ -330,25 +363,59 @@ size_t RequiredSlots(const std::shared_ptr<Request>& request) {
 
 }  // namespace
 
+size_t PagedCacheMemoryBudget(size_t available_memory_bytes, float gpu_utilization_factor) {
+  constexpr float memory_fragmentation_factor = 0.9f;
+  return static_cast<size_t>(
+      available_memory_bytes * memory_fragmentation_factor * gpu_utilization_factor);
+}
+
+size_t DeviceMemoryBudgetAvailableBytes(uint64_t budget_bytes,
+                                        size_t initial_free_bytes,
+                                        size_t available_memory_bytes,
+                                        std::optional<uint64_t> headroom_bytes) {
+  if (!headroom_bytes) {
+    throw std::runtime_error("device_memory_budget_bytes requires an explicit device_memory_headroom_bytes allowance.");
+  }
+  const size_t startup_bytes = initial_free_bytes > available_memory_bytes
+                                   ? initial_free_bytes - available_memory_bytes
+                                   : 0;
+  if (startup_bytes >= budget_bytes) {
+    throw std::runtime_error(
+        "engine.dynamic_batching.device_memory_budget_bytes is too small "
+        "for the model and allocated Engine state.");
+  }
+  const auto remaining = std::min<uint64_t>(budget_bytes - startup_bytes, available_memory_bytes);
+  if (*headroom_bytes >= remaining) {
+    throw std::runtime_error("device_memory_budget_bytes is too small after reserving device_memory_headroom_bytes.");
+  }
+  return static_cast<size_t>(remaining - *headroom_bytes);
+}
+
 size_t ComputePagedBlockCapacityFromBytes(size_t available_memory_bytes,
                                           float gpu_utilization_factor,
                                           size_t reserved_memory_bytes,
                                           size_t primary_bytes_per_block,
                                           size_t auxiliary_bytes_per_block) {
+  return ComputePagedBlockCapacityFromBudget(
+      PagedCacheMemoryBudget(available_memory_bytes, gpu_utilization_factor),
+      reserved_memory_bytes, primary_bytes_per_block, auxiliary_bytes_per_block);
+}
+
+size_t ComputePagedBlockCapacityFromBudget(size_t budget_bytes,
+                                           size_t reserved_memory_bytes,
+                                           size_t primary_bytes_per_block,
+                                           size_t auxiliary_bytes_per_block) {
   if (primary_bytes_per_block == 0) {
     throw std::invalid_argument("Paged cache bytes per block must be greater than zero");
   }
-  constexpr float memory_fragmentation_factor = 0.9f;
-  const auto budget = static_cast<size_t>(
-      available_memory_bytes * memory_fragmentation_factor * gpu_utilization_factor);
-  if (budget <= reserved_memory_bytes) {
+  if (budget_bytes <= reserved_memory_bytes) {
     throw std::runtime_error("The key-value cache budget is too small to hold the reserved decoder state.");
   }
   if (auxiliary_bytes_per_block >
       std::numeric_limits<size_t>::max() - primary_bytes_per_block) {
     throw std::overflow_error("Combined paged cache bytes per block overflow size_t");
   }
-  return (budget - reserved_memory_bytes) /
+  return (budget_bytes - reserved_memory_bytes) /
          (primary_bytes_per_block + auxiliary_bytes_per_block);
 }
 
@@ -406,23 +473,74 @@ size_t PagedKeyValueCacheBytesPerBlock(const std::shared_ptr<Model>& model) {
   return bytes;
 }
 
+size_t PagedCacheCaptureBlockTableBytes(const std::shared_ptr<Model>& model) {
+  const auto& batching = *model->config_->engine.dynamic_batching;
+  const auto& decoder = model->config_->model.decoder;
+  if (!batching.device_memory_budget_bytes || !IsGraphCaptureEnabled(decoder.session_options)) {
+    return 0;
+  }
+  const size_t context_length = static_cast<size_t>(model->config_->model.context_length);
+  const size_t columns = std::max(size_t{1}, context_length / batching.block_size +
+                                                 (context_length % batching.block_size != 0));
+  size_t table_bytes = CheckedMultiply(batching.max_batch_size, columns, "Capture block-table allocation");
+  table_bytes = CheckedMultiply(table_bytes, sizeof(int32_t), "Capture block-table allocation");
+  if (!WindowedLayers(model, ResolvePagedKeyValueGroup(decoder)).empty()) {
+    table_bytes = CheckedMultiply(table_bytes, 2, "Capture block-table allocation");
+  }
+  return table_bytes;
+}
+
+bool ResolvePrefixCachingEnabled(const std::shared_ptr<Model>& model,
+                                 size_t auxiliary_bytes_per_block) {
+  const auto& batching = *model->config_->engine.dynamic_batching;
+  if (!batching.prefix_caching.value_or(true)) {
+    return false;
+  }
+
+  const auto paged_group =
+      ResolvePagedKeyValueGroup(model->config_->model.decoder);
+  const auto windowed = WindowedLayers(model, paged_group);
+  const char* unsupported_layout = nullptr;
+  if (!model->config_->model.dflash2.filename.empty() &&
+      model->config_->model.dflash2.is_dspark) {
+    unsupported_layout =
+        "Prefix caching does not yet support an Engine-hosted DSpark drafter.";
+  } else if (auxiliary_bytes_per_block != 0) {
+    unsupported_layout =
+        "Prefix caching does not yet support an auxiliary cache that mirrors target blocks.";
+  } else if (!windowed.empty()) {
+    return false;
+  }
+  if (!unsupported_layout) {
+    return true;
+  }
+  if (batching.prefix_caching.has_value()) {
+    throw std::runtime_error(unsupported_layout);
+  }
+  return false;
+}
+
 PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model,
                                        size_t auxiliary_bytes_per_block,
-                                       size_t auxiliary_reserved_memory_bytes)
+                                       size_t auxiliary_reserved_memory_bytes,
+                                       bool requires_prefix_checkpoint,
+                                       size_t max_prefix_checkpoints)
     : model_(model) {
   const auto& decoder = model->config_->model.decoder;
+  window_block_table_required_ =
+      !decoder.inputs.block_table_windowed.empty() &&
+      model->session_info_.HasInput(decoder.inputs.block_table_windowed);
   const size_t block_size = model->config_->engine.dynamic_batching->block_size;
   const size_t max_batch_size = model->config_->engine.dynamic_batching->max_batch_size;
   const auto paged_group = ResolvePagedKeyValueGroup(decoder);
   ValidateScaleBindings(decoder, paged_group);
   const auto dtype = KeyValueCacheType(model_, paged_group);
+  const bool prefix_caching_enabled =
+      ResolvePrefixCachingEnabled(model, auxiliary_bytes_per_block);
 
   const auto windowed = WindowedLayers(model, paged_group);
   size_t num_window_blocks = 0;
   if (!windowed.empty()) {
-    if (decoder.sliding_window->window_size <= 0) {
-      throw std::runtime_error("Sliding-window size must be greater than zero.");
-    }
     window_size_ = static_cast<size_t>(decoder.sliding_window->window_size);
 
     // A step covers positions [past, past + scheduled) and each of those queries reaches back
@@ -455,11 +573,38 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model,
     }
     windowed_bytes += layer_bytes;
   }
+  const size_t table_bytes = PagedCacheCaptureBlockTableBytes(model);
+  if (table_bytes > std::numeric_limits<size_t>::max() - windowed_bytes) {
+    throw std::overflow_error("Paged cache reserved memory overflows size_t");
+  }
+  const size_t reserved_bytes = windowed_bytes + table_bytes;
   const auto num_blocks = ComputeNumBlocks(model_, PagedKeyValueCacheBytesPerBlock(model),
-                                           windowed_bytes,
+                                           reserved_bytes,
                                            auxiliary_bytes_per_block,
                                            auxiliary_reserved_memory_bytes);
+  if (model->config_->engine.dynamic_batching->device_memory_budget_bytes && num_blocks == 0) {
+    throw std::runtime_error(
+        "engine.dynamic_batching.device_memory_budget_bytes is too small "
+        "to hold a cache block after Engine reservations.");
+  }
 
+  auto& allocator = model->p_device_kvcache_->GetAllocator();
+  const auto create_payload = [&](const std::vector<int64_t>& shape,
+                                  std::unique_ptr<void, Ort::AllocatorDeleter>& storage) {
+    if (!model->config_->engine.dynamic_batching->device_memory_budget_bytes) {
+      return OrtValue::CreateTensor(allocator, shape, dtype);
+    }
+    if (!allocator.Reserve) {
+      throw std::runtime_error("device_memory_budget_bytes requires allocator Reserve support.");
+    }
+    size_t bytes = Ort::SizeOf(dtype);
+    for (const auto dimension : shape) {
+      bytes = CheckedMultiply(bytes, static_cast<size_t>(dimension), "Budgeted paged cache allocation");
+    }
+    storage.reset(allocator.Reserve(&allocator, bytes));
+    if (!storage) throw std::bad_alloc();
+    return OrtValue::CreateTensor(allocator.GetInfo(), storage.get(), bytes, shape, dtype);
+  };
   for (const int layer_id : paged_group.layer_ids) {
     const auto blocks = windowed.count(layer_id) != 0 ? num_window_blocks : num_blocks;
     const auto key_name = ComposeKeyValueName(decoder.inputs.past_key_names, layer_id);
@@ -470,9 +615,15 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model,
                                                    static_cast<int64_t>(CacheHeadSize(model, key_name))};
     auto value_shape_per_layer = key_shape_per_layer;
     value_shape_per_layer.back() = static_cast<int64_t>(CacheHeadSize(model, value_name));
+    std::unique_ptr<void, Ort::AllocatorDeleter> key_storage(nullptr, Ort::AllocatorDeleter(&allocator));
+    std::unique_ptr<void, Ort::AllocatorDeleter> value_storage(nullptr, Ort::AllocatorDeleter(&allocator));
+    auto key_cache = create_payload(key_shape_per_layer, key_storage);
+    auto value_cache = create_payload(value_shape_per_layer, value_storage);
     cache_.push_back(LayerCache{
-        OrtValue::CreateTensor(model->p_device_kvcache_->GetAllocator(), key_shape_per_layer, dtype),
-        OrtValue::CreateTensor(model->p_device_kvcache_->GetAllocator(), value_shape_per_layer, dtype),
+        std::move(key_storage),
+        std::move(value_storage),
+        std::move(key_cache),
+        std::move(value_cache),
         key_name,
         value_name,
         ComposeKeyValueName(decoder.outputs.present_key_names, layer_id),
@@ -497,7 +648,6 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model,
       for (const auto dimension : scale_shape) {
         scale_bytes = CheckedMultiply(scale_bytes, static_cast<size_t>(dimension), "Paged scale cache allocation");
       }
-      auto& allocator = model->p_device_kvcache_->GetAllocator();
       std::unique_ptr<void, Ort::AllocatorDeleter> storage(
           allocator.Reserve ? allocator.Reserve(&allocator, scale_bytes) : allocator.Alloc(scale_bytes),
           Ort::AllocatorDeleter(&allocator));
@@ -510,6 +660,13 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model,
     }
   }
   block_pool_ = std::make_unique<BlockPool>(block_size, num_blocks);
+  PrefixCacheOptions prefix_options;
+  prefix_options.enabled = prefix_caching_enabled;
+  prefix_options.max_blocks = num_blocks;
+  prefix_options.requires_checkpoint = requires_prefix_checkpoint;
+  prefix_options.max_checkpoints = max_prefix_checkpoints;
+  prefix_cache_ =
+      std::make_unique<PrefixCache>(*block_pool_, prefix_options);
   if (Windowed()) {
     window_block_pool_ = std::make_unique<BlockPool>(block_size, num_window_blocks);
   }
@@ -658,19 +815,51 @@ void PagedKeyValueCache::AppendTokens(std::shared_ptr<Request> request) {
 }
 
 void PagedKeyValueCache::Remove(std::shared_ptr<Request> request) {
-  RemovePagedCacheBlockTable(*block_pool_, window_block_pool_.get(),
-                             block_tables_, request.get());
-  RebuildBlockTableIndex();
+  ValidateRemove(request.get());
+  RemoveValidated(request.get());
 }
 
 void PagedKeyValueCache::ValidateRemove(const void* request_id) const {
-  ValidateRemovePagedCacheBlockTable(
-      *block_pool_, window_block_pool_.get(), block_tables_, request_id);
+  const auto table = std::find_if(
+      block_tables_.begin(), block_tables_.end(),
+      [request_id](const PagedCacheBlockTable& candidate) {
+        return candidate.RequestId() == request_id;
+      });
+  if (table == block_tables_.end()) {
+    return;
+  }
+
+  block_pool_->ValidateFree(table->Blocks());
+  if (window_block_pool_) {
+    window_block_pool_->ValidateFree(table->WindowBlocks());
+  }
 }
 
 void PagedKeyValueCache::RemoveValidated(const void* request_id) noexcept {
-  RemoveValidatedPagedCacheBlockTable(
-      *block_pool_, window_block_pool_.get(), block_tables_, request_id);
+  const auto table = std::find_if(
+      block_tables_.begin(), block_tables_.end(),
+      [request_id](const PagedCacheBlockTable& candidate) {
+        return candidate.RequestId() == request_id;
+      });
+  if (table == block_tables_.end()) {
+    return;
+  }
+
+  if (!block_pool_->CanFreeValidated(table->Blocks()) ||
+      (window_block_pool_ &&
+       !window_block_pool_->CanFreeValidated(table->WindowBlocks()))) {
+    std::terminate();
+  }
+  block_pool_->FreeValidated(table->Blocks());
+  if (window_block_pool_) {
+    window_block_pool_->FreeValidated(table->WindowBlocks());
+  }
+  table->blocks_.clear();
+  table->window_blocks_.clear();
+  if (table != block_tables_.end() - 1) {
+    *table = std::move(block_tables_.back());
+  }
+  block_tables_.pop_back();
   RebuildBlockTableIndex();
 }
 
@@ -693,9 +882,242 @@ size_t PagedKeyValueCache::CommittedSlots(
 }
 
 PagedCacheReservation PagedKeyValueCache::Reserve(std::span<const PagedCacheReservationRequest> requests) {
+  RetainedBlockReclaimer reclaimer{*prefix_cache_};
   return PagedCacheReservation{*block_pool_, block_tables_, requests,
                                window_block_pool_.get(), window_ring_blocks_,
-                               block_table_index_.get()};
+                               block_table_index_.get(), &reclaimer};
+}
+
+PrefixCacheMatch PagedKeyValueCache::MatchPrefix(
+    std::span<const int32_t> tokens, size_t max_adoptable_tokens) {
+  return prefix_cache_->Match(tokens, max_adoptable_tokens);
+}
+
+void PagedKeyValueCache::RecordPrefixAdoptions(
+    const PagedCacheReservation& reservation) noexcept {
+  for (const auto& delta : reservation.Deltas()) {
+    if (delta.adopted_block_count == 0) {
+      continue;
+    }
+    prefix_cache_->RecordAdoption(
+        std::span<const std::shared_ptr<Block>>{
+            reservation.AdoptedBlocks().data() +
+                delta.adopted_block_offset,
+            delta.adopted_block_count});
+  }
+}
+
+void PagedKeyValueCache::RecordDeferredPrefixMatches(size_t count) noexcept {
+  prefix_cache_->RecordDeferredMatches(count);
+}
+
+void PagedKeyValueCache::RecordPrefixPublicationRefusal() noexcept {
+  prefix_cache_->RecordPublicationRefusal();
+}
+
+bool PagedKeyValueCache::PrefixCachingEnabled() const {
+  return prefix_cache_->Enabled();
+}
+
+const PrefixCacheMetrics& PagedKeyValueCache::PrefixMetrics() const {
+  return prefix_cache_->Metrics();
+}
+
+void PagedKeyValueCache::SealCommittedBlocks(
+    const void* request_id, std::span<const int32_t> tokens,
+    std::shared_ptr<const FixedStatePrefixCheckpoint> checkpoint) {
+  if (!prefix_cache_->Enabled()) {
+    return;
+  }
+  if (RequiresPrefixCheckpoint()) {
+    if (checkpoint) {
+      const size_t token_count = checkpoint->TokenCount();
+      SealCheckpointedPrefix(
+          request_id, tokens, token_count, [checkpoint = std::move(checkpoint)] { return checkpoint; });
+    }
+    return;
+  }
+  const auto table_index = block_table_index_->Find(request_id);
+  if (!table_index || *table_index >= block_tables_.size()) {
+    return;
+  }
+  auto& table = block_tables_[*table_index];
+  if (table.sealing_stopped_) {
+    return;
+  }
+  const size_t block_size = block_pool_->BlockSize();
+  const size_t full_blocks = table.committed_slots_ / block_size;
+  if (full_blocks <= table.sealed_blocks_) {
+    return;
+  }
+  if (tokens.size() < full_blocks * block_size) {
+    throw std::runtime_error(
+        "The request token mirror is shorter than its committed paged cache.");
+  }
+
+  auto parent = table.sealed_identity_;
+  for (size_t index = table.sealed_blocks_; index < full_blocks; ++index) {
+    auto registration = prefix_cache_->Register(
+        table.blocks_[index],
+        tokens.subspan(index * block_size, block_size),
+        parent);
+    if (!registration.identity) {
+      table.sealing_stopped_ = registration.StopsSealing();
+      break;
+    }
+    parent = std::move(registration.identity);
+    table.sealed_blocks_ = index + 1;
+    table.sealed_identity_ = parent;
+  }
+}
+
+void PagedKeyValueCache::SealCheckpointedPrefix(
+    const void* request_id, std::span<const int32_t> tokens, size_t token_count,
+    const std::function<std::shared_ptr<const FixedStatePrefixCheckpoint>()>& capture_checkpoint) {
+  if (!prefix_cache_->Enabled() || !RequiresPrefixCheckpoint() ||
+      !CanSealPrefixCheckpoint(request_id, token_count, tokens)) {
+    return;
+  }
+  auto& table = block_tables_[*block_table_index_->Find(request_id)];
+  const size_t block_size = block_pool_->BlockSize();
+  const size_t full_blocks = token_count / block_size;
+  auto registration = prefix_cache_->RegisterCheckpointedPrefix(
+      std::span<const std::shared_ptr<Block>>{table.blocks_}.subspan(
+          table.sealed_blocks_, full_blocks - table.sealed_blocks_),
+      tokens.subspan(table.sealed_blocks_ * block_size,
+                     (full_blocks - table.sealed_blocks_) * block_size),
+      table.sealed_identity_, capture_checkpoint);
+  if (registration.identity) {
+    table.sealed_blocks_ = full_blocks;
+    table.sealed_identity_ = std::move(registration.identity);
+  } else {
+    // A duplicate checkpoint at this boundary is usable by a future request, but this request has
+    // already computed a private physical history and may diverge before its next checkpoint. Keep
+    // the whole private suffix retryable so the later endpoint can publish as its own exact
+    // physical variant. True hash collisions remain permanently unreachable.
+    table.sealing_stopped_ =
+        registration.status == PrefixCacheRegistrationStatus::HashCollision;
+  }
+}
+
+bool PagedKeyValueCache::CanSealPrefixCheckpoint(
+    const void* request_id, size_t token_count,
+    std::span<const int32_t> tokens) {
+  const auto table_index = block_table_index_->Find(request_id);
+  if (!table_index || *table_index >= block_tables_.size()) {
+    return false;
+  }
+  auto& table = block_tables_[*table_index];
+  const size_t block_size = block_pool_->BlockSize();
+  if (table.sealing_stopped_ || token_count == 0 ||
+      token_count != table.committed_slots_ || token_count % block_size != 0 ||
+      table.sealed_blocks_ >= token_count / block_size) {
+    return false;
+  }
+  if (tokens.size() < token_count) {
+    throw std::runtime_error(
+        "The request token mirror is shorter than its committed paged cache.");
+  }
+  const auto status = prefix_cache_->CheckCheckpointedPrefix(
+      std::span<const std::shared_ptr<Block>>{table.blocks_}.subspan(
+          table.sealed_blocks_, token_count / block_size - table.sealed_blocks_),
+      tokens.subspan(table.sealed_blocks_ * block_size,
+                     token_count - table.sealed_blocks_ * block_size),
+      table.sealed_identity_);
+  // A concurrent request may duplicate this checkpoint and then diverge before its next one.
+  // Retain its private blocks and retry the entire suffix at that later boundary.
+  table.sealing_stopped_ =
+      status == PrefixCacheRegistrationStatus::HashCollision;
+  return status == PrefixCacheRegistrationStatus::Indexed;
+}
+
+bool PagedKeyValueCache::CanAttachPrefixCheckpoint(
+    const void* request_id, size_t token_count) const {
+  const auto table_index = block_table_index_->Find(request_id);
+  if (!table_index || *table_index >= block_tables_.size()) {
+    return false;
+  }
+  const auto& table = block_tables_[*table_index];
+  const size_t block_size = block_pool_->BlockSize();
+  return token_count != 0 &&
+         token_count == table.committed_slots_ &&
+         token_count % block_size == 0 &&
+         table.sealed_blocks_ == token_count / block_size &&
+         prefix_cache_->CanAttachCheckpoint(table.sealed_identity_);
+}
+
+bool PagedKeyValueCache::AttachPrefixCheckpoint(
+    const void* request_id,
+    std::shared_ptr<const FixedStatePrefixCheckpoint> checkpoint) {
+  if (!checkpoint ||
+      !CanAttachPrefixCheckpoint(request_id, checkpoint->TokenCount())) {
+    return false;
+  }
+  const auto table_index = block_table_index_->Find(request_id);
+  return prefix_cache_->AttachCheckpoint(
+      block_tables_[*table_index].sealed_identity_, std::move(checkpoint));
+}
+
+std::optional<DraftPrefixBoundary> PagedKeyValueCache::DraftBoundary(
+    const void* request_id, size_t token_count) const {
+  if (!prefix_cache_->Enabled() || !prefix_cache_->Options().requires_checkpoint) {
+    return std::nullopt;
+  }
+  const auto table_index = block_table_index_->Find(request_id);
+  if (!table_index || *table_index >= block_tables_.size()) {
+    return std::nullopt;
+  }
+  const auto& table = block_tables_[*table_index];
+  if (token_count == 0 || token_count != table.committed_slots_ ||
+      token_count % block_pool_->BlockSize() != 0 ||
+      table.sealed_blocks_ != token_count / block_pool_->BlockSize()) {
+    return std::nullopt;
+  }
+  auto checkpoint = prefix_cache_->DraftBoundary(table.sealed_identity_, token_count);
+  if (!checkpoint) {
+    return std::nullopt;
+  }
+  return DraftPrefixBoundary{table.sealed_identity_, std::move(checkpoint)};
+}
+
+bool PagedKeyValueCache::AttachDraftCheckpoint(
+    const DraftPrefixBoundary& boundary,
+    std::shared_ptr<const Dflash2PrefixCheckpoint> checkpoint) {
+  return prefix_cache_->AttachDraftCheckpoint(boundary.first, boundary.second, std::move(checkpoint));
+}
+
+void PagedKeyValueCache::DropUnleasedDraftCheckpoints() {
+  prefix_cache_->DropUnleasedDraftCheckpoints();
+}
+
+size_t PagedKeyValueCache::ReclaimPrefixCheckpoints(
+    size_t checkpoints_needed) {
+  return prefix_cache_->ReclaimCheckpoints(checkpoints_needed);
+}
+
+bool PagedKeyValueCache::ReclaimPrefixCheckpoint(
+    const FixedStatePrefixCheckpoint* checkpoint) {
+  return prefix_cache_->ReclaimCheckpoint(checkpoint);
+}
+
+size_t PagedKeyValueCache::ReclaimablePrefixCheckpoints() const {
+  return prefix_cache_->ReclaimableCheckpoints();
+}
+
+const FixedStatePrefixCheckpoint* PagedKeyValueCache::ReclaimablePrefixCheckpoint(
+    const void* request_id) const {
+  std::shared_ptr<const BlockIdentity> current_path;
+  if (request_id) {
+    const auto table_index = block_table_index_->Find(request_id);
+    if (table_index && *table_index < block_tables_.size()) {
+      current_path = block_tables_[*table_index].sealed_identity_;
+    }
+  }
+  return prefix_cache_->ReclaimableCheckpoint(current_path);
+}
+
+bool PagedKeyValueCache::RequiresPrefixCheckpoint() const {
+  return prefix_cache_->Options().requires_checkpoint;
 }
 
 void PagedKeyValueCache::RebuildBlockTableIndex() noexcept {
@@ -723,7 +1145,8 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
         "Step plan request limit exceeds the configured batch size.");
   }
 
-  const size_t available_blocks = block_pool_->AvailableBlocks();
+  const size_t available_blocks =
+      block_pool_->AvailableBlocks() + prefix_cache_->ReclaimableBlocks();
   const size_t available_window_blocks =
       Windowed() ? window_block_pool_->AvailableBlocks() : 0;
   size_t planned_blocks = 0;
@@ -736,14 +1159,20 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
   struct CacheGrowth {
     size_t proposed_blocks{};
     size_t new_blocks{};
+    std::vector<size_t> claimed_retained_blocks;
   };
+  std::unordered_set<size_t> charged_retained_blocks;
   // Blocks the request has to own for this step. A chunked prefill is planned one chunk at a time,
   // but the blocks are taken for the whole sequence: admitting a prompt on the strength of its
   // first chunk and then losing the rest of the pool to another request would stall it part way
   // through, holding the blocks it already took. PagedCacheReservation reserves the same blocks.
   const auto calculate_growth = [&](const RequestStepPlan& entry,
                                     const PagedCacheBlockTable* table) {
-    const size_t committed_slots = table ? table->committed_slots_ : 0;
+    const size_t adopted_blocks =
+        entry.prefix_match ? entry.prefix_match->blocks.size() : 0;
+    const size_t committed_slots =
+        table ? table->committed_slots_
+              : (entry.prefix_match ? entry.prefix_match->token_count : 0);
     if (entry.target_cache_slots < committed_slots) {
       throw StepPlanningConsistencyError(
           "Step plan target precedes the committed cache boundary.");
@@ -751,12 +1180,33 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
 
     const size_t reserved_slots =
         std::max(entry.whole_sequence_cache_slots, entry.target_cache_slots);
-    const size_t committed_blocks = table ? table->blocks_.size() : 0;
+    std::vector<size_t> claimed_retained_blocks;
+    if (entry.prefix_match &&
+        !entry.prefix_match->fixed_state_checkpoint) {
+      // A hybrid Match returns one complete physical history together with a shared fixed-state
+      // checkpoint. That shared checkpoint leases its endpoint, and prefix-cache reclamation
+      // protects the endpoint's complete physical ancestry. None of the adopted blocks can
+      // contribute to available_blocks, so avoid rebuilding the pool-sized leased-ancestry bitmap
+      // for every queued candidate. An optional draft checkpoint is attached only at the same
+      // endpoint; this fast path relies on the fixed checkpoint, not on draft coverage.
+      for (const size_t block_id :
+           prefix_cache_->ReclaimableBlockIds(entry.prefix_match->blocks)) {
+        // Charge only paged-only retained blocks that contribute to available_blocks. Claiming a
+        // shared block once prevents later candidates from planning against capacity that the
+        // first selected adoption protects.
+        if (charged_retained_blocks.count(block_id) == 0) {
+          claimed_retained_blocks.push_back(block_id);
+        }
+      }
+    }
+    const size_t committed_blocks =
+        table ? table->blocks_.size() : adopted_blocks;
     const size_t committed_capacity = committed_blocks * block_pool_->BlockSize();
     const size_t additional_slots =
         reserved_slots > committed_capacity ? reserved_slots - committed_capacity : 0;
     const size_t new_blocks = block_pool_->BlocksNeeded(additional_slots);
-    return CacheGrowth{committed_blocks + new_blocks, new_blocks};
+    return CacheGrowth{committed_blocks + new_blocks, new_blocks,
+                       std::move(claimed_retained_blocks)};
   };
   const auto permanently_unserviceable = [&](const CacheGrowth& growth) {
     return growth.proposed_blocks > block_pool_->Capacity() ||
@@ -767,7 +1217,11 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
                           const CacheGrowth& growth) {
     // Compact selected entries in place. Requests skipped for temporary capacity pressure remain
     // pending with their committed block tables untouched and can be reconsidered next Run().
-    planned_blocks += growth.new_blocks;
+    planned_blocks +=
+        growth.new_blocks + growth.claimed_retained_blocks.size();
+    charged_retained_blocks.insert(
+        growth.claimed_retained_blocks.begin(),
+        growth.claimed_retained_blocks.end());
     max_blocks_per_request =
         std::max(max_blocks_per_request, growth.proposed_blocks);
     if (selected_requests != request_index) {
@@ -811,7 +1265,9 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
          (committed_request_count + selected_new_requests >= max_batch_size_ ||
           (Windowed() &&
            (selected_new_requests + 1) * window_ring_blocks_ > available_window_blocks))) ||
-        planned_blocks + growth.new_blocks > available_blocks) {
+        planned_blocks + growth.new_blocks +
+                growth.claimed_retained_blocks.size() >
+            available_blocks) {
       capacity_deferred = true;
       continue;
     }
@@ -870,6 +1326,13 @@ PagedCacheSnapshot PagedKeyValueCache::Snapshot() const {
   snapshot.total_blocks = block_pool_->Capacity();
   snapshot.free_blocks = block_pool_->AvailableBlocks();
   snapshot.block_table_columns = block_table_columns_;
+  const auto owned_blocks = block_pool_->OwnedBlocks();
+  snapshot.blocks.reserve(owned_blocks.size());
+  for (const auto& block : owned_blocks) {
+    snapshot.blocks.push_back(CachedBlockSnapshot{
+        block->Id(), block->RefCount(), block->Size(),
+        block->IsFull(), block->HasIdentity()});
+  }
   snapshot.requests.reserve(block_tables_.size());
   for (const auto& block_table : block_tables_) {
     RequestBlockSnapshot request_snapshot;
@@ -908,6 +1371,11 @@ PagedCacheSnapshot PagedKeyValueCache::Snapshot(
   for (const auto& block : reservation.ReservedBlocks()) {
     snapshot.transaction_reserved_block_ids.push_back(block->Id());
   }
+  snapshot.transaction_adopted_block_ids.reserve(
+      reservation.AdoptedBlocks().size());
+  for (const auto& block : reservation.AdoptedBlocks()) {
+    snapshot.transaction_adopted_block_ids.push_back(block->Id());
+  }
   snapshot.window_blocks.transaction_reserved_block_ids.reserve(
       reservation.ReservedWindowBlocks().size());
   for (const auto& block : reservation.ReservedWindowBlocks()) {
@@ -924,6 +1392,12 @@ PagedCacheSnapshot PagedKeyValueCache::Snapshot(
     for (size_t i = 0; i < delta.reserved_block_count; ++i) {
       request_reservation.reserved_block_ids.push_back(
           reservation.ReservedBlocks()[delta.reserved_block_offset + i]->Id());
+    }
+    request_reservation.adopted_block_ids.reserve(
+        delta.adopted_block_count);
+    for (size_t i = 0; i < delta.adopted_block_count; ++i) {
+      request_reservation.adopted_block_ids.push_back(
+          reservation.AdoptedBlocks()[delta.adopted_block_offset + i]->Id());
     }
     snapshot.reservations.push_back(std::move(request_reservation));
   }
@@ -1085,6 +1559,10 @@ std::pair<OrtValue*, const char*> PagedKeyValueCache::BlockTables(
 }
 
 std::pair<OrtValue*, const char*> PagedKeyValueCache::WindowBlockTables(const std::vector<std::shared_ptr<Request>>& requests) {
+  if (!Windowed()) {
+    return {graph_capture_ ? block_tables_tensor_->GetOrtTensor() : block_tables_value_.get(),
+            model_->config_->model.decoder.inputs.block_table_windowed.c_str()};
+  }
   // Must run after BlockTables(), which is what settles the column count for this step. Both
   // tables carry the same columns so that a position resolves through the same index in each.
   const size_t columns = block_table_columns_;
@@ -1115,6 +1593,10 @@ std::pair<OrtValue*, const char*> PagedKeyValueCache::WindowBlockTables(
     const std::vector<std::shared_ptr<Request>>& requests,
     const PagedCacheReservation& reservation,
     size_t columns) {
+  if (!Windowed()) {
+    return {graph_capture_ ? block_tables_tensor_->GetOrtTensor() : block_tables_value_.get(),
+            model_->config_->model.decoder.inputs.block_table_windowed.c_str()};
+  }
   const std::vector<int64_t> shape = {static_cast<int64_t>(requests.size()),
                                       static_cast<int64_t>(columns)};
   int32_t* data = nullptr;
@@ -1152,7 +1634,7 @@ void PagedKeyValueCache::BindCache(State& state) {
   auto cache_names = Names();
   auto cache_output_names = OutputNames();
 
-  const size_t num_block_tables = Windowed() ? 2 : 1;
+  const size_t num_block_tables = window_block_table_required_ ? 2 : 1;
   // Every scale cache is bound on both sides, so the output layout mirrors the input layout minus
   // the block tables. Sizing both up front keeps the indices below stable across steps.
   const size_t num_state_outputs = cache.size() * 2 + scale_cache_.size();
@@ -1203,7 +1685,7 @@ void PagedKeyValueCache::UpdateState(State& state, const std::vector<std::shared
   state.inputs_[block_table_index] = block_tables.first;
   state.input_names_[block_table_index] = block_tables.second;
 
-  if (Windowed()) {
+  if (window_block_table_required_) {
     // Depends on the column count BlockTables() just settled, so it has to follow it.
     auto window_block_tables = WindowBlockTables(requests);
     state.inputs_[block_table_index + 1] = window_block_tables.first;
@@ -1221,7 +1703,7 @@ void PagedKeyValueCache::UpdateState(
   const size_t block_table_index = cache_.size() * 2 + scale_cache_.size();
   state.inputs_[block_table_index] = block_tables.first;
   state.input_names_[block_table_index] = block_tables.second;
-  if (Windowed()) {
+  if (window_block_table_required_) {
     auto window_block_tables = WindowBlockTables(requests, reservation, columns);
     state.inputs_[block_table_index + 1] = window_block_tables.first;
     state.input_names_[block_table_index + 1] = window_block_tables.second;

@@ -13,6 +13,7 @@
 #include "engine_invariants.h"
 #include "step_plan.h"
 #include "turn_policy.h"
+#include "../decoding/speculative_sampling.h"
 
 /**
  * @file request.h
@@ -23,6 +24,7 @@
 namespace Generators {
 
 namespace test {
+struct EngineRunTestAccess;
 struct RequestGuidanceTestAccess;
 }  // namespace test
 
@@ -34,7 +36,7 @@ class StopStringController;
 // Resident-session policy. Everything here outlives a single turn.
 struct RequestOptions {
   // Total tokens (prompt plus generated, across every turn) the Request may ever reach. Defaults to
-  // the model-configured search.max_length, which is also its ceiling.
+  // model-configured search.max_length capped by a nonzero Engine max_request_length.
   std::optional<size_t> max_session_tokens;
 };
 
@@ -60,10 +62,18 @@ struct TurnOptions {
   // an already-configured turn, cleared). Bounds and UTF-8 validity are enforced by
   // OgaTurnOptionsSetStopStrings (via StopStringMatcher) before this is populated.
   std::vector<std::string> stop_strings;
-  // Copied grammar for this turn. Both empty means the turn is unguided; guidance is never
+  // Copied whole-turn grammar. Both empty means no whole-turn guidance; guidance is never
   // inherited from a previous turn or from model/Request state.
   std::string guidance_type;
   std::string guidance_data;
+  // The marker-scoped grammar is owned by these options and is mutually exclusive with
+  // whole-turn guidance. Keeping all three values together prevents partial configurations.
+  struct DelimitedGuidance {
+    int32_t opening_token;
+    int32_t closing_token;
+    std::string grammar;
+  };
+  std::optional<DelimitedGuidance> delimited_guidance;
 
   void ValidateOwnerThread() const;
   // Restores every option to its unset state, leaving the bound Request alone.
@@ -80,6 +90,9 @@ struct RequestStepResult {
   int32_t matched_stop_string_index{-1};
   std::array<int32_t, kMaxGeneratedTokensPerStep> visible_tokens{};
   size_t visible_token_count{};
+  // Internal commit feedback, independent of stop buffering and caller event-drain rate.
+  size_t candidates_consumed{};
+  size_t tokens_appended{};
 };
 
 struct RequestTurnAdmission {
@@ -115,6 +128,20 @@ struct RequestTurnAdmission {
 struct RequestTurnCounters {
   uint64_t prompt_tokens{};
   uint64_t generated_tokens{};
+};
+
+// Fully prepared Request-local state for an externally requested rewind. Engine prepares this
+// before releasing cache ownership, then publishes it through Request::CommitRewind at a no-throw
+// boundary.
+struct RequestRewindState {
+  RequestRewindState();
+  RequestRewindState(RequestRewindState&&) noexcept;
+  RequestRewindState& operator=(RequestRewindState&&) noexcept;
+  ~RequestRewindState();
+
+  std::unique_ptr<Search> search;
+  size_t sequence_length{};
+  size_t retained_turn_count{};
 };
 
 /**
@@ -159,11 +186,17 @@ struct Request : std::enable_shared_from_this<Request>,
   uint64_t BeginTurn(
       std::span<const int32_t> tokens,
       const TurnOptions& options);
+  // Rewinds a completed Request to the sequence boundary before the identified Turn began.
+  // Turn IDs are never reused; the next BeginTurn replays the retained prefix.
+  void RewindToStartOfTurn(uint64_t turn_id);
   void ValidateOwnerThread() const;
   void AttachToEngine(std::shared_ptr<Engine> engine) noexcept;
   bool BelongsTo(const Engine& engine) const noexcept;
   bool IsAwaitingFirstTurn() const noexcept;
   bool IsRestartableCanceledTurn() const noexcept;
+  bool NeedsReplayAfterRewind() const noexcept {
+    return needs_replay_after_rewind_;
+  }
   void ValidateTurnAdmission(
       std::span<const int32_t> tokens,
       const TurnOptions& options) const;
@@ -260,6 +293,12 @@ struct Request : std::enable_shared_from_this<Request>,
    * one full stream synchronization per request per step.
    */
   std::span<const int32_t> UnprocessedTokensCpu() const;
+  std::span<const int32_t> TokensCpu() const { return tokens_host_; }
+  void StagePrefixAdoption(size_t adopted_tokens);
+  void RollbackPrefixAdoption() noexcept;
+  void CommitPrefixAdoption() noexcept { prefix_adoption_staged_ = false; }
+  size_t AdoptedPrefixLength() const noexcept { return adopted_prefix_length_; }
+  size_t TurnCachedPromptTokens() const noexcept { return turn_cached_prompt_tokens_; }
 
   /**
    * @brief Launches the generation of the next token based on the provided logits.
@@ -288,6 +327,16 @@ struct Request : std::enable_shared_from_this<Request>,
    */
   void SetDraftTokens(std::span<const int32_t> tokens);
 
+  // Samples one token from each independent draft distribution and retains the sparse q(x)
+  // distributions for probability-ratio verification. Learned-lattice DFlash2 continues to call
+  // SetDraftTokens.
+  void SetDraftTokenDistributions(std::span<const TargetTokenSelection> distributions);
+
+  // Stages drafts the caller already drew, with the distribution each was drawn from, for
+  // probability-ratio verification.
+  void SetSampledDraftTokens(std::span<const int32_t> tokens,
+                             std::span<const TargetTokenSelection> distributions);
+
   /**
    * @brief Draft tokens proposed for the next step but not yet sent through the model.
    */
@@ -314,6 +363,7 @@ struct Request : std::enable_shared_from_this<Request>,
 
   void AppendDraftsForTransaction(size_t draft_count);
   std::span<const int32_t> StagedDraftTokens() const;
+  std::span<const TargetTokenSelection> StagedDraftTokenDistributions() const;
   void CommitAcceptedDraftsForTransaction(size_t accepted_count);
   bool DraftVerificationCompletedGeneration() const noexcept {
     return draft_verification_.completed_generation;
@@ -372,6 +422,19 @@ struct Request : std::enable_shared_from_this<Request>,
    * Updates the host-side token mirror and the request status.
    */
   RequestStepResult CompleteGeneration();
+
+  /**
+   * @brief Commits tokens an executor selected itself, in sequence order, and reports the step.
+   * @param tokens One to kMaxGeneratedTokensPerStep tokens the executor decided to commit.
+   *
+   * Each token goes through Search::CommitToken, so EOS and the session limit follow the ordinary
+   * bookkeeping (an EOS token ends the turn and is not appended). Stop strings observe every
+   * appended token. The turn limit, the context limit and a stop match end the turn at the first
+   * token that reaches them, with the same precedence as StageGeneration (stop string, EOS, turn
+   * limit, context limit); tokens after that one are not committed. The returned step lists the
+   * appended tokens only.
+   */
+  RequestStepResult CommitExternalTokens(std::span<const int32_t> tokens);
 
   /**
    * @brief Checks if the current generation turn reached a stopping condition.
@@ -484,7 +547,8 @@ struct Request : std::enable_shared_from_this<Request>,
    *        handing the logits to the search, and applying the logits processors.
    */
   void PrepareGeneration(DeviceSpan<float> logits, bool guidance_applied = false);
-  bool HasGuidance() const { return guidance_logits_processor_ != nullptr; }
+  bool HasGuidance() const;
+  bool HasDelimitedGuidance() const;
   std::span<const uint32_t> GetReadyGuidanceMask();
 
   /**
@@ -500,6 +564,8 @@ struct Request : std::enable_shared_from_this<Request>,
    */
   BatchedSamplerState& SamplingState(BatchedSampler& sampler);
   void CommitSamplingState(std::unique_ptr<BatchedSamplerState> state) noexcept;
+  RequestRewindState PrepareRewindToStartOfTurn(uint64_t turn_id) const;
+  void CommitRewind(RequestRewindState&& state) noexcept;
 
   /**
    * @brief The durable seed basis a newly created sampler state starts from.
@@ -539,12 +605,19 @@ struct Request : std::enable_shared_from_this<Request>,
                                       bool device_state_checkpointed);
 
  private:
+  struct TurnBoundary {
+    uint64_t turn_id{};
+    size_t sequence_length{};
+  };
+
   // The search sequence is partitioned at processed_sequence_length_: tokens before it already
   // have KV entries, and UnprocessedTokens() returns the scheduled prefix of [processed, current).
   // Host-side mirror of the full sequence (prompt + generated tokens). Kept in step with the
   // search's device sequence so that streaming and input-id preparation never read it back.
   std::vector<int32_t> tokens_host_;
+  friend struct Engine;
   friend struct ScheduledRequests;
+  friend struct test::EngineRunTestAccess;
   friend struct test::RequestGuidanceTestAccess;
 
   void CompleteClose() noexcept;
@@ -574,6 +647,9 @@ struct Request : std::enable_shared_from_this<Request>,
   void DiscardStagedDrafts() noexcept;
 
   int64_t processed_sequence_length_{};
+  size_t adopted_prefix_length_{};
+  size_t turn_cached_prompt_tokens_{};
+  bool prefix_adoption_staged_{};
   // Sequence length the application's tokens reach up to. Everything below it is prompt, so the
   // request is still prefilling while processed_sequence_length_ has not caught up with it.
   int64_t prompt_sequence_length_{};
@@ -588,6 +664,7 @@ struct Request : std::enable_shared_from_this<Request>,
   uint64_t next_turn_id_{1};
   bool has_current_turn_{};
   bool turn_id_exhausted_{};
+  std::vector<TurnBoundary> turn_boundaries_;
   GenerationFinishReason finish_reason_{GenerationFinishReason::None};
   // Caller-facing stop-string match index committed by CommitStep(), or -1. Only ever written from
   // CommitStep() (after the commit boundary), so unlike stop_controller_ it needs no transactional
@@ -596,6 +673,7 @@ struct Request : std::enable_shared_from_this<Request>,
   // Drafts proposed for the next step, the ones the step in flight staged onto the sequence, and
   // the leading part of those the target model accepted.
   std::vector<int32_t> draft_tokens_;
+  std::vector<TargetTokenSelection> draft_token_distributions_;
   size_t staged_draft_count_{};
   size_t accepted_draft_count_{};
   // Proposed draft positions whose target acceptance verification has actually examined this
@@ -641,6 +719,7 @@ struct Request : std::enable_shared_from_this<Request>,
   std::optional<uint64_t> pending_reseed_;
   bool pending_reseed_applied_{};
   std::mt19937 rng_;
+  std::mt19937 draft_rng_;
   std::mt19937 transaction_rng_;
   int64_t transaction_processed_sequence_length_{};
   size_t transaction_tokens_host_size_{};
@@ -658,6 +737,7 @@ struct Request : std::enable_shared_from_this<Request>,
   std::unique_ptr<BatchedSamplerState> batched_sampler_state_;
   std::weak_ptr<Engine> engine_;
   const Engine* engine_identity_{};
+  bool needs_replay_after_rewind_{};
 
   void ApplyLogitsProcessors(DeviceSpan<float> logits, bool guidance_applied);
   void SelectNextToken();

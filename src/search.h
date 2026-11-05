@@ -1,4 +1,5 @@
 #include "sequences.h"
+#include <optional>
 #include <random>
 #include <stdexcept>
 #include "beam_search_scorer.h"
@@ -114,12 +115,15 @@ struct Search : LeakChecked<Search> {
   // bookkeeping. Used by speculative decoding, which chooses the token itself (there is no logits
   // row to sample). Default asserts: only the greedy searches implement it.
   virtual void CommitToken(int32_t /*token*/) { assert(false); }
+  // Ends the search without adding a token, as a stop token does. Default asserts: only the greedy
+  // searches implement it.
+  virtual void MarkDone() { assert(false); }
   virtual void SampleTopP(float /*p*/, float /*temperature*/, std::mt19937& /*rng*/) { assert(false); }
   virtual void SampleTopK(int /*k*/, float /*temperature*/, std::mt19937& /*rng*/) { assert(false); }
   virtual void SampleTopKTopP(int /*k*/, float /*p*/, float /*temperature*/, std::mt19937& /*rng*/) { assert(false); }
 
   // Scoring features
-  virtual void ApplyMinLength(int min_length) = 0;
+  virtual void ApplyMinLength(int min_length, std::optional<int> sequence_length = std::nullopt) = 0;
   virtual void ApplyRepetitionPenalty(float penalty) = 0;
   // This is inline because the standalone CUDA shared library does not compile search.cpp.
   virtual void ApplyNoRepeatNgram(int ngram_size) {
@@ -170,7 +174,7 @@ struct Search_Cpu : Search {
   DeviceSpan<float> GetLogits() const override;
   void SetLogits(DeviceSpan<float> logits) override;
 
-  void ApplyMinLength(int min_length) override;
+  void ApplyMinLength(int min_length, std::optional<int> sequence_length = std::nullopt) override;
   void ApplyRepetitionPenalty(float penalty) override;
   void ApplyNoRepeatNgram(int ngram_size) override;
 
@@ -207,6 +211,7 @@ struct GreedySearch_Cpu : Search_Cpu {
 
   void SelectTop() override;
   void CommitToken(int32_t token) override;
+  void MarkDone() override { done_ = true; }
   void SampleTopK(int k, float temperature, std::mt19937& rng) override;
   void SampleTopP(float p, float temperature, std::mt19937& rng) override;
   void SampleTopKTopP(int k, float p, float temperature, std::mt19937& rng) override;

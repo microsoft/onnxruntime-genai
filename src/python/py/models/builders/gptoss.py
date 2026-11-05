@@ -21,7 +21,21 @@ class GPTOSSModel(Model):
         self.moe_attrs["normalize_routing_weights"] = True
         self.moe_attrs["swiglu_fusion"] = 1
 
-    def load_mxfp4_experts(self, layer_id):
+        if self.io_dtype == ir.DataType.FLOAT16 and self.num_layers == 36 and self.moe_attrs["num_experts"] == 128:
+            if self.ep in {"cuda", "trt-rtx"}:
+                guidance = (
+                    "For CUDA/TRT-RTX, consider `--precision bf16` or "
+                    "`--precision int4 --extra_options use_cuda_bf16=true`."
+                )
+            else:
+                guidance = "Consider FP32 I/O or an execution provider with BF16 support."
+            print(
+                "WARNING: The 36-layer, 128-expert GPT-OSS (120B) configuration may overflow "
+                "with float16 I/O and produce NaN logits. Validate your checkpoint and workload. "
+                f"{guidance}"
+            )
+
+    def load_mxfp4_experts(self, layer_id, decode=False):
         try:
             from loaders.gptoss import GptOssMXFP4Loader  # noqa: PLC0415
         except ImportError:
@@ -29,7 +43,7 @@ class GPTOSSModel(Model):
 
         if not hasattr(self, "mxfp4_loader"):
             self.mxfp4_loader = GptOssMXFP4Loader(self.model_name_or_path, self.cache_dir, self.hf_token)
-        return self.mxfp4_loader.prepare_experts(layer_id)
+        return self.mxfp4_loader.prepare_experts(layer_id, decode=decode)
 
     def make_layernorm(self, layer_id, layernorm, skip, simple, location):
         if "final_norm" in location:
@@ -531,6 +545,11 @@ class GPTOSSModel(Model):
             self.make_moe_expert_initializers(layer_id, moe.experts)
         elif is_fp4_moe:
             self.make_moe_expert_initializers(layer_id, self.load_mxfp4_experts(layer_id))
+        elif self.moe_attrs["op_type"] == "QMoE":
+            gate_up_proj_layout, down_proj_layout = self.load_mxfp4_experts(layer_id, decode=True)
+            self.make_moe_expert_initializers(
+                layer_id, moe.experts, gate_up_proj_layout, down_proj_layout
+            )
         else:
             # HF GptOssExperts stores weights input-major, while every downstream consumer
             # expects output-major [E, N, K] with the contraction axis last.

@@ -5,11 +5,14 @@
 
 #include <algorithm>
 #include <exception>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
 
 #include "../models/model_state_manifest.h"
+#include "../logging.h"
+#include "dflash2_drafter.h"
 
 namespace Generators {
 
@@ -32,7 +35,7 @@ class CompositeCacheStepReservation final : public CacheStepReservation {
                                 FixedStatePool* fixed_state_pool,
                                 std::vector<std::shared_ptr<Request>>& allocated_requests,
                                 const StepPlan& plan)
-      : allocated_requests_{allocated_requests} {
+      : cache_{cache}, allocated_requests_{allocated_requests} {
     std::vector<PagedCacheReservationRequest> paged_requests;
     paged_requests.reserve(plan.requests.size());
     std::vector<FixedStateReservationRequest> fixed_requests;
@@ -46,6 +49,7 @@ class CompositeCacheStepReservation final : public CacheStepReservation {
           entry.target_cache_slots,
           entry.newly_admitted,
           entry.whole_sequence_cache_slots,
+          entry.prefix_match.get(),
       });
       if (fixed_state_pool) {
         // Fixed and paged track the same per-request cache-slot boundary: the fixed target_tokens
@@ -55,6 +59,9 @@ class CompositeCacheStepReservation final : public CacheStepReservation {
             entry.request_id,
             entry.target_cache_slots,
             entry.draft_token_count,
+            entry.prefix_match
+                ? entry.prefix_match->fixed_state_checkpoint
+                : nullptr,
         });
       }
       if (entry.newly_admitted) {
@@ -155,6 +162,7 @@ class CompositeCacheStepReservation final : public CacheStepReservation {
     if (fixed_reservation_) {
       fixed_reservation_->PublishCommit();
     }
+    cache_.RecordPrefixAdoptions(*paged_reservation_);
     allocated_requests_.insert(allocated_requests_.end(),
                                newly_admitted_.begin(),
                                newly_admitted_.end());
@@ -188,6 +196,7 @@ class CompositeCacheStepReservation final : public CacheStepReservation {
   }
 
  private:
+  PagedKeyValueCache& cache_;
   std::vector<std::shared_ptr<Request>>& allocated_requests_;
   std::vector<std::shared_ptr<Request>> newly_admitted_;
   // Destroyed in reverse declaration order: the fixed reservation unwinds before the paged one,
@@ -202,12 +211,19 @@ class CompositeCacheStepReservation final : public CacheStepReservation {
 
 std::unique_ptr<CacheManager> CacheManager::Create(std::shared_ptr<Model> model,
                                                    size_t auxiliary_bytes_per_block,
-                                                   size_t auxiliary_reserved_memory_bytes) {
+                                                   size_t auxiliary_reserved_memory_bytes,
+                                                   size_t optional_draft_checkpoint_bytes,
+                                                   bool* draft_checkpoint_enabled) {
   const ModelStateManifest manifest{model->config_->model.decoder};
   if (model->config_->engine.dynamic_batching) {
     ModelStateManifest::ValidateDynamicEngineCompatibility(model->config_->model.decoder);
-    return std::make_unique<PagedCacheManager>(
-        model, auxiliary_bytes_per_block, auxiliary_reserved_memory_bytes);
+    auto manager = std::make_unique<PagedCacheManager>(
+        model, auxiliary_bytes_per_block, auxiliary_reserved_memory_bytes,
+        optional_draft_checkpoint_bytes);
+    if (draft_checkpoint_enabled) {
+      *draft_checkpoint_enabled = manager->DraftCheckpointEnabled();
+    }
+    return manager;
   }
   if (manifest.HasFixedStateGroups()) {
     throw std::runtime_error(
@@ -307,6 +323,31 @@ void StaticCacheManager::Deallocate(std::vector<std::shared_ptr<Request>>& reque
   cache_allocated_requests_.clear();
 }
 
+void StaticCacheManager::ValidateRewind(
+    const std::shared_ptr<Request>& request) const {
+  if (!IsResident(request)) {
+    return;
+  }
+  if (cache_allocated_requests_.size() != 1) {
+    throw std::runtime_error(
+        "Static Engine Request rewind requires exactly one resident "
+        "Request because a row cannot be released independently from its "
+        "shared contiguous cache allocation.");
+  }
+}
+
+void StaticCacheManager::ReleaseForRewind(
+    const std::shared_ptr<Request>& request) {
+  ValidateRewind(request);
+  if (!IsResident(request)) {
+    return;
+  }
+  key_value_cache_.reset();
+  key_value_cache_state_.reset();
+  params_.reset();
+  cache_allocated_requests_.clear();
+}
+
 void StaticCacheManager::DetachRequestForTeardown(
     const std::shared_ptr<Request>& request) noexcept {
   if (!IsResident(request)) {
@@ -332,7 +373,8 @@ bool StaticCacheManager::IsResident(const std::shared_ptr<Request>& request) con
 
 PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model,
                                      size_t auxiliary_bytes_per_block,
-                                     size_t auxiliary_reserved_memory_bytes)
+                                     size_t auxiliary_reserved_memory_bytes,
+                                     size_t optional_draft_checkpoint_bytes)
     : CacheManager(model),
       params_(std::make_shared<GeneratorParams>(*model_)) {
   // The paged cache resolves its own paged_kv group. The fixed pool is created only when the
@@ -340,16 +382,158 @@ PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model,
   // the composite path degrades to paged-only. Its capacity matches the paged batch limit so paged
   // admission (bounded by max_batch_size) can never outrun fixed slots.
   ModelStateManifest manifest{model->config_->model.decoder};
+  const bool hybrid_prefix_caching =
+      ResolvePrefixCachingEnabled(model, auxiliary_bytes_per_block) &&
+      manifest.HasFixedStateGroups();
+  size_t prefix_checkpoint_capacity = 0;
   if (manifest.HasFixedStateGroups()) {
+    prefix_checkpoint_capacity =
+        hybrid_prefix_caching
+            ? model_->config_->engine.dynamic_batching->max_batch_size
+            : 0;
     auto fixed_state_pool = std::make_unique<FixedStatePool>(
-        model, model_->config_->engine.dynamic_batching->max_batch_size);
+        model, model_->config_->engine.dynamic_batching->max_batch_size,
+        prefix_checkpoint_capacity);
     fixed_state_pool_ = std::move(fixed_state_pool);
+  }
+  if (optional_draft_checkpoint_bytes != 0 && hybrid_prefix_caching &&
+      auxiliary_bytes_per_block == 0) {
+    const auto& batching = *model_->config_->engine.dynamic_batching;
+    const auto& limits = batching.snapshot_cache;
+    const bool device_resident = model_->p_device_kvcache_->GetType() == DeviceType::WEBGPU ||
+                                 !limits.Configured();
+    size_t count = std::min(batching.dflash2_max_snapshots, prefix_checkpoint_capacity);
+    if (batching.max_snapshots) {
+      count = std::min(count, *batching.max_snapshots);
+    }
+    if (!device_resident && limits.vram_bytes != 0 && model_->p_device_kvcache_->GetType() != DeviceType::CUDA) {
+      throw std::runtime_error("A VRAM prefix snapshot budget requires a CUDA device.");
+    }
+    const size_t target_block_bytes = PagedKeyValueCacheBytesPerBlock(model_);
+    size_t budget = 0;
+    if (batching.num_blocks) {
+      if (*batching.num_blocks <= std::numeric_limits<size_t>::max() / target_block_bytes) {
+        budget = *batching.num_blocks * target_block_bytes;
+      }
+    } else {
+      size_t free_bytes = 0, total_bytes = 0;
+      model_->p_device_kvcache_->GetAvailableMemory(free_bytes, total_bytes);
+      if (batching.device_memory_budget_bytes) {
+        if (!model_->device_memory_budget_initial_free_bytes_) {
+          throw std::runtime_error("device_memory_budget_bytes must be configured before loading the model.");
+        }
+        budget = DeviceMemoryBudgetAvailableBytes(
+            *batching.device_memory_budget_bytes,
+            *model_->device_memory_budget_initial_free_bytes_, free_bytes,
+            batching.device_memory_headroom_bytes);
+      } else {
+        budget = PagedCacheMemoryBudget(free_bytes, *batching.gpu_utilization_factor);
+      }
+    }
+    size_t available = budget;
+    for (const size_t reserved : {auxiliary_reserved_memory_bytes,
+                                  PagedCacheCaptureBlockTableBytes(model_), target_block_bytes}) {
+      available -= std::min(available, reserved);
+    }
+    const size_t device_count = std::min(count, available / optional_draft_checkpoint_bytes);
+    const size_t vram_count = device_resident ? device_count
+                                              : std::min(device_count, limits.vram_bytes / optional_draft_checkpoint_bytes);
+    draft_checkpoint_vram_bytes_ = vram_count * optional_draft_checkpoint_bytes;
+    auxiliary_reserved_memory_bytes += draft_checkpoint_vram_bytes_;
+    const size_t ram_count = limits.ram_bytes / optional_draft_checkpoint_bytes;
+    const size_t disk_count = limits.disk_bytes / optional_draft_checkpoint_bytes;
+    const size_t host_count =
+        ram_count > std::numeric_limits<size_t>::max() - disk_count
+            ? std::numeric_limits<size_t>::max()
+            : ram_count + disk_count;
+    const size_t tier_count =
+        vram_count > std::numeric_limits<size_t>::max() - host_count
+            ? std::numeric_limits<size_t>::max()
+            : vram_count + host_count;
+    draft_checkpoint_capacity_ = device_resident ? vram_count : std::min(count, tier_count);
   }
   // Size the primary and auxiliary paged caches from one memory budget. The fixed pool above is
   // already reflected in the free-memory query used by the paged cache.
   key_value_cache_ = std::make_unique<PagedKeyValueCache>(
-      model, auxiliary_bytes_per_block, auxiliary_reserved_memory_bytes);
+      model, auxiliary_bytes_per_block, auxiliary_reserved_memory_bytes,
+      hybrid_prefix_caching, prefix_checkpoint_capacity);
+  if (optional_draft_checkpoint_bytes != 0 && g_log.enabled) {
+    const auto& batching = *model_->config_->engine.dynamic_batching;
+    const size_t target_blocks = key_value_cache_->Snapshot().total_blocks;
+    Log("engine_cache",
+        "DFlash 2 snapshots: requested=%zu, effective=%zu; target cache: blocks=%zu, "
+        "block_size=%zu, bytes=%zu; draft snapshot reservation: bytes=%zu",
+        batching.dflash2_max_snapshots,
+        draft_checkpoint_capacity_, target_blocks,
+        static_cast<size_t>(batching.block_size),
+        target_blocks * PagedKeyValueCacheBytesPerBlock(model_),
+        draft_checkpoint_vram_bytes_);
+  }
   key_value_cache_state_ = std::make_unique<KeyValueCacheState>(*params_, *model_);
+}
+
+std::shared_ptr<const PrefixCacheMatch> PagedCacheManager::MatchPrefix(
+    const Request& request) {
+  if (!key_value_cache_->PrefixCachingEnabled()) {
+    return nullptr;
+  }
+  const auto tokens = request.TokensCpu();
+  if (tokens.size() <= 1) {
+    return nullptr;
+  }
+  auto match = key_value_cache_->MatchPrefix(tokens, tokens.size() - 1);
+  if (!match.Empty() && fixed_state_pool_ &&
+      !match.fixed_state_checkpoint) {
+    throw std::logic_error(
+        "A hybrid prefix match has no fixed state checkpoint.");
+  }
+  return match.Empty()
+             ? nullptr
+             : std::make_shared<const PrefixCacheMatch>(std::move(match));
+}
+
+void PagedCacheManager::SealCommittedBlocks(const StepPlan& plan) {
+  if (!key_value_cache_->PrefixCachingEnabled()) {
+    return;
+  }
+  for (const auto& entry : plan.requests) {
+    if (!fixed_state_pool_) {
+      key_value_cache_->SealCommittedBlocks(
+          entry.request_id, entry.request->TokensCpu());
+      continue;
+    }
+    if (!entry.is_prefill ||
+        !key_value_cache_->CanSealPrefixCheckpoint(
+            entry.request_id, entry.target_cache_slots, entry.request->TokensCpu())) {
+      continue;
+    }
+    if (fixed_state_pool_->AvailablePrefixCheckpoints() == 0) {
+      // Prefix matching always leaves the request's final prompt token to execute. A checkpoint at
+      // the exact prompt boundary therefore cannot serve an identical replay. Keep the newest
+      // earlier checkpoint instead of reclaiming it when the checkpoint pool is full.
+      if (entry.target_cache_slots ==
+          static_cast<size_t>(entry.sequence_length_before)) {
+        continue;
+      }
+      if (!key_value_cache_->ReclaimablePrefixCheckpoint(entry.request_id)) {
+        continue;
+      }
+    }
+    key_value_cache_->SealCheckpointedPrefix(
+        entry.request_id, entry.request->TokensCpu(), entry.target_cache_slots,
+        [this, request_id = entry.request_id] {
+          const auto* replacement =
+              fixed_state_pool_->AvailablePrefixCheckpoints() == 0
+                  ? key_value_cache_->ReclaimablePrefixCheckpoint(request_id)
+                  : nullptr;
+          return fixed_state_pool_->CapturePrefixCheckpoint(
+              request_id, replacement, [this, replacement] {
+                if (!key_value_cache_->ReclaimPrefixCheckpoint(replacement)) {
+                  throw std::logic_error("A selected prefix checkpoint could not be reclaimed.");
+                }
+              });
+        });
+  }
 }
 
 bool PagedCacheManager::CanAllocate(const std::vector<std::shared_ptr<Request>>& requests) const {
@@ -471,6 +655,35 @@ void PagedCacheManager::Deallocate(std::vector<std::shared_ptr<Request>>& reques
       cache_allocated_requests_.end());
 }
 
+void PagedCacheManager::ValidateRewind(
+    const std::shared_ptr<Request>& request) const {
+  if (!IsResident(request)) {
+    return;
+  }
+  key_value_cache_->ValidateRemove(request.get());
+  if (fixed_state_pool_) {
+    fixed_state_pool_->ValidateRelease(
+        fixed_state_pool_->HandleFor(request.get()));
+  }
+}
+
+void PagedCacheManager::ReleaseForRewind(
+    const std::shared_ptr<Request>& request) {
+  ValidateRewind(request);
+  if (!IsResident(request)) {
+    return;
+  }
+  // Deallocate builds temporary vectors; rewind publishes only after auxiliary state is released.
+  // The single-request path uses the already validated no-throw release primitives instead.
+  if (fixed_state_pool_) {
+    fixed_state_pool_->ReleaseValidated(fixed_state_pool_->HandleFor(request.get()));
+  }
+  key_value_cache_->RemoveValidated(request.get());
+  cache_allocated_requests_.erase(
+      std::remove(cache_allocated_requests_.begin(), cache_allocated_requests_.end(), request),
+      cache_allocated_requests_.end());
+}
+
 void PagedCacheManager::DetachRequestForTeardown(
     const std::shared_ptr<Request>& request) noexcept {
   if (std::find(cache_allocated_requests_.begin(),
@@ -489,6 +702,13 @@ void PagedCacheManager::DetachRequestForTeardown(
 }
 
 bool PagedCacheManager::SupportsDynamicBatching() const { return true; }
+
+size_t PagedCacheManager::MaxQueryTokensPerRequest() const {
+  // Fixed state stores one row per request and commits the state after the complete query, so it
+  // does not constrain prefill length. Prefix checkpoints are attached only when that committed
+  // endpoint is block-aligned; they must not reduce the model's configured prefill chunk.
+  return key_value_cache_->MaxQueryTokensPerRequest();
+}
 
 size_t PagedCacheManager::MaxDraftTokensPerStep() const {
   // Recurrent state can only be replayed through the compact transitions the operators captured.

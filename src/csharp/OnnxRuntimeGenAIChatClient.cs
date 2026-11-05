@@ -246,6 +246,11 @@ public sealed partial class OnnxRuntimeGenAIChatClient : IChatClient
     }
 
     /// <inheritdoc/>
+    /// <remarks>
+    /// A <see cref="Generator"/> service is available only while a generator is cached between requests.
+    /// The returned generator is owned by this client and must not be disposed, retained across requests,
+    /// or used concurrently with a request.
+    /// </remarks>
     object? IChatClient.GetService(Type serviceType, object? serviceKey)
     {
         if (serviceType is null)
@@ -259,6 +264,7 @@ public sealed partial class OnnxRuntimeGenAIChatClient : IChatClient
             serviceType == typeof(Model) ? _model :
             serviceType == typeof(Tokenizer) ? _tokenizer :
             serviceType == typeof(Config) ? _config :
+            serviceType == typeof(Generator) ? Volatile.Read(ref _cachedGenerator)?.Generator :
             serviceType?.IsInstanceOfType(this) is true ? this :
             null;
     }

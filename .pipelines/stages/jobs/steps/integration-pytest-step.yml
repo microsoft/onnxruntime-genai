@@ -38,20 +38,27 @@ steps:
       $wheel = Get-ChildItem "${{ parameters.wheelDir }}\*.whl" | Select-Object -First 1
       if (-not $wheel) { throw "no wheel found in ${{ parameters.wheelDir }}" }
       python -m pip install --upgrade pip
+      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       python -m pip install -r test\python\requirements.txt
-      python -m pip install pytest
+      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       if ("${{ parameters.ep }}" -eq "cuda") {
         python -m pip uninstall -y onnxruntime-gpu
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        python -m pip install --index-url https://pypi.org/simple/ -r test\python\cuda\ort\requirements.txt
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         python -m pip install `
-          --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/ `
-          -r test\python\cuda\ort\requirements.txt `
-          onnxruntime-ep-cuda12==0.2.0.dev20260819
+          --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/ `
+          onnxruntime-ep-cuda12==0.3.0
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       } else {
-        python -m pip install onnxruntime==1.28.0
+        python -m pip install --index-url https://pypi.org/simple/ onnxruntime==1.31.0
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       }
-      python -m pip install $wheel.FullName
+      python -m pip install --no-deps $wheel.FullName
+      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       if ("${{ parameters.ep }}" -eq "webgpu") {
         python -m pip install onnxruntime-ep-webgpu==0.2.1
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       }
     displayName: 'Install source-built wheel and test deps'
     workingDirectory: '$(Build.Repository.LocalPath)'
@@ -93,13 +100,12 @@ steps:
           set -e -x
           PYTHON_EXE=/opt/python/cp312-cp312/bin/python3.12
           \$PYTHON_EXE -m pip install -r test/python/requirements.txt
-          \$PYTHON_EXE -m pip install pytest
           \$PYTHON_EXE -m pip uninstall -y onnxruntime-gpu
+          \$PYTHON_EXE -m pip install --index-url https://pypi.org/simple/ -r test/python/cuda/ort/requirements.txt
           \$PYTHON_EXE -m pip install \
-            --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/ \
-            -r test/python/cuda/ort/requirements.txt \
-            onnxruntime-ep-cuda12==0.2.0.dev20260819
-          \$PYTHON_EXE -m pip install /wheel/*.whl
+            --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/ \
+            onnxruntime-ep-cuda12==0.3.0
+          \$PYTHON_EXE -m pip install --no-deps /wheel/*.whl
           nvidia-smi --query-gpu=name,compute_cap,driver_version,memory.total,memory.used,memory.free --format=csv
           \$PYTHON_EXE -m pytest ${{ parameters.testPath }} -sv ${{ parameters.extraPytestArgs }} \
             --execution-provider ${{ parameters.ep }} \
@@ -113,7 +119,6 @@ steps:
       set -e -x
       python3 -m pip install --upgrade pip
       python3 -m pip install -r test/python/requirements.txt
-      python3 -m pip install pytest
       python3 -m pip install ${{ parameters.wheelDir }}/*.whl
     displayName: 'Install source-built wheel and test deps'
     workingDirectory: '$(Build.Repository.LocalPath)'
@@ -135,8 +140,7 @@ steps:
       source $(Agent.TempDirectory)/genai-venv/bin/activate
       python -m pip install --upgrade pip
       python -m pip install -r test/python/requirements.txt
-      python -m pip install pytest
-      python -m pip install onnxruntime==1.28.0
+      python -m pip install --index-url https://pypi.org/simple/ onnxruntime==1.31.0
       python -m pip install ${{ parameters.wheelDir }}/*.whl
       if [ "${{ parameters.ep }}" = "webgpu" ]; then
         python -m pip install onnxruntime-ep-webgpu==0.2.1

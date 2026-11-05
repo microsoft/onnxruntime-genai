@@ -12,6 +12,7 @@
 #include "decoding/n_gram_decoding_strategy.h"
 #include "models/model.h"
 #include "models/model_type.h"
+#include "models/nemotron_bolt.h"
 
 namespace Generators {
 
@@ -23,7 +24,12 @@ SpeculativeStats DecodingStrategy::GetStats() const {
 // Factory
 std::unique_ptr<DecodingStrategy> MakeDecodingStrategy(Generator& generator) {
   const auto& model = generator.model_->config_->model;
-  if (ModelType::IsTransducer(model.type))
+  if (model.type == "nemotron_bolt")
+    return MakeNemotronBoltStrategy(generator);
+  // Transducer (RNNT/TDT) and streaming encoder-decoder ASR (e.g. Moonshine)
+  // models drive token emission via TransducerState::StepToken() and never
+  // build the search_/logits pipeline, so they must not read generator.search_.
+  if (ModelType::IsTransducer(model.type) || ModelType::IsStreamingEncDecASR(model.type))
     return std::make_unique<TransducerDecodingStrategy>(generator);
   const bool uses_ngram = generator.search_->params_->speculative.ngram_size > 0;
   if (model.draft)

@@ -184,6 +184,274 @@ class GuidanceProcessorTest : public ::testing::Test {
   DoublesEngine engine_;
 };
 
+TEST_F(GuidanceProcessorTest, StaticBatchingRejectsDelimitedTurnWithoutConsumingFirstTurn) {
+  model_->config_->engine.dynamic_batching.reset();
+  auto cache = std::make_shared<RecordingCacheManager>(
+      model_, /*capacity=*/4, nullptr, /*supports_dynamic_batching=*/false);
+  auto scheduler = Scheduler::Create(model_, cache);
+  auto executor = std::make_unique<RecordingModelExecutor>(model_, cache, EosToken(*model_));
+  EngineDependencies dependencies{cache, std::move(scheduler), std::move(executor)};
+  auto engine = std::make_shared<Engine>(model_, std::move(dependencies));
+  auto request = CreateEngineRequest(engine, Prompt().size() + 4);
+  TurnOptions options;
+  options.delimited_guidance = TurnOptions::DelimitedGuidance{10, 11, "start: \"ok\""};
+
+  try {
+    request->BeginTurn(Prompt(), options);
+    FAIL() << "Static batching admitted delimited guidance.";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(std::string(error.what()).find("dynamic batching"), std::string::npos);
+  }
+  EXPECT_TRUE(request->IsAwaitingFirstTurn());
+  EXPECT_EQ(request->CurrentSequenceLength(), 0);
+
+  options.delimited_guidance.reset();
+  EXPECT_EQ(request->BeginTurn(Prompt(), options), 1u);
+}
+
+class RegionBodyProcessor final : public ConstrainedLogitsProcessor {
+ public:
+  explicit RegionBodyProcessor(bool include_secondary_eos = false)
+      : include_secondary_eos_(include_secondary_eos) {}
+
+  void CommitTokens(std::span<int32_t> tokens) override {
+    for (int32_t token : tokens) {
+      if (token != 7) {
+        throw std::runtime_error("Unexpected body token.");
+      }
+      ++committed_;
+    }
+  }
+  void ProcessLogits(DeviceSpan<float>) override {}
+  std::span<const uint32_t> GetReadyMask() override {
+    // An accepting body can either continue with another 7 or close via EOS.
+    mask_[0] = (uint32_t{1} << 7) | (committed_ ? uint32_t{1} << 5 : 0) |
+               (include_secondary_eos_ ? uint32_t{1} << 6 : 0);
+    return mask_;
+  }
+  bool AllowsOnlyTokens(size_t, std::span<const int>) override { return false; }
+  void Reset() override { committed_ = 0; }
+  std::vector<int32_t> GetFFTokens(size_t) override { return {}; }
+  std::unique_ptr<ConstrainedLogitsProcessor> Clone() const override {
+    return std::make_unique<RegionBodyProcessor>(*this);
+  }
+
+ private:
+  bool include_secondary_eos_{};
+  size_t committed_{};
+  std::array<uint32_t, 1> mask_{};
+};
+
+void InstallRegionProcessor(Request& request, Model& model) {
+  auto region = std::make_unique<DelimitedGuidanceLogitsProcessor>(
+      std::make_unique<RegionBodyProcessor>(), *model.p_device_, 32, std::vector<int32_t>{5}, 10, 11);
+  RequestGuidanceTestAccess::Install(request, std::move(region));
+}
+
+TEST_F(GuidanceProcessorTest, DelimitedBodyMasksOnlyBetweenCommittedMarkersAndResetsForAdjacentCalls) {
+  DelimitedGuidanceLogitsProcessor region{
+      std::make_unique<RegionBodyProcessor>(), *model_->p_device_, 32, {5}, 10, 11};
+  auto commit = [&region](int32_t token) {
+    region.CommitTokens(std::span<int32_t>{&token, 1});
+  };
+  EXPECT_TRUE(region.GetReadyMask().empty());
+  commit(9);
+  EXPECT_FALSE(region.IsDelimitedActive());
+  commit(10);
+  ASSERT_TRUE(region.IsDelimitedActive());
+  EXPECT_EQ(region.GetReadyMask()[0], uint32_t{1} << 7);
+  auto logits = model_->p_device_->Allocate<float>(32);
+  std::fill(logits.CpuSpan().begin(), logits.CpuSpan().end(), 10.0f);
+  region.ProcessLogits(logits);
+  EXPECT_EQ(logits.CpuSpan()[7], 10.0f);
+  EXPECT_EQ(logits.CpuSpan()[11], std::numeric_limits<float>::lowest());
+  EXPECT_THROW(commit(11), std::runtime_error);
+  commit(7);
+  EXPECT_EQ(region.GetReadyMask()[0], (uint32_t{1} << 7) | (uint32_t{1} << 11));
+  std::fill(logits.CpuSpan().begin(), logits.CpuSpan().end(), 10.0f);
+  region.ProcessLogits(logits);
+  EXPECT_EQ(logits.CpuSpan()[11], 10.0f);
+  EXPECT_EQ(logits.CpuSpan()[5], std::numeric_limits<float>::lowest());
+  commit(11);
+  EXPECT_TRUE(region.GetReadyMask().empty());
+  commit(10);
+  EXPECT_EQ(region.GetReadyMask()[0], uint32_t{1} << 7);
+  commit(7);
+  commit(11);
+  EXPECT_FALSE(region.IsDelimitedActive());
+}
+
+TEST_F(GuidanceProcessorTest, DelimitedCursorCloneRestoresBothInactiveAndActiveModes) {
+  DelimitedGuidanceLogitsProcessor region{
+      std::make_unique<RegionBodyProcessor>(), *model_->p_device_, 32, {5}, 10, 11};
+  auto before = region.Clone();
+  int32_t open = 10;
+  region.CommitTokens(std::span<int32_t>{&open, 1});
+  auto inside = region.Clone();
+  int32_t body = 7;
+  region.CommitTokens(std::span<int32_t>{&body, 1});
+  EXPECT_EQ(region.GetReadyMask()[0], (uint32_t{1} << 7) | (uint32_t{1} << 11));
+  EXPECT_EQ(inside->GetReadyMask()[0], uint32_t{1} << 7);
+  int32_t close = 11;
+  region.CommitTokens(std::span<int32_t>{&close, 1});
+  EXPECT_FALSE(region.IsDelimitedActive());
+  EXPECT_TRUE(before->GetReadyMask().empty());
+  EXPECT_TRUE(inside->IsDelimitedActive());
+}
+
+TEST_F(GuidanceProcessorTest, DelimitedRequestTruncatesDraftsBeforeAnOpeningMarker) {
+  auto request = NewAssignedRequest(/*max_length_beyond_prompt=*/12);
+  engine_.cache->SetMaxDraftTokensPerStep(4);
+  request->Schedule();
+  request->GenerateNextTokens(LogitsForToken(*model_, 9));
+  ASSERT_TRUE(request->CompleteGeneration().token_appended);
+  InstallRegionProcessor(*request, *model_);
+
+  ASSERT_EQ(request->DraftTokenValidationError(), nullptr);
+  request->SetDraftTokens(std::array<int32_t, 3>{7, 10, 8});
+  EXPECT_EQ(request->PendingDraftTokenCount(), 1u);
+  request->SetDraftTokens(std::array<int32_t, 2>{10, 8});
+  EXPECT_EQ(request->PendingDraftTokenCount(), 0u);
+}
+
+TEST_F(GuidanceProcessorTest, DelimitedDraftVerificationCommitsOpenerBeforeMaskingNextStep) {
+  engine_.cache->SetMaxDraftTokensPerStep(4);
+  engine_.executor->SetForcedToken(9);
+  auto request = NewAssignedRequest(/*max_length_beyond_prompt=*/12);
+  ASSERT_EQ(RunOne(*engine_.engine).token, 9);
+  InstallRegionProcessor(*request, *model_);
+
+  request->SetDraftTokens(std::array<int32_t, 3>{7, 10, 8});
+  ASSERT_EQ(request->PendingDraftTokenCount(), 1u);
+  engine_.executor->SetVerifyRowTokens({7, 10});
+  std::array<EngineEvent, 3> events;
+  ASSERT_EQ(engine_.engine->Run(events), 2u);
+  EXPECT_EQ(events[0].token, 7);
+  EXPECT_EQ(events[1].token, 10);
+  EXPECT_TRUE(RequestGuidanceTestAccess::Get(*request)->IsDelimitedActive());
+  EXPECT_NE(request->DraftTokenValidationError(), nullptr);
+
+  engine_.executor->SetVerifyRowTokens({});
+  engine_.executor->SetForcedToken(8);
+  EXPECT_EQ(RunOne(*engine_.engine).token, 7);
+  engine_.executor->SetForcedToken(11);
+  EXPECT_EQ(RunOne(*engine_.engine).token, 11);
+  EXPECT_FALSE(RequestGuidanceTestAccess::Get(*request)->IsDelimitedActive());
+  EXPECT_EQ(request->DraftTokenValidationError(), nullptr);
+}
+
+TEST_F(GuidanceProcessorTest, DelimitedDraftTruncationUsesOnlyTokensBeforeMarkerForContextBudget) {
+  auto request = NewAssignedRequest(/*max_length_beyond_prompt=*/3);
+  engine_.cache->SetMaxDraftTokensPerStep(4);
+  request->Schedule();
+  request->GenerateNextTokens(LogitsForToken(*model_, 9));
+  ASSERT_TRUE(request->CompleteGeneration().token_appended);
+  InstallRegionProcessor(*request, *model_);
+
+  EXPECT_NO_THROW(request->SetDraftTokens(std::array<int32_t, 3>{7, 10, 8}));
+  EXPECT_EQ(request->PendingDraftTokenCount(), 1u);
+  EXPECT_NO_THROW(request->SetDraftTokens(std::array<int32_t, 2>{10, 8}));
+  EXPECT_EQ(request->PendingDraftTokenCount(), 0u);
+}
+
+TEST_F(GuidanceProcessorTest, DelimitedSampledDraftRoutesKeepDistributionsAlignedAfterTruncation) {
+  for (const bool pre_sampled : {false, true}) {
+    auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
+    engine.cache->SetMaxDraftTokensPerStep(4);
+    engine.executor->SetForcedToken(9);
+    auto request = CreateEngineRequest(engine.engine, Prompt().size() + 12);
+    TurnOptions options;
+    options.do_sample = true;
+    options.top_k = 3;
+    options.temperature = 0.01f;
+    options.seed = 1234;
+    request->BeginTurn(Prompt(), options);
+    ASSERT_EQ(RunOne(*engine.engine).token, 9);
+    InstallRegionProcessor(*request, *model_);
+
+    std::array<TargetTokenSelection, 3> distributions;
+    for (size_t i = 0; i < distributions.size(); ++i) {
+      distributions[i].indices = {std::array<int32_t, 3>{7, 10, 8}[i]};
+      distributions[i].probs = {1.0f};
+    }
+    if (pre_sampled) {
+      request->SetSampledDraftTokens(std::array<int32_t, 3>{7, 10, 8}, distributions);
+    } else {
+      request->SetDraftTokenDistributions(distributions);
+    }
+    ASSERT_EQ(request->PendingDraftTokenCount(), 1u);
+    engine.executor->SetVerifyRowTokens({7, 10});
+    std::array<EngineEvent, 3> events;
+    ASSERT_EQ(engine.engine->Run(events), 2u);
+    EXPECT_EQ(events[0].token, 7);
+    EXPECT_EQ(events[1].token, 10);
+    EXPECT_TRUE(RequestGuidanceTestAccess::Get(*request)->IsDelimitedActive());
+  }
+}
+
+TEST_F(GuidanceProcessorTest, DelimitedBodyMasksEveryEosAndRejectsAnyEosAsMarker) {
+  EXPECT_THROW((DelimitedGuidanceLogitsProcessor{
+                   std::make_unique<RegionBodyProcessor>(), *model_->p_device_, 32, {5, 6}, 6, 11}),
+               std::invalid_argument);
+  EXPECT_THROW((DelimitedGuidanceLogitsProcessor{
+                   std::make_unique<RegionBodyProcessor>(), *model_->p_device_, 32, {5, 6}, 10, 6}),
+               std::invalid_argument);
+  DelimitedGuidanceLogitsProcessor region{
+      std::make_unique<RegionBodyProcessor>(true), *model_->p_device_, 32, {5, 6}, 10, 11};
+  int32_t open = 10;
+  region.CommitTokens(std::span<int32_t>{&open, 1});
+  EXPECT_EQ(region.GetReadyMask()[0], uint32_t{1} << 7);
+  int32_t body = 7;
+  region.CommitTokens(std::span<int32_t>{&body, 1});
+  EXPECT_EQ(region.GetReadyMask()[0], (uint32_t{1} << 7) | (uint32_t{1} << 11));
+}
+
+TEST_F(GuidanceProcessorTest, DelimitedRequestRestoresModeOnRollbackAndPermitsDraftingAfterClose) {
+  auto request = NewAssignedRequest(/*max_length_beyond_prompt=*/12);
+  request->Schedule();
+  InstallRegionProcessor(*request, *model_);
+  auto* region = static_cast<DelimitedGuidanceLogitsProcessor*>(RequestGuidanceTestAccess::Get(*request));
+
+  RequestStepPlan plan;
+  plan.request = request;
+  plan.request_id = request.get();
+  plan.sequence_length_before = request->Snapshot().current_sequence_length;
+  plan.target_cache_slots = static_cast<size_t>(plan.sequence_length_before);
+  PrepareRequestStep(model_, plan);
+
+  request->SaveStateForTransaction();
+  const auto discarded = request->ApplyLogitsForTransaction(LogitsForToken(*model_, 10));
+  ASSERT_TRUE(discarded.token_appended);
+  ASSERT_TRUE(region->IsDelimitedActive());
+  request->RestoreStateForTransaction();
+  region = static_cast<DelimitedGuidanceLogitsProcessor*>(RequestGuidanceTestAccess::Get(*request));
+  EXPECT_FALSE(region->IsDelimitedActive());
+
+  request->SaveStateForTransaction();
+  const auto opening = request->ApplyLogitsForTransaction(LogitsForToken(*model_, 10));
+  ASSERT_EQ(opening.token, 10);
+  request->CommitStateForTransaction();
+  request->CommitStep(plan, opening);
+  region = static_cast<DelimitedGuidanceLogitsProcessor*>(RequestGuidanceTestAccess::Get(*request));
+  EXPECT_TRUE(region->IsDelimitedActive());
+  EXPECT_NE(request->DraftTokenValidationError(), nullptr);
+
+  for (const int32_t token : {7, 11}) {
+    plan.sequence_length_before = request->Snapshot().current_sequence_length;
+    plan.target_cache_slots = static_cast<size_t>(plan.sequence_length_before);
+    PrepareRequestStep(model_, plan);
+    request->SaveStateForTransaction();
+    const auto result = request->ApplyLogitsForTransaction(LogitsForToken(*model_, token));
+    ASSERT_EQ(result.token, token);
+    request->CommitStateForTransaction();
+    request->CommitStep(plan, result);
+  }
+
+  region = static_cast<DelimitedGuidanceLogitsProcessor*>(RequestGuidanceTestAccess::Get(*request));
+  EXPECT_FALSE(region->IsDelimitedActive());
+  EXPECT_EQ(request->DraftTokenValidationError(), nullptr);
+}
+
 // Two requests must not share any guidance state: committing tokens on one must never appear on
 // the other's grammar cursor. This is the basic per-request-instance guarantee that everything
 // else in this file builds on.

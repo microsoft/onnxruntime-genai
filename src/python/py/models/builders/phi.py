@@ -28,6 +28,18 @@ class PhiModel(Model):
             location="input",
         )
         self.make_attention(layer_id, layer.self_attn, root_input=self.layernorm_attrs["output_0"])
+        if layer_id == self.num_layers - 1 and self.prunes_hidden_rows():
+            self.make_selected_hidden_rows()
+            norm_output = self.layernorm_attrs["output_0"]
+            gather_name = f"/model/layers.{layer_id}/mlp_input/Gather"
+            self.make_gather(
+                gather_name,
+                [norm_output, self.input_names["logits_indices"]],
+                dtype=self.values[norm_output].dtype,
+                shape=["num_logits", self.hidden_size],
+                axis=0,
+            )
+            self.layernorm_attrs["output_0"] = f"{gather_name}/output_0"
 
         old_skip_input = self.layernorm_attrs["skip_input"]
         self.make_mlp(layer_id, layer.mlp, root_input=self.layernorm_attrs["output_0"])
@@ -38,7 +50,7 @@ class PhiModel(Model):
             residual_add_name,
             residual_add_inputs,
             dtype=self.io_dtype,
-            shape=["batch_size", "sequence_length", self.hidden_size],
+            shape=self.make_hidden_state_shape(),
         )
 
         self.layernorm_attrs["first_layernorm"] = False
@@ -592,9 +604,15 @@ class Phi3MoELongRoPEModel(MistralModel):
 
         for i in range(self.moe_attrs["num_experts"]):
             # Quantize the weights with uint8
-            pre_qweight1, w1_scale = self.make_qmoe_weights(moe.experts[i].w1.weight.T)
-            pre_qweight2, w2_scale = self.make_qmoe_weights(moe.experts[i].w2.weight.T)
-            pre_qweight3, w3_scale = self.make_qmoe_weights(moe.experts[i].w3.weight.T)
+            pre_qweight1, w1_scale = self.make_qmoe_weights(
+                moe.experts[i].w1.weight.T, self.moe_attrs.get("fc1_expert_weight_bits")
+            )
+            pre_qweight2, w2_scale = self.make_qmoe_weights(
+                moe.experts[i].w2.weight.T, self.moe_attrs.get("fc2_expert_weight_bits")
+            )
+            pre_qweight3, w3_scale = self.make_qmoe_weights(
+                moe.experts[i].w3.weight.T, self.moe_attrs.get("fc3_expert_weight_bits")
+            )
 
             w1_list.append(pre_qweight1)
             w2_list.append(pre_qweight2)

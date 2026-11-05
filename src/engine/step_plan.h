@@ -14,6 +14,7 @@
 namespace Generators {
 
 struct Request;
+struct PrefixCacheMatch;
 
 using StepTransactionId = uint64_t;
 
@@ -70,6 +71,7 @@ struct RequestStepPlan {
   bool is_prefill{};
   bool newly_admitted{};
   size_t scheduling_order{};  // Logical scheduler order before physical execution ordering.
+  std::shared_ptr<const PrefixCacheMatch> prefix_match;
 };
 
 // Fixed decoder-state demand for a step, planned atomically with the paged-block demand so the

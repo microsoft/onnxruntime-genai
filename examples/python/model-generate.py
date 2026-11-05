@@ -29,10 +29,8 @@ def main(args):
             text = input("Input: ")
             prompts = [text]
     args.batch_size = len(prompts)
-    search_config = {"batch_size": args.batch_size, "chunk_size": args.chunk_size, "num_beams": args.num_beams}
-    config = get_config(
-        args.model_path, args.execution_provider, args.ep_path, ep_options={}, search_options=search_config
-    )
+    search_options = get_search_options(args)
+    config = get_config(args.model_path, args.execution_provider, args.ep_path, search_options=search_options)
 
     model = og.Model(config)
     if args.verbose:
@@ -55,7 +53,6 @@ def main(args):
         print(f"Prompt(s) encoded: {prompts}")
 
     params = og.GeneratorParams(model)
-    search_options = get_search_options(args)
     params.set_search_options(**search_options)
     if args.verbose:
         print(f"GeneratorParams created: {search_options}")

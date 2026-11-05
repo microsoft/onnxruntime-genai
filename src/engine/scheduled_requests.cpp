@@ -12,8 +12,45 @@
 #include <cstdint>
 #include <exception>
 #include <limits>
+#include <numeric>
 
 namespace Generators {
+
+ScheduledRequests::~ScheduledRequests() = default;
+ScheduledRequests::ScheduledRequests(ScheduledRequests&&) noexcept = default;
+ScheduledRequests& ScheduledRequests::operator=(ScheduledRequests&&) noexcept = default;
+
+TargetTokenSelection BuildTopKTargetSelection(
+    std::span<const int32_t> tokens, std::span<const float> scores,
+    const EffectiveTurnPolicy& policy) {
+  TargetTokenSelection selection;
+  const float max_score = scores[0];
+  const float inverse_temperature = 1.0f / policy.temperature;
+  std::vector<float> probabilities(scores.size());
+  float sum = 0.0f;
+  for (size_t i = 0; i < scores.size(); ++i) {
+    probabilities[i] = std::exp((scores[i] - max_score) * inverse_temperature);
+    sum += probabilities[i];
+  }
+  for (float& probability : probabilities)
+    probability /= sum;
+
+  float cumulative = 0.0f;
+  for (size_t i = 0; i < scores.size(); ++i) {
+    const float probability = probabilities[i];
+    const bool keep_top_p = !(policy.top_p > 0.0f && policy.top_p < 1.0f) ||
+                            cumulative < policy.top_p;
+    cumulative += probability;
+    if (keep_top_p) {
+      selection.indices.push_back(tokens[i]);
+      selection.probs.push_back(probability);
+    }
+  }
+  const float retained_mass = std::accumulate(selection.probs.begin(), selection.probs.end(), 0.0f);
+  for (float& probability : selection.probs)
+    probability /= retained_mass;
+  return selection;
+}
 
 namespace {
 
@@ -101,40 +138,9 @@ TargetTokenSelection BuildTargetSelection(
 
   const int k = std::min(policy.top_k, topk.k);
   const size_t offset = row * static_cast<size_t>(topk.k);
-  const float max_score = topk.scores[offset];
-  const float inverse_temperature = 1.0f / policy.temperature;
-  std::vector<float> probabilities(static_cast<size_t>(k));
-  float sum = 0.0f;
-  for (int i = 0; i < k; ++i) {
-    probabilities[static_cast<size_t>(i)] =
-        std::exp((topk.scores[offset + static_cast<size_t>(i)] - max_score) *
-                 inverse_temperature);
-    sum += probabilities[static_cast<size_t>(i)];
-  }
-  for (float& probability : probabilities)
-    probability /= sum;
-
-  int keep = k;
-  if (policy.top_p > 0.0f && policy.top_p < 1.0f) {
-    float cumulative = 0.0f;
-    for (int i = 0; i < k; ++i) {
-      cumulative += probabilities[static_cast<size_t>(i)];
-      if (cumulative >= policy.top_p) {
-        keep = i + 1;
-        break;
-      }
-    }
-  }
-  float kept_sum = 0.0f;
-  for (int i = 0; i < keep; ++i)
-    kept_sum += probabilities[static_cast<size_t>(i)];
-  selection.indices.assign(
-      topk.tokens.begin() + static_cast<ptrdiff_t>(offset),
-      topk.tokens.begin() + static_cast<ptrdiff_t>(offset + static_cast<size_t>(keep)));
-  selection.probs.assign(probabilities.begin(), probabilities.begin() + keep);
-  for (float& probability : selection.probs)
-    probability /= kept_sum;
-  return selection;
+  return BuildTopKTargetSelection(
+      std::span<const int32_t>{topk.tokens}.subspan(offset, static_cast<size_t>(k)),
+      std::span<const float>{topk.scores}.subspan(offset, static_cast<size_t>(k)), policy);
 }
 
 }  // namespace
@@ -212,7 +218,107 @@ Tensor* ScheduledRequests::HiddenStates() const {
   return decoder_state_ ? decoder_state_->HiddenStates() : nullptr;
 }
 
+void ScheduledRequests::BeginBackendStep(std::vector<BackendPlannedRow> plan) {
+  if (output_kind_ != StepOutputKind::DecoderOutputs || decoder_state_)
+    throw std::logic_error("An executor step can select its output protocol only once.");
+  if (plan.empty() && std::any_of(requests_.begin(), requests_.end(),
+                                  [](const auto& request) { return IsExecuting(request->status_); }))
+    throw std::logic_error("Executable backend work requires a nonempty plan; defer idle work in the scheduler.");
+  for (size_t i = 0; i < plan.size(); ++i) {
+    const auto& row = plan[i];
+    if (row.request_row >= requests_.size() || !IsExecuting(requests_[row.request_row]->status_) ||
+        row.key.turn_id != requests_[row.request_row]->CurrentTurnId() ||
+        row.key.context_id == 0 || row.key.lease_epoch == 0 || row.key.slot.epoch == 0 ||
+        row.key.submission_id == 0 || row.key.slot.index >= backend_max_slots_)
+      throw std::logic_error("A backend plan contains an invalid live row identity.");
+    for (size_t j = 0; j < i; ++j) {
+      if (plan[j].request_row == row.request_row || plan[j].key.slot.index == row.key.slot.index ||
+          plan[j].key.context_id != row.key.context_id || plan[j].key.lease_epoch != row.key.lease_epoch)
+        throw std::logic_error("A backend plan schedules the same request or slot twice.");
+    }
+  }
+  output_kind_ = StepOutputKind::BackendRows;
+  backend_plan_ = std::move(plan);
+  backend_rows_.reserve(backend_plan_.size());
+  backend_request_rows_.reserve(backend_plan_.size());
+  commit_acks_.reserve(backend_plan_.size());
+}
+
+void ScheduledRequests::StageBackendRow(size_t request_row, BackendRowResult result) {
+  if (output_kind_ != StepOutputKind::BackendRows)
+    throw std::logic_error("Backend rows require an explicit backend step plan.");
+  for (size_t row : backend_request_rows_) {
+    if (row == request_row)
+      throw std::logic_error("A backend returned duplicate completion rows.");
+  }
+  backend_request_rows_.push_back(request_row);
+  backend_rows_.push_back(std::move(result));
+}
+
+void ScheduledRequests::ValidateBackendRows() const {
+  if (backend_rows_.size() != backend_plan_.size())
+    throw std::logic_error("Backend completion coverage does not match its submitted plan.");
+  for (size_t i = 0; i < backend_rows_.size(); ++i) {
+    const auto& row = backend_rows_[i];
+    const size_t request_row = backend_request_rows_[i];
+    const auto planned = std::find_if(backend_plan_.begin(), backend_plan_.end(),
+                                      [request_row](const BackendPlannedRow& p) { return p.request_row == request_row; });
+    if (planned == backend_plan_.end() || !(planned->key == row.key) ||
+        !IsExecuting(requests_[request_row]->status_) ||
+        requests_[request_row]->CurrentTurnId() != row.key.turn_id)
+      throw std::logic_error("Backend completion does not belong to the planned live request.");
+    if (!row.prefill && !row.selected_tokens)
+      throw std::logic_error("A backend row must report progress or selected tokens.");
+    if (row.prefill) {
+      const auto& progress = *row.prefill;
+      if (progress.prompt_tokens_processed_this_step > planned->max_prompt_tokens ||
+          (progress.prompt_tokens_processed_this_step == 0 &&
+           !(planned->allow_phase_completion && progress.prompt_complete)))
+        throw std::logic_error("Backend prefill progress is outside its planned prompt range.");
+    }
+    if (row.selected_tokens) {
+      const auto& block = *row.selected_tokens;
+      if (block.candidate_count == 0 || block.candidate_count > kMaxGeneratedTokensPerStep ||
+          block.candidate_count > backend_max_result_tokens_ ||
+          block.speculation.accepted > block.speculation.proposed)
+        throw std::logic_error("A backend returned an invalid selected-token block.");
+      for (size_t j = 0; j < block.candidate_count; ++j) {
+        if (block.candidates[j] < 0 || block.candidates[j] >= model_->config_->model.vocab_size)
+          throw std::logic_error("A backend returned a token outside the configured vocabulary.");
+      }
+    }
+  }
+}
+
 void ScheduledRequests::GenerateNextTokens(std::vector<RequestStepResult>& results) {
+  if (output_kind_ == StepOutputKind::BackendRows) {
+    ValidateBackendRows();  // The entire batch is checked before the first Request changes.
+    if (backend_committed_)
+      throw std::logic_error("A backend completion batch was committed more than once.");
+    backend_committed_ = true;  // A partially failed Request commit must never be retried.
+    results.assign(requests_.size(), RequestStepResult{});
+    for (size_t i = 0; i < backend_rows_.size(); ++i) {
+      const auto& row = backend_rows_[i];
+      const size_t request_row = backend_request_rows_[i];
+      auto& request = requests_[request_row];
+      auto& result = results[request_row];
+      if (row.selected_tokens) {
+        const auto& block = *row.selected_tokens;
+        result = request->CommitExternalTokens({block.candidates.data(), block.candidate_count});
+      }
+      TokenCommitAck ack;
+      ack.key = row.key;
+      ack.candidates_consumed = result.candidates_consumed;
+      ack.tokens_appended = result.tokens_appended;
+      ack.tokens_staged_for_events = result.visible_token_count;
+      ack.request_sequence_length_after = static_cast<uint64_t>(request->CurrentSequenceLength());
+      ack.turn_finished = result.done;
+      ack.finish_reason = result.finish_reason;
+      ack.disposition = result.done ? ContinuationDisposition::Invalidate : ContinuationDisposition::Continue;
+      commit_acks_.push_back(std::move(ack));
+    }
+    return;
+  }
   if (!decoder_state_) {
     throw std::runtime_error("Cannot generate next tokens without the decoder state.");
   }
@@ -265,6 +371,8 @@ std::vector<DeviceSpan<float>> ScheduledRequests::ProcessLogits() {
   }
 
   // A verify step gets one row per draft on top of the row that predicts the request's next token.
+  // The current contract keeps at least one row per request, including an incomplete prefill chunk
+  // whose row is not sampled. This could later be optimized by allowing zero rows for such chunks.
   size_t expected_rows = requests_.size();
   for (size_t draft_count : draft_token_counts_) {
     expected_rows += draft_count;
@@ -288,10 +396,12 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
     std::vector<DeviceSpan<float>>& verify_rows,
     std::vector<std::vector<int32_t>>& selected_tokens,
     std::vector<size_t>& confirmed_draft_counts,
-    std::vector<std::vector<std::mt19937>>& rng_checkpoints) {
+    std::vector<std::vector<std::mt19937>>& rng_checkpoints,
+    std::vector<int32_t>& greedy_tokens) {
   std::vector<DeviceSpan<float>> sampled_rows;
   sampled_rows.reserve(requests_.size());
   selected_tokens.resize(requests_.size());
+  greedy_tokens.assign(requests_.size(), -1);
   confirmed_draft_counts.assign(requests_.size(), 0);
   // Left completely empty (no allocation at all) unless the pre-scan below finds at least one
   // random-sampled drafted request with an active stop controller; only then is it sized once, to
@@ -304,6 +414,33 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
   // is comparable to the step itself, so ask the device for the token ids in one launch instead.
   const bool step_has_drafts = std::any_of(draft_token_counts_.begin(), draft_token_counts_.end(),
                                            [](size_t count) { return count != 0; });
+  if (step_has_drafts) {
+    size_t first_row = 0;
+    for (size_t i = 0; i < requests_.size(); ++i) {
+      const size_t draft_count = draft_token_counts_[i];
+      auto& request = requests_[i];
+      if (draft_count != 0) {
+        const int eos_floor = request->TurnEosFloor();
+        const int64_t committed_length = request->CommittedSequenceLength();
+        for (size_t offset = 0; offset <= draft_count; ++offset) {
+          const int64_t row_length = committed_length + static_cast<int64_t>(offset);
+          if (row_length >= eos_floor) {
+            break;
+          }
+          // Staged drafts already extend Search's sequence; each verification row needs its
+          // own logical length, including the correction/bonus row, before argmax or top-k.
+          request->search_->SetLogits(verify_rows[first_row + offset]);
+          request->search_->ApplyMinLength(eos_floor, static_cast<int>(row_length));
+          if (model_->p_device_scoring_->GetType() == DeviceType::CPU) {
+            // SetLogits downloads the shared buffer again for the next row, so persist this
+            // host-side mask first. Device scorers already modify the device buffer in place.
+            verify_rows[first_row + offset].CopyCpuToDevice();
+          }
+        }
+      }
+      first_row += draft_count + 1;
+    }
+  }
   std::vector<int32_t> row_argmax =
       step_has_drafts ? TryDeviceArgmaxPerRow(*model_->p_device_inputs_, verify_rows)
                       : std::vector<int32_t>{};
@@ -376,6 +513,8 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
         rng_checkpoints[i].reserve(draft_count + 1);
       }
       const auto drafts = requests_[i]->StagedDraftTokens();
+      const auto draft_distributions = requests_[i]->StagedDraftTokenDistributions();
+      const bool ratio_verification = draft_distributions.size() == draft_count;
       const size_t token_budget = requests_[i]->RemainingTurnTokenBudget();
       requests_[i]->RewindDraftsForTransaction(0);
       size_t accepted_count = 0;
@@ -384,12 +523,32 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
         const auto selection = BuildTargetSelection(
             row + accepted_count, verify_rows[row + accepted_count],
             requests_[i]->TurnPolicy(), topk, sampling_scratch);
-        const int32_t token = SampleTargetToken(selection, requests_[i]->rng_);
+        int32_t token;
+        bool accepted = false;
+        if (ratio_verification) {
+          const int32_t draft_token = drafts[accepted_count];
+          const auto& draft_distribution = draft_distributions[accepted_count];
+          const float target_probability = GetTargetTokenProbability(selection, draft_token);
+          const float draft_probability = GetSparseTokenProbability(
+              draft_distribution.indices, draft_distribution.probs, draft_token);
+          std::uniform_real_distribution<float> uniform(0.0f, 1.0f);
+          accepted = uniform(requests_[i]->rng_) <
+                     ComputeAcceptProb(target_probability, draft_probability);
+          token = accepted
+                      ? draft_token
+                      : SampleCorrectionToken(
+                            selection.indices, selection.probs,
+                            draft_distribution.indices, draft_distribution.probs,
+                            requests_[i]->rng_);
+        } else {
+          token = SampleTargetToken(selection, requests_[i]->rng_);
+          accepted = token == drafts[accepted_count];
+        }
         selected_tokens[i].push_back(token);
         if (checkpoint_rng) {
           rng_checkpoints[i].push_back(requests_[i]->rng_);
         }
-        if (token != drafts[accepted_count] || requests_[i]->IsStopToken(token))
+        if (!accepted || requests_[i]->IsStopToken(token))
           break;
         ++accepted_count;
       }
@@ -422,6 +581,7 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
       ++accepted_count;
     }
     requests_[i]->CommitAcceptedDraftsForTransaction(accepted_count);
+    greedy_tokens[i] = row_argmax[row + accepted_count];
     sampled_rows.push_back(verify_rows[row + accepted_count]);
     row += draft_count + 1;
   }
@@ -487,7 +647,7 @@ void ScheduledRequests::ScheduleGuidanceMasks() noexcept {
     std::vector<ConstrainedLogitsProcessor*> processors;
     processors.reserve(requests_.size());
     for (const auto& request : requests_) {
-      if (request->guidance_logits_processor_ &&
+      if (request->HasGuidance() &&
           !request->IsTurnComplete()) {
         processors.push_back(request->guidance_logits_processor_.get());
       }
@@ -621,8 +781,9 @@ bool ScheduledRequests::PrepareBatchedSamplingPlan(
     if (!status_is_executable ||
         !request->IsChunkComplete())
       continue;
-    if (require_transaction_support && draft_token_counts_[request_index] != 0 &&
-        !request->TurnPolicy().IsGreedy()) {
+    // Drafted requests select every committed token during verification: a sampled request draws
+    // on its host stream, and a greedy request takes the verification argmax.
+    if (require_transaction_support && draft_token_counts_[request_index] != 0) {
       continue;
     }
 
@@ -645,16 +806,35 @@ void ScheduledRequests::BeginTransaction() {
   transaction_uses_batched_sampler_ = PrepareBatchedSamplingPlan(true);
   checkpointed_sampler_states_.clear();
   try {
-    for (const auto& request : requests_) {
+    std::vector<size_t> greedy_drafted_rows;
+    for (size_t i = 0; i < requests_.size(); ++i) {
+      const auto& request = requests_[i];
       const bool uses_batched_sampler =
           transaction_uses_batched_sampler_ &&
           std::find(sampling_plan_->requests.begin(), sampling_plan_->requests.end(),
                     request.get()) != sampling_plan_->requests.end();
-      if (uses_batched_sampler)
+      // A greedy drafted request selects its tokens from the verification argmax and commits them
+      // into a slot this transaction owns (bound below), so like a batched-sampled request its
+      // Search owns no RNG or next-token scratch worth checkpointing.
+      const bool commits_external_tokens =
+          i < draft_token_counts_.size() && draft_token_counts_[i] != 0 &&
+          request->TurnPolicy().IsGreedy() && request->SupportsBatchedSampling();
+      if (uses_batched_sampler || commits_external_tokens)
         request->SaveStateForExternalSamplingTransaction();
       else
         request->SaveStateForTransaction();
       ++transaction_checkpoint_count_;
+      if (commits_external_tokens)
+        greedy_drafted_rows.push_back(i);
+    }
+    // Such a Search may still be bound to a batched-sampler slot from an earlier step, which the
+    // sampler now hands to another request. Give it a private slot before it commits any token.
+    if (!greedy_drafted_rows.empty()) {
+      auto slots = model_->p_device_->Allocate<int32_t>(greedy_drafted_rows.size());
+      for (size_t row = 0; row < greedy_drafted_rows.size(); ++row) {
+        if (!requests_[greedy_drafted_rows[row]]->BindNextTokensSlot(slots.subspan(row, 1)))
+          throw std::logic_error("A greedy drafted request lost batched-search support.");
+      }
     }
     // Drafts join the sequence only after every checkpoint exists, so an abort rewinds them for
     // free through the same restore path as a sampled token.
@@ -726,8 +906,9 @@ void ScheduledRequests::GenerateNextTokensForTransaction(
   std::vector<std::vector<int32_t>> selected_tokens;
   std::vector<size_t> confirmed_draft_counts;
   std::vector<std::vector<std::mt19937>> rng_checkpoints;
+  std::vector<int32_t> greedy_tokens;
   auto logits = SelectSampledRows(verify_rows, selected_tokens, confirmed_draft_counts,
-                                  rng_checkpoints);
+                                  rng_checkpoints, greedy_tokens);
   const bool guidance_applied = TryApplyBatchedGuidanceMasks(logits);
   results.assign(requests_.size(), RequestStepResult{});
   std::vector<bool> sampled_by_batched_sampler(requests_.size(), false);
@@ -893,7 +1074,15 @@ void ScheduledRequests::GenerateNextTokensForTransaction(
           requests_[i]->StageDraftCompletionForTransaction();
     } else if (requests_[i]->IsChunkComplete() && selected_tokens[i].empty() &&
                !sampled_by_batched_sampler[i]) {
-      results[i] = requests_[i]->ApplyLogitsForTransaction(logits[i], guidance_applied);
+      if (greedy_tokens[i] >= 0) {
+        // Verification rows already have the applicable EOS floor applied, and other logits
+        // processors are excluded by DraftTokenValidationError, so this is the greedy token.
+        // Committing it directly skips a second vocabulary pass and its device round trip.
+        requests_[i]->search_->CommitToken(greedy_tokens[i]);
+        results[i] = requests_[i]->StageGenerationForTransaction(plan.requests[i]);
+      } else {
+        results[i] = requests_[i]->ApplyLogitsForTransaction(logits[i], guidance_applied);
+      }
     }
   }
 }

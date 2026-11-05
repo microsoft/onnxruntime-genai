@@ -13,6 +13,7 @@ bool SharedCacheGrowth::IsSupported(const State& state, std::span<const std::str
   if (Ort::api->GetModelEditorApi() == nullptr) return false;
   const auto& model = state.model_;
   if (model.p_device_kvcache_->GetType() != DeviceType::WEBGPU ||
+      !model.config_->model.decoder.pipeline.empty() ||
       !state.params_->IsPastPresentShareBufferEnabled(model.config_->model.type) ||
       state.params_->search.num_beams != 1 || model.config_->model.decoder.sliding_window ||
       model.p_device_kvcache_->GetKeyValueCacheQuantizationBits(model.config_->model.decoder.session_options) != 0) {

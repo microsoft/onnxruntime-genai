@@ -9,6 +9,7 @@ import os
 import platform
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import textwrap
@@ -103,6 +104,11 @@ def _parse_args():
         help="If set, install the built core (libraries, public headers, and the exported "
         "find_package(onnxruntime-genai) CMake package) to this prefix after building. This is "
         "the hand-off point for incremental SDK builds.",
+    )
+    parser.add_argument(
+        "--strip_install",
+        action="store_true",
+        help="Strip installed binaries when --install_dir is set. Leaves build outputs unchanged.",
     )
     parser.add_argument(
         "--prebuilt_genai_home",
@@ -557,12 +563,31 @@ def _run_android_tests(args: argparse.Namespace):
 
 
 def _get_windows_build_args(args: argparse.Namespace):
+    spectre_enabled = True
+    for definition in args.cmake_extra_defines:
+        name, separator, value = definition.removeprefix("-D").partition("=")
+        if name.split(":", 1)[0] == "ENABLE_MSVC_SPECTRE" and separator:
+            value = value.strip().upper()
+            spectre_enabled = value not in {
+                "",
+                "0",
+                "OFF",
+                "NO",
+                "FALSE",
+                "N",
+                "IGNORE",
+                "NOTFOUND",
+            } and not value.endswith("-NOTFOUND")
+    spectre_flag = " /Qspectre" if spectre_enabled else ""
     win_args = [
         "-DCMAKE_EXE_LINKER_FLAGS_INIT=/profile /DYNAMICBASE",
         "-DCMAKE_MODULE_LINKER_FLAGS_INIT=/profile /DYNAMICBASE",
         "-DCMAKE_SHARED_LINKER_FLAGS_INIT=/profile /DYNAMICBASE",
     ]
-    cmake_c_flags = "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000"
+    cmake_c_flags = (
+        "/EHsc /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000"
+        + spectre_flag
+    )
     if args.config == "Release":
         cmake_c_flags += " /O2 /Ob2 /DNDEBUG"
     elif args.config == "RelWithDebInfo":
@@ -575,7 +600,9 @@ def _get_windows_build_args(args: argparse.Namespace):
     ]
     if args.use_cuda:
         win_args += [
-            '-DCMAKE_CUDA_FLAGS_INIT=/DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 -Xcompiler=" /MP /guard:cf /Qspectre " -allow-unsupported-compiler',
+            '-DCMAKE_CUDA_FLAGS_INIT=/DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 -Xcompiler=" /MP /guard:cf'
+            + spectre_flag
+            + ' " -allow-unsupported-compiler',
         ]
     return win_args
 
@@ -845,6 +872,8 @@ def install_core(args: argparse.Namespace, env: dict[str, str]):
         "--prefix",
         str(args.install_dir),
     ]
+    if args.strip_install:
+        cmd.append("--strip")
     util.run(cmd, env=env)
 
 
@@ -910,7 +939,7 @@ def _build_sdk_cmake(args: argparse.Namespace, env: dict[str, str]):
     util.run(build_command, env=env)
 
     if args.sdk == "python" and not args.skip_wheel:
-        util.run(build_command + ["--target", "PyPackageBuild"], env=env)
+        util.run([*build_command, "--target", "PyPackageBuild"], env=env)
 
 
 def _build_sdk_csharp(args: argparse.Namespace, env: dict[str, str]):
@@ -1003,14 +1032,20 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
 
     if build_dir.exists():
         log.info(f"Removing existing build directory: {build_dir}")
-        shutil.rmtree(build_dir)
+
+        def remove_readonly(function, path, _):
+            os.chmod(path, stat.S_IWRITE)
+            function(path)
+
+        shutil.rmtree(build_dir, onerror=remove_readonly)
 
     build_dir.mkdir()
 
-    samples_to_build = ["-DMODEL_QA=ON", "-DMODEL_CHAT=ON", "-DMODEL_MM=ON", "-DWHISPER=ON", "-DNEMOTRON_SPEECH=ON"]
+    samples_to_build = ["-DMODEL_QA=ON", "-DMODEL_CHAT=ON", "-DMODEL_MM=ON", "-DWHISPER=ON", "-DMODEL_ASR=ON"]
 
-    ort_include_dir = REPO_ROOT / "ort" / "include"
-    ort_lib_dir = REPO_ROOT / "ort" / "lib"
+    ort_root = args.ort_home if args.ort_home else REPO_ROOT / "ort"
+    ort_include_dir = ort_root / "include"
+    ort_lib_dir = ort_root / "lib"
     oga_include_dir = REPO_ROOT / "src"
     oga_lib_dir = args.build_dir
     if util.is_windows():

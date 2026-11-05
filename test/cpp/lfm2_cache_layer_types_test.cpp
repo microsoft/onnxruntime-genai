@@ -6,6 +6,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -97,6 +98,45 @@ void ExpectLayerTypesValidationMessage(const std::string& message, size_t actual
   EXPECT_NE(message.find("num_hidden_layers (" + std::to_string(expected_layers) + ")"), std::string::npos) << message;
 }
 
+// LFM2 variants that the exporter labels with their own model type still have to run through the
+// LFM2 runtime: the same conv state cache, and no rewind.
+void ExpectLfm2Runtime(const std::string& model_type, const std::string& temp_suffix,
+                       const std::string& layer_types_json = "") {
+  const auto src_dir = GetLfm2ModelPath();
+  const auto model_dir = MakeTempDir(temp_suffix);
+  fs_std::copy(src_dir, model_dir, fs_std::copy_options::recursive | fs_std::copy_options::overwrite_existing);
+  std::string config = ReadFile(model_dir / "genai_config.json");
+  ReplaceFirst(config, "\"type\": \"lfm2\"", "\"type\": \"" + model_type + "\"");
+  if (!layer_types_json.empty()) {
+    ReplaceFirst(config,
+                 "\"layer_types\": [\"conv\", \"full_attention\", \"conv\", \"full_attention\"]",
+                 "\"layer_types\": " + layer_types_json);
+  }
+  WriteFile(model_dir / "genai_config.json", config);
+
+  auto model = OgaModel::Create(model_dir.string().c_str());
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 8);
+  auto generator = OgaGenerator::Create(*model, *params);
+
+  const std::vector<int32_t> input_ids{0, 0, 195, 731};
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+  generator->GenerateNextToken();
+  const size_t sequence_length = generator->GetSequenceCount(0);
+  EXPECT_GT(sequence_length, input_ids.size());
+
+  // Conv state cannot be rewound, exactly like the dense LFM2 models. The generator's up-front guard
+  // has to reject it; a throw from deeper in the state would come after the sequence was rewound.
+  std::string message;
+  try {
+    generator->RewindTo(0);
+  } catch (const std::runtime_error& e) {
+    message = e.what();
+  }
+  EXPECT_NE(message.find("RewindTo is currently not supported for " + model_type), std::string::npos) << message;
+  EXPECT_EQ(generator->GetSequenceCount(0), sequence_length);
+}
+
 }  // namespace
 
 TEST(LFM2CacheLayerTypesValidationTest, UndersizedLayerTypesArray) {
@@ -125,6 +165,17 @@ TEST(LFM2CacheLayerTypesValidationTest, EmptyLayerTypesArray) {
   ExpectLayerTypesValidationMessage(message, 0, 4);
 }
 
+// A layer type the cache does not know must not be taken for a conv layer.
+TEST(LFM2CacheLayerTypesValidationTest, UnknownLayerType) {
+  SkipIfModelUnavailable();
+
+  const auto model_dir = WriteModelWithLayerTypes(
+      "unknown",
+      "[\"conv\", \"full_attention\", \"linear_attention\", \"full_attention\"]");
+  const std::string message = CaptureRuntimeErrorMessage(model_dir);
+  EXPECT_NE(message.find("LFM2Cache: layer_types[2] is \"linear_attention\""), std::string::npos) << message;
+}
+
 TEST(LFM2CacheLayerTypesValidationTest, ValidMatchingLayers) {
   SkipIfModelUnavailable();
 
@@ -135,4 +186,31 @@ TEST(LFM2CacheLayerTypesValidationTest, ValidMatchingLayers) {
   EXPECT_NO_THROW({
     CreateGeneratorForModel(model_dir);
   });
+}
+
+// The MoE variant (LFM2-8B-A1B, LFM2.5-8B-A1B, LFM2-24B-A2B) is exported as "lfm2_moe".
+TEST(LFM2CacheLayerTypesValidationTest, Lfm2MoeTypeUsesLfm2Runtime) {
+  SkipIfModelUnavailable();
+  ExpectLfm2Runtime("lfm2_moe", "moe_type");
+}
+
+// An LFM2-VL checkpoint exported without exclude_embeds is labeled "lfm2_vl_text": a plain LFM2
+// decoder rather than a stage of the vision pipeline.
+TEST(LFM2CacheLayerTypesValidationTest, Lfm2VlTextTypeUsesLfm2Runtime) {
+  SkipIfModelUnavailable();
+  ExpectLfm2Runtime("lfm2_vl_text", "vl_text_type");
+}
+
+// An LFM2-Audio checkpoint exported without exclude_embeds is labeled "lfm2_audio_text": a plain
+// LFM2 decoder rather than a stage of the speech pipeline.
+TEST(LFM2CacheLayerTypesValidationTest, Lfm2AudioTextTypeUsesLfm2Runtime) {
+  SkipIfModelUnavailable();
+  ExpectLfm2Runtime("lfm2_audio_text", "audio_text_type");
+}
+
+// LFM3 is exported as "lfm3", and its sliding_attention layers keep a KV cache like the
+// full_attention ones rather than a conv state.
+TEST(LFM2CacheLayerTypesValidationTest, Lfm3TypeUsesLfm2Runtime) {
+  SkipIfModelUnavailable();
+  ExpectLfm2Runtime("lfm3", "lfm3_type", "[\"conv\", \"full_attention\", \"conv\", \"sliding_attention\"]");
 }

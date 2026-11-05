@@ -3,13 +3,22 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <limits>
 #include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
 #include <vector>
 
+#include <cuda_runtime.h>
 #include <gtest/gtest.h>
 
+#include "dflash2_staging.h"
 #include "generator/generators.h"
+#include "models/cpu_embedding.h"
 #include "ort_genai.h"
 #include "telemetry_test_environment.h"
 
@@ -74,6 +83,243 @@ TEST(DeviceSpanTests, DeviceInputKeepsPaddingMetadataSeparateFromTokenIdsCuda) {
                           [](int32_t token) { return token == non_pad_metadata; }));
   auto input_ids = input.CopyDeviceToCpu();
   EXPECT_TRUE(std::equal(token_ids.begin(), token_ids.end(), input_ids.begin()));
+}
+
+TEST(DeviceSpanTests, EmbeddingStagingSurvivesReuseGrowthAndTeardownCuda) {
+  [[maybe_unused]] auto model = CreateCudaModel();
+  auto* device = Generators::GetDeviceInterface(Generators::DeviceType::CUDA);
+  const std::array<int64_t, 5> sizes{64, 32, 128, 16, 128};
+  std::vector<std::unique_ptr<Generators::Tensor>> outputs;
+  {
+    Generators::CpuEmbedding::Workspace workspace;
+    uint8_t* previous_host = nullptr;
+    size_t capacity = 0;
+    for (size_t step = 0; step < sizes.size(); ++step) {
+      auto output = std::make_unique<Generators::Tensor>(device, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+      output->CreateTensor(std::array<int64_t, 1>{sizes[step]});
+      auto staging = workspace.Prepare(*output);
+      auto host = staging.CpuSpan();
+      if (host.size() <= capacity) {
+        EXPECT_EQ(host.data(), previous_host);
+      }
+      capacity = std::max(capacity, host.size());
+      previous_host = host.data();
+      std::fill(host.begin(), host.end(), static_cast<uint8_t>(step + 1));
+      workspace.Upload();
+      outputs.push_back(std::move(output));
+    }
+  }
+  for (size_t step = 0; step < outputs.size(); ++step) {
+    auto bytes = outputs[step]->GetByteSpan();
+    const auto result = bytes.CopyDeviceToCpu();
+    EXPECT_TRUE(std::all_of(result.begin(), result.end(), [step](uint8_t value) { return value == step + 1; }));
+  }
+}
+
+TEST(DeviceSpanTests, PinnedMirrorIsNotReusedBeforePendingCopyCompletesCuda) {
+  [[maybe_unused]] auto model = CreateCudaModel();
+  auto* device = Generators::GetDeviceInterface(Generators::DeviceType::CUDA);
+  constexpr size_t size = 1 << 20;
+  auto first = device->Allocate<uint8_t>(size);
+  auto second = device->Allocate<uint8_t>(size);
+  auto queued_work = device->Allocate<uint8_t>(size_t{64} << 20);
+  queued_work.Zero();
+
+  {
+    auto view = device->WrapMemoryBase(first.Span().data(), size);
+    view->AllocateCpu();
+    std::fill_n(view->p_cpu_, size, uint8_t{0x35});
+    view->CopyCpuToDevice();
+  }
+  {
+    auto view = device->WrapMemoryBase(second.Span().data(), size);
+    view->AllocateCpu();
+    std::fill_n(view->p_cpu_, size, uint8_t{0xA7});
+    view->CopyCpuToDevice();
+  }
+
+  const auto first_result = first.CopyDeviceToCpu();
+  const auto second_result = second.CopyDeviceToCpu();
+  EXPECT_TRUE(std::all_of(first_result.begin(), first_result.end(), [](uint8_t value) { return value == 0x35; }));
+  EXPECT_TRUE(std::all_of(second_result.begin(), second_result.end(), [](uint8_t value) { return value == 0xA7; }));
+}
+
+// Holds the stream until the test opens the gate, so every upload queued behind it stays pending.
+void CUDART_CB WaitForGate(void* gate) {
+  while (!static_cast<std::atomic<bool>*>(gate)->load()) std::this_thread::yield();
+}
+
+TEST(DeviceSpanTests, ReleasingMirrorsPastPoolLimitsDoesNotWaitCuda) {
+  [[maybe_unused]] auto model = CreateCudaModel();
+  auto* device = Generators::GetDeviceInterface(Generators::DeviceType::CUDA);
+  auto stream = static_cast<cudaStream_t>(device->GetCudaStream());
+  // Past both the 64-entry class limit and the 8 MiB retention limit of the pinned mirror pool, and
+  // large enough that uploads read the mirror from a queued kernel rather than from launch arguments.
+  constexpr size_t size = size_t{128} << 10;
+  constexpr size_t count = 80;
+  ASSERT_TRUE(device->RecyclesHostMirrorsAfterUpload(size));
+  std::vector<Generators::DeviceSpan<uint8_t>> destinations;
+  for (size_t i = 0; i < count; ++i) destinations.push_back(device->Allocate<uint8_t>(size));
+
+  for (int round = 0; round < 2; ++round) {
+    std::atomic<bool> gate{false};
+    std::mutex mutex;
+    std::condition_variable finished;
+    bool done = false;
+    ASSERT_EQ(cudaLaunchHostFunc(stream, WaitForGate, &gate), cudaSuccess);
+    // Opens the gate if a release waits for the device, so the test fails instead of hanging.
+    std::thread watchdog{[&] {
+      std::unique_lock<std::mutex> lock{mutex};
+      finished.wait_for(lock, std::chrono::seconds{10}, [&] { return done; });
+      gate = true;
+    }};
+    for (size_t i = 0; i < count; ++i) {
+      auto view = device->WrapMemoryBase(destinations[i].Span().data(), size);
+      view->AllocateCpu();
+      std::fill_n(view->p_cpu_, size, static_cast<uint8_t>(round * count + i + 1));
+      view->CopyCpuToDevice();
+    }
+    const bool released_while_stream_blocked = !gate.load();
+    {
+      std::lock_guard<std::mutex> lock{mutex};
+      done = true;
+    }
+    finished.notify_one();
+    watchdog.join();
+    EXPECT_TRUE(released_while_stream_blocked) << "round " << round;
+    device->Synchronize();
+
+    for (size_t i = 0; i < count; ++i) {
+      const auto result = destinations[i].CopyDeviceToCpu();
+      const auto expected = static_cast<uint8_t>(round * count + i + 1);
+      EXPECT_TRUE(std::all_of(result.begin(), result.end(), [expected](uint8_t value) { return value == expected; }))
+          << "round " << round << " destination " << i;
+    }
+  }
+}
+
+TEST(DeviceSpanTests, FreshThreadUsesTheStreamDeviceCuda) {
+  int device_count = 0;
+  if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count < 2) GTEST_SKIP() << "needs two CUDA devices";
+  [[maybe_unused]] auto model = CreateCudaModel();
+  auto* device = Generators::GetDeviceInterface(Generators::DeviceType::CUDA);
+
+  constexpr size_t count = 16;
+  auto input = device->Allocate<int32_t>(count);
+  auto output = device->Allocate<int64_t>(count);
+  // The shared stream belongs to the device that owns the buffers allocated through the interface.
+  cudaPointerAttributes attributes{};
+  ASSERT_EQ(cudaPointerGetAttributes(&attributes, output.Span().data()), cudaSuccess);
+  const int stream_device = attributes.device;
+  const int other_device = (stream_device + 1) % device_count;
+
+  int device_after_cast = -1;
+  bool cast_succeeded = false;
+  // A host thread that selected another device than the shared stream's, as a fresh thread does by default.
+  std::thread worker{[&] {
+    ASSERT_EQ(cudaSetDevice(other_device), cudaSuccess);
+    cast_succeeded = device->Cast(input.Span().data(), output.Span().data(), Ort::TypeToTensorType<int32_t>,
+                                  Ort::TypeToTensorType<int64_t>, count);
+    ASSERT_EQ(cudaGetDevice(&device_after_cast), cudaSuccess);
+  }};
+  worker.join();
+  EXPECT_TRUE(cast_succeeded);
+  EXPECT_EQ(device_after_cast, stream_device);
+  device->Synchronize();
+}
+
+// Device memory of the test itself, so the test needs the CUDA add-on but no model.
+struct CudaBuffer {
+  explicit CudaBuffer(size_t bytes) { EXPECT_EQ(cudaMalloc(&data, bytes), cudaSuccess); }
+  ~CudaBuffer() { cudaFree(data); }
+  CudaBuffer(const CudaBuffer&) = delete;
+  CudaBuffer& operator=(const CudaBuffer&) = delete;
+  void* data{};
+};
+
+// The multi-slot qwen38_flash_graph engine drafts slot after slot without draining the stream. The proposal of the second slot
+// fills the host mirror of the block table while the upload of the first one's may not have run: a table past the 4032 bytes a
+// launch can carry is read from its mirror when the device gets to it, so the run of the first slot would see the block ids of
+// the second one.
+TEST(DeviceSpanTests, FreshStagingMirrorsKeepTheProposalsOfTwoSlotsApartCuda) {
+  auto* device = Generators::GetDeviceInterface(Generators::DeviceType::CUDA);
+  auto stream = static_cast<cudaStream_t>(device->GetCudaStream());
+  constexpr size_t bytes = size_t{16} << 10;  // a block table of 4096 ids
+  ASSERT_TRUE(device->RecyclesHostMirrorsAfterUpload(bytes));
+  constexpr size_t slots = 2;
+
+  // Pins the mirrors the proposals take below and loads the upload kernel: pinning a buffer (cudaHostAlloc) and loading a
+  // module wait for the device, which the engine only does while its pool and kernels warm up.
+  {
+    CudaBuffer unused{bytes};
+    Generators::Dflash2HostStaging pinning;
+    pinning.SetFreshMirrorPerUpload(true);
+    std::vector<Generators::DeviceSpan<uint8_t>> mirrors;
+    for (size_t slot = 0; slot < slots; ++slot) {
+      mirrors.push_back(pinning.Acquire(*device, &unused, unused.data, bytes, bytes));
+      mirrors.back().CpuSpan();
+      mirrors.back().CopyCpuRangeToDevice();
+    }
+    ASSERT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+  }
+
+  // Every proposal uploads into the step tensor and its run reads the tensor behind the upload; returns whether each run
+  // saw the block table of its own proposal.
+  const auto propose_for_both_slots = [&](bool fresh_mirror_per_upload) {
+    CudaBuffer step_tensor{bytes};
+    CudaBuffer first_run{bytes};
+    CudaBuffer second_run{bytes};
+    const std::array<void*, slots> read_by_run{first_run.data, second_run.data};
+    Generators::Dflash2HostStaging staging;
+    staging.SetFreshMirrorPerUpload(fresh_mirror_per_upload);
+
+    std::atomic<bool> gate{false};
+    std::mutex mutex;
+    std::condition_variable finished;
+    bool done = false;
+    EXPECT_EQ(cudaLaunchHostFunc(stream, WaitForGate, &gate), cudaSuccess);
+    // Opens the gate if a proposal waits for the device, so the test fails instead of hanging.
+    std::thread watchdog{[&] {
+      std::unique_lock<std::mutex> lock{mutex};
+      finished.wait_for(lock, std::chrono::seconds{10}, [&] { return done; });
+      gate = true;
+    }};
+    for (size_t slot = 0; slot < slots; ++slot) {
+      auto mirror = staging.Acquire(*device, &step_tensor, step_tensor.data, bytes, bytes);
+      auto host = mirror.CpuSpan();
+      std::fill(host.begin(), host.end(), static_cast<uint8_t>(0x11 * (slot + 1)));
+      mirror.CopyCpuRangeToDevice();
+      EXPECT_EQ(cudaMemcpyAsync(read_by_run[slot], step_tensor.data, bytes, cudaMemcpyDeviceToDevice, stream), cudaSuccess);
+    }
+    const bool proposed_without_waiting = !gate.load();
+    {
+      std::lock_guard<std::mutex> lock{mutex};
+      done = true;
+    }
+    finished.notify_one();
+    watchdog.join();
+    EXPECT_TRUE(proposed_without_waiting);
+    EXPECT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+
+    std::array<bool, slots> intact{};
+    std::vector<uint8_t> seen(bytes);
+    for (size_t slot = 0; slot < slots; ++slot) {
+      EXPECT_EQ(cudaMemcpy(seen.data(), read_by_run[slot], bytes, cudaMemcpyDeviceToHost), cudaSuccess);
+      const auto expected = static_cast<uint8_t>(0x11 * (slot + 1));
+      intact[slot] = std::all_of(seen.begin(), seen.end(), [expected](uint8_t value) { return value == expected; });
+    }
+    return intact;
+  };
+
+  // The mirror a tensor keeps is rewritten by the second proposal before the first upload has run: the harness reproduces the
+  // hazard that the fresh mirrors remove.
+  const auto kept = propose_for_both_slots(false);
+  EXPECT_FALSE(kept[0]) << "a kept mirror no longer shows the hazard, so this test checks nothing";
+  EXPECT_TRUE(kept[1]);
+
+  const auto fresh = propose_for_both_slots(true);
+  EXPECT_TRUE(fresh[0]) << "the first slot's run read the block table of the second";
+  EXPECT_TRUE(fresh[1]);
 }
 
 TEST(SamplingTests, SchedulerOwnedSamplerHandlesHeterogeneousRowsCuda) {

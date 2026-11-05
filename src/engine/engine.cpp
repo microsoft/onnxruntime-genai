@@ -7,8 +7,12 @@
 #include "../constrained_logits_processor.h"
 #include "../models/preprocessing/genai_tokenizer.h"
 #include "../stop_string_controller.h"
+#include "decoders/varlen_decoder_io.h"
+#include "backend_factory.h"
 
+#include <exception>
 #include <limits>
+#include <new>
 
 namespace Generators {
 
@@ -16,12 +20,52 @@ static_assert(kMaxDraftTokensPerStep < kSpeculativeAcceptanceLengthBins);
 
 namespace {
 
+// A throwing decode/copy must fence queued work before its local tensor owners unwind.
+struct MtpFailureFence {
+  DeviceInterface* device;
+  std::exception_ptr& error;
+  int exceptions{std::uncaught_exceptions()};
+  ~MtpFailureFence() noexcept {
+    if (std::uncaught_exceptions() <= exceptions) return;
+    try {
+      device->Synchronize();
+    } catch (...) {
+      if (!error) error = std::current_exception();
+    }
+  }
+};
+
 constexpr size_t kFatalEventOverhead = 2;
 constexpr size_t kMtpFailureDisableThreshold = 3;
 constexpr size_t kDflash2FailureDisableThreshold = 3;
 
 struct MtpRollbackError : std::runtime_error {
   using std::runtime_error::runtime_error;
+};
+
+class PrefixAdoptionGuard {
+ public:
+  explicit PrefixAdoptionGuard(StepPlan& plan) : plan_{plan} {}
+  PrefixAdoptionGuard(const PrefixAdoptionGuard&) = delete;
+  PrefixAdoptionGuard& operator=(const PrefixAdoptionGuard&) = delete;
+  ~PrefixAdoptionGuard() {
+    if (!committed_) {
+      for (const auto& entry : plan_.requests) {
+        entry.request->RollbackPrefixAdoption();
+      }
+    }
+  }
+
+  void Commit() noexcept {
+    for (const auto& entry : plan_.requests) {
+      entry.request->CommitPrefixAdoption();
+    }
+    committed_ = true;
+  }
+
+ private:
+  StepPlan& plan_;
+  bool committed_{};
 };
 
 std::string AddExceptionCause(std::string message, std::exception_ptr error) {
@@ -148,16 +192,21 @@ Engine::Engine(std::shared_ptr<Model> model)
 Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
     : model_{std::move(model)},
       cache_manager_{std::move(dependencies.cache_manager)},
+      snapshot_cache_{std::move(dependencies.snapshot_cache)},
       scheduler_{std::move(dependencies.scheduler)},
       model_executor_{std::move(dependencies.model_executor)},
       mtp_model_{std::move(dependencies.mtp_model)},
       mtp_cache_manager_{std::move(dependencies.mtp_cache_manager)},
       mtp_model_executor_{std::move(dependencies.mtp_model_executor)},
       dflash2_drafter_{std::move(dependencies.dflash2_drafter)},
+      dflash2_prefix_checkpoints_enabled_{dependencies.dflash2_prefix_checkpoints_enabled},
       make_step_error_{dependencies.make_step_error
                            ? dependencies.make_step_error
                            : MakeEngineStepError} {
   // Fail fast on a missing collaborator rather than crashing later on first use.
+  if (!model_) {
+    throw std::runtime_error("Engine requires a non-null model.");
+  }
   if (!cache_manager_) {
     throw std::runtime_error("Engine requires a non-null cache manager.");
   }
@@ -167,6 +216,14 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
   if (!model_executor_) {
     throw std::runtime_error("Engine requires a non-null model executor.");
   }
+  if (dflash2_prefix_checkpoints_enabled_ && (!dflash2_drafter_ || !snapshot_cache_)) {
+    throw std::runtime_error("DFlash prefix snapshots require a drafter and an Engine snapshot cache.");
+  }
+  if (dflash2_drafter_ && snapshot_cache_) {
+    dflash2_drafter_->InitializeSnapshotCache(snapshot_cache_);
+  }
+  backend_capabilities_ = ResolveBackendCapabilities(
+      *model_, *cache_manager_, *scheduler_, *model_executor_, dependencies.backend_capabilities);
   fatal_contract_fallback_error_ =
       MakeFatalFallbackError(StepOutcomeKind::ExecutionContractFailure);
   fatal_execution_fallback_error_ =
@@ -193,6 +250,42 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
     dflash2_feeds_.reserve(max_batch_size);
     dflash2_draft_widths_.reserve(max_batch_size);
     dflash2_drafts_.reserve(max_batch_size);
+    dflash2_draft_distributions_.reserve(max_batch_size);
+    dflash2_lattices_.reserve(max_batch_size);
+    dflash2_rng_checkpoints_.reserve(max_batch_size);
+  }
+  WarnOnClampedDraftWidth();
+}
+
+void Engine::WarnOnClampedDraftWidth() const {
+  // Without a hosted drafter nothing reads speculative.max_draft_tokens, so there is nothing to
+  // clamp. Log() asserts that logging is enabled, so the guard has to come before the call.
+  if ((!dflash2_drafter_ && !mtp_model_) || !g_log.enabled || !g_log.warning) {
+    return;
+  }
+  const auto requested = static_cast<size_t>(model_->config_->speculative.max_draft_tokens);
+  // MaxDraftTokensPerStep() already folds the state-update capacity, the paged query limit and
+  // kMaxDraftTokensPerStep into one number, so a single warning can name the real width.
+  size_t effective = MaxDraftTokensPerStep();
+  if (dflash2_drafter_) {
+    effective = std::min(effective, dflash2_drafter_->NumDraftTokens());
+  }
+  if (mtp_model_ && mtp_model_->index_share_config_.base_capacity > 0) {
+    effective = std::min(effective, static_cast<size_t>(mtp_model_->index_share_config_.max_draft_tokens));
+  }
+  if (requested <= effective) {
+    return;
+  }
+  try {
+    Log("warning",
+        "speculative.max_draft_tokens is " + std::to_string(requested) + " but this engine " +
+            (effective == 0
+                 ? "cannot verify draft tokens, so speculative decoding is disabled."
+                 : "can verify at most " + std::to_string(effective) +
+                       " per step, so each step will draft only " + std::to_string(effective) +
+                       " tokens."));
+  } catch (...) {
+    // Diagnostics must not turn a constructible Engine into a construction failure.
   }
 }
 
@@ -222,11 +315,11 @@ void ValidateMtpModelCompatibility(const Config& config,
   const auto target_shape =
       target_metadata.GetOutputShape(mtp.main_hidden_states);
   const auto head_shape = head_metadata.GetInputShape(mtp.inputs.hidden_states);
-  const int64_t hidden_size = config.model.decoder.hidden_size;
-  if (target_shape.size() != 2 || target_shape[1] != hidden_size ||
-      head_shape.size() != 2 || head_shape[1] != hidden_size) {
+  if (target_shape.size() != 2 || head_shape.size() != 2 ||
+      target_shape[1] <= 0 || head_shape[1] <= 0 ||
+      target_shape[1] != head_shape[1]) {
     throw std::runtime_error(
-        "MTP requires matching 2-D hidden-state tensors with the configured static width.");
+        "MTP requires matching 2-D hidden-state tensors with a positive static width.");
   }
   if (target_metadata.GetOutputDataType(mtp.main_hidden_states) !=
       head_metadata.GetInputDataType(mtp.inputs.hidden_states)) {
@@ -236,131 +329,7 @@ void ValidateMtpModelCompatibility(const Config& config,
 }
 
 EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
-  // The static batch decoder rebuilds its contiguous cache from the whole sequence every step, so
-  // it cannot resume a half-written prompt. Reject a model that configures chunking here rather
-  // than surfacing it once a Request is already being admitted.
-  if (!model->config_->engine.dynamic_batching &&
-      model->config_->search.chunk_size.value_or(0) != 0) {
-    throw std::runtime_error(
-        "search.chunk_size requires dynamic batching; the static batch scheduler cannot chunk a "
-        "prefill.");
-  }
-  std::shared_ptr<DecoderOnly_Model> mtp_model;
-  size_t mtp_bytes_per_block = 0;
-  if (!model->config_->model.mtp.filename.empty()) {
-    if (!model->config_->engine.dynamic_batching) {
-      throw std::runtime_error("An Engine-hosted MTP head requires dynamic batching.");
-    }
-    auto& target_hidden_states =
-        model->config_->model.decoder.outputs.hidden_states;
-    target_hidden_states = model->config_->model.mtp.main_hidden_states;
-    mtp_model = std::make_shared<DecoderOnly_Model>(
-        CreateMtpDecoderConfig(*model->config_), GetOrtEnv());
-    ValidateMtpModelCompatibility(
-        *model->config_, model->session_info_, mtp_model->session_info_);
-    mtp_bytes_per_block = PagedKeyValueCacheBytesPerBlock(mtp_model);
-    // The head consumes the target decoder's packed hidden states, so the target must emit them.
-    model->config_->engine.hidden_states_output_required = true;
-  }
-
-  std::unique_ptr<Dflash2Drafter> dflash2_drafter;
-  std::shared_ptr<Dflash2Model> dflash2_model;
-  size_t dflash2_bytes_per_block = 0;
-  size_t dflash2_reserved_memory_bytes = 0;
-  size_t dflash2_max_batch_size = 0;
-  size_t dflash2_pool_blocks = 0;
-  if (!model->config_->model.dflash2.filename.empty()) {
-    if (!model->config_->engine.dynamic_batching) {
-      throw std::runtime_error("An Engine-hosted DFlash 2 drafter requires dynamic batching.");
-    }
-    auto& dflash2 = model->config_->model.dflash2;
-    auto& target_aux_output = model->config_->model.decoder.outputs.aux_hidden_states;
-    if (dflash2.main_aux_hidden_states.empty()) {
-      dflash2.main_aux_hidden_states = target_aux_output;
-    }
-    if (dflash2.main_aux_hidden_states.empty()) {
-      throw std::runtime_error(
-          "model.dflash2.main_aux_hidden_states must name a main-model output.");
-    }
-    target_aux_output = dflash2.main_aux_hidden_states;
-    if (!model->session_info_.HasOutput(target_aux_output)) {
-      throw std::runtime_error(
-          "model.dflash2.main_aux_hidden_states must name a main-model output.");
-    }
-
-    const auto& batching = *model->config_->engine.dynamic_batching;
-    const size_t paged_block_size = static_cast<size_t>(batching.block_size);
-    dflash2_max_batch_size = static_cast<size_t>(batching.max_batch_size);
-    dflash2_model = std::make_shared<Dflash2Model>(
-        CreateDflash2Config(*model->config_), GetOrtEnv());
-    const auto dflash2_cache_type = ValidateDflash2ModelCompatibility(
-        *model->config_, model->session_info_, dflash2_model->session_info_, paged_block_size);
-    model->config_->engine.aux_hidden_states_output_required = true;
-    dflash2_pool_blocks = Dflash2Drafter::PoolBlocks(
-        *model->config_, paged_block_size, dflash2_max_batch_size);
-    if (dflash2_pool_blocks != 0) {
-      if (batching.num_blocks.has_value()) {
-        // Explicit num_blocks bypasses the free-memory probe. CacheManager validates and deducts
-        // this fixed pool before either cache pool is allocated.
-        dflash2_reserved_memory_bytes = Dflash2Drafter::PoolBytes(
-            *model->config_, paged_block_size, dflash2_pool_blocks, dflash2_cache_type);
-      } else {
-        // Automatic sizing measures free memory after allocating the fixed drafter pool.
-        dflash2_drafter = std::make_unique<Dflash2Drafter>(
-            dflash2_model, paged_block_size, dflash2_pool_blocks, dflash2_max_batch_size);
-      }
-    } else {
-      // A full-attention drafter mirrors the target pool, so it is billed per target block instead
-      // and built below once the target pool's block count is known.
-      dflash2_bytes_per_block =
-          Dflash2Drafter::BytesPerBlock(*model->config_, paged_block_size, dflash2_cache_type);
-      dflash2_reserved_memory_bytes = Dflash2Drafter::FullAttentionReservedBytes(
-          paged_block_size, static_cast<size_t>(dflash2.block_size),
-          dflash2_max_batch_size, dflash2_bytes_per_block);
-    }
-  }
-
-  if (dflash2_bytes_per_block > std::numeric_limits<size_t>::max() - mtp_bytes_per_block) {
-    throw std::runtime_error("Engine auxiliary cache bytes per block overflow size_t.");
-  }
-  std::shared_ptr<CacheManager> cache_manager =
-      CacheManager::Create(model, mtp_bytes_per_block + dflash2_bytes_per_block,
-                           dflash2_reserved_memory_bytes);
-  if (dflash2_model && !dflash2_drafter) {
-    const size_t paged_block_size =
-        static_cast<size_t>(model->config_->engine.dynamic_batching->block_size);
-    if (dflash2_pool_blocks != 0) {
-      dflash2_drafter = std::make_unique<Dflash2Drafter>(
-          dflash2_model, paged_block_size, dflash2_pool_blocks, dflash2_max_batch_size);
-    } else {
-      const auto& dflash2 = model->config_->model.dflash2;
-      dflash2_drafter = std::make_unique<Dflash2Drafter>(
-          dflash2_model, paged_block_size,
-          Dflash2Drafter::FullAttentionPoolBlocks(
-              cache_manager->Snapshot().total_blocks, paged_block_size,
-              static_cast<size_t>(dflash2.block_size), dflash2_max_batch_size),
-          dflash2_max_batch_size);
-    }
-  }
-  auto scheduler = Scheduler::Create(model, cache_manager);
-  auto model_executor = ModelExecutor::Create(model, cache_manager);
-
-  std::shared_ptr<CacheManager> mtp_cache_manager;
-  std::unique_ptr<ModelExecutor> mtp_model_executor;
-  if (mtp_model) {
-    // Both decoders cover the same resident request set. Fixing the head to the main pool's block
-    // count makes the auxiliary bytes included above exact rather than letting it independently
-    // consume another gpu_utilization_factor share of currently free memory.
-    mtp_model->config_->engine.dynamic_batching->num_blocks =
-        cache_manager->Snapshot().total_blocks;
-    mtp_cache_manager = CacheManager::Create(mtp_model);
-    mtp_model_executor = ModelExecutor::Create(mtp_model, mtp_cache_manager);
-  }
-
-  return EngineDependencies{
-      std::move(cache_manager), std::move(scheduler), std::move(model_executor),
-      std::move(mtp_model), std::move(mtp_cache_manager), std::move(mtp_model_executor),
-      std::move(dflash2_drafter)};
+  return CreateEngineBackend(std::move(model)).dependencies;
 }
 
 void Engine::PrepareDflash2Feeds(const StepPlan& plan,
@@ -373,6 +342,13 @@ void Engine::PrepareDflash2Feeds(const StepPlan& plan,
   for (size_t i = 0; i < plan.requests.size(); ++i) {
     const auto& entry = plan.requests[i];
     const bool greedy = entry.request->TurnPolicy().IsGreedy();
+    using Proposal = Config::Model::Dflash2::SampledProposal;
+    const Proposal sampled_proposal =
+        greedy ? Proposal::None : model_->config_->model.dflash2.sampled_proposal;
+    const bool independent_sampling = sampled_proposal == Proposal::Independent;
+    // A sampled turn without a positive top_k fails draft validation, so it should not take a slot.
+    const bool drafts_enabled =
+        greedy || (sampled_proposal != Proposal::None && entry.request->TurnPolicy().top_k > 0);
     const size_t accepted = entry.request->AcceptedDraftTokenCount();
     if (accepted > entry.draft_token_count) {
       throw std::logic_error("DFlash 2 observed more accepted drafts than the target planned.");
@@ -387,10 +363,15 @@ void Engine::PrepareDflash2Feeds(const StepPlan& plan,
 
     Dflash2Drafter::Feed feed;
     feed.request = entry.request.get();
+    if (entry.prefix_match) {
+      feed.prefix_checkpoint = entry.prefix_match->draft_checkpoint;
+    }
     feed.aux_row_begin = entry.packed_token_offset;
     feed.aux_row_count = valid_rows;
     feed.first_position = first_position;
-    feed.draft_eligible = greedy;
+    feed.draft_eligible = drafts_enabled;
+    feed.wants_independent_sampling = independent_sampling;
+    feed.wants_lattice = sampled_proposal == Proposal::Lattice;
 
     // The committed length this step ends at: the accepted prefix plus the token just sampled.
     const int64_t length_after_step = static_cast<int64_t>(first_position + valid_rows) +
@@ -405,7 +386,8 @@ void Engine::PrepareDflash2Feeds(const StepPlan& plan,
         max_drafts, static_cast<size_t>(entry.request->SpeculativeOptions().max_draft_tokens),
         static_cast<size_t>(length_after_step), sequence_limit,
         remaining_turn_tokens_after_step);
-    feed.wants_drafts = greedy && width > 0 && results[i].token_appended && !results[i].done &&
+    feed.wants_drafts = drafts_enabled && width > 0 &&
+                        results[i].token_appended && !results[i].done &&
                         !entry.request->DraftTokenValidationError();
     feed.anchor_token = results[i].token;
     dflash2_feeds_.push_back(feed);
@@ -422,19 +404,86 @@ void Engine::PublishDflash2Drafts(ScheduledRequests& scheduled_requests) {
     throw std::logic_error("The main decoder did not expose auxiliary hidden states for DFlash 2.");
   }
 
-  if (dflash2_drafter_->Propose(*aux_hidden_states, dflash2_feeds_, dflash2_drafts_)) {
+  if (dflash2_drafter_->Propose(*aux_hidden_states, dflash2_feeds_, dflash2_drafts_,
+                                &dflash2_draft_distributions_, &dflash2_lattices_)) {
     ++speculative_stats_.draft_forward_passes;
   }
+  ReleaseConsumedDflash2Checkpoints();
+  PublishDflash2DraftResults();
+  if (!dflash2_prefix_checkpoints_enabled_) {
+    return;
+  }
   for (size_t i = 0; i < dflash2_feeds_.size(); ++i) {
-    auto& drafts = dflash2_drafts_[i];
-    if (drafts.empty()) {
+    const auto& entry = step_plan_.requests[i];
+    const auto& feed = dflash2_feeds_[i];
+    if (!entry.is_prefill || !feed.draft_eligible ||
+        feed.first_position + feed.aux_row_count != entry.target_cache_slots) {
       continue;
     }
-    // The drafter always emits its full block; a request with a narrower budget takes the prefix
-    // of the same greedy path.
-    drafts.resize(std::min(drafts.size(), dflash2_draft_widths_[i]));
-    dflash2_feeds_[i].request->SetDraftTokens(drafts);
+    auto boundary = cache_manager_->DraftBoundary(entry.request_id, entry.target_cache_slots);
+    if (!boundary ||
+        !dflash2_drafter_->CanCapturePrefix(feed.request, entry.target_cache_slots)) {
+      continue;
+    }
+    try {
+      auto checkpoint = dflash2_drafter_->CapturePrefix(feed.request, entry.target_cache_slots);
+      if (!checkpoint || !cache_manager_->AttachDraftCheckpoint(*boundary, std::move(checkpoint))) {
+        cache_manager_->RecordPrefixPublicationRefusal();
+      }
+    } catch (const std::bad_alloc&) {
+      cache_manager_->RecordPrefixPublicationRefusal();
+    }
   }
+}
+
+void Engine::ReleaseConsumedDflash2Checkpoints() noexcept {
+  for (auto& feed : dflash2_feeds_) {
+    feed.prefix_checkpoint.reset();
+  }
+}
+
+void Engine::PublishDflash2DraftResults() {
+  dflash2_rng_checkpoints_.clear();
+  try {
+    for (size_t i = 0; i < dflash2_feeds_.size(); ++i) {
+      auto& drafts = dflash2_drafts_[i];
+      auto& distributions = dflash2_draft_distributions_[i];
+      const Dflash2Lattice* lattice =
+          i < dflash2_lattices_.size() && dflash2_lattices_[i].top_k != 0 ? &dflash2_lattices_[i]
+                                                                          : nullptr;
+      if (drafts.empty() && distributions.empty() && !lattice) {
+        continue;
+      }
+      Request& request = *dflash2_feeds_[i].request;
+      if (lattice) {
+        dflash2_rng_checkpoints_.emplace_back(&request, request.draft_rng_);
+        const auto& policy = request.TurnPolicy();
+        Dflash2SampleLatticePath(*lattice, dflash2_draft_widths_[i], policy.temperature,
+                                 policy.top_k, policy.top_p, request.draft_rng_, drafts,
+                                 distributions);
+        request.SetSampledDraftTokens(drafts, distributions);
+        continue;
+      }
+      // The drafter always emits its full block; a request with a narrower budget takes the prefix
+      // of the same greedy path.
+      if (!distributions.empty()) {
+        dflash2_rng_checkpoints_.emplace_back(dflash2_feeds_[i].request,
+                                              dflash2_feeds_[i].request->draft_rng_);
+        distributions.resize(std::min(distributions.size(), dflash2_draft_widths_[i]));
+        dflash2_feeds_[i].request->SetDraftTokenDistributions(
+            distributions);
+      } else {
+        drafts.resize(std::min(drafts.size(), dflash2_draft_widths_[i]));
+        dflash2_feeds_[i].request->SetDraftTokens(drafts);
+      }
+    }
+  } catch (...) {
+    for (const auto& [request, rng] : dflash2_rng_checkpoints_)
+      request->draft_rng_ = rng;
+    dflash2_rng_checkpoints_.clear();
+    throw;
+  }
+  dflash2_rng_checkpoints_.clear();
 }
 
 void Engine::RecordDflash2Failure(std::exception_ptr error, bool contract_error) {
@@ -495,11 +544,12 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
     throw std::logic_error("The main decoder did not expose hidden states for its MTP head.");
   }
   const auto target_hidden_shape = target_hidden_states->GetShape();
-  const int64_t hidden_size = model_->config_->model.decoder.hidden_size;
-  if (target_hidden_shape !=
-      std::vector<int64_t>{static_cast<int64_t>(target_plan.token_count), hidden_size}) {
+  if (target_hidden_shape.size() != 2 ||
+      target_hidden_shape[0] != static_cast<int64_t>(target_plan.token_count) ||
+      target_hidden_shape[1] <= 0) {
     throw std::logic_error("The main decoder hidden-state shape does not match its packed step plan.");
   }
+  const int64_t hidden_size = target_hidden_shape[1];
   const auto hidden_type = target_hidden_states->GetType();
   const auto& mtp_hidden_name = mtp_model_->config_->model.decoder.inputs.hidden_states;
   if (hidden_type != mtp_model_->session_info_.GetInputDataType(mtp_hidden_name)) {
@@ -562,7 +612,10 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
           result.visible_token_count < remaining_turn_tokens
               ? remaining_turn_tokens - result.visible_token_count
               : 0;
-      const size_t max_draft_tokens = std::min({MaxDraftTokensPerStep(),
+      const size_t exported_draft_capacity = mtp_model_->index_share_config_.base_capacity > 0
+                                                 ? static_cast<size_t>(mtp_model_->index_share_config_.max_draft_tokens)
+                                                 : MaxDraftTokensPerStep();
+      const size_t max_draft_tokens = std::min({MaxDraftTokensPerStep(), exported_draft_capacity,
                                                 static_cast<size_t>(entry.request->SpeculativeOptions().max_draft_tokens),
                                                 static_cast<size_t>(committed_length_after_step) + 1 < sequence_limit
                                                     ? sequence_limit - static_cast<size_t>(committed_length_after_step) - 1
@@ -578,7 +631,9 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
       // match: it is true for any committed StopString result exactly like any other finish
       // reason, so this check below already skips proposing a new draft block for it with no
       // stop-specific condition needed.
-      if (!result.token_appended || result.done ||
+      // MTP is intentionally unavailable for scoped turns: its chained proposals may cross
+      // an opener before the target can switch to the grammar cursor.
+      if (!result.token_appended || result.done || entry.request->HasDelimitedGuidance() ||
           entry.request->DraftTokenValidationError() ||
           max_draft_tokens == 0) {
         continue;
@@ -654,15 +709,22 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
       step->newly_created.push_back(feed.newly_created);
       packed_offset += token_count;
     }
-    step->plan.graph_capture_eligible = std::all_of(
-        step->plan.requests.begin(), step->plan.requests.end(),
-        [](const RequestStepPlan& entry) {
-          return !entry.is_prefill && entry.unprocessed_token_count == 1;
-        });
+    // One captured graph bakes in every tensor shape it was recorded with, so a step qualifies only
+    // when each request contributes the same number of tokens.
+    const size_t uniform_token_count =
+        step->plan.requests.empty() ? 0 : step->plan.requests.front().unprocessed_token_count;
+    step->plan.graph_capture_eligible =
+        !step->plan.requests.empty() && uniform_token_count != 0 &&
+        std::all_of(
+            step->plan.requests.begin(), step->plan.requests.end(),
+            [uniform_token_count](const RequestStepPlan& entry) {
+              return !entry.is_prefill && entry.unprocessed_token_count == uniform_token_count;
+            });
   } catch (...) {
     rollback_setup_and_rethrow(std::current_exception());
   }
 
+  std::exception_ptr lifetime_fence_error;
   try {
     const auto planning = mtp_cache_manager_->PlanStepResources(step->plan);
     if (!planning.executable || step->plan.requests.size() != feeds.size()) {
@@ -676,6 +738,117 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
                                           return left.max_draft_tokens < right.max_draft_tokens;
                                         })
                                         ->max_draft_tokens;
+    const auto& indexshare = mtp_model_->index_share_config_;
+    const bool use_indexshare = indexshare.base_capacity > 0;
+    if (use_indexshare && max_draft_tokens > static_cast<size_t>(indexshare.max_draft_tokens)) {
+      throw std::logic_error("MTP draft budget exceeds the IndexShare model's exported capacity.");
+    }
+    auto& selection_buffers = mtp_indexshare_buffers_;
+    const size_t selection_capacity = static_cast<size_t>(indexshare.base_capacity);
+    const size_t output_capacity = use_indexshare ? selection_capacity + indexshare.max_draft_tokens - 1 : 0;
+    if (use_indexshare && selection_buffers.max_batch == 0) {
+      const size_t max_batch = mtp_model_->config_->engine.dynamic_batching->max_batch_size;
+      const size_t max_extend_rows = max_batch * (static_cast<size_t>(indexshare.max_draft_tokens) + 1);
+      auto* device = mtp_model_->p_device_inputs_;
+      selection_buffers.extend_indices = device->Allocate<int32_t>(max_extend_rows * output_capacity);
+      selection_buffers.extend_counts = device->Allocate<int32_t>(max_extend_rows);
+      selection_buffers.indices = device->Allocate<int32_t>(max_batch * selection_capacity);
+      selection_buffers.counts = device->Allocate<int32_t>(max_batch);
+      selection_buffers.capture_ends = device->Allocate<int32_t>(max_batch);
+      selection_buffers.extend_row_indices = device->Allocate<int32_t>(max_extend_rows);
+      selection_buffers.row_indices.resize(indexshare.max_draft_tokens - 1);
+      for (auto& rows : selection_buffers.row_indices) rows = device->Allocate<int32_t>(max_batch);
+      selection_buffers.status = device->Allocate<int32_t>(max_batch * std::max(1, indexshare.max_draft_tokens - 1) +
+                                                           max_extend_rows);
+      {
+        const size_t stages = static_cast<size_t>(indexshare.max_draft_tokens - 1);
+        selection_buffers.projection_rows = device->Allocate<int64_t>(max_extend_rows);
+        auto projection_host = selection_buffers.projection_rows.CpuSpan();
+        std::iota(projection_host.begin(), projection_host.end(), int64_t{0});
+        selection_buffers.projection_rows.CopyCpuToDevice();
+        selection_buffers.stage_projection_rows.resize(stages);
+        selection_buffers.range_starts.resize(stages);
+        selection_buffers.range_ends.resize(stages);
+        selection_buffers.stage_capture_counts.resize(stages);
+        selection_buffers.stage_state_inputs.resize(stages);
+        selection_buffers.stage_state_outputs.resize(stages);
+        selection_buffers.stage_state_updates.resize(stages);
+        selection_buffers.stage_slots.resize(stages);
+        selection_buffers.stage_bindings.resize(stages);
+        for (size_t stage = 0; stage < stages; ++stage) {
+          selection_buffers.stage_projection_rows[stage] = device->Allocate<int64_t>(max_batch);
+          auto rows = selection_buffers.stage_projection_rows[stage].CpuSpan();
+          std::iota(rows.begin(), rows.end(), int64_t{0});
+          selection_buffers.stage_projection_rows[stage].CopyCpuToDevice();
+          selection_buffers.range_starts[stage] = device->Allocate<int32_t>(max_batch);
+          selection_buffers.range_ends[stage] = device->Allocate<int32_t>(max_batch);
+          selection_buffers.stage_capture_counts[stage] = device->Allocate<int32_t>(max_batch);
+          selection_buffers.stage_capture_counts[stage].Zero();
+        }
+        selection_buffers.stage_indices = device->Allocate<int32_t>(stages * max_batch * output_capacity);
+        selection_buffers.stage_counts = device->Allocate<int32_t>(stages * max_batch);
+      }
+      selection_buffers.max_batch = max_batch;
+    }
+    if (use_indexshare) {
+      if (feeds.size() > selection_buffers.max_batch || total_rows > selection_buffers.extend_counts.size()) {
+        throw std::runtime_error("IndexShare feed exceeds its persistent buffer capacity.");
+      }
+      selection_buffers.status.Zero();
+    }
+    const auto cached_view = [&](void* data, size_t bytes, std::span<const int64_t> shape,
+                                 ONNXTensorElementDataType type, const OrtMemoryInfo& memory) {
+      const auto found = selection_buffers.views.find(IndexShareBuffers::ViewLookup{data, type, shape});
+      if (found != selection_buffers.views.end()) return found->second.get();
+      auto tensor = OrtValue::CreateTensor(memory, data, bytes, shape, type);
+      auto* result = tensor.get();
+      selection_buffers.views.emplace(
+          IndexShareBuffers::ViewKey{data, type, {shape.begin(), shape.end()}}, std::move(tensor));
+      return result;
+    };
+    const auto selection_view = [&](DeviceSpan<int32_t> values, std::initializer_list<int64_t> shape) {
+      return cached_view(values.Span().data(), values.size() * sizeof(int32_t),
+                         {shape.begin(), shape.size()}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32,
+                         mtp_model_->p_device_inputs_->GetAllocator().GetInfo());
+    };
+    const auto projection_view = [&](DeviceSpan<int64_t> values) {
+      const std::array<int64_t, 1> shape{static_cast<int64_t>(values.size())};
+      return cached_view(values.Span().data(), values.size() * sizeof(int64_t), shape,
+                         ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, mtp_model_->p_device_inputs_->GetAllocator().GetInfo());
+    };
+    const auto mode_view = [&](bool reuse) {
+      auto memory = OrtMemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+      const std::array<int64_t, 1> shape{1};
+      return cached_view(&selection_buffers.modes[reuse ? 1 : 0], sizeof(int32_t), shape,
+                         ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32, *memory);
+    };
+    const auto assign_extra_layout = [&](ExecutionContext& execution, size_t stage, size_t batch) {
+      // Only the pool can promise the lifetime/layout of the extend step's original fixed tensors.
+      if (!execution.fixed_state_bindings.empty() && execution.fixed_state_binding_key == 0) return;
+      const std::array<size_t, 6> key{
+          stage, batch, total_rows, execution.fixed_state_binding_key,
+          execution.fixed_state_binding_domain, static_cast<size_t>(execution.indexshare_decode)};
+      auto& layout = selection_buffers.extra_layouts[key];
+      if (!layout) {
+        auto new_layout = std::make_unique<IndexShareBuffers::ExtraBindingLayout>();
+        auto& addresses = new_layout->tensor_addresses;
+        const auto record_tensor = [&](OrtValue* tensor) {
+          addresses.push_back(tensor ? tensor->GetTensorMutableData<void>() : nullptr);
+        };
+        for (auto* tensor : execution.extra_inputs) record_tensor(tensor);
+        for (auto* tensor : execution.extra_outputs) record_tensor(tensor);
+        for (const auto& binding : execution.fixed_state_bindings) {
+          record_tensor(binding.input);
+          record_tensor(binding.output);
+          record_tensor(binding.state_update_value);
+          record_tensor(binding.state_update_capture_count);
+          record_tensor(binding.state_update_active);
+          record_tensor(binding.state_update_capsule);
+        }
+        layout = std::move(new_layout);
+      }
+      execution.extra_binding_layout_key = reinterpret_cast<size_t>(layout.get());
+    };
     bool device_draft_chain =
         max_draft_tokens > 1 && mtp_model_->p_device_->GetType() == DeviceType::CUDA;
     DeviceSpan<int32_t> device_drafts;
@@ -705,7 +878,20 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
       }
     };
 
+    std::unique_ptr<Tensor> feedback_hidden;
+    std::vector<std::unique_ptr<ScheduledRequests>> pending_device_requests;
+    pending_device_requests.reserve(max_draft_tokens - 1);
+    std::vector<std::unique_ptr<Tensor>> pending_device_inputs;
+    pending_device_inputs.reserve(max_draft_tokens - 1);
+    struct ChainFixedState {
+      std::vector<FixedStateSlotHandle> handles;
+      std::vector<FixedStateBinding> bindings;
+    };
+    std::vector<ChainFixedState> pending_fixed_states;
+    pending_fixed_states.reserve(max_draft_tokens - 1);
     Tensor packed_hidden_states{mtp_model_->p_device_inputs_, hidden_type};
+    ScheduledRequests mtp_requests{step->plan, mtp_model_, nullptr, nullptr};
+    MtpFailureFence step_fence{mtp_model_->p_device_scoring_, lifetime_fence_error};
     const std::array<int64_t, 2> packed_hidden_shape{
         static_cast<int64_t>(total_rows), hidden_size};
     packed_hidden_states.CreateTensor(packed_hidden_shape);
@@ -721,15 +907,69 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
       destination_row += row_count;
     }
 
-    ScheduledRequests mtp_requests{step->plan, mtp_model_, nullptr, nullptr};
     ExecutionContext context{&step->plan};
     context.cache_reservation = step->reservation->PagedReservation();
+    context.fixed_state_slots = step->reservation->FixedStateSlots();
+    context.fixed_state_bindings = step->reservation->FixedStateBindings();
+    context.fixed_state_staging_bytes = step->reservation->FixedStateStagingBytes();
+    if (auto* fixed_reservation = step->reservation->FixedReservation()) {
+      context.fixed_state_binding_key = fixed_reservation->BindingLayoutKey();
+    }
     context.hidden_states_input = packed_hidden_states.GetOrtTensor();
+    std::array<OrtValue*, 2> selection_outputs{};
+    const std::array<const char*, 7> packed_selection_input_names{
+        "mode", "projection_rows", indexshare.indices_input.c_str(), indexshare.counts_input.c_str(),
+        "base_row_indices", "range_starts", "range_ends"};
+    const std::array<const char*, 3> packed_selection_output_names{
+        indexshare.indices_output.c_str(), indexshare.counts_output.c_str(), indexshare.status_output.c_str()};
+    std::array<OrtValue*, 7> packed_extend_inputs{};
+    std::array<OrtValue*, 3> packed_extend_outputs{};
+    if (use_indexshare) {
+      context.decoder_session = mtp_model_->session_decoder_.get();
+      {
+        const int64_t cached_rows = static_cast<int64_t>(selection_buffers.max_batch);
+        packed_extend_inputs = {
+            mode_view(false), projection_view(selection_buffers.projection_rows.subspan(0, total_rows)),
+            selection_view(selection_buffers.indices, {cached_rows, static_cast<int64_t>(selection_capacity)}),
+            selection_view(selection_buffers.counts, {cached_rows}),
+            selection_view(selection_buffers.extend_row_indices.subspan(0, 0), {0}),
+            selection_view(selection_buffers.capture_ends.subspan(0, 0), {0}),
+            selection_view(selection_buffers.capture_ends.subspan(0, 0), {0})};
+        context.extra_input_names = packed_selection_input_names;
+        context.extra_inputs = packed_extend_inputs;
+      }
+      selection_outputs = {
+          selection_view(selection_buffers.extend_indices.subspan(0, total_rows * output_capacity),
+                         {static_cast<int64_t>(total_rows), static_cast<int64_t>(output_capacity)}),
+          selection_view(selection_buffers.extend_counts.subspan(0, total_rows), {static_cast<int64_t>(total_rows)})};
+      {
+        packed_extend_outputs = {selection_outputs[0], selection_outputs[1],
+                                 selection_view(selection_buffers.status.subspan(0, total_rows),
+                                                {static_cast<int64_t>(total_rows)})};
+        context.extra_output_names = packed_selection_output_names;
+        context.extra_outputs = packed_extend_outputs;
+      }
+      assign_extra_layout(context, 0, feeds.size());
+    }
     if (device_draft_chain) {
       context.run_options->AddConfigEntry("disable_synchronize_execution_providers", "1");
     }
     mtp_model_executor_->Decode(mtp_requests, context);
     ++speculative_stats_.draft_forward_passes;
+    if (use_indexshare) {
+      auto capture_end_host = selection_buffers.capture_ends.CpuSpan();
+      for (size_t row = 0; row < feeds.size(); ++row) {
+        const auto& entry = step->plan.requests[row];
+        if (entry.target_cache_slots >= static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+          throw std::runtime_error("IndexShare capture position must fit int32 with room for the next query.");
+        }
+        capture_end_host[row] = static_cast<int32_t>(entry.target_cache_slots);
+        selection_buffers.indices.subspan(row * selection_capacity, selection_capacity).CopyFrom(selection_buffers.extend_indices.subspan(entry.logits_row_index * output_capacity, selection_capacity));
+        selection_buffers.counts.subspan(row, 1).CopyFrom(
+            selection_buffers.extend_counts.subspan(entry.logits_row_index, 1));
+      }
+      selection_buffers.capture_ends.CopyCpuToDevice();
+    }
     auto logits = mtp_requests.ProcessLogits();
     device_draft_chain =
         device_draft_chain &&
@@ -757,6 +997,7 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
     const auto copy_hidden_rows = [&](Tensor& source,
                                       std::span<const size_t> source_rows) {
       auto destination = std::make_unique<Tensor>(mtp_model_->p_device_inputs_, hidden_type);
+      MtpFailureFence copy_fence{mtp_model_->p_device_scoring_, lifetime_fence_error};
       const std::array<int64_t, 2> shape{
           static_cast<int64_t>(source_rows.size()), hidden_size};
       destination->CreateTensor(shape);
@@ -780,7 +1021,6 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
         feedback_rows.push_back(step->plan.requests[i].logits_row_index);
       }
     }
-    std::unique_ptr<Tensor> feedback_hidden;
     if (!active_feed_indices.empty()) {
       Tensor* head_hidden = mtp_requests.HiddenStates();
       if (!head_hidden ||
@@ -791,13 +1031,6 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
       }
       feedback_hidden = copy_hidden_rows(*head_hidden, feedback_rows);
     }
-
-    // Keep each stage's decoder I/O alive until the final device-to-host copy completes; device
-    // ArgMax can still be reading its logits after Decode returns.
-    std::vector<std::unique_ptr<ScheduledRequests>> pending_device_requests;
-    pending_device_requests.reserve(max_draft_tokens - 1);
-    std::vector<std::unique_ptr<Tensor>> pending_device_inputs;
-    pending_device_inputs.reserve(max_draft_tokens - 1);
 
     for (size_t draft_index = 1; !active_feed_indices.empty(); ++draft_index) {
       StepPlan chain_plan;
@@ -841,9 +1074,223 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
 
       auto chain_requests = std::make_unique<ScheduledRequests>(
           chain_plan, mtp_model_, nullptr, nullptr);
+      MtpFailureFence stage_fence{mtp_model_->p_device_scoring_, lifetime_fence_error};
       ExecutionContext chain_context{&chain_plan};
       chain_context.cache_reservation = step->reservation->PagedReservation();
+      if (!use_indexshare) {
+        const auto source_bindings = pending_fixed_states.empty()
+                                         ? step->reservation->FixedStateBindings()
+                                         : std::span<const FixedStateBinding>{pending_fixed_states.back().bindings};
+        pending_fixed_states.emplace_back();
+        auto& chain_state = pending_fixed_states.back();
+        const auto reserved_handles = step->reservation->FixedStateSlots();
+        if (!reserved_handles.empty()) {
+          for (const size_t feed_index : active_feed_indices) {
+            chain_state.handles.push_back(reserved_handles[feed_index]);
+          }
+        }
+        const size_t input_bank = (draft_index - 1) % 2;
+        size_t binding_index = 0;
+        const bool initialize_buffers = mtp_chain_state_.buffers.empty();
+        std::vector<MtpChainState::Banks> new_buffers;
+        std::vector<MtpChainState::Banks> new_views;
+        MtpFailureFence bank_fence{mtp_model_->p_device_scoring_, lifetime_fence_error};
+        auto& buffers = initialize_buffers ? new_buffers : mtp_chain_state_.buffers;
+        auto& cached_views = mtp_chain_state_.views[active_feed_indices.size()];
+        const bool initialize_views = cached_views.empty();
+        auto& views = initialize_views ? new_views : cached_views;
+        if ((!initialize_buffers && buffers.size() != source_bindings.size()) ||
+            (!initialize_views && views.size() != source_bindings.size())) {
+          throw std::logic_error("Chained MTP fixed state binding count changed.");
+        }
+        for (const auto& binding : source_bindings) {
+          const auto info = binding.output->GetTensorTypeAndShapeInfo();
+          auto shape = info->GetShape();
+          if (shape.empty() || shape.front() <= 0) {
+            throw std::logic_error("Chained MTP fixed state requires a nonempty batch dimension.");
+          }
+          auto source = ByteWrapTensor(*mtp_model_->p_device_inputs_, *binding.output);
+          const size_t source_rows = static_cast<size_t>(shape.front());
+          const size_t fixed_state_row_bytes = source.size() / source_rows;
+          if (initialize_buffers) {
+            const size_t capacity = mtp_cache_manager_->MaxBatchSize();
+            shape.front() = static_cast<int64_t>(capacity);
+            MtpChainState::Banks banks;
+            for (auto& bank : banks) {
+              bank = OrtValue::CreateTensor(mtp_model_->p_device_inputs_->GetAllocator(),
+                                            shape, info->GetElementType());
+            }
+            buffers.push_back(std::move(banks));
+          }
+          const auto& banks = buffers[binding_index];
+          const auto bank_info = banks.front()->GetTensorTypeAndShapeInfo();
+          const auto bank_shape = bank_info->GetShape();
+          if (bank_info->GetElementType() != info->GetElementType() ||
+              bank_shape.size() != shape.size() ||
+              !std::equal(shape.begin() + 1, shape.end(), bank_shape.begin() + 1) ||
+              active_feed_indices.size() > static_cast<size_t>(bank_shape.front())) {
+            throw std::logic_error("Chained MTP fixed state exceeds its persistent layout.");
+          }
+          if (initialize_views) {
+            shape.front() = static_cast<int64_t>(active_feed_indices.size());
+            MtpChainState::Banks row_views;
+            for (size_t bank = 0; bank < banks.size(); ++bank) {
+              row_views[bank] = OrtValue::CreateTensor(
+                  banks[bank]->GetTensorMemoryInfo(), banks[bank]->GetTensorMutableData<void>(),
+                  fixed_state_row_bytes * active_feed_indices.size(), shape, info->GetElementType());
+            }
+            views.push_back(std::move(row_views));
+          }
+          auto* input = views[binding_index][input_bank].get();
+          auto* output = views[binding_index][input_bank ^ 1].get();
+          auto destination = ByteWrapTensor(*mtp_model_->p_device_inputs_, *input);
+          for (size_t row = 0; row < active_feed_indices.size(); ++row) {
+            const size_t source_row = previous_stage_rows[active_feed_indices[row]];
+            if (source_row >= source_rows) {
+              throw std::logic_error("Chained MTP fixed state row is out of range.");
+            }
+            if (binding.output != input) {
+              destination.subspan(row * fixed_state_row_bytes, fixed_state_row_bytes)
+                  .CopyFrom(source.subspan(source_row * fixed_state_row_bytes, fixed_state_row_bytes));
+            } else if (source_row != row) {
+              throw std::logic_error("Chained MTP aliased rows must retain their order.");
+            }
+          }
+          auto chain_binding = binding;
+          chain_binding.input = input;
+          chain_binding.output = output;
+          chain_state.bindings.push_back(chain_binding);
+          ++binding_index;
+        }
+        if (initialize_buffers) {
+          mtp_chain_state_.buffers = std::move(new_buffers);
+        }
+        if (initialize_views) {
+          cached_views = std::move(new_views);
+        }
+        chain_context.fixed_state_slots = chain_state.handles;
+        chain_context.fixed_state_bindings = chain_state.bindings;
+        if (!chain_state.bindings.empty()) {
+          chain_context.fixed_state_binding_domain = input_bank + 1;
+        }
+      }
+      chain_context.fixed_state_staging_bytes = step->reservation->FixedStateStagingBytes();
+      if (auto* fixed_reservation = step->reservation->FixedReservation()) {
+        chain_context.fixed_state_binding_key = fixed_reservation->BindingLayoutKey();
+      }
       chain_context.hidden_states_input = feedback_hidden->GetOrtTensor();
+      std::array<OrtValue*, 7> packed_stage_inputs{};
+      std::array<OrtValue*, 3> packed_stage_outputs{};
+      if (use_indexshare) {
+        auto stage_rows = selection_buffers.row_indices[draft_index - 1];
+        auto row_host = stage_rows.CpuSpan();
+        for (size_t row = 0; row < active_feed_indices.size(); ++row) {
+          const size_t feed_index = active_feed_indices[row];
+          if (feed_index > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+            throw std::runtime_error("IndexShare row index exceeds int32.");
+          }
+          row_host[row] = static_cast<int32_t>(feed_index);
+        }
+        stage_rows.CopyCpuToDevice();
+        const int64_t cached_rows = static_cast<int64_t>(selection_buffers.max_batch);
+        const int64_t query_count = static_cast<int64_t>(active_feed_indices.size());
+        chain_context.decoder_session = mtp_model_->session_decoder_.get();
+        {
+          const size_t stage = draft_index - 1;
+          auto& stage_slots = selection_buffers.stage_slots[stage];
+          auto& stage_bindings = selection_buffers.stage_bindings[stage];
+          stage_slots.clear();
+          const bool reuse = indexshare.enabled;
+          const size_t merge_queries = reuse ? active_feed_indices.size() : 0;
+          auto starts_host = selection_buffers.range_starts[stage].CpuSpan();
+          auto ends_host = selection_buffers.range_ends[stage].CpuSpan();
+          auto capture_host = selection_buffers.capture_ends.CpuSpan();
+          for (size_t row = 0; row < active_feed_indices.size(); ++row) {
+            const auto end = chain_plan.requests[row].target_cache_slots;
+            if (end > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+              throw std::runtime_error("IndexShare range end exceeds int32.");
+            }
+            starts_host[row] = capture_host[active_feed_indices[row]];
+            ends_host[row] = static_cast<int32_t>(end);
+          }
+          selection_buffers.range_starts[stage].CopyCpuToDevice();
+          selection_buffers.range_ends[stage].CopyCpuToDevice();
+          packed_stage_inputs = {
+              mode_view(reuse), projection_view(selection_buffers.stage_projection_rows[stage].subspan(0, reuse ? 0 : active_feed_indices.size())),
+              selection_view(selection_buffers.indices, {cached_rows, static_cast<int64_t>(selection_capacity)}),
+              selection_view(selection_buffers.counts, {cached_rows}),
+              selection_view(stage_rows.subspan(0, merge_queries), {static_cast<int64_t>(merge_queries)}),
+              selection_view(selection_buffers.range_starts[stage].subspan(0, merge_queries), {static_cast<int64_t>(merge_queries)}),
+              selection_view(selection_buffers.range_ends[stage].subspan(0, merge_queries), {static_cast<int64_t>(merge_queries)})};
+          packed_stage_outputs = {
+              selection_view(selection_buffers.stage_indices.subspan(stage * selection_buffers.max_batch * output_capacity,
+                                                                     active_feed_indices.size() * output_capacity),
+                             {query_count, static_cast<int64_t>(output_capacity)}),
+              selection_view(selection_buffers.stage_counts.subspan(stage * selection_buffers.max_batch, active_feed_indices.size()), {query_count}),
+              selection_view(selection_buffers.status.subspan(selection_buffers.extend_counts.size() + stage * selection_buffers.max_batch,
+                                                              active_feed_indices.size()),
+                             {query_count})};
+          chain_context.indexshare_decode = reuse;
+          chain_context.extra_input_names = packed_selection_input_names;
+          chain_context.extra_inputs = packed_stage_inputs;
+          chain_context.extra_output_names = packed_selection_output_names;
+          chain_context.extra_outputs = packed_stage_outputs;
+
+          if (!context.fixed_state_slots.empty()) {
+            for (size_t feed_index : active_feed_indices) stage_slots.push_back(context.fixed_state_slots[feed_index]);
+          }
+          stage_bindings.assign(context.fixed_state_bindings.begin(), context.fixed_state_bindings.end());
+          auto& state_inputs = selection_buffers.stage_state_inputs[stage];
+          auto& state_outputs = selection_buffers.stage_state_outputs[stage];
+          auto& state_updates = selection_buffers.stage_state_updates[stage];
+          state_inputs.resize(stage_bindings.size());
+          state_outputs.resize(stage_bindings.size());
+          state_updates.resize(stage_bindings.size());
+          const auto state_view = [&](DeviceSpan<uint8_t>& buffer, OrtValue& geometry) {
+            auto info = geometry.GetTensorTypeAndShapeInfo();
+            auto shape = info->GetShape();
+            const size_t row_bytes = info->GetElementCount() / static_cast<size_t>(shape[0]) * Ort::SizeOf(info->GetElementType());
+            if (buffer.size() == 0) buffer = mtp_model_->p_device_inputs_->Allocate<uint8_t>(selection_buffers.max_batch * row_bytes);
+            shape[0] = query_count;
+            return cached_view(buffer.Span().data(), active_feed_indices.size() * row_bytes,
+                               shape, info->GetElementType(), mtp_model_->p_device_inputs_->GetAllocator().GetInfo());
+          };
+          for (size_t state_binding_index = 0; state_binding_index < stage_bindings.size(); ++state_binding_index) {
+            auto& binding = stage_bindings[state_binding_index];
+            const auto& original = context.fixed_state_bindings[state_binding_index];
+            binding.input = state_view(state_inputs[state_binding_index], *original.input);
+            binding.output = state_view(state_outputs[state_binding_index], *original.output);
+            auto source = draft_index == 1
+                              ? ByteWrapTensor(*mtp_model_->p_device_inputs_, *original.output)
+                              : selection_buffers.stage_state_outputs[stage - 1][state_binding_index];
+            const size_t state_row_bytes = state_inputs[state_binding_index].size() / selection_buffers.max_batch;
+            for (size_t row = 0; row < active_feed_indices.size(); ++row) {
+              const size_t source_row = draft_index == 1 ? active_feed_indices[row] : previous_stage_rows[active_feed_indices[row]];
+              state_inputs[state_binding_index].subspan(row * state_row_bytes, state_row_bytes).CopyFrom(source.subspan(source_row * state_row_bytes, state_row_bytes));
+            }
+            if (binding.state_update_capacity != 0) {
+              binding.state_update_capture_count = selection_view(selection_buffers.stage_capture_counts[stage].subspan(0, active_feed_indices.size()), {query_count});
+              if (binding.state_update_active) binding.state_update_active = packed_extend_inputs[0];
+              if (binding.state_update_value) binding.state_update_value = state_view(state_updates[state_binding_index], *original.state_update_value);
+              if (binding.state_update_capsule) throw std::runtime_error("IndexShare MTP supports indexer state, not recurrent capsules.");
+            }
+          }
+          if (!stage_bindings.empty()) {
+            OrtValue* capture_count = nullptr;
+            for (auto& binding : stage_bindings) {
+              if (binding.state_update_capture_count) {
+                if (!capture_count) capture_count = binding.state_update_capture_count;
+                binding.state_update_capture_count = capture_count;
+              }
+            }
+          }
+          chain_context.fixed_state_slots = stage_slots;
+          chain_context.fixed_state_bindings = stage_bindings;
+          // IndexShare uses a distinct persistent allocation for each stage, not the generic banks.
+          chain_context.fixed_state_binding_domain = draft_index + 2;
+          assign_extra_layout(chain_context, draft_index, active_feed_indices.size());
+        }
+      }
       if (device_draft_chain) {
         chain_context.input_ids = packed_device_inputs;
         chain_context.run_options->AddConfigEntry(
@@ -865,8 +1312,6 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
       } else {
         if (device_draft_chain) {
           materialize_device_drafts();
-          pending_device_requests.clear();
-          pending_device_inputs.clear();
           device_draft_chain = false;
         }
         chain_drafts = GreedyTokens(mtp_model_, chain_logits);
@@ -899,19 +1344,25 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
         }
         auto next_feedback_hidden =
             copy_hidden_rows(*head_hidden, next_feedback_rows);
-        if (device_draft_chain) {
-          pending_device_inputs.push_back(std::move(feedback_hidden));
-        }
+        MtpFailureFence feedback_fence{mtp_model_->p_device_scoring_, lifetime_fence_error};
+        pending_device_inputs.push_back(std::move(feedback_hidden));
         feedback_hidden = std::move(next_feedback_hidden);
       }
-      if (device_draft_chain) {
-        pending_device_requests.push_back(std::move(chain_requests));
-      }
+      pending_device_requests.push_back(std::move(chain_requests));
       active_feed_indices = std::move(next_active_feed_indices);
     }
 
     if (device_draft_chain) {
       materialize_device_drafts();
+    }
+    // Also fence feedback copies if ArgMax fell back to the host partway through the chain.
+    mtp_model_->p_device_scoring_->Synchronize();
+
+    if (use_indexshare) {
+      const auto status = selection_buffers.status.CopyDeviceToCpu();
+      if (std::any_of(status.begin(), status.end(), [](int32_t value) { return value != 0; })) {
+        throw std::runtime_error("IndexShare indexer merge failed; tentative drafts were not published.");
+      }
     }
 
     for (size_t i = 0; i < feeds.size(); ++i) {
@@ -928,6 +1379,7 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
     const auto preparation_error = std::current_exception();
     try {
       RollbackMtpStep(*step);
+      if (lifetime_fence_error) std::rethrow_exception(lifetime_fence_error);
     } catch (...) {
       auto message = AddExceptionCause(
           "MTP step preparation failed.", preparation_error);
@@ -1080,14 +1532,21 @@ std::shared_ptr<Request> Engine::CreateRequest(const RequestOptions& options) {
         R"(config.overlay('{"search": {"num_beams": 1}}') -- )"
         "and batch across Requests instead.");
   }
-  const size_t model_ceiling = static_cast<size_t>(model_search.max_length);
+  const size_t configured_default = static_cast<size_t>(model_search.max_length);
+  const uint64_t capability = GetCapabilities().max_request_length;
+  if (capability > std::numeric_limits<size_t>::max()) {
+    throw std::overflow_error("Engine max_request_length exceeds size_t.");
+  }
+  const size_t engine_ceiling = capability == 0 ? configured_default : static_cast<size_t>(capability);
   const size_t max_session_tokens =
-      options.max_session_tokens.value_or(model_ceiling);
-  if (max_session_tokens == 0 || max_session_tokens > model_ceiling) {
+      options.max_session_tokens.value_or(std::min(configured_default, engine_ceiling));
+  if (max_session_tokens == 0 || max_session_tokens > engine_ceiling) {
+    const char* ceiling_name =
+        capability == 0 ? "model-configured search.max_length" : "Engine's max_request_length";
     throw std::runtime_error(
         "max_session_tokens (" + std::to_string(max_session_tokens) +
-        ") must be greater than zero and no greater than the model-configured search.max_length (" +
-        std::to_string(model_ceiling) + ").");
+        ") must be greater than zero and no greater than the " + ceiling_name + " (" +
+        std::to_string(engine_ceiling) + ").");
   }
   auto request = std::make_shared<Request>(
       *model_, max_session_tokens, abandonment_pending_);
@@ -1126,10 +1585,20 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
         "Cannot begin a turn for a request that does not belong to this engine.");
   }
   request->ValidateTurnAdmission(tokens, options);
+  if (backend_capabilities_.SelectsOwnTokens()) {
+    const int vocab_size = model_->config_->model.vocab_size;
+    for (size_t i = 0; i < tokens.size(); ++i) {
+      if (tokens[i] < 0 || tokens[i] >= vocab_size) {
+        throw std::invalid_argument("Prompt token " + std::to_string(i) + " has id " +
+                                    std::to_string(tokens[i]) + ", outside [0, " + std::to_string(vocab_size) +
+                                    ") (model.vocab_size).");
+      }
+    }
+  }
 
   // Resolve and validate this turn's complete policy before any Request mutation, so an
   // unsatisfiable combination leaves the previous completed turn entirely reusable.
-  const bool dynamic_batching = cache_manager_->SupportsDynamicBatching();
+  const bool dynamic_batching = backend_capabilities_.UsesTransactions();
   const auto policy = ResolveTurnPolicy(model_->config_->search, options);
   const size_t turn_prompt_length =
       static_cast<size_t>(request->IsAwaitingFirstTurn()
@@ -1139,12 +1608,26 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
   ValidateTurnPolicy(policy, options, model_->p_device_scoring_->GetType(),
                      model_->config_->model.vocab_size, turn_prompt_length,
                      request->MaxSessionTokens());
+  model_executor_->ValidateTurn(policy, options);
+  if ((!backend_capabilities_.supports_sampling && !policy.IsGreedy()) ||
+      (!backend_capabilities_.supports_penalties &&
+       (policy.repetition_penalty != 1.0f || policy.no_repeat_ngram_size != 0)) ||
+      (!backend_capabilities_.supports_min_generated_tokens && policy.min_generated_tokens != 0) ||
+      (!backend_capabilities_.supports_guidance &&
+       (!options.guidance_type.empty() || !options.guidance_data.empty() || options.delimited_guidance))) {
+    throw std::runtime_error("The selected execution backend does not support the requested turn policy.");
+  }
   // Static batching completes generation through a non-transactional path (RunStatic) that cannot
   // stage, roll back, or replay a stop match, and its sampler RNG state is created once when the
   // Request joins the batch rather than inside a rollback-capable step. Reject both before any
   // Request mutation rather than letting a turn run without the guarantee its options promise.
   if (!dynamic_batching) {
-    if (!options.stop_strings.empty()) {
+    if (options.delimited_guidance) {
+      throw std::runtime_error("Delimited guidance requires an Engine configured for dynamic batching.");
+    }
+    // An executor that commits its own tokens runs them through Request::CommitExternalTokens, which
+    // observes stop strings token by token and only ever ends the turn, so it has nothing to roll back.
+    if (!options.stop_strings.empty() && !backend_capabilities_.supports_stop_strings) {
       throw std::runtime_error(
           "Stop strings require an Engine configured for dynamic batching.");
     }
@@ -1153,18 +1636,29 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
           "A per-turn seed requires an Engine configured for dynamic batching.");
     }
   }
-  if (options.seed && !scheduler_->SupportsTransactionalSamplerState()) {
+  if (options.seed && !backend_capabilities_.supports_per_turn_seed) {
     throw std::runtime_error(
         "A per-turn seed requires a batched sampler that supports transaction rollback.");
   }
 
+  if ((!options.stop_strings.empty() && !backend_capabilities_.supports_stop_strings) ||
+      (options.delimited_guidance && !backend_capabilities_.supports_delimited_guidance)) {
+    throw std::runtime_error("The selected execution backend does not support the requested stop or guidance policy.");
+  }
+
   const bool first_turn = request->IsAwaitingFirstTurn();
+  bool allow_nonresident = false;
   if (!first_turn) {
     const bool restartable_canceled_turn =
         request->IsRestartableCanceledTurn() &&
         !cache_manager_->IsResident(request);
-    ValidateRequestCanContinue(request, restartable_canceled_turn);
-    if (!restartable_canceled_turn) {
+    const bool replay_rewound_request =
+        request->NeedsReplayAfterRewind() &&
+        !cache_manager_->IsResident(request);
+    allow_nonresident =
+        restartable_canceled_turn || replay_rewound_request;
+    ValidateRequestCanContinue(request, allow_nonresident);
+    if (!allow_nonresident) {
       request->ValidateContinuousDecodingSupport();
     }
   }
@@ -1194,9 +1688,9 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
 
   try {
     request->PrepareTurnAdmission(tokens, admission);
-    if (first_turn) {
+    if (first_turn || allow_nonresident) {
       scheduler_->AddRequest(request);
-      added_to_scheduler = true;
+      added_to_scheduler = first_turn;
     }
     return request->CommitTurnAdmission(options, admission);
   } catch (...) {
@@ -1252,7 +1746,7 @@ bool Engine::CancelRequest(const std::shared_ptr<Request>& request, uint64_t tur
   terminal.usage = {
       counters.prompt_tokens,
       counters.generated_tokens,
-      0};
+      request->TurnCachedPromptTokens()};
   if (has_existing_event) {
     existing->flags |= terminal.flags;
     existing->finish_reason = terminal.finish_reason;
@@ -1269,6 +1763,68 @@ bool Engine::CancelRequest(const std::shared_ptr<Request>& request, uint64_t tur
   return true;
 }
 
+void Engine::RewindRequestToStartOfTurn(
+    const std::shared_ptr<Request>& request,
+    uint64_t turn_id) {
+  ValidateOwnerThread();
+  CompleteNonresidentClosedRequests();
+  ReclaimAbandonedRequests();
+  if (health_ == EngineHealth::Unhealthy) {
+    std::rethrow_exception(fatal_error_);
+  }
+  if (!request || !request->BelongsTo(*this)) {
+    throw std::runtime_error(
+        "Cannot rewind a request that does not belong to this engine.");
+  }
+  if (!IsTurnComplete(request->Status())) {
+    if (IsClosed(request->Status())) {
+      throw std::runtime_error("Cannot rewind a closed request.");
+    }
+    throw std::runtime_error(
+        "Request rewind is only valid after the current turn is complete.");
+  }
+  if (request->FinishReason() == GenerationFinishReason::Failed) {
+    throw std::runtime_error(
+        "Cannot rewind a Request whose current turn failed.");
+  }
+  if (std::find_if(
+          pending_events_.begin() +
+              static_cast<ptrdiff_t>(pending_event_index_),
+          pending_events_.end(),
+          [&request](const EngineEvent& event) {
+            return event.request == request;
+          }) != pending_events_.end()) {
+    throw std::runtime_error(
+        "Cannot rewind a request while an Engine event is pending; "
+        "call Engine::Run() to drain the event before rewinding.");
+  }
+
+  if (backend_capabilities_.rewind == BackendRewind::Unsupported) {
+    throw std::runtime_error("The selected execution backend does not support request rewind.");
+  }
+  const bool resident = cache_manager_->IsResident(request);
+  if (!resident && !request->IsRestartableCanceledTurn() &&
+      !request->NeedsReplayAfterRewind()) {
+    throw std::runtime_error(
+        "Cannot rewind a request whose model state is no longer resident.");
+  }
+
+  // Every fallible preparation and temporary allocation completes before committed target-cache
+  // ownership changes. The cache managers validate their complete release up front, then publish
+  // the ownership change through allocation-free no-throw operations.
+  cache_manager_->ValidateRewind(request);
+  auto rewind_state =
+      request->PrepareRewindToStartOfTurn(turn_id);
+  // Auxiliary decoders mirror a generated suffix that is no longer authoritative after rewind.
+  // Release them before the target cache so any fallible cleanup leaves target ownership intact.
+  CloseMtpRequest(request);
+  if (dflash2_drafter_) {
+    dflash2_drafter_->Release(request.get());
+  }
+  cache_manager_->ReleaseForRewind(request);
+  request->CommitRewind(std::move(rewind_state));
+}
+
 void Engine::CloseRequest(const std::shared_ptr<Request>& request) {
   ValidateOwnerThread();
   if (request && IsClosed(request->status_)) {
@@ -1279,7 +1835,7 @@ void Engine::CloseRequest(const std::shared_ptr<Request>& request) {
   }
   scheduler_->RemoveRequest(request);
   const bool retain_static_runtime_state =
-      !cache_manager_->SupportsDynamicBatching() &&
+      !backend_capabilities_.UsesTransactions() &&
       cache_manager_->IsResident(request);
 
   CloseMtpRequest(request);
@@ -1441,6 +1997,9 @@ void Engine::ValidateRequestCanContinue(
   if (!request->BelongsTo(*this)) {
     throw std::runtime_error("Cannot continue a request that does not belong to this engine.");
   }
+  if (request->FinishReason() == GenerationFinishReason::Failed) {
+    throw std::runtime_error("Cannot continue a Request whose current turn failed.");
+  }
 
   if (!allow_nonresident && !cache_manager_->IsResident(request)) {
     throw std::runtime_error("Cannot continue a request whose model state is no longer resident.");
@@ -1458,7 +2017,7 @@ void Engine::ValidateRequestCanContinue(
   }
 
   if (!allow_nonresident &&
-      !cache_manager_->SupportsDynamicBatching() &&
+      !backend_capabilities_.SupportsIndependentAdmission() &&
       cache_manager_->ResidentRequestCount() > 1) {
     throw std::runtime_error(
         "Continuous decoding requires exactly one resident request in a "
@@ -1533,7 +2092,7 @@ size_t Engine::Run(std::span<EngineEvent> events) {
     std::rethrow_exception(fatal_error_);
   }
   try {
-    if (cache_manager_->SupportsDynamicBatching()) {
+    if (backend_capabilities_.UsesTransactions()) {
       RunDynamic();
     } else {
       RunStatic();
@@ -1549,9 +2108,9 @@ size_t Engine::Run(std::span<EngineEvent> events) {
 
 void Engine::RunStatic() {
   if (scheduler_->HasPendingRequests()) {
-    auto scheduled_requests = [&]() -> ScheduledRequests {
+    auto scheduling = [&]() -> NontransactionalSchedulingResult {
       try {
-        return scheduler_->Schedule();
+        return scheduler_->ScheduleStep();
       } catch (...) {
         MarkUnhealthyAndThrow(
             StepOutcomeKind::ExecutionContractFailure,
@@ -1561,15 +2120,38 @@ void Engine::RunStatic() {
             std::current_exception());
       }
     }();
+    if (!scheduling.scheduled) {
+      if (scheduling.outcome.kind == StepOutcomeKind::UnserviceableRequest) {
+        RetainEvent(FailUnserviceableRequest(scheduling.outcome.request_id));
+      } else if (scheduling.outcome.kind == StepOutcomeKind::CapacityDeferred) {
+        ++transaction_metrics_.capacity_deferrals;
+      } else if (scheduling.outcome.kind != StepOutcomeKind::NoWork) {
+        MarkUnhealthyAndThrow(StepOutcomeKind::ExecutionContractFailure, 0, nullptr,
+                              "Static scheduler returned an invalid non-executable outcome.", nullptr);
+      }
+      return;
+    }
+    auto& scheduled_requests = *scheduling.scheduled;
+    if (scheduling.outcome.kind != StepOutcomeKind::Committed || !scheduled_requests) {
+      MarkUnhealthyAndThrow(StepOutcomeKind::ExecutionContractFailure, 0, nullptr,
+                            "Static scheduler returned contradictory executable work.", nullptr);
+    }
     // Scheduling may recycle an all-terminal static batch. Closed rows retain their Search,
     // parameters, host tokens, and length metadata only until that shared allocation is gone;
     // finish their physical close before executing the replacement batch.
     CompleteNonresidentClosedRequests();
 
     try {
+      scheduled_requests.SetBackendLimits(backend_capabilities_.max_slots, backend_capabilities_.max_result_tokens);
       model_executor_->Decode(scheduled_requests);
-      ++speculative_stats_.target_forward_passes;
+      if (backend_capabilities_.SelectsOwnTokens() !=
+          (scheduled_requests.OutputKind() == StepOutputKind::BackendRows))
+        throw std::logic_error("Executor output protocol contradicts the resolved backend capabilities.");
+      if (!model_executor_->SelectsOwnTokens()) {
+        ++speculative_stats_.target_forward_passes;
+      }
       scheduled_requests.GenerateNextTokens(step_results_);
+      model_executor_->OnStepCommitted(scheduled_requests, step_results_);
     } catch (...) {
       MarkUnhealthyAndThrow(
           StepOutcomeKind::FatalExecutionFailure,
@@ -1613,6 +2195,7 @@ void Engine::RunDynamic() {
           "Dynamic scheduler planning failed and the Engine is no longer healthy.",
           std::current_exception());
     }
+    PrefixAdoptionGuard prefix_adoption_guard{step_plan_};
     if (planning_result.capacity_deferred) {
       ++transaction_metrics_.capacity_deferrals;
     }
@@ -1716,6 +2299,9 @@ void Engine::RunDynamic() {
     context.fixed_state_slots = reservation->FixedStateSlots();
     context.fixed_state_bindings = reservation->FixedStateBindings();
     context.fixed_state_staging_bytes = reservation->FixedStateStagingBytes();
+    if (auto* fixed_reservation = reservation->FixedReservation()) {
+      context.fixed_state_binding_key = fixed_reservation->BindingLayoutKey();
+    }
 
     bool request_transaction_active = false;
     std::unique_ptr<MtpStep> mtp_step;
@@ -1954,6 +2540,7 @@ void Engine::RunDynamic() {
       scheduled_requests.CommitStateForTransaction();
       request_transaction_active = false;
       reservation->Commit();
+      prefix_adoption_guard.Commit();
       if (mtp_step) {
         CommitMtpStep(*mtp_step);
       }
@@ -1961,6 +2548,14 @@ void Engine::RunDynamic() {
       for (size_t i = 0; i < step_plan_.requests.size(); ++i) {
         step_plan_.requests[i].request->CommitStep(
             step_plan_.requests[i], step_results_[i]);
+      }
+      for (auto& entry : step_plan_.requests) {
+        entry.prefix_match.reset();
+      }
+      try {
+        cache_manager_->SealCommittedBlocks(step_plan_);
+      } catch (const std::bad_alloc&) {
+        cache_manager_->RecordPrefixPublicationRefusal();
       }
       if (mtp_step) {
         PublishMtpDrafts(*mtp_step);
@@ -2036,7 +2631,7 @@ void Engine::AppendEventsFromStep(
     event.usage = {
         request->TurnPromptTokens(),
         request->TurnGeneratedTokens(),
-        0};
+        request->TurnCachedPromptTokens()};
   };
 
   for (size_t i = 0; i < result.visible_token_count; ++i) {
@@ -2096,7 +2691,7 @@ EngineEvent Engine::FailUnserviceableRequest(const void* request_id) {
   event.usage = {
       request->TurnPromptTokens(),
       request->TurnGeneratedTokens(),
-      0};
+      request->TurnCachedPromptTokens()};
   return event;
 }
 
@@ -2161,6 +2756,7 @@ EngineEvent Engine::EventFromStepError(
   if (health_ == EngineHealth::Unhealthy) {
     std::rethrow_exception(fatal_error_);
   }
+  model_executor_->OnExecutionFailure();
 
   std::exception_ptr durable_error =
       outcome == StepOutcomeKind::ExecutionContractFailure
@@ -2207,7 +2803,7 @@ EngineEvent Engine::EventFromStepError(
       event.usage = {
           request->TurnPromptTokens(),
           request->TurnGeneratedTokens(),
-          0};
+          request->TurnCachedPromptTokens()};
       const auto existing = std::find_if(
           fatal_events_.rbegin(), fatal_events_.rend(),
           [&request](const EngineEvent& pending) {
@@ -2269,7 +2865,7 @@ bool Engine::HasPendingRequests() {
 
 size_t Engine::MaxDraftTokensPerStep() const {
   ValidateOwnerThread();
-  return cache_manager_->SupportsDynamicBatching() &&
+  return backend_capabilities_.UsesTransactions() &&
                  model_executor_->SupportsDraftVerification()
              ? cache_manager_->MaxDraftTokensPerStep()
              : 0;
@@ -2284,6 +2880,20 @@ const std::shared_ptr<Tokenizer>& Engine::GetOrCreateStopTokenizer() {
 
 std::unique_ptr<ConstrainedLogitsProcessor> Engine::CreateTurnGuidance(
     const TurnOptions& options) const {
+  if (options.delimited_guidance) {
+    if (!options.guidance_type.empty() || !options.guidance_data.empty()) {
+      throw std::invalid_argument("Delimited and whole-turn guidance cannot be combined.");
+    }
+    const auto& region = *options.delimited_guidance;
+    const auto& config = model_->config_->model;
+    auto params = std::make_shared<GeneratorParams>(*model_);
+    params->search.batch_size = 1;
+    params->SetGuidance("lark_grammar", region.grammar, false);
+    auto body = CreateGuidanceLogitsProcessor(std::move(params));
+    return std::make_unique<DelimitedGuidanceLogitsProcessor>(
+        std::move(body), *model_->p_device_, config.vocab_size,
+        config.eos_token_id, region.opening_token, region.closing_token);
+  }
   if (options.guidance_type.empty() && options.guidance_data.empty()) {
     return nullptr;
   }
@@ -2300,6 +2910,7 @@ SpeculativeStats Engine::GetSpeculativeStats() const {
   // would be a data race.
   ValidateOwnerThread();
   auto stats = speculative_stats_;
+  model_executor_->AddSpeculativeStats(stats);
   if (dflash2_drafter_) {
     stats.dflash2_admission_misses = dflash2_drafter_->AdmissionMisses();
   }
@@ -2313,6 +2924,20 @@ SpeculativeStats Engine::GetSpeculativeStats() const {
         static_cast<float>(stats.rounds);
   }
   return stats;
+}
+
+EngineCapabilities Engine::GetCapabilities() const {
+  ValidateOwnerThread();
+  return {backend_capabilities_.configured_max_batch_size,
+          backend_capabilities_.max_scheduled_tokens,
+          backend_capabilities_.max_request_length};
+}
+
+std::optional<PrefixCacheMetrics> Engine::PrefixCacheStats() const {
+  ValidateOwnerThread();
+  if (!backend_capabilities_.prefix_reuse) return std::nullopt;
+  const auto* metrics = cache_manager_->PrefixMetrics();
+  return metrics ? std::optional<PrefixCacheMetrics>{*metrics} : std::nullopt;
 }
 
 }  // namespace Generators

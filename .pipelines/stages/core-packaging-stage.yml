@@ -2,9 +2,9 @@
 # core-packaging-stage.yml — Core binary packaging stages.
 #
 # Two logical stages, each gated by a single per-EP toggle. When an EP is
-# enabled its whole fixed platform matrix is built (goal 8):
+# enabled its whole fixed platform matrix is built:
 #   Core · CPU  — win-x64, win-arm64, osx-arm64, linux-x64, linux-arm64
-#   Core · CUDA — win-x64, win-arm64, linux-x64
+#   Core · CUDA — win-x64, win-arm64, linux-x64, linux-arm64
 #
 # (iOS and Android are CPU targets but use bespoke builds; they live in their own
 #  stages, gated by enable_cpu at the pipeline level.)
@@ -126,6 +126,14 @@ stages:
         ep: cuda
         ort_version: ${{ parameters.ort_version }}
         cuda_version: ${{ parameters.cuda_version }}
+
+    - template: jobs/core-build-job.yml
+      parameters:
+        os: linux
+        arch: arm64
+        ep: cuda
+        ort_version: '1.30.0'
+        cuda_version: '13.1'
 
 # ---------------------------------------------------------------------------
 # Core · WinML  (built when the WinML EP is enabled)

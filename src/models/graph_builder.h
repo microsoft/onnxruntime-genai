@@ -72,7 +72,7 @@ namespace GraphBuilder {
 
 // Build a complete ONNX model using the Model Editor API
 // Returns an OrtModel that can be used to create sessions
-std::unique_ptr<OrtModel> Build(const ModelConfig& config);
+std::unique_ptr<OrtModel> Build(const ModelConfig& config, const char* domain = "", int opset_version = 0);
 
 }  // namespace GraphBuilder
 

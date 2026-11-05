@@ -11,8 +11,8 @@
 #include <gtest/gtest.h>
 
 #include "ort_genai.h"
-// Included only for the compile-time ORT_GENAI_HAS_MODEL_PACKAGE gate; the tests below
-// drive the feature exclusively through the public C++ API (ort_genai.h).
+// The package gate and external-data fixture use internal ORT wrappers. Keep these tests
+// in the object-library test target rather than requiring private shared-library exports.
 #include "models/model_package.h"
 
 #if ORT_GENAI_HAS_MODEL_PACKAGE
@@ -103,8 +103,8 @@ std::string CaptureThrowMessage(Fn&& fn) {
 // initializers. Writes <out_dir>/model.onnx plus <out_dir>/model.onnx.data and returns the
 // model path. Used to exercise the external-initializers folder session option.
 fs_std::path ExportModelWithExternalData(const fs_std::path& src_onnx, const fs_std::path& out_dir) {
-  // The low-level ORT wrappers below run in this test binary, which has its own copy of the
-  // Ort::api pointer (the genai .so initializes its own). Initialize ours before using them.
+  // The fixture uses internal ORT wrappers linked into this test binary. Initialize their
+  // API pointer before creating the external-data model.
   Ort::InitApi();
   fs_std::create_directories(out_dir);
   const auto model_path = out_dir / "model.onnx";
@@ -122,6 +122,19 @@ fs_std::path ExportModelWithExternalData(const fs_std::path& src_onnx, const fs_
 }
 
 }  // namespace
+
+TEST(ModelPackage, UsesStableApi) {
+  Ort::InitApi();
+  EXPECT_EQ(&Ort::GetModelPackageApi(), Ort::api->GetModelPackageApi());
+}
+
+TEST(ModelPackage, RejectsOlderRuntimeApi) {
+  Ort::InitApi();
+  const auto saved_version = Ort::api_version;
+  Ort::api_version = 30;
+  EXPECT_THROW(Ort::GetModelPackageApi(), std::runtime_error);
+  Ort::api_version = saved_version;
+}
 
 TEST(ModelPackage, RejectsFlatDirectory) {
   const auto root = MakeTempDir("flat");

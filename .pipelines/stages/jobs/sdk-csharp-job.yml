@@ -276,6 +276,7 @@ jobs:
         if ('${{ parameters.enable_win_x64 }}' -eq 'True')   { $cudaExpected['win-x64']   = 'onnxruntime-genai-cuda.dll' }
         if ('${{ parameters.enable_win_arm64 }}' -eq 'True') { $cudaExpected['win-arm64'] = 'onnxruntime-genai-cuda.dll' }
         if ('${{ parameters.enable_linux_x64 }}' -eq 'True') { $cudaExpected['linux-x64'] = 'libonnxruntime-genai-cuda.so' }
+        if ('${{ parameters.enable_linux_arm64 }}' -eq 'True') { $cudaExpected['linux-arm64'] = 'libonnxruntime-genai-cuda.so' }
         foreach ($rid in $cudaExpected.Keys) {
           $lib = "$outputDir/$rid/$(buildConfig)/$($cudaExpected[$rid])"
           if (-not (Test-Path $lib)) { throw "Expected CUDA native library missing for RID '$rid': $lib" }
@@ -312,6 +313,7 @@ jobs:
         --sources_path $(Build.Repository.LocalPath) `
         --native_build_path $(buildDir) `
         --nuspec_output_path $(Build.Repository.LocalPath)/nuget/$(genai_nuget_package_name).nuspec
+      if ($LASTEXITCODE -ne 0) { throw "Native nuspec generation failed with exit code $LASTEXITCODE" }
       cat $(Build.Repository.LocalPath)/nuget/$(genai_nuget_package_name).nuspec
     displayName: 'Generate native nuspec'
 
@@ -338,6 +340,9 @@ jobs:
       if (-not $nupkg) { Write-Error "ASSERT FAIL: native nupkg not produced"; exit 1 }
       Add-Type -AssemblyName System.IO.Compression.FileSystem
       $names = [System.IO.Compression.ZipFile]::OpenRead($nupkg.FullName).Entries.FullName
+      if ($names | Where-Object { ($_ -replace '\\','/') -match '^runtimes/[^/]+/native/(?:lib)?onnxruntime(?:\.|_(?!genai(?:[._]|$)))' }) {
+        throw 'GenAI NuGet must not bundle ONNX Runtime binaries'
+      }
       $expectRids = @()
       if ('${{ parameters.enable_win_x64 }}' -eq 'True')     { $expectRids += 'runtimes/win-x64/native' }
       if ('${{ parameters.enable_win_arm64 }}' -eq 'True')   { $expectRids += 'runtimes/win-arm64/native' }
@@ -349,6 +354,14 @@ jobs:
       foreach ($rid in $expectRids) {
         if (-not ($names | Where-Object { $_ -replace '\\','/' -like "$rid/*" })) {
           Write-Error "ASSERT FAIL: nupkg missing $rid"; exit 1
+        }
+      }
+      if ('${{ parameters.ep }}' -eq 'cuda') {
+        foreach ($name in @('libonnxruntime-genai.so', 'libonnxruntime-genai-cuda.so')) {
+          $path = "runtimes/linux-arm64/native/$name"
+          if (-not ($names | Where-Object { ($_ -replace '\\','/') -eq $path })) {
+            throw "CUDA nupkg missing $path"
+          }
         }
       }
       Write-Host "ASSERT OK: native nupkg contains expected RIDs: $($expectRids -join ', ')"

@@ -61,6 +61,7 @@ class TensorModule:
         self.weight = weight
         self.bias = bias
         self.quant_type = "none"
+        self.can_reuse_as_embedding = True
         self.exclude_from_quantization = False
         self.weight_scale = None
         self.weight_scale_2 = None
@@ -210,6 +211,19 @@ class QuantizedMLP:
         self.router = TensorModule()
 
 
+class QuantizedLinearAttention:
+    def __init__(self):
+        self.in_proj_qkv = QuantizedTensorModule()
+        self.in_proj_z   = QuantizedTensorModule()
+        self.in_proj_a   = QuantizedTensorModule()
+        self.in_proj_b   = QuantizedTensorModule()
+        self.out_proj    = QuantizedTensorModule()
+        self.conv1d      = TensorModule()
+        self.norm        = TensorModule()
+        self.A_log       = None
+        self.dt_bias     = None
+
+
 class QuantizedDecoderLayer:
     def __init__(self, layer_id):
         self.layer_id = layer_id
@@ -219,6 +233,7 @@ class QuantizedDecoderLayer:
         self.pre_feedforward_layernorm = TensorModule()
         self.post_feedforward_layernorm = TensorModule()
         self.mlp = QuantizedMLP()
+        self.linear_attn = QuantizedLinearAttention()
 
     def is_empty(self):
         return self.input_layernorm.weight is None
@@ -245,10 +260,10 @@ class QuantizedModel:
         self.lm_head = lm_head if lm_head is not None else TensorModule()
         self.layers = {} if load_weights else []
         self.num_layers = num_layers
+        self.quant_attrs = quant_attrs
         if not load_weights:
             return
 
-        self.quant_attrs = quant_attrs
         self.global_group_size = (
             quant_attrs["config"]["group_size"] if global_group_size is None else global_group_size
         )
@@ -424,6 +439,55 @@ class QuantizedModel:
                             # model.layers.layer_id.self_attn.o_proj.bias
                             # model.layers.layer_id.self_attention.dense.bias
                             tensor_map["self_attn.o_proj.bias"] = tensor
+                        # linear_attn (GatedDeltaNet) projections
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.in_proj_qkv\.q?weight$", name)):
+                            tensor_map["linear_attn.in_proj_qkv.qweight"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.in_proj_qkv\.(scales|weight_scale)$", name)):
+                            tensor_map["linear_attn.in_proj_qkv.scales"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.in_proj_qkv\.(qzeros|weight_zero_point)$", name)):
+                            tensor_map["linear_attn.in_proj_qkv.qzeros"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.in_proj_qkv\.g_idx$", name)):
+                            tensor_map["linear_attn.in_proj_qkv.g_idx"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.in_proj_z\.q?weight$", name)):
+                            tensor_map["linear_attn.in_proj_z.qweight"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.in_proj_z\.(scales|weight_scale)$", name)):
+                            tensor_map["linear_attn.in_proj_z.scales"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.in_proj_z\.(qzeros|weight_zero_point)$", name)):
+                            tensor_map["linear_attn.in_proj_z.qzeros"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.in_proj_z\.g_idx$", name)):
+                            tensor_map["linear_attn.in_proj_z.g_idx"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.in_proj_a\.q?weight$", name)):
+                            tensor_map["linear_attn.in_proj_a.qweight"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.in_proj_a\.(scales|weight_scale)$", name)):
+                            tensor_map["linear_attn.in_proj_a.scales"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.in_proj_a\.(qzeros|weight_zero_point)$", name)):
+                            tensor_map["linear_attn.in_proj_a.qzeros"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.in_proj_a\.g_idx$", name)):
+                            tensor_map["linear_attn.in_proj_a.g_idx"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.in_proj_b\.q?weight$", name)):
+                            tensor_map["linear_attn.in_proj_b.qweight"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.in_proj_b\.(scales|weight_scale)$", name)):
+                            tensor_map["linear_attn.in_proj_b.scales"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.in_proj_b\.(qzeros|weight_zero_point)$", name)):
+                            tensor_map["linear_attn.in_proj_b.qzeros"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.in_proj_b\.g_idx$", name)):
+                            tensor_map["linear_attn.in_proj_b.g_idx"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.out_proj\.q?weight$", name)):
+                            tensor_map["linear_attn.out_proj.qweight"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.out_proj\.(scales|weight_scale)$", name)):
+                            tensor_map["linear_attn.out_proj.scales"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.out_proj\.(qzeros|weight_zero_point)$", name)):
+                            tensor_map["linear_attn.out_proj.qzeros"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.out_proj\.g_idx$", name)):
+                            tensor_map["linear_attn.out_proj.g_idx"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.A_log$", name)):
+                            tensor_map["linear_attn.A_log"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.dt_bias$", name)):
+                            tensor_map["linear_attn.dt_bias"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.conv1d\.weight$", name)):
+                            tensor_map["linear_attn.conv1d.weight"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.norm\.weight$", name)):
+                            tensor_map["linear_attn.norm.weight"] = tensor
                         elif bool(re.match(r"^model.layers\.\d+\.post_attention_layernorm\.weight$", name)):
                             # model.layers.layer_id.post_attention_layernorm.weight
                             tensor_map["post_attention_layernorm.weight"] = tensor
@@ -853,6 +917,9 @@ class QuantizedModel:
             for module in layer.self_attn.__dict__.values():
                 if isinstance(module, QuantizedTensorModule):
                     yield module
+            for module in layer.linear_attn.__dict__.values():
+                if isinstance(module, QuantizedTensorModule):
+                    yield module
             for module in layer.mlp.__dict__.values():
                 if isinstance(module, QuantizedTensorModule):
                     yield module
@@ -877,6 +944,19 @@ class QuantizedModel:
     def repack_experts(self, experts):
         pass
 
+    def dequantize_gate_to_dense(self, module):
+        """Dequantize a pre-quantized gate projection and return a plain TensorModule.
+
+        Follows the same pattern as ModeloptModel.make_dense_linear_module: unpacks and
+        dequantizes the weight to float16 so the builder sees a dense projection and emits
+        a standard float MatMul instead of MatMulNBits.
+        """
+        self.prepare_quantized_tensor(module)
+        self.unpack(module)  # sets module.qweight to dequantized float16 [out, in] weight
+        dense = TensorModule()
+        dense.weight = module.qweight
+        return dense
+
     def repack_quantized_tensor(self, module, clear_g_idx):
         if module.qweight is None:
             return
@@ -894,6 +974,19 @@ class QuantizedModel:
 
             for module in layer.self_attn.__dict__.values():
                 if isinstance(module, QuantizedTensorModule):
+                    self.repack_quantized_tensor(module, clear_g_idx)
+
+            # GatedDeltaNet decay/beta gate projections (in_proj_b, in_proj_a) must be
+            # dequantized to dense float16 — their outputs feed exp() and softplus() in
+            # the recurrence, so quantization error would be amplified there. All other
+            # linear_attn projections are repacked normally for int4 MatMulNBits.
+            _dense_gate_names = {"in_proj_b", "in_proj_a"}
+            for attr_name, module in list(layer.linear_attn.__dict__.items()):
+                if not isinstance(module, QuantizedTensorModule):
+                    continue
+                if attr_name in _dense_gate_names and module.qweight is not None:
+                    setattr(layer.linear_attn, attr_name, self.dequantize_gate_to_dense(module))
+                else:
                     self.repack_quantized_tensor(module, clear_g_idx)
 
             for module in layer.mlp.__dict__.values():
@@ -981,19 +1074,15 @@ class QuantizedModel:
 
         orig_tensor = tensor.T if transpose else tensor
 
-        original_cols = orig_tensor.shape[1]
-        pad_len = (values_per_pack - (original_cols % values_per_pack)) % values_per_pack
-        if pad_len > 0:
-            orig_tensor = torch.nn.functional.pad(orig_tensor, (0, pad_len), "constant", 0)
+        packed_cols = (orig_tensor.shape[1] + values_per_pack - 1) // values_per_pack
+        out = torch.zeros((orig_tensor.shape[0], packed_cols), dtype=packed_dtype, device=orig_tensor.device)
 
-        wf = torch.arange(0, bits).view(1, 1, -1)
-        out = torch.bitwise_right_shift(orig_tensor.unsqueeze(-1), wf)
-        out = torch.bitwise_and(out, 1)
-
-        out = out.reshape(orig_tensor.shape[0], -1, values_per_pack * bits)
-        wf1 = torch.arange(0, values_per_pack * bits, 1).view(1, 1, -1)
-        out = torch.bitwise_left_shift(out, wf1)
-        out = out.sum(dim=-1).to(packed_dtype)
+        # Accumulate one value per packed word at a time instead of expanding every bit to int64.
+        # Zero initialization supplies the padding bits for an incomplete final word.
+        mask = (1 << bits) - 1
+        for offset in range(values_per_pack):
+            values = orig_tensor[:, offset::values_per_pack].to(packed_dtype)
+            out[:, :values.shape[1]] |= (values & mask) << (offset * bits)
         return out.T if transpose else out
 
     def pack_on_row(self, tensor, bits, transpose, packed_dtype=torch.int32):
@@ -1096,4 +1185,3 @@ class QuantizedModel:
             module.qzeros = intzeros_pt.contiguous().byte()
         else:
             module.qzeros = intzeros_pt.contiguous()
-

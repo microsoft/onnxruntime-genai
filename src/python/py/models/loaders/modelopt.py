@@ -4,6 +4,7 @@
 # license information.
 # --------------------------------------------------------------------------
 
+import glob
 import json
 import os
 from types import SimpleNamespace
@@ -65,7 +66,12 @@ class ModeloptModel(QuantizedModel):
             # Globals: embeddings + final norm are BF16; lm_head retains its native NVFP4 tensors.
             self.embedding.weight = self.get_tensor("model.language_model.embed_tokens.weight")
             self.final_norm.weight = self.get_tensor("model.language_model.norm.weight")
-            self.make_linear_module("lm_head", self.lm_head)
+            if self.make_linear_module("lm_head", self.lm_head) is None and text_config.get(
+                "tie_word_embeddings", False
+            ):
+                # Keep a distinct module so the builder visits both the embedding and LM head,
+                # while reusing the checkpoint's single tied weight tensor.
+                self.lm_head.weight = self.embedding.weight
             self.mtp = self.make_mtp()
         finally:
             # Every tensor is materialized above; do not hold file descriptors open for
@@ -145,6 +151,7 @@ class ModeloptModel(QuantizedModel):
                 )
             self.validate_positive_scalar(module.weight_scale_2, f"{base}.weight_scale_2")
             module.quant_type = "nvfp4"
+            module.can_reuse_as_embedding = False
             module.weight_scale = module.weight_scale.view(torch.uint8).contiguous()
         elif module.weight.dtype == torch.float8_e4m3fn:
             self.validate_positive_weight_scale(
@@ -153,6 +160,7 @@ class ModeloptModel(QuantizedModel):
             if module.input_scale is not None:
                 self.validate_positive_scalar(module.input_scale, f"{base}.input_scale")
             module.quant_type = "fp8"
+            module.can_reuse_as_embedding = False
 
     def make_linear_module(self, base, module=None):
         weight = self.get_tensor(f"{base}.weight")
@@ -188,17 +196,19 @@ class ModeloptModel(QuantizedModel):
         module.weight = self.get_tensor(name)
         return module
 
-    def prepare_qmoe_experts(self, experts):
-        def unpack(weight):
-            low = weight & 0x0F
-            high = weight >> 4
-            return torch.stack((low, high), dim=-1).reshape(weight.shape[0], -1)
+    def make_gate_module(self, base, dense=False):
+        module = self.make_dense_linear_module(base) if dense else self.make_tensor_module(f"{base}.weight")
+        module.exclude_from_quantization = True
+        return module
 
-        def pack(codes):
-            if codes.shape[0] % 2 != 0:
-                raise ValueError(f"NVFP4 QMoE packing requires an even N={codes.shape[0]} for nibble packing.")
-            codes = codes.T.contiguous()
-            return ((codes[:, 1::2] << 4) | (codes[:, 0::2] & 0x0F)).contiguous()
+    def prepare_qmoe_experts(self, experts):
+        weights_prepacked = int(self.quant_attrs.get("qmoe_weights_prepacked", 0) == 1)
+
+        def pack_weight(weight):
+            if weights_prepacked == 1:
+                return weight.reshape(weight.shape[1] * 2, weight.shape[0] // 2)
+            codes = torch.stack((weight & 15, weight >> 4), dim=-1).reshape(weight.shape[0], -1).transpose(0, 1)
+            return (codes[:, 0::2] | (codes[:, 1::2] << 4)).contiguous()
 
         def scale_bytes(projection):
             return projection.weight_scale.view(torch.uint8).contiguous()
@@ -206,17 +216,17 @@ class ModeloptModel(QuantizedModel):
         gate_up_weights, gate_up_scales, gate_up_globals = [], [], []
         down_weights, down_scales, down_globals = [], [], []
         for expert_id, expert in enumerate(experts):
-            gate_codes = unpack(expert.gate_proj.weight)
-            up_codes = unpack(expert.up_proj.weight)
-            if gate_codes.shape != up_codes.shape:
+            gate_weight = expert.gate_proj.weight
+            up_weight = expert.up_proj.weight
+            if gate_weight.shape != up_weight.shape:
                 raise ValueError(
                     f"ModelOpt expert {expert_id} gate/up weights must have matching shapes, "
-                    f"got {tuple(gate_codes.shape)} and {tuple(up_codes.shape)}."
+                    f"got {tuple(gate_weight.shape)} and {tuple(up_weight.shape)}."
                 )
 
-            intermediate_size = gate_codes.shape[0]
-            fused_codes = torch.stack((gate_codes, up_codes), dim=1).reshape(2 * intermediate_size, -1)
-            gate_up_weights.append(pack(fused_codes))
+            intermediate_size = gate_weight.shape[0]
+            fused_weight = torch.stack((gate_weight, up_weight), dim=1).reshape(2 * intermediate_size, -1)
+            gate_up_weights.append(pack_weight(fused_weight))
             gate_up_scales.append(
                 torch.stack((scale_bytes(expert.gate_proj), scale_bytes(expert.up_proj)), dim=1).reshape(
                     2 * intermediate_size, -1
@@ -232,12 +242,16 @@ class ModeloptModel(QuantizedModel):
                 )
             gate_up_globals.append(gate_global)
 
-            down_weights.append(pack(unpack(expert.down_proj.weight)))
+            down_weight = expert.down_proj.weight
+            if down_weight.shape[0] % 2 != 0:
+                raise ValueError(f"NVFP4 QMoE packing requires an even N={down_weight.shape[0]} for nibble packing.")
+            down_weights.append(pack_weight(down_weight))
             down_scales.append(scale_bytes(expert.down_proj))
             down_globals.append(expert.down_proj.weight_scale_2.float().reshape(()))
 
         prepared = QuantizedExperts()
         prepared.quant_type = "nvfp4"
+        prepared.weights_prepacked = weights_prepacked
         prepared.block_size = 16
         prepared.scale_dtype = ir.DataType.FLOAT8E4M3FN
         prepared.scales_raw = True
@@ -261,10 +275,8 @@ class ModeloptModel(QuantizedModel):
             la = SimpleNamespace()
             la.in_proj_qkv = self.make_linear_module(f"{prefix}.linear_attn.in_proj_qkv")
             la.in_proj_z = self.make_linear_module(f"{prefix}.linear_attn.in_proj_z")
-            la.in_proj_a = self.make_dense_linear_module(f"{prefix}.linear_attn.in_proj_a")
-            la.in_proj_b = self.make_dense_linear_module(f"{prefix}.linear_attn.in_proj_b")
-            la.in_proj_a.exclude_from_quantization = True
-            la.in_proj_b.exclude_from_quantization = True
+            la.in_proj_a = self.make_gate_module(f"{prefix}.linear_attn.in_proj_a", dense=True)
+            la.in_proj_b = self.make_gate_module(f"{prefix}.linear_attn.in_proj_b", dense=True)
             la.out_proj = self.make_linear_module(f"{prefix}.linear_attn.out_proj")
             la.conv1d = self.make_tensor_module(f"{prefix}.linear_attn.conv1d.weight")
             la.A_log = self.get_tensor(f"{prefix}.linear_attn.A_log")
@@ -289,15 +301,13 @@ class ModeloptModel(QuantizedModel):
 
         mlp = SimpleNamespace()
         if self.get_tensor(f"{prefix}.mlp.gate.weight") is not None:
-            mlp.gate = self.make_tensor_module(f"{prefix}.mlp.gate.weight")
-            mlp.gate.exclude_from_quantization = True
+            mlp.gate = self.make_gate_module(f"{prefix}.mlp.gate")
             shared = SimpleNamespace()
             shared.gate_proj = self.make_linear_module(f"{prefix}.mlp.shared_expert.gate_proj")
             shared.up_proj = self.make_linear_module(f"{prefix}.mlp.shared_expert.up_proj")
             shared.down_proj = self.make_linear_module(f"{prefix}.mlp.shared_expert.down_proj")
             mlp.shared_expert = shared
-            mlp.shared_expert_gate = self.make_tensor_module(f"{prefix}.mlp.shared_expert_gate.weight")
-            mlp.shared_expert_gate.exclude_from_quantization = True
+            mlp.shared_expert_gate = self.make_gate_module(f"{prefix}.mlp.shared_expert_gate")
             mlp.experts = []
             for expert_id in range(self.num_experts):
                 expert_prefix = f"{prefix}.mlp.experts.{expert_id}"
@@ -371,7 +381,83 @@ class ModeloptModel(QuantizedModel):
             if scale.numel() != 1:
                 scale = scale.reshape(-1, 1)
             return (weight.float() * scale).to(torch.bfloat16)
+        if weight.dtype == torch.uint8 and weight.ndim == 3 and weight.shape[-1] == 34:
+            return self.dequantize_q8_0(weight, name)
         return weight
+
+    def unpack_q8_0(self, blocks, name="weight"):
+        """Unpack ggml Q8_0 ``uint8 [N, K/32, 34]`` blocks into MatMulNBits ``(qweight, scales)``."""
+        if blocks.dtype != torch.uint8 or blocks.ndim != 3 or blocks.shape[-1] != 34:
+            raise ValueError(
+                f"Q8_0 tensor '{name}' must be uint8 [N, K/32, 34], "
+                f"got dtype={blocks.dtype} shape={tuple(blocks.shape)}."
+            )
+        scales = blocks[..., :2].contiguous().view(torch.float16).squeeze(-1)
+        qweight = (blocks[..., 2:].contiguous().view(torch.int8).to(torch.int16) + 128).to(torch.uint8)
+        return qweight, scales
+
+    def dequantize_q8_0(self, blocks, name="weight"):
+        """Dequantize ggml Q8_0 ``uint8 [N, K/32, 34]`` blocks to a dense ``[N, K]`` bfloat16 tensor."""
+        qweight, scales = self.unpack_q8_0(blocks, name)
+        weight = (qweight.to(torch.float32) - 128.0) * scales.to(torch.float32).unsqueeze(-1)
+        return weight.reshape(blocks.shape[0], -1).to(torch.bfloat16)
+
+    @classmethod
+    def load_lilicorr_weights(cls, draft_dir, target_dir, dequantize_lm_head=False):
+        """Load and decode a ModelOpt LiLiCorr drafter checkpoint plus the target's embedding and LM head."""
+        loader = cls.__new__(cls)
+        loader.quant_type = "modelopt"
+
+        draft_state = {}
+        for shard in sorted(glob.glob(os.path.join(draft_dir, "*.safetensors"))):
+            with safe_open(shard, framework="pt", device="cpu") as handle:
+                for key in handle.keys():  # noqa: SIM118
+                    draft_state[key] = handle.get_tensor(key)
+        weights = loader.dequantize_state(draft_state)
+        if "fc.weight" not in weights or "lilicorr.token_proj.weight" not in weights:
+            raise ValueError(f"'{draft_dir}' does not look like a LiLiCorr draft checkpoint.")
+
+        embed_candidates = (
+            "language_model.backbone.embeddings.weight",
+            "model.embed_tokens.weight",
+            "model.language_model.embed_tokens.weight",
+        )
+        head_candidates = ("language_model.lm_head.weight", "lm_head.weight")
+        index_path = os.path.join(target_dir, "model.safetensors.index.json")
+        if os.path.exists(index_path):
+            with open(index_path) as f:
+                weight_map = json.load(f)["weight_map"]
+            embed_key = next((key for key in embed_candidates if key in weight_map), None)
+            head_key = next((key for key in head_candidates if key in weight_map), None)
+            if embed_key is None or head_key is None:
+                raise ValueError(f"Could not find embedding and LM head weights in '{target_dir}'.")
+            for key, name in ((embed_key, "embed_tokens.weight"), (head_key, "lm_head.weight")):
+                shard_path = os.path.join(target_dir, weight_map[key])
+                with safe_open(shard_path, framework="pt", device="cpu") as handle:
+                    weights[name] = handle.get_tensor(key)
+        else:
+            for shard in sorted(glob.glob(os.path.join(target_dir, "*.safetensors"))):
+                with safe_open(shard, framework="pt", device="cpu") as handle:
+                    keys = set(handle.keys())
+                    for key in embed_candidates:
+                        if key in keys and "embed_tokens.weight" not in weights:
+                            weights["embed_tokens.weight"] = handle.get_tensor(key)
+                    for key in head_candidates:
+                        if key in keys and "lm_head.weight" not in weights:
+                            weights["lm_head.weight"] = handle.get_tensor(key)
+            if "embed_tokens.weight" not in weights or "lm_head.weight" not in weights:
+                raise ValueError(f"Could not find embedding and LM head weights in '{target_dir}'.")
+
+        lm_head = weights["lm_head.weight"]
+        if lm_head.dtype == torch.uint8 and lm_head.ndim == 3:
+            if dequantize_lm_head:
+                weights["lm_head.weight"] = loader.dequantize_q8_0(lm_head, "lm_head.weight")
+            else:
+                qweight, scales = loader.unpack_q8_0(lm_head, "lm_head.weight")
+                weights["lm_head.qweight"] = qweight
+                weights["lm_head.scales"] = scales
+                del weights["lm_head.weight"]
+        return weights
 
     def dequantize_state(self, state):
         result = {}

@@ -35,6 +35,8 @@ sys.path.insert(0, str(BUILDERS_DIR.parent))
 
 
 def _load_builder_module(module_name):
+    if f"models.builders.{module_name}" in sys.modules:
+        return sys.modules[f"models.builders.{module_name}"]
     spec = importlib.util.spec_from_file_location(f"models.builders.{module_name}", BUILDERS_DIR / f"{module_name}.py")
     module = importlib.util.module_from_spec(spec)
     sys.modules[f"models.builders.{module_name}"] = module
@@ -207,6 +209,7 @@ def test_all_local_layers_keep_the_shared_block_count():
 
 def _make_inputs_model(use_paged_attention, use_ring):
     model = _new_model()
+    model.ep = "cuda"
     model.extra_options = {}
     model.use_paged_attention = use_paged_attention
     model.context_length_attrs["window_kv_cache"] = use_ring
@@ -224,6 +227,7 @@ def _make_inputs_model(use_paged_attention, use_ring):
         "cumulative_sequence_lengths": "cumulative_sequence_lengths",
         "past_sequence_lengths": "past_sequence_lengths",
         "attention_metadata": "attention_metadata",
+        "logits_indices": "logits_indices",
         "past.conv": {},
         "past.recurrent": {},
     }
@@ -232,6 +236,7 @@ def _make_inputs_model(use_paged_attention, use_ring):
         "past_key_values.key": [],
         "past_key_values.value": [],
     }
+    model.input_types = dict.fromkeys(model.input_names)
     return model
 
 
@@ -253,12 +258,14 @@ def test_paged_model_without_a_ring_drops_the_windowed_block_table():
 
 
 def test_webgpu_paged_model_keeps_attention_metadata():
-    model = _make_inputs_model(use_paged_attention=True, use_ring=False)
+    model = _make_inputs_model(use_paged_attention=True, use_ring=True)
     model.ep = "webgpu"
 
     model.make_inputs_init()
 
     assert "attention_metadata" in model.input_names
+    assert "block_table" in model.input_names
+    assert "block_table_windowed" in model.input_names
 
 
 def test_non_paged_model_drops_every_paged_input():
@@ -333,6 +340,7 @@ def _make_attention_model(use_ring, local_layers=(0,)):
         "cumulative_sequence_lengths": "cumulative_sequence_lengths",
         "past_sequence_lengths": "past_sequence_lengths",
         "attention_metadata": "attention_metadata",
+        "logits_indices": "logits_indices",
     }
     model.paged_attention_calls = []
     model.make_paged_attention = lambda name, **kwargs: model.paged_attention_calls.append(kwargs)
@@ -391,6 +399,7 @@ def _write_genai_config(
     use_ring=True,
     has_local_layers=True,
     all_local_layers=False,
+    ep="cuda",
 ):
     hf_config = SimpleNamespace(eos_token_id=[2])
     monkeypatch.setattr(base_module, "GenerationConfig", _NoGenerationConfig)
@@ -398,8 +407,8 @@ def _write_genai_config(
     model = _new_model()
     model.hf_token = None
     model.hf_remote = False
-    model.ep = "cuda"
-    model.ep_attrs = {"cuda": {}}
+    model.ep = ep
+    model.ep_attrs = {ep: {}}
     model.extra_options = dict(extra_options or {})
     model.matmul_attrs = {"weights_prepacked": 0}
     model.attention_attrs = {"paged_block_size": 256}
@@ -458,6 +467,14 @@ def test_genai_config_names_the_windowed_block_table(monkeypatch, tmp_path):
     assert inputs["block_table"] == "block_table"
 
 
+@pytest.mark.parametrize("ep", ["cuda", "webgpu"])
+def test_genai_config_binds_attention_metadata_for_paged_attention(monkeypatch, tmp_path, ep):
+    config = _write_genai_config(monkeypatch, tmp_path, window_size=128, ep=ep)
+
+    inputs = config["model"]["decoder"]["inputs"]
+    assert inputs["attention_metadata"] == "attention_metadata"
+
+
 def test_genai_config_defaults_chunk_size_to_the_block_size(monkeypatch, tmp_path):
     # The ring only holds chunk_size + window_size - 1 positions, so a one-shot prefill would
     # overwrite positions it still had to attend to. Chunking is therefore not optional here.
@@ -470,6 +487,14 @@ def test_genai_config_honours_paged_chunk_size(monkeypatch, tmp_path):
     config = _write_genai_config(monkeypatch, tmp_path, window_size=128, extra_options={"paged_chunk_size": "64"})
 
     assert config["search"]["chunk_size"] == 64
+
+
+def test_genai_config_honours_explicit_block_capacity(monkeypatch, tmp_path):
+    config = _write_genai_config(monkeypatch, tmp_path, window_size=128, extra_options={"num_blocks": "1024"})
+
+    dynamic_batching = config["engine"]["dynamic_batching"]
+    assert dynamic_batching["num_blocks"] == 1024
+    assert "gpu_utilization_factor" not in dynamic_batching
 
 
 def test_genai_config_omits_the_ring_when_it_is_off(monkeypatch, tmp_path):

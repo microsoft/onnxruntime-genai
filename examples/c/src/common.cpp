@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include <cassert>
+#include <stdexcept>
 
 #include "common.h"
 
@@ -175,7 +176,8 @@ bool ParseArgs(
     bool& interactive,
     bool& rewind,
     std::vector<std::string>& image_paths,
-    std::vector<std::string>& audio_paths) {
+    std::vector<std::string>& audio_paths,
+    bool use_model_prompt_default) {
   CLI::App app{"Command-line arguments for ORT GenAI C/C++ examples"};
   argv = app.ensure_utf8(argv);
 
@@ -208,7 +210,8 @@ bool ParseArgs(
 
   app.add_option("--ep_path", ep_path, "Path to execution provider DLL/SO for plug-in providers (ex: onnxruntime_providers_cuda.dll or onnxruntime_providers_tensorrt.dll)");
   app.add_option("--system_prompt", system_prompt, "System prompt to use for the model.");
-  app.add_option("--user_prompt", user_prompt, "User prompt to use for the model.");
+  auto* user_prompt_option = app.add_option("--user_prompt", user_prompt,
+                                            "User prompt. Multimodal examples choose a default for the model type when omitted. Model prompt restrictions apply.");
   app.add_flag("--rewind", rewind, "Rewind to the system prompt after each generation. Defaults to false. Only used in model_chat.");
   app.add_flag_callback(
       "--non_interactive", [&] { interactive = false; }, "Disable interactive mode");
@@ -221,6 +224,14 @@ bool ParseArgs(
   } catch (...) {
     std::cout << app.help() << std::endl;
     return false;
+  }
+  if (use_model_prompt_default && user_prompt_option->count() == 0) {
+    try {
+      user_prompt = GetDefaultUserPrompt(model_path, user_prompt);
+    } catch (const std::exception& e) {
+      std::cerr << "Error selecting the default user prompt: " << e.what() << std::endl;
+      return false;
+    }
   }
   return true;
 }
@@ -252,7 +263,28 @@ void RegisterEP(const std::string& ep, const std::string& ep_path) {
 }
 
 std::unique_ptr<OgaConfig> GetConfig(const std::string& path, const std::string& ep, const std::unordered_map<std::string, std::string>& ep_options, GeneratorParamsArgs& search_options) {
+  if (search_options.max_length && search_options.max_length.value() <= 0) {
+    throw std::invalid_argument("max_length must be greater than 0");
+  }
+  // Match the generator's limits before providers use batch_size * num_beams for model profiles.
+  if (search_options.batch_size < 1 || search_options.batch_size > 32) {
+    throw std::invalid_argument("batch_size (" + std::to_string(search_options.batch_size) + ") must be in [1, 32]");
+  }
+  if (search_options.num_beams < 1 || search_options.num_beams > 32) {
+    throw std::invalid_argument("num_beams (" + std::to_string(search_options.num_beams) + ") must be in [1, 32]");
+  }
   auto config = OgaConfig::Create(path.c_str());
+  if (search_options.max_length) {
+    // Check the model limit before an EP can use max_length during session creation.
+    // OgaConfig does not expose a context_length getter.
+    std::ifstream config_file(std::filesystem::path(path) / "genai_config.json");
+    const auto model_config = nlohmann::ordered_json::parse(config_file);
+    const auto context_length = model_config.at("model").at("context_length").get<int64_t>();
+    if (search_options.max_length.value() > context_length) {
+      throw std::invalid_argument("max_length (" + std::to_string(search_options.max_length.value()) +
+                                  ") cannot be greater than model context_length (" + std::to_string(context_length) + ")");
+    }
+  }
   if (ep.compare("follow_config") != 0) {
     config->ClearProviders();
     if (ep.compare("cpu") != 0) {
@@ -272,7 +304,7 @@ std::unique_ptr<OgaConfig> GetConfig(const std::string& path, const std::string&
 
   // Set any search-specific options that need to be known before constructing a Model object
   // Otherwise they can be set with params.SetSearchOptions(search_options)
-  nlohmann::ordered_json j = search_options;
+  nlohmann::ordered_json j = {{"search", search_options}};
   std::string s = j.dump();
   config->Overlay(s.c_str());
   return config;
@@ -295,6 +327,10 @@ void SetSearchOptions(OgaGeneratorParams& generatorParams, GeneratorParamsArgs& 
   if (args.min_length) {
     generatorParams.SetSearchOption("min_length", args.min_length.value());
     opts.push_back("min_length: " + std::to_string(args.min_length.value()));
+  }
+  if (args.max_length) {
+    generatorParams.SetSearchOption("max_length", args.max_length.value());
+    opts.push_back("max_length: " + std::to_string(args.max_length.value()));
   }
   if (args.num_beams) {
     generatorParams.SetSearchOption("num_beams", args.num_beams);
@@ -347,6 +383,14 @@ std::string ApplyChatTemplate(const std::string& model_path, OgaTokenizer& token
 
   std::string prompt = std::string(tokenizer.ApplyChatTemplate(template_str.c_str(), messages.c_str(), tools.c_str(), add_generation_prompt));
   return prompt;
+}
+
+std::string GetDefaultUserPrompt(const std::string& model_path, const std::string& fallback) {
+  std::ifstream file{std::filesystem::path(model_path) / "genai_config.json"};
+  const auto config = nlohmann::json::parse(file);
+  return config.at("model").value("type", "") == "nemotron_parse"
+             ? "</s><s><predict_bbox><predict_classes><output_markdown>"
+             : fallback;
 }
 
 std::string GetUserPrompt(const std::string& prompt, bool interactive) {

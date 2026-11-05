@@ -1,13 +1,17 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License
 
+import importlib.util
 import json
 import os
+from pathlib import Path
+from types import SimpleNamespace
 
 import onnx
+import pytest
 from onnx import external_data_helper, helper
 
-from models.builders.qwen import Qwen35MoEModel
+from models.builders.qwen import Qwen4ExpModel, Qwen35MoEModel
 
 
 def _make_external_model(path, data_name, tensors):
@@ -47,7 +51,76 @@ def _make_qwen_mtp_model():
     return model
 
 
-def test_add_mtp_to_genai_config(tmp_path):
+@pytest.mark.parametrize(
+    "model_type,head_type",
+    [
+        ("decoder", "decoder"),
+        ("qwen3_5", "qwen3_5_text"),
+        ("qwen3_5_moe", "qwen3_5_moe_text"),
+        ("qwen3_5_text", "qwen3_5_text"),
+        ("qwen4_exp", "qwen4_exp_text"),
+    ],
+)
+def test_mtp_decoder_overlay_excludes_multimodal_companions(tmp_path, model_type, head_type):
+    config = {
+        "model": {
+            "type": model_type,
+            "decoder": {"shared_initializers": []},
+            "mtp": {
+                "filename": "mtp.onnx",
+                "num_hidden_layers": 1,
+                "num_key_value_heads": 2,
+                "head_size": 256,
+                "shared_initializers": [],
+                "inputs": {"input_ids": "input_ids", "hidden_states": "hidden_states"},
+                "outputs": {"logits": "logits", "hidden_states": "hidden_states_out"},
+            },
+        }
+    }
+    (tmp_path / "genai_config.json").write_text(json.dumps(config))
+    example_path = Path(__file__).resolve().parents[3] / "examples/python/qwen-3.6-mtp.py"
+    spec = importlib.util.spec_from_file_location("qwen_mtp_example", example_path)
+    example = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(example)
+
+    overlay = example.mtp_decoder_overlay(tmp_path)["model"]
+
+    assert overlay["type"] == head_type
+    assert overlay["decoder"]["filename"] == "mtp.onnx"
+    assert overlay["decoder"]["layer_types"] == []
+    assert overlay["decoder"]["conv_cache_size"] == 0
+    assert overlay["decoder"]["inputs"] == config["model"]["mtp"]["inputs"]
+    for companion in ("embedding", "vision", "engram"):
+        assert overlay[companion]["filename"] == ""
+
+
+@pytest.mark.parametrize("prefix_caching", [None, False, True])
+def test_add_mtp_to_genai_config(tmp_path, prefix_caching):
+    config_path = tmp_path / "genai_config.json"
+    dynamic_batching = {} if prefix_caching is None else {"prefix_caching": prefix_caching}
+    config_path.write_text(
+        json.dumps(
+            {
+                "model": {"decoder": {}},
+                "engine": {"dynamic_batching": dynamic_batching},
+            }
+        )
+    )
+    model = object.__new__(Qwen35MoEModel)
+    model.decoder = type("Decoder", (), {"num_kv_heads": 2, "head_size": 128})()
+    model.mtp_attrs = {"shared_initializers": []}
+
+    model.add_mtp_to_genai_config(tmp_path)
+
+    config = json.loads(config_path.read_text())
+    assert config["model"]["decoder"]["outputs"]["hidden_states"] == "hidden_states"
+    assert config["model"]["mtp"]["enabled"] is True
+    assert config["model"]["mtp"]["filename"] == "mtp.onnx"
+    expected_prefix_caching = False if prefix_caching is None else prefix_caching
+    assert config["engine"]["dynamic_batching"]["prefix_caching"] is expected_prefix_caching
+
+
+def test_add_mtp_to_static_genai_config(tmp_path):
     config_path = tmp_path / "genai_config.json"
     config_path.write_text(json.dumps({"model": {"decoder": {}}}))
     model = object.__new__(Qwen35MoEModel)
@@ -57,11 +130,47 @@ def test_add_mtp_to_genai_config(tmp_path):
     model.add_mtp_to_genai_config(tmp_path)
 
     config = json.loads(config_path.read_text())
-    assert config["model"]["decoder"]["outputs"]["hidden_states"] == "hidden_states"
+    assert "engine" not in config
     assert config["model"]["mtp"]["filename"] == "mtp.onnx"
 
 
-def test_share_mtp_weights_repacks_data_after_staging_metadata(tmp_path):
+@pytest.mark.parametrize("fpa_intb_gemm", [None, "0", "1"])
+def test_add_qwen4_exp_mtp_to_genai_config(tmp_path, fpa_intb_gemm):
+    config_path = tmp_path / "genai_config.json"
+    expected_session_options = {"session.use_device_allocator_for_initializers": "1"}
+    if fpa_intb_gemm is not None:
+        expected_session_options["ep.cuda.fpa_intb_gemm"] = fpa_intb_gemm
+    decoder_session_options = {
+        **expected_session_options,
+        "log_id": "onnxruntime-genai",
+        "provider_options": [{"cuda": {"enable_cuda_graph": "0"}}],
+        "session.layer_assignment_settings": "cpu(=cpu_embedding)",
+        "session.disable_prepacking": "1",
+        "ep.cuda.qmoe_row_tile_size": "1",
+    }
+    config_path.write_text(json.dumps({"model": {"decoder": {"session_options": decoder_session_options}}}))
+    model = object.__new__(Qwen4ExpModel)
+    model.mtp = type("MTP", (), {"use_paged_attention": False, "prune_lm_head": False})()
+    model.decoder = type(
+        "Decoder",
+        (),
+        {"num_kv_heads": 2, "head_size": 256, "hc_hidden_size": 10240, "ep": "cuda", "use_paged_attention": False},
+    )()
+    model.mtp_attrs = {"shared_initializers": []}
+
+    model.add_mtp_to_genai_config(tmp_path)
+
+    config = json.loads(config_path.read_text())
+    assert "hidden_size" not in config["model"]["mtp"]
+    assert config["model"]["mtp"]["inputs"]["past_indexer_names"] == "past.%d.indexer_key"
+    assert config["model"]["mtp"]["inputs"]["past_sequence_length"] == "past_sequence_length"
+    assert config["model"]["mtp"]["outputs"]["present_indexer_names"] == "present.%d.indexer_key"
+    assert config["model"]["mtp"]["session_options"] == expected_session_options
+    assert config["model"]["decoder"]["session_options"] == decoder_session_options
+
+
+@pytest.mark.parametrize("qwen38", [False, True])
+def test_share_mtp_weights_preserves_private_data_after_staging_metadata(tmp_path, qwen38):
     main_data = b"samecodescalglob"
     mtp_data = b"samecodescalglobkeep"
     (tmp_path / "model.onnx.data").write_bytes(main_data)
@@ -89,16 +198,19 @@ def test_share_mtp_weights_repacks_data_after_staging_metadata(tmp_path):
     )
 
     model_builder = _make_qwen_mtp_model()
+    if qwen38:
+        model_builder = object.__new__(Qwen4ExpModel)
+        model_builder.make_mtp_init(SimpleNamespace(text_config=SimpleNamespace(mtp_num_hidden_layers=1)), {})
     shared_initializers = model_builder.share_initializers(tmp_path, "model.onnx", "mtp.onnx")
 
-    assert (tmp_path / "mtp.onnx.data").read_bytes() == b"keep"
+    assert (tmp_path / "mtp.onnx.data").read_bytes() == mtp_data
     model = onnx.load(tmp_path / "mtp.onnx", load_external_data=False)
     initializers = {tensor.name: tensor for tensor in model.graph.initializer}
-    assert _external_info(initializers["model.embed_tokens.weight"]) == ("model.onnx.data", 0, 4)
-    assert _external_info(initializers["lm_head.MatMul.nvfp4_weight"]) == ("model.onnx.data", 4, 4)
-    assert _external_info(initializers["lm_head.MatMul.nvfp4_weight_scale"]) == ("model.onnx.data", 8, 4)
-    assert _external_info(initializers["lm_head.MatMul.nvfp4_weight_scale_2"]) == ("model.onnx.data", 12, 4)
-    assert _external_info(initializers["mtp.fc.weight"]) == ("mtp.onnx.data", 0, 4)
+    assert _external_info(initializers["model.embed_tokens.weight"]) == ("mtp.onnx.data", 0, 4)
+    assert _external_info(initializers["lm_head.MatMul.nvfp4_weight"]) == ("mtp.onnx.data", 4, 4)
+    assert _external_info(initializers["lm_head.MatMul.nvfp4_weight_scale"]) == ("mtp.onnx.data", 8, 4)
+    assert _external_info(initializers["lm_head.MatMul.nvfp4_weight_scale_2"]) == ("mtp.onnx.data", 12, 4)
+    assert _external_info(initializers["mtp.fc.weight"]) == ("mtp.onnx.data", 16, 4)
     assert shared_initializers == [
         {
             "name": "model.embed_tokens.weight",
@@ -133,6 +245,118 @@ def test_share_mtp_weights_repacks_data_after_staging_metadata(tmp_path):
             "shape": [1],
         },
     ]
+
+
+def test_share_initializers_can_adopt_source_quantization(tmp_path):
+    (tmp_path / "model.onnx.data").write_bytes(b"main")
+    (tmp_path / "dflash2.onnx.data").write_bytes(b"diffkeep")
+    _make_external_model(
+        tmp_path / "model.onnx",
+        "model.onnx.data",
+        [("lm_head.MatMul.weight_Q4", 0, 4)],
+    )
+    _make_external_model(
+        tmp_path / "dflash2.onnx",
+        "dflash2.onnx.data",
+        [("lm_head.MatMul.weight_Q4", 0, 4), ("dflash2.fc.weight", 4, 4)],
+    )
+
+    model_builder = _make_qwen_mtp_model()
+    shared_initializers = model_builder.share_initializers(
+        tmp_path,
+        "model.onnx",
+        "dflash2.onnx",
+        adopt_source_initializers={"lm_head.MatMul.weight_Q4"},
+    )
+
+    assert (tmp_path / "dflash2.onnx.data").read_bytes() == b"mainkeep"
+    model = onnx.load(tmp_path / "dflash2.onnx", load_external_data=False)
+    initializers = {tensor.name: tensor for tensor in model.graph.initializer}
+    assert _external_info(initializers["lm_head.MatMul.weight_Q4"]) == ("dflash2.onnx.data", 0, 4)
+    assert shared_initializers[0]["name"] == "lm_head.MatMul.weight_Q4"
+
+
+def test_excluded_initializer_keeps_its_private_copy(tmp_path):
+    (tmp_path / "model.onnx.data").write_bytes(b"same")
+    (tmp_path / "dflash2.onnx.data").write_bytes(b"same")
+    tensors = [("lm_head.MatMul.weight_Q4", 0, 4)]
+    _make_external_model(tmp_path / "model.onnx", "model.onnx.data", tensors)
+    _make_external_model(tmp_path / "dflash2.onnx", "dflash2.onnx.data", tensors)
+    original_model = (tmp_path / "dflash2.onnx").read_bytes()
+
+    model_builder = _make_qwen_mtp_model()
+    shared_initializers = model_builder.share_initializers(
+        tmp_path,
+        "model.onnx",
+        "dflash2.onnx",
+        excluded_source_initializers={"lm_head.MatMul.weight_Q4"},
+    )
+
+    assert shared_initializers == []
+    assert (tmp_path / "dflash2.onnx").read_bytes() == original_model
+    assert (tmp_path / "dflash2.onnx.data").read_bytes() == b"same"
+
+
+def test_required_adoption_is_transactional_when_one_initializer_is_incompatible(tmp_path):
+    (tmp_path / "model.onnx.data").write_bytes(b"weightscale")
+    (tmp_path / "dflash2.onnx.data").write_bytes(b"draft!bad")
+    tensors = [("lm_head.MatMul.weight_Q4", 0, 6), ("lm_head.MatMul.weight_scales", 6, 5)]
+    _make_external_model(tmp_path / "model.onnx", "model.onnx.data", tensors)
+    _make_external_model(
+        tmp_path / "dflash2.onnx",
+        "dflash2.onnx.data",
+        [("lm_head.MatMul.weight_Q4", 0, 6), ("lm_head.MatMul.weight_scales", 6, 3)],
+    )
+    original_model = (tmp_path / "dflash2.onnx").read_bytes()
+    original_data = (tmp_path / "dflash2.onnx.data").read_bytes()
+    required = {"lm_head.MatMul.weight_Q4", "lm_head.MatMul.weight_scales"}
+
+    model_builder = _make_qwen_mtp_model()
+    shared_initializers = model_builder.share_initializers(
+        tmp_path,
+        "model.onnx",
+        "dflash2.onnx",
+        adopt_source_initializers=required,
+        required_source_initializers=required,
+    )
+
+    assert shared_initializers == []
+    assert (tmp_path / "dflash2.onnx").read_bytes() == original_model
+    assert (tmp_path / "dflash2.onnx.data").read_bytes() == original_data
+    assert not (tmp_path / "dflash2.onnx.tmp").exists()
+    assert not (tmp_path / "dflash2.onnx.data.tmp").exists()
+
+
+def test_required_adoption_rejects_a_truncated_source_range(tmp_path):
+    (tmp_path / "model.onnx.data").write_bytes(b"abc")
+    (tmp_path / "dflash2.onnx.data").write_bytes(b"diff")
+    _make_external_model(
+        tmp_path / "model.onnx",
+        "model.onnx.data",
+        [("lm_head.MatMul.weight_Q4", 0, 4)],
+    )
+    _make_external_model(
+        tmp_path / "dflash2.onnx",
+        "dflash2.onnx.data",
+        [("lm_head.MatMul.weight_Q4", 0, 4)],
+    )
+    original_model = (tmp_path / "dflash2.onnx").read_bytes()
+    required = {"lm_head.MatMul.weight_Q4"}
+
+    model_builder = _make_qwen_mtp_model()
+    shared_initializers = model_builder.share_initializers(
+        tmp_path,
+        "model.onnx",
+        "dflash2.onnx",
+        adopt_source_initializers=required,
+        required_source_initializers=required,
+    )
+
+    assert shared_initializers == []
+    assert (tmp_path / "dflash2.onnx").read_bytes() == original_model
+    assert (tmp_path / "dflash2.onnx.data").read_bytes() == b"diff"
+    assert not (tmp_path / "dflash2.onnx.tmp").exists()
+    assert not (tmp_path / "dflash2.onnx.data.tmp").exists()
 
 
 def test_share_mtp_weights_leaves_originals_on_truncated_data(tmp_path):
