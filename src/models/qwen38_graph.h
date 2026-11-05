@@ -645,6 +645,7 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
     uint8_t* hidden{};
     size_t status_count{};
     uint8_t* auxiliary{};
+    bool warmup_captured{};
   };
   struct RowInputs {  // fixed-address per-row-count inputs of the target
     std::map<std::string, std::unique_ptr<DevTensor>> tensors;
