@@ -1,14 +1,12 @@
 # Refreshing GenAI build images
 
-The base images are produced and promoted by the `onnxruntime_build_scripts`
-repository in the aiinfra Azure DevOps organization, not by this repository.
+The base images are produced and promoted upstream, not by this repository.
 [`base-images.json`](base-images.json) centralizes the consumed repositories,
 immutable digests, provenance tags/builds, and Dockerfile default families.
 Tags are provenance metadata; consumers use `repository@digest`.
 
-The AlmaLinux8 entries come from official producer run
-[1525578](https://dev.azure.com/aiinfra/ONNX%20Runtime/_build/results?buildId=1525578).
-Its source commit is recorded in the manifest. The pins match
+The AlmaLinux8 entries use promoted official images. Producer build and source
+commit provenance are recorded in the manifest. The pins match
 [microsoft/onnxruntime#33777](https://github.com/microsoft/onnxruntime/pull/33777)
 at commit `898786027ebd16e53f3db80d4b8a96f41749b2aa`, but the default map covers
 GenAI's own six Dockerfiles and only the families it consumes:
