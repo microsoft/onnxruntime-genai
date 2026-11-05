@@ -141,12 +141,14 @@ def test_formatted_admission_reclaims_abandoned_media_before_host_preflight(visi
     abandoned, survivor = new_request(engine), new_request(engine)
     value = prompt(tokenizer, 1)
     images = og.Images.open(str(IMAGE_DIR / "cars.jpg"))
-    assert begin(abandoned, value, images, maximum=1) == 1
+    abandoned_turn = begin(abandoned, value, images, maximum=1)
+    assert abandoned_turn == 1
     with pytest.raises(RuntimeError, match="host capacity"):
         begin(survivor, value, images, maximum=1)
     del abandoned
     gc.collect()
-    assert begin(survivor, value, images, maximum=1) == 1
+    survivor_turn = begin(survivor, value, images, maximum=1)
+    assert survivor_turn == 1
     survivor.close()
 
 
@@ -168,7 +170,8 @@ def test_text_only_export_rejects_images_without_consuming_the_turn(vision_packa
     images = og.Images.open(str(IMAGE_DIR / "cars.jpg"))
     with pytest.raises(RuntimeError, match="does not support image inputs"):
         begin(request, prompt(tokenizer, 1), images, maximum=1)
-    assert begin(request, prompt(tokenizer, 0), maximum=1) == 1
+    turn = begin(request, prompt(tokenizer, 0), maximum=1)
+    assert turn == 1
     _, finishes, _ = drain(engine)
     assert len(finishes) == 1
     request.close()
@@ -179,7 +182,8 @@ def test_image_input_lifetime_and_real_draft_activity(vision_model):
     engine, tokenizer = og.Engine(model), og.Tokenizer(model)
     request = new_request(engine)
     images = og.Images.open(str(IMAGE_DIR / "cars.jpg"))
-    assert begin(request, prompt(tokenizer, 1, "What kind of vehicles are shown? Answer briefly."), images) == 1
+    turn = begin(request, prompt(tokenizer, 1, "What kind of vehicles are shown? Answer briefly."), images)
+    assert turn == 1
     del images
     gc.collect()
     tokens, finishes, runs = drain(engine, capacity=64)
@@ -219,7 +223,8 @@ def test_two_image_pressure_prefix_identity_and_rewind(vision_model, tmp_path):
     cached = finishes[0][3]
     assert cached > 0, "The hybrid target must restore actual media-dependent prefix state"
     repeated.rewind_to_start_of_turn(turn)
-    assert begin(repeated, value, og.Images.open(*paths)) > turn
+    replay_turn = begin(repeated, value, og.Images.open(*paths))
+    assert replay_turn > turn
     replayed, _, _ = drain(engine)
     assert replayed == expected
     repeated.close()
@@ -249,7 +254,8 @@ def test_admission_failures_preserve_turn_id_and_preflight_allocations(vision_mo
     oversized = og.Images.open_bytes(bytes(encoded))
     with pytest.raises(RuntimeError, match="media_host_bytes|device media budget"):
         begin(request, value, oversized)
-    assert begin(request, value, og.Images.open(str(IMAGE_DIR / "cars.jpg"))) == 1
+    turn = begin(request, value, og.Images.open(str(IMAGE_DIR / "cars.jpg")))
+    assert turn == 1
     drain(engine)
     request.close()
 
@@ -264,14 +270,16 @@ def test_text_api_continuation_after_media_and_cancellation(vision_model):
         "<|im_end|>\n<|im_start|>user\nWhat is the document type?<|im_end|>\n"
         "<|im_start|>assistant\n<think>\n\n</think>\n\n"
     )
-    assert begin(request, suffix) > first
+    next_turn = begin(request, suffix)
+    assert next_turn > first
     tokens, finishes, _ = drain(engine)
     assert tokens and len(finishes) == 1
     request.close()
 
     canceled = new_request(engine)
     turn = begin(canceled, prompt(tokenizer, 1), og.Images.open(str(IMAGE_DIR / "cars.jpg")))
-    assert canceled.cancel_turn(turn)
+    was_canceled = canceled.cancel_turn(turn)
+    assert was_canceled
     drain(engine)
     canceled.close()
     peer = new_request(engine)
@@ -333,7 +341,8 @@ def test_cancel_after_encoding_and_replay_full_history(vision_model):
             break
     else:
         pytest.fail("The image must be encoded in a preparation-only Run")
-    assert request.cancel_turn(turn)
+    was_canceled = request.cancel_turn(turn)
+    assert was_canceled
     drain(engine)
     request.rewind_to_start_of_turn(turn)
     replay_turn = begin(request, value, og.Images.open(str(IMAGE_DIR / "cars.jpg")), maximum=16)

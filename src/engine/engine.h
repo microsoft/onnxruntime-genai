@@ -294,7 +294,7 @@ struct Engine : std::enable_shared_from_this<Engine>,
                                           std::string_view message,
                                           std::exception_ptr error);
 
-  std::shared_ptr<Model> model_;                 // The model used by the Engine.
+  std::shared_ptr<Model> model_;  // The model used by the Engine.
   std::unique_ptr<MediaStore> media_store_;
   std::shared_ptr<CacheManager> cache_manager_;  // The cache manager for handling cached data.
   std::shared_ptr<PrefixSnapshotCache> snapshot_cache_;
