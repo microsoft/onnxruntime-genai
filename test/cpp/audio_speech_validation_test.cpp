@@ -731,6 +731,12 @@ TEST(AudioSpeechValidationTests, MoonshineSequenceOutputShapeValidation) {
   EXPECT_EQ(Generators::ValidateMoonshineSequenceOutputShape(
                 "frontend", {1, 8, 64}, 512, 64),
             8);
+  EXPECT_EQ(Generators::ValidateMoonshineSequenceOutputShape(
+                "frontend", {1, 0, 64}, 0, 64),
+            0);
+  EXPECT_THROW(Generators::ValidateMoonshineSequenceOutputShape(
+                   "frontend", {8, 64}, 512, 64),
+               std::runtime_error);
   EXPECT_THROW(Generators::ValidateMoonshineSequenceOutputShape(
                    "frontend", {0, 8, 64}, 0, 64),
                std::runtime_error);

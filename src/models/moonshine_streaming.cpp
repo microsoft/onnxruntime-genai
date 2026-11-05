@@ -22,6 +22,15 @@ std::unique_ptr<T> AdoptOutput(T*& slot) {
   slot = nullptr;
   return owned;
 }
+
+std::string ShapeString(std::span<const int64_t> shape) {
+  std::string result{"["};
+  for (size_t i = 0; i < shape.size(); ++i) {
+    if (i > 0) result += ", ";
+    result += std::to_string(shape[i]);
+  }
+  return result + "]";
+}
 }  // namespace
 
 ONNXTensorElementDataType ValidateMoonshineFloatType(std::span<const ONNXTensorElementDataType> types) {
@@ -81,7 +90,8 @@ void ValidateMoonshineCrossKvOutputShape(std::string_view name,
   const auto expected = std::array<int64_t, 5>{layers, 1, heads, frames, head_size};
   if (layers <= 0 || heads <= 0 || frames <= 0 || head_size <= 0 ||
       !std::equal(shape.begin(), shape.end(), expected.begin(), expected.end())) {
-    throw std::runtime_error(std::string{name} + " has an unexpected cross-KV shape");
+    throw std::runtime_error(std::string{name} + " must have shape " + ShapeString(expected) +
+                             ", got " + ShapeString(shape));
   }
 
   size_t expected_count = 1;
