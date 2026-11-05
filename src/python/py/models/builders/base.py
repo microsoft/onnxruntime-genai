@@ -5212,6 +5212,20 @@ class Model:
         original_window_size = self.window_size
         self.window_size = original_window_size if self.is_local(layer_id) else -1
         try:
+            if self.attention_attrs["op_type"] == "MultiHeadAttention":
+                unsupported = []
+                if self.window_size is not None and self.window_size > 0:
+                    unsupported.append("sliding-window attention")
+                if self.attention_attrs["softcap"] != 0.0:
+                    unsupported.append("attention softcapping")
+                if self.attention_attrs["sinks"]:
+                    unsupported.append("attention sinks")
+                if unsupported:
+                    raise ValueError(
+                        "CPU MultiHeadAttention fallback does not support "
+                        + ", ".join(unsupported)
+                        + "; use a supported head size or execution provider"
+                    )
             self.make_attention_input_proj(layer_id, attention, root_input, **kwargs)
             self.make_attention_qk_subgraph(layer_id, attention, root_input, **kwargs)
             self.make_attention_output_proj(layer_id, attention, root_input, **kwargs)
@@ -7147,8 +7161,15 @@ class Model:
         self.mask_attrs["mask_name"] = tile_name
 
     def make_past_key_subgraph(self, basename):
+        cache_names = self.input_names.get("past_key_values.key", {})
+        if isinstance(cache_names, dict):
+            cache_name = next(iter(cache_names.values()), "")
+        else:
+            cache_name = cache_names
+        if not cache_name:
+            raise ValueError("MHA mask reformatting requires an attention-layer KV cache input")
         shape_name = f"{basename}/Shape"
-        self.make_shape(shape_name, "past_key_values.0.key", shape=[4])
+        self.make_shape(shape_name, cache_name, shape=[4])
         gather_name = f"{basename}/Gather"
         gather_inputs = [f"{shape_name}/output_0", "/model/constants/INT64/2"]
         self.make_gather(gather_name, gather_inputs, dtype=ir.DataType.INT64, shape=[], axis=0)
