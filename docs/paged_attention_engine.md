@@ -1074,7 +1074,7 @@ If at least one request fits, the step is executable even when other requests we
 
 After cache planning selects the batch, every selected request keeps its one-token contribution and
 decode rows add their drafts. The remaining tokens go to chunk work (prefill chunks and decode rows
-with unread guidance fast-forward tokens) in plan order, so prompts finish in the order they came.
+with unread guidance fast-forward tokens) in plan order, so earlier prompts finish prefill first.
 In a step with a fast-forward catch-up row, the row that has waited longest for spare tokens goes
 first instead: starting a turn counts as service, so new prompts queue behind waiting ones, and only
 the first row served and rows that read their whole chunk count as served; a row cut short keeps
@@ -2341,7 +2341,7 @@ The current ordering policy is:
    fast-forward catch-up row, prefills and catch-up rows share them instead, the one that has
    waited longest since its turn started or it was last served first.
 
-Requests skipped because of token, row, or temporary cache capacity remain pending for a later step. Selection does not rotate or promote waiting prefills, so sustained decode demand can keep a prefill from being selected. Without fast-forward, a selected prompt reads one token per step until earlier prompts finish, which frees their cache blocks early. Beside a catch-up row, a chunk-work row is served before every row that was served or started a turn after it last was, so neither new prompts nor fast-forward work can keep it waiting.
+Requests skipped because of token, row, or temporary cache capacity remain pending for a later step. Selection does not rotate or promote waiting prefills, so sustained decode demand can keep a prefill from being selected. In a step without a catch-up row, prompts take spare tokens in selection order: each reads one token per step until the prompts selected before it finish their prefill, so earlier prompts reach their first token sooner. Beside a catch-up row, a chunk-work row is served before every row that was served or started a turn after it last was, so neither new prompts nor fast-forward work can keep it waiting.
 
 If no request can run because of temporary capacity, `RunDynamic()` reports `CapacityDeferred` instead of returning `nullptr`. Returning `nullptr` would incorrectly tell the caller that no work remains.
 

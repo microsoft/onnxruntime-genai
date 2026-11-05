@@ -2712,9 +2712,9 @@ TEST_F(EngineRunTest, MixedRunRollbackPreservesProgressAndCacheResidents) {
   EXPECT_EQ(engine.cache->AllocatedCount(), 2u);
 }
 
-// Without fast-forward, prompts take spare tokens in arrival order: each finishes its prefill
-// before the next reads more than its one token, so a burst of long prompts frees cache blocks as
-// early as possible instead of every prompt holding its blocks until all of them finish together.
+// Without a fast-forward catch-up row, prompts take spare tokens in arrival order: each reads one
+// token per step until the prompts before it finish their prefill, so earlier prompts reach their
+// first token sooner instead of every prompt finishing its prefill together at the end.
 TEST_F(EngineRunTest, PromptsTakeSpareTokensInArrivalOrder) {
   model_->config_->engine.dynamic_batching->max_scheduled_tokens = 8;
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);

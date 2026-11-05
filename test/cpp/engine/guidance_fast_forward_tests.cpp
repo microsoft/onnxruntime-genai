@@ -293,8 +293,9 @@ TEST_F(GuidanceFastForwardTest, RolledBackStepDoesNotChangeWhoGetsSpareTokens) {
   EXPECT_EQ(reads, (std::vector<std::vector<size_t>>{{5, 1}, {1, 5}, {1, 5}}));
 }
 
-// Fast-forward turns arriving every step cannot keep a long prompt from spare tokens: arrivals
-// queue behind it, and catch-up rows that waited longer take one turn each before it goes again.
+// Fast-forward turns arriving every step cannot keep a long prompt from spare tokens: it waits at
+// most one turn for each forcing turn with an older stamp, including one admitted in the step the
+// prompt was last served.
 TEST_F(GuidanceFastForwardTest, SustainedFastForwardArrivalsCannotKeepAPromptWaiting) {
   model_->config_->engine.dynamic_batching->max_scheduled_tokens = 10;
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
@@ -305,7 +306,7 @@ TEST_F(GuidanceFastForwardTest, SustainedFastForwardArrivalsCannotKeepAPromptWai
   size_t catch_up_steps = 0;
   engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
     for (const auto& entry : context.plan->requests) {
-      catch_up_steps += entry.ReadsSeveralCommittedTokens();
+      catch_up_steps += !entry.is_prefill && entry.ReadsSeveralCommittedTokens();
       if (entry.request_id != prompt.get())
         continue;
       const auto& request = *entry.request;
@@ -326,8 +327,74 @@ TEST_F(GuidanceFastForwardTest, SustainedFastForwardArrivalsCannotKeepAPromptWai
   ASSERT_FALSE(prompt->IsPrefill());
   ASSERT_GT(catch_up_steps, 0u);
   // Each step's spare tokens fill one catch-up row's share, so the prompt waits at most one turn
-  // for each other forcing turn.
-  EXPECT_LE(max_passed_over, forcing.size() - 1);
+  // for each forcing turn.
+  EXPECT_LE(max_passed_over, forcing.size());
+}
+
+// A forcing turn whose every sampled token forces three more: a catch-up row in every step, so
+// every step orders chunk work by waiting time.
+std::shared_ptr<Request> AlwaysCatchingUpRequest(DoublesEngine& engine) {
+  auto forcing = CreateRequestWithPrompt(engine.engine, Prompt(), Limit(400));
+  InstallForcingGrammar(*forcing, /*trigger=*/11, {12, 13, 14});
+  std::array<EngineEvent, 16> storage;
+  EXPECT_EQ(engine.engine->Run(storage), 4u);
+  return forcing;
+}
+
+// The prompt among `prompts` that read more than one token in the step, or none.
+std::optional<size_t> Leader(const ExecutionContext& context,
+                             const std::vector<std::shared_ptr<Request>>& prompts) {
+  for (const auto& entry : context.plan->requests) {
+    const auto row = std::ranges::find(prompts, entry.request_id, &std::shared_ptr<Request>::get);
+    if (row != prompts.end() && entry.unprocessed_token_count > 1)
+      return static_cast<size_t>(row - prompts.begin());
+  }
+  return std::nullopt;
+}
+
+// Beside a catch-up row, a newly admitted prompt counts as just served, so it queues behind a
+// prompt already waiting: of prompts {first, waiting, arrival}, the arrival leads only after the
+// waiting prompt has.
+TEST_F(GuidanceFastForwardTest, NewArrivalQueuesBehindAWaitingPrompt) {
+  model_->config_->engine.dynamic_batching->max_scheduled_tokens = 8;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
+  auto forcing = AlwaysCatchingUpRequest(engine);
+  std::vector<std::shared_ptr<Request>> prompts{CreateRequestWithPrompt(engine.engine, LongPrompt(20)),
+                                                CreateRequestWithPrompt(engine.engine, LongPrompt(20))};
+  std::vector<std::optional<size_t>> leaders;
+  engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
+    leaders.push_back(Leader(context, prompts));
+  });
+  std::array<EngineEvent, 16> storage;
+  engine.engine->Run(storage);
+  prompts.push_back(CreateRequestWithPrompt(engine.engine, LongPrompt(20)));
+  for (int step = 0; step < 4; ++step)
+    engine.engine->Run(storage);
+  EXPECT_EQ(leaders, (std::vector<std::optional<size_t>>{0, 0, 1, 2, 2}));
+}
+
+// Beside a catch-up row, a resident request starting a new turn queues behind a prompt already
+// waiting, like an arrival: of {resident, served, waiting}, the new turn leads only after the
+// waiting prompt has, and its turn-start stamp keeps it ahead of the prompt served since.
+TEST_F(GuidanceFastForwardTest, ContinuationTurnQueuesBehindAWaitingPrompt) {
+  model_->config_->engine.dynamic_batching->max_scheduled_tokens = 8;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
+  auto resident = CreateRequestWithPrompt(engine.engine, Prompt(), Limit(1));
+  std::array<EngineEvent, 16> storage;
+  engine.engine->Run(storage);
+  ASSERT_EQ(resident->Status(), RequestStatus::TurnComplete);
+  auto forcing = AlwaysCatchingUpRequest(engine);
+  std::vector<std::shared_ptr<Request>> prompts{resident, CreateRequestWithPrompt(engine.engine, LongPrompt(20)),
+                                                CreateRequestWithPrompt(engine.engine, LongPrompt(20))};
+  std::vector<std::optional<size_t>> leaders;
+  engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
+    leaders.push_back(Leader(context, prompts));
+  });
+  engine.engine->Run(storage);
+  resident->BeginTurn(LongPrompt(20));
+  for (int step = 0; step < 4; ++step)
+    engine.engine->Run(storage);
+  EXPECT_EQ(leaders, (std::vector<std::optional<size_t>>{1, 1, 2, 0, 0}));
 }
 
 // While a peer verifies drafts, the row reads one unread token per step, so the peer keeps them;
