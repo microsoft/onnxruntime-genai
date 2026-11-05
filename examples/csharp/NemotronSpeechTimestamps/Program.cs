@@ -43,7 +43,7 @@ if (useVadOverride == "true") {
 
 using var generatorParams = new GeneratorParams(model);
 using var generator = new Generator(model, generatorParams);
-using var postprocessor = new TokenPostProcessor(generator);
+using var postprocessor = new ASRPostProcessor(generator);
 var timestampedTranscript = new StringBuilder();
 
 for (int offset = 0; offset < audio.Length; offset += chunkSize) {
@@ -66,7 +66,7 @@ while (true) {
 }
 
 postprocessor.FinalizeProcessing();
-foreach (var result in postprocessor.GetNextTokenResults())
+foreach (var result in postprocessor.GetNextResults())
   AppendSegments(result, timestampedTranscript);
 
 Console.WriteLine();
@@ -74,25 +74,25 @@ Console.WriteLine(new string('=', 60));
 Console.WriteLine(timestampedTranscript.ToString());
 Console.WriteLine(new string('=', 60));
 
-static void DecodeSegments(Generator generator, TokenPostProcessor postprocessor,
+static void DecodeSegments(Generator generator, ASRPostProcessor postprocessor,
                            StringBuilder timestampedTranscript) {
   while (!generator.IsDone()) {
     generator.GenerateNextToken();
-    postprocessor.ProcessNextTokens();
-    foreach (var result in postprocessor.GetNextTokenResults()) {
+    postprocessor.ProcessNext();
+    foreach (var result in postprocessor.GetNextResults()) {
       AppendSegments(result, timestampedTranscript);
     }
   }
 }
 
-static void AppendSegments(TokenPostProcessorResult result, StringBuilder timestampedTranscript) {
-  var timestamps = result.GetTimestamps();
+static void AppendSegments(ASRPostProcessorResult result, StringBuilder timestampedTranscript) {
+  var timestamps = result.TimestampResult;
   if (timestamps == null) return;
-  foreach (var segment in timestamps.GetSegments()) {
-    string text = segment.GetText();
+  foreach (var segment in timestamps.Segments) {
+    string text = segment.Text;
     string separator = text.Length > 0 && char.IsWhiteSpace(text[0]) ? "" : " ";
-    string prefix = segment.HasTimestamp() ? $"[{segment.GetStartTime():F2} - {segment.GetStopTime():F2}]" : "";
-    if (segment.GetSpeakerLabel() is string speaker) prefix += $"[{speaker}]";
+    string prefix = segment.TimeInterval is { } interval ? $"[{interval.Start:F2} - {interval.Stop:F2}]" : "";
+    if (segment.SpeakerLabel is string speaker) prefix += $"[{speaker}]";
     string timestampedSegment = $"{prefix}{separator}{text}";
     timestampedTranscript.Append(timestampedSegment);
     Console.Write(timestampedSegment);

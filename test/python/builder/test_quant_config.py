@@ -277,12 +277,34 @@ def test_structured_op_types_accepts_supported_arrays(op_types):
 
 def test_extra_options_accepts_legacy_integer_strings():
     config = QuantConfig.from_extra_options(
-        {"accuracy_level": "4", "qmoe_weights_prepacked": "-1", "matmulnbits_weights_prepacked": "2"},
+        {"accuracy_level": "4"},
         precision="int4",
     )
     assert config.weights.accuracy_level == 4
     assert config.moe.weights_prepacked == -1
-    assert config.runtime.matmulnbits_weights_prepacked == 2
+    assert config.runtime.matmulnbits_weights_prepacked == 0
+
+
+@pytest.mark.parametrize("provider", ["cuda", "cpu", "webgpu", "dml", "trt-rtx"])
+def test_weight_packing_defaults_are_host_independent(provider):
+    config = QuantConfig.from_extra_options({}, precision="int4", execution_provider=provider)
+
+    assert config.moe.weights_prepacked == -1
+    assert config.runtime.matmulnbits_weights_prepacked == 0
+
+
+@pytest.mark.parametrize("option", ["qmoe_weights_prepacked", "matmulnbits_weights_prepacked"])
+@pytest.mark.parametrize("value", [0, 1, 2, "0", "1", "2"])
+def test_weight_packing_extra_options_are_preserved(option, value):
+    if option == "qmoe_weights_prepacked" and int(value) == 2:
+        with pytest.raises(ValueError, match="weights_prepacked"):
+            QuantConfig.from_extra_options({option: value})
+    else:
+        config = QuantConfig.from_extra_options({option: value})
+        actual = (
+            config.moe.weights_prepacked if option.startswith("qmoe") else config.runtime.matmulnbits_weights_prepacked
+        )
+        assert actual == int(value)
 
 
 # ---------------------------------------------------------------------------
@@ -460,18 +482,16 @@ def test_extra_options_int8_precision_defaults_moe_to_int8():
     assert QuantConfig.from_extra_options({"moe_quant_type": "int4"}, precision="int8").moe.type == "int4"
 
 
-def test_extra_options_runtime_and_prepack_knobs():
+def test_extra_options_qdq_and_block_size_preserve_provider_packing():
     cfg = QuantConfig.from_extra_options(
         {
             "use_qdq": True,
-            "matmulnbits_weights_prepacked": 2,
-            "qmoe_weights_prepacked": 1,
             "qmoe_block_size": 64,
         },
         precision="int4",
         execution_provider="cuda",
     )
     assert cfg.runtime.use_qdq is True
-    assert cfg.runtime.matmulnbits_weights_prepacked == 2
-    assert cfg.moe.weights_prepacked == 1
+    assert cfg.runtime.matmulnbits_weights_prepacked == 0
+    assert cfg.moe.weights_prepacked == -1
     assert cfg.moe.block_size == 64

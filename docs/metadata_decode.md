@@ -1,101 +1,120 @@
-# Token Post-Processing
+# ASR Post-Processing
+
+Native postprocessors and their timestamp/word-grouping helpers live in
+[`src/models/postprocessing/`](../src/models/postprocessing/), separate from
+input preprocessing in
+[`src/models/preprocessing/`](../src/models/preprocessing/).
+
+`PostProcessor` is the native base class for generator-facing postprocessors. It
+holds the borrowed generator reference shared by output-specific wrappers and
+declares virtual `ProcessNext()`, `Finalize()`, and `Reset()` methods.
+`ProcessNext()` advances the concrete processor using the generator's current
+output without returning a result. The base has no result getter or shared
+result contract.
+
+`ASRPostProcessor(generator)` derives from that base. It retrieves token and
+optional timing views from the generator and delegates to its private
+`ProcessNext(const TokenOutputs& outputs)` overload. That overload processes
+the supplied views without reading the generator. The processor directly owns
+a tokenizer, an ordinary tokenizer stream,
+`MetadataCoreState`, grouping/timing state, and the current results. Configuration
+comes from the generator's model and its `genai_config.json`. Callers do not pass a
+model or create token metadata records.
+
+Callers explicitly select `ASRPostProcessor` to obtain incremental text and
+optional speech timestamps. Its non-virtual `GetNextResults()` returns
+ASR-specific `ASRPostProcessorResult` values; other subclasses can expose their
+own result types. This processor also supports untimed text when timestamps
+are disabled.
 
 ## Speaker attribution
 
-One generator owns both ASR and diarization inference. Its private `GetTokenOutputs()`
-returns sequential token IDs, required acoustic intervals, and optional cumulative
-speaker-probability boundary sums/counts from the same generation step. The speaker
-payload is internal: no public generator-output getter or token-metadata DTO is exposed.
-ASR encoding and diarization run once per retained central audio chunk, not once per
-emitted token. Even zero-token chunks advance diarization caches and probability sums.
+The same generator runs ASR and optional Nemotron diarization for each retained
+central audio chunk. Its private `GetTokenOutputs()` includes optional cumulative
+speaker-probability boundary evidence alongside token IDs and acoustic frame pairs.
+With diarization disabled, the evidence is `std::nullopt`, the generator never asks
+for it, and no diarization session, preprocessing, aggregation, or speaker buffering runs.
 
-`TokenPostProcessor.ProcessNextTokens()` validates each interval and speaker snapshot
-before ordinary decoding, fetches Extensions lexical facts when either speech feature
-needs grouping, and writes directly into its canonical `PostProcessorResult`.
-Its existing `MetadataCoreState` owns grouping, pending intervals/evidence, word
-speaker attribution, and unfinished turns. `TokenDiarization` supplies stateless
-validation and probability-mean/argmax helpers in GenAI; Extensions owns no speech
-metadata accumulation, grouping, aggregation, or segment construction.
+`ASRPostProcessor.ProcessNext()` handles evidence through the same private overload,
+word grouper, and `MetadataCoreState` as timestamps. The first and last contributing
+token boundaries define each word's probability window; `TokenDiarization` validates
+stream-wide monotonic evidence and computes the speaker from per-channel means.
+Zero-token chunks still advance the inference cache and cumulative probabilities.
+All grouping, alignment, aggregation, and turn assembly live in GenAI's
+`models/postprocessing/`; Extensions only provides lexical facts and ordinary decoding.
 
-Speaker snapshots must be finite and non-negative, with valid evaluated-frame counts
-and stream-wide nondecreasing sums/counts. The last accepted snapshot remains separate
-from pending words, survives finalization, and clears on processor reset. Equal
-snapshots are allowed for tokens sharing a frame. Word labels are computed only when
-the word completes, using its own first/last contributing token boundaries.
+`TimestampRecord` uses optional paired frame/time intervals and an optional speaker
+label. The borrowed `TimestampResult` / `timestamp_result` is present when either
+timestamps or diarization is enabled. Timestamp modes remain `off`, `word`, and
+`segment`; `all` is not supported on this feature branch.
 
-The same `TimestampRecord` has optional timing components and an optional speaker
-label. `GetTimestamps()` is non-null when either timestamps or diarization are enabled.
-With timestamps off and diarization on, it contains speaker-turn segments with no
-times. `word` returns labeled words; `segment` returns labeled speaker turns.
-Turns split only on speaker changes or finalization, not punctuation or silence gaps.
-Timestamp-only segmentation keeps the configured punctuation/gap rules.
+| Timestamps | Diarization output |
+| --- | --- |
+| `off` | Speaker-turn segments with absent frame/time pairs |
+| `word` | Timed words, each with a speaker label |
+| `segment` | Timed speaker-turn segments |
 
-Native C/C++ callers check `HasTimestamp()` before scalar timing accessors, whose
-absent value is zero. Python/C# timing getters return `None`/null when absent.
-`GetSpeakerLabel()` / `get_speaker_label()` returns null/`None` without diarization.
-These accessors use the existing borrowed handles and stale-result guards; no copied
-result hierarchy or V2 API is introduced.
+With diarization enabled, turns split only on speaker changes or finalization,
+not punctuation or configured gaps. Timestamp-only segmentation is unchanged.
+C/C++ callers check `HasTimestamp()` before reading timing pairs/scalars; absent
+native scalar values return zero. Python `frame_interval` / `time_interval` and C#
+`FrameInterval` / `TimeInterval` are nullable pairs. Speaker labels use
+`GetSpeakerLabel()`, `speaker_label`, and `SpeakerLabel`, respectively. All new
+properties retain the existing stale-result checks.
 
-Flush buffered audio and run all remaining inference before the single postprocessor
-finalization. Processor reset clears decoding and post-processing, not the generator
-or either inference cache. Recreate/reset recording inference state separately.
-If either model fails, generation fails rather than publishing incomplete combined
-outputs; do not blindly retry after one branch may have advanced state.
-
-`TokenPostProcessor(generator)` derives from `PostProcessor`, which holds the
-borrowed generator reference and the virtual `Finalize()` / `Reset()` interface.
-The token-specific wrapper calls `generator_.GetTokenOutputs()` and delegates to
-its private `TokenPostProcessorInternal`. That internal processor owns the tokenizer,
-ordinary tokenizer stream, immutable configuration, `MetadataCoreState`, and current
-results. It accepts borrowed token, acoustic interval, and speaker evidence spans,
-not a generator. Configuration comes from the model's `genai_config.json`.
-Callers do not create or pass token metadata records.
-
-`TokenOutputs` holds direct optional spans: when diarization is disabled,
-its speaker evidence is `std::nullopt`, `GetSpeakerEvidence()` returns null, and
-the generator does not request speaker evidence from the model state. No
-diarization session, feature extraction, aggregation, or speaker buffering runs.
-Acoustic intervals are still required with diarization on and timestamps off,
-but no public timing fields are populated in that configuration.
+Flush all audio and generate the remaining tokens before finalizing the processor.
+Reset clears decoding, grouping, evidence validation, turns, and current results;
+it does not reset the generator or either model's inference cache. If either model
+fails, generation fails rather than publishing an incomplete combined result.
 
 ## Processing Loop
 
-Create the generator and processor from the same model, after configuring the
-model's timestamp level. The generator must outlive the processor. Only
+Configure the model's timestamp level before creating the generator, then create
+the processor from that generator alone. The generator retains its native model,
+which supplies the processor configuration and tokenizer; no public model getter
+or separate model ownership is required. The generator must outlive the processor. Only
 `batch_size=1` and `num_beams=1` are supported; other values are rejected.
 
 ```cpp
-auto postprocessor = OgaTokenPostProcessor::Create(*generator);
+auto postprocessor = OgaASRPostProcessor::Create(*generator);
 while (!generator->IsDone()) {
   generator->GenerateNextToken();
-  postprocessor->ProcessNextTokens();
-  for (const auto* result : postprocessor->GetNextTokenResults()) {
+  postprocessor->ProcessNext();
+  for (const auto* result : postprocessor->GetNextResults()) {
     ProcessText(result->GetText());
-    if (const auto* timestamps = result->GetTimestamps()) {
-      for (size_t index = 0; index < timestamps->GetWordCount(); ++index)
-        ProcessWord(timestamps->GetWord(index));
-      for (size_t index = 0; index < timestamps->GetSegmentCount(); ++index)
-        ProcessSegment(timestamps->GetSegment(index));
+    if (const auto* timestamps = result->GetTimestampResult()) {
+      for (size_t index = 0; index < timestamps->GetWordCount(); ++index) {
+        const auto* word = timestamps->GetTimestampRecord(OgaTimestampRecordKind_Words, index);
+        ProcessWord(word->GetText(), word->GetFrameInterval(), word->GetTimestampInterval());
+      }
+      for (size_t index = 0; index < timestamps->GetSegmentCount(); ++index) {
+        const auto* segment = timestamps->GetTimestampRecord(OgaTimestampRecordKind_Segments, index);
+        ProcessSegment(segment->GetText(), segment->GetFrameInterval(), segment->GetTimestampInterval());
+      }
     }
   }
 }
 postprocessor->Finalize();
-for (const auto* result : postprocessor->GetNextTokenResults()) {
-  if (const auto* timestamps = result->GetTimestamps()) {
-    for (size_t index = 0; index < timestamps->GetWordCount(); ++index)
-      ProcessWord(timestamps->GetWord(index));
-    for (size_t index = 0; index < timestamps->GetSegmentCount(); ++index)
-      ProcessSegment(timestamps->GetSegment(index));
+for (const auto* result : postprocessor->GetNextResults()) {
+  if (const auto* timestamps = result->GetTimestampResult()) {
+    for (size_t index = 0; index < timestamps->GetWordCount(); ++index) {
+      const auto* word = timestamps->GetTimestampRecord(OgaTimestampRecordKind_Words, index);
+      ProcessWord(word->GetText(), word->GetFrameInterval(), word->GetTimestampInterval());
+    }
+    for (size_t index = 0; index < timestamps->GetSegmentCount(); ++index) {
+      const auto* segment = timestamps->GetTimestampRecord(OgaTimestampRecordKind_Segments, index);
+      ProcessSegment(segment->GetText(), segment->GetFrameInterval(), segment->GetTimestampInterval());
+    }
   }
 }
 ```
 
-`ProcessNextTokens()` consumes all emissions from the current generation step in
+`ProcessNext()` consumes all emissions from the current generation step in
 order. A step can emit zero tokens or multiple sequential tokens. Call it once
 after each generation step, before advancing the generator again. There is no
 generation-step counter or duplicate-processing detection.
 
-`GetNextTokenResults()` only reads the latest results. Repeated reads do not
+`GetNextResults()` only reads the latest results. Repeated reads do not
 decode, flush, or otherwise change state. Results are per-call events, not
 cumulative history; retain any history the application needs. Incremental text
 and completed words/segments are alternative transcript representations: do not
@@ -109,47 +128,68 @@ configuration for a fresh sequence. It does not reset the generator.
 
 ## Internal Flow
 
-The following native method flow starts after `Generator::GenerateNextToken()`
-has produced a step's token IDs and acoustic intervals. It shows timestamps
-enabled; the processor handles every emission in order, including empty decoded
-fragments. The language bindings forward processing to this same native path.
+The following native method flow starts after generation. It shows timestamps
+enabled; the private overload handles the supplied tokens in order, including empty
+decoded fragments. The language bindings forward processing to this same native path.
 
-```mermaid
-flowchart TD
-  process["TokenPostProcessor::ProcessNextTokens()"] --> clear["Clear previous results"]
-  clear --> outputs["Generator::GetTokenOutputs() - private"]
-  outputs --> tokens["TransducerState::GetStepTokens()"]
-  tokens --> config["Check generator model timestamp_level != Off"]
-  config --> intervals["TransducerState::GetStepTokenIntervals()<br/>Validate interval count equals token count"]
-  intervals --> set["TokenOutputs::SetTimestamps()"]
-  set --> access["TokenOutputs::GetTokens() / GetTimestamps()"]
-  access --> each{"Another emitted token?"}
-  each -->|Yes| validate["MetadataCoreState::ValidateInput()<br/>TimestampsEnabled(): require 0 <= start < stop"]
-  validate --> enabled["MetadataCoreState::TimestampsEnabled()"]
-  enabled --> facts["Tokenizer::GetWordPieceInfo(token_id)"]
-  facts --> lookup["Extensions: OrtxGetTokenWordPieceInfo()"]
-  lookup --> decode["TokenizerStream::Decode(token_id)"]
-  decode --> cache["Extensions: OrtxDetokenizeCached()"]
-  cache --> result["Create processor-owned result<br/>Store exact decoded text"]
-  result --> metadata["MetadataCoreState::ProcessDecoded(token, piece, result)<br/>Detailed flow below"]
-  metadata --> each
-  each -->|No| done["ProcessNextTokens() returns"]
-  done -.->|Caller reads| read["TokenPostProcessor::GetNextTokenResults()<br/>GetText() / nullable GetTimestamps()"]
+```text
+ASRPostProcessor.ProcessNext()
+  -> Generator.GetTokenOutputs(): view existing output without advancing generation
+      -> transducer: GetStepTokens() and optional GetStepTokenIntervals()
+          -> validate token/interval counts
+      -> search: GetNextTokens().CopyDeviceToCpu()
+  -> ASRPostProcessor.ProcessNext(outputs): private overload
+      -> clear previous processing results
+      -> TokenOutputs.GetTokens() / GetAcousticFrameIntervals()
+      -> validate token/interval counts
+      -> for each emission, in order:
+          -> MetadataCoreState.ValidateInput(token)
+          -> if timestamps enabled: Tokenizer.GetWordPieceInfo(token_id)
+              -> OrtxGetTokenWordPieceInfo(...)
+          -> TokenizerStream.Decode(token_id)
+              -> OrtxDetokenizeCached(...)
+          -> store exact decoded text in a result
+          -> MetadataCoreState.ProcessDecoded(token, lexical facts, result)
+  -> return to application
+
+ASRPostProcessor.GetNextResults()
+  -> read the processor's current results without mutation
+  -> GetText() / nullable GetTimestampResult()
 ```
 
-The private generator getter views existing token and interval storage without
-advancing generation. It is accessible only to the native processor, not through
-the public C, C++, C#, or Python generator APIs. `GenerateNextToken()` is unchanged.
-`TokenOutputs` hides its storage behind accessors. It supplies acoustic intervals
-when timestamps or diarization are enabled, and speaker evidence only for diarization.
-Fully disabled acoustic metadata is null. The getter selects optional output from
-the generator model's configuration directly. The transducer's cached
-timestamp flag controls interval production only; it does not select the getter's
-output fields. A token/interval count mismatch fails before per-token decoding.
+The private generator getter borrows existing transducer token and interval storage,
+or reads the existing search-selected token buffer. It does not change generation
+or token selection. Nemotron continues to supply zero or one token per step, without
+copying its token or interval buffers. Optional timing is selected from the model's
+timestamp configuration. `GenerateNextToken()` and the decoding strategies are
+unchanged.
+
+The private getter returns an internal `TokenOutputs` with inline private spans,
+not a heap-allocated PImpl. Token IDs and optional timing are separate collections;
+`GetAcousticFrameIntervals()` returns null when timing is absent. The spans borrow their
+producer's storage and must remain valid for `ProcessNext(outputs)`. Native timing uses
+`std::pair<int64_t, int64_t>` and `std::optional`, not a public C interval layout or
+an integer presence flag. Timestamp records store frame bounds as an integer pair
+and rounded second bounds as a `std::pair<double, double>`. The first element is
+the start and the second is the exclusive stop. Public C declarations and result
+handles remain field-based and opaque.
+
+### Batch and Offline Input
+
+The private `ProcessNext(outputs)` overload consumes only the supplied token/timing
+views and the processor's tokenizer and copied configuration; it does not query
+the generator or model state. It can process one token, a batch, or all supplied
+tokens, followed by `Finalize()` to flush trailing records. Batch and incremental
+processing preserve the same text and timestamps for identical ordered inputs.
+
+This does not add a public offline factory or another producer API. The public
+wrapper remains `ASRPostProcessor(generator)`. A different offline producer
+would need an adapter and must supply timing to obtain timestamps. Stateful
+grouping does not imply an online-only input source.
 
 Extensions owns vocabulary-specific facts: `is_special`, `starts_word`,
 `ends_word`, and `boundary_style`. Its standalone lookup is independent of decoder
-history and runs before ordinary decoding when timestamps or diarization require word grouping. It neither groups words nor owns
+history and runs before ordinary decoding only when timestamps are enabled. It neither groups words nor owns
 timestamp state. The tokenizer and stream have no timestamp configuration or
 special metadata decode mode.
 
@@ -177,15 +217,15 @@ flowchart TD
   completed --> words["TokenWordGroupingState::CompletedWords()"]
   words --> align["For each completed word:<br/>validate token span; take first.start and last.stop"]
   align --> publish["MetadataCoreState::PublishWord(text, interval, timestamps)"]
-  publish -->|word| word["AddRecord(timestamps.words)<br/>RoundTimestamp(start and stop seconds)"]
-  publish -->|segment| gap["Check gap against pending segment"]
+  publish -->|word or all| word["AddRecord(timestamps.words)<br/>RoundTimestamp(start and stop seconds)"]
+  publish -->|segment or all| gap["Check gap against pending segment"]
   gap -->|Gap completes prior segment| prior["CompleteSegment()<br/>AddRecord(timestamps.segments)<br/>RoundTimestamp()"]
   gap --> pending["Start or extend pending segment text and interval"]
   prior --> pending
   pending --> separator["EndsWithSeparator() for configured suffixes"]
   separator -->|Suffix completes segment| finish["CompleteSegment()<br/>AddRecord(timestamps.segments)<br/>RoundTimestamp()"]
   completed --> release["After all completed words:<br/>TokenWordGroupingState::FirstPendingTokenIndex()<br/>Release intervals before that watermark"]
-  release --> returned["Return to TokenPostProcessor with result populated"]
+  release --> returned["Return to ASRPostProcessor::ProcessNext(outputs) with result populated"]
 ```
 
 The grouper buffers incomplete words, whitespace, and UTF-8 output. It may
@@ -199,12 +239,12 @@ After the last generation step, flush pending work without decoding a token:
 
 ```mermaid
 flowchart TD
-  finalize["TokenPostProcessor::Finalize()<br/>Clear previous results; create final result"] --> state["MetadataCoreState::ProcessFinalized()"]
+  finalize["ASRPostProcessor::Finalize()<br/>Clear previous results; create final result"] --> state["MetadataCoreState::ProcessFinalized()"]
   state --> enabled["TimestampsEnabled()"]
   enabled --> group["TokenWordGroupingState::Finalize()<br/>Append() pending delimiter; CompleteWord()"]
   group --> words["MetadataCoreState::ProcessCompletedWords()<br/>Same alignment/publication path as above"]
   words --> segment["MetadataCoreState::CompleteSegment()<br/>Flush any remaining segment with AddRecord()"]
-  segment -.->|Caller reads| results["GetNextTokenResults()"]
+  segment -.->|Caller reads| results["GetNextResults()"]
 ```
 
 ## Configuration
@@ -215,26 +255,48 @@ timestamps require a model that produces acoustic intervals, currently
 `subsampling_factor`. Being an ASR model alone is not sufficient. Missing or
 invalid intervals fail before decoding the affected token.
 
+The processor constructor reads these existing model fields once and derives
+`seconds_per_frame` and the rounded segment-gap frame threshold. Its copied
+configuration stores that optional timebase separately from word/segment output
+settings. Neither the processor nor `MetadataCoreState` stores another set of sample rate,
+hop length, and subsampling factor values. Missing or non-positive/non-finite
+timebases are rejected when timestamps are enabled.
+
 `segment_separators` defaults to `.`, `?`, and `!`. The optional
 `segment_gap_threshold_seconds` is non-negative or `null`; it is rounded to the
-nearest acoustic frame before being copied into the processor configuration.
-The processor also receives a model-derived `seconds_per_frame` timebase for
-converting published timestamps, rather than interpreting audio preprocessing settings.
-Zero and positive gaps below half a frame split each word into its own segment
-in timestamp-only mode. When both timestamps and diarization are off, ordinary
-text is returned without metadata, interval buffering, or word/segment accumulation.
+nearest acoustic frame. Zero and positive gaps below half a frame split each word
+into its own segment in timestamp-only mode. When both timestamps and diarization are off, ordinary text is returned,
+without timestamp records, interval buffering, or word/segment accumulation.
 
 See [Nemotron speech timestamps](nemotron_speech_timestamps.md) for acoustic
-origins and interval semantics.
+origins and interval semantics, including optional speaker attribution.
 
 ## Bindings and Lifetime
 
-C exposes opaque `OgaTokenPostProcessor`, `OgaTokenPostProcessorResult`,
-`OgaTokenPostProcessorTimestamp`, and
-`OgaTokenPostProcessorTimestampRecord` handles, with typed getters for text,
+C exposes opaque `OgaASRPostProcessor`, `OgaASRPostProcessorResult`,
+`OgaASRPostProcessorTimestampResult`, and
+`OgaASRPostProcessorTimestampRecord` handles, with typed getters for text,
 timestamp presence, word/segment counts, records, frame bounds, and second bounds.
 Result and record layouts are private. An out-of-range C result or record lookup
-returns null; the C++ record accessor throws `std::out_of_range`.
+returns null. `OgaASRPostProcessorTimestampResultGetTimestampRecord()` selects
+words or segments through `OgaTimestampRecordKind`; it also returns null for an
+unknown kind. Word and segment counts have separate field accessors.
+
+Creation stays subclass-specific through `OgaCreateASRPostProcessor()`.
+Call `OgaASRPostProcessorAsPostProcessor()` to obtain an `OgaPostProcessor` base
+view, then use `OgaPostProcessorProcessNext()`, `OgaPostProcessorFinalize()`, and
+`OgaPostProcessorReset()` to dispatch through the native virtual methods.
+`OgaDestroyPostProcessor()` destroys the concrete processor through its virtual
+destructor. Conversion does not transfer or duplicate ownership: destroy the
+underlying processor exactly once, and do not use either handle afterward.
+C++ and managed wrappers perform this conversion and destruction automatically;
+do not manually destroy a processor owned by a wrapper. Results remain ASR-specific.
+
+Each C getter reads one field or returns one opaque child handle. Adding a native
+record field does not change existing getter signatures; expose a new field through
+a new accessor rather than extending a combined output-parameter list. The C#
+P/Invoke declarations mirror these C functions directly. Public language properties
+hide those accessor calls without exposing native layouts.
 
 Results, nested timestamp records, and native strings are borrowed until the next processor mutation
 or destruction, not the next getter or generator operation. Never free them;
@@ -243,20 +305,34 @@ must be externally serialized. Independent processors have independent state.
 
 `MetadataCoreState` populates the processor's canonical results directly. There
 is no intermediate metadata output or conversion to a second result model. The
-internal processor owns one immutable configuration; metadata state reads that same object.
+processor owns one immutable configuration; metadata state reads that same object.
 
-Python uses `TokenPostProcessor(generator)`, `process_next_tokens()`,
-`get_next_token_results()`, `finalize()`, and `reset()`. Borrowed
-`TokenPostProcessorResult` objects expose `get_text()` and nullable
-`get_timestamps()`. Timestamp objects expose `get_words()` and `get_segments()`;
-records expose `get_text()`, `get_start_frame()`, `get_stop_frame()`,
-`get_start_time()`, and `get_stop_time()`.
+Python uses `ASRPostProcessor(generator)`, `process_next()`,
+`get_next_results()`, `finalize()`, and `reset()`. Borrowed
+`ASRPostProcessorResult` objects expose read-only `text` and nullable
+`timestamp_result` properties. `ASRPostProcessorTimestampResult` objects expose
+`words` and `segments`;
+records expose `text`, `frame_interval`, and `time_interval`. Interval properties
+return two-element tuples ordered as `(start, stop)`. These pybind11 properties
+call the C++ wrapper getters, which delegate to the per-field C API. The binding
+constructs Python strings, tuples, and lists without exposing native layouts.
 
-C# uses `TokenPostProcessor(generator)`, `ProcessNextTokens()`,
-`GetNextTokenResults()`, `FinalizeProcessing()`, and `Reset()`. Borrowed
-`TokenPostProcessorResult` objects expose `GetText()` and nullable `GetTimestamps()`.
-Timestamp objects expose `GetWords()` and `GetSegments()`; records expose
-`GetText()`, `GetStartFrame()`, `GetStopFrame()`, `GetStartTime()`, and `GetStopTime()`.
+C# uses `ASRPostProcessor(generator)`, `ProcessNext()`,
+`GetNextResults()`, `FinalizeProcessing()`, and `Reset()`. Borrowed
+`ASRPostProcessorResult` objects expose read-only `Text` and nullable `TimestampResult`
+properties. `ASRPostProcessorTimestampResult` objects expose `Words` and `Segments`; records expose `Text`,
+`FrameInterval`, and `TimeInterval`. Interval properties return named `(Start, Stop)`
+value tuples. For example, read `record.Text` and `record.TimeInterval.Start`.
+
+C++ follows the global, method-only opaque wrapper pattern. `GetNextResults()`
+returns borrowed `const OgaASRPostProcessorResult*` pointers, not copied payloads.
+`GetText()` returns borrowed native text; `GetTimestampResult()` returns a nullable
+`const OgaASRPostProcessorTimestampResult*`. The container exposes `GetWordCount()`,
+`GetSegmentCount()`, and `GetTimestampRecord(kind, index)`. Records expose `GetText()`,
+`GetFrameInterval()`, and `GetTimestampInterval()`; interval getters return `std::pair`
+values through the per-field C accessors. No public payload fields or separate C++
+value-model types are exposed. Native C++ callers must respect the borrowed lifetime
+themselves and copy text needed beyond the next processor mutation.
 
 Python and C# wrap the same native results without copying their payload. They
 reject access to results or nested records invalidated by processing, finalization,

@@ -24,6 +24,7 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -154,18 +155,21 @@ std::vector<float> LoadWav(const std::string& path, int target_sample_rate) {
   throw std::runtime_error("No data chunk found in WAV file");
 }
 
-void AppendTimestampRecords(const OgaTokenPostProcessorResult& result, bool use_segments,
+void AppendTimestampRecords(const OgaASRPostProcessorResult& result, bool use_segments,
                             std::string& transcript, bool print_output = true) {
-  const auto* timestamps = result.GetTimestamps();
+  const auto* timestamps = result.GetTimestampResult();
   if (!timestamps) return;
   const size_t count = use_segments ? timestamps->GetSegmentCount() : timestamps->GetWordCount();
+  const auto kind = use_segments ? OgaTimestampRecordKind_Segments : OgaTimestampRecordKind_Words;
   for (size_t index = 0; index < count; ++index) {
-    const auto& record = use_segments ? timestamps->GetSegment(index) : timestamps->GetWord(index);
-    const char* text = record.GetText();
+    const auto* record = timestamps->GetTimestampRecord(kind, index);
+    const char* text = record->GetText();
     std::ostringstream output;
-    if (record.HasTimestamp())
-      output << '[' << std::fixed << std::setprecision(2) << record.GetStartTime() << " - " << record.GetStopTime() << ']';
-    if (const auto* speaker = record.GetSpeakerLabel()) output << '[' << speaker << ']';
+    if (record->HasTimestamp()) {
+      const auto [start, stop] = record->GetTimestampInterval();
+      output << '[' << std::fixed << std::setprecision(2) << start << " - " << stop << ']';
+    }
+    if (const auto* speaker = record->GetSpeakerLabel()) output << '[' << speaker << ']';
     if (use_segments) {
       if (text[0] == '\0' || !std::isspace(static_cast<unsigned char>(text[0]))) output << ' ';
       output << text;
@@ -180,16 +184,16 @@ void AppendTimestampRecords(const OgaTokenPostProcessorResult& result, bool use_
   }
 }
 
-std::string DecodeTokens(OgaGenerator& generator, OgaTokenPostProcessor& postprocessor,
+std::string DecodeTokens(OgaGenerator& generator, OgaASRPostProcessor& postprocessor,
                          const std::string& timestamp_level) {
   std::string text;
   const bool use_segments = timestamp_level != "word";
   while (!generator.IsDone()) {
     generator.GenerateNextToken();
-    postprocessor.ProcessNextTokens();
-    for (const auto* result : postprocessor.GetNextTokenResults()) {
+    postprocessor.ProcessNext();
+    for (const auto* result : postprocessor.GetNextResults()) {
       text += result->GetText();
-      if (!result->GetTimestamps()) {
+      if (!result->GetTimestampResult()) {
         std::cout << result->GetText() << std::flush;
       } else {
         std::string formatted;
@@ -230,7 +234,7 @@ void StreamingTranscribe(const std::string& model_path, const std::string& audio
 
   auto params = OgaGeneratorParams::Create(*model);
   auto generator = OgaGenerator::Create(*model, *params);
-  auto postprocessor = OgaTokenPostProcessor::Create(*generator);
+  auto postprocessor = OgaASRPostProcessor::Create(*generator);
 
   std::cout << "  Sample rate: " << sample_rate << ", Chunk: " << chunk_samples << " samples" << std::endl;
   std::cout << "  Audio duration: " << duration << "s" << std::endl;
@@ -240,6 +244,7 @@ void StreamingTranscribe(const std::string& model_path, const std::string& audio
   std::string full_transcript;
   int chunks_total = 0;
   int chunks_processed = 0;
+  int chunks_skipped = 0;
 
   // Stream audio in chunks
   for (size_t i = 0; i < audio.size(); i += chunk_samples) {
@@ -250,22 +255,22 @@ void StreamingTranscribe(const std::string& model_path, const std::string& audio
       chunks_processed++;
       generator->SetInputs(*inputs);
       full_transcript += DecodeTokens(*generator, *postprocessor, timestamp_level);
+    } else {
+      chunks_skipped++;
     }
   }
 
   // Flush remaining audio
   while (auto inputs = processor->Flush()) {
-    chunks_processed++;
     generator->SetInputs(*inputs);
     full_transcript += DecodeTokens(*generator, *postprocessor, timestamp_level);
   }
 
   postprocessor->Finalize();
-  for (const auto* result : postprocessor->GetNextTokenResults()) {
+  for (const auto* result : postprocessor->GetNextResults()) {
     std::string formatted;
     AppendTimestampRecords(*result, timestamp_level != "word", formatted);
   }
-  const int chunks_skipped = chunks_total - chunks_processed;
 
   auto end = std::chrono::high_resolution_clock::now();
   double wall_time = std::chrono::duration<double>(end - start).count();

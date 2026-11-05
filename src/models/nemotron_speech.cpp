@@ -520,8 +520,10 @@ void NemotronSpeechState::SetExtraInputs(const std::vector<ExtraInput>& extra_in
         if (!input.tensor || input.tensor->GetType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64 ||
             input.tensor->GetElementCount() != 1)
           throw std::runtime_error("Diarization input metadata must be scalar int64");
-        if (input.name == "diarization_lookahead") current_diarization_lookahead_ = *input.tensor->GetData<int64_t>();
-        else current_valid_samples_ = *input.tensor->GetData<int64_t>();
+        if (input.name == "diarization_lookahead")
+          current_diarization_lookahead_ = *input.tensor->GetData<int64_t>();
+        else
+          current_valid_samples_ = *input.tensor->GetData<int64_t>();
       }
     }
     if (!current_diarization_features_ || current_valid_samples_ <= 0 ||
@@ -745,7 +747,7 @@ void NemotronSpeechState::StepToken() {
       last_token_intervals_.push_back({token_frame, token_frame + 1});
     }
     if (diarization_state_) last_speaker_evidence_.push_back(diarization_state_->GetTokenSpeakerEvidence(token_frame -
-        GetNemotronGlobalFrame(chunk_start_sample_, 0, nemotron_config_.hop_length, nemotron_config_.subsampling_factor)));
+                                                                                                         GetNemotronGlobalFrame(chunk_start_sample_, 0, nemotron_config_.hop_length, nemotron_config_.subsampling_factor)));
     return;
   }
 

@@ -139,20 +139,21 @@ def load_audio(audio_path, sample_rate):
 
 
 def format_timestamp_records(result, use_segments):
-    timestamps = result.get_timestamps()
+    timestamps = result.timestamp_result
     if timestamps is None:
         return ""
-    records = timestamps.get_segments() if use_segments else timestamps.get_words()
+    records = timestamps.segments if use_segments else timestamps.words
     formatted = []
     for record in records:
-        text = record.get_text() if use_segments else record.get_text().strip()
+        text = record.text if use_segments else record.text.strip()
         separator = " " if use_segments and not text[:1].isspace() else ""
         suffix = "" if use_segments else " "
         prefix = ""
-        if record.has_timestamp():
-            prefix += f"[{record.get_start_time():.2f} - {record.get_stop_time():.2f}]"
-        if record.get_speaker_label() is not None:
-            prefix += f"[{record.get_speaker_label()}]"
+        if record.time_interval is not None:
+            start, stop = record.time_interval
+            prefix = f"[{start:.2f} - {stop:.2f}]"
+        if record.speaker_label is not None:
+            prefix += f"[{record.speaker_label}]"
         formatted.append(f"{prefix}{separator}{text}{suffix}")
     return "".join(formatted)
 
@@ -162,11 +163,11 @@ def decode_tokens(generator, postprocessor, timestamp_level):
     text = ""
     while not generator.is_done():
         generator.generate_next_token()
-        postprocessor.process_next_tokens()
-        for result in postprocessor.get_next_token_results():
-            text += result.get_text()
-            if result.get_timestamps() is None:
-                token_text = result.get_text()
+        postprocessor.process_next()
+        for result in postprocessor.get_next_results():
+            text += result.text
+            if result.timestamp_result is None:
+                token_text = result.text
                 print(token_text, end="", flush=True)
             else:
                 timestamped_text = format_timestamp_records(
@@ -212,7 +213,7 @@ def simulate_microphone(model_path, audio_path, execution_provider, use_vad=None
 
     params = og.GeneratorParams(model)
     generator = og.Generator(model, params)
-    postprocessor = og.TokenPostProcessor(generator)
+    postprocessor = og.ASRPostProcessor(generator)
     # Per-generator language selection
     if selected_lang is not None:
         generator.set_runtime_option("lang_id", str(int(selected_lang[0])))
@@ -223,6 +224,7 @@ def simulate_microphone(model_path, audio_path, execution_provider, use_vad=None
     vad_enabled = vad_status == "true"
     chunks_total = 0
     chunks_processed = 0
+    chunks_skipped = 0
 
     for i in range(0, len(audio), chunk_samples):
         chunk = audio[i : i + chunk_samples].astype(np.float32)
@@ -234,19 +236,19 @@ def simulate_microphone(model_path, audio_path, execution_provider, use_vad=None
             full_transcript += decode_tokens(
                 generator, postprocessor, timestamp_level
             )
+        else:
+            chunks_skipped += 1
 
     # Flush remaining audio
     while (inputs := processor.flush()) is not None:
-        chunks_processed += 1
         generator.set_inputs(inputs)
         full_transcript += decode_tokens(
             generator, postprocessor, timestamp_level
         )
 
     postprocessor.finalize()
-    for result in postprocessor.get_next_token_results():
+    for result in postprocessor.get_next_results():
         print(format_timestamp_records(result, timestamp_level != "word"), end="", flush=True)
-    chunks_skipped = chunks_total - chunks_processed
 
     total_wall = time.perf_counter() - stream_start
 

@@ -60,40 +60,39 @@ def test_real_audio_metadata_modes(tmp_path, streaming_models, speech_audio, dia
     parameters = og.GeneratorParams(model)
     parameters.set_search_options(max_length=512)
     generator = og.Generator(model, parameters)
-    postprocessor = og.TokenPostProcessor(generator)
+    postprocessor = og.ASRPostProcessor(generator)
     fragments = []
     records = []
     metadata = diarization or level != "off"
     borrowed = []
 
     def collect(result):
-        fragments.append(result.get_text())
-        timestamps = result.get_timestamps()
+        fragments.append(result.text)
+        timestamps = result.timestamp_result
         if not metadata:
             assert timestamps is None
             return
         assert timestamps is not None
         if level == "word":
-            assert timestamps.get_segments() == []
-            completed = timestamps.get_words()
+            assert timestamps.segments == []
+            completed = timestamps.words
         else:
-            assert timestamps.get_words() == []
-            completed = timestamps.get_segments()
+            assert timestamps.words == []
+            completed = timestamps.segments
         for record in completed:
-            records.append((record.get_text(), record.get_start_frame(), record.get_stop_frame(),
-                            record.get_start_time(), record.get_stop_time(), record.get_speaker_label()))
+            records.append((record.text, record.frame_interval, record.time_interval, record.speaker_label))
             borrowed.append(record)
 
     def process_current():
         previous = borrowed[:]
         borrowed.clear()
-        postprocessor.process_next_tokens()
+        postprocessor.process_next()
         for record in previous:
             with pytest.raises(RuntimeError, match="expired"):
-                record.get_speaker_label()
+                _ = record.speaker_label
             with pytest.raises(RuntimeError, match="expired"):
-                record.has_timestamp()
-        for result in postprocessor.get_next_token_results():
+                _ = record.has_timestamp
+        for result in postprocessor.get_next_results():
             collect(result)
 
     def decode(inputs):
@@ -110,23 +109,24 @@ def test_real_audio_metadata_modes(tmp_path, streaming_models, speech_audio, dia
     while (inputs := processor.flush()) is not None:
         decode(inputs)
     postprocessor.finalize()
-    for result in postprocessor.get_next_token_results():
+    for result in postprocessor.get_next_results():
         collect(result)
     if metadata:
         postprocessor.finalize()
-        trailing = postprocessor.get_next_token_results()[0].get_timestamps()
-        assert trailing.get_words() == [] and trailing.get_segments() == []
+        trailing = postprocessor.get_next_results()[0].timestamp_result
+        assert trailing.words == [] and trailing.segments == []
         assert records
         assert "".join(record[0] for record in records) == "".join(fragments)
-        for _, start_frame, stop_frame, start_time, stop_time, speaker_label in records:
+        for _, frame_interval, time_interval, speaker_label in records:
             if diarization:
                 assert speaker_label in {f"speaker_{index}" for index in range(8)}
             else:
                 assert speaker_label is None
             if level == "off":
-                assert start_frame is None and stop_frame is None
-                assert start_time is None and stop_time is None
+                assert frame_interval is None and time_interval is None
             else:
+                start_frame, stop_frame = frame_interval
+                start_time, stop_time = time_interval
                 assert 0 <= start_frame < stop_frame
                 assert start_time < stop_time
                 assert stop_time <= len(speech_audio) / 16000 + 0.08

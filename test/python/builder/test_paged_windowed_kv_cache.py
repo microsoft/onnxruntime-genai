@@ -35,6 +35,8 @@ sys.path.insert(0, str(BUILDERS_DIR.parent))
 
 
 def _load_builder_module(module_name):
+    if f"models.builders.{module_name}" in sys.modules:
+        return sys.modules[f"models.builders.{module_name}"]
     spec = importlib.util.spec_from_file_location(f"models.builders.{module_name}", BUILDERS_DIR / f"{module_name}.py")
     module = importlib.util.module_from_spec(spec)
     sys.modules[f"models.builders.{module_name}"] = module
@@ -234,6 +236,7 @@ def _make_inputs_model(use_paged_attention, use_ring):
         "past_key_values.key": [],
         "past_key_values.value": [],
     }
+    model.input_types = dict.fromkeys(model.input_names)
     return model
 
 

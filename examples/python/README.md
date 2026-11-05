@@ -61,7 +61,7 @@ python model-asr.py --model_path /path/to/nemotron --audio_file /path/to/audio.w
 
 Configure `diarization.filename` and optional right-context in the model's
 `genai_config.json` following the
-[streaming diarization guide](../../docs/nemotron_speech_timestamps.md#streaming-diarization).
+[streaming diarization guide](../../docs/nemotron_speech_timestamps.md#diarization).
 No separate diarization CLI flag is needed. With diarization enabled,
 `timestamp_level: off` prints speaker-turn segments without times, `word` prints
 timestamped labeled words, and `segment` prints timestamped speaker turns.
@@ -69,12 +69,12 @@ Without diarization, timestamp-only modes still work and `off` preserves ordinar
 incremental text. `all` is not supported.
 
 Metadata output consists of completed records rather than duplicate text fragments.
-`TokenPostProcessor` owns the tokenizer/stream internally. Its borrowed record
-accessors `has_timestamp()` and `get_speaker_label()` distinguish optional timing
-from attribution; `get_timestamps()` remains non-null for diarization-only output.
+`ASRPostProcessor` owns the tokenizer/stream. Call `process_next()` and read
+`get_next_results()`. Borrowed record properties `has_timestamp`, `speaker_label`,
+and nullable `(start, stop)` pairs `frame_interval` / `time_interval` distinguish
+timing from attribution; `timestamp_result` remains non-null for diarization-only output.
 The example drains all remaining audio through `processor.flush()` before one
-metadata finalization. VAD statistics distinguish skipped chunks from initial
-look-ahead buffering. The final summary remains the plain transcript.
+metadata finalization. The final summary remains the plain transcript.
 
 ## Execution Providers
 
