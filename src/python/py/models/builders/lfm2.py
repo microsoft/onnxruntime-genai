@@ -340,6 +340,9 @@ class LFM3Model(LFM2Model):
             for option in ("use_paged_attention", "enable_cuda_graph", "exclude_embeds")
         )
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        # An export cut by num_hidden_layers before its first sliding layer has nothing to window.
+        if "sliding_attention" not in self.layer_types:
+            self.context_length_attrs["window_kv_cache"] = False
         dtype = ir.DataType.FLOAT if self.rope_attrs["cast"]["use_fp32"] else self.io_dtype
         self.rope_cache_names = {}
         for layer_type in self.lfm3_rope_parameters:

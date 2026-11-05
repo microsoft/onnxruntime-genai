@@ -598,6 +598,14 @@ def test_lfm3_sliding_layers_keep_a_window_only_where_it_has_run(
         assert "sliding_window" not in decoder
 
 
+def test_lfm3_export_cut_before_its_first_sliding_layer_has_no_window(tmp_path):
+    # Even an empty sliding_window block makes the runtime refuse graph capture and run each padded prompt alone.
+    limit = {"num_hidden_layers": LAYER_TYPES.index("sliding_attention")}
+    output_dir = _export_for_genai(tmp_path, "out", _seeded_lfm3(), limit)
+
+    assert "sliding_window" not in json.loads((output_dir / "genai_config.json").read_text())["model"]["decoder"]
+
+
 @pytest.mark.parametrize(
     "ep,io_dtype,architecture,extra_options",
     [
