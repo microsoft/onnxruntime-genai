@@ -120,6 +120,106 @@ Dynamic batching limits scheduled rows with `max_batch_size` and limits the tota
 query tokens in one model run with `max_scheduled_tokens`. The token limit defaults
 to 2048. Both limits are positive and independent.
 
+### Device-memory budget and conservative headroom
+
+Set `engine.dynamic_batching.device_memory_budget_bytes` before loading a model
+to size its CUDA paged cache against a per-model allowance. The package also supplies
+`device_memory_headroom_bytes`, a conservative allowance for additional GPU memory:
+
+```json
+{
+  "engine": {
+    "dynamic_batching": {
+      "device_memory_budget_bytes": 25769803776,
+      "device_memory_headroom_bytes": 3221225472
+    }
+  }
+}
+```
+
+The example is a 24-GiB budget with 3 GiB of headroom, not 24 GB. The headroom
+is illustrative, not a validated value for every model. Both values are integer
+byte counts no greater than 9007199254740991, the existing JSON parser's exact
+integer range. The budget must be positive; headroom must be non-negative.
+Budgeted Engine construction requires explicit headroom; zero is accepted only
+as an explicit choice, not substituted for missing profiling data.
+Existing configuration overlays, including `OgaConfigOverlay`, can set the
+budget before Model creation; there is no separate budget API.
+
+The supported path is one initial load of a CUDA paged decoder Model/Engine,
+including an enabled windowed DFlash 2 drafter. CPU embedding is supported.
+Other devices/backends and enabled MTP or DSpark auxiliary models are rejected
+during Engine construction when this field is set.
+
+An explicit budget overrides `num_blocks` and `gpu_utilization_factor`, including
+block counts supplied by runtime profiles. Other profile and execution settings
+remain unchanged. The user budget is not a runtime-profile overlay setting.
+Packages may override headroom through a runtime profile's
+`overlay.engine.dynamic_batching.device_memory_headroom_bytes`.
+Omitting the user budget preserves existing sizing behavior, even when headroom
+is configured.
+
+Runtime profiles are applied first, using actual hardware facts. Cache sizing
+then uses the effective configuration in this order:
+
+| Settings | Cache sizing behavior |
+|---|---|
+| User budget and explicit headroom | Subtract observed startup usage, headroom, and pending reservations before choosing blocks. Ignore `num_blocks` and `gpu_utilization_factor`. |
+| No user budget; `num_blocks` is set | Use the configured target-equivalent cache allowance. With auxiliary caches, the resolved target block count can be smaller. Ignore `gpu_utilization_factor`. |
+| No user budget or `num_blocks`; `gpu_utilization_factor` is set | Use that fraction of currently free GPU memory, with the existing 10% reserve, then deduct pending reservations. |
+| Runtime profile supplies `num_blocks` | Use that count unless a user budget is set. Other execution settings from the profile still apply. |
+| Runtime profile supplies headroom | Use that headroom only when a user budget is set. |
+| Headroom without a user budget | Ignore headroom and keep the existing sizing behavior. |
+
+For example, `num_blocks: 407` does not necessarily mean 407 target blocks when
+a drafter is enabled: the draft caches share the equivalent byte allowance.
+Use Engine capabilities for the resolved request-length limit.
+
+After device initialization and before loading model initializers/sessions,
+the Model records free GPU memory. Cache sizing subtracts the observed startup
+consumption, including draft-model weights, allocated draft caches, and already
+allocated fixed state, from the allowance and clamps the remainder to current
+free memory. Configured headroom is then subtracted, followed by pending window
+storage, graph buffers, capture block tables, and sampler startup buffers,
+before dividing by the graph-derived cache bytes per block. The explicit headroom
+replaces the generic 10% reserve only in the user-budget path; the legacy path
+retains that reserve. An insufficient budget after deducting configured headroom
+and reservations, or a zero resulting block count, is an initialization error.
+Successful initialization does not certify that the supplied headroom covers
+every later allocation.
+Budgeted key/value payloads use allocator `Reserve` storage, following the scale
+cache ownership pattern, rather than growing the shared arena in larger chunks.
+The default allocation path is unchanged when the budget is omitted.
+
+Headroom covers additional peak usage not already counted in the startup delta
+or pending reservations, including lazy inference workspace, allocator growth,
+and any initialization overhead excluded by the baseline. Do not charge already
+allocated Engine state or known reservations twice. Package authors should profile
+cold initialization and representative mixed workloads at the supported context,
+batch, prefill, speculative, and graph-capture limits, then add a conservative margin.
+A shared value may cover supported GPU families; a run on one GPU alone does not
+establish that it is sufficient elsewhere. Revalidate it when the shipped execution
+configuration or runtime changes.
+
+After successful initialization, use Engine capabilities to read the actual
+maximum request length. This is a prompt/history-plus-generation structural
+limit for exclusive cache use, not current free capacity or a concurrency
+guarantee. Neither a pre-load estimate nor live resizing is provided.
+
+This is an incremental device-wide startup measurement, not allocation
+ownership accounting, an exclusive reservation, or a hard VRAM quota. Other
+GPU activity and reuse of shared or retained allocator storage can affect the
+measurement. Later logits, sampling workspace, and provider allocations are
+covered only to the extent allowed for by the packaged headroom; it is not an
+allocation-enforced peak limit. Reload-aware accounting and physical
+reclamation are outside this initial scope.
+
+The budget sizes the pool at initialization; it does not enable recompute
+preemption. On a supported layout, preemption releases a suspended Request's
+references to blocks in that same pool. Reclaimable blocks can then be reused
+without resizing the pool, returning its backing allocation to CUDA, or changing
+the configured budget or headroom.
+
 ### Prefix caching
 
 Dynamic batching caches prefixes by default for supported layouts.

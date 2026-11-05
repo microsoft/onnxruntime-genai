@@ -916,6 +916,43 @@ TEST(PagedKeyValueCacheManifestTest, BlockCapacityUsesParticipatingLayerCount) {
                std::overflow_error);
 }
 
+TEST(PagedKeyValueCacheManifestTest, DeviceBudgetCountsAllocatedStartupStateBeforePendingReservations) {
+  const auto available = DeviceMemoryBudgetAvailableBytes(6144, 10240, 8192, 0);
+  EXPECT_EQ(available, 4096u);
+  EXPECT_EQ(ComputePagedBlockCapacityFromBudget(available, 0, 64), 64u);
+  EXPECT_EQ(ComputePagedBlockCapacityFromBudget(available, 1024, 64), 48u);
+  EXPECT_THROW(ComputePagedBlockCapacityFromBudget(available, 4096, 64),
+               std::runtime_error);
+}
+
+TEST(PagedKeyValueCacheManifestTest, DeviceBudgetClampsToPhysicalFreeMemoryAndHandlesIncreases) {
+  EXPECT_EQ(DeviceMemoryBudgetAvailableBytes(12288, 10240, 5120, 0), 5120u);
+  EXPECT_EQ(DeviceMemoryBudgetAvailableBytes(6144, 10240, 12288, 0), 6144u);
+  EXPECT_EQ(DeviceMemoryBudgetAvailableBytes(std::numeric_limits<uint64_t>::max(), 10240, 5120, 0), 5120u);
+  EXPECT_THROW(DeviceMemoryBudgetAvailableBytes(2048, 10240, 8192, 0), std::runtime_error);
+  EXPECT_THROW(DeviceMemoryBudgetAvailableBytes(1024, 10240, 8192, 0), std::runtime_error);
+}
+
+TEST(PagedKeyValueCacheManifestTest, DeviceBudgetSubtractsHeadroomOnceBeforePendingReservations) {
+  const auto available = DeviceMemoryBudgetAvailableBytes(6144, 10240, 8192, 1024);
+  EXPECT_EQ(available, 3072u);
+  EXPECT_EQ(ComputePagedBlockCapacityFromBudget(available, 1024, 64, 32), 21u);
+  EXPECT_EQ(DeviceMemoryBudgetAvailableBytes(12288, 10240, 5120, 1024), 4096u);
+  EXPECT_EQ(ComputePagedBlockCapacityFromBudget(4096, 0, 64), 64u);
+  EXPECT_EQ(ComputePagedBlockCapacityFromBytes(4096, 1.0f, 0, 64), 57u);
+}
+
+TEST(PagedKeyValueCacheManifestTest, DeviceBudgetRejectsMissingOrExhaustedHeadroom) {
+  EXPECT_THROW(DeviceMemoryBudgetAvailableBytes(6144, 10240, 8192, std::nullopt), std::runtime_error);
+  EXPECT_THROW(DeviceMemoryBudgetAvailableBytes(6144, 10240, 8192, 4096), std::runtime_error);
+  EXPECT_THROW(DeviceMemoryBudgetAvailableBytes(6144, 10240, 8192, 4097), std::runtime_error);
+  EXPECT_THROW(DeviceMemoryBudgetAvailableBytes(12288, 10240, 5120, 5120), std::runtime_error);
+  EXPECT_THROW(DeviceMemoryBudgetAvailableBytes(6144, 10240, 8192,
+                                                std::numeric_limits<uint64_t>::max()),
+               std::runtime_error);
+  EXPECT_THROW(ComputePagedBlockCapacityFromBudget(4096, 4096, 64), std::runtime_error);
+}
+
 // The production path: per-block bytes come from the graph, and capacity divides the budget by
 // them. The quantized fixture pays 96 bytes per block against the plain fixture's 64 because each
 // layer adds two float16 scales per slot, so the same budget holds fewer blocks.

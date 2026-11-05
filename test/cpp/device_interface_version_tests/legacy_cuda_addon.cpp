@@ -16,12 +16,17 @@ struct DeviceInterface;
 #endif
 
 namespace {
+uint32_t interface_version{19};
 uint32_t interface_calls{};
-}
+}  // namespace
 
 extern "C" {
 LEGACY_ADDON_EXPORT uint32_t GetInterfaceVersion() {
-  return 19;
+  return interface_version;
+}
+
+LEGACY_ADDON_EXPORT void SetLegacyInterfaceVersion(uint32_t version) {
+  interface_version = version;
 }
 
 LEGACY_ADDON_EXPORT Generators::DeviceInterface* GetInterface(GenaiInterface*, const char*, const OrtApi*) {

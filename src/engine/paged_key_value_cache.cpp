@@ -314,17 +314,40 @@ size_t ComputeNumBlocks(std::shared_ptr<Model> model,
 
   size_t free_bytes, total_bytes;
   model->p_device_kvcache_->GetAvailableMemory(free_bytes, total_bytes);
+  const size_t physical_free_bytes = free_bytes;
+  const auto& batching = *model->config_->engine.dynamic_batching;
+  if (batching.device_memory_budget_bytes) {
+    if (!model->device_memory_budget_initial_free_bytes_) {
+      throw std::runtime_error("device_memory_budget_bytes must be configured before loading the model.");
+    }
+    free_bytes = DeviceMemoryBudgetAvailableBytes(
+        *batching.device_memory_budget_bytes,
+        *model->device_memory_budget_initial_free_bytes_, free_bytes,
+        batching.device_memory_headroom_bytes);
+  }
 
   if (auxiliary_reserved_memory_bytes > std::numeric_limits<size_t>::max() - windowed_bytes) {
     throw std::overflow_error("Combined paged cache reserved memory overflows size_t");
   }
 
-  return ComputePagedBlockCapacityFromBytes(
-      free_bytes,
-      *model->config_->engine.dynamic_batching->gpu_utilization_factor,
+  const size_t cache_budget = batching.device_memory_budget_bytes
+                                  ? free_bytes
+                                  : PagedCacheMemoryBudget(free_bytes, *batching.gpu_utilization_factor);
+  const size_t blocks = ComputePagedBlockCapacityFromBudget(
+      cache_budget,
       windowed_bytes + auxiliary_reserved_memory_bytes,
       full_bytes_per_block,
       auxiliary_bytes_per_block);
+  if (batching.device_memory_budget_bytes && g_log.enabled) {
+    Log("engine_cache",
+        "Device memory budget: bytes=%llu, initial_free=%zu, physical_free=%zu, "
+        "headroom=%llu, sizing_available=%zu, reserved=%zu, target_blocks=%zu",
+        static_cast<unsigned long long>(*batching.device_memory_budget_bytes),
+        *model->device_memory_budget_initial_free_bytes_, physical_free_bytes,
+        static_cast<unsigned long long>(*batching.device_memory_headroom_bytes), free_bytes,
+        windowed_bytes + auxiliary_reserved_memory_bytes, blocks);
+  }
+  return blocks;
 }
 
 size_t UsedSlots(const std::vector<std::shared_ptr<Block>>& blocks) {
@@ -347,23 +370,53 @@ size_t PagedCacheMemoryBudget(size_t available_memory_bytes, float gpu_utilizati
       available_memory_bytes * memory_fragmentation_factor * gpu_utilization_factor);
 }
 
+size_t DeviceMemoryBudgetAvailableBytes(uint64_t budget_bytes,
+                                        size_t initial_free_bytes,
+                                        size_t available_memory_bytes,
+                                        std::optional<uint64_t> headroom_bytes) {
+  if (!headroom_bytes) {
+    throw std::runtime_error("device_memory_budget_bytes requires an explicit device_memory_headroom_bytes allowance.");
+  }
+  const size_t startup_bytes = initial_free_bytes > available_memory_bytes
+                                   ? initial_free_bytes - available_memory_bytes
+                                   : 0;
+  if (startup_bytes >= budget_bytes) {
+    throw std::runtime_error(
+        "engine.dynamic_batching.device_memory_budget_bytes is too small "
+        "for the model and allocated Engine state.");
+  }
+  const auto remaining = std::min<uint64_t>(budget_bytes - startup_bytes, available_memory_bytes);
+  if (*headroom_bytes >= remaining) {
+    throw std::runtime_error("device_memory_budget_bytes is too small after reserving device_memory_headroom_bytes.");
+  }
+  return static_cast<size_t>(remaining - *headroom_bytes);
+}
+
 size_t ComputePagedBlockCapacityFromBytes(size_t available_memory_bytes,
                                           float gpu_utilization_factor,
                                           size_t reserved_memory_bytes,
                                           size_t primary_bytes_per_block,
                                           size_t auxiliary_bytes_per_block) {
+  return ComputePagedBlockCapacityFromBudget(
+      PagedCacheMemoryBudget(available_memory_bytes, gpu_utilization_factor),
+      reserved_memory_bytes, primary_bytes_per_block, auxiliary_bytes_per_block);
+}
+
+size_t ComputePagedBlockCapacityFromBudget(size_t budget_bytes,
+                                           size_t reserved_memory_bytes,
+                                           size_t primary_bytes_per_block,
+                                           size_t auxiliary_bytes_per_block) {
   if (primary_bytes_per_block == 0) {
     throw std::invalid_argument("Paged cache bytes per block must be greater than zero");
   }
-  const auto budget = PagedCacheMemoryBudget(available_memory_bytes, gpu_utilization_factor);
-  if (budget <= reserved_memory_bytes) {
+  if (budget_bytes <= reserved_memory_bytes) {
     throw std::runtime_error("The key-value cache budget is too small to hold the reserved decoder state.");
   }
   if (auxiliary_bytes_per_block >
       std::numeric_limits<size_t>::max() - primary_bytes_per_block) {
     throw std::overflow_error("Combined paged cache bytes per block overflow size_t");
   }
-  return (budget - reserved_memory_bytes) /
+  return (budget_bytes - reserved_memory_bytes) /
          (primary_bytes_per_block + auxiliary_bytes_per_block);
 }
 
@@ -419,6 +472,23 @@ size_t PagedKeyValueCacheBytesPerBlock(const std::shared_ptr<Model>& model) {
     bytes += layer_bytes;
   }
   return bytes;
+}
+
+size_t PagedCacheCaptureBlockTableBytes(const std::shared_ptr<Model>& model) {
+  const auto& batching = *model->config_->engine.dynamic_batching;
+  const auto& decoder = model->config_->model.decoder;
+  if (!batching.device_memory_budget_bytes || !IsGraphCaptureEnabled(decoder.session_options)) {
+    return 0;
+  }
+  const size_t context_length = static_cast<size_t>(model->config_->model.context_length);
+  const size_t columns = std::max(size_t{1}, context_length / batching.block_size +
+                                                 (context_length % batching.block_size != 0));
+  size_t table_bytes = CheckedMultiply(batching.max_batch_size, columns, "Capture block-table allocation");
+  table_bytes = CheckedMultiply(table_bytes, sizeof(int32_t), "Capture block-table allocation");
+  if (!WindowedLayers(model, ResolvePagedKeyValueGroup(decoder)).empty()) {
+    table_bytes = CheckedMultiply(table_bytes, 2, "Capture block-table allocation");
+  }
+  return table_bytes;
 }
 
 bool ResolvePrefixCachingEnabled(const std::shared_ptr<Model>& model,
@@ -504,11 +574,38 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model,
     }
     windowed_bytes += layer_bytes;
   }
+  const size_t table_bytes = PagedCacheCaptureBlockTableBytes(model);
+  if (table_bytes > std::numeric_limits<size_t>::max() - windowed_bytes) {
+    throw std::overflow_error("Paged cache reserved memory overflows size_t");
+  }
+  const size_t reserved_bytes = windowed_bytes + table_bytes;
   const auto num_blocks = ComputeNumBlocks(model_, PagedKeyValueCacheBytesPerBlock(model),
-                                           windowed_bytes,
+                                           reserved_bytes,
                                            auxiliary_bytes_per_block,
                                            auxiliary_reserved_memory_bytes);
+  if (model->config_->engine.dynamic_batching->device_memory_budget_bytes && num_blocks == 0) {
+    throw std::runtime_error(
+        "engine.dynamic_batching.device_memory_budget_bytes is too small "
+        "to hold a cache block after Engine reservations.");
+  }
 
+  auto& allocator = model->p_device_kvcache_->GetAllocator();
+  const auto create_payload = [&](const std::vector<int64_t>& shape,
+                                  std::unique_ptr<void, Ort::AllocatorDeleter>& storage) {
+    if (!model->config_->engine.dynamic_batching->device_memory_budget_bytes) {
+      return OrtValue::CreateTensor(allocator, shape, dtype);
+    }
+    if (!allocator.Reserve) {
+      throw std::runtime_error("device_memory_budget_bytes requires allocator Reserve support.");
+    }
+    size_t bytes = Ort::SizeOf(dtype);
+    for (const auto dimension : shape) {
+      bytes = CheckedMultiply(bytes, static_cast<size_t>(dimension), "Budgeted paged cache allocation");
+    }
+    storage.reset(allocator.Reserve(&allocator, bytes));
+    if (!storage) throw std::bad_alloc();
+    return OrtValue::CreateTensor(allocator.GetInfo(), storage.get(), bytes, shape, dtype);
+  };
   for (const int layer_id : paged_group.layer_ids) {
     const auto blocks = windowed.count(layer_id) != 0 ? num_window_blocks : num_blocks;
     const auto key_name = ComposeKeyValueName(decoder.inputs.past_key_names, layer_id);
@@ -519,9 +616,15 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model,
                                                    static_cast<int64_t>(CacheHeadSize(model, key_name))};
     auto value_shape_per_layer = key_shape_per_layer;
     value_shape_per_layer.back() = static_cast<int64_t>(CacheHeadSize(model, value_name));
+    std::unique_ptr<void, Ort::AllocatorDeleter> key_storage(nullptr, Ort::AllocatorDeleter(&allocator));
+    std::unique_ptr<void, Ort::AllocatorDeleter> value_storage(nullptr, Ort::AllocatorDeleter(&allocator));
+    auto key_cache = create_payload(key_shape_per_layer, key_storage);
+    auto value_cache = create_payload(value_shape_per_layer, value_storage);
     cache_.push_back(LayerCache{
-        OrtValue::CreateTensor(model->p_device_kvcache_->GetAllocator(), key_shape_per_layer, dtype),
-        OrtValue::CreateTensor(model->p_device_kvcache_->GetAllocator(), value_shape_per_layer, dtype),
+        std::move(key_storage),
+        std::move(value_storage),
+        std::move(key_cache),
+        std::move(value_cache),
         key_name,
         value_name,
         ComposeKeyValueName(decoder.outputs.present_key_names, layer_id),
@@ -546,7 +649,6 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model,
       for (const auto dimension : scale_shape) {
         scale_bytes = CheckedMultiply(scale_bytes, static_cast<size_t>(dimension), "Paged scale cache allocation");
       }
-      auto& allocator = model->p_device_kvcache_->GetAllocator();
       std::unique_ptr<void, Ort::AllocatorDeleter> storage(
           allocator.Reserve ? allocator.Reserve(&allocator, scale_bytes) : allocator.Alloc(scale_bytes),
           Ort::AllocatorDeleter(&allocator));

@@ -18,26 +18,38 @@
 
 extern "C" {
 LEGACY_ADDON_IMPORT uint32_t GetInterfaceVersion();
+LEGACY_ADDON_IMPORT void SetLegacyInterfaceVersion(uint32_t version);
 LEGACY_ADDON_IMPORT uint32_t GetLegacyInterfaceCallCount();
 }
 
 namespace Generators::test {
 
-class LegacyDeviceInterfaceVersionTest : public ::testing::TestWithParam<DeviceType> {};
+class LegacyDeviceInterfaceVersionTest : public ::testing::TestWithParam<DeviceType> {
+ protected:
+  void RejectsVersionBeforeUsingInterface(uint32_t version) {
+    SetLegacyInterfaceVersion(version);
+    ASSERT_EQ(GetInterfaceVersion(), version);
+    const auto calls_before = GetLegacyInterfaceCallCount();
+    try {
+      GetDeviceInterface(GetParam());
+      ADD_FAILURE() << "An add-on without the combined preemption and budget layouts must be rejected.";
+    } catch (const std::runtime_error& error) {
+      EXPECT_EQ(std::string{error.what()},
+                "Cuda interface not available: CUDA add-on interface version mismatch: expected " +
+                    std::to_string(kDeviceInterfaceVersion) +
+                    ", got " + std::to_string(version) +
+                    "; install a matching onnxruntime-genai-cuda package");
+    }
+    EXPECT_EQ(GetLegacyInterfaceCallCount(), calls_before);
+  }
+};
 
 TEST_P(LegacyDeviceInterfaceVersionTest, RejectsVersion19BeforeUsingItsInterface) {
-  ASSERT_EQ(GetInterfaceVersion(), 19u);
-  const auto calls_before = GetLegacyInterfaceCallCount();
-  try {
-    GetDeviceInterface(GetParam());
-    ADD_FAILURE() << "An add-on without the preemption Config layout must be rejected.";
-  } catch (const std::runtime_error& error) {
-    EXPECT_EQ(std::string{error.what()},
-              "Cuda interface not available: CUDA add-on interface version mismatch: expected " +
-                  std::to_string(kDeviceInterfaceVersion) +
-                  ", got 19; install a matching onnxruntime-genai-cuda package");
-  }
-  EXPECT_EQ(GetLegacyInterfaceCallCount(), calls_before);
+  RejectsVersionBeforeUsingInterface(19);
+}
+
+TEST_P(LegacyDeviceInterfaceVersionTest, RejectsVersion20BeforeUsingItsInterface) {
+  RejectsVersionBeforeUsingInterface(20);
 }
 
 INSTANTIATE_TEST_SUITE_P(
