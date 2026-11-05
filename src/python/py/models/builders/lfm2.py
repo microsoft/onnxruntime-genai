@@ -329,6 +329,16 @@ class LFM3Model(LFM2Model):
             for name in ("audio_start_token_id", "mixed_start_token_id", "text_end_token_id")
             if getattr(config, name, None) is not None
         ]
+        # Window-sized KV caches run on text exports for CPU and CUDA. ConvKeyValueCache refuses them under graph
+        # capture, which reruns the step it captures and so evicts from the window more than once. Decided here because
+        # Model.__init__ calls make_context_length_init before it sets self.ep.
+        # TODO: turn them on for TRT-RTX once a windowed export runs there; for WebGPU once its GroupQueryAttention
+        # takes sliding_window_cache=1, which also needs webgpu in Model.uses_windowed_kv_cache; for paged exports once
+        # the Engine's window ring has run with conv state; for exclude_embeds once the pipelines that read it exist.
+        self.keep_max_length_kv_caches = ep not in {"cpu", "cuda"} or any(
+            extra_options.get(option, False)
+            for option in ("use_paged_attention", "enable_cuda_graph", "exclude_embeds")
+        )
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         dtype = ir.DataType.FLOAT if self.rope_attrs["cast"]["use_fp32"] else self.io_dtype
         self.rope_cache_names = {}
@@ -356,11 +366,13 @@ class LFM3Model(LFM2Model):
 
     def make_context_length_init(self, config):
         super().make_context_length_init(config)
-        # TODO: sliding layers keep max_length KV caches until the runtime's hybrid conv/KV cache
-        # (ConvKeyValueCache) has window-sized buffers.
-        if self.extra_options.get("windowed_kv_cache", False):
-            print("Warning: LFM3 ignores windowed_kv_cache=true; its sliding layers keep max_length KV caches.")
-        self.context_length_attrs["window_kv_cache"] = False
+        if self.keep_max_length_kv_caches:
+            if self.extra_options.get("windowed_kv_cache", False):
+                print(
+                    "Warning: LFM3 ignores windowed_kv_cache=true here: only text exports for CPU and CUDA, without "
+                    "paged attention or graph capture, have window-sized KV caches."
+                )
+            self.context_length_attrs["window_kv_cache"] = False
 
     def make_intermediate_size_init(self, config):
         # Lfm3Config has no block_auto_adjust_ff_dim: the MLP uses intermediate_size as is.
