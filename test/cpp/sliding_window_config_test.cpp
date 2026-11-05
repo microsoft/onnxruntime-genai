@@ -78,6 +78,13 @@ TEST(SlidingWindowConfigTest, AcceptsSlidingWindowWithoutCacheSlack) {
   EXPECT_NO_THROW(OgaConfig::Create(root.string().c_str()));
 }
 
+TEST(SlidingWindowConfigTest, AcceptsOversizedWindowWhenSlidingIsDisabled) {
+  const auto root = WriteConfigWithSlidingWindow(
+      "oversized_disabled",
+      "{ \"window_size\": 512, \"slide_key_value_cache\": false, \"slide_inputs\": false }");
+  EXPECT_NO_THROW(OgaConfig::Create(root.string().c_str()));
+}
+
 TEST(SlidingWindowConfigTest, RejectsNonPositiveWindowSize) {
   for (const char* window_size : {"0", "-1"}) {
     const auto root = WriteConfigWithSlidingWindow(

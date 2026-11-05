@@ -4279,7 +4279,9 @@ Config::Config(const fs::path& path, std::string_view json_overlay,
     const int window_size = model.decoder.sliding_window->window_size;
     if (window_size <= 0)
       throw std::runtime_error("model.decoder.sliding_window.window_size must be greater than 0");
-    if (model.context_length > 0 && window_size > model.context_length)
+    if ((model.decoder.sliding_window->slide_inputs ||
+         model.decoder.sliding_window->slide_key_value_cache) &&
+        model.context_length > 0 && window_size > model.context_length)
       throw std::runtime_error("model.decoder.sliding_window.window_size cannot exceed model.context_length");
   }
 
