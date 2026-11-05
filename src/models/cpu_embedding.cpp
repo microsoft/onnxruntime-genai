@@ -12,9 +12,20 @@ namespace Generators {
 CpuEmbedding::CpuEmbedding(Model& model, OrtEnv& env) : config_{model.config_->model.embedding} {
   auto options = OrtSessionOptions::Create();
   Config::SessionOptions cpu_options = config_.session_options.value_or(Config::SessionOptions{});
-  if (!cpu_options.provider_options.empty() || !cpu_options.providers.empty()) {
-    throw std::runtime_error("Engine model.embedding must use CPU (no provider_options).");
+  if (cpu_options.providers_explicitly_selected) {
+    std::erase_if(cpu_options.provider_options, [&cpu_options](const auto& provider) {
+      return std::find(cpu_options.providers.begin(), cpu_options.providers.end(), provider.name) ==
+             cpu_options.providers.end();
+    });
   }
+
+  if (std::any_of(cpu_options.providers.begin(), cpu_options.providers.end(),
+                  [](const auto& provider) { return provider != "CPU"; }) ||
+      std::any_of(cpu_options.provider_options.begin(), cpu_options.provider_options.end(),
+                  [](const auto& provider) { return provider.name != "CPU" || !provider.options.empty(); })) {
+    throw std::runtime_error("Engine model.embedding must use CPU without provider options.");
+  }
+
   // Tiny decode lookups do not benefit from a thread pool. Explicit config can override this.
   if (!cpu_options.intra_op_num_threads) cpu_options.intra_op_num_threads = 1;
   model.CreateSessionOptionsFromConfig(cpu_options, *options, false, true, false, false);

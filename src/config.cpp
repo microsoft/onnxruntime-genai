@@ -41,6 +41,7 @@ void InheritProviderOptions(const Config::SessionOptions& parent,
                             Config::SessionOptions& child) {
   if (child.providers.empty()) {
     child.providers = parent.providers;
+    child.providers_explicitly_selected = parent.providers_explicitly_selected;
   }
 
   for (const auto& parent_provider : parent.provider_options) {
@@ -443,6 +444,7 @@ struct SessionOptions_Element : JSON::Element {
 
   JSON::Element& OnArray(std::string_view name) override {
     if (name == "provider_options") {
+      v_.providers_explicitly_selected = false;
       return provider_options_;
     }
     if (name == "custom_ops_libraries") {
@@ -2408,7 +2410,10 @@ struct Engram_Element : JSON::Element {
 
   Element& OnObject(std::string_view name) override {
     if (name == "session_options") {
-      v_.session_options = Config::SessionOptions{};
+      if (!v_.session_options || !v_.session_options->providers_explicitly_selected) {
+        v_.session_options = Config::SessionOptions{};
+      }
+
       session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
       return *session_options_;
     }
@@ -3651,6 +3656,7 @@ void SetModelProvider(Config& config, std::string_view provider_name) {
   const auto normalized_provider = NormalizeProviderName(provider_name);
   const auto set_provider = [normalized_provider](Config::SessionOptions& session_options) {
     session_options.providers = {std::string{normalized_provider}};
+    session_options.providers_explicitly_selected = true;
     if (std::none_of(session_options.provider_options.begin(), session_options.provider_options.end(),
                      [normalized_provider](const Config::ProviderOptions& options) {
                        return options.name == normalized_provider;
@@ -3996,7 +4002,7 @@ void ParseConfig(const fs::path& filename, std::string_view json_overlay, Config
 }
 
 void RefreshEngramProviders(Config& config) {
-  if (config.model.engram.session_options) {
+  if (config.model.engram.session_options && !config.model.engram.session_options->providers_explicitly_selected) {
     auto& options = *config.model.engram.session_options;
     options.providers.clear();
     for (const auto& provider : options.provider_options)

@@ -21,7 +21,9 @@
 
 #include "config.h"
 #include "engine_test_doubles.h"
+#include "models/decoder_only.h"
 #include "models/model_type.h"
+#include "models/qwen38_graph.h"
 #include "models/runtime_profiles.h"
 #include "models/session_options.h"
 #include "scoped-environment-variable.h"
@@ -108,6 +110,132 @@ TEST(ConfigTest, LegacyProviderApisRemainDecoderOnly) {
   EXPECT_EQ(config.model.vision.session_options->providers, (std::vector<std::string>{"WebGPU"}));
   SetModelProvider(config, "cuda");
   EXPECT_EQ(config.model.draft->session_options.providers, (std::vector<std::string>{"WebGPU"}));
+}
+
+TEST(ConfigTest, ModelProviderSelectionIsAuthoritativeForNonPrimarySessions) {
+  auto config = std::make_unique<Config>(fs::path{MODEL_PATH "engine/dummy-decoder"}, "");
+  auto& stage = config->model.decoder.pipeline.emplace_back();
+  stage.model_id = "stage";
+  stage.session_options.emplace();
+  config->model.vision.pipeline.resize(1);
+  for (auto* options : {&stage.session_options, &config->model.vision.pipeline[0].session_options,
+                        &config->model.vad.session_options}) {
+    options->emplace().provider_options = {{"WebGPU", {}}, {"nonexistent_provider", {}}};
+  }
+
+  auto legacy = std::make_unique<Config>(*config);
+  EXPECT_THROW(CreateModel(GetOrtEnv(), std::move(legacy)), std::exception);
+
+  SetModelProvider(*config, "CPU");
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  EXPECT_EQ(model->p_device_->GetType(), DeviceType::CPU);
+  const auto trivial = GetTrivialModel();
+  EXPECT_NO_THROW(OrtSession::Create(GetOrtEnv(), trivial.data(), trivial.size(), model->GetSessionOptions("stage")));
+  for (const auto* configured : {&*model->config_->model.vision.pipeline[0].session_options,
+                                 &*model->config_->model.vad.session_options}) {
+    auto options = OrtSessionOptions::Create();
+    EXPECT_NO_THROW(model->CreateSessionOptionsFromConfig(*configured, *options, false));
+    EXPECT_NO_THROW(OrtSession::Create(GetOrtEnv(), trivial.data(), trivial.size(), options.get()));
+    ASSERT_EQ(configured->provider_options.size(), 3u);
+    EXPECT_EQ(configured->provider_options[0].name, "WebGPU");
+    EXPECT_EQ(configured->provider_options[1].name, "nonexistent_provider");
+  }
+}
+
+TEST(ConfigTest, ModelProviderSelectionSurvivesUnrelatedEngramOverlays) {
+  Config config;
+  OverlayConfig(config, R"({"model":{"engram":{"session_options":{"provider_options":[{"WebGPU":{}}]}}}})");
+  SetModelProvider(config, "cuda");
+  OverlayConfig(config, R"({"search":{"max_length":8},"model":{"engram":{"session_options":{"intra_op_num_threads":2}}}})");
+  const auto& options = *config.model.engram.session_options;
+  EXPECT_EQ(options.providers, (std::vector<std::string>{"cuda"}));
+  ASSERT_EQ(options.provider_options.size(), 2u);
+  EXPECT_EQ(options.provider_options[0].name, "WebGPU");
+  EXPECT_EQ(options.intra_op_num_threads, 2);
+
+  OverlayConfig(config, R"({"model":{"engram":{"session_options":{"provider_options":[{"CPU":{}}]}}}})");
+  EXPECT_EQ(config.model.engram.session_options->providers, (std::vector<std::string>{"WebGPU", "cuda", "CPU"}));
+}
+
+TEST(ConfigTest, ModelProviderSelectionSurvivesAuxiliarySessionResolution) {
+  Config config;
+  config.model.decoder.session_options.provider_options = {{"WebGPU", {}}};
+  config.model.qwen38_graph.head.session_options.emplace().provider_options = {{"WebGPU", {}}};
+  SetModelProvider(config, "CPU");
+  for (bool inherit : {false, true}) {
+    for (const auto& configured : {std::optional<Config::SessionOptions>{},
+                                   config.model.qwen38_graph.head.session_options}) {
+      const auto resolved = ResolveQwen38AuxiliarySessionOptions(config.model.decoder.session_options, configured, inherit);
+      auto options = OrtSessionOptions::Create();
+      EXPECT_NO_THROW(SetProviderSessionOptions(*options, resolved.providers, resolved.provider_options, false, config,
+                                                false, resolved.providers_explicitly_selected));
+      EXPECT_EQ(resolved.providers, (std::vector<std::string>{"CPU"}));
+    }
+  }
+}
+
+TEST(ConfigTest, ModelProviderCpuLoadsEngineWithExplicitEmbeddingSessionOptions) {
+  // Real ONNX graphs: Cast + Unsqueeze maps int64[n] IDs to float[n,1]; the decoder forwards those embeddings.
+  constexpr uint8_t embedding[] = {
+      0x08, 0x09, 0x3a, 0xa1, 0x01, 0x0a, 0x22, 0x0a, 0x09, 0x69, 0x6e, 0x70, 0x75, 0x74, 0x5f, 0x69,
+      0x64, 0x73, 0x12, 0x04, 0x63, 0x61, 0x73, 0x74, 0x22, 0x04, 0x43, 0x61, 0x73, 0x74, 0x2a, 0x09,
+      0x0a, 0x02, 0x74, 0x6f, 0x18, 0x01, 0xa0, 0x01, 0x02, 0x0a, 0x26, 0x0a, 0x04, 0x63, 0x61, 0x73,
+      0x74, 0x0a, 0x04, 0x61, 0x78, 0x69, 0x73, 0x12, 0x0d, 0x69, 0x6e, 0x70, 0x75, 0x74, 0x73, 0x5f,
+      0x65, 0x6d, 0x62, 0x65, 0x64, 0x73, 0x22, 0x09, 0x55, 0x6e, 0x73, 0x71, 0x75, 0x65, 0x65, 0x7a,
+      0x65, 0x12, 0x09, 0x65, 0x6d, 0x62, 0x65, 0x64, 0x64, 0x69, 0x6e, 0x67, 0x2a, 0x0c, 0x08, 0x01,
+      0x10, 0x07, 0x38, 0x01, 0x42, 0x04, 0x61, 0x78, 0x69, 0x73, 0x5a, 0x18, 0x0a, 0x09, 0x69, 0x6e,
+      0x70, 0x75, 0x74, 0x5f, 0x69, 0x64, 0x73, 0x12, 0x0b, 0x0a, 0x09, 0x08, 0x07, 0x12, 0x05, 0x0a,
+      0x03, 0x12, 0x01, 0x6e, 0x62, 0x20, 0x0a, 0x0d, 0x69, 0x6e, 0x70, 0x75, 0x74, 0x73, 0x5f, 0x65,
+      0x6d, 0x62, 0x65, 0x64, 0x73, 0x12, 0x0f, 0x0a, 0x0d, 0x08, 0x01, 0x12, 0x09, 0x0a, 0x03, 0x12,
+      0x01, 0x6e, 0x0a, 0x02, 0x08, 0x01, 0x42, 0x02, 0x10, 0x15};
+  constexpr uint8_t decoder[] = {
+      0x08, 0x09, 0x3a, 0x69, 0x0a, 0x21, 0x0a, 0x0d, 0x69, 0x6e, 0x70, 0x75, 0x74, 0x73, 0x5f, 0x65,
+      0x6d, 0x62, 0x65, 0x64, 0x73, 0x12, 0x06, 0x6c, 0x6f, 0x67, 0x69, 0x74, 0x73, 0x22, 0x08, 0x49,
+      0x64, 0x65, 0x6e, 0x74, 0x69, 0x74, 0x79, 0x12, 0x07, 0x64, 0x65, 0x63, 0x6f, 0x64, 0x65, 0x72,
+      0x5a, 0x20, 0x0a, 0x0d, 0x69, 0x6e, 0x70, 0x75, 0x74, 0x73, 0x5f, 0x65, 0x6d, 0x62, 0x65, 0x64,
+      0x73, 0x12, 0x0f, 0x0a, 0x0d, 0x08, 0x01, 0x12, 0x09, 0x0a, 0x03, 0x12, 0x01, 0x6e, 0x0a, 0x02,
+      0x08, 0x01, 0x62, 0x19, 0x0a, 0x06, 0x6c, 0x6f, 0x67, 0x69, 0x74, 0x73, 0x12, 0x0f, 0x0a, 0x0d,
+      0x08, 0x01, 0x12, 0x09, 0x0a, 0x03, 0x12, 0x01, 0x6e, 0x0a, 0x02, 0x08, 0x01, 0x42, 0x02, 0x10,
+      0x15};
+  const auto directory = std::filesystem::temp_directory_path() /
+                         ("genai_cpu_embedding_" + std::to_string(std::random_device{}()));
+  ASSERT_TRUE(std::filesystem::create_directory(directory));
+  struct Cleanup {
+    std::filesystem::path path;
+    ~Cleanup() {
+      std::error_code ignored;
+      std::filesystem::remove_all(path, ignored);
+    }
+  } cleanup{directory};
+  for (const auto& [name, bytes] : {std::pair{"embedding.onnx", std::span<const uint8_t>{embedding}},
+                                    std::pair{"decoder.onnx", std::span<const uint8_t>{decoder}}}) {
+    std::ofstream out{directory / name, std::ios::binary};
+    out.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    ASSERT_TRUE(out.good());
+  }
+
+  for (bool retained_provider : {false, true}) {
+    auto config = std::make_unique<Config>(fs::path{MODEL_PATH "engine/dummy-decoder"}, "");
+    config->config_path = fs::path{directory.string()};
+    config->engine.dynamic_batching.emplace();
+    config->model.type = "llama";
+    config->model.decoder.hidden_size = 1;
+    config->model.embedding.filename = "embedding.onnx";
+    config->model.embedding.session_options.emplace().intra_op_num_threads = 2;
+    if (retained_provider) {
+      config->model.embedding.session_options->provider_options = {{"WebGPU", {}}};
+    }
+
+    SetModelProvider(*config, "CPU");
+    auto model = std::dynamic_pointer_cast<DecoderOnly_Model>(CreateModel(GetOrtEnv(), std::move(config)));
+    ASSERT_NE(model, nullptr);
+    ASSERT_NE(model->cpu_embedding_, nullptr);
+    EXPECT_EQ(model->cpu_embedding_->hidden_size_, 1);
+    EXPECT_EQ(model->config_->model.embedding.session_options->intra_op_num_threads, 2);
+    if (retained_provider) {
+      EXPECT_EQ(model->config_->model.embedding.session_options->provider_options[0].name, "WebGPU");
+    }
+  }
 }
 
 TEST(ConfigTest, ParsesDeterministicCompute) {
