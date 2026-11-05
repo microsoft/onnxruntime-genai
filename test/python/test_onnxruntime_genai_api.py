@@ -125,7 +125,7 @@ def test_asr_example_decodes_all_generated_results(test_data_path, asr_example, 
 
 @pytest.mark.parametrize(
     "timestamp_level,use_vad",
-    [("off", False), ("word", False), ("segment", False), ("all", False), ("all", True)],
+    [("off", False), ("word", False), ("segment", False), ("word", True)],
 )
 def test_asr_example_formats_speech_timestamps(test_data_path, asr_example, timestamp_level, use_vad):
     model_path = os.getenv("NEMOTRON_STREAMING_MODEL_PATH") or os.fspath(

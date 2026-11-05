@@ -81,7 +81,7 @@ TEST(AudioSpeechValidationTests, NemotronTimestampConfiguration) {
 
   Generators::NemotronConfig nemotron_config;
   EXPECT_NO_THROW(nemotron_config.PopulateFromConfig(config));
-  EXPECT_EQ(nemotron_config.timestamp_level, Generators::Config::TimestampLevel::Segment);
+  EXPECT_EQ(nemotron_config.timestamp_level, Generators::Config::TimestampLevel::Word);
   EXPECT_EQ(Generators::GetSegmentGapThresholdFrames(config.model), 13);
 }
 
@@ -564,57 +564,67 @@ TEST_F(MetadataCoreStateTests, RepeatedVocabularyIdsKeepPositionSpecificInterval
 }
 
 TEST_F(MetadataCoreStateTests, OpaqueFieldGettersReturnBorrowedRecords) {
-  auto processor = OgaASRPostProcessor::Create(*reinterpret_cast<const OgaGenerator*>(generator.get()));
-  size_t record_count = 0;
-  std::string words;
-  std::string segments;
-  const auto check_records = [&] {
-    size_t result_index = 0;
-    for (const auto* result : processor->GetNextResults()) {
-      const auto* native_result = OgaASRPostProcessorGetResult(processor.get(), result_index);
-      ASSERT_NE(result, nullptr);
-      EXPECT_EQ(result, native_result);
-      EXPECT_EQ(result->GetText(), OgaASRPostProcessorResultGetText(native_result));
-      const auto* timestamps = result->GetTimestampResult();
-      ASSERT_NE(timestamps, nullptr);
-      EXPECT_EQ(timestamps, OgaASRPostProcessorResultGetTimestampResult(native_result));
-      ++result_index;
-      EXPECT_EQ(timestamps->GetTimestampRecord(static_cast<OgaTimestampRecordKind>(99), 0), nullptr);
-      for (auto kind : {OgaTimestampRecordKind_Words, OgaTimestampRecordKind_Segments}) {
-        const bool use_segments = kind == OgaTimestampRecordKind_Segments;
-        const auto count = use_segments ? timestamps->GetSegmentCount() : timestamps->GetWordCount();
-        EXPECT_EQ(count, use_segments ? OgaASRPostProcessorTimestampResultGetSegmentCount(timestamps)
-                                      : OgaASRPostProcessorTimestampResultGetWordCount(timestamps));
-        for (size_t index = 0; index < count; ++index) {
-          const auto* record = timestamps->GetTimestampRecord(kind, index);
-          const auto* native_record = OgaASRPostProcessorTimestampResultGetTimestampRecord(timestamps, kind, index);
-          ASSERT_NE(record, nullptr);
-          EXPECT_EQ(record, native_record);
-          ++record_count;
-          const auto frames = record->GetFrameInterval();
-          EXPECT_EQ(frames.first, 4);
-          EXPECT_EQ(frames.second, 5);
-          const auto times = record->GetTimestampInterval();
-          EXPECT_DOUBLE_EQ(times.first, 0.4);
-          EXPECT_DOUBLE_EQ(times.second, 0.5);
-          (use_segments ? segments : words).append(record->GetText());
-          EXPECT_EQ(record->GetText(), OgaASRPostProcessorTimestampRecordGetText(native_record));
-          EXPECT_EQ(frames.first, OgaASRPostProcessorTimestampRecordGetStartFrame(native_record));
-          EXPECT_EQ(frames.second, OgaASRPostProcessorTimestampRecordGetStopFrame(native_record));
-          EXPECT_DOUBLE_EQ(times.first, OgaASRPostProcessorTimestampRecordGetStartTime(native_record));
-          EXPECT_DOUBLE_EQ(times.second, OgaASRPostProcessorTimestampRecordGetStopTime(native_record));
+  for (const auto level : {Generators::Config::TimestampLevel::Word, Generators::Config::TimestampLevel::Segment}) {
+    model->config_->model.timestamp_level = level;
+    auto processor = OgaASRPostProcessor::Create(*reinterpret_cast<const OgaGenerator*>(generator.get()));
+    size_t record_count = 0;
+    std::string words;
+    std::string segments;
+    const auto check_records = [&] {
+      size_t result_index = 0;
+      for (const auto* result : processor->GetNextResults()) {
+        const auto* native_result = OgaASRPostProcessorGetResult(processor.get(), result_index);
+        ASSERT_NE(result, nullptr);
+        EXPECT_EQ(result, native_result);
+        EXPECT_EQ(result->GetText(), OgaASRPostProcessorResultGetText(native_result));
+        const auto* timestamps = result->GetTimestampResult();
+        ASSERT_NE(timestamps, nullptr);
+        EXPECT_EQ(timestamps, OgaASRPostProcessorResultGetTimestampResult(native_result));
+        ++result_index;
+        EXPECT_EQ(timestamps->GetTimestampRecord(static_cast<OgaTimestampRecordKind>(99), 0), nullptr);
+        for (auto kind : {OgaTimestampRecordKind_Words, OgaTimestampRecordKind_Segments}) {
+          const bool use_segments = kind == OgaTimestampRecordKind_Segments;
+          const auto count = use_segments ? timestamps->GetSegmentCount() : timestamps->GetWordCount();
+          EXPECT_EQ(count, use_segments ? OgaASRPostProcessorTimestampResultGetSegmentCount(timestamps)
+                                        : OgaASRPostProcessorTimestampResultGetWordCount(timestamps));
+          for (size_t index = 0; index < count; ++index) {
+            const auto* record = timestamps->GetTimestampRecord(kind, index);
+            const auto* native_record = OgaASRPostProcessorTimestampResultGetTimestampRecord(timestamps, kind, index);
+            ASSERT_NE(record, nullptr);
+            EXPECT_TRUE(record->HasTimestamp());
+            EXPECT_EQ(record->GetSpeakerLabel(), nullptr);
+            EXPECT_EQ(record, native_record);
+            ++record_count;
+            const auto frames = record->GetFrameInterval();
+            EXPECT_EQ(frames.first, 4);
+            EXPECT_EQ(frames.second, 5);
+            const auto times = record->GetTimestampInterval();
+            EXPECT_DOUBLE_EQ(times.first, 0.4);
+            EXPECT_DOUBLE_EQ(times.second, 0.5);
+            (use_segments ? segments : words).append(record->GetText());
+            EXPECT_EQ(record->GetText(), OgaASRPostProcessorTimestampRecordGetText(native_record));
+            EXPECT_EQ(frames.first, OgaASRPostProcessorTimestampRecordGetStartFrame(native_record));
+            EXPECT_EQ(frames.second, OgaASRPostProcessorTimestampRecordGetStopFrame(native_record));
+            EXPECT_DOUBLE_EQ(times.first, OgaASRPostProcessorTimestampRecordGetStartTime(native_record));
+            EXPECT_DOUBLE_EQ(times.second, OgaASRPostProcessorTimestampRecordGetStopTime(native_record));
+          }
+          EXPECT_EQ(timestamps->GetTimestampRecord(kind, count), nullptr);
         }
-        EXPECT_EQ(timestamps->GetTimestampRecord(kind, count), nullptr);
       }
+    };
+    processor->ProcessNext();
+    check_records();
+    processor->Finalize();
+    check_records();
+    EXPECT_GT(record_count, 0U);
+    if (level == Generators::Config::TimestampLevel::Word) {
+      EXPECT_EQ(words, "Hello world.");
+      EXPECT_TRUE(segments.empty());
+    } else {
+      EXPECT_EQ(segments, "Hello world.");
+      EXPECT_TRUE(words.empty());
     }
-  };
-  processor->ProcessNext();
-  check_records();
-  processor->Finalize();
-  check_records();
-  EXPECT_GT(record_count, 0U);
-  EXPECT_EQ(words, "Hello world.");
-  EXPECT_EQ(segments, words);
+  }
 }
 
 TEST_F(MetadataCoreStateTests, SegmentGapsAndFinalizationPreserveExactText) {
