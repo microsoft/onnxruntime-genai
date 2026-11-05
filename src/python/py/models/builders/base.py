@@ -854,6 +854,12 @@ class Model:
                 # GQA + Rot.Emb. does not require `position_ids` as input
                 del self.input_names["position_ids"]
 
+        elif self.ep == "cpu" and self.head_size % 8 != 0:
+            # CPU GQA does not support these head sizes. Use the MHA fallback,
+            # which expands K/V heads before invoking the general attention op.
+            self.attention_attrs["op_type"] = "MultiHeadAttention"
+            print("MultiHeadAttention (fallback) is used in this model.")
+
         elif self.is_packed_attn_supported():
             # Change model settings for packed Attention
             self.attention_attrs["op_type"] = "Attention"

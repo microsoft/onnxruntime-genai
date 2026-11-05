@@ -100,10 +100,11 @@ def test_cpu_gqa_uses_fused_rope_only_for_head_sizes_multiple_of_16(head_size, e
 
 
 @pytest.mark.parametrize("head_size", [4, 12, 20])
-def test_cpu_uses_packed_attention_when_gqa_head_size_is_not_multiple_of_8(head_size):
+def test_cpu_uses_multi_head_attention_fallback_when_gqa_head_size_is_not_multiple_of_8(head_size):
     model = _initialize_cpu_gqa(head_size)
 
-    assert model.attention_attrs["op_type"] == "Attention"
+    assert model.attention_attrs["op_type"] == "MultiHeadAttention"
+    assert model.attention_attrs["use_packed_matmul"] is False
     assert model.attention_attrs["use_rope_in_attn"] is False
     assert "position_ids" in model.input_names
 
