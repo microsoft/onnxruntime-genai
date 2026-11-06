@@ -65,7 +65,7 @@ std::unique_ptr<OrtSession> CreateSession(
     session_options->AddConfigEntry(session_config_keys[i], session_config_values[i]);
     constexpr std::string_view webgpu_prefix = "ep.webgpuexecutionprovider.";
     const std::string_view key{session_config_keys[i]};
-    if (reuse_webgpu_options && key.starts_with(webgpu_prefix)) {
+    if (reuse_webgpu_options && key.compare(0, webgpu_prefix.size(), webgpu_prefix) == 0) {
       const auto option_name = key.substr(webgpu_prefix.size());
       auto option = std::find_if(provider_options.options.begin(), provider_options.options.end(),
                                  [option_name](const auto& entry) { return entry.first == option_name; });
