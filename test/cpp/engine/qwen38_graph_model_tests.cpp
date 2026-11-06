@@ -2522,6 +2522,45 @@ TEST(Qwen38DynamicBatchingConfigTest, SingleSlotDynamicBatchingPreservesPreceden
   EXPECT_EQ(ResolveQwen38MaxBatchSize(config), 1u);
 }
 
+TEST(Qwen38DynamicBatchingConfigTest, RejectsRecomputePreemptionBeforeChangingSingleOrMultiSlotConfig) {
+  for (const int slots : {1, 2}) {
+    SCOPED_TRACE(slots);
+    Config config;
+    config.model.context_length = 4096;
+    config.model.qwen38_graph.kv_capacity = 4104;
+    config.model.qwen38_graph.max_batch_size = 4;
+    config.model.qwen38_graph.prefill.chunk = 2048;
+    config.search.max_length = 4096;
+    config.search.batch_size = 4;
+    config.search.chunk_size = 1024;
+    auto& batching = config.engine.dynamic_batching.emplace();
+    batching.max_batch_size = slots;
+    batching.block_size = 256;
+    batching.num_blocks = 16;
+    batching.enable_recompute_preemption = true;
+
+    try {
+      ApplyQwen38DynamicBatchingConfig(config);
+      ADD_FAILURE() << "The non-paged backend must reject recompute preemption.";
+    } catch (const std::runtime_error& error) {
+      EXPECT_STREQ(error.what(),
+                   "qwen38_flash_graph does not support engine.dynamic_batching.enable_recompute_preemption.");
+    }
+
+    ASSERT_TRUE(config.engine.dynamic_batching);
+    EXPECT_TRUE(config.engine.dynamic_batching->enable_recompute_preemption);
+    EXPECT_EQ(config.engine.dynamic_batching->max_batch_size, static_cast<size_t>(slots));
+    EXPECT_EQ(config.model.context_length, 4096);
+    EXPECT_EQ(config.model.qwen38_graph.kv_capacity, 4104);
+    EXPECT_EQ(config.model.qwen38_graph.max_batch_size, 4);
+    EXPECT_FALSE(config.model.qwen38_graph.resolved_max_batch_size);
+    EXPECT_EQ(config.model.qwen38_graph.prefill.chunk, 2048);
+    EXPECT_EQ(config.search.max_length, 4096);
+    EXPECT_EQ(config.search.batch_size, 4);
+    EXPECT_EQ(config.search.chunk_size, 1024u);
+  }
+}
+
 TEST(Qwen38DynamicBatchingConfigTest, RejectsTargetCapacityOverflowingIntRange) {
   Config config;
   config.engine.dynamic_batching.emplace();

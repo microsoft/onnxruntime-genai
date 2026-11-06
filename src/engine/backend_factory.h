@@ -12,6 +12,8 @@ struct EngineBackendBundle {
   BackendCapabilities capabilities;
 };
 
+void ValidateRecomputePreemptionModel(const Config& config);
+
 // Resources/profile selection belongs to Model initialization. This factory only assembles
 // collaborators for that already-selected model and leases its execution context.
 EngineBackendBundle CreateEngineBackend(std::shared_ptr<Model> model);

@@ -61,6 +61,16 @@ TEST(DeviceInterfaceVersionTest, IsPastTheQwen38GraphMaxBatchSizeConfigLayout) {
   EXPECT_GE(kDeviceInterfaceVersion, kVersionOfTheMaxBatchSize);
 }
 
+TEST(DeviceInterfaceVersionTest, IsPastTheRecomputePreemptionConfigLayouts) {
+  constexpr uint32_t kVersionOfThePreemptionFields = 20;
+  EXPECT_GE(kDeviceInterfaceVersion, kVersionOfThePreemptionFields);
+}
+
+TEST(DeviceInterfaceVersionTest, IsPastTheBudgetAndPreemptionConfigLayouts) {
+  constexpr uint32_t kVersionOfEitherUncombinedParent = 20;
+  EXPECT_GT(kDeviceInterfaceVersion, kVersionOfEitherUncombinedParent);
+}
+
 TEST(DeviceSpanTest, RangeUploadForwardsTheByteRangeOfTheSubspan) {
   auto buffer = std::make_shared<RangeUploadRecorder>(16 * sizeof(int32_t));
   auto* recorder = buffer.get();

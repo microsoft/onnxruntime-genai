@@ -968,6 +968,10 @@ struct Config {
         bool Configured() const noexcept { return explicitly_set || Enabled() || !directory.empty(); }
       } snapshot_cache;
       size_t dflash2_max_snapshots{1};  // Budget-limited windowed drafter prefix snapshots; 0 disables.
+      // Permanent construction-time age-based recovery policy, not foreground priority.
+      bool enable_recompute_preemption{false};
+      size_t max_preemptions_per_step{1};
+      size_t min_decode_steps_before_preemption{8};
     };
     std::optional<DynamicBatching> dynamic_batching;  // Dynamic batching settings
 
@@ -1014,6 +1018,10 @@ struct Config {
         std::optional<size_t> max_snapshots;
         std::optional<Engine::DynamicBatching::SnapshotCache> snapshot_cache;
         std::optional<size_t> dflash2_max_snapshots;
+        // Overrides the base age-based policy before Engine construction, including explicit false.
+        std::optional<bool> enable_recompute_preemption;
+        std::optional<size_t> max_preemptions_per_step;
+        std::optional<size_t> min_decode_steps_before_preemption;
       } dynamic_batching;
 
       struct Search {

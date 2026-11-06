@@ -1449,6 +1449,9 @@ def validate_runtime_config(runtime_config: dict[str, Any], generated_config: di
             "max_snapshots",
             "snapshot_cache",
             "dflash2_max_snapshots",
+            "enable_recompute_preemption",
+            "max_preemptions_per_step",
+            "min_decode_steps_before_preemption",
         },
         "runtime_config.engine.dynamic_batching",
     )
@@ -1458,7 +1461,13 @@ def validate_runtime_config(runtime_config: dict[str, Any], generated_config: di
         raise ValueError("runtime_config references absent dynamic_batching configuration")
     if "num_blocks" in dynamic_batching and "gpu_utilization_factor" in dynamic_batching:
         raise ValueError("runtime_config cannot specify both num_blocks and gpu_utilization_factor")
-    for field_name in ("max_batch_size", "max_scheduled_tokens", "num_blocks"):
+    for field_name in (
+        "max_batch_size",
+        "max_scheduled_tokens",
+        "num_blocks",
+        "max_preemptions_per_step",
+        "min_decode_steps_before_preemption",
+    ):
         if field_name not in dynamic_batching:
             continue
         value = dynamic_batching[field_name]
@@ -1466,6 +1475,9 @@ def validate_runtime_config(runtime_config: dict[str, Any], generated_config: di
             raise ValueError(f"runtime_config.engine.dynamic_batching.{field_name} must be a positive integer")
         if value > 2_147_483_647:
             raise ValueError(f"runtime_config.engine.dynamic_batching.{field_name} must be at most 2147483647")
+    if "enable_recompute_preemption" in dynamic_batching:
+        if not isinstance(dynamic_batching["enable_recompute_preemption"], bool):
+            raise ValueError("runtime_config.engine.dynamic_batching.enable_recompute_preemption must be a boolean")
     if dynamic_batching.get("max_batch_size", 1) > 256:
         raise ValueError("runtime_config.engine.dynamic_batching.max_batch_size must be at most 256")
     if "prefix_caching" in dynamic_batching and not isinstance(dynamic_batching["prefix_caching"], bool):
@@ -1716,6 +1728,9 @@ def validate_runtime_profiles(runtime_profiles: Any, generated_config: dict[str,
                 "max_snapshots",
                 "snapshot_cache",
                 "dflash2_max_snapshots",
+                "enable_recompute_preemption",
+                "max_preemptions_per_step",
+                "min_decode_steps_before_preemption",
             },
             f"{path}.overlay.engine.dynamic_batching",
         )

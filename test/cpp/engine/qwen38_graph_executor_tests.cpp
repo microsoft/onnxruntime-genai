@@ -2118,6 +2118,24 @@ TEST_F(Qwen38GraphEngineTest, DynamicBatchingConfigurationIsRejected) {
   EXPECT_THROW(CreateQwen38GraphDependencies(model_, device_), std::runtime_error);
 }
 
+TEST_F(Qwen38GraphEngineTest, MultiSlotDynamicBatchingConfigurationStillRejectsRecomputePreemption) {
+  device_ = std::make_shared<ScriptedQwen38Device>(/*capacity=*/68, /*mtp=*/true, /*max_batch_size=*/2);
+  auto& batching = model_->config_->engine.dynamic_batching.emplace();
+  batching.max_batch_size = 2;
+  {
+    const auto engine = MakeEngine();
+    EXPECT_EQ(engine->GetCapabilities().configured_max_batch_size, 2u);
+  }
+
+  batching.enable_recompute_preemption = true;
+  try {
+    MakeEngine();
+    FAIL() << "The multi-slot non-paged backend must reject recompute preemption.";
+  } catch (const std::runtime_error& error) {
+    EXPECT_STREQ(error.what(), "Recompute preemption requires a compatible dynamic paged cache without auxiliary state.");
+  }
+}
+
 TEST_F(Qwen38GraphEngineTest, InvalidPromptTokenIdsAreRejectedAtTurnAdmissionWithoutPoisoningTheDevice) {
   auto engine = MakeEngine();
   auto request = engine->CreateRequest();

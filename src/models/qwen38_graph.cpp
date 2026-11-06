@@ -3281,8 +3281,12 @@ size_t ResolveQwen38DflashReservedBlocks(const Config& config, size_t block_size
 bool ApplyQwen38DynamicBatchingConfig(Config& config) {
   bool has_dynamic_batching_kv = false;
   if (config.engine.dynamic_batching) {
-    const size_t max_batch = ResolveQwen38MaxBatchSize(config);
     const auto& db = *config.engine.dynamic_batching;
+    if (db.enable_recompute_preemption) {
+      throw std::runtime_error(
+          "qwen38_flash_graph does not support engine.dynamic_batching.enable_recompute_preemption.");
+    }
+    const size_t max_batch = ResolveQwen38MaxBatchSize(config);
     if (db.block_size == 0) {
       throw std::runtime_error("engine.dynamic_batching.block_size must be positive.");
     }
