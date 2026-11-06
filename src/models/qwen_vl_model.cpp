@@ -97,10 +97,9 @@ struct FixedVisionOutputLayout {
 };
 
 std::optional<FixedVisionOutputLayout> GetFixedVisionOutputLayout(
-    const Qwen2_5_VL_PipelineModel& model, const std::string& output_name,
+    const Qwen2_5_VL_PipelineModel& model, std::vector<int64_t> shape, size_t pixel_index,
     OrtValue& pixels, OrtValue* positions, OrtValue* counts, int64_t num_images) {
   if (model.config_->model.type != "gemma4") return std::nullopt;
-  auto shape = model.session_info_.GetOutputShape(output_name);
   if ((shape.size() != 2 && shape.size() != 3) || shape[shape.size() - 2] <= 0) return std::nullopt;
   const int64_t capacity = shape[shape.size() - 2];
   if (shape.size() == 3) {
@@ -110,7 +109,10 @@ std::optional<FixedVisionOutputLayout> GetFixedVisionOutputLayout(
     shape[0] = 1;
   }
   const auto pixel_shape = pixels.GetTensorTypeAndShapeInfo()->GetShape();
-  const auto declared_pixels = model.session_info_.GetInputShape(model.config_->model.vision.inputs.pixel_values);
+  if (pixel_index == SIZE_MAX) {
+    throw std::runtime_error("Gemma 4 fixed-output vision requires a configured pixel input in the vision session");
+  }
+  const auto declared_pixels = model.vision_session_->GetInputTypeInfo(pixel_index)->GetTensorTypeAndShapeInfo().GetShape();
   const auto position_shape = positions ? positions->GetTensorTypeAndShapeInfo()->GetShape()
                                         : std::vector<int64_t>{};
   if (pixel_shape.size() != 3 || declared_pixels.size() != 3 || declared_pixels[0] > 1 ||
@@ -543,11 +545,13 @@ void Qwen2_5_VL_PipelineState::RunSingleSessionVision(const std::vector<ExtraInp
   if (num_images > 1 && pixel_index == SIZE_MAX) {
     throw std::runtime_error("Vision encoder: multi-image input requires a '" + pixel_name + "' session input");
   }
+  const auto output_info = vl_model_.vision_session_->GetOutputTypeInfo(output_index);
+  const auto& output_type_info = output_info->GetTensorTypeAndShapeInfo();
   const auto layout = GetFixedVisionOutputLayout(
-      vl_model_, output_names[output_index], *pixel_values,
+      vl_model_, output_type_info.GetShape(), pixel_index, *pixel_values,
       find_extra_input(vl_model_.config_->model.vision.inputs.pixel_position_ids),
       find_extra_input(Config::Defaults::NumImageTokens), num_images);
-  const auto declared_type = vl_model_.session_info_.GetOutputDataType(output_names[output_index]);
+  const auto declared_type = output_type_info.GetElementType();
   std::unique_ptr<OrtValue> owner;
   if (layout && layout->shape.back() > 0) {
     VisionOutputBytes(layout->backing_tokens, layout->shape.back(), declared_type);

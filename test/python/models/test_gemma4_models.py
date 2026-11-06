@@ -1075,6 +1075,50 @@ def test_gemma4_fixed_output_overlapping_writes(
         del generator
 
 
+def test_gemma4_vision_output_metadata_ignores_embedding_name_collision(
+    test_data_path, tmp_path
+):
+    onnx = pytest.importorskip("onnx")
+    model_path = tmp_path / "vision_output_collision"
+    config_path = _write_pipelined_gemma4(
+        onnx,
+        _get_gemma4_model_path(test_data_path),
+        model_path,
+        feature_type=onnx.TensorProto.FLOAT16,
+    )
+    vision_path = model_path / "dummy_vision.onnx"
+    _create_fixed_output_vision_model(
+        onnx, vision_path, 280, feature_dtype=np.float16
+    )
+    vision = onnx.load(vision_path)
+    vision.graph.output[0].name = "inputs_embeds"
+    for node in vision.graph.node:
+        for i, name in enumerate(node.output):
+            if name == "image_features":
+                node.output[i] = "inputs_embeds"
+    onnx.checker.check_model(vision)
+    onnx.save(vision, vision_path)
+
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["model"]["vision"]["outputs"]["image_features"] = "inputs_embeds"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    model = og.Model(os.fspath(model_path))
+    processor = model.create_multimodal_processor()
+    image_path = _get_test_media_path(test_data_path, Path("images") / "australia.jpg")
+    if not image_path.exists():
+        pytest.skip("Gemma4 test image not available")
+    inputs = processor(GEMMA4_IMAGE_TOKEN, images=og.Images.open(os.fspath(image_path)))
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=4096)
+    generator = og.Generator(model, params)
+    generator.set_inputs(inputs)
+    assert generator.get_input("image_features").shape == (
+        int(_to_numpy(inputs["num_image_tokens"])[0]), 2048
+    )
+    generator.generate_next_token()
+    assert generator.get_next_tokens() == [2]
+
+
 @pytest.mark.parametrize(
     "bad_counts",
     [None, [281], [0], [-1], [1, 1], [np.iinfo(np.int64).max] * 2, np.array([260], dtype=np.int32)],
