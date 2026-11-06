@@ -180,8 +180,11 @@ def save_results(args, results, filename, print_memory_usage=False):
         record.metrics.customized["prompt_processing_latency_ms"] = row["Prompt Processing Latency (ms)"]
         record.metrics.customized["time_to_first_token_ms"] = row["Time to First Token (ms)"]
         record.metrics.customized["time_to_first_token_stddev_ms"] = row["Time to First Token StdDev (ms)"]
-        record.metrics.customized["token_generation_throughput_tps"] = row["Token Generation Throughput (tps)"]
-        record.metrics.customized["token_generation_latency_ms"] = row["Token Generation Latency (ms)"]
+        if pd.notna(row["Token Generation Throughput (tps)"]) and pd.notna(row["Token Generation Latency (ms)"]):
+            record.metrics.customized["token_generation_throughput_tps"] = row["Token Generation Throughput (tps)"]
+            record.metrics.customized["token_generation_latency_ms"] = row["Token Generation Latency (ms)"]
+        else:
+            record.metrics.customized["token_generation_metrics_status"] = "unavailable"
         record.metrics.customized["sampling_throughput_tps"] = row["Sampling Throughput (tps)"]
         record.metrics.customized["sampling_latency_ms"] = row["Sampling Latency (ms)"]
         record.metrics.customized["wall_clock_throughput_tps"] = row["Wall Clock Throughput (tps)"]
@@ -405,7 +408,8 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
 
     tokenize_times = []
     prompt_times = []
-    token_gen_times = []
+    token_gen_latencies = []
+    token_gen_throughputs = []
     sampling_times = []
     wall_clock_times = []
     if args.verbose:
@@ -434,7 +438,8 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         prompt_end_time = time.perf_counter()
         prompt_times.append(prompt_end_time - prompt_start_time)
 
-        target_token_count = gen.token_count() + generation_length
+        prompt_token_count = gen.token_count()
+        target_token_count = prompt_token_count + generation_length
 
         sampling_start_time = time.perf_counter()
         gen.generate_next_token()
@@ -442,17 +447,21 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         sampling_end_time = time.perf_counter()
         sampling_times.append(sampling_end_time - sampling_start_time)
 
-        # Measure token generation
+        # Include the entire loop between first and final token completions,
+        # not just individual calls (which may return buffered tokens).
+        decode_end_time = sampling_end_time
         while not generator_done and gen.token_count() < target_token_count:
-            # Run inference
-            token_gen_start_time = time.perf_counter()
             gen.generate_next_token()
             generator_done = gen.is_done()
-            token_gen_end_time = time.perf_counter()
-            token_gen_times.append(token_gen_end_time - token_gen_start_time)
+            decode_end_time = time.perf_counter()
 
         wall_clock_end_time = time.time()
         wall_clock_times.append(wall_clock_end_time - wall_clock_start_time)
+        post_first_tokens = gen.token_count() - prompt_token_count - 1
+        decode_elapsed_s = decode_end_time - sampling_end_time
+        if post_first_tokens > 0 and np.isfinite(decode_elapsed_s) and decode_elapsed_s > 0:
+            token_gen_latencies.append(decode_elapsed_s * 1000 / post_first_tokens)
+            token_gen_throughputs.append(batch_size * post_first_tokens / decode_elapsed_s)
         if args.print_model_output:
             print(tokenizer.decode(gen.get_sequence(0)))
         if not args.reuse_generator:
@@ -508,12 +517,19 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     print(f"{aggregation_label} Prompt Processing Latency (per token): {per_token_prompt_latency_ms} ms")
     print(f"{aggregation_label} Prompt Processing Throughput (per token): {per_token_prompt_thrpt} tps")
 
-    # Calculate token generation input prep metrics
-    token_gen_latency_s = aggregate_measurements(token_gen_times, args.aggregation)
-    token_gen_latency_ms = token_gen_latency_s * 1000
-    token_gen_thrpt = batch_size * (1 / token_gen_latency_s)
-    print(f"{aggregation_label} Token Generation Latency (per token): {token_gen_latency_ms} ms")
-    print(f"{aggregation_label} Token Generation Throughput (per token): {token_gen_thrpt} tps")
+    # Aggregate request-level decode rates and per-sequence token latencies.
+    if token_gen_latencies:
+        token_gen_latency_ms = aggregate_measurements(token_gen_latencies, args.aggregation)
+        token_gen_thrpt = aggregate_measurements(token_gen_throughputs, args.aggregation)
+        print(f"{aggregation_label} Token Generation Latency (per token): {token_gen_latency_ms} ms")
+        print(f"{aggregation_label} Token Generation Throughput (per token): {token_gen_thrpt} tps")
+    else:
+        token_gen_latency_ms = None
+        token_gen_thrpt = None
+        print(f"{aggregation_label} Token Generation Latency (per token): N/A (no measurable post-first-token decode)")
+        print(
+            f"{aggregation_label} Token Generation Throughput (per token): N/A (no measurable post-first-token decode)"
+        )
 
     # Calculate sampling metrics
     sampling_latency_s = aggregate_measurements(sampling_times, args.aggregation)
