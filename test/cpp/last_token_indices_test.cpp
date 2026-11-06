@@ -80,7 +80,8 @@ class RuntimeLastTokenLogitsTest : public testing::Test {
   }
 
   void RunChunk(const std::vector<int32_t>& tokens, int sequence_length,
-                const std::array<int32_t, 3>& indices, bool expanded = false) {
+                const std::array<int32_t, 3>& indices, bool expanded = false, bool is_prompt = true) {
+    State::PromptInputScope prompt_scope(*state_, is_prompt);
     auto next = SetTokens(tokens, sequence_length);
     if (expanded)
       next = WrapTensor<int32_t>(*model_->p_device_inputs_, *input_ids_);
@@ -152,7 +153,10 @@ TEST_F(RuntimeLastTokenLogitsTest, DeviceTokensDoNotReadAnUnpopulatedHostMirror)
   device_tokens.CopyFrom(tokens);
   auto wrapped = cuda->WrapMemory<int32_t>(device_tokens.Span());
   std::fill(wrapped.CpuSpan().begin(), wrapped.CpuSpan().end(), 0);
-  ASSERT_NO_THROW(logits_->Update(wrapped, 3));
+  {
+    State::PromptInputScope prompt_scope(*state_, true);
+    ASSERT_NO_THROW(logits_->Update(wrapped, 3));
+  }
   const auto* indices = state_->inputs_[1]->GetTensorData<int32_t>();
   EXPECT_EQ((std::vector<int32_t>{indices, indices + 3}), (std::vector<int32_t>{0, 1, 2}));
   auto decode_tokens = cuda->WrapMemory<int32_t>(device_tokens.Span().first(3));
@@ -161,6 +165,35 @@ TEST_F(RuntimeLastTokenLogitsTest, DeviceTokensDoNotReadAnUnpopulatedHostMirror)
   auto* output_binding = state_->outputs_[0];
   logits_->Update(decode_tokens, 1);
   EXPECT_EQ(decode_tokens.GetBuffer().p_cpu_, nullptr);
+  EXPECT_EQ(state_->inputs_[1], index_binding);
+  EXPECT_EQ(state_->outputs_[0], output_binding);
+}
+
+TEST_F(RuntimeLastTokenLogitsTest, SingletonPromptUsesDeviceValuesWithStaleHostMirror) {
+  Initialize();
+  logits_->Add();
+  auto tokens = SetTokens({4, 5, 6}, 1);
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
+  ClearProviders(*config);
+  SetProviderOption(*config, "cuda", {}, {});
+  auto cuda_model = CreateModel(GetOrtEnv(), std::move(config));
+  auto* cuda = cuda_model->p_device_;
+  ASSERT_NE(cuda, nullptr);
+  auto device_tokens = cuda->Allocate<int32_t>(tokens.size());
+  device_tokens.CopyFrom(tokens);
+  auto wrapped = cuda->WrapMemory<int32_t>(device_tokens.Span());
+  std::fill(wrapped.CpuSpan().begin(), wrapped.CpuSpan().end(), 0);
+  State::PromptInputScope prompt_scope(*state_, true);
+  ASSERT_NO_THROW(logits_->Update(wrapped, 1));
+  auto* index_binding = state_->inputs_[1];
+  auto* output_binding = state_->outputs_[0];
+  const auto* indices = index_binding->GetTensorData<int32_t>();
+  EXPECT_EQ((std::vector<int32_t>{indices, indices + 3}), (std::vector<int32_t>{0, 0, 0}));
+
+  tokens = SetTokens({4, 0, 6}, 1);
+  device_tokens.CopyFrom(tokens);
+  std::fill(wrapped.CpuSpan().begin(), wrapped.CpuSpan().end(), 7);
+  EXPECT_THROW(logits_->Update(wrapped, 1), std::invalid_argument);
   EXPECT_EQ(state_->inputs_[1], index_binding);
   EXPECT_EQ(state_->outputs_[0], output_binding);
 }
@@ -192,6 +225,44 @@ TEST_P(RuntimeLastTokenLogitsModesTest, OneTokenPrefillInitializesEveryBoundInde
   RunChunk({7, 8, 9}, 1, {0, 0, 0});
 }
 
+TEST_P(RuntimeLastTokenLogitsModesTest, FinalSingletonPaddingValidatesWithAnExistingZeroIndex) {
+  Initialize("pruned.onnx", std::get<0>(GetParam()), std::get<1>(GetParam()));
+  logits_->Add();
+  RunChunk({4, 5, 6}, 1, {0, 0, 0});
+  auto* index_binding = state_->inputs_[1];
+  auto* output_binding = state_->outputs_[0];
+  auto next = SetTokens({4, 0, 6}, 1);
+  State::PromptInputScope prompt_scope(*state_, true);
+  EXPECT_THROW(logits_->Update(next, 1), std::invalid_argument);
+  EXPECT_NO_THROW(logits_->Update(next, 1, /*all_tokens_valid=*/false, /*is_final_chunk=*/false));
+  EXPECT_EQ(state_->inputs_[1], index_binding);
+  EXPECT_EQ(state_->outputs_[0], output_binding);
+}
+
+TEST_P(RuntimeLastTokenLogitsModesTest, GeneratedPadDoesNotValidateOrRebind) {
+  Initialize("pruned.onnx", std::get<0>(GetParam()), std::get<1>(GetParam()));
+  logits_->Add();
+  RunChunk({4, 5, 6}, 1, {0, 0, 0});
+  auto* index_binding = state_->inputs_[1];
+  auto* output_binding = state_->outputs_[0];
+  RunChunk({0, 0, 0}, 1, {0, 0, 0}, /*expanded=*/false, /*is_prompt=*/false);
+  EXPECT_EQ(state_->inputs_[1], index_binding);
+  EXPECT_EQ(state_->outputs_[0], output_binding);
+}
+
+TEST_F(RuntimeLastTokenLogitsTest, PromptScopeRestoresTokenOriginAfterAnException) {
+  Initialize();
+  EXPECT_FALSE(state_->IsPromptInput());
+  EXPECT_THROW(
+      [&] {
+        State::PromptInputScope prompt_scope(*state_, true);
+        EXPECT_TRUE(state_->IsPromptInput());
+        throw std::invalid_argument("test prompt failure");
+      }(),
+      std::invalid_argument);
+  EXPECT_FALSE(state_->IsPromptInput());
+}
+
 TEST_F(RuntimeLastTokenLogitsTest, InvalidChunkPreservesExistingIndexAndOutputBindings) {
   Initialize("pruned.onnx", true, 2);
   logits_->Add();
@@ -200,6 +271,7 @@ TEST_F(RuntimeLastTokenLogitsTest, InvalidChunkPreservesExistingIndexAndOutputBi
   auto* indices = state_->inputs_[1];
   auto* output = state_->outputs_[0];
   auto next = SetTokens({8, 0, 0, 0, 9, 10}, 2);
+  State::PromptInputScope prompt_scope(*state_, true);
   EXPECT_THROW(logits_->Update(next, 2), std::invalid_argument);
   EXPECT_EQ(state_->inputs_[1], indices);
   EXPECT_EQ(state_->outputs_[0], output);

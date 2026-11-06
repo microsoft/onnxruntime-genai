@@ -101,6 +101,65 @@ TEST_F(LongRopeContextTest, ChunkedPrefillAcceptsDiscardedPaddingOnlyChunks) {
   ExpectConsistentCache(*generator);
 }
 
+TEST_F(LongRopeContextTest, RuntimeIndicesRejectPaddingOnlyFinalSingletonChunks) {
+  auto config = OgaConfig::Create(MODEL_PATH "longrope-context-runtime-indices");
+  config->Overlay(R"({"model":{"pad_token_id":0,"eos_token_id":2}})");
+  model = OgaModel::Create(*config);
+  for (int chunk : {0, 1, 2}) {
+    for (const auto& prompt : {std::vector<int32_t>{0}, std::vector<int32_t>{1, 1, 0}}) {
+      if (chunk == 0 && prompt.size() > 1)
+        continue;
+      SCOPED_TRACE(testing::Message() << "chunk=" << chunk << " prompt_length=" << prompt.size());
+      auto generator = CreateGenerator(chunk);
+      try {
+        generator->AppendTokens(prompt);
+        ADD_FAILURE() << "Accepted a padding-only final singleton prompt chunk";
+      } catch (const std::runtime_error& error) {
+        EXPECT_NE(std::string(error.what()).find("non-padding token in each current chunk"), std::string::npos);
+      }
+    }
+  }
+}
+
+TEST_F(LongRopeContextTest, RuntimeIndicesValidateAppendedSingletonPrompts) {
+  auto config = OgaConfig::Create(MODEL_PATH "longrope-context-runtime-indices");
+  config->Overlay(R"({"model":{"pad_token_id":0,"eos_token_id":2}})");
+  model = OgaModel::Create(*config);
+  for (int chunk : {0, 1, 2}) {
+    SCOPED_TRACE(testing::Message() << "chunk=" << chunk);
+    auto generator = CreateGenerator(chunk);
+    ASSERT_NO_THROW(generator->AppendTokens(std::vector<int32_t>{1}));
+    ExpectConsistentCache(*generator);
+    EXPECT_THROW(generator->AppendTokens(std::vector<int32_t>{0}), std::runtime_error);
+
+    generator = CreateGenerator(chunk);
+    ASSERT_NO_THROW(generator->AppendTokens(std::vector<int32_t>{0, 1}));
+    ExpectConsistentCache(*generator);
+  }
+}
+
+TEST_F(LongRopeContextTest, GeneratedPadTokenRemainsValidWithoutReplay) {
+  for (const auto* path : {MODEL_PATH "longrope-context", MODEL_PATH "longrope-context-runtime-indices"}) {
+    auto config = OgaConfig::Create(path);
+    config->Overlay(R"({"model":{"pad_token_id":1,"eos_token_id":2}})");
+    model = OgaModel::Create(*config);
+    for (int chunk : {0, 1, 2}) {
+      SCOPED_TRACE(testing::Message() << "path=" << path << " chunk=" << chunk);
+      auto generator = CreateGenerator(chunk);
+      generator->AppendTokens(std::vector<int32_t>{0});
+      std::array<float, 3> forced_logits{0, 10, -10};
+      generator->SetLogits(*OgaTensor::Create(forced_logits.data(), std::array<int64_t, 2>{1, 3}));
+      generator->GenerateNextToken();
+      ASSERT_EQ(generator->GetSequenceData(0)[1], 1);
+      ExpectConsistentCache(*generator);
+      generator->GenerateNextToken();
+      EXPECT_EQ(generator->GetSequenceData(0)[2], 0);
+      ASSERT_NO_THROW(generator->AppendTokens(std::vector<int32_t>{0}));
+      ExpectConsistentCache(*generator);
+    }
+  }
+}
+
 TEST_F(LongRopeContextTest, OrdinaryPromptStillIgnoresTrailingPadding) {
   auto config = OgaConfig::Create(MODEL_PATH "longrope-context");
   config->Overlay(R"({"model":{"pad_token_id":1,"eos_token_id":2}})");

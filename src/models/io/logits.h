@@ -16,6 +16,7 @@ struct Logits {
   // For first iteration, find last token of each beam and store it in output_last_tokens_.
   DeviceSpan<float> Get(bool all_tokens_valid = false);
 
+  // PromptInputScope enables padding validation, including one-token final chunks.
   // Token rows may be logical batch rows or already expanded over beams.
   void Update(const DeviceSpan<int32_t>& next_tokens, size_t new_kv_length,
               bool all_tokens_valid = false, bool is_final_chunk = true);

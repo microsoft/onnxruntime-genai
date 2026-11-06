@@ -771,6 +771,7 @@ void MultiModalPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extr
 }
 
 DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
+  State::PromptInputScope prompt_scope(*decoder_state_, IsPromptInput());
   // Pipeline state defines the pipeline of the execution of the models
   // Prompt stage:
   //   - pixel_values, [image_attention_mask], image_sizes -> |vision_model| -> image_features

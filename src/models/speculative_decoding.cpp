@@ -164,6 +164,8 @@ SpeculativeDecodingState::SpeculativeDecodingState(const SpeculativeDecodingMode
 DeviceSpan<float> SpeculativeDecodingState::Run(int total_length,
                                                 DeviceSpan<int32_t>& next_tokens,
                                                 DeviceSpan<int32_t> next_indices) {
+  State::PromptInputScope target_prompt_scope(*target_state_, IsPromptInput());
+  State::PromptInputScope draft_prompt_scope(*draft_state_, IsPromptInput());
   const int vocab_size = params_->config.model.vocab_size;
   auto draft_logits = draft_state_->Run(total_length, next_tokens, next_indices);
   auto cpu_draft = draft_logits.CopyDeviceToCpu();

@@ -12,6 +12,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <utility>
 #include "models/io/adapters.h"
 #include "models/io/extra_outputs.h"
 
@@ -98,6 +99,21 @@ struct State {
   virtual void DiscardNextLogits() {}
   virtual void StartTurn() {}
 
+  class PromptInputScope {
+   public:
+    PromptInputScope(State& state, bool is_prompt)
+        : state_{state}, previous_{std::exchange(state.is_prompt_input_, is_prompt)} {}
+    ~PromptInputScope() { state_.is_prompt_input_ = previous_; }
+    PromptInputScope(const PromptInputScope&) = delete;
+    PromptInputScope& operator=(const PromptInputScope&) = delete;
+
+   private:
+    State& state_;
+    bool previous_;
+  };
+
+  bool IsPromptInput() const { return is_prompt_input_; }
+
   void DumpInputs();
   void DumpOutputs();
 
@@ -127,6 +143,8 @@ struct State {
   std::unique_ptr<OrtRunOptions> run_options_;
 
  private:
+  // Generated and replayed tokens are valid even when their ID equals PAD.
+  bool is_prompt_input_{};
   // Capture identity includes input length, execution variant, and active adapters.
   // IDs are unique across states sharing a session and stay owned until destruction.
   GraphAnnotationIds graph_ids_;

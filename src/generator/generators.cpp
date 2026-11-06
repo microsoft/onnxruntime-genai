@@ -826,7 +826,7 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
     search_->AppendTokens(input_ids_device);
   } else {
     search_->AppendTokens(input_ids_device);
-    ComputeLogits(input_ids_device);
+    ComputeLogits(input_ids_device, /*is_prompt=*/true);
   }
 
   generation_telemetry_.CompleteAppend(
@@ -863,7 +863,7 @@ void Generator::AppendTokens(DeviceSpan<int32_t> input_ids) {
   }
   search_->AppendTokens(input_ids);
   computed_logits_ = false;
-  ComputeLogits(input_ids);
+  ComputeLogits(input_ids, /*is_prompt=*/true);
 }
 
 void Generator::RunGeneratedToken() {
@@ -915,7 +915,7 @@ void Generator::SetInputs(const NamedTensors& named_tensors) {
   }
 }
 
-void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
+void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens, bool is_prompt) {
   if (computed_logits_)
     throw std::runtime_error("ComputeLogits called again without calling AppendTokens or GenerateNextToken first");
 
@@ -924,7 +924,7 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
     guidance_logits_processor_->CommitTokens(next_tokens_span);
   }
 
-  auto logits = RunWithRopeCache(next_tokens);
+  auto logits = RunWithRopeCache(next_tokens, is_prompt);
   if (g_log.enabled && g_log.model_logits) {
     auto& stream = Log("model_logits");
     DumpValues(stream, Ort::TypeToTensorType<float>, logits.CopyDeviceToCpu().data(), logits.size());
@@ -965,7 +965,7 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
   computed_logits_ = true;
 }
 
-DeviceSpan<float> Generator::RunWithRopeCache(DeviceSpan<int32_t> next_tokens) {
+DeviceSpan<float> Generator::RunWithRopeCache(DeviceSpan<int32_t> next_tokens, bool is_prompt) {
   const int length = search_->GetSequenceLength();
   const bool replay = rope_context_threshold_ != 0 && rope_cache_length_ > 0 &&
                       (rope_cache_length_ >= rope_context_threshold_) != (length >= rope_context_threshold_);
@@ -976,6 +976,7 @@ DeviceSpan<float> Generator::RunWithRopeCache(DeviceSpan<int32_t> next_tokens) {
     next_tokens.CopyDeviceToCpu();
   }
 
+  State::PromptInputScope prompt_scope(*state_, is_prompt && !replay);
   auto logits = replay ? static_cast<DecoderOnly_State&>(*state_).Run(length, next_tokens, search_->GetNextIndices(), true)
                        : state_->Run(length, next_tokens, search_->GetNextIndices());
   rope_cache_length_ = length;
