@@ -1075,9 +1075,7 @@ def test_gemma4_fixed_output_overlapping_writes(
         del generator
 
 
-def test_gemma4_vision_output_metadata_ignores_embedding_name_collision(
-    test_data_path, tmp_path
-):
+def test_gemma4_vision_output_metadata_ignores_embedding_name_collision(test_data_path, tmp_path):
     onnx = pytest.importorskip("onnx")
     model_path = tmp_path / "vision_output_collision"
     config_path = _write_pipelined_gemma4(
@@ -1087,9 +1085,7 @@ def test_gemma4_vision_output_metadata_ignores_embedding_name_collision(
         feature_type=onnx.TensorProto.FLOAT16,
     )
     vision_path = model_path / "dummy_vision.onnx"
-    _create_fixed_output_vision_model(
-        onnx, vision_path, 280, feature_dtype=np.float16
-    )
+    _create_fixed_output_vision_model(onnx, vision_path, 280, feature_dtype=np.float16)
     vision = onnx.load(vision_path)
     vision.graph.output[0].name = "inputs_embeds"
     for node in vision.graph.node:
@@ -1112,9 +1108,45 @@ def test_gemma4_vision_output_metadata_ignores_embedding_name_collision(
     params.set_search_options(max_length=4096)
     generator = og.Generator(model, params)
     generator.set_inputs(inputs)
-    assert generator.get_input("image_features").shape == (
-        int(_to_numpy(inputs["num_image_tokens"])[0]), 2048
-    )
+    assert generator.get_input("image_features").shape == (int(_to_numpy(inputs["num_image_tokens"])[0]), 2048)
+    generator.generate_next_token()
+    assert generator.get_next_tokens() == [2]
+
+
+def test_gemma4_fixed_output_accepts_single_image_rank2_inputs(test_data_path, tmp_path):
+    onnx = pytest.importorskip("onnx")
+    model_path = tmp_path / "rank2_vision"
+    _write_pipelined_gemma4(onnx, _get_gemma4_model_path(test_data_path), model_path)
+    vision_path = model_path / "dummy_vision.onnx"
+    _create_fixed_output_vision_model(onnx, vision_path, 280)
+    vision = onnx.load(vision_path)
+    for input_value, batched_name in zip(vision.graph.input, ("batched_pixels", "batched_positions"), strict=True):
+        input_name = input_value.name
+        del input_value.type.tensor_type.shape.dim[0]
+        for node in vision.graph.node:
+            for i, name in enumerate(node.input):
+                if name == input_name:
+                    node.input[i] = batched_name
+        vision.graph.node.insert(
+            0, onnx.helper.make_node("Unsqueeze", [input_name, "input_batch_axis"], [batched_name])
+        )
+    vision.graph.initializer.append(onnx.numpy_helper.from_array(np.array([0], dtype=np.int64), "input_batch_axis"))
+    onnx.checker.check_model(vision)
+    onnx.save(vision, vision_path)
+
+    model = og.Model(os.fspath(model_path))
+    processor = model.create_multimodal_processor()
+    image_path = _get_test_media_path(test_data_path, Path("images") / "australia.jpg")
+    if not image_path.exists():
+        pytest.skip("Gemma4 test image not available")
+    inputs = processor(GEMMA4_IMAGE_TOKEN, images=og.Images.open(os.fspath(image_path)))
+    inputs["pixel_values"] = _to_numpy(inputs["pixel_values"])[0]
+    inputs["pixel_position_ids"] = _to_numpy(inputs["pixel_position_ids"])[0]
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=4096)
+    generator = og.Generator(model, params)
+    generator.set_inputs(inputs)
+    assert generator.get_input("image_features").shape == (int(_to_numpy(inputs["num_image_tokens"])[0]), 2048)
     generator.generate_next_token()
     assert generator.get_next_tokens() == [2]
 
@@ -1449,14 +1481,10 @@ def _write_pipelined_gemma4(
     return config_path
 
 
-def test_gemma4_vision_input_metadata_ignores_decoder_name_collision(
-    test_data_path, tmp_path
-):
+def test_gemma4_vision_input_metadata_ignores_decoder_name_collision(test_data_path, tmp_path):
     onnx = pytest.importorskip("onnx")
     model_path = tmp_path / "vision_position_collision"
-    config_path = _write_pipelined_gemma4(
-        onnx, _get_gemma4_model_path(test_data_path), model_path
-    )
+    config_path = _write_pipelined_gemma4(onnx, _get_gemma4_model_path(test_data_path), model_path)
     vision_path = model_path / "dummy_vision.onnx"
     vision = onnx.load(vision_path)
     vision.graph.input[1].name = "position_ids"

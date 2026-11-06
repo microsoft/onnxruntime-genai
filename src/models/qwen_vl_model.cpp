@@ -115,10 +115,14 @@ std::optional<FixedVisionOutputLayout> GetFixedVisionOutputLayout(
   const auto declared_pixels = model.vision_session_->GetInputTypeInfo(pixel_index)->GetTensorTypeAndShapeInfo().GetShape();
   const auto position_shape = positions ? positions->GetTensorTypeAndShapeInfo()->GetShape()
                                         : std::vector<int64_t>{};
-  if (pixel_shape.size() != 3 || declared_pixels.size() != 3 || declared_pixels[0] > 1 ||
-      position_shape.size() != 3 || position_shape[0] != num_images ||
-      position_shape[1] != pixel_shape[1] || position_shape[2] != 2) {
-    throw std::runtime_error("Gemma 4 fixed-output vision requires matching rank-3 per-image pixel and position inputs");
+  const bool rank3 = pixel_shape.size() == 3 && declared_pixels.size() == 3 && declared_pixels[0] <= 1 &&
+                     position_shape.size() == 3 && position_shape[0] == num_images &&
+                     position_shape[1] == pixel_shape[1] && position_shape[2] == 2;
+  const bool rank2 = num_images == 1 && pixel_shape.size() == 2 && declared_pixels.size() == 2 &&
+                     position_shape.size() == 2 && position_shape[0] == pixel_shape[0] &&
+                     position_shape[1] == 2;
+  if (!rank3 && !rank2) {
+    throw std::runtime_error("Gemma 4 fixed-output vision requires matching rank-3 inputs or single-image rank-2 inputs");
   }
   if (!counts || counts->GetTensorTypeAndShapeInfo()->GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64 ||
       counts->GetTensorTypeAndShapeInfo()->GetElementCount() != static_cast<size_t>(num_images)) {
