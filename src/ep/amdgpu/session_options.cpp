@@ -113,8 +113,8 @@ void SetStaticPaddingConfig(OrtSessionOptions& session_options, const Config& co
 void ReleaseOwnedUmbrellaEp(OrtEnv& env, bool& owns_registration) {
   // genai releases the library + its OrtEnv-shared allocators only when it owns the registration; a host
   // that registered them keeps both. env and owns_registration are passed in (not fetched via
-  // GetOrtEnv() / GetOrtGlobals()) because ~OrtGlobals calls this while g_ort_globals_mutex is held, so
-  // re-entering those accessors — including via FindRegisteredEpDevices — would re-lock it and deadlock.
+  // GetOrtEnv() / GetOrtGlobals()) because ~OrtGlobals runs while global re-creation is blocked.
+  // Re-entering those accessors — including via FindRegisteredEpDevices — would wait for teardown itself.
   if (!owns_registration)
     return;
 
