@@ -301,10 +301,6 @@ Gemma4MultiModalProcessor::Gemma4MultiModalProcessor(Config& config, const Sessi
       }
     }
   }
-  if (!unified_ && vision_fixed_num_patches_ > 0 &&
-      vision_fixed_num_patches_ % (kGemma4PoolingKernelSize * kGemma4PoolingKernelSize) != 0) {
-    throw std::runtime_error("Gemma4 vision fixed num_patches must be divisible by 9");
-  }
   const auto image_processor_config = (config.config_path / fs::path(config.model.vision.config_filename)).string();
   CheckResult(OrtxCreateProcessor(image_processor_.ToBeAssigned(), image_processor_config.c_str()));
 

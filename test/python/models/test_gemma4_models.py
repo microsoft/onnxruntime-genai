@@ -850,7 +850,7 @@ def test_gemma4_static_batch_vision_executes_multiple_images(
 
 @pytest.mark.parametrize("fixed_input", ["pixels", "positions", "both"])
 @pytest.mark.parametrize("position_dtype", [np.int32, np.int64])
-@pytest.mark.parametrize("extra_patches", [0, 9, pytest.param(280 * 9, id="beyond-preprocessor-capacity")])
+@pytest.mark.parametrize("extra_patches", [0, 1, 9, pytest.param(280 * 9, id="beyond-preprocessor-capacity")])
 def test_gemma4_fixed_patch_vision_pads_multiple_images(
     test_data_path, tmp_path, fixed_input, position_dtype, extra_patches
 ):
