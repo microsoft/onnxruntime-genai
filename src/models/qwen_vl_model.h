@@ -44,6 +44,7 @@ struct Qwen2_5_VL_PipelineModel : public DecoderOnlyPipelineModel {
 
   std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths,
                                      const GeneratorParams& params) const override;
+  OrtSession* GetVisionSession() const override { return vision_session_.get(); }
 
   // Vision pipeline shared across states (sessions reused).
   std::unique_ptr<QwenVisionPipeline> vision_pipeline_;

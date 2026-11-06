@@ -1405,6 +1405,37 @@ def _write_pipelined_gemma4(
     return config_path
 
 
+def test_gemma4_vision_input_metadata_ignores_decoder_name_collision(
+    test_data_path, tmp_path
+):
+    onnx = pytest.importorskip("onnx")
+    model_path = tmp_path / "vision_position_collision"
+    config_path = _write_pipelined_gemma4(
+        onnx, _get_gemma4_model_path(test_data_path), model_path
+    )
+    vision_path = model_path / "dummy_vision.onnx"
+    vision = onnx.load(vision_path)
+    vision.graph.input[1].name = "position_ids"
+    for node in vision.graph.node:
+        for i, name in enumerate(node.input):
+            if name == "pixel_position_ids":
+                node.input[i] = "position_ids"
+    onnx.checker.check_model(vision)
+    onnx.save(vision, vision_path)
+
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["model"]["vision"]["inputs"]["pixel_position_ids"] = "position_ids"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    model = og.Model(os.fspath(model_path))
+    processor = model.create_multimodal_processor()
+    image_path = _get_test_media_path(test_data_path, Path("images") / "australia.jpg")
+    if not image_path.exists():
+        pytest.skip("Gemma4 test image not available")
+    inputs = processor(GEMMA4_IMAGE_TOKEN, images=og.Images.open(os.fspath(image_path)))
+    patches = int(_to_numpy(inputs["num_image_tokens"])[0]) * 9
+    assert _to_numpy(inputs["pixel_position_ids"]).shape == (1, patches, 2)
+
+
 def test_pipelined_gemma4_fixture_selects_dummy_vision_graph(test_data_path, tmp_path):
     """Inherited vision graph settings must not change what the pipeline fixture executes."""
     onnx = pytest.importorskip("onnx")

@@ -259,8 +259,11 @@ ProcessGemma4Prompt(const Generators::Tokenizer& tokenizer, const std::string& p
 
 }  // namespace
 
-Gemma4MultiModalProcessor::Gemma4MultiModalProcessor(Config& config, const SessionInfo& session_info)
-    : pixel_values_type_{session_info.GetInputDataType(config.model.vision.inputs.pixel_values)} {
+Gemma4MultiModalProcessor::Gemma4MultiModalProcessor(Config& config, const SessionInfo& session_info,
+                                                     const SessionInfo* vision_info, ThreadPool* thread_pool)
+    : Processor(thread_pool),
+      pixel_values_type_{(vision_info ? *vision_info : session_info).GetInputDataType(config.model.vision.inputs.pixel_values)} {
+  const auto& vision_metadata = vision_info ? *vision_info : session_info;
   // gemma-4-12B "unified" is encoder-free: it consumes raw 48px merged pixel
   // patches (patch_dim 6912) and raw 640-sample waveform frames directly. The
   // preprocessing ops (Gemma4ImageTransform at patch_size=48/pooling=1 and
@@ -269,7 +272,7 @@ Gemma4MultiModalProcessor::Gemma4MultiModalProcessor(Config& config, const Sessi
   // audio-token count is applied.
   unified_ = config.model.type == "gemma4_unified";
   if (!unified_) {
-    const auto pixel_shape = session_info.GetInputShape(config.model.vision.inputs.pixel_values);
+    const auto pixel_shape = vision_metadata.GetInputShape(config.model.vision.inputs.pixel_values);
     if (pixel_shape.size() != 2 && pixel_shape.size() != 3) {
       throw std::runtime_error("Gemma4 vision pixel_values input must have rank 2 or 3");
     }
@@ -277,15 +280,15 @@ Gemma4MultiModalProcessor::Gemma4MultiModalProcessor(Config& config, const Sessi
   }
 
   // Query pixel_position_ids type (int32 or int64) if the vision model has this input
-  if (session_info.HasInput(config.model.vision.inputs.pixel_position_ids)) {
-    pixel_position_ids_type_ = session_info.GetInputDataType(config.model.vision.inputs.pixel_position_ids);
+  if (vision_metadata.HasInput(config.model.vision.inputs.pixel_position_ids)) {
+    pixel_position_ids_type_ = vision_metadata.GetInputDataType(config.model.vision.inputs.pixel_position_ids);
     if (pixel_position_ids_type_ != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 &&
         pixel_position_ids_type_ != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
       throw std::runtime_error("Gemma4 pixel_position_ids input must have type INT32 or INT64");
     }
     if (!unified_) {
-      const auto pixel_shape = session_info.GetInputShape(config.model.vision.inputs.pixel_values);
-      const auto position_shape = session_info.GetInputShape(config.model.vision.inputs.pixel_position_ids);
+      const auto pixel_shape = vision_metadata.GetInputShape(config.model.vision.inputs.pixel_values);
+      const auto position_shape = vision_metadata.GetInputShape(config.model.vision.inputs.pixel_position_ids);
       if (position_shape.size() != pixel_shape.size()) {
         throw std::runtime_error("Gemma4 vision pixel_values and pixel_position_ids must have matching ranks");
       }
