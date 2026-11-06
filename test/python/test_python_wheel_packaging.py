@@ -9,6 +9,7 @@ from pathlib import Path
 from zipfile import ZipFile
 
 import pytest
+from packaging.requirements import Requirement
 
 
 @pytest.mark.parametrize(
@@ -21,9 +22,15 @@ import pytest
         ("onnxruntime-genai-winml", "onnxruntime"),
     ],
 )
-def test_sdk_wheel_excludes_ort_and_declares_runtime_dependency(tmp_path, package, dependency):
+@pytest.mark.parametrize("telemetry_enabled", [True, False])
+def test_sdk_wheel_excludes_ort_and_declares_runtime_dependency(tmp_path, package, dependency, telemetry_enabled):
     template = Path(__file__).resolve().parents[2] / "src/python/setup.py.in"
-    setup = template.read_text(encoding="utf-8").replace("@TARGET_NAME@", package).replace("@VERSION_INFO@", "1.0.0")
+    setup = (
+        template.read_text(encoding="utf-8")
+        .replace("@TARGET_NAME@", package)
+        .replace("@VERSION_INFO@", "1.0.0")
+        .replace("@PYTHON_TELEMETRY_ENABLED@", str(telemetry_enabled))
+    )
     (tmp_path / "setup.py").write_text(setup, encoding="utf-8")
     (tmp_path / "package_description.md").write_text("Test package", encoding="utf-8")
     package_dir = tmp_path / "onnxruntime_genai"
@@ -73,4 +80,6 @@ def test_sdk_wheel_excludes_ort_and_declares_runtime_dependency(tmp_path, packag
         (metadata_path,) = (name for name in paths if name.endswith(".dist-info/METADATA"))
         metadata = Parser().parsestr(archive.read(metadata_path).decode("utf-8"))
     assert metadata["Name"] == package
-    assert f"{dependency}>=1.30.0" in metadata.get_all("Requires-Dist")
+    assert Requirement(f"{dependency}>=1.30.0") in [
+        Requirement(requirement) for requirement in metadata.get_all("Requires-Dist")
+    ]

@@ -7,10 +7,12 @@ import runpy
 import shutil
 from pathlib import Path
 
+import pytest
 import setuptools
 
 
-def test_wheel_discovers_all_model_packages(tmp_path, monkeypatch):
+@pytest.mark.parametrize("telemetry_enabled", [False, True])
+def test_wheel_discovers_all_model_packages(tmp_path, monkeypatch, telemetry_enabled):
     root = Path(__file__).resolve().parents[3]
     python_source = root / "src" / "python"
     package = tmp_path / "onnxruntime_genai"
@@ -20,7 +22,9 @@ def test_wheel_discovers_all_model_packages(tmp_path, monkeypatch):
     template = (python_source / "setup.py.in").read_text(encoding="utf-8")
     setup_file = tmp_path / "setup.py"
     setup_file.write_text(
-        template.replace("@TARGET_NAME@", "onnxruntime-genai").replace("@VERSION_INFO@", "0.0.0"),
+        template.replace("@TARGET_NAME@", "onnxruntime-genai")
+        .replace("@VERSION_INFO@", "0.0.0")
+        .replace("@PYTHON_TELEMETRY_ENABLED@", str(telemetry_enabled)),
         encoding="utf-8",
     )
     captured = {}
@@ -29,6 +33,7 @@ def test_wheel_discovers_all_model_packages(tmp_path, monkeypatch):
     runpy.run_path(str(setup_file))
 
     packages = set(captured["packages"])
+    assert ("onnxruntime_genai.telemetry" in packages) is telemetry_enabled
     assert "onnxruntime_genai.models.builders.qwen3_8" in packages
     assert "onnxruntime_genai.models.builders.qwen3_5" in packages
     for initializer in (package / "models").rglob("__init__.py"):
