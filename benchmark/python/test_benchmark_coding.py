@@ -124,7 +124,7 @@ def fake_runtime():
     return SimpleNamespace(
         RequestOptions=FakeOptions,
         TurnOptions=lambda request: FakeOptions(),
-        EngineEventFlags=SimpleNamespace(TOKEN=1, TURN_FINISHED=2, FAILED=4),
+        EngineEventFlags=SimpleNamespace(TOKEN=1, TURN_FINISHED=2, FAILED=4, CAPACITY_BLOCKED=8, RETRYABLE=16),
     )
 
 
@@ -150,6 +150,43 @@ def test_event_pacing_and_cleanup():
 def test_failed_requests_close(engine, cap, message):
     with pytest.raises(RuntimeError, match=message):
         run_request(fake_runtime(), engine, [1, 2], cap)
+    assert engine.request.closed
+
+
+@pytest.mark.parametrize("requestless", [False, True])
+@pytest.mark.parametrize(
+    "flags, message",
+    [
+        (4, "Engine failed with error_code=17"),
+        (8, "Engine capacity-blocked with error_code=17"),
+        (16, "Engine retryable abort with error_code=17"),
+        (4 | 16, "Engine failed with error_code=17"),
+    ],
+)
+def test_native_error_category_precedes_request_ownership(requestless, flags, message):
+    class ErrorEngine(FakeEngine):
+        def run(self, events):
+            batch = super().run(events)
+            if requestless:
+                batch[0].request = None
+            return batch
+
+    engine = ErrorEngine(flags=(flags,))
+    with pytest.raises(RuntimeError, match=message):
+        run_request(fake_runtime(), engine, [1, 2], 2)
+    assert engine.request.closed
+
+
+def test_foreign_token_event_still_rejected():
+    class ForeignEngine(FakeEngine):
+        def run(self, events):
+            batch = super().run(events)
+            batch[0].request = FakeRequest()
+            return batch
+
+    engine = ForeignEngine()
+    with pytest.raises(RuntimeError, match="another request"):
+        run_request(fake_runtime(), engine, [1, 2], 2)
     assert engine.request.closed
 
 

@@ -74,10 +74,16 @@ def run_request(og, engine, prompt, output_cap, clock=time.perf_counter):
         while engine.has_pending_requests():
             calls += 1
             for event in engine.run(events):
-                if event.request is not request:
-                    raise RuntimeError("Engine returned an event for another request")
+                # Shared-batch outcomes may have no request. Preserve the native
+                # failure category and error code before checking token ownership.
                 if event.flags & og.EngineEventFlags.FAILED:
                     raise RuntimeError(f"Engine failed with error_code={event.error_code}")
+                if event.flags & og.EngineEventFlags.CAPACITY_BLOCKED:
+                    raise RuntimeError(f"Engine capacity-blocked with error_code={event.error_code}")
+                if event.flags & og.EngineEventFlags.RETRYABLE:
+                    raise RuntimeError(f"Engine retryable abort with error_code={event.error_code}")
+                if event.request is not request:
+                    raise RuntimeError("Engine returned an event for another request")
                 if event.flags & og.EngineEventFlags.TOKEN:
                     tokens.append(int(event.token))
                     timestamps.append(clock() - started)

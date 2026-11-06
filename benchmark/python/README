@@ -30,8 +30,10 @@ Every request is new, greedy, and capped at 2048 generated tokens. Prefix
 caching is explicitly disabled, including across warmups; no prefix state is
 reused. The first request and each warm-process request record token IDs,
 host-visible event times, completion reason, and raw speculative snapshots
-plus additive counter deltas. Speculative tokens may be buffered together;
-host event spacing is not GPU kernel latency. Decode rate excludes the first
+plus additive counter deltas. Native failed, capacity-blocked, and retryable outcomes abort the measurement
+with their error code even when they have no associated request.
+Speculative tokens may be buffered together; host event spacing is not GPU
+kernel latency. Decode rate excludes the first
 token and uses the last minus first token time. EOS may finish below the cap.
 
 Use --reference {baseline.json} for exact token-ID comparison across every
