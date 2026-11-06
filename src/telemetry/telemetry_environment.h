@@ -3,7 +3,10 @@
 
 #pragma once
 
+#include <atomic>
 #include <array>
+#include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <string_view>
 #include "../models/env_utils.h"
@@ -190,10 +193,40 @@ inline bool ShouldSuppressTelemetryFromEnvironment() {
     const auto value = GetEnv(name, kMaxTelemetryInputBytes);
     if (!value || IsTruthyValue(*value)) return true;
   }
-  const auto input = GetEnv("ORT_DISABLE_TELEMETRY", kMaxTelemetryInputBytes);
-  if (!input) return true;
-  const std::string value = ToLowerAscii(TrimAscii(*input));
-  return value == "1" || value == "true" || value == "yes" || value == "on" || value == "y";
+  const auto legacy_input = GetEnv("ORT_TELEMETRY_DISABLED", kMaxTelemetryInputBytes);
+  if (!legacy_input || IsTruthyValue(*legacy_input)) return true;
+
+  const auto canonical_input = GetEnv("ORT_DISABLE_TELEMETRY", kMaxTelemetryInputBytes);
+  if (!canonical_input) return true;
+  const std::string value = ToLowerAscii(TrimAscii(*canonical_input));
+  return value == "1" || value == "true" || value == "yes" || value == "on" ||
+         value == "y";
+}
+
+inline std::shared_lock<std::shared_mutex> LockTelemetryForLogging(
+    bool require_enabled, const std::atomic<bool>& permanently_disabled,
+    const std::atomic<bool>& enabled, std::shared_mutex& lifecycle_mutex) {
+  std::shared_lock<std::shared_mutex> lock(lifecycle_mutex);
+  if (permanently_disabled.load() || (require_enabled && !enabled.load())) {
+    return {};
+  }
+  return lock;
+}
+
+inline void ApplyTelemetryEnabledControl(bool requested_enabled,
+                                         std::atomic<bool>& permanently_disabled,
+                                         std::atomic<bool>& enabled,
+                                         std::shared_mutex& lifecycle_mutex) {
+  std::unique_lock<std::shared_mutex> lock(lifecycle_mutex);
+  if (permanently_disabled.load()) {
+    return;
+  }
+  if (ShouldSuppressTelemetryFromEnvironment()) {
+    permanently_disabled.store(true);
+    enabled.store(false);
+    return;
+  }
+  enabled.store(requested_enabled);
 }
 
 }  // namespace Generators::TelemetryInternal

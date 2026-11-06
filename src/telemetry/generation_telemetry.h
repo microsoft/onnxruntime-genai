@@ -10,6 +10,7 @@
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
 #include <chrono>
 #include <string>
+#include "hardware_info.h"
 #endif
 
 namespace Generators {
@@ -41,6 +42,7 @@ class GenerationTelemetry {
   bool BeginAppend();
   void CompleteAppend(size_t input_token_count, int num_beams, std::string_view input_modality);
   void OnTokenGenerated(int64_t active_token_count);
+  void OnGenerationCompleted();
   void OnRewind(int64_t rewound_token_count);
   AppendTrackingSuppression SuppressAppendTracking();
 
@@ -68,6 +70,7 @@ class GenerationTelemetry {
   std::chrono::steady_clock::time_point append_start_time_;
   std::chrono::steady_clock::time_point steady_clock_anchor_;
   std::chrono::system_clock::time_point system_clock_anchor_;
+  TelemetryInternal::ResourceSampleWindow resource_samples_;
 #else
   class AppendTrackingSuppression {};
 
@@ -80,6 +83,7 @@ class GenerationTelemetry {
   bool BeginAppend() { return false; }
   void CompleteAppend(size_t, int, std::string_view) {}
   void OnTokenGenerated(int64_t) {}
+  void OnGenerationCompleted() {}
   void OnRewind(int64_t) {}
   AppendTrackingSuppression SuppressAppendTracking() { return {}; }
 #endif
