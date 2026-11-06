@@ -54,21 +54,21 @@ The main implementation is under `src/engine/`:
 
 ## Vision inputs
 
-The packed Qwen3.5-family vision package supports `request.begin_turn(formatted_prompt, turn_options, images=images)` in Python, `OgaRequest::BeginTurn(formatted_prompt, options, images)` in C++, and `OgaRequestBeginTurnWithImages` in C. The original token overload is unchanged. The prompt overload also accepts text without images. Engine types remain independent of Generator parameters and state; callers do not create a multimodal processor.
+Packed Qwen3.5-family and Qwen4-Exp (Flash-Next) vision packages support `request.begin_turn(formatted_prompt, turn_options, images=images)` in Python, `OgaRequest::BeginTurn(formatted_prompt, options, images)` in C++, and `OgaRequestBeginTurnWithImages` in C. The original token overload is unchanged. The prompt overload also accepts text without images. Engine types remain independent of Generator parameters and state; callers do not create a multimodal processor.
 
-The package type follows the source model: `qwen3_5` (or `qwen3_5_moe`) identifies the complete vision-language model, while `qwen3_5_text` (or `qwen3_5_moe_text`) identifies a text-only export. Text-only packages reject image inputs and cannot configure a vision encoder. A complete Engine vision export must include the supported encoder, processor assets, pure CPU token lookup, and packed decoder. Changing the type label or retaining image markers in a tokenizer does not add vision support. The runtime validates these component contracts before accepting images; ordinary Generator vision packages retain their separate execution path.
+The package type follows the source model: `qwen3_5`, `qwen3_5_moe`, and `qwen4_exp` identify complete packed vision-language exports; their corresponding `_text` types identify text-only exports. Text-only packages reject image inputs and cannot configure a vision encoder. A complete Engine vision export must include the supported encoder, processor assets, pure CPU token lookup, and packed decoder. Changing the type label or retaining image markers in a tokenizer does not add vision support. The runtime validates these component and position contracts before accepting images; ordinary Generator vision packages retain their separate execution path.
 
 The input is an explicitly formatted **incremental turn**, not messages or unformatted text. The Engine applies no chat template. For this package, each image has one `<|vision_start|><|image_pad|><|vision_end|>` marker, in input-image order. Only PNG/JPEG images with inspectable dimensions and the configured Qwen `PatchImage` pipeline are accepted. Audio, video, streaming, cross-attention, and Generator merge-embedding packages are not enabled by this interface.
 
 On a vision Engine, the token-only overload rejects all three image-marker IDs. Image markers require the formatted prompt and matching ordered image inputs; they cannot silently fall back to token embeddings.
 
-Packed vision with MTP is not enabled; exports must set `exclude_mtp=true` or select a supported block drafter. Text-only MTP behavior is unchanged. Vision-targeted adapters are rejected rather than silently discarded; merge them into the source checkpoint before export. Text-only adapters can still accompany packed vision.
+Packed vision with MTP is not enabled; exports must set `exclude_mtp=true` or select a supported block drafter for Qwen3.5-family targets. Flash-Next uses the ordinary dynamic Engine with floating KV, internal sparse selection, PLE/Engram, and independent target/indexer MRoPE. Its packed vision export does not support MTP or block drafters and does not enable the separate `qwen38_flash_graph` backend. Text-only MTP behavior is unchanged. Vision-targeted adapters are rejected rather than silently discarded; merge them into the source checkpoint before export. Text-only adapters can still accompany packed vision.
 
 Admission synchronously inspects dimensions, validates marker counts and session limits, and preprocesses into owned canonical host patches. Invalid admission preserves prior history and the next Turn ID. After success, callers may release the image handle. Neural vision encoding happens during `Run()`, outside decoder reservation. When no decoder work is ready, one `Run()` can encode one image and produce **zero events** without advancing request tokens, RNG, cache state, or positions. Continue while `has_pending_requests()` is true. Runnable text/decode peers take priority over preparation; the existing decode-first starvation limitation is unchanged.
 
 There is no encoder aging rule or reserved preparation step: sustained runnable text traffic can indefinitely delay image preparation. Once that traffic drains or becomes non-executable, pending image preparation can proceed. Applications requiring bounded image latency must bound competing work; this feature does not change the Engine's strict priority policy.
 
-The scheduler checks prospective prefix hits before requesting features. Missing features split prefill ranges at media boundaries; individually fitting images need not coexist. Whole images are encoded even when a chunk or prefix hit starts inside one. The decoder still performs its pure CPU token lookup, then replaces exactly the image rows with projected features. Cache lengths, token usage, and session limits count expanded decoder rows, not MRoPE extents. Three-axis positions derive from retained image geometry for prefill, generated text, continuation, and rewind. Encoder/prefill execution is eager; eligible decode/speculative steps retain the existing CUDA graph path.
+The scheduler checks prospective prefix hits before requesting features. Prefill ranges split at media boundaries whether features are cold or resident, so feature-cache residency does not change recurrent-state chunking. Individually fitting images need not coexist. Whole images are encoded even when a chunk or prefix hit starts inside one. The decoder still performs its pure CPU token lookup, then replaces exactly the image rows with projected features. Cache lengths, token usage, and session limits count expanded decoder rows, not MRoPE extents. Three-axis positions derive from retained image geometry for prefill, generated text, continuation, and rewind. Encoder/prefill execution is eager; eligible decode/speculative steps retain the existing CUDA graph path.
 
 Exact canonical content and geometry are interned within the Engine. Private row identities feed only the existing collision-checked prefix cache, never the model, tokenizer, policies, or drafter. Different image content cannot adopt media-dependent state or descendants. Optional identity eviction may cause a safe cache miss. Hybrid fixed-state and DFlash checkpoints use the same enriched prefix lineage. When the cache enables prefix reuse, media-bearing prefills align to the furthest complete block within their assigned budget when one fits, so matching hybrid snapshots can be published.
 
@@ -123,6 +123,74 @@ With four request slots, 64 cache blocks, 64-row chunks, prefix caching off, and
 Original text-only static KV scales failed the vision numerical gate. Vision-aware scales passed against floating KV on the tested images and held-out resize geometry: minimum aligned-logit cosine 0.99935, maximum RMS error 0.126, and worst clipping/saturation 0.0144% (limits: cosine at least 0.995, RMS at most 0.2, clipping at most 0.05%). This uses two real images and is **not held-out content-corpus or broad image-quality qualification**. Deployments must qualify their own calibration coverage.
 
 Regression checks passed 1,644 native Engine tests, two public C/C++ API tests, and 817 affected builder tests; optional skips/disabled tests are not qualification evidence. The local Python ORT 1.30.0 and native SDK 1.31.1 conflict when initialized in one CUDA process, independently reproducible without GenAI. Critical unchanged GIL-release and CPU-lookup CUDA checks pass in clean processes, but the combined Python files were not qualified in that environment. This build has guidance disabled; audio, other drafters, and other vision backends have no end-to-end reference qualification here.
+
+### Flash-Next qualification
+
+The ordinary paged `qwen4_exp` package was exported from `nvidia/Qwen3.8-Flash-Next-NVFP4` revision `fc694b54fb0174e0913e6adf86691ef85a4ead47`. It retains all 48 layers, native NVFP4 experts and FP8 Engram weights, with FP16 vision, decoder I/O and floating KV. Export with `-p fp16`, `qmoe_weights_prepacked=1`, and the other options in the Model Builder's packed-vision example; do not graft an encoder onto a text package or rewrite its model type. The source architecture's context remains 262144; the tested 64-block pool holds at most 16384 resident rows shared across requests, and qualification requests use a 4096-row session limit.
+
+Qualification used an A100 80 GiB and clean ORT source `7201c96570759372e18b122ffe6d4a24367d542a`, built as 1.32.0 with CUDA 12.8 and SM80. GenAI and its Python/native test binaries were rebuilt against that SDK. The released CUDA 13 ORT 1.31.1 provider did not numerically honor this K-packed contract; a version string alone is not evidence that the required operator/layout is included. Real layer-0, six-row expert comparisons against matching source weights pass with 0.23-0.30% relative L2 error and cosine above 0.999995. No ORT source or quantization-parser patch was required.
+
+Use the following `flash_runtime.json` for the tested two-slot, six-row, eager target-only profile:
+
+```json
+{
+  "model": {
+    "decoder": {
+      "session_options": {
+        "provider_options": [
+          {"cuda": {"enable_cuda_graph": "0", "arena_extend_strategy": "kSameAsRequested"}}
+        ]
+      }
+    }
+  },
+  "engine": {
+    "dynamic_batching": {
+      "num_blocks": 64,
+      "max_batch_size": 2,
+      "max_scheduled_tokens": 6,
+      "media_device_bytes": 1048576
+    }
+  },
+  "search": {"chunk_size": 6}
+}
+```
+
+Run inference and the qualification tests with `ORT_FORCE_DETERMINISTIC_MOE=1`. In this ORT build, it avoids unused dense tactic-profiling scratch on the NVFP4 GEMV path. Without it, that profiling requested approximately 3.1 GiB beyond the tightly budgeted model. Six scheduled rows bound the expanded top-10 expert routes; increasing the cap can select a much larger fallback workspace. Four request slots exhausted the tested GPU; they are not part of this qualified profile. Keep the existing required builder session settings rather than overriding them through `runtime_config`.
+
+All 12 real Flash-Next cases passed: text-only rejection, position-contract rejection, caller input lifetime, controlled cars/spreadsheet substitution, ordered two-image pressure, content-sensitive prefixes, rewind, continuation, cancellation, mixed requests, seeded sampling, decoded stops, and tool-history replay. The actual full FP16 encoder passed three non-square/square source geometries with 0.49-0.78% relative L2 error and cosine at least 0.999968. CPU token-lookup rows matched the checkpoint exactly, and all four components' external-data ownership/ranges were validated. BF16 vision failed the original numerical gates and is not qualified. This is limited image/geometry coverage, not broad corpus or long-context quality qualification.
+
+After one text warmup, three fresh-Engine trials with 32 generated tokens gave median text TTFT 460 ms and decode 30.0 ms/token. Three fresh-image trials gave median admission 26.7 ms, encoder-only Run 13.4 ms (44.7 ms on the first encoder invocation), TTFT 1.63 s and decode 33.7 ms/token. Model loading took 10.7 s, process peak host RSS was 2.54 GiB, and device-wide 100 ms samples peaked at 79797 MiB. RSS excludes filesystem cache and the device sampling is not an allocator peak or quota. These are small reproducible workload measurements, not comparisons with the separately optimized text backend.
+
+To reproduce the timing workload, run from the repository root with the exported profile above and Python/native GenAI linked to the qualified ORT build:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 ORT_FORCE_DETERMINISTIC_MOE=1 \
+  python examples/python/engine/vision-benchmark.py \
+    --model /path/to/flash-next-vision --image test/images/cars.jpg
+```
+
+The harness loads the model once, discards one text warmup, then reports three text and three image trials as JSON lines. Each trial creates a fresh Engine and 4096-row request, uses greedy generation with a 16-token minimum and 32-token maximum, and explicitly closes the Qwen reasoning prefix. The measured trials above all generated 32 tokens; compare the reported token counts, not just latencies. The text question is `Give a concise numbered list of steps for diagnosing a failing software build.` The image question is `Describe the vehicles and visible colors in a few sentences.`, preceded by one image marker. The checked-in `test/images/cars.jpg` has SHA256 `73081a75ef2874b8b44d33e68ddca4dfcbbd611684d38413dcadf4465261dccb`.
+
+Admission measures only `begin_turn`, including synchronous preprocessing but excluding image-file loading and prompt formatting. TTFT starts immediately before admission and ends when Python receives the first token event; it includes preprocessing, encoder preparation and decoder prefill. Decode is the median interval between subsequent token events with an event buffer of one. Encoder time is the wall duration of the encoder-only `Engine.run` (no target forward or public event), not an isolated CUDA-kernel duration. Fresh Engines prevent prefix/feature reuse between trials; ORT sessions and kernels remain warm, and the first encoder invocation is reported separately from the text warmup. Calculate medians over each workload's three non-warmup records. For optional Linux memory measurements, GNU `time -v` reports process maximum RSS; in a second terminal, `nvidia-smi --id=0 --query-gpu=timestamp,memory.used --format=csv --loop-ms=100` samples device-wide memory until interrupted. Keep the device otherwise idle and include model loading in the sampling interval.
+
+Rotary history is an existing optimization opportunity, not a new bounded-history contract: the runtime constructs and uploads int64 `[3, batch, 262144]` positions on each target forward, or 6 MiB per scheduled request, even with a 4096-row session. A separate profiled warmup/text/image run observed 154 decoder forwards. At 499 Hz, `perf` attributed approximately 0.33 sampled CPU-seconds to `PrepareRotaryPositionIds` and its callees, about 2.1 ms of CPU work per forward averaged across that workload. ORT's 13 `/model/indexer_rotary/` nodes had a median aggregate dispatch duration of 264 microseconds per forward. These are observational CPU/dispatch measurements, **not isolated GPU-kernel durations or unprofiled latency**; enabling profiling materially increases runtime overhead.
+
+On Linux with `perf` permissions, reproduce that separate observation with:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 ORT_FORCE_DETERMINISTIC_MOE=1 \
+  perf record -e task-clock:u -F 499 --call-graph dwarf,4096 \
+    -o flash-rotary.perf -- python examples/python/engine/vision-benchmark.py \
+    --model /path/to/flash-next-vision --image test/images/cars.jpg \
+    --repeats 1 --profile flash-rotary
+perf report --stdio --children -g none --sort symbol -i flash-rotary.perf
+```
+
+The `--profile` option also emits ORT JSON traces with per-node input shapes and dispatch timings. Keep these runs separate from baseline timing/memory comparisons. Bounding eager history or reusing its contents is deferred: it needs separate sparse-indexer bounds, retained-history and capture-shape validation rather than truncating an input based only on the current chunk. This enablement preserves the existing history and capture contracts.
+
+The shared-path regression rerun passed all 39 Qwen3.8-27B real-model cases across eager/captured and target-only/DFlash2 execution, plus 1692 native Engine cases and 11 public Engine API cases. Three unchanged model-package tests were excluded after their existing fixture-directory copies failed; the Python builder environment retains its separately verified ORT/Engram schema mismatch (112 focused passes, one baseline failure). These environment/fixture issues are not reported as passing tests.
+
+Flash-Next capture, quantized KV, MTP/DFlash, expert offload and `qwen38_flash_graph` compatibility remain outside this enablement. Existing Qwen3.8-27B optimized behavior has its own qualification above.
 
 ## The main idea
 
