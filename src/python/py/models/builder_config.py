@@ -914,7 +914,16 @@ def flatten_target_options(
             flattened[legacy_key] = kv_cache[field_name]
 
     optimizations = options.get("optimizations", {})
-    check_fields(optimizations, set(), "target_options.optimizations")
+    check_fields(optimizations, {"merge_shared_input_projections"}, "target_options.optimizations")
+    if "merge_shared_input_projections" in optimizations:
+        if not isinstance(optimizations["merge_shared_input_projections"], bool):
+            raise ValueError("target_options.optimizations.merge_shared_input_projections must be a boolean")
+        warn_structured_override(
+            legacy_options,
+            "merge_shared_input_projections",
+            "target_options.optimizations.merge_shared_input_projections",
+        )
+        flattened["merge_shared_input_projections"] = optimizations["merge_shared_input_projections"]
 
     return flattened, quant_config, effective_precision
 

@@ -200,6 +200,32 @@ python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folde
 python builder.py -m model_name -o path_to_output_folder -p fp16 -e webgpu --extra_options use_paged_attention=true num_blocks=128
 ```
 
+## Qwen3.8 Merged Shared-Input Projections
+
+The Qwen3.8 Flash Next decoder already emits packed QKV and Z, packed A/B gates, and a combined hyper-connection down/inject projection. Set `merge_shared_input_projections=true` (or the structured `target_options.optimizations.merge_shared_input_projections`) to also merge the projections that still read the same activation into one `MatMul` followed by `Split`:
+
+| Layer | Merged projections |
+|---|---|
+| GatedDeltaNet | QKV, Z, A and B (replacing the separate QKV/Z and A/B pairs) |
+| Sparse attention | Packed Q/K/V, output gate and indexer Q/K (when the Q/K/V projections are packed, which is automatic for dense projections) |
+| MoE | Router and the shared expert's gate and up |
+
+Each `Split` output keeps the name the unmerged `MatMul` output had, so no consumer changes and the model's inputs and outputs are identical. The shared expert's one-wide output gate stays separate because a width that is not a multiple of 8 would misalign the merged GEMM. The option defaults to `false`, applies to the decoder only (the MTP head is unchanged), and requires an fp32, fp16 or bf16 export with dense, bias-free projections; otherwise the export fails instead of silently skipping a group. The one exception is the sparse-attention group, which stays separate when its Q/K/V projections are not packed.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -i path_to_target_model -o path_to_output_folder -p bf16 -e cuda --extra_options use_paged_attention=true merge_shared_input_projections=true
+
+# From source:
+python builder.py -i path_to_target_model -o path_to_output_folder -p bf16 -e cuda --extra_options use_paged_attention=true merge_shared_input_projections=true
+```
+
+The structured spelling is equivalent:
+
+```bash
+python builder.py -i path_to_target_model -o path_to_output_folder -e cuda --builder_config_version 2 --target_options '{"quant_config":{"io_dtype":"bf16","weights":{"type":"none"}},"attention":{"implementation":"paged"},"optimizations":{"merge_shared_input_projections":true}}'
+```
+
 ## GPT-OSS Precision Advisory
 
 The builder emits a precautionary FP16 I/O warning for exports with 36 decoder layers and 128 experts per layer, matching the [published GPT-OSS-120B configuration](https://huggingface.co/openai/gpt-oss-120b/blob/main/config.json). The [original overflow report](https://github.com/microsoft/onnxruntime-genai/pull/2444) describes NaN logits after activation growth through layer 35, but does not identify the checkpoint revision or complete reproduction settings. It does not establish that every 120B checkpoint or FP16 export overflows.

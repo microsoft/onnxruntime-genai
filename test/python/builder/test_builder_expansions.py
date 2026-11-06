@@ -54,6 +54,7 @@ from models.builders.qwen3_8.graph import Qwen4ExpGraphModel
                 "make_attention_output_proj",
                 "make_qwen_gated_delta_net",
                 "make_linear_attention_input_proj",
+                "make_linear_attention_projections",
                 "make_linear_attention_output_proj",
                 "make_decoder_state_groups",
             ],
@@ -89,7 +90,10 @@ def test_webgpu_graph_capture_override_lives_in_webgpu(capture):
     ("model_class", "methods"),
     [
         (Qwen3VLTextModel, ["make_qk_norm"]),
-        (Qwen35TextModel, ["make_attention_input_proj", "make_attention_output_proj"]),
+        (
+            Qwen35TextModel,
+            ["make_attention_input_proj", "make_attention_output_proj", "make_linear_attention_projections"],
+        ),
         (Qwen35MoETextModel, ["make_moe_preprocessing", "make_moe_router", "make_moe_subgraph", "make_shared_expert"]),
         (
             Qwen4ExpTextModel,
@@ -97,7 +101,10 @@ def test_webgpu_graph_capture_override_lives_in_webgpu(capture):
                 "make_moe_preprocessing",
                 "make_moe_expert_names",
                 "make_moe_op",
+                "make_moe_router",
+                "make_shared_expert",
                 "make_attention_input_proj",
+                "make_linear_attention_projections",
                 "make_gated_rms_norm",
             ],
         ),
@@ -132,6 +139,7 @@ def test_qwen_overrides_are_defined_directly_in_builders(model_class, methods):
             Qwen4ExpTextModel,
             [
                 "make_linear_attention_qkv_z_proj",
+                "make_merged_projections",
                 "make_qwen_sparse_attention",
                 "make_hyper_connection_mix",
                 "make_ple_gate",
@@ -246,6 +254,12 @@ def test_qwen38_super_dispatch_preserves_qwen35_projection_fallback():
         super(Qwen4ExpTextModel, model).make_linear_attention_qkv_z_proj.__func__
         is Qwen35TextModel.make_linear_attention_qkv_z_proj
     )
+    assert (
+        super(Qwen4ExpTextModel, model).make_linear_attention_projections.__func__
+        is Qwen35TextModel.make_linear_attention_projections
+    )
+    assert super(Qwen4ExpTextModel, model).make_moe_router.__func__ is Qwen35MoETextModel.make_moe_router
+    assert super(Qwen4ExpTextModel, model).make_shared_expert.__func__ is Qwen35MoETextModel.make_shared_expert
 
 
 def test_qwen_expansion_modules_are_removed():

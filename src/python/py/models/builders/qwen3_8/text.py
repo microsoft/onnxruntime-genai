@@ -2,6 +2,7 @@
 # Licensed under the MIT License
 
 import copy
+import types
 
 import onnx_ir as ir
 import torch
@@ -15,6 +16,8 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
     """Qwen4-Exp decoder builder using external token/vision embeddings."""
 
     get_engram_pad_id = EngramWeights.get_engram_pad_id
+    merge_shared_input_projections = False
+    merged_shared_expert_layers = frozenset()
 
     def make_ple(self, layer_id, ple, root_input):
         if self.use_paged_attention:
@@ -171,18 +174,20 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
         super().make_attention_init(config)
         self.attention_attrs["use_packed_matmul"] = self.is_packed_matmul_supported()
 
-    def make_moe_router(self, layer_id, moe, root_input):
-        return super().make_moe_router(layer_id, moe, root_input)
-
-    def make_shared_expert(self, layer_id, shared_expert, shared_expert_gate, root_input):
-        return super().make_shared_expert(layer_id, shared_expert, shared_expert_gate, root_input)
-
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         extra_options = copy.deepcopy(extra_options)
         text_only = extra_options.get("text_only", False)
         extra_options["exclude_embeds"] = not text_only
         extra_options.setdefault("filename", "model.onnx" if text_only else "text.onnx")
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self.merge_shared_input_projections = bool(extra_options.get("merge_shared_input_projections", False))
+        self.merged_shared_expert_layers = set()
+        if self.merge_shared_input_projections and onnx_dtype not in {
+            ir.DataType.FLOAT,
+            ir.DataType.FLOAT16,
+            ir.DataType.BFLOAT16,
+        }:
+            raise ValueError("merge_shared_input_projections requires an fp32, fp16 or bf16 export.")
         if not hasattr(self, "context_length_attrs"):
             self.context_length_attrs = {"state_window": 0, "state_window_dims": []}
         self.use_cpu_embedding_gather = False
@@ -634,6 +639,20 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
         selected.out_features = indices.numel()
         return selected
 
+    def make_linear_attention_projections(self, layer_id, attention, root_input):
+        if not self.merge_shared_input_projections:
+            return super().make_linear_attention_projections(layer_id, attention, root_input)
+
+        basename = f"/model/layers.{layer_id}/linear_attn"
+        qkv_name, z_name, a_name, b_name = (f"{basename}/{name}_proj/MatMul" for name in ("qkv", "z", "a", "b"))
+        self.make_merged_projections(
+            f"{basename}/qkv_z_a_b_proj",
+            root_input,
+            [attention.in_proj_qkv, attention.in_proj_z, attention.in_proj_a, attention.in_proj_b],
+            [qkv_name, z_name, a_name, b_name],
+        )
+        return f"{qkv_name}/output_0", f"{z_name}/output_0", f"{b_name}/output_0", f"{a_name}/output_0"
+
     def make_linear_attention_qkv_z_proj(self, layer_id, attention, root_input):
         qkv = attention.in_proj_qkv
         z = attention.in_proj_z
@@ -704,6 +723,125 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
             axis=-1,
         )
         return f"{b_name}/output_0", f"{a_name}/output_0"
+
+    def make_moe_router(self, layer_id, moe, root_input):
+        # Returns nothing, like the base builder: consumers address the router output by name.
+        if self.merge_shared_input_projections:
+            self.make_merged_moe_router(layer_id, moe, root_input)
+        else:
+            super().make_moe_router(layer_id, moe, root_input)
+
+    def make_merged_moe_router(self, layer_id, moe, root_input):
+        # The router and the shared expert's gate and up projections read the same activation. The
+        # shared expert's one-wide output gate is left out: a width that is not a multiple of 8 would
+        # make the merged GEMM's output unaligned.
+        basename = f"/model/layers.{layer_id}/moe"
+        shared_basename = f"/model/layers.{layer_id}/mlp"
+        shared_expert = moe.shared_expert
+        router_name = f"{basename}/router/MatMul"
+        self.make_merged_projections(
+            f"{basename}/router_shared_gate_up_proj",
+            root_input,
+            [moe.gate, shared_expert.gate_proj, shared_expert.up_proj],
+            [router_name, f"{shared_basename}/gate_proj/MatMul", f"{shared_basename}/up_proj/MatMul"],
+        )
+        self.merged_shared_expert_layers.add(layer_id)
+        self.make_reshape(
+            f"{basename}/router/Reshape",
+            [f"{router_name}/output_0", f"/model/constants/INT64/{[-1, self.moe_attrs['num_experts']]}"],
+            dtype=self.io_dtype,
+            shape=self.make_moe_router_shape(),
+        )
+
+    def make_shared_expert(self, layer_id, shared_expert, shared_expert_gate, root_input):
+        if layer_id not in self.merged_shared_expert_layers:
+            return super().make_shared_expert(layer_id, shared_expert, shared_expert_gate, root_input)
+
+        # Gate and up were produced by the merged router projection; this is the rest of the unmerged
+        # fused-gate/up shared expert.
+        self.merged_shared_expert_layers.remove(layer_id)
+        down_bias = getattr(shared_expert.down_proj, "bias", None)
+        if down_bias is not None and torch.count_nonzero(down_bias) > 0:
+            raise ValueError("merge_shared_input_projections requires a bias-free shared-expert down projection.")
+        basename = f"/model/layers.{layer_id}/mlp"
+        intermediate_size = self.intermediate_size
+        try:
+            self.intermediate_size = self.shared_expert_intermediate_size
+            act_fn_name = self.make_activation(layer_id, root_input=f"{basename}/gate_proj/MatMul/output_0")
+            mul_name = f"{basename}/Mul"
+            self.make_mul(
+                mul_name,
+                [f"{act_fn_name}/output_0", f"{basename}/up_proj/MatMul/output_0"],
+                dtype=self.io_dtype,
+                shape=self.make_hidden_state_shape(last_dim=self.intermediate_size),
+            )
+            down_name = self.make_matmul(
+                shared_expert.down_proj, f"{basename}/down_proj/MatMul", f"{mul_name}/output_0"
+            )
+        finally:
+            self.intermediate_size = intermediate_size
+
+        gate_matmul_name = self.make_matmul(
+            shared_expert_gate, f"/model/layers.{layer_id}/shared_expert_gate/MatMul", root_input
+        )
+        gate_sigmoid_name = f"/model/layers.{layer_id}/shared_expert_gate/Sigmoid"
+        self.make_sigmoid(
+            gate_sigmoid_name,
+            f"{gate_matmul_name}/output_0",
+            self.io_dtype,
+            shape=self.make_hidden_state_shape(last_dim=1),
+        )
+        return f"{down_name}/output_0", f"{gate_sigmoid_name}/output_0"
+
+    def make_merged_projections(self, basename, root_input, projections, matmul_names):
+        """Emit one MatMul over the row-concatenated weights of ``projections``, then Split it.
+
+        The projections read the same activation, so one GEMM reads it once and launches once. Each Split
+        output takes the name that projection's own MatMul output would have had, so consumers are
+        unchanged. The results are the same dot products as the separate MatMuls.
+        """
+        sizes = []
+        exclusions = set()
+        for matmul_name, projection in zip(matmul_names, projections, strict=True):
+            weight = getattr(projection, "weight", None)
+            bias = getattr(projection, "bias", None)
+            if (
+                weight is None
+                or not weight.is_floating_point()
+                or hasattr(projection, "qweight")
+                or hasattr(projection, "base_layer")
+                or getattr(projection, "quant_type", "none") != "none"
+                or (bias is not None and torch.count_nonzero(bias) > 0)
+            ):
+                raise ValueError(
+                    f"merge_shared_input_projections requires dense, bias-free projections, but '{matmul_name}' is not."
+                )
+            if weight.shape[0] % 8:
+                raise ValueError(
+                    "merge_shared_input_projections requires every merged projection to have a multiple of 8 "
+                    f"outputs, but '{matmul_name}' has {weight.shape[0]}."
+                )
+            sizes.append(weight.shape[0])
+            exclusions.add(bool(getattr(projection, "exclude_from_quantization", False)))
+        if len(exclusions) != 1:
+            raise ValueError(
+                "merge_shared_input_projections cannot preserve a quantization exclusion that applies to only some of "
+                f"{matmul_names}."
+            )
+
+        merged = types.SimpleNamespace(
+            weight=torch.cat([projection.weight for projection in projections]),
+            exclude_from_quantization=exclusions.pop(),
+        )
+        merged_name = self.make_matmul(merged, f"{basename}/MatMul", root_input)
+        self.make_split(
+            f"{basename}/Split",
+            [f"{merged_name}/output_0", f"/model/constants/INT64/{sizes}"],
+            [f"{matmul_name}/output_0" for matmul_name in matmul_names],
+            [self.io_dtype] * len(sizes),
+            [self.make_hidden_state_shape(last_dim=size) for size in sizes],
+            axis=-1,
+        )
 
     def make_branchwise_rms_norm(self, name, root_input, norm, hidden_size):
         token_shape = ["num_tokens"] if self.use_paged_attention else ["batch_size", "sequence_length"]
@@ -1297,6 +1435,33 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
 
             qkv_projections = (q_proj, attention.k_proj, attention.v_proj)
             packed_qkv = self.make_packed_matmul_class(*qkv_projections)
+            if self.merge_shared_input_projections:
+                if indexer_root_input != root_input:
+                    raise ValueError("merge_shared_input_projections cannot merge an indexer that reads gathered rows.")
+                basename = f"/model/layers.{layer_id}/attn"
+                matmul_names = [
+                    f"{basename}/qkv_proj/MatMul",
+                    f"{basename}/gate_proj/MatMul",
+                    f"{basename}/indexer/index_qk_proj/MatMul",
+                ]
+                if any(
+                    getattr(projection, "bias", None) is not None and torch.count_nonzero(projection.bias) > 0
+                    for projection in qkv_projections
+                ):
+                    raise ValueError("merge_shared_input_projections requires bias-free Q/K/V projections.")
+                self.make_merged_projections(
+                    f"{basename}/qkv_gate_indexer_proj",
+                    root_input,
+                    [packed_qkv, gate_proj, indexer_proj],
+                    matmul_names,
+                )
+                self.attention_attrs["q_path"] = f"{matmul_names[0]}/output_0"
+                self.attention_attrs["k_path"] = ""
+                self.attention_attrs["v_path"] = ""
+                self.attention_attrs["gate_path"] = f"{matmul_names[1]}/output_0"
+                self.attention_attrs["indexer_qk_path"] = f"{matmul_names[2]}/output_0"
+                return None
+
             packed_qkv_name = self.make_matmul(
                 packed_qkv,
                 f"/model/layers.{layer_id}/attn/qkv_proj/MatMul",
