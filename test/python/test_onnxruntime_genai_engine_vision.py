@@ -16,6 +16,45 @@ IMAGE_DIR = Path(__file__).resolve().parents[1] / "images"
 IMAGE_MARKER = "<|vision_start|><|image_pad|><|vision_end|>\n"
 
 
+def vision_modes():
+    directory = os.environ.get("ORTGENAI_ENGINE_VISION_MODEL")
+    if directory and Path(directory, "genai_config.json").is_file():
+        manifest = json.loads(Path(directory, "genai_config.json").read_text())
+        if manifest["model"]["type"] == "qwen4_exp":
+            return [pytest.param((False, False), id="eager-target")]
+    return [
+        pytest.param((False, False), id="eager-target"),
+        pytest.param((False, True), id="eager-dflash"),
+        pytest.param((True, False), id="graph-target"),
+        pytest.param((True, True), id="graph-dflash"),
+    ]
+
+
+def vision_profile(manifest):
+    profile = (2, 6, 6) if manifest["model"]["type"] == "qwen4_exp" else (4, 512, 64)
+    batching = manifest["engine"]["dynamic_batching"]
+    for field, required in zip(("max_batch_size", "max_scheduled_tokens"), profile[:2], strict=True):
+        assert batching.get(field, 0) >= required, f"Qualification requires {field} >= {required}"
+    chunk_size = manifest["search"].get("chunk_size", 0)
+    assert not chunk_size or chunk_size >= profile[2], f"Qualification requires chunk_size >= {profile[2]}"
+    return profile
+
+
+@pytest.mark.parametrize("model_type", ["qwen3_5", "qwen4_exp"])
+@pytest.mark.parametrize("field", ["max_batch_size", "max_scheduled_tokens", "chunk_size"])
+def test_qualification_rejects_reduced_execution_limits(model_type, field):
+    batch_size, token_cap, chunk_size = (2, 6, 6) if model_type == "qwen4_exp" else (4, 512, 64)
+    manifest = {
+        "model": {"type": model_type},
+        "engine": {"dynamic_batching": {"max_batch_size": batch_size, "max_scheduled_tokens": token_cap}},
+        "search": {"chunk_size": chunk_size},
+    }
+    limits = manifest["search"] if field == "chunk_size" else manifest["engine"]["dynamic_batching"]
+    limits[field] -= 1
+    with pytest.raises(AssertionError, match=field):
+        vision_profile(manifest)
+
+
 @pytest.fixture(scope="module")
 def vision_package():
     directory = os.environ.get("ORTGENAI_ENGINE_VISION_MODEL")
@@ -26,7 +65,7 @@ def vision_package():
     if not og.is_cuda_available():
         pytest.fail("Real Engine vision qualification requires CUDA")
     manifest = json.loads(Path(directory, "genai_config.json").read_text())
-    assert manifest["model"]["type"] == "qwen3_5"
+    assert manifest["model"]["type"] in {"qwen3_5", "qwen4_exp"}
     assert manifest["model"]["vision"]["filename"]
     assert manifest["model"]["embedding"]["filename"]
     return directory, manifest
@@ -34,12 +73,12 @@ def vision_package():
 
 @pytest.fixture(
     scope="module",
-    params=[(False, False), (False, True), (True, False), (True, True)],
-    ids=["eager-target", "eager-dflash", "graph-target", "graph-dflash"],
+    params=vision_modes(),
 )
 def vision_model(request, vision_package):
     directory, manifest = vision_package
     graphs, drafts = request.param
+    batch_size, token_cap, chunk_size = vision_profile(manifest)
     config = og.Config(directory)
     overlay = {
         "model": {
@@ -56,20 +95,24 @@ def vision_model(request, vision_package):
         "engine": {
             "dynamic_batching": {
                 "num_blocks": 64,
-                "max_batch_size": 4,
-                "max_scheduled_tokens": 512,
+                "max_batch_size": batch_size,
+                "max_scheduled_tokens": token_cap,
                 "prefix_caching": True,
-                "media_device_bytes": 2 * 1024 * 1024,
+                "media_device_bytes": (1 if manifest["model"]["type"] == "qwen4_exp" else 2) * 1024 * 1024,
             }
         },
-        "search": {"chunk_size": 64},
+        "search": {"chunk_size": chunk_size},
     }
+    if manifest["model"]["type"] == "qwen4_exp":
+        del overlay["model"]["decoder"]
     if drafts:
         assert manifest["model"]["dflash2"]["filename"], "The mandatory drafter must not be silently absent"
     else:
         overlay["model"]["dflash2"] = {"filename": ""}
     config.overlay(json.dumps(overlay))
     config.set_provider_option("cuda", "enable_cuda_graph", "1" if graphs else "0")
+    if manifest["model"]["type"] == "qwen4_exp":
+        config.set_provider_option("cuda", "arena_extend_strategy", "kSameAsRequested")
     model = og.Model(config)
     yield model, drafts
     del model
@@ -153,12 +196,16 @@ def test_formatted_admission_reclaims_abandoned_media_before_host_preflight(visi
 
 
 def test_text_only_export_rejects_images_without_consuming_the_turn(vision_package):
-    directory, _ = vision_package
+    directory, manifest = vision_package
     config = og.Config(directory)
     config.overlay(
         json.dumps(
             {
-                "model": {"type": "qwen3_5_text", "vision": {"filename": ""}, "dflash2": {"filename": ""}},
+                "model": {
+                    "type": manifest["model"]["type"] + "_text",
+                    "vision": {"filename": ""},
+                    "dflash2": {"filename": ""},
+                },
                 "engine": {"dynamic_batching": {"num_blocks": 64, "max_batch_size": 1}},
             }
         )
@@ -175,6 +222,19 @@ def test_text_only_export_rejects_images_without_consuming_the_turn(vision_packa
     _, finishes, _ = drain(engine)
     assert len(finishes) == 1
     request.close()
+
+
+def test_vision_export_requires_multimodal_position_bindings(vision_package):
+    directory, manifest = vision_package
+    bindings = [("position_ids", "three-axis int64 decoder position IDs")]
+    if manifest["model"]["type"] == "qwen4_exp":
+        bindings.append(("rotary_position_ids", "three-axis int64 sparse-indexer rotary history"))
+    for binding, diagnostic in bindings:
+        config = og.Config(directory)
+        config.overlay(json.dumps({"model": {"decoder": {"inputs": {binding: "missing_position_input"}}}}))
+        config.set_provider_option("cuda", "enable_cuda_graph", "0")
+        with pytest.raises(RuntimeError, match=diagnostic):
+            og.Model(config)
 
 
 def test_image_input_lifetime_and_real_draft_activity(vision_model):
@@ -198,6 +258,26 @@ def test_image_input_lifetime_and_real_draft_activity(vision_model):
         assert stats["draft_tokens_evaluated"] > 0
         assert stats["dflash2_failures"] == 0
     request.close()
+
+
+def test_controlled_image_substitution_changes_grounded_answer(vision_model):
+    model, _ = vision_model
+    engine, tokenizer = og.Engine(model), og.Tokenizer(model)
+    value = prompt(
+        tokenizer, 1, "Classify the image as either vehicles or a spreadsheet. Reply with only the category."
+    )
+    answers, streams = [], []
+    for filename in ("cars.jpg", "sheet.png"):
+        request = new_request(engine)
+        begin(request, value, og.Images.open(str(IMAGE_DIR / filename)))
+        tokens, finishes, _ = drain(engine)
+        assert len(finishes) == 1
+        answers.append(tokenizer.decode(tokens).lower())
+        streams.append(tokens)
+        request.close()
+    assert "car" in answers[0] or "vehicle" in answers[0], answers[0]
+    assert "spreadsheet" in answers[1], answers[1]
+    assert streams[0] != streams[1], "Identical prompts must respond to the substituted image content"
 
 
 def test_two_image_pressure_prefix_identity_and_rewind(vision_model, tmp_path):
@@ -350,7 +430,10 @@ def test_cancel_after_encoding_and_replay_full_history(vision_model):
     messages = [
         {"role": "user", "content": IMAGE_MARKER + "What is shown? Answer briefly."},
         {"role": "assistant", "content": tokenizer.decode(tokens)},
-        {"role": "user", "content": "What kind of vehicles are they? Answer briefly."},
+        {
+            "role": "user",
+            "content": "Classify them as cars, motorcycles, buses, or trucks. Reply with only the category.",
+        },
     ]
     full = tokenizer.apply_chat_template(messages=json.dumps(messages), add_generation_prompt=True) + "\n</think>\n\n"
     retained = list(tokenizer.encode(value)) + tokens
@@ -429,7 +512,7 @@ def test_reference_tool_formatting_retains_image_history(vision_model):
         },
         {"role": "tool", "content": "The inspected vehicles are cars."},
     ]
-    initial = prompt(tokenizer, 1, "Identify the vehicles. Use the inspection result.") + messages[1]["content"]
+    initial = prompt(tokenizer, 1, "Identify the vehicles. Use the inspection result.") + "This reply will be replaced."
     full = tokenizer.apply_chat_template(messages=json.dumps(messages), add_generation_prompt=True) + "\n</think>\n\n"
     initial_ids, full_ids = list(tokenizer.encode(initial)), list(tokenizer.encode(full))
     assert "<tool_call>\n<function=inspect>" in full
