@@ -6,8 +6,28 @@
 #include "models/model.h"
 #include "models/io/logits.h"
 #include "ep/openvino/interface.h"
+#include <limits>
 
 namespace Generators {
+
+std::vector<int32_t> LastTokenIndices(std::span<const int32_t> tokens, size_t batch_size,
+                                      size_t num_beams, size_t sequence_length, int32_t pad_token_id) {
+  if (!batch_size || !num_beams || !sequence_length ||
+      sequence_length > static_cast<size_t>(std::numeric_limits<int32_t>::max()) ||
+      batch_size > tokens.size() / sequence_length ||
+      batch_size > std::numeric_limits<size_t>::max() / num_beams)
+    throw std::invalid_argument("Invalid last-token index dimensions or token count");
+  std::vector<int32_t> indices(batch_size * num_beams);
+  for (size_t batch = 0; batch < batch_size; ++batch) {
+    size_t end = sequence_length;
+    while (end && tokens[batch * sequence_length + end - 1] == pad_token_id)
+      --end;
+    if (!end)
+      throw std::invalid_argument("Last-token prefill requires a non-padding token in each current chunk");
+    std::fill_n(indices.begin() + batch * num_beams, num_beams, static_cast<int32_t>(end - 1));
+  }
+  return indices;
+}
 
 Logits::Logits(State& state)
     : state_{state},
@@ -82,6 +102,23 @@ DeviceSpan<float> Logits::Get(bool all_tokens_valid) {
 }
 
 void Logits::Update(const DeviceSpan<int32_t>& next_tokens, size_t new_kv_length) {
+  if (token_indices_ &&
+      (!output_raw_->ort_tensor_ || new_kv_length > 1 ||
+       std::any_of(input_sequence_lengths.begin(), input_sequence_lengths.end(), [](int n) { return n != 1; }))) {
+    const auto batch_size = state_.params_->search.batch_size;
+    const auto num_beams = state_.params_->search.num_beams;
+    std::vector<int32_t> indices(batch_size * num_beams, 0);
+    if (new_kv_length > 1)
+      indices = LastTokenIndices(const_cast<DeviceSpan<int32_t>&>(next_tokens).CpuSpan(),
+                                 batch_size, num_beams, new_kv_length, model_.config_->model.pad_token_id);
+    for (size_t batch = 0; batch < static_cast<size_t>(batch_size); ++batch)
+      input_sequence_lengths[batch] = indices[batch * num_beams] + 1;
+    auto host = OrtValue::CreateTensor<int32_t>(model_.allocator_cpu_,
+                                                std::array<int64_t, 3>{batch_size * num_beams, 1, 1});
+    std::copy(indices.begin(), indices.end(), host->GetTensorMutableData<int32_t>());
+    token_indices_->GetByteSpan().CopyFrom(
+        ByteWrapTensor(model_.p_device_inputs_->GetCpuFallbackDevice(), *host));
+  }
   if (trimmed_prefill_logits_) {
     new_kv_length = 1;
   }
@@ -91,7 +128,7 @@ void Logits::Update(const DeviceSpan<int32_t>& next_tokens, size_t new_kv_length
   }
 
   // Store length of input sequence for each batch for the get step
-  for (int b = 0; b < state_.params_->search.batch_size; b++) {
+  for (int b = 0; !trimmed_prefill_logits_ && b < state_.params_->search.batch_size; b++) {
     // Find the first non pad token from the end
     size_t token_index = new_kv_length;
     while (token_index-- > 0) {
@@ -115,6 +152,15 @@ void Logits::Update(const DeviceSpan<int32_t>& next_tokens, size_t new_kv_length
 }
 
 void Logits::Add() {
+  if (model_.session_info_.HasInput("last_token_indices")) {
+    if (!trimmed_prefill_logits_ ||
+        model_.session_info_.GetInputDataType("last_token_indices") != Ort::TypeToTensorType<int32_t>)
+      throw std::runtime_error("last_token_indices requires pruned logits and int32 indices");
+    token_indices_ = std::make_unique<Tensor>(model_.p_device_inputs_, Ort::TypeToTensorType<int32_t>);
+    token_indices_->CreateTensor(std::array<int64_t, 3>{shape_[0], 1, 1}, state_.params_->use_graph_capture);
+    state_.input_names_.push_back("last_token_indices");
+    state_.inputs_.push_back(token_indices_->GetOrtTensor());
+  }
   output_index_ = state_.outputs_.size();
 
   state_.output_names_.push_back(model_.config_->model.decoder.outputs.logits.c_str());

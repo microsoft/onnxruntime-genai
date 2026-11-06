@@ -4,6 +4,9 @@
 
 namespace Generators {
 
+std::vector<int32_t> LastTokenIndices(std::span<const int32_t> tokens, size_t batch_size,
+                                      size_t num_beams, size_t sequence_length, int32_t pad_token_id);
+
 struct Logits {
   Logits(State& state);
 
@@ -30,6 +33,7 @@ struct Logits {
   std::unique_ptr<OrtValue> logits_of_last_token_fp32_;
 
   std::unique_ptr<Tensor> output_raw_;  // Raw logits output from model
+  std::unique_ptr<Tensor> token_indices_;
 
   std::vector<int> input_sequence_lengths;
   // OrtValue wrapped in a DeviceMemory object to make it universal

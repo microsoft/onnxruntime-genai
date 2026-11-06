@@ -662,6 +662,12 @@ class Model:
         self.exclude_lm_head = self.extra_options.get("exclude_lm_head", False)
         self.include_hidden_states = self.extra_options.get("include_hidden_states", False)
         self.prune_lm_head = self.extra_options.get("prune_lm_head", False)
+        if self.prune_lm_head and not self.exclude_lm_head and self.extra_options.get("runtime_last_token_indices", False):
+            if self.use_paged_attention:
+                raise ValueError("runtime_last_token_indices is for non-paged generation")
+            self.input_names["last_token_indices"] = "last_token_indices"
+            self.input_types["last_token_indices"] = ir.DataType.INT32
+            self.input_shapes["last_token_indices"] = ["batch_size", 1, 1]
 
         # Auxiliary hidden states for an EAGLE3/DFlash-style drafter. Entry `i` is the residual
         # stream *entering* decoder layer i, which only exists as a tensor inside layer i's skip
@@ -6590,24 +6596,29 @@ class Model:
         """Pick each row's last real token from [B, S, H] hidden states and return the [B, 1, H] output name.
 
         The index is n - 1, with n from make_last_real_token_position. A row with no real token reads
-        column 0.
+        column 0. When last_token_indices is present, the runtime supplies current-chunk indices
+        directly; this also handles trailing padding on continuation and chunked prefill.
         """
         #   n (make_last_real_token_position)       root_input
         #         |                                     |
         #   Sub(1) --> Max(0) --> Unsqueeze --> Expand  |
         #                                         |     |
         #                               GatherElements(axis=1)
-        sub_name = f"{basename}/Sub"
-        sub_inputs = [self.make_last_real_token_position(root_input), "/model/constants/INT32/1"]
-        self.make_sub(sub_name, sub_inputs, dtype=ir.DataType.INT32, shape=["batch_size", 1])
-        # A row with no real token would give -1, so keep the index at 0 or more.
-        max_name = f"{basename}/Max"
-        self.make_max(max_name, [f"{sub_name}/output_0", "/model/constants/INT32/0"], dtype=ir.DataType.INT32, shape=["batch_size", 1])
-        unsqueeze_name = f"{basename}/Unsqueeze"
-        self.make_unsqueeze(unsqueeze_name, [f"{max_name}/output_0", "/model/constants/INT64/[2]"], dtype=ir.DataType.INT32, shape=["batch_size", 1, 1])
+        if "last_token_indices" in self.input_names:
+            indices = self.input_names["last_token_indices"]
+        else:
+            sub_name = f"{basename}/Sub"
+            sub_inputs = [self.make_last_real_token_position(root_input), "/model/constants/INT32/1"]
+            self.make_sub(sub_name, sub_inputs, dtype=ir.DataType.INT32, shape=["batch_size", 1])
+            # A row with no real token would give -1, so keep the index at 0 or more.
+            max_name = f"{basename}/Max"
+            self.make_max(max_name, [f"{sub_name}/output_0", "/model/constants/INT32/0"], dtype=ir.DataType.INT32, shape=["batch_size", 1])
+            unsqueeze_name = f"{basename}/Unsqueeze"
+            self.make_unsqueeze(unsqueeze_name, [f"{max_name}/output_0", "/model/constants/INT64/[2]"], dtype=ir.DataType.INT32, shape=["batch_size", 1, 1])
+            indices = f"{unsqueeze_name}/output_0"
         # GatherElements returns the shape of its indices, so this assumes the LM head input is hidden_size wide.
         expand_name = f"{basename}/Expand"
-        expand_inputs = [f"{unsqueeze_name}/output_0", f"/model/constants/INT64/[1, 1, {self.hidden_size}]"]
+        expand_inputs = [indices, f"/model/constants/INT64/[1, 1, {self.hidden_size}]"]
         self.make_expand(expand_name, expand_inputs, dtype=ir.DataType.INT32, shape=["batch_size", 1, self.hidden_size])
 
         gather_name = f"{basename}/GatherElements"
