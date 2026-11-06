@@ -1376,6 +1376,7 @@ RequestStepResult Request::CompleteGeneration() {
     status_ = RequestStatus::TurnComplete;
     if (search_->IsDone() && !next_tokens.empty() &&
         contains(params_->config.model.eos_token_id, next_tokens.back())) {
+      token = next_tokens.back();
       finish_reason_ = GenerationFinishReason::EosToken;
     } else if (turn_limit_reached) {
       finish_reason_ = GenerationFinishReason::TurnLimit;
