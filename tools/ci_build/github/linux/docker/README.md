@@ -5,10 +5,10 @@ The base images are produced and promoted upstream, not by this repository.
 immutable digests, provenance tags/builds, and Dockerfile default families.
 Tags are provenance metadata; consumers use `repository@digest`.
 
-The AlmaLinux8 entries use promoted official images. Producer build and source
+All entries use promoted official images. Producer build and source
 commit provenance are recorded in the manifest. The pins match
 [microsoft/onnxruntime#33777](https://github.com/microsoft/onnxruntime/pull/33777)
-at commit `898786027ebd16e53f3db80d4b8a96f41749b2aa`, but the default map covers
+at commit `fc10988d0f7c8c4c7700d4e8f7b47f4b55e787ea`, but the default map covers
 GenAI's own six Dockerfiles and only the families it consumes:
 
 | Consumer | Base family |
@@ -17,13 +17,12 @@ GenAI's own six Dockerfiles and only the families it consumes:
 | manylinux CPU ARM64 | AlmaLinux8 CPU ARM64 |
 | manylinux CUDA 12.8 x64 | AlmaLinux8 CUDA12 x64 |
 | manylinux CUDA 13 x64 | AlmaLinux8 CUDA13 x64 |
-| manylinux CUDA 13 ARM64 | Historical AlmaLinux9 CUDA13 ARM64 |
+| manylinux CUDA 13 ARM64 | AlmaLinux9 CUDA13 ARM64 |
 | inference CPU ARM64 | AlmaLinux8 CPU ARM64 with dotnet |
 | ADO CUDA integration tests and engine benchmarks | AlmaLinux8 CUDA12 x64 |
 
-CUDA13 ARM64 retains its `20260323.1` AlmaLinux9 image, pinned by digest.
-Replacing it with AlmaLinux8 would change the manylinux/glibc ABI. Refreshing
-that historical family remains separate work.
+CUDA13 ARM64 uses the refreshed AlmaLinux9 image, preserving its manylinux/glibc
+ABI rather than substituting an AlmaLinux8 base.
 
 ## Resolution and cache behavior
 
@@ -33,7 +32,16 @@ CUDA ARM64 and CPU ARM64 workflows already use this helper. GenAI has no
 consumer of the upstream GHCR-caching `build-docker-image` action, so it does
 not need ORT's wrapper action. If such a consumer is added, resolve the base
 into its build arguments **before** that action calculates its cache key.
-The resolver's `--github-output` option can emit those resolved arguments.
+The resolver writes an immutable image reference to stdout with `--family`
+alone, or one line of shell-quoted build arguments with `--dockerfile`.
+Errors go to stderr with a nonzero exit code and no result on stdout.
+For a GitHub step, capture the result before writing the step output:
+
+```shell
+build_args="$(python3 tools/ci_build/resolve_docker_base_image.py --dockerfile "$DOCKERFILE")"
+# Keep resolution separate so Bash -e stops on failure before writing output.
+printf 'build-args=%s\n' "$build_args" >> "$GITHUB_OUTPUT"
+```
 
 ADO integration tests and engine benchmarks resolve the same CUDA12 family
 before `docker run`, rather than retaining separate image pins.
@@ -77,7 +85,7 @@ The refreshed AlmaLinux8 bases supply Node 24.22.2 and npm 11.21.1. The ARM64
 CPU inference dependency script no longer overwrites them with Node 18.
 Manylinux dependency scripts have no duplicate Node installation to remove;
 there is no GenAI `install_shared_deps.sh` or OpenVINO Dockerfile cleanup.
-The historical AlmaLinux9 family keeps its existing inherited tools.
+The AlmaLinux9 CUDA13 ARM64 family is refreshed in the same producer build.
 
 The new producer interpreters are CPython 3.11--3.14, not 3.10. GenAI's
 manylinux dependency installer and SDK wheel matrix already select 3.11--3.14;
