@@ -1,5 +1,12 @@
 # Paged Attention Engine
 
+An opt-in [Qwen WebGPU coding export profile](qwen_webgpu_coding_profile.md)
+documents selected logits, seven-token DFlash 2 proposals, and a 512-token
+scheduling budget. Its `webgpu_gdn_chunk_size` builder option selects only the
+internal recurrent-kernel chunk attribute (16 or the unchanged default 64);
+it does not alter Engine transaction boundaries, cache ownership, FP32
+recurrent state, or scheduling defaults.
+
 This document describes how the paged attention engine and continuous batching work in the current codebase. It is intended to be the living architecture guide for this part of ONNX Runtime GenAI.
 
 Update this document whenever a change affects request admission, scheduling, paged KV-cache ownership, model input packing, sampling, transaction behavior, request completion, or failure handling. Historical design and performance work can remain in separate documents, but this document should always describe the behavior that exists on the current branch.
