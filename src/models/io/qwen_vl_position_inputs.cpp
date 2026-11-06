@@ -27,10 +27,20 @@ struct UpdatePositionIdsFunctor {
   int64_t batch_size;
   int64_t seq_len;
   const std::vector<int64_t>& rope_deltas;
+  int64_t rope_rank;  // 3 (Qwen2-VL/Qwen3-VL) or 4 (Qwen3.5, leading text-position row)
 
   template <typename T>
   void operator()() {
     auto* data = position_ids->GetTensorMutableData<T>();
+    // Qwen3.5 (rope_rank 4) prepends a sequential text-position row; the 3 vision rows follow it.
+    if (rope_rank == 4) {
+      for (int64_t b = 0; b < batch_size; ++b) {
+        for (int64_t s = 0; s < seq_len; ++s) {
+          data[b * seq_len + s] = static_cast<T>(base_pos) + static_cast<T>(s);
+        }
+      }
+      data += batch_size * seq_len;
+    }
     for (int64_t dim = 0; dim < 3; ++dim) {
       for (int64_t b = 0; b < batch_size; ++b) {
         for (int64_t s = 0; s < seq_len; ++s) {
@@ -85,9 +95,12 @@ Qwen2VLPositionInputs::Qwen2VLPositionInputs(const Model& model, State& state, D
   if (has_posid_input_) {
     ONNXTensorElementDataType posid_type = model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.position_ids);
 
-    // Set up 3D position IDs shape: [3, batch_size, sequence_length]
-    // The 3 dimensions represent temporal, height, and width for mrope
-    position_ids_shape_[0] = 3;
+    // mrope rows come from the decoder's declared position_ids rank: 3 (temporal/height/width) for
+    // Qwen2-VL / Qwen3-VL, or 4 for Qwen3.5 (a leading text-position row precedes the 3 vision rows).
+    auto posid_shape = model_.session_info_.GetInputShape(model_.config_->model.decoder.inputs.position_ids);
+    rope_rank_ = (!posid_shape.empty() && posid_shape[0] == 4) ? 4 : 3;
+
+    position_ids_shape_[0] = rope_rank_;
     position_ids_shape_[1] = state_.params_->search.batch_size;
     position_ids_shape_[2] = 0;  // Will be set during first update
 
@@ -101,7 +114,7 @@ Qwen2VLPositionInputs::Qwen2VLPositionInputs(const Model& model, State& state, D
   const auto& history_name = model_.config_->model.decoder.inputs.rotary_position_ids;
   if (!history_name.empty()) {
     const auto shape = model_.session_info_.GetInputShape(history_name);
-    if (!has_posid_input_ || type_ != Ort::TypeToTensorType<int64_t> ||
+    if (!has_posid_input_ || rope_rank_ != 3 || type_ != Ort::TypeToTensorType<int64_t> ||
         model_.session_info_.GetInputDataType(history_name) != Ort::TypeToTensorType<int64_t> ||
         shape.size() != 3 || shape[0] != 3 || state_.params_->search.max_length <= 0) {
       throw std::runtime_error("Rotary history requires int64 [3, batch, history] and current T/H/W positions");
@@ -183,7 +196,10 @@ void Qwen2VLPositionInputs::CreateAndInitialize3DPositionIDs(DeviceSpan<int32_t>
   int64_t seq_len = shape[2];
 
   auto position_ids = OrtValue::CreateTensor(model_.allocator_cpu_, shape, type_);
-  auto* position_data = position_ids->GetTensorMutableData<T>();
+  auto* position_data_base = position_ids->GetTensorMutableData<T>();
+  // Qwen3.5 (rope_rank_==4) prepends a text-position row; the 3 vision rows are written after it. For the
+  // 3-row families the offset is 0, so the writes below are byte-for-byte identical.
+  auto* position_data = position_data_base + (rope_rank_ - 3) * batch_size * seq_len;
 
   // Get spans for grid_thw tensors (on CPU)
   std::span<const int64_t> image_grid_thw_span;
@@ -361,6 +377,15 @@ void Qwen2VLPositionInputs::CreateAndInitialize3DPositionIDs(DeviceSpan<int32_t>
     rope_deltas_.push_back(max_pos_for_batch + 1 - seq_len);
   }
 
+  // Qwen3.5: row 0 is the sequential text position.
+  if (rope_rank_ == 4) {
+    for (int64_t b = 0; b < batch_size; ++b) {
+      for (int64_t s = 0; s < seq_len; ++s) {
+        position_data_base[b * seq_len + s] = static_cast<T>(s);
+      }
+    }
+  }
+
   UpdateRotaryHistory(*position_ids, 0, state_.params_->search.num_beams);
   // Move tensor to GPU and expand by num_beams
   SetPositionIDs(std::move(position_ids), state_.params_->search.num_beams);
@@ -408,7 +433,7 @@ void Qwen2VLPositionInputs::Update3DPositionIDs(int base_pos) {
     throw std::runtime_error("rope_deltas size mismatch with batch_size * num_beams.");
   }
 
-  DispatchOnType(type_, UpdatePositionIdsFunctor{position_ids.get(), base_pos, batch_size, seq_len, rope_deltas_});
+  DispatchOnType(type_, UpdatePositionIdsFunctor{position_ids.get(), base_pos, batch_size, seq_len, rope_deltas_, rope_rank_});
 
   UpdateRotaryHistory(*position_ids, base_pos, 1);
   SetPositionIDs(std::move(position_ids), 1);  // Already expanded over beams.

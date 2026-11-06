@@ -9,6 +9,8 @@
 #include "models/io/qwen_vl_position_inputs.h"
 #include "pixtral_vision_state.h"
 #include "qwen_vl_state.h"
+#include "openvino_multi_modal.h"
+#include "openvino_vision_merger.h"
 #include <algorithm>
 #include <future>
 #include <numeric>
@@ -462,6 +464,13 @@ DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int3
       decoder_input_ids_ = std::make_unique<DefaultInputIDs>(*this);
       decoder_input_ids_->Add();
     }
+    // OpenVINO-partitioned Gemma3 decoders declare a token_type_ids input the graph consumes for
+    // image-token attention. It is absent from native decoders, so bind it only when present.
+    if (AsOpenVINOMultiModalModel(model_) &&
+        decoder_only_info.HasInput(model_.config_->model.decoder.inputs.token_type_ids)) {
+      token_type_ids_ = std::make_unique<TokenTypeIds>(*this);
+      token_type_ids_->Add();
+    }
   }
 
   position_inputs_->Add();
@@ -518,6 +527,9 @@ bool DecoderState::SupportsPrefillChunking(bool has_multimodal_content) const {
   // contiguous for a single sequence. Continuous decoding of position ids/attention mask in
   // DefaultPositionInputs is likewise restricted to a batch-beam size of one.
   if (params_->BatchBeamSize() != 1)
+    return false;
+
+  if (token_type_ids_)
     return false;
 
   // DefaultPositionInputs produces position ids sequentially, so chunking is always safe.
@@ -688,6 +700,7 @@ void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int tot
   inputs_embeds_.UpdateSequenceLength(new_length);
   if (engram_embeddings_) engram_embeddings_->UpdateSequenceLength(new_length);
   if (per_layer_inputs_) per_layer_inputs_->UpdateSequenceLength(new_length);
+  if (token_type_ids_) token_type_ids_->Update(new_length);
 }
 
 // Overload for pipeline to call
@@ -705,6 +718,7 @@ void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int tot
   inputs_embeds_.UpdateSequenceLength(new_length);
   if (engram_embeddings_) engram_embeddings_->UpdateSequenceLength(new_length);
   if (per_layer_inputs_) per_layer_inputs_->UpdateSequenceLength(new_length);
+  if (token_type_ids_) token_type_ids_->Update(new_length);
 }
 
 MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& model, DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params)
@@ -724,6 +738,12 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& 
   decoder_state_ = std::make_unique<DecoderState>(model_, sequence_lengths, params);
   if (model_.depthformer_session_) {
     audio_output_ = std::make_unique<Lfm2AudioOutput>(model_, params);
+  }
+
+  // OpenVINO-partitioned VLMs run their vision graph(s) and merge image features on the host via a
+  // per-family strategy, instead of fusing them inside the embedding graph.
+  if (const auto* openvino_model = AsOpenVINOMultiModalModel(model_)) {
+    vision_merger_ = CreateOpenVINOVisionMerger(*openvino_model, params);
   }
 
   if (vision_state_ != nullptr && model_.config_->model.vision.adapter_filename.has_value() && num_image_tokens_ > 0) {
@@ -748,6 +768,21 @@ void MultiModalPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extr
   if (model_.speech_session_) {
     speech_state_->SetExtraInputs(extra_inputs, num_audio_tokens_);
   }
+  if (vision_merger_) {
+    vision_merger_->RunVision(extra_inputs);
+  }
+  // Forward the prompt's token_type_ids (image placeholder markers) to the decoder when its graph
+  // consumes them (OpenVINO-partitioned Gemma3). Text-only prompts have none, so the decoder keeps zeros.
+  if (decoder_state_->token_type_ids_) {
+    for (const auto& input : extra_inputs) {
+      if (input.name == Config::Defaults::TokenTypeIdsName) {
+        OrtValue* ttids = input.tensor->GetOrtTensor();
+        auto markers = ReadTokenTypeIds(*ttids);
+        decoder_state_->token_type_ids_->SetPending(markers);
+        break;
+      }
+    }
+  }
   embedding_state_->SetExtraInputs(num_images_, num_image_tokens_, num_audio_tokens_);
   // Set the grid tensors for Qwen2-VL if present
   if (auto* qwen_pos_inputs = dynamic_cast<Qwen2VLPositionInputs*>(decoder_state_->position_inputs_.get())) {
@@ -760,6 +795,15 @@ void MultiModalPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extr
         vid_grid = input.tensor;
       } else if (input.name == "second_per_grid_ts") {
         sec_grid = input.tensor;
+      }
+    }
+
+    if (!img_grid && IsOpenVINOPartitioned(*model_.config_)) {
+      for (const auto& input : extra_inputs) {
+        if (input.name == model_.config_->model.vision.inputs.image_grid_thw) {
+          img_grid = input.tensor;
+          break;
+        }
       }
     }
 
@@ -839,6 +883,13 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
         engram_state_->Run(current_length, next_tokens, next_indices);
         engram_state_->CopyEmbeddingsTo(*decoder_state_->engram_embeddings_);
       }
+    }
+
+    // OpenVINO-partitioned VLMs merge image features into the (text-only) embeddings on the host, after
+    // the embedding graph runs and before the decoder consumes the shared inputs_embeds buffer.
+    if (vision_merger_) {
+      vision_merger_->Merge(*decoder_state_->inputs_embeds_.Get(), next_tokens);
+      vision_merger_.reset();
     }
 
     auto logits = chunk_prefill

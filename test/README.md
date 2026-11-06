@@ -14,6 +14,27 @@ This directory contains assets, scripts, and definitions used by the test suite.
     - `test/python/models/*` contains Python scripts used to test ONNX models. Scripts follow the `test_*.py` naming format.
 - `test/tool-definitions/*` contains all tool definitions used for testing.
 
+## OpenVINO-partitioned VLM tests
+
+The Qwen position-input tests in `engine_unit_tests` (`RopeRows/QwenPositionValuesTest.*` and
+`StandardPositionInputsTest.RotaryHistoryRejectsFourRowPositions`) use tiny metadata fixtures. Regenerate them from
+the repository root:
+
+```sh
+python test/python/create/create_qwen_position_inputs.py
+python test/python/create/create_qwen_position_inputs.py --rotary-history
+```
+
+Run the CPU host-merge regressions for partitioned Qwen3.5 and Gemma3 from `test/python`:
+
+```sh
+python -m pytest -q --test_models ../models models/test_qwen_fara_models.py -k qwen3_5_openvino_partitioned
+python -m pytest -q --test_models ../models models/test_decoder_state_input_ids.py -k gemma3_partitioned
+```
+
+These generate small ONNX graphs in pytest temporary directories and need the `onnx` package (and Pillow for the Qwen
+cases). They check host-side wiring and math, not pretrained-model parity or OpenVINO EP/device behavior.
+
 ## Parallel preprocessing checks
 
 After building a Release configuration, run the focused C++ suite:
