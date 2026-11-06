@@ -174,9 +174,14 @@ def test_weights_rejects_bad_method():
         WeightsConfig.from_dict({"type": "int4", "method": "gptq"})
 
 
-def test_weights_per_channel_block_size_string():
-    w = WeightsConfig.from_dict({"type": "int4", "block_size": "per_channel"})
+def test_weights_per_channel_block_size_zero():
+    w = WeightsConfig.from_dict({"type": "int4", "block_size": 0})
     assert w.block_size == 0
+
+
+def test_weights_rejects_per_channel_block_size_string():
+    with pytest.raises(ValueError):
+        WeightsConfig.from_dict({"type": "int4", "block_size": "per_channel"})
 
 
 def test_weights_mx_dtype_block_size_conflict():

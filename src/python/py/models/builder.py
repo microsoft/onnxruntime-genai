@@ -997,8 +997,8 @@ def get_args():
                     2 is fp16.
                     1 is fp32.
                     Default is 4 for the CPU EP and 0 for non-CPU EPs.
-                block_size = 16/32/64/128/256: Specify the block size for int4/int8 weight-only (MatMulNBits) quantization.
-                    Default value is 32.
+                block_size = 0/16/32/64/128/256: Specify the block size for int4/int8 weight-only (MatMulNBits) quantization.
+                    Default value is 32. Use 0 for per-channel quantization.
                 qmoe_block_size = <=0/16/32/64/128/256: Specify the block size for QMoE expert weights quantization.
                     Set <= 0 for per-channel quantization. Default is 128 for TRT-RTX, 32 for others.
                     CPU, CUDA, and WebGPU block-wise QMoE support 32/64/128 only; TRT-RTX also accepts 16/256.
