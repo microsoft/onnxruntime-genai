@@ -394,9 +394,10 @@ Runtime indices also select the requested row in decoders without an attention
 mask, and are emitted by the Nemotron Parse decoder's custom input setup.
 Padding-only intermediate chunks are permitted when their logits are discarded;
 each final prompt chunk must contain a non-padding token in every row, even
-when the chunk contains only one token. Generated tokens and committed-token
-replay treat PAD-ID tokens as valid. Ordinary one-token decode does not download
-tokens to the CPU to validate padding.
+when the chunk contains only one token. New prompt tokens are validated before
+a LongRoPE cache transition replays them with committed tokens. Generated tokens
+and committed-token replay treat PAD-ID tokens as valid. Ordinary one-token decode
+does not download tokens to the CPU to validate padding.
 
 The exported model requires a runtime built with `last_token_indices` support.
 For older runtimes, re-export with both `runtime_last_token_indices=false` and

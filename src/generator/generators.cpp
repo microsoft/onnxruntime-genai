@@ -21,6 +21,7 @@
 #include "models/model_type.h"
 #include "models/decoder_only.h"
 #include "models/io/kv_cache.h"
+#include "models/io/logits.h"
 #include "models/io/position_inputs.h"
 #include "decoding/decoding_strategy.h"
 #include "decoding/n_gram_decoding_strategy.h"
@@ -970,6 +971,14 @@ DeviceSpan<float> Generator::RunWithRopeCache(DeviceSpan<int32_t> next_tokens, b
   const bool replay = rope_context_threshold_ != 0 && rope_cache_length_ > 0 &&
                       (rope_cache_length_ >= rope_context_threshold_) != (length >= rope_context_threshold_);
   if (replay) {
+    if (is_prompt && model_->session_info_.HasInput("last_token_indices")) {
+      // Validate new prompt tokens before replay turns them into committed tokens.
+      const auto batch_size = static_cast<size_t>(state_->params_->search.batch_size);
+      if (!batch_size || next_tokens.size() % batch_size)
+        throw std::invalid_argument("Last-token indices require complete prompt token rows");
+      LastTokenIndices(next_tokens.CopyDeviceToCpu(), batch_size, 1, next_tokens.size() / batch_size,
+                       model_->config_->model.pad_token_id);
+    }
     // Rebuild only model state: search, sampling, guidance and usage already contain these tokens.
     state_->RewindTo(0);
     next_tokens = search_->GetSequence(0);

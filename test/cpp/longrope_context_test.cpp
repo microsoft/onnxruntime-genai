@@ -127,12 +127,20 @@ TEST_F(LongRopeContextTest, RuntimeIndicesValidateAppendedSingletonPrompts) {
   model = OgaModel::Create(*config);
   for (int chunk : {0, 1, 2}) {
     SCOPED_TRACE(testing::Message() << "chunk=" << chunk);
-    auto generator = CreateGenerator(chunk);
-    ASSERT_NO_THROW(generator->AppendTokens(std::vector<int32_t>{1}));
-    ExpectConsistentCache(*generator);
-    EXPECT_THROW(generator->AppendTokens(std::vector<int32_t>{0}), std::runtime_error);
+    for (int length : {1, 8}) {
+      SCOPED_TRACE(testing::Message() << "length=" << length);
+      auto generator = CreateGenerator(chunk);
+      ASSERT_NO_THROW(generator->AppendTokens(std::vector<int32_t>(length, 1)));
+      ExpectConsistentCache(*generator);
+      EXPECT_THROW(generator->AppendTokens(std::vector<int32_t>{0}), std::runtime_error);
 
-    generator = CreateGenerator(chunk);
+      generator = CreateGenerator(chunk);
+      ASSERT_NO_THROW(generator->AppendTokens(std::vector<int32_t>(length, 1)));
+      ASSERT_NO_THROW(generator->AppendTokens(std::vector<int32_t>{1}));
+      ExpectConsistentCache(*generator);
+    }
+
+    auto generator = CreateGenerator(chunk);
     ASSERT_NO_THROW(generator->AppendTokens(std::vector<int32_t>{0, 1}));
     ExpectConsistentCache(*generator);
   }
