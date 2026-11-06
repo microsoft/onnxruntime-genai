@@ -21,6 +21,8 @@ env:
   binaryDir: 'build/cpu/win-x64/Release'
   WEBGPU_EP_PACKAGE_NAME: 'Microsoft.ML.OnnxRuntime.EP.WebGpu'
   WEBGPU_EP_PACKAGE_VERSION: '0.6.0-dev.20261020022011'
+  # CopyTensors is already available in this SDK. Single-submission fixed-state copies also
+  # require the companion ORT fixed-state-batching change; repin the EP once its nightly ships.
   # Use an API-32 SDK for both the native build and runtime tests.
   # PagedAttention requires the extended schema with attention_metadata at input 16.
   # This core/plugin pair includes the GatedDeltaNetStateReplay schema and WebGPU kernel.
@@ -156,6 +158,9 @@ jobs:
             "GraphBuilderTest.DefaultOnnxDomainStillExecutesCast",
             "WebGpuFixedStatePoolTest.CompactPartialAcceptanceReplaysConvAndGdn",
             "WebGpuFixedStatePoolTest.AdversarialReplayPreservesRequestState",
+            "WebGpuFixedStatePoolTest.PhaseCopiesPreservePreparedDiscardAndPublication",
+            "WebGpuFixedStatePoolTest.PhaseCopiesFlushBeforeOffsetFallback",
+            "WebGpuFixedStatePoolTest.BatchViewFailurePoisonsPoolWithoutPublishing",
             "WebGpuFixedStatePoolTest.PartialRequestsShareBackingTransfers",
             "WebGpuFixedStatePoolTest.ConvolutionSharedMirrorsObserveEarlierDescriptorWrites",
             "WebGpuFixedStatePoolTest.DeferredGpuRunFailurePoisonsPoolBeforeNextReader",
