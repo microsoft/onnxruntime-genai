@@ -360,6 +360,28 @@ def test_lfm3_vl_casts_pixel_values_to_the_vision_input_type(test_data_path, tmp
     np.testing.assert_allclose(features, fp32_generator.get_input("image_features"), rtol=0, atol=1e-2)
 
 
+def test_lfm3_vl_runs_several_images_with_an_extra_vision_output(test_data_path, tmp_path):
+    # The first vision run adds the extra output to the session's outputs, which can move that vector
+    onnx = pytest.importorskip("onnx")
+    model_dir = _copy_model(test_data_path, tmp_path)
+    vision = onnx.load(os.fspath(model_dir / "dummy_vision.onnx"))
+    features = vision.graph.output[0]
+    vision.graph.node.append(onnx.helper.make_node("Identity", [features.name], ["debug_features"]))
+    elem_type = features.type.tensor_type.elem_type
+    vision.graph.output.append(onnx.helper.make_tensor_value_info("debug_features", elem_type, None))
+    onnx.save(vision, os.fspath(model_dir / "dummy_vision.onnx"))
+
+    sizes = [(256, 320), (256, 256)]
+    stock_model, stock_inputs = _process(_model_path(test_data_path), _prompt(2), _images(*sizes))
+    model, inputs = _process(model_dir, _prompt(2), _images(*sizes))
+    generator = _generator(model, inputs)
+    generator.generate_next_token()
+    stock_generator = _generator(stock_model, stock_inputs)
+    stock_generator.generate_next_token()
+    np.testing.assert_array_equal(generator.get_input("image_features"), stock_generator.get_input("image_features"))
+    np.testing.assert_array_equal(generator.get_sequence(0), stock_generator.get_sequence(0))
+
+
 def _generate_on(model_dir: Path, provider: str | None, num_tokens: int) -> tuple[np.ndarray, np.ndarray]:
     """Returns the generated sequence and the image features the embedding session read."""
     config = og.Config(os.fspath(model_dir))

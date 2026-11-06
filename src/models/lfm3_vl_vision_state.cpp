@@ -11,11 +11,13 @@ namespace Generators {
 
 namespace {
 
+// Holds the vector and an index, not an element reference: the first State::Run can grow outputs_ for extra outputs.
 struct OrtValuePointerRestore {
-  OrtValue*& slot;
+  std::vector<OrtValue*>& slots;
+  size_t index;
   OrtValue* value;
 
-  ~OrtValuePointerRestore() { slot = value; }
+  ~OrtValuePointerRestore() { slots[index] = value; }
 };
 
 }  // namespace
@@ -108,9 +110,9 @@ DeviceSpan<float> Lfm3VlVisionState::Run(int current_length, DeviceSpan<int32_t>
   OrtValue* grid = inputs_[grid_index];
   OrtValue* features = outputs_[0];
   // Each run binds one image's tensors, which die with their loop iteration.
-  const OrtValuePointerRestore restore_pixel_values{inputs_[pixel_index], pixel_values};
-  const OrtValuePointerRestore restore_grid{inputs_[grid_index], grid};
-  const OrtValuePointerRestore restore_features{outputs_[0], features};
+  const OrtValuePointerRestore restore_pixel_values{inputs_, pixel_index, pixel_values};
+  const OrtValuePointerRestore restore_grid{inputs_, grid_index, grid};
+  const OrtValuePointerRestore restore_features{outputs_, 0, features};
 
   const auto pixel_info = pixel_values->GetTensorTypeAndShapeInfo();
   const auto pixel_type = pixel_info->GetElementType();
