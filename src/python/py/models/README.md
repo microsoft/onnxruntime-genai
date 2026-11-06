@@ -77,7 +77,7 @@ The tool currently supports the following model architectures.
 - LFM2 MoE
 - LFM3 (text, d1-2B text decisions, LFM3-VL with its vision model, and the decoders of LFM3-Audio / LFM3-Omni)
   - d1-2B (`D1Model`) needs `hf_remote=true`, because only its remote code registers the model. Its full-attention layers read the whole prompt in both directions (GroupQueryAttention `causal=0`), so an export is for [`d1-decisions.py`](../../../../examples/python/d1-decisions.py), not for generating text. It runs on CPU and CUDA with ONNX Runtime 1.30 or newer; the builder refuses other execution providers, which do not have `causal=0`. See the [d1 tutorial](../../../../examples/python/d1-tutorial.md).
-  - With `exclude_embeds=true` the builder writes only d1-2B's decoder, typed `lfm3_vl`, without the vision and embedding models that pipeline needs. The LFM3-Audio / LFM3-Omni decoders are stages of the `lfm3_audio` and `lfm3_omni` pipelines, which the runtime cannot load yet.
+  - The builder refuses d1-2B with `exclude_embeds=true`, because it does not write d1-2B's vision and embedding models yet. With `exclude_embeds=true` the LFM3-Audio / LFM3-Omni decoders are stages of the `lfm3_audio` and `lfm3_omni` pipelines, which the runtime cannot load yet.
   - LFM3-1.7B has a 262144-token context. Its RoPE caches take about 134 MB in a model with fp16 inputs and outputs and 268 MB with fp32 ones (CPU exports, int4 included). Every attention layer, the sliding-window ones included, keeps a KV cache of `search.max_length` tokens, which defaults to that context, so set `search.max_length` to the length you need.
 - Llama
 - Mistral
