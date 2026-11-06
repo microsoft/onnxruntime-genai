@@ -101,6 +101,17 @@ save(
     helper.make_model(indexer, opset_imports=[helper.make_opsetid("", 21)], ir_version=10), output_dir / "indexer.onnx"
 )
 
+growing_indexer = helper.make_graph(
+    [helper.make_node("Identity", ["past.0.indexer_key"], ["present.0.indexer_key"])],
+    "growing_indexer_history",
+    [helper.make_tensor_value_info("past.0.indexer_key", TensorProto.FLOAT, [1, "past_sequence_length", 4])],
+    [helper.make_tensor_value_info("present.0.indexer_key", TensorProto.FLOAT, [1, "total_sequence_length", 4])],
+)
+save(
+    helper.make_model(growing_indexer, opset_imports=[helper.make_opsetid("", 21)], ir_version=10),
+    output_dir / "indexer-growing.onnx",
+)
+
 ple_inputs = [
     helper.make_tensor_value_info("past.0.ple_tokens", TensorProto.INT64, [1, 2]),
     helper.make_tensor_value_info("past.0.ple_conv", TensorProto.FLOAT, [1, 2, 4]),
