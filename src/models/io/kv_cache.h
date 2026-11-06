@@ -5,6 +5,7 @@
 #pragma once
 
 #include "../model.h"
+#include <string_view>
 #include <type_traits>
 
 namespace Generators {
@@ -47,7 +48,9 @@ struct KeyValueCache {
   }
 };
 
-std::string ComposeKeyValueName(const std::string& template_string, int index);
+std::string ComposeKeyValueName(const std::string& template_string, int index,
+                                size_t max_length = 64,
+                                std::string_view name_kind = "key value name");
 
 // Pipeline stages may use different EPs, so their KV policy cannot come from the top-level device.
 bool CanUseTopLevelDeviceKeyValueCachePolicy(const Model& model);
