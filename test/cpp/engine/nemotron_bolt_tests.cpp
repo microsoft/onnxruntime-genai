@@ -209,13 +209,55 @@ TEST(NemotronBolt, PreservesDrafterOptimizerExclusions) {
     entries.emplace_back("optimization.disable_specified_optimizers", existing);
     const auto projected = CreateNemotronBoltDrafterConfig(config);
     const auto& merged = projected->model.decoder.session_options.config_entries;
-    ASSERT_EQ(merged.size(), entries.size());
     EXPECT_EQ(merged.front().second, "SupersededFusion");
-    EXPECT_EQ(merged.back().second,
+    const auto exclusion = std::find_if(merged.rbegin(), merged.rend(), [](const auto& option) {
+      return option.first == "optimization.disable_specified_optimizers";
+    });
+    ASSERT_NE(exclusion, merged.rend());
+    EXPECT_EQ(exclusion->second,
               existing.empty() ? "GatherSliceToSplitFusion"
                                : existing + (existing == "OtherFusion,GatherSliceToSplitFusion"
                                                  ? ""
                                                  : ",GatherSliceToSplitFusion"));
+  }
+}
+
+TEST(NemotronBolt, PreservesLogicalDrafterLengthsAndExplicitSanitizerPolicy) {
+  for (const std::string policy : {"", "0", "1"}) {
+    Config config;
+    config.model.vocab_size = 128;
+    auto& drafter = config.model.dflash2;
+    drafter.filename = "drafter.onnx";
+    drafter.num_hidden_layers = drafter.num_key_value_heads = drafter.head_size = 1;
+    drafter.block_size = 8;
+    drafter.num_draft_tokens = 7;
+    drafter.selector_top_k = 1;
+    drafter.sliding_window = 8;
+    drafter.session_options.emplace();
+    constexpr auto key = "session.paged_attention.skip_input_sanitizer";
+    if (!policy.empty()) {
+      drafter.session_options->config_entries.emplace_back(key, policy);
+    }
+    const auto projected = CreateNemotronBoltDrafterConfig(config);
+    const auto& entries = projected->model.decoder.session_options.config_entries;
+    const auto length_policy = std::find_if(entries.begin(), entries.end(), [](const auto& option) {
+      return option.first == key;
+    });
+#if ORT_API_VERSION >= 32
+    ASSERT_NE(length_policy, entries.end());
+    EXPECT_EQ(length_policy->second, policy.empty() ? "1" : policy);
+    EXPECT_EQ(std::count_if(entries.begin(), entries.end(), [](const auto& option) {
+                return option.first == key;
+              }), 1);
+#else
+    if (policy.empty()) {
+      EXPECT_EQ(length_policy, entries.end());
+    } else {
+      ASSERT_NE(length_policy, entries.end());
+      EXPECT_EQ(length_policy->second, policy);
+    }
+#endif
+    EXPECT_EQ(drafter.session_options->config_entries.size(), policy.empty() ? 0u : 1u);
   }
 }
 
