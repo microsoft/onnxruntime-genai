@@ -81,6 +81,11 @@ size_t IndexShareScratchBytes(const DecoderOnly_Model& model, size_t max_batch) 
 }
 
 EngineDependencies CreateDecoderDependencies(std::shared_ptr<Model> model) {
+  const auto* decoder = dynamic_cast<const DecoderOnly_Model*>(model.get());
+  if (decoder && !decoder->rope_context_input_.empty()) {
+    throw std::runtime_error(
+        "Engine does not support the explicit LongRoPE context contract; use Generator instead.");
+  }
   // The static batch decoder rebuilds its contiguous cache from the whole sequence every step, so
   // it cannot resume a half-written prompt. Reject a model that configures chunking here rather
   // than surfacing it once a Request is already being admitted.

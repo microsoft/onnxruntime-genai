@@ -138,6 +138,9 @@ SpeculativeDecodingModel::SpeculativeDecodingModel(std::unique_ptr<Config> confi
   target_model_ = std::make_shared<DecoderOnly_Model>(CloneConfigForTarget(*config_), ort_env);
   draft_model_ = std::make_shared<DecoderOnly_Model>(
       CloneConfigForDraft(*config_, draft_config), ort_env);
+  if (!target_model_->rope_context_input_.empty() || !draft_model_->rope_context_input_.empty())
+    throw std::runtime_error(
+        "Speculative decoding does not support the explicit LongRoPE context contract in target or draft models.");
   ValidateLogitsDimensionsMatch(*target_model_, *draft_model_);
   session_info_.Add(*target_model_->session_decoder_);
 }

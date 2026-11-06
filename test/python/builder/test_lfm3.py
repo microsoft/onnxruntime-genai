@@ -7,9 +7,9 @@ LFM3 adds to LFM2 sliding-window attention layers, RoPE per attention layer type
 on the full-attention layers), a sigmoid output gate per head and sandwich norms. A tiny export must
 match the PyTorch model through a prefill longer than the window and the decode steps after it; that
 test needs transformers' LFM3 classes and an onnxruntime that runs CausalConvWithState. The other tests
-build from a stand-in config, and the graph tests from a stand-in module tree with the module names of the
-checkpoints' remote code. Of those, only the KV cache tests run their graphs, in onnxruntime_genai, so they
-need that onnxruntime too but not the LFM3 classes.
+need no LFM3 classes: they build from a stand-in config, and the graph tests from a stand-in module tree
+with the module names of the checkpoints' remote code. Of those, only the KV cache tests, in onnxruntime_genai,
+and the d1-2B causal test run their graphs, so they need that onnxruntime too.
 """
 
 from __future__ import annotations
@@ -22,7 +22,13 @@ import types
 
 import numpy as np
 import pytest
-from _builder_test_utils import BUILDERS_DIR, check_node_shapes, load_builder_module, ort_runs_causal_conv_with_state
+from _builder_test_utils import (
+    BUILDERS_DIR,
+    check_node_shapes,
+    load_builder_module,
+    ort_runs_bidirectional_group_query_attention,
+    ort_runs_causal_conv_with_state,
+)
 
 torch = pytest.importorskip("torch")
 onnx = pytest.importorskip("onnx")
@@ -83,8 +89,25 @@ def _build_tiny_lfm3(tmp_path, full_attention_rope_type):
     model = LFM3Model(builder_config, ir.DataType.FLOAT, ir.DataType.FLOAT, "cpu", None, {})
     model.load_weights = lambda input_path: hf_model
     model.make_model("")
-    ir.save(model.model, tmp_path / "model.onnx")
-    return ort.InferenceSession(str(tmp_path / "model.onnx"), providers=["CPUExecutionProvider"]), model, hf_model
+    return _session(tmp_path, model, "model"), model, hf_model
+
+
+def _session(tmp_path, model, name):
+    ir.save(model.model, tmp_path / f"{name}.onnx")
+    return ort.InferenceSession(str(tmp_path / f"{name}.onnx"), providers=["CPUExecutionProvider"])
+
+
+def _empty_past(session, model):
+    """KV caches that hold no tokens and zero conv states for every past input of the session."""
+    past = {}
+    for graph_input in session.get_inputs():
+        if graph_input.name.startswith("past_key_values"):
+            # The sliding layer evicts from a buffer that holds the whole window from the first run.
+            length = SLIDING_WINDOW if graph_input.shape[2] == "past_sliding_length" else 0
+            past[graph_input.name] = np.zeros((1, model.num_kv_heads, length, model.head_size), np.float32)
+        elif graph_input.name.endswith(".conv"):
+            past[graph_input.name] = np.zeros((1, model.hidden_size, model.conv_L_cache - 1), np.float32)
+    return past
 
 
 @pytest.mark.skipif(
@@ -99,14 +122,7 @@ def _build_tiny_lfm3(tmp_path, full_attention_rope_type):
 @pytest.mark.parametrize("full_attention_rope_type", ["default", "proportional"])
 def test_lfm3_matches_pytorch_past_the_sliding_window(tmp_path, full_attention_rope_type):
     session, model, hf_model = _build_tiny_lfm3(tmp_path, full_attention_rope_type)
-    past = {}
-    for graph_input in session.get_inputs():
-        if graph_input.name.startswith("past_key_values"):
-            # The sliding layer evicts from a buffer that holds the whole window from the first run.
-            length = SLIDING_WINDOW if graph_input.shape[2] == "past_sliding_length" else 0
-            past[graph_input.name] = np.zeros((1, model.num_kv_heads, length, model.head_size), np.float32)
-        elif graph_input.name.endswith(".conv"):
-            past[graph_input.name] = np.zeros((1, model.hidden_size, model.conv_L_cache - 1), np.float32)
+    past = _empty_past(session, model)
     output_names = [output.name for output in session.get_outputs()]
 
     rng = np.random.default_rng(0)
@@ -128,9 +144,11 @@ def test_lfm3_matches_pytorch_past_the_sliding_window(tmp_path, full_attention_r
         )
 
 
-def _stand_in_config(architecture="Lfm3ForCausalLM", layer_types=LAYER_TYPES, rope_parameters=ROPE_PARAMETERS):
+def _stand_in_config(
+    architecture="Lfm3ForCausalLM", layer_types=LAYER_TYPES, rope_parameters=ROPE_PARAMETERS, **overrides
+):
     """The attributes of an LFM3 config.json that the builder reads, at a tiny size."""
-    return types.SimpleNamespace(
+    config = types.SimpleNamespace(
         architectures=[architecture],
         _name_or_path="LiquidAI/LFM3-1.7B",
         vocab_size=VOCAB_SIZE,
@@ -151,6 +169,11 @@ def _stand_in_config(architecture="Lfm3ForCausalLM", layer_types=LAYER_TYPES, ro
         conv_L_cache=3,
         tie_word_embeddings=False,
     )
+    if architecture == "D1Model":
+        # From d1-2B's config.json; the builder reads them only for D1Model.
+        vars(config).update(model_type="lfm3_vl", d1_attention="set")
+    vars(config).update(overrides)
+    return config
 
 
 class Lfm3DecoderLayer(torch.nn.Module):
@@ -202,6 +225,32 @@ def _build_stand_in_lfm3(ep, io_dtype, extra_options, use_sandwich_norm=True):
     config = _stand_in_config()
     model = LFM3Model(config, io_dtype, io_dtype, ep, None, extra_options)
     model.load_weights = lambda input_path: _stand_in_lfm3(config, use_sandwich_norm)
+    model.make_model("")
+    return model
+
+
+def _nested_stand_in(config):
+    """The module tree of a VL checkpoint, with the decoder under model.language_model."""
+    text_model = _stand_in_lfm3(config, use_sandwich_norm=True)
+    hf_model = torch.nn.Module()
+    hf_model.model = torch.nn.Module()
+    hf_model.model.language_model = text_model.model
+    hf_model.lm_head = text_model.lm_head
+    return hf_model
+
+
+def build_stand_in_d1(config, ep="cpu", io_dtype=ir.DataType.FLOAT, cache_dir=None):
+    """An export of random seeded weights, the same for every architecture. Its RMSNorm weights are not all ones,
+    so a norm the builder drops moves the logits, and its LM head spreads the logits, so errors are visible."""
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(0)
+        hf_model = _nested_stand_in(config)
+        for module in hf_model.modules():
+            if isinstance(module, torch.nn.RMSNorm):
+                torch.nn.init.normal_(module.weight, mean=1.0, std=0.1)
+        torch.nn.init.normal_(hf_model.lm_head.weight, std=0.1)
+    model = LFM3Model(config, io_dtype, io_dtype, ep, cache_dir, {})
+    model.load_weights = lambda input_path: hf_model
     model.make_model("")
     return model
 
@@ -264,16 +313,6 @@ def test_lfm3_graph_wiring(ep, io_dtype, extra_options, use_sandwich_norm):
             nodes[f"/model/layers.{layer_id + 1}/{next_norm}_layernorm/SkipLayerNorm"].inputs[1].name
             == f"{layer}/post_ffn_layernorm/output_0"
         )
-
-
-def _stand_in_multimodal_lfm3(config):
-    # LFM3-VL, LFM3-Audio and LFM3-Omni keep the decoder, and its final norm, under model.language_model.
-    text_model = _stand_in_lfm3(config, use_sandwich_norm=True)
-    hf_model = torch.nn.Module()
-    hf_model.model = torch.nn.Module()
-    hf_model.model.language_model = text_model.model
-    hf_model.lm_head = text_model.lm_head
-    return hf_model
 
 
 def _export_for_genai(tmp_path, name, hf_model, extra_options, ep="cpu", io_dtype=ir.DataType.FLOAT, config=None):
@@ -569,7 +608,7 @@ def test_lfm3_sliding_layers_keep_a_window_only_where_it_has_run(
 ):
     config = _stand_in_config(architecture)
     multimodal = architecture in LFM3Model.MULTIMODAL
-    hf_model = _stand_in_multimodal_lfm3(config) if multimodal else _stand_in_lfm3(config, use_sandwich_norm=True)
+    hf_model = _nested_stand_in(config) if multimodal else _stand_in_lfm3(config, use_sandwich_norm=True)
     output_dir = _export_for_genai(tmp_path, "out", hf_model, extra_options, ep, io_dtype, config)
 
     model = onnx.load(output_dir / "model.onnx", load_external_data=False)
@@ -641,8 +680,9 @@ def test_lfm3_takes_windowed_kv_cache_where_it_has_run(capsys):
 
 @pytest.mark.parametrize("exclude_embeds", [False, True])
 def test_lfm3_builds_the_decoder_of_a_multimodal_checkpoint(exclude_embeds):
+    # LFM3-VL, LFM3-Audio and LFM3-Omni keep the decoder, and its final norm, under model.language_model.
     config = _stand_in_config("Lfm3VlForConditionalGeneration")
-    hf_model = _stand_in_multimodal_lfm3(config)
+    hf_model = _nested_stand_in(config)
     model = LFM3Model(config, ir.DataType.FLOAT, ir.DataType.FLOAT, "cpu", None, {"exclude_embeds": exclude_embeds})
     model.load_weights = lambda input_path: hf_model
     model.make_model("")
@@ -757,6 +797,97 @@ def test_lfm3_needs_an_attention_op_with_a_sliding_window(ep, io_dtype, error):
             build()
 
 
+@pytest.mark.parametrize(
+    "architecture,ep,io_dtype,causal",
+    [
+        ("D1Model", "cpu", ir.DataType.FLOAT, {"full_attention": 0, "sliding_attention": None}),
+        ("D1Model", "cuda", ir.DataType.FLOAT16, {"full_attention": 0, "sliding_attention": None}),
+        (
+            "Lfm3VlForConditionalGeneration",
+            "cpu",
+            ir.DataType.FLOAT,
+            {"full_attention": None, "sliding_attention": None},
+        ),
+    ],
+)
+def test_lfm3_causal_attribute_per_layer_type(architecture, ep, io_dtype, causal):
+    graph = build_stand_in_d1(_stand_in_config(architecture), ep, io_dtype).model.graph
+
+    for layer_id, layer_type in enumerate(LAYER_TYPES):
+        if layer_type == "conv":
+            continue
+        (attention,) = [
+            node
+            for node in graph
+            if node.name.startswith(f"/model/layers.{layer_id}/attn/") and node.op_type == "GroupQueryAttention"
+        ]
+        attribute = attention.attributes.get("causal")
+        assert (None if attribute is None else attribute.value) == causal[layer_type]
+
+
+def _prefill_logits(session, model, tokens):
+    feeds = {"input_ids": np.array([tokens], np.int64), "attention_mask": np.ones((1, len(tokens)), np.int64)}
+    return session.run(["logits"], {**feeds, **_empty_past(session, model)})[0][0]
+
+
+@pytest.mark.skipif(
+    not ort_runs_causal_conv_with_state(),
+    reason="the installed onnxruntime cannot run com.microsoft:CausalConvWithState",
+)
+@pytest.mark.skipif(
+    not ort_runs_bidirectional_group_query_attention(),
+    reason="the installed onnxruntime has no causal attribute on GroupQueryAttention",
+)
+def test_d1_export_reads_later_tokens_where_a_causal_export_cannot(tmp_path):
+    tokens = np.random.default_rng(0).integers(1, VOCAB_SIZE, size=3 * SLIDING_WINDOW).tolist()
+    changed = [*tokens[:-1], (tokens[-1] + 1) % VOCAB_SIZE]
+    d1_model = build_stand_in_d1(_stand_in_config("D1Model"))
+    causal_model = build_stand_in_d1(_stand_in_config("Lfm3VlForConditionalGeneration"))
+    d1_session, causal_session = _session(tmp_path, d1_model, "d1"), _session(tmp_path, causal_model, "causal")
+
+    logits = _prefill_logits(d1_session, d1_model, tokens)
+    causal_logits = _prefill_logits(causal_session, causal_model, tokens)
+
+    # The first token reads the last one only through the full-attention layer's causal=0.
+    assert np.abs(_prefill_logits(causal_session, causal_model, changed)[0] - causal_logits[0]).max() < 1e-5
+    assert np.abs(_prefill_logits(d1_session, d1_model, changed)[0] - logits[0]).max() > 1e-2
+
+    # The answer is read at the last position, which the earlier tokens reach through the sliding layer.
+    assert np.abs(logits[-1] - causal_logits[-1]).max() > 0.1
+
+
+@pytest.mark.parametrize(
+    "ep,io_dtype,extra_options,error",
+    [
+        ("webgpu", ir.DataType.FLOAT16, {}, "causal=0, which ONNX Runtime has on CPU and CUDA, not webgpu"),
+        ("webgpu", ir.DataType.FLOAT, {}, "causal=0, which ONNX Runtime has on CPU and CUDA, not webgpu"),
+        ("js", ir.DataType.FLOAT, {}, "causal=0, which ONNX Runtime has on CPU and CUDA, not js"),
+        ("dml", ir.DataType.FLOAT16, {}, "causal=0, which ONNX Runtime has on CPU and CUDA, not dml"),
+        ("trt-rtx", ir.DataType.FLOAT16, {}, "causal=0, which ONNX Runtime has on CPU and CUDA, not trt-rtx"),
+        ("cuda", ir.DataType.FLOAT16, {"use_paged_attention": True}, "PagedAttention"),
+        # The same refusals as LFM3 text.
+        ("cuda", ir.DataType.FLOAT, {}, "selects Attention"),
+        ("cpu", ir.DataType.FLOAT16, {}, "selects MultiHeadAttention"),
+    ],
+)
+def test_d1_refuses_what_cannot_run_causal_0(ep, io_dtype, extra_options, error):
+    with pytest.raises(NotImplementedError, match=error):
+        LFM3Model(_stand_in_config("D1Model"), io_dtype, io_dtype, ep, None, extra_options)
+
+
+@pytest.mark.parametrize(
+    "overrides,error",
+    [
+        # d1-Omni-2B is also a D1Model.
+        ({"model_type": "lfm3_omni"}, "not lfm3_omni"),
+        ({"d1_attention": "causal"}, "d1_attention=causal"),
+    ],
+)
+def test_d1_refuses_other_d1_checkpoints(overrides, error):
+    with pytest.raises(NotImplementedError, match=error):
+        LFM3Model(_stand_in_config("D1Model", **overrides), ir.DataType.FLOAT, ir.DataType.FLOAT, "cpu", None, {})
+
+
 def test_lfm3_paged_conv_layers_keep_each_sequence_apart():
     model = _build_stand_in_lfm3("cuda", ir.DataType.FLOAT16, {"use_paged_attention": True})
 
@@ -802,6 +933,7 @@ def _load_builder_entrypoint_module():
         ("Lfm3VlForConditionalGeneration", "AutoModelForImageTextToText", "lfm3", "lfm3_vl"),
         ("Lfm3AudioForConditionalGeneration", "AutoModelForMultimodalLM", "lfm3", "lfm3_audio"),
         ("Lfm3OmniForConditionalGeneration", "AutoModelForMultimodalLM", "lfm3", "lfm3_omni"),
+        ("D1Model", "AutoModel", "lfm3", "lfm3_vl"),
     ],
 )
 def test_lfm3_architectures_pick_the_loader_and_the_model_type(
