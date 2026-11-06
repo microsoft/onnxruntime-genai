@@ -20,10 +20,11 @@ env:
   buildRoot: 'build/cpu/win-x64'
   binaryDir: 'build/cpu/win-x64/Release'
   WEBGPU_EP_PACKAGE_NAME: 'Microsoft.ML.OnnxRuntime.EP.WebGpu'
-  WEBGPU_EP_PACKAGE_VERSION: '0.5.0-dev.20260928012604+a11b4e59'
+  WEBGPU_EP_PACKAGE_VERSION: '0.6.0-dev.20261106072551+ee5b21dd'
   # Published ONNX Runtime used at test time (GenAI is built against the cmake-default ORT).
   # PagedAttention requires the extended schema with attention_metadata at input 16.
-  ORT_TEST_VERSION: '1.31.0-dev-20260928-0516-2b758bc'
+  # State replay requires ConvStateReplay and GatedDeltaNetStateReplay schemas and WebGPU kernels.
+  ORT_TEST_VERSION: '1.32.0-dev-20261105-0500-527971b'
 
 jobs:
   windows-webgpu-x64-build:
