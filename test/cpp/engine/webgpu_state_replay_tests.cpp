@@ -54,6 +54,30 @@ std::string ConfigEntry(const OrtSessionOptions& options, const char* key) {
   return value;
 }
 
+TEST(WebGpuInitSessionOptionsTest, ForwardsDawnCacheInterfaceAndExcludesSessionOptions) {
+  auto* device = GetDeviceInterface(DeviceType::WEBGPU);
+  for (const char* value : {"0", "123456"}) {
+    SCOPED_TRACE(value);
+    Config::ProviderOptions user_options{
+        "WebGPU", {{"dawnCacheInterface", value}, {"weightLoadAcceleration", "required"}, {"enableGraphCapture", "1"}, {"preferredLayout", "NHWC"}}};
+    Config::ProviderOptions init_options{"WebGPU", {}};
+    device->ShapeInitSessionProviderOptions(init_options, &user_options);
+    const std::vector<std::pair<std::string, std::string>> expected{
+        {"dawnCacheInterface", value}, {"weightLoadAcceleration", "required"}};
+    EXPECT_EQ(init_options.options, expected);
+  }
+}
+
+TEST(WebGpuInitSessionOptionsTest, DoesNotInjectDawnCacheInterfaceWhenOmitted) {
+  auto* device = GetDeviceInterface(DeviceType::WEBGPU);
+  Config::ProviderOptions user_options{"WebGPU", {{"enableGraphCapture", "1"}}};
+  Config::ProviderOptions init_options{"WebGPU", {}};
+  device->ShapeInitSessionProviderOptions(init_options, &user_options);
+  EXPECT_TRUE(init_options.options.empty());
+  device->ShapeInitSessionProviderOptions(init_options, nullptr);
+  EXPECT_TRUE(init_options.options.empty());
+}
+
 class WebGpuStateReplayTest : public ::testing::TestWithParam<bool> {
  protected:
   static constexpr size_t kHv = 3, kDv = 2, kDk = 4, kHk = 2, kCapacity = 4;

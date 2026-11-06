@@ -47,7 +47,15 @@ std::unique_ptr<OrtSession> CreateSession(
     const std::string& ep_name,
     const std::vector<const char*>& session_config_keys,
     const std::vector<const char*>& session_config_values) {
-  auto session_options = OrtSessionOptions::Create();
+  const auto& init_options =
+      GetOrtGlobals()->device_allocators_[static_cast<int>(DeviceType::WEBGPU)].session_options_;
+  const bool reuse_webgpu_options =
+      device_type == DeviceType::WEBGPU && ep_name == "WebGpuExecutionProvider" && init_options;
+  // Auxiliary WebGPU graphs operate on buffers owned by GenAI's persistent device
+  // allocator. Clone its initialization-session options to preserve the provider
+  // registration and device configuration, including Dawn cache callbacks.
+  // Registering WebGPU with empty options would conflict with that shared context.
+  auto session_options = reuse_webgpu_options ? init_options->Clone() : OrtSessionOptions::Create();
   session_options->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
   // Apply session configuration entries
@@ -56,7 +64,7 @@ std::unique_ptr<OrtSession> CreateSession(
   }
 
   // Append execution provider
-  if (!ep_name.empty()) {
+  if (!ep_name.empty() && !reuse_webgpu_options) {
     const Config::ProviderOptions provider_options{ep_name, {}};
     if (!AppendExecutionProviderV2(*session_options, provider_options,
                                    device_type, ep_name)) {
