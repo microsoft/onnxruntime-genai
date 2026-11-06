@@ -3528,6 +3528,7 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
   }
 
   engine_ = std::make_unique<Qwen38GraphEngine>(*this);
+  engine_thread_ = std::this_thread::get_id();
   auto& capabilities = resolved_capabilities_;
   capabilities.token_selection = BackendTokenSelection::Backend;
   capabilities.admission = engine_->MaxBatchSize() > 1 ? BackendAdmission::IndependentSlots : BackendAdmission::WholeBatch;
@@ -3601,6 +3602,12 @@ std::shared_ptr<Qwen38DecodeDevice> Qwen38GraphModel::AcquireDevice() {
     // CUDA's current device is per thread. The Engine drives the model from the thread that acquires it, which is not the
     // thread that loaded the model, so select the model's GPU here: its stream and buffers live on that device.
     plane_->Check(plane_->set_device(p_device_->GetDeviceId(nullptr)), "cudaSetDevice");
+    // Recreate CUDA-graph decode state on its execution thread; selecting the device alone does not transfer that state.
+    if (engine_thread_ != std::this_thread::get_id()) {
+      engine_.reset();
+      engine_ = std::make_unique<Qwen38GraphEngine>(*this);
+      engine_thread_ = std::this_thread::get_id();
+    }
   } catch (...) {
     leased_.store(false);
     throw;
