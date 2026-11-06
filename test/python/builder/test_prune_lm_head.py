@@ -74,17 +74,17 @@ def _make_lm_head_graph(tmp_path, io_dtype, with_mask, runtime_indices=False):
     return model, ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
 
 
-def test_runtime_indices_select_chunk_local_rows_with_a_static_mask(tmp_path):
-    _, session = _make_lm_head_graph(tmp_path, ir.DataType.FLOAT16, with_mask=True, runtime_indices=True)
+@pytest.mark.parametrize("with_mask", [False, True])
+def test_runtime_indices_select_chunk_local_rows_with_a_static_mask(tmp_path, with_mask):
+    _, session = _make_lm_head_graph(tmp_path, ir.DataType.FLOAT16, with_mask=with_mask, runtime_indices=True)
     hidden = np.arange(2 * 968 * HIDDEN_SIZE, dtype=np.float32).reshape(2, 968, HIDDEN_SIZE).astype(np.float16)
-    (output,) = session.run(
-        None,
-        {
-            "hidden_states": hidden,
-            "attention_mask": np.ones((2, 8192), dtype=np.int64),
-            "last_token_indices": np.array([951, 2], dtype=np.int32).reshape(2, 1, 1),
-        },
-    )
+    feeds = {
+        "hidden_states": hidden,
+        "last_token_indices": np.array([951, 2], dtype=np.int32).reshape(2, 1, 1),
+    }
+    if with_mask:
+        feeds["attention_mask"] = np.ones((2, 8192), dtype=np.int64)
+    (output,) = session.run(None, feeds)
     np.testing.assert_array_equal(output, hidden[np.arange(2), [951, 2]][:, np.newaxis, :])
 
 

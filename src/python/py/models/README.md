@@ -390,6 +390,11 @@ full attention mask. Logits remain `[batch_size, 1, vocab_size]`; attention and
 KV-cache updates still process the entire chunk. Do not add this reserved input
 to the JSON decoder-input mapping.
 
+Runtime indices also select the requested row in decoders without an attention
+mask, and are emitted by the Nemotron Parse decoder's custom input setup.
+Padding-only intermediate chunks are permitted when their logits are discarded;
+committed-token replay treats PAD-ID tokens as valid.
+
 The exported model requires a runtime built with `last_token_indices` support.
 For older runtimes, re-export with both `runtime_last_token_indices=false` and
 `prune_lm_head=false`. The runtime-index option cannot be combined with paged

@@ -175,7 +175,7 @@ DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& 
     return RunWithChunking(total_length, next_tokens, next_indices, chunk_size_opt.value(), all_tokens_valid);
   }
 
-  UpdateInputsOutputs(next_tokens, next_indices, total_length);
+  UpdateInputsOutputs(next_tokens, next_indices, total_length, all_tokens_valid, true);
   if (engram_state_) {
     engram_state_->UpdateInputsOutputs(next_tokens);
     engram_state_->Run(total_length, next_tokens, next_indices);
@@ -237,7 +237,8 @@ DeviceSpan<float> DecoderOnly_State::RunWithChunking(int total_length, DeviceSpa
     length = length + static_cast<int>(current_chunk_size);
 
     // Process this chunk - fills KV cache progressively
-    UpdateInputsOutputs(chunk_tokens, next_indices, length);
+    UpdateInputsOutputs(chunk_tokens, next_indices, length, all_tokens_valid,
+                        processed_tokens + current_chunk_size == num_tokens);
     if (engram_state_) {
       engram_state_->UpdateInputsOutputs(chunk_tokens);
       engram_state_->Run(length, chunk_tokens, next_indices);
@@ -320,7 +321,8 @@ void DecoderOnly_State::CropToAccepted(size_t new_length, size_t recurrent_posit
     indexer_cache_->CommitAcceptedPrefix(recurrent_position + 1);
 }
 
-void DecoderOnly_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> beam_indices, int total_length) {
+void DecoderOnly_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> beam_indices, int total_length,
+                                            bool all_tokens_valid, bool is_final_chunk) {
   input_ids_.Update(next_tokens);
   size_t new_length = static_cast<size_t>(input_ids_.GetShape()[1]);
 
@@ -358,7 +360,7 @@ void DecoderOnly_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, De
     hidden_states_output_->Update(static_cast<int>(new_length));
   if (recurrent_state_)
     recurrent_state_->SetForwardLength(static_cast<int>(new_length));
-  logits_.Update(next_tokens, new_length);
+  logits_.Update(next_tokens, new_length, all_tokens_valid, is_final_chunk);
 }
 
 }  // namespace Generators

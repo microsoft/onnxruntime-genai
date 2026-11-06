@@ -5,6 +5,7 @@
 #include <array>
 #include <limits>
 #include <tuple>
+#include "config_utils.h"
 #include "generator/generators.h"
 #include "models/model.h"
 #include "models/io/logits.h"
@@ -79,8 +80,10 @@ class RuntimeLastTokenLogitsTest : public testing::Test {
   }
 
   void RunChunk(const std::vector<int32_t>& tokens, int sequence_length,
-                const std::array<int32_t, 3>& indices) {
+                const std::array<int32_t, 3>& indices, bool expanded = false) {
     auto next = SetTokens(tokens, sequence_length);
+    if (expanded)
+      next = WrapTensor<int32_t>(*model_->p_device_inputs_, *input_ids_);
     logits_->Update(next, sequence_length);
     const int beams = params_->search.num_beams;
     if (model_->session_info_.HasInput("last_token_indices")) {
@@ -118,6 +121,50 @@ class RuntimeLastTokenLogitsTest : public testing::Test {
 
 class RuntimeLastTokenLogitsModesTest : public RuntimeLastTokenLogitsTest,
                                         public testing::WithParamInterface<std::tuple<bool, int>> {};
+
+TEST_F(RuntimeLastTokenLogitsTest, BeamExpandedRowsKeepUnequalPromptLengths) {
+  Initialize("pruned.onnx", false, 2);
+  logits_->Add();
+  RunChunk({4, 0, 0, 5, 6, 0, 7, 8, 9}, 3, {0, 1, 2}, true);
+}
+
+TEST_F(RuntimeLastTokenLogitsTest, RejectsInvalidBatchBeamDimensionsBeforeAllocation) {
+  Initialize();
+  for (const auto& [batch, beams] : {std::pair{0, 1}, std::pair{1, 0}, std::pair{50000, 50000}}) {
+    params_->search.batch_size = batch;
+    params_->search.num_beams = beams;
+    EXPECT_THROW(Logits temporary(*state_), std::invalid_argument);
+  }
+}
+
+#if USE_CUDA
+TEST_F(RuntimeLastTokenLogitsTest, DeviceTokensDoNotReadAnUnpopulatedHostMirror) {
+  Initialize();
+  logits_->Add();
+  auto tokens = SetTokens({4, 0, 0, 5, 6, 0, 7, 8, 9}, 3);
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
+  ClearProviders(*config);
+  SetProviderOption(*config, "cuda", {}, {});
+  auto cuda_model = CreateModel(GetOrtEnv(), std::move(config));
+  auto* cuda = cuda_model->p_device_;
+  ASSERT_NE(cuda, nullptr);
+  auto device_tokens = cuda->Allocate<int32_t>(tokens.size());
+  device_tokens.CopyFrom(tokens);
+  auto wrapped = cuda->WrapMemory<int32_t>(device_tokens.Span());
+  std::fill(wrapped.CpuSpan().begin(), wrapped.CpuSpan().end(), 0);
+  ASSERT_NO_THROW(logits_->Update(wrapped, 3));
+  const auto* indices = state_->inputs_[1]->GetTensorData<int32_t>();
+  EXPECT_EQ((std::vector<int32_t>{indices, indices + 3}), (std::vector<int32_t>{0, 1, 2}));
+  auto decode_tokens = cuda->WrapMemory<int32_t>(device_tokens.Span().first(3));
+  auto* index_binding = state_->inputs_[1];
+  logits_->Update(decode_tokens, 1);
+  auto* output_binding = state_->outputs_[0];
+  logits_->Update(decode_tokens, 1);
+  EXPECT_EQ(decode_tokens.GetBuffer().p_cpu_, nullptr);
+  EXPECT_EQ(state_->inputs_[1], index_binding);
+  EXPECT_EQ(state_->outputs_[0], output_binding);
+}
+#endif
 
 TEST_P(RuntimeLastTokenLogitsModesTest, BoundIndicesFollowPrefillContinuationAndDecode) {
   Initialize("pruned.onnx", std::get<0>(GetParam()), std::get<1>(GetParam()));

@@ -9,7 +9,7 @@ from pathlib import Path
 from onnx import TensorProto, helper, save
 
 
-def create_model(output_dir, declare_context=True):
+def create_model(output_dir, declare_context=True, runtime_indices=False):
     output_dir.mkdir(parents=True, exist_ok=True)
     inputs = [
         helper.make_tensor_value_info("input_ids", TensorProto.INT64, ["batch", "sequence"]),
@@ -20,8 +20,10 @@ def create_model(output_dir, declare_context=True):
     ]
     if declare_context:
         inputs.insert(3, helper.make_tensor_value_info("rope_context_length", TensorProto.INT64, []))
+    if runtime_indices:
+        inputs.append(helper.make_tensor_value_info("last_token_indices", TensorProto.INT32, ["batch", 1, 1]))
     outputs = [
-        helper.make_tensor_value_info("logits", TensorProto.FLOAT, ["batch", "sequence", 3]),
+        helper.make_tensor_value_info("logits", TensorProto.FLOAT, ["batch", 1 if runtime_indices else "sequence", 3]),
         helper.make_tensor_value_info("present.0.key", TensorProto.FLOAT, ["batch", 1, "total", 1]),
         helper.make_tensor_value_info("present.0.value", TensorProto.FLOAT, ["batch", 1, "total", 1]),
     ]
@@ -60,8 +62,19 @@ def create_model(output_dir, declare_context=True):
         helper.make_node("Unsqueeze", ["sum", "logits_axis"], ["positive_logit"]),
         helper.make_node("Unsqueeze", ["negative", "logits_axis"], ["negative_logit"]),
         helper.make_node("Unsqueeze", ["zeros", "logits_axis"], ["zero_logit"]),
-        helper.make_node("Concat", ["positive_logit", "negative_logit", "zero_logit"], ["logits"], axis=2),
+        helper.make_node(
+            "Concat",
+            ["positive_logit", "negative_logit", "zero_logit"],
+            ["all_logits" if runtime_indices else "logits"],
+            axis=2,
+        ),
     ]
+    if runtime_indices:
+        constants.append(helper.make_tensor("indices_shape", TensorProto.INT64, [3], [1, 1, 3]))
+        nodes += [
+            helper.make_node("Expand", ["last_token_indices", "indices_shape"], ["expanded_indices"]),
+            helper.make_node("GatherElements", ["all_logits", "expanded_indices"], ["logits"], axis=1),
+        ]
     graph = helper.make_graph(nodes, "longrope-context", inputs, outputs, initializer=constants)
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 18)], ir_version=9)
     if declare_context:
@@ -98,3 +111,4 @@ def create_model(output_dir, declare_context=True):
 if __name__ == "__main__":
     create_model(Path(__file__).parents[1] / "models" / "longrope-context")
     create_model(Path(__file__).parents[1] / "models" / "longrope-context-without-metadata", declare_context=False)
+    create_model(Path(__file__).parents[1] / "models" / "longrope-context-runtime-indices", runtime_indices=True)

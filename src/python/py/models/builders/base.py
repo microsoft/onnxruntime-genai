@@ -6674,7 +6674,7 @@ class Model:
             # for all S tokens during prefill, reducing compute by ~S×.
             seq_dim = 1
 
-            if "attention_mask" in self.input_names:
+            if "attention_mask" in self.input_names or "last_token_indices" in self.input_names:
                 root_input = self.make_last_real_token_selection(f"{basename}/prune", root_input)
             else:
                 # Without a mask, take the last column, as before. Among non-paged exports only the Whisper

@@ -575,7 +575,8 @@ DeviceSpan<float> DecoderState::RunPrefillWithChunking(int current_length, Devic
       ple_state_->Update();
     if (indexer_cache_)
       indexer_cache_->Update(next_indices, length, static_cast<int>(current_chunk_size));
-    logits_.Update(chunk_tokens, current_chunk_size);
+    logits_.Update(chunk_tokens, current_chunk_size, false,
+                   processed_tokens + current_chunk_size == num_tokens);
     if (hidden_states_output_)
       hidden_states_output_->Update(static_cast<int>(current_chunk_size));
     if (engram_state) {

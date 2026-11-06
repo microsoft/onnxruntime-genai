@@ -72,22 +72,33 @@ TEST_F(LongRopeContextTest, LegacyGraphSupportsSameRegimeContinuation) {
 }
 
 TEST_F(LongRopeContextTest, ReplayUsesLogitsOfCommittedPadToken) {
-  auto config = OgaConfig::Create(MODEL_PATH "longrope-context");
-  config->Overlay(R"({"model":{"pad_token_id":1,"eos_token_id":2}})");
-  model = OgaModel::Create(*config);
-  for (int chunk : {0, 3, 4}) {
-    SCOPED_TRACE(testing::Message() << "chunk=" << chunk);
-    auto generator = CreateGenerator(chunk);
-    generator->AppendTokens(std::vector<int32_t>(8, 0));
-    std::array<float, 3> forced_logits{0, 10, -10};
-    generator->SetLogits(*OgaTensor::Create(forced_logits.data(), std::array<int64_t, 2>{1, 3}));
-    generator->GenerateNextToken();
-    ASSERT_EQ(generator->GetSequenceCount(0), 9u);
-    ASSERT_EQ(generator->GetSequenceData(0)[8], 1);
-    ExpectConsistentCache(*generator);
-    generator->GenerateNextToken();
-    EXPECT_EQ(generator->GetSequenceData(0)[9], 0);
+  for (const auto* path : {MODEL_PATH "longrope-context", MODEL_PATH "longrope-context-runtime-indices"}) {
+    auto config = OgaConfig::Create(path);
+    config->Overlay(R"({"model":{"pad_token_id":1,"eos_token_id":2}})");
+    model = OgaModel::Create(*config);
+    for (int chunk : {0, 3, 4}) {
+      SCOPED_TRACE(testing::Message() << "path=" << path << " chunk=" << chunk);
+      auto generator = CreateGenerator(chunk);
+      generator->AppendTokens(std::vector<int32_t>(8, 0));
+      std::array<float, 3> forced_logits{0, 10, -10};
+      generator->SetLogits(*OgaTensor::Create(forced_logits.data(), std::array<int64_t, 2>{1, 3}));
+      generator->GenerateNextToken();
+      ASSERT_EQ(generator->GetSequenceCount(0), 9u);
+      ASSERT_EQ(generator->GetSequenceData(0)[8], 1);
+      ExpectConsistentCache(*generator);
+      generator->GenerateNextToken();
+      EXPECT_EQ(generator->GetSequenceData(0)[9], 0);
+    }
   }
+}
+
+TEST_F(LongRopeContextTest, ChunkedPrefillAcceptsDiscardedPaddingOnlyChunks) {
+  auto config = OgaConfig::Create(MODEL_PATH "longrope-context-runtime-indices");
+  config->Overlay(R"({"model":{"pad_token_id":0,"eos_token_id":2}})");
+  model = OgaModel::Create(*config);
+  auto generator = CreateGenerator(2);
+  ASSERT_NO_THROW(generator->AppendTokens(std::vector<int32_t>{0, 0, 1, 1}));
+  ExpectConsistentCache(*generator);
 }
 
 TEST_F(LongRopeContextTest, OrdinaryPromptStillIgnoresTrailingPadding) {
