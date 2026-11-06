@@ -159,7 +159,7 @@ def create_tokenizer(output_dir: str):
     }
     with open(os.path.join(output_dir, "tokenizer.json"), "w", encoding="utf-8") as f:
         json.dump(tokenizer, f, ensure_ascii=False)
-    with open(os.path.join(output_dir, "tokenizer_config.json"), "w") as f:
+    with open(os.path.join(output_dir, "tokenizer_config.json"), "w", encoding="utf-8") as f:
         json.dump(tokenizer_config, f, indent=2)
         f.write("\n")
 
@@ -168,7 +168,7 @@ def write_configs(output_dir: str):
     """genai_config.json and processor_config.json, with the sections the builder writes for LFM3-VL-2B."""
     config_path = os.path.join(output_dir, "genai_config.json")
     create_genai_config(config_path)
-    with open(config_path) as f:
+    with open(config_path, encoding="utf-8") as f:
         config = json.load(f)
     model = config["model"]
     model.update(type="lfm3_vl", bos_token_id=BOS_ID, eos_token_id=EOS_ID, pad_token_id=PAD_ID)
@@ -181,7 +181,7 @@ def write_configs(output_dir: str):
         "outputs": {"image_features": "image_features"},
         "session_options": {"log_id": "onnxruntime-genai", "provider_options": []},
     }
-    with open(config_path, "w") as f:
+    with open(config_path, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=4)
         f.write("\n")
 
@@ -204,7 +204,7 @@ def write_configs(output_dir: str):
         step("normalize", "Normalize", mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
         step("patch_image", "PatchImage", patch_size=16, temporal_patch_size=2, merge_size=2),
     ]
-    with open(os.path.join(output_dir, "processor_config.json"), "w") as f:
+    with open(os.path.join(output_dir, "processor_config.json"), "w", encoding="utf-8") as f:
         json.dump({"processor": {"name": "lfm3_vl_image_processor", "transforms": transforms}}, f, indent=2)
         f.write("\n")
 

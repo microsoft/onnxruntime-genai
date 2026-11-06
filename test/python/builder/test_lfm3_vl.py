@@ -122,7 +122,7 @@ def write_image_processor(tmp_path, **overrides):
         "size": {"shortest_edge": 4096, "longest_edge": 262144},
         **overrides,
     }
-    (path / "processor_config.json").write_text(json.dumps({"image_processor": image_processor}))
+    (path / "processor_config.json").write_text(json.dumps({"image_processor": image_processor}), encoding="utf-8")
 
 
 class Lfm3VlVisionLayer(torch.nn.Module):
@@ -479,15 +479,15 @@ def test_genai_config_and_processor_config(tmp_path):
     (tmp_path / "out").mkdir()
     model.make_genai_config(config, {}, str(tmp_path / "out"))
 
-    genai_config = json.loads((tmp_path / "out" / "genai_config.json").read_text())["model"]
-    fixture = json.loads((FIXTURE / "genai_config.json").read_text())["model"]
+    genai_config = json.loads((tmp_path / "out" / "genai_config.json").read_text(encoding="utf-8"))["model"]
+    fixture = json.loads((FIXTURE / "genai_config.json").read_text(encoding="utf-8"))["model"]
     assert genai_config["type"] == "lfm3_vl"
     assert genai_config["decoder"]["filename"] == "model.onnx"
     assert genai_config["decoder"]["layer_types"] == config.text_config.layer_types
     assert genai_config["embedding"] == dict(fixture["embedding"], filename="embeddings.onnx")
     assert genai_config["vision"] == dict(fixture["vision"], filename="vision.onnx")
-    assert json.loads((tmp_path / "out" / "processor_config.json").read_text()) == json.loads(
-        (FIXTURE / "processor_config.json").read_text()
+    assert json.loads((tmp_path / "out" / "processor_config.json").read_text(encoding="utf-8")) == json.loads(
+        (FIXTURE / "processor_config.json").read_text(encoding="utf-8")
     )
 
 
