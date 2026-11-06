@@ -332,7 +332,7 @@ runs_conv_state = pytest.mark.skipif(
 )
 # CUDA keeps no rows past the window, and the per-row prompt runs copy device memory.
 on_cpu_and_cuda = pytest.mark.parametrize("ep,io_dtype", [("cpu", ir.DataType.FLOAT), ("cuda", ir.DataType.FLOAT16)])
-# In fp16 a decode step of a padded batch and of its row alone differ by up to 2.1e-3 on an H100.
+# In fp16 a step of a padded batch and of its row alone differ by up to 2.4e-3 on an H100 and 7.3e-3 on an A10.
 ATOL = {"cpu": 1e-4, "cuda": 1e-2}
 CACHE_SLACK = {"cpu": 16, "cuda": 0}
 
@@ -416,12 +416,14 @@ def test_lfm3_windowed_kv_cache_runs_a_padded_batch_like_each_prompt_alone(
 
     width = max(lengths)
     for row, prompt in enumerate(prompts):
-        # Alone, with as many new tokens as in the batch.
+        # No padding, and as many new tokens as in the batch.
         max_length = len(prompt) + len(sequences[row]) - width
-        (expected_sequence,), expected_logits, _ = _generate(og, windowed, [prompt], num_beams, max_length)
-        np.testing.assert_array_equal(sequences[row][width:], expected_sequence[len(prompt) :])
+        # On an A10, fp16 rounds a batch of 1 and a batch of 2 differently, which flips near ties on this random model.
+        reference = [prompt] if ep == "cpu" else [prompt, prompt]
+        expected_sequences, expected_logits, _ = _generate(og, windowed, reference, num_beams, max_length)
+        np.testing.assert_array_equal(sequences[row][width:], expected_sequences[0][len(prompt) :])
         beams = slice(row * num_beams, (row + 1) * num_beams)
-        np.testing.assert_allclose(logits[:, beams], expected_logits, rtol=0, atol=ATOL[ep])
+        np.testing.assert_allclose(logits[:, beams], expected_logits[:, :num_beams], rtol=0, atol=ATOL[ep])
 
 
 @runs_conv_state
@@ -589,7 +591,7 @@ def test_lfm3_sliding_layers_keep_a_window_only_where_it_has_run(
     assert ("sliding_window_cache" in attributes(sliding)) == windowed
     assert "sliding_window_cache" not in attributes(full)
     assert (past_shape(sliding) != past_shape(full)) == windowed
-    decoder = json.loads((output_dir / "genai_config.json").read_text())["model"]["decoder"]
+    decoder = json.loads((output_dir / "genai_config.json").read_text(encoding="utf-8"))["model"]["decoder"]
     if windowed:
         assert decoder["sliding_window"]["window_size"] == SLIDING_WINDOW
         assert decoder["sliding_window"]["layers"] == [sliding]
@@ -603,7 +605,8 @@ def test_lfm3_export_cut_before_its_first_sliding_layer_has_no_window(tmp_path):
     limit = {"num_hidden_layers": LAYER_TYPES.index("sliding_attention")}
     output_dir = _export_for_genai(tmp_path, "out", _seeded_lfm3(), limit)
 
-    assert "sliding_window" not in json.loads((output_dir / "genai_config.json").read_text())["model"]["decoder"]
+    decoder = json.loads((output_dir / "genai_config.json").read_text(encoding="utf-8"))["model"]["decoder"]
+    assert "sliding_window" not in decoder
 
 
 @pytest.mark.parametrize(
