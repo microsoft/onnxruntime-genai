@@ -28,6 +28,9 @@ void ScenarioBase::ValidateConfig(const ScenarioConfig& config) const {
   if (config.prompt_length_k && *config.prompt_length_k < 1) {
     throw std::invalid_argument("prompt_length_k must be >= 1.");
   }
+  if (config.prompt_tokens && (config.scenario != "long_prefill" || *config.prompt_tokens < 1)) {
+    throw std::invalid_argument("prompt_tokens requires long_prefill and must be >= 1.");
+  }
   if (config.generation_tokens < 1) {
     throw std::invalid_argument("generation_tokens must be >= 1.");
   }
@@ -47,9 +50,20 @@ nlohmann::json ScenarioBase::Run(const ScenarioConfig& config, const BenchmarkCo
       {"execution_provider", config.execution_provider},
       {"concurrency", config.concurrency},
       {"generation_tokens", config.generation_tokens},
+      {"warmup_runs", config.warmup_runs},
+      {"model_config", config.model_config},
+      {"execution_provider_library", config.execution_provider_library},
       {"measured_runs", config.measured_runs}};
+#if defined(__linux__)
+  result["config_metadata"]["device_memory_source"] = "NVML (when available)";
+#else
+  result["config_metadata"]["device_memory_source"] = "unavailable";
+#endif
   if (config.prompt_length_k) {
     result["config_metadata"]["prompt_length_k"] = *config.prompt_length_k;
+  }
+  if (config.prompt_tokens) {
+    result["config_metadata"]["prompt_tokens"] = *config.prompt_tokens;
   }
 
   try {

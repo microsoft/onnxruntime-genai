@@ -1,0 +1,54 @@
+[
+  {
+    "scenario": "decode_baseline",
+    "concurrency": 1,
+    "prompt_length_k": 4,
+    "model_path": "../qwen3.8-27b-webgpu-int4-dflash2-w3",
+    "execution_provider": "webgpu",
+    "execution_provider_library": "../onnxruntime-main-benchmark/build/WebGPUMatched/Release/libonnxruntime_providers_webgpu.dylib",
+    "generation_tokens": 64,
+    "warmup_runs": 1,
+    "measured_runs": 3,
+    "model_config": {
+      "engine": {
+        "dynamic_batching": {
+          "num_blocks": 256,
+          "max_batch_size": 1,
+          "max_scheduled_tokens": 1024,
+          "prefix_caching": false
+        }
+      },
+      "speculative": {
+        "max_draft_tokens": 3,
+        "min_adaptive_k": 0,
+        "cooldown": false
+      }
+    }
+  },
+  {
+    "scenario": "long_prefill",
+    "concurrency": 1,
+    "prompt_length_k": 32,
+    "model_path": "../qwen3.8-27b-webgpu-int4-dflash2-w3",
+    "execution_provider": "webgpu",
+    "execution_provider_library": "../onnxruntime-main-benchmark/build/WebGPUMatched/Release/libonnxruntime_providers_webgpu.dylib",
+    "generation_tokens": 1,
+    "warmup_runs": 1,
+    "measured_runs": 3,
+    "model_config": {
+      "engine": {
+        "dynamic_batching": {
+          "num_blocks": 256,
+          "max_batch_size": 1,
+          "max_scheduled_tokens": 1024,
+          "prefix_caching": false
+        }
+      },
+      "speculative": {
+        "max_draft_tokens": 3,
+        "min_adaptive_k": 0,
+        "cooldown": false
+      }
+    }
+  }
+]

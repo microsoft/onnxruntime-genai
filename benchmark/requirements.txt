@@ -1,2 +1,2 @@
-patchelf
+patchelf; sys_platform == "linux"
 requests

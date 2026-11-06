@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Each scenario gets a fresh process so CUDA and ORT allocator state cannot affect later cache checks.
+# Each scenario gets a fresh process so provider and ORT allocator state cannot affect later cache checks.
 """Run each benchmark scenario in a separate process."""
 
 import argparse
@@ -21,8 +21,11 @@ def main() -> int:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument(
         "--cuda_visible_devices",
-        required=True,
-        help="Comma-separated GPU IDs; each scenario waits for and uses one available GPU.",
+        help="Comma-separated GPU IDs, required for CUDA scenarios. WebGPU scenarios run serially.",
+    )
+    parser.add_argument("--model_path", type=Path, help="Override model_path in every scenario.")
+    parser.add_argument(
+        "--execution_provider_library", type=Path, help="Override the provider library in every scenario."
     )
     parser.add_argument("--verbose", dest="verbose", action="store_true", help="Print each benchmark process's output.")
     args = parser.parse_args()
@@ -32,13 +35,24 @@ def main() -> int:
     if not isinstance(scenarios, list) or not scenarios:
         raise ValueError("config must contain a non-empty JSON array of scenarios")
 
-    gpu_ids = [gpu.strip() for gpu in args.cuda_visible_devices.split(",") if gpu.strip()]
-    if not gpu_ids:
+    providers = {scenario.get("execution_provider", "cuda") for scenario in scenarios}
+    if len(providers) > 1:
+        raise ValueError("config must not mix execution providers; run CUDA and WebGPU scenarios in separate configs")
+    uses_cuda = "cuda" in providers
+    gpu_ids = [gpu.strip() for gpu in (args.cuda_visible_devices or "").split(",") if gpu.strip()]
+    if uses_cuda and not gpu_ids:
         raise ValueError("--cuda_visible_devices must contain at least one GPU ID")
     # One queue token per GPU; taking a token reserves that GPU for one scenario.
     available_gpus = Queue()
     for gpu_id in gpu_ids:
         available_gpus.put(gpu_id)
+    available_webgpu = Queue()
+    available_webgpu.put("default adapter")
+    for scenario in scenarios:
+        if args.model_path:
+            scenario["model_path"] = str(args.model_path.expanduser().resolve())
+        if args.execution_provider_library:
+            scenario["execution_provider_library"] = str(args.execution_provider_library.expanduser().resolve())
 
     args.out.mkdir(parents=True, exist_ok=True)
 
@@ -52,31 +66,45 @@ def main() -> int:
             temp_config.write_text(json.dumps([scenario], indent=2) + "\n")
 
             environment = os.environ.copy()
-            # Block until a GPU is free, then return it after the subprocess exits.
-            gpu_id = available_gpus.get()
-            environment["CUDA_VISIBLE_DEVICES"] = gpu_id
+            is_cuda = scenario.get("execution_provider", "cuda") == "cuda"
+            devices = available_gpus if is_cuda else available_webgpu
+            gpu_id = devices.get()
+            if is_cuda:
+                environment["CUDA_VISIBLE_DEVICES"] = gpu_id
+            elif scenario.get("execution_provider") == "webgpu":
+                environment.pop("CUDA_VISIBLE_DEVICES", None)
             label = f"{index}/{len(scenarios)} {scenario['scenario']}"
+            log_path = args.out / f"{scenario['scenario']}_{index:03d}.log"
             try:
                 print(f"Starting {label} on GPU {gpu_id}", flush=True)
-                completed = subprocess.run(
-                    [str(args.executable), "--config", str(temp_config), "--out", str(scenario_out)],
-                    check=False,
-                    env=environment,
-                    capture_output=not args.verbose,
-                    text=True,
-                )
+                with log_path.open("w") as log:
+                    completed = subprocess.run(
+                        [str(args.executable), "--config", str(temp_config), "--out", str(scenario_out)],
+                        check=False,
+                        env=environment,
+                        stdout=log,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                    )
             finally:
-                available_gpus.put(gpu_id)
+                devices.put(gpu_id)
 
             result_path = scenario_out / f"{scenario['scenario']}_results_001.json"
+            failed = completed.returncode != 0
             if result_path.exists():
+                failed |= json.loads(result_path.read_text()).get("status") != "success"
                 shutil.move(result_path, args.out / f"{scenario['scenario']}_results_{index:03d}.json")
-            state = "completed" if completed.returncode == 0 else f"failed ({completed.returncode})"
+            else:
+                print(f"Missing result for {label}", flush=True)
+                failed = True
+            if args.verbose or failed:
+                print(log_path.read_text(), end="", flush=True)
+            state = "completed" if not failed else f"failed (exit={completed.returncode}; see results and log)"
             print(f"{state.capitalize()} {label}", flush=True)
-            return completed.returncode != 0
+            return failed
 
     work = list(enumerate(scenarios, 1))
-    with ThreadPoolExecutor(max_workers=len(gpu_ids)) as executor:
+    with ThreadPoolExecutor(max_workers=max(1, len(gpu_ids))) as executor:
         scenario_failed = list(executor.map(run_scenario, work))
 
     failed_count = sum(1 for failed in scenario_failed if failed)
