@@ -15,8 +15,8 @@ tokenizer made here:
   dummy_embedding.onnx  input_ids, image_features -> inputs_embeds
                         Token lookup with image_features scattered over the positions holding <|image|>.
   dummy_text.onnx       The LFM2 decoder of the LFM2-VL fixture (see create_dummy_lfm2_vl_models.py): each logit
-                        depends on the current input embedding and the two before it, so the image features
-                        reach the logits.
+                        depends on the current input embedding and the two before it, so image features reach
+                        only the logits at and just after their positions.
   tokenizer.json        Byte-level BPE with no merges: one token per byte, plus the chat and vision markers as
                         special tokens. It holds no vocabulary from any released model.
 

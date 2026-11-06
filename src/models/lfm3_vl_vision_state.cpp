@@ -120,7 +120,8 @@ DeviceSpan<float> Lfm3VlVisionState::Run(int current_length, DeviceSpan<int32_t>
   const auto feature_type = feature_info->GetElementType();
   const int64_t hidden_size = feature_info->GetShape().back();
   const size_t token_bytes = static_cast<size_t>(hidden_size) * Ort::SizeOf(feature_type);
-  const int64_t merge_square = model_.config_->model.vision.spatial_merge_size * model_.config_->model.vision.spatial_merge_size;
+  const int64_t merge_size = model_.config_->model.vision.spatial_merge_size;
+  const int64_t merge_square = merge_size * merge_size;
 
   // The pixel rows and grid are the caller's CPU tensors; the features live on the vision session's device.
   auto cpu_memory = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
