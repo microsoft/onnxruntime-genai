@@ -31,7 +31,7 @@ the CUDA provider and `enable_cuda_graph: "1"`. The legacy plugin provider's
 `min_num_runs_before_cuda_graph_capture: "2"` option is not supported by the
 built-in CUDA provider; do not carry it into that configuration.
 Set `ep.cuda.arena.use_cuda_mempool: "1"` in both session-options objects.
-For padded drafter replay, use an ORT API 27+ build implementing
+For padded drafter replay, use an ORT API 32+ build implementing
 `session.paged_attention.skip_input_sanitizer` and explicitly set this session
 config entry to `"1"` in the drafter session. Without that explicit compatible
 policy, partial-row proposals remain unpadded and are not captured. Fixed-request
@@ -51,7 +51,6 @@ override these native bindings. No decoder `state_groups`, `sliding_window`, or
 Engine settings are needed; decoder `sliding_window` and enabled static/dynamic
 batching are rejected. The drafter's internal paged cache and sliding window do
 not make the target paged or windowed.
-There are no Bolt-specific JSON fields.
 Set `speculative.max_draft_tokens: 7` for speculative decoding; the verify width
 is fixed, not adaptive. Ordinary greedy decoding accepts `max_draft_tokens: 0`
 and executes fixed-R8 target blocks, committing only the first row. Configuring
@@ -61,6 +60,51 @@ loaded. These are different memory-measurement configurations.
 Target-only decoding permits capture to be disabled. Requesting capture requires
 a capture-enabled target session; speculative decoding requires both a loaded
 drafter and capture.
+
+### Optional larger-chunk prefill
+
+The default package remains fixed-R8, including prompt ingestion. To opt in to
+a separate prefill graph, set `model.decoder.prefill_filename` to its packaged
+filename. `model.decoder.prefill_sequence_length` may be omitted (zero), or must
+match that graph's fixed input width `R`. `R` must be greater than eight,
+divisible by eight, and no greater than `model.context_length`. This is a package
+choice, not `search.chunk_size`, which remains unsupported.
+
+The runtime consumes full `R`-token chunks with the prefill session, then uses
+the existing R8 graph for the remainder. No large chunk is padded. Verification
+and ordinary decoding remain R8, and the context-capacity reserve stays eight
+positions. Both sessions use the decoder session options and declared shared
+initializers. List all common large initializers in
+`model.decoder.shared_initializers` to avoid loading a second device copy;
+undeclared weights are **not** automatically deduplicated.
+
+The prefill graph is an external exporter/operator dependency with this contract:
+
+- Input and output **names** match the R8 target. Inputs other than
+  `input_ids[1,R]` have the exact same types and shapes as that target, including
+  the eight-row recurrent banks and full-capacity dense KV.
+- `seqlens_k = logical_past + R - 1`; `state_row` selects the incoming recurrent
+  row, just as for verification. The graph must produce causal KV for all `R`
+  tokens and put its **terminal recurrent state in row zero**. Other recurrent
+  rows are scratch. It must support the same in-place `past_*`/`present_*`
+  aliases and read the selected incoming state before overwriting it.
+- BF16 `logits[1,1,vocab_size]` and INT64 `pred_ids[1,1]` describe only the last
+  input token. BF16 `aux_hidden_states[1,R,width]` contains every input row in
+  order, with exactly the R8 target's auxiliary-layer selection.
+- Prefill runs with `gpu_graph_id=-1`, independently of verification capture.
+  Intermediate chunks avoid prediction readback. The final chunk selects the
+  anchor, and the runtime retains only the drafter's trailing context window,
+  even when its start falls inside a large chunk.
+
+Changing the R8 constant or reshaping the existing model is **not** a compatible
+export. In particular, the current packed projection contrib operators accept
+at most eight flattened rows, while `Mamba2Verify` accepts at most 16 rows and
+emits per-token state snapshots. These are not efficient 2048-token prefill
+kernels. Larger graphs require compatible projection, recurrent, MoE and
+attention kernels plus a validated exporter implementing the contract above.
+Merely adding this configuration to the preserved benchmark packages does not
+make them faster. This runtime opt-in makes no 32K/64K/128K/256K-context performance
+claim and does not increase a package's KV capacity.
 
 With a plugin CUDA EP, register its library **before** constructing the model:
 
@@ -150,8 +194,9 @@ until those artifacts are supplied.
 
 ## State and public-token semantics
 
-Prompt ingestion uses the same fixed-R8 target, eight tokens per call. Intermediate
-chunks execute asynchronously without host readback; the final chunk is padded
+By default, prompt ingestion uses the same fixed-R8 target, eight tokens per call.
+An explicitly configured prefill graph handles full larger chunks as described
+above. Intermediate chunks execute asynchronously without host readback; an R8 tail is padded
 but only valid rows are committed, and its last valid row selects the recurrent
 state and first generated anchor. The drafter then ingests the prompt's trailing
 sliding-window suffix (`<= context_window`) in a single proposal pass after the
@@ -203,6 +248,16 @@ reset and at every output-budget boundary, terminal EOS, every recurrent
 acceptance row, and prompt lengths immediately below/at/above an eight-row chunk,
 the drafter context window, and the supported capacity (with rejection above
 capacity). Those independent real-graph checks remain outstanding.
+
+For a package with the optional prefill graph, set
+`ORTGENAI_BOLT_PREFILL_TEST_MODEL` and run
+`engine_unit_tests --gtest_filter='NemotronBoltGPU.*Prefill*'`.
+For a plugin CUDA EP, also pass `--ep_dir /runtime`; omit it for the built-in EP.
+This compares the larger-chunk and original R8 paths **within each mode**,
+including committed recurrent/KV bytes, selected logits, first proposals,
+generated tokens, reset behavior and actual prefill call counts. It covers R8,
+large-chunk and drafter-window boundaries, with and without verification capture
+where supported. It is not an independent HF oracle or a throughput benchmark.
 
 The original custom-op package's benchmark scores remain scoped to its pinned
 runtime. Migration checks compare custom-op and contrib-op results in the same

@@ -1095,6 +1095,8 @@ struct Decoder_Element : JSON::Element {
       v_.filename = JSON::Get<std::string_view>(value);
     } else if (name == "prefill_sequence_length") {
       v_.prefill_sequence_length = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "prefill_filename") {
+      v_.prefill_filename = JSON::Get<std::string_view>(value);
     } else if (name == "hidden_size") {
       v_.hidden_size = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "num_attention_heads") {
@@ -4234,6 +4236,7 @@ void ValidateModelPaths(const Config& config) {
   ValidateConfigPath(m.qwen38_graph.ple_table, "model.qwen38_graph.ple_table");
 
   ValidateConfigPath(m.decoder.filename, "model.decoder.filename");
+  ValidateConfigPath(m.decoder.prefill_filename, "model.decoder.prefill_filename");
   for (const auto& stage : m.decoder.pipeline) {
     ValidateConfigPath(stage.filename, "model.decoder.pipeline.filename");
   }

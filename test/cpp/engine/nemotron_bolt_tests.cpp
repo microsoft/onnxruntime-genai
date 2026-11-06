@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <functional>
+#include <set>
 
 #include <nlohmann/json.hpp>
 
@@ -14,6 +15,32 @@
 namespace Generators::test {
 
 struct NemotronBoltTestAccess {
+  static std::vector<uint8_t> CommittedState(NemotronBoltState& state) {
+    std::vector<uint8_t> result;
+    for (const auto& name : state.bolt_.session_info_.GetInputNames()) {
+      if (name.rfind("past_", 0) != 0) continue;
+      auto bytes = state.tensors_.at(name)->GetByteSpan();
+      const auto append = [&](size_t offset, size_t count) {
+        auto selected = bytes.subspan(offset, count);
+        const auto cpu = selected.CopyDeviceToCpu();
+        result.insert(result.end(), cpu.begin(), cpu.end());
+      };
+      if (name.rfind("past_key.", 0) == 0 || name.rfind("past_value.", 0) == 0) {
+        const size_t head_bytes = state.bolt_.capacity_ * 128 * sizeof(uint16_t);
+        for (size_t head = 0; head < 2; ++head)
+          append(head * head_bytes, state.length_ * 128 * sizeof(uint16_t));
+      } else {
+        const size_t row_bytes = bytes.size() / kBoltVerifyRows;
+        append(static_cast<size_t>(state.state_row_) * row_bytes, row_bytes);
+      }
+    }
+    return result;
+  }
+
+  static std::vector<int32_t> Drafts(const NemotronBoltState& state) {
+    return state.drafts_;
+  }
+
   static std::vector<uint8_t> SelectedLogits(NemotronBoltState& state) {
     const size_t row_bytes = static_cast<size_t>(state.bolt_.config_->model.vocab_size) * sizeof(uint16_t);
     // Keep the wrapped buffer's host mirror alive until the vector has been copied.
@@ -169,6 +196,23 @@ TEST(NemotronBolt, ParsesTargetOnlyRegardlessOfJsonMemberOrder) {
     EXPECT_NO_THROW(OverlayConfig(config, R"({"speculative":{"max_draft_tokens":0}})"));
   }
   EXPECT_THROW((Config{fs::path{}, {}, R"({"speculative":{"max_draft_tokens":0},"model":{"type":"llama","context_length":16}})"}),
+               std::runtime_error);
+}
+
+TEST(NemotronBolt, ParsesOptionalPrefillAndValidatesItsPath) {
+  Config config{fs::path{}, {}, R"({
+    "model":{"type":"nemotron_bolt","context_length":4096,"vocab_size":128,
+      "decoder":{"filename":"model.onnx","prefill_filename":"prefill.onnx",
+                 "prefill_sequence_length":2048}},
+    "speculative":{"max_draft_tokens":0}
+  })"};
+  EXPECT_EQ(config.model.decoder.prefill_filename, "prefill.onnx");
+  EXPECT_EQ(config.model.decoder.prefill_sequence_length, 2048);
+  EXPECT_THROW((Config{fs::path{}, {}, R"({
+    "model":{"type":"nemotron_bolt","context_length":4096,"vocab_size":128,
+      "decoder":{"prefill_filename":"../prefill.onnx"}},
+    "speculative":{"max_draft_tokens":0}
+  })"}),
                std::runtime_error);
 }
 
@@ -367,6 +411,93 @@ std::unique_ptr<Config> BoltTestConfig(const char* path) {
 }
 
 // Optional real-graph correctness coverage. No models or GPU are needed for the tests above.
+TEST(NemotronBoltGPU, ChunkedPrefillMatchesR8StateTokensAndReset) {
+  const char* path = std::getenv("ORTGENAI_BOLT_PREFILL_TEST_MODEL");
+  if (!path) GTEST_SKIP() << "Set ORTGENAI_BOLT_PREFILL_TEST_MODEL to a package with a compatible prefill graph";
+  auto model = CreateModel(GetOrtEnv(), BoltTestConfig(path));
+  auto& bolt = dynamic_cast<NemotronBoltModel&>(*model);
+  ASSERT_TRUE(bolt.prefill_session_);
+  ASSERT_TRUE(bolt.drafter_model_);
+  const size_t rows = bolt.prefill_rows_;
+  const size_t window = static_cast<size_t>(model->config_->model.dflash2.sliding_window);
+  ASSERT_GT(window, 0);
+  const std::set<size_t> lengths{7, 8, 9, rows - 1, rows, rows + 1, 2 * rows,
+                                 2 * rows + 7, 2 * rows + 8, window - 1, window,
+                                 window + 1, window + rows + 9};
+  const std::vector<int32_t> chat{
+      10, 25708, 1010, 11, 1010, 10, 3263, 1010, 18746, 1261, 17616, 2254, 1455,
+      29196, 5627, 1261, 3310, 1395, 1261, 5796, 92145, 1044, 1454, 1261, 4958,
+      17984, 1046, 11, 1010, 10, 1503, 19464, 1010, 12, 13};
+  for (int k : {0, 7}) {
+    for (bool capture : {false, true}) {
+      if (k == 7 && !capture) continue;
+      for (size_t length : lengths) {
+        SCOPED_TRACE(::testing::Message() << "length=" << length << " k=" << k << " capture=" << capture);
+        ASSERT_GT(static_cast<size_t>(model->config_->model.context_length), length + 16);
+        std::vector<int32_t> prompt(length);
+        for (size_t i = 0; i < length; ++i) prompt[i] = chat[i % chat.size()];
+        std::vector<uint8_t> expected_state, expected_logits;
+        std::vector<int32_t> expected_tokens, expected_drafts;
+        for (bool chunked : {false, true}) {
+          // Keep the loaded prefill session alive, but run the unchanged R8 path for the oracle.
+          auto prefill = chunked ? nullptr : std::move(bolt.prefill_session_);
+          auto params = std::make_shared<GeneratorParams>(*model);
+          params->use_graph_capture = capture;
+          params->speculative.max_draft_tokens = k;
+          params->search.max_length = static_cast<int>(length + 16);
+          {
+            Generator generator{*model, *params};
+            for (int reset = 0; reset < 2; ++reset) {
+              generator.AppendTokens(prompt);
+              auto& state = dynamic_cast<NemotronBoltState&>(*generator.state_);
+              const auto committed = NemotronBoltTestAccess::CommittedState(state);
+              const auto drafts = NemotronBoltTestAccess::Drafts(state);
+              const auto prefill_stats = generator.GetSpeculativeStats();
+              const size_t calls = chunked ? length / rows + (length % rows + 7) / 8
+                                           : (length + 7) / 8;
+              EXPECT_EQ(prefill_stats.target_forward_passes, calls);
+              std::vector<uint8_t> logits;
+              while (!generator.IsDone()) {
+                generator.GenerateNextToken();
+                const auto selected = NemotronBoltTestAccess::SelectedLogits(state);
+                logits.insert(logits.end(), selected.begin(), selected.end());
+              }
+              const auto sequence = generator.GetSequence(0).CopyDeviceToCpu();
+              const std::vector<int32_t> tokens(sequence.begin(), sequence.end());
+              if (!chunked && reset == 0) {
+                expected_state = committed;
+                expected_logits = logits;
+                expected_tokens = tokens;
+                expected_drafts = drafts;
+              }
+              EXPECT_TRUE(committed == expected_state);
+              EXPECT_TRUE(logits == expected_logits);
+              EXPECT_EQ(tokens, expected_tokens);
+              EXPECT_EQ(drafts, expected_drafts);
+              generator.RewindToLength(0);
+              EXPECT_EQ(generator.GetSpeculativeStats().target_forward_passes, 0);
+            }
+          }
+          if (!chunked) bolt.prefill_session_ = std::move(prefill);
+        }
+      }
+    }
+  }
+}
+
+TEST(NemotronBoltGPU, RejectsIncompatiblePrefillGeometry) {
+  const char* path = std::getenv("ORTGENAI_BOLT_PREFILL_TEST_MODEL");
+  if (!path) GTEST_SKIP() << "Set ORTGENAI_BOLT_PREFILL_TEST_MODEL to a package with a compatible prefill graph";
+  for (bool wrong_graph : {false, true}) {
+    auto config = BoltTestConfig(path);
+    if (wrong_graph)
+      config->model.decoder.prefill_filename = config->model.decoder.filename;
+    else
+      ++config->model.decoder.prefill_sequence_length;
+    EXPECT_THROW(CreateModel(GetOrtEnv(), std::move(config)), std::runtime_error);
+  }
+}
+
 TEST(NemotronBoltGPU, TargetOnlyCaptureAndReset) {
   const char* path = std::getenv("ORTGENAI_BOLT_TEST_MODEL");
   if (!path) GTEST_SKIP() << "Set ORTGENAI_BOLT_TEST_MODEL to a native Bolt package";
