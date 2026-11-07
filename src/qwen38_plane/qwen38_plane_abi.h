@@ -25,7 +25,7 @@
 // for its invariants and does not validate them (ParseQwen38PleDescription enforces them): 1 <= n_heads <= 32,
 // n_heads * head_dim <= 3072 (one 1024-thread block gathers a row, and a staged row must fit an 8192-byte ring slot),
 // 0 <= heads_per_ngram <= n_heads, vocab[h] > 0 with the rows of every head inside the shards, 1 <= n_shards <= 256 with
-// ascending shard_end, and a non-null shard_ptr for every shard.
+// ascending shard_end, and a non-null shard_ptr for every shard. IQ4_NL shards require head_dim to be a multiple of 32.
 // pad_ is not padding: 1 marks a "staged" table, one the GPU cannot address, whose rows the host gathers (see below).
 typedef struct Qwen38PleParams {
   int n_heads, head_dim, heads_per_ngram, n_shards;
@@ -34,8 +34,8 @@ typedef struct Qwen38PleParams {
   long long offset[32];
   long long shard_end[256];
   const unsigned char* shard_ptr[256];
-  // Dequantisation scale of the shard bytes, which are FP8 E4M3 when it is positive. A negative value marks INT8 shards
-  // whose scale is |scale| (QWEN38_PLANE_CAP_INT8_PLE); a library without that capability would decode them as FP8.
+  // Dequantisation scale of the shard bytes, which are FP8 E4M3 when it is positive. -20.0 marks GGUF IQ4_NL shards
+  // (QWEN38_PLANE_CAP_IQ4_NL_PLE); other negative values mark INT8 shards whose scale is |scale| (QWEN38_PLANE_CAP_INT8_PLE).
   float scale;
   int pad_;
   long long eos;
@@ -259,7 +259,7 @@ typedef int (*Qwen38PlaneReplayStateUpdatesFn)(void* stream, const void* descs, 
 // the library reports every listed bit with no further change), implement it, call RequireCapabilities where the loader
 // selects it, and cover a library with and a library without the bit in the qwen38_plane tests.
 #define QWEN38_PLANE_CAP_INT8_EMBEDDING 0x1ull  // embed_gather: per-row INT8 embedding tables (any row count)
-#define QWEN38_PLANE_CAP_INT8_PLE 0x2ull        // a negative Qwen38PleParams::scale marks INT8 PLE shards
+#define QWEN38_PLANE_CAP_INT8_PLE 0x2ull        // a negative Qwen38PleParams::scale other than -20.0 marks INT8 PLE shards
 // prep: a pos_add in [-8, -2] prepares the -pos_add rows of one folded verify step in a single call (see the notes on prep
 // above). A library without it reads that pos_add as an offset of one row and leaves the other rows of the step stale.
 #define QWEN38_PLANE_CAP_NEGATIVE_POS_ADD_BATCH 0x4ull
@@ -276,6 +276,8 @@ typedef int (*Qwen38PlaneReplayStateUpdatesFn)(void* stream, const void* descs, 
 // the other offset for 1 to 7 rows and several slots, so the n-gram context a slot commits would be wrong without any error
 // (8 rows give both strides the same value). The host requires it with QWEN38_PLANE_CAP_BATCHED_PREP.
 #define QWEN38_PLANE_CAP_CTX_SLOT_STRIDE 0x20ull
+// prep and ple_rows: Qwen38PleParams::scale == -20.0 selects GGUF IQ4_NL PLE rows (18 bytes per 32 elements).
+#define QWEN38_PLANE_CAP_IQ4_NL_PLE 0x40ull
 
 // X(bit, name), in bit order.
 #define QWEN38_PLANE_CAPABILITIES(X)                                         \
@@ -284,7 +286,8 @@ typedef int (*Qwen38PlaneReplayStateUpdatesFn)(void* stream, const void* descs, 
   X(QWEN38_PLANE_CAP_NEGATIVE_POS_ADD_BATCH, "negative_pos_add_batch")       \
   X(QWEN38_PLANE_CAP_BATCHED_PREP, "batched_prep")                           \
   X(QWEN38_PLANE_CAP_CONV_HISTORY_FIRST_REPLAY, "conv_history_first_replay") \
-  X(QWEN38_PLANE_CAP_CTX_SLOT_STRIDE, "ctx_slot_stride")
+  X(QWEN38_PLANE_CAP_CTX_SLOT_STRIDE, "ctx_slot_stride")                     \
+  X(QWEN38_PLANE_CAP_IQ4_NL_PLE, "iq4_nl_ple")
 
 #define QWEN38_PLANE_CAPABILITY_BIT_(bit, name) | (bit)
 #define QWEN38_PLANE_ALL_CAPABILITIES (0ull QWEN38_PLANE_CAPABILITIES(QWEN38_PLANE_CAPABILITY_BIT_))

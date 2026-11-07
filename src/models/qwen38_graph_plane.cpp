@@ -629,11 +629,14 @@ Qwen38PleDescription ParseQwen38PleDescription(const std::filesystem::path& tabl
       params.heads_per_ngram > params.n_heads || !has_scale || !has_mult || !has_vocab || !has_offset ||
       description.shards.empty() || description.shards.size() > kMaxPleShards)
     throw std::runtime_error("qwen38_graph: malformed PLE table " + table_path.string());
-  // The scale is the FP8 dequantization scale, or the negative of the INT8 one (the sign selects the decoder), so a missing
-  // line (0), a zero or a non-finite scale would decode every PLE row to zero or NaN without a diagnostic.
+  if (params.scale == -20.0f && params.head_dim % 32 != 0)
+    throw std::runtime_error("qwen38_graph: the IQ4_NL PLE table " + table_path.string() +
+                             " requires head_dim to be a multiple of 32");
+  // The scale selects FP8 (positive), INT8 (negative), or IQ4_NL (-20.0). A missing, zero or non-finite scale would decode
+  // every PLE row to zero or NaN without a diagnostic.
   if (params.scale == 0.0f || !std::isfinite(params.scale))
     throw std::runtime_error("qwen38_graph: the PLE table " + table_path.string() +
-                             " needs a finite, non-zero scale line (positive for FP8 shards, negative for INT8 shards)");
+                             " needs a finite, non-zero scale line (positive for FP8, negative for INT8, -20.0 for IQ4_NL)");
   long long total_rows = 0;
   for (const auto& shard : description.shards) {
     if (shard.rows <= 0 || shard.rows > std::numeric_limits<long long>::max() - total_rows)
@@ -651,8 +654,9 @@ Qwen38PleDescription ParseQwen38PleDescription(const std::filesystem::path& tabl
 
 void RequireQwen38PleTableSupported(const Qwen38Plane& plane, const Qwen38PleDescription& description,
                                     const std::filesystem::path& table_path) {
-  // A negative scale marks INT8 shards; a library without the capability would decode them as FP8.
-  if (description.params.scale < 0.0f) {
+  if (description.params.scale == -20.0f) {
+    plane.RequireCapabilities(QWEN38_PLANE_CAP_IQ4_NL_PLE, "the IQ4_NL PLE table " + table_path.string());
+  } else if (description.params.scale < 0.0f) {
     plane.RequireCapabilities(QWEN38_PLANE_CAP_INT8_PLE, "the INT8 PLE table " + table_path.string());
   }
 }
@@ -918,6 +922,7 @@ Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::filesystem::path& 
   bool pin_ple = false;
   GetEnv("ORT_QMOE_WIN_PIN_PLE", pin_ple);
   params.pad_ = pin_ple ? 0 : 1;
+  const bool is_gguf_iq4_nl = (params.scale == -20.0f);
   long long first_row = 0;
   try {
     for (size_t i = 0; i < description.shards.size(); ++i) {
@@ -936,11 +941,12 @@ Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::filesystem::path& 
       const uint64_t file_size = static_cast<uint64_t>(st_size.QuadPart);
       const uint64_t rows_u64 = static_cast<uint64_t>(shard.rows);
       const uint64_t hd_u64 = static_cast<uint64_t>(params.head_dim);
-      if (hd_u64 == 0 || rows_u64 > std::numeric_limits<size_t>::max() / hd_u64) {
+      const uint64_t rb_u64 = is_gguf_iq4_nl ? ((hd_u64 / 32u) * 18u) : hd_u64;
+      if (rb_u64 == 0 || rows_u64 > std::numeric_limits<size_t>::max() / rb_u64) {
         CloseHandle(hFile);
         throw std::runtime_error("qwen38_graph: PLE shard byte size overflows for " + full.string());
       }
-      const size_t bytes = static_cast<size_t>(rows_u64 * hd_u64);
+      const size_t bytes = static_cast<size_t>(rows_u64 * rb_u64);
       if (shard.offset > file_size || static_cast<uint64_t>(bytes) > file_size - shard.offset) {
         CloseHandle(hFile);
         throw std::runtime_error("qwen38_graph: PLE shard range exceeds file size for " + full.string());
@@ -1116,6 +1122,7 @@ Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::filesystem::path& 
   const auto start = std::chrono::steady_clock::now();
   const long page = sysconf(_SC_PAGESIZE);
   const size_t page_sz = page > 0 ? static_cast<size_t>(page) : size_t{4096};
+  const bool is_gguf_iq4_nl = (params.scale == -20.0f);
   long long first_row = 0;
   try {
     for (size_t i = 0; i < description.shards.size(); ++i) {
@@ -1131,11 +1138,12 @@ Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::filesystem::path& 
       const uint64_t file_size = static_cast<uint64_t>(st.st_size);
       const uint64_t rows_u64 = static_cast<uint64_t>(shard.rows);
       const uint64_t hd_u64 = static_cast<uint64_t>(params.head_dim);
-      if (hd_u64 == 0 || rows_u64 > std::numeric_limits<size_t>::max() / hd_u64) {
+      const uint64_t rb_u64 = is_gguf_iq4_nl ? ((hd_u64 / 32u) * 18u) : hd_u64;
+      if (rb_u64 == 0 || rows_u64 > std::numeric_limits<size_t>::max() / rb_u64) {
         close(fd);
         throw std::runtime_error("qwen38_graph: PLE shard byte size overflows for " + full.string());
       }
-      const size_t bytes = static_cast<size_t>(rows_u64 * hd_u64);
+      const size_t bytes = static_cast<size_t>(rows_u64 * rb_u64);
       if (shard.offset > file_size || static_cast<uint64_t>(bytes) > file_size - shard.offset) {
         close(fd);
         throw std::runtime_error("qwen38_graph: PLE shard range exceeds file size for " + full.string());
