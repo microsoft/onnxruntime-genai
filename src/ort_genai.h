@@ -1116,6 +1116,12 @@ struct OgaEngineEvent : OgaAbstract {
     return value;
   }
 
+  std::optional<int32_t> TerminalTokenId() const {
+    int32_t value{};
+    OgaCheckResult(OgaEngineEventGetTerminalTokenId(this, &value));
+    return value < 0 ? std::nullopt : std::optional<int32_t>{value};
+  }
+
   /** Index into the turn's stop-string list that completed a match, or std::nullopt unless
    *  FinishReason() == OgaFinishReason_StopString. */
   std::optional<int32_t> MatchedStopStringIndex() const {

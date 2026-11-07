@@ -701,6 +701,7 @@ struct Request : std::enable_shared_from_this<Request>,
   struct DraftVerificationState {
     bool completed_generation{};
     bool eos{};
+    int32_t eos_token_id{-1};
     int32_t stop_match_index{-1};
 
     void Reset() noexcept { *this = DraftVerificationState{}; }

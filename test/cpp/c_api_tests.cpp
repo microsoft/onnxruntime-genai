@@ -1318,6 +1318,75 @@ TEST(CAPITests, SetTerminate) {
 #endif
 }
 
+TEST(CAPITests, EngineTerminalTokenId) {
+  auto config = OgaConfig::Create(MODEL_PATH "engine/synthetic-paged");
+  config->Overlay(R"({"model":{"eos_token_id":[0,2]}})");
+  auto model = OgaModel::Create(*config);
+  auto engine = OgaEngine::Create(*model);
+  auto buffer = engine->CreateEventBuffer(1);
+  const auto check_terminal = [](const OgaEngineEvent& event,
+                                 std::optional<int32_t> expected) {
+    int32_t terminal_token_id = 42;
+    OgaCheckResult(OgaEngineEventGetTerminalTokenId(&event, &terminal_token_id));
+    EXPECT_EQ(terminal_token_id, expected.value_or(-1));
+    EXPECT_EQ(event.TerminalTokenId(), expected);
+  };
+
+  for (const int32_t eos : {0, 2}) {
+    SCOPED_TRACE(::testing::Message() << "EOS " << eos);
+    auto request = engine->CreateRequest();
+    // The fixture predicts (first token + last token + prompt length) % 64.
+    const std::array<int32_t, 2> prompt =
+        eos == 0 ? std::array<int32_t, 2>{31, 31}
+                 : std::array<int32_t, 2>{0, 0};
+    request->BeginTurn(prompt);
+    ASSERT_EQ(engine->Run(*buffer), 1u);
+    const auto* event = buffer->Get(0);
+    ASSERT_NE(event, nullptr);
+    EXPECT_EQ(event->Flags(), OgaEngineEventFlag_TurnFinished);
+    EXPECT_EQ(event->FinishReason(), OgaFinishReason_Eos);
+    check_terminal(*event, eos);
+    EXPECT_EQ(event->Usage().PromptTokens(), prompt.size());
+    EXPECT_EQ(event->Usage().GeneratedTokens(), 0u);
+    request->Close();
+  }
+
+  auto request = engine->CreateRequest();
+  auto options = request->CreateTurnOptions();
+  options->SetMaxGeneratedTokens(2);
+  const std::array<int32_t, 3> prompt{2, 3, 4};
+  request->BeginTurn(prompt, options.get());
+  ASSERT_EQ(engine->Run(*buffer), 1u);
+  const auto* token_event = buffer->Get(0);
+  ASSERT_NE(token_event, nullptr);
+  EXPECT_EQ(token_event->Flags(), OgaEngineEventFlag_Token);
+  EXPECT_EQ(token_event->Token(), 9);
+  check_terminal(*token_event, std::nullopt);
+
+  ASSERT_EQ(engine->Run(*buffer), 1u);
+  const auto* limited = buffer->Get(0);
+  ASSERT_NE(limited, nullptr);
+  EXPECT_EQ(limited->Flags(),
+            OgaEngineEventFlag_Token | OgaEngineEventFlag_TurnFinished);
+  EXPECT_EQ(limited->Token(), 15);
+  EXPECT_EQ(limited->FinishReason(), OgaFinishReason_MaxGeneratedTokens);
+  check_terminal(*limited, std::nullopt);
+  EXPECT_EQ(limited->Usage().PromptTokens(), prompt.size());
+  EXPECT_EQ(limited->Usage().GeneratedTokens(), 2u);
+
+  const std::array<int32_t, 1> continuation{5};
+  const auto turn_id = request->BeginTurn(continuation);
+  ASSERT_TRUE(request->CancelTurn(turn_id));
+  ASSERT_EQ(engine->Run(*buffer), 1u);
+  const auto* cancelled = buffer->Get(0);
+  ASSERT_NE(cancelled, nullptr);
+  EXPECT_EQ(cancelled->Flags(), OgaEngineEventFlag_TurnFinished);
+  EXPECT_EQ(cancelled->FinishReason(), OgaFinishReason_Cancelled);
+  check_terminal(*cancelled, std::nullopt);
+  EXPECT_EQ(cancelled->Usage().PromptTokens(), continuation.size());
+  EXPECT_EQ(cancelled->Usage().GeneratedTokens(), 0u);
+}
+
 TEST(CAPITests, EngineRequestTurnAndEventContracts) {
   auto model = OgaModel::Create(MODEL_PATH "engine/synthetic-paged");
   auto engine = OgaEngine::Create(*model);

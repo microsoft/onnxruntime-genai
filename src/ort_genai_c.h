@@ -1456,6 +1456,10 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineEventGetTurnId(
     const OgaEngineEvent* event, uint64_t* out);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineEventGetToken(
     const OgaEngineEvent* event, int32_t* out);
+/** \brief Returns the sampled EOS token that ended the turn, or -1 for other events.
+ * This is completion metadata, not an appended sequence token. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineEventGetTerminalTokenId(
+    const OgaEngineEvent* event, int32_t* out);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineEventGetFinishReason(
     const OgaEngineEvent* event, OgaFinishReason* out);
 /**

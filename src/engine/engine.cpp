@@ -1791,6 +1791,7 @@ bool Engine::CancelRequest(const std::shared_ptr<Request>& request, uint64_t tur
   if (has_existing_event) {
     existing->flags |= terminal.flags;
     existing->finish_reason = terminal.finish_reason;
+    existing->terminal_token_id = terminal.terminal_token_id;
     // CanCancelFromEngine() only allows this merge while the Request is still executable, and a
     // committed StopString match makes it TurnComplete in the very same step that stages the
     // match's terminal event -- so `existing` here can only ever be a non-terminal (Token-only)
@@ -2695,6 +2696,9 @@ void Engine::AppendEventsFromStep(
   const auto finish_turn = [&request, &result](EngineEvent& event) {
     event.flags |= EngineEventFlagTurnFinished;
     event.finish_reason = result.finish_reason;
+    if (result.finish_reason == GenerationFinishReason::EosToken) {
+      event.terminal_token_id = result.token;
+    }
     event.matched_stop_string_index = result.matched_stop_string_index;
     event.usage = {
         request->TurnPromptTokens(),
@@ -2884,6 +2888,7 @@ EngineEvent Engine::EventFromStepError(
       } else {
         existing->flags |= event.flags;
         existing->finish_reason = event.finish_reason;
+        existing->terminal_token_id = event.terminal_token_id;
         // This merge only runs for a Request this sweep just found IsExecutable(), and a committed
         // StopString match makes a Request TurnComplete in the very same step that stages the
         // match's terminal event -- so `existing` here can only ever be a non-terminal (Token-only)
