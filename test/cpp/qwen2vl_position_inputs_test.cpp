@@ -242,6 +242,34 @@ TYPED_TEST(PositionInputBuffersTest, DynamicMasksRetainDecoderSpecificPaddingBeh
   }
 }
 
+TYPED_TEST(PositionInputBuffersTest, CpuDynamicMasksPreservePaddingAcrossMultiTokenUpdates) {
+  const auto type = Ort::TypeToTensorType<TypeParam>;
+  this->params_->use_graph_capture = false;
+  this->params_->search.past_present_share_buffer = false;
+  for (int batch : {1, 2}) {
+    this->params_->search.batch_size = batch;
+    for (int beams : {1, 2}) {
+      this->params_->search.num_beams = beams;
+      SCOPED_TRACE(testing::Message() << "batch=" << batch << " beams=" << beams);
+      auto buffer = CreateAttentionMaskBuffer(*this->model_, *this->params_);
+      Tensor tensor{this->model_->p_device_inputs_, type};
+      std::array<int64_t, 2> shape{batch, 3};
+      auto values = OrtValue::CreateTensor(this->model_->allocator_cpu_, shape, type);
+      const std::array<TypeParam, 6> prompt{0, 1, 1, 1, 1, 0};
+      std::copy_n(prompt.begin(), batch * 3, values->template GetTensorMutableData<TypeParam>());
+      buffer->Initialize(tensor, values, beams, shape);
+      for (const auto& [length, appended] : {std::pair{5, 2}, std::pair{8, 3}, std::pair{9, 1}}) {
+        buffer->Update(tensor, shape, length, appended);
+        ASSERT_EQ(tensor.GetShape(), (std::vector<int64_t>{batch * beams, length}));
+        for (int row = 0; row < batch * beams; ++row)
+          for (int col = 0; col < length; ++col)
+            EXPECT_EQ(tensor.GetData<TypeParam>()[row * length + col],
+                      col < 3 ? prompt[(row / beams) * 3 + col] : 1);
+      }
+    }
+  }
+}
+
 }  // namespace
 
 TEST_F(StandardPositionInputsTest, QwenVLWith3DPositionIdsUsesMrope) {
