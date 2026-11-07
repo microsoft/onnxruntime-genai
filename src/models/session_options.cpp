@@ -210,7 +210,8 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
                                            const std::vector<Config::ProviderOptions>& provider_options_list,
                                            bool is_primary_session_options,
                                            const Config& config,
-                                           bool disable_graph_capture) {
+                                           bool disable_graph_capture,
+                                           bool providers_explicitly_selected) {
   using AppendExecutionProviderFn = DeviceInterface* (*)(OrtSessionOptions&,
                                                          const Config::ProviderOptions&,
                                                          const Config&,
@@ -249,7 +250,7 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
   DeviceInterface* device{};
 
   auto providers_list = providers;
-  if (!is_primary_session_options) {
+  if (!is_primary_session_options && !providers_explicitly_selected) {
     // Providers specified in a non-primary provider options list are added
     // to the primary providers. They are considered immutable and implicitly
     // added as providers.

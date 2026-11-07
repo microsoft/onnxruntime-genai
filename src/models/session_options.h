@@ -57,7 +57,8 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
                                            const std::vector<Config::ProviderOptions>& provider_options_list,
                                            bool is_primary_session_options,
                                            const Config& config,
-                                           bool disable_graph_capture = false);
+                                           bool disable_graph_capture = false,
+                                           bool providers_explicitly_selected = false);
 
 // Gets a trivial ONNX model that just returns a single float constant.
 inline auto GetTrivialModel() {

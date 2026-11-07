@@ -99,6 +99,18 @@ TEST(CAPITests, Config) {
 #endif
 }
 
+TEST(CAPITests, SetModelProvider) {
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->SetModelProvider("WebGpuExecutionProvider");
+  config->SetModelProvider("CPUExecutionProvider");
+  EXPECT_NO_THROW(OgaModel::Create(*config));
+  EXPECT_THROW(config->SetModelProvider(""), std::runtime_error);
+  EXPECT_THROW(config->SetModelProvider(nullptr), std::runtime_error);
+  OgaResult* result = OgaConfigSetModelProvider(nullptr, "CPU");
+  ASSERT_NE(result, nullptr);
+  OgaDestroyResult(result);
+}
+
 // Regression test: appending CPU provider should not throw.
 // See https://github.com/microsoft/onnxruntime-genai/pull/2179
 TEST(CAPITests, AppendCpuProvider) {

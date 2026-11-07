@@ -254,6 +254,10 @@ struct OgaConfig : OgaAbstract {
     OgaCheckResult(OgaConfigClearProviders(this));
   }
 
+  void SetModelProvider(const char* provider) {
+    OgaCheckResult(OgaConfigSetModelProvider(this, provider));
+  }
+
   void AppendProvider(const char* provider) {
     OgaCheckResult(OgaConfigAppendProvider(this, provider));
   }
