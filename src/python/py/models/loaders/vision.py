@@ -3,6 +3,7 @@
 
 import json
 import os
+import zipfile
 
 import torch
 from huggingface_hub import hf_hub_download
@@ -46,7 +47,7 @@ def load_qwen35_visual(model_class, config, model_name_or_path, **kwargs):
                     if name.startswith("model.visual."):
                         state[name.removeprefix("model.visual.")] = weights.get_tensor(name)
         else:
-            weights = torch.load(path, map_location="cpu", weights_only=True)
+            weights = torch.load(path, map_location="cpu", weights_only=True, mmap=zipfile.is_zipfile(path))
             for name, tensor in weights.items():
                 if name.startswith("model.visual."):
                     state[name.removeprefix("model.visual.")] = tensor

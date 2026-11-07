@@ -177,7 +177,9 @@ PreparedMediaTurn MediaStore::Prepare(const std::string& prompt, const Images* i
   const size_t merge = static_cast<size_t>(config.vision.spatial_merge_size);
   const size_t patch = static_cast<size_t>(config.vision.patch_size);
   const auto pixel_shape = model_->vision_->session_info.GetInputShape(config.vision.inputs.pixel_values);
-  const size_t patch_bytes = MultiplyBytes(static_cast<size_t>(pixel_shape[1]), sizeof(float));
+  // Extensions output, the FP32 copy and the converted tensor coexist during preprocessing.
+  const size_t patch_bytes = MultiplyBytes(static_cast<size_t>(pixel_shape[1]),
+                                           2 * sizeof(float) + Ort::SizeOf(model_->cpu_embedding_->type_));
   size_t estimate = 0, maximum_patches = 0, expected_rows = raw_tokens.size();
   for (const auto& info : images->info_) {
     if (info.width == 0 || info.height == 0)

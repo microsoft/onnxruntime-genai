@@ -404,7 +404,7 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
   for (size_t index = 0; index < plan.requests.size(); ++index) {
     auto& entry = plan.requests[index];
     if (entry.is_prefill && !entry.request->Media().empty() &&
-        dynamic_batching.prefix_caching.value_or(true)) {
+        cache_manager_->PrefixCachingEnabled()) {
       // Use the furthest complete block within the actual budget, retaining progress when no
       // boundary fits. Hybrid targets can then publish a checkpoint without block-sized forwards.
       const auto end = selected_processed_lengths[index] + token_counts[index];

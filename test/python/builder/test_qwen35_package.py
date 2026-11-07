@@ -1,6 +1,7 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License
 
+import importlib
 import json
 from types import SimpleNamespace
 
@@ -204,6 +205,35 @@ def tiny_qwen35_config(hybrid=False):
         vision_end_token_id=63,
         architectures=["Qwen3_5ForConditionalGeneration"],
     )
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_qwen35_visual_pytorch_loading_maps_only_compatible_checkpoints(monkeypatch, tmp_path, legacy):
+    source = pytest.importorskip("transformers.models.qwen3_5.modeling_qwen3_5")
+    load_builder_module("base")
+    vision = importlib.import_module("models.loaders.vision")
+
+    config = tiny_qwen35_config().vision_config
+    expected = source.Qwen3_5VisionModel(config).eval()
+    state = {f"model.visual.{name}": tensor for name, tensor in expected.state_dict().items()}
+    state["model.language_model.embed_tokens.weight"] = torch.ones(8, 32)
+    torch.save(state, tmp_path / "pytorch_model.bin", _use_new_zipfile_serialization=not legacy)
+    load = torch.load
+    calls = []
+
+    def load_checkpoint(*args, **kwargs):
+        calls.append(kwargs)
+        return load(*args, **kwargs)
+
+    monkeypatch.setattr(torch, "load", load_checkpoint)
+    actual = vision.load_qwen35_visual(source.Qwen3_5VisionModel, config, str(tmp_path))
+
+    assert len(calls) == 1
+    assert calls[0]["mmap"] == (not legacy)
+    assert calls[0]["weights_only"] is True
+    assert calls[0]["map_location"] == "cpu"
+    for name, tensor in expected.state_dict().items():
+        torch.testing.assert_close(actual.state_dict()[name], tensor)
 
 
 @pytest.mark.parametrize("hybrid", [False, True])

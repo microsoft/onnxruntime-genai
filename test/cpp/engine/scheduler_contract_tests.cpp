@@ -486,6 +486,45 @@ TEST_F(SchedulerContractTest, MediaPrefillUsesTheFurthestBudgetedBlockBoundary) 
   }
 }
 
+TEST_F(SchedulerContractTest, DisabledResolvedPrefixCachingDoesNotAlignMediaPrefills) {
+  for (const bool windowed : {false, true}) {
+    for (const size_t image_rows : {size_t{1}, size_t{7}}) {
+      auto model = LoadSyntheticPagedModel();
+      model->config_->search.chunk_size = 3;
+      auto& config = *model->config_->engine.dynamic_batching;
+      config.max_scheduled_tokens = 3;
+      ASSERT_TRUE(config.prefix_caching.value_or(true));
+      if (windowed) {
+        auto& decoder = model->config_->model.decoder;
+        decoder.sliding_window.emplace();
+        decoder.sliding_window->window_size = 4;
+        decoder.sliding_window->layers = {1};
+        decoder.inputs.block_table_windowed = decoder.inputs.block_table;
+      }
+      const size_t auxiliary_bytes = windowed ? 0 : 1;
+      ASSERT_FALSE(ResolvePrefixCachingEnabled(model, auxiliary_bytes));
+      auto cache = std::make_shared<PagedCacheManager>(model, auxiliary_bytes);
+      DynamicBatchScheduler scheduler(model, cache);
+      auto request = CreateRequestWithPrompt(assign_target_, std::vector<int32_t>(10, 4));
+      auto image = std::make_shared<MediaItem>();
+      image->rows = image_rows;
+      image->features = std::make_shared<Tensor>(GetDeviceInterface(DeviceType::CPU), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+      request->ReserveMedia(1);
+      request->AppendMedia(std::array<MediaSpan, 1>{{{0, image}}});
+      request->StagePrefixAdoption(3);
+      request->CommitPrefixAdoption();
+      MakePrefillResident(scheduler, *cache, request);
+
+      StepPlan plan;
+      ASSERT_TRUE(scheduler.PlanStep(plan).executable);
+      ASSERT_EQ(plan.requests.size(), 1u);
+      EXPECT_EQ(plan.token_count, 3u);
+      EXPECT_EQ(plan.requests[0].target_cache_slots, 6u);
+      EXPECT_EQ(plan.requests[0].logits_row_index, 2u);
+    }
+  }
+}
+
 TEST_F(SchedulerContractTest, DynamicPreservesRequestOrder) {
   auto cache = std::make_shared<RecordingCacheManager>(model_, /*capacity=*/8);
   DynamicBatchScheduler scheduler(model_, cache);

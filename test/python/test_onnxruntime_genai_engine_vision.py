@@ -11,6 +11,7 @@ from pathlib import Path
 
 import onnxruntime_genai as og
 import pytest
+from PIL import Image
 
 IMAGE_DIR = Path(__file__).resolve().parents[1] / "images"
 IMAGE_MARKER = "<|vision_start|><|image_pad|><|vision_end|>\n"
@@ -122,6 +123,42 @@ def drain(engine, capacity=1):
     return tokens, finishes, runs
 
 
+def test_mixed_geometry_padding_is_rejected_before_host_budget_is_exceeded(vision_package, tmp_path):
+    directory, _ = vision_package
+    config = og.Config(directory)
+    config.overlay(
+        json.dumps(
+            {
+                "model": {"dflash2": {"filename": ""}},
+                "engine": {
+                    "dynamic_batching": {
+                        "num_blocks": 64,
+                        "max_batch_size": 1,
+                        "media_device_bytes": 32 * 1024 * 1024,
+                    }
+                },
+            }
+        )
+    )
+    config.set_provider_option("cuda", "enable_cuda_graph", "0")
+    model = og.Model(config)
+    engine, tokenizer = og.Engine(model), og.Tokenizer(model)
+    request = new_request(engine)
+    paths = []
+    for size in (1024, 256):
+        path = tmp_path / f"image-{size}.png"
+        with Image.new("RGB", (size, size), "blue") as image:
+            image.save(path)
+        paths.append(str(path))
+    images = og.Images.open(paths[0], *([paths[1]] * 11))
+
+    with pytest.raises(RuntimeError, match="media_host_bytes"):
+        begin(request, prompt(tokenizer, 12), images, maximum=1)
+    turn = begin(request, prompt(tokenizer, 0), maximum=1)
+    assert turn == 1
+    request.close()
+
+
 def test_formatted_admission_reclaims_abandoned_media_before_host_preflight(vision_package):
     directory, _ = vision_package
     config = og.Config(directory)
@@ -130,7 +167,7 @@ def test_formatted_admission_reclaims_abandoned_media_before_host_preflight(visi
             {
                 "model": {"dflash2": {"filename": ""}},
                 "engine": {
-                    "dynamic_batching": {"num_blocks": 64, "max_batch_size": 1, "media_host_bytes": 16 * 1024 * 1024}
+                    "dynamic_batching": {"num_blocks": 64, "max_batch_size": 1, "media_host_bytes": 21 * 1024 * 1024}
                 },
             }
         )
