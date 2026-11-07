@@ -13,7 +13,7 @@ bool HybridDecoderIO::SupportsVariableWidthGraph(const ExecutionContext& context
       context.fixed_state_slots.size() != context.plan->requests.size())
     return false;
 
-  const auto& shared = context.fixed_state_bindings.front();
+  const auto& shared = context.fixed_state_bindings[0];
   // Compact-update mode keeps GDN's CPU dispatch invariant. Only the exact per-row device
   // counts change on replay; neither counts nor CommitPrefix boundaries are bucketed.
   if (shared.state_update_capacity != 7 ||
