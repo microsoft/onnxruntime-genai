@@ -7,14 +7,14 @@ import os
 
 import onnx_ir as ir
 from builder_config import serialize_genai_config
-from huggingface_hub import hf_hub_download, snapshot_download
+from huggingface_hub import snapshot_download
 
 from ..mtp import MTPModel
 from .embedding import Qwen4ExpEmbeddingModel
 from .engram import Qwen4ExpEngramModel
 from .mtp import Qwen4ExpMTPTextModel
 from .text import Qwen4ExpTextModel
-from .vision import Qwen4ExpVisionModel
+from .vision import Qwen4ExpVisionModel, save_image_processor
 
 
 class Qwen4ExpModel(MTPModel):
@@ -28,6 +28,10 @@ class Qwen4ExpModel(MTPModel):
         decoder_options = self.make_mtp_init(config, self.extra_options)
         self.decoder = Qwen4ExpTextModel(copy.deepcopy(config), io_dtype, onnx_dtype, ep, cache_dir, decoder_options)
         self.decoder.model_type = "qwen4_exp_text" if self.text_only else "qwen3_5"
+        # Implicit exclusion serves the legacy merge graph, not a standalone lookup.
+        self.decoder.embed_attrs["emit_component"] = self.decoder.use_paged_attention and self.extra_options.get(
+            "exclude_embeds", False
+        )
         self.mtp = None
         if self.mtp_attrs["build"]:
             self.decoder.hyper_connection_attrs["emit_pre_final_hidden_states"] = True
@@ -322,76 +326,4 @@ class Qwen4ExpModel(MTPModel):
 
     def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
         self.decoder.save_processing(model_name_or_path, extra_kwargs, out_dir)
-        preprocessor_path = (
-            os.path.join(model_name_or_path, "preprocessor_config.json")
-            if os.path.isdir(model_name_or_path)
-            else hf_hub_download(
-                model_name_or_path,
-                "preprocessor_config.json",
-                cache_dir=extra_kwargs.get("cache_dir"),
-                token=self.hf_token,
-            )
-        )
-        with open(preprocessor_path) as preprocessor_file:
-            image_processor = json.load(preprocessor_file)
-        processor_config = {
-            "processor": {
-                "name": "qwen4_exp_image_processor",
-                "transforms": [
-                    {
-                        "operation": {
-                            "name": "decode_image",
-                            "type": "DecodeImage",
-                            "attrs": {"color_space": "RGB"},
-                        }
-                    },
-                    {"operation": {"name": "convert_to_rgb", "type": "ConvertRGB"}},
-                    {
-                        "operation": {
-                            "name": "resize",
-                            "type": "Resize",
-                            "attrs": {
-                                "width": 540,
-                                "height": 360,
-                                "smart_resize": 1,
-                                "min_pixels": image_processor["size"]["shortest_edge"],
-                                "max_pixels": image_processor["size"]["longest_edge"],
-                                "patch_size": image_processor["patch_size"],
-                                "merge_size": image_processor["merge_size"],
-                            },
-                        }
-                    },
-                    {
-                        "operation": {
-                            "name": "rescale",
-                            "type": "Rescale",
-                            "attrs": {"rescale_factor": 1 / 255},
-                        }
-                    },
-                    {
-                        "operation": {
-                            "name": "normalize",
-                            "type": "Normalize",
-                            "attrs": {
-                                "mean": image_processor["image_mean"],
-                                "std": image_processor["image_std"],
-                                "qwen3_vl": 1,
-                            },
-                        }
-                    },
-                    {
-                        "operation": {
-                            "name": "patch_image",
-                            "type": "PatchImage",
-                            "attrs": {
-                                "patch_size": image_processor["patch_size"],
-                                "temporal_patch_size": image_processor["temporal_patch_size"],
-                                "merge_size": image_processor["merge_size"],
-                            },
-                        }
-                    },
-                ],
-            }
-        }
-        with open(os.path.join(out_dir, "processor_config.json"), "w") as processor_config_file:
-            json.dump(processor_config, processor_config_file, indent=4)
+        save_image_processor(model_name_or_path, extra_kwargs, out_dir, self.hf_token)

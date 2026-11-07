@@ -728,6 +728,72 @@ def test_engine_run_releases_gil(model):
     assert not thread.is_alive()
 
 
+def test_formatted_begin_turn_releases_gil(model):
+    engine = og.Engine(model)
+    value = "ABC"
+    worker_ready = threading.Event()
+    allow_worker = threading.Event()
+    worker_progressed = threading.Event()
+
+    def worker():
+        worker_ready.set()
+        allow_worker.wait()
+        worker_progressed.set()
+
+    thread = threading.Thread(target=worker)
+    previous_switch_interval = sys.getswitchinterval()
+    thread.start()
+    try:
+        assert worker_ready.wait(timeout=5)
+        # Only an explicit native GIL release, not periodic Python switching, may let the worker run.
+        sys.setswitchinterval(10.0)
+        deadline = time.monotonic() + 5.0
+        allow_worker.set()
+        while True:
+            request = engine.create_request()
+            try:
+                request.begin_turn(value)
+            finally:
+                request.close()
+            if worker_progressed.is_set() or time.monotonic() >= deadline:
+                break
+        assert worker_progressed.is_set()
+    finally:
+        sys.setswitchinterval(previous_switch_interval)
+        allow_worker.set()
+        thread.join(timeout=5)
+
+    assert not thread.is_alive()
+
+
+def test_formatted_begin_turn_validation_preserves_request(model):
+    engine = og.Engine(model)
+    request = engine.create_request()
+    value = "ABC"
+    errors = []
+
+    def begin_off_owner_thread():
+        try:
+            request.begin_turn(value)
+        except Exception as error:
+            errors.append(error)
+
+    try:
+        with pytest.raises(ValueError, match="embedded NUL"):
+            request.begin_turn(value + "\0")
+        thread = threading.Thread(target=begin_off_owner_thread)
+        thread.start()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        assert len(errors) == 1
+        assert isinstance(errors[0], RuntimeError)
+        assert "Engine operations must be called from the Engine owner thread" in str(errors[0])
+        turn = request.begin_turn(value)
+        assert turn == 1
+    finally:
+        request.close()
+
+
 def test_model_declares_paged_config():
     config = json.loads((_MODEL_DIR / "genai_config.json").read_text())
     dynamic_batching = config.get("engine", {}).get("dynamic_batching")

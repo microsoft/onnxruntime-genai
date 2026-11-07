@@ -163,7 +163,7 @@ TYPED_TEST(PositionInputBuffersTest, PositionStorageHandlesRanksBeamsAndCaptureL
 TYPED_TEST(PositionInputBuffersTest, StaticMasksPreservePaddingAcrossUpdatesRewindAndReset) {
   const auto type = Ort::TypeToTensorType<TypeParam>;
   this->params_->search.max_length = 8;
-  for (DeviceType device_type : {DeviceType::CPU, DeviceType::WEBGPU}) {
+  for (DeviceType device_type : {DeviceType::CPU, DeviceType::WEBGPU, DeviceType::NvTensorRtRtx}) {
     PositionInputsTestDevice device{*this->model_, device_type, true};
     for (bool capture : {false, true}) {
       SCOPED_TRACE(testing::Message() << static_cast<int>(device_type) << ", capture=" << capture);
@@ -512,6 +512,49 @@ TEST_F(StandardPositionInputsTest, MropeFullRewindReinitializesPromptPositionsAn
     EXPECT_EQ(mask[0], 0);
     EXPECT_EQ(mask[1], 1);
     EXPECT_EQ(mask[2], 1);
+  }
+}
+
+TEST_F(StandardPositionInputsTest, TrtRtxSharedMropeMasksUseCacheCapacityWithoutGraphCapture) {
+  Use3DPositionIds();
+  model_->config_->model.pad_token_id = 0;
+  params_->use_graph_capture = false;
+  params_->search.max_length = 8;
+  params_->search.past_present_share_buffer = true;
+  PositionInputsTestDevice device{*model_, DeviceType::NvTensorRtRtx, true};
+  for (const char* model_type : {"qwen3_5_text", "qwen3_5_moe_text"}) {
+    SCOPED_TRACE(model_type);
+    model_->config_->model.type = model_type;
+    state_ = std::make_unique<PositionInputsTestState>(*params_, *model_);
+    auto inputs = CreatePositionInputs();
+    inputs->Add();
+    auto prompt = Tokens(std::array<int32_t, 3>{0, 10, 20});
+    inputs->Update(prompt, 3, 3);
+    const void* mask_address = state_->GetInput("attention_mask")->GetTensorRawData();
+    auto check_mask = [&](int valid_length) {
+      auto* mask = state_->GetInput("attention_mask");
+      EXPECT_EQ(mask->GetTensorRawData(), mask_address);
+      ASSERT_EQ(mask->GetTensorTypeAndShapeInfo()->GetShape(), (std::vector<int64_t>{1, 8}));
+      for (int index = 0; index < 8; ++index)
+        EXPECT_EQ(mask->GetTensorData<int64_t>()[index], index > 0 && index < valid_length ? 1 : 0);
+    };
+    check_mask(3);
+    auto decode = Tokens(std::array<int32_t, 1>{30});
+    for (int length : {4, 5}) {
+      inputs->Update(decode, length, 1);
+      check_mask(length);
+      auto* positions = state_->GetInput("position_ids");
+      ASSERT_EQ(positions->GetTensorTypeAndShapeInfo()->GetShape(), (std::vector<int64_t>{3, 1, 1}));
+      for (int dim = 0; dim < 3; ++dim)
+        EXPECT_EQ(positions->GetTensorData<int64_t>()[dim], length - 2);
+    }
+    inputs->RewindTo(3);
+    check_mask(3);
+    inputs->Update(decode, 4, 1);
+    check_mask(4);
+    inputs->RewindTo(0);
+    inputs->Update(prompt, 3, 3);
+    check_mask(3);
   }
 }
 

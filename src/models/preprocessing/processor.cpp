@@ -6,22 +6,105 @@
 #include "models/parallel_utils.h"
 #include "models/preprocessing/processor.h"
 
+#include <array>
+#include <fstream>
+#include <limits>
+
 namespace Generators {
+
+namespace {
+
+void ValidateEncodedImageBytes(std::span<const size_t> sizes) {
+  size_t total = 0;
+  for (const auto size : sizes) {
+    if (size > kMaxEncodedImageBytes - total)
+      throw std::runtime_error("Encoded image inputs exceed the 512 MiB loading limit.");
+    total += size;
+  }
+}
+
+template <typename Read>
+Images::Info ReadImageInfo(size_t bytes, Read&& read) {
+  Images::Info info{bytes};
+  std::array<uint8_t, 24> header{};
+  if (!read(0, header)) return info;
+  constexpr std::array<uint8_t, 8> png{137, 80, 78, 71, 13, 10, 26, 10};
+  if (std::equal(png.begin(), png.end(), header.begin()) &&
+      header[12] == 'I' && header[13] == 'H' && header[14] == 'D' && header[15] == 'R') {
+    const auto dimension = [&](size_t offset) {
+      return (uint32_t{header[offset]} << 24) | (uint32_t{header[offset + 1]} << 16) |
+             (uint32_t{header[offset + 2]} << 8) | uint32_t{header[offset + 3]};
+    };
+    info.width = dimension(16);
+    info.height = dimension(20);
+    return info;
+  }
+  if (header[0] != 0xff || header[1] != 0xd8) return info;
+  size_t offset = 2;
+  while (offset < bytes) {
+    std::array<uint8_t, 2> marker{};
+    if (!read(offset, marker) || marker[0] != 0xff) return info;
+    ++offset;
+    while (marker[1] == 0xff) {
+      std::array<uint8_t, 1> next{};
+      if (!read(++offset, next)) return info;
+      marker[1] = next[0];
+    }
+    ++offset;
+    if (marker[1] == 0xda || marker[1] == 0xd9) return info;
+    if (marker[1] == 0x01 || (marker[1] >= 0xd0 && marker[1] <= 0xd7)) continue;
+    std::array<uint8_t, 2> length{};
+    if (!read(offset, length)) return info;
+    const size_t count = (size_t{length[0]} << 8) | length[1];
+    if (count < 2 || count > bytes - offset) return info;
+    const bool frame = marker[1] >= 0xc0 && marker[1] <= 0xcf &&
+                       marker[1] != 0xc4 && marker[1] != 0xc8 && marker[1] != 0xcc;
+    if (frame) {
+      std::array<uint8_t, 5> dimensions{};
+      if (count < 7 || !read(offset + 2, dimensions)) return info;
+      info.height = (uint32_t{dimensions[1]} << 8) | dimensions[2];
+      info.width = (uint32_t{dimensions[3]} << 8) | dimensions[4];
+      return info;
+    }
+    offset += count;
+  }
+  return info;
+}
+
+}  // namespace
 
 std::unique_ptr<Images> LoadImages(std::span<const char* const> image_paths) {
   if (image_paths.empty())
     throw std::runtime_error("No images provided");
 
+  std::vector<std::vector<uint8_t>> encoded;
+  std::vector<const void*> data;
+  std::vector<size_t> sizes;
+  encoded.reserve(image_paths.size());
   for (const char* image_path : image_paths) {
     if (!fs::path(image_path).exists()) {
       throw std::runtime_error("Image path does not exist: " + std::string(image_path));
     }
+    auto input = fs::path(image_path).open(std::ios::binary | std::ios::ate);
+    const auto bytes = static_cast<std::streamoff>(input.tellg());
+    if (bytes < 0 || static_cast<uintmax_t>(bytes) > std::numeric_limits<size_t>::max() ||
+        bytes > std::numeric_limits<std::streamsize>::max())
+      throw std::runtime_error("Cannot read image: " + std::string(image_path));
+    sizes.push_back(static_cast<size_t>(bytes));
   }
-  ort_extensions::OrtxObjectPtr<OrtxRawImages> images;
-  size_t num_images{};
-  CheckResult(OrtxLoadImages(images.ToBeAssigned(), const_cast<const char**>(image_paths.data()), image_paths.size(), &num_images));
-
-  return std::make_unique<Images>(std::move(images), num_images);
+  ValidateEncodedImageBytes(sizes);
+  for (size_t index = 0; index < image_paths.size(); ++index) {
+    auto input = fs::path(image_paths[index]).open(std::ios::binary | std::ios::ate);
+    if (static_cast<std::streamoff>(input.tellg()) != static_cast<std::streamoff>(sizes[index]))
+      throw std::runtime_error("Image size changed while loading: " + std::string(image_paths[index]));
+    encoded.emplace_back(sizes[index]);
+    input.seekg(0);
+    input.read(reinterpret_cast<char*>(encoded.back().data()), static_cast<std::streamsize>(sizes[index]));
+    if (!input) throw std::runtime_error("Cannot read image: " + std::string(image_paths[index]));
+    data.push_back(encoded.back().data());
+  }
+  // Metadata comes from the buffered snapshot that Extensions copies, not another header read.
+  return LoadImagesFromBuffers(data, sizes);
 }
 
 std::unique_ptr<Images> LoadImagesFromBuffers(std::span<const void*> image_data,
@@ -32,13 +115,28 @@ std::unique_ptr<Images> LoadImagesFromBuffers(std::span<const void*> image_data,
     throw std::runtime_error("Number of image data buffers does not match the number of image data sizes");
 
   std::vector<int64_t> sizes;
-  for (size_t i = 0; i < image_data_sizes.size(); ++i)
+  std::vector<Images::Info> info;
+  for (size_t i = 0; i < image_data_sizes.size(); ++i) {
+    if (!image_data[i] || image_data_sizes[i] == 0 ||
+        image_data_sizes[i] > static_cast<size_t>(std::numeric_limits<int64_t>::max())) {
+      throw std::runtime_error("Image buffer must be nonempty and fit in int64.");
+    }
+  }
+  ValidateEncodedImageBytes(image_data_sizes);
+  info.reserve(image_data.size());
+  for (size_t i = 0; i < image_data_sizes.size(); ++i) {
     sizes.push_back(image_data_sizes[i]);
+    info.push_back(ReadImageInfo(image_data_sizes[i], [&](size_t offset, std::span<uint8_t> data) {
+      if (offset > image_data_sizes[i] || data.size() > image_data_sizes[i] - offset) return false;
+      std::copy_n(static_cast<const uint8_t*>(image_data[i]) + offset, data.size(), data.data());
+      return true;
+    }));
+  }
 
   ort_extensions::OrtxObjectPtr<OrtxRawImages> images;
   CheckResult(OrtxCreateRawImages(images.ToBeAssigned(), image_data.data(), sizes.data(), image_data.size()));
 
-  return std::make_unique<Images>(std::move(images), image_data.size());
+  return std::make_unique<Images>(std::move(images), image_data.size(), std::move(info));
 }
 
 std::unique_ptr<Audios> LoadAudios(const std::span<const char* const>& audio_paths) {
