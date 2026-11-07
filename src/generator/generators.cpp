@@ -974,7 +974,7 @@ DeviceSpan<float> Generator::RunWithRopeCache(DeviceSpan<int32_t> next_tokens, b
     auto prompt_tokens = next_tokens;
     if (is_prompt && prompt_tokens.size() > static_cast<size_t>(length))
       throw std::invalid_argument("LongRoPE prompt tokens exceed the committed sequence length");
-    if (is_prompt && model_->session_info_.HasInput("last_token_indices")) {
+    if (is_prompt) {
       // Validate new prompt tokens before replay turns them into committed tokens.
       const auto batch_size = static_cast<size_t>(state_->params_->search.batch_size);
       if (!batch_size || next_tokens.size() % batch_size)
@@ -1000,8 +1000,8 @@ DeviceSpan<float> Generator::RunWithRopeCache(DeviceSpan<int32_t> next_tokens, b
   }
 
   State::PromptInputScope prompt_scope(*state_, is_prompt);
-  auto logits = replay && !is_prompt
-                    ? static_cast<DecoderOnly_State&>(*state_).Run(length, next_tokens, search_->GetNextIndices(), true)
+  auto logits = replay
+                    ? static_cast<DecoderOnly_State&>(*state_).Run(length, next_tokens, search_->GetNextIndices(), !is_prompt, length)
                     : state_->Run(length, next_tokens, search_->GetNextIndices());
   rope_cache_length_ = length;
   return logits;

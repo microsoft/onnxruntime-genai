@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <algorithm>
 #include <array>
 #include <fstream>
 #include <iterator>
@@ -30,6 +31,21 @@ struct LongRopeContextTest : testing::Test {
     EXPECT_FLOAT_EQ(logits[0], sum);
     EXPECT_FLOAT_EQ(logits[1], -sum);
     EXPECT_FLOAT_EQ(logits[2], 0);
+  }
+
+  void ExpectRecordedChunkSizes(OgaGenerator& generator, size_t prefix_length, size_t chunk_size) {
+    const auto count = generator.GetSequenceCount(0);
+    auto tensor = generator.GetOutput("present.0.value");
+    const std::vector<int64_t> shape{1, 1, static_cast<int64_t>(count), 1};
+    ASSERT_EQ(tensor->Shape(), shape);
+    const auto* sizes = static_cast<const float*>(tensor->Data());
+    for (size_t i = 0; i < count; ++i) {
+      const size_t segment_length = i < prefix_length ? prefix_length : count - prefix_length;
+      const size_t segment_index = i < prefix_length ? i : i - prefix_length;
+      const size_t expected = chunk_size ? std::min(chunk_size, segment_length - segment_index / chunk_size * chunk_size)
+                                         : segment_length;
+      EXPECT_FLOAT_EQ(sizes[i], static_cast<float>(expected)) << "token=" << i;
+    }
   }
 };
 
@@ -139,6 +155,91 @@ TEST_F(LongRopeContextTest, ReplayPreservesAppendedPromptPaddingSelection) {
           EXPECT_EQ(generator->GetSequenceData(0)[10], 0);
           ExpectConsistentCache(*generator);
         }
+      }
+    }
+  }
+}
+
+TEST_F(LongRopeContextTest, ReplayKeepsAppendedPromptWithinChunkBudget) {
+  std::vector<bool> cuda_modes{false};
+#if USE_CUDA
+  cuda_modes.push_back(true);
+#endif
+  for (bool use_cuda : cuda_modes) {
+    for (const auto* path : {MODEL_PATH "longrope-context-chunk-sizes",
+                             MODEL_PATH "longrope-context-runtime-indices-chunk-sizes"}) {
+      for (int padding : {0, 1, 7}) {
+        auto config = OgaConfig::Create(path);
+        if (padding)
+          config->Overlay(R"({"model":{"pad_token_id":1,"eos_token_id":2}})");
+        if (use_cuda)
+          config->AppendProvider("cuda");
+        model = OgaModel::Create(*config);
+        for (int chunk : {0, 1, 2, 3, 4}) {
+          for (int suffix_length : {16, 17}) {
+            SCOPED_TRACE(testing::Message() << "use_cuda=" << use_cuda << " path=" << path
+                                            << " padding=" << padding << " chunk=" << chunk
+                                            << " suffix_length=" << suffix_length);
+            auto generator = CreateGenerator(chunk);
+            std::vector<int32_t> prefix(8, padding ? 0 : 1);
+            std::vector<int32_t> suffix(suffix_length, padding ? 0 : 1);
+            if (padding)
+              std::fill(suffix.end() - padding, suffix.end(), 1);
+            generator->AppendTokens(prefix);
+            generator->AppendTokens(suffix);
+            std::vector<int32_t> expected = prefix;
+            expected.insert(expected.end(), suffix.begin(), suffix.end());
+            ASSERT_EQ(generator->GetSequenceCount(0), expected.size());
+            EXPECT_EQ(std::vector<int32_t>(generator->GetSequenceData(0),
+                                           generator->GetSequenceData(0) + expected.size()),
+                      expected);
+            ExpectRecordedChunkSizes(*generator, prefix.size(), static_cast<size_t>(chunk));
+            auto tensor = generator->GetLogits();
+            const auto* logits = static_cast<const float*>(tensor->Data());
+            const float sum = padding ? 0.0f : static_cast<float>(expected.size()) * 2.0f;
+            EXPECT_FLOAT_EQ(logits[0], sum);
+            EXPECT_FLOAT_EQ(logits[1], -sum);
+            EXPECT_FLOAT_EQ(logits[2], 0);
+            generator->GenerateNextToken();
+            EXPECT_EQ(generator->GetSequenceData(0)[expected.size()], 0);
+            ExpectConsistentCache(*generator);
+            auto cache = generator->GetOutput("present.0.value");
+            EXPECT_FLOAT_EQ(static_cast<const float*>(cache->Data())[expected.size()], 1.0f);
+          }
+        }
+      }
+    }
+  }
+}
+
+TEST_F(LongRopeContextTest, ReplayRejectsPaddingOnlyPromptBeforeRebuildingCache) {
+  std::vector<bool> cuda_modes{false};
+#if USE_CUDA
+  cuda_modes.push_back(true);
+#endif
+  for (bool use_cuda : cuda_modes) {
+    for (const auto* path : {MODEL_PATH "longrope-context", MODEL_PATH "longrope-context-runtime-indices"}) {
+      auto config = OgaConfig::Create(path);
+      config->Overlay(R"({"model":{"pad_token_id":0,"eos_token_id":2}})");
+      if (use_cuda)
+        config->AppendProvider("cuda");
+      model = OgaModel::Create(*config);
+      for (int chunk : {0, 1, 4}) {
+        SCOPED_TRACE(testing::Message() << "use_cuda=" << use_cuda << " path=" << path << " chunk=" << chunk);
+        auto generator = CreateGenerator(chunk);
+        generator->AppendTokens(std::vector<int32_t>(8, 1));
+        try {
+          generator->AppendTokens(std::vector<int32_t>(4, 0));
+          ADD_FAILURE() << "Accepted a padding-only replayed prompt";
+        } catch (const std::runtime_error& error) {
+          EXPECT_NE(std::string(error.what()).find("non-padding token"), std::string::npos);
+        }
+        auto cache = generator->GetOutput("present.0.key");
+        const std::vector<int64_t> shape{1, 1, 8, 1};
+        ASSERT_EQ(cache->Shape(), shape);
+        const auto* values = static_cast<const float*>(cache->Data());
+        for (size_t i = 0; i < 8; ++i)
+          EXPECT_FLOAT_EQ(values[i], 1.0f);
       }
     }
   }

@@ -67,7 +67,8 @@ struct DecoderOnly_State : State {
 
  private:
   DeviceSpan<float> RunWithChunking(int total_length, DeviceSpan<int32_t>& next_tokens,
-                                    DeviceSpan<int32_t> next_indices, size_t chunk_size, bool all_tokens_valid);
+                                    DeviceSpan<int32_t> next_indices, size_t chunk_size, bool all_tokens_valid,
+                                    bool preserve_prompt_selection);
 
   void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> beam_indices, int total_length,
                            bool all_tokens_valid, bool is_final_chunk);

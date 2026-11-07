@@ -96,8 +96,10 @@ Dense text LongRoPE exports using an `If` node declare an int64 scalar
 `com.microsoft.genai.original_context_length` identify that input and the cache
 switch boundary. The runtime keeps the input constant across a chunked prefill
 and replays cached tokens when the sequence switches factors, including after
-a rewind. These exports require a runtime supporting this contract; cache replay
-currently requires a single Generator sequence without beam search. Engine and
+a rewind. Both the committed prefix and appended prompt honor the configured
+prefill chunk size during replay. These exports require a runtime supporting
+this contract; cache replay currently requires a single Generator sequence
+without beam search. Engine and
 speculative decoding (including n-gram decoding) reject this contract. KV-cache calibration reads the
 metadata and supplies each sample's context length. Paged, multimodal,
 and in-kernel cache-selection exports retain their existing interfaces.
@@ -393,12 +395,13 @@ to the JSON decoder-input mapping.
 Runtime indices also select the requested row in decoders without an attention
 mask, and are emitted by the Nemotron Parse decoder's custom input setup.
 Padding-only intermediate chunks are permitted when their logits are discarded;
-each final prompt chunk must contain a non-padding token in every row, even
-when the chunk contains only one token. New prompt tokens are validated before
+for ordinary prefills, each final prompt chunk must contain a non-padding token
+in every row, even when the chunk contains only one token. New prompt tokens are validated before
 a LongRoPE cache transition. At the transition, committed history and the new
-prompt are replayed separately under the same final context regime, so the new
-prompt still selects its last non-padding token. Generated tokens and
-committed-token replay treat PAD-ID tokens as valid, and every token remains in
+prompt are replayed separately under the same final context regime and configured
+chunk limit. The replayed prompt retains logits from its last non-padding chunk
+while any remaining padding-only chunks update only the cache. Generated tokens
+and committed-token replay treat PAD-ID tokens as valid, and every token remains in
 the KV cache. Ordinary one-token decode does not download tokens to the CPU to
 validate padding.
 

@@ -9,7 +9,7 @@ from pathlib import Path
 from onnx import TensorProto, helper, save
 
 
-def create_model(output_dir, declare_context=True, runtime_indices=False):
+def create_model(output_dir, declare_context=True, runtime_indices=False, record_chunk_sizes=False):
     output_dir.mkdir(parents=True, exist_ok=True)
     inputs = [
         helper.make_tensor_value_info("input_ids", TensorProto.INT64, ["batch", "sequence"]),
@@ -45,6 +45,14 @@ def create_model(output_dir, declare_context=True, runtime_indices=False):
             helper.make_node("Gather", ["attention_shape", "sequence_axis"], ["rope_context_length"], axis=0),
         ]
     )
+    if record_chunk_sizes:
+        nodes += [
+            helper.make_node("Shape", ["input_ids"], ["token_shape"]),
+            helper.make_node("Gather", ["token_shape", "sequence_axis"], ["chunk_size"], axis=0),
+            helper.make_node("Cast", ["chunk_size"], ["chunk_size_float"], to=TensorProto.FLOAT),
+            helper.make_node("Expand", ["chunk_size_float", "token_shape"], ["token_chunk_sizes"]),
+            helper.make_node("Unsqueeze", ["token_chunk_sizes", "cache_axes"], ["new_chunk_sizes"]),
+        ]
     nodes += [
         helper.make_node("Greater", ["rope_context_length", "boundary"], ["long_mode"]),
         helper.make_node("Where", ["long_mode", "long_factor", "short_factor"], ["factor"]),
@@ -52,7 +60,12 @@ def create_model(output_dir, declare_context=True, runtime_indices=False):
         helper.make_node("Mul", ["tokens", "factor"], ["scaled_tokens"]),
         helper.make_node("Unsqueeze", ["scaled_tokens", "cache_axes"], ["new_keys"]),
         helper.make_node("Concat", ["past_key_values.0.key", "new_keys"], ["present.0.key"], axis=2),
-        helper.make_node("Concat", ["past_key_values.0.value", "new_keys"], ["present.0.value"], axis=2),
+        helper.make_node(
+            "Concat",
+            ["past_key_values.0.value", "new_chunk_sizes" if record_chunk_sizes else "new_keys"],
+            ["present.0.value"],
+            axis=2,
+        ),
         helper.make_node("ReduceSum", ["past_key_values.0.key", "reduce_axes"], ["past_sum"], keepdims=1),
         helper.make_node("Squeeze", ["past_sum", "cache_axes"], ["past_sum_column"]),
         helper.make_node("CumSum", ["scaled_tokens", "sequence_axis"], ["token_sums"]),
@@ -112,3 +125,9 @@ if __name__ == "__main__":
     create_model(Path(__file__).parents[1] / "models" / "longrope-context")
     create_model(Path(__file__).parents[1] / "models" / "longrope-context-without-metadata", declare_context=False)
     create_model(Path(__file__).parents[1] / "models" / "longrope-context-runtime-indices", runtime_indices=True)
+    create_model(Path(__file__).parents[1] / "models" / "longrope-context-chunk-sizes", record_chunk_sizes=True)
+    create_model(
+        Path(__file__).parents[1] / "models" / "longrope-context-runtime-indices-chunk-sizes",
+        runtime_indices=True,
+        record_chunk_sizes=True,
+    )
