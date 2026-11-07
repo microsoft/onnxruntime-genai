@@ -3575,7 +3575,8 @@ class Model:
             weight_name = "model.embed_tokens.weight_Q8"
             scales_name = "model.embed_tokens.weight_scales"
             self.make_initializer(quantized_weight, weight_name)
-            self.make_initializer(scales, scales_name, to=self.io_dtype)
+            lookup_dtype = ir.DataType.FLOAT if self.io_dtype == ir.DataType.BFLOAT16 else self.io_dtype
+            self.make_initializer(scales, scales_name, to=lookup_dtype)
 
             gather_name = f"{basename}/GatherBlockQuantized"
             gather_output = f"{gather_name}/output_0"
@@ -3595,6 +3596,11 @@ class Model:
                 gather_axis=0,
                 quantize_axis=1,
             )
+            if lookup_dtype != self.io_dtype:
+                self.make_value(gather_output, lookup_dtype, shape=self.make_hidden_state_shape())
+                cast_name = f"{gather_name}/Cast"
+                self.make_cast(cast_name, gather_output, self.io_dtype, shape=self.make_hidden_state_shape())
+                gather_output = f"{cast_name}/output_0"
 
         else:
             weight = "model.embed_tokens.weight"
@@ -6111,9 +6117,10 @@ class Model:
         ]
         output = f"{name}/output_0"
 
-        extra_kwargs = (
-            {"swiglu_limit": self.moe_attrs["swiglu_limit"]} if self.moe_attrs["swiglu_limit"] is not None else {}
-        )
+        limit = kwargs.get("swiglu_limit", self.moe_attrs["swiglu_limit"])
+        extra_kwargs = {"swiglu_limit": limit} if limit is not None else {}
+        if "swiglu_limit_after_activation" in kwargs:
+            extra_kwargs["swiglu_limit_after_activation"] = kwargs["swiglu_limit_after_activation"]
         self.make_node(
             "MoE",
             inputs=inputs,
@@ -6221,9 +6228,10 @@ class Model:
 
         output = f"{name}/output_0"
 
-        extra_kwargs = (
-            {"swiglu_limit": self.moe_attrs["swiglu_limit"]} if self.moe_attrs["swiglu_limit"] is not None else {}
-        )
+        limit = kwargs.get("swiglu_limit", self.moe_attrs["swiglu_limit"])
+        extra_kwargs = {"swiglu_limit": limit} if limit is not None else {}
+        if "swiglu_limit_after_activation" in kwargs:
+            extra_kwargs["swiglu_limit_after_activation"] = kwargs["swiglu_limit_after_activation"]
 
         # Only include block_size attribute if it was set
         if "block_size" in self.moe_attrs:

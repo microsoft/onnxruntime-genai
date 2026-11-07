@@ -7,6 +7,7 @@
 #include "models/preprocessing/genai_tokenizer.h"
 #include "models/preprocessing/multi_modal_processor.h"
 #include "models/preprocessing/processor.h"
+#include "models/preprocessing/qwen2_5_vl_image_processor.h"
 
 #include <cmath>
 #include <sstream>
@@ -153,6 +154,7 @@ void MediaStore::MakeHostRoom(size_t bytes) {
 PreparedMediaTurn MediaStore::Prepare(const std::string& prompt, const Images* images, size_t first_row, size_t remaining_rows) {
   auto& tokenizer = *model_->vision_->processor->tokenizer_;
   const auto& config = model_->config_->model;
+  const bool ling = config.type == "bailing_moe_v3_vl";
   const size_t count = images ? images->num_images_ : 0;
   const auto marker = tokenizer.Encode("<|vision_end|>");
   if (marker.size() != 1) throw std::logic_error("The packed vision tokenizer has no vision-end token.");
@@ -170,7 +172,7 @@ PreparedMediaTurn MediaStore::Prepare(const std::string& prompt, const Images* i
     }
   }
   if (markers != count) throw std::invalid_argument("Image marker count does not match the ordered image inputs.");
-  if (raw_tokens.empty() || raw_tokens.size() > remaining_rows)
+  if (raw_tokens.empty() || ((!ling || count == 0) && raw_tokens.size() > remaining_rows))
     throw std::invalid_argument("The formatted turn does not fit the remaining session rows.");
   if (count == 0) return {raw_tokens, {}};
   if (images->info_.size() != count) throw std::invalid_argument("Image header metadata is unavailable.");
@@ -178,12 +180,19 @@ PreparedMediaTurn MediaStore::Prepare(const std::string& prompt, const Images* i
   const size_t patch = static_cast<size_t>(config.vision.patch_size);
   const auto pixel_shape = model_->vision_->session_info.GetInputShape(config.vision.inputs.pixel_values);
   const size_t patch_bytes = MultiplyBytes(static_cast<size_t>(pixel_shape[1]), sizeof(float));
+  std::vector<int64_t> expected_grids;
+  if (ling) {
+    if (MultiplyBytes(count, 3 * sizeof(int64_t)) > host_limit_)
+      throw std::invalid_argument("Image grid metadata exceeds the configured media host budget.");
+    expected_grids.reserve(MultiplyBytes(count, 3));
+  }
   size_t estimate = 0, maximum_patches = 0, expected_rows = raw_tokens.size();
   for (const auto& info : images->info_) {
     if (info.width == 0 || info.height == 0)
       throw std::invalid_argument("Packed vision requires PNG or JPEG dimensions before preprocessing.");
     const size_t source_pixels = MultiplyBytes(info.width, info.height);
     const auto grid = MediaImageGrid(info.width, info.height, patch, merge, min_pixels_, max_pixels_);
+    if (ling) expected_grids.insert(expected_grids.end(), grid.begin(), grid.end());
     const size_t height = MultiplyBytes(static_cast<size_t>(grid[1]), patch);
     const size_t width = MultiplyBytes(static_cast<size_t>(grid[2]), patch);
     const size_t patches = MultiplyBytes(static_cast<size_t>(grid[1]), static_cast<size_t>(grid[2]));
@@ -195,17 +204,31 @@ PreparedMediaTurn MediaStore::Prepare(const std::string& prompt, const Images* i
       throw std::invalid_argument("An image cannot fit the configured device media budget.");
     estimate = AddBytes(estimate, AddBytes(MultiplyBytes(source_pixels, 16), MultiplyBytes(MultiplyBytes(height, width), 64)));
   }
-  if (expected_rows > remaining_rows) throw std::invalid_argument("Expanded image rows exceed the remaining session capacity.");
+  if (!ling && expected_rows > remaining_rows) throw std::invalid_argument("Expanded image rows exceed the remaining session capacity.");
   estimate = AddBytes(estimate, MultiplyBytes(MultiplyBytes(count, maximum_patches), patch_bytes));
-  estimate = AddBytes(estimate, MultiplyBytes(expected_rows, 128));
+  estimate = AddBytes(estimate, MultiplyBytes(AddBytes(expected_rows, ling ? count : 0), 128));
+  if (ling) {
+    estimate = AddBytes(estimate, MultiplyBytes(prompt.size(), 16));
+    estimate = AddBytes(estimate, MultiplyBytes(expected_grids.size(), sizeof(int64_t)));
+  }
   MakeHostRoom(estimate);
   accounting_->host_bytes += estimate;
   HostReservation reservation{accounting_, estimate};
+  std::vector<int32_t> expected_tokens;
+  if (ling) {
+    // Added newlines can merge with adjacent whitespace, so admission uses exact final tokens.
+    expected_tokens = TokenizeLingImagePrompt(tokenizer, prompt, expected_grids, static_cast<int64_t>(merge));
+    expected_rows = expected_tokens.size();
+    if (expected_rows > remaining_rows)
+      throw std::invalid_argument("Expanded image rows exceed the remaining session capacity.");
+  }
   auto processed = model_->vision_->processor->Process(prompt, images, nullptr);
   const auto ids = processed->at(std::string{Config::Defaults::InputIdsName});
   PreparedMediaTurn result;
   result.tokens.assign(ids->GetData<int32_t>(), ids->GetData<int32_t>() + ids->GetElementCount());
   if (result.tokens.size() != expected_rows) throw std::runtime_error("Image preprocessing violated its expanded-row estimate.");
+  if (ling && result.tokens != expected_tokens)
+    throw std::runtime_error("Ling image preprocessing disagreed with admission tokenization.");
   const auto grids = processed->at(std::string{Config::Defaults::ImageGridThwName});
   const auto pixels = processed->at(std::string{Config::Defaults::PixelValuesName});
   const auto shape = pixels->GetShape();
@@ -213,6 +236,8 @@ PreparedMediaTurn MediaStore::Prepare(const std::string& prompt, const Images* i
       pixels->GetType() != model_->cpu_embedding_->type_ || (shape.size() != 2 && shape.size() != 3) ||
       shape.back() != pixel_shape[1] || (shape.size() == 3 && shape[0] != static_cast<int64_t>(count)))
     throw std::runtime_error("Image preprocessing returned an unsupported patch/grid layout.");
+  if (ling && !std::equal(expected_grids.begin(), expected_grids.end(), grids->GetData<int64_t>()))
+    throw std::runtime_error("Ling image preprocessing disagreed with admission grids.");
   const size_t physical_patches = pixels->GetElementCount() / static_cast<size_t>(shape.back());
   size_t logical_patches = 0;
   for (size_t image = 0; image < count; ++image) {
