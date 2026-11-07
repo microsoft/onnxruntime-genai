@@ -1173,8 +1173,12 @@ decode-only paged capture with unequal query or draft widths. The switch default
 to disabled and does not add public configuration fields.
 
 Eligible models expose per-token or selected logits and the three-value
-`attention_metadata` input. Fixed-state models, sparse-attention metadata,
-extra bindings, and prefill retain the existing capture/eager rules.
+`attention_metadata` input. Hybrid eligibility is restricted to `qwen3_5_text`
+Conv/GatedDeltaNet models with capacity-seven compact updates, device-resident
+per-row capture counts, and invariant CPU `state_update_active=1`. Forced
+`ORT_GDN_PLAN` overrides disable the new hybrid path. Other fixed-state models,
+sparse-attention metadata, extra bindings, and prefill retain the existing
+capture/eager rules.
 
 The graph key includes the exact packed token count, batch size, and a bucketed
 maximum-query launch bound. Input/output tensor dimensions remain exact: there
@@ -1189,6 +1193,23 @@ a performance improvement. The optional native regression test
 CUDA build and `GENAI_VARLEN_GRAPH_MODEL` pointing to a compatible ordinary paged
 model. It compares greedy, draft-assisted control, and opted-in output while
 alternating `[2,4]` and `[3,3]` widths.
+
+The optional `VarlenHybridGraphReplayTest` uses `GENAI_VARLEN_HYBRID_MODEL`
+and a writable `GENAI_VARLEN_HYBRID_REFERENCE` file. It disables hosted drafters
+without changing target weights, checks zero/partial/full acceptance and a
+subsequent turn, and compares exact committed fixed/KV state, logits, and tokens
+between control and enabled runs. Its schedule changes widths within each
+bank-specific graph key, including width-one rows with zero capture counts.
+The streamed reference contains model state and can require several GiB; remove
+it after validation. Kernel source contracts do not replace actual replay
+qualification against the deployed ORT binary. Controlled manual-oracle results
+exclude drafter cost and are not end-to-end DFlash performance evidence.
+
+Captured target steps retain provider synchronization when their auxiliary
+outputs feed a drafter session. The optional
+`VarlenHybridGraphReplayTest.DflashPreservesTokensAcrossGraphModes` regression
+uses `GENAI_VARLEN_HYBRID_DFLASH_MODEL` and checks actual DFlash token parity
+after capture warmup, including unequal prompt lengths.
 
 ## One dynamic step in detail
 

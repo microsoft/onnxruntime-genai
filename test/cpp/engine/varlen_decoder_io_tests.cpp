@@ -12,6 +12,7 @@
 
 #include "engine/decoders/varlen_decoder_io.h"
 #include "engine/decoders/simple_decoder.h"
+#include "engine/decoders/hybrid_decoder_io.h"
 #include "engine/paged_key_value_cache.h"
 #include "engine/step_plan.h"
 #include "engine_test_doubles.h"
@@ -533,6 +534,58 @@ TEST(VarlenDecoderIOTest, VariableWidthGraphKeysSeparatePackedGeometryAndQueryBo
   EXPECT_NE(ids.Id(key(4, 6)), mixed);
   EXPECT_NE(ids.Id(key(8, 5)), mixed);
   EXPECT_NE(ids.Id(*DecodeGraphKey(2, 4, 8, 0)), mixed);
+}
+
+TEST(VarlenDecoderIOTest, HybridGraphRequiresDeviceCountsAndInvariantCaptureMode) {
+  StepPlan plan;
+  plan.requests.resize(2);
+  plan.requests[0].unprocessed_token_count = 2;
+  plan.requests[0].draft_token_count = 1;
+  plan.requests[1].unprocessed_token_count = 4;
+  plan.requests[1].draft_token_count = 3;
+  plan.token_count = 6;
+  ExecutionContext context{&plan};
+  std::array<FixedStateSlotHandle, 2> slots{};
+  context.fixed_state_slots = slots;
+  context.fixed_state_binding_key = 2;
+  auto gpu = OrtMemoryInfo::Create("Cuda", OrtDeviceAllocator, 0, OrtMemTypeDefault);
+  auto cpu = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+  // These views test placement metadata only; no device operation dereferences their backing.
+  std::array<int32_t, 2> counts{1, 3};
+  std::array<int32_t, 1> active{1};
+  const std::array<int64_t, 1> count_shape{2};
+  const std::array<int64_t, 1> active_shape{1};
+  auto device_counts = OrtValue::CreateTensor(*gpu, std::span<int32_t>{counts}, count_shape);
+  auto host_counts = OrtValue::CreateTensor(*cpu, std::span<int32_t>{counts}, count_shape);
+  auto host_active = OrtValue::CreateTensor(*cpu, std::span<int32_t>{active}, active_shape);
+  std::array<FixedStateBinding, 1> bindings{};
+  auto& binding = bindings[0];
+  binding.kind = Config::Model::Decoder::StateGroupKind::FixedConv;
+  binding.state_update_kind = Config::Model::Decoder::StateUpdateKind::CausalConv;
+  binding.input = device_counts.get();
+  binding.output = device_counts.get();
+  binding.state_update_value = device_counts.get();
+  binding.state_update_capacity = 7;
+  binding.state_update_capture_count = device_counts.get();
+  binding.state_update_active = host_active.get();
+  context.fixed_state_bindings = bindings;
+  EXPECT_TRUE(HybridDecoderIO::SupportsVariableWidthGraph(context));
+  binding.state_update_capture_count = host_counts.get();
+  EXPECT_FALSE(HybridDecoderIO::SupportsVariableWidthGraph(context));
+  binding.state_update_capture_count = device_counts.get();
+  active[0] = 0;
+  EXPECT_FALSE(HybridDecoderIO::SupportsVariableWidthGraph(context));
+  active[0] = 1;
+  plan.requests[0].unprocessed_token_count = 1;
+  plan.requests[0].draft_token_count = 0;
+  counts[0] = 0;
+  EXPECT_TRUE(HybridDecoderIO::SupportsVariableWidthGraph(context));
+  EXPECT_EQ(counts[1], 3);
+  plan.requests[1].draft_token_count = 2;
+  EXPECT_FALSE(HybridDecoderIO::SupportsVariableWidthGraph(context));
+  plan.requests[1].draft_token_count = 3;
+  binding.state_update_kind = Config::Model::Decoder::StateUpdateKind::Indexer;
+  EXPECT_FALSE(HybridDecoderIO::SupportsVariableWidthGraph(context));
 }
 
 TEST(VarlenGraphReplayTest, ChangingWidthsPreserveTokensAndCaptureGeometry) {

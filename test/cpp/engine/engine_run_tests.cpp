@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -38,6 +39,7 @@
 #include "engine/scheduled_requests.h"
 #include "decoding/speculative_sampling.h"
 #include "models/preprocessing/genai_tokenizer.h"
+#include "scoped-environment-variable.h"
 
 namespace Generators {
 namespace test {
@@ -282,25 +284,29 @@ class NativeCaptureExecutor : public ModelExecutor {
     const auto snapshot = cache_->Snapshot();
     State* cache_state = cache_->Cache();
     if (cache_state && !snapshot.requests.empty()) {
-      if (requests.size() != 1 || snapshot.requests.size() != 1 ||
-          !snapshot.window_blocks.requests.empty())
-        throw std::runtime_error("Native capture requires one non-windowed request.");
-      const auto& committed = snapshot.requests.front();
-      for (size_t index = 0; index < cache_state->inputs_.size(); ++index) {
-        OrtValue* value = cache_state->inputs_[index];
-        const auto info = value->GetTensorTypeAndShapeInfo();
-        const auto shape = info->GetShape();
-        if (shape.size() != 4) continue;
-        if (static_cast<size_t>(shape[1]) != snapshot.block_size)
-          throw std::runtime_error("Native capture encountered unexpected KV layout.");
-        const size_t slot_bytes = shape[2] * shape[3] * Ort::SizeOf(info->GetElementType());
-        size_t remaining = committed.used_slots;
-        for (size_t block = 0; remaining; ++block) {
-          const size_t slots = std::min(remaining, snapshot.block_size);
-          reference_.Tensor(*model_, prefix + "/committed/" + cache_state->input_names_[index] + "/logical-block-" + std::to_string(block),
-                            *value, committed.block_ids.at(block) * snapshot.block_size * slot_bytes,
-                            slots * slot_bytes);
-          remaining -= slots;
+      if (!snapshot.window_blocks.requests.empty())
+        throw std::runtime_error("Native capture requires non-windowed requests.");
+      for (size_t row = 0; row < snapshot.requests.size(); ++row) {
+        const auto& committed = snapshot.requests[row];
+        const std::string request_prefix = snapshot.requests.size() == 1
+                                               ? ""
+                                               : "/request-" + std::to_string(row);
+        for (size_t index = 0; index < cache_state->inputs_.size(); ++index) {
+          OrtValue* value = cache_state->inputs_[index];
+          const auto info = value->GetTensorTypeAndShapeInfo();
+          const auto shape = info->GetShape();
+          if (shape.size() != 4) continue;
+          if (static_cast<size_t>(shape[1]) != snapshot.block_size)
+            throw std::runtime_error("Native capture encountered unexpected KV layout.");
+          const size_t slot_bytes = shape[2] * shape[3] * Ort::SizeOf(info->GetElementType());
+          size_t remaining = committed.used_slots;
+          for (size_t block = 0; remaining; ++block) {
+            const size_t slots = std::min(remaining, snapshot.block_size);
+            reference_.Tensor(*model_, prefix + "/committed" + request_prefix + "/" + cache_state->input_names_[index] + "/logical-block-" + std::to_string(block),
+                              *value, committed.block_ids.at(block) * snapshot.block_size * slot_bytes,
+                              slots * slot_bytes);
+            remaining -= slots;
+          }
         }
       }
     }
@@ -448,6 +454,273 @@ TEST(EngineNativeCaptureTest, RealModelLifecycleLogitsAndCommittedState) {
             << stats.zero_accept_rounds << " full=" << stats.full_accept_rounds << '\n';
   engine->CloseRequest(request);
   reference.Finish();
+}
+
+TEST(VarlenHybridGraphReplayTest, ChangingWidthsPreserveCommittedStateAndTokens) {
+  const char* path = std::getenv("GENAI_VARLEN_HYBRID_MODEL");
+  const char* reference_path = std::getenv("GENAI_VARLEN_HYBRID_REFERENCE");
+  if (!path || !*path || !reference_path || !*reference_path)
+    GTEST_SKIP() << "Set GENAI_VARLEN_HYBRID_MODEL and GENAI_VARLEN_HYBRID_REFERENCE for CUDA hybrid validation.";
+  const std::string model_directory{path};
+  const std::string reference_file{reference_path};
+  constexpr size_t generated_tokens = 96;
+  ScopedEnvironmentVariable plan_override{"ORT_GDN_PLAN", ""};
+  struct ReplayStep {
+    std::vector<size_t> widths;
+    GraphAnnotationIds::Key key;
+  };
+  struct ObservingExecutor : NativeCaptureExecutor {
+    ObservingExecutor(std::shared_ptr<DecoderOnly_Model> model,
+                      std::shared_ptr<CacheManager> cache, std::unique_ptr<ModelExecutor> executor,
+                      NativeTensorReference& reference, std::vector<ReplayStep>& steps)
+        : NativeCaptureExecutor{model, std::move(cache), std::move(executor), reference, "hybrid"},
+          session_{model->session_decoder_.get()},
+          steps_{steps} {}
+    void Decode(ScheduledRequests& requests, ExecutionContext& context) override {
+      NativeCaptureExecutor::Decode(requests, context);
+      if (!context.plan || context.plan->requests.size() != 2 ||
+          context.graph_query_len_bound != 4)
+        return;
+      const auto key = SimpleDecoder::GraphKeyForContext(2, 4, context, session_);
+      ASSERT_TRUE(key);
+      ReplayStep step{{}, *key};
+      for (const auto& entry : context.plan->requests)
+        step.widths.push_back(entry.unprocessed_token_count);
+      std::cout << "HYBRID_GRAPH_STEP step=" << steps_.size() << " key=";
+      for (const auto component : step.key)
+        std::cout << component << ",";
+      std::cout << " widths=" << step.widths[0] << "," << step.widths[1] << "\n";
+      steps_.push_back(std::move(step));
+    }
+    const OrtSession* session_;
+    std::vector<ReplayStep>& steps_;
+  };
+  using Tokens = std::array<std::vector<int32_t>, 2>;
+  std::vector<ReplayStep> steps;
+  const auto run = [&](bool enabled, const Tokens* oracle) {
+    ScopedEnvironmentVariable flag{"ORTGENAI_ENGINE_VARLEN_GRAPH", enabled ? "1" : "0"};
+    auto config = CreateConfig(GetOrtEnv(), model_directory.c_str());
+    if (config->model.type != "qwen3_5_text" || !config->engine.dynamic_batching)
+      throw std::runtime_error("Hybrid replay requires a Qwen3.5 paged model.");
+    config->model.dflash2 = {};
+    config->model.mtp = {};
+    config->speculative = {};
+    config->speculative.max_draft_tokens = 3;
+    config->engine.dynamic_batching->max_batch_size = 2;
+    config->engine.dynamic_batching->max_scheduled_tokens = 8;
+    config->engine.dynamic_batching->num_blocks = 64;
+    config->engine.dynamic_batching->prefix_caching = false;
+    SetProviderOption(*config, "cuda", "enable_cuda_graph", "1");
+    auto model = std::dynamic_pointer_cast<DecoderOnly_Model>(
+        CreateModel(GetOrtEnv(), std::move(config)));
+    if (!model || model->p_device_->GetType() != DeviceType::CUDA)
+      throw std::runtime_error("Hybrid replay requires CUDA.");
+    auto dependencies = Engine::CreateDependencies(model);
+    std::unique_ptr<NativeTensorReference> reference;
+    if (oracle) {
+      reference = std::make_unique<NativeTensorReference>(reference_file, enabled);
+      dependencies.model_executor = std::make_unique<ObservingExecutor>(
+          model, dependencies.cache_manager, std::move(dependencies.model_executor), *reference, steps);
+    }
+    auto engine = std::make_shared<Engine>(model, std::move(dependencies));
+    Tokenizer tokenizer{*model->config_};
+    std::array<std::shared_ptr<Request>, 2> requests;
+    TurnOptions turn;
+    turn.do_sample = false;
+    turn.min_generated_tokens = generated_tokens;
+    turn.max_generated_tokens = generated_tokens;
+    const auto prompt = tokenizer.Encode("Explain binary search and its time complexity.");
+    for (auto& request : requests)
+      request = CreateRequestWithPrompt(engine, prompt, turn);
+    Tokens tokens;
+    size_t round = 0;
+    while (engine->HasPendingRequests()) {
+      if (oracle && requests[0]->status_ == RequestStatus::Active &&
+          requests[1]->status_ == RequestStatus::Active &&
+          !requests[0]->IsPrefill() && !requests[1]->IsPrefill()) {
+        // Each bank-specific graph must see both distributions, rather than alternating one
+        // distribution per bank. The last four rounds also exercise a zero-count row.
+        const std::array<std::array<size_t, 2>, 8> widths{{
+            {2, 4},
+            {3, 3},
+            {3, 3},
+            {4, 2},
+            {1, 4},
+            {2, 3},
+            {3, 2},
+            {4, 1},
+        }};
+        const size_t pattern = round++ % widths.size();
+        for (size_t row = 0; row < requests.size(); ++row) {
+          const size_t offset = tokens[row].size();
+          if (offset >= generated_tokens)
+            continue;
+          const size_t count = std::min(widths[pattern][row] - 1, generated_tokens - offset - 1);
+          std::vector<int32_t> draft{(*oracle)[row].begin() + offset,
+                                     (*oracle)[row].begin() + offset + count};
+          if (round == 2 && draft.size() == 2) {
+            const size_t rejected = row == 0 ? 1 : 0;
+            draft[rejected] = draft[rejected] == 42 ? 43 : 42;
+          }
+          if (!draft.empty())
+            requests[row]->SetDraftTokens(draft);
+        }
+      }
+      std::array<EngineEvent, 8> events;
+      const size_t count = engine->Run(events);
+      for (size_t index = 0; index < count; ++index) {
+        const auto& event = events[index];
+        if (event.flags & EngineEventFlagFailed)
+          throw std::runtime_error("Hybrid replay request failed.");
+        const auto request = std::find(requests.begin(), requests.end(), event.request);
+        if (request == requests.end())
+          throw std::runtime_error("Hybrid replay received an unknown request.");
+        const size_t row = request - requests.begin();
+        if (event.flags & EngineEventFlagToken)
+          tokens[row].push_back(event.token);
+        if (reference) {
+          const std::array<uint64_t, 5> values{row, event.flags,
+                                               static_cast<uint32_t>(event.token), static_cast<uint64_t>(event.finish_reason),
+                                               static_cast<uint64_t>(event.request->ProcessedSequenceLength())};
+          reference->Record("event", {reinterpret_cast<const uint8_t*>(values.data()), sizeof(values)});
+        }
+      }
+    }
+    const auto stats = engine->GetSpeculativeStats();
+    if (oracle) {
+      EXPECT_GT(stats.full_accept_rounds, 0u);
+      EXPECT_GT(stats.partial_accept_rounds, 0u);
+      EXPECT_GT(stats.zero_accept_rounds, 0u);
+    }
+    // Read the final repaired state again after the generation budget closed the first turn.
+    turn.min_generated_tokens = 1;
+    turn.max_generated_tokens = 1;
+    for (const auto& request : requests)
+      request->BeginTurn(prompt, turn);
+    while (engine->HasPendingRequests()) {
+      std::array<EngineEvent, 8> events;
+      const size_t count = engine->Run(events);
+      for (size_t index = 0; index < count; ++index) {
+        if (events[index].flags & EngineEventFlagFailed)
+          throw std::runtime_error("Hybrid replay state probe failed.");
+        if (events[index].flags & EngineEventFlagToken) {
+          const auto request = std::find(requests.begin(), requests.end(), events[index].request);
+          if (request == requests.end())
+            throw std::runtime_error("Hybrid replay state probe received an unknown request.");
+          tokens[request - requests.begin()].push_back(events[index].token);
+        }
+      }
+    }
+    for (const auto& request : requests)
+      engine->CloseRequest(request);
+    if (reference)
+      reference->Finish();
+    return tokens;
+  };
+  const auto oracle = run(false, nullptr);
+  for (const auto& row : oracle)
+    ASSERT_EQ(row.size(), generated_tokens + 1);
+  EXPECT_EQ(run(false, &oracle), oracle);
+  steps.clear();
+  EXPECT_EQ(run(true, &oracle), oracle);
+  ASSERT_GE(steps.size(), 16u);
+  size_t changing_keys = 0;
+  for (size_t index = 0; index < steps.size(); ++index) {
+    if (std::any_of(steps.begin(), steps.begin() + index,
+                    [&](const ReplayStep& step) { return step.key == steps[index].key; }))
+      continue;
+    size_t same_width = 0;
+    size_t changed_width = 0;
+    std::map<std::vector<size_t>, size_t> distributions;
+    for (const auto& step : steps) {
+      if (step.key != steps[index].key)
+        continue;
+      ++distributions[step.widths];
+      if (step.widths == steps[index].widths)
+        ++same_width;
+      else
+        ++changed_width;
+    }
+    std::cout << "HYBRID_GRAPH_KEY key=";
+    for (const auto component : steps[index].key)
+      std::cout << component << ",";
+    for (const auto& [widths, count] : distributions)
+      std::cout << " widths=" << widths[0] << "," << widths[1] << " count=" << count;
+    std::cout << "\n";
+    if (same_width >= 3 && changed_width >= 3)
+      ++changing_keys;
+  }
+  EXPECT_GE(changing_keys, 4u);
+}
+
+TEST(VarlenHybridGraphReplayTest, DflashPreservesTokensAcrossGraphModes) {
+  const char* path = std::getenv("GENAI_VARLEN_HYBRID_DFLASH_MODEL");
+  if (!path || !*path)
+    GTEST_SKIP() << "Set GENAI_VARLEN_HYBRID_DFLASH_MODEL for actual CUDA DFlash validation.";
+  const std::string model_directory{path};
+  using Tokens = std::array<std::vector<int32_t>, 2>;
+  const auto run = [&](bool enabled) {
+    ScopedEnvironmentVariable flag{"ORTGENAI_ENGINE_VARLEN_GRAPH", enabled ? "1" : "0"};
+    auto config = CreateConfig(GetOrtEnv(), model_directory.c_str());
+    if (!config->engine.dynamic_batching || config->model.dflash2.filename.empty())
+      throw std::runtime_error("DFlash replay requires a dynamically batched DFlash model.");
+    config->search.random_seed = 42;
+    config->search.do_sample = false;
+    config->speculative = {};
+    config->speculative.max_draft_tokens = 7;
+    config->engine.dynamic_batching->max_batch_size = 4;
+    config->engine.dynamic_batching->max_scheduled_tokens = 512;
+    config->engine.dynamic_batching->num_blocks = 128;
+    config->engine.dynamic_batching->prefix_caching = false;
+    SetProviderOption(*config, "cuda", "enable_cuda_graph", "1");
+    auto model = CreateModel(GetOrtEnv(), std::move(config));
+    if (model->p_device_->GetType() != DeviceType::CUDA)
+      throw std::runtime_error("DFlash replay requires CUDA.");
+    auto engine = std::make_shared<Engine>(model, Engine::CreateDependencies(model));
+    Tokenizer tokenizer{*model->config_};
+    const auto base = tokenizer.Encode("Explain cache ownership, transaction rollback, and request isolation clearly. ");
+    const auto generate = [&] {
+      Tokens tokens;
+      std::array<std::shared_ptr<Request>, 2> requests;
+      TurnOptions turn;
+      turn.do_sample = false;
+      turn.min_generated_tokens = 96;
+      turn.max_generated_tokens = 96;
+      for (size_t row = 0; row < requests.size(); ++row) {
+        std::vector<int32_t> prompt(row == 0 ? 96 : 160);
+        for (size_t index = 0; index < prompt.size(); ++index)
+          prompt[index] = base.at(index % base.size());
+        requests[row] = CreateEngineRequest(engine, 4096);
+        requests[row]->BeginTurn(prompt, turn);
+      }
+      while (engine->HasPendingRequests()) {
+        std::array<EngineEvent, 64> events;
+        const size_t count = engine->Run(events);
+        for (size_t index = 0; index < count; ++index) {
+          const auto& event = events[index];
+          if (event.flags & EngineEventFlagFailed)
+            throw std::runtime_error("DFlash replay request failed.");
+          const auto request = std::find(requests.begin(), requests.end(), event.request);
+          if (request == requests.end())
+            throw std::runtime_error("DFlash replay received an unknown request.");
+          if (event.flags & EngineEventFlagToken)
+            tokens[request - requests.begin()].push_back(event.token);
+          if (event.flags & EngineEventFlagTurnFinished)
+            engine->CloseRequest(event.request);
+        }
+      }
+      return tokens;
+    };
+    for (size_t warmup = 0; warmup < 4; ++warmup)
+      generate();
+    const auto tokens = generate();
+    EXPECT_GT(engine->GetSpeculativeStats().draft_forward_passes, 0u);
+    EXPECT_EQ(engine->GetSpeculativeStats().dflash2_failures, 0u);
+    for (const auto& row : tokens)
+      EXPECT_EQ(row.size(), 96u);
+    return tokens;
+  };
+  EXPECT_EQ(run(false), run(true));
 }
 
 class TestBarrier {

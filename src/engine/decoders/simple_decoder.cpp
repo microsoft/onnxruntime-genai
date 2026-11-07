@@ -19,6 +19,8 @@ SimpleDecoder::SimpleDecoder(std::shared_ptr<DecoderOnly_Model> model,
   const ModelStateManifest manifest{model_->config_->model.decoder};
   has_fixed_state_groups_ = manifest.HasFixedStateGroups();
   GetEnv("ORTGENAI_ENGINE_VARLEN_GRAPH", varlen_graph_enabled_);
+  if (varlen_graph_enabled_ && has_fixed_state_groups_ && !GetEnv("ORT_GDN_PLAN").empty())
+    varlen_graph_enabled_ = false;
   const bool has_position_ids = model_->session_info_.HasInput(
       model_->config_->model.decoder.inputs.position_ids);
   if (cache_manager_->SupportsDynamicBatching() && has_position_ids) {
@@ -177,7 +179,9 @@ void SimpleDecoder::Decode(ScheduledRequests& scheduled_requests,
                                   : UniformDecodeTokenCount(scheduled_requests);
   context.graph_query_len_bound = 0;
   if (varlen_graph_enabled_ && graph_buffers_ && context.plan &&
-      !has_fixed_state_groups_ && context.fixed_state_bindings.empty() &&
+      ((!has_fixed_state_groups_ && context.fixed_state_bindings.empty()) ||
+       (has_fixed_state_groups_ && model_->config_->model.type == "qwen3_5_text" &&
+        HybridDecoderIO::SupportsVariableWidthGraph(context))) &&
       context.extra_inputs.empty() && context.extra_outputs.empty() &&
       context.extra_input_names.empty() && context.extra_output_names.empty() &&
       DecoderLogitsArePerToken(*model_) &&
@@ -247,11 +251,13 @@ void SimpleDecoder::Decode(ScheduledRequests& scheduled_requests,
   if (IsGraphCaptureEnabled(model_->config_->model.decoder.session_options) &&
       cache_manager_->SupportsDynamicBatching()) {
     context.run_options->AddConfigEntry("gpu_graph_id", std::to_string(annotation_id).c_str());
-    // Every consumer of a captured step's outputs runs on the session's CUDA stream, and the first
-    // host read of them (the sampled token ids) synchronizes that stream. Skipping the end-of-run
-    // synchronization lets that work queue behind the graph instead of waiting for the device.
-    if (capture && model_->p_device_->GetType() == DeviceType::CUDA) {
-      context.run_options->AddConfigEntry("disable_synchronize_execution_providers", "1");
+    // Auxiliary outputs feed the drafter's session, so preserve producer synchronization at that
+    // handoff. Ordinary sampling orders its work and token readback on the target stream.
+    if (model_->p_device_->GetType() == DeviceType::CUDA &&
+        (capture || model_->config_->engine.aux_hidden_states_output_required)) {
+      context.run_options->AddConfigEntry(
+          "disable_synchronize_execution_providers",
+          model_->config_->engine.aux_hidden_states_output_required ? "0" : "1");
     }
   }
 
