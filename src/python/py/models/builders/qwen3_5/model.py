@@ -448,9 +448,7 @@ class Qwen35MoEModel(MTPModel):
         drafter_io_dtype = (
             drafter_quant_config.to_onnx_dtypes()[0]
             if drafter_quant_config is not None
-            else io_dtype
-            if self.decoder.ep == "webgpu"
-            else ir.DataType.BFLOAT16
+            else io_dtype if self.decoder.ep == "webgpu" else ir.DataType.BFLOAT16
         )
         if self.decoder.ep == "webgpu" and drafter_io_dtype != ir.DataType.FLOAT16:
             raise ValueError("WebGPU DFlash2 requires FP16 body activations and KV caches.")
@@ -573,10 +571,7 @@ class Qwen35MoEModel(MTPModel):
         private = set(head_initializers - adopted) if head is not None else set()
 
         if shared_weight_policies is not None:
-            if embedding_initializers & head_initializers and set(shared_weight_policies.values()) == {
-                "required",
-                "off",
-            }:
+            if embedding_initializers & head_initializers and set(shared_weight_policies.values()) == {"required", "off"}:
                 raise ValueError("A tied embedding and LM head cannot have conflicting required/off sharing policies.")
             for tensor_name, initializers in (
                 ("embedding", embedding_initializers),

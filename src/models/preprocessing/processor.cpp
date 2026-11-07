@@ -14,6 +14,15 @@ namespace Generators {
 
 namespace {
 
+void ValidateEncodedImageBytes(std::span<const size_t> sizes) {
+  size_t total = 0;
+  for (const auto size : sizes) {
+    if (size > kMaxEncodedImageBytes - total)
+      throw std::runtime_error("Encoded image inputs exceed the 512 MiB loading limit.");
+    total += size;
+  }
+}
+
 template <typename Read>
 Images::Info ReadImageInfo(size_t bytes, Read&& read) {
   Images::Info info{bytes};
@@ -81,14 +90,20 @@ std::unique_ptr<Images> LoadImages(std::span<const char* const> image_paths) {
     if (bytes < 0 || static_cast<uintmax_t>(bytes) > std::numeric_limits<size_t>::max() ||
         bytes > std::numeric_limits<std::streamsize>::max())
       throw std::runtime_error("Cannot read image: " + std::string(image_path));
-    encoded.emplace_back(static_cast<size_t>(bytes));
-    input.seekg(0);
-    input.read(reinterpret_cast<char*>(encoded.back().data()), static_cast<std::streamsize>(bytes));
-    if (!input) throw std::runtime_error("Cannot read image: " + std::string(image_path));
-    data.push_back(encoded.back().data());
-    sizes.push_back(encoded.back().size());
+    sizes.push_back(static_cast<size_t>(bytes));
   }
-  // Inspect the same bytes Extensions owns, not a second file read that could observe new contents.
+  ValidateEncodedImageBytes(sizes);
+  for (size_t index = 0; index < image_paths.size(); ++index) {
+    auto input = fs::path(image_paths[index]).open(std::ios::binary | std::ios::ate);
+    if (static_cast<std::streamoff>(input.tellg()) != static_cast<std::streamoff>(sizes[index]))
+      throw std::runtime_error("Image size changed while loading: " + std::string(image_paths[index]));
+    encoded.emplace_back(sizes[index]);
+    input.seekg(0);
+    input.read(reinterpret_cast<char*>(encoded.back().data()), static_cast<std::streamsize>(sizes[index]));
+    if (!input) throw std::runtime_error("Cannot read image: " + std::string(image_paths[index]));
+    data.push_back(encoded.back().data());
+  }
+  // Metadata comes from the buffered snapshot that Extensions copies, not another header read.
   return LoadImagesFromBuffers(data, sizes);
 }
 
@@ -101,12 +116,15 @@ std::unique_ptr<Images> LoadImagesFromBuffers(std::span<const void*> image_data,
 
   std::vector<int64_t> sizes;
   std::vector<Images::Info> info;
-  info.reserve(image_data.size());
   for (size_t i = 0; i < image_data_sizes.size(); ++i) {
     if (!image_data[i] || image_data_sizes[i] == 0 ||
         image_data_sizes[i] > static_cast<size_t>(std::numeric_limits<int64_t>::max())) {
       throw std::runtime_error("Image buffer must be nonempty and fit in int64.");
     }
+  }
+  ValidateEncodedImageBytes(image_data_sizes);
+  info.reserve(image_data.size());
+  for (size_t i = 0; i < image_data_sizes.size(); ++i) {
     sizes.push_back(image_data_sizes[i]);
     info.push_back(ReadImageInfo(image_data_sizes[i], [&](size_t offset, std::span<uint8_t> data) {
       if (offset > image_data_sizes[i] || data.size() > image_data_sizes[i] - offset) return false;

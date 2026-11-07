@@ -230,6 +230,8 @@ struct Engine : std::enable_shared_from_this<Engine>,
 
  private:
   friend struct test::EngineRunTestAccess;
+  uint64_t AdmitTurn(const std::shared_ptr<Request>& request, std::span<const int32_t> tokens,
+                     const TurnOptions& options);
   void DetachRequestForTeardown(
       const std::shared_ptr<Request>& request) noexcept;
   // Logs one warning when the hosted speculative path cannot deliver the configured

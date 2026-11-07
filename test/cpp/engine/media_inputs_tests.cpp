@@ -2,6 +2,8 @@
 // Licensed under the MIT License.
 
 #include <array>
+#include <chrono>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <tuple>
@@ -41,6 +43,33 @@ TEST(MediaInputsTest, RetainsPngAndJpegDimensionsWithoutPreprocessing) {
 TEST(MediaInputsTest, RejectsInvalidImageBufferBeforeCopying) {
   std::array<const void*, 1> buffers{nullptr};
   const std::array<size_t, 1> sizes{1};
+  EXPECT_THROW(LoadImagesFromBuffers(buffers, sizes), std::runtime_error);
+}
+
+TEST(MediaInputsTest, RejectsOversizedImageCollectionsBeforeReadingPayloads) {
+  const auto path = std::filesystem::temp_directory_path() /
+                    ("ortgenai_image_limit_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+  {
+    std::ofstream output(path, std::ios::binary);
+    output.seekp(300 * 1024 * 1024 - 1);
+    output.put('\0');
+    ASSERT_TRUE(output);
+  }
+  const std::string filename = path.string();
+  const std::array paths{filename.c_str(), filename.c_str()};
+  try {
+    LoadImages(paths);
+    ADD_FAILURE() << "Accepted more than 512 MiB of encoded images";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(std::string{error.what()}.find("512 MiB loading limit"), std::string::npos);
+  }
+  EXPECT_TRUE(std::filesystem::remove(path));
+}
+
+TEST(MediaInputsTest, RejectsCombinedBufferBytesBeforeInspectingEitherBuffer) {
+  const uint8_t unused = 0;
+  std::array<const void*, 2> buffers{&unused, &unused};
+  const std::array<size_t, 2> sizes{256 * 1024 * 1024, 256 * 1024 * 1024 + 1};
   EXPECT_THROW(LoadImagesFromBuffers(buffers, sizes), std::runtime_error);
 }
 
@@ -133,6 +162,29 @@ TEST(MediaInputsTest, ResizePreflightMatchesNativeTieAndMinimumPixelRules) {
   EXPECT_THROW(MediaImageGrid(0, 100, 16, 2, 65536, 16777216), std::invalid_argument);
   EXPECT_THROW(MediaImageGrid(1, 201, 16, 2, 65536, 16777216), std::invalid_argument);
   EXPECT_THROW(MediaImageGrid(UINT32_MAX, UINT32_MAX, 16, 2, 65536, 16777216), std::invalid_argument);
+}
+
+TEST(MediaInputsTest, PositionRangesPreserveImageBoundariesAndLaterTextOffsets) {
+  auto first = std::make_shared<MediaItem>();
+  first->grid = {1, 4, 6};
+  first->rows = 6;
+  auto second = std::make_shared<MediaItem>();
+  second->grid = {1, 4, 4};
+  second->rows = 4;
+  const std::array<MediaSpan, 2> media{{{3, first}, {12, second}}};
+  const std::array<std::array<int64_t, 20>, 3> expected{{
+      {0, 1, 2, 3, 3, 3, 3, 3, 3, 6, 7, 8, 9, 9, 9, 9, 11, 12, 13, 14},
+      {0, 1, 2, 3, 3, 3, 4, 4, 4, 6, 7, 8, 9, 9, 10, 10, 11, 12, 13, 14},
+      {0, 1, 2, 3, 4, 5, 3, 4, 5, 6, 7, 8, 9, 10, 9, 10, 11, 12, 13, 14},
+  }};
+  for (const auto& [start, count] : {std::pair{0u, 20u}, std::pair{4u, 10u},
+                                     std::pair{14u, 4u}, std::pair{20u, 0u}}) {
+    std::array<std::vector<int64_t>, 3> actual;
+    for (auto& plane : actual) plane.resize(count);
+    MediaPositions(media, start, 2, {actual[0], actual[1], actual[2]});
+    for (size_t plane = 0; plane < 3; ++plane)
+      EXPECT_TRUE(std::equal(actual[plane].begin(), actual[plane].end(), expected[plane].begin() + start));
+  }
 }
 
 TEST(MediaInputsTest, PrefixIdentityDoesNotReplaceVocabularyInputs) {

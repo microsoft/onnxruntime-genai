@@ -133,7 +133,7 @@ TEST_F(SchedulerContractTest, MissingImageProducesPreparationWithoutLogicalProgr
   EXPECT_TRUE(scheduler.HasPendingRequests());
 }
 
-TEST_F(SchedulerContractTest, MissingImageDoesNotSuppressReadyDecode) {
+TEST_F(SchedulerContractTest, PendingImageWaitsForRunnableDecodeToDrain) {
   auto cache = std::make_shared<RecordingCacheManager>(model_, 8);
   DynamicBatchScheduler scheduler(model_, cache);
   auto image_request = Assigned(10);
@@ -146,11 +146,30 @@ TEST_F(SchedulerContractTest, MissingImageDoesNotSuppressReadyDecode) {
   auto decode = Assigned(20);
   MakeDecodeResident(scheduler, *cache, decode);
   StepPlan plan;
-  const auto result = scheduler.PlanStep(plan);
-  ASSERT_TRUE(result.executable);
-  ASSERT_EQ(plan.requests.size(), 1u);
-  EXPECT_EQ(plan.requests[0].request, decode);
-  EXPECT_FALSE(plan.requests[0].is_prefill);
+  auto logits = model_->p_device_inputs_->Allocate<float>(static_cast<size_t>(model_->config_->model.vocab_size));
+  std::fill(logits.CpuSpan().begin(), logits.CpuSpan().end(), 0.0f);
+  logits.CpuSpan()[5] = 100.0f;
+  logits.CopyCpuToDevice();
+  for (size_t step = 0; step < 32; ++step) {
+    const auto result = scheduler.PlanStep(plan);
+    ASSERT_TRUE(result.executable);
+    ASSERT_EQ(plan.requests.size(), 1u);
+    EXPECT_EQ(plan.requests[0].request, decode);
+    EXPECT_FALSE(plan.requests[0].is_prefill);
+    EXPECT_FALSE(image->features);
+    EXPECT_EQ(image_request->ProcessedSequenceLength(), 0);
+    PrepareRequestStep(model_, plan.requests[0]);
+    decode->SaveStateForTransaction();
+    const auto sampled = decode->ApplyLogitsForTransaction(logits);
+    decode->CommitStateForTransaction();
+    decode->CommitStep(plan.requests[0], sampled);
+  }
+  scheduler.RemoveRequest(decode);
+  const auto preparation = scheduler.PlanStep(plan);
+  EXPECT_FALSE(preparation.executable);
+  EXPECT_EQ(preparation.outcome.kind, StepOutcomeKind::PreparationProgress);
+  EXPECT_EQ(preparation.preparation_request, image_request);
+  EXPECT_EQ(preparation.preparation_item, image);
   EXPECT_EQ(image_request->ProcessedSequenceLength(), 0);
 }
 

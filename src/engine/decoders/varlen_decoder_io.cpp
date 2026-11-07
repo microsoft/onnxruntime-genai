@@ -890,11 +890,16 @@ void VarlenDecoderIO::PrepareRotaryPositionIds(
                   cpu.begin() + (plane * scheduled_requests.size() + row + 1) * capacity, int64_t{0});
       continue;
     }
-    for (size_t position = 0; position < capacity; ++position) {
-      const auto coordinates = scheduled_requests[row]->Position(position);
-      for (size_t plane = 0; plane < 3; ++plane)
-        cpu[(plane * scheduled_requests.size() + row) * capacity + position] = coordinates[plane];
+    const auto& request = scheduled_requests[row];
+    const size_t history = static_cast<size_t>(request->ProcessedSequenceLength()) + request->ScheduledTokenCount();
+    std::array<std::span<int64_t>, 3> planes;
+    for (size_t plane = 0; plane < 3; ++plane) {
+      const auto start = (plane * scheduled_requests.size() + row) * capacity;
+      planes[plane] = cpu.subspan(start, history);
+      // Keep fixed capture geometry, but never forecast unprocessed image coordinates into its tail.
+      std::iota(cpu.begin() + start + history, cpu.begin() + start + capacity, static_cast<int64_t>(history));
     }
+    MediaPositions(request->Media(), 0, static_cast<size_t>(model->config_->model.vision.spatial_merge_size), planes);
   }
   positions.CopyCpuToDevice();
   input_names_.push_back(name.c_str());

@@ -45,13 +45,17 @@ struct PreparedMediaTurn {
 };
 
 std::array<int64_t, 3> MediaPosition(std::span<const MediaSpan> media, size_t row, size_t merge_size);
+void MediaPositions(std::span<const MediaSpan> media, size_t first_row, size_t merge_size,
+                    const std::array<std::span<int64_t>, 3>& positions);
 std::array<int64_t, 3> MediaImageGrid(uint32_t width, uint32_t height, size_t patch, size_t merge,
                                       int64_t min_pixels, int64_t max_pixels);
 
 class MediaStore {
  public:
   MediaStore(std::shared_ptr<DecoderOnly_Model> model, size_t host_limit, size_t device_limit);
-  PreparedMediaTurn Prepare(const std::string& prompt, const Images* images, size_t first_row, size_t remaining_rows);
+  PreparedMediaTurn Prepare(const std::string& prompt, std::span<const int32_t> raw_tokens,
+                            const Images* images, size_t first_row, size_t remaining_rows);
+  void ValidateTextTokens(std::span<const int32_t> tokens) const;
   void ReserveItems(size_t count);
   void Retain(std::span<const MediaSpan> media) noexcept;
   void Encode(const std::shared_ptr<MediaItem>& item);
@@ -67,6 +71,7 @@ class MediaStore {
   int64_t next_prefix_row_{1};
   int64_t min_pixels_{};
   int64_t max_pixels_{};
+  int32_t vision_end_token_{};
 };
 
 }  // namespace Generators

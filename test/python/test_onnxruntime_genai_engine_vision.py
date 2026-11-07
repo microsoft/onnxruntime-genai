@@ -159,6 +159,29 @@ def test_mixed_geometry_padding_is_rejected_before_host_budget_is_exceeded(visio
     request.close()
 
 
+def test_token_admission_rejects_image_markers_and_preserves_turn_ids(vision_model):
+    model, _ = vision_model
+    engine, tokenizer = og.Engine(model), og.Tokenizer(model)
+    request = new_request(engine)
+    options = og.TurnOptions(request)
+    options.set_max_generated_tokens(1)
+    markers = ("<|vision_start|>", "<|image_pad|>", "<|vision_end|>", IMAGE_MARKER)
+    for value in markers:
+        with pytest.raises(RuntimeError, match="Image markers require"):
+            request.begin_turn(tokenizer.encode(value), options)
+    images = og.Images.open(str(IMAGE_DIR / "cars.jpg"))
+    first = begin(request, prompt(tokenizer, 1), images, maximum=1)
+    assert first == 1
+    drain(engine)
+    for value in markers:
+        with pytest.raises(RuntimeError, match="Image markers require"):
+            request.begin_turn(tokenizer.encode(value), options)
+    second = request.begin_turn(tokenizer.encode("ABC"), options)
+    assert second == 2
+    drain(engine)
+    request.close()
+
+
 def test_formatted_admission_reclaims_abandoned_media_before_host_preflight(vision_package):
     directory, _ = vision_package
     config = og.Config(directory)

@@ -74,20 +74,44 @@ void MediaItem::ReleaseFeatures() {
 }
 
 std::array<int64_t, 3> MediaPosition(std::span<const MediaSpan> media, size_t row, size_t merge_size) {
+  std::array<int64_t, 3> result;
+  MediaPositions(media, row, merge_size, {std::span<int64_t>{&result[0], 1}, std::span<int64_t>{&result[1], 1}, std::span<int64_t>{&result[2], 1}});
+  return result;
+}
+
+void MediaPositions(std::span<const MediaSpan> media, size_t first_row, size_t merge_size,
+                    const std::array<std::span<int64_t>, 3>& positions) {
+  const size_t count = positions[0].size();
+  if (positions[1].size() != count || positions[2].size() != count)
+    throw std::invalid_argument("Media position planes must have equal lengths.");
   int64_t delta = 0;
-  for (const auto& span : media) {
-    if (row < span.start) break;
-    const auto height = span.item->grid[1] / static_cast<int64_t>(merge_size);
+  size_t span_index = 0;
+  size_t index = 0;
+  while (index < count) {
+    const size_t row = first_row + index;
+    while (span_index < media.size() && row >= media[span_index].start + media[span_index].item->rows) {
+      const auto& span = media[span_index++];
+      delta += std::max(span.item->grid[1], span.item->grid[2]) / static_cast<int64_t>(merge_size) -
+               static_cast<int64_t>(span.item->rows);
+    }
+    if (span_index == media.size() || row < media[span_index].start) {
+      const size_t end = span_index == media.size() ? count : std::min(count, media[span_index].start - first_row);
+      for (auto plane : positions)
+        std::iota(plane.begin() + index, plane.begin() + end, static_cast<int64_t>(row) + delta);
+      index = end;
+      continue;
+    }
+    const auto& span = media[span_index];
     const auto width = span.item->grid[2] / static_cast<int64_t>(merge_size);
     const auto base = static_cast<int64_t>(span.start) + delta;
-    if (row - span.start < span.item->rows) {
-      const auto offset = static_cast<int64_t>(row - span.start);
-      return {base, base + offset / width, base + offset % width};
+    const size_t end = index + std::min(count - index, span.item->rows - (row - span.start));
+    for (; index < end; ++index) {
+      const auto offset = static_cast<int64_t>(first_row + index - span.start);
+      positions[0][index] = base;
+      positions[1][index] = base + offset / width;
+      positions[2][index] = base + offset % width;
     }
-    delta += std::max(height, width) - static_cast<int64_t>(span.item->rows);
   }
-  const auto position = static_cast<int64_t>(row) + delta;
-  return {position, position, position};
 }
 
 std::array<int64_t, 3> MediaImageGrid(uint32_t width, uint32_t height, size_t patch, size_t merge,
@@ -135,6 +159,9 @@ MediaStore::MediaStore(std::shared_ptr<DecoderOnly_Model> model, size_t host_lim
   }
   min_pixels_ = limits.min_pixels;
   max_pixels_ = limits.max_pixels;
+  const auto marker = model_->vision_->processor->tokenizer_->Encode("<|vision_end|>");
+  if (marker.size() != 1) throw std::logic_error("The packed vision tokenizer has no vision-end token.");
+  vision_end_token_ = marker[0];
 }
 
 void MediaStore::MakeHostRoom(size_t bytes) {
@@ -150,29 +177,34 @@ void MediaStore::MakeHostRoom(size_t bytes) {
     throw std::runtime_error("Retained media leaves insufficient host capacity for this turn.");
 }
 
-PreparedMediaTurn MediaStore::Prepare(const std::string& prompt, const Images* images, size_t first_row, size_t remaining_rows) {
-  auto& tokenizer = *model_->vision_->processor->tokenizer_;
+void MediaStore::ValidateTextTokens(std::span<const int32_t> tokens) const {
+  const auto& config = model_->config_->model;
+  if (std::any_of(tokens.begin(), tokens.end(), [&](int32_t token) {
+        return token == config.image_token_id || token == config.vision_start_token_id || token == vision_end_token_;
+      }))
+    throw std::invalid_argument("Image markers require the formatted prompt and images overload.");
+}
+
+PreparedMediaTurn MediaStore::Prepare(const std::string& prompt, std::span<const int32_t> raw_tokens,
+                                      const Images* images, size_t first_row, size_t remaining_rows) {
   const auto& config = model_->config_->model;
   const size_t count = images ? images->num_images_ : 0;
-  const auto marker = tokenizer.Encode("<|vision_end|>");
-  if (marker.size() != 1) throw std::logic_error("The packed vision tokenizer has no vision-end token.");
-  const auto raw_tokens = tokenizer.Encode(prompt.c_str());
   size_t markers = 0;
   for (size_t index = 0; index < raw_tokens.size(); ++index) {
     if (raw_tokens[index] == config.vision_start_token_id) {
       if (index + 2 >= raw_tokens.size() || raw_tokens[index + 1] != config.image_token_id ||
-          raw_tokens[index + 2] != marker[0])
+          raw_tokens[index + 2] != vision_end_token_)
         throw std::invalid_argument("Each image must use a complete vision-start/image-pad/vision-end marker.");
       ++markers;
       index += 2;
-    } else if (raw_tokens[index] == config.image_token_id || raw_tokens[index] == marker[0]) {
+    } else if (raw_tokens[index] == config.image_token_id || raw_tokens[index] == vision_end_token_) {
       throw std::invalid_argument("Image markers must form complete ordered image items.");
     }
   }
   if (markers != count) throw std::invalid_argument("Image marker count does not match the ordered image inputs.");
   if (raw_tokens.empty() || raw_tokens.size() > remaining_rows)
     throw std::invalid_argument("The formatted turn does not fit the remaining session rows.");
-  if (count == 0) return {raw_tokens, {}};
+  if (count == 0) return {std::vector<int32_t>{raw_tokens.begin(), raw_tokens.end()}, {}};
   if (images->info_.size() != count) throw std::invalid_argument("Image header metadata is unavailable.");
   const size_t merge = static_cast<size_t>(config.vision.spatial_merge_size);
   const size_t patch = static_cast<size_t>(config.vision.patch_size);

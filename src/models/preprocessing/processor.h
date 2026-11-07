@@ -13,6 +13,8 @@
 
 namespace Generators {
 
+inline constexpr size_t kMaxEncodedImageBytes = 512 * 1024 * 1024;
+
 struct Images {
   struct Info {
     size_t encoded_bytes{};

@@ -1597,10 +1597,10 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request, const std::s
   const auto raw = GetOrCreateStopTokenizer()->Encode(prompt.c_str());
   request->ValidateTurnAdmission(raw, options);
   const size_t first_row = static_cast<size_t>(request->CurrentSequenceLength());
-  auto prepared = media_store_->Prepare(prompt, images, first_row, request->MaxSessionTokens() - first_row);
+  auto prepared = media_store_->Prepare(prompt, raw, images, first_row, request->MaxSessionTokens() - first_row);
   request->ReserveMedia(prepared.media.size());
   media_store_->ReserveItems(prepared.media.size());
-  const auto turn_id = BeginTurn(request, prepared.tokens, options);
+  const auto turn_id = AdmitTurn(request, prepared.tokens, options);
   media_store_->Retain(prepared.media);
   request->AppendMedia(prepared.media);
   return turn_id;
@@ -1619,6 +1619,12 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
     throw std::runtime_error(
         "Cannot begin a turn for a request that does not belong to this engine.");
   }
+  if (media_store_) media_store_->ValidateTextTokens(tokens);
+  return AdmitTurn(request, tokens, options);
+}
+
+uint64_t Engine::AdmitTurn(const std::shared_ptr<Request>& request, std::span<const int32_t> tokens,
+                           const TurnOptions& options) {
   request->ValidateTurnAdmission(tokens, options);
   if (backend_capabilities_.SelectsOwnTokens()) {
     const int vocab_size = model_->config_->model.vocab_size;
@@ -2259,6 +2265,7 @@ void Engine::RunDynamic() {
               RetainEvent(FailUnserviceableRequest(outcome.request_id));
             return;
           }
+          // Synchronization does not prove an unknown kernel failure is item-local; preserve fail-stop semantics.
           MarkUnhealthyAndThrow(StepOutcomeKind::FatalExecutionFailure, step_plan_.transaction_id,
                                 outcome.request_id, "Unclassified encoder execution failure.", std::current_exception());
         } catch (...) {
