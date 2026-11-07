@@ -117,7 +117,7 @@ Qwen2VLPositionInputs::Qwen2VLPositionInputs(const Model& model, State& state, D
     rotary_history_input_->CreateTensor(history_shape, true);
   }
   position_buffer_ = CreatePositionIdsBuffer(*state_.params_);
-  mask_buffer_ = CreateAttentionMaskBuffer(model_, *state_.params_, DynamicMaskUpdate::FillOnes);
+  mask_buffer_ = CreateAttentionMaskBuffer(model_, *state_.params_);
 }
 
 void Qwen2VLPositionInputs::SetGridTensors(const std::shared_ptr<Tensor>& image_grid_thw,
@@ -294,7 +294,7 @@ void Qwen2VLPositionInputs::CreateAndInitialize3DPositionIDs(DeviceSpan<int32_t>
       // 1. Fill Text Part
       // Text runs from `st` up to `ed-1` (which is the <|vision_start|> token)
       int64_t text_len = ed - st;
-      st_idx = (k > 0 || b > 0) ? max_pos_for_batch + 1 : 0;
+      st_idx = k > 0 ? max_pos_for_batch + 1 : 0;
       T current_pos = st_idx;
 
       for (int64_t s = 0; s < text_len; ++s) {

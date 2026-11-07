@@ -664,6 +664,74 @@ TEST_F(StandardPositionInputsTest, CapturedVisionPositionsPreserveMropeDeltasAnd
   }
 }
 
+TEST_F(StandardPositionInputsTest, BatchedVisionPositionsStartEachRowAtZero) {
+  Use3DPositionIds();
+  model_->config_->model.type = "qwen3_vl";
+  model_->config_->model.vision_start_token_id = 40;
+  model_->config_->model.image_token_id = 41;
+  model_->config_->model.vision.spatial_merge_size = 2;
+  params_->search.batch_size = 2;
+  params_->search.max_length = 8;
+  params_->max_graph_capture_length = 1;
+  sequence_lengths_ = model_->p_device_->Allocate<int32_t>(2);
+  for (bool capture : {false, true}) {
+    SCOPED_TRACE(capture);
+    params_->use_graph_capture = capture;
+    state_ = std::make_unique<PositionInputsTestState>(*params_, *model_);
+    auto inputs = CreatePositionInputs();
+    auto* qwen = dynamic_cast<Qwen2VLPositionInputs*>(inputs.get());
+    ASSERT_NE(qwen, nullptr);
+    auto grid = OrtValue::CreateTensor(model_->allocator_cpu_, std::array<int64_t, 2>{2, 3},
+                                       Ort::TypeToTensorType<int64_t>);
+    const std::array<int64_t, 6> dimensions{1, 2, 2, 1, 2, 2};
+    std::copy(dimensions.begin(), dimensions.end(), grid->GetTensorMutableData<int64_t>());
+    qwen->SetGridTensors(std::make_shared<Tensor>(std::move(grid)), nullptr, nullptr);
+    inputs->Add();
+    auto tokens = Tokens(std::array<int32_t, 6>{40, 41, 10, 40, 41, 10});
+    inputs->Update(tokens, 3, 3);
+    auto* positions = state_->GetInput("position_ids");
+    ASSERT_EQ(positions->GetTensorTypeAndShapeInfo()->GetShape(), (std::vector<int64_t>{3, 2, 3}));
+    for (int row = 0; row < 6; ++row)
+      for (int col = 0; col < 3; ++col)
+        EXPECT_EQ(positions->GetTensorData<int64_t>()[row * 3 + col], col);
+    auto next = Tokens(std::array<int32_t, 2>{10, 10});
+    inputs->Update(next, 4, 1);
+    positions = state_->GetInput("position_ids");
+    for (int row = 0; row < 6; ++row)
+      EXPECT_EQ(positions->GetTensorData<int64_t>()[row], 3);
+  }
+}
+
+TEST_F(StandardPositionInputsTest, BatchedDecodePreservesPromptPadding) {
+  Use3DPositionIds();
+  model_->config_->model.type = "qwen3_vl";
+  model_->config_->model.pad_token_id = 0;
+  params_->search.batch_size = 2;
+  params_->search.max_length = 8;
+  params_->max_graph_capture_length = 1;
+  sequence_lengths_ = model_->p_device_->Allocate<int32_t>(2);
+  for (bool capture : {false, true}) {
+    SCOPED_TRACE(capture);
+    params_->use_graph_capture = capture;
+    state_ = std::make_unique<PositionInputsTestState>(*params_, *model_);
+    auto inputs = CreatePositionInputs();
+    inputs->Add();
+    auto tokens = Tokens(std::array<int32_t, 6>{0, 10, 20, 30, 40, 0});
+    inputs->Update(tokens, 3, 3);
+    auto next = Tokens(std::array<int32_t, 2>{10, 30});
+    for (int length : {4, 5}) {
+      inputs->Update(next, length, 1);
+      auto* mask = state_->GetInput("attention_mask");
+      const auto shape = mask->GetTensorTypeAndShapeInfo()->GetShape();
+      ASSERT_EQ(shape, (std::vector<int64_t>{2, capture ? 8 : length}));
+      for (int row = 0; row < 2; ++row)
+        for (int col = 0; col < shape[1]; ++col)
+          EXPECT_EQ(mask->GetTensorData<int64_t>()[row * shape[1] + col],
+                    col < length && col != (row == 0 ? 0 : 2) ? 1 : 0);
+    }
+  }
+}
+
 TEST(Qwen2VLPositionInputsTest, RejectsNegativeGridDimensions) {
   const std::vector<int64_t> grid{1, -1, 2};
   const std::string message = CaptureThrowMessage([&] {
