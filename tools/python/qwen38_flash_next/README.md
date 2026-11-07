@@ -47,3 +47,23 @@ python tools/python/qwen38_flash_next/build_package.py \
   -x 2 -y 14 -z 32 --kl-mode dp23 \
   --out /home/tianlei/models/qwen_flash_next_custom_2_14_32
 ```
+
+---
+
+## 3. Exporting Zero-Copy GGUF Model Packages (`build_package_gguf.py`)
+
+`tools/python/qwen38_flash_next/build_package_gguf.py` exports `unsloth/Qwen3.8-Flash-Next-GGUF` quantization variants (`UD-IQ1_S`, `UD-IQ2_XS`, `UD-IQ3_XXS`) and the `IQ4_NL` n-gram (`engram`) GGUF directly to `qwen38_flash_graph` packages using `GatherPacked`, `MatMulPacked`, and `MoEPacked`, sharing dynamic cache surgery (`ensure_unified_dynamic_cache_model`), protocol boundary tokens, and config migration helpers with `build_package.py`:
+
+```bash
+python tools/python/qwen38_flash_next/build_package_gguf.py \
+  --gguf-root /data/tlwu/qwen_flash_next_ggufs \
+  --base-pkg /data/tlwu/qwen_flash_next_int4_int8_rc5_contrib_dflash2_qmoe_2b375_x02_y14_z32_dp23_b64 \
+  --out-root /data/tlwu \
+  --variants UD-IQ1_S,UD-IQ2_XS,UD-IQ3_XXS
+```
+
+| GGUF Variant | Total GPU Weights | 32K Peak VRAM (`num_blocks=142`, min `141`) | 64K Peak VRAM (`num_blocks=270`, min `269`) | 128K Peak VRAM (`num_blocks=525`) | 256K Peak VRAM (`num_blocks=1037`) | `runtime_profiles` Min VRAM (`gpu-32k` / `gpu-64k` / `gpu-128k` / `gpu-256k`) |
+|---|---:|---:|---:|---:|---:|---:|
+| **`UD-IQ1_S`** | `35.66 GiB` (`38.29 GB`) | `41.39 GiB` (`44.45 GB`) | `41.74 GiB` (`44.82 GB`) | `42.85 GiB` (`46.00 GB`) | `45.54 GiB` (`48.90 GB`) | `47 GB` / `48 GB` / `49 GB` / `52 GB` |
+| **`UD-IQ2_XS`** | `44.46 GiB` (`47.74 GB`) | `50.14 GiB` (`53.84 GB`) | `50.49 GiB` (`54.21 GB`) | `51.59 GiB` (`55.39 GB`) | `54.28 GiB` (`58.28 GB`) | `56 GB` / `57 GB` / `58 GB` / `61 GB` |
+| **`UD-IQ3_XXS`** | `51.73 GiB` (`55.55 GB`) | `57.44 GiB` (`61.68 GB`) | `57.79 GiB` (`62.05 GB`) | `58.89 GiB` (`63.24 GB`) | `61.59 GiB` (`66.13 GB`) | `64 GB` / `65 GB` / `66 GB` / `69 GB` |
