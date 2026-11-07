@@ -198,6 +198,8 @@ class Gemma4Model(Gemma3Model):
         self.layer_types = list(config.layer_types)
         self.sliding_head_dim = config.head_dim
         self.global_head_dim = config.global_head_dim
+        if self.ep == "cpu" and any(self.layer_head_dim(layer_id) % 8 != 0 for layer_id in range(self.num_layers)):
+            raise ValueError("CPU Gemma4 requires every attention head size to be divisible by 8.")
         self.sliding_num_kv_heads = config.num_key_value_heads
         self.global_num_kv_heads = config.num_global_key_value_heads
         self.attention_k_eq_v = getattr(config, "attention_k_eq_v", False)
@@ -296,10 +298,12 @@ class Gemma4Model(Gemma3Model):
         # cache as a zero-padded NoPE tail (see make_proportional_rope_caches), so
         # the op rotates the full head_dim with that pre-zeroed cache — matching
         # HF's proportional RoPE. The external RotaryEmbedding op needs position_ids.
-        super().make_attention(
-            layer_id, attention, root_input, position_ids=self.input_names["position_ids"], **kwargs
-        )
-        self.head_size, self.num_kv_heads, self.q_size, self.kv_size = original
+        try:
+            super().make_attention(
+                layer_id, attention, root_input, position_ids=self.input_names["position_ids"], **kwargs
+            )
+        finally:
+            self.head_size, self.num_kv_heads, self.q_size, self.kv_size = original
 
     def make_attention_input_proj(self, layer_id, attention, root_input, **kwargs):
         if self.attention_k_eq_v and not self.is_local(layer_id):

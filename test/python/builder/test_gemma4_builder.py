@@ -27,6 +27,7 @@ import types
 
 import numpy as np
 import onnx_ir as ir
+import pytest
 import torch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "src", "python", "py"))
@@ -118,6 +119,11 @@ class TestGemma4Model:
         """Gemma4 RMSNorm uses the weight directly (add_offset == 0)."""
         m = self._make_model()
         assert m.layernorm_attrs["add_offset"] == 0
+
+    @pytest.mark.parametrize(("head_dim", "global_head_dim"), [(16, 20), (12, 16)])
+    def test_cpu_rejects_unaligned_head_size_in_any_layer(self, head_dim, global_head_dim):
+        with pytest.raises(ValueError, match="every attention head size"):
+            self._make_model(head_dim=head_dim, global_head_dim=global_head_dim)
 
     def test_attention_scale_is_one(self):
         """Q/K are RMS-normed, so the attention scale is 1.0."""
