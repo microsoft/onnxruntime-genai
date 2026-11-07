@@ -161,6 +161,9 @@ parameters:
     - qwen3.5-2b
     - qwen3.5-4b
 
+variables:
+  skipNugetSecurityAnalysis: true
+
 stages:
 - template: stages/integration-stage.yml
   parameters:

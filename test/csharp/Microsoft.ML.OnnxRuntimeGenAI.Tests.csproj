@@ -12,8 +12,6 @@
     <LangVersion>latest</LangVersion>
     <AllowUnsafeBlocks>True</AllowUnsafeBlocks>
     <Configurations>Debug;RelWithDebInfo;Release</Configurations>
-    <RestoreAdditionalProjectSources>https://api.nuget.org/v3/index.json;https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json</RestoreAdditionalProjectSources>
-    <RestoreSources>$(RestoreAdditionalProjectSources);$(RestoreSources)</RestoreSources>
     <RootNamespace>Microsoft.ML.OnnxRuntimeGenAI.Tests</RootNamespace>
     <AssemblyName>Microsoft.ML.OnnxRuntimeGenAI.Tests</AssemblyName>
     <OrtPackageVersion>1.28.0-dev-20260610-0510-50c9510000</OrtPackageVersion>

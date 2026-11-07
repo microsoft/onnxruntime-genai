@@ -132,6 +132,9 @@ jobs:
   # 'version' stage), so no per-job version computation is needed here.
 
   # --- Feed isolation: NuGet restore → Lotus --------------------------------
+  # Packaging uses an authenticated, isolated feed for library dependencies and
+  # mobile workloads. GitHub Actions tests use the root source mapping instead;
+  # this job does not restore the test project or provision its dependencies.
   - task: NuGetAuthenticate@1
     displayName: 'Authenticate NuGet to Lotus feed'
 
@@ -149,9 +152,15 @@ jobs:
           <clear />
           <add key="Lotus" value="$lotusFeed" />
         </packageSources>
+        <packageSourceMapping>
+          <clear />
+          <packageSource key="Lotus">
+            <package pattern="*" />
+          </packageSource>
+        </packageSourceMapping>
       </configuration>
       "@ | Set-Content -Path $nugetConfig -Encoding UTF8
-    displayName: Create Lotus Config
+    displayName: 'Create Lotus NuGet config'
     workingDirectory: '$(Build.Repository.LocalPath)/src/csharp'
 
   - powershell: |
