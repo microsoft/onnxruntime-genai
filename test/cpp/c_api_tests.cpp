@@ -1668,15 +1668,29 @@ TEST(CAPITests, RealQwenEngineVideoOwnershipContinuationAndCancellation) {
   }
   const char* optimized_profile = std::getenv("ORTGENAI_ENGINE_VIDEO_OPTIMIZED");
   const bool optimized = optimized_profile && std::strcmp(optimized_profile, "1") == 0;
+  const char* profile = std::getenv("ORTGENAI_ENGINE_VIDEO_PROFILE");
+  const bool flash = profile && std::strcmp(profile, "flash-next") == 0;
+  ASSERT_TRUE(!profile || flash || std::strcmp(profile, "qwen-27b") == 0);
+  ASSERT_FALSE(flash && optimized) << "Flash video qualification requires eager target-only execution.";
   auto config = OgaConfig::Create(path);
-  config->Overlay(R"({
+  if (flash) {
+    config->Overlay(R"({
+      "engine":{"dynamic_batching":{"num_blocks":64,"max_batch_size":2,
+        "max_scheduled_tokens":6,"media_device_bytes":1048576}},
+      "search":{"chunk_size":6}
+    })");
+    config->SetProviderOption("cuda", "arena_extend_strategy", "kSameAsRequested");
+  } else {
+    config->Overlay(R"({
     "engine":{"dynamic_batching":{"num_blocks":64,"max_batch_size":4,
       "max_scheduled_tokens":512,"media_device_bytes":2097152}},
     "search":{"chunk_size":64}
   })");
+  }
   if (!optimized) config->Overlay(R"({"model":{"dflash2":{"filename":""}}})");
   config->SetProviderOption("cuda", "enable_cuda_graph", optimized ? "1" : "0");
   auto model = OgaModel::Create(*config);
+  ASSERT_EQ(std::string{model->GetType()}, flash ? "qwen4_exp" : "qwen3_5");
   auto engine = OgaEngine::Create(*model);
   auto tokenizer = OgaTokenizer::Create(*model);
   auto request_options = OgaRequestOptions::Create();

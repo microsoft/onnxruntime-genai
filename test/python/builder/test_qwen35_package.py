@@ -441,9 +441,25 @@ def qwen_video_processing_files(tmp_path):
     return builder, source, output
 
 
+@pytest.mark.parametrize("paged,excluded", [(True, True), (True, False), (False, True)])
+def test_qwen4_video_assets_require_explicit_packed_vision(qwen_video_processing_files, paged, excluded):
+    reference, source, output = qwen_video_processing_files
+    owner = load_builder_module("qwen3_8")
+    builder = owner.Qwen4ExpModel.__new__(owner.Qwen4ExpModel)
+    builder.hf_token = None
+    builder.text_only = False
+    builder.extra_options = {"use_paged_attention": paged, "exclude_embeds": excluded}
+    builder.config = SimpleNamespace(vision_config=reference.vision_config)
+    builder.decoder = SimpleNamespace(save_processing=lambda *args: None)
+    builder.save_processing(str(source), {}, str(output))
+    config = json.loads((output / "genai_config.json").read_text())
+    assert ("video_config_filename" in config["model"]["vision"]) == (paged and excluded)
+    assert (output / "video_processor_config.json").exists() == (paged and excluded)
+
+
 @pytest.mark.parametrize("remote", [False, True])
 @pytest.mark.parametrize("rescale_factor", [1 / 255, 1 / 128])
-def test_qwen35_video_assets_preserve_image_policy_and_source_revision(
+def test_qwen_video_assets_preserve_image_policy_and_source_revision(
     monkeypatch, qwen_video_processing_files, remote, rescale_factor
 ):
     builder, source, output = qwen_video_processing_files
@@ -458,10 +474,14 @@ def test_qwen35_video_assets_preserve_image_policy_and_source_revision(
         downloads.append((repository, filename, kwargs))
         return str(source / filename)
 
-    owner = load_builder_module("qwen3_5.model")
+    owner = load_builder_module("qwen3_8.vision")
     monkeypatch.setattr(owner, "hf_hub_download", download)
-    builder.save_video_processing(
-        "remote/qwen" if remote else str(source), {"revision": "pinned", "cache_dir": "cache"}, str(output)
+    owner.save_video_processor(
+        "remote/qwen" if remote else str(source),
+        {"revision": "pinned", "cache_dir": "cache"},
+        str(output),
+        builder.hf_token,
+        builder.vision_config,
     )
     assert downloads == (
         [("remote/qwen", "video_preprocessor_config.json", {"revision": "pinned", "cache_dir": "cache", "token": None})]
@@ -495,12 +515,13 @@ def test_qwen35_video_assets_preserve_image_policy_and_source_revision(
 @pytest.mark.parametrize(
     "failure", ["missing_asset", "temporal_factor", "missing_token", "rescale_factor", "disabled_rescale"]
 )
-def test_qwen35_video_assets_do_not_enable_an_absent_or_incompatible_contract(qwen_video_processing_files, failure):
+def test_qwen_video_assets_do_not_enable_an_absent_or_incompatible_contract(qwen_video_processing_files, failure):
     builder, source, output = qwen_video_processing_files
+    owner = load_builder_module("qwen3_8.vision")
     video_path = source / "video_preprocessor_config.json"
     if failure == "missing_asset":
         video_path.unlink()
-        builder.save_video_processing(str(source), {}, str(output))
+        owner.save_video_processor(str(source), {}, str(output), builder.hf_token, builder.vision_config)
     else:
         if failure in ("temporal_factor", "rescale_factor", "disabled_rescale"):
             metadata = json.loads(video_path.read_text())
@@ -517,7 +538,7 @@ def test_qwen35_video_assets_do_not_enable_an_absent_or_incompatible_contract(qw
             del config["model"]["video_token_id"]
             config_path.write_text(json.dumps(config))
         with pytest.raises(ValueError, match="Packed Qwen video requires"):
-            builder.save_video_processing(str(source), {}, str(output))
+            owner.save_video_processor(str(source), {}, str(output), builder.hf_token, builder.vision_config)
     config = json.loads((output / "genai_config.json").read_text())
     assert "video_config_filename" not in config["model"]["vision"]
     assert not (output / "video_processor_config.json").exists()

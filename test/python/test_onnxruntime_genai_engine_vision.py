@@ -387,7 +387,8 @@ def test_video_terminal_result_order_under_feature_pressure(video_model, first_r
     request.close()
 
 
-def test_video_prefix_identity_includes_order_and_timestamp_text(video_model):
+@pytest.mark.parametrize("change", ["timestamps", "frame_order"])
+def test_video_prefix_identity_includes_order_and_timestamp_text(video_model, change):
     model, _ = video_model
     engine, tokenizer = og.Engine(model), og.Tokenizer(model)
     notes = "These surrounding notes are unrelated to the video. " * 40
@@ -399,12 +400,16 @@ def test_video_prefix_identity_includes_order_and_timestamp_text(video_model):
     frames = np.empty((4, 64, 96, 3), dtype=np.uint8)
     frames[:2] = (255, 0, 0)
     frames[2:] = (0, 0, 255)
+    changed = (
+        (frames, [10.0, 11.0, 12.0, 13.0], "red")
+        if change == "timestamps"
+        else (frames[::-1].copy(), [0.0, 1.0, 2.0, 3.0], "blue")
+    )
     results = []
     for clip, timestamps, color in (
         (frames, [0.0, 1.0, 2.0, 3.0], "red"),
         (frames, [0.0, 1.0, 2.0, 3.0], "red"),
-        (frames, [10.0, 11.0, 12.0, 13.0], "red"),
-        (frames[::-1].copy(), [0.0, 1.0, 2.0, 3.0], "blue"),
+        changed,
     ):
         request = new_request(engine)
         options = og.TurnOptions(request)
@@ -419,8 +424,7 @@ def test_video_prefix_identity_includes_order_and_timestamp_text(video_model):
         results.append(finished[0][3])
         request.close()
     assert results[0] == 0
-    assert results[1] > results[2] > 0, "Changed timestamps must invalidate video-dependent prefix blocks"
-    assert results[1] > results[3] > 0, "Changed frame order must invalidate video-dependent prefix blocks"
+    assert results[1] > results[2] > 0, f"Changed {change} must invalidate video-dependent prefix blocks"
 
 
 def test_mixed_geometry_padding_is_rejected_before_host_budget_is_exceeded(vision_package, tmp_path):

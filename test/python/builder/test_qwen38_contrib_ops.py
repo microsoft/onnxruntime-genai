@@ -1525,7 +1525,9 @@ def test_qwen4_exp_engram_model_extracts_cpu_lookup_graph(tmp_path, ple_layer_id
 @pytest.mark.parametrize("include_mtp", [False, True])
 @pytest.mark.parametrize("native_fp8", [False, True])
 @pytest.mark.parametrize("paged", [False, True])
-def test_qwen4_exp_only_standalone_model_stores_engram_table(tmp_path, monkeypatch, text_only, include_mtp, native_fp8, paged):
+def test_qwen4_exp_only_standalone_model_stores_engram_table(
+    tmp_path, monkeypatch, text_only, include_mtp, native_fp8, paged
+):
     embedding = SimpleNamespace(
         layer_multipliers=torch.tensor([0, 1, 2], dtype=torch.int64),
         ngram_heads_vocab_sizes=torch.tensor([7, 7, 7, 7], dtype=torch.int64),
@@ -1591,8 +1593,7 @@ def test_qwen4_exp_only_standalone_model_stores_engram_table(tmp_path, monkeypat
     assert (tmp_path / "engram.onnx.data").is_file()
     filenames = ("engram.onnx", "model.onnx") + (("mtp.onnx",) if include_mtp else ())
     exported = [onnx.load(tmp_path / filename, load_external_data=False) for filename in filenames]
-    assert any(node.op_type == "NGramHashMapping"
-               for node in exported[0].graph.node)
+    assert any(node.op_type == "NGramHashMapping" for node in exported[0].graph.node)
     tables = [value for value in exported[0].graph.initializer if value.name == table_name]
     assert len(tables) == 1
     assert next(entry.value for entry in tables[0].external_data if entry.key == "location") == "engram.onnx.data"
@@ -1681,18 +1682,20 @@ def tiny_qwen4_config():
     )
 
 
-def test_qwen4_exp_packed_vision_final_package_preserves_cpu_lookup(tmp_path, monkeypatch):
+@pytest.mark.parametrize("video", [False, True])
+def test_qwen4_exp_packed_vision_final_package_preserves_cpu_lookup(tmp_path, monkeypatch, video):
     from tokenizers import Tokenizer, models, pre_tokenizers  # noqa: PLC0415
     from transformers import PreTrainedTokenizerFast  # noqa: PLC0415
 
     source = pytest.importorskip("transformers.models.qwen4_exp.modeling_qwen4_exp")
     config = tiny_qwen4_config()
+    config.video_token_id = 124
     torch.manual_seed(7)
     weights = source.Qwen4ExpForConditionalGeneration(config).eval()
     source_path = tmp_path / "source"
     weights.save_pretrained(str(source_path))
-    vocab = {f"token_{index}": index for index in range(125)}
-    vocab.update({"<|image_pad|>": 125, "<|vision_start|>": 126, "<|vision_end|>": 127})
+    vocab = {f"token_{index}": index for index in range(124)}
+    vocab.update({"<|video_pad|>": 124, "<|image_pad|>": 125, "<|vision_start|>": 126, "<|vision_end|>": 127})
     tokenizer = Tokenizer(models.BPE(vocab, [], unk_token="token_0"))
     tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
     tokenizer = PreTrainedTokenizerFast(
@@ -1700,7 +1703,7 @@ def test_qwen4_exp_packed_vision_final_package_preserves_cpu_lookup(tmp_path, mo
         unk_token="token_0",
         bos_token="token_1",
         eos_token="token_2",
-        additional_special_tokens=["<|image_pad|>", "<|vision_start|>", "<|vision_end|>"],
+        additional_special_tokens=["<|video_pad|>", "<|image_pad|>", "<|vision_start|>", "<|vision_end|>"],
     )
     tokenizer.save_pretrained(str(source_path))
     (source_path / "preprocessor_config.json").write_text(
@@ -1715,6 +1718,10 @@ def test_qwen4_exp_packed_vision_final_package_preserves_cpu_lookup(tmp_path, mo
             }
         )
     )
+    if video:
+        video_metadata = json.loads((source_path / "preprocessor_config.json").read_text())
+        video_metadata["video_processor_type"] = "Qwen3VLVideoProcessor"
+        (source_path / "video_preprocessor_config.json").write_text(json.dumps(video_metadata))
     builder = Qwen4ExpModel(
         config,
         ir.DataType.FLOAT16,
@@ -1726,8 +1733,8 @@ def test_qwen4_exp_packed_vision_final_package_preserves_cpu_lookup(tmp_path, mo
     monkeypatch.setattr(builder.decoder, "load_weights", lambda path: weights)
     builder.make_model(str(source_path))
     builder.save_model(str(tmp_path))
-    builder.save_processing(str(source_path), {}, str(tmp_path))
     builder.make_genai_config(config, {}, str(tmp_path))
+    builder.save_processing(str(source_path), {}, str(tmp_path))
 
     lookup = ort.InferenceSession(str(tmp_path / "embedding.onnx"), providers=["CPUExecutionProvider"])
     ids = np.array([3, 7, 125, 9], dtype=np.int64)
@@ -1739,6 +1746,17 @@ def test_qwen4_exp_packed_vision_final_package_preserves_cpu_lookup(tmp_path, mo
     assert metadata["embedding"]["inputs"] == {"input_ids": "input_ids"}
     assert metadata["embedding"]["session_options"]["intra_op_num_threads"] == 1
     assert metadata["vision"]["patch_size"] == 2
+    assert metadata["video_token_id"] == config.video_token_id
+    assert ("video_config_filename" in metadata["vision"]) == video
+    if video:
+        processor = json.loads((tmp_path / metadata["vision"]["video_config_filename"]).read_text())["processor"]
+        assert [op["operation"]["type"] for op in processor["transforms"]] == [
+            "Resize",
+            "Rescale",
+            "Normalize",
+            "PatchImage",
+        ]
+        assert processor["transforms"][2]["operation"]["attrs"]["qwen3_vl"] == 0
     for filename in ("embedding.onnx", "vision.onnx", "engram.onnx", "text.onnx"):
         component = onnx.load(tmp_path / filename, load_external_data=False)
         assert all(
