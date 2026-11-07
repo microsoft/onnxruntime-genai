@@ -2689,6 +2689,7 @@ TEST(Qwen38MoeOffloadTest, NonOffloadedTargetsKeepTheirConfiguredWarmupGraphIds)
 }
 
 TEST(Qwen38MoeOffloadTest, OffloadedTargetDirectionsCaptureOnFirstWarmupUseEagerOnSubsequentWarmupsAndRestoreGraphIdOnLiveRuns) {
+  static_cast<void>(GetOrtEnv());
   const auto settings = ParseQwen38MoeOffloadSettings({{"session.moe.offload.mode", "required"}});
   auto offload_warmup = CreateQwen38OffloadWarmupRunOptions(settings);
   ASSERT_NE(offload_warmup, nullptr);
