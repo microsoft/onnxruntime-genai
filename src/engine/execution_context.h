@@ -47,6 +47,8 @@ struct ExecutionContext {
   size_t extra_binding_layout_key{};
   std::unique_ptr<OrtRunOptions> run_options;
   size_t block_table_columns{};
+  // Captured launch bound; packed tensors retain their exact, unpadded row count.
+  size_t graph_query_len_bound{};
 };
 
 }  // namespace Generators

@@ -32,14 +32,14 @@ void ValidatePackedHiddenStatesInputShape(
     std::span<const int64_t> model_shape);
 
 AttentionMetadataValues GetAttentionMetadataForPlan(const StepPlan& plan);
-// `max_query_len` is the number of new tokens every sequence contributes to steps served by this
-// graph, which is one for plain decode and the verified block for speculative decode.
+// `max_query_len` bounds the new tokens any sequence contributes to steps served by this graph.
 AttentionMetadataValues GetAttentionMetadataForGraph(size_t max_query_len, size_t block_table_columns,
                                                      size_t block_size);
 AttentionMetadataValues GetAttentionMetadataForGraphStep(
     const AttentionMetadataValues& exact_metadata, size_t block_table_columns, size_t block_size);
 AttentionMetadataValues GetAttentionMetadataForGraphStep(
     const StepPlan& plan, size_t block_table_columns, size_t block_size);
+size_t GetGraphQueryTokenBound(size_t query_tokens, size_t capacity);
 std::array<int32_t, kAttentionMetadataElementCount> PackAttentionMetadata(
     const AttentionMetadataValues& metadata);
 std::array<int32_t, kSparseAttentionMetadataElementCount> PackSparseAttentionMetadata(
@@ -73,13 +73,15 @@ size_t VarlenGraphBufferBytes(const Model& model, size_t position_planes,
 // the device addresses of the fixed decoder state from its binding layout. `state_binding_key` is
 // zero for models without fixed decoder state. Session, IndexShare mode, and the owner's persistent
 // extra-binding layout each occupy their own exact component, never a combined pointer hash.
+// Variable-width steps additionally key the exact, unpadded packed token count.
 std::optional<GraphAnnotationIds::Key> DecodeGraphKey(size_t batch_size, size_t tokens_per_request,
                                                       size_t block_table_columns,
                                                       size_t state_binding_key,
                                                       size_t state_binding_domain = 0,
                                                       const OrtSession* decoder_session = nullptr,
                                                       bool indexshare_decode = false,
-                                                      size_t extra_binding_layout_key = 0);
+                                                      size_t extra_binding_layout_key = 0,
+                                                      size_t packed_token_count = 0);
 
 /**
  * @struct VarlenGraphBuffers
@@ -115,6 +117,13 @@ struct VarlenGraphBuffers {
   bool Fits(size_t batch_size, size_t tokens_per_request) const {
     return batch_size <= max_batch_size && tokens_per_request <= max_query_tokens &&
            batch_size * tokens_per_request <= max_token_rows;
+  }
+
+  bool FitsPacked(size_t batch_size, size_t query_bound, size_t token_count) const {
+    return batch_size != 0 && batch_size <= max_batch_size &&
+           query_bound != 0 && query_bound <= max_query_tokens &&
+           token_count >= batch_size && token_count <= max_token_rows &&
+           token_count <= batch_size * query_bound;
   }
 
   std::unique_ptr<Tensor> input_ids;
@@ -203,6 +212,7 @@ struct VarlenDecoderIO : DecoderIO {
   VarlenGraphBuffers* graph_buffers_{};
   const StepPlan* plan_{};
   size_t block_table_columns_{};
+  size_t graph_query_len_bound_{};
   // Borrowed spans/pointers whose backing storage is owned through synchronous model execution.
   DeviceSpan<int32_t> input_ids_;
   OrtValue* hidden_states_input_{};

@@ -40,6 +40,7 @@ struct SimpleDecoder : public Decoder {
   std::shared_ptr<DecoderOnly_Model> model_;
   std::shared_ptr<CacheManager> cache_manager_;
   bool has_fixed_state_groups_{};
+  bool varlen_graph_enabled_{};
   size_t position_planes_{};
   GraphFallback last_fallback_{GraphFallback::kCaptured};
   // Allocated only when the model asked for CUDA graphs. Owning it here, rather than in the per-step

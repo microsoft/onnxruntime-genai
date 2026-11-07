@@ -3,17 +3,23 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <limits>
+#include <string>
 #include <vector>
 
 #include <gtest/gtest.h>
 
 #include "engine/decoders/varlen_decoder_io.h"
+#include "engine/decoders/simple_decoder.h"
 #include "engine/paged_key_value_cache.h"
 #include "engine/step_plan.h"
 #include "engine_test_doubles.h"
 #include "engine_test_helpers.h"
+#include "models/decoder_only.h"
 #include "models/io/rotary_position_history.h"
+#include "models/preprocessing/genai_tokenizer.h"
+#include "scoped-environment-variable.h"
 
 namespace Generators {
 namespace test {
@@ -187,6 +193,22 @@ TEST(VarlenDecoderIOTest, PacksThreePlanePositionsInScheduledRequestOrder) {
     for (size_t plane = 0; plane < 3; ++plane) {
       EXPECT_TRUE(std::equal(expected.begin(), expected.end(), data + plane * expected.size()));
     }
+    VarlenGraphBuffers buffers{*model, 3, 4};
+    context.block_table_columns = 8;
+    context.graph_query_len_bound = 4;
+    VarlenDecoderIO captured_io{model, scheduled, cache, &context, &buffers, 3};
+    EXPECT_EQ(buffers.input_ids->GetShape(), (std::vector<int64_t>{5}));
+    EXPECT_EQ(buffers.cumulative_sequence_lengths->GetShape(), (std::vector<int64_t>{3}));
+    EXPECT_EQ(buffers.logits->GetShape()[0], 5);
+    const auto cumulative = buffers.cumulative_sequence_lengths->GetDeviceSpan<int32_t>().CopyDeviceToCpu();
+    EXPECT_EQ(cumulative[0], 0);
+    EXPECT_EQ(cumulative[1], reversed ? 3 : 2);
+    EXPECT_EQ(cumulative[2], 5);
+    const auto attention = std::find_if(
+        captured_io.input_names_.begin(), captured_io.input_names_.end(),
+        [&](const char* name) { return model->config_->model.decoder.inputs.attention_metadata == name; });
+    ASSERT_NE(attention, captured_io.input_names_.end());
+    EXPECT_EQ(captured_io.inputs_[attention - captured_io.input_names_.begin()]->GetTensorData<int32_t>()[0], 4);
   }
 }
 
@@ -482,6 +504,166 @@ TEST(VarlenDecoderIOTest, GraphBuffersRejectStepsWiderThanTheyWereSizedFor) {
   // A step the buffers cannot hold runs eagerly rather than overflowing a static view mid-step.
   EXPECT_FALSE(buffers.Fits(max_batch_size + 1, 1));
   EXPECT_FALSE(buffers.Fits(1, kMaxDraftTokensPerStep + 2));
+}
+
+TEST(VarlenDecoderIOTest, VariableWidthCaptureUsesExactPackedRowsAndBucketedQueryBound) {
+  auto model = std::dynamic_pointer_cast<DecoderOnly_Model>(LoadSyntheticPagedPerTokenModel());
+  ASSERT_TRUE(model);
+  model->config_->engine.dynamic_batching->max_batch_size = 2;
+  model->config_->engine.dynamic_batching->max_scheduled_tokens = 5;
+  VarlenGraphBuffers buffers{*model, PackedPositionIdPlanes(*model), 4};
+  // A 1+4 token batch fits even though padding both requests to width four would not.
+  EXPECT_TRUE(buffers.FitsPacked(2, 4, 5));
+  EXPECT_FALSE(buffers.Fits(2, 4));
+  EXPECT_FALSE(buffers.FitsPacked(2, 4, 6));
+  EXPECT_FALSE(buffers.FitsPacked(2, 4, 1));
+  EXPECT_EQ(GetGraphQueryTokenBound(3, 7), 4u);
+  EXPECT_EQ(GetGraphQueryTokenBound(5, 7), 7u);
+  EXPECT_EQ(GetGraphQueryTokenBound(0, 7), 0u);
+  EXPECT_EQ(GetGraphQueryTokenBound(8, 7), 0u);
+}
+
+TEST(VarlenDecoderIOTest, VariableWidthGraphKeysSeparatePackedGeometryAndQueryBounds) {
+  GraphAnnotationIds ids;
+  const auto key = [&](size_t query_bound, size_t tokens) {
+    return *DecodeGraphKey(2, query_bound, 8, 0, 0, nullptr, false, 0, tokens);
+  };
+  const int mixed = ids.Id(key(4, 5));
+  EXPECT_EQ(ids.Id(key(4, 5)), mixed);
+  EXPECT_NE(ids.Id(key(4, 6)), mixed);
+  EXPECT_NE(ids.Id(key(8, 5)), mixed);
+  EXPECT_NE(ids.Id(*DecodeGraphKey(2, 4, 8, 0)), mixed);
+}
+
+TEST(VarlenGraphReplayTest, ChangingWidthsPreserveTokensAndCaptureGeometry) {
+  const char* model_path = std::getenv("GENAI_VARLEN_GRAPH_MODEL");
+  if (!model_path || !*model_path)
+    GTEST_SKIP() << "Set GENAI_VARLEN_GRAPH_MODEL to a compatible CUDA paged model.";
+  const std::string model_directory{model_path};
+
+  struct ReplayStep {
+    std::vector<size_t> widths;
+    GraphAnnotationIds::Key key;
+  };
+  struct ObservingExecutor : ModelExecutor {
+    ObservingExecutor(std::unique_ptr<ModelExecutor> executor, const OrtSession* session,
+                      std::vector<ReplayStep>& steps)
+        : executor_{std::move(executor)}, session_{session}, steps_{steps} {}
+
+    bool SupportsDraftVerification() const override {
+      return executor_->SupportsDraftVerification();
+    }
+
+    void Decode(ScheduledRequests& requests, ExecutionContext& context) override {
+      executor_->Decode(requests, context);
+      if (context.graph_query_len_bound == 0 || !context.plan ||
+          context.plan->requests.size() != 2 || context.plan->token_count != 6)
+        return;
+      EXPECT_EQ(context.graph_query_len_bound, 4u);
+      const auto key = SimpleDecoder::GraphKeyForContext(
+          2, context.graph_query_len_bound, context, session_);
+      ASSERT_TRUE(key);
+      ReplayStep step{{}, *key};
+      for (const auto& entry : context.plan->requests)
+        step.widths.push_back(entry.unprocessed_token_count);
+      steps_.push_back(std::move(step));
+    }
+
+    std::unique_ptr<ModelExecutor> executor_;
+    const OrtSession* session_;
+    std::vector<ReplayStep>& steps_;
+  };
+
+  using Tokens = std::array<std::vector<int32_t>, 2>;
+  std::vector<ReplayStep> steps;
+  const auto run = [&](bool enabled, const Tokens* oracle) {
+    ScopedEnvironmentVariable flag{"ORTGENAI_ENGINE_VARLEN_GRAPH", enabled ? "1" : "0"};
+    auto config = CreateConfig(GetOrtEnv(), model_directory.c_str());
+    config->speculative.max_draft_tokens = 3;
+    if (!config->engine.dynamic_batching)
+      throw std::runtime_error("Replay test requires an ordinary paged Engine model.");
+    config->engine.dynamic_batching->max_batch_size = 2;
+    config->engine.dynamic_batching->max_scheduled_tokens = 8;
+    config->engine.dynamic_batching->num_blocks = 64;
+    config->engine.dynamic_batching->prefix_caching = false;
+    SetProviderOption(*config, "cuda", "enable_cuda_graph", "1");
+    auto model = std::dynamic_pointer_cast<DecoderOnly_Model>(
+        CreateModel(GetOrtEnv(), std::move(config)));
+    if (!model)
+      throw std::runtime_error("Replay test requires a decoder-only model.");
+    if (model->p_device_->GetType() != DeviceType::CUDA)
+      throw std::runtime_error("Replay test requires CUDA execution.");
+    auto dependencies = Engine::CreateDependencies(model);
+    dependencies.model_executor = std::make_unique<ObservingExecutor>(
+        std::move(dependencies.model_executor), model->session_decoder_.get(), steps);
+    auto engine = std::make_shared<Engine>(model, std::move(dependencies));
+    Tokenizer tokenizer{*model->config_};
+    const std::array<const char*, 2> prompts{
+        "Write a Python function that merges sorted integer lists without modifying either input.",
+        "Explain binary search and its time complexity."};
+    std::array<std::shared_ptr<Request>, 2> requests;
+    TurnOptions turn;
+    turn.do_sample = false;
+    turn.min_generated_tokens = 64;
+    turn.max_generated_tokens = 64;
+    for (size_t row = 0; row < requests.size(); ++row)
+      requests[row] = CreateRequestWithPrompt(engine, tokenizer.Encode(prompts[row]), turn);
+    Tokens tokens;
+    size_t draft_round = 0;
+    while (engine->HasPendingRequests()) {
+      if (oracle && requests[0]->status_ == RequestStatus::Active &&
+          requests[1]->status_ == RequestStatus::Active &&
+          !requests[0]->IsPrefill() && !requests[1]->IsPrefill()) {
+        const std::array<size_t, 2> widths = draft_round++ % 2 == 0
+                                                 ? std::array<size_t, 2>{2, 4}
+                                                 : std::array<size_t, 2>{3, 3};
+        for (size_t row = 0; row < requests.size(); ++row) {
+          const size_t offset = tokens[row].size();
+          if (offset >= (*oracle)[row].size())
+            throw std::runtime_error("Replay test exhausted its greedy reference.");
+          const size_t count = std::min(widths[row] - 1, (*oracle)[row].size() - offset - 1);
+          if (count != 0)
+            requests[row]->SetDraftTokens(std::span<const int32_t>{(*oracle)[row]}.subspan(offset, count));
+        }
+      }
+      std::array<EngineEvent, 8> events;
+      const size_t count = engine->Run(events);
+      for (size_t index = 0; index < count; ++index) {
+        const auto& event = events[index];
+        if (event.flags & EngineEventFlagFailed)
+          throw std::runtime_error("Replay test request failed.");
+        if (event.flags & EngineEventFlagToken) {
+          const auto request = std::find(requests.begin(), requests.end(), event.request);
+          if (request == requests.end())
+            throw std::runtime_error("Replay test received an unknown request.");
+          tokens[request - requests.begin()].push_back(event.token);
+        }
+      }
+    }
+    for (const auto& request : requests)
+      engine->CloseRequest(request);
+    return tokens;
+  };
+  const auto oracle = run(false, nullptr);
+  for (const auto& tokens : oracle)
+    ASSERT_EQ(tokens.size(), 64u);
+  EXPECT_EQ(run(false, &oracle), oracle);
+  steps.clear();
+  EXPECT_EQ(run(true, &oracle), oracle);
+  ASSERT_GE(steps.size(), 8u);
+  size_t mixed_steps = 0;
+  size_t uniform_steps = 0;
+  for (const auto& step : steps) {
+    EXPECT_EQ(step.key, steps.front().key);
+    if (step.widths == std::vector<size_t>{2, 4})
+      ++mixed_steps;
+    else if (step.widths == std::vector<size_t>{3, 3})
+      ++uniform_steps;
+    else
+      ADD_FAILURE() << "Unexpected captured query distribution.";
+  }
+  EXPECT_GE(mixed_steps, 3u);
+  EXPECT_GE(uniform_steps, 3u);
 }
 
 TEST(VarlenDecoderIOTest, GraphBuffersRejectInvalidPackedRowCounts) {
