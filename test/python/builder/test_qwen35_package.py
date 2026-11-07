@@ -404,6 +404,118 @@ def test_qwen35_processor_download_honors_source_revision(monkeypatch, tmp_path)
     ]
 
 
+@pytest.fixture
+def qwen_video_processing_files(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    output = tmp_path / "output"
+    output.mkdir()
+    metadata = {
+        "size": {"shortest_edge": 4096, "longest_edge": 25165824},
+        "patch_size": 16,
+        "merge_size": 2,
+        "temporal_patch_size": 2,
+        "image_mean": [0.5, 0.5, 0.5],
+        "image_std": [0.5, 0.5, 0.5],
+        "video_processor_type": "Qwen3VLVideoProcessor",
+    }
+    (source / "video_preprocessor_config.json").write_text(json.dumps(metadata))
+    image_metadata = dict(metadata, size={"shortest_edge": 65536, "longest_edge": 1048576})
+    (source / "preprocessor_config.json").write_text(json.dumps(image_metadata))
+    owner = load_builder_module("qwen3_5")
+    vision = load_builder_module("qwen3_8.vision")
+    vision.save_image_processor(str(source), {}, str(output), None)
+    (output / "genai_config.json").write_text(
+        json.dumps({"model": {"video_token_id": 151656, "vision": {"filename": "vision.onnx"}}})
+    )
+    builder = owner.Qwen35Model.__new__(owner.Qwen35Model)
+    builder.hf_token = None
+    builder.vision_config = SimpleNamespace(patch_size=16, spatial_merge_size=2)
+    return builder, source, output
+
+
+@pytest.mark.parametrize("remote", [False, True])
+@pytest.mark.parametrize("rescale_factor", [1 / 255, 1 / 128])
+def test_qwen35_video_assets_preserve_image_policy_and_source_revision(
+    monkeypatch, qwen_video_processing_files, remote, rescale_factor
+):
+    builder, source, output = qwen_video_processing_files
+    source_video = source / "video_preprocessor_config.json"
+    metadata = json.loads(source_video.read_text())
+    metadata["rescale_factor"] = rescale_factor
+    source_video.write_text(json.dumps(metadata))
+    original_image = (output / "processor_config.json").read_bytes()
+    downloads = []
+
+    def download(repository, filename, **kwargs):
+        downloads.append((repository, filename, kwargs))
+        return str(source / filename)
+
+    owner = load_builder_module("qwen3_5.model")
+    monkeypatch.setattr(owner, "hf_hub_download", download)
+    builder.save_video_processing(
+        "remote/qwen" if remote else str(source), {"revision": "pinned", "cache_dir": "cache"}, str(output)
+    )
+    assert downloads == (
+        [("remote/qwen", "video_preprocessor_config.json", {"revision": "pinned", "cache_dir": "cache", "token": None})]
+        if remote
+        else []
+    )
+    assert (output / "processor_config.json").read_bytes() == original_image
+    config = json.loads((output / "genai_config.json").read_text())
+    filename = config["model"]["vision"]["video_config_filename"]
+    video = json.loads((output / filename).read_text())["processor"]
+    operations = video["transforms"]
+    assert [op["operation"]["type"] for op in operations] == ["Resize", "Rescale", "Normalize", "PatchImage"]
+    resize = operations[0]["operation"]["attrs"]
+    assert (resize["min_pixels"], resize["max_pixels"]) == (4096, 25165824)
+    assert (resize["height"], resize["width"], resize["smart_resize"], resize["coefficient_type"]) == (
+        32,
+        32,
+        0,
+        "int16",
+    )
+    assert video["max_video_tokens"] == 768
+    assert operations[1]["operation"]["attrs"]["rescale_factor"] == rescale_factor
+    assert operations[2]["operation"]["attrs"] == {
+        "mean": [0.5, 0.5, 0.5],
+        "std": [0.5, 0.5, 0.5],
+        "qwen3_vl": 0,
+    }
+    assert config["model"]["video_token_id"] == 151656
+
+
+@pytest.mark.parametrize(
+    "failure", ["missing_asset", "temporal_factor", "missing_token", "rescale_factor", "disabled_rescale"]
+)
+def test_qwen35_video_assets_do_not_enable_an_absent_or_incompatible_contract(qwen_video_processing_files, failure):
+    builder, source, output = qwen_video_processing_files
+    video_path = source / "video_preprocessor_config.json"
+    if failure == "missing_asset":
+        video_path.unlink()
+        builder.save_video_processing(str(source), {}, str(output))
+    else:
+        if failure in ("temporal_factor", "rescale_factor", "disabled_rescale"):
+            metadata = json.loads(video_path.read_text())
+            if failure == "temporal_factor":
+                metadata["temporal_patch_size"] = 1
+            elif failure == "rescale_factor":
+                metadata["rescale_factor"] = float("nan")
+            else:
+                metadata["do_rescale"] = False
+            video_path.write_text(json.dumps(metadata))
+        else:
+            config_path = output / "genai_config.json"
+            config = json.loads(config_path.read_text())
+            del config["model"]["video_token_id"]
+            config_path.write_text(json.dumps(config))
+        with pytest.raises(ValueError, match="Packed Qwen video requires"):
+            builder.save_video_processing(str(source), {}, str(output))
+    config = json.loads((output / "genai_config.json").read_text())
+    assert "video_config_filename" not in config["model"]["vision"]
+    assert not (output / "video_processor_config.json").exists()
+
+
 @pytest.mark.parametrize("component", ["visual", "language_model"])
 def test_qwen35_adapter_does_not_silently_drop_visual_weights(monkeypatch, tmp_path, component):
     pytest.importorskip("peft")

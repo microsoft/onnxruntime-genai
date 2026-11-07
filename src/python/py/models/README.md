@@ -432,6 +432,8 @@ This package uses the Engine prompt/images overload, not Generator's merge-embed
 
 Packed vision with MTP is not supported: use `exclude_mtp=true` or select a block drafter. Text-only MTP is unchanged. Vision-targeted adapters must first be merged into the source checkpoint; export rejects them instead of silently omitting their weights. Text-only adapters remain supported, and the vision loader accepts safetensors and PyTorch checkpoints, including sharded checkpoints.
 
+When a packed Qwen checkpoint supplies the compatible `video_preprocessor_config.json`, the composite also writes `video_processor_config.json` and binds it through optional `model.vision.video_config_filename`. This preserves the separate image processor and records the source video pixel policy, real temporal packing and tensor-resize coefficient mode. Missing video assets leave the image-only package unchanged; incompatible temporal metadata is rejected. The asset binding alone does not establish Engine video execution or full-model qualification.
+
 For the Qwen3.8-27B reference with seven-token DFlash2 verification, preserve the hybrid rollback capacity as well as the runtime draft limit:
 
 ```bash

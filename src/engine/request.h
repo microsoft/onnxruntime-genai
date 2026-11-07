@@ -187,7 +187,8 @@ struct Request : std::enable_shared_from_this<Request>,
   uint64_t BeginTurn(
       std::span<const int32_t> tokens,
       const TurnOptions& options);
-  uint64_t BeginTurn(const std::string& prompt, const TurnOptions& options, const Images* images);
+  uint64_t BeginTurn(const std::string& prompt, const TurnOptions& options, const Images* images,
+                     const Videos* videos = nullptr);
   // Rewinds a completed Request to the sequence boundary before the identified Turn began.
   // Turn IDs are never reused; the next BeginTurn replays the retained prefix.
   void RewindToStartOfTurn(uint64_t turn_id);

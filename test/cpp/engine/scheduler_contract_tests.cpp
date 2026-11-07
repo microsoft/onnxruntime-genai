@@ -173,6 +173,34 @@ TEST_F(SchedulerContractTest, PendingImageWaitsForRunnableDecodeToDrain) {
   EXPECT_EQ(image_request->ProcessedSequenceLength(), 0);
 }
 
+TEST_F(SchedulerContractTest, FeatureResidencyDoesNotChangeThePrefillBoundary) {
+  for (const bool features_ready : {false, true}) {
+    for (const size_t first_media_row : {1u, 2u}) {
+      auto cache = std::make_shared<RecordingCacheManager>(model_, 8);
+      DynamicBatchScheduler scheduler(model_, cache);
+      auto request = Assigned(10);
+      std::vector<MediaSpan> media;
+      for (size_t row = first_media_row; row < 3; ++row) {
+        auto item = std::make_shared<MediaItem>();
+        item->rows = 1;
+        if (features_ready) {
+          item->features = std::make_shared<Tensor>(GetDeviceInterface(DeviceType::CPU), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+        }
+        media.push_back({row, item});
+      }
+      request->ReserveMedia(media.size());
+      request->AppendMedia(media);
+      scheduler.AddRequest(request);
+      StepPlan plan;
+      ASSERT_TRUE(scheduler.PlanStep(plan).executable);
+      ASSERT_EQ(plan.requests.size(), 1u);
+      EXPECT_EQ(plan.token_count, first_media_row);
+      EXPECT_EQ(plan.requests[0].unprocessed_token_count, first_media_row);
+      EXPECT_EQ(request->ProcessedSequenceLength(), 0);
+    }
+  }
+}
+
 TEST_F(SchedulerContractTest, PrefillStopsBeforeTheNextMissingImage) {
   for (const auto chunk : {std::optional<size_t>{}, std::optional<size_t>{0}, std::optional<size_t>{64}}) {
     for (const bool prefix_caching : {false, true}) {

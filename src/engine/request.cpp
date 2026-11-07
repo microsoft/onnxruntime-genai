@@ -490,10 +490,11 @@ uint64_t Request::BeginTurn(
   return engine->BeginTurn(shared_from_this(), tokens, options);
 }
 
-uint64_t Request::BeginTurn(const std::string& prompt, const TurnOptions& options, const Images* images) {
+uint64_t Request::BeginTurn(const std::string& prompt, const TurnOptions& options, const Images* images,
+                            const Videos* videos) {
   auto engine = engine_.lock();
   if (!engine) throw std::runtime_error("Cannot begin a turn after the request's engine has been destroyed.");
-  return engine->BeginTurn(shared_from_this(), prompt, options, images);
+  return engine->BeginTurn(shared_from_this(), prompt, options, images, videos);
 }
 
 void Request::ReserveMedia(size_t count) {

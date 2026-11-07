@@ -73,6 +73,7 @@ typedef struct OgaTokenizer OgaTokenizer;
 typedef struct OgaTokenizerStream OgaTokenizerStream;
 typedef struct OgaTensor OgaTensor;
 typedef struct OgaImages OgaImages;
+typedef struct OgaVideos OgaVideos;
 typedef struct OgaNamedTensors OgaNamedTensors;
 typedef struct OgaMultiModalProcessor OgaMultiModalProcessor;
 typedef struct OgaAudios OgaAudios;
@@ -317,6 +318,116 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaLoadImages(const OgaStringArray* image_pat
 OGA_EXPORT OgaResult* OGA_API_CALL OgaLoadImagesFromBuffers(const void** image_data, const size_t* image_data_sizes, size_t count, OgaImages** images);
 
 OGA_EXPORT void OGA_API_CALL OgaDestroyImages(OgaImages* images);
+
+/** An interleaved RGB8 frame with positive row stride (channel/pixel strides 1/3).
+ * data_size covers the readable span through the final row, including row padding.
+ * Times are finite, nonnegative, nondecreasing seconds on the original presentation timeline.
+ * Buffers must remain readable and immutable during synchronous construction.
+ */
+typedef struct {
+  const void* data;
+  size_t data_size;
+  int64_t width;
+  int64_t height;
+  size_t row_stride;
+  double timestamp_seconds;
+} OgaVideoFrame;
+
+typedef struct {
+  const OgaVideoFrame* frames;
+  size_t count;
+} OgaVideoClip;
+
+typedef struct {
+  size_t struct_size;
+  size_t max_clips;
+  size_t max_frames;
+  size_t max_bytes;
+  int64_t max_dimension;
+} OgaVideoFrameLimits;
+
+typedef enum {
+  OgaVideoSamplingFps = 0,
+  OgaVideoSamplingCount = 1,
+  OgaVideoSamplingTimes = 2
+} OgaVideoSampling;
+
+typedef struct {
+  size_t struct_size;
+  OgaVideoSampling sampling;
+  double sampling_fps;
+  size_t frame_count;
+  const double* target_times;
+  size_t target_count;
+  double start_seconds;
+  double end_seconds;
+  int has_end;
+} OgaVideoLoadOptions;
+
+typedef struct {
+  const char* path;
+  OgaVideoLoadOptions options;
+} OgaVideoFile;
+
+typedef struct {
+  size_t struct_size;
+  size_t max_clips;
+  size_t max_frames;
+  size_t max_bytes;
+  size_t max_encoded_bytes;
+  size_t max_read_bytes;
+  size_t max_packets;
+  size_t max_decoded_frames;
+  size_t max_targets;
+  int64_t max_dimension;
+} OgaVideoFileLimits;
+
+typedef struct {
+  size_t struct_size;
+  int64_t time_base_num;
+  int64_t time_base_den;
+  int64_t origin_pts;
+  size_t requested_samples;
+  size_t selected_frames;
+} OgaVideoMetadata;
+
+typedef struct {
+  double target_seconds;
+  size_t frame_index;
+  int64_t source_pts;
+  size_t source_frame_index;
+} OgaVideoSample;
+
+/** Snapshot ordered clips after validating the entire collection.
+ * Null limits uses 64 clips, 64 frames/clip, 256 MiB total packed RGB, and dimension 16384.
+ * Loading accepts one frame; model-specific temporal minimums apply separately at admission.
+ * Failure sets *videos to null. Original buffers may be released after success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaLoadVideosFromFrames(
+    const OgaVideoClip* clips, size_t count, const OgaVideoFrameLimits* limits, OgaVideos** videos);
+/** Load ordered local MP4/H.264 clips through the optional Extensions decoder.
+ * Each file requires exactly one FPS/count/explicit-time policy; unused policy fields are zero/null.
+ * Count requires an explicit finite range. Times use the original elapsed presentation timeline.
+ * Null limits: 64 clips, 64 selected frames/clip, 256 MiB total RGB, 512 MiB total encoded input;
+ * per-file work limits: 1 GiB reads, 100000 packets, 4096 decoded frames/targets, dimension 4096.
+ * Codec workspace and one-frame staging are separate from retained RGB storage.
+ * Decoder-disabled builds return an unavailable error. Audio tracks are ignored.
+ * Failure sets *videos to null; no partially loaded collection is returned.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaLoadVideos(
+    const OgaVideoFile* files, size_t count, const OgaVideoFileLimits* limits, OgaVideos** videos);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaVideosGetClipCount(const OgaVideos* videos, size_t* count);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaVideosGetFrameCount(const OgaVideos* videos, size_t clip, size_t* count);
+/** Return a borrowed, tightly packed snapshot view, valid until OgaDestroyVideos. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaVideosGetFrame(
+    const OgaVideos* videos, size_t clip, size_t frame, OgaVideoFrame* descriptor);
+/** File metadata only; initialize metadata->struct_size. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaVideosGetMetadata(
+    const OgaVideos* videos, size_t clip, OgaVideoMetadata* metadata);
+/** One record per requested target; uncovered FPS/count targets have frame_index=SIZE_MAX. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaVideosGetSample(
+    const OgaVideos* videos, size_t clip, size_t sample, OgaVideoSample* result);
+OGA_EXPORT void OGA_API_CALL OgaDestroyVideos(OgaVideos* videos);
 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaLoadAudio(const char* audio_path, OgaAudios** audios);
 
@@ -1679,6 +1790,14 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestBeginTurn(
 OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestBeginTurnWithImages(
     OgaRequest* request, const OgaTurnOptions* turn_options,
     const char* formatted_prompt, const OgaImages* images, uint64_t* out_turn_id);
+
+/** Admit formatted text with independently ordered image/video collections.
+ * Prompt markers determine mixed ordering. CPU preprocessing is synchronous; encoding is scheduled.
+ * Video requires a supported model processor contract. No chat template or sampling is applied.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestBeginTurnWithMedia(
+    OgaRequest* request, const OgaTurnOptions* turn_options, const char* formatted_prompt,
+    const OgaImages* images, const OgaVideos* videos, uint64_t* out_turn_id);
 
 /**
  * \brief Cancels the named queued or active Turn.

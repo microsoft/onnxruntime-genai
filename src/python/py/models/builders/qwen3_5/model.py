@@ -3,10 +3,13 @@
 
 import copy
 import json
+import math
 import os
 
 import onnx_ir as ir
 from builder_config import serialize_genai_config
+from huggingface_hub import hf_hub_download
+from huggingface_hub.errors import EntryNotFoundError
 from loaders.vision import load_qwen35_visual
 
 from ..mtp import MTPModel
@@ -231,6 +234,8 @@ class Qwen35MoEModel(MTPModel):
         model_config = genai_config["model"]
         model_config["image_token_id"] = config.image_token_id
         model_config["vision_start_token_id"] = config.vision_start_token_id
+        if getattr(config, "video_token_id", None) is not None:
+            model_config["video_token_id"] = config.video_token_id
         model_config["vision"] = {
             "filename": "vision.onnx",
             "spatial_merge_size": config.vision_config.spatial_merge_size,
@@ -293,6 +298,68 @@ class Qwen35MoEModel(MTPModel):
         self.decoder.save_processing(model_name_or_path, extra_kwargs, out_dir)
         if self.decoder.use_paged_attention and self.decoder.exclude_embeds:
             save_image_processor(model_name_or_path, extra_kwargs, out_dir, self.hf_token)
+            self.save_video_processing(model_name_or_path, extra_kwargs, out_dir)
+
+    def save_video_processing(self, model_name_or_path, extra_kwargs, out_dir):
+        if os.path.isdir(model_name_or_path):
+            source_path = os.path.join(model_name_or_path, "video_preprocessor_config.json")
+            if not os.path.isfile(source_path):
+                return
+        else:
+            try:
+                source_path = hf_hub_download(
+                    model_name_or_path,
+                    "video_preprocessor_config.json",
+                    cache_dir=extra_kwargs.get("cache_dir"),
+                    token=self.hf_token,
+                    revision=extra_kwargs.get("revision"),
+                )
+            except EntryNotFoundError:
+                return
+        with open(source_path) as source_file:
+            video = json.load(source_file)
+        rescale_factor = video.get("rescale_factor", 1 / 255)
+        if (
+            video.get("video_processor_type") != "Qwen3VLVideoProcessor"
+            or video["patch_size"] != self.vision_config.patch_size
+            or video["merge_size"] != self.vision_config.spatial_merge_size
+            or video["temporal_patch_size"] != 2
+            or video["size"]["shortest_edge"] <= 0
+            or video["size"]["longest_edge"] < video["size"]["shortest_edge"]
+            or any(video.get(option, True) is not True for option in ("do_resize", "do_rescale", "do_normalize"))
+            or type(rescale_factor) not in (int, float)
+            or not math.isfinite(rescale_factor)
+        ):
+            raise ValueError("Packed Qwen video requires the source Qwen3-VL temporal preprocessing contract.")
+        config_path = os.path.join(out_dir, "genai_config.json")
+        with open(config_path) as config_file:
+            genai_config = json.load(config_file)
+        if not genai_config["model"].get("video_token_id"):
+            raise ValueError("Packed Qwen video requires the source video token ID.")
+        with open(os.path.join(out_dir, "processor_config.json")) as image_file:
+            processor = json.load(image_file)["processor"]
+        processor["name"] = "qwen3_vl_video_processor"
+        processor["transforms"] = processor["transforms"][2:]
+        processor["max_video_tokens"] = 768
+        resize = processor["transforms"][0]["operation"]["attrs"]
+        resize.update(
+            height=video["patch_size"] * video["merge_size"],
+            width=video["patch_size"] * video["merge_size"],
+            smart_resize=0,
+            coefficient_type="int16",
+            min_pixels=video["size"]["shortest_edge"],
+            max_pixels=video["size"]["longest_edge"],
+        )
+        processor["transforms"][1]["operation"]["attrs"]["rescale_factor"] = rescale_factor
+        processor["transforms"][2]["operation"]["attrs"].update(
+            mean=video["image_mean"], std=video["image_std"], qwen3_vl=0
+        )
+        filename = "video_processor_config.json"
+        with open(os.path.join(out_dir, filename), "w") as video_file:
+            json.dump({"processor": processor}, video_file, indent=4)
+        genai_config["model"]["vision"]["video_config_filename"] = filename
+        with open(config_path, "w") as config_file:
+            config_file.write(serialize_genai_config(genai_config))
 
     def require_specforge_aux_taps(self, target_layer_ids, drafter_name):
         if not target_layer_ids:

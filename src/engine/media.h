@@ -9,11 +9,14 @@
 #include <vector>
 
 #include "generator/generators.h"
+#include "ortx_cpp_helper.h"
+#include "ortx_processor.h"
 
 namespace Generators {
 
 struct DecoderOnly_Model;
 struct Images;
+struct Videos;
 
 struct MediaAccounting {
   size_t host_bytes{};
@@ -31,6 +34,7 @@ struct MediaItem {
   size_t feature_bytes{};
   size_t rows{};
   int32_t prefix_base{};
+  int32_t marker_token{};
   void ReleaseFeatures();
 };
 
@@ -44,17 +48,31 @@ struct PreparedMediaTurn {
   std::vector<MediaSpan> media;
 };
 
+struct QwenVideoPrompt {
+  std::array<int64_t, 3> grid;
+  std::span<const double> timestamps;
+};
+
+std::string ExpandQwenMediaPrompt(std::string_view prompt,
+                                  std::span<const std::array<int64_t, 3>> image_grids,
+                                  std::span<const QwenVideoPrompt> videos, size_t merge_size,
+                                  size_t maximum_bytes);
+
 std::array<int64_t, 3> MediaPosition(std::span<const MediaSpan> media, size_t row, size_t merge_size);
 void MediaPositions(std::span<const MediaSpan> media, size_t first_row, size_t merge_size,
                     const std::array<std::span<int64_t>, 3>& positions);
 std::array<int64_t, 3> MediaImageGrid(uint32_t width, uint32_t height, size_t patch, size_t merge,
                                       int64_t min_pixels, int64_t max_pixels);
+std::array<int64_t, 3> MediaVideoGrid(uint32_t width, uint32_t height, size_t frames,
+                                      size_t patch, size_t merge, int64_t min_pixels,
+                                      int64_t max_pixels, size_t max_video_tokens);
 
 class MediaStore {
  public:
   MediaStore(std::shared_ptr<DecoderOnly_Model> model, size_t host_limit, size_t device_limit);
   PreparedMediaTurn Prepare(const std::string& prompt, std::span<const int32_t> raw_tokens,
-                            const Images* images, size_t first_row, size_t remaining_rows);
+                            const Images* images, size_t first_row, size_t remaining_rows,
+                            const Videos* videos = nullptr);
   void ValidateTextTokens(std::span<const int32_t> tokens) const;
   void ReserveItems(size_t count);
   void Retain(std::span<const MediaSpan> media) noexcept;
@@ -63,6 +81,12 @@ class MediaStore {
 
  private:
   void MakeHostRoom(size_t bytes);
+  PreparedMediaTurn PrepareVideos(const std::string& prompt, std::span<const int32_t> raw_tokens,
+                                  const Images* images, const Videos& videos, size_t first_row,
+                                  size_t remaining_rows);
+  std::shared_ptr<MediaItem> Intern(const std::array<int64_t, 3>& grid, int32_t marker,
+                                    const Tensor& pixels, size_t patch_offset,
+                                    std::span<const MediaSpan> pending, size_t& reservation);
   std::shared_ptr<DecoderOnly_Model> model_;
   std::shared_ptr<MediaAccounting> accounting_{std::make_shared<MediaAccounting>()};
   std::vector<std::shared_ptr<MediaItem>> items_;
@@ -72,6 +96,11 @@ class MediaStore {
   int64_t min_pixels_{};
   int64_t max_pixels_{};
   int32_t vision_end_token_{};
+  int32_t video_token_{};
+  ort_extensions::OrtxObjectPtr<OrtxProcessor> video_processor_;
+  int64_t video_min_pixels_{};
+  int64_t video_max_pixels_{};
+  size_t max_video_tokens_{};
 };
 
 }  // namespace Generators

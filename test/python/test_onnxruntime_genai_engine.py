@@ -8,6 +8,7 @@ from __future__ import annotations
 import gc
 import json
 import logging
+import os
 import sys
 import threading
 import time
@@ -40,6 +41,175 @@ _DEVICES = ["cpu"] + (["cuda"] if og.is_cuda_available() else [])
 _PROMPT_A = [5, 9, 13]
 _PROMPT_B = [7, 2, 20, 4]
 _PROMPT_LONG = [3, 8, 2, 15, 6, 11]
+
+
+def test_video_frame_loading_preserves_clips_and_original_times():
+    backing = np.arange(2 * 3 * 5 * 3, dtype=np.uint8).reshape(2, 3, 5, 3)
+    padded = backing[:, :, :4, :]
+    expected = padded.copy()
+    videos = og.Videos.from_clips([padded, [padded[0]]], timestamps=[[2.5, 2.5], [7.25]])
+    backing.fill(0)
+    assert videos.clip_count == 2
+    assert videos.frame_count(0) == 2
+    assert videos.frame_count(1) == 1
+    assert videos.timestamps(0) == [2.5, 2.5]
+    assert videos.timestamps(1) == [7.25]
+    copied = videos.frame(0, 0)
+    np.testing.assert_array_equal(copied, expected[0])
+    copied.fill(0)
+    np.testing.assert_array_equal(videos.frame(0, 0), expected[0])
+    with pytest.raises(RuntimeError):
+        videos.frame_count(2)
+
+
+@pytest.mark.parametrize(
+    "frames",
+    [
+        [np.zeros((2, 2, 3), dtype=np.float32)],
+        [np.zeros((2, 2, 4), dtype=np.uint8)],
+        [np.zeros((2, 2, 3), dtype=np.uint8)[::-1]],
+        [np.zeros((2, 4, 3), dtype=np.uint8)[:, ::2]],
+        [np.zeros((2, 2, 3), dtype=np.uint8)[:, :, ::-1]],
+        [np.lib.stride_tricks.as_strided(np.zeros(1, dtype=np.uint8), (2, 2, 3), (6, 3, 1))],
+    ],
+)
+def test_video_frame_loading_rejects_unsupported_or_unreadable_arrays(frames):
+    with pytest.raises(ValueError):
+        og.Videos.from_frames(frames, timestamps=[0.0])
+
+
+@pytest.mark.parametrize("timestamps", [[0.0], [0.0, -1.0], [1.0, 0.0], [0.0, np.nan], [0.0, np.inf]])
+def test_video_frame_loading_rejects_invalid_times(timestamps):
+    frames = np.zeros((2, 2, 2, 3), dtype=np.uint8)
+    with pytest.raises((ValueError, RuntimeError)):
+        og.Videos.from_frames(frames, timestamps=timestamps)
+
+
+def test_video_frame_loading_enforces_collection_limits():
+    frames = np.zeros((2, 2, 2, 3), dtype=np.uint8)
+    for limits in ({"max_frames": 1}, {"max_bytes": 23}, {"max_dimension": 1}):
+        with pytest.raises((ValueError, RuntimeError)):
+            og.Videos.from_frames(frames, timestamps=[0.0, 1.0], **limits)
+    with pytest.raises((ValueError, RuntimeError)):
+        og.Videos.from_clips([frames, frames], timestamps=[[0.0, 1.0], [2.0, 3.0]], max_bytes=47)
+    recovered = og.Videos.from_frames(frames, timestamps=[0.0, 1.0], max_bytes=24)
+    assert recovered.frame_count(0) == 2
+
+
+@pytest.mark.parametrize(
+    "paths, options",
+    [
+        (["unused.mp4"], {}),
+        (["unused.mp4"], {"sampling_fps": 2, "frame_count": 4}),
+        (["unused.mp4"], {"frame_count": 4, "target_times": [0.0]}),
+        (["unused\0.mp4"], {"sampling_fps": 2}),
+        ([Path("unused.mp4")], {"sampling_fps": 2}),
+        ([], {"sampling_fps": 2}),
+    ],
+)
+def test_video_file_surface_rejects_invalid_python_inputs(paths, options):
+    with pytest.raises(ValueError):
+        og.Videos.open(*paths, **options)
+
+
+@pytest.fixture
+def video_files():
+    root = os.environ.get("ORTGENAI_VIDEO_TEST_DIR")
+    if not root:
+        pytest.skip("Optional codec qualification requires ORTGENAI_VIDEO_TEST_DIR.")
+    root = Path(root)
+    for name in ("cfr.mp4", "vfr.mp4", "origin.mp4", "rotated.mp4"):
+        assert (root / name).is_file(), f"Required codec qualification fixture is missing: {name}"
+    return root
+
+
+def test_video_file_loading_preserves_metadata_and_owned_rgb(video_files):
+    videos = og.Videos.open(str(video_files / "cfr.mp4"), frame_count=8, end_seconds=4)
+    assert videos.timestamps(0) == [0, 0.5, 1, 1.5, 2, 2.5]
+    metadata = videos.metadata(0)
+    assert metadata["requested_samples"] == 8
+    assert metadata["selected_frames"] == 6
+    samples = videos.samples(0)
+    assert [sample["frame_index"] for sample in samples] == [0, 1, 2, 3, 4, 5, None, None]
+    image = videos.frame(0, 0)
+    assert image.shape == (64, 96, 3)
+    assert image[32, 48, 0] > 200
+    image.fill(0)
+    assert videos.frame(0, 0)[32, 48, 0] > 200
+    del videos
+    image.fill(7)
+    assert image[0, 0, 0] == 7
+
+
+def test_video_file_loading_vfr_range_and_ordered_clips(video_files):
+    videos = og.Videos.open(str(video_files / "vfr.mp4"), str(video_files / "origin.mp4"), target_times=[0.2, 1.2])
+    assert videos.clip_count == 2
+    assert videos.timestamps(0) == [0.32, 1.24]
+    assert videos.timestamps(1) == [0.5, 1.5]
+    origin = videos.metadata(1)
+    numerator, denominator = origin["time_base"]
+    assert origin["origin_pts"] * numerator / denominator == 5
+    rotated = og.Videos.open(str(video_files / "rotated.mp4"), frame_count=1, end_seconds=3)
+    source = og.Videos.open(str(video_files / "cfr.mp4"), frame_count=1, end_seconds=3)
+    np.testing.assert_array_equal(rotated.frame(0, 0), np.rot90(source.frame(0, 0)))
+
+
+def test_video_file_loading_rejection_and_recovery(video_files, tmp_path):
+    path = str(video_files / "cfr.mp4")
+    with pytest.raises(RuntimeError, match="regular local file"):
+        og.Videos.open(str(tmp_path), sampling_fps=2)
+    for options in (
+        {"target_times": [0.1, 0.2]},
+        {"target_times": [0, 2.75], "end_seconds": 3},
+        {"frame_count": 1},
+        {"sampling_fps": 4, "end_seconds": 3, "max_targets": 2},
+        {"frame_count": 6, "end_seconds": 3, "max_decoded_frames": 1},
+    ):
+        with pytest.raises(RuntimeError):
+            og.Videos.open(path, **options)
+    with pytest.raises(RuntimeError, match="encoded"):
+        og.Videos.open(path, path, frame_count=1, end_seconds=3, max_encoded_bytes=Path(path).stat().st_size)
+    with pytest.raises(RuntimeError, match="RGB"):
+        og.Videos.open(path, path, frame_count=1, end_seconds=3, max_bytes=64 * 96 * 3)
+    recovered = og.Videos.open(path, sampling_fps=2)
+    assert recovered.frame_count(0) == 6
+    unicode_path = tmp_path / "video-\u00e9.mp4"
+    unicode_path.write_bytes(Path(path).read_bytes())
+    equivalent = og.Videos.open(str(unicode_path), sampling_fps=2)
+    assert equivalent.timestamps(0) == recovered.timestamps(0)
+    np.testing.assert_array_equal(equivalent.frame(0, 0), recovered.frame(0, 0))
+
+
+def test_video_file_loading_releases_gil(video_files):
+    ready = threading.Event()
+    allowed = threading.Event()
+    progressed = threading.Event()
+
+    def worker():
+        ready.set()
+        allowed.wait()
+        progressed.set()
+
+    thread = threading.Thread(target=worker)
+    previous_switch_interval = sys.getswitchinterval()
+    thread.start()
+    try:
+        assert ready.wait(timeout=5)
+        # Only native loading, not periodic Python switching, may let the worker acquire the GIL.
+        sys.setswitchinterval(10.0)
+        deadline = time.monotonic() + 5
+        allowed.set()
+        while True:
+            videos = og.Videos.open(str(video_files / "cfr.mp4"), sampling_fps=2)
+            assert videos.frame_count(0) == 6
+            if progressed.is_set() or time.monotonic() >= deadline:
+                break
+        assert progressed.is_set()
+    finally:
+        sys.setswitchinterval(previous_switch_interval)
+        allowed.set()
+        thread.join(timeout=5)
+    assert not thread.is_alive()
 
 
 def _has_indexer_merge():
