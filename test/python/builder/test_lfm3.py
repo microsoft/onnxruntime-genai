@@ -865,6 +865,7 @@ def test_d1_export_reads_later_tokens_where_a_causal_export_cannot(tmp_path):
         ("dml", ir.DataType.FLOAT16, {}, "causal=0, which ONNX Runtime has on CPU and CUDA, not dml"),
         ("trt-rtx", ir.DataType.FLOAT16, {}, "causal=0, which ONNX Runtime has on CPU and CUDA, not trt-rtx"),
         ("cuda", ir.DataType.FLOAT16, {"use_paged_attention": True}, "PagedAttention"),
+        ("cpu", ir.DataType.FLOAT, {"exclude_embeds": True}, "exclude_embeds=true is not supported"),
         # The same refusals as LFM3 text.
         ("cuda", ir.DataType.FLOAT, {}, "selects Attention"),
         ("cpu", ir.DataType.FLOAT16, {}, "selects MultiHeadAttention"),
@@ -930,10 +931,10 @@ def _load_builder_entrypoint_module():
         # builder.py leaves the architecture as the model type of a text checkpoint, which the genai config
         # shortens to "lfm3".
         ("Lfm3ForCausalLM", "AutoModelForCausalLM", "Lfm3ForCausalLM", "Lfm3ForCausalLM"),
-        ("Lfm3VlForConditionalGeneration", "AutoModelForImageTextToText", "lfm3", "lfm3_vl"),
         ("Lfm3AudioForConditionalGeneration", "AutoModelForMultimodalLM", "lfm3", "lfm3_audio"),
         ("Lfm3OmniForConditionalGeneration", "AutoModelForMultimodalLM", "lfm3", "lfm3_omni"),
-        ("D1Model", "AutoModel", "lfm3", "lfm3_vl"),
+        # d1-2B refuses exclude_embeds until the builder writes its vision and embedding models.
+        ("D1Model", "AutoModel", "lfm3", None),
     ],
 )
 def test_lfm3_architectures_pick_the_loader_and_the_model_type(
@@ -952,7 +953,10 @@ def test_lfm3_architectures_pick_the_loader_and_the_model_type(
 
     monkeypatch.setattr(builder_module, "LFM3Model", RecordingLFM3Model)
     config = _stand_in_config(architecture)
-    for exclude_embeds in (False, True):
+    model_types = {False: text_type}
+    if pipeline_type:
+        model_types[True] = pipeline_type
+    for exclude_embeds in model_types:
         builder_module.create_model(
             config._name_or_path,
             str(tmp_path / "input"),
@@ -965,7 +969,7 @@ def test_lfm3_architectures_pick_the_loader_and_the_model_type(
             hf_details={"extra_kwargs": {}, "hf_name": config._name_or_path, "hf_config": config},
         )
 
-    assert captured == {False: (loader, text_type), True: (loader, pipeline_type)}
+    assert captured == {mode: (loader, model_type) for mode, model_type in model_types.items()}
 
 
 @pytest.mark.parametrize(

@@ -16,6 +16,7 @@ from .hunyuan import HunyuanDenseV1Model
 from .internlm import InternLM2Model
 from .lfm2 import LFM2AudioModel, LFM2Model, LFM2MoEModel, LFM3Model
 from .lfm2_vl import LFM2VLModel
+from .lfm3_vl import LFM3VLModel
 from .llama import LlamaModel
 from .mistral import Mistral3TextModel, MistralModel
 from .mtp import MTPModel
@@ -74,6 +75,7 @@ __all__ = [
     "LFM2Model",
     "LFM2VLModel",
     "LFM3Model",
+    "LFM3VLModel",
     "LlamaModel",
     "MTPModel",
     "Mistral3TextModel",

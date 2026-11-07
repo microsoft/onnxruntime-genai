@@ -23,6 +23,8 @@ int64_t DownsampledLength(int64_t patches, int64_t downsample_factor) {
   return (patches + downsample_factor - 1) / downsample_factor;
 }
 
+constexpr char kProcessorName[] = "Lfm2VlImageProcessor";
+
 // Reads a [N, 2] int64 tensor of per-image (height, width) produced by the PixtralImageSizes step.
 // The batched pixel_values tensor is zero-padded to the largest image, so these are the only
 // reliable per-image dimensions.
@@ -49,6 +51,8 @@ std::vector<std::pair<int64_t, int64_t>> ReadImageSizes(OrtxTensor* image_sizes_
   return image_sizes;
 }
 
+}  // namespace
+
 std::unique_ptr<OrtValue> MakeInt64Tensor(const std::vector<int64_t>& values, std::vector<int64_t> shape,
                                           Ort::Allocator& allocator) {
   auto tensor = OrtValue::CreateTensor<int64_t>(allocator, shape);
@@ -62,43 +66,35 @@ std::unique_ptr<OrtValue> MakeInputIds(const std::vector<int32_t>& input_ids, Or
   return tensor;
 }
 
-// The vision graph's input names come from genai_config.json; a wrong name would otherwise be
-// dropped silently by ExtraInputs and only surface as ORT's "Missing Input" at run time.
 ONNXTensorElementDataType VisionInputType(const SessionInfo& session_info, const std::string& name,
-                                          const char* config_field) {
+                                          const char* config_field, const char* processor_name) {
   if (!session_info.HasInput(name)) {
-    throw std::runtime_error("Lfm2VlImageProcessor: the vision model has no input named \"" + name +
+    throw std::runtime_error(std::string(processor_name) + ": the vision model has no input named \"" + name +
                              "\". Point model.vision.inputs." + config_field +
                              " in genai_config.json at the name the vision model uses.");
   }
   return session_info.GetInputDataType(name);
 }
 
-// pixel_attention_mask and spatial_shapes are always emitted as int64, so fail at load rather than
-// at the first image if the graph was exported with another integer type.
-void RequireInt64VisionInput(const SessionInfo& session_info, const std::string& name, const char* config_field) {
-  const auto type = VisionInputType(session_info, name, config_field);
+void RequireInt64VisionInput(const SessionInfo& session_info, const std::string& name, const char* config_field,
+                             const char* processor_name) {
+  const auto type = VisionInputType(session_info, name, config_field, processor_name);
   if (type != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
-    throw std::runtime_error("Lfm2VlImageProcessor: vision input \"" + name + "\" must be int64, got " +
+    throw std::runtime_error(std::string(processor_name) + ": vision input \"" + name + "\" must be int64, got " +
                              TypeToString(type) + ".");
   }
 }
 
-// The list overload of MultiModalProcessor::Process fills payload.prompts and leaves payload.prompt
-// empty. Batching is not supported, so a single-entry list is the prompt and anything longer is an error
-// rather than silently dropped text.
-std::string ResolvePrompt(const Payload& payload) {
+std::string ResolvePrompt(const Payload& payload, const char* processor_name) {
   if (payload.prompts.empty()) {
     return payload.prompt;
   }
   if (payload.prompts.size() != 1) {
-    throw std::runtime_error("Lfm2VlImageProcessor: batched prompts are not supported; got " +
+    throw std::runtime_error(std::string(processor_name) + ": batched prompts are not supported; got " +
                              std::to_string(payload.prompts.size()) + " prompts. Pass a single prompt string.");
   }
   return payload.prompts[0] ? std::string(payload.prompts[0]) : std::string{};
 }
-
-}  // namespace
 
 void WriteLfm2VlImagePatches(ThreadPool* thread_pool, const float* image, int64_t channels,
                              int64_t padded_height, int64_t padded_width,
@@ -222,12 +218,13 @@ std::string ExpandLfm2VlImageTokens(const std::string& prompt, const std::vector
 }
 
 Lfm2VlImageProcessor::Lfm2VlImageProcessor(Config& config, const SessionInfo& session_info)
-    : pixel_values_type_{VisionInputType(session_info, config.model.vision.inputs.pixel_values, "pixel_values")},
+    : pixel_values_type_{VisionInputType(session_info, config.model.vision.inputs.pixel_values, "pixel_values",
+                                         kProcessorName)},
       encoder_patch_size_{config.model.vision.patch_size},
       downsample_factor_{config.model.vision.spatial_merge_size},
       max_num_patches_{config.model.vision.max_num_patches} {
-  RequireInt64VisionInput(session_info, config.model.vision.inputs.attention_mask, "attention_mask");
-  RequireInt64VisionInput(session_info, config.model.vision.inputs.image_sizes, "image_sizes");
+  RequireInt64VisionInput(session_info, config.model.vision.inputs.attention_mask, "attention_mask", kProcessorName);
+  RequireInt64VisionInput(session_info, config.model.vision.inputs.image_sizes, "image_sizes", kProcessorName);
 
   const auto processor_config = (config.config_path / fs::path(config.model.vision.config_filename)).string();
   CheckResult(OrtxCreateProcessor(processor_.ToBeAssigned(), processor_config.c_str()));
@@ -239,7 +236,7 @@ Lfm2VlImageProcessor::Lfm2VlImageProcessor(Config& config, const SessionInfo& se
 }
 
 std::unique_ptr<NamedTensors> Lfm2VlImageProcessor::Process(const Tokenizer& tokenizer, const Payload& payload) const {
-  const std::string prompt = ResolvePrompt(payload);
+  const std::string prompt = ResolvePrompt(payload, kProcessorName);
   const Images* images = payload.images;
   Ort::Allocator& allocator{Ort::Allocator::GetWithDefaultOptions()};
   auto named_tensors = std::make_unique<NamedTensors>();

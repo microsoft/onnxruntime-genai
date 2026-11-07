@@ -253,7 +253,7 @@ The script picks these from the model type, `lfm3`, to match d1-2B's own code:
 What this does not do:
 
 - A choice with `"multiple": true` is refused: it needs one answer slot per option, and this script reads one position per question. The `text`, `number`, `date`, `box` and `boxes` types are refused for the same reason.
-- No images. They need the `lfm3_vl` pipeline, which GenAI does not have yet.
+- No images. The builder does not write the vision and embedding models of d1-2B yet, and it refuses `exclude_embeds=true` for this model.
 - One question per pass. d1's own code reads up to 16 questions in one pass (`d1_set_size` in its `config.json`), and its model card says larger sets are faster and cost some accuracy on text; only one question per pass was compared here.
 - WebGPU, JS and DirectML are refused by the builder, and `d1-decisions.py` refuses `-e WebGpuExecutionProvider`, because `causal=0` runs on CPU and CUDA only. ONNX Runtime 1.29 and older fail to load the model.
 - Do not generate text with this export: its full-attention layers read later tokens, so it is for one forward pass over a whole prompt.

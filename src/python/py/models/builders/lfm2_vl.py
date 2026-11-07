@@ -25,6 +25,12 @@ class LFM2VLVisionEncoder(Model):
         if config.projector_hidden_act != "gelu":
             raise ValueError(f"Unsupported projector_hidden_act {config.projector_hidden_act}: expected gelu")
 
+        self.make_vision_config_init(config)
+        extra_options["filename"] = "vision.onnx"
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self.make_vision_attrs_init(config.vision_config)
+
+    def make_vision_config_init(self, config):
         # Standardize config attributes for the vision layers to simplify layer building logic
         vision_config = config.vision_config
         config.hidden_size = vision_config.hidden_size
@@ -40,12 +46,10 @@ class LFM2VLVisionEncoder(Model):
         self.position_embedding_size = int(vision_config.num_patches**0.5)
         self.downsample_factor = config.downsample_factor
         self.text_hidden_size = config.text_config.hidden_size
-
-        extra_options["filename"] = "vision.onnx"
         # Model sets model_type from this, and "lfm2_vl" loads the weights through Lfm2VlForConditionalGeneration
         config.architectures = ["lfm2_vl"]
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
+    def make_vision_attrs_init(self, vision_config):
         self.layernorm_attrs["simple"] = False
         self.layernorm_attrs["epsilon"] = vision_config.layer_norm_eps
         self.attention_attrs["rope"] = False
@@ -59,8 +63,7 @@ class LFM2VLVisionEncoder(Model):
         # MultiHeadAttention is the attention op with an attention bias that runs on CPU, CUDA and WebGPU
         return False
 
-    def make_inputs_and_outputs(self):
-        # Set input dicts
+    def make_vision_inputs(self):
         self.input_names = {
             "pixel_values": "pixel_values",
             "pixel_attention_mask": "pixel_attention_mask",
@@ -77,6 +80,10 @@ class LFM2VLVisionEncoder(Model):
             "pixel_attention_mask": ["batch_size", "sequence_length"],
             "spatial_shapes": ["batch_size", 2],  # Patch rows and columns of each image
         }
+
+    def make_inputs_and_outputs(self):
+        # Set input dicts
+        self.make_vision_inputs()
 
         # Set output dicts
         self.output_names = {"image_features": "image_features"}
@@ -342,6 +349,14 @@ class LFM2VLVisionEncoder(Model):
             self.make_value(layernorm_output, self.io_dtype, shape=["num_image_tokens", token_dim])
             root_input = layernorm_output
 
+        self.make_projector_mlp(root_input)
+
+    def make_projector_mlp(self, root_input):
+        # Make the end of the projector, on the tokens of all images:
+        #
+        #   tokens [T,*] --> linear_1 --> Gelu --> linear_2 --> image_features [T,H]
+        basename = "/model/projector"
+        projector = self.weights.model.multi_modal_projector
         root_input = self.make_projector_linear(projector.linear_1, f"{basename}/linear_1", root_input)
         gelu_name = f"{basename}/act_fn/Gelu"
         gelu_output = f"{gelu_name}/output_0"
@@ -455,6 +470,10 @@ class LFM2VLEmbedding(Model):
         self.embed_attrs["image_token_id"] = config.image_token_id  # Token whose embeddings the image features replace
         self.embed_attrs["image_features_dtype"] = self.io_dtype  # Type of the vision model's image_features
 
+    def make_rope_init(self, config):
+        # This model has no attention, whatever RoPE the decoder's config holds (LFM3 nests it per layer type)
+        pass
+
     def make_inputs_and_outputs(self):
         # Set input dicts
         self.input_names = {"input_ids": "input_ids", "image_features": "image_features"}
@@ -533,37 +552,49 @@ class LFM2VLModel:
     # The lfm2_vl pipeline (exclude_embeds=true): the LFM2 decoder, plus the vision and embedding models
     # that turn images and token ids into its inputs_embeds
 
+    vision_class = LFM2VLVisionEncoder
+    decoder_class = LFM2Model
+    pipeline_type = "lfm2_vl"
+
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        # The vision and embedding models are never quantized. A bf16 vision tower drifts much further from fp32 than
-        # an fp16 one, so it runs in fp16 and the embedding model casts its output.
-        vision_dtype = ir.DataType.FLOAT16 if io_dtype == ir.DataType.BFLOAT16 else io_dtype
+        # The vision and embedding models are never quantized
+        vision_dtype = self.make_vision_dtype(io_dtype, ep)
         # The remaining options configure the decoder
         options = {key: extra_options[key] for key in ("hf_token", "hf_remote") if key in extra_options}
         # Without the checkpoint's quantization_config, Model loads them through transformers, not QuantModel
         unquantized_config = copy.deepcopy(config)
         if hasattr(unquantized_config, "quantization_config"):
             delattr(unquantized_config, "quantization_config")
-        self.vision = LFM2VLVisionEncoder(
+        self.vision = self.vision_class(
             copy.deepcopy(unquantized_config), vision_dtype, vision_dtype, ep, cache_dir, dict(options)
         )
         self.embedding = LFM2VLEmbedding(unquantized_config, io_dtype, io_dtype, ep, cache_dir, dict(options))
         self.embedding.embed_attrs["image_features_dtype"] = self.vision.io_dtype
-        self.decoder = LFM2Model(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-        self.decoder.model_type = "lfm2_vl"
+        self.decoder = self.decoder_class(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self.decoder.model_type = self.pipeline_type
         if self.decoder.filename in (self.vision.filename, self.embedding.filename):
             raise ValueError(
                 f"The decoder cannot be named {self.decoder.filename}: the vision or embedding model has that name"
             )
 
         # Read the image processor settings before the build, so an unsupported checkpoint fails early
-        self.image_processor, _ = ImageProcessingMixin.get_image_processor_dict(
+        self.image_processor = self.read_image_processor(config, cache_dir)
+        self.processor_config = self.make_processor_config(self.image_processor)
+
+    def make_vision_dtype(self, io_dtype, ep):
+        # A bf16 vision tower drifts much further from fp32 than an fp16 one, so it runs in fp16 and the embedding model
+        # casts its output.
+        return ir.DataType.FLOAT16 if io_dtype == ir.DataType.BFLOAT16 else io_dtype
+
+    def read_image_processor(self, config, cache_dir):
+        image_processor, _ = ImageProcessingMixin.get_image_processor_dict(
             self.decoder.model_name_or_path, cache_dir=cache_dir, token=self.decoder.hf_token
         )
         # transformers derives max_num_patches; without image splitting it is max_image_tokens * downsample_factor**2
-        self.image_processor.setdefault(
-            "max_num_patches", self.image_processor["max_image_tokens"] * self.image_processor["downsample_factor"] ** 2
+        image_processor.setdefault(
+            "max_num_patches", image_processor["max_image_tokens"] * image_processor["downsample_factor"] ** 2
         )
-        self.processor_config = self.make_processor_config(self.image_processor)
+        return image_processor
 
     def make_processor_config(self, image_processor):
         # The Hugging Face Lfm2VlImageProcessor without image splitting (tiling)
@@ -644,14 +675,7 @@ class LFM2VLModel:
         model["vision"] = {
             "filename": self.vision.filename,
             "config_filename": "processor_config.json",
-            "patch_size": self.image_processor["encoder_patch_size"],
-            "spatial_merge_size": self.image_processor["downsample_factor"],
-            "max_num_patches": self.image_processor["max_num_patches"],
-            "inputs": {
-                "pixel_values": "pixel_values",
-                "attention_mask": "pixel_attention_mask",
-                "image_sizes": "spatial_shapes",
-            },
+            **self.make_vision_section(),
             "outputs": {"image_features": "image_features"},
             "session_options": session_options,
         }
@@ -660,6 +684,19 @@ class LFM2VLModel:
             json.dump(genai_config, f, indent=4)
         with open(os.path.join(out_dir, "processor_config.json"), "w") as f:
             json.dump(self.processor_config, f, indent=2)
+
+    def make_vision_section(self):
+        # The genai_config vision settings that depend on the pipeline
+        return {
+            "patch_size": self.image_processor["encoder_patch_size"],
+            "spatial_merge_size": self.image_processor["downsample_factor"],
+            "max_num_patches": self.image_processor["max_num_patches"],
+            "inputs": {
+                "pixel_values": "pixel_values",
+                "attention_mask": "pixel_attention_mask",
+                "image_sizes": "spatial_shapes",
+            },
+        }
 
     def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
         self.decoder.save_processing(model_name_or_path, extra_kwargs, out_dir)

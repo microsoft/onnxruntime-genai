@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 #pragma once
 
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -49,6 +50,27 @@ std::string BuildLfm2VlImagePlaceholder(int64_t num_tokens);
 // prompt holds exactly one "<image>" per image, the rule Lfm2VlProcessor.validate_inputs applies, so
 // the vision features and the placeholder runs can never be misaligned or silently dropped.
 std::string ExpandLfm2VlImageTokens(const std::string& prompt, const std::vector<int64_t>& tokens_per_image);
+
+// Helpers shared with Lfm3VlImageProcessor. `processor_name` starts every error message.
+
+std::unique_ptr<OrtValue> MakeInt64Tensor(const std::vector<int64_t>& values, std::vector<int64_t> shape,
+                                          Ort::Allocator& allocator);
+std::unique_ptr<OrtValue> MakeInputIds(const std::vector<int32_t>& input_ids, Ort::Allocator& allocator);
+
+// The vision graph's input names come from genai_config.json; a wrong name would otherwise be
+// dropped silently by ExtraInputs and only surface as ORT's "Missing Input" at run time.
+ONNXTensorElementDataType VisionInputType(const SessionInfo& session_info, const std::string& name,
+                                          const char* config_field, const char* processor_name);
+
+// Integer side inputs are always emitted as int64, so fail at load rather than at the first image
+// if the graph was exported with another integer type.
+void RequireInt64VisionInput(const SessionInfo& session_info, const std::string& name, const char* config_field,
+                             const char* processor_name);
+
+// The list overload of MultiModalProcessor::Process fills payload.prompts and leaves payload.prompt
+// empty. Batching is not supported, so a single-entry list is the prompt and anything longer is an error
+// rather than silently dropped text.
+std::string ResolvePrompt(const Payload& payload, const char* processor_name);
 
 struct Lfm2VlImageProcessor : Processor {
   Lfm2VlImageProcessor(Config& config, const SessionInfo& session_info);
