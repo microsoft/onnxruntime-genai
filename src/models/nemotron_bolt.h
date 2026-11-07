@@ -30,6 +30,17 @@ struct NemotronBoltPrefillStep {
   size_t length_after{};
 };
 
+struct NemotronBoltPrefillAuxWindow {
+  size_t max_buffer_rows{};
+  size_t draft_start{};
+  size_t draft_rows{};
+  size_t ingest_offset{};
+  size_t ingest_rows{};
+  size_t ingest_first_position{};
+};
+
+bool IsNemotronBoltR16PrefillDisabledValue(const char* env_value);
+bool ResolveNemotronBoltR16Enabled(bool model_supports_r16_prefill);
 void ValidateNemotronBoltSearch(const GeneratorParams& params);
 NemotronBoltTargetRowContract ValidateNemotronBoltTargetRowContract(
     const std::vector<int64_t>& input_ids_shape,
@@ -45,8 +56,8 @@ std::vector<NemotronBoltPrefillStep> PlanNemotronBoltPrefillChunks(
     size_t prompt_rows, size_t capacity, bool allow_r16,
     size_t initial_length = 0, int32_t initial_state_row = 0,
     size_t prefix_r8_rows = 0);
-size_t NemotronBoltPrefillAuxRowsToRetain(size_t prompt_rows, size_t sliding_window,
-                                          size_t block_rows);
+NemotronBoltPrefillAuxWindow PlanNemotronBoltPrefillAuxWindow(
+    size_t prompt_rows, size_t context_window, size_t block_rows = kBoltVerifyRows);
 void CopyNemotronBoltPrefillAuxRows(Tensor& destination, Tensor& source,
                                     size_t chunk_position, size_t valid_rows,
                                     size_t physical_prefix_rows = 0);
@@ -66,6 +77,10 @@ struct NemotronBoltModel : Model {
   size_t capacity_{};
   size_t aux_width_{};
   bool supports_r16_prefill_{};
+
+ private:
+  friend struct test::NemotronBoltTestAccess;
+  explicit NemotronBoltModel(std::unique_ptr<Config> config) : Model{std::move(config)} {}
 };
 
 // The target owns dense attention K/V and eight recurrent-state rows. Only the drafter is paged.
@@ -92,6 +107,7 @@ struct NemotronBoltState : State {
   void Reset();
 
   const NemotronBoltModel& bolt_;
+  const bool r16_enabled_{};
   std::map<std::string, std::unique_ptr<Tensor>> tensors_;
   std::map<std::string, std::unique_ptr<Tensor>> tensors_16_;
   std::vector<std::string> input_storage_, output_storage_;
@@ -112,6 +128,14 @@ struct NemotronBoltState : State {
   std::vector<int32_t> drafts_;
   std::deque<int32_t> pending_;
   bool prefilled_{};
+  bool in_warmup_{true};
+  uint64_t warmup_r8_calls_{};
+  uint64_t warmup_r16_calls_{};
+  uint64_t prefill_r8_calls_{};
+  uint64_t prefill_r16_calls_{};
+  uint64_t verify_r8_calls_{};
+  size_t last_prefill_draft_start_{};
+  size_t last_prefill_draft_rows_{};
   SpeculativeStats stats_;
 };
 

@@ -33,11 +33,6 @@ std::vector<std::string> ToSymbolicStrings(const std::vector<const char*>& raw) 
   return out;
 }
 
-bool IsBoltR16PrefillDisabled() {
-  const char* env = std::getenv("BOLT_DISABLE_R16_PREFILL");
-  return env != nullptr && std::string_view{env} == "1";
-}
-
 template <typename T>
 void Upload(Tensor& tensor, std::span<const T> values) {
   tensor.GetDeviceSpan<T>().CopyFromCpu(values);
@@ -81,6 +76,15 @@ struct BoltSearch : GreedySearch_Cpu {
 };
 
 }  // namespace
+
+bool IsNemotronBoltR16PrefillDisabledValue(const char* env_value) {
+  return env_value != nullptr && std::string_view{env_value} == "1";
+}
+
+bool ResolveNemotronBoltR16Enabled(bool model_supports_r16_prefill) {
+  return model_supports_r16_prefill &&
+         !IsNemotronBoltR16PrefillDisabledValue(std::getenv("BOLT_DISABLE_R16_PREFILL"));
+}
 
 void ValidateNemotronBoltSearch(const GeneratorParams& params) {
   const auto& s = params.search;
@@ -357,12 +361,15 @@ Tensor& NemotronBoltState::AddTensor16(const std::string& name, DeviceInterface*
 }
 
 NemotronBoltState::NemotronBoltState(const NemotronBoltModel& model, const GeneratorParams& params)
-    : State{params, model}, bolt_{model}, request_{std::make_unique<Request>(model, params.search.max_length)} {
+    : State{params, model},
+      bolt_{model},
+      r16_enabled_{ResolveNemotronBoltR16Enabled(model.supports_r16_prefill_)},
+      request_{std::make_unique<Request>(model, params.search.max_length)} {
   const auto& info = model.session_info_;
   const int64_t r8 = static_cast<int64_t>(kBoltVerifyRows);
   const int64_t vocab_size = static_cast<int64_t>(model.config_->model.vocab_size);
   const int64_t aux_width = static_cast<int64_t>(model.aux_width_);
-  const size_t max_input_rows = model.supports_r16_prefill_ ? kBoltPrefillRows16 : kBoltVerifyRows;
+  const size_t max_input_rows = r16_enabled_ ? kBoltPrefillRows16 : kBoltVerifyRows;
   verify_inputs_span_ = model.p_device_->Allocate<int32_t>(2 * max_input_rows + 8);
   verify_inputs_span_.CpuSpan();
   int32_t* verify_in_base = verify_inputs_span_.Span().data();
@@ -412,10 +419,10 @@ NemotronBoltState::NemotronBoltState(const NemotronBoltModel& model, const Gener
   auto& aux = *tensors_.at("aux_hidden_states");
   const std::array<int64_t, 2> shape{r8, aux_width};
   aux_view_ = std::make_unique<Tensor>(OrtValue::CreateTensor(
-      *model.p_device_->GetMemoryInfo(), aux.GetMutableRawData(), aux.GetByteSpan().size(),
+      dev_mem_info, aux.GetMutableRawData(), aux.GetByteSpan().size(),
       shape, aux.GetType()));
   aux_view_->p_device_ = model.p_device_;
-  if (model.supports_r16_prefill_) {
+  if (r16_enabled_) {
     const int64_t r16 = static_cast<int64_t>(kBoltPrefillRows16);
     const std::array<int64_t, 2> in16_shape{1, r16};
     auto in16 = std::make_unique<Tensor>(OrtValue::CreateTensor(
@@ -431,7 +438,7 @@ NemotronBoltState::NemotronBoltState(const NemotronBoltModel& model, const Gener
     pred_ids_16_span_.CpuSpan();
     const std::array<int64_t, 2> shape16{r16, aux_width};
     aux_view_16_ = std::make_unique<Tensor>(OrtValue::CreateTensor(
-        *model.p_device_->GetMemoryInfo(), aux16.GetMutableRawData(), aux16.GetByteSpan().size(),
+        dev_mem_info, aux16.GetMutableRawData(), aux16.GetByteSpan().size(),
         shape16, aux16.GetType()));
     aux_view_16_->p_device_ = model.p_device_;
 
@@ -453,8 +460,7 @@ NemotronBoltState::NemotronBoltState(const NemotronBoltModel& model, const Gener
   if (blocks == 0) blocks = (model.capacity_ + 255) / 256 + 1;
   drafter_ = std::make_unique<Dflash2Drafter>(model.drafter_model_, 256, blocks, 1, true);
   const size_t max_prefill_rows =
-      ((std::max(drafter_->ContextWindow(), kBoltVerifyRows) + kBoltVerifyRows - 1) / kBoltVerifyRows + 1) *
-      kBoltVerifyRows;
+      PlanNemotronBoltPrefillAuxWindow(1, drafter_->ContextWindow(), kBoltVerifyRows).max_buffer_rows;
   const std::array<int64_t, 2> prefill_shape{static_cast<int64_t>(max_prefill_rows),
                                              static_cast<int64_t>(model.aux_width_)};
   prefill_aux_ = std::make_unique<Tensor>(model.p_device_, aux.GetType());
@@ -464,7 +470,7 @@ NemotronBoltState::NemotronBoltState(const NemotronBoltModel& model, const Gener
   // Initial graph-enabled executions are not trustworthy. Capture on dummy zero state and discard
   // everything, including the recurrent row selection, before any real prompt is processed.
   for (int i = 0; i < 4; ++i) Verify(dummy, i == 3);
-  if (model.supports_r16_prefill_) {
+  if (r16_enabled_) {
     Reset();
     std::vector<int32_t> dummy16(kBoltPrefillRows16, 1);
     for (int i = 0; i < 4; ++i) PrefillChunk16(dummy16, i == 3);
@@ -474,6 +480,7 @@ NemotronBoltState::NemotronBoltState(const NemotronBoltModel& model, const Gener
     Propose(8, 0, 1);
   }
   Reset();
+  in_warmup_ = false;
 }
 
 NemotronBoltState::~NemotronBoltState() = default;
@@ -492,6 +499,11 @@ void NemotronBoltState::Reset() {
   drafts_.clear();
   pending_.clear();
   prefilled_ = false;
+  prefill_r8_calls_ = 0;
+  prefill_r16_calls_ = 0;
+  verify_r8_calls_ = 0;
+  last_prefill_draft_start_ = 0;
+  last_prefill_draft_rows_ = 0;
   stats_ = {};
 }
 
@@ -512,7 +524,7 @@ void NemotronBoltState::SetActiveAdapter(Adapters*, const std::string&) {
 std::vector<int64_t> NemotronBoltState::Verify(std::span<const int32_t> tokens, bool want_predictions) {
   Require(tokens.size() == kBoltVerifyRows && length_ + kBoltVerifyRows <= bolt_.capacity_,
           "verify block exceeds fixed capacity");
-  const size_t max_input_rows = bolt_.supports_r16_prefill_ ? kBoltPrefillRows16 : kBoltVerifyRows;
+  const size_t max_input_rows = r16_enabled_ ? kBoltPrefillRows16 : kBoltVerifyRows;
   auto cpu_in = verify_inputs_span_.CpuSpan();
   auto* ids_out = reinterpret_cast<int64_t*>(cpu_in.data());
   for (size_t i = 0; i < kBoltVerifyRows; ++i) ids_out[i] = tokens[i];
@@ -523,14 +535,21 @@ std::vector<int64_t> NemotronBoltState::Verify(std::span<const int32_t> tokens, 
   outputs_ = outputs_8_;
   State::Run(*bolt_.session_, true, 8, 0, nullptr);
   ++stats_.target_forward_passes;
+  if (in_warmup_) {
+    ++warmup_r8_calls_;
+  } else if (!prefilled_) {
+    ++prefill_r8_calls_;
+  } else {
+    ++verify_r8_calls_;
+  }
   if (!want_predictions) return {};
   auto cpu = pred_ids_span_.CopyDeviceToCpu();
   return {cpu.begin(), cpu.end()};
 }
 
 std::vector<int64_t> NemotronBoltState::PrefillChunk16(std::span<const int32_t> tokens, bool want_predictions) {
-  Require(bolt_.supports_r16_prefill_ && !inputs_16_.empty(),
-          "R16 target prefill profile is unavailable on a fixed-R8 target session");
+  Require(r16_enabled_ && !inputs_16_.empty(),
+          "R16 target prefill profile is unavailable or disabled for this generator");
   Require(tokens.size() == kBoltPrefillRows16 && length_ + kBoltPrefillRows16 <= bolt_.capacity_,
           "R16 prefill block exceeds fixed capacity");
   auto cpu_in = verify_inputs_span_.CpuSpan();
@@ -543,18 +562,41 @@ std::vector<int64_t> NemotronBoltState::PrefillChunk16(std::span<const int32_t> 
   outputs_ = outputs_16_;
   State::Run(*bolt_.session_, true, static_cast<int>(kBoltPrefillRows16), 0, nullptr);
   ++stats_.target_forward_passes;
+  if (in_warmup_) {
+    ++warmup_r16_calls_;
+  } else {
+    ++prefill_r16_calls_;
+  }
   if (!want_predictions) return {};
   auto cpu = pred_ids_16_span_.CopyDeviceToCpu();
   return {cpu.begin(), cpu.end()};
 }
 
-size_t NemotronBoltPrefillAuxRowsToRetain(size_t prompt_rows, size_t sliding_window, size_t block_rows) {
+NemotronBoltPrefillAuxWindow PlanNemotronBoltPrefillAuxWindow(
+    size_t prompt_rows, size_t context_window, size_t block_rows) {
   Require(prompt_rows > 0 && block_rows > 0, "prefill rows and block size must be positive");
-  if (sliding_window == 0)
-    return prompt_rows;
-  Require(sliding_window <= std::numeric_limits<size_t>::max() - block_rows,
-          "prefill context window overflow");
-  return std::min(prompt_rows, sliding_window + block_rows);
+  if (context_window != 0) {
+    Require(context_window <= std::numeric_limits<size_t>::max() - 2 * block_rows,
+            "prefill context window overflow");
+  }
+  const size_t max_buffer_rows =
+      ((std::max(context_window, block_rows) + block_rows - 1) / block_rows + 1) * block_rows;
+  const size_t draft_start =
+      (context_window != 0 && prompt_rows > context_window)
+          ? ((prompt_rows - context_window) / block_rows) * block_rows
+          : 0;
+  const size_t draft_rows = prompt_rows - draft_start;
+  const size_t ingest_offset =
+      (context_window != 0 && draft_rows > context_window) ? (draft_rows - context_window) : 0;
+  const size_t ingest_rows = draft_rows - ingest_offset;
+  const size_t ingest_first_position = draft_start + ingest_offset;
+  return NemotronBoltPrefillAuxWindow{
+      .max_buffer_rows = max_buffer_rows,
+      .draft_start = draft_start,
+      .draft_rows = draft_rows,
+      .ingest_offset = ingest_offset,
+      .ingest_rows = ingest_rows,
+      .ingest_first_position = ingest_first_position};
 }
 
 void CopyNemotronBoltPrefillAuxRows(Tensor& destination, Tensor& source,
@@ -605,15 +647,14 @@ void NemotronBoltState::Prefill(std::span<const int32_t> tokens) {
   // A failure after the first chunk leaves advanced caches and a native cursor that the public
   // sequence (still empty) cannot rewind, so discard all partial state before propagating.
   try {
-    const size_t window = drafter_->ContextWindow();
-    const size_t draft_start =
-        (window != 0 && tokens.size() > window)
-            ? ((tokens.size() - window) / kBoltVerifyRows) * kBoltVerifyRows
-            : 0;
-    const size_t draft_rows = tokens.size() - draft_start;
-    const bool use_r16 = bolt_.supports_r16_prefill_ && !IsBoltR16PrefillDisabled();
+    const auto aux_window =
+        PlanNemotronBoltPrefillAuxWindow(tokens.size(), drafter_->ContextWindow(), kBoltVerifyRows);
+    const size_t draft_start = aux_window.draft_start;
+    const size_t draft_rows = aux_window.draft_rows;
+    last_prefill_draft_start_ = draft_start;
+    last_prefill_draft_rows_ = draft_rows;
     const auto plan = PlanNemotronBoltPrefillChunks(
-        tokens.size(), bolt_.capacity_, use_r16, length_, state_row_);
+        tokens.size(), bolt_.capacity_, r16_enabled_, length_, state_row_);
     const bool single_chunk = (draft_start == 0 && plan.size() == 1);
     for (size_t i = 0; i < plan.size(); ++i) {
       const auto& step = plan[i];
