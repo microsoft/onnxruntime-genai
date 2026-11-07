@@ -31,12 +31,13 @@ std::unique_ptr<Config> MakeConfig() {
 }
 
 struct TestModel : Model {
-  TestModel(int64_t fixed_capacity = -1, const char* op = "Identity") : Model{MakeConfig()} {
+  TestModel(int64_t fixed_capacity = -1, const char* op = "Identity",
+            ONNXTensorElementDataType cache_type = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) : Model{MakeConfig()} {
     for (const char* suffix : {"key", "value"}) {
       ModelConfig config(op);
-      config.inputs.emplace_back(std::string{"past_key_values.0."} + suffix, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
+      config.inputs.emplace_back(std::string{"past_key_values.0."} + suffix, cache_type,
                                  std::vector<int64_t>{-1, 3, fixed_capacity, 4});
-      config.outputs.emplace_back(std::string{"present.0."} + suffix, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
+      config.outputs.emplace_back(std::string{"present.0."} + suffix, cache_type,
                                   std::vector<int64_t>{-1, 3, fixed_capacity, 4});
       auto graph = GraphBuilder::Build(config);
       OrtSession* session = nullptr;
@@ -108,6 +109,37 @@ void CheckGrowth(const std::shared_ptr<TestModel>& model) {
 
 TEST(SharedCacheGrowth, MigratesBatchesAndHeadsAndRetainsAliasing) {
   CheckGrowth(std::make_shared<TestModel>());
+}
+
+TEST(SharedCacheGrowth, MigratesFloat16BatchesAndHeadsWithoutChangingBits) {
+  auto model = std::make_shared<TestModel>(-1, "Identity", ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16);
+  auto params = CreateGeneratorParams(*model);
+  TestState state{*model, *params};
+  SharedKeyValueCache cache{state};
+  cache.Add();
+  cache.Update({}, 3);
+  ASSERT_EQ(cache.GetShape()[2], 512);
+  auto& device = *model->p_device_kvcache_;
+  std::vector<Ort::Float16_t> values(2 * 3 * 512 * 4);
+  for (size_t i = 0; i < values.size(); ++i) {
+    values[i] = Ort::Float16_t{static_cast<uint16_t>(0x3000 + i % 4096)};
+  }
+  for (auto* tensor : state.inputs_) {
+    auto span = WrapTensor<Ort::Float16_t>(device, *tensor);
+    std::copy(values.begin(), values.end(), span.CpuSpan().begin());
+    span.CopyCpuToDevice();
+  }
+  cache.Update({}, 513);
+  ASSERT_EQ(cache.GetShape()[2], 1024);
+  for (size_t tensor = 0; tensor < state.inputs_.size(); ++tensor) {
+    EXPECT_EQ(state.inputs_[tensor], state.outputs_[tensor]);
+    auto span = WrapTensor<Ort::Float16_t>(device, *state.inputs_[tensor]);
+    const auto migrated = span.CopyDeviceToCpu();
+    for (size_t head = 0; head < 6; ++head) {
+      for (size_t i = 0; i < 2048; ++i) EXPECT_EQ(migrated[head * 4096 + i].value, values[head * 2048 + i].value);
+      for (size_t i = 2048; i < 4096; ++i) EXPECT_EQ(migrated[head * 4096 + i].value, 0);
+    }
+  }
 }
 
 TEST(SharedCacheGrowth, PrefillReservesFirstDecodeToken) {
