@@ -6805,6 +6805,8 @@ class Model:
         # More specific markers must precede overlapping general markers (e.g. Qwen3.5 MoE before dense).
         model_loader_rules = (
             ("qwen4_exp", "Qwen4ExpForConditionalGeneration"),
+            ("qwen3_asr", "Qwen3ASRForConditionalGeneration"),
+            ("Qwen3ASR", "Qwen3ASRForConditionalGeneration"),
             ("qwen3_5_moe", "Qwen3_5MoeForConditionalGeneration"),
             ("qwen3_5", "Qwen3_5ForConditionalGeneration"),
             ("qwen3_vl_text", "Qwen3VLForConditionalGeneration"),

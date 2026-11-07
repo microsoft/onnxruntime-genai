@@ -7,6 +7,7 @@
 #include "nemotron_parse.h"
 #include "models/io/default_position_inputs.h"
 #include "models/io/qwen_vl_position_inputs.h"
+#include "models/preprocessing/qwen3_asr_processor.h"
 #include "pixtral_vision_state.h"
 #include "qwen_vl_state.h"
 #include <algorithm>
@@ -209,7 +210,8 @@ void Lfm2AudioSpeechState::SetExtraInputs(const std::vector<ExtraInput>& extra_i
   // The feature buffer is one sequence wide, so beams would fail as a shape mismatch inside the
   // encoder. The reference decodes greedily.
   if (params_->search.num_beams > 1) {
-    throw std::runtime_error("Lfm2AudioSpeechState: beam search is not supported for lfm2_audio; got num_beams " +
+    throw std::runtime_error("Lfm2AudioSpeechState: beam search is not supported for " + model_.config_->model.type +
+                             "; got num_beams " +
                              std::to_string(params_->search.num_beams) + ". Set num_beams to 1.");
   }
 
@@ -263,7 +265,7 @@ Lfm2AudioSpeechState::SpeechBindings Lfm2AudioSpeechState::ResolveBindings() con
 }
 
 std::unique_ptr<OrtValue> Lfm2AudioSpeechState::RunClip(const SpeechBindings& bindings, int64_t index,
-                                                        int64_t num_frames) {
+                                                        int64_t num_frames, int64_t valid_frames) {
   const size_t mel_element_size = Ort::SizeOf(bindings.mel_type);
   const size_t clip_stride = static_cast<size_t>(bindings.longest_clip * bindings.num_mels) * mel_element_size;
   const auto* mel_data = static_cast<const uint8_t*>(inputs_[bindings.mel_index]->GetTensorRawData());
@@ -274,7 +276,7 @@ std::unique_ptr<OrtValue> Lfm2AudioSpeechState::RunClip(const SpeechBindings& bi
               static_cast<size_t>(num_frames * bindings.num_mels) * mel_element_size);
 
   auto clip_length = OrtValue::CreateTensor<int64_t>(Ort::Allocator::GetWithDefaultOptions(), std::vector<int64_t>{1});
-  clip_length->GetTensorMutableData<int64_t>()[0] = num_frames;
+  clip_length->GetTensorMutableData<int64_t>()[0] = valid_frames;
 
   auto clip_features = OrtValue::CreateTensor(
       p_session_device_->GetAllocator(),
@@ -315,14 +317,16 @@ DeviceSpan<float> Lfm2AudioSpeechState::Run(int current_length, DeviceSpan<int32
   // a batch), so run it once per clip on that clip's own frames — which also keeps the padding out
   // of the encoder entirely — and concatenate the results in clip order.
   for (int64_t clip = 0; clip < bindings.num_clips; ++clip) {
-    const int64_t num_frames = frames_per_clip[clip];
-    if (num_frames <= 0 || num_frames > bindings.longest_clip) {
+    const int64_t valid_frames = frames_per_clip[clip];
+    const int64_t num_frames = (valid_frames + frame_multiple_ - 1) / frame_multiple_ * frame_multiple_;
+    if (valid_frames <= 0 || num_frames > bindings.longest_clip) {
       throw std::runtime_error("Lfm2AudioSpeechState: clip " + std::to_string(clip) + " reports " +
-                               std::to_string(num_frames) + " mel frames, outside the 1.." +
-                               std::to_string(bindings.longest_clip) + " the mel tensor holds.");
+                               std::to_string(valid_frames) + " mel frames (" + std::to_string(num_frames) +
+                               " with the chunk padding), outside the 1.." + std::to_string(bindings.longest_clip) +
+                               " the mel tensor holds.");
     }
 
-    auto clip_features = RunClip(bindings, clip, num_frames);
+    auto clip_features = RunClip(bindings, clip, num_frames, valid_frames);
     const size_t clip_bytes = static_cast<size_t>(tokens_per_clip_[static_cast<size_t>(clip)]) * feature_row_bytes;
     features_bytes.subspan(destination, clip_bytes).CopyFrom(ByteWrapTensor(*p_session_device_, *clip_features));
     destination += clip_bytes;
@@ -347,6 +351,10 @@ size_t Lfm2AudioSpeechState::FindOutput(const std::string& name) const {
 std::unique_ptr<SpeechState> CreateSpeechState(const MultiModalLanguageModel& model, const GeneratorParams& params) {
   if (model.config_->model.type == "lfm2_audio") {
     return std::make_unique<Lfm2AudioSpeechState>(model, params);
+  }
+  if (model.config_->model.type == "qwen3_asr") {
+    // The Qwen3-ASR encoder runs its convolutions on whole chunks of mel frames.
+    return std::make_unique<Lfm2AudioSpeechState>(model, params, kQwen3AsrChunkFrames);
   }
   return std::make_unique<SpeechState>(model, params);
 }
