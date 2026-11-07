@@ -497,14 +497,18 @@ void PagedCacheManager::SealCommittedBlocks(const StepPlan& plan) {
     return;
   }
   for (const auto& entry : plan.requests) {
-    if (!fixed_state_pool_) {
-      key_value_cache_->SealCommittedBlocks(
-          entry.request_id, entry.request->PrefixTokensCpu());
+    if ((fixed_state_pool_ && !entry.is_prefill) ||
+        !key_value_cache_->CanSealCommittedBlocks(entry.request_id)) {
       continue;
     }
-    if (!entry.is_prefill ||
-        !key_value_cache_->CanSealPrefixCheckpoint(
-            entry.request_id, entry.target_cache_slots, entry.request->PrefixTokensCpu())) {
+    const auto tokens = entry.request->PrefixTokensCpu();
+    if (!fixed_state_pool_) {
+      key_value_cache_->SealCommittedBlocks(
+          entry.request_id, tokens);
+      continue;
+    }
+    if (!key_value_cache_->CanSealPrefixCheckpoint(
+            entry.request_id, entry.target_cache_slots, tokens)) {
       continue;
     }
     if (fixed_state_pool_->AvailablePrefixCheckpoints() == 0) {
@@ -520,7 +524,7 @@ void PagedCacheManager::SealCommittedBlocks(const StepPlan& plan) {
       }
     }
     key_value_cache_->SealCheckpointedPrefix(
-        entry.request_id, entry.request->PrefixTokensCpu(), entry.target_cache_slots,
+        entry.request_id, tokens, entry.target_cache_slots,
         [this, request_id = entry.request_id] {
           const auto* replacement =
               fixed_state_pool_->AvailablePrefixCheckpoints() == 0

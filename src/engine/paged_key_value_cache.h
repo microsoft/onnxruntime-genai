@@ -126,6 +126,7 @@ struct PagedKeyValueCache {
       const PagedCacheReservation& reservation) noexcept;
   void RecordDeferredPrefixMatches(size_t count) noexcept;
   void RecordPrefixPublicationRefusal() noexcept;
+  bool CanSealCommittedBlocks(const void* request_id) const;
   void SealCommittedBlocks(const void* request_id,
                            std::span<const int32_t> tokens,
                            std::shared_ptr<const FixedStatePrefixCheckpoint> checkpoint = nullptr);

@@ -28,6 +28,10 @@ class Qwen4ExpModel(MTPModel):
         decoder_options = self.make_mtp_init(config, self.extra_options)
         self.decoder = Qwen4ExpTextModel(copy.deepcopy(config), io_dtype, onnx_dtype, ep, cache_dir, decoder_options)
         self.decoder.model_type = "qwen4_exp_text" if self.text_only else "qwen3_5"
+        # Implicit exclusion serves the legacy merge graph, not a standalone lookup.
+        self.decoder.embed_attrs["emit_component"] = self.decoder.use_paged_attention and self.extra_options.get(
+            "exclude_embeds", False
+        )
         self.mtp = None
         if self.mtp_attrs["build"]:
             self.decoder.hyper_connection_attrs["emit_pre_final_hidden_states"] = True

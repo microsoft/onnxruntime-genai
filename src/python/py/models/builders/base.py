@@ -305,6 +305,7 @@ class Model:
         # Embedding-specific variables
         self.embed_attrs = {
             "scale": 1,                  # Scale value to multiply output of Embedding layer by
+            "emit_component": self.use_paged_attention,  # Standalone lookup for external embedding consumers.
         }
 
         # LayerNorm-specific variables
@@ -6938,7 +6939,7 @@ class Model:
                     self.make_embedding(module.weight)
                 else:
                     # Exclude embedding layer from model
-                    if self.use_paged_attention or self.extra_options.get("dflash2_path"):
+                    if self.embed_attrs["emit_component"] or self.extra_options.get("dflash2_path"):
                         self.embedding_model = self.make_embedding_component(module.weight)
                     self.layernorm_attrs["root_input"] = "inputs_embeds"
                     self.layernorm_attrs["skip_input"] = "inputs_embeds"

@@ -279,6 +279,51 @@ TEST_F(SchedulerContractTest, MissingImageDoesNotSuppressUnserviceablePeerFailur
   EXPECT_FALSE(result.preparation_item);
 }
 
+TEST_F(SchedulerContractTest, OccupiedPagedSlotDefersQueuedImagesWithoutFeatureThrashing) {
+  for (const int ready_image : {-1, 0, 1}) {
+    auto& config = *model_->config_->engine.dynamic_batching;
+    config.block_size = 4;
+    config.num_blocks = 8;
+    config.max_batch_size = 1;
+    config.max_scheduled_tokens = 1;
+    config.media_device_bytes = 16;
+    auto cache = std::make_shared<PagedCacheManager>(model_);
+    DynamicBatchScheduler scheduler(model_, cache);
+    auto completed = Assigned(10);
+    MakePrefillResident(scheduler, *cache, completed);
+    completed->status_ = RequestStatus::TurnComplete;
+
+    std::array<std::shared_ptr<MediaItem>, 2> images;
+    for (size_t i = 0; i < images.size(); ++i) {
+      auto request = Assigned(static_cast<int32_t>(20 + i));
+      images[i] = std::make_shared<MediaItem>();
+      images[i]->rows = 2;
+      images[i]->feature_bytes = config.media_device_bytes;
+      if (static_cast<int>(i) == ready_image)
+        images[i]->features = std::make_shared<Tensor>(GetDeviceInterface(DeviceType::CPU), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+      request->ReserveMedia(1);
+      const std::array<MediaSpan, 1> media{{{1, images[i]}}};
+      request->AppendMedia(media);
+      request->StagePrefixAdoption(1);
+      request->CommitPrefixAdoption();
+      scheduler.AddRequest(request);
+    }
+
+    StepPlan plan;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+      const auto blocked = scheduler.PlanStep(plan);
+      EXPECT_FALSE(blocked.executable);
+      EXPECT_EQ(blocked.outcome.kind, StepOutcomeKind::CapacityDeferred);
+      EXPECT_TRUE(blocked.capacity_deferred);
+      EXPECT_FALSE(blocked.preparation_item);
+      EXPECT_TRUE(plan.Empty());
+    }
+    scheduler.RemoveRequest(completed);
+    const auto resumed = scheduler.PlanStep(plan);
+    EXPECT_TRUE(resumed.executable || resumed.outcome.kind == StepOutcomeKind::PreparationProgress);
+  }
+}
+
 TEST_F(SchedulerContractTest, MissingImageDoesNotSuppressLaterQueuedTextPrefill) {
   auto cache = std::make_shared<RecordingCacheManager>(model_, 8);
   DynamicBatchScheduler scheduler(model_, cache);
@@ -297,6 +342,81 @@ TEST_F(SchedulerContractTest, MissingImageDoesNotSuppressLaterQueuedTextPrefill)
   ASSERT_EQ(plan.requests.size(), 1u);
   EXPECT_EQ(plan.requests[0].request, text);
   EXPECT_EQ(image_request->ProcessedSequenceLength(), 0);
+}
+
+TEST_F(SchedulerContractTest, QueuedImagePreparationRespectsPerRequestCapacityFailures) {
+  for (const bool unserviceable : {false, true}) {
+    auto cache = std::make_shared<RecordingCacheManager>(model_, 8);
+    DynamicBatchScheduler scheduler(model_, cache);
+    const std::array requests{Assigned(10), Assigned(20)};
+    for (const auto& request : requests) {
+      auto image = std::make_shared<MediaItem>();
+      image->rows = 2;
+      request->ReserveMedia(1);
+      request->AppendMedia(std::array<MediaSpan, 1>{{{0, image}}});
+      scheduler.AddRequest(request);
+    }
+    if (unserviceable)
+      cache->SetUnserviceableRequest(requests[0]);
+    else
+      cache->SetCapacityDeferredRequest(requests[0]);
+
+    StepPlan plan;
+    const auto result = scheduler.PlanStep(plan);
+    EXPECT_TRUE(plan.Empty());
+    if (unserviceable) {
+      EXPECT_EQ(result.outcome.kind, StepOutcomeKind::UnserviceableRequest);
+      EXPECT_EQ(result.unserviceable_request_id, requests[0].get());
+      EXPECT_FALSE(result.preparation_item);
+    } else {
+      EXPECT_EQ(result.outcome.kind, StepOutcomeKind::PreparationProgress);
+      EXPECT_EQ(result.preparation_request, requests[1]);
+    }
+  }
+}
+
+TEST_F(SchedulerContractTest, QueuedImagePreparationProbesTheProspectivePrefixBoundary) {
+  auto& config = *model_->config_->engine.dynamic_batching;
+  config.block_size = 4;
+  config.num_blocks = 2;
+  config.max_batch_size = 1;
+  config.max_scheduled_tokens = 1;
+  config.prefix_caching = true;
+  auto cache = std::make_shared<PagedCacheManager>(model_);
+  DynamicBatchScheduler scheduler(model_, cache);
+  auto source = CreateRequestWithPrompt(assign_target_, std::array<int32_t, 5>{4, 4, 4, 4, 4});
+  source->StagePrefixAdoption(4);
+  source->CommitPrefixAdoption();
+  MakePrefillResident(scheduler, *cache, source);
+  StepPlan publication;
+  RequestStepPlan entry;
+  entry.request = source;
+  entry.request_id = source.get();
+  entry.target_cache_slots = 4;
+  entry.is_prefill = true;
+  publication.requests.push_back(entry);
+  auto reservation = cache->ReserveStep(publication);
+  reservation->Commit();
+  cache->SealCommittedBlocks(publication);
+  scheduler.RemoveRequest(source);
+
+  auto request = CreateRequestWithPrompt(assign_target_, std::array<int32_t, 7>{4, 4, 4, 4, 4, 4, 4});
+  auto image = std::make_shared<MediaItem>();
+  image->rows = 2;
+  request->ReserveMedia(1);
+  request->AppendMedia(std::array<MediaSpan, 1>{{{4, image}}});
+  scheduler.AddRequest(request);
+  const auto match = cache->MatchPrefix(*request);
+  ASSERT_TRUE(match);
+  ASSERT_EQ(match->token_count, 4u);
+
+  StepPlan plan;
+  const auto result = scheduler.PlanStep(plan);
+  EXPECT_EQ(result.outcome.kind, StepOutcomeKind::PreparationProgress);
+  EXPECT_EQ(result.preparation_request, request);
+  EXPECT_EQ(result.preparation_item, image);
+  EXPECT_EQ(request->ProcessedSequenceLength(), 0);
+  EXPECT_TRUE(plan.Empty());
 }
 
 TEST_F(SchedulerContractTest, MediaChunkFinishesAnOffsetCacheBlockExactly) {
@@ -325,6 +445,43 @@ TEST_F(SchedulerContractTest, MediaChunkFinishesAnOffsetCacheBlockExactly) {
       EXPECT_EQ(plan.token_count, prefix_caching ? 13u : 27u);
       EXPECT_EQ(plan.requests[0].target_cache_slots, prefix_caching ? 16u : 30u);
       EXPECT_EQ(request->ProcessedSequenceLength(), 3);
+    }
+  }
+}
+
+TEST_F(SchedulerContractTest, MediaPrefillUsesTheFurthestBudgetedBlockBoundary) {
+  for (const size_t image_rows : {size_t{1}, size_t{96}}) {
+    for (const size_t chunk : {size_t{0}, size_t{20}, size_t{64}}) {
+      for (const size_t budget : {size_t{12}, size_t{50}, size_t{64}}) {
+        model_->config_->search.chunk_size = chunk;
+        auto& config = *model_->config_->engine.dynamic_batching;
+        config.prefix_caching = true;
+        config.block_size = 16;
+        config.max_scheduled_tokens = budget;
+        auto cache = std::make_shared<RecordingCacheManager>(model_, 8);
+        DynamicBatchScheduler scheduler(model_, cache);
+        const std::vector<int32_t> tokens(96, 4);
+        auto request = CreateRequestWithPrompt(assign_target_, tokens);
+        auto image = std::make_shared<MediaItem>();
+        image->rows = image_rows;
+        image->features = std::make_shared<Tensor>(GetDeviceInterface(DeviceType::CPU), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+        request->ReserveMedia(1);
+        const std::array<MediaSpan, 1> media{{{0, image}}};
+        request->AppendMedia(media);
+        request->StagePrefixAdoption(3);
+        request->CommitPrefixAdoption();
+        scheduler.AddRequest(request);
+
+        const size_t limit = std::min(budget, chunk == 0 ? size_t{93} : chunk);
+        const size_t boundary = (3 + limit) / config.block_size * config.block_size;
+        const size_t expected = boundary > 3 ? boundary - 3 : limit;
+        StepPlan plan;
+        ASSERT_TRUE(scheduler.PlanStep(plan).executable);
+        ASSERT_EQ(plan.requests.size(), 1u);
+        EXPECT_EQ(plan.token_count, expected);
+        EXPECT_EQ(plan.requests[0].target_cache_slots, 3 + expected);
+        EXPECT_EQ(plan.requests[0].logits_row_index, expected - 1);
+      }
     }
   }
 }
