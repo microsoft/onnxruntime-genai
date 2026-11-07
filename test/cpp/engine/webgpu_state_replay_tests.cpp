@@ -54,6 +54,100 @@ std::string ConfigEntry(const OrtSessionOptions& options, const char* key) {
   return value;
 }
 
+TEST(WebGpuInitSessionOptionsTest, ForwardsDawnCacheInterfaceAndExcludesSessionOptions) {
+  auto* device = GetDeviceInterface(DeviceType::WEBGPU);
+  for (const char* value : {"0", "123456"}) {
+    SCOPED_TRACE(value);
+    Config::ProviderOptions user_options{
+        "WebGPU", {{"dawnCacheInterface", value}, {"weightLoadAcceleration", "required"}, {"enableGraphCapture", "1"}, {"preferredLayout", "NHWC"}, {"enableInt64", "1"}}};
+    Config::ProviderOptions init_options{"WebGPU", {}};
+    device->ShapeInitSessionProviderOptions(init_options, &user_options);
+    const std::vector<std::pair<std::string, std::string>> expected{
+        {"dawnCacheInterface", value}, {"weightLoadAcceleration", "required"}};
+    EXPECT_EQ(init_options.options, expected);
+  }
+}
+
+TEST(WebGpuInitSessionOptionsTest, DoesNotInjectDawnCacheInterfaceWhenOmitted) {
+  auto* device = GetDeviceInterface(DeviceType::WEBGPU);
+  Config::ProviderOptions user_options{"WebGPU", {{"enableGraphCapture", "1"}}};
+  Config::ProviderOptions init_options{"WebGPU", {}};
+  device->ShapeInitSessionProviderOptions(init_options, &user_options);
+  EXPECT_TRUE(init_options.options.empty());
+  device->ShapeInitSessionProviderOptions(init_options, nullptr);
+  EXPECT_TRUE(init_options.options.empty());
+}
+
+TEST(WebGpuCastTest, AppliesInt64OverrideBeforeProviderRegistration) {
+  GetOrtEnv();
+  const auto providers = Ort::GetAvailableProviders();
+  if (std::find(providers.begin(), providers.end(), "WebGpuExecutionProvider") == providers.end()) {
+    GTEST_SKIP() << "No native WebGPU EP is available.";
+  }
+
+  auto* device = GetDeviceInterface(DeviceType::WEBGPU);
+  Config config;
+  config.model.decoder.session_options.provider_options.emplace_back(
+      "WebGPU", std::vector<std::pair<std::string, std::string>>{
+                    {"deviceId", "0"}, {"dawnCacheInterface", "0"}});
+  auto& user_options = config.model.decoder.session_options.provider_options.front();
+  user_options.device_filtering_options.emplace();
+  user_options.device_filtering_options->hardware_device_type = OrtHardwareDeviceType_GPU;
+  auto& allocator = GetOrtGlobals()->device_allocators_[static_cast<int>(DeviceType::WEBGPU)];
+  const bool already_initialized = allocator.allocator_ != nullptr;
+  EnsureDeviceOrtInit(*device, config);
+  ASSERT_EQ(allocator.provider_options_.name, "WebGPU");
+  auto& init_options = allocator.session_options_;
+  struct RestoreInitSessionOptions {
+    std::unique_ptr<OrtSessionOptions>& target;
+    std::unique_ptr<OrtSessionOptions> original;
+    ~RestoreInitSessionOptions() { target = std::move(original); }
+  } restore{init_options, std::move(init_options)};
+  // V1 factories capture their options at registration, unlike factories that read options at session creation.
+  Config::ProviderOptions native_options{"WebGPU", {}};
+  device->ShapeInitSessionProviderOptions(native_options, &user_options);
+  native_options.options.emplace_back("enableGraphCapture", "0");
+  if (!already_initialized) {
+    EXPECT_EQ(allocator.provider_options_.options, native_options.options);
+    ASSERT_TRUE(allocator.provider_options_.device_filtering_options);
+    EXPECT_EQ(allocator.provider_options_.device_filtering_options->hardware_device_type, OrtHardwareDeviceType_GPU);
+  }
+  init_options = OrtSessionOptions::Create();
+  AppendExecutionProviderV1(*init_options, native_options);
+
+  auto memory_info = device->GetMemoryInfo();
+  const std::array<float, 4> values{1.75f, -2.5f, 0.0f, 3.0f};
+  const std::array<int64_t, 4> expected{1, -2, 0, 3};
+  auto input = device->Allocate<float>(values.size());
+  auto output = device->Allocate<int64_t>(values.size());
+  input.BackingBuffer()->CopyFromCpu(values.data(), sizeof(values));
+
+  const std::vector<const char*> keys{
+      "ep.webgpuexecutionprovider.enableInt64", "session.disable_cpu_ep_fallback"};
+  const std::vector<const char*> settings{"1", "1"};
+  ExecuteCastOp(input.Span().data(), output.Span().data(),
+                ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64,
+                values.size(), DeviceType::WEBGPU, "WebGpuExecutionProvider",
+                memory_info.get(), keys, settings);
+  const auto result = output.CopyDeviceToCpu();
+  for (size_t i = 0; i < expected.size(); ++i) {
+    EXPECT_EQ(result[i], expected[i]);
+  }
+
+  auto round_trip = device->Allocate<float>(values.size());
+  ExecuteCastOp(output.Span().data(), round_trip.Span().data(),
+                ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
+                values.size(), DeviceType::WEBGPU, "WebGpuExecutionProvider",
+                memory_info.get(), keys, settings);
+  const auto round_trip_result = round_trip.CopyDeviceToCpu();
+  for (size_t i = 0; i < expected.size(); ++i) {
+    EXPECT_EQ(round_trip_result[i], static_cast<float>(expected[i]));
+  }
+  if (!already_initialized) {
+    EXPECT_EQ(allocator.provider_options_.options, native_options.options);
+  }
+}
+
 class WebGpuStateReplayTest : public ::testing::TestWithParam<bool> {
  protected:
   static constexpr size_t kHv = 3, kDv = 2, kDk = 4, kHk = 2, kCapacity = 4;

@@ -4,9 +4,11 @@
 #include "graph_executor.h"
 #include "graph_builder.h"
 #include "generator/generators.h"
+#include <algorithm>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <string_view>
 #include <unordered_map>
 #include <cstring>
 #include "session_options.h"
@@ -47,17 +49,36 @@ std::unique_ptr<OrtSession> CreateSession(
     const std::string& ep_name,
     const std::vector<const char*>& session_config_keys,
     const std::vector<const char*>& session_config_values) {
+  const auto& allocator =
+      GetOrtGlobals()->device_allocators_[static_cast<int>(DeviceType::WEBGPU)];
+  const bool reuse_webgpu_options =
+      device_type == DeviceType::WEBGPU && ep_name == "WebGpuExecutionProvider" && allocator.session_options_;
+  // Auxiliary WebGPU graphs share the allocator's device/cache configuration.
+  // Register a fresh provider after graph-specific overrides; cloning would reuse
+  // a native factory whose configuration was already captured.
+  auto provider_options = reuse_webgpu_options ? allocator.provider_options_ : Config::ProviderOptions{ep_name, {}};
   auto session_options = OrtSessionOptions::Create();
   session_options->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
   // Apply session configuration entries
   for (size_t i = 0; i < session_config_keys.size(); i++) {
     session_options->AddConfigEntry(session_config_keys[i], session_config_values[i]);
+    constexpr std::string_view webgpu_prefix = "ep.webgpuexecutionprovider.";
+    const std::string_view key{session_config_keys[i]};
+    if (reuse_webgpu_options && key.compare(0, webgpu_prefix.size(), webgpu_prefix) == 0) {
+      const auto option_name = key.substr(webgpu_prefix.size());
+      auto option = std::find_if(provider_options.options.begin(), provider_options.options.end(),
+                                 [option_name](const auto& entry) { return entry.first == option_name; });
+      if (option == provider_options.options.end()) {
+        provider_options.options.emplace_back(option_name, session_config_values[i]);
+      } else {
+        option->second = session_config_values[i];
+      }
+    }
   }
 
   // Append execution provider
   if (!ep_name.empty()) {
-    const Config::ProviderOptions provider_options{ep_name, {}};
     if (!AppendExecutionProviderV2(*session_options, provider_options,
                                    device_type, ep_name)) {
       AppendExecutionProviderV1(*session_options, provider_options);
