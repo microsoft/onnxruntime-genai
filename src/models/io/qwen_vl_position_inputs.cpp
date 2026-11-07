@@ -324,7 +324,7 @@ void Qwen2VLPositionInputs::CreateAndInitialize3DPositionIDs(DeviceSpan<int32_t>
 
         // Round to nearest integer for temporal position
         // Note: huggingface code use truncation/floor (time_tensor_long = time_tensor.long() when converting time coordinates.
-        // This will cause slight deviation from the reference during parity comparsion.
+        // This will cause slight deviation from the reference during parity comparison.
         T t_pos = static_cast<T>(std::round(gt * second_per_grid_t * tokens_per_second_)) + st_idx;
         T h_pos = static_cast<T>(gh) + st_idx;
         T w_pos = static_cast<T>(gw) + st_idx;

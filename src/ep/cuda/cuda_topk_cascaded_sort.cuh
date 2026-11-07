@@ -55,7 +55,7 @@ namespace cg = cooperative_groups;
 // candidates in Stage 2.
 constexpr int kMaxPartitions = 64;
 
-// Parition sizes are optimized for common vocab_size (padded to multiple of
+// Partition sizes are optimized for common vocab_size (padded to multiple of
 // 256) used in open source LLM:
 //    32256, 32512, 128256, 128512, 152064, 152320, 200192, 200448, 201216,
 //    201472, 262400, 262656.
