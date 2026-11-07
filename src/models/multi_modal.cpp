@@ -575,7 +575,8 @@ DeviceSpan<float> DecoderState::RunPrefillWithChunking(int current_length, Devic
       ple_state_->Update();
     if (indexer_cache_)
       indexer_cache_->Update(next_indices, length, static_cast<int>(current_chunk_size));
-    logits_.Update(chunk_tokens, current_chunk_size);
+    logits_.Update(chunk_tokens, current_chunk_size, false,
+                   processed_tokens + current_chunk_size == num_tokens);
     if (hidden_states_output_)
       hidden_states_output_->Update(static_cast<int>(current_chunk_size));
     if (engram_state) {
@@ -770,6 +771,7 @@ void MultiModalPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extr
 }
 
 DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
+  State::PromptInputScope prompt_scope(*decoder_state_, IsPromptInput(), InputSelectionLength());
   // Pipeline state defines the pipeline of the execution of the models
   // Prompt stage:
   //   - pixel_values, [image_attention_mask], image_sizes -> |vision_model| -> image_features

@@ -33,7 +33,7 @@ PAD_TOKEN_ID = 0
 HEAD_SIZE = 16
 
 
-def _make_lm_head_graph(tmp_path, io_dtype, with_mask):
+def _make_lm_head_graph(tmp_path, io_dtype, with_mask, runtime_indices=False):
     """Build only the pruned LM head. The MatMul is an Identity, so the logits are the picked hidden states."""
     model = Model.__new__(Model)
     model.use_paged_attention = False
@@ -42,6 +42,8 @@ def _make_lm_head_graph(tmp_path, io_dtype, with_mask):
     model.hidden_size = HIDDEN_SIZE
     model.vocab_size = HIDDEN_SIZE
     model.input_names = {"attention_mask": "attention_mask"} if with_mask else {}
+    if runtime_indices:
+        model.input_names["last_token_indices"] = "last_token_indices"
     model.output_types = {"logits": io_dtype}
     model.output_shapes = {"logits": ["batch_size", "sequence_length", model.vocab_size]}
     model.layernorm_attrs = {"output_0": "hidden_states"}
@@ -55,6 +57,8 @@ def _make_lm_head_graph(tmp_path, io_dtype, with_mask):
         graph.inputs.append(
             model.make_value("attention_mask", ir.DataType.INT64, ["batch_size", "total_sequence_length"])
         )
+    if runtime_indices:
+        graph.inputs.append(model.make_value("last_token_indices", ir.DataType.INT32, ["batch_size", 1, 1]))
 
     def make_matmul(_lm_head, name, root_input, **_kwargs):
         model.make_node("Identity", inputs=[root_input], outputs=["logits"], name=name)
@@ -68,6 +72,20 @@ def _make_lm_head_graph(tmp_path, io_dtype, with_mask):
     path = tmp_path / "pruned_lm_head.onnx"
     ir.save(model.model, path)
     return model, ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+
+
+@pytest.mark.parametrize("with_mask", [False, True])
+def test_runtime_indices_select_chunk_local_rows_with_a_static_mask(tmp_path, with_mask):
+    _, session = _make_lm_head_graph(tmp_path, ir.DataType.FLOAT16, with_mask=with_mask, runtime_indices=True)
+    hidden = np.arange(2 * 968 * HIDDEN_SIZE, dtype=np.float32).reshape(2, 968, HIDDEN_SIZE).astype(np.float16)
+    feeds = {
+        "hidden_states": hidden,
+        "last_token_indices": np.array([951, 2], dtype=np.int32).reshape(2, 1, 1),
+    }
+    if with_mask:
+        feeds["attention_mask"] = np.ones((2, 8192), dtype=np.int64)
+    (output,) = session.run(None, feeds)
+    np.testing.assert_array_equal(output, hidden[np.arange(2), [951, 2]][:, np.newaxis, :])
 
 
 @pytest.mark.parametrize(
@@ -251,6 +269,37 @@ def test_the_last_layer_reaches_the_logits(model_sessions):
 # The row choice is exact (the head-only tests above use assert_array_equal). Here a MatMul over one row
 # is compared with a MatMul over S rows, and the CPU kernels may round the last bits differently.
 ATOL = 1e-5
+
+
+def test_runtime_index_option_exports_a_complete_model(tmp_path):
+    if not hasattr(transformers, "LlamaForCausalLM"):
+        pytest.skip("transformers does not provide LlamaForCausalLM")
+
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(0)
+        hf_model, builder_class = _tiny_llama()
+    hf_model.eval()
+    full = _build_session(tmp_path, hf_model, builder_class, {})
+    pruned = _build_session(
+        tmp_path, hf_model, builder_class, {"prune_lm_head": True, "runtime_last_token_indices": True}
+    )
+    ids = np.array([[10, 11, 0, 0], [12, 13, 14, 15]], dtype=np.int64)
+    mask = (ids != 0).astype(np.int64)
+    expected, _ = _run(full, ids, mask, _empty_state(full, 2))
+    feeds = {
+        "input_ids": ids,
+        "attention_mask": mask,
+        **_empty_state(pruned, 2),
+        "last_token_indices": np.array([1, 3], dtype=np.int32).reshape(2, 1, 1),
+    }
+    outputs = dict(zip([v.name for v in pruned.get_outputs()], pruned.run(None, feeds), strict=True))
+    np.testing.assert_allclose(outputs["logits"], expected[np.arange(2), [1, 3]][:, np.newaxis, :], atol=ATOL, rtol=0)
+
+
+def test_runtime_index_complete_export_skips_without_transformers(tmp_path, monkeypatch):
+    monkeypatch.setitem(globals(), "transformers", types.ModuleType("transformers"))
+    with pytest.raises(pytest.skip.Exception, match="transformers does not provide LlamaForCausalLM"):
+        test_runtime_index_option_exports_a_complete_model(tmp_path)
 
 
 def test_pruned_model_matches_full_logits_on_a_right_padded_batch(model_sessions):

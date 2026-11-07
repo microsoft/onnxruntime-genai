@@ -4,6 +4,10 @@
 
 namespace Generators {
 
+std::vector<int32_t> LastTokenIndices(std::span<const int32_t> tokens, size_t batch_size,
+                                      size_t num_beams, size_t sequence_length, int32_t pad_token_id,
+                                      bool allow_padding_only = false);
+
 struct Logits {
   Logits(State& state);
 
@@ -12,8 +16,10 @@ struct Logits {
   // For first iteration, find last token of each beam and store it in output_last_tokens_.
   DeviceSpan<float> Get(bool all_tokens_valid = false);
 
-  // Resize logits to [bz, token_count, vocab_size] if necessary.
-  void Update(const DeviceSpan<int32_t>& next_tokens, size_t new_kv_length);
+  // PromptInputScope enables padding validation, including one-token final chunks.
+  // Token rows may be logical batch rows or already expanded over beams.
+  void Update(const DeviceSpan<int32_t>& next_tokens, size_t new_kv_length,
+              bool all_tokens_valid = false, bool is_final_chunk = true);
 
  private:
   State& state_;
@@ -30,6 +36,7 @@ struct Logits {
   std::unique_ptr<OrtValue> logits_of_last_token_fp32_;
 
   std::unique_ptr<Tensor> output_raw_;  // Raw logits output from model
+  std::unique_ptr<Tensor> token_indices_;
 
   std::vector<int> input_sequence_lengths;
   // OrtValue wrapped in a DeviceMemory object to make it universal

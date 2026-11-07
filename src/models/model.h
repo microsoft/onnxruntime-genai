@@ -12,6 +12,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <utility>
 #include "models/io/adapters.h"
 #include "models/io/extra_outputs.h"
 
@@ -98,6 +99,28 @@ struct State {
   virtual void DiscardNextLogits() {}
   virtual void StartTurn() {}
 
+  class PromptInputScope {
+   public:
+    PromptInputScope(State& state, bool is_prompt, size_t input_selection_length = 0)
+        : state_{state},
+          previous_{std::exchange(state.is_prompt_input_, is_prompt)},
+          previous_selection_length_{std::exchange(state.input_selection_length_, input_selection_length)} {}
+    ~PromptInputScope() {
+      state_.is_prompt_input_ = previous_;
+      state_.input_selection_length_ = previous_selection_length_;
+    }
+    PromptInputScope(const PromptInputScope&) = delete;
+    PromptInputScope& operator=(const PromptInputScope&) = delete;
+
+   private:
+    State& state_;
+    bool previous_;
+    size_t previous_selection_length_;
+  };
+
+  bool IsPromptInput() const { return is_prompt_input_; }
+  size_t InputSelectionLength() const { return input_selection_length_; }
+
   void DumpInputs();
   void DumpOutputs();
 
@@ -127,6 +150,10 @@ struct State {
   std::unique_ptr<OrtRunOptions> run_options_;
 
  private:
+  // Generated and replayed tokens are valid even when their ID equals PAD.
+  bool is_prompt_input_{};
+  // A nonzero extent excludes synthetic right-side alignment padding, not genuine PAD tokens.
+  size_t input_selection_length_{};
   // Capture identity includes input length, execution variant, and active adapters.
   // IDs are unique across states sharing a session and stay owned until destruction.
   GraphAnnotationIds graph_ids_;
