@@ -906,6 +906,7 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
 
 Qwen38GraphEngine::~Qwen38GraphEngine() {
   Drain();
+  ReleaseCapturedGraphs();
   // IO bindings and OrtValues reference the buffers: release them first
   for (auto& row : dirs_)
     for (auto& d : row) d.binding.reset();
@@ -916,6 +917,23 @@ Qwen38GraphEngine::~Qwen38GraphEngine() {
     for (auto& d : h.dirs) d.binding.reset();
   for (auto& d : head_r2_.dirs) d.binding.reset();
   fast_.reset();
+}
+
+void Qwen38GraphEngine::ReleaseCapturedGraphs() noexcept {
+  for (const auto& [session, annotation_id] : captured_graphs_) {
+    try {
+      session->ReleaseCapturedGraph(annotation_id);
+    } catch (const std::exception& e) {
+      if (g_log.enabled) {
+        Log("graph_capture") << "ReleaseCapturedGraph(id=" << annotation_id << ") failed: " << e.what() << std::endl;
+      }
+    } catch (...) {
+      if (g_log.enabled) {
+        Log("graph_capture") << "ReleaseCapturedGraph(id=" << annotation_id << ") failed" << std::endl;
+      }
+    }
+  }
+  captured_graphs_.clear();
 }
 
 void Qwen38GraphEngine::Drain() noexcept {
@@ -1469,6 +1487,7 @@ void Qwen38GraphEngine::BuildTarget() {
       const int id = Qwen38GraphAnnotationId(Qwen38GraphRun::kTarget, rows, k);
       d.run_options->AddConfigEntry("gpu_graph_id", std::to_string(id).c_str());
       d.run_options->AddConfigEntry("disable_synchronize_execution_providers", "1");
+      captured_graphs_.emplace_back(&session, id);
     }
   }
 
@@ -1638,6 +1657,7 @@ void Qwen38GraphEngine::BuildTarget() {
           const int id = Qwen38GraphAnnotationId(Qwen38GraphRun::kTarget, rows, k, B, first_slot);
           d.run_options->AddConfigEntry("gpu_graph_id", std::to_string(id).c_str());
           d.run_options->AddConfigEntry("disable_synchronize_execution_providers", "1");
+          captured_graphs_.emplace_back(&session, id);
         }
       }
     }
@@ -1740,6 +1760,7 @@ void Qwen38GraphEngine::BuildHead() {
       const int id = Qwen38GraphAnnotationId(Qwen38GraphRun::kHead, rows, dir);
       d.run_options->AddConfigEntry("gpu_graph_id", std::to_string(id).c_str());
       d.run_options->AddConfigEntry("disable_synchronize_execution_providers", "1");
+      captured_graphs_.emplace_back(&session, id);
     }
     for (auto& view : views) head_views_.push_back(std::move(view.second));
   }
@@ -2225,9 +2246,10 @@ void Qwen38GraphEngine::BuildHeadR2() {
       d.binding->BindOutput(name.c_str(), *t->value);
     }
     d.run_options = OrtRunOptions::Create();
-    d.run_options->AddConfigEntry("gpu_graph_id",
-                                  std::to_string(Qwen38GraphAnnotationId(Qwen38GraphRun::kHeadR2, 2, k)).c_str());
+    const int id = Qwen38GraphAnnotationId(Qwen38GraphRun::kHeadR2, 2, k);
+    d.run_options->AddConfigEntry("gpu_graph_id", std::to_string(id).c_str());
     d.run_options->AddConfigEntry("disable_synchronize_execution_providers", "1");
+    captured_graphs_.emplace_back(h.session, id);
   }
   SyncStream();
 }
@@ -3666,7 +3688,7 @@ std::shared_ptr<Qwen38DecodeDevice> Qwen38GraphModel::AcquireDevice() {
     // thread that loaded the model, so select the model's GPU here: its stream and buffers live on that device.
     plane_->Check(plane_->set_device(p_device_->GetDeviceId(nullptr)), "cudaSetDevice");
     // Recreate CUDA-graph decode state on its execution thread; selecting the device alone does not transfer that state.
-    if (engine_thread_ != std::this_thread::get_id()) {
+    if (!engine_ || engine_thread_ != std::this_thread::get_id()) {
       engine_.reset();
       engine_ = std::make_unique<Qwen38GraphEngine>(*this);
       engine_thread_ = std::this_thread::get_id();
