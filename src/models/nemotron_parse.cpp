@@ -257,7 +257,7 @@ class NemotronParseState : public State {
   DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens,
                         DeviceSpan<int32_t> next_indices) override {
     ThrowIfFailed();
-    State::PromptInputScope prompt_scope(decoder_state_, IsPromptInput());
+    State::PromptInputScope prompt_scope(decoder_state_, IsPromptInput(), InputSelectionLength());
     try {
       if (!encoder_has_run_) {
         encoder_state_->Run(total_length, next_tokens, next_indices);

@@ -192,7 +192,10 @@ struct Generator : LeakChecked<Generator> {
   DeviceSpan<int32_t> AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids);
   void ComputeLogits(DeviceSpan<int32_t> next_tokens, bool is_prompt = false);
   void RunGeneratedToken();
-  DeviceSpan<float> RunWithRopeCache(DeviceSpan<int32_t> next_tokens, bool is_prompt = false);
+  DeviceSpan<float> RunWithRopeCache(DeviceSpan<int32_t> next_tokens, bool is_prompt = false, size_t input_selection_length = 0);
+  void AppendTokens(cpu_span<const int32_t> input_ids, bool is_prompt);
+  bool NeedsRopeReplay(int total_length) const;
+  void ValidatePromptBeforeAppend(cpu_span<const int32_t> input_ids, size_t padded_count) const;
   int rope_cache_length_{};
   int rope_context_threshold_{};
   void ThrowIfAppendExceedsMaxLength(size_t input_ids_count);

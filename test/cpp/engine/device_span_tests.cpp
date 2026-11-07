@@ -66,6 +66,11 @@ TEST(DeviceInterfaceVersionTest, IsPastTheStatePromptInputLayout) {
   EXPECT_GE(kDeviceInterfaceVersion, kVersionOfThePromptInput);
 }
 
+TEST(DeviceInterfaceVersionTest, IsPastTheStateInputSelectionLayout) {
+  constexpr uint32_t kVersionOfTheInputSelection = 22;
+  EXPECT_GE(kDeviceInterfaceVersion, kVersionOfTheInputSelection);
+}
+
 TEST(DeviceSpanTest, RangeUploadForwardsTheByteRangeOfTheSubspan) {
   auto buffer = std::make_shared<RangeUploadRecorder>(16 * sizeof(int32_t));
   auto* recorder = buffer.get();

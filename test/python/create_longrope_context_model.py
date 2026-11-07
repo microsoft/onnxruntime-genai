@@ -9,7 +9,9 @@ from pathlib import Path
 from onnx import TensorProto, helper, save
 
 
-def create_model(output_dir, declare_context=True, runtime_indices=False, record_chunk_sizes=False):
+def create_model(
+    output_dir, declare_context=True, runtime_indices=False, record_chunk_sizes=False, reverse_logits=False
+):
     output_dir.mkdir(parents=True, exist_ok=True)
     inputs = [
         helper.make_tensor_value_info("input_ids", TensorProto.INT64, ["batch", "sequence"]),
@@ -77,7 +79,9 @@ def create_model(output_dir, declare_context=True, runtime_indices=False, record
         helper.make_node("Unsqueeze", ["zeros", "logits_axis"], ["zero_logit"]),
         helper.make_node(
             "Concat",
-            ["positive_logit", "negative_logit", "zero_logit"],
+            ["negative_logit", "positive_logit", "zero_logit"]
+            if reverse_logits
+            else ["positive_logit", "negative_logit", "zero_logit"],
             ["all_logits" if runtime_indices else "logits"],
             axis=2,
         ),
@@ -130,4 +134,15 @@ if __name__ == "__main__":
         Path(__file__).parents[1] / "models" / "longrope-context-runtime-indices-chunk-sizes",
         runtime_indices=True,
         record_chunk_sizes=True,
+    )
+    create_model(
+        Path(__file__).parents[1] / "models" / "longrope-context-legacy",
+        declare_context=False,
+        reverse_logits=True,
+    )
+    create_model(
+        Path(__file__).parents[1] / "models" / "longrope-context-legacy-runtime-indices",
+        declare_context=False,
+        runtime_indices=True,
+        reverse_logits=True,
     )

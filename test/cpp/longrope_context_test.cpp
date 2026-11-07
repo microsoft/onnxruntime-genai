@@ -234,15 +234,68 @@ TEST_F(LongRopeContextTest, ReplayRejectsPaddingOnlyPromptBeforeRebuildingCache)
         } catch (const std::runtime_error& error) {
           EXPECT_NE(std::string(error.what()).find("non-padding token"), std::string::npos);
         }
+        ASSERT_EQ(generator->GetSequenceCount(0), 8u);
+        for (size_t i = 0; i < 8; ++i)
+          EXPECT_EQ(generator->GetSequenceData(0)[i], 1);
+        ExpectConsistentCache(*generator);
         auto cache = generator->GetOutput("present.0.key");
         const std::vector<int64_t> shape{1, 1, 8, 1};
         ASSERT_EQ(cache->Shape(), shape);
         const auto* values = static_cast<const float*>(cache->Data());
         for (size_t i = 0; i < 8; ++i)
           EXPECT_FLOAT_EQ(values[i], 1.0f);
+        generator->AppendTokens(std::vector<int32_t>{1});
+        ASSERT_EQ(generator->GetSequenceCount(0), 9u);
+        ExpectConsistentCache(*generator);
       }
     }
   }
+}
+
+TEST_F(LongRopeContextTest, LegacyThresholdReplayPreservesGeneratedPadOrigin) {
+  for (const auto* path : {MODEL_PATH "longrope-context-legacy", MODEL_PATH "longrope-context-legacy-runtime-indices"}) {
+    auto config = OgaConfig::Create(path);
+    config->Overlay(R"({"model":{"type":"phi3","context_length":8192,"pad_token_id":1,"eos_token_id":2},
+                       "search":{"max_length":8192}})");
+    model = OgaModel::Create(*config);
+    for (int chunk : {0, 1, 4}) {
+      SCOPED_TRACE(testing::Message() << "path=" << path << " chunk=" << chunk);
+      auto generator = CreateGenerator(chunk);
+      generator->AppendTokens(std::vector<int32_t>(4096, 0));
+      std::array<float, 3> forced_logits{0, 10, -10};
+      generator->SetLogits(*OgaTensor::Create(forced_logits.data(), std::array<int64_t, 2>{1, 3}));
+      generator->GenerateNextToken();
+      ASSERT_EQ(generator->GetSequenceCount(0), 4097u);
+      ASSERT_EQ(generator->GetSequenceData(0)[4096], 1);
+      ASSERT_NO_THROW(generator->GenerateNextToken());
+      ASSERT_EQ(generator->GetSequenceCount(0), 4098u);
+      EXPECT_EQ(generator->GetSequenceData(0)[4097], 1);
+    }
+  }
+}
+
+TEST_F(LongRopeContextTest, SpeculativeLegacyThresholdReplayPreservesGeneratedPadOrigin) {
+  auto config = OgaConfig::Create(MODEL_PATH "longrope-context-legacy");
+  config->Overlay(R"({"model":{"type":"phi3","context_length":8192,"pad_token_id":1,"eos_token_id":2,
+                    "draft":{"filename":"draft.onnx","num_hidden_layers":1,"num_attention_heads":1,
+                             "num_key_value_heads":1,"head_size":1,"hidden_size":1,
+                             "session_options":{"intra_op_num_threads":1}}},
+                    "search":{"max_length":8192},"speculative":{"max_draft_tokens":1}})");
+  std::ifstream input(MODEL_PATH "longrope-context-legacy/model.onnx", std::ios::binary);
+  ASSERT_TRUE(input);
+  const std::string graph{std::istreambuf_iterator<char>{input}, {}};
+  config->AddModelData("draft.onnx", graph.data(), graph.size());
+  model = OgaModel::Create(*config);
+  auto generator = CreateGenerator(4);
+  generator->AppendTokens(std::vector<int32_t>(4096, 0));
+  std::array<float, 3> forced_logits{0, 10, -10};
+  generator->SetLogits(*OgaTensor::Create(forced_logits.data(), std::array<int64_t, 2>{1, 3}));
+  generator->GenerateNextToken();
+  ASSERT_EQ(generator->GetSequenceCount(0), 4097u);
+  ASSERT_EQ(generator->GetSequenceData(0)[4096], 1);
+  ASSERT_NO_THROW(generator->GenerateNextToken());
+  ASSERT_EQ(generator->GetSequenceCount(0), 4098u);
+  EXPECT_EQ(generator->GetSequenceData(0)[4097], 1);
 }
 
 TEST_F(LongRopeContextTest, RuntimeIndicesRejectPaddingOnlyFinalSingletonChunks) {
@@ -277,6 +330,11 @@ TEST_F(LongRopeContextTest, RuntimeIndicesValidateAppendedSingletonPrompts) {
       ASSERT_NO_THROW(generator->AppendTokens(std::vector<int32_t>(length, 1)));
       ExpectConsistentCache(*generator);
       EXPECT_THROW(generator->AppendTokens(std::vector<int32_t>{0}), std::runtime_error);
+      ASSERT_EQ(generator->GetSequenceCount(0), static_cast<size_t>(length));
+      ExpectConsistentCache(*generator);
+      generator->AppendTokens(std::vector<int32_t>{1});
+      ASSERT_EQ(generator->GetSequenceCount(0), static_cast<size_t>(length + 1));
+      ExpectConsistentCache(*generator);
 
       generator = CreateGenerator(chunk);
       ASSERT_NO_THROW(generator->AppendTokens(std::vector<int32_t>(length, 1)));

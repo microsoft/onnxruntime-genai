@@ -4,7 +4,10 @@
 #include <gtest/gtest.h>
 #include <array>
 #include <limits>
+#include <numeric>
 #include <tuple>
+#include <utility>
+#include "constrained_logits_processor.h"
 #include "config_utils.h"
 #include "generator/generators.h"
 #include "models/model.h"
@@ -14,10 +17,100 @@
 namespace Generators::test {
 namespace {
 
+class ForcedTokensProcessor final : public ConstrainedLogitsProcessor {
+ public:
+  explicit ForcedTokensProcessor(std::vector<int32_t> tokens) : tokens_{std::move(tokens)} {}
+  void CommitTokens(std::span<int32_t>) override {}
+  void ProcessLogits(DeviceSpan<float>) override {}
+  bool AllowsOnlyTokens(size_t, std::span<const int>) override { return false; }
+  void Reset() override {}
+  std::vector<int32_t> GetFFTokens(size_t) override { return std::exchange(tokens_, {}); }
+  std::unique_ptr<ConstrainedLogitsProcessor> Clone() const override {
+    return std::make_unique<ForcedTokensProcessor>(*this);
+  }
+
+ private:
+  std::vector<int32_t> tokens_;
+};
+
+TEST(ForcedTokenLogitsTest, SlidingWindowAlignmentExcludesOnlySyntheticPadding) {
+  for (const auto* path : {MODEL_PATH "longrope-context-legacy", MODEL_PATH "longrope-context-legacy-runtime-indices"}) {
+    for (const auto* alignment : {"left", "right"}) {
+      for (bool slide_inputs : {false, true}) {
+        for (int forced_length : {2, 3, 4, 6, 7, 8}) {
+          for (int32_t final_token : {1, 2}) {
+            SCOPED_TRACE(testing::Message() << "path=" << path << " alignment=" << alignment
+                                            << " slide_inputs=" << slide_inputs << " forced_length=" << forced_length
+                                            << " final_token=" << final_token);
+            auto config = CreateConfig(GetOrtEnv(), path);
+            config->model.pad_token_id = 1;
+            config->model.eos_token_id = {0};
+            if (slide_inputs) {
+              auto& window = config->model.decoder.sliding_window.emplace();
+              window.window_size = 4;
+              window.alignment = alignment;
+              window.slide_inputs = true;
+              window.slide_key_value_cache = false;
+            }
+            auto model = CreateModel(GetOrtEnv(), std::move(config));
+            auto params = std::make_shared<GeneratorParams>(*model);
+            auto generator = std::make_unique<Generator>(*model, *params);
+            generator->AppendTokens(std::vector<int32_t>{2, 2, 2, 2});
+            auto forced_logits = model->p_device_->Allocate<float>(3);
+            std::copy_n(std::array<float, 3>{0, 0, 10}.begin(), 3, forced_logits.CpuSpan().begin());
+            forced_logits.CopyCpuToDevice();
+            generator->SetLogits(forced_logits);
+            generator->GenerateNextToken();
+            std::vector<int32_t> forced_tokens(forced_length, 2);
+            forced_tokens.back() = final_token;
+            generator->guidance_logits_processor_ = std::make_unique<ForcedTokensProcessor>(forced_tokens);
+            auto logits = generator->GetLogits().CopyDeviceToCpu();
+            auto* cache = generator->state_->GetOutput("present.0.key");
+            const auto count = cache->GetTensorTypeAndShapeInfo()->GetElementCount();
+            const auto* values = cache->GetTensorData<float>();
+            const size_t padding = slide_inputs && forced_length % 4 ? 4 - forced_length % 4 : 0;
+            const size_t selected_length = count - (std::string_view{alignment} == "left" ? padding : 0);
+            const float sum = std::accumulate(values, values + selected_length, 0.0f);
+            EXPECT_FLOAT_EQ(logits[0], -sum);
+            EXPECT_FLOAT_EQ(logits[1], sum);
+            EXPECT_FLOAT_EQ(logits[2], 0);
+          }
+        }
+      }
+    }
+  }
+}
+
 TEST(LastTokenIndicesTest, SelectsEachRowsLastNonpadAndRepeatsForBeams) {
   const std::array<int32_t, 15> tokens{0, 4, 5, 0, 0, 2, 0, 3, 0, 0, 1, 2, 3, 4, 5};
   EXPECT_EQ(LastTokenIndices(tokens, 3, 2, 5, 0), (std::vector<int32_t>{2, 2, 2, 2, 4, 4}));
   EXPECT_EQ(LastTokenIndices(std::array<int32_t, 1>{7}, 1, 1, 1, 0), (std::vector<int32_t>{0}));
+}
+
+TEST(ForcedTokenLogitsTest, ExplicitSelectionExtentSurvivesChunkingAndKeepsGeneratedPad) {
+  for (const auto* path : {MODEL_PATH "longrope-context-legacy", MODEL_PATH "longrope-context-legacy-runtime-indices"}) {
+    for (int chunk : {0, 1, 2, 3}) {
+      SCOPED_TRACE(testing::Message() << "path=" << path << " chunk=" << chunk);
+      auto config = CreateConfig(GetOrtEnv(), path);
+      config->model.pad_token_id = 1;
+      auto model = CreateModel(GetOrtEnv(), std::move(config));
+      auto params = std::make_shared<GeneratorParams>(*model);
+      params->search.chunk_size = chunk;
+      auto generator = std::make_unique<Generator>(*model, *params);
+      auto tokens = model->p_device_->Allocate<int32_t>(4);
+      std::copy_n(std::array<int32_t, 4>{2, 2, 1, 1}.begin(), 4, tokens.CpuSpan().begin());
+      tokens.CopyCpuToDevice();
+      auto indices = model->p_device_->Allocate<int32_t>(1);
+      indices.CpuSpan()[0] = 0;
+      indices.CopyCpuToDevice();
+      State::PromptInputScope selection_scope(*generator->state_, false, 3);
+      auto selected_logits = generator->state_->Run(4, tokens, indices);
+      auto logits = selected_logits.CopyDeviceToCpu();
+      EXPECT_FLOAT_EQ(logits[0], -5);
+      EXPECT_FLOAT_EQ(logits[1], 5);
+      EXPECT_FLOAT_EQ(logits[2], 0);
+    }
+  }
 }
 
 TEST(LastTokenIndicesTest, HandlesChunkLocalPaddingIndependentlyOfPastAndStaticMask) {
@@ -35,6 +128,42 @@ TEST(LastTokenIndicesTest, RejectsEmptyRowsAndInvalidDimensions) {
   EXPECT_THROW(LastTokenIndices(tokens, 2, 1, 2, 0), std::invalid_argument);
   EXPECT_THROW(LastTokenIndices(tokens, 1, 1, std::numeric_limits<size_t>::max(), 0), std::invalid_argument);
   EXPECT_THROW(LastTokenIndices(tokens, 2, std::numeric_limits<size_t>::max(), 1, 0), std::invalid_argument);
+}
+
+TEST(ForcedTokenLogitsTest, DeviceAppendRejectsPaddingBeforeMutatingTheSequence) {
+#if USE_CUDA
+  const std::array providers{false, true};
+#else
+  const std::array providers{false};
+#endif
+  for (bool use_cuda : providers) {
+    for (const auto* path : {MODEL_PATH "longrope-context", MODEL_PATH "longrope-context-runtime-indices"}) {
+      SCOPED_TRACE(testing::Message() << "path=" << path << " cuda=" << use_cuda);
+      auto config = CreateConfig(GetOrtEnv(), path);
+      config->model.pad_token_id = 0;
+      if (use_cuda)
+        OverlayConfig(*config, R"({"model":{"decoder":{"session_options":{"provider_options":[{"cuda":{}}]}}}})");
+      auto model = CreateModel(GetOrtEnv(), std::move(config));
+      auto params = std::make_shared<GeneratorParams>(*model);
+      params->search.chunk_size = 4;
+      auto generator = std::make_unique<Generator>(*model, *params);
+      generator->AppendTokens(std::vector<int32_t>(8, 1));
+      auto tokens = model->p_device_->Allocate<int32_t>(4);
+      std::fill(tokens.CpuSpan().begin(), tokens.CpuSpan().end(), 0);
+      tokens.CopyCpuToDevice();
+      EXPECT_THROW(generator->AppendTokens(tokens), std::invalid_argument);
+      ASSERT_EQ(generator->GetSequence(0).size(), 8u);
+      auto logits = generator->GetLogits().CopyDeviceToCpu();
+      EXPECT_FLOAT_EQ(logits[0], 8);
+      EXPECT_FLOAT_EQ(logits[1], -8);
+      auto* cache = generator->state_->GetOutput("present.0.key");
+      EXPECT_EQ(cache->GetTensorTypeAndShapeInfo()->GetElementCount(), 8u);
+      tokens.CpuSpan()[0] = 1;
+      tokens.CopyCpuToDevice();
+      EXPECT_NO_THROW(generator->AppendTokens(tokens));
+      EXPECT_EQ(generator->GetSequence(0).size(), 12u);
+    }
+  }
 }
 
 struct LogitsTestState : State {
@@ -253,14 +382,24 @@ TEST_P(RuntimeLastTokenLogitsModesTest, GeneratedPadDoesNotValidateOrRebind) {
 TEST_F(RuntimeLastTokenLogitsTest, PromptScopeRestoresTokenOriginAfterAnException) {
   Initialize();
   EXPECT_FALSE(state_->IsPromptInput());
+  EXPECT_EQ(state_->InputSelectionLength(), 0u);
   EXPECT_THROW(
       [&] {
-        State::PromptInputScope prompt_scope(*state_, true);
+        State::PromptInputScope prompt_scope(*state_, true, 3);
         EXPECT_TRUE(state_->IsPromptInput());
+        EXPECT_EQ(state_->InputSelectionLength(), 3u);
+        {
+          State::PromptInputScope nested_scope(*state_, false, 1);
+          EXPECT_FALSE(state_->IsPromptInput());
+          EXPECT_EQ(state_->InputSelectionLength(), 1u);
+        }
+        EXPECT_TRUE(state_->IsPromptInput());
+        EXPECT_EQ(state_->InputSelectionLength(), 3u);
         throw std::invalid_argument("test prompt failure");
       }(),
       std::invalid_argument);
   EXPECT_FALSE(state_->IsPromptInput());
+  EXPECT_EQ(state_->InputSelectionLength(), 0u);
 }
 
 TEST_F(RuntimeLastTokenLogitsTest, InvalidChunkPreservesExistingIndexAndOutputBindings) {

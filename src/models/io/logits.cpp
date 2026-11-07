@@ -82,7 +82,7 @@ DeviceSpan<float> Logits::Get(bool all_tokens_valid) {
     auto logits_last_tokens = ByteWrapTensor(*model_.p_device_logits_, *logits_of_last_token);
 
     for (int batch_index = 0; batch_index < state_.params_->search.batch_size; batch_index++) {
-      size_t token_index = all_tokens_valid || !state_.IsPromptInput()
+      size_t token_index = (all_tokens_valid || !state_.IsPromptInput()) && !state_.InputSelectionLength()
                                ? seq_length - 1
                                : input_sequence_lengths[batch_index] - 1;
       for (int beam_index = 0; beam_index < num_beams; beam_index++) {
@@ -111,15 +111,19 @@ DeviceSpan<float> Logits::Get(bool all_tokens_valid) {
 void Logits::Update(const DeviceSpan<int32_t>& next_tokens, size_t new_kv_length,
                     bool all_tokens_valid, bool is_final_chunk) {
   const bool validate_padding = state_.IsPromptInput() && !all_tokens_valid;
+  const size_t selection_length = state_.InputSelectionLength();
+  if (selection_length > new_kv_length)
+    throw std::invalid_argument("Logit selection extent exceeds the current input length");
+  const size_t selected_length = selection_length ? selection_length : new_kv_length;
   if (token_indices_ &&
-      (validate_padding || !output_raw_->ort_tensor_ || new_kv_length > 1 ||
+      (validate_padding || selection_length || !output_raw_->ort_tensor_ || new_kv_length > 1 ||
        std::any_of(input_sequence_lengths.begin(), input_sequence_lengths.end(), [](int n) { return n != 1; }))) {
     if (!new_kv_length || new_kv_length > static_cast<size_t>(std::numeric_limits<int32_t>::max()))
       throw std::invalid_argument("Invalid last-token sequence length");
     const auto batch_size = static_cast<size_t>(state_.params_->search.batch_size);
     const auto num_beams = static_cast<size_t>(state_.params_->search.num_beams);
     const auto batch_beams = static_cast<size_t>(shape_[0]);
-    std::vector<int32_t> indices(batch_beams, validate_padding ? 0 : static_cast<int32_t>(new_kv_length - 1));
+    std::vector<int32_t> indices(batch_beams, validate_padding ? 0 : static_cast<int32_t>(selected_length - 1));
     if (validate_padding) {
       auto token_span = next_tokens;
       auto tokens = token_span.CopyDeviceToCpu();
@@ -149,7 +153,7 @@ void Logits::Update(const DeviceSpan<int32_t>& next_tokens, size_t new_kv_length
   // Store length of input sequence for each batch for the get step
   for (int b = 0; !trimmed_prefill_logits_ && b < state_.params_->search.batch_size; b++) {
     if (!validate_padding) {
-      input_sequence_lengths[b] = static_cast<int>(new_kv_length);
+      input_sequence_lengths[b] = static_cast<int>(selected_length);
       continue;
     }
     // Find the first non pad token from the end

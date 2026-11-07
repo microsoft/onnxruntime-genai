@@ -320,7 +320,7 @@ void WhisperState::FinalizeCrossQK(int current_length) {
 }
 
 DeviceSpan<float> WhisperState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
-  State::PromptInputScope prompt_scope(*decoder_state_, IsPromptInput());
+  State::PromptInputScope prompt_scope(*decoder_state_, IsPromptInput(), InputSelectionLength());
   if (encoder_state_->first_run_) {
     // Run encoder
     encoder_state_->Run(current_length, next_tokens, next_indices);

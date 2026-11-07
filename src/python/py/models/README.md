@@ -396,14 +396,22 @@ Runtime indices also select the requested row in decoders without an attention
 mask, and are emitted by the Nemotron Parse decoder's custom input setup.
 Padding-only intermediate chunks are permitted when their logits are discarded;
 for ordinary prefills, each final prompt chunk must contain a non-padding token
-in every row, even when the chunk contains only one token. New prompt tokens are validated before
-a LongRoPE cache transition. At the transition, committed history and the new
+in every row, even when the chunk contains only one token. Prompt validation
+precedes sequence and cache mutation, so a rejected append leaves the generator
+usable. At a LongRoPE transition, committed history and the new
 prompt are replayed separately under the same final context regime and configured
 chunk limit. The replayed prompt retains logits from its last non-padding chunk
 while any remaining padding-only chunks update only the cache. Generated tokens
 and committed-token replay treat PAD-ID tokens as valid, and every token remains in
 the KV cache. Ordinary one-token decode does not download tokens to the CPU to
-validate padding.
+validate padding. Legacy Phi3 threshold replay also retains committed-token
+origin. For left-aligned sliding-window guidance, an explicit selection extent
+excludes synthetic trailing padding without excluding genuine forced PAD tokens.
+Selection is preserved across chunking and nested decoder states.
+
+These runtime changes require device-interface version 22. Rebuild the CUDA
+add-on together with the runtime; older add-ons are rejected with an explicit
+version-mismatch error.
 
 The exported model requires a runtime built with `last_token_indices` support.
 For older runtimes, re-export with both `runtime_last_token_indices=false` and
