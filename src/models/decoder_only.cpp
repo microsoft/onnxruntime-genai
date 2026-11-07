@@ -1,12 +1,35 @@
 #include "generator/generators.h"
 #include "decoder_only.h"
 #include "engram.h"
+#include <charconv>
+#include <limits>
 
 namespace Generators {
 DecoderOnly_Model::DecoderOnly_Model(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
   session_decoder_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());
   session_info_.Add(*session_decoder_);
+  auto metadata = session_decoder_->GetModelMetadata();
+  const auto keys = metadata->GetCustomMetadataMapKeysAllocated();
+  if (std::find(keys.begin(), keys.end(), "com.microsoft.genai.rope_context_length_input") != keys.end()) {
+    if (std::find(keys.begin(), keys.end(), "com.microsoft.genai.original_context_length") == keys.end())
+      throw std::runtime_error("LongRoPE metadata requires an original context length");
+    rope_context_input_ = metadata->LookupCustomMetadataMap("com.microsoft.genai.rope_context_length_input");
+    auto original_context = metadata->LookupCustomMetadataMap("com.microsoft.genai.original_context_length");
+    auto [end, error] = std::from_chars(original_context.data(), original_context.data() + original_context.size(),
+                                        original_context_length_);
+    if (rope_context_input_.empty() || error != std::errc{} ||
+        end != original_context.data() + original_context.size() ||
+        original_context_length_ <= 0 || original_context_length_ == std::numeric_limits<int>::max()) {
+      throw std::runtime_error("LongRoPE metadata requires an input name and a valid original context length");
+    }
+
+    if (session_info_.GetInputDataType(rope_context_input_) != Ort::TypeToTensorType<int64_t> ||
+        !session_info_.GetInputShape(rope_context_input_).empty()) {
+      throw std::runtime_error("LongRoPE context input must be an int64 scalar");
+    }
+  }
+
   if (!config_->model.engram.filename.empty()) {
     engram_session_options_ = OrtSessionOptions::Create();
     CreateSessionOptionsFromConfig(
@@ -84,6 +107,14 @@ DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, DeviceSpan<
       position_inputs_{model_.p_device_inputs_->CreatePositionInputs(*this, sequence_lengths_unk, model_.config_->model.decoder.inputs.attention_mask)} {
   input_ids_.Add();
   position_inputs_->Add();
+  const auto& rope_context_name = model_.rope_context_input_;
+  if (!rope_context_name.empty()) {
+    const std::array<int64_t, 0> shape{};
+    rope_context_length_ = OrtValue::CreateTensor(model_.allocator_cpu_, shape, Ort::TypeToTensorType<int64_t>);
+    inputs_.push_back(rope_context_length_.get());
+    input_names_.push_back(rope_context_name.c_str());
+  }
+
   logits_.Add();
   if (kv_cache_)
     kv_cache_->Add();
@@ -128,11 +159,20 @@ void DecoderOnly_State::SetHiddenStates(OrtValue* hidden_states) {
 }
 
 DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
+  return Run(total_length, next_tokens, next_indices, false);
+}
+
+DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices,
+                                         bool all_tokens_valid) {
   size_t num_tokens = next_tokens.size();
   const auto& chunk_size_opt = params_->search.chunk_size;
 
-  if (first_run_ && chunk_size_opt.has_value() && chunk_size_opt.value() > 0 && num_tokens > chunk_size_opt.value()) {
-    return RunWithChunking(total_length, next_tokens, next_indices, chunk_size_opt.value());
+  if (rope_context_length_)
+    *rope_context_length_->GetTensorMutableData<int64_t>() = total_length;
+  const bool replaying_rope_cache = rope_context_length_ && num_tokens == static_cast<size_t>(total_length);
+  if ((first_run_ || replaying_rope_cache) && chunk_size_opt.has_value() &&
+      chunk_size_opt.value() > 0 && num_tokens > chunk_size_opt.value()) {
+    return RunWithChunking(total_length, next_tokens, next_indices, chunk_size_opt.value(), all_tokens_valid);
   }
 
   UpdateInputsOutputs(next_tokens, next_indices, total_length);
@@ -176,11 +216,11 @@ DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& 
   if (recurrent_state_) recurrent_state_->SetForwardLength(seq_len);
   if (ple_state_) ple_state_->SetForwardLength(seq_len);
 
-  return logits_.Get();
+  return logits_.Get(all_tokens_valid);
 }
 
 DeviceSpan<float> DecoderOnly_State::RunWithChunking(int total_length, DeviceSpan<int32_t>& next_tokens,
-                                                     DeviceSpan<int32_t> next_indices, size_t chunk_size) {
+                                                     DeviceSpan<int32_t> next_indices, size_t chunk_size, bool all_tokens_valid) {
   // Chunking logic for context phase - process in chunks based on configured chunk_size
   size_t num_tokens = next_tokens.size();
   size_t processed_tokens = 0;
@@ -213,7 +253,7 @@ DeviceSpan<float> DecoderOnly_State::RunWithChunking(int total_length, DeviceSpa
   }
 
   // Return logits from the last chunk for potential sampling
-  return logits_.Get();
+  return logits_.Get(all_tokens_valid);
 }
 
 void DecoderOnly_State::ValidateRewindTo(size_t index) const {

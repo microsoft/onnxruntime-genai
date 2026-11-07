@@ -13,6 +13,7 @@
 #include "models/postprocessing/asr_post_processor.h"
 #include "models/preprocessing/streaming_processor.h"
 #include "models/nemotron_speech.h"
+#include "models/nemotron_bolt.h"
 #include "models/parakeet.h"
 #include "sequences.h"
 #include "models/env_utils.h"
@@ -592,6 +593,8 @@ std::unique_ptr<Search> CreateSearch(const GeneratorParams& params) {
       throw std::runtime_error("eos_token_id (" + std::to_string(eos_token_id) + ") must be in range [0, " + std::to_string(params.config.model.vocab_size) + ") (vocab_size)");
   }
 
+  if (params.config.model.type == "nemotron_bolt")
+    return CreateNemotronBoltSearch(params);
   if (params.search.num_beams > 1)
     return params.p_device->CreateBeam(params);
   return params.p_device->CreateGreedy(params);
@@ -624,6 +627,8 @@ Generator::Generator(const Model& model, const GeneratorParams& params)
   // search/logits pipeline; skip the standard validations and create the
   // TransducerState-derived state directly.
   const auto& model_type = model.config_->model.type;
+  if (model_type == "nemotron_bolt")
+    ValidateNemotronBoltSearch(params);
   if (ModelType::IsTransducer(model_type) || ModelType::IsStreamingEncDecASR(model_type)) {
     state_ = model.CreateState({}, params);
     transducer_state_ = dynamic_cast<TransducerState*>(state_.get());
@@ -683,6 +688,16 @@ void Generator::LogGeneratorCreate(const GeneratorParams& params) {
 }
 
 void Generator::InitializePhi3RopeThreshold(const GeneratorParams& params) {
+  const auto* decoder = dynamic_cast<const DecoderOnly_Model*>(model_.get());
+  if (decoder && !decoder->rope_context_input_.empty()) {
+    if (params.speculative.ngram_size > 0)
+      throw std::runtime_error("N-gram decoding does not support the explicit LongRoPE context contract");
+    if (params.BatchBeamSize() != 1)
+      throw std::runtime_error("LongRoPE context selection currently requires batch_size=1 and num_beams=1");
+    rope_context_threshold_ = decoder->original_context_length_ + 1;
+    return;
+  }
+
   // Phi3 ROPE factor rewind threshold: 4097 for phi3/phimoe, 8193 for phi3small, 0 otherwise
   // TODO: Extend to support batch size > 1, num beams > 1, and multimodal models
   const auto& model_type = model_->config_->model.type;
@@ -723,18 +738,17 @@ void Generator::InitializeSamplingMethod(const GeneratorParams& params) {
 
 Generator::~Generator() = default;
 
+// With slide_inputs, input ids are padded to whole windows for the model, and the sequence keeps the padding.
+size_t Generator::PaddedInputIdsSize(size_t input_ids_count) const {
+  const auto& sliding_window = model_->config_->model.decoder.sliding_window;
+  if (!sliding_window.has_value() || !sliding_window->slide_inputs)
+    return input_ids_count;
+  const auto window_size = static_cast<size_t>(sliding_window->window_size);
+  return (input_ids_count + window_size - 1) / window_size * window_size;
+}
+
 DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids) {
-  size_t padded_input_ids_size = input_ids.size();
-  if (model_->config_->model.decoder.sliding_window.has_value()) {
-    // If the model has a sliding window, pad the input_ids to the next multiple of the window size
-    // so that the input_ids can be divided into window size chunks.
-    const auto window_size = model_->config_->model.decoder.sliding_window->window_size;
-
-    if (model_->config_->model.decoder.sliding_window->slide_inputs) {
-      padded_input_ids_size = ((input_ids.size() + window_size - 1) / window_size) * window_size;
-    }
-  }
-
+  const size_t padded_input_ids_size = PaddedInputIdsSize(input_ids.size());
   auto input_ids_device = state_->params_->p_device->Allocate<int32_t>(padded_input_ids_size);
   auto cpu_span = input_ids_device.CpuSpan();
   auto padding_begin = cpu_span.begin();
@@ -760,7 +774,7 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (input_ids.size() == 0)
     throw std::runtime_error("input_ids is empty");
-  ThrowIfAppendExceedsMaxLength(input_ids.size());
+  ThrowIfAppendExceedsMaxLength(PaddedInputIdsSize(input_ids.size()));
   if (search_->GetSequenceLength() != 0 && state_->params_->search.batch_size > 1)
     throw std::runtime_error("AppendTokens can only be called once for batch_size > 1. To call AppendTokens again, use RewindToLength(0)");
 
@@ -802,13 +816,18 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   strategy_->PrepareForAppend(*this);
   RunGeneratedToken();
   // Running the last generated token can append the tokens the grammar forces after it.
-  ThrowIfAppendExceedsMaxLength(input_ids.size());
+  ThrowIfAppendExceedsMaxLength(PaddedInputIdsSize(input_ids.size()));
   state_->StartTurn();
 
   auto input_ids_device = AllocateInputIdsOnDevice(input_ids);
-  search_->AppendTokens(input_ids_device);
   computed_logits_ = false;
-  ComputeLogits(input_ids_device);
+  if (auto* bolt = dynamic_cast<NemotronBoltState*>(state_.get())) {
+    bolt->Prefill(input_ids);
+    search_->AppendTokens(input_ids_device);
+  } else {
+    search_->AppendTokens(input_ids_device);
+    ComputeLogits(input_ids_device);
+  }
 
   generation_telemetry_.CompleteAppend(
       input_ids.size(), state_->params_->search.num_beams, append_input_modality);
@@ -821,6 +840,11 @@ void Generator::AppendTokens(DeviceSpan<int32_t> input_ids) {
   if (input_ids.empty())
     throw std::runtime_error("input_ids is empty");
   ThrowIfAppendExceedsMaxLength(input_ids.size());
+  if (model_->config_->model.type == "nemotron_bolt") {
+    auto cpu = input_ids.CopyDeviceToCpu();
+    AppendTokens(cpu_span<const int32_t>{cpu.data(), cpu.size()});
+    return;
+  }
   if (search_->GetSequenceLength() != 0 && state_->params_->search.batch_size > 1)
     throw std::runtime_error("AppendTokens can only be called once for batch_size > 1. To call AppendTokens again, use RewindToLength(0)");
 
@@ -900,7 +924,7 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
     guidance_logits_processor_->CommitTokens(next_tokens_span);
   }
 
-  auto logits = state_->Run(search_->GetSequenceLength(), next_tokens, search_->GetNextIndices());
+  auto logits = RunWithRopeCache(next_tokens);
   if (g_log.enabled && g_log.model_logits) {
     auto& stream = Log("model_logits");
     DumpValues(stream, Ort::TypeToTensorType<float>, logits.CopyDeviceToCpu().data(), logits.size());
@@ -910,9 +934,11 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
 
   if (guidance_logits_processor_ && last_action_ == Action::generated) {
     auto ff_tokens = guidance_logits_processor_->GetFFTokens(0);
-    // The sequence holds max_length tokens, so forced tokens past it are dropped.
+    const size_t forced_count = ff_tokens.size();
+    // The sequence holds max_length tokens, padding included, so forced tokens past it are dropped.
     const int room = std::max(0, state_->params_->search.max_length - search_->GetSequenceLength());
-    ff_tokens.resize(std::min(ff_tokens.size(), static_cast<size_t>(room)));
+    while (PaddedInputIdsSize(ff_tokens.size()) > static_cast<size_t>(room))
+      ff_tokens.pop_back();
     if (!ff_tokens.empty()) {
       // process fast-forward tokens
       std::span<int32_t> forced_tokens_span{ff_tokens};
@@ -921,7 +947,7 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
 
       std::span<int32_t> new_next_token_span{ff_tokens};
       auto new_next_token = AllocateInputIdsOnDevice(new_next_token_span);
-      logits = state_->Run(search_->GetSequenceLength(), new_next_token, search_->GetNextIndices());
+      logits = RunWithRopeCache(new_next_token);
       if (g_log.enabled && g_log.model_logits) {
         auto& stream_ = Log("model_logits");
         DumpValues(stream_, Ort::TypeToTensorType<float>, logits.CopyDeviceToCpu().data(), logits.size());
@@ -930,10 +956,30 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
       SetLogits(logits);
       generation_telemetry_.OnTokenGenerated(static_cast<int64_t>(ff_tokens.size()));
     }
+    // The grammar has accepted the dropped tokens, so end the search like a stop token rather than skip them.
+    if (ff_tokens.size() < forced_count)
+      search_->MarkDone();
   }
 
   last_action_ = Action::standard;
   computed_logits_ = true;
+}
+
+DeviceSpan<float> Generator::RunWithRopeCache(DeviceSpan<int32_t> next_tokens) {
+  const int length = search_->GetSequenceLength();
+  const bool replay = rope_context_threshold_ != 0 && rope_cache_length_ > 0 &&
+                      (rope_cache_length_ >= rope_context_threshold_) != (length >= rope_context_threshold_);
+  if (replay) {
+    // Rebuild only model state: search, sampling, guidance and usage already contain these tokens.
+    state_->RewindTo(0);
+    next_tokens = search_->GetSequence(0);
+    next_tokens.CopyDeviceToCpu();
+  }
+
+  auto logits = replay ? static_cast<DecoderOnly_State&>(*state_).Run(length, next_tokens, search_->GetNextIndices(), true)
+                       : state_->Run(length, next_tokens, search_->GetNextIndices());
+  rope_cache_length_ = length;
+  return logits;
 }
 
 void Generator::SetRuntimeOption(const char* key, const char* value) {
@@ -991,6 +1037,8 @@ bool Generator::IsSessionTerminated() const {
 }
 
 void Generator::SetLogits(DeviceSpan<float> logits) {
+  if (model_->config_->model.type == "nemotron_bolt")
+    throw std::runtime_error("nemotron_bolt: SetLogits is unsupported");
   search_->SetLogits(logits);
   computed_logits_ = true;
 }
@@ -1037,6 +1085,8 @@ SpeculativeStats Generator::GetSpeculativeStats() const {
 
 void Generator::RewindToLength(size_t new_length) {
   const auto& model_type = model_->config_->model.type;
+  if (model_type == "nemotron_bolt" && new_length != 0)
+    throw std::runtime_error("nemotron_bolt: only reset-to-zero rewind is supported");
   // RNNT/TDT/streaming-enc-dec-ASR models (e.g. Moonshine) take the
   // TransducerState path and never create search_, so rewind is unsupported.
   // Fail clearly here before search_ is dereferenced below.
@@ -1063,6 +1113,8 @@ void Generator::RewindToLength(size_t new_length) {
   state_->ValidateRewindTo(new_length);
   search_->RewindTo(new_length);
   state_->RewindTo(new_length);
+  if (new_length == 0)
+    rope_cache_length_ = 0;
   if (guidance_logits_processor_) {
     guidance_logits_processor_->Reset();
   }

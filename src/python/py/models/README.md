@@ -75,9 +75,10 @@ The tool currently supports the following model architectures.
 - InternLM2
 - LFM2 (text, LFM2-VL / LFM2.5-VL / d1-3B with their vision models, and the decoders of LFM2-Audio / LFM2.5-Audio)
 - LFM2 MoE
-- LFM3 (text and the decoders of LFM3-VL / LFM3-Audio / LFM3-Omni)
-  - With `exclude_embeds=true` the LFM3-VL / LFM3-Audio / LFM3-Omni decoders are stages of the `lfm3_vl`, `lfm3_audio` and `lfm3_omni` pipelines, which the runtime cannot load yet.
-  - LFM3-1.7B has a 262144-token context. Its RoPE caches take about 134 MB in a model with fp16 inputs and outputs and 268 MB with fp32 ones (CPU exports, int4 included). Every attention layer, the sliding-window ones included, keeps a KV cache of `search.max_length` tokens, which defaults to that context, so set `search.max_length` to the length you need.
+- LFM3 (text, d1-2B text decisions, and the decoders of LFM3-VL / LFM3-Audio / LFM3-Omni)
+  - d1-2B (`D1Model`) needs `hf_remote=true`, because only its remote code registers the model. Its full-attention layers read the whole prompt in both directions (GroupQueryAttention `causal=0`), so an export is for [`d1-decisions.py`](../../../../examples/python/d1-decisions.py), not for generating text. It runs on CPU and CUDA with ONNX Runtime 1.30 or newer; the builder refuses other execution providers, which do not have `causal=0`. Like LFM3-1.7B below, its CPU and CUDA exports without `exclude_embeds` give the 5 sliding-window layers window-sized KV caches. See the [d1 tutorial](../../../../examples/python/d1-tutorial.md).
+  - With `exclude_embeds=true` the LFM3-VL / LFM3-Audio / LFM3-Omni / d1-2B decoders are stages of the `lfm3_vl`, `lfm3_audio` and `lfm3_omni` pipelines, which the runtime cannot load yet.
+  - LFM3-1.7B has a 262144-token context. Its RoPE caches take about 134 MB in a model with fp16 inputs and outputs and 268 MB with fp32 ones (CPU exports, int4 included). Its full-attention layers keep a KV cache of `search.max_length` tokens, which defaults to that context, so set `search.max_length` to the length you need. In text exports for CPU and CUDA the sliding-window layers keep only their 256-token window (272 rows on CPU, 256 on CUDA), and each prompt of a right-padded batch runs alone; with `include_hidden_states` the export refuses such a batch instead. An export with window-sized caches needs a runtime with this support: an older onnxruntime-genai fails on it on CUDA at the first step and on CPU with padded batches or beam search, and the WebGPU provider does not load it. Export with `windowed_kv_cache=false` to get full-length caches in every layer, as earlier exports have. Exports with `use_paged_attention`, `enable_cuda_graph` or `exclude_embeds`, and exports for WebGPU or TRT-RTX, keep `search.max_length` tokens in those layers too. The runtime refuses CUDA graph capture on an export with window-sized caches. No LFM3 checkpoint has finished a run on TRT-RTX yet.
 - Llama
 - Mistral
 - Nemotron
@@ -88,6 +89,18 @@ The tool currently supports the following model architectures.
 - Whisper
 
 It is intended for supporting the latest, popular state-of-the-art models.
+
+Dense text LongRoPE exports using an `If` node declare an int64 scalar
+`rope_context_length` input. ONNX metadata entries
+`com.microsoft.genai.rope_context_length_input` and
+`com.microsoft.genai.original_context_length` identify that input and the cache
+switch boundary. The runtime keeps the input constant across a chunked prefill
+and replays cached tokens when the sequence switches factors, including after
+a rewind. These exports require a runtime supporting this contract; cache replay
+currently requires a single Generator sequence without beam search. Engine and
+speculative decoding (including n-gram decoding) reject this contract. KV-cache calibration reads the
+metadata and supplies each sample's context length. Paged, multimodal,
+and in-kernel cache-selection exports retain their existing interfaces.
 
 ## Usage
 

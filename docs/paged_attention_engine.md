@@ -115,6 +115,100 @@ Dynamic batching limits scheduled rows with `max_batch_size` and limits the tota
 query tokens in one model run with `max_scheduled_tokens`. The token limit defaults
 to 2048. Both limits are positive and independent.
 
+### Device-memory budget and conservative headroom
+
+Set `engine.dynamic_batching.device_memory_budget_bytes` before loading a model
+to size its CUDA paged cache against a per-model allowance. The package also supplies
+`device_memory_headroom_bytes`, a conservative allowance for additional GPU memory:
+
+```json
+{
+  "engine": {
+    "dynamic_batching": {
+      "device_memory_budget_bytes": 25769803776,
+      "device_memory_headroom_bytes": 3221225472
+    }
+  }
+}
+```
+
+The example is a 24-GiB budget with 3 GiB of headroom, not 24 GB. The headroom
+is illustrative, not a validated value for every model. Both values are integer
+byte counts no greater than 9007199254740991, the existing JSON parser's exact
+integer range. The budget must be positive; headroom must be non-negative.
+Budgeted Engine construction requires explicit headroom; zero is accepted only
+as an explicit choice, not substituted for missing profiling data.
+Existing configuration overlays, including `OgaConfigOverlay`, can set the
+budget before Model creation; there is no separate budget API.
+
+The supported path is one initial load of a CUDA paged decoder Model/Engine,
+including an enabled windowed DFlash 2 drafter. CPU embedding is supported.
+Other devices/backends and enabled MTP or DSpark auxiliary models are rejected
+during Engine construction when this field is set.
+
+An explicit budget overrides `num_blocks` and `gpu_utilization_factor`, including
+block counts supplied by runtime profiles. Other profile and execution settings
+remain unchanged. The user budget is not a runtime-profile overlay setting.
+Packages may override headroom through a runtime profile's
+`overlay.engine.dynamic_batching.device_memory_headroom_bytes`.
+Omitting the user budget preserves existing sizing behavior, even when headroom
+is configured.
+
+Runtime profiles are applied first, using actual hardware facts. Cache sizing
+then uses the effective configuration in this order:
+
+| Settings | Cache sizing behavior |
+|---|---|
+| User budget and explicit headroom | Subtract observed startup usage, headroom, and pending reservations before choosing blocks. Ignore `num_blocks` and `gpu_utilization_factor`. |
+| No user budget; `num_blocks` is set | Use the configured target-equivalent cache allowance. With auxiliary caches, the resolved target block count can be smaller. Ignore `gpu_utilization_factor`. |
+| No user budget or `num_blocks`; `gpu_utilization_factor` is set | Use that fraction of currently free GPU memory, with the existing 10% reserve, then deduct pending reservations. |
+| Runtime profile supplies `num_blocks` | Use that count unless a user budget is set. Other execution settings from the profile still apply. |
+| Runtime profile supplies headroom | Use that headroom only when a user budget is set. |
+| Headroom without a user budget | Ignore headroom and keep the existing sizing behavior. |
+
+For example, `num_blocks: 407` does not necessarily mean 407 target blocks when
+a drafter is enabled: the draft caches share the equivalent byte allowance.
+Use Engine capabilities for the resolved request-length limit.
+
+After device initialization and before loading model initializers/sessions,
+the Model records free GPU memory. Cache sizing subtracts the observed startup
+consumption, including draft-model weights, allocated draft caches, and already
+allocated fixed state, from the allowance and clamps the remainder to current
+free memory. Configured headroom is then subtracted, followed by pending window
+storage, graph buffers, capture block tables, and sampler startup buffers,
+before dividing by the graph-derived cache bytes per block. The explicit headroom
+replaces the generic 10% reserve only in the user-budget path; the legacy path
+retains that reserve. An insufficient budget after deducting configured headroom
+and reservations, or a zero resulting block count, is an initialization error.
+Successful initialization does not certify that the supplied headroom covers
+every later allocation.
+Budgeted key/value payloads use allocator `Reserve` storage, following the scale
+cache ownership pattern, rather than growing the shared arena in larger chunks.
+The default allocation path is unchanged when the budget is omitted.
+
+Headroom covers additional peak usage not already counted in the startup delta
+or pending reservations, including lazy inference workspace, allocator growth,
+and any initialization overhead excluded by the baseline. Do not charge already
+allocated Engine state or known reservations twice. Package authors should profile
+cold initialization and representative mixed workloads at the supported context,
+batch, prefill, speculative, and graph-capture limits, then add a conservative margin.
+A shared value may cover supported GPU families; a run on one GPU alone does not
+establish that it is sufficient elsewhere. Revalidate it when the shipped execution
+configuration or runtime changes.
+
+After successful initialization, use Engine capabilities to read the actual
+maximum request length. This is a prompt/history-plus-generation structural
+limit for exclusive cache use, not current free capacity or a concurrency
+guarantee. Neither a pre-load estimate nor live resizing is provided.
+
+This is an incremental device-wide startup measurement, not allocation
+ownership accounting, an exclusive reservation, or a hard VRAM quota. Other
+GPU activity and reuse of shared or retained allocator storage can affect the
+measurement. Later logits, sampling workspace, and provider allocations are
+covered only to the extent allowed for by the packaged headroom; it is not an
+allocation-enforced peak limit. Reload-aware accounting and physical
+reclamation are outside this initial scope.
+
 ### Prefix caching
 
 Dynamic batching caches prefixes by default for supported layouts.
@@ -2442,7 +2536,8 @@ token. The device holds `model.qwen38_graph.max_batch_size` slots (default 1), o
   case is not a configuration error;
   the decode-graph path needs an even chunk; a step that only advances the prompt delivers no event, so `CancelRequest`
   stays responsive; the dense prefill state continues across the chunks and is handed over to the decode state in the step that
-  ingests the last one) or one whole cycle (with `fold.enabled`: one CUDA-graph launch). The executor tells the device the
+  ingests the last one) or one whole cycle (with `fold.enabled`: one CUDA-graph launch per contiguous active-slot interval).
+  The executor tells the device the
   prompt length of the turn (`Qwen38DecodeDevice::ExpectPrefillTokens`, after `Reset()` and before the first chunk; with
   several slots `ExpectPrefillTokensSlot(slot, total)`, after `ResetSlot(slot)` and before the first `PrefillChunkSlot` of
   that slot); the device hands it to the ORT QMoE kernels with every chunk of that turn and drops it at
@@ -2492,26 +2587,18 @@ token. The device holds `model.qwen38_graph.max_batch_size` slots (default 1), o
   consumed twice, and a fatal execution failure poisons the mutable device context across Engine leases until the model is
   reloaded. At Engine teardown the executor drains the device and reads its status too, but nobody is left to report an error
   to, so a failure poisons the device context instead (the next Engine over the model fails).
-- Known limitation: with several slots a batched decode cycle is only enqueued once every requested slot has ingested its
-  prompt. `StepBatch` enqueues one in phase 2, when all the requested slots are decoding, and lets the device enqueue the next
-  one while it advances a finished cycle (phase 1) only when every requested slot is decoding too; otherwise it passes
-  `defer_next_cycle`, the device keeps the aux rows of the cycle for the DFlash2 drafter, and the next cycle waits for the
-  prompts. So a slot that is ready decodes only after the last chunk of the longest prompt of the batch
-  (it still delivers its first token right after its own prompt), and admitting a long prompt pauses the decoding peers until
-  that prompt is ingested. The barrier protects the state of the slots that are part-way through their prompts, and the device
-  has no primitive to lift it: a batched cycle runs the target over the slots `0 .. max(active slot)` (the batch rows are the
-  slots; there is no slot-to-row indirection), and `Qwen38GraphEngine::MuteSlot` only keeps the other slots of that range
-  valid inputs: it sets the control words of the slot to idle (`{0, 0, 0, 1}`) and zeroes the lengths of its indexer buffers,
-  and the forward then writes the idle row (token 0 at position r, empty contexts, a zero per-layer embedding row) into the
-  slot's KV rows `0 .. r - 1` and its recurrent state. That is harmless for a finished slot, which `ResetSlot()` and its next
-  prompt initialize again, and for a slot nobody has used yet (the executor does not reset it, but slots are assigned from the
-  lowest index, so it lies above every slot a cycle runs and is never muted); it destroys a slot that is part-way through its
-  prompt. Besides, the recurrent state
-  ring advances once per cycle for the whole batch (`bank_phase_`) while a prompt chunk reads and commits the slot's state in
-  the bank of that moment. Decoding the ready slots between the chunks of another prompt therefore needs masked KV and state
-  writes for the slots that sit out a cycle (or a slot-indirected batched binding) and a ring phase per slot that is in
-  prefill: new graph, kernel and device work that this change does not include. Until then a ragged batch decodes in lockstep
-  once its last prompt is in; the chunk size (`prefill.chunk`) bounds how long a step takes, not how long the peers wait.
+- Ready slots decode between prompt chunks, including when a new long prompt joins resident decoders. Phase 1 defers the
+  next cycle only until phase 2 has ingested one chunk per prefilling slot; phase 2 then enqueues all ready decoders.
+  The device splits active slots into contiguous intervals and uses fixed-address bindings for each interval, including
+  its offset KV, indexer, recurrent state, control block, context and result ring. A slot outside those intervals is never
+  an idle row of a target Run, so neither its prompt KV nor its recurrent state is overwritten. Each prefilling slot keeps
+  its own recurrent bank independent of the decode ring phase; its final hand-off copies that slot's recurrent state to the
+  current decode bank before it joins the ready slots. Target graph ids include the first slot as well as batch size and
+  bank phase, and warm-up covers those offset bindings. Contiguous ready slots still share one target forward; separated
+  intervals run separately, without waiting for the prompts between them. Auxiliary features are bound directly to persistent
+  per-slot slices, so both shared and deferred DFlash proposals consume the right slot's features. Each interval binding owns
+  its validation aggregate, and each slot retains the direction of its in-flight target Run so completion errors report that
+  Run's status codes even after later intervals execute.
 - With several slots the DFlash2 drafter proposes for one slot after the other without waiting for the device in between.
   A step tensor larger than a launch can carry (4032 bytes: the block table of a long context) is uploaded from its host
   mirror when the device reaches the copy, so one shared mirror per tensor would be rewritten by the next slot's proposal
@@ -2525,7 +2612,9 @@ token. The device holds `model.qwen38_graph.max_batch_size` slots (default 1), o
   KV capacity - reserved tail, clamped to `model.context_length` when that is configured, so it is the smaller of the two.
 - `GetSpeculativeStats()` includes the executor's counters (`ModelExecutor::AddSpeculativeStats`): one round per slot and
   cycle, one or more proposed drafts per round (the fold verifies 1..3), accepted drafts, bonus and correction tokens, the
-  acceptance-length histogram. One target forward is counted per step, however many slots it batches. The counters describe
+  acceptance-length histogram. Target forwards are counted per physical Run (one per contiguous ready-slot interval), not
+  per slot. A shared batched DFlash proposal counts one draft forward across its surviving rows; independent startup and
+  deferred-seed proposals still count separately. An explicit zero draft-forward count stays zero. The counters describe
   what the Engine consumed, as `Engine::RecordSpeculativeCommit` does for sampled MTP: a turn that ends inside a cycle (turn or
   session limit, stop string, EOS) only accepts the drafts it delivered,
   `draft_tokens_evaluated` counts the draft positions examined up to the terminal token (every accepted draft consumed, an EOS

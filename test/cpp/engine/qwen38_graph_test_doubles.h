@@ -54,6 +54,7 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
     slot_cycles_.assign(max_batch_size_, 0);
     slot_error_bits_.assign(max_batch_size_, 0);
     slot_expected_prefill_.assign(max_batch_size_, 0);
+    slot_draft_shared_.assign(max_batch_size_, false);
   }
 
   // ---- script ----
@@ -67,6 +68,7 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
 
   bool dense_prefill{};
   size_t preferred_chunk{};
+  int draft_forward_override{-1};
 
   // Called at the end of ExpectPrefillTokens(), that is between the publication of a turn's prompt length and its first
   // PrefillChunk(): a test that drives several Engines blocks here to interleave their owner threads the worst way.
@@ -275,6 +277,7 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
     if (slot_ledgers_.at(slot_idx).Length() == 0) throw std::logic_error("BeginDecodeSlot before prompt was ingested");
     slot_decoding_.at(slot_idx) = true;
     slot_expected_prefill_.at(slot_idx) = 0;  // spent, like the single-slot BeginDecode()
+    slot_draft_shared_.at(slot_idx) = false;
     if (slot_idx == 0) decoding_ = true;
     if (want_more && dense_prefill) {
       ++handoffs;
@@ -309,6 +312,10 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
       const auto own = slot_accepted_counts_.find(s);
       records[i] = ScriptedRecord(slot_ledgers_.at(s).Length(), slot_cycles_.at(s),
                                   own != slot_accepted_counts_.end() ? own->second : accepted_counts_);
+      records[i].draft_forward_shared = single_drafter_forward && slot_draft_shared_[s];
+      size_t first = s;
+      while (first > 0 && std::find(active_slots.begin(), active_slots.end(), first - 1) != active_slots.end()) --first;
+      records[i].target_forward_group = first;
     }
   }
 
@@ -328,6 +335,7 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
         pending_ = slot_pending_[0];
       }
       if (want_more[i] != 0) {
+        slot_draft_shared_[s] = !defer_next_cycle;
         next_slots.push_back(s);
       }
     }
@@ -406,6 +414,7 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
     }
     record.proposed_count = mtp_ ? drafts_ : 1;
     record.draft_forward_count = single_drafter_forward ? 1 : record.proposed_count;
+    if (draft_forward_override >= 0) record.draft_forward_count = draft_forward_override;
     // Rows after the first mismatch are meaningless; the cycle commits the accepted drafts and one token more.
     const size_t step = accepted_drafts + 1;
     const std::array<int64_t*, 8> predictions{
@@ -462,6 +471,7 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
   int64_t error_bits_{};
   size_t expected_prefill_{};                  // ExpectPrefillTokens: device-local, dropped by Reset() and BeginDecode()
   std::vector<size_t> slot_expected_prefill_;  // ExpectPrefillTokensSlot: per slot, dropped by Reset(), ResetSlot() and BeginDecodeSlot()
+  std::vector<bool> slot_draft_shared_;
 };
 
 }  // namespace Generators::test

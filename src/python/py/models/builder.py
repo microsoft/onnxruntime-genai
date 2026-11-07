@@ -1184,6 +1184,9 @@ def get_args():
                     With paged attention, eligible local layers use a ring of blocks while at least one full-context
                     layer remains. Without paged attention, supported execution providers use their windowed-cache
                     mode. Set to false to give every layer a full-length KV cache for comparison or compatibility.
+                    LFM3 has window-sized KV caches only in text exports for CPU and CUDA without paged attention or
+                    enable_cuda_graph; other exports keep full-length caches. An older onnxruntime-genai fails on
+                    LFM3 exports with window-sized caches on CUDA, and the WebGPU provider does not load them.
                 gpu_utilization_factor = Fraction of available GPU memory used for the paged KV-cache. Default is 0.6.
                     Must be greater than 0 and at most 1.
                 max_batch_size = Maximum number of requests in a dynamic batch. Default is 100.
@@ -1210,6 +1213,8 @@ def get_args():
                 enable_cuda_graph = Enable CUDA graph capture during inference. Default is false.
                     If enabled, all nodes being placed on the CUDA EP is the prerequisite for the CUDA graph to be used correctly.
                     It is not guaranteed that CUDA graph be enabled as it depends on the model and the graph structure.
+                    LFM3 exports with this option keep full-length KV caches, since the runtime refuses graph capture with
+                    window-sized ones.
                 enable_dml_graph = Enable DML graph capture during inference. Default is true.
                     If enabled, the model structure will be optimized for DML graph execution.
                     DML EP uses graph capture by default for best performance.

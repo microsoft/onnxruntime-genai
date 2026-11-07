@@ -81,6 +81,11 @@ size_t IndexShareScratchBytes(const DecoderOnly_Model& model, size_t max_batch) 
 }
 
 EngineDependencies CreateDecoderDependencies(std::shared_ptr<Model> model) {
+  const auto* decoder = dynamic_cast<const DecoderOnly_Model*>(model.get());
+  if (decoder && !decoder->rope_context_input_.empty()) {
+    throw std::runtime_error(
+        "Engine does not support the explicit LongRoPE context contract; use Generator instead.");
+  }
   // The static batch decoder rebuilds its contiguous cache from the whole sequence every step, so
   // it cannot resume a half-written prompt. Reject a model that configures chunking here rather
   // than surfacing it once a Request is already being admitted.
@@ -213,6 +218,15 @@ EngineDependencies CreateDecoderDependencies(std::shared_ptr<Model> model) {
                                        : CheckedMtpMultiply(2, FixedStatePool::StateBankBytes(*mtp_model, max_batch));
       graph_buffer_reserved_bytes = CheckedMtpAdd(graph_buffer_reserved_bytes, scratch_bytes);
     }
+  }
+  if (model->config_->engine.dynamic_batching &&
+      model->config_->engine.dynamic_batching->device_memory_budget_bytes) {
+    const size_t sampler_bytes = model->p_device_scoring_->GetBatchedSamplerInitialAllocationBytes(
+        std::max(kDefaultStaticBatchSize, model->config_->engine.dynamic_batching->max_batch_size));
+    if (sampler_bytes > std::numeric_limits<size_t>::max() - graph_buffer_reserved_bytes) {
+      throw std::overflow_error("Engine startup reserved memory bytes overflow size_t.");
+    }
+    graph_buffer_reserved_bytes += sampler_bytes;
   }
   if (graph_buffer_reserved_bytes >
       std::numeric_limits<size_t>::max() - dflash2_reserved_memory_bytes) {
@@ -391,6 +405,26 @@ BackendCapabilities ResolveBackendCapabilities(
 
 EngineBackendBundle CreateEngineBackend(std::shared_ptr<Model> model) {
   if (!model) throw std::invalid_argument("Engine backend construction requires a model.");
+  auto& batching = model->config_->engine.dynamic_batching;
+  if (batching && batching->device_memory_budget_bytes) {
+    if (model->p_device_kvcache_->GetType() != DeviceType::CUDA ||
+        std::dynamic_pointer_cast<Qwen38GraphModel>(model) ||
+        !std::dynamic_pointer_cast<DecoderOnly_Model>(model)) {
+      throw std::runtime_error("device_memory_budget_bytes requires a CUDA paged decoder Engine.");
+    }
+    if (model->config_->model.mtp.IsEnabled() ||
+        (!model->config_->model.dflash2.filename.empty() && model->config_->model.dflash2.is_dspark)) {
+      throw std::runtime_error("device_memory_budget_bytes does not yet support MTP or DSpark auxiliary models.");
+    }
+    if (!model->device_memory_budget_initial_free_bytes_) {
+      throw std::runtime_error("device_memory_budget_bytes must be configured before loading the model.");
+    }
+    if (!batching->device_memory_headroom_bytes) {
+      throw std::runtime_error("device_memory_budget_bytes requires an explicit device_memory_headroom_bytes allowance.");
+    }
+    batching->num_blocks.reset();
+    batching->gpu_utilization_factor = 1.0f;
+  }
   EngineDependencies dependencies;
   std::optional<BackendCapabilities> declared;
   if (auto graph_model = std::dynamic_pointer_cast<Qwen38GraphModel>(model)) {

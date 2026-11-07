@@ -7,6 +7,12 @@ parameters:
   values: [cpu, cuda]
 - name: cuda_version
   type: string
+- name: base_image_family
+  type: string
+  default: ''
+- name: docker_build_args
+  type: string
+  default: ''
 
 steps:
 - bash: |
@@ -21,7 +27,7 @@ steps:
     python3 -m venv "$venv_dir"
     source "$venv_dir/bin/activate"
     python -m pip install requests
-    dockerBuildArgs="--build-arg BUILD_UID=$(id -u) --secret id=pip_index_url,env=PIP_INDEX_URL"
+    dockerBuildArgs="$DOCKER_BUILD_ARGS --build-arg BUILD_UID=$(id -u) --secret id=pip_index_url,env=PIP_INDEX_URL"
     if [ '${{ parameters.ep }}' = 'cuda' ] && [ '${{ parameters.arch }}' = 'arm64' ]; then
       [ '${{ parameters.cuda_version }}' = '13.1' ] || {
         echo 'Linux ARM64 CUDA requires CUDA 13.1'; exit 1; }
@@ -41,8 +47,12 @@ steps:
     python tools/ci_build/get_docker_image.py \
       --dockerfile "$dockerfile" \
       --context tools/ci_build/github/linux/docker/manylinux \
+      --base-image-family "$BASE_IMAGE_FAMILY" \
       --docker-build-args "$dockerBuildArgs" \
       --container-registry onnxruntimebuildcache.azurecr.io \
       --repository "ortgenai${{ parameters.ep }}build${{ parameters.arch }}"
   displayName: 'Pull manylinux Docker image (${{ parameters.ep }}, ${{ parameters.arch }})'
   workingDirectory: '$(Build.SourcesDirectory)'
+  env:
+    BASE_IMAGE_FAMILY: ${{ parameters.base_image_family }}
+    DOCKER_BUILD_ARGS: ${{ parameters.docker_build_args }}

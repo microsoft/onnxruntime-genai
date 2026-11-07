@@ -151,7 +151,7 @@ struct Dflash2Drafter {
    *        request, so both are only sufficient while at most that many requests are tracked.
    */
   Dflash2Drafter(std::shared_ptr<Dflash2Model> model, size_t paged_block_size, size_t num_blocks,
-                 size_t max_requests);
+                 size_t max_requests, bool fixed_single_request = false);
   ~Dflash2Drafter();
 
   // Binds the shared Engine policy once, before tracking requests.
@@ -194,6 +194,7 @@ struct Dflash2Drafter {
   // being uploaded from (Dflash2HostStaging).
   void SetFreshStagingMirrors(bool fresh) noexcept { staging_.SetFreshMirrorPerUpload(fresh); }
   size_t AdmissionMisses() const { return admission_misses_; }
+  size_t ContextWindow() const noexcept { return context_window_; }
 
   // A windowed drafter retains only a bounded ring, independently of the target context length.
   static size_t PrefixCheckpointBytes(const Config& config, size_t paged_block_size,
@@ -234,6 +235,8 @@ struct Dflash2Drafter {
   void ReleaseAll();
 
  private:
+  // Native fixed-R8 targets can pad 1..8 committed rows to one replayable proposal shape.
+  bool fixed_single_request_{};
   struct RequestState {
     std::vector<int32_t> blocks;
     size_t cached_positions{};  // Logical committed cursor; a windowed ring retains only its live tail.
@@ -290,6 +293,17 @@ struct Dflash2Drafter {
     std::unique_ptr<Tensor> attention_metadata;
     std::unique_ptr<Tensor> candidate_ids;
     std::unique_ptr<Tensor> scores;
+    DeviceSpan<int32_t> fixed_inputs_span;
+    std::unique_ptr<Tensor> fixed_input_ids;
+    std::unique_ptr<Tensor> fixed_block_row_index;
+    std::unique_ptr<Tensor> fixed_anchor_row_index;
+    std::unique_ptr<Tensor> fixed_cumulative_sequence_lengths;
+    std::unique_ptr<Tensor> fixed_past_sequence_lengths;
+    std::unique_ptr<Tensor> fixed_q_row_map;
+    std::unique_ptr<Tensor> fixed_qkv_row_map;
+    DeviceSpan<uint32_t> fixed_outputs_span;
+    std::vector<int32_t> last_block_table_ring;
+    size_t last_block_table_columns{};
   } step_tensors_;
   // Block-table widths are bucketed to powers of two up to this cap so that a growing context
   // reuses a captured graph instead of retiring one per block boundary.

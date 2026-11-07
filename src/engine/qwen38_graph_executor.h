@@ -69,7 +69,7 @@ class Qwen38GraphSession : public FixedSlotSession {
   // Runs one batched step across `requests` (in their assigned slots) and writes per-request results to `results`.
   void StepBatch(std::span<const Qwen38StepRequest> requests, std::span<Qwen38StepResult> results);
 
-  // Immutable work selection: decode residents may be paused by the backend's serialized prefill barrier.
+  // Immutable work selection for prompt chunks and in-flight decode residents.
   std::vector<BackendPlannedRow> Plan(std::span<const Qwen38StepRequest> requests, std::span<const size_t> request_rows);
   void Collected(const BackendRowResult& result) { completions_.Collected(result); }
   void Acknowledge(const TokenCommitAck& ack);
@@ -103,7 +103,7 @@ class Qwen38GraphSession : public FixedSlotSession {
     size_t draft_forwards{};
     size_t accepted{};
     size_t produced{};
-    bool count_forward_pass{true};  // a batched step runs one target forward for all of its slots
+    bool count_forward_pass{true};  // one target Run can serve several slots
   };
 
   struct SlotState {

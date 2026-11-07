@@ -3083,6 +3083,13 @@ struct DynamicBatching_Element : JSON::Element {
       if (parsed_value <= 0)
         throw std::out_of_range("num_blocks must be > 0");
       v_->num_blocks = static_cast<size_t>(parsed_value);
+    } else if (name == "device_memory_budget_bytes") {
+      const auto bytes = ParseRuntimeProfileMemoryBytes(value, name);
+      if (bytes == 0)
+        throw std::out_of_range("device_memory_budget_bytes must be > 0");
+      v_->device_memory_budget_bytes = bytes;
+    } else if (name == "device_memory_headroom_bytes") {
+      v_->device_memory_headroom_bytes = ParseRuntimeProfileMemoryBytes(value, name);
     } else if (name == "gpu_utilization_factor") {
       const auto parsed_value = JSON::Get<double>(value);
       if (!std::isfinite(parsed_value) || parsed_value <= 0 || parsed_value > 1)
@@ -3214,6 +3221,10 @@ struct RuntimeProfileDynamicBatching_Element : JSON::Element {
   explicit RuntimeProfileDynamicBatching_Element(Config::RuntimeProfile::Overlay::DynamicBatching& v) : v_{v} {}
 
   void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "device_memory_headroom_bytes") {
+      v_.device_memory_headroom_bytes = ParseRuntimeProfileMemoryBytes(value, name);
+      return;
+    }
     if (name == "prefix_caching") {
       v_.prefix_caching = JSON::Get<bool>(value);
       return;
@@ -3585,7 +3596,7 @@ void ValidateRuntimeProfiles(const Config& config) {
     }
     if (!profile.overlay.model.decoder_filename &&
         profile.overlay.model.decoder_session_options.empty() &&
-        !batching.num_blocks && !batching.max_batch_size &&
+        !batching.num_blocks && !batching.device_memory_headroom_bytes && !batching.max_batch_size &&
         !batching.max_scheduled_tokens && !batching.prefix_caching &&
         !batching.max_snapshots && !batching.snapshot_cache && !search.chunk_size &&
         !batching.dflash2_max_snapshots &&
@@ -4107,7 +4118,7 @@ void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device) {
     return;
   }
   const auto& batching = selected->overlay.dynamic_batching;
-  const bool has_batching_overlay = batching.num_blocks || batching.max_batch_size ||
+  const bool has_batching_overlay = batching.num_blocks || batching.device_memory_headroom_bytes || batching.max_batch_size ||
                                     batching.max_scheduled_tokens || batching.prefix_caching ||
                                     batching.max_snapshots || batching.snapshot_cache ||
                                     batching.dflash2_max_snapshots;
@@ -4137,6 +4148,7 @@ void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device) {
   if (has_batching_overlay) {
     auto& effective = *candidate.engine.dynamic_batching;
     if (batching.num_blocks) effective.num_blocks = batching.num_blocks;
+    if (batching.device_memory_headroom_bytes) effective.device_memory_headroom_bytes = batching.device_memory_headroom_bytes;
     if (batching.max_batch_size) effective.max_batch_size = *batching.max_batch_size;
     if (batching.max_scheduled_tokens) effective.max_scheduled_tokens = *batching.max_scheduled_tokens;
     if (batching.prefix_caching) effective.prefix_caching = *batching.prefix_caching;
