@@ -1031,6 +1031,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
           [](OgaRequest& request, const std::string& prompt, OgaTurnOptions* options, OgaImages* images) {
             if (prompt.find('\0') != std::string::npos)
               throw pybind11::value_error("A formatted prompt must not contain embedded NUL.");
+            pybind11::gil_scoped_release release;
             return request.BeginTurn(prompt.c_str(), options, images);
           },
           pybind11::arg("prompt"), pybind11::arg("turn_options") = pybind11::none(),
