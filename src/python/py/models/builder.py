@@ -1089,6 +1089,7 @@ def get_args():
                 runtime_last_token_indices = Use runtime-supplied chunk-local nonpad indices with a pruned LM head.
                     Handles trailing padding in chunked prefill and continuation without inspecting a static mask.
                     Requires an updated runtime supporting last_token_indices. Default is false.
+                    GenAI currently rejects this option with explicit or legacy rotary-cache replay.
                 include_hidden_states = Include hidden states as output from your ONNX model.
                     Use this option when you want to have the hidden states as an output from your ONNX model.
                     In addition to `logits`, you will have `hidden_states` as an output to your ONNX model.

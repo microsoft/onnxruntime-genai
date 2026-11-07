@@ -12,6 +12,7 @@
 #include "generator/generators.h"
 #include "models/model.h"
 #include "models/io/logits.h"
+#include "ort_genai.h"
 #include "test_utils.h"
 
 namespace Generators::test {
@@ -34,15 +35,16 @@ class ForcedTokensProcessor final : public ConstrainedLogitsProcessor {
 };
 
 TEST(ForcedTokenLogitsTest, SlidingWindowAlignmentExcludesOnlySyntheticPadding) {
-  for (const auto* path : {MODEL_PATH "longrope-context-legacy", MODEL_PATH "longrope-context-legacy-runtime-indices"}) {
+  for (const auto* filename : {"full.onnx", "pruned.onnx"}) {
     for (const auto* alignment : {"left", "right"}) {
       for (bool slide_inputs : {false, true}) {
         for (int forced_length : {2, 3, 4, 6, 7, 8}) {
           for (int32_t final_token : {1, 2}) {
-            SCOPED_TRACE(testing::Message() << "path=" << path << " alignment=" << alignment
+            SCOPED_TRACE(testing::Message() << "filename=" << filename << " alignment=" << alignment
                                             << " slide_inputs=" << slide_inputs << " forced_length=" << forced_length
                                             << " final_token=" << final_token);
-            auto config = CreateConfig(GetOrtEnv(), path);
+            auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "last-token-generation");
+            config->model.decoder.filename = filename;
             config->model.pad_token_id = 1;
             config->model.eos_token_id = {0};
             if (slide_inputs) {
@@ -88,10 +90,11 @@ TEST(LastTokenIndicesTest, SelectsEachRowsLastNonpadAndRepeatsForBeams) {
 }
 
 TEST(ForcedTokenLogitsTest, ExplicitSelectionExtentSurvivesChunkingAndKeepsGeneratedPad) {
-  for (const auto* path : {MODEL_PATH "longrope-context-legacy", MODEL_PATH "longrope-context-legacy-runtime-indices"}) {
+  for (const auto* filename : {"full.onnx", "pruned.onnx"}) {
     for (int chunk : {0, 1, 2, 3}) {
-      SCOPED_TRACE(testing::Message() << "path=" << path << " chunk=" << chunk);
-      auto config = CreateConfig(GetOrtEnv(), path);
+      SCOPED_TRACE(testing::Message() << "filename=" << filename << " chunk=" << chunk);
+      auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "last-token-generation");
+      config->model.decoder.filename = filename;
       config->model.pad_token_id = 1;
       auto model = CreateModel(GetOrtEnv(), std::move(config));
       auto params = std::make_shared<GeneratorParams>(*model);
@@ -137,9 +140,9 @@ TEST(ForcedTokenLogitsTest, DeviceAppendRejectsPaddingBeforeMutatingTheSequence)
   const std::array providers{false};
 #endif
   for (bool use_cuda : providers) {
-    for (const auto* path : {MODEL_PATH "longrope-context", MODEL_PATH "longrope-context-runtime-indices"}) {
-      SCOPED_TRACE(testing::Message() << "path=" << path << " cuda=" << use_cuda);
-      auto config = CreateConfig(GetOrtEnv(), path);
+    {
+      SCOPED_TRACE(testing::Message() << "cuda=" << use_cuda);
+      auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "last-token-generation");
       config->model.pad_token_id = 0;
       if (use_cuda)
         OverlayConfig(*config, R"({"model":{"decoder":{"session_options":{"provider_options":[{"cuda":{}}]}}}})");
@@ -154,8 +157,8 @@ TEST(ForcedTokenLogitsTest, DeviceAppendRejectsPaddingBeforeMutatingTheSequence)
       EXPECT_THROW(generator->AppendTokens(tokens), std::invalid_argument);
       ASSERT_EQ(generator->GetSequence(0).size(), 8u);
       auto logits = generator->GetLogits().CopyDeviceToCpu();
-      EXPECT_FLOAT_EQ(logits[0], 8);
-      EXPECT_FLOAT_EQ(logits[1], -8);
+      EXPECT_FLOAT_EQ(logits[0], -8);
+      EXPECT_FLOAT_EQ(logits[1], 8);
       auto* cache = generator->state_->GetOutput("present.0.key");
       EXPECT_EQ(cache->GetTensorTypeAndShapeInfo()->GetElementCount(), 8u);
       tokens.CpuSpan()[0] = 1;
@@ -163,6 +166,120 @@ TEST(ForcedTokenLogitsTest, DeviceAppendRejectsPaddingBeforeMutatingTheSequence)
       EXPECT_NO_THROW(generator->AppendTokens(tokens));
       EXPECT_EQ(generator->GetSequence(0).size(), 12u);
     }
+  }
+}
+
+struct GeneratorLastTokenLogitsTest : testing::Test {
+  std::unique_ptr<OgaModel> model = OgaModel::Create(MODEL_PATH "last-token-generation");
+
+  std::unique_ptr<OgaGenerator> CreateGenerator(int chunk_size) {
+    auto params = OgaGeneratorParams::Create(*model);
+    params->SetSearchOption("chunk_size", chunk_size);
+    return OgaGenerator::Create(*model, *params);
+  }
+
+  void ExpectConsistentCache(OgaGenerator& generator) {
+    const auto count = generator.GetSequenceCount(0);
+    const auto* tokens = generator.GetSequenceData(0);
+    const float sum = std::accumulate(tokens, tokens + count, 0.0f);
+    auto tensor = generator.GetLogits();
+    const auto* logits = static_cast<const float*>(tensor->Data());
+    EXPECT_FLOAT_EQ(logits[0], -sum);
+    EXPECT_FLOAT_EQ(logits[1], sum);
+    EXPECT_FLOAT_EQ(logits[2], 0);
+  }
+};
+
+TEST_F(GeneratorLastTokenLogitsTest, ChunkedPrefillAcceptsDiscardedPaddingOnlyChunks) {
+  auto config = OgaConfig::Create(MODEL_PATH "last-token-generation");
+  config->Overlay(R"({"model":{"pad_token_id":0,"eos_token_id":2}})");
+  model = OgaModel::Create(*config);
+  auto generator = CreateGenerator(2);
+  ASSERT_NO_THROW(generator->AppendTokens(std::vector<int32_t>{0, 0, 1, 1}));
+  ExpectConsistentCache(*generator);
+}
+
+TEST_F(GeneratorLastTokenLogitsTest, RejectsPaddingOnlyFinalSingletonChunks) {
+  auto config = OgaConfig::Create(MODEL_PATH "last-token-generation");
+  config->Overlay(R"({"model":{"pad_token_id":0,"eos_token_id":2}})");
+  model = OgaModel::Create(*config);
+  for (int chunk : {0, 1, 2}) {
+    for (const auto& prompt : {std::vector<int32_t>{0}, std::vector<int32_t>{1, 1, 0}}) {
+      if (chunk == 0 && prompt.size() > 1)
+        continue;
+      SCOPED_TRACE(testing::Message() << "chunk=" << chunk << " prompt_length=" << prompt.size());
+      auto generator = CreateGenerator(chunk);
+      try {
+        generator->AppendTokens(prompt);
+        ADD_FAILURE() << "Accepted a padding-only final singleton prompt chunk";
+      } catch (const std::runtime_error& error) {
+        EXPECT_NE(std::string(error.what()).find("non-padding token in each current chunk"), std::string::npos);
+      }
+    }
+  }
+}
+
+TEST_F(GeneratorLastTokenLogitsTest, ValidatesAppendedSingletonPromptsBeforeMutation) {
+  auto config = OgaConfig::Create(MODEL_PATH "last-token-generation");
+  config->Overlay(R"({"model":{"pad_token_id":0,"eos_token_id":2}})");
+  model = OgaModel::Create(*config);
+  for (int chunk : {0, 1, 2}) {
+    SCOPED_TRACE(testing::Message() << "chunk=" << chunk);
+    for (int length : {1, 8}) {
+      SCOPED_TRACE(testing::Message() << "length=" << length);
+      auto generator = CreateGenerator(chunk);
+      ASSERT_NO_THROW(generator->AppendTokens(std::vector<int32_t>(length, 1)));
+      ExpectConsistentCache(*generator);
+      EXPECT_THROW(generator->AppendTokens(std::vector<int32_t>{0}), std::runtime_error);
+      ASSERT_EQ(generator->GetSequenceCount(0), static_cast<size_t>(length));
+      ExpectConsistentCache(*generator);
+      generator->AppendTokens(std::vector<int32_t>{1});
+      ASSERT_EQ(generator->GetSequenceCount(0), static_cast<size_t>(length + 1));
+      ExpectConsistentCache(*generator);
+
+      generator = CreateGenerator(chunk);
+      ASSERT_NO_THROW(generator->AppendTokens(std::vector<int32_t>(length, 1)));
+      ASSERT_NO_THROW(generator->AppendTokens(std::vector<int32_t>{1}));
+      ExpectConsistentCache(*generator);
+    }
+    auto generator = CreateGenerator(chunk);
+    ASSERT_NO_THROW(generator->AppendTokens(std::vector<int32_t>{0, 1}));
+    ExpectConsistentCache(*generator);
+  }
+}
+
+TEST_F(GeneratorLastTokenLogitsTest, GeneratedPadRemainsValid) {
+  for (const auto* filename : {"full.onnx", "pruned.onnx"}) {
+    auto config = OgaConfig::Create(MODEL_PATH "last-token-generation");
+    config->Overlay(R"({"model":{"pad_token_id":1,"eos_token_id":2}})");
+    config->Overlay((std::string{R"({"model":{"decoder":{"filename":")"} + filename + R"("}}})").c_str());
+    model = OgaModel::Create(*config);
+    for (int chunk : {0, 1, 2}) {
+      SCOPED_TRACE(testing::Message() << "filename=" << filename << " chunk=" << chunk);
+      auto generator = CreateGenerator(chunk);
+      generator->AppendTokens(std::vector<int32_t>{0});
+      std::array<float, 3> forced_logits{0, 10, -10};
+      generator->SetLogits(*OgaTensor::Create(forced_logits.data(), std::array<int64_t, 2>{1, 3}));
+      generator->GenerateNextToken();
+      ASSERT_EQ(generator->GetSequenceData(0)[1], 1);
+      ExpectConsistentCache(*generator);
+      generator->GenerateNextToken();
+      EXPECT_EQ(generator->GetSequenceData(0)[2], 1);
+      ASSERT_NO_THROW(generator->AppendTokens(std::vector<int32_t>{0}));
+      ExpectConsistentCache(*generator);
+    }
+  }
+}
+
+TEST_F(GeneratorLastTokenLogitsTest, RejectsUnsupportedRotaryCacheReplay) {
+  auto config = OgaConfig::Create(MODEL_PATH "last-token-generation");
+  config->Overlay(R"({"model":{"type":"phi3"}})");
+  model = OgaModel::Create(*config);
+  try {
+    CreateGenerator(0);
+    FAIL() << "Accepted runtime-selected indices with rotary-cache replay";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(std::string(error.what()).find("do not support rotary-cache replay"), std::string::npos);
   }
 }
 

@@ -49,6 +49,9 @@ examples/csharp/ModelChat/models
 !test/models/qwen3-5/*
 !test/models/qwen3-vl/*
 !test/models/whisper/*
+!/test/models/last-token-generation/
+!test/models/last-token-generation/*.onnx
+!test/models/last-token-generation/genai_config.json
 
 !/test/models/engine/
 /test/models/engine/*

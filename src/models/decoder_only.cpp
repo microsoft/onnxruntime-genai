@@ -163,19 +163,16 @@ DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& 
 }
 
 DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices,
-                                         bool all_tokens_valid, int rope_context_length) {
+                                         bool all_tokens_valid) {
   size_t num_tokens = next_tokens.size();
   const auto& chunk_size_opt = params_->search.chunk_size;
 
   if (rope_context_length_)
-    *rope_context_length_->GetTensorMutableData<int64_t>() = rope_context_length > 0 ? rope_context_length : total_length;
-  const bool replaying_rope_cache =
-      rope_context_length_ && (rope_context_length > 0 || num_tokens == static_cast<size_t>(total_length));
+    *rope_context_length_->GetTensorMutableData<int64_t>() = total_length;
+  const bool replaying_rope_cache = rope_context_length_ && num_tokens == static_cast<size_t>(total_length);
   if ((first_run_ || replaying_rope_cache) && chunk_size_opt.has_value() &&
       chunk_size_opt.value() > 0 && num_tokens > chunk_size_opt.value()) {
-    return RunWithChunking(total_length, next_tokens, next_indices, chunk_size_opt.value(), all_tokens_valid,
-                           (replaying_rope_cache && rope_context_length > 0 && IsPromptInput() && !all_tokens_valid) ||
-                               InputSelectionLength() > 0);
+    return RunWithChunking(total_length, next_tokens, next_indices, chunk_size_opt.value(), all_tokens_valid);
   }
 
   UpdateInputsOutputs(next_tokens, next_indices, total_length, all_tokens_valid, true);
@@ -223,8 +220,7 @@ DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& 
 }
 
 DeviceSpan<float> DecoderOnly_State::RunWithChunking(int total_length, DeviceSpan<int32_t>& next_tokens,
-                                                     DeviceSpan<int32_t> next_indices, size_t chunk_size, bool all_tokens_valid,
-                                                     bool preserve_prompt_selection) {
+                                                     DeviceSpan<int32_t> next_indices, size_t chunk_size, bool all_tokens_valid) {
   // Chunking logic for context phase - process in chunks based on configured chunk_size
   size_t num_tokens = next_tokens.size();
   size_t processed_tokens = 0;
@@ -233,12 +229,9 @@ DeviceSpan<float> DecoderOnly_State::RunWithChunking(int total_length, DeviceSpa
   DeviceSpan<float> saved_logits;
   const size_t selection_length = InputSelectionLength();
   if (selection_length > num_tokens)
-    throw std::invalid_argument("Logit selection extent exceeds the replayed input length");
+    throw std::invalid_argument("Logit selection extent exceeds the current input length");
   if (selection_length) {
     last_prompt_token = selection_length - 1;
-  } else if (preserve_prompt_selection) {
-    last_prompt_token = static_cast<size_t>(
-        LastTokenIndices(next_tokens.CopyDeviceToCpu(), 1, 1, num_tokens, model_.config_->model.pad_token_id).front());
   }
 
   if (model_.config_->model.decoder.run_options.has_value()) {
@@ -258,7 +251,7 @@ DeviceSpan<float> DecoderOnly_State::RunWithChunking(int total_length, DeviceSpa
 
     // Process this chunk - fills KV cache progressively
     UpdateInputsOutputs(chunk_tokens, next_indices, length, all_tokens_valid,
-                        preserve_prompt_selection ? selected_chunk : last_chunk);
+                        selection_length ? selected_chunk : last_chunk);
     if (engram_state_) {
       engram_state_->UpdateInputsOutputs(chunk_tokens);
       engram_state_->Run(length, chunk_tokens, next_indices);
@@ -269,7 +262,7 @@ DeviceSpan<float> DecoderOnly_State::RunWithChunking(int total_length, DeviceSpa
     // Graph capture is typically disabled during context phase chunking
     bool graph_capture_this_run = false;  // Disable graph capture during chunking
     State::Run(*model_.session_decoder_, graph_capture_this_run);
-    if (preserve_prompt_selection && selected_chunk) {
+    if (selection_length && selected_chunk) {
       auto selected_logits = logits_.Get(all_tokens_valid);
       if (last_chunk)
         return selected_logits;

@@ -43,7 +43,7 @@ struct DecoderOnly_State : State {
 
   DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
   DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices,
-                        bool all_tokens_valid, int rope_context_length = 0);
+                        bool all_tokens_valid);
 
   void RewindTo(size_t index) override;
   void ValidateRewindTo(size_t index) const override;
@@ -67,8 +67,7 @@ struct DecoderOnly_State : State {
 
  private:
   DeviceSpan<float> RunWithChunking(int total_length, DeviceSpan<int32_t>& next_tokens,
-                                    DeviceSpan<int32_t> next_indices, size_t chunk_size, bool all_tokens_valid,
-                                    bool preserve_prompt_selection);
+                                    DeviceSpan<int32_t> next_indices, size_t chunk_size, bool all_tokens_valid);
 
   void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> beam_indices, int total_length,
                            bool all_tokens_valid, bool is_final_chunk);

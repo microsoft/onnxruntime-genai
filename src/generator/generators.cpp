@@ -670,6 +670,8 @@ Generator::Generator(const Model& model, const GeneratorParams& params)
   guidance_logits_processor_ = CreateGuidanceLogitsProcessor(*state_);  // Could be nullptr if use_guidance (constrained decoding) is not used
 
   InitializePhi3RopeThreshold(params);
+  if ((rope_context_threshold_ || phi3_rope_threshold_) && model_->session_info_.HasInput("last_token_indices"))
+    throw std::runtime_error("Runtime last-token indices do not support rotary-cache replay");
   InitializeSamplingMethod(params);
   strategy_ = MakeDecodingStrategy(*this);
   LogGeneratorCreate(params);
@@ -769,36 +771,25 @@ void Generator::ThrowIfAppendExceedsMaxLength(size_t input_ids_count) {
     throw std::runtime_error("input_ids size (" + std::to_string(input_ids_count) + ") + current sequence length (" + std::to_string(search_->GetSequenceLength()) + ") exceeds max length (" + std::to_string(state_->params_->search.max_length) + ")");
 }
 
-void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
-  AppendTokens(input_ids, true);
-}
-
-bool Generator::NeedsRopeReplay(int total_length) const {
-  return rope_context_threshold_ != 0 && rope_cache_length_ > 0 &&
-         (rope_cache_length_ >= rope_context_threshold_) != (total_length >= rope_context_threshold_);
-}
-
-void Generator::ValidatePromptBeforeAppend(cpu_span<const int32_t> input_ids, size_t padded_count) const {
+void Generator::ValidatePromptBeforeAppend(cpu_span<const int32_t> input_ids) const {
   const auto batch_size = static_cast<size_t>(state_->params_->search.batch_size);
-  const int length = search_->GetSequenceLength() + static_cast<int>(padded_count / batch_size);
-  const bool replay = NeedsRopeReplay(length);
-  if (!replay && !model_->session_info_.HasInput("last_token_indices"))
+  if (!model_->session_info_.HasInput("last_token_indices"))
     return;
   if (input_ids.size() % batch_size)
     throw std::invalid_argument("Last-token indices require complete prompt token rows");
   std::span<const int32_t> validation_tokens = input_ids;
   size_t sequence_length = input_ids.size() / batch_size;
   const auto& chunk_size = state_->params_->search.chunk_size;
-  if (!replay && search_->GetSequenceLength() == 0 && batch_size == 1 &&
+  if (search_->GetSequenceLength() == 0 && batch_size == 1 &&
       chunk_size.has_value() && *chunk_size > 0 && sequence_length > *chunk_size) {
     const size_t offset = (sequence_length - 1) / *chunk_size * *chunk_size;
-    validation_tokens = validation_tokens.subspan(offset);
+    validation_tokens = validation_tokens.subspan(offset, validation_tokens.size() - offset);
     sequence_length -= offset;
   }
   LastTokenIndices(validation_tokens, batch_size, 1, sequence_length, model_->config_->model.pad_token_id);
 }
 
-void Generator::AppendTokens(cpu_span<const int32_t> input_ids, bool is_prompt) {
+void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   DurationTrace trace{"Generator::AppendTokens"};
 
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
@@ -814,8 +805,7 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids, bool is_prompt) 
     throw std::runtime_error("Continuous decoding is not supported on the selected device type (" + to_string(state_->model_.p_device_kvcache_->GetType()) +
                              "). Please recreate the generator instance to avoid using continuous decoding.");
 
-  if (is_prompt)
-    ValidatePromptBeforeAppend(input_ids, PaddedInputIdsSize(input_ids.size()));
+  ValidatePromptBeforeAppend(input_ids);
 
   std::string_view append_input_modality = transducer_state_ ? "audio" : "text";
   if (generation_telemetry_.BeginAppend()) {
@@ -859,7 +849,7 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids, bool is_prompt) 
     search_->AppendTokens(input_ids_device);
   } else {
     search_->AppendTokens(input_ids_device);
-    ComputeLogits(input_ids_device, is_prompt);
+    ComputeLogits(input_ids_device, /*is_prompt=*/true);
   }
 
   generation_telemetry_.CompleteAppend(
@@ -881,9 +871,8 @@ void Generator::AppendTokens(DeviceSpan<int32_t> input_ids) {
   if (search_->GetSequenceLength() != 0 && state_->params_->search.batch_size > 1)
     throw std::runtime_error("AppendTokens can only be called once for batch_size > 1. To call AppendTokens again, use RewindToLength(0)");
 
-  if (NeedsRopeReplay(search_->GetSequenceLength() + static_cast<int>(input_ids.size())) ||
-      model_->session_info_.HasInput("last_token_indices"))
-    ValidatePromptBeforeAppend(input_ids.CopyDeviceToCpu(), input_ids.size());
+  if (model_->session_info_.HasInput("last_token_indices"))
+    ValidatePromptBeforeAppend(input_ids.CopyDeviceToCpu());
 
   if (set_extra_inputs_) {
     state_->SetExtraInputs(extra_inputs_);
@@ -1011,40 +1000,24 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens, bool is_prompt) {
 
 DeviceSpan<float> Generator::RunWithRopeCache(DeviceSpan<int32_t> next_tokens, bool is_prompt, size_t input_selection_length) {
   const int length = search_->GetSequenceLength();
-  const bool replay = NeedsRopeReplay(length);
+  const bool replay = rope_context_threshold_ != 0 && rope_cache_length_ > 0 &&
+                      (rope_cache_length_ >= rope_context_threshold_) != (length >= rope_context_threshold_);
   if (replay) {
-    auto prompt_tokens = next_tokens;
-    if ((is_prompt || input_selection_length) && prompt_tokens.size() > static_cast<size_t>(length))
-      throw std::invalid_argument("LongRoPE prompt tokens exceed the committed sequence length");
-    if (is_prompt) {
-      // Validate new prompt tokens before replay turns them into committed tokens.
-      const auto batch_size = static_cast<size_t>(state_->params_->search.batch_size);
-      if (!batch_size || next_tokens.size() % batch_size)
-        throw std::invalid_argument("Last-token indices require complete prompt token rows");
-      LastTokenIndices(next_tokens.CopyDeviceToCpu(), batch_size, 1, next_tokens.size() / batch_size,
-                       model_->config_->model.pad_token_id);
+    if (input_selection_length) {
+      if (input_selection_length > next_tokens.size() || next_tokens.size() > static_cast<size_t>(length))
+        throw std::invalid_argument("Logit selection extent exceeds the current input length");
+      // The explicit extent is relative to the incoming suffix, not replayed history.
+      input_selection_length += static_cast<size_t>(length) - next_tokens.size();
     }
     // Rebuild only model state: search, sampling, guidance and usage already contain these tokens.
     state_->RewindTo(0);
     next_tokens = search_->GetSequence(0);
     next_tokens.CopyDeviceToCpu();
-    if (is_prompt || input_selection_length) {
-      const size_t prefix_length = next_tokens.size() - prompt_tokens.size();
-      if (prefix_length > 0) {
-        auto committed_tokens = next_tokens.subspan(0, prefix_length);
-        State::PromptInputScope committed_scope(*state_, false);
-        // Rebuild the prefix in the final regime, but retain prompt-only padding selection for the suffix.
-        static_cast<DecoderOnly_State&>(*state_).Run(static_cast<int>(prefix_length), committed_tokens,
-                                                     search_->GetNextIndices(), true, length);
-      }
-      next_tokens = prompt_tokens;
-    }
   }
 
-  State::PromptInputScope prompt_scope(*state_, is_prompt, input_selection_length);
-  auto logits = replay
-                    ? static_cast<DecoderOnly_State&>(*state_).Run(length, next_tokens, search_->GetNextIndices(), !is_prompt, length)
-                    : state_->Run(length, next_tokens, search_->GetNextIndices());
+  State::PromptInputScope prompt_scope(*state_, !replay && is_prompt, input_selection_length);
+  auto logits = replay ? static_cast<DecoderOnly_State&>(*state_).Run(length, next_tokens, search_->GetNextIndices(), true)
+                       : state_->Run(length, next_tokens, search_->GetNextIndices());
   rope_cache_length_ = length;
   return logits;
 }

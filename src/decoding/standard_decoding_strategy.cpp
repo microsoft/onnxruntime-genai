@@ -69,7 +69,7 @@ void StandardDecodingStrategy::Step(Generator& g) {
       [[maybe_unused]] auto suppress_telemetry_append_tracking =
           g.generation_telemetry_.SuppressAppendTracking();
       g.RewindToLength(0);
-      g.AppendTokens(current_seq, false);
+      g.AppendTokens(current_seq);
     }
   }
   RunStandardDecodingStep(g);

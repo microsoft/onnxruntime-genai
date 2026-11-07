@@ -96,10 +96,8 @@ Dense text LongRoPE exports using an `If` node declare an int64 scalar
 `com.microsoft.genai.original_context_length` identify that input and the cache
 switch boundary. The runtime keeps the input constant across a chunked prefill
 and replays cached tokens when the sequence switches factors, including after
-a rewind. Both the committed prefix and appended prompt honor the configured
-prefill chunk size during replay. These exports require a runtime supporting
-this contract; cache replay currently requires a single Generator sequence
-without beam search. Engine and
+a rewind. These exports require a runtime supporting this contract; cache replay
+currently requires a single Generator sequence without beam search. Engine and
 speculative decoding (including n-gram decoding) reject this contract. KV-cache calibration reads the
 metadata and supplies each sample's context length. Paged, multimodal,
 and in-kernel cache-selection exports retain their existing interfaces.
@@ -398,16 +396,16 @@ Padding-only intermediate chunks are permitted when their logits are discarded;
 for ordinary prefills, each final prompt chunk must contain a non-padding token
 in every row, even when the chunk contains only one token. Prompt validation
 precedes sequence and cache mutation, so a rejected append leaves the generator
-usable. At a LongRoPE transition, committed history and the new
-prompt are replayed separately under the same final context regime and configured
-chunk limit. The replayed prompt retains logits from its last non-padding chunk
-while any remaining padding-only chunks update only the cache. Generated tokens
-and committed-token replay treat PAD-ID tokens as valid, and every token remains in
+usable. Generated tokens treat PAD-ID tokens as valid, and every token remains in
 the KV cache. Ordinary one-token decode does not download tokens to the CPU to
-validate padding. Legacy Phi3 threshold replay also retains committed-token
-origin. For left-aligned sliding-window guidance, an explicit selection extent
+validate padding. For left-aligned sliding-window guidance, an explicit selection extent
 excludes synthetic trailing padding without excluding genuine forced PAD tokens.
 Selection is preserved across chunking and nested decoder states.
+
+Runtime-selected indices do not currently support explicit LongRoPE context
+selection or legacy Phi-family rotary-cache replay; the runtime rejects those
+combinations. Exports without the reserved input retain their existing replay
+behavior. LongRoPE-specific enhancements are outside this feature's scope.
 
 These runtime changes require device-interface version 22. Rebuild the CUDA
 add-on together with the runtime; older add-ons are rejected with an explicit
