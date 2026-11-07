@@ -92,8 +92,10 @@ struct Qwen38CycleRecord {
   bool accepted{};
   int accepted_count{};
   int proposed_count{1};
-  int draft_forward_count{1};  // drafter executions behind the proposals: one per token for an MTP chain, one per block for DFlash
-  int64_t new_pending{};       // device view after the commit (checked against the host ledger)
+  int draft_forward_count{1};     // independent drafter executions, or the shared count when draft_forward_shared is true
+  bool draft_forward_shared{};    // one batched drafter execution serves all records with this flag
+  size_t target_forward_group{};  // records of the same target Run share a group (the first physical slot of that Run)
+  int64_t new_pending{};          // device view after the commit (checked against the host ledger)
   int64_t new_length{};
 
   size_t TokenCount() const {
