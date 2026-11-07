@@ -9,14 +9,21 @@ import onnx_ir as ir
 from loaders.bailing import BailingModel
 
 from .base import Model
+from .expansions.standard import Standard
 from .qwen3_5.text import Qwen35TextModel
-
 
 class BailingMoeV3Model(Qwen35TextModel):
     """Builder for inclusionAI/Ling-3.0-tiny (BailingMoeV3ForCausalLM, model_type='bailing_hybrid')."""
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         self.config = config
+        for name in ("expert_swiglu_limit_list", "share_expert_swiglu_limit_list"):
+            limits = getattr(config, name, None)
+            if limits is not None:
+                if len(limits) != config.num_hidden_layers:
+                    raise ValueError(f"{name} must have one value per decoder layer")
+                if any(not math.isfinite(limit) or limit < 0 for limit in limits):
+                    raise ValueError(f"{name} must contain finite nonnegative limits")
         layer_group_size = getattr(config, "layer_group_size", 1)
         if isinstance(layer_group_size, bool) or not isinstance(layer_group_size, int) or layer_group_size <= 0:
             raise ValueError("BailingMoeV3 layer_group_size must be a positive integer; per-layer lists are not supported")
@@ -102,6 +109,10 @@ class BailingMoeV3Model(Qwen35TextModel):
         self.moe_attrs["swiglu_fusion"] = 1
         self.moe_attrs["normalize_routing_weights"] = getattr(config, "norm_topk_prob", False)
 
+        if self.ep == "cuda":
+            # Router projection and expert selection require FP32, not TF32.
+            self.ep_attrs["cuda"]["use_tf32"] = "0"
+
         if self.ep == "cuda" and self.use_paged_attention:
             self.ep_attrs["cuda"]["enable_cuda_graph"] = (
                 "1" if str(extra_options.get("enable_cuda_graph", "1")).lower() not in ("0", "false") else "0"
@@ -132,6 +143,8 @@ class BailingMoeV3Model(Qwen35TextModel):
         self.input_shapes["position_ids"] = (
             ["num_tokens"] if self.use_paged_attention else ["batch_size", "sequence_length"]
         )
+        if self.rope_attrs["op_type"] == "MRotaryEmbedding":
+            self.input_shapes["position_ids"] = [3, "num_tokens"]
         if self.ep == "cpu":
             recurrent_shape = [
                 "batch_size",
@@ -346,6 +359,16 @@ class BailingMoeV3Model(Qwen35TextModel):
             out = f"{sq_out}/output_0"
         return out
 
+    def make_mla_query(self, layer_id, attention, root_input):
+        basename = f"/model/layers.{layer_id}/attn"
+        if self.mla_attrs["q_lora_rank"] is None:
+            return self.make_matmul(attention.q_proj, f"{basename}/q_proj/MatMul", root_input)
+        qa_matmul = self.make_matmul(attention.q_a_proj, f"{basename}/q_a_proj/MatMul", root_input)
+        qa_norm = self.make_mla_projection_norm(
+            layer_id, attention.q_a_layernorm, f"{qa_matmul}/output_0", "q"
+        )
+        return self.make_matmul(attention.q_b_proj, f"{basename}/q_b_proj/MatMul", qa_norm)
+
     def make_attention(self, layer_id, attention, root_input, **kwargs):
         if self.layer_types[layer_id] == "linear_attention":
             self.make_qwen_gated_delta_net(layer_id, attention, root_input)
@@ -411,12 +434,8 @@ class BailingMoeV3Model(Qwen35TextModel):
         rope_dim = self.mla_attrs["qk_rope_head_dim"]
         qk_dim = self.head_size
 
-        qa_matmul = self.make_matmul(attention.q_a_proj, f"{basename}/q_a_proj/MatMul", root_input)
-        qa_norm = self.make_mla_projection_norm(
-            layer_id, attention.q_a_layernorm, f"{qa_matmul}/output_0", "q"
-        )
-        qb_matmul = self.make_matmul(attention.q_b_proj, f"{basename}/q_b_proj/MatMul", qa_norm)
-        q_reshape = f"{basename}/q_b_proj/Reshape"
+        qb_matmul = self.make_mla_query(layer_id, attention, root_input)
+        q_reshape = f"{qb_matmul.removesuffix('/MatMul')}/Reshape"
         self.make_reshape(
             q_reshape,
             [f"{qb_matmul}/output_0", f"/model/constants/INT64/[{kept_axes}, {num_heads}, {qk_dim}]"],
@@ -667,7 +686,22 @@ class BailingMoeV3Model(Qwen35TextModel):
         topk_group = self.moe_attrs["topk_group"]
         logits_shape = self.make_moe_router_shape()
 
-        matmul_name = self.make_matmul(moe.gate, f"{basename}/MatMul", root_input)
+        router_input = root_input
+        if self.io_dtype != ir.DataType.FLOAT:
+            cast_name = f"{basename}/Cast_input"
+            self.make_cast(cast_name, root_input, ir.DataType.FLOAT, self.make_hidden_state_shape())
+            router_input = f"{cast_name}/output_0"
+        matmul_name = f"{basename}/MatMul"
+        weight_name = f"model.layers.{layer_id}.moe.router.weight"
+        self.make_initializer(moe.gate.weight.T, weight_name, to=ir.DataType.FLOAT)
+        self.make_node(
+            "MatMul",
+            inputs=[router_input, weight_name],
+            outputs=[f"{matmul_name}/output_0"],
+            name=matmul_name,
+        )
+        self.make_value(f"{matmul_name}/output_0", ir.DataType.FLOAT, shape=logits_shape)
+        self.exclude_node_from_quantization(matmul_name)
         expert_bias_name = f"model.layers.{layer_id}.moe.expert_bias"
         self.make_initializer(moe.expert_bias, expert_bias_name, to=ir.DataType.FLOAT)
 
@@ -685,7 +719,11 @@ class BailingMoeV3Model(Qwen35TextModel):
             group_topk=self.moe_attrs["group_topk"],
             router_sentinel=float(self.moe_attrs["router_sentinel"]),
         )
-        self.make_value(router_probs_name, self.io_dtype, shape=logits_shape)
+        self.make_value(router_probs_name, ir.DataType.FLOAT, shape=logits_shape)
+        if self.io_dtype != ir.DataType.FLOAT:
+            cast_name = f"{basename}/Cast_scores"
+            self.make_cast(cast_name, router_probs_name, self.io_dtype, logits_shape)
+            router_probs_name = f"{cast_name}/output_0"
 
         routed_scale = self.moe_attrs["routed_scaling_factor"]
         scale_const = f"/model/constants/{self.io_dtype}/{routed_scale}"
@@ -736,6 +774,9 @@ class BailingMoeV3Model(Qwen35TextModel):
         op_type = self.moe_attrs["op_type"]
         names = self.make_moe_expert_names(layer_id)
         moe_name = f"{basename}/{op_type}"
+        limits = getattr(self.config, "expert_swiglu_limit_list", None)
+        limit = float(limits[layer_id]) if limits else 0
+        activation_attrs = {"swiglu_limit": limit, "swiglu_limit_after_activation": 1} if limit > 0 else {}
         self.make_moe_op(
             moe_name,
             root_input=root_input,
@@ -746,6 +787,7 @@ class BailingMoeV3Model(Qwen35TextModel):
             weight2=names["down_weight"],
             scales2=names["down_scales"] if op_type == "QMoE" else "",
             bias2="",
+            **activation_attrs,
         )
         mul_name = f"{basename}/Mul_scale"
         self.make_mul(
@@ -779,6 +821,38 @@ class BailingMoeV3Model(Qwen35TextModel):
             genai_config["model"]["decoder"]["session_options"]["ep.cuda.gated_delta_net_bf16_precision"] = (
                 self.kda_attrs["bf16_precision"]
             )
+
+    def make_mlp_proj(self, layer_id, mlp, root_input):
+        limits = getattr(self.config, "share_expert_swiglu_limit_list", None)
+        limit = limits[layer_id] if limits else 0
+        if layer_id < self.moe_attrs["first_k_dense_replace"] or limit <= 0:
+            return super().make_mlp_proj(layer_id, mlp, root_input)
+        basename = f"/model/layers.{layer_id}/mlp"
+        names = []
+        inputs = []
+        for kind in ("gate", "up"):
+            linear = getattr(mlp, f"{kind}_proj")
+            name = self.make_matmul(linear, f"{basename}/{kind}_proj/MatMul", root_input)
+            names.append(name)
+            if linear.bias is not None:
+                add = f"{basename}/{kind}_proj/Add"
+                self.make_add_bias(linear.bias, add, root_input=f"{name}/output_0")
+                name = add
+            inputs.append(f"{name}/output_0")
+        self.make_mlp_proj_fused(layer_id, *names)
+        activated = Standard.make_clipped_swiglu(
+            self,
+            f"{basename}/clipped_swiglu",
+            *inputs,
+            limit,
+            self.make_hidden_state_shape(last_dim=self.intermediate_size),
+        )
+        down = self.make_matmul(mlp.down_proj, f"{basename}/down_proj/MatMul", activated)
+        if mlp.down_proj.bias is not None:
+            add = f"{basename}/down_proj/Add"
+            self.make_add_bias(mlp.down_proj.bias, add, root_input=f"{down}/output_0")
+            down = add
+        self.mlp_attrs["output_0"] = f"{down}/output_0"
 
     def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
         super().save_processing(model_name_or_path, extra_kwargs, out_dir)

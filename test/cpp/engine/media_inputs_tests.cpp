@@ -4,6 +4,7 @@
 #include <array>
 #include <chrono>
 #include <filesystem>
+#include <cstdlib>
 #include <fstream>
 #include <iterator>
 #include <tuple>
@@ -11,6 +12,10 @@
 #include <gtest/gtest.h>
 
 #include "models/preprocessing/processor.h"
+#include "models/preprocessing/genai_tokenizer.h"
+#include "models/preprocessing/qwen2_5_vl_image_processor.h"
+#include "models/preprocessing/multi_modal_processor.h"
+#include "models/decoder_only.h"
 #include "engine/media.h"
 #include "engine_test_helpers.h"
 #include "engine_test_doubles.h"
@@ -37,6 +42,115 @@ TEST(MediaInputsTest, RetainsPngAndJpegDimensionsWithoutPreprocessing) {
     EXPECT_EQ(buffer_images->info_[0].height, height);
     EXPECT_EQ(buffer_images->info_[0].encoded_bytes, bytes.size());
     EXPECT_EQ(file_images->info_[0].encoded_bytes, bytes.size());
+  }
+}
+
+TEST(MediaInputsTest, LingImageExpansionRetokenizesOrderedImagesAndWhitespace) {
+  const auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "qwen3-5");
+  const Tokenizer tokenizer{*config};
+  const std::string marker = "<|vision_start|><|image_pad|><|vision_end|>";
+  const std::string expanded = "<|vision_start|><|image_pad|><|image_pad|><|vision_end|>\n";
+  const std::array<int64_t, 3> grid{1, 2, 4};
+  const std::array<int64_t, 6> two_grids{1, 2, 4, 1, 2, 4};
+  for (const std::string suffix : {"", " ", "\n", "\n\n  code", "\tcode"}) {
+    EXPECT_EQ(TokenizeLingImagePrompt(tokenizer, marker + suffix, grid, 2),
+              tokenizer.Encode((expanded + suffix).c_str()));
+    EXPECT_EQ(TokenizeLingImagePrompt(tokenizer, "code " + marker + marker + suffix, two_grids, 2),
+              tokenizer.Encode(("code " + expanded + expanded + suffix).c_str()));
+  }
+  EXPECT_EQ(TokenizeLingImagePrompt(tokenizer, "text only\n", {}, 2), tokenizer.Encode("text only\n"));
+}
+
+TEST(MediaInputsTest, LingImageExpansionRejectsInvalidMarkersAndGrids) {
+  const auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "qwen3-5");
+  const Tokenizer tokenizer{*config};
+  const std::string marker = "<|vision_start|><|image_pad|><|vision_end|>";
+  const std::array<int64_t, 3> grid{1, 2, 4};
+  EXPECT_THROW(TokenizeLingImagePrompt(tokenizer, "", grid, 2), std::invalid_argument);
+  EXPECT_THROW(TokenizeLingImagePrompt(tokenizer, marker + marker, grid, 2), std::invalid_argument);
+  EXPECT_THROW(TokenizeLingImagePrompt(tokenizer, marker, grid, 0), std::invalid_argument);
+  for (const std::array<int64_t, 3> invalid : {std::array<int64_t, 3>{2, 2, 4}, {1, 3, 4}, {1, 0, 4}})
+    EXPECT_THROW(TokenizeLingImagePrompt(tokenizer, marker, invalid, 2), std::invalid_argument);
+  const std::array<int64_t, 2> incomplete{1, 2};
+  EXPECT_THROW(TokenizeLingImagePrompt(tokenizer, marker, incomplete, 2), std::invalid_argument);
+  const std::array<int64_t, 3> overflowing{1, INT64_MAX - 1, INT64_MAX - 1};
+  EXPECT_THROW(TokenizeLingImagePrompt(tokenizer, marker, overflowing, 2), std::overflow_error);
+}
+
+TEST(MediaInputsTest, LingAdmissionRejectsExactCapacityBeforePixelDecoding) {
+  const char* model_path = std::getenv("GENAI_NATIVE_CAPTURE_MODEL");
+  if (!model_path || !*model_path)
+    GTEST_SKIP() << "Set GENAI_NATIVE_CAPTURE_MODEL to a real Ling vision package.";
+  auto config = CreateConfig(GetOrtEnv(), model_path);
+  if (config->model.type != "bailing_moe_v3_vl")
+    GTEST_SKIP() << "This admission regression requires Ling newline retokenization.";
+  const char* overlay = std::getenv("GENAI_NATIVE_CAPTURE_CONFIG_OVERLAY");
+  if (overlay && *overlay)
+    OverlayConfig(*config, overlay);
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  auto* decoder = dynamic_cast<DecoderOnly_Model*>(model.get());
+  ASSERT_NE(decoder, nullptr);
+  Tokenizer tokenizer{*model->config_};
+  auto engine = std::make_shared<Engine>(model);
+  const std::string png_path = std::string{MODEL_PATH} + "../images/sheet.png";
+  const std::string jpeg_path = std::string{MODEL_PATH} + "../images/cars.jpg";
+  const std::array paths{png_path.c_str(), jpeg_path.c_str()};
+  auto images = LoadImages(paths);
+  std::ifstream input(png_path, std::ios::binary);
+  const std::vector<uint8_t> png{std::istreambuf_iterator<char>{input}, std::istreambuf_iterator<char>{}};
+  std::ifstream jpeg_input(jpeg_path, std::ios::binary);
+  const std::vector<uint8_t> jpeg{std::istreambuf_iterator<char>{jpeg_input}, std::istreambuf_iterator<char>{}};
+  ASSERT_GE(png.size(), 33u);
+  // Keep the PNG header, but no pixel payload: reaching preprocessing must fail.
+  std::array<const void*, 2> buffers{png.data(), jpeg.data()};
+  const std::array<size_t, 2> sizes{33, jpeg.size()};
+  auto header_only = LoadImagesFromBuffers(buffers, sizes);
+  const auto prefix = tokenizer.Encode("retained context");
+  const std::string marker = "<|vision_start|><|image_pad|><|vision_end|>";
+  TurnOptions options;
+  options.do_sample = false;
+  options.min_generated_tokens = 1;
+  options.max_generated_tokens = 1;
+  for (const std::string suffix : {"", " ", "\n", "\n\n  code", "\tcode"}) {
+    SCOPED_TRACE(suffix);
+    const std::string prompt = marker + marker + suffix;
+    const auto processed = decoder->vision_->processor->Process(prompt, images.get(), nullptr);
+    const auto ids = processed->at(std::string{Config::Defaults::InputIdsName});
+    const std::vector<int32_t> expected{ids->GetData<int32_t>(), ids->GetData<int32_t>() + ids->GetElementCount()};
+    for (size_t spare : {0u, 1u}) {
+      auto request = CreateEngineRequest(engine, prefix.size() + 1 + expected.size() + spare);
+      ASSERT_EQ(request->BeginTurn(prefix, options), 1u);
+      size_t runs = 0;
+      while (engine->HasPendingRequests()) {
+        ASSERT_LT(runs++, 2048u);
+        const auto event = RunOne(*engine);
+        ASSERT_FALSE(event.flags & EngineEventFlagFailed);
+      }
+      const auto before = request->TokensCpu();
+      const std::vector<int32_t> retained{before.begin(), before.end()};
+      ASSERT_EQ(retained.size(), prefix.size() + 1);
+      try {
+        request->BeginTurn(prompt, options, header_only.get());
+        FAIL() << "Header-only image reached successful admission.";
+      } catch (const std::exception& error) {
+        const std::string message{error.what()};
+        if (spare == 0)
+          EXPECT_NE(message.find("Expanded image rows exceed"), std::string::npos) << message;
+        else
+          EXPECT_NE(message.find("[ImageDecoder]"), std::string::npos) << message;
+      }
+      EXPECT_EQ(request->CurrentTurnId(), 1u);
+      EXPECT_EQ((std::vector<int32_t>{request->TokensCpu().begin(), request->TokensCpu().end()}), retained);
+      if (spare) {
+        EXPECT_EQ(request->BeginTurn(prompt, options, images.get()), 2u);
+        const auto tokens = request->TokensCpu();
+        ASSERT_EQ(tokens.size(), retained.size() + expected.size());
+        EXPECT_TRUE(std::equal(expected.begin(), expected.end(), tokens.begin() + retained.size()));
+      } else {
+        EXPECT_EQ(request->BeginTurn("x", options, nullptr), 2u);
+      }
+      engine->CloseRequest(request);
+    }
   }
 }
 
@@ -74,7 +188,7 @@ TEST(MediaInputsTest, RejectsCombinedBufferBytesBeforeInspectingEitherBuffer) {
 }
 
 TEST(MediaInputsTest, TextOnlyModelTypesRejectVisionComponents) {
-  for (const char* type : {"qwen3_5_text", "qwen3_5_moe_text", "qwen4_exp_text", "qwen38_flash_graph", "gpt2"}) {
+  for (const char* type : {"bailing_hybrid", "qwen3_5_text", "qwen3_5_moe_text", "qwen4_exp_text", "qwen38_flash_graph", "gpt2"}) {
     auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
     config->model.type = type;
     config->model.vision.filename = "vision.onnx";
@@ -88,7 +202,7 @@ TEST(MediaInputsTest, TextOnlyModelTypesRejectVisionComponents) {
 }
 
 TEST(MediaInputsTest, VisionModelTypeWithoutEncoderDoesNotEnableVision) {
-  for (const char* type : {"qwen3_5", "qwen3_5_moe", "qwen4_exp"}) {
+  for (const char* type : {"bailing_moe_v3_vl", "qwen3_5", "qwen3_5_moe", "qwen4_exp"}) {
     auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
     config->model.type = type;
     config->engine.dynamic_batching.emplace();
@@ -97,6 +211,22 @@ TEST(MediaInputsTest, VisionModelTypeWithoutEncoderDoesNotEnableVision) {
       FAIL() << type << " accepted an incomplete vision package";
     } catch (const std::runtime_error& error) {
       EXPECT_NE(std::string{error.what()}.find("exported vision encoder"), std::string::npos);
+    }
+  }
+}
+
+TEST(MediaInputsTest, LingVisionRequiresTargetOnlyDynamicBatching) {
+  for (int invalid = 0; invalid < 3; ++invalid) {
+    auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
+    config->model.type = "bailing_moe_v3_vl";
+    if (invalid > 0) config->engine.dynamic_batching.emplace();
+    if (invalid == 1) config->model.mtp.filename = "mtp.onnx";
+    if (invalid == 2) config->model.dflash2.filename = "dflash2.onnx";
+    try {
+      CreateModel(GetOrtEnv(), std::move(config));
+      FAIL() << "Ling vision accepted a non-target-only dynamic-batching package";
+    } catch (const std::runtime_error& error) {
+      EXPECT_NE(std::string{error.what()}.find("target-only dynamic-batching Engine"), std::string::npos);
     }
   }
 }

@@ -47,6 +47,16 @@ class Standard:
         )
         self.make_value(kwargs["present_conv_state"], self.io_dtype, ["batch_size", channels, state_size])
 
+    def make_clipped_swiglu(self, name, gate, up, limit, shape):
+        maximum = f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{float(limit)}"
+        minimum = f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{-float(limit)}"
+        self.make_sigmoid(f"{name}/Sigmoid", gate, self.io_dtype, shape)
+        self.make_mul(f"{name}/SiLU", [gate, f"{name}/Sigmoid/output_0"], self.io_dtype, shape)
+        self.make_clip(f"{name}/Clip_gate", [f"{name}/SiLU/output_0", "", maximum], self.io_dtype, shape)
+        self.make_clip(f"{name}/Clip_up", [up, minimum, maximum], self.io_dtype, shape)
+        self.make_mul(name, [f"{name}/Clip_gate/output_0", f"{name}/Clip_up/output_0"], self.io_dtype, shape)
+        return f"{name}/output_0"
+
     def make_gated_add(self, name, root_input, scaled_input, gate, shape):
         # scaled_input * gate -> Add(root_input)
         mul_name = f"{name}/Mul"
@@ -257,6 +267,43 @@ class Standard:
             self.make_gather(f"{name}/positions_{dim}", [position_ids, index], ir.DataType.INT64, shape, axis=0)
             positions.append(f"{name}/positions_{dim}/output_0")
         return positions
+
+    def make_packed_mrope(self, name, root_input, num_heads, rotary_dim, owners):
+        caches = self.make_rotary_embedding_caches()
+        leading = ["num_tokens"]
+        cache_name = "/model/rotary/packed"
+        cos = f"{cache_name}/cos/Unsqueeze/output_0"
+        sin = f"{cache_name}/sin/Unsqueeze/output_0"
+        if cos not in self.values:
+            positions = Standard.make_mrope_positions(self, cache_name, self.input_names["position_ids"], leading)
+            for kind, cache in zip(("cos", "sin"), caches, strict=True):
+                Standard.make_mrope_cache(
+                    self,
+                    cache_name,
+                    kind,
+                    cache,
+                    positions,
+                    owners,
+                    "/model/constants/INT64/[1]",
+                    self.io_dtype,
+                    leading,
+                )
+        shape = [*leading, num_heads, rotary_dim]
+        self.make_reshape(
+            f"{name}/Reshape",
+            [root_input, f"/model/constants/INT64/[0, {num_heads}, {rotary_dim}]"],
+            self.io_dtype,
+            shape,
+        )
+        rotated = Standard.make_mrope_rotation(self, name, f"{name}/Reshape/output_0", cos, sin, self.io_dtype, shape)
+        output = f"{name}/Flatten"
+        self.make_reshape(
+            output,
+            [rotated, f"/model/constants/INT64/[0, {num_heads * rotary_dim}]"],
+            self.io_dtype,
+            [*leading, num_heads * rotary_dim],
+        )
+        return f"{output}/output_0"
 
     def make_mrope_cache(self, name, kind, cache, positions, owners, axes, dtype, leading):
         cache_shape = [*leading, len(owners)]

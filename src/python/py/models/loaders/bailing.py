@@ -47,6 +47,8 @@ class BailingModel:
             self.final_norm = TensorModule(weight=self.get_tensor("model.norm.weight"))
             self.lm_head = self.make_linear_module("lm_head")
             if self.lm_head is None or self.lm_head.weight is None:
+                if not getattr(config, "tie_word_embeddings", True):
+                    raise ValueError("Untied Bailing checkpoints require lm_head.weight")
                 self.lm_head = TensorModule(weight=self.embedding.weight)
         finally:
             self.close()
@@ -178,10 +180,15 @@ class BailingModel:
 
     def make_mla_attention(self, prefix):
         attention = SimpleNamespace()
-        for name in ("q_a_proj", "q_b_proj", "kv_a_proj_with_mqa", "kv_b_proj", "g_proj", "dense"):
+        if getattr(self.config, "q_lora_rank", 256) is None:
+            attention.q_proj = self.make_linear_module(f"{prefix}.q_proj")
+        else:
+            for name in ("q_a_proj", "q_b_proj"):
+                setattr(attention, name, self.make_linear_module(f"{prefix}.{name}"))
+            attention.q_a_layernorm = TensorModule(weight=self.get_tensor(f"{prefix}.q_a_layernorm.weight"))
+        for name in ("kv_a_proj_with_mqa", "kv_b_proj", "g_proj", "dense"):
             setattr(attention, name, self.make_linear_module(f"{prefix}.{name}"))
-        for name in ("q_a_layernorm", "kv_a_layernorm"):
-            setattr(attention, name, TensorModule(weight=self.get_tensor(f"{prefix}.{name}.weight")))
+        attention.kv_a_layernorm = TensorModule(weight=self.get_tensor(f"{prefix}.kv_a_layernorm.weight"))
         return attention
 
     def make_kda_attention(self, prefix):

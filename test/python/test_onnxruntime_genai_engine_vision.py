@@ -422,6 +422,25 @@ def test_admission_failures_preserve_turn_id_and_preflight_allocations(vision_mo
     request.close()
 
 
+def test_exact_expanded_prompt_capacity_rejects_before_pixels(vision_model):
+    model, _ = vision_model
+    engine, tokenizer = og.Engine(model), og.Tokenizer(model)
+    images = og.Images.open(str(IMAGE_DIR / "cars.jpg"))
+    value = prompt(tokenizer, 1)
+    processed = model.create_multimodal_processor()(value, images=images)
+    options = og.RequestOptions()
+    options.set_max_session_tokens(processed["input_ids"].as_numpy().size)
+    request = engine.create_request(options=options)
+    try:
+        with pytest.raises(RuntimeError, match="Expanded image rows exceed the remaining session capacity"):
+            begin(request, value, images, maximum=1)
+        turn = begin(request, "x", maximum=1)
+        assert turn == 1
+        drain(engine)
+    finally:
+        request.close()
+
+
 def test_text_api_continuation_after_media_and_cancellation(vision_model):
     model, _ = vision_model
     engine, tokenizer = og.Engine(model), og.Tokenizer(model)

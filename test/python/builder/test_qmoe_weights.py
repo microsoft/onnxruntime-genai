@@ -150,6 +150,7 @@ def _load_builder_cli_module(monkeypatch):
     builders_module = types.ModuleType("builders")
     for class_name in (
         "BailingMoeV3Model",
+        "BailingVLModel",
         "ChatGLMModel",
         "ErnieModel",
         "Gemma2Model",
