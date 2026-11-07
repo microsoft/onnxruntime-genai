@@ -14,7 +14,8 @@
 // tests that mint requests from a tiny CPU fixture model. The fixture model only has to load: the
 // component tests drive the scheduler and engine with recording doubles that stand in for the cache
 // manager and model executor, so the ONNX graph is never executed and the suite still needs no GPU
-// and no real inference. Everything runs in seconds on every CPU and CUDA native PR build.
+// and no real inference. CUDA builds also host native Qwen38 graph regressions that execute a tiny
+// checked-in model; those tests skip when no CUDA device is available.
 
 #include <filesystem>
 #include <string>
