@@ -101,6 +101,49 @@ TEST_F(LongRopeContextTest, ChunkedPrefillAcceptsDiscardedPaddingOnlyChunks) {
   ExpectConsistentCache(*generator);
 }
 
+TEST_F(LongRopeContextTest, ReplayPreservesAppendedPromptPaddingSelection) {
+  std::vector<bool> cuda_modes{false};
+#if USE_CUDA
+  cuda_modes.push_back(true);
+#endif
+  for (bool use_cuda : cuda_modes) {
+    SCOPED_TRACE(testing::Message() << "use_cuda=" << use_cuda);
+    for (const auto* path : {MODEL_PATH "longrope-context", MODEL_PATH "longrope-context-runtime-indices"}) {
+      auto config = OgaConfig::Create(path);
+      config->Overlay(R"({"model":{"pad_token_id":1,"eos_token_id":2}})");
+      if (use_cuda)
+        config->AppendProvider("cuda");
+      model = OgaModel::Create(*config);
+      for (int chunk : {0, 1, 2, 3, 4}) {
+        for (bool committed_pad : {false, true}) {
+          SCOPED_TRACE(testing::Message() << "path=" << path << " chunk=" << chunk << " committed_pad=" << committed_pad);
+          auto generator = CreateGenerator(chunk);
+          generator->AppendTokens(std::vector<int32_t>(committed_pad ? 7 : 8, 0));
+          if (committed_pad) {
+            std::array<float, 3> forced_logits{0, 10, -10};
+            generator->SetLogits(*OgaTensor::Create(forced_logits.data(), std::array<int64_t, 2>{1, 3}));
+            generator->GenerateNextToken();
+            ASSERT_EQ(generator->GetSequenceData(0)[7], 1);
+          }
+          ASSERT_EQ(generator->GetSequenceCount(0), 8u);
+          generator->AppendTokens(std::vector<int32_t>{0, 1});
+          ASSERT_EQ(generator->GetSequenceCount(0), 10u);
+          EXPECT_EQ(generator->GetSequenceData(0)[9], 1);
+          auto tensor = generator->GetLogits();
+          const auto* logits = static_cast<const float*>(tensor->Data());
+          const float expected = committed_pad ? 2.0f : 0.0f;
+          EXPECT_FLOAT_EQ(logits[0], expected);
+          EXPECT_FLOAT_EQ(logits[1], -expected);
+          EXPECT_FLOAT_EQ(logits[2], 0);
+          generator->GenerateNextToken();
+          EXPECT_EQ(generator->GetSequenceData(0)[10], 0);
+          ExpectConsistentCache(*generator);
+        }
+      }
+    }
+  }
+}
+
 TEST_F(LongRopeContextTest, RuntimeIndicesRejectPaddingOnlyFinalSingletonChunks) {
   auto config = OgaConfig::Create(MODEL_PATH "longrope-context-runtime-indices");
   config->Overlay(R"({"model":{"pad_token_id":0,"eos_token_id":2}})");

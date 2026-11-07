@@ -163,12 +163,12 @@ DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& 
 }
 
 DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices,
-                                         bool all_tokens_valid) {
+                                         bool all_tokens_valid, int rope_context_length) {
   size_t num_tokens = next_tokens.size();
   const auto& chunk_size_opt = params_->search.chunk_size;
 
   if (rope_context_length_)
-    *rope_context_length_->GetTensorMutableData<int64_t>() = total_length;
+    *rope_context_length_->GetTensorMutableData<int64_t>() = rope_context_length > 0 ? rope_context_length : total_length;
   const bool replaying_rope_cache = rope_context_length_ && num_tokens == static_cast<size_t>(total_length);
   if ((first_run_ || replaying_rope_cache) && chunk_size_opt.has_value() &&
       chunk_size_opt.value() > 0 && num_tokens > chunk_size_opt.value()) {

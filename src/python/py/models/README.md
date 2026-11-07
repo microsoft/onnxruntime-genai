@@ -395,9 +395,12 @@ mask, and are emitted by the Nemotron Parse decoder's custom input setup.
 Padding-only intermediate chunks are permitted when their logits are discarded;
 each final prompt chunk must contain a non-padding token in every row, even
 when the chunk contains only one token. New prompt tokens are validated before
-a LongRoPE cache transition replays them with committed tokens. Generated tokens
-and committed-token replay treat PAD-ID tokens as valid. Ordinary one-token decode
-does not download tokens to the CPU to validate padding.
+a LongRoPE cache transition. At the transition, committed history and the new
+prompt are replayed separately under the same final context regime, so the new
+prompt still selects its last non-padding token. Generated tokens and
+committed-token replay treat PAD-ID tokens as valid, and every token remains in
+the KV cache. Ordinary one-token decode does not download tokens to the CPU to
+validate padding.
 
 The exported model requires a runtime built with `last_token_indices` support.
 For older runtimes, re-export with both `runtime_last_token_indices=false` and

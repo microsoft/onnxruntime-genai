@@ -971,6 +971,9 @@ DeviceSpan<float> Generator::RunWithRopeCache(DeviceSpan<int32_t> next_tokens, b
   const bool replay = rope_context_threshold_ != 0 && rope_cache_length_ > 0 &&
                       (rope_cache_length_ >= rope_context_threshold_) != (length >= rope_context_threshold_);
   if (replay) {
+    auto prompt_tokens = next_tokens;
+    if (is_prompt && prompt_tokens.size() > static_cast<size_t>(length))
+      throw std::invalid_argument("LongRoPE prompt tokens exceed the committed sequence length");
     if (is_prompt && model_->session_info_.HasInput("last_token_indices")) {
       // Validate new prompt tokens before replay turns them into committed tokens.
       const auto batch_size = static_cast<size_t>(state_->params_->search.batch_size);
@@ -983,11 +986,23 @@ DeviceSpan<float> Generator::RunWithRopeCache(DeviceSpan<int32_t> next_tokens, b
     state_->RewindTo(0);
     next_tokens = search_->GetSequence(0);
     next_tokens.CopyDeviceToCpu();
+    if (is_prompt) {
+      const size_t prefix_length = next_tokens.size() - prompt_tokens.size();
+      if (prefix_length > 0) {
+        auto committed_tokens = next_tokens.subspan(0, prefix_length);
+        State::PromptInputScope committed_scope(*state_, false);
+        // Rebuild the prefix in the final regime, but retain prompt-only padding selection for the suffix.
+        static_cast<DecoderOnly_State&>(*state_).Run(static_cast<int>(prefix_length), committed_tokens,
+                                                     search_->GetNextIndices(), true, length);
+      }
+      next_tokens = prompt_tokens;
+    }
   }
 
-  State::PromptInputScope prompt_scope(*state_, is_prompt && !replay);
-  auto logits = replay ? static_cast<DecoderOnly_State&>(*state_).Run(length, next_tokens, search_->GetNextIndices(), true)
-                       : state_->Run(length, next_tokens, search_->GetNextIndices());
+  State::PromptInputScope prompt_scope(*state_, is_prompt);
+  auto logits = replay && !is_prompt
+                    ? static_cast<DecoderOnly_State&>(*state_).Run(length, next_tokens, search_->GetNextIndices(), true)
+                    : state_->Run(length, next_tokens, search_->GetNextIndices());
   rope_cache_length_ = length;
   return logits;
 }

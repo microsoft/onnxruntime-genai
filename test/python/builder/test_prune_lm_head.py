@@ -272,6 +272,9 @@ ATOL = 1e-5
 
 
 def test_runtime_index_option_exports_a_complete_model(tmp_path):
+    if not hasattr(transformers, "LlamaForCausalLM"):
+        pytest.skip("transformers does not provide LlamaForCausalLM")
+
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(0)
         hf_model, builder_class = _tiny_llama()
@@ -291,6 +294,12 @@ def test_runtime_index_option_exports_a_complete_model(tmp_path):
     }
     outputs = dict(zip([v.name for v in pruned.get_outputs()], pruned.run(None, feeds), strict=True))
     np.testing.assert_allclose(outputs["logits"], expected[np.arange(2), [1, 3]][:, np.newaxis, :], atol=ATOL, rtol=0)
+
+
+def test_runtime_index_complete_export_skips_without_transformers(tmp_path, monkeypatch):
+    monkeypatch.setitem(globals(), "transformers", types.ModuleType("transformers"))
+    with pytest.raises(pytest.skip.Exception, match="transformers does not provide LlamaForCausalLM"):
+        test_runtime_index_option_exports_a_complete_model(tmp_path)
 
 
 def test_pruned_model_matches_full_logits_on_a_right_padded_batch(model_sessions):

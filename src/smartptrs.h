@@ -238,7 +238,7 @@ struct StateUpdateReplayDesc {
 
 // Increment whenever a layout the add-on boundary depends on changes: DeviceInterface's virtual
 // layout, or the virtual or data layout of any type constructed by, passed to, or returned across
-// that boundary (DeviceBuffer, Search, BatchedSampler, BatchedSamplerState, GeneratorParams, or Config).
+// that boundary (DeviceBuffer, Search, BatchedSampler, BatchedSamplerState, GeneratorParams, Config, or State).
 // Dynamically loaded add-ons must report this exact version before the host can safely call through
 // the C++ interface.
 // Version 15: DeviceInterface gained AllocatePinnedHost, CopyDeviceToHost and CopyHostToDevice.
@@ -247,7 +247,8 @@ struct StateUpdateReplayDesc {
 // Version 18: DeviceBuffer::CopyCpuRangeToDevice shifted the virtual slots that follow CopyCpuToDevice.
 // Version 19: Config::Model::Qwen38Graph gained max_batch_size, which changed the layouts of Config::Model and Config.
 // Version 20: Config gained memory budget/headroom settings; DeviceInterface gained sampler startup-byte sizing.
-inline constexpr uint32_t kDeviceInterfaceVersion = 20;
+// Version 21: State gained prompt-input origin tracking, which changed its data layout.
+inline constexpr uint32_t kDeviceInterfaceVersion = 21;
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}

@@ -61,6 +61,11 @@ TEST(DeviceInterfaceVersionTest, IsPastTheQwen38GraphMaxBatchSizeConfigLayout) {
   EXPECT_GE(kDeviceInterfaceVersion, kVersionOfTheMaxBatchSize);
 }
 
+TEST(DeviceInterfaceVersionTest, IsPastTheStatePromptInputLayout) {
+  constexpr uint32_t kVersionOfThePromptInput = 21;
+  EXPECT_GE(kDeviceInterfaceVersion, kVersionOfThePromptInput);
+}
+
 TEST(DeviceSpanTest, RangeUploadForwardsTheByteRangeOfTheSubspan) {
   auto buffer = std::make_shared<RangeUploadRecorder>(16 * sizeof(int32_t));
   auto* recorder = buffer.get();
