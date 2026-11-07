@@ -16,6 +16,7 @@
 #include "models/preprocessing/phi_image_processor.h"
 #include "models/preprocessing/phi_multimodal_processor.h"
 #include "models/preprocessing/qwen2_5_vl_image_processor.h"
+#include "models/preprocessing/qwen3_asr_processor.h"
 #include "models/preprocessing/videochat_flash_processor.h"
 #include "models/preprocessing/whisper_processor.h"
 #include "models/threadpool.h"
@@ -63,6 +64,7 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
           {"phi4mm", Processor::Create<PhiMultiModalProcessor>},
           {"gemma3", Processor::Create<GemmaImageProcessor>},
           {"lfm2_audio", Processor::Create<Lfm2AudioProcessor>},
+          {"qwen3_asr", Processor::Create<Qwen3AsrProcessor>},
           {"lfm2_vl", Processor::Create<Lfm2VlImageProcessor>},
           {"gemma4", Processor::Create<Gemma4MultiModalProcessor>},
           {"gemma4_unified", Processor::Create<Gemma4MultiModalProcessor>},

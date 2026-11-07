@@ -39,6 +39,7 @@ from .qwen import (
     QwenModel,
     VideoChatFlashQwenModel,
 )
+from .qwen3_asr import Qwen3ASRModel
 from .qwen3_5 import (
     Qwen35DenseMTPModel,
     Qwen35Model,
@@ -90,6 +91,7 @@ __all__ = [
     "Phi3VModel",
     "Phi4MMModel",
     "PhiModel",
+    "Qwen3ASRModel",
     "Qwen3Model",
     "Qwen3VLTextModel",
     "Qwen4ExpEmbeddingModel",

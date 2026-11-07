@@ -30,9 +30,9 @@ struct ModelType {
   }
 
   inline static bool IsALM(const std::string& model_type) {
-    // Audio-language model (ALM): audio in, text out. "lfm2_audio" runs the multi-modal pipeline
-    // (speech encoder -> embedding -> LFM2 decoder), "whisper" its own encoder-decoder model.
-    static constexpr std::array<std::string_view, 2> ALM = {"lfm2_audio", "whisper"};
+    // Audio-language model (ALM): audio in, text out. "lfm2_audio" and "qwen3_asr" run the multi-modal
+    // pipeline (speech encoder -> embedding -> LFM2 / Qwen3 decoder), "whisper" its own encoder-decoder model.
+    static constexpr std::array<std::string_view, 3> ALM = {"lfm2_audio", "qwen3_asr", "whisper"};
     return std::find(ALM.begin(), ALM.end(), model_type) != ALM.end();
   }
 
