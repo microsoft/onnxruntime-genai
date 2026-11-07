@@ -2304,6 +2304,26 @@ OgaResult* OgaRequestBeginTurn(
   OGA_CATCH
 }
 
+OgaResult* OgaRequestBeginTurnWithImages(
+    OgaRequest* request, const OgaTurnOptions* turn_options,
+    const char* formatted_prompt, const OgaImages* images, uint64_t* out_turn_id) {
+  OGA_TRY
+  if (!request || !out_turn_id || !formatted_prompt)
+    throw std::invalid_argument("request, formatted_prompt, and out_turn_id must not be null.");
+  *out_turn_id = 0;
+  request->ValidateOwnerThread();
+  Generators::TurnOptions options;
+  if (turn_options) {
+    const auto owner = turn_options->request.lock();
+    if (!owner || owner.get() != request)
+      throw std::invalid_argument("Turn options belong to a different or destroyed Request.");
+    options = *turn_options;
+  }
+  *out_turn_id = request->BeginTurn(formatted_prompt, options, images);
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OgaRequestCancelTurn(
     OgaRequest* request, uint64_t turn_id, bool* out_cancelled) {
   OGA_TRY

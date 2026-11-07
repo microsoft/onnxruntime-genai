@@ -1263,6 +1263,13 @@ struct OgaTurnOptions : OgaAbstract {
 };
 
 struct OgaRequest : OgaAbstract {
+  uint64_t BeginTurn(const char* formatted_prompt, const OgaTurnOptions* options = nullptr,
+                     const OgaImages* images = nullptr) {
+    uint64_t turn_id{};
+    OgaCheckResult(OgaRequestBeginTurnWithImages(this, options, formatted_prompt, images, &turn_id));
+    return turn_id;
+  }
+
   uint64_t BeginTurn(const int32_t* input_ids, size_t input_ids_count,
                      const OgaTurnOptions* options = nullptr) {
     uint64_t turn_id{};
