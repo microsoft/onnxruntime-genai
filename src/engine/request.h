@@ -66,6 +66,10 @@ struct TurnOptions {
   // inherited from a previous turn or from model/Request state.
   std::string guidance_type;
   std::string guidance_data;
+  // Appends the forced span the whole-turn grammar produces instead of sampling it one token per
+  // step. Opt-in because the grammar tokenizes forced text itself, so token IDs, and therefore later
+  // output, may differ from a turn without it.
+  bool guidance_fast_forward{};
   // The marker-scoped grammar is owned by these options and is mutually exclusive with
   // whole-turn guidance. Keeping all three values together prevents partial configurations.
   struct DelimitedGuidance {
@@ -409,6 +413,9 @@ struct Request : std::enable_shared_from_this<Request>,
   RequestStepResult StageGenerationForTransaction(
       const RequestStepPlan& plan);
   RequestStepResult StageDraftCompletionForTransaction();
+  // Stages up to kMaxGeneratedTokensPerStep more of the forced span instead of sampling.
+  // Only valid when PublishesForcedTokens() holds for this step.
+  RequestStepResult StageForcedTokensForTransaction();
   void RestoreStateForTransaction();
   void QueueStateRestoreForTransaction();
   void CompleteStateRestoreForTransaction();
@@ -516,13 +523,24 @@ struct Request : std::enable_shared_from_this<Request>,
    */
   size_t ScheduledTokenCount() const;
 
+  // The scheduler clock value at which this request started its turn or last counted as served for
+  // spare chunk tokens.
+  uint64_t ChunkServiceStamp() const noexcept { return chunk_service_stamp_; }
+
   /**
-   * @brief True when this step's tokens run to the end of the sequence.
+   * @brief True when this step's tokens run to the end of the sequence and the Request samples.
    *
    * Only then does the last logits row of this request predict a new token. A partial prefill chunk
-   * ends in the middle of the prompt, so its logits are discarded.
+   * ends in the middle of the prompt, so its logits are discarded, and so does a row still holding
+   * forced tokens it has not published (see PublishesForcedTokens()).
    */
   bool IsChunkComplete() const;
+
+  /**
+   * @brief True when this step reads to the end of the sequence while part of the forced span is
+   * not yet published, so the step publishes more of it instead of sampling.
+   */
+  bool PublishesForcedTokens() const;
 
   /**
    * @brief Moves the cursor past the tokens this step processed.
@@ -654,6 +672,7 @@ struct Request : std::enable_shared_from_this<Request>,
   // request is still prefilling while processed_sequence_length_ has not caught up with it.
   int64_t prompt_sequence_length_{};
   size_t scheduled_token_count_{};
+  uint64_t chunk_service_stamp_{};
   // The committed turn's resolved policy. The constructor resolves it from the model's own search
   // defaults so an unadmitted Request already has a complete one.
   EffectiveTurnPolicy turn_policy_;
@@ -685,6 +704,15 @@ struct Request : std::enable_shared_from_this<Request>,
   // MarkFinalStageAsEvaluatedNonAcceptedDraft/CommitAcceptedDraftsForTransaction for how each path
   // advances it.
   size_t evaluated_draft_count_{};
+  // The forced span: tokens the turn's grammar forced after its last sampled token. The grammar
+  // cursor is already past all of it, but a step publishes at most kMaxGeneratedTokensPerStep tokens,
+  // so the unpublished rest stays private here and the Request samples nothing until it is empty. A
+  // step stages the staged_forced_token_count_ tokens after the first published_forced_token_count_,
+  // which CommitStep() appends to tokens_host_ and Search already holds. Cleared once fully published
+  // or the turn ends.
+  std::vector<int32_t> forced_tokens_;
+  size_t published_forced_token_count_{};
+  size_t staged_forced_token_count_{};
   struct DraftVerificationState {
     bool completed_generation{};
     bool eos{};
@@ -723,6 +751,9 @@ struct Request : std::enable_shared_from_this<Request>,
   std::mt19937 transaction_rng_;
   int64_t transaction_processed_sequence_length_{};
   size_t transaction_tokens_host_size_{};
+  // A step only refills forced_tokens_ when it was empty and never changes it otherwise, so its size
+  // is the whole checkpoint.
+  size_t transaction_forced_tokens_size_{};
   std::unique_ptr<Search> search_;
   std::unique_ptr<ConstrainedLogitsProcessor> guidance_logits_processor_;
   std::unique_ptr<ConstrainedLogitsProcessor> guidance_transaction_checkpoint_;
@@ -743,9 +774,13 @@ struct Request : std::enable_shared_from_this<Request>,
   void SelectNextToken();
   void StageVisibleTokens(RequestStepResult& result,
                           size_t committed_count,
-                          std::optional<int32_t> sampled_token) const;
+                          std::optional<int32_t> sampled_token,
+                          std::span<const int32_t> forced_tokens = {}) const;
   RequestStepResult StageGeneration(int64_t sequence_length_before);
   void CommitGuidanceToken(const RequestStepResult& result);
+  bool ReadsToSequenceEnd() const;
+  void StageForcedTokens(RequestStepResult& result, size_t limit);
+  std::span<const int32_t> StagedForcedTokens() const;
 };
 
 }  // namespace Generators

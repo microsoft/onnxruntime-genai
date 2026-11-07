@@ -39,3 +39,16 @@ Delimited guidance requires dynamic batching and cannot be combined with whole-t
 guidance disables speculative drafts; delimited guidance permits drafts outside its region,
 truncates proposals before an opening marker, and suspends drafting inside the region. Automatic
 MTP drafting is unavailable for delimited turns.
+
+Whole-turn Engine guidance can also fast-forward: `OgaTurnOptionsSetGuidanceFastForward`
+(`set_guidance_fast_forward` in Python) appends the tokens the grammar forces, such as JSON keys and
+punctuation, instead of running a decode step for each. It is off by default because it can change
+token IDs, random-number consumption, and later values, both inside and after the grammar. It is
+not available with delimited guidance, a nonzero `no_repeat_ngram_size`, or static batching. It
+saves model steps for the guided turn but is not latency-neutral for other requests sharing the
+Engine, so enable it per workload after checking their latency targets.
+
+For any guided Engine turn, only an `Eos` finish means the grammar accepted the output. A turn that
+finished for any other reason (`MaxGeneratedTokens`, `MaxSessionTokens`, `StopString`,
+`Cancelled`, or `Failed`) can hold incomplete JSON or tool arguments: check the turn's finish
+reason, then parse and validate the result before calling a tool.

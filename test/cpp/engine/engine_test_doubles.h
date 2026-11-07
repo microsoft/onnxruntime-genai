@@ -151,6 +151,10 @@ struct RecordingCacheManager : CacheManager {
     size_t selected_requests = 0;
     size_t selected_new_requests = 0;
     bool capacity_deferred = false;
+    const bool defer_drafted =
+        std::any_of(plan.requests.begin(), plan.requests.end(),
+                    [](const RequestStepPlan& entry) { return entry.draft_token_count != 0; }) &&
+        std::exchange(defer_drafted_requests_once_, false);
     const void* unserviceable_request_id = nullptr;
     std::vector<const void*> request_ids;
     request_ids.reserve(plan.requests.size());
@@ -171,6 +175,7 @@ struct RecordingCacheManager : CacheManager {
         continue;
       }
       if (entry.request_id == capacity_deferred_request_id_ ||
+          (defer_drafted && entry.draft_token_count != 0) ||
           selected_requests >= request_limit ||
           (entry.newly_admitted &&
            (!can_allocate_verdict_ ||
@@ -357,6 +362,9 @@ struct RecordingCacheManager : CacheManager {
   void OverselectPlanningOnce() {
     overselect_planning_once_ = true;
   }
+  // The next planning pass that carries drafts defers every row that has them, as a paged cache
+  // short of blocks for the drafts would.
+  void DeferDraftedRequestsOnce() { defer_drafted_requests_once_ = true; }
   void ThrowPrepareFailureOnce() { throw_prepare_failure_ = true; }
   void ThrowDeallocateFailureOnce() { throw_deallocate_failure_ = true; }
   void ThrowDeallocateInvariantFailureOnce() {
@@ -410,6 +418,7 @@ struct RecordingCacheManager : CacheManager {
   mutable bool always_throw_planning_bad_alloc_{};
   mutable bool throw_planning_consistency_{};
   mutable bool overselect_planning_once_{};
+  mutable bool defer_drafted_requests_once_{};
   bool throw_prepare_failure_{};
   bool throw_deallocate_failure_{};
   bool throw_deallocate_invariant_failure_{};
@@ -651,6 +660,60 @@ struct RecordingModelExecutor : ModelExecutor {
   bool supports_draft_verification_{true};
   int64_t hidden_size_{};
   ONNXTensorElementDataType hidden_type_{Ort::TypeToTensorType<float>};
+};
+
+// Exercises CUDA's shared next-token-slot lifetime with real CPU EOS/search semantics: like
+// GreedySearch_Cuda, every token this search selects or commits is written into its bound slot.
+class SharedSlotSearch final : public GreedySearch_Cpu {
+ public:
+  SharedSlotSearch(const GeneratorParams& params, bool reports_batched_sampling)
+      : GreedySearch_Cpu{params}, reports_batched_sampling_{reports_batched_sampling} {}
+  bool BindNextTokensSlot(DeviceSpan<int32_t> slot) override {
+    if (params_->BatchBeamSize() != 1 || slot.size() != 1)
+      return false;
+    next_tokens_ptr_ = slot;
+    next_tokens_ = cpu_span<int32_t>(slot.Span());
+    return true;
+  }
+  bool SupportsBatchedSampling() const override { return reports_batched_sampling_; }
+
+ private:
+  bool reports_batched_sampling_;
+};
+
+class SharedSlotDevice final : public DeviceInterface {
+ public:
+  explicit SharedSlotDevice(DeviceInterface& inner, bool reports_batched_sampling = false)
+      : inner_{inner}, reports_batched_sampling_{reports_batched_sampling} {}
+  DeviceType GetType() const override { return inner_.GetType(); }
+  void InitOrt(const OrtApi& api, Ort::Allocator& allocator) override {
+    inner_.InitOrt(api, allocator);
+  }
+  Ort::Allocator& GetAllocator() override { return inner_.GetAllocator(); }
+  std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
+    return inner_.GetMemoryInfo();
+  }
+  std::string GetExecutionProviderName() const override {
+    return inner_.GetExecutionProviderName();
+  }
+  std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
+    return inner_.AllocateBase(size);
+  }
+  std::shared_ptr<DeviceBuffer> WrapMemoryBase(void* memory, size_t size) override {
+    return inner_.WrapMemoryBase(memory, size);
+  }
+  std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) override {
+    return std::make_unique<SharedSlotSearch>(params, reports_batched_sampling_);
+  }
+  std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) override {
+    return inner_.CreateBeam(params);
+  }
+  std::unique_ptr<KeyValueCache> CreateKeyValueCache(State&) override { return {}; }
+  void Synchronize() override { inner_.Synchronize(); }
+
+ private:
+  DeviceInterface& inner_;
+  bool reports_batched_sampling_;
 };
 
 struct CountingCudaDeviceState {

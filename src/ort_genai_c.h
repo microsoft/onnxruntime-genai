@@ -1632,11 +1632,46 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetStopStrings(
  * validated before the Turn mutates the Request, so an invalid grammar leaves the Request exactly
  * as it was. Guidance is strictly Turn-scoped: a following Turn that sets none is unguided. A
  * guided Turn does not accept speculative drafts; the next unguided Turn does again.
+ *
+ * Only an OgaFinishReason_Eos finish means the grammar accepted the output. A Turn that finished
+ * for any other reason (MaxGeneratedTokens, MaxSessionTokens, StopString, Cancelled, or Failed) can
+ * hold incomplete JSON or tool arguments, so check the finish reason, parse, and validate the
+ * result before acting on it.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetGuidance(
     OgaTurnOptions* options, const char* guidance_type,
     const char* guidance_data);
-/** \brief Removes either whole-turn or delimited guidance, so the Turn is unguided. */
+/**
+ * \brief Lets this Turn's whole-turn grammar append the tokens it forces instead of sampling them.
+ *
+ * When the grammar allows only one continuation, its tokens are committed without sampling, at most
+ * eight per step counting the sampled token, and the model reads them on later steps rather than in
+ * one decode step each. Off by default because it changes what the Turn generates: forced token
+ * IDs follow the grammar's tokenization rather than the model's choice, and forced tokens draw no
+ * random numbers, so token IDs, random-number consumption, and later values both inside and after
+ * the grammar can differ from a Turn without fast-forward.
+ *
+ * Admission rejects a Turn that enables it without whole-turn guidance (OgaTurnOptionsSetGuidance;
+ * delimited guidance is not supported), with a nonzero no_repeat_ngram_size, or on an Engine
+ * without dynamic batching.
+ *
+ * Other requests on the Engine see scheduling and delivery effects: a step in which this Turn
+ * reads several unread tokens runs the whole batch without CUDA graph replay; while another request
+ * verifies speculative drafts this Turn reads one unread token per step; otherwise its unread
+ * tokens share the step's spare token budget with other requests' prefill chunks, longest-waiting
+ * first. The publication cap is per Turn, so N fast-forward Turns can place up to 8 * N events
+ * ahead of another request's token. This trades fewer model steps for possibly longer gaps between
+ * other requests' tokens, so check it against the workload's latency targets before enabling it.
+ *
+ * As for any guided Turn, check the finish reason before trusting the output (see
+ * OgaTurnOptionsSetGuidance).
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetGuidanceFastForward(
+    OgaTurnOptions* options, bool enable);
+/**
+ * \brief Removes either whole-turn or delimited guidance, so the Turn is unguided, and turns off
+ * guidance fast-forward.
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsClearGuidance(
     OgaTurnOptions* options);
 /** \brief Restores every Turn option to its unset state. */

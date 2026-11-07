@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -2710,6 +2711,81 @@ TEST_F(EngineRunTest, MixedRunRollbackPreservesProgressAndCacheResidents) {
   EXPECT_EQ(engine.cache->AllocatedCount(), 2u);
 }
 
+// Without a fast-forward catch-up row, prompts take spare tokens in arrival order: each reads one
+// token per step until the prompts before it finish their prefill, so earlier prompts reach their
+// first token sooner instead of every prompt finishing its prefill together at the end.
+TEST_F(EngineRunTest, PromptsTakeSpareTokensInArrivalOrder) {
+  model_->config_->engine.dynamic_batching->max_scheduled_tokens = 8;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
+  const auto long_prompt = SequentialPrompt(20);
+  std::vector<std::shared_ptr<Request>> prompts;
+  for (int i = 0; i < 3; ++i)
+    prompts.push_back(CreateRequestWithPrompt(engine.engine, long_prompt));
+
+  std::vector<std::vector<size_t>> reads;  // per step, in arrival order
+  engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
+    ASSERT_NE(context.plan, nullptr);
+    std::vector<size_t> step(prompts.size());
+    for (const auto& entry : context.plan->requests) {
+      const auto row = std::ranges::find(prompts, entry.request_id, &std::shared_ptr<Request>::get);
+      step[static_cast<size_t>(row - prompts.begin())] = entry.unprocessed_token_count;
+    }
+    reads.push_back(step);
+  });
+  std::array<EngineEvent, 16> storage;
+  for (int step = 0; step < 20 && std::ranges::any_of(prompts, [](const auto& r) { return r->IsPrefill(); }); ++step)
+    engine.engine->Run(storage);
+
+  EXPECT_EQ(reads, (std::vector<std::vector<size_t>>{
+                       {6, 1, 1}, {6, 1, 1}, {6, 1, 1}, {2, 5, 1}, {1, 6, 1}, {1, 6, 1}, {1, 1, 6}, {1, 1, 6}, {1, 1, 2}}));
+}
+
+// Under a chunk cap too, the earlier prompt keeps the larger share until it is read.
+TEST_F(EngineRunTest, CappedPromptsTakeSpareTokensInArrivalOrder) {
+  model_->config_->search.chunk_size = 4;
+  model_->config_->engine.dynamic_batching->max_scheduled_tokens = 6;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
+  const auto long_prompt = SequentialPrompt(20);
+  auto first = CreateRequestWithPrompt(engine.engine, long_prompt);
+  auto second = CreateRequestWithPrompt(engine.engine, long_prompt);
+
+  std::vector<std::vector<size_t>> reads;  // {first, second} per step
+  engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
+    ASSERT_NE(context.plan, nullptr);
+    std::vector<size_t> step(2);
+    for (const auto& entry : context.plan->requests)
+      step[entry.request_id == first.get() ? 0 : 1] = entry.unprocessed_token_count;
+    reads.push_back(step);
+  });
+  for (int step = 0; step < 3; ++step)
+    RunOne(*engine.engine);
+  EXPECT_EQ(reads, (std::vector<std::vector<size_t>>{{4, 2}, {4, 2}, {4, 2}}));
+}
+
+// When capacity planning drops a draft, the token it would have used goes to the prefill.
+TEST_F(EngineRunTest, DraftDroppedByCapacityPlanningGivesItsTokenToThePrefill) {
+  model_->config_->engine.dynamic_batching->max_scheduled_tokens = 4;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
+  engine.cache->SetMaxDraftTokensPerStep(1);
+  auto decode = CreateRequestWithPrompt(engine.engine, Prompt(10));
+  RunOne(*engine.engine);
+  decode->SetDraftTokens(std::array<int32_t, 1>{11});
+  const auto long_prompt = SequentialPrompt(20);
+  auto prefill = CreateRequestWithPrompt(engine.engine, long_prompt);
+
+  engine.cache->DeferDraftedRequestsOnce();
+  engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
+    ASSERT_NE(context.plan, nullptr);
+    EXPECT_EQ(context.plan->token_count, 4u);
+    for (const auto& entry : context.plan->requests) {
+      const bool is_prefill = entry.request_id == prefill.get();
+      EXPECT_EQ(entry.unprocessed_token_count, is_prefill ? 3u : 1u);
+      EXPECT_EQ(entry.draft_token_count, 0u);
+    }
+  });
+  RunOne(*engine.engine);
+}
+
 TEST_F(EngineRunTest, SpeculativeRunKeepsAcceptedPrefixAndEmitsAllTokens) {
   const int32_t eos = EosToken(*model_);
   const int32_t filler = eos == 5 ? 6 : 5;
@@ -5304,10 +5380,11 @@ TEST_F(EngineRunTest, CompositeMixedPrefillDefersResidentDraft) {
   auto prefill = CreateRequestWithPrompt(
       engine.engine, long_prompt);
 
+  // The deferred draft's token goes to the prefill instead of going unused.
   engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
     ASSERT_NE(context.plan, nullptr);
     ASSERT_EQ(context.plan->requests.size(), 2u);
-    EXPECT_EQ(context.plan->token_count, 2u);
+    EXPECT_EQ(context.plan->token_count, 3u);
     const auto& decode_entry = context.plan->requests[0];
     EXPECT_EQ(decode_entry.request_id, decode.get());
     EXPECT_EQ(decode_entry.unprocessed_token_count, 1u);
@@ -5316,7 +5393,7 @@ TEST_F(EngineRunTest, CompositeMixedPrefillDefersResidentDraft) {
               static_cast<size_t>(decode->CurrentSequenceLength()));
     const auto& prefill_entry = context.plan->requests[1];
     EXPECT_EQ(prefill_entry.request_id, prefill.get());
-    EXPECT_EQ(prefill_entry.unprocessed_token_count, 1u);
+    EXPECT_EQ(prefill_entry.unprocessed_token_count, 2u);
     for (const auto& binding : context.fixed_state_bindings) {
       for (size_t row = 0; row < context.plan->requests.size(); ++row) {
         FillFixedOutputRow(binding, row, static_cast<float>(row + 1));
@@ -5327,7 +5404,7 @@ TEST_F(EngineRunTest, CompositeMixedPrefillDefersResidentDraft) {
   EXPECT_EQ(RunOne(*engine.engine).request, decode);
   EXPECT_EQ(decode->ProcessedSequenceLength(),
             decode_before_mixed.processed_sequence_length + 1);
-  EXPECT_EQ(prefill->ProcessedSequenceLength(), 1);
+  EXPECT_EQ(prefill->ProcessedSequenceLength(), 2);
   EXPECT_TRUE(prefill->IsPrefill());
 }
 

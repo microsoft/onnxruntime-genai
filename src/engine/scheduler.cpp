@@ -196,7 +196,11 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
   const size_t cache_query_token_cap = cache_manager_->MaxQueryTokensPerRequest();
   const size_t max_draft_token_count = cache_manager_->MaxDraftTokensPerStep();
 
-  const auto add_candidate = [&candidates, cache_query_token_cap, max_draft_token_count,
+  // Within a step, an admission stamps before a share of spare tokens, so a row admitted now waits
+  // ahead of one served now and behind one served earlier.
+  const uint64_t admitted_stamp = 2 * ++chunk_service_clock_;
+  const uint64_t served_stamp = admitted_stamp + 1;
+  const auto add_candidate = [&candidates, cache_query_token_cap, max_draft_token_count, admitted_stamp,
                               this](
                                  const std::shared_ptr<Request>& request,
                                  bool newly_admitted) {
@@ -225,10 +229,10 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     candidate.entry.request_id = request.get();
     candidate.entry.sequence_length_before = snapshot.current_sequence_length;
     candidate.entry.prefix_match = std::move(prefix_match);
-    // Drafts extend a decode step, which by definition ends at the sequence tail. A prefill chunk
-    // has committed tokens of its own left to push through, so it can never verify one.
+    // Drafts extend a step that ends at the sequence tail. A prefill chunk or a decode row with
+    // unread committed tokens still has its own tokens to push through, so it never verifies drafts.
     candidate.entry.draft_token_count =
-        snapshot.is_prefill
+        snapshot.is_prefill || remaining_token_count > 1
             ? 0
             : std::min(request->PendingDraftTokenCount(), max_draft_token_count);
     candidate.entry.unprocessed_token_count = 1 + candidate.entry.draft_token_count;
@@ -239,16 +243,21 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
         SlotsForWholeSequence(snapshot.current_sequence_length);
     candidate.entry.is_prefill = snapshot.is_prefill;
     candidate.entry.newly_admitted = newly_admitted;
-    auto prefill_token_cap = request->PrefillChunkSize();
+    // search.chunk_size tunes prompt throughput. A decode row's unread committed tokens are at most
+    // one published batch, so only the cache's query cap bounds them.
+    auto chunk_token_cap =
+        snapshot.is_prefill ? request->PrefillChunkSize() : std::optional<size_t>{};
     if (cache_query_token_cap != 0 &&
-        (prefill_token_cap.value_or(0) == 0 || *prefill_token_cap > cache_query_token_cap)) {
-      prefill_token_cap = cache_query_token_cap;
+        (chunk_token_cap.value_or(0) == 0 || *chunk_token_cap > cache_query_token_cap)) {
+      chunk_token_cap = cache_query_token_cap;
     }
     candidate.budget = DecodeFirstBudgetCandidate{
         snapshot.is_prefill,
         static_cast<size_t>(remaining_token_count),
-        prefill_token_cap,
+        chunk_token_cap,
         candidate.entry.draft_token_count,
+        // A request starting a turn waits behind every row already in line for spare tokens.
+        IsQueued(snapshot.status) ? admitted_stamp : request->ChunkServiceStamp(),
     };
     candidate.processed_sequence_length =
         effective_processed_sequence_length;
@@ -337,33 +346,48 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     selected_processed_lengths.push_back(
         candidate.processed_sequence_length);
   }
-  std::vector<size_t> token_counts;
-  try {
-    token_counts = AllocateDecodeFirstTokenBudget(
-        selected_candidates, dynamic_batching.max_scheduled_tokens);
-  } catch (const std::invalid_argument& error) {
-    throw StepPlanningConsistencyError(error.what());
+  // Decide before budgeting, so the tokens drafts would have taken go to chunk work instead of
+  // being dropped later by cache planning.
+  if (cache_manager_->PrefillDefersDrafts() &&
+      std::any_of(selected_candidates.begin(), selected_candidates.end(),
+                  [](const DecodeFirstBudgetCandidate& candidate) { return candidate.is_prefill; })) {
+    for (auto& candidate : selected_candidates)
+      candidate.decode_extra_token_count = 0;
   }
+  std::vector<size_t> token_counts;
+  std::vector<bool> chunk_service;
+  const auto allocate_token_budget = [&] {
+    try {
+      token_counts = AllocateDecodeFirstTokenBudget(
+          selected_candidates, dynamic_batching.max_scheduled_tokens, &chunk_service);
+    } catch (const std::invalid_argument& error) {
+      throw StepPlanningConsistencyError(error.what());
+    }
+  };
+  allocate_token_budget();
 
   for (size_t index = 0; index < plan.requests.size(); ++index) {
     auto& entry = plan.requests[index];
     entry.scheduling_order = index;
     entry.unprocessed_token_count = token_counts[index];
-    entry.draft_token_count = entry.is_prefill ? 0 : token_counts[index] - 1;
+    entry.draft_token_count =
+        std::min(token_counts[index] - 1, selected_candidates[index].decode_extra_token_count);
     entry.target_cache_slots = RequiredSlots(
         selected_processed_lengths[index],
         entry.unprocessed_token_count);
   }
 
-  // Only drafts push a request's reserved slots past the probe that was just validated: a prefill
-  // chunk reserves its whole sequence either way, and a draft-free decode still takes one slot. So
-  // a plan without drafts needs no second planning pass, and must not pay for one every step.
+  // Only drafts push a request's reserved slots past the probe that was just validated: every
+  // draft-free row, prefill chunk or decode, ends within the whole sequence the probe already
+  // reserved. So a plan without drafts needs no second planning pass, and must not pay for one
+  // every step.
   const bool plans_drafts = std::any_of(
       plan.requests.begin(), plan.requests.end(),
       [](const RequestStepPlan& entry) { return entry.draft_token_count != 0; });
   if (plans_drafts) {
     const size_t selected_request_count = plan.requests.size();
     auto budgeted_requests = plan.requests;
+    bool released_draft_tokens = false;
     while (true) {
       const auto resource_result = cache_manager_->PlanStepResources(plan);
       if (resource_result.executable &&
@@ -389,6 +413,7 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
         entry.target_cache_slots = RequiredSlots(
             selected_processed_lengths[entry.scheduling_order],
             entry.unprocessed_token_count);
+        released_draft_tokens = true;
       };
       bool reduced_draft_count = false;
       for (auto& entry : budgeted_requests) {
@@ -411,6 +436,22 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
         reduce_draft_count(*optional_work);
       }
       plan.requests = budgeted_requests;
+    }
+    // Draft-free rows end within the sequence the probe reserved, so chunk work can take the tokens
+    // the dropped drafts would have used without another cache pass.
+    if (released_draft_tokens) {
+      for (const auto& entry : plan.requests) {
+        selected_candidates[entry.scheduling_order].decode_extra_token_count =
+            entry.draft_token_count;
+      }
+      allocate_token_budget();
+    }
+  }
+  for (auto& entry : plan.requests) {
+    if (chunk_service[entry.scheduling_order]) {
+      entry.chunk_service_stamp = served_stamp;
+    } else if (IsQueued(entry.request->status_)) {
+      entry.chunk_service_stamp = admitted_stamp;
     }
   }
   record_deferred_prefix_matches();
@@ -438,10 +479,12 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
       uniform_token_count = entry.unprocessed_token_count;
     }
     // One captured graph bakes in every tensor shape it was recorded with, so a step qualifies only
-    // when each request contributes the same number of tokens.
+    // when each request contributes the same number of tokens. A row reading several committed
+    // tokens selects one logits row, whereas a verify row of the same width selects one per token;
+    // only single-token and verify rows qualify.
     plan.graph_capture_eligible &=
         !entry.is_prefill && entry.unprocessed_token_count == uniform_token_count &&
-        entry.unprocessed_token_count != 0;
+        !entry.ReadsSeveralCommittedTokens();
   }
   try {
     for (const auto& entry : plan.requests) {

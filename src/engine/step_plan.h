@@ -62,7 +62,7 @@ struct RequestStepPlan {
   std::shared_ptr<Request> request;
   const void* request_id{};
   int64_t sequence_length_before{};     // Search length before this transaction appends a token.
-  size_t unprocessed_token_count{};     // Prompt chunk or single decode token sent to the model.
+  size_t unprocessed_token_count{};     // Prompt chunk, or a decode row's unread tokens plus drafts.
   size_t draft_token_count{};           // Trailing speculative tokens of that count, verified this step.
   size_t packed_token_offset{};         // First row for this request in the flat varlen input.
   size_t logits_row_index{};            // Last packed row; its logits produce this request's next token.
@@ -71,7 +71,15 @@ struct RequestStepPlan {
   bool is_prefill{};
   bool newly_admitted{};
   size_t scheduling_order{};  // Logical scheduler order before physical execution ordering.
+  // Nonzero when this row starts a turn or counts as served for spare chunk tokens; CommitStep()
+  // records it.
+  uint64_t chunk_service_stamp{};
   std::shared_ptr<const PrefixCacheMatch> prefix_match;
+
+  // Reads more than one token plus its drafts: a prefill chunk, or a decode row reading committed
+  // tokens (guidance fast-forward) it has not read yet. Such a row selects one logits row, not one
+  // per token.
+  bool ReadsSeveralCommittedTokens() const { return unprocessed_token_count > draft_token_count + 1; }
 };
 
 // Fixed decoder-state demand for a step, planned atomically with the paged-block demand so the

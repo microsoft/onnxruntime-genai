@@ -1618,12 +1618,17 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
     throw std::runtime_error("The selected execution backend does not support the requested turn policy.");
   }
   // Static batching completes generation through a non-transactional path (RunStatic) that cannot
-  // stage, roll back, or replay a stop match, and its sampler RNG state is created once when the
-  // Request joins the batch rather than inside a rollback-capable step. Reject both before any
-  // Request mutation rather than letting a turn run without the guarantee its options promise.
+  // stage, roll back, or replay a stop match, never appends grammar-forced tokens, and creates its
+  // sampler RNG state once when the Request joins the batch rather than inside a rollback-capable
+  // step. Reject these options before any Request mutation rather than letting a turn run without
+  // the guarantee its options promise.
   if (!dynamic_batching) {
     if (options.delimited_guidance) {
       throw std::runtime_error("Delimited guidance requires an Engine configured for dynamic batching.");
+    }
+    if (options.guidance_fast_forward) {
+      throw std::runtime_error(
+          "Guidance fast-forward requires an Engine configured for dynamic batching.");
     }
     // An executor that commits its own tokens runs them through Request::CommitExternalTokens, which
     // observes stop strings token by token and only ever ends the turn, so it has nothing to roll back.
@@ -2880,6 +2885,9 @@ const std::shared_ptr<Tokenizer>& Engine::GetOrCreateStopTokenizer() {
 
 std::unique_ptr<ConstrainedLogitsProcessor> Engine::CreateTurnGuidance(
     const TurnOptions& options) const {
+  if (options.guidance_fast_forward && options.guidance_type.empty()) {
+    throw std::invalid_argument("Guidance fast-forward requires whole-turn guidance.");
+  }
   if (options.delimited_guidance) {
     if (!options.guidance_type.empty() || !options.guidance_data.empty()) {
       throw std::invalid_argument("Delimited and whole-turn guidance cannot be combined.");
@@ -2901,7 +2909,7 @@ std::unique_ptr<ConstrainedLogitsProcessor> Engine::CreateTurnGuidance(
   // nothing about a previous turn's grammar can leak into this one.
   auto params = std::make_shared<GeneratorParams>(*model_);
   params->search.batch_size = 1;
-  params->SetGuidance(options.guidance_type, options.guidance_data, false);
+  params->SetGuidance(options.guidance_type, options.guidance_data, options.guidance_fast_forward);
   return CreateGuidanceLogitsProcessor(std::move(params));
 }
 

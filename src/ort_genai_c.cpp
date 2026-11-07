@@ -2142,6 +2142,7 @@ OGA_TURN_SCALAR_SETTER(
 OGA_TURN_SCALAR_SETTER(
     OgaTurnOptionsSetNoRepeatNgramSize, int32_t, no_repeat_ngram_size)
 OGA_TURN_SCALAR_SETTER(OgaTurnOptionsSetSeed, uint64_t, seed)
+OGA_TURN_SCALAR_SETTER(OgaTurnOptionsSetGuidanceFastForward, bool, guidance_fast_forward)
 
 #undef OGA_TURN_SCALAR_SETTER
 
@@ -2228,6 +2229,7 @@ OgaResult* OgaTurnOptionsClearGuidance(OgaTurnOptions* options) {
   options->guidance_type.clear();
   options->guidance_data.clear();
   options->delimited_guidance.reset();
+  options->guidance_fast_forward = false;
   return nullptr;
   OGA_CATCH
 }

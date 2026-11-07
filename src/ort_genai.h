@@ -1243,12 +1243,19 @@ struct OgaTurnOptions : OgaAbstract {
   void SetGuidance(const char* type, const char* data) {
     OgaCheckResult(OgaTurnOptionsSetGuidance(this, type, data));
   }
+  /** Lets the whole-turn grammar append the tokens it forces instead of sampling them. Off by
+   *  default: token IDs, random-number use and later values inside and after the grammar may
+   *  differ, and other requests' token gaps may grow. See OgaTurnOptionsSetGuidanceFastForward. */
+  void SetGuidanceFastForward(bool enable) {
+    OgaCheckResult(OgaTurnOptionsSetGuidanceFastForward(this, enable));
+  }
   /** Copies a Lark grammar for the body between distinct opening and closing token IDs.
    *  Cannot be combined with whole-turn guidance; ClearGuidance or Reset switches modes. */
   void SetDelimitedGuidance(int32_t opening_token, int32_t closing_token, const char* grammar) {
     OgaCheckResult(OgaTurnOptionsSetDelimitedGuidance(this, opening_token, closing_token, grammar));
   }
-  /** Removes whole-turn or delimited guidance, so the Turn is unguided. */
+  /** Removes whole-turn or delimited guidance, so the Turn is unguided, and turns off guidance
+   *  fast-forward. */
   void ClearGuidance() {
     OgaCheckResult(OgaTurnOptionsClearGuidance(this));
   }

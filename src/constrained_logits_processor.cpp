@@ -690,9 +690,7 @@ std::vector<int32_t> GuidanceLogitsProcessor::GetFFTokens(size_t index) {
     return std::vector<int32_t>();
   }
 
-  auto v = std::vector<int32_t>(ff_tokens_batch_[index]);
-  ff_tokens_batch_[index].clear();
-  return v;
+  return std::exchange(ff_tokens_batch_[index], {});
 }
 
 void GuidanceLogitsProcessor::CommitTokens(std::span<int32_t> tokens) {
@@ -715,11 +713,13 @@ void GuidanceLogitsProcessor::CommitTokens(std::span<int32_t> tokens) {
       throw std::runtime_error("Error committing tokens: " + error_message);
     }
 
+    // Store forced tokens (i.e. index >= 1) to process outside of this logits processor. One exact
+    // allocation: GetFFTokens() moves this vector out, so it has no capacity to reuse.
     auto& ff_tokens = ff_tokens_batch_[i];
-    ff_tokens.clear();
-    // Store forced tokens (i.e. index >= 1) to process outside of this logits processor
-    for (size_t j = 1; j < commit_result.n_tokens; j++) {
-      ff_tokens.push_back((int32_t)commit_result.tokens[j]);
+    if (commit_result.n_tokens > 1) {
+      ff_tokens.assign(commit_result.tokens + 1, commit_result.tokens + commit_result.n_tokens);
+    } else {
+      ff_tokens.clear();
     }
   }
 

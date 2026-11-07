@@ -2,7 +2,7 @@ This is an end-to-end benchmarking script for any GenAI-supported ONNX model.
 
 
 Prerequisites: 
-0) Install onnxruntime-genai, pandas, tqdm and psutil
+0) Install onnxruntime-genai, pandas, tqdm and psutil (the guidance fast-forward benchmark also needs jsonschema)
 
 1) Use builder.py to build the desired ONNX model
 
@@ -20,6 +20,45 @@ python build.py --use_cuda --use_guidance --skip_tests --skip_examples
 python benchmark/python/benchmark_engine_guidance.py -m {model folder} -e cuda --warmup 5 --iterations 30 --output guidance-profile.json
 
 Guidance remains request-local. The benchmark alternates guided and unguided requests on one Engine and reports token counts because constrained and unconstrained output lengths may differ.
+
+Engine guidance fast-forward benchmark
+
+Run the same guided turns with guidance fast-forward off and on, on one Engine, alternating which mode runs first each iteration. Turns are greedy, so the two modes can be compared token for token:
+
+python benchmark/python/benchmark_engine_guidance_fast_forward.py -m {model folder} --workloads weather tool_call invoice --requests 8 --iterations 5 --output ff.json
+
+Workloads: weather, tool_call and invoice use fixed-whitespace JSON, which forces the most tokens; weather_flexible, long_text and choice force few. By default every guided turn starts at once. Options:
+
+  --concurrency {n}        keep at most n guided turns in flight (closed loop)
+  --arrival_rate {n/s}     start guided turns as a Poisson process instead
+  --peers {n}              unguided turns running alongside; --replenish_peers starts a new one whenever one finishes while guided work remains, and --peer_delay_ms {ms} starts them while guided turns are forcing tokens
+  --peer_drafts controlled peers propose their own solo output as drafts; by default the model's own drafter, such as DFlash, drafts for them
+  --cancel_after {tokens}  cancel each guided turn after that many tokens, to measure cancellation latency
+  --event_buffer {n}       drain at most n events per Run call
+  --context_sentences {n}  put n sentences of background, unique per turn, before each guided prompt so prefills compete for the step's token budget
+  --no_prefix_caching      every iteration repeats the same prompts, so the prefix cache skips most prefill after the first; disable it when prefill work should be measured
+  --modes off|on|both      off never calls the fast-forward setter, so the script also runs on a build without it
+
+Latency is measured from when a turn is due, so it includes request creation and grammar compilation.
+
+The JSON reports, for off and on (mean, p50, p95, p99, max where they are distributions):
+
+  model steps, and Run calls (more when a step's events exceed the event buffer)
+  draft tokens proposed, evaluated and accepted, for controlled drafts and the model's own drafter alike
+  wall time and the guided span (start to last guided finish); guided turns/s and tokens/s use the span, since peers can outlive the guided work; peer tokens/s
+  guided arrival-to-first-token, steps to first token and end-to-end latency
+  finish reasons and the rate of guided outputs valid against the workload's full JSON schema
+  cancellation latency
+  peer inter-token gaps, arrival-to-first-token and Run calls before the first token
+  overlap_* fields: throughput and peer gaps for only the time when guided turns and peers were both present, with overlap_fraction its share of wall time; conclusions about mixed load hold only for that window
+  peers_matching_reference: each peer's output compared with its solo output, and where the others first differ
+  build: the onnxruntime_genai version and module that ran
+
+Controlled drafts come from the peer's solo output while verifying those drafts, rerun until it stops changing, because verification can change greedy output; peer_reference reports how many passes that took and whether it converged. A controlled-draft run fails if a scenario evaluates no drafts, so it cannot silently measure ordinary decoding.
+
+Off/on comparison: the summary counts pairs with identical token IDs and identical text and lists where differing pairs first diverge. Fast-forward can change token IDs, so identical text matters more than identical IDs. Batched numerics can also change greedy output between identical runs, so off_repeat and on_repeat compare each iteration with the first one of the same mode as a baseline.
+
+Comparing two builds: run --modes off on each and compare guided_outputs_sha256, steps to first token and the latency fields. This reaches the order in which prompts share spare tokens only when prompts are longer than max_scheduled_tokens allows in one step, and peer admission during prefill only with --peer_delay_ms inside that window; continuation turns, search.chunk_size, recurrent-state models and drafts dropped for cache capacity are covered by the C++ scheduler tests, not this script. Check that each process loaded its own onnxruntime_genai library: the summary's build.module, and the native library the process mapped.
 
 CPU preprocessing/inference contention benchmark (Linux)
 

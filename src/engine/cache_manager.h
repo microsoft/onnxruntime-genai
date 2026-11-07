@@ -125,6 +125,9 @@ struct CacheManager {
   // roll a rejected draft back. A verify step runs 1 + drafts tokens, so a model with recurrent
   // state is capped by its checkpoint window.
   virtual size_t MaxDraftTokensPerStep() const { return 0; }
+  // True when a step with a prefill chunk cannot also verify drafts, because fixed recurrent state
+  // cannot checkpoint draft positions beside it. The scheduler then plans that step without drafts.
+  virtual bool PrefillDefersDrafts() const { return false; }
   virtual std::shared_ptr<const PrefixCacheMatch> MatchPrefix(const Request&) {
     return nullptr;
   }
@@ -253,6 +256,7 @@ struct PagedCacheManager : CacheManager {
   size_t MaxQueryTokensPerRequest() const override;
 
   size_t MaxDraftTokensPerStep() const override;
+  bool PrefillDefersDrafts() const override { return fixed_state_pool_ != nullptr; }
   std::shared_ptr<const PrefixCacheMatch> MatchPrefix(
       const Request& request) override;
   void RecordDeferredPrefixMatches(size_t count) noexcept override {

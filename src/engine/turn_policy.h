@@ -88,11 +88,15 @@ EffectiveTurnPolicy ResolveTurnPolicy(const Config::Search& model_defaults,
  *   themselves consistent with greedy selection (`temperature == 0`, `top_k == 1`) or that restrict
  *   nothing (`top_k == 0`, `top_p` of 0 or 1, `temperature` of 1) are accepted.
  *
+ * It also rejects guidance fast-forward with a nonzero `no_repeat_ngram_size`, including one
+ * supplied by the model's search defaults, because forced tokens bypass that restriction.
+ *
  * A zero `max_generated_tokens` is rejected earlier by Request::ValidateTurnAdmission(), which
  * every admission passes through first.
  *
  * @param policy The resolved policy.
- * @param options The turn options, read only to tell an explicit override from a model default.
+ * @param options The turn options, read to tell an explicit override from a model default and to
+ *        see whether guidance fast-forward is enabled.
  * @param scoring_device_type Device that will build this Request's Search.
  * @param vocab_size Number of tokens in the model vocabulary.
  * @param turn_prompt_length Sequence length the turn's generated output starts at.

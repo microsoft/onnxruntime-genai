@@ -127,7 +127,7 @@ void SimpleDecoder::LogGraphDecision(size_t batch_size, size_t tokens_per_reques
       stream << "eager (graph capture not enabled for this decoder)";
       break;
     case GraphFallback::kNonUniformStep:
-      stream << "eager (prefill, or requests contribute different token counts)";
+      stream << "eager (prefill, unread committed tokens, or non-uniform token counts)";
       break;
     case GraphFallback::kStepTooWide:
       stream << "eager (step exceeds the persistent buffers: max_batch_size="
