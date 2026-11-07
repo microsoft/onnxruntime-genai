@@ -674,6 +674,7 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   void BuildHead();
   void BuildHeadState();
   void BuildHeadR2();
+  void ReleaseCapturedGraphs() noexcept;
   void BuildFastPrefill();
   void StepPrefill(std::span<const int32_t> tokens);
   void FastAppend(std::span<const int32_t> tokens);
@@ -812,6 +813,7 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   Direction batch_dirs_[kMaxBatch][kMaxBatch][kMaxBanks];  // [first slot][batch size - 1][phase]
   std::vector<std::unique_ptr<DevTensor>> output_tensors_;
   std::vector<std::unique_ptr<DevTensor>> head_views_;
+  std::vector<std::pair<OrtSession*, int>> captured_graphs_;
   std::deque<PlaneBuffer> owned_;  // individually allocated tensors
   const Direction* slot_inflight_dirs_[kMaxBatch]{};
   size_t slot_target_group_[kMaxBatch]{};
