@@ -51,9 +51,11 @@ int64_t GetNumAudioTokens(const std::vector<ExtraInput>& extra_inputs,
   return 0;
 }
 
-int64_t GetImageFeatureBatchSize(const std::vector<ExtraInput>& extra_inputs) {
+// The processors map the default pixel_values name to model.vision.inputs.pixel_values, so the pixels
+// arrive under the configured name when the vision model's input is renamed.
+int64_t GetImageFeatureBatchSize(const std::vector<ExtraInput>& extra_inputs, const std::string& pixel_values_name) {
   for (const auto& input : extra_inputs) {
-    if (input.name == Config::Defaults::PixelValuesName) {
+    if (input.name == Config::Defaults::PixelValuesName || input.name == pixel_values_name) {
       assert(input.tensor->ort_tensor_);
       const auto shape = input.tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape();
       if (shape.size() >= 3) {
@@ -740,7 +742,7 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& 
 void MultiModalPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
   num_image_tokens_ = GetNumImageTokens(extra_inputs);
   num_audio_tokens_ = GetNumAudioTokens(extra_inputs, model_.config_->model.speech.inputs.audio_sizes);
-  num_images_ = GetImageFeatureBatchSize(extra_inputs);
+  num_images_ = GetImageFeatureBatchSize(extra_inputs, model_.config_->model.vision.inputs.pixel_values);
 
   if (model_.vision_session_) {
     vision_state_->SetExtraInputs(extra_inputs, num_images_, num_image_tokens_);
@@ -767,6 +769,10 @@ void MultiModalPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extr
       qwen_pos_inputs->SetGridTensors(img_grid, vid_grid, sec_grid);
     }
   }
+}
+
+void MultiModalPipelineState::SetActiveAdapter(Adapters* adapters, const std::string& adapter_name) {
+  decoder_state_->SetActiveAdapter(adapters, adapter_name);
 }
 
 DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {

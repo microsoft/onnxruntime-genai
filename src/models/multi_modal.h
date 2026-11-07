@@ -231,6 +231,8 @@ struct MultiModalPipelineState : State {
   void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) override;
   void DiscardNextLogits() override { discard_next_logits_ = true; }
   void StartTurn() override { new_turn_ = true; }
+  // LoRA weights are decoder inputs, so the adapter is activated on the decoder's runs.
+  void SetActiveAdapter(Adapters* adapters, const std::string& adapter_name) override;
 
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens,
                         DeviceSpan<int32_t> next_indices) override;

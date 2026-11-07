@@ -20,8 +20,9 @@ MultiModalFeatures::MultiModalFeatures(State& state, MultiModalFeatures::Mode mo
   const auto dims = feature_shape.size();
 
   // If the model expects 3 dimensions, add a batch dimension
-  // batch_size <= 0 signals "skip batch dim even if model has 3D output"
-  if (dims == 3 && batch_size > 0) {
+  // batch_size < 0 signals "skip batch dim even if model has 3D output". A batch of 0 (a prompt
+  // without images) keeps the dimension so the empty tensor still has the rank the model expects.
+  if (dims == 3 && batch_size >= 0) {
     shape_.push_back(batch_size);
   }
 
