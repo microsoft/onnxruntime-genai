@@ -148,19 +148,7 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
   // in their own session_options in genai_config.json.
 
   // Try pre-registered plugin path first
-  auto plugin_options = provider_options;
-  auto options_end = std::remove_if(
-      plugin_options.options.begin(), plugin_options.options.end(),
-      [](const auto& option) {
-        return option.first == "user_compute_stream" || option.first == "has_user_compute_stream";
-      });
-  plugin_options.options.erase(options_end, plugin_options.options.end());
-  // The V2 factory reads provider options, not the session config entry above.
-  // Both keys are required for CUDA's UpdateProviderOptions to retain the pointer.
-  plugin_options.options.emplace_back(
-      "user_compute_stream", std::to_string(reinterpret_cast<uintptr_t>(device->GetCudaStream())));
-  plugin_options.options.emplace_back("has_user_compute_stream", "1");
-  if (!AppendExecutionProviderV2(session_options, plugin_options,
+  if (!AppendExecutionProviderV2(session_options, provider_options,
                                  DeviceType::CUDA, "CUDAExecutionProvider")) {
     // Register the CUDA execution provider as a provider-bridge provider.
     CUDAExecutionProvider::AppendProviderBridgeExecutionProvider(

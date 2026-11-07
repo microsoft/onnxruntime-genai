@@ -15,7 +15,6 @@ file(GLOB test_srcs CONFIGURE_DEPENDS
 # Keep tests with dedicated white-box executables out of the public-API unit_tests target.
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/audio_speech_validation_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/cpu_cast_test.cpp")
-list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/cuda_session_options_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/dflash2_config_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/environment-tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/kv_cache_tests.cpp")
@@ -154,19 +153,6 @@ if (NOT MSVC)
 endif()
 
 add_test(NAME UnitTests COMMAND unit_tests)
-
-# Isolate the fake OrtApi/device registry from process-global GenAI state, while
-# compiling the actual CUDA session-options implementation without requiring a GPU.
-add_executable(cuda_session_options_tests
-  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/cuda_session_options_test.cpp"
-  "${CMAKE_SOURCE_DIR}/src/ep/cuda/session_options.cpp")
-target_include_directories(cuda_session_options_tests PRIVATE
-  ${ORT_HEADER_DIR}
-  ${onnxruntime_extensions_SOURCE_DIR}/shared/api
-  ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(cuda_session_options_tests PRIVATE GTest::gtest_main)
-set_target_properties(cuda_session_options_tests PROPERTIES FOLDER "Tests")
-add_test(NAME CudaSessionOptionsTests COMMAND cuda_session_options_tests)
 
 if(APPLE OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR ANDROID)
   add_test(NAME SharedLibraryExports
