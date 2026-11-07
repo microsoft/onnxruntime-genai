@@ -1597,7 +1597,8 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request, const std::s
   const auto raw = GetOrCreateStopTokenizer()->Encode(prompt.c_str());
   request->ValidateTurnAdmission(raw, options);
   const size_t first_row = static_cast<size_t>(request->CurrentSequenceLength());
-  auto prepared = media_store_->Prepare(prompt, images, first_row, request->MaxSessionTokens() - first_row);
+  // Match Request::ValidateAppendLength's reserved generated-token row before preprocessing.
+  auto prepared = media_store_->Prepare(prompt, images, first_row, request->MaxSessionTokens() - first_row - 1);
   request->ReserveMedia(prepared.media.size());
   media_store_->ReserveItems(prepared.media.size());
   const auto turn_id = BeginTurn(request, prepared.tokens, options);

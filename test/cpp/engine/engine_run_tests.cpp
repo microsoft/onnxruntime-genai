@@ -14,6 +14,7 @@
 #include <charconv>
 #include <condition_variable>
 #include <cmath>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -38,6 +39,9 @@
 #include "engine/scheduled_requests.h"
 #include "decoding/speculative_sampling.h"
 #include "models/preprocessing/genai_tokenizer.h"
+#include "models/preprocessing/processor.h"
+#include "models/preprocessing/qwen2_5_vl_image_processor.h"
+#include "models/utils.h"
 
 namespace Generators {
 namespace test {
@@ -324,6 +328,177 @@ class NativeCaptureExecutor : public ModelExecutor {
   std::string role_;
   size_t step_{};
 };
+
+class PackedStepCaptureExecutor : public ModelExecutor {
+ public:
+  PackedStepCaptureExecutor(std::shared_ptr<Model> model,
+                            std::unique_ptr<ModelExecutor> executor,
+                            NativeTensorReference& reference, int32_t teacher_token)
+      : model_{std::move(model)}, executor_{std::move(executor)}, reference_{reference}, teacher_token_{teacher_token} {}
+
+  void Decode(ScheduledRequests& requests, ExecutionContext& context) override {
+    if (requests.size() != 1)
+      throw std::runtime_error("Packed calibration capture requires one request.");
+    model_->p_device_->Synchronize();
+    const std::string prefix = "step/" + std::to_string(step_++);
+    std::vector<std::string_view> state_names;
+    for (const auto& binding : context.fixed_state_bindings) {
+      state_names.push_back(binding.input_name);
+      reference_.Tensor(*model_, prefix + "/pre/" + binding.input_name, *binding.input);
+    }
+    executor_->Decode(requests, context);
+    model_->p_device_->Synchronize();
+    State& state = EngineRunTestAccess::DecoderState(requests);
+    std::string layout;
+    for (size_t index = 0; index < state.inputs_.size(); ++index) {
+      const auto name = std::string_view{state.input_names_[index]};
+      if (std::find(state_names.begin(), state_names.end(), name) == state_names.end())
+        reference_.Tensor(*model_, prefix + "/feed/" + std::string{name}, *state.inputs_[index]);
+      layout += std::string{name} + " device=" +
+                std::to_string(state.inputs_[index]->GetTensorMemoryInfo().GetDeviceType()) + "\n";
+    }
+    OrtValue* logits = nullptr;
+    for (size_t index = 0; index < state.outputs_.size(); ++index) {
+      const auto name = std::string_view{state.output_names_[index]};
+      reference_.Tensor(*model_, prefix + "/post/" + std::string{name}, *state.outputs_[index]);
+      for (size_t input = 0; input < state.inputs_.size(); ++input)
+        if (state.outputs_[index]->GetTensorMutableData<uint8_t>() ==
+            state.inputs_[input]->GetTensorMutableData<uint8_t>())
+          layout += std::string{name} + " aliases=" + state.input_names_[input] + "\n";
+      if (name == model_->config_->model.decoder.outputs.logits)
+        logits = state.outputs_[index];
+    }
+    reference_.Record(prefix + "/layout",
+                      {reinterpret_cast<const uint8_t*>(layout.data()), layout.size()});
+    if (!logits || logits->GetTensorTypeAndShapeInfo()->GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)
+      throw std::runtime_error("Teacher-forced capture requires FLOAT logits.");
+    if (requests[0]->IsChunkComplete()) {
+      const auto info = logits->GetTensorTypeAndShapeInfo();
+      const size_t vocabulary = static_cast<size_t>(info->GetShape().back());
+      if (teacher_token_ < 0 || static_cast<size_t>(teacher_token_) >= vocabulary)
+        throw std::runtime_error("Teacher token is outside the vocabulary.");
+      auto forced = model_->p_device_->WrapMemory<float>(
+          {logits->GetTensorMutableData<float>(), info->GetElementCount()});
+      auto cpu = forced.CpuSpan();
+      std::fill(cpu.begin(), cpu.end(), 0.0f);
+      for (size_t row = 0; row < cpu.size() / vocabulary; ++row)
+        cpu[row * vocabulary + teacher_token_] = 1.0f;
+      forced.CopyCpuToDevice();
+      model_->p_device_->Synchronize();
+    }
+  }
+
+ private:
+  std::shared_ptr<Model> model_;
+  std::unique_ptr<ModelExecutor> executor_;
+  NativeTensorReference& reference_;
+  int32_t teacher_token_;
+  size_t step_{};
+};
+
+TEST(EngineNativeCaptureTest, PackedImageContinuationCalibrationTrace) {
+  const char* model_path = std::getenv("GENAI_NATIVE_CAPTURE_MODEL");
+  const char* reference_path = std::getenv("GENAI_NATIVE_CAPTURE_REFERENCE");
+  const char* image_path = std::getenv("GENAI_NATIVE_CAPTURE_IMAGE");
+  if (!model_path || !*model_path || !reference_path || !*reference_path || !image_path || !*image_path)
+    GTEST_SKIP() << "Set native capture model, reference and image paths for real calibration validation.";
+  auto config = CreateConfig(GetOrtEnv(), model_path);
+  const char* overlay = std::getenv("GENAI_NATIVE_CAPTURE_CONFIG_OVERLAY");
+  if (overlay && *overlay)
+    OverlayConfig(*config, overlay);
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  Tokenizer tokenizer{*model->config_};
+  const auto teacher = tokenizer.Encode("x");
+  ASSERT_EQ(teacher.size(), 1u);
+  ASSERT_EQ(std::find(model->config_->model.eos_token_id.begin(),
+                      model->config_->model.eos_token_id.end(), teacher[0]),
+            model->config_->model.eos_token_id.end());
+  NativeTensorReference reference{reference_path, false};
+  auto dependencies = Engine::CreateDependencies(model);
+  ASSERT_FALSE(dependencies.mtp_model_executor);
+  dependencies.model_executor = std::make_unique<PackedStepCaptureExecutor>(
+      model, std::move(dependencies.model_executor), reference, teacher[0]);
+  auto engine = std::make_shared<Engine>(model, std::move(dependencies));
+  auto request = CreateEngineRequest(engine, 512);
+  const std::array<const char*, 1> paths{image_path};
+  auto images = LoadImages(paths);
+  std::string prompt;
+  while (tokenizer.Encode(prompt.c_str()).size() < 250)
+    prompt += "x ";
+  prompt += "<|vision_start|><|image_pad|><|vision_end|>\nDescribe the image.";
+  const std::array<std::string, 3> prompts{prompt, "\nExplain the code.", "\nCheck this image: <|vision_start|><|image_pad|><|vision_end|>"};
+  for (size_t turn = 0; turn < prompts.size(); ++turn) {
+    TurnOptions options;
+    options.do_sample = false;
+    options.max_generated_tokens = 3;
+    const auto turn_id = request->BeginTurn(prompts[turn], options, turn == 1 ? nullptr : images.get());
+    ASSERT_EQ(turn_id, turn + 1);
+    size_t tokens = 0;
+    bool finished = false;
+    size_t runs = 0;
+    while (engine->HasPendingRequests()) {
+      ASSERT_LT(runs++, 2048u);
+      const auto event = RunOne(*engine);
+      ASSERT_FALSE(event.flags & EngineEventFlagFailed);
+      if (event.flags & EngineEventFlagToken) {
+        EXPECT_EQ(event.token, teacher[0]);
+        ++tokens;
+      }
+      if (event.flags & EngineEventFlagTurnFinished)
+        finished = true;
+    }
+    ASSERT_TRUE(finished);
+    EXPECT_EQ(tokens, 3u);
+  }
+  EXPECT_EQ(engine->GetSpeculativeStats().draft_forward_passes, 0u);
+  engine->CloseRequest(request);
+  reference.Finish();
+}
+
+TEST(EngineNativeCaptureTest, Bf16PixelsUseSourceNearestEvenRounding) {
+  const char* model_path = std::getenv("GENAI_NATIVE_CAPTURE_MODEL");
+  const char* image_path = std::getenv("GENAI_NATIVE_CAPTURE_IMAGE");
+  if (!model_path || !*model_path || !image_path || !*image_path)
+    GTEST_SKIP() << "Set native capture model and image paths for actual pixel conversion validation.";
+  auto config = CreateConfig(GetOrtEnv(), model_path);
+  const char* overlay = std::getenv("GENAI_NATIVE_CAPTURE_CONFIG_OVERLAY");
+  if (overlay && *overlay)
+    OverlayConfig(*config, overlay);
+  auto model = std::dynamic_pointer_cast<DecoderOnly_Model>(
+      CreateModel(GetOrtEnv(), std::move(config)));
+  ASSERT_TRUE(model);
+  ASSERT_TRUE(model->vision_);
+  LingImageProcessor float_processor{*model->config_, model->session_info_};
+  LingImageProcessor bf16_processor{*model->config_, model->vision_->session_info};
+  const std::array<const char*, 1> paths{image_path};
+  auto images = LoadImages(paths);
+  const Tokenizer tokenizer{*model->config_};
+  const std::string prompt = "<|vision_start|><|image_pad|><|vision_end|>";
+  const Payload payload{prompt, {}, images.get(), nullptr};
+  const auto floating = float_processor.Process(tokenizer, payload);
+  const auto bf16 = bf16_processor.Process(tokenizer, payload);
+  const auto& input = *floating->at(std::string{Config::Defaults::PixelValuesName});
+  const auto& actual = *bf16->at(std::string{Config::Defaults::PixelValuesName});
+  ASSERT_EQ(input.GetType(), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+  ASSERT_EQ(actual.GetType(), ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16);
+  ASSERT_EQ(input.GetShape(), actual.GetShape());
+  const auto count = input.GetElementCount();
+  const auto* source = input.GetData<float>();
+  const auto* converted = actual.GetData<uint16_t>();
+  size_t mismatches = 0;
+  for (size_t index = 0; index < count; ++index) {
+    const float value = source[index];
+    ASSERT_TRUE(std::isfinite(value));
+    const uint16_t truncated = Float32ToBFloat16(value);
+    const uint16_t adjacent = static_cast<uint16_t>(truncated + 1u);
+    const float truncated_distance = std::abs(value - BFloat16ToFloat32(truncated));
+    const float adjacent_distance = std::abs(value - BFloat16ToFloat32(adjacent));
+    const uint16_t expected = truncated_distance < adjacent_distance || (truncated_distance == adjacent_distance && (truncated & 1u) == 0) ? truncated : adjacent;
+    if (converted[index] != expected)
+      ++mismatches;
+  }
+  EXPECT_EQ(mismatches, 0u);
+}
 
 TEST(EngineNativeCaptureTest, StreamedBytesDetectMismatch) {
   const auto path = std::filesystem::temp_directory_path() /

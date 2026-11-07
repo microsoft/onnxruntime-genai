@@ -57,6 +57,7 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
     : tokenizer_{std::make_shared<Tokenizer>(config)},
       thread_pool_{std::move(thread_pool)},
       processor_factory_{
+          {"bailing_moe_v3_vl", Processor::Create<LingImageProcessor>},
           {"phi3v", Processor::Create<PhiImageProcessor>},
           {"whisper", Processor::Create<WhisperProcessor>},
           {"parakeet_tdt", Processor::Create<ParakeetTdtProcessor>},
