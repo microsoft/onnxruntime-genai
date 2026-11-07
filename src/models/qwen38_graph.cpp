@@ -3735,7 +3735,10 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
 
   // Estimate the capacity before session creation using the package's tier padding or the configured fallback.
   // SyncQwen38GraphContext below still derives the execution settings from the loaded graph.
-  const auto context_tier = Qwen38ContextTierForTarget(target_filename);
+  auto context_tier = Qwen38ContextTierForTarget(target_filename);
+  if (!context_tier && explicit_context_env) {
+    context_tier = Qwen38ContextTierForTarget("model_" + NormalizeQwen38ContextTier(context_request) + ".onnx");
+  }
   const int budget_kv_capacity = context_tier ? context_tier->kv_capacity : q.kv_capacity;
   // The config field and the filename CreateSession opens below must name the same head graph.
   config_->model.qwen38_graph.fold.head_r2.filename =
@@ -3765,10 +3768,12 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
   ValidateQwen38BatchedTargetOutputs(ResolveQwen38MaxBatchSize(*config_), session_target_->GetOutputNames());
   if (const int64_t graph_positions =
           ResolveQwen38GraphKvCapacity(CacheInputsOf(session_info_, "past_key_values.", true));
-      graph_positions > 0 && !has_dynamic_batching_kv) {
-    if (g_log.enabled && moe_offload.enabled && adaptive_budget && graph_positions != budget_kv_capacity) {
+      (graph_positions > 0 && !has_dynamic_batching_kv) ||
+      (graph_positions <= 0 && explicit_context_env && context_tier.has_value())) {
+    const int64_t effective_positions = graph_positions > 0 ? graph_positions : context_tier->kv_capacity;
+    if (g_log.enabled && moe_offload.enabled && adaptive_budget && effective_positions != budget_kv_capacity) {
       Log("qwen38_graph") << "warning: offload budget estimate used kv_capacity " << budget_kv_capacity
-                          << ", but target graph " << target_filename << " reports " << graph_positions
+                          << ", but target graph " << target_filename << " reports " << effective_positions
                           << "; the session budgets are already set. Check the package layout or set "
                              "ORT_QWEN38_ADAPTIVE_CTX_BUDGET=0 and configure explicit budgets."
                           << std::endl;
@@ -3776,7 +3781,7 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
     // The capacity follows the graph. The default generation budget follows it only when a context tier was requested: a
     // package that limits search.max_length keeps its limit.
     const Qwen38GraphContext context =
-        SyncQwen38GraphContext(graph_positions, config_->search.max_length, !context_request.empty());
+        SyncQwen38GraphContext(effective_positions, config_->search.max_length, !context_request.empty());
     config_->model.qwen38_graph.kv_capacity = context.kv_capacity;
     if (config_->model.qwen38_graph.prefill.enabled &&
         EffectiveQwen38PrefillChunkTokens(config_->model.qwen38_graph) > static_cast<size_t>(context.kv_capacity)) {
