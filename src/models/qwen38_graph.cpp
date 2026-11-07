@@ -790,6 +790,27 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
         dflash_config.sliding_window > 0 ? static_cast<size_t>(dflash_config.sliding_window + dflash_config.block_size) : 0;
     for (auto& features : slot_dflash_prompt_) features = Qwen38DflashPromptFeatures{dflash_context_window};
   }
+  WarmupForCurrentThread();
+  if (g_log.enabled)
+    Log("qwen38_graph") << "engine ready: ple register " << ple_register_seconds << " s, warmup " << warmup_seconds
+                        << " s, mtp=" << mtp_enabled_ << " fold=" << fold_ << " fast_prefill=" << (fast_ != nullptr) << std::endl;
+}
+
+void Qwen38GraphEngine::WarmupForCurrentThread() {
+  // ORT's graph cache is thread-local. A lifetime token also distinguishes reused OS thread IDs.
+  thread_local const auto current_thread = std::make_shared<const WarmupThread>();
+  std::erase_if(warmup_threads_, [](const auto& thread) { return thread.expired(); });
+  if (std::any_of(warmup_threads_.begin(), warmup_threads_.end(),
+                  [&](const auto& thread) { return thread.lock() == current_thread; })) {
+    return;
+  }
+  for (auto& row : dirs_)
+    for (auto& direction : row) direction.warmup_captured = false;
+  for (auto& first : batch_dirs_)
+    for (auto& row : first)
+      for (auto& direction : row) direction.warmup_captured = false;
+
+  const auto& q = model_.config_->model.qwen38_graph;
   Reset();
   if (dflash_) {
     const auto start = Clock::now();
@@ -867,8 +888,8 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
         }
         if (fold_ && max_batch_ > 1) {
           // The batched graphs are captured after the arenas ORT shrinks once the prompt state has moved to the decode graphs.
-          // Each (slot interval, bank) graph is run as often as a single-slot graph. Offloaded targets stay eager so synthetic
-          // replays cannot bypass ORT's warmup control; their graphs are captured by live runs instead.
+          // Each (slot interval, bank) graph captures on its first muted warmup run; later offloaded warmups stay eager so
+          // synthetic replays cannot bypass ORT's per-run warmup control.
           const int runs_per_graph = Qwen38WarmupRuns(IsGraphCaptureEnabled(model_.config_->model.decoder.session_options));
           FastHandoff();
           for (int B = 1; B <= max_batch_; ++B) {
@@ -899,9 +920,7 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
     Warmup();
     warmup_seconds = SecondsSince(start);
   }
-  if (g_log.enabled)
-    Log("qwen38_graph") << "engine ready: ple register " << ple_register_seconds << " s, warmup " << warmup_seconds
-                        << " s, mtp=" << mtp_enabled_ << " fold=" << fold_ << " fast_prefill=" << (fast_ != nullptr) << std::endl;
+  warmup_threads_.emplace_back(current_thread);
 }
 
 Qwen38GraphEngine::~Qwen38GraphEngine() {
@@ -1907,9 +1926,8 @@ void Qwen38GraphEngine::RunTarget(int rows, int phase, const Qwen38PromptRunHint
 
 void Qwen38GraphEngine::RunTarget(Direction& direction, const Qwen38PromptRunHints* prompt,
                                   Qwen38SlotMask participants) {
-  OrtRunOptions* options = run_hints_.InWarmup() && offload_warmup_run_options_
-                               ? offload_warmup_run_options_.get()
-                               : direction.run_options.get();
+  OrtRunOptions* options = SelectQwen38TargetRunOptions(
+      run_hints_, direction.run_options.get(), offload_warmup_run_options_.get(), direction.warmup_captured);
   RunSession(*model_.session_target_, options, *direction.binding, prompt, participants);
 }
 
@@ -2796,7 +2814,7 @@ void Qwen38GraphEngine::Advance(const Qwen38CycleRecord& record, bool want_more)
 }
 
 void Qwen38GraphEngine::Warmup() {
-  // Touch every (rows, phase) and head direction enough times for first-use costs and, except on offloaded targets, capture.
+  // Touch every (rows, phase) and head direction for first-use costs and capture. Later offloaded warmups stay eager.
   // The Runs of the warmup carry ep.cuda.qmoe_in_warmup (and ORT_QMOE_IN_WARMUP) and, from here on, every Run of the
   // engine asks for deterministic MoE tactics: the engine keeps that state and publishes it around each Run only
   // (qwen38_ort_env.h), also when this throws.
@@ -3084,6 +3102,20 @@ std::unique_ptr<OrtRunOptions> CreateQwen38OffloadWarmupRunOptions(const Qwen38M
   options->AddConfigEntry("gpu_graph_id", "-1");
   options->AddConfigEntry("disable_synchronize_execution_providers", "1");
   options->AddConfigEntry(Qwen38OrtRunEntry::kInWarmup, "1");
+  return options;
+}
+
+OrtRunOptions* SelectQwen38TargetRunOptions(const Qwen38OrtRunHints& hints, OrtRunOptions* direction_options,
+                                            OrtRunOptions* offload_warmup_options, bool& warmup_captured) {
+  OrtRunOptions* options = direction_options;
+  if (hints.InWarmup() && offload_warmup_options != nullptr) {
+    if (warmup_captured) {
+      options = offload_warmup_options;
+    } else {
+      warmup_captured = true;
+    }
+  }
+  if (options != nullptr) hints.ApplyRunConfigEntries(*options);
   return options;
 }
 
@@ -3496,10 +3528,10 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
       SelectQwen38TierHeadR2Filename(q.fold.head_r2.filename, context_tier, package_has_file);
   head_r2_filename = SelectQwen38TierHeadR2Filename(head_r2_filename, context_tier, package_has_file);
   const std::string adaptive_ctx_budget = GetEnv("ORT_QWEN38_ADAPTIVE_CTX_BUDGET");
-  const bool adaptive_budget = adaptive_ctx_budget == "1";
+  const bool adaptive_budget = adaptive_ctx_budget.empty() || adaptive_ctx_budget == "1";
   if (g_log.enabled && moe_offload.enabled && !adaptive_ctx_budget.empty()) {
     if (!adaptive_budget) {
-      Log("qwen38_graph") << "ORT_QWEN38_ADAPTIVE_CTX_BUDGET=" << adaptive_ctx_budget << " is ignored: only 1 turns it on"
+      Log("qwen38_graph") << "ORT_QWEN38_ADAPTIVE_CTX_BUDGET=" << adaptive_ctx_budget << " disables adaptive context budget"
                           << std::endl;
     } else if (!context_tier) {
       Log("qwen38_graph") << "ORT_QWEN38_ADAPTIVE_CTX_BUDGET=1: " << target_filename
@@ -3661,10 +3693,13 @@ std::shared_ptr<Qwen38DecodeDevice> Qwen38GraphModel::AcquireDevice() {
     if (!IsExecutionContextHealthy()) {
       throw std::runtime_error("qwen38_flash_graph: the execution context is poisoned; reload the Model before creating another Engine.");
     }
-    // CUDA's current device is per thread. The Engine drives the model from the thread that acquires it, which is not the
-    // thread that loaded the model, so select the model's GPU here: its stream and buffers live on that device.
+    // CUDA's current device and ORT's captured graphs are per thread. Select the GPU and warm the acquiring Engine thread
+    // before any live state update, even when model construction already warmed another thread.
     plane_->Check(plane_->set_device(p_device_->GetDeviceId(nullptr)), "cudaSetDevice");
+    engine_->WarmupForCurrentThread();
   } catch (...) {
+    PoisonExecutionContext();
+    engine_->Drain();
     leased_.store(false);
     throw;
   }

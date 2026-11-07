@@ -2532,7 +2532,7 @@ token. The device holds `model.qwen38_graph.max_batch_size` slots (default 1), o
 - MoE offload requires an explicit `session.moe.offload.mode` of `required`, `auto`, `1` or `on` (case-insensitive).
   A budget alone does not enable offload, matching ORT's disabled default; `disabled`, `0` and `off` preserve that behavior.
   Only enabled offload changes target-graph selection, synthetic warmup options or session budgets.
-  `ORT_QWEN38_ADAPTIVE_CTX_BUDGET=1` opts into a fixed-layout estimate for the Flash-Next NVFP4 package: 12 attention layers,
+  By default (`ORT_QWEN38_ADAPTIVE_CTX_BUDGET` unset or `1`; set `0` to disable), offload uses a fixed-layout estimate for the Flash-Next NVFP4 package: 12 attention layers,
   two KV heads of 256 channels, one-byte K/V caches, int64 position IDs, and a 128-float index-key row per four positions
   per layer. It charges 16 KiB per position per request slot, relative to one slot of 33032 positions. These are not bytes
   measured from the selected graph, and do not account for every state tensor, workspace or allocator overhead.
@@ -2628,9 +2628,13 @@ token. The device holds `model.qwen38_graph.max_batch_size` slots (default 1), o
   serves its slot, a batched decode the slots that decode in it).
   Every Run also carries `ep.cuda.qmoe_in_warmup=1` during synthetic warmup and `0` afterwards; current ORT reads that entry
   rather than `ORT_QMOE_IN_WARMUP`. Reused run options are updated only when the value changes, including the reset to `0`
-  before live runs. Offloaded target decode warmup uses `gpu_graph_id=-1`, including all batched shapes:
-  captured replays bypass the per-run control and would otherwise score and promote dummy-token experts. These targets
-  pay graph capture costs during their first live runs; non-offloaded targets and auxiliary heads still capture during warmup.
+  before live runs. With warmup enabled (the default), the first offloaded target warmup for each direction uses its normal
+  `gpu_graph_id` and captures while the device is muted. Subsequent synthetic warmups use `gpu_graph_id=-1`, including
+  batched shapes: captured replays bypass the per-run control and would otherwise score and promote dummy-token experts.
+  ORT caches CUDA graphs per thread, so acquiring an Engine on a thread that has not warmed this model repeats the muted
+  warmup before any live request. Engines on an already-warmed live thread reuse its captures; a new thread must warm up
+  even if the operating system reuses a previous thread's ID. A failed warmup drains the device and poisons the model,
+  requiring a reload rather than allowing partially initialized graph state to reach live execution.
   With several slots a step advances every slot (`Qwen38GraphSession::StepBatch`): it commits the in-flight batched cycle of
   the decoding slots, prefills the next chunk of the slots that have not started decoding and enqueues the next batched
   cycle. The executor declares its step plan via `ScheduledRequests::BeginBackendStep` and stages owned `BackendRowResult`
