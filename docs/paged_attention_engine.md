@@ -1166,6 +1166,30 @@ repeatability requires replaying the same proposals and schedule.
 `Engine.get_speculative_stats`) reads counters that `Run()` mutates without synchronization. Like
 every other Engine query, it must be called from the Engine's owner thread and throws otherwise.
 
+### Experimental variable-width graph capture
+
+Set `ORTGENAI_ENGINE_VARLEN_GRAPH=1` before creating the Engine to opt into
+decode-only paged capture with unequal query or draft widths. The switch defaults
+to disabled and does not add public configuration fields.
+
+Eligible models expose per-token or selected logits and the three-value
+`attention_metadata` input. Fixed-state models, sparse-attention metadata,
+extra bindings, and prefill retain the existing capture/eager rules.
+
+The graph key includes the exact packed token count, batch size, and a bucketed
+maximum-query launch bound. Input/output tensor dimensions remain exact: there
+are no dummy requests, padded tokens, or unreserved KV writes. For example, query
+widths `[2,4]` and `[3,3]` can share one graph with six packed rows and a query
+bound of four. Different packed shapes still consume separate entries in the
+existing bounded graph cache.
+
+Qualify eager/captured token parity and actual CUDA graph replay before claiming
+a performance improvement. The optional native regression test
+`VarlenGraphReplayTest.ChangingWidthsPreserveTokensAndCaptureGeometry` runs with a
+CUDA build and `GENAI_VARLEN_GRAPH_MODEL` pointing to a compatible ordinary paged
+model. It compares greedy, draft-assisted control, and opted-in output while
+alternating `[2,4]` and `[3,3]` widths.
+
 ## One dynamic step in detail
 
 `Engine::RunDynamic()` coordinates the complete transaction.

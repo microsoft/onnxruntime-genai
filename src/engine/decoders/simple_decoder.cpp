@@ -6,6 +6,7 @@
 #include "static_batch_decoder_io.h"
 #include "varlen_decoder_io.h"
 #include "../../models/model_state_manifest.h"
+#include "../../models/env_utils.h"
 
 namespace Generators {
 
@@ -17,6 +18,7 @@ SimpleDecoder::SimpleDecoder(std::shared_ptr<DecoderOnly_Model> model,
   }
   const ModelStateManifest manifest{model_->config_->model.decoder};
   has_fixed_state_groups_ = manifest.HasFixedStateGroups();
+  GetEnv("ORTGENAI_ENGINE_VARLEN_GRAPH", varlen_graph_enabled_);
   const bool has_position_ids = model_->session_info_.HasInput(
       model_->config_->model.decoder.inputs.position_ids);
   if (cache_manager_->SupportsDynamicBatching() && has_position_ids) {
@@ -74,10 +76,8 @@ SimpleDecoder::~SimpleDecoder() {
 
 namespace {
 
-// A step can be captured only if it looks like every other step the graph will serve: the same
-// number of new tokens for every sequence. Prefill and chunked-prefill steps carry a variable number
-// of tokens and are shaped differently from run to run, so they always execute eagerly. Returns the
-// shared per-request token count, or zero when the step cannot be captured.
+// Legacy capture requires the same number of new tokens for every sequence. Prefill and
+// chunked-prefill always execute eagerly. Returns the shared per-request token count, or zero.
 size_t UniformDecodeTokenCount(ScheduledRequests& scheduled_requests) {
   size_t tokens_per_request = 0;
   for (auto& request : scheduled_requests) {
@@ -115,8 +115,12 @@ void SimpleDecoder::LogGraphDecision(size_t batch_size, size_t tokens_per_reques
     return;
   }
   auto& stream = Log("graph_capture");
-  stream << "decode batch=" << batch_size << " tokens_per_request=" << tokens_per_request
-         << " block_table_columns=" << context.block_table_columns
+  stream << "decode batch=" << batch_size
+         << (context.graph_query_len_bound ? " query_bound=" : " tokens_per_request=")
+         << tokens_per_request;
+  if (context.graph_query_len_bound && context.plan)
+    stream << " packed_tokens=" << context.plan->token_count;
+  stream << " block_table_columns=" << context.block_table_columns
          << " state_binding=" << context.fixed_state_binding_key
          << " state_domain=" << context.fixed_state_binding_domain << " -> ";
   switch (fallback) {
@@ -162,14 +166,36 @@ std::optional<GraphAnnotationIds::Key> SimpleDecoder::GraphKeyForContext(
   return DecodeGraphKey(batch_size, tokens_per_request, context.block_table_columns,
                         context.fixed_state_binding_key, context.fixed_state_binding_domain,
                         context.decoder_session ? context.decoder_session : default_session,
-                        context.indexshare_decode, context.extra_binding_layout_key);
+                        context.indexshare_decode, context.extra_binding_layout_key,
+                        context.graph_query_len_bound && context.plan ? context.plan->token_count : 0);
 }
 
 void SimpleDecoder::Decode(ScheduledRequests& scheduled_requests,
                            ExecutionContext& context) {
-  const size_t tokens_per_request = context.plan
-                                        ? PlanDecodeTokenCount(*context.plan)
-                                        : UniformDecodeTokenCount(scheduled_requests);
+  size_t tokens_per_request = context.plan
+                                  ? PlanDecodeTokenCount(*context.plan)
+                                  : UniformDecodeTokenCount(scheduled_requests);
+  context.graph_query_len_bound = 0;
+  if (varlen_graph_enabled_ && graph_buffers_ && context.plan &&
+      !has_fixed_state_groups_ && context.fixed_state_bindings.empty() &&
+      context.extra_inputs.empty() && context.extra_outputs.empty() &&
+      context.extra_input_names.empty() && context.extra_output_names.empty() &&
+      DecoderLogitsArePerToken(*model_) &&
+      model_->session_info_.HasInput(model_->config_->model.decoder.inputs.attention_metadata) &&
+      model_->session_info_.GetInputShape(model_->config_->model.decoder.inputs.attention_metadata) ==
+          std::vector<int64_t>{static_cast<int64_t>(kAttentionMetadataElementCount)}) {
+    size_t maximum_query = 0;
+    bool decode_only = !context.plan->requests.empty();
+    for (const auto& entry : context.plan->requests) {
+      decode_only &= !entry.is_prefill && entry.unprocessed_token_count != 0;
+      maximum_query = std::max(maximum_query, entry.unprocessed_token_count);
+    }
+    const size_t bound = GetGraphQueryTokenBound(maximum_query, graph_buffers_->max_query_tokens);
+    if (decode_only && graph_buffers_->FitsPacked(scheduled_requests.size(), bound, context.plan->token_count)) {
+      tokens_per_request = bound;
+      context.graph_query_len_bound = bound;
+    }
+  }
   // -1 tells the CUDA EP to run eagerly. Otherwise every distinct decode shape gets its own
   // annotation id: the EP runs that id once eagerly, captures it on the next occurrence, and
   // replays from then on. The id also covers the fixed-state binding layout, whose device
@@ -181,7 +207,9 @@ void SimpleDecoder::Decode(ScheduledRequests& scheduled_requests,
     fallback = GraphFallback::kDisabled;
   } else if (tokens_per_request == 0) {
     fallback = GraphFallback::kNonUniformStep;
-  } else if (!graph_buffers_->Fits(scheduled_requests.size(), tokens_per_request)) {
+  } else if (context.graph_query_len_bound
+                 ? !graph_buffers_->FitsPacked(scheduled_requests.size(), tokens_per_request, context.plan->token_count)
+                 : !graph_buffers_->Fits(scheduled_requests.size(), tokens_per_request)) {
     fallback = GraphFallback::kStepTooWide;
   } else {
     const auto key = GraphKeyForContext(scheduled_requests.size(), tokens_per_request,
@@ -197,6 +225,8 @@ void SimpleDecoder::Decode(ScheduledRequests& scheduled_requests,
     }
   }
   const bool capture = annotation_id > 0;
+  if (!capture)
+    context.graph_query_len_bound = 0;
   LogGraphDecision(scheduled_requests.size(), tokens_per_request, context, annotation_id, fallback,
                    known_shapes);
 

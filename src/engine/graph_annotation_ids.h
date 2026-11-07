@@ -35,7 +35,7 @@ namespace Generators {
 class GraphAnnotationIds {
  public:
   static constexpr size_t kMaxCapturedShapes = 64;
-  static constexpr size_t kMaxKeyComponents = 8;
+  static constexpr size_t kMaxKeyComponents = 9;
   // Unused trailing components are zero, so keys of different widths never collide.
   using Key = std::array<size_t, kMaxKeyComponents>;
 
