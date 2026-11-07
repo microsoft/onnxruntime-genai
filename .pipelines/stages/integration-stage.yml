@@ -138,6 +138,7 @@ stages:
             arch: 'x64'
             ep: 'cuda'
             model: ${{ model }}
+            runToolcalling: ${{ eq(model, 'qwen2.5-coder-1.5b-instruct') }}
 
 - ${{ if and(eq(parameters.build_linux_x64, true), eq(parameters.linux_x64_engine, true)) }}:
   - stage: integration_engine_test_linux_x64
