@@ -20,6 +20,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include "engine/backend_capabilities.h"
@@ -673,6 +674,7 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   void BuildHead();
   void BuildHeadState();
   void BuildHeadR2();
+  void ReleaseCapturedGraphs() noexcept;
   void BuildFastPrefill();
   void StepPrefill(std::span<const int32_t> tokens);
   void FastAppend(std::span<const int32_t> tokens);
@@ -811,6 +813,7 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   Direction batch_dirs_[kMaxBatch][kMaxBatch][kMaxBanks];  // [first slot][batch size - 1][phase]
   std::vector<std::unique_ptr<DevTensor>> output_tensors_;
   std::vector<std::unique_ptr<DevTensor>> head_views_;
+  std::vector<std::pair<OrtSession*, int>> captured_graphs_;
   std::deque<PlaneBuffer> owned_;  // individually allocated tensors
   const Direction* slot_inflight_dirs_[kMaxBatch]{};
   size_t slot_target_group_[kMaxBatch]{};
@@ -943,6 +946,7 @@ struct Qwen38GraphModel : Model {
   std::unique_ptr<OrtSession> session_head_r2_, session_dense_, session_head_kv_;
   std::optional<int64_t> target_head_rows_;
   std::unique_ptr<Qwen38GraphEngine> engine_;
+  std::thread::id engine_thread_;
 
   void RunCpuEmbedding(const int64_t* ids_host, size_t num_tokens, void* dst_host) const;
 
