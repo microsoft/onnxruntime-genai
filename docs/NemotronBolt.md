@@ -162,6 +162,20 @@ advances dense KV length by `accepted + 1`, and selects recurrent row `accepted`
 Only accepted context reaches the drafter. Its packed row maps preserve the real
 last-context `anchor_row_index`, even when padded to eight rows for graph replay.
 
+The pinned native H128 Flash attention route partitions split-K work in 128-key tiles using the
+padded endpoint of each R8 call. Crossing a tile boundary inside a speculative
+block can therefore change BF16 attention arithmetic relative to target-only
+row zero, even with identical queries and valid-prefix KV. Speculative decode
+segments such blocks at the arithmetic boundary. Each segment still executes
+the native R8 graph with its own live state; all eight logical recurrent
+snapshots, logits, prediction IDs and auxiliary rows are merged on device before acceptance.
+Prefill and ordinary decoding are unchanged. A segmented verification round
+uses two actual target passes, which are included in `target_forward_passes`
+and `target_verify_forward_passes`; acceptance and round counters still describe
+the single seven-draft proposal. No reference routes, logits or caches are used.
+The additional snapshot workspace is generator-owned and retains fixed graph
+buffer addresses.
+
 Target and drafter capture/warm on dummy state, then reset before processing the
 real prompt. Each generator owns independent buffers and graph annotations.
 Drive generators sequentially; concurrent calls on a shared model are unsupported.
@@ -205,6 +219,16 @@ reset and at every output-budget boundary, terminal EOS, every recurrent
 acceptance row, and prompt lengths immediately below/at/above an eight-row chunk,
 the drafter context window, and the supported capacity (with rejection above
 capacity). Those independent real-graph checks remain outstanding.
+
+`IdenticalCandidatePrefixReplay` compares sequential and block logits plus every
+recurrent and valid-prefix KV boundary from byte-validated identical prior state.
+`LiveOrdinarySpeculativeBoundaryStates` compares complete finite cache/logit
+boundaries using two independently advancing live generators, repeats requests
+after reset, and checks full token identity against supplied `expected_ordinary`
+fixtures. Set `ORTGENAI_BOLT_TEST_CASES` to a JSON object containing `cases`
+(`case_id`, integer `prompt_ids`, `max_new_tokens`, `expected_ordinary`) and
+`ORTGENAI_BOLT_OUTPUT` to an owned report prefix. These remain same-runtime
+consistency tests, not independent HuggingFace execution.
 
 The original custom-op package's benchmark scores remain scoped to its pinned
 runtime. Migration checks compare custom-op and contrib-op results in the same
