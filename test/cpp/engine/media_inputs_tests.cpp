@@ -142,6 +142,7 @@ TEST(MediaInputsTest, RealQwenVideoCanonicalOrderAndEncoderInputs) {
       }
     }
   }
+  store.ReserveItems(prepared.media.size());
   store.Retain(prepared.media);
   const auto item = prepared.media[0].item;
   {
@@ -154,6 +155,24 @@ TEST(MediaInputsTest, RealQwenVideoCanonicalOrderAndEncoderInputs) {
       EXPECT_GT(accounting->host_bytes, retained_bytes);
     }
     EXPECT_EQ(accounting->host_bytes, retained_bytes);
+  }
+  {
+    constexpr size_t host_limit = 16 * 1024 * 1024;
+    MediaStore eviction_store{model, host_limit, 2 * 1024 * 1024};
+    std::shared_ptr<MediaAccounting> accounting;
+    {
+      auto cached = eviction_store.Prepare(prompt, raw, nullptr, 0, 4096, videos.get());
+      eviction_store.Identify(cached, 0, {});
+      accounting = cached.storage->accounting;
+      const auto before_growth = accounting->host_bytes;
+      eviction_store.ReserveItems(64);
+      EXPECT_GE(accounting->host_bytes - before_growth, 64 * sizeof(std::shared_ptr<MediaItem>));
+      eviction_store.Retain(cached.media);
+    }
+    auto allocation = eviction_store.ReserveHost(host_limit - sizeof(MediaAllocation) - 2 * sizeof(void*));
+    EXPECT_EQ(accounting->host_bytes, host_limit);
+    allocation.reset();
+    EXPECT_EQ(accounting->host_bytes, 0u);
   }
   {
     struct InvalidPlan : VisionPreparation {
@@ -306,6 +325,7 @@ TEST(MediaInputsTest, RealQwenVideoCanonicalOrderAndEncoderInputs) {
   EXPECT_NO_THROW(empty_budget.Prepare(long_prompt, long_tokens, nullptr, 0, 4096, videos.get()));
   MediaStore retained_budget{model, 2500000, 2 * 1024 * 1024};
   auto retained = retained_budget.Prepare(prompt, raw, nullptr, 0, 4096, videos.get());
+  retained_budget.ReserveItems(retained.media.size());
   retained_budget.Retain(retained.media);
   EXPECT_THROW(retained_budget.Prepare(long_prompt, long_tokens, nullptr, 0, 4096, videos.get()),
                std::runtime_error);

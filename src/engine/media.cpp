@@ -170,6 +170,14 @@ void MediaStore::MakeHostRoom(size_t bytes) {
       ++item;
     }
   }
+  if (prefixes_.empty()) {
+    std::vector<std::shared_ptr<const MediaPrefix>>{}.swap(prefixes_);
+    prefix_storage_.reset();
+  }
+  if (items_.empty()) {
+    std::vector<std::shared_ptr<MediaItem>>{}.swap(items_);
+    item_storage_.reset();
+  }
   if (accounting_->host_bytes > host_limit_ - bytes)
     throw std::runtime_error("Retained media leaves insufficient host capacity for this turn.");
 }
@@ -217,7 +225,12 @@ void MediaStore::Identify(PreparedMediaTurn& turn, size_t first_row, std::span<c
   MakeHostRoom(estimate);
   accounting_->host_bytes += estimate;
   HostReservation reservation{accounting_, estimate};
-  prefixes_.reserve(AddBytes(prefixes_.size(), turn.media.size()));
+  const auto capacity = AddBytes(prefixes_.size(), turn.media.size());
+  if (capacity > prefixes_.capacity()) {
+    auto allocation = ReserveHost(MultiplyBytes(capacity, sizeof(decltype(prefixes_)::value_type)));
+    prefixes_.reserve(capacity);
+    prefix_storage_ = std::move(allocation);
+  }
   for (auto& span : turn.media) {
     const auto values = std::span<const int32_t>{turn.tokens}.subspan(span.start - first_row, span.rows);
     const auto base = AddPosition(static_cast<int64_t>(span.start), delta);
@@ -404,7 +417,12 @@ std::shared_ptr<MediaItem> MediaStore::Intern(NamedTensors inputs, size_t rows,
 }
 
 void MediaStore::ReserveItems(size_t count) {
-  items_.reserve(AddBytes(items_.size(), count));
+  const auto capacity = AddBytes(items_.size(), count);
+  if (capacity > items_.capacity()) {
+    auto allocation = ReserveHost(MultiplyBytes(capacity, sizeof(decltype(items_)::value_type)));
+    items_.reserve(capacity);
+    item_storage_ = std::move(allocation);
+  }
 }
 
 void MediaStore::Retain(std::span<const MediaSpan> media) noexcept {

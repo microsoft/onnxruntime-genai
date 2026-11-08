@@ -122,6 +122,8 @@ class MediaStore {
                                     std::span<const MediaSpan> pending, size_t& reservation);
   std::shared_ptr<DecoderOnly_Model> model_;
   std::shared_ptr<MediaAccounting> accounting_{std::make_shared<MediaAccounting>()};
+  std::shared_ptr<MediaAllocation> item_storage_;
+  std::shared_ptr<MediaAllocation> prefix_storage_;
   std::vector<std::shared_ptr<MediaItem>> items_;
   std::vector<std::shared_ptr<const MediaPrefix>> prefixes_;
   size_t host_limit_;
