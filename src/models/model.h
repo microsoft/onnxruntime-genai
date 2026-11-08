@@ -8,7 +8,6 @@
 #include "model_type.h"
 #include "generator/generators.h"
 #include "engine/graph_annotation_ids.h"
-#include "onnx_kv_cache.h"
 #include "utils.h"
 #include <map>
 #include <mutex>
@@ -204,8 +203,6 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
   Ort::Allocator& allocator_cpu_{GetDeviceInterface(DeviceType::CPU)->GetAllocator()};
 
   SessionInfo session_info_;
-  mutable std::once_flag webgpu_shared_kv_once_;
-  mutable SharedKvBindings webgpu_shared_kv_bindings_;
   mutable std::once_flag preprocessing_thread_pool_once_;
   mutable std::shared_ptr<ThreadPool> preprocessing_thread_pool_;
 

@@ -268,7 +268,7 @@ if(USE_WEBGPU)
   target_include_directories(shared_cache_growth_tests PRIVATE ${ORT_HEADER_DIR} ${CMAKE_SOURCE_DIR}/src)
   target_link_libraries(shared_cache_growth_tests PRIVATE onnxruntime-genai-obj GTest::gtest)
   target_compile_definitions(shared_cache_growth_tests PRIVATE
-    ORTGENAI_TEST_WEBGPU_GQA_MODEL_DIR="${CMAKE_CURRENT_SOURCE_DIR}/models/webgpu-auto-shared-gqa")
+    ORTGENAI_TEST_WEBGPU_GQA_MODEL_DIR="${CMAKE_CURRENT_SOURCE_DIR}/models/webgpu-shared-gqa")
   add_dependencies(shared_cache_growth_tests onnxruntime-genai)
   set_target_properties(shared_cache_growth_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>")
   if(NOT MSVC)
@@ -277,9 +277,7 @@ if(USE_WEBGPU)
   add_test(NAME SharedCacheGrowthTests COMMAND shared_cache_growth_tests)
 endif()
 
-add_executable(kv_cache_unit_tests
-  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/kv_cache_tests.cpp"
-  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/onnx_kv_cache_tests.cpp")
+add_executable(kv_cache_unit_tests "${CMAKE_CURRENT_SOURCE_DIR}/cpp/kv_cache_tests.cpp")
 target_include_directories(kv_cache_unit_tests PRIVATE
   ${ORT_HEADER_DIR}
   ${onnxruntime_extensions_SOURCE_DIR}/shared/api

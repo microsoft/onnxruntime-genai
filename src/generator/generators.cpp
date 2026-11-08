@@ -21,7 +21,6 @@
 #include "models/model_type.h"
 #include "models/decoder_only.h"
 #include "models/io/kv_cache.h"
-#include "models/io/shared_cache_growth.h"
 #include "models/io/position_inputs.h"
 #include "decoding/decoding_strategy.h"
 #include "decoding/n_gram_decoding_strategy.h"
@@ -502,11 +501,10 @@ void GeneratorParams::SetGuidance(std::string_view type, std::string_view data, 
 }
 
 bool GeneratorParams::IsPastPresentShareBufferEnabled(const std::string& model_type) const {
-  // Recognized native WebGPU GQA exports use growable shared KV even when the
-  // package selected the older unshared dynamic policy. Other EPs keep the flag.
-  const bool share = search.past_present_share_buffer ||
-                     (model_ && SharedCacheGrowth::CanAutoShare(*model_, *this));
-  return share &&
+  // past_present_share_buffer is only actually enabled when:
+  // 1. The config option is set to true, AND
+  // 2. Either num_beams == 1 OR the model is Whisper
+  return search.past_present_share_buffer &&
          (search.num_beams == 1 || model_type == "whisper");
 }
 

@@ -4,4 +4,4 @@
 *.patch text eol=lf
 
 # Preserve the serialized ONNX test fixture without text conversion or diffs.
-/test/models/webgpu-auto-shared-gqa/*.onnx binary
+/test/models/webgpu-shared-gqa/*.onnx binary

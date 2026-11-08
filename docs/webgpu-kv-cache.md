@@ -1,6 +1,7 @@
 # WebGPU KV cache growth and graph capture
 
-Native WebGPU models with symbolic KV sequence dimensions can use shared
+Native WebGPU models with `past_present_share_buffer: true` and symbolic KV
+sequence dimensions can use shared
 past/present buffers without reserving the full `search.max_length` at generator
 creation. Supported FP16/FP32 caches allocate on the first prompt, reserve at
 least 512 tokens (clamped to `max_length`), and grow geometrically as needed.
@@ -13,14 +14,13 @@ tensor. Symbolic shapes can use either separate tensors or shared tensors with
 fixed or growable capacity. Fixed positive KV shapes are detected automatically
 and use shared tensors sized to the model's declared capacity.
 
-For file-backed decoder exports with direct `com.microsoft::GroupQueryAttention`
-past/present bindings, GenAI selects this policy automatically on WebGPU,
-including packages configured with `past_present_share_buffer: false`. Every
-configured KV pair must have compatible symbolic shapes and matching data types,
-and the attention op must be the only consumer of the past cache. Graphs with
-extra KV consumers, subgraphs or model-local functions keep their existing policy.
-Memory-provided models also keep their existing policy. Other backends are
-unchanged.
+The share flag remains explicit: `false` keeps the existing separate-buffer
+dynamic path. Other backends keep their existing sharing and capacity policies.
+For future WebGPU model packages, prefer `true` when the exported attention
+graph supports aliased past/present buffers and uses a separate logical sequence
+length, as the tested `com.microsoft::GroupQueryAttention` exports do. This PR
+does not change model-builder defaults or automatically inspect graphs to enable
+sharing. Verify each export before selecting the flag.
 
 Graph capture is opt-in through the existing WebGPU provider option. Keep the
 model package's other provider options, including any rotary-cache options, and
@@ -43,10 +43,11 @@ set these fields in its configuration:
 ```
 
 This fragment shows the relevant fields; it is not a complete model
-configuration. Recognized WebGPU GQA exports do not need the explicit share flag.
-Other exports require it and must support aliased past/present
-buffers and consume the current logical sequence length during replay. Symbolic
-ONNX dimensions alone do not establish those semantics.
+configuration. Shared exports must support aliased past/present buffers and
+consume the current logical sequence length during replay. Symbolic ONNX
+dimensions alone do not establish those semantics. In particular, deriving
+logical length from `Shape(past)` reads capacity, and concatenating the entire
+past tensor includes spare rows; setting the flag does not fix either graph.
 
 Within one capacity, decode reuses stable buffer addresses. At a growth boundary,
 GenAI releases all captured lengths and variants owned by that generator,
@@ -60,10 +61,12 @@ support graph capture. Growable shared KV currently
 excludes beam search, decoder pipelines, configured sliding windows and
 quantized KV. Fixed-declared cache shapes retain their declared capacity.
 
-Evaluate both memory and latency for the intended workload. Shared growth saves
-KV capacity relative to reserving `max_length` and avoids allocating a new
-present tensor on each decode step. It reserves spare capacity, while unshared
-dynamic KV keeps separate past and present tensors. Capture can reduce decode
+Evaluate both memory and latency for the intended workload. With the share flag
+already true, both the previous `max_length` allocation and the growable policy
+reuse past/present storage. Growth reduces reserved KV capacity and adds occasional
+allocation/migration work; it does not remove per-step present allocation from
+that already-shared baseline. Unshared dynamic KV keeps separate tensors.
+Capture can reduce decode
 CPU overhead; crossing a
 capacity boundary adds migration and recapture latency. Bound KV tensor bytes
 exclude retained allocator buffers, migration overlap, model weights and capture

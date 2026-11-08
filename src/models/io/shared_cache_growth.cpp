@@ -6,76 +6,8 @@
 #include "kv_cache.h"
 
 #include <algorithm>
-#include <charconv>
 
 namespace Generators {
-
-bool SharedCacheGrowth::CanAutoShare(const Model& model, const GeneratorParams& params) {
-  const auto& config = *model.config_;
-  const auto& decoder = config.model.decoder;
-  if (model.p_device_kvcache_->GetType() != DeviceType::WEBGPU || params.search.num_beams != 1 ||
-      !decoder.pipeline.empty() || decoder.sliding_window || !decoder.inputs.past_names.empty() ||
-      !decoder.inputs.cross_past_key_names.empty() ||
-      model.p_device_kvcache_->GetKeyValueCacheQuantizationBits(decoder.session_options) != 0 ||
-      Ort::api->GetModelEditorApi() == nullptr || decoder.filename.empty() ||
-      config.memory_assets_only_ || config.model_data_spans_.contains(decoder.filename)) return false;
-#if ORT_API_VERSION < 27
-  if (params.use_graph_capture) return false;
-#endif
-  // A symbolic sequence axis alone does not establish in-place attention semantics.
-  // Inspect the file once per Model, without loading its initializer payloads.
-  std::call_once(model.webgpu_shared_kv_once_, [&] {
-    model.webgpu_shared_kv_bindings_ = ReadOnnxSharedKvBindings(
-        std::filesystem::path{(config.config_path / decoder.filename).c_str()});
-  });
-  const auto& bindings = model.webgpu_shared_kv_bindings_;
-  if (bindings.empty()) return false;
-
-  const auto& key_template = decoder.inputs.past_key_names;
-  const auto placeholder = key_template.find("%d");
-  if (placeholder == std::string::npos) return false;
-  const auto prefix = key_template.substr(0, placeholder);
-  const auto suffix = key_template.substr(placeholder + 2);
-  size_t cache_count = 0;
-  ONNXTensorElementDataType cache_type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
-  for (const auto& name : model.session_info_.GetInputNames()) {
-    if (!name.starts_with(prefix) || !name.ends_with(suffix) || name.size() <= prefix.size() + suffix.size()) continue;
-    const auto digits = std::string_view{name}.substr(prefix.size(), name.size() - prefix.size() - suffix.size());
-    int layer = -1;
-    const auto parsed = std::from_chars(digits.data(), digits.data() + digits.size(), layer);
-    if (parsed.ec != std::errc{} || parsed.ptr != digits.data() + digits.size() || layer < 0 ||
-        ComposeKeyValueName(key_template, layer) != name) return false;
-    const std::string inputs[] = {name, ComposeKeyValueName(decoder.inputs.past_value_names, layer)};
-    const std::string outputs[] = {ComposeKeyValueName(decoder.outputs.present_key_names, layer),
-                                   ComposeKeyValueName(decoder.outputs.present_value_names, layer)};
-    std::vector<int64_t> key_shape;
-    for (size_t i = 0; i < 2; ++i) {
-      if (!model.session_info_.HasInput(inputs[i]) || !model.session_info_.HasOutput(outputs[i]) ||
-          std::find(bindings.begin(), bindings.end(), std::pair{inputs[i], outputs[i]}) == bindings.end()) return false;
-      const auto input_shape = model.session_info_.GetInputShape(inputs[i]);
-      const auto output_shape = model.session_info_.GetOutputShape(outputs[i]);
-      const auto type = model.session_info_.GetInputDataType(inputs[i]);
-      if (input_shape.size() != 4 || output_shape.size() != 4 || input_shape[2] >= 0 || output_shape[2] >= 0 ||
-          (type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16 && type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) ||
-          model.session_info_.GetOutputDataType(outputs[i]) != type) return false;
-      if (cache_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED) cache_type = type;
-      if (type != cache_type) return false;  // One typed migration session serves every cache.
-      for (size_t axis : {size_t{0}, size_t{1}, size_t{3}}) {
-        int64_t resolved = params.search.batch_size;
-        if (axis != 0) {
-          resolved = input_shape[axis] > 0 ? input_shape[axis] : axis == 1 ? decoder.num_key_value_heads
-                                                                           : decoder.head_size;
-        }
-        if (resolved <= 0 || (input_shape[axis] >= 0 && input_shape[axis] != resolved) ||
-            (output_shape[axis] >= 0 && output_shape[axis] != resolved)) return false;
-        if (i == 1 && input_shape[axis] != key_shape[axis]) return false;
-      }
-      if (i == 0) key_shape = input_shape;
-      ++cache_count;
-    }
-  }
-  return cache_count == bindings.size();
-}
 
 bool SharedCacheGrowth::IsSupported(const State& state, std::span<const std::string> input_names,
                                     std::span<const std::string> output_names) {
@@ -83,7 +15,7 @@ bool SharedCacheGrowth::IsSupported(const State& state, std::span<const std::str
   const auto& model = state.model_;
   if (model.p_device_kvcache_->GetType() != DeviceType::WEBGPU ||
       !model.config_->model.decoder.pipeline.empty() ||
-      !state.params_->IsPastPresentShareBufferEnabled(model.config_->model.type) ||
+      !state.params_->search.past_present_share_buffer ||
       state.params_->search.num_beams != 1 || model.config_->model.decoder.sliding_window ||
       model.p_device_kvcache_->GetKeyValueCacheQuantizationBits(model.config_->model.decoder.session_options) != 0) {
     return false;
