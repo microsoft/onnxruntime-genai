@@ -230,6 +230,29 @@ TEST_F(SchedulerContractTest, PrefillStopsBeforeTheNextMissingImage) {
   }
 }
 
+TEST_F(SchedulerContractTest, FeatureResidencyDoesNotChangeThePrefillBoundary) {
+  for (const bool features_ready : {false, true}) {
+    auto cache = std::make_shared<RecordingCacheManager>(model_, 8);
+    DynamicBatchScheduler scheduler(model_, cache);
+    auto request = Assigned(10);
+    auto image = std::make_shared<MediaItem>();
+    image->rows = 1;
+    if (features_ready) {
+      image->features = std::make_shared<Tensor>(GetDeviceInterface(DeviceType::CPU), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+    }
+    request->ReserveMedia(1);
+    const std::array<MediaSpan, 1> media{{{2, image}}};
+    request->AppendMedia(media);
+    scheduler.AddRequest(request);
+    StepPlan plan;
+    ASSERT_TRUE(scheduler.PlanStep(plan).executable);
+    ASSERT_EQ(plan.requests.size(), 1u);
+    EXPECT_EQ(plan.token_count, 2u);
+    EXPECT_EQ(plan.requests[0].unprocessed_token_count, 2u);
+    EXPECT_EQ(request->ProcessedSequenceLength(), 0);
+  }
+}
+
 TEST_F(SchedulerContractTest, CapacityBlockedPeerDoesNotSuppressResidentImagePreparation) {
   for (const bool occupied_slot : {false, true}) {
     auto cache = std::make_shared<RecordingCacheManager>(model_, occupied_slot ? 1 : 8);

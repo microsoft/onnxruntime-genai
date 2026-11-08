@@ -345,7 +345,7 @@ TEST(MediaInputsTest, VideoProcessorAssetBindingIsOptionalAndParsedAtomically) {
 }
 
 TEST(MediaInputsTest, TextOnlyModelTypesRejectVisionComponents) {
-  for (const char* type : {"qwen3_5_text", "qwen3_5_moe_text", "gpt2"}) {
+  for (const char* type : {"qwen3_5_text", "qwen3_5_moe_text", "qwen4_exp_text", "qwen38_flash_graph", "gpt2"}) {
     auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
     config->model.type = type;
     config->model.vision.filename = "vision.onnx";
@@ -359,7 +359,7 @@ TEST(MediaInputsTest, TextOnlyModelTypesRejectVisionComponents) {
 }
 
 TEST(MediaInputsTest, VisionModelTypeWithoutEncoderDoesNotEnableVision) {
-  for (const char* type : {"qwen3_5", "qwen3_5_moe"}) {
+  for (const char* type : {"qwen3_5", "qwen3_5_moe", "qwen4_exp"}) {
     auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
     config->model.type = type;
     config->engine.dynamic_batching.emplace();

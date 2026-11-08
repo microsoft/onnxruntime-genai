@@ -188,6 +188,7 @@ def test_modelopt_gate_exclusions_are_specific_to_model_family(dense):
 def test_multimodal_qwen38_builds_decoder_and_mtp_without_blanket_restriction():
     model = qwen.Qwen4ExpModel.__new__(qwen.Qwen4ExpModel)
     model.text_only = False
+    model.extra_options = {}
     calls = []
     model.decoder = SimpleNamespace(quant_type=None, make_model=lambda path: calls.append(("decoder", path)))
     model.mtp = SimpleNamespace(make_model=lambda path: calls.append(("mtp", path)))

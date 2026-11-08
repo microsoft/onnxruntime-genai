@@ -103,9 +103,16 @@ def test_qwen35_mtp_hidden_states_output_uses_normalization_producer(monkeypatch
 
 
 @pytest.mark.parametrize("grid", [(1, 4, 6), (1, 6, 4), (1, 8, 8)])
-def test_qwen35_vision_export_matches_source_features(tmp_path, grid):
-    source = pytest.importorskip("transformers.models.qwen3_5.modeling_qwen3_5")
-    config = source.Qwen3_5VisionConfig(
+@pytest.mark.parametrize(
+    ("source_module", "config_name", "model_name"),
+    [
+        ("qwen3_5", "Qwen3_5VisionConfig", "Qwen3_5VisionModel"),
+        ("qwen4_exp", "Qwen4ExpVisionConfig", "Qwen4ExpVisionModel"),
+    ],
+)
+def test_qwen35_vision_export_matches_source_features(tmp_path, grid, source_module, config_name, model_name):
+    source = pytest.importorskip(f"transformers.models.{source_module}.modeling_{source_module}")
+    config = getattr(source, config_name)(
         depth=2,
         hidden_size=32,
         intermediate_size=48,
@@ -118,7 +125,7 @@ def test_qwen35_vision_export_matches_source_features(tmp_path, grid):
     )
     config._attn_implementation = "eager"
     torch.manual_seed(7)
-    visual = source.Qwen3_5VisionModel(config).eval()
+    visual = getattr(source, model_name)(config).eval()
     builder = load_builder_module("qwen3_8.vision").Qwen4ExpVisionModel(config, visual, ir.DataType.FLOAT)
     builder.save_model(str(tmp_path))
 
