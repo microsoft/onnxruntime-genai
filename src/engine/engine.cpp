@@ -1595,10 +1595,9 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request, const std::s
     const auto tokens = GetOrCreateStopTokenizer()->Encode(prompt.c_str());
     return BeginTurn(request, tokens, options);
   }
-  const auto raw = GetOrCreateStopTokenizer()->Encode(prompt.c_str());
-  request->ValidateTurnAdmission(raw, options);
+  request->ValidateTurnState(options);
   const size_t first_row = static_cast<size_t>(request->CurrentSequenceLength());
-  auto prepared = media_store_->Prepare(prompt, raw, images, first_row, request->MaxSessionTokens() - first_row,
+  auto prepared = media_store_->Prepare(prompt, images, first_row, request->MaxSessionTokens() - first_row,
                                         videos, request->Media());
   media_store_->Identify(prepared, first_row, request->Media());
   request->ReserveMedia(prepared.media.size(), media_store_.get());

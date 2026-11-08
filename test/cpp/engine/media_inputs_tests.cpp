@@ -69,15 +69,14 @@ TEST(MediaInputsTest, RealQwenVideoCanonicalOrderAndEncoderInputs) {
     ASSERT_EQ(ids->GetElementCount(), expected.size());
     EXPECT_TRUE(std::equal(expected.begin(), expected.end(), ids->GetData<int32_t>()));
     MediaStore image_store{model, 512 * 1024 * 1024, 2 * 1024 * 1024};
-    const auto raw_images = model->vision_->processor->tokenizer_->Encode(image_prompt.c_str());
-    auto planned_images = image_store.Prepare(image_prompt, raw_images, images.get(), 0, 4096);
+    auto planned_images = image_store.Prepare(image_prompt, images.get(), 0, 4096);
     EXPECT_EQ(planned_images.tokens, expected);
     ASSERT_EQ(planned_images.media.size(), image_grids.size());
     Images metadata_only{{}, images->num_images_, images->info_};
-    EXPECT_THROW(image_store.Prepare(image_prompt, raw_images, &metadata_only, 0, expected.size()),
+    EXPECT_THROW(image_store.Prepare(image_prompt, &metadata_only, 0, expected.size()),
                  std::invalid_argument);
     std::swap(images->info_[0].width, images->info_[0].height);
-    EXPECT_THROW(image_store.Prepare(image_prompt, raw_images, images.get(), 0, 4096), std::runtime_error);
+    EXPECT_THROW(image_store.Prepare(image_prompt, images.get(), 0, 4096), std::runtime_error);
     std::swap(images->info_[0].width, images->info_[0].height);
   }
   MediaStore store{model, 512 * 1024 * 1024, 2 * 1024 * 1024};
@@ -94,16 +93,16 @@ TEST(MediaInputsTest, RealQwenVideoCanonicalOrderAndEncoderInputs) {
   std::fill(rgb.begin(), rgb.end(), 0);
   const std::string prompt = "<|vision_start|><|video_pad|><|vision_end|>Which color appears first?";
   const auto raw = tokenizer.Encode(prompt.c_str());
-  auto prepared = store.Prepare(prompt, raw, nullptr, 0, 4096, videos.get());
+  auto prepared = store.Prepare(prompt, nullptr, 0, 4096, videos.get());
   ASSERT_EQ(prepared.media.size(), 2u);
   store.Identify(prepared, 0, {});
   store.ReserveItems(prepared.media.size());
   store.Retain(prepared.media);
-  auto identical = store.Prepare(prompt, raw, nullptr, 0, 4096, videos.get());
+  auto identical = store.Prepare(prompt, nullptr, 0, 4096, videos.get());
   identical.media[0].positions = MakeQwenVisionPosition({1, 4, 6}, 2);
   store.Identify(identical, 0, {});
   EXPECT_EQ(identical.media[0].prefix, prepared.media[0].prefix);
-  auto changed_positions = store.Prepare(prompt, raw, nullptr, 0, 4096, videos.get());
+  auto changed_positions = store.Prepare(prompt, nullptr, 0, 4096, videos.get());
   changed_positions.media[0].positions = MakeQwenVisionPosition({1, 6, 4}, 2);
   store.Identify(changed_positions, 0, {});
   EXPECT_EQ(changed_positions.media[0].item, prepared.media[0].item);
@@ -150,7 +149,7 @@ TEST(MediaInputsTest, RealQwenVideoCanonicalOrderAndEncoderInputs) {
     const auto accounting = prepared.storage->accounting;
     const auto retained_bytes = accounting->host_bytes;
     {
-      auto reused = store.Prepare(prompt, raw, nullptr, 0, 4096, videos.get());
+      auto reused = store.Prepare(prompt, nullptr, 0, 4096, videos.get());
       EXPECT_EQ(reused.media[0].item, item);
       EXPECT_GT(accounting->host_bytes, retained_bytes);
     }
@@ -161,7 +160,7 @@ TEST(MediaInputsTest, RealQwenVideoCanonicalOrderAndEncoderInputs) {
     MediaStore eviction_store{model, host_limit, 2 * 1024 * 1024};
     std::shared_ptr<MediaAccounting> accounting;
     {
-      auto cached = eviction_store.Prepare(prompt, raw, nullptr, 0, 4096, videos.get());
+      auto cached = eviction_store.Prepare(prompt, nullptr, 0, 4096, videos.get());
       eviction_store.Identify(cached, 0, {});
       accounting = cached.storage->accounting;
       const auto before_growth = accounting->host_bytes;
@@ -188,10 +187,12 @@ TEST(MediaInputsTest, RealQwenVideoCanonicalOrderAndEncoderInputs) {
       };
       explicit InvalidPlan(std::unique_ptr<VisionPreparation> processor) : processor{std::move(processor)} {}
       size_t Estimate(const VisionPreparationInput& input, size_t limit) const override {
+        if (failure == 10) return limit + 1;
         return processor->Estimate(input, limit);
       }
       std::unique_ptr<const VisionPlan> Plan(const Tokenizer& tokenizer,
                                              const VisionPreparationInput& input, size_t limit) const override {
+        planned = true;
         const auto original = processor->Plan(tokenizer, input, limit);
         auto plan = std::make_unique<VisionPlan>(*original);
         switch (failure) {
@@ -220,6 +221,9 @@ TEST(MediaInputsTest, RealQwenVideoCanonicalOrderAndEncoderInputs) {
                                                            : 0);
             break;
           }
+          case 8:
+            plan->tokens[0] = -1;
+            break;
         }
         return plan;
       }
@@ -233,24 +237,30 @@ TEST(MediaInputsTest, RealQwenVideoCanonicalOrderAndEncoderInputs) {
       std::array<int64_t, 2> CoordinateRange() const override { return processor->CoordinateRange(); }
       std::unique_ptr<VisionPreparation> processor;
       int failure{};
+      mutable bool planned{};
       mutable bool materialized{};
     };
     auto invalid = std::make_unique<InvalidPlan>(std::move(model->vision_->preparation));
     auto* probe = invalid.get();
     model->vision_->preparation = std::move(invalid);
-    for (int failure = 0; failure < 8; ++failure) {
+    for (int failure = 0; failure < 9; ++failure) {
       probe->failure = failure;
       probe->materialized = false;
-      EXPECT_THROW(store.Prepare(prompt, raw, nullptr, 0, 4096, videos.get()), std::invalid_argument);
+      EXPECT_THROW(store.Prepare(prompt, nullptr, 0, 4096, videos.get()), std::invalid_argument);
       EXPECT_FALSE(probe->materialized) << "failure=" << failure;
     }
-    probe->failure = 8;
+    probe->failure = 9;
     const std::array<MediaSpan, 1> invalid_history{{
         {0, item, std::make_shared<InvalidPlan::PositionProbe>(item->rows, probe->CoordinateRange()[1] + 1, 0)},
     }};
-    EXPECT_THROW(store.Prepare(prompt, raw, nullptr, item->rows, 4096 - item->rows,
+    EXPECT_THROW(store.Prepare(prompt, nullptr, item->rows, 4096 - item->rows,
                                videos.get(), invalid_history),
                  std::invalid_argument);
+    EXPECT_FALSE(probe->materialized);
+    probe->failure = 10;
+    probe->planned = false;
+    EXPECT_THROW(store.Prepare(prompt, nullptr, 0, 4096, videos.get()), std::runtime_error);
+    EXPECT_FALSE(probe->planned);
     EXPECT_FALSE(probe->materialized);
     model->vision_->preparation = std::move(probe->processor);
   }
@@ -320,7 +330,7 @@ TEST(MediaInputsTest, RealQwenVideoCanonicalOrderAndEncoderInputs) {
     }
     const std::array<std::span<const OrtxFrame>, 1> swapped_clips{swapped};
     auto swapped_videos = LoadVideosFromFrames(swapped_clips);
-    auto swapped_turn = store.Prepare(prompt, raw, nullptr, 0, 4096, swapped_videos.get());
+    auto swapped_turn = store.Prepare(prompt, nullptr, 0, 4096, swapped_videos.get());
     ASSERT_EQ(swapped_turn.media.size(), prepared.media.size());
     const auto& name = model->config_->model.vision.inputs.pixel_values;
     for (size_t group = 0; group < prepared.media.size(); ++group) {
@@ -340,7 +350,7 @@ TEST(MediaInputsTest, RealQwenVideoCanonicalOrderAndEncoderInputs) {
   auto ordered = LoadVideosFromFrames(ordered_clips);
   const std::string mixed_prompt =
       "<|vision_start|><|video_pad|><|vision_end|><|vision_start|><|video_pad|><|vision_end|>";
-  auto mixed = store.Prepare(mixed_prompt, tokenizer.Encode(mixed_prompt.c_str()), nullptr, 0, 4096, ordered.get());
+  auto mixed = store.Prepare(mixed_prompt, nullptr, 0, 4096, ordered.get());
   ASSERT_EQ(mixed.media.size(), 4u);
   EXPECT_EQ(mixed.media[0].item, prepared.media[0].item);
   EXPECT_EQ(mixed.media[1].item, prepared.media[1].item);
@@ -349,16 +359,15 @@ TEST(MediaInputsTest, RealQwenVideoCanonicalOrderAndEncoderInputs) {
 
   std::string long_prompt = prompt;
   for (size_t index = 0; index < 500; ++index) long_prompt += " abc";
-  const auto long_tokens = tokenizer.Encode(long_prompt.c_str());
   MediaStore empty_budget{model, 2500000, 2 * 1024 * 1024};
-  EXPECT_NO_THROW(empty_budget.Prepare(long_prompt, long_tokens, nullptr, 0, 4096, videos.get()));
+  EXPECT_NO_THROW(empty_budget.Prepare(long_prompt, nullptr, 0, 4096, videos.get()));
   MediaStore retained_budget{model, 2500000, 2 * 1024 * 1024};
-  auto retained = retained_budget.Prepare(prompt, raw, nullptr, 0, 4096, videos.get());
+  auto retained = retained_budget.Prepare(prompt, nullptr, 0, 4096, videos.get());
   retained_budget.ReserveItems(retained.media.size());
   retained_budget.Retain(retained.media);
-  EXPECT_THROW(retained_budget.Prepare(long_prompt, long_tokens, nullptr, 0, 4096, videos.get()),
+  EXPECT_THROW(retained_budget.Prepare(long_prompt, nullptr, 0, 4096, videos.get()),
                std::runtime_error);
-  auto recovered = retained_budget.Prepare(prompt, raw, nullptr, 0, 4096, videos.get());
+  auto recovered = retained_budget.Prepare(prompt, nullptr, 0, 4096, videos.get());
   ASSERT_EQ(recovered.media.size(), retained.media.size());
   EXPECT_EQ(recovered.media[0].item, retained.media[0].item);
   EXPECT_EQ(recovered.media[1].item, retained.media[1].item);
@@ -407,7 +416,7 @@ TEST(MediaInputsTest, RealQwenVideoCanonicalOrderAndEncoderInputs) {
   MediaStore image_only{model, 512 * 1024 * 1024, 2 * 1024 * 1024};
   const auto video_marker = tokenizer.Encode("<|video_pad|>");
   EXPECT_THROW(image_only.ValidateTextTokens(video_marker), std::invalid_argument);
-  EXPECT_THROW(image_only.Prepare("<|video_pad|>", video_marker, nullptr, 0, 4096), std::invalid_argument);
+  EXPECT_THROW(image_only.Prepare("<|video_pad|>", nullptr, 0, 4096), std::invalid_argument);
   const std::array<int32_t, 1> ordinary_zero{0};
   EXPECT_NO_THROW(image_only.ValidateTextTokens(ordinary_zero));
 }

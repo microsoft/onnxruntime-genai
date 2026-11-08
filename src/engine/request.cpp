@@ -179,16 +179,29 @@ RequestTurnAdmission::~RequestTurnAdmission() = default;
 void Request::ValidateTurnAdmission(
     std::span<const int32_t> tokens,
     const TurnOptions& options) const {
+  ValidateTurnState(options);
+  if (tokens.empty()) {
+    throw std::runtime_error(
+        "Expected at least one input token for generation. Received 0.");
+  }
+  const size_t sequence_length =
+      IsAwaitingFirstTurn() ? 0 : static_cast<size_t>(CurrentSequenceLength());
+  if (std::any_of(tokens.begin(), tokens.end(), [](int32_t token) { return token < 0; }))
+    throw std::invalid_argument("Prompt tokens must be nonnegative vocabulary IDs.");
+  ValidateAppendLength(max_session_tokens_, sequence_length, tokens.size());
+  if (tokens_host_.capacity() < tokens_host_.size() + tokens.size()) {
+    throw std::logic_error(
+        "The request host token mirror does not have reserved turn capacity.");
+  }
+}
+
+void Request::ValidateTurnState(const TurnOptions& options) const {
   // The single place a zero turn maximum is rejected. The C API's setter treats zero as "unset",
   // so this only fires for a direct in-process TurnOptions that asked for a turn generating
   // nothing; ValidateTurnPolicy() deliberately does not repeat the check.
   if (options.max_generated_tokens && *options.max_generated_tokens == 0) {
     throw std::runtime_error(
         "max_generated_tokens (0) must be greater than zero.");
-  }
-  if (tokens.empty()) {
-    throw std::runtime_error(
-        "Expected at least one input token for generation. Received 0.");
   }
   if (turn_id_exhausted_) {
     throw std::overflow_error(
@@ -202,16 +215,6 @@ void Request::ValidateTurnAdmission(
     }
     throw std::runtime_error(
         "BeginTurn is only valid for a new request or after the current turn is complete.");
-  }
-
-  const size_t sequence_length =
-      first_turn ? 0 : static_cast<size_t>(CurrentSequenceLength());
-  if (std::any_of(tokens.begin(), tokens.end(), [](int32_t token) { return token < 0; }))
-    throw std::invalid_argument("Prompt tokens must be nonnegative vocabulary IDs.");
-  ValidateAppendLength(max_session_tokens_, sequence_length, tokens.size());
-  if (tokens_host_.capacity() < tokens_host_.size() + tokens.size()) {
-    throw std::logic_error(
-        "The request host token mirror does not have reserved turn capacity.");
   }
 }
 

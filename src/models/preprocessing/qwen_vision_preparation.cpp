@@ -205,13 +205,13 @@ size_t QwenVisionPreparation::Estimate(const VisionPreparationInput& input, size
   if (metadata.VideoCount() && !videos_)
     throw std::invalid_argument("This package has no supported video preprocessing contract.");
   if (!metadata.VideoCount() && video_token_ &&
-      std::find(input.raw_tokens.begin(), input.raw_tokens.end(), video_token_) != input.raw_tokens.end())
+      input.prompt.find("<|video_pad|>") != std::string::npos)
     throw std::invalid_argument("Video markers require ordered video inputs.");
-  if (input.raw_tokens.empty() || input.raw_tokens.size() > input.remaining_rows)
-    throw std::invalid_argument("The formatted turn does not fit the remaining session rows.");
+  if (input.prompt.empty())
+    throw std::runtime_error("Expected at least one input token for generation. Received 0.");
   if (!metadata.ImageCount() && !metadata.VideoCount()) {
-    QwenMediaPromptBytes(input.prompt, metadata, merge, std::numeric_limits<size_t>::max());
-    return 0;
+    const auto bytes = QwenMediaPromptBytes(input.prompt, metadata, merge, std::numeric_limits<size_t>::max());
+    return Add(1024, Multiply(Add(bytes, 1), 128));
   }
   size_t estimate = 0, units = 0, rows = 0, maximum_image_patches = 0;
   const auto patch_bytes = Multiply(static_cast<size_t>(pixel_width_), 2 * sizeof(float) + 2 * Ort::SizeOf(pixel_type_));
@@ -243,7 +243,7 @@ size_t QwenVisionPreparation::Estimate(const VisionPreparationInput& input, size
   if (rows >= input.remaining_rows)
     throw std::invalid_argument("Expanded media rows exceed the remaining session capacity.");
   const auto prompt_bytes = QwenMediaPromptBytes(input.prompt, metadata, merge, host_limit);
-  estimate = Add(estimate, Add(Add(prompt_bytes, 1), Multiply(Add(input.raw_tokens.size(), prompt_bytes), 128)));
+  estimate = Add(estimate, Add(Add(prompt_bytes, 1), Multiply(Add(prompt_bytes, 1), 128)));
   const auto& names = config_.model.vision.inputs;
   estimate = Add(estimate, Multiply(units, Add(1024, Multiply(Add(names.pixel_values.size(), names.image_grid_thw.size()), 4))));
   return estimate;
@@ -259,7 +259,7 @@ std::unique_ptr<const VisionPlan> QwenVisionPreparation::Plan(const Tokenizer& t
   plan->images = input.images;
   plan->videos = input.videos;
   if (!metadata.ImageCount() && !metadata.VideoCount()) {
-    plan->tokens.assign(input.raw_tokens.begin(), input.raw_tokens.end());
+    plan->tokens = tokenizer.Encode(input.prompt.c_str());
     return plan;
   }
   for (size_t image = 0; image < metadata.ImageCount(); ++image)

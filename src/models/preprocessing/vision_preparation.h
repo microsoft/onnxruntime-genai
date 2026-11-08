@@ -17,7 +17,6 @@ struct Tokenizer;
 
 struct VisionPreparationInput {
   const std::string& prompt;
-  std::span<const int32_t> raw_tokens;
   const Images* images;
   const Videos* videos;
   size_t remaining_rows;

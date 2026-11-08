@@ -203,6 +203,7 @@ struct Request : std::enable_shared_from_this<Request>,
   void ValidateTurnAdmission(
       std::span<const int32_t> tokens,
       const TurnOptions& options) const;
+  void ValidateTurnState(const TurnOptions& options) const;
   void ValidateContinuousDecodingSupport() const;
   void PrepareTurnAdmission(
       std::span<const int32_t> tokens,

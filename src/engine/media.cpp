@@ -311,18 +311,23 @@ void MediaStore::ValidateTextTokens(std::span<const int32_t> tokens) const {
   model_->vision_->preparation->ValidateTextTokens(tokens);
 }
 
-PreparedMediaTurn MediaStore::Prepare(const std::string& prompt, std::span<const int32_t> raw_tokens,
-                                      const Images* images, size_t first_row, size_t remaining_rows,
+PreparedMediaTurn MediaStore::Prepare(const std::string& prompt, const Images* images, size_t first_row, size_t remaining_rows,
                                       const Videos* videos, std::span<const MediaSpan> history) {
-  const VisionPreparationInput input{prompt, raw_tokens, images, videos, remaining_rows};
+  const VisionPreparationInput input{prompt, images, videos, remaining_rows};
   const auto& processor = *model_->vision_->preparation;
   const auto estimate = processor.Estimate(input, host_limit_);
   MakeHostRoom(estimate);
   accounting_->host_bytes += estimate;
   HostReservation reservation{accounting_, estimate};
   const auto plan = processor.Plan(*model_->vision_->processor->tokenizer_, input, host_limit_);
-  if (!plan || plan->tokens.empty() || plan->tokens.size() >= remaining_rows)
+  if (!plan)
+    throw std::logic_error("Media preparation omitted its resolved plan.");
+  if (plan->tokens.empty())
+    throw std::runtime_error("Expected at least one input token for generation. Received 0.");
+  if (plan->tokens.size() >= remaining_rows)
     throw std::invalid_argument("Expanded media tokens exceed the remaining session capacity.");
+  if (std::any_of(plan->tokens.begin(), plan->tokens.end(), [](int32_t token) { return token < 0; }))
+    throw std::invalid_argument("Prompt tokens must be nonnegative vocabulary IDs.");
   std::vector<std::shared_ptr<MediaItem>> units;
   units.reserve(plan->units.size());
   const auto input_count = model_->vision_->session_info.GetInputNames().size();
@@ -358,14 +363,12 @@ PreparedMediaTurn MediaStore::Prepare(const std::string& prompt, std::span<const
     previous_end = AddBytes(span.start, span.rows);
   }
   ValidateCoordinates(result.media, first_row, remaining_rows, history, processor.CoordinateRange());
-  if (!result.media.empty()) {
-    result.storage = TransferHost(AddBytes(MultiplyBytes(result.tokens.capacity(), sizeof(int32_t)),
-                                           MultiplyBytes(result.media.capacity(), sizeof(MediaSpan))),
-                                  reservation.bytes);
-    for (auto& span : result.media)
-      if (span.positions)
-        span.position_storage = TransferHost(span.positions->SizeBytes(), reservation.bytes);
-  }
+  result.storage = TransferHost(AddBytes(MultiplyBytes(result.tokens.capacity(), sizeof(int32_t)),
+                                         MultiplyBytes(result.media.capacity(), sizeof(MediaSpan))),
+                                reservation.bytes);
+  for (auto& span : result.media)
+    if (span.positions)
+      span.position_storage = TransferHost(span.positions->SizeBytes(), reservation.bytes);
   auto feeds = processor.Materialize(*plan);
   if (feeds.size() != units.size())
     throw std::runtime_error("Media materialization omitted an encoder unit.");
