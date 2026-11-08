@@ -126,7 +126,7 @@ void Logits::Update(const DeviceSpan<int32_t>& next_tokens, size_t new_kv_length
     std::vector<int32_t> indices(batch_beams, validate_padding ? 0 : static_cast<int32_t>(selected_length - 1));
     if (validate_padding) {
       auto token_span = next_tokens;
-      auto tokens = token_span.CopyDeviceToCpu();
+      auto tokens = token_span.CopyDeviceRangeToCpu();
       const size_t rows = tokens.size() / new_kv_length;
       if (tokens.size() % new_kv_length || (rows != batch_size && rows != batch_beams))
         throw std::invalid_argument("Last-token indices require batch or batch-beam token rows");

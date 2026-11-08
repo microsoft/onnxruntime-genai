@@ -12,6 +12,7 @@
 #include "generator/generators.h"
 #include "models/model.h"
 #include "models/io/logits.h"
+#include "models/speculative_decoding.h"
 #include "ort_genai.h"
 #include "test_utils.h"
 
@@ -33,6 +34,193 @@ class ForcedTokensProcessor final : public ConstrainedLogitsProcessor {
  private:
   std::vector<int32_t> tokens_;
 };
+
+std::vector<float> CacheValues(State& state) {
+  auto* cache = state.GetOutput("present.0.key");
+  if (!cache)
+    return {};
+  auto values = WrapTensor<float>(*state.model_.p_device_kvcache_, *cache).CopyDeviceToCpu();
+  return {values.begin(), values.end()};
+}
+
+void AppendPrompt(Generator& generator, const std::vector<int32_t>& tokens, bool device) {
+  if (!device) {
+    generator.AppendTokens(tokens);
+    return;
+  }
+  auto input = generator.model_->p_device_->Allocate<int32_t>(tokens.size());
+  std::copy(tokens.begin(), tokens.end(), input.CpuSpan().begin());
+  input.CopyCpuToDevice();
+  generator.AppendTokens(input);
+}
+
+TEST(GeneratorPromptValidationTest, ChecksBothSpeculativeChildrenBeforeMutation) {
+  for (const auto& [target, draft] :
+       {std::pair{"full.onnx", "pruned.onnx"}, std::pair{"pruned.onnx", "full.onnx"},
+        std::pair{"pruned.onnx", "pruned.onnx"}}) {
+    for (bool device : {false, true}) {
+      for (bool continued : {false, true}) {
+        SCOPED_TRACE(testing::Message() << target << "/" << draft << " device=" << device
+                                        << " continued=" << continued);
+        auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "last-token-generation");
+        config->model.pad_token_id = 0;
+        config->model.decoder.filename = target;
+#if USE_CUDA
+        if (device) {
+          ClearProviders(*config);
+          SetProviderOption(*config, "cuda", {}, {});
+        }
+#endif
+        config->model.draft = config->model.decoder;
+        config->model.draft->filename = draft;
+        auto model = CreateModel(GetOrtEnv(), std::move(config));
+        auto params = std::make_shared<GeneratorParams>(*model);
+        auto generator = std::make_unique<Generator>(*model, *params);
+        auto& state = static_cast<SpeculativeDecodingState&>(*generator->state_);
+        if (continued)
+          generator->AppendTokens(std::vector<int32_t>{1, 1, 1, 1});
+        const auto length = generator->GetSequence(0).size();
+        const auto target_cache = CacheValues(state.target_state());
+        const auto draft_cache = CacheValues(state.draft_state());
+        EXPECT_THROW(AppendPrompt(*generator, {0, 0}, device), std::invalid_argument);
+        EXPECT_EQ(generator->GetSequence(0).size(), length);
+        EXPECT_EQ(CacheValues(state.target_state()), target_cache);
+        EXPECT_EQ(CacheValues(state.draft_state()), draft_cache);
+        ASSERT_NO_THROW(AppendPrompt(*generator, {1, 1}, device));
+        EXPECT_EQ(generator->GetSequence(0).size(), length + 2);
+        EXPECT_EQ(CacheValues(state.target_state()).size(), length + 2);
+        EXPECT_EQ(CacheValues(state.draft_state()).size(), length + 2);
+      }
+    }
+  }
+}
+
+TEST(GeneratorPromptValidationTest, ChecksPhysicalFinalSlidingWindowBeforeMutation) {
+  for (const auto* alignment : {"left", "right"}) {
+    for (bool device : {false, true}) {
+      for (bool continued : {false, true}) {
+        SCOPED_TRACE(testing::Message() << alignment << " device=" << device << " continued=" << continued);
+        auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "last-token-generation");
+        config->model.pad_token_id = 0;
+        OverlayConfig(*config, R"({"model":{"type":"decoder-pipeline","decoder":{"pipeline":[{"decoder":{
+          "filename":"pruned.onnx",
+          "inputs":["input_ids","attention_mask","position_ids","past_key_values.0.key","past_key_values.0.value","last_token_indices"],
+          "outputs":["logits","present.0.key","present.0.value"]
+        }}]}}})");
+        auto& window = config->model.decoder.sliding_window.emplace();
+        window.window_size = 4;
+        window.alignment = alignment;
+        window.slide_inputs = true;
+        window.slide_key_value_cache = false;
+        auto model = CreateModel(GetOrtEnv(), std::move(config));
+        auto params = std::make_shared<GeneratorParams>(*model);
+        auto generator = std::make_unique<Generator>(*model, *params);
+        if (continued)
+          ASSERT_NO_THROW(generator->AppendTokens(std::vector<int32_t>{1, 1, 1, 1}));
+        const auto length = generator->GetSequence(0).size();
+        const auto cache = CacheValues(*generator->state_);
+        EXPECT_THROW(AppendPrompt(*generator, {1, 1, 1, 1, 0, 0, 0, 0}, device), std::invalid_argument);
+        EXPECT_EQ(generator->GetSequence(0).size(), length);
+        EXPECT_EQ(CacheValues(*generator->state_), cache);
+        if (!device && std::string_view{alignment} == "left")
+          EXPECT_THROW(AppendPrompt(*generator, {1, 1, 1, 1, 0}, false), std::invalid_argument);
+        EXPECT_EQ(generator->GetSequence(0).size(), length);
+        EXPECT_EQ(CacheValues(*generator->state_), cache);
+        ASSERT_NO_THROW(AppendPrompt(*generator, {1, 1, 1, 1}, device));
+        EXPECT_EQ(generator->GetSequence(0).size(), length + 4);
+      }
+    }
+  }
+}
+
+TEST(GeneratorPromptValidationTest, FinalPaddingRejectionPreservesThePipelineWindowCursor) {
+  {
+    auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "last-token-generation");
+    config->model.decoder.sliding_window.emplace().window_size = 4;
+    config->model.decoder.sliding_window->slide_inputs = true;
+    config->model.decoder.sliding_window->slide_key_value_cache = false;
+    auto model = CreateModel(GetOrtEnv(), std::move(config));
+    auto params = std::make_shared<GeneratorParams>(*model);
+    auto generator = std::make_unique<Generator>(*model, *params);
+    ASSERT_NO_THROW(AppendPrompt(*generator, {1, 1, 1}, true));
+    EXPECT_EQ(generator->GetSequence(0).size(), 3u);
+    EXPECT_NO_THROW(generator->GetLogits());
+  }
+  for (bool device : {false, true}) {
+    SCOPED_TRACE(testing::Message() << "device=" << device);
+    auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "last-token-generation");
+    OverlayConfig(*config, R"({"model":{"type":"decoder-pipeline","pad_token_id":0,"vocab_size":4,
+      "decoder":{"pipeline":[{"decoder":{"filename":"../engine/last-token-logits/pruned.onnx",
+        "inputs":["input_ids","last_token_indices"],"outputs":["logits"]}}]}}})");
+    auto& window = config->model.decoder.sliding_window.emplace();
+    window.window_size = 4;
+    window.slide_inputs = true;
+    window.slide_key_value_cache = false;
+    auto model = CreateModel(GetOrtEnv(), std::move(config));
+    auto params = std::make_shared<GeneratorParams>(*model);
+    auto generator = std::make_unique<Generator>(*model, *params);
+    ASSERT_NO_THROW(AppendPrompt(*generator, {1, 1, 1, 1, 2, 2, 2, 2}, device));
+    auto logits = generator->GetLogits().CopyDeviceToCpu();
+    EXPECT_EQ((std::vector<float>{logits.begin(), logits.end()}), (std::vector<float>{2, 2, 2, 2}));
+    EXPECT_THROW(AppendPrompt(*generator, {1, 1, 1, 1, 0, 0, 0, 0}, device), std::invalid_argument);
+    EXPECT_EQ(generator->GetSequence(0).size(), 8u);
+    ASSERT_NO_THROW(AppendPrompt(*generator, {3, 3, 3, 3}, device));
+    EXPECT_EQ(generator->GetSequence(0).size(), 12u);
+    logits = generator->GetLogits().CopyDeviceToCpu();
+    EXPECT_EQ((std::vector<float>{logits.begin(), logits.end()}), (std::vector<float>{3, 3, 3, 3}));
+  }
+}
+
+TEST(GeneratorPromptValidationTest, SinglePassQwenPrefillAcceptsTrailingPadding) {
+  for (const auto& [image, batch_size, beams] :
+       {std::tuple{true, 1, 1}, std::tuple{false, 1, 2}, std::tuple{false, 2, 1}, std::tuple{false, 2, 2}}) {
+    SCOPED_TRACE(testing::Message() << "image=" << image << " batch=" << batch_size << " beams=" << beams);
+    auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "last-token-generation");
+    OverlayConfig(*config, R"({"model":{
+        "type":"qwen3_vl","pad_token_id":0,"image_token_id":4,"vision_start_token_id":3,
+        "decoder":{"filename":"multimodal_decoder.onnx","inputs":{"inputs_embeds":"inputs_embeds"}},
+        "embedding":{"filename":"multimodal_embedding.onnx","inputs":{"input_ids":"input_ids","image_features":"image_features"},
+          "outputs":{"inputs_embeds":"inputs_embeds"}},
+        "vision":{"filename":"multimodal_vision.onnx","spatial_merge_size":1,
+          "inputs":{"pixel_values":"pixel_values","image_grid_thw":"image_grid_thw"},"outputs":{"image_features":"image_features"}}
+      }})");
+    auto model = CreateModel(GetOrtEnv(), std::move(config));
+    auto params = std::make_shared<GeneratorParams>(*model);
+    params->search.chunk_size = 2;
+    params->search.num_beams = beams;
+    params->search.batch_size = batch_size;
+    auto generator = std::make_unique<Generator>(*model, *params);
+    if (image) {
+      auto add = [&](std::string_view name, std::unique_ptr<OrtValue> value) {
+        auto tensor = std::make_shared<Tensor>(model->p_device_inputs_, value->GetTensorTypeAndShapeInfo()->GetElementType());
+        tensor->ort_tensor_ = std::move(value);
+        generator->extra_inputs_.push_back({std::string{name}, std::move(tensor)});
+      };
+      auto count = OrtValue::CreateTensor<int64_t>(model->allocator_cpu_, std::array<int64_t, 1>{1});
+      count->GetTensorMutableData<int64_t>()[0] = 1;
+      add(Config::Defaults::NumImageTokens, std::move(count));
+      auto grid = OrtValue::CreateTensor<int64_t>(model->allocator_cpu_, std::array<int64_t, 2>{1, 3});
+      std::fill_n(grid->GetTensorMutableData<int64_t>(), 3, 1);
+      add("image_grid_thw", std::move(grid));
+      auto pixels = OrtValue::CreateTensor<float>(model->allocator_cpu_, std::array<int64_t, 2>{1, 1});
+      pixels->GetTensorMutableData<float>()[0] = 0;
+      add("pixel_values", std::move(pixels));
+    }
+    std::vector<int32_t> prompt;
+    for (int batch = 0; batch < batch_size; ++batch) {
+      const auto row = image ? std::vector<int32_t>{3, 4, 1, 1, 0} : std::vector<int32_t>{1, 1, 1, 1, 0};
+      prompt.insert(prompt.end(), row.begin(), row.end());
+    }
+    ASSERT_NO_THROW(generator->AppendTokens(prompt));
+    EXPECT_EQ(generator->GetSequence(0).size(), 5u);
+    auto logits = generator->GetLogits().CopyDeviceToCpu();
+    ASSERT_EQ(logits.size(), static_cast<size_t>(batch_size * beams * 3));
+    for (int row = 0; row < batch_size * beams; ++row) {
+      EXPECT_FLOAT_EQ(logits[row * 3], image ? -9 : -4);
+      EXPECT_FLOAT_EQ(logits[row * 3 + 1], image ? 9 : 4);
+    }
+  }
+}
 
 TEST(ForcedTokenLogitsTest, SlidingWindowAlignmentExcludesOnlySyntheticPadding) {
   for (const auto* filename : {"full.onnx", "pruned.onnx"}) {
@@ -291,7 +479,7 @@ struct LogitsTestState : State {
 
 class RuntimeLastTokenLogitsTest : public testing::Test {
  protected:
-  void Initialize(const std::string& filename = "pruned.onnx", bool capture = false, int beams = 1) {
+  void Initialize(const std::string& filename = "pruned.onnx", bool capture = false, int beams = 1, int batch_size = 3) {
     model_ = CreateModel(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
     model_->config_->model.vocab_size = 4;
     session_ = model_->CreateSession(
@@ -299,7 +487,7 @@ class RuntimeLastTokenLogitsTest : public testing::Test {
     model_->session_info_ = SessionInfo{};
     model_->session_info_.Add(*session_);
     params_ = std::make_shared<GeneratorParams>(*model_);
-    params_->search.batch_size = 3;
+    params_->search.batch_size = batch_size;
     params_->search.num_beams = beams;
     params_->use_graph_capture = capture;
     state_ = std::make_unique<LogitsTestState>(*params_, *model_);
@@ -385,6 +573,67 @@ TEST_F(RuntimeLastTokenLogitsTest, RejectsInvalidBatchBeamDimensionsBeforeAlloca
 }
 
 #if USE_CUDA
+struct DownloadRecorder final : DeviceBuffer {
+  explicit DownloadRecorder(std::shared_ptr<DeviceBuffer> source) : source_{std::move(source)} {
+    p_device_ = source_->p_device_;
+    size_in_bytes_ = source_->size_in_bytes_;
+  }
+  const char* GetType() const override { return source_->GetType(); }
+  void AllocateCpu() override {
+    source_->AllocateCpu();
+    p_cpu_ = source_->p_cpu_;
+  }
+  void CopyDeviceToCpu() override {
+    whole_bytes += size_in_bytes_;
+    source_->CopyDeviceToCpu();
+    p_cpu_ = source_->p_cpu_;
+  }
+  void CopyDeviceRangeToCpu(size_t begin_bytes, size_t bytes) override {
+    range_bytes += bytes;
+    ++range_calls;
+    source_->CopyDeviceRangeToCpu(begin_bytes, bytes);
+    p_cpu_ = source_->p_cpu_;
+  }
+  void CopyCpuToDevice() override { source_->CopyCpuToDevice(); }
+  void CopyFrom(size_t dest, DeviceBuffer& source, size_t offset, size_t bytes) override {
+    source_->CopyFrom(dest, source, offset, bytes);
+  }
+  void Zero() override { source_->Zero(); }
+  std::shared_ptr<DeviceBuffer> source_;
+  size_t whole_bytes{}, range_bytes{}, range_calls{};
+};
+
+TEST_F(RuntimeLastTokenLogitsTest, ChunkedCudaSelectionDownloadsOnly512KiBForA128KPrompt) {
+  Initialize("pruned.onnx", false, 1, 1);
+  logits_->Add();
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
+  ClearProviders(*config);
+  SetProviderOption(*config, "cuda", {}, {});
+  auto cuda_model = CreateModel(GetOrtEnv(), std::move(config));
+  constexpr size_t prompt = 128 * 1024;
+  constexpr size_t chunk = 2 * 1024;
+  auto device_tokens = cuda_model->p_device_->Allocate<int32_t>(prompt);
+  std::fill(device_tokens.CpuSpan().begin(), device_tokens.CpuSpan().end(), 1);
+  device_tokens.CopyCpuToDevice();
+  device_tokens.CopyDeviceToCpu();
+  auto buffer = std::make_shared<DownloadRecorder>(device_tokens.BackingBuffer());
+  auto* recorder = buffer.get();
+  DeviceSpan<int32_t> tokens{std::move(buffer)};
+  for (size_t offset = 0; offset < prompt; offset += chunk)
+    tokens.subspan(offset, chunk).CopyDeviceToCpu();
+  EXPECT_EQ(recorder->whole_bytes, 32u * 1024 * 1024);
+  recorder->whole_bytes = 0;
+  std::fill(device_tokens.CpuSpan().begin(), device_tokens.CpuSpan().end(), 0);
+  State::PromptInputScope prompt_scope(*state_, true);
+  for (size_t offset = 0; offset < prompt; offset += chunk) {
+    logits_->Update(tokens.subspan(offset, chunk), chunk, false, offset + chunk == prompt);
+    EXPECT_EQ(state_->inputs_[1]->GetTensorData<int32_t>()[0], static_cast<int32_t>(chunk - 1));
+  }
+  EXPECT_EQ(recorder->whole_bytes, 0u);
+  EXPECT_EQ(recorder->range_bytes, 512u * 1024);
+  EXPECT_EQ(recorder->range_calls, 64u);
+}
+
 TEST_F(RuntimeLastTokenLogitsTest, DeviceTokensDoNotReadAnUnpopulatedHostMirror) {
   Initialize();
   logits_->Add();

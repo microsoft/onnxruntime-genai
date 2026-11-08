@@ -93,6 +93,7 @@ struct State {
   virtual void SetRunOption(const char* key, const char* value);
   void SetRunOptions(const Config::RunOptions& config_run_options);
   virtual void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {}
+  virtual size_t GetPromptChunkSize(const std::vector<ExtraInput>* /*pending_inputs*/ = nullptr) const { return 0; }
 
   // Generator::AppendTokens calls DiscardNextLogits before it runs the last generated token only to bring
   // the state up to date, and StartTurn before it runs the appended tokens. Default no-op.

@@ -39,6 +39,7 @@ struct DeviceBuffer : std::enable_shared_from_this<DeviceBuffer> {
 
   virtual void AllocateCpu() = 0;      // Allocates p_cpu_ if necessary (using appropriate memory type for interop)
   virtual void CopyDeviceToCpu() = 0;  // Allocates p_cpu_ if necessary and copies p_device_ memory into it
+  virtual void CopyDeviceRangeToCpu(size_t /*begin_bytes*/, size_t /*size_in_bytes*/) { CopyDeviceToCpu(); }
   virtual void CopyCpuToDevice() = 0;
   // Uploads only [begin_bytes, begin_bytes + size_in_bytes) of the CPU memory. Backends without a ranged
   // upload fall back to uploading the whole buffer, which contains that range.
@@ -93,6 +94,11 @@ struct DeviceSpan {
   // Copy device memory to CPU memory and return the CPU accessible memory
   std::span<T> CopyDeviceToCpu() {
     p_device_memory_->CopyDeviceToCpu();
+    return std::span<T>{reinterpret_cast<T*>(p_device_memory_->p_cpu_) + begin_, length_};
+  }
+
+  std::span<T> CopyDeviceRangeToCpu() {
+    p_device_memory_->CopyDeviceRangeToCpu(begin_ * sizeof(T), length_ * sizeof(T));
     return std::span<T>{reinterpret_cast<T*>(p_device_memory_->p_cpu_) + begin_, length_};
   }
 
@@ -249,7 +255,8 @@ struct StateUpdateReplayDesc {
 // Version 20: Config gained memory budget/headroom settings; DeviceInterface gained sampler startup-byte sizing.
 // Version 21: State gained prompt-input origin tracking, which changed its data layout.
 // Version 22: State gained the alignment-padding selection extent.
-inline constexpr uint32_t kDeviceInterfaceVersion = 22;
+// Version 23: DeviceBuffer gained ranged downloads and State gained prompt-chunk eligibility.
+inline constexpr uint32_t kDeviceInterfaceVersion = 23;
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}

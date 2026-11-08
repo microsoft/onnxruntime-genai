@@ -46,6 +46,7 @@ struct DecoderOnly_State : State {
                         bool all_tokens_valid);
 
   void RewindTo(size_t index) override;
+  size_t GetPromptChunkSize(const std::vector<ExtraInput>* pending_inputs = nullptr) const override;
   void ValidateRewindTo(size_t index) const override;
 
   void SnapshotState(size_t position) override;

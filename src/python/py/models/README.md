@@ -396,7 +396,11 @@ Padding-only intermediate chunks are permitted when their logits are discarded;
 for ordinary prefills, each final prompt chunk must contain a non-padding token
 in every row, even when the chunk contains only one token. Prompt validation
 precedes sequence and cache mutation, so a rejected append leaves the generator
-usable. Generated tokens treat PAD-ID tokens as valid, and every token remains in
+usable. Validation checks both speculative child decoders and uses the decoder's
+actual chunking eligibility, including physical sliding-window alignment padding.
+Multimodal or batch-beam prefills that run in a single pass validate that whole pass.
+CUDA chunk selection downloads only the current token range, not the entire
+prompt allocation for each chunk. Generated tokens treat PAD-ID tokens as valid, and every token remains in
 the KV cache. Ordinary one-token decode does not download tokens to the CPU to
 validate padding. For left-aligned sliding-window guidance, an explicit selection extent
 excludes synthetic trailing padding without excluding genuine forced PAD tokens.
@@ -407,7 +411,7 @@ selection or legacy Phi-family rotary-cache replay; the runtime rejects those
 combinations. Exports without the reserved input retain their existing replay
 behavior. LongRoPE-specific enhancements are outside this feature's scope.
 
-These runtime changes require device-interface version 22. Rebuild the CUDA
+These runtime changes require device-interface version 23. Rebuild the CUDA
 add-on together with the runtime; older add-ons are rejected with an explicit
 version-mismatch error.
 

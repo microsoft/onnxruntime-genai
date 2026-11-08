@@ -673,7 +673,8 @@ void DecoderState::CropToAccepted(size_t new_length, size_t recurrent_position) 
 }
 
 void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int total_length, DeviceSpan<int32_t> beam_indices) {
-  int batch_size = static_cast<int>(inputs_embeds_.GetShape()[0]);
+  const int batch_size = IsPromptInput() ? params_->search.batch_size
+                                         : static_cast<int>(inputs_embeds_.GetShape()[0]);
   size_t new_length = next_tokens.size() / batch_size;
   if (decoder_input_ids_) decoder_input_ids_->Update(next_tokens);
   position_inputs_->Update(next_tokens, total_length, static_cast<int>(new_length));
@@ -770,6 +771,18 @@ void MultiModalPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extr
   }
 }
 
+size_t MultiModalPipelineState::GetPromptChunkSize(const std::vector<ExtraInput>* pending_inputs) const {
+  if (!is_prompt_)
+    return 0;
+  const auto image_tokens = pending_inputs ? GetNumImageTokens(*pending_inputs) : num_image_tokens_;
+  const auto audio_tokens = pending_inputs
+                                ? GetNumAudioTokens(*pending_inputs, model_.config_->model.speech.inputs.audio_sizes)
+                                : num_audio_tokens_;
+  return decoder_state_->SupportsPrefillChunking(image_tokens != 0 || audio_tokens != 0)
+             ? params_->search.chunk_size.value_or(0)
+             : 0;
+}
+
 DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
   State::PromptInputScope prompt_scope(*decoder_state_, IsPromptInput(), InputSelectionLength());
   // Pipeline state defines the pipeline of the execution of the models
@@ -793,11 +806,8 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
   // Prefill chunking (search.chunk_size): during the prompt stage the decoder can process the
   // prompt embeddings in several smaller runs to bound peak memory usage.
   const size_t num_tokens = next_tokens.size();
-  auto chunk_size = params_->search.chunk_size.value_or(0);
-  const bool has_multimodal_content = num_image_tokens_ != 0 || num_audio_tokens_ != 0;
-  const bool chunk_prefill =
-      is_prompt_ && chunk_size > 0 && num_tokens > chunk_size &&
-      decoder_state_->SupportsPrefillChunking(has_multimodal_content);
+  const auto chunk_size = is_prompt_ ? GetPromptChunkSize() : 0;
+  const bool chunk_prefill = chunk_size > 0 && num_tokens > chunk_size;
 
   if (chunk_prefill) {
     decoder_state_->PrepareEmbeddingsForPrefill(num_tokens);

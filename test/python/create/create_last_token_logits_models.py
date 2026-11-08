@@ -40,11 +40,15 @@ def create_model(path, *, pruned, indices_type=None):
     onnx.save_model(model, path)
 
 
-def create_generator_model(path, *, pruned):
+def create_generator_model(path, *, pruned, multimodal=False):
     inputs = [
-        helper.make_tensor_value_info("input_ids", TensorProto.INT64, ["batch", "sequence"]),
+        helper.make_tensor_value_info("inputs_embeds", TensorProto.FLOAT, ["batch", "sequence", 1])
+        if multimodal
+        else helper.make_tensor_value_info("input_ids", TensorProto.INT64, ["batch", "sequence"]),
         helper.make_tensor_value_info("attention_mask", TensorProto.INT64, ["batch", "total"]),
-        helper.make_tensor_value_info("position_ids", TensorProto.INT64, ["batch", "sequence"]),
+        helper.make_tensor_value_info(
+            "position_ids", TensorProto.INT64, [3, "batch", "sequence"] if multimodal else ["batch", "sequence"]
+        ),
         helper.make_tensor_value_info("past_key_values.0.key", TensorProto.FLOAT, ["batch", 1, "past", 1]),
         helper.make_tensor_value_info("past_key_values.0.value", TensorProto.FLOAT, ["batch", 1, "past", 1]),
     ]
@@ -53,18 +57,22 @@ def create_generator_model(path, *, pruned):
     constants = [
         helper.make_tensor("cache_axes", TensorProto.INT64, [2], [1, 3]),
         helper.make_tensor("reduce_axes", TensorProto.INT64, [3], [1, 2, 3]),
-        helper.make_tensor("sum_axis", TensorProto.INT64, [1], [1]),
+        helper.make_tensor("squeeze_axes", TensorProto.INT64, [2], [2, 3]),
         helper.make_tensor("sequence_axis", TensorProto.INT64, [], [1]),
         helper.make_tensor("logits_axis", TensorProto.INT64, [1], [2]),
         helper.make_tensor("zero", TensorProto.FLOAT, [], [0]),
     ]
+    if multimodal:
+        constants.append(helper.make_tensor("embedding_axis", TensorProto.INT64, [1], [2]))
     nodes = [
-        helper.make_node("Cast", ["input_ids"], ["tokens"], to=TensorProto.FLOAT),
+        helper.make_node("Squeeze", ["inputs_embeds", "embedding_axis"], ["tokens"])
+        if multimodal
+        else helper.make_node("Cast", ["input_ids"], ["tokens"], to=TensorProto.FLOAT),
         helper.make_node("Unsqueeze", ["tokens", "cache_axes"], ["new_keys"]),
         helper.make_node("Concat", ["past_key_values.0.key", "new_keys"], ["present.0.key"], axis=2),
         helper.make_node("Concat", ["past_key_values.0.value", "new_keys"], ["present.0.value"], axis=2),
-        helper.make_node("ReduceSum", ["past_key_values.0.key", "reduce_axes"], ["past_sum"], keepdims=0),
-        helper.make_node("Unsqueeze", ["past_sum", "sum_axis"], ["past_sum_column"]),
+        helper.make_node("ReduceSum", ["past_key_values.0.key", "reduce_axes"], ["past_sum"], keepdims=1),
+        helper.make_node("Squeeze", ["past_sum", "squeeze_axes"], ["past_sum_column"]),
         helper.make_node("CumSum", ["tokens", "sequence_axis"], ["token_sums"]),
         helper.make_node("Add", ["past_sum_column", "token_sums"], ["sum"]),
         helper.make_node("Neg", ["sum"], ["negative"]),
@@ -107,6 +115,44 @@ def create_generator_model(path, *, pruned):
     onnx.save_model(model, path)
 
 
+def create_multimodal_models(output):
+    create_generator_model(output / "multimodal_decoder.onnx", pruned=True, multimodal=True)
+    graphs = [
+        (
+            "multimodal_embedding.onnx",
+            [
+                helper.make_node("Cast", ["input_ids"], ["tokens"], to=TensorProto.FLOAT),
+                helper.make_node("Unsqueeze", ["tokens", "axis"], ["inputs_embeds"]),
+            ],
+            [
+                helper.make_tensor_value_info("input_ids", TensorProto.INT64, ["batch", "sequence"]),
+                helper.make_tensor_value_info("image_features", TensorProto.FLOAT, ["images", 1]),
+            ],
+            [helper.make_tensor_value_info("inputs_embeds", TensorProto.FLOAT, ["batch", "sequence", 1])],
+            [helper.make_tensor("axis", TensorProto.INT64, [1], [2])],
+        ),
+        (
+            "multimodal_vision.onnx",
+            [helper.make_node("Identity", ["feature"], ["image_features"])],
+            [
+                helper.make_tensor_value_info("pixel_values", TensorProto.FLOAT, ["patches", 1]),
+                helper.make_tensor_value_info("image_grid_thw", TensorProto.INT64, ["images", 3]),
+            ],
+            [helper.make_tensor_value_info("image_features", TensorProto.FLOAT, [1, 1])],
+            [helper.make_tensor("feature", TensorProto.FLOAT, [1, 1], [0])],
+        ),
+    ]
+    for filename, nodes, inputs, outputs, constants in graphs:
+        model = helper.make_model(
+            helper.make_graph(nodes, filename, inputs, outputs, constants),
+            opset_imports=[helper.make_opsetid("", 18)],
+            ir_version=9,
+            producer_name="onnxruntime-genai",
+        )
+        onnx.checker.check_model(model, full_check=True)
+        onnx.save_model(model, output / filename)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -129,6 +175,7 @@ def main():
     args.generation_output_dir.mkdir(parents=True, exist_ok=True)
     create_generator_model(args.generation_output_dir / "full.onnx", pruned=False)
     create_generator_model(args.generation_output_dir / "pruned.onnx", pruned=True)
+    create_multimodal_models(args.generation_output_dir)
 
 
 if __name__ == "__main__":

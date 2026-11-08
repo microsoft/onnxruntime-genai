@@ -229,6 +229,7 @@ struct MultiModalPipelineState : State {
   MultiModalPipelineState& operator=(const MultiModalPipelineState&) = delete;
 
   void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) override;
+  size_t GetPromptChunkSize(const std::vector<ExtraInput>* pending_inputs = nullptr) const override;
   void DiscardNextLogits() override { discard_next_logits_ = true; }
   void StartTurn() override { new_turn_ = true; }
 

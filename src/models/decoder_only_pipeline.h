@@ -61,6 +61,7 @@ struct DecoderOnlyPipelineState : State {
   DecoderOnlyPipelineState& operator=(const DecoderOnlyPipelineState&) = delete;
 
   void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) override;
+  size_t GetPromptChunkSize(const std::vector<ExtraInput>* pending_inputs = nullptr) const override;
 
   DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens,
                         DeviceSpan<int32_t> next_indices) override;

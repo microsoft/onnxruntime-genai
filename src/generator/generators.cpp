@@ -20,6 +20,7 @@
 #include "models/model.h"
 #include "models/model_type.h"
 #include "models/decoder_only.h"
+#include "models/speculative_decoding.h"
 #include "models/io/kv_cache.h"
 #include "models/io/logits.h"
 #include "models/io/position_inputs.h"
@@ -670,7 +671,7 @@ Generator::Generator(const Model& model, const GeneratorParams& params)
   guidance_logits_processor_ = CreateGuidanceLogitsProcessor(*state_);  // Could be nullptr if use_guidance (constrained decoding) is not used
 
   InitializePhi3RopeThreshold(params);
-  if ((rope_context_threshold_ || phi3_rope_threshold_) && model_->session_info_.HasInput("last_token_indices"))
+  if ((rope_context_threshold_ || phi3_rope_threshold_) && RequiresPromptValidation())
     throw std::runtime_error("Runtime last-token indices do not support rotary-cache replay");
   InitializeSamplingMethod(params);
   strategy_ = MakeDecodingStrategy(*this);
@@ -771,22 +772,52 @@ void Generator::ThrowIfAppendExceedsMaxLength(size_t input_ids_count) {
     throw std::runtime_error("input_ids size (" + std::to_string(input_ids_count) + ") + current sequence length (" + std::to_string(search_->GetSequenceLength()) + ") exceeds max length (" + std::to_string(state_->params_->search.max_length) + ")");
 }
 
-void Generator::ValidatePromptBeforeAppend(cpu_span<const int32_t> input_ids) const {
-  const auto batch_size = static_cast<size_t>(state_->params_->search.batch_size);
-  if (!model_->session_info_.HasInput("last_token_indices"))
+bool Generator::RequiresPromptValidation() const {
+  if (const auto* model = dynamic_cast<const SpeculativeDecodingModel*>(model_.get()))
+    return model->target_model().session_info_.HasInput("last_token_indices") ||
+           model->draft_model().session_info_.HasInput("last_token_indices");
+  return model_->session_info_.HasInput("last_token_indices");
+}
+
+void Generator::ValidatePromptBeforeAppend(cpu_span<const int32_t> input_ids, bool pad_to_window) const {
+  if (!RequiresPromptValidation())
     return;
-  if (input_ids.size() % batch_size)
-    throw std::invalid_argument("Last-token indices require complete prompt token rows");
-  std::span<const int32_t> validation_tokens = input_ids;
-  size_t sequence_length = input_ids.size() / batch_size;
-  const auto& chunk_size = state_->params_->search.chunk_size;
-  if (search_->GetSequenceLength() == 0 && batch_size == 1 &&
-      chunk_size.has_value() && *chunk_size > 0 && sequence_length > *chunk_size) {
-    const size_t offset = (sequence_length - 1) / *chunk_size * *chunk_size;
-    validation_tokens = validation_tokens.subspan(offset, validation_tokens.size() - offset);
-    sequence_length -= offset;
+  const size_t physical_size = pad_to_window || model_->config_->model.type == "decoder-pipeline"
+                                   ? PaddedInputIdsSize(input_ids.size())
+                                   : input_ids.size();
+  std::vector<int32_t> padded;
+  if (physical_size != input_ids.size()) {
+    if (!pad_to_window)
+      throw std::invalid_argument("Windowed device prompts require complete padded windows");
+    padded.assign(physical_size, model_->config_->model.pad_token_id);
+    const auto& window = *model_->config_->model.decoder.sliding_window;
+    std::copy(input_ids.begin(), input_ids.end(),
+              padded.begin() + (window.alignment == "left" ? 0 : physical_size - input_ids.size()));
+    input_ids = padded;
   }
-  LastTokenIndices(validation_tokens, batch_size, 1, sequence_length, model_->config_->model.pad_token_id);
+
+  const auto validate = [&](const State& state) {
+    if (!state.model_.session_info_.HasInput("last_token_indices"))
+      return;
+    const auto batch_size = static_cast<size_t>(state.params_->search.batch_size);
+    if (input_ids.size() % batch_size)
+      throw std::invalid_argument("Last-token indices require complete prompt token rows");
+    std::span<const int32_t> validation_tokens = input_ids;
+    size_t sequence_length = input_ids.size() / batch_size;
+    const size_t chunk_size = state.GetPromptChunkSize(set_extra_inputs_ ? &extra_inputs_ : nullptr);
+    if (batch_size == 1 && chunk_size > 0 && sequence_length > chunk_size) {
+      const size_t offset = (sequence_length - 1) / chunk_size * chunk_size;
+      validation_tokens = validation_tokens.subspan(offset, validation_tokens.size() - offset);
+      sequence_length -= offset;
+    }
+    LastTokenIndices(validation_tokens, batch_size, 1, sequence_length, state.model_.config_->model.pad_token_id);
+  };
+  if (auto* state = dynamic_cast<SpeculativeDecodingState*>(state_.get())) {
+    validate(state->target_state());
+    validate(state->draft_state());
+  } else {
+    validate(*state_);
+  }
 }
 
 void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
@@ -805,7 +836,7 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
     throw std::runtime_error("Continuous decoding is not supported on the selected device type (" + to_string(state_->model_.p_device_kvcache_->GetType()) +
                              "). Please recreate the generator instance to avoid using continuous decoding.");
 
-  ValidatePromptBeforeAppend(input_ids);
+  ValidatePromptBeforeAppend(input_ids, true);
 
   std::string_view append_input_modality = transducer_state_ ? "audio" : "text";
   if (generation_telemetry_.BeginAppend()) {
@@ -871,8 +902,8 @@ void Generator::AppendTokens(DeviceSpan<int32_t> input_ids) {
   if (search_->GetSequenceLength() != 0 && state_->params_->search.batch_size > 1)
     throw std::runtime_error("AppendTokens can only be called once for batch_size > 1. To call AppendTokens again, use RewindToLength(0)");
 
-  if (model_->session_info_.HasInput("last_token_indices"))
-    ValidatePromptBeforeAppend(input_ids.CopyDeviceToCpu());
+  if (RequiresPromptValidation())
+    ValidatePromptBeforeAppend(input_ids.CopyDeviceRangeToCpu(), false);
 
   if (set_extra_inputs_) {
     state_->SetExtraInputs(extra_inputs_);

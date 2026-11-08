@@ -362,6 +362,11 @@ void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>
   }
 }
 
+size_t DecoderOnlyPipelineState::GetPromptChunkSize(const std::vector<ExtraInput>*) const {
+  const auto& window = model_.config_->model.decoder.sliding_window;
+  return window ? static_cast<size_t>(window->window_size) : 0;
+}
+
 DeviceSpan<float> DecoderOnlyPipelineState::Run(int total_length, DeviceSpan<int32_t>& next_tokens,
                                                 DeviceSpan<int32_t> next_indices) {
   DurationTrace trace{"DecoderOnlyPipelineState::Run"};
@@ -372,8 +377,8 @@ DeviceSpan<float> DecoderOnlyPipelineState::Run(int total_length, DeviceSpan<int
   // It is true only for the prompt processing part when the provided tokens are more than 1.
   first_run_ = next_tokens.size() > 1;
   size_t num_chunks{1};
-  if (first_run_ && model_.config_->model.decoder.sliding_window.has_value()) {
-    int window_size = model_.config_->model.decoder.sliding_window->window_size;
+  const auto window_size = first_run_ ? GetPromptChunkSize() : 0;
+  if (first_run_ && window_size) {
     num_chunks = (next_tokens.size() + window_size - 1) / window_size;
   }
 

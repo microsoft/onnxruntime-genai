@@ -338,11 +338,17 @@ struct GpuMemory final : DeviceBuffer {
   static constexpr size_t kKernelCopyMaxBytes = size_t{256} << 10;
 
   void CopyDeviceToCpu() override {
+    CopyDeviceRangeToCpu(0, size_in_bytes_);
+  }
+
+  void CopyDeviceRangeToCpu(size_t begin_bytes, size_t bytes) override {
+    assert(begin_bytes <= size_in_bytes_ && bytes <= size_in_bytes_ - begin_bytes);
     AllocateCpu();
-    if (size_in_bytes_ <= kKernelCopyMaxBytes) {
-      cuda::LaunchCopyBytes(p_cpu_, p_device_, size_in_bytes_, GetStream());
+    if (bytes <= kKernelCopyMaxBytes) {
+      cuda::LaunchCopyBytes(p_cpu_ + begin_bytes, p_device_ + begin_bytes, bytes, GetStream());
     } else {
-      CUDA_CHECK(::cudaMemcpyAsync(p_cpu_, p_device_, size_in_bytes_, ::cudaMemcpyDeviceToHost, GetStream()));
+      CUDA_CHECK(::cudaMemcpyAsync(p_cpu_ + begin_bytes, p_device_ + begin_bytes, bytes,
+                                   ::cudaMemcpyDeviceToHost, GetStream()));
     }
     CUDA_CHECK(::cudaStreamSynchronize(GetStream()));
     copy_to_device_pending_ = false;
