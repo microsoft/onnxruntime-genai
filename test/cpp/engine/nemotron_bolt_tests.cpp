@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 #include <array>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <cstring>
@@ -773,9 +774,36 @@ TEST(NemotronBoltGPU, SequentialGeneratorsResetAndPublicBoundaries) {
             bolt.drafter_model_->config_->model.decoder.shared_initializers.size());
   ASSERT_EQ(bolt.shared_initializer_entries_.size(),
             bolt.drafter_model_->shared_initializer_entries_.size());
-  for (size_t i = 0; i < bolt.shared_initializer_entries_.size(); ++i)
-    EXPECT_EQ(bolt.shared_initializer_entries_[i].get(),
-              bolt.drafter_model_->shared_initializer_entries_[i].get());
+  ASSERT_EQ(bolt.shared_initializer_entries_.size(),
+            bolt.drafter_model_->shared_initializer_entries_.size());
+  for (size_t i = 0; i < bolt.shared_initializer_entries_.size(); ++i) {
+    const auto& target = bolt.config_->model.decoder.shared_initializers[i];
+    const auto& draft = bolt.drafter_model_->config_->model.decoder.shared_initializers[i];
+    const auto target_path = bolt.config_->ResolvePath(target.data_file);
+    const auto draft_path = bolt.drafter_model_->config_->ResolvePath(draft.data_file);
+#ifdef _WIN32
+    const bool same_file = target_path.string() == draft_path.string();
+#else
+    const bool same_file = std::filesystem::equivalent(target_path, draft_path);
+#endif
+    const auto offset = [](const std::string& value) {
+      return value.empty() ? uint64_t{0} : std::stoull(value);
+    };
+    const auto& target_memory = bolt.p_device_->GetAllocator().GetInfo();
+    const auto& draft_memory = bolt.drafter_model_->p_device_->GetAllocator().GetInfo();
+    const bool same_region = same_file && offset(target.offset) == offset(draft.offset) &&
+                             std::stoull(target.length) == std::stoull(draft.length) &&
+                             target.data_type == draft.data_type && target.shape == draft.shape &&
+                             target_memory.GetDeviceType() == draft_memory.GetDeviceType() &&
+                             target_memory.GetDeviceId() == draft_memory.GetDeviceId();
+    // Split data files contain copies; registry sharing follows the source region, not equal values.
+    if (same_region)
+      EXPECT_EQ(bolt.shared_initializer_entries_[i].get(),
+                bolt.drafter_model_->shared_initializer_entries_[i].get());
+    else
+      EXPECT_NE(bolt.shared_initializer_entries_[i].get(),
+                bolt.drafter_model_->shared_initializer_entries_[i].get());
+  }
   // A real, non-thinking chat asking for a palindrome function. Length 35 also exercises a
   // three-row final prefill chunk and its nonzero recurrent/anchor row.
   const std::vector<int32_t> prompt{
