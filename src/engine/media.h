@@ -28,14 +28,12 @@ struct MediaAccounting {
 struct MediaItem {
   ~MediaItem();
 
-  std::array<int64_t, 3> grid;
-  std::shared_ptr<Tensor> pixels;
+  NamedTensors inputs;
   std::shared_ptr<Tensor> features;
   std::shared_ptr<MediaAccounting> accounting;
   size_t host_bytes{};
   size_t feature_bytes{};
   size_t rows{};
-  int32_t marker_token{};
   void ReleaseFeatures();
 };
 
@@ -110,7 +108,10 @@ class MediaStore {
   PreparedMediaTurn PrepareVideos(const std::string& prompt, std::span<const int32_t> raw_tokens,
                                   const Images* images, const Videos& videos, size_t first_row,
                                   size_t remaining_rows);
-  std::shared_ptr<MediaItem> Intern(const std::array<int64_t, 3>& grid, int32_t marker,
+  void ValidateInputs(const NamedTensors& inputs) const;
+  std::shared_ptr<MediaItem> Intern(NamedTensors inputs, size_t rows,
+                                    std::span<const MediaSpan> pending, size_t& reservation);
+  std::shared_ptr<MediaItem> Intern(const std::array<int64_t, 3>& grid,
                                     const Tensor& pixels, size_t patch_offset,
                                     std::span<const MediaSpan> pending, size_t& reservation);
   std::shared_ptr<DecoderOnly_Model> model_;

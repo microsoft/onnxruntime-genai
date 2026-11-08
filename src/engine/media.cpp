@@ -10,7 +10,9 @@
 #include "models/preprocessing/qwen_vision_position.h"
 #include "models/preprocessing/qwen_vision_processing.h"
 
-#include <cmath>
+#include <algorithm>
+#include <cstring>
+#include <limits>
 #include <sstream>
 
 namespace Generators {
@@ -422,7 +424,7 @@ PreparedMediaTurn MediaStore::Prepare(const std::string& prompt, std::span<const
         !std::all_of(result.tokens.begin() + index, result.tokens.begin() + index + rows,
                      [&](int32_t token) { return token == config.image_token_id; }))
       throw std::runtime_error("Expanded image span does not match its processed geometry.");
-    auto item = Intern({grid[0], grid[1], grid[2]}, config.image_token_id, *pixels, patch_offset,
+    auto item = Intern({grid[0], grid[1], grid[2]}, *pixels, patch_offset,
                        result.media, reservation.bytes);
     result.media.push_back({first_row + index, std::move(item),
                             MakeQwenVisionPosition({grid[0], grid[1], grid[2]}, merge)});
@@ -434,21 +436,42 @@ PreparedMediaTurn MediaStore::Prepare(const std::string& prompt, std::span<const
   return result;
 }
 
-std::shared_ptr<MediaItem> MediaStore::Intern(const std::array<int64_t, 3>& grid, int32_t marker,
-                                              const Tensor& pixels, size_t patch_offset,
+void MediaStore::ValidateInputs(const NamedTensors& inputs) const {
+  const auto& info = model_->vision_->session_info;
+  if (inputs.size() != info.GetInputNames().size())
+    throw std::invalid_argument("Media inputs do not cover the encoder session.");
+  for (const auto& [name, tensor] : inputs) {
+    if (!tensor || tensor->p_device_ != GetDeviceInterface(DeviceType::CPU) ||
+        !info.HasInput(name) || tensor->GetType() != info.GetInputDataType(name))
+      throw std::invalid_argument("Media input does not match its configured CPU encoder feed.");
+    const auto shape = tensor->GetShape();
+    const auto expected = info.GetInputShape(name);
+    if (shape.size() != expected.size())
+      throw std::invalid_argument("Media input rank does not match its encoder feed.");
+    for (size_t axis = 0; axis < shape.size(); ++axis) {
+      if (shape[axis] < 0 || (expected[axis] >= 0 && shape[axis] != expected[axis]))
+        throw std::invalid_argument("Media input shape does not match its encoder feed.");
+    }
+  }
+}
+
+std::shared_ptr<MediaItem> MediaStore::Intern(NamedTensors inputs, size_t rows,
                                               std::span<const MediaSpan> pending, size_t& reservation) {
-  const size_t patches = MultiplyBytes(static_cast<size_t>(grid[1]), static_cast<size_t>(grid[2]));
-  const size_t rows = MergedGridRows(grid, static_cast<size_t>(model_->config_->model.vision.spatial_merge_size));
-  const auto width = pixels.GetShape().back();
-  if (AddBytes(patch_offset, patches) > pixels.GetElementCount() / static_cast<size_t>(width))
-    throw std::logic_error("Canonical media exceeds its processed patch buffer.");
-  const size_t row_bytes = MultiplyBytes(static_cast<size_t>(width), Ort::SizeOf(pixels.GetType()));
-  const size_t bytes = MultiplyBytes(patches, row_bytes);
-  const auto* data = static_cast<const uint8_t*>(pixels.GetRawData()) + MultiplyBytes(patch_offset, row_bytes);
+  ValidateInputs(inputs);
+  if (rows == 0 || rows > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))
+    throw std::invalid_argument("Media encoder output rows must be positive and fit int64.");
   const auto matches = [&](const std::shared_ptr<MediaItem>& cached) {
-    return cached->marker_token == marker && cached->grid == grid && cached->pixels->GetType() == pixels.GetType() &&
-           MultiplyBytes(cached->pixels->GetElementCount(), Ort::SizeOf(cached->pixels->GetType())) == bytes &&
-           std::memcmp(cached->pixels->GetRawData(), data, bytes) == 0;
+    if (cached->rows != rows || cached->inputs.size() != inputs.size()) return false;
+    for (const auto& [name, tensor] : inputs) {
+      const auto found = cached->inputs.find(name);
+      if (found == cached->inputs.end() || found->second->GetType() != tensor->GetType() ||
+          found->second->GetShape() != tensor->GetShape())
+        return false;
+      const auto bytes = MultiplyBytes(tensor->GetElementCount(), Ort::SizeOf(tensor->GetType()));
+      if (bytes != 0 && std::memcmp(found->second->GetRawData(), tensor->GetRawData(), bytes) != 0)
+        return false;
+    }
+    return true;
   };
   for (const auto& cached : items_) {
     if (matches(cached)) return cached;
@@ -456,22 +479,53 @@ std::shared_ptr<MediaItem> MediaStore::Intern(const std::array<int64_t, 3>& grid
   for (const auto& span : pending) {
     if (matches(span.item)) return span.item;
   }
-  const auto retained_bytes = AddBytes(bytes, sizeof(MediaItem) + sizeof(std::shared_ptr<MediaItem>));
+  size_t retained_bytes = AddBytes(sizeof(MediaItem) + sizeof(std::shared_ptr<MediaItem>),
+                                   MultiplyBytes(inputs.bucket_count(), sizeof(void*)));
+  for (const auto& [name, tensor] : inputs) {
+    const auto metadata = AddBytes(sizeof(NamedTensors::value_type) + sizeof(Tensor) + 4 * sizeof(void*),
+                                   AddBytes(AddBytes(name.capacity(), 1), MultiplyBytes(tensor->GetShape().size(), sizeof(int64_t))));
+    retained_bytes = AddBytes(retained_bytes, AddBytes(
+                                                  metadata, MultiplyBytes(tensor->GetElementCount(), Ort::SizeOf(tensor->GetType()))));
+  }
   if (retained_bytes > reservation) throw std::logic_error("Canonical media exceeded its host reservation.");
   auto item = std::make_shared<MediaItem>();
-  item->grid = grid;
-  item->marker_token = marker;
+  item->inputs = std::move(inputs);
   item->rows = rows;
-  item->pixels = std::make_shared<Tensor>(GetDeviceInterface(DeviceType::CPU), pixels.GetType());
-  const std::array<int64_t, 2> item_shape{static_cast<int64_t>(patches), width};
-  item->pixels->CreateTensor(item_shape);
-  std::memcpy(item->pixels->GetMutableRawData(), data, bytes);
   item->feature_bytes = MultiplyBytes(MultiplyBytes(rows, static_cast<size_t>(model_->cpu_embedding_->hidden_size_)),
                                       Ort::SizeOf(model_->cpu_embedding_->type_));
   item->accounting = accounting_;
   item->host_bytes = retained_bytes;
   reservation -= retained_bytes;
   return item;
+}
+
+std::shared_ptr<MediaItem> MediaStore::Intern(const std::array<int64_t, 3>& grid,
+                                              const Tensor& pixels, size_t patch_offset,
+                                              std::span<const MediaSpan> pending, size_t& reservation) {
+  if (grid[0] != 1 || pixels.p_device_ != GetDeviceInterface(DeviceType::CPU))
+    throw std::logic_error("Qwen encoder units require CPU patches and a single temporal group.");
+  const size_t patches = MultiplyBytes(static_cast<size_t>(grid[1]), static_cast<size_t>(grid[2]));
+  const size_t rows = MergedGridRows(grid, static_cast<size_t>(model_->config_->model.vision.spatial_merge_size));
+  const auto width = pixels.GetShape().back();
+  if (AddBytes(patch_offset, patches) > pixels.GetElementCount() / static_cast<size_t>(width))
+    throw std::logic_error("Canonical media exceeds its processed patch buffer.");
+  const size_t row_bytes = MultiplyBytes(static_cast<size_t>(width), Ort::SizeOf(pixels.GetType()));
+  const size_t bytes = MultiplyBytes(patches, row_bytes);
+  if (AddBytes(bytes, sizeof(grid)) > reservation)
+    throw std::logic_error("Canonical media inputs exceed their host reservation.");
+  const auto* data = static_cast<const uint8_t*>(pixels.GetRawData()) + MultiplyBytes(patch_offset, row_bytes);
+  auto owned_pixels = std::make_shared<Tensor>(GetDeviceInterface(DeviceType::CPU), pixels.GetType());
+  const std::array<int64_t, 2> item_shape{static_cast<int64_t>(patches), width};
+  owned_pixels->CreateTensor(item_shape);
+  std::memcpy(owned_pixels->GetMutableRawData(), data, bytes);
+  auto owned_grid = std::make_shared<Tensor>(GetDeviceInterface(DeviceType::CPU), Ort::TypeToTensorType<int64_t>);
+  owned_grid->CreateTensor(std::array<int64_t, 2>{1, 3});
+  std::copy(grid.begin(), grid.end(), owned_grid->GetMutableData<int64_t>());
+  const auto& config = model_->config_->model.vision;
+  NamedTensors inputs;
+  inputs.emplace(config.inputs.pixel_values, std::move(owned_pixels));
+  inputs.emplace(config.inputs.image_grid_thw, std::move(owned_grid));
+  return Intern(std::move(inputs), rows, pending, reservation);
 }
 
 PreparedMediaTurn MediaStore::PrepareVideos(const std::string& prompt, std::span<const int32_t> raw_tokens,
@@ -567,6 +621,7 @@ PreparedMediaTurn MediaStore::PrepareVideos(const std::string& prompt, std::span
     throw std::invalid_argument("Expanded media tokens exceed the remaining session capacity.");
   std::vector<MediaSpan> pending;
   std::vector<std::shared_ptr<MediaItem>> image_items, video_items;
+  std::vector<std::shared_ptr<const VisionPosition>> image_positions, video_positions;
   if (image_count != 0) {
     std::string image_prompt;
     AppendPrompt(image_prompt, "<|vision_start|><|image_pad|><|vision_end|>", image_count, host_limit_);
@@ -593,8 +648,9 @@ PreparedMediaTurn MediaStore::PrepareVideos(const std::string& prompt, std::span
       const auto patches = MultiplyBytes(static_cast<size_t>(grid[1]), static_cast<size_t>(grid[2]));
       const auto stride = physical == logical ? patches : physical / image_count;
       if (patches > stride) throw std::runtime_error("Image patches exceed their physical stride.");
-      auto item = Intern(grid, config.image_token_id, *pixels, offset, pending, reservation.bytes);
+      auto item = Intern(grid, *pixels, offset, pending, reservation.bytes);
       image_items.push_back(item);
+      image_positions.push_back(MakeQwenVisionPosition(grid, merge));
       pending.push_back({0, std::move(item)});
       offset += stride;
     }
@@ -628,10 +684,11 @@ PreparedMediaTurn MediaStore::PrepareVideos(const std::string& prompt, std::span
     EmplaceProcessedTensor(nullptr, converted, Config::Defaults::PixelValuesName, pixels.get(),
                            model_->cpu_embedding_->type_, Ort::Allocator::GetWithDefaultOptions());
     for (size_t group = 0; group < static_cast<size_t>(grid[0]); ++group) {
-      auto item = Intern({1, grid[1], grid[2]}, config.video_token_id,
+      auto item = Intern({1, grid[1], grid[2]},
                          *converted.at(std::string{Config::Defaults::PixelValuesName}),
                          MultiplyBytes(group, patches), pending, reservation.bytes);
       video_items.push_back(item);
+      video_positions.push_back(MakeQwenVisionPosition({1, grid[1], grid[2]}, merge));
       pending.push_back({0, std::move(item)});
     }
   }
@@ -640,14 +697,16 @@ PreparedMediaTurn MediaStore::PrepareVideos(const std::string& prompt, std::span
     const auto token = result.tokens[index];
     if (token != config.image_token_id && token != config.video_token_id) continue;
     const auto& collection = token == config.image_token_id ? image_items : video_items;
+    const auto& positions = token == config.image_token_id ? image_positions : video_positions;
     auto& item_index = token == config.image_token_id ? image : video;
     if (item_index == collection.size()) throw std::runtime_error("Expanded media has no corresponding encoder unit.");
-    const auto& item = collection[item_index++];
+    const auto unit = item_index++;
+    const auto& item = collection[unit];
     if (item->rows > result.tokens.size() - index ||
         !std::all_of(result.tokens.begin() + index, result.tokens.begin() + index + item->rows,
                      [&](int32_t value) { return value == token; }))
       throw std::runtime_error("Expanded media span does not match its processed geometry.");
-    result.media.push_back({AddBytes(first_row, index), item, MakeQwenVisionPosition(item->grid, merge)});
+    result.media.push_back({AddBytes(first_row, index), item, positions[unit]});
     index += item->rows - 1;
   }
   if (image != image_items.size() || video != video_items.size())
@@ -667,17 +726,22 @@ void MediaStore::Retain(std::span<const MediaSpan> media) noexcept {
 
 void MediaStore::Encode(const std::shared_ptr<MediaItem>& item) {
   if (item->features) return;
-  if (item->feature_bytes > device_limit_) throw std::runtime_error("An image cannot fit the device media budget.");
+  ValidateInputs(item->inputs);
+  if (item->feature_bytes > device_limit_) throw std::runtime_error("An encoder unit cannot fit the device media budget.");
   for (auto& cached : items_) {
     if (accounting_->device_bytes <= device_limit_ - item->feature_bytes) break;
     cached->ReleaseFeatures();
   }
   const auto& config = model_->config_->model.vision;
-  const auto& memory = GetDeviceInterface(DeviceType::CPU)->GetAllocator().GetInfo();
-  const std::array<int64_t, 2> grid_shape{1, 3};
-  auto grid = OrtValue::CreateTensor(memory, item->grid.data(), sizeof(item->grid), grid_shape, Ort::TypeToTensorType<int64_t>);
-  const char* names[]{config.inputs.pixel_values.c_str(), config.inputs.image_grid_thw.c_str()};
-  OrtValue* inputs[]{item->pixels->GetOrtTensor(), grid.get()};
+  const auto input_names = model_->vision_->session->GetInputNames();
+  std::vector<const char*> names;
+  std::vector<OrtValue*> inputs;
+  names.reserve(input_names.size());
+  inputs.reserve(input_names.size());
+  for (const auto& name : input_names) {
+    names.push_back(name.c_str());
+    inputs.push_back(item->inputs.at(name)->GetOrtTensor());
+  }
   auto features = std::make_shared<Tensor>(model_->vision_->device, model_->cpu_embedding_->type_);
   const std::array<int64_t, 2> feature_shape{static_cast<int64_t>(item->rows), model_->cpu_embedding_->hidden_size_};
   features->CreateTensor(feature_shape);
@@ -690,7 +754,7 @@ void MediaStore::Encode(const std::shared_ptr<MediaItem>& item) {
   // Component sessions can inherit CUDA graph settings from the decoder. Image shapes and
   // output addresses vary per item, so encoding must never capture or replay the default graph.
   options->AddConfigEntry("gpu_graph_id", "-1");
-  model_->vision_->session->Run(options.get(), names, inputs, 2, &output_name, &output, 1);
+  model_->vision_->session->Run(options.get(), names.data(), inputs.data(), inputs.size(), &output_name, &output, 1);
   model_->vision_->device->Synchronize();
   item->features = std::move(features);
   accounting_->device_bytes += item->feature_bytes;

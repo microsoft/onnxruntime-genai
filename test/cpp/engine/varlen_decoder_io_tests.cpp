@@ -201,14 +201,12 @@ TEST(VarlenDecoderIOTest, RotaryHistoryBoundsMediaCoordinatesAndOverwritesUnused
   auto cache = std::shared_ptr<CacheManager>{CacheManager::Create(model)};
   auto engine = MakeDoublesEngine(model, 2, EosToken(*model)).engine;
   auto first = std::make_shared<MediaItem>();
-  first->grid = {1, 4, 6};
   first->rows = 6;
   auto second = std::make_shared<MediaItem>();
-  second->grid = {1, 4, 4};
   second->rows = 4;
   const std::array<MediaSpan, 2> media{{
-      {1, first, MakeQwenVisionPosition(first->grid, 2)},
-      {8, second, MakeQwenVisionPosition(second->grid, 2)},
+      {1, first, MakeQwenVisionPosition({1, 4, 6}, 2)},
+      {8, second, MakeQwenVisionPosition({1, 4, 4}, 2)},
   }};
   const std::array<std::array<int64_t, 11>, 3> expected{{
       {0, 1, 1, 1, 1, 1, 1, 4, 5, 5, 5},

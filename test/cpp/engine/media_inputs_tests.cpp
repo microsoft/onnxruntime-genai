@@ -101,13 +101,19 @@ TEST(MediaInputsTest, RealQwenVideoCanonicalOrderAndEncoderInputs) {
   const auto output = GetEnv("ORTGENAI_ENGINE_VIDEO_REFERENCE_OUTPUT");
   for (size_t group = 0; group < prepared.media.size(); ++group) {
     const auto& item = prepared.media[group].item;
-    EXPECT_EQ(item->grid, (std::array<int64_t, 3>{1, 4, 6}));
+    const auto& encoder = model->config_->model.vision;
+    const auto& pixels = item->inputs.at(encoder.inputs.pixel_values);
+    const auto& grid = item->inputs.at(encoder.inputs.image_grid_thw);
+    ASSERT_EQ(grid->GetType(), Ort::TypeToTensorType<int64_t>);
+    ASSERT_EQ(grid->GetElementCount(), 3u);
+    const std::array<int64_t, 3> expected_grid{1, 4, 6};
+    EXPECT_TRUE(std::equal(expected_grid.begin(), expected_grid.end(), grid->GetData<int64_t>()));
     EXPECT_EQ(item->rows, 6u);
-    EXPECT_EQ(item->marker_token, model->config_->model.video_token_id);
-    ASSERT_EQ(item->pixels->GetType(), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16);
-    ASSERT_EQ(item->pixels->GetElementCount(), 24 * 1536u);
-    const auto* data = static_cast<const uint16_t*>(item->pixels->GetRawData());
-    for (size_t value = 0; value < item->pixels->GetElementCount(); ++value) {
+    EXPECT_EQ(prepared.tokens[prepared.media[group].start], model->config_->model.video_token_id);
+    ASSERT_EQ(pixels->GetType(), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16);
+    ASSERT_EQ(pixels->GetElementCount(), 24 * 1536u);
+    const auto* data = static_cast<const uint16_t*>(pixels->GetRawData());
+    for (size_t value = 0; value < pixels->GetElementCount(); ++value) {
       const auto channel = value % 1536 / 512;
       ASSERT_EQ(data[value], channel == (group == 0 ? 0u : 2u) ? 0x3c00u : 0xbc00u)
           << "group=" << group << "value=" << value;
@@ -115,7 +121,7 @@ TEST(MediaInputsTest, RealQwenVideoCanonicalOrderAndEncoderInputs) {
     store.Encode(item);
     if (!output.empty()) {
       for (const auto& [name, tensor] :
-           {std::pair{"patches", item->pixels}, std::pair{"features", item->features}}) {
+           {std::pair{"patches", pixels}, std::pair{"features", item->features}}) {
         auto cpu = tensor->GetByteSpan().CopyDeviceToCpu();
         std::ofstream file(std::filesystem::path(output) / (std::string{name} + "-" + std::to_string(group) + ".bin"),
                            std::ios::binary);
@@ -127,6 +133,32 @@ TEST(MediaInputsTest, RealQwenVideoCanonicalOrderAndEncoderInputs) {
   }
   store.Retain(prepared.media);
   const auto item = prepared.media[0].item;
+  {
+    auto invalid = std::make_shared<MediaItem>();
+    invalid->rows = item->rows;
+    invalid->feature_bytes = std::numeric_limits<size_t>::max();
+    invalid->inputs = item->inputs;
+    const auto& name = model->config_->model.vision.inputs.pixel_values;
+    auto renamed = invalid->inputs.extract(name);
+    renamed.key() = "unknown_encoder_input";
+    invalid->inputs.insert(std::move(renamed));
+    EXPECT_THROW(store.Encode(invalid), std::invalid_argument);
+    EXPECT_EQ(invalid->features, nullptr);
+    invalid->inputs = item->inputs;
+    auto wrong_type = std::make_shared<Tensor>(GetDeviceInterface(DeviceType::CPU), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+    wrong_type->CreateTensor(item->inputs.at(name)->GetShape());
+    invalid->inputs[name] = std::move(wrong_type);
+    EXPECT_THROW(store.Encode(invalid), std::invalid_argument);
+    EXPECT_EQ(invalid->features, nullptr);
+    auto wrong_shape = std::make_shared<Tensor>(GetDeviceInterface(DeviceType::CPU), item->inputs.at(name)->GetType());
+    wrong_shape->CreateTensor(std::array<int64_t, 2>{1, item->inputs.at(name)->GetShape().back() + 1});
+    invalid->inputs[name] = std::move(wrong_shape);
+    EXPECT_THROW(store.Encode(invalid), std::invalid_argument);
+    invalid->inputs.erase(name);
+    EXPECT_THROW(store.Encode(invalid), std::invalid_argument);
+    EXPECT_EQ(invalid->features, nullptr);
+    EXPECT_NE(item->features, nullptr);
+  }
   const std::array<MediaSpan, 2> slices{{
       {1, item, MakeQwenVisionPosition({1, 2, 4}, 2), 2, 1},
       {5, item, MakeQwenVisionPosition({1, 2, 4}, 2), 2, 4},
@@ -156,6 +188,32 @@ TEST(MediaInputsTest, RealQwenVideoCanonicalOrderAndEncoderInputs) {
     CheckResult(OrtxGetRawFrame(videos->clips_[0].get(), frame, &forward[frame]));
     CheckResult(OrtxGetRawFrame(videos->clips_[0].get(), frames.size() - 1 - frame, &reverse[frame]));
     reverse[frame].timestamp_seconds = 10.0 + static_cast<double>(frame);
+  }
+  {
+    // Uniform colors preserve patch bytes while changing the grid feed.
+    auto swapped = forward;
+    for (auto& frame : swapped) {
+      frame.width = 64;
+      frame.height = 96;
+      frame.row_stride = 64 * 3;
+    }
+    const std::array<std::span<const OrtxFrame>, 1> swapped_clips{swapped};
+    auto swapped_videos = LoadVideosFromFrames(swapped_clips);
+    auto swapped_turn = store.Prepare(prompt, raw, nullptr, 0, 4096, swapped_videos.get());
+    ASSERT_EQ(swapped_turn.media.size(), prepared.media.size());
+    const auto& name = model->config_->model.vision.inputs.pixel_values;
+    for (size_t group = 0; group < prepared.media.size(); ++group) {
+      const auto& original = prepared.media[group].item;
+      const auto& changed = swapped_turn.media[group].item;
+      EXPECT_NE(original, changed);
+      const auto& original_pixels = original->inputs.at(name);
+      const auto& changed_pixels = changed->inputs.at(name);
+      ASSERT_EQ(original_pixels->GetShape(), changed_pixels->GetShape());
+      ASSERT_EQ(original_pixels->GetType(), changed_pixels->GetType());
+      EXPECT_EQ(std::memcmp(original_pixels->GetRawData(), changed_pixels->GetRawData(),
+                            original_pixels->GetElementCount() * Ort::SizeOf(original_pixels->GetType())),
+                0);
+    }
   }
   const std::array<std::span<const OrtxFrame>, 2> ordered_clips{forward, reverse};
   auto ordered = LoadVideosFromFrames(ordered_clips);
@@ -498,14 +556,12 @@ TEST(MediaInputsTest, LeavesUnknownHeaderDimensionsUnavailable) {
 
 TEST(MediaInputsTest, PositionsUseGeometryRatherThanExpandedRowCount) {
   auto first = std::make_shared<MediaItem>();
-  first->grid = {1, 4, 6};
   first->rows = 6;
   auto second = std::make_shared<MediaItem>();
-  second->grid = {1, 4, 4};
   second->rows = 4;
   const std::array<MediaSpan, 2> media{{
-      {3, first, MakeQwenVisionPosition(first->grid, 2)},
-      {12, second, MakeQwenVisionPosition(second->grid, 2)},
+      {3, first, MakeQwenVisionPosition({1, 4, 6}, 2)},
+      {12, second, MakeQwenVisionPosition({1, 4, 4}, 2)},
   }};
   EXPECT_EQ(MediaPosition(media, 2), (std::array<int64_t, 3>{2, 2, 2}));
   EXPECT_EQ(MediaPosition(media, 3), (std::array<int64_t, 3>{3, 3, 3}));
@@ -555,14 +611,12 @@ TEST(MediaInputsTest, VideoResizeRejectsUnsupportedAndOverflowingGeometry) {
 
 TEST(MediaInputsTest, PositionRangesPreserveImageBoundariesAndLaterTextOffsets) {
   auto first = std::make_shared<MediaItem>();
-  first->grid = {1, 4, 6};
   first->rows = 6;
   auto second = std::make_shared<MediaItem>();
-  second->grid = {1, 4, 4};
   second->rows = 4;
   const std::array<MediaSpan, 2> media{{
-      {3, first, MakeQwenVisionPosition(first->grid, 2)},
-      {12, second, MakeQwenVisionPosition(second->grid, 2)},
+      {3, first, MakeQwenVisionPosition({1, 4, 6}, 2)},
+      {12, second, MakeQwenVisionPosition({1, 4, 4}, 2)},
   }};
   const std::array<std::array<int64_t, 20>, 3> expected{{
       {0, 1, 2, 3, 3, 3, 3, 3, 3, 6, 7, 8, 9, 9, 9, 9, 11, 12, 13, 14},
@@ -582,7 +636,6 @@ TEST(MediaInputsTest, PositionRangesPreserveImageBoundariesAndLaterTextOffsets) 
 TEST(MediaInputsTest, NoncontiguousFeatureSlicesHaveIndependentPositionRanges) {
   auto item = std::make_shared<MediaItem>();
   item->rows = 6;
-  item->grid = {1, 100, 100};
   const auto positions = MakeQwenVisionPosition({1, 2, 4}, 2);
   const std::array<MediaSpan, 2> media{{
       {1, item, positions, 2, 1},
