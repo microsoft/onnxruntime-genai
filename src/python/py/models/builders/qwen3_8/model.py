@@ -246,7 +246,6 @@ class Qwen4ExpModel(MTPModel):
         decoder_inputs = model_config["decoder"]["inputs"]
         decoder_inputs["engram_embeddings"] = "engram_embeddings"
         if not self.text_only:
-            model_config["type"] = "qwen4_exp" if self.is_packed_vision() else "qwen3_5"
             model_config["image_token_id"] = config.image_token_id
             model_config["vision_start_token_id"] = config.vision_start_token_id
             decoder_inputs["inputs_embeds"] = "inputs_embeds"
@@ -261,6 +260,7 @@ class Qwen4ExpModel(MTPModel):
                     },
                 )
             else:
+                model_config["type"] = "qwen3_5"
                 decoder_inputs["input_ids"] = "input_ids"
                 model_config["embedding"] = {
                     "filename": "embedding.onnx",

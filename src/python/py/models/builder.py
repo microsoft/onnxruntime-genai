@@ -433,9 +433,7 @@ def check_extra_options(
             and getattr(config, "vision_config", None) is not None
             and not extra_options.get("text_only", False)
         ):
-            raise ValueError(
-                "use_paged_attention with exclude_embeds requires a complete Qwen vision composite."
-            )
+            raise ValueError("use_paged_attention with exclude_embeds requires a complete Qwen vision composite.")
 
     if (
         execution_provider == "webgpu"
