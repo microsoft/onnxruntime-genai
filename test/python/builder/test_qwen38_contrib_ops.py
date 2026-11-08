@@ -1616,6 +1616,174 @@ def test_qwen4_exp_only_standalone_model_stores_engram_table(tmp_path, monkeypat
         assert {value.key: value.value for value in lookup.metadata_props}["layer_ann"] == "cpu_embedding"
 
 
+def tiny_qwen4_config():
+    source = pytest.importorskip("transformers.models.qwen4_exp.modeling_qwen4_exp")
+    return source.Qwen4ExpConfig(
+        text_config={
+            "hidden_size": 32,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "head_dim": 16,
+            "vocab_size": 128,
+            "bos_token_id": 1,
+            "eos_token_id": 2,
+            "pad_token_id": 0,
+            "layer_types": ["linear_attention", "indexed_attention"],
+            "linear_num_key_heads": 2,
+            "linear_num_value_heads": 4,
+            "linear_key_head_dim": 8,
+            "linear_value_head_dim": 8,
+            "moe_intermediate_size": 32,
+            "shared_expert_intermediate_size": 32,
+            "num_experts": 2,
+            "num_experts_per_tok": 1,
+            "max_position_embeddings": 128,
+            "mtp_num_hidden_layers": 0,
+            "hc_count": 2,
+            "hc_lowrank": 8,
+            "ple_layer_ids": [1],
+            "ple_embed_dim": 8,
+            "ple_conv_kernel_size": 2,
+            "ngram_size": 3,
+            "heads_per_ngram": 2,
+            "ngram_vocab_size_base": 17,
+            "make_ngram_vocab_size_divisible_by": 1,
+            "split_ngram_parts": 2,
+            "indexer_n_heads": 2,
+            "indexer_kv_heads": 1,
+            "indexer_head_dim": 16,
+            "indexer_budget": 4,
+            "indexer_compress_ratio": 4,
+            "rope_parameters": {
+                "rope_type": "default",
+                "rope_theta": 10000,
+                "partial_rotary_factor": 1.0,
+                "mrope_section": [2, 3, 3],
+                "mrope_interleaved": True,
+            },
+        },
+        vision_config={
+            "depth": 1,
+            "hidden_size": 16,
+            "intermediate_size": 32,
+            "num_heads": 2,
+            "patch_size": 2,
+            "temporal_patch_size": 2,
+            "spatial_merge_size": 2,
+            "out_hidden_size": 32,
+            "num_position_embeddings": 16,
+        },
+        image_token_id=125,
+        vision_start_token_id=126,
+        vision_end_token_id=127,
+        architectures=["Qwen4ExpForConditionalGeneration"],
+    )
+
+
+def test_qwen4_exp_packed_vision_final_package_preserves_cpu_lookup(tmp_path, monkeypatch):
+    from tokenizers import Tokenizer, models, pre_tokenizers  # noqa: PLC0415
+    from transformers import PreTrainedTokenizerFast  # noqa: PLC0415
+
+    source = pytest.importorskip("transformers.models.qwen4_exp.modeling_qwen4_exp")
+    config = tiny_qwen4_config()
+    torch.manual_seed(7)
+    weights = source.Qwen4ExpForConditionalGeneration(config).eval()
+    source_path = tmp_path / "source"
+    weights.save_pretrained(str(source_path))
+    vocab = {f"token_{index}": index for index in range(125)}
+    vocab.update({"<|image_pad|>": 125, "<|vision_start|>": 126, "<|vision_end|>": 127})
+    tokenizer = Tokenizer(models.BPE(vocab, [], unk_token="token_0"))
+    tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
+    tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=tokenizer,
+        unk_token="token_0",
+        bos_token="token_1",
+        eos_token="token_2",
+        additional_special_tokens=["<|image_pad|>", "<|vision_start|>", "<|vision_end|>"],
+    )
+    tokenizer.save_pretrained(str(source_path))
+    (source_path / "preprocessor_config.json").write_text(
+        json.dumps(
+            {
+                "size": {"shortest_edge": 64, "longest_edge": 1024},
+                "patch_size": 2,
+                "temporal_patch_size": 2,
+                "merge_size": 2,
+                "image_mean": [0.5, 0.5, 0.5],
+                "image_std": [0.5, 0.5, 0.5],
+            }
+        )
+    )
+    builder = Qwen4ExpModel(
+        config,
+        ir.DataType.FLOAT16,
+        ir.DataType.FLOAT16,
+        "cuda",
+        str(tmp_path / "cache"),
+        {"use_paged_attention": True, "exclude_embeds": True, "exclude_mtp": True},
+    )
+    monkeypatch.setattr(builder.decoder, "load_weights", lambda path: weights)
+    builder.make_model(str(source_path))
+    builder.save_model(str(tmp_path))
+    builder.save_processing(str(source_path), {}, str(tmp_path))
+    builder.make_genai_config(config, {}, str(tmp_path))
+
+    lookup = ort.InferenceSession(str(tmp_path / "embedding.onnx"), providers=["CPUExecutionProvider"])
+    ids = np.array([3, 7, 125, 9], dtype=np.int64)
+    expected = weights.model.language_model.embed_tokens(torch.from_numpy(ids)).detach().numpy().astype(np.float16)
+    np.testing.assert_array_equal(lookup.run(None, {"input_ids": ids})[0], expected)
+    assert len(lookup.get_inputs()) == 1
+    metadata = json.loads((tmp_path / "genai_config.json").read_text())["model"]
+    assert metadata["type"] == "qwen4_exp"
+    assert metadata["embedding"]["inputs"] == {"input_ids": "input_ids"}
+    assert metadata["embedding"]["session_options"]["intra_op_num_threads"] == 1
+    assert metadata["vision"]["patch_size"] == 2
+    for filename in ("embedding.onnx", "vision.onnx", "engram.onnx", "text.onnx"):
+        component = onnx.load(tmp_path / filename, load_external_data=False)
+        assert all(
+            entry.value == filename + ".data"
+            for tensor in component.graph.initializer
+            for entry in tensor.external_data
+            if entry.key == "location"
+        )
+    decoder = ir.load(str(tmp_path / "text.onnx"))
+    indexer = next(node for node in decoder.graph if node.op_type == "PackedSparseAttentionIndexer")
+    attention = next(node for node in decoder.graph if node.op_type == "SparsePagedAttention")
+    assert all(value not in decoder.graph.inputs for value in indexer.outputs[:2])
+    assert all(value in attention.inputs for value in indexer.outputs[:2])
+
+
+@pytest.mark.parametrize("option", ["mtp", "dflash2_path", "dspark_path"])
+def test_qwen4_exp_packed_vision_rejects_unsupported_drafters(option):
+    config = tiny_qwen4_config()
+    config.text_config.mtp_num_hidden_layers = 1
+    options = {"use_paged_attention": True, "exclude_embeds": True, "exclude_mtp": True}
+    if option == "mtp":
+        options["exclude_mtp"] = False
+    else:
+        options[option] = "drafter"
+    with pytest.raises(ValueError, match="Packed Qwen4-Exp vision does not support"):
+        Qwen4ExpModel(config, ir.DataType.FLOAT16, ir.DataType.FLOAT16, "cuda", "", options)
+
+
+def test_qwen4_exp_packed_vision_rejects_visual_adapters_before_loading(monkeypatch):
+    peft = pytest.importorskip("peft.utils.save_and_load")
+    monkeypatch.setattr(
+        peft, "load_peft_weights", lambda *args, **kwargs: {"model.visual.adapter.weight": torch.ones(1)}
+    )
+    builder = Qwen4ExpModel(
+        tiny_qwen4_config(),
+        ir.DataType.FLOAT16,
+        ir.DataType.FLOAT16,
+        "cuda",
+        "",
+        {"use_paged_attention": True, "exclude_embeds": True, "exclude_mtp": True, "adapter_path": "adapter"},
+    )
+    with pytest.raises(ValueError, match="vision-targeted adapters"):
+        builder.make_model("unused")
+
+
 @pytest.mark.parametrize("include_mtp", [False, True])
 @pytest.mark.parametrize("ple_layer_id", [1, 4])
 @pytest.mark.parametrize("ep", ["cpu", "cuda"])
