@@ -3543,7 +3543,10 @@ bool ApplyQwen38DynamicBatchingConfig(Config& config) {
         throw std::runtime_error("search.chunk_size exceeds the maximum supported prefill chunk.");
       }
       config.model.qwen38_graph.prefill.chunk = static_cast<int>(*config.search.chunk_size);
-    } else if (config.model.qwen38_graph.prefill.chunk == 0 && db.max_scheduled_tokens > 0) {
+    } else if (db.max_scheduled_tokens > 0 &&
+               (config.model.qwen38_graph.prefill.chunk == 0 ||
+                (db.max_scheduled_tokens <= 2048 &&
+                 static_cast<size_t>(config.model.qwen38_graph.prefill.chunk) > db.max_scheduled_tokens))) {
       if (db.max_scheduled_tokens > static_cast<size_t>(std::numeric_limits<int>::max())) {
         throw std::runtime_error(
             "engine.dynamic_batching.max_scheduled_tokens exceeds the maximum supported prefill chunk.");

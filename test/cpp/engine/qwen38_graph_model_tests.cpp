@@ -2532,16 +2532,37 @@ TEST(Qwen38DynamicBatchingConfigTest, RejectsTargetCapacityOverflowingIntRange) 
   EXPECT_THROW(ApplyQwen38DynamicBatchingConfig(config), std::runtime_error);
 }
 
-TEST(Qwen38DynamicBatchingConfigTest, MaxScheduledTokensOnlyAppliesWhenPrefillChunkIsUnset) {
-  // Explicit model.qwen38_graph.prefill.chunk is preserved when search.chunk_size is absent.
+TEST(Qwen38DynamicBatchingConfigTest, MaxScheduledTokensSuppliesUnsetChunkAndCapsLargeChunkOnSmallBudgets) {
+  // Explicit model.qwen38_graph.prefill.chunk is preserved when search.chunk_size is absent and the step budget exceeds
+  // 2048 tokens.
   Config explicit_chunk;
   explicit_chunk.model.qwen38_graph.prefill.enabled = true;
   explicit_chunk.model.qwen38_graph.prefill.chunk = 8192;
   explicit_chunk.engine.dynamic_batching.emplace();
   explicit_chunk.engine.dynamic_batching->max_batch_size = 2;
-  explicit_chunk.engine.dynamic_batching->max_scheduled_tokens = 2048;
+  explicit_chunk.engine.dynamic_batching->max_scheduled_tokens = 4096;
   EXPECT_FALSE(ApplyQwen38DynamicBatchingConfig(explicit_chunk));
   EXPECT_EQ(explicit_chunk.model.qwen38_graph.prefill.chunk, 8192);
+
+  // A step budget of at most 2048 tokens (the 16 GB GPU runtime profiles) caps a larger explicit prefill chunk.
+  Config capped_chunk;
+  capped_chunk.model.qwen38_graph.prefill.enabled = true;
+  capped_chunk.model.qwen38_graph.prefill.chunk = 8192;
+  capped_chunk.engine.dynamic_batching.emplace();
+  capped_chunk.engine.dynamic_batching->max_batch_size = 2;
+  capped_chunk.engine.dynamic_batching->max_scheduled_tokens = 2048;
+  EXPECT_FALSE(ApplyQwen38DynamicBatchingConfig(capped_chunk));
+  EXPECT_EQ(capped_chunk.model.qwen38_graph.prefill.chunk, 2048);
+
+  // A smaller explicit chunk stays below a small step budget.
+  Config small_chunk;
+  small_chunk.model.qwen38_graph.prefill.enabled = true;
+  small_chunk.model.qwen38_graph.prefill.chunk = 1024;
+  small_chunk.engine.dynamic_batching.emplace();
+  small_chunk.engine.dynamic_batching->max_batch_size = 2;
+  small_chunk.engine.dynamic_batching->max_scheduled_tokens = 2048;
+  EXPECT_FALSE(ApplyQwen38DynamicBatchingConfig(small_chunk));
+  EXPECT_EQ(small_chunk.model.qwen38_graph.prefill.chunk, 1024);
 
   // When prefill.chunk is unset (0), max_scheduled_tokens supplies the prefill chunk.
   Config unset_chunk;

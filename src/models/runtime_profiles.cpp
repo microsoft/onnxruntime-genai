@@ -326,6 +326,14 @@ void QueryHostMemoryFacts(std::optional<uint64_t>& effective_host_bytes,
   if (GlobalMemoryStatusEx(&stat)) {
     readings.physical_total = static_cast<uint64_t>(stat.ullTotalPhys);
     readings.physical_available = static_cast<uint64_t>(stat.ullAvailPhys);
+    ULONGLONG installed_kb = 0;
+    if (GetPhysicallyInstalledSystemMemory(&installed_kb) && installed_kb > 0) {
+      const uint64_t installed_bytes = static_cast<uint64_t>(installed_kb) * 1024ULL;
+      if (installed_bytes > *readings.physical_total &&
+          installed_bytes <= *readings.physical_total + (4ULL << 30)) {
+        readings.physical_total = installed_bytes;
+      }
+    }
   }
 #else
   const long page_sz = sysconf(_SC_PAGESIZE);
