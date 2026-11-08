@@ -136,6 +136,9 @@ TEST(GeneratorPromptValidationTest, ChecksPhysicalFinalSlidingWindowBeforeMutati
 TEST(GeneratorPromptValidationTest, FinalPaddingRejectionPreservesThePipelineWindowCursor) {
   {
     auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "last-token-generation");
+    // The non-pipeline control must not expose fixed-window position or mask inputs.
+    config->model.vocab_size = 4;
+    config->model.decoder.filename = "../engine/last-token-logits/pruned.onnx";
     config->model.decoder.sliding_window.emplace().window_size = 4;
     config->model.decoder.sliding_window->slide_inputs = true;
     config->model.decoder.sliding_window->slide_key_value_cache = false;
@@ -144,7 +147,8 @@ TEST(GeneratorPromptValidationTest, FinalPaddingRejectionPreservesThePipelineWin
     auto generator = std::make_unique<Generator>(*model, *params);
     ASSERT_NO_THROW(AppendPrompt(*generator, {1, 1, 1}, true));
     EXPECT_EQ(generator->GetSequence(0).size(), 3u);
-    EXPECT_NO_THROW(generator->GetLogits());
+    auto logits = generator->GetLogits().CopyDeviceToCpu();
+    EXPECT_EQ((std::vector<float>{logits.begin(), logits.end()}), (std::vector<float>{1, 1, 1, 1}));
   }
   for (bool device : {false, true}) {
     SCOPED_TRACE(testing::Message() << "device=" << device);
@@ -216,8 +220,8 @@ TEST(GeneratorPromptValidationTest, SinglePassQwenPrefillAcceptsTrailingPadding)
     auto logits = generator->GetLogits().CopyDeviceToCpu();
     ASSERT_EQ(logits.size(), static_cast<size_t>(batch_size * beams * 3));
     for (int row = 0; row < batch_size * beams; ++row) {
-      EXPECT_FLOAT_EQ(logits[row * 3], image ? -9 : -4);
-      EXPECT_FLOAT_EQ(logits[row * 3 + 1], image ? 9 : 4);
+      EXPECT_FLOAT_EQ(logits[row * 3], image ? -9.0f : -4.0f);
+      EXPECT_FLOAT_EQ(logits[row * 3 + 1], image ? 9.0f : 4.0f);
     }
   }
 }
