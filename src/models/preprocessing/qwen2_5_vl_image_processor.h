@@ -17,6 +17,7 @@ struct QwenImageProcessor : Processor {
   QwenImageProcessor(Config& config, const SessionInfo& session_info);
 
   virtual std::unique_ptr<NamedTensors> Process(const Tokenizer& tokenizer, const Payload& payload) const override;
+  std::unique_ptr<NamedTensors> ProcessImages(const Images& images) const;
 
  private:
   ort_extensions::OrtxObjectPtr<OrtxProcessor> processor_;

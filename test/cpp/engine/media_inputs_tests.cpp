@@ -12,7 +12,10 @@
 
 #include "models/preprocessing/processor.h"
 #include "models/preprocessing/genai_tokenizer.h"
+#include "models/preprocessing/multi_modal_processor.h"
 #include "models/preprocessing/qwen_vision_position.h"
+#include "models/preprocessing/qwen_vision_processing.h"
+#include "models/preprocessing/qwen2_5_vl_image_processor.h"
 #include "models/preprocessing/bailing_vision_position.h"
 #include "models/decoder_only.h"
 #include "models/env_utils.h"
@@ -34,6 +37,38 @@ TEST(MediaInputsTest, RealQwenVideoCanonicalOrderAndEncoderInputs) {
   ASSERT_EQ(config->model.decoder.num_hidden_layers, 64);
   auto model = std::dynamic_pointer_cast<DecoderOnly_Model>(CreateModel(GetOrtEnv(), std::move(config)));
   ASSERT_NE(model, nullptr);
+  {
+    auto image_processor = std::dynamic_pointer_cast<QwenImageProcessor>(model->vision_->processor->processor_);
+    ASSERT_NE(image_processor, nullptr);
+    const std::array<const char*, 2> paths{MODEL_PATH "../images/sheet.png", MODEL_PATH "../images/cars.jpg"};
+    auto images = LoadImages(paths);
+    auto pixels_only = image_processor->ProcessImages(*images);
+    EXPECT_EQ(pixels_only->count(std::string{Config::Defaults::InputIdsName}), 0u);
+    EXPECT_EQ(pixels_only->count(std::string{Config::Defaults::NumImageTokens}), 0u);
+    const std::string image_prompt =
+        "before<|vision_start|><|image_pad|><|vision_end|>between<|vision_start|><|image_pad|><|vision_end|>after";
+    auto combined = model->vision_->processor->Process(image_prompt, images.get(), nullptr);
+    for (const auto name : {Config::Defaults::PixelValuesName, Config::Defaults::ImageGridThwName}) {
+      const auto& pixels = pixels_only->at(std::string{name});
+      const auto& together = combined->at(std::string{name});
+      ASSERT_EQ(pixels->GetType(), together->GetType());
+      ASSERT_EQ(pixels->GetShape(), together->GetShape());
+      EXPECT_EQ(std::memcmp(pixels->GetRawData(), together->GetRawData(),
+                            pixels->GetElementCount() * Ort::SizeOf(pixels->GetType())),
+                0);
+    }
+    const auto& grids = pixels_only->at(std::string{Config::Defaults::ImageGridThwName});
+    ASSERT_EQ(grids->GetElementCount(), 6u);
+    std::array<std::array<int64_t, 3>, 2> image_grids{};
+    for (size_t image = 0; image < image_grids.size(); ++image)
+      std::copy_n(grids->GetData<int64_t>() + image * 3, 3, image_grids[image].begin());
+    const auto expanded = ExpandQwenMediaPrompt(
+        image_prompt, image_grids, {}, static_cast<size_t>(model->config_->model.vision.spatial_merge_size), 1024 * 1024);
+    const auto expected = model->vision_->processor->tokenizer_->Encode(expanded.c_str());
+    const auto& ids = combined->at(std::string{Config::Defaults::InputIdsName});
+    ASSERT_EQ(ids->GetElementCount(), expected.size());
+    EXPECT_TRUE(std::equal(expected.begin(), expected.end(), ids->GetData<int32_t>()));
+  }
   MediaStore store{model, 512 * 1024 * 1024, 2 * 1024 * 1024};
   Tokenizer tokenizer{*model->config_};
   std::vector<uint8_t> rgb(4 * 64 * 96 * 3, 0);
@@ -332,6 +367,20 @@ TEST(MediaInputsTest, VideoPromptPreservesOuterWrapperAndSourceTimestampRounding
   EXPECT_THROW(ExpandQwenMediaPrompt(
                    "before<|vision_start|><|video_pad|><|vision_end|>after", {}, clips, 2, expanded.size() - 1),
                std::invalid_argument);
+  EXPECT_EQ(QwenMediaPromptBytes(
+                "before<|vision_start|><|video_pad|><|vision_end|>after", {}, clips, 2, expanded.size()),
+            expanded.size());
+  EXPECT_THROW(QwenMediaPromptBytes(
+                   "before<|vision_start|><|video_pad|><|vision_end|>after", {}, clips, 2, expanded.size() - 1),
+               std::invalid_argument);
+}
+
+TEST(MediaInputsTest, PromptEstimateCountsLargeImageExpansionWithoutMaterialization) {
+  constexpr std::string_view marker = "<|vision_start|><|image_pad|><|vision_end|>";
+  const std::array<std::array<int64_t, 3>, 1> images{{{1, 8192, 8192}}};
+  constexpr size_t expected_bytes = size_t{4096} * 4096 * 13 + 30;
+  EXPECT_EQ(QwenMediaPromptBytes(marker, images, {}, 2, expected_bytes), expected_bytes);
+  EXPECT_THROW(QwenMediaPromptBytes(marker, images, {}, 2, expected_bytes - 1), std::invalid_argument);
 }
 
 TEST(MediaInputsTest, VideoPromptKeepsIndependentImageAndClipOrdering) {
@@ -468,40 +517,40 @@ TEST(MediaInputsTest, PositionsUseGeometryRatherThanExpandedRowCount) {
 }
 
 TEST(MediaInputsTest, ResizePreflightMatchesNativeTieAndMinimumPixelRules) {
-  EXPECT_EQ(MediaImageGrid(500, 400, 16, 2, 65536, 262144), (std::array<int64_t, 3>{1, 24, 32}));
-  EXPECT_EQ(MediaImageGrid(30, 17, 16, 2, 65536, 262144), (std::array<int64_t, 3>{1, 14, 22}));
-  EXPECT_EQ(MediaImageGrid(381, 137, 16, 2, 65536, 16777216), (std::array<int64_t, 3>{1, 10, 28}));
-  EXPECT_THROW(MediaImageGrid(0, 100, 16, 2, 65536, 16777216), std::invalid_argument);
-  EXPECT_THROW(MediaImageGrid(1, 201, 16, 2, 65536, 16777216), std::invalid_argument);
-  EXPECT_THROW(MediaImageGrid(UINT32_MAX, UINT32_MAX, 16, 2, 65536, 16777216), std::invalid_argument);
+  EXPECT_EQ(QwenImageGrid(500, 400, 16, 2, 65536, 262144), (std::array<int64_t, 3>{1, 24, 32}));
+  EXPECT_EQ(QwenImageGrid(30, 17, 16, 2, 65536, 262144), (std::array<int64_t, 3>{1, 14, 22}));
+  EXPECT_EQ(QwenImageGrid(381, 137, 16, 2, 65536, 16777216), (std::array<int64_t, 3>{1, 10, 28}));
+  EXPECT_THROW(QwenImageGrid(0, 100, 16, 2, 65536, 16777216), std::invalid_argument);
+  EXPECT_THROW(QwenImageGrid(1, 201, 16, 2, 65536, 16777216), std::invalid_argument);
+  EXPECT_THROW(QwenImageGrid(UINT32_MAX, UINT32_MAX, 16, 2, 65536, 16777216), std::invalid_argument);
 }
 
 TEST(MediaInputsTest, VideoResizeMatchesSourceSpatialAndTemporalRounding) {
-  EXPECT_EQ(MediaVideoGrid(29, 17, 4, 16, 2, 4096, 25165824, 768), (std::array<int64_t, 3>{2, 2, 4}));
-  EXPECT_EQ(MediaVideoGrid(112, 80, 5, 16, 2, 4096, 25165824, 768), (std::array<int64_t, 3>{3, 4, 8}));
-  EXPECT_EQ(MediaVideoGrid(1500, 1000, 4, 16, 2, 4096, 25165824, 768), (std::array<int64_t, 3>{2, 44, 66}));
-  EXPECT_EQ(MediaVideoGrid(896, 896, 5, 16, 2, 4096, 25165824, 768), (std::array<int64_t, 3>{3, 56, 56}));
-  EXPECT_EQ(MediaVideoGrid(896, 896, 3, 16, 2, 4096, 25165824, 768), (std::array<int64_t, 3>{2, 54, 54}));
+  EXPECT_EQ(QwenVideoGrid(29, 17, 4, 16, 2, 4096, 25165824, 768), (std::array<int64_t, 3>{2, 2, 4}));
+  EXPECT_EQ(QwenVideoGrid(112, 80, 5, 16, 2, 4096, 25165824, 768), (std::array<int64_t, 3>{3, 4, 8}));
+  EXPECT_EQ(QwenVideoGrid(1500, 1000, 4, 16, 2, 4096, 25165824, 768), (std::array<int64_t, 3>{2, 44, 66}));
+  EXPECT_EQ(QwenVideoGrid(896, 896, 5, 16, 2, 4096, 25165824, 768), (std::array<int64_t, 3>{3, 56, 56}));
+  EXPECT_EQ(QwenVideoGrid(896, 896, 3, 16, 2, 4096, 25165824, 768), (std::array<int64_t, 3>{2, 54, 54}));
 }
 
 TEST(MediaInputsTest, VideoResizeUsesWholeClipRatherThanEncoderGroupBudget) {
-  EXPECT_EQ(MediaVideoGrid(1500, 1000, 64, 16, 2, 4096, 25165824, 768), (std::array<int64_t, 3>{32, 32, 48}));
-  EXPECT_EQ(MediaVideoGrid(1500, 1000, 2, 16, 2, 4096, 25165824, 768), (std::array<int64_t, 3>{1, 44, 66}));
-  EXPECT_EQ(MediaVideoGrid(32, 32, 2, 16, 2, 65536, 25165824, 768), (std::array<int64_t, 3>{1, 12, 12}));
+  EXPECT_EQ(QwenVideoGrid(1500, 1000, 64, 16, 2, 4096, 25165824, 768), (std::array<int64_t, 3>{32, 32, 48}));
+  EXPECT_EQ(QwenVideoGrid(1500, 1000, 2, 16, 2, 4096, 25165824, 768), (std::array<int64_t, 3>{1, 44, 66}));
+  EXPECT_EQ(QwenVideoGrid(32, 32, 2, 16, 2, 65536, 25165824, 768), (std::array<int64_t, 3>{1, 12, 12}));
 }
 
 TEST(MediaInputsTest, VideoResizeRejectsUnsupportedAndOverflowingGeometry) {
-  EXPECT_THROW(MediaVideoGrid(0, 100, 4, 16, 2, 4096, 25165824, 768), std::invalid_argument);
-  EXPECT_THROW(MediaVideoGrid(UINT32_MAX, 100, 4, 16, 2, 4096, 25165824, 768), std::invalid_argument);
-  EXPECT_THROW(MediaVideoGrid(1, 201, 4, 16, 2, 4096, 25165824, 768), std::invalid_argument);
-  EXPECT_THROW(MediaVideoGrid(100, 100, 1, 16, 2, 4096, 25165824, 768), std::invalid_argument);
-  EXPECT_THROW(MediaVideoGrid(100, 100, 4, 0, 2, 4096, 25165824, 768), std::invalid_argument);
-  EXPECT_THROW(MediaVideoGrid(100, 100, 4, 16, 0, 4096, 25165824, 768), std::invalid_argument);
-  EXPECT_THROW(MediaVideoGrid(100, 100, 4, 16, 2, 0, 25165824, 768), std::invalid_argument);
-  EXPECT_THROW(MediaVideoGrid(100, 100, 4, 16, 2, 4096, 4095, 768), std::invalid_argument);
-  EXPECT_THROW(MediaVideoGrid(100, 100, 4, 16, 2, 4096, 25165824, 0), std::invalid_argument);
-  EXPECT_THROW(MediaVideoGrid(100, 100, std::numeric_limits<size_t>::max(), 16, 2, 4096, 25165824, 768), std::overflow_error);
-  EXPECT_THROW(MediaVideoGrid(100, 100, 4, std::numeric_limits<size_t>::max(), 2, 4096, 25165824, 768), std::overflow_error);
+  EXPECT_THROW(QwenVideoGrid(0, 100, 4, 16, 2, 4096, 25165824, 768), std::invalid_argument);
+  EXPECT_THROW(QwenVideoGrid(UINT32_MAX, 100, 4, 16, 2, 4096, 25165824, 768), std::invalid_argument);
+  EXPECT_THROW(QwenVideoGrid(1, 201, 4, 16, 2, 4096, 25165824, 768), std::invalid_argument);
+  EXPECT_THROW(QwenVideoGrid(100, 100, 1, 16, 2, 4096, 25165824, 768), std::invalid_argument);
+  EXPECT_THROW(QwenVideoGrid(100, 100, 4, 0, 2, 4096, 25165824, 768), std::invalid_argument);
+  EXPECT_THROW(QwenVideoGrid(100, 100, 4, 16, 0, 4096, 25165824, 768), std::invalid_argument);
+  EXPECT_THROW(QwenVideoGrid(100, 100, 4, 16, 2, 0, 25165824, 768), std::invalid_argument);
+  EXPECT_THROW(QwenVideoGrid(100, 100, 4, 16, 2, 4096, 4095, 768), std::invalid_argument);
+  EXPECT_THROW(QwenVideoGrid(100, 100, 4, 16, 2, 4096, 25165824, 0), std::invalid_argument);
+  EXPECT_THROW(QwenVideoGrid(100, 100, std::numeric_limits<size_t>::max(), 16, 2, 4096, 25165824, 768), std::overflow_error);
+  EXPECT_THROW(QwenVideoGrid(100, 100, 4, std::numeric_limits<size_t>::max(), 2, 4096, 25165824, 768), std::overflow_error);
 }
 
 TEST(MediaInputsTest, PositionRangesPreserveImageBoundariesAndLaterTextOffsets) {

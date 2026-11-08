@@ -94,7 +94,6 @@ std::unique_ptr<OrtValue> ConvertPixelValues(ThreadPool* thread_pool,
 
 std::tuple<std::unique_ptr<OrtValue>, std::unique_ptr<OrtValue>>
 ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& prompt,
-                   OrtxTensor* pixel_values, OrtxTensor* image_grid_thw,
                    const int64_t* computed_grid_data, int64_t computed_grid_num_images,
                    Ort::Allocator& allocator, int64_t spatial_merge_size) {
   constexpr char vision_start_token[] = "<|vision_start|>";
@@ -105,27 +104,9 @@ ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& pr
   int64_t total_image_tokens = 0;
   const int64_t* image_grid_thw_data = nullptr;
 
-  if (pixel_values) {
-    // Get image_grid_thw data from either processor output or computed value
-    if (image_grid_thw) {
-      const int64_t* image_grid_thw_shape{};
-      size_t image_grid_thw_num_dims;
-      CheckResult(OrtxGetTensorData(image_grid_thw, reinterpret_cast<const void**>(&image_grid_thw_data),
-                                    &image_grid_thw_shape, &image_grid_thw_num_dims));
-      size_t grid_elements = 1;
-      for (size_t dim = 0; dim < image_grid_thw_num_dims; ++dim) {
-        if (image_grid_thw_shape[dim] <= 0 ||
-            static_cast<size_t>(image_grid_thw_shape[dim]) > std::numeric_limits<size_t>::max() / grid_elements)
-          throw std::runtime_error("Invalid image grid shape.");
-        grid_elements *= static_cast<size_t>(image_grid_thw_shape[dim]);
-      }
-      if (grid_elements % 3 != 0 || grid_elements / 3 > static_cast<size_t>(std::numeric_limits<int64_t>::max()))
-        throw std::runtime_error("Image grid must contain complete T/H/W entries.");
-      num_images = static_cast<int64_t>(grid_elements / 3);
-    } else if (computed_grid_data) {
-      image_grid_thw_data = computed_grid_data;
-      num_images = computed_grid_num_images;
-    }
+  if (computed_grid_data) {
+    image_grid_thw_data = computed_grid_data;
+    num_images = computed_grid_num_images;
 
     // Calculate total image tokens based on grid dimensions
     // For each image: (temporal * height * width) / (merge_size^2)
@@ -239,20 +220,34 @@ QwenImageProcessor::QwenImageProcessor(Config& config, const SessionInfo& sessio
 }
 
 std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& tokenizer, const Payload& payload) const {
-  std::string prompt = std::string(payload.prompt);
   const Images* images = payload.images;
   Ort::Allocator& allocator{Ort::Allocator::GetWithDefaultOptions()};
-  auto named_tensors = std::make_unique<NamedTensors>();
-
-  if (!images || images->num_images_ == 0) {
-    auto [input_ids, num_img_tokens] = ProcessImagePrompt(tokenizer, prompt, nullptr, nullptr, nullptr, 0, allocator, spatial_merge_size_);
-    named_tensors->emplace(std::string(Config::Defaults::InputIdsName), std::make_shared<Tensor>(std::move(input_ids)));
-    named_tensors->emplace(std::string(Config::Defaults::NumImageTokens), std::make_shared<Tensor>(std::move(num_img_tokens)));
-    return named_tensors;
+  auto named_tensors = images && images->num_images_ ? ProcessImages(*images) : std::make_unique<NamedTensors>();
+  const auto grid = named_tensors->find(std::string{Config::Defaults::ImageGridThwName});
+  const int64_t* grid_data = nullptr;
+  int64_t grid_images = 0;
+  if (grid != named_tensors->end()) {
+    const auto elements = grid->second->GetElementCount();
+    if (grid->second->GetType() != Ort::TypeToTensorType<int64_t> ||
+        elements % 3 != 0 || elements / 3 > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))
+      throw std::runtime_error("Image grid must contain complete int64 T/H/W entries.");
+    grid_data = grid->second->GetData<int64_t>();
+    grid_images = static_cast<int64_t>(elements / 3);
   }
+  auto [input_ids, num_img_tokens] = ProcessImagePrompt(
+      tokenizer, payload.prompt, grid_data, grid_images, allocator, spatial_merge_size_);
+  named_tensors->emplace(std::string(Config::Defaults::InputIdsName), std::make_shared<Tensor>(std::move(input_ids)));
+  named_tensors->emplace(std::string(Config::Defaults::NumImageTokens), std::make_shared<Tensor>(std::move(num_img_tokens)));
+  return named_tensors;
+}
+
+std::unique_ptr<NamedTensors> QwenImageProcessor::ProcessImages(const Images& images) const {
+  Ort::Allocator& allocator{Ort::Allocator::GetWithDefaultOptions()};
+  auto named_tensors = std::make_unique<NamedTensors>();
+  if (images.num_images_ == 0) return named_tensors;
 
   ort_extensions::OrtxObjectPtr<OrtxTensorResult> result;
-  CheckResult(OrtxImagePreProcess(processor_.get(), images->images_.get(), result.ToBeAssigned()));
+  CheckResult(OrtxImagePreProcess(processor_.get(), images.images_.get(), result.ToBeAssigned()));
 
   // OrtxTensorResultGetAt allocates a new TensorObject that the caller owns.
   // Wrap in OrtxObjectPtr so it's disposed on scope exit (avoids TensorObject leak).
@@ -275,8 +270,6 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
   // If processor doesn't provide image_grid_thw or patched pixel_values, compute them
   std::unique_ptr<OrtValue> computed_image_grid_thw;
   std::unique_ptr<OrtValue> patched_pixel_values;
-  const int64_t* computed_grid_data = nullptr;
-  int64_t computed_grid_num_images = 0;
 
   // Check if pixel_values needs patching (shape should be [1, height, width, channels] in HWC format)
   if (pixel_values_num_dims == 4 && pixel_values_shape[0] == 1) {
@@ -354,16 +347,9 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
         grid_data[0] = 1;  // Single temporal frame for images
         grid_data[1] = height_patches;
         grid_data[2] = width_patches;
-
-        computed_grid_data = grid_data;
-        computed_grid_num_images = 1;
       }
     }
   }
-
-  auto [input_ids, num_img_tokens] = ProcessImagePrompt(tokenizer, prompt, pixel_values,
-                                                        image_grid_thw, computed_grid_data, computed_grid_num_images, allocator, spatial_merge_size_);
-  named_tensors->emplace(std::string(Config::Defaults::InputIdsName), std::make_shared<Tensor>(std::move(input_ids)));
 
   // Use patched pixel_values if we computed it, otherwise use processor output
   if (patched_pixel_values) {
@@ -434,9 +420,17 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
     // because the last logical dimension is always 3 (T, H, W per image).
     // This is safe as long as the extension never inserts extra trailing dims,
     // which holds for all current versions of ort-extensions PatchImage.
-    int64_t total_grid_elements = 1;
-    for (size_t i = 0; i < grid_num_dims; ++i) total_grid_elements *= grid_shape[i];
-    int64_t num_grid_images = total_grid_elements / 3;
+    size_t total_grid_elements = 1;
+    for (size_t i = 0; i < grid_num_dims; ++i) {
+      if (grid_shape[i] <= 0 ||
+          static_cast<uint64_t>(grid_shape[i]) > std::numeric_limits<size_t>::max() / total_grid_elements)
+        throw std::runtime_error("Invalid image grid shape.");
+      total_grid_elements *= static_cast<size_t>(grid_shape[i]);
+    }
+    if (total_grid_elements % 3 != 0 ||
+        total_grid_elements / 3 > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))
+      throw std::runtime_error("Image grid must contain complete T/H/W entries.");
+    int64_t num_grid_images = static_cast<int64_t>(total_grid_elements / 3);
     std::vector<int64_t> grid_target_shape = {num_grid_images, 3LL};
 
     // Ensure we have rank 2 [num_images, 3]
@@ -454,8 +448,6 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
     named_tensors->emplace("image_grid_thw",
                            std::make_shared<Tensor>(std::move(computed_image_grid_thw)));
   }
-
-  named_tensors->emplace(std::string(Config::Defaults::NumImageTokens), std::make_shared<Tensor>(std::move(num_img_tokens)));
 
   return named_tensors;
 }

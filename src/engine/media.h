@@ -87,27 +87,11 @@ struct PreparedMediaTurn {
   std::vector<MediaSpan> media;
 };
 
-struct QwenVideoPrompt {
-  std::array<int64_t, 3> grid;
-  std::span<const double> timestamps;
-};
-
-std::string ExpandQwenMediaPrompt(std::string_view prompt,
-                                  std::span<const std::array<int64_t, 3>> image_grids,
-                                  std::span<const QwenVideoPrompt> videos, size_t merge_size,
-                                  size_t maximum_bytes);
-
 std::array<int64_t, 3> MediaPosition(std::span<const MediaSpan> media, size_t row);
 void MediaPositions(std::span<const MediaSpan> media, size_t first_row,
                     const std::array<std::span<int64_t>, 3>& positions);
 void ApplyMediaFeatures(std::span<const MediaSpan> media, size_t first_row, size_t rows,
                         Tensor& embeddings, size_t packed_row);
-std::array<int64_t, 3> MediaImageGrid(uint32_t width, uint32_t height, size_t patch, size_t merge,
-                                      int64_t min_pixels, int64_t max_pixels);
-std::array<int64_t, 3> MediaVideoGrid(uint32_t width, uint32_t height, size_t frames,
-                                      size_t patch, size_t merge, int64_t min_pixels,
-                                      int64_t max_pixels, size_t max_video_tokens);
-
 class MediaStore {
  public:
   MediaStore(std::shared_ptr<DecoderOnly_Model> model, size_t host_limit, size_t device_limit);
