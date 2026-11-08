@@ -81,6 +81,7 @@ struct Payload {
 struct Config;
 struct SessionInfo;
 class ThreadPool;
+struct VisionPreparation;
 
 // A null pool keeps same-type copies on the direct sequential path.
 template <typename T>
@@ -112,6 +113,8 @@ struct Processor {
 
   virtual void ConfigureTokenizer(Tokenizer&) const {}
   virtual std::unique_ptr<NamedTensors> Process(const Tokenizer& tokenizer, const Payload& payload) const = 0;
+  virtual std::unique_ptr<VisionPreparation> CreateVisionPreparation(
+      const Config& config, const SessionInfo& info, const Tokenizer& tokenizer) const;
 
  protected:
   ThreadPool* thread_pool_{};

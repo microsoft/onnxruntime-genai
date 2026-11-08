@@ -105,14 +105,10 @@ class MediaStore {
 
  private:
   void MakeHostRoom(size_t bytes);
-  PreparedMediaTurn PrepareVideos(const std::string& prompt, std::span<const int32_t> raw_tokens,
-                                  const Images* images, const Videos& videos, size_t first_row,
-                                  size_t remaining_rows);
+  void ValidateInput(const std::string& name, ONNXTensorElementDataType type,
+                     std::span<const int64_t> shape) const;
   void ValidateInputs(const NamedTensors& inputs) const;
   std::shared_ptr<MediaItem> Intern(NamedTensors inputs, size_t rows,
-                                    std::span<const MediaSpan> pending, size_t& reservation);
-  std::shared_ptr<MediaItem> Intern(const std::array<int64_t, 3>& grid,
-                                    const Tensor& pixels, size_t patch_offset,
                                     std::span<const MediaSpan> pending, size_t& reservation);
   std::shared_ptr<DecoderOnly_Model> model_;
   std::shared_ptr<MediaAccounting> accounting_{std::make_shared<MediaAccounting>()};
@@ -121,14 +117,6 @@ class MediaStore {
   size_t host_limit_;
   size_t device_limit_;
   int64_t next_prefix_row_{1};
-  int64_t min_pixels_{};
-  int64_t max_pixels_{};
-  int32_t vision_end_token_{};
-  int32_t video_token_{};
-  ort_extensions::OrtxObjectPtr<OrtxProcessor> video_processor_;
-  int64_t video_min_pixels_{};
-  int64_t video_max_pixels_{};
-  size_t max_video_tokens_{};
 };
 
 }  // namespace Generators

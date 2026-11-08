@@ -5,6 +5,7 @@
 #include "models/model.h"
 #include "models/parallel_utils.h"
 #include "models/preprocessing/processor.h"
+#include "models/preprocessing/vision_preparation.h"
 
 #include <array>
 #include <filesystem>
@@ -12,6 +13,11 @@
 #include <limits>
 
 namespace Generators {
+
+std::unique_ptr<VisionPreparation> Processor::CreateVisionPreparation(
+    const Config&, const SessionInfo&, const Tokenizer&) const {
+  return {};
+}
 
 namespace {
 

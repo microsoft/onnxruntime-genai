@@ -6,6 +6,7 @@
 #include "models/parallel_utils.h"
 #include "models/preprocessing/genai_tokenizer.h"
 #include "models/preprocessing/qwen2_5_vl_image_processor.h"
+#include "models/preprocessing/qwen_vision_preparation.h"
 #include "models/threadpool.h"
 #include <array>
 #include <cstring>
@@ -217,6 +218,11 @@ QwenImageProcessor::QwenImageProcessor(Config& config, const SessionInfo& sessio
 
   config.AddMapping(std::string(Config::Defaults::InputIdsName), config.model.embedding.inputs.input_ids);
   config.AddMapping(std::string(Config::Defaults::PixelValuesName), config.model.vision.inputs.pixel_values);
+}
+
+std::unique_ptr<VisionPreparation> QwenImageProcessor::CreateVisionPreparation(
+    const Config& config, const SessionInfo& info, const Tokenizer& tokenizer) const {
+  return std::make_unique<QwenVisionPreparation>(config, info, tokenizer, *this, thread_pool_);
 }
 
 std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& tokenizer, const Payload& payload) const {

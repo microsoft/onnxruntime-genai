@@ -145,6 +145,57 @@ TEST(MediaInputsTest, RealQwenVideoCanonicalOrderAndEncoderInputs) {
   store.Retain(prepared.media);
   const auto item = prepared.media[0].item;
   {
+    struct InvalidPlan : VisionPreparation {
+      explicit InvalidPlan(std::unique_ptr<VisionPreparation> processor) : processor{std::move(processor)} {}
+      size_t Estimate(const VisionPreparationInput& input, size_t limit) const override {
+        return processor->Estimate(input, limit);
+      }
+      std::unique_ptr<const VisionPlan> Plan(const Tokenizer& tokenizer,
+                                             const VisionPreparationInput& input, size_t limit) const override {
+        const auto original = processor->Plan(tokenizer, input, limit);
+        auto plan = std::make_unique<VisionPlan>(*original);
+        switch (failure) {
+          case 0:
+            plan->units[0].inputs[0].name = "unknown_encoder_feed";
+            break;
+          case 1:
+            ++plan->units[0].inputs[0].shape.back();
+            break;
+          case 2:
+            plan->units[0].inputs[1] = plan->units[0].inputs[0];
+            break;
+          case 3:
+            plan->units[0].rows = 4096;
+            break;
+          case 4:
+            plan->spans[0].feature_offset = plan->units[0].rows;
+            break;
+        }
+        return plan;
+      }
+      std::vector<NamedTensors> Materialize(const VisionPlan&) const override {
+        materialized = true;
+        return {};
+      }
+      void ValidateTextTokens(std::span<const int32_t> tokens) const override {
+        processor->ValidateTextTokens(tokens);
+      }
+      std::unique_ptr<VisionPreparation> processor;
+      int failure{};
+      mutable bool materialized{};
+    };
+    auto invalid = std::make_unique<InvalidPlan>(std::move(model->vision_->preparation));
+    auto* probe = invalid.get();
+    model->vision_->preparation = std::move(invalid);
+    for (int failure = 0; failure < 5; ++failure) {
+      probe->failure = failure;
+      probe->materialized = false;
+      EXPECT_THROW(store.Prepare(prompt, raw, nullptr, 0, 4096, videos.get()), std::invalid_argument);
+      EXPECT_FALSE(probe->materialized) << "failure=" << failure;
+    }
+    model->vision_->preparation = std::move(probe->processor);
+  }
+  {
     auto invalid = std::make_shared<MediaItem>();
     invalid->rows = item->rows;
     invalid->feature_bytes = std::numeric_limits<size_t>::max();
@@ -275,7 +326,8 @@ TEST(MediaInputsTest, RealQwenVideoCanonicalOrderAndEncoderInputs) {
   model->config_->model.vision.video_config_filename = "invalid-rgb.json";
   std::string error;
   try {
-    MediaStore invalid_rgb{model, 512 * 1024 * 1024, 2 * 1024 * 1024};
+    model->vision_->processor->processor_->CreateVisionPreparation(
+        *model->config_, model->vision_->session_info, *model->vision_->processor->tokenizer_);
   } catch (const std::runtime_error& failure) {
     error = failure.what();
   }
@@ -286,7 +338,9 @@ TEST(MediaInputsTest, RealQwenVideoCanonicalOrderAndEncoderInputs) {
   model->config_->model.vision.video_config_filename = video_filename;
   const auto type = model->config_->model.type;
   model->config_->model.type = "qwen2_5_vl";
-  EXPECT_THROW((MediaStore{model, 512 * 1024 * 1024, 2 * 1024 * 1024}), std::runtime_error);
+  EXPECT_THROW(model->vision_->processor->processor_->CreateVisionPreparation(
+                   *model->config_, model->vision_->session_info, *model->vision_->processor->tokenizer_),
+               std::runtime_error);
   model->config_->model.type = type;
   model->config_->model.vision.video_config_filename.reset();
   model->config_->model.video_token_id = 0;

@@ -4,6 +4,7 @@
 #include <charconv>
 #include <limits>
 #include "preprocessing/multi_modal_processor.h"
+#include "preprocessing/processor.h"
 
 namespace Generators {
 DecoderOnly_Model::DecoderOnly_Model(std::unique_ptr<Config> config, OrtEnv& ort_env)
@@ -72,20 +73,18 @@ DecoderOnly_Model::DecoderOnly_Model(std::unique_ptr<Config> config, OrtEnv& ort
     vision_->session = CreateSession(ort_env, config_->model.vision.filename, vision_->session_options.get());
     vision_->session_info.Add(*vision_->session);
     const auto& vision_config = config_->model.vision;
-    const auto pixels = vision_->session_info.GetInputShape(vision_config.inputs.pixel_values);
     const auto features = vision_->session_info.GetOutputShape(vision_config.outputs.image_features);
-    if (vision_->session->GetInputNames().size() != 2 || vision_->session->GetOutputNames().size() != 1 ||
-        pixels.size() != 2 || pixels[0] >= 0 || pixels[1] <= 0 ||
-        vision_->session_info.GetInputDataType(vision_config.inputs.pixel_values) != cpu_embedding_->type_ ||
-        vision_->session_info.GetInputShape(vision_config.inputs.image_grid_thw) != std::vector<int64_t>{1, 3} ||
-        vision_->session_info.GetInputDataType(vision_config.inputs.image_grid_thw) != Ort::TypeToTensorType<int64_t> ||
+    if (vision_->session->GetOutputNames().size() != 1 ||
         features != std::vector<int64_t>{-1, cpu_embedding_->hidden_size_} ||
-        vision_->session_info.GetOutputDataType(vision_config.outputs.image_features) != cpu_embedding_->type_ ||
-        vision_config.patch_size <= 0 || vision_config.spatial_merge_size <= 0) {
-      throw std::runtime_error("Packed vision encoder does not match the patch/grid/projected-feature contract.");
+        vision_->session_info.GetOutputDataType(vision_config.outputs.image_features) != cpu_embedding_->type_) {
+      throw std::runtime_error("Packed vision encoder does not match the projected-feature contract.");
     }
     vision_->processor = std::make_shared<MultiModalProcessor>(
         *config_, vision_->session_info, GetOrCreatePreprocessingThreadPool());
+    vision_->preparation = vision_->processor->processor_->CreateVisionPreparation(
+        *config_, vision_->session_info, *vision_->processor->tokenizer_);
+    if (!vision_->preparation)
+      throw std::runtime_error("Packed vision requires a bounded processor preparation contract.");
   }
 }
 

@@ -48,9 +48,20 @@ size_t MergedGridRows(const std::array<int64_t, 3>& grid, size_t merge) {
   return MultiplyBytes(static_cast<size_t>(grid[1]) / merge, static_cast<size_t>(grid[2]) / merge);
 }
 
-size_t BuildQwenMediaPrompt(std::string_view prompt,
-                            std::span<const std::array<int64_t, 3>> image_grids,
-                            std::span<const QwenVideoPrompt> videos, size_t merge_size,
+struct SpanPromptSource : QwenMediaPromptSource {
+  SpanPromptSource(std::span<const std::array<int64_t, 3>> images, std::span<const QwenVideoPrompt> videos)
+      : images{images}, videos{videos} {}
+  size_t ImageCount() const override { return images.size(); }
+  size_t VideoCount() const override { return videos.size(); }
+  std::array<int64_t, 3> ImageGrid(size_t image) const override { return images[image]; }
+  std::array<int64_t, 3> VideoGrid(size_t video) const override { return videos[video].grid; }
+  size_t FrameCount(size_t video) const override { return videos[video].timestamps.size(); }
+  double Timestamp(size_t video, size_t frame) const override { return videos[video].timestamps[frame]; }
+  std::span<const std::array<int64_t, 3>> images;
+  std::span<const QwenVideoPrompt> videos;
+};
+
+size_t BuildQwenMediaPrompt(std::string_view prompt, const QwenMediaPromptSource& source, size_t merge_size,
                             size_t maximum_bytes, std::string* expanded) {
   constexpr std::string_view start = "<|vision_start|>", end = "<|vision_end|>";
   constexpr std::string_view image = "<|image_pad|>", video = "<|video_pad|>";
@@ -75,30 +86,35 @@ size_t BuildQwenMediaPrompt(std::string_view prompt,
     if (marker == std::string_view::npos) break;
     prompt.remove_prefix(marker);
     if (prompt.substr(0, image_marker.size()) == image_marker) {
-      if (image_index == image_grids.size() || image_grids[image_index][0] != 1)
+      if (image_index == source.ImageCount() || source.ImageGrid(image_index)[0] != 1)
         throw std::invalid_argument("Image marker count or temporal grid does not match the ordered inputs.");
-      const auto rows = MergedGridRows(image_grids[image_index++], merge_size);
+      const auto rows = MergedGridRows(source.ImageGrid(image_index++), merge_size);
       append(start, 1);
       append(image, rows);
       append(end, 1);
       prompt.remove_prefix(image_marker.size());
     } else if (prompt.substr(0, video_marker.size()) == video_marker) {
-      if (video_index == videos.size())
+      if (video_index == source.VideoCount())
         throw std::invalid_argument("Video marker count does not match the ordered inputs.");
-      const auto& clip = videos[video_index++];
-      const auto rows = MergedGridRows(clip.grid, merge_size);
-      if (clip.timestamps.size() < 2 ||
-          static_cast<uint64_t>(clip.grid[0]) != clip.timestamps.size() / 2 + clip.timestamps.size() % 2)
+      const auto clip = video_index++;
+      const auto grid = source.VideoGrid(clip);
+      const auto frames = source.FrameCount(clip);
+      const auto rows = MergedGridRows(grid, merge_size);
+      if (frames < 2 ||
+          static_cast<uint64_t>(grid[0]) != frames / 2 + frames % 2)
         throw std::invalid_argument("Video temporal grid does not match its selected frame count.");
-      for (size_t index = 0; index < clip.timestamps.size(); ++index) {
-        if (!std::isfinite(clip.timestamps[index]) || clip.timestamps[index] < 0 ||
-            (index != 0 && clip.timestamps[index] < clip.timestamps[index - 1]))
+      double previous = 0;
+      for (size_t index = 0; index < frames; ++index) {
+        const auto timestamp = source.Timestamp(clip, index);
+        if (!std::isfinite(timestamp) || timestamp < 0 ||
+            (index != 0 && timestamp < previous))
           throw std::invalid_argument("Video presentation timestamps must be finite, nonnegative and ordered.");
+        previous = timestamp;
       }
       append(start, 1);
-      for (size_t group = 0; group < static_cast<size_t>(clip.grid[0]); ++group) {
+      for (size_t group = 0; group < static_cast<size_t>(grid[0]); ++group) {
         const auto timestamp =
-            (clip.timestamps[group * 2] + clip.timestamps[std::min(group * 2 + 1, clip.timestamps.size() - 1)]) / 2;
+            (source.Timestamp(clip, group * 2) + source.Timestamp(clip, std::min(group * 2 + 1, frames - 1))) / 2;
         if (!std::isfinite(timestamp))
           throw std::invalid_argument("Video group timestamp overflows.");
         std::ostringstream label;
@@ -115,7 +131,7 @@ size_t BuildQwenMediaPrompt(std::string_view prompt,
       throw std::invalid_argument("Each media item requires a complete vision-start/pad/vision-end marker.");
     }
   }
-  if (image_index != image_grids.size() || video_index != videos.size())
+  if (image_index != source.ImageCount() || video_index != source.VideoCount())
     throw std::invalid_argument("Media marker counts do not match the ordered inputs.");
   return bytes;
 }
@@ -126,7 +142,12 @@ size_t QwenMediaPromptBytes(std::string_view prompt,
                             std::span<const std::array<int64_t, 3>> image_grids,
                             std::span<const QwenVideoPrompt> videos, size_t merge_size,
                             size_t maximum_bytes) {
-  return BuildQwenMediaPrompt(prompt, image_grids, videos, merge_size, maximum_bytes, nullptr);
+  return QwenMediaPromptBytes(prompt, SpanPromptSource{image_grids, videos}, merge_size, maximum_bytes);
+}
+
+size_t QwenMediaPromptBytes(std::string_view prompt, const QwenMediaPromptSource& source,
+                            size_t merge_size, size_t maximum_bytes) {
+  return BuildQwenMediaPrompt(prompt, source, merge_size, maximum_bytes, nullptr);
 }
 
 std::string ExpandQwenMediaPrompt(std::string_view prompt,
@@ -136,7 +157,7 @@ std::string ExpandQwenMediaPrompt(std::string_view prompt,
   const auto bytes = QwenMediaPromptBytes(prompt, image_grids, videos, merge_size, maximum_bytes);
   std::string expanded;
   expanded.reserve(bytes);
-  BuildQwenMediaPrompt(prompt, image_grids, videos, merge_size, maximum_bytes, &expanded);
+  BuildQwenMediaPrompt(prompt, SpanPromptSource{image_grids, videos}, merge_size, maximum_bytes, &expanded);
   return expanded;
 }
 
