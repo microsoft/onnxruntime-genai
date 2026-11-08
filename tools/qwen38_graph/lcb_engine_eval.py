@@ -58,6 +58,8 @@ def open_engine(model_path: Path, provider: str):
 
 
 def generate(engine, buffer, prompt: list[int], max_new: int):
+    if max_new <= 0:
+        raise ValueError(f"generation budget must be positive, got {max_new}")
     before = engine.get_speculative_stats()
     request = engine.create_request()
     result, _ = run_turn(engine, buffer, request, prompt, max_new)
@@ -80,6 +82,15 @@ def generate(engine, buffer, prompt: list[int], max_new: int):
     }
 
 
+def generation_budget(prompt, max_new, max_context, index):
+    budget = min(max_new, max_context - len(prompt))
+    if budget <= 0:
+        raise ValueError(
+            f"no generation budget for item {index}: prompt={len(prompt)}, max_context={max_context}, max_new={max_new}"
+        )
+    return budget
+
+
 def run_shard(args) -> None:
     from eval_lib import messages_of, qwen38_prompt  # noqa: PLC0415
     from transformers import AutoTokenizer  # noqa: PLC0415
@@ -88,6 +99,9 @@ def run_shard(args) -> None:
     samples = {json.loads(line)["index"]: json.loads(line) for line in args.samples.open()}
     assert len(prompts) == 175
     mine = prompts[args.shard :: args.shards]
+    budgets = {
+        row["index"]: generation_budget(row["ids"], args.max_new, args.max_context, row["index"]) for row in mine
+    }
 
     done = {}
     if args.out.exists():
@@ -134,7 +148,7 @@ def run_shard(args) -> None:
 
     # Warm-up turn
     w_req = engine.create_request()
-    run_turn(engine, buffer, w_req, mine[0]["ids"], 16)
+    run_turn(engine, buffer, w_req, mine[0]["ids"], min(16, budgets[mine[0]["index"]]))
     w_req.close()
 
     t_wall = time.perf_counter()
@@ -146,7 +160,7 @@ def run_shard(args) -> None:
                 if done[idx]["prompt_sha256"] != row["prompt_sha256"]:
                     raise RuntimeError(f"resume mismatch at {idx}")
                 continue
-            budget = min(args.max_new, args.max_context - len(prompt_ids))
+            budget = budgets[idx]
             gen = generate(engine, buffer, prompt_ids, budget)
             tokens = gen["tokens"]
             text = hf.decode(tokens, skip_special_tokens=False)
@@ -182,10 +196,11 @@ def run_shard(args) -> None:
             sink.write(json.dumps(rec) + "\n")
             sink.flush()
             done[idx] = rec
+            ttft = f"{rec['prefill_s']:.3f}s" if rec["prefill_s"] is not None else "n/a (no token)"
             print(
                 f"[{k}/{len(mine)}] idx={idx} diff={sample['difficulty']} prompt={len(prompt_ids)} "
                 f"gen={len(tokens)}/{budget} trunc={rec['truncated']} code={rec['has_code']} "
-                f"ttft={rec['prefill_s']:.3f}s tps={rec['tps']:.1f} acc={rec['accept_rate']:.3f}",
+                f"ttft={ttft} tps={rec['tps']:.1f} acc={rec['accept_rate']:.3f}",
                 flush=True,
             )
 
@@ -258,25 +273,46 @@ def grade_records_in_docker(
     return out
 
 
+def load_arm_records(paths, expected_indices):
+    """Reads completed shards, rejecting overlaps and runs with different protocols."""
+    recs, protocol = {}, None
+    for path in paths:
+        proto_path = path.with_suffix(".protocol.json")
+        meta = json.loads(proto_path.read_text())
+        meta.pop("shard", None)
+        if protocol is not None and meta != protocol:
+            raise ValueError(f"protocol mismatch across grading shards: {path}")
+        protocol = meta
+        with path.open() as stream:
+            for line in stream:
+                if line.strip():
+                    record = json.loads(line)
+                    index = record["index"]
+                    if index in recs:
+                        raise ValueError(f"duplicate grading index {index} in {path}")
+                    recs[index] = record
+    if not recs or recs.keys() != expected_indices:
+        raise ValueError(
+            f"grading index set mismatch: missing {sorted(expected_indices - recs.keys())}, extra {sorted(recs.keys() - expected_indices)}"
+        )
+    return recs
+
+
 def grade_suite(args) -> None:
     from scipy.stats import binomtest  # noqa: PLC0415
     from transformers import AutoTokenizer  # noqa: PLC0415
 
     hf = AutoTokenizer.from_pretrained(args.checkpoint)
     samples = {json.loads(line)["index"]: json.loads(line) for line in args.samples.open()}
+    if len(samples) != 175:
+        raise ValueError(f"expected 175 LiveCodeBench samples, got {len(samples)}")
     caps = sorted(args.caps)
 
     arms_records: dict[str, dict[int, dict]] = {}
     for spec in args.arms:
         name, pattern = spec.split("=", 1)
-        recs = {}
-        for p in sorted(Path("/").glob(pattern.lstrip("/")) if pattern.startswith("/") else Path(".").glob(pattern)):
-            for line in p.open():
-                if line.strip():
-                    r = json.loads(line)
-                    recs[r["index"]] = r
-        if len(recs) != 175:
-            raise RuntimeError(f"Arm {name} has {len(recs)} records (expected 175) from {pattern}")
+        paths = sorted(Path("/").glob(pattern.lstrip("/")) if pattern.startswith("/") else Path(".").glob(pattern))
+        recs = load_arm_records(paths, set(samples))
         arms_records[name] = recs
 
     items = []

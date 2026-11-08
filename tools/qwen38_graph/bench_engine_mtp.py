@@ -83,7 +83,9 @@ def main():
     parser.add_argument("--new", type=int, default=256)
     parser.add_argument("--reps", type=int, default=3)
     parser.add_argument("--no-warmup", action="store_true")
-    parser.add_argument("--no-mtp", action="store_true")
+    parser.add_argument(
+        "--no-mtp", action="store_true", help="S=1 decode; requires a non-folded package with S=1 graphs"
+    )
     parser.add_argument(
         "--stop-token-id",
         type=int,
@@ -128,7 +130,10 @@ def main():
             accepted = after["draft_tokens_accepted"] - before["draft_tokens_accepted"]
             proposed = after["draft_tokens_proposed"] - before["draft_tokens_proposed"]
             head_calls = after["draft_forward_passes"] - before["draft_forward_passes"]
-            accept_hist, pos_accept_rates, cond_accept_rates = acceptance_stats(before, after, rounds)
+            if proposed:
+                accept_hist, pos_accept_rates, cond_accept_rates = acceptance_stats(before, after, rounds)
+            else:
+                accept_hist, pos_accept_rates, cond_accept_rates = None, None, None
             record = {
                 "label": (
                     "warmup" if index == 0 and not skip_warmup else f"run{index if not skip_warmup else index + 1}"
@@ -143,7 +148,7 @@ def main():
                 "cycles": rounds,
                 "proposed": proposed,
                 "accepted": accepted,
-                "accept_rate": accepted / rounds if rounds else None,
+                "accept_rate": accepted / rounds if proposed and rounds else None,
                 "accepted_per_proposed": accepted / proposed if proposed else None,
                 "head_calls": head_calls,
                 "accept_hist": accept_hist,

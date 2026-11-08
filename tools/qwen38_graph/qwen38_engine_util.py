@@ -34,7 +34,7 @@ if os.name == "nt":
             _extra_dirs.append(os.path.join(_cuda_path, _sub))
     for _d in _extra_dirs:
         if os.path.isdir(_d):
-            _WIN_DLL_HANDLES.append(os.add_dll_directory(_d))
+            _WIN_DLL_HANDLES.append(os.add_dll_directory(str(Path(_d).resolve())))
             if _d not in os.environ.get("PATH", ""):
                 os.environ["PATH"] = _d + os.pathsep + os.environ.get("PATH", "")
 
@@ -143,8 +143,15 @@ def set_force_reject(enabled):
 
 def load_model(package, provider=None, overlay=None):
     """Registers the plugin CUDA EP (`provider` path, default $QWEN_PROVIDER or <package>/provider/libonnxruntime_providers_cuda.so) and loads the package."""
+    package = Path(package).resolve()
+    env_overlay = os.environ.get("QWEN38_OVERLAY_JSON")
+    validate_mtp_mode(
+        json.loads((package / "genai_config.json").read_text()),
+        json.loads(env_overlay) if env_overlay else {},
+        overlay or {},
+    )
     if os.name == "nt":
-        pkg_libs = Path(package) / "libs"
+        pkg_libs = package / "libs"
         if pkg_libs.is_dir():
             _WIN_DLL_HANDLES.append(os.add_dll_directory(str(pkg_libs)))
     provider = provider or os.environ.get("QWEN_PROVIDER")
@@ -157,18 +164,32 @@ def load_model(package, provider=None, overlay=None):
         if pkg_provider.exists():
             provider = str(pkg_provider)
     if provider:
+        provider = str(Path(provider).resolve())
         if os.name == "nt":
             prov_dir = Path(provider).parent
             if prov_dir.is_dir():
                 _WIN_DLL_HANDLES.append(os.add_dll_directory(str(prov_dir)))
         og.register_execution_provider_library("CUDAExecutionProvider", provider)
     config = og.Config(str(package))
-    env_overlay = os.environ.get("QWEN38_OVERLAY_JSON")
     if env_overlay:
         config.overlay(env_overlay)
     if overlay:
         config.overlay(json.dumps(overlay))
     return og.Model(config)
+
+
+def validate_mtp_mode(*configs):
+    """Rejects no-MTP on folded graphs after applying the package and overlays in order."""
+    mtp, fold = True, False
+    for config in configs:
+        graph = config.get("model", {}).get("qwen38_graph", {})
+        mtp = graph.get("mtp", {}).get("enabled", mtp)
+        fold = graph.get("fold", {}).get("enabled", fold)
+    if fold and not mtp:
+        raise ValueError(
+            "--no-mtp requires a non-folded package with S=1 graphs; this package has fold.enabled=true. "
+            "Use --force-reject with engine_gate.py for an identity reference; forced rejection does not measure S=1 performance."
+        )
 
 
 class TurnResult:

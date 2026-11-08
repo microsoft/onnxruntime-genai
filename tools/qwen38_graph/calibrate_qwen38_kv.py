@@ -24,7 +24,6 @@ import torch
 from onnxruntime_genai.models.quantization.kv_cache_calibration import (
     CORPUS,
     _get_quant_type_max,
-    _mse_threshold,
     _subsample,
     _tokenize_corpus,
 )
@@ -32,6 +31,52 @@ from transformers import AutoTokenizer
 
 # Every run calibrates both quantizations; --out receives the one named by --quant-type.
 QUANT_TYPES = ("int8_per_channel", "fp8_per_channel")
+METHODS = ("minmax", "percentile")
+
+
+def validate_method(method):
+    if method not in METHODS:
+        raise ValueError(
+            "dual INT8/FP8 calibration supports minmax or percentile; MSE models integer rounding, not FP8"
+        )
+
+
+def create_calibration_sessions(ort, pkg):
+    """Loads the dense/head-KV graphs with their configured custom ops on separate session options.
+
+    An auxiliary session's explicit library list replaces the decoder's list; if it specifies neither library field,
+    the decoder's libraries are used. Relative paths are resolved from the package, as in the Engine packages.
+    """
+    pkg = pkg.resolve()
+    model = json.loads((pkg / "genai_config.json").read_text())["model"]
+    parent = model.get("decoder", {}).get("session_options", {})
+    prefill = model.get("qwen38_graph", {}).get("prefill", {})
+    plans = []
+    for name in ("dense", "head_kv"):
+        graph = prefill.get(name, {})
+        options = graph.get("session_options", {})
+        if not options.get("custom_ops_library") and not options.get("custom_ops_libraries"):
+            options = parent
+        libraries = ([options["custom_ops_library"]] if options.get("custom_ops_library") else []) + options.get(
+            "custom_ops_libraries", []
+        )
+        paths = list(dict.fromkeys((pkg / lib).resolve() for lib in libraries))
+        for path in paths:
+            if not path.is_file():
+                raise FileNotFoundError(f"{name} custom-op library not found: {path}")
+        plans.append((pkg / graph.get("filename", f"{name}/model.onnx"), paths))
+
+    sessions = []
+    providers = [("CUDAExecutionProvider", {"device_id": 0, "arena_extend_strategy": "kSameAsRequested"})]
+    for filename, libraries in plans:
+        so = ort.SessionOptions()
+        so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
+        so.add_session_config_entry("session.use_device_allocator_for_initializers", "1")
+        for library in libraries:
+            so.register_custom_ops_library(str(library))
+        print(f"Loading calibration session from {filename}...", flush=True)
+        sessions.append(ort.InferenceSession(str(filename), sess_options=so, providers=providers))
+    return sessions
 
 
 def ensure_distinct_outputs(output_paths: dict[str, Path]) -> None:
@@ -87,6 +132,22 @@ def pair_envelope_partial(x: np.ndarray, num_kv_heads: int, head_size: int, rota
     return out.reshape(x.shape[0], -1)
 
 
+def discover_kv_outputs(output_names):
+    keys, values = {}, {}
+    for name in output_names:
+        parts = name.split(".")
+        if len(parts) == 3 and parts[0] == "present" and parts[1].isdigit():
+            if parts[2] == "key":
+                keys[int(parts[1])] = name
+            elif parts[2] == "value":
+                values[int(parts[1])] = name
+    if not keys or keys.keys() != values.keys():
+        raise ValueError(
+            f"expected paired KV outputs: key-only layers {sorted(keys.keys() - values.keys())}, value-only layers {sorted(values.keys() - keys.keys())}"
+        )
+    return keys, values
+
+
 def calibrate_package(
     pkg: Path,
     checkpoint: Path,
@@ -100,6 +161,7 @@ def calibrate_package(
     sample_budget: int = 16384,
 ) -> dict:
     output_paths = plan_output_paths(out_json, quant_type)
+    validate_method(method)
 
     import onnxruntime as ort  # noqa: PLC0415
     from mobius._configs import Qwen4ExpConfig  # noqa: PLC0415
@@ -122,32 +184,14 @@ def calibrate_package(
     ple_layer = next(int(i) - 1 for i in (config.ple_layer_ids or []))
     lookup = Qwen4ExpCPUPLELookup(str(checkpoint), config, ple_layer)
 
-    so = ort.SessionOptions()
-    so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
-    so.add_session_config_entry("session.use_device_allocator_for_initializers", "1")
-    providers = [("CUDAExecutionProvider", {"device_id": 0, "arena_extend_strategy": "kSameAsRequested"})]
-
-    print(f"Loading dense session from {pkg / 'dense/model.onnx'}...", flush=True)
-    dense_sess = ort.InferenceSession(str(pkg / "dense/model.onnx"), sess_options=so, providers=providers)
-    print(f"Loading head_kv session from {pkg / 'head_kv/model.onnx'}...", flush=True)
-    head_kv_sess = ort.InferenceSession(str(pkg / "head_kv/model.onnx"), sess_options=so, providers=providers)
+    dense_sess, head_kv_sess = create_calibration_sessions(ort, pkg)
 
     num_kv_heads = 2
     head_size = 256
     channels = num_kv_heads * head_size
 
-    output_names = [o.name for o in dense_sess.get_outputs()]
-    present_keys = {
-        int(name.split(".")[1]): name
-        for name in output_names
-        if name.startswith("present.") and name.endswith(".key") and name.split(".")[1].isdigit()
-    }
-    present_values = {
-        int(name.split(".")[1]): name
-        for name in output_names
-        if name.startswith("present.") and name.endswith(".value") and name.split(".")[1].isdigit()
-    }
-    layer_ids = sorted(present_keys.keys() & present_values.keys())
+    present_keys, present_values = discover_kv_outputs([o.name for o in dense_sess.get_outputs()])
+    layer_ids = sorted(present_keys)
     num_layers = len(layer_ids)
     print(f"Target sparse attention layers ({num_layers}): {layer_ids}", flush=True)
 
@@ -308,27 +352,35 @@ def calibrate_quant_types(
 
     The buffers have one entry per target layer followed by one for the MTP head (`len(layer_ids) + 1` in total).
     """
+    validate_method(method)
+    for name, arrays in (
+        ("k_amax", [k_amax]),
+        ("v_amax", [v_amax]),
+        ("k_env", [a for entry in k_env_buf for a in entry]),
+        ("v_env", [a for entry in v_env_buf for a in entry]),
+        ("k_raw", [a for entry in k_raw_buf for a in entry]),
+        ("v_raw", [a for entry in v_raw_buf for a in entry]),
+    ):
+        if any(not np.isfinite(a).all() for a in arrays):
+            raise ValueError(f"non-finite calibration capture: {name}")
     num_layers = len(layer_ids)
     total_entries = num_layers + 1
     results = {}
-    for qtype, target_path in output_paths.items():
+    for qtype in output_paths:
         qmax = _get_quant_type_max(qtype)
         is_fp8 = qtype.startswith("fp8")
-        qneg, qpos = (-qmax, qmax) if is_fp8 else (-qmax, qmax - 1.0)
         k_thr = k_amax.copy()
         v_thr = v_amax.copy()
-        if method in ("percentile", "mse"):
+        if method == "percentile":
             for i in range(total_entries):
                 ks = np.concatenate(k_env_buf[i], axis=0).astype(np.float32)
                 vs = np.concatenate(v_env_buf[i], axis=0).astype(np.float32)
-                if method == "percentile":
-                    k_thr[i] = np.percentile(np.abs(ks), percentile, axis=0)
-                    v_thr[i] = np.percentile(np.abs(vs), percentile, axis=0)
-                else:
-                    k_thr[i] = _mse_threshold(ks, k_amax[i], qmax, qneg, qpos)
-                    v_thr[i] = _mse_threshold(vs, v_amax[i], qmax, qneg, qpos)
+                k_thr[i] = np.percentile(np.abs(ks), percentile, axis=0)
+                v_thr[i] = np.percentile(np.abs(vs), percentile, axis=0)
         k_scales = np.maximum(k_thr, 1e-6) / qmax
         v_scales = np.maximum(v_thr, 1e-6) / qmax
+        if not np.isfinite(k_scales).all() or not np.isfinite(v_scales).all():
+            raise ValueError(f"non-finite {qtype} calibration scales")
 
         # Compute empirical reconstruction relative L2 error across all captured tokens
         k_errs, v_errs = [], []
@@ -343,8 +395,11 @@ def calibrate_quant_types(
             else:
                 kq = np.clip(np.rint(kr / ks_i), -128.0, 127.0) * ks_i
                 vq = np.clip(np.rint(vr / vs_i), -128.0, 127.0) * vs_i
-            k_errs.append(float(np.linalg.norm(kr - kq) / np.linalg.norm(kr)))
-            v_errs.append(float(np.linalg.norm(vr - vq) / np.linalg.norm(vr)))
+            k_norm, v_norm = float(np.linalg.norm(kr)), float(np.linalg.norm(vr))
+            k_errs.append(float(np.linalg.norm(kr - kq)) / k_norm if k_norm else 0.0)
+            v_errs.append(float(np.linalg.norm(vr - vq)) / v_norm if v_norm else 0.0)
+        if not np.isfinite(k_errs).all() or not np.isfinite(v_errs).all():
+            raise ValueError(f"non-finite {qtype} calibration error statistics")
 
         payload = {
             "scales": {
@@ -372,9 +427,12 @@ def calibrate_quant_types(
             },
         }
         results[qtype] = payload
+    # Serialize both payloads before publishing either: invalid scales/statistics must not leave a partial calibration.
+    serialized = {qtype: json.dumps(payload, indent=2, allow_nan=False) + "\n" for qtype, payload in results.items()}
+    for qtype, target_path in output_paths.items():
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        target_path.write_text(json.dumps(payload, indent=2) + "\n")
-        print(f"Wrote {target_path}: stats={json.dumps(payload['stats'])}", flush=True)
+        target_path.write_text(serialized[qtype])
+        print(f"Wrote {target_path}: stats={json.dumps(results[qtype]['stats'])}", flush=True)
 
     return results
 
@@ -391,7 +449,9 @@ def main() -> None:
         "(kv_scales_int8_per_channel.json -> kv_scales_fp8_per_channel.json, scales.json -> scales.fp8_per_channel.json)",
     )
     parser.add_argument("--quant-type", default="int8_per_channel", choices=QUANT_TYPES)
-    parser.add_argument("--method", default="percentile", choices=("minmax", "percentile", "mse"))
+    parser.add_argument(
+        "--method", default="percentile", choices=METHODS, help="MSE is unsupported for the FP8 companion"
+    )
     parser.add_argument("--percentile", type=float, default=99.99)
     parser.add_argument("--num-seqs", type=int, default=24)
     parser.add_argument("--target-seq", type=int, default=512)

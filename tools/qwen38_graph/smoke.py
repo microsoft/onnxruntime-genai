@@ -20,7 +20,9 @@ def main():
     parser.add_argument("model", help="package directory (genai_config.json with model.type qwen38_flash_graph)")
     parser.add_argument("--tokens", type=int, default=64)
     parser.add_argument("--prompt", default="Explain in two sentences why the sky is blue.")
-    parser.add_argument("--no-mtp", action="store_true", help="plain S=1 CUDA-graph decode")
+    parser.add_argument(
+        "--no-mtp", action="store_true", help="S=1 decode; requires a non-folded package with S=1 graphs"
+    )
     parser.add_argument("--provider")
     args = parser.parse_args()
 
@@ -50,6 +52,8 @@ def main():
     count, t_first, finish = 0, None, None
     while engine.has_pending_requests():
         for event in engine.run(buffer):
+            if event.flags & (og.EngineEventFlags.FAILED | og.EngineEventFlags.CAPACITY_BLOCKED):
+                raise RuntimeError(f"Engine failure: flags={event.flags} error={event.error_code}")
             if event.flags & og.EngineEventFlags.TOKEN:
                 if t_first is None:
                     t_first = time.perf_counter()
@@ -59,9 +63,14 @@ def main():
                 finish = event.finish_reason
     t1 = time.perf_counter()
     print()
-    print(
-        f"first token after {t_first - t0:.3f} s; {count} tokens; decode {(count - 1) / (t1 - t_first):.1f} tokens/s; finish {finish}"
-    )
+    request.close()
+    if t_first is None:
+        print(f"0 tokens; first-token latency and decode throughput unavailable; finish {finish}")
+    else:
+        decode_tps = (count - 1) / (t1 - t_first) if t1 > t_first else 0.0
+        print(
+            f"first token after {t_first - t0:.3f} s; {count} tokens; decode {decode_tps:.1f} tokens/s; finish {finish}"
+        )
     print("stats:", engine.get_speculative_stats())
 
 

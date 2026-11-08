@@ -45,6 +45,10 @@ argument and overlays config values for the run: `--no-mtp` is `mtp.enabled=fals
 `--prefill steps|fast` is `prefill.enabled`. Config overlays append to `eos_token_id`, so a fixed-length benchmark ("ignore EOS")
 needs its own package whose stop id is an ordinary id that is never generated (`248319`).
 
+`--no-mtp` requires a non-folded package with compatible S=1 graphs. The tools reject this mode when the effective
+`fold.enabled` is true (including v12b/rc4/rc5 folded packages). For a folded package's greedy identity reference, record
+`engine_gate.py --force-reject`; forced rejection keeps the folded execution path and does not measure S=1 performance.
+
 ## v12b stack: folded cycle + fast prefill + shared weights
 
 With `model.qwen38_graph.fold.enabled` the decoder session is the **fold** model (verify S=2 body + MTP head + glue): one CUDA-graph
@@ -98,6 +102,23 @@ while engine.has_pending_requests():
 ## Scripts
 
 All need a package; the ones that build prompts need a text pool (`--text-pool`, see above).
+
+Calibration registers each dense/head-KV session's configured `custom_ops_library` and `custom_ops_libraries` before loading
+its graph, resolving relative paths from the package and falling back to the decoder's libraries if neither field is set.
+Both output quantizations use `--method minmax` or `percentile`; MSE is rejected because its integer rounding objective does
+not model FP8. Incomplete K/V layer pairs and non-finite captures, scales or statistics are rejected before either scale file
+is written.
+
+The gate requires matching prompt hashes whenever the reference provides them, in addition to checking prompt lengths.
+Prompt-length comparisons require equal, non-empty length sets. MMLU resume protocols include `--force-reject`, so changing
+that mode requires a fresh output. LiveCodeBench rejects prompts that leave no generation budget and requires disjoint,
+complete grading shards with matching `.protocol.json` metadata (apart from the shard index).
+
+`engine_behaviours.py` requires the single-slot baseline (`configured_max_batch_size=1`, `max_request_length=33024`); it rejects
+other configurations before running probes. Its 20K prefill, 40K capacity and sequential queueing probes assume that baseline.
+The decode benchmark reports cycle timing without speculative acceptance statistics when no drafts were proposed.
+`bench_ttft_engine.py` raises an explicit benchmark error if EOS arrives before any token is delivered; `smoke.py` reports the
+completed zero-token turn with unavailable latency/throughput and raises on failed or capacity-blocked Engine events.
 
 | script | purpose |
 | --- | --- |

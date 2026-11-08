@@ -36,6 +36,7 @@ def ttft(engine, buffer, prompt):
     request.begin_turn(np.asarray(prompt, dtype=np.int32), turn)
     steps = []
     first = None
+    finish_reason = None
     t_prev = t0
     while engine.has_pending_requests():
         events = engine.run(buffer)
@@ -50,7 +51,13 @@ def ttft(engine, buffer, prompt):
         for event in events:
             if event.flags & (og.EngineEventFlags.FAILED | og.EngineEventFlags.CAPACITY_BLOCKED):
                 raise RuntimeError(f"Engine failure: flags={event.flags} error={event.error_code}")
+            if event.flags & og.EngineEventFlags.TURN_FINISHED:
+                finish_reason = event.finish_reason
     request.close()
+    if first is None:
+        raise RuntimeError(
+            f"TTFT benchmark received no token (finish reason: {finish_reason}); first-token latency is undefined"
+        )
     return {
         "ttft_s": first[0],
         "prefill_steps_s": sum(steps[:-1]),

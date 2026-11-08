@@ -88,6 +88,7 @@ QWEN38_GRAPH_KEYS = {
     "plane_library": None,
     "ple_table": None,
     "kv_capacity": None,
+    "max_batch_size": None,
     "warmup": None,
     "head": {"filename_s1": None, "filename_s2": None, "session_options": None},
     "mtp": {"enabled": None, "prefill_head": None},

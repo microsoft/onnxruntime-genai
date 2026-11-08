@@ -4,8 +4,8 @@
 """Token-identity gate of the Engine-hosted qwen38_flash_graph backend.
 
 Runs the gate prompts (text / prose / random 2k, three chat prompts) as greedy turns and compares the token streams with a
-reference stream of the same prompts. The Engine never delivers the stop token itself (finish reason EOS), so a stream that
-ended with EOS is compared as tokens + [the stop token of the reference].
+reference stream of the same prompts. The Engine never delivers the stop token itself (finish reason EOS), so comparisons
+check delivered tokens and EOS termination, without claiming identity of the unobservable stop token.
 
 References (--reference <json>), either of
   * a file written by this script (`results[].tokens`, `.ended_with_eos` and `.spec`), e.g. a run of the same package with --no-mtp, or
@@ -13,10 +13,12 @@ References (--reference <json>), either of
   * a file of reference streams from another runner: {"cases": [{"case": "<kind>:<context>:<seed>" or "chat:<index>",
     "prompt_tokens": N, "old": {"tokens": [...incl. the stop token], "cycles": C, "accepted": A}, "new": {...}}]}.
 Without --reference the streams are only recorded (the result is "RECORDED", not PASS).
+Reference prompt hashes, when present, must match; legacy references without hashes still check prompt length.
 
 --prefill steps (prefill.enabled=false, the bit-exact muted-fold prompt path) must be token-identical to the reference (and to
 its cycle / accept counts when it has them: only another runner's streams do); --prefill fast is reported as agreement
 statistics (identical prefix, first token), because the fast prefill is tolerance level and not run-to-run reproducible.
+It requires matching prompt identity and a prefix of at least --min-fast-prefix tokens (default 1).
 
 usage: engine_gate.py <package> --out <json> [--no-mtp] [--ignore-eos] [--cases text,prose,random,chat]
                       [--prefill steps|fast] [--reference <json>] [--force-reject]
@@ -72,6 +74,7 @@ def load_reference(path):
     return {
         r["spec"]: {
             "prompt_tokens": r["prompt_len"],
+            "prompt_hash": r.get("prompt_hash"),
             # no cycle counts: a recording of another configuration (--no-mtp, --force-reject) has different ones by design
             "old": {
                 "tokens": list(r["tokens"]),
@@ -86,7 +89,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("model")
     parser.add_argument("--out", type=Path, required=True)
-    parser.add_argument("--no-mtp", action="store_true")
+    parser.add_argument(
+        "--no-mtp", action="store_true", help="S=1 decode; requires a non-folded package with S=1 graphs"
+    )
     parser.add_argument("--ignore-eos", action="store_true", help="record only: the package must not stop at an EOS id")
     parser.add_argument("--cases", default="text,prose,random,chat")
     parser.add_argument("--context", type=int, default=2048)
@@ -176,6 +181,7 @@ def main():
             entry["reference"] = {
                 "key": key,
                 "prompt_tokens_equal": reference[spec].get("prompt_tokens") in (None, len(prompt)),
+                "prompt_hash_equal": reference[spec].get("prompt_hash") in (None, entry["prompt_hash"]),
                 "identical": tokens == ref_tokens and ended_with_eos == ref_ended_with_eos,
                 "ended_with_eos_equal": ended_with_eos == ref_ended_with_eos,
                 "identical_prefix": common,
@@ -191,11 +197,13 @@ def main():
                     entry["reference"]["identical"]
                     and entry["reference"]["cycles_equal"]
                     and entry["reference"]["prompt_tokens_equal"]
+                    and entry["reference"]["prompt_hash_equal"]
                 )
             else:
                 required_prefix = min(max(1, args.min_fast_prefix), len(ref_tokens)) if ref_tokens else 0
                 check = (
                     entry["reference"]["prompt_tokens_equal"]
+                    and entry["reference"]["prompt_hash_equal"]
                     and entry["reference"]["first_equal"]
                     and entry["reference"]["identical_prefix"] >= required_prefix
                 )

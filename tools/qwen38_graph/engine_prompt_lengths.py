@@ -68,6 +68,12 @@ def run(args):
 def compare(args):
     a = {r["length"]: r for r in json.loads(Path(args.reference).read_text())["results"]}
     b = {r["length"]: r for r in json.loads(Path(args.candidate).read_text())["results"]}
+    if not a or a.keys() != b.keys():
+        print(
+            f"length sets must be equal and non-empty: missing {sorted(a.keys() - b.keys())}, extra {sorted(b.keys() - a.keys())}"
+        )
+        print("FAIL")
+        return 1
     ok = True
     first_equal = 0
     for n in sorted(a):

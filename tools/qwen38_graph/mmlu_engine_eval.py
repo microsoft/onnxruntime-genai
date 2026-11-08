@@ -108,6 +108,7 @@ def run(args):
             done[r["index"]] = r
     meta = {
         "max_new": args.max_new,
+        "force_reject": args.force_reject,
         "shard": args.shard,
         "shards": args.shards,
         "package": str(args.model),

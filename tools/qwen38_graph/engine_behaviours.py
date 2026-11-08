@@ -5,6 +5,9 @@
 test/cpp/engine/qwen38_graph_executor_tests.cpp): stop tokens, limits, stop strings, cancel (during prefill and decode),
 queueing of a second request, turn continuation, rewind, speculative statistics and the capability errors.
 
+This suite requires the single-slot baseline with max_request_length=33024. Other capacities and multi-slot scheduling
+need different probes and are rejected before any checks run.
+
 --prefill steps|fast overlays prefill.enabled (the v12b fast prefill is tolerance level and not run-to-run reproducible, so the
 "identical to the reference" checks are exact only with --prefill steps, the bit-exact muted-fold prompt path).
 
@@ -38,6 +41,15 @@ def expect_error(name, action, fragment):
     check(name, False, "no error raised")
 
 
+def require_baseline(capabilities):
+    if capabilities.configured_max_batch_size != 1 or capabilities.max_request_length != 33024:
+        raise ValueError(
+            "engine_behaviours.py requires the single-slot baseline "
+            "(configured_max_batch_size=1, max_request_length=33024); "
+            f"got {capabilities.configured_max_batch_size} slots and max_request_length={capabilities.max_request_length}"
+        )
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("model")
@@ -51,13 +63,14 @@ def main():
 
     overlay = {"model": {"qwen38_graph": {"prefill": {"enabled": args.prefill == "fast"}}}} if args.prefill else None
     model = load_model(args.model, args.provider, overlay)
+    engine = og.Engine(model)
+    capabilities = engine.get_capabilities()
+    require_baseline(capabilities)
     tokenizer = og.Tokenizer(model)
     prompts = Prompts.from_args(model, args)
-    engine = og.Engine(model)
     buffer = engine.create_event_buffer(16)
     finish = og.FinishReason
 
-    capabilities = engine.get_capabilities()
     check("capabilities: one row", capabilities.configured_max_batch_size == 1, capabilities.configured_max_batch_size)
     check(
         "capabilities: max_request_length is the KV capacity - 4",
