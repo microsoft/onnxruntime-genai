@@ -55,6 +55,7 @@ struct TestState : State {
   TestState(const Model& model, const GeneratorParams& params) : State{params, model} {}
   DeviceSpan<float> Run(int, DeviceSpan<int32_t>&, DeviceSpan<int32_t>) override { return {}; }
   void Execute(OrtSession& session, int length = 1, int variant = 0) { State::Run(session, true, length, variant); }
+  void ExecuteUncaptured(OrtSession& session) { State::Run(session, false); }
 };
 
 // Load a real GQA graph and inspect the same file's bindings.
@@ -70,6 +71,7 @@ struct TestGqaModel : Model {
     config_->model.decoder.outputs.present_value_names = "out.%d.v";
     config_->config_path = fs::path{ORTGENAI_TEST_WEBGPU_GQA_MODEL_DIR};
     config_->model.decoder.filename = "model.onnx";
+    session_options_->AddConfigEntry("session.disable_cpu_ep_fallback", "1");
     session = CreateSession(GetOrtEnv(), config_->model.decoder.filename, session_options_.get());
     session_info_.Add(*session);
   }
@@ -201,6 +203,103 @@ TEST(SharedCacheGrowth, MigratesFloat16BatchesAndHeadsWithoutChangingBits) {
       for (size_t i = 2048; i < 4096; ++i) EXPECT_EQ(migrated[head * 4096 + i].value, 0);
     }
   }
+}
+
+void CheckGqaDecodeThroughGrowth(bool capture) {
+  auto model = std::make_shared<TestGqaModel>();
+  auto params = CreateGeneratorParams(*model);
+  ASSERT_TRUE(params->use_graph_capture);
+  ASSERT_TRUE(params->IsPastPresentShareBufferEnabled(model->config_->model.type));
+  TestState state{*model, *params};
+  SharedKeyValueCache cache{state};
+  cache.Add();
+  cache.Update({}, 510);
+  ASSERT_EQ(cache.GetShape()[2], 512);
+  auto& device = *model->p_device_kvcache_;
+  std::vector<float> history(510);
+  std::iota(history.begin(), history.end(), 1.0f);
+  auto write = [&]<typename T>(OrtValue& tensor, const std::vector<T>& values) {
+    auto span = WrapTensor<T>(device, tensor);
+    std::copy(values.begin(), values.end(), span.CpuSpan().begin());
+    span.CopyCpuToDevice();
+  };
+  write(*state.inputs_[0], std::vector<float>(2 * 512 * 64, 0.0f));
+  std::vector<float> values(2 * 512 * 64, 100000.0f);  // Poison spare capacity.
+  for (size_t batch = 0; batch < 2; ++batch) {
+    for (size_t token = 0; token < history.size(); ++token) {
+      for (size_t dim = 0; dim < 64; ++dim) {
+        values[(batch * 512 + token) * 64 + dim] = history[token] + batch * 128 + dim / 8.0f;
+      }
+    }
+  }
+  write(*state.inputs_[1], values);
+  auto query = OrtValue::CreateTensor<float>(device.GetAllocator(), std::array<int64_t, 3>{2, 1, 128});
+  auto key = OrtValue::CreateTensor<float>(device.GetAllocator(), std::array<int64_t, 3>{2, 1, 64});
+  auto value = OrtValue::CreateTensor<float>(device.GetAllocator(), std::array<int64_t, 3>{2, 1, 64});
+  auto seqlens = OrtValue::CreateTensor<int32_t>(device.GetAllocator(), std::array<int64_t, 1>{2});
+  auto total = OrtValue::CreateTensor<int32_t>(device.GetAllocator(), std::array<int64_t, 1>{1});
+  auto attention = OrtValue::CreateTensor<float>(device.GetAllocator(), std::array<int64_t, 3>{2, 1, 128});
+  write(*query, std::vector<float>(256, 0.0f));
+  write(*key, std::vector<float>(128, 0.0f));
+  for (const char* name : {"q", "k", "v", "seqlens_k", "total_sequence_length"}) state.input_names_.push_back(name);
+  for (auto* tensor : {query.get(), key.get(), value.get(), seqlens.get(), total.get()}) {
+    state.inputs_.push_back(tensor);
+  }
+  state.output_names_.push_back("attention");
+  state.outputs_.push_back(attention.get());
+  int ordinal = 0;
+  auto decode = [&] {
+    const auto past_length = static_cast<int32_t>(history.size());
+    cache.Update({}, past_length + 1);
+    history.push_back(1000.0f + ++ordinal * 16);
+    std::vector<float> next(128);
+    for (size_t batch = 0; batch < 2; ++batch) {
+      for (size_t dim = 0; dim < 64; ++dim) next[batch * 64 + dim] = history.back() + batch * 128 + dim / 8.0f;
+    }
+    write(*value, next);
+    write(*seqlens, std::vector<int32_t>(2, past_length));
+    write(*total, std::vector<int32_t>{past_length + 1});
+    if (capture) {
+      state.Execute(*model->session);
+    } else {
+      state.ExecuteUncaptured(*model->session);
+    }
+    EXPECT_EQ(state.inputs_[0], state.outputs_[0]);
+    EXPECT_EQ(state.inputs_[1], state.outputs_[1]);
+    // Zero Q/K gives uniform attention over the live tokens, independently
+    // of cache capacity, poisoned tails, or whether this run was replayed.
+    const float mean = std::accumulate(history.begin(), history.end(), 0.0f) / history.size();
+    const auto output = Read(device, *attention);
+    for (size_t batch = 0; batch < 2; ++batch) {
+      for (size_t dim = 0; dim < 128; ++dim) {
+        EXPECT_NEAR(output[batch * 128 + dim], mean + batch * 128 + (dim % 64) / 8.0f, 0.005f);
+      }
+    }
+  };
+  const auto epoch = state.GraphCaptureEpoch();
+  decode();  // Record at length 511, then replay with changing values/lengths.
+  decode();
+  EXPECT_EQ(state.GraphCaptureEpoch(), epoch);
+  decode();  // Grow to 1024, migrate and recapture at length 513.
+  decode();
+  ASSERT_EQ(cache.GetShape()[2], 1024);
+  EXPECT_EQ(state.GraphCaptureEpoch(), epoch + 1);
+  for (size_t length : {size_t{2}, size_t{0}}) {
+    cache.RewindTo(length);
+    history.resize(length);
+    decode();  // Old live tokens become masked tails; overwrite the new token.
+    decode();
+    EXPECT_EQ(cache.GetShape()[2], 1024);
+    EXPECT_EQ(state.GraphCaptureEpoch(), epoch + 1);
+  }
+}
+
+TEST(SharedCacheGrowth, GqaUsesLogicalLengthThroughGrowthAndRewind) {
+  CheckGqaDecodeThroughGrowth(false);
+}
+
+TEST(SharedCacheGrowth, GqaReplayUsesLogicalLengthThroughGrowthAndRewind) {
+  CheckGqaDecodeThroughGrowth(true);
 }
 
 TEST(SharedCacheGrowth, PrefillReservesFirstDecodeToken) {
