@@ -8,13 +8,15 @@ on the full-attention layers), a sigmoid output gate per head and sandwich norms
 match the PyTorch model through a prefill longer than the window and the decode steps after it; that
 test needs transformers' LFM3 classes and an onnxruntime that runs CausalConvWithState. The other tests
 need no LFM3 classes: they build from a stand-in config, and the graph tests from a stand-in module tree
-with the module names of the checkpoints' remote code. Only the d1-2B causal test also runs its graph.
+with the module names of the checkpoints' remote code. Of those, only the KV cache tests, in onnxruntime_genai,
+and the d1-2B causal test run their graphs, so they need that onnxruntime too.
 """
 
 from __future__ import annotations
 
 import copy
 import importlib.util
+import json
 import re
 import types
 
@@ -29,7 +31,7 @@ from _builder_test_utils import (
 )
 
 torch = pytest.importorskip("torch")
-pytest.importorskip("onnx")
+onnx = pytest.importorskip("onnx")
 ort = pytest.importorskip("onnxruntime")
 if not hasattr(ort, "InferenceSession"):
     # _builder_test_utils puts an empty onnxruntime module in place when the package is missing.
@@ -96,11 +98,13 @@ def _session(tmp_path, model, name):
 
 
 def _empty_past(session, model):
-    """Zero-length KV caches and zero conv states for every past input of the session."""
+    """KV caches that hold no tokens and zero conv states for every past input of the session."""
     past = {}
     for graph_input in session.get_inputs():
         if graph_input.name.startswith("past_key_values"):
-            past[graph_input.name] = np.zeros((1, model.num_kv_heads, 0, model.head_size), np.float32)
+            # The sliding layer evicts from a buffer that holds the whole window from the first run.
+            length = SLIDING_WINDOW if graph_input.shape[2] == "past_sliding_length" else 0
+            past[graph_input.name] = np.zeros((1, model.num_kv_heads, length, model.head_size), np.float32)
         elif graph_input.name.endswith(".conv"):
             past[graph_input.name] = np.zeros((1, model.hidden_size, model.conv_L_cache - 1), np.float32)
     return past
@@ -309,6 +313,369 @@ def test_lfm3_graph_wiring(ep, io_dtype, extra_options, use_sandwich_norm):
             nodes[f"/model/layers.{layer_id + 1}/{next_norm}_layernorm/SkipLayerNorm"].inputs[1].name
             == f"{layer}/post_ffn_layernorm/output_0"
         )
+
+
+def _export_for_genai(tmp_path, name, hf_model, extra_options, ep="cpu", io_dtype=ir.DataType.FLOAT, config=None):
+    """An export and its genai_config.json, written in the order of builder.py's create_model."""
+    config = config or _stand_in_config()
+    # The stand-in names a Hub checkpoint; a local folder keeps the generation config and tokenizer lookups offline.
+    config._name_or_path = str(tmp_path)
+    model = LFM3Model(config, io_dtype, io_dtype, ep, str(tmp_path / "cache"), extra_options)
+    model.load_weights = lambda input_path: hf_model
+    model.make_model("")
+    output_dir = tmp_path / name
+    output_dir.mkdir()
+    model.save_model(str(output_dir))
+    model.make_genai_config(config, {}, str(output_dir))
+    return output_dir
+
+
+def _seeded_lfm3():
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(0)
+        return _stand_in_lfm3(_stand_in_config(), use_sandwich_norm=True)
+
+
+def _generator(og, model_dir, batch_size, num_beams, max_length):
+    model = og.Model(str(model_dir))
+    params = og.GeneratorParams(model)
+    # No EOS before max_length, so every run decodes through several evictions from the window cache.
+    params.set_search_options(batch_size=batch_size, num_beams=num_beams, min_length=max_length, max_length=max_length)
+    return og.Generator(model, params)
+
+
+def _generate(og, model_dir, prompts, num_beams, max_length=128, as_tensor=False):
+    """Each prompt's best sequence, the logits of every step and the length of the sliding layer's KV buffer.
+    Prompts of different lengths go in as one right-padded batch."""
+    generator = _generator(og, model_dir, len(prompts), num_beams, max_length)
+    width = max(len(prompt) for prompt in prompts)
+    pad = _stand_in_config().pad_token_id
+    tokens = np.array([prompt + [pad] * (width - len(prompt)) for prompt in prompts], np.int32)
+    generator.append_tokens(og.Tensor(tokens) if as_tensor else tokens)
+    logits = []
+    while not generator.is_done():
+        logits.append(generator.get_logits())
+        generator.generate_next_token()
+    sliding_past = generator.get_input(f"past_key_values.{LAYER_TYPES.index('sliding_attention')}.key")
+    return [generator.get_sequence(row) for row in range(len(prompts))], np.stack(logits), sliding_past.shape[2]
+
+
+def _prompts(*lengths):
+    rng = np.random.default_rng(0)
+    return [rng.integers(_stand_in_config().pad_token_id + 1, VOCAB_SIZE, size=length).tolist() for length in lengths]
+
+
+runs_conv_state = pytest.mark.skipif(
+    not ort_runs_causal_conv_with_state(),
+    reason="the installed onnxruntime cannot run com.microsoft:CausalConvWithState",
+)
+# CUDA keeps no rows past the window, and the per-row prompt runs copy device memory.
+on_cpu_and_cuda = pytest.mark.parametrize("ep,io_dtype", [("cpu", ir.DataType.FLOAT), ("cuda", ir.DataType.FLOAT16)])
+# In fp16 a step of a padded batch and of its row alone differ by up to 2.4e-3 on an H100 and 7.3e-3 on an A10.
+ATOL = {"cpu": 1e-4, "cuda": 1e-2}
+CACHE_SLACK = {"cpu": 16, "cuda": 0}
+
+
+def _import_genai(ep):
+    og = pytest.importorskip("onnxruntime_genai")
+    if ep == "cuda" and not og.is_cuda_available():
+        pytest.skip("needs the CUDA build of onnxruntime_genai")
+    return og
+
+
+@runs_conv_state
+@on_cpu_and_cuda
+# Beam search turns off the shared past/present KV buffers and reorders the caches every step.
+@pytest.mark.parametrize("num_beams", [1, 2])
+# In the second case max_length is shorter than the window, whose buffer ORT still wants whole.
+@pytest.mark.parametrize("prompt_length,max_length", [(10 * SLIDING_WINDOW, 128), (2, SLIDING_WINDOW - 1)])
+def test_lfm3_windowed_kv_cache_matches_the_full_cache_in_onnxruntime_genai(
+    tmp_path, ep, io_dtype, num_beams, prompt_length, max_length
+):
+    og = _import_genai(ep)
+    hf_model = _seeded_lfm3()
+    windowed = _export_for_genai(tmp_path, "windowed", hf_model, {}, ep, io_dtype)
+    full = _export_for_genai(tmp_path, "full", hf_model, {"windowed_kv_cache": False}, ep, io_dtype)
+    prompts = _prompts(prompt_length)
+
+    (sequence,), logits, sliding_length = _generate(og, windowed, prompts, num_beams, max_length)
+    (expected_sequence,), expected_logits, _ = _generate(og, full, prompts, num_beams, max_length)
+
+    assert sliding_length == max(SLIDING_WINDOW, min(SLIDING_WINDOW + CACHE_SLACK[ep], max_length))
+    np.testing.assert_array_equal(sequence, expected_sequence)
+    np.testing.assert_allclose(logits, expected_logits, rtol=0, atol=ATOL[ep])
+
+
+@runs_conv_state
+def test_lfm3_windowed_kv_cache_appends_at_each_position(tmp_path):
+    og = pytest.importorskip("onnxruntime_genai")
+    hf_model = _seeded_lfm3()
+    windowed = _export_for_genai(tmp_path, "windowed", hf_model, {})
+    full = _export_for_genai(tmp_path, "full", hf_model, {"windowed_kv_cache": False})
+
+    def run(model_dir):
+        generator = _generator(og, model_dir, 1, 1, 128)
+        logits = []
+        # Inside the window, one token, then past the window, each after tokens generated from the last append.
+        for chunk in _prompts(3, 1, 2 * SLIDING_WINDOW + 1, 1):
+            generator.append_tokens(np.array([chunk], np.int32))
+            for _ in range(3):
+                logits.append(generator.get_logits())
+                generator.generate_next_token()
+        # Conv state cannot be rewound, with any KV cache.
+        with pytest.raises(RuntimeError, match="RewindTo is currently not supported for lfm3"):
+            generator.rewind_to(1)
+        return generator.get_sequence(0), np.stack(logits)
+
+    sequence, logits = run(windowed)
+    expected_sequence, expected_logits = run(full)
+
+    np.testing.assert_array_equal(sequence, expected_sequence)
+    np.testing.assert_allclose(logits, expected_logits, rtol=0, atol=1e-4)
+
+
+@runs_conv_state
+@on_cpu_and_cuda
+# The windowed attention op takes every token of a step as real, so the runtime runs each padded prompt alone.
+@pytest.mark.parametrize("num_beams", [1, 2])
+# Shorter than the window, longer than the window, and the padded row after the longest one.
+@pytest.mark.parametrize("lengths", [(25, 40), (2, 40), (40, 25)])
+# A pad token inside a prompt stays part of it: only trailing ones are padding.
+@pytest.mark.parametrize("pad_inside", [False, True])
+def test_lfm3_windowed_kv_cache_runs_a_padded_batch_like_each_prompt_alone(
+    tmp_path, ep, io_dtype, lengths, num_beams, pad_inside
+):
+    og = _import_genai(ep)
+    windowed = _export_for_genai(tmp_path, "windowed", _seeded_lfm3(), {}, ep, io_dtype)
+    prompts = _prompts(*lengths)
+    if pad_inside:
+        prompts[0][0] = _stand_in_config().pad_token_id
+
+    sequences, logits, _ = _generate(og, windowed, prompts, num_beams)
+
+    width = max(lengths)
+    for row, prompt in enumerate(prompts):
+        # No padding, and as many new tokens as in the batch.
+        max_length = len(prompt) + len(sequences[row]) - width
+        # On an A10, fp16 rounds a batch of 1 and a batch of 2 differently, which flips near ties on this random model.
+        reference = [prompt] if ep == "cpu" else [prompt, prompt]
+        expected_sequences, expected_logits, _ = _generate(og, windowed, reference, num_beams, max_length)
+        np.testing.assert_array_equal(sequences[row][width:], expected_sequences[0][len(prompt) :])
+        beams = slice(row * num_beams, (row + 1) * num_beams)
+        np.testing.assert_allclose(logits[:, beams], expected_logits[:, :num_beams], rtol=0, atol=ATOL[ep])
+
+
+@runs_conv_state
+def test_lfm3_windowed_kv_cache_takes_a_padded_batch_as_a_tensor(tmp_path):
+    og = pytest.importorskip("onnxruntime_genai")
+    windowed = _export_for_genai(tmp_path, "windowed", _seeded_lfm3(), {})
+    prompts = _prompts(10, 40)
+
+    sequences, logits, _ = _generate(og, windowed, prompts, 1, as_tensor=True)
+    expected_sequences, expected_logits, _ = _generate(og, windowed, prompts, 1)
+
+    np.testing.assert_array_equal(sequences, expected_sequences)
+    np.testing.assert_array_equal(logits, expected_logits)
+
+
+@runs_conv_state
+def test_lfm3_padded_batch_takes_trailing_pad_tokens_as_padding_with_any_kv_cache(tmp_path):
+    # A batch has no other record of a row's length, so a prompt that really ends in the pad token loses it, as it did
+    # before window-sized KV caches.
+    og = pytest.importorskip("onnxruntime_genai")
+    hf_model = _seeded_lfm3()
+    windowed = _export_for_genai(tmp_path, "windowed", hf_model, {})
+    full = _export_for_genai(tmp_path, "full", hf_model, {"windowed_kv_cache": False})
+    short, long = _prompts(10, 40)
+    ends_in_pad = [*short, _stand_in_config().pad_token_id]
+
+    for model_dir in (windowed, full):
+        sequences, logits, _ = _generate(og, model_dir, [ends_in_pad, long], 1)
+        expected_sequences, expected_logits, _ = _generate(og, model_dir, [short, long], 1)
+        np.testing.assert_array_equal(sequences[0], expected_sequences[0])
+        np.testing.assert_array_equal(logits, expected_logits)
+
+
+@runs_conv_state
+def test_lfm3_batch_of_one_keeps_trailing_pad_tokens_with_any_kv_cache(tmp_path):
+    # A batch of one gets an all-ones attention mask, so its prompt is not cut at the pad token.
+    og = pytest.importorskip("onnxruntime_genai")
+    hf_model = _seeded_lfm3()
+    windowed = _export_for_genai(tmp_path, "windowed", hf_model, {})
+    full = _export_for_genai(tmp_path, "full", hf_model, {"windowed_kv_cache": False})
+    (prompt,) = _prompts(10)
+    ends_in_pad = [[*prompt, _stand_in_config().pad_token_id]]
+
+    sequences, logits, _ = _generate(og, windowed, ends_in_pad, 1)
+    expected_sequences, expected_logits, _ = _generate(og, full, ends_in_pad, 1)
+
+    np.testing.assert_array_equal(sequences, expected_sequences)
+    np.testing.assert_allclose(logits, expected_logits, rtol=0, atol=ATOL["cpu"])
+
+
+@runs_conv_state
+@on_cpu_and_cuda
+def test_lfm3_window_sized_caches_start_zeroed(tmp_path, ep, io_dtype):
+    og = _import_genai(ep)
+    windowed = _export_for_genai(tmp_path, "windowed", _seeded_lfm3(), {}, ep, io_dtype)
+    name = f"past_key_values.{LAYER_TYPES.index('sliding_attention')}.key"
+
+    # The second generator can get the memory the first one filled. Under beam search no shared buffer is zeroed, so
+    # only the window's own zeroing clears it.
+    for _ in range(2):
+        generator = _generator(og, windowed, 1, 2, 128)
+        assert not generator.get_input(name).any()
+        generator.append_tokens(np.array(_prompts(40), np.int32))
+        generator.generate_next_token()
+        del generator
+
+
+@runs_conv_state
+def test_lfm3_padded_batch_with_window_sized_caches_takes_appends_only_once(tmp_path):
+    og = pytest.importorskip("onnxruntime_genai")
+    windowed = _export_for_genai(tmp_path, "windowed", _seeded_lfm3(), {})
+    generator = _generator(og, windowed, 2, 1, 128)
+    short, long = _prompts(2, 3)
+    generator.append_tokens(np.array([[*short, _stand_in_config().pad_token_id], long], np.int32))
+
+    with pytest.raises(RuntimeError, match="only be called once"):
+        generator.append_tokens(np.array([long, long], np.int32))
+
+
+@runs_conv_state
+def test_lfm3_padded_batch_with_window_sized_caches_refuses_a_row_of_pad_tokens(tmp_path):
+    og = pytest.importorskip("onnxruntime_genai")
+    windowed = _export_for_genai(tmp_path, "windowed", _seeded_lfm3(), {})
+    generator = _generator(og, windowed, 2, 1, 128)
+    (prompt,) = _prompts(3)
+
+    with pytest.raises(RuntimeError, match="row 1 of the batch has only pad tokens"):
+        generator.append_tokens(np.array([prompt, [_stand_in_config().pad_token_id] * len(prompt)], np.int32))
+
+
+@runs_conv_state
+def test_lfm3_padded_batch_with_window_sized_caches_refuses_extra_outputs(tmp_path):
+    og = pytest.importorskip("onnxruntime_genai")
+    hf_model = _seeded_lfm3()
+    windowed = _export_for_genai(tmp_path, "windowed", hf_model, {"include_hidden_states": True})
+    full = _export_for_genai(tmp_path, "full", hf_model, {"include_hidden_states": True, "windowed_kv_cache": False})
+
+    # The rows go through in one run when none is padded, which fills the batch's hidden states.
+    _generate(og, windowed, _prompts(40, 40), 1)
+    with pytest.raises(RuntimeError, match="take no extra model inputs or outputs"):
+        _generate(og, windowed, _prompts(10, 40), 1)
+    # Full-length caches take the padded batch in one run, as before.
+    _generate(og, full, _prompts(10, 40), 1)
+
+
+@runs_conv_state
+def test_lfm3_cuda_graph_capture_needs_full_length_kv_caches(tmp_path):
+    og = _import_genai("cuda")
+    hf_model = _seeded_lfm3()
+    windowed = _export_for_genai(tmp_path, "windowed", hf_model, {}, "cuda", ir.DataType.FLOAT16)
+    full = _export_for_genai(tmp_path, "full", hf_model, {"enable_cuda_graph": True}, "cuda", ir.DataType.FLOAT16)
+
+    def generator_with_capture(model_dir):
+        config = og.Config(str(model_dir))
+        config.set_provider_option("cuda", "enable_cuda_graph", "1")
+        model = og.Model(config)
+        return og.Generator(model, og.GeneratorParams(model))
+
+    with pytest.raises(RuntimeError, match="window-sized KV caches"):
+        generator_with_capture(windowed)
+    generator_with_capture(full)
+
+
+@pytest.mark.parametrize(
+    "ep,io_dtype,architecture,extra_options,windowed",
+    [
+        ("cpu", ir.DataType.FLOAT, "Lfm3ForCausalLM", {}, True),
+        ("cuda", ir.DataType.FLOAT16, "Lfm3ForCausalLM", {}, True),
+        # The decoder of a multimodal checkpoint with its embeddings is a text model, which the runtime can run.
+        ("cpu", ir.DataType.FLOAT, "Lfm3VlForConditionalGeneration", {}, True),
+        ("cpu", ir.DataType.FLOAT, "Lfm3ForCausalLM", {"windowed_kv_cache": False}, False),
+        ("cuda", ir.DataType.FLOAT16, "Lfm3ForCausalLM", {"enable_cuda_graph": True}, False),
+        ("cuda", ir.DataType.FLOAT16, "Lfm3ForCausalLM", {"use_paged_attention": True}, False),
+        ("webgpu", ir.DataType.FLOAT16, "Lfm3ForCausalLM", {}, False),
+        ("trt-rtx", ir.DataType.FLOAT16, "Lfm3ForCausalLM", {}, False),
+        ("cpu", ir.DataType.FLOAT, "Lfm3VlForConditionalGeneration", {"exclude_embeds": True}, False),
+        ("cpu", ir.DataType.FLOAT, "Lfm3AudioForConditionalGeneration", {"exclude_embeds": True}, False),
+        ("cpu", ir.DataType.FLOAT, "Lfm3OmniForConditionalGeneration", {"exclude_embeds": True}, False),
+    ],
+)
+def test_lfm3_sliding_layers_keep_a_window_only_where_it_has_run(
+    tmp_path, ep, io_dtype, architecture, extra_options, windowed
+):
+    config = _stand_in_config(architecture)
+    multimodal = architecture in LFM3Model.MULTIMODAL
+    hf_model = _nested_stand_in(config) if multimodal else _stand_in_lfm3(config, use_sandwich_norm=True)
+    output_dir = _export_for_genai(tmp_path, "out", hf_model, extra_options, ep, io_dtype, config)
+
+    model = onnx.load(output_dir / "model.onnx", load_external_data=False)
+    sliding, full = (LAYER_TYPES.index(kind) for kind in ("sliding_attention", "full_attention"))
+
+    def past_shape(layer):
+        (past,) = [value for value in model.graph.input if value.name == f"past_key_values.{layer}.key"]
+        return [dim.dim_param or dim.dim_value for dim in past.type.tensor_type.shape.dim]
+
+    def attributes(layer):
+        (attention,) = [
+            node
+            for node in model.graph.node
+            if node.op_type in {"GroupQueryAttention", "PagedAttention"}
+            and node.name.startswith(f"/model/layers.{layer}/attn/")
+        ]
+        return {attribute.name for attribute in attention.attribute}
+
+    assert ("sliding_window_cache" in attributes(sliding)) == windowed
+    assert "sliding_window_cache" not in attributes(full)
+    assert (past_shape(sliding) != past_shape(full)) == windowed
+    decoder = json.loads((output_dir / "genai_config.json").read_text(encoding="utf-8"))["model"]["decoder"]
+    if windowed:
+        assert decoder["sliding_window"]["window_size"] == SLIDING_WINDOW
+        assert decoder["sliding_window"]["layers"] == [sliding]
+        assert decoder["sliding_window"]["slide_inputs"] is False
+    else:
+        assert "sliding_window" not in decoder
+
+
+def test_lfm3_export_cut_before_its_first_sliding_layer_has_no_window(tmp_path):
+    # Even an empty sliding_window block makes the runtime refuse graph capture and run each padded prompt alone.
+    limit = {"num_hidden_layers": LAYER_TYPES.index("sliding_attention")}
+    output_dir = _export_for_genai(tmp_path, "out", _seeded_lfm3(), limit)
+
+    decoder = json.loads((output_dir / "genai_config.json").read_text(encoding="utf-8"))["model"]["decoder"]
+    assert "sliding_window" not in decoder
+
+
+@pytest.mark.parametrize(
+    "ep,io_dtype,architecture,extra_options",
+    [
+        ("trt-rtx", ir.DataType.FLOAT16, "Lfm3ForCausalLM", {}),
+        ("webgpu", ir.DataType.FLOAT16, "Lfm3ForCausalLM", {}),
+        ("cuda", ir.DataType.FLOAT16, "Lfm3ForCausalLM", {"enable_cuda_graph": True}),
+        ("cuda", ir.DataType.FLOAT16, "Lfm3ForCausalLM", {"use_paged_attention": True}),
+        ("cpu", ir.DataType.FLOAT, "Lfm3VlForConditionalGeneration", {"exclude_embeds": True}),
+    ],
+)
+def test_lfm3_warns_when_it_ignores_windowed_kv_cache(capsys, ep, io_dtype, architecture, extra_options):
+    LFM3Model(
+        _stand_in_config(architecture), io_dtype, io_dtype, ep, None, {**extra_options, "windowed_kv_cache": True}
+    )
+
+    assert capsys.readouterr().out.count("ignores windowed_kv_cache=true") == 1
+    # Without the option nothing asked for the window, so nothing is ignored.
+    LFM3Model(_stand_in_config(architecture), io_dtype, io_dtype, ep, None, extra_options)
+    assert "ignores windowed_kv_cache" not in capsys.readouterr().out
+
+
+def test_lfm3_takes_windowed_kv_cache_where_it_has_run(capsys):
+    model = LFM3Model(
+        _stand_in_config(), ir.DataType.FLOAT, ir.DataType.FLOAT, "cpu", None, {"windowed_kv_cache": True}
+    )
+
+    assert model.uses_windowed_kv_cache()
+    assert "ignores windowed_kv_cache=true" not in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("exclude_embeds", [False, True])

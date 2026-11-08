@@ -256,7 +256,8 @@ struct StateUpdateReplayDesc {
 // Version 21: State gained prompt-input origin tracking, which changed its data layout.
 // Version 22: State gained the alignment-padding selection extent.
 // Version 23: DeviceBuffer gained ranged downloads and State gained prompt-chunk eligibility.
-inline constexpr uint32_t kDeviceInterfaceVersion = 23;
+// Version 24: Config::Engine::DynamicBatching gained host/device media budgets, changing Config's layout.
+inline constexpr uint32_t kDeviceInterfaceVersion = 24;
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}

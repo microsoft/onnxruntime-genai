@@ -85,6 +85,11 @@ TEST(DeviceInterfaceVersionTest, IsPastTheRangedDownloadAndPromptChunkLayout) {
   EXPECT_GE(kDeviceInterfaceVersion, kVersionOfTheRangedDownloadAndPromptChunk);
 }
 
+TEST(DeviceInterfaceVersionTest, IsPastTheEngineMediaBudgetConfigLayout) {
+  constexpr uint32_t kVersionOfTheEngineMediaBudget = 24;
+  EXPECT_GE(kDeviceInterfaceVersion, kVersionOfTheEngineMediaBudget);
+}
+
 TEST(DeviceSpanTest, RangeDownloadForwardsTheSubspanAndReturnsTheSameHostRange) {
   auto buffer = std::make_shared<RangeDownloadRecorder>(16 * sizeof(int32_t));
   auto* recorder = buffer.get();
