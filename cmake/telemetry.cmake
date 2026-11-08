@@ -15,6 +15,8 @@
 #
 # Either way this module defines the INTERFACE target `onnxruntime-genai-telemetry`, which
 # the main library links, so the rest of the build is agnostic to how the SDK was obtained.
+# Caller-supplied packages must already contain the SDK version and auth-mutex lifetime fixes;
+# generated source replacements below cannot repair an imported binary.
 
 if(NOT ENABLE_TELEMETRY)
   return()
@@ -96,6 +98,16 @@ endif()
 if(APPLE)
   set(MATSDK_SQLITE_PROVIDER SYSTEM CACHE STRING "Use Apple's system SQLite" FORCE)
   set(MATSDK_ZLIB_PROVIDER SYSTEM CACHE STRING "Use Apple's system libz" FORCE)
+  # The SDK skips creating system targets when it detects a vcpkg toolchain.
+  # Supply the canonical targets without replacing dependencies provided by the caller.
+  if(NOT TARGET SQLite3::SQLite3)
+    add_library(SQLite3::SQLite3 INTERFACE IMPORTED)
+    target_link_libraries(SQLite3::SQLite3 INTERFACE sqlite3)
+  endif()
+  if(NOT TARGET ZLIB::ZLIB)
+    add_library(ZLIB::ZLIB INTERFACE IMPORTED)
+    target_link_libraries(ZLIB::ZLIB INTERFACE z)
+  endif()
 else()
   set(MATSDK_SQLITE_PROVIDER MINIMAL CACHE STRING "Build the SDK's minimal private SQLite" FORCE)
   set(MATSDK_ZLIB_PROVIDER VENDORED CACHE STRING "Build the SDK's private zlib" FORCE)
@@ -125,6 +137,18 @@ if(DEFINED BUILD_VERSION)
 endif()
 set(BUILD_VERSION "3.10.309.1")
 FetchContent_MakeAvailable(cpp_client_telemetry)
+
+function(_ortgenai_replace_mat_source original replacement)
+  get_target_property(sources mat SOURCES)
+  list(FIND sources "${original}" position)
+  if(position EQUAL -1)
+    message(FATAL_ERROR "Update the 1DS SDK ${original} source replacement for the selected SDK target")
+  endif()
+  list(REMOVE_ITEM sources "${original}")
+  set_property(TARGET mat PROPERTY SOURCES "${sources}")
+  target_sources(mat PRIVATE "${replacement}")
+endfunction()
+
 # The SDK's lazy version string can otherwise be destroyed before GenAI joins the upload worker.
 # Compile a patched copy, leaving the downloaded source intact. Like the SDK PAL itself, this
 # immutable value uses process-lifetime storage; normal shutdown still releases SDK workers.
@@ -146,14 +170,34 @@ string(REPLACE "${_ortgenai_version_original}" "${_ortgenai_version_fixed}"
   _ortgenai_pal "${_ortgenai_pal}")
 set(ORTGENAI_TELEMETRY_PAL_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/telemetry-sdk/PAL.cpp")
 file(CONFIGURE OUTPUT "${ORTGENAI_TELEMETRY_PAL_SOURCE}" CONTENT "${_ortgenai_pal}" @ONLY)
-get_target_property(_ortgenai_mat_sources mat SOURCES)
-list(FIND _ortgenai_mat_sources "pal/PAL.cpp" _ortgenai_pal_position)
-if(_ortgenai_pal_position EQUAL -1)
-  message(FATAL_ERROR "Update the 1DS SDK PAL source replacement for the selected SDK target")
+_ortgenai_replace_mat_source("pal/PAL.cpp" "${ORTGENAI_TELEMETRY_PAL_SOURCE}")
+
+# Upload encoding can lazily initialize this mutex after the telemetry owner's exit registration.
+# Like the PAL version, it must survive until that owner has joined the real SDK worker.
+set(_ortgenai_auth_source "${cpp_client_telemetry_SOURCE_DIR}/lib/api/AuthTokensController.cpp")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_ortgenai_auth_source}")
+file(READ "${_ortgenai_auth_source}" _ortgenai_auth)
+set(_ortgenai_auth_original [=[        static std::mutex mutex;
+        return mutex;]=])
+set(_ortgenai_auth_fixed [=[        using AuthMutex = std::mutex;
+        alignas(AuthMutex) static unsigned char storage[sizeof(AuthMutex)];
+        static AuthMutex* mutex = ::new (storage) AuthMutex;
+        return *mutex;]=])
+set(_ortgenai_auth_include "#include \"AuthTokensController.hpp\"")
+string(FIND "${_ortgenai_auth}" "${_ortgenai_auth_original}" _ortgenai_auth_position)
+string(FIND "${_ortgenai_auth}" "${_ortgenai_auth_include}" _ortgenai_auth_include_position)
+if(_ortgenai_auth_position EQUAL -1 OR _ortgenai_auth_include_position EQUAL -1)
+  message(FATAL_ERROR "Update the 1DS SDK auth-mutex lifetime patch for the selected SDK source")
 endif()
-list(REMOVE_ITEM _ortgenai_mat_sources "pal/PAL.cpp")
-set_property(TARGET mat PROPERTY SOURCES "${_ortgenai_mat_sources}")
-target_sources(mat PRIVATE "${ORTGENAI_TELEMETRY_PAL_SOURCE}")
+string(REPLACE "${_ortgenai_auth_original}" "${_ortgenai_auth_fixed}"
+  _ortgenai_auth "${_ortgenai_auth}")
+# The generated copy no longer resides next to the SDK's API header.
+string(REPLACE "${_ortgenai_auth_include}" "#include \"api/AuthTokensController.hpp\"\n#include <new>"
+  _ortgenai_auth "${_ortgenai_auth}")
+set(ORTGENAI_TELEMETRY_AUTH_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/telemetry-sdk/AuthTokensController.cpp")
+file(CONFIGURE OUTPUT "${ORTGENAI_TELEMETRY_AUTH_SOURCE}" CONTENT "${_ortgenai_auth}" @ONLY)
+_ortgenai_replace_mat_source("api/AuthTokensController.cpp" "${ORTGENAI_TELEMETRY_AUTH_SOURCE}")
+
 if(DEFINED _ortgenai_saved_mat_build_version)
   set(BUILD_VERSION "${_ortgenai_saved_mat_build_version}")
   unset(_ortgenai_saved_mat_build_version)

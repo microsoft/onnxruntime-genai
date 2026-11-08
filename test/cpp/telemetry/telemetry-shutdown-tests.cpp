@@ -5,6 +5,7 @@
 #include "DebugEvents.hpp"
 #include "ITaskDispatcher.hpp"
 #include "mat/config.h"
+#include "api/AuthTokensController.hpp"
 #include "http/HttpClientFactory.hpp"
 #include "pal/PAL.hpp"
 
@@ -55,7 +56,9 @@ struct State {
   bool upload_at_exit = false;
   bool encode_started = false;
   bool version_destroyed = false;
+  bool auth_mutex_destroyed = false;
   int version_reads = 0;
+  int auth_mutex_reads = 0;
   int uploads_completed = 0;
   int workers_started = 0;
   int collector_events = 0;
@@ -78,7 +81,7 @@ struct State {
                !worker_joined || !worker.expired()) {
       Fail(32, "owner, native SDK worker, and mutex teardown were not fully exercised");
     }
-    if (upload_at_exit && (!encode_started || uploads_completed == 0 || version_reads < 2)) {
+    if (upload_at_exit && (!encode_started || uploads_completed == 0 || version_reads < 2 || auth_mutex_reads < 2)) {
       Fail(32, "shutdown did not exercise production decoration, encoding, and upload completion");
     }
     std::fputs("PASS: actual telemetry owner preserved SDK dependency lifetimes\n", stderr);
@@ -206,6 +209,22 @@ extern "C" void TelemetryTestVersionAccess() {
   ++state.version_reads;
 }
 
+extern "C" void TelemetryTestAuthMutexDestroyed() {
+  auto& state = GetState();
+  std::lock_guard lock(state.mutex);
+  state.auth_mutex_destroyed = true;
+}
+
+extern "C" void TelemetryTestAuthMutexAccess() {
+  auto& state = GetState();
+  std::lock_guard lock(state.mutex);
+  if (state.auth_mutex_destroyed) {
+    Fail(21, "SDK accessed its auth mutex after destruction");
+  }
+
+  ++state.auth_mutex_reads;
+}
+
 extern "C" void TelemetryTestBeforeEncode() {
   auto& state = GetState();
   std::unique_lock lock(state.mutex);
@@ -269,11 +288,13 @@ int main(int argc, char* argv[]) {
   }
   auto& state = GetState();
   state.upload_at_exit = mode == "upload-at-exit" || mode == "upload-after-reinit";
-  // Register after the singleton, but before the first event lazily initializes the SDK version.
-  // The original SDK destroys that version before this callback releases the blocked encoder.
+  // Register after the singleton, but before the SDK's lazy version and auth mutex.
+  // The original SDK destroys both before this callback releases the blocked encoder.
   if (state.upload_at_exit) {
     InitializeOwner(false);
     if (std::atexit(ReleaseCallback) != 0) Fail(32, "cannot register production upload release");
+    // Simulate an earlier upload initializing the auth mutex after its owner, even on non-libc++ hosts.
+    (void)sdk::AuthTokensController::GetMutex();
   }
   state.priming_failure = mode == "prime-failed" ? 1 : mode == "prime-allocation-failed" ? 2
                                                                                          : 0;

@@ -5,6 +5,14 @@ if(NOT ENABLE_TELEMETRY OR CMAKE_CROSSCOMPILING OR ANDROID OR IOS)
   return()
 endif()
 
+foreach(mode missing preserved sqlite-preserved zlib-preserved)
+  add_test(NAME TelemetryAppleDependencies-${mode}
+    COMMAND ${CMAKE_COMMAND}
+      -S "${CMAKE_CURRENT_LIST_DIR}/telemetry-dependencies"
+      -B "${CMAKE_CURRENT_BINARY_DIR}/telemetry-apple-dependencies-${mode}"
+      "-DGENAI_SOURCE_DIR=${CMAKE_SOURCE_DIR}" "-DMODE=${mode}")
+endforeach()
+
 set(TELEMETRY_SHUTDOWN_SDK_SOURCE_DIR "${cpp_client_telemetry_SOURCE_DIR}" CACHE PATH
   "Matching 1DS source tree for deterministic shutdown regressions (also supports static CONFIG packages)")
 if(NOT TELEMETRY_SHUTDOWN_SDK_SOURCE_DIR)
@@ -19,10 +27,13 @@ endif()
 
 set(shutdown_sdk_dir "${CMAKE_CURRENT_BINARY_DIR}/telemetry_shutdown_sdk")
 file(MAKE_DIRECTORY "${shutdown_sdk_dir}")
-foreach(source callbacks/DebugSource.cpp pal/WorkerThread.cpp api/Logger.cpp pal/PAL.cpp http/HttpRequestEncoder.cpp)
+foreach(source callbacks/DebugSource.cpp pal/WorkerThread.cpp api/Logger.cpp pal/PAL.cpp
+    api/AuthTokensController.cpp http/HttpRequestEncoder.cpp)
   set(source_path "${TELEMETRY_SHUTDOWN_SDK_SOURCE_DIR}/lib/${source}")
   if(source STREQUAL "pal/PAL.cpp" AND ORTGENAI_TELEMETRY_PAL_SOURCE)
     set(source_path "${ORTGENAI_TELEMETRY_PAL_SOURCE}")
+  elseif(source STREQUAL "api/AuthTokensController.cpp" AND ORTGENAI_TELEMETRY_AUTH_SOURCE)
+    set(source_path "${ORTGENAI_TELEMETRY_AUTH_SOURCE}")
   endif()
   set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${source_path}")
   file(READ "${source_path}" instrumented)
@@ -89,6 +100,29 @@ struct TelemetryTestSdkVersion : std::string {
     ~TelemetryTestSdkVersion() { TelemetryTestVersionDestroyed(); }
 };
 ]=])
+  elseif(source STREQUAL "api/AuthTokensController.cpp")
+    # A real destructor observer makes the libc++ failure deterministic on every host.
+    string(REPLACE "static std::mutex mutex;" "static TelemetryTestAuthMutex mutex;"
+      instrumented "${instrumented}")
+    string(REPLACE "using AuthMutex = std::mutex;" "using AuthMutex = TelemetryTestAuthMutex;"
+      instrumented "${instrumented}")
+    string(REPLACE "return mutex;" "TelemetryTestAuthMutexAccess();\n        return mutex;"
+      instrumented "${instrumented}")
+    string(REPLACE "return *mutex;" "TelemetryTestAuthMutexAccess();\n        return *mutex;"
+      instrumented "${instrumented}")
+    string(REGEX MATCHALL "TelemetryTestAuthMutexAccess\\(\\)" sites "${instrumented}")
+    list(LENGTH sites count)
+    if(NOT count EQUAL 1)
+      message(FATAL_ERROR "Update shutdown regression auth-mutex lifetime instrumentation")
+    endif()
+    string(PREPEND instrumented [=[
+#include <mutex>
+extern "C" void TelemetryTestAuthMutexDestroyed();
+extern "C" void TelemetryTestAuthMutexAccess();
+struct TelemetryTestAuthMutex : std::mutex {
+    ~TelemetryTestAuthMutex() { TelemetryTestAuthMutexDestroyed(); }
+};
+]=])
   else()
     set(encode_site "bool HttpRequestEncoder::handleEncode(EventsUploadContextPtr const& ctx)\n    {")
     string(FIND "${instrumented}" "${encode_site}" encode_position)
@@ -105,7 +139,8 @@ endforeach()
 
 add_library(telemetry_shutdown_sdk OBJECT
   "${shutdown_sdk_dir}/DebugSource.cpp" "${shutdown_sdk_dir}/WorkerThread.cpp" "${shutdown_sdk_dir}/Logger.cpp"
-  "${shutdown_sdk_dir}/PAL.cpp" "${shutdown_sdk_dir}/HttpRequestEncoder.cpp")
+  "${shutdown_sdk_dir}/PAL.cpp" "${shutdown_sdk_dir}/AuthTokensController.cpp"
+  "${shutdown_sdk_dir}/HttpRequestEncoder.cpp")
 target_link_libraries(telemetry_shutdown_sdk PRIVATE ${shutdown_sdk_target})
 target_include_directories(telemetry_shutdown_sdk PRIVATE
   "${TELEMETRY_SHUTDOWN_SDK_SOURCE_DIR}/lib" "${TELEMETRY_SHUTDOWN_SDK_SOURCE_DIR}/lib/api"
