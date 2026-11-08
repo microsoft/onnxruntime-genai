@@ -88,6 +88,12 @@ struct MediaPrefix {
 };
 
 struct PreparedMediaTurn {
+  PreparedMediaTurn() = default;
+  PreparedMediaTurn(PreparedMediaTurn&&) = default;
+  PreparedMediaTurn& operator=(PreparedMediaTurn&&) = default;
+  PreparedMediaTurn(const PreparedMediaTurn&) = delete;
+  PreparedMediaTurn& operator=(const PreparedMediaTurn&) = delete;
+
   std::vector<int32_t> tokens;
   std::vector<MediaSpan> media;
   std::shared_ptr<MediaAllocation> storage;

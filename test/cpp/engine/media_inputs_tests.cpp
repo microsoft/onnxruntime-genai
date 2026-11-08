@@ -97,11 +97,13 @@ TEST(MediaInputsTest, RealQwenVideoCanonicalOrderAndEncoderInputs) {
   auto prepared = store.Prepare(prompt, raw, nullptr, 0, 4096, videos.get());
   ASSERT_EQ(prepared.media.size(), 2u);
   store.Identify(prepared, 0, {});
-  auto identical = prepared;
+  store.ReserveItems(prepared.media.size());
+  store.Retain(prepared.media);
+  auto identical = store.Prepare(prompt, raw, nullptr, 0, 4096, videos.get());
   identical.media[0].positions = MakeQwenVisionPosition({1, 4, 6}, 2);
   store.Identify(identical, 0, {});
   EXPECT_EQ(identical.media[0].prefix, prepared.media[0].prefix);
-  auto changed_positions = prepared;
+  auto changed_positions = store.Prepare(prompt, raw, nullptr, 0, 4096, videos.get());
   changed_positions.media[0].positions = MakeQwenVisionPosition({1, 6, 4}, 2);
   store.Identify(changed_positions, 0, {});
   EXPECT_EQ(changed_positions.media[0].item, prepared.media[0].item);
@@ -142,8 +144,6 @@ TEST(MediaInputsTest, RealQwenVideoCanonicalOrderAndEncoderInputs) {
       }
     }
   }
-  store.ReserveItems(prepared.media.size());
-  store.Retain(prepared.media);
   const auto item = prepared.media[0].item;
   {
     ASSERT_NE(prepared.storage, nullptr);
