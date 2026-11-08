@@ -6,9 +6,11 @@
 #include <algorithm>
 #include <array>
 #include <climits>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <fstream>
+#include <limits>
 #include <mutex>
 #include <set>
 #include <sstream>
@@ -279,14 +281,18 @@ struct GgufFileEntry {
     }
     mmap_base = static_cast<uint8_t*>(mapped);
 #else
-    std::ifstream in(path, std::ios::binary | std::ios::ate);
+    auto in = path.open(std::ios::binary | std::ios::ate);
     if (!in) {
       throw std::runtime_error("Failed to open GGUF file: " + path.string());
     }
-    mmap_size = static_cast<size_t>(in.tellg());
+    const std::streamsize size = in.tellg();
+    if (size <= 0 || static_cast<uintmax_t>(size) > std::numeric_limits<size_t>::max()) {
+      throw std::runtime_error("Invalid GGUF file size: " + path.string());
+    }
+    mmap_size = static_cast<size_t>(size);
     in.seekg(0, std::ios::beg);
     fallback_buffer.resize(mmap_size);
-    if (mmap_size > 0 && !in.read(reinterpret_cast<char*>(fallback_buffer.data()), mmap_size)) {
+    if (!in.read(reinterpret_cast<char*>(fallback_buffer.data()), size)) {
       throw std::runtime_error("Failed to read GGUF file: " + path.string());
     }
     mmap_base = fallback_buffer.data();
@@ -496,8 +502,10 @@ std::string SharedInitializerFileIdentity(const fs::path& path) {
   if (::stat(path.c_str(), &file_info) == 0) {
     return std::to_string(file_info.st_dev) + ":" + std::to_string(file_info.st_ino);
   }
-#endif
   return path.string();
+#else
+  return fs::path{std::filesystem::canonical(path.c_str()).native()}.string();
+#endif
 }
 
 std::mutex g_gguf_files_mutex;
@@ -972,7 +980,7 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
     device_memory_budget_initial_free_bytes_ = free_bytes;
   }
   AddSharedInitializers();
-  AddGgufInitializers();
+  AddGgufInitializers(*session_options_);
 
   // Inputs-only interface backed by a host-accessible allocation, so the CPU updates the small
   // decode inputs in place with no per-step roundtrip. Null if the device offers no such allocator.
@@ -1030,6 +1038,7 @@ void Model::AddSharedInitializers() {
     std::ostringstream key;
     key << SharedInitializerFileIdentity(data_path) << ':' << offset << ':' << length << ':'
         << initializer.data_type << ':'
+        << memory_info->GetAllocatorName() << ':'
         << memory_info->GetDeviceType() << ':' << memory_info->GetDeviceId();
     for (int64_t dimension : initializer.shape) {
       key << ':' << dimension;
@@ -1069,7 +1078,7 @@ void Model::AddSharedInitializers() {
   }
 }
 
-void Model::AddGgufInitializers() {
+void Model::AddGgufInitializers(OrtSessionOptions& session_options) {
   auto gguf_cfg = config_->model.decoder.gguf_initializers;
   if (!gguf_cfg.config_file.empty()) {
     if (config_->memory_assets_only_) {
@@ -1089,6 +1098,9 @@ void Model::AddGgufInitializers() {
   if (gguf_cfg.tensors.empty()) {
     return;
   }
+  if (!config_->model.decoder.pipeline.empty()) {
+    throw std::runtime_error("GGUF initializers are not supported for pipelined decoders.");
+  }
   if (config_->memory_assets_only_) {
     throw std::runtime_error("Memory-only loading does not support GGUF initializers.");
   }
@@ -1102,19 +1114,22 @@ void Model::AddGgufInitializers() {
     const fs::path resolved = config_->ResolvePath(rel_file);
     auto entry = GetOrOpenGgufFile(resolved);
     opened_files.emplace(rel_file, entry);
-    ordered_files.push_back(entry);
     shared_initializer_entries_.push_back(entry);
     return entry;
   };
 
   for (const auto& f : gguf_cfg.files) {
-    open_file(f);
+    auto entry = open_file(f);
+    if (std::find(ordered_files.begin(), ordered_files.end(), entry) == ordered_files.end()) {
+      ordered_files.push_back(std::move(entry));
+    }
   }
 
   auto cpu_memory_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
   std::vector<std::string> ext_names;
   ext_names.reserve(gguf_cfg.tensors.size());
-  gguf_external_values_.reserve(gguf_cfg.tensors.size());
+  std::vector<std::unique_ptr<OrtValue>> ext_values;
+  ext_values.reserve(gguf_cfg.tensors.size());
 
   for (const auto& mapping : gguf_cfg.tensors) {
     if (mapping.onnx_name.empty() || mapping.gguf_name.empty()) {
@@ -1148,7 +1163,7 @@ void Model::AddGgufInitializers() {
     const auto data_type = mapping.data_type != 0
                                ? static_cast<ONNXTensorElementDataType>(mapping.data_type)
                                : matched_info->default_dtype;
-    const auto& shape = !mapping.shape.empty() ? mapping.shape : matched_info->default_shape;
+    const auto& shape = mapping.has_shape || !mapping.shape.empty() ? mapping.shape : matched_info->default_shape;
     size_t expected_bytes = OrtElementByteSize(data_type);
     for (int64_t d : shape) {
       if (d < 0) {
@@ -1170,14 +1185,15 @@ void Model::AddGgufInitializers() {
     void* tensor_ptr = matched_file->mmap_base + matched_info->data_offset;
     auto cpu_view = OrtValue::CreateTensor(*cpu_memory_info, tensor_ptr, matched_info->n_bytes, shape, data_type);
     ext_names.push_back(mapping.onnx_name);
-    gguf_external_values_.push_back(std::move(cpu_view));
+    ext_values.push_back(std::move(cpu_view));
 
     const bool share_tensor = mapping.has_share ? mapping.share : gguf_cfg.share;
     if (share_tensor && p_device_ && p_device_->GetType() != DeviceType::CPU) {
       auto memory_info = p_device_->GetMemoryInfo();
       std::ostringstream key;
       key << matched_file->identity << ':' << matched_info->data_offset << ':' << matched_info->n_bytes << ':'
-          << static_cast<int>(data_type) << ':' << memory_info->GetDeviceType() << ':' << memory_info->GetDeviceId();
+          << static_cast<int>(data_type) << ':' << memory_info->GetAllocatorName() << ':'
+          << memory_info->GetDeviceType() << ':' << memory_info->GetDeviceId();
       for (int64_t dimension : shape) {
         key << ':' << dimension;
       }
@@ -1198,13 +1214,16 @@ void Model::AddGgufInitializers() {
           g_shared_initializers[key.str()] = shared_entry;
         }
       }
-      session_options_->AddInitializer(mapping.onnx_name.c_str(), *shared_entry->shared_view);
+      session_options.AddInitializer(mapping.onnx_name.c_str(), *shared_entry->shared_view);
       shared_initializer_entries_.push_back(std::move(shared_entry));
     }
   }
 
-  session_options_->AddConfigEntry("session.use_external_initializer_file_buffers_directly", "1");
-  session_options_->AddExternalInitializers(ext_names, gguf_external_values_);
+  session_options.AddConfigEntry("session.use_external_initializer_file_buffers_directly", "1");
+  session_options.AddExternalInitializers(ext_names, ext_values);
+  for (auto& value : ext_values) {
+    gguf_external_values_.push_back(std::move(value));
+  }
 }
 
 Model::~Model() {

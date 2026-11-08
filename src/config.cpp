@@ -791,6 +791,7 @@ struct GgufTensorMapping_Element : JSON::Element {
 
   Element& OnArray(std::string_view name) override {
     if (name == "shape") {
+      v_.has_shape = true;
       return shape_;
     }
     throw JSON::unknown_value_error{};
@@ -4417,6 +4418,9 @@ void ValidateModelPaths(const Config& config) {
     }
   };
   validate_gguf(m.decoder.gguf_initializers, "model.decoder.gguf_initializers");
+  if (m.draft) {
+    validate_gguf(m.draft->gguf_initializers, "model.draft.gguf_initializers");
+  }
   validate_gguf(m.dflash2.gguf_initializers, "model.dflash2.gguf_initializers");
   validate_gguf(m.mtp.gguf_initializers, "model.mtp.gguf_initializers");
 }

@@ -225,7 +225,7 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
   std::shared_ptr<ThreadPool> GetOrCreatePreprocessingThreadPool() const;
   void CreateSessionOptions();
   void AddSharedInitializers();
-  void AddGgufInitializers();
+  void AddGgufInitializers(OrtSessionOptions& session_options);
 
   std::map<std::string, std::unique_ptr<OrtSessionOptions>> pipeline_session_options_;
 };

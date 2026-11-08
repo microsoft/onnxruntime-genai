@@ -527,6 +527,7 @@ struct Config {
       std::string file;
       int data_type{};
       std::vector<int64_t> shape;
+      bool has_shape{};
       bool share{};
       bool has_share{};
     };

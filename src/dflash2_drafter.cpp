@@ -1301,9 +1301,7 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
     }
     auto dst_sub = destination_bytes.subspan(destination_row * aux_row_bytes, ingest_count[i] * aux_row_bytes);
     auto src_sub = source_bytes.subspan(ingest_begin[i] * aux_row_bytes, ingest_count[i] * aux_row_bytes);
-    if (dst_sub.Span().data() != src_sub.Span().data()) {
-      dst_sub.CopyFrom(src_sub);
-    }
+    dst_sub.CopyFrom(src_sub);
     last_context_row[i] = CheckedMetadataValue(destination_row + ingest_count[i] - 1,
                                                "DFlash 2 anchor context row");
     destination_row += ingest_count[i];
