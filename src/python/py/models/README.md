@@ -432,7 +432,34 @@ This package uses the Engine prompt/images overload, not Generator's merge-embed
 
 Packed vision with MTP is not supported: use `exclude_mtp=true`, or select a supported block drafter for Qwen3.5-family targets. Flash-Next packed vision requires floating KV and does not support MTP or block drafters. It uses the ordinary paged Engine, not the specialized `qwen38_flash_graph` backend; a freshly exported complete package is required. Native FP8/NVFP4 checkpoint and operator requirements remain unchanged. Text-only MTP is unchanged. Vision-targeted adapters must first be merged into the source checkpoint; export rejects them instead of silently omitting their weights. Text-only adapters remain supported, and the vision loader accepts safetensors and PyTorch checkpoints, including sharded checkpoints.
 
-For the qualified native NVFP4 Flash-Next checkpoint, use FP16 I/O and floating KV while preserving native expert and Engram storage:
+#### Flash-Next packed vision setup
+
+For native NVFP4 Flash-Next checkpoints, use FP16 I/O and floating KV while preserving native expert and Engram storage. The following bounded A100 80 GiB example uses `nvidia/Qwen3.8-Flash-Next-NVFP4` revision `fc694b54fb0174e0913e6adf86691ef85a4ead47` with two request slots, six scheduled rows, and eager target-only execution. Its 64-block pool holds at most 16384 resident rows shared across requests; this is separate from the model's 262144-row architecture context and the example's 4096-row request limit.
+
+Save this runtime fragment as `flash_runtime.json` before running the export:
+
+```json
+{
+  "model": {
+    "decoder": {
+      "session_options": {
+        "provider_options": [
+          {"cuda": {"enable_cuda_graph": "0", "arena_extend_strategy": "kSameAsRequested"}}
+        ]
+      }
+    }
+  },
+  "engine": {
+    "dynamic_batching": {
+      "num_blocks": 64,
+      "max_batch_size": 2,
+      "max_scheduled_tokens": 6,
+      "media_device_bytes": 1048576
+    }
+  },
+  "search": {"chunk_size": 6}
+}
+```
 
 ```bash
 python src/python/py/models/builder.py -i path_to_pinned_flash_next_nvfp4_checkpoint -o output -p fp16 -e cuda \
@@ -441,7 +468,21 @@ python src/python/py/models/builder.py -i path_to_pinned_flash_next_nvfp4_checkp
   qmoe_weights_prepacked=1 num_blocks=64 max_batch_size=2 max_scheduled_tokens=6 paged_chunk_size=6
 ```
 
-The K-packed NVFP4 operator requires a compatible runtime; the released ORT 1.31.1 build did not qualify this layout. See [Flash-Next qualification](../../../../docs/paged_attention_engine.md#flash-next-qualification) for the pinned checkpoint/runtime, `flash_runtime.json`, required runtime environment, measured A100 profile, and limits. BF16 vision, larger scheduling profiles, and the specialized backend are not qualified by this example.
+The K-packed NVFP4 operator requires matching runtime layout support. This example uses ORT source `7201c96570759372e18b122ffe6d4a24367d542a`, built as 1.32.0 with CUDA 12.8 and SM80; the released CUDA 13 ORT 1.31.1 provider does not correctly execute this layout. Build GenAI and its core/add-on and Python binaries against the same SDK. A runtime version number alone does not establish operator/layout compatibility.
+
+Run inference with `ORT_FORCE_DETERMINISTIC_MOE=1` to avoid unused dense MoE tactic-profiling scratch on this runtime's NVFP4 GEMV path. Keep the required builder session settings rather than overriding them through `runtime_config`. Increasing slots or scheduled rows changes state and expert-workspace demand; choose deployment limits explicitly rather than assuming this profile scales to larger batches. This example does not cover BF16 vision or the specialized `qwen38_flash_graph` backend.
+
+The public Engine benchmark uses the exported package's runtime settings:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 ORT_FORCE_DETERMINISTIC_MOE=1 \
+  python examples/python/engine/vision-benchmark.py \
+    --model /path/to/flash-next-vision --image test/images/cars.jpg
+```
+
+It reports model loading, admission, encoder-only Runs, first-token latency, and token-event intervals. Each trial uses a fresh Engine and a 4096-row request, with a text warmup and three repetitions by default. For separate ORT node traces, add `--repeats 1 --profile flash-rotary`; profiling runs should not be compared directly with unprofiled timings.
+
+#### Qwen3.8-27B with DFlash2
 
 For the Qwen3.8-27B reference with seven-token DFlash2 verification, preserve the hybrid rollback capacity as well as the runtime draft limit:
 
@@ -456,7 +497,23 @@ python src/python/py/models/builder.py -i path_to_qwen_checkpoint -o output -p i
 
 Static KV scales must cover image-conditioned activations; text-only scales are not automatically suitable. Compare floating-KV and INT8-KV logits and clipping on representative images and held-out geometry. The text-feed `kv_cache_calibration` utility does not directly feed this packed embedding-input hybrid graph.
 
-Compare performance with matching CUDA kernel, autotuning, and CPU-lookup prefault settings, not just matching quantization labels. See the [reference qualification](../../../../docs/paged_attention_engine.md#reference-qualification) for the tested launch overlay, measurements, and calibration limits.
+Compare performance with matching CUDA kernel, autotuning, and CPU-lookup prefault settings, not just matching quantization labels. Apply this fragment with `Config.overlay()` before creating the Model when using that kernel/prefault configuration; select eager/captured execution separately with the existing CUDA provider option:
+
+```json
+{
+  "model": {
+    "decoder": {
+      "session_options": {
+        "ep.cuda.fpa_intb_gemm": "1",
+        "session.use_device_allocator_for_initializers": "1",
+        "ep.cuda.matmul_nbits_m_chunk_size": "512",
+        "ep.cuda.enable_gemm_auto_tune": "1"
+      }
+    },
+    "embedding": {"prefault": true}
+  }
+}
+```
 
 Prefix caching is enabled by default for supported dynamic-batching layouts. Set
 `engine.dynamic_batching.prefix_caching` to `false` in `genai_config.json` to
