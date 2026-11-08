@@ -117,7 +117,7 @@ TEST_F(SchedulerContractTest, MissingImageProducesPreparationWithoutLogicalProgr
   image->rows = 2;
   request->ReserveMedia(1);
   const std::array<MediaSpan, 1> media{{{0, image}}};
-  request->AppendMedia(media);
+  AppendSchedulingMedia(request, media);
   scheduler.AddRequest(request);
   const auto before = request->Snapshot();
   StepPlan plan;
@@ -141,7 +141,7 @@ TEST_F(SchedulerContractTest, PendingImageWaitsForRunnableDecodeToDrain) {
   image->rows = 2;
   image_request->ReserveMedia(1);
   const std::array<MediaSpan, 1> media{{{0, image}}};
-  image_request->AppendMedia(media);
+  AppendSchedulingMedia(image_request, media);
   scheduler.AddRequest(image_request);
   auto decode = Assigned(20);
   MakeDecodeResident(scheduler, *cache, decode);
@@ -189,7 +189,7 @@ TEST_F(SchedulerContractTest, FeatureResidencyDoesNotChangeThePrefillBoundary) {
         media.push_back({row, item});
       }
       request->ReserveMedia(media.size());
-      request->AppendMedia(media);
+      AppendSchedulingMedia(request, media);
       scheduler.AddRequest(request);
       StepPlan plan;
       ASSERT_TRUE(scheduler.PlanStep(plan).executable);
@@ -216,7 +216,7 @@ TEST_F(SchedulerContractTest, PrefillStopsBeforeTheNextMissingImage) {
       second->rows = 1;
       request->ReserveMedia(2);
       const std::array<MediaSpan, 2> media{{{0, first}, {2, second}}};
-      request->AppendMedia(media);
+      AppendSchedulingMedia(request, media);
       scheduler.AddRequest(request);
       StepPlan plan;
       const auto result = scheduler.PlanStep(plan);
@@ -239,7 +239,7 @@ TEST_F(SchedulerContractTest, CapacityBlockedPeerDoesNotSuppressResidentImagePre
     image->rows = 2;
     request->ReserveMedia(1);
     const std::array<MediaSpan, 1> media{{{1, image}}};
-    request->AppendMedia(media);
+    AppendSchedulingMedia(request, media);
     request->StagePrefixAdoption(1);
     request->CommitPrefixAdoption();
     MakePrefillResident(scheduler, *cache, request);
@@ -282,7 +282,7 @@ TEST_F(SchedulerContractTest, OccupiedPagedSlotDoesNotSuppressResidentImagePrepa
   image->rows = 2;
   request->ReserveMedia(1);
   const std::array<MediaSpan, 1> media{{{1, image}}};
-  request->AppendMedia(media);
+  AppendSchedulingMedia(request, media);
   request->StagePrefixAdoption(1);
   request->CommitPrefixAdoption();
   MakePrefillResident(scheduler, *cache, request);
@@ -313,7 +313,7 @@ TEST_F(SchedulerContractTest, MissingImageDoesNotSuppressUnserviceablePeerFailur
   image->rows = 2;
   request->ReserveMedia(1);
   const std::array<MediaSpan, 1> media{{{0, image}}};
-  request->AppendMedia(media);
+  AppendSchedulingMedia(request, media);
   scheduler.AddRequest(request);
   auto peer = Assigned(20);
   scheduler.AddRequest(peer);
@@ -350,7 +350,7 @@ TEST_F(SchedulerContractTest, OccupiedPagedSlotDefersQueuedImagesWithoutFeatureT
         images[i]->features = std::make_shared<Tensor>(GetDeviceInterface(DeviceType::CPU), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
       request->ReserveMedia(1);
       const std::array<MediaSpan, 1> media{{{1, images[i]}}};
-      request->AppendMedia(media);
+      AppendSchedulingMedia(request, media);
       request->StagePrefixAdoption(1);
       request->CommitPrefixAdoption();
       scheduler.AddRequest(request);
@@ -379,7 +379,7 @@ TEST_F(SchedulerContractTest, MissingImageDoesNotSuppressLaterQueuedTextPrefill)
   image->rows = 2;
   image_request->ReserveMedia(1);
   const std::array<MediaSpan, 1> media{{{0, image}}};
-  image_request->AppendMedia(media);
+  AppendSchedulingMedia(image_request, media);
   auto text = Assigned(10);
   scheduler.AddRequest(image_request);
   scheduler.AddRequest(text);
@@ -400,7 +400,7 @@ TEST_F(SchedulerContractTest, QueuedImagePreparationRespectsPerRequestCapacityFa
       auto image = std::make_shared<MediaItem>();
       image->rows = 2;
       request->ReserveMedia(1);
-      request->AppendMedia(std::array<MediaSpan, 1>{{{0, image}}});
+      AppendSchedulingMedia(request, std::array<MediaSpan, 1>{{{0, image}}});
       scheduler.AddRequest(request);
     }
     if (unserviceable)
@@ -451,7 +451,7 @@ TEST_F(SchedulerContractTest, QueuedImagePreparationProbesTheProspectivePrefixBo
   auto image = std::make_shared<MediaItem>();
   image->rows = 2;
   request->ReserveMedia(1);
-  request->AppendMedia(std::array<MediaSpan, 1>{{{4, image}}});
+  AppendSchedulingMedia(request, std::array<MediaSpan, 1>{{{4, image}}});
   scheduler.AddRequest(request);
   const auto match = cache->MatchPrefix(*request);
   ASSERT_TRUE(match);
@@ -481,7 +481,7 @@ TEST_F(SchedulerContractTest, MediaChunkFinishesAnOffsetCacheBlockExactly) {
       image->features = std::make_shared<Tensor>(GetDeviceInterface(DeviceType::CPU), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
       request->ReserveMedia(1);
       const std::array<MediaSpan, 1> media{{{0, image}}};
-      request->AppendMedia(media);
+      AppendSchedulingMedia(request, media);
       request->StagePrefixAdoption(3);
       request->CommitPrefixAdoption();
       scheduler.AddRequest(request);
@@ -514,7 +514,7 @@ TEST_F(SchedulerContractTest, MediaPrefillUsesTheFurthestBudgetedBlockBoundary) 
         image->features = std::make_shared<Tensor>(GetDeviceInterface(DeviceType::CPU), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
         request->ReserveMedia(1);
         const std::array<MediaSpan, 1> media{{{0, image}}};
-        request->AppendMedia(media);
+        AppendSchedulingMedia(request, media);
         request->StagePrefixAdoption(3);
         request->CommitPrefixAdoption();
         scheduler.AddRequest(request);
@@ -557,7 +557,7 @@ TEST_F(SchedulerContractTest, DisabledResolvedPrefixCachingDoesNotAlignMediaPref
       image->rows = image_rows;
       image->features = std::make_shared<Tensor>(GetDeviceInterface(DeviceType::CPU), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
       request->ReserveMedia(1);
-      request->AppendMedia(std::array<MediaSpan, 1>{{{0, image}}});
+      AppendSchedulingMedia(request, std::array<MediaSpan, 1>{{{0, image}}});
       request->StagePrefixAdoption(3);
       request->CommitPrefixAdoption();
       MakePrefillResident(scheduler, *cache, request);

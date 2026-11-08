@@ -12,6 +12,8 @@
 
 #include "models/preprocessing/processor.h"
 #include "models/preprocessing/genai_tokenizer.h"
+#include "models/preprocessing/qwen_vision_position.h"
+#include "models/preprocessing/bailing_vision_position.h"
 #include "models/decoder_only.h"
 #include "models/env_utils.h"
 #include "engine/media.h"
@@ -48,6 +50,17 @@ TEST(MediaInputsTest, RealQwenVideoCanonicalOrderAndEncoderInputs) {
   const auto raw = tokenizer.Encode(prompt.c_str());
   auto prepared = store.Prepare(prompt, raw, nullptr, 0, 4096, videos.get());
   ASSERT_EQ(prepared.media.size(), 2u);
+  store.Identify(prepared, 0, {});
+  auto identical = prepared;
+  identical.media[0].positions = MakeQwenVisionPosition({1, 4, 6}, 2);
+  store.Identify(identical, 0, {});
+  EXPECT_EQ(identical.media[0].prefix, prepared.media[0].prefix);
+  auto changed_positions = prepared;
+  changed_positions.media[0].positions = MakeQwenVisionPosition({1, 6, 4}, 2);
+  store.Identify(changed_positions, 0, {});
+  EXPECT_EQ(changed_positions.media[0].item, prepared.media[0].item);
+  EXPECT_NE(changed_positions.media[0].prefix, prepared.media[0].prefix);
+  EXPECT_EQ(changed_positions.media[1].prefix, prepared.media[1].prefix);
   EXPECT_LT(prepared.media[0].start, prepared.media[1].start);
   EXPECT_NE(prepared.media[0].item, prepared.media[1].item);
   const auto output = GetEnv("ORTGENAI_ENGINE_VIDEO_REFERENCE_OUTPUT");
@@ -78,6 +91,31 @@ TEST(MediaInputsTest, RealQwenVideoCanonicalOrderAndEncoderInputs) {
     }
   }
   store.Retain(prepared.media);
+  const auto item = prepared.media[0].item;
+  const std::array<MediaSpan, 2> slices{{
+      {1, item, MakeQwenVisionPosition({1, 2, 4}, 2), 2, 1},
+      {5, item, MakeQwenVisionPosition({1, 2, 4}, 2), 2, 4},
+  }};
+  const std::array<int64_t, 8> lookup_tokens{raw[0], raw[0], raw[0], raw[0], raw[0], raw[0], raw[0], raw[0]};
+  const auto features = item->features->GetByteSpan().CopyDeviceToCpu();
+  const auto row_bytes = static_cast<size_t>(model->cpu_embedding_->hidden_size_) * Ort::SizeOf(model->cpu_embedding_->type_);
+  for (const auto& [first_row, rows] : {std::pair{0u, 8u}, std::pair{2u, 4u}}) {
+    Tensor embeddings{GetDeviceInterface(DeviceType::CPU), model->cpu_embedding_->type_};
+    embeddings.CreateTensor(std::array<int64_t, 2>{rows, model->cpu_embedding_->hidden_size_});
+    CpuEmbedding::Workspace workspace;
+    model->cpu_embedding_->Run(std::span<const int64_t>{lookup_tokens}.first(rows), embeddings, workspace);
+    const auto original_view = embeddings.GetByteSpan().CopyDeviceToCpu();
+    const std::vector<uint8_t> original{original_view.begin(), original_view.end()};
+    ApplyMediaFeatures(slices, first_row, rows, embeddings, 0);
+    const auto replaced = embeddings.GetByteSpan().CopyDeviceToCpu();
+    for (size_t row = 0; row < rows; ++row) {
+      const auto absolute = first_row + row;
+      const auto source = absolute >= 1 && absolute < 3 ? absolute : absolute >= 5 && absolute < 7 ? absolute - 1
+                                                                                                   : item->rows;
+      const auto* expected = source < item->rows ? features.data() + source * row_bytes : original.data() + row * row_bytes;
+      EXPECT_EQ(std::memcmp(replaced.data() + row * row_bytes, expected, row_bytes), 0);
+    }
+  }
   std::array<OrtxFrame, 4> forward{}, reverse{};
   for (size_t frame = 0; frame < frames.size(); ++frame) {
     CheckResult(OrtxGetRawFrame(videos->clips_[0].get(), frame, &forward[frame]));
@@ -416,14 +454,17 @@ TEST(MediaInputsTest, PositionsUseGeometryRatherThanExpandedRowCount) {
   auto second = std::make_shared<MediaItem>();
   second->grid = {1, 4, 4};
   second->rows = 4;
-  const std::array<MediaSpan, 2> media{{{3, first}, {12, second}}};
-  EXPECT_EQ(MediaPosition(media, 2, 2), (std::array<int64_t, 3>{2, 2, 2}));
-  EXPECT_EQ(MediaPosition(media, 3, 2), (std::array<int64_t, 3>{3, 3, 3}));
-  EXPECT_EQ(MediaPosition(media, 7, 2), (std::array<int64_t, 3>{3, 4, 4}));
-  EXPECT_EQ(MediaPosition(media, 9, 2), (std::array<int64_t, 3>{6, 6, 6}));
-  EXPECT_EQ(MediaPosition(media, 13, 2), (std::array<int64_t, 3>{9, 9, 10}));
-  EXPECT_EQ(MediaPosition(media, 16, 2), (std::array<int64_t, 3>{11, 11, 11}));
-  EXPECT_EQ(MediaPosition(media, 7, 2), (std::array<int64_t, 3>{3, 4, 4}));
+  const std::array<MediaSpan, 2> media{{
+      {3, first, MakeQwenVisionPosition(first->grid, 2)},
+      {12, second, MakeQwenVisionPosition(second->grid, 2)},
+  }};
+  EXPECT_EQ(MediaPosition(media, 2), (std::array<int64_t, 3>{2, 2, 2}));
+  EXPECT_EQ(MediaPosition(media, 3), (std::array<int64_t, 3>{3, 3, 3}));
+  EXPECT_EQ(MediaPosition(media, 7), (std::array<int64_t, 3>{3, 4, 4}));
+  EXPECT_EQ(MediaPosition(media, 9), (std::array<int64_t, 3>{6, 6, 6}));
+  EXPECT_EQ(MediaPosition(media, 13), (std::array<int64_t, 3>{9, 9, 10}));
+  EXPECT_EQ(MediaPosition(media, 16), (std::array<int64_t, 3>{11, 11, 11}));
+  EXPECT_EQ(MediaPosition(media, 7), (std::array<int64_t, 3>{3, 4, 4}));
 }
 
 TEST(MediaInputsTest, ResizePreflightMatchesNativeTieAndMinimumPixelRules) {
@@ -470,7 +511,10 @@ TEST(MediaInputsTest, PositionRangesPreserveImageBoundariesAndLaterTextOffsets) 
   auto second = std::make_shared<MediaItem>();
   second->grid = {1, 4, 4};
   second->rows = 4;
-  const std::array<MediaSpan, 2> media{{{3, first}, {12, second}}};
+  const std::array<MediaSpan, 2> media{{
+      {3, first, MakeQwenVisionPosition(first->grid, 2)},
+      {12, second, MakeQwenVisionPosition(second->grid, 2)},
+  }};
   const std::array<std::array<int64_t, 20>, 3> expected{{
       {0, 1, 2, 3, 3, 3, 3, 3, 3, 6, 7, 8, 9, 9, 9, 9, 11, 12, 13, 14},
       {0, 1, 2, 3, 3, 3, 4, 4, 4, 6, 7, 8, 9, 9, 10, 10, 11, 12, 13, 14},
@@ -480,10 +524,78 @@ TEST(MediaInputsTest, PositionRangesPreserveImageBoundariesAndLaterTextOffsets) 
                                      std::pair{14u, 4u}, std::pair{20u, 0u}}) {
     std::array<std::vector<int64_t>, 3> actual;
     for (auto& plane : actual) plane.resize(count);
-    MediaPositions(media, start, 2, {actual[0], actual[1], actual[2]});
+    MediaPositions(media, start, {actual[0], actual[1], actual[2]});
     for (size_t plane = 0; plane < 3; ++plane)
       EXPECT_TRUE(std::equal(actual[plane].begin(), actual[plane].end(), expected[plane].begin() + start));
   }
+}
+
+TEST(MediaInputsTest, NoncontiguousFeatureSlicesHaveIndependentPositionRanges) {
+  auto item = std::make_shared<MediaItem>();
+  item->rows = 6;
+  item->grid = {1, 100, 100};
+  const auto positions = MakeQwenVisionPosition({1, 2, 4}, 2);
+  const std::array<MediaSpan, 2> media{{
+      {1, item, positions, 2, 1},
+      {5, item, positions, 2, 4},
+  }};
+  EXPECT_EQ(MediaPosition(media, 2), (std::array<int64_t, 3>{1, 1, 2}));
+  EXPECT_EQ(MediaPosition(media, 3), (std::array<int64_t, 3>{3, 3, 3}));
+  EXPECT_EQ(MediaPosition(media, 6), (std::array<int64_t, 3>{5, 5, 6}));
+  EXPECT_EQ(MediaPosition(media, 7), (std::array<int64_t, 3>{7, 7, 7}));
+  EXPECT_THROW((MediaSpan{0, item, positions, 3, 0}), std::invalid_argument);
+  EXPECT_THROW((MediaSpan{0, item, positions, 2, 5}), std::invalid_argument);
+  EXPECT_THROW((MediaSpan{std::numeric_limits<size_t>::max(), item}), std::invalid_argument);
+}
+
+TEST(MediaInputsTest, PositionRangesRejectOverflowAndIncompatiblePlanes) {
+  std::array<int64_t, 2> first{}, second{};
+  std::array<int64_t, 1> short_plane{};
+  EXPECT_THROW(MediaPositions({}, 0, {first, second, short_plane}), std::invalid_argument);
+  EXPECT_THROW(MediaPositions({}, std::numeric_limits<size_t>::max(), {first, second, first}),
+               std::overflow_error);
+  const auto position = MakeQwenVisionPosition({1, 4, 6}, 2);
+  EXPECT_THROW(position->Fill(5, 0, {first, second, first}), std::invalid_argument);
+  EXPECT_THROW(position->Fill(0, std::numeric_limits<int64_t>::max(), {first, second, first}),
+               std::overflow_error);
+  auto item = std::make_shared<MediaItem>();
+  item->rows = 2;
+  const std::array<MediaSpan, 2> unordered{{{3, item}, {1, item}}};
+  const std::array<MediaSpan, 2> overlapping{{{1, item}, {2, item}}};
+  EXPECT_THROW(MediaPositions(unordered, 0, {first, second, first}), std::invalid_argument);
+  EXPECT_THROW(MediaPositions(overlapping, 0, {first, second, first}), std::invalid_argument);
+}
+
+TEST(MediaInputsTest, BailingPositionsUseSignedCentersAndTemporalTextAdvance) {
+  for (const size_t temporal : {1u, 2u}) {
+    auto item = std::make_shared<MediaItem>();
+    item->rows = temporal * 24;
+    const auto positions = MakeBailingVisionPosition({static_cast<int64_t>(temporal), 8, 12}, 2);
+    const std::array<MediaSpan, 1> media{{{1, item, positions}}};
+    EXPECT_EQ(MediaPosition(media, 1), (std::array<int64_t, 3>{1, 0, -1}));
+    EXPECT_EQ(MediaPosition(media, 6), (std::array<int64_t, 3>{1, 0, 4}));
+    EXPECT_EQ(MediaPosition(media, 7), (std::array<int64_t, 3>{1, 1, -1}));
+    if (temporal == 2)
+      EXPECT_EQ(MediaPosition(media, 25), (std::array<int64_t, 3>{3, 2, 1}));
+    const auto next = static_cast<int64_t>((temporal - 1) * 2 + 2);
+    EXPECT_EQ(MediaPosition(media, 1 + item->rows), (std::array<int64_t, 3>{next, next, next}));
+    EXPECT_TRUE(positions->Equals(*MakeBailingVisionPosition({static_cast<int64_t>(temporal), 8, 12}, 2)));
+    EXPECT_FALSE(positions->Equals(*MakeQwenVisionPosition({1, 8, 12}, 2)));
+  }
+}
+
+TEST(MediaInputsTest, BailingCoordinateLimitsDoNotOverflowIntermediateSums) {
+  const auto positions = MakeBailingVisionPosition({1, 8, 12}, 2);
+  std::array<int64_t, 1> time{}, height{}, width{};
+  const auto limit = std::numeric_limits<int64_t>::max();
+  positions->Fill(23, limit - 3, {time, height, width});
+  EXPECT_EQ(time[0], limit - 3);
+  EXPECT_EQ(height[0], limit - 1);
+  EXPECT_EQ(width[0], limit);
+  EXPECT_THROW(positions->Fill(23, limit - 2, {time, height, width}), std::overflow_error);
+  EXPECT_THROW(MakeBailingVisionPosition({0, 8, 12}, 2), std::invalid_argument);
+  EXPECT_THROW(MakeBailingVisionPosition({1, 7, 12}, 2), std::invalid_argument);
+  EXPECT_THROW(MakeBailingVisionPosition({limit, 8, 12}, 2), std::overflow_error);
 }
 
 TEST(MediaInputsTest, PrefixIdentityDoesNotReplaceVocabularyInputs) {
@@ -494,13 +606,17 @@ TEST(MediaInputsTest, PrefixIdentityDoesNotReplaceVocabularyInputs) {
   auto second = CreateRequestWithPrompt(engine, tokens);
   auto image_a = std::make_shared<MediaItem>();
   image_a->rows = 2;
-  image_a->prefix_base = 1;
   auto image_b = std::make_shared<MediaItem>();
   image_b->rows = 2;
-  image_b->prefix_base = 3;
   first->ReserveMedia(1);
   second->ReserveMedia(1);
-  const std::array<MediaSpan, 1> first_media{{{2, image_a}}}, second_media{{{2, image_b}}};
+  std::array<MediaSpan, 1> first_media{{{2, image_a}}}, second_media{{{2, image_b}}};
+  auto first_prefix = std::make_shared<MediaPrefix>();
+  first_prefix->first_id = 1;
+  auto second_prefix = std::make_shared<MediaPrefix>();
+  second_prefix->first_id = 3;
+  first_media[0].prefix = first_prefix;
+  second_media[0].prefix = second_prefix;
   first->AppendMedia(first_media);
   second->AppendMedia(second_media);
   EXPECT_TRUE(std::equal(first->TokensCpu().begin(), first->TokensCpu().end(), tokens.begin()));
@@ -512,6 +628,34 @@ TEST(MediaInputsTest, PrefixIdentityDoesNotReplaceVocabularyInputs) {
   const std::array<int32_t, 1> private_id{-1};
   EXPECT_THROW(invalid->BeginTurn(private_id), std::invalid_argument);
   EXPECT_TRUE(invalid->IsAwaitingFirstTurn());
+}
+
+TEST(MediaInputsTest, DecoderIdentityIncludesSlicesTokensAndCoordinateSemantics) {
+  auto item = std::make_shared<MediaItem>();
+  item->rows = 8;
+  const std::array<int32_t, 6> tokens{2, 2, 2, 2, 2, 2};
+  MediaSpan span{3, item, MakeQwenVisionPosition({1, 4, 6}, 2), 6, 1};
+  MediaPrefix identity;
+  identity.item = item;
+  identity.positions = span.positions;
+  identity.tokens.assign(tokens.begin(), tokens.end());
+  identity.feature_offset = span.feature_offset;
+  identity.position_base = 3;
+  EXPECT_TRUE(identity.Matches(span, tokens, 3));
+  span.positions = MakeQwenVisionPosition({1, 4, 6}, 2);
+  EXPECT_TRUE(identity.Matches(span, tokens, 3));
+  span.positions = MakeQwenVisionPosition({1, 6, 4}, 2);
+  EXPECT_FALSE(identity.Matches(span, tokens, 3));
+  span.positions = MakeBailingVisionPosition({1, 4, 6}, 2);
+  EXPECT_FALSE(identity.Matches(span, tokens, 3));
+  span.positions = identity.positions;
+  EXPECT_FALSE(identity.Matches(span, tokens, 4));
+  span.feature_offset = 2;
+  EXPECT_FALSE(identity.Matches(span, tokens, 3));
+  span.feature_offset = 1;
+  auto different_tokens = tokens;
+  different_tokens[2] = 3;
+  EXPECT_FALSE(identity.Matches(span, different_tokens, 3));
 }
 
 TEST(MediaInputsTest, EncoderFailureBudgetIsRequestLocalAndClearedAtTurnBoundaries) {

@@ -523,18 +523,18 @@ void Request::ClearMediaPreparationFailure() noexcept {
 std::span<const int32_t> Request::PrefixTokensCpu() const {
   if (media_.empty()) return tokens_host_;
   prefix_tokens_.assign(tokens_host_.begin(), tokens_host_.end());
-  // These private IDs are never decoder inputs. Exact item interning gives every media row a
-  // distinct identity while preserving the cache's collision-checked token and parent comparisons.
+  // Private row IDs include feature slices, tokens and coordinate semantics, never decoder inputs.
   for (const auto& span : media_) {
-    const auto end = std::min(tokens_host_.size(), span.start + span.item->rows);
+    if (!span.prefix) throw std::logic_error("Media prefix identity was not prepared before admission.");
+    const auto end = std::min(tokens_host_.size(), span.End());
     for (size_t row = span.start; row < end; ++row)
-      prefix_tokens_[row] = -span.item->prefix_base - static_cast<int32_t>(row - span.start);
+      prefix_tokens_[row] = -span.prefix->first_id - static_cast<int32_t>(row - span.start);
   }
   return prefix_tokens_;
 }
 
 std::array<int64_t, 3> Request::Position(size_t row) const {
-  return MediaPosition(media_, row, static_cast<size_t>(params_->model_->config_->model.vision.spatial_merge_size));
+  return MediaPosition(media_, row);
 }
 
 void Request::RewindToStartOfTurn(uint64_t turn_id) {

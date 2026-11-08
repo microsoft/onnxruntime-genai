@@ -14,6 +14,7 @@
 #include "engine_test_doubles.h"
 #include "engine_test_helpers.h"
 #include "models/io/rotary_position_history.h"
+#include "models/preprocessing/qwen_vision_position.h"
 
 namespace Generators {
 namespace test {
@@ -205,7 +206,10 @@ TEST(VarlenDecoderIOTest, RotaryHistoryBoundsMediaCoordinatesAndOverwritesUnused
   auto second = std::make_shared<MediaItem>();
   second->grid = {1, 4, 4};
   second->rows = 4;
-  const std::array<MediaSpan, 2> media{{{1, first}, {8, second}}};
+  const std::array<MediaSpan, 2> media{{
+      {1, first, MakeQwenVisionPosition(first->grid, 2)},
+      {8, second, MakeQwenVisionPosition(second->grid, 2)},
+  }};
   const std::array<std::array<int64_t, 11>, 3> expected{{
       {0, 1, 1, 1, 1, 1, 1, 4, 5, 5, 5},
       {0, 1, 1, 1, 2, 2, 2, 4, 5, 5, 6},
@@ -216,7 +220,7 @@ TEST(VarlenDecoderIOTest, RotaryHistoryBoundsMediaCoordinatesAndOverwritesUnused
     for (const size_t past : {8u, 0u}) {
       auto request = CreateRequestWithPrompt(engine, std::array<int32_t, 13>{2, 3, 4, 5, 6, 7, 8, 9, 8, 7, 6, 5, 4});
       request->ReserveMedia(2);
-      request->AppendMedia(media);
+      AppendSchedulingMedia(request, media);
       if (past != 0) {
         request->StagePrefixAdoption(past);
         request->CommitPrefixAdoption();
