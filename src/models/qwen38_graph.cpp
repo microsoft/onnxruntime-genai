@@ -799,7 +799,9 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
 void Qwen38GraphEngine::WarmupForCurrentThread() {
   // ORT's graph cache is thread-local. A lifetime token also distinguishes reused OS thread IDs.
   thread_local const auto current_thread = std::make_shared<const WarmupThread>();
-  std::erase_if(warmup_threads_, [](const auto& thread) { return thread.expired(); });
+  warmup_threads_.erase(std::remove_if(warmup_threads_.begin(), warmup_threads_.end(),
+                                       [](const auto& thread) { return thread.expired(); }),
+                        warmup_threads_.end());
   if (std::any_of(warmup_threads_.begin(), warmup_threads_.end(),
                   [&](const auto& thread) { return thread.lock() == current_thread; })) {
     return;
@@ -1161,7 +1163,9 @@ void Qwen38GraphEngine::BuildTarget() {
       for (int s = 0; s < max_batch_; ++s) {
         std::vector<Qwen38StateReplayDesc> fast_descs;
         std::vector<Qwen38StateReplayDesc> generic_descs;
-        for (const auto& [su_name, su_tensor] : state_update_tensors_) {
+        for (const auto& state_update : state_update_tensors_) {
+          const auto& su_name = state_update.first;
+          const auto& su_tensor = state_update.second;
           const size_t dot1 = su_name.find('.');
           const size_t dot2 = su_name.find('.', dot1 + 1);
           const std::string lid_str = su_name.substr(dot1 + 1, dot2 - dot1 - 1);
