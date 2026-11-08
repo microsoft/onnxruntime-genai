@@ -39,6 +39,48 @@ struct HostReservation {
   ~HostReservation() { accounting->host_bytes -= bytes; }
 };
 
+void ValidateCoordinates(std::span<const MediaSpan> media, size_t first_row, size_t remaining_rows,
+                         std::span<const MediaSpan> history, const std::array<int64_t, 2>& limits) {
+  if (limits[0] > limits[1] || first_row > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) ||
+      remaining_rows > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) - first_row ||
+      (!history.empty() && history.back().End() > first_row))
+    throw std::invalid_argument("Media coordinate plan exceeds its decoder range.");
+  const auto validate = [&](int64_t coordinate) {
+    if (coordinate < limits[0] || coordinate > limits[1])
+      throw std::invalid_argument("Media coordinate plan exceeds its decoder range.");
+  };
+  size_t cursor = first_row;
+  int64_t next = MediaPosition(history, first_row)[0];
+  const auto text = [&](size_t count) {
+    if (!count) return;
+    validate(next);
+    validate(AddPosition(next, static_cast<int64_t>(count) - 1));
+    next = AddPosition(next, static_cast<int64_t>(count));
+  };
+  std::array<std::array<int64_t, 64>, 3> scratch{};
+  for (const auto& span : media) {
+    text(span.start - cursor);
+    if (span.positions) {
+      for (size_t offset = 0; offset < span.rows;) {
+        const auto count = std::min(scratch[0].size(), span.rows - offset);
+        span.positions->Fill(offset, next,
+                             {std::span<int64_t>{scratch[0]}.first(count),
+                              std::span<int64_t>{scratch[1]}.first(count),
+                              std::span<int64_t>{scratch[2]}.first(count)});
+        for (const auto& plane : scratch)
+          for (size_t index = 0; index < count; ++index)
+            validate(plane[index]);
+        offset += count;
+      }
+      next = AddPosition(next, span.positions->text_advance);
+    } else {
+      text(span.rows);
+    }
+    cursor = span.End();
+  }
+  text(remaining_rows - (cursor - first_row));
+}
+
 }  // namespace
 
 MediaItem::~MediaItem() {
@@ -271,7 +313,7 @@ void MediaStore::ValidateTextTokens(std::span<const int32_t> tokens) const {
 
 PreparedMediaTurn MediaStore::Prepare(const std::string& prompt, std::span<const int32_t> raw_tokens,
                                       const Images* images, size_t first_row, size_t remaining_rows,
-                                      const Videos* videos) {
+                                      const Videos* videos, std::span<const MediaSpan> history) {
   const VisionPreparationInput input{prompt, raw_tokens, images, videos, remaining_rows};
   const auto& processor = *model_->vision_->preparation;
   const auto estimate = processor.Estimate(input, host_limit_);
@@ -315,6 +357,7 @@ PreparedMediaTurn MediaStore::Prepare(const std::string& prompt, std::span<const
                               span.rows, span.feature_offset);
     previous_end = AddBytes(span.start, span.rows);
   }
+  ValidateCoordinates(result.media, first_row, remaining_rows, history, processor.CoordinateRange());
   if (!result.media.empty()) {
     result.storage = TransferHost(AddBytes(MultiplyBytes(result.tokens.capacity(), sizeof(int32_t)),
                                            MultiplyBytes(result.media.capacity(), sizeof(MediaSpan))),

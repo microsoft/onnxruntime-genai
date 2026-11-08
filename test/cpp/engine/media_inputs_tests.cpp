@@ -176,6 +176,16 @@ TEST(MediaInputsTest, RealQwenVideoCanonicalOrderAndEncoderInputs) {
   }
   {
     struct InvalidPlan : VisionPreparation {
+      struct PositionProbe : VisionPosition {
+        PositionProbe(size_t rows, int64_t advance, int64_t value)
+            : VisionPosition{rows, advance}, value{value} {}
+        void Fill(size_t, int64_t, const std::array<std::span<int64_t>, 3>& output) const override {
+          for (auto plane : output) std::fill(plane.begin(), plane.end(), value);
+        }
+        bool Equals(const VisionPosition&) const override { return false; }
+        size_t SizeBytes() const override { return sizeof(*this); }
+        int64_t value;
+      };
       explicit InvalidPlan(std::unique_ptr<VisionPreparation> processor) : processor{std::move(processor)} {}
       size_t Estimate(const VisionPreparationInput& input, size_t limit) const override {
         return processor->Estimate(input, limit);
@@ -200,6 +210,16 @@ TEST(MediaInputsTest, RealQwenVideoCanonicalOrderAndEncoderInputs) {
           case 4:
             plan->spans[0].feature_offset = plan->units[0].rows;
             break;
+          case 5:
+          case 6:
+          case 7: {
+            const auto range = CoordinateRange();
+            plan->spans[0].positions = std::make_shared<PositionProbe>(
+                plan->spans[0].rows, failure == 7 ? range[1] + 1 : 1,
+                failure == 5 ? range[0] - 1 : failure == 6 ? range[1] + 1
+                                                           : 0);
+            break;
+          }
         }
         return plan;
       }
@@ -210,6 +230,7 @@ TEST(MediaInputsTest, RealQwenVideoCanonicalOrderAndEncoderInputs) {
       void ValidateTextTokens(std::span<const int32_t> tokens) const override {
         processor->ValidateTextTokens(tokens);
       }
+      std::array<int64_t, 2> CoordinateRange() const override { return processor->CoordinateRange(); }
       std::unique_ptr<VisionPreparation> processor;
       int failure{};
       mutable bool materialized{};
@@ -217,12 +238,20 @@ TEST(MediaInputsTest, RealQwenVideoCanonicalOrderAndEncoderInputs) {
     auto invalid = std::make_unique<InvalidPlan>(std::move(model->vision_->preparation));
     auto* probe = invalid.get();
     model->vision_->preparation = std::move(invalid);
-    for (int failure = 0; failure < 5; ++failure) {
+    for (int failure = 0; failure < 8; ++failure) {
       probe->failure = failure;
       probe->materialized = false;
       EXPECT_THROW(store.Prepare(prompt, raw, nullptr, 0, 4096, videos.get()), std::invalid_argument);
       EXPECT_FALSE(probe->materialized) << "failure=" << failure;
     }
+    probe->failure = 8;
+    const std::array<MediaSpan, 1> invalid_history{{
+        {0, item, std::make_shared<InvalidPlan::PositionProbe>(item->rows, probe->CoordinateRange()[1] + 1, 0)},
+    }};
+    EXPECT_THROW(store.Prepare(prompt, raw, nullptr, item->rows, 4096 - item->rows,
+                               videos.get(), invalid_history),
+                 std::invalid_argument);
+    EXPECT_FALSE(probe->materialized);
     model->vision_->preparation = std::move(probe->processor);
   }
   {

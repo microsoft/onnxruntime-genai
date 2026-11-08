@@ -192,6 +192,12 @@ void QwenVisionPreparation::ValidateTextTokens(std::span<const int32_t> tokens) 
     throw std::invalid_argument("Image markers require the formatted prompt and images overload.");
 }
 
+std::array<int64_t, 2> QwenVisionPreparation::CoordinateRange() const {
+  if (config_.model.context_length <= 0)
+    throw std::runtime_error("Packed Qwen positions require a positive exported context length.");
+  return {0, static_cast<int64_t>(config_.model.context_length) - 1};
+}
+
 size_t QwenVisionPreparation::Estimate(const VisionPreparationInput& input, size_t host_limit) const {
   const auto patch = static_cast<size_t>(config_.model.vision.patch_size);
   const auto merge = static_cast<size_t>(config_.model.vision.spatial_merge_size);

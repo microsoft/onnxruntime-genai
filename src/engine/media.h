@@ -109,7 +109,7 @@ class MediaStore {
   MediaStore(std::shared_ptr<DecoderOnly_Model> model, size_t host_limit, size_t device_limit);
   PreparedMediaTurn Prepare(const std::string& prompt, std::span<const int32_t> raw_tokens,
                             const Images* images, size_t first_row, size_t remaining_rows,
-                            const Videos* videos = nullptr);
+                            const Videos* videos = nullptr, std::span<const MediaSpan> history = {});
   void ValidateTextTokens(std::span<const int32_t> tokens) const;
   void Identify(PreparedMediaTurn& turn, size_t first_row, std::span<const MediaSpan> history);
   void ReserveItems(size_t count);

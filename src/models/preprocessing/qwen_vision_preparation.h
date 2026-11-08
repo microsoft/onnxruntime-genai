@@ -17,6 +17,7 @@ struct QwenVisionPreparation : VisionPreparation {
                                          const VisionPreparationInput& input, size_t host_limit) const override;
   std::vector<NamedTensors> Materialize(const VisionPlan& plan) const override;
   void ValidateTextTokens(std::span<const int32_t> tokens) const override;
+  std::array<int64_t, 2> CoordinateRange() const override;
 
  private:
   const Config& config_;
