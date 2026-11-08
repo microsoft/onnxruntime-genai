@@ -138,7 +138,7 @@ TEST(GeneratorPromptValidationTest, CacheOnlyPipelineWindowAcceptsTrailingPaddin
   for (bool device : {false, true}) {
     for (bool continued : {false, true}) {
       for (const auto& tokens : {std::vector<int32_t>{1, 1, 1, 1, 0, 0, 0, 0},
-                                std::vector<int32_t>{1, 2, 3, 0, 0}}) {
+                                 std::vector<int32_t>{1, 2, 3, 0, 0}}) {
         SCOPED_TRACE(testing::Message() << "device=" << device << " continued=" << continued
                                         << " length=" << tokens.size());
         auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "last-token-generation");
