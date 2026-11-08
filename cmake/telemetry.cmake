@@ -123,7 +123,7 @@ FetchContent_Declare(
 if(DEFINED BUILD_VERSION)
   set(_ortgenai_saved_mat_build_version "${BUILD_VERSION}")
 endif()
-set(BUILD_VERSION "3.10.281.1")
+set(BUILD_VERSION "3.10.309.1")
 FetchContent_MakeAvailable(cpp_client_telemetry)
 # The SDK's lazy version string can otherwise be destroyed before GenAI joins the upload worker.
 # Compile a patched copy, leaving the downloaded source intact. Like the SDK PAL itself, this

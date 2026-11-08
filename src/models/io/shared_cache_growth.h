@@ -10,6 +10,8 @@ namespace Generators {
 // Capacity changes are rare; a provider-matched Pad graph migrates BNSH tensors
 // on device without treating opaque WebGPU buffer handles as offset pointers.
 struct SharedCacheGrowth {
+  static bool CanAutoShare(const Model& model, const GeneratorParams& params);
+
   static bool IsSupported(const State& state, std::span<const std::string> input_names,
                           std::span<const std::string> output_names);
 

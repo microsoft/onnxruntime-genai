@@ -57,6 +57,26 @@ struct TestState : State {
   void Execute(OrtSession& session, int length = 1, int variant = 0) { State::Run(session, true, length, variant); }
 };
 
+// Load a real GQA graph and inspect the same file's bindings.
+struct TestGqaModel : Model {
+  TestGqaModel() : Model{MakeConfig()} {
+    config_->search.past_present_share_buffer = false;
+    config_->model.decoder.num_key_value_heads = 1;
+    config_->model.decoder.num_attention_heads = 2;
+    config_->model.decoder.head_size = 64;
+    config_->model.decoder.inputs.past_key_names = "kv.%d.k";
+    config_->model.decoder.inputs.past_value_names = "kv.%d.v";
+    config_->model.decoder.outputs.present_key_names = "out.%d.k";
+    config_->model.decoder.outputs.present_value_names = "out.%d.v";
+    config_->config_path = fs::path{ORTGENAI_TEST_WEBGPU_GQA_MODEL_DIR};
+    config_->model.decoder.filename = "model.onnx";
+    session = CreateSession(GetOrtEnv(), config_->model.decoder.filename, session_options_.get());
+    session_info_.Add(*session);
+  }
+  std::unique_ptr<State> CreateState(DeviceSpan<int32_t>, const GeneratorParams&) const override { return nullptr; }
+  std::unique_ptr<OrtSession> session;
+};
+
 std::vector<float> Read(DeviceInterface& device, OrtValue& value) {
   auto wrapped = WrapTensor<float>(device, value);
   auto data = wrapped.CopyDeviceToCpu();
@@ -109,6 +129,47 @@ void CheckGrowth(const std::shared_ptr<TestModel>& model) {
 
 TEST(SharedCacheGrowth, MigratesBatchesAndHeadsAndRetainsAliasing) {
   CheckGrowth(std::make_shared<TestModel>());
+}
+
+TEST(SharedCacheGrowth, SymbolicShapeAloneDoesNotEnableSharing) {
+  auto model = std::make_shared<TestModel>();
+  auto params = CreateGeneratorParams(*model);
+  params->search.past_present_share_buffer = false;
+  EXPECT_FALSE(params->IsPastPresentShareBufferEnabled(model->config_->model.type));
+  TestState state{*model, *params};
+  EXPECT_THROW(SharedKeyValueCache{state}, std::runtime_error);
+  model->config_->memory_assets_only_ = true;
+  EXPECT_FALSE(SharedCacheGrowth::CanAutoShare(*model, *params));
+  model->p_device_kvcache_ = GetDeviceInterface(DeviceType::CPU);
+  EXPECT_FALSE(SharedCacheGrowth::CanAutoShare(*model, *params));
+}
+
+TEST(SharedCacheGrowth, AutoSharesSparseGqaBindingsWithoutChangingConfig) {
+  auto model = std::make_shared<TestGqaModel>();
+  auto params = CreateGeneratorParams(*model);
+  ASSERT_FALSE(params->search.past_present_share_buffer);
+  ASSERT_TRUE(params->IsPastPresentShareBufferEnabled(model->config_->model.type));
+  TestState state{*model, *params};
+  SharedKeyValueCache cache{state};
+  cache.Add();
+  cache.Update({}, 128);
+  auto* original = state.inputs_[0];
+  EXPECT_EQ(state.inputs_[0], state.outputs_[0]);
+  cache.Update({}, 320);
+  EXPECT_EQ(state.inputs_[0], original);
+  cache.Update({}, 513);
+  EXPECT_EQ(cache.GetShape()[2], 1024);
+  EXPECT_EQ(state.inputs_[0], state.outputs_[0]);
+  EXPECT_NE(state.inputs_[0], original);
+  EXPECT_FALSE(params->search.past_present_share_buffer);
+  params->search.num_beams = 2;
+  EXPECT_FALSE(params->IsPastPresentShareBufferEnabled(model->config_->model.type));
+  params->search.num_beams = 1;
+  model->config_->memory_assets_only_ = true;
+  EXPECT_FALSE(SharedCacheGrowth::CanAutoShare(*model, *params));
+  model->config_->memory_assets_only_ = false;
+  model->p_device_kvcache_ = GetDeviceInterface(DeviceType::CPU);
+  EXPECT_FALSE(SharedCacheGrowth::CanAutoShare(*model, *params));
 }
 
 TEST(SharedCacheGrowth, MigratesFloat16BatchesAndHeadsWithoutChangingBits) {

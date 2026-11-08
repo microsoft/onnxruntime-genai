@@ -139,5 +139,50 @@ TEST_F(StateGraphCaptureTest, BudgetFallbackLogsOnceAndKeepsExistingIds) {
   EXPECT_EQ(capture_log, first_message);
 }
 
+constexpr const char* kLfm2ModelPath = MODEL_PATH "hf-internal-testing/tiny-random-lfm2-fp32";
+
+// What creating a generator under graph capture throws, on the tiny LFM2 graph made an LFM3 one whose layer 3 slides.
+// The flag is set directly, so this runs on CPU; a CUDA session would set it from enable_cuda_graph.
+std::string GraphCaptureError(bool window_sized, bool share_buffer) {
+  auto config = std::make_unique<Config>(fs::path{kLfm2ModelPath}, std::string_view{});
+  config->model.type = "lfm3";
+  config->model.decoder.layer_types[3] = "sliding_attention";
+  if (window_sized) {
+    // What the builder writes for this layer.
+    config->model.decoder.sliding_window.emplace();
+    config->model.decoder.sliding_window->window_size = 4;
+    config->model.decoder.sliding_window->slide_key_value_cache = false;
+    config->model.decoder.sliding_window->slide_inputs = false;
+    config->model.decoder.sliding_window->layers = {3};
+  }
+  config->search.max_length = 64;
+  config->search.past_present_share_buffer = share_buffer;
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  auto params = CreateGeneratorParams(*model);
+  params->use_graph_capture = true;
+  try {
+    CreateGenerator(*model, *params);
+  } catch (const std::exception& e) {
+    return e.what();
+  }
+  return {};
+}
+
+TEST(ConvKeyValueCacheGraphCaptureTest, RefusesWindowSizedCaches) {
+  if (!fs::path{kLfm2ModelPath}.exists()) {
+    GTEST_SKIP() << "tiny-random-lfm2-fp32 test model not found";
+  }
+  EXPECT_NE(GraphCaptureError(true, true).find("window-sized KV caches"), std::string::npos);
+  EXPECT_EQ(GraphCaptureError(false, true), "");
+}
+
+TEST(ConvKeyValueCacheGraphCaptureTest, RefusesSeparatePastAndPresent) {
+  if (!fs::path{kLfm2ModelPath}.exists()) {
+    GTEST_SKIP() << "tiny-random-lfm2-fp32 test model not found";
+  }
+  const auto message = GraphCaptureError(false, false);
+  EXPECT_NE(message.find("past_present_share_buffer set to false"), std::string::npos) << message;
+}
+
 }  // namespace
 }  // namespace Generators

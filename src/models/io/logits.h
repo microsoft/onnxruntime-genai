@@ -10,7 +10,7 @@ struct Logits {
   // Register input_ids as ORT session input.
   void Add();
   // For first iteration, find last token of each beam and store it in output_last_tokens_.
-  DeviceSpan<float> Get();
+  DeviceSpan<float> Get(bool all_tokens_valid = false);
 
   // Resize logits to [bz, token_count, vocab_size] if necessary.
   void Update(const DeviceSpan<int32_t>& next_tokens, size_t new_kv_length);

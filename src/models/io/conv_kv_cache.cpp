@@ -50,7 +50,7 @@ ConvKeyValueCache::ConvKeyValueCache(State& state)
   if (kv_layer_count_ > 0) {
     kv_shape_ = {state_.params_->BatchBeamSize(), model_.config_->model.decoder.num_key_value_heads, 0, model_.config_->model.decoder.head_size};
     kv_pasts_.resize(kv_layer_count_ * 2);
-    kv_presents_.reserve(kv_layer_count_ * 2);
+    kv_presents_.resize(kv_layer_count_ * 2);
 
     for (int layer_idx : kv_layer_indices_) {
       kv_input_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.inputs.past_key_names, layer_idx));
@@ -72,10 +72,27 @@ ConvKeyValueCache::ConvKeyValueCache(State& state)
     if (g_log.enabled && g_log.warning && state_.params_->search.past_present_share_buffer && !kv_share_buffer_) {
       Log("warning", "past_present_share_buffer search option set to true, but has been disabled due to the current configuration. See https://aka.ms/generate_config for details");
     } else if (g_log.enabled && !state_.params_->search.past_present_share_buffer && kv_share_buffer_) {
-      Log("info", "ConvKeyValueCache: past_present_share_buffer was forced on due to a fixed kv-cache shape in the model graph.");
+      Log("info", "ConvKeyValueCache: shared past/present buffers selected from the model graph.");
     }
     if (state_.params_->use_graph_capture && !kv_share_buffer_) {
       throw std::runtime_error("Graph capture is not supported with past_present_share_buffer set to false.");
+    }
+
+    // chunk_size would only add rows: the op stages long steps itself, and ORT 1.31 CUDA takes exactly the window.
+    auto search = state_.params_->search;
+    search.chunk_size.reset();
+    int window_capacity = GetWindowedKeyValueCacheSize(model_, search, search.max_length);
+    if (window_capacity > 0) {
+      // ORT rejects a buffer shorter than the window, even when max_length is shorter.
+      window_capacity = std::max(window_capacity, model_.config_->model.decoder.sliding_window->window_size);
+    }
+    if (window_capacity > 0 && state_.params_->use_graph_capture) {
+      // ORT reruns the step it captures, and every run evicts from the window again.
+      throw std::runtime_error(
+          "Graph capture is not supported with window-sized KV caches. Export with windowed_kv_cache=false to use it.");
+    }
+    for (int layer_idx : kv_layer_indices_) {
+      kv_windowed_.push_back(window_capacity > 0 && layer_types_[layer_idx] == "sliding_attention");
     }
 
     if (kv_share_buffer_) {
@@ -94,16 +111,17 @@ ConvKeyValueCache::ConvKeyValueCache(State& state)
             "in genai_config.json).");
       }
       kv_shape_[2] = seq_cap;
-      for (int i = 0; i < kv_layer_count_ * 2; ++i) {
-        kv_presents_.push_back(OrtValue::CreateTensor(Allocator(), kv_shape_, kv_type_));
-        if (Device().ShouldZeroKeyValueCacheTensors()) {
-          ByteWrapTensor(Device(), *kv_presents_.back()).Zero();
-        }
-      }
     } else {
       kv_empty_past_ = OrtValue::CreateTensor(Allocator(), kv_shape_, kv_type_);
-      for (int i = 0; i < kv_layer_count_ * 2; ++i) {
-        kv_presents_.push_back(OrtValue::CreateTensor(Allocator(), kv_shape_, kv_type_));
+    }
+    for (int i = 0; i < kv_layer_count_ * 2; ++i) {
+      auto shape = kv_shape_;
+      if (kv_windowed_[i / 2]) {
+        shape[2] = window_capacity;
+      }
+      kv_presents_[i] = OrtValue::CreateTensor(Allocator(), shape, kv_type_);
+      if ((kv_share_buffer_ || kv_windowed_[i / 2]) && Device().ShouldZeroKeyValueCacheTensors()) {
+        ByteWrapTensor(Device(), *kv_presents_[i]).Zero();
       }
     }
   }
@@ -143,10 +161,10 @@ ConvKeyValueCache::ConvKeyValueCache(State& state)
 }
 
 void ConvKeyValueCache::Add() {
-  // Shared past/present alias the same tensor; growth rebinds both together.
+  // Shared and windowed past/present alias the same tensor; growth rebinds both together.
   kv_input_index_ = state_.inputs_.size();
   for (int i = 0; i < kv_layer_count_ * 2; ++i) {
-    state_.inputs_.push_back(kv_share_buffer_ ? kv_presents_[i].get() : kv_empty_past_.get());
+    state_.inputs_.push_back(kv_share_buffer_ || kv_windowed_[i / 2] ? kv_presents_[i].get() : kv_empty_past_.get());
     state_.input_names_.push_back(kv_input_name_strings_[i].c_str());
   }
   kv_output_index_ = state_.outputs_.size();
@@ -179,6 +197,16 @@ void ConvKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_lengt
   if (!kv_share_buffer_) {
     if (!kv_is_first_update_) {
       for (int i = 0; i < kv_layer_count_ * 2; i++) {
+        if (kv_windowed_[i / 2]) {
+          // Updated in place by the attention op, so only beam search has to touch it.
+          if (!beam_indices.empty()) {
+            PickPastState(beam_indices, i);
+            kv_presents_[i] = std::move(kv_pasts_[i]);
+            state_.inputs_[kv_input_index_ + i] = kv_presents_[i].get();
+            state_.outputs_[kv_output_index_ + i] = kv_presents_[i].get();
+          }
+          continue;
+        }
         if (beam_indices.empty()) {
           kv_pasts_[i] = std::move(kv_presents_[i]);
         } else {
@@ -190,6 +218,9 @@ void ConvKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_lengt
 
     kv_shape_[2] = total_length;
     for (int i = 0; i < kv_layer_count_ * 2; i++) {
+      if (kv_windowed_[i / 2]) {
+        continue;
+      }
       kv_presents_[i] = OrtValue::CreateTensor(Allocator(), kv_shape_, kv_type_);
       state_.outputs_[kv_output_index_ + i] = kv_presents_[i].get();
     }
@@ -243,11 +274,14 @@ void ConvKeyValueCache::RewindTo(size_t index) {
 template <typename ScoreType>
 void ConvKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices_device, int index) {
   std::span<int32_t> beam_indices = beam_indices_device.CopyDeviceToCpu();
-  std::array<int64_t, 4> tensor_shape = kv_shape_;
+  OrtValue& present_value = *kv_presents_[index];
+  // Windowed layers have their own length, so take the shape from the tensor.
+  std::array<int64_t, 4> tensor_shape;
+  const auto present_shape = present_value.GetTensorTypeAndShapeInfo()->GetShape();
+  std::copy_n(present_shape.begin(), tensor_shape.size(), tensor_shape.begin());
 
   auto block_size_per_beam = tensor_shape[1] * tensor_shape[2] * tensor_shape[3];
 
-  OrtValue& present_value = *kv_presents_[index];
   std::unique_ptr<OrtValue> past_value = OrtValue::CreateTensor<ScoreType>(Allocator(), tensor_shape);
 
   auto past_span = KeyValueCacheDetail::WrapKvCacheTensor<ScoreType>(Device(), *past_value, kv_type_);

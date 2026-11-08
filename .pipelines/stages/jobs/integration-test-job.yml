@@ -51,8 +51,6 @@ jobs:
       value: '$(Agent.TempDirectory)\ortgenai-models'
     ${{ else }}:
       value: '$(Agent.TempDirectory)/ortgenai-models'
-  - name: cuda_docker_image
-    value: onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda12_x64_almalinux8_gcc14:20251017.1
 
   steps:
   - checkout: self
@@ -98,5 +96,4 @@ jobs:
       ep: ${{ parameters.ep }}
       model: ${{ parameters.model }}
       modelRoot: $(modelRoot)
-      cudaDockerImage: $(cuda_docker_image)
       wheelDir: '$(Build.BinariesDirectory)/wheel'

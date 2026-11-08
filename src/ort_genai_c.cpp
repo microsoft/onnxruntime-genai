@@ -1826,6 +1826,25 @@ OgaResult* OgaEngineEventGetToken(
   OGA_CATCH
 }
 
+OgaResult* OgaEngineEventGetTerminalTokenId(
+    const OgaEngineEvent* event,
+    int32_t* out) {
+  OGA_TRY
+  if (!out) {
+    throw std::runtime_error("out must not be null.");
+  }
+  *out = -1;
+  if (!event) {
+    throw std::runtime_error("event must not be null.");
+  }
+  if ((event->flags & Generators::EngineEventFlagTurnFinished) &&
+      event->finish_reason == Generators::GenerationFinishReason::EosToken) {
+    *out = event->terminal_token_id;
+  }
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OgaEngineEventGetFinishReason(
     const OgaEngineEvent* event,
     OgaFinishReason* out) {
@@ -2300,6 +2319,26 @@ OgaResult* OgaRequestBeginTurn(
       std::span<const int32_t>{
           input_ids, static_cast<size_t>(input_ids_count)},
       options);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaRequestBeginTurnWithImages(
+    OgaRequest* request, const OgaTurnOptions* turn_options,
+    const char* formatted_prompt, const OgaImages* images, uint64_t* out_turn_id) {
+  OGA_TRY
+  if (!request || !out_turn_id || !formatted_prompt)
+    throw std::invalid_argument("request, formatted_prompt, and out_turn_id must not be null.");
+  *out_turn_id = 0;
+  request->ValidateOwnerThread();
+  Generators::TurnOptions options;
+  if (turn_options) {
+    const auto owner = turn_options->request.lock();
+    if (!owner || owner.get() != request)
+      throw std::invalid_argument("Turn options belong to a different or destroyed Request.");
+    options = *turn_options;
+  }
+  *out_turn_id = request->BeginTurn(formatted_prompt, options, images);
   return nullptr;
   OGA_CATCH
 }

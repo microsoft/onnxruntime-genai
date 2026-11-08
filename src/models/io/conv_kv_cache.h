@@ -52,6 +52,8 @@ struct ConvKeyValueCache : KeyValueCache {
   // WebGPU caches grow on demand; fixed shapes retain their declared capacity.
   bool kv_share_buffer_{false};
   std::unique_ptr<SharedCacheGrowth> shared_cache_growth_;
+  // Per KV layer: a sliding_attention layer whose window-sized buffer is bound as past and present in every mode.
+  std::vector<bool> kv_windowed_;
 
   // Conv state cache (only for conv layers)
   int conv_layer_count_{};

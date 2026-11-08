@@ -1,0 +1,67 @@
+	onnxruntime-genai-tests:÷
+£
+q
+k
+v
+kv.3.k
+kv.3.v
+	seqlens_k
+total_sequence_length	attentionout.3.kout.3.v"GroupQueryAttention:com.microsoft*
+	num_heads *
+kv_num_heads webgpu_auto_shared_gqaZ%
+q 
+
+batch
+
+sequence
+€Z$
+k
+
+batch
+
+sequence
+@Z$
+v
+
+batch
+
+sequence
+@Z2
+kv.3.k(
+&"
+batch
+
+past_sequence
+@Z2
+kv.3.v(
+&"
+batch
+
+past_sequence
+@Z
+	seqlens_k
+	
+batchZ#
+total_sequence_length
+
+
+b-
+	attention 
+
+batch
+
+sequence
+€b4
+out.3.k)
+'#
+batch
+
+total_sequence
+@b4
+out.3.v)
+'#
+batch
+
+total_sequence
+@BB
+com.microsoft

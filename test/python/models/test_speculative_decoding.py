@@ -184,11 +184,15 @@ class TestSpeculativeConfigGuards:
         with pytest.raises(Exception, match="LFM2"):
             og.Model(path)
 
-    def test_multimodal_vision_rejected(self, tmp_path):
-        cfg = _spec_config()
+    @pytest.mark.parametrize(
+        ("model_type", "error"),
+        [("decoder", "Text-only model type"), ("qwen3_5", "does not support multimodal")],
+    )
+    def test_multimodal_vision_rejected(self, tmp_path, model_type, error):
+        cfg = _spec_config(type=model_type)
         cfg["model"]["vision"] = {"filename": "vision.onnx"}
         path = _write_config(tmp_path / "vision", cfg)
-        with pytest.raises(Exception, match="multimodal"):
+        with pytest.raises(RuntimeError, match=error):
             og.Model(path)
 
     def test_max_draft_tokens_too_large(self, tmp_path):

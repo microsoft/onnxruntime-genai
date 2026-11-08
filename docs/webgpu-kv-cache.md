@@ -7,6 +7,21 @@ least 512 tokens (clamped to `max_length`), and grow geometrically as needed.
 Longer prompts also reserve room for the first decode token. Rewinding retains
 the allocated capacity for subsequent use.
 
+Symbolic/fixed KV shapes describe the ONNX sequence dimension.
+`past_present_share_buffer` controls whether past and present alias the same
+tensor. Symbolic shapes can use either separate tensors or shared tensors with
+fixed or growable capacity. Fixed positive KV shapes are detected automatically
+and use shared tensors sized to the model's declared capacity.
+
+For file-backed decoder exports with direct `com.microsoft::GroupQueryAttention`
+past/present bindings, GenAI selects this policy automatically on WebGPU,
+including packages configured with `past_present_share_buffer: false`. Every
+configured KV pair must have compatible symbolic shapes and matching data types,
+and the attention op must be the only consumer of the past cache. Graphs with
+extra KV consumers, subgraphs or model-local functions keep their existing policy.
+Memory-provided models also keep their existing policy. Other backends are
+unchanged.
+
 Graph capture is opt-in through the existing WebGPU provider option. Keep the
 model package's other provider options, including any rotary-cache options, and
 set these fields in its configuration:
@@ -28,7 +43,8 @@ set these fields in its configuration:
 ```
 
 This fragment shows the relevant fields; it is not a complete model
-configuration. The exported attention graph must support aliased past/present
+configuration. Recognized WebGPU GQA exports do not need the explicit share flag.
+Other exports require it and must support aliased past/present
 buffers and consume the current logical sequence length during replay. Symbolic
 ONNX dimensions alone do not establish those semantics.
 
@@ -39,14 +55,16 @@ larger buffers. Later decode captures again. This requires ORT API 27 or newer
 for captured-graph release and a runtime with the model-editor API for the
 migration graph. Other generators' captures remain independently owned.
 
-Unshared dynamic KV (`past_present_share_buffer: false`) allocates new outputs
-each step and does not support graph capture. Growable shared KV currently
+Graphs that retain unshared dynamic KV allocate new outputs each step and do not
+support graph capture. Growable shared KV currently
 excludes beam search, decoder pipelines, configured sliding windows and
 quantized KV. Fixed-declared cache shapes retain their declared capacity.
 
 Evaluate both memory and latency for the intended workload. Shared growth saves
-KV capacity relative to reserving `max_length`, but uses spare capacity relative
-to an unshared dynamic cache. Capture can reduce decode CPU overhead; crossing a
+KV capacity relative to reserving `max_length` and avoids allocating a new
+present tensor on each decode step. It reserves spare capacity, while unshared
+dynamic KV keeps separate past and present tensors. Capture can reduce decode
+CPU overhead; crossing a
 capacity boundary adds migration and recapture latency. Bound KV tensor bytes
 exclude retained allocator buffers, migration overlap, model weights and capture
 resources, so they do not measure total GPU memory or its peak. Check logits and
