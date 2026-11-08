@@ -100,6 +100,14 @@ size_t NemotronBoltAcceptedPrefix(std::span<const int32_t> drafts,
   return accepted;
 }
 
+size_t NemotronBoltVerifyPrefixRows(size_t position) {
+  // The pinned H128 Flash split-K kernel partitions live K tiles of 128 keys.
+  // Keep each committed query's padded R8 endpoint in the same tile as row zero,
+  // so split widths and BF16 softmax/PV arithmetic match target-only decoding.
+  constexpr size_t key_tile = 128;
+  return std::min(kBoltVerifyRows, key_tile - ((position + kBoltVerifyRows - 1) % key_tile));
+}
+
 std::vector<int32_t> NemotronBoltRoundTokens(std::span<const int32_t> drafts,
                                              std::span<const int64_t> predictions,
                                              size_t remaining, std::span<const int> eos) {
@@ -378,6 +386,59 @@ void NemotronBoltState::SetActiveAdapter(Adapters*, const std::string&) {
 }
 
 std::vector<int64_t> NemotronBoltState::Verify(std::span<const int32_t> tokens, bool want_predictions) {
+  const size_t prefix = NemotronBoltVerifyPrefixRows(length_);
+  if (!prefilled_ || !drafter_ || prefix == kBoltVerifyRows)
+    return VerifyBlock(tokens, want_predictions);
+  if (length_ + prefix + kBoltVerifyRows > bolt_.capacity_) {
+    Require(static_cast<size_t>(params_->search.max_length) - length_ - 1 <= prefix,
+            "arithmetic boundary exceeds verification scratch capacity");
+    return VerifyBlock(tokens, want_predictions);
+  }
+  const size_t position = length_;
+  const int32_t selected = state_row_;
+  try {
+    auto predictions = VerifyBlock(tokens, want_predictions);
+    const auto preserve = [&](const std::string& name, size_t source_row, size_t destination_row, size_t rows) {
+      auto& tensor = *tensors_.at(name);
+      auto& backup = verify_prefix_backup_[name];
+      if (!backup) {
+        backup = std::make_unique<Tensor>(model_.p_device_, tensor.GetType());
+        backup->CreateTensor(tensor.GetShape(), true);
+      }
+      const size_t row_bytes = tensor.GetByteSpan().size() / kBoltVerifyRows;
+      backup->GetByteSpan().subspan(destination_row * row_bytes, rows * row_bytes).CopyFrom(tensor.GetByteSpan().subspan(source_row * row_bytes, rows * row_bytes));
+    };
+    for (const auto& [name, tensor] : tensors_) {
+      if (name.rfind("past_conv.", 0) == 0 || name.rfind("past_ssm.", 0) == 0 ||
+          name == "logits" || name == "aux_hidden_states" || name == "pred_ids")
+        preserve(name, 0, 0, prefix);
+    }
+    // Reuse only this verified candidate input prefix, not any ordinary/reference state.
+    // The second native R8 run is anchored at the arithmetic tile boundary.
+    length_ += prefix;
+    state_row_ = static_cast<int32_t>(prefix - 1);
+    std::vector<int32_t> remainder(kBoltVerifyRows, tokens.back());
+    std::copy(tokens.begin() + prefix, tokens.end(), remainder.begin());
+    const auto tail_predictions = VerifyBlock(remainder, want_predictions);
+    if (want_predictions)
+      std::copy_n(tail_predictions.begin(), kBoltVerifyRows - prefix, predictions.begin() + prefix);
+    for (const auto& [name, backup] : verify_prefix_backup_) {
+      preserve(name, 0, prefix, kBoltVerifyRows - prefix);
+      tensors_.at(name)->GetByteSpan().CopyFrom(backup->GetByteSpan());
+    }
+    length_ = position;
+    state_row_ = selected;
+    return predictions;
+  } catch (...) {
+    try {
+      Reset();
+    } catch (...) {
+    }
+    throw;
+  }
+}
+
+std::vector<int64_t> NemotronBoltState::VerifyBlock(std::span<const int32_t> tokens, bool want_predictions) {
   Require(tokens.size() == kBoltVerifyRows && length_ + kBoltVerifyRows <= bolt_.capacity_,
           "verify block exceeds fixed capacity");
   auto cpu_in = verify_inputs_span_.CpuSpan();
@@ -475,6 +536,7 @@ int32_t NemotronBoltState::NextToken(size_t public_length) {
   if (pending_.empty()) {
     std::vector<int32_t> block{anchor_};
     block.insert(block.end(), drafts_.begin(), drafts_.end());
+    const auto target_passes = stats_.target_forward_passes;
     const auto predictions = Verify(block);
     const size_t accepted = NemotronBoltAcceptedPrefix(drafts_, predictions);
     if (g_log.enabled && g_log.model_logits) {
@@ -492,7 +554,7 @@ int32_t NemotronBoltState::NextToken(size_t public_length) {
     pending_.insert(pending_.end(), tokens.begin(), tokens.end());
     ++stats_.rounds;
     ++stats_.completed_rounds;
-    ++stats_.target_verify_forward_passes;
+    stats_.target_verify_forward_passes += stats_.target_forward_passes - target_passes;
     stats_.draft_tokens_proposed += 7;
     stats_.draft_tokens_evaluated += 7;
     stats_.draft_tokens_accepted += accepted;

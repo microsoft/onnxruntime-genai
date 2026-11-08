@@ -5,6 +5,8 @@
 #include <cstdlib>
 #include <fstream>
 #include <functional>
+#include <cstring>
+#include <cmath>
 
 #include <nlohmann/json.hpp>
 
@@ -14,6 +16,191 @@
 namespace Generators::test {
 
 struct NemotronBoltTestAccess {
+  static std::vector<uint8_t> Bytes(DeviceSpan<uint8_t> span) {
+    auto selected = GetDeviceInterface(DeviceType::CUDA)->WrapMemory(span.Span());
+    const auto cpu = selected.CopyDeviceToCpu();
+    return {cpu.begin(), cpu.end()};
+  }
+
+  static size_t Length(const NemotronBoltState& state) { return state.length_; }
+  static size_t SelectedRow(const NemotronBoltState& state) { return static_cast<size_t>(state.state_row_); }
+
+  static nlohmann::json CompareLiveBoundary(NemotronBoltState& ordinary,
+                                            NemotronBoltState& speculative, size_t row) {
+    nlohmann::json differences = nlohmann::json::array();
+    size_t bytes_compared = 0;
+    for (const auto& [name, tensor] : ordinary.tensors_) {
+      if (name.rfind("past_", 0) != 0 && name != "logits" &&
+          name != "aux_hidden_states" && name != "pred_ids") continue;
+      auto expected = tensor->GetByteSpan();
+      auto actual = speculative.tensors_.at(name)->GetByteSpan();
+      const auto compare = [&](DeviceSpan<uint8_t> lhs, DeviceSpan<uint8_t> rhs) {
+        const auto a = Bytes(lhs), b = Bytes(rhs);
+        bytes_compared += a.size();
+        if (std::memcmp(a.data(), b.data(), a.size()) != 0) {
+          const auto first = std::mismatch(a.begin(), a.end(), b.begin());
+          differences.push_back({{"name", name}, {"first_byte", first.first - a.begin()}});
+        }
+        if (name == "pred_ids") return;
+        const bool fp32 = name.rfind("past_ssm.", 0) == 0;
+        const size_t item_bytes = fp32 ? sizeof(uint32_t) : sizeof(uint16_t);
+        for (size_t i = 0; i < b.size(); i += item_bytes) {
+          uint32_t bits = 0;
+          std::memcpy(&bits, b.data() + i, item_bytes);
+          if ((fp32 && (bits & 0x7f800000) == 0x7f800000) ||
+              (!fp32 && (bits & 0x7f80) == 0x7f80)) {
+            differences.push_back({{"name", name}, {"nonfinite_byte", i}});
+            break;
+          }
+        }
+      };
+      if (name.rfind("past_key.", 0) == 0 || name.rfind("past_value.", 0) == 0) {
+        const auto shape = tensor->GetShape();
+        const size_t head_bytes = expected.size() / static_cast<size_t>(shape[1]);
+        const size_t valid_bytes = ordinary.length_ * static_cast<size_t>(shape[3]) * sizeof(uint16_t);
+        for (size_t head = 0; head < static_cast<size_t>(shape[1]); ++head)
+          compare(expected.subspan(head * head_bytes, valid_bytes), actual.subspan(head * head_bytes, valid_bytes));
+      } else {
+        const size_t row_bytes = expected.size() / 8;
+        compare(expected.subspan(static_cast<size_t>(ordinary.state_row_) * row_bytes, row_bytes),
+                actual.subspan(row * row_bytes, row_bytes));
+      }
+    }
+    return {{"logical_input_prefix", ordinary.length_}, {"snapshot_row", row}, {"complete_bytes_compared", bytes_compared}, {"differences", differences}};
+  }
+
+  // Replay identical candidate IDs from the same committed state, without feeding
+  // reference activations/routes into the live generator.
+  static nlohmann::json CompareCandidatePrefix(NemotronBoltState& state) {
+    const size_t length = state.length_;
+    const int32_t selected = state.state_row_;
+    const auto stats = state.stats_;
+    std::vector<int32_t> candidates{state.anchor_};
+    candidates.insert(candidates.end(), state.drafts_.begin(), state.drafts_.end());
+    struct SavedCache {
+      Tensor* tensor;
+      std::string name;
+      bool recurrent;
+      size_t row_bytes;
+      std::vector<uint8_t> initial;
+      std::vector<uint8_t> block;
+    };
+    std::vector<SavedCache> caches;
+    for (auto* tensor : state.caches_) {
+      const auto shape = tensor->GetShape();
+      const bool recurrent = shape[0] == 8;
+      const size_t row_bytes = recurrent ? tensor->GetByteSpan().size() / 8 : 0;
+      auto span = tensor->GetByteSpan();
+      const auto initial = recurrent
+                               ? Bytes(span.subspan(static_cast<size_t>(selected) * row_bytes, row_bytes))
+                               : Bytes(span);
+      std::string name;
+      for (const auto& entry : state.tensors_)
+        if (entry.second.get() == tensor) name = entry.first;
+      caches.push_back({tensor, name, recurrent, row_bytes, initial, {}});
+    }
+    const auto restore = [&] {
+      for (auto& cache : caches) {
+        auto destination = cache.tensor->GetByteSpan();
+        if (cache.recurrent)
+          destination = destination.subspan(static_cast<size_t>(selected) * cache.row_bytes, cache.row_bytes);
+        const auto cpu = destination.CpuSpan();
+        std::copy(cache.initial.begin(), cache.initial.end(), cpu.begin());
+        destination.CopyCpuRangeToDevice();
+      }
+      state.length_ = length;
+      state.state_row_ = selected;
+      state.stats_ = stats;
+    };
+    const auto predictions = state.Verify(candidates);
+    const auto block_predictions = Bytes(state.tensors_.at("pred_ids")->GetByteSpan());
+    const auto block_logits = Bytes(state.tensors_.at("logits")->GetByteSpan());
+    for (auto& cache : caches)
+      cache.block = Bytes(cache.tensor->GetByteSpan());
+    restore();
+    for (const auto& cache : caches) {
+      auto span = cache.tensor->GetByteSpan();
+      if (cache.recurrent)
+        span = span.subspan(static_cast<size_t>(selected) * cache.row_bytes, cache.row_bytes);
+      RequireRestored(Bytes(span) == cache.initial);
+    }
+    state.Verify(candidates, false);
+    const bool discarded_predictions_match =
+        Bytes(state.tensors_.at("pred_ids")->GetByteSpan()) == block_predictions;
+    restore();
+    nlohmann::json result{
+        {"length", length}, {"state_row", selected}, {"candidates", candidates}, {"predictions", predictions}, {"discarded_predictions_match", discarded_predictions_match}, {"accepted", NemotronBoltAcceptedPrefix(state.drafts_, predictions)}, {"rows", nlohmann::json::array()}};
+    const size_t logit_bytes = block_logits.size() / 8;
+    for (size_t row = 0; row < candidates.size(); ++row) {
+      const auto sequential = state.Verify(std::vector<int32_t>(8, candidates[row]));
+      const auto logits = Bytes(state.tensors_.at("logits")->GetByteSpan().subspan(0, logit_bytes));
+      nlohmann::json differences = nlohmann::json::array();
+      for (const auto& cache : caches) {
+        if (!cache.recurrent) {
+          const auto shape = cache.tensor->GetShape();
+          const size_t head_bytes = cache.tensor->GetByteSpan().size() / static_cast<size_t>(shape[1]);
+          const size_t valid_bytes = (length + row + 1) * static_cast<size_t>(shape[3]) * sizeof(uint16_t);
+          const auto bytes = Bytes(cache.tensor->GetByteSpan());
+          for (size_t head = 0; head < static_cast<size_t>(shape[1]); ++head) {
+            const auto begin = bytes.begin() + head * head_bytes;
+            const auto end = begin + valid_bytes;
+            const auto first = std::mismatch(begin, end, cache.block.begin() + head * head_bytes);
+            if (first.first != end)
+              differences.push_back({{"name", cache.name}, {"head", head}, {"first_byte", first.first - begin}});
+          }
+          continue;
+        }
+        const auto bytes = Bytes(cache.tensor->GetByteSpan().subspan(0, cache.row_bytes));
+        const auto first = std::mismatch(bytes.begin(), bytes.end(), cache.block.begin() + row * cache.row_bytes);
+        if (first.first != bytes.end())
+          differences.push_back({{"name", cache.name},
+                                 {"cache_index", &cache - caches.data()},
+                                 {"first_byte", first.first - bytes.begin()}});
+      }
+      const auto first = std::mismatch(logits.begin(), logits.end(), block_logits.begin() + row * logit_bytes);
+      const auto scores = [](const uint8_t* data, size_t bytes) {
+        std::array<std::pair<float, size_t>, 2> best{{{-INFINITY, 0}, {-INFINITY, 0}}};
+        for (size_t i = 0; i < bytes / sizeof(uint16_t); ++i) {
+          uint16_t stored;
+          std::memcpy(&stored, data + i * sizeof(stored), sizeof(stored));
+          const uint32_t bits = static_cast<uint32_t>(stored) << 16;
+          float value;
+          std::memcpy(&value, &bits, sizeof(value));
+          if (value > best[0].first) {
+            best[1] = best[0];
+            best[0] = {value, i};
+          } else if (value > best[1].first) {
+            best[1] = {value, i};
+          }
+        }
+        return nlohmann::json{{"top_id", best[0].second}, {"top", best[0].first}, {"second_id", best[1].second}, {"second", best[1].first}, {"margin", best[0].first - best[1].first}};
+      };
+      const char* output = std::getenv("ORTGENAI_BOLT_OUTPUT");
+      if (output && first.first != logits.end()) {
+        const auto prefix = std::string{output} + "-L" + std::to_string(length) + "-R" + std::to_string(row);
+        std::ofstream serial{prefix + "-sequential.bf16", std::ios::binary};
+        std::ofstream block{prefix + "-block.bf16", std::ios::binary};
+        serial.write(reinterpret_cast<const char*>(logits.data()), logits.size());
+        block.write(reinterpret_cast<const char*>(block_logits.data() + row * logit_bytes), logit_bytes);
+      }
+      result["rows"].push_back({{"row", row}, {"sequential_prediction", sequential[0]}, {"logits_bitwise", first.first == logits.end()}, {"cache_differences", differences}, {"sequential_raw_processed_scores", scores(logits.data(), logit_bytes)}, {"block_raw_processed_scores", scores(block_logits.data() + row * logit_bytes, logit_bytes)}});
+      ++state.length_;
+      state.state_row_ = 0;
+    }
+    restore();
+    return result;
+  }
+
+  static bool ReadyForRound(const NemotronBoltState& state) {
+    const char* round = std::getenv("ORTGENAI_BOLT_PREFIX_ROUND");
+    return state.pending_.empty() &&
+           (!round || state.stats_.rounds + 1 == static_cast<uint64_t>(std::stoul(round)));
+  }
+
+  static void RequireRestored(bool restored) {
+    if (!restored) throw std::runtime_error("identical-prefix observer failed to restore prior state");
+  }
+
   static std::vector<uint8_t> SelectedLogits(NemotronBoltState& state) {
     const size_t row_bytes = static_cast<size_t>(state.bolt_.config_->model.vocab_size) * sizeof(uint16_t);
     // Keep the wrapped buffer's host mirror alive until the vector has been copied.
@@ -41,6 +228,21 @@ struct NemotronBoltTestAccess {
 
 namespace {
 
+std::unique_ptr<Config> BoltTestConfig(const char* path);
+
+TEST(NemotronBolt, VerificationKeepsQueryEndpointsInOneKeyTile) {
+  for (size_t position : {size_t{0}, size_t{500}, size_t{504}, size_t{505},
+                          size_t{632}, size_t{633}, size_t{135158}}) {
+    const size_t rows = NemotronBoltVerifyPrefixRows(position);
+    ASSERT_GE(rows, 1);
+    ASSERT_LE(rows, 8);
+    for (size_t row = 0; row < rows; ++row)
+      EXPECT_EQ((position + 7) / 128, (position + row + 7) / 128);
+    if (rows < 8)
+      EXPECT_NE((position + 7) / 128, (position + rows + 7) / 128);
+  }
+}
+
 TEST(NemotronBolt, EveryAcceptanceLengthAndBudget) {
   const std::vector<int32_t> drafts{20, 21, 22, 23, 24, 25, 26};
   const std::vector<int> eos{2, 11};
@@ -53,6 +255,133 @@ TEST(NemotronBolt, EveryAcceptanceLengthAndBudget) {
       ASSERT_EQ(tokens.size(), std::min(accepted + 1, remaining));
       for (size_t i = 0; i < tokens.size(); ++i)
         EXPECT_EQ(tokens[i], i < accepted ? drafts[i] : 99);
+    }
+  }
+}
+
+TEST(NemotronBoltGPU, IdenticalCandidatePrefixReplay) {
+  const char* path = std::getenv("ORTGENAI_BOLT_TEST_MODEL");
+  const char* cases_path = std::getenv("ORTGENAI_BOLT_TEST_CASES");
+  const char* output = std::getenv("ORTGENAI_BOLT_OUTPUT");
+  if (!path || !cases_path || !output)
+    GTEST_SKIP() << "Set model, exact token fixtures and owned output path";
+  std::ifstream input{cases_path};
+  nlohmann::json fixtures;
+  input >> fixtures;
+  auto model = CreateModel(GetOrtEnv(), BoltTestConfig(path));
+  std::ofstream report{std::string{output} + "-prefix.jsonl"};
+  ASSERT_TRUE(report);
+  for (const auto& fixture : fixtures.at("cases")) {
+    const auto prompt = fixture.at("prompt_ids").get<std::vector<int32_t>>();
+    auto params = std::make_shared<GeneratorParams>(*model);
+    params->speculative.max_draft_tokens = 7;
+    params->use_graph_capture = true;
+    params->search.max_length = static_cast<int>(prompt.size() + 60);
+    Generator generator{*model, *params};
+    generator.AppendTokens(prompt);
+    while (!generator.IsDone()) {
+      auto& state = dynamic_cast<NemotronBoltState&>(*generator.state_);
+      if (NemotronBoltTestAccess::ReadyForRound(state)) {
+        const auto comparison = NemotronBoltTestAccess::CompareCandidatePrefix(state);
+        report << comparison.dump() << std::endl;
+        EXPECT_TRUE(comparison.at("discarded_predictions_match").get<bool>()) << comparison.dump();
+        for (const auto& row : comparison.at("rows")) {
+          EXPECT_TRUE(row.at("logits_bitwise").get<bool>()) << comparison.dump();
+          EXPECT_TRUE(row.at("cache_differences").empty()) << comparison.dump();
+        }
+      }
+      generator.GenerateNextToken();
+    }
+    const auto sequence = generator.GetSequence(0).CopyDeviceToCpu();
+    if (fixture.contains("expected_speculative")) {
+      const auto expected = fixture.at("expected_speculative").get<std::vector<int32_t>>();
+      EXPECT_EQ(std::vector<int32_t>(sequence.begin() + prompt.size(), sequence.end()), expected)
+          << "Deep observer changed live generation";
+    }
+    report << nlohmann::json{{"live_generated_ids", std::vector<int32_t>(
+                                                        sequence.begin() + prompt.size(), sequence.end())}}
+                  .dump()
+           << std::endl;
+  }
+}
+
+TEST(NemotronBoltGPU, LiveOrdinarySpeculativeBoundaryStates) {
+  const char* path = std::getenv("ORTGENAI_BOLT_TEST_MODEL");
+  const char* cases_path = std::getenv("ORTGENAI_BOLT_TEST_CASES");
+  const char* output = std::getenv("ORTGENAI_BOLT_OUTPUT");
+  if (!path || !cases_path || !output)
+    GTEST_SKIP() << "Set model, exact token fixtures and owned output path";
+  std::ifstream input{cases_path};
+  nlohmann::json fixtures;
+  input >> fixtures;
+  auto model = CreateModel(GetOrtEnv(), BoltTestConfig(path));
+  std::ofstream report{std::string{output} + "-live-states.jsonl"};
+  ASSERT_TRUE(report);
+  for (const auto& fixture : fixtures.at("cases")) {
+    const auto prompt = fixture.at("prompt_ids").get<std::vector<int32_t>>();
+    const auto budget = fixture.at("max_new_tokens").get<int>();
+    const auto expected = fixture.at("expected_ordinary").get<std::vector<int32_t>>();
+    auto ordinary_params = std::make_shared<GeneratorParams>(*model);
+    ordinary_params->speculative.max_draft_tokens = 0;
+    ordinary_params->search.max_length = static_cast<int>(prompt.size()) + budget;
+    auto speculative_params = std::make_shared<GeneratorParams>(*model);
+    speculative_params->speculative.max_draft_tokens = 7;
+    speculative_params->search.max_length = ordinary_params->search.max_length;
+    Generator ordinary{*model, *ordinary_params};
+    Generator speculative{*model, *speculative_params};
+    auto& ordinary_state = dynamic_cast<NemotronBoltState&>(*ordinary.state_);
+    auto& speculative_state = dynamic_cast<NemotronBoltState&>(*speculative.state_);
+    for (int repeat = 0; repeat < 2; ++repeat) {
+      ordinary.AppendTokens(prompt);
+      speculative.AppendTokens(prompt);
+      size_t boundaries = 0;
+      size_t bytes_compared = 0;
+      const auto prefill = NemotronBoltTestAccess::CompareLiveBoundary(
+          ordinary_state, speculative_state, NemotronBoltTestAccess::SelectedRow(speculative_state));
+      ASSERT_TRUE(prefill.at("differences").empty()) << prefill.dump();
+      bytes_compared += prefill.at("complete_bytes_compared").get<size_t>();
+      while (!speculative.IsDone()) {
+        const auto before = speculative.GetSpeculativeStats();
+        const size_t position = NemotronBoltTestAccess::Length(speculative_state);
+        speculative.GenerateNextToken();
+        const auto after = speculative.GetSpeculativeStats();
+        if (after.rounds == before.rounds) continue;
+        const size_t accepted = static_cast<size_t>(after.draft_tokens_accepted - before.draft_tokens_accepted);
+        for (size_t row = 0; row <= accepted; ++row) {
+          const size_t logical_prefix = position + row + 1;
+          while (!ordinary.IsDone() && NemotronBoltTestAccess::Length(ordinary_state) < logical_prefix)
+            ordinary.GenerateNextToken();
+          if (NemotronBoltTestAccess::Length(ordinary_state) != logical_prefix) break;
+          auto comparison = NemotronBoltTestAccess::CompareLiveBoundary(ordinary_state, speculative_state, row);
+          ++boundaries;
+          bytes_compared += comparison.at("complete_bytes_compared").get<size_t>();
+          if (!comparison.at("differences").empty()) {
+            comparison["case_id"] = fixture.at("case_id");
+            comparison["repeat"] = repeat;
+            report << comparison.dump() << std::endl;
+          }
+          ASSERT_TRUE(comparison.at("differences").empty()) << comparison.dump();
+        }
+      }
+      while (!ordinary.IsDone()) ordinary.GenerateNextToken();
+      const auto ordinary_sequence = ordinary.GetSequence(0).CopyDeviceToCpu();
+      const auto speculative_sequence = speculative.GetSequence(0).CopyDeviceToCpu();
+      const std::vector<int32_t> ordinary_tokens(ordinary_sequence.begin() + prompt.size(), ordinary_sequence.end());
+      const std::vector<int32_t> speculative_tokens(speculative_sequence.begin() + prompt.size(), speculative_sequence.end());
+      EXPECT_EQ(ordinary_tokens, expected);
+      EXPECT_EQ(speculative_tokens, expected);
+      const auto stats = speculative.GetSpeculativeStats();
+      EXPECT_EQ(stats.tokens_emitted, expected.size());
+      EXPECT_EQ(stats.tokens_buffered, 0);
+      EXPECT_EQ(stats.dflash2_failures, 0);
+      EXPECT_EQ(stats.dflash2_disables, 0);
+      EXPECT_GE(stats.target_verify_forward_passes, stats.rounds);
+      report << nlohmann::json{{"case_id", fixture.at("case_id")}, {"repeat", repeat}, {"complete_boundaries", boundaries}, {"complete_bytes_compared", bytes_compared}, {"ordinary_tokens", ordinary_tokens}, {"speculative_tokens", speculative_tokens}, {"target_verify_passes", stats.target_verify_forward_passes}, {"rounds", stats.rounds}}.dump()
+             << std::endl;
+      ordinary.RewindToLength(0);
+      speculative.RewindToLength(0);
+      EXPECT_EQ(ordinary.TokenCount(), 0);
+      EXPECT_EQ(speculative.TokenCount(), 0);
     }
   }
 }
@@ -437,8 +766,13 @@ TEST(NemotronBoltGPU, SequentialGeneratorsResetAndPublicBoundaries) {
   auto model = CreateModel(GetOrtEnv(), BoltTestConfig(path));
   auto& bolt = dynamic_cast<NemotronBoltModel&>(*model);
   ASSERT_TRUE(bolt.drafter_model_);
-  ASSERT_EQ(bolt.shared_initializer_entries_.size(), 2);
-  ASSERT_EQ(bolt.drafter_model_->shared_initializer_entries_.size(), 2);
+  ASSERT_FALSE(bolt.config_->model.decoder.shared_initializers.empty());
+  ASSERT_EQ(bolt.shared_initializer_entries_.size(),
+            bolt.config_->model.decoder.shared_initializers.size());
+  ASSERT_EQ(bolt.drafter_model_->shared_initializer_entries_.size(),
+            bolt.drafter_model_->config_->model.decoder.shared_initializers.size());
+  ASSERT_EQ(bolt.shared_initializer_entries_.size(),
+            bolt.drafter_model_->shared_initializer_entries_.size());
   for (size_t i = 0; i < bolt.shared_initializer_entries_.size(); ++i)
     EXPECT_EQ(bolt.shared_initializer_entries_[i].get(),
               bolt.drafter_model_->shared_initializer_entries_[i].get());
