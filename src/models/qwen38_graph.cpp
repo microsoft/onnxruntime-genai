@@ -920,6 +920,7 @@ Qwen38GraphEngine::~Qwen38GraphEngine() {
 }
 
 void Qwen38GraphEngine::ReleaseCapturedGraphs() noexcept {
+#if ORT_API_VERSION >= 27
   for (const auto& [session, annotation_id] : captured_graphs_) {
     try {
       session->ReleaseCapturedGraph(annotation_id);
@@ -933,6 +934,7 @@ void Qwen38GraphEngine::ReleaseCapturedGraphs() noexcept {
       }
     }
   }
+#endif
   captured_graphs_.clear();
 }
 
