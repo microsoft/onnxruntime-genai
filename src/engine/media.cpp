@@ -7,6 +7,7 @@
 #include "models/preprocessing/genai_tokenizer.h"
 #include "models/preprocessing/multi_modal_processor.h"
 #include "models/preprocessing/processor.h"
+#include "models/preprocessing/qwen2_5_vl_image_processor.h"
 #include "models/preprocessing/qwen_vision_position.h"
 #include "models/preprocessing/qwen_vision_processing.h"
 
@@ -384,15 +385,24 @@ PreparedMediaTurn MediaStore::Prepare(const std::string& prompt, std::span<const
   }
   if (expected_rows > remaining_rows) throw std::invalid_argument("Expanded image rows exceed the remaining session capacity.");
   estimate = AddBytes(estimate, MultiplyBytes(MultiplyBytes(count, maximum_patches), patch_bytes));
-  estimate = AddBytes(estimate, MultiplyBytes(expected_rows, 128));
+  estimate = AddBytes(estimate, MultiplyBytes(AddBytes(expected_rows, prompt.size()), 128));
   MakeHostRoom(estimate);
   accounting_->host_bytes += estimate;
   HostReservation reservation{accounting_, estimate};
-  auto processed = model_->vision_->processor->Process(prompt, images, nullptr);
-  const auto ids = processed->at(std::string{Config::Defaults::InputIdsName});
+  std::vector<std::array<int64_t, 3>> planned_grids;
+  planned_grids.reserve(count);
+  for (const auto& info : images->info_)
+    planned_grids.push_back(QwenImageGrid(info.width, info.height, patch, merge, min_pixels_, max_pixels_));
+  const auto expanded = ExpandQwenMediaPrompt(prompt, planned_grids, {}, merge, host_limit_);
   PreparedMediaTurn result;
-  result.tokens.assign(ids->GetData<int32_t>(), ids->GetData<int32_t>() + ids->GetElementCount());
-  if (result.tokens.size() != expected_rows) throw std::runtime_error("Image preprocessing violated its expanded-row estimate.");
+  result.tokens = model_->vision_->processor->tokenizer_->Encode(expanded.c_str());
+  if (result.tokens.size() != expected_rows)
+    throw std::runtime_error("Image prompt expansion violated its resolved row count.");
+  if (result.tokens.size() >= remaining_rows)
+    throw std::invalid_argument("Expanded image tokens exceed the remaining session capacity.");
+  const auto processor = std::dynamic_pointer_cast<QwenImageProcessor>(model_->vision_->processor->processor_);
+  if (!processor) throw std::logic_error("Packed Qwen image preparation has no image transform.");
+  auto processed = processor->ProcessImages(*images);
   const auto grids = processed->at(std::string{Config::Defaults::ImageGridThwName});
   const auto pixels = processed->at(std::string{Config::Defaults::PixelValuesName});
   const auto shape = pixels->GetShape();
@@ -404,6 +414,8 @@ PreparedMediaTurn MediaStore::Prepare(const std::string& prompt, std::span<const
   size_t logical_patches = 0;
   for (size_t image = 0; image < count; ++image) {
     const auto* grid = grids->GetData<int64_t>() + image * 3;
+    if (!std::equal(planned_grids[image].begin(), planned_grids[image].end(), grid))
+      throw std::runtime_error("Image preprocessing violated its resolved geometry.");
     if (grid[0] != 1 || grid[1] <= 0 || grid[2] <= 0 || grid[1] % merge != 0 || grid[2] % merge != 0)
       throw std::runtime_error("Packed vision supports complete spatially merged image grids, not video.");
     logical_patches = AddBytes(logical_patches, MultiplyBytes(static_cast<size_t>(grid[1]), static_cast<size_t>(grid[2])));

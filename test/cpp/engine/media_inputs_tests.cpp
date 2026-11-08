@@ -68,6 +68,17 @@ TEST(MediaInputsTest, RealQwenVideoCanonicalOrderAndEncoderInputs) {
     const auto& ids = combined->at(std::string{Config::Defaults::InputIdsName});
     ASSERT_EQ(ids->GetElementCount(), expected.size());
     EXPECT_TRUE(std::equal(expected.begin(), expected.end(), ids->GetData<int32_t>()));
+    MediaStore image_store{model, 512 * 1024 * 1024, 2 * 1024 * 1024};
+    const auto raw_images = model->vision_->processor->tokenizer_->Encode(image_prompt.c_str());
+    auto planned_images = image_store.Prepare(image_prompt, raw_images, images.get(), 0, 4096);
+    EXPECT_EQ(planned_images.tokens, expected);
+    ASSERT_EQ(planned_images.media.size(), image_grids.size());
+    Images metadata_only{{}, images->num_images_, images->info_};
+    EXPECT_THROW(image_store.Prepare(image_prompt, raw_images, &metadata_only, 0, expected.size()),
+                 std::invalid_argument);
+    std::swap(images->info_[0].width, images->info_[0].height);
+    EXPECT_THROW(image_store.Prepare(image_prompt, raw_images, images.get(), 0, 4096), std::runtime_error);
+    std::swap(images->info_[0].width, images->info_[0].height);
   }
   MediaStore store{model, 512 * 1024 * 1024, 2 * 1024 * 1024};
   Tokenizer tokenizer{*model->config_};
