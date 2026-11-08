@@ -925,7 +925,7 @@ TEST(NemotronBoltGPU, SequentialGeneratorsResetAndPublicBoundaries) {
 #ifdef _WIN32
     const bool same_file = target_path.string() == draft_path.string();
 #else
-    const bool same_file = std::filesystem::equivalent(target_path, draft_path);
+    const bool same_file = std::filesystem::equivalent(target_path.string(), draft_path.string());
 #endif
     const auto offset = [](const std::string& value) {
       return value.empty() ? uint64_t{0} : std::stoull(value);
