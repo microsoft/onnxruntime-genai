@@ -195,9 +195,13 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
   candidates.reserve(allocated_requests.size() + requests_pool_.size());
   const size_t cache_query_token_cap = cache_manager_->MaxQueryTokensPerRequest();
   const size_t max_draft_token_count = cache_manager_->MaxDraftTokensPerStep();
+  std::shared_ptr<Request> preparation_request;
+  std::shared_ptr<MediaItem> preparation_item;
+  StepPlanningResult deferred_preparation;
 
   const auto add_candidate = [&candidates, cache_query_token_cap, max_draft_token_count,
-                              this](
+                              &preparation_request, &preparation_item,
+                              &deferred_preparation, &plan, this](
                                  const std::shared_ptr<Request>& request,
                                  bool newly_admitted) {
     const auto snapshot = request->Snapshot();
@@ -240,9 +244,43 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     candidate.entry.is_prefill = snapshot.is_prefill;
     candidate.entry.newly_admitted = newly_admitted;
     auto prefill_token_cap = request->PrefillChunkSize();
+    if (prefill_token_cap == 0) prefill_token_cap.reset();
     if (cache_query_token_cap != 0 &&
         (prefill_token_cap.value_or(0) == 0 || *prefill_token_cap > cache_query_token_cap)) {
       prefill_token_cap = cache_query_token_cap;
+    }
+    for (const auto& span : request->Media()) {
+      if (span.start + span.item->rows <= effective_processed_sequence_length ||
+          span.start >= static_cast<size_t>(snapshot.current_sequence_length) || span.item->features)
+        continue;
+      if (span.start <= effective_processed_sequence_length) {
+        if (!preparation_request) {
+          if (newly_admitted) {
+            // Preparing a queued image cannot release decoder capacity. Check admission first
+            // so blocked requests do not repeatedly evict each other's features without running.
+            StepPlan probe;
+            probe.transaction_id = plan.transaction_id;
+            probe.scheduled_request_limit = 1;
+            probe.requests.push_back(candidate.entry);
+            auto& entry = probe.requests.back();
+            entry.draft_token_count = 0;
+            entry.unprocessed_token_count = 1;
+            entry.target_cache_slots = RequiredSlots(effective_processed_sequence_length, 1);
+            const auto resources = cache_manager_->PlanStepResources(probe);
+            if (!resources.executable) {
+              if (!deferred_preparation.unserviceable_request_id)
+                deferred_preparation = resources;
+              return;
+            }
+          }
+          preparation_request = request;
+          preparation_item = span.item;
+        }
+        return;
+      }
+      const auto available = span.start - effective_processed_sequence_length;
+      prefill_token_cap = std::min(prefill_token_cap.value_or(available), available);
+      break;
     }
     candidate.budget = DecodeFirstBudgetCandidate{
         snapshot.is_prefill,
@@ -267,7 +305,21 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     if (IsQueued(request->status_) && !cache_manager_->IsResident(request)) {
       add_candidate(request, true);
     }
+    if (deferred_preparation.unserviceable_request_id)
+      return deferred_preparation;
   }
+  const auto prepare_media = [&] {
+    plan.requests.clear();
+    plan.fixed_state = {};
+    StepPlanningResult result;
+    result.outcome = {StepOutcomeKind::PreparationProgress, plan.transaction_id, preparation_request.get()};
+    result.preparation_request = std::move(preparation_request);
+    result.preparation_item = std::move(preparation_item);
+    return result;
+  };
+  if (candidates.empty() && preparation_item) return prepare_media();
+  if (candidates.empty() && deferred_preparation.outcome.kind != StepOutcomeKind::NoWork)
+    return deferred_preparation;
 
   std::vector<DecodeFirstBudgetCandidate> budget_candidates;
   budget_candidates.reserve(candidates.size());
@@ -290,6 +342,7 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
       dynamic_batching.max_batch_size);
 
   auto result = cache_manager_->PlanStepResources(plan);
+  result.capacity_deferred |= deferred_preparation.capacity_deferred;
   const auto record_deferred_prefix_matches = [&] {
     if (!result.capacity_deferred) {
       return;
@@ -311,6 +364,9 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
   };
   if (!result.executable) {
     record_deferred_prefix_matches();
+    if (preparation_item && !result.unserviceable_request_id &&
+        (result.outcome.kind == StepOutcomeKind::CapacityDeferred || result.outcome.kind == StepOutcomeKind::NoWork))
+      return prepare_media();
     return result;
   }
 
@@ -347,6 +403,15 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
 
   for (size_t index = 0; index < plan.requests.size(); ++index) {
     auto& entry = plan.requests[index];
+    if (entry.is_prefill && !entry.request->Media().empty() &&
+        cache_manager_->PrefixCachingEnabled()) {
+      // Use the furthest complete block within the actual budget, retaining progress when no
+      // boundary fits. Hybrid targets can then publish a checkpoint without block-sized forwards.
+      const auto end = selected_processed_lengths[index] + token_counts[index];
+      const auto boundary = end - end % dynamic_batching.block_size;
+      if (boundary > selected_processed_lengths[index])
+        token_counts[index] = boundary - selected_processed_lengths[index];
+    }
     entry.scheduling_order = index;
     entry.unprocessed_token_count = token_counts[index];
     entry.draft_token_count = entry.is_prefill ? 0 : token_counts[index] - 1;

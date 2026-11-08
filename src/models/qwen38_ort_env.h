@@ -3,15 +3,17 @@
 //
 // Qwen3.8-Flash-Next NVFP4 (model.type "qwen38_flash_graph"): the per-Run hints the engine hands to ORT's QMoE kernels.
 //
-// Those kernels (ORT contrib_ops/cuda/moe and the CUDA plugin EP) read their hints from process environment variables;
-// ORT has no per-run config entry for them yet. The follow-up is to pass them through OrtRunOptions::AddConfigEntry,
-// as the engine already does for `gpu_graph_id` and `memory.enable_memory_arena_shrinkage`; this file then goes away.
+// Those kernels (ORT contrib_ops/cuda/moe and the CUDA plugin EP) read their hints from process environment variables.
+// Current ORT reads the warm-up flag from the per-run config entry `ep.cuda.qmoe_in_warmup` instead and no longer reads
+// ORT_QMOE_IN_WARMUP, so every Run also carries that entry (Qwen38OrtRunHints::ApplyRunConfigEntries); the variable stays for
+// the older prototype. The other hints follow the same way, as the engine already does for `gpu_graph_id` and
+// `memory.enable_memory_arena_shrinkage`; this file then goes away.
 //   ORT_QMOE_PREFILL_NEW_TURN             "1" for the first Run of a turn (ORT resets it to "0" once it consumed it)
 //   ORT_QMOE_PREFILL_TOTAL_TOKENS         prompt length of the turn, while the prompt is ingested
 //   ORT_QMOE_CURRENT_MAX_COMPACT_EXPERTS  expert-compaction wave of one dense prefill chunk
 //   ORT_QMOE_PREFILL_HANDOFF_DONE         "1" for the first Run after the prompt state moved to the decode graphs (ORT
 //                                         resets it to "0" once it consumed it)
-//   ORT_QMOE_IN_WARMUP                    "1" for the Runs of Warmup()
+//   ORT_QMOE_IN_WARMUP                    "1" for the Runs of Warmup() (the older prototype's form of ep.cuda.qmoe_in_warmup)
 //   ORT_FORCE_DETERMINISTIC_MOE           "1" for the Runs from the first Warmup() on unless the process sets it
 //                                         (deterministic tactics instead of GEMM profiling)
 //
@@ -36,7 +38,10 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
+
+struct OrtRunOptions;
 
 namespace Generators {
 
@@ -48,6 +53,12 @@ inline constexpr const char* kHandoffDone = "ORT_QMOE_PREFILL_HANDOFF_DONE";
 inline constexpr const char* kInWarmup = "ORT_QMOE_IN_WARMUP";
 inline constexpr const char* kForceDeterministicMoe = "ORT_FORCE_DETERMINISTIC_MOE";
 }  // namespace Qwen38OrtEnv
+
+namespace Qwen38OrtRunEntry {
+// Per-run config entry of the CUDA QMoE kernels: "1" keeps the Run out of expert scores, route statistics and promotions.
+// It lives for one Run only and an entry that is not supplied means "0".
+inline constexpr const char* kInWarmup = "ep.cuda.qmoe_in_warmup";
+}  // namespace Qwen38OrtRunEntry
 
 struct Qwen38OrtEnvVariable {
   std::string name;
@@ -157,6 +168,10 @@ class Qwen38OrtRunHints {
     if (warmup) deterministic_moe_ = true;
   }
   bool InWarmup() const noexcept { return warmup_; }
+
+  // Update reused run options only when the value changes, including the reset to "0" after warmup. Captured CUDA
+  // graph replays do not read these entries. Returns whether an entry was written.
+  bool ApplyRunConfigEntries(OrtRunOptions& options) const;
 
   // Every Run of this engine asks for deterministic MoE tactics from now on, without being a warmup Run: the DFlash
   // pipeline verifies at S=8 under CUDA graphs from its first decode on, whether or not the model warms up.

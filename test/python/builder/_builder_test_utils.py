@@ -234,6 +234,51 @@ def ort_runs_causal_conv_with_state():
 
 
 @functools.cache
+def ort_runs_bidirectional_group_query_attention():
+    """Whether the installed onnxruntime knows GroupQueryAttention's causal attribute, added in 1.30.
+
+    Tests that run a d1-2B export need this. Like ort_runs_causal_conv_with_state, it loads a one-node model,
+    so a load error in the model under test still fails that test instead of skipping it.
+    """
+    import onnx  # noqa: PLC0415
+    import onnxruntime  # noqa: PLC0415
+
+    def value(name, element_type, shape):
+        return onnx.helper.make_tensor_value_info(name, element_type, shape)
+
+    node = onnx.helper.make_node(
+        "GroupQueryAttention",
+        ["q", "k", "v", "", "", "lengths", "total"],
+        ["y", "present_key", "present_value"],
+        domain="com.microsoft",
+        num_heads=1,
+        kv_num_heads=1,
+        causal=0,
+    )
+    graph = onnx.helper.make_graph(
+        [node],
+        "bidirectional_group_query_attention_probe",
+        [
+            value("q", onnx.TensorProto.FLOAT, [1, 2, 4]),
+            value("k", onnx.TensorProto.FLOAT, [1, 2, 4]),
+            value("v", onnx.TensorProto.FLOAT, [1, 2, 4]),
+            value("lengths", onnx.TensorProto.INT32, [1]),
+            value("total", onnx.TensorProto.INT32, []),
+        ],
+        [value("y", onnx.TensorProto.FLOAT, [1, 2, 4])],
+    )
+    opsets = [onnx.helper.make_opsetid("", 21), onnx.helper.make_opsetid("com.microsoft", 1)]
+    model = onnx.helper.make_model(graph, opset_imports=opsets, ir_version=10)
+    try:
+        onnxruntime.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"])
+    except Exception as error:
+        if "Unrecognized attribute: causal" in str(error):
+            return False
+        raise
+    return True
+
+
+@functools.cache
 def ort_runs_engram_op(op_type):
     """Probe Engram operators missing from the older ORT wheel pinned by DirectML CI."""
     import onnx  # noqa: PLC0415

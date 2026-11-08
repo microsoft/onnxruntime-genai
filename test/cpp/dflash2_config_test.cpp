@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include <algorithm>
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -131,9 +132,10 @@ struct TensorMetadata {
 
 class SnapshotCountingBuffer final : public DeviceBuffer {
  public:
-  SnapshotCountingBuffer(std::shared_ptr<DeviceBuffer> inner, size_t& downloads, size_t& uploads)
+  SnapshotCountingBuffer(std::shared_ptr<DeviceBuffer> inner, size_t& downloads, size_t& uploads,
+                         uint8_t* device_handle = nullptr)
       : inner_{std::move(inner)}, downloads_{downloads}, uploads_{uploads} {
-    p_device_ = inner_->p_device_;
+    p_device_ = device_handle ? device_handle : inner_->p_device_;
     size_in_bytes_ = inner_->size_in_bytes_;
   }
   const char* GetType() const override { return inner_->GetType(); }
@@ -151,7 +153,8 @@ class SnapshotCountingBuffer final : public DeviceBuffer {
     inner_->CopyCpuToDevice();
   }
   void CopyFrom(size_t destination, DeviceBuffer& source, size_t offset, size_t bytes) override {
-    inner_->CopyFrom(destination, source, offset, bytes);
+    auto* wrapped = dynamic_cast<SnapshotCountingBuffer*>(&source);
+    inner_->CopyFrom(destination, wrapped ? *wrapped->inner_ : source, offset, bytes);
   }
   void Zero() override { inner_->Zero(); }
 
@@ -185,6 +188,14 @@ class CheckpointAllocationDevice final : public DeviceInterface {
     return inner_.AllocateBase(size);
   }
   std::shared_ptr<DeviceBuffer> WrapMemoryBase(void* memory, size_t size) override {
+    if (opaque_buffer_handles) {
+      if (next_handle_ == handles_.size()) {
+        throw std::logic_error("Opaque test buffer handles exhausted.");
+      }
+      return std::make_shared<SnapshotCountingBuffer>(
+          inner_.WrapMemoryBase(memory, size), buffer_downloads, buffer_uploads,
+          reinterpret_cast<uint8_t*>(&handles_[next_handle_++]));
+    }
     if (type_ == DeviceType::WEBGPU) {
       wrapped_memory.push_back(memory);
       return std::make_shared<SnapshotCountingBuffer>(
@@ -236,6 +247,7 @@ class CheckpointAllocationDevice final : public DeviceInterface {
   size_t uploaded_bytes{};
   size_t host_allocations{};
   bool fail_host_allocation{};
+  bool opaque_buffer_handles{};
   size_t buffer_downloads{};
   size_t buffer_uploads{};
   size_t synchronizations{};
@@ -245,6 +257,8 @@ class CheckpointAllocationDevice final : public DeviceInterface {
   DeviceInterface& inner_;
   DeviceType type_;
   Ort::Allocator* allocator_;
+  std::array<float, 256> handles_{};
+  size_t next_handle_{};
 };
 
 class FakeModelStateMetadata final : public ModelStateMetadata {
@@ -1342,6 +1356,44 @@ TEST(Dflash2ConfigTest, RunsPackedQkvDrafterWithoutQueryRowMap) {
 }
 
 class Dflash2StorageRestoreTest : public ::testing::TestWithParam<bool> {};
+
+TEST(Dflash2ConfigTest, CopiesAuxiliaryRowsWithOpaqueHandleCollisions) {
+  const auto root = WriteAnchorRowIndexDrafterModel();
+  auto config = MakeDflash2Config();
+  config.config_path = fs::path{root.string()};
+  auto& draft = config.model.dflash2;
+  draft.filename = "dflash2_anchor.onnx";
+  draft.num_hidden_layers = 1;
+  draft.num_key_value_heads = 1;
+  draft.head_size = 1;
+  draft.sliding_window = 4;
+  draft.inputs.anchor_row_index = "anchor_row_index";
+
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  CheckpointAllocationDevice device{*cpu, DeviceType::CPU};
+  device.opaque_buffer_handles = true;
+  auto model = std::make_shared<Dflash2Model>(CreateDflash2Config(config), GetOrtEnv());
+  model->p_device_inputs_ = &device;
+  Dflash2Drafter drafter{model, 4, Dflash2Drafter::PoolBlocks(config, 4, 1), 1};
+  Tensor aux{&device, Ort::TypeToTensorType<float>};
+  aux.CreateTensor(std::array<int64_t, 2>{4, 1});
+  aux.GetDeviceSpan<float>().CopyFromCpu(std::array<float, 4>{100, 101, 102, 103});
+
+  // Adjacent handles differ by one float, so source row one falsely aliases destination row zero.
+  int request_id = 0;
+  const std::array feeds{
+      Dflash2Drafter::Feed{.request = reinterpret_cast<Request*>(&request_id),
+                           .aux_row_begin = 1,
+                           .aux_row_count = 3,
+                           .first_position = 0,
+                           .anchor_token = 11,
+                           .draft_eligible = true,
+                           .wants_drafts = true}};
+  std::vector<std::vector<int32_t>> drafts;
+  ASSERT_TRUE(drafter.Propose(aux, feeds, drafts));
+  ASSERT_EQ(drafts.size(), 1u);
+  EXPECT_EQ(drafts[0], (std::vector<int32_t>{2, 103, 0}));
+}
 
 TEST(Dflash2ConfigTest, RunsDrafterWithAnchorRowIndex) {
   const auto root = WriteAnchorRowIndexDrafterModel();

@@ -534,6 +534,12 @@ def calibrate_kv_scales(
             raise ValueError(f"Calibration model is missing required input '{required_name}'.")
     past_metas = [meta for meta in input_metas.values() if meta.name.startswith("past_key_values.")]
     supported_inputs = {"input_ids", "attention_mask", "position_ids", *(meta.name for meta in past_metas)}
+    rope_context_input = sess.get_modelmeta().custom_metadata_map.get("com.microsoft.genai.rope_context_length_input")
+    if rope_context_input is not None:
+        rope_context_meta = input_metas.get(rope_context_input)
+        if rope_context_meta is None or rope_context_meta.type != "tensor(int64)" or rope_context_meta.shape != []:
+            raise ValueError("LongRoPE context metadata must name an int64 scalar input.")
+        supported_inputs.add(rope_context_input)
     unsupported_inputs = sorted(input_metas.keys() - supported_inputs)
     if unsupported_inputs:
         raise ValueError(f"Calibration model has unsupported required inputs: {unsupported_inputs}.")
@@ -563,6 +569,8 @@ def calibrate_kv_scales(
                 (1, seq_len), dtype=_numpy_dtype(input_metas["attention_mask"].type)
             ),
         }
+        if rope_context_input is not None:
+            feeds[rope_context_input] = np.asarray(seq_len, dtype=np.int64)
         if "position_ids" in input_metas:
             position_meta = input_metas["position_ids"]
             position_ids = np.arange(seq_len, dtype=_numpy_dtype(position_meta.type)).reshape(1, seq_len)

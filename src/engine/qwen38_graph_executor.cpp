@@ -228,6 +228,14 @@ void Qwen38GraphSession::Release() {
   decoding_ = false;
   pending_step_ = {};
   const bool had_cycle_in_flight = std::exchange(cycle_in_flight_, false) || batch_inflight_;
+  size_t target_forwards = batch_inflight_ ? 0 : 1;
+  if (batch_inflight_) {
+    for (const size_t slot : inflight_slots_) {
+      if (slot == 0 || std::find(inflight_slots_.begin(), inflight_slots_.end(), slot - 1) == inflight_slots_.end()) {
+        ++target_forwards;
+      }
+    }
+  }
   batch_inflight_ = false;
   inflight_slots_.clear();
   inflight_owners_.clear();
@@ -241,7 +249,7 @@ void Qwen38GraphSession::Release() {
   CheckStatusIfPending();
   if (had_cycle_in_flight) {
     ++work_metrics_.work_records;
-    ++work_metrics_.target_forward_passes;
+    work_metrics_.target_forward_passes += target_forwards;
     ++work_metrics_.discarded_completions;
   }
 }
@@ -310,7 +318,8 @@ Qwen38GraphSession::PendingStep Qwen38GraphSession::ProcessCycleRecord(const Qwe
   };
   const size_t produced = record.TokenCount();
   if (produced == 0 || produced > predictions.size() || record.accepted_count < 0 ||
-      record.proposed_count < 0 || record.proposed_count > 7 ||
+      record.proposed_count < 0 || record.proposed_count > 7 || record.draft_forward_count < 0 ||
+      record.target_forward_group >= MaxBatchSize() ||
       (record.accepted_count > 0 && record.accepted_count > record.proposed_count)) {
     throw std::logic_error("Qwen backend returned a malformed cycle record.");
   }
@@ -341,7 +350,7 @@ Qwen38GraphSession::PendingStep Qwen38GraphSession::ProcessCycleRecord(const Qwe
   const size_t n_acc =
       record.accepted_count > 0 ? static_cast<size_t>(record.accepted_count) : (record.accepted ? 1 : 0);
   result.speculation = SpeculativeRowMetrics{n_prop, n_acc};
-  const size_t draft_forwards = record.draft_forward_count > 0 ? static_cast<size_t>(record.draft_forward_count) : 1;
+  const size_t draft_forwards = static_cast<size_t>(record.draft_forward_count);
   return PendingStep{/*active=*/true, /*is_decode_cycle=*/true, /*mtp=*/device_->MtpEnabled(),
                      /*proposed=*/n_prop, /*draft_forwards=*/draft_forwards, /*accepted=*/n_acc,
                      /*produced=*/produced, /*count_forward_pass=*/true};
@@ -545,8 +554,7 @@ void Qwen38GraphSession::StepBatch(std::span<const Qwen38StepRequest> requests, 
     slot_states_.at(req.slot).pending = {};
   }
 
-  // The prompt the decoders were paused behind is gone (canceled): nothing would resume them, so the cycle that Plan()
-  // announced is enqueued now and collected by phase 1 below.
+  // If ready decoders have no lookahead, enqueue the cycle Plan() announced and collect it in phase 1 below.
   if (ResumesPausedDecoders(requests)) {
     EnqueueDecodeCycle(requests);
   }
@@ -556,11 +564,21 @@ void Qwen38GraphSession::StepBatch(std::span<const Qwen38StepRequest> requests, 
     std::vector<Qwen38CycleRecord> records(inflight_slots_.size());
     device_->WaitBatchDecode(inflight_slots_, records);
     ++work_metrics_.work_records;
-    ++work_metrics_.target_forward_passes;
+    std::vector<bool> work_groups(MaxBatchSize(), false);
+    for (const auto& record : records) {
+      if (record.target_forward_group >= work_groups.size()) {
+        throw std::logic_error("Qwen backend returned an invalid target forward group.");
+      }
+      if (!work_groups[record.target_forward_group]) {
+        ++work_metrics_.target_forward_passes;
+        work_groups[record.target_forward_group] = true;
+      }
+    }
     batch_inflight_ = false;
 
     std::vector<uint8_t> want_more(inflight_slots_.size(), 0);
-    bool counted_pass = false;
+    std::vector<bool> counted_pass(MaxBatchSize(), false);
+    bool counted_shared_draft = false;
     for (size_t i = 0; i < inflight_slots_.size(); ++i) {
       const size_t s = inflight_slots_[i];
       size_t match_idx = requests.size();
@@ -577,9 +595,12 @@ void Qwen38GraphSession::StepBatch(std::span<const Qwen38StepRequest> requests, 
         const size_t limit = std::min(req.token_budget, req.session_budget);
         bool ended = false;
         PendingStep pending = ProcessCycleRecord(records[i], limit, results[match_idx], ended);
-        // One target forward serves every slot of the batch.
-        pending.count_forward_pass = !counted_pass;
-        counted_pass = true;
+        pending.count_forward_pass = !counted_pass[records[i].target_forward_group];
+        counted_pass[records[i].target_forward_group] = true;
+        if (records[i].draft_forward_shared) {
+          if (counted_shared_draft) pending.draft_forwards = 0;
+          counted_shared_draft = true;
+        }
         slot_states_[s].pending = pending;
         slot_states_[s].want_more = !ended;
         want_more[i] = !ended ? 1 : 0;
@@ -634,7 +655,6 @@ void Qwen38GraphSession::StepBatch(std::span<const Qwen38StepRequest> requests, 
   }
 
   // Phase 2: prefill any slot that has not entered decoding yet.
-  bool all_decoding = true;
   for (size_t r = 0; r < requests.size(); ++r) {
     const auto& req = requests[r];
     const size_t s = req.slot;
@@ -658,7 +678,6 @@ void Qwen38GraphSession::StepBatch(std::span<const Qwen38StepRequest> requests, 
       results[r].prompt_tokens_processed = chunk;
       results[r].prompt_complete = st.prefilled == req.tokens.size();
       if (st.prefilled < req.tokens.size()) {
-        all_decoding = false;
         continue;
       }
       const size_t limit = std::min(req.token_budget, req.session_budget);
@@ -678,9 +697,7 @@ void Qwen38GraphSession::StepBatch(std::span<const Qwen38StepRequest> requests, 
     }
   }
 
-  if (all_decoding) {
-    EnqueueDecodeCycle(requests);
-  }
+  EnqueueDecodeCycle(requests);
 }
 
 void Qwen38GraphSession::AddStats(SpeculativeStats& stats) const {
