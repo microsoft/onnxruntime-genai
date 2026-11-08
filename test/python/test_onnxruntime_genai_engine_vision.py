@@ -34,11 +34,29 @@ def vision_modes():
 def vision_profile(manifest):
     profile = (2, 6, 6) if manifest["model"]["type"] == "qwen4_exp" else (4, 512, 64)
     batching = manifest["engine"]["dynamic_batching"]
+    defaults = {"max_batch_size": 16, "max_scheduled_tokens": 2048}
     for field, required in zip(("max_batch_size", "max_scheduled_tokens"), profile[:2], strict=True):
-        assert batching.get(field, 0) >= required, f"Qualification requires {field} >= {required}"
+        assert batching.get(field, defaults[field]) >= required, f"Qualification requires {field} >= {required}"
     chunk_size = manifest["search"].get("chunk_size", 0)
     assert not chunk_size or chunk_size >= profile[2], f"Qualification requires chunk_size >= {profile[2]}"
     return profile
+
+
+@pytest.mark.parametrize("model_type", ["qwen3_5", "qwen4_exp"])
+@pytest.mark.parametrize(
+    "omitted_fields",
+    [("max_batch_size",), ("max_scheduled_tokens",), ("max_batch_size", "max_scheduled_tokens")],
+)
+def test_qualification_uses_runtime_defaults_for_omitted_limits(model_type, omitted_fields):
+    profile = (2, 6, 6) if model_type == "qwen4_exp" else (4, 512, 64)
+    manifest = {
+        "model": {"type": model_type},
+        "engine": {"dynamic_batching": {"max_batch_size": profile[0], "max_scheduled_tokens": profile[1]}},
+        "search": {"chunk_size": profile[2]},
+    }
+    for field in omitted_fields:
+        del manifest["engine"]["dynamic_batching"][field]
+    assert vision_profile(manifest) == profile
 
 
 @pytest.mark.parametrize("model_type", ["qwen3_5", "qwen4_exp"])
@@ -54,6 +72,10 @@ def test_qualification_rejects_reduced_execution_limits(model_type, field):
     limits[field] -= 1
     with pytest.raises(AssertionError, match=field):
         vision_profile(manifest)
+    if field != "chunk_size":
+        limits[field] = 0
+        with pytest.raises(AssertionError, match=field):
+            vision_profile(manifest)
 
 
 @pytest.fixture(scope="module")
