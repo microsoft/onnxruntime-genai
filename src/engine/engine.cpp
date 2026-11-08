@@ -1600,7 +1600,7 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request, const std::s
   const size_t first_row = static_cast<size_t>(request->CurrentSequenceLength());
   auto prepared = media_store_->Prepare(prompt, raw, images, first_row, request->MaxSessionTokens() - first_row, videos);
   media_store_->Identify(prepared, first_row, request->Media());
-  request->ReserveMedia(prepared.media.size());
+  request->ReserveMedia(prepared.media.size(), media_store_.get());
   media_store_->ReserveItems(prepared.media.size());
   const auto turn_id = AdmitTurn(request, prepared.tokens, options);
   media_store_->Retain(prepared.media);

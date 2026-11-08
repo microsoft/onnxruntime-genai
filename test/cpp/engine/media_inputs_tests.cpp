@@ -145,6 +145,17 @@ TEST(MediaInputsTest, RealQwenVideoCanonicalOrderAndEncoderInputs) {
   store.Retain(prepared.media);
   const auto item = prepared.media[0].item;
   {
+    ASSERT_NE(prepared.storage, nullptr);
+    const auto accounting = prepared.storage->accounting;
+    const auto retained_bytes = accounting->host_bytes;
+    {
+      auto reused = store.Prepare(prompt, raw, nullptr, 0, 4096, videos.get());
+      EXPECT_EQ(reused.media[0].item, item);
+      EXPECT_GT(accounting->host_bytes, retained_bytes);
+    }
+    EXPECT_EQ(accounting->host_bytes, retained_bytes);
+  }
+  {
     struct InvalidPlan : VisionPreparation {
       explicit InvalidPlan(std::unique_ptr<VisionPreparation> processor) : processor{std::move(processor)} {}
       size_t Estimate(const VisionPreparationInput& input, size_t limit) const override {

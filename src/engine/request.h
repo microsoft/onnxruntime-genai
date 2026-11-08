@@ -300,7 +300,7 @@ struct Request : std::enable_shared_from_this<Request>,
   std::span<const int32_t> PrefixTokensCpu() const;
   std::span<const MediaSpan> Media() const { return media_; }
   std::array<int64_t, 3> Position(size_t row) const;
-  void ReserveMedia(size_t count);
+  void ReserveMedia(size_t count, MediaStore* store = nullptr);
   void AppendMedia(std::span<const MediaSpan> media) noexcept;
   bool RetryMediaPreparation(const std::shared_ptr<MediaItem>& item) noexcept;
   void ClearMediaPreparationFailure() noexcept;
@@ -626,6 +626,8 @@ struct Request : std::enable_shared_from_this<Request>,
   // search's device sequence so that streaming and input-id preparation never read it back.
   std::vector<int32_t> tokens_host_;
   mutable std::vector<int32_t> prefix_tokens_;
+  std::shared_ptr<MediaAllocation> media_storage_;
+  std::shared_ptr<MediaAllocation> prefix_storage_;
   std::vector<MediaSpan> media_;
   std::weak_ptr<MediaItem> failed_media_;
   bool media_preparation_retried_{};

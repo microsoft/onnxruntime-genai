@@ -25,6 +25,12 @@ struct MediaAccounting {
   size_t device_bytes{};
 };
 
+struct MediaAllocation {
+  ~MediaAllocation();
+  std::shared_ptr<MediaAccounting> accounting;
+  size_t host_bytes{};
+};
+
 struct MediaItem {
   ~MediaItem();
 
@@ -62,6 +68,7 @@ struct MediaSpan {
   std::shared_ptr<MediaItem> item;
   std::shared_ptr<const VisionPosition> positions;
   std::shared_ptr<const MediaPrefix> prefix;
+  std::shared_ptr<MediaAllocation> position_storage;
   size_t rows{};
   size_t feature_offset{};
 };
@@ -83,6 +90,7 @@ struct MediaPrefix {
 struct PreparedMediaTurn {
   std::vector<int32_t> tokens;
   std::vector<MediaSpan> media;
+  std::shared_ptr<MediaAllocation> storage;
 };
 
 std::array<int64_t, 3> MediaPosition(std::span<const MediaSpan> media, size_t row);
@@ -102,9 +110,11 @@ class MediaStore {
   void Retain(std::span<const MediaSpan> media) noexcept;
   void Encode(const std::shared_ptr<MediaItem>& item);
   void ReleaseFeatures();
+  std::shared_ptr<MediaAllocation> ReserveHost(size_t bytes);
 
  private:
   void MakeHostRoom(size_t bytes);
+  std::shared_ptr<MediaAllocation> TransferHost(size_t bytes, size_t& reservation);
   void ValidateInput(const std::string& name, ONNXTensorElementDataType type,
                      std::span<const int64_t> shape) const;
   void ValidateInputs(const NamedTensors& inputs) const;

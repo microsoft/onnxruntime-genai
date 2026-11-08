@@ -465,6 +465,8 @@ void Request::CompleteClose() noexcept {
   std::vector<int32_t>{}.swap(tokens_host_);
   std::vector<int32_t>{}.swap(prefix_tokens_);
   std::vector<MediaSpan>{}.swap(media_);
+  media_storage_.reset();
+  prefix_storage_.reset();
   std::vector<TurnBoundary>{}.swap(turn_boundaries_);
 }
 
@@ -497,10 +499,21 @@ uint64_t Request::BeginTurn(const std::string& prompt, const TurnOptions& option
   return engine->BeginTurn(shared_from_this(), prompt, options, images, videos);
 }
 
-void Request::ReserveMedia(size_t count) {
+void Request::ReserveMedia(size_t count, MediaStore* store) {
   if (count == 0) return;
-  media_.reserve(media_.size() + count);
-  prefix_tokens_.reserve(max_session_tokens_);
+  if (count > media_.max_size() - media_.size())
+    throw std::overflow_error("Request media capacity exceeds its supported size.");
+  const auto capacity = media_.size() + count;
+  if (capacity > media_.capacity()) {
+    auto allocation = store ? store->ReserveHost(capacity * sizeof(MediaSpan)) : nullptr;
+    media_.reserve(capacity);
+    media_storage_ = std::move(allocation);
+  }
+  if (prefix_tokens_.capacity() < max_session_tokens_) {
+    auto allocation = store ? store->ReserveHost(max_session_tokens_ * sizeof(int32_t)) : nullptr;
+    prefix_tokens_.reserve(max_session_tokens_);
+    prefix_storage_ = std::move(allocation);
+  }
 }
 
 void Request::AppendMedia(std::span<const MediaSpan> media) noexcept {

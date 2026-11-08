@@ -48,6 +48,10 @@ MediaItem::~MediaItem() {
   }
 }
 
+MediaAllocation::~MediaAllocation() {
+  if (accounting) accounting->host_bytes -= host_bytes;
+}
+
 MediaPrefix::~MediaPrefix() {
   if (accounting) accounting->host_bytes -= host_bytes;
 }
@@ -170,6 +174,26 @@ void MediaStore::MakeHostRoom(size_t bytes) {
     throw std::runtime_error("Retained media leaves insufficient host capacity for this turn.");
 }
 
+std::shared_ptr<MediaAllocation> MediaStore::ReserveHost(size_t bytes) {
+  const auto total = AddBytes(bytes, sizeof(MediaAllocation) + 2 * sizeof(void*));
+  MakeHostRoom(total);
+  auto allocation = std::make_shared<MediaAllocation>();
+  allocation->accounting = accounting_;
+  allocation->host_bytes = total;
+  accounting_->host_bytes += total;
+  return allocation;
+}
+
+std::shared_ptr<MediaAllocation> MediaStore::TransferHost(size_t bytes, size_t& reservation) {
+  const auto total = AddBytes(bytes, sizeof(MediaAllocation) + 2 * sizeof(void*));
+  if (total > reservation) throw std::logic_error("Media metadata exceeded its host reservation.");
+  auto allocation = std::make_shared<MediaAllocation>();
+  allocation->accounting = accounting_;
+  allocation->host_bytes = total;
+  reservation -= total;
+  return allocation;
+}
+
 void MediaStore::Identify(PreparedMediaTurn& turn, size_t first_row, std::span<const MediaSpan> history) {
   if (turn.media.empty()) return;
   auto delta = AddPosition(MediaPosition(history, first_row)[0], -static_cast<int64_t>(first_row));
@@ -205,6 +229,7 @@ void MediaStore::Identify(PreparedMediaTurn& turn, size_t first_row, std::span<c
     if (match != prefixes_.end()) {
       span.prefix = *match;
       span.positions = (*match)->positions;
+      span.position_storage.reset();
       continue;
     }
     if (span.rows > static_cast<uint64_t>(std::numeric_limits<int32_t>::max() - next_prefix_row_))
@@ -223,6 +248,7 @@ void MediaStore::Identify(PreparedMediaTurn& turn, size_t first_row, std::span<c
     next_prefix_row_ += span.rows;
     prefixes_.push_back(prefix);
     span.prefix = std::move(prefix);
+    span.position_storage.reset();
   }
 }
 
@@ -275,6 +301,14 @@ PreparedMediaTurn MediaStore::Prepare(const std::string& prompt, std::span<const
     result.media.emplace_back(AddBytes(first_row, span.start), units[span.unit], span.positions,
                               span.rows, span.feature_offset);
     previous_end = AddBytes(span.start, span.rows);
+  }
+  if (!result.media.empty()) {
+    result.storage = TransferHost(AddBytes(MultiplyBytes(result.tokens.capacity(), sizeof(int32_t)),
+                                           MultiplyBytes(result.media.capacity(), sizeof(MediaSpan))),
+                                  reservation.bytes);
+    for (auto& span : result.media)
+      if (span.positions)
+        span.position_storage = TransferHost(span.positions->SizeBytes(), reservation.bytes);
   }
   auto feeds = processor.Materialize(*plan);
   if (feeds.size() != units.size())
