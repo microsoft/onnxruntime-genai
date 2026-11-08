@@ -24,7 +24,8 @@ class SmolLM3Model(LlamaModel):
         # Keep the per-layer RoPE selection within the provider's fusion
         # capabilities. CPU fallback attention uses standalone RotaryEmbedding
         # for unsupported head sizes and must not be switched back to fused RoPE.
-        self.attention_attrs["use_rope_in_attn"] = original_use_rope and bool(self.no_rope_layers[layer_id])
+        self.attention_attrs["rope"] = original_rope and bool(self.no_rope_layers[layer_id])
+        self.attention_attrs["use_rope_in_attn"] = original_use_rope and self.attention_attrs["rope"]
 
         # Set the sliding window size for the current layer.
         assert self.layer_types[layer_id] in {"sliding_attention", "full_attention"}

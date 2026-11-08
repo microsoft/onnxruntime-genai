@@ -35,6 +35,7 @@ base_module = _load_builder_module("base")
 qwen_module = _load_builder_module("qwen")
 Model = base_module.Model
 Qwen35TextModel = qwen_module.Qwen35TextModel
+SmolLM3Model = _load_builder_module("smollm").SmolLM3Model
 
 from loaders.base import QuantizedTensorModule  # noqa: E402
 from loaders.modelopt import ModeloptModel  # noqa: E402
@@ -72,6 +73,27 @@ def _model(model_type, extra_options, use_paged_attention=True):
         "v_path": "",
     }
     return model
+
+
+@pytest.mark.parametrize("fused", [False, True])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_smollm_layer_rope_selection_and_restore(monkeypatch, fused, enabled):
+    model = _model(SmolLM3Model, {})
+    model.attention_attrs.update(rope=True, use_rope_in_attn=fused)
+    model.no_rope_layers = [enabled]
+    model.layer_types = ["full_attention"]
+    model.window_size = 16
+    seen = []
+
+    def capture(self, layer_id, attention, root_input, **kwargs):
+        seen.append((self.attention_attrs["rope"], self.attention_attrs["use_rope_in_attn"]))
+
+    monkeypatch.setattr(SmolLM3Model.__bases__[0], "make_attention", capture)
+    model.make_attention(0, None, "root")
+    assert seen == [(enabled, fused and enabled)]
+    assert model.attention_attrs["rope"] is True
+    assert model.attention_attrs["use_rope_in_attn"] is fused
+    assert model.window_size == 16
 
 
 @pytest.mark.parametrize("use_lora", [False, True])
