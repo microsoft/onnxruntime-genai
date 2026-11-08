@@ -10,6 +10,7 @@
 #include "constrained_logits_processor.h"
 #include "config_utils.h"
 #include "generator/generators.h"
+#include "models/decoder_only_pipeline.h"
 #include "models/model.h"
 #include "models/io/logits.h"
 #include "models/speculative_decoding.h"
@@ -131,6 +132,73 @@ TEST(GeneratorPromptValidationTest, ChecksPhysicalFinalSlidingWindowBeforeMutati
       }
     }
   }
+}
+
+TEST(GeneratorPromptValidationTest, CacheOnlyPipelineWindowAcceptsTrailingPadding) {
+  for (bool device : {false, true}) {
+    for (bool continued : {false, true}) {
+      for (const auto& tokens : {std::vector<int32_t>{1, 1, 1, 1, 0, 0, 0, 0},
+                                std::vector<int32_t>{1, 2, 3, 0, 0}}) {
+        SCOPED_TRACE(testing::Message() << "device=" << device << " continued=" << continued
+                                        << " length=" << tokens.size());
+        auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "last-token-generation");
+        OverlayConfig(*config, R"({"model":{"type":"decoder-pipeline","pad_token_id":0,"vocab_size":4,
+          "decoder":{"pipeline":[{"decoder":{"filename":"../engine/last-token-logits/pruned.onnx",
+            "inputs":["input_ids","last_token_indices"],"outputs":["logits"]}}]}}})");
+        auto& window = config->model.decoder.sliding_window.emplace();
+        window.window_size = 4;
+        window.slide_inputs = false;
+        window.slide_key_value_cache = false;
+        auto model = CreateModel(GetOrtEnv(), std::move(config));
+        auto params = std::make_shared<GeneratorParams>(*model);
+        auto generator = std::make_unique<Generator>(*model, *params);
+        if (continued)
+          ASSERT_NO_THROW(generator->AppendTokens(std::vector<int32_t>{1, 1, 1, 1}));
+        const auto length = generator->GetSequence(0).size();
+        EXPECT_THROW(AppendPrompt(*generator, {0, 0, 0, 0, 0, 0, 0, 0}, device), std::invalid_argument);
+        EXPECT_EQ(generator->GetSequence(0).size(), length);
+        ASSERT_NO_THROW(AppendPrompt(*generator, tokens, device));
+        EXPECT_EQ(generator->GetSequence(0).size(), length + tokens.size());
+        auto* indices = generator->state_->GetInput("last_token_indices");
+        ASSERT_NE(indices, nullptr);
+        EXPECT_EQ(indices->GetTensorTypeAndShapeInfo()->GetShape(), (std::vector<int64_t>{1, 1, 1}));
+        EXPECT_EQ(indices->GetTensorData<int32_t>()[0], tokens.size() == 8 ? 3 : 2);
+        auto logits = generator->GetLogits().CopyDeviceToCpu();
+        const float expected = tokens.size() == 8 ? 1.0f : 3.0f;
+        EXPECT_EQ((std::vector<float>{logits.begin(), logits.end()}), (std::vector<float>(4, expected)));
+      }
+    }
+  }
+}
+
+TEST(PipelineLastTokenLogitsTest, CacheOnlyWindowsPreserveRunIterations) {
+  struct CountingPipelineState : DecoderOnlyPipelineState {
+    using DecoderOnlyPipelineState::DecoderOnlyPipelineState;
+    size_t runs{};
+    void OnStageComplete(size_t) override { ++runs; }
+  };
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "last-token-generation");
+  OverlayConfig(*config, R"({"model":{"type":"decoder-pipeline","pad_token_id":0,"vocab_size":4,
+    "decoder":{"pipeline":[{"decoder":{"filename":"../engine/last-token-logits/pruned.onnx",
+      "inputs":["input_ids","last_token_indices"],"outputs":["logits"]}}]}}})");
+  auto& window = config->model.decoder.sliding_window.emplace();
+  window.window_size = 4;
+  window.slide_inputs = false;
+  window.slide_key_value_cache = false;
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  auto params = std::make_shared<GeneratorParams>(*model);
+  auto sequence_lengths = model->p_device_->Allocate<int32_t>(1);
+  sequence_lengths.CpuSpan()[0] = 0;
+  sequence_lengths.CopyCpuToDevice();
+  CountingPipelineState state(static_cast<DecoderOnlyPipelineModel&>(*model), sequence_lengths, *params);
+  EXPECT_EQ(state.GetPromptChunkSize(), 0u);
+  const std::vector<int32_t> tokens{1, 1, 1, 1, 0, 0, 0, 0};
+  auto input = model->p_device_->Allocate<int32_t>(tokens.size());
+  std::copy(tokens.begin(), tokens.end(), input.CpuSpan().begin());
+  input.CopyCpuToDevice();
+  State::PromptInputScope prompt_scope(state, true);
+  ASSERT_NO_THROW(state.Run(static_cast<int>(tokens.size()), input, {}));
+  EXPECT_EQ(state.runs, 2u);
 }
 
 TEST(GeneratorPromptValidationTest, FinalPaddingRejectionPreservesThePipelineWindowCursor) {
