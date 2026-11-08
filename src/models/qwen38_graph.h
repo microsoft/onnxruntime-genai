@@ -413,9 +413,21 @@ struct Qwen38MoeOffloadSettings {
 
 Qwen38MoeOffloadSettings ParseQwen38MoeOffloadSettings(const std::vector<Config::NamedString>& config_entries);
 
-// Offloaded target warmup must stay eager: CUDA graph replays bypass ORT's per-run warmup control. Live runs keep their
-// own graph ids and capture normally. Null when offload is disabled, so other packages keep capturing during warmup.
+// Offloaded target warmup must stay eager after the first capture pass: CUDA graph replays bypass ORT's per-run warmup
+// control. Live runs reuse the graph ids captured during warmup on their execution thread. Null when offload is disabled,
+// so other packages keep capturing during warmup.
 std::unique_ptr<OrtRunOptions> CreateQwen38OffloadWarmupRunOptions(const Qwen38MoeOffloadSettings& settings);
+
+// Selects and stamps the OrtRunOptions for one target Run of a Direction:
+//  - On the first warmup run of an offloaded target direction (`hints.InWarmup()`, `offload_warmup_options != nullptr`,
+//    `!warmup_captured`), marks `warmup_captured = true` and uses `direction_options` so ORT captures the direction's
+//    CUDA graph while warmup (`ep.cuda.qmoe_in_warmup=1` and `MutedPrefill(true)`) is active instead of deferring
+//    capture to the first live decode step.
+//  - On subsequent warmup runs of that direction (`warmup_captured` already true), uses `offload_warmup_options`
+//    (`gpu_graph_id=-1`) so synthetic warmup iterations run eagerly without replaying a captured graph.
+//  - On live runs or non-offloaded targets, uses `direction_options` and stamps the current warmup flag (0 on live runs).
+OrtRunOptions* SelectQwen38TargetRunOptions(const Qwen38OrtRunHints& hints, OrtRunOptions* direction_options,
+                                            OrtRunOptions* offload_warmup_options, bool& warmup_captured);
 
 // Estimated KV capacity of the Flash-Next package's tier-named target graphs (2k, 8k, 16k, 32k, 64k, 128k), available
 // before the session exists. These fixed padded capacities are not read from the graph. Other file names fall back to
@@ -580,7 +592,7 @@ struct Qwen38SuffixDrafter {
   std::array<uint64_t, kTableSize> ngram2_key_{};
 };
 
-// Owns every device-side object of one model. Graphs stay captured across Engines (see Qwen38GraphModel::AcquireDevice).
+// Owns every device-side object of one model. Graphs stay captured per execution thread across Engines.
 struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   explicit Qwen38GraphEngine(Qwen38GraphModel& model);
   ~Qwen38GraphEngine() override;
@@ -593,6 +605,8 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   void Drain() noexcept override;
   void MarkContextFailed() noexcept override;
   bool ContextIsHealthy() const noexcept override;
+  // Runs the configured muted warmup once per live thread, at model construction and before an Engine leases the device.
+  void WarmupForCurrentThread();
 
   // Ingests prompt tokens: by the dense chunked prefill session when prefill.enabled (FastAppend: the dense state continues
   // across chunks and is handed over to the decode state in BeginDecode), otherwise by S=2 graph steps (StepPrefill; the
@@ -632,6 +646,7 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   // The int64 control words of one request slot in ctl_ (the `state` of the plane's prep): the slots lie this far apart for
   // the plane, for the batched fold.ctl views and for every host access.
   static constexpr size_t kCtlWordsPerSlot = QWEN38_PLANE_CTL_WORDS_PER_SLOT;
+  struct WarmupThread {};
   struct Bank {
     PlaneBuffer arena;
     std::map<std::string, std::unique_ptr<DevTensor>> tensors;  // keyed by input name (past_key_values.*)
@@ -645,6 +660,7 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
     uint8_t* hidden{};
     size_t status_count{};
     uint8_t* auxiliary{};
+    bool warmup_captured{};
   };
   struct RowInputs {  // fixed-address per-row-count inputs of the target
     std::map<std::string, std::unique_ptr<DevTensor>> tensors;
@@ -906,6 +922,7 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   const uint8_t* last_hidden_ptr_{};  // hidden output of the last cycle (rows h0, h1)
   Qwen38OrtRunHints run_hints_;       // per slot: what the ORT QMoE kernels are told with each Run (qwen38_ort_env.h)
   std::unique_ptr<OrtRunOptions> offload_warmup_run_options_;
+  std::vector<std::weak_ptr<const WarmupThread>> warmup_threads_;
 };
 
 struct Qwen38GraphModel : Model {
@@ -916,7 +933,8 @@ struct Qwen38GraphModel : Model {
   std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const override;
 
   // Leases the device engine to one Engine at a time (it owns the captured graphs, the KV store and the bank ring). The
-  // lease drains the device when released and keeps the model alive. Throws when another Engine holds it.
+  // acquiring thread is warmed before live execution. The lease drains the device when released and keeps the model
+  // alive. Throws when another Engine holds it; a failed warmup poisons the model before releasing the lease.
   std::shared_ptr<Qwen38DecodeDevice> AcquireDevice();
   void PoisonExecutionContext() noexcept { context_healthy_.store(false); }
   bool IsExecutionContextHealthy() const noexcept { return context_healthy_.load(); }
