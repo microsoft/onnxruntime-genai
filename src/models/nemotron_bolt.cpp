@@ -181,17 +181,24 @@ NemotronBoltModel::NemotronBoltModel(std::unique_ptr<Config> config, OrtEnv& env
   session_ = CreateSession(env, config_->model.decoder.filename, session_options_.get());
   session_info_.Add(*session_);
   const auto& info = session_info_;
-  RequireTensor(info, "input_ids", true, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, {1, 8});
+  const auto ids_shape = info.GetInputShape("input_ids");
+  Require(ids_shape == std::vector<int64_t>({1, 8}) ||
+              (ids_shape == std::vector<int64_t>({1, 1}) &&
+               config_->speculative.max_draft_tokens == 0),
+          "input_ids must be [1,8], or [1,1] in an opt-in target-only package");
+  target_rows_ = static_cast<size_t>(ids_shape[1]);
+  const auto rows = static_cast<int64_t>(target_rows_);
+  RequireTensor(info, "input_ids", true, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, {1, rows});
   RequireTensor(info, "seqlens_k", true, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32, {1});
   RequireTensor(info, "state_row", true, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32, {1});
   RequireTensor(info, "total_sequence_length", true, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32, {});
-  RequireTensor(info, "pred_ids", false, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, {1, 8});
+  RequireTensor(info, "pred_ids", false, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, {1, rows});
   RequireTensor(info, "logits", false, ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16,
-                {1, 8, config_->model.vocab_size});
+                {1, rows, config_->model.vocab_size});
   const auto aux_shape = info.GetOutputShape("aux_hidden_states");
-  Require(aux_shape.size() == 3 && aux_shape[0] == 1 && aux_shape[1] == 8 && aux_shape[2] > 0 &&
+  Require(aux_shape.size() == 3 && aux_shape[0] == 1 && aux_shape[1] == rows && aux_shape[2] > 0 &&
               info.GetOutputDataType("aux_hidden_states") == ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16,
-          "expected bf16 aux_hidden_states[1,8,width]");
+          "expected bf16 aux_hidden_states[1,target_rows,width]");
   aux_width_ = static_cast<size_t>(aux_shape[2]);
   std::set<std::string> outputs{"logits", "pred_ids", "aux_hidden_states"};
   size_t conv_count = 0, ssm_count = 0, key_count = 0, value_count = 0;
@@ -351,7 +358,7 @@ NemotronBoltState::NemotronBoltState(const NemotronBoltModel& model, const Gener
     prefill_aux_->CreateTensor(prefill_shape, true);
   }
   Reset();
-  std::vector<int32_t> dummy(kBoltVerifyRows, 1);
+  std::vector<int32_t> dummy(model.target_rows_, 1);
   // The legacy two-run capture delay needs four calls through the first replay.
   // Newer ORT can warm up and capture internally within a single Run().
   // Use disposable state: warmup may re-execute in-place aliases before Reset().
@@ -455,15 +462,17 @@ std::vector<int64_t> NemotronBoltState::Verify(std::span<const int32_t> tokens, 
 }
 
 std::vector<int64_t> NemotronBoltState::VerifyBlock(std::span<const int32_t> tokens, bool want_predictions) {
-  Require(tokens.size() == kBoltVerifyRows && length_ + kBoltVerifyRows <= bolt_.capacity_,
+  Require(tokens.size() == bolt_.target_rows_ && length_ + kBoltVerifyRows <= bolt_.capacity_,
           "verify block exceeds fixed capacity");
   auto cpu_in = verify_inputs_span_.CpuSpan();
   auto* ids_out = reinterpret_cast<int64_t*>(cpu_in.data());
-  for (size_t i = 0; i < kBoltVerifyRows; ++i) ids_out[i] = tokens[i];
+  for (size_t i = 0; i < bolt_.target_rows_; ++i) ids_out[i] = tokens[i];
+  // The R1 package pads only attention to R8, preserving its position and tile arithmetic.
   cpu_in[2 * kBoltVerifyRows] = static_cast<int32_t>(length_ + kBoltVerifyRows - 1);
   cpu_in[2 * kBoltVerifyRows + 4] = state_row_;
   verify_inputs_span_.CopyCpuToDevice();
-  State::Run(*bolt_.session_, params_->use_graph_capture, 8, 0, nullptr);
+  State::Run(*bolt_.session_, params_->use_graph_capture,
+             static_cast<int>(bolt_.target_rows_), 0, nullptr);
   ++stats_.target_forward_passes;
   if (!want_predictions) return {};
   auto cpu = pred_ids_span_.CopyDeviceToCpu();
@@ -503,10 +512,10 @@ void NemotronBoltState::Prefill(std::span<const int32_t> tokens) {
     const size_t draft_rows = tokens.size() - draft_start;
     const bool single_chunk = draft_rows <= kBoltVerifyRows;
     const size_t aux_row_bytes = bolt_.aux_width_ * sizeof(uint16_t);
-    for (size_t pos = 0; pos < tokens.size(); pos += kBoltVerifyRows) {
-      const size_t valid = std::min(kBoltVerifyRows, tokens.size() - pos);
-      const bool last_chunk = pos + kBoltVerifyRows >= tokens.size();
-      std::vector<int32_t> block(kBoltVerifyRows, tokens[pos + valid - 1]);
+    for (size_t pos = 0; pos < tokens.size(); pos += bolt_.target_rows_) {
+      const size_t valid = std::min(bolt_.target_rows_, tokens.size() - pos);
+      const bool last_chunk = pos + bolt_.target_rows_ >= tokens.size();
+      std::vector<int32_t> block(bolt_.target_rows_, tokens[pos + valid - 1]);
       std::copy_n(tokens.begin() + pos, valid, block.begin());
       const auto predictions = Verify(block, last_chunk);
       if (drafter_ && !single_chunk && pos >= draft_start) {
@@ -542,7 +551,7 @@ int32_t NemotronBoltState::NextToken(size_t public_length) {
   Require(prefilled_, "AppendTokens must precede GenerateNextToken");
   if (pending_.empty() && !drafter_) {
     // Only row zero is committed; later rows are causal scratch and are overwritten.
-    const auto predictions = Verify(std::vector<int32_t>(kBoltVerifyRows, anchor_));
+    const auto predictions = Verify(std::vector<int32_t>(bolt_.target_rows_, anchor_));
     anchor_ = static_cast<int32_t>(predictions[0]);
     ++length_;
     state_row_ = 0;
