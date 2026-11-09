@@ -362,6 +362,60 @@ def test_builder_refuses_output_overlapping_any_input(builders, tmp_path, flag, 
     assert snapshot(tmp_path / "inputs") == before
 
 
+@pytest.mark.parametrize("location", ["nested", "equal", "resolved", "symlink", "presets"])
+def test_rope_config_overlap_is_rejected_before_output_mutation(builders, tmp_path, location):
+    pkg = builders.pkg
+    reuse = tmp_path / "reuse"
+    reuse.mkdir()
+    out = tmp_path / "output"
+    if location == "presets":
+        first = out / pkg.resolve_preset_spec("all_int4")["pkg_name"]
+        first.mkdir(parents=True)
+        (first / "keep").write_text("unchanged")
+        out /= pkg.resolve_preset_spec("top08")["pkg_name"]
+    out.mkdir(parents=True)
+    (out / "keep").write_text("unchanged")
+    rope_path = out / "rope.json"
+    rope_path.write_text('{"rope_type": "default"}\n')
+    if location == "equal":
+        out = rope_path
+    elif location == "resolved":
+        alias = tmp_path / "alias"
+        alias.mkdir()
+        out = alias / ".." / out.name
+    elif location == "symlink":
+        alias = tmp_path / "rope-alias.json"
+        alias.symlink_to(rope_path)
+        rope_path = alias
+
+    argv = ["--reuse-banks-from", str(reuse), "--rope-config", str(rope_path)]
+    if location == "presets":
+        argv.extend(["--models-root", str(out.parent), "--presets", "all_int4,top08"])
+    else:
+        argv.extend(["--out", str(out)])
+    before = snapshot(tmp_path)
+    with pytest.raises(SystemExit, match="contain --rope-config"):
+        pkg.main(argv)
+    assert snapshot(tmp_path) == before
+
+
+def test_rope_config_outside_output_remains_supported(builders, tmp_path, monkeypatch):
+    rope_path, reuse = tmp_path / "rope.json", tmp_path / "reuse"
+    rope_path.write_text('{"rope_type": "default"}\n')
+    reuse.mkdir()
+    before = rope_path.read_bytes()
+
+    def stop_before_weights(*args, **kwargs):
+        raise RuntimeError("procedural export reached")
+
+    monkeypatch.setattr(builders.pkg, "_prepare_procedural_base_assets", stop_before_weights)
+    with pytest.raises(RuntimeError, match="procedural export reached"):
+        builders.pkg.main(
+            ["--out", str(tmp_path / "out"), "--reuse-banks-from", str(reuse), "--rope-config", str(rope_path)]
+        )
+    assert rope_path.read_bytes() == before
+
+
 def test_config_migration_and_rc5_session_options(builders):
     pkg = builders.pkg
     legacy = {
@@ -1099,6 +1153,34 @@ def test_capacity_metadata_survives_tier_and_unified_conversion(builders):
     assert positions["capacity"] == rope.ContextCapacity(4096, "fixed").to_dict()
     with pytest.raises(ValueError, match="exceeds positional coverage"):
         pkg.build_context_tier_model(graph, 2097160, 524291)
+
+
+@pytest.mark.parametrize("existing_output", [False, True])
+def test_legacy_base_package_explicit_capacity_is_rejected_before_output_mutation(builders, tmp_path, existing_output):
+    pkg, rope = builders.pkg, builders.rope
+    source, pool = make_synthetic_rc5_base_package(tmp_path)
+    cap = rope.ContextCapacity(1048576, "unified")
+    model_path = source / "model.onnx"
+    model = onnx.load(model_path, load_external_data=False)
+    pkg.ensure_unified_dynamic_cache_model(model, cap.kv_capacity, cap.state_capacity)
+    props = {p.key: p.value for p in model.metadata_props}
+    props["qwen38.position_config"] = json.dumps(
+        rope.position_config(rope.RopeConfig(rope_type="yarn", factor=4), cap.positional_rows, cap.positional_rows, cap)
+    )
+    helper.set_model_props(model, props)
+    onnx.save_model(model, model_path, save_as_external_data=False)
+    config_path = source / "genai_config.json"
+    config = json.loads(config_path.read_text())
+    pkg.configure_rc5_genai_config(config, has_int3_layers=True, capacity=cap, prefill_chunk=512)
+    config_path.write_text(json.dumps(config))
+    out = tmp_path / "output"
+    if existing_output:
+        out.mkdir()
+        (out / "keep").write_text("unchanged")
+    before = snapshot(tmp_path)
+    with pytest.raises(ValueError, match="explicit-capacity.*--reuse-banks-from"):
+        pkg.build_rc5_package(out, base_pkg=source, pool_dir=pool, x_int4=1, y_int3=1, z_int2=2, kl_mode="dp23")
+    assert snapshot(tmp_path) == before
 
 
 def test_cache_cannot_write_into_reuse_source(builders, tmp_path):

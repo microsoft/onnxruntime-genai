@@ -2880,6 +2880,29 @@ def build_rc5_package(
         },
     )
 
+    if base_pkg_resolved is not None:
+        src_model_path = base_pkg_resolved / "model.onnx"
+        if not src_model_path.is_file():
+            raise FileNotFoundError(f"Missing target model.onnx in --base-pkg: {src_model_path}")
+        if not (base_pkg_resolved / "genai_config.json").is_file():
+            raise FileNotFoundError(
+                f"Missing genai_config.json in --base-pkg: {base_pkg_resolved / 'genai_config.json'}"
+            )
+        model = onnx.load(str(src_model_path), load_external_data=False)
+        props = {p.key: p.value for p in model.metadata_props}
+        positions = json.loads(props.get("qwen38.position_config", "{}"))
+        if positions.get("capacity") is not None:
+            raise ValueError(
+                "--base-pkg cannot convert an explicit-capacity package: legacy conversion resets graph capacity "
+                "to 262K without reconciling the runtime configuration. Use --reuse-banks-from with "
+                "--max-context-length and --cache-layout instead."
+            )
+        for n in model.graph.node:
+            if n.op_type == "QMoEOffload":
+                raise ValueError(
+                    f"{src_model_path} contains legacy QMoEOffload nodes; rebuild with standard com.microsoft::QMoE nodes"
+                )
+
     if out_pkg.exists() or out_pkg.is_symlink():
         if out_pkg.is_symlink() or out_pkg.is_file():
             out_pkg.unlink()
@@ -2892,19 +2915,6 @@ def build_rc5_package(
 
     procedural_prof: Path | None = None
     if base_pkg_resolved is not None:
-        src_model_path = base_pkg_resolved / "model.onnx"
-        if not src_model_path.is_file():
-            raise FileNotFoundError(f"Missing target model.onnx in --base-pkg: {src_model_path}")
-        if not (base_pkg_resolved / "genai_config.json").is_file():
-            raise FileNotFoundError(
-                f"Missing genai_config.json in --base-pkg: {base_pkg_resolved / 'genai_config.json'}"
-            )
-        model = onnx.load(str(src_model_path), load_external_data=False)
-        for n in model.graph.node:
-            if n.op_type == "QMoEOffload":
-                raise ValueError(
-                    f"{src_model_path} contains legacy QMoEOffload nodes; rebuild with standard com.microsoft::QMoE nodes"
-                )
         ensure_rc5_speculative_prefix_commit(model)
         fused_routers = fuse_router_gate_up_proj(model)
         ensure_unified_dynamic_cache_model(model, 262152, 8259)
@@ -3588,6 +3598,9 @@ def main(argv: list[str] | None = None) -> int:
         else:
             parser.error("--out or --models-root is required")
         build_jobs.append((out_dir, spec))
+
+    for out_dir, _ in build_jobs:
+        reject_output_overlap(out_dir, {"--rope-config": args.rope_config})
 
     first_built_out: Path | None = None
     for out_dir, spec in build_jobs:

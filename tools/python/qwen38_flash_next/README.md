@@ -2,11 +2,14 @@
 
 `tools/python/qwen38_flash_next/build_package.py` procedurally constructs self-contained ONNX Runtime GenAI model packages for **Qwen3.8-Flash-Next** (`model.type: "qwen38_flash_graph"`) + **DFlash2** (`S=8`, 7-draft speculative decoding) directly from the two Hugging Face checkpoints (`Qwen3.8-Flash-Next` and `Qwen3.8-Flash-Next-DFlash2`), without depending on any pre-exported `.onnx` model.
 
-Every generated package supports:
+The default standard-RoPE export with unified caches supports:
 - **Single unified `model.onnx` across all context lengths (`32K` / `128K` / `256K`)**: cache capacity dimensions (`kv_capacity` and `state_capacity`) are symbolic and `contrib_const_dsa_total_seq` is set to `[262152]`, so a single `model.onnx` serves `32K` (`num_blocks: 142`), `128K` (`num_blocks: 525`), and `256K` (`num_blocks: 1037`) without duplicate `model_128k.onnx` / `model_256k.onnx` files.
 - **Pure GPU execution** up to **256K (`262,144`) context length** on H200 / high-VRAM GPUs (`gpu-128k`, `gpu-256k` -> `model.onnx`).
 - **QMoE CPU/GPU hybrid offload** on 20–36.5 GB consumer GPUs (`consumer-gpu-24g`, `consumer-gpu-24g-host-64g`, `consumer-gpu-30g-ram-48g-32k`, `consumer-gpu-32g` -> `model.onnx` + `expert-profile.bin`).
 - **Authoritative protocol boundary token IDs** (`bot_token_id: 248058`, `eot_token_id: 248059`, `bor_token_id: 248068`, `eor_token_id: 248069`) and **Engine dynamic batching** (`max_batch_size: 1`, `max_scheduled_tokens: 8192`).
+
+Opt-in fixed-capacity exports instead select one target graph and disable
+automatic context profiles and Engine dynamic batching (see section 5).
 
 ---
 
@@ -184,7 +187,8 @@ existing DFlash2 reservation and disables automatic lower-capacity profiles.
 New unified capacities require separate GPU qualification. Explicit context/RoPE
 exports currently support **default component precision only**. Other precision
 profiles/overrides and `--context-tiers` are rejected before export. The legacy
-`--base-pkg` graph-conversion route is also rejected for this mode.
+`--base-pkg` graph-conversion route is also rejected for this mode, including
+incoming explicit-capacity packages when the new options are omitted.
 
 For safe weight-bank reuse, replace the checkpoint arguments with:
 
@@ -206,7 +210,9 @@ Explicit-capacity exports disable tactic writes into model directories. The
 default writable cache is a sibling `<output-name>-cache`; an explicit
 `--tactic-cache-dir` must be separate from every model/checkpoint directory.
 Use a new output directory: the existing builder replaces an existing output.
-Do not pass a protected model as `--out`.
+Do not pass a protected model as `--out`. Keep `--rope-config` outside every
+output directory; overlapping resolved paths are rejected before any output
+is replaced, including when building multiple presets.
 
 ### Tests and qualification
 
@@ -254,10 +260,23 @@ absolute positions, actual GPU table consumption and high-position rotations,
 DFlash2 execution, phase-specific device/process memory, timings and acceptance.
 Run lightweight retrieval diagnostics only after execution passes.
 
-The post-export-patched 1M prototype passed this capacity milestone on an
-**A100 80GB**. That is not automatic qualification of every new export, precision
-mode or unified layout. Broad long-context quality and exact DFlash2 speculative
-losslessness remain unproven; the known width-dependent discrepancy is deferred.
+The exporter-generated **fixed-capacity 1M YaRN4 package** passed
+**1048544 input + 32 generated tokens** on an **A100 80GB**, matching the
+post-export-patched prototype's generated tokens and final logits. Qualification
+used validated weight-bank reuse, default component precision, the pinned native
+runtime above and 512-token prefill chunks. All six positional tables matched
+the prototype bit-for-bit; GPU table readbacks, sampled rotary/QSA checks and
+DFlash2 execution passed with zero observed operator validation errors.
+
+The full-capacity campaign used target capture threshold **4**. The package's
+default threshold **2** was exercised separately at 4K and in near-1M retrieval
+diagnostics with facts at 1%, 50% and 90% depth. These results establish engineering
+execution correctness for the qualified configuration, not comprehensive
+long-context model quality or performance certification. They do not automatically
+qualify other exports, precision modes or unified layouts. Fresh checkpoint
+quantization remains unqualified because the original BF16 checkpoints were
+unavailable. Broad long-context quality and exact DFlash2 speculative losslessness
+remain unproven; the known width-dependent discrepancy is deferred.
 The original 128K/256K VRAM estimator is not used as admission evidence for new
 explicit-capacity packages.
 
