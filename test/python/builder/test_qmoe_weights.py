@@ -149,6 +149,8 @@ def test_gptoss_moe_dispatches_fused_and_decomposed_paths(monkeypatch):
 def _load_builder_cli_module(monkeypatch):
     builders_module = types.ModuleType("builders")
     for class_name in (
+        "BailingMoeV3Model",
+        "BailingVLModel",
         "ChatGLMModel",
         "ErnieModel",
         "Gemma2Model",
