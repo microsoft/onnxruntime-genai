@@ -4,6 +4,7 @@
 """Real CUDA graph ownership tests (set ORT_QWEN38_TEST_MODEL to an exported package)."""
 
 import gc
+import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -20,6 +21,10 @@ def model_path():
         pytest.skip("ORT_QWEN38_TEST_MODEL not provided")
     path = Path(path)
     assert path.is_dir()
+    config = json.loads((path / "genai_config.json").read_text())
+    assert config["model"]["qwen38_graph"].get("warmup", True), "ownership tests require graph warmup"
+    providers = config["model"]["decoder"]["session_options"]["provider_options"]
+    assert any(str(provider.get("cuda", {}).get("enable_cuda_graph")) == "1" for provider in providers)
     plugin = os.environ.get("ORT_QWEN38_TEST_CUDA_PLUGIN")
     if plugin:
         og.register_execution_provider_library("CUDAExecutionProvider", plugin)
