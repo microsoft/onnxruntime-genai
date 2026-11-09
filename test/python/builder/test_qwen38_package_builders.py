@@ -890,8 +890,80 @@ def test_precision_options_profiles_and_overrides():
     assert c_fp16kv.gdn_precision == "fp32"
     assert c_fp16kv.ple_engram == "q8_0"
 
+    c_v2 = parse(["--precision-profile", "fp32_fp16kv_v2"])
+    assert c_v2.is_non_default()
+    assert c_v2.kv_cache_dtype == "fp16"
+    assert c_v2.qsa_qkv_dtype == "v_rc5_fp16"
+    assert c_v2.ple_engram == "default"
+    assert c_v2.emit_int8kv_variant is True
+
+    c_int8kv_v2 = parse(["--precision-profile", "fp32_int8kv_v2"])
+    assert c_int8kv_v2.is_non_default()
+    assert c_int8kv_v2.kv_cache_dtype == "int8"
+    assert c_int8kv_v2.qsa_qkv_dtype == "v_rc5_fp16"
+    assert c_int8kv_v2.ple_engram == "default"
+    assert c_int8kv_v2.emit_int8kv_variant is False
+
     c_custom = parse(["--precision-profile", "fp32", "--kv-cache-dtype", "fp16", "--ple-engram", "default"])
     assert c_custom.kv_cache_dtype == "fp16"
     assert c_custom.ple_engram == "default"
     assert c_custom.indexer_dtype == "fp32"
+
+
+def test_consolidate_package_external_data_merges_and_page_aligns(tmp_path):
+    sys.path.insert(0, str(FLASH_NEXT_TOOLS_DIR))
+    try:
+        po = importlib.import_module("precision_options")
+    finally:
+        if sys.path and sys.path[0] == str(FLASH_NEXT_TOOLS_DIR):
+            sys.path.pop(0)
+
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "bank_a.data").write_bytes(b"A" * 100)
+    (pkg / "bank_b.data").write_bytes(b"B" * 200)
+
+    def make_ext_init(name, loc, offset, length):
+        t = onnx.TensorProto()
+        t.name = name
+        t.data_type = TensorProto.UINT8
+        t.dims.extend([length])
+        t.data_location = TensorProto.EXTERNAL
+        for k, v in (("location", loc), ("offset", str(offset)), ("length", str(length))):
+            kv = t.external_data.add()
+            kv.key = k
+            kv.value = v
+        return t
+
+    inits = [
+        make_ext_init("w_a", "bank_a.data", 0, 100),
+        make_ext_init("w_b", "bank_b.data", 0, 200),
+        numpy_helper.from_array(np.array([1.0, 2.0], dtype=np.float32), name="node_GuardedDSA_3_k_scale"),
+    ]
+    g = helper.make_graph([], "test_g", [], [], initializer=inits)
+    m = helper.make_model(g)
+    onnx.save(m, str(pkg / "model.onnx"))
+    onnx.save(m, str(pkg / "model_int8kv.onnx"))
+    (pkg / "weights_pool.txt").write_text("qwen38_weights_pool 1\nsession dflash2 w_a 4\n")
+
+    res = po.consolidate_package_external_data(pkg, target_data_name="model.onnx.data")
+    assert res["consolidated"] is True and len(res["removed_files"]) == 2
+    assert (pkg / "model.onnx.data").is_file()
+    assert not (pkg / "bank_a.data").exists()
+    assert not (pkg / "bank_b.data").exists()
+
+    raw = (pkg / "model.onnx.data").read_bytes()
+    assert raw[0:100] == b"A" * 100
+    assert raw[4096:4296] == b"B" * 200
+
+    for fname in ("model.onnx", "model_int8kv.onnx"):
+        m_loaded = onnx.load(str(pkg / fname), load_external_data=False)
+        ext_map = {
+            init.name: {kv.key: kv.value for kv in init.external_data}
+            for init in m_loaded.graph.initializer
+            if init.data_location == TensorProto.EXTERNAL
+        }
+        assert ext_map["w_a"] == {"location": "model.onnx.data", "offset": "0", "length": "100"}
+        assert ext_map["w_b"] == {"location": "model.onnx.data", "offset": "4096", "length": "200"}
+
 
