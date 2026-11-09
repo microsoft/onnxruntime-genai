@@ -210,9 +210,7 @@ NemotronBoltModel::NemotronBoltModel(std::unique_ptr<Config> config, OrtEnv& env
     if (name == "input_ids" || name == "seqlens_k" || name == "state_row" ||
         name == "total_sequence_length" || (single_token_decode_ && name == "query_rows"))
       continue;
-    auto shape = info.GetInputShape(name);
-    if (model.single_token_decode_ && name == "input_ids")
-      shape[1] = kBoltVerifyRows;
+    const auto shape = info.GetInputShape(name);
     const auto type = info.GetInputDataType(name);
     if (name.rfind("past_key.", 0) == 0 || name.rfind("past_value.", 0) == 0) {
       Require(shape.size() == 4 && shape[0] == 1 && shape[1] == 2 &&
@@ -312,7 +310,9 @@ NemotronBoltState::NemotronBoltState(const NemotronBoltModel& model, const Gener
                   : name == "seqlens_k" ? static_cast<void*>(verify_in_base + 2 * kBoltVerifyRows)
                                         : static_cast<void*>(verify_in_base + 2 * kBoltVerifyRows + 4);
       const size_t bytes = name == "input_ids" ? kBoltVerifyRows * sizeof(int64_t) : sizeof(int32_t);
-      const auto shape = info.GetInputShape(name);
+      auto shape = info.GetInputShape(name);
+      if (model.single_token_decode_ && name == "input_ids")
+        shape[1] = kBoltVerifyRows;
       auto tensor = std::make_unique<Tensor>(
           OrtValue::CreateTensor(dev_mem_info, ptr, bytes, shape, info.GetInputDataType(name)));
       tensor->p_device_ = model.p_device_;
