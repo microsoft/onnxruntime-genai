@@ -1141,7 +1141,8 @@ def test_gemma4_fixed_output_accepts_single_image_rank2_inputs(test_data_path, t
         pytest.skip("Gemma4 test image not available")
     inputs = processor(GEMMA4_IMAGE_TOKEN, images=og.Images.open(os.fspath(image_path)))
     inputs["pixel_values"] = _to_numpy(inputs["pixel_values"])[0]
-    inputs["pixel_position_ids"] = _to_numpy(inputs["pixel_position_ids"])[0]
+    # The binding requires the canonical int64 dtype, not the buffer's long-long alias.
+    inputs["pixel_position_ids"] = _to_numpy(inputs["pixel_position_ids"])[0].astype(np.int64)
     params = og.GeneratorParams(model)
     params.set_search_options(max_length=4096)
     generator = og.Generator(model, params)
