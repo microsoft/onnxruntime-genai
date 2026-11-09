@@ -390,8 +390,10 @@ def _import_genai(ep):
 @on_cpu_and_cuda
 # Beam search turns off the shared past/present KV buffers and reorders the caches every step.
 @pytest.mark.parametrize("num_beams", [1, 2])
-# In the second case max_length is shorter than the window, whose buffer ORT still wants whole.
-@pytest.mark.parametrize("prompt_length,max_length", [(10 * SLIDING_WINDOW, 128), (2, SLIDING_WINDOW - 1)])
+# In the last two cases max_length is below the window, whose buffer ORT still wants whole; the last decodes a step.
+@pytest.mark.parametrize(
+    "prompt_length,max_length", [(10 * SLIDING_WINDOW, 128), (2, SLIDING_WINDOW - 1), (1, SLIDING_WINDOW - 1)]
+)
 def test_lfm3_windowed_kv_cache_matches_the_full_cache_in_onnxruntime_genai(
     tmp_path, ep, io_dtype, num_beams, prompt_length, max_length
 ):
