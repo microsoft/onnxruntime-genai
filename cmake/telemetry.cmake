@@ -149,25 +149,51 @@ function(_ortgenai_replace_mat_source original replacement)
   target_sources(mat PRIVATE "${replacement}")
 endfunction()
 
-# The SDK's lazy version string can otherwise be destroyed before GenAI joins the upload worker.
-# Compile a patched copy, leaving the downloaded source intact. Like the SDK PAL itself, this
-# immutable value uses process-lifetime storage; normal shutdown still releases SDK workers.
+function(_ortgenai_replace_sdk_text variable original replacement description)
+  string(FIND "${${variable}}" "${original}" position)
+  if(position EQUAL -1)
+    message(FATAL_ERROR "Update the 1DS SDK ${description} patch for the selected SDK source")
+  endif()
+  string(REPLACE "${original}" "${replacement}" patched "${${variable}}")
+  set(${variable} "${patched}" PARENT_SCOPE)
+endfunction()
+
+# A literal survives late uploads without a destructor or a heap buffer leaked on library unload.
+# Change both internal PAL declarations in a generated header, leaving downloaded sources intact.
+set(ORTGENAI_TELEMETRY_SDK_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/telemetry-sdk")
+set(_ortgenai_pal_header "${cpp_client_telemetry_SOURCE_DIR}/lib/pal/PAL.hpp")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_ortgenai_pal_header}")
+file(READ "${_ortgenai_pal_header}" _ortgenai_pal_hpp)
+_ortgenai_replace_sdk_text(_ortgenai_pal_hpp
+  "const std::string& getSdkVersion() const;" "const char* getSdkVersion() const;"
+  "PAL version declaration")
+_ortgenai_replace_sdk_text(_ortgenai_pal_hpp
+  "inline const std::string& getSdkVersion()" "inline const char* getSdkVersion()"
+  "PAL version wrapper")
+# Preserve source-local header resolution after moving PAL.hpp out of the SDK tree.
+foreach(header DebugTrace.hpp SystemInformationImpl.hpp NetworkInformationImpl.hpp DeviceInformationImpl.hpp typename.hpp WorkerThread.hpp)
+  _ortgenai_replace_sdk_text(_ortgenai_pal_hpp
+    "#include \"${header}\"" "#include \"pal/${header}\"" "generated PAL ${header} include")
+endforeach()
+file(CONFIGURE OUTPUT "${ORTGENAI_TELEMETRY_SDK_INCLUDE_DIR}/pal/PAL.hpp"
+  CONTENT "${_ortgenai_pal_hpp}" @ONLY)
+target_include_directories(mat BEFORE PUBLIC
+  "$<BUILD_INTERFACE:${ORTGENAI_TELEMETRY_SDK_INCLUDE_DIR}>")
+
 set(_ortgenai_pal_source "${cpp_client_telemetry_SOURCE_DIR}/lib/pal/PAL.cpp")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_ortgenai_pal_source}")
 file(READ "${_ortgenai_pal_source}" _ortgenai_pal)
 set(_ortgenai_version_original [=[        static const std::string sdkVersion(EVTSDK_VERSION_PREFIX "-" OS_NAME "-C++-" ECS_SUPP "-" BUILD_VERSION_STR);
         return sdkVersion;]=])
-set(_ortgenai_version_fixed [=[        using SdkVersion = std::string;
-        alignas(SdkVersion) static unsigned char storage[sizeof(SdkVersion)];
-        static const SdkVersion* sdkVersion = ::new (storage)
-            SdkVersion(EVTSDK_VERSION_PREFIX "-" OS_NAME "-C++-" ECS_SUPP "-" BUILD_VERSION_STR);
-        return *sdkVersion;]=])
-string(FIND "${_ortgenai_pal}" "${_ortgenai_version_original}" _ortgenai_version_position)
-if(_ortgenai_version_position EQUAL -1)
-  message(FATAL_ERROR "Update the 1DS SDK version-lifetime patch for the selected SDK source")
-endif()
-string(REPLACE "${_ortgenai_version_original}" "${_ortgenai_version_fixed}"
-  _ortgenai_pal "${_ortgenai_pal}")
+_ortgenai_replace_sdk_text(_ortgenai_pal "${_ortgenai_version_original}"
+  [=[        return EVTSDK_VERSION_PREFIX "-" OS_NAME "-C++-" ECS_SUPP "-" BUILD_VERSION_STR;]=]
+  "version-lifetime")
+_ortgenai_replace_sdk_text(_ortgenai_pal
+  "const std::string& PlatformAbstractionLayer::getSdkVersion() const"
+  "const char* PlatformAbstractionLayer::getSdkVersion() const"
+  "PAL version definition")
+_ortgenai_replace_sdk_text(_ortgenai_pal
+  "#include \"PAL.hpp\"" "#include \"pal/PAL.hpp\"" "generated PAL include")
 set(ORTGENAI_TELEMETRY_PAL_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/telemetry-sdk/PAL.cpp")
 file(CONFIGURE OUTPUT "${ORTGENAI_TELEMETRY_PAL_SOURCE}" CONTENT "${_ortgenai_pal}" @ONLY)
 _ortgenai_replace_mat_source("pal/PAL.cpp" "${ORTGENAI_TELEMETRY_PAL_SOURCE}")

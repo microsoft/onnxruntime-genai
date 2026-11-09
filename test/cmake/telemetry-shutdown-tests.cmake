@@ -78,6 +78,7 @@ foreach(source callbacks/DebugSource.cpp pal/WorkerThread.cpp api/Logger.cpp pal
       instrumented "${instrumented}")
     string(PREPEND instrumented "extern \"C\" void TelemetryTestCollectorEvent(const char*);\n")
   elseif(source STREQUAL "pal/PAL.cpp")
+    # Keep destructor observers for the original/immortal-string negative controls.
     string(REPLACE "using SdkVersion = std::string;" "using SdkVersion = TelemetryTestSdkVersion;"
       instrumented "${instrumented}")
     string(REPLACE "static const std::string sdkVersion(" "static const TelemetryTestSdkVersion sdkVersion("
@@ -85,6 +86,9 @@ foreach(source callbacks/DebugSource.cpp pal/WorkerThread.cpp api/Logger.cpp pal
     string(REPLACE "return *sdkVersion;" "TelemetryTestVersionAccess();\n        return *sdkVersion;"
       instrumented "${instrumented}")
     string(REPLACE "return sdkVersion;" "TelemetryTestVersionAccess();\n        return sdkVersion;"
+      instrumented "${instrumented}")
+    set(version_entry "const char* PlatformAbstractionLayer::getSdkVersion() const\n    {")
+    string(REPLACE "${version_entry}" "${version_entry}\n        TelemetryTestVersionAccess();"
       instrumented "${instrumented}")
     string(REGEX MATCHALL "TelemetryTestVersionAccess\\(\\)" sites "${instrumented}")
     list(LENGTH sites count)
@@ -152,6 +156,9 @@ if(TARGET mat)
   target_compile_options(telemetry_shutdown_sdk PRIVATE $<TARGET_PROPERTY:mat,COMPILE_OPTIONS>)
   target_include_directories(telemetry_shutdown_sdk PRIVATE $<TARGET_PROPERTY:mat,INCLUDE_DIRECTORIES>)
 endif()
+if(ORTGENAI_TELEMETRY_SDK_INCLUDE_DIR)
+  target_include_directories(telemetry_shutdown_sdk BEFORE PRIVATE "${ORTGENAI_TELEMETRY_SDK_INCLUDE_DIR}")
+endif()
 add_executable(telemetry_shutdown_tests
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry/telemetry-shutdown-tests.cpp"
   $<TARGET_OBJECTS:telemetry_shutdown_sdk>)
@@ -160,9 +167,46 @@ target_include_directories(telemetry_shutdown_tests PRIVATE
   "${CMAKE_SOURCE_DIR}/src"
   "${TELEMETRY_SHUTDOWN_SDK_SOURCE_DIR}/lib" "${TELEMETRY_SHUTDOWN_SDK_SOURCE_DIR}/lib/include"
   "${TELEMETRY_SHUTDOWN_SDK_SOURCE_DIR}/lib/include/mat")
+if(ORTGENAI_TELEMETRY_SDK_INCLUDE_DIR)
+  target_include_directories(telemetry_shutdown_tests BEFORE PRIVATE "${ORTGENAI_TELEMETRY_SDK_INCLUDE_DIR}")
+endif()
 add_dependencies(telemetry_shutdown_tests onnxruntime-genai)
 set_target_properties(telemetry_shutdown_tests PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>" FOLDER "Tests")
+
+# Exercise real DLL/DSO unload so a heap-backed "immortal" string cannot hide behind live roots.
+if(WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  add_library(telemetry_version_reload_fixture SHARED
+    "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry/telemetry-version-reload-fixture.cpp")
+  target_link_libraries(telemetry_version_reload_fixture PRIVATE ${shutdown_sdk_target})
+  target_include_directories(telemetry_version_reload_fixture PRIVATE
+    "${TELEMETRY_SHUTDOWN_SDK_SOURCE_DIR}/lib"
+    "${TELEMETRY_SHUTDOWN_SDK_SOURCE_DIR}/lib/include"
+    "${TELEMETRY_SHUTDOWN_SDK_SOURCE_DIR}/lib/include/mat")
+  if(TARGET mat)
+    target_compile_definitions(telemetry_version_reload_fixture PRIVATE $<TARGET_PROPERTY:mat,COMPILE_DEFINITIONS>)
+  endif()
+  if(ORTGENAI_TELEMETRY_SDK_INCLUDE_DIR)
+    target_include_directories(telemetry_version_reload_fixture BEFORE PRIVATE "${ORTGENAI_TELEMETRY_SDK_INCLUDE_DIR}")
+  endif()
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    if(TARGET mat)
+      # GNU-unique symbols would mark the fixture NODELETE and mask unload leaks.
+      target_compile_options(mat PRIVATE $<$<COMPILE_LANG_AND_ID:CXX,GNU>:-fno-gnu-unique>)
+    endif()
+    target_link_options(telemetry_version_reload_fixture PRIVATE
+      "LINKER:--exclude-libs,ALL" "LINKER:-Bsymbolic")
+  endif()
+  add_executable(telemetry_version_reload_tests
+    "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry/telemetry-version-reload-tests.cpp")
+  target_compile_features(telemetry_version_reload_fixture PRIVATE cxx_std_20)
+  target_compile_features(telemetry_version_reload_tests PRIVATE cxx_std_20)
+  target_link_libraries(telemetry_version_reload_tests PRIVATE ${CMAKE_DL_LIBS})
+  add_dependencies(telemetry_version_reload_tests telemetry_version_reload_fixture)
+  add_test(NAME TelemetryVersionReload
+    COMMAND telemetry_version_reload_tests $<TARGET_FILE:telemetry_version_reload_fixture>)
+  set_tests_properties(TelemetryVersionReload PROPERTIES TIMEOUT 30)
+endif()
 
 foreach(mode retained threaded recreated explicit prime-only disabled ci-disabled prime-failed prime-allocation-failed upload-at-exit upload-after-reinit)
   set(home "${CMAKE_CURRENT_BINARY_DIR}/telemetry-shutdown-${mode}")

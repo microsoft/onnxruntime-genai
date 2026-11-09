@@ -33,9 +33,23 @@ endforeach()
 
 set(sdk_dir "${CMAKE_CURRENT_BINARY_DIR}/sdk")
 file(MAKE_DIRECTORY "${sdk_dir}/lib/pal" "${sdk_dir}/lib/api")
+file(WRITE "${sdk_dir}/lib/pal/PAL.hpp" [=[
+#include "DebugTrace.hpp"
+#include "SystemInformationImpl.hpp"
+#include "NetworkInformationImpl.hpp"
+#include "DeviceInformationImpl.hpp"
+#include "typename.hpp"
+#include "WorkerThread.hpp"
+        const std::string& getSdkVersion() const;
+    inline const std::string& getSdkVersion()
+]=])
 file(WRITE "${sdk_dir}/lib/pal/PAL.cpp" [=[
+#include "PAL.hpp"
+    const std::string& PlatformAbstractionLayer::getSdkVersion() const
+    {
         static const std::string sdkVersion(EVTSDK_VERSION_PREFIX "-" OS_NAME "-C++-" ECS_SUPP "-" BUILD_VERSION_STR);
         return sdkVersion;
+    }
 ]=])
 file(WRITE "${sdk_dir}/lib/api/AuthTokensController.cpp" [=[
 #include "AuthTokensController.hpp"
@@ -85,5 +99,21 @@ foreach(dependency SQLite3 ZLIB)
 endforeach()
 if(NOT BUILD_SHARED_LIBS OR NOT BUILD_VERSION STREQUAL "caller-version")
   message(FATAL_ERROR "Telemetry did not restore caller build settings")
+endif()
+
+file(READ "${ORTGENAI_TELEMETRY_PAL_SOURCE}" generated_pal)
+file(READ "${ORTGENAI_TELEMETRY_SDK_INCLUDE_DIR}/pal/PAL.hpp" generated_header)
+file(READ "${sdk_dir}/lib/pal/PAL.hpp" original_header)
+foreach(declaration "const char* getSdkVersion() const;" "inline const char* getSdkVersion()")
+  string(FIND "${generated_header}" "${declaration}" position)
+  if(position EQUAL -1)
+    message(FATAL_ERROR "Generated PAL header did not replace ${declaration}")
+  endif()
+endforeach()
+string(FIND "${generated_pal}"
+  [=[return EVTSDK_VERSION_PREFIX "-" OS_NAME "-C++-" ECS_SUPP "-" BUILD_VERSION_STR;]=] literal_position)
+string(FIND "${original_header}" "const std::string& getSdkVersion() const;" original_position)
+if(literal_position EQUAL -1 OR original_position EQUAL -1)
+  message(FATAL_ERROR "PAL must use a generated literal getter without modifying downloaded headers")
 endif()
 message(STATUS "PASS: Apple SYSTEM dependencies with vcpkg (${MODE})")
