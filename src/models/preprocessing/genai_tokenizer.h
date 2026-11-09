@@ -46,6 +46,8 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenize
 
   void UpdateOptions(const char* const* keys, const char* const* values, size_t num_options);
   std::vector<int32_t> Encode(const char* text) const;
+  void PrepareBoundedEncoding() const;
+  std::vector<int32_t> EncodeBounded(const std::string& text, size_t allowance) const;
   std::vector<std::vector<int32_t>> EncodeBatchRows(
       std::span<const char*> strings) const;
   std::string Decode(std::span<const int32_t> tokens) const;

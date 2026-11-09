@@ -26,6 +26,11 @@ size_t Multiply(size_t left, size_t right) {
   return left * right;
 }
 
+size_t TokenizationAllowance(size_t prompt_bytes) {
+  // This is an enforced allocation allowance, not a prediction of tokenizer scratch.
+  return Multiply(Add(prompt_bytes, 1), 128);
+}
+
 size_t Patches(const std::array<int64_t, 3>& grid) {
   return Multiply(static_cast<size_t>(grid[1]), static_cast<size_t>(grid[2]));
 }
@@ -152,6 +157,7 @@ PatchVisionPreparation::PatchVisionPreparation(const Config& config, const Sessi
   vision_end_token_ = marker[0];
   const auto video_marker = tokenizer.Encode("<|video_pad|>");
   if (video_marker.size() == 1 && video_marker[0] > 0) video_token_ = video_marker[0];
+  tokenizer.PrepareBoundedEncoding();
 }
 
 void PatchVisionPreparation::InitializeVideo(const std::string& definition) {
@@ -183,7 +189,7 @@ size_t PatchVisionPreparation::Estimate(const VisionPreparationInput& input, siz
     throw std::runtime_error("Expected at least one input token for generation. Received 0.");
   if (!metadata.ImageCount() && !metadata.VideoCount()) {
     const auto bytes = PromptBytes(input.prompt, metadata, std::numeric_limits<size_t>::max());
-    return Add(1024, Multiply(Add(bytes, 1), 128));
+    return Add(1024, TokenizationAllowance(bytes));
   }
   size_t estimate = 0, units = 0, rows = 0, maximum_image_patches = 0;
   const auto patch_bytes = Multiply(static_cast<size_t>(pixel_width_), 2 * sizeof(float) + 2 * Ort::SizeOf(pixel_type_));
@@ -216,7 +222,7 @@ size_t PatchVisionPreparation::Estimate(const VisionPreparationInput& input, siz
   if (rows >= input.remaining_rows)
     throw std::invalid_argument("Expanded media rows exceed the remaining session capacity.");
   const auto prompt_bytes = PromptBytes(input.prompt, metadata, host_limit);
-  estimate = Add(estimate, Add(Add(prompt_bytes, 1), Multiply(Add(prompt_bytes, 1), 128)));
+  estimate = Add(estimate, Add(Add(prompt_bytes, 1), TokenizationAllowance(prompt_bytes)));
   const auto& names = config_.model.vision.inputs;
   estimate = Add(estimate, Multiply(units, Add(1024, Multiply(Add(names.pixel_values.size(), names.image_grid_thw.size()), 4))));
   return estimate;
@@ -231,7 +237,7 @@ std::unique_ptr<const VisionPlan> PatchVisionPreparation::Plan(const Tokenizer& 
   plan->images = input.images;
   plan->videos = input.videos;
   if (!metadata.ImageCount() && !metadata.VideoCount()) {
-    plan->tokens = tokenizer.Encode(input.prompt.c_str());
+    plan->tokens = tokenizer.EncodeBounded(input.prompt, TokenizationAllowance(input.prompt.size()));
     return plan;
   }
   for (size_t image = 0; image < metadata.ImageCount(); ++image)
@@ -249,7 +255,7 @@ std::unique_ptr<const VisionPlan> PatchVisionPreparation::Plan(const Tokenizer& 
   }
   std::vector<size_t> unit_order;
   const auto expanded = ExpandPrompt(input.prompt, plan->image_grids, plan->clips, host_limit, unit_order);
-  plan->tokens = tokenizer.Encode(expanded.c_str());
+  plan->tokens = tokenizer.EncodeBounded(expanded, TokenizationAllowance(expanded.size()));
   if (plan->tokens.empty() || plan->tokens.size() >= input.remaining_rows)
     throw std::invalid_argument("Expanded media tokens exceed the remaining session capacity.");
   const auto& inputs = config_.model.vision.inputs;

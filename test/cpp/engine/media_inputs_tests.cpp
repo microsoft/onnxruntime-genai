@@ -103,6 +103,15 @@ TEST(MediaInputsTest, RealQwenVideoCanonicalOrderAndEncoderInputs) {
   }
   MediaStore store{model, 512 * 1024 * 1024, 2 * 1024 * 1024};
   Tokenizer tokenizer{*model->config_};
+  tokenizer.PrepareBoundedEncoding();
+  for (const std::string text : {"ordinary code 12345", "caf\xc3\xa9 e\xcc\x81", "<|vision_end|>"}) {
+    EXPECT_EQ(tokenizer.EncodeBounded(text, 128 * (text.size() + 1)), tokenizer.Encode(text.c_str()));
+    EXPECT_THROW(tokenizer.EncodeBounded(text, 1), std::invalid_argument);
+  }
+  const std::string long_text(4097, '9');
+  EXPECT_THROW(tokenizer.EncodeBounded(std::string{"a\0b", 3}, 512), std::invalid_argument);
+  EXPECT_THROW(tokenizer.EncodeBounded(long_text, (long_text.size() + 2) * sizeof(int32_t)), std::runtime_error);
+  EXPECT_EQ(tokenizer.EncodeBounded(long_text, 128 * (long_text.size() + 1)), tokenizer.Encode(long_text.c_str()));
   std::vector<uint8_t> rgb(4 * 64 * 96 * 3, 0);
   std::array<OrtxFrame, 4> frames{};
   for (size_t frame = 0; frame < frames.size(); ++frame) {
