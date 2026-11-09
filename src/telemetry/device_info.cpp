@@ -43,6 +43,7 @@
 #include <sys/sysctl.h>
 #include <sys/types.h>
 #include <mach/mach.h>
+#include <mach-o/dyld.h>
 #include <unistd.h>
 #else  // Linux
 #include <unistd.h>
@@ -136,6 +137,38 @@ std::string GetOsArchitecture() {
   return "x86";
 #else
   return "unknown";
+#endif
+}
+
+std::string GetProcessName() {
+#if defined(_WIN32)
+  std::vector<wchar_t> path(MAX_PATH);
+  for (;;) {
+    const DWORD length = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
+    if (length == 0) return {};
+    if (length < path.size()) {
+      const auto name = std::filesystem::path(std::wstring_view(path.data(), length)).filename().u8string();
+      return TelemetryInternal::ProcessNameFromTelemetryInput(std::string(name.begin(), name.end()));
+    }
+    if (path.size() >= 32768) return {};
+    path.resize((std::min)(path.size() * 2, size_t{32768}));
+  }
+#elif defined(__APPLE__)
+  uint32_t size = 1024;
+  std::vector<char> path(size);
+  if (_NSGetExecutablePath(path.data(), &size) != 0) {
+    if (size > kMaxTelemetryInputBytes) return {};
+    path.resize(size);
+    if (_NSGetExecutablePath(path.data(), &size) != 0) return {};
+  }
+  return TelemetryInternal::ProcessNameFromTelemetryInput(BoundedTelemetryCString(path.data(), path.size()));
+#elif defined(__linux__) || defined(__ANDROID__)
+  const auto cmdline = ReadBoundedFile("/proc/self/cmdline");
+  // A missing terminator could mean argv[0] was truncated before its basename.
+  if (cmdline.find('\0') == std::string::npos) return {};
+  return TelemetryInternal::ProcessNameFromTelemetryInput(cmdline);
+#else
+  return {};
 #endif
 }
 
@@ -937,6 +970,7 @@ const DeviceInfo& GetDeviceInfo() {
     di.processor_count = GetProcessorCount();
     di.total_memory_mb = GetTotalMemoryMB();
     di.cpu_model = GetCpuModel();
+    di.process_name = GetProcessName();
     const auto host_environment = GetHostEnvironmentInfo();
     di.is_container = host_environment.is_container;
     di.is_virtual_machine = host_environment.is_virtual_machine;

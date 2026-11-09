@@ -76,7 +76,16 @@ foreach(source callbacks/DebugSource.cpp pal/WorkerThread.cpp api/Logger.cpp pal
     string(REPLACE "${log_site}"
       "${log_site}\n        TelemetryTestCollectorEvent(properties.GetName().c_str());"
       instrumented "${instrumented}")
-    string(PREPEND instrumented "extern \"C\" void TelemetryTestCollectorEvent(const char*);\n")
+    set(decorated_site "DispatchEvent(DebugEvent(DebugEventType::EVT_LOG_EVENT, size_t(latency), size_t(0), static_cast<void*>(&record), sizeof(record)));")
+    string(FIND "${instrumented}" "${decorated_site}" decorated_position)
+    if(decorated_position EQUAL -1)
+      message(FATAL_ERROR "Update telemetry client-identity decoration interception")
+    endif()
+    string(REPLACE "${decorated_site}"
+      "TelemetryTestDecoratedEvent(properties.GetName().c_str(), record);\n        ${decorated_site}"
+      instrumented "${instrumented}")
+    string(PREPEND instrumented
+      "namespace CsProtocol { struct Record; }\nextern \"C\" void TelemetryTestCollectorEvent(const char*);\nvoid TelemetryTestDecoratedEvent(const char*, const CsProtocol::Record&);\n")
   elseif(source STREQUAL "pal/PAL.cpp")
     # Keep destructor observers for the original/immortal-string negative controls.
     string(REPLACE "using SdkVersion = std::string;" "using SdkVersion = TelemetryTestSdkVersion;"

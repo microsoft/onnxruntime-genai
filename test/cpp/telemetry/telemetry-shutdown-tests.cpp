@@ -3,6 +3,7 @@
 
 #include "telemetry/telemetry.h"
 #include "DebugEvents.hpp"
+#include "CsProtocol_types.hpp"
 #include "ITaskDispatcher.hpp"
 #include "mat/config.h"
 #include "api/AuthTokensController.hpp"
@@ -13,6 +14,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <string_view>
@@ -62,6 +64,8 @@ struct State {
   int uploads_completed = 0;
   int workers_started = 0;
   int collector_events = 0;
+  int client_identity_events = 0;
+  std::string expected_process_name;
   int priming_failure = 0;
   int priming_attempts = 0;
 
@@ -83,6 +87,9 @@ struct State {
     }
     if (upload_at_exit && (!encode_started || uploads_completed == 0 || version_reads < 2 || auth_mutex_reads < 2)) {
       Fail(32, "shutdown did not exercise production decoration, encoding, and upload completion");
+    }
+    if (upload_at_exit && client_identity_events != 1) {
+      Fail(32, "ProcessInfo client identity was not exercised exactly once");
     }
     std::fputs("PASS: actual telemetry owner preserved SDK dependency lifetimes\n", stderr);
   }
@@ -277,6 +284,22 @@ extern "C" void TelemetryTestCollectorEvent(const char*) {
   ++state.collector_events;
 }
 
+void TelemetryTestDecoratedEvent(const char* name, const CsProtocol::Record& record) {
+  if (std::string_view{name} != "ProcessInfo") return;
+  auto& state = GetState();
+  std::lock_guard lock(state.mutex);
+  if (record.extApp.empty() || record.extApp.front().name != state.expected_process_name ||
+      record.data.empty()) {
+    Fail(32, "ProcessInfo application context did not contain the executable basename");
+  }
+  const auto& properties = record.data.front().properties;
+  const auto process = properties.find("processName");
+  if (process == properties.end() || process->second.stringValue != state.expected_process_name) {
+    Fail(32, "ProcessInfo processName did not contain the executable basename");
+  }
+  ++state.client_identity_events;
+}
+
 int main(int argc, char* argv[]) {
   if (argc != 2) Fail(32, "expected a shutdown regression mode");
   const std::string_view mode{argv[1]};
@@ -287,6 +310,7 @@ int main(int argc, char* argv[]) {
     Fail(32, "unknown shutdown regression mode");
   }
   auto& state = GetState();
+  state.expected_process_name = std::filesystem::path(argv[0]).filename().string();
   state.upload_at_exit = mode == "upload-at-exit" || mode == "upload-after-reinit";
   // Register after the singleton, but before the SDK's lazy version and auth mutex.
   // The original SDK destroys both before this callback releases the blocked encoder.
