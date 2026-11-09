@@ -47,3 +47,28 @@ python tools/python/qwen38_flash_next/build_package.py \
   -x 2 -y 14 -z 32 --kl-mode dp23 \
   --out /home/tianlei/models/qwen_flash_next_custom_2_14_32
 ```
+
+---
+
+## 3. Component Precision Options (`precision_options.py`)
+
+`build_package.py` accepts `--precision-profile {default,fp32,fp32_fp16kv}` as well as individual per-component flags (`--kv-cache-dtype {int8,bf16,fp16}`, `--rotary-cache-dtype {bf16,fp32}`, `--indexer-dtype`, `--gdn-gate-dtype`, `--gdn-precision`, `--ple-engram`, `--ple-norm-dtype`):
+
+```bash
+# Build rc5_all_int4_fp32_fp16kv (FP16 KV cache + FP32 rotary cache + FP32 GDN/indexer/PLE norms + Q8_0 engram):
+python tools/python/qwen38_flash_next/build_package.py \
+  --hf-dir /data/tlwu/Qwen3.8-Flash-Next \
+  --dflash-dir /data/tlwu/Qwen3.8-Flash-Next-DFlash2 \
+  --preset qwen_flash_next_int4_int8_rc5_contrib_dflash2 \
+  --precision-profile fp32_fp16kv \
+  --out /data/tlwu/qwen_flash_next_rc5_all_int4_fp32_fp16kv
+
+# Build rc5_2b375 with BF16 KV cache + FP32 GDN/indexer/PLE norms:
+python tools/python/qwen38_flash_next/build_package.py \
+  --hf-dir /data/tlwu/Qwen3.8-Flash-Next \
+  --dflash-dir /data/tlwu/Qwen3.8-Flash-Next-DFlash2 \
+  --preset 2b375_x02_y14_z32_dp23_b64 \
+  --precision-profile fp32 \
+  --out /data/tlwu/qwen_flash_next_rc5_2b375
+```
+

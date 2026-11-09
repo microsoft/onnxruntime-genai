@@ -849,3 +849,49 @@ def test_removed_legacy_flags_and_conflicting_arguments_fail_cleanly(builders):
         pkg.main(["--base-pkg", "a", "--out", "b", "--prefill-chunk", "2048", "--prefill-chunk-tokens", "4096"])
     with pytest.raises(SystemExit):
         pkg.main(["--base-pkg", "a", "--out", "b", "-x", "10", "-y", "20"])
+
+
+def test_precision_options_profiles_and_overrides():
+    import argparse
+
+    sys.path.insert(0, str(FLASH_NEXT_TOOLS_DIR))
+    try:
+        po = importlib.import_module("precision_options")
+    finally:
+        if sys.path and sys.path[0] == str(FLASH_NEXT_TOOLS_DIR):
+            sys.path.pop(0)
+
+    def parse(argv):
+        ap = argparse.ArgumentParser()
+        po.add_precision_cli_args(ap)
+        return po.resolve_precision_config(ap.parse_args(argv))
+
+    c_def = parse([])
+    assert not c_def.is_non_default()
+    assert c_def.kv_cache_dtype == "int8"
+    assert c_def.rotary_cache_dtype == "bf16"
+
+    c_fp32 = parse(["--precision-profile", "fp32"])
+    assert c_fp32.is_non_default()
+    assert c_fp32.kv_cache_dtype == "bf16"
+    assert c_fp32.rotary_cache_dtype == "bf16"
+    assert c_fp32.indexer_dtype == "fp32"
+    assert c_fp32.gdn_gate_dtype == "fp32"
+    assert c_fp32.gdn_precision == "fp32"
+    assert c_fp32.ple_engram == "q8_0"
+    assert c_fp32.ple_norm_dtype == "fp32"
+
+    c_fp16kv = parse(["--precision-profile", "fp32_fp16kv"])
+    assert c_fp16kv.is_non_default()
+    assert c_fp16kv.kv_cache_dtype == "fp16"
+    assert c_fp16kv.rotary_cache_dtype == "fp32"
+    assert c_fp16kv.indexer_dtype == "fp32"
+    assert c_fp16kv.gdn_gate_dtype == "fp32"
+    assert c_fp16kv.gdn_precision == "fp32"
+    assert c_fp16kv.ple_engram == "q8_0"
+
+    c_custom = parse(["--precision-profile", "fp32", "--kv-cache-dtype", "fp16", "--ple-engram", "default"])
+    assert c_custom.kv_cache_dtype == "fp16"
+    assert c_custom.ple_engram == "default"
+    assert c_custom.indexer_dtype == "fp32"
+
