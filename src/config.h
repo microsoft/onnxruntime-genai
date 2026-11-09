@@ -328,6 +328,7 @@ struct Config {
       int max_num_patches{0};
 
       std::string config_filename{"processor_config.json"};
+      std::optional<std::string> video_config_filename;
       std::optional<std::string> adapter_filename{};
 
       // Vision pipeline support (patch embed -> vision attn -> patch merger)

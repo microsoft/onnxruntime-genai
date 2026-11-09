@@ -715,19 +715,10 @@ void VarlenDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, 
                                  model->cpu_embedding_->type_,
                                  {static_cast<int64_t>(num_tokens), model->cpu_embedding_->hidden_size_});
       model->cpu_embedding_->Run(cpu_span, *embeddings, *embedding_workspace_);
-      const size_t row_bytes = static_cast<size_t>(model->cpu_embedding_->hidden_size_) *
-                               Ort::SizeOf(model->cpu_embedding_->type_);
       size_t packed_row = 0;
       for (const auto& request : scheduled_requests) {
         const auto first_row = static_cast<size_t>(request->ProcessedSequenceLength());
-        const auto end_row = first_row + request->ScheduledTokenCount();
-        for (const auto& span : request->Media()) {
-          const auto begin = std::max(first_row, span.start);
-          const auto end = std::min(end_row, span.start + span.item->rows);
-          if (begin >= end) continue;
-          if (!span.item->features) throw std::logic_error("Decoder plan references unprepared image features.");
-          embeddings->GetByteSpan().subspan((packed_row + begin - first_row) * row_bytes, (end - begin) * row_bytes).CopyFrom(span.item->features->GetByteSpan().subspan((begin - span.start) * row_bytes, (end - begin) * row_bytes));
-        }
+        ApplyMediaFeatures(request->Media(), first_row, request->ScheduledTokenCount(), *embeddings, packed_row);
         packed_row += request->ScheduledTokenCount();
       }
       input_names_.push_back(model->config_->model.decoder.inputs.embeddings.c_str());
@@ -896,7 +887,7 @@ void VarlenDecoderIO::PrepareRotaryPositionIds(
       // Keep fixed capture geometry, but never forecast unprocessed image coordinates into its tail.
       std::iota(cpu.begin() + start + history, cpu.begin() + start + capacity, static_cast<int64_t>(history));
     }
-    MediaPositions(request->Media(), 0, static_cast<size_t>(model->config_->model.vision.spatial_merge_size), planes);
+    MediaPositions(request->Media(), 0, planes);
   }
   positions.CopyCpuToDevice();
   input_names_.push_back(name.c_str());

@@ -117,7 +117,7 @@ TEST_F(SchedulerContractTest, MissingImageProducesPreparationWithoutLogicalProgr
   image->rows = 2;
   request->ReserveMedia(1);
   const std::array<MediaSpan, 1> media{{{0, image}}};
-  request->AppendMedia(media);
+  AppendSchedulingMedia(request, media);
   scheduler.AddRequest(request);
   const auto before = request->Snapshot();
   StepPlan plan;
@@ -141,7 +141,7 @@ TEST_F(SchedulerContractTest, PendingImageWaitsForRunnableDecodeToDrain) {
   image->rows = 2;
   image_request->ReserveMedia(1);
   const std::array<MediaSpan, 1> media{{{0, image}}};
-  image_request->AppendMedia(media);
+  AppendSchedulingMedia(image_request, media);
   scheduler.AddRequest(image_request);
   auto decode = Assigned(20);
   MakeDecodeResident(scheduler, *cache, decode);
@@ -173,6 +173,34 @@ TEST_F(SchedulerContractTest, PendingImageWaitsForRunnableDecodeToDrain) {
   EXPECT_EQ(image_request->ProcessedSequenceLength(), 0);
 }
 
+TEST_F(SchedulerContractTest, FeatureResidencyDoesNotChangeThePrefillBoundary) {
+  for (const bool features_ready : {false, true}) {
+    for (const size_t first_media_row : {1u, 2u}) {
+      auto cache = std::make_shared<RecordingCacheManager>(model_, 8);
+      DynamicBatchScheduler scheduler(model_, cache);
+      auto request = Assigned(10);
+      std::vector<MediaSpan> media;
+      for (size_t row = first_media_row; row < 3; ++row) {
+        auto item = std::make_shared<MediaItem>();
+        item->rows = 1;
+        if (features_ready) {
+          item->features = std::make_shared<Tensor>(GetDeviceInterface(DeviceType::CPU), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+        }
+        media.push_back({row, item});
+      }
+      request->ReserveMedia(media.size());
+      AppendSchedulingMedia(request, media);
+      scheduler.AddRequest(request);
+      StepPlan plan;
+      ASSERT_TRUE(scheduler.PlanStep(plan).executable);
+      ASSERT_EQ(plan.requests.size(), 1u);
+      EXPECT_EQ(plan.token_count, first_media_row);
+      EXPECT_EQ(plan.requests[0].unprocessed_token_count, first_media_row);
+      EXPECT_EQ(request->ProcessedSequenceLength(), 0);
+    }
+  }
+}
+
 TEST_F(SchedulerContractTest, PrefillStopsBeforeTheNextMissingImage) {
   for (const auto chunk : {std::optional<size_t>{}, std::optional<size_t>{0}, std::optional<size_t>{64}}) {
     for (const bool prefix_caching : {false, true}) {
@@ -188,7 +216,7 @@ TEST_F(SchedulerContractTest, PrefillStopsBeforeTheNextMissingImage) {
       second->rows = 1;
       request->ReserveMedia(2);
       const std::array<MediaSpan, 2> media{{{0, first}, {2, second}}};
-      request->AppendMedia(media);
+      AppendSchedulingMedia(request, media);
       scheduler.AddRequest(request);
       StepPlan plan;
       const auto result = scheduler.PlanStep(plan);
@@ -202,29 +230,6 @@ TEST_F(SchedulerContractTest, PrefillStopsBeforeTheNextMissingImage) {
   }
 }
 
-TEST_F(SchedulerContractTest, FeatureResidencyDoesNotChangeThePrefillBoundary) {
-  for (const bool features_ready : {false, true}) {
-    auto cache = std::make_shared<RecordingCacheManager>(model_, 8);
-    DynamicBatchScheduler scheduler(model_, cache);
-    auto request = Assigned(10);
-    auto image = std::make_shared<MediaItem>();
-    image->rows = 1;
-    if (features_ready) {
-      image->features = std::make_shared<Tensor>(GetDeviceInterface(DeviceType::CPU), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-    }
-    request->ReserveMedia(1);
-    const std::array<MediaSpan, 1> media{{{2, image}}};
-    request->AppendMedia(media);
-    scheduler.AddRequest(request);
-    StepPlan plan;
-    ASSERT_TRUE(scheduler.PlanStep(plan).executable);
-    ASSERT_EQ(plan.requests.size(), 1u);
-    EXPECT_EQ(plan.token_count, 2u);
-    EXPECT_EQ(plan.requests[0].unprocessed_token_count, 2u);
-    EXPECT_EQ(request->ProcessedSequenceLength(), 0);
-  }
-}
-
 TEST_F(SchedulerContractTest, CapacityBlockedPeerDoesNotSuppressResidentImagePreparation) {
   for (const bool occupied_slot : {false, true}) {
     auto cache = std::make_shared<RecordingCacheManager>(model_, occupied_slot ? 1 : 8);
@@ -234,7 +239,7 @@ TEST_F(SchedulerContractTest, CapacityBlockedPeerDoesNotSuppressResidentImagePre
     image->rows = 2;
     request->ReserveMedia(1);
     const std::array<MediaSpan, 1> media{{{1, image}}};
-    request->AppendMedia(media);
+    AppendSchedulingMedia(request, media);
     request->StagePrefixAdoption(1);
     request->CommitPrefixAdoption();
     MakePrefillResident(scheduler, *cache, request);
@@ -277,7 +282,7 @@ TEST_F(SchedulerContractTest, OccupiedPagedSlotDoesNotSuppressResidentImagePrepa
   image->rows = 2;
   request->ReserveMedia(1);
   const std::array<MediaSpan, 1> media{{{1, image}}};
-  request->AppendMedia(media);
+  AppendSchedulingMedia(request, media);
   request->StagePrefixAdoption(1);
   request->CommitPrefixAdoption();
   MakePrefillResident(scheduler, *cache, request);
@@ -308,7 +313,7 @@ TEST_F(SchedulerContractTest, MissingImageDoesNotSuppressUnserviceablePeerFailur
   image->rows = 2;
   request->ReserveMedia(1);
   const std::array<MediaSpan, 1> media{{{0, image}}};
-  request->AppendMedia(media);
+  AppendSchedulingMedia(request, media);
   scheduler.AddRequest(request);
   auto peer = Assigned(20);
   scheduler.AddRequest(peer);
@@ -345,7 +350,7 @@ TEST_F(SchedulerContractTest, OccupiedPagedSlotDefersQueuedImagesWithoutFeatureT
         images[i]->features = std::make_shared<Tensor>(GetDeviceInterface(DeviceType::CPU), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
       request->ReserveMedia(1);
       const std::array<MediaSpan, 1> media{{{1, images[i]}}};
-      request->AppendMedia(media);
+      AppendSchedulingMedia(request, media);
       request->StagePrefixAdoption(1);
       request->CommitPrefixAdoption();
       scheduler.AddRequest(request);
@@ -374,7 +379,7 @@ TEST_F(SchedulerContractTest, MissingImageDoesNotSuppressLaterQueuedTextPrefill)
   image->rows = 2;
   image_request->ReserveMedia(1);
   const std::array<MediaSpan, 1> media{{{0, image}}};
-  image_request->AppendMedia(media);
+  AppendSchedulingMedia(image_request, media);
   auto text = Assigned(10);
   scheduler.AddRequest(image_request);
   scheduler.AddRequest(text);
@@ -395,7 +400,7 @@ TEST_F(SchedulerContractTest, QueuedImagePreparationRespectsPerRequestCapacityFa
       auto image = std::make_shared<MediaItem>();
       image->rows = 2;
       request->ReserveMedia(1);
-      request->AppendMedia(std::array<MediaSpan, 1>{{{0, image}}});
+      AppendSchedulingMedia(request, std::array<MediaSpan, 1>{{{0, image}}});
       scheduler.AddRequest(request);
     }
     if (unserviceable)
@@ -446,7 +451,7 @@ TEST_F(SchedulerContractTest, QueuedImagePreparationProbesTheProspectivePrefixBo
   auto image = std::make_shared<MediaItem>();
   image->rows = 2;
   request->ReserveMedia(1);
-  request->AppendMedia(std::array<MediaSpan, 1>{{{4, image}}});
+  AppendSchedulingMedia(request, std::array<MediaSpan, 1>{{{4, image}}});
   scheduler.AddRequest(request);
   const auto match = cache->MatchPrefix(*request);
   ASSERT_TRUE(match);
@@ -476,7 +481,7 @@ TEST_F(SchedulerContractTest, MediaChunkFinishesAnOffsetCacheBlockExactly) {
       image->features = std::make_shared<Tensor>(GetDeviceInterface(DeviceType::CPU), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
       request->ReserveMedia(1);
       const std::array<MediaSpan, 1> media{{{0, image}}};
-      request->AppendMedia(media);
+      AppendSchedulingMedia(request, media);
       request->StagePrefixAdoption(3);
       request->CommitPrefixAdoption();
       scheduler.AddRequest(request);
@@ -509,7 +514,7 @@ TEST_F(SchedulerContractTest, MediaPrefillUsesTheFurthestBudgetedBlockBoundary) 
         image->features = std::make_shared<Tensor>(GetDeviceInterface(DeviceType::CPU), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
         request->ReserveMedia(1);
         const std::array<MediaSpan, 1> media{{{0, image}}};
-        request->AppendMedia(media);
+        AppendSchedulingMedia(request, media);
         request->StagePrefixAdoption(3);
         request->CommitPrefixAdoption();
         scheduler.AddRequest(request);
@@ -552,7 +557,7 @@ TEST_F(SchedulerContractTest, DisabledResolvedPrefixCachingDoesNotAlignMediaPref
       image->rows = image_rows;
       image->features = std::make_shared<Tensor>(GetDeviceInterface(DeviceType::CPU), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
       request->ReserveMedia(1);
-      request->AppendMedia(std::array<MediaSpan, 1>{{{0, image}}});
+      AppendSchedulingMedia(request, std::array<MediaSpan, 1>{{{0, image}}});
       request->StagePrefixAdoption(3);
       request->CommitPrefixAdoption();
       MakePrefillResident(scheduler, *cache, request);

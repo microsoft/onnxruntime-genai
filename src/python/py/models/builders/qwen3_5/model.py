@@ -10,7 +10,7 @@ from builder_config import serialize_genai_config
 from loaders.vision import load_qwen35_visual
 
 from ..mtp import MTPModel
-from ..qwen3_8.vision import Qwen4ExpVisionModel, save_image_processor
+from ..qwen3_8.vision import Qwen4ExpVisionModel, save_image_processor, save_video_processor
 from .mtp import Qwen35DenseMTPModel, Qwen35MTPModel
 from .text import Qwen35MoETextModel, Qwen35TextModel
 
@@ -231,6 +231,8 @@ class Qwen35MoEModel(MTPModel):
         model_config = genai_config["model"]
         model_config["image_token_id"] = config.image_token_id
         model_config["vision_start_token_id"] = config.vision_start_token_id
+        if getattr(config, "video_token_id", None) is not None:
+            model_config["video_token_id"] = config.video_token_id
         model_config["vision"] = {
             "filename": "vision.onnx",
             "spatial_merge_size": config.vision_config.spatial_merge_size,
@@ -293,6 +295,7 @@ class Qwen35MoEModel(MTPModel):
         self.decoder.save_processing(model_name_or_path, extra_kwargs, out_dir)
         if self.decoder.use_paged_attention and self.decoder.exclude_embeds:
             save_image_processor(model_name_or_path, extra_kwargs, out_dir, self.hf_token)
+            save_video_processor(model_name_or_path, extra_kwargs, out_dir, self.hf_token, self.vision_config)
 
     def require_specforge_aux_taps(self, target_layer_ids, drafter_name):
         if not target_layer_ids:
@@ -448,7 +451,9 @@ class Qwen35MoEModel(MTPModel):
         drafter_io_dtype = (
             drafter_quant_config.to_onnx_dtypes()[0]
             if drafter_quant_config is not None
-            else io_dtype if self.decoder.ep == "webgpu" else ir.DataType.BFLOAT16
+            else io_dtype
+            if self.decoder.ep == "webgpu"
+            else ir.DataType.BFLOAT16
         )
         if self.decoder.ep == "webgpu" and drafter_io_dtype != ir.DataType.FLOAT16:
             raise ValueError("WebGPU DFlash2 requires FP16 body activations and KV caches.")
@@ -571,7 +576,10 @@ class Qwen35MoEModel(MTPModel):
         private = set(head_initializers - adopted) if head is not None else set()
 
         if shared_weight_policies is not None:
-            if embedding_initializers & head_initializers and set(shared_weight_policies.values()) == {"required", "off"}:
+            if embedding_initializers & head_initializers and set(shared_weight_policies.values()) == {
+                "required",
+                "off",
+            }:
                 raise ValueError("A tied embedding and LM head cannot have conflicting required/off sharing policies.")
             for tensor_name, initializers in (
                 ("embedding", embedding_initializers),

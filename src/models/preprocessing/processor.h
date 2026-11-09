@@ -33,6 +33,29 @@ struct Images {
 std::unique_ptr<Images> LoadImages(std::span<const char* const> image_paths);
 std::unique_ptr<Images> LoadImagesFromBuffers(std::span<const void*> image_data, std::span<const size_t> image_data_sizes);
 
+struct VideoFrameLimits {
+  size_t max_clips{64};
+  size_t max_frames{64};
+  size_t max_bytes{256 * 1024 * 1024};
+  int64_t max_dimension{16384};
+};
+
+struct Videos {
+  std::vector<ort_extensions::OrtxObjectPtr<OrtxRawFrames>> clips_;
+  size_t packed_bytes_{};
+};
+
+std::unique_ptr<Videos> LoadVideosFromFrames(std::span<const std::span<const OrtxFrame>> clips,
+                                             const VideoFrameLimits& limits = {});
+
+struct VideoFile {
+  const char* path;
+  OrtxVideoLoadOptions options;
+};
+
+std::unique_ptr<Videos> LoadVideos(std::span<const VideoFile> files, size_t max_clips,
+                                   const OrtxVideoLimits& limits);
+
 struct Audios {
   Audios(ort_extensions::OrtxObjectPtr<OrtxRawAudios> audios, size_t num_audios)
       : audios_(std::move(audios)), num_audios_{num_audios} {}
@@ -58,6 +81,7 @@ struct Payload {
 struct Config;
 struct SessionInfo;
 class ThreadPool;
+struct VisionPreparation;
 
 // A null pool keeps same-type copies on the direct sequential path.
 template <typename T>
@@ -89,6 +113,8 @@ struct Processor {
 
   virtual void ConfigureTokenizer(Tokenizer&) const {}
   virtual std::unique_ptr<NamedTensors> Process(const Tokenizer& tokenizer, const Payload& payload) const = 0;
+  virtual std::unique_ptr<VisionPreparation> CreateVisionPreparation(
+      const Config& config, const SessionInfo& info, const Tokenizer& tokenizer) const;
 
  protected:
   ThreadPool* thread_pool_{};

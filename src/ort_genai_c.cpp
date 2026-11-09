@@ -99,6 +99,7 @@ struct OgaGenerator : Generators::Generator, OgaAbstract {};
 struct OgaGeneratorParams : Generators::GeneratorParams, OgaAbstract {};
 struct OgaMtpGenerator : Generators::MtpGenerator, OgaAbstract {};
 struct OgaImages : Generators::Images, OgaAbstract {};
+struct OgaVideos : Generators::Videos, OgaAbstract {};
 struct OgaModel : Generators::Model, OgaAbstract {};
 struct OgaMultiModalProcessor : Generators::MultiModalProcessor, OgaAbstract {};
 struct OgaNamedTensors : Generators::NamedTensors, OgaAbstract {};
@@ -319,6 +320,136 @@ OgaResult* OGA_API_CALL OgaLoadImages(const OgaStringArray* image_paths, OgaImag
 OgaResult* OGA_API_CALL OgaLoadImagesFromBuffers(const void** image_data, const size_t* image_data_sizes, size_t count, OgaImages** images) {
   OGA_TRY
   *images = ReturnUnique<OgaImages>(Generators::LoadImagesFromBuffers(std::span<const void*>(image_data, count), std::span<const size_t>(image_data_sizes, count)));
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaLoadVideosFromFrames(
+    const OgaVideoClip* clips, size_t count, const OgaVideoFrameLimits* limits, OgaVideos** videos) {
+  OGA_TRY
+  if (!videos) throw std::invalid_argument("videos must not be null.");
+  *videos = nullptr;
+  Generators::VideoFrameLimits resolved;
+  if (limits) {
+    if (limits->struct_size != sizeof(OgaVideoFrameLimits))
+      throw std::invalid_argument("Unsupported video frame limits size.");
+    resolved = {limits->max_clips, limits->max_frames, limits->max_bytes, limits->max_dimension};
+  }
+  if (!clips || count == 0 || count > resolved.max_clips || resolved.max_frames == 0 ||
+      resolved.max_bytes == 0 || resolved.max_dimension <= 0)
+    throw std::invalid_argument("Invalid video collection or loading limits.");
+  std::vector<std::vector<OrtxFrame>> descriptors;
+  descriptors.reserve(count);
+  for (size_t clip = 0; clip < count; ++clip) {
+    if (!clips[clip].frames || clips[clip].count == 0 || clips[clip].count > resolved.max_frames)
+      throw std::invalid_argument("Invalid video frame collection.");
+    descriptors.emplace_back();
+    descriptors.back().reserve(clips[clip].count);
+    for (size_t frame = 0; frame < clips[clip].count; ++frame) {
+      const auto& source = clips[clip].frames[frame];
+      descriptors.back().push_back({source.data, source.data_size, source.width, source.height,
+                                    source.row_stride, source.timestamp_seconds});
+    }
+  }
+  std::vector<std::span<const OrtxFrame>> inputs;
+  inputs.reserve(count);
+  for (const auto& clip : descriptors) inputs.emplace_back(clip);
+  *videos = ReturnUnique<OgaVideos>(Generators::LoadVideosFromFrames(inputs, resolved));
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaVideosGetClipCount(const OgaVideos* videos, size_t* count) {
+  OGA_TRY
+  if (!videos || !count) throw std::invalid_argument("videos and count must not be null.");
+  *count = videos->clips_.size();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaLoadVideos(
+    const OgaVideoFile* files, size_t count, const OgaVideoFileLimits* limits, OgaVideos** videos) {
+  OGA_TRY
+  if (!videos) throw std::invalid_argument("videos must not be null.");
+  *videos = nullptr;
+  const OgaVideoFileLimits defaults{sizeof(OgaVideoFileLimits), 64, 64, 256 * 1024 * 1024,
+                                    512 * 1024 * 1024, 1024 * 1024 * 1024, 100000, 4096, 4096, 4096};
+  if (!limits) limits = &defaults;
+  if (limits->struct_size != sizeof(OgaVideoFileLimits) || !files || count == 0 || count > limits->max_clips)
+    throw std::invalid_argument("Invalid video files or file loading limits.");
+  const OrtxVideoLimits decoder_limits{sizeof(OrtxVideoLimits), limits->max_frames, limits->max_bytes,
+                                       limits->max_encoded_bytes, limits->max_read_bytes, limits->max_packets,
+                                       limits->max_decoded_frames, limits->max_targets, limits->max_dimension};
+  std::vector<Generators::VideoFile> inputs;
+  inputs.reserve(count);
+  for (size_t index = 0; index < count; ++index) {
+    const auto& source = files[index].options;
+    if (source.struct_size != sizeof(OgaVideoLoadOptions))
+      throw std::invalid_argument("Unsupported video loading options size.");
+    OrtxVideoSampling sampling;
+    switch (source.sampling) {
+      case OgaVideoSamplingFps:
+        sampling = kOrtxVideoSamplingFps;
+        break;
+      case OgaVideoSamplingCount:
+        sampling = kOrtxVideoSamplingCount;
+        break;
+      case OgaVideoSamplingTimes:
+        sampling = kOrtxVideoSamplingTimes;
+        break;
+      default:
+        throw std::invalid_argument("Unknown video sampling policy.");
+    }
+    inputs.push_back({files[index].path,
+                      {sizeof(OrtxVideoLoadOptions), sampling, source.sampling_fps, source.frame_count,
+                       source.target_times, source.target_count, source.start_seconds, source.end_seconds,
+                       source.has_end}});
+  }
+  *videos = ReturnUnique<OgaVideos>(Generators::LoadVideos(inputs, limits->max_clips, decoder_limits));
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaVideosGetMetadata(const OgaVideos* videos, size_t clip, OgaVideoMetadata* metadata) {
+  OGA_TRY
+  if (!videos || !metadata || metadata->struct_size != sizeof(OgaVideoMetadata) || clip >= videos->clips_.size())
+    throw std::invalid_argument("Invalid video clip or metadata output.");
+  OrtxVideoMetadata value{sizeof(OrtxVideoMetadata)};
+  Generators::CheckResult(OrtxGetVideoMetadata(videos->clips_[clip].get(), &value));
+  *metadata = {sizeof(OgaVideoMetadata), value.time_base_num, value.time_base_den, value.origin_pts,
+               value.requested_samples, value.selected_frames};
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaVideosGetSample(const OgaVideos* videos, size_t clip, size_t sample, OgaVideoSample* result) {
+  OGA_TRY
+  if (!videos || !result || clip >= videos->clips_.size())
+    throw std::invalid_argument("Invalid video clip or sample output.");
+  OrtxVideoSample value{};
+  Generators::CheckResult(OrtxGetVideoSample(videos->clips_[clip].get(), sample, &value));
+  *result = {value.target_seconds, value.frame_index, value.source_pts, value.source_frame_index};
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaVideosGetFrameCount(const OgaVideos* videos, size_t clip, size_t* count) {
+  OGA_TRY
+  if (!videos || !count || clip >= videos->clips_.size())
+    throw std::invalid_argument("Invalid video clip or count.");
+  Generators::CheckResult(OrtxGetRawFrameCount(videos->clips_[clip].get(), count));
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaVideosGetFrame(const OgaVideos* videos, size_t clip, size_t frame,
+                                          OgaVideoFrame* descriptor) {
+  OGA_TRY
+  if (!videos || !descriptor || clip >= videos->clips_.size())
+    throw std::invalid_argument("Invalid video clip or frame descriptor.");
+  OrtxFrame view{};
+  Generators::CheckResult(OrtxGetRawFrame(videos->clips_[clip].get(), frame, &view));
+  *descriptor = {view.data, view.data_size, view.width, view.height, view.row_stride, view.timestamp_seconds};
   return nullptr;
   OGA_CATCH
 }
@@ -2326,6 +2457,12 @@ OgaResult* OgaRequestBeginTurn(
 OgaResult* OgaRequestBeginTurnWithImages(
     OgaRequest* request, const OgaTurnOptions* turn_options,
     const char* formatted_prompt, const OgaImages* images, uint64_t* out_turn_id) {
+  return OgaRequestBeginTurnWithMedia(request, turn_options, formatted_prompt, images, nullptr, out_turn_id);
+}
+
+OgaResult* OgaRequestBeginTurnWithMedia(
+    OgaRequest* request, const OgaTurnOptions* turn_options,
+    const char* formatted_prompt, const OgaImages* images, const OgaVideos* videos, uint64_t* out_turn_id) {
   OGA_TRY
   if (!request || !out_turn_id || !formatted_prompt)
     throw std::invalid_argument("request, formatted_prompt, and out_turn_id must not be null.");
@@ -2338,7 +2475,7 @@ OgaResult* OgaRequestBeginTurnWithImages(
       throw std::invalid_argument("Turn options belong to a different or destroyed Request.");
     options = *turn_options;
   }
-  *out_turn_id = request->BeginTurn(formatted_prompt, options, images);
+  *out_turn_id = request->BeginTurn(formatted_prompt, options, images, videos);
   return nullptr;
   OGA_CATCH
 }
@@ -2397,6 +2534,7 @@ void OGA_API_CALL OgaDestroyTokenizerStream(OgaTokenizerStream* p) { delete stat
 void OGA_API_CALL OgaDestroyTensor(OgaTensor* p) { p->ExternalRelease(); }
 void OGA_API_CALL OgaDestroyMultiModalProcessor(OgaMultiModalProcessor* p) { p->ExternalRelease(); }
 void OGA_API_CALL OgaDestroyImages(OgaImages* p) { delete static_cast<Generators::Images*>(p); }
+void OGA_API_CALL OgaDestroyVideos(OgaVideos* p) { delete static_cast<Generators::Videos*>(p); }
 void OGA_API_CALL OgaDestroyAudios(OgaAudios* p) { delete static_cast<Generators::Audios*>(p); }
 void OGA_API_CALL OgaDestroyNamedTensors(OgaNamedTensors* p) { delete static_cast<Generators::NamedTensors*>(p); }
 void OGA_API_CALL OgaDestroyAdapters(OgaAdapters* p) { p->ExternalRelease(); }
