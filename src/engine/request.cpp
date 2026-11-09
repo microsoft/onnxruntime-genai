@@ -179,16 +179,29 @@ RequestTurnAdmission::~RequestTurnAdmission() = default;
 void Request::ValidateTurnAdmission(
     std::span<const int32_t> tokens,
     const TurnOptions& options) const {
+  ValidateTurnState(options);
+  if (tokens.empty()) {
+    throw std::runtime_error(
+        "Expected at least one input token for generation. Received 0.");
+  }
+  const size_t sequence_length =
+      IsAwaitingFirstTurn() ? 0 : static_cast<size_t>(CurrentSequenceLength());
+  if (std::any_of(tokens.begin(), tokens.end(), [](int32_t token) { return token < 0; }))
+    throw std::invalid_argument("Prompt tokens must be nonnegative vocabulary IDs.");
+  ValidateAppendLength(max_session_tokens_, sequence_length, tokens.size());
+  if (tokens_host_.capacity() < tokens_host_.size() + tokens.size()) {
+    throw std::logic_error(
+        "The request host token mirror does not have reserved turn capacity.");
+  }
+}
+
+void Request::ValidateTurnState(const TurnOptions& options) const {
   // The single place a zero turn maximum is rejected. The C API's setter treats zero as "unset",
   // so this only fires for a direct in-process TurnOptions that asked for a turn generating
   // nothing; ValidateTurnPolicy() deliberately does not repeat the check.
   if (options.max_generated_tokens && *options.max_generated_tokens == 0) {
     throw std::runtime_error(
         "max_generated_tokens (0) must be greater than zero.");
-  }
-  if (tokens.empty()) {
-    throw std::runtime_error(
-        "Expected at least one input token for generation. Received 0.");
   }
   if (turn_id_exhausted_) {
     throw std::overflow_error(
@@ -202,16 +215,6 @@ void Request::ValidateTurnAdmission(
     }
     throw std::runtime_error(
         "BeginTurn is only valid for a new request or after the current turn is complete.");
-  }
-
-  const size_t sequence_length =
-      first_turn ? 0 : static_cast<size_t>(CurrentSequenceLength());
-  if (std::any_of(tokens.begin(), tokens.end(), [](int32_t token) { return token < 0; }))
-    throw std::invalid_argument("Prompt tokens must be nonnegative vocabulary IDs.");
-  ValidateAppendLength(max_session_tokens_, sequence_length, tokens.size());
-  if (tokens_host_.capacity() < tokens_host_.size() + tokens.size()) {
-    throw std::logic_error(
-        "The request host token mirror does not have reserved turn capacity.");
   }
 }
 
@@ -465,6 +468,8 @@ void Request::CompleteClose() noexcept {
   std::vector<int32_t>{}.swap(tokens_host_);
   std::vector<int32_t>{}.swap(prefix_tokens_);
   std::vector<MediaSpan>{}.swap(media_);
+  media_storage_.reset();
+  prefix_storage_.reset();
   std::vector<TurnBoundary>{}.swap(turn_boundaries_);
 }
 
@@ -490,16 +495,28 @@ uint64_t Request::BeginTurn(
   return engine->BeginTurn(shared_from_this(), tokens, options);
 }
 
-uint64_t Request::BeginTurn(const std::string& prompt, const TurnOptions& options, const Images* images) {
+uint64_t Request::BeginTurn(const std::string& prompt, const TurnOptions& options, const Images* images,
+                            const Videos* videos) {
   auto engine = engine_.lock();
   if (!engine) throw std::runtime_error("Cannot begin a turn after the request's engine has been destroyed.");
-  return engine->BeginTurn(shared_from_this(), prompt, options, images);
+  return engine->BeginTurn(shared_from_this(), prompt, options, images, videos);
 }
 
-void Request::ReserveMedia(size_t count) {
+void Request::ReserveMedia(size_t count, MediaStore* store) {
   if (count == 0) return;
-  media_.reserve(media_.size() + count);
-  prefix_tokens_.reserve(max_session_tokens_);
+  if (count > media_.max_size() - media_.size())
+    throw std::overflow_error("Request media capacity exceeds its supported size.");
+  const auto capacity = media_.size() + count;
+  if (capacity > media_.capacity()) {
+    auto allocation = store ? store->ReserveHost(capacity * sizeof(MediaSpan)) : nullptr;
+    media_.reserve(capacity);
+    media_storage_ = std::move(allocation);
+  }
+  if (prefix_tokens_.capacity() < max_session_tokens_) {
+    auto allocation = store ? store->ReserveHost(max_session_tokens_ * sizeof(int32_t)) : nullptr;
+    prefix_tokens_.reserve(max_session_tokens_);
+    prefix_storage_ = std::move(allocation);
+  }
 }
 
 void Request::AppendMedia(std::span<const MediaSpan> media) noexcept {
@@ -522,18 +539,18 @@ void Request::ClearMediaPreparationFailure() noexcept {
 std::span<const int32_t> Request::PrefixTokensCpu() const {
   if (media_.empty()) return tokens_host_;
   prefix_tokens_.assign(tokens_host_.begin(), tokens_host_.end());
-  // These private IDs are never decoder inputs. Exact item interning gives every media row a
-  // distinct identity while preserving the cache's collision-checked token and parent comparisons.
+  // Private row IDs include feature slices, tokens and coordinate semantics, never decoder inputs.
   for (const auto& span : media_) {
-    const auto end = std::min(tokens_host_.size(), span.start + span.item->rows);
+    if (!span.prefix) throw std::logic_error("Media prefix identity was not prepared before admission.");
+    const auto end = std::min(tokens_host_.size(), span.End());
     for (size_t row = span.start; row < end; ++row)
-      prefix_tokens_[row] = -span.item->prefix_base - static_cast<int32_t>(row - span.start);
+      prefix_tokens_[row] = -span.prefix->first_id - static_cast<int32_t>(row - span.start);
   }
   return prefix_tokens_;
 }
 
 std::array<int64_t, 3> Request::Position(size_t row) const {
-  return MediaPosition(media_, row, static_cast<size_t>(params_->model_->config_->model.vision.spatial_merge_size));
+  return MediaPosition(media_, row);
 }
 
 void Request::RewindToStartOfTurn(uint64_t turn_id) {

@@ -11,11 +11,554 @@
 #include <gtest/gtest.h>
 
 #include "models/preprocessing/processor.h"
+#include "models/preprocessing/genai_tokenizer.h"
+#include "models/preprocessing/multi_modal_processor.h"
+#include "models/preprocessing/qwen_vision_position.h"
+#include "models/preprocessing/qwen_vision_processing.h"
+#include "models/preprocessing/qwen2_5_vl_image_processor.h"
+#include "models/preprocessing/bailing_vision_position.h"
+#include "models/preprocessing/bailing_vision_processing.h"
+#include "models/decoder_only.h"
+#include "models/env_utils.h"
 #include "engine/media.h"
 #include "engine_test_helpers.h"
 #include "engine_test_doubles.h"
 
 namespace Generators::test {
+
+TEST(MediaInputsTest, RealQwenVideoCanonicalOrderAndEncoderInputs) {
+  const auto path = GetEnv("ORTGENAI_ENGINE_VIDEO_MODEL");
+  if (path.empty()) {
+    bool required = false;
+    GetEnv("ORTGENAI_REQUIRE_ENGINE_VIDEO", required);
+    if (required) FAIL() << "ORTGENAI_ENGINE_VIDEO_MODEL must name the complete Qwen video package.";
+    GTEST_SKIP() << "Set ORTGENAI_ENGINE_VIDEO_MODEL for actual-weight canonical video validation.";
+  }
+  auto config = CreateConfig(GetOrtEnv(), path.c_str());
+  ASSERT_EQ(config->model.decoder.num_hidden_layers, 64);
+  auto model = std::dynamic_pointer_cast<DecoderOnly_Model>(CreateModel(GetOrtEnv(), std::move(config)));
+  ASSERT_NE(model, nullptr);
+  {
+    LingImageProcessor ling_processor{*model->config_, model->vision_->session_info};
+    EXPECT_THROW(ling_processor.CreateVisionPreparation(
+                     *model->config_, model->vision_->session_info, *model->vision_->processor->tokenizer_),
+                 std::runtime_error);
+  }
+  {
+    auto image_processor = std::dynamic_pointer_cast<QwenImageProcessor>(model->vision_->processor->processor_);
+    ASSERT_NE(image_processor, nullptr);
+    const std::array<const char*, 2> paths{MODEL_PATH "../images/sheet.png", MODEL_PATH "../images/cars.jpg"};
+    auto images = LoadImages(paths);
+    auto pixels_only = image_processor->ProcessImages(*images);
+    EXPECT_EQ(pixels_only->count(std::string{Config::Defaults::InputIdsName}), 0u);
+    EXPECT_EQ(pixels_only->count(std::string{Config::Defaults::NumImageTokens}), 0u);
+    const std::string image_prompt =
+        "before<|vision_start|><|image_pad|><|vision_end|>between<|vision_start|><|image_pad|><|vision_end|>after";
+    auto combined = model->vision_->processor->Process(image_prompt, images.get(), nullptr);
+    for (const auto name : {Config::Defaults::PixelValuesName, Config::Defaults::ImageGridThwName}) {
+      const auto& pixels = pixels_only->at(std::string{name});
+      const auto& together = combined->at(std::string{name});
+      ASSERT_EQ(pixels->GetType(), together->GetType());
+      ASSERT_EQ(pixels->GetShape(), together->GetShape());
+      EXPECT_EQ(std::memcmp(pixels->GetRawData(), together->GetRawData(),
+                            pixels->GetElementCount() * Ort::SizeOf(pixels->GetType())),
+                0);
+    }
+    const auto& grids = pixels_only->at(std::string{Config::Defaults::ImageGridThwName});
+    ASSERT_EQ(grids->GetElementCount(), 6u);
+    std::array<std::array<int64_t, 3>, 2> image_grids{};
+    for (size_t image = 0; image < image_grids.size(); ++image)
+      std::copy_n(grids->GetData<int64_t>() + image * 3, 3, image_grids[image].begin());
+    {
+      const std::array<const char*, 1> single_path{paths[1]};
+      auto single = LoadImages(single_path);
+      const std::array<std::array<int64_t, 3>, 1> resolved{{{1, 4, 6}}};
+      auto fixed = image_processor->ProcessImages(*single, resolved);
+      const auto& fixed_grid = fixed->at(std::string{Config::Defaults::ImageGridThwName});
+      ASSERT_EQ(fixed_grid->GetElementCount(), 3u);
+      EXPECT_TRUE(std::equal(resolved[0].begin(), resolved[0].end(), fixed_grid->GetData<int64_t>()));
+      auto unchanged = image_processor->ProcessImages(*images);
+      const auto& unchanged_grid = unchanged->at(std::string{Config::Defaults::ImageGridThwName});
+      ASSERT_EQ(unchanged_grid->GetElementCount(), grids->GetElementCount());
+      EXPECT_EQ(std::memcmp(unchanged_grid->GetRawData(), grids->GetRawData(),
+                            grids->GetElementCount() * sizeof(int64_t)),
+                0);
+    }
+    const auto expanded = ExpandQwenMediaPrompt(
+        image_prompt, image_grids, {}, static_cast<size_t>(model->config_->model.vision.spatial_merge_size), 1024 * 1024);
+    const auto expected = model->vision_->processor->tokenizer_->Encode(expanded.c_str());
+    const auto& ids = combined->at(std::string{Config::Defaults::InputIdsName});
+    ASSERT_EQ(ids->GetElementCount(), expected.size());
+    EXPECT_TRUE(std::equal(expected.begin(), expected.end(), ids->GetData<int32_t>()));
+    MediaStore image_store{model, 512 * 1024 * 1024, 2 * 1024 * 1024};
+    auto planned_images = image_store.Prepare(image_prompt, images.get(), 0, 4096);
+    EXPECT_EQ(planned_images.tokens, expected);
+    ASSERT_EQ(planned_images.media.size(), image_grids.size());
+    Images metadata_only{ort_extensions::OrtxObjectPtr<OrtxRawImages>{}, images->num_images_, images->info_};
+    EXPECT_THROW(image_store.Prepare(image_prompt, &metadata_only, 0, expected.size()),
+                 std::invalid_argument);
+    std::swap(images->info_[0].width, images->info_[0].height);
+    EXPECT_THROW(image_store.Prepare(image_prompt, images.get(), 0, 4096), std::runtime_error);
+    std::swap(images->info_[0].width, images->info_[0].height);
+  }
+  MediaStore store{model, 512 * 1024 * 1024, 2 * 1024 * 1024};
+  Tokenizer tokenizer{*model->config_};
+  tokenizer.PrepareBoundedEncoding();
+  for (const std::string text : {"ordinary code 12345", "caf\xc3\xa9 e\xcc\x81", "<|vision_end|>"}) {
+    EXPECT_EQ(tokenizer.EncodeBounded(text, 128 * (text.size() + 1)), tokenizer.Encode(text.c_str()));
+    EXPECT_THROW(tokenizer.EncodeBounded(text, 1), std::invalid_argument);
+  }
+  const std::string long_text(4097, '9');
+  EXPECT_THROW(tokenizer.EncodeBounded(std::string{"a\0b", 3}, 512), std::invalid_argument);
+  EXPECT_THROW(tokenizer.EncodeBounded(long_text, (long_text.size() + 2) * sizeof(int32_t)), std::runtime_error);
+  EXPECT_EQ(tokenizer.EncodeBounded(long_text, 128 * (long_text.size() + 1)), tokenizer.Encode(long_text.c_str()));
+  std::vector<uint8_t> rgb(4 * 64 * 96 * 3, 0);
+  std::array<OrtxFrame, 4> frames{};
+  for (size_t frame = 0; frame < frames.size(); ++frame) {
+    auto* data = rgb.data() + frame * 64 * 96 * 3;
+    for (size_t pixel = 0; pixel < 64 * 96; ++pixel) data[pixel * 3 + (frame < 2 ? 0 : 2)] = 255;
+    frames[frame] = {data, 64 * 96 * 3, 96, 64, 96 * 3, static_cast<double>(frame)};
+  }
+  const std::array<std::span<const OrtxFrame>, 1> clips{frames};
+  auto videos = LoadVideosFromFrames(clips);
+  std::fill(rgb.begin(), rgb.end(), 0);
+  const std::string prompt = "<|vision_start|><|video_pad|><|vision_end|>Which color appears first?";
+  const auto raw = tokenizer.Encode(prompt.c_str());
+  auto prepared = store.Prepare(prompt, nullptr, 0, 4096, videos.get());
+  ASSERT_EQ(prepared.media.size(), 2u);
+  store.Identify(prepared, 0, {});
+  store.ReserveItems(prepared.media.size());
+  store.Retain(prepared.media);
+  auto identical = store.Prepare(prompt, nullptr, 0, 4096, videos.get());
+  identical.media[0].positions = MakeQwenVisionPosition({1, 4, 6}, 2);
+  store.Identify(identical, 0, {});
+  EXPECT_EQ(identical.media[0].prefix, prepared.media[0].prefix);
+  auto changed_positions = store.Prepare(prompt, nullptr, 0, 4096, videos.get());
+  changed_positions.media[0].positions = MakeQwenVisionPosition({1, 6, 4}, 2);
+  store.Identify(changed_positions, 0, {});
+  EXPECT_EQ(changed_positions.media[0].item, prepared.media[0].item);
+  EXPECT_NE(changed_positions.media[0].prefix, prepared.media[0].prefix);
+  EXPECT_EQ(changed_positions.media[1].prefix, prepared.media[1].prefix);
+  EXPECT_LT(prepared.media[0].start, prepared.media[1].start);
+  EXPECT_NE(prepared.media[0].item, prepared.media[1].item);
+  const auto output = GetEnv("ORTGENAI_ENGINE_VIDEO_REFERENCE_OUTPUT");
+  for (size_t group = 0; group < prepared.media.size(); ++group) {
+    const auto& item = prepared.media[group].item;
+    const auto& encoder = model->config_->model.vision;
+    const auto& pixels = item->inputs.at(encoder.inputs.pixel_values);
+    const auto& grid = item->inputs.at(encoder.inputs.image_grid_thw);
+    ASSERT_EQ(grid->GetType(), Ort::TypeToTensorType<int64_t>);
+    ASSERT_EQ(grid->GetElementCount(), 3u);
+    const std::array<int64_t, 3> expected_grid{1, 4, 6};
+    EXPECT_TRUE(std::equal(expected_grid.begin(), expected_grid.end(), grid->GetData<int64_t>()));
+    EXPECT_EQ(item->rows, 6u);
+    EXPECT_EQ(prepared.tokens[prepared.media[group].start], model->config_->model.video_token_id);
+    ASSERT_EQ(pixels->GetType(), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16);
+    ASSERT_EQ(pixels->GetElementCount(), 24 * 1536u);
+    const auto* data = static_cast<const uint16_t*>(pixels->GetRawData());
+    for (size_t value = 0; value < pixels->GetElementCount(); ++value) {
+      const auto channel = value % 1536 / 512;
+      ASSERT_EQ(data[value], channel == (group == 0 ? 0u : 2u) ? 0x3c00u : 0xbc00u)
+          << "group=" << group << "value=" << value;
+    }
+    store.Encode(item);
+    if (!output.empty()) {
+      for (const auto& [name, tensor] :
+           {std::pair{"patches", pixels}, std::pair{"features", item->features}}) {
+        auto cpu = tensor->GetByteSpan().CopyDeviceToCpu();
+        std::ofstream file(std::filesystem::path(output) / (std::string{name} + "-" + std::to_string(group) + ".bin"),
+                           std::ios::binary);
+        ASSERT_TRUE(file);
+        file.write(reinterpret_cast<const char*>(cpu.data()), static_cast<std::streamsize>(cpu.size()));
+        ASSERT_TRUE(file);
+      }
+    }
+  }
+  const auto item = prepared.media[0].item;
+  {
+    ASSERT_NE(prepared.storage, nullptr);
+    const auto accounting = prepared.storage->accounting;
+    const auto retained_bytes = accounting->host_bytes;
+    {
+      auto reused = store.Prepare(prompt, nullptr, 0, 4096, videos.get());
+      EXPECT_EQ(reused.media[0].item, item);
+      EXPECT_GT(accounting->host_bytes, retained_bytes);
+    }
+    EXPECT_EQ(accounting->host_bytes, retained_bytes);
+  }
+  {
+    constexpr size_t host_limit = 16 * 1024 * 1024;
+    MediaStore eviction_store{model, host_limit, 2 * 1024 * 1024};
+    std::shared_ptr<MediaAccounting> accounting;
+    {
+      auto cached = eviction_store.Prepare(prompt, nullptr, 0, 4096, videos.get());
+      eviction_store.Identify(cached, 0, {});
+      accounting = cached.storage->accounting;
+      const auto before_growth = accounting->host_bytes;
+      eviction_store.ReserveItems(64);
+      EXPECT_GE(accounting->host_bytes - before_growth, 64 * sizeof(std::shared_ptr<MediaItem>));
+      eviction_store.Retain(cached.media);
+    }
+    auto allocation = eviction_store.ReserveHost(host_limit - sizeof(MediaAllocation) - 2 * sizeof(void*));
+    EXPECT_EQ(accounting->host_bytes, host_limit);
+    allocation.reset();
+    EXPECT_EQ(accounting->host_bytes, 0u);
+  }
+  {
+    struct InvalidPlan : VisionPreparation {
+      struct PositionProbe : VisionPosition {
+        PositionProbe(size_t rows, int64_t advance, int64_t value)
+            : VisionPosition{rows, advance}, value{value} {}
+        void Fill(size_t, int64_t, const std::array<std::span<int64_t>, 3>& output) const override {
+          for (auto plane : output) std::fill(plane.begin(), plane.end(), value);
+        }
+        bool Equals(const VisionPosition&) const override { return false; }
+        size_t SizeBytes() const override { return sizeof(*this); }
+        int64_t value;
+      };
+      explicit InvalidPlan(std::unique_ptr<VisionPreparation> processor) : processor{std::move(processor)} {}
+      size_t Estimate(const VisionPreparationInput& input, size_t limit) const override {
+        if (failure == 10) return limit + 1;
+        return processor->Estimate(input, limit);
+      }
+      std::unique_ptr<const VisionPlan> Plan(const Tokenizer& tokenizer,
+                                             const VisionPreparationInput& input, size_t limit) const override {
+        planned = true;
+        const auto original = processor->Plan(tokenizer, input, limit);
+        auto plan = std::make_unique<VisionPlan>(*original);
+        switch (failure) {
+          case 0:
+            plan->units[0].inputs[0].name = "unknown_encoder_feed";
+            break;
+          case 1:
+            ++plan->units[0].inputs[0].shape.back();
+            break;
+          case 2:
+            plan->units[0].inputs[1] = plan->units[0].inputs[0];
+            break;
+          case 3:
+            plan->units[0].rows = 4096;
+            break;
+          case 4:
+            plan->spans[0].feature_offset = plan->units[0].rows;
+            break;
+          case 5:
+          case 6:
+          case 7: {
+            const auto range = CoordinateRange();
+            plan->spans[0].positions = std::make_shared<PositionProbe>(
+                plan->spans[0].rows, failure == 7 ? range[1] + 1 : 1,
+                failure == 5 ? range[0] - 1 : failure == 6 ? range[1] + 1
+                                                           : 0);
+            break;
+          }
+          case 8:
+            plan->tokens[0] = -1;
+            break;
+        }
+        return plan;
+      }
+      std::vector<NamedTensors> Materialize(const VisionPlan&) const override {
+        materialized = true;
+        return {};
+      }
+      void ValidateTextTokens(std::span<const int32_t> tokens) const override {
+        processor->ValidateTextTokens(tokens);
+      }
+      std::array<int64_t, 2> CoordinateRange() const override { return processor->CoordinateRange(); }
+      std::unique_ptr<VisionPreparation> processor;
+      int failure{};
+      mutable bool planned{};
+      mutable bool materialized{};
+    };
+    auto invalid = std::make_unique<InvalidPlan>(std::move(model->vision_->preparation));
+    auto* probe = invalid.get();
+    model->vision_->preparation = std::move(invalid);
+    for (int failure = 0; failure < 9; ++failure) {
+      probe->failure = failure;
+      probe->materialized = false;
+      EXPECT_THROW(store.Prepare(prompt, nullptr, 0, 4096, videos.get()), std::invalid_argument);
+      EXPECT_FALSE(probe->materialized) << "failure=" << failure;
+    }
+    probe->failure = 9;
+    const std::array<MediaSpan, 1> invalid_history{{
+        {0, item, std::make_shared<InvalidPlan::PositionProbe>(item->rows, probe->CoordinateRange()[1] + 1, 0)},
+    }};
+    EXPECT_THROW(store.Prepare(prompt, nullptr, item->rows, 4096 - item->rows,
+                               videos.get(), invalid_history),
+                 std::invalid_argument);
+    EXPECT_FALSE(probe->materialized);
+    probe->failure = 10;
+    probe->planned = false;
+    EXPECT_THROW(store.Prepare(prompt, nullptr, 0, 4096, videos.get()), std::runtime_error);
+    EXPECT_FALSE(probe->planned);
+    EXPECT_FALSE(probe->materialized);
+    model->vision_->preparation = std::move(probe->processor);
+  }
+  {
+    auto invalid = std::make_shared<MediaItem>();
+    invalid->rows = item->rows;
+    invalid->feature_bytes = std::numeric_limits<size_t>::max();
+    invalid->inputs = item->inputs;
+    const auto& name = model->config_->model.vision.inputs.pixel_values;
+    auto renamed = invalid->inputs.extract(name);
+    renamed.key() = "unknown_encoder_input";
+    invalid->inputs.insert(std::move(renamed));
+    EXPECT_THROW(store.Encode(invalid), std::invalid_argument);
+    EXPECT_EQ(invalid->features, nullptr);
+    invalid->inputs = item->inputs;
+    auto wrong_type = std::make_shared<Tensor>(GetDeviceInterface(DeviceType::CPU), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+    wrong_type->CreateTensor(item->inputs.at(name)->GetShape());
+    invalid->inputs[name] = std::move(wrong_type);
+    EXPECT_THROW(store.Encode(invalid), std::invalid_argument);
+    EXPECT_EQ(invalid->features, nullptr);
+    auto wrong_shape = std::make_shared<Tensor>(GetDeviceInterface(DeviceType::CPU), item->inputs.at(name)->GetType());
+    wrong_shape->CreateTensor(std::array<int64_t, 2>{1, item->inputs.at(name)->GetShape().back() + 1});
+    invalid->inputs[name] = std::move(wrong_shape);
+    EXPECT_THROW(store.Encode(invalid), std::invalid_argument);
+    invalid->inputs.erase(name);
+    EXPECT_THROW(store.Encode(invalid), std::invalid_argument);
+    EXPECT_EQ(invalid->features, nullptr);
+    EXPECT_NE(item->features, nullptr);
+  }
+  const std::array<MediaSpan, 2> slices{{
+      {1, item, MakeQwenVisionPosition({1, 2, 4}, 2), 2, 1},
+      {5, item, MakeQwenVisionPosition({1, 2, 4}, 2), 2, 4},
+  }};
+  const std::array<int64_t, 8> lookup_tokens{raw[0], raw[0], raw[0], raw[0], raw[0], raw[0], raw[0], raw[0]};
+  const auto features = item->features->GetByteSpan().CopyDeviceToCpu();
+  const auto row_bytes = static_cast<size_t>(model->cpu_embedding_->hidden_size_) * Ort::SizeOf(model->cpu_embedding_->type_);
+  for (const auto& [first_row, rows] : {std::pair{0u, 8u}, std::pair{2u, 4u}}) {
+    Tensor embeddings{GetDeviceInterface(DeviceType::CPU), model->cpu_embedding_->type_};
+    embeddings.CreateTensor(std::array<int64_t, 2>{rows, model->cpu_embedding_->hidden_size_});
+    CpuEmbedding::Workspace workspace;
+    model->cpu_embedding_->Run(std::span<const int64_t>{lookup_tokens}.first(rows), embeddings, workspace);
+    const auto original_view = embeddings.GetByteSpan().CopyDeviceToCpu();
+    const std::vector<uint8_t> original{original_view.begin(), original_view.end()};
+    ApplyMediaFeatures(slices, first_row, rows, embeddings, 0);
+    const auto replaced = embeddings.GetByteSpan().CopyDeviceToCpu();
+    for (size_t row = 0; row < rows; ++row) {
+      const auto absolute = first_row + row;
+      const auto source = absolute >= 1 && absolute < 3 ? absolute : absolute >= 5 && absolute < 7 ? absolute - 1
+                                                                                                   : item->rows;
+      const auto* expected = source < item->rows ? features.data() + source * row_bytes : original.data() + row * row_bytes;
+      EXPECT_EQ(std::memcmp(replaced.data() + row * row_bytes, expected, row_bytes), 0);
+    }
+  }
+  std::array<OrtxFrame, 4> forward{}, reverse{};
+  for (size_t frame = 0; frame < frames.size(); ++frame) {
+    CheckResult(OrtxGetRawFrame(videos->clips_[0].get(), frame, &forward[frame]));
+    CheckResult(OrtxGetRawFrame(videos->clips_[0].get(), frames.size() - 1 - frame, &reverse[frame]));
+    reverse[frame].timestamp_seconds = 10.0 + static_cast<double>(frame);
+  }
+  {
+    // Uniform colors preserve patch bytes while changing the grid feed.
+    auto swapped = forward;
+    for (auto& frame : swapped) {
+      frame.width = 64;
+      frame.height = 96;
+      frame.row_stride = 64 * 3;
+    }
+    const std::array<std::span<const OrtxFrame>, 1> swapped_clips{swapped};
+    auto swapped_videos = LoadVideosFromFrames(swapped_clips);
+    auto swapped_turn = store.Prepare(prompt, nullptr, 0, 4096, swapped_videos.get());
+    ASSERT_EQ(swapped_turn.media.size(), prepared.media.size());
+    const auto& name = model->config_->model.vision.inputs.pixel_values;
+    for (size_t group = 0; group < prepared.media.size(); ++group) {
+      const auto& original = prepared.media[group].item;
+      const auto& changed = swapped_turn.media[group].item;
+      EXPECT_NE(original, changed);
+      const auto& original_pixels = original->inputs.at(name);
+      const auto& changed_pixels = changed->inputs.at(name);
+      ASSERT_EQ(original_pixels->GetShape(), changed_pixels->GetShape());
+      ASSERT_EQ(original_pixels->GetType(), changed_pixels->GetType());
+      EXPECT_EQ(std::memcmp(original_pixels->GetRawData(), changed_pixels->GetRawData(),
+                            original_pixels->GetElementCount() * Ort::SizeOf(original_pixels->GetType())),
+                0);
+    }
+  }
+  const std::array<std::span<const OrtxFrame>, 2> ordered_clips{forward, reverse};
+  auto ordered = LoadVideosFromFrames(ordered_clips);
+  const std::string mixed_prompt =
+      "<|vision_start|><|video_pad|><|vision_end|><|vision_start|><|video_pad|><|vision_end|>";
+  auto mixed = store.Prepare(mixed_prompt, nullptr, 0, 4096, ordered.get());
+  ASSERT_EQ(mixed.media.size(), 4u);
+  EXPECT_EQ(mixed.media[0].item, prepared.media[0].item);
+  EXPECT_EQ(mixed.media[1].item, prepared.media[1].item);
+  EXPECT_EQ(mixed.media[2].item, prepared.media[1].item);
+  EXPECT_EQ(mixed.media[3].item, prepared.media[0].item);
+
+  std::string long_prompt = prompt;
+  for (size_t index = 0; index < 500; ++index) long_prompt += " abc";
+  MediaStore empty_budget{model, 2500000, 2 * 1024 * 1024};
+  EXPECT_NO_THROW(empty_budget.Prepare(long_prompt, nullptr, 0, 4096, videos.get()));
+  MediaStore retained_budget{model, 2500000, 2 * 1024 * 1024};
+  auto retained = retained_budget.Prepare(prompt, nullptr, 0, 4096, videos.get());
+  retained_budget.ReserveItems(retained.media.size());
+  retained_budget.Retain(retained.media);
+  EXPECT_THROW(retained_budget.Prepare(long_prompt, nullptr, 0, 4096, videos.get()),
+               std::runtime_error);
+  auto recovered = retained_budget.Prepare(prompt, nullptr, 0, 4096, videos.get());
+  ASSERT_EQ(recovered.media.size(), retained.media.size());
+  EXPECT_EQ(recovered.media[0].item, retained.media[0].item);
+  EXPECT_EQ(recovered.media[1].item, retained.media[1].item);
+
+  const auto video_filename = model->config_->model.vision.video_config_filename;
+  auto video_definition = model->config_->ResolvePath(*video_filename).open(std::ios::binary);
+  std::string definition{std::istreambuf_iterator<char>{video_definition}, std::istreambuf_iterator<char>{}};
+  constexpr std::string_view normalization = "\"qwen3_vl\": 0";
+  const auto normalization_offset = definition.find(normalization);
+  ASSERT_NE(normalization_offset, std::string::npos);
+  definition[normalization_offset + normalization.size() - 1] = '1';
+  const auto invalid_path = std::filesystem::temp_directory_path() /
+                            ("ortgenai_video_rgb_" +
+                             std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".json");
+  {
+    std::ofstream invalid_definition(invalid_path);
+    invalid_definition << definition;
+    ASSERT_TRUE(invalid_definition);
+  }
+  auto resolver = std::move(model->config_->package_resolver);
+  model->config_->package_resolver = [&](const fs::path& base, std::string_view value) {
+    if (value == "invalid-rgb.json") return fs::path{invalid_path.string()};
+    return resolver ? resolver(base, value) : base / std::string{value};
+  };
+  model->config_->model.vision.video_config_filename = "invalid-rgb.json";
+  std::string error;
+  try {
+    model->vision_->processor->processor_->CreateVisionPreparation(
+        *model->config_, model->vision_->session_info, *model->vision_->processor->tokenizer_);
+  } catch (const std::runtime_error& failure) {
+    error = failure.what();
+  }
+  model->config_->package_resolver = std::move(resolver);
+  std::filesystem::remove(invalid_path);
+  EXPECT_NE(error.find("bounded Qwen3-VL temporal preprocessing pipeline"), std::string::npos) << error;
+
+  model->config_->model.vision.video_config_filename = video_filename;
+  const auto type = model->config_->model.type;
+  model->config_->model.type = "qwen2_5_vl";
+  EXPECT_THROW(model->vision_->processor->processor_->CreateVisionPreparation(
+                   *model->config_, model->vision_->session_info, *model->vision_->processor->tokenizer_),
+               std::runtime_error);
+  model->config_->model.type = type;
+  model->config_->model.vision.video_config_filename.reset();
+  model->config_->model.video_token_id = 0;
+  MediaStore image_only{model, 512 * 1024 * 1024, 2 * 1024 * 1024};
+  const auto video_marker = tokenizer.Encode("<|video_pad|>");
+  EXPECT_THROW(image_only.ValidateTextTokens(video_marker), std::invalid_argument);
+  EXPECT_THROW(image_only.Prepare("<|video_pad|>", nullptr, 0, 4096), std::invalid_argument);
+  const std::array<int32_t, 1> ordinary_zero{0};
+  EXPECT_NO_THROW(image_only.ValidateTextTokens(ordinary_zero));
+}
+
+TEST(MediaInputsTest, RealLingVideoPreparationAndEncoderInputs) {
+  const auto path = GetEnv("ORTGENAI_ENGINE_LING_VIDEO_MODEL");
+  if (path.empty()) {
+    bool required = false;
+    GetEnv("ORTGENAI_REQUIRE_ENGINE_LING_VIDEO", required);
+    if (required) FAIL() << "ORTGENAI_ENGINE_LING_VIDEO_MODEL must name the complete Ling VL package.";
+    GTEST_SKIP() << "Set ORTGENAI_ENGINE_LING_VIDEO_MODEL for actual-weight Ling validation.";
+  }
+  auto config = CreateConfig(GetOrtEnv(), path.c_str());
+  ASSERT_EQ(config->model.type, "bailing_moe_v3_vl");
+  auto model = std::dynamic_pointer_cast<DecoderOnly_Model>(CreateModel(GetOrtEnv(), std::move(config)));
+  ASSERT_NE(model, nullptr);
+  ASSERT_NE(model->vision_, nullptr);
+  ASSERT_NE(model->vision_->preparation, nullptr);
+  const auto context = static_cast<int64_t>(model->config_->model.context_length);
+  EXPECT_EQ(model->vision_->preparation->CoordinateRange(), (std::array<int64_t, 2>{-context, context - 1}));
+  {
+    const auto legacy_config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
+    const auto legacy_path = std::filesystem::path(MODEL_PATH "engine/dummy-decoder") / legacy_config->model.decoder.filename;
+    const auto legacy = OrtSession::Create(GetOrtEnv(), legacy_path.c_str(), nullptr);
+    EXPECT_THROW(model->vision_->preparation->ValidateDecoderMetadata(*legacy->GetModelMetadata()),
+                 std::runtime_error);
+    auto mismatch = CreateConfig(GetOrtEnv(), path.c_str());
+    mismatch->model.context_length = 512;
+    auto preparation = model->vision_->processor->processor_->CreateVisionPreparation(
+        *mismatch, model->vision_->session_info, *model->vision_->processor->tokenizer_);
+    EXPECT_THROW(preparation->ValidateDecoderMetadata(*model->session_decoder_->GetModelMetadata()), std::runtime_error);
+  }
+  MediaStore store{model, 512 * 1024 * 1024, 8 * 1024 * 1024};
+  const auto output = GetEnv("ORTGENAI_ENGINE_LING_VIDEO_REFERENCE_OUTPUT");
+  const auto write = [&](const std::string& name, const void* data, size_t bytes) {
+    if (output.empty()) return;
+    std::ofstream file(std::filesystem::path(output) / name, std::ios::binary);
+    ASSERT_TRUE(file);
+    file.write(static_cast<const char*>(data), static_cast<std::streamsize>(bytes));
+    ASSERT_TRUE(file);
+  };
+  const std::array<std::string, 3> markers{
+      "<|video_start|><|video_pad|><|video_end|>", "<|vision_start|><|video_pad|><|vision_end|>", "<|video_pad|>"};
+  for (const size_t count : {3u, 4u}) {
+    std::vector<uint8_t> rgb(count * 64 * 96 * 3);
+    std::vector<OrtxFrame> frames(count);
+    for (size_t frame = 0; frame < count; ++frame) {
+      auto* data = rgb.data() + frame * 64 * 96 * 3;
+      for (size_t y = 0; y < 64; ++y)
+        for (size_t x = 0; x < 96; ++x) {
+          data[(y * 96 + x) * 3] = static_cast<uint8_t>(x + 29 * frame);
+          data[(y * 96 + x) * 3 + 1] = static_cast<uint8_t>(y + 61 * frame);
+          data[(y * 96 + x) * 3 + 2] = static_cast<uint8_t>(x + y + 97 * frame);
+        }
+      frames[frame] = {data, 64 * 96 * 3, 96, 64, 96 * 3, 5.0 + frame * frame / 3.0};
+    }
+    const std::array<std::span<const OrtxFrame>, 1> clips{frames};
+    auto videos = LoadVideosFromFrames(clips);
+    for (size_t wrapper = 0; wrapper < markers.size(); ++wrapper) {
+      const auto name = std::to_string(count) + "-" + std::to_string(wrapper);
+      auto prepared = store.Prepare("Before " + markers[wrapper] + " after.\n", nullptr, 0, 4096, videos.get());
+      ASSERT_EQ(prepared.media.size(), 2u);
+      write(name + "-tokens.bin", prepared.tokens.data(), prepared.tokens.size() * sizeof(int32_t));
+      for (size_t group = 0; group < prepared.media.size(); ++group) {
+        const auto& span = prepared.media[group];
+        const auto& item = span.item;
+        const auto& vision = model->config_->model.vision;
+        const auto& pixels = item->inputs.at(vision.inputs.pixel_values);
+        const auto& grid = item->inputs.at(vision.inputs.image_grid_thw);
+        ASSERT_EQ(pixels->GetType(), ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16);
+        EXPECT_EQ(pixels->GetShape(), (std::vector<int64_t>{192, 1536}));
+        ASSERT_EQ(grid->GetElementCount(), 3u);
+        const std::array<int64_t, 3> expected_grid{1, 12, 16};
+        EXPECT_TRUE(std::equal(expected_grid.begin(), expected_grid.end(), grid->GetData<int64_t>()));
+        EXPECT_EQ(item->rows, 48u);
+        ASSERT_NE(span.positions, nullptr);
+        EXPECT_TRUE(span.positions->Equals(*MakeBailingVisionPosition({1, 12, 16}, 2)));
+        EXPECT_EQ(prepared.tokens[span.start], model->config_->model.video_token_id);
+        write(name + "-patches-" + std::to_string(group) + ".bin", pixels->GetRawData(),
+              pixels->GetElementCount() * sizeof(uint16_t));
+        store.Encode(item);
+        ASSERT_NE(item->features, nullptr);
+        auto cpu = item->features->GetByteSpan().CopyDeviceToCpu();
+        write(name + "-features-" + std::to_string(group) + ".bin", cpu.data(), cpu.size());
+      }
+    }
+    if (count == 4) {
+      const std::array<const char*, 2> paths{MODEL_PATH "../images/sheet.png", MODEL_PATH "../images/cars.jpg"};
+      auto images = LoadImages(paths);
+      const std::array<std::span<const OrtxFrame>, 2> mixed_clips{
+          std::span<const OrtxFrame>{frames.data(), 2}, frames};
+      auto mixed_videos = LoadVideosFromFrames(mixed_clips);
+      const std::string prompt =
+          "A<|image_pad|> B<|video_pad|> C<|vision_start|><|image_pad|><|vision_end|>"
+          " D<|video_start|><|video_pad|><|video_end|>";
+      const VisionPreparationInput input{prompt, images.get(), mixed_videos.get(), 4096};
+      const auto plan = model->vision_->preparation->Plan(*model->vision_->processor->tokenizer_, input,
+                                                          512 * 1024 * 1024);
+      const std::array<size_t, 5> order{1, 3, 4, 0, 2};
+      ASSERT_EQ(plan->spans.size(), order.size());
+      auto prepared = store.Prepare(prompt, images.get(), 0, 4096, mixed_videos.get());
+      EXPECT_EQ(prepared.tokens, plan->tokens);
+      ASSERT_EQ(prepared.media.size(), order.size());
+      for (size_t index = 0; index < order.size(); ++index) {
+        EXPECT_EQ(plan->spans[index].unit, order[index]);
+        EXPECT_EQ(prepared.media[index].item->rows, plan->units[order[index]].rows);
+        EXPECT_TRUE(prepared.media[index].positions->Equals(*plan->spans[index].positions));
+      }
+    }
+  }
+}
 
 TEST(MediaInputsTest, RetainsPngAndJpegDimensionsWithoutPreprocessing) {
   for (const auto& [filename, width, height] :
@@ -73,6 +616,206 @@ TEST(MediaInputsTest, RejectsCombinedBufferBytesBeforeInspectingEitherBuffer) {
   EXPECT_THROW(LoadImagesFromBuffers(buffers, sizes), std::runtime_error);
 }
 
+TEST(MediaInputsTest, VideoFramesOwnOrderedClipsAndPresentationTimes) {
+  std::array<uint8_t, 9> padded{1, 2, 3, 0, 0, 0, 4, 5, 6};
+  std::array<uint8_t, 3> other{7, 8, 9};
+  const std::array<OrtxFrame, 2> first{{
+      {padded.data(), padded.size(), 1, 2, 6, 0.25},
+      {other.data(), other.size(), 1, 1, 3, 1.25},
+  }};
+  const std::array<OrtxFrame, 1> second{first[1]};
+  const std::array<std::span<const OrtxFrame>, 2> clips{first, second};
+  auto videos = LoadVideosFromFrames(clips);
+  padded.fill(0);
+  other.fill(0);
+  ASSERT_EQ(videos->clips_.size(), 2u);
+  EXPECT_EQ(videos->packed_bytes_, 12u);
+  size_t count{};
+  ASSERT_EQ(OrtxGetRawFrameCount(videos->clips_[0].get(), &count), kOrtxOK);
+  EXPECT_EQ(count, 2u);
+  OrtxFrame frame{};
+  ASSERT_EQ(OrtxGetRawFrame(videos->clips_[0].get(), 0, &frame), kOrtxOK);
+  EXPECT_EQ(frame.row_stride, 3u);
+  EXPECT_EQ(frame.data_size, 6u);
+  EXPECT_DOUBLE_EQ(frame.timestamp_seconds, 0.25);
+  const std::array<uint8_t, 6> expected{1, 2, 3, 4, 5, 6};
+  EXPECT_TRUE(std::equal(expected.begin(), expected.end(), static_cast<const uint8_t*>(frame.data)));
+  ASSERT_EQ(OrtxGetRawFrame(videos->clips_[1].get(), 0, &frame), kOrtxOK);
+  EXPECT_DOUBLE_EQ(frame.timestamp_seconds, 1.25);
+  EXPECT_EQ(static_cast<const uint8_t*>(frame.data)[0], 7);
+}
+
+TEST(MediaInputsTest, VideoFramesRejectLateInvalidClipsAndCombinedQuotasBeforeCopying) {
+  const uint8_t unused = 0;
+  const std::array<OrtxFrame, 1> first{{{&unused, 6, 2, 1, 6, 0}}};
+  auto second = first;
+  second[0].data_size = 5;
+  const std::array<std::span<const OrtxFrame>, 2> clips{first, second};
+  EXPECT_THROW(LoadVideosFromFrames(clips), std::runtime_error);
+  second[0].data_size = 6;
+  VideoFrameLimits limits;
+  limits.max_bytes = 11;
+  EXPECT_THROW(LoadVideosFromFrames(clips, limits), std::runtime_error);
+}
+
+TEST(MediaInputsTest, VideoFramesEnforceLoadingLimitsWithoutImposingModelMinimums) {
+  const std::array<uint8_t, 3> pixels{1, 2, 3};
+  const std::array<OrtxFrame, 1> frames{{{pixels.data(), pixels.size(), 1, 1, 3, 0}}};
+  const std::array<std::span<const OrtxFrame>, 1> clips{frames};
+  auto videos = LoadVideosFromFrames(clips);
+  ASSERT_EQ(videos->clips_.size(), 1u);
+  VideoFrameLimits limits;
+  limits.max_clips = 0;
+  EXPECT_THROW(LoadVideosFromFrames(clips, limits), std::runtime_error);
+  limits.max_clips = 1;
+  limits.max_frames = 0;
+  EXPECT_THROW(LoadVideosFromFrames(clips, limits), std::runtime_error);
+  limits.max_frames = 1;
+  limits.max_bytes = 2;
+  EXPECT_THROW(LoadVideosFromFrames(clips, limits), std::runtime_error);
+  limits.max_bytes = 3;
+  limits.max_dimension = 0;
+  EXPECT_THROW(LoadVideosFromFrames(clips, limits), std::runtime_error);
+  EXPECT_THROW(LoadVideosFromFrames({}), std::runtime_error);
+}
+
+TEST(MediaInputsTest, VideoPromptPreservesOuterWrapperAndSourceTimestampRounding) {
+  const std::array times{0.0, 0.5, 1.0, 1.5, 2.0};
+  const std::array<VisionVideoPrompt, 1> clips{{{{3, 2, 2}, times}}};
+  const auto expanded = ExpandQwenMediaPrompt(
+      "before<|vision_start|><|video_pad|><|vision_end|>after", {}, clips, 2, 1024);
+  EXPECT_EQ(expanded,
+            "before<|vision_start|>"
+            "<0.2 seconds><|vision_start|><|video_pad|><|vision_end|>"
+            "<1.2 seconds><|vision_start|><|video_pad|><|vision_end|>"
+            "<2.0 seconds><|vision_start|><|video_pad|><|vision_end|>"
+            "<|vision_end|>after");
+  EXPECT_EQ(ExpandQwenMediaPrompt("plain text", {}, {}, 2, 10), "plain text");
+  EXPECT_THROW(ExpandQwenMediaPrompt("plain text", {}, {}, 2, 9), std::invalid_argument);
+  EXPECT_EQ(ExpandQwenMediaPrompt(
+                "before<|vision_start|><|video_pad|><|vision_end|>after", {}, clips, 2, expanded.size()),
+            expanded);
+  EXPECT_THROW(ExpandQwenMediaPrompt(
+                   "before<|vision_start|><|video_pad|><|vision_end|>after", {}, clips, 2, expanded.size() - 1),
+               std::invalid_argument);
+  EXPECT_EQ(QwenMediaPromptBytes(
+                "before<|vision_start|><|video_pad|><|vision_end|>after", {}, clips, 2, expanded.size()),
+            expanded.size());
+  EXPECT_THROW(QwenMediaPromptBytes(
+                   "before<|vision_start|><|video_pad|><|vision_end|>after", {}, clips, 2, expanded.size() - 1),
+               std::invalid_argument);
+}
+
+TEST(MediaInputsTest, BailingVideoWrappersAndOddTimestampPaddingMatchSource) {
+  const std::array times{0.0, 0.5, 1.0};
+  const std::array<VisionVideoPrompt, 1> clips{{{{2, 2, 2}, times}}};
+  const std::string groups =
+      "<0.2 seconds><|vision_start|><|video_pad|><|vision_end|>"
+      "<1.0 seconds><|vision_start|><|video_pad|><|vision_end|>";
+  for (const auto* marker : {"<|video_pad|>", "<|vision_start|><|video_pad|><|vision_end|>"})
+    EXPECT_EQ(ExpandBailingMediaPrompt(std::string{"before"} + marker + "after", {}, clips, 2, 1024),
+              "before" + groups + "after");
+  EXPECT_EQ(ExpandBailingMediaPrompt(
+                "<|video_start|><|video_pad|><|video_end|>", {}, clips, 2, 1024),
+            "<|video_start|>" + groups + "<|video_end|>");
+  EXPECT_EQ(ExpandBailingMediaPrompt("<|video_pad|>", {}, clips, 2, groups.size()), groups);
+  EXPECT_THROW(ExpandBailingMediaPrompt("<|video_pad|>", {}, clips, 2, groups.size() - 1), std::invalid_argument);
+  EXPECT_THROW(ExpandBailingMediaPrompt("<|vision_start|><|video_pad|>", {}, clips, 2, 1024), std::invalid_argument);
+  EXPECT_THROW(ExpandBailingMediaPrompt("", {}, clips, 2, 1024), std::invalid_argument);
+}
+
+TEST(MediaInputsTest, BailingMixedMarkersRetainPublisherReplacementPriority) {
+  const std::array<std::array<int64_t, 3>, 2> images{{{1, 2, 2}, {1, 2, 4}}};
+  const std::array first_times{2.0, 2.0}, second_times{4.0, 4.0};
+  const std::array<VisionVideoPrompt, 2> clips{{{{1, 2, 2}, first_times}, {{1, 2, 4}, second_times}}};
+  std::vector<size_t> units;
+  const auto expanded = ExpandBailingMediaPrompt(
+      "<|image_pad|> <|video_pad|> <|vision_start|><|image_pad|><|vision_end|> "
+      "<|video_start|><|video_pad|><|video_end|>",
+      images, clips, 2, 1024, &units);
+  EXPECT_EQ(expanded,
+            "<|vision_start|><|image_pad|><|image_pad|><|vision_end|>\n "
+            "<4.0 seconds><|vision_start|><|video_pad|><|video_pad|><|vision_end|> "
+            "<|vision_start|><|image_pad|><|vision_end|>\n "
+            "<|video_start|><2.0 seconds><|vision_start|><|video_pad|><|vision_end|><|video_end|>");
+  EXPECT_EQ(units, (std::vector<size_t>{1, 3, 0, 2}));
+}
+
+TEST(MediaInputsTest, BailingSizingUsesOriginalClipCountAndImageOnlyDimensionClamp) {
+  EXPECT_EQ(BailingVideoGrid(640, 480, 3, 16, 2, 43008, 100000), (std::array<int64_t, 3>{2, 12, 18}));
+  EXPECT_EQ(BailingVideoGrid(640, 480, 4, 16, 2, 43008, 100000), (std::array<int64_t, 3>{2, 12, 16}));
+  EXPECT_EQ(BailingImageGrid(32, 4096, 16, 2, 4096, 4096), (std::array<int64_t, 3>{1, 44, 2}));
+  EXPECT_THROW(BailingVideoGrid(32, 4096, 2, 16, 2, 4096, 4096), std::invalid_argument);
+  EXPECT_THROW(BailingVideoGrid(96, 64, 1, 16, 2, 43008, 4718592), std::invalid_argument);
+  EXPECT_THROW(BailingImageGrid(0, 64, 16, 2, 4096, 4194304), std::invalid_argument);
+}
+
+TEST(MediaInputsTest, VisionPixelConversionUsesNearestEvenBfloat16) {
+  auto& allocator = Ort::Allocator::GetWithDefaultOptions();
+  auto source = OrtValue::CreateTensor<float>(allocator, std::array<int64_t, 1>{4});
+  const std::array values{1.00390625f, 1.01171875f, -1.00390625f, -1.01171875f};
+  std::copy(values.begin(), values.end(), source->GetTensorMutableData<float>());
+  const auto converted = ConvertVisionPixels(nullptr, *source, ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16, allocator);
+  const std::array<uint16_t, 4> expected{0x3f80, 0x3f82, 0xbf80, 0xbf82};
+  EXPECT_EQ(std::memcmp(converted->GetTensorData<Ort::BFloat16_t>(), expected.data(), sizeof(expected)), 0);
+}
+
+TEST(MediaInputsTest, PromptEstimateCountsLargeImageExpansionWithoutMaterialization) {
+  constexpr std::string_view marker = "<|vision_start|><|image_pad|><|vision_end|>";
+  const std::array<std::array<int64_t, 3>, 1> images{{{1, 8192, 8192}}};
+  constexpr size_t expected_bytes = size_t{4096} * 4096 * 13 + 30;
+  EXPECT_EQ(QwenMediaPromptBytes(marker, images, {}, 2, expected_bytes), expected_bytes);
+  EXPECT_THROW(QwenMediaPromptBytes(marker, images, {}, 2, expected_bytes - 1), std::invalid_argument);
+}
+
+TEST(MediaInputsTest, VideoPromptKeepsIndependentImageAndClipOrdering) {
+  const std::array<std::array<int64_t, 3>, 1> images{{{1, 2, 4}}};
+  const std::array first_times{4.0, 4.0};
+  const std::array second_times{8.0, 9.0};
+  const std::array<VisionVideoPrompt, 2> clips{{{{1, 2, 2}, first_times}, {{1, 2, 4}, second_times}}};
+  EXPECT_EQ(ExpandQwenMediaPrompt(
+                "<|vision_start|><|video_pad|><|vision_end|> \n"
+                "<|vision_start|><|image_pad|><|vision_end|> "
+                "<|vision_start|><|video_pad|><|vision_end|>",
+                images, clips, 2, 1024),
+            "<|vision_start|><4.0 seconds><|vision_start|><|video_pad|><|vision_end|><|vision_end|> \n"
+            "<|vision_start|><|image_pad|><|image_pad|><|vision_end|> "
+            "<|vision_start|><8.5 seconds><|vision_start|><|video_pad|><|video_pad|><|vision_end|><|vision_end|>");
+}
+
+TEST(MediaInputsTest, VideoPromptRejectsMalformedMarkersAndTemporalMetadata) {
+  std::array times{0.0, 1.0};
+  std::array<VisionVideoPrompt, 1> clips{{{{1, 2, 2}, times}}};
+  constexpr std::string_view marker = "<|vision_start|><|video_pad|><|vision_end|>";
+  for (std::string_view invalid :
+       {"<|video_pad|>", "<|image_pad|>", "<|vision_end|>", "<|vision_start|>", "<|vision_start|><|video_pad|>"})
+    EXPECT_THROW(ExpandQwenMediaPrompt(invalid, {}, clips, 2, 1024), std::invalid_argument);
+  EXPECT_THROW(ExpandQwenMediaPrompt("", {}, clips, 2, 1024), std::invalid_argument);
+  EXPECT_THROW(ExpandQwenMediaPrompt(marker, {}, {}, 2, 1024), std::invalid_argument);
+  EXPECT_THROW(ExpandQwenMediaPrompt(marker, {}, clips, 0, 1024), std::invalid_argument);
+  clips[0].grid[0] = 2;
+  EXPECT_THROW(ExpandQwenMediaPrompt(marker, {}, clips, 2, 1024), std::invalid_argument);
+  clips[0].grid[0] = 1;
+  clips[0].grid[1] = 3;
+  EXPECT_THROW(ExpandQwenMediaPrompt(marker, {}, clips, 2, 1024), std::invalid_argument);
+  clips[0].grid[1] = 2;
+  times[0] = 2.0;
+  EXPECT_THROW(ExpandQwenMediaPrompt(marker, {}, clips, 2, 1024), std::invalid_argument);
+  times[0] = std::numeric_limits<double>::infinity();
+  EXPECT_THROW(ExpandQwenMediaPrompt(marker, {}, clips, 2, 1024), std::invalid_argument);
+  times.fill(std::numeric_limits<double>::max());
+  EXPECT_THROW(ExpandQwenMediaPrompt(marker, {}, clips, 2, 1024), std::invalid_argument);
+}
+
+TEST(MediaInputsTest, VideoProcessorAssetBindingIsOptionalAndParsedAtomically) {
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
+  EXPECT_FALSE(config->model.vision.video_config_filename.has_value());
+  OverlayConfig(*config, R"({"model":{"vision":{"video_config_filename":"video_processor_config.json"}}})");
+  EXPECT_EQ(config->model.vision.video_config_filename, "video_processor_config.json");
+  EXPECT_THROW(OverlayConfig(*config, R"({"model":{"vision":{"video_config_filename":42}}})"), std::exception);
+  EXPECT_EQ(config->model.vision.video_config_filename, "video_processor_config.json");
+}
+
 TEST(MediaInputsTest, TextOnlyModelTypesRejectVisionComponents) {
   for (const char* type : {"qwen3_5_text", "qwen3_5_moe_text", "qwen4_exp_text", "qwen38_flash_graph", "gpt2"}) {
     auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
@@ -88,7 +831,7 @@ TEST(MediaInputsTest, TextOnlyModelTypesRejectVisionComponents) {
 }
 
 TEST(MediaInputsTest, VisionModelTypeWithoutEncoderDoesNotEnableVision) {
-  for (const char* type : {"qwen3_5", "qwen3_5_moe", "qwen4_exp"}) {
+  for (const char* type : {"qwen3_5", "qwen3_5_moe", "qwen4_exp", "bailing_moe_v3_vl", "mistral3"}) {
     auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
     config->model.type = type;
     config->engine.dynamic_batching.emplace();
@@ -140,38 +883,68 @@ TEST(MediaInputsTest, LeavesUnknownHeaderDimensionsUnavailable) {
 
 TEST(MediaInputsTest, PositionsUseGeometryRatherThanExpandedRowCount) {
   auto first = std::make_shared<MediaItem>();
-  first->grid = {1, 4, 6};
   first->rows = 6;
   auto second = std::make_shared<MediaItem>();
-  second->grid = {1, 4, 4};
   second->rows = 4;
-  const std::array<MediaSpan, 2> media{{{3, first}, {12, second}}};
-  EXPECT_EQ(MediaPosition(media, 2, 2), (std::array<int64_t, 3>{2, 2, 2}));
-  EXPECT_EQ(MediaPosition(media, 3, 2), (std::array<int64_t, 3>{3, 3, 3}));
-  EXPECT_EQ(MediaPosition(media, 7, 2), (std::array<int64_t, 3>{3, 4, 4}));
-  EXPECT_EQ(MediaPosition(media, 9, 2), (std::array<int64_t, 3>{6, 6, 6}));
-  EXPECT_EQ(MediaPosition(media, 13, 2), (std::array<int64_t, 3>{9, 9, 10}));
-  EXPECT_EQ(MediaPosition(media, 16, 2), (std::array<int64_t, 3>{11, 11, 11}));
-  EXPECT_EQ(MediaPosition(media, 7, 2), (std::array<int64_t, 3>{3, 4, 4}));
+  const std::array<MediaSpan, 2> media{{
+      {3, first, MakeQwenVisionPosition({1, 4, 6}, 2)},
+      {12, second, MakeQwenVisionPosition({1, 4, 4}, 2)},
+  }};
+  EXPECT_EQ(MediaPosition(media, 2), (std::array<int64_t, 3>{2, 2, 2}));
+  EXPECT_EQ(MediaPosition(media, 3), (std::array<int64_t, 3>{3, 3, 3}));
+  EXPECT_EQ(MediaPosition(media, 7), (std::array<int64_t, 3>{3, 4, 4}));
+  EXPECT_EQ(MediaPosition(media, 9), (std::array<int64_t, 3>{6, 6, 6}));
+  EXPECT_EQ(MediaPosition(media, 13), (std::array<int64_t, 3>{9, 9, 10}));
+  EXPECT_EQ(MediaPosition(media, 16), (std::array<int64_t, 3>{11, 11, 11}));
+  EXPECT_EQ(MediaPosition(media, 7), (std::array<int64_t, 3>{3, 4, 4}));
 }
 
 TEST(MediaInputsTest, ResizePreflightMatchesNativeTieAndMinimumPixelRules) {
-  EXPECT_EQ(MediaImageGrid(500, 400, 16, 2, 65536, 262144), (std::array<int64_t, 3>{1, 24, 32}));
-  EXPECT_EQ(MediaImageGrid(30, 17, 16, 2, 65536, 262144), (std::array<int64_t, 3>{1, 14, 22}));
-  EXPECT_EQ(MediaImageGrid(381, 137, 16, 2, 65536, 16777216), (std::array<int64_t, 3>{1, 10, 28}));
-  EXPECT_THROW(MediaImageGrid(0, 100, 16, 2, 65536, 16777216), std::invalid_argument);
-  EXPECT_THROW(MediaImageGrid(1, 201, 16, 2, 65536, 16777216), std::invalid_argument);
-  EXPECT_THROW(MediaImageGrid(UINT32_MAX, UINT32_MAX, 16, 2, 65536, 16777216), std::invalid_argument);
+  EXPECT_EQ(QwenImageGrid(500, 400, 16, 2, 65536, 262144), (std::array<int64_t, 3>{1, 24, 32}));
+  EXPECT_EQ(QwenImageGrid(30, 17, 16, 2, 65536, 262144), (std::array<int64_t, 3>{1, 14, 22}));
+  EXPECT_EQ(QwenImageGrid(381, 137, 16, 2, 65536, 16777216), (std::array<int64_t, 3>{1, 10, 28}));
+  EXPECT_THROW(QwenImageGrid(0, 100, 16, 2, 65536, 16777216), std::invalid_argument);
+  EXPECT_THROW(QwenImageGrid(1, 201, 16, 2, 65536, 16777216), std::invalid_argument);
+  EXPECT_THROW(QwenImageGrid(UINT32_MAX, UINT32_MAX, 16, 2, 65536, 16777216), std::invalid_argument);
+}
+
+TEST(MediaInputsTest, VideoResizeMatchesSourceSpatialAndTemporalRounding) {
+  EXPECT_EQ(QwenVideoGrid(29, 17, 4, 16, 2, 4096, 25165824, 768), (std::array<int64_t, 3>{2, 2, 4}));
+  EXPECT_EQ(QwenVideoGrid(112, 80, 5, 16, 2, 4096, 25165824, 768), (std::array<int64_t, 3>{3, 4, 8}));
+  EXPECT_EQ(QwenVideoGrid(1500, 1000, 4, 16, 2, 4096, 25165824, 768), (std::array<int64_t, 3>{2, 44, 66}));
+  EXPECT_EQ(QwenVideoGrid(896, 896, 5, 16, 2, 4096, 25165824, 768), (std::array<int64_t, 3>{3, 56, 56}));
+  EXPECT_EQ(QwenVideoGrid(896, 896, 3, 16, 2, 4096, 25165824, 768), (std::array<int64_t, 3>{2, 54, 54}));
+}
+
+TEST(MediaInputsTest, VideoResizeUsesWholeClipRatherThanEncoderGroupBudget) {
+  EXPECT_EQ(QwenVideoGrid(1500, 1000, 64, 16, 2, 4096, 25165824, 768), (std::array<int64_t, 3>{32, 32, 48}));
+  EXPECT_EQ(QwenVideoGrid(1500, 1000, 2, 16, 2, 4096, 25165824, 768), (std::array<int64_t, 3>{1, 44, 66}));
+  EXPECT_EQ(QwenVideoGrid(32, 32, 2, 16, 2, 65536, 25165824, 768), (std::array<int64_t, 3>{1, 12, 12}));
+}
+
+TEST(MediaInputsTest, VideoResizeRejectsUnsupportedAndOverflowingGeometry) {
+  EXPECT_THROW(QwenVideoGrid(0, 100, 4, 16, 2, 4096, 25165824, 768), std::invalid_argument);
+  EXPECT_THROW(QwenVideoGrid(UINT32_MAX, 100, 4, 16, 2, 4096, 25165824, 768), std::invalid_argument);
+  EXPECT_THROW(QwenVideoGrid(1, 201, 4, 16, 2, 4096, 25165824, 768), std::invalid_argument);
+  EXPECT_THROW(QwenVideoGrid(100, 100, 1, 16, 2, 4096, 25165824, 768), std::invalid_argument);
+  EXPECT_THROW(QwenVideoGrid(100, 100, 4, 0, 2, 4096, 25165824, 768), std::invalid_argument);
+  EXPECT_THROW(QwenVideoGrid(100, 100, 4, 16, 0, 4096, 25165824, 768), std::invalid_argument);
+  EXPECT_THROW(QwenVideoGrid(100, 100, 4, 16, 2, 0, 25165824, 768), std::invalid_argument);
+  EXPECT_THROW(QwenVideoGrid(100, 100, 4, 16, 2, 4096, 4095, 768), std::invalid_argument);
+  EXPECT_THROW(QwenVideoGrid(100, 100, 4, 16, 2, 4096, 25165824, 0), std::invalid_argument);
+  EXPECT_THROW(QwenVideoGrid(100, 100, std::numeric_limits<size_t>::max(), 16, 2, 4096, 25165824, 768), std::overflow_error);
+  EXPECT_THROW(QwenVideoGrid(100, 100, 4, std::numeric_limits<size_t>::max(), 2, 4096, 25165824, 768), std::overflow_error);
 }
 
 TEST(MediaInputsTest, PositionRangesPreserveImageBoundariesAndLaterTextOffsets) {
   auto first = std::make_shared<MediaItem>();
-  first->grid = {1, 4, 6};
   first->rows = 6;
   auto second = std::make_shared<MediaItem>();
-  second->grid = {1, 4, 4};
   second->rows = 4;
-  const std::array<MediaSpan, 2> media{{{3, first}, {12, second}}};
+  const std::array<MediaSpan, 2> media{{
+      {3, first, MakeQwenVisionPosition({1, 4, 6}, 2)},
+      {12, second, MakeQwenVisionPosition({1, 4, 4}, 2)},
+  }};
   const std::array<std::array<int64_t, 20>, 3> expected{{
       {0, 1, 2, 3, 3, 3, 3, 3, 3, 6, 7, 8, 9, 9, 9, 9, 11, 12, 13, 14},
       {0, 1, 2, 3, 3, 3, 4, 4, 4, 6, 7, 8, 9, 9, 10, 10, 11, 12, 13, 14},
@@ -181,10 +954,77 @@ TEST(MediaInputsTest, PositionRangesPreserveImageBoundariesAndLaterTextOffsets) 
                                      std::pair{14u, 4u}, std::pair{20u, 0u}}) {
     std::array<std::vector<int64_t>, 3> actual;
     for (auto& plane : actual) plane.resize(count);
-    MediaPositions(media, start, 2, {actual[0], actual[1], actual[2]});
+    MediaPositions(media, start, {actual[0], actual[1], actual[2]});
     for (size_t plane = 0; plane < 3; ++plane)
       EXPECT_TRUE(std::equal(actual[plane].begin(), actual[plane].end(), expected[plane].begin() + start));
   }
+}
+
+TEST(MediaInputsTest, NoncontiguousFeatureSlicesHaveIndependentPositionRanges) {
+  auto item = std::make_shared<MediaItem>();
+  item->rows = 6;
+  const auto positions = MakeQwenVisionPosition({1, 2, 4}, 2);
+  const std::array<MediaSpan, 2> media{{
+      {1, item, positions, 2, 1},
+      {5, item, positions, 2, 4},
+  }};
+  EXPECT_EQ(MediaPosition(media, 2), (std::array<int64_t, 3>{1, 1, 2}));
+  EXPECT_EQ(MediaPosition(media, 3), (std::array<int64_t, 3>{3, 3, 3}));
+  EXPECT_EQ(MediaPosition(media, 6), (std::array<int64_t, 3>{5, 5, 6}));
+  EXPECT_EQ(MediaPosition(media, 7), (std::array<int64_t, 3>{7, 7, 7}));
+  EXPECT_THROW((MediaSpan{0, item, positions, 3, 0}), std::invalid_argument);
+  EXPECT_THROW((MediaSpan{0, item, positions, 2, 5}), std::invalid_argument);
+  EXPECT_THROW((MediaSpan{std::numeric_limits<size_t>::max(), item}), std::invalid_argument);
+}
+
+TEST(MediaInputsTest, PositionRangesRejectOverflowAndIncompatiblePlanes) {
+  std::array<int64_t, 2> first{}, second{};
+  std::array<int64_t, 1> short_plane{};
+  EXPECT_THROW(MediaPositions({}, 0, {first, second, short_plane}), std::invalid_argument);
+  EXPECT_THROW(MediaPositions({}, std::numeric_limits<size_t>::max(), {first, second, first}),
+               std::overflow_error);
+  const auto position = MakeQwenVisionPosition({1, 4, 6}, 2);
+  EXPECT_THROW(position->Fill(5, 0, {first, second, first}), std::invalid_argument);
+  EXPECT_THROW(position->Fill(0, std::numeric_limits<int64_t>::max(), {first, second, first}),
+               std::overflow_error);
+  auto item = std::make_shared<MediaItem>();
+  item->rows = 2;
+  const std::array<MediaSpan, 2> unordered{{{3, item}, {1, item}}};
+  const std::array<MediaSpan, 2> overlapping{{{1, item}, {2, item}}};
+  EXPECT_THROW(MediaPositions(unordered, 0, {first, second, first}), std::invalid_argument);
+  EXPECT_THROW(MediaPositions(overlapping, 0, {first, second, first}), std::invalid_argument);
+}
+
+TEST(MediaInputsTest, BailingPositionsUseSignedCentersAndTemporalTextAdvance) {
+  for (const size_t temporal : {1u, 2u}) {
+    auto item = std::make_shared<MediaItem>();
+    item->rows = temporal * 24;
+    const auto positions = MakeBailingVisionPosition({static_cast<int64_t>(temporal), 8, 12}, 2);
+    const std::array<MediaSpan, 1> media{{{1, item, positions}}};
+    EXPECT_EQ(MediaPosition(media, 1), (std::array<int64_t, 3>{1, 0, -1}));
+    EXPECT_EQ(MediaPosition(media, 6), (std::array<int64_t, 3>{1, 0, 4}));
+    EXPECT_EQ(MediaPosition(media, 7), (std::array<int64_t, 3>{1, 1, -1}));
+    if (temporal == 2)
+      EXPECT_EQ(MediaPosition(media, 25), (std::array<int64_t, 3>{3, 2, 1}));
+    const auto next = static_cast<int64_t>((temporal - 1) * 2 + 2);
+    EXPECT_EQ(MediaPosition(media, 1 + item->rows), (std::array<int64_t, 3>{next, next, next}));
+    EXPECT_TRUE(positions->Equals(*MakeBailingVisionPosition({static_cast<int64_t>(temporal), 8, 12}, 2)));
+    EXPECT_FALSE(positions->Equals(*MakeQwenVisionPosition({1, 8, 12}, 2)));
+  }
+}
+
+TEST(MediaInputsTest, BailingCoordinateLimitsDoNotOverflowIntermediateSums) {
+  const auto positions = MakeBailingVisionPosition({1, 8, 12}, 2);
+  std::array<int64_t, 1> time{}, height{}, width{};
+  const auto limit = std::numeric_limits<int64_t>::max();
+  positions->Fill(23, limit - 3, {time, height, width});
+  EXPECT_EQ(time[0], limit - 3);
+  EXPECT_EQ(height[0], limit - 1);
+  EXPECT_EQ(width[0], limit);
+  EXPECT_THROW(positions->Fill(23, limit - 2, {time, height, width}), std::overflow_error);
+  EXPECT_THROW(MakeBailingVisionPosition({0, 8, 12}, 2), std::invalid_argument);
+  EXPECT_THROW(MakeBailingVisionPosition({1, 7, 12}, 2), std::invalid_argument);
+  EXPECT_THROW(MakeBailingVisionPosition({limit, 8, 12}, 2), std::overflow_error);
 }
 
 TEST(MediaInputsTest, PrefixIdentityDoesNotReplaceVocabularyInputs) {
@@ -195,13 +1035,17 @@ TEST(MediaInputsTest, PrefixIdentityDoesNotReplaceVocabularyInputs) {
   auto second = CreateRequestWithPrompt(engine, tokens);
   auto image_a = std::make_shared<MediaItem>();
   image_a->rows = 2;
-  image_a->prefix_base = 1;
   auto image_b = std::make_shared<MediaItem>();
   image_b->rows = 2;
-  image_b->prefix_base = 3;
   first->ReserveMedia(1);
   second->ReserveMedia(1);
-  const std::array<MediaSpan, 1> first_media{{{2, image_a}}}, second_media{{{2, image_b}}};
+  std::array<MediaSpan, 1> first_media{{{2, image_a}}}, second_media{{{2, image_b}}};
+  auto first_prefix = std::make_shared<MediaPrefix>();
+  first_prefix->first_id = 1;
+  auto second_prefix = std::make_shared<MediaPrefix>();
+  second_prefix->first_id = 3;
+  first_media[0].prefix = first_prefix;
+  second_media[0].prefix = second_prefix;
   first->AppendMedia(first_media);
   second->AppendMedia(second_media);
   EXPECT_TRUE(std::equal(first->TokensCpu().begin(), first->TokensCpu().end(), tokens.begin()));
@@ -213,6 +1057,34 @@ TEST(MediaInputsTest, PrefixIdentityDoesNotReplaceVocabularyInputs) {
   const std::array<int32_t, 1> private_id{-1};
   EXPECT_THROW(invalid->BeginTurn(private_id), std::invalid_argument);
   EXPECT_TRUE(invalid->IsAwaitingFirstTurn());
+}
+
+TEST(MediaInputsTest, DecoderIdentityIncludesSlicesTokensAndCoordinateSemantics) {
+  auto item = std::make_shared<MediaItem>();
+  item->rows = 8;
+  const std::array<int32_t, 6> tokens{2, 2, 2, 2, 2, 2};
+  MediaSpan span{3, item, MakeQwenVisionPosition({1, 4, 6}, 2), 6, 1};
+  MediaPrefix identity;
+  identity.item = item;
+  identity.positions = span.positions;
+  identity.tokens.assign(tokens.begin(), tokens.end());
+  identity.feature_offset = span.feature_offset;
+  identity.position_base = 3;
+  EXPECT_TRUE(identity.Matches(span, tokens, 3));
+  span.positions = MakeQwenVisionPosition({1, 4, 6}, 2);
+  EXPECT_TRUE(identity.Matches(span, tokens, 3));
+  span.positions = MakeQwenVisionPosition({1, 6, 4}, 2);
+  EXPECT_FALSE(identity.Matches(span, tokens, 3));
+  span.positions = MakeBailingVisionPosition({1, 4, 6}, 2);
+  EXPECT_FALSE(identity.Matches(span, tokens, 3));
+  span.positions = identity.positions;
+  EXPECT_FALSE(identity.Matches(span, tokens, 4));
+  span.feature_offset = 2;
+  EXPECT_FALSE(identity.Matches(span, tokens, 3));
+  span.feature_offset = 1;
+  auto different_tokens = tokens;
+  different_tokens[2] = 3;
+  EXPECT_FALSE(identity.Matches(span, different_tokens, 3));
 }
 
 TEST(MediaInputsTest, EncoderFailureBudgetIsRequestLocalAndClearedAtTurnBoundaries) {

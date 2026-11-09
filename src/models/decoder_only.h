@@ -12,6 +12,7 @@
 #include "models/io/recurrent_state.h"
 #include "models/io/ple_state.h"
 #include "models/io/indexer_cache.h"
+#include "models/preprocessing/vision_preparation.h"
 
 namespace Generators {
 struct EngramState;
@@ -23,6 +24,7 @@ struct PackedVision {
   DeviceInterface* device{};
   SessionInfo session_info;
   std::shared_ptr<MultiModalProcessor> processor;
+  std::unique_ptr<VisionPreparation> preparation;
 };
 
 struct DecoderOnly_Model : Model {

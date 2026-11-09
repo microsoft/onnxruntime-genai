@@ -223,7 +223,7 @@ struct Engine : std::enable_shared_from_this<Engine>,
                      std::span<const int32_t> tokens,
                      const TurnOptions& options);
   uint64_t BeginTurn(const std::shared_ptr<Request>& request,
-                     const std::string& prompt, const TurnOptions& options, const Images* images);
+                     const std::string& prompt, const TurnOptions& options, const Images* images, const Videos* videos = nullptr);
   void RewindRequestToStartOfTurn(
       const std::shared_ptr<Request>& request, uint64_t turn_id);
   void CloseRequest(const std::shared_ptr<Request>& request);

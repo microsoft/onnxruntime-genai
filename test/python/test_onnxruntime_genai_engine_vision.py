@@ -9,12 +9,14 @@ import os
 import struct
 from pathlib import Path
 
+import numpy as np
 import onnxruntime_genai as og
 import pytest
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 IMAGE_DIR = Path(__file__).resolve().parents[1] / "images"
 IMAGE_MARKER = "<|vision_start|><|image_pad|><|vision_end|>\n"
+VIDEO_MARKER = "<|vision_start|><|video_pad|><|vision_end|>"
 
 
 def vision_modes():
@@ -188,6 +190,243 @@ def drain(engine, capacity=1):
     return tokens, finishes, runs
 
 
+@pytest.fixture
+def video_model(vision_model, vision_package):
+    if not vision_package[1]["model"]["vision"].get("video_config_filename"):
+        if os.environ.get("ORTGENAI_REQUIRE_ENGINE_VIDEO") == "1":
+            pytest.fail("Video qualification requires the source-bound video processor asset")
+        pytest.skip("This image package has no video processor asset")
+    return vision_model
+
+
+@pytest.mark.parametrize("first_color", ["red", "blue"])
+def test_video_frame_order_and_snapshot_ownership(video_model, first_color):
+    model, _ = video_model
+    engine, tokenizer = og.Engine(model), og.Tokenizer(model)
+    request = new_request(engine)
+    frames = np.empty((4, 64, 96, 3), dtype=np.uint8)
+    first, last = ((255, 0, 0), (0, 0, 255)) if first_color == "red" else ((0, 0, 255), (255, 0, 0))
+    frames[:2] = first
+    frames[2:] = last
+    videos = og.Videos.from_frames(frames, timestamps=[0.0, 1.0, 2.0, 3.0])
+    frames.fill(0)
+    value = prompt(
+        tokenizer, 0, VIDEO_MARKER + "Which color appears FIRST in the video: red or blue? Answer just the color."
+    )
+    options = og.TurnOptions(request)
+    options.set_do_sample(False)
+    options.set_max_generated_tokens(16)
+    turn = request.begin_turn(value, options, videos=videos)
+    del videos, frames
+    tokens, finished, runs = drain(engine)
+    assert turn == 1
+    assert len(finished) == 1
+    assert runs >= 3, "Two distinct temporal units must be prepared before decoder execution"
+    expanded = value.replace(
+        VIDEO_MARKER,
+        "<|vision_start|>"
+        + "".join(
+            f"<{time} seconds><|vision_start|>" + "<|video_pad|>" * 6 + "<|vision_end|>" for time in ("0.5", "2.5")
+        )
+        + "<|vision_end|>",
+    )
+    assert finished[0][1] == len(tokenizer.encode(expanded))
+    assert tokenizer.decode(tokens).strip().lower().startswith(first_color)
+    request.close()
+
+
+def test_video_model_rejection_preserves_admission_identity(video_model):
+    model, _ = video_model
+    engine, tokenizer = og.Engine(model), og.Tokenizer(model)
+    request = new_request(engine)
+    value = prompt(tokenizer, 0, VIDEO_MARKER + "Describe the video.")
+    options = og.TurnOptions(request)
+    options.set_max_generated_tokens(1)
+    frame = np.zeros((64, 96, 3), dtype=np.uint8)
+    single = og.Videos.from_frames([frame], timestamps=[0.0])
+    with pytest.raises(RuntimeError, match="frame count"):
+        request.begin_turn(value, options, videos=single)
+    mismatched = og.Videos.from_frames([frame, frame[:32]], timestamps=[0.0, 1.0])
+    with pytest.raises(RuntimeError, match="uniform source geometry"):
+        request.begin_turn(value, options, videos=mismatched)
+    valid = og.Videos.from_frames([frame, frame], timestamps=[0.0, 1.0])
+    turn = request.begin_turn(value, options, videos=valid)
+    _, finished, _ = drain(engine)
+    assert turn == 1
+    assert finished[0][0] == 1
+    request.close()
+
+
+def test_video_input_lifetime_and_real_draft_activity(video_model):
+    model, drafts = video_model
+    engine, tokenizer = og.Engine(model), og.Tokenizer(model)
+    request = new_request(engine)
+    frames = np.zeros((4, 64, 96, 3), dtype=np.uint8)
+    frames[:2, :, :, 0] = 255
+    frames[2:, :, :, 2] = 255
+    videos = og.Videos.from_frames(frames, timestamps=[0.0, 1.0, 2.0, 3.0])
+    value = prompt(tokenizer, 0, VIDEO_MARKER + "Describe the color changes in this video in one sentence.")
+    options = og.TurnOptions(request)
+    options.set_do_sample(False)
+    options.set_max_generated_tokens(32)
+    request.begin_turn(value, options, videos=videos)
+    del videos, frames
+    tokens, finishes, runs = drain(engine, capacity=64)
+    answer = tokenizer.decode(tokens).lower()
+    assert "red" in answer and "blue" in answer, answer
+    assert len(finishes) == 1
+    stats = engine.get_speculative_stats()
+    assert runs - stats["target_forward_passes"] == 2, "Expected one encoder-only Run per temporal unit"
+    if drafts:
+        assert stats["draft_forward_passes"] > 0
+        assert stats["draft_tokens_proposed"] > 0
+        assert stats["draft_tokens_evaluated"] > 0
+        assert stats["dflash2_failures"] == 0
+    request.close()
+
+
+@pytest.mark.parametrize("spare_rows", [0, 1, 2])
+def test_video_expanded_capacity_and_recovery(video_model, spare_rows):
+    model, _ = video_model
+    engine, tokenizer = og.Engine(model), og.Tokenizer(model)
+    value = prompt(tokenizer, 0, VIDEO_MARKER + "Describe the video.")
+    expanded = value.replace(
+        VIDEO_MARKER,
+        "<|vision_start|>"
+        + "".join(
+            f"<{time} seconds><|vision_start|>" + "<|video_pad|>" * 6 + "<|vision_end|>" for time in ("0.5", "2.5")
+        )
+        + "<|vision_end|>",
+    )
+    rows = len(tokenizer.encode(expanded))
+    request_options = og.RequestOptions()
+    request_options.set_max_session_tokens(rows + spare_rows)
+    request = engine.create_request(options=request_options)
+    options = og.TurnOptions(request)
+    options.set_max_generated_tokens(1)
+    videos = og.Videos.from_frames(np.zeros((4, 64, 96, 3), dtype=np.uint8), timestamps=[0.0, 1.0, 2.0, 3.0])
+    if spare_rows == 0:
+        with pytest.raises(RuntimeError, match="remaining session capacity"):
+            request.begin_turn(value, options, videos=videos)
+        assert not engine.has_pending_requests()
+        turn = request.begin_turn("ABC", options)
+        _, finished, _ = drain(engine)
+        assert turn == finished[0][0] == 1
+    else:
+        turn = request.begin_turn(value, options, videos=videos)
+        _, finished, _ = drain(engine)
+        assert turn == finished[0][0] == 1
+        assert finished[0][1:3] == (rows, 1)
+    request.close()
+
+
+def test_video_mixed_images_and_ordered_clips(video_model):
+    model, _ = video_model
+    engine, tokenizer = og.Engine(model), og.Tokenizer(model)
+    request = new_request(engine)
+    frames = np.empty((4, 64, 96, 3), dtype=np.uint8)
+    frames[:2] = (255, 0, 0)
+    frames[2:] = (0, 0, 255)
+    videos = og.Videos.from_clips(
+        [frames, frames[::-1].copy()], timestamps=[[0.0, 1.0, 2.0, 3.0], [10.0, 11.0, 12.0, 13.0]]
+    )
+    images = og.Images.open(str(IMAGE_DIR / "cars.jpg"))
+    value = prompt(
+        tokenizer,
+        0,
+        "Still image:\n"
+        + IMAGE_MARKER
+        + "Video 1:\n"
+        + VIDEO_MARKER
+        + "\nVideo 2:\n"
+        + VIDEO_MARKER
+        + "\n"
+        + "Ignore the still image. Which color appears FIRST in the SECOND video: red or blue? Answer just the color.",
+    )
+    options = og.TurnOptions(request)
+    options.set_do_sample(False)
+    options.set_max_generated_tokens(16)
+    turn = request.begin_turn(value, options, images=images, videos=videos)
+    del images, videos, frames
+    tokens, finished, _ = drain(engine)
+    assert turn == 1
+    assert len(finished) == 1
+    assert tokenizer.decode(tokens).strip().lower().startswith("blue")
+    request.close()
+
+
+@pytest.mark.parametrize("first_result", ["FAILED", "PASSED"])
+def test_video_terminal_result_order_under_feature_pressure(video_model, first_result):
+    model, _ = video_model
+    engine, tokenizer = og.Engine(model), og.Tokenizer(model)
+    request = new_request(engine)
+    frames = []
+    font = ImageFont.load_default(size=20)
+    for result in (first_result, "PASSED" if first_result == "FAILED" else "FAILED"):
+        with Image.new("RGB", (384, 288), "#181818") as image:
+            draw = ImageDraw.Draw(image)
+            draw.text((16, 16), "$ python -m pytest -q", fill="white", font=font)
+            draw.text((16, 80), "test_cache.py::test_order", fill="white", font=font)
+            draw.text((16, 144), result, fill="red" if result == "FAILED" else "lime", font=font)
+            frames.extend([np.asarray(image).copy()] * 2)
+    videos = og.Videos.from_frames(frames, timestamps=[0.0, 1.0, 2.0, 3.0])
+    value = prompt(
+        tokenizer,
+        0,
+        VIDEO_MARKER + "Which test result occurred FIRST in the video: FAILED or PASSED? Answer just FAILED or PASSED.",
+    )
+    options = og.TurnOptions(request)
+    options.set_do_sample(False)
+    options.set_max_generated_tokens(16)
+    request.begin_turn(value, options, videos=videos)
+    del videos, frames
+    tokens, finished, runs = drain(engine)
+    assert len(finished) == 1
+    assert runs >= 3
+    assert tokenizer.decode(tokens).strip().upper().startswith(first_result)
+    request.close()
+
+
+@pytest.mark.parametrize("change", ["timestamps", "frame_order"])
+def test_video_prefix_identity_includes_order_and_timestamp_text(video_model, change):
+    model, _ = video_model
+    engine, tokenizer = og.Engine(model), og.Tokenizer(model)
+    notes = "These surrounding notes are unrelated to the video. " * 40
+    value = prompt(
+        tokenizer,
+        0,
+        notes + VIDEO_MARKER + notes + "Which color appears FIRST in the video: red or blue? Answer just the color.",
+    )
+    frames = np.empty((4, 64, 96, 3), dtype=np.uint8)
+    frames[:2] = (255, 0, 0)
+    frames[2:] = (0, 0, 255)
+    changed = (
+        (frames, [10.0, 11.0, 12.0, 13.0], "red")
+        if change == "timestamps"
+        else (frames[::-1].copy(), [0.0, 1.0, 2.0, 3.0], "blue")
+    )
+    results = []
+    for clip, timestamps, color in (
+        (frames, [0.0, 1.0, 2.0, 3.0], "red"),
+        (frames, [0.0, 1.0, 2.0, 3.0], "red"),
+        changed,
+    ):
+        request = new_request(engine)
+        options = og.TurnOptions(request)
+        options.set_do_sample(False)
+        options.set_max_generated_tokens(16)
+        videos = og.Videos.from_frames(clip, timestamps=timestamps)
+        request.begin_turn(value, options, videos=videos)
+        tokens, finished, _ = drain(engine)
+        answer = tokenizer.decode(tokens).strip().lower()
+        assert color in answer and ("blue" if color == "red" else "red") not in answer, answer
+        assert len(finished) == 1
+        results.append(finished[0][3])
+        request.close()
+    assert results[0] == 0
+    assert results[1] > results[2] > 0, f"Changed {change} must invalidate video-dependent prefix blocks"
+
+
 def test_mixed_geometry_padding_is_rejected_before_host_budget_is_exceeded(vision_package, tmp_path):
     directory, _ = vision_package
     config = og.Config(directory)
@@ -247,7 +486,23 @@ def test_token_admission_rejects_image_markers_and_preserves_turn_ids(vision_mod
     request.close()
 
 
-def test_formatted_admission_reclaims_abandoned_media_before_host_preflight(vision_package):
+def test_video_markers_reject_without_frames_on_image_packages(vision_model):
+    model, _ = vision_model
+    engine, tokenizer = og.Engine(model), og.Tokenizer(model)
+    request = new_request(engine)
+    options = og.TurnOptions(request)
+    options.set_max_generated_tokens(1)
+    for value in ("<|video_pad|>", VIDEO_MARKER):
+        for prompt_value in (value, tokenizer.encode(value)):
+            with pytest.raises(RuntimeError, match="Video markers require"):
+                request.begin_turn(prompt_value, options)
+    first = request.begin_turn(tokenizer.encode("ABC"), options)
+    assert first == 1
+    drain(engine)
+    request.close()
+
+
+def test_formatted_admission_reclaims_abandoned_media_before_host_preflight(vision_package, tmp_path):
     directory, _ = vision_package
     config = og.Config(directory)
     config.overlay(
@@ -255,7 +510,12 @@ def test_formatted_admission_reclaims_abandoned_media_before_host_preflight(visi
             {
                 "model": {"dflash2": {"filename": ""}},
                 "engine": {
-                    "dynamic_batching": {"num_blocks": 64, "max_batch_size": 1, "media_host_bytes": 21 * 1024 * 1024}
+                    "dynamic_batching": {
+                        "num_blocks": 64,
+                        "max_batch_size": 1,
+                        "media_host_bytes": 21 * 1024 * 1024,
+                        "media_device_bytes": 4 * 1024 * 1024,
+                    }
                 },
             }
         )
@@ -265,7 +525,10 @@ def test_formatted_admission_reclaims_abandoned_media_before_host_preflight(visi
     engine, tokenizer = og.Engine(model), og.Tokenizer(model)
     abandoned, survivor = new_request(engine), new_request(engine)
     value = prompt(tokenizer, 1)
-    images = og.Images.open(str(IMAGE_DIR / "cars.jpg"))
+    image_path = tmp_path / "cars.png"
+    with Image.open(IMAGE_DIR / "cars.jpg") as source:
+        source.resize((640, 384)).save(image_path)
+    images = og.Images.open(str(image_path))
     abandoned_turn = begin(abandoned, value, images, maximum=1)
     assert abandoned_turn == 1
     with pytest.raises(RuntimeError, match="host capacity"):

@@ -250,7 +250,7 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
       prefill_token_cap = cache_query_token_cap;
     }
     for (const auto& span : request->Media()) {
-      if (span.start + span.item->rows <= effective_processed_sequence_length ||
+      if (span.End() <= effective_processed_sequence_length ||
           span.start >= static_cast<size_t>(snapshot.current_sequence_length))
         continue;
       if (span.start <= effective_processed_sequence_length) {

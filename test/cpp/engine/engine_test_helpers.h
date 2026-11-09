@@ -17,6 +17,18 @@
 namespace Generators {
 namespace test {
 
+// Scheduling doubles do not preprocess/intern inputs; provide a distinct key for each span.
+inline void AppendSchedulingMedia(const std::shared_ptr<Request>& request, std::span<const MediaSpan> media) {
+  std::vector<MediaSpan> spans{media.begin(), media.end()};
+  for (auto& span : spans) {
+    if (span.prefix) continue;
+    auto prefix = std::make_shared<MediaPrefix>();
+    prefix->first_id = static_cast<int32_t>(span.start + 1);
+    span.prefix = std::move(prefix);
+  }
+  request->AppendMedia(spans);
+}
+
 // Loads the tiny checked-in decoder model used by the engine component tests. The model only has to
 // load as a decoder-only Generators::Model on CPU: the tests drive the scheduler and engine with the
 // recording doubles in engine_test_doubles.h, so the ONNX graph is never executed. Minting a Request

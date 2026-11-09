@@ -1563,6 +1563,220 @@ TEST(CAPITests, EngineFormattedPromptAdmissionContracts) {
   other->Close();
 }
 
+TEST(CAPITests, VideoFramesSnapshotPaddedRowsAndOrderedClips) {
+  std::array<uint8_t, 9> padded{1, 2, 3, 0, 0, 0, 4, 5, 6};
+  const std::array<OgaVideoFrame, 2> frames{{
+      {padded.data(), padded.size(), 1, 2, 6, 2.5},
+      {padded.data(), padded.size(), 1, 2, 6, 3.75},
+  }};
+  const std::array<OgaVideoClip, 2> clips{{{frames.data(), frames.size()}, {frames.data(), 1}}};
+  auto videos = OgaVideos::FromFrames(clips.data(), clips.size());
+  padded.fill(0);
+  ASSERT_EQ(videos->ClipCount(), 2u);
+  ASSERT_EQ(videos->FrameCount(0), 2u);
+  ASSERT_EQ(videos->FrameCount(1), 1u);
+  const auto frame = videos->Frame(0, 1);
+  EXPECT_EQ(frame.timestamp_seconds, 3.75);
+  EXPECT_EQ(frame.row_stride, 3u);
+  ASSERT_EQ(frame.data_size, 6u);
+  const std::array<uint8_t, 6> expected{1, 2, 3, 4, 5, 6};
+  EXPECT_EQ(std::memcmp(frame.data, expected.data(), expected.size()), 0);
+  EXPECT_THROW(videos->Frame(2, 0), std::runtime_error);
+  EXPECT_THROW(videos->Frame(0, 2), std::runtime_error);
+}
+
+TEST(CAPITests, VideoCollectionValidatesLateFramesAndAggregateQuotaBeforeCopying) {
+  const uint8_t unused = 0;
+  const OgaVideoFrame claimed{&unused, 12, 2, 2, 6, 0.0};
+  auto invalid = claimed;
+  invalid.timestamp_seconds = -1.0;
+  const std::array<OgaVideoClip, 2> clips{{{&claimed, 1}, {&invalid, 1}}};
+  OgaVideos* videos = reinterpret_cast<OgaVideos*>(1);
+  EXPECT_THROW(OgaCheckResult(OgaLoadVideosFromFrames(clips.data(), clips.size(), nullptr, &videos)),
+               std::runtime_error);
+  EXPECT_EQ(videos, nullptr);
+  const std::array<OgaVideoClip, 2> valid_metadata{{{&claimed, 1}, {&claimed, 1}}};
+  const OgaVideoFrameLimits limits{sizeof(OgaVideoFrameLimits), 2, 1, 23, 2};
+  EXPECT_THROW(OgaVideos::FromFrames(valid_metadata.data(), valid_metadata.size(), &limits), std::runtime_error);
+  EXPECT_THROW(OgaVideos::FromFrames(nullptr, 0), std::runtime_error);
+}
+
+TEST(CAPITests, EngineRejectsUnsupportedVideoWithoutConsumingTurnIdentity) {
+  const std::array<uint8_t, 3> rgb{1, 2, 3};
+  const OgaVideoFrame frame{rgb.data(), rgb.size(), 1, 1, 3, 0.0};
+  const OgaVideoClip clip{&frame, 1};
+  auto videos = OgaVideos::FromFrames(&clip, 1);
+  auto model = OgaModel::Create(MODEL_PATH "engine/synthetic-paged");
+  auto engine = OgaEngine::Create(*model);
+  auto request = engine->CreateRequest();
+  auto options = request->CreateTurnOptions();
+  options->SetMaxGeneratedTokens(1);
+  EXPECT_THROW(request->BeginTurn("ABC", options.get(), nullptr, videos.get()), std::runtime_error);
+  EXPECT_EQ(request->BeginTurn("ABC", options.get(), nullptr, nullptr), 1u);
+  EXPECT_EQ(RunOne(*engine).turn_id, 1u);
+  request->Close();
+}
+
+TEST(CAPITests, VideoFilesExposeTimelineAndRejectIncompleteCollections) {
+  const char* root = std::getenv("ORTGENAI_VIDEO_TEST_DIR");
+  if (!root || !*root) {
+    const char* required = std::getenv("ORTGENAI_REQUIRE_VIDEO_FILES");
+    if (required && std::strcmp(required, "1") == 0)
+      FAIL() << "ORTGENAI_VIDEO_TEST_DIR must name the required codec fixtures.";
+    GTEST_SKIP() << "Set ORTGENAI_VIDEO_TEST_DIR for codec-enabled public API qualification.";
+  }
+  const std::string cfr = std::string{root} + "/cfr.mp4";
+  const std::string vfr = std::string{root} + "/vfr.mp4";
+  const double times[] = {0.2, 1.2};
+  const std::array<OgaVideoFile, 3> files{{
+      {cfr.c_str(), {sizeof(OgaVideoLoadOptions), OgaVideoSamplingFps, 2, 0, nullptr, 0, 0, 3, 1}},
+      {cfr.c_str(), {sizeof(OgaVideoLoadOptions), OgaVideoSamplingCount, 0, 8, nullptr, 0, 0, 4, 1}},
+      {vfr.c_str(), {sizeof(OgaVideoLoadOptions), OgaVideoSamplingTimes, 0, 0, times, 2, 0, 2, 1}},
+  }};
+  OgaVideos* raw{};
+  OgaCheckResult(OgaLoadVideos(files.data(), files.size(), nullptr, &raw));
+  std::unique_ptr<OgaVideos> videos(raw);
+  ASSERT_EQ(videos->ClipCount(), 3u);
+  EXPECT_EQ(videos->FrameCount(0), 6u);
+  EXPECT_EQ(videos->FrameCount(2), 2u);
+  const auto metadata = videos->Metadata(1);
+  EXPECT_EQ(metadata.requested_samples, 8u);
+  EXPECT_EQ(metadata.selected_frames, 6u);
+  EXPECT_EQ(videos->Sample(1, 6).frame_index, std::numeric_limits<size_t>::max());
+  EXPECT_EQ(videos->Frame(2, 0).timestamp_seconds, 0.32);
+  EXPECT_EQ(videos->Frame(2, 1).timestamp_seconds, 1.24);
+  auto invalid = files;
+  invalid.back().options.target_count = 0;
+  raw = reinterpret_cast<OgaVideos*>(1);
+  EXPECT_THROW(OgaCheckResult(OgaLoadVideos(invalid.data(), invalid.size(), nullptr, &raw)), std::runtime_error);
+  EXPECT_EQ(raw, nullptr);
+  const OgaVideoFileLimits limits{sizeof(OgaVideoFileLimits), 3, 64, 256 * 1024 * 1024,
+                                  1, 1024 * 1024 * 1024, 100000, 4096, 4096, 4096};
+  raw = reinterpret_cast<OgaVideos*>(1);
+  EXPECT_THROW(OgaCheckResult(OgaLoadVideos(files.data(), files.size(), &limits, &raw)), std::runtime_error);
+  EXPECT_EQ(raw, nullptr);
+  EXPECT_NO_THROW(OgaVideos::Open(files.data(), files.size()));
+}
+
+TEST(CAPITests, RealQwenEngineVideoOwnershipContinuationAndCancellation) {
+  const char* path = std::getenv("ORTGENAI_ENGINE_VIDEO_MODEL");
+  if (!path || !*path) {
+    const char* required = std::getenv("ORTGENAI_REQUIRE_ENGINE_VIDEO");
+    if (required && std::strcmp(required, "1") == 0)
+      FAIL() << "ORTGENAI_ENGINE_VIDEO_MODEL must name the complete Qwen video package.";
+    GTEST_SKIP() << "Set ORTGENAI_ENGINE_VIDEO_MODEL for real public video validation.";
+  }
+  const char* optimized_profile = std::getenv("ORTGENAI_ENGINE_VIDEO_OPTIMIZED");
+  const bool optimized = optimized_profile && std::strcmp(optimized_profile, "1") == 0;
+  const char* profile = std::getenv("ORTGENAI_ENGINE_VIDEO_PROFILE");
+  const bool flash = profile && std::strcmp(profile, "flash-next") == 0;
+  ASSERT_TRUE(!profile || flash || std::strcmp(profile, "qwen-27b") == 0);
+  ASSERT_FALSE(flash && optimized) << "Flash video qualification requires eager target-only execution.";
+  auto config = OgaConfig::Create(path);
+  if (flash) {
+    config->Overlay(R"({
+      "engine":{"dynamic_batching":{"num_blocks":64,"max_batch_size":2,
+        "max_scheduled_tokens":6,"media_device_bytes":1048576}},
+      "search":{"chunk_size":6}
+    })");
+    config->SetProviderOption("cuda", "arena_extend_strategy", "kSameAsRequested");
+  } else {
+    config->Overlay(R"({
+    "engine":{"dynamic_batching":{"num_blocks":64,"max_batch_size":4,
+      "max_scheduled_tokens":512,"media_device_bytes":2097152}},
+    "search":{"chunk_size":64}
+  })");
+  }
+  if (!optimized) config->Overlay(R"({"model":{"dflash2":{"filename":""}}})");
+  config->SetProviderOption("cuda", "enable_cuda_graph", optimized ? "1" : "0");
+  auto model = OgaModel::Create(*config);
+  ASSERT_EQ(std::string{model->GetType()}, flash ? "qwen4_exp" : "qwen3_5");
+  auto engine = OgaEngine::Create(*model);
+  auto tokenizer = OgaTokenizer::Create(*model);
+  auto request_options = OgaRequestOptions::Create();
+  request_options->SetMaxSessionTokens(4096);
+  auto request = engine->CreateRequest(request_options.get());
+  auto options = request->CreateTurnOptions();
+  options->SetDoSample(false);
+  options->SetMaxGeneratedTokens(optimized ? 16 : 1);
+  std::vector<uint8_t> rgb(4 * 64 * 96 * 3, 0);
+  std::array<OgaVideoFrame, 4> frames{};
+  for (size_t frame = 0; frame < frames.size(); ++frame) {
+    auto* pixels = rgb.data() + frame * 64 * 96 * 3;
+    for (size_t pixel = 0; pixel < 64 * 96; ++pixel) pixels[pixel * 3 + (frame < 2 ? 0 : 2)] = 255;
+    frames[frame] = {pixels, 64 * 96 * 3, 96, 64, 96 * 3, static_cast<double>(frame)};
+  }
+  const OgaVideoClip clip{frames.data(), frames.size()};
+  auto videos = OgaVideos::FromFrames(&clip, 1);
+  const char* video_file = std::getenv("ORTGENAI_ENGINE_VIDEO_FILE");
+  if (video_file && *video_file) {
+    const OgaVideoFile file{video_file,
+                            {sizeof(OgaVideoLoadOptions), OgaVideoSamplingFps, 1, 0, nullptr, 0, 0, 4, 1}};
+    videos = OgaVideos::Open(&file, 1);
+    ASSERT_EQ(videos->FrameCount(0), 4u);
+  }
+  std::fill(rgb.begin(), rgb.end(), 0);
+  const auto formatted = tokenizer->ApplyChatTemplate(
+      nullptr,
+      R"([{"role":"user","content":"<|vision_start|><|video_pad|><|vision_end|>Which color appears FIRST in the video: red or blue? Answer just the color."}])",
+      nullptr, true);
+  const auto prompt = std::string{formatted} + "\n</think>\n\n";
+  uint64_t first{};
+  OgaCheckResult(OgaRequestBeginTurnWithMedia(request.get(), options.get(), prompt.c_str(),
+                                              nullptr, videos.get(), &first));
+  EXPECT_EQ(first, 1u);
+  videos.reset();
+  const auto collect = [&] {
+    std::vector<int32_t> tokens;
+    size_t finished = 0;
+    auto buffer = engine->CreateEventBuffer(1);
+    for (size_t step = 0; step < 4096 && engine->HasPendingRequests(); ++step) {
+      const auto count = engine->Run(*buffer);
+      for (size_t index = 0; index < count; ++index) {
+        const auto event = Snapshot(buffer->Get(index));
+        EXPECT_EQ(event.flags & (OgaEngineEventFlag_Failed | OgaEngineEventFlag_CapacityBlocked), 0);
+        if (event.flags & OgaEngineEventFlag_Token) tokens.push_back(event.token);
+        if (event.flags & OgaEngineEventFlag_TurnFinished) ++finished;
+      }
+    }
+    EXPECT_FALSE(engine->HasPendingRequests());
+    EXPECT_EQ(finished, 1u);
+    return tokens;
+  };
+  const auto first_tokens = collect();
+  ASSERT_FALSE(first_tokens.empty());
+  const auto first_answer = std::string{tokenizer->Decode(first_tokens)};
+  if (optimized)
+    EXPECT_TRUE(first_answer.rfind("Red", 0) == 0 || first_answer.rfind("red", 0) == 0) << first_answer;
+  else
+    EXPECT_TRUE(first_answer == "Red" || first_answer == "red") << first_answer;
+  options->SetMaxGeneratedTokens(16);
+  const auto second = request->BeginTurn(
+      "<|im_end|>\n<|im_start|>user\nWhich color appeared FIRST in that video? Answer just the color."
+      "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+      options.get());
+  EXPECT_EQ(second, 2u);
+  const auto second_tokens = collect();
+  ASSERT_FALSE(second_tokens.empty());
+  const auto second_answer = std::string{tokenizer->Decode(second_tokens)};
+  EXPECT_TRUE(second_answer.rfind("Red", 0) == 0 || second_answer.rfind("red", 0) == 0) << second_answer;
+  if (optimized) {
+    const auto stats = engine->GetSpeculativeStats();
+    EXPECT_GT(stats->GetCount("draft_forward_passes"), 0u);
+    EXPECT_GT(stats->GetCount("draft_tokens_proposed"), 0u);
+    EXPECT_GT(stats->GetCount("draft_tokens_evaluated"), 0u);
+    EXPECT_EQ(stats->GetCount("dflash2_failures"), 0u);
+  }
+  videos = OgaVideos::FromFrames(&clip, 1);
+  const auto cancelled = request->BeginTurn(prompt.c_str(), options.get(), nullptr, videos.get());
+  EXPECT_TRUE(request->CancelTurn(cancelled));
+  const auto completion = RunOne(*engine);
+  EXPECT_EQ(completion.turn_id, cancelled);
+  EXPECT_EQ(completion.finish_reason, OgaFinishReason_Cancelled);
+  EXPECT_FALSE(engine->HasPendingRequests());
+  request->Close();
+}
+
 TEST(CAPITests, EngineMaxRequestLengthUsesResolvedCacheCapacity) {
   auto config = OgaConfig::Create(MODEL_PATH "engine/synthetic-paged");
   config->Overlay(R"({

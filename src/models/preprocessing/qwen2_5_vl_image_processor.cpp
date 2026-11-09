@@ -6,6 +6,8 @@
 #include "models/parallel_utils.h"
 #include "models/preprocessing/genai_tokenizer.h"
 #include "models/preprocessing/qwen2_5_vl_image_processor.h"
+#include "models/preprocessing/qwen_vision_preparation.h"
+#include "models/preprocessing/bailing_vision_preparation.h"
 #include "models/threadpool.h"
 #include <array>
 #include <cstring>
@@ -14,6 +16,42 @@
 #include <regex>
 
 namespace Generators {
+
+std::vector<int32_t> TokenizeLingImagePrompt(const Tokenizer& tokenizer, const std::string& prompt,
+                                             std::span<const int64_t> grids, int64_t spatial_merge_size) {
+  constexpr std::string_view start = "<|vision_start|>", end = "<|vision_end|>", pad = "<|image_pad|>";
+  constexpr std::string_view marker = "<|vision_start|><|image_pad|><|vision_end|>";
+  if (spatial_merge_size <= 0 || grids.size() % 3 != 0)
+    throw std::invalid_argument("Ling image grids require complete T/H/W entries and a positive merge size.");
+  std::string expanded;
+  size_t cursor = 0;
+  for (size_t image = 0; image < grids.size(); image += 3) {
+    const auto height = grids[image + 1], width = grids[image + 2];
+    if (grids[image] != 1 || height <= 0 || width <= 0 ||
+        height % spatial_merge_size != 0 || width % spatial_merge_size != 0)
+      throw std::invalid_argument("Ling supports complete spatially merged image grids, not video.");
+    const size_t rows = static_cast<size_t>(height / spatial_merge_size);
+    const size_t columns = static_cast<size_t>(width / spatial_merge_size);
+    if (columns > std::numeric_limits<size_t>::max() / rows)
+      throw std::overflow_error("Ling image row count overflows size_t.");
+    const auto position = prompt.find(marker, cursor);
+    if (position == std::string::npos)
+      throw std::invalid_argument("Ling requires one complete ordered image marker per image.");
+    expanded.append(prompt, cursor, position - cursor);
+    expanded.append(start);
+    const size_t tokens = rows * columns;
+    if (tokens > (expanded.max_size() - expanded.size()) / pad.size())
+      throw std::overflow_error("Ling image prompt expansion exceeds string capacity.");
+    for (size_t row = 0; row < tokens; ++row) expanded.append(pad);
+    expanded.append(end);
+    expanded.push_back('\n');
+    cursor = position + marker.size();
+  }
+  if (prompt.find(marker, cursor) != std::string::npos)
+    throw std::invalid_argument("Ling image marker count exceeds the ordered image inputs.");
+  expanded.append(prompt, cursor, std::string::npos);
+  return tokenizer.Encode(expanded.c_str());
+}
 
 void ExtractQwenImagePatches(ThreadPool* thread_pool, const float* source, float* destination,
                              int64_t height, int64_t width, int64_t channels,
@@ -53,13 +91,11 @@ void ExtractQwenImagePatches(ThreadPool* thread_pool, const float* source, float
       });
 }
 
-namespace {
-
 // Helper to convert float32 tensor to target type (float16 or bfloat16)
-std::unique_ptr<OrtValue> ConvertPixelValues(ThreadPool* thread_pool,
-                                             const OrtValue& float_tensor,
-                                             ONNXTensorElementDataType target_type,
-                                             Ort::Allocator& allocator) {
+std::unique_ptr<OrtValue> ConvertVisionPixels(ThreadPool* thread_pool,
+                                              const OrtValue& float_tensor,
+                                              ONNXTensorElementDataType target_type,
+                                              Ort::Allocator& allocator) {
   if (target_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
     // No conversion needed, return a copy
     auto shape = float_tensor.GetTensorTypeAndShapeInfo()->GetShape();
@@ -77,6 +113,19 @@ std::unique_ptr<OrtValue> ConvertPixelValues(ThreadPool* thread_pool,
   std::unique_ptr<OrtValue> result;
   if (target_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16) {
     result = OrtValue::CreateTensor<Ort::BFloat16_t>(allocator, shape);
+    // Source tensor casts round to nearest-even; the general CPU Cast truncates BF16.
+    ParallelTransform(thread_pool, float_tensor.GetTensorData<float>(),
+                      result->GetTensorMutableData<Ort::BFloat16_t>(), count, 2.0,
+                      [](float value) {
+                        uint32_t bits;
+                        std::memcpy(&bits, &value, sizeof(bits));
+                        if ((bits & 0x7fffffffu) > 0x7f800000u)
+                          bits |= 0x00400000u;
+                        else
+                          bits += 0x7fffu + ((bits >> 16) & 1u);
+                        return Ort::BFloat16_t{static_cast<uint16_t>(bits >> 16)};
+                      });
+    return result;
   } else if (target_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
     result = OrtValue::CreateTensor<Ort::Float16_t>(allocator, shape);
   } else {
@@ -92,11 +141,12 @@ std::unique_ptr<OrtValue> ConvertPixelValues(ThreadPool* thread_pool,
   return result;
 }
 
+namespace {
+
 std::tuple<std::unique_ptr<OrtValue>, std::unique_ptr<OrtValue>>
 ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& prompt,
-                   OrtxTensor* pixel_values, OrtxTensor* image_grid_thw,
                    const int64_t* computed_grid_data, int64_t computed_grid_num_images,
-                   Ort::Allocator& allocator, int64_t spatial_merge_size) {
+                   Ort::Allocator& allocator, int64_t spatial_merge_size, bool ling) {
   constexpr char vision_start_token[] = "<|vision_start|>";
   constexpr char vision_end_token[] = "<|vision_end|>";
   constexpr char image_pad_token[] = "<|image_pad|>";
@@ -105,27 +155,9 @@ ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& pr
   int64_t total_image_tokens = 0;
   const int64_t* image_grid_thw_data = nullptr;
 
-  if (pixel_values) {
-    // Get image_grid_thw data from either processor output or computed value
-    if (image_grid_thw) {
-      const int64_t* image_grid_thw_shape{};
-      size_t image_grid_thw_num_dims;
-      CheckResult(OrtxGetTensorData(image_grid_thw, reinterpret_cast<const void**>(&image_grid_thw_data),
-                                    &image_grid_thw_shape, &image_grid_thw_num_dims));
-      size_t grid_elements = 1;
-      for (size_t dim = 0; dim < image_grid_thw_num_dims; ++dim) {
-        if (image_grid_thw_shape[dim] <= 0 ||
-            static_cast<size_t>(image_grid_thw_shape[dim]) > std::numeric_limits<size_t>::max() / grid_elements)
-          throw std::runtime_error("Invalid image grid shape.");
-        grid_elements *= static_cast<size_t>(image_grid_thw_shape[dim]);
-      }
-      if (grid_elements % 3 != 0 || grid_elements / 3 > static_cast<size_t>(std::numeric_limits<int64_t>::max()))
-        throw std::runtime_error("Image grid must contain complete T/H/W entries.");
-      num_images = static_cast<int64_t>(grid_elements / 3);
-    } else if (computed_grid_data) {
-      image_grid_thw_data = computed_grid_data;
-      num_images = computed_grid_num_images;
-    }
+  if (computed_grid_data) {
+    image_grid_thw_data = computed_grid_data;
+    num_images = computed_grid_num_images;
 
     // Calculate total image tokens based on grid dimensions
     // For each image: (temporal * height * width) / (merge_size^2)
@@ -141,70 +173,73 @@ ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& pr
   // Generate input_ids with vision tokens
   std::string text = prompt;
 
-  // If prompt is empty, add vision markers for each image
-  if (text.empty()) {
-    for (int64_t i = 0; i < num_images; ++i) {
-      text += std::string(vision_start_token) + " " + std::string(vision_end_token);
-      if (i < num_images - 1) {
-        text += " ";
+  if (!ling) {
+    // If prompt is empty, add vision markers for each image
+    if (text.empty()) {
+      for (int64_t i = 0; i < num_images; ++i) {
+        text += std::string(vision_start_token) + " " + std::string(vision_end_token);
+        if (i < num_images - 1) {
+          text += " ";
+        }
       }
     }
-  }
 
-  // Count the number of vision_start tokens and make sure it matches the number of images
-  // Need to escape special regex characters in the token
-  const std::regex vision_start_regex{R"(<\|vision_start\|>)"};
-  const auto vision_start_begin = std::sregex_iterator(text.begin(), text.end(), vision_start_regex);
-  const auto vision_start_end = std::sregex_iterator();
-  const auto vision_start_tokens = std::distance(vision_start_begin, vision_start_end);
+    // Count the number of vision_start tokens and make sure it matches the number of images
+    // Need to escape special regex characters in the token
+    const std::regex vision_start_regex{R"(<\|vision_start\|>)"};
+    const auto vision_start_begin = std::sregex_iterator(text.begin(), text.end(), vision_start_regex);
+    const auto vision_start_end = std::sregex_iterator();
+    const auto vision_start_tokens = std::distance(vision_start_begin, vision_start_end);
 
-  if (num_images != vision_start_tokens) {
-    throw std::runtime_error("Prompt contained " + std::to_string(vision_start_tokens) +
-                             " vision_start tokens but received " + std::to_string(num_images) + " images.");
-  }
-
-  // For Qwen2-VL, we need to replace vision markers with image_pad tokens
-  // The number of image_pad tokens for each image depends on the image dimensions
-  if (num_images > 0 && image_grid_thw_data) {
-    std::string modified_text;
-    size_t last_pos = 0;
-    size_t image_idx = 0;
-
-    std::smatch match;
-    std::string temp_text = text;
-    while (std::regex_search(temp_text, match, vision_start_regex)) {
-      // Add text before the vision_start token
-      modified_text += text.substr(last_pos, match.position() - (last_pos - (text.size() - temp_text.size())));
-
-      // Calculate number of image_pad tokens for this image
-      int64_t t = image_grid_thw_data[image_idx * 3 + 0];
-      int64_t h = image_grid_thw_data[image_idx * 3 + 1];
-      int64_t w = image_grid_thw_data[image_idx * 3 + 2];
-      int64_t num_pads = (t * h * w) / (spatial_merge_size * spatial_merge_size);
-
-      // Add vision_start, image_pad tokens, and vision_end
-      modified_text += vision_start_token;
-      for (int64_t i = 0; i < num_pads; ++i) {
-        modified_text += image_pad_token;
-      }
-      modified_text += vision_end_token;
-
-      last_pos = match.position() + match.length() + (text.size() - temp_text.size());
-
-      // Find and skip vision_end token
-      size_t vision_end_pos = text.find(vision_end_token, last_pos);
-      if (vision_end_pos != std::string::npos) {
-        last_pos = vision_end_pos + strlen(vision_end_token);
-      }
-
-      temp_text = match.suffix();
-      image_idx++;
+    if (num_images != vision_start_tokens) {
+      throw std::runtime_error("Prompt contained " + std::to_string(vision_start_tokens) +
+                               " vision_start tokens but received " + std::to_string(num_images) + " images.");
     }
-    modified_text += text.substr(last_pos);
-    text = modified_text;
-  }
 
-  const std::vector<int32_t> input_ids = tokenizer.Encode(text.c_str());
+    // For Qwen2-VL, we need to replace vision markers with image_pad tokens
+    // The number of image_pad tokens for each image depends on the image dimensions
+    if (num_images > 0 && image_grid_thw_data) {
+      std::string modified_text;
+      size_t last_pos = 0;
+      size_t image_idx = 0;
+
+      std::smatch match;
+      std::string temp_text = text;
+      while (std::regex_search(temp_text, match, vision_start_regex)) {
+        // Add text before the vision_start token
+        modified_text += text.substr(last_pos, match.position() - (last_pos - (text.size() - temp_text.size())));
+
+        // Calculate number of image_pad tokens for this image
+        int64_t t = image_grid_thw_data[image_idx * 3 + 0];
+        int64_t h = image_grid_thw_data[image_idx * 3 + 1];
+        int64_t w = image_grid_thw_data[image_idx * 3 + 2];
+        int64_t num_pads = (t * h * w) / (spatial_merge_size * spatial_merge_size);
+
+        // Add vision_start, image_pad tokens, and vision_end
+        modified_text += vision_start_token;
+        for (int64_t i = 0; i < num_pads; ++i) {
+          modified_text += image_pad_token;
+        }
+        modified_text += vision_end_token;
+
+        last_pos = match.position() + match.length() + (text.size() - temp_text.size());
+
+        // Find and skip vision_end token
+        size_t vision_end_pos = text.find(vision_end_token, last_pos);
+        if (vision_end_pos != std::string::npos) {
+          last_pos = vision_end_pos + strlen(vision_end_token);
+        }
+
+        temp_text = match.suffix();
+        image_idx++;
+      }
+      modified_text += text.substr(last_pos);
+      text = modified_text;
+    }
+  }
+  const std::vector<int32_t> input_ids =
+      ling ? TokenizeLingImagePrompt(tokenizer, prompt, {image_grid_thw_data, static_cast<size_t>(num_images) * 3}, spatial_merge_size)
+           : tokenizer.Encode(text.c_str());
 
   std::unique_ptr<OrtValue> input_ids_value = OrtValue::CreateTensor<int32_t>(
       allocator, std::vector<int64_t>{1, static_cast<int64_t>(input_ids.size())});
@@ -238,21 +273,73 @@ QwenImageProcessor::QwenImageProcessor(Config& config, const SessionInfo& sessio
   config.AddMapping(std::string(Config::Defaults::PixelValuesName), config.model.vision.inputs.pixel_values);
 }
 
+std::unique_ptr<VisionPreparation> QwenImageProcessor::CreateVisionPreparation(
+    const Config& config, const SessionInfo& info, const Tokenizer& tokenizer) const {
+  return std::make_unique<QwenVisionPreparation>(config, info, tokenizer, *this, thread_pool_);
+}
+
 std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& tokenizer, const Payload& payload) const {
-  std::string prompt = std::string(payload.prompt);
+  return ProcessImages(tokenizer, payload, false);
+}
+
+std::unique_ptr<NamedTensors> LingImageProcessor::Process(const Tokenizer& tokenizer, const Payload& payload) const {
+  return ProcessImages(tokenizer, payload, true);
+}
+
+std::unique_ptr<VisionPreparation> LingImageProcessor::CreateVisionPreparation(
+    const Config& config, const SessionInfo& info, const Tokenizer& tokenizer) const {
+  return std::make_unique<BailingVisionPreparation>(config, info, tokenizer, *this, thread_pool_);
+}
+
+std::unique_ptr<NamedTensors> QwenImageProcessor::ProcessImages(
+    const Tokenizer& tokenizer, const Payload& payload, bool ling) const {
   const Images* images = payload.images;
   Ort::Allocator& allocator{Ort::Allocator::GetWithDefaultOptions()};
-  auto named_tensors = std::make_unique<NamedTensors>();
-
-  if (!images || images->num_images_ == 0) {
-    auto [input_ids, num_img_tokens] = ProcessImagePrompt(tokenizer, prompt, nullptr, nullptr, nullptr, 0, allocator, spatial_merge_size_);
-    named_tensors->emplace(std::string(Config::Defaults::InputIdsName), std::make_shared<Tensor>(std::move(input_ids)));
-    named_tensors->emplace(std::string(Config::Defaults::NumImageTokens), std::make_shared<Tensor>(std::move(num_img_tokens)));
-    return named_tensors;
+  auto named_tensors = images && images->num_images_ ? ProcessImages(*images) : std::make_unique<NamedTensors>();
+  const auto grid = named_tensors->find(std::string{Config::Defaults::ImageGridThwName});
+  const int64_t* grid_data = nullptr;
+  int64_t grid_images = 0;
+  if (grid != named_tensors->end()) {
+    const auto elements = grid->second->GetElementCount();
+    if (grid->second->GetType() != Ort::TypeToTensorType<int64_t> ||
+        elements % 3 != 0 || elements / 3 > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))
+      throw std::runtime_error("Image grid must contain complete int64 T/H/W entries.");
+    grid_data = grid->second->GetData<int64_t>();
+    grid_images = static_cast<int64_t>(elements / 3);
   }
+  auto [input_ids, num_img_tokens] = ProcessImagePrompt(
+      tokenizer, payload.prompt, grid_data, grid_images, allocator, spatial_merge_size_, ling);
+  named_tensors->emplace(std::string(Config::Defaults::InputIdsName), std::make_shared<Tensor>(std::move(input_ids)));
+  named_tensors->emplace(std::string(Config::Defaults::NumImageTokens), std::make_shared<Tensor>(std::move(num_img_tokens)));
+  return named_tensors;
+}
+
+std::unique_ptr<NamedTensors> QwenImageProcessor::ProcessImages(
+    const Images& images, std::span<const std::array<int64_t, 3>> grids) const {
+  Ort::Allocator& allocator{Ort::Allocator::GetWithDefaultOptions()};
+  auto named_tensors = std::make_unique<NamedTensors>();
+  if (images.num_images_ == 0) return named_tensors;
 
   ort_extensions::OrtxObjectPtr<OrtxTensorResult> result;
-  CheckResult(OrtxImagePreProcess(processor_.get(), images->images_.get(), result.ToBeAssigned()));
+  if (grids.empty()) {
+    CheckResult(OrtxImagePreProcess(processor_.get(), images.images_.get(), result.ToBeAssigned()));
+  } else {
+    if (grids.size() != images.num_images_ || images.info_.size() != grids.size() || patch_size_ <= 0)
+      throw std::invalid_argument("Resolved image grids do not match the input images.");
+    std::vector<OrtxImagePreProcessOptions> options;
+    options.reserve(grids.size());
+    for (size_t image = 0; image < grids.size(); ++image) {
+      const auto& grid = grids[image];
+      if (grid[0] != 1 || grid[1] <= 0 || grid[2] <= 0 ||
+          grid[1] > std::numeric_limits<int64_t>::max() / patch_size_ ||
+          grid[2] > std::numeric_limits<int64_t>::max() / patch_size_)
+        throw std::invalid_argument("Resolved image geometry exceeds its grid limits.");
+      options.push_back({sizeof(OrtxImagePreProcessOptions), images.info_[image].height, images.info_[image].width,
+                         grid[1] * patch_size_, grid[2] * patch_size_});
+    }
+    CheckResult(OrtxImagePreProcessWithOptions(processor_.get(), images.images_.get(),
+                                               options.data(), options.size(), result.ToBeAssigned()));
+  }
 
   // OrtxTensorResultGetAt allocates a new TensorObject that the caller owns.
   // Wrap in OrtxObjectPtr so it's disposed on scope exit (avoids TensorObject leak).
@@ -275,8 +362,6 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
   // If processor doesn't provide image_grid_thw or patched pixel_values, compute them
   std::unique_ptr<OrtValue> computed_image_grid_thw;
   std::unique_ptr<OrtValue> patched_pixel_values;
-  const int64_t* computed_grid_data = nullptr;
-  int64_t computed_grid_num_images = 0;
 
   // Check if pixel_values needs patching (shape should be [1, height, width, channels] in HWC format)
   if (pixel_values_num_dims == 4 && pixel_values_shape[0] == 1) {
@@ -354,21 +439,14 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
         grid_data[0] = 1;  // Single temporal frame for images
         grid_data[1] = height_patches;
         grid_data[2] = width_patches;
-
-        computed_grid_data = grid_data;
-        computed_grid_num_images = 1;
       }
     }
   }
 
-  auto [input_ids, num_img_tokens] = ProcessImagePrompt(tokenizer, prompt, pixel_values,
-                                                        image_grid_thw, computed_grid_data, computed_grid_num_images, allocator, spatial_merge_size_);
-  named_tensors->emplace(std::string(Config::Defaults::InputIdsName), std::make_shared<Tensor>(std::move(input_ids)));
-
   // Use patched pixel_values if we computed it, otherwise use processor output
   if (patched_pixel_values) {
     auto converted_tensor =
-        ConvertPixelValues(thread_pool_, *patched_pixel_values, pixel_values_type_, allocator);
+        ConvertVisionPixels(thread_pool_, *patched_pixel_values, pixel_values_type_, allocator);
     named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
                            std::make_shared<Tensor>(std::move(converted_tensor)));
   } else {
@@ -407,7 +485,7 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
 
     // Convert to target type
     auto converted_tensor =
-        ConvertPixelValues(thread_pool_, *float_tensor, pixel_values_type_, allocator);
+        ConvertVisionPixels(thread_pool_, *float_tensor, pixel_values_type_, allocator);
     named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
                            std::make_shared<Tensor>(std::move(converted_tensor)));
   }
@@ -434,9 +512,17 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
     // because the last logical dimension is always 3 (T, H, W per image).
     // This is safe as long as the extension never inserts extra trailing dims,
     // which holds for all current versions of ort-extensions PatchImage.
-    int64_t total_grid_elements = 1;
-    for (size_t i = 0; i < grid_num_dims; ++i) total_grid_elements *= grid_shape[i];
-    int64_t num_grid_images = total_grid_elements / 3;
+    size_t total_grid_elements = 1;
+    for (size_t i = 0; i < grid_num_dims; ++i) {
+      if (grid_shape[i] <= 0 ||
+          static_cast<uint64_t>(grid_shape[i]) > std::numeric_limits<size_t>::max() / total_grid_elements)
+        throw std::runtime_error("Invalid image grid shape.");
+      total_grid_elements *= static_cast<size_t>(grid_shape[i]);
+    }
+    if (total_grid_elements % 3 != 0 ||
+        total_grid_elements / 3 > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))
+      throw std::runtime_error("Image grid must contain complete T/H/W entries.");
+    int64_t num_grid_images = static_cast<int64_t>(total_grid_elements / 3);
     std::vector<int64_t> grid_target_shape = {num_grid_images, 3LL};
 
     // Ensure we have rank 2 [num_images, 3]
@@ -454,8 +540,6 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
     named_tensors->emplace("image_grid_thw",
                            std::make_shared<Tensor>(std::move(computed_image_grid_thw)));
   }
-
-  named_tensors->emplace(std::string(Config::Defaults::NumImageTokens), std::make_shared<Tensor>(std::move(num_img_tokens)));
 
   return named_tensors;
 }

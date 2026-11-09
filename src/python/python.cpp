@@ -521,6 +521,76 @@ void SetLogCallback(std::optional<const pybind11::function> callback) {
   }
 }
 
+std::unique_ptr<OgaVideos> LoadVideoFrames(const pybind11::sequence& clips,
+                                           const pybind11::sequence& timestamps,
+                                           size_t max_clips, size_t max_frames, size_t max_bytes,
+                                           int64_t max_dimension) {
+  const auto clip_count = static_cast<size_t>(clips.size());
+  if (clip_count == 0 || clips.size() != timestamps.size() || clip_count > max_clips ||
+      max_frames == 0 || max_bytes == 0 || max_dimension <= 0)
+    throw pybind11::value_error("Invalid video clip collections or loading limits.");
+  std::vector<std::vector<OgaVideoFrame>> frames;
+  std::vector<pybind11::array> owners;
+  frames.reserve(clip_count);
+  size_t packed_bytes = 0;
+  for (size_t clip = 0; clip < clip_count; ++clip) {
+    const auto arrays = clips[clip].cast<pybind11::sequence>();
+    const auto times = timestamps[clip].cast<pybind11::sequence>();
+    const auto frame_count = static_cast<size_t>(arrays.size());
+    if (frame_count == 0 || arrays.size() != times.size() || frame_count > max_frames)
+      throw pybind11::value_error("Each video clip requires bounded frames and one timestamp per frame.");
+    frames.emplace_back();
+    frames.back().reserve(frame_count);
+    for (size_t index = 0; index < frame_count; ++index) {
+      if (!pybind11::isinstance<pybind11::array>(arrays[index]))
+        throw pybind11::value_error("Video frames must be uint8 NumPy arrays; no implicit conversion is performed.");
+      auto array = arrays[index].cast<pybind11::array>();
+      if (!array.dtype().is(pybind11::dtype::of<uint8_t>()) || array.ndim() != 3 || array.shape(2) != 3 ||
+          array.shape(0) <= 0 || array.shape(1) <= 0 || array.shape(0) > max_dimension ||
+          array.shape(1) > max_dimension || array.strides(2) != 1 || array.strides(1) != 3 ||
+          array.strides(0) <= 0)
+        throw pybind11::value_error("Video frames require positive-stride HWC RGB8 arrays within dimension limits.");
+      const auto height = static_cast<size_t>(array.shape(0));
+      const auto width = static_cast<size_t>(array.shape(1));
+      const auto stride = static_cast<size_t>(array.strides(0));
+      if (width > max_bytes / 3 || height > (max_bytes - packed_bytes) / (width * 3))
+        throw pybind11::value_error("Video frames exceed the aggregate packed RGB loading limit.");
+      const auto row_bytes = width * 3;
+      if (stride < row_bytes || height - 1 > (std::numeric_limits<size_t>::max() - row_bytes) / stride)
+        throw pybind11::value_error("Video frame row stride or readable extent is invalid.");
+      const auto extent = (height - 1) * stride + row_bytes;
+      auto backing = array;
+      while (pybind11::isinstance<pybind11::array>(backing.base()))
+        backing = backing.base().cast<pybind11::array>();
+      pybind11::object buffer = backing;
+      if (!backing.owndata()) {
+        buffer = backing.base();
+        if (buffer.is_none() || !PyObject_CheckBuffer(buffer.ptr()))
+          throw pybind11::value_error("Video frames require a verifiable NumPy or buffer backing allocation.");
+      }
+      const auto info = pybind11::reinterpret_borrow<pybind11::buffer>(buffer).request();
+      if (info.size < 0 || info.itemsize <= 0 ||
+          static_cast<size_t>(info.size) > std::numeric_limits<size_t>::max() / static_cast<size_t>(info.itemsize))
+        throw pybind11::value_error("Video backing allocation has an invalid extent.");
+      const auto backing_bytes = static_cast<size_t>(info.size) * static_cast<size_t>(info.itemsize);
+      const auto begin = reinterpret_cast<uintptr_t>(info.ptr);
+      const auto data = reinterpret_cast<uintptr_t>(array.data());
+      if (data < begin || data - begin > backing_bytes || extent > backing_bytes - (data - begin))
+        throw pybind11::value_error("Video frame exceeds its readable backing allocation.");
+      frames.back().push_back({array.data(), extent, static_cast<int64_t>(width), static_cast<int64_t>(height),
+                               stride, times[index].cast<double>()});
+      packed_bytes += height * row_bytes;
+      owners.push_back(std::move(array));
+    }
+  }
+  std::vector<OgaVideoClip> inputs;
+  inputs.reserve(frames.size());
+  for (const auto& clip : frames) inputs.push_back({clip.data(), clip.size()});
+  const OgaVideoFrameLimits limits{sizeof(OgaVideoFrameLimits), max_clips, max_frames, max_bytes, max_dimension};
+  pybind11::gil_scoped_release release;
+  return OgaVideos::FromFrames(inputs.data(), inputs.size(), &limits);
+}
+
 PYBIND11_MODULE(onnxruntime_genai, m) {
   m.doc() = R"pbdoc(
         Ort Generators library
@@ -815,6 +885,85 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         return OgaImages::Load(image_raw_data.data(), image_sizes.data(), image_raw_data.size());
       });
 
+  pybind11::class_<OgaVideos>(m, "Videos")
+      .def_static("open", [](const pybind11::args& paths, std::optional<double> sampling_fps, std::optional<size_t> frame_count, std::optional<std::vector<double>> target_times, double start_seconds, std::optional<double> end_seconds, size_t max_clips, size_t max_frames, size_t max_bytes, size_t max_encoded_bytes, size_t max_read_bytes, size_t max_packets, size_t max_decoded_frames, size_t max_targets, int64_t max_dimension) {
+        if (sampling_fps.has_value() + frame_count.has_value() + target_times.has_value() != 1)
+          throw pybind11::value_error("Exactly one of sampling_fps, frame_count or target_times is required.");
+        if (paths.size() == 0 || static_cast<size_t>(paths.size()) > max_clips)
+          throw pybind11::value_error("Video paths must be nonempty and within the clip loading limit.");
+        std::vector<std::string> owners;
+        owners.reserve(paths.size());
+        for (const auto& path : paths) {
+          if (!pybind11::isinstance<pybind11::str>(path))
+            throw pybind11::value_error("Video paths must be strings.");
+          owners.push_back(path.cast<std::string>());
+          if (owners.back().find('\0') != std::string::npos)
+            throw pybind11::value_error("Video paths must not contain embedded NUL bytes.");
+        }
+        const OgaVideoLoadOptions options{
+            sizeof(OgaVideoLoadOptions),
+            sampling_fps ? OgaVideoSamplingFps : frame_count ? OgaVideoSamplingCount : OgaVideoSamplingTimes,
+            sampling_fps.value_or(0), frame_count.value_or(0),
+            target_times ? target_times->data() : nullptr, target_times ? target_times->size() : 0,
+            start_seconds, end_seconds.value_or(0), end_seconds.has_value()};
+        std::vector<OgaVideoFile> files;
+        files.reserve(owners.size());
+        for (const auto& path : owners) files.push_back({path.c_str(), options});
+        const OgaVideoFileLimits limits{sizeof(OgaVideoFileLimits), max_clips, max_frames, max_bytes,
+                                        max_encoded_bytes, max_read_bytes, max_packets, max_decoded_frames,
+                                        max_targets, max_dimension};
+        pybind11::gil_scoped_release release;
+        return OgaVideos::Open(files.data(), files.size(), &limits); }, pybind11::arg("sampling_fps") = pybind11::none(), pybind11::arg("frame_count") = pybind11::none(), pybind11::arg("target_times") = pybind11::none(), pybind11::arg("start_seconds") = 0, pybind11::arg("end_seconds") = pybind11::none(), pybind11::arg("max_clips") = 64, pybind11::arg("max_frames") = 64, pybind11::arg("max_bytes") = 256 * 1024 * 1024, pybind11::arg("max_encoded_bytes") = 512 * 1024 * 1024, pybind11::arg("max_read_bytes") = 1024 * 1024 * 1024, pybind11::arg("max_packets") = 100000, pybind11::arg("max_decoded_frames") = 4096, pybind11::arg("max_targets") = 4096, pybind11::arg("max_dimension") = 4096, "Load ordered finite local MP4/H.264 clips with one explicit sampling policy. Sound is ignored.")
+      .def_static("from_frames", [](const pybind11::sequence& frames, const pybind11::sequence& timestamps, size_t max_frames, size_t max_bytes, int64_t max_dimension) { return LoadVideoFrames(pybind11::make_tuple(frames), pybind11::make_tuple(timestamps),
+                                                                                                                                                                                                 1, max_frames, max_bytes, max_dimension); }, pybind11::arg("frames"), pybind11::arg("timestamps"), pybind11::kw_only(), pybind11::arg("max_frames") = 64, pybind11::arg("max_bytes") = 256 * 1024 * 1024, pybind11::arg("max_dimension") = 16384, "Snapshot ordered RGB8 frames with original-timeline seconds. Do not mutate buffers during construction.")
+      .def_static("from_clips", &LoadVideoFrames, pybind11::arg("clips"), pybind11::arg("timestamps"), pybind11::kw_only(), pybind11::arg("max_clips") = 64, pybind11::arg("max_frames") = 64, pybind11::arg("max_bytes") = 256 * 1024 * 1024, pybind11::arg("max_dimension") = 16384)
+      .def_property_readonly("clip_count", &OgaVideos::ClipCount)
+      .def("frame_count", &OgaVideos::FrameCount, pybind11::arg("clip"))
+      .def("frame", [](const OgaVideos& videos, size_t clip, size_t frame) {
+        const auto view = videos.Frame(clip, frame);
+        pybind11::array_t<uint8_t> result({static_cast<pybind11::ssize_t>(view.height),
+                                         static_cast<pybind11::ssize_t>(view.width), pybind11::ssize_t{3}});
+        auto* data = result.mutable_data();
+        {
+          pybind11::gil_scoped_release release;
+          std::memcpy(data, view.data, view.data_size);
+        }
+        return result; }, pybind11::arg("clip"), pybind11::arg("frame"), "Return an independent RGB8 copy of a selected frame.")
+      .def("metadata", [](const OgaVideos& videos, size_t clip) {
+        const auto value = videos.Metadata(clip);
+        pybind11::dict result;
+        result["time_base"] = pybind11::make_tuple(value.time_base_num, value.time_base_den);
+        result["origin_pts"] = value.origin_pts;
+        result["requested_samples"] = value.requested_samples;
+        result["selected_frames"] = value.selected_frames;
+        return result; }, pybind11::arg("clip"))
+      .def("samples", [](const OgaVideos& videos, size_t clip) {
+        std::vector<pybind11::dict> result;
+        const auto metadata = videos.Metadata(clip);
+        result.reserve(metadata.requested_samples);
+        for (size_t index = 0; index < metadata.requested_samples; ++index) {
+          const auto value = videos.Sample(clip, index);
+          pybind11::dict sample;
+          sample["target_seconds"] = value.target_seconds;
+          if (value.frame_index == std::numeric_limits<size_t>::max()) {
+            sample["frame_index"] = pybind11::none();
+            sample["source_pts"] = pybind11::none();
+            sample["source_frame_index"] = pybind11::none();
+          } else {
+            sample["frame_index"] = value.frame_index;
+            sample["source_pts"] = value.source_pts;
+            sample["source_frame_index"] = value.source_frame_index;
+          }
+          result.push_back(std::move(sample));
+        }
+        return result; }, pybind11::arg("clip"))
+      .def("timestamps", [](const OgaVideos& videos, size_t clip) {
+        std::vector<double> times;
+        const auto count = videos.FrameCount(clip);
+        times.reserve(count);
+        for (size_t frame = 0; frame < count; ++frame) times.push_back(videos.Frame(clip, frame).timestamp_seconds);
+        return times; }, pybind11::arg("clip"));
+
   pybind11::class_<OgaAudios>(m, "Audios")
       .def_static("open", [](pybind11::args audio_paths) {
         std::vector<std::string> audio_paths_string;
@@ -1028,15 +1177,17 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
           pybind11::arg("turn_options") = pybind11::none())
       .def(
           "begin_turn",
-          [](OgaRequest& request, const std::string& prompt, OgaTurnOptions* options, OgaImages* images) {
+          [](OgaRequest& request, const std::string& prompt, OgaTurnOptions* options,
+             OgaImages* images, OgaVideos* videos) {
             if (prompt.find('\0') != std::string::npos)
               throw pybind11::value_error("A formatted prompt must not contain embedded NUL.");
             pybind11::gil_scoped_release release;
-            return request.BeginTurn(prompt.c_str(), options, images);
+            return request.BeginTurn(prompt.c_str(), options, images, videos);
           },
           pybind11::arg("prompt"), pybind11::arg("turn_options") = pybind11::none(),
           pybind11::kw_only(), pybind11::arg("images") = pybind11::none(),
-          "Admit an already formatted incremental prompt and ordered images. CPU preprocessing "
+          pybind11::arg("videos") = pybind11::none(),
+          "Admit an already formatted incremental prompt and ordered images/videos. CPU preprocessing "
           "is synchronous; encoding is scheduled by Engine.run. No chat template is applied.")
       .def("cancel_turn", &OgaRequest::CancelTurn)
       .def("rewind_to_start_of_turn", &OgaRequest::RewindToStartOfTurn,
