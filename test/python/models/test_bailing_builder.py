@@ -142,6 +142,157 @@ def test_ling_composite_rejects_unsupported_component_contracts(tmp_path, option
         )
 
 
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "./vision.onnx",
+        "./embedding.onnx",
+        "nested/../vision.onnx",
+        "vision.onnx.data",
+        "./embedding.onnx.data",
+        "vision.onnx.saving",
+        "embedding.onnx.data.bak",
+        "absolute-vision",
+        "../decoder.onnx",
+        "nested/../../decoder.onnx",
+    ],
+)
+def test_ling_component_destinations_reject_aliases_before_writing(tmp_path, filename):
+    if filename == "absolute-vision":
+        filename = str(tmp_path / "vision.onnx")
+    config = PretrainedConfig(text_config=_config(), vision_config=PretrainedConfig(), mrope_section=[8, 12, 12])
+    model = BailingVLModel(
+        config,
+        ir.DataType.BFLOAT16,
+        ir.DataType.BFLOAT16,
+        "cuda",
+        str(tmp_path),
+        {"use_paged_attention": True, "exclude_embeds": True, "filename": filename},
+    )
+    (tmp_path / "nested").mkdir()
+    existing = {
+        name: name.encode()
+        for name in ("model.onnx", "embedding.onnx", "embedding.onnx.data", "vision.onnx", "vision.onnx.data")
+    }
+    for name, content in existing.items():
+        (tmp_path / name).write_bytes(content)
+    model.decoder.save_model = Mock()
+    model.vision = Mock()
+
+    with pytest.raises(ValueError, match="conflicts|escapes"):
+        model.save_model(tmp_path)
+
+    model.decoder.save_model.assert_not_called()
+    model.vision.save_model.assert_not_called()
+    assert {name: (tmp_path / name).read_bytes() for name in existing} == existing
+
+
+@pytest.mark.parametrize("filename", ["decoder.onnx", "nested/decoder.onnx"])
+def test_ling_component_destinations_reject_symlinks_before_writing(tmp_path, filename):
+    config = PretrainedConfig(text_config=_config(), vision_config=PretrainedConfig(), mrope_section=[8, 12, 12])
+    model = BailingVLModel(
+        config,
+        ir.DataType.BFLOAT16,
+        ir.DataType.BFLOAT16,
+        "cuda",
+        str(tmp_path),
+        {"use_paged_attention": True, "exclude_embeds": True, "filename": filename},
+    )
+    (tmp_path / "nested").mkdir()
+    original = tmp_path / "vision.onnx.data"
+    original.write_bytes(b"existing vision weights")
+    (tmp_path / f"{filename}.data").symlink_to(original)
+    model.decoder.save_model = Mock()
+    model.vision = Mock()
+
+    with pytest.raises(ValueError, match="symlink"):
+        model.save_model(tmp_path)
+
+    model.decoder.save_model.assert_not_called()
+    model.vision.save_model.assert_not_called()
+    assert original.read_bytes() == b"existing vision weights"
+
+
+@pytest.mark.parametrize("filename", ["model.onnx", "./decoder.onnx", "nested/decoder.onnx"])
+def test_ling_distinct_component_destinations_preserve_save_order(tmp_path, filename):
+    config = PretrainedConfig(text_config=_config(), vision_config=PretrainedConfig(), mrope_section=[8, 12, 12])
+    model = BailingVLModel(
+        config,
+        ir.DataType.BFLOAT16,
+        ir.DataType.BFLOAT16,
+        "cuda",
+        str(tmp_path),
+        {"use_paged_attention": True, "exclude_embeds": True, "filename": filename},
+    )
+    (tmp_path / "nested").mkdir()
+    saves = Mock()
+    model.decoder.save_model = saves.decoder
+    model.vision = SimpleNamespace(save_model=saves.vision)
+
+    model.save_model(tmp_path)
+
+    assert [call[0] for call in saves.mock_calls] == ["decoder", "vision"]
+    saves.decoder.assert_called_once_with(tmp_path)
+    saves.vision.assert_called_once_with(tmp_path)
+
+
+@pytest.mark.parametrize("moe_quant_type", [None, "int4", "int8"])
+def test_ling_compressed_tensors_policy_matches_integer_expert_emission(tmp_path, monkeypatch, moe_quant_type):
+    config = PretrainedConfig(
+        model_type="bailing_moe_v3_vl",
+        text_config=_config(num_experts=2, num_experts_per_tok=1, n_group=1),
+        vision_config=PretrainedConfig(),
+        mrope_section=[8, 12, 12],
+        quantization_config={"quant_method": "compressed-tensors"},
+    )
+    monkeypatch.setattr(builder, "get_hf_details", lambda *args: {"hf_config": config})
+    options = ["use_paged_attention=true", "exclude_embeds=true", "qmoe_weights_prepacked=0"]
+    if moe_quant_type is not None:
+        options.append(f"moe_quant_type={moe_quant_type}")
+    parsed = builder.parse_extra_options("test/ling", "", str(tmp_path), "int4", "cuda", str(tmp_path), options)
+    model = BailingVLModel(config, ir.DataType.BFLOAT16, ir.DataType.INT4, "cuda", str(tmp_path), parsed).decoder
+    save_file(
+        {
+            "model.word_embeddings.weight": torch.ones(32, 128, dtype=torch.bfloat16),
+            "model.norm.weight": torch.ones(128, dtype=torch.bfloat16),
+            "lm_head.weight": torch.ones(32, 128, dtype=torch.bfloat16),
+            "gate_up.weight_packed": torch.full((256, 16), 0x76543210, dtype=torch.int32),
+            "gate_up.weight_scale": torch.ones(256, 4),
+            "down.weight_packed": torch.full((128, 16), 0x76543210, dtype=torch.int32),
+            "down.weight_scale": torch.ones(128, 4),
+        },
+        tmp_path / "model.safetensors",
+    )
+    weights = model.load_weights(str(tmp_path))
+    try:
+        experts = SimpleNamespace(
+            gate_up_proj=weights.make_linear("gate_up").weight.repeat(2, 1, 1),
+            down_proj=weights.make_linear("down").weight.repeat(2, 1, 1),
+        )
+        model.make_interleaved_swiglu_moe_preprocessing(2, SimpleNamespace(experts=experts))
+    finally:
+        weights.close()
+    names = model.make_moe_expert_names(2)
+    model.make_moe_op(
+        "/experts",
+        root_input="hidden",
+        router_probs="router",
+        weight1=names["gate_up_weight"],
+        scales1=names["gate_up_scales"],
+        weight2=names["down_weight"],
+        scales2=names["down_scales"],
+    )
+    node = model.values["/experts/output_0"].producer()
+    bits = 8 if moe_quant_type == "int8" else 4
+    assert node.op_type == "QMoE"
+    assert node.attributes["expert_weight_bits"].as_int() == bits
+    assert "quant_type" not in node.attributes
+    for key, elements in (("gate_up_weight", 2 * 256 * 128), ("down_weight", 2 * 128 * 128)):
+        tensor = model.graph.initializers[names[key]].const_value
+        assert tensor.dtype == ir.DataType.UINT8
+        assert tensor.nbytes == elements * bits // 8
+
+
 @pytest.mark.parametrize("text_only", [False, True])
 def test_ling_raw_configuration_preserves_source_activation_default(tmp_path, text_only):
     text = _config().to_dict()
@@ -426,6 +577,7 @@ def test_untied_bailing_checkpoint_requires_its_language_model_head(tmp_path):
 
 @pytest.fixture
 def bailing_vision_checkpoint(tmp_path):
+    """Qwen-derived tiny tower with a Ling-shaped merger/projector, not a publisher-source oracle."""
     config = Qwen3VLVisionConfig(
         depth=1,
         hidden_size=16,

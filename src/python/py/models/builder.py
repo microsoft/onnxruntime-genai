@@ -465,10 +465,9 @@ def check_extra_options(
             raise ValueError("Native FP8 checkpoint export is currently supported only for Qwen3.8 and BailingMoeV3.")
         if execution_provider not in {"cuda", "webgpu"}:
             raise ValueError("Native Qwen3.8/BailingMoeV3 FP8 checkpoint export requires the CUDA or WebGPU EP.")
-    if (
-        quantization_config.get("quant_method") in {"modelopt", "compressed-tensors"}
-        and getattr(config, "model_type", None) != "bailing_hybrid"
-    ):
+    if quantization_config.get("quant_method") in {"modelopt", "compressed-tensors"} and getattr(
+        config, "model_type", None
+    ) not in {"bailing_hybrid", "bailing_moe_v3_vl"}:
         if execution_provider != "cuda":
             raise ValueError("ModelOpt FP8/NVFP4 checkpoints are only supported on the CUDA EP.")
         if extra_options.get("moe_quant_type", "nvfp4") != "nvfp4":

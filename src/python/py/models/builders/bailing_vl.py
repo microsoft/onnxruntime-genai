@@ -4,10 +4,11 @@
 import json
 import os
 from copy import deepcopy
+from pathlib import Path
 
 import numpy as np
 import onnx_ir as ir
-from builder_config import serialize_genai_config
+from builder_config import paths_collide, serialize_genai_config, validate_destination_path
 from loaders.vision import load_bailing_visual
 from transformers import PretrainedConfig
 
@@ -85,6 +86,18 @@ class BailingVLModel(Model):
     def save_model(self, output_dir):
         if not self.text_only and self.vision is None:
             raise RuntimeError("make_model must construct Ling vision before save_model")
+        if not self.text_only:
+            output_root = Path(output_dir).resolve()
+            destinations = []
+            for filename in (self.decoder.filename, "embedding.onnx", "vision.onnx"):
+                for suffix in ("", ".data", ".saving", ".data.saving", ".bak", ".data.bak"):
+                    destination = output_root / f"{filename}{suffix}"
+                    validate_destination_path(output_root, destination, "Ling")
+                    destination = destination.resolve()
+                    validate_destination_path(output_root, destination, "Ling")
+                    if any(paths_collide(destination, other) for other in destinations):
+                        raise ValueError("Ling decoder filename conflicts with an emitted companion graph or data file")
+                    destinations.append(destination)
         self.decoder.save_model(output_dir)
         if self.vision is not None:
             self.vision.save_model(output_dir)

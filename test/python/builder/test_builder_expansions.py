@@ -168,6 +168,8 @@ def test_standard_helpers_live_with_their_expansions():
         "make_mrope_rotation",
         "make_mrope_output",
         "make_l2_normalize",
+        "make_clipped_swiglu",
+        "make_packed_mrope",
     ):
         assert name in Standard.__dict__
         assert name not in Model.__dict__
@@ -214,6 +216,8 @@ def test_expansion_overrides_have_existing_builder_counterparts():
             "make_mrope_rotation",
             "make_mrope_output",
             "make_l2_normalize",
+            "make_clipped_swiglu",
+            "make_packed_mrope",
         }
     )
     for path in (builders / "expansions").glob("*.py"):
