@@ -94,26 +94,8 @@ TEST(WebGpuCastTest, AppliesInt64OverrideBeforeProviderRegistration) {
   user_options.device_filtering_options.emplace();
   user_options.device_filtering_options->hardware_device_type = OrtHardwareDeviceType_GPU;
   auto& allocator = GetOrtGlobals()->device_allocators_[static_cast<int>(DeviceType::WEBGPU)];
-  const bool already_initialized = allocator.allocator_ != nullptr;
   EnsureDeviceOrtInit(*device, config);
-  ASSERT_EQ(allocator.provider_options_.name, "WebGPU");
-  auto& init_options = allocator.session_options_;
-  struct RestoreInitSessionOptions {
-    std::unique_ptr<OrtSessionOptions>& target;
-    std::unique_ptr<OrtSessionOptions> original;
-    ~RestoreInitSessionOptions() { target = std::move(original); }
-  } restore{init_options, std::move(init_options)};
-  // V1 factories capture their options at registration, unlike factories that read options at session creation.
-  Config::ProviderOptions native_options{"WebGPU", {}};
-  device->ShapeInitSessionProviderOptions(native_options, &user_options);
-  native_options.options.emplace_back("enableGraphCapture", "0");
-  if (!already_initialized) {
-    EXPECT_EQ(allocator.provider_options_.options, native_options.options);
-    ASSERT_TRUE(allocator.provider_options_.device_filtering_options);
-    EXPECT_EQ(allocator.provider_options_.device_filtering_options->hardware_device_type, OrtHardwareDeviceType_GPU);
-  }
-  init_options = OrtSessionOptions::Create();
-  AppendExecutionProviderV1(*init_options, native_options);
+  EXPECT_EQ(ConfigEntry(*allocator.session_options_, "ep.webgpuexecutionprovider.enableGraphCapture"), "0");
 
   auto memory_info = device->GetMemoryInfo();
   const std::array<float, 4> values{1.75f, -2.5f, 0.0f, 3.0f};
@@ -142,9 +124,6 @@ TEST(WebGpuCastTest, AppliesInt64OverrideBeforeProviderRegistration) {
   const auto round_trip_result = round_trip.CopyDeviceToCpu();
   for (size_t i = 0; i < expected.size(); ++i) {
     EXPECT_EQ(round_trip_result[i], static_cast<float>(expected[i]));
-  }
-  if (!already_initialized) {
-    EXPECT_EQ(allocator.provider_options_.options, native_options.options);
   }
 }
 

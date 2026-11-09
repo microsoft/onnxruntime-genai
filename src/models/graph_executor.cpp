@@ -4,7 +4,6 @@
 #include "graph_executor.h"
 #include "graph_builder.h"
 #include "generator/generators.h"
-#include <algorithm>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -49,14 +48,11 @@ std::unique_ptr<OrtSession> CreateSession(
     const std::string& ep_name,
     const std::vector<const char*>& session_config_keys,
     const std::vector<const char*>& session_config_values) {
-  const auto& allocator =
-      GetOrtGlobals()->device_allocators_[static_cast<int>(DeviceType::WEBGPU)];
-  const bool reuse_webgpu_options =
-      device_type == DeviceType::WEBGPU && ep_name == "WebGpuExecutionProvider" && allocator.session_options_;
-  // Auxiliary WebGPU graphs share the allocator's device/cache configuration.
-  // Register a fresh provider after graph-specific overrides; cloning would reuse
-  // a native factory whose configuration was already captured.
-  auto provider_options = reuse_webgpu_options ? allocator.provider_options_ : Config::ProviderOptions{ep_name, {}};
+  const bool is_webgpu = device_type == DeviceType::WEBGPU && ep_name == "WebGpuExecutionProvider";
+  Config::ProviderOptions provider_options{ep_name, {}};
+  if (is_webgpu) {
+    provider_options.options.emplace_back("enableGraphCapture", "0");
+  }
   auto session_options = OrtSessionOptions::Create();
   session_options->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
@@ -65,14 +61,15 @@ std::unique_ptr<OrtSession> CreateSession(
     session_options->AddConfigEntry(session_config_keys[i], session_config_values[i]);
     constexpr std::string_view webgpu_prefix = "ep.webgpuexecutionprovider.";
     const std::string_view key{session_config_keys[i]};
-    if (reuse_webgpu_options && key.compare(0, webgpu_prefix.size(), webgpu_prefix) == 0) {
+    if (is_webgpu && key.compare(0, webgpu_prefix.size(), webgpu_prefix) == 0) {
       const auto option_name = key.substr(webgpu_prefix.size());
-      auto option = std::find_if(provider_options.options.begin(), provider_options.options.end(),
-                                 [option_name](const auto& entry) { return entry.first == option_name; });
-      if (option == provider_options.options.end()) {
-        provider_options.options.emplace_back(option_name, session_config_values[i]);
+      if (option_name == "enableGraphCapture") {
+        if (std::string_view{session_config_values[i]} != "0") {
+          throw std::invalid_argument("Auxiliary WebGPU graphs require enableGraphCapture=0");
+        }
       } else {
-        option->second = session_config_values[i];
+        // Native factories capture provider options at registration.
+        provider_options.options.emplace_back(option_name, session_config_values[i]);
       }
     }
   }

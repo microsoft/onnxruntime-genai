@@ -405,7 +405,6 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   device.InitDeviceAllocators(user_provider_options, allocator.device_id_);
   allocator.host_accessible_allocator_ = device.GetHostAccessibleAllocator();
   if (type == DeviceType::WEBGPU) {
-    allocator.provider_options_ = std::move(provider_options_list.front());
     allocator.session_options_ = std::move(session_options);
   }
 }
