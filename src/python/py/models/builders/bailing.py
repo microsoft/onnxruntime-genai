@@ -12,6 +12,7 @@ from .base import Model
 from .expansions.standard import Standard
 from .qwen3_5.text import Qwen35TextModel
 
+
 class BailingMoeV3Model(Qwen35TextModel):
     """Builder for inclusionAI/Ling-3.0-tiny (BailingMoeV3ForCausalLM, model_type='bailing_hybrid')."""
 
@@ -323,7 +324,12 @@ class BailingMoeV3Model(Qwen35TextModel):
         rope_node_in = rope_in
         if rope_dtype != self.io_dtype:
             cast_in = f"{name}/Cast_in"
-            self.make_cast(cast_in, rope_in, rope_dtype, [1, "num_tokens", dim] if self.use_paged_attention else [*token_shape, dim])
+            self.make_cast(
+                cast_in,
+                rope_in,
+                rope_dtype,
+                [1, "num_tokens", dim] if self.use_paged_attention else [*token_shape, dim],
+            )
             rope_node_in = f"{cast_in}/output_0"
 
         rope_out = f"{name}/rope_raw"
@@ -364,9 +370,7 @@ class BailingMoeV3Model(Qwen35TextModel):
         if self.mla_attrs["q_lora_rank"] is None:
             return self.make_matmul(attention.q_proj, f"{basename}/q_proj/MatMul", root_input)
         qa_matmul = self.make_matmul(attention.q_a_proj, f"{basename}/q_a_proj/MatMul", root_input)
-        qa_norm = self.make_mla_projection_norm(
-            layer_id, attention.q_a_layernorm, f"{qa_matmul}/output_0", "q"
-        )
+        qa_norm = self.make_mla_projection_norm(layer_id, attention.q_a_layernorm, f"{qa_matmul}/output_0", "q")
         return self.make_matmul(attention.q_b_proj, f"{basename}/q_b_proj/MatMul", qa_norm)
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
@@ -676,7 +680,7 @@ class BailingMoeV3Model(Qwen35TextModel):
 
     def make_moe_preprocessing(self, layer_id, moe, root_input):
         moe.gate.exclude_from_quantization = True
-        self.make_interleaved_swiglu_moe_preprocessing(layer_id, moe)
+        self.make_interleaved_swiglu_moe_preprocessing(layer_id, moe, self.intermediate_size)
 
     def make_moe_router(self, layer_id, moe, root_input):
         """Emit BailingMoeV3's fused MoEGroupRouter (noaux_tc group-limited sigmoid + expert_bias routing)."""

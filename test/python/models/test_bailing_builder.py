@@ -110,7 +110,7 @@ def test_ling_composite_normalizes_decoder_without_losing_native_fp8_metadata(tm
     assert decoder.config.quantization_config == config.quantization_config
     assert decoder.config.quantization_config is not config.quantization_config
     assert decoder.config.name_or_path == "test/ling-vl"
-    assert decoder.q_lora_rank is None
+    assert decoder.mla_attrs["q_lora_rank"] is None
     assert not decoder.config.tie_word_embeddings
     assert decoder.rope_attrs["interleaved"] == 1
     assert decoder.rope_attrs["op_type"] == ("RotaryEmbedding" if text_only else "MRotaryEmbedding")
@@ -266,10 +266,10 @@ def test_ling_compressed_tensors_policy_matches_integer_expert_emission(tmp_path
     weights = model.load_weights(str(tmp_path))
     try:
         experts = SimpleNamespace(
-            gate_up_proj=weights.make_linear("gate_up").weight.repeat(2, 1, 1),
-            down_proj=weights.make_linear("down").weight.repeat(2, 1, 1),
+            gate_up_proj=weights.make_linear_module("gate_up").weight.repeat(2, 1, 1),
+            down_proj=weights.make_linear_module("down").weight.repeat(2, 1, 1),
         )
-        model.make_interleaved_swiglu_moe_preprocessing(2, SimpleNamespace(experts=experts))
+        model.make_interleaved_swiglu_moe_preprocessing(2, SimpleNamespace(experts=experts), model.intermediate_size)
     finally:
         weights.close()
     names = model.make_moe_expert_names(2)

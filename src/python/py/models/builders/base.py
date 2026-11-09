@@ -5998,7 +5998,7 @@ class Model:
             names[f"{key}_bias"] = f"{prefix}.bias"
         return names
 
-    def make_interleaved_swiglu_moe_preprocessing(self, layer_id, moe):
+    def make_interleaved_swiglu_moe_preprocessing(self, layer_id, moe, intermediate_size):
         """Emit the expert initializers for a bias-free SwiGLU MoE layer with fused gate/up experts.
 
         Hugging Face stores ``[gate | up]`` concatenated along the output axis of ``gate_up_proj``
@@ -6020,9 +6020,7 @@ class Model:
 
         names = self.make_moe_expert_names(layer_id)
         num_experts = self.moe_attrs["num_experts"]
-        self.make_initializer(
-            torch.zeros(num_experts, 2 * self.moe_intermediate_size), names["gate_up_bias"], to=self.io_dtype
-        )
+        self.make_initializer(torch.zeros(num_experts, 2 * intermediate_size), names["gate_up_bias"], to=self.io_dtype)
         self.make_initializer(torch.zeros(num_experts, self.hidden_size), names["down_bias"], to=self.io_dtype)
 
     def make_moe_expert_initializers(self, layer_id, experts, gate_up_weight=None, down_weight=None):

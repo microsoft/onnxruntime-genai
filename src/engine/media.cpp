@@ -251,7 +251,7 @@ PreparedMediaTurn MediaStore::Prepare(const std::string& prompt, std::span<const
   std::vector<int32_t> expected_tokens;
   if (ling) {
     // Added newlines can merge with adjacent whitespace, so admission uses exact final tokens.
-    expected_tokens = TokenizeLingImagePrompt(tokenizer, prompt, expected_grids, static_cast<int64_t>(merge));
+    expected_tokens = TokenizeLingImagePrompt(*model_->vision_->processor->tokenizer_, prompt, expected_grids, static_cast<int64_t>(merge));
     expected_rows = expected_tokens.size();
     if (expected_rows > remaining_rows)
       throw std::invalid_argument("Expanded image rows exceed the remaining session capacity.");
