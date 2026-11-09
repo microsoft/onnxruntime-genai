@@ -269,7 +269,8 @@ def test_ling_signed_position_domain_requires_unscaled_source_context(tmp_path, 
 
 
 @pytest.mark.parametrize("text_only", [False, True])
-def test_ling_composite_config_preserves_component_and_position_contracts(tmp_path, text_only):
+@pytest.mark.parametrize("dtype", [ir.DataType.FLOAT16, ir.DataType.BFLOAT16])
+def test_ling_composite_config_preserves_component_and_position_contracts(tmp_path, text_only, dtype):
     (tmp_path / "generation_config.json").write_text(json.dumps({"eos_token_id": 2, "pad_token_id": 0}))
     config = PretrainedConfig(
         _name_or_path=str(tmp_path),
@@ -282,15 +283,38 @@ def test_ling_composite_config_preserves_component_and_position_contracts(tmp_pa
     )
     model = BailingVLModel(
         config,
-        ir.DataType.BFLOAT16,
-        ir.DataType.BFLOAT16,
+        dtype,
+        ir.DataType.INT4,
         "cuda",
         str(tmp_path),
-        {"use_paged_attention": True, "exclude_embeds": not text_only, "text_only": text_only},
+        {
+            "use_paged_attention": True,
+            "exclude_embeds": not text_only,
+            "text_only": text_only,
+            "enable_cuda_graph": False,
+            "max_batch_size": 1,
+            "max_scheduled_tokens": 17,
+            "paged_chunk_size": 17,
+            "num_blocks": 16,
+            "paged_block_size": 256,
+        },
     )
     model.decoder.make_inputs_and_outputs()
     model.make_genai_config(config, {}, str(tmp_path))
-    saved = json.loads((tmp_path / "genai_config.json").read_text())["model"]
+    emitted = json.loads((tmp_path / "genai_config.json").read_text())
+    saved = emitted["model"]
+    session_options = saved["decoder"]["session_options"]
+    assert session_options.get("session.use_device_allocator_for_initializers") == (None if text_only else "1")
+    assert session_options["ep.cuda.gated_delta_net_bf16_precision"] == "bf16"
+    assert session_options["provider_options"][0]["cuda"]["enable_cuda_graph"] == "0"
+    assert model.decoder.io_dtype == dtype
+    assert model.decoder.onnx_dtype == ir.DataType.INT4
+    assert emitted["search"]["chunk_size"] == 17
+    batching = emitted["engine"]["dynamic_batching"]
+    assert batching["max_batch_size"] == 1
+    assert batching["max_scheduled_tokens"] == 17
+    assert batching["num_blocks"] == 16
+    assert batching["block_size"] == 256
     assert saved["type"] == ("bailing_hybrid" if text_only else "bailing_moe_v3_vl")
     assert saved["decoder"]["session_options"]["provider_options"][0]["cuda"]["use_tf32"] == "0"
     with pytest.raises(ValueError, match="FP32 routing"):
@@ -306,6 +330,7 @@ def test_ling_composite_config_preserves_component_and_position_contracts(tmp_pa
         assert saved["image_token_id"] == 29
         assert saved["vision"]["patch_size"] == 16
         assert saved["vision"]["outputs"] == {"image_features": "image_features"}
+        assert "session_options" not in saved["vision"]
         assert saved["embedding"]["inputs"] == {"input_ids": "input_ids"}
         assert saved["embedding"]["outputs"] == {"inputs_embeds": "inputs_embeds"}
         assert saved["decoder"]["inputs"]["inputs_embeds"] == "inputs_embeds"

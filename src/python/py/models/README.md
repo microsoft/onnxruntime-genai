@@ -748,7 +748,7 @@ python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra
 
 ##### Device Allocator for Initializers
 
-`use_device_allocator_for_initializers=true` opts into `session.use_device_allocator_for_initializers=1` (default `false`). Paged Qwen3.8 sessions enable it automatically. Initializers then bypass the ONNX Runtime arena, avoiding retention of the original allocation when a kernel replaces a weight during `PrePack`.
+`use_device_allocator_for_initializers=true` opts into `session.use_device_allocator_for_initializers=1` (default `false`). Paged Qwen3.8 and complete packed CUDA Bailing-VL sessions enable it automatically. The entry is a flat string `"session.use_device_allocator_for_initializers": "1"` in `model.decoder.session_options`; Bailing-VL vision inherits the decoder session options. Initializers then bypass the ONNX Runtime arena, avoiding retention of the original allocation when a kernel replaces a weight during `PrePack`.
 
 ```bash
 # From wheel:

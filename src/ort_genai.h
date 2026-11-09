@@ -934,7 +934,8 @@ struct OgaVideos : OgaAbstract {
   }
 
   OgaVideoMetadata Metadata(size_t clip) const {
-    OgaVideoMetadata metadata{sizeof(OgaVideoMetadata)};
+    OgaVideoMetadata metadata{};
+    metadata.struct_size = sizeof(metadata);
     OgaCheckResult(OgaVideosGetMetadata(this, clip, &metadata));
     return metadata;
   }

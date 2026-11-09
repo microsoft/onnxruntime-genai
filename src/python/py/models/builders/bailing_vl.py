@@ -97,6 +97,8 @@ class BailingVLModel(Model):
         with open(config_path, encoding="utf-8") as handle:
             genai_config = json.load(handle)
         model_config = genai_config["model"]
+        # Let consumed prepack initializers be released instead of retained in the CUDA arena.
+        model_config["decoder"]["session_options"]["session.use_device_allocator_for_initializers"] = "1"
         model_config["image_token_id"] = config.image_token_id
         model_config["vision_start_token_id"] = config.vision_start_token_id
         if getattr(config, "video_token_id", None) is not None:
