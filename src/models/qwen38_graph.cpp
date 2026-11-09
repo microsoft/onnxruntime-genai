@@ -3316,6 +3316,7 @@ std::optional<Qwen38ContextTier> Qwen38ContextTierForTarget(const std::string& t
     size_t end = stem.find('_', begin);
     if (end == std::string::npos) end = stem.size();
     const std::string_view part = std::string_view(stem).substr(begin, end - begin);
+    if (part == "256k") return Qwen38ContextTier{"256k", 262152};
     if (part == "128k") return Qwen38ContextTier{"128k", 133128};
     if (part == "64k") return Qwen38ContextTier{"64k", 65800};
     if (part == "32k") return Qwen38ContextTier{"32k", 33032};
