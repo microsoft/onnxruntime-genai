@@ -50,11 +50,40 @@ python tools/python/qwen38_flash_next/build_package.py \
 
 ---
 
-## 3. Component Precision Options (`precision_options.py`)
+## 3. Exporting Zero-Copy GGUF Model Packages (`build_package_gguf.py`)
 
-`build_package.py` accepts `--precision-profile {default,fp32,fp32_fp16kv}` as well as individual per-component flags (`--kv-cache-dtype {int8,bf16,fp16}`, `--rotary-cache-dtype {bf16,fp32}`, `--indexer-dtype`, `--gdn-gate-dtype`, `--gdn-precision`, `--ple-engram`, `--ple-norm-dtype`):
+`tools/python/qwen38_flash_next/build_package_gguf.py` exports `unsloth/Qwen3.8-Flash-Next-GGUF` quantization variants (`UD-IQ1_S`, `UD-IQ2_XS`, `UD-IQ3_XXS`) and the `IQ4_NL` n-gram (`engram`) GGUF directly to `qwen38_flash_graph` packages using `GatherPacked`, `MatMulPacked`, and `MoEPacked`, sharing dynamic cache surgery (`ensure_unified_dynamic_cache_model`), protocol boundary tokens, and config migration helpers with `build_package.py`:
 
 ```bash
+python tools/python/qwen38_flash_next/build_package_gguf.py \
+  --gguf-root /data/tlwu/qwen_flash_next_ggufs \
+  --base-pkg /data/tlwu/qwen_flash_next_int4_int8_rc5_contrib_dflash2_qmoe_2b375_x02_y14_z32_dp23_b64 \
+  --out-root /data/tlwu \
+  --variants UD-IQ1_S,UD-IQ2_XS,UD-IQ3_XXS
+```
+
+| GGUF Variant | Total GPU Weights | 32K Peak VRAM (`num_blocks=142`, min `141`) | 64K Peak VRAM (`num_blocks=270`, min `269`) | 128K Peak VRAM (`num_blocks=525`) | 256K Peak VRAM (`num_blocks=1037`) | `runtime_profiles` Min VRAM (`gpu-32k` / `gpu-64k` / `gpu-128k` / `gpu-256k`) |
+|---|---:|---:|---:|---:|---:|---:|
+| **`UD-IQ1_S`** | `35.66 GiB` (`38.29 GB`) | `41.39 GiB` (`44.45 GB`) | `41.74 GiB` (`44.82 GB`) | `42.85 GiB` (`46.00 GB`) | `45.54 GiB` (`48.90 GB`) | `47 GB` / `48 GB` / `49 GB` / `52 GB` |
+| **`UD-IQ2_XS`** | `44.46 GiB` (`47.74 GB`) | `50.14 GiB` (`53.84 GB`) | `50.49 GiB` (`54.21 GB`) | `51.59 GiB` (`55.39 GB`) | `54.28 GiB` (`58.28 GB`) | `56 GB` / `57 GB` / `58 GB` / `61 GB` |
+| **`UD-IQ3_XXS`** | `51.73 GiB` (`55.55 GB`) | `57.44 GiB` (`61.68 GB`) | `57.79 GiB` (`62.05 GB`) | `58.89 GiB` (`63.24 GB`) | `61.59 GiB` (`66.13 GB`) | `64 GB` / `65 GB` / `66 GB` / `69 GB` |
+
+---
+
+## 4. Component Precision Options (`precision_options.py`)
+
+Both `build_package.py` and `build_package_gguf.py` accept `--precision-profile {default,fp32,fp32_fp16kv,fp32_fp16kv_v2}` as well as individual per-component flags (`--kv-cache-dtype`, `--rotary-cache-dtype`, `--qsa-qkv-dtype`, `--indexer-dtype`, `--gdn-gate-dtype`, `--gdn-precision`, `--ple-engram`, `--ple-norm-dtype`, `--small-weights-source`):
+
+```bash
+# Build rc5_top16_fp32_fp16kv_v2, rc5_all_int4_fp32_fp16kv_v2, and rc5_2b375_fp32_fp16kv_v2
+# (native INT8 PLE + bit-exact RC5-calibrated FP16 V & FP16 KV cache + FP32 rotary cache + FP32 GDN/indexer/PLE norms):
+python tools/python/qwen38_flash_next/build_package.py \
+  --hf-dir /data/tlwu/Qwen3.8-Flash-Next \
+  --dflash-dir /data/tlwu/Qwen3.8-Flash-Next-DFlash2 \
+  --preset top16_44_33_b64,qwen_flash_next_int4_int8_rc5_contrib_dflash2,2b375_x02_y14_z32_dp23_b64 \
+  --precision-profile fp32_fp16kv_v2 \
+  --out /data/tlwu/qwen_flash_next_rc5_v2
+
 # Build rc5_all_int4_fp32_fp16kv (FP16 KV cache + FP32 rotary cache + FP32 GDN/indexer/PLE norms + Q8_0 engram):
 python tools/python/qwen38_flash_next/build_package.py \
   --hf-dir /data/tlwu/Qwen3.8-Flash-Next \
@@ -70,5 +99,14 @@ python tools/python/qwen38_flash_next/build_package.py \
   --preset 2b375_x02_y14_z32_dp23_b64 \
   --precision-profile fp32 \
   --out /data/tlwu/qwen_flash_next_rc5_2b375
+
+# Build GGUF UD-IQ3_XXS and UD-IQ2_XS with Q8_0 engram, FP32 long-context path, and FP16 KV cache:
+python tools/python/qwen38_flash_next/build_package_gguf.py \
+  --gguf-root /data/tlwu/qwen_flash_next_ggufs \
+  --base-pkg /data/tlwu/qwen_flash_next_int4_int8_rc5_contrib_dflash2_qmoe_top16_44_33_b64_unified \
+  --out-root /data/tlwu \
+  --variants UD-IQ3_XXS,UD-IQ2_XS \
+  --precision-profile fp32_fp16kv \
+  --pkg-suffix _q8_engram_fp32_fp16kv
 ```
 
