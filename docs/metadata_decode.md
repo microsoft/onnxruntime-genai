@@ -130,7 +130,7 @@ not a heap-allocated PImpl. Token IDs and optional timing are separate collectio
 producer's storage and must remain valid for `ProcessNext(outputs)`. Native timing uses
 `std::pair<int64_t, int64_t>` and `std::optional`, not a public C interval layout or
 an integer presence flag. Timestamp records store frame bounds as an integer pair
-and rounded second bounds as a `std::pair<double, double>`. The first element is
+and rounded millisecond bounds as a `std::pair<int64_t, int64_t>`. The first element is
 the start and the second is the exclusive stop. Public C declarations and result
 handles remain field-based and opaque.
 
@@ -236,7 +236,7 @@ origins and interval semantics. Diarization is not implemented by this processor
 C exposes opaque `OgaASRPostProcessor`, `OgaASRPostProcessorResult`,
 `OgaASRPostProcessorTimestampResult`, and
 `OgaASRPostProcessorTimestampRecord` handles, with typed getters for text,
-timestamp presence, word/segment counts, records, frame bounds, and second bounds.
+timestamp presence, word/segment counts, records, frame bounds, and millisecond bounds.
 Result and record layouts are private. An out-of-range C result or record lookup
 returns null. `OgaASRPostProcessorTimestampResultGetTimestampRecord()` selects
 words or segments through `OgaTimestampRecordKind`; it also returns null for an
@@ -273,7 +273,7 @@ Python uses `ASRPostProcessor(generator)`, `process_next()`,
 `timestamp_result` properties. `ASRPostProcessorTimestampResult` objects expose
 `words` and `segments`;
 records expose `text`, `frame_interval`, and `time_interval`. Interval properties
-return two-element tuples ordered as `(start, stop)`. These pybind11 properties
+return two-element integer tuples ordered as `(start, stop)`, in milliseconds. These pybind11 properties
 call the C++ wrapper getters, which delegate to the per-field C API. The binding
 constructs Python strings, tuples, and lists without exposing native layouts.
 
@@ -282,7 +282,7 @@ C# uses `ASRPostProcessor(generator)`, `ProcessNext()`,
 `ASRPostProcessorResult` objects expose read-only `Text` and nullable `TimestampResult`
 properties. `ASRPostProcessorTimestampResult` objects expose `Words` and `Segments`; records expose `Text`,
 `FrameInterval`, and `TimeInterval`. Interval properties return named `(Start, Stop)`
-value tuples. For example, read `record.Text` and `record.TimeInterval.Start`.
+value tuples of `long` milliseconds. For example, read `record.Text` and `record.TimeInterval.Start`.
 
 C++ follows the global, method-only opaque wrapper pattern. `GetNextResults()`
 returns borrowed `const OgaASRPostProcessorResult*` pointers, not copied payloads.

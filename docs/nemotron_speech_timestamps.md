@@ -68,7 +68,7 @@ flowchart TB
     stream --> internal[Private ASRPostProcessor.ProcessNext with outputs]
     internal --> ortx[Extensions: vocabulary facts + ordinary cached decode]
     ortx --> align[GenAI MetadataCoreState: group words and align buffered frames]
-    align --> events[Per-call word / segment events with frame and second bounds]
+    align --> events[Per-call word / segment events with frame and millisecond bounds]
     events --> read[GetNextResults: read only]
     stream --> final[Finalize: flush trailing word / segment]
     final --> trailing[Trailing word / segment events]
@@ -115,7 +115,7 @@ rounded gap threshold once from the existing model configuration. The internal
 timestamp code receives those derived values, not another copy of sample rate,
 hop length, and subsampling factor. Native token input uses an optional
 `std::pair<int64_t, int64_t>`; timestamp records also contain a
-`std::pair<double, double>` for second bounds. Native interval layouts are not
+`std::pair<int64_t, int64_t>` for millisecond bounds. Native interval layouts are not
 exposed by the public C output handles or field accessors.
 
 ## Decoding
@@ -227,7 +227,7 @@ The VAD case requires a model with a configured VAD component. These tests run i
 
 Frame and time intervals are half-open: `[start, stop)`. Each RNNT token initially covers one
 encoder frame. Frame positions are absolute across all submitted audio, including chunks discarded
-by VAD. Time values are seconds rounded to two decimal places.
+by VAD. Time values are signed 64-bit integer milliseconds, rounded once from acoustic frames.
 
 Punctuation remains attached to its word. Segments complete on configured suffixes, configured
 frame gaps, or finalization.

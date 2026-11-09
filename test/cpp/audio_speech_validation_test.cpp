@@ -384,8 +384,8 @@ TEST_F(MetadataCoreStateTests, BatchMatchesIncrementalProcessing) {
     for (size_t index = 0; index < actual.size(); ++index) {
       EXPECT_EQ(actual[index].text, expected[index].text);
       EXPECT_EQ(actual[index].frame_interval, expected[index].frame_interval);
-      EXPECT_DOUBLE_EQ(actual[index].time_interval.first, expected[index].time_interval.first);
-      EXPECT_DOUBLE_EQ(actual[index].time_interval.second, expected[index].time_interval.second);
+      EXPECT_EQ(actual[index].time_interval.first, expected[index].time_interval.first);
+      EXPECT_EQ(actual[index].time_interval.second, expected[index].time_interval.second);
     }
   };
   expect_records(batch.timestamps->words, incremental.timestamps->words);
@@ -552,8 +552,8 @@ TEST_F(MetadataCoreStateTests, RepeatedVocabularyIdsKeepPositionSpecificInterval
   EXPECT_EQ(words[1].text, words[0].text);
   EXPECT_EQ(words[0].frame_interval.first, 2);
   EXPECT_EQ(words[0].frame_interval.second, 7);
-  EXPECT_DOUBLE_EQ(words[0].time_interval.first, 0.2);
-  EXPECT_DOUBLE_EQ(words[0].time_interval.second, 0.7);
+  EXPECT_EQ(words[0].time_interval.first, 200);
+  EXPECT_EQ(words[0].time_interval.second, 700);
   EXPECT_EQ(words[1].frame_interval.first, 20);
   EXPECT_EQ(words[1].frame_interval.second, 23);
 }
@@ -590,14 +590,14 @@ TEST_F(MetadataCoreStateTests, OpaqueFieldGettersReturnBorrowedRecords) {
           EXPECT_EQ(frames.first, 4);
           EXPECT_EQ(frames.second, 5);
           const auto times = record->GetTimestampInterval();
-          EXPECT_DOUBLE_EQ(times.first, 0.4);
-          EXPECT_DOUBLE_EQ(times.second, 0.5);
+          EXPECT_EQ(times.first, 400);
+          EXPECT_EQ(times.second, 500);
           (use_segments ? segments : words).append(record->GetText());
           EXPECT_EQ(record->GetText(), OgaASRPostProcessorTimestampRecordGetText(native_record));
           EXPECT_EQ(frames.first, OgaASRPostProcessorTimestampRecordGetStartFrame(native_record));
           EXPECT_EQ(frames.second, OgaASRPostProcessorTimestampRecordGetStopFrame(native_record));
-          EXPECT_DOUBLE_EQ(times.first, OgaASRPostProcessorTimestampRecordGetStartTime(native_record));
-          EXPECT_DOUBLE_EQ(times.second, OgaASRPostProcessorTimestampRecordGetStopTime(native_record));
+          EXPECT_EQ(times.first, OgaASRPostProcessorTimestampRecordGetStartTime(native_record));
+          EXPECT_EQ(times.second, OgaASRPostProcessorTimestampRecordGetStopTime(native_record));
         }
         EXPECT_EQ(timestamps->GetTimestampRecord(kind, count), nullptr);
       }
@@ -610,6 +610,36 @@ TEST_F(MetadataCoreStateTests, OpaqueFieldGettersReturnBorrowedRecords) {
   EXPECT_GT(record_count, 0U);
   EXPECT_EQ(words, "Hello world.");
   EXPECT_EQ(segments, words);
+}
+
+TEST_F(MetadataCoreStateTests, TimestampMillisecondsRoundOnceFromFrames) {
+  model->config_->model.sample_rate = 16000;
+  model->config_->model.hop_length = 20;
+  source->SetStep(tokens, 1);
+  Generators::ASRPostProcessor processor{*generator};
+  size_t word_count = 0;
+  const auto check_words = [&] {
+    for (const auto& result : processor.GetNextResults()) {
+      for (const auto& word : result.timestamps->words) {
+        EXPECT_EQ(word.time_interval.first, 1);
+        EXPECT_EQ(word.time_interval.second, 3);
+        ++word_count;
+      }
+    }
+  };
+  processor.ProcessNext();
+  check_words();
+  processor.Finalize();
+  check_words();
+  EXPECT_EQ(word_count, 2U);
+}
+
+TEST_F(MetadataCoreStateTests, TimestampMillisecondsRejectOverflow) {
+  source->SetStep(tokens, INT64_MAX - 1);
+  Generators::ASRPostProcessor processor{*generator};
+  EXPECT_THROW({
+    processor.ProcessNext();
+    processor.Finalize(); }, std::overflow_error);
 }
 
 TEST_F(MetadataCoreStateTests, SegmentGapsAndFinalizationPreserveExactText) {

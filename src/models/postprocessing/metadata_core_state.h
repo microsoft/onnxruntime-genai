@@ -23,7 +23,7 @@ struct TokenMetadataInput {
 struct TimestampRecord {
   std::string text;
   std::pair<int64_t, int64_t> frame_interval;
-  std::pair<double, double> time_interval;
+  std::pair<int64_t, int64_t> time_interval;
 };
 
 struct TimestampResult {

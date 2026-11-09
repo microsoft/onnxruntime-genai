@@ -416,9 +416,9 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern long OgaASRPostProcessorTimestampRecordGetStopFrame(IntPtr record);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern double OgaASRPostProcessorTimestampRecordGetStartTime(IntPtr record);
+        public static extern long OgaASRPostProcessorTimestampRecordGetStartTime(IntPtr record);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern double OgaASRPostProcessorTimestampRecordGetStopTime(IntPtr record);
+        public static extern long OgaASRPostProcessorTimestampRecordGetStopTime(IntPtr record);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaTokenizerStreamReset(IntPtr /* OgaTokenizerStream* */ tokenizerStream);

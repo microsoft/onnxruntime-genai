@@ -3,13 +3,19 @@
 #include <algorithm>
 #include <cmath>
 #include <cctype>
+#include <limits>
 #include <stdexcept>
 
 namespace Generators {
 
 namespace {
-double RoundTimestamp(double value) {
-  return std::round(value * 100.0) / 100.0;
+int64_t TimestampMilliseconds(int64_t frame, double seconds_per_frame) {
+  const auto milliseconds = std::round(static_cast<long double>(frame) * seconds_per_frame * 1000.0L);
+  if (!std::isfinite(milliseconds) || milliseconds < 0 ||
+      milliseconds >= std::ldexp(1.0L, std::numeric_limits<int64_t>::digits)) {
+    throw std::overflow_error("Timestamp interval exceeds the signed 64-bit millisecond range");
+  }
+  return static_cast<int64_t>(milliseconds);
 }
 
 bool EndsWithSeparator(std::string_view text, std::string_view separator) {
@@ -52,7 +58,7 @@ void MetadataCoreState::ValidateInput(const TokenMetadataInput& token) const {
 
 void MetadataCoreState::AddRecord(std::vector<TimestampRecord>& records, std::string_view text,
                                   std::pair<int64_t, int64_t> interval) {
-  records.push_back({std::string(text), interval, {RoundTimestamp(interval.first * seconds_per_frame_), RoundTimestamp(interval.second * seconds_per_frame_)}});
+  records.push_back({std::string(text), interval, {TimestampMilliseconds(interval.first, seconds_per_frame_), TimestampMilliseconds(interval.second, seconds_per_frame_)}});
 }
 
 void MetadataCoreState::CompleteSegment(TimestampResult& result) {
