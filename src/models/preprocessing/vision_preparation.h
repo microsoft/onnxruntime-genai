@@ -56,6 +56,7 @@ struct VisionPreparation {
   // Donate private owned CPU feeds; materializers must not reuse or mutate their buffers.
   virtual std::vector<NamedTensors> Materialize(const VisionPlan& plan) const = 0;
   virtual void ValidateTextTokens(std::span<const int32_t> tokens) const = 0;
+  virtual void ValidateDecoderMetadata(const OrtModelMetadata&) const {}
   virtual std::array<int64_t, 2> CoordinateRange() const = 0;
 };
 

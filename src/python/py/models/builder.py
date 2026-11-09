@@ -432,11 +432,13 @@ def check_extra_options(
 
     if extra_options.get("use_paged_attention", False) and extra_options.get("exclude_embeds", False):
         if not (
-            getattr(config, "model_type", None) in {"qwen3_5", "qwen3_5_moe", "qwen4_exp"}
+            getattr(config, "model_type", None) in {"qwen3_5", "qwen3_5_moe", "qwen4_exp", "bailing_moe_v3_vl"}
             and getattr(config, "vision_config", None) is not None
             and not extra_options.get("text_only", False)
         ):
-            raise ValueError("use_paged_attention with exclude_embeds requires a complete Qwen vision composite.")
+            raise ValueError(
+                "use_paged_attention with exclude_embeds requires a complete Qwen vision composite or Ling Flash-VL composite."
+            )
 
     if (
         execution_provider == "webgpu"

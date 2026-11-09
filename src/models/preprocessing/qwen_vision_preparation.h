@@ -2,34 +2,25 @@
 // Licensed under the MIT License.
 #pragma once
 
-#include "processor.h"
-#include "vision_preparation.h"
+#include "patch_vision_preparation.h"
 
 namespace Generators {
 
-struct QwenImageProcessor;
-
-struct QwenVisionPreparation : VisionPreparation {
+struct QwenVisionPreparation : PatchVisionPreparation {
   QwenVisionPreparation(const Config& config, const SessionInfo& info,
                         const Tokenizer& tokenizer, const QwenImageProcessor& images, ThreadPool* thread_pool);
-  size_t Estimate(const VisionPreparationInput& input, size_t host_limit) const override;
-  std::unique_ptr<const VisionPlan> Plan(const Tokenizer& tokenizer,
-                                         const VisionPreparationInput& input, size_t host_limit) const override;
-  std::vector<NamedTensors> Materialize(const VisionPlan& plan) const override;
-  void ValidateTextTokens(std::span<const int32_t> tokens) const override;
+  std::array<int64_t, 3> ImageGrid(uint32_t width, uint32_t height) const override;
+  std::array<int64_t, 3> VideoGrid(uint32_t width, uint32_t height, size_t frames) const override;
+  size_t PromptBytes(std::string_view prompt, const VisionMediaPromptSource& source, size_t maximum_bytes) const override;
+  std::string ExpandPrompt(std::string_view prompt, std::span<const std::array<int64_t, 3>> images,
+                           std::span<const VisionVideoPrompt> videos, size_t maximum_bytes,
+                           std::vector<size_t>& unit_order) const override;
+  std::shared_ptr<const VisionPosition> Position(std::array<int64_t, 3> grid) const override;
   std::array<int64_t, 2> CoordinateRange() const override;
 
  private:
-  const Config& config_;
-  const QwenImageProcessor& images_;
-  ThreadPool* thread_pool_;
-  int64_t min_pixels_{}, max_pixels_{};
   int64_t video_min_pixels_{}, video_max_pixels_{};
   size_t max_video_tokens_{};
-  int64_t pixel_width_{};
-  ONNXTensorElementDataType pixel_type_{};
-  int32_t vision_end_token_{}, video_token_{};
-  ort_extensions::OrtxObjectPtr<OrtxProcessor> videos_;
 };
 
 }  // namespace Generators

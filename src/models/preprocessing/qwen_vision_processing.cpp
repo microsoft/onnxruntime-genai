@@ -48,8 +48,8 @@ size_t MergedGridRows(const std::array<int64_t, 3>& grid, size_t merge) {
   return MultiplyBytes(static_cast<size_t>(grid[1]) / merge, static_cast<size_t>(grid[2]) / merge);
 }
 
-struct SpanPromptSource : QwenMediaPromptSource {
-  SpanPromptSource(std::span<const std::array<int64_t, 3>> images, std::span<const QwenVideoPrompt> videos)
+struct SpanPromptSource : VisionMediaPromptSource {
+  SpanPromptSource(std::span<const std::array<int64_t, 3>> images, std::span<const VisionVideoPrompt> videos)
       : images{images}, videos{videos} {}
   size_t ImageCount() const override { return images.size(); }
   size_t VideoCount() const override { return videos.size(); }
@@ -58,10 +58,10 @@ struct SpanPromptSource : QwenMediaPromptSource {
   size_t FrameCount(size_t video) const override { return videos[video].timestamps.size(); }
   double Timestamp(size_t video, size_t frame) const override { return videos[video].timestamps[frame]; }
   std::span<const std::array<int64_t, 3>> images;
-  std::span<const QwenVideoPrompt> videos;
+  std::span<const VisionVideoPrompt> videos;
 };
 
-size_t BuildQwenMediaPrompt(std::string_view prompt, const QwenMediaPromptSource& source, size_t merge_size,
+size_t BuildQwenMediaPrompt(std::string_view prompt, const VisionMediaPromptSource& source, size_t merge_size,
                             size_t maximum_bytes, std::string* expanded) {
   constexpr std::string_view start = "<|vision_start|>", end = "<|vision_end|>";
   constexpr std::string_view image = "<|image_pad|>", video = "<|video_pad|>";
@@ -140,19 +140,19 @@ size_t BuildQwenMediaPrompt(std::string_view prompt, const QwenMediaPromptSource
 
 size_t QwenMediaPromptBytes(std::string_view prompt,
                             std::span<const std::array<int64_t, 3>> image_grids,
-                            std::span<const QwenVideoPrompt> videos, size_t merge_size,
+                            std::span<const VisionVideoPrompt> videos, size_t merge_size,
                             size_t maximum_bytes) {
   return QwenMediaPromptBytes(prompt, SpanPromptSource{image_grids, videos}, merge_size, maximum_bytes);
 }
 
-size_t QwenMediaPromptBytes(std::string_view prompt, const QwenMediaPromptSource& source,
+size_t QwenMediaPromptBytes(std::string_view prompt, const VisionMediaPromptSource& source,
                             size_t merge_size, size_t maximum_bytes) {
   return BuildQwenMediaPrompt(prompt, source, merge_size, maximum_bytes, nullptr);
 }
 
 std::string ExpandQwenMediaPrompt(std::string_view prompt,
                                   std::span<const std::array<int64_t, 3>> image_grids,
-                                  std::span<const QwenVideoPrompt> videos, size_t merge_size,
+                                  std::span<const VisionVideoPrompt> videos, size_t merge_size,
                                   size_t maximum_bytes) {
   const auto bytes = QwenMediaPromptBytes(prompt, image_grids, videos, merge_size, maximum_bytes);
   std::string expanded;

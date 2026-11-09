@@ -7,6 +7,7 @@
 #include "models/preprocessing/genai_tokenizer.h"
 #include "models/preprocessing/qwen2_5_vl_image_processor.h"
 #include "models/preprocessing/qwen_vision_preparation.h"
+#include "models/preprocessing/bailing_vision_preparation.h"
 #include "models/threadpool.h"
 #include <array>
 #include <cstring>
@@ -90,13 +91,11 @@ void ExtractQwenImagePatches(ThreadPool* thread_pool, const float* source, float
       });
 }
 
-namespace {
-
 // Helper to convert float32 tensor to target type (float16 or bfloat16)
-std::unique_ptr<OrtValue> ConvertPixelValues(ThreadPool* thread_pool,
-                                             const OrtValue& float_tensor,
-                                             ONNXTensorElementDataType target_type,
-                                             Ort::Allocator& allocator) {
+std::unique_ptr<OrtValue> ConvertVisionPixels(ThreadPool* thread_pool,
+                                              const OrtValue& float_tensor,
+                                              ONNXTensorElementDataType target_type,
+                                              Ort::Allocator& allocator) {
   if (target_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
     // No conversion needed, return a copy
     auto shape = float_tensor.GetTensorTypeAndShapeInfo()->GetShape();
@@ -141,6 +140,8 @@ std::unique_ptr<OrtValue> ConvertPixelValues(ThreadPool* thread_pool,
 
   return result;
 }
+
+namespace {
 
 std::tuple<std::unique_ptr<OrtValue>, std::unique_ptr<OrtValue>>
 ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& prompt,
@@ -286,9 +287,8 @@ std::unique_ptr<NamedTensors> LingImageProcessor::Process(const Tokenizer& token
 }
 
 std::unique_ptr<VisionPreparation> LingImageProcessor::CreateVisionPreparation(
-    const Config&, const SessionInfo&, const Tokenizer&) const {
-  // Centered Ling coordinates require its own adapter, not Qwen's raster policy.
-  return {};
+    const Config& config, const SessionInfo& info, const Tokenizer& tokenizer) const {
+  return std::make_unique<BailingVisionPreparation>(config, info, tokenizer, *this, thread_pool_);
 }
 
 std::unique_ptr<NamedTensors> QwenImageProcessor::ProcessImages(
@@ -446,7 +446,7 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::ProcessImages(
   // Use patched pixel_values if we computed it, otherwise use processor output
   if (patched_pixel_values) {
     auto converted_tensor =
-        ConvertPixelValues(thread_pool_, *patched_pixel_values, pixel_values_type_, allocator);
+        ConvertVisionPixels(thread_pool_, *patched_pixel_values, pixel_values_type_, allocator);
     named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
                            std::make_shared<Tensor>(std::move(converted_tensor)));
   } else {
@@ -485,7 +485,7 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::ProcessImages(
 
     // Convert to target type
     auto converted_tensor =
-        ConvertPixelValues(thread_pool_, *float_tensor, pixel_values_type_, allocator);
+        ConvertVisionPixels(thread_pool_, *float_tensor, pixel_values_type_, allocator);
     named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
                            std::make_shared<Tensor>(std::move(converted_tensor)));
   }

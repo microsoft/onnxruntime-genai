@@ -184,6 +184,89 @@ def test_ling_raw_configuration_and_image_processor_assets(tmp_path):
     assert operations["Resize"]["attrs"]["max_pixels"] == 4194304
     assert operations["PatchImage"]["attrs"] == {"patch_size": 16, "temporal_patch_size": 2, "merge_size": 2}
 
+    model = BailingVLModel(
+        PretrainedConfig(
+            text_config=_config(),
+            vision_config={"patch_size": 16, "spatial_merge_size": 2},
+            mrope_section=[8, 12, 12],
+        ),
+        ir.DataType.BFLOAT16,
+        ir.DataType.BFLOAT16,
+        "cuda",
+        str(tmp_path),
+        {"use_paged_attention": True, "exclude_embeds": True},
+    )
+    (tmp_path / "genai_config.json").write_text(json.dumps({"model": {"video_token_id": 28, "vision": {}}}))
+    source = json.loads((tmp_path / "preprocessor_config.json").read_text())
+    model.save_video_processing(source, str(tmp_path))
+    assert not (tmp_path / "video_processor_config.json").exists()
+    source["use_interleaved_frame_timestamp"] = True
+    model.save_video_processing(source, str(tmp_path))
+    video = json.loads((tmp_path / "video_processor_config.json").read_text())["processor"]
+    resize = video["transforms"][0]["operation"]["attrs"]
+    assert resize["interpolation"] == "CUBIC_OPENCV"
+    assert resize["smart_resize"] == 0
+    assert resize["min_pixels"] == 43008
+    assert video["total_pixels"] == 4718592
+    assert video["transforms"][2]["operation"]["attrs"]["qwen3_vl"] == 0
+    assert json.loads((tmp_path / "processor_config.json").read_text())["processor"] == processor
+    config = json.loads((tmp_path / "genai_config.json").read_text())
+    assert config["model"]["vision"]["video_config_filename"] == "video_processor_config.json"
+    source["temporal_patch_size"] = 1
+    with pytest.raises(ValueError, match="temporal preprocessing"):
+        model.save_video_processing(source, str(tmp_path))
+
+
+@pytest.mark.parametrize(
+    "model_type,vision_config,text_only",
+    [
+        ("bailing_moe_v3_vl", {}, False),
+        ("bailing_hybrid", {}, False),
+        ("bailing_moe_v3_vl", None, False),
+        ("bailing_moe_v3_vl", {}, True),
+    ],
+)
+def test_ling_cli_requires_complete_vision_composite(tmp_path, monkeypatch, model_type, vision_config, text_only):
+    config = {
+        "architectures": ["BailingMoeV3VLForConditionalGeneration"],
+        "model_type": model_type,
+        "text_config": {"hidden_size": 2560},
+        "vision_config": vision_config,
+    }
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    tokenizer = Mock()
+    tokenizer.get_vocab.return_value = {}
+    monkeypatch.setattr(builder.AutoTokenizer, "from_pretrained", Mock(return_value=tokenizer))
+    options = {"use_paged_attention": True, "exclude_embeds": True, "text_only": text_only}
+    args = (None, str(tmp_path), str(tmp_path / "out"), "int4", "cuda", str(tmp_path / "cache"), options)
+    if model_type == "bailing_moe_v3_vl" and vision_config is not None and not text_only:
+        builder.check_extra_options(*args)
+    else:
+        with pytest.raises(ValueError, match="complete Qwen vision composite or Ling"):
+            builder.check_extra_options(*args)
+
+
+@pytest.mark.parametrize("text_only", [False, True])
+def test_ling_signed_position_domain_requires_unscaled_source_context(tmp_path, text_only):
+    kwargs = {
+        "model_class": BailingVLTextModel,
+        "dtype": ir.DataType.BFLOAT16,
+        "ep": "cuda",
+        "config_overrides": {
+            "mrope_section": [8, 12, 12],
+            "q_lora_rank": None,
+            "original_max_position_embeddings": 64,
+        },
+        "use_paged_attention": True,
+        "exclude_embeds": not text_only,
+        "text_only": text_only,
+    }
+    if text_only:
+        _model(tmp_path, **kwargs)
+    else:
+        with pytest.raises(ValueError, match="unscaled source rotary context"):
+            _model(tmp_path, **kwargs)
+
 
 @pytest.mark.parametrize("text_only", [False, True])
 def test_ling_composite_config_preserves_component_and_position_contracts(tmp_path, text_only):
@@ -194,6 +277,7 @@ def test_ling_composite_config_preserves_component_and_position_contracts(tmp_pa
         vision_config={"patch_size": 16, "spatial_merge_size": 2, "out_hidden_size": 4096},
         mrope_section=[8, 12, 12],
         image_token_id=29,
+        video_token_id=28,
         vision_start_token_id=30,
     )
     model = BailingVLModel(
@@ -445,6 +529,8 @@ def test_ling_packed_rotary_matches_adjacent_pairs_and_reuses_current_rows(tmp_p
         expected.append(rotated.reshape(3, -1))
     model.save_model(str(tmp_path))
     session = ort.InferenceSession(str(tmp_path / model.filename), providers=["CPUExecutionProvider"])
+    position_range = session.get_modelmeta().custom_metadata_map.get("com.microsoft.genai.vision_position_range")
+    assert position_range == (None if text_only else f"{-model.context_length},{model.context_length - 1}")
     actual = session.run(None, feeds)
     for output, reference in zip(actual, expected, strict=True):
         np.testing.assert_allclose(output, reference, rtol=2e-3, atol=1e-3)

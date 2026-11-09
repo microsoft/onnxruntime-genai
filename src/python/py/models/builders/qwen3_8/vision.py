@@ -83,6 +83,7 @@ def save_image_processor(model_name_or_path, extra_kwargs, out_dir, hf_token):
     }
     with open(os.path.join(out_dir, "processor_config.json"), "w") as processor_config_file:
         json.dump(processor_config, processor_config_file, indent=4)
+    return image_processor
 
 
 def save_video_processor(model_name_or_path, extra_kwargs, out_dir, hf_token, vision_config):
