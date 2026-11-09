@@ -123,8 +123,8 @@ class MediaStore {
   void ValidateInput(const std::string& name, ONNXTensorElementDataType type,
                      std::span<const int64_t> shape) const;
   void ValidateInputs(const NamedTensors& inputs) const;
-  std::shared_ptr<MediaItem> Intern(NamedTensors inputs, size_t rows,
-                                    std::span<const MediaSpan> pending, size_t& reservation);
+  std::shared_ptr<MediaItem> Intern(NamedTensors inputs, std::shared_ptr<MediaItem> item,
+                                    std::span<const std::shared_ptr<MediaItem>> pending, size_t& reservation);
   std::shared_ptr<DecoderOnly_Model> model_;
   std::shared_ptr<MediaAccounting> accounting_{std::make_shared<MediaAccounting>()};
   std::shared_ptr<MediaAllocation> item_storage_;

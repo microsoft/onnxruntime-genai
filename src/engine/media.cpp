@@ -372,8 +372,6 @@ PreparedMediaTurn MediaStore::Prepare(const std::string& prompt, const Images* i
   auto feeds = processor.Materialize(*plan);
   if (feeds.size() != units.size())
     throw std::runtime_error("Media materialization omitted an encoder unit.");
-  std::vector<MediaSpan> pending;
-  pending.reserve(units.size());
   for (size_t unit = 0; unit < units.size(); ++unit) {
     ValidateInputs(feeds[unit]);
     for (const auto& spec : plan->units[unit].inputs) {
@@ -381,11 +379,11 @@ PreparedMediaTurn MediaStore::Prepare(const std::string& prompt, const Images* i
       if (tensor->GetType() != spec.type || tensor->GetShape() != spec.shape)
         throw std::runtime_error("Media materialization violated its resolved feed metadata.");
     }
-    auto item = Intern(std::move(feeds[unit]), units[unit]->rows, pending, reservation.bytes);
-    pending.emplace_back(0, std::move(item));
+    units[unit] = Intern(std::move(feeds[unit]), std::move(units[unit]),
+                         std::span<const std::shared_ptr<MediaItem>>{units}.first(unit), reservation.bytes);
   }
   for (size_t span = 0; span < result.media.size(); ++span)
-    result.media[span].item = pending[plan->spans[span].unit].item;
+    result.media[span].item = units[plan->spans[span].unit];
   return result;
 }
 
@@ -418,11 +416,12 @@ void MediaStore::ValidateInputs(const NamedTensors& inputs) const {
   }
 }
 
-std::shared_ptr<MediaItem> MediaStore::Intern(NamedTensors inputs, size_t rows,
-                                              std::span<const MediaSpan> pending, size_t& reservation) {
+std::shared_ptr<MediaItem> MediaStore::Intern(NamedTensors inputs, std::shared_ptr<MediaItem> item,
+                                              std::span<const std::shared_ptr<MediaItem>> pending, size_t& reservation) {
   ValidateInputs(inputs);
-  if (rows == 0 || rows > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))
+  if (!item || item->rows == 0 || item->rows > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))
     throw std::invalid_argument("Media encoder output rows must be positive and fit int64.");
+  const auto rows = item->rows;
   const auto matches = [&](const std::shared_ptr<MediaItem>& cached) {
     if (cached->rows != rows || cached->inputs.size() != inputs.size()) return false;
     for (const auto& [name, tensor] : inputs) {
@@ -439,8 +438,8 @@ std::shared_ptr<MediaItem> MediaStore::Intern(NamedTensors inputs, size_t rows,
   for (const auto& cached : items_) {
     if (matches(cached)) return cached;
   }
-  for (const auto& span : pending) {
-    if (matches(span.item)) return span.item;
+  for (const auto& previous : pending) {
+    if (matches(previous)) return previous;
   }
   size_t retained_bytes = AddBytes(sizeof(MediaItem) + sizeof(std::shared_ptr<MediaItem>),
                                    MultiplyBytes(inputs.bucket_count(), sizeof(void*)));
@@ -451,9 +450,7 @@ std::shared_ptr<MediaItem> MediaStore::Intern(NamedTensors inputs, size_t rows,
                                                   metadata, MultiplyBytes(tensor->GetElementCount(), Ort::SizeOf(tensor->GetType()))));
   }
   if (retained_bytes > reservation) throw std::logic_error("Canonical media exceeded its host reservation.");
-  auto item = std::make_shared<MediaItem>();
   item->inputs = std::move(inputs);
-  item->rows = rows;
   item->feature_bytes = MultiplyBytes(MultiplyBytes(rows, static_cast<size_t>(model_->cpu_embedding_->hidden_size_)),
                                       Ort::SizeOf(model_->cpu_embedding_->type_));
   item->accounting = accounting_;
