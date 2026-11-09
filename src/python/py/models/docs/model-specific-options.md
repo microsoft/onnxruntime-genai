@@ -2,6 +2,16 @@
 
 These options and workflows apply to particular model families and speculative drafters. See the [Model Builder README](../README.md) for shared configuration, quantization, and export options, and [Qwen3.8 design](qwen3_8.md) for component ownership.
 
+## Bailing MoE V3 (Ling-3.0-tiny)
+
+The builder reads Bailing configuration fields rather than assuming the Ling-3.0-tiny values. `layer_group_size` must be a positive integer (default `1`); per-layer lists are explicitly unsupported. Full attention ends each complete group and covers every layer in an incomplete final group, matching the Hugging Face checkpoint's decoder scheduling. Limiting the exported layer count preserves the original checkpoint's layer types.
+
+`norm_topk_prob` controls routed-expert normalization (default `false`), and `routed_scaling_factor` scales only the routed experts (default `1.0`). Because `MoEGroupRouter` emits selected log-scores and MoE/QMoE applies softmax, unnormalized routing additionally restores the selected sigmoid-score sum before adding the shared expert. `group_topk` is configurable, defaults to `2` for `noaux_tc`, must be a positive integer, and is clamped to the number of experts per group by the runtime operator.
+
+KDA uses the bounded sigmoid decay only when `kda_safe_gate=true`, which requires an explicit finite negative `kda_lower_bound`. Otherwise it uses the unbounded negative softplus decay and ignores `kda_lower_bound`, including `null`. MLA retains the checkpoint's projection weights and selects the ONNX RoPE layout through `rope_interleave` (default `true`), avoiding weight, scale, or bias permutations.
+
+Small offline scheduling, routing, KDA and RoPE regressions live in `test/python/models/test_bailing_builder.py`. Run them from the repository root with `python -m pytest -q test/python/models/test_bailing_builder.py` using an ONNX Runtime build containing `MoEGroupRouter` and per-key KDA support. These tests do not establish full-checkpoint CUDA generation accuracy or H200 performance.
+
 ## Build a DFlash 2 Block Drafter
 
 Set `dflash2_path` to a DFlash 2 checkpoint to export an auxiliary `dflash2.onnx` block drafter beside a Qwen3.5 or Qwen3.8 target model. The target must use paged attention. SpecForge identifies the target layers whose outputs are tapped, while `aux_hidden_state_layers` identifies residual streams entering layers, so each configured auxiliary layer must be one greater than the corresponding `target_layer_ids` entry in the DFlash checkpoint. The drafter reuses the target's embedding and LM-head initializers, so both checkpoints must use compatible tensors.

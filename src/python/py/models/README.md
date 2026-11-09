@@ -64,6 +64,7 @@ This folder contains the model builder for quickly creating optimized and quanti
 The tool currently supports the following model architectures.
 
 - AMD OLMo
+- Bailing MoE V3 (Ling-3.0-tiny; see [configuration semantics](docs/model-specific-options.md#bailing-moe-v3-ling-30-tiny))
 - ChatGLM
 - DeepSeek
 - ERNIE 4.5

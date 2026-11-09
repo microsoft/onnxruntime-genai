@@ -21,13 +21,6 @@ COMPATIBLE_LING_REGEX = (
 )
 
 
-def _deinterleave_rope_rows(weight: torch.Tensor, start: int, length: int = 64) -> torch.Tensor:
-    out = weight.clone()
-    sub = out[start : start + length]
-    out[start : start + length] = torch.cat([sub[0::2], sub[1::2]], dim=0)
-    return out
-
-
 class _BailingLayerModule(torch.nn.Module):
     def __init__(self, layer_id: int):
         super().__init__()
@@ -180,23 +173,7 @@ class _BailingWeights(torch.nn.Module):
             sa.q_a_proj = self.make_linear(f"{ap}.q_a_proj")
             sa.q_a_layernorm = TensorModule(weight=self.get_tensor(f"{ap}.q_a_layernorm.weight"))
             sa.q_b_proj = self.make_linear(f"{ap}.q_b_proj")
-            # De-interleave the 64 RoPE rows of each head in q_b_proj.weight so standard non-interleaved RoPE is exact.
-            num_heads = self.config.num_attention_heads
-            nope_dim = self.config.qk_nope_head_dim
-            rope_dim = self.config.qk_rope_head_dim
-            head_stride = nope_dim + rope_dim
-            qb_w = sa.q_b_proj.weight.clone()
-            for h in range(num_heads):
-                start = h * head_stride + nope_dim
-                sub = qb_w[start : start + rope_dim]
-                qb_w[start : start + rope_dim] = torch.cat([sub[0::2], sub[1::2]], dim=0)
-            sa.q_b_proj.weight = qb_w.contiguous()
-
             sa.kv_a_proj_with_mqa = self.make_linear(f"{ap}.kv_a_proj_with_mqa")
-            kv_lora_rank = self.config.kv_lora_rank
-            sa.kv_a_proj_with_mqa.weight = _deinterleave_rope_rows(
-                sa.kv_a_proj_with_mqa.weight, kv_lora_rank, rope_dim
-            ).contiguous()
             sa.kv_a_layernorm = TensorModule(weight=self.get_tensor(f"{ap}.kv_a_layernorm.weight"))
             sa.kv_b_proj = self.make_linear(f"{ap}.kv_b_proj")
             sa.g_proj = self.make_linear(f"{ap}.g_proj")
@@ -296,9 +273,14 @@ class BailingMoeV3Model(Qwen35TextModel):
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         self.config = config
-        layer_group_size = getattr(config, "layer_group_size", 4)
+        layer_group_size = getattr(config, "layer_group_size", 1)
+        if isinstance(layer_group_size, bool) or not isinstance(layer_group_size, int) or layer_group_size <= 0:
+            raise ValueError("BailingMoeV3 layer_group_size must be a positive integer; per-layer lists are not supported")
+        full_attention_tail = config.num_hidden_layers // layer_group_size * layer_group_size
         config.layer_types = [
-            "full_attention" if (i + 1) % layer_group_size == 0 else "linear_attention"
+            "full_attention"
+            if (i + 1) % layer_group_size == 0 or i >= full_attention_tail
+            else "linear_attention"
             for i in range(config.num_hidden_layers)
         ]
         self.qk_nope_head_dim = getattr(config, "qk_nope_head_dim", 128)
@@ -307,7 +289,17 @@ class BailingMoeV3Model(Qwen35TextModel):
         self.q_lora_rank = getattr(config, "q_lora_rank", 256)
         self.kv_lora_rank = getattr(config, "kv_lora_rank", 512)
         self.kda_head_dim = getattr(config, "head_dim", 128)
-        self.kda_lower_bound = float(getattr(config, "kda_lower_bound", -5.0))
+        self.kda_lower_bound = None
+        if getattr(config, "kda_safe_gate", False):
+            lower_bound = getattr(config, "kda_lower_bound", None)
+            if (
+                isinstance(lower_bound, bool)
+                or not isinstance(lower_bound, (int, float))
+                or not math.isfinite(lower_bound)
+                or lower_bound >= 0
+            ):
+                raise ValueError("BailingMoeV3 kda_safe_gate=true requires a finite negative kda_lower_bound")
+            self.kda_lower_bound = float(lower_bound)
 
         # MLA uses qk_head_dim = 192 (128 nope + 64 rope) and pads v from 128 to 192 so PagedAttention /
         # GroupQueryAttention run with uniform head_size = 192 across all 16 heads.
@@ -333,7 +325,7 @@ class BailingMoeV3Model(Qwen35TextModel):
         self.layernorm_attrs["add_offset"] = 0
         self.rope_attrs["mrope_layout"] = 0
         self.rope_attrs["op_type"] = "RotaryEmbedding"
-        self.rope_attrs["interleaved"] = 0
+        self.rope_attrs["interleaved"] = int(getattr(config, "rope_interleave", True))
         self.rope_attrs["rotary_embedding_dim"] = self.qk_rope_head_dim
         self.rope_attrs["partial_rotary_factor"] = float(self.qk_rope_head_dim) / float(self.head_size)
         self.rope_attrs["cast"]["use_fp32"] = False
@@ -351,11 +343,15 @@ class BailingMoeV3Model(Qwen35TextModel):
         self.moe_attrs["top_k"] = getattr(config, "num_experts_per_tok", 8)
         self.moe_attrs["n_group"] = getattr(config, "n_group", 8)
         self.moe_attrs["topk_group"] = getattr(config, "topk_group", 4)
-        self.moe_attrs["routed_scaling_factor"] = float(getattr(config, "routed_scaling_factor", 2.5))
+        self.moe_attrs["group_topk"] = getattr(config, "group_topk", 2)
+        group_topk = self.moe_attrs["group_topk"]
+        if isinstance(group_topk, bool) or not isinstance(group_topk, int) or group_topk <= 0:
+            raise ValueError("BailingMoeV3 group_topk must be a positive integer")
+        self.moe_attrs["routed_scaling_factor"] = float(getattr(config, "routed_scaling_factor", 1.0))
         self.moe_attrs["router_sentinel"] = -10000.0
         self.moe_attrs["activation_type"] = "swiglu"
         self.moe_attrs["swiglu_fusion"] = 1
-        self.moe_attrs["normalize_routing_weights"] = True
+        self.moe_attrs["normalize_routing_weights"] = getattr(config, "norm_topk_prob", False)
 
         if self.ep == "cuda" and self.use_paged_attention:
             self.ep_attrs["cuda"]["enable_cuda_graph"] = (
@@ -474,14 +470,15 @@ class BailingMoeV3Model(Qwen35TextModel):
             "dt_bias": dt_bias_name,
             "decay_shape": [*token_shape, value_heads, key_head_dim],
             "beta_shape": [*token_shape, value_heads],
-            "gate_activation": "sigmoid",
+            "gate_activation": "sigmoid" if self.kda_lower_bound is not None else "softplus",
             "beta_activation": "sigmoid",
             "qk_l2_norm": 1,
-            "gate_lower_bound": self.kda_lower_bound,
             "update_rule": "gated_delta",
             "scale": 0.0,
             "output_shape": [*token_shape, value_heads, value_head_dim],
         }
+        if self.kda_lower_bound is not None:
+            shared_kwargs["gate_lower_bound"] = self.kda_lower_bound
         if packed:
             self.make_varlen_gated_delta_net(
                 op_name,
@@ -586,7 +583,7 @@ class BailingMoeV3Model(Qwen35TextModel):
             outputs=[rope_out],
             name=name,
             domain="com.microsoft",
-            interleaved=0,
+            interleaved=self.rope_attrs["interleaved"],
             num_heads=num_heads,
             rotary_embedding_dim=self.qk_rope_head_dim,
         )
@@ -905,13 +902,53 @@ class BailingMoeV3Model(Qwen35TextModel):
             top_k=top_k,
             n_group=n_group,
             topk_group=topk_group,
-            group_topk=2,
+            group_topk=self.moe_attrs["group_topk"],
             router_sentinel=float(self.moe_attrs["router_sentinel"]),
         )
         self.make_value(router_probs_name, self.io_dtype, shape=logits_shape)
 
         routed_scale = self.moe_attrs["routed_scaling_factor"]
         scale_const = f"/model/constants/{self.io_dtype}/{routed_scale}"
+        if not self.moe_attrs["normalize_routing_weights"]:
+            # MoE softmax normalizes the selected log-scores even without top-k renormalization.
+            scores_name = f"{basename}/Exp"
+            self.make_exp(scores_name, router_probs_name, self.io_dtype, logits_shape)
+            sum_name = f"{basename}/ReduceSum"
+            self.make_reduce_sum(
+                sum_name,
+                [f"{scores_name}/output_0", "/model/constants/INT64/[-1]"],
+                self.io_dtype,
+                [logits_shape[0], 1],
+                keepdims=True,
+            )
+            sum_output = f"{sum_name}/output_0"
+            if not self.use_paged_attention:
+                shape_name = f"{basename}/token_shape/Shape"
+                self.make_shape(shape_name, root_input, [2], end=2)
+                concat_name = f"{basename}/token_shape/Concat"
+                self.make_concat(
+                    concat_name,
+                    [f"{shape_name}/output_0", "/model/constants/INT64/[1]"],
+                    ir.DataType.INT64,
+                    [3],
+                    axis=0,
+                )
+                reshape_name = f"{basename}/weight_sum/Reshape"
+                self.make_reshape(
+                    reshape_name,
+                    [sum_output, f"{concat_name}/output_0"],
+                    self.io_dtype,
+                    self.make_hidden_state_shape(last_dim=1),
+                )
+                sum_output = f"{reshape_name}/output_0"
+            scale_name = f"{basename}/output_scale/Mul"
+            self.make_mul(
+                scale_name,
+                [sum_output, scale_const],
+                self.io_dtype,
+                self.make_hidden_state_shape(last_dim=1),
+            )
+            scale_const = f"{scale_name}/output_0"
         return router_probs_name, scale_const
 
     def make_moe_subgraph(self, layer_id, moe, root_input, router_probs=None, output_scale=None):
