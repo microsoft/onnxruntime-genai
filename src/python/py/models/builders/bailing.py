@@ -4,268 +4,12 @@
 import json
 import math
 import os
-from types import SimpleNamespace
 
 import onnx_ir as ir
-import torch
-from huggingface_hub import snapshot_download
-from loaders.base import QuantizedExperts, TensorModule
-from safetensors import safe_open
+from loaders.bailing import BailingModel
 
 from .base import Model
 from .qwen3_5.text import Qwen35TextModel
-
-COMPATIBLE_LING_REGEX = (
-    r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| "
-    r"?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"
-)
-
-
-class _BailingLayerModule(torch.nn.Module):
-    def __init__(self, layer_id: int):
-        super().__init__()
-        self.layer_id = layer_id
-
-
-class _BailingWeights(torch.nn.Module):
-    """Streaming safetensors loader for BailingMoeV3 (BF16, block-FP8, and compressed-tensors INT4)."""
-
-    def __init__(self, input_path: str, config, target_is_int: bool, io_dtype: ir.DataType):
-        super().__init__()
-        self.input_path = input_path
-        self.config = config
-        self.target_is_int = target_is_int
-        self.io_dtype = io_dtype
-        self.handles = {}
-        self.handle_keys = {}
-
-        index_path = os.path.join(input_path, "model.safetensors.index.json")
-        if os.path.exists(index_path):
-            with open(index_path, encoding="utf-8") as f:
-                self.weight_map = json.load(f)["weight_map"]
-            self.single_file = None
-        else:
-            self.weight_map = None
-            candidates = sorted(f for f in os.listdir(input_path) if f.endswith(".safetensors"))
-            if len(candidates) != 1:
-                raise ValueError(f"Expected model.safetensors.index.json or a single .safetensors in {input_path}")
-            self.single_file = candidates[0]
-
-        embed_w = self.get_tensor("model.word_embeddings.weight")
-        if embed_w is None:
-            embed_w = self.get_tensor("model.embed_tokens.weight")
-        self.embedding = TensorModule(weight=embed_w)
-        self.layers = [ _BailingLayerModule(i) for i in range(config.num_hidden_layers) ]
-        self.final_norm = TensorModule(weight=self.get_tensor("model.norm.weight"))
-        self.lm_head = self.make_linear("lm_head", dense=False)
-        if self.lm_head is None or self.lm_head.weight is None:
-            self.lm_head = TensorModule(weight=self.embedding.weight)
-
-    def close(self):
-        for handle in self.handles.values():
-            handle.__exit__(None, None, None)
-        self.handles.clear()
-        self.handle_keys.clear()
-
-    def __del__(self):
-        if getattr(self, "handles", None):
-            self.close()
-
-    def modules(self):
-        yield self.embedding
-        yield from self.layers
-        yield self.final_norm
-        yield self.lm_head
-
-    def get_tensor(self, name: str):
-        if self.weight_map is not None:
-            fname = self.weight_map.get(name)
-            files = [fname] if fname is not None else []
-        else:
-            files = [self.single_file]
-        for fname in files:
-            handle = self.handles.get(fname)
-            if handle is None:
-                handle = safe_open(os.path.join(self.input_path, fname), framework="pt", device="cpu")
-                self.handles[fname] = handle
-                self.handle_keys[fname] = set(handle.keys())
-            if name in self.handle_keys[fname]:
-                return handle.get_tensor(name)
-        return None
-
-    @staticmethod
-    def dequantize_fp8_block(weight: torch.Tensor, scale_inv: torch.Tensor, block_size: int = 128) -> torch.Tensor:
-        n, k = weight.shape
-        s = scale_inv.float().repeat_interleave(block_size, dim=0)[:n].repeat_interleave(block_size, dim=1)[:, :k]
-        return (weight.float() * s).to(torch.bfloat16)
-
-    @staticmethod
-    def dequantize_int4_packed(weight_packed: torch.Tensor, weight_scale: torch.Tensor) -> torch.Tensor:
-        n = weight_packed.shape[0]
-        k = weight_packed.shape[1] * 8
-        group_size = k // weight_scale.shape[1]
-        shifts = torch.arange(0, 32, 4, dtype=torch.int32)
-        u4 = ((weight_packed.unsqueeze(-1) >> shifts) & 0xF).reshape(n, k)
-        return ((u4.float() - 8.0) * weight_scale.float().repeat_interleave(group_size, dim=1)).to(torch.bfloat16)
-
-    def make_linear(self, base: str, dense: bool = False) -> TensorModule | None:
-        weight = self.get_tensor(f"{base}.weight")
-        scale_inv = self.get_tensor(f"{base}.weight_scale_inv")
-        bias = self.get_tensor(f"{base}.bias")
-        if weight is not None:
-            if weight.dtype == torch.float8_e4m3fn:
-                if scale_inv is None:
-                    raise ValueError(f"FP8 tensor '{base}.weight' is missing '{base}.weight_scale_inv'")
-                if dense or self.target_is_int:
-                    dq = self.dequantize_fp8_block(weight, scale_inv)
-                    mod = TensorModule(weight=dq, bias=bias)
-                    mod.exclude_from_quantization = dense
-                    return mod
-                mod = TensorModule(weight=weight, bias=bias)
-                mod.quant_type = "fp8"
-                mod.block_size = 128
-                # The ONNX kernel expects one scale row per output channel.
-                mod.weight_scale = scale_inv.float().repeat_interleave(mod.block_size, dim=0)[: weight.shape[0]].contiguous()
-                mod.can_reuse_as_embedding = False
-                return mod
-            mod = TensorModule(weight=weight, bias=bias)
-            mod.exclude_from_quantization = dense
-            return mod
-
-        weight_packed = self.get_tensor(f"{base}.weight_packed")
-        weight_scale = self.get_tensor(f"{base}.weight_scale")
-        if weight_packed is not None and weight_scale is not None:
-            dq = self.dequantize_int4_packed(weight_packed, weight_scale)
-            mod = TensorModule(weight=dq, bias=bias)
-            mod.exclude_from_quantization = dense
-            return mod
-        return None
-
-    @staticmethod
-    def concat_linears(linears: list[TensorModule]) -> TensorModule:
-        first = linears[0]
-        if first.quant_type == "fp8":
-            mod = TensorModule(
-                weight=torch.cat([m.weight for m in linears], dim=0).contiguous(),
-                bias=torch.cat([m.bias for m in linears], dim=0).contiguous() if first.bias is not None else None,
-            )
-            mod.quant_type = "fp8"
-            mod.block_size = first.block_size
-            mod.weight_scale = torch.cat([m.weight_scale for m in linears], dim=0).contiguous()
-            mod.can_reuse_as_embedding = False
-            return mod
-        return TensorModule(
-            weight=torch.cat([m.weight for m in linears], dim=0).contiguous(),
-            bias=torch.cat([m.bias for m in linears], dim=0).contiguous() if first.bias is not None else None,
-        )
-
-    def build_layer(self, layer_id: int, is_mla: bool, is_moe: bool):
-        prefix = f"model.layers.{layer_id}"
-        layer = SimpleNamespace()
-        layer.input_layernorm = TensorModule(weight=self.get_tensor(f"{prefix}.input_layernorm.weight"))
-        layer.post_attention_layernorm = TensorModule(
-            weight=self.get_tensor(f"{prefix}.post_attention_layernorm.weight")
-        )
-
-        ap = f"{prefix}.attention"
-        if is_mla:
-            sa = SimpleNamespace()
-            sa.q_a_proj = self.make_linear(f"{ap}.q_a_proj")
-            sa.q_a_layernorm = TensorModule(weight=self.get_tensor(f"{ap}.q_a_layernorm.weight"))
-            sa.q_b_proj = self.make_linear(f"{ap}.q_b_proj")
-            sa.kv_a_proj_with_mqa = self.make_linear(f"{ap}.kv_a_proj_with_mqa")
-            sa.kv_a_layernorm = TensorModule(weight=self.get_tensor(f"{ap}.kv_a_layernorm.weight"))
-            sa.kv_b_proj = self.make_linear(f"{ap}.kv_b_proj")
-            sa.g_proj = self.make_linear(f"{ap}.g_proj")
-            sa.dense = self.make_linear(f"{ap}.dense")
-            layer.self_attn = sa
-            layer.linear_attn = None
-        else:
-            la = SimpleNamespace()
-            q_proj = self.make_linear(f"{ap}.q_proj")
-            k_proj = self.make_linear(f"{ap}.k_proj")
-            v_proj = self.make_linear(f"{ap}.v_proj")
-            la.in_proj_qkv = self.concat_linears([q_proj, k_proj, v_proj])
-            la.in_proj_a = self.make_linear(f"{ap}.f_proj")
-            la.in_proj_b = self.make_linear(f"{ap}.b_proj", dense=True)
-            if self.get_tensor(f"{ap}.g_proj.weight") is not None:
-                la.in_proj_z = self.make_linear(f"{ap}.g_proj")
-                la.in_proj_z_a = None
-                la.in_proj_z_b = None
-            else:
-                la.in_proj_z = None
-                la.in_proj_z_a = self.make_linear(f"{ap}.g_proj_a")
-                la.in_proj_z_b = self.make_linear(f"{ap}.g_proj_b")
-            q_conv = self.get_tensor(f"{ap}.q_conv1d.weight")
-            k_conv = self.get_tensor(f"{ap}.k_conv1d.weight")
-            v_conv = self.get_tensor(f"{ap}.v_conv1d.weight")
-            la.conv1d = TensorModule(weight=torch.cat([q_conv, k_conv, v_conv], dim=0).contiguous())
-            la.A_log = self.get_tensor(f"{ap}.A_log").float().view(-1)
-            la.dt_bias = self.get_tensor(f"{ap}.dt_bias").float().view(
-                self.config.linear_num_value_heads, self.config.linear_key_head_dim
-            )
-            la.norm = TensorModule(weight=self.get_tensor(f"{ap}.o_norm.weight"))
-            la.out_proj = self.make_linear(f"{ap}.o_proj")
-            layer.linear_attn = la
-            layer.self_attn = None
-
-        mp = f"{prefix}.mlp"
-        if not is_moe:
-            mlp = SimpleNamespace()
-            mlp.gate_proj = self.make_linear(f"{mp}.gate_proj")
-            mlp.up_proj = self.make_linear(f"{mp}.up_proj")
-            mlp.down_proj = self.make_linear(f"{mp}.down_proj")
-            layer.mlp = mlp
-        else:
-            moe = SimpleNamespace()
-            moe.gate = self.make_linear(f"{mp}.gate", dense=True)
-            moe.expert_bias = self.get_tensor(f"{mp}.gate.expert_bias").float()
-            shared = SimpleNamespace()
-            shared.gate_proj = self.make_linear(f"{mp}.shared_experts.gate_proj")
-            shared.up_proj = self.make_linear(f"{mp}.shared_experts.up_proj")
-            shared.down_proj = self.make_linear(f"{mp}.shared_experts.down_proj")
-            moe.shared_experts = shared
-
-            num_experts = self.config.num_experts
-            e0_gate_w = self.get_tensor(f"{mp}.experts.0.gate_proj.weight")
-            if e0_gate_w is not None and e0_gate_w.dtype == torch.float8_e4m3fn and not self.target_is_int:
-                prepared = QuantizedExperts()
-                prepared.quant_type = "fp8"
-                prepared.block_size = 128
-                prepared.scale_dtype = ir.DataType.FLOAT
-                gate_up_w, gate_up_s, down_w, down_s = [], [], [], []
-                for e in range(num_experts):
-                    ep = f"{mp}.experts.{e}"
-                    gw = self.get_tensor(f"{ep}.gate_proj.weight")
-                    uw = self.get_tensor(f"{ep}.up_proj.weight")
-                    gs = self.get_tensor(f"{ep}.gate_proj.weight_scale_inv").float()
-                    us = self.get_tensor(f"{ep}.up_proj.weight_scale_inv").float()
-                    dw = self.get_tensor(f"{ep}.down_proj.weight")
-                    ds = self.get_tensor(f"{ep}.down_proj.weight_scale_inv").float()
-                    gate_up_w.append(torch.cat([gw, uw], dim=0))
-                    gate_up_s.append(torch.cat([gs, us], dim=0))
-                    down_w.append(dw)
-                    down_s.append(ds)
-                prepared.gate_up_qweight = torch.stack(gate_up_w).contiguous()
-                prepared.gate_up_scales = torch.stack(gate_up_s).contiguous()
-                prepared.down_qweight = torch.stack(down_w).contiguous()
-                prepared.down_scales = torch.stack(down_s).contiguous()
-                moe.experts = prepared
-            else:
-                gate_up_list, down_list = [], []
-                for e in range(num_experts):
-                    ep = f"{mp}.experts.{e}"
-                    g_mod = self.make_linear(f"{ep}.gate_proj", dense=True)
-                    u_mod = self.make_linear(f"{ep}.up_proj", dense=True)
-                    d_mod = self.make_linear(f"{ep}.down_proj", dense=True)
-                    gate_up_list.append(torch.cat([g_mod.weight, u_mod.weight], dim=0))
-                    down_list.append(d_mod.weight)
-                experts_ns = SimpleNamespace()
-                experts_ns.gate_up_proj = torch.stack(gate_up_list).contiguous()
-                experts_ns.down_proj = torch.stack(down_list).contiguous()
-                moe.experts = experts_ns
-            layer.mlp = moe
-        return layer
 
 
 class BailingMoeV3Model(Qwen35TextModel):
@@ -283,13 +27,22 @@ class BailingMoeV3Model(Qwen35TextModel):
             else "linear_attention"
             for i in range(config.num_hidden_layers)
         ]
-        self.qk_nope_head_dim = getattr(config, "qk_nope_head_dim", 128)
-        self.qk_rope_head_dim = getattr(config, "qk_rope_head_dim", 64)
-        self.v_head_dim = getattr(config, "v_head_dim", 128)
-        self.q_lora_rank = getattr(config, "q_lora_rank", 256)
-        self.kv_lora_rank = getattr(config, "kv_lora_rank", 512)
-        self.kda_head_dim = getattr(config, "head_dim", 128)
-        self.kda_lower_bound = None
+        self.mla_attrs = {
+            "qk_nope_head_dim": getattr(config, "qk_nope_head_dim", 128),  # Non-rotary query/key channels per MLA head.
+            "qk_rope_head_dim": getattr(config, "qk_rope_head_dim", 64),  # Rotary query/key channels per MLA head.
+            "v_head_dim": getattr(config, "v_head_dim", 128),  # Value channels retained after padded attention.
+            "q_lora_rank": getattr(config, "q_lora_rank", 256),  # Compressed query projection width.
+            "kv_lora_rank": getattr(config, "kv_lora_rank", 512),  # Compressed key/value projection width.
+        }
+        kda_head_dim = getattr(config, "head_dim", 128)
+        self.kda_attrs = {
+            "gate_lower_bound": None,  # Negative sigmoid-decay bound, used only for safe KDA gating.
+            "bf16_precision": extra_options.get("gated_delta_net_bf16_precision", "bf16"),  # CUDA BF16 paged prefill tiles.
+        }
+        if not isinstance(self.kda_attrs["bf16_precision"], str) or self.kda_attrs["bf16_precision"] not in (
+            "fp32", "fp16", "bf16"
+        ):
+            raise ValueError("gated_delta_net_bf16_precision must be one of fp32, fp16, bf16")
         if getattr(config, "kda_safe_gate", False):
             lower_bound = getattr(config, "kda_lower_bound", None)
             if (
@@ -299,46 +52,42 @@ class BailingMoeV3Model(Qwen35TextModel):
                 or lower_bound >= 0
             ):
                 raise ValueError("BailingMoeV3 kda_safe_gate=true requires a finite negative kda_lower_bound")
-            self.kda_lower_bound = float(lower_bound)
+            self.kda_attrs["gate_lower_bound"] = float(lower_bound)
 
         # MLA uses qk_head_dim = 192 (128 nope + 64 rope) and pads v from 128 to 192 so PagedAttention /
         # GroupQueryAttention run with uniform head_size = 192 across all 16 heads.
-        config.head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
+        config.head_dim = self.mla_attrs["qk_nope_head_dim"] + self.mla_attrs["qk_rope_head_dim"]
         config.num_key_value_heads = config.num_attention_heads
         config.linear_num_key_heads = config.num_attention_heads
         config.linear_num_value_heads = config.num_attention_heads
-        config.linear_key_head_dim = self.kda_head_dim
-        config.linear_value_head_dim = self.kda_head_dim
+        config.linear_key_head_dim = kda_head_dim
+        config.linear_value_head_dim = kda_head_dim
         config.linear_conv_kernel_dim = getattr(config, "short_conv_kernel_size", 4)
 
-        if (
-            ep == "cuda"
-            and io_dtype == ir.DataType.FLOAT16
-            and str(getattr(config, "torch_dtype", "")).endswith("bfloat16")
-            and "io_dtype" not in extra_options
-        ):
-            io_dtype = ir.DataType.BFLOAT16
-
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+
+        if "gated_delta_net_bf16_precision" in extra_options and not (
+            self.ep == "cuda" and self.use_paged_attention and self.io_dtype == ir.DataType.BFLOAT16
+        ):
+            raise ValueError("gated_delta_net_bf16_precision applies only to CUDA BF16 paged-attention exports")
 
         # Standard RMSNorm (not Qwen's (1 + weight) OffsetRMSNorm) and standard 2D position_ids.
         self.layernorm_attrs["add_offset"] = 0
         self.rope_attrs["mrope_layout"] = 0
         self.rope_attrs["op_type"] = "RotaryEmbedding"
         self.rope_attrs["interleaved"] = int(getattr(config, "rope_interleave", True))
-        self.rope_attrs["rotary_embedding_dim"] = self.qk_rope_head_dim
-        self.rope_attrs["partial_rotary_factor"] = float(self.qk_rope_head_dim) / float(self.head_size)
+        self.rope_attrs["rotary_embedding_dim"] = self.mla_attrs["qk_rope_head_dim"]
+        self.rope_attrs["partial_rotary_factor"] = float(self.mla_attrs["qk_rope_head_dim"]) / float(self.head_size)
         self.rope_attrs["cast"]["use_fp32"] = False
         self.attention_attrs["use_rope_in_attn"] = 0
         self.attention_attrs["scale"] = 1.0 / math.sqrt(float(self.head_size))
 
         # MoE configuration
-        self.dense_intermediate_size = getattr(config, "intermediate_size", 4608)
-        self.first_k_dense_replace = getattr(config, "first_k_dense_replace", 1)
-        self.moe_intermediate_size = getattr(config, "moe_intermediate_size", 512)
-        self.shared_expert_intermediate_size = getattr(
-            config, "moe_shared_expert_intermediate_size", self.moe_intermediate_size
-        ) * getattr(config, "num_shared_experts", 1)
+        self.moe_attrs["dense_intermediate_size"] = getattr(config, "intermediate_size", 4608)  # Early dense MLP width.
+        self.moe_attrs["first_k_dense_replace"] = getattr(config, "first_k_dense_replace", 1)  # First routed-expert layer.
+        self.moe_attrs["shared_expert_intermediate_size"] = getattr(
+            config, "moe_shared_expert_intermediate_size", self.intermediate_size
+        ) * getattr(config, "num_shared_experts", 1)  # Combined width of the shared experts.
         self.moe_attrs["num_experts"] = getattr(config, "num_experts", 128)
         self.moe_attrs["top_k"] = getattr(config, "num_experts_per_tok", 8)
         self.moe_attrs["n_group"] = getattr(config, "n_group", 8)
@@ -404,37 +153,25 @@ class BailingMoeV3Model(Qwen35TextModel):
         if self.adapter_path:
             raise ValueError("BailingMoeV3 does not support adapter_path with the streaming weight loader")
         target_is_int = self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4, ir.DataType.INT8, ir.DataType.UINT8}
-        src_path = input_path if os.path.isdir(input_path) else self.model_name_or_path
-        if not os.path.isdir(src_path):
-            src_path = snapshot_download(
-                repo_id=src_path,
-                cache_dir=self.cache_dir,
-                token=self.hf_token,
-                revision=self.revision,
-                allow_patterns=["*.safetensors", "*.safetensors.index.json"],
-            )
-        weights = _BailingWeights(src_path, self.config, target_is_int, self.io_dtype)
+        weights = BailingModel.from_pretrained(
+            input_path or self.model_name_or_path,
+            self.config,
+            cache_dir=self.cache_dir,
+            token=self.hf_token,
+            revision=self.revision,
+            target_is_int=target_is_int,
+            num_layers=self.num_layers,
+        )
         if target_is_int:
             # The loader emits dequantized weights; save_model must still run to_nbits for QDQ.
             self.quant_type = None
         return weights
-
-    def is_layer(self, module):
-        return isinstance(module, _BailingLayerModule)
 
     def has_final_norm(self, module, orig_model):
         return module == getattr(orig_model, "final_norm", None)
 
     def get_moe_module(self, layer_id, layer):
         return layer.mlp
-
-    def make_layer(self, layer_id, layer_module):
-        is_mla = self.layer_types[layer_id] == "full_attention"
-        is_moe = layer_id >= self.first_k_dense_replace
-        layer = self.weights.build_layer(layer_id, is_mla=is_mla, is_moe=is_moe)
-        super().make_layer(layer_id, layer)
-        if self.layer_id == self.num_layers - 1:
-            self.weights.close()
 
     def make_gated_delta_net_layer(self, layer_id, linear_attn, conv_output, b_name, a_name):
         basename = f"/model/layers.{layer_id}/linear_attn"
@@ -470,15 +207,15 @@ class BailingMoeV3Model(Qwen35TextModel):
             "dt_bias": dt_bias_name,
             "decay_shape": [*token_shape, value_heads, key_head_dim],
             "beta_shape": [*token_shape, value_heads],
-            "gate_activation": "sigmoid" if self.kda_lower_bound is not None else "softplus",
+            "gate_activation": "sigmoid" if self.kda_attrs["gate_lower_bound"] is not None else "softplus",
             "beta_activation": "sigmoid",
             "qk_l2_norm": 1,
             "update_rule": "gated_delta",
             "scale": 0.0,
             "output_shape": [*token_shape, value_heads, value_head_dim],
         }
-        if self.kda_lower_bound is not None:
-            shared_kwargs["gate_lower_bound"] = self.kda_lower_bound
+        if self.kda_attrs["gate_lower_bound"] is not None:
+            shared_kwargs["gate_lower_bound"] = self.kda_attrs["gate_lower_bound"]
         if packed:
             self.make_varlen_gated_delta_net(
                 op_name,
@@ -556,9 +293,9 @@ class BailingMoeV3Model(Qwen35TextModel):
         o_name = self.make_matmul(attention.out_proj, f"{basename}/out_proj/MatMul", f"{gated_norm_name}/output_0")
         self.layernorm_attrs["skip_input"] = f"{o_name}/output_0"
 
-    def _make_mla_rope(self, name: str, root_input: str, num_heads: int, token_shape: list):
+    def make_mla_rope(self, name: str, root_input: str, num_heads: int, token_shape: list):
         cos_cache_name, sin_cache_name = self.make_rotary_embedding_caches()
-        dim = num_heads * self.qk_rope_head_dim
+        dim = num_heads * self.mla_attrs["qk_rope_head_dim"]
         pos_ids = self.input_names["position_ids"]
         rope_in = root_input
         if self.use_paged_attention:
@@ -585,7 +322,7 @@ class BailingMoeV3Model(Qwen35TextModel):
             domain="com.microsoft",
             interleaved=self.rope_attrs["interleaved"],
             num_heads=num_heads,
-            rotary_embedding_dim=self.qk_rope_head_dim,
+            rotary_embedding_dim=self.mla_attrs["qk_rope_head_dim"],
         )
         self.make_value(
             rope_out,
@@ -612,34 +349,73 @@ class BailingMoeV3Model(Qwen35TextModel):
     def make_attention(self, layer_id, attention, root_input, **kwargs):
         if self.layer_types[layer_id] == "linear_attention":
             self.make_qwen_gated_delta_net(layer_id, attention, root_input)
-            return
+        else:
+            self.make_mla_attention(layer_id, attention, root_input, **kwargs)
 
+    def make_mla_attention(self, layer_id, attention, root_input, **kwargs):
+        """Query/KV projections -> attention -> value slice -> sigmoid gate -> output projection."""
+        q_path = self.make_mla_query_projection(layer_id, attention, root_input)
+        k_path, v_path = self.make_mla_key_value_projection(layer_id, attention, root_input)
+        attn_op_name = f"/model/layers.{layer_id}/attn/{self.attention_attrs['op_type']}"
+        past_k, past_v, present_k, present_v = self.make_key_value_cache_names(layer_id)
+        self.make_attention_op(
+            attn_op_name,
+            layer_id=layer_id,
+            root_input=root_input,
+            q_path=q_path,
+            k_path=k_path,
+            v_path=v_path,
+            past_k=past_k,
+            past_v=past_v,
+            present_k=present_k,
+            present_v=present_v,
+            cos_cache="",
+            sin_cache="",
+            sinks="",
+            q_norm_weight="",
+            k_norm_weight="",
+            qk_norm_epsilon=self.attention_attrs["qk_norm_epsilon"],
+            **kwargs,
+        )
+        self.make_mla_output_projection(layer_id, attention, root_input, f"{attn_op_name}/output_0")
+
+    def make_mla_projection_norm(self, layer_id, layernorm, root_input, location):
+        weight = f"model.layers.{layer_id}.attn.{location}_a_layernorm.weight"
+        self.make_initializer(layernorm.weight, weight, to=self.io_dtype)
+        name = f"/model/layers.{layer_id}/attn/{location}_a_layernorm/LayerNorm"
+        output = f"{name}/output_0"
+        self.make_layernorm_op(
+            name,
+            op_type="SimplifiedLayerNormalization",
+            inputs=[root_input, weight],
+            outputs=[output],
+            skip=False,
+            new_io_dtype=self.io_dtype,
+            axis=-1,
+            epsilon=self.layernorm_attrs["epsilon"],
+            stash_type=1,
+        )
+        self.make_value(
+            output, self.io_dtype, self.make_hidden_state_shape(last_dim=self.mla_attrs[f"{location}_lora_rank"])
+        )
+        return output
+
+    def make_mla_query_projection(self, layer_id, attention, root_input):
+        """Query LoRA projection -> RMSNorm -> up projection -> split -> RoPE -> packed heads."""
         basename = f"/model/layers.{layer_id}/attn"
         packed = self.use_paged_attention
         token_shape = ["num_tokens"] if packed else ["batch_size", "sequence_length"]
         kept_axes = "0" if packed else "0, 0"
         num_heads = self.num_attn_heads
-        nope_dim = self.qk_nope_head_dim
-        rope_dim = self.qk_rope_head_dim
+        nope_dim = self.mla_attrs["qk_nope_head_dim"]
+        rope_dim = self.mla_attrs["qk_rope_head_dim"]
         qk_dim = self.head_size
-        v_dim = self.v_head_dim
 
-        # 1. Query LoRA projection + RMSNorm + Up projection
         qa_matmul = self.make_matmul(attention.q_a_proj, f"{basename}/q_a_proj/MatMul", root_input)
-        qa_norm_w = f"model.layers.{layer_id}.attn.q_a_layernorm.weight"
-        self.make_initializer(attention.q_a_layernorm.weight, qa_norm_w, to=self.io_dtype)
-        qa_norm = f"{basename}/q_a_layernorm/LayerNorm"
-        self.make_node(
-            "SimplifiedLayerNormalization",
-            inputs=[f"{qa_matmul}/output_0", qa_norm_w],
-            outputs=[f"{qa_norm}/output_0"],
-            name=qa_norm,
-            axis=-1,
-            epsilon=self.layernorm_attrs["epsilon"],
-            stash_type=1,
+        qa_norm = self.make_mla_projection_norm(
+            layer_id, attention.q_a_layernorm, f"{qa_matmul}/output_0", "q"
         )
-        self.make_value(f"{qa_norm}/output_0", self.io_dtype, shape=[*token_shape, self.q_lora_rank])
-        qb_matmul = self.make_matmul(attention.q_b_proj, f"{basename}/q_b_proj/MatMul", f"{qa_norm}/output_0")
+        qb_matmul = self.make_matmul(attention.q_b_proj, f"{basename}/q_b_proj/MatMul", qa_norm)
         q_reshape = f"{basename}/q_b_proj/Reshape"
         self.make_reshape(
             q_reshape,
@@ -665,7 +441,7 @@ class BailingMoeV3Model(Qwen35TextModel):
             self.io_dtype,
             [*token_shape, num_heads * rope_dim],
         )
-        q_pe_rot_flat = self._make_mla_rope(f"{basename}/q_rotary", f"{q_pe_flat}/output_0", num_heads, token_shape)
+        q_pe_rot_flat = self.make_mla_rope(f"{basename}/q_rotary", f"{q_pe_flat}/output_0", num_heads, token_shape)
         q_pe_rot = f"{basename}/q_pe_rot/Reshape"
         self.make_reshape(
             q_pe_rot,
@@ -688,34 +464,32 @@ class BailingMoeV3Model(Qwen35TextModel):
             self.io_dtype,
             [*token_shape, num_heads * qk_dim],
         )
+        return f"{q_final}/output_0"
 
-        # 2. KV LoRA + MQA RoPE projection
+    def make_mla_kv_projection(self, layer_id, attention, root_input):
+        """KV LoRA projection -> split -> RMSNorm -> up projection -> key/value split."""
+        basename = f"/model/layers.{layer_id}/attn"
+        packed = self.use_paged_attention
+        token_shape = ["num_tokens"] if packed else ["batch_size", "sequence_length"]
+        kept_axes = "0" if packed else "0, 0"
+        num_heads = self.num_attn_heads
+        nope_dim = self.mla_attrs["qk_nope_head_dim"]
+        rope_dim = self.mla_attrs["qk_rope_head_dim"]
+        v_dim = self.mla_attrs["v_head_dim"]
         kva_matmul = self.make_matmul(attention.kv_a_proj_with_mqa, f"{basename}/kv_a_proj/MatMul", root_input)
         kva_split = f"{basename}/kv_a_split/Split"
         kv_comp = f"{kva_split}/output_0"
         k_pe_flat = f"{kva_split}/output_1"
         self.make_split(
             kva_split,
-            inputs=[f"{kva_matmul}/output_0", f"/model/constants/INT64/[{self.kv_lora_rank}, {rope_dim}]"],
+            inputs=[f"{kva_matmul}/output_0", f"/model/constants/INT64/[{self.mla_attrs['kv_lora_rank']}, {rope_dim}]"],
             outputs=[kv_comp, k_pe_flat],
             dtypes=[self.io_dtype, self.io_dtype],
-            shapes=[[*token_shape, self.kv_lora_rank], [*token_shape, rope_dim]],
+            shapes=[[*token_shape, self.mla_attrs["kv_lora_rank"]], [*token_shape, rope_dim]],
             axis=-1,
         )
-        kva_norm_w = f"model.layers.{layer_id}.attn.kv_a_layernorm.weight"
-        self.make_initializer(attention.kv_a_layernorm.weight, kva_norm_w, to=self.io_dtype)
-        kva_norm = f"{basename}/kv_a_layernorm/LayerNorm"
-        self.make_node(
-            "SimplifiedLayerNormalization",
-            inputs=[kv_comp, kva_norm_w],
-            outputs=[f"{kva_norm}/output_0"],
-            name=kva_norm,
-            axis=-1,
-            epsilon=self.layernorm_attrs["epsilon"],
-            stash_type=1,
-        )
-        self.make_value(f"{kva_norm}/output_0", self.io_dtype, shape=[*token_shape, self.kv_lora_rank])
-        kvb_matmul = self.make_matmul(attention.kv_b_proj, f"{basename}/kv_b_proj/MatMul", f"{kva_norm}/output_0")
+        kva_norm = self.make_mla_projection_norm(layer_id, attention.kv_a_layernorm, kv_comp, "kv")
+        kvb_matmul = self.make_matmul(attention.kv_b_proj, f"{basename}/kv_b_proj/MatMul", kva_norm)
         kvb_reshape = f"{basename}/kv_b_proj/Reshape"
         self.make_reshape(
             kvb_reshape,
@@ -734,9 +508,19 @@ class BailingMoeV3Model(Qwen35TextModel):
             shapes=[[*token_shape, num_heads, nope_dim], [*token_shape, num_heads, v_dim]],
             axis=-1,
         )
+        return k_nope, k_pe_flat, v_states
 
-        # Rotate single-head k_pe and broadcast across num_heads heads via Concat
-        k_pe_rot_flat = self._make_mla_rope(f"{basename}/k_rotary", k_pe_flat, 1, token_shape)
+    def make_mla_key_value_projection(self, layer_id, attention, root_input):
+        """KV projection -> single-head RoPE -> key broadcast -> value padding -> packed heads."""
+        k_nope, k_pe_flat, v_states = self.make_mla_kv_projection(layer_id, attention, root_input)
+        basename = f"/model/layers.{layer_id}/attn"
+        packed = self.use_paged_attention
+        token_shape = ["num_tokens"] if packed else ["batch_size", "sequence_length"]
+        kept_axes = "0" if packed else "0, 0"
+        num_heads = self.num_attn_heads
+        rope_dim = self.mla_attrs["qk_rope_head_dim"]
+        qk_dim = self.head_size
+        k_pe_rot_flat = self.make_mla_rope(f"{basename}/k_rotary", k_pe_flat, 1, token_shape)
         k_pe_unsq = f"{basename}/k_pe_rot/Unsqueeze"
         self.make_unsqueeze(
             k_pe_unsq,
@@ -767,12 +551,22 @@ class BailingMoeV3Model(Qwen35TextModel):
             self.io_dtype,
             [*token_shape, num_heads * qk_dim],
         )
+        v_path = self.make_mla_value_padding(layer_id, v_states, f"{k_pe_tiles}/output_0")
+        return f"{k_final}/output_0", v_path
 
+    def make_mla_value_padding(self, layer_id, v_states, rotary_keys):
+        basename = f"/model/layers.{layer_id}/attn"
+        packed = self.use_paged_attention
+        token_shape = ["num_tokens"] if packed else ["batch_size", "sequence_length"]
+        kept_axes = "0" if packed else "0, 0"
+        num_heads = self.num_attn_heads
+        rope_dim = self.mla_attrs["qk_rope_head_dim"]
+        qk_dim = self.head_size
         # Pad v_states from 128 to 192 per head using GPU Mul(0) + Concat so all nodes run on CUDA.
         v_zeros = f"{basename}/v_pad/Mul_zero"
         self.make_mul(
             v_zeros,
-            [f"{k_pe_tiles}/output_0", f"/model/constants/{self.io_dtype}/0.0"],
+            [rotary_keys, f"/model/constants/{self.io_dtype}/0.0"],
             self.io_dtype,
             [*token_shape, num_heads, rope_dim],
         )
@@ -791,35 +585,21 @@ class BailingMoeV3Model(Qwen35TextModel):
             self.io_dtype,
             [*token_shape, num_heads * qk_dim],
         )
+        return f"{v_final}/output_0"
 
-        # 3. Run PagedAttention or GroupQueryAttention
-        attn_op_name = f"{basename}/{self.attention_attrs['op_type']}"
-        past_k, past_v, present_k, present_v = self.make_key_value_cache_names(layer_id)
-        self.make_attention_op(
-            attn_op_name,
-            layer_id=layer_id,
-            root_input=root_input,
-            q_path=f"{q_final}/output_0",
-            k_path=f"{k_final}/output_0",
-            v_path=f"{v_final}/output_0",
-            past_k=past_k,
-            past_v=past_v,
-            present_k=present_k,
-            present_v=present_v,
-            cos_cache="",
-            sin_cache="",
-            sinks="",
-            q_norm_weight="",
-            k_norm_weight="",
-            qk_norm_epsilon=self.attention_attrs["qk_norm_epsilon"],
-            **kwargs,
-        )
-
-        # 4. Slice V head dimension [0:128] and apply head-wise sigmoid gate (g_proj)
+    def make_mla_output_projection(self, layer_id, attention, root_input, attn_output):
+        """Slice padded value channels -> per-head sigmoid gate -> output projection."""
+        basename = f"/model/layers.{layer_id}/attn"
+        packed = self.use_paged_attention
+        token_shape = ["num_tokens"] if packed else ["batch_size", "sequence_length"]
+        kept_axes = "0" if packed else "0, 0"
+        num_heads = self.num_attn_heads
+        qk_dim = self.head_size
+        v_dim = self.mla_attrs["v_head_dim"]
         attn_4d = f"{basename}/attn_out/Reshape"
         self.make_reshape(
             attn_4d,
-            [f"{attn_op_name}/output_0", f"/model/constants/INT64/[{kept_axes}, {num_heads}, {qk_dim}]"],
+            [attn_output, f"/model/constants/INT64/[{kept_axes}, {num_heads}, {qk_dim}]"],
             self.io_dtype,
             [*token_shape, num_heads, qk_dim],
         )
@@ -863,10 +643,10 @@ class BailingMoeV3Model(Qwen35TextModel):
         self.layernorm_attrs["skip_input"] = f"{o_matmul}/output_0"
 
     def make_moe(self, layer_id, moe, root_input):
-        if layer_id < self.first_k_dense_replace:
+        if layer_id < self.moe_attrs["first_k_dense_replace"]:
             prev_inter = self.intermediate_size
             try:
-                self.intermediate_size = self.dense_intermediate_size
+                self.intermediate_size = self.moe_attrs["dense_intermediate_size"]
                 self.make_mlp(layer_id, moe, root_input=root_input)
             finally:
                 self.intermediate_size = prev_inter
@@ -978,7 +758,7 @@ class BailingMoeV3Model(Qwen35TextModel):
         # Shared expert MLP
         intermediate_size = self.intermediate_size
         try:
-            self.intermediate_size = self.shared_expert_intermediate_size
+            self.intermediate_size = self.moe_attrs["shared_expert_intermediate_size"]
             self.make_mlp_proj(layer_id, moe.shared_experts, root_input)
         finally:
             self.intermediate_size = intermediate_size
@@ -993,20 +773,12 @@ class BailingMoeV3Model(Qwen35TextModel):
         )
         self.layernorm_attrs["skip_input"] = f"{add_name}/output_0"
 
-    def make_genai_config(self, config, extra_kwargs, out_dir):
-        super().make_genai_config(config, extra_kwargs, out_dir)
-        if self.ep == "cuda" and self.use_paged_attention:
-            config_path = os.path.join(out_dir, "genai_config.json")
-            if os.path.exists(config_path):
-                with open(config_path, encoding="utf-8") as f:
-                    genai_config = json.load(f)
-                sess_opts = genai_config.get("model", {}).get("decoder", {}).setdefault("session_options", {})
-                sess_opts.setdefault(
-                    "ep.cuda.gated_delta_net_bf16_precision",
-                    str(self.extra_options.get("gated_delta_net_bf16_precision", "bf16")),
-                )
-                with open(config_path, "w", encoding="utf-8") as f:
-                    json.dump(genai_config, f, indent=4)
+    def update_genai_config(self, genai_config):
+        super().update_genai_config(genai_config)
+        if self.ep == "cuda" and self.use_paged_attention and self.io_dtype == ir.DataType.BFLOAT16:
+            genai_config["model"]["decoder"]["session_options"]["ep.cuda.gated_delta_net_bf16_precision"] = (
+                self.kda_attrs["bf16_precision"]
+            )
 
     def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
         super().save_processing(model_name_or_path, extra_kwargs, out_dir)
@@ -1014,11 +786,15 @@ class BailingMoeV3Model(Qwen35TextModel):
         if os.path.exists(tokenizer_json_path):
             with open(tokenizer_json_path, encoding="utf-8") as f:
                 tok_data = json.load(f)
+            compatible_ling_regex = (
+                r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| "
+                r"?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"
+            )
             pre_tok = tok_data.get("pre_tokenizer", {})
             for entry in pre_tok.get("pretokenizers", []):
                 pattern = entry.get("pattern", {})
                 if isinstance(pattern, dict) and "Regex" in pattern:
                     if "?+" in pattern["Regex"] or "++" in pattern["Regex"]:
-                        pattern["Regex"] = COMPATIBLE_LING_REGEX
+                        pattern["Regex"] = compatible_ling_regex
             with open(tokenizer_json_path, "w", encoding="utf-8") as f:
                 json.dump(tok_data, f, ensure_ascii=False, indent=2)

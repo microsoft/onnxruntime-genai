@@ -4,13 +4,17 @@ These options and workflows apply to particular model families and speculative d
 
 ## Bailing MoE V3 (Ling-3.0-tiny)
 
+Use an ONNX Runtime source build at `d93f5446f362d9c70bea81de953f32a26aa26d25` or a later revision containing [ORT #33817](https://github.com/microsoft/onnxruntime/pull/33817), merged November 8, 2026. A version label alone is not sufficient: the build must register `MoEGroupRouter` and the `gate_lower_bound` attribute on `GatedDeltaNet` for per-key KDA. Older wheels such as the reviewed ORT 1.30.0 build lack this support.
+
 The builder reads Bailing configuration fields rather than assuming the Ling-3.0-tiny values. `layer_group_size` must be a positive integer (default `1`); per-layer lists are explicitly unsupported. Full attention ends each complete group and covers every layer in an incomplete final group, matching the Hugging Face checkpoint's decoder scheduling. Limiting the exported layer count preserves the original checkpoint's layer types.
 
 `norm_topk_prob` controls routed-expert normalization (default `false`), and `routed_scaling_factor` scales only the routed experts (default `1.0`). Because `MoEGroupRouter` emits selected log-scores and MoE/QMoE applies softmax, unnormalized routing additionally restores the selected sigmoid-score sum before adding the shared expert. `group_topk` is configurable, defaults to `2` for `noaux_tc`, must be a positive integer, and is clamped to the number of experts per group by the runtime operator.
 
 KDA uses the bounded sigmoid decay only when `kda_safe_gate=true`, which requires an explicit finite negative `kda_lower_bound`. Otherwise it uses the unbounded negative softplus decay and ignores `kda_lower_bound`, including `null`. MLA retains the checkpoint's projection weights and selects the ONNX RoPE layout through `rope_interleave` (default `true`), avoiding weight, scale, or bias permutations.
 
-Small offline scheduling, routing, KDA and RoPE regressions live in `test/python/models/test_bailing_builder.py`. Run them from the repository root with `python -m pytest -q test/python/models/test_bailing_builder.py` using an ONNX Runtime build containing `MoEGroupRouter` and per-key KDA support. These tests do not establish full-checkpoint CUDA generation accuracy or H200 performance.
+The builder consumes normalized layers from `loaders/bailing.py`; source unpacking and FP8 scale validation stay in the loader. MLA graph settings live in `mla_attrs`, KDA decay/prefill settings in `kda_attrs`, and dense/shared/routed MLP settings in `moe_attrs`. Explicit FP16/BF16 requests are not changed based on checkpoint dtype. See [Bailing BF16 KDA prefill precision](../README.md#bailing-bf16-kda-prefill-precision) for the CUDA BF16 paged-only `gated_delta_net_bf16_precision` option, its values, default, and examples.
+
+Small offline scheduling, loader, precision, routing, KDA and RoPE regressions live in `test/python/models/test_bailing_builder.py`. Run them from the repository root with `python -m pytest -q test/python/models/test_bailing_builder.py` using a compatible ONNX Runtime build. Linux CUDA CI builds the minimum revision above and runs `ORTGENAI_REQUIRE_BAILING_KERNELS=1 python -m pytest -q test/python/models/test_bailing_builder.py`; missing schemas or CPU/CUDA providers fail this lane rather than skip. Older developer environments retain skips without this environment variable. These tests do not establish full-checkpoint CUDA generation accuracy or H200 performance.
 
 ## Build a DFlash 2 Block Drafter
 

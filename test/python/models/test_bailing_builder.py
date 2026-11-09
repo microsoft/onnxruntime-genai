@@ -3,8 +3,12 @@
 
 """Small, offline regressions for Bailing checkpoint loading and graph export."""
 
+import builtins
+import json
+import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import numpy as np
@@ -22,7 +26,10 @@ sys.path.insert(0, str(Path(__file__).parents[3] / "src" / "python" / "py" / "mo
 
 import builder
 from builders import bailing
-from builders.bailing import BailingMoeV3Model, _BailingWeights
+from builders.bailing import BailingMoeV3Model
+from loaders import bailing as bailing_loader
+from loaders.bailing import BailingModel
+from loaders.base import QuantizedDecoderLayer, QuantizedExperts, TensorModule
 
 
 def _model(
@@ -77,6 +84,156 @@ def _checkpoint(tmp_path, out_features=16, in_features=128):
     return scales
 
 
+def _layer_checkpoint(tmp_path, model, weight_format="bf16"):
+    tensors = {
+        "model.word_embeddings.weight": torch.ones(model.vocab_size, model.hidden_size, dtype=torch.bfloat16),
+        "model.norm.weight": torch.ones(model.hidden_size, dtype=torch.bfloat16),
+    }
+
+    def linear(prefix, out_features, in_features):
+        if weight_format == "int4":
+            tensors[f"{prefix}.weight_packed"] = torch.full(
+                (out_features, in_features // 8), 0x76543210, dtype=torch.int32
+            )
+            tensors[f"{prefix}.weight_scale"] = torch.ones(out_features, in_features // 32)
+        else:
+            weight = torch.ones(out_features, in_features)
+            tensors[f"{prefix}.weight"] = weight.to(torch.float8_e4m3fn if weight_format == "fp8" else torch.bfloat16)
+            if weight_format == "fp8":
+                tensors[f"{prefix}.weight_scale_inv"] = torch.ones(
+                    (out_features + 127) // 128, (in_features + 127) // 128
+                )
+
+    def mlp(prefix, intermediate):
+        linear(f"{prefix}.gate_proj", intermediate, model.hidden_size)
+        linear(f"{prefix}.up_proj", intermediate, model.hidden_size)
+        linear(f"{prefix}.down_proj", model.hidden_size, intermediate)
+
+    linear("lm_head", model.vocab_size, model.hidden_size)
+    for layer_id in range(model.num_layers):
+        prefix = f"model.layers.{layer_id}"
+        for name in ("input_layernorm", "post_attention_layernorm"):
+            tensors[f"{prefix}.{name}.weight"] = torch.ones(model.hidden_size, dtype=torch.bfloat16)
+        attention = f"{prefix}.attention"
+        if model.layer_types[layer_id] == "full_attention":
+            mla = model.mla_attrs
+            linear(f"{attention}.q_a_proj", mla["q_lora_rank"], model.hidden_size)
+            linear(f"{attention}.q_b_proj", model.num_attn_heads * model.head_size, mla["q_lora_rank"])
+            linear(f"{attention}.kv_a_proj_with_mqa", mla["kv_lora_rank"] + mla["qk_rope_head_dim"], model.hidden_size)
+            linear(
+                f"{attention}.kv_b_proj",
+                model.num_attn_heads * (mla["qk_nope_head_dim"] + mla["v_head_dim"]),
+                mla["kv_lora_rank"],
+            )
+            linear(f"{attention}.g_proj", model.num_attn_heads, model.hidden_size)
+            linear(f"{attention}.dense", model.hidden_size, model.num_attn_heads * mla["v_head_dim"])
+            for name, rank in (("q_a_layernorm", mla["q_lora_rank"]), ("kv_a_layernorm", mla["kv_lora_rank"])):
+                tensors[f"{attention}.{name}.weight"] = torch.ones(rank, dtype=torch.bfloat16)
+        else:
+            dim = model.linear_value_dim
+            for name in ("q_proj", "k_proj", "v_proj", "f_proj", "g_proj"):
+                linear(f"{attention}.{name}", dim, model.hidden_size)
+            linear(f"{attention}.b_proj", model.linear_num_value_heads, model.hidden_size)
+            linear(f"{attention}.o_proj", model.hidden_size, dim)
+            for name in ("q", "k", "v"):
+                tensors[f"{attention}.{name}_conv1d.weight"] = torch.ones(dim, 1, model.linear_conv_kernel_dim)
+            tensors[f"{attention}.A_log"] = torch.zeros(model.linear_num_value_heads)
+            tensors[f"{attention}.dt_bias"] = torch.zeros(dim)
+            tensors[f"{attention}.o_norm.weight"] = torch.ones(model.linear_value_head_dim)
+        mlp_prefix = f"{prefix}.mlp"
+        if layer_id < model.moe_attrs["first_k_dense_replace"]:
+            mlp(mlp_prefix, model.moe_attrs["dense_intermediate_size"])
+        else:
+            linear(f"{mlp_prefix}.gate", model.moe_attrs["num_experts"], model.hidden_size)
+            tensors[f"{mlp_prefix}.gate.expert_bias"] = torch.zeros(model.moe_attrs["num_experts"])
+            mlp(f"{mlp_prefix}.shared_experts", model.moe_attrs["shared_expert_intermediate_size"])
+            for expert_id in range(model.moe_attrs["num_experts"]):
+                mlp(f"{mlp_prefix}.experts.{expert_id}", model.intermediate_size)
+    save_file(tensors, tmp_path / "model.safetensors")
+    return tensors
+
+
+def _mla_weights(model):
+    attrs = model.mla_attrs
+    shapes = {
+        "q_a_proj": (attrs["q_lora_rank"], model.hidden_size),
+        "q_b_proj": (model.num_attn_heads * model.head_size, attrs["q_lora_rank"]),
+        "kv_a_proj_with_mqa": (attrs["kv_lora_rank"] + attrs["qk_rope_head_dim"], model.hidden_size),
+        "kv_b_proj": (
+            model.num_attn_heads * (attrs["qk_nope_head_dim"] + attrs["v_head_dim"]),
+            attrs["kv_lora_rank"],
+        ),
+        "g_proj": (model.num_attn_heads, model.hidden_size),
+        "dense": (model.hidden_size, model.num_attn_heads * attrs["v_head_dim"]),
+    }
+    generator = torch.Generator().manual_seed(23)
+    attention = SimpleNamespace(
+        **{name: TensorModule(weight=torch.randn(shape, generator=generator) * 0.1) for name, shape in shapes.items()}
+    )
+    attention.q_a_layernorm = TensorModule(weight=torch.linspace(0.5, 1.5, attrs["q_lora_rank"]))
+    attention.kv_a_layernorm = TensorModule(weight=torch.linspace(0.5, 1.5, attrs["kv_lora_rank"]))
+    return attention
+
+
+def _mla_reference(model, attention, hidden, positions=None, attn_output=None):
+    dtype = torch.float16 if model.io_dtype == ir.DataType.FLOAT16 else torch.float32
+    attrs = model.mla_attrs
+    token_shape = hidden.shape[:-1]
+    hidden = torch.from_numpy(hidden).float()
+
+    def rounded(value):
+        return value.to(dtype).float()
+
+    def linear(name, value):
+        return rounded(value @ getattr(attention, name).weight.to(dtype).float().T)
+
+    def normalized(value, scale):
+        return rounded(
+            value
+            / torch.sqrt(value.square().mean(dim=-1, keepdim=True) + model.layernorm_attrs["epsilon"])
+            * scale.to(dtype).float()
+        )
+
+    def rotary(value):
+        frequencies = torch.from_numpy(positions).float()[..., None] / (
+            model.rope_attrs["theta"]
+            ** (torch.arange(0, attrs["qk_rope_head_dim"], 2).float() / attrs["qk_rope_head_dim"])
+        )
+        cos, sin = frequencies.cos()[..., None, :], frequencies.sin()[..., None, :]
+        if model.rope_attrs["interleaved"]:
+            output = torch.empty_like(value)
+            output[..., 0::2] = value[..., 0::2] * cos - value[..., 1::2] * sin
+            output[..., 1::2] = value[..., 1::2] * cos + value[..., 0::2] * sin
+        else:
+            left, right = value.chunk(2, dim=-1)
+            output = torch.cat([left * cos - right * sin, right * cos + left * sin], dim=-1)
+        return rounded(output)
+
+    if attn_output is not None:
+        values = torch.from_numpy(attn_output).float().reshape(*token_shape, model.num_attn_heads, model.head_size)
+        values = values[..., : attrs["v_head_dim"]]
+        gates = rounded(linear("g_proj", hidden).sigmoid())
+        gated = rounded(values * gates[..., None]).reshape(*token_shape, model.num_attn_heads * attrs["v_head_dim"])
+        return linear("dense", gated).to(dtype).numpy()
+    query = linear("q_b_proj", normalized(linear("q_a_proj", hidden), attention.q_a_layernorm.weight))
+    query = query.reshape(*token_shape, model.num_attn_heads, model.head_size)
+    q_nope, q_rope = query.split([attrs["qk_nope_head_dim"], attrs["qk_rope_head_dim"]], dim=-1)
+    query = torch.cat([q_nope, rotary(q_rope)], dim=-1)
+    compressed, k_rope = linear("kv_a_proj_with_mqa", hidden).split(
+        [attrs["kv_lora_rank"], attrs["qk_rope_head_dim"]], dim=-1
+    )
+    kv = linear("kv_b_proj", normalized(compressed, attention.kv_a_layernorm.weight))
+    kv = kv.reshape(*token_shape, model.num_attn_heads, attrs["qk_nope_head_dim"] + attrs["v_head_dim"])
+    k_nope, values = kv.split([attrs["qk_nope_head_dim"], attrs["v_head_dim"]], dim=-1)
+    k_rope = rotary(k_rope[..., None, :]).expand(*token_shape, model.num_attn_heads, attrs["qk_rope_head_dim"])
+    key = torch.cat([k_nope, k_rope], dim=-1)
+    value = torch.cat([values, torch.zeros_like(k_rope)], dim=-1)
+    return tuple(
+        tensor.reshape(*token_shape, model.num_attn_heads * model.head_size).to(dtype).numpy()
+        for tensor in (query, key, value)
+    )
+
+
 @pytest.mark.parametrize("trust", [False, True])
 def test_config_failure_preserves_remote_code_policy(tmp_path, monkeypatch, trust):
     load_config = Mock(side_effect=ValueError("custom configuration requires remote code"))
@@ -129,7 +286,7 @@ def test_compact_capture_rejected_for_per_key_decay(tmp_path, ep, options):
 def test_streaming_loader_rejects_adapters_before_loading(tmp_path, monkeypatch):
     model = _model(tmp_path, adapter_path="test/adapter")
     download = Mock()
-    monkeypatch.setattr(bailing, "snapshot_download", download)
+    monkeypatch.setattr(bailing_loader, "snapshot_download", download)
 
     with pytest.raises(ValueError, match="does not support adapter_path"):
         model.load_weights("")
@@ -142,7 +299,7 @@ def test_streaming_loader_resolves_checkpoint_source(tmp_path, monkeypatch, remo
     _checkpoint(tmp_path)
     model = _model(tmp_path, hf_token=False, base_revision="test-revision")
     download = Mock(return_value=str(tmp_path))
-    monkeypatch.setattr(bailing, "snapshot_download", download)
+    monkeypatch.setattr(bailing_loader, "snapshot_download", download)
 
     weights = model.load_weights("" if remote else str(tmp_path))
     try:
@@ -169,7 +326,7 @@ def test_dequantized_source_is_quantized_to_int4_qdq(tmp_path, quant_method):
     model.model.graph.inputs.append(model.make_value("input", ir.DataType.FLOAT, [1, 1, 128]))
     weights = model.load_weights(str(tmp_path))
     try:
-        projection = weights.make_linear("projection")
+        projection = weights.make_linear_module("projection")
         assert projection.weight.dtype == torch.bfloat16
         model.make_matmul(projection, "/projection/MatMul", "input")
     finally:
@@ -207,8 +364,8 @@ def test_block_fp8_metadata_and_partial_blocks_survive_concatenation(tmp_path):
     model = _model(tmp_path, quant_method="fp8")
     weights = model.load_weights(str(tmp_path))
     try:
-        projection = weights.make_linear("projection")
-        fused = _BailingWeights.concat_linears([projection, projection])
+        projection = weights.make_linear_module("projection")
+        fused = weights.concat_linears([projection, projection])
         model.make_matmul(fused, "/projection", "input")
     finally:
         weights.close()
@@ -272,7 +429,7 @@ def test_router_defaults_match_sglang(tmp_path):
     assert model.moe_attrs["normalize_routing_weights"] is False
     assert model.moe_attrs["routed_scaling_factor"] == 1.0
     assert model.moe_attrs["group_topk"] == 2
-    assert model.kda_lower_bound is None
+    assert model.kda_attrs["gate_lower_bound"] is None
 
 
 @pytest.mark.parametrize("lower_bound", [None, 0, 1, float("nan"), float("-inf"), True, "-5"])
@@ -291,13 +448,13 @@ def test_mla_rope_matches_hf_layout(tmp_path, interleaved, packed):
         use_paged_attention=packed,
         config_options={"rope_interleave": interleaved},
     )
-    heads, rotary_dim = 2, model.qk_rope_head_dim
+    heads, rotary_dim = 2, model.mla_attrs["qk_rope_head_dim"]
     token_shape = [4] if packed else [2, 2]
     shape = [*token_shape, heads * rotary_dim]
     model.model.graph.inputs.append(model.make_value("input", model.io_dtype, shape))
     positions = np.array([0, 1, 3, 7], dtype=np.int64).reshape(token_shape)
     model.model.graph.inputs.append(model.make_value(model.input_names["position_ids"], ir.DataType.INT64, token_shape))
-    output = model._make_mla_rope("/rope", "input", heads, token_shape)
+    output = model.make_mla_rope("/rope", "input", heads, token_shape)
     model.model.graph.outputs.append(model.values[output])
     model.model.graph.sort()
     inputs = (
@@ -327,13 +484,18 @@ def test_mla_rope_matches_hf_layout(tmp_path, interleaved, packed):
 
 
 def kernel_session(model, provider, required_op):
+    def unavailable(reason):
+        if os.environ.get("ORTGENAI_REQUIRE_BAILING_KERNELS") == "1":
+            pytest.fail(reason)
+        pytest.skip(reason)
+
     schemas = {schema.name: schema for schema in get_all_operator_schema() if schema.domain == "com.microsoft"}
     if required_op not in schemas or (
         required_op == "GatedDeltaNet" and "gate_lower_bound" not in schemas[required_op].attributes
     ):
-        pytest.skip(f"Requires an ONNX Runtime build with {required_op} from ORT PR #33817")
+        unavailable(f"Requires an ONNX Runtime build with {required_op} from ORT PR #33817")
     if provider not in ort.get_available_providers():
-        pytest.skip(f"{provider} is unavailable")
+        unavailable(f"{provider} is unavailable")
     options = ort.SessionOptions()
     if provider == "CUDAExecutionProvider":
         options.add_session_config_entry("session.disable_cpu_ep_fallback", "1")
@@ -379,7 +541,7 @@ def test_router_weights_match_sglang_grouped_topk(tmp_path, provider, packed, no
     bias = torch.tensor([0.1, -0.15, 0.2, -0.05, -0.1, 0.15, -0.2, 0.05])
     gate = torch.zeros(8, model.hidden_size)
     gate[:, :4] = logits.T
-    moe = bailing.SimpleNamespace(gate=bailing.TensorModule(weight=gate), expert_bias=bias)
+    moe = SimpleNamespace(gate=TensorModule(weight=gate), expert_bias=bias)
     model.model.graph.inputs.append(model.make_value("hidden", model.io_dtype, list(hidden.shape)))
     routed, scale = model.make_moe_router(1, moe, "hidden")
     model.make_softmax("/weights/Softmax", routed, model.io_dtype, [4, 8])
@@ -433,7 +595,7 @@ def test_kda_output_and_state_match_recurrent_reference(tmp_path, provider, safe
         model.model.graph.inputs.append(model.make_value(name, model.io_dtype, shape))
     a_log = torch.tensor([-0.5, 0.25])
     dt_bias = torch.linspace(-1, 1, heads * dim).reshape(heads, dim)
-    attention = bailing.SimpleNamespace(A_log=a_log, dt_bias=dt_bias)
+    attention = SimpleNamespace(A_log=a_log, dt_bias=dt_bias)
     output = model.make_gated_delta_net_layer(0, attention, "conv", "b", "a")
     present = model.output_names["present.recurrent"][0]
     model.model.graph.outputs.extend([model.values[output], model.values[present]])
@@ -471,3 +633,381 @@ def test_kda_output_and_state_match_recurrent_reference(tmp_path, provider, safe
     tolerance = 5e-3 if dtype == np.float16 else 1e-5
     np.testing.assert_allclose(actual, expected.reshape(batch, length, heads * dim), rtol=tolerance, atol=tolerance)
     np.testing.assert_allclose(actual_state, state, rtol=tolerance, atol=tolerance)
+
+
+@pytest.mark.parametrize("dtype", [ir.DataType.FLOAT16, ir.DataType.BFLOAT16, ir.DataType.FLOAT])
+@pytest.mark.parametrize("ep", ["cpu", "cuda"])
+def test_explicit_precision_matches_policy_and_saved_tensor_types(tmp_path, dtype, ep):
+    model = _model(tmp_path, dtype=dtype, ep=ep, config_options={"torch_dtype": torch.bfloat16})
+    model.model.graph.inputs.append(model.make_value("hidden", dtype, [1, 1, model.hidden_size]))
+    model.make_matmul(TensorModule(weight=torch.ones(16, model.hidden_size)), "/projection", "hidden")
+    model.model.graph.outputs.append(model.values["/projection/output_0"])
+    output = tmp_path / "export"
+    output.mkdir()
+
+    model.save_model(str(output))
+
+    expected_policy = {ir.DataType.FLOAT16: "fp16", ir.DataType.BFLOAT16: "bf16", ir.DataType.FLOAT: "fp32"}[dtype]
+    assert model.io_dtype == model.onnx_dtype == dtype
+    assert model.quant_config.io_dtype == expected_policy
+    exported = ir.load(output / "model.onnx")
+    assert exported.graph.inputs[0].dtype == exported.graph.outputs[0].dtype == dtype
+    weight = next(node for node in exported.graph if node.op_type == "MatMul").inputs[1]
+    assert weight.dtype == dtype
+
+
+@pytest.mark.parametrize("io_dtype", [None, "fp16", "bf16"])
+def test_inferred_precision_uses_the_existing_structured_policy(tmp_path, io_dtype):
+    quant_data = {"weights": {"type": "int4"}, "moe": {"type": "int4"}}
+    if io_dtype is not None:
+        quant_data["io_dtype"] = io_dtype
+    policy = builder.normalize_builder_config(None, "cuda", target_options={"quant_config": quant_data})
+    resolved_io, resolved_weights = policy.extra_options["_quant_config"].to_onnx_dtypes()
+    model = _model(
+        tmp_path,
+        dtype=resolved_io,
+        precision=resolved_weights,
+        ep="cuda",
+        config_options={"torch_dtype": torch.bfloat16},
+        **policy.extra_options,
+    )
+    model.model.graph.inputs.append(model.make_value("hidden", resolved_io, [1, 1, model.hidden_size]))
+    model.make_matmul(TensorModule(weight=torch.ones(16, model.hidden_size)), "/projection", "hidden")
+
+    assert model.io_dtype == resolved_io
+    assert model.quant_config.io_dtype == (io_dtype or "fp16")
+    assert model.values["/projection/output_0"].dtype == resolved_io
+
+
+@pytest.mark.parametrize("precision", [None, "fp32", "fp16", "bf16"])
+def test_bf16_prefill_precision_is_added_by_config_hook(tmp_path, precision, monkeypatch):
+    options = {} if precision is None else {"gated_delta_net_bf16_precision": precision}
+    model = _model(tmp_path, dtype=ir.DataType.BFLOAT16, ep="cuda", use_paged_attention=True, **options)
+    model.make_inputs_and_outputs()
+    monkeypatch.setattr(model, "load_generation_config", Mock(side_effect=OSError("offline")))
+    monkeypatch.setattr(model, "resolve_special_token_ids", Mock(return_value=(0, 1, 0)))
+    open_file = Mock(wraps=builtins.open)
+    monkeypatch.setattr(builtins, "open", open_file)
+
+    model.make_genai_config(model.config, {}, str(tmp_path))
+
+    config_path = tmp_path / "genai_config.json"
+    writes = [call for call in open_file.call_args_list if call.args[0] == str(config_path)]
+    assert len(writes) == 1
+    assert writes[0].args[1] == "w"
+    config = json.loads(config_path.read_text())
+    assert config["model"]["decoder"]["session_options"]["ep.cuda.gated_delta_net_bf16_precision"] == (
+        precision or "bf16"
+    )
+
+
+@pytest.mark.parametrize("precision", [None, True, 0, "", "fast", "FP32", ["bf16"]])
+def test_invalid_bf16_prefill_precision_is_rejected(tmp_path, precision):
+    with pytest.raises(ValueError, match="must be one of fp32, fp16, bf16"):
+        _model(tmp_path, gated_delta_net_bf16_precision=precision)
+
+
+@pytest.mark.parametrize(
+    ("ep", "dtype", "paged"),
+    [("cpu", ir.DataType.FLOAT, False), ("cuda", ir.DataType.BFLOAT16, False), ("cuda", ir.DataType.FLOAT16, True)],
+)
+def test_bf16_prefill_precision_rejects_inapplicable_exports(tmp_path, ep, dtype, paged):
+    with pytest.raises(ValueError, match="only to CUDA BF16 paged-attention exports"):
+        _model(tmp_path, dtype=dtype, ep=ep, use_paged_attention=paged, gated_delta_net_bf16_precision="bf16")
+
+
+@pytest.mark.parametrize(
+    ("ep", "dtype", "paged"),
+    [("cpu", ir.DataType.FLOAT, False), ("cuda", ir.DataType.BFLOAT16, False), ("cuda", ir.DataType.FLOAT16, True)],
+)
+def test_bf16_prefill_default_does_not_change_other_exports(tmp_path, ep, dtype, paged):
+    model = _model(tmp_path, dtype=dtype, ep=ep, use_paged_attention=paged)
+    config = {"model": {"decoder": {"session_options": {}}}}
+
+    model.update_genai_config(config)
+
+    assert "ep.cuda.gated_delta_net_bf16_precision" not in config["model"]["decoder"]["session_options"]
+
+
+@pytest.mark.parametrize(
+    ("weight_format", "requantize"), [("bf16", False), ("fp8", False), ("fp8", True), ("int4", True)]
+)
+def test_loader_exposes_normalized_layers_and_preserves_weight_formats(tmp_path, weight_format, requantize):
+    model = _model(
+        tmp_path,
+        precision=ir.DataType.INT4 if requantize else ir.DataType.FLOAT,
+        quant_method="fp8" if weight_format == "fp8" else None,
+        config_options={"num_experts": 2},
+    )
+    _layer_checkpoint(tmp_path, model, weight_format)
+    weights = model.load_weights(str(tmp_path))
+
+    modules = list(weights.modules())
+
+    layers = [module for module in modules if model.is_layer(module)]
+    assert len(layers) == model.num_layers
+    assert all(isinstance(layer, QuantizedDecoderLayer) for layer in layers)
+    assert layers[0].self_attn is None
+    assert layers[-1].linear_attn is None
+    assert layers[0].linear_attn.in_proj_qkv.weight.shape == (3 * model.linear_value_dim, model.hidden_size)
+    assert layers[0].linear_attn.in_proj_b.exclude_from_quantization
+    assert layers[1].mlp.gate.exclude_from_quantization
+    assert weights.handles == {}
+    assert weights.handle_keys == {}
+    if weight_format == "fp8" and not requantize:
+        assert layers[0].linear_attn.in_proj_qkv.quant_type == "fp8"
+        assert not weights.lm_head.can_reuse_as_embedding
+        experts = layers[1].mlp.experts
+        assert isinstance(experts, QuantizedExperts)
+        assert experts.gate_up_qweight.dtype == torch.float8_e4m3fn
+        assert experts.gate_up_scales.shape == (2, 2, 1)
+    else:
+        assert layers[0].linear_attn.in_proj_qkv.weight.dtype == torch.bfloat16
+        assert layers[1].mlp.experts.gate_up_proj.dtype == torch.bfloat16
+
+
+def test_streaming_loader_does_not_read_layers_beyond_export_limit(tmp_path):
+    model = _model(tmp_path, num_hidden_layers=1, config_options={"num_experts": 2})
+    _layer_checkpoint(tmp_path, model)
+    weights = model.load_weights(str(tmp_path))
+
+    modules = list(weights.modules())
+
+    assert len(modules) == 4
+    assert isinstance(modules[1], QuantizedDecoderLayer)
+    assert weights.handles == {}
+
+
+def test_streaming_loader_closes_after_partial_layer_failure(tmp_path):
+    model = _model(tmp_path, quant_method="fp8", config_options={"num_experts": 2})
+    tensors = _layer_checkpoint(tmp_path, model, "fp8")
+    del tensors["model.layers.1.mlp.experts.1.gate_proj.weight_scale_inv"]
+    save_file(tensors, tmp_path / "model.safetensors")
+    weights = model.load_weights(str(tmp_path))
+    modules = weights.modules()
+    next(modules)
+    first_layer = next(modules)
+
+    with pytest.raises(ValueError, match="weight_scale_inv.*must have shape"):
+        list(modules)
+
+    assert weights.handles == {}
+    assert weights.handle_keys == {}
+    assert first_layer.linear_attn.in_proj_qkv.weight.shape == (384, 128)
+
+
+def test_packed_int4_loader_unpacks_signed_nibbles_and_group_scales(tmp_path):
+    packed = np.array([[0x76543210, 0xFEDCBA98]], dtype=np.uint32).view(np.int32)
+    scales = torch.tensor([[0.5, 2.0]])
+    save_file(
+        {
+            "model.word_embeddings.weight": torch.ones(32, 128),
+            "model.norm.weight": torch.ones(128),
+            "projection.weight_packed": torch.from_numpy(packed),
+            "projection.weight_scale": scales,
+        },
+        tmp_path / "model.safetensors",
+    )
+    model = _model(tmp_path)
+    weights = BailingModel(str(tmp_path), model.config)
+    try:
+        projection = weights.make_linear_module("projection")
+    finally:
+        weights.close()
+
+    expected = (torch.arange(16).reshape(1, 16) - 8) * scales.repeat_interleave(8, dim=1)
+    torch.testing.assert_close(projection.weight, expected.to(torch.bfloat16))
+
+
+@pytest.mark.parametrize("scale_shape", [None, (1,), (2, 2)])
+def test_loader_rejects_missing_or_malformed_fp8_block_scales(tmp_path, scale_shape):
+    tensors = {
+        "model.word_embeddings.weight": torch.ones(32, 128),
+        "model.norm.weight": torch.ones(128),
+        "projection.weight": torch.ones(16, 128).to(torch.float8_e4m3fn),
+    }
+    if scale_shape is not None:
+        tensors["projection.weight_scale_inv"] = torch.ones(scale_shape)
+    save_file(tensors, tmp_path / "model.safetensors")
+    weights = _model(tmp_path).load_weights(str(tmp_path))
+    try:
+        with pytest.raises(ValueError, match="weight_scale_inv.*must have shape"):
+            weights.make_linear_module("projection")
+    finally:
+        weights.close()
+
+
+@pytest.mark.parametrize("required", [False, True])
+@pytest.mark.parametrize("missing", ["schema", "provider"])
+def test_ci_requires_kernel_support_instead_of_skipping(tmp_path, monkeypatch, required, missing):
+    monkeypatch.setenv("ORTGENAI_REQUIRE_BAILING_KERNELS", "1" if required else "0")
+    schemas = [] if missing == "schema" else [SimpleNamespace(name="MoEGroupRouter", domain="com.microsoft")]
+    monkeypatch.setattr(sys.modules[__name__], "get_all_operator_schema", lambda: schemas)
+    monkeypatch.setattr(ort, "get_available_providers", list)
+    exception = pytest.fail.Exception if required else pytest.skip.Exception
+
+    with pytest.raises(exception, match="ORT PR #33817" if missing == "schema" else "is unavailable"):
+        kernel_session(_model(tmp_path), "CUDAExecutionProvider", "MoEGroupRouter")
+
+
+def test_tokenizer_regex_is_local_and_preserves_supported_patterns(tmp_path, monkeypatch):
+    tokenizer = {
+        "pre_tokenizer": {
+            "pretokenizers": [
+                {"pattern": {"Regex": r"\p{N}++"}},
+                {"pattern": {"Regex": r"\w+"}},
+            ]
+        }
+    }
+    tokenizer_path = tmp_path / "tokenizer.json"
+    tokenizer_path.write_text(json.dumps(tokenizer))
+    monkeypatch.setattr(bailing.Qwen35TextModel, "save_processing", Mock())
+
+    _model(tmp_path).save_processing("test/bailing", {}, str(tmp_path))
+
+    patterns = json.loads(tokenizer_path.read_text())["pre_tokenizer"]["pretokenizers"]
+    assert "++" not in patterns[0]["pattern"]["Regex"]
+    assert patterns[1]["pattern"]["Regex"] == r"\w+"
+
+
+@pytest.mark.parametrize("packed", [False, True])
+@pytest.mark.parametrize("interleaved", [False, True])
+def test_mla_query_key_value_helpers_match_projection_reference(tmp_path, packed, interleaved):
+    model = _model(
+        tmp_path,
+        dtype=ir.DataType.FLOAT16 if packed else ir.DataType.FLOAT,
+        ep="cuda" if packed else "cpu",
+        use_paged_attention=packed,
+        config_options={"q_lora_rank": 32, "kv_lora_rank": 32, "rope_interleave": interleaved},
+    )
+    attention = _mla_weights(model)
+    token_shape = (4,) if packed else (2, 2)
+    dtype = np.float16 if packed else np.float32
+    hidden = (
+        np.linspace(-1, 1, np.prod(token_shape) * model.hidden_size, dtype=np.float32)
+        .reshape(*token_shape, model.hidden_size)
+        .astype(dtype)
+    )
+    positions = np.array([0, 1, 3, 7], dtype=np.int64).reshape(token_shape)
+    model.model.graph.inputs.append(model.make_value("hidden", model.io_dtype, list(hidden.shape)))
+    position_name = model.input_names["position_ids"]
+    model.model.graph.inputs.append(model.make_value(position_name, ir.DataType.INT64, list(token_shape)))
+    query = model.make_mla_query_projection(3, attention, "hidden")
+    key, value = model.make_mla_key_value_projection(3, attention, "hidden")
+    model.model.graph.outputs.extend(model.values[name] for name in (query, key, value))
+    model.model.graph.sort()
+    session = ort.InferenceSession(
+        ir.serde.serialize_model(model.model).SerializeToString(), providers=["CPUExecutionProvider"]
+    )
+
+    actual = session.run(None, {"hidden": hidden, position_name: positions})
+    expected = _mla_reference(model, attention, hidden, positions)
+
+    for result, reference in zip(actual, expected, strict=True):
+        np.testing.assert_allclose(result, reference, rtol=5e-3 if packed else 1e-5, atol=2e-3 if packed else 1e-6)
+
+
+@pytest.mark.parametrize("packed", [False, True])
+def test_mla_output_gating_helper_matches_reference(tmp_path, packed):
+    model = _model(
+        tmp_path,
+        dtype=ir.DataType.FLOAT16 if packed else ir.DataType.FLOAT,
+        ep="cuda" if packed else "cpu",
+        use_paged_attention=packed,
+        config_options={"q_lora_rank": 32, "kv_lora_rank": 32},
+    )
+    attention = _mla_weights(model)
+    token_shape = (4,) if packed else (2, 2)
+    dtype = np.float16 if packed else np.float32
+    rng = np.random.default_rng(11)
+    hidden = rng.normal(size=(*token_shape, model.hidden_size)).astype(dtype)
+    attn_output = rng.normal(size=(*token_shape, model.num_attn_heads * model.head_size)).astype(dtype)
+    for name, data in (("hidden", hidden), ("attention", attn_output)):
+        model.model.graph.inputs.append(model.make_value(name, model.io_dtype, list(data.shape)))
+    model.make_mla_output_projection(3, attention, "hidden", "attention")
+    model.model.graph.outputs.append(model.values[model.layernorm_attrs["skip_input"]])
+    model.model.graph.sort()
+    session = ort.InferenceSession(
+        ir.serde.serialize_model(model.model).SerializeToString(), providers=["CPUExecutionProvider"]
+    )
+
+    actual = session.run(None, {"hidden": hidden, "attention": attn_output})[0]
+    expected = _mla_reference(model, attention, hidden, attn_output=attn_output)
+
+    np.testing.assert_allclose(actual, expected, rtol=5e-3 if packed else 1e-5, atol=2e-3 if packed else 1e-6)
+
+
+@pytest.mark.parametrize("provider", ["CPUExecutionProvider", "CUDAExecutionProvider"])
+@pytest.mark.parametrize("interleaved", [False, True])
+def test_full_mla_attention_matches_causal_reference(tmp_path, provider, interleaved):
+    cuda = provider == "CUDAExecutionProvider"
+    model = _model(
+        tmp_path,
+        dtype=ir.DataType.FLOAT16 if cuda else ir.DataType.FLOAT,
+        ep="cuda" if cuda else "cpu",
+        config_options={"q_lora_rank": 32, "kv_lora_rank": 32, "rope_interleave": interleaved},
+    )
+    attention = _mla_weights(model)
+    model.make_inputs_and_outputs()
+    model.model.graph.inputs.clear()
+    model.model.graph.outputs.clear()
+    batch, length = 2, 3
+    dtype = np.float16 if cuda else np.float32
+    rng = np.random.default_rng(11)
+    hidden = rng.normal(size=(batch, length, model.hidden_size)).astype(dtype)
+    positions = np.tile(np.arange(length, dtype=np.int64), (batch, 1))
+    past_k, past_v, present_k, present_v = model.make_key_value_cache_names(3)
+    position_name = model.input_names["position_ids"]
+    model.model.graph.inputs.append(model.make_value("hidden", model.io_dtype, list(hidden.shape)))
+    model.model.graph.inputs.extend(model.values[name] for name in (position_name, past_k, past_v))
+    model.mask_attrs["seqlens_k"] = "/seqlens"
+    model.mask_attrs["total_seq_len"] = "/total"
+    model.model.graph.inputs.extend(
+        [
+            model.make_value("/seqlens/output_0", ir.DataType.INT32, [batch]),
+            model.make_value("/total/output_0", ir.DataType.INT32, [1]),
+        ]
+    )
+    model.make_attention(3, attention, "hidden")
+    output = model.layernorm_attrs["skip_input"]
+    model.model.graph.outputs.extend(model.values[name] for name in (output, present_k, present_v))
+    inputs = {
+        "hidden": hidden,
+        position_name: positions,
+        past_k: np.empty((batch, model.num_attn_heads, 0, model.head_size), dtype=dtype),
+        past_v: np.empty((batch, model.num_attn_heads, 0, model.head_size), dtype=dtype),
+        "/seqlens/output_0": np.full(batch, length - 1, dtype=np.int32),
+        "/total/output_0": np.array([length], dtype=np.int32),
+    }
+
+    actual, actual_key, actual_value = kernel_session(model, provider, "GroupQueryAttention").run(None, inputs)
+
+    query, key, value = _mla_reference(model, attention, hidden, positions)
+    tensors = [
+        torch.from_numpy(data.astype(np.float32))
+        .reshape(batch, length, model.num_attn_heads, model.head_size)
+        .transpose(1, 2)
+        for data in (query, key, value)
+    ]
+    query, key, value = tensors
+    scores = query @ key.transpose(-1, -2) * model.attention_attrs["scale"]
+    scores.masked_fill_(torch.ones(length, length, dtype=torch.bool).triu(1), float("-inf"))
+    attended = (scores.softmax(dim=-1) @ value).transpose(1, 2).reshape(batch, length, -1).numpy().astype(dtype)
+    expected = _mla_reference(model, attention, hidden, attn_output=attended)
+    tolerance = 5e-3 if cuda else 1e-5
+    np.testing.assert_allclose(actual, expected, rtol=tolerance, atol=tolerance)
+    np.testing.assert_allclose(actual_key, key.numpy(), rtol=tolerance, atol=tolerance)
+    np.testing.assert_allclose(actual_value, value.numpy(), rtol=tolerance, atol=tolerance)
+
+
+def test_bailing_prefill_precision_cli_help_is_renderable(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["builder", "--help"])
+
+    with pytest.raises(SystemExit) as result:
+        builder.get_args()
+
+    assert result.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "gated_delta_net_bf16_precision" in help_text
+    assert "gated_delta_net_bf16_precision=fp32" in help_text
+    assert "N % 64" in help_text

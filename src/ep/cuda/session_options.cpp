@@ -56,14 +56,14 @@ Config::ProviderOptions ResolveStreamBindingOptions(const Config::ProviderOption
 
 namespace {
 
-void EnsureCudaPluginEpRegistered(bool force_adjacent_probe = false) {
+void EnsureCudaPluginEpRegistered() {
   if (!FindRegisteredEpDevices("CUDAExecutionProvider").empty()) {
     return;
   }
   std::error_code ec;
   std::filesystem::path ep_path = GetEnv("ORT_CUDA_PLUGIN_EP_PATH");
 #if !defined(_WIN32)
-  if (ep_path.empty() && force_adjacent_probe) {
+  if (ep_path.empty()) {
     Dl_info info{};
     if (dladdr(reinterpret_cast<const void*>(Ort::api->RegisterExecutionProviderLibrary), &info) != 0 &&
         info.dli_fname != nullptr) {
@@ -73,8 +73,6 @@ void EnsureCudaPluginEpRegistered(bool force_adjacent_probe = false) {
       }
     }
   }
-#else
-  (void)force_adjacent_probe;
 #endif
   if (!ep_path.empty() && std::filesystem::exists(ep_path, ec)) {
     try {
@@ -156,7 +154,9 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
 
   // Resolve the selected CUDA device before creating/attaching the stream or appending the EP,
   // so the CUDA runtime device, stream, and OrtMemoryInfo agree with the selected EP device.
-  EnsureCudaPluginEpRegistered(false);
+  // The process-wide stream cannot be rebound after creation. Discover adjacent plugin libraries
+  // before selecting a device, including when the provider bridge is unavailable.
+  EnsureCudaPluginEpRegistered();
   std::optional<std::string> selected_plugin_device_id;
   auto ep_devices_ptrs = FindRegisteredEpDevices("CUDAExecutionProvider");
   if (!ep_devices_ptrs.empty()) {
@@ -187,17 +187,8 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
   // Try pre-registered plugin path first
   if (!AppendExecutionProviderV2(session_options, provider_options,
                                  DeviceType::CUDA, "CUDAExecutionProvider")) {
-    try {
-      // Register the CUDA execution provider as a provider-bridge provider.
-      CUDAExecutionProvider::AppendProviderBridgeExecutionProvider(
-          session_options, provider_options, device);
-    } catch (const Ort::Exception&) {
-      EnsureCudaPluginEpRegistered(true);
-      if (!AppendExecutionProviderV2(session_options, provider_options,
-                                     DeviceType::CUDA, "CUDAExecutionProvider")) {
-        throw;
-      }
-    }
+    CUDAExecutionProvider::AppendProviderBridgeExecutionProvider(
+        session_options, provider_options, device);
   }
 
   return device;

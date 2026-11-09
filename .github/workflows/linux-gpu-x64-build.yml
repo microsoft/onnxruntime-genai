@@ -49,6 +49,14 @@ jobs:
           path: manylinux
           submodules: true
 
+      - name: Checkout the minimum ORT revision for Bailing kernels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: microsoft/onnxruntime
+          ref: d93f5446f362d9c70bea81de953f32a26aa26d25 # ORT #33817: MoEGroupRouter and per-key KDA
+          path: onnxruntime-bailing
+          submodules: recursive
+
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: '8.0.x'
@@ -214,6 +222,30 @@ jobs:
               ${{ env.PYTHON_EXECUTABLE }} -m pip install /ort_genai_src/build/cuda/Release/wheel/onnxruntime_genai*manylinux*.whl --no-deps --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pytest -sv test/python/test_onnxruntime_genai_engine.py && \
               ${{ env.PYTHON_EXECUTABLE }} test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/models --e2e"
+
+      - name: Build compatible ORT and require Bailing CPU/CUDA kernel regressions
+        run: |
+          set -e -x
+          docker run \
+            --gpus all \
+            --rm \
+            --volume $GITHUB_WORKSPACE:/ort_genai_src \
+            -w /ort_genai_src onnxruntimecudabuildx64 bash -c " \
+              ${{ env.PYTHON_EXECUTABLE }} -m venv --system-site-packages build/bailing-venv && \
+              build/bailing-venv/bin/python -m pip install -r test/python/requirements.txt && \
+              build/bailing-venv/bin/python -m pip install -r test/python/cuda/torch/requirements.txt && \
+              build/bailing-venv/bin/python -m pip install -r onnxruntime-bailing/tools/ci_build/requirements/pybind/requirements.txt && \
+              build/bailing-venv/bin/python onnxruntime-bailing/tools/ci_build/build.py \
+                --build_dir /ort_genai_src/build/bailing-ort \
+                --config Release --build_wheel --skip_tests --skip_submodule_sync \
+                --parallel 4 --nvcc_threads 1 --cmake_generator Ninja \
+                --cmake_path /usr/bin/cmake \
+                --use_cuda --cuda_home /usr/local/cuda \
+                --cudnn_home \$(build/bailing-venv/bin/python -c 'import nvidia.cudnn; print(nvidia.cudnn.__path__[0])') \
+                --cmake_extra_defines CMAKE_CUDA_ARCHITECTURES=86 && \
+              build/bailing-venv/bin/python -m pip install --no-deps /ort_genai_src/build/bailing-ort/Release/dist/*.whl && \
+              ORTGENAI_REQUIRE_BAILING_KERNELS=1 \
+                build/bailing-venv/bin/python -m pytest -q test/python/models/test_bailing_builder.py"
 
       # TODO: Enable this by adding dotnet to the docker image
       # - name: Build the C# API and Run the C# Tests

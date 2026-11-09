@@ -1019,6 +1019,11 @@ def get_args():
                     Unsupported shapes, non-default zero points, and shared weight buffers stay raw.
                 use_device_allocator_for_initializers = true/false: Default false; opt into device allocation.
                     Paged Qwen3.8 sessions enable this automatically.
+                gated_delta_net_bf16_precision = bf16/fp16/fp32: Internal KDA prefill tensor-core precision.
+                    Bailing CUDA BF16 paged-attention exports only; explicit use elsewhere is rejected.
+                    Default bf16 uses native BF16 tiles; fp16 uses runtime range safeguards;
+                    fp32 uses the higher-accuracy multi-slice path. Model I/O and FP32 recurrent states are unchanged.
+                    Example: -p bf16 -e cuda --extra_options use_paged_attention=true gated_delta_net_bf16_precision=fp32
                 is_symmetric = Quantize the weights symmetrically. Default is true.
                     If true, quantization is done to int4/int8. If false, quantization is done to uint4/uint8.
                 op_types_to_quantize = MatMul/Gather: Specify op types to target for int4/int8 weight-only quantization.
@@ -1117,7 +1122,7 @@ def get_args():
                     small dynamic-convolution and candidate-selector projections dense. The body
                     uses the target's automatic hardware-specific packing policy. CUDA emits
                     the corresponding fpA-intB layout for
-                    projections the kernel supports (N % 64 for int4, N % 32 for int8); other
+                    projections the kernel supports (N %% 64 for int4, N %% 32 for int8); other
                     projections stay raw, and the drafter session disables fpA-intB selection for them.
                     CUDA body activations and KV caches default to bf16. WebGPU uses FP16,
                     with FP32 residual/skip normalization and convolution-finish accumulation for FP16
