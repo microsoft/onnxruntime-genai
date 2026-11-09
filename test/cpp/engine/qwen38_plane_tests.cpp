@@ -199,6 +199,24 @@ std::string Int8PleTable() {
   return text;
 }
 
+std::string Iq4NlPleTable() {
+  std::string text = kValidPleTable;
+  const std::string fp8_scale = "scale 0.5";
+  text.replace(text.find(fp8_scale), fp8_scale.size(), "scale -20.0");
+  const std::string head_dim = "head_dim 4";
+  text.replace(text.find(head_dim), head_dim.size(), "head_dim 160");
+  return text;
+}
+
+std::string Q8_0PleTable() {
+  std::string text = kValidPleTable;
+  const std::string fp8_scale = "scale 0.5";
+  text.replace(text.find(fp8_scale), fp8_scale.size(), "scale -8.0");
+  const std::string head_dim = "head_dim 4";
+  text.replace(text.find(head_dim), head_dim.size(), "head_dim 160");
+  return text;
+}
+
 }  // namespace
 
 // ---- weight pool manifest and QSA constants index --------------------------------------------
@@ -338,6 +356,56 @@ TEST(Qwen38PleDescriptionTest, ParsesAValidTable) {
   std::filesystem::remove_all(dir, ec);
 }
 
+TEST(Qwen38PleDescriptionTest, Iq4NlShardsRequireWholeBlocks) {
+  const auto dir = MakeScratchDir("ple_iq4_nl_blocks");
+  const auto table_path = dir / "ple_table.txt";
+  const auto with_head_dim = [](int head_dim) {
+    std::string text = Iq4NlPleTable();
+    const std::string original = "head_dim 160";
+    text.replace(text.find(original), original.size(), "head_dim " + std::to_string(head_dim));
+    return text;
+  };
+  for (const int head_dim : {32, 64, 160}) {
+    ForLfAndCrlfLines(with_head_dim(head_dim), [&](const std::string& lines) {
+      const auto description = ParseQwen38PleDescription(WriteFile(table_path, lines));
+      EXPECT_EQ(description.params.head_dim, head_dim);
+      EXPECT_FLOAT_EQ(description.params.scale, -20.0f);
+    });
+  }
+  for (const int head_dim : {1, 31, 33, 63, 159, 161}) {
+    ForLfAndCrlfLines(with_head_dim(head_dim), [&](const std::string& lines) {
+      EXPECT_THROW(ParseQwen38PleDescription(WriteFile(table_path, lines)), std::runtime_error) << head_dim;
+    });
+  }
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+TEST(Qwen38PleDescriptionTest, Q8_0ShardsRequireWholeBlocks) {
+  const auto dir = MakeScratchDir("ple_q8_0_blocks");
+  const auto table_path = dir / "ple_table.txt";
+  const auto with_head_dim = [](int head_dim) {
+    std::string text = Q8_0PleTable();
+    const std::string original = "head_dim 160";
+    text.replace(text.find(original), original.size(), "head_dim " + std::to_string(head_dim));
+    return text;
+  };
+  for (const int head_dim : {32, 64, 160}) {
+    ForLfAndCrlfLines(with_head_dim(head_dim), [&](const std::string& lines) {
+      const auto description = ParseQwen38PleDescription(WriteFile(table_path, lines));
+      EXPECT_EQ(description.params.head_dim, head_dim);
+      EXPECT_FLOAT_EQ(description.params.scale, -8.0f);
+    });
+  }
+  for (const int head_dim : {1, 31, 33, 63, 159, 161}) {
+    ForLfAndCrlfLines(with_head_dim(head_dim), [&](const std::string& lines) {
+      EXPECT_THROW(ParseQwen38PleDescription(WriteFile(table_path, lines)), std::runtime_error) << head_dim;
+    });
+  }
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
 TEST(Qwen38PleDescriptionTest, RejectsMalformedTables) {
   const auto dir = MakeScratchDir("ple_invalid");
   const auto table = dir / "ple_table.txt";
@@ -430,6 +498,82 @@ TEST(Qwen38PleDescriptionTest, RejectsMalformedTables) {
 }
 
 #if !defined(QWEN38_GRAPH_NO_POSIX)
+TEST(Qwen38PleTableTest, Iq4NlShardsUsePackedRowSizesAndRequireCapabilityBeforeMapping) {
+#if defined(_WIN32)
+  ScopedEnvironmentVariable pin_ple{"ORT_QMOE_WIN_PIN_PLE", "1"};
+#endif
+  const auto dir = MakeScratchDir("ple_iq4_nl_map");
+  std::filesystem::create_directories(dir / "ple");
+  const auto table_path = WriteFile(dir / "ple_table.txt", Iq4NlPleTable());
+
+  Qwen38Plane int8;
+  InitCurrentStubPlane(int8);
+  int8.capabilities &= ~QWEN38_PLANE_CAP_IQ4_NL_PLE;
+  ExpectMissingCapability([&] { Qwen38PleTable table{int8, table_path, dir, 64}; }, "iq4_nl_ple", table_path.string(),
+                          int8.library_path);
+  EXPECT_TRUE(StubPlaneState::registered_ptrs.empty());
+
+  constexpr size_t row_bytes = 160 / 32 * 18;
+  WriteFile(dir / "ple" / "a.safetensors", std::string(128 + 11 * row_bytes, 'a'));
+  WriteFile(dir / "ple" / "b.safetensors", std::string(13 * row_bytes - 1, 'b'));
+  Qwen38Plane current;
+  InitCurrentStubPlane(current);
+  EXPECT_THROW((Qwen38PleTable{current, table_path, dir, 64}), std::runtime_error);
+  EXPECT_EQ(StubPlaneState::registered_ptrs.size(), 1u);
+  EXPECT_EQ(StubPlaneState::unregistered_ptrs, StubPlaneState::registered_ptrs);
+
+  WriteFile(dir / "ple" / "b.safetensors", std::string(13 * row_bytes, 'b'));
+  InitCurrentStubPlane(current);
+  {
+    Qwen38PleTable table{current, table_path, dir, 64};
+    EXPECT_FLOAT_EQ(table.params.scale, -20.0f);
+    EXPECT_EQ(table.params.head_dim, 160);
+    EXPECT_EQ(StubPlaneState::registered_ptrs.size(), 2u);
+  }
+  EXPECT_EQ(StubPlaneState::unregistered_ptrs, StubPlaneState::registered_ptrs);
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+TEST(Qwen38PleTableTest, Q8_0ShardsUsePackedRowSizesAndRequireCapabilityBeforeMapping) {
+#if defined(_WIN32)
+  ScopedEnvironmentVariable pin_ple{"ORT_QMOE_WIN_PIN_PLE", "1"};
+#endif
+  const auto dir = MakeScratchDir("ple_q8_0_map");
+  std::filesystem::create_directories(dir / "ple");
+  const auto table_path = WriteFile(dir / "ple_table.txt", Q8_0PleTable());
+
+  Qwen38Plane iq4;
+  InitCurrentStubPlane(iq4);
+  iq4.capabilities &= ~QWEN38_PLANE_CAP_Q8_0_PLE;
+  ExpectMissingCapability([&] { Qwen38PleTable table{iq4, table_path, dir, 64}; }, "q8_0_ple", table_path.string(),
+                          iq4.library_path);
+  EXPECT_TRUE(StubPlaneState::registered_ptrs.empty());
+
+  constexpr size_t row_bytes = 160 / 32 * 34;
+  WriteFile(dir / "ple" / "a.safetensors", std::string(128 + 11 * row_bytes, 'a'));
+  WriteFile(dir / "ple" / "b.safetensors", std::string(13 * row_bytes - 1, 'b'));
+  Qwen38Plane current;
+  InitCurrentStubPlane(current);
+  EXPECT_THROW((Qwen38PleTable{current, table_path, dir, 64}), std::runtime_error);
+  EXPECT_EQ(StubPlaneState::registered_ptrs.size(), 1u);
+  EXPECT_EQ(StubPlaneState::unregistered_ptrs, StubPlaneState::registered_ptrs);
+
+  WriteFile(dir / "ple" / "b.safetensors", std::string(13 * row_bytes, 'b'));
+  InitCurrentStubPlane(current);
+  {
+    Qwen38PleTable table{current, table_path, dir, 64};
+    EXPECT_FLOAT_EQ(table.params.scale, -8.0f);
+    EXPECT_EQ(table.params.head_dim, 160);
+    EXPECT_EQ(StubPlaneState::registered_ptrs.size(), 2u);
+  }
+  EXPECT_EQ(StubPlaneState::unregistered_ptrs, StubPlaneState::registered_ptrs);
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
 TEST(Qwen38PleTableTest, ValidatesShardFileBoundsAndUsesDevicePointer) {
 #if defined(_WIN32)
   // Without the pin the Windows table maps its shards without registering them; the assertions below are about registration.
@@ -708,8 +852,10 @@ TEST(Qwen38PlaneCapabilityTest, DescribesCapabilitiesByName) {
   EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_CAP_BATCHED_PREP), "batched_prep");
   EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_CAP_CONV_HISTORY_FIRST_REPLAY), "conv_history_first_replay");
   EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_CAP_CTX_SLOT_STRIDE), "ctx_slot_stride");
+  EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_CAP_IQ4_NL_PLE), "iq4_nl_ple");
+  EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_CAP_Q8_0_PLE), "q8_0_ple");
   EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_ALL_CAPABILITIES),
-            "int8_embedding, int8_ple, negative_pos_add_batch, batched_prep, conv_history_first_replay, ctx_slot_stride");
+            "int8_embedding, int8_ple, negative_pos_add_batch, batched_prep, conv_history_first_replay, ctx_slot_stride, iq4_nl_ple, q8_0_ple");
   // A bit that this build has no name for is reported, not dropped.
   EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_CAP_INT8_PLE | (1ull << 40)), "int8_ple, unknown bits 0x10000000000");
 }
@@ -742,7 +888,7 @@ TEST(Qwen38PlaneCapabilityTest, RequireCapabilitiesNamesTheMissingCapabilityWhat
   } catch (const std::runtime_error& error) {
     const std::string message = error.what();
     EXPECT_NE(message.find("the fold package requires the plane capability int8_embedding, negative_pos_add_batch, "
-                           "batched_prep, conv_history_first_replay, ctx_slot_stride, which"),
+                           "batched_prep, conv_history_first_replay, ctx_slot_stride, iq4_nl_ple, q8_0_ple, which"),
               std::string::npos)
         << message;
   }
@@ -757,7 +903,8 @@ TEST(Qwen38PlaneCapabilityTest, TheSlotStrideCapabilityHasTheBitAndTheNameOfItsC
   EXPECT_NE(QWEN38_PLANE_ALL_CAPABILITIES & QWEN38_PLANE_CAP_CTX_SLOT_STRIDE, 0ull);
   EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_CAP_CTX_SLOT_STRIDE), "ctx_slot_stride");
   // A library that reports every capability of the generation before it (what the plane of the preceding PR reports) lacks it.
-  const unsigned long long before_the_stride = QWEN38_PLANE_ALL_CAPABILITIES & ~QWEN38_PLANE_CAP_CTX_SLOT_STRIDE;
+  const unsigned long long before_the_stride =
+      QWEN38_PLANE_ALL_CAPABILITIES & (QWEN38_PLANE_CAP_CTX_SLOT_STRIDE - 1ull);
   EXPECT_EQ(before_the_stride, 0x1full);
 }
 
@@ -1041,6 +1188,48 @@ TEST(Qwen38PleDescriptionTest, Int8ShardsNeedTheInt8PleCapability) {
   capable.capabilities = QWEN38_PLANE_CAP_INT8_PLE;
   EXPECT_NO_THROW(RequireQwen38PleTableSupported(capable, int8_table, int8_path));
   EXPECT_NO_THROW(RequireQwen38PleTableSupported(capable, fp8_table, fp8_path));
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+TEST(Qwen38PleDescriptionTest, Iq4NlShardsNeedTheirOwnCapability) {
+  const auto dir = MakeScratchDir("ple_iq4_nl_capability");
+  const auto table_path = WriteFile(dir / "ple_table.txt", Iq4NlPleTable());
+  const auto description = ParseQwen38PleDescription(table_path);
+
+  Qwen38Plane legacy;
+  legacy.library_path = "legacy/libqwen38_plane.so";
+  for (const unsigned long long capabilities : {0ull, QWEN38_PLANE_CAP_INT8_PLE}) {
+    legacy.capabilities = capabilities;
+    ExpectMissingCapability([&] { RequireQwen38PleTableSupported(legacy, description, table_path); }, "iq4_nl_ple",
+                            table_path.string(), legacy.library_path);
+  }
+
+  Qwen38Plane capable;
+  capable.capabilities = QWEN38_PLANE_CAP_IQ4_NL_PLE;
+  EXPECT_NO_THROW(RequireQwen38PleTableSupported(capable, description, table_path));
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+TEST(Qwen38PleDescriptionTest, Q8_0ShardsNeedTheirOwnCapability) {
+  const auto dir = MakeScratchDir("ple_q8_0_capability");
+  const auto table_path = WriteFile(dir / "ple_table.txt", Q8_0PleTable());
+  const auto description = ParseQwen38PleDescription(table_path);
+
+  Qwen38Plane legacy;
+  legacy.library_path = "legacy/libqwen38_plane.so";
+  for (const unsigned long long capabilities : {0ull, QWEN38_PLANE_CAP_INT8_PLE, QWEN38_PLANE_CAP_IQ4_NL_PLE}) {
+    legacy.capabilities = capabilities;
+    ExpectMissingCapability([&] { RequireQwen38PleTableSupported(legacy, description, table_path); }, "q8_0_ple",
+                            table_path.string(), legacy.library_path);
+  }
+
+  Qwen38Plane capable;
+  capable.capabilities = QWEN38_PLANE_CAP_Q8_0_PLE;
+  EXPECT_NO_THROW(RequireQwen38PleTableSupported(capable, description, table_path));
 
   std::error_code ec;
   std::filesystem::remove_all(dir, ec);
