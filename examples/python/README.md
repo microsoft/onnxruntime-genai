@@ -50,6 +50,24 @@ python qwen-3.6-mtp.py -m {path to main model folder} -d {path to MTP head folde
 python d1-decisions.py -m {path to model folder} -r {path to request json}
 ```
 
+## Opt-in Nemotron Bolt ordinary decoding
+
+For an existing packed R8 Bolt package, `nemotron-bolt-hybrid.py` creates an
+ordinary-only package with eight-row prefill and captured one-row decode in one
+session. It requires `onnx-ir`, `numpy`, and `ml-dtypes`, and an ORT build including
+the multi-slot R1 Mamba readout-order correction. This is not supported by older
+release binaries. Keep the original R8 package for k7 speculation.
+
+```bash
+python nemotron-bolt-hybrid.py --input /path/to/packed-r8 --output /path/to/new-hybrid
+python model-generate.py -m /path/to/new-hybrid -e cuda
+```
+
+The output must be fresh. Put it on the weight payload's filesystem so large
+external data can be hardlinked within the new package; external-data path
+validation remains enabled. Packed values, eight recurrent snapshot slots, KV
+capacity and the physical eight-row attention geometry are unchanged.
+
 ## Execution Providers
 
 The ONNX Runtime GenAI Python package supports the following execution providers (EPs):
