@@ -3318,6 +3318,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--uniform-profile-slots", action="store_true", help="Spread --total-resident-slots uniformly across layers"
     )
     ap.add_argument("--copy", action="store_true", help="Copy weight files instead of hard-linking")
+    from precision_options import add_precision_cli_args
+
+    add_precision_cli_args(ap)
     return ap
 
 
@@ -3411,6 +3414,9 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("--out or --models-root is required")
         build_jobs.append((out_dir, spec))
 
+    from precision_options import apply_precision_config_to_package, resolve_precision_config
+
+    pcfg = resolve_precision_config(args)
     first_built_out: Path | None = None
     for out_dir, spec in build_jobs:
         eff_reuse = args.reuse_banks_from or first_built_out
@@ -3448,6 +3454,8 @@ def main(argv: list[str] | None = None) -> int:
             link_root=args.link_root,
             copy=args.copy,
         )
+        if pcfg.is_non_default():
+            apply_precision_config_to_package(out_dir, pcfg, hf_dir=args.hf_dir or DEFAULT_HF_DIR)
         if first_built_out is None:
             first_built_out = out_dir
     return 0
