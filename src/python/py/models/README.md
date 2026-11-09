@@ -484,6 +484,8 @@ It reports model loading, admission, encoder-only Runs, first-token latency, and
 
 #### Qwen3.8-27B with DFlash2
 
+When a packed Qwen checkpoint supplies the compatible `video_preprocessor_config.json`, the composite also writes `video_processor_config.json` and binds it through optional `model.vision.video_config_filename`. This preserves the separate image processor and records the source video pixel policy, real temporal packing and tensor-resize coefficient mode. Missing video assets leave the image-only package unchanged; incompatible temporal metadata is rejected. The asset binding alone does not establish Engine video execution or full-model qualification.
+
 For the Qwen3.8-27B reference with seven-token DFlash2 verification, preserve the hybrid rollback capacity as well as the runtime draft limit:
 
 ```bash

@@ -14,7 +14,7 @@ from .embedding import Qwen4ExpEmbeddingModel
 from .engram import Qwen4ExpEngramModel
 from .mtp import Qwen4ExpMTPTextModel
 from .text import Qwen4ExpTextModel
-from .vision import Qwen4ExpVisionModel, save_image_processor
+from .vision import Qwen4ExpVisionModel, save_image_processor, save_video_processor
 
 
 class Qwen4ExpModel(MTPModel):
@@ -248,6 +248,8 @@ class Qwen4ExpModel(MTPModel):
         if not self.text_only:
             model_config["image_token_id"] = config.image_token_id
             model_config["vision_start_token_id"] = config.vision_start_token_id
+            if getattr(config, "video_token_id", None) is not None:
+                model_config["video_token_id"] = config.video_token_id
             decoder_inputs["inputs_embeds"] = "inputs_embeds"
             if self.is_packed_vision():
                 model_config.setdefault(
@@ -367,3 +369,5 @@ class Qwen4ExpModel(MTPModel):
     def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
         self.decoder.save_processing(model_name_or_path, extra_kwargs, out_dir)
         save_image_processor(model_name_or_path, extra_kwargs, out_dir, self.hf_token)
+        if self.is_packed_vision():
+            save_video_processor(model_name_or_path, extra_kwargs, out_dir, self.hf_token, self.config.vision_config)
