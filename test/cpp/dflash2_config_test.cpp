@@ -1114,9 +1114,16 @@ TEST(Dflash2ConfigTest, RejectsDflash2GeometryForDspark) {
   EXPECT_THROW(CreateDflash2Config(config), std::runtime_error);
 }
 
-TEST(Dflash2ConfigTest, RejectsFullAttentionForDflash2) {
+TEST(Dflash2ConfigTest, AcceptsFullAttentionForDflash2) {
   auto config = MakeDflash2Config();
   config.model.dflash2.sliding_window = 0;
+  EXPECT_NO_THROW(CreateDflash2Config(config));
+  EXPECT_EQ(Dflash2Drafter::PoolBlocks(config, 8, 3), 0u);
+}
+
+TEST(Dflash2ConfigTest, RejectsNegativeWindowForDflash2) {
+  auto config = MakeDflash2Config();
+  config.model.dflash2.sliding_window = -1;
   EXPECT_THROW(CreateDflash2Config(config), std::runtime_error);
 }
 
