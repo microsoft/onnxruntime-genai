@@ -62,7 +62,15 @@ struct NemotronBoltTestAccess {
         for (size_t head = 0; head < static_cast<size_t>(shape[1]); ++head)
           compare(expected.subspan(head * head_bytes, valid_bytes), actual.subspan(head * head_bytes, valid_bytes));
       } else {
-        const size_t row_bytes = expected.size() / 8;
+        const bool recurrent = name.rfind("past_", 0) == 0;
+        const auto shape = tensor->GetShape();
+        const auto actual_shape = speculative.tensors_.at(name)->GetShape();
+        const size_t row_bytes = expected.size() / static_cast<size_t>(shape[recurrent ? 0 : 1]);
+        const size_t actual_row_bytes = actual.size() / static_cast<size_t>(actual_shape[recurrent ? 0 : 1]);
+        if (row_bytes != actual_row_bytes) {
+          differences.push_back({{"name", name}, {"row_bytes_mismatch", true}});
+          continue;
+        }
         compare(expected.subspan(static_cast<size_t>(ordinary.state_row_) * row_bytes, row_bytes),
                 actual.subspan(row * row_bytes, row_bytes));
       }
@@ -759,6 +767,55 @@ TEST(NemotronBoltGPU, TargetOnlyCaptureAndReset) {
     EXPECT_EQ(libraries.find("libbolt"), std::string::npos);
   }
 #endif
+}
+
+TEST(NemotronBoltGPU, OptInOneTokenMatchesEightRowCommittedStates) {
+  const char* reference_path = std::getenv("ORTGENAI_BOLT_TEST_MODEL");
+  const char* candidate_path = std::getenv("ORTGENAI_BOLT_R1_MODEL");
+  if (!reference_path || !candidate_path)
+    GTEST_SKIP() << "Set native R8 and opt-in attention-padded R1 packages";
+  auto reference_config = BoltTestConfig(reference_path);
+  auto candidate_config = BoltTestConfig(candidate_path);
+  reference_config->speculative.max_draft_tokens = 0;
+  candidate_config->speculative.max_draft_tokens = 0;
+  auto reference = CreateModel(GetOrtEnv(), std::move(reference_config));
+  auto candidate = CreateModel(GetOrtEnv(), std::move(candidate_config));
+  ASSERT_EQ(dynamic_cast<NemotronBoltModel&>(*candidate).target_rows_, 1);
+  const std::vector<int32_t> prompt{
+      10, 25708, 1010, 11, 1010, 10, 3263, 1010, 18746, 1261, 17616, 2254, 1455,
+      29196, 5627, 1261, 3310, 1395, 1261, 5796, 92145, 1044, 1454, 1261, 4958,
+      17984, 1046, 11, 1010, 10, 1503, 19464, 1010, 12, 13};
+  for (const bool capture : {false, true}) {
+    auto reference_params = std::make_shared<GeneratorParams>(*reference);
+    auto candidate_params = std::make_shared<GeneratorParams>(*candidate);
+    reference_params->use_graph_capture = candidate_params->use_graph_capture = capture;
+    reference_params->search.max_length = candidate_params->search.max_length =
+        static_cast<int>(prompt.size()) + 32;
+    Generator baseline{*reference, *reference_params};
+    Generator optimized{*candidate, *candidate_params};
+    auto& baseline_state = dynamic_cast<NemotronBoltState&>(*baseline.state_);
+    auto& optimized_state = dynamic_cast<NemotronBoltState&>(*optimized.state_);
+    for (int repeat = 0; repeat < 2; ++repeat) {
+      baseline.AppendTokens(prompt);
+      optimized.AppendTokens(prompt);
+      do {
+        const auto comparison = NemotronBoltTestAccess::CompareLiveBoundary(
+            baseline_state, optimized_state, NemotronBoltTestAccess::SelectedRow(optimized_state));
+        ASSERT_TRUE(comparison.at("differences").empty()) << comparison.dump();
+        ASSERT_EQ(baseline.IsDone(), optimized.IsDone());
+        if (baseline.IsDone()) break;
+        baseline.GenerateNextToken();
+        optimized.GenerateNextToken();
+      } while (true);
+      const auto a = baseline.GetSequence(0).CopyDeviceToCpu();
+      const auto b = optimized.GetSequence(0).CopyDeviceToCpu();
+      EXPECT_EQ(std::vector<int32_t>(a.begin(), a.end()), std::vector<int32_t>(b.begin(), b.end()));
+      EXPECT_EQ(baseline.GetSpeculativeStats().tokens_emitted,
+                optimized.GetSpeculativeStats().tokens_emitted);
+      baseline.RewindToLength(0);
+      optimized.RewindToLength(0);
+    }
+  }
 }
 
 TEST(NemotronBoltGPU, SequentialGeneratorsResetAndPublicBoundaries) {

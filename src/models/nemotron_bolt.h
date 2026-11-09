@@ -32,6 +32,7 @@ struct NemotronBoltModel : Model {
   std::shared_ptr<Dflash2Model> drafter_model_;
   size_t capacity_{};
   size_t aux_width_{};
+  size_t target_rows_{kBoltVerifyRows};
 };
 
 // The target owns dense attention K/V and eight recurrent-state rows. Only the drafter is paged.
