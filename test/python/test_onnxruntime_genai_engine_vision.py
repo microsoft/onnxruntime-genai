@@ -502,7 +502,7 @@ def test_video_markers_reject_without_frames_on_image_packages(vision_model):
     request.close()
 
 
-def test_formatted_admission_reclaims_abandoned_media_before_host_preflight(vision_package):
+def test_formatted_admission_reclaims_abandoned_media_before_host_preflight(vision_package, tmp_path):
     directory, _ = vision_package
     config = og.Config(directory)
     config.overlay(
@@ -510,7 +510,12 @@ def test_formatted_admission_reclaims_abandoned_media_before_host_preflight(visi
             {
                 "model": {"dflash2": {"filename": ""}},
                 "engine": {
-                    "dynamic_batching": {"num_blocks": 64, "max_batch_size": 1, "media_host_bytes": 21 * 1024 * 1024}
+                    "dynamic_batching": {
+                        "num_blocks": 64,
+                        "max_batch_size": 1,
+                        "media_host_bytes": 21 * 1024 * 1024,
+                        "media_device_bytes": 4 * 1024 * 1024,
+                    }
                 },
             }
         )
@@ -520,7 +525,10 @@ def test_formatted_admission_reclaims_abandoned_media_before_host_preflight(visi
     engine, tokenizer = og.Engine(model), og.Tokenizer(model)
     abandoned, survivor = new_request(engine), new_request(engine)
     value = prompt(tokenizer, 1)
-    images = og.Images.open(str(IMAGE_DIR / "cars.jpg"))
+    image_path = tmp_path / "cars.png"
+    with Image.open(IMAGE_DIR / "cars.jpg") as source:
+        source.resize((640, 384)).save(image_path)
+    images = og.Images.open(str(image_path))
     abandoned_turn = begin(abandoned, value, images, maximum=1)
     assert abandoned_turn == 1
     with pytest.raises(RuntimeError, match="host capacity"):

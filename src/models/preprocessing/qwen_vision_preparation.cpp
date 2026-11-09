@@ -224,7 +224,8 @@ size_t QwenVisionPreparation::Estimate(const VisionPreparationInput& input, size
                                  Multiply(Multiply(Patches(grid), Multiply(patch, patch)), 64)));
     ++units;
   }
-  estimate = Add(estimate, Multiply(Multiply(metadata.ImageCount(), maximum_image_patches), patch_bytes));
+  // Transform scratch is released before stacked patches are copied/cast and donated.
+  estimate = std::max(estimate, Multiply(Multiply(metadata.ImageCount(), maximum_image_patches), patch_bytes));
   for (size_t video = 0; video < metadata.VideoCount(); ++video) {
     const auto grid = metadata.VideoGrid(video);
     const auto first = metadata.Frame(video, 0);
