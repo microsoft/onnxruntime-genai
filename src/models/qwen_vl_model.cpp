@@ -39,14 +39,18 @@ void ApplyVisionRunOption(OrtRunOptions& run_options, const char* key, const cha
 
 // Creates a view of one image's slice of a tensor whose leading dimension is the image count.
 // The result borrows source's buffer and must not outlive it.
-std::unique_ptr<OrtValue> SliceLeadingImage(OrtValue& source, int64_t index) {
+std::unique_ptr<OrtValue> SliceLeadingImage(OrtValue& source, int64_t index, bool drop_image_axis) {
   auto info = source.GetTensorTypeAndShapeInfo();
   auto shape = info->GetShape();
   const auto type = info->GetElementType();
   int64_t per_image = 1;
   for (size_t i = 1; i < shape.size(); ++i) per_image *= shape[i];
   const size_t slice_bytes = static_cast<size_t>(per_image) * Ort::SizeOf(type);
-  shape[0] = 1;
+  if (drop_image_axis) {
+    shape.erase(shape.begin());
+  } else {
+    shape[0] = 1;
+  }
   auto* data = static_cast<uint8_t*>(source.GetTensorMutableRawData());
   return OrtValue::CreateTensor(source.GetTensorMemoryInfo(), data + static_cast<size_t>(index) * slice_bytes,
                                 slice_bytes, shape, type);
@@ -112,13 +116,13 @@ std::optional<FixedVisionOutputLayout> GetFixedVisionOutputLayout(
   if (pixel_index == SIZE_MAX) {
     throw std::runtime_error("Gemma 4 fixed-output vision requires a configured pixel input in the vision session");
   }
-  const auto declared_pixels = model.vision_session_->GetInputTypeInfo(pixel_index)->GetTensorTypeAndShapeInfo().GetShape();
   const auto position_shape = positions ? positions->GetTensorTypeAndShapeInfo()->GetShape()
                                         : std::vector<int64_t>{};
-  const bool rank3 = pixel_shape.size() == 3 && declared_pixels.size() == 3 && declared_pixels[0] <= 1 &&
+  // Validate the aggregate grid here; per-image session shapes are checked when binding.
+  const bool rank3 = pixel_shape.size() == 3 &&
                      position_shape.size() == 3 && position_shape[0] == num_images &&
                      position_shape[1] == pixel_shape[1] && position_shape[2] == 2;
-  const bool rank2 = num_images == 1 && pixel_shape.size() == 2 && declared_pixels.size() == 2 &&
+  const bool rank2 = num_images == 1 && pixel_shape.size() == 2 &&
                      position_shape.size() == 2 && position_shape[0] == pixel_shape[0] &&
                      position_shape[1] == 2;
   if (!rank3 && !rank2) {
@@ -495,8 +499,8 @@ void Qwen2_5_VL_PipelineState::RunSingleSessionVision(const std::vector<ExtraInp
     source_values.push_back(value);
   }
 
-  // Gemma-4's vision graph has a static batch of 1, so several images must be encoded one at a
-  // time and their features concatenated. This mirrors Gemma4VisionState on the multi-modal path.
+  // Gemma-4's vision graph encodes one image at a time; concatenate features for multiple images.
+  // This mirrors Gemma4VisionState on the multi-modal path.
   size_t pixel_index = SIZE_MAX;
   for (size_t i = 0; i < input_names.size(); ++i) {
     if (input_names[i] == pixel_name) pixel_index = i;
@@ -505,6 +509,12 @@ void Qwen2_5_VL_PipelineState::RunSingleSessionVision(const std::vector<ExtraInp
   const auto pixel_shape = pixel_values->GetTensorTypeAndShapeInfo()->GetShape();
   // Gemma's rank-three layout has an image axis; rank-two layouts have a patch axis instead.
   const int64_t num_images = pixel_shape.size() == 3 ? pixel_shape[0] : 1;
+  if (num_images <= 0) {
+    throw std::runtime_error("Vision encoder: image count must be positive");
+  }
+  if (num_images > 1 && pixel_index == SIZE_MAX) {
+    throw std::runtime_error("Vision encoder: multi-image input requires a '" + pixel_name + "' session input");
+  }
 
   // Every input the processor produced per image has to be sliced in step with pixel_values,
   // not just pixel_values and pixel_position_ids. The session may declare inputs such as an
@@ -512,10 +522,38 @@ void Qwen2_5_VL_PipelineState::RunSingleSessionVision(const std::vector<ExtraInp
   // sliced to one image would feed the encoder mismatched batches. Select by leading
   // dimension, which is what makes an input per image.
   std::vector<size_t> batched_indices;
-  if (num_images > 1) {
-    for (size_t i = 0; i < source_values.size(); ++i) {
-      const auto shape = source_values[i]->GetTensorTypeAndShapeInfo()->GetShape();
-      if (shape.size() >= 2 && shape[0] == num_images) batched_indices.push_back(i);
+  std::vector<bool> drop_image_axis(source_values.size(), false);
+  std::vector<std::vector<int64_t>> declared_shapes(source_values.size());
+  for (size_t i = 0; i < source_values.size(); ++i) {
+    const auto shape = source_values[i]->GetTensorTypeAndShapeInfo()->GetShape();
+    if (vl_model_.config_->model.type == "gemma4" &&
+        (input_names[i] == pixel_name ||
+         input_names[i] == vl_model_.config_->model.vision.inputs.pixel_position_ids)) {
+      declared_shapes[i] = vl_model_.vision_session_->GetInputTypeInfo(i)->GetTensorTypeAndShapeInfo().GetShape();
+      drop_image_axis[i] = shape.size() == 3 && shape[0] == num_images && declared_shapes[i].size() == 2;
+    }
+    if ((num_images > 1 && shape.size() >= 2 && shape[0] == num_images) || drop_image_axis[i]) {
+      batched_indices.push_back(i);
+    }
+  }
+  std::vector<std::unique_ptr<OrtValue>> slices;
+  slices.reserve(batched_indices.size());
+  auto bind_image_inputs = [&](int64_t image) {
+    slices.clear();
+    for (size_t index : batched_indices) {
+      slices.push_back(SliceLeadingImage(*source_values[index], image, drop_image_axis[index]));
+      input_values[index] = slices.back().get();
+    }
+  };
+  bind_image_inputs(0);
+  for (size_t i = 0; i < declared_shapes.size(); ++i) {
+    if (declared_shapes[i].empty()) continue;
+    const auto shape = input_values[i]->GetTensorTypeAndShapeInfo()->GetShape();
+    if (shape.size() != declared_shapes[i].size() ||
+        !std::equal(shape.begin(), shape.end(), declared_shapes[i].begin(),
+                    [](int64_t actual, int64_t declared) { return declared < 0 || actual == declared; })) {
+      throw std::runtime_error("Vision encoder: input '" + input_names[i] +
+                               "' does not match the declared per-image shape");
     }
   }
 
@@ -543,12 +581,6 @@ void Qwen2_5_VL_PipelineState::RunSingleSessionVision(const std::vector<ExtraInp
   }
   const char* output_name_ptrs[] = {output_names[output_index].c_str()};
 
-  if (num_images <= 0) {
-    throw std::runtime_error("Vision encoder: image count must be positive");
-  }
-  if (num_images > 1 && pixel_index == SIZE_MAX) {
-    throw std::runtime_error("Vision encoder: multi-image input requires a '" + pixel_name + "' session input");
-  }
   const auto output_info = vl_model_.vision_session_->GetOutputTypeInfo(output_index);
   const auto& output_type_info = output_info->GetTensorTypeAndShapeInfo();
   const auto layout = GetFixedVisionOutputLayout(
@@ -577,12 +609,7 @@ void Qwen2_5_VL_PipelineState::RunSingleSessionVision(const std::vector<ExtraInp
   int64_t hidden_size = 0;
   auto output_type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
   for (int64_t image = 0; image < num_images; ++image) {
-    std::vector<std::unique_ptr<OrtValue>> slices;
-    slices.reserve(batched_indices.size());
-    for (size_t index : batched_indices) {
-      slices.push_back(SliceLeadingImage(*source_values[index], image));
-      input_values[index] = slices.back().get();
-    }
+    if (image > 0) bind_image_inputs(image);
     std::unique_ptr<OrtValue> output;
     if (preallocated) {
       const auto& shape = layout->shape;

@@ -1113,12 +1113,20 @@ def test_gemma4_vision_output_metadata_ignores_embedding_name_collision(test_dat
     assert generator.get_next_tokens() == [2]
 
 
-def test_gemma4_fixed_output_accepts_single_image_rank2_inputs(test_data_path, tmp_path):
+@pytest.mark.parametrize("image_names", [["australia.jpg"], ["sheet.png", "australia.jpg"]])
+@pytest.mark.parametrize("fixed_output", [True, False])
+@pytest.mark.parametrize("position_dtype", [np.int64, np.int32])
+def test_gemma4_rank2_vision_inputs_follow_processor_contract(
+    test_data_path, tmp_path, image_names, fixed_output, position_dtype
+):
     onnx = pytest.importorskip("onnx")
     model_path = tmp_path / "rank2_vision"
     _write_pipelined_gemma4(onnx, _get_gemma4_model_path(test_data_path), model_path)
     vision_path = model_path / "dummy_vision.onnx"
-    _create_fixed_output_vision_model(onnx, vision_path, 280)
+    if fixed_output:
+        _create_fixed_output_vision_model(onnx, vision_path, 280)
+    if position_dtype == np.int32:
+        _set_vision_position_dtype(onnx, vision_path, onnx.TensorProto.INT32)
     vision = onnx.load(vision_path)
     for input_value, batched_name in zip(vision.graph.input, ("batched_pixels", "batched_positions"), strict=True):
         input_name = input_value.name
@@ -1136,20 +1144,33 @@ def test_gemma4_fixed_output_accepts_single_image_rank2_inputs(test_data_path, t
 
     model = og.Model(os.fspath(model_path))
     processor = model.create_multimodal_processor()
-    image_path = _get_test_media_path(test_data_path, Path("images") / "australia.jpg")
-    if not image_path.exists():
+    image_paths = [_get_test_media_path(test_data_path, Path("images") / name) for name in image_names]
+    if not all(path.exists() for path in image_paths):
         pytest.skip("Gemma4 test image not available")
-    inputs = processor(GEMMA4_IMAGE_TOKEN, images=og.Images.open(os.fspath(image_path)))
-    inputs["pixel_values"] = _to_numpy(inputs["pixel_values"])[0]
-    # The binding requires the canonical int64 dtype, not the buffer's long-long alias.
-    inputs["pixel_position_ids"] = _to_numpy(inputs["pixel_position_ids"])[0].astype(np.int64)
+    inputs = processor(
+        GEMMA4_IMAGE_TOKEN * len(image_paths),
+        images=og.Images.open(*(os.fspath(path) for path in image_paths)),
+    )
+    pixels = _to_numpy(inputs["pixel_values"])
+    positions = _to_numpy(inputs["pixel_position_ids"])
+    counts = _to_numpy(inputs["num_image_tokens"])
+    assert pixels.ndim == 3 and pixels.shape[0] == len(image_paths)
+    assert positions.shape == (*pixels.shape[:2], 2)
+    assert positions.dtype == position_dtype
+    if len(image_paths) > 1:
+        assert counts[0] != counts[1], "Exercise different valid patch counts and image offsets"
+    expected_features = np.concatenate(
+        [np.pad(pv[pos[:, 0] >= 0][::9], ((0, 0), (0, 1280))) for pv, pos in zip(pixels, positions, strict=True)]
+    )
     params = og.GeneratorParams(model)
     params.set_search_options(max_length=4096)
     generator = og.Generator(model, params)
     generator.set_inputs(inputs)
-    assert generator.get_input("image_features").shape == (int(_to_numpy(inputs["num_image_tokens"])[0]), 2048)
+    np.testing.assert_array_equal(generator.get_input("image_features"), expected_features)
     generator.generate_next_token()
     assert generator.get_next_tokens() == [2]
+    assert _to_numpy(inputs["pixel_values"]).shape == pixels.shape
+    assert _to_numpy(inputs["pixel_position_ids"]).shape == positions.shape
 
 
 @pytest.mark.parametrize(
