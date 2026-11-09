@@ -46,7 +46,7 @@ void PresetExtraInputs::Add() {
 }
 
 ExtraInputs::ExtraInputs(State& state)
-    : state_{state} {}
+    : state_{state}, model_{state.model_} {}
 
 // Extra inputs are bound once and then stay bound for the whole generation, but they are
 // created in CPU memory. ORT cannot know their contents never change, so a CPU-resident feed

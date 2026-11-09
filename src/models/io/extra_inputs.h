@@ -22,7 +22,9 @@ struct ExtraInputs {
   OrtValue* MakeDeviceResident(Tensor& tensor);
 
   State& state_;
-  const Model& model_{state_.model_};
+  // Initialized in the constructor. An in-class initializer would access
+  // state_.model_ while State is still incomplete, which MSVC rejects.
+  const Model& model_;
   PresetExtraInputs registrar_{state_};
   std::unordered_map<const Tensor*, std::unique_ptr<OrtValue>> device_inputs_;
 };
