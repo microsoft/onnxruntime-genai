@@ -3090,6 +3090,14 @@ struct DynamicBatching_Element : JSON::Element {
       v_->device_memory_budget_bytes = bytes;
     } else if (name == "device_memory_headroom_bytes") {
       v_->device_memory_headroom_bytes = ParseRuntimeProfileMemoryBytes(value, name);
+    } else if (name == "media_host_bytes" || name == "media_device_bytes") {
+      const auto bytes = ParseRuntimeProfileMemoryBytes(value, name);
+      if (bytes == 0 || bytes > std::numeric_limits<size_t>::max())
+        throw std::out_of_range(std::string{name} + " must be positive and fit size_t");
+      if (name == "media_host_bytes")
+        v_->media_host_bytes = static_cast<size_t>(bytes);
+      else
+        v_->media_device_bytes = static_cast<size_t>(bytes);
     } else if (name == "gpu_utilization_factor") {
       const auto parsed_value = JSON::Get<double>(value);
       if (!std::isfinite(parsed_value) || parsed_value <= 0 || parsed_value > 1)
@@ -3234,6 +3242,16 @@ struct RuntimeProfileDynamicBatching_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "enable_recompute_preemption") {
       v_.enable_recompute_preemption = JSON::Get<bool>(value);
+      return;
+    }
+    if (name == "media_host_bytes" || name == "media_device_bytes") {
+      const auto bytes = ParseRuntimeProfileMemoryBytes(value, name);
+      if (bytes == 0 || bytes > std::numeric_limits<size_t>::max())
+        throw std::out_of_range(std::string{name} + " must be a positive size_t byte count.");
+      if (name == "media_host_bytes")
+        v_.media_host_bytes = static_cast<size_t>(bytes);
+      else
+        v_.media_device_bytes = static_cast<size_t>(bytes);
       return;
     }
     if (name == "device_memory_headroom_bytes") {
@@ -3618,7 +3636,7 @@ void ValidateRuntimeProfiles(const Config& config) {
         !batching.num_blocks && !batching.device_memory_headroom_bytes && !batching.max_batch_size &&
         !batching.max_scheduled_tokens && !batching.prefix_caching &&
         !batching.max_snapshots && !batching.snapshot_cache && !search.chunk_size &&
-        !batching.dflash2_max_snapshots &&
+        !batching.dflash2_max_snapshots && !batching.media_host_bytes && !batching.media_device_bytes &&
         !batching.enable_recompute_preemption && !batching.max_preemptions_per_step &&
         !batching.min_decode_steps_before_preemption &&
         !profile.overlay.speculative.max_draft_tokens) {
@@ -4142,7 +4160,7 @@ void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device) {
   const bool has_batching_overlay = batching.num_blocks || batching.device_memory_headroom_bytes || batching.max_batch_size ||
                                     batching.max_scheduled_tokens || batching.prefix_caching ||
                                     batching.max_snapshots || batching.snapshot_cache ||
-                                    batching.dflash2_max_snapshots ||
+                                    batching.dflash2_max_snapshots || batching.media_host_bytes || batching.media_device_bytes ||
                                     batching.enable_recompute_preemption || batching.max_preemptions_per_step ||
                                     batching.min_decode_steps_before_preemption;
   if (has_batching_overlay && !config.engine.dynamic_batching) {
@@ -4185,6 +4203,8 @@ void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device) {
     if (batching.min_decode_steps_before_preemption) {
       effective.min_decode_steps_before_preemption = *batching.min_decode_steps_before_preemption;
     }
+    if (batching.media_host_bytes) effective.media_host_bytes = *batching.media_host_bytes;
+    if (batching.media_device_bytes) effective.media_device_bytes = *batching.media_device_bytes;
   }
   const auto& search = selected->overlay.search;
   if (search.chunk_size) candidate.search.chunk_size = search.chunk_size;

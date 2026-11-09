@@ -192,6 +192,9 @@ struct Generator : LeakChecked<Generator> {
   DeviceSpan<int32_t> AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids);
   void ComputeLogits(DeviceSpan<int32_t> next_tokens);
   void RunGeneratedToken();
+  DeviceSpan<float> RunWithRopeCache(DeviceSpan<int32_t> next_tokens);
+  int rope_cache_length_{};
+  int rope_context_threshold_{};
   void ThrowIfAppendExceedsMaxLength(size_t input_ids_count);
   Action last_action_{Action::standard};
 

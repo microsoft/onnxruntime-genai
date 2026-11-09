@@ -1,10 +1,79 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License
 
+import json
+import os
+
 import numpy as np
 import onnx_ir as ir
+from huggingface_hub import hf_hub_download
 
 from .graph import Qwen4ExpGraphModel
+
+
+def save_image_processor(model_name_or_path, extra_kwargs, out_dir, hf_token):
+    preprocessor_path = (
+        os.path.join(model_name_or_path, "preprocessor_config.json")
+        if os.path.isdir(model_name_or_path)
+        else hf_hub_download(
+            model_name_or_path,
+            "preprocessor_config.json",
+            cache_dir=extra_kwargs.get("cache_dir"),
+            token=hf_token,
+            revision=extra_kwargs.get("revision"),
+        )
+    )
+    with open(preprocessor_path) as preprocessor_file:
+        image_processor = json.load(preprocessor_file)
+    processor_config = {
+        "processor": {
+            "name": "qwen4_exp_image_processor",
+            "transforms": [
+                {"operation": {"name": "decode_image", "type": "DecodeImage", "attrs": {"color_space": "RGB"}}},
+                {"operation": {"name": "convert_to_rgb", "type": "ConvertRGB"}},
+                {
+                    "operation": {
+                        "name": "resize",
+                        "type": "Resize",
+                        "attrs": {
+                            "width": 540,
+                            "height": 360,
+                            "smart_resize": 1,
+                            "min_pixels": image_processor["size"]["shortest_edge"],
+                            "max_pixels": image_processor["size"]["longest_edge"],
+                            "patch_size": image_processor["patch_size"],
+                            "merge_size": image_processor["merge_size"],
+                        },
+                    }
+                },
+                {"operation": {"name": "rescale", "type": "Rescale", "attrs": {"rescale_factor": 1 / 255}}},
+                {
+                    "operation": {
+                        "name": "normalize",
+                        "type": "Normalize",
+                        "attrs": {
+                            "mean": image_processor["image_mean"],
+                            "std": image_processor["image_std"],
+                            "qwen3_vl": 1,
+                        },
+                    }
+                },
+                {
+                    "operation": {
+                        "name": "patch_image",
+                        "type": "PatchImage",
+                        "attrs": {
+                            "patch_size": image_processor["patch_size"],
+                            "temporal_patch_size": image_processor["temporal_patch_size"],
+                            "merge_size": image_processor["merge_size"],
+                        },
+                    }
+                },
+            ],
+        }
+    }
+    with open(os.path.join(out_dir, "processor_config.json"), "w") as processor_config_file:
+        json.dump(processor_config, processor_config_file, indent=4)
 
 
 class Qwen4ExpVisionModel(Qwen4ExpGraphModel):
@@ -433,33 +502,37 @@ class Qwen4ExpVisionModel(Qwen4ExpGraphModel):
             axis=0,
         )
         if self.io_dtype != ir.DataType.FLOAT:
-            weights = self.make_cast(
-                "/vision/interpolation/weights/Cast",
-                weights,
-                self.io_dtype,
-                ["num_patches", 4],
+            gathered = self.make_cast(
+                "/vision/pos_embed/Cast",
+                gathered,
+                ir.DataType.FLOAT,
+                ["num_patches", 4, self.hidden_size],
             )
         weights_expanded = "/vision/interpolation/weights/Unsqueeze/output_0"
         self.make_unsqueeze(
             "/vision/interpolation/weights/Unsqueeze",
             [weights, "/model/constants/INT64/[-1]"],
-            self.io_dtype,
+            ir.DataType.FLOAT,
             ["num_patches", 4, 1],
         )
         weighted = self.make_binary(
             "Mul",
             "/vision/pos_embed/Mul",
             [gathered, weights_expanded],
-            self.io_dtype,
+            ir.DataType.FLOAT,
             ["num_patches", 4, self.hidden_size],
         )
         output = "/vision/pos_embed/ReduceSum/output_0"
         self.make_reduce_sum(
             "/vision/pos_embed/ReduceSum",
             [weighted, "/model/constants/INT64/[1]"],
-            self.io_dtype,
+            ir.DataType.FLOAT,
             ["num_patches", self.hidden_size],
         )
+        if self.io_dtype != ir.DataType.FLOAT:
+            output = self.make_cast(
+                "/vision/pos_embed/output/Cast", output, self.io_dtype, ["num_patches", self.hidden_size]
+            )
         return output
 
     def make_rotary_embeddings(self, row, col):
@@ -520,31 +593,31 @@ class Qwen4ExpVisionModel(Qwen4ExpGraphModel):
         )
         cos = self.make_unary("Cos", "/vision/rotary/Cos", full, ir.DataType.FLOAT, ["num_patches", self.head_size])
         sin = self.make_unary("Sin", "/vision/rotary/Sin", full, ir.DataType.FLOAT, ["num_patches", self.head_size])
-        if self.io_dtype != ir.DataType.FLOAT:
-            cos = self.make_cast("/vision/rotary/cos/Cast", cos, self.io_dtype, ["num_patches", self.head_size])
-            sin = self.make_cast("/vision/rotary/sin/Cast", sin, self.io_dtype, ["num_patches", self.head_size])
         return cos, sin
 
     def apply_rotary(self, layer_id, label, tensor, cos, sin):
         basename = f"/visual/blocks/{layer_id}/attn/{label}_rotary"
+        shape = ["num_patches", self.num_heads, self.head_size]
+        if self.io_dtype != ir.DataType.FLOAT:
+            tensor = self.make_cast(f"{basename}/input/Cast", tensor, ir.DataType.FLOAT, shape)
         first = f"{basename}/Split/output_0"
         second = f"{basename}/Split/output_1"
         self.make_split(
             f"{basename}/Split",
             [tensor, f"/model/constants/INT64/[{self.head_size // 2}, {self.head_size // 2}]"],
             [first, second],
-            [self.io_dtype, self.io_dtype],
+            [ir.DataType.FLOAT, ir.DataType.FLOAT],
             [["num_patches", self.num_heads, self.head_size // 2]] * 2,
             axis=-1,
         )
         negative = self.make_unary(
-            "Neg", f"{basename}/Neg", second, self.io_dtype, ["num_patches", self.num_heads, self.head_size // 2]
+            "Neg", f"{basename}/Neg", second, ir.DataType.FLOAT, ["num_patches", self.num_heads, self.head_size // 2]
         )
         rotated = f"{basename}/Concat/output_0"
         self.make_concat(
             f"{basename}/Concat",
             [negative, first],
-            self.io_dtype,
+            ir.DataType.FLOAT,
             ["num_patches", self.num_heads, self.head_size],
             axis=-1,
         )
@@ -553,36 +626,39 @@ class Qwen4ExpVisionModel(Qwen4ExpGraphModel):
         self.make_unsqueeze(
             f"{basename}/cos/Unsqueeze",
             [cos, "/model/constants/INT64/[1]"],
-            self.io_dtype,
+            ir.DataType.FLOAT,
             ["num_patches", 1, self.head_size],
         )
         self.make_unsqueeze(
             f"{basename}/sin/Unsqueeze",
             [sin, "/model/constants/INT64/[1]"],
-            self.io_dtype,
+            ir.DataType.FLOAT,
             ["num_patches", 1, self.head_size],
         )
         direct = self.make_binary(
             "Mul",
             f"{basename}/direct/Mul",
             [tensor, cos_3d],
-            self.io_dtype,
+            ir.DataType.FLOAT,
             ["num_patches", self.num_heads, self.head_size],
         )
         crossed = self.make_binary(
             "Mul",
             f"{basename}/crossed/Mul",
             [rotated, sin_3d],
-            self.io_dtype,
+            ir.DataType.FLOAT,
             ["num_patches", self.num_heads, self.head_size],
         )
-        return self.make_binary(
+        output = self.make_binary(
             "Add",
             f"{basename}/Add",
             [direct, crossed],
-            self.io_dtype,
+            ir.DataType.FLOAT,
             ["num_patches", self.num_heads, self.head_size],
         )
+        if self.io_dtype != ir.DataType.FLOAT:
+            output = self.make_cast(f"{basename}/output/Cast", output, self.io_dtype, shape)
+        return output
 
     def make_frame_attention_mask(self, layer_id):
         name = f"/visual/blocks/{layer_id}/attn/frame_mask"

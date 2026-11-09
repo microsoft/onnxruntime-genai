@@ -247,8 +247,9 @@ struct StateUpdateReplayDesc {
 // Version 18: DeviceBuffer::CopyCpuRangeToDevice shifted the virtual slots that follow CopyCpuToDevice.
 // Version 19: Config::Model::Qwen38Graph gained max_batch_size, which changed the layouts of Config::Model and Config.
 // Version 20: Config gained memory budget/headroom settings; DeviceInterface gained sampler startup-byte sizing.
-// Version 21: Recompute-preemption Config fields extend the version-20 batching and runtime-profile layouts.
-inline constexpr uint32_t kDeviceInterfaceVersion = 21;
+// Version 21: Config::Engine::DynamicBatching gained host/device media budgets, changing Config's layout.
+// Version 22: Recompute-preemption Config fields extend the version-21 batching and runtime-profile layouts.
+inline constexpr uint32_t kDeviceInterfaceVersion = 22;
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}

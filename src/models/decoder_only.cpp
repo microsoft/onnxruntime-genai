@@ -1,12 +1,36 @@
 #include "generator/generators.h"
 #include "decoder_only.h"
 #include "engram.h"
+#include <charconv>
+#include <limits>
+#include "preprocessing/multi_modal_processor.h"
 
 namespace Generators {
 DecoderOnly_Model::DecoderOnly_Model(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
   session_decoder_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());
   session_info_.Add(*session_decoder_);
+  auto metadata = session_decoder_->GetModelMetadata();
+  const auto keys = metadata->GetCustomMetadataMapKeysAllocated();
+  if (std::find(keys.begin(), keys.end(), "com.microsoft.genai.rope_context_length_input") != keys.end()) {
+    if (std::find(keys.begin(), keys.end(), "com.microsoft.genai.original_context_length") == keys.end())
+      throw std::runtime_error("LongRoPE metadata requires an original context length");
+    rope_context_input_ = metadata->LookupCustomMetadataMap("com.microsoft.genai.rope_context_length_input");
+    auto original_context = metadata->LookupCustomMetadataMap("com.microsoft.genai.original_context_length");
+    auto [end, error] = std::from_chars(original_context.data(), original_context.data() + original_context.size(),
+                                        original_context_length_);
+    if (rope_context_input_.empty() || error != std::errc{} ||
+        end != original_context.data() + original_context.size() ||
+        original_context_length_ <= 0 || original_context_length_ == std::numeric_limits<int>::max()) {
+      throw std::runtime_error("LongRoPE metadata requires an input name and a valid original context length");
+    }
+
+    if (session_info_.GetInputDataType(rope_context_input_) != Ort::TypeToTensorType<int64_t> ||
+        !session_info_.GetInputShape(rope_context_input_).empty()) {
+      throw std::runtime_error("LongRoPE context input must be an int64 scalar");
+    }
+  }
+
   if (!config_->model.engram.filename.empty()) {
     engram_session_options_ = OrtSessionOptions::Create();
     CreateSessionOptionsFromConfig(
@@ -21,6 +45,47 @@ DecoderOnly_Model::DecoderOnly_Model(std::unique_ptr<Config> config, OrtEnv& ort
     }
     cpu_embedding_ = std::make_shared<CpuEmbedding>(*this, ort_env);
     cpu_embedding_->ValidateConsumer(session_info_, config_->model.decoder.inputs.embeddings);
+  }
+  if (!config_->model.vision.filename.empty()) {
+    if (!cpu_embedding_ || !config_->engine.dynamic_batching || !config_->model.vision.pipeline.empty() ||
+        !config_->model.speech.filename.empty()) {
+      throw std::runtime_error(
+          "Packed vision requires a Qwen dynamic-batching decoder with pure CPU embeddings.");
+    }
+    const auto& inputs = config_->model.decoder.inputs;
+    if (!session_info_.HasInput(inputs.position_ids) ||
+        session_info_.GetInputShape(inputs.position_ids) != std::vector<int64_t>{3, -1} ||
+        session_info_.GetInputDataType(inputs.position_ids) != Ort::TypeToTensorType<int64_t>) {
+      throw std::runtime_error("Packed Qwen vision requires three-axis int64 decoder position IDs.");
+    }
+    if (config_->model.type == "qwen4_exp" &&
+        (!session_info_.HasInput(inputs.rotary_position_ids) ||
+         session_info_.GetInputShape(inputs.rotary_position_ids) != std::vector<int64_t>{3, -1, -1} ||
+         session_info_.GetInputDataType(inputs.rotary_position_ids) != Ort::TypeToTensorType<int64_t>)) {
+      throw std::runtime_error("Packed Qwen4-Exp vision requires three-axis int64 sparse-indexer rotary history.");
+    }
+    vision_ = std::make_unique<PackedVision>();
+    vision_->session_options = OrtSessionOptions::Create();
+    vision_->device = CreateSessionOptionsFromConfig(
+        config_->model.vision.session_options.value_or(config_->model.decoder.session_options),
+        *vision_->session_options, true, /*disable_graph_capture=*/true);
+    vision_->session = CreateSession(ort_env, config_->model.vision.filename, vision_->session_options.get());
+    vision_->session_info.Add(*vision_->session);
+    const auto& vision_config = config_->model.vision;
+    const auto pixels = vision_->session_info.GetInputShape(vision_config.inputs.pixel_values);
+    const auto features = vision_->session_info.GetOutputShape(vision_config.outputs.image_features);
+    if (vision_->session->GetInputNames().size() != 2 || vision_->session->GetOutputNames().size() != 1 ||
+        pixels.size() != 2 || pixels[0] >= 0 || pixels[1] <= 0 ||
+        vision_->session_info.GetInputDataType(vision_config.inputs.pixel_values) != cpu_embedding_->type_ ||
+        vision_->session_info.GetInputShape(vision_config.inputs.image_grid_thw) != std::vector<int64_t>{1, 3} ||
+        vision_->session_info.GetInputDataType(vision_config.inputs.image_grid_thw) != Ort::TypeToTensorType<int64_t> ||
+        features != std::vector<int64_t>{-1, cpu_embedding_->hidden_size_} ||
+        vision_->session_info.GetOutputDataType(vision_config.outputs.image_features) != cpu_embedding_->type_ ||
+        vision_config.patch_size <= 0 || vision_config.spatial_merge_size <= 0) {
+      throw std::runtime_error("Packed vision encoder does not match the patch/grid/projected-feature contract.");
+    }
+    vision_->processor = std::make_shared<MultiModalProcessor>(
+        *config_, vision_->session_info, GetOrCreatePreprocessingThreadPool());
   }
 }
 
@@ -84,6 +149,14 @@ DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, DeviceSpan<
       position_inputs_{model_.p_device_inputs_->CreatePositionInputs(*this, sequence_lengths_unk, model_.config_->model.decoder.inputs.attention_mask)} {
   input_ids_.Add();
   position_inputs_->Add();
+  const auto& rope_context_name = model_.rope_context_input_;
+  if (!rope_context_name.empty()) {
+    const std::array<int64_t, 0> shape{};
+    rope_context_length_ = OrtValue::CreateTensor(model_.allocator_cpu_, shape, Ort::TypeToTensorType<int64_t>);
+    inputs_.push_back(rope_context_length_.get());
+    input_names_.push_back(rope_context_name.c_str());
+  }
+
   logits_.Add();
   if (kv_cache_)
     kv_cache_->Add();
@@ -128,11 +201,20 @@ void DecoderOnly_State::SetHiddenStates(OrtValue* hidden_states) {
 }
 
 DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
+  return Run(total_length, next_tokens, next_indices, false);
+}
+
+DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices,
+                                         bool all_tokens_valid) {
   size_t num_tokens = next_tokens.size();
   const auto& chunk_size_opt = params_->search.chunk_size;
 
-  if (first_run_ && chunk_size_opt.has_value() && chunk_size_opt.value() > 0 && num_tokens > chunk_size_opt.value()) {
-    return RunWithChunking(total_length, next_tokens, next_indices, chunk_size_opt.value());
+  if (rope_context_length_)
+    *rope_context_length_->GetTensorMutableData<int64_t>() = total_length;
+  const bool replaying_rope_cache = rope_context_length_ && num_tokens == static_cast<size_t>(total_length);
+  if ((first_run_ || replaying_rope_cache) && chunk_size_opt.has_value() &&
+      chunk_size_opt.value() > 0 && num_tokens > chunk_size_opt.value()) {
+    return RunWithChunking(total_length, next_tokens, next_indices, chunk_size_opt.value(), all_tokens_valid);
   }
 
   UpdateInputsOutputs(next_tokens, next_indices, total_length);
@@ -176,11 +258,11 @@ DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& 
   if (recurrent_state_) recurrent_state_->SetForwardLength(seq_len);
   if (ple_state_) ple_state_->SetForwardLength(seq_len);
 
-  return logits_.Get();
+  return logits_.Get(all_tokens_valid);
 }
 
 DeviceSpan<float> DecoderOnly_State::RunWithChunking(int total_length, DeviceSpan<int32_t>& next_tokens,
-                                                     DeviceSpan<int32_t> next_indices, size_t chunk_size) {
+                                                     DeviceSpan<int32_t> next_indices, size_t chunk_size, bool all_tokens_valid) {
   // Chunking logic for context phase - process in chunks based on configured chunk_size
   size_t num_tokens = next_tokens.size();
   size_t processed_tokens = 0;
@@ -213,7 +295,7 @@ DeviceSpan<float> DecoderOnly_State::RunWithChunking(int total_length, DeviceSpa
   }
 
   // Return logits from the last chunk for potential sampling
-  return logits_.Get();
+  return logits_.Get(all_tokens_valid);
 }
 
 void DecoderOnly_State::ValidateRewindTo(size_t index) const {

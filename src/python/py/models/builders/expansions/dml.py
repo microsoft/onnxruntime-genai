@@ -5,6 +5,7 @@ from .standard import Standard
 
 
 class DML:
+    make_causal_conv_with_state = Standard.make_causal_conv_with_state
     make_gated_add = Standard.make_gated_add
     make_simplified_layer_norm = Standard.make_simplified_layer_norm
     make_branchwise_rms_norm = Standard.make_branchwise_rms_norm

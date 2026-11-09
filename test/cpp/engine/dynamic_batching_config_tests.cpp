@@ -67,6 +67,22 @@ TEST(DynamicBatchingConfigTest, RejectsInvalidDeviceMemoryBudgets) {
   }
 }
 
+TEST(DynamicBatchingConfigTest, MediaLimitsUseTransactionalPositiveByteOverlays) {
+  for (const auto* name : {"media_host_bytes", "media_device_bytes"}) {
+    auto config = LoadDynamicConfig(std::string{"{\""} + name + "\":2097152}");
+    const auto value = [&]() {
+      return name == std::string_view{"media_host_bytes"} ? config.engine.dynamic_batching->media_host_bytes
+                                                          : config.engine.dynamic_batching->media_device_bytes;
+    };
+    EXPECT_EQ(value(), 2097152u);
+    for (const auto* invalid : {"0", "-1", "1.5", "true", "\"24\"", "null", "9007199254740992"}) {
+      EXPECT_THROW(OverlayConfig(config, std::string{"{\"engine\":{\"dynamic_batching\":{\""} + name + "\":" + invalid + "}}}"),
+                   std::runtime_error);
+      EXPECT_EQ(value(), 2097152u);
+    }
+  }
+}
+
 TEST(DynamicBatchingConfigTest, DeviceMemoryHeadroomUsesTransactionalByteOverlays) {
   auto config = LoadDynamicConfig(R"({"max_batch_size":1})");
   EXPECT_FALSE(config.engine.dynamic_batching->device_memory_headroom_bytes);
@@ -85,6 +101,23 @@ TEST(DynamicBatchingConfigTest, DeviceMemoryHeadroomUsesTransactionalByteOverlay
   }
   OverlayConfig(config, R"({"engine":{"dynamic_batching":{"device_memory_headroom_bytes":0}}})");
   EXPECT_EQ(config.engine.dynamic_batching->device_memory_headroom_bytes, 0u);
+}
+
+TEST(DynamicBatchingConfigTest, RuntimeProfileCanOverrideOnlyMediaLimits) {
+  auto config = LoadDynamicConfig(R"({"media_host_bytes":536870912,"media_device_bytes":134217728})");
+  OverlayConfig(config, R"({"runtime_profiles":[{
+    "id":"media","eligibility":{"minimum_total_device_memory_bytes":0},
+    "overlay":{"engine":{"dynamic_batching":{"media_host_bytes":4294967296,"media_device_bytes":2097152}}}
+  }]})");
+  ApplyRuntimeProfile(config, uint64_t{34359738368});
+  EXPECT_EQ(config.engine.dynamic_batching->media_host_bytes, 4294967296ull);
+  EXPECT_EQ(config.engine.dynamic_batching->media_device_bytes, 2097152u);
+  EXPECT_THROW(OverlayConfig(config, R"({"runtime_profiles":[{
+    "id":"invalid","eligibility":{"minimum_total_device_memory_bytes":0},
+    "overlay":{"engine":{"dynamic_batching":{"media_host_bytes":0}}}
+  }]})"),
+               std::runtime_error);
+  EXPECT_EQ(config.engine.dynamic_batching->media_host_bytes, 4294967296ull);
 }
 
 TEST(DynamicBatchingConfigTest, RuntimeProfileCanOverrideOnlyHeadroomIncludingZero) {
@@ -133,6 +166,30 @@ TEST(DynamicBatchingConfigTest, RuntimeProfileCombinesHeadroomAndPreemptionOptOu
     EXPECT_EQ(batching.max_preemptions_per_step, 4u);
     EXPECT_EQ(batching.min_decode_steps_before_preemption, 5u);
   }
+}
+
+TEST(DynamicBatchingConfigTest, RuntimeProfileCombinesMediaBudgetsAndPreemptionOptOut) {
+  auto config = LoadDynamicConfig(R"({
+    "media_host_bytes":536870912,"media_device_bytes":134217728,
+    "enable_recompute_preemption":true,"max_preemptions_per_step":2,
+    "min_decode_steps_before_preemption":3
+  })");
+  OverlayConfig(config, R"({"runtime_profiles":[{
+    "id":"wait-only-media","eligibility":{"minimum_total_device_memory_bytes":0},
+    "overlay":{"engine":{"dynamic_batching":{
+      "media_host_bytes":4294967296,"media_device_bytes":2097152,
+      "enable_recompute_preemption":false,"max_preemptions_per_step":4,
+      "min_decode_steps_before_preemption":5
+    }}}
+  }]})");
+  ApplyRuntimeProfile(config, uint64_t{34359738368});
+
+  const auto& batching = *config.engine.dynamic_batching;
+  EXPECT_EQ(batching.media_host_bytes, 4294967296ull);
+  EXPECT_EQ(batching.media_device_bytes, 2097152u);
+  EXPECT_FALSE(batching.enable_recompute_preemption);
+  EXPECT_EQ(batching.max_preemptions_per_step, 4u);
+  EXPECT_EQ(batching.min_decode_steps_before_preemption, 5u);
 }
 
 TEST(DynamicBatchingConfigTest, ScheduledTokenBudgetAcceptsOverride) {

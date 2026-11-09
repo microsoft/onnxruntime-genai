@@ -4908,8 +4908,10 @@ class HashedPleTable {
   // contexts of slot b are read at word b * kCtxWords of the buffer, where the rest of the slot holds the fill value too;
   // `prefixes`, when given, receives the whole buffer of batch * kCtxWords words as the call left it.
   std::vector<FoldPrepOutputs> PrepBatched(const std::vector<FoldState>& states, const std::vector<FoldContext>& contexts,
-                                           int rows, bool with_committed = true, std::vector<int64_t>* prefixes = nullptr) {
+                                           int rows, bool with_committed = true, std::vector<int64_t>* prefixes = nullptr,
+                                           size_t first_slot = 0, size_t slot_count = 0) {
     const size_t batch = states.size();
+    const size_t selected = slot_count == 0 ? batch - first_slot : slot_count;
     const size_t n = static_cast<size_t>(rows);
     std::vector<int64_t> control(batch * kCtlWords, kSpareWord);
     std::vector<int64_t> context_in(batch * 2);
@@ -4925,9 +4927,15 @@ class HashedPleTable {
     const PlaneBuffer committed = device_.Filled(batch * sizeof(int32_t), 0xAB);
     const PlaneBuffer past_pos = device_.Filled(batch * StagedPleRig::kPositions * sizeof(int64_t), 0xAB);
     const PlaneBuffer ple = device_.Filled(batch * n * kRowValues * sizeof(uint16_t), 0xAB);
-    EXPECT_EQ(plane_.prep_batched(device_.stream(), device_params_.data(), rows, static_cast<int>(batch), ctx_in.data(),
-                                  ctx_out.data(), input_ids.data(), position_ids.data(),
-                                  with_committed ? committed.data() : nullptr, past_pos.data(), ple.data(), state.data()),
+    EXPECT_EQ(plane_.prep_batched(device_.stream(), device_params_.data(), rows, static_cast<int>(selected),
+                                  ctx_in.data() + first_slot * 2 * sizeof(int64_t),
+                                  ctx_out.data() + first_slot * kCtxWords * sizeof(int64_t),
+                                  input_ids.data() + first_slot * n * sizeof(int64_t),
+                                  position_ids.data() + first_slot * n * sizeof(int64_t),
+                                  with_committed ? committed.data() + first_slot * sizeof(int32_t) : nullptr,
+                                  past_pos.data() + first_slot * StagedPleRig::kPositions * sizeof(int64_t),
+                                  ple.data() + first_slot * n * kRowValues * sizeof(uint16_t),
+                                  state.data() + first_slot * kCtlWords * sizeof(int64_t)),
               0);
 
     const auto contexts_out = device_.Download<int64_t>(ctx_out, batch * kCtxWords);
@@ -5234,6 +5242,29 @@ TEST_F(Qwen38PlaneBatchedPrepKernelTest, EverySlotMatchesItsOwnPrepForAnInt8Devi
 TEST_F(Qwen38PlaneBatchedPrepKernelTest, EverySlotMatchesItsOwnPrepForAnInt8StagedTable) {
   if ((plane_->capabilities & QWEN38_PLANE_CAP_INT8_PLE) == 0) GTEST_SKIP() << "the plane library has no INT8 PLE";
   ExpectEverySlotToMatchItsOwnPrep(/*staged=*/true, -0.0123f);
+}
+
+TEST_F(Qwen38PlaneBatchedPrepKernelTest, OffsetIntervalsLeaveExcludedSlotsCompletelyUntouched) {
+  constexpr size_t kSlots = QWEN38_PLANE_MAX_PREP_BATCH;
+  for (const bool staged : {false, true}) {
+    KernelTestDevice device{*plane_};
+    HashedPleTable table{*plane_, device, 0.3f, staged};
+    const BatchedFoldSlots slots = MakeBatchedFoldSlots(kSlots, 1);
+    for (const int rows : {3, 8}) {
+      for (size_t first = 0; first < kSlots; ++first) {
+        for (size_t count = 1; first + count <= kSlots; ++count) {
+          SCOPED_TRACE("first=" + std::to_string(first) + " count=" + std::to_string(count) +
+                       " rows=" + std::to_string(rows) + " staged=" + std::to_string(staged));
+          const auto prepared = table.PrepBatched(slots.states, slots.contexts, rows, true, nullptr, first, count);
+          for (size_t s = 0; s < kSlots; ++s) {
+            const bool included = first <= s && s < first + count;
+            ExpectSameFoldPrepOutputs(table.Expected(slots.states[s], slots.contexts[s], included ? rows : 0),
+                                      prepared[s], "slot " + std::to_string(s));
+          }
+        }
+      }
+    }
+  }
 }
 
 // A slot whose control word 3 is nonzero takes no part in the step: a table the GPU addresses prepares idle inputs for it and

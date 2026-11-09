@@ -277,7 +277,7 @@ def check_extra_options(
     if extra_options.get("use_paged_attention", False):
         incompatible_options = [
             key
-            for key in ("exclude_embeds", "exclude_lm_head")
+            for key in ("exclude_lm_head",)
             if extra_options.get(key, False)
         ]
         if incompatible_options:
@@ -426,6 +426,14 @@ def check_extra_options(
     hf_details = get_hf_details(model_name, input_path, cache_dir, extra_options)
     config = hf_details["hf_config"]
     extra_options["hf_details"] = hf_details
+
+    if extra_options.get("use_paged_attention", False) and extra_options.get("exclude_embeds", False):
+        if not (
+            getattr(config, "model_type", None) in {"qwen3_5", "qwen3_5_moe", "qwen4_exp"}
+            and getattr(config, "vision_config", None) is not None
+            and not extra_options.get("text_only", False)
+        ):
+            raise ValueError("use_paged_attention with exclude_embeds requires a complete Qwen vision composite.")
 
     if (
         execution_provider == "webgpu"
@@ -1159,8 +1167,9 @@ def get_args():
                     By default, the model outputs [num_tokens, vocab_size] logits.
                     Supports CUDA with fp16 or bf16 precision. WebGPU supports fp16 only for causal, full-context
                     attention with zero softcap, FP16 KV caches, and no Q/K normalization inputs; for example,
-                    Gemma2's non-zero attention softcap is unsupported. Cannot be combined with exclude_embeds or
-                    exclude_lm_head.
+                    Gemma2's non-zero attention softcap is unsupported. Cannot be combined with exclude_lm_head.
+                    exclude_embeds is supported only for complete Qwen3.5/Qwen4-Exp vision composites, exporting a pure CPU lookup
+                    and a separate vision encoder; it cannot be combined with text_only.
                 paged_block_size = 16/32/64/128/256/...: Paged KV-cache block size used when use_paged_attention is set.
                     Must be a power of two and at least 16, which is what the ONNX Runtime PagedAttention op
                     accepts. Default is 256. Also written to the `engine.dynamic_batching` section of
@@ -1184,6 +1193,9 @@ def get_args():
                     With paged attention, eligible local layers use a ring of blocks while at least one full-context
                     layer remains. Without paged attention, supported execution providers use their windowed-cache
                     mode. Set to false to give every layer a full-length KV cache for comparison or compatibility.
+                    LFM3 has window-sized KV caches only in text exports for CPU and CUDA without paged attention or
+                    enable_cuda_graph; other exports keep full-length caches. An older onnxruntime-genai fails on
+                    LFM3 exports with window-sized caches on CUDA, and the WebGPU provider does not load them.
                 gpu_utilization_factor = Fraction of available GPU memory used for the paged KV-cache. Default is 0.6.
                     Must be greater than 0 and at most 1.
                 max_batch_size = Maximum number of requests in a dynamic batch. Default is 100.
@@ -1210,6 +1222,8 @@ def get_args():
                 enable_cuda_graph = Enable CUDA graph capture during inference. Default is false.
                     If enabled, all nodes being placed on the CUDA EP is the prerequisite for the CUDA graph to be used correctly.
                     It is not guaranteed that CUDA graph be enabled as it depends on the model and the graph structure.
+                    LFM3 exports with this option keep full-length KV caches, since the runtime refuses graph capture with
+                    window-sized ones.
                 enable_dml_graph = Enable DML graph capture during inference. Default is true.
                     If enabled, the model structure will be optimized for DML graph execution.
                     DML EP uses graph capture by default for best performance.

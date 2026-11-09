@@ -71,6 +71,11 @@ TEST(DeviceInterfaceVersionTest, IsPastTheBudgetAndPreemptionConfigLayouts) {
   EXPECT_GT(kDeviceInterfaceVersion, kVersionOfEitherUncombinedParent);
 }
 
+TEST(DeviceInterfaceVersionTest, IsPastTheMediaAndPreemptionConfigLayouts) {
+  constexpr uint32_t kVersionOfEitherUncombinedParent = 21;
+  EXPECT_GT(kDeviceInterfaceVersion, kVersionOfEitherUncombinedParent);
+}
+
 TEST(DeviceSpanTest, RangeUploadForwardsTheByteRangeOfTheSubspan) {
   auto buffer = std::make_shared<RangeUploadRecorder>(16 * sizeof(int32_t));
   auto* recorder = buffer.get();
