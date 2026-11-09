@@ -291,6 +291,8 @@ def test_qwen4_exp_composite_saves_image_processor_config(monkeypatch, tmp_path)
     model.decoder = SimpleNamespace(save_processing=lambda *args: decoder_calls.append(args))
     model.hf_token = True
     model.hf_remote = False
+    model.text_only = False
+    model.extra_options = {}
 
     model.save_processing("Qwen/Qwen3.8-Flash-Next", {}, tmp_path)
 
