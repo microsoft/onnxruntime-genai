@@ -25,7 +25,7 @@ from pathlib import Path
 
 import numpy as np
 import onnxruntime_genai as og
-from qwen38_engine_util import load_model, run_turn
+from qwen38_engine_util import FORCE_REJECT_ENV, execution_protocol, load_model, run_turn
 
 for _path in os.environ.get("QWEN38_EVAL_PATHS", "").split(os.pathsep):
     if _path:
@@ -69,14 +69,17 @@ def generate(engine, buffer, prompt: list[int], max_new: int):
     ended_with_stop = result.finish_reason == og.FinishReason.EOS
     if ended_with_stop:
         tokens.append(EOS_APPENDED)
-    decode_s = result.times[-1] - result.times[0] if result.times else 0.0
+    decode_s = 0.0
+    if result.times:
+        decode_end = result.end if ended_with_stop else result.times[-1]
+        decode_s = decode_end - result.times[0]
     return {
         "tokens": tokens,
         "stop_token_appended": ended_with_stop,
         "usage_ok": result.usage.prompt_tokens == len(prompt) and result.usage.generated_tokens == len(result.tokens),
         "ttft_s": result.times[0] - result.start if result.times else None,
         "decode_s": decode_s,
-        "wall_s": (result.times[-1] - result.start) if result.times else 0.0,
+        "wall_s": result.end - result.start,
         "cycles": int(after["rounds"] - before["rounds"]),
         "accepted": int(after["draft_tokens_accepted"] - before["draft_tokens_accepted"]),
     }
@@ -111,6 +114,8 @@ def run_shard(args) -> None:
                 done[r["index"]] = r
 
     meta = {
+        **execution_protocol(),
+        "force_reject": os.environ.get(FORCE_REJECT_ENV),
         "max_new": args.max_new,
         "max_context": args.max_context,
         "shard": args.shard,
@@ -350,11 +355,11 @@ def grade_suite(args) -> None:
             "total_generated_tokens": sum(gen_list),
             "generated_tokens_median": statistics.median(gen_list),
             "generated_tokens_mean": statistics.mean(gen_list),
-            "decode_tps_median": statistics.median(tps_list),
-            "decode_tps_mean": statistics.mean(tps_list),
-            "acceptance_rate_mean": statistics.mean(acc_list),
-            "prefill_s_median": statistics.median(ttft_list),
-            "prefill_s_mean": statistics.mean(ttft_list),
+            "decode_tps_median": statistics.median(tps_list) if tps_list else None,
+            "decode_tps_mean": statistics.mean(tps_list) if tps_list else None,
+            "acceptance_rate_mean": statistics.mean(acc_list) if acc_list else None,
+            "prefill_s_median": statistics.median(ttft_list) if ttft_list else None,
+            "prefill_s_mean": statistics.mean(ttft_list) if ttft_list else None,
             "usage_ok": sum(bool(r["usage_ok"]) for r in recs.values()),
         }
 

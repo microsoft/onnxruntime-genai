@@ -14,6 +14,7 @@ References (--reference <json>), either of
     "prompt_tokens": N, "old": {"tokens": [...incl. the stop token], "cycles": C, "accepted": A}, "new": {...}}]}.
 Without --reference the streams are only recorded (the result is "RECORDED", not PASS).
 Reference prompt hashes, when present, must match; legacy references without hashes still check prompt length.
+Using --reference requires an explicit --prefill steps|fast so the correct reference and checks are selected.
 
 --prefill steps (prefill.enabled=false, the bit-exact muted-fold prompt path) must be token-identical to the reference (and to
 its cycle / accept counts when it has them: only another runner's streams do); --prefill fast is reported as agreement
@@ -114,6 +115,8 @@ def main():
     parser.add_argument("--provider")
     add_prompt_arguments(parser)
     args = parser.parse_args()
+    if args.reference and args.prefill is None:
+        parser.error("--prefill is required with --reference; choose steps or fast")
     if args.out.exists():
         raise FileExistsError(args.out)
 

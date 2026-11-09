@@ -82,7 +82,8 @@ def load_tools(*names, stubs=None):
 
 # The keys below ``model.qwen38_graph`` that the engine's config parser (src/config.cpp, model type ``qwen38_flash_graph``) knows.
 # It rejects every other key when the package is loaded, e.g. the former ``fold.mtp`` / ``fold.drafter`` head sessions,
-# ``fold.force_reject``, ``mtp.skip_refeed``, ``prefill_chunk_tokens`` and all CUDA graph id keys. A leaf maps to ``None``;
+# ``fold.force_reject``, ``mtp.skip_refeed``, ``prefill_chunk_tokens`` and the obsolete top-level CUDA graph id keys.
+# Positive, distinct legacy ``fold.target_graph_id`` / ``fold.head_r2.graph_id`` are still accepted. A leaf maps to ``None``;
 # the ``session_options`` objects are standard session options, which this description does not look into.
 QWEN38_GRAPH_KEYS = {
     "plane_library": None,
@@ -92,7 +93,11 @@ QWEN38_GRAPH_KEYS = {
     "warmup": None,
     "head": {"filename_s1": None, "filename_s2": None, "session_options": None},
     "mtp": {"enabled": None, "prefill_head": None},
-    "fold": {"enabled": None, "head_r2": {"filename": None, "session_options": None}},
+    "fold": {
+        "enabled": None,
+        "target_graph_id": None,
+        "head_r2": {"filename": None, "graph_id": None, "session_options": None},
+    },
     "prefill": {
         "enabled": None,
         "chunk": None,
@@ -110,8 +115,6 @@ REMOVED_QWEN38_GRAPH_KEYS = (
     "fold.force_reject",
     "fold.mtp",
     "fold.drafter",
-    "fold.target_graph_id",
-    "fold.head_r2.graph_id",
     "prefill_chunk_tokens",
     "target_s1_graph_id",
     "target_s2_graph_id",

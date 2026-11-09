@@ -9,6 +9,7 @@ Reuses the corpus, tokenization, and threshold estimation from
 onnxruntime_genai.models.quantization.kv_cache_calibration, while handling the Qwen3.8-Flash-Next
 PLE input (`ple_embeddings.1`), `past_position_ids`, `logits_indices`, the partial-rotary
 (`rotary_dim = 64` of `head_size = 256`) rotation-invariant pair envelope, and the MTP head KV model.
+Embedding-only graphs use the package's CPU embedding session for the prompt and shifted head inputs.
 """
 
 from __future__ import annotations
@@ -41,6 +42,19 @@ def validate_method(method):
         )
 
 
+def custom_ops_paths(pkg, options, name, fallback=None):
+    if not options.get("custom_ops_library") and not options.get("custom_ops_libraries"):
+        options = fallback or {}
+    libraries = ([options["custom_ops_library"]] if options.get("custom_ops_library") else []) + options.get(
+        "custom_ops_libraries", []
+    )
+    paths = list(dict.fromkeys((pkg / lib).resolve() for lib in libraries))
+    for path in paths:
+        if not path.is_file():
+            raise FileNotFoundError(f"{name} custom-op library not found: {path}")
+    return paths
+
+
 def create_calibration_sessions(ort, pkg):
     """Loads the dense/head-KV graphs with their configured custom ops on separate session options.
 
@@ -54,16 +68,7 @@ def create_calibration_sessions(ort, pkg):
     plans = []
     for name in ("dense", "head_kv"):
         graph = prefill.get(name, {})
-        options = graph.get("session_options", {})
-        if not options.get("custom_ops_library") and not options.get("custom_ops_libraries"):
-            options = parent
-        libraries = ([options["custom_ops_library"]] if options.get("custom_ops_library") else []) + options.get(
-            "custom_ops_libraries", []
-        )
-        paths = list(dict.fromkeys((pkg / lib).resolve() for lib in libraries))
-        for path in paths:
-            if not path.is_file():
-                raise FileNotFoundError(f"{name} custom-op library not found: {path}")
+        paths = custom_ops_paths(pkg, graph.get("session_options", {}), name, parent)
         plans.append((pkg / graph.get("filename", f"{name}/model.onnx"), paths))
 
     sessions = []
@@ -77,6 +82,37 @@ def create_calibration_sessions(ort, pkg):
         print(f"Loading calibration session from {filename}...", flush=True)
         sessions.append(ort.InferenceSession(str(filename), sess_options=so, providers=providers))
     return sessions
+
+
+def create_embedding_session(ort, pkg):
+    pkg = pkg.resolve()
+    graph = json.loads((pkg / "genai_config.json").read_text())["model"].get("embedding", {})
+    if not graph.get("filename"):
+        raise ValueError("inputs_embeds calibration requires model.embedding.filename")
+    so = ort.SessionOptions()
+    so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
+    so.enable_cpu_mem_arena = False
+    for library in custom_ops_paths(pkg, graph.get("session_options", {}), "embedding"):
+        so.register_custom_ops_library(str(library))
+    session = ort.InferenceSession(str(pkg / graph["filename"]), sess_options=so, providers=["CPUExecutionProvider"])
+    return (
+        session,
+        graph.get("inputs", {}).get("input_ids", "input_ids"),
+        graph.get("outputs", {}).get("embeddings", "inputs_embeds"),
+    )
+
+
+def run_embeddings(ort, session, input_name, output_name, tokens: np.ndarray, device) -> torch.Tensor:
+    meta = next((meta for meta in session.get_inputs() if meta.name == input_name), None)
+    if meta is None or len(meta.shape) not in (1, 2):
+        raise ValueError(f"embedding input {input_name!r} must exist and have rank 1 or 2")
+    ids = tokens.reshape(-1) if len(meta.shape) == 1 else tokens
+    binding = session.io_binding()
+    binding.bind_cpu_input(input_name, np.ascontiguousarray(ids, dtype=np.int64))
+    binding.bind_output(output_name, "cpu")
+    session.run_with_iobinding(binding)
+    embeddings = torch.from_dlpack(binding.get_outputs()[0])
+    return embeddings.reshape(1, tokens.shape[1], -1).to(device=device).contiguous()
 
 
 def ensure_distinct_outputs(output_paths: dict[str, Path]) -> None:
@@ -185,6 +221,13 @@ def calibrate_package(
     lookup = Qwen4ExpCPUPLELookup(str(checkpoint), config, ple_layer)
 
     dense_sess, head_kv_sess = create_calibration_sessions(ort, pkg)
+    dense_inputs = {meta.name for meta in dense_sess.get_inputs()}
+    head_inputs = {meta.name for meta in head_kv_sess.get_inputs()}
+    embedding = (
+        create_embedding_session(ort, pkg)
+        if "inputs_embeds" in dense_inputs or "inputs_embeds" in head_inputs
+        else None
+    )
 
     num_kv_heads = 2
     head_size = 256
@@ -200,9 +243,13 @@ def calibrate_package(
     init_states = {}
     for meta in dense_sess.get_inputs():
         name = meta.name
-        if name in ("input_ids", "attention_mask", "position_ids", "logits_indices") or name.startswith(
-            "ple_embeddings."
-        ):
+        if name in (
+            "input_ids",
+            "inputs_embeds",
+            "attention_mask",
+            "position_ids",
+            "logits_indices",
+        ) or name.startswith("ple_embeddings."):
             continue
         shape = [1 if not isinstance(d, int) or d <= 0 else d for d in meta.shape]
         if name == "past_position_ids":
@@ -238,6 +285,9 @@ def calibrate_package(
         ctx = lookup.initial_context(1)
         ple_emb, _ = lookup([prompt_list], ctx)
         ple_dev = ple_emb.to(device=device, dtype=torch.bfloat16).contiguous()
+        embeddings = None
+        if embedding is not None:
+            embeddings = run_embeddings(ort, *embedding, seq_np, device)
 
         binding = dense_sess.io_binding()
         keep = []
@@ -248,7 +298,11 @@ def calibrate_package(
             keep_ref.append((t, ov))
             b.bind_ortvalue_input(name, ov)
 
-        bind_in("input_ids", torch.from_numpy(seq_np).to(device=device, dtype=torch.int64))
+        if "input_ids" in dense_inputs:
+            bind_in("input_ids", torch.from_numpy(seq_np).to(device=device, dtype=torch.int64))
+        if "inputs_embeds" in dense_inputs:
+            assert embeddings is not None
+            bind_in("inputs_embeds", embeddings)
         bind_in("attention_mask", torch.ones((1, seq_len), dtype=torch.int64, device=device))
         bind_in("position_ids", torch.arange(seq_len, dtype=torch.int64, device=device).reshape(1, seq_len))
         bind_in("logits_indices", torch.tensor([seq_len - 1], dtype=torch.int64, device=device))
@@ -284,7 +338,11 @@ def calibrate_package(
         hidden = out_map["hidden_states"][:, :-1, :].contiguous()
         m = seq_len - 1
         hb = head_kv_sess.io_binding()
-        bind_in("input_ids", torch.from_numpy(seq_np[:, 1:]).to(device=device, dtype=torch.int64), hb)
+        if "input_ids" in head_inputs:
+            bind_in("input_ids", torch.from_numpy(seq_np[:, 1:]).to(device=device, dtype=torch.int64), hb)
+        if "inputs_embeds" in head_inputs:
+            assert embeddings is not None
+            bind_in("inputs_embeds", embeddings[:, 1:, :], hb)
         bind_in("attention_mask", torch.ones((1, m), dtype=torch.int64, device=device), hb)
         bind_in("position_ids", torch.arange(1, seq_len, dtype=torch.int64, device=device).reshape(1, m), hb)
         bind_in("past_position_ids", torch.zeros((1, 0), dtype=torch.int64, device=device), hb)

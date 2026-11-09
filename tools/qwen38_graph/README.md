@@ -105,18 +105,30 @@ All need a package; the ones that build prompts need a text pool (`--text-pool`,
 
 Calibration registers each dense/head-KV session's configured `custom_ops_library` and `custom_ops_libraries` before loading
 its graph, resolving relative paths from the package and falling back to the decoder's libraries if neither field is set.
+Graphs that take `inputs_embeds` run the package's CPU `model.embedding` graph with its configured input/output names:
+dense prefill receives the prompt embeddings, and head-KV receives the shifted embeddings for tokens 1 through N-1.
+The embedding graph is not loaded when both calibration graphs take `input_ids`.
 Both output quantizations use `--method minmax` or `percentile`; MSE is rejected because its integer rounding objective does
 not model FP8. Incomplete K/V layer pairs and non-finite captures, scales or statistics are rejected before either scale file
 is written.
 
-The gate requires matching prompt hashes whenever the reference provides them, in addition to checking prompt lengths.
-Prompt-length comparisons require equal, non-empty length sets. MMLU resume protocols include `--force-reject`, so changing
-that mode requires a fresh output. LiveCodeBench rejects prompts that leave no generation budget and requires disjoint,
-complete grading shards with matching `.protocol.json` metadata (apart from the shard index).
+The gate requires an explicit `--prefill steps|fast` with `--reference`, and matching prompt hashes whenever the reference
+provides them, in addition to checking prompt lengths. Prompt-length comparisons require equal, non-empty length sets.
+MMLU and LiveCodeBench resume protocols record the parsed `$QWEN38_OVERLAY_JSON` and any launcher host-expert byte budget;
+MMLU also records `--force-reject`, while LiveCodeBench records the inherited `$ORT_QWEN38_FORCE_REJECT` hook. Changing these
+settings requires a fresh output. Older protocol files without these fields also require a fresh output.
+LiveCodeBench rejects prompts that leave no generation budget and requires disjoint, complete grading shards with matching
+`.protocol.json` metadata (apart from the shard index). Evaluation wall time ends at turn completion, including EOS-first
+turns; when the stop token is appended to the recorded count, decode timing includes the terminal EOS run.
+Grading still saves accuracy when no decode interval, acceptance rounds or delivered first token can be measured:
+unavailable aggregate performance metrics are JSON null.
 
 `engine_behaviours.py` requires the single-slot baseline (`configured_max_batch_size=1`, `max_request_length=33024`); it rejects
 other configurations before running probes. Its 20K prefill, 40K capacity and sequential queueing probes assume that baseline.
-The decode benchmark reports cycle timing without speculative acceptance statistics when no drafts were proposed.
+The decode benchmark requires `--new` to be at least 2 and reports cycle timing without speculative acceptance statistics
+when no drafts were proposed. Stop-string probes use fresh tokenizer streams so split UTF-8 tokens match the Engine's text,
+and lost-residency probes require the specific "no longer resident" diagnostic rather than accepting arbitrary exceptions.
+Completed turn usage counters are owned snapshots, not references to the reused Engine event buffer.
 `bench_ttft_engine.py` raises an explicit benchmark error if EOS arrives before any token is delivered; `smoke.py` reports the
 completed zero-token turn with unavailable latency/throughput and raises on failed or capacity-blocked Engine events.
 
@@ -132,13 +144,20 @@ completed zero-token turn with unavailable latency/throughput and raises on fail
 | `engine_prompt_lengths.py` | `run` the same greedy turns for 1 .. 20000-token prompts (dense chunk boundaries 8191/8192/8193, ...) with `--prefill steps` and `--prefill fast`, then `compare` (first token equal, shared prefix) |
 | `mmlu_engine_eval.py` | MMLU-Pro 800 through the Engine (shards, resumable) and the MTP == no-MTP stream check (`--check-items`, `--force-reject`, `--compare`); a run stops before generating when an Engine prompt differs from the canonical prompt ids/text, and `--compare A B` (A an MTP run, B a `--force-reject` run) exits non-zero unless both cover the same items and every stream is identical |
 | `lcb_engine_eval.py` | LiveCodeBench v6 (175 problems) through the Engine, generated in resumable `--shard K --shards N` runs; with `--grade --arms name=glob ...` the completed shards are graded in the `lcb-grader` Docker sandbox at each cap of `--caps` (default 16K and 32K) and the arms are compared with a paired exact McNemar test |
-| `test_plane_kernels.py` | kernel tests of the plane's fast prefill kernels (`ple_rows`, `pool_keys`, `transpose_f32`) against the research implementations |
-| `run_with_ram_budget.py` | runs a command (for example `bench_engine_mtp.py`) with a bounded host expert cache for a QMoE-offload package: `$ORT_QMOE_HOST_CACHE_MIB` / `$ORT_QMOE_HOST_CACHE_LAYERS` from `--ram-budget-gib` minus `--reserve-gib`, and with `--enforce` a `systemd-run --user` cap on the whole command; `test_ram_budget.py` is its unit test (`python -m unittest test_ram_budget`) |
+| `test_plane_kernels.py` | kernel tests of the plane's fast prefill kernels (`ple_rows`, `pool_keys`, `transpose_f32`) against the research implementations; uses ABI 3 and checks the PLE CUDA return status before inspecting outputs |
+| `run_with_ram_budget.py` | runs a command (for example `bench_engine_mtp.py`) with a bounded host expert cache for a QMoE-offload package: the legacy `$ORT_QMOE_HOST_CACHE_MIB` / `$ORT_QMOE_HOST_CACHE_LAYERS` and `$QWEN38_HOST_EXPERT_BYTES` from `--ram-budget-gib` minus `--reserve-gib`; the shared model loader applies the byte budget to decoder session options and all runtime-profile overrides. With `--enforce`, a `systemd-run --user` cap bounds the whole command; `test_ram_budget.py` is its unit test (`python -m unittest test_ram_budget`) |
 
 A qualification pass of a package: `engine_gate.py` with `--force-reject --prefill steps` (record), then without `--force-reject`
-with `--reference` of that recording (MTP stream == no-MTP stream); `engine_behaviours.py --prefill steps`; `bench_engine_mtp.py` on
+with `--prefill steps --reference` of that recording (MTP stream == no-MTP stream); `engine_behaviours.py --prefill steps`; `bench_engine_mtp.py` on
 the fixed-length package; `bench_ttft_engine.py`; `engine_prompt_lengths.py` with both prefill modes; and, for accuracy,
 `mmlu_engine_eval.py` and `lcb_engine_eval.py`.
+
+The RAM launcher's session-option budget applies to commands that use `qwen38_engine_util.load_model`. It takes precedence
+over package, environment-overlay and CLI-overlay budgets, including runtime profiles. The loader uses a temporary config
+with links to the original assets and keeps it alive for the process; it never edits the original package.
+Creating the config view requires symlink support (on Windows, Developer Mode or the usual symlink privilege).
+Other commands must apply `session.moe.offload.host_expert_bytes` themselves or use `--enforce` for a total process limit.
+`--ram-budget-gib 0` clears the launcher override and leaves the package's session options unchanged.
 
 The provider-side settings the numbers in the PR descriptions were taken with are
 `CUDA_MODULE_LOADING=EAGER ORT_ENABLE_FP4_GEMV=1 ORT_NVFP4_FC1_EXPERT_REUSE=0 ORT_FORCE_DETERMINISTIC_MOE=1`
@@ -147,6 +166,8 @@ The provider-side settings the numbers in the PR descriptions were taken with ar
 The logic that does not need a GPU is covered by `test/cpp/engine/qwen38_graph_*_tests.cpp` (scripted device, real Engine); the pure logic of
 the qualification scripts (acceptance histogram, calibration output names, the MMLU prompt check and `--compare`) by
 `test/python/builder/test_qwen38_qualification_tools.py` (`cd test/python/builder && python -m pytest -q test_qwen38_qualification_tools.py`).
+`test/python/builder/test_qwen38_calibration_embeddings.py` additionally runs tiny CPU ONNX embedding graphs (including BF16)
+and checks dense/head-KV token and embedding bindings without a GPU or research checkpoint.
 `engine_unit_tests --gtest_also_run_disabled_tests --gtest_filter='*RunOverhead*'` measures the host cost of one Engine step with
 an instantly answering device.
 

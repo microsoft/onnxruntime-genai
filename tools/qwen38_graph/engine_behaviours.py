@@ -33,12 +33,19 @@ def check(name, ok, detail=None):
 
 
 def expect_error(name, action, fragment):
+    if not fragment:
+        raise ValueError("expected error fragment must not be empty")
     try:
         action()
     except Exception as error:
         check(name, fragment in str(error), str(error)[:200])
         return
     check(name, False, "no error raised")
+
+
+def decode_chunks(tokenizer, tokens):
+    stream = tokenizer.create_stream()
+    return [stream.decode(token) for token in tokens]
 
 
 def require_baseline(capabilities):
@@ -120,7 +127,7 @@ def main():
     check("session-limited tokens are a prefix of the reference", limited.tokens == reference.tokens[:9])
 
     # stop string: a 5-character window of the reference text (with a visible character) that ends after the 12th token
-    pieces = [tokenizer.decode(np.asarray([t], dtype=np.int32)) for t in reference.tokens]
+    pieces = decode_chunks(tokenizer, reference.tokens)
     full = "".join(pieces)
     offset = len("".join(pieces[:12]))
     stop = next(
@@ -131,8 +138,9 @@ def main():
     request = engine.create_request()
     stopped, _ = run_turn(engine, buffer, request, text, 100, stop_strings=[stop])
     request.close()
-    produced = "".join(tokenizer.decode(np.asarray([t], dtype=np.int32)) for t in stopped.tokens)
-    before_last = "".join(tokenizer.decode(np.asarray([t], dtype=np.int32)) for t in stopped.tokens[:-1])
+    stopped_pieces = decode_chunks(tokenizer, stopped.tokens)
+    produced = "".join(stopped_pieces)
+    before_last = "".join(stopped_pieces[:-1])
     # the Engine delivers whole tokens: the turn ends with the first token whose text completes the match
     check(
         "stop string ends the turn at its first occurrence",
@@ -213,7 +221,7 @@ def main():
     expect_error(
         "the first request cannot continue after the second took the slot",
         lambda: first.begin_turn(np.asarray([1000, 1001], dtype=np.int32), t1),
-        "",
+        "no longer resident",
     )
     first.close()
     second.close()

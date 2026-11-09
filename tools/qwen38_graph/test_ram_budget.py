@@ -11,11 +11,13 @@ class RamBudgetTest(unittest.TestCase):
         env, mib = plan_environment(64, 8, 48, original)
         self.assertEqual(mib, 56 * 1024)
         self.assertEqual(env["ORT_QMOE_HOST_CACHE_LAYERS"], "48")
+        self.assertEqual(env["QWEN38_HOST_EXPERT_BYTES"], str(56 * (1 << 30)))
         self.assertEqual(original, {"CUSTOM": "keep"})
         env, mib = plan_environment(0, 8, 48, env)
         self.assertEqual(mib, 0)
         self.assertEqual(env["ORT_QMOE_HOST_CACHE_MIB"], "0")
         self.assertNotIn("ORT_QMOE_HOST_CACHE_LAYERS", env)
+        self.assertNotIn("QWEN38_HOST_EXPERT_BYTES", env)
         self.assertEqual(env["CUSTOM"], "keep")
 
     def test_invalid_and_incompatible_budgets(self):

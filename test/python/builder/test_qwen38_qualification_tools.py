@@ -10,12 +10,16 @@ are replaced by small fakes.
 
 from __future__ import annotations
 
+import codecs
+import ctypes
 import json
 import os
 import re
 import runpy
 import sys
 import types
+from pathlib import Path
+from typing import ClassVar
 
 import numpy as np
 import pytest
@@ -42,8 +46,9 @@ def tools():
         "bench_ttft_engine",
         "smoke",
         "lcb_engine_eval",
+        "test_plane_kernels",
         stubs=make_kv_calibration_stubs(),
-    ) as (bench, calibrate, gate, mmlu, util, lengths, behaviours, ttft, smoke, lcb):
+    ) as (bench, calibrate, gate, mmlu, util, lengths, behaviours, ttft, smoke, lcb, plane):
         yield types.SimpleNamespace(
             bench=bench,
             calibrate=calibrate,
@@ -55,6 +60,7 @@ def tools():
             ttft=ttft,
             smoke=smoke,
             lcb=lcb,
+            plane=plane,
         )
 
 
@@ -112,7 +118,8 @@ def test_acceptance_stats_reject_inconsistent_snapshots(tools, before, after, ro
 
 
 @pytest.mark.parametrize("mtp", [True, False])
-def test_bench_records_the_complete_histogram_of_mixed_width_rounds(tools, tmp_path, monkeypatch, mtp):
+@pytest.mark.parametrize("max_new", [2, 8])
+def test_bench_records_the_complete_histogram_of_mixed_width_rounds(tools, tmp_path, monkeypatch, mtp, max_new):
     bench = tools.bench
     snapshots = [
         {
@@ -174,7 +181,18 @@ def test_bench_records_the_complete_histogram_of_mixed_width_rounds(tools, tmp_p
     monkeypatch.setattr(bench, "Prompts", FakePrompts)
     monkeypatch.setattr(bench, "run_turn", fake_run_turn)
     out = tmp_path / "bench.json"
-    argv = ["bench_engine_mtp.py", "package", "--out", str(out), "--contexts", "16", "--reps", "1", "--new", "8"]
+    argv = [
+        "bench_engine_mtp.py",
+        "package",
+        "--out",
+        str(out),
+        "--contexts",
+        "16",
+        "--reps",
+        "1",
+        "--new",
+        str(max_new),
+    ]
     if not mtp:
         argv.append("--no-mtp")
     monkeypatch.setattr(sys, "argv", [*argv, "--no-warmup"])
@@ -185,6 +203,8 @@ def test_bench_records_the_complete_histogram_of_mixed_width_rounds(tools, tmp_p
     assert [run["label"] for run in runs] == ["run1"]
     measured = runs[0]
     assert measured["cycles"] == 2
+    assert measured["tokens"] == max_new
+    assert measured["tps"] == pytest.approx(10.0)
     if not mtp:
         assert measured["accept_hist"] is None
         assert measured["pos_accept_rates"] is None
@@ -195,6 +215,18 @@ def test_bench_records_the_complete_histogram_of_mixed_width_rounds(tools, tmp_p
     assert measured["accept_hist"] == [0, 0, 0, 1, 0, 0, 0, 1]
     assert measured["pos_accept_rates"][0] == 1.0
     assert measured["cond_accept_rates"][3] == 0.5
+
+
+@pytest.mark.parametrize("max_new", [-1, 0, 1])
+def test_decode_bench_requires_two_tokens_before_loading(tools, tmp_path, monkeypatch, capsys, max_new):
+    monkeypatch.setattr(tools.bench, "load_model", lambda *args: pytest.fail("model must not be loaded"))
+    out = tmp_path / "bench.json"
+    monkeypatch.setattr(sys, "argv", ["bench_engine_mtp.py", "package", "--out", str(out), "--new", str(max_new)])
+    with pytest.raises(SystemExit) as exc:
+        tools.bench.main()
+    assert exc.value.code == 2
+    assert "--new must be at least 2" in capsys.readouterr().err
+    assert not out.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -667,6 +699,10 @@ def test_config_description_rejects_every_removed_key(removed):
     assert unknown_qwen38_graph_keys(nested(removed, 1)) == [GRAPH_PREFIX + removed]
 
 
+def test_config_description_accepts_legacy_fold_graph_ids():
+    assert unknown_qwen38_graph_keys({"fold": {"target_graph_id": 17, "head_r2": {"graph_id": 18}}}) == []
+
+
 @pytest.mark.parametrize(
     "section, problem",
     [
@@ -881,6 +917,19 @@ def test_gate_checks_reference_prompt_hash(tools, tmp_path, monkeypatch, hook_un
     assert comparison["prompt_hash_equal"] == (hash_mode != "different")
 
 
+def test_gate_reference_requires_explicit_prefill_before_loading(tools, tmp_path, monkeypatch, capsys):
+    reference = tmp_path / "reference.json"
+    reference.write_text(json.dumps({"cases": []}))
+    monkeypatch.setattr(tools.gate, "load_model", lambda *args: pytest.fail("model must not be loaded"))
+    out = tmp_path / "gate.json"
+    monkeypatch.setattr(sys, "argv", ["engine_gate.py", "package", "--out", str(out), "--reference", str(reference)])
+    with pytest.raises(SystemExit) as exc:
+        tools.gate.main()
+    assert exc.value.code == 2
+    assert "--prefill is required with --reference" in capsys.readouterr().err
+    assert not out.exists()
+
+
 @pytest.mark.parametrize(
     "a,b,ok", [([], [], False), ([1], [], False), ([1], [1, 2], False), ([1, 2], [1], False), ([1, 2], [1, 2], True)]
 )
@@ -908,6 +957,24 @@ def test_mmlu_resume_rejects_changed_decoding_mode(mmlu_run, tmp_path, force_rej
     previous = len(generated)
     with pytest.raises(SystemExit, match="protocol mismatch"):
         run(force_reject=not force_reject)
+    assert len(generated) == previous
+
+
+def test_mmlu_resume_compares_parsed_environment_overlays(mmlu_run, tmp_path, monkeypatch):
+    run, generated = mmlu_run
+    overlay = {"model": {"qwen38_graph": {"mtp": {"prefill_head": False}}}}
+    monkeypatch.setenv("QWEN38_OVERLAY_JSON", json.dumps(overlay, indent=2))
+    run()
+    assert json.loads((tmp_path / "mmlu.protocol.json").read_text())["overlay"] == overlay
+    monkeypatch.setenv("QWEN38_OVERLAY_JSON", json.dumps(overlay, separators=(",", ":")))
+    previous = len(generated)
+    run()
+    assert len(generated) == previous + 1  # Only the unrecorded warm-up is repeated on resume.
+    overlay["model"]["qwen38_graph"]["mtp"]["prefill_head"] = True
+    monkeypatch.setenv("QWEN38_OVERLAY_JSON", json.dumps(overlay))
+    previous = len(generated)
+    with pytest.raises(SystemExit, match="protocol mismatch"):
+        run()
     assert len(generated) == previous
 
 
@@ -1061,6 +1128,108 @@ def test_windows_loading_resolves_relative_dll_directories(tools, tmp_path, monk
     assert registrations == [str(provider_path)]
 
 
+def test_host_budget_overrides_package_and_overlay_runtime_profiles(tools, tmp_path, monkeypatch):
+    util = tools.util
+    entry = util.HOST_EXPERT_BYTES_ENTRY
+    budget = 56 * (1 << 30)
+    original = {
+        "model": {"decoder": {"session_options": {entry: "auto", "keep": "base"}}},
+        "runtime_profiles": [
+            {
+                "id": "large",
+                "eligibility": {"minimum_total_device_memory_bytes": 1, "is_integrated": False},
+                "overlay": {
+                    "model": {"decoder": {"session_options": {entry: str(128 * (1 << 30)), "keep": "profile"}}}
+                },
+            }
+        ],
+    }
+    (tmp_path / "genai_config.json").write_text(json.dumps(original))
+    (tmp_path / "weights").mkdir()
+    (tmp_path / "weights" / "model.data").write_bytes(b"asset")
+    inherited = {
+        "model": {"decoder": {"session_options": {entry: "999"}}},
+        "runtime_profiles": [
+            {
+                "id": "extra",
+                "eligibility": {"minimum_total_device_memory_bytes": 1, "is_integrated": True},
+                "overlay": {"model": {"decoder": {"session_options": {entry: "888"}}}},
+            }
+        ],
+    }
+    argument = {"model": {"decoder": {"session_options": {entry: "777"}}}}
+    monkeypatch.setenv("QWEN38_OVERLAY_JSON", json.dumps(inherited))
+    monkeypatch.setenv(util.HOST_EXPERT_BYTES_ENV, str(budget))
+
+    class Config:
+        def __init__(self, path):
+            self.path = Path(path)
+            self.document = json.loads((self.path / "genai_config.json").read_text())
+            self.overlays = []
+
+        def overlay(self, raw):
+            self.overlays.append(json.loads(raw))
+
+    monkeypatch.setattr(util.og, "Config", Config, raising=False)
+    monkeypatch.setattr(util.og, "Model", lambda config: config, raising=False)
+    config = util.load_model(tmp_path, overlay=argument)
+    assert config.path != tmp_path
+    assert (config.path / "weights" / "model.data").read_bytes() == b"asset"
+    assert json.loads((tmp_path / "genai_config.json").read_text()) == original
+    assert config.document["model"]["decoder"]["session_options"] == {
+        entry: str(budget),
+        "keep": "base",
+    }
+    profile_options = config.document["runtime_profiles"][0]["overlay"]["model"]["decoder"]["session_options"]
+    assert profile_options == {entry: str(budget), "keep": "profile"}
+    assert all(overlay["model"]["decoder"]["session_options"][entry] == str(budget) for overlay in config.overlays)
+    assert config.overlays[0]["runtime_profiles"][0]["overlay"]["model"]["decoder"]["session_options"][entry] == str(
+        budget
+    )
+    assert argument["model"]["decoder"]["session_options"][entry] == "777"
+    assert util.execution_protocol() == {"overlay": inherited, "host_expert_bytes": budget}
+
+
+@pytest.mark.parametrize("raw", ["0", "-1", "invalid", str(1 << 64)])
+def test_host_budget_rejects_invalid_byte_counts_before_native_loading(tools, tmp_path, monkeypatch, raw):
+    (tmp_path / "genai_config.json").write_text('{"model": {}}')
+    monkeypatch.setenv(tools.util.HOST_EXPERT_BYTES_ENV, raw)
+    monkeypatch.setattr(
+        tools.util.og, "Config", lambda path: pytest.fail("invalid budget reached Config"), raising=False
+    )
+    with pytest.raises(ValueError, match="positive integer byte budget"):
+        tools.util.load_model(tmp_path)
+
+
+@pytest.mark.parametrize("stage", ["link", "config", "model"])
+def test_budget_package_is_cleaned_up_after_native_load_failure(tools, tmp_path, monkeypatch, stage):
+    util = tools.util
+    (tmp_path / "genai_config.json").write_text('{"model": {}}')
+    (tmp_path / "model.data").write_bytes(b"original asset")
+    monkeypatch.setenv(util.HOST_EXPERT_BYTES_ENV, str(56 * (1 << 30)))
+    temporary_directory = util.tempfile.TemporaryDirectory
+    created = []
+
+    def create_directory(*args, **kwargs):
+        directory = temporary_directory(*args, **kwargs)
+        created.append(Path(directory.name))
+        return directory
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("native load failed")
+
+    monkeypatch.setattr(util, "tempfile", types.SimpleNamespace(TemporaryDirectory=create_directory))
+    if stage == "link":
+        monkeypatch.setattr(util.Path, "symlink_to", fail)
+    monkeypatch.setattr(util.og, "Config", fail if stage == "config" else lambda path: object(), raising=False)
+    monkeypatch.setattr(util.og, "Model", fail, raising=False)
+    with pytest.raises(RuntimeError, match="native load failed"):
+        util.load_model(tmp_path)
+    assert created and all(not path.exists() for path in created)
+    assert (tmp_path / "genai_config.json").exists()
+    assert (tmp_path / "model.data").read_bytes() == b"original asset"
+
+
 @pytest.mark.parametrize("batch,length", [(2, 33024), (1, 8192), (1, 262140)])
 def test_behaviours_rejects_unsupported_baselines_before_probes(tools, tmp_path, monkeypatch, batch, length):
     monkeypatch.setattr(tools.behaviours, "load_model", lambda *args: object())
@@ -1121,9 +1290,181 @@ def event(flags, token=5, finish_reason="eos"):
         token=token,
         finish_reason=finish_reason,
         error_code=17,
-        usage=types.SimpleNamespace(prompt_tokens=1, generated_tokens=0),
+        usage=types.SimpleNamespace(prompt_tokens=1, generated_tokens=0, cached_prompt_tokens=0),
         matched_stop_string_index=None,
     )
+
+
+def test_turn_usage_is_owned_after_event_buffer_reuse(tools, monkeypatch):
+    terminal = event(8)
+    terminal.usage = types.SimpleNamespace(prompt_tokens=11, generated_tokens=7, cached_prompt_tokens=3)
+    engine = fake_event_engine(tools.util, monkeypatch, [[terminal]])
+    first, _ = tools.util.run_turn(engine, object(), engine.request, [1], 8)
+    terminal.usage.prompt_tokens = 23
+    terminal.usage.generated_tokens = 5
+    terminal.usage.cached_prompt_tokens = 2
+    engine.batches = [[terminal]]
+    second, _ = tools.util.run_turn(engine, object(), engine.request, [1], 8)
+    assert (first.usage.prompt_tokens, first.usage.generated_tokens, first.usage.cached_prompt_tokens) == (11, 7, 3)
+    assert (second.usage.prompt_tokens, second.usage.generated_tokens, second.usage.cached_prompt_tokens) == (23, 5, 2)
+
+
+def test_turn_completion_timestamp_is_not_set_by_a_partial_pump(tools, monkeypatch):
+    engine = fake_event_engine(tools.util, monkeypatch, [[event(4)], [event(8)]])
+    ticks = iter([10.0, 11.0, 15.0])
+    monkeypatch.setattr(tools.util, "time", types.SimpleNamespace(perf_counter=lambda: next(ticks)))
+    result, _ = tools.util.run_turn(engine, object(), engine.request, [1], 8, until=lambda r: bool(r.tokens))
+    assert result.end is None and result.finish_reason is None
+    tools.util.pump(engine, object(), result)
+    assert result.end == 15.0 and result.finish_reason == "eos"
+
+
+@pytest.mark.parametrize("module", ["lcb", "mmlu"])
+@pytest.mark.parametrize(
+    "reason,tokens,ttft_s,decode_s",
+    [
+        ("eos", [], None, 0.0),
+        ("eos", [23], 1.0, 4.0),
+        ("eos", [23, 24], 1.0, 4.0),
+        ("length", [23, 24], 1.0, 1.0),
+    ],
+)
+def test_evaluations_time_terminal_eos_and_completed_wall_time(
+    tools, monkeypatch, module, reason, tokens, ttft_s, decode_s
+):
+    evaluator = getattr(tools, module)
+    terminal = event(8, finish_reason=reason)
+    terminal.usage.generated_tokens = len(tokens)
+    engine = fake_event_engine(evaluator, monkeypatch, [[event(4, token=t)] for t in tokens] + [[terminal]])
+    ticks = iter([10.0, *[11.0 + i for i in range(len(tokens))], 15.0])
+    monkeypatch.setattr(tools.util, "time", types.SimpleNamespace(perf_counter=lambda: next(ticks)))
+    result = evaluator.generate(engine, object(), [1], 8)
+    assert result["tokens"] == tokens + ([evaluator.EOS_APPENDED] if reason == "eos" else [])
+    assert result["ttft_s"] == ttft_s
+    assert result["decode_s"] == decode_s
+    assert result["wall_s"] == 5.0
+    assert result["usage_ok"]
+
+
+def test_behaviour_error_checks_reject_empty_fragments(tools):
+    with pytest.raises(ValueError, match="fragment must not be empty"):
+        tools.behaviours.expect_error("residency", lambda: None, "")
+
+
+@pytest.mark.parametrize(
+    "message,ok", [("model state is no longer resident", True), ("incompatible function arguments", False)]
+)
+def test_behaviour_residency_check_does_not_accept_unrelated_errors(tools, monkeypatch, message, ok):
+    monkeypatch.setattr(tools.behaviours, "CHECKS", [])
+
+    def fail():
+        raise RuntimeError(message)
+
+    tools.behaviours.expect_error("residency", fail, "no longer resident")
+    assert tools.behaviours.CHECKS[0]["ok"] is ok
+
+
+def test_behaviour_stop_string_chunks_use_fresh_utf8_streams(tools):
+    streams = []
+
+    def create_stream():
+        decoder = codecs.getincrementaldecoder("utf-8")()
+        streams.append(decoder)
+        return types.SimpleNamespace(decode=lambda token: decoder.decode(bytes([token])))
+
+    tokenizer = types.SimpleNamespace(create_stream=create_stream)
+    tokens = list("\u20acabc".encode())
+    expected = ["", "", "\u20ac", "a", "b", "c"]
+    assert tools.behaviours.decode_chunks(tokenizer, tokens) == expected
+    stopped = tools.behaviours.decode_chunks(tokenizer, tokens[:4])
+    assert "".join(stopped) == "\u20aca"
+    assert "\u20aca" not in "".join(stopped[:-1])
+    assert len(streams) == 2
+
+
+@pytest.mark.parametrize("status", [0, 2, 17])
+def test_plane_abi3_status_is_checked_before_output_comparison(tools, tmp_path, monkeypatch, status):
+    plane = tools.plane
+
+    class PleParams(ctypes.Structure):
+        _fields_: ClassVar[list[tuple[str, type]]] = [("dummy", ctypes.c_int)]
+
+    tensor = types.SimpleNamespace()
+    tensor.to = lambda *args, **kwargs: tensor
+    tensor.reshape = lambda *args: tensor
+    tensor.data_ptr = lambda: 42
+
+    class Lookup:
+        _eos_token_id = 248046
+
+        def initial_context(self):
+            return np.zeros((1, 2), dtype=np.int64)
+
+        def __call__(self, tokens, context):
+            return tensor, context
+
+    def compared():
+        raise RuntimeError("output comparison reached")
+
+    lib = types.SimpleNamespace(
+        qwen38_plane_ple_rows=lambda *args: status,
+        qwen38_plane_pool_keys=lambda *args: pytest.fail("unexpected pooled-key call"),
+        qwen38_plane_transpose_f32=lambda *args: pytest.fail("unexpected transpose call"),
+        qwen38_plane_sizeof_ple_params=lambda: ctypes.sizeof(PleParams),
+    )
+    monkeypatch.setattr(plane.ctypes, "CDLL", lambda path: lib)
+    monkeypatch.setattr(
+        plane,
+        "torch",
+        types.SimpleNamespace(
+            cuda=types.SimpleNamespace(
+                init=lambda: None, current_stream=lambda: types.SimpleNamespace(cuda_stream=1), synchronize=compared
+            ),
+            tensor=lambda *args, **kwargs: tensor,
+            zeros=lambda *args, **kwargs: tensor,
+            empty=lambda *args, **kwargs: tensor,
+            bfloat16=object(),
+            int64=object(),
+        ),
+    )
+    modules = {
+        "plane": {
+            "PleParams": PleParams,
+            "PleDevice": lambda *args: types.SimpleNamespace(ptr=1, width=4),
+        },
+        "mobius._configs": {
+            "Qwen4ExpConfig": types.SimpleNamespace(
+                from_transformers=lambda config: types.SimpleNamespace(ple_layer_ids=[1])
+            )
+        },
+        "mobius.generation._qwen4_exp_ple": {"Qwen4ExpCPUPLELookup": lambda *args: Lookup()},
+        "mobius.integrations.transformers._builder": {
+            "_load_transformers_config": lambda *args, **kwargs: (None, None)
+        },
+    }
+    for name, attributes in modules.items():
+        module = types.ModuleType(name)
+        module.__dict__.update(attributes)
+        monkeypatch.setitem(sys.modules, name, module)
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "test_plane_kernels.py",
+            str(tmp_path),
+            "--checkpoint",
+            str(tmp_path),
+            "--runner-dir",
+            str(tmp_path),
+            "--prefill-dir",
+            str(tmp_path),
+        ],
+    )
+    message = f"qwen38_plane_ple_rows failed with CUDA status {status}" if status else "output comparison reached"
+    with pytest.raises(RuntimeError, match=message):
+        plane.main()
+    assert lib.qwen38_plane_ple_rows.restype is ctypes.c_int
 
 
 def test_ttft_reports_eos_before_first_token_as_a_benchmark_error(tools, monkeypatch):
@@ -1187,10 +1528,12 @@ def test_lcb_eos_first_records_no_ttft(tools, monkeypatch):
 
 
 @pytest.mark.parametrize("max_context", [1, 2])
+@pytest.mark.parametrize("setting", ["QWEN38_OVERLAY_JSON", FORCE_REJECT_ENV, "QWEN38_HOST_EXPERT_BYTES"])
 def test_lcb_shard_handles_eos_first_and_checks_budget_before_loading(
-    tools, tmp_path, monkeypatch, capsys, max_context
+    tools, tmp_path, monkeypatch, capsys, max_context, setting
 ):
     lcb = tools.lcb
+    monkeypatch.delenv(setting, raising=False)
     prompts = tmp_path / "prompts.jsonl"
     samples = tmp_path / "samples.jsonl"
     rows = [
@@ -1269,6 +1612,18 @@ def test_lcb_shard_handles_eos_first_and_checks_budget_before_loading(
         assert [r["index"] for r in records] == [0, 100]
         assert all(r["prefill_s"] is None for r in records)
         assert capsys.readouterr().out.count("ttft=n/a (no token)") == 2
+        metadata_key = {
+            "QWEN38_OVERLAY_JSON": "overlay",
+            FORCE_REJECT_ENV: "force_reject",
+            "QWEN38_HOST_EXPERT_BYTES": "host_expert_bytes",
+        }[setting]
+        protocol = json.loads(args.out.with_suffix(".protocol.json").read_text())
+        assert protocol[metadata_key] == ({} if setting == "QWEN38_OVERLAY_JSON" else None)
+        value = json.dumps({"model": {"qwen38_graph": {"mtp": {"prefill_head": False}}}})
+        monkeypatch.setenv(setting, value if setting == "QWEN38_OVERLAY_JSON" else "1")
+        with pytest.raises(SystemExit, match="protocol mismatch"):
+            lcb.run_shard(args)
+        assert generated == [1, 1] and warmups == [1]
 
 
 @pytest.mark.parametrize("problem", [None, "duplicate", "missing", "extra", "protocol"])
@@ -1292,3 +1647,74 @@ def test_lcb_grading_requires_disjoint_complete_consistent_shards(tools, tmp_pat
             tools.lcb.load_arm_records(paths, {0, 1, 2, 3})
     else:
         assert set(tools.lcb.load_arm_records(paths, {0, 1, 2, 3})) == {0, 1, 2, 3}
+
+
+@pytest.mark.parametrize("eos_first", [False, True])
+def test_lcb_grading_persists_accuracy_without_decode_metrics(tools, tmp_path, monkeypatch, eos_first):
+    samples = tmp_path / "samples.jsonl"
+    samples.write_text(
+        "".join(
+            json.dumps({"index": index, "difficulty": ("easy", "medium", "hard")[index % 3]}) + "\n"
+            for index in range(175)
+        )
+    )
+    records = tmp_path / "shard.jsonl"
+    records.write_text(
+        "".join(
+            json.dumps(
+                {
+                    "index": index,
+                    "question_id": str(index),
+                    "test_file": "tests.json",
+                    "tokens": [tools.lcb.EOS_APPENDED if eos_first else 23],
+                    "text": "",
+                    "generated_tokens": 1,
+                    "truncated": not eos_first,
+                    "tps": 0.0,
+                    "cycles": 0 if eos_first else 1,
+                    "accept_rate": 0.0 if eos_first else 0.5,
+                    "prefill_s": None if eos_first else 0.1,
+                    "usage_ok": True,
+                }
+            )
+            + "\n"
+            for index in range(175)
+        )
+    )
+    records.with_suffix(".protocol.json").write_text("{}")
+    transformers = types.ModuleType("transformers")
+    transformers.AutoTokenizer = types.SimpleNamespace(from_pretrained=lambda path: object())
+    monkeypatch.setitem(sys.modules, "transformers", transformers)
+    scipy_stats = types.ModuleType("scipy.stats")
+    scipy_stats.binomtest = lambda *args: pytest.fail("unpaired arm must not need McNemar")
+    monkeypatch.setitem(sys.modules, "scipy.stats", scipy_stats)
+    monkeypatch.setattr(
+        tools.lcb,
+        "grade_records_in_docker",
+        lambda items, *args: {
+            (item["arm"], int(item["key"])): {"correct": True, "extracted_code": False} for item in items
+        },
+    )
+    out = tmp_path / "report.json"
+    args = types.SimpleNamespace(
+        checkpoint=tmp_path,
+        samples=samples,
+        caps=[16],
+        arms=[f"engine={records}"],
+        tests=tmp_path,
+        lcb_repo=tmp_path,
+        grader=tmp_path / "grader.py",
+        workers=1,
+        timeout=1,
+        out=out,
+    )
+    tools.lcb.grade_suite(args)
+    report = json.loads(out.read_text())
+    assert report["caps"]["16"]["engine"]["pass_at_1_pct"] == 100.0
+    performance = report["performance"]["engine"]
+    assert performance["total_generated_tokens"] == 175
+    assert performance["decode_tps_median"] is None
+    assert performance["decode_tps_mean"] is None
+    assert performance["acceptance_rate_mean"] == (None if eos_first else 0.5)
+    assert performance["prefill_s_median"] == (None if eos_first else 0.1)
+    assert performance["prefill_s_mean"] == (None if eos_first else 0.1)

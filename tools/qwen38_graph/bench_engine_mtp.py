@@ -25,7 +25,10 @@ from qwen38_engine_util import Prompts, add_prompt_arguments, load_model, run_tu
 
 def host_memory_stats():
     """Collect Linux host accounting outside timed decode; cgroup peak includes charged file cache."""
-    stats = {"expert_cache_mib": os.environ.get("ORT_QMOE_HOST_CACHE_MIB", "0")}
+    stats = {
+        "expert_cache_mib": os.environ.get("ORT_QMOE_HOST_CACHE_MIB", "0"),
+        "expert_cache_bytes": os.environ.get("QWEN38_HOST_EXPERT_BYTES"),
+    }
     try:
         stats["process_status"] = {
             line.split(":", 1)[0]: line.split(":", 1)[1].strip()
@@ -96,6 +99,8 @@ def main():
     parser.add_argument("--provider", default=os.environ.get("QWEN_PROVIDER"))
     add_prompt_arguments(parser)
     args = parser.parse_args()
+    if args.new < 2:
+        parser.error("--new must be at least 2 to measure decode throughput")
     if args.out.exists():
         raise FileExistsError(args.out)
 
