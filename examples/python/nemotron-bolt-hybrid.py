@@ -128,10 +128,11 @@ def convert(source: Path, output: Path) -> None:
         raise ValueError(f"Expected eight packed attention layers, got {attention_count}")
     model.graph.remove(original_nodes, safe=False)
     model.graph.extend(nodes)
+    source_entries = list(source.iterdir())
+    if any(not path.is_file() for path in source_entries):
+        raise ValueError("Expected a flat packed package")
     output.mkdir(parents=True)
-    for path in source.iterdir():
-        if not path.is_file():
-            raise ValueError("Expected a flat packed package")
+    for path in source_entries:
         if path.name in (filename, "genai_config.json"):
             continue
         resolved = path.resolve(strict=True)

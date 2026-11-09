@@ -63,7 +63,8 @@ python nemotron-bolt-hybrid.py --input /path/to/packed-r8 --output /path/to/new-
 python model-generate.py -m /path/to/new-hybrid -e cuda
 ```
 
-The output must be fresh. Put it on the weight payload's filesystem so large
+The output must be fresh and may be nested inside an initially flat input package.
+Put it on the weight payload's filesystem so large
 external data can be hardlinked within the new package; external-data path
 validation remains enabled. Packed values, eight recurrent snapshot slots, KV
 capacity and the physical eight-row attention geometry are unchanged.
