@@ -89,6 +89,7 @@ void DefaultInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
     *current_sequence_length_->GetTensorMutableData<int32_t>() += new_sequence_length;
     *past_sequence_length_->GetTensorMutableData<int32_t>() += new_sequence_length;
   } else if (total_sequence_length_ && past_sequence_length_) {
+    auto new_tokens_cpu = new_tokens.CopyDeviceToCpu();
     if (state_.params_->BatchBeamSize() != 1) {
       throw std::runtime_error("Batch size must be 1 for total_sequence_length and past_sequence_length inputs");
     }
