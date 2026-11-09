@@ -585,7 +585,7 @@ struct Qwen38SuffixDrafter {
 struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   explicit Qwen38GraphEngine(Qwen38GraphModel& model);
   ~Qwen38GraphEngine() override;
-  void Initialize();
+  void Initialize(bool is_session_recreation);
   void ReleaseBindings();
 
   int Capacity() const override { return capacity_; }
@@ -946,13 +946,13 @@ struct Qwen38GraphModel : Model {
   std::unique_ptr<OrtSession> session_head_r2_, session_dense_, session_head_kv_;
   std::optional<int64_t> target_head_rows_;
   std::unique_ptr<Qwen38GraphEngine> engine_;
-  std::thread::id engine_thread_;
+  std::shared_ptr<const std::thread::id> engine_thread_;
 
   void RunCpuEmbedding(const int64_t* ids_host, size_t num_tokens, void* dst_host) const;
 
  private:
   void DestroyDecodeState();
-  void InitializeDecodeState();
+  void InitializeDecodeState(bool is_session_recreation = false);
   void RecreateCapturedSessions();
   std::string target_filename_, head_s1_filename_, head_s2_filename_, head_r2_filename_;
   std::atomic<bool> leased_{false};

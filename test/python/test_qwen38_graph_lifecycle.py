@@ -72,13 +72,42 @@ def test_serialized_graph_handoffs_preserve_output(model_path, load_on_worker):
     else:
         model = og.Model(str(model_path))
     try:
-        expected = generate(model)
+        if load_on_worker:
+            with ThreadPoolExecutor(max_workers=1) as first_worker:
+                expected = first_worker.submit(generate, model).result()
+            assert generate(model) == expected
+        else:
+            expected = generate(model)
         with ThreadPoolExecutor(max_workers=1) as worker:
             for _ in range(2):
                 assert worker.submit(generate, model).result() == expected
                 assert generate(model) == expected
     finally:
         del model
+        gc.collect()
+
+
+def test_handoff_does_not_reuse_borrowed_path_graph_buffers(model_path):
+    def load():
+        config = og.Config(str(model_path))
+        buffers = {path.name: bytearray(path.read_bytes()) for path in model_path.glob("*.onnx")}
+        assert buffers
+        for name, buffer in buffers.items():
+            config.add_model_data(name, buffer)
+        model = og.Model(config)
+        for buffer in buffers.values():
+            buffer[:] = bytes(len(buffer))
+        return model, buffers
+
+    with ThreadPoolExecutor(max_workers=1) as loader:
+        model, buffers = loader.submit(load).result()
+    try:
+        # A new worker may reuse the exited loader's OS ID, but not its lifetime token.
+        with ThreadPoolExecutor(max_workers=1) as worker:
+            expected = worker.submit(generate, model).result()
+        assert generate(model) == expected
+    finally:
+        del model, buffers
         gc.collect()
 
 

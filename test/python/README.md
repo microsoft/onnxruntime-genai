@@ -15,3 +15,6 @@ Engine ownership across repeated main/worker/main handoffs and a loader thread
 that exits, checking exact multi-step greedy output equality. They also inject
 an initialization failure after warmup captures, then verify both a clean model
 reload and a failed handoff retry on the same model.
+An exited-loader-to-new-worker case also overwrites path-backed graph buffers
+after model creation, checking that session recreation uses package files rather
+than the no-longer-valid borrowed data.
