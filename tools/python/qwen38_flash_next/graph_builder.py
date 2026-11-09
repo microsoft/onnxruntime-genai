@@ -21,6 +21,7 @@ import numpy as np
 import onnx
 import torch
 from onnx import TensorProto, helper, numpy_helper
+from rope import DEFAULT_ROPE, DRAFT_NAMES, TARGET_NAMES, RopeConfig, dflash_rope, target_rope
 
 ALIGN = 4096
 PLE_INT8_SCALE = 0.000703105776
@@ -2577,6 +2578,7 @@ def build_target_non_qmoe_from_hf(
     out_dir: Path,
     fast_quant_prepack_fn: Callable,
     max_rotary_rows: int = 262144,
+    rope_config: RopeConfig = DEFAULT_ROPE,
 ) -> tuple[dict[str, dict], dict[str, TensorProto]]:
     """Build `norm_and_rope.data`, `attn_consts.data`, `contrib_weights.data`, `matmul_int8.data`, `matmul_scales.data`
     and embedded layer norms directly from `hf_loader`.
@@ -2591,13 +2593,8 @@ def build_target_non_qmoe_from_hf(
     mm_s_writer = BinaryBlobWriter(out_dir / "matmul_scales.data")
 
     try:
-        # 1. 256K RoPE caches in norm_and_rope.data and attn_consts.data
-        dim = 64
-        inv = 1.0 / (10000000.0 ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
-        pos = torch.arange(max_rotary_rows, dtype=torch.float32)[:, None]
-        freqs = pos * inv[None, :]
-        cos32 = torch.cos(freqs).to(torch.bfloat16)
-        sin32 = torch.sin(freqs).to(torch.bfloat16)
+        cos, sin = target_rope(torch.arange(max_rotary_rows, dtype=torch.float32), rope_config)
+        cos32, sin32 = cos.to(torch.bfloat16), sin.to(torch.bfloat16)
         cos64 = torch.cat([cos32, cos32], dim=-1).contiguous()
         sin64 = torch.cat([sin32, sin32], dim=-1).contiguous()
 
@@ -2831,6 +2828,12 @@ def build_dflash2_from_hf(
     sliding_window = int(cfg.get("sliding_window", 2048))
     rope_theta = float(cfg.get("rope_parameters", {}).get("rope_theta", 10000.0))
     head_dim = int(cfg.get("head_dim", 128))
+    if (
+        head_dim != 128
+        or rope_theta != 10000.0
+        or cfg.get("rope_parameters", {}).get("rope_type", "default") != "default"
+    ):
+        raise ValueError("RC5 DFlash2 requires independent default RoPE with head_dim=128 and theta=10000")
 
     writer = BinaryBlobWriter(out_dir / "dflash2.onnx.data")
     dflash_locations: dict[str, dict] = {
@@ -2907,11 +2910,8 @@ def build_dflash2_from_hf(
             dflash_loader.read_tensor("candidate_selector.successor_codebook"),
         )
 
-        inv = 1.0 / (rope_theta ** (np.arange(0, head_dim, 2, dtype=np.float64) / head_dim))
-        pos = np.arange(max_position, dtype=np.float64)[:, None]
-        freqs = pos * inv[None, :]
-        cos_d = torch.from_numpy(np.cos(freqs).astype(np.float32)).to(torch.bfloat16)
-        sin_d = torch.from_numpy(np.sin(freqs).astype(np.float32)).to(torch.bfloat16)
+        cos, sin = dflash_rope(np.arange(max_position, dtype=np.float64), head_dim, rope_theta)
+        cos_d, sin_d = cos.to(torch.bfloat16), sin.to(torch.bfloat16)
         write_bf16("dflash2.cos_cache", cos_d)
         write_bf16("dflash2.hidden_norm.weight", dflash_loader.read_tensor("hidden_norm.weight"))
 
@@ -3026,10 +3026,16 @@ def load_bank_metadata_from_dir(bank_dir: Path) -> tuple[dict[str, dict], dict[s
             embedded_weights[name] = t
         return tensor_locations, embedded_weights
 
-    # Fallback: read initializer metadata from bank_dir/model.onnx and bank_dir/dflash2.onnx
+    # Fallback also supports a package containing only its explicitly selected fixed graph.
     tensor_locations = {}
     embedded_weights = {}
-    for m_name in ("model.onnx", "dflash2.onnx"):
+    target_filename = "model.onnx"
+    config_path = bank_dir / "genai_config.json"
+    if config_path.is_file():
+        target_filename = json.loads(config_path.read_text())["model"]["decoder"]["filename"]
+    if not (bank_dir / target_filename).resolve().is_relative_to(bank_dir.resolve()):
+        raise ValueError("Target graph must be inside the reused package")
+    for m_name in (target_filename, "dflash2.onnx"):
         p = bank_dir / m_name
         if not p.is_file():
             continue
@@ -3045,7 +3051,7 @@ def load_bank_metadata_from_dir(bank_dir: Path) -> tuple[dict[str, dict], dict[s
                     "dims": list(t.dims),
                 }
             elif (
-                m_name == "model.onnx"
+                m_name == target_filename
                 and ("layers." in t.name or "hyper_connection_mixer" in t.name)
                 and t.name != "v_model.layers.0.linear_attn.CastLike_145"
             ):
@@ -3056,7 +3062,10 @@ def load_bank_metadata_from_dir(bank_dir: Path) -> tuple[dict[str, dict], dict[s
 
 
 def save_bank_metadata_to_dir(
-    out_dir: Path, tensor_locations: dict[str, dict], embedded_weights: dict[str, TensorProto]
+    out_dir: Path,
+    tensor_locations: dict[str, dict],
+    embedded_weights: dict[str, TensorProto],
+    position_config: dict | None = None,
 ) -> None:
     """Save `bank_metadata.json` so subsequent multi-preset builds can reuse binary `.data` banks without parsing ONNX."""
     non_qmoe_locs = {k: v for k, v in tensor_locations.items() if not str(v.get("location", "")).startswith("qmoe_")}
@@ -3068,6 +3077,31 @@ def save_bank_metadata_to_dir(
         }
         for name, t in embedded_weights.items()
     }
-    (out_dir / "bank_metadata.json").write_text(
-        json.dumps({"tensor_locations": non_qmoe_locs, "embedded_weights": emb_serialized}, indent=2) + "\n"
-    )
+    metadata = {"tensor_locations": non_qmoe_locs, "embedded_weights": emb_serialized}
+    if position_config is not None:
+        metadata["position_config"] = position_config
+    (out_dir / "bank_metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
+
+
+def build_reused_position_tables(
+    out_dir: Path, tensor_locations: dict[str, dict], rope: RopeConfig, target_rows: int, draft_rows: int
+) -> None:
+    """Construct new positional assets without rewriting or requantizing reused weight banks."""
+    writer = BinaryBlobWriter(out_dir / "position_tables.data")
+    try:
+        cos, sin = target_rope(torch.arange(target_rows, dtype=torch.float32), rope)
+        for index, name in enumerate(TARGET_NAMES):
+            value = (cos, sin)[index % 2].to(torch.bfloat16)
+            if index >= 2:
+                value = torch.cat((value, value), dim=-1)
+            tensor_locations[name] = writer.write_aligned(
+                value.view(torch.uint16).numpy().tobytes(), TensorProto.BFLOAT16, list(value.shape)
+            )
+        cos, sin = dflash_rope(np.arange(draft_rows, dtype=np.float64))
+        for name, table in zip(DRAFT_NAMES, (cos, sin), strict=True):
+            value = table.to(torch.bfloat16)
+            tensor_locations[name] = writer.write_aligned(
+                value.view(torch.uint16).numpy().tobytes(), TensorProto.BFLOAT16, list(value.shape)
+            )
+    finally:
+        writer.close()

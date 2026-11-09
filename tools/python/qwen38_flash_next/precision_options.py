@@ -290,6 +290,10 @@ def apply_precision_config_to_package(
     if not pcfg.is_non_default():
         return {"applied": False, "config": pcfg.to_dict()}
 
+    manifest_path = pkg_dir / "package_manifest.json"
+    if manifest_path.is_file() and json.loads(manifest_path.read_text()).get("position_config"):
+        raise ValueError("Precision overrides are not qualified for configurable RoPE/context exports")
+
     from build_package import HFCheckpointReader, ensure_unified_dynamic_cache_model, make_ext_init
     from build_package_gguf import SmallWeightBlobWriter, set_inline_f32
 
@@ -660,8 +664,12 @@ def apply_precision_config_to_package(
             a_f32_name = f"{a_name}.cast_f32"
             new_nodes.extend(
                 [
-                    helper.make_node("Split", list(n.input), [qkv_out, z_out, unused_b, unused_a], name=n.name, axis=-1),
-                    helper.make_node("Cast", [a_name], [a_f32_name], name=f"{n.name}/CastInputF32", to=TensorProto.FLOAT),
+                    helper.make_node(
+                        "Split", list(n.input), [qkv_out, z_out, unused_b, unused_a], name=n.name, axis=-1
+                    ),
+                    helper.make_node(
+                        "Cast", [a_name], [a_f32_name], name=f"{n.name}/CastInputF32", to=TensorProto.FLOAT
+                    ),
                     helper.make_node(
                         "MatMul",
                         [a_f32_name, f"model.layers.{lid}.linear_attn.beta.weight_t.f32"],
@@ -857,7 +865,9 @@ def apply_precision_config_to_package(
                     helper.make_node(
                         "Split", list(n.input), [unused_iqk, q_gate_out, k_out, v_out], name=n.name, axis=-1
                     ),
-                    helper.make_node("Cast", [a_name], [a_f32_name], name=f"{n.name}/CastInputF32", to=TensorProto.FLOAT),
+                    helper.make_node(
+                        "Cast", [a_name], [a_f32_name], name=f"{n.name}/CastInputF32", to=TensorProto.FLOAT
+                    ),
                     helper.make_node(
                         "MatMul",
                         [a_f32_name, f"model.layers.{lid}.self_attn.indexer_qk.weight_t.f32"],
@@ -874,7 +884,9 @@ def apply_precision_config_to_package(
             a_f32_name = f"{a_name}.cast_f32"
             new_nodes.extend(
                 [
-                    helper.make_node("Cast", [a_name], [a_f32_name], name=f"{n.name}/CastInputF32", to=TensorProto.FLOAT),
+                    helper.make_node(
+                        "Cast", [a_name], [a_f32_name], name=f"{n.name}/CastInputF32", to=TensorProto.FLOAT
+                    ),
                     helper.make_node(
                         "MatMul",
                         [a_f32_name, f"model.layers.{lid}.linear_attn.alpha.weight_t.f32"],
@@ -891,7 +903,9 @@ def apply_precision_config_to_package(
             a_f32_name = f"{a_name}.beta_cast_f32"
             new_nodes.extend(
                 [
-                    helper.make_node("Cast", [a_name], [a_f32_name], name=f"{n.name}/CastInputF32", to=TensorProto.FLOAT),
+                    helper.make_node(
+                        "Cast", [a_name], [a_f32_name], name=f"{n.name}/CastInputF32", to=TensorProto.FLOAT
+                    ),
                     helper.make_node(
                         "MatMul",
                         [a_f32_name, f"model.layers.{lid}.linear_attn.beta.weight_t.f32"],
@@ -908,7 +922,9 @@ def apply_precision_config_to_package(
             a_f32_name = f"{a_name}.cast_f32"
             new_nodes.extend(
                 [
-                    helper.make_node("Cast", [a_name], [a_f32_name], name=f"{n.name}/CastInputF32", to=TensorProto.FLOAT),
+                    helper.make_node(
+                        "Cast", [a_name], [a_f32_name], name=f"{n.name}/CastInputF32", to=TensorProto.FLOAT
+                    ),
                     helper.make_node(
                         "MatMul",
                         [a_f32_name, f"model.layers.{lid}.self_attn.indexer_qk.weight_t.f32"],
@@ -965,4 +981,3 @@ def apply_precision_config_to_package(
         manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
 
     return {"applied": True, "config": pcfg.to_dict()}
-
