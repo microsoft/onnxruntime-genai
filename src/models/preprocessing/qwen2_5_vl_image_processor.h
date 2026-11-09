@@ -41,6 +41,8 @@ struct QwenImageProcessor : Processor {
 struct LingImageProcessor : QwenImageProcessor {
   using QwenImageProcessor::QwenImageProcessor;
   std::unique_ptr<NamedTensors> Process(const Tokenizer& tokenizer, const Payload& payload) const override;
+  std::unique_ptr<VisionPreparation> CreateVisionPreparation(
+      const Config& config, const SessionInfo& info, const Tokenizer& tokenizer) const override;
 };
 
 }  // namespace Generators

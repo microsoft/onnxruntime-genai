@@ -38,6 +38,12 @@ TEST(MediaInputsTest, RealQwenVideoCanonicalOrderAndEncoderInputs) {
   auto model = std::dynamic_pointer_cast<DecoderOnly_Model>(CreateModel(GetOrtEnv(), std::move(config)));
   ASSERT_NE(model, nullptr);
   {
+    LingImageProcessor ling_processor{*model->config_, model->vision_->session_info};
+    EXPECT_EQ(ling_processor.CreateVisionPreparation(
+                  *model->config_, model->vision_->session_info, *model->vision_->processor->tokenizer_),
+              nullptr);
+  }
+  {
     auto image_processor = std::dynamic_pointer_cast<QwenImageProcessor>(model->vision_->processor->processor_);
     ASSERT_NE(image_processor, nullptr);
     const std::array<const char*, 2> paths{MODEL_PATH "../images/sheet.png", MODEL_PATH "../images/cars.jpg"};

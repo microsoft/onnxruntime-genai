@@ -285,6 +285,12 @@ std::unique_ptr<NamedTensors> LingImageProcessor::Process(const Tokenizer& token
   return ProcessImages(tokenizer, payload, true);
 }
 
+std::unique_ptr<VisionPreparation> LingImageProcessor::CreateVisionPreparation(
+    const Config&, const SessionInfo&, const Tokenizer&) const {
+  // Centered Ling coordinates require its own adapter, not Qwen's raster policy.
+  return {};
+}
+
 std::unique_ptr<NamedTensors> QwenImageProcessor::ProcessImages(
     const Tokenizer& tokenizer, const Payload& payload, bool ling) const {
   const Images* images = payload.images;
