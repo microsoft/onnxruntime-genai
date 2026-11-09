@@ -70,8 +70,8 @@ TEST(MediaInputsTest, RealQwenVideoCanonicalOrderAndEncoderInputs) {
     for (size_t image = 0; image < image_grids.size(); ++image)
       std::copy_n(grids->GetData<int64_t>() + image * 3, 3, image_grids[image].begin());
     {
-      const std::array<const char*, 1> path{paths[1]};
-      auto single = LoadImages(path);
+      const std::array<const char*, 1> single_path{paths[1]};
+      auto single = LoadImages(single_path);
       const std::array<std::array<int64_t, 3>, 1> resolved{{{1, 4, 6}}};
       auto fixed = image_processor->ProcessImages(*single, resolved);
       const auto& fixed_grid = fixed->at(std::string{Config::Defaults::ImageGridThwName});
