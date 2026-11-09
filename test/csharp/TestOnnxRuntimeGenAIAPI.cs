@@ -5,6 +5,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
@@ -165,13 +166,34 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             Console.WriteLine("**** OnnxRuntimeGenAI constructor completed");
         }
 
-        [Fact(DisplayName = "TestSharedShutdownHandle")]
-        public void TestSharedShutdownHandle()
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private void CreateCollectibleTestInstances()
         {
             _ = new OnnxRuntimeGenAITests(output);
             _ = new OnnxRuntimeGenAITests(output);
+        }
+
+        [Fact]
+        public void TestRuntimeSurvivesTestInstanceCollection()
+        {
+            CreateCollectibleTestInstances();
+            using var model = new Model(_tinyRandomGpt2ModelPath);
+            using var tokenizer = new Tokenizer(model);
+
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+
+            using var tokens = tokenizer.Encode("test");
+            Assert.NotEmpty(tokens[0].ToArray());
+        }
+
+        [Fact(DisplayName = "TestSharedShutdownHandle")]
+        public void TestSharedShutdownHandle()
+        {
+            CreateCollectibleTestInstances();
 
             using var model = new Model(_tinyRandomGpt2ModelPath);
+            using var tokenizer = new Tokenizer(model);
             using var generatorParams = new GeneratorParams(model);
             generatorParams.SetSearchOption("max_length", 10);
             using var generator = new Generator(model, generatorParams);
@@ -180,6 +202,8 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             GC.Collect();
             GC.WaitForPendingFinalizers();
 
+            using var tokens = tokenizer.Encode("test");
+            Assert.NotEmpty(tokens[0].ToArray());
             generator.GenerateNextToken();
             Assert.Equal(5, generator.GetSequence(0).Length);
         }

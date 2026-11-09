@@ -15,6 +15,7 @@ namespace Generators {
 
 struct Request;
 struct PrefixCacheMatch;
+struct MediaItem;
 
 using StepTransactionId = uint64_t;
 
@@ -30,6 +31,7 @@ inline constexpr size_t kMaxGeneratedTokensPerStep = kMaxDraftTokensPerStep + 1;
 
 enum class StepOutcomeKind {
   NoWork,
+  PreparationProgress,
   CapacityDeferred,
   UnserviceableRequest,
   Committed,
@@ -56,6 +58,8 @@ struct StepPlanningResult {
   bool capacity_deferred{};
   const void* unserviceable_request_id{};
   StepOutcome outcome;
+  std::shared_ptr<Request> preparation_request;
+  std::shared_ptr<MediaItem> preparation_item;
 };
 
 struct RequestStepPlan {

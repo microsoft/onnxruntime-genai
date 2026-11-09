@@ -190,6 +190,65 @@ TEST(VarlenDecoderIOTest, PacksThreePlanePositionsInScheduledRequestOrder) {
   }
 }
 
+TEST(VarlenDecoderIOTest, RotaryHistoryBoundsMediaCoordinatesAndOverwritesUnusedCaptureRows) {
+  auto model = std::dynamic_pointer_cast<DecoderOnly_Model>(LoadSyntheticPagedPerTokenModel());
+  auto session = model->CreateSession(GetOrtEnv(), "../synthetic-rotary-history/positions.onnx",
+                                      model->session_options_.get());
+  model->session_info_.Add(*session);
+  model->config_->model.decoder.inputs.rotary_position_ids = "rotary_position_ids";
+  model->config_->model.context_length = 32;
+  auto cache = std::shared_ptr<CacheManager>{CacheManager::Create(model)};
+  auto engine = MakeDoublesEngine(model, 2, EosToken(*model)).engine;
+  auto first = std::make_shared<MediaItem>();
+  first->grid = {1, 4, 6};
+  first->rows = 6;
+  auto second = std::make_shared<MediaItem>();
+  second->grid = {1, 4, 4};
+  second->rows = 4;
+  const std::array<MediaSpan, 2> media{{{1, first}, {8, second}}};
+  const std::array<std::array<int64_t, 11>, 3> expected{{
+      {0, 1, 1, 1, 1, 1, 1, 4, 5, 5, 5},
+      {0, 1, 1, 1, 2, 2, 2, 4, 5, 5, 6},
+      {0, 1, 2, 3, 1, 2, 3, 4, 5, 6, 5},
+  }};
+  for (const bool persistent : {false, true}) {
+    auto buffers = persistent ? std::make_unique<VarlenGraphBuffers>(*model, 0, 3) : nullptr;
+    for (const size_t past : {8u, 0u}) {
+      auto request = CreateRequestWithPrompt(engine, std::array<int32_t, 13>{2, 3, 4, 5, 6, 7, 8, 9, 8, 7, 6, 5, 4});
+      request->ReserveMedia(2);
+      request->AppendMedia(media);
+      if (past != 0) {
+        request->StagePrefixAdoption(past);
+        request->CommitPrefixAdoption();
+      }
+      StepPlan plan;
+      RequestStepPlan entry;
+      entry.request = request;
+      entry.request_id = request.get();
+      entry.sequence_length_before = request->CurrentSequenceLength();
+      entry.unprocessed_token_count = 3;
+      entry.target_cache_slots = past + 3;
+      entry.logits_row_index = 2;
+      plan.token_count = 3;
+      plan.requests.push_back(entry);
+      ScheduledRequests scheduled{plan, model, nullptr, nullptr};
+      ExecutionContext context{&plan};
+      context.block_table_columns = 4;
+      VarlenDecoderIO io{model, scheduled, cache, &context, buffers.get()};
+      const auto input = std::find_if(io.input_names_.begin(), io.input_names_.end(),
+                                      [](const char* name) { return std::string_view{name} == "rotary_position_ids"; });
+      ASSERT_NE(input, io.input_names_.end());
+      const auto& tensor = *io.inputs_[input - io.input_names_.begin()];
+      EXPECT_EQ(tensor.GetTensorTypeAndShapeInfo()->GetShape(), (std::vector<int64_t>{3, 1, 32}));
+      const auto* values = tensor.GetTensorData<int64_t>();
+      for (size_t plane = 0; plane < 3; ++plane)
+        for (size_t row = 0; row < 32; ++row)
+          EXPECT_EQ(values[plane * 32 + row], row < past + 3 ? expected[plane][row] : static_cast<int64_t>(row));
+      request->Close();
+    }
+  }
+}
+
 TEST(VarlenDecoderIOTest, EagerMetadataUsesExactStepBounds) {
   StepPlan plan;
   RequestStepPlan first;
@@ -423,6 +482,38 @@ TEST(VarlenDecoderIOTest, GraphBuffersRejectStepsWiderThanTheyWereSizedFor) {
   // A step the buffers cannot hold runs eagerly rather than overflowing a static view mid-step.
   EXPECT_FALSE(buffers.Fits(max_batch_size + 1, 1));
   EXPECT_FALSE(buffers.Fits(1, kMaxDraftTokensPerStep + 2));
+}
+
+TEST(VarlenDecoderIOTest, GraphBuffersRejectInvalidPackedRowCounts) {
+  auto model = std::dynamic_pointer_cast<DecoderOnly_Model>(LoadSyntheticPagedPerTokenModel());
+  ASSERT_TRUE(model);
+  const size_t planes = PackedPositionIdPlanes(*model);
+  const size_t width = kMaxDraftTokensPerStep + 1;
+  for (const size_t batch : std::array<size_t, 3>{
+           0, static_cast<size_t>(std::numeric_limits<int64_t>::max()), std::numeric_limits<size_t>::max()}) {
+    model->config_->engine.dynamic_batching->max_batch_size = batch;
+    EXPECT_THROW(VarlenGraphBufferBytes(*model, planes, width), std::runtime_error);
+    EXPECT_THROW((VarlenGraphBuffers{*model, planes, width}), std::runtime_error);
+  }
+  model->config_->engine.dynamic_batching->max_batch_size =
+      static_cast<size_t>(std::numeric_limits<int64_t>::max()) / width;
+  model->config_->engine.dynamic_batching->max_scheduled_tokens = 0;
+  EXPECT_THROW(VarlenGraphBufferBytes(*model, 3, width), std::runtime_error);
+  EXPECT_THROW((VarlenGraphBuffers{*model, 3, width}), std::runtime_error);
+}
+
+TEST(VarlenDecoderIOTest, GraphBuffersRejectPackedRowOverflowBeforeScheduledTokenCap) {
+  auto model = std::dynamic_pointer_cast<DecoderOnly_Model>(LoadSyntheticPagedPerTokenModel());
+  ASSERT_TRUE(model);
+  const size_t planes = PackedPositionIdPlanes(*model);
+  const size_t width = static_cast<size_t>(std::numeric_limits<int64_t>::max()) / 2 + 1;
+  model->config_->engine.dynamic_batching->max_batch_size = 2;
+  model->config_->engine.dynamic_batching->max_scheduled_tokens = 2;
+
+  EXPECT_NO_THROW(VarlenGraphBufferBytes(*model, planes, width - 1));
+  EXPECT_NO_THROW((VarlenGraphBuffers{*model, planes, width - 1}));
+  EXPECT_THROW(VarlenGraphBufferBytes(*model, planes, width), std::runtime_error);
+  EXPECT_THROW((VarlenGraphBuffers{*model, planes, width}), std::runtime_error);
 }
 
 TEST(VarlenDecoderIOTest, GraphIdSeparatesEveryCapturedShape) {

@@ -106,6 +106,11 @@ def _parse_args():
         "the hand-off point for incremental SDK builds.",
     )
     parser.add_argument(
+        "--strip_install",
+        action="store_true",
+        help="Strip installed binaries when --install_dir is set. Leaves build outputs unchanged.",
+    )
+    parser.add_argument(
         "--prebuilt_genai_home",
         type=Path,
         default=None,
@@ -867,6 +872,8 @@ def install_core(args: argparse.Namespace, env: dict[str, str]):
         "--prefix",
         str(args.install_dir),
     ]
+    if args.strip_install:
+        cmd.append("--strip")
     util.run(cmd, env=env)
 
 

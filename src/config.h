@@ -6,7 +6,9 @@
 #include "filesystem.h"
 #include "provider_options.h"
 
+#include <array>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 
@@ -80,6 +82,7 @@ struct Config {
     static constexpr std::string_view CurrentSequenceLengthName = "current_sequence_length";
     static constexpr std::string_view TotalSequenceLengthName = "total_sequence_length";
     static constexpr std::string_view CacheIndirectionName = "cache_indirection";
+    static constexpr std::string_view CacheWriteIndicesName = "cache_write_indices";
     static constexpr std::string_view AlignmentHeadsName = "alignment_heads";
     static constexpr std::string_view TokenTypeIdsName = "token_type_ids";
 
@@ -524,6 +527,8 @@ struct Config {
       std::optional<RunOptions> run_options;
       std::vector<SharedInitializer> shared_initializers;
 
+      int prefill_sequence_length{};
+
       int hidden_size{};          // Not currently used, potentially useful for embeddings in the future
       int num_attention_heads{};  // Not currently used, potentially useful if num_key_value_heads isn't set
       int num_key_value_heads{};
@@ -534,7 +539,7 @@ struct Config {
       int state_update_capacity{};
 
       // Hybrid SSM+Attention (LFM2) parameters
-      std::vector<std::string> layer_types;  // Per-layer type: "conv" or "full_attention"
+      std::vector<std::string> layer_types;  // Per-layer type: "conv", "full_attention" or "sliding_attention"
       int conv_cache_size{};                 // Convolution cache width (conv_L_cache from HF config)
       int64_t ple_token_pad_id{-1};
       int indexer_compress_ratio{};  // Zero means unspecified by an older export.
@@ -608,6 +613,7 @@ struct Config {
         std::string current_sequence_length{Defaults::CurrentSequenceLengthName};
         std::string total_sequence_length{Defaults::TotalSequenceLengthName};
         std::string cache_indirection{Defaults::CacheIndirectionName};
+        std::string cache_write_indices{Defaults::CacheWriteIndicesName};
         std::string encoder_hidden_states{Defaults::EncoderHiddenStatesName};
         std::string rnn_prev_states{Defaults::RnnStatesPrevName};
         std::string encoder_attention_mask{Defaults::EncoderAttentionMaskName};
@@ -765,6 +771,73 @@ struct Config {
       bool IsEnabled() const noexcept { return enabled && !filename.empty(); }
     } mtp;
 
+    // Qwen3.8-Flash CUDA-graph decode stack with a built-in MTP(1) self-speculative loop
+    // (model.type "qwen38_flash_graph", served by the Engine). The target session is model.decoder; the head sessions,
+    // the CUDA data-plane library and the PLE table are described here. All paths are relative to the model folder.
+    struct Qwen38Graph {
+      struct Head {
+        std::string filename_s1;  // S=1 draft graph
+        std::string filename_s2;  // S=2 refeed graph
+        std::optional<SessionOptions> session_options;
+      } head;
+
+      std::string plane_library;  // optional libqwen38_plane.so in the model folder; empty or missing uses onnxruntime-genai-cuda
+      std::string ple_table;      // description of the host-registered FP8 PLE shards
+
+      int kv_capacity{33028};
+
+      bool warmup{true};  // Run the graph warm-up (captures every CUDA graph) when the model is created
+
+      // Concurrent request slots of the Engine-hosted decode device, in [1, kMaxBatchSize]. Values above 1 need the fold
+      // stack with unified fast prefill (see ValidateQwen38MultiSlotConfig).
+      static constexpr int kMaxBatchSize{8};
+      int max_batch_size{1};
+      // Set when engine.dynamic_batching resolved to one slot and was cleared for the static Engine path, so
+      // ResolveQwen38MaxBatchSize preserves that authoritative single-slot choice over model.qwen38_graph.max_batch_size,
+      // search.batch_size, and ORT_QWEN38_MAX_BATCH_SIZE.
+      std::optional<int> resolved_max_batch_size;
+
+      struct Mtp {
+        bool enabled{true};       // false: plain S=1 graph decode (no draft/verify)
+        bool prefill_head{true};  // feed the prompt hidden rows to the head (vLLM does the same)
+      } mtp;
+
+      // Folded decode cycle (v12 stack): the MTP head lives inside the verify graph, one graph launch per cycle.
+      // model.decoder is then the fold model (verify S=2 body + head + glue); head_r2 is the standalone R=2 head
+      // session used for the prompt context (pair calls) and the first draft.
+      struct Fold {
+        bool enabled{false};
+        std::optional<int> legacy_target_graph_id;
+        struct HeadR2 {
+          std::string filename;
+          std::optional<int> legacy_graph_id;
+          std::optional<SessionOptions> session_options;
+        } head_r2;
+      } fold;
+
+      // Prompt ingestion. Without `enabled` the prompt is ingested by the decode graphs, `chunk` prompt tokens per
+      // Engine step (an even number, so S=2 pairs stay aligned). With `enabled` it is ingested by the dense chunked
+      // prefill session, `chunk` tokens per call, and its state is handed over to the packed decode state + a batched
+      // KV-only head prefill. The dense/head_kv/decode sessions share one device copy of every identical initializer
+      // (weights_pool, written by the package builders in tools/qwen38_graph/, e.g. build_package_engine_v12b.py).
+      // `chunk` 0 selects the default of the path in use: 2048 tokens per step, 8192 per dense chunk.
+      struct Prefill {
+        bool enabled{false};
+        int chunk{0};
+        std::string weights_pool;  // text manifest of the shared initializers (qwen38_weights_pool 1)
+        std::string constants;     // text index + binary of the QSA hand-off constants (qwen38_qsa_consts 1)
+        struct Model {
+          std::string filename;
+          std::optional<SessionOptions> session_options;
+        } dense, head_kv;
+        std::vector<int> warmup_lengths{8192, 2048, 512, 128, 37};
+      } prefill;
+
+      bool IsConfigured() const noexcept {
+        return !head.filename_s1.empty() || !fold.head_r2.filename.empty() || fold.enabled;
+      }
+    } qwen38_graph;
+
     // DFlash 2/DSpark block-drafter metadata. Unlike MTP the drafter is not decoder-shaped: it
     // reads the main model's auxiliary hidden states, predicts a whole block of tokens at once,
     // and returns a candidate lattice that the Engine walks greedily. model.dspark is a config
@@ -878,11 +951,24 @@ struct Config {
       size_t block_size{256};  // Total number of slots per block.
       // Baseline target blocks; Engine auxiliary caches share the equivalent byte budget.
       std::optional<size_t> num_blocks;
-      std::optional<float> gpu_utilization_factor;  // Fraction of free GPU memory to use for key-value cache.
-      size_t max_batch_size{16};                    // Maximum batch size for dynamically batching requests.
-      size_t max_scheduled_tokens{2048};            // Maximum tokens in one dynamically batched model run.
-      bool prefix_caching{true};
-      bool prefix_caching_explicitly_set{};
+      std::optional<float> gpu_utilization_factor;           // Fraction of free GPU memory to use for key-value cache.
+      std::optional<uint64_t> device_memory_budget_bytes;    // GPU sizing allowance for one CUDA Model/Engine.
+      std::optional<uint64_t> device_memory_headroom_bytes;  // Additional profiled GPU memory reserved when budgeting.
+      size_t media_host_bytes{512 * 1024 * 1024};            // Retained canonical inputs and preprocessing reservation.
+      size_t media_device_bytes{128 * 1024 * 1024};          // Reclaimable projected image features.
+      size_t max_batch_size{16};                             // Maximum batch size for dynamically batching requests.
+      size_t max_scheduled_tokens{2048};                     // Maximum tokens in one dynamically batched model run.
+      std::optional<bool> prefix_caching;
+      std::optional<size_t> max_snapshots;  // Optional shared Engine-wide snapshot count limit.
+      struct SnapshotCache {
+        size_t vram_bytes{};
+        size_t ram_bytes{};
+        size_t disk_bytes{};
+        std::string directory;
+        bool explicitly_set{};
+        bool Enabled() const noexcept { return vram_bytes != 0 || ram_bytes != 0 || disk_bytes != 0; }
+        bool Configured() const noexcept { return explicitly_set || Enabled() || !directory.empty(); }
+      } snapshot_cache;
       size_t dflash2_max_snapshots{1};  // Budget-limited windowed drafter prefix snapshots; 0 disables.
     };
     std::optional<DynamicBatching> dynamic_batching;  // Dynamic batching settings
@@ -909,18 +995,28 @@ struct Config {
       std::optional<uint64_t> maximum_total_device_memory_bytes;
       std::optional<uint64_t> minimum_free_device_memory_bytes;
       std::optional<uint64_t> maximum_free_device_memory_bytes;
+      std::optional<uint64_t> minimum_effective_host_memory_bytes;
+      std::optional<uint64_t> maximum_effective_host_memory_bytes;
+      std::optional<uint64_t> minimum_available_host_memory_bytes;
       std::optional<bool> is_integrated;
     } eligibility;
 
     struct Overlay {
       struct Model {
         std::optional<std::string> decoder_filename;
+        std::map<std::string, std::string> decoder_session_options;
       } model;
 
       struct DynamicBatching {
         std::optional<size_t> num_blocks;
+        std::optional<uint64_t> device_memory_headroom_bytes;
+        std::optional<size_t> media_host_bytes;
+        std::optional<size_t> media_device_bytes;
         std::optional<size_t> max_batch_size;
         std::optional<size_t> max_scheduled_tokens;
+        std::optional<bool> prefix_caching;
+        std::optional<size_t> max_snapshots;
+        std::optional<Engine::DynamicBatching::SnapshotCache> snapshot_cache;
         std::optional<size_t> dflash2_max_snapshots;
       } dynamic_batching;
 
@@ -947,6 +1043,16 @@ struct Config {
   std::shared_ptr<const TokenizerMemoryData> tokenizer_memory_data_;
 };
 
+// Native RGB preprocessing settings; ORT Extensions interprets the processor pipeline.
+struct VisionProcessingConfig {
+  std::array<float, 3> image_mean{};
+  std::array<float, 3> image_std{};
+  std::optional<int64_t> image_height;
+  std::optional<int64_t> image_width;
+};
+
+VisionProcessingConfig LoadVisionProcessingConfig(const fs::path& path);
+
 void SetSearchNumber(Config::Search& search, std::string_view name, double value);
 void SetSearchBool(Config::Search& search, std::string_view name, bool value);
 void SetSpeculativeNumber(Config::Speculative& speculative, std::string_view name, double value);
@@ -967,6 +1073,8 @@ struct RuntimeProfileDeviceFacts {
   std::optional<bool> is_integrated;
   // Unset means unknown: profiles with free-memory bounds do not match.
   std::optional<uint64_t> free_device_memory_bytes;
+  std::optional<uint64_t> effective_host_memory_bytes;
+  std::optional<uint64_t> available_host_memory_bytes;
 };
 void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device);
 void ApplyRuntimeProfile(Config& config, uint64_t total_device_memory_bytes);

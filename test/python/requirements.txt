@@ -1,10 +1,12 @@
 coloredlogs
 flatbuffers
-numpy<2
+# NumPy 1.x has no Python 3.13+ wheels; newer ml_dtypes also requires NumPy 2 there.
+numpy<2; python_version < "3.13"
+numpy>=2.1; python_version >= "3.13"
 packaging
 protobuf==6.33.5
 sympy
 pytest
-onnx
+onnx>=1.21.0
 onnx_ir>=0.1.3
 transformers>=5.0.0

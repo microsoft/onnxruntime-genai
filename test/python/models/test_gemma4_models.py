@@ -766,8 +766,9 @@ def test_gemma4_vision_multiple_images(test_data_path, relative_image_paths):
     [[Path("images") / "australia.jpg", Path("images") / "sheet.png"]],
 )
 @pytest.mark.parametrize("position_dtype", ["int64", "int32"])
+@pytest.mark.parametrize("extra_vision_output", [False, True])
 def test_gemma4_static_batch_vision_executes_multiple_images(
-    test_data_path, tmp_path, relative_image_paths, position_dtype
+    test_data_path, tmp_path, relative_image_paths, position_dtype, extra_vision_output
 ):
     """Test that the static-B=1 vision model runs once per differently sized image."""
     onnx = pytest.importorskip("onnx")
@@ -785,6 +786,18 @@ def test_gemma4_static_batch_vision_executes_multiple_images(
     config["search"]["past_present_share_buffer"] = False
     config_path.write_text(json.dumps(config), encoding="utf-8")
     _create_static_batch_vision_model(onnx, model_path / "dummy_vision.onnx")
+    if extra_vision_output:
+        # The first vision run grows outputs_ for this output, which can reallocate it
+        vision = onnx.load(model_path / "dummy_vision.onnx")
+        vision.graph.node.append(
+            onnx.helper.make_node("Identity", ["image_features"], ["debug_features"])
+        )
+        vision.graph.output.append(
+            onnx.helper.make_tensor_value_info(
+                "debug_features", onnx.TensorProto.FLOAT, ["num_soft_tokens", 2048]
+            )
+        )
+        onnx.save(vision, model_path / "dummy_vision.onnx")
     _create_dynamic_embedding_model(
         onnx, model_path / "dummy_embedding.onnx", config["model"]["image_token_id"]
     )

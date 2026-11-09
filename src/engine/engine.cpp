@@ -6,8 +6,12 @@
 #include "../search.h"
 #include "../constrained_logits_processor.h"
 #include "../models/preprocessing/genai_tokenizer.h"
+#include "../models/preprocessing/multi_modal_processor.h"
+#include "../models/preprocessing/processor.h"
 #include "../stop_string_controller.h"
+#include "../stop_string_matcher.h"
 #include "decoders/varlen_decoder_io.h"
+#include "backend_factory.h"
 
 #include <exception>
 #include <limits>
@@ -18,70 +22,6 @@ namespace Generators {
 static_assert(kMaxDraftTokensPerStep < kSpeculativeAcceptanceLengthBins);
 
 namespace {
-
-size_t CheckedMtpAdd(size_t left, size_t right) {
-  if (right > std::numeric_limits<size_t>::max() - left)
-    throw std::runtime_error("MTP scratch memory bytes overflow size_t.");
-  return left + right;
-}
-
-size_t CheckedMtpMultiply(size_t left, size_t right) {
-  if (left != 0 && right > std::numeric_limits<size_t>::max() / left)
-    throw std::runtime_error("MTP scratch memory bytes overflow size_t.");
-  return left * right;
-}
-
-size_t IndexShareScratchBytes(const DecoderOnly_Model& model, size_t max_batch) {
-  const auto& indexshare = model.index_share_config_;
-  const size_t stages = static_cast<size_t>(indexshare.max_draft_tokens - 1);
-  const size_t extend_rows = CheckedMtpMultiply(max_batch, static_cast<size_t>(indexshare.max_draft_tokens) + 1);
-  const size_t output_capacity = CheckedMtpAdd(static_cast<size_t>(indexshare.base_capacity), stages);
-  const size_t batch_ints = CheckedMtpAdd(
-      CheckedMtpAdd(CheckedMtpAdd(static_cast<size_t>(indexshare.base_capacity), 2), std::max(size_t{1}, stages)),
-      CheckedMtpMultiply(stages, CheckedMtpAdd(output_capacity, 5)));
-  const size_t ints = CheckedMtpAdd(
-      CheckedMtpMultiply(extend_rows, CheckedMtpAdd(output_capacity, 3)),
-      CheckedMtpMultiply(max_batch, batch_ints));
-  const size_t projection_rows = CheckedMtpAdd(extend_rows, CheckedMtpMultiply(stages, max_batch));
-  size_t bytes = CheckedMtpAdd(CheckedMtpMultiply(ints, sizeof(int32_t)),
-                               CheckedMtpMultiply(projection_rows, sizeof(int64_t)));
-  const auto& decoder = model.config_->model.decoder;
-  size_t update_bank_bytes = 0;
-  if (decoder.state_groups) {
-    for (const auto& group : *decoder.state_groups) {
-      if (!group.state_update) continue;
-      std::vector<std::string> templates;
-      using Kind = Config::Model::Decoder::StateGroupKind;
-      if (group.kind == Kind::FixedIndexer) {
-        templates.push_back(decoder.outputs.state_update_indexer_names);
-      } else if (group.kind == Kind::FixedConv) {
-        templates.push_back(decoder.outputs.state_update_conv_value_names);
-      } else if (group.kind == Kind::FixedPle) {
-        templates.push_back(decoder.outputs.state_update_ple_token_names);
-        templates.push_back(decoder.outputs.state_update_ple_conv_value_names);
-      }
-      for (const auto& output_template : templates) {
-        if (output_template.empty()) continue;
-        for (int layer : group.layer_ids) {
-          std::string name = output_template;
-          const auto placeholder = name.find("%d");
-          if (placeholder != std::string::npos) name.replace(placeholder, 2, std::to_string(layer));
-          const auto shape = model.session_info_.GetOutputShape(name);
-          size_t row_elements = 1;
-          for (size_t axis = 1; axis < shape.size(); ++axis) {
-            if (shape[axis] <= 0) throw std::runtime_error("IndexShare state-update scratch requires static non-batch geometry.");
-            row_elements = CheckedMtpMultiply(row_elements, static_cast<size_t>(shape[axis]));
-          }
-          update_bank_bytes = CheckedMtpAdd(update_bank_bytes, CheckedMtpMultiply(
-                                                                   max_batch, CheckedMtpMultiply(row_elements, Ort::SizeOf(model.session_info_.GetOutputDataType(name)))));
-        }
-      }
-    }
-  }
-  const size_t state_bytes = CheckedMtpAdd(
-      CheckedMtpMultiply(2, FixedStatePool::StateBankBytes(model, max_batch)), update_bank_bytes);
-  return CheckedMtpAdd(bytes, CheckedMtpMultiply(stages, state_bytes));
-}
 
 // A throwing decode/copy must fence queued work before its local tensor owners unwind.
 struct MtpFailureFence {
@@ -255,6 +195,7 @@ Engine::Engine(std::shared_ptr<Model> model)
 Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
     : model_{std::move(model)},
       cache_manager_{std::move(dependencies.cache_manager)},
+      snapshot_cache_{std::move(dependencies.snapshot_cache)},
       scheduler_{std::move(dependencies.scheduler)},
       model_executor_{std::move(dependencies.model_executor)},
       mtp_model_{std::move(dependencies.mtp_model)},
@@ -266,6 +207,14 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
                            ? dependencies.make_step_error
                            : MakeEngineStepError} {
   // Fail fast on a missing collaborator rather than crashing later on first use.
+  if (!model_) {
+    throw std::runtime_error("Engine requires a non-null model.");
+  }
+  if (auto packed = std::dynamic_pointer_cast<DecoderOnly_Model>(model_); packed && packed->vision_) {
+    stop_tokenizer_ = packed->vision_->processor->tokenizer_;
+    const auto& batching = *model_->config_->engine.dynamic_batching;
+    media_store_ = std::make_unique<MediaStore>(std::move(packed), batching.media_host_bytes, batching.media_device_bytes);
+  }
   if (!cache_manager_) {
     throw std::runtime_error("Engine requires a non-null cache manager.");
   }
@@ -275,6 +224,14 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
   if (!model_executor_) {
     throw std::runtime_error("Engine requires a non-null model executor.");
   }
+  if (dflash2_prefix_checkpoints_enabled_ && (!dflash2_drafter_ || !snapshot_cache_)) {
+    throw std::runtime_error("DFlash prefix snapshots require a drafter and an Engine snapshot cache.");
+  }
+  if (dflash2_drafter_ && snapshot_cache_) {
+    dflash2_drafter_->InitializeSnapshotCache(snapshot_cache_);
+  }
+  backend_capabilities_ = ResolveBackendCapabilities(
+      *model_, *cache_manager_, *scheduler_, *model_executor_, dependencies.backend_capabilities);
   fatal_contract_fallback_error_ =
       MakeFatalFallbackError(StepOutcomeKind::ExecutionContractFailure);
   fatal_execution_fallback_error_ =
@@ -380,186 +337,7 @@ void ValidateMtpModelCompatibility(const Config& config,
 }
 
 EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
-  // The static batch decoder rebuilds its contiguous cache from the whole sequence every step, so
-  // it cannot resume a half-written prompt. Reject a model that configures chunking here rather
-  // than surfacing it once a Request is already being admitted.
-  if (!model->config_->engine.dynamic_batching &&
-      model->config_->search.chunk_size.value_or(0) != 0) {
-    throw std::runtime_error(
-        "search.chunk_size requires dynamic batching; the static batch scheduler cannot chunk a "
-        "prefill.");
-  }
-  std::shared_ptr<DecoderOnly_Model> mtp_model;
-  size_t mtp_bytes_per_block = 0;
-  if (model->config_->model.mtp.IsEnabled()) {
-    if (!model->config_->engine.dynamic_batching) {
-      throw std::runtime_error("An Engine-hosted MTP head requires dynamic batching.");
-    }
-    auto& target_hidden_states =
-        model->config_->model.decoder.outputs.hidden_states;
-    target_hidden_states = model->config_->model.mtp.main_hidden_states;
-    mtp_model = std::make_shared<DecoderOnly_Model>(
-        CreateMtpDecoderConfig(*model->config_), GetOrtEnv());
-    mtp_model->InitializeIndexShare(model->config_->model.mtp.index_share, GetOrtEnv());
-    ValidateMtpModelCompatibility(
-        *model->config_, model->session_info_, mtp_model->session_info_);
-    mtp_bytes_per_block = PagedKeyValueCacheBytesPerBlock(mtp_model);
-    // The head consumes the target decoder's packed hidden states, so the target must emit them.
-    model->config_->engine.hidden_states_output_required = true;
-  }
-
-  std::unique_ptr<Dflash2Drafter> dflash2_drafter;
-  std::shared_ptr<Dflash2Model> dflash2_model;
-  size_t dflash2_bytes_per_block = 0;
-  size_t dflash2_reserved_memory_bytes = 0;
-  size_t dflash2_max_batch_size = 0;
-  size_t dflash2_pool_blocks = 0;
-  size_t dflash2_prefix_checkpoint_bytes = 0;
-  bool dflash2_prefix_checkpoints_enabled = false;
-  if (!model->config_->model.dflash2.filename.empty()) {
-    if (!model->config_->engine.dynamic_batching) {
-      throw std::runtime_error("An Engine-hosted DFlash 2 drafter requires dynamic batching.");
-    }
-    auto& dflash2 = model->config_->model.dflash2;
-    auto& target_aux_output = model->config_->model.decoder.outputs.aux_hidden_states;
-    if (dflash2.main_aux_hidden_states.empty()) {
-      dflash2.main_aux_hidden_states = target_aux_output;
-    }
-    if (dflash2.main_aux_hidden_states.empty()) {
-      throw std::runtime_error(
-          "model.dflash2.main_aux_hidden_states must name a main-model output.");
-    }
-    target_aux_output = dflash2.main_aux_hidden_states;
-    if (!model->session_info_.HasOutput(target_aux_output)) {
-      throw std::runtime_error(
-          "model.dflash2.main_aux_hidden_states must name a main-model output.");
-    }
-
-    const auto& batching = *model->config_->engine.dynamic_batching;
-    const size_t paged_block_size = static_cast<size_t>(batching.block_size);
-    dflash2_max_batch_size = static_cast<size_t>(batching.max_batch_size);
-    auto decoder_model = std::dynamic_pointer_cast<DecoderOnly_Model>(model);
-    dflash2_model = std::make_shared<Dflash2Model>(
-        CreateDflash2Config(*model->config_), GetOrtEnv(),
-        decoder_model ? decoder_model->cpu_embedding_ : nullptr);
-    const auto dflash2_cache_type = ValidateDflash2ModelCompatibility(
-        *model->config_, model->session_info_, dflash2_model->session_info_, paged_block_size);
-    model->config_->engine.aux_hidden_states_output_required = true;
-    dflash2_pool_blocks = Dflash2Drafter::PoolBlocks(
-        *model->config_, paged_block_size, dflash2_max_batch_size);
-    if (dflash2_pool_blocks != 0) {
-      if (batching.num_blocks.has_value()) {
-        // Explicit num_blocks bypasses the free-memory probe. CacheManager validates and deducts
-        // this fixed pool before either cache pool is allocated.
-        dflash2_reserved_memory_bytes = Dflash2Drafter::PoolBytes(
-            *model->config_, paged_block_size, dflash2_pool_blocks, dflash2_cache_type);
-      } else {
-        // Automatic sizing measures free memory after allocating the fixed drafter pool.
-        dflash2_drafter = std::make_unique<Dflash2Drafter>(
-            dflash2_model, paged_block_size, dflash2_pool_blocks, dflash2_max_batch_size);
-      }
-    } else {
-      // A full-attention drafter mirrors the target pool, so it is billed per target block instead
-      // and built below once the target pool's block count is known.
-      dflash2_bytes_per_block =
-          Dflash2Drafter::BytesPerBlock(*model->config_, paged_block_size, dflash2_cache_type);
-      dflash2_reserved_memory_bytes = Dflash2Drafter::FullAttentionReservedBytes(
-          paged_block_size, static_cast<size_t>(dflash2.block_size),
-          dflash2_max_batch_size, dflash2_bytes_per_block);
-    }
-    if (dflash2_model->cpu_embedding_) {
-      const size_t embedding_bytes = Dflash2Drafter::EmbeddingReservedBytes(
-          dflash2_max_batch_size, static_cast<size_t>(dflash2.block_size),
-          static_cast<size_t>(dflash2_model->cpu_embedding_->hidden_size_),
-          dflash2_model->cpu_embedding_->type_);
-      if (embedding_bytes > std::numeric_limits<size_t>::max() - dflash2_reserved_memory_bytes) {
-        throw std::runtime_error("DFlash 2 reserved memory bytes overflow size_t.");
-      }
-      dflash2_reserved_memory_bytes += embedding_bytes;
-    }
-    if (dflash2_pool_blocks != 0 && mtp_bytes_per_block == 0 && !dflash2.is_dspark &&
-        ModelStateManifest{model->config_->model.decoder}.HasFixedStateGroups() &&
-        ResolvePrefixCachingEnabled(model, /*auxiliary_bytes_per_block=*/0)) {
-      dflash2_prefix_checkpoint_bytes = Dflash2Drafter::PrefixCheckpointBytes(
-          *model->config_, paged_block_size, dflash2_cache_type);
-    }
-  }
-
-  if (dflash2_bytes_per_block > std::numeric_limits<size_t>::max() - mtp_bytes_per_block) {
-    throw std::runtime_error("Engine auxiliary cache bytes per block overflow size_t.");
-  }
-  // SimpleDecoder allocates its persistent capture buffers only after the cache has chosen its
-  // block count, so the automatic free-memory probe has to know about them or the paged pool claims
-  // the memory they still need. IndexShare's selection and per-stage state scratch are also priced
-  // here, even without graph capture. Sizing uses the engine-wide draft ceiling, which is at least what
-  // each decoder will ask for. An explicit num_blocks is the caller pinning the pool, so it is left
-  // alone.
-  size_t graph_buffer_reserved_bytes = 0;
-  if (model->config_->engine.dynamic_batching &&
-      !model->config_->engine.dynamic_batching->num_blocks.has_value()) {
-    const auto reserve_for = [](const std::shared_ptr<Model>& decoder) -> size_t {
-      if (!decoder || !IsGraphCaptureEnabled(decoder->config_->model.decoder.session_options)) {
-        return 0;
-      }
-      return VarlenGraphBufferBytes(*decoder, PackedPositionIdPlanes(*decoder),
-                                    kMaxDraftTokensPerStep + 1);
-    };
-    graph_buffer_reserved_bytes = reserve_for(model) + reserve_for(mtp_model);
-    if (mtp_model) {
-      const size_t max_batch = model->config_->engine.dynamic_batching->max_batch_size;
-      const size_t scratch_bytes = mtp_model->index_share_config_.base_capacity > 0
-                                       ? IndexShareScratchBytes(*mtp_model, max_batch)
-                                       : CheckedMtpMultiply(2, FixedStatePool::StateBankBytes(*mtp_model, max_batch));
-      graph_buffer_reserved_bytes = CheckedMtpAdd(graph_buffer_reserved_bytes, scratch_bytes);
-    }
-  }
-  if (graph_buffer_reserved_bytes >
-      std::numeric_limits<size_t>::max() - dflash2_reserved_memory_bytes) {
-    throw std::runtime_error("Engine reserved memory bytes overflow size_t.");
-  }
-  std::shared_ptr<CacheManager> cache_manager =
-      CacheManager::Create(model, mtp_bytes_per_block + dflash2_bytes_per_block,
-                           dflash2_reserved_memory_bytes + graph_buffer_reserved_bytes,
-                           dflash2_prefix_checkpoint_bytes,
-                           &dflash2_prefix_checkpoints_enabled);
-  if (dflash2_model && !dflash2_drafter) {
-    const size_t paged_block_size =
-        static_cast<size_t>(model->config_->engine.dynamic_batching->block_size);
-    if (dflash2_pool_blocks != 0) {
-      dflash2_drafter = std::make_unique<Dflash2Drafter>(
-          dflash2_model, paged_block_size, dflash2_pool_blocks, dflash2_max_batch_size);
-    } else {
-      const auto& dflash2 = model->config_->model.dflash2;
-      dflash2_drafter = std::make_unique<Dflash2Drafter>(
-          dflash2_model, paged_block_size,
-          Dflash2Drafter::FullAttentionPoolBlocks(
-              cache_manager->Snapshot().total_blocks, paged_block_size,
-              static_cast<size_t>(dflash2.block_size), dflash2_max_batch_size),
-          dflash2_max_batch_size);
-    }
-  }
-  if (dflash2_drafter) {
-    dflash2_drafter->SetPrefixCheckpointCapacity(cache_manager->DraftCheckpointCapacity());
-  }
-  auto scheduler = Scheduler::Create(model, cache_manager);
-  auto model_executor = ModelExecutor::Create(model, cache_manager);
-
-  std::shared_ptr<CacheManager> mtp_cache_manager;
-  std::unique_ptr<ModelExecutor> mtp_model_executor;
-  if (mtp_model) {
-    // Both decoders cover the same resident request set. Fixing the head to the main pool's block
-    // count makes the auxiliary bytes included above exact rather than letting it independently
-    // consume another gpu_utilization_factor share of currently free memory.
-    mtp_model->config_->engine.dynamic_batching->num_blocks =
-        cache_manager->Snapshot().total_blocks;
-    mtp_cache_manager = CacheManager::Create(mtp_model);
-    mtp_model_executor = ModelExecutor::Create(mtp_model, mtp_cache_manager);
-  }
-
-  return EngineDependencies{
-      std::move(cache_manager), std::move(scheduler), std::move(model_executor),
-      std::move(mtp_model), std::move(mtp_cache_manager), std::move(mtp_model_executor),
-      std::move(dflash2_drafter), dflash2_prefix_checkpoints_enabled};
+  return CreateEngineBackend(std::move(model)).dependencies;
 }
 
 void Engine::PrepareDflash2Feeds(const StepPlan& plan,
@@ -656,12 +434,8 @@ void Engine::PublishDflash2Drafts(ScheduledRequests& scheduled_requests) {
       continue;
     }
     try {
-      if (dflash2_drafter_->AvailablePrefixCheckpoints() == 0 &&
-          !cache_manager_->ReclaimDraftCheckpoint()) {
-        continue;
-      }
       auto checkpoint = dflash2_drafter_->CapturePrefix(feed.request, entry.target_cache_slots);
-      if (checkpoint && !cache_manager_->AttachDraftCheckpoint(*boundary, std::move(checkpoint))) {
+      if (!checkpoint || !cache_manager_->AttachDraftCheckpoint(*boundary, std::move(checkpoint))) {
         cache_manager_->RecordPrefixPublicationRefusal();
       }
     } catch (const std::bad_alloc&) {
@@ -1805,6 +1579,33 @@ std::shared_ptr<Request> Engine::CreateRequest(const RequestOptions& options) {
   return request;
 }
 
+uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request, const std::string& prompt,
+                           const TurnOptions& options, const Images* images) {
+  ValidateOwnerThread();
+  CompleteNonresidentClosedRequests();
+  ReclaimAbandonedRequests();
+  if (health_ == EngineHealth::Unhealthy) std::rethrow_exception(fatal_error_);
+  if (!request || !request->BelongsTo(*this))
+    throw std::invalid_argument("Cannot begin a turn for a request that does not belong to this engine.");
+  if (prompt.find('\0') != std::string::npos) throw std::invalid_argument("A formatted prompt must not contain embedded NUL.");
+  if (!IsValidUtf8(prompt)) throw std::invalid_argument("A formatted prompt must be valid UTF-8.");
+  if (!media_store_) {
+    if (images && images->num_images_ != 0) throw std::invalid_argument("This Engine model does not support image inputs.");
+    const auto tokens = GetOrCreateStopTokenizer()->Encode(prompt.c_str());
+    return BeginTurn(request, tokens, options);
+  }
+  const auto raw = GetOrCreateStopTokenizer()->Encode(prompt.c_str());
+  request->ValidateTurnAdmission(raw, options);
+  const size_t first_row = static_cast<size_t>(request->CurrentSequenceLength());
+  auto prepared = media_store_->Prepare(prompt, raw, images, first_row, request->MaxSessionTokens() - first_row);
+  request->ReserveMedia(prepared.media.size());
+  media_store_->ReserveItems(prepared.media.size());
+  const auto turn_id = AdmitTurn(request, prepared.tokens, options);
+  media_store_->Retain(prepared.media);
+  request->AppendMedia(prepared.media);
+  return turn_id;
+}
+
 uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
                            std::span<const int32_t> tokens,
                            const TurnOptions& options) {
@@ -1818,11 +1619,27 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
     throw std::runtime_error(
         "Cannot begin a turn for a request that does not belong to this engine.");
   }
+  if (media_store_) media_store_->ValidateTextTokens(tokens);
+  return AdmitTurn(request, tokens, options);
+}
+
+uint64_t Engine::AdmitTurn(const std::shared_ptr<Request>& request, std::span<const int32_t> tokens,
+                           const TurnOptions& options) {
   request->ValidateTurnAdmission(tokens, options);
+  if (backend_capabilities_.SelectsOwnTokens()) {
+    const int vocab_size = model_->config_->model.vocab_size;
+    for (size_t i = 0; i < tokens.size(); ++i) {
+      if (tokens[i] < 0 || tokens[i] >= vocab_size) {
+        throw std::invalid_argument("Prompt token " + std::to_string(i) + " has id " +
+                                    std::to_string(tokens[i]) + ", outside [0, " + std::to_string(vocab_size) +
+                                    ") (model.vocab_size).");
+      }
+    }
+  }
 
   // Resolve and validate this turn's complete policy before any Request mutation, so an
   // unsatisfiable combination leaves the previous completed turn entirely reusable.
-  const bool dynamic_batching = cache_manager_->SupportsDynamicBatching();
+  const bool dynamic_batching = backend_capabilities_.UsesTransactions();
   const auto policy = ResolveTurnPolicy(model_->config_->search, options);
   const size_t turn_prompt_length =
       static_cast<size_t>(request->IsAwaitingFirstTurn()
@@ -1832,6 +1649,15 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
   ValidateTurnPolicy(policy, options, model_->p_device_scoring_->GetType(),
                      model_->config_->model.vocab_size, turn_prompt_length,
                      request->MaxSessionTokens());
+  model_executor_->ValidateTurn(policy, options);
+  if ((!backend_capabilities_.supports_sampling && !policy.IsGreedy()) ||
+      (!backend_capabilities_.supports_penalties &&
+       (policy.repetition_penalty != 1.0f || policy.no_repeat_ngram_size != 0)) ||
+      (!backend_capabilities_.supports_min_generated_tokens && policy.min_generated_tokens != 0) ||
+      (!backend_capabilities_.supports_guidance &&
+       (!options.guidance_type.empty() || !options.guidance_data.empty() || options.delimited_guidance))) {
+    throw std::runtime_error("The selected execution backend does not support the requested turn policy.");
+  }
   // Static batching completes generation through a non-transactional path (RunStatic) that cannot
   // stage, roll back, or replay a stop match, and its sampler RNG state is created once when the
   // Request joins the batch rather than inside a rollback-capable step. Reject both before any
@@ -1840,7 +1666,9 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
     if (options.delimited_guidance) {
       throw std::runtime_error("Delimited guidance requires an Engine configured for dynamic batching.");
     }
-    if (!options.stop_strings.empty()) {
+    // An executor that commits its own tokens runs them through Request::CommitExternalTokens, which
+    // observes stop strings token by token and only ever ends the turn, so it has nothing to roll back.
+    if (!options.stop_strings.empty() && !backend_capabilities_.supports_stop_strings) {
       throw std::runtime_error(
           "Stop strings require an Engine configured for dynamic batching.");
     }
@@ -1849,12 +1677,18 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
           "A per-turn seed requires an Engine configured for dynamic batching.");
     }
   }
-  if (options.seed && !scheduler_->SupportsTransactionalSamplerState()) {
+  if (options.seed && !backend_capabilities_.supports_per_turn_seed) {
     throw std::runtime_error(
         "A per-turn seed requires a batched sampler that supports transaction rollback.");
   }
 
+  if ((!options.stop_strings.empty() && !backend_capabilities_.supports_stop_strings) ||
+      (options.delimited_guidance && !backend_capabilities_.supports_delimited_guidance)) {
+    throw std::runtime_error("The selected execution backend does not support the requested stop or guidance policy.");
+  }
+
   const bool first_turn = request->IsAwaitingFirstTurn();
+  bool allow_nonresident = false;
   if (!first_turn) {
     const bool restartable_canceled_turn =
         request->IsRestartableCanceledTurn() &&
@@ -1862,7 +1696,7 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
     const bool replay_rewound_request =
         request->NeedsReplayAfterRewind() &&
         !cache_manager_->IsResident(request);
-    const bool allow_nonresident =
+    allow_nonresident =
         restartable_canceled_turn || replay_rewound_request;
     ValidateRequestCanContinue(request, allow_nonresident);
     if (!allow_nonresident) {
@@ -1895,9 +1729,9 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
 
   try {
     request->PrepareTurnAdmission(tokens, admission);
-    if (first_turn) {
+    if (first_turn || allow_nonresident) {
       scheduler_->AddRequest(request);
-      added_to_scheduler = true;
+      added_to_scheduler = first_turn;
     }
     return request->CommitTurnAdmission(options, admission);
   } catch (...) {
@@ -1957,6 +1791,7 @@ bool Engine::CancelRequest(const std::shared_ptr<Request>& request, uint64_t tur
   if (has_existing_event) {
     existing->flags |= terminal.flags;
     existing->finish_reason = terminal.finish_reason;
+    existing->terminal_token_id = terminal.terminal_token_id;
     // CanCancelFromEngine() only allows this merge while the Request is still executable, and a
     // committed StopString match makes it TurnComplete in the very same step that stages the
     // match's terminal event -- so `existing` here can only ever be a non-terminal (Token-only)
@@ -2006,6 +1841,9 @@ void Engine::RewindRequestToStartOfTurn(
         "call Engine::Run() to drain the event before rewinding.");
   }
 
+  if (backend_capabilities_.rewind == BackendRewind::Unsupported) {
+    throw std::runtime_error("The selected execution backend does not support request rewind.");
+  }
   const bool resident = cache_manager_->IsResident(request);
   if (!resident && !request->IsRestartableCanceledTurn() &&
       !request->NeedsReplayAfterRewind()) {
@@ -2039,7 +1877,7 @@ void Engine::CloseRequest(const std::shared_ptr<Request>& request) {
   }
   scheduler_->RemoveRequest(request);
   const bool retain_static_runtime_state =
-      !cache_manager_->SupportsDynamicBatching() &&
+      !backend_capabilities_.UsesTransactions() &&
       cache_manager_->IsResident(request);
 
   CloseMtpRequest(request);
@@ -2221,7 +2059,7 @@ void Engine::ValidateRequestCanContinue(
   }
 
   if (!allow_nonresident &&
-      !cache_manager_->SupportsDynamicBatching() &&
+      !backend_capabilities_.SupportsIndependentAdmission() &&
       cache_manager_->ResidentRequestCount() > 1) {
     throw std::runtime_error(
         "Continuous decoding requires exactly one resident request in a "
@@ -2296,7 +2134,7 @@ size_t Engine::Run(std::span<EngineEvent> events) {
     std::rethrow_exception(fatal_error_);
   }
   try {
-    if (cache_manager_->SupportsDynamicBatching()) {
+    if (backend_capabilities_.UsesTransactions()) {
       RunDynamic();
     } else {
       RunStatic();
@@ -2312,9 +2150,9 @@ size_t Engine::Run(std::span<EngineEvent> events) {
 
 void Engine::RunStatic() {
   if (scheduler_->HasPendingRequests()) {
-    auto scheduled_requests = [&]() -> ScheduledRequests {
+    auto scheduling = [&]() -> NontransactionalSchedulingResult {
       try {
-        return scheduler_->Schedule();
+        return scheduler_->ScheduleStep();
       } catch (...) {
         MarkUnhealthyAndThrow(
             StepOutcomeKind::ExecutionContractFailure,
@@ -2324,15 +2162,38 @@ void Engine::RunStatic() {
             std::current_exception());
       }
     }();
+    if (!scheduling.scheduled) {
+      if (scheduling.outcome.kind == StepOutcomeKind::UnserviceableRequest) {
+        RetainEvent(FailUnserviceableRequest(scheduling.outcome.request_id));
+      } else if (scheduling.outcome.kind == StepOutcomeKind::CapacityDeferred) {
+        ++transaction_metrics_.capacity_deferrals;
+      } else if (scheduling.outcome.kind != StepOutcomeKind::NoWork) {
+        MarkUnhealthyAndThrow(StepOutcomeKind::ExecutionContractFailure, 0, nullptr,
+                              "Static scheduler returned an invalid non-executable outcome.", nullptr);
+      }
+      return;
+    }
+    auto& scheduled_requests = *scheduling.scheduled;
+    if (scheduling.outcome.kind != StepOutcomeKind::Committed || !scheduled_requests) {
+      MarkUnhealthyAndThrow(StepOutcomeKind::ExecutionContractFailure, 0, nullptr,
+                            "Static scheduler returned contradictory executable work.", nullptr);
+    }
     // Scheduling may recycle an all-terminal static batch. Closed rows retain their Search,
     // parameters, host tokens, and length metadata only until that shared allocation is gone;
     // finish their physical close before executing the replacement batch.
     CompleteNonresidentClosedRequests();
 
     try {
+      scheduled_requests.SetBackendLimits(backend_capabilities_.max_slots, backend_capabilities_.max_result_tokens);
       model_executor_->Decode(scheduled_requests);
-      ++speculative_stats_.target_forward_passes;
+      if (backend_capabilities_.SelectsOwnTokens() !=
+          (scheduled_requests.OutputKind() == StepOutputKind::BackendRows))
+        throw std::logic_error("Executor output protocol contradicts the resolved backend capabilities.");
+      if (!model_executor_->SelectsOwnTokens()) {
+        ++speculative_stats_.target_forward_passes;
+      }
       scheduled_requests.GenerateNextTokens(step_results_);
+      model_executor_->OnStepCommitted(scheduled_requests, step_results_);
     } catch (...) {
       MarkUnhealthyAndThrow(
           StepOutcomeKind::FatalExecutionFailure,
@@ -2387,6 +2248,33 @@ void Engine::RunDynamic() {
     }
     if (!planning_result.executable) {
       const auto outcome = planning_result.outcome;
+      if (outcome.kind == StepOutcomeKind::PreparationProgress) {
+        try {
+          if (!media_store_ || !planning_result.preparation_item || !planning_result.preparation_request)
+            throw std::logic_error("The media preparation plan has no owning resources.");
+          media_store_->Encode(planning_result.preparation_item);
+          planning_result.preparation_request->ClearMediaPreparationFailure();
+        } catch (const Ort::Exception& error) {
+          if (ClassifyOrtExecutionFailure(error.what()) == ExecutionFailureKind::CapacityExceeded) {
+            try {
+              media_store_->ReleaseFeatures();
+            } catch (...) {
+              MarkUnhealthyAndThrow(StepOutcomeKind::FatalExecutionFailure, step_plan_.transaction_id,
+                                    outcome.request_id, "Failed to release encoder resources.", std::current_exception());
+            }
+            if (!planning_result.preparation_request->RetryMediaPreparation(planning_result.preparation_item))
+              RetainEvent(FailUnserviceableRequest(outcome.request_id));
+            return;
+          }
+          // Synchronization does not prove an unknown kernel failure is item-local; preserve fail-stop semantics.
+          MarkUnhealthyAndThrow(StepOutcomeKind::FatalExecutionFailure, step_plan_.transaction_id,
+                                outcome.request_id, "Unclassified encoder execution failure.", std::current_exception());
+        } catch (...) {
+          MarkUnhealthyAndThrow(StepOutcomeKind::FatalExecutionFailure, step_plan_.transaction_id,
+                                outcome.request_id, "Encoder preparation violated its execution contract.", std::current_exception());
+        }
+        return;
+      }
       if (outcome.kind == StepOutcomeKind::NoWork &&
           !scheduler_->HasPendingRequests()) {
         return;
@@ -2808,6 +2696,9 @@ void Engine::AppendEventsFromStep(
   const auto finish_turn = [&request, &result](EngineEvent& event) {
     event.flags |= EngineEventFlagTurnFinished;
     event.finish_reason = result.finish_reason;
+    if (result.finish_reason == GenerationFinishReason::EosToken) {
+      event.terminal_token_id = result.token;
+    }
     event.matched_stop_string_index = result.matched_stop_string_index;
     event.usage = {
         request->TurnPromptTokens(),
@@ -2913,6 +2804,7 @@ EngineEvent Engine::EventFromStepError(
       break;
     case StepOutcomeKind::UnserviceableRequest:
     case StepOutcomeKind::NoWork:
+    case StepOutcomeKind::PreparationProgress:
     case StepOutcomeKind::Committed:
       // These outcomes must be handled before throwing EngineStepError. Reaching this catch path is
       // itself an Engine contract failure; do not call a helper that can throw while translating it.
@@ -2937,6 +2829,7 @@ EngineEvent Engine::EventFromStepError(
   if (health_ == EngineHealth::Unhealthy) {
     std::rethrow_exception(fatal_error_);
   }
+  model_executor_->OnExecutionFailure();
 
   std::exception_ptr durable_error =
       outcome == StepOutcomeKind::ExecutionContractFailure
@@ -2995,6 +2888,7 @@ EngineEvent Engine::EventFromStepError(
       } else {
         existing->flags |= event.flags;
         existing->finish_reason = event.finish_reason;
+        existing->terminal_token_id = event.terminal_token_id;
         // This merge only runs for a Request this sweep just found IsExecutable(), and a committed
         // StopString match makes a Request TurnComplete in the very same step that stages the
         // match's terminal event -- so `existing` here can only ever be a non-terminal (Token-only)
@@ -3045,7 +2939,7 @@ bool Engine::HasPendingRequests() {
 
 size_t Engine::MaxDraftTokensPerStep() const {
   ValidateOwnerThread();
-  return cache_manager_->SupportsDynamicBatching() &&
+  return backend_capabilities_.UsesTransactions() &&
                  model_executor_->SupportsDraftVerification()
              ? cache_manager_->MaxDraftTokensPerStep()
              : 0;
@@ -3090,6 +2984,7 @@ SpeculativeStats Engine::GetSpeculativeStats() const {
   // would be a data race.
   ValidateOwnerThread();
   auto stats = speculative_stats_;
+  model_executor_->AddSpeculativeStats(stats);
   if (dflash2_drafter_) {
     stats.dflash2_admission_misses = dflash2_drafter_->AdmissionMisses();
   }
@@ -3107,32 +3002,14 @@ SpeculativeStats Engine::GetSpeculativeStats() const {
 
 EngineCapabilities Engine::GetCapabilities() const {
   ValidateOwnerThread();
-  EngineCapabilities capabilities;
-  if (model_->config_->engine.dynamic_batching) {
-    const auto& batching = *model_->config_->engine.dynamic_batching;
-    capabilities.configured_max_batch_size = batching.max_batch_size;
-    capabilities.max_scheduled_tokens = batching.max_scheduled_tokens;
-    const size_t block_count = cache_manager_->TargetBlockCount();
-    const size_t block_size = cache_manager_->TargetBlockSize();
-    if (block_count != 0 && block_size != 0) {
-      if (block_count > (std::numeric_limits<uint64_t>::max() - 1) / block_size) {
-        throw std::overflow_error("Engine max_request_length exceeds uint64_t.");
-      }
-      const uint64_t cache_limit = static_cast<uint64_t>(block_count) * block_size + 1;
-      capabilities.max_request_length =
-          std::min<uint64_t>(static_cast<uint64_t>(model_->config_->model.context_length), cache_limit);
-    }
-  } else if (model_->config_->engine.static_batching) {
-    capabilities.configured_max_batch_size =
-        model_->config_->engine.static_batching->max_batch_size;
-  } else {
-    capabilities.configured_max_batch_size = kDefaultStaticBatchSize;
-  }
-  return capabilities;
+  return {backend_capabilities_.configured_max_batch_size,
+          backend_capabilities_.max_scheduled_tokens,
+          backend_capabilities_.max_request_length};
 }
 
 std::optional<PrefixCacheMetrics> Engine::PrefixCacheStats() const {
   ValidateOwnerThread();
+  if (!backend_capabilities_.prefix_reuse) return std::nullopt;
   const auto* metrics = cache_manager_->PrefixMetrics();
   return metrics ? std::optional<PrefixCacheMetrics>{*metrics} : std::nullopt;
 }

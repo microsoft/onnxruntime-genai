@@ -3,6 +3,8 @@
 
 #include "request.h"
 
+#include <utility>
+
 #include "engine.h"
 #include "sequence_positions.h"
 #include "../constrained_logits_processor.h"
@@ -204,6 +206,8 @@ void Request::ValidateTurnAdmission(
 
   const size_t sequence_length =
       first_turn ? 0 : static_cast<size_t>(CurrentSequenceLength());
+  if (std::any_of(tokens.begin(), tokens.end(), [](int32_t token) { return token < 0; }))
+    throw std::invalid_argument("Prompt tokens must be nonnegative vocabulary IDs.");
   ValidateAppendLength(max_session_tokens_, sequence_length, tokens.size());
   if (tokens_host_.capacity() < tokens_host_.size() + tokens.size()) {
     throw std::logic_error(
@@ -380,6 +384,7 @@ void Request::CompleteFailedTurnFromEngine(const Engine& engine) noexcept {
 // starts from the documented defaults: no stop strings, no guidance, and no draft proposal unless
 // it asks for them.
 void Request::ReleaseTurnResources() noexcept {
+  ClearMediaPreparationFailure();
   stop_controller_.reset();
   stop_controller_transaction_checkpoint_ = 0;
   guidance_transaction_checkpoint_.reset();
@@ -458,6 +463,8 @@ void Request::CompleteClose() noexcept {
   evaluated_draft_count_ = 0;
   draft_verification_.Reset();
   std::vector<int32_t>{}.swap(tokens_host_);
+  std::vector<int32_t>{}.swap(prefix_tokens_);
+  std::vector<MediaSpan>{}.swap(media_);
   std::vector<TurnBoundary>{}.swap(turn_boundaries_);
 }
 
@@ -481,6 +488,52 @@ uint64_t Request::BeginTurn(
         "Cannot begin a turn after the request's engine has been destroyed.");
   }
   return engine->BeginTurn(shared_from_this(), tokens, options);
+}
+
+uint64_t Request::BeginTurn(const std::string& prompt, const TurnOptions& options, const Images* images) {
+  auto engine = engine_.lock();
+  if (!engine) throw std::runtime_error("Cannot begin a turn after the request's engine has been destroyed.");
+  return engine->BeginTurn(shared_from_this(), prompt, options, images);
+}
+
+void Request::ReserveMedia(size_t count) {
+  if (count == 0) return;
+  media_.reserve(media_.size() + count);
+  prefix_tokens_.reserve(max_session_tokens_);
+}
+
+void Request::AppendMedia(std::span<const MediaSpan> media) noexcept {
+  media_.insert(media_.end(), media.begin(), media.end());
+}
+
+bool Request::RetryMediaPreparation(const std::shared_ptr<MediaItem>& item) noexcept {
+  if (failed_media_.lock() != item) {
+    failed_media_ = item;
+    media_preparation_retried_ = false;
+  }
+  return !std::exchange(media_preparation_retried_, true);
+}
+
+void Request::ClearMediaPreparationFailure() noexcept {
+  failed_media_.reset();
+  media_preparation_retried_ = false;
+}
+
+std::span<const int32_t> Request::PrefixTokensCpu() const {
+  if (media_.empty()) return tokens_host_;
+  prefix_tokens_.assign(tokens_host_.begin(), tokens_host_.end());
+  // These private IDs are never decoder inputs. Exact item interning gives every media row a
+  // distinct identity while preserving the cache's collision-checked token and parent comparisons.
+  for (const auto& span : media_) {
+    const auto end = std::min(tokens_host_.size(), span.start + span.item->rows);
+    for (size_t row = span.start; row < end; ++row)
+      prefix_tokens_[row] = -span.item->prefix_base - static_cast<int32_t>(row - span.start);
+  }
+  return prefix_tokens_;
+}
+
+std::array<int64_t, 3> Request::Position(size_t row) const {
+  return MediaPosition(media_, row, static_cast<size_t>(params_->model_->config_->model.vision.spatial_merge_size));
 }
 
 void Request::RewindToStartOfTurn(uint64_t turn_id) {
@@ -708,6 +761,9 @@ void Request::CommitAcceptedDraftsForTransaction(size_t accepted_count) {
       draft_verification_.completed_generation = true;
       draft_verification_.eos =
           search_->IsDone() && contains(params_->config.model.eos_token_id, token);
+      if (draft_verification_.eos) {
+        draft_verification_.eos_token_id = token;
+      }
       break;
     }
   }
@@ -1036,7 +1092,7 @@ RequestStepResult Request::StageDraftCompletionForTransaction() {
     }
   }
   RequestStepResult result{
-      0,
+      draft_verification_.eos_token_id,
       false,
       true,
       finish_reason,
@@ -1147,6 +1203,9 @@ void Request::CommitStep(const RequestStepPlan& plan,
 void Request::StageVisibleTokens(RequestStepResult& result,
                                  size_t committed_count,
                                  std::optional<int32_t> sampled_token) const {
+  result.tokens_appended = committed_count + static_cast<size_t>(sampled_token.has_value());
+  result.candidates_consumed = result.tokens_appended +
+                               static_cast<size_t>(result.finish_reason == GenerationFinishReason::EosToken);
   if (committed_count + (sampled_token ? 1u : 0u) > result.visible_tokens.size()) {
     throw std::logic_error(
         "A single engine step produced more visible tokens than it can report.");
@@ -1370,6 +1429,7 @@ RequestStepResult Request::CompleteGeneration() {
     status_ = RequestStatus::TurnComplete;
     if (search_->IsDone() && !next_tokens.empty() &&
         contains(params_->config.model.eos_token_id, next_tokens.back())) {
+      token = next_tokens.back();
       finish_reason_ = GenerationFinishReason::EosToken;
     } else if (turn_limit_reached) {
       finish_reason_ = GenerationFinishReason::TurnLimit;
@@ -1385,6 +1445,78 @@ RequestStepResult Request::CompleteGeneration() {
       finish_reason_,
   };
   StageVisibleTokens(result, new_token_count, std::nullopt);
+  return result;
+}
+
+RequestStepResult Request::CommitExternalTokens(std::span<const int32_t> tokens) {
+  if (tokens.empty() || tokens.size() > kMaxGeneratedTokensPerStep) {
+    throw std::logic_error("An executor must commit between one and the per-step maximum of tokens.");
+  }
+  if (!IsExecuting(status_)) {
+    throw std::logic_error("Tokens can only be committed to an active request.");
+  }
+  // Everything before this step has been processed by the model, exactly as for sampled steps.
+  processed_sequence_length_ = CurrentSequenceLength();
+  needs_replay_after_rewind_ = false;
+
+  size_t appended_count = 0;
+  size_t consumed_count = 0;
+  int32_t last_token = 0;
+  GenerationFinishReason finish_reason = GenerationFinishReason::None;
+  int32_t matched_stop_string_index = -1;
+  for (const int32_t token : tokens) {
+    ++consumed_count;
+    last_token = token;
+    const int64_t sequence_length_before = CurrentSequenceLength();
+    search_->CommitToken(token);
+    const bool appended = CurrentSequenceLength() > sequence_length_before;
+    if (appended) {
+      tokens_host_.push_back(token);
+      ++turn_generated_tokens_;
+      ++appended_count;
+      if (stop_controller_) {
+        if (const auto& match = stop_controller_->ObserveToken(token)) {
+          finish_reason = GenerationFinishReason::StopString;
+          matched_stop_string_index = static_cast<int32_t>(match->index);
+          break;
+        }
+      }
+    }
+    const bool search_done = search_->IsDone();
+    const bool turn_limit_reached =
+        turn_policy_.max_generated_tokens &&
+        turn_generated_tokens_ >= *turn_policy_.max_generated_tokens;
+    const bool context_limit_reached =
+        static_cast<size_t>(CurrentSequenceLength()) >= max_session_tokens_;
+    if (search_done && contains(params_->config.model.eos_token_id, token)) {
+      finish_reason = GenerationFinishReason::EosToken;
+    } else if (turn_limit_reached) {
+      finish_reason = GenerationFinishReason::TurnLimit;
+    } else if (context_limit_reached || search_done) {
+      finish_reason = GenerationFinishReason::ContextLimit;
+    }
+    if (finish_reason != GenerationFinishReason::None) {
+      break;
+    }
+  }
+
+  const bool done = finish_reason != GenerationFinishReason::None;
+  if (done) {
+    status_ = RequestStatus::TurnComplete;
+    finish_reason_ = finish_reason;
+    matched_stop_string_index_ = matched_stop_string_index;
+    ReleaseTurnResources();
+  }
+  RequestStepResult result{
+      last_token,
+      appended_count != 0,
+      done,
+      finish_reason,
+      matched_stop_string_index,
+  };
+  StageVisibleTokens(result, appended_count, std::nullopt);
+  result.candidates_consumed = consumed_count;
+  result.tokens_appended = appended_count;
   return result;
 }
 
@@ -1422,6 +1554,9 @@ void Request::CommitRewind(RequestRewindState&& state) noexcept {
   assert(state.sequence_length <= tokens_host_.size());
   search_ = std::move(state.search);
   tokens_host_.resize(state.sequence_length);
+  media_.erase(std::remove_if(media_.begin(), media_.end(),
+                              [&](const MediaSpan& span) { return span.start >= state.sequence_length; }),
+               media_.end());
   turn_boundaries_.resize(state.retained_turn_count);
   processed_sequence_length_ = 0;
   prompt_sequence_length_ = 0;

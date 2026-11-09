@@ -5,12 +5,111 @@ import importlib.util
 import shutil
 import stat
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+@pytest.mark.parametrize("strip_install", [False, True])
+def test_install_core_stripping_is_opt_in(monkeypatch, tmp_path, strip_install):
+    spec = importlib.util.spec_from_file_location("genai_install_review", REPO_ROOT / "build.py")
+    build = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(build)
+    command = ["build.py", "--install_dir", str(tmp_path / "install"), "--build_dir", str(tmp_path / "build")]
+    if strip_install:
+        command.append("--strip_install")
+    monkeypatch.setattr(sys, "argv", command)
+    args = build._parse_args()
+    commands = []
+    env = {"PACKAGING_TEST": "1"}
+    monkeypatch.setattr(build.util, "run", lambda command, **kwargs: commands.append((command, kwargs)))
+    build.install_core(args, env)
+    expected = [
+        str(args.cmake_path),
+        "--install",
+        str(args.build_dir),
+        "--config",
+        args.config,
+        "--prefix",
+        str(args.install_dir),
+    ]
+    if strip_install:
+        expected.append("--strip")
+    assert commands == [(expected, {"env": env})]
+
+
+@pytest.fixture
+def android_stripping_tools(tmp_path):
+    compiler = shutil.which("cc")
+    strip = shutil.which("llvm-strip")
+    if sys.platform != "linux" or compiler is None or strip is None:
+        pytest.skip("Linux compiler and LLVM tools are needed to test ELF stripping")
+    strip = Path(strip)
+    if not strip.with_name("llvm-readelf").is_file():
+        pytest.skip("llvm-readelf is needed to test ELF stripping")
+    spec = importlib.util.spec_from_file_location(
+        "genai_android_stripping_review", REPO_ROOT / "tools/ci_build/github/android/build_aar_package.py"
+    )
+    builder = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(builder)
+
+    def make_library(name, alignment):
+        library = tmp_path / name
+        subprocess.run(
+            [
+                compiler,
+                "-shared",
+                "-fPIC",
+                "-g",
+                f"-Wl,-z,max-page-size={alignment}",
+                "-x",
+                "c",
+                "-",
+                "-o",
+                str(library),
+            ],
+            input="int packaging_test(void) { return 0; }\n",
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        return library
+
+    return builder, strip, make_library
+
+
+@pytest.mark.parametrize("alignment", [4096, 16384])
+def test_android_stripping_preserves_load_segments_and_originals(android_stripping_tools, tmp_path, alignment):
+    builder, strip, make_library = android_stripping_tools
+    source = make_library("source.so", alignment)
+    original = source.read_bytes()
+    destination = tmp_path / "staged.so"
+    builder._strip_library(source, destination, strip)
+    assert source.read_bytes() == original
+    assert destination.stat().st_size < source.stat().st_size
+
+
+def test_android_stripping_rejects_changed_load_segments(android_stripping_tools, monkeypatch, tmp_path):
+    builder, strip, make_library = android_stripping_tools
+    source = make_library("source.so", 16384)
+    replacement = make_library("misaligned.so", 4096)
+    original = source.read_bytes()
+    run = subprocess.run
+
+    def change_alignment(command, **kwargs):
+        if Path(command[0]) == strip:
+            shutil.copy2(replacement, command[1])
+            return subprocess.CompletedProcess(command, 0)
+        return run(command, **kwargs)
+
+    monkeypatch.setattr(builder.subprocess, "run", change_alignment)
+    with pytest.raises(RuntimeError, match="Stripping changed LOAD segments"):
+        builder._strip_library(source, tmp_path / "staged.so", strip)
+    assert source.read_bytes() == original
 
 
 @pytest.mark.parametrize("use_cuda", [False, True])

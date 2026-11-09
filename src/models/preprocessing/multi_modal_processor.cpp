@@ -11,6 +11,7 @@
 #include "models/preprocessing/lfm2_audio_processor.h"
 #include "models/preprocessing/lfm2_vl_image_processor.h"
 #include "models/preprocessing/mistral3_image_processor.h"
+#include "models/preprocessing/nemotron_parse_processor.h"
 #include "models/preprocessing/parakeet_processor.h"
 #include "models/preprocessing/phi_image_processor.h"
 #include "models/preprocessing/phi_multimodal_processor.h"
@@ -73,6 +74,7 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
           {"qwen3_5", Processor::Create<QwenImageProcessor>},
           {"qwen3_5_moe", Processor::Create<QwenImageProcessor>},
           {"qwen4_exp", Processor::Create<QwenImageProcessor>},
+          {"nemotron_parse", Processor::Create<NemotronParseProcessor>},
           {"videochat_flash_qwen", Processor::Create<VideoChatFlashProcessor>}} {
   if (config.model.type == "gemma4" && vision_session) {
     SessionInfo vision_info;
@@ -83,6 +85,7 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
   auto processor = processor_factory_.find(config.model.type);
   if (processor != processor_factory_.end()) {
     processor_ = processor->second(config, session_info, thread_pool_.get());
+    processor_->ConfigureTokenizer(*tokenizer_);
   } else {
     throw std::runtime_error("MultiModalProcessor cannot be created. " + config.model.type + " is not a registered multi-modal model type.");
   }

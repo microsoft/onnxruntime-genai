@@ -10,6 +10,7 @@ import gc
 import hashlib
 import importlib
 import importlib.util
+import itertools
 import json
 import math
 import os
@@ -32,6 +33,9 @@ SUITES = (
     "cancellation",
     "pressure",
     "random",
+    "growing-chain",
+    "tier-pressure",
+    "history-capacity",
 )
 SPECULATIVE_COUNTERS = (
     "draft_forward_passes",
@@ -118,6 +122,7 @@ class Action:
     keep_open: bool = False
     release: bool = False
     cancel_after_runs: int = 0
+    stagger_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -178,7 +183,7 @@ def make_plan(
     )
     if not lengths or min(lengths) <= 0:
         raise ValueError("Prompt lengths must be positive.")
-    if profile.max_batch_size < 2 and {"concurrency", "leases"} & set(suites):
+    if profile.max_batch_size < 2 and {"concurrency", "leases", "tier-pressure"} & set(suites):
         raise ValueError(
             "Concurrency/lease suites need max_batch_size >= 2; select other suites or override the profile."
         )
@@ -315,6 +320,28 @@ def make_plan(
             name = f"random-branch-{index}"
             specs[name] = PromptSpec(name, long_length, split, index + 1)
             scenarios.append(Scenario(name, (Action(("long",), "cold"), Action((name,)), Action((name,), "warm"))))
+    if "growing-chain" in suites:
+        chain = []
+        for index in range(pressure_requests):
+            name = f"chain-{index}"
+            specs[name] = PromptSpec(name, max(long_length, profile.draft_window + chunk + 1) + index * chunk)
+            chain.append(Action((name,), "cold" if index == 0 else "safe"))
+        for endpoint in sorted({0, max(0, pressure_requests - 2)}):
+            scenarios.append(Scenario(f"chain-revisit-{endpoint}", (*chain, Action((f"chain-{endpoint}",)))))
+    if "tier-pressure" in suites:
+        actions = [Action(("long",), "cold")]
+        for index in range(pressure_requests):
+            name = f"tier-churn-{index}"
+            specs[name] = PromptSpec(name, long_length, 0, index + 1, mutation_width=block)
+            actions.append(Action(("long", name), stagger_tokens=1))
+        scenarios.append(Scenario("decode-with-prefill-tier-pressure", tuple(actions), uncached_control=True))
+    if "history-capacity" in suites:
+        histories = []
+        for index in range(pressure_requests):
+            name = f"history-{index}"
+            specs[name] = PromptSpec(name, long_length, 0, index + 1, mutation_width=block)
+            histories.append(Action((name,)))
+        scenarios.append(Scenario("retained-history-revisits", (*histories, *histories)))
     used = {name for scenario in scenarios for action in scenario.actions for name in action.prompts}
     return {name: spec for name, spec in specs.items() if name in used}, scenarios
 
@@ -460,6 +487,8 @@ class Pending:
     tokens: list[int] = field(default_factory=list)
     text: str = ""
     ttft: float | None = None
+    last_token_s: float | None = None
+    inter_token_s: list[float] = field(default_factory=list)
     first_reasoning: float | None = None
     cancel_requested: bool = False
 
@@ -485,22 +514,32 @@ class Driver:
         pending = {}
         before = dict(self.engine.get_speculative_stats())
         completed = []
+        phase_started = time.perf_counter()
         deadline = time.monotonic() + self.args.timeout_seconds
         buffer = self.engine.create_event_buffer(self.args.event_buffer_size)
+        queued = list(action.prompts)
+        emitted = 0
+
+        def admit(name):
+            tokens = self.prompts[name]
+            options = self.og.RequestOptions()
+            options.set_max_session_tokens(len(tokens) + self.args.generated_tokens)
+            request = self.engine.create_request(options=options)
+            state = Pending(name, request, 0, time.perf_counter(), self.tokenizer.create_stream())
+            pending[request] = state
+            turn = self.og.TurnOptions(request)
+            turn.set_do_sample(False)
+            turn.set_max_generated_tokens(self.args.generated_tokens)
+            state.turn_id = request.begin_turn(self.np.asarray(tokens, dtype=self.np.int32), turn)
+
         try:
-            for name in action.prompts:
-                tokens = self.prompts[name]
-                options = self.og.RequestOptions()
-                options.set_max_session_tokens(len(tokens) + self.args.generated_tokens)
-                request = self.engine.create_request(options=options)
-                state = Pending(name, request, 0, time.perf_counter(), self.tokenizer.create_stream())
-                pending[request] = state
-                turn = self.og.TurnOptions(request)
-                turn.set_do_sample(False)
-                turn.set_max_generated_tokens(self.args.generated_tokens)
-                state.turn_id = request.begin_turn(self.np.asarray(tokens, dtype=self.np.int32), turn)
+            while queued and (not action.stagger_tokens or not pending):
+                admit(queued.pop(0))
             runs = 0
-            while self.engine.has_pending_requests():
+            while queued or self.engine.has_pending_requests():
+                if queued and (not pending or emitted >= action.stagger_tokens):
+                    admit(queued.pop(0))
+                    emitted = 0
                 if time.monotonic() > deadline or runs >= self.args.max_run_calls:
                     raise TimeoutError("Engine exceeded the phase deadline/run-call budget.")
                 for event in self.engine.run(buffer):
@@ -520,6 +559,10 @@ class Driver:
                         raise RuntimeError("Engine returned an event for a different turn.")
                     elapsed = time.perf_counter() - state.started
                     if flags & self.og.EngineEventFlags.TOKEN:
+                        emitted += 1
+                        if state.last_token_s is not None:
+                            state.inter_token_s.append(elapsed - state.last_token_s)
+                        state.last_token_s = elapsed
                         state.tokens.append(int(event.token))
                         state.text += state.stream.decode(int(event.token))
                         if state.ttft is None:
@@ -547,6 +590,7 @@ class Driver:
                                 "tokens": state.tokens,
                                 "cancelled": cancelled,
                                 "ttft_s": state.ttft,
+                                "inter_token_s": state.inter_token_s,
                                 "first_reasoning_s": state.first_reasoning,
                                 "elapsed_s": elapsed,
                                 "finish_reason": str(event.finish_reason),
@@ -574,7 +618,12 @@ class Driver:
             delta = {name: after[name] - before[name] for name in SPECULATIVE_COUNTERS}
             if delta["dflash2_failures"] or delta["dflash2_disables"] or delta["mtp_failures"]:
                 raise RuntimeError(f"Drafter failure/fallback during phase: {delta}.")
-            return completed, {"before": before, "after": after, "delta": delta}
+            return completed, {
+                "before": before,
+                "after": after,
+                "delta": delta,
+                "elapsed_s": time.perf_counter() - phase_started,
+            }
         finally:
             for state in pending.values():
                 state.request.close()
@@ -596,6 +645,34 @@ def make_model(og, args, profile, enabled, draft_mode, source_config):
 def save_report(path, report):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+
+
+def timing_summary(scenarios):
+    def distribution(values):
+        values = sorted(value for value in values if value is not None)
+        return {
+            "samples": len(values),
+            **{
+                f"p{percentile}_s": values[max(0, math.ceil(len(values) * percentile / 100) - 1)] if values else None
+                for percentile in (50, 95, 99)
+            },
+        }
+
+    summary = {}
+    for name in sorted({scenario["name"] for scenario in scenarios}):
+        selected = [scenario for scenario in scenarios if scenario["name"] == name]
+        steps = [step for scenario in selected for step in scenario["steps"]]
+        rows = [row for step in steps for row in step["rows"] if not row["cancelled"]]
+        elapsed = sum(step.get("speculative_stats", {}).get("elapsed_s", 0) for step in steps)
+        summary[name] = {
+            "repetitions": len(selected),
+            "failed_repetitions": sum(scenario["status"] != "passed" for scenario in selected),
+            "request": distribution(row["elapsed_s"] for row in rows),
+            "ttft": distribution(row["ttft_s"] for row in rows),
+            "inter_token": distribution(value for row in rows for value in row["inter_token_s"]),
+            "generated_tokens_per_s": sum(len(row["tokens"]) for row in rows) / elapsed if elapsed else None,
+        }
+    return summary
 
 
 def run_uncached_controls(
@@ -752,9 +829,9 @@ def run_profile(og, np, args, source_config, profile, specs, scenarios, draft_mo
         model, overlay = make_model(og, args, cached_profile, True, draft_mode, source_config)
         tokenizer = og.Tokenizer(model)
         try:
-            for scenario in selected:
+            for repeat, scenario in itertools.product(range(args.scenario_repeats), selected):
                 driver = Driver(og, np, model, tokenizer, prompts, args, template_thinks)
-                result = {"name": scenario.name, "steps": [], "status": "running"}
+                result = {"name": scenario.name, "repeat": repeat, "steps": [], "status": "running"}
                 result["overlay"] = overlay
                 entry["scenarios"].append(result)
                 previous = {}
@@ -832,6 +909,8 @@ def run_profile(og, np, args, source_config, profile, specs, scenarios, draft_mo
         finally:
             del tokenizer, model
             gc.collect()
+    entry["timing"] = timing_summary(entry["scenarios"])
+    save_report(args.output, report)
 
 
 def parser():
@@ -892,6 +971,12 @@ def parser():
         help="Repeat each cache-disabled reference to detect baseline instability; one run leaves stability unchecked.",
     )
     result.add_argument("--event-buffer-size", type=positive_int, default=1)
+    result.add_argument(
+        "--scenario-repeats",
+        type=positive_int,
+        default=1,
+        help="Repeat each complete scenario with a fresh Engine; retain every repetition and its correctness checks.",
+    )
     result.add_argument("--timeout-seconds", type=positive_float, default=300)
     result.add_argument("--max-run-calls", type=positive_int, default=100000)
     result.add_argument(

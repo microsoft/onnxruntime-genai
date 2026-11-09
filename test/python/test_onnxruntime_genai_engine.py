@@ -554,6 +554,109 @@ def _generate_isolated(model, prompt, max_new_tokens):
     return sink.tokens
 
 
+@pytest.mark.parametrize("chunk_size", [4, 5])
+def test_sliding_window_prefix_cache_matches_ring_execution(tmp_path, chunk_size):
+    # Use ordinary ONNX cache reads/writes so CPU can exercise both block tables. Logits depend
+    # on the full-attention first token and the oldest token of a four-position sliding window.
+    graph_model = onnx.load(_MODEL_DIR / "decoder.onnx")
+    helper, tensor = onnx.helper, onnx.TensorProto
+    graph_model.graph.input.append(
+        helper.make_tensor_value_info("block_table_windowed", tensor.INT32, ["batch", "max_blocks"])
+    )
+    for value in list(graph_model.graph.input) + list(graph_model.graph.output):
+        if value.name.startswith(("past_key_values.", "present.")):
+            dimension = value.type.tensor_type.shape.dim[0]
+            dimension.ClearField("dim_value")
+            dimension.dim_param = "num_blocks"
+    next(value for value in graph_model.graph.initializer if value.name == "cache_shape").CopyFrom(
+        helper.make_tensor("cache_shape", tensor.INT64, [4], [-1, 4, 1, 1])
+    )
+    graph_model.graph.initializer.append(helper.make_tensor("window_offset", tensor.INT64, [], [3]))
+    window_nodes = [
+        helper.make_node("Cast", ["block_table_windowed"], ["window_table"], to=tensor.INT64),
+        helper.make_node("GatherND", ["window_table", "block_gather_index"], ["window_block"]),
+        helper.make_node("Mul", ["window_block", "cB"], ["window_base"]),
+        helper.make_node("Add", ["window_base", "slot_in_block"], ["window_phys"]),
+        helper.make_node("Unsqueeze", ["window_phys", "axis1"], ["window_scatter"]),
+    ]
+    for side in ("key", "value"):
+        window_nodes.extend(
+            [
+                helper.make_node("Reshape", [f"past_key_values.4.{side}", "flat"], [f"window_{side}_past"]),
+                helper.make_node(
+                    "ScatterND",
+                    [f"window_{side}_past", "window_scatter", "token_f"],
+                    [f"window_{side}_present"],
+                ),
+                helper.make_node("Reshape", [f"window_{side}_present", "cache_shape"], [f"present.4.{side}"]),
+            ]
+        )
+    window_nodes.extend(
+        [
+            helper.make_node("Sub", ["pos", "window_offset"], ["history_unclamped"]),
+            helper.make_node("Max", ["history_unclamped", "c0"], ["history_pos"]),
+            helper.make_node("Div", ["history_pos", "cB"], ["history_col"]),
+            helper.make_node("Mod", ["history_pos", "cB"], ["history_slot"]),
+            helper.make_node("Unsqueeze", ["history_col", "axis1"], ["history_col_col"]),
+            helper.make_node("Concat", ["row_id_col", "history_col_col"], ["history_index"], axis=1),
+            helper.make_node("GatherND", ["window_table", "history_index"], ["history_block"]),
+            helper.make_node("Mul", ["history_block", "cB"], ["history_base"]),
+            helper.make_node("Add", ["history_base", "history_slot"], ["history_phys"]),
+            helper.make_node("Gather", ["window_value_present", "history_phys"], ["cur_value"], axis=0),
+        ]
+    )
+    nodes = []
+    for node in graph_model.graph.node:
+        if node.output[0].startswith("present.4."):
+            continue
+        if node.output[0] == "cur_value":
+            nodes.extend(window_nodes)
+        else:
+            nodes.append(node)
+    del graph_model.graph.node[:]
+    graph_model.graph.node.extend(nodes)
+    onnx.checker.check_model(graph_model)
+    onnx.save_model(graph_model, tmp_path / "decoder.onnx")
+
+    config = json.loads((_MODEL_DIR / "genai_config.json").read_text())
+    config["model"]["decoder"]["sliding_window"] = {"window_size": 4, "layers": [4]}
+    config["model"]["decoder"]["inputs"]["block_table_windowed"] = "block_table_windowed"
+    config["search"]["chunk_size"] = chunk_size
+
+    def make_engine(caching):
+        config["engine"]["dynamic_batching"]["prefix_caching"] = caching
+        (tmp_path / "genai_config.json").write_text(json.dumps(config))
+        return og.Engine(og.Model(str(tmp_path)))
+
+    def generate(engine, prompts):
+        sinks = {}
+        for prompt in prompts:
+            request = engine.create_request()
+            options = og.TurnOptions(request)
+            options.set_min_generated_tokens(8)
+            options.set_max_generated_tokens(8)
+            sinks[request] = _Sink()
+            request.begin_turn(np.asarray(prompt, dtype=np.int32), options)
+        _run(engine, sinks)
+        results = list(sinks.values())
+        assert all(len(sink.tokens) == 8 for sink in results)
+        return results
+
+    prompt = list(range(2, 19))
+    branch = prompt.copy()
+    branch[9] += 1
+    branch[14] += 1
+    references = [generate(make_engine(False), [tokens])[0].tokens for tokens in (prompt, branch)]
+    engine = make_engine(True)
+    for tokens, expected, hit in ((prompt, references[0], 0), (branch, references[1], 8)):
+        result = generate(engine, [tokens])[0]
+        assert result.tokens == expected
+        assert result.usage.cached_prompt_tokens == hit
+    for result, expected in zip(generate(engine, [prompt, branch]), references, strict=True):
+        assert result.tokens == expected
+        assert result.usage.cached_prompt_tokens == 16
+
+
 def test_engine_capabilities(model):
     engine = og.Engine(model)
 
@@ -623,6 +726,72 @@ def test_engine_run_releases_gil(model):
         request.close()
 
     assert not thread.is_alive()
+
+
+def test_formatted_begin_turn_releases_gil(model):
+    engine = og.Engine(model)
+    value = "ABC"
+    worker_ready = threading.Event()
+    allow_worker = threading.Event()
+    worker_progressed = threading.Event()
+
+    def worker():
+        worker_ready.set()
+        allow_worker.wait()
+        worker_progressed.set()
+
+    thread = threading.Thread(target=worker)
+    previous_switch_interval = sys.getswitchinterval()
+    thread.start()
+    try:
+        assert worker_ready.wait(timeout=5)
+        # Only an explicit native GIL release, not periodic Python switching, may let the worker run.
+        sys.setswitchinterval(10.0)
+        deadline = time.monotonic() + 5.0
+        allow_worker.set()
+        while True:
+            request = engine.create_request()
+            try:
+                request.begin_turn(value)
+            finally:
+                request.close()
+            if worker_progressed.is_set() or time.monotonic() >= deadline:
+                break
+        assert worker_progressed.is_set()
+    finally:
+        sys.setswitchinterval(previous_switch_interval)
+        allow_worker.set()
+        thread.join(timeout=5)
+
+    assert not thread.is_alive()
+
+
+def test_formatted_begin_turn_validation_preserves_request(model):
+    engine = og.Engine(model)
+    request = engine.create_request()
+    value = "ABC"
+    errors = []
+
+    def begin_off_owner_thread():
+        try:
+            request.begin_turn(value)
+        except Exception as error:
+            errors.append(error)
+
+    try:
+        with pytest.raises(ValueError, match="embedded NUL"):
+            request.begin_turn(value + "\0")
+        thread = threading.Thread(target=begin_off_owner_thread)
+        thread.start()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        assert len(errors) == 1
+        assert isinstance(errors[0], RuntimeError)
+        assert "Engine operations must be called from the Engine owner thread" in str(errors[0])
+        turn = request.begin_turn(value)
+        assert turn == 1
+    finally:
+        request.close()
 
 
 def test_model_declares_paged_config():

@@ -3,6 +3,8 @@
 
 #include "session_options.h"
 
+#include <charconv>
+
 #include "models/session_options.h"
 #include "ep/cuda/session_options.h"
 #include "models/io/kv_cache.h"
@@ -11,7 +13,19 @@ namespace Generators::NvTensorRtRtxExecutionProvider {
 
 namespace {
 
-void ConfigureProfile(const Config& config, OrtSessionOptions& session_options, bool is_multi_profile_enabled) {
+void ConfigureProfile(const Config& config,
+                      OrtSessionOptions& session_options,
+                      bool is_multi_profile_enabled) {
+  const bool has_min = session_options.HasConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_profile_min_shapes");
+  const bool has_opt = session_options.HasConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_profile_opt_shapes");
+  const bool has_max = session_options.HasConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_profile_max_shapes");
+  if (has_min || has_opt || has_max) {
+    if (!(has_min && has_opt && has_max)) {
+      throw std::runtime_error("Explicit TRT-RTX profiles must specify nv_profile_min_shapes, nv_profile_opt_shapes, and nv_profile_max_shapes together");
+    }
+    return;
+  }
+
   // Get model parameters from decoder config
   const int num_layers = config.model.decoder.num_hidden_layers;
   const int num_kv_heads = config.model.decoder.num_key_value_heads;
@@ -135,13 +149,60 @@ void ConfigureProfile(const Config& config, OrtSessionOptions& session_options, 
   }
 }
 
+constexpr const char* kPluginEpName = "NvTensorRTRTXExecutionProvider";
+
+// Value of the device_id provider option, if set.
+std::optional<int> GetDeviceIdOption(const Config::ProviderOptions& provider_options) {
+  for (const auto& [name, value] : provider_options.options) {
+    if (name != "device_id")
+      continue;
+    int device_id{};
+    const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), device_id);
+    if (error != std::errc{} || end != value.data() + value.size() || device_id < 0)
+      throw std::runtime_error("Invalid NvTensorRtRtx device_id provider option: " + value);
+    return device_id;
+  }
+  return std::nullopt;
+}
+
+// CUDA ordinal of the EP device. For the plugin EP this is the device of the allocator
+// advertised by the selected OrtEpDevice (the same one AppendExecutionProviderV2 passes to the EP), which
+// is not necessarily 0. For the built-in EP it is the device_id provider option, which defaults to 0.
+std::optional<int> GetSelectedCudaDeviceId(const Config::ProviderOptions& provider_options) {
+  const auto device_id_option = GetDeviceIdOption(provider_options);
+
+  const auto ep_devices = FindRegisteredEpDevices(kPluginEpName);
+  if (!ep_devices.empty()) {
+    const auto filtered_ep_devices = ApplyDeviceFiltering(provider_options, ep_devices);
+    const OrtMemoryInfo* memory_info = filtered_ep_devices.front()->GetMemoryInfo(OrtDeviceMemoryType_DEFAULT);
+    if (!memory_info)
+      return std::nullopt;
+    const int device_id = memory_info->GetDeviceId();
+    // The built-in EP registered as a plugin applies a device_id option over the selected device, which
+    // would put the session on another device than the one the stream and allocator are bound to.
+    if (device_id_option && *device_id_option != device_id)
+      throw std::runtime_error("NvTensorRtRtx device_id provider option " + std::to_string(*device_id_option) +
+                               " conflicts with the selected EP device, which is CUDA device " +
+                               std::to_string(device_id) +
+                               ". Select the device with device_filtering_options or remove device_id.");
+    return device_id;
+  }
+
+  // The built-in EP runs on device 0 when device_id is not set. Bind to it explicitly rather than to
+  // whichever device happened to be current when the device interface was created.
+  return device_id_option.value_or(0);
+}
+
 }  // namespace
 
 DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
                                          const Config::ProviderOptions& provider_options,
                                          const Config& config,
-                                         bool /*disable_graph_capture*/) {
+                                         bool disable_graph_capture) {
   auto device = GetDeviceInterface(DeviceType::NvTensorRtRtx);
+  // Bind the device interface to the EP's device before its stream is handed to the EP below.
+  if (const auto device_id = GetSelectedCudaDeviceId(provider_options))
+    device->SelectDevice(*device_id);
   Generators::CUDAExecutionProvider::AddCudaStreamConfig(session_options, device);
   Generators::CUDAExecutionProvider::AddCudaStreamConfig(
       session_options, device, "ep.nvtensorrtrtxexecutionprovider.user_compute_stream");
@@ -149,7 +210,8 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
   // Configure NvTensorRT-specific settings (needed for both pre-registered and built-in paths)
   NvTensorRtRtxExecutionProvider::ConfigureProfile(config, session_options,
                                                    IsMultiProfileEnabled(config.model.decoder.session_options));
-  if (IsGraphCaptureEnabled(config.model.decoder.session_options)) {
+  if (!disable_graph_capture &&
+      IsGraphCaptureEnabled(config.model.decoder.session_options)) {
     session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.enable_cuda_graph", "1");
   }
 

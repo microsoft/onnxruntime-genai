@@ -110,6 +110,87 @@ def load_builder_module(module_name):
     return module
 
 
+def check_node_shapes(model):
+    """Run ONNX shape inference on each node of a ModelProto alone, from the shapes the builder declared.
+
+    A whole-graph onnx.shape_inference pass stops reporting errors after the first op it does not know, and
+    builder graphs use onnxruntime-only ops from the start, so it misses shape errors onnxruntime rejects at load.
+    Constant nodes (make_constant declares them with shape []) are skipped; a node that reads a Constant is
+    checked together with it. Any other input without a declared shape is an error. onnx has no schema for
+    onnxruntime-only ops, so their output shapes are not checked.
+    """
+    import onnx  # noqa: PLC0415
+
+    graph = model.graph
+    declared = {value.name: value for value in (*graph.input, *graph.value_info, *graph.output)}
+    initializers = {tensor.name: tensor for tensor in graph.initializer}
+    constants = {node.output[0]: node for node in graph.node if node.op_type == "Constant"}
+    for node in graph.node:
+        if node.op_type == "Constant":
+            continue
+        inputs = [name for name in node.input if name and name not in initializers and name not in constants]
+        undeclared = [
+            name for name in inputs if name not in declared or not declared[name].type.tensor_type.HasField("shape")
+        ]
+        assert not undeclared, f"{node.name} ({node.op_type}) reads inputs with no declared shape: {undeclared}"
+        one_node = onnx.helper.make_graph(
+            [*(constants[name] for name in node.input if name in constants), node],
+            node.name,
+            [declared[name] for name in inputs],
+            [declared[name] for name in node.output if name in declared],
+            initializer=[initializers[name] for name in node.input if name in initializers],
+        )
+        onnx.shape_inference.infer_shapes(
+            onnx.helper.make_model(one_node, opset_imports=model.opset_import, ir_version=model.ir_version),
+            check_type=True,
+            strict_mode=True,
+        )
+
+
+@functools.cache
+def ort_runs_tensor_scatter():
+    """Whether the installed onnxruntime has a CPU kernel for the opset-24 TensorScatter node.
+
+    The Nemotron Parse decoder updates its KV cache with TensorScatter. Some CI jobs pin an older
+    onnxruntime: the DirectML job's onnxruntime-directml 1.25.0.dev knows the opset-24 schema but has no
+    CPU kernel for it. This loads a one-node model once, so a load error in the model under test still
+    fails that test instead of skipping it. Without the Python onnxruntime package, assume support.
+    """
+    try:
+        import onnx  # noqa: PLC0415
+        import onnxruntime  # noqa: PLC0415
+    except ImportError:
+        return True
+
+    def value(name, elem_type, shape):
+        return onnx.helper.make_tensor_value_info(name, elem_type, shape)
+
+    graph = onnx.helper.make_graph(
+        [onnx.helper.make_node("TensorScatter", ["past", "updates", "write_indices"], ["present"], axis=1)],
+        "tensor_scatter_probe",
+        [
+            value("past", onnx.TensorProto.FLOAT, [1, 4, 2]),
+            value("updates", onnx.TensorProto.FLOAT, [1, 1, 2]),
+            value("write_indices", onnx.TensorProto.INT64, [1]),
+        ],
+        [value("present", onnx.TensorProto.FLOAT, [1, 4, 2])],
+    )
+    model = onnx.helper.make_model(graph, opset_imports=[onnx.helper.make_opsetid("", 24)], ir_version=10)
+    try:
+        onnxruntime.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"])
+    except Exception as error:
+        message = str(error)
+        if (
+            "Could not find an implementation" in message
+            or "Kernel not found" in message
+            or "is not a registered function/op" in message
+            or "Current official support for domain ai.onnx is till opset" in message
+        ):
+            return False
+        raise
+    return True
+
+
 @functools.cache
 def ort_runs_causal_conv_with_state():
     """Whether the installed onnxruntime can load the CausalConvWithState node the LFM2 builder writes.
@@ -147,6 +228,51 @@ def ort_runs_causal_conv_with_state():
     except Exception as error:
         message = str(error)
         if "is not a registered function/op" in message or "Unrecognized attribute: state_window" in message:
+            return False
+        raise
+    return True
+
+
+@functools.cache
+def ort_runs_bidirectional_group_query_attention():
+    """Whether the installed onnxruntime knows GroupQueryAttention's causal attribute, added in 1.30.
+
+    Tests that run a d1-2B export need this. Like ort_runs_causal_conv_with_state, it loads a one-node model,
+    so a load error in the model under test still fails that test instead of skipping it.
+    """
+    import onnx  # noqa: PLC0415
+    import onnxruntime  # noqa: PLC0415
+
+    def value(name, element_type, shape):
+        return onnx.helper.make_tensor_value_info(name, element_type, shape)
+
+    node = onnx.helper.make_node(
+        "GroupQueryAttention",
+        ["q", "k", "v", "", "", "lengths", "total"],
+        ["y", "present_key", "present_value"],
+        domain="com.microsoft",
+        num_heads=1,
+        kv_num_heads=1,
+        causal=0,
+    )
+    graph = onnx.helper.make_graph(
+        [node],
+        "bidirectional_group_query_attention_probe",
+        [
+            value("q", onnx.TensorProto.FLOAT, [1, 2, 4]),
+            value("k", onnx.TensorProto.FLOAT, [1, 2, 4]),
+            value("v", onnx.TensorProto.FLOAT, [1, 2, 4]),
+            value("lengths", onnx.TensorProto.INT32, [1]),
+            value("total", onnx.TensorProto.INT32, []),
+        ],
+        [value("y", onnx.TensorProto.FLOAT, [1, 2, 4])],
+    )
+    opsets = [onnx.helper.make_opsetid("", 21), onnx.helper.make_opsetid("com.microsoft", 1)]
+    model = onnx.helper.make_model(graph, opset_imports=opsets, ir_version=10)
+    try:
+        onnxruntime.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"])
+    except Exception as error:
+        if "Unrecognized attribute: causal" in str(error):
             return False
         raise
     return True

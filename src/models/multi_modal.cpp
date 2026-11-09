@@ -4,6 +4,7 @@
 #include "generator/generators.h"
 #include "gemma4_vision_state.h"
 #include "multi_modal.h"
+#include "nemotron_parse.h"
 #include "models/io/default_position_inputs.h"
 #include "models/io/qwen_vl_position_inputs.h"
 #include "pixtral_vision_state.h"
@@ -11,6 +12,7 @@
 #include <algorithm>
 #include <future>
 #include <numeric>
+#include <utility>
 
 namespace Generators {
 
@@ -65,6 +67,12 @@ int64_t GetImageFeatureBatchSize(const std::vector<ExtraInput>& extra_inputs) {
 }
 
 }  // namespace
+
+std::shared_ptr<Model> MultiModalLanguageModel::Create(std::unique_ptr<Config> config, OrtEnv& ort_env, bool vision, bool speech) {
+  if (config->model.type == "nemotron_parse")
+    return std::make_shared<NemotronParseModel>(std::move(config), ort_env);
+  return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, vision, speech);
+}
 
 MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config, OrtEnv& ort_env, bool vision, bool speech)
     : Model(std::move(config)) {
@@ -772,8 +780,11 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
   //   - input_ids, image_features, audio_features -> |embeddings_model| -> inputs_embeds
   //   - inputs_embeds -> |decoder_model| -> logits
 
+  // A frame sampled for logits the generator discards would have no placeholder in the sequence.
+  const bool sample_audio = !std::exchange(discard_next_logits_, false) && audio_output_;
+  const bool new_turn = std::exchange(new_turn_, false);
   if (audio_output_) {
-    audio_output_->BeginStep(next_tokens, is_prompt_);
+    audio_output_->BeginStep(next_tokens, is_prompt_ || new_turn);
   }
   embedding_state_->UpdateInputsOutputs(next_tokens, is_prompt_);
 
@@ -840,7 +851,7 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
     if (vision_state_) vision_state_.reset();  // The vision state is no longer needed in generation stage
     if (speech_state_) speech_state_.reset();  // The speech state is no longer needed in generation stage
 
-    return audio_output_ ? SampleAudioOrText(logits) : logits;
+    return sample_audio ? SampleAudioOrText(logits) : logits;
   }
 
   embedding_state_->inputs_embeds_.ReuseEmbeddingsBuffer(decoder_state_->inputs_embeds_);
@@ -859,7 +870,7 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
     engram_state_->CopyEmbeddingsTo(*decoder_state_->engram_embeddings_);
   }
   auto logits = decoder_state_->Run(current_length, next_tokens, next_indices);
-  return audio_output_ ? SampleAudioOrText(logits) : logits;
+  return sample_audio ? SampleAudioOrText(logits) : logits;
 }
 
 DeviceSpan<float> MultiModalPipelineState::SampleAudioOrText(DeviceSpan<float> logits) {

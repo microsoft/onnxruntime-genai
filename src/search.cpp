@@ -308,6 +308,8 @@ void GreedySearch_Cpu::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
   }
 
   ResetDone();
+  // A full sequence stays done, as on CUDA, so no sampled token is written past max_length.
+  done_ = sequences_.GetSequenceLength() >= params_->search.max_length;
 }
 
 void GreedySearch_Cpu::RewindTo(size_t index) {

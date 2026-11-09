@@ -85,6 +85,7 @@ class Model:
         *, graph_name=None, graph_opset=20,
     ):
         if graph_name is not None:
+            self.graph_attrs = {**Model.default_graph_attrs(), "ai.onnx": graph_opset}
             Model.make_graph(self, graph_name, opset=graph_opset)
             return
         if config is None or extra_options is None:
@@ -172,9 +173,17 @@ class Model:
         self.hf_remote = extra_options.get("hf_remote", False)
         self.revision = extra_options.get("base_revision")
 
+        self.graph_attrs = Model.default_graph_attrs()
+
         # States for building the model
-        self.make_graph("main_graph", opset=22)
-        self.graph.opset_imports["com.microsoft"] = 1
+        Model.make_graph(
+            self,
+            "main_graph",
+            opset=self.graph_attrs["ai.onnx"],
+            ir_version=self.graph_attrs["ir_version"],
+            producer_name=self.graph_attrs["producer_name"],
+        )
+        self.graph.opset_imports["com.microsoft"] = self.graph_attrs["com.microsoft"]
 
         # EP-specific variables
         self.ep = ep
@@ -296,6 +305,7 @@ class Model:
         # Embedding-specific variables
         self.embed_attrs = {
             "scale": 1,                  # Scale value to multiply output of Embedding layer by
+            "emit_component": self.use_paged_attention,  # Standalone lookup for external embedding consumers.
         }
 
         # LayerNorm-specific variables
@@ -619,6 +629,8 @@ class Model:
         # Manage the inputs for paged attention
         if self.use_paged_attention:
             self.input_shapes["input_ids"] = ["num_tokens"]
+            if self.exclude_embeds:
+                self.input_shapes["inputs_embeds"] = ["num_tokens", self.hidden_size]
             self.input_shapes["past_key_values.key"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
             self.input_shapes["past_key_values.value"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
             if "attention_mask" in self.input_names:
@@ -1382,13 +1394,16 @@ class Model:
                 dynamic_batching["max_scheduled_tokens"] = int(self.extra_options["max_scheduled_tokens"])
             genai_config["engine"] = {"dynamic_batching": dynamic_batching}
 
+    def load_generation_config(self, extra_kwargs):
+        return GenerationConfig.from_pretrained(
+            self.model_name_or_path, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs
+        )
+
     def make_genai_config(self, config, extra_kwargs, out_dir):
         # Create config with attributes from config.json and generation_config.json (if latter file exists)
         try:
             # Override search attributes in config based on values in generation_config.json
-            gen_config = GenerationConfig.from_pretrained(
-                self.model_name_or_path, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs
-            )
+            gen_config = self.load_generation_config(extra_kwargs)
             defaults = {
                 "bos_token_id": None,
                 "do_sample": False,
@@ -2131,9 +2146,19 @@ class Model:
         ):
             self.make_value(output, ir.DataType.INT32, shape)
 
-    def make_graph(self, graph_name, opset=20, ir_version=10):
+    @staticmethod
+    def default_graph_attrs():
+        """Return the ONNX graph metadata used by the builders' default graphs."""
+        return {
+            "ai.onnx": 22,
+            "com.microsoft": 1,
+            "ir_version": 10,
+            "producer_name": "onnxruntime-genai",
+        }
+
+    def make_graph(self, graph_name, opset=20, ir_version=10, producer_name="onnxruntime-genai"):
         self.graph = ir.Graph(inputs=(), outputs=(), nodes=(), name=graph_name, opset_imports={"": opset})
-        self.model = ir.Model(self.graph, ir_version=ir_version, producer_name="onnxruntime-genai")
+        self.model = ir.Model(self.graph, ir_version=ir_version, producer_name=producer_name)
         self.values = {}
         self.node_names = set()
 
@@ -2669,6 +2694,32 @@ class Model:
         self.make_node("Transpose", inputs=[root_input], outputs=[output], name=name, perm=perm)
         self.make_value(output, dtype, shape=shape)
 
+    def make_tensor_scatter(
+        self,
+        name,
+        data,
+        updates,
+        indices,
+        dtype,
+        shape,
+        *,
+        output=None,
+        axis=-2,
+        mode="linear",
+    ):
+        """Update slices of a tensor with the standard ONNX TensorScatter op."""
+        output = output or f"{name}/output_0"
+        self.make_node(
+            "TensorScatter",
+            inputs=[data, updates, indices],
+            outputs=[output],
+            name=name,
+            axis=axis,
+            mode=mode,
+        )
+        self.make_value(output, dtype, shape=shape)
+        return output
+
     def make_lp_normalization(self, name, root_input, dtype, shape, axis=-1, p=2):
         output = f"{name}/output_0"
         self.make_node("LpNormalization", inputs=[root_input], outputs=[output], name=name, axis=axis, p=p)
@@ -2843,7 +2894,8 @@ class Model:
         state_update_capacity = kwargs.get("state_update_capacity", 0)
         if state_update_capacity:
             inputs.append(kwargs["state_update_capture_count"])
-            inputs.append(kwargs.get("state_update_active", ""))
+            if kwargs.get("state_update_active"):
+                inputs.append(kwargs["state_update_active"])
 
         output = f"{name}/output_0"
         present_conv = kwargs["present_conv_state"]
@@ -4103,8 +4155,7 @@ class Model:
         # For other EPs (CPU, CUDA, WebGPU), create regular If node with multiple outputs
         # Make the following subgraph to decide which cos/sin caches to use in the rotary embeddings
         #
-        # attention_mask --> Shape --> Gather --> Greater --> If --> (cos_cache, sin_cache)
-        #                             (idx=1)
+        # rope_context_length --> Greater --> If --> (cos_cache, sin_cache)
         #
         # Or for PagedAttention (no attention_mask input):
         #
@@ -4113,17 +4164,23 @@ class Model:
         #
 
         basename = "/model/rope_caches_subgraph"
-        gather_name = ""
-        if self.attention_attrs["op_type"] == "GroupQueryAttention":
-            gather_name = "/model/attn_mask_reformat/attn_mask_subgraph/Gather"
+        if not self.use_paged_attention and "input_ids" in self.input_names:
+            self.input_names["rope_context_length"] = "rope_context_length"
+            self.input_types["rope_context_length"] = ir.DataType.INT64
+            self.input_shapes["rope_context_length"] = []
+            self.model.metadata_props["com.microsoft.genai.rope_context_length_input"] = "rope_context_length"
+            self.model.metadata_props["com.microsoft.genai.original_context_length"] = str(self.original_context_length)
+            context_length_input = self.input_names["rope_context_length"]
+        elif self.attention_attrs["op_type"] == "GroupQueryAttention":
+            context_length_input = "/model/attn_mask_reformat/attn_mask_subgraph/Gather/output_0"
         elif self.attention_attrs["op_type"] == "PagedAttention":
             self.make_paged_rotary_multi_cache_subgraph()
-            gather_name = "/model/context_length_subgraph/Mul"
+            context_length_input = "/model/context_length_subgraph/Mul/output_0"
         else:
-            gather_name = "/model/attn_mask_reformat/attn_mask_subgraph/Gather_2"
+            context_length_input = "/model/attn_mask_reformat/attn_mask_subgraph/Gather_2/output_0"
 
         greater_name = f"{basename}/Greater"
-        greater_inputs = [f"{gather_name}/output_0", f"/model/constants/INT64/{self.original_context_length}"]
+        greater_inputs = [context_length_input, f"/model/constants/INT64/{self.original_context_length}"]
         self.make_greater(greater_name, greater_inputs, shape=[])
         if_name = f"{basename}/If"
 
@@ -6882,7 +6939,7 @@ class Model:
                     self.make_embedding(module.weight)
                 else:
                     # Exclude embedding layer from model
-                    if self.extra_options.get("dflash2_path"):
+                    if self.embed_attrs["emit_component"] or self.extra_options.get("dflash2_path"):
                         self.embedding_model = self.make_embedding_component(module.weight)
                     self.layernorm_attrs["root_input"] = "inputs_embeds"
                     self.layernorm_attrs["skip_input"] = "inputs_embeds"
