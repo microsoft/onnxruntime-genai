@@ -97,8 +97,12 @@ class BailingVLModel(Model):
         with open(config_path, encoding="utf-8") as handle:
             genai_config = json.load(handle)
         model_config = genai_config["model"]
+        # Let consumed prepack initializers be released instead of retained in the CUDA arena.
+        model_config["decoder"]["session_options"]["session.use_device_allocator_for_initializers"] = "1"
         model_config["image_token_id"] = config.image_token_id
         model_config["vision_start_token_id"] = config.vision_start_token_id
+        if getattr(config, "video_token_id", None) is not None:
+            model_config["video_token_id"] = config.video_token_id
         vision_config = self.config.vision_config
         model_config["vision"] = {
             "filename": "vision.onnx",
@@ -122,7 +126,48 @@ class BailingVLModel(Model):
     def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
         self.decoder.save_processing(model_name_or_path, extra_kwargs, out_dir)
         if not self.text_only:
-            save_image_processor(model_name_or_path, extra_kwargs, out_dir, self.hf_token)
+            source = save_image_processor(model_name_or_path, extra_kwargs, out_dir, self.hf_token)
+            self.save_video_processing(source, out_dir)
+
+    def save_video_processing(self, source, out_dir):
+        if source.get("use_interleaved_frame_timestamp") is not True:
+            return
+        vision = self.config.vision_config
+        if (
+            source["patch_size"] != vision.patch_size
+            or source["merge_size"] != vision.spatial_merge_size
+            or source["temporal_patch_size"] != 2
+            or source.get("rescale_factor", 1 / 255) != 1 / 255
+            or any(source.get(option, True) is not True for option in ("do_rescale", "do_normalize"))
+        ):
+            raise ValueError("Ling video requires the source interleaved temporal preprocessing contract")
+        config_path = os.path.join(out_dir, "genai_config.json")
+        with open(config_path, encoding="utf-8") as handle:
+            config = json.load(handle)
+        if not config["model"].get("video_token_id"):
+            raise ValueError("Ling video requires the source video token ID")
+        with open(os.path.join(out_dir, "processor_config.json"), encoding="utf-8") as handle:
+            processor = json.load(handle)["processor"]
+        processor["name"] = "bailing_video_processor"
+        processor["transforms"] = processor["transforms"][2:]
+        # Publisher V1 fetch policy sizes the whole clip before temporal padding.
+        processor["total_pixels"] = 4718592
+        processor["transforms"][0]["operation"]["attrs"].update(
+            height=vision.patch_size * vision.spatial_merge_size,
+            width=vision.patch_size * vision.spatial_merge_size,
+            smart_resize=0,
+            min_pixels=43008,
+            max_pixels=4718592,
+            interpolation="CUBIC_OPENCV",
+            coefficient_type="int16",
+        )
+        processor["transforms"][2]["operation"]["attrs"]["qwen3_vl"] = 0
+        filename = "video_processor_config.json"
+        with open(os.path.join(out_dir, filename), "w", encoding="utf-8") as handle:
+            json.dump({"processor": processor}, handle, indent=4)
+        config["model"]["vision"]["video_config_filename"] = filename
+        with open(config_path, "w", encoding="utf-8") as handle:
+            handle.write(serialize_genai_config(config))
 
 
 class BailingVLTextModel(BailingMoeV3Model):
@@ -133,6 +178,15 @@ class BailingVLTextModel(BailingMoeV3Model):
         self.rope_attrs["mrope_section"] = list(config.mrope_section)
         self.rope_attrs["op_type"] = "RotaryEmbedding" if extra_options.get("text_only", False) else "MRotaryEmbedding"
         self.rope_attrs["interleaved"] = 1
+        if self.rope_attrs["op_type"] == "MRotaryEmbedding":
+            if self.original_context_length != self.context_length:
+                raise ValueError("Ling vision requires its unscaled source rotary context")
+            self.rope_attrs["position_start"] = -self.original_context_length
+            self.rope_attrs["cache_length"] = self.original_context_length + self.context_length
+            self.rope_attrs["cast"]["use_fp32"] = True
+            self.model.metadata_props["com.microsoft.genai.vision_position_range"] = (
+                f"{self.rope_attrs['position_start']},{self.context_length - 1}"
+            )
         self.get_mrope_owners(self.qk_rope_head_dim)
 
     def get_mrope_owners(self, rotary_dim):
