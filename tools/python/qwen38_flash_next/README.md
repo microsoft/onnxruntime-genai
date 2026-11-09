@@ -75,16 +75,22 @@ python tools/python/qwen38_flash_next/build_package_gguf.py \
 
 ## 4. Component Precision Options (`precision_options.py`)
 
-Both `build_package.py` and `build_package_gguf.py` accept `--precision-profile {default,fp32,fp32_fp16kv,fp32_fp16kv_v2}` as well as individual per-component flags (`--kv-cache-dtype`, `--rotary-cache-dtype`, `--qsa-qkv-dtype`, `--indexer-dtype`, `--gdn-gate-dtype`, `--gdn-precision`, `--ple-engram`, `--ple-norm-dtype`, `--small-weights-source`):
+Both `build_package.py` and `build_package_gguf.py` accept `--precision-profile {default,fp32,fp32_fp16kv,fp32_fp16kv_v2,fp32_int8kv_v2}` as well as individual per-component flags (`--kv-cache-dtype`, `--rotary-cache-dtype`, `--qsa-qkv-dtype`, `--indexer-dtype`, `--gdn-gate-dtype`, `--gdn-precision`, `--ple-engram`, `--ple-norm-dtype`, `--small-weights-source`, `--emit-int8kv-variant`, `--consolidate-data-files`):
+
+- **Dual-ONNX (`model.onnx` + `model_int8kv.onnx`) & Consolidated External Data (`model.onnx.data`)**:
+  - With `--precision-profile fp32_fp16kv_v2` (or `--emit-int8kv-variant`), the builder emits **both** `model.onnx` (`FP16` KV cache) and `model_int8kv.onnx` (`INT8` KV cache with inline `node_GuardedDSA_*_{k,v}_scale` initializers) in the same package directory, sharing the exact same external weight files.
+  - `genai_config.json` `runtime_profiles` automatically select `"filename": "model_int8kv.onnx"` for VRAM-constrained offload profiles (`consumer-gpu-24g`, `consumer-gpu-32g`, etc., where `session.moe.offload.mode == "required"`) and inherit `"model.onnx"` (`FP16` KV cache) for full-VRAM profiles (`gpu-128k`, `gpu-256k`).
+  - With `--consolidate-data-files` (`consolidate_package_external_data`), all target decoder external `.data` files are merged into a single `4096`-byte page-aligned `model.onnx.data` file (compatible with `PosixEnv::MapFileIntoMemory` and `PromoteFileMappingToSharedReadOnly` for QMoE offload), leaving only 3 `.data` files in the package (`embedding.onnx.data`, `dflash2.onnx.data`, and `model.onnx.data`).
 
 ```bash
 # Build rc5_top16_fp32_fp16kv_v2, rc5_all_int4_fp32_fp16kv_v2, and rc5_2b375_fp32_fp16kv_v2
-# (native INT8 PLE + bit-exact RC5-calibrated FP16 V & FP16 KV cache + FP32 rotary cache + FP32 GDN/indexer/PLE norms):
+# (emits both model.onnx [FP16 KV] and model_int8kv.onnx [INT8 KV] + consolidated model.onnx.data):
 python tools/python/qwen38_flash_next/build_package.py \
   --hf-dir /data/tlwu/Qwen3.8-Flash-Next \
   --dflash-dir /data/tlwu/Qwen3.8-Flash-Next-DFlash2 \
   --preset top16_44_33_b64,qwen_flash_next_int4_int8_rc5_contrib_dflash2,2b375_x02_y14_z32_dp23_b64 \
   --precision-profile fp32_fp16kv_v2 \
+  --consolidate-data-files \
   --out /data/tlwu/qwen_flash_next_rc5_v2
 
 # Build rc5_all_int4_fp32_fp16kv (FP16 KV cache + FP32 rotary cache + FP32 GDN/indexer/PLE norms + Q8_0 engram):

@@ -1907,7 +1907,7 @@ void Qwen38GraphEngine::RunTarget(int rows, int phase, const Qwen38PromptRunHint
 
 void Qwen38GraphEngine::RunTarget(Direction& direction, const Qwen38PromptRunHints* prompt,
                                   Qwen38SlotMask participants) {
-  OrtRunOptions* options = run_hints_.InWarmup() && offload_warmup_run_options_
+  OrtRunOptions* options = offload_warmup_run_options_
                                ? offload_warmup_run_options_.get()
                                : direction.run_options.get();
   RunSession(*model_.session_target_, options, *direction.binding, prompt, participants);

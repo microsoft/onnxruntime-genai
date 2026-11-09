@@ -40,13 +40,15 @@ class PrecisionConfig:
     profile: str = "default"
     kv_cache_dtype: str = "int8"  # int8 | bf16 | fp16
     rotary_cache_dtype: str = "bf16"  # bf16 | fp32
-    qsa_qkv_dtype: str = "default"  # default | fp16
+    qsa_qkv_dtype: str = "default"  # default | v_rc5_fp16 | kv_fp16 | fp16
     indexer_dtype: str = "default"  # default | int8 | bf16 | fp32
     gdn_gate_dtype: str = "default"  # default | int8 | bf16 | fp32
     gdn_precision: str = "bf16"  # bf16 | fp32
     ple_engram: str = "default"  # default | int8 | iq4_nl | q8_0
     ple_norm_dtype: str = "bf16"  # bf16 | fp32
     small_weights_source: str = "default"  # default | gguf | hf_bf16
+    emit_int8kv_variant: bool = False  # emit model_int8kv.onnx alongside model.onnx when kv_cache_dtype in ("bf16", "fp16")
+    consolidate_data_files: bool = False  # consolidate target .data files into a single model.onnx.data
     engram_gguf_path: Path | None = None
 
     def is_non_default(self) -> bool:
@@ -61,6 +63,8 @@ class PrecisionConfig:
             or self.ple_engram not in ("default",)
             or self.ple_norm_dtype != "bf16"
             or self.small_weights_source not in ("default", "gguf")
+            or self.emit_int8kv_variant
+            or self.consolidate_data_files
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -74,13 +78,14 @@ def add_precision_cli_args(ap: argparse.ArgumentParser) -> None:
     grp = ap.add_argument_group("Component Precision & Long-Context Options")
     grp.add_argument(
         "--precision-profile",
-        choices=("default", "fp32", "fp32_fp16kv", "fp32_fp16kv_v2"),
+        choices=("default", "fp32", "fp32_fp16kv", "fp32_fp16kv_v2", "fp32_int8kv_v2"),
         default="default",
         help=(
             "Preset precision profile: 'default' (standard INT8 KV / BF16 kernels), "
             "'fp32' (BF16 KV + FP32 Indexer + FP32 GDN gates/state + Q8_0 Engram + FP32 PLE norm + HF BF16 small weights), "
             "'fp32_fp16kv' (same as 'fp32' with FP16 KV cache + FP32 QSA rotary caches and FP16 RMSNormRotary Q/K outputs), "
-            "or 'fp32_fp16kv_v2' (FP16 QSA Q/K/V/O projections + FP16 KV cache + FP32 QSA rotary caches + FP32 Indexer + FP32 GDN gates/state + native INT8 PLE). "
+            "'fp32_fp16kv_v2' (RC5-calibrated FP16 V + FP16 KV cache + FP32 QSA rotary caches + FP32 Indexer + FP32 GDN gates/state + native INT8 PLE), "
+            "or 'fp32_int8kv_v2' (same as 'fp32_fp16kv_v2' with INT8 KV cache for VRAM-limited offload). "
             "Any individual component flag below overrides the profile."
         ),
     )
@@ -138,6 +143,34 @@ def add_precision_cli_args(ap: argparse.ArgumentParser) -> None:
         default=None,
         help="For GGUF builds: source for small weights hc_* and shared_expert.* (gguf or hf_bf16)",
     )
+    grp.add_argument(
+        "--emit-int8kv-variant",
+        dest="emit_int8kv_variant",
+        action="store_true",
+        default=None,
+        help="When building an FP16/BF16 KV cache package, also emit model_int8kv.onnx sharing all weights for VRAM-limited offload",
+    )
+    grp.add_argument(
+        "--no-emit-int8kv-variant",
+        dest="emit_int8kv_variant",
+        action="store_false",
+        default=None,
+        help="Disable emitting model_int8kv.onnx alongside model.onnx",
+    )
+    grp.add_argument(
+        "--consolidate-data-files",
+        dest="consolidate_data_files",
+        action="store_true",
+        default=None,
+        help="Consolidate all target decoder external .data files into a single model.onnx.data file",
+    )
+    grp.add_argument(
+        "--no-consolidate-data-files",
+        dest="consolidate_data_files",
+        action="store_false",
+        default=None,
+        help="Do not consolidate target decoder external .data files into model.onnx.data",
+    )
 
 
 def resolve_precision_config(args: argparse.Namespace) -> PrecisionConfig:
@@ -178,6 +211,21 @@ def resolve_precision_config(args: argparse.Namespace) -> PrecisionConfig:
             ple_engram="default",
             ple_norm_dtype="fp32",
             small_weights_source="hf_bf16",
+            emit_int8kv_variant=True,
+            consolidate_data_files=True,
+        )
+    elif prof == "fp32_int8kv_v2":
+        cfg = PrecisionConfig(
+            profile="fp32_int8kv_v2",
+            kv_cache_dtype="int8",
+            rotary_cache_dtype="fp32",
+            qsa_qkv_dtype="v_rc5_fp16",
+            indexer_dtype="fp32",
+            gdn_gate_dtype="fp32",
+            gdn_precision="fp32",
+            ple_engram="default",
+            ple_norm_dtype="fp32",
+            small_weights_source="hf_bf16",
         )
     else:
         cfg = PrecisionConfig(profile="default")
@@ -203,9 +251,160 @@ def resolve_precision_config(args: argparse.Namespace) -> PrecisionConfig:
         cfg.ple_norm_dtype = args.ple_norm_dtype
     if getattr(args, "small_weights_source", None) is not None:
         cfg.small_weights_source = args.small_weights_source
+    if getattr(args, "emit_int8kv_variant", None) is not None:
+        cfg.emit_int8kv_variant = bool(args.emit_int8kv_variant)
+    if getattr(args, "consolidate_data_files", None) is not None:
+        cfg.consolidate_data_files = bool(args.consolidate_data_files)
     if getattr(args, "engram_gguf", None) is not None:
         cfg.engram_gguf_path = args.engram_gguf
     return cfg
+
+
+def consolidate_package_external_data(
+    pkg_dir: Path,
+    target_data_name: str = "model.onnx.data",
+) -> dict[str, object]:
+    """Consolidate all target decoder external `.data` files referenced by `model.onnx` (and `model_int8kv.onnx`)
+    into a single `4096`-byte page-aligned `model.onnx.data` file, leaving only:
+      - `embedding.onnx` + `embedding.onnx.data`
+      - `dflash2.onnx` + `dflash2.onnx.data`
+      - `model.onnx` (+ `model_int8kv.onnx`) + `model.onnx.data`
+    """
+    model_path = pkg_dir / "model.onnx"
+    if not model_path.exists():
+        return {"consolidated": False}
+
+    model = onnx.load(str(model_path), load_external_data=False)
+    int8_path = pkg_dir / "model_int8kv.onnx"
+    model_int8 = onnx.load(str(int8_path), load_external_data=False) if int8_path.exists() else None
+    dflash_path = pkg_dir / "dflash2.onnx"
+    model_dflash = onnx.load(str(dflash_path), load_external_data=False) if dflash_path.exists() else None
+
+    keep_separate = {"embedding.onnx.data", "dflash2.onnx.data", target_data_name}
+    slices_ordered: list[tuple[str, int, int]] = []
+    seen_slices: set[tuple[str, int, int]] = set()
+    old_files: set[str] = set()
+
+    def collect_from_proto(m_proto: onnx.ModelProto | None, only_from_old_files: bool = False) -> None:
+        if m_proto is None:
+            return
+        for t in m_proto.graph.initializer:
+            if t.data_location != TensorProto.EXTERNAL:
+                continue
+            ext = {kv.key: kv.value for kv in t.external_data}
+            loc = ext.get("location", "")
+            if not loc or loc in keep_separate or loc.endswith(".gguf") or "/" in loc:
+                continue
+            if only_from_old_files and loc not in old_files:
+                continue
+            key = (loc, int(ext.get("offset", 0)), int(ext["length"]))
+            old_files.add(loc)
+            if key not in seen_slices:
+                seen_slices.add(key)
+                slices_ordered.append(key)
+
+    collect_from_proto(model, only_from_old_files=False)
+    collect_from_proto(model_int8, only_from_old_files=False)
+    collect_from_proto(model_dflash, only_from_old_files=True)
+
+    pool_path = pkg_dir / "weights_pool.txt"
+    pool_lines = pool_path.read_text().splitlines() if pool_path.exists() else []
+    for ln in pool_lines:
+        parts = ln.split()
+        if len(parts) >= 8 and parts[0] == "pool":
+            loc = parts[-1]
+            if loc in old_files:
+                key = (loc, int(parts[3]), int(parts[4]))
+                if key not in seen_slices:
+                    seen_slices.add(key)
+                    slices_ordered.append(key)
+
+    if not slices_ordered:
+        return {"consolidated": False}
+
+    page_align = 4096
+    tmp_data_path = pkg_dir / f"{target_data_name}.tmp.{os.getpid()}"
+    slice_new_offset: dict[tuple[str, int, int], int] = {}
+    cur_off = 0
+    open_fds: dict[str, int] = {}
+    try:
+        with open(tmp_data_path, "wb") as out_f:
+            out_fd = out_f.fileno()
+            for loc, off, length in slices_ordered:
+                pad = (page_align - (cur_off % page_align)) % page_align
+                if pad > 0:
+                    os.write(out_fd, b"\x00" * pad)
+                    cur_off += pad
+                slice_new_offset[(loc, off, length)] = cur_off
+                if loc not in open_fds:
+                    open_fds[loc] = os.open(str(pkg_dir / loc), os.O_RDONLY)
+                in_fd = open_fds[loc]
+                rem = length
+                in_pos = off
+                while rem > 0:
+                    chunk = min(rem, 1 << 30)
+                    sent = os.sendfile(out_fd, in_fd, in_pos, chunk)
+                    if sent <= 0:
+                        raise RuntimeError(f"sendfile returned {sent} for {loc} at {in_pos}")
+                    in_pos += sent
+                    rem -= sent
+                cur_off += length
+            tail_pad = (page_align - (cur_off % page_align)) % page_align
+            if tail_pad > 0:
+                os.write(out_fd, b"\x00" * tail_pad)
+                cur_off += tail_pad
+    finally:
+        for fd in open_fds.values():
+            os.close(fd)
+
+    def rewrite_proto_inits(m_proto: onnx.ModelProto | None) -> bool:
+        if m_proto is None:
+            return False
+        changed = False
+        for t in m_proto.graph.initializer:
+            if t.data_location != TensorProto.EXTERNAL:
+                continue
+            ext = {kv.key: kv.value for kv in t.external_data}
+            loc = ext.get("location", "")
+            if loc not in old_files:
+                continue
+            key = (loc, int(ext.get("offset", 0)), int(ext["length"]))
+            new_off = slice_new_offset[key]
+            del t.external_data[:]
+            for k, v in (("location", target_data_name), ("offset", str(new_off)), ("length", str(key[2]))):
+                entry = t.external_data.add()
+                entry.key = k
+                entry.value = v
+            changed = True
+        return changed
+
+    tmp_data_path.replace(pkg_dir / target_data_name)
+    if rewrite_proto_inits(model):
+        onnx.save(model, str(model_path))
+    if rewrite_proto_inits(model_int8) and model_int8 is not None:
+        onnx.save(model_int8, str(int8_path))
+    if rewrite_proto_inits(model_dflash) and model_dflash is not None:
+        onnx.save(model_dflash, str(dflash_path))
+
+    if pool_lines:
+        new_pool_lines: list[str] = []
+        for ln in pool_lines:
+            parts = ln.split()
+            if len(parts) >= 8 and parts[0] == "pool" and parts[-1] in old_files:
+                key = (parts[-1], int(parts[3]), int(parts[4]))
+                parts[3] = str(slice_new_offset[key])
+                parts[-1] = target_data_name
+                new_pool_lines.append(" ".join(parts))
+            else:
+                new_pool_lines.append(ln)
+        pool_path.write_text("\n".join(new_pool_lines) + "\n")
+
+    for loc in sorted(old_files):
+        p_old = pkg_dir / loc
+        if p_old.exists() or p_old.is_symlink():
+            p_old.unlink()
+
+    return {"consolidated": True, "target_data_file": target_data_name, "total_bytes": cur_off, "removed_files": sorted(old_files)}
 
 
 def compute_f32_rope_caches(max_rotary_rows: int = 262144) -> tuple[bytes, bytes, bytes, bytes]:
@@ -306,201 +505,126 @@ def apply_precision_config_to_package(
     if pcfg.ple_engram in ("q8_0", "iq4_nl"):
         write_gguf_ple_table(pkg_dir, pcfg.ple_engram, pcfg.engram_gguf_path)
 
-    # 2. Optional RoPE / Indexer cache upgrades in attn_consts.data & weights_pool.txt
+    # 2. Optional RoPE / Indexer cache, FP32 GDN/Indexer projections, and FP16 QSA projections
+    #    All precision-override tensors are packed into the single `attn_consts.data` file.
     cos64_f32_bytes, sin64_f32_bytes, cos32_f32_bytes, sin32_f32_bytes = compute_f32_rope_caches(262144)
     pool_path = pkg_dir / "weights_pool.txt"
     pool_lines = pool_path.read_text().splitlines() if pool_path.exists() else []
 
-    if pcfg.indexer_dtype == "fp32" or pcfg.rotary_cache_dtype == "fp32":
-        ac_path = pkg_dir / "attn_consts.data"
-        if ac_path.is_symlink() or ac_path.exists():
-            # Unlink before writing so we never mutate a hard-linked source file!
-            old_bytes = ac_path.read_bytes() if pcfg.indexer_dtype != "fp32" else b""
-            ac_path.unlink()
-        else:
-            old_bytes = b""
+    ac_path = pkg_dir / "attn_consts.data"
+    old_ac_bytes = b""
+    if ac_path.is_symlink() or ac_path.exists():
+        if pcfg.indexer_dtype != "fp32":
+            old_ac_bytes = ac_path.read_bytes()
+        ac_path.unlink()
 
-        with open(ac_path, "wb") as f_ac:
-            if pcfg.indexer_dtype == "fp32":
-                f_ac.write(cos64_f32_bytes)
-                f_ac.write(sin64_f32_bytes)
-                rot_base_off = len(cos64_f32_bytes) + len(sin64_f32_bytes)
+    for legacy_blob in ("fp32_gates_and_indexer.data", "fp16_qsa_v_rc5.data", "fp16_qsa_kv.data", "fp16_qsa_qkv_o.data"):
+        p_leg = pkg_dir / legacy_blob
+        if p_leg.is_symlink() or p_leg.exists():
+            p_leg.unlink()
+
+    ac_writer = SmallWeightBlobWriter(pkg_dir, "attn_consts.data")
+
+    def add_ac_ext(onnx_name: str, raw_bytes: bytes, dt: int, dims: list[int]) -> tuple[str, int, int, int, list[int]]:
+        info = ac_writer.write_raw(raw_bytes, dt, dims)
+        inits_by_name[onnx_name] = make_ext_init(onnx_name, *info)
+        return info
+
+    if pcfg.indexer_dtype == "fp32":
+        c64_info = add_ac_ext("capture.indexer_cos_cache.folded", cos64_f32_bytes, TensorProto.FLOAT, [262144, 64])
+        s64_info = add_ac_ext("capture.indexer_sin_cache.folded", sin64_f32_bytes, TensorProto.FLOAT, [262144, 64])
+        new_pool: list[str] = []
+        for ln in pool_lines:
+            if ln.startswith("pool 2 "):
+                new_pool.append(f"pool 2 1 {c64_info[1]} {c64_info[2]} 2 262144 64 attn_consts.data")
+            elif ln.startswith("pool 3 "):
+                new_pool.append(f"pool 3 1 {s64_info[1]} {s64_info[2]} 2 262144 64 attn_consts.data")
             else:
-                f_ac.write(old_bytes)
-                rot_base_off = len(old_bytes)
-            if pcfg.rotary_cache_dtype == "fp32":
-                f_ac.write(cos32_f32_bytes)
-                f_ac.write(sin32_f32_bytes)
+                new_pool.append(ln)
+        pool_lines = new_pool
+    elif old_ac_bytes:
+        ac_writer.write_raw(old_ac_bytes, TensorProto.UINT8, [len(old_ac_bytes)])
 
-        if pcfg.indexer_dtype == "fp32":
-            inits_by_name["capture.indexer_cos_cache.folded"] = make_ext_init(
-                "capture.indexer_cos_cache.folded",
-                "attn_consts.data",
-                0,
-                len(cos64_f32_bytes),
-                TensorProto.FLOAT,
-                [262144, 64],
-            )
-            inits_by_name["capture.indexer_sin_cache.folded"] = make_ext_init(
-                "capture.indexer_sin_cache.folded",
-                "attn_consts.data",
-                len(cos64_f32_bytes),
-                len(sin64_f32_bytes),
-                TensorProto.FLOAT,
-                [262144, 64],
-            )
-            new_pool: list[str] = []
-            for ln in pool_lines:
-                if ln.startswith("pool 2 "):
-                    new_pool.append(f"pool 2 1 0 {len(cos64_f32_bytes)} 2 262144 64 attn_consts.data")
-                elif ln.startswith("pool 3 "):
-                    new_pool.append(
-                        f"pool 3 1 {len(cos64_f32_bytes)} {len(sin64_f32_bytes)} 2 262144 64 attn_consts.data"
-                    )
-                else:
-                    new_pool.append(ln)
-            pool_lines = new_pool
+    if pcfg.rotary_cache_dtype == "fp32":
+        c32_info = add_ac_ext("model.rotary_emb.cos_cache", cos32_f32_bytes, TensorProto.FLOAT, [262144, 32])
+        s32_info = add_ac_ext("model.rotary_emb.sin_cache", sin32_f32_bytes, TensorProto.FLOAT, [262144, 32])
+        new_pool = []
+        for ln in pool_lines:
+            if ln.startswith("pool 0 "):
+                new_pool.append(f"pool 0 1 {c32_info[1]} {c32_info[2]} 2 262144 32 attn_consts.data")
+            elif ln.startswith("pool 1 "):
+                new_pool.append(f"pool 1 1 {s32_info[1]} {s32_info[2]} 2 262144 32 attn_consts.data")
+            else:
+                new_pool.append(ln)
+        pool_lines = new_pool
 
-        if pcfg.rotary_cache_dtype == "fp32":
-            cos32_off = rot_base_off
-            sin32_off = rot_base_off + len(cos32_f32_bytes)
-            inits_by_name["model.rotary_emb.cos_cache"] = make_ext_init(
-                "model.rotary_emb.cos_cache",
-                "attn_consts.data",
-                cos32_off,
-                len(cos32_f32_bytes),
-                TensorProto.FLOAT,
-                [262144, 32],
-            )
-            inits_by_name["model.rotary_emb.sin_cache"] = make_ext_init(
-                "model.rotary_emb.sin_cache",
-                "attn_consts.data",
-                sin32_off,
-                len(sin32_f32_bytes),
-                TensorProto.FLOAT,
-                [262144, 32],
-            )
-            new_pool = []
-            for ln in pool_lines:
-                if ln.startswith("pool 0 "):
-                    new_pool.append(f"pool 0 1 {cos32_off} {len(cos32_f32_bytes)} 2 262144 32 attn_consts.data")
-                elif ln.startswith("pool 1 "):
-                    new_pool.append(f"pool 1 1 {sin32_off} {len(sin32_f32_bytes)} 2 262144 32 attn_consts.data")
-                else:
-                    new_pool.append(ln)
-            pool_lines = new_pool
+    if pool_lines:
+        pool_path.write_text("\n".join(pool_lines) + "\n")
 
-        if pool_lines:
-            pool_path.write_text("\n".join(pool_lines) + "\n")
-
-    # 3. Optional FP32 GDN gate projections & FP32 Indexer projections
+    # 3. Optional FP32 GDN gate projections & FP32 Indexer projections (packed into attn_consts.data)
     if pcfg.gdn_gate_dtype == "fp32" or pcfg.indexer_dtype == "fp32":
-        need_write_f32_blob = False
         for lid in range(48):
+            lpfx = f"model.language_model.layers.{lid}"
             if lid % 4 != 3 and pcfg.gdn_gate_dtype == "fp32":
-                if f"model.layers.{lid}.linear_attn.alpha.weight_t.f32" not in inits_by_name:
-                    need_write_f32_blob = True
+                w_a = np.ascontiguousarray(
+                    hf_reader.read_bf16_tensor(f"{lpfx}.linear_attn.in_proj_a.weight").float().numpy().T,
+                    dtype=np.float32,
+                )
+                w_b = np.ascontiguousarray(
+                    hf_reader.read_bf16_tensor(f"{lpfx}.linear_attn.in_proj_b.weight").float().numpy().T,
+                    dtype=np.float32,
+                )
+                add_ac_ext(f"model.layers.{lid}.linear_attn.alpha.weight_t.f32", w_a.tobytes(), TensorProto.FLOAT, list(w_a.shape))
+                add_ac_ext(f"model.layers.{lid}.linear_attn.beta.weight_t.f32", w_b.tobytes(), TensorProto.FLOAT, list(w_b.shape))
             elif lid % 4 == 3 and pcfg.indexer_dtype == "fp32":
-                if f"model.layers.{lid}.self_attn.indexer_qk.weight_t.f32" not in inits_by_name:
-                    need_write_f32_blob = True
+                w_iqk = np.ascontiguousarray(
+                    hf_reader.read_bf16_tensor(f"{lpfx}.self_attn.indexer.index_qk_proj.weight").float().numpy().T,
+                    dtype=np.float32,
+                )
+                add_ac_ext(f"model.layers.{lid}.self_attn.indexer_qk.weight_t.f32", w_iqk.tobytes(), TensorProto.FLOAT, list(w_iqk.shape))
 
-        if need_write_f32_blob:
-            f32_writer = SmallWeightBlobWriter(pkg_dir, "fp32_gates_and_indexer.data")
-
-            def add_f32_ext(onnx_name: str, arr_f32: np.ndarray) -> None:
-                arr_c = np.ascontiguousarray(arr_f32, dtype=np.float32)
-                loc, off, ln, dt, dims = f32_writer.write_raw(arr_c.tobytes(), TensorProto.FLOAT, list(arr_c.shape))
-                inits_by_name[onnx_name] = make_ext_init(onnx_name, loc, off, ln, dt, dims)
-
-            for lid in range(48):
-                lpfx = f"model.language_model.layers.{lid}"
-                if lid % 4 != 3 and pcfg.gdn_gate_dtype == "fp32":
-                    w_a = hf_reader.read_bf16_tensor(f"{lpfx}.linear_attn.in_proj_a.weight").float().numpy().T
-                    w_b = hf_reader.read_bf16_tensor(f"{lpfx}.linear_attn.in_proj_b.weight").float().numpy().T
-                    add_f32_ext(f"model.layers.{lid}.linear_attn.alpha.weight_t.f32", w_a)
-                    add_f32_ext(f"model.layers.{lid}.linear_attn.beta.weight_t.f32", w_b)
-                elif lid % 4 == 3 and pcfg.indexer_dtype == "fp32":
-                    w_iqk = (
-                        hf_reader.read_bf16_tensor(f"{lpfx}.self_attn.indexer.index_qk_proj.weight").float().numpy().T
-                    )
-                    add_f32_ext(f"model.layers.{lid}.self_attn.indexer_qk.weight_t.f32", w_iqk)
-            f32_writer.close()
-
-    # 3b. Optional FP16 QSA V (`v_rc5_fp16`), K/V (`kv_fp16`), or Q/K/V/O (`fp16`) projections (12 QSA layers)
+    # 3b. Optional FP16 QSA V (`v_rc5_fp16`), K/V (`kv_fp16`), or Q/K/V/O (`fp16`) projections (packed into attn_consts.data)
     if pcfg.qsa_qkv_dtype == "v_rc5_fp16":
         import torch
 
-        need_write_qsa_v_fp16 = any(
-            f"model.layers.{lid}.self_attn.v.rc5_deq.fp16" not in inits_by_name for lid in range(3, 48, 4)
-        )
-        if need_write_qsa_v_fp16:
-            fp16_writer = SmallWeightBlobWriter(pkg_dir, "fp16_qsa_v_rc5.data")
-
-            def add_v_fp16_ext(onnx_name: str, arr_f16: np.ndarray) -> None:
-                arr_c = np.ascontiguousarray(arr_f16, dtype=np.float16)
-                loc, off, ln, dt, dims = fp16_writer.write_raw(arr_c.tobytes(), TensorProto.FLOAT16, list(arr_c.shape))
-                inits_by_name[onnx_name] = make_ext_init(onnx_name, loc, off, ln, dt, dims)
-
-            for lid in range(3, 48, 4):
-                lpfx = f"model.language_model.layers.{lid}"
-                w_v_hf = hf_reader.read_bf16_tensor(f"{lpfx}.self_attn.v_proj.weight")
-                w_f32 = w_v_hf.float().reshape(512, 2560 // 32, 32)
-                scales_bf16 = (w_f32.abs().amax(dim=-1) / 127.0).to(torch.bfloat16)
-                scales_f32 = scales_bf16.float().unsqueeze(-1)
-                q_signed = torch.round(w_f32 / scales_f32).clamp(-128.0, 127.0)
-                w_bf16_deq = (q_signed.to(torch.bfloat16) * scales_bf16.unsqueeze(-1)).float().reshape(512, 2560)
-                w_v_fp16_t = w_bf16_deq.numpy().T.astype(np.float16)
-                add_v_fp16_ext(f"model.layers.{lid}.self_attn.v.rc5_deq.fp16", w_v_fp16_t)
-            fp16_writer.close()
+        for lid in range(3, 48, 4):
+            lpfx = f"model.language_model.layers.{lid}"
+            w_v_hf = hf_reader.read_bf16_tensor(f"{lpfx}.self_attn.v_proj.weight")
+            w_f32 = w_v_hf.float().reshape(512, 2560 // 32, 32)
+            scales_bf16 = (w_f32.abs().amax(dim=-1) / 127.0).to(torch.bfloat16)
+            scales_f32 = scales_bf16.float().unsqueeze(-1)
+            q_signed = torch.round(w_f32 / scales_f32).clamp(-128.0, 127.0)
+            w_bf16_deq = (q_signed.to(torch.bfloat16) * scales_bf16.unsqueeze(-1)).float().reshape(512, 2560)
+            w_v_fp16_t = np.ascontiguousarray(w_bf16_deq.numpy().T, dtype=np.float16)
+            add_ac_ext(f"model.layers.{lid}.self_attn.v.rc5_deq.fp16", w_v_fp16_t.tobytes(), TensorProto.FLOAT16, list(w_v_fp16_t.shape))
     elif pcfg.qsa_qkv_dtype == "kv_fp16":
-        need_write_qsa_kv_fp16 = any(
-            f"model.layers.{lid}.self_attn.kv.weight_t.fp16" not in inits_by_name for lid in range(3, 48, 4)
-        )
-        if need_write_qsa_kv_fp16:
-            fp16_writer = SmallWeightBlobWriter(pkg_dir, "fp16_qsa_kv.data")
-
-            def add_kv_fp16_ext(onnx_name: str, arr_f16: np.ndarray) -> None:
-                arr_c = np.ascontiguousarray(arr_f16, dtype=np.float16)
-                loc, off, ln, dt, dims = fp16_writer.write_raw(arr_c.tobytes(), TensorProto.FLOAT16, list(arr_c.shape))
-                inits_by_name[onnx_name] = make_ext_init(onnx_name, loc, off, ln, dt, dims)
-
-            for lid in range(3, 48, 4):
-                lpfx = f"model.language_model.layers.{lid}"
-                w_k = hf_reader.read_bf16_tensor(f"{lpfx}.self_attn.k_proj.weight").float().numpy().astype(np.float16).T
-                w_v = hf_reader.read_bf16_tensor(f"{lpfx}.self_attn.v_proj.weight").float().numpy().astype(np.float16).T
-                w_kv = np.concatenate([w_k, w_v], axis=1)
-                add_kv_fp16_ext(f"model.layers.{lid}.self_attn.kv.weight_t.fp16", w_kv)
-            fp16_writer.close()
-
+        for lid in range(3, 48, 4):
+            lpfx = f"model.language_model.layers.{lid}"
+            w_k = hf_reader.read_bf16_tensor(f"{lpfx}.self_attn.k_proj.weight").float().numpy().astype(np.float16).T
+            w_v = hf_reader.read_bf16_tensor(f"{lpfx}.self_attn.v_proj.weight").float().numpy().astype(np.float16).T
+            w_kv = np.ascontiguousarray(np.concatenate([w_k, w_v], axis=1), dtype=np.float16)
+            add_ac_ext(f"model.layers.{lid}.self_attn.kv.weight_t.fp16", w_kv.tobytes(), TensorProto.FLOAT16, list(w_kv.shape))
         inits_by_name["const_split_qsa_kv_512_512"] = numpy_helper.from_array(
             np.array([512, 512], dtype=np.int64), name="const_split_qsa_kv_512_512"
         )
     elif pcfg.qsa_qkv_dtype == "fp16":
-        need_write_qsa_fp16 = any(
-            f"model.layers.{lid}.self_attn.qkv.weight_t.fp16" not in inits_by_name for lid in range(3, 48, 4)
-        )
-        if need_write_qsa_fp16:
-            fp16_writer = SmallWeightBlobWriter(pkg_dir, "fp16_qsa_qkv_o.data")
-
-            def add_fp16_ext(onnx_name: str, arr_f16: np.ndarray) -> None:
-                arr_c = np.ascontiguousarray(arr_f16, dtype=np.float16)
-                loc, off, ln, dt, dims = fp16_writer.write_raw(arr_c.tobytes(), TensorProto.FLOAT16, list(arr_c.shape))
-                inits_by_name[onnx_name] = make_ext_init(onnx_name, loc, off, ln, dt, dims)
-
-            for lid in range(3, 48, 4):
-                lpfx = f"model.language_model.layers.{lid}"
-                w_q = hf_reader.read_bf16_tensor(f"{lpfx}.self_attn.q_proj.weight").float().numpy().astype(np.float16).T
-                w_k = hf_reader.read_bf16_tensor(f"{lpfx}.self_attn.k_proj.weight").float().numpy().astype(np.float16).T
-                w_v = hf_reader.read_bf16_tensor(f"{lpfx}.self_attn.v_proj.weight").float().numpy().astype(np.float16).T
-                w_qkv = np.concatenate([w_q, w_k, w_v], axis=1)
-                add_fp16_ext(f"model.layers.{lid}.self_attn.qkv.weight_t.fp16", w_qkv)
-                w_o = hf_reader.read_bf16_tensor(f"{lpfx}.self_attn.o_proj.weight").float().numpy().astype(np.float16).T
-                add_fp16_ext(f"model.layers.{lid}.self_attn.o_proj.weight_t.fp16", w_o)
-            fp16_writer.close()
-
+        for lid in range(3, 48, 4):
+            lpfx = f"model.language_model.layers.{lid}"
+            w_q = hf_reader.read_bf16_tensor(f"{lpfx}.self_attn.q_proj.weight").float().numpy().astype(np.float16).T
+            w_k = hf_reader.read_bf16_tensor(f"{lpfx}.self_attn.k_proj.weight").float().numpy().astype(np.float16).T
+            w_v = hf_reader.read_bf16_tensor(f"{lpfx}.self_attn.v_proj.weight").float().numpy().astype(np.float16).T
+            w_qkv = np.ascontiguousarray(np.concatenate([w_q, w_k, w_v], axis=1), dtype=np.float16)
+            add_ac_ext(f"model.layers.{lid}.self_attn.qkv.weight_t.fp16", w_qkv.tobytes(), TensorProto.FLOAT16, list(w_qkv.shape))
+            w_o = np.ascontiguousarray(
+                hf_reader.read_bf16_tensor(f"{lpfx}.self_attn.o_proj.weight").float().numpy().astype(np.float16).T,
+                dtype=np.float16,
+            )
+            add_ac_ext(f"model.layers.{lid}.self_attn.o_proj.weight_t.fp16", w_o.tobytes(), TensorProto.FLOAT16, list(w_o.shape))
         inits_by_name["const_split_qsa_qkv_12288_512_512"] = numpy_helper.from_array(
             np.array([12288, 512, 512], dtype=np.int64), name="const_split_qsa_qkv_12288_512_512"
         )
+
+    ac_writer.close()
 
     # 4. Inline norms (indexer q/k layernorm and Layer 1 PLE norms)
     if pcfg.indexer_dtype == "fp32":
@@ -530,6 +654,17 @@ def apply_precision_config_to_package(
                 w = 1.0 + hf_reader.read_bf16_tensor(p_key).float().numpy().astype(np.float32)
                 set_inline_f32(inits_by_name[oname], w.flatten())
 
+    kv_scale_inits: dict[str, TensorProto] = {}
+    orig_dsa_scale_inputs: dict[str, list[str]] = {}
+    for name, tp in inits_by_name.items():
+        if re.match(r"^node_GuardedDSA_\d+_(k|v)_scale$", name):
+            tp_copy = TensorProto()
+            tp_copy.CopyFrom(tp)
+            kv_scale_inits[name] = tp_copy
+    for n in model.graph.node:
+        if n.op_type == "DynamicSparseAttention" and len(n.input) >= 20 and n.input[18] and n.input[19]:
+            orig_dsa_scale_inputs[n.name] = [n.input[18], n.input[19]]
+
     if pcfg.kv_cache_dtype in ("bf16", "fp16"):
         for name in list(inits_by_name.keys()):
             if re.match(r"^node_GuardedDSA_\d+_(k|v)_scale$", name):
@@ -551,7 +686,11 @@ def apply_precision_config_to_package(
         if n.name in removed_qsa_mm_names:
             continue
         if n.op_type == "RMSNormRotary":
-            out_fp16 = 1 if pcfg.kv_cache_dtype == "fp16" else 0
+            out_fp16 = (
+                1
+                if (pcfg.kv_cache_dtype == "fp16" or pcfg.qsa_qkv_dtype in ("v_rc5_fp16", "kv_fp16", "fp16"))
+                else 0
+            )
             attrs = {a.name: helper.get_attribute_value(a) for a in n.attribute}
             attrs["output_fp16"] = out_fp16
             new_nodes.append(
@@ -564,9 +703,11 @@ def apply_precision_config_to_package(
                     **attrs,
                 )
             )
-        elif n.op_type == "DynamicSparseAttention" and pcfg.kv_cache_dtype in ("bf16", "fp16"):
-            dsa_inputs = list(n.input[:18])
-            if pcfg.kv_cache_dtype == "fp16" and pcfg.qsa_qkv_dtype == "fp16":
+        elif n.op_type == "DynamicSparseAttention" and (
+            pcfg.kv_cache_dtype in ("bf16", "fp16") or pcfg.qsa_qkv_dtype in ("v_rc5_fp16", "kv_fp16", "fp16")
+        ):
+            dsa_inputs = list(n.input[:18]) if pcfg.kv_cache_dtype in ("bf16", "fp16") else list(n.input)
+            if pcfg.qsa_qkv_dtype == "fp16":
                 dsa_out_orig = n.output[0]
                 dsa_out_bf16 = f"{dsa_out_orig}.bf16"
                 dsa_outputs = [dsa_out_bf16] + list(n.output[1:])
@@ -592,7 +733,7 @@ def apply_precision_config_to_package(
                         ),
                     ]
                 )
-            elif pcfg.kv_cache_dtype == "fp16" and pcfg.qsa_qkv_dtype in ("v_rc5_fp16", "kv_fp16"):
+            elif pcfg.qsa_qkv_dtype in ("v_rc5_fp16", "kv_fp16"):
                 new_nodes.append(
                     helper.make_node(
                         "DynamicSparseAttention",
@@ -966,18 +1107,82 @@ def apply_precision_config_to_package(
     ensure_unified_dynamic_cache_model(model)
     onnx.save(model, str(model_path))
 
-    # 7. Update genai_config.json session options
+    emitted_int8kv_onnx: str | None = None
+    if (
+        pcfg.emit_int8kv_variant
+        and pcfg.kv_cache_dtype in ("bf16", "fp16")
+        and kv_scale_inits
+        and orig_dsa_scale_inputs
+    ):
+        model_int8kv = onnx.ModelProto()
+        model_int8kv.CopyFrom(model)
+        for n in model_int8kv.graph.node:
+            if n.op_type == "DynamicSparseAttention" and n.name in orig_dsa_scale_inputs:
+                while len(n.input) < 18:
+                    n.input.append("")
+                del n.input[18:]
+                n.input.extend(orig_dsa_scale_inputs[n.name])
+        for vi in model_int8kv.graph.input:
+            if re.match(r"^past_key_values\.\d+\.(key|value)$", vi.name):
+                vi.type.tensor_type.elem_type = TensorProto.INT8
+        for vi in model_int8kv.graph.output:
+            if re.match(r"^present\.\d+\.(key|value)$", vi.name):
+                vi.type.tensor_type.elem_type = TensorProto.INT8
+        int8_inits_map = {t.name: t for t in model_int8kv.graph.initializer}
+        int8_inits_map.update(kv_scale_inits)
+        used_int8_inputs = {inp for n in model_int8kv.graph.node for inp in n.input if inp}
+        final_int8_inits = [init_tp for name, init_tp in int8_inits_map.items() if name in used_int8_inputs]
+        del model_int8kv.graph.initializer[:]
+        model_int8kv.graph.initializer.extend(final_int8_inits)
+        ensure_unified_dynamic_cache_model(model_int8kv)
+        emitted_int8kv_onnx = "model_int8kv.onnx"
+        onnx.save(model_int8kv, str(pkg_dir / emitted_int8kv_onnx))
+
+    # 7. Update genai_config.json session options and offload runtime_profiles
     cfg_path = pkg_dir / "genai_config.json"
     if cfg_path.exists():
         gcfg = json.loads(cfg_path.read_text())
         gcfg["model"]["decoder"]["session_options"]["ep.cuda.gated_delta_net_bf16_precision"] = pcfg.gdn_precision
+        if emitted_int8kv_onnx is not None:
+            gcfg["model"]["decoder"]["filename"] = "model.onnx"
+            for prof_entry in gcfg.get("runtime_profiles", []):
+                dec_ov = prof_entry.get("overlay", {}).get("model", {}).get("decoder", {})
+                sopts = dec_ov.get("session_options", {})
+                if sopts.get("session.moe.offload.mode") == "required":
+                    dec_ov["filename"] = emitted_int8kv_onnx
+                elif "filename" in dec_ov:
+                    del dec_ov["filename"]
         cfg_path.write_text(json.dumps(gcfg, indent=2) + "\n")
 
-    # 8. Update package_manifest.json
+    # Copy tactic cache TSV for model_int8kv.onnx if model.onnx tactic cache exists
+    if emitted_int8kv_onnx is not None:
+        src_tsv = pkg_dir / "model.onnx.matmulnbits_fpa_intb.tsv"
+        dst_tsv = pkg_dir / f"{emitted_int8kv_onnx}.matmulnbits_fpa_intb.tsv"
+        if src_tsv.exists() and not dst_tsv.exists():
+            shutil.copy2(src_tsv, dst_tsv)
+
+    # 8. Optionally consolidate all target external .data files into model.onnx.data
+    consolidation_info = None
+    if pcfg.consolidate_data_files:
+        consolidation_info = consolidate_package_external_data(pkg_dir, "model.onnx.data")
+
+    # 9. Update package_manifest.json
     manifest_path = pkg_dir / "package_manifest.json"
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text())
         manifest["precision_config"] = pcfg.to_dict()
+        if emitted_int8kv_onnx is not None:
+            manifest["onnx_variants"] = {
+                f"{pcfg.kv_cache_dtype}_kv": "model.onnx",
+                "int8_kv": emitted_int8kv_onnx,
+            }
+        if consolidation_info is not None and consolidation_info.get("consolidated"):
+            manifest["external_data_files"] = ["model.onnx.data", "dflash2.onnx.data", "embedding.onnx.data"]
         manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
 
-    return {"applied": True, "config": pcfg.to_dict()}
+    return {
+        "applied": True,
+        "config": pcfg.to_dict(),
+        "emitted_int8kv_onnx": emitted_int8kv_onnx,
+        "consolidation": consolidation_info,
+    }

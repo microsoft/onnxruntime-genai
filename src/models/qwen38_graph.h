@@ -413,8 +413,10 @@ struct Qwen38MoeOffloadSettings {
 
 Qwen38MoeOffloadSettings ParseQwen38MoeOffloadSettings(const std::vector<Config::NamedString>& config_entries);
 
-// Offloaded target warmup must stay eager: CUDA graph replays bypass ORT's per-run warmup control. Live runs keep their
-// own graph ids and capture normally. Null when offload is disabled, so other packages keep capturing during warmup.
+// Offloaded target runs must stay eager: CUDA graph replays bypass ORT's per-run warmup control, and ORT's multi-run
+// graph-capture loop (min_num_runs_before_cuda_graph_capture + 1 executions inside a single Session::Run call) cannot run
+// on live unmuted SpeculativePrefixCommit decode steps without mutating ctl/result_ring multiple times. Null when offload
+// is disabled, so non-offload packages keep capturing during warmup.
 std::unique_ptr<OrtRunOptions> CreateQwen38OffloadWarmupRunOptions(const Qwen38MoeOffloadSettings& settings);
 
 // Estimated KV capacity of the Flash-Next package's tier-named target graphs (2k, 8k, 16k, 32k, 64k, 128k), available
