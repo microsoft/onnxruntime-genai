@@ -585,6 +585,8 @@ struct Qwen38SuffixDrafter {
 struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   explicit Qwen38GraphEngine(Qwen38GraphModel& model);
   ~Qwen38GraphEngine() override;
+  void Initialize();
+  void ReleaseBindings();
 
   int Capacity() const override { return capacity_; }
   int ReservedTail() const override { return std::max(verify_rows_, kReservedTail); }
@@ -674,7 +676,6 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   void BuildHead();
   void BuildHeadState();
   void BuildHeadR2();
-  void ReleaseCapturedGraphs() noexcept;
   void BuildFastPrefill();
   void StepPrefill(std::span<const int32_t> tokens);
   void FastAppend(std::span<const int32_t> tokens);
@@ -813,7 +814,6 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   Direction batch_dirs_[kMaxBatch][kMaxBatch][kMaxBanks];  // [first slot][batch size - 1][phase]
   std::vector<std::unique_ptr<DevTensor>> output_tensors_;
   std::vector<std::unique_ptr<DevTensor>> head_views_;
-  std::vector<std::pair<OrtSession*, int>> captured_graphs_;
   std::deque<PlaneBuffer> owned_;  // individually allocated tensors
   const Direction* slot_inflight_dirs_[kMaxBatch]{};
   size_t slot_target_group_[kMaxBatch]{};
@@ -951,6 +951,10 @@ struct Qwen38GraphModel : Model {
   void RunCpuEmbedding(const int64_t* ids_host, size_t num_tokens, void* dst_host) const;
 
  private:
+  void DestroyDecodeState();
+  void InitializeDecodeState();
+  void RecreateCapturedSessions();
+  std::string target_filename_, head_s1_filename_, head_s2_filename_, head_r2_filename_;
   std::atomic<bool> leased_{false};
   std::atomic<bool> context_healthy_{true};
   BackendCapabilities resolved_capabilities_;
