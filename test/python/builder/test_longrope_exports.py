@@ -32,6 +32,7 @@ def export_caches(tmp_path, ep="cpu", graph_capture=False, paged=False):
         "theta": 10000.0,
         "t_dtype": torch.float32,
         "position_scale": 1,
+        "position_start": 0,
         "cast": {"use_fp32": False},
         "create_caches": True,
         "multi_cache": {
