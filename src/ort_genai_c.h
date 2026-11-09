@@ -558,7 +558,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaModelGetDeviceType(const OgaModel* model, 
 /**
  * \brief Reports whether generator parameters may request host-driven prefill chunking.
  * \param[in] model The model to query.
- * \param[out] out True when a positive search.chunk_size is supported.
+ * \param[out] out True when this Generator implementation supports a positive search.chunk_size.
+ *                Implementations that ignore the option report false.
  * \return OgaResult containing the error message if the query failed.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaModelGetSupportsExternalPrefillChunking(const OgaModel* model, bool* out);
