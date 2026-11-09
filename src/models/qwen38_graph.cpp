@@ -34,6 +34,12 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
+const std::shared_ptr<const std::thread::id>& ExecutionThreadToken() {
+  // Retaining the allocation distinguishes thread lifetimes even when an ID is reused.
+  thread_local const auto token = std::make_shared<const std::thread::id>(std::this_thread::get_id());
+  return token;
+}
+
 double SecondsSince(Clock::time_point start) {
   return std::chrono::duration<double>(Clock::now() - start).count();
 }
@@ -670,7 +676,7 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
       ledger_{model.config_->model.qwen38_graph.kv_capacity},
       run_hints_{static_cast<size_t>(max_batch_)} {}
 
-void Qwen38GraphEngine::Initialize() {
+void Qwen38GraphEngine::Initialize(bool is_session_recreation) {
   const auto& q = model_.config_->model.qwen38_graph;
   offload_warmup_run_options_ = CreateQwen38OffloadWarmupRunOptions(
       ParseQwen38MoeOffloadSettings(model_.config_->model.decoder.session_options.config_entries));
@@ -773,7 +779,8 @@ void Qwen38GraphEngine::Initialize() {
               opts.AddInitializer("model.embed_tokens.weight.row_scales", *model_.embed_values_[1]);
             }
           }
-        });
+        },
+        is_session_recreation);
     const size_t page_size = Qwen38DflashCachePageSize(dflash_model_->session_info_,
                                                        dflash_model_->config_->model.dflash2.inputs.past_key_names);
     dflash_ = std::make_unique<Dflash2Drafter>(
@@ -3610,7 +3617,7 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
   head_s2_filename_ = head_s2_filename;
   head_r2_filename_ = head_r2_filename;
   InitializeDecodeState();
-  engine_thread_ = std::this_thread::get_id();
+  engine_thread_ = ExecutionThreadToken();
   auto& capabilities = resolved_capabilities_;
   capabilities.token_selection = BackendTokenSelection::Backend;
   capabilities.admission = engine_->MaxBatchSize() > 1 ? BackendAdmission::IndependentSlots : BackendAdmission::WholeBatch;
@@ -3653,10 +3660,10 @@ void Qwen38GraphModel::DestroyDecodeState() {
   engine_.reset();
 }
 
-void Qwen38GraphModel::InitializeDecodeState() {
+void Qwen38GraphModel::InitializeDecodeState(bool is_session_recreation) {
   engine_ = std::make_unique<Qwen38GraphEngine>(*this);
   try {
-    engine_->Initialize();
+    engine_->Initialize(is_session_recreation);
   } catch (...) {
     DestroyDecodeState();
     throw;
@@ -3666,13 +3673,13 @@ void Qwen38GraphModel::InitializeDecodeState() {
 void Qwen38GraphModel::RecreateCapturedSessions() {
   auto& env = GetOrtEnv();
   try {
-    session_target_ = CreateSession(env, target_filename_, session_options_.get());
+    session_target_ = CreateSession(env, target_filename_, session_options_.get(), true);
     if (head_session_options_) {
-      session_head_s1_ = CreateSession(env, head_s1_filename_, head_session_options_.get());
-      session_head_s2_ = CreateSession(env, head_s2_filename_, head_session_options_.get());
+      session_head_s1_ = CreateSession(env, head_s1_filename_, head_session_options_.get(), true);
+      session_head_s2_ = CreateSession(env, head_s2_filename_, head_session_options_.get(), true);
     }
     if (head_r2_session_options_) {
-      session_head_r2_ = CreateSession(env, head_r2_filename_, head_r2_session_options_.get());
+      session_head_r2_ = CreateSession(env, head_r2_filename_, head_r2_session_options_.get(), true);
     }
   } catch (...) {
     DestroyDecodeState();
@@ -3728,11 +3735,11 @@ std::shared_ptr<Qwen38DecodeDevice> Qwen38GraphModel::AcquireDevice() {
     // thread that loaded the model, so select the model's GPU here: its stream and buffers live on that device.
     plane_->Check(plane_->set_device(p_device_->GetDeviceId(nullptr)), "cudaSetDevice");
     // Captures are provider/thread-owned. A handoff needs new sessions, not only new buffers.
-    if (!engine_ || engine_thread_ != std::this_thread::get_id()) {
+    if (!engine_ || engine_thread_ != ExecutionThreadToken()) {
       DestroyDecodeState();
       RecreateCapturedSessions();
-      InitializeDecodeState();
-      engine_thread_ = std::this_thread::get_id();
+      InitializeDecodeState(true);
+      engine_thread_ = ExecutionThreadToken();
     }
   } catch (...) {
     leased_.store(false);

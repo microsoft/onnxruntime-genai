@@ -91,7 +91,8 @@ void Dflash2SampleLatticePath(const Dflash2Lattice& lattice, size_t steps, float
 struct Dflash2Model : Model {
   Dflash2Model(std::unique_ptr<Config> config, OrtEnv& ort_env,
                std::shared_ptr<CpuEmbedding> cpu_embedding = nullptr,
-               const std::function<void(OrtSessionOptions&)>& configure_session_options = {});
+               const std::function<void(OrtSessionOptions&)>& configure_session_options = {},
+               bool is_session_recreation = false);
 
   std::unique_ptr<State> CreateState(DeviceSpan<int32_t>, const GeneratorParams&) const override;
 
