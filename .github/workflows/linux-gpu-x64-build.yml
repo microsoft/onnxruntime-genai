@@ -242,7 +242,7 @@ jobs:
                 --cmake_path /usr/bin/cmake \
                 --use_cuda --cuda_home /usr/local/cuda \
                 --cudnn_home \$(build/bailing-venv/bin/python -c 'import nvidia.cudnn; print(nvidia.cudnn.__path__[0])') \
-                --cmake_extra_defines CMAKE_CUDA_ARCHITECTURES=86 && \
+                --cmake_extra_defines CMAKE_CUDA_ARCHITECTURES=86 onnxruntime_BUILD_UNIT_TESTS=OFF && \
               build/bailing-venv/bin/python -m pip install --no-deps /ort_genai_src/build/bailing-ort/Release/dist/*.whl && \
               ORTGENAI_REQUIRE_BAILING_KERNELS=1 \
                 build/bailing-venv/bin/python -m pytest -q test/python/models/test_bailing_builder.py"

@@ -153,7 +153,7 @@ def _layer_checkpoint(tmp_path, model, weight_format="bf16"):
     return tensors
 
 
-def _mla_weights(model):
+def _mla_weights(model, *, sparse=False):
     attrs = model.mla_attrs
     shapes = {
         "q_a_proj": (attrs["q_lora_rank"], model.hidden_size),
@@ -170,6 +170,17 @@ def _mla_weights(model):
     attention = SimpleNamespace(
         **{name: TensorModule(weight=torch.randn(shape, generator=generator) * 0.1) for name, shape in shapes.items()}
     )
+    if sparse:
+        # ARM64's native FP16 MatMul rounds each FMA to FP16, whereas the
+        # reference accumulates in FP32. Four power-of-two coefficients per
+        # row bound that drift while still mixing distinct input channels.
+        # Keep dense random weights for the full CPU/CUDA attention test.
+        for name, (out_features, in_features) in shapes.items():
+            rows = torch.arange(out_features)[:, None]
+            columns = (7 * rows + torch.tensor([0, 5, 13, 23])) % in_features
+            weight = torch.zeros(out_features, in_features)
+            weight[rows, columns] = torch.tensor([0.125, -0.25, 0.5, -0.125])
+            getattr(attention, name).weight = weight
     attention.q_a_layernorm = TensorModule(weight=torch.linspace(0.5, 1.5, attrs["q_lora_rank"]))
     attention.kv_a_layernorm = TensorModule(weight=torch.linspace(0.5, 1.5, attrs["kv_lora_rank"]))
     return attention
@@ -880,7 +891,7 @@ def test_mla_query_key_value_helpers_match_projection_reference(tmp_path, packed
         use_paged_attention=packed,
         config_options={"q_lora_rank": 32, "kv_lora_rank": 32, "rope_interleave": interleaved},
     )
-    attention = _mla_weights(model)
+    attention = _mla_weights(model, sparse=True)
     token_shape = (4,) if packed else (2, 2)
     dtype = np.float16 if packed else np.float32
     hidden = (
@@ -916,7 +927,7 @@ def test_mla_output_gating_helper_matches_reference(tmp_path, packed):
         use_paged_attention=packed,
         config_options={"q_lora_rank": 32, "kv_lora_rank": 32},
     )
-    attention = _mla_weights(model)
+    attention = _mla_weights(model, sparse=True)
     token_shape = (4,) if packed else (2, 2)
     dtype = np.float16 if packed else np.float32
     rng = np.random.default_rng(11)
