@@ -8,8 +8,10 @@
 #include "tensor.h"
 
 #include <algorithm>
+#include <limits>
 #include <stdexcept>
 #include <string_view>
+#include <type_traits>
 
 namespace Generators {
 
@@ -153,6 +155,29 @@ void Tokenizer::UpdateOptions(const char* const* keys, const char* const* values
   if (!extension_keys.empty() || num_options == 0)
     CheckResult(OrtxUpdateTokenizerOptions(tokenizer_, extension_keys.data(), extension_values.data(), extension_keys.size()));
   literal_ = literal;
+}
+
+void Tokenizer::PrepareBoundedEncoding() const {
+  CheckResult(OrtxPrepareBoundedTokenization(tokenizer_));
+}
+
+std::vector<int32_t> Tokenizer::EncodeBounded(const std::string& text, size_t allowance) const {
+  if (literal_) throw std::invalid_argument("Bounded media encoding requires control-token recognition.");
+  if (text.find('\0') != std::string::npos)
+    throw std::invalid_argument("Bounded media input must not contain embedded NUL.");
+  if (text.size() > (std::numeric_limits<size_t>::max() / sizeof(int32_t)) - 2)
+    throw std::overflow_error("Bounded token output size overflows size_t.");
+  const size_t capacity = text.size() + 2;
+  const size_t output_bytes = capacity * sizeof(int32_t);
+  if (output_bytes > allowance)
+    throw std::invalid_argument("Token output exceeds its reserved allowance.");
+  std::vector<int32_t> result(capacity);
+  size_t count{};
+  static_assert(std::is_same_v<extTokenId_t, std::make_unsigned_t<int32_t>>);
+  CheckResult(OrtxTokenizeIntoBuffer(tokenizer_, text.c_str(), allowance - output_bytes,
+                                     reinterpret_cast<extTokenId_t*>(result.data()), result.size(), &count));
+  result.resize(count);
+  return result;
 }
 
 std::vector<int32_t> Tokenizer::Encode(const char* text) const {

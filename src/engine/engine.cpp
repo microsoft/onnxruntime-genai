@@ -1580,7 +1580,7 @@ std::shared_ptr<Request> Engine::CreateRequest(const RequestOptions& options) {
 }
 
 uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request, const std::string& prompt,
-                           const TurnOptions& options, const Images* images) {
+                           const TurnOptions& options, const Images* images, const Videos* videos) {
   ValidateOwnerThread();
   CompleteNonresidentClosedRequests();
   ReclaimAbandonedRequests();
@@ -1591,14 +1591,16 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request, const std::s
   if (!IsValidUtf8(prompt)) throw std::invalid_argument("A formatted prompt must be valid UTF-8.");
   if (!media_store_) {
     if (images && images->num_images_ != 0) throw std::invalid_argument("This Engine model does not support image inputs.");
+    if (videos && !videos->clips_.empty()) throw std::invalid_argument("This Engine model does not support video inputs.");
     const auto tokens = GetOrCreateStopTokenizer()->Encode(prompt.c_str());
     return BeginTurn(request, tokens, options);
   }
-  const auto raw = GetOrCreateStopTokenizer()->Encode(prompt.c_str());
-  request->ValidateTurnAdmission(raw, options);
+  request->ValidateTurnState(options);
   const size_t first_row = static_cast<size_t>(request->CurrentSequenceLength());
-  auto prepared = media_store_->Prepare(prompt, raw, images, first_row, request->MaxSessionTokens() - first_row);
-  request->ReserveMedia(prepared.media.size());
+  auto prepared = media_store_->Prepare(prompt, images, first_row, request->MaxSessionTokens() - first_row,
+                                        videos, request->Media());
+  media_store_->Identify(prepared, first_row, request->Media());
+  request->ReserveMedia(prepared.media.size(), media_store_.get());
   media_store_->ReserveItems(prepared.media.size());
   const auto turn_id = AdmitTurn(request, prepared.tokens, options);
   media_store_->Retain(prepared.media);

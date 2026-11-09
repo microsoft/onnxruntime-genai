@@ -5,12 +5,19 @@
 #include "models/model.h"
 #include "models/parallel_utils.h"
 #include "models/preprocessing/processor.h"
+#include "models/preprocessing/vision_preparation.h"
 
 #include <array>
+#include <filesystem>
 #include <fstream>
 #include <limits>
 
 namespace Generators {
+
+std::unique_ptr<VisionPreparation> Processor::CreateVisionPreparation(
+    const Config&, const SessionInfo&, const Tokenizer&) const {
+  return {};
+}
 
 namespace {
 
@@ -137,6 +144,80 @@ std::unique_ptr<Images> LoadImagesFromBuffers(std::span<const void*> image_data,
   CheckResult(OrtxCreateRawImages(images.ToBeAssigned(), image_data.data(), sizes.data(), image_data.size()));
 
   return std::make_unique<Images>(std::move(images), image_data.size(), std::move(info));
+}
+
+std::unique_ptr<Videos> LoadVideosFromFrames(std::span<const std::span<const OrtxFrame>> clips,
+                                             const VideoFrameLimits& limits) {
+  if (clips.empty() || clips.size() > limits.max_clips)
+    throw std::runtime_error("Video clip count exceeds the loading limit or is empty.");
+
+  const OrtxFrameLimits frame_limits{sizeof(OrtxFrameLimits), limits.max_frames, limits.max_bytes,
+                                     limits.max_dimension};
+  size_t total_bytes = 0;
+  for (const auto clip : clips) {
+    size_t bytes{};
+    CheckResult(OrtxValidateRawFrames(clip.data(), clip.size(), &frame_limits, &bytes));
+    if (bytes > limits.max_bytes - total_bytes)
+      throw std::runtime_error("Video frame collection exceeds the RGB loading limit.");
+    total_bytes += bytes;
+  }
+
+  auto videos = std::make_unique<Videos>();
+  videos->clips_.reserve(clips.size());
+  for (const auto clip : clips) {
+    ort_extensions::OrtxObjectPtr<OrtxRawFrames> frames;
+    CheckResult(OrtxCreateRawFrames(frames.ToBeAssigned(), clip.data(), clip.size(), &frame_limits));
+    videos->clips_.push_back(std::move(frames));
+  }
+  videos->packed_bytes_ = total_bytes;
+  return videos;
+}
+
+std::unique_ptr<Videos> LoadVideos(std::span<const VideoFile> files, size_t max_clips,
+                                   const OrtxVideoLimits& limits) {
+  if (files.empty() || files.size() > max_clips)
+    throw std::invalid_argument("Video file collection is empty or exceeds the clip loading limit.");
+
+  std::vector<size_t> sizes;
+  sizes.reserve(files.size());
+  size_t encoded_bytes = 0;
+  for (const auto& file : files) {
+    CheckResult(OrtxValidateVideoLoadOptions(&file.options, &limits));
+    if (!file.path || !*file.path)
+      throw std::invalid_argument("Video file path must not be empty.");
+    const fs::path input_path{file.path};
+    if (!std::filesystem::is_regular_file(input_path.c_str()))
+      throw std::invalid_argument("Video input must be a regular local file.");
+    auto input = input_path.open(std::ios::binary | std::ios::ate);
+    const auto bytes = static_cast<std::streamoff>(input.tellg());
+    if (bytes <= 0 || static_cast<uintmax_t>(bytes) > limits.max_file_bytes - encoded_bytes)
+      throw std::runtime_error("Video file collection exceeds the encoded loading limit or cannot be read.");
+    sizes.push_back(static_cast<size_t>(bytes));
+    encoded_bytes += sizes.back();
+  }
+
+  auto videos = std::make_unique<Videos>();
+  videos->clips_.reserve(files.size());
+  for (size_t index = 0; index < files.size(); ++index) {
+    auto clip_limits = limits;
+    clip_limits.max_file_bytes = sizes[index];
+    clip_limits.max_rgb_bytes -= videos->packed_bytes_;
+    if (clip_limits.max_rgb_bytes == 0)
+      throw std::runtime_error("Video file collection exceeds the RGB loading limit.");
+    ort_extensions::OrtxObjectPtr<OrtxRawFrames> frames;
+    CheckResult(OrtxLoadVideo(frames.ToBeAssigned(), files[index].path, &files[index].options, &clip_limits));
+    size_t count{};
+    CheckResult(OrtxGetRawFrameCount(frames.get(), &count));
+    for (size_t frame = 0; frame < count; ++frame) {
+      OrtxFrame descriptor{};
+      CheckResult(OrtxGetRawFrame(frames.get(), frame, &descriptor));
+      if (descriptor.data_size > limits.max_rgb_bytes - videos->packed_bytes_)
+        throw std::runtime_error("Video file collection exceeds the RGB loading limit.");
+      videos->packed_bytes_ += descriptor.data_size;
+    }
+    videos->clips_.push_back(std::move(frames));
+  }
+  return videos;
 }
 
 std::unique_ptr<Audios> LoadAudios(const std::span<const char* const>& audio_paths) {

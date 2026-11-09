@@ -900,6 +900,55 @@ struct OgaImages : OgaAbstract {
   static void operator delete(void* p) { OgaDestroyImages(reinterpret_cast<OgaImages*>(p)); }
 };
 
+struct OgaVideos : OgaAbstract {
+  static std::unique_ptr<OgaVideos> Open(const OgaVideoFile* files, size_t count,
+                                         const OgaVideoFileLimits* limits = nullptr) {
+    OgaVideos* videos;
+    OgaCheckResult(OgaLoadVideos(files, count, limits, &videos));
+    return std::unique_ptr<OgaVideos>(videos);
+  }
+
+  static std::unique_ptr<OgaVideos> FromFrames(const OgaVideoClip* clips, size_t count,
+                                               const OgaVideoFrameLimits* limits = nullptr) {
+    OgaVideos* videos;
+    OgaCheckResult(OgaLoadVideosFromFrames(clips, count, limits, &videos));
+    return std::unique_ptr<OgaVideos>(videos);
+  }
+
+  size_t ClipCount() const {
+    size_t count;
+    OgaCheckResult(OgaVideosGetClipCount(this, &count));
+    return count;
+  }
+
+  size_t FrameCount(size_t clip) const {
+    size_t count;
+    OgaCheckResult(OgaVideosGetFrameCount(this, clip, &count));
+    return count;
+  }
+
+  OgaVideoFrame Frame(size_t clip, size_t frame) const {
+    OgaVideoFrame descriptor;
+    OgaCheckResult(OgaVideosGetFrame(this, clip, frame, &descriptor));
+    return descriptor;
+  }
+
+  OgaVideoMetadata Metadata(size_t clip) const {
+    OgaVideoMetadata metadata{};
+    metadata.struct_size = sizeof(metadata);
+    OgaCheckResult(OgaVideosGetMetadata(this, clip, &metadata));
+    return metadata;
+  }
+
+  OgaVideoSample Sample(size_t clip, size_t sample) const {
+    OgaVideoSample result;
+    OgaCheckResult(OgaVideosGetSample(this, clip, sample, &result));
+    return result;
+  }
+
+  static void operator delete(void* p) { OgaDestroyVideos(reinterpret_cast<OgaVideos*>(p)); }
+};
+
 struct OgaAudios : OgaAbstract {
   static std::unique_ptr<OgaAudios> Load(const std::vector<const char*>& audio_paths) {
     OgaAudios* p;
@@ -1273,6 +1322,13 @@ struct OgaRequest : OgaAbstract {
                      const OgaImages* images = nullptr) {
     uint64_t turn_id{};
     OgaCheckResult(OgaRequestBeginTurnWithImages(this, options, formatted_prompt, images, &turn_id));
+    return turn_id;
+  }
+
+  uint64_t BeginTurn(const char* formatted_prompt, const OgaTurnOptions* options,
+                     const OgaImages* images, const OgaVideos* videos) {
+    uint64_t turn_id;
+    OgaCheckResult(OgaRequestBeginTurnWithMedia(this, options, formatted_prompt, images, videos, &turn_id));
     return turn_id;
   }
 

@@ -1644,6 +1644,8 @@ struct Vision_Element : JSON::Element {
       v_.filename = JSON::Get<std::string_view>(value);
     } else if (name == "config_filename") {
       v_.config_filename = JSON::Get<std::string_view>(value);
+    } else if (name == "video_config_filename") {
+      v_.video_config_filename = JSON::Get<std::string_view>(value);
     } else if (name == "adapter_filename") {
       v_.adapter_filename = JSON::Get<std::string_view>(value);
     } else if (name == "spatial_merge_size") {
@@ -4225,6 +4227,9 @@ void ValidateModelPaths(const Config& config) {
 
   ValidateConfigPath(m.vision.filename, "model.vision.filename");
   ValidateConfigPath(m.vision.config_filename, "model.vision.config_filename");
+  if (m.vision.video_config_filename.has_value()) {
+    ValidateConfigPath(*m.vision.video_config_filename, "model.vision.video_config_filename");
+  }
   if (m.vision.adapter_filename.has_value()) {
     ValidateConfigPath(*m.vision.adapter_filename, "model.vision.adapter_filename");
   }
