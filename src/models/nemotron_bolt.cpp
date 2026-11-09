@@ -353,10 +353,10 @@ NemotronBoltState::NemotronBoltState(const NemotronBoltModel& model, const Gener
       single_token_tensors_.emplace(name, std::move(view));
     }
     for (size_t i = 0; i < input_storage_.size(); ++i)
-      if (single_token_tensors_.contains(input_storage_[i]))
+      if (single_token_tensors_.find(input_storage_[i]) != single_token_tensors_.end())
         single_token_input_indices_.push_back(i);
     for (size_t i = 0; i < output_storage_.size(); ++i)
-      if (single_token_tensors_.contains(output_storage_[i]))
+      if (single_token_tensors_.find(output_storage_[i]) != single_token_tensors_.end())
         single_token_output_indices_.push_back(i);
   }
   pred_ids_span_ = tensors_.at("pred_ids")->GetDeviceSpan<int64_t>();
