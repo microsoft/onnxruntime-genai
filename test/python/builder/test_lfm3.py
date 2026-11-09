@@ -52,7 +52,7 @@ ROPE_PARAMETERS = {
 }
 
 
-def _build_tiny_lfm3(tmp_path, full_attention_rope_type):
+def _build_tiny_lfm3(tmp_path, full_attention_rope_type, **config_overrides):
     config = transformers.Lfm3Config(
         architectures=["Lfm3ForCausalLM"],
         vocab_size=VOCAB_SIZE,
@@ -77,6 +77,7 @@ def _build_tiny_lfm3(tmp_path, full_attention_rope_type):
         norm_eps=1e-3,
         # Larger weights than the default 0.02, so a missing gate or norm moves the logits visibly.
         initializer_range=0.2,
+        **config_overrides,
     )
     config._attn_implementation = "eager"
     with torch.random.fork_rng(devices=[]):
@@ -120,8 +121,14 @@ def _empty_past(session, model):
 # The Hub checkpoints spell the zero-tail RoPE of the full-attention layers "default" with a
 # partial_rotary_factor, transformers spells it "proportional"; the export must read both the same way.
 @pytest.mark.parametrize("full_attention_rope_type", ["default", "proportional"])
-def test_lfm3_matches_pytorch_past_the_sliding_window(tmp_path, full_attention_rope_type):
-    session, model, hf_model = _build_tiny_lfm3(tmp_path, full_attention_rope_type)
+# With these off, transformers sets the gate to None and the sandwich norms to Identity.
+@pytest.mark.parametrize(
+    "config_overrides",
+    [{}, {"use_attention_gate": False, "use_sandwich_norm": False}],
+    ids=["gate-sandwich", "no-gate-no-sandwich"],
+)
+def test_lfm3_matches_pytorch_past_the_sliding_window(tmp_path, full_attention_rope_type, config_overrides):
+    session, model, hf_model = _build_tiny_lfm3(tmp_path, full_attention_rope_type, **config_overrides)
     past = _empty_past(session, model)
     output_names = [output.name for output in session.get_outputs()]
 
