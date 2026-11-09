@@ -184,9 +184,93 @@ def test_ling_raw_configuration_and_image_processor_assets(tmp_path):
     assert operations["Resize"]["attrs"]["max_pixels"] == 4194304
     assert operations["PatchImage"]["attrs"] == {"patch_size": 16, "temporal_patch_size": 2, "merge_size": 2}
 
+    model = BailingVLModel(
+        PretrainedConfig(
+            text_config=_config(),
+            vision_config={"patch_size": 16, "spatial_merge_size": 2},
+            mrope_section=[8, 12, 12],
+        ),
+        ir.DataType.BFLOAT16,
+        ir.DataType.BFLOAT16,
+        "cuda",
+        str(tmp_path),
+        {"use_paged_attention": True, "exclude_embeds": True},
+    )
+    (tmp_path / "genai_config.json").write_text(json.dumps({"model": {"video_token_id": 28, "vision": {}}}))
+    source = json.loads((tmp_path / "preprocessor_config.json").read_text())
+    model.save_video_processing(source, str(tmp_path))
+    assert not (tmp_path / "video_processor_config.json").exists()
+    source["use_interleaved_frame_timestamp"] = True
+    model.save_video_processing(source, str(tmp_path))
+    video = json.loads((tmp_path / "video_processor_config.json").read_text())["processor"]
+    resize = video["transforms"][0]["operation"]["attrs"]
+    assert resize["interpolation"] == "CUBIC_OPENCV"
+    assert resize["smart_resize"] == 0
+    assert resize["min_pixels"] == 43008
+    assert video["total_pixels"] == 4718592
+    assert video["transforms"][2]["operation"]["attrs"]["qwen3_vl"] == 0
+    assert json.loads((tmp_path / "processor_config.json").read_text())["processor"] == processor
+    config = json.loads((tmp_path / "genai_config.json").read_text())
+    assert config["model"]["vision"]["video_config_filename"] == "video_processor_config.json"
+    source["temporal_patch_size"] = 1
+    with pytest.raises(ValueError, match="temporal preprocessing"):
+        model.save_video_processing(source, str(tmp_path))
+
+
+@pytest.mark.parametrize(
+    "model_type,vision_config,text_only",
+    [
+        ("bailing_moe_v3_vl", {}, False),
+        ("bailing_hybrid", {}, False),
+        ("bailing_moe_v3_vl", None, False),
+        ("bailing_moe_v3_vl", {}, True),
+    ],
+)
+def test_ling_cli_requires_complete_vision_composite(tmp_path, monkeypatch, model_type, vision_config, text_only):
+    config = {
+        "architectures": ["BailingMoeV3VLForConditionalGeneration"],
+        "model_type": model_type,
+        "text_config": {"hidden_size": 2560},
+        "vision_config": vision_config,
+    }
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    tokenizer = Mock()
+    tokenizer.get_vocab.return_value = {}
+    monkeypatch.setattr(builder.AutoTokenizer, "from_pretrained", Mock(return_value=tokenizer))
+    options = {"use_paged_attention": True, "exclude_embeds": True, "text_only": text_only}
+    args = (None, str(tmp_path), str(tmp_path / "out"), "int4", "cuda", str(tmp_path / "cache"), options)
+    if model_type == "bailing_moe_v3_vl" and vision_config is not None and not text_only:
+        builder.check_extra_options(*args)
+    else:
+        with pytest.raises(ValueError, match="complete Qwen vision composite or Ling"):
+            builder.check_extra_options(*args)
+
 
 @pytest.mark.parametrize("text_only", [False, True])
-def test_ling_composite_config_preserves_component_and_position_contracts(tmp_path, text_only):
+def test_ling_signed_position_domain_requires_unscaled_source_context(tmp_path, text_only):
+    kwargs = {
+        "model_class": BailingVLTextModel,
+        "dtype": ir.DataType.BFLOAT16,
+        "ep": "cuda",
+        "config_overrides": {
+            "mrope_section": [8, 12, 12],
+            "q_lora_rank": None,
+            "original_max_position_embeddings": 64,
+        },
+        "use_paged_attention": True,
+        "exclude_embeds": not text_only,
+        "text_only": text_only,
+    }
+    if text_only:
+        _model(tmp_path, **kwargs)
+    else:
+        with pytest.raises(ValueError, match="unscaled source rotary context"):
+            _model(tmp_path, **kwargs)
+
+
+@pytest.mark.parametrize("text_only", [False, True])
+@pytest.mark.parametrize("dtype", [ir.DataType.FLOAT16, ir.DataType.BFLOAT16])
+def test_ling_composite_config_preserves_component_and_position_contracts(tmp_path, text_only, dtype):
     (tmp_path / "generation_config.json").write_text(json.dumps({"eos_token_id": 2, "pad_token_id": 0}))
     config = PretrainedConfig(
         _name_or_path=str(tmp_path),
@@ -194,19 +278,43 @@ def test_ling_composite_config_preserves_component_and_position_contracts(tmp_pa
         vision_config={"patch_size": 16, "spatial_merge_size": 2, "out_hidden_size": 4096},
         mrope_section=[8, 12, 12],
         image_token_id=29,
+        video_token_id=28,
         vision_start_token_id=30,
     )
     model = BailingVLModel(
         config,
-        ir.DataType.BFLOAT16,
-        ir.DataType.BFLOAT16,
+        dtype,
+        ir.DataType.INT4,
         "cuda",
         str(tmp_path),
-        {"use_paged_attention": True, "exclude_embeds": not text_only, "text_only": text_only},
+        {
+            "use_paged_attention": True,
+            "exclude_embeds": not text_only,
+            "text_only": text_only,
+            "enable_cuda_graph": False,
+            "max_batch_size": 1,
+            "max_scheduled_tokens": 17,
+            "paged_chunk_size": 17,
+            "num_blocks": 16,
+            "paged_block_size": 256,
+        },
     )
     model.decoder.make_inputs_and_outputs()
     model.make_genai_config(config, {}, str(tmp_path))
-    saved = json.loads((tmp_path / "genai_config.json").read_text())["model"]
+    emitted = json.loads((tmp_path / "genai_config.json").read_text())
+    saved = emitted["model"]
+    session_options = saved["decoder"]["session_options"]
+    assert session_options.get("session.use_device_allocator_for_initializers") == (None if text_only else "1")
+    assert session_options["ep.cuda.gated_delta_net_bf16_precision"] == "bf16"
+    assert session_options["provider_options"][0]["cuda"]["enable_cuda_graph"] == "0"
+    assert model.decoder.io_dtype == dtype
+    assert model.decoder.onnx_dtype == ir.DataType.INT4
+    assert emitted["search"]["chunk_size"] == 17
+    batching = emitted["engine"]["dynamic_batching"]
+    assert batching["max_batch_size"] == 1
+    assert batching["max_scheduled_tokens"] == 17
+    assert batching["num_blocks"] == 16
+    assert batching["block_size"] == 256
     assert saved["type"] == ("bailing_hybrid" if text_only else "bailing_moe_v3_vl")
     assert saved["decoder"]["session_options"]["provider_options"][0]["cuda"]["use_tf32"] == "0"
     with pytest.raises(ValueError, match="FP32 routing"):
@@ -222,6 +330,7 @@ def test_ling_composite_config_preserves_component_and_position_contracts(tmp_pa
         assert saved["image_token_id"] == 29
         assert saved["vision"]["patch_size"] == 16
         assert saved["vision"]["outputs"] == {"image_features": "image_features"}
+        assert "session_options" not in saved["vision"]
         assert saved["embedding"]["inputs"] == {"input_ids": "input_ids"}
         assert saved["embedding"]["outputs"] == {"inputs_embeds": "inputs_embeds"}
         assert saved["decoder"]["inputs"]["inputs_embeds"] == "inputs_embeds"
@@ -402,8 +511,10 @@ def test_direct_query_loader_preserves_ling_pair_order_only_for_multimodal(tmp_p
         weights.close()
 
 
-@pytest.mark.parametrize("text_only,text_coordinates", [(False, False), (False, True), (True, True)])
-def test_ling_packed_rotary_matches_adjacent_pairs_and_reuses_current_rows(tmp_path, text_only, text_coordinates):
+@pytest.mark.parametrize(
+    "text_only,coordinates", [(False, "spatial"), (False, "text"), (False, "signed"), (True, "text")]
+)
+def test_ling_packed_rotary_matches_adjacent_pairs_and_reuses_current_rows(tmp_path, text_only, coordinates):
     model = _model(
         tmp_path,
         model_class=BailingVLTextModel,
@@ -415,7 +526,14 @@ def test_ling_packed_rotary_matches_adjacent_pairs_and_reuses_current_rows(tmp_p
     )
     position_shape = ["num_tokens"] if text_only else [3, "num_tokens"]
     model.graph.inputs.append(model.make_value("position_ids", ir.DataType.INT64, position_shape))
-    positions = np.array([[1, 3, 5]] * 3 if text_coordinates else [[0, 3, 5], [2, 4, 6], [7, 8, 9]], dtype=np.int64)
+    positions = np.array(
+        {
+            "text": [[1, 3, 5]] * 3,
+            "spatial": [[0, 3, 5], [2, 4, 6], [7, 8, 9]],
+            "signed": [[0, 3, 5], [-128, -2, 127], [-1, 127, -128]],
+        }[coordinates],
+        dtype=np.int64,
+    )
     feeds = {"position_ids": positions[0] if text_only else positions}
     expected = []
     for label, heads in (("query", 2), ("key", 1)):
@@ -427,13 +545,17 @@ def test_ling_packed_rotary_matches_adjacent_pairs_and_reuses_current_rows(tmp_p
         model.graph.outputs.append(model.values[output])
         owners = np.array([1, 2] * 12 + [0] * 8)
         frequencies = 1 / 10000 ** (np.arange(32, dtype=np.float32) * 2 / 64)
-        angles = positions[owners, :].T * frequencies
-        cos, sin = np.cos(angles).astype(np.float16)[:, None], np.sin(angles).astype(np.float16)[:, None]
+        angles = positions[owners, :].T.astype(np.float32) * frequencies
+        rotary_dtype = np.float16 if text_only else np.float32
+        cos, sin = np.cos(angles).astype(rotary_dtype)[:, None], np.sin(angles).astype(rotary_dtype)[:, None]
         rotated = np.empty_like(data)
         rotated[..., 0::2] = data[..., 0::2] * cos - data[..., 1::2] * sin
         rotated[..., 1::2] = data[..., 1::2] * cos + data[..., 0::2] * sin
         expected.append(rotated.reshape(3, -1))
-    session = ort.InferenceSession(ir.to_proto(model.model).SerializeToString(), providers=["CPUExecutionProvider"])
+    model.save_model(str(tmp_path))
+    session = ort.InferenceSession(str(tmp_path / model.filename), providers=["CPUExecutionProvider"])
+    position_range = session.get_modelmeta().custom_metadata_map.get("com.microsoft.genai.vision_position_range")
+    assert position_range == (None if text_only else f"{-model.context_length},{model.context_length - 1}")
     actual = session.run(None, feeds)
     for output, reference in zip(actual, expected, strict=True):
         np.testing.assert_allclose(output, reference, rtol=2e-3, atol=1e-3)
