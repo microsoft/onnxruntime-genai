@@ -921,17 +921,20 @@ TEST(NemotronBoltGPU, OptInOneTokenMatchesEightRowCommittedStates) {
   candidate_config->speculative.max_draft_tokens = 0;
   auto reference = CreateModel(GetOrtEnv(), std::move(reference_config));
   auto candidate = CreateModel(GetOrtEnv(), std::move(candidate_config));
-  ASSERT_EQ(dynamic_cast<NemotronBoltModel&>(*candidate).target_rows_, 1);
+  ASSERT_TRUE(dynamic_cast<NemotronBoltModel&>(*candidate).single_token_decode_);
   const std::vector<int32_t> prompt{
       10, 25708, 1010, 11, 1010, 10, 3263, 1010, 18746, 1261, 17616, 2254, 1455,
       29196, 5627, 1261, 3310, 1395, 1261, 5796, 92145, 1044, 1454, 1261, 4958,
       17984, 1046, 11, 1010, 10, 1503, 19464, 1010, 12, 13};
+  std::ofstream state_report;
+  if (const char* output = std::getenv("ORTGENAI_BOLT_OUTPUT"))
+    state_report.open(std::string{output} + "-r1-live-states.jsonl");
   for (const bool capture : {false, true}) {
     auto reference_params = std::make_shared<GeneratorParams>(*reference);
     auto candidate_params = std::make_shared<GeneratorParams>(*candidate);
     reference_params->use_graph_capture = candidate_params->use_graph_capture = capture;
     reference_params->search.max_length = candidate_params->search.max_length =
-        static_cast<int>(prompt.size()) + 32;
+        static_cast<int>(prompt.size()) + 96;
     Generator baseline{*reference, *reference_params};
     Generator optimized{*candidate, *candidate_params};
     auto& baseline_state = dynamic_cast<NemotronBoltState&>(*baseline.state_);
@@ -940,8 +943,11 @@ TEST(NemotronBoltGPU, OptInOneTokenMatchesEightRowCommittedStates) {
       baseline.AppendTokens(prompt);
       optimized.AppendTokens(prompt);
       do {
-        const auto comparison = NemotronBoltTestAccess::CompareLiveBoundary(
+        auto comparison = NemotronBoltTestAccess::CompareLiveBoundary(
             baseline_state, optimized_state, NemotronBoltTestAccess::SelectedRow(optimized_state));
+        comparison["capture"] = capture;
+        comparison["repeat"] = repeat;
+        if (state_report.is_open()) state_report << comparison.dump() << std::endl;
         ASSERT_TRUE(comparison.at("differences").empty()) << comparison.dump();
         ASSERT_EQ(baseline.IsDone(), optimized.IsDone());
         if (baseline.IsDone()) break;
@@ -951,8 +957,13 @@ TEST(NemotronBoltGPU, OptInOneTokenMatchesEightRowCommittedStates) {
       const auto a = baseline.GetSequence(0).CopyDeviceToCpu();
       const auto b = optimized.GetSequence(0).CopyDeviceToCpu();
       EXPECT_EQ(std::vector<int32_t>(a.begin(), a.end()), std::vector<int32_t>(b.begin(), b.end()));
+      if (state_report.is_open())
+        state_report << nlohmann::json{{"capture", capture}, {"repeat", repeat}, {"reference_tokens", std::vector<int32_t>(a.begin(), a.end())}, {"candidate_tokens", std::vector<int32_t>(b.begin(), b.end())}}.dump()
+                     << std::endl;
       EXPECT_EQ(baseline.GetSpeculativeStats().tokens_emitted,
                 optimized.GetSpeculativeStats().tokens_emitted);
+      EXPECT_EQ(baseline.GetSpeculativeStats().target_forward_passes,
+                optimized.GetSpeculativeStats().target_forward_passes);
       baseline.RewindToLength(0);
       optimized.RewindToLength(0);
     }

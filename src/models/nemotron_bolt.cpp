@@ -183,11 +183,15 @@ NemotronBoltModel::NemotronBoltModel(std::unique_ptr<Config> config, OrtEnv& env
   const auto& info = session_info_;
   const auto ids_shape = info.GetInputShape("input_ids");
   Require(ids_shape == std::vector<int64_t>({1, 8}) ||
-              (ids_shape == std::vector<int64_t>({1, 1}) &&
+              ((ids_shape == std::vector<int64_t>({1, 1}) ||
+                ids_shape == std::vector<int64_t>({1, -1})) &&
                config_->speculative.max_draft_tokens == 0),
-          "input_ids must be [1,8], or [1,1] in an opt-in target-only package");
-  target_rows_ = static_cast<size_t>(ids_shape[1]);
-  const auto rows = static_cast<int64_t>(target_rows_);
+          "input_ids must be [1,8], or an opt-in target-only row contract");
+  single_token_decode_ = ids_shape[1] == -1;
+  target_rows_ = single_token_decode_ ? kBoltVerifyRows : static_cast<size_t>(ids_shape[1]);
+  const auto rows = ids_shape[1];
+  if (single_token_decode_)
+    RequireTensor(info, "query_rows", true, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, {-1});
   RequireTensor(info, "input_ids", true, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, {1, rows});
   RequireTensor(info, "seqlens_k", true, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32, {1});
   RequireTensor(info, "state_row", true, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32, {1});
@@ -204,9 +208,11 @@ NemotronBoltModel::NemotronBoltModel(std::unique_ptr<Config> config, OrtEnv& env
   size_t conv_count = 0, ssm_count = 0, key_count = 0, value_count = 0;
   for (const auto& name : info.GetInputNames()) {
     if (name == "input_ids" || name == "seqlens_k" || name == "state_row" ||
-        name == "total_sequence_length")
+        name == "total_sequence_length" || (single_token_decode_ && name == "query_rows"))
       continue;
-    const auto shape = info.GetInputShape(name);
+    auto shape = info.GetInputShape(name);
+    if (model.single_token_decode_ && name == "input_ids")
+      shape[1] = kBoltVerifyRows;
     const auto type = info.GetInputDataType(name);
     if (name.rfind("past_key.", 0) == 0 || name.rfind("past_value.", 0) == 0) {
       Require(shape.size() == 4 && shape[0] == 1 && shape[1] == 2 &&
@@ -316,15 +322,43 @@ NemotronBoltState::NemotronBoltState(const NemotronBoltModel& model, const Gener
       continue;
     }
     auto* device = name == "total_sequence_length" ? GetDeviceInterface(DeviceType::CPU) : model.p_device_;
-    auto& tensor = AddTensor(name, true, device, info.GetInputDataType(name), info.GetInputShape(name));
+    auto shape = info.GetInputShape(name);
+    if (model.single_token_decode_ && name == "query_rows")
+      shape[0] = kBoltVerifyRows;
+    auto& tensor = AddTensor(name, true, device, info.GetInputDataType(name), shape);
+    if (name == "query_rows") {
+      const std::array<int64_t, 8> indices{0, 1, 2, 3, 4, 5, 6, 7};
+      Upload(tensor, std::span<const int64_t>{indices});
+    }
     if (name.rfind("past_", 0) == 0) {
       caches_.push_back(&tensor);
       output_storage_.push_back("present_" + name.substr(5));
       outputs_.push_back(tensor.GetOrtTensor());
     }
   }
-  for (const auto* name : {"logits", "pred_ids", "aux_hidden_states"})
-    AddTensor(name, false, model.p_device_, info.GetOutputDataType(name), info.GetOutputShape(name));
+  for (const auto* name : {"logits", "pred_ids", "aux_hidden_states"}) {
+    auto shape = info.GetOutputShape(name);
+    if (model.single_token_decode_)
+      shape[1] = kBoltVerifyRows;
+    AddTensor(name, false, model.p_device_, info.GetOutputDataType(name), shape);
+  }
+  if (model.single_token_decode_) {
+    for (const auto* name : {"input_ids", "query_rows", "logits", "pred_ids", "aux_hidden_states"}) {
+      auto& full = *tensors_.at(name);
+      auto shape = full.GetShape();
+      shape[std::string_view{name} == "query_rows" ? 0 : 1] = 1;
+      auto view = std::make_unique<Tensor>(OrtValue::CreateTensor(
+          dev_mem_info, full.GetMutableRawData(), full.GetByteSpan().size(), shape, full.GetType()));
+      view->p_device_ = model.p_device_;
+      single_token_tensors_.emplace(name, std::move(view));
+    }
+    for (size_t i = 0; i < input_storage_.size(); ++i)
+      if (single_token_tensors_.contains(input_storage_[i]))
+        single_token_input_indices_.push_back(i);
+    for (size_t i = 0; i < output_storage_.size(); ++i)
+      if (single_token_tensors_.contains(output_storage_[i]))
+        single_token_output_indices_.push_back(i);
+  }
   pred_ids_span_ = tensors_.at("pred_ids")->GetDeviceSpan<int64_t>();
   pred_ids_span_.CpuSpan();
   for (auto& name : input_storage_) input_names_.push_back(name.c_str());
@@ -365,6 +399,11 @@ NemotronBoltState::NemotronBoltState(const NemotronBoltModel& model, const Gener
   if (params.use_graph_capture) {
     for (int i = 0; i < kCaptureWarmupRuns; ++i)
       Verify(dummy, i == kCaptureWarmupRuns - 1);
+    if (model.single_token_decode_) {
+      const std::vector<int32_t> one_token(1, 1);
+      for (int i = 0; i < kCaptureWarmupRuns; ++i)
+        Verify(one_token, i == kCaptureWarmupRuns - 1);
+    }
   }
   if (drafter_) {
     for (int i = 0; i < kCaptureWarmupRuns; ++i) {
@@ -462,21 +501,30 @@ std::vector<int64_t> NemotronBoltState::Verify(std::span<const int32_t> tokens, 
 }
 
 std::vector<int64_t> NemotronBoltState::VerifyBlock(std::span<const int32_t> tokens, bool want_predictions) {
-  Require(tokens.size() == bolt_.target_rows_ && length_ + kBoltVerifyRows <= bolt_.capacity_,
+  const auto rows = tokens.size();
+  Require((rows == bolt_.target_rows_ || (bolt_.single_token_decode_ && rows == 1)) &&
+              length_ + kBoltVerifyRows <= bolt_.capacity_,
           "verify block exceeds fixed capacity");
+  if (bolt_.single_token_decode_) {
+    const auto& selected = rows == 1 ? single_token_tensors_ : tensors_;
+    for (const auto i : single_token_input_indices_)
+      inputs_[i] = selected.at(input_storage_[i])->GetOrtTensor();
+    for (const auto i : single_token_output_indices_)
+      outputs_[i] = selected.at(output_storage_[i])->GetOrtTensor();
+  }
   auto cpu_in = verify_inputs_span_.CpuSpan();
   auto* ids_out = reinterpret_cast<int64_t*>(cpu_in.data());
-  for (size_t i = 0; i < bolt_.target_rows_; ++i) ids_out[i] = tokens[i];
+  for (size_t i = 0; i < rows; ++i) ids_out[i] = tokens[i];
   // The R1 package pads only attention to R8, preserving its position and tile arithmetic.
   cpu_in[2 * kBoltVerifyRows] = static_cast<int32_t>(length_ + kBoltVerifyRows - 1);
   cpu_in[2 * kBoltVerifyRows + 4] = state_row_;
   verify_inputs_span_.CopyCpuToDevice();
   State::Run(*bolt_.session_, params_->use_graph_capture,
-             static_cast<int>(bolt_.target_rows_), 0, nullptr);
+             static_cast<int>(rows), 0, nullptr);
   ++stats_.target_forward_passes;
   if (!want_predictions) return {};
   auto cpu = pred_ids_span_.CopyDeviceToCpu();
-  return {cpu.begin(), cpu.end()};
+  return {cpu.begin(), cpu.begin() + rows};
 }
 
 void NemotronBoltState::Propose(size_t context_rows, size_t first_position, int32_t anchor, Tensor* aux_override) {
@@ -551,7 +599,8 @@ int32_t NemotronBoltState::NextToken(size_t public_length) {
   Require(prefilled_, "AppendTokens must precede GenerateNextToken");
   if (pending_.empty() && !drafter_) {
     // Only row zero is committed; later rows are causal scratch and are overwritten.
-    const auto predictions = Verify(std::vector<int32_t>(bolt_.target_rows_, anchor_));
+    const auto rows = bolt_.single_token_decode_ ? 1 : bolt_.target_rows_;
+    const auto predictions = Verify(std::vector<int32_t>(rows, anchor_));
     anchor_ = static_cast<int32_t>(predictions[0]);
     ++length_;
     state_row_ = 0;
