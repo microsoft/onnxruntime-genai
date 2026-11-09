@@ -585,12 +585,12 @@ void Model::AddSharedInitializers() {
     const uint64_t offset = initializer.offset.empty() ? 0 : std::stoull(initializer.offset);
     const size_t length = static_cast<size_t>(std::stoull(initializer.length));
     const auto data_type = static_cast<ONNXTensorElementDataType>(initializer.data_type);
-    auto memory_info = p_device_->GetMemoryInfo();
+    const auto& memory_info = p_device_->GetAllocator().GetInfo();
 
     std::ostringstream key;
     key << SharedInitializerFileIdentity(data_path) << ':' << offset << ':' << length << ':'
         << initializer.data_type << ':'
-        << memory_info->GetDeviceType() << ':' << memory_info->GetDeviceId();
+        << memory_info.GetDeviceType() << ':' << memory_info.GetDeviceId();
     for (int64_t dimension : initializer.shape) {
       key << ':' << dimension;
     }
@@ -619,7 +619,7 @@ void Model::AddSharedInitializers() {
         entry->device_data = p_device_->Allocate<uint8_t>(length);
         entry->device_data.CopyFromCpu(bytes);
         entry->shared_view = OrtValue::CreateTensor(
-            *memory_info, entry->device_data.Span().data(), length, initializer.shape, data_type);
+            memory_info, entry->device_data.Span().data(), length, initializer.shape, data_type);
         g_shared_initializers[key.str()] = entry;
       }
     }

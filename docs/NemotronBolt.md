@@ -26,11 +26,23 @@ input, which both retain the graph's full capacity of 135168.
 Configure the LiLiCorr `model.dflash2` section with five layers,
 block size 8, seven drafts, top-k 8, mask 990, sliding window 1024, and
 `inputs.anchor_row_index: "anchor_row_index"`. Set its filename to the packaged
-drafter ONNX path. Configure **both** sessions with the CUDA provider and
-`enable_cuda_graph: "1"` and `min_num_runs_before_cuda_graph_capture: "2"`.
+drafter ONNX path. For speculative decoding, configure **both** sessions with
+the CUDA provider and `enable_cuda_graph: "1"`. The legacy plugin provider's
+`min_num_runs_before_cuda_graph_capture: "2"` option is not supported by the
+built-in CUDA provider; do not carry it into that configuration.
 Set `ep.cuda.arena.use_cuda_mempool: "1"` in both session-options objects.
-Set `custom_ops_library: "libbolt_ops.so"` in decoder session options (also valid
-in drafter session options). Provider-specific memory/GEMM settings from the
+For padded drafter replay, use an ORT API 27+ build implementing
+`session.paged_attention.skip_input_sanitizer` and explicitly set this session
+config entry to `"1"` in the drafter session. Without that explicit compatible
+policy, partial-row proposals remain unpadded and are not captured. Fixed-request
+packing requires a windowed drafter; full-attention DSpark keeps its existing
+non-fixed execution path.
+Legacy custom-op graphs require their matching `custom_ops_library` or
+`custom_ops_libraries` registrations. Graphs converted to the corresponding
+`com.microsoft` contrib operators require an ORT build containing those kernels
+instead. Remove custom-library registration only after converting and validating
+both target and drafter graphs.
+Provider-specific memory/GEMM settings from the
 reference runtime may be retained. Decoder cache name mappings and
 layer counts are not used: the native state validates the actual graph metadata.
 The standard decoder input keys `past_sequence_length: "seqlens_k"` and
@@ -40,7 +52,15 @@ Engine settings are needed; decoder `sliding_window` and enabled static/dynamic
 batching are rejected. The drafter's internal paged cache and sliding window do
 not make the target paged or windowed.
 There are no Bolt-specific JSON fields.
-Set `speculative.max_draft_tokens: 7`; the verify width is fixed, not adaptive.
+Set `speculative.max_draft_tokens: 7` for speculative decoding; the verify width
+is fixed, not adaptive. Ordinary greedy decoding accepts `max_draft_tokens: 0`
+and executes fixed-R8 target blocks, committing only the first row. Configuring
+the model itself with zero draft tokens skips loading the drafter; requesting
+zero draft tokens from a model configured with a drafter leaves its weights
+loaded. These are different memory-measurement configurations.
+Target-only decoding permits capture to be disabled. Requesting capture requires
+a capture-enabled target session; speculative decoding requires both a loaded
+drafter and capture.
 
 With a plugin CUDA EP, register its library **before** constructing the model:
 
@@ -58,6 +78,10 @@ while not generator.is_done():
 tokens = generator.get_sequence(0)
 stats = generator.get_speculative_stats()  # Python dictionary
 ```
+
+For the built-in CUDA EP, omit the execution-provider-library registration.
+Provider-library registration and custom-operator-library registration are
+separate mechanisms.
 
 The plugin, ORT runtime, GenAI core/CUDA add-on, and custom operators must be
 mutually compatible. ORT API 27 or later is required to release captured graphs.
@@ -179,3 +203,9 @@ reset and at every output-budget boundary, terminal EOS, every recurrent
 acceptance row, and prompt lengths immediately below/at/above an eight-row chunk,
 the drafter context window, and the supported capacity (with rejection above
 capacity). Those independent real-graph checks remain outstanding.
+
+The original custom-op package's benchmark scores remain scoped to its pinned
+runtime. Migration checks compare custom-op and contrib-op results in the same
+decoding mode. A pre-existing ordinary-versus-speculative sequence difference
+must be disclosed separately; passing migration checks does not establish
+ordinary/speculative equivalence or final release readiness.
