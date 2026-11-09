@@ -7,7 +7,6 @@
 #include <functional>
 #include <memory>
 #include <mutex>
-#include <string_view>
 #include <unordered_map>
 #include <cstring>
 #include "session_options.h"
@@ -48,24 +47,17 @@ std::unique_ptr<OrtSession> CreateSession(
     const std::string& ep_name,
     const std::vector<const char*>& session_config_keys,
     const std::vector<const char*>& session_config_values) {
-  const bool is_webgpu = device_type == DeviceType::WEBGPU && ep_name == "WebGpuExecutionProvider";
-  Config::ProviderOptions provider_options{ep_name, {}};
   auto session_options = OrtSessionOptions::Create();
   session_options->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
   // Apply session configuration entries
   for (size_t i = 0; i < session_config_keys.size(); i++) {
     session_options->AddConfigEntry(session_config_keys[i], session_config_values[i]);
-    constexpr std::string_view webgpu_prefix = "ep.webgpuexecutionprovider.";
-    const std::string_view key{session_config_keys[i]};
-    if (is_webgpu && key.compare(0, webgpu_prefix.size(), webgpu_prefix) == 0) {
-      // Native factories capture provider options at registration.
-      provider_options.options.emplace_back(key.substr(webgpu_prefix.size()), session_config_values[i]);
-    }
   }
 
   // Append execution provider
   if (!ep_name.empty()) {
+    const Config::ProviderOptions provider_options{ep_name, {}};
     if (!AppendExecutionProviderV2(*session_options, provider_options,
                                    device_type, ep_name)) {
       AppendExecutionProviderV1(*session_options, provider_options);
