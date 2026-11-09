@@ -28,7 +28,7 @@ from pathlib import Path
 
 import numpy as np
 import onnx
-from onnx import TensorProto, helper
+from onnx import TensorProto, helper, numpy_helper
 
 DEFAULT_HF_DIR = Path("/data/tlwu/Qwen3.8-Flash-Next")
 DEFAULT_ENGRAM_Q8_GGUF = Path("/data/tlwu/qwen_flash_next_ggufs/engram/Qwen3.8-Flash-Next-engram-Q8_0.gguf_file")
@@ -40,6 +40,7 @@ class PrecisionConfig:
     profile: str = "default"
     kv_cache_dtype: str = "int8"  # int8 | bf16 | fp16
     rotary_cache_dtype: str = "bf16"  # bf16 | fp32
+    qsa_qkv_dtype: str = "default"  # default | fp16
     indexer_dtype: str = "default"  # default | int8 | bf16 | fp32
     gdn_gate_dtype: str = "default"  # default | int8 | bf16 | fp32
     gdn_precision: str = "bf16"  # bf16 | fp32
@@ -53,6 +54,7 @@ class PrecisionConfig:
             self.profile != "default"
             or self.kv_cache_dtype != "int8"
             or self.rotary_cache_dtype != "bf16"
+            or self.qsa_qkv_dtype != "default"
             or self.indexer_dtype not in ("default", "int8", "bf16")
             or self.gdn_gate_dtype not in ("default", "int8", "bf16")
             or self.gdn_precision != "bf16"
@@ -72,12 +74,13 @@ def add_precision_cli_args(ap: argparse.ArgumentParser) -> None:
     grp = ap.add_argument_group("Component Precision & Long-Context Options")
     grp.add_argument(
         "--precision-profile",
-        choices=("default", "fp32", "fp32_fp16kv"),
+        choices=("default", "fp32", "fp32_fp16kv", "fp32_fp16kv_v2"),
         default="default",
         help=(
             "Preset precision profile: 'default' (standard INT8 KV / BF16 kernels), "
             "'fp32' (BF16 KV + FP32 Indexer + FP32 GDN gates/state + Q8_0 Engram + FP32 PLE norm + HF BF16 small weights), "
-            "or 'fp32_fp16kv' (same as 'fp32' with FP16 KV cache + FP32 QSA rotary caches and FP16 RMSNormRotary Q/K outputs). "
+            "'fp32_fp16kv' (same as 'fp32' with FP16 KV cache + FP32 QSA rotary caches and FP16 RMSNormRotary Q/K outputs), "
+            "or 'fp32_fp16kv_v2' (FP16 QSA Q/K/V/O projections + FP16 KV cache + FP32 QSA rotary caches + FP32 Indexer + FP32 GDN gates/state + native INT8 PLE). "
             "Any individual component flag below overrides the profile."
         ),
     )
@@ -92,6 +95,12 @@ def add_precision_cli_args(ap: argparse.ArgumentParser) -> None:
         choices=("bf16", "fp32"),
         default=None,
         help="Element type for QSA model.rotary_emb.{cos,sin}_cache [262144, 32] (bf16 or fp32)",
+    )
+    grp.add_argument(
+        "--qsa-qkv-dtype",
+        choices=("default", "v_rc5_fp16", "kv_fp16", "fp16"),
+        default=None,
+        help="QSA full-attention projection precision across the 12 QSA layers (default, v_rc5_fp16 for lossless RC5-calibrated FP16 V, kv_fp16 for FP16 K/V, or fp16 for FP16 Q/K/V/O)",
     )
     grp.add_argument(
         "--indexer-dtype",
@@ -157,6 +166,19 @@ def resolve_precision_config(args: argparse.Namespace) -> PrecisionConfig:
             ple_norm_dtype="fp32",
             small_weights_source="hf_bf16",
         )
+    elif prof == "fp32_fp16kv_v2":
+        cfg = PrecisionConfig(
+            profile="fp32_fp16kv_v2",
+            kv_cache_dtype="fp16",
+            rotary_cache_dtype="fp32",
+            qsa_qkv_dtype="v_rc5_fp16",
+            indexer_dtype="fp32",
+            gdn_gate_dtype="fp32",
+            gdn_precision="fp32",
+            ple_engram="default",
+            ple_norm_dtype="fp32",
+            small_weights_source="hf_bf16",
+        )
     else:
         cfg = PrecisionConfig(profile="default")
 
@@ -167,6 +189,8 @@ def resolve_precision_config(args: argparse.Namespace) -> PrecisionConfig:
     elif cfg.kv_cache_dtype == "fp16" and prof == "default":
         # Default rotary_cache_dtype to fp32 when fp16 KV cache is explicitly requested
         cfg.rotary_cache_dtype = "fp32"
+    if getattr(args, "qsa_qkv_dtype", None) is not None:
+        cfg.qsa_qkv_dtype = args.qsa_qkv_dtype
     if getattr(args, "indexer_dtype", None) is not None:
         cfg.indexer_dtype = args.indexer_dtype
     if getattr(args, "gdn_gate_dtype", None) is not None:
@@ -398,6 +422,82 @@ def apply_precision_config_to_package(
                     add_f32_ext(f"model.layers.{lid}.self_attn.indexer_qk.weight_t.f32", w_iqk)
             f32_writer.close()
 
+    # 3b. Optional FP16 QSA V (`v_rc5_fp16`), K/V (`kv_fp16`), or Q/K/V/O (`fp16`) projections (12 QSA layers)
+    if pcfg.qsa_qkv_dtype == "v_rc5_fp16":
+        import torch
+
+        need_write_qsa_v_fp16 = any(
+            f"model.layers.{lid}.self_attn.v.rc5_deq.fp16" not in inits_by_name for lid in range(3, 48, 4)
+        )
+        if need_write_qsa_v_fp16:
+            fp16_writer = SmallWeightBlobWriter(pkg_dir, "fp16_qsa_v_rc5.data")
+
+            def add_v_fp16_ext(onnx_name: str, arr_f16: np.ndarray) -> None:
+                arr_c = np.ascontiguousarray(arr_f16, dtype=np.float16)
+                loc, off, ln, dt, dims = fp16_writer.write_raw(arr_c.tobytes(), TensorProto.FLOAT16, list(arr_c.shape))
+                inits_by_name[onnx_name] = make_ext_init(onnx_name, loc, off, ln, dt, dims)
+
+            for lid in range(3, 48, 4):
+                lpfx = f"model.language_model.layers.{lid}"
+                w_v_hf = hf_reader.read_bf16_tensor(f"{lpfx}.self_attn.v_proj.weight")
+                w_f32 = w_v_hf.float().reshape(512, 2560 // 32, 32)
+                scales_bf16 = (w_f32.abs().amax(dim=-1) / 127.0).to(torch.bfloat16)
+                scales_f32 = scales_bf16.float().unsqueeze(-1)
+                q_signed = torch.round(w_f32 / scales_f32).clamp(-128.0, 127.0)
+                w_bf16_deq = (q_signed.to(torch.bfloat16) * scales_bf16.unsqueeze(-1)).float().reshape(512, 2560)
+                w_v_fp16_t = w_bf16_deq.numpy().T.astype(np.float16)
+                add_v_fp16_ext(f"model.layers.{lid}.self_attn.v.rc5_deq.fp16", w_v_fp16_t)
+            fp16_writer.close()
+    elif pcfg.qsa_qkv_dtype == "kv_fp16":
+        need_write_qsa_kv_fp16 = any(
+            f"model.layers.{lid}.self_attn.kv.weight_t.fp16" not in inits_by_name for lid in range(3, 48, 4)
+        )
+        if need_write_qsa_kv_fp16:
+            fp16_writer = SmallWeightBlobWriter(pkg_dir, "fp16_qsa_kv.data")
+
+            def add_kv_fp16_ext(onnx_name: str, arr_f16: np.ndarray) -> None:
+                arr_c = np.ascontiguousarray(arr_f16, dtype=np.float16)
+                loc, off, ln, dt, dims = fp16_writer.write_raw(arr_c.tobytes(), TensorProto.FLOAT16, list(arr_c.shape))
+                inits_by_name[onnx_name] = make_ext_init(onnx_name, loc, off, ln, dt, dims)
+
+            for lid in range(3, 48, 4):
+                lpfx = f"model.language_model.layers.{lid}"
+                w_k = hf_reader.read_bf16_tensor(f"{lpfx}.self_attn.k_proj.weight").float().numpy().astype(np.float16).T
+                w_v = hf_reader.read_bf16_tensor(f"{lpfx}.self_attn.v_proj.weight").float().numpy().astype(np.float16).T
+                w_kv = np.concatenate([w_k, w_v], axis=1)
+                add_kv_fp16_ext(f"model.layers.{lid}.self_attn.kv.weight_t.fp16", w_kv)
+            fp16_writer.close()
+
+        inits_by_name["const_split_qsa_kv_512_512"] = numpy_helper.from_array(
+            np.array([512, 512], dtype=np.int64), name="const_split_qsa_kv_512_512"
+        )
+    elif pcfg.qsa_qkv_dtype == "fp16":
+        need_write_qsa_fp16 = any(
+            f"model.layers.{lid}.self_attn.qkv.weight_t.fp16" not in inits_by_name for lid in range(3, 48, 4)
+        )
+        if need_write_qsa_fp16:
+            fp16_writer = SmallWeightBlobWriter(pkg_dir, "fp16_qsa_qkv_o.data")
+
+            def add_fp16_ext(onnx_name: str, arr_f16: np.ndarray) -> None:
+                arr_c = np.ascontiguousarray(arr_f16, dtype=np.float16)
+                loc, off, ln, dt, dims = fp16_writer.write_raw(arr_c.tobytes(), TensorProto.FLOAT16, list(arr_c.shape))
+                inits_by_name[onnx_name] = make_ext_init(onnx_name, loc, off, ln, dt, dims)
+
+            for lid in range(3, 48, 4):
+                lpfx = f"model.language_model.layers.{lid}"
+                w_q = hf_reader.read_bf16_tensor(f"{lpfx}.self_attn.q_proj.weight").float().numpy().astype(np.float16).T
+                w_k = hf_reader.read_bf16_tensor(f"{lpfx}.self_attn.k_proj.weight").float().numpy().astype(np.float16).T
+                w_v = hf_reader.read_bf16_tensor(f"{lpfx}.self_attn.v_proj.weight").float().numpy().astype(np.float16).T
+                w_qkv = np.concatenate([w_q, w_k, w_v], axis=1)
+                add_fp16_ext(f"model.layers.{lid}.self_attn.qkv.weight_t.fp16", w_qkv)
+                w_o = hf_reader.read_bf16_tensor(f"{lpfx}.self_attn.o_proj.weight").float().numpy().astype(np.float16).T
+                add_fp16_ext(f"model.layers.{lid}.self_attn.o_proj.weight_t.fp16", w_o)
+            fp16_writer.close()
+
+        inits_by_name["const_split_qsa_qkv_12288_512_512"] = numpy_helper.from_array(
+            np.array([12288, 512, 512], dtype=np.int64), name="const_split_qsa_qkv_12288_512_512"
+        )
+
     # 4. Inline norms (indexer q/k layernorm and Layer 1 PLE norms)
     if pcfg.indexer_dtype == "fp32":
         for name in list(inits_by_name.keys()):
@@ -434,8 +534,18 @@ def apply_precision_config_to_package(
     # 5. Rewrite nodes in model.graph.node
     node_by_output = {o: n for n in model.graph.node for o in n.output}
     existing_node_names = {n.name for n in model.graph.node}
+    removed_qsa_mm_names: set[str] = set()
+    if pcfg.qsa_qkv_dtype == "fp16" and pcfg.indexer_dtype == "fp32":
+        for n in model.graph.node:
+            if n.op_type == "Split" and n.name.endswith("/SplitQsa"):
+                mm_node = node_by_output.get(n.input[0])
+                if mm_node is not None and mm_node.op_type == "MatMulNBits":
+                    removed_qsa_mm_names.add(mm_node.name)
+
     new_nodes: list[onnx.NodeProto] = []
     for n in model.graph.node:
+        if n.name in removed_qsa_mm_names:
+            continue
         if n.op_type == "RMSNormRotary":
             out_fp16 = 1 if pcfg.kv_cache_dtype == "fp16" else 0
             attrs = {a.name: helper.get_attribute_value(a) for a in n.attribute}
@@ -452,17 +562,86 @@ def apply_precision_config_to_package(
             )
         elif n.op_type == "DynamicSparseAttention" and pcfg.kv_cache_dtype in ("bf16", "fp16"):
             dsa_inputs = list(n.input[:18])
-            new_nodes.append(
-                helper.make_node(
-                    "DynamicSparseAttention",
-                    dsa_inputs,
-                    list(n.output),
-                    name=n.name,
-                    domain=n.domain,
-                    kv_num_heads=2,
-                    num_heads=24,
-                    scale=0.0625,
+            if pcfg.kv_cache_dtype == "fp16" and pcfg.qsa_qkv_dtype == "fp16":
+                dsa_out_orig = n.output[0]
+                dsa_out_bf16 = f"{dsa_out_orig}.bf16"
+                dsa_outputs = [dsa_out_bf16] + list(n.output[1:])
+                new_nodes.extend(
+                    [
+                        helper.make_node(
+                            "DynamicSparseAttention",
+                            dsa_inputs,
+                            dsa_outputs,
+                            name=n.name,
+                            domain=n.domain,
+                            kv_num_heads=2,
+                            num_heads=24,
+                            scale=0.0625,
+                            output_bf16=1,
+                        ),
+                        helper.make_node(
+                            "Cast",
+                            [dsa_out_bf16],
+                            [dsa_out_orig],
+                            name=f"{n.name}/CastOutputF16",
+                            to=TensorProto.FLOAT16,
+                        ),
+                    ]
                 )
+            elif pcfg.kv_cache_dtype == "fp16" and pcfg.qsa_qkv_dtype in ("v_rc5_fp16", "kv_fp16"):
+                new_nodes.append(
+                    helper.make_node(
+                        "DynamicSparseAttention",
+                        dsa_inputs,
+                        list(n.output),
+                        name=n.name,
+                        domain=n.domain,
+                        kv_num_heads=2,
+                        num_heads=24,
+                        scale=0.0625,
+                        output_bf16=1,
+                    )
+                )
+            else:
+                new_nodes.append(
+                    helper.make_node(
+                        "DynamicSparseAttention",
+                        dsa_inputs,
+                        list(n.output),
+                        name=n.name,
+                        domain=n.domain,
+                        kv_num_heads=2,
+                        num_heads=24,
+                        scale=0.0625,
+                    )
+                )
+        elif (
+            n.op_type == "MatMulNBits"
+            and pcfg.qsa_qkv_dtype == "fp16"
+            and len(n.input) >= 2
+            and re.match(r"^model\.layers\.(\d+)\.self_attn\.o_proj\.weight_t\.qweight$", n.input[1])
+        ):
+            m_o = re.match(r"^model\.layers\.(\d+)\.self_attn\.o_proj\.weight_t\.qweight$", n.input[1])
+            assert m_o is not None
+            lid = int(m_o.group(1))
+            o_out = n.output[0]
+            o_fp16 = f"{o_out}.fp16"
+            new_nodes.extend(
+                [
+                    helper.make_node(
+                        "MatMul",
+                        [n.input[0], f"model.layers.{lid}.self_attn.o_proj.weight_t.fp16"],
+                        [o_fp16],
+                        name=f"{n.name}/o_proj/MatMulF16",
+                    ),
+                    helper.make_node(
+                        "Cast",
+                        [o_fp16],
+                        [o_out],
+                        name=f"{n.name}/o_proj/CastOutBF16",
+                        to=TensorProto.BFLOAT16,
+                    ),
+                ]
             )
         elif (
             n.op_type == "Split"
@@ -494,6 +673,168 @@ def apply_precision_config_to_package(
                         [a_f32_name, f"model.layers.{lid}.linear_attn.alpha.weight_t.f32"],
                         [a_out],
                         name=f"{n.name}/alpha/MatMulF32",
+                    ),
+                ]
+            )
+        elif (
+            n.op_type == "Split"
+            and n.name.endswith("/SplitQsa")
+            and pcfg.qsa_qkv_dtype == "v_rc5_fp16"
+            and pcfg.indexer_dtype == "fp32"
+        ):
+            mm_node = node_by_output[n.input[0]]
+            a_name = mm_node.input[0]
+            m_in_layer = re.search(r"layers\.(\d+)\.", a_name)
+            assert m_in_layer is not None
+            lid = int(m_in_layer.group(1))
+            iqk_out, q_gate_out, k_out, v_out = n.output[0], n.output[1], n.output[2], n.output[3]
+            unused_iqk = iqk_out if iqk_out.endswith(".unused_int8") else f"{iqk_out}.unused_int8"
+            unused_v = f"{v_out}.unused_int8"
+            a_fp16_name = f"{a_name}.cast_fp16"
+            new_nodes.append(
+                helper.make_node(
+                    "Split",
+                    list(n.input),
+                    [unused_iqk, q_gate_out, k_out, unused_v],
+                    name=n.name,
+                    axis=-1,
+                )
+            )
+            if f"{n.name}/indexer_qk/MatMulF32" not in existing_node_names:
+                a_f32_name = f"{a_name}.cast_f32"
+                new_nodes.extend(
+                    [
+                        helper.make_node(
+                            "Cast", [a_name], [a_f32_name], name=f"{n.name}/CastInputF32", to=TensorProto.FLOAT
+                        ),
+                        helper.make_node(
+                            "MatMul",
+                            [a_f32_name, f"model.layers.{lid}.self_attn.indexer_qk.weight_t.f32"],
+                            [iqk_out],
+                            name=f"{n.name}/indexer_qk/MatMulF32",
+                        ),
+                    ]
+                )
+            new_nodes.extend(
+                [
+                    helper.make_node(
+                        "Cast", [a_name], [a_fp16_name], name=f"{n.name}/CastInputF16", to=TensorProto.FLOAT16
+                    ),
+                    helper.make_node(
+                        "MatMul",
+                        [a_fp16_name, f"model.layers.{lid}.self_attn.v.rc5_deq.fp16"],
+                        [v_out],
+                        name=f"{n.name}/v/MatMulF16",
+                    ),
+                ]
+            )
+        elif (
+            n.op_type == "Split"
+            and n.name.endswith("/SplitQsa")
+            and pcfg.qsa_qkv_dtype == "kv_fp16"
+            and pcfg.indexer_dtype == "fp32"
+        ):
+            mm_node = node_by_output[n.input[0]]
+            a_name = mm_node.input[0]
+            m_in_layer = re.search(r"layers\.(\d+)\.", a_name)
+            assert m_in_layer is not None
+            lid = int(m_in_layer.group(1))
+            iqk_out, q_gate_out, k_out, v_out = n.output[0], n.output[1], n.output[2], n.output[3]
+            unused_iqk = iqk_out if iqk_out.endswith(".unused_int8") else f"{iqk_out}.unused_int8"
+            unused_k = f"{k_out}.unused_int8"
+            unused_v = f"{v_out}.unused_int8"
+            a_fp16_name = f"{a_name}.cast_fp16"
+            kv_fp16_out = f"{n.input[0]}.kv_fp16"
+            new_nodes.append(
+                helper.make_node(
+                    "Split",
+                    list(n.input),
+                    [unused_iqk, q_gate_out, unused_k, unused_v],
+                    name=n.name,
+                    axis=-1,
+                )
+            )
+            if f"{n.name}/indexer_qk/MatMulF32" not in existing_node_names:
+                a_f32_name = f"{a_name}.cast_f32"
+                new_nodes.extend(
+                    [
+                        helper.make_node(
+                            "Cast", [a_name], [a_f32_name], name=f"{n.name}/CastInputF32", to=TensorProto.FLOAT
+                        ),
+                        helper.make_node(
+                            "MatMul",
+                            [a_f32_name, f"model.layers.{lid}.self_attn.indexer_qk.weight_t.f32"],
+                            [iqk_out],
+                            name=f"{n.name}/indexer_qk/MatMulF32",
+                        ),
+                    ]
+                )
+            new_nodes.extend(
+                [
+                    helper.make_node(
+                        "Cast", [a_name], [a_fp16_name], name=f"{n.name}/CastInputF16", to=TensorProto.FLOAT16
+                    ),
+                    helper.make_node(
+                        "MatMul",
+                        [a_fp16_name, f"model.layers.{lid}.self_attn.kv.weight_t.fp16"],
+                        [kv_fp16_out],
+                        name=f"{n.name}/kv/MatMulF16",
+                    ),
+                    helper.make_node(
+                        "Split",
+                        [kv_fp16_out, "const_split_qsa_kv_512_512"],
+                        [k_out, v_out],
+                        name=f"{n.name}/kv/SplitKvF16",
+                        axis=-1,
+                    ),
+                ]
+            )
+        elif (
+            n.op_type == "Split"
+            and n.name.endswith("/SplitQsa")
+            and pcfg.qsa_qkv_dtype == "fp16"
+            and pcfg.indexer_dtype == "fp32"
+        ):
+            mm_node = node_by_output[n.input[0]]
+            a_name = mm_node.input[0]
+            m_in_layer = re.search(r"layers\.(\d+)\.", a_name)
+            assert m_in_layer is not None
+            lid = int(m_in_layer.group(1))
+            iqk_out, q_gate_out, k_out, v_out = n.output[0], n.output[1], n.output[2], n.output[3]
+            a_fp16_name = f"{a_name}.cast_fp16"
+            qkv_fp16_out = f"{n.input[0]}.qkv_fp16"
+            if f"{n.name}/indexer_qk/MatMulF32" not in existing_node_names:
+                a_f32_name = f"{a_name}.cast_f32"
+                new_nodes.extend(
+                    [
+                        helper.make_node(
+                            "Cast", [a_name], [a_f32_name], name=f"{n.name}/CastInputF32", to=TensorProto.FLOAT
+                        ),
+                        helper.make_node(
+                            "MatMul",
+                            [a_f32_name, f"model.layers.{lid}.self_attn.indexer_qk.weight_t.f32"],
+                            [iqk_out],
+                            name=f"{n.name}/indexer_qk/MatMulF32",
+                        ),
+                    ]
+                )
+            new_nodes.extend(
+                [
+                    helper.make_node(
+                        "Cast", [a_name], [a_fp16_name], name=f"{n.name}/CastInputF16", to=TensorProto.FLOAT16
+                    ),
+                    helper.make_node(
+                        "MatMul",
+                        [a_fp16_name, f"model.layers.{lid}.self_attn.qkv.weight_t.fp16"],
+                        [qkv_fp16_out],
+                        name=f"{n.name}/qkv/MatMulF16",
+                    ),
+                    helper.make_node(
+                        "Split",
+                        [qkv_fp16_out, "const_split_qsa_qkv_12288_512_512"],
+                        [q_gate_out, k_out, v_out],
+                        name=f"{n.name}/qkv/SplitQsaF16",
+                        axis=-1,
                     ),
                 ]
             )
