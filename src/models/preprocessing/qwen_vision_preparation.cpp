@@ -343,7 +343,7 @@ std::vector<NamedTensors> QwenVisionPreparation::Materialize(const VisionPlan& s
     result.push_back(std::move(feeds));
   };
   if (!plan->image_grids.empty()) {
-    auto processed = images_.ProcessImages(*plan->images);
+    auto processed = images_.ProcessImages(*plan->images, plan->image_grids);
     const auto& grids = processed->at(std::string{Config::Defaults::ImageGridThwName});
     const auto& pixels = processed->at(std::string{Config::Defaults::PixelValuesName});
     const auto shape = pixels->GetShape();

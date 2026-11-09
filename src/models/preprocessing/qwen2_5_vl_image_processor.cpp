@@ -247,13 +247,32 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
   return named_tensors;
 }
 
-std::unique_ptr<NamedTensors> QwenImageProcessor::ProcessImages(const Images& images) const {
+std::unique_ptr<NamedTensors> QwenImageProcessor::ProcessImages(
+    const Images& images, std::span<const std::array<int64_t, 3>> grids) const {
   Ort::Allocator& allocator{Ort::Allocator::GetWithDefaultOptions()};
   auto named_tensors = std::make_unique<NamedTensors>();
   if (images.num_images_ == 0) return named_tensors;
 
   ort_extensions::OrtxObjectPtr<OrtxTensorResult> result;
-  CheckResult(OrtxImagePreProcess(processor_.get(), images.images_.get(), result.ToBeAssigned()));
+  if (grids.empty()) {
+    CheckResult(OrtxImagePreProcess(processor_.get(), images.images_.get(), result.ToBeAssigned()));
+  } else {
+    if (grids.size() != images.num_images_ || images.info_.size() != grids.size() || patch_size_ <= 0)
+      throw std::invalid_argument("Resolved image grids do not match the input images.");
+    std::vector<OrtxImagePreProcessOptions> options;
+    options.reserve(grids.size());
+    for (size_t image = 0; image < grids.size(); ++image) {
+      const auto& grid = grids[image];
+      if (grid[0] != 1 || grid[1] <= 0 || grid[2] <= 0 ||
+          grid[1] > std::numeric_limits<int64_t>::max() / patch_size_ ||
+          grid[2] > std::numeric_limits<int64_t>::max() / patch_size_)
+        throw std::invalid_argument("Resolved image geometry exceeds its grid limits.");
+      options.push_back({sizeof(OrtxImagePreProcessOptions), images.info_[image].height, images.info_[image].width,
+                         grid[1] * patch_size_, grid[2] * patch_size_});
+    }
+    CheckResult(OrtxImagePreProcessWithOptions(processor_.get(), images.images_.get(),
+                                               options.data(), options.size(), result.ToBeAssigned()));
+  }
 
   // OrtxTensorResultGetAt allocates a new TensorObject that the caller owns.
   // Wrap in OrtxObjectPtr so it's disposed on scope exit (avoids TensorObject leak).

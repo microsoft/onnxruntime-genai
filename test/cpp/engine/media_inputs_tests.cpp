@@ -62,6 +62,21 @@ TEST(MediaInputsTest, RealQwenVideoCanonicalOrderAndEncoderInputs) {
     std::array<std::array<int64_t, 3>, 2> image_grids{};
     for (size_t image = 0; image < image_grids.size(); ++image)
       std::copy_n(grids->GetData<int64_t>() + image * 3, 3, image_grids[image].begin());
+    {
+      const std::array<const char*, 1> path{paths[1]};
+      auto single = LoadImages(path);
+      const std::array<std::array<int64_t, 3>, 1> resolved{{{1, 4, 6}}};
+      auto fixed = image_processor->ProcessImages(*single, resolved);
+      const auto& fixed_grid = fixed->at(std::string{Config::Defaults::ImageGridThwName});
+      ASSERT_EQ(fixed_grid->GetElementCount(), 3u);
+      EXPECT_TRUE(std::equal(resolved[0].begin(), resolved[0].end(), fixed_grid->GetData<int64_t>()));
+      auto unchanged = image_processor->ProcessImages(*images);
+      const auto& unchanged_grid = unchanged->at(std::string{Config::Defaults::ImageGridThwName});
+      ASSERT_EQ(unchanged_grid->GetElementCount(), grids->GetElementCount());
+      EXPECT_EQ(std::memcmp(unchanged_grid->GetRawData(), grids->GetRawData(),
+                            grids->GetElementCount() * sizeof(int64_t)),
+                0);
+    }
     const auto expanded = ExpandQwenMediaPrompt(
         image_prompt, image_grids, {}, static_cast<size_t>(model->config_->model.vision.spatial_merge_size), 1024 * 1024);
     const auto expected = model->vision_->processor->tokenizer_->Encode(expanded.c_str());

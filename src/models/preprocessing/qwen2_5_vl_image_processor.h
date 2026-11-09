@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <array>
+
 #include "models/model.h"
 #include "models/preprocessing/processor.h"
 #include "ortx_processor.h"
@@ -17,7 +19,8 @@ struct QwenImageProcessor : Processor {
   QwenImageProcessor(Config& config, const SessionInfo& session_info);
 
   virtual std::unique_ptr<NamedTensors> Process(const Tokenizer& tokenizer, const Payload& payload) const override;
-  std::unique_ptr<NamedTensors> ProcessImages(const Images& images) const;
+  std::unique_ptr<NamedTensors> ProcessImages(
+      const Images& images, std::span<const std::array<int64_t, 3>> grids = {}) const;
   std::unique_ptr<VisionPreparation> CreateVisionPreparation(
       const Config& config, const SessionInfo& info, const Tokenizer& tokenizer) const override;
 
