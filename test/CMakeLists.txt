@@ -343,6 +343,13 @@ endif()
 # It hosts pure unit tests (no model, no ONNX session, no GPU) alongside component
 # tests that mint requests from a tiny CPU fixture model; the fixture model only loads and never
 # runs the graph, so the suite still needs no GPU and no real inference.
+FetchContent_Declare(
+  nlohmann_json
+  GIT_REPOSITORY https://github.com/nlohmann/json.git
+  GIT_TAG v3.12.0
+)
+FetchContent_MakeAvailable(nlohmann_json)
+
 file(GLOB engine_unit_test_srcs CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/engine/*.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/engine/*.cpp"
@@ -372,6 +379,7 @@ target_include_directories(engine_unit_tests PRIVATE
 target_link_libraries(engine_unit_tests PRIVATE
   onnxruntime-genai-obj
   GTest::gtest
+  nlohmann_json::nlohmann_json
 )
 # The shared library stages the ORT runtime (and CUDA add-on) next to itself; depend on it so those
 # are present in engine_unit_tests' output directory at run time.
