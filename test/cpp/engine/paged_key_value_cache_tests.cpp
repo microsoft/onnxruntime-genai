@@ -133,6 +133,35 @@ TEST_F(PagedKeyValueCacheTest, ReportsCommittedBoundaryForResident) {
   EXPECT_THROW(cache_->CommittedSlots(this), StepPlanningConsistencyError);
 }
 
+TEST_F(PagedKeyValueCacheTest, PrefixPublicationEligibilityTracksCommittedBlockBoundaries) {
+  for (const bool checkpoint_required : {false, true}) {
+    model_->config_->engine.dynamic_batching->prefix_caching = true;
+    cache_ = std::make_unique<PagedKeyValueCache>(model_, 0, 0, checkpoint_required, 2);
+    auto request = AddCommittedRequest({2, 3, 4, 5});
+    EXPECT_FALSE(cache_->CanSealCommittedBlocks(this));
+    ASSERT_TRUE(cache_->CanSealCommittedBlocks(request.get()));
+    if (!checkpoint_required) {
+      cache_->SealCommittedBlocks(request.get(), std::array<int32_t, 4>{2, 3, 4, 5});
+      EXPECT_FALSE(cache_->CanSealCommittedBlocks(request.get()));
+    }
+    for (const size_t slots : {size_t{5}, size_t{8}}) {
+      const std::array reservations{PagedCacheReservationRequest{request.get(), slots, false}};
+      auto reservation = cache_->Reserve(reservations);
+      reservation.Commit();
+      EXPECT_EQ(cache_->CanSealCommittedBlocks(request.get()), slots == 8);
+    }
+    cache_->Remove(request);
+    EXPECT_FALSE(cache_->CanSealCommittedBlocks(request.get()));
+  }
+}
+
+TEST_F(PagedKeyValueCacheTest, DisabledPrefixCachingHasNoPublicationBoundary) {
+  model_->config_->engine.dynamic_batching->prefix_caching = false;
+  cache_ = MakePagedCache(model_);
+  auto request = AddCommittedRequest({2, 3, 4, 5});
+  EXPECT_FALSE(cache_->CanSealCommittedBlocks(request.get()));
+}
+
 TEST_F(PagedKeyValueCacheTest, ValidatedRemovalReleasesAndReindexesCommittedTables) {
   auto first = AddCommittedRequest({2, 3, 4, 5});
   auto second = AddCommittedRequest({6, 7, 8, 9});
@@ -850,6 +879,43 @@ TEST(PagedKeyValueCacheManifestTest, BlockCapacityUsesParticipatingLayerCount) {
   EXPECT_THROW(ComputePagedBlockCapacityFromBytes(10240, 1.0f, 0, primary_bytes(2),
                                                   std::numeric_limits<size_t>::max()),
                std::overflow_error);
+}
+
+TEST(PagedKeyValueCacheManifestTest, DeviceBudgetCountsAllocatedStartupStateBeforePendingReservations) {
+  const auto available = DeviceMemoryBudgetAvailableBytes(6144, 10240, 8192, 0);
+  EXPECT_EQ(available, 4096u);
+  EXPECT_EQ(ComputePagedBlockCapacityFromBudget(available, 0, 64), 64u);
+  EXPECT_EQ(ComputePagedBlockCapacityFromBudget(available, 1024, 64), 48u);
+  EXPECT_THROW(ComputePagedBlockCapacityFromBudget(available, 4096, 64),
+               std::runtime_error);
+}
+
+TEST(PagedKeyValueCacheManifestTest, DeviceBudgetClampsToPhysicalFreeMemoryAndHandlesIncreases) {
+  EXPECT_EQ(DeviceMemoryBudgetAvailableBytes(12288, 10240, 5120, 0), 5120u);
+  EXPECT_EQ(DeviceMemoryBudgetAvailableBytes(6144, 10240, 12288, 0), 6144u);
+  EXPECT_EQ(DeviceMemoryBudgetAvailableBytes(std::numeric_limits<uint64_t>::max(), 10240, 5120, 0), 5120u);
+  EXPECT_THROW(DeviceMemoryBudgetAvailableBytes(2048, 10240, 8192, 0), std::runtime_error);
+  EXPECT_THROW(DeviceMemoryBudgetAvailableBytes(1024, 10240, 8192, 0), std::runtime_error);
+}
+
+TEST(PagedKeyValueCacheManifestTest, DeviceBudgetSubtractsHeadroomOnceBeforePendingReservations) {
+  const auto available = DeviceMemoryBudgetAvailableBytes(6144, 10240, 8192, 1024);
+  EXPECT_EQ(available, 3072u);
+  EXPECT_EQ(ComputePagedBlockCapacityFromBudget(available, 1024, 64, 32), 21u);
+  EXPECT_EQ(DeviceMemoryBudgetAvailableBytes(12288, 10240, 5120, 1024), 4096u);
+  EXPECT_EQ(ComputePagedBlockCapacityFromBudget(4096, 0, 64), 64u);
+  EXPECT_EQ(ComputePagedBlockCapacityFromBytes(4096, 1.0f, 0, 64), 57u);
+}
+
+TEST(PagedKeyValueCacheManifestTest, DeviceBudgetRejectsMissingOrExhaustedHeadroom) {
+  EXPECT_THROW(DeviceMemoryBudgetAvailableBytes(6144, 10240, 8192, std::nullopt), std::runtime_error);
+  EXPECT_THROW(DeviceMemoryBudgetAvailableBytes(6144, 10240, 8192, 4096), std::runtime_error);
+  EXPECT_THROW(DeviceMemoryBudgetAvailableBytes(6144, 10240, 8192, 4097), std::runtime_error);
+  EXPECT_THROW(DeviceMemoryBudgetAvailableBytes(12288, 10240, 5120, 5120), std::runtime_error);
+  EXPECT_THROW(DeviceMemoryBudgetAvailableBytes(6144, 10240, 8192,
+                                                std::numeric_limits<uint64_t>::max()),
+               std::runtime_error);
+  EXPECT_THROW(ComputePagedBlockCapacityFromBudget(4096, 4096, 64), std::runtime_error);
 }
 
 // The production path: per-block bytes come from the graph, and capacity divides the budget by

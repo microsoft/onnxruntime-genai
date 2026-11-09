@@ -36,6 +36,7 @@
 #include "whisper.h"
 #include "parakeet.h"
 #include "nemotron_speech.h"
+#include "nemotron_bolt.h"
 #include "moonshine_streaming.h"
 #include "multi_modal.h"
 #include "lfm2.h"
@@ -158,7 +159,7 @@ void State::DumpOutputs() {
 }
 
 void State::Run(OrtSession& session, bool graph_capture_this_run, int graph_capture_length,
-                int graph_capture_variant) {
+                int graph_capture_variant, OrtIoBinding* binding) {
   DurationTrace trace{"State::Run"};
 
   if (params_->use_graph_capture) {
@@ -202,8 +203,13 @@ void State::Run(OrtSession& session, bool graph_capture_this_run, int graph_capt
     run_options_->AddConfigEntry("disable_synchronize_execution_providers", "1");
   }
 
-  session.Run(run_options_.get(), input_names_.data(), inputs_.data(), input_names_.size(),
-              output_names_.data(), outputs_.data(), output_names_.size());
+  if (binding) {
+    session.Run(run_options_.get(), *binding);
+    binding->SynchronizeOutputs();
+  } else {
+    session.Run(run_options_.get(), input_names_.data(), inputs_.data(), input_names_.size(),
+                output_names_.data(), outputs_.data(), output_names_.size());
+  }
 
   extra_outputs_.RegisterOutputs();
 
@@ -519,6 +525,13 @@ std::vector<const char*> SessionInfo::GetOutputSymbolicShape(const std::string& 
 Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   CreateSessionOptions();
   EnsureDeviceOrtInit(*p_device_, *config_);
+  if (config_->engine.dynamic_batching &&
+      config_->engine.dynamic_batching->device_memory_budget_bytes &&
+      p_device_->GetType() == DeviceType::CUDA) {
+    size_t free_bytes, total_bytes;
+    p_device_->GetAvailableMemory(free_bytes, total_bytes);
+    device_memory_budget_initial_free_bytes_ = free_bytes;
+  }
   AddSharedInitializers();
 
   // Inputs-only interface backed by a host-accessible allocation, so the CPU updates the small
@@ -1077,6 +1090,14 @@ std::unique_ptr<Config> CreateConfig(OrtEnv& ort_env, const char* config_path, c
 }
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
+  const bool text_only = ModelType::IsLLM(config->model.type);
+  if (text_only && (!config->model.vision.filename.empty() || !config->model.vision.pipeline.empty())) {
+    throw std::runtime_error(
+        "Text-only model type '" + config->model.type +
+        "' cannot configure a vision encoder. Export the complete vision-language model instead.");
+  }
+  if (config->model.type == "nemotron_bolt")
+    return std::make_shared<NemotronBoltModel>(std::move(config), ort_env);
   if (config->model.draft)
     return std::make_shared<SpeculativeDecodingModel>(std::move(config), ort_env);
   if (!config->model.decoder.pipeline.empty() &&
@@ -1092,8 +1113,15 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
   if (config->model.type == "qwen38_flash_graph")
     return std::make_shared<Qwen38GraphModel>(std::move(config), ort_env);
-  if (ModelType::IsLLM(config->model.type))
+  if (text_only)
     return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
+  if ((config->model.type == "qwen3_5" || config->model.type == "qwen3_5_moe" || config->model.type == "qwen4_exp") &&
+      config->engine.dynamic_batching) {
+    if (config->model.vision.filename.empty()) {
+      throw std::runtime_error("Packed Qwen vision requires an exported vision encoder.");
+    }
+    return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
+  }
   if (ModelType::IsRNNT(config->model.type))
     return std::make_shared<NemotronSpeechModel>(std::move(config), ort_env);
   if (ModelType::IsStreamingEncDecASR(config->model.type))
