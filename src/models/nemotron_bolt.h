@@ -33,6 +33,7 @@ struct NemotronBoltModel : Model {
   size_t capacity_{};
   size_t aux_width_{};
   size_t target_rows_{kBoltVerifyRows};
+  bool single_token_decode_{};
 };
 
 // The target owns dense attention K/V and eight recurrent-state rows. Only the drafter is paged.
@@ -58,6 +59,8 @@ struct NemotronBoltState : State {
 
   const NemotronBoltModel& bolt_;
   std::map<std::string, std::unique_ptr<Tensor>> tensors_;
+  std::map<std::string, std::unique_ptr<Tensor>> single_token_tensors_;
+  std::vector<size_t> single_token_input_indices_, single_token_output_indices_;
   std::vector<std::string> input_storage_, output_storage_;
   std::vector<Tensor*> caches_;
   std::map<std::string, std::unique_ptr<Tensor>> verify_prefix_backup_;
