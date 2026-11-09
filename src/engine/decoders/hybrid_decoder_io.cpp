@@ -7,6 +7,58 @@
 
 namespace Generators {
 
+bool HybridDecoderIO::SupportsVariableWidthGraph(const ExecutionContext& context) {
+  if (!context.plan || context.plan->requests.empty() ||
+      context.fixed_state_binding_key == 0 || context.fixed_state_bindings.empty() ||
+      context.fixed_state_slots.size() != context.plan->requests.size())
+    return false;
+
+  const auto& shared = context.fixed_state_bindings[0];
+  // Compact-update mode keeps GDN's CPU dispatch invariant. Only the exact per-row device
+  // counts change on replay; neither counts nor CommitPrefix boundaries are bucketed.
+  if (shared.state_update_capacity != 7 ||
+      !shared.state_update_capture_count || !shared.state_update_active)
+    return false;
+  const auto counts = shared.state_update_capture_count->GetTensorTypeAndShapeInfo();
+  const auto active = shared.state_update_active->GetTensorTypeAndShapeInfo();
+  if (counts->GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 ||
+      counts->GetShape() != std::vector<int64_t>{static_cast<int64_t>(context.plan->requests.size())} ||
+      shared.state_update_capture_count->GetTensorMemoryInfo().GetDeviceType() != OrtMemoryInfoDeviceType_GPU ||
+      active->GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 ||
+      active->GetShape() != std::vector<int64_t>{1} ||
+      shared.state_update_active->GetTensorMemoryInfo().GetDeviceType() != OrtMemoryInfoDeviceType_CPU ||
+      shared.state_update_active->GetTensorData<int32_t>()[0] != 1)
+    return false;
+
+  bool has_drafts = false;
+  for (const auto& entry : context.plan->requests) {
+    if (entry.is_prefill || entry.unprocessed_token_count == 0 ||
+        entry.unprocessed_token_count - 1 != entry.draft_token_count ||
+        entry.draft_token_count > shared.state_update_capacity)
+      return false;
+    has_drafts |= entry.draft_token_count != 0;
+  }
+  if (!has_drafts)
+    return false;
+
+  using Kind = Config::Model::Decoder::StateGroupKind;
+  using Update = Config::Model::Decoder::StateUpdateKind;
+  for (const auto& binding : context.fixed_state_bindings) {
+    const bool conv = binding.kind == Kind::FixedConv &&
+                      binding.state_update_kind == Update::CausalConv &&
+                      binding.state_update_value && !binding.state_update_capsule;
+    const bool recurrent = binding.kind == Kind::FixedRecurrent &&
+                           binding.state_update_kind == Update::GatedDeltaNet &&
+                           binding.state_update_capsule && !binding.state_update_value;
+    if ((!conv && !recurrent) || !binding.input || !binding.output ||
+        binding.state_update_capacity != shared.state_update_capacity ||
+        binding.state_update_capture_count != shared.state_update_capture_count ||
+        binding.state_update_active != shared.state_update_active)
+      return false;
+  }
+  return true;
+}
+
 HybridDecoderIO::HybridDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
                                  ScheduledRequests& scheduled_requests,
                                  std::shared_ptr<CacheManager> cache_manager,

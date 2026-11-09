@@ -188,6 +188,18 @@ AttentionMetadataValues GetAttentionMetadataForPlan(const StepPlan& plan) {
   return metadata;
 }
 
+size_t GetGraphQueryTokenBound(size_t query_tokens, size_t capacity) {
+  if (query_tokens == 0 || query_tokens > capacity)
+    return 0;
+  size_t bound = 1;
+  while (bound < query_tokens) {
+    if (bound > capacity / 2)
+      return capacity;
+    bound *= 2;
+  }
+  return bound;
+}
+
 AttentionMetadataValues GetAttentionMetadataForGraph(size_t max_query_len, size_t block_table_columns,
                                                      size_t block_size) {
   if (block_table_columns == 0 || block_size == 0) {
@@ -196,7 +208,6 @@ AttentionMetadataValues GetAttentionMetadataForGraph(size_t max_query_len, size_
   if (max_query_len == 0) {
     throw std::runtime_error("Captured attention metadata requires a non-zero query length.");
   }
-
   size_t max_kv_len_lower_bound = 1;
   if (block_table_columns > kMinGraphBlockTableColumns) {
     // Graph shapes use 8, 16, 32, ... columns, with the configured maximum possibly truncating the
@@ -221,8 +232,7 @@ AttentionMetadataValues GetAttentionMetadataForGraph(size_t max_query_len, size_
 
 AttentionMetadataValues GetAttentionMetadataForGraphStep(
     const AttentionMetadataValues& exact_metadata, size_t block_table_columns, size_t block_size) {
-  // Every request in a capturable step carries the same token count, so the step's own query bound
-  // is exactly the bound for every step this graph will serve.
+  // The caller supplies the query bound shared by every step using this graph key.
   auto metadata = GetAttentionMetadataForGraph(
       static_cast<size_t>(exact_metadata.max_query_len_bound), block_table_columns, block_size);
   if (exact_metadata.max_query_len_bound > metadata.max_query_len_bound ||
@@ -507,7 +517,8 @@ std::optional<GraphAnnotationIds::Key> DecodeGraphKey(size_t batch_size, size_t 
                                                       size_t state_binding_domain,
                                                       const OrtSession* decoder_session,
                                                       bool indexshare_decode,
-                                                      size_t extra_binding_layout_key) {
+                                                      size_t extra_binding_layout_key,
+                                                      size_t packed_token_count) {
   if (batch_size == 0 || tokens_per_request == 0 || block_table_columns == 0) {
     return std::nullopt;
   }
@@ -521,7 +532,8 @@ std::optional<GraphAnnotationIds::Key> DecodeGraphKey(size_t batch_size, size_t 
   }
   return GraphAnnotationIds::Key{batch_size, tokens_per_request, columns_bucket, state_binding_key,
                                  state_binding_domain, reinterpret_cast<size_t>(decoder_session),
-                                 static_cast<size_t>(indexshare_decode), extra_binding_layout_key};
+                                 static_cast<size_t>(indexshare_decode), extra_binding_layout_key,
+                                 packed_token_count};
 }
 
 VarlenDecoderIO::VarlenDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
@@ -536,6 +548,8 @@ VarlenDecoderIO::VarlenDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
       plan_{execution_context ? execution_context->plan : nullptr},
       block_table_columns_{
           execution_context ? execution_context->block_table_columns : 0},
+      graph_query_len_bound_{
+          execution_context ? execution_context->graph_query_len_bound : 0},
       input_ids_{execution_context ? execution_context->input_ids : DeviceSpan<int32_t>{}},
       hidden_states_input_{
           execution_context ? execution_context->hidden_states_input : nullptr},
@@ -924,10 +938,14 @@ void VarlenDecoderIO::PrepareAttentionMetadata(std::shared_ptr<DecoderOnly_Model
     if (plan_ == nullptr) {
       throw std::runtime_error("Captured attention metadata requires a step plan.");
     }
+    auto exact = GetAttentionMetadataForPlan(*plan_);
+    if (graph_query_len_bound_ != 0) {
+      if (static_cast<size_t>(exact.max_query_len_bound) > graph_query_len_bound_)
+        throw std::runtime_error("Captured query bound does not cover the current step.");
+      exact.max_query_len_bound = CheckedMetadataLength(graph_query_len_bound_, "Query length");
+    }
     metadata = GetAttentionMetadataForGraphStep(
-        *plan_,
-        block_table_columns_,
-        model->config_->engine.dynamic_batching->block_size);
+        exact, block_table_columns_, model->config_->engine.dynamic_batching->block_size);
   } else if (plan_) {
     metadata = GetAttentionMetadataForPlan(*plan_);
   } else {

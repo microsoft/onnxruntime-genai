@@ -1084,6 +1084,51 @@ repeatability requires replaying the same proposals and schedule.
 `Engine.get_speculative_stats`) reads counters that `Run()` mutates without synchronization. Like
 every other Engine query, it must be called from the Engine's owner thread and throws otherwise.
 
+### Experimental variable-width graph capture
+
+Set `ORTGENAI_ENGINE_VARLEN_GRAPH=1` before creating the Engine to opt into
+decode-only paged capture with unequal query or draft widths. The switch defaults
+to disabled and does not add public configuration fields.
+
+Eligible models expose per-token or selected logits and the three-value
+`attention_metadata` input. Hybrid eligibility is restricted to `qwen3_5_text`
+Conv/GatedDeltaNet models with capacity-seven compact updates, device-resident
+per-row capture counts, and invariant CPU `state_update_active=1`. Forced
+`ORT_GDN_PLAN` overrides disable the new hybrid path. Other fixed-state models,
+sparse-attention metadata, extra bindings, and prefill retain the existing
+capture/eager rules.
+
+The graph key includes the exact packed token count, batch size, and a bucketed
+maximum-query launch bound. Input/output tensor dimensions remain exact: there
+are no dummy requests, padded tokens, or unreserved KV writes. For example, query
+widths `[2,4]` and `[3,3]` can share one graph with six packed rows and a query
+bound of four. Different packed shapes still consume separate entries in the
+existing bounded graph cache.
+
+Qualify eager/captured token parity and actual CUDA graph replay before claiming
+a performance improvement. The optional native regression test
+`VarlenGraphReplayTest.ChangingWidthsPreserveTokensAndCaptureGeometry` runs with a
+CUDA build and `GENAI_VARLEN_GRAPH_MODEL` pointing to a compatible ordinary paged
+model. It compares greedy, draft-assisted control, and opted-in output while
+alternating `[2,4]` and `[3,3]` widths.
+
+The optional `VarlenHybridGraphReplayTest` uses `GENAI_VARLEN_HYBRID_MODEL`
+and a writable `GENAI_VARLEN_HYBRID_REFERENCE` file. It disables hosted drafters
+without changing target weights, checks zero/partial/full acceptance and a
+subsequent turn, and compares exact committed fixed/KV state, logits, and tokens
+between control and enabled runs. Its schedule changes widths within each
+bank-specific graph key, including width-one rows with zero capture counts.
+The streamed reference contains model state and can require several GiB; remove
+it after validation. Kernel source contracts do not replace actual replay
+qualification against the deployed ORT binary. Controlled manual-oracle results
+exclude drafter cost and are not end-to-end DFlash performance evidence.
+
+Captured target steps retain provider synchronization when their auxiliary
+outputs feed a drafter session. The optional
+`VarlenHybridGraphReplayTest.DflashPreservesTokensAcrossGraphModes` regression
+uses `GENAI_VARLEN_HYBRID_DFLASH_MODEL` and checks actual DFlash token parity
+after capture warmup, including unequal prompt lengths.
+
 ## One dynamic step in detail
 
 `Engine::RunDynamic()` coordinates the complete transaction.
