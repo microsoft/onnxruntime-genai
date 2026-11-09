@@ -7,6 +7,7 @@
 # Portions of this file consist of AI generated content.
 # -------------------------------------------------------------------------
 from .bailing import BailingMoeV3Model
+from .bailing_vl import BailingVLModel
 from .base import Model
 from .chatglm import ChatGLMModel
 from .ernie import ErnieModel
@@ -59,6 +60,7 @@ from .whisper import WhisperModel
 
 __all__ = [
     "BailingMoeV3Model",
+    "BailingVLModel",
     "ChatGLMModel",
     "ErnieModel",
     "GPTOSSModel",

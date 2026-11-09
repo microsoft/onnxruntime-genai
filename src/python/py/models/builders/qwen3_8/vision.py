@@ -28,6 +28,12 @@ def save_image_processor(model_name_or_path, extra_kwargs, out_dir, hf_token):
     )
     with open(preprocessor_path) as preprocessor_file:
         image_processor = json.load(preprocessor_file)
+    size = image_processor.get("size")
+    if size is None:
+        size = {
+            "shortest_edge": image_processor["min_pixels"],
+            "longest_edge": image_processor["max_pixels"],
+        }
     processor_config = {
         "processor": {
             "name": "qwen4_exp_image_processor",
@@ -42,8 +48,8 @@ def save_image_processor(model_name_or_path, extra_kwargs, out_dir, hf_token):
                             "width": 540,
                             "height": 360,
                             "smart_resize": 1,
-                            "min_pixels": image_processor["size"]["shortest_edge"],
-                            "max_pixels": image_processor["size"]["longest_edge"],
+                            "min_pixels": size["shortest_edge"],
+                            "max_pixels": size["longest_edge"],
                             "patch_size": image_processor["patch_size"],
                             "merge_size": image_processor["merge_size"],
                         },
@@ -142,8 +148,9 @@ def save_video_processor(model_name_or_path, extra_kwargs, out_dir, hf_token, vi
 
 
 class Qwen4ExpVisionModel(Qwen4ExpGraphModel):
-    def __init__(self, config, visual, io_dtype):
-        super().__init__(io_dtype, "vision.onnx", "qwen4_exp_vision")
+    def __init__(self, config, visual, io_dtype, *, compute_dtype=None):
+        super().__init__(compute_dtype if compute_dtype is not None else io_dtype, "vision.onnx", "qwen4_exp_vision")
+        self.feature_dtype = ir.DataType(io_dtype)
         self.config = config
         self.visual = visual
         self.hidden_size = config.hidden_size
@@ -160,13 +167,18 @@ class Qwen4ExpVisionModel(Qwen4ExpGraphModel):
         self.make_vision_model()
 
     def make_vision_model(self):
-        pixel_values = self.make_value("pixel_values", self.io_dtype, ["num_patches", self.patch_dim])
+        pixel_values = self.make_value("pixel_values", self.feature_dtype, ["num_patches", self.patch_dim])
         image_grid = self.make_value("image_grid_thw", ir.DataType.INT64, [1, 3])
         image_features = self.make_value(
-            "image_features", self.io_dtype, ["num_image_tokens", self.config.out_hidden_size]
+            "image_features", self.feature_dtype, ["num_image_tokens", self.config.out_hidden_size]
         )
         self.graph.inputs.extend([pixel_values, image_grid])
         self.graph.outputs.append(image_features)
+        patch_input = "pixel_values"
+        if self.feature_dtype != self.io_dtype:
+            patch_input = self.make_cast(
+                "/vision/pixel_values/Cast", patch_input, self.io_dtype, ["num_patches", self.patch_dim]
+            )
 
         shape = "/vision/pixel_values/Shape/output_0"
         self.make_shape("/vision/pixel_values/Shape", "pixel_values", [2])
@@ -189,7 +201,7 @@ class Qwen4ExpVisionModel(Qwen4ExpGraphModel):
         patch_matmul = self.make_binary(
             "MatMul",
             "/visual/patch_embed/proj/MatMul",
-            ["pixel_values", patch_weight_name],
+            [patch_input, patch_weight_name],
             self.io_dtype,
             ["num_patches", self.hidden_size],
         )
@@ -263,6 +275,14 @@ class Qwen4ExpVisionModel(Qwen4ExpGraphModel):
             self.io_dtype,
             ["num_image_tokens", merged_hidden_size],
         )
+        features = self.make_vision_projector(merged_input, merged_hidden_size)
+        if self.feature_dtype != self.io_dtype:
+            self.make_node(
+                "Cast", [features], ["image_features"], name="/vision/image_features/Cast", to=self.feature_dtype
+            )
+
+    def make_vision_projector(self, merged_input, merged_hidden_size):
+        merger = self.visual.merger
         merger_fc1 = self.make_linear(
             "visual.merger.linear_fc1",
             merger.linear_fc1,
@@ -272,12 +292,12 @@ class Qwen4ExpVisionModel(Qwen4ExpGraphModel):
         merger_activated = self.make_vision_gelu(
             "/visual/merger/Gelu", merger_fc1, ["num_image_tokens", merged_hidden_size]
         )
-        self.make_linear(
+        return self.make_linear(
             "visual.merger.linear_fc2",
             merger.linear_fc2,
             merger_activated,
             ["num_image_tokens", self.config.out_hidden_size],
-            output="image_features",
+            output="image_features" if self.feature_dtype == self.io_dtype else None,
         )
 
     def make_unary(self, op_type, name, root_input, dtype, shape, **attributes):
