@@ -120,6 +120,8 @@ class DFlash2Builder(BlockDrafterBuilder):
         if self.taps != 2:
             raise ValueError(f"DFlash 2 requires conv_kernel_size=2 for block-boundary masking; got {self.taps}.")
         self.group_size = int(dfl["conv_group_size"])
+        if self.group_size <= 0 or self.hidden_size % self.group_size != 0:
+            raise ValueError("DFlash 2 conv_group_size must be positive and divide hidden_size.")
         self.num_groups = self.hidden_size // self.group_size
         self.selector_rank = int(dfl["selector_rank"])
         self.selector_top_k = int(dfl["selector_top_k"])
@@ -172,6 +174,31 @@ class DFlash2Builder(BlockDrafterBuilder):
         )
         gt = self.binary("Greater", "/dflash2/conv_mask/Greater", mod, self.const(0), ir.DataType.BOOL, ["num_block"])
         cast = self.unary("Cast", "/dflash2/conv_mask/Cast", gt, self.io_dtype, ["num_block"], to=self.io_dtype)
+        if self.ep == "cuda" and self.layernorm_attrs["residual_dtype"] == self.io_dtype:
+            starts = self.out("/dflash2/conv_offsets/Range")
+            self.make_node(
+                "Range",
+                [self.const(0), rows, self.const(self.block_size)],
+                [starts],
+                name="/dflash2/conv_offsets/Range",
+            )
+            self.make_value(starts, ir.DataType.INT64, ["conv_batch"])
+            last = self.reshape("/dflash2/conv_offsets/last", rows, [1], ir.DataType.INT64, [1])
+            offsets = self.make_concat(
+                "/dflash2/conv_offsets/Concat", [starts, last], ir.DataType.INT64, ["conv_batch_plus_one"]
+            )
+            self.unary(
+                "Cast",
+                "/dflash2/conv_offsets/Cast",
+                offsets,
+                ir.DataType.INT32,
+                ["conv_batch_plus_one"],
+                to=ir.DataType.INT32,
+            )
+            previous = self.binary(
+                "Sub", "/dflash2/conv_seed/Sub", starts, self.const(1), ir.DataType.INT64, ["conv_batch"]
+            )
+            self.binary("Max", "/dflash2/conv_seed/Max", previous, self.const(0), ir.DataType.INT64, ["conv_batch"])
         return self.reshape("/dflash2/conv_mask/Reshape", cast, [-1, 1], self.io_dtype, ["num_block", 1])
 
     def _conv_coefficients(self, prefix, x, kernel_weight, rows):
@@ -193,6 +220,8 @@ class DFlash2Builder(BlockDrafterBuilder):
             self.io_dtype,
             ["num_block", 2 * self.taps, self.num_groups],
         )
+        if self.ep == "cuda" and self.layernorm_attrs["residual_dtype"] == self.io_dtype:
+            return [(flat, side * self.taps) for side in range(2)]
         outs = [f"{prefix}/kernel_projection/Split/output_{i}" for i in range(2 * self.taps)]
         self.make_node(
             "Split", [flat], outs, name=f"{prefix}/kernel_projection/Split", axis=1, num_outputs=2 * self.taps
@@ -212,6 +241,44 @@ class DFlash2Builder(BlockDrafterBuilder):
         # Split output index is side * taps + tap (the reference reshapes to [T, 2, taps, G]).
         return [deltas[side * self.taps : (side + 1) * self.taps] for side in range(2)]
 
+    def make_varlen_grouped_conv(self, prefix, x, deltas, base_kernel, shift_mask, rows):
+        """Gather(boundary sample) -> Unsqueeze -> VarlenCausalConvWithState."""
+        weight_name = f"{prefix}.base_kernel"
+        weight = base_kernel.reshape(self.taps, self.hidden_size).flip(0).T.unsqueeze(1)
+        self.make_initializer(weight, weight_name, to=self.io_dtype)
+        seed = self.binary(
+            "Gather",
+            f"{prefix}/state/Gather",
+            x,
+            self.out("/dflash2/conv_seed/Max"),
+            self.io_dtype,
+            ["conv_batch", self.hidden_size],
+            axis=0,
+        )
+        state = self.binary(
+            "Unsqueeze",
+            f"{prefix}/state/Unsqueeze",
+            seed,
+            self.const([2]),
+            self.io_dtype,
+            ["conv_batch", self.hidden_size, 1],
+        )
+        name = f"{prefix}/VarlenCausalConvWithState"
+        output, final_state = self.out(name), f"{name}/output_1"
+        self.make_node(
+            "VarlenCausalConvWithState",
+            [x, weight_name, self.out("/dflash2/conv_offsets/Cast"), "", state, "", deltas[0], shift_mask],
+            [output, final_state],
+            name=name,
+            domain="com.microsoft",
+            activation="none",
+            group_size=self.group_size,
+            delta_offset=deltas[1],
+        )
+        self.make_value(output, self.io_dtype, [rows, self.hidden_size])
+        self.make_value(final_state, self.io_dtype, ["conv_batch", self.hidden_size, 1])
+        return output
+
     def _grouped_conv(self, prefix, x, deltas, base_kernel, shift_mask, rows, dtype=None):
         """``coef, shift(x) -> [Cast] -> Mul -> Mask -> Add`` inside each block.
 
@@ -219,6 +286,10 @@ class DFlash2Builder(BlockDrafterBuilder):
         Coefficient construction and shifts stay at the normal activation dtype.
         """
         dtype = self.io_dtype if dtype is None else dtype
+        if self.ep == "cuda" and self.layernorm_attrs["residual_dtype"] == self.io_dtype:
+            if dtype != self.io_dtype:
+                raise ValueError("CUDA dynamic grouped convolution requires the activation output dtype.")
+            return self.make_varlen_grouped_conv(prefix, x, deltas, base_kernel, shift_mask, rows)
         if dtype != self.io_dtype:
             shift_mask = self.unary("Cast", f"{prefix}/mask/Cast", shift_mask, dtype, ["num_block", 1], to=dtype)
         terms = []
