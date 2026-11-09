@@ -50,9 +50,6 @@ std::unique_ptr<OrtSession> CreateSession(
     const std::vector<const char*>& session_config_values) {
   const bool is_webgpu = device_type == DeviceType::WEBGPU && ep_name == "WebGpuExecutionProvider";
   Config::ProviderOptions provider_options{ep_name, {}};
-  if (is_webgpu) {
-    provider_options.options.emplace_back("enableGraphCapture", "0");
-  }
   auto session_options = OrtSessionOptions::Create();
   session_options->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
@@ -62,15 +59,8 @@ std::unique_ptr<OrtSession> CreateSession(
     constexpr std::string_view webgpu_prefix = "ep.webgpuexecutionprovider.";
     const std::string_view key{session_config_keys[i]};
     if (is_webgpu && key.compare(0, webgpu_prefix.size(), webgpu_prefix) == 0) {
-      const auto option_name = key.substr(webgpu_prefix.size());
-      if (option_name == "enableGraphCapture") {
-        if (std::string_view{session_config_values[i]} != "0") {
-          throw std::invalid_argument("Auxiliary WebGPU graphs require enableGraphCapture=0");
-        }
-      } else {
-        // Native factories capture provider options at registration.
-        provider_options.options.emplace_back(option_name, session_config_values[i]);
-      }
+      // Native factories capture provider options at registration.
+      provider_options.options.emplace_back(key.substr(webgpu_prefix.size()), session_config_values[i]);
     }
   }
 
