@@ -429,13 +429,11 @@ def check_extra_options(
 
     if extra_options.get("use_paged_attention", False) and extra_options.get("exclude_embeds", False):
         if not (
-            getattr(config, "model_type", None) in {"qwen3_5", "qwen3_5_moe"}
+            getattr(config, "model_type", None) in {"qwen3_5", "qwen3_5_moe", "qwen4_exp"}
             and getattr(config, "vision_config", None) is not None
             and not extra_options.get("text_only", False)
         ):
-            raise ValueError(
-                "use_paged_attention with exclude_embeds requires a Qwen3.5 vision composite."
-            )
+            raise ValueError("use_paged_attention with exclude_embeds requires a complete Qwen vision composite.")
 
     if (
         execution_provider == "webgpu"
@@ -1170,7 +1168,7 @@ def get_args():
                     Supports CUDA with fp16 or bf16 precision. WebGPU supports fp16 only for causal, full-context
                     attention with zero softcap, FP16 KV caches, and no Q/K normalization inputs; for example,
                     Gemma2's non-zero attention softcap is unsupported. Cannot be combined with exclude_lm_head.
-                    exclude_embeds is supported only for Qwen3.5 vision composites, exporting a pure CPU lookup
+                    exclude_embeds is supported only for complete Qwen3.5/Qwen4-Exp vision composites, exporting a pure CPU lookup
                     and a separate vision encoder; it cannot be combined with text_only.
                 paged_block_size = 16/32/64/128/256/...: Paged KV-cache block size used when use_paged_attention is set.
                     Must be a power of two and at least 16, which is what the ONNX Runtime PagedAttention op

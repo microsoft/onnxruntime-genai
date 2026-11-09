@@ -51,6 +51,7 @@ class FakeQwen4ExpComponent(FakeComponent):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         self.multimodal_rotary = multimodal_rotary
         self.model_type = "qwen4_exp"
+        self.hidden_size = 8
         self.hyper_connection_attrs = {"hidden_size": 8}
         self.output_shapes = {"hidden_states": ["batch_size", "sequence_length", 2]}
         self.filename = extra_options.get("filename", "text.onnx")
@@ -81,7 +82,8 @@ def test_qwen4_exp_builds_standalone_lookup_only_for_a_consumer(
     monkeypatch.setitem(Qwen4ExpModel.__init__.__globals__, "Qwen4ExpTextModel", FakeQwen4ExpComponent)
     options = {"use_paged_attention": True, "exclude_embeds": exclude_embeds, "dflash2_path": dflash2_path}
     config = SimpleNamespace(
-        text_config=SimpleNamespace(mtp_num_hidden_layers=0, bos_token_id=0, eos_token_id=1, pad_token_id=0)
+        text_config=SimpleNamespace(mtp_num_hidden_layers=0, bos_token_id=0, eos_token_id=1, pad_token_id=0),
+        vision_config=SimpleNamespace(out_hidden_size=8),
     )
     composite = Qwen4ExpModel(config, ir.DataType.FLOAT16, ir.DataType.FLOAT16, "cuda", None, options)
     decoder = composite.decoder
