@@ -135,7 +135,7 @@ FetchContent_Declare(
 if(DEFINED BUILD_VERSION)
   set(_ortgenai_saved_mat_build_version "${BUILD_VERSION}")
 endif()
-set(BUILD_VERSION "3.10.309.1")
+set(BUILD_VERSION "3.10.310.1")
 FetchContent_MakeAvailable(cpp_client_telemetry)
 
 function(_ortgenai_replace_mat_source original replacement)

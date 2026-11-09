@@ -46,7 +46,7 @@ bool RunCycle(const std::string& path) {
   }
 
   const std::string_view version{getter()};
-  if (!version.starts_with("EVT-") || version.find("3.10.309.1") == std::string_view::npos ||
+  if (!version.starts_with("EVT-") || version.find("3.10.310.1") == std::string_view::npos ||
       version.data() != getter()) {
     std::fputs("FAIL: unexpected SDK version value or unstable storage\n", stderr);
     return false;
