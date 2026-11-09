@@ -84,7 +84,7 @@ struct PatchPlan : VisionPlan {
   const Images* images{};
   const Videos* videos{};
   std::vector<std::array<int64_t, 3>> image_grids;
-  std::vector<std::vector<double>> timestamps;
+  std::vector<double> timestamps;
   std::vector<VisionVideoPrompt> clips;
   std::vector<std::shared_ptr<const VisionPosition>> positions;
 };
@@ -240,20 +240,31 @@ std::unique_ptr<const VisionPlan> PatchVisionPreparation::Plan(const Tokenizer& 
     plan->tokens = tokenizer.EncodeBounded(input.prompt, TokenizationAllowance(input.prompt.size()));
     return plan;
   }
+  size_t unit_count = metadata.ImageCount(), frame_count = 0;
+  for (size_t video = 0; video < metadata.VideoCount(); ++video) {
+    unit_count = Add(unit_count, static_cast<size_t>(metadata.VideoGrid(video)[0]));
+    frame_count = Add(frame_count, metadata.FrameCount(video));
+  }
+  if (unit_count >= input.remaining_rows)
+    throw std::invalid_argument("Expanded media rows exceed the remaining session capacity.");
+  plan->image_grids.reserve(metadata.ImageCount());
+  plan->timestamps.reserve(frame_count);
+  plan->clips.reserve(metadata.VideoCount());
+  plan->units.reserve(unit_count);
+  plan->positions.reserve(unit_count);
+  plan->spans.reserve(unit_count);
   for (size_t image = 0; image < metadata.ImageCount(); ++image)
     plan->image_grids.push_back(metadata.ImageGrid(image));
-  plan->timestamps.reserve(metadata.VideoCount());
-  plan->clips.reserve(metadata.VideoCount());
   for (size_t video = 0; video < metadata.VideoCount(); ++video) {
     const auto grid = metadata.VideoGrid(video);
-    plan->timestamps.emplace_back();
+    const auto offset = plan->timestamps.size();
     const auto count = metadata.FrameCount(video);
-    plan->timestamps.back().reserve(count);
     for (size_t frame = 0; frame < count; ++frame)
-      plan->timestamps.back().push_back(metadata.Timestamp(video, frame));
-    plan->clips.push_back({grid, plan->timestamps.back()});
+      plan->timestamps.push_back(metadata.Timestamp(video, frame));
+    plan->clips.push_back({grid, std::span<const double>{plan->timestamps}.subspan(offset, count)});
   }
   std::vector<size_t> unit_order;
+  unit_order.reserve(unit_count);
   const auto expanded = ExpandPrompt(input.prompt, plan->image_grids, plan->clips, host_limit, unit_order);
   plan->tokens = tokenizer.EncodeBounded(expanded, TokenizationAllowance(expanded.size()));
   if (plan->tokens.empty() || plan->tokens.size() >= input.remaining_rows)
