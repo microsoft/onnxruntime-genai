@@ -62,6 +62,10 @@ def test_block_size_is_parsed_from_a_string():
     [
         ("qwen3_5", True, False, True),
         ("qwen3_5_moe", True, False, True),
+        ("qwen4_exp", True, False, True),
+        ("qwen4_exp", True, True, False),
+        ("qwen4_exp", False, False, False),
+        ("qwen4_exp_text", True, False, False),
         ("qwen3_5", True, True, False),
         ("qwen3_5", False, False, False),
         ("llama", True, False, False),
@@ -80,7 +84,7 @@ def test_paged_excluded_embeddings_require_a_vision_composite(
     if supported:
         builder_module.check_extra_options("dummy-model", "", "", "fp16", "cuda", "", options)
     else:
-        with pytest.raises(ValueError, match="requires a Qwen3.5 vision composite"):
+        with pytest.raises(ValueError, match="requires a complete Qwen vision composite"):
             builder_module.check_extra_options("dummy-model", "", "", "fp16", "cuda", "", options)
 
 
