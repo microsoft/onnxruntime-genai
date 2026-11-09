@@ -402,8 +402,10 @@ def test_direct_query_loader_preserves_ling_pair_order_only_for_multimodal(tmp_p
         weights.close()
 
 
-@pytest.mark.parametrize("text_only,text_coordinates", [(False, False), (False, True), (True, True)])
-def test_ling_packed_rotary_matches_adjacent_pairs_and_reuses_current_rows(tmp_path, text_only, text_coordinates):
+@pytest.mark.parametrize(
+    "text_only,coordinates", [(False, "spatial"), (False, "text"), (False, "signed"), (True, "text")]
+)
+def test_ling_packed_rotary_matches_adjacent_pairs_and_reuses_current_rows(tmp_path, text_only, coordinates):
     model = _model(
         tmp_path,
         model_class=BailingVLTextModel,
@@ -415,7 +417,14 @@ def test_ling_packed_rotary_matches_adjacent_pairs_and_reuses_current_rows(tmp_p
     )
     position_shape = ["num_tokens"] if text_only else [3, "num_tokens"]
     model.graph.inputs.append(model.make_value("position_ids", ir.DataType.INT64, position_shape))
-    positions = np.array([[1, 3, 5]] * 3 if text_coordinates else [[0, 3, 5], [2, 4, 6], [7, 8, 9]], dtype=np.int64)
+    positions = np.array(
+        {
+            "text": [[1, 3, 5]] * 3,
+            "spatial": [[0, 3, 5], [2, 4, 6], [7, 8, 9]],
+            "signed": [[0, 3, 5], [-128, -2, 127], [-1, 127, -128]],
+        }[coordinates],
+        dtype=np.int64,
+    )
     feeds = {"position_ids": positions[0] if text_only else positions}
     expected = []
     for label, heads in (("query", 2), ("key", 1)):
@@ -427,13 +436,15 @@ def test_ling_packed_rotary_matches_adjacent_pairs_and_reuses_current_rows(tmp_p
         model.graph.outputs.append(model.values[output])
         owners = np.array([1, 2] * 12 + [0] * 8)
         frequencies = 1 / 10000 ** (np.arange(32, dtype=np.float32) * 2 / 64)
-        angles = positions[owners, :].T * frequencies
-        cos, sin = np.cos(angles).astype(np.float16)[:, None], np.sin(angles).astype(np.float16)[:, None]
+        angles = positions[owners, :].T.astype(np.float32) * frequencies
+        rotary_dtype = np.float16 if text_only else np.float32
+        cos, sin = np.cos(angles).astype(rotary_dtype)[:, None], np.sin(angles).astype(rotary_dtype)[:, None]
         rotated = np.empty_like(data)
         rotated[..., 0::2] = data[..., 0::2] * cos - data[..., 1::2] * sin
         rotated[..., 1::2] = data[..., 1::2] * cos + data[..., 0::2] * sin
         expected.append(rotated.reshape(3, -1))
-    session = ort.InferenceSession(ir.to_proto(model.model).SerializeToString(), providers=["CPUExecutionProvider"])
+    model.save_model(str(tmp_path))
+    session = ort.InferenceSession(str(tmp_path / model.filename), providers=["CPUExecutionProvider"])
     actual = session.run(None, feeds)
     for output, reference in zip(actual, expected, strict=True):
         np.testing.assert_allclose(output, reference, rtol=2e-3, atol=1e-3)

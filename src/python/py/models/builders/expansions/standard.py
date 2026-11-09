@@ -270,12 +270,23 @@ class Standard:
 
     def make_packed_mrope(self, name, root_input, num_heads, rotary_dim, owners):
         caches = self.make_rotary_embedding_caches()
+        dtype = ir.DataType.FLOAT if self.rope_attrs["cast"]["use_fp32"] else self.io_dtype
         leading = ["num_tokens"]
         cache_name = "/model/rotary/packed"
         cos = f"{cache_name}/cos/Unsqueeze/output_0"
         sin = f"{cache_name}/sin/Unsqueeze/output_0"
         if cos not in self.values:
-            positions = Standard.make_mrope_positions(self, cache_name, self.input_names["position_ids"], leading)
+            position_ids = self.input_names["position_ids"]
+            start = self.rope_attrs["position_start"]
+            if start:
+                self.make_sub(
+                    f"{cache_name}/Offset",
+                    [position_ids, f"/model/constants/INT64/{start}"],
+                    ir.DataType.INT64,
+                    [3, *leading],
+                )
+                position_ids = f"{cache_name}/Offset/output_0"
+            positions = Standard.make_mrope_positions(self, cache_name, position_ids, leading)
             for kind, cache in zip(("cos", "sin"), caches, strict=True):
                 Standard.make_mrope_cache(
                     self,
@@ -285,25 +296,32 @@ class Standard:
                     positions,
                     owners,
                     "/model/constants/INT64/[1]",
-                    self.io_dtype,
+                    dtype,
                     leading,
                 )
         shape = [*leading, num_heads, rotary_dim]
+        if dtype != self.io_dtype:
+            self.make_cast(f"{name}/Cast_in", root_input, dtype, self.values[root_input].shape)
+            root_input = f"{name}/Cast_in/output_0"
         self.make_reshape(
             f"{name}/Reshape",
             [root_input, f"/model/constants/INT64/[0, {num_heads}, {rotary_dim}]"],
-            self.io_dtype,
+            dtype,
             shape,
         )
-        rotated = Standard.make_mrope_rotation(self, name, f"{name}/Reshape/output_0", cos, sin, self.io_dtype, shape)
+        rotated = Standard.make_mrope_rotation(self, name, f"{name}/Reshape/output_0", cos, sin, dtype, shape)
         output = f"{name}/Flatten"
         self.make_reshape(
             output,
             [rotated, f"/model/constants/INT64/[0, {num_heads * rotary_dim}]"],
-            self.io_dtype,
+            dtype,
             [*leading, num_heads * rotary_dim],
         )
-        return f"{output}/output_0"
+        result = f"{output}/output_0"
+        if dtype != self.io_dtype:
+            self.make_cast(f"{name}/Cast_out", result, self.io_dtype, [*leading, num_heads * rotary_dim])
+            result = f"{name}/Cast_out/output_0"
+        return result
 
     def make_mrope_cache(self, name, kind, cache, positions, owners, axes, dtype, leading):
         cache_shape = [*leading, len(owners)]

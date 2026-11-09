@@ -133,6 +133,10 @@ class BailingVLTextModel(BailingMoeV3Model):
         self.rope_attrs["mrope_section"] = list(config.mrope_section)
         self.rope_attrs["op_type"] = "RotaryEmbedding" if extra_options.get("text_only", False) else "MRotaryEmbedding"
         self.rope_attrs["interleaved"] = 1
+        if self.rope_attrs["op_type"] == "MRotaryEmbedding":
+            self.rope_attrs["position_start"] = -self.original_context_length
+            self.rope_attrs["cache_length"] = self.original_context_length + self.context_length
+            self.rope_attrs["cast"]["use_fp32"] = True
         self.get_mrope_owners(self.qk_rope_head_dim)
 
     def get_mrope_owners(self, rotary_dim):
