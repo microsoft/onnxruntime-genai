@@ -112,7 +112,16 @@ ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& pr
       size_t image_grid_thw_num_dims;
       CheckResult(OrtxGetTensorData(image_grid_thw, reinterpret_cast<const void**>(&image_grid_thw_data),
                                     &image_grid_thw_shape, &image_grid_thw_num_dims));
-      num_images = image_grid_thw_shape[0];
+      size_t grid_elements = 1;
+      for (size_t dim = 0; dim < image_grid_thw_num_dims; ++dim) {
+        if (image_grid_thw_shape[dim] <= 0 ||
+            static_cast<size_t>(image_grid_thw_shape[dim]) > std::numeric_limits<size_t>::max() / grid_elements)
+          throw std::runtime_error("Invalid image grid shape.");
+        grid_elements *= static_cast<size_t>(image_grid_thw_shape[dim]);
+      }
+      if (grid_elements % 3 != 0 || grid_elements / 3 > static_cast<size_t>(std::numeric_limits<int64_t>::max()))
+        throw std::runtime_error("Image grid must contain complete T/H/W entries.");
+      num_images = static_cast<int64_t>(grid_elements / 3);
     } else if (computed_grid_data) {
       image_grid_thw_data = computed_grid_data;
       num_images = computed_grid_num_images;

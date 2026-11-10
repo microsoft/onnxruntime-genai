@@ -20,6 +20,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include "engine/backend_capabilities.h"
@@ -592,10 +593,12 @@ struct Qwen38SuffixDrafter {
   std::array<uint64_t, kTableSize> ngram2_key_{};
 };
 
-// Owns every device-side object of one model. Graphs stay captured per execution thread across Engines.
+// Owns every device-side object of one model. Graphs stay captured across Engines (see Qwen38GraphModel::AcquireDevice).
 struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   explicit Qwen38GraphEngine(Qwen38GraphModel& model);
   ~Qwen38GraphEngine() override;
+  void Initialize(bool is_session_recreation);
+  void ReleaseBindings();
 
   int Capacity() const override { return capacity_; }
   int ReservedTail() const override { return std::max(verify_rows_, kReservedTail); }
@@ -605,8 +608,6 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   void Drain() noexcept override;
   void MarkContextFailed() noexcept override;
   bool ContextIsHealthy() const noexcept override;
-  // Runs the configured muted warmup once per live thread, at model construction and before an Engine leases the device.
-  void WarmupForCurrentThread();
 
   // Ingests prompt tokens: by the dense chunked prefill session when prefill.enabled (FastAppend: the dense state continues
   // across chunks and is handed over to the decode state in BeginDecode), otherwise by S=2 graph steps (StepPrefill; the
@@ -646,7 +647,6 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   // The int64 control words of one request slot in ctl_ (the `state` of the plane's prep): the slots lie this far apart for
   // the plane, for the batched fold.ctl views and for every host access.
   static constexpr size_t kCtlWordsPerSlot = QWEN38_PLANE_CTL_WORDS_PER_SLOT;
-  struct WarmupThread {};
   struct Bank {
     PlaneBuffer arena;
     std::map<std::string, std::unique_ptr<DevTensor>> tensors;  // keyed by input name (past_key_values.*)
@@ -922,7 +922,6 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   const uint8_t* last_hidden_ptr_{};  // hidden output of the last cycle (rows h0, h1)
   Qwen38OrtRunHints run_hints_;       // per slot: what the ORT QMoE kernels are told with each Run (qwen38_ort_env.h)
   std::unique_ptr<OrtRunOptions> offload_warmup_run_options_;
-  std::vector<std::weak_ptr<const WarmupThread>> warmup_threads_;
 };
 
 struct Qwen38GraphModel : Model {
@@ -933,8 +932,7 @@ struct Qwen38GraphModel : Model {
   std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const override;
 
   // Leases the device engine to one Engine at a time (it owns the captured graphs, the KV store and the bank ring). The
-  // acquiring thread is warmed before live execution. The lease drains the device when released and keeps the model
-  // alive. Throws when another Engine holds it; a failed warmup poisons the model before releasing the lease.
+  // lease drains the device when released and keeps the model alive. Throws when another Engine holds it.
   std::shared_ptr<Qwen38DecodeDevice> AcquireDevice();
   void PoisonExecutionContext() noexcept { context_healthy_.store(false); }
   bool IsExecutionContextHealthy() const noexcept { return context_healthy_.load(); }
@@ -961,10 +959,15 @@ struct Qwen38GraphModel : Model {
   std::unique_ptr<OrtSession> session_head_r2_, session_dense_, session_head_kv_;
   std::optional<int64_t> target_head_rows_;
   std::unique_ptr<Qwen38GraphEngine> engine_;
+  std::shared_ptr<const std::thread::id> engine_thread_;
 
   void RunCpuEmbedding(const int64_t* ids_host, size_t num_tokens, void* dst_host) const;
 
  private:
+  void DestroyDecodeState();
+  void InitializeDecodeState(bool is_session_recreation = false);
+  void RecreateCapturedSessions();
+  std::string target_filename_, head_s1_filename_, head_s2_filename_, head_r2_filename_;
   std::atomic<bool> leased_{false};
   std::atomic<bool> context_healthy_{true};
   BackendCapabilities resolved_capabilities_;

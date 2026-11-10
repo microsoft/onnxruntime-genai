@@ -1090,6 +1090,12 @@ std::unique_ptr<Config> CreateConfig(OrtEnv& ort_env, const char* config_path, c
 }
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
+  const bool text_only = ModelType::IsLLM(config->model.type);
+  if (text_only && (!config->model.vision.filename.empty() || !config->model.vision.pipeline.empty())) {
+    throw std::runtime_error(
+        "Text-only model type '" + config->model.type +
+        "' cannot configure a vision encoder. Export the complete vision-language model instead.");
+  }
   if (config->model.type == "nemotron_bolt")
     return std::make_shared<NemotronBoltModel>(std::move(config), ort_env);
   if (config->model.draft)
@@ -1107,8 +1113,15 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
   if (config->model.type == "qwen38_flash_graph")
     return std::make_shared<Qwen38GraphModel>(std::move(config), ort_env);
-  if (ModelType::IsLLM(config->model.type))
+  if (text_only)
     return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
+  if ((config->model.type == "qwen3_5" || config->model.type == "qwen3_5_moe" || config->model.type == "qwen4_exp") &&
+      config->engine.dynamic_batching) {
+    if (config->model.vision.filename.empty()) {
+      throw std::runtime_error("Packed Qwen vision requires an exported vision encoder.");
+    }
+    return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
+  }
   if (ModelType::IsRNNT(config->model.type))
     return std::make_shared<NemotronSpeechModel>(std::move(config), ort_env);
   if (ModelType::IsStreamingEncDecASR(config->model.type))

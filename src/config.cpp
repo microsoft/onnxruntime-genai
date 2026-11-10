@@ -3090,6 +3090,14 @@ struct DynamicBatching_Element : JSON::Element {
       v_->device_memory_budget_bytes = bytes;
     } else if (name == "device_memory_headroom_bytes") {
       v_->device_memory_headroom_bytes = ParseRuntimeProfileMemoryBytes(value, name);
+    } else if (name == "media_host_bytes" || name == "media_device_bytes") {
+      const auto bytes = ParseRuntimeProfileMemoryBytes(value, name);
+      if (bytes == 0 || bytes > std::numeric_limits<size_t>::max())
+        throw std::out_of_range(std::string{name} + " must be positive and fit size_t");
+      if (name == "media_host_bytes")
+        v_->media_host_bytes = static_cast<size_t>(bytes);
+      else
+        v_->media_device_bytes = static_cast<size_t>(bytes);
     } else if (name == "gpu_utilization_factor") {
       const auto parsed_value = JSON::Get<double>(value);
       if (!std::isfinite(parsed_value) || parsed_value <= 0 || parsed_value > 1)
@@ -3221,6 +3229,16 @@ struct RuntimeProfileDynamicBatching_Element : JSON::Element {
   explicit RuntimeProfileDynamicBatching_Element(Config::RuntimeProfile::Overlay::DynamicBatching& v) : v_{v} {}
 
   void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "media_host_bytes" || name == "media_device_bytes") {
+      const auto bytes = ParseRuntimeProfileMemoryBytes(value, name);
+      if (bytes == 0 || bytes > std::numeric_limits<size_t>::max())
+        throw std::out_of_range(std::string{name} + " must be a positive size_t byte count.");
+      if (name == "media_host_bytes")
+        v_.media_host_bytes = static_cast<size_t>(bytes);
+      else
+        v_.media_device_bytes = static_cast<size_t>(bytes);
+      return;
+    }
     if (name == "device_memory_headroom_bytes") {
       v_.device_memory_headroom_bytes = ParseRuntimeProfileMemoryBytes(value, name);
       return;
@@ -3599,7 +3617,7 @@ void ValidateRuntimeProfiles(const Config& config) {
         !batching.num_blocks && !batching.device_memory_headroom_bytes && !batching.max_batch_size &&
         !batching.max_scheduled_tokens && !batching.prefix_caching &&
         !batching.max_snapshots && !batching.snapshot_cache && !search.chunk_size &&
-        !batching.dflash2_max_snapshots &&
+        !batching.dflash2_max_snapshots && !batching.media_host_bytes && !batching.media_device_bytes &&
         !profile.overlay.speculative.max_draft_tokens) {
       throw std::runtime_error("runtime profile '" + profile.id +
                                "' does not contain any overlay fields");
@@ -4121,7 +4139,7 @@ void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device) {
   const bool has_batching_overlay = batching.num_blocks || batching.device_memory_headroom_bytes || batching.max_batch_size ||
                                     batching.max_scheduled_tokens || batching.prefix_caching ||
                                     batching.max_snapshots || batching.snapshot_cache ||
-                                    batching.dflash2_max_snapshots;
+                                    batching.dflash2_max_snapshots || batching.media_host_bytes || batching.media_device_bytes;
   if (has_batching_overlay && !config.engine.dynamic_batching) {
     throw std::runtime_error("runtime profile '" + selected->id +
                              "' requires engine.dynamic_batching in the base config");
@@ -4155,6 +4173,8 @@ void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device) {
     if (batching.max_snapshots) effective.max_snapshots = *batching.max_snapshots;
     if (batching.snapshot_cache) effective.snapshot_cache = *batching.snapshot_cache;
     if (batching.dflash2_max_snapshots) effective.dflash2_max_snapshots = *batching.dflash2_max_snapshots;
+    if (batching.media_host_bytes) effective.media_host_bytes = *batching.media_host_bytes;
+    if (batching.media_device_bytes) effective.media_device_bytes = *batching.media_device_bytes;
   }
   const auto& search = selected->overlay.search;
   if (search.chunk_size) candidate.search.chunk_size = search.chunk_size;

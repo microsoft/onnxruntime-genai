@@ -34,6 +34,12 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
+const std::shared_ptr<const std::thread::id>& ExecutionThreadToken() {
+  // Retaining the allocation distinguishes thread lifetimes even when an ID is reused.
+  thread_local const auto token = std::make_shared<const std::thread::id>(std::this_thread::get_id());
+  return token;
+}
+
 double SecondsSince(Clock::time_point start) {
   return std::chrono::duration<double>(Clock::now() - start).count();
 }
@@ -668,7 +674,9 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
       vocab_{model.config_->model.vocab_size},
       max_batch_{static_cast<int>(ResolveQwen38MaxBatchSize(*model.config_))},
       ledger_{model.config_->model.qwen38_graph.kv_capacity},
-      run_hints_{static_cast<size_t>(max_batch_)} {
+      run_hints_{static_cast<size_t>(max_batch_)} {}
+
+void Qwen38GraphEngine::Initialize(bool is_session_recreation) {
   const auto& q = model_.config_->model.qwen38_graph;
   offload_warmup_run_options_ = CreateQwen38OffloadWarmupRunOptions(
       ParseQwen38MoeOffloadSettings(model_.config_->model.decoder.session_options.config_entries));
@@ -771,7 +779,8 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
               opts.AddInitializer("model.embed_tokens.weight.row_scales", *model_.embed_values_[1]);
             }
           }
-        });
+        },
+        is_session_recreation);
     const size_t page_size = Qwen38DflashCachePageSize(dflash_model_->session_info_,
                                                        dflash_model_->config_->model.dflash2.inputs.past_key_names);
     dflash_ = std::make_unique<Dflash2Drafter>(
@@ -790,29 +799,6 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
         dflash_config.sliding_window > 0 ? static_cast<size_t>(dflash_config.sliding_window + dflash_config.block_size) : 0;
     for (auto& features : slot_dflash_prompt_) features = Qwen38DflashPromptFeatures{dflash_context_window};
   }
-  WarmupForCurrentThread();
-  if (g_log.enabled)
-    Log("qwen38_graph") << "engine ready: ple register " << ple_register_seconds << " s, warmup " << warmup_seconds
-                        << " s, mtp=" << mtp_enabled_ << " fold=" << fold_ << " fast_prefill=" << (fast_ != nullptr) << std::endl;
-}
-
-void Qwen38GraphEngine::WarmupForCurrentThread() {
-  // ORT's graph cache is thread-local. A lifetime token also distinguishes reused OS thread IDs.
-  thread_local const auto current_thread = std::make_shared<const WarmupThread>();
-  warmup_threads_.erase(std::remove_if(warmup_threads_.begin(), warmup_threads_.end(),
-                                       [](const auto& thread) { return thread.expired(); }),
-                        warmup_threads_.end());
-  if (std::any_of(warmup_threads_.begin(), warmup_threads_.end(),
-                  [&](const auto& thread) { return thread.lock() == current_thread; })) {
-    return;
-  }
-  for (auto& row : dirs_)
-    for (auto& direction : row) direction.warmup_captured = false;
-  for (auto& first : batch_dirs_)
-    for (auto& row : first)
-      for (auto& direction : row) direction.warmup_captured = false;
-
-  const auto& q = model_.config_->model.qwen38_graph;
   Reset();
   if (dflash_) {
     const auto start = Clock::now();
@@ -922,11 +908,27 @@ void Qwen38GraphEngine::WarmupForCurrentThread() {
     Warmup();
     warmup_seconds = SecondsSince(start);
   }
-  warmup_threads_.emplace_back(current_thread);
+  // Fault injection must happen after captures exist to exercise initialization rollback.
+  if (const char* fail = std::getenv("ORT_QWEN38_TEST_FAIL_AFTER_WARMUP");
+      fail && std::string_view(fail) == "1") {
+    throw std::runtime_error("qwen38_graph: injected initialization failure after warmup");
+  }
+  if (g_log.enabled)
+    Log("qwen38_graph") << "engine ready: ple register " << ple_register_seconds << " s, warmup " << warmup_seconds
+                        << " s, mtp=" << mtp_enabled_ << " fold=" << fold_ << " fast_prefill=" << (fast_ != nullptr) << std::endl;
 }
 
 Qwen38GraphEngine::~Qwen38GraphEngine() {
   Drain();
+  ReleaseBindings();
+  // Destroy drafter captures before either its tensors or the target's shared buffers.
+  if (dflash_model_) dflash_model_->session_.reset();
+  dflash_.reset();
+  dflash_model_.reset();
+  fast_.reset();
+}
+
+void Qwen38GraphEngine::ReleaseBindings() {
   // IO bindings and OrtValues reference the buffers: release them first
   for (auto& row : dirs_)
     for (auto& d : row) d.binding.reset();
@@ -936,7 +938,6 @@ Qwen38GraphEngine::~Qwen38GraphEngine() {
   for (auto& h : head_)
     for (auto& d : h.dirs) d.binding.reset();
   for (auto& d : head_r2_.dirs) d.binding.reset();
-  fast_.reset();
 }
 
 void Qwen38GraphEngine::Drain() noexcept {
@@ -2247,8 +2248,8 @@ void Qwen38GraphEngine::BuildHeadR2() {
       d.binding->BindOutput(name.c_str(), *t->value);
     }
     d.run_options = OrtRunOptions::Create();
-    d.run_options->AddConfigEntry("gpu_graph_id",
-                                  std::to_string(Qwen38GraphAnnotationId(Qwen38GraphRun::kHeadR2, 2, k)).c_str());
+    const int id = Qwen38GraphAnnotationId(Qwen38GraphRun::kHeadR2, 2, k);
+    d.run_options->AddConfigEntry("gpu_graph_id", std::to_string(id).c_str());
     d.run_options->AddConfigEntry("disable_synchronize_execution_providers", "1");
   }
   SyncStream();
@@ -3626,7 +3627,12 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
     if (g_log.enabled) Log("qwen38_graph") << "head sessions " << SecondsSince(start) << " s" << std::endl;
   }
 
-  engine_ = std::make_unique<Qwen38GraphEngine>(*this);
+  target_filename_ = target_filename;
+  head_s1_filename_ = head_s1_filename;
+  head_s2_filename_ = head_s2_filename;
+  head_r2_filename_ = head_r2_filename;
+  InitializeDecodeState();
+  engine_thread_ = ExecutionThreadToken();
   auto& capabilities = resolved_capabilities_;
   capabilities.token_selection = BackendTokenSelection::Backend;
   capabilities.admission = engine_->MaxBatchSize() > 1 ? BackendAdmission::IndependentSlots : BackendAdmission::WholeBatch;
@@ -3651,7 +3657,50 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
     capabilities.max_scheduled_tokens = config_->engine.dynamic_batching->max_scheduled_tokens;
 }
 
-Qwen38GraphModel::~Qwen38GraphModel() = default;
+Qwen38GraphModel::~Qwen38GraphModel() {
+  DestroyDecodeState();
+}
+
+void Qwen38GraphModel::DestroyDecodeState() {
+  if (engine_) {
+    engine_->Drain();
+    engine_->ReleaseBindings();
+  }
+  // The plugin may implement graph release as a successful no-op. Destroy every capturing
+  // session while its bound buffers are still alive, rather than reusing its graph cache.
+  session_head_s1_.reset();
+  session_head_s2_.reset();
+  session_head_r2_.reset();
+  session_target_.reset();
+  engine_.reset();
+}
+
+void Qwen38GraphModel::InitializeDecodeState(bool is_session_recreation) {
+  engine_ = std::make_unique<Qwen38GraphEngine>(*this);
+  try {
+    engine_->Initialize(is_session_recreation);
+  } catch (...) {
+    DestroyDecodeState();
+    throw;
+  }
+}
+
+void Qwen38GraphModel::RecreateCapturedSessions() {
+  auto& env = GetOrtEnv();
+  try {
+    session_target_ = CreateSession(env, target_filename_, session_options_.get(), true);
+    if (head_session_options_) {
+      session_head_s1_ = CreateSession(env, head_s1_filename_, head_session_options_.get(), true);
+      session_head_s2_ = CreateSession(env, head_s2_filename_, head_session_options_.get(), true);
+    }
+    if (head_r2_session_options_) {
+      session_head_r2_ = CreateSession(env, head_r2_filename_, head_r2_session_options_.get(), true);
+    }
+  } catch (...) {
+    DestroyDecodeState();
+    throw;
+  }
+}
 
 Qwen38EmbeddingTable Qwen38GraphModel::EmbeddingTable() const {
   Qwen38EmbeddingTable table;
@@ -3697,13 +3746,17 @@ std::shared_ptr<Qwen38DecodeDevice> Qwen38GraphModel::AcquireDevice() {
     if (!IsExecutionContextHealthy()) {
       throw std::runtime_error("qwen38_flash_graph: the execution context is poisoned; reload the Model before creating another Engine.");
     }
-    // CUDA's current device and ORT's captured graphs are per thread. Select the GPU and warm the acquiring Engine thread
-    // before any live state update, even when model construction already warmed another thread.
+    // CUDA's current device is per thread. The Engine drives the model from the thread that acquires it, which is not the
+    // thread that loaded the model, so select the model's GPU here: its stream and buffers live on that device.
     plane_->Check(plane_->set_device(p_device_->GetDeviceId(nullptr)), "cudaSetDevice");
-    engine_->WarmupForCurrentThread();
+    // Captures are provider/thread-owned. A handoff needs new sessions, not only new buffers.
+    if (!engine_ || engine_thread_ != ExecutionThreadToken()) {
+      DestroyDecodeState();
+      RecreateCapturedSessions();
+      InitializeDecodeState(true);
+      engine_thread_ = ExecutionThreadToken();
+    }
   } catch (...) {
-    PoisonExecutionContext();
-    engine_->Drain();
     leased_.store(false);
     throw;
   }

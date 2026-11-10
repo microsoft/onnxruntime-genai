@@ -277,7 +277,7 @@ def check_extra_options(
     if extra_options.get("use_paged_attention", False):
         incompatible_options = [
             key
-            for key in ("exclude_embeds", "exclude_lm_head")
+            for key in ("exclude_lm_head",)
             if extra_options.get(key, False)
         ]
         if incompatible_options:
@@ -426,6 +426,14 @@ def check_extra_options(
     hf_details = get_hf_details(model_name, input_path, cache_dir, extra_options)
     config = hf_details["hf_config"]
     extra_options["hf_details"] = hf_details
+
+    if extra_options.get("use_paged_attention", False) and extra_options.get("exclude_embeds", False):
+        if not (
+            getattr(config, "model_type", None) in {"qwen3_5", "qwen3_5_moe", "qwen4_exp"}
+            and getattr(config, "vision_config", None) is not None
+            and not extra_options.get("text_only", False)
+        ):
+            raise ValueError("use_paged_attention with exclude_embeds requires a complete Qwen vision composite.")
 
     if (
         execution_provider == "webgpu"
@@ -1159,8 +1167,9 @@ def get_args():
                     By default, the model outputs [num_tokens, vocab_size] logits.
                     Supports CUDA with fp16 or bf16 precision. WebGPU supports fp16 only for causal, full-context
                     attention with zero softcap, FP16 KV caches, and no Q/K normalization inputs; for example,
-                    Gemma2's non-zero attention softcap is unsupported. Cannot be combined with exclude_embeds or
-                    exclude_lm_head.
+                    Gemma2's non-zero attention softcap is unsupported. Cannot be combined with exclude_lm_head.
+                    exclude_embeds is supported only for complete Qwen3.5/Qwen4-Exp vision composites, exporting a pure CPU lookup
+                    and a separate vision encoder; it cannot be combined with text_only.
                 paged_block_size = 16/32/64/128/256/...: Paged KV-cache block size used when use_paged_attention is set.
                     Must be a power of two and at least 16, which is what the ONNX Runtime PagedAttention op
                     accepts. Default is 256. Also written to the `engine.dynamic_batching` section of
