@@ -314,7 +314,7 @@ def test_embedding_model_matches_transformers(tmp_path, table_dtype, features_dt
     embedding = lfm2_vl_module.LFM2VLEmbedding(
         copy.deepcopy(config), table_dtype, table_dtype, "cpu", str(tmp_path / "cache"), {}
     )
-    embedding.embed_attrs["image_features_dtype"] = features_dtype
+    embedding.embed_attrs["features"].append(("image_features", IMAGE_TOKEN, features_dtype))
     build(embedding, hf_model, tmp_path)
 
     ids = np.array(ids, np.int64)

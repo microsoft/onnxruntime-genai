@@ -13,7 +13,7 @@ from onnx_ir.tensor_adapters import to_torch_dtype
 from transformers.image_processing_base import ImageProcessingMixin
 
 from .base import Model
-from .lfm2 import LFM2Model
+from .lfm2 import LFM2Model, LFM3Model
 
 
 class LFM2VLVisionEncoder(Model):
@@ -458,30 +458,48 @@ class LFM2VLVisionEncoder(Model):
 
 
 class LFM2VLEmbedding(Model):
-    # input_ids, image_features --> inputs_embeds, with the image features in place of the image tokens
+    # input_ids and the features of each modality --> inputs_embeds, with the features in place of their tokens
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         config.hidden_act = None  # Model reads the decoder's activation, which this model does not have
         extra_options["filename"] = "embeddings.onnx"
+        self.architecture = config.architectures[0]
         # Model sets model_type from this, and "lfm2_vl" loads the weights through Lfm2VlForConditionalGeneration
         config.architectures = ["lfm2_vl"]
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
-        self.embed_attrs["image_token_id"] = config.image_token_id  # Token whose embeddings the image features replace
-        self.embed_attrs["image_features_dtype"] = self.io_dtype  # Type of the vision model's image_features
+        # The pipeline fills this: (input name, token whose embeddings the features replace, type of the features)
+        self.embed_attrs["features"] = []
 
     def make_rope_init(self, config):
         # This model has no attention, whatever RoPE the decoder's config holds (LFM3 nests it per layer type)
         pass
 
+    def resolve_model_loader(self):
+        if self.architecture in LFM3Model.MULTIMODAL:
+            return self.resolve_transformers_class(LFM3Model.MULTIMODAL[self.architecture][0])
+        return super().resolve_model_loader()
+
+    def make_session_options(self, decoder_session_options):
+        # The other models run on the decoder's EP. Graph capture replays one recorded run, so it stays on the
+        # decoder: the other models get new shapes for every prompt.
+        graph_capture = {"enable_cuda_graph", "enable_graph_capture", "enableGraphCapture"}
+        provider_options = [
+            {name: {key: value for key, value in options.items() if key not in graph_capture}}
+            for provider in decoder_session_options["provider_options"]
+            for name, options in provider.items()
+        ]
+        return {"log_id": "onnxruntime-genai", "provider_options": provider_options}
+
     def make_inputs_and_outputs(self):
         # Set input dicts
-        self.input_names = {"input_ids": "input_ids", "image_features": "image_features"}
-        self.input_types = {"input_ids": ir.DataType.INT64, "image_features": self.embed_attrs["image_features_dtype"]}
-        self.input_shapes = {
-            "input_ids": ["batch_size", "sequence_length"],
-            "image_features": ["num_image_tokens", self.hidden_size],
-        }
+        self.input_names = {"input_ids": "input_ids"}
+        self.input_types = {"input_ids": ir.DataType.INT64}
+        self.input_shapes = {"input_ids": ["batch_size", "sequence_length"]}
+        for name, _, dtype in self.embed_attrs["features"]:
+            self.input_names[name] = name
+            self.input_types[name] = dtype
+            self.input_shapes[name] = [self.make_num_tokens_dim(name), self.hidden_size]
 
         # Set output dicts
         self.output_names = {"inputs_embeds": "inputs_embeds"}
@@ -491,24 +509,24 @@ class LFM2VLEmbedding(Model):
         # Now set inputs and outputs
         super().make_inputs_and_outputs()
 
+    def make_num_tokens_dim(self, features_name):
+        # image_features --> num_image_tokens
+        return f"num_{features_name.removesuffix('_features')}_tokens"
+
     def make_model(self, input_path):
-        # Only the token embedding of the checkpoint, then the image features
+        # Only the token embedding of the checkpoint, then the features
         self.make_inputs_and_outputs()
         self.make_embedding(self.load_weights(input_path).get_input_embeddings().weight)
         self.make_postprocessing_nodes()
 
     def make_postprocessing_nodes(self):
-        # Make the following subgraph, which writes the image features over the embeddings of the image tokens in
+        # Make the following subgraph, which writes each modality's features over the embeddings of its tokens in
         # order (transformers' masked_scatter):
         #
-        #   input_ids --> Equal(image_token_id) --> Reshape [-1] --> NonZero --> Transpose ---------+
-        #                                                                                           |
-        #   embeddings --> Reshape [-1,H] --> ScatterND <-- image_features (--> Cast) <--------------+
-        #                                         |
-        #                                      Reshape(Shape(embeddings)) --> inputs_embeds
-        basename = "/model/embed_tokens/image_features"
+        #   embeddings --> Reshape [-1,H] --> ScatterND per modality --> Reshape(Shape(embeddings)) --> inputs_embeds
+        basename = f"/model/embed_tokens/{self.embed_attrs['features'][0][0]}"
         embeddings = self.layernorm_attrs["root_input"]
-        flat, features_shape = ["num_tokens", self.hidden_size], ["num_image_tokens", self.hidden_size]
+        flat = ["num_tokens", self.hidden_size]
 
         shape_name = f"{basename}/Shape"
         self.make_shape(shape_name, embeddings, shape=[3])
@@ -517,69 +535,90 @@ class LFM2VLEmbedding(Model):
             flat_name, [embeddings, f"/model/constants/INT64/[-1, {self.hidden_size}]"], self.io_dtype, flat
         )
 
+        scattered = f"{flat_name}/output_0"
+        for name, token_id, dtype in self.embed_attrs["features"]:
+            scattered = self.make_features_scatter(name, token_id, dtype, scattered)
+
+        output_inputs = [scattered, f"{shape_name}/output_0"]
+        self.make_node(
+            "Reshape", output_inputs, [self.output_names["inputs_embeds"]], name=f"{basename}/output/Reshape"
+        )
+
+    def make_features_scatter(self, name, token_id, dtype, flat_embeddings):
+        # Make the following subgraph:
+        #
+        #   input_ids --> Equal(token_id) --> Reshape [-1] --> NonZero --> Transpose ---------+
+        #                                                                                     |
+        #   flat embeddings --> ScatterND <-- features (--> Cast) <---------------------------+
+        basename = f"/model/embed_tokens/{name}"
+        num_tokens = self.make_num_tokens_dim(name)
+        flat, features_shape = ["num_tokens", self.hidden_size], [num_tokens, self.hidden_size]
+
         equal_name = f"{basename}/Equal"
-        image_token = f"/model/constants/INT64/{self.embed_attrs['image_token_id']}"
-        self.make_equal(equal_name, [self.input_names["input_ids"], image_token], ["batch_size", "sequence_length"])
+        token = f"/model/constants/INT64/{token_id}"
+        self.make_equal(equal_name, [self.input_names["input_ids"], token], ["batch_size", "sequence_length"])
         mask_name = f"{basename}/mask/Reshape"
         self.make_reshape(
             mask_name, [f"{equal_name}/output_0", "/model/constants/INT64/[-1]"], ir.DataType.BOOL, ["num_tokens"]
         )
         nonzero_name = f"{basename}/NonZero"
         self.make_node("NonZero", [f"{mask_name}/output_0"], [f"{nonzero_name}/output_0"], name=nonzero_name)
-        self.make_value(f"{nonzero_name}/output_0", ir.DataType.INT64, shape=[1, "num_image_tokens"])
+        self.make_value(f"{nonzero_name}/output_0", ir.DataType.INT64, shape=[1, num_tokens])
         transpose_name = f"{basename}/Transpose"
-        self.make_transpose(
-            transpose_name, f"{nonzero_name}/output_0", ir.DataType.INT64, ["num_image_tokens", 1], [1, 0]
-        )
+        self.make_transpose(transpose_name, f"{nonzero_name}/output_0", ir.DataType.INT64, [num_tokens, 1], [1, 0])
 
-        features = self.input_names["image_features"]
-        if self.embed_attrs["image_features_dtype"] != self.io_dtype:
+        features = self.input_names[name]
+        if dtype != self.io_dtype:
             cast_name = f"{basename}/Cast"
             self.make_cast(cast_name, features, self.io_dtype, features_shape)
             features = f"{cast_name}/output_0"
 
         scatter_name = f"{basename}/ScatterND"
-        scatter_inputs = [f"{flat_name}/output_0", f"{transpose_name}/output_0", features]
+        scatter_inputs = [flat_embeddings, f"{transpose_name}/output_0", features]
         self.make_node("ScatterND", scatter_inputs, [f"{scatter_name}/output_0"], name=scatter_name)
         self.make_value(f"{scatter_name}/output_0", self.io_dtype, shape=flat)
-        output_inputs = [f"{scatter_name}/output_0", f"{shape_name}/output_0"]
-        self.make_node(
-            "Reshape", output_inputs, [self.output_names["inputs_embeds"]], name=f"{basename}/output/Reshape"
-        )
+        return f"{scatter_name}/output_0"
 
 
 class LFM2VLModel:
     # The lfm2_vl pipeline (exclude_embeds=true): the LFM2 decoder, plus the vision and embedding models
-    # that turn images and token ids into its inputs_embeds
+    # that turn images and token ids into its inputs_embeds. A pipeline with vision_class None has no vision model.
 
     vision_class = LFM2VLVisionEncoder
     decoder_class = LFM2Model
     pipeline_type = "lfm2_vl"
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        # The vision and embedding models are never quantized
-        vision_dtype = self.make_vision_dtype(io_dtype, ep)
         # The remaining options configure the decoder
         options = {key: extra_options[key] for key in ("hf_token", "hf_remote") if key in extra_options}
         # Without the checkpoint's quantization_config, Model loads them through transformers, not QuantModel
         unquantized_config = copy.deepcopy(config)
         if hasattr(unquantized_config, "quantization_config"):
             delattr(unquantized_config, "quantization_config")
-        self.vision = self.vision_class(
-            copy.deepcopy(unquantized_config), vision_dtype, vision_dtype, ep, cache_dir, dict(options)
-        )
+        # The vision and embedding models are never quantized
+        self.vision = None
+        if self.vision_class is not None:
+            vision_dtype = self.make_vision_dtype(io_dtype, ep)
+            self.vision = self.vision_class(
+                copy.deepcopy(unquantized_config), vision_dtype, vision_dtype, ep, cache_dir, dict(options)
+            )
         self.embedding = LFM2VLEmbedding(unquantized_config, io_dtype, io_dtype, ep, cache_dir, dict(options))
-        self.embedding.embed_attrs["image_features_dtype"] = self.vision.io_dtype
+        self.sub_models = [self.embedding] if self.vision is None else [self.vision, self.embedding]
+        if self.vision is not None:
+            self.embedding.embed_attrs["features"].append(
+                ("image_features", config.image_token_id, self.vision.io_dtype)
+            )
         self.decoder = self.decoder_class(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         self.decoder.model_type = self.pipeline_type
-        if self.decoder.filename in (self.vision.filename, self.embedding.filename):
+        if self.decoder.filename in [sub_model.filename for sub_model in self.sub_models]:
             raise ValueError(
                 f"The decoder cannot be named {self.decoder.filename}: the vision or embedding model has that name"
             )
 
         # Read the image processor settings before the build, so an unsupported checkpoint fails early
-        self.image_processor = self.read_image_processor(config, cache_dir)
-        self.processor_config = self.make_processor_config(self.image_processor)
+        if self.vision is not None:
+            self.image_processor = self.read_image_processor(config, cache_dir)
+            self.processor_config = self.make_processor_config(self.image_processor)
 
     def make_vision_dtype(self, io_dtype, ep):
         # A bf16 vision tower drifts much further from fp32 than an fp16 one, so it runs in fp16 and the embedding model
@@ -631,23 +670,22 @@ class LFM2VLModel:
         return {"processor": {"name": "lfm2_vl_image_processor", "transforms": transforms}}
 
     def make_model(self, input_path):
-        # All three models read the same checkpoint, so load it once
-        hf_model = self.vision.load_weights(input_path)
-        self.vision.load_weights = self.embedding.load_weights = lambda _input_path: hf_model
+        # All the models read the same checkpoint, so load it once
+        hf_model = self.sub_models[0].load_weights(input_path)
+        for sub_model in self.sub_models:
+            sub_model.load_weights = lambda _input_path: hf_model
         # The decoder loads another model from a pre-quantized checkpoint, with an adapter or with fewer layers
         if (
             self.decoder.quant_type is None
             and not {"adapter_path", "num_hidden_layers"} & self.decoder.extra_options.keys()
         ):
-            self.decoder.load_weights = self.vision.load_weights
-        self.vision.make_model(input_path)
-        self.embedding.make_model(input_path)
-        self.decoder.make_model(input_path)
+            self.decoder.load_weights = self.embedding.load_weights
+        for model in (*self.sub_models, self.decoder):
+            model.make_model(input_path)
 
     def save_model(self, out_dir):
-        self.vision.save_model(out_dir)
-        self.embedding.save_model(out_dir)
-        self.decoder.save_model(out_dir)
+        for model in (*self.sub_models, self.decoder):
+            model.save_model(out_dir)
 
     def make_genai_config(self, config, extra_kwargs, out_dir):
         self.decoder.make_genai_config(config, extra_kwargs, out_dir)
@@ -656,34 +694,33 @@ class LFM2VLModel:
         with open(config_path) as f:
             genai_config = json.load(f)
 
-        # The vision and embedding models run on the decoder's EP. Graph capture replays one recorded run, so it
-        # stays on the decoder: the other models get new shapes for every prompt.
-        model = genai_config["model"]
-        graph_capture = {"enable_cuda_graph", "enable_graph_capture", "enableGraphCapture"}
-        provider_options = [
-            {name: {key: value for key, value in options.items() if key not in graph_capture}}
-            for provider in model["decoder"]["session_options"]["provider_options"]
-            for name, options in provider.items()
-        ]
-        session_options = {"log_id": "onnxruntime-genai", "provider_options": provider_options}
-        model["embedding"] = {
-            "filename": self.embedding.filename,
-            "inputs": {"input_ids": "input_ids", "image_features": "image_features"},
-            "outputs": {"inputs_embeds": "inputs_embeds"},
-            "session_options": session_options,
-        }
-        model["vision"] = {
-            "filename": self.vision.filename,
-            "config_filename": "processor_config.json",
-            **self.make_vision_section(),
-            "outputs": {"image_features": "image_features"},
-            "session_options": session_options,
-        }
+        self.update_genai_config(genai_config)
 
         with open(config_path, "w") as f:
             json.dump(genai_config, f, indent=4)
-        with open(os.path.join(out_dir, "processor_config.json"), "w") as f:
-            json.dump(self.processor_config, f, indent=2)
+        if self.vision is not None:
+            with open(os.path.join(out_dir, "processor_config.json"), "w") as f:
+                json.dump(self.processor_config, f, indent=2)
+
+    def update_genai_config(self, genai_config):
+        # The sections of the sub-models, next to the decoder's
+        model = genai_config["model"]
+        session_options = self.embedding.make_session_options(model["decoder"]["session_options"])
+        features = [name for name, _, _ in self.embedding.embed_attrs["features"]]
+        model["embedding"] = {
+            "filename": self.embedding.filename,
+            "inputs": {"input_ids": "input_ids", **{name: name for name in features}},
+            "outputs": {"inputs_embeds": "inputs_embeds"},
+            "session_options": session_options,
+        }
+        if self.vision is not None:
+            model["vision"] = {
+                "filename": self.vision.filename,
+                "config_filename": "processor_config.json",
+                **self.make_vision_section(),
+                "outputs": {"image_features": "image_features"},
+                "session_options": session_options,
+            }
 
     def make_vision_section(self):
         # The genai_config vision settings that depend on the pipeline

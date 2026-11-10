@@ -1,0 +1,16 @@
+{{- '<|startoftext|>' -}}
+{%- for message in messages -%}
+{{- '<|im_start|>' + message['role'] + '
+' -}}
+{%- if message['content'] is string -%}
+{{- message['content'] -}}
+{%- else -%}
+{%- for item in message['content'] -%}
+{%- if item['type'] == 'audio' -%}{{- '<|audio|>' -}}{%- else -%}{{- item['text'] -}}{%- endif -%}
+{%- endfor -%}
+{%- endif -%}
+{{- '<|im_end|>
+' -}}
+{%- endfor -%}
+{%- if add_generation_prompt -%}{{- '<|im_start|>assistant
+' -}}{%- endif -%}

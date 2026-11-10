@@ -38,6 +38,8 @@ examples/csharp/ModelChat/models
 !test/models/lfm2-vl/*
 !/test/models/lfm3-vl/
 !test/models/lfm3-vl/*
+!/test/models/lfm3-audio/
+!test/models/lfm3-audio/*
 !test/models/marian-batch/*
 !test/models/marian-batch-beams/*
 !test/models/marian-batch-values/

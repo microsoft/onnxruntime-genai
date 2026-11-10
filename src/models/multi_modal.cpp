@@ -3,6 +3,7 @@
 
 #include "generator/generators.h"
 #include "gemma4_vision_state.h"
+#include "lfm3_audio_speech_state.h"
 #include "lfm3_vl_vision_state.h"
 #include "multi_modal.h"
 #include "nemotron_parse.h"
@@ -351,6 +352,9 @@ size_t Lfm2AudioSpeechState::FindOutput(const std::string& name) const {
 std::unique_ptr<SpeechState> CreateSpeechState(const MultiModalLanguageModel& model, const GeneratorParams& params) {
   if (model.config_->model.type == "lfm2_audio") {
     return std::make_unique<Lfm2AudioSpeechState>(model, params);
+  }
+  if (model.config_->model.type == "lfm3_audio") {
+    return std::make_unique<Lfm3AudioSpeechState>(model, params);
   }
   return std::make_unique<SpeechState>(model, params);
 }
