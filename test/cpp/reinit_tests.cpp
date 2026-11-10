@@ -190,6 +190,59 @@ TEST(ReInitTests, SequentialModelLoads) {
   OgaShutdown();  // leave process-global state clean for any following test
 }
 
+class DeviceResourceReleaseTests : public testing::Test {
+ protected:
+  void SetUp() override { OgaShutdown(); }
+  void TearDown() override { OgaShutdown(); }
+};
+
+TEST_F(DeviceResourceReleaseTests, FailedCudaModelCreationThenRepeatedRelease) {
+  std::string initialization_error;
+  {
+    auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+    config->ClearProviders();
+    config->AppendProvider("cuda");
+    try {
+      auto model = OgaModel::Create(*config);
+    } catch (const std::exception& e) {
+      initialization_error = e.what();
+    }
+  }  // Destroy the config and any model objects before releasing device resources.
+
+  if (initialization_error.find("Cuda interface not available:") == std::string::npos)
+    GTEST_SKIP() << "Requires an unavailable CUDA add-on; initialization result: " << initialization_error;
+
+  EXPECT_NO_THROW(OgaCheckResult(OgaReleaseDeviceResources("CUDA")));
+  EXPECT_NO_THROW(OgaCheckResult(OgaReleaseDeviceResources("CUDA")));
+}
+
+TEST_F(DeviceResourceReleaseTests, CudaReleaseThenReinitialize) {
+  Generators::DeviceInterface* device{};
+  try {
+    device = Generators::GetDeviceInterface(Generators::DeviceType::CUDA);
+    const Generators::ProviderOptions options{"cuda", {}};
+    (void)device->GetDeviceId(&options);
+  } catch (const std::exception& e) {
+    GTEST_SKIP() << "CUDA is unavailable: " << e.what();
+  }
+
+  ASSERT_NO_THROW(RunGenerateOnce("cuda"));
+  auto& allocator = Generators::GetOrtGlobals()->device_allocators_[static_cast<int>(Generators::DeviceType::CUDA)];
+  ASSERT_NE(allocator.allocator_, nullptr);
+  for (int cycle = 0; cycle < 2; ++cycle) {
+    SCOPED_TRACE("release/reinitialize cycle " + std::to_string(cycle));
+    ASSERT_NO_THROW(OgaCheckResult(OgaReleaseDeviceResources("CUDA")));
+    ASSERT_NO_THROW(OgaCheckResult(OgaReleaseDeviceResources("CUDA")));
+    EXPECT_EQ(allocator.allocator_, nullptr);
+    EXPECT_EQ(allocator.session_, nullptr);
+    EXPECT_EQ(Generators::GetDeviceInterface(Generators::DeviceType::CUDA), device);
+
+    ASSERT_NO_THROW(RunGenerateOnce("cuda"));
+    EXPECT_NE(allocator.allocator_, nullptr);
+    EXPECT_NE(allocator.session_, nullptr);
+  }
+}
+
 namespace {
 
 constexpr auto kConcurrencyTimeout = std::chrono::seconds(10);

@@ -433,7 +433,8 @@ void OrtGlobals::ReleaseDeviceResources(DeviceType type) {
 
   std::scoped_lock lock{device_interfaces_mutex_};
   auto interface = device_interfaces_.find(type);
-  if (interface != device_interfaces_.end()) {
+  // A failed add-on load can leave a null interface entry in the cache.
+  if (cuda_library_ && *cuda_library_ && interface != device_interfaces_.end() && interface->second) {
     using ReleaseInterfaceResourcesFn = void (*)(const char*);
     auto release_interface_resources = reinterpret_cast<ReleaseInterfaceResourcesFn>(
         cuda_library_->GetSymbol("ReleaseInterfaceResources"));
