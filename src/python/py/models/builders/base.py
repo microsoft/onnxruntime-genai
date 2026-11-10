@@ -309,7 +309,16 @@ class Model:
         }
 
         # LayerNorm-specific variables
-        epsilon = config.rms_norm_eps if hasattr(config, "rms_norm_eps") else 1e-06
+        # Configs name the norm epsilon differently: rms_norm_eps (most models), layer_norm_eps (Phi),
+        # layer_norm_epsilon (Phi-3-small), norm_eps (Nemotron) and layernorm_epsilon (ChatGLM).
+        epsilon = next(
+            (
+                getattr(config, name)
+                for name in ("rms_norm_eps", "layer_norm_eps", "layer_norm_epsilon", "norm_eps", "layernorm_epsilon")
+                if getattr(config, name, None) is not None
+            ),
+            1e-06,
+        )
         self.layernorm_attrs = {
             "simple": True,              # Use SimplifiedLayerNorm/SkipSimplifiedLayerNorm vs. LayerNorm/SkipLayerNorm
             "first_layernorm": True,     # 1st LayerNorm = LayerNorm, then SkipLayerNorm for all subsequent LayerNorms
