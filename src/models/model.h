@@ -171,6 +171,7 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
   std::shared_ptr<MultiModalProcessor> CreateMultiModalProcessor() const;
 
   virtual std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const = 0;
+  virtual bool SupportsExternalPrefillChunking() const noexcept { return false; }
 
   std::unique_ptr<OrtValue> ExpandInputs(std::unique_ptr<OrtValue>& input, int num_beams) const;
 

@@ -353,6 +353,12 @@ struct OgaModel : OgaAbstract {
     return p;
   }
 
+  bool SupportsExternalPrefillChunking() const {
+    bool supported{};
+    OgaCheckResult(OgaModelGetSupportsExternalPrefillChunking(this, &supported));
+    return supported;
+  }
+
   static void operator delete(void* p) { OgaDestroyModel(reinterpret_cast<OgaModel*>(p)); }
 };
 

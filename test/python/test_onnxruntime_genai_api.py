@@ -1067,6 +1067,15 @@ def test_model_device_type(test_data_path, relative_model_path):
     assert model.device_type == relative_model_path[1]
 
 
+@pytest.mark.parametrize("model_type, supported", [("gpt2", False), ("qwen2", True)])
+def test_model_external_prefill_chunking_capability(test_data_path, model_type, supported):
+    model_path = Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32"
+    config = og.Config(os.fspath(model_path))
+    config.overlay(json.dumps({"model": {"type": model_type}}))
+    model = og.Model(config)
+    assert model.supports_external_prefill_chunking is supported
+
+
 @pytest.mark.parametrize(
     "relative_model_path",
     (
