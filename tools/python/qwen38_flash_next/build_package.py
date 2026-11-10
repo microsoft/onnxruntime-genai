@@ -251,9 +251,9 @@ RC5_CORE_PRESETS: tuple[str, ...] = (
     "qwen_flash_next_int4_int8_rc5_contrib_dflash2_qmoe_2b375_x02_y14_z32_dp23_b64",
 )
 RC6_CORE_PRESETS: tuple[str, ...] = (
-    "qwen_flash_next_rc6_all_int4_fp32_fp16kv_v2",
-    "qwen_flash_next_rc6_top16_fp32_fp16kv_v2",
-    "qwen_flash_next_rc6_2b375_fp32_fp16kv_v2",
+    "qwen_flash_next_rc6_all_int4_fp32",
+    "qwen_flash_next_rc6_top16_fp32",
+    "qwen_flash_next_rc6_2b375_fp32",
 )
 
 PRESETS: dict[str, dict] = {
@@ -367,8 +367,8 @@ PRESETS: dict[str, dict] = {
         "bs2": 64,
         "kl_mode": "dp2",
     },
-    "qwen_flash_next_rc6_all_int4_fp32_fp16kv_v2": {
-        "pkg_name": "qwen_flash_next_rc6_all_int4_fp32_fp16kv_v2",
+    "qwen_flash_next_rc6_all_int4_fp32": {
+        "pkg_name": "qwen_flash_next_rc6_all_int4_fp32",
         "x": 48,
         "y": 0,
         "z": 0,
@@ -379,8 +379,8 @@ PRESETS: dict[str, dict] = {
         "precision_profile": "fp32_fp16kv_v2",
         "consolidate_data_files": True,
     },
-    "qwen_flash_next_rc6_top16_fp32_fp16kv_v2": {
-        "pkg_name": "qwen_flash_next_rc6_top16_fp32_fp16kv_v2",
+    "qwen_flash_next_rc6_top16_fp32": {
+        "pkg_name": "qwen_flash_next_rc6_top16_fp32",
         "x": 16,
         "y": 32,
         "z": 0,
@@ -391,8 +391,8 @@ PRESETS: dict[str, dict] = {
         "precision_profile": "fp32_fp16kv_v2",
         "consolidate_data_files": True,
     },
-    "qwen_flash_next_rc6_2b375_fp32_fp16kv_v2": {
-        "pkg_name": "qwen_flash_next_rc6_2b375_fp32_fp16kv_v2",
+    "qwen_flash_next_rc6_2b375_fp32": {
+        "pkg_name": "qwen_flash_next_rc6_2b375_fp32",
         "x": 2,
         "y": 14,
         "z": 32,
@@ -421,12 +421,21 @@ PRESET_ALIASES: dict[str, str] = {
     "2b25_x00_y12_z36_dp2_b64": "qwen_flash_next_int4_int8_rc5_contrib_dflash2_qmoe_2b25_x00_y12_z36_dp2_b64",
     "2b125_x00_y06_z42_dp2_b64": "qwen_flash_next_int4_int8_rc5_contrib_dflash2_qmoe_2b125_x00_y06_z42_dp2_b64",
     "2b0_x00_y00_z48_b64": "qwen_flash_next_int4_int8_rc5_contrib_dflash2_qmoe_2b0_x00_y00_z48_b64",
-    "rc6_all_int4": "qwen_flash_next_rc6_all_int4_fp32_fp16kv_v2",
-    "rc6_all_int4_fp32_fp16kv_v2": "qwen_flash_next_rc6_all_int4_fp32_fp16kv_v2",
-    "rc6_top16": "qwen_flash_next_rc6_top16_fp32_fp16kv_v2",
-    "rc6_top16_fp32_fp16kv_v2": "qwen_flash_next_rc6_top16_fp32_fp16kv_v2",
-    "rc6_2b375": "qwen_flash_next_rc6_2b375_fp32_fp16kv_v2",
-    "rc6_2b375_fp32_fp16kv_v2": "qwen_flash_next_rc6_2b375_fp32_fp16kv_v2",
+    "rc6_all_int4": "qwen_flash_next_rc6_all_int4_fp32",
+    "rc6_all_int4_fp32": "qwen_flash_next_rc6_all_int4_fp32",
+    "qwen_flash_next_rc6_all_int4": "qwen_flash_next_rc6_all_int4_fp32",
+    "rc6_all_int4_fp32_fp16kv_v2": "qwen_flash_next_rc6_all_int4_fp32",
+    "qwen_flash_next_rc6_all_int4_fp32_fp16kv_v2": "qwen_flash_next_rc6_all_int4_fp32",
+    "rc6_top16": "qwen_flash_next_rc6_top16_fp32",
+    "rc6_top16_fp32": "qwen_flash_next_rc6_top16_fp32",
+    "qwen_flash_next_rc6_top16": "qwen_flash_next_rc6_top16_fp32",
+    "rc6_top16_fp32_fp16kv_v2": "qwen_flash_next_rc6_top16_fp32",
+    "qwen_flash_next_rc6_top16_fp32_fp16kv_v2": "qwen_flash_next_rc6_top16_fp32",
+    "rc6_2b375": "qwen_flash_next_rc6_2b375_fp32",
+    "rc6_2b375_fp32": "qwen_flash_next_rc6_2b375_fp32",
+    "qwen_flash_next_rc6_2b375": "qwen_flash_next_rc6_2b375_fp32",
+    "rc6_2b375_fp32_fp16kv_v2": "qwen_flash_next_rc6_2b375_fp32",
+    "qwen_flash_next_rc6_2b375_fp32_fp16kv_v2": "qwen_flash_next_rc6_2b375_fp32",
 }
 
 CONTEXT_TIERS: dict[str, tuple[int, int]] = {
