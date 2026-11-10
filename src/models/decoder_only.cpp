@@ -85,7 +85,7 @@ DecoderOnly_Model::DecoderOnly_Model(std::unique_ptr<Config> config, OrtEnv& ort
       throw std::runtime_error("Packed vision encoder does not match the patch/grid/projected-feature contract.");
     }
     vision_->processor = std::make_shared<MultiModalProcessor>(
-        *config_, vision_->session_info, GetOrCreatePreprocessingThreadPool());
+        *config_, vision_->session_info, GetOrCreatePreprocessingThreadPool(), vision_->session.get());
   }
 }
 

@@ -44,6 +44,7 @@ struct Qwen2_5_VL_PipelineModel : public DecoderOnlyPipelineModel {
 
   std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths,
                                      const GeneratorParams& params) const override;
+  OrtSession* GetVisionSession() const override { return vision_session_.get(); }
 
   // Vision pipeline shared across states (sessions reused).
   std::unique_ptr<QwenVisionPipeline> vision_pipeline_;
@@ -61,6 +62,7 @@ struct Qwen2_5_VL_PipelineState : public DecoderOnlyPipelineState {
                            const GeneratorParams& params);
 
   void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) override;
+  void SetRunOption(const char* key, const char* value) override;
 
   DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens,
                         DeviceSpan<int32_t> next_indices) override;
@@ -90,11 +92,12 @@ struct Qwen2_5_VL_PipelineState : public DecoderOnlyPipelineState {
   int32_t GetImageTokenId() const;
 
   const Qwen2_5_VL_PipelineModel& vl_model_;
+  std::unique_ptr<OrtRunOptions> vision_run_options_{OrtRunOptions::Create()};
   bool vision_ran_{false};
   std::unique_ptr<OrtValue> image_features_value_;
   std::vector<float> image_features_buffer_;       // backing storage for OrtValue
-  std::unique_ptr<OrtValue> vision_output_owner_;  // keeps the encoder's output alive when
-                                                   // image_features_value_ is a reshaped view of it
+  std::unique_ptr<OrtValue> vision_output_owner_;  // Owns the encoder output, including any padded tail
+                                                   // beyond the compact image_features_value_ view.
   size_t image_embed_consumed_{0};                 // Track how many vision embeddings we've injected
   bool embedding_merges_features_{false};          // embedding graph does the merge, so skip injection
   size_t image_feature_input_index_{SIZE_MAX};
