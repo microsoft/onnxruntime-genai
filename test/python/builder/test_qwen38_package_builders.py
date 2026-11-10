@@ -1017,6 +1017,18 @@ def external_locations(path: Path) -> dict[str, dict[str, str]]:
     }
 
 
+def external_initializer(name: str, location: str, offset: int, length: int) -> TensorProto:
+    t = TensorProto()
+    t.name = name
+    t.data_type = TensorProto.UINT8
+    t.dims.extend([length])
+    t.data_location = TensorProto.EXTERNAL
+    for k, v in (("location", location), ("offset", str(offset)), ("length", str(length))):
+        kv = t.external_data.add()
+        kv.key, kv.value = k, v
+    return t
+
+
 def test_precision_options_and_package_io_do_not_import_the_builders():
     for module in ("precision_options.py", "package_io.py"):
         tree = ast.parse((FLASH_NEXT_TOOLS_DIR / module).read_text())
@@ -1032,20 +1044,12 @@ def test_consolidation_relocates_existing_target_data_file(tmp_path):
     (pkg / "model.onnx.data").write_bytes(b"T" * 300)
     (pkg / "bank_a.data").write_bytes(b"A" * 100)
 
-    def ext_init(name, loc, offset, length):
-        t = TensorProto()
-        t.name = name
-        t.data_type = TensorProto.UINT8
-        t.dims.extend([length])
-        t.data_location = TensorProto.EXTERNAL
-        for k, v in (("location", loc), ("offset", str(offset)), ("length", str(length))):
-            kv = t.external_data.add()
-            kv.key, kv.value = k, v
-        return t
-
-    inits = [ext_init("w_t", "model.onnx.data", 100, 200), ext_init("w_a", "bank_a.data", 0, 100)]
+    inits = [
+        external_initializer("w_t", "model.onnx.data", 100, 200),
+        external_initializer("w_a", "bank_a.data", 0, 100),
+    ]
     onnx.save(helper.make_model(helper.make_graph([], "g", [], [], initializer=inits)), str(pkg / "model.onnx"))
-    tier = [ext_init("w_a", "bank_a.data", 0, 100)]
+    tier = [external_initializer("w_a", "bank_a.data", 0, 100)]
     onnx.save(helper.make_model(helper.make_graph([], "g", [], [], initializer=tier)), str(pkg / "model_2k.onnx"))
 
     res = po.consolidate_package_external_data(pkg)
@@ -1058,6 +1062,21 @@ def test_consolidation_relocates_existing_target_data_file(tmp_path):
         assert raw[off : off + length] == payload
     assert external_locations(pkg / "model_2k.onnx")["w_a"] == locs["w_a"]
     assert po.consolidate_package_external_data(pkg) == {"consolidated": False}
+
+
+def test_consolidation_failure_removes_partial_output_and_leaves_package_untouched(tmp_path):
+    po = import_precision_options()
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "bank_a.data").write_bytes(b"A" * 100)
+    (pkg / "bank_b.data").write_bytes(b"B" * 50)  # the graph below claims 200 bytes
+    inits = [external_initializer("w_a", "bank_a.data", 0, 100), external_initializer("w_b", "bank_b.data", 0, 200)]
+    onnx.save(helper.make_model(helper.make_graph([], "g", [], [], initializer=inits)), str(pkg / "model.onnx"))
+    before = snapshot(pkg)
+
+    with pytest.raises(RuntimeError, match="sendfile returned 0"):
+        po.consolidate_package_external_data(pkg)
+    assert snapshot(pkg) == before
 
 
 def test_consolidated_precision_build_rewrites_every_graph_and_keeps_base_package_intact(builders, tmp_path):
