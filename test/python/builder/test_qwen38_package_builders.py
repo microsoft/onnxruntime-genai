@@ -981,11 +981,21 @@ def test_rc6_fp32_gdn_kl_calibration_and_presets(builders):
     assert len(top16_3) == 32 and top16_2 == []
 
     spec = pkg.resolve_preset_spec("rc6_2b375")
-    assert spec["pkg_name"] == "qwen_flash_next_rc6_2b375_fp32_fp16kv_v2"
+    assert spec["pkg_name"] == "qwen_flash_next_rc6_2b375_fp32"
     assert (spec["x"], spec["y"], spec["z"]) == (2, 14, 32)
     assert spec["kl_mode"] == "dp23_fp32"
     assert spec["precision_profile"] == "fp32_fp16kv_v2"
     assert spec["consolidate_data_files"] is True
+
+    spec_top16 = pkg.resolve_preset_spec("rc6_top16")
+    assert spec_top16["pkg_name"] == "qwen_flash_next_rc6_top16_fp32"
+    assert (spec_top16["x"], spec_top16["y"], spec_top16["z"]) == (16, 32, 0)
+    assert spec_top16["kl_mode"] == "rank_fp32"
+
+    spec_all4 = pkg.resolve_preset_spec("rc6_all_int4")
+    assert spec_all4["pkg_name"] == "qwen_flash_next_rc6_all_int4_fp32"
+    assert (spec_all4["x"], spec_all4["y"], spec_all4["z"]) == (48, 0, 0)
+
 
 
 
