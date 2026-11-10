@@ -37,7 +37,6 @@ struct MultiModalLanguageModel : Model {
   MultiModalLanguageModel& operator=(const MultiModalLanguageModel&) = delete;
 
   std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const override;
-  bool SupportsExternalPrefillChunking() const noexcept override { return true; }
 
   std::unique_ptr<OrtSession> vision_session_;     // pixel_values, [image_attention_mask], image_sizes -> image_features
   std::unique_ptr<OrtSession> speech_session_;     // audio_embeds, audio_sizes, audio_projection_mode -> audio_features

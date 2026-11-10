@@ -25,7 +25,6 @@ std::vector<int32_t> NemotronBoltRoundTokens(std::span<const int32_t> drafts,
 struct NemotronBoltModel : Model {
   NemotronBoltModel(std::unique_ptr<Config> config, OrtEnv& env);
   std::unique_ptr<State> CreateState(DeviceSpan<int32_t>, const GeneratorParams& params) const override;
-  bool SupportsExternalPrefillChunking() const noexcept override { return false; }
 
   std::unique_ptr<OrtSession> session_;
   std::shared_ptr<Dflash2Model> drafter_model_;

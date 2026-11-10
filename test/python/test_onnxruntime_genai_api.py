@@ -68,13 +68,10 @@ def test_tokenizer_create_from_config_and_path(test_data_path):
     assert tokenizer_from_path.decode(tokenizer_from_config.encode(text)) == text
 
 
-@pytest.mark.parametrize(
-    "model_type,timing,reason",
-    [
-        ("nemotron_speech", {}, "positive sample_rate"),
-        ("gpt2", {"sample_rate": 100, "hop_length": 10, "subsampling_factor": 1}, "nemotron_speech model"),
-    ],
-)
+@pytest.mark.parametrize("model_type,timing,reason", [
+    ("nemotron_speech", {}, "positive sample_rate"),
+    ("gpt2", {"sample_rate": 100, "hop_length": 10, "subsampling_factor": 1}, "nemotron_speech model"),
+])
 def test_requested_timestamps_reject_invalid_model_config(test_data_path, model_type, timing, reason):
     model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
     config = og.Config(model_path)
@@ -121,7 +118,7 @@ def test_asr_example_decodes_all_generated_results(test_data_path, asr_example, 
     transcript = asr_example.decode_tokens(generator, postprocessor, "off", [])
     tokenizer = og.Tokenizer(model)
     plain = tokenizer.create_stream()
-    expected = "".join(plain.decode(int(token_id)) for token_id in generator.get_sequence(0)[prompt.size :])
+    expected = "".join(plain.decode(int(token_id)) for token_id in generator.get_sequence(0)[prompt.size:])
     assert transcript == expected
     assert capsys.readouterr().out == expected
 
@@ -180,7 +177,8 @@ def test_asr_example_formats_speech_timestamps(test_data_path, asr_example, time
         word_records = timestamps.words
         segment_records = timestamps.segments
         assert asr_example.format_timestamp_records(result, False) == "".join(
-            f"[{word.time_interval[0]:.2f} - {word.time_interval[1]:.2f}]{word.text.strip()} " for word in word_records
+            f"[{word.time_interval[0]:.2f} - {word.time_interval[1]:.2f}]{word.text.strip()} "
+            for word in word_records
         )
         assert asr_example.format_timestamp_records(result, True) == "".join(
             f"[{segment.time_interval[0]:.2f} - {segment.time_interval[1]:.2f}]"
@@ -1067,15 +1065,6 @@ def test_model_device_type(test_data_path, relative_model_path):
     model = og.Model(model_path)
 
     assert model.device_type == relative_model_path[1]
-
-
-@pytest.mark.parametrize("model_type, supported", [("gpt2", False), ("qwen2", True)])
-def test_model_external_prefill_chunking_capability(test_data_path, model_type, supported):
-    model_path = Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32"
-    config = og.Config(os.fspath(model_path))
-    config.overlay(json.dumps({"model": {"type": model_type}}))
-    model = og.Model(config)
-    assert model.supports_external_prefill_chunking is supported
 
 
 @pytest.mark.parametrize(

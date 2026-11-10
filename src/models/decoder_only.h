@@ -29,7 +29,6 @@ struct DecoderOnly_Model : Model {
   DecoderOnly_Model(std::unique_ptr<Config> config, OrtEnv& ort_env);
 
   std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths_unk, const GeneratorParams& params) const override;
-  bool SupportsExternalPrefillChunking() const noexcept override { return true; }
 
   void InitializeIndexShare(const Config::Model::Mtp::IndexShare& config, OrtEnv& ort_env);
 

@@ -612,13 +612,6 @@ OgaResult* OGA_API_CALL OgaModelGetDeviceType(const OgaModel* model, const char*
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaModelGetSupportsExternalPrefillChunking(const OgaModel* model, bool* out) {
-  OGA_TRY
-  *out = model->SupportsExternalPrefillChunking();
-  return nullptr;
-  OGA_CATCH
-}
-
 OgaResult* OGA_API_CALL OgaCreateGeneratorParams(const OgaModel* model, OgaGeneratorParams** out) {
   OGA_TRY
   auto params = std::make_shared<Generators::GeneratorParams>(*model);
