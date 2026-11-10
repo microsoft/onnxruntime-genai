@@ -24,16 +24,20 @@ if os.name == "nt":
     _extra_dirs = [d for d in os.environ.get("ORT_GENAI_DLL_DIRS", "").split(os.pathsep) if d]
     _cudnn_home = os.environ.get("CUDNN_HOME")
     if not _cudnn_home:
-        for _cand in (r"D:\cudnn\9.24.1.1_cuda13", r"C:\cuDNN\9.27.0.42_cuda13"):
+        for _cand in (
+            r"D:\cudnn\9.24.1.1_cuda13",
+            r"C:\cuDNN\9.27.0.42_cuda13",
+            r"C:\cudnn-windows-arm64-9.27.0.42_cuda13",
+        ):
             if os.path.isdir(_cand):
                 _cudnn_home = _cand
                 break
     if _cudnn_home:
-        for _sub in (os.path.join("bin", "x64"), "bin"):
+        for _sub in (os.path.join("bin", "arm64"), os.path.join("bin", "x64"), "bin"):
             _extra_dirs.append(os.path.join(_cudnn_home, _sub))
-    _cuda_path = os.environ.get("CUDA_PATH")
+    _cuda_path = os.environ.get("CUDA_PATH", r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.4")
     if _cuda_path:
-        for _sub in (os.path.join("bin", "x64"), "bin"):
+        for _sub in (os.path.join("bin", "arm64"), os.path.join("bin", "x64"), "bin"):
             _extra_dirs.append(os.path.join(_cuda_path, _sub))
     for _d in _extra_dirs:
         if os.path.isdir(_d):
@@ -99,7 +103,7 @@ class Prompts:
             if str(path).endswith(".npy"):
                 tokens = np.load(path).tolist()
             else:
-                tokens = [int(t) for t in self._tokenizer.encode(Path(path).read_text(errors="ignore"))]
+                tokens = [int(t) for t in self._tokenizer.encode(Path(path).read_text(encoding="utf-8", errors="ignore"))]
             self._pools[kind] = tokens
         return self._pools[kind]
 
@@ -120,7 +124,7 @@ class Prompts:
 
     def chat_prompt(self, question):
         """Non-thinking chat prompt of the package's own chat template (GenAI tokenizer)."""
-        template = (self._package / "chat_template.jinja").read_text()
+        template = (self._package / "chat_template.jinja").read_text(encoding="utf-8")
         template = template.replace(_THINKING_ON, "false").replace(_THINKING_OFF, "true")
         messages = json.dumps([{"role": "user", "content": question}])
         text = self._tokenizer.apply_chat_template(messages, template_str=template, add_generation_prompt=True)
@@ -189,10 +193,22 @@ def with_host_expert_budget(document, budget):
     return document
 
 
+def _link_package_asset(link_path: Path, target: Path) -> None:
+    try:
+        link_path.symlink_to(target, target_is_directory=target.is_dir())
+    except OSError:
+        if os.name != "nt":
+            raise
+        if target.is_dir():
+            import _winapi  # noqa: PLC0415
+
+            _winapi.CreateJunction(str(target), str(link_path))
+        else:
+            os.link(target, link_path)
 def load_model(package, provider=None, overlay=None):
     """Registers the plugin CUDA EP (`provider` path, default $QWEN_PROVIDER or <package>/provider/libonnxruntime_providers_cuda.so) and loads the package."""
     package = Path(package).resolve()
-    package_config = json.loads((package / "genai_config.json").read_text())
+    package_config = json.loads((package / "genai_config.json").read_text(encoding="utf-8"))
     env_overlay = environment_overlay()
     validate_mtp_mode(package_config, env_overlay, overlay or {})
     budget = host_expert_budget()
@@ -225,9 +241,9 @@ def load_model(package, provider=None, overlay=None):
             config_package = Path(directory.name)
             for asset in package.iterdir():
                 if asset.name != "genai_config.json":
-                    (config_package / asset.name).symlink_to(asset, target_is_directory=asset.is_dir())
+                    _link_package_asset(config_package / asset.name, asset)
             (config_package / "genai_config.json").write_text(
-                json.dumps(with_host_expert_budget(package_config, budget))
+                json.dumps(with_host_expert_budget(package_config, budget)), encoding="utf-8"
             )
         config = og.Config(str(config_package))
         for document in (env_overlay, overlay):

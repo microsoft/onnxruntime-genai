@@ -95,12 +95,25 @@ def generation_budget(prompt, max_new, max_context, index):
     return budget
 
 
+def _load_hf_tokenizer(checkpoint: Path):
+    try:
+        from transformers import AutoTokenizer  # noqa: PLC0415
+        return AutoTokenizer.from_pretrained(checkpoint)
+    except ImportError:
+        from tokenizers import Tokenizer as _FastTokenizer  # noqa: PLC0415
+        _tok = _FastTokenizer.from_file(str(Path(checkpoint) / "tokenizer.json"))
+        class _HFShim:
+            @staticmethod
+            def decode(ids, skip_special_tokens=False):
+                return _tok.decode(ids, skip_special_tokens=skip_special_tokens)
+        return _HFShim()
+
+
 def run_shard(args) -> None:
     from eval_lib import messages_of, qwen38_prompt  # noqa: PLC0415
-    from transformers import AutoTokenizer  # noqa: PLC0415
 
-    prompts = [json.loads(line) for line in args.prompts.open()]
-    samples = {json.loads(line)["index"]: json.loads(line) for line in args.samples.open()}
+    prompts = [json.loads(line) for line in args.prompts.open(encoding="utf-8")]
+    samples = {json.loads(line)["index"]: json.loads(line) for line in args.samples.open(encoding="utf-8")}
     assert len(prompts) == 175
     mine = prompts[args.shard :: args.shards]
     budgets = {
@@ -109,7 +122,7 @@ def run_shard(args) -> None:
 
     done = {}
     if args.out.exists():
-        for line in args.out.read_text().splitlines():
+        for line in args.out.read_text(encoding="utf-8").splitlines():
             if line.strip():
                 r = json.loads(line)
                 done[r["index"]] = r
@@ -129,12 +142,12 @@ def run_shard(args) -> None:
         "stack": "GenAI Engine qwen38_flash_graph: fold MTP(1) + fast prefill (LiveCodeBench v6)",
     }
     proto = args.out.with_suffix(".protocol.json")
-    if proto.exists() and json.loads(proto.read_text()) != meta:
+    if proto.exists() and json.loads(proto.read_text(encoding="utf-8")) != meta:
         raise SystemExit("protocol mismatch; use a fresh --out")
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    proto.write_text(json.dumps(meta, indent=1))
+    proto.write_text(json.dumps(meta, indent=1), encoding="utf-8")
 
-    hf = AutoTokenizer.from_pretrained(args.checkpoint)
+    hf = _load_hf_tokenizer(args.checkpoint)
     model, engine, buffer, load_s = open_engine(args.model, args.provider)
     tokenizer = og.Tokenizer(model)
 
@@ -148,7 +161,7 @@ def run_shard(args) -> None:
         check["prompt_ids_equal"] += int(eq)
         if not eq:
             check["mismatch_items"].append(row["index"])
-    args.out.with_suffix(".promptcheck.json").write_text(json.dumps(check, indent=1))
+    args.out.with_suffix(".promptcheck.json").write_text(json.dumps(check, indent=1), encoding="utf-8")
     if check["mismatch_items"]:
         raise RuntimeError(f"prompt check failed: {check}")
 
@@ -158,7 +171,7 @@ def run_shard(args) -> None:
     w_req.close()
 
     t_wall = time.perf_counter()
-    with args.out.open("a") as sink:
+    with args.out.open("a", encoding="utf-8") as sink:
         for k, row in enumerate(mine, 1):
             idx = row["index"]
             prompt_ids = row["ids"]
@@ -236,6 +249,39 @@ def grade_records_in_docker(
     workers: int = 16,
     timeout: int = 6,
 ) -> dict[tuple[str, int], dict]:
+    if os.name == "nt":
+        if str(lcb_repo.resolve()) not in sys.path:
+            sys.path.insert(0, str(lcb_repo.resolve()))
+        from lcb_runner.evaluation.compute_code_generation_metrics import codegen_metrics  # noqa: PLC0415
+
+        samples, generations = [], []
+        for item in items:
+            specification = json.loads((tests_dir / item["test_file"]).read_text(encoding="utf-8"))
+            cases = specification["tests"]
+            contract = {"inputs": [case["input"] for case in cases], "outputs": [case["output"] for case in cases]}
+            if specification.get("func_name"):
+                contract["fn_name"] = specification["func_name"]
+            samples.append({"input_output": json.dumps(contract)})
+            generations.append([item["code"]])
+
+        metrics, results, _ = codegen_metrics(
+            samples, generations, k_list=[1], num_process_evaluate=workers, timeout=timeout
+        )
+        detail = metrics.get("detail", {}).get("pass@1", {})
+        out = {}
+        for index, item in enumerate(items):
+            value = detail.get(index, detail.get(str(index)))
+            passed = [bool(test > 0) for test in results[index][0]] if index in results else []
+            out[(item["arm"], int(item["key"]))] = {
+                "key": item["key"],
+                "arm": item["arm"],
+                "question_id": item["question_id"],
+                "correct": bool(value == 1),
+                "extracted_code": bool(item["code"].strip()),
+                "tests_total": len(passed),
+                "tests_passed": sum(passed),
+            }
+        return out
     with tempfile.TemporaryDirectory(prefix="lcb_grade_") as tmp:
         work = Path(tmp)
         shutil.copytree(tests_dir, work / "tests")
@@ -279,17 +325,17 @@ def grade_records_in_docker(
     return out
 
 
-def load_arm_records(paths, expected_indices):
+def load_arm_records(paths, expected_indices=None):
     """Reads completed shards, rejecting overlaps and runs with different protocols."""
     recs, protocol = {}, None
     for path in paths:
         proto_path = path.with_suffix(".protocol.json")
-        meta = json.loads(proto_path.read_text())
+        meta = json.loads(proto_path.read_text(encoding="utf-8"))
         meta.pop("shard", None)
         if protocol is not None and meta != protocol:
             raise ValueError(f"protocol mismatch across grading shards: {path}")
         protocol = meta
-        with path.open() as stream:
+        with path.open(encoding="utf-8") as stream:
             for line in stream:
                 if line.strip():
                     record = json.loads(line)
@@ -297,28 +343,44 @@ def load_arm_records(paths, expected_indices):
                     if index in recs:
                         raise ValueError(f"duplicate grading index {index} in {path}")
                     recs[index] = record
-    if not recs or recs.keys() != expected_indices:
+    if not recs or (expected_indices is not None and recs.keys() != expected_indices):
         raise ValueError(
-            f"grading index set mismatch: missing {sorted(expected_indices - recs.keys())}, extra {sorted(recs.keys() - expected_indices)}"
+            f"grading index set mismatch: missing {sorted((expected_indices or set()) - recs.keys())}, extra {sorted(recs.keys() - (expected_indices or set()))}"
         )
     return recs
 
 
-def grade_suite(args) -> None:
-    from scipy.stats import binomtest  # noqa: PLC0415
-    from transformers import AutoTokenizer  # noqa: PLC0415
+def _binomtest_pvalue(k: int, n: int) -> float:
+    if n <= 0:
+        return 1.0
+    try:
+        from scipy.stats import binomtest  # noqa: PLC0415
 
-    hf = AutoTokenizer.from_pretrained(args.checkpoint)
-    samples = {json.loads(line)["index"]: json.loads(line) for line in args.samples.open()}
+        return float(binomtest(k, n).pvalue)
+    except ImportError:
+        import math  # noqa: PLC0415
+
+        tail = min(k, n - k)
+        p = sum(math.comb(n, i) for i in range(tail + 1)) / (2 ** (n - 1))
+        return min(1.0, float(p))
+
+
+def grade_suite(args) -> None:
+
+    hf = _load_hf_tokenizer(args.checkpoint)
+    samples = {json.loads(line)["index"]: json.loads(line) for line in args.samples.open(encoding="utf-8")}
     if len(samples) != 175:
         raise ValueError(f"expected 175 LiveCodeBench samples, got {len(samples)}")
     caps = sorted(args.caps)
 
     arms_records: dict[str, dict[int, dict]] = {}
+    eval_indices = None if getattr(args, "allow_partial_shards", False) else set(samples)
     for spec in args.arms:
         name, pattern = spec.split("=", 1)
         paths = sorted(Path(path) for path in glob.glob(pattern, recursive=True))
-        recs = load_arm_records(paths, set(samples))
+        recs = load_arm_records(paths, eval_indices)
+        if eval_indices is None:
+            eval_indices = set(recs.keys())
         arms_records[name] = recs
 
     items = []
@@ -387,7 +449,8 @@ def grade_suite(args) -> None:
                 "no_code": no_code,
                 "truncated": truncated,
                 "by_difficulty": {
-                    k: {"solved": v[0], "total": v[1], "pct": 100.0 * v[0] / v[1]} for k, v in by_diff.items()
+                    k: {"solved": v[0], "total": v[1], "pct": (100.0 * v[0] / v[1]) if v[1] else 0.0}
+                    for k, v in by_diff.items()
                 },
             }
         report["caps"][str(cap)] = cap_entry
@@ -395,23 +458,24 @@ def grade_suite(args) -> None:
         arm_names = list(arms_records.keys())
         if len(arm_names) >= 2:
             ref_name = arm_names[0]
+            sorted_eval_indices = sorted(eval_indices)
             for alt_name in arm_names[1:]:
                 wins = sum(
                     (not verdicts[(f"{ref_name}@{cap}", idx)]["correct"])
                     and verdicts[(f"{alt_name}@{cap}", idx)]["correct"]
-                    for idx in range(175)
+                    for idx in sorted_eval_indices
                 )
                 losses = sum(
                     verdicts[(f"{ref_name}@{cap}", idx)]["correct"]
                     and (not verdicts[(f"{alt_name}@{cap}", idx)]["correct"])
-                    for idx in range(175)
+                    for idx in sorted_eval_indices
                 )
                 disc = wins + losses
                 report["paired"][f"{alt_name}_vs_{ref_name}@{cap}"] = {
                     "wins": wins,
                     "losses": losses,
-                    "delta_pp": 100.0 * (wins - losses) / 175.0,
-                    "mcnemar_p": float(binomtest(wins, disc).pvalue) if disc else 1.0,
+                    "delta_pp": 100.0 * (wins - losses) / len(sorted_eval_indices),
+                    "mcnemar_p": _binomtest_pvalue(wins, disc) if disc else 1.0,
                 }
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -437,6 +501,7 @@ def main() -> None:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--arms", nargs="+", help="name=glob pairs for --grade")
     parser.add_argument("--caps", type=int, nargs="+", default=[16384, 32768])
+    parser.add_argument("--allow-partial-shards", action="store_true", help="grade a matching subset of shards")
     parser.add_argument("--workers", type=int, default=16)
     parser.add_argument("--timeout", type=int, default=6)
     args = parser.parse_args()

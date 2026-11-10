@@ -52,7 +52,7 @@ def token_hash(tokens):
 
 
 def load_prompts(path):
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         return [json.loads(line) for line in f]
 
 
@@ -99,14 +99,24 @@ def run(args):
         messages_of,
     )
     from eval_mcq_genai import non_thinking_template  # noqa: PLC0415 - research environment only needed in this mode
-    from transformers import AutoTokenizer  # noqa: PLC0415 - research environment only needed in this mode
+    try:
+        from transformers import AutoTokenizer  # noqa: PLC0415 - research environment only needed in this mode
+        hf = AutoTokenizer.from_pretrained(args.checkpoint)
+    except ImportError:
+        from tokenizers import Tokenizer as _FastTokenizer  # noqa: PLC0415
+        _tok = _FastTokenizer.from_file(str(Path(args.checkpoint) / "tokenizer.json"))
+        class _HFShim:
+            @staticmethod
+            def decode(ids, skip_special_tokens=False):
+                return _tok.decode(ids, skip_special_tokens=skip_special_tokens)
+        hf = _HFShim()
 
     rows = load_prompts(args.prompts)
     assert len(rows) == 800
     mine = rows[args.shard :: args.shards]
     done = {}
     if args.out.exists():
-        for line in args.out.read_text().splitlines():
+        for line in args.out.read_text(encoding="utf-8").splitlines():
             r = json.loads(line)
             done[r["index"]] = r
     meta = {
@@ -122,11 +132,10 @@ def run(args):
         "stack": "GenAI Engine qwen38_flash_graph v12b: fold MTP(1) + fast prefill",
     }
     proto = args.out.with_suffix(".protocol.json")
-    if proto.exists() and json.loads(proto.read_text()) != meta:
+    if proto.exists() and json.loads(proto.read_text(encoding="utf-8")) != meta:
         raise SystemExit("protocol mismatch; use a fresh --out")
-    proto.write_text(json.dumps(meta, indent=1))
+    proto.write_text(json.dumps(meta, indent=1), encoding="utf-8")
 
-    hf = AutoTokenizer.from_pretrained(args.checkpoint)
     model, engine, buffer, load_s = open_engine(args, prefill=True)
     tokenizer = og.Tokenizer(model)
 
