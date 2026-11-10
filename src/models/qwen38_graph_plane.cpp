@@ -1009,12 +1009,20 @@ Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::filesystem::path& 
   if (!pin_ple) params.pad_ |= QWEN38_PLANE_PLE_STAGED;
   const uint64_t row_bytes = Qwen38PleShardRowBytes(description);
   long long first_row = 0;
+#if defined(_M_ARM64)
+  bool ple_random_access = false;
+#else
+  bool ple_random_access = true;
+#endif
+  GetEnv("ORT_QWEN38_PLE_RANDOM_ACCESS", ple_random_access);
+  const DWORD file_flags =
+      FILE_ATTRIBUTE_NORMAL | (ple_random_access ? FILE_FLAG_RANDOM_ACCESS : 0);
   try {
     for (size_t i = 0; i < description.shards.size(); ++i) {
       const auto& shard = description.shards[i];
       const std::filesystem::path full = ResolvePleShardPathWithinRoot(root, shard.path);
       HANDLE hFile = CreateFileW(full.wstring().c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
-                                 OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_RANDOM_ACCESS, nullptr);
+                                 OPEN_EXISTING, file_flags, nullptr);
       if (hFile == INVALID_HANDLE_VALUE) {
         throw std::runtime_error("qwen38_graph: cannot open the PLE shard file " + full.string());
       }
