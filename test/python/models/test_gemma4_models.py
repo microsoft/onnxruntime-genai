@@ -11,6 +11,7 @@ This file can be used in two ways:
 """
 
 import argparse
+import gc
 import json
 import logging
 import os
@@ -175,7 +176,14 @@ def _set_vision_position_dtype(onnx, model_path, dtype):
 
 
 def _create_fixed_output_vision_model(
-    onnx, output_path, capacity, *, output_rank=2, feature_dtype=np.float32, symbolic_width=False
+    onnx,
+    output_path,
+    capacity,
+    *,
+    output_rank=2,
+    feature_dtype=np.float32,
+    symbolic_width=False,
+    gpu_workload=False,
 ):
     """Pad each output with a sentinel so overlap must discard the full padded tail."""
     _create_static_batch_vision_model(onnx, output_path, num_patches=2520)
@@ -196,9 +204,9 @@ def _create_fixed_output_vision_model(
         graph.register_initializer(value)
         return value
 
-    def emit(op_type, inputs, attributes=()):
+    def emit(op_type, inputs, attributes=(), *, name=None):
         value = ir.Value()
-        graph.append(ir.Node("", op_type, inputs, attributes, outputs=[value]))
+        graph.append(ir.Node("", op_type, inputs, attributes, outputs=[value], name=name))
         return value
 
     shape = emit("Shape", [valid_features])
@@ -214,6 +222,12 @@ def _create_fixed_output_vision_model(
     if feature_dtype == np.float16:
         output_dtype = ir.DataType.FLOAT16
         output = emit("Cast", [output], [ir.AttrInt64("to", int(output_dtype))])
+    if gpu_workload:
+        output = emit(
+            "MatMul",
+            [output, constant("vision_identity", np.eye(2048), feature_dtype)],
+            name="vision_identity_matmul",
+        )
     if symbolic_width:
         row = emit("Gather", [output, constant("first_row", 0)], [ir.AttrInt64("axis", 0)])
         mask = emit("Equal", [row, row])
@@ -989,6 +1003,9 @@ def _fixed_output_gemma4(
     disable_ep_sync=False,
     consume_features=True,
     symbolic_width=False,
+    vision_provider=None,
+    profile_prefix=None,
+    gpu_workload=False,
 ):
     onnx = pytest.importorskip("onnx")
     config_path = _write_pipelined_gemma4(
@@ -1001,6 +1018,12 @@ def _fixed_output_gemma4(
     config = json.loads(config_path.read_text(encoding="utf-8"))
     if disable_ep_sync:
         config["model"]["vision"]["run_options"] = {"disable_synchronize_execution_providers": "1"}
+    if vision_provider:
+        config["model"]["vision"]["session_options"] = {
+            "provider_options": [{vision_provider: {"use_tf32": "0"} if vision_provider == "cuda" else {}}],
+        }
+    if profile_prefix:
+        config["model"]["vision"].setdefault("session_options", {})["enable_profiling"] = os.fspath(profile_prefix)
     config_path.write_text(json.dumps(config), encoding="utf-8")
     _create_fixed_output_vision_model(
         onnx,
@@ -1009,6 +1032,7 @@ def _fixed_output_gemma4(
         output_rank=output_rank,
         feature_dtype=feature_dtype,
         symbolic_width=symbolic_width,
+        gpu_workload=gpu_workload,
     )
     model = og.Model(os.fspath(model_path))
     return model, model.create_multimodal_processor()
@@ -1086,6 +1110,89 @@ def test_gemma4_fixed_output_overlapping_writes(
         if consume_features:
             assert generator.get_input("image_features").shape == (0, 2048)
         del generator
+
+
+def _assert_vision_compute_provider(profile_prefix, provider):
+    profiles = list(profile_prefix.parent.glob(f"{profile_prefix.name}*.json"))
+    assert profiles, "Vision session profiling did not produce evidence of provider placement"
+    events = [event for path in profiles for event in json.loads(path.read_text(encoding="utf-8"))]
+    assert any(
+        "vision_identity_matmul" in event.get("name", "")
+        and event.get("args", {}).get("op_name") == "MatMul"
+        and event.get("args", {}).get("provider") == provider
+        for event in events
+    ), f"The vision MatMul must execute on {provider}"
+
+
+@pytest.mark.parametrize(
+    "feature_dtype,image_names",
+    [
+        (np.float32, ["australia.jpg", "sheet.png"]),
+        (np.float16, ["sheet.png", "australia.jpg", "sheet.png"]),
+    ],
+)
+def test_gemma4_fixed_output_cuda_overlapping_writes(test_data_path, tmp_path, feature_dtype, image_names):
+    required = os.environ.get("ORTGENAI_REQUIRE_GEMMA4_CUDA") == "1"
+    if not og.is_cuda_available():
+        if required:
+            pytest.fail("Gemma4 CUDA qualification requires a CUDA-enabled build and provider")
+        pytest.skip("CUDA is unavailable")
+    if required:
+        assert test_data_path and Path(test_data_path, GEMMA4_MODEL_NAME, "genai_config.json").is_file()
+    paths = [os.fspath(_get_test_media_path(test_data_path, Path("images") / name)) for name in image_names]
+    assert all(Path(path).is_file() for path in paths)
+
+    def run(model, processor):
+        inputs = processor(GEMMA4_IMAGE_TOKEN * len(paths) + "Describe these images", images=og.Images.open(*paths))
+        assert np.all(_to_numpy(inputs["num_image_tokens"]) < 280)
+        results = []
+        for _ in range(2):
+            params = og.GeneratorParams(model)
+            params.set_search_options(max_length=4096, do_sample=False)
+            generator = og.Generator(model, params)
+            generator.set_inputs(inputs)
+            features = generator.get_input("image_features").copy()
+            generator.generate_next_token()
+            results.append((features, generator.get_next_tokens().copy()))
+            del generator
+        return results
+
+    cpu_model, cpu_processor = _fixed_output_gemma4(
+        test_data_path, tmp_path / "cpu", feature_dtype=feature_dtype, gpu_workload=True
+    )
+    expected = run(cpu_model, cpu_processor)
+    cuda_model, cuda_processor = _fixed_output_gemma4(
+        test_data_path,
+        tmp_path / "cuda",
+        feature_dtype=feature_dtype,
+        gpu_workload=True,
+        disable_ep_sync=True,
+        vision_provider="cuda",
+        profile_prefix=tmp_path / "cuda_vision",
+    )
+    actual = run(cuda_model, cuda_processor)
+    for (features, tokens), (reference, reference_tokens) in zip(actual, expected, strict=True):
+        np.testing.assert_allclose(features, reference, rtol=1e-3, atol=1e-5)
+        assert tokens == reference_tokens == [2]
+    del cuda_processor, cuda_model
+    gc.collect()
+    _assert_vision_compute_provider(tmp_path / "cuda_vision", "CUDAExecutionProvider")
+
+
+def test_gemma4_fixed_output_profile_records_vision_compute(test_data_path, tmp_path):
+    prefix = tmp_path / "cpu_vision"
+    model, processor = _fixed_output_gemma4(test_data_path, tmp_path / "cpu", gpu_workload=True, profile_prefix=prefix)
+    image = os.fspath(_get_test_media_path(test_data_path, Path("images") / "australia.jpg"))
+    inputs = processor(GEMMA4_IMAGE_TOKEN + "Describe", images=og.Images.open(image))
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=4096, do_sample=False)
+    generator = og.Generator(model, params)
+    generator.set_inputs(inputs)
+    generator.generate_next_token()
+    assert generator.get_next_tokens() == [2]
+    del generator, params, processor, model
+    gc.collect()
+    _assert_vision_compute_provider(prefix, "CPUExecutionProvider")
 
 
 def test_gemma4_vision_output_metadata_ignores_embedding_name_collision(test_data_path, tmp_path):
@@ -1268,10 +1375,51 @@ def test_gemma4_pipeline_vision_runtime_termination_can_be_cleared(test_data_pat
     generator.set_runtime_option("terminate_session", "1")
     with pytest.raises(RuntimeError, match="terminate"):
         generator.set_inputs(inputs)
+    with pytest.raises(RuntimeError, match="terminate_session key value unexpected"):
+        generator.set_runtime_option("terminate_session", "invalid")
     generator.set_runtime_option("terminate_session", "0")
     generator.set_inputs(inputs)
     generator.generate_next_token()
     assert generator.get_next_tokens() == [2]
+
+
+@pytest.mark.parametrize("vision_only", [False, True])
+@pytest.mark.parametrize("profile_value", ["1", "vision_profile"])
+def test_gemma4_pipeline_vision_run_options_profiling(
+    test_data_path, tmp_path, monkeypatch, vision_only, profile_value
+):
+    monkeypatch.chdir(tmp_path)
+    model_path = tmp_path / "profile_model"
+    onnx = pytest.importorskip("onnx")
+    config_path = _write_pipelined_gemma4(onnx, _get_gemma4_model_path(test_data_path), model_path)
+    _create_fixed_output_vision_model(onnx, model_path / "dummy_vision.onnx", 280, gpu_workload=True)
+    if vision_only:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        config["model"]["vision"]["run_options"] = {"enable_profiling": profile_value}
+        config_path.write_text(json.dumps(config), encoding="utf-8")
+    model = og.Model(os.fspath(model_path))
+    path = os.fspath(_get_test_media_path(test_data_path, Path("images") / "australia.jpg"))
+    inputs = model.create_multimodal_processor()(GEMMA4_IMAGE_TOKEN + "Describe", images=og.Images.open(path))
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=4096)
+    generator = og.Generator(model, params)
+    try:
+        if not vision_only:
+            generator.set_runtime_option("enable_profiling", profile_value)
+        generator.set_inputs(inputs)
+    except RuntimeError as error:
+        if "requires ONNX Runtime 1.25 or later" in str(error):
+            pytest.skip(str(error))
+        raise
+    generator.generate_next_token()
+    assert generator.get_next_tokens() == [2]
+    prefix = "onnxruntime_run_profile" if profile_value == "1" else profile_value
+    profiles = set(tmp_path.glob(f"{prefix}*.json"))
+    assert profiles
+    assert any(json.loads(path.read_text(encoding="utf-8")) for path in profiles)
+    generator.set_runtime_option("enable_profiling", "0")
+    generator.generate_next_token()
+    assert set(tmp_path.glob(f"{prefix}*.json")) == profiles
 
 
 @pytest.mark.parametrize("relative_image_path", [Path("images") / "australia.jpg"])

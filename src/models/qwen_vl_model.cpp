@@ -12,31 +12,6 @@ namespace Generators {
 
 namespace {
 
-void ApplyVisionRunOption(OrtRunOptions& run_options, const char* key, const char* value) {
-  if (std::strcmp(key, "terminate_session") == 0) {
-    if (std::strcmp(value, "0") == 0) {
-      run_options.UnsetTerminate();
-    } else if (std::strcmp(value, "1") == 0) {
-      run_options.SetTerminate();
-    } else {
-      throw std::runtime_error(std::string("terminate_session key value unexpected: ") + value);
-    }
-  } else if (std::strcmp(key, "enable_profiling") == 0) {
-#if ORT_API_VERSION >= 25
-    if (std::strcmp(value, "0") == 0) {
-      run_options.DisableProfiling();
-    } else {
-      const char* prefix = std::strcmp(value, "1") == 0 ? "onnxruntime_run_profile" : value;
-      run_options.EnableProfiling(fs::path(prefix).c_str());
-    }
-#else
-    throw std::runtime_error("enable_profiling requires ONNX Runtime 1.25 or later");
-#endif
-  } else {
-    run_options.AddConfigEntry(key, value);
-  }
-}
-
 // Creates a view of one image's slice of a tensor whose leading dimension is the image count.
 // The result borrows source's buffer and must not outlive it.
 std::unique_ptr<OrtValue> SliceLeadingImage(OrtValue& source, int64_t index, bool drop_image_axis) {
@@ -251,7 +226,7 @@ void Qwen2_5_VL_PipelineState::SetExtraInputs(const std::vector<ExtraInput>& ext
 
 void Qwen2_5_VL_PipelineState::SetRunOption(const char* key, const char* value) {
   State::SetRunOption(key, value);
-  ApplyVisionRunOption(*vision_run_options_, key, value);
+  ApplyRunOption(*vision_run_options_, key, value);
 }
 
 DeviceSpan<float> Qwen2_5_VL_PipelineState::Run(int total_length, DeviceSpan<int32_t>& next_tokens,
@@ -597,7 +572,7 @@ void Qwen2_5_VL_PipelineState::RunSingleSessionVision(const std::vector<ExtraInp
   const bool preallocated = owner != nullptr;
   if (vl_model_.config_->model.vision.run_options.has_value()) {
     for (const auto& [key, value] : *vl_model_.config_->model.vision.run_options) {
-      ApplyVisionRunOption(*vision_run_options_, key.c_str(), value.c_str());
+      ApplyRunOption(*vision_run_options_, key.c_str(), value.c_str());
     }
   }
   if (session_terminated_) vision_run_options_->SetTerminate();
