@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
-"""Unit tests of the Engine qualification and benchmark scripts in ``tools/qwen38_graph``.
+"""Unit tests of the Engine qualification and benchmark scripts in ``tools/python/qwen38_flash_next``.
 
 Only the pure logic is exercised (histogram arithmetic, output-file planning, report comparison, prompt verification control flow,
 the config overlays and the force-reject hook); the Engine, the GPU, ``torch``, the research evaluation libraries and the tokenizers

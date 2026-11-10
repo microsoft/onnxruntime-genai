@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
-"""Helpers that load the ``tools/qwen38_graph`` scripts in the unit tests.
+"""Helpers that load the ``tools/python/qwen38_flash_next`` scripts in the unit tests.
 
 The scripts import each other by bare module name and pull in ``onnxruntime_genai`` (and, depending on the script, ``torch``,
 ``transformers`` or the research evaluation libraries). The tests only exercise their pure logic, so ``load_tools`` replaces those
@@ -23,7 +23,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-TOOLS_DIR = REPO_ROOT / "tools" / "qwen38_graph"
+TOOLS_DIR = REPO_ROOT / "tools" / "python" / "qwen38_flash_next"
 KV_CALIBRATION_SOURCE = REPO_ROOT / "src" / "python" / "py" / "models" / "quantization" / "kv_cache_calibration.py"
 
 
@@ -64,7 +64,7 @@ def _drop_tool_modules():
 
 @contextlib.contextmanager
 def load_tools(*names, stubs=None):
-    """Yields the ``tools/qwen38_graph`` modules ``names``, imported with ``stubs`` (module name -> module) installed.
+    """Yields the ``tools/python/qwen38_flash_next`` modules ``names``, imported with ``stubs`` (module name -> module) installed.
 
     ``onnxruntime_genai`` is always replaced by a minimal stub unless ``stubs`` provides one.
     """
