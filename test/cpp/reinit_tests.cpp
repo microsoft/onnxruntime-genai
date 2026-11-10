@@ -217,6 +217,7 @@ TEST_F(DeviceResourceReleaseTests, FailedCudaModelCreationThenRepeatedRelease) {
 }
 
 TEST_F(DeviceResourceReleaseTests, CudaReleaseThenReinitialize) {
+#if USE_CUDA
   Generators::DeviceInterface* device{};
   try {
     device = Generators::GetDeviceInterface(Generators::DeviceType::CUDA);
@@ -241,6 +242,9 @@ TEST_F(DeviceResourceReleaseTests, CudaReleaseThenReinitialize) {
     EXPECT_NE(allocator.allocator_, nullptr);
     EXPECT_NE(allocator.session_, nullptr);
   }
+#else
+  GTEST_SKIP() << "CUDA execution provider is not enabled in this build (USE_CUDA=OFF).";
+#endif
 }
 
 namespace {
