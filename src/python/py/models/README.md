@@ -92,7 +92,7 @@ The tool currently supports the following model architectures.
 
 It is intended for supporting the latest, popular state-of-the-art models.
 
-Bailing exports require an ONNX Runtime source build containing [ORT #33817](https://github.com/microsoft/onnxruntime/pull/33817), merged November 8, 2026. The minimum compatible main revision is `d93f5446f362d9c70bea81de953f32a26aa26d25`; use that revision or a later build containing it for `MoEGroupRouter` and per-key KDA decay. Older installed wheels, including the reviewed ORT 1.30.0 wheel, do not gain these operators automatically. The Linux CUDA CI workflow builds this pinned revision and requires the CPU/CUDA routing and KDA tests to execute, not skip.
+Bailing exports require an ONNX Runtime build containing [ORT #33817](https://github.com/microsoft/onnxruntime/pull/33817), merged November 8, 2026 as `d93f5446f362d9c70bea81de953f32a26aa26d25`, for `MoEGroupRouter` and per-key KDA decay. The first `onnxruntime` and `onnxruntime-gpu` nightly wheels with it are `1.32.0.dev20261109001`; a CPU `onnxruntime` nightly also works with an `onnxruntime-ep-cuda12` nightly built after the merge. Older installed wheels, including the reviewed ORT 1.30.0 wheel, do not gain these operators automatically. The Linux CUDA CI workflow installs the nightly packages pinned in `test/python/cuda/ort-nightly/` and requires the CPU/CUDA routing and KDA tests to execute, not skip.
 
 Dense text LongRoPE exports using an `If` node declare an int64 scalar
 `rope_context_length` input. ONNX metadata entries

@@ -4,6 +4,7 @@
 """Small, offline regressions for Bailing checkpoint loading and graph export."""
 
 import builtins
+import importlib
 import json
 import os
 import sys
@@ -494,6 +495,26 @@ def test_mla_rope_matches_hf_layout(tmp_path, interleaved, packed):
     )
 
 
+def register_cuda_plugin_ep():
+    """Registers the standalone CUDA plugin EP when the core onnxruntime wheel does not bundle CUDA."""
+    if "CUDAExecutionProvider" in ort.get_available_providers():
+        return
+    try:
+        cuda_ep = importlib.import_module("onnxruntime_ep_cuda")
+    except ImportError:
+        return
+    if not any(device.ep_name == cuda_ep.get_ep_name() for device in ort.get_ep_devices()):
+        ort.register_execution_provider_library(cuda_ep.get_ep_name(), cuda_ep.get_library_path())
+
+
+def prepare_cuda_provider():
+    """Makes CUDAExecutionProvider usable from an onnxruntime-gpu wheel or from the standalone plugin EP."""
+    if hasattr(ort, "preload_dlls"):
+        # onnxruntime-gpu does not search the NVIDIA pip packages for its CUDA libraries on its own.
+        ort.preload_dlls()
+    register_cuda_plugin_ep()
+
+
 def kernel_session(model, provider, required_op):
     def unavailable(reason):
         if os.environ.get("ORTGENAI_REQUIRE_BAILING_KERNELS") == "1":
@@ -505,6 +526,11 @@ def kernel_session(model, provider, required_op):
         required_op == "GatedDeltaNet" and "gate_lower_bound" not in schemas[required_op].attributes
     ):
         unavailable(f"Requires an ONNX Runtime build with {required_op} from ORT PR #33817")
+    if provider == "CUDAExecutionProvider":
+        try:
+            prepare_cuda_provider()
+        except Exception as exc:
+            unavailable(f"Preparing the CUDA provider failed: {exc}")
     if provider not in ort.get_available_providers():
         unavailable(f"{provider} is unavailable")
     options = ort.SessionOptions()
@@ -854,11 +880,70 @@ def test_ci_requires_kernel_support_instead_of_skipping(tmp_path, monkeypatch, r
     monkeypatch.setenv("ORTGENAI_REQUIRE_BAILING_KERNELS", "1" if required else "0")
     schemas = [] if missing == "schema" else [SimpleNamespace(name="MoEGroupRouter", domain="com.microsoft")]
     monkeypatch.setattr(sys.modules[__name__], "get_all_operator_schema", lambda: schemas)
+    monkeypatch.setattr(sys.modules[__name__], "prepare_cuda_provider", lambda: None)
     monkeypatch.setattr(ort, "get_available_providers", list)
     exception = pytest.fail.Exception if required else pytest.skip.Exception
 
     with pytest.raises(exception, match="ORT PR #33817" if missing == "schema" else "is unavailable"):
         kernel_session(_model(tmp_path), "CUDAExecutionProvider", "MoEGroupRouter")
+
+
+@pytest.mark.parametrize("required", [False, True])
+def test_cuda_provider_preparation_failure_is_reported(tmp_path, monkeypatch, required):
+    monkeypatch.setenv("ORTGENAI_REQUIRE_BAILING_KERNELS", "1" if required else "0")
+    schemas = [SimpleNamespace(name="MoEGroupRouter", domain="com.microsoft")]
+    monkeypatch.setattr(sys.modules[__name__], "get_all_operator_schema", lambda: schemas)
+    monkeypatch.setattr(ort, "get_available_providers", lambda: ["CPUExecutionProvider"])
+    monkeypatch.setattr(ort, "preload_dlls", lambda: None, raising=False)
+    plugin = SimpleNamespace(get_ep_name=lambda: "CUDAExecutionProvider", get_library_path=lambda: "libcuda.so")
+    monkeypatch.setitem(sys.modules, "onnxruntime_ep_cuda", plugin)
+    monkeypatch.setattr(ort, "get_ep_devices", list)
+
+    def fail_to_register(name, path):
+        raise RuntimeError("libcudart.so.12 not found")
+
+    monkeypatch.setattr(ort, "register_execution_provider_library", fail_to_register)
+    exception = pytest.fail.Exception if required else pytest.skip.Exception
+
+    with pytest.raises(exception, match="Preparing the CUDA provider failed: libcudart.so.12 not found"):
+        kernel_session(_model(tmp_path), "CUDAExecutionProvider", "MoEGroupRouter")
+
+
+@pytest.mark.parametrize("has_preload_dlls", [False, True])
+def test_cuda_libraries_are_preloaded_before_plugin_registration(monkeypatch, has_preload_dlls):
+    calls = []
+    monkeypatch.setattr(sys.modules[__name__], "register_cuda_plugin_ep", lambda: calls.append("register"))
+    if has_preload_dlls:
+        monkeypatch.setattr(ort, "preload_dlls", lambda: calls.append("preload"), raising=False)
+    else:
+        monkeypatch.delattr(ort, "preload_dlls", raising=False)
+
+    prepare_cuda_provider()
+
+    assert calls == (["preload", "register"] if has_preload_dlls else ["register"])
+
+
+def test_cuda_plugin_ep_is_registered_once_when_core_wheel_lacks_cuda(monkeypatch):
+    registered = []
+    plugin = SimpleNamespace(get_ep_name=lambda: "CUDAExecutionProvider", get_library_path=lambda: "libcuda.so")
+    monkeypatch.setitem(sys.modules, "onnxruntime_ep_cuda", plugin)
+    monkeypatch.setattr(ort, "get_available_providers", lambda: ["CPUExecutionProvider"])
+    monkeypatch.setattr(ort, "get_ep_devices", lambda: [SimpleNamespace(ep_name=name) for name, _ in registered])
+    monkeypatch.setattr(ort, "register_execution_provider_library", lambda name, path: registered.append((name, path)))
+
+    register_cuda_plugin_ep()
+    register_cuda_plugin_ep()
+
+    assert registered == [("CUDAExecutionProvider", "libcuda.so")]
+
+
+def test_cuda_plugin_ep_is_not_registered_when_core_wheel_bundles_cuda(monkeypatch):
+    plugin = SimpleNamespace(get_ep_name=lambda: "CUDAExecutionProvider", get_library_path=lambda: "libcuda.so")
+    monkeypatch.setitem(sys.modules, "onnxruntime_ep_cuda", plugin)
+    monkeypatch.setattr(ort, "get_available_providers", lambda: ["CUDAExecutionProvider", "CPUExecutionProvider"])
+    monkeypatch.setattr(ort, "register_execution_provider_library", Mock(side_effect=AssertionError))
+
+    register_cuda_plugin_ep()
 
 
 def test_tokenizer_regex_is_local_and_preserves_supported_patterns(tmp_path, monkeypatch):
