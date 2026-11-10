@@ -4574,7 +4574,11 @@ void LoadGgufInitializersConfig(const fs::path& path, Config::Model::GgufInitial
   GgufInitializersRoot_Element root{v};
   try {
     JSON::Parse(root, std::string_view(buffer.data(), buffer.size()));
-    ValidateConfigPath(v.config_file, "gguf_initializers.config_file");
+    // Model::AddGgufInitializers loads a single mapping file, so a chained reference would be silently ignored.
+    if (!v.config_file.empty()) {
+      throw std::runtime_error("gguf_initializers.config_file: nested mapping files are not supported, got: " +
+                               v.config_file);
+    }
     for (const auto& f : v.files) {
       ValidateConfigPath(f, "gguf_initializers.files");
     }

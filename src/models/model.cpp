@@ -20,7 +20,15 @@
 #include <unordered_set>
 #include <unordered_map>
 
-#ifndef _WIN32
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -252,26 +260,85 @@ size_t OrtElementByteSize(ONNXTensorElementDataType dt) {
   }
 }
 
+#ifdef _WIN32
+struct Win32HandleCloser {
+  void operator()(HANDLE handle) const noexcept { ::CloseHandle(handle); }
+};
+using UniqueWin32Handle = std::unique_ptr<void, Win32HandleCloser>;
+#endif
+
 struct GgufFileEntry {
   fs::path path;
   std::string identity;
   uint8_t* mmap_base{nullptr};
   size_t mmap_size{0};
-  std::vector<uint8_t> fallback_buffer;
   uint64_t tensor_data_offset{0};
   std::unordered_map<std::string, GgufTensorInfo> tensors;
 
   explicit GgufFileEntry(const fs::path& file_path, std::string file_identity)
       : path{file_path}, identity{std::move(file_identity)} {
-#ifndef _WIN32
+    Map();
+    try {
+      ParseHeader();
+    } catch (...) {
+      Unmap();
+      throw;
+    }
+  }
+
+  ~GgufFileEntry() { Unmap(); }
+
+  GgufFileEntry(const GgufFileEntry&) = delete;
+  GgufFileEntry& operator=(const GgufFileEntry&) = delete;
+
+ private:
+  // Maps the whole file read-only, so tensor pages are loaded on demand and remain reclaimable by the OS.
+  void Map() {
+#ifdef _WIN32
+    const auto win32_error = [this](const char* message) {
+      const DWORD error = ::GetLastError();
+      return std::runtime_error(message + path.string() + " (Win32 error " + std::to_string(error) + ")");
+    };
+    HANDLE file_handle = ::CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                                       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file_handle == INVALID_HANDLE_VALUE) {
+      throw win32_error("Failed to open GGUF file: ");
+    }
+    const UniqueWin32Handle file{file_handle};
+    LARGE_INTEGER file_size{};
+    if (!::GetFileSizeEx(file.get(), &file_size)) {
+      throw win32_error("Failed to stat GGUF file: ");
+    }
+    // CreateFileMappingW rejects zero-length files, so report them like the POSIX path does.
+    if (file_size.QuadPart <= 0) {
+      throw std::runtime_error("Empty GGUF file: " + path.string());
+    }
+    if (static_cast<uint64_t>(file_size.QuadPart) > std::numeric_limits<size_t>::max()) {
+      throw std::runtime_error("GGUF file is too large to map: " + path.string());
+    }
+    mmap_size = static_cast<size_t>(file_size.QuadPart);
+    // The view keeps the mapping and the file open, so both handles can be closed once it exists.
+    const UniqueWin32Handle mapping{::CreateFileMappingW(file.get(), nullptr, PAGE_READONLY, 0, 0, nullptr)};
+    if (!mapping) {
+      throw win32_error("Failed to create GGUF file mapping: ");
+    }
+    void* mapped = ::MapViewOfFile(mapping.get(), FILE_MAP_READ, 0, 0, 0);
+    if (mapped == nullptr) {
+      throw win32_error("Failed to map GGUF file: ");
+    }
+#else
     const int fd = ::open(path.c_str(), O_RDONLY);
     if (fd < 0) {
       throw std::runtime_error("Failed to open GGUF file: " + path.string());
     }
     struct stat st = {};
-    if (::fstat(fd, &st) != 0 || st.st_size <= 0) {
+    if (::fstat(fd, &st) != 0) {
       ::close(fd);
       throw std::runtime_error("Failed to stat GGUF file: " + path.string());
+    }
+    if (st.st_size <= 0) {
+      ::close(fd);
+      throw std::runtime_error("Empty GGUF file: " + path.string());
     }
     mmap_size = static_cast<size_t>(st.st_size);
     void* mapped = ::mmap(nullptr, mmap_size, PROT_READ, MAP_SHARED, fd, 0);
@@ -279,49 +346,22 @@ struct GgufFileEntry {
     if (mapped == MAP_FAILED) {
       throw std::runtime_error("Failed to mmap GGUF file: " + path.string());
     }
+#endif
     mmap_base = static_cast<uint8_t*>(mapped);
+  }
+
+  void Unmap() noexcept {
+    if (mmap_base == nullptr) {
+      return;
+    }
+#ifdef _WIN32
+    ::UnmapViewOfFile(mmap_base);
 #else
-    auto in = path.open(std::ios::binary | std::ios::ate);
-    if (!in) {
-      throw std::runtime_error("Failed to open GGUF file: " + path.string());
-    }
-    const std::streamsize size = in.tellg();
-    if (size <= 0 || static_cast<uintmax_t>(size) > std::numeric_limits<size_t>::max()) {
-      throw std::runtime_error("Invalid GGUF file size: " + path.string());
-    }
-    mmap_size = static_cast<size_t>(size);
-    in.seekg(0, std::ios::beg);
-    fallback_buffer.resize(mmap_size);
-    if (!in.read(reinterpret_cast<char*>(fallback_buffer.data()), size)) {
-      throw std::runtime_error("Failed to read GGUF file: " + path.string());
-    }
-    mmap_base = fallback_buffer.data();
+    ::munmap(mmap_base, mmap_size);
 #endif
-    try {
-      ParseHeader();
-    } catch (...) {
-#ifndef _WIN32
-      if (mmap_base) {
-        ::munmap(mmap_base, mmap_size);
-        mmap_base = nullptr;
-      }
-#endif
-      throw;
-    }
+    mmap_base = nullptr;
   }
 
-  ~GgufFileEntry() {
-#ifndef _WIN32
-    if (mmap_base) {
-      ::munmap(mmap_base, mmap_size);
-    }
-#endif
-  }
-
-  GgufFileEntry(const GgufFileEntry&) = delete;
-  GgufFileEntry& operator=(const GgufFileEntry&) = delete;
-
- private:
   void ParseHeader() {
     size_t cursor = 0;
     auto require_bytes = [&](size_t n) {
@@ -1101,6 +1141,11 @@ void Model::AddGgufInitializers(OrtSessionOptions& session_options) {
   if (!config_->model.decoder.pipeline.empty()) {
     throw std::runtime_error("GGUF initializers are not supported for pipelined decoders.");
   }
+  // MoonshineStreamingModel replaces session_options_ after this registration and shares it across all of its
+  // sessions, so the mappings would be lost (and would not match the non-decoder graphs).
+  if (ModelType::IsStreamingEncDecASR(config_->model.type)) {
+    throw std::runtime_error("GGUF initializers are not supported for streaming_enc_dec_asr models.");
+  }
   if (config_->memory_assets_only_) {
     throw std::runtime_error("Memory-only loading does not support GGUF initializers.");
   }
@@ -1189,6 +1234,11 @@ void Model::AddGgufInitializers(OrtSessionOptions& session_options) {
 
     const bool share_tensor = mapping.has_share ? mapping.share : gguf_cfg.share;
     if (share_tensor && p_device_ && p_device_->GetType() != DeviceType::CPU) {
+      // ~Model closes the global DML allocator while these entries (possibly held by other models) are still alive.
+      if (p_device_->GetType() == DeviceType::DML) {
+        throw std::runtime_error("GGUF initializer '" + mapping.onnx_name +
+                                 "' cannot use \"share\": true because device sharing is not supported on DML.");
+      }
       auto memory_info = p_device_->GetMemoryInfo();
       std::ostringstream key;
       key << matched_file->identity << ':' << matched_info->data_offset << ':' << matched_info->n_bytes << ':'

@@ -6,7 +6,7 @@ ONNX Runtime GenAI supports loading ONNX model initializers directly from GGUF v
 
 The `model.decoder`, `model.draft`, `model.dflash2`, and `model.mtp` sections can specify `"gguf_initializers"` either as a relative path to an external JSON mapping file or as an inline JSON object.
 
-Mappings apply to all decoder sessions, including separately configured speech decoders and Nemotron Parse prefill sessions. Pipelined decoders are not supported and reject GGUF mappings explicitly.
+Mappings apply to all decoder sessions, including separately configured speech decoders and Nemotron Parse prefill sessions. Pipelined decoders and `streaming_enc_dec_asr` (Moonshine) models are not supported and reject GGUF mappings explicitly.
 
 ### 1. External Mapping File (`gguf_initializers.json`)
 
@@ -79,20 +79,25 @@ In `gguf_initializers.json`:
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `config_file` | `string` | Optional path (relative to `genai_config.json`) to an external JSON mapping file. Can also be passed directly as `"gguf_initializers": "path.json"`. |
+| `config_file` | `string` | Optional path (relative to `genai_config.json`) to an external JSON mapping file. Can also be passed directly as `"gguf_initializers": "path.json"`. An external mapping file cannot specify `config_file` itself; nested mapping files are rejected. |
 | `files` / `file` | `string[]` / `string` | One or more `.gguf` files (relative to `genai_config.json`) searched when a tensor mapping does not specify its own `file`. Aliases of the same file are deduplicated; matches in distinct files are rejected as ambiguous. Per-tensor overrides do not add files to this default search list. |
 | `share` | `bool` | Default cross-session device sharing flag (`false` by default) inherited by tensor entries that do not specify `share`. |
 | `tensors` | `object` or `array` | Map of `onnx_initializer_name -> gguf_tensor_name` (or mapping object), or array of mapping objects with `onnx_name` (`name`) and `gguf_name` (`gguf_tensor` / `tensor`). |
 | `tensors[].file` | `string` | Optional `.gguf` file override for a specific tensor when weights span multiple GGUF shards. |
 | `tensors[].data_type` (`dtype`) | `int` | Optional `ONNXTensorElementDataType` enum override. Defaults to the GGUF type's natural ONNX element type (`FLOAT` for `F32`, `FLOAT16` for `F16`, `BFLOAT16` for `BF16`, `UINT8` for block-quantized types). |
 | `tensors[].shape` | `int64[]` | Optional ONNX tensor shape override. An explicit `[]` creates a rank-zero scalar. Must match the exact byte size of the GGUF tensor. When omitted, defaults to `[ggml_dims[n-1], ..., ggml_dims[1], (ggml_dims[0] / blck_size) * type_size]` for block-quantized tensors or `[ggml_dims[n-1], ..., ggml_dims[0]]` for unquantized tensors. |
-| `tensors[].share` | `bool` | When `true` on a non-CPU device, copies the GGUF tensor once into a cached device `OrtValue` and registers it via `SessionOptions::AddInitializer` so multiple sessions (e.g. target decoder and `dflash2` / `mtp` drafter) share a single GPU allocation. |
+| `tensors[].share` | `bool` | When `true` on a non-CPU device, copies the GGUF tensor once into a cached device `OrtValue` and registers it via `SessionOptions::AddInitializer` so multiple sessions (e.g. target decoder and `dflash2` / `mtp` drafter) share a single GPU allocation. Ignored on CPU. Rejected on DML, whose allocator is closed while shared tensors may still be alive. |
 
 ## Runtime Behavior & Zero-Copy Loading
 
-1. **Cached `mmap` and Header Parsing**:
-   `GetOrOpenGgufFile` memory-maps each `.gguf` file once (`PROT_READ, MAP_SHARED` on POSIX) and caches the parsed GGUF v2/v3 tensor directory by file identity (`st_dev:st_ino`). Windows uses a retained file buffer and canonical UTF-16 paths.
+1. **Cached Read-Only Mapping and Header Parsing**:
+   `GetOrOpenGgufFile` maps each `.gguf` file read-only once (`mmap` with `PROT_READ, MAP_SHARED` on POSIX; `CreateFileMappingW` with `PAGE_READONLY` and `MapViewOfFile` on Windows, opened by UTF-16 path) and caches the parsed GGUF v2/v3 tensor directory by file identity (`st_dev:st_ino` on POSIX, canonical path on Windows). Pages are loaded on demand and remain reclaimable by the OS. Every model that uses a file holds a reference to its mapping, so the mapping stays valid until the last such model is destroyed.
 2. **Direct Buffer Injection (`"share": false`)**:
-   `Model::AddGgufInitializers` creates non-owning CPU `OrtValue` views pointing directly into the `mmap`'d GGUF data region, sets `session.use_external_initializer_file_buffers_directly = "1"`, and injects them via `SessionOptions::AddExternalInitializers`. ONNX Runtime aliases the `mmap`'d pages without allocating or copying a duplicate CPU buffer.
+   `Model::AddGgufInitializers` creates non-owning CPU `OrtValue` views pointing directly into the mapped GGUF data region, sets `session.use_external_initializer_file_buffers_directly = "1"`, and injects them via `SessionOptions::AddExternalInitializers`. Whether ONNX Runtime borrows a view instead of copying it depends on the runtime and the tensor:
+   - The runtime must include [microsoft/onnxruntime#33877](https://github.com/microsoft/onnxruntime/pull/33877) (ONNX Runtime 1.32.0 or later). Older runtimes apply this option only to `AddExternalInitializersFromFilesInMemory`, so every tensor supplied through `AddExternalInitializers` is copied into memory owned by ONNX Runtime during session creation.
+   - Even then, ONNX Runtime borrows only tensors larger than 127 bytes whose data address is a multiple of their element size, and only on little-endian hosts; it copies all other tensors. GGUF tensor data is aligned to `general.alignment` (32 bytes by default), so tensors are naturally aligned unless the file uses a smaller alignment than the element size of the mapped ONNX type.
+   - Borrowing removes only the duplicate CPU copy. Execution providers that keep initializers in device memory still upload them during session creation.
+
+   When tensors are copied, budget host memory for those copies in addition to the mapped file pages.
 3. **Cross-Session Device Sharing (`"share": true`)**:
-   Tensors marked with `"share": true` (such as `token_embd.weight` and `output.weight` shared between the target decoder and the LiLiCorr/DFlash2 drafter) are uploaded once to device memory, cached in `g_shared_initializers`, and bound into both sessions via `SessionOptions::AddInitializer`. The cache distinguishes allocator names as well as device types and IDs, so different execution providers cannot share incompatible allocations.
+   Tensors marked with `"share": true` (such as `token_embd.weight` and `output.weight` shared between the target decoder and the LiLiCorr/DFlash2 drafter) are uploaded once to device memory, cached in `g_shared_initializers`, and bound into both sessions via `SessionOptions::AddInitializer`. The cache distinguishes allocator names as well as device types and IDs, so different execution providers cannot share incompatible allocations. Sharing is not supported on DML.
