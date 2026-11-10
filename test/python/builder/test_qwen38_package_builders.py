@@ -14,6 +14,8 @@ Covers:
 
 from __future__ import annotations
 
+import argparse
+import ast
 import builtins
 import copy
 import hashlib
@@ -56,7 +58,14 @@ def builders():
         pkg = importlib.import_module("build_package")
         yield types.SimpleNamespace(config=config, paths=paths, gb=gb, pkg=pkg)
     finally:
-        for name in ("package_config", "package_paths", "graph_builder", "build_package"):
+        for name in (
+            "package_config",
+            "package_paths",
+            "package_io",
+            "precision_options",
+            "graph_builder",
+            "build_package",
+        ):
             sys.modules.pop(name, None)
         if sys.path and sys.path[0] == str(FLASH_NEXT_TOOLS_DIR):
             sys.path.pop(0)
@@ -674,10 +683,10 @@ def make_synthetic_rc5_base_package(root: Path, num_layers: int = 4, num_experts
     )
     onnx.save_model(model, str(base_pkg / "model.onnx"), save_as_external_data=False)
 
-    # Write STRP v1 expert-profile.bin
-    pairs = [(lay, exp, 100 - lay * 10 - exp, 0) for exp in range(num_experts) for lay in range(num_layers)]
+    # Write STRP v1 expert-profile.bin: ranked (layer, expert) uint16 pairs, hottest first
+    pairs = [(lay, exp) for exp in range(num_experts) for lay in range(num_layers)]
     header = struct.pack("<IIIIII", STRP_MAGIC, 1, num_layers, num_experts, num_layers * 2, len(pairs))
-    body = b"".join(struct.pack("<HHHH", *p) for p in pairs)
+    body = b"".join(struct.pack("<HH", *p) for p in pairs)
     (base_pkg / "expert-profile.bin").write_bytes(header + body)
     (base_pkg / "weights_pool.txt").write_text("qwen38_weights_pool 1\n")
     (base_pkg / "ple" / "ple_int8_00.data").write_bytes(b"\x00" * 160)
@@ -785,6 +794,31 @@ def test_strp_profile_plans_and_error_handling(builders, tmp_path):
         pkg.load_expert_profile_plan(prof, num_layers=3, num_experts=8, total_slots=-1)
 
 
+def test_strp_profile_records_are_layer_expert_pairs(builders, tmp_path):
+    # The QMoE offload planner reads every ranked STRP v1 entry as two uint16 values (layer, expert).
+    pkg, gb = builders.pkg, builders.gb
+    base_pkg, _ = make_synthetic_rc5_base_package(tmp_path, num_layers=3, num_experts=8)
+    prof = base_pkg / "expert-profile.bin"
+    assert prof.stat().st_size == 24 + 3 * 8 * 4
+    plan = pkg.load_expert_profile_plan(prof, num_layers=3, num_experts=8, total_slots=4, min_slots_per_layer=0)
+    assert plan == {0: [0, 1], 1: [0], 2: [0]}
+
+    gate_norms = {0: [1.0, 5.0, 3.0, 2.0], 1: [4.0, 0.5, 6.0, 0.1]}
+
+    class GateLoader:
+        def read_tensor(self, name):
+            lid = int(name.split(".")[3])
+            return torch.tensor(gate_norms[lid]).unsqueeze(1)
+
+    written = tmp_path / "expert-profile-hf.bin"
+    gb.build_expert_profile_from_hf(GateLoader(), written, num_layers=2, num_experts=4)
+    assert written.stat().st_size == 24 + 2 * 4 * 4
+    ranked = struct.unpack_from("<16H", written.read_bytes(), 24)
+    assert list(zip(ranked[0::2], ranked[1::2], strict=True))[:3] == [(1, 2), (0, 1), (1, 0)]
+    plan = pkg.load_expert_profile_plan(written, num_layers=2, num_experts=4, total_slots=3, min_slots_per_layer=0)
+    assert plan == {0: [1], 1: [0, 2]}
+
+
 def test_bank_metadata_and_weights_pool_roundtrip(builders, tmp_path):
     gb = builders.gb
     locs = {
@@ -852,8 +886,6 @@ def test_removed_legacy_flags_and_conflicting_arguments_fail_cleanly(builders):
 
 
 def test_precision_options_profiles_and_overrides():
-    import argparse
-
     sys.path.insert(0, str(FLASH_NEXT_TOOLS_DIR))
     try:
         po = importlib.import_module("precision_options")
@@ -967,6 +999,163 @@ def test_consolidate_package_external_data_merges_and_page_aligns(tmp_path):
         assert ext_map["w_b"] == {"location": "model.onnx.data", "offset": "4096", "length": "200"}
 
 
+def import_precision_options():
+    sys.path.insert(0, str(FLASH_NEXT_TOOLS_DIR))
+    try:
+        return importlib.import_module("precision_options")
+    finally:
+        if sys.path and sys.path[0] == str(FLASH_NEXT_TOOLS_DIR):
+            sys.path.pop(0)
+
+
+def external_locations(path: Path) -> dict[str, dict[str, str]]:
+    m = onnx.load(str(path), load_external_data=False)
+    return {
+        init.name: {kv.key: kv.value for kv in init.external_data}
+        for init in m.graph.initializer
+        if init.data_location == TensorProto.EXTERNAL
+    }
+
+
+def test_precision_options_and_package_io_do_not_import_the_builders():
+    for module in ("precision_options.py", "package_io.py"):
+        tree = ast.parse((FLASH_NEXT_TOOLS_DIR / module).read_text())
+        imported = {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names}
+        imported |= {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
+        assert not imported & {"build_package", "build_package_gguf"}, module
+
+
+def test_consolidation_relocates_existing_target_data_file(tmp_path):
+    po = import_precision_options()
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "model.onnx.data").write_bytes(b"T" * 300)
+    (pkg / "bank_a.data").write_bytes(b"A" * 100)
+
+    def ext_init(name, loc, offset, length):
+        t = TensorProto()
+        t.name = name
+        t.data_type = TensorProto.UINT8
+        t.dims.extend([length])
+        t.data_location = TensorProto.EXTERNAL
+        for k, v in (("location", loc), ("offset", str(offset)), ("length", str(length))):
+            kv = t.external_data.add()
+            kv.key, kv.value = k, v
+        return t
+
+    inits = [ext_init("w_t", "model.onnx.data", 100, 200), ext_init("w_a", "bank_a.data", 0, 100)]
+    onnx.save(helper.make_model(helper.make_graph([], "g", [], [], initializer=inits)), str(pkg / "model.onnx"))
+    tier = [ext_init("w_a", "bank_a.data", 0, 100)]
+    onnx.save(helper.make_model(helper.make_graph([], "g", [], [], initializer=tier)), str(pkg / "model_2k.onnx"))
+
+    res = po.consolidate_package_external_data(pkg)
+    assert res["consolidated"] is True and res["removed_files"] == ["bank_a.data"]
+    raw = (pkg / "model.onnx.data").read_bytes()
+    locs = external_locations(pkg / "model.onnx")
+    for name, payload in (("w_t", b"T" * 200), ("w_a", b"A" * 100)):
+        assert locs[name]["location"] == "model.onnx.data"
+        off, length = int(locs[name]["offset"]), int(locs[name]["length"])
+        assert raw[off : off + length] == payload
+    assert external_locations(pkg / "model_2k.onnx")["w_a"] == locs["w_a"]
+    assert po.consolidate_package_external_data(pkg) == {"consolidated": False}
+
+
+def test_consolidated_precision_build_rewrites_every_graph_and_keeps_base_package_intact(builders, tmp_path):
+    base_pkg, pool_dir = make_synthetic_rc5_base_package(tmp_path, num_layers=4, num_experts=8)
+    shared = TensorProto()
+    shared.name = "dflash2.shared_scales"
+    shared.data_type = TensorProto.UINT8
+    shared.dims.extend([16])
+    shared.data_location = TensorProto.EXTERNAL
+    for k, v in (("location", "qmoe_scales.data"), ("offset", "0"), ("length", "16")):
+        kv = shared.external_data.add()
+        kv.key, kv.value = k, v
+    dflash = helper.make_model(helper.make_graph([], "dflash2", [], [], initializer=[shared]))
+    onnx.save(dflash, str(base_pkg / "dflash2.onnx"))
+    before = snapshot(base_pkg)
+
+    out_pkg = tmp_path / "out_consolidated"
+    rc = builders.pkg.main(
+        [
+            "--base-pkg",
+            str(base_pkg),
+            "--pool-dir",
+            str(pool_dir),
+            "--out",
+            str(out_pkg),
+            "--qmoe-xyz",
+            "1,1,2",
+            "--kl-mode",
+            "dp23",
+            "--context-tiers",
+            "2k,8k",
+            "--consolidate-data-files",
+        ]
+    )
+    assert rc == 0
+    assert snapshot(base_pkg) == before
+    assert not (out_pkg / "qmoe_scales.data").exists()
+    for gname in ("model.onnx", "model_2k.onnx", "model_8k.onnx", "dflash2.onnx"):
+        locs = external_locations(out_pkg / gname)
+        assert locs and {e["location"] for e in locs.values()} == {"model.onnx.data"}, gname
+    assert external_locations(out_pkg / "model_2k.onnx") == external_locations(out_pkg / "model.onnx")
+    assert external_locations(base_pkg / "dflash2.onnx")["dflash2.shared_scales"]["location"] == "qmoe_scales.data"
+
+
+def test_fp16_qsa_projections_require_fp32_indexer(builders):
+    po = import_precision_options()
+    ap = argparse.ArgumentParser()
+    po.add_precision_cli_args(ap)
+    for qsa in ("v_rc5_fp16", "kv_fp16", "fp16"):
+        with pytest.raises(ValueError, match="requires --indexer-dtype fp32"):
+            po.resolve_precision_config(ap.parse_args(["--qsa-qkv-dtype", qsa]))
+        with pytest.raises(ValueError, match="requires --indexer-dtype fp32"):
+            po.resolve_precision_config(
+                ap.parse_args(
+                    ["--precision-profile", "fp32_fp16kv_v2", "--qsa-qkv-dtype", qsa, "--indexer-dtype", "bf16"]
+                )
+            )
+        assert po.resolve_precision_config(ap.parse_args(["--qsa-qkv-dtype", qsa, "--indexer-dtype", "fp32"]))
+    with pytest.raises(SystemExit):
+        builders.pkg.main(["--base-pkg", "a", "--out", "b", "--qsa-qkv-dtype", "fp16"])
+
+
+def test_aligned_blob_writer_page_aligns_and_replaces_existing_file(tmp_path):
+    import_precision_options()
+    package_io = sys.modules["package_io"]
+    (tmp_path / "attn_consts.data").write_bytes(b"stale")
+    writer = package_io.AlignedBlobWriter(tmp_path, "attn_consts.data")
+    assert writer.write_raw(b"a" * 10, TensorProto.UINT8, [10]) == ("attn_consts.data", 0, 10, TensorProto.UINT8, [10])
+    assert writer.write_raw(b"b" * 3, TensorProto.UINT8, [3])[1] == 4096
+    assert (tmp_path / "attn_consts.data").read_bytes() == b"a" * 10 + b"\x00" * 4086 + b"b" * 3
+
+
+def test_gguf_ple_table_is_copied_into_output_when_hard_link_fails(tmp_path, monkeypatch):
+    po = import_precision_options()
+    name = b"per_layer_token_embd.weight"
+    header = struct.pack("<4sIQQ", b"GGUF", 3, 1, 1)
+    header += struct.pack("<Q", 17) + b"general.alignment" + struct.pack("<II", 4, 64)
+    header += struct.pack("<Q", len(name)) + name + struct.pack("<I", 2) + struct.pack("<QQ", 160, 4)
+    header += struct.pack("<IQ", 8, 0)
+    data_offset = (len(header) + 63) // 64 * 64
+    src = tmp_path / "src" / "engram.gguf_file"
+    src.parent.mkdir()
+    src.write_bytes(header + b"\x00" * (data_offset - len(header)) + b"\x11" * 680)
+    out = tmp_path / "out"
+    out.mkdir()
+
+    def no_link(*_args):
+        raise OSError("cross-device link")
+
+    monkeypatch.setattr(po.os, "link", no_link)
+    dst_name = po.write_gguf_ple_table(out, "q8_0", src)
+    assert dst_name == "Qwen3.8-Flash-Next-engram-Q8_0.gguf"
+    assert (out / dst_name).read_bytes() == src.read_bytes()
+    shards = [ln.split() for ln in (out / "ple_table.txt").read_text().splitlines() if ln.startswith("shard ")]
+    assert shards[0] == ["shard", dst_name, str(data_offset), "2500012"]
+    assert sum(int(s[3]) for s in shards) == 300001275 + 20000171
+
+
 def test_rc6_fp32_gdn_kl_calibration_and_presets(builders):
     pkg = builders.pkg
     l4, l3, l2, mode = pkg.select_qmoe_layers_by_kl(2, 14, 32, kl_mode="dp23_fp32")
@@ -995,7 +1184,3 @@ def test_rc6_fp32_gdn_kl_calibration_and_presets(builders):
     spec_all4 = pkg.resolve_preset_spec("rc6_all_int4")
     assert spec_all4["pkg_name"] == "qwen_flash_next_rc6_all_int4_fp32"
     assert (spec_all4["x"], spec_all4["y"], spec_all4["z"]) == (48, 0, 0)
-
-
-
-
