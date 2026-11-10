@@ -53,7 +53,8 @@ def embedding_package(path, rank=1, bfloat16=True):
 
 @pytest.mark.parametrize("rank", [1, 2])
 @pytest.mark.parametrize("bfloat16", [False, True])
-def test_package_cpu_embedding_preserves_names_shapes_and_dtype(calibration, tmp_path, rank, bfloat16):
+def test_package_cpu_embedding_preserves_names_shapes_and_dtype(calibration, tmp_path, monkeypatch, rank, bfloat16):
+    monkeypatch.setattr(torch, "from_dlpack", lambda *args: pytest.fail("CPU embeddings must not require DLPack"))
     table = embedding_package(tmp_path, rank, bfloat16)
     embedding = calibration.create_embedding_session(ort, tmp_path)
     tokens = np.asarray([[1, 4, 7, 2]], dtype=np.int64)
@@ -139,6 +140,8 @@ def test_calibrator_binds_prompt_and_shifted_head_embeddings(
 
     dense = Session(dense_input)
     head = Session(head_input, head=True)
+    # The CUDA sessions above are fakes; their tensor bridge must not depend on the installed ORT wheel either.
+    monkeypatch.setattr(ort.OrtValue, "from_dlpack", staticmethod(torch.from_dlpack), raising=False)
     monkeypatch.setattr(calibration, "create_calibration_sessions", lambda *args: (dense, head))
     loaded_embeddings = []
     create_embedding_session = calibration.create_embedding_session
@@ -155,6 +158,7 @@ def test_calibrator_binds_prompt_and_shifted_head_embeddings(
             name: getattr(torch, name)
             for name in (
                 "from_numpy",
+                "frombuffer",
                 "from_dlpack",
                 "zeros",
                 "ones",

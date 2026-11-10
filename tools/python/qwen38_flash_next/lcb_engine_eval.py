@@ -11,6 +11,7 @@ lcb-grader:latest at both 16K and 32K caps, plus paired exact McNemar comparison
 from __future__ import annotations
 
 import argparse
+import glob
 import hashlib
 import json
 import os
@@ -316,7 +317,7 @@ def grade_suite(args) -> None:
     arms_records: dict[str, dict[int, dict]] = {}
     for spec in args.arms:
         name, pattern = spec.split("=", 1)
-        paths = sorted(Path("/").glob(pattern.lstrip("/")) if pattern.startswith("/") else Path(".").glob(pattern))
+        paths = sorted(Path(path) for path in glob.glob(pattern, recursive=True))
         recs = load_arm_records(paths, set(samples))
         arms_records[name] = recs
 

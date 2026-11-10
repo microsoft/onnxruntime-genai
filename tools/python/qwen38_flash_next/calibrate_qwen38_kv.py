@@ -15,6 +15,7 @@ Embedding-only graphs use the package's CPU embedding session for the prompt and
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import os
 from pathlib import Path
@@ -111,7 +112,14 @@ def run_embeddings(ort, session, input_name, output_name, tokens: np.ndarray, de
     binding.bind_cpu_input(input_name, np.ascontiguousarray(ids, dtype=np.int64))
     binding.bind_output(output_name, "cpu")
     session.run_with_iobinding(binding)
-    embeddings = torch.from_dlpack(binding.get_outputs()[0])
+    output = binding.get_outputs()[0]
+    if output.data_type() == "tensor(bfloat16)":
+        # CPU/DirectML wheels need not expose DLPack, and OrtValue.numpy() does not support BF16.
+        # Copy the raw CPU storage so the tensor also survives the binding's lifetime.
+        raw = bytearray(ctypes.string_at(output.data_ptr(), int(np.prod(output.shape())) * 2))
+        embeddings = torch.frombuffer(raw, dtype=torch.bfloat16).reshape(output.shape())
+    else:
+        embeddings = torch.from_numpy(output.numpy().copy())
     return embeddings.reshape(1, tokens.shape[1], -1).to(device=device).contiguous()
 
 

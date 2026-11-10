@@ -1650,7 +1650,9 @@ def test_lcb_grading_requires_disjoint_complete_consistent_shards(tools, tmp_pat
 
 
 @pytest.mark.parametrize("eos_first", [False, True])
-def test_lcb_grading_persists_accuracy_without_decode_metrics(tools, tmp_path, monkeypatch, eos_first):
+@pytest.mark.parametrize("path_kind", ["absolute", "absolute_glob", "relative", "relative_recursive"])
+def test_lcb_grading_persists_accuracy_without_decode_metrics(tools, tmp_path, monkeypatch, eos_first, path_kind):
+    monkeypatch.chdir(tmp_path)
     samples = tmp_path / "samples.jsonl"
     samples.write_text(
         "".join(
@@ -1696,11 +1698,17 @@ def test_lcb_grading_persists_accuracy_without_decode_metrics(tools, tmp_path, m
         },
     )
     out = tmp_path / "report.json"
+    pattern = {
+        "absolute": str(records),
+        "absolute_glob": str(tmp_path / "shard*.jsonl"),
+        "relative": records.name,
+        "relative_recursive": "**/shard*.jsonl",
+    }[path_kind]
     args = types.SimpleNamespace(
         checkpoint=tmp_path,
         samples=samples,
         caps=[16],
-        arms=[f"engine={records}"],
+        arms=[f"engine={pattern}"],
         tests=tmp_path,
         lcb_repo=tmp_path,
         grader=tmp_path / "grader.py",
