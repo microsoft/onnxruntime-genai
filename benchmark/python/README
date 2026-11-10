@@ -37,9 +37,14 @@ Gemma4 multi-image vision benchmark
 
 benchmark_multimodal.py accepts --image_paths for one prompt containing multiple images;
 the existing --image_path remains supported. Gemma4 prompts use one <|image|> marker
-per image. For example, on Windows:
+per image and the model tokenizer's chat template. If the tokenizer reports an
+empty or unsupported template, the benchmark falls back to Gemma4's canonical single-user
+turn format. For example, on Windows:
 
 python benchmark\python\benchmark_multimodal.py -i {fixed-output Gemma4 model} --image_paths test\images\australia.jpg test\images\sheet.png -g 1,32 -m 4096,4096 -k 1 -p 1 -w 5 -r 30 -o overlap.csv
+
+For a fixed-shape decoder export, set --chunk_size and --max_lengths to the export's
+prefill chunk size and cache capacity. Dynamic exports retain their default chunking.
 
 Repeat with 1, 2, 4, and 8 image paths, including mixed geometries. Use a real fixed-output
 vision export for performance results; the tiny test graphs establish correctness only.

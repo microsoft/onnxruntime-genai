@@ -2,11 +2,13 @@
 # Licensed under the MIT License.
 
 import importlib.util
+import json
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
-from models.test_gemma4_models import _fixed_output_gemma4, _get_test_media_path
+from models.test_gemma4_models import _fixed_output_gemma4, _get_test_media_path, _to_numpy
 
 
 @pytest.fixture(scope="module")
@@ -18,12 +20,34 @@ def benchmark():
     return module
 
 
-@pytest.mark.parametrize("image_count", [1, 2, 4, 8])
-def test_gemma4_benchmark_prompt_has_one_marker_per_image(benchmark, image_count):
-    prompt = benchmark.build_prompt("gemma4", image_count, False)
+@pytest.mark.parametrize("model_type", ["gemma4", "gemma4_unified"])
+@pytest.mark.parametrize("image_count", [0, 1, 2, 4, 8])
+@pytest.mark.parametrize("template_error", ["Invalid or unsupported chat template", "Empty chat template."])
+def test_gemma4_benchmark_prompt_with_unsupported_template(benchmark, model_type, image_count, template_error):
+    tokenizer = SimpleNamespace(apply_chat_template=Mock(side_effect=RuntimeError(template_error)))
+    prompt = benchmark.build_prompt(model_type, image_count, False, tokenizer)
+    content = "<|image|>" * image_count + "Describe these images." if image_count else "What is the meaning of life?"
+    assert prompt == f"<bos><|turn>user\n{content}<turn|>\n<|turn>model\n"
     assert prompt.count("<|image|>") == image_count
     assert "<|image_1|>" not in prompt
-    assert prompt.endswith("<start_of_turn>model\n")
+    tokenizer.apply_chat_template.assert_called_once_with(
+        json.dumps([{"role": "user", "content": content}]), add_generation_prompt=True
+    )
+
+
+def test_gemma4_benchmark_uses_model_chat_template(benchmark):
+    tokenizer = SimpleNamespace(apply_chat_template=Mock(return_value="model-formatted prompt"))
+    assert benchmark.build_prompt("gemma4", 2, False, tokenizer) == "model-formatted prompt"
+    tokenizer.apply_chat_template.assert_called_once_with(
+        json.dumps([{"role": "user", "content": "<|image|><|image|>Describe these images."}]),
+        add_generation_prompt=True,
+    )
+
+
+def test_gemma4_benchmark_does_not_hide_tokenizer_errors(benchmark):
+    tokenizer = SimpleNamespace(apply_chat_template=Mock(side_effect=RuntimeError("Tokenizer failure")))
+    with pytest.raises(RuntimeError, match="Tokenizer failure"):
+        benchmark.build_prompt("gemma4", 1, False, tokenizer)
 
 
 @pytest.mark.parametrize("model_type", ["phi3v", "phi4mm"])
@@ -43,9 +67,12 @@ def test_multimodal_benchmark_runs_gemma4_and_checks_baseline(benchmark, request
     if not data:
         pytest.skip("--test_models is required")
     model_path = tmp_path / "model"
-    _fixed_output_gemma4(data, model_path)
+    model, processor = _fixed_output_gemma4(data, model_path)
     names = ["australia.jpg", "sheet.png"] if multi_image else ["australia.jpg"]
     paths = [str(_get_test_media_path(data, Path("images") / name)) for name in names]
+    prompt = benchmark.build_prompt("gemma4", len(paths), False, benchmark.og.Tokenizer(model))
+    inputs = processor(prompt, images=benchmark.og.Images.open(*paths))
+    expected_prompt_length = _to_numpy(inputs["input_ids"]).shape[-1]
     args = SimpleNamespace(
         input_folder=str(model_path),
         image_paths=paths if multi_image else [],
@@ -61,9 +88,11 @@ def test_multimodal_benchmark_runs_gemma4_and_checks_baseline(benchmark, request
         print_model_output=False,
         output=str(tmp_path / "baseline.csv"),
         baseline_csv=None,
+        chunk_size=None,
     )
     benchmark.main(args)
     baseline = benchmark.pd.read_csv(args.output)
+    assert baseline["Prompt Length"].tolist() == [expected_prompt_length] * 2
     assert baseline["Image Count"].tolist() == [len(paths)] * 2
     assert baseline.loc[0, "Tokens Generated"] == 1
     assert benchmark.pd.isna(baseline.loc[0, "Token Generation Latency (ms)"])

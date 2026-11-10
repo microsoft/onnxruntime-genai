@@ -156,14 +156,23 @@ def image_paths(args):
     return args.image_paths or ([args.image_path] if args.image_path else [])
 
 
-def build_prompt(model_type, image_count, has_audio):
+def build_prompt(model_type, image_count, has_audio, tokenizer=None):
     if model_type in {"gemma4", "gemma4_unified"}:
         if has_audio:
             raise ValueError("Gemma4 audio benchmarking is not supported by this image benchmark")
         content = (
             "<|image|>" * image_count + "Describe these images." if image_count else "What is the meaning of life?"
         )
-        return f"<start_of_turn>user\n{content}<end_of_turn>\n<start_of_turn>model\n"
+        if tokenizer is not None:
+            try:
+                return tokenizer.apply_chat_template(
+                    json.dumps([{"role": "user", "content": content}]), add_generation_prompt=True
+                )
+            except RuntimeError as error:
+                if "Invalid or unsupported chat template" not in str(error) and str(error) != "Empty chat template.":
+                    raise
+        # Older tokenizer runtimes cannot render Gemma4's canonical Jinja template.
+        return f"<bos><|turn>user\n{content}<turn|>\n<|turn>model\n"
     image_special = (
         "<|endoftext10|>\n" * image_count
         if model_type == "phi4mm"
@@ -200,11 +209,14 @@ def run_benchmark(args, model, processor, image, audio, generation_length, max_l
         print("Processing inputs...")
 
     paths = image_paths(args)
-    prompt = build_prompt(model_type, len(paths), audio is not None)
+    tokenizer = og.Tokenizer(model) if model_type in {"gemma4", "gemma4_unified"} else None
+    prompt = build_prompt(model_type, len(paths), audio is not None, tokenizer)
 
     if model_type == "whisper":
         decoder_prompt_tokens = ["<|startoftranscript|>", "<|en|>", "<|transcribe|>", "<|notimestamps|>"]
         prompts = ["".join(decoder_prompt_tokens)]
+    elif model_type in {"gemma4", "gemma4_unified"}:
+        prompts = prompt
     else:
         prompts = [prompt]
     inputs = processor(prompts, images=image, audios=audio)
@@ -227,6 +239,8 @@ def run_benchmark(args, model, processor, image, audio, generation_length, max_l
                 args.warmup,
                 args.top_k,
                 args.top_p,
+                args.chunk_size,
+                prompt,
                 os.environ.get("ORTGENAI_PREPROCESSING_THREADS"),
             ],
             sort_keys=True,
@@ -235,9 +249,8 @@ def run_benchmark(args, model, processor, image, audio, generation_length, max_l
     if args.verbose:
         print(f"Prompt used: {prompt}")
 
-    params = og.GeneratorParams(model)
     do_sample = args.top_k > 1 or (args.top_p != 1.0 and args.top_p > 0.0)
-    params.set_search_options(
+    search_options = dict(
         do_sample=do_sample,
         top_k=args.top_k,
         top_p=args.top_p,
@@ -245,6 +258,10 @@ def run_benchmark(args, model, processor, image, audio, generation_length, max_l
         max_length=max_length,
         min_length=max_length,
     )
+    if args.chunk_size is not None:
+        search_options["chunk_size"] = args.chunk_size
+    params = og.GeneratorParams(model)
+    params.set_search_options(**search_options)
 
     if args.verbose:
         print("Processed inputs, running warmup runs...")
@@ -280,14 +297,7 @@ def run_benchmark(args, model, processor, image, audio, generation_length, max_l
 
         # Prepare run
         params = og.GeneratorParams(model)
-        params.set_search_options(
-            do_sample=do_sample,
-            top_k=args.top_k,
-            top_p=args.top_p,
-            temperature=temperature,
-            max_length=max_length,
-            min_length=max_length,
-        )
+        params.set_search_options(**search_options)
 
         # Measure prompt processing
         prompt_start_time = time.perf_counter()
@@ -462,6 +472,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("-r", "--repetitions", type=int, default=30, help="Number of times to repeat the benchmark")
     parser.add_argument("-w", "--warmup", type=int, default=5, help="Number of warmup runs before benchmarking")
+    parser.add_argument("--chunk_size", type=int, help="Prefill chunk size required by a fixed-shape decoder export")
     parser.add_argument("-k", "--top_k", type=int, default=50, help="Top k tokens to sample from")
     parser.add_argument("-p", "--top_p", type=float, default=1.0, help="Top p probability to sample with")
     parser.add_argument(
