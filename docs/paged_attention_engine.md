@@ -2441,7 +2441,9 @@ token. The device holds `model.qwen38_graph.max_batch_size` slots (default 1), o
 - MoE offload requires an explicit `session.moe.offload.mode` of `required`, `auto`, `1` or `on` (case-insensitive).
   A budget alone does not enable offload, matching ORT's disabled default; `disabled`, `0` and `off` preserve that behavior.
   Only enabled offload changes target-graph selection, synthetic warmup options or session budgets.
-  By default (`ORT_QWEN38_ADAPTIVE_CTX_BUDGET` unset or `1`; set `0` to disable), offload uses a fixed-layout estimate for the Flash-Next NVFP4 package: 12 attention layers,
+  By default, offload uses a fixed-layout estimate for the Flash-Next NVFP4 package. `ORT_QWEN38_ADAPTIVE_CTX_BUDGET`
+  keeps it on when unset, empty, `1` or `true`, turns it off when `0` or `false`, and makes model creation fail on any
+  other value. The estimate assumes 12 attention layers,
   two KV heads of 256 channels, one-byte K/V caches, int64 position IDs, and a 128-float index-key row per four positions
   per layer. It charges 16 KiB per position per request slot, relative to one slot of 33032 positions. These are not bytes
   measured from the selected graph, and do not account for every state tensor, workspace or allocator overhead.

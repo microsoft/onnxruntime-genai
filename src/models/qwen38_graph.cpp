@@ -3532,14 +3532,14 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
   config_->model.qwen38_graph.fold.head_r2.filename =
       SelectQwen38TierHeadR2Filename(q.fold.head_r2.filename, context_tier, package_has_file);
   head_r2_filename = SelectQwen38TierHeadR2Filename(head_r2_filename, context_tier, package_has_file);
-  const std::string adaptive_ctx_budget = GetEnv("ORT_QWEN38_ADAPTIVE_CTX_BUDGET");
-  const bool adaptive_budget = adaptive_ctx_budget.empty() || adaptive_ctx_budget == "1";
-  if (g_log.enabled && moe_offload.enabled && !adaptive_ctx_budget.empty()) {
+  // On unless ORT_QWEN38_ADAPTIVE_CTX_BUDGET is 0/false; unset and empty keep the default, and invalid values throw.
+  bool adaptive_budget = true;
+  GetEnv("ORT_QWEN38_ADAPTIVE_CTX_BUDGET", adaptive_budget);
+  if (g_log.enabled && moe_offload.enabled) {
     if (!adaptive_budget) {
-      Log("qwen38_graph") << "ORT_QWEN38_ADAPTIVE_CTX_BUDGET=" << adaptive_ctx_budget << " disables adaptive context budget"
-                          << std::endl;
+      Log("qwen38_graph") << "ORT_QWEN38_ADAPTIVE_CTX_BUDGET disables the adaptive context budget" << std::endl;
     } else if (!context_tier) {
-      Log("qwen38_graph") << "ORT_QWEN38_ADAPTIVE_CTX_BUDGET=1: " << target_filename
+      Log("qwen38_graph") << "adaptive context budget: " << target_filename
                           << " is not named after a context tier, so the offload budgets follow the configured kv_capacity "
                           << q.kv_capacity << std::endl;
     }
@@ -3560,8 +3560,8 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
     if (g_log.enabled && moe_offload.enabled && adaptive_budget && graph_positions != budget_kv_capacity) {
       Log("qwen38_graph") << "warning: offload budget estimate used kv_capacity " << budget_kv_capacity
                           << ", but target graph " << target_filename << " reports " << graph_positions
-                          << "; the session budgets are already set. Check the package layout or disable "
-                             "ORT_QWEN38_ADAPTIVE_CTX_BUDGET and configure explicit budgets."
+                          << "; the session budgets are already set. Check the package layout or set "
+                             "ORT_QWEN38_ADAPTIVE_CTX_BUDGET=0 and configure explicit budgets."
                           << std::endl;
     }
     // The capacity follows the graph. The default generation budget follows it only when a context tier was requested: a

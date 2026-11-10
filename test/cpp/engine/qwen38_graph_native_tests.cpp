@@ -8,6 +8,7 @@
 #include <future>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 
@@ -80,7 +81,16 @@ TEST_F(Qwen38GraphNativeTest, AdaptiveBudgetEnvironmentDefaultsAndOptOutReachThe
     std::optional<std::string> value;
     const char* reserve;
   };
-  const Case cases[] = {{std::nullopt, "5901778944"}, {"", "5901778944"}, {"1", "5901778944"}, {"0", "6442450944"}};
+  constexpr const char* kAdaptiveReserve = "5901778944";
+  constexpr const char* kOptOutReserve = "6442450944";
+  const Case cases[] = {
+      {std::nullopt, kAdaptiveReserve},
+      {"", kAdaptiveReserve},
+      {"1", kAdaptiveReserve},
+      {"true", kAdaptiveReserve},
+      {"0", kOptOutReserve},
+      {"false", kOptOutReserve},
+  };
   for (const auto& [value, reserve] : cases) {
     SCOPED_TRACE(value ? *value : "<unset>");
     const ScopedEnvironmentVariable env{"ORT_QWEN38_ADAPTIVE_CTX_BUDGET", value};
@@ -92,6 +102,19 @@ TEST_F(Qwen38GraphNativeTest, AdaptiveBudgetEnvironmentDefaultsAndOptOutReachThe
     Ort::ThrowOnError(Ort::api->GetSessionConfigEntry(model->session_options_.get(), key, actual.data(), &size));
     if (!actual.empty() && actual.back() == '\0') actual.pop_back();
     EXPECT_EQ(actual, reserve);
+  }
+}
+
+TEST_F(Qwen38GraphNativeTest, InvalidAdaptiveBudgetEnvironmentValuesFailModelCreation) {
+  for (const char* value : {"2", "yes"}) {
+    SCOPED_TRACE(value);
+    const ScopedEnvironmentVariable env{"ORT_QWEN38_ADAPTIVE_CTX_BUDGET", std::string{value}};
+    try {
+      LoadCounterModel(false);
+      ADD_FAILURE() << "model creation accepted an invalid ORT_QWEN38_ADAPTIVE_CTX_BUDGET";
+    } catch (const std::invalid_argument& error) {
+      EXPECT_NE(std::string{error.what()}.find("ORT_QWEN38_ADAPTIVE_CTX_BUDGET"), std::string::npos) << error.what();
+    }
   }
 }
 
