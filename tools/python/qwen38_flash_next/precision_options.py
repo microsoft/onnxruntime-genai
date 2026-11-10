@@ -43,6 +43,7 @@ from package_io import (
     read_gguf_tensor_infos,
     save_model_replacing,
     set_inline_f32,
+    write_all,
     write_text_replacing,
 )
 
@@ -355,14 +356,14 @@ def consolidate_package_external_data(
             for loc, off, length in slices_ordered:
                 pad = (page_align - (cur_off % page_align)) % page_align
                 if pad > 0:
-                    os.write(out_fd, b"\x00" * pad)
+                    write_all(out_fd, b"\x00" * pad)
                     cur_off += pad
                 slice_new_offset[(loc, off, length)] = cur_off
                 append_file_range(out_fd, pkg_dir / loc, off, length)
                 cur_off += length
             tail_pad = (page_align - (cur_off % page_align)) % page_align
             if tail_pad > 0:
-                os.write(out_fd, b"\x00" * tail_pad)
+                write_all(out_fd, b"\x00" * tail_pad)
                 cur_off += tail_pad
         tmp_data_path.replace(pkg_dir / target_data_name)
     finally:

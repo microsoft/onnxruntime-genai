@@ -942,7 +942,19 @@ def test_precision_options_profiles_and_overrides():
     assert c_custom.indexer_dtype == "fp32"
 
 
-def test_consolidate_package_external_data_merges_and_page_aligns(tmp_path):
+@pytest.fixture(params=["sendfile", "buffered"])
+def file_range_copy(request, monkeypatch):
+    """Runs a consolidation test with os.sendfile and with the buffered copy that Windows and macOS use."""
+    if request.param == "sendfile" and not (sys.platform.startswith("linux") and hasattr(os, "sendfile")):
+        pytest.skip("os.sendfile copies into regular files only on Linux")
+    package_io = sys.modules[import_precision_options().append_file_range.__module__]
+    monkeypatch.setattr(package_io, "USE_SENDFILE", request.param == "sendfile")
+    # A small chunk makes the buffered copy loop over several reads and writes per range.
+    monkeypatch.setattr(package_io, "COPY_CHUNK_BYTES", 64)
+    return request.param
+
+
+def test_consolidate_package_external_data_merges_and_page_aligns(tmp_path, file_range_copy):
     sys.path.insert(0, str(FLASH_NEXT_TOOLS_DIR))
     try:
         po = importlib.import_module("precision_options")
@@ -1037,7 +1049,7 @@ def test_precision_options_and_package_io_do_not_import_the_builders():
         assert not imported & {"build_package", "build_package_gguf"}, module
 
 
-def test_consolidation_relocates_existing_target_data_file(tmp_path):
+def test_consolidation_relocates_existing_target_data_file(tmp_path, file_range_copy):
     po = import_precision_options()
     pkg = tmp_path / "pkg"
     pkg.mkdir()
@@ -1064,7 +1076,7 @@ def test_consolidation_relocates_existing_target_data_file(tmp_path):
     assert po.consolidate_package_external_data(pkg) == {"consolidated": False}
 
 
-def test_consolidation_failure_removes_partial_output_and_leaves_package_untouched(tmp_path):
+def test_consolidation_failure_removes_partial_output_and_leaves_package_untouched(tmp_path, file_range_copy):
     po = import_precision_options()
     pkg = tmp_path / "pkg"
     pkg.mkdir()
@@ -1074,7 +1086,7 @@ def test_consolidation_failure_removes_partial_output_and_leaves_package_untouch
     onnx.save(helper.make_model(helper.make_graph([], "g", [], [], initializer=inits)), str(pkg / "model.onnx"))
     before = snapshot(pkg)
 
-    with pytest.raises(RuntimeError, match="sendfile returned 0"):
+    with pytest.raises(RuntimeError, match=r"bank_b\.data ends at byte 50, 150 bytes short"):
         po.consolidate_package_external_data(pkg)
     assert snapshot(pkg) == before
 

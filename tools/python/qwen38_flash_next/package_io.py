@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import struct
+import sys
 from collections.abc import Callable
 from pathlib import Path
 
@@ -212,16 +213,43 @@ def read_gguf_tensor_infos(path: Path) -> tuple[list[dict], int]:
     return tensors, data_offset
 
 
+# Linux copies file ranges in the kernel. Windows has no os.sendfile, and the macOS one only writes to sockets.
+USE_SENDFILE = sys.platform.startswith("linux") and hasattr(os, "sendfile")
+COPY_CHUNK_BYTES = 64 << 20
+
+
+def write_all(out_fd: int, data: bytes) -> None:
+    """Writes all of `data` to the file descriptor `out_fd`; os.write may write only part of it."""
+    view = memoryview(data)
+    while view:
+        written = os.write(out_fd, view)
+        if written <= 0:
+            raise RuntimeError(f"os.write returned {written} with {len(view)} bytes left to write")
+        view = view[written:]
+
+
 def append_file_range(out_fd: int, src_path: Path, offset: int, length: int) -> None:
-    """Appends `length` bytes of `src_path` starting at `offset` to the file descriptor `out_fd`, without a user-space copy."""
+    """Appends `length` bytes of `src_path` starting at `offset` to the file descriptor `out_fd`.
+
+    Uses os.sendfile where it writes to regular files (no user-space copy) and a bounded buffer elsewhere.
+    """
     with open(src_path, "rb") as src:
         pos, remaining = offset, length
+        if not USE_SENDFILE:
+            src.seek(offset)
         while remaining > 0:
-            sent = os.sendfile(out_fd, src.fileno(), pos, min(remaining, 1 << 30))
-            if sent <= 0:
-                raise RuntimeError(f"sendfile returned {sent} for {src_path} at {pos}")
-            pos += sent
-            remaining -= sent
+            if USE_SENDFILE:
+                copied = os.sendfile(out_fd, src.fileno(), pos, min(remaining, 1 << 30))
+            else:
+                chunk = src.read(min(remaining, COPY_CHUNK_BYTES))
+                write_all(out_fd, chunk)
+                copied = len(chunk)
+            if copied <= 0:
+                raise RuntimeError(
+                    f"{src_path} ends at byte {pos}, {remaining} bytes short of the range [{offset}, {offset + length})"
+                )
+            pos += copied
+            remaining -= copied
 
 
 def replace_file(path: Path, write: Callable[[Path], None]) -> None:
