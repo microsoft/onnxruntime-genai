@@ -56,8 +56,29 @@ larger buffers. Later decode captures again. This requires ORT API 27 or newer
 for captured-graph release and a runtime with the model-editor API for the
 migration graph. Other generators' captures remain independently owned.
 
-Graphs that retain unshared dynamic KV allocate new outputs each step and do not
-support graph capture. Growable shared KV currently
+For WebGPU with `past_present_share_buffer: true`, `num_beams: 1` and dynamic
+KV, the public model factory automatically falls back to eager execution if
+ORT explicitly refuses graph capture during initialization (for example,
+control flow or incompatible node assignments). It destroys the failed model
+before retrying once with fresh capture-disabled provider factories, so kernel
+configuration and input allocation agree with eager mode. Dynamic KV is checked
+from session metadata: all matching past/present key and value tensors must be
+rank 4 with a symbolic sequence axis (axis 2). `max_length` does not determine
+fallback eligibility.
+
+The returned model owns one set of eager sessions, reused by all its generators;
+there is no retained capture model or second model variant. Failed-session
+resources are released, though shared allocator/driver caches may retain memory.
+Eager execution still uses WebGPU for supported nodes. The sharing setting and
+growable KV policy are preserved. Compatible models keep graph capture enabled.
+
+Unshared KV, fixed KV, beams greater than 1 and other execution providers retain
+their existing capture error behavior. Unrelated load errors, an unsuccessful
+eager retry, generator configuration errors and errors after execution begins
+still propagate. Retrying a failed run could apply KV or recurrent-state updates
+twice; this fallback is limited to model initialization.
+
+Growable shared KV currently
 excludes beam search, decoder pipelines, configured sliding windows and
 quantized KV. Fixed-declared cache shapes retain their declared capacity.
 

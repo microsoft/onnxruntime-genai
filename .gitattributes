@@ -5,3 +5,4 @@
 
 # Preserve the serialized ONNX test fixture without text conversion or diffs.
 /test/models/webgpu-shared-gqa/*.onnx binary
+/test/models/webgpu-capture-fallback/*.onnx binary
