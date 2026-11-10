@@ -44,9 +44,18 @@ import onnx
 import torch
 from onnx import TensorProto, helper, numpy_helper
 from package_config import migrate_qwen38_graph_config
+from package_io import (
+    ALIGN,
+    CONTEXT_TIERS,
+    HFCheckpointReader,
+    align_up,
+    build_context_tier_model,
+    ensure_unified_dynamic_cache_model,
+    make_ext_init,
+)
 from package_paths import reject_output_overlap
+from precision_options import add_precision_cli_args, apply_precision_config_to_package, resolve_precision_config
 
-ALIGN = 4096
 PLE_INT8_SCALE = 0.000703105776
 STRP_MAGIC = 0x50525453
 EXPERT_PROFILE_NAME = "expert-profile.bin"
@@ -438,18 +447,6 @@ PRESET_ALIASES: dict[str, str] = {
     "qwen_flash_next_rc6_2b375_fp32_fp16kv_v2": "qwen_flash_next_rc6_2b375_fp32",
 }
 
-CONTEXT_TIERS: dict[str, tuple[int, int]] = {
-    "2k": (2312, 2312 // 4 + 1),
-    "8k": (8456, 8456 // 4 + 1),
-    "16k": (16648, 16648 // 4 + 1),
-    "32k": (33032, 33032 // 4 + 1),
-    "64k": (65800, 65800 // 4 + 1),
-    "128k": (131080, 131080 // 4 + 1),
-    "256k": (262152, 262152 // 4 + 1),
-}
-SRC_KV_CAPS = {33028, 33032, 131080, 133128, 262152}
-SRC_STATE_CAPS = {8257, 8259, 32771, 33283, 65539}
-
 # Exact block counts at block_size=256 with 13 reserved DFlash2 blocks (dflash2_max_snapshots=1):
 #   32K  (33,024 tokens) = 129 + 13 = 142 blocks (kv_capacity = 33,032)
 #   128K (131,072 tokens) = 512 + 13 = 525 blocks (kv_capacity = 131,080)
@@ -464,10 +461,6 @@ INT3_DEQUANT_SESSION_OPTIONS = {
     "ep.cuda.qmoe_row_tile_size": "8192",
 }
 RC5_PREFILL_CONFIG = {"chunk": 8192, "warmup_lengths": [8192, 2048, 512, 128, 37]}
-
-
-def align_up(val: int, align: int = ALIGN) -> int:
-    return (val + align - 1) // align * align
 
 
 def resolve_preset_spec(name: str) -> dict:
@@ -1096,68 +1089,6 @@ def quantize_and_pack_raw_qmoe(
     return packed.cpu(), scales_bf16.contiguous().cpu()
 
 
-class HFCheckpointReader:
-    def __init__(self, hf_dir: Path) -> None:
-        self.hf_dir = hf_dir
-        idx_path = hf_dir / "model.safetensors.index.json"
-        if idx_path.exists():
-            self.weight_map: dict[str, str] = json.loads(idx_path.read_text())["weight_map"]
-        else:
-            self.weight_map = {}
-        self._header_cache: dict[str, tuple[int, dict]] = {}
-
-    def _get_header(self, filename: str) -> tuple[int, dict]:
-        if filename not in self._header_cache:
-            path = self.hf_dir / filename
-            with open(path, "rb") as f:
-                hdr_len = struct.unpack("<Q", f.read(8))[0]
-                hdr = json.loads(f.read(hdr_len).decode("utf-8"))
-            self._header_cache[filename] = (8 + hdr_len, hdr)
-        return self._header_cache[filename]
-
-    def read_raw_tensor(self, name: str) -> tuple[str, list[int], bytes]:
-        shard = self.weight_map[name]
-        base_off, hdr = self._get_header(shard)
-        info = hdr[name]
-        start, end = info["data_offsets"]
-        with open(self.hf_dir / shard, "rb") as f:
-            f.seek(base_off + start)
-            raw = f.read(end - start)
-        return info["dtype"], info["shape"], raw
-
-    def read_bf16_tensor(self, name: str, device: str | torch.device = "cpu") -> torch.Tensor:
-        if name in self.weight_map:
-            dtype, shape, raw = self.read_raw_tensor(name)
-            if dtype != "BF16":
-                raise ValueError(f"Expected BF16 for {name}, got {dtype}")
-            arr = np.frombuffer(raw, dtype=np.uint16).copy()
-            return torch.from_numpy(arr).view(torch.bfloat16).reshape(shape).to(device)
-        if name + "_scale_inv" in self.weight_map:
-            dtype_w, shape_w, raw_w = self.read_raw_tensor(name)
-            dtype_s, shape_s, raw_s = self.read_raw_tensor(name + "_scale_inv")
-            if dtype_w != "F8_E4M3":
-                raise ValueError(f"Expected F8_E4M3 for {name}, got {dtype_w}")
-            w_u8 = torch.from_numpy(np.frombuffer(raw_w, dtype=np.uint8).copy()).reshape(shape_w).to(device)
-            w_f32 = w_u8.view(torch.float8_e4m3fn).float()
-            s_dtype = np.float32 if dtype_s == "F32" else np.uint16
-            s_arr = np.frombuffer(raw_s, dtype=s_dtype).copy()
-            if dtype_s == "BF16":
-                s_f32 = torch.from_numpy(s_arr).view(torch.bfloat16).reshape(shape_s).to(device).float()
-            else:
-                s_f32 = torch.from_numpy(s_arr).reshape(shape_s).to(device).float()
-            if w_f32.dim() == 2:
-                rows, cols = w_f32.shape
-                sn, sk = s_f32.shape
-                s_exp = s_f32.repeat_interleave(rows // sn, dim=0).repeat_interleave(cols // sk, dim=1)
-                return (w_f32 * s_exp).to(torch.bfloat16)
-            if w_f32.dim() == 3:
-                _num_experts, rows, cols = w_f32.shape
-                _, sn, sk = s_f32.shape
-                s_exp = s_f32.repeat_interleave(rows // sn, dim=1).repeat_interleave(cols // sk, dim=2)
-                return (w_f32 * s_exp).to(torch.bfloat16)
-        raise KeyError(f"Tensor {name} not found in {self.hf_dir}")
-
-
 def build_ple_int8(src_v12d_dir: Path, hf_dir: Path, out_dir: Path) -> dict:
     """Quantize FP8 PLE safetensors shards into 10 INT8 files (`ple/ple_int8_00..09.data`) and write `ple_table.txt`."""
     t0 = time.time()
@@ -1276,25 +1207,6 @@ class ContribWeightWriter:
             "dtype": dtype,
             "dims": list(dims),
         }
-
-
-def set_ext_data(tensor: TensorProto, location: str, offset: int, length: int, dtype: int, dims: list[int]) -> None:
-    tensor.data_type = dtype
-    del tensor.dims[:]
-    tensor.dims.extend(dims)
-    tensor.ClearField("raw_data")
-    del tensor.external_data[:]
-    tensor.data_location = TensorProto.EXTERNAL
-    for k, v in (("location", location), ("offset", str(offset)), ("length", str(length))):
-        e = tensor.external_data.add()
-        e.key, e.value = k, v
-
-
-def make_ext_init(name: str, location: str, offset: int, length: int, dtype: int, dims: list[int]) -> TensorProto:
-    t = TensorProto()
-    t.name = name
-    set_ext_data(t, location, offset, length, dtype, dims)
-    return t
 
 
 # ---------------------------------------------------------------------------
@@ -1597,13 +1509,14 @@ def load_expert_profile_plan(
             f"Profile {profile_path} is for ({hdr_layers} layers, {hdr_experts} experts), "
             f"expected ({num_layers}, {num_experts})"
         )
-    expected_bytes = 24 + n_ranked * 8
+    # Each ranked entry is a (layer, expert) pair of uint16 values, as read by the QMoE offload planner.
+    expected_bytes = 24 + n_ranked * 4
     if len(data) < expected_bytes:
         raise ValueError(
             f"Profile {profile_path} is truncated: {len(data)} bytes, header declares {n_ranked} entries ({expected_bytes} bytes)"
         )
 
-    entries = np.frombuffer(data, dtype=np.uint16, count=n_ranked * 4, offset=24).reshape(n_ranked, 4)
+    entries = np.frombuffer(data, dtype=np.uint16, count=n_ranked * 2, offset=24).reshape(n_ranked, 2)
     by_layer: dict[int, list[int]] = {i: [] for i in range(num_layers)}
     seen_in_layer: dict[int, set[int]] = {i: set() for i in range(num_layers)}
     ordered_unique: list[tuple[int, int]] = []
@@ -2480,74 +2393,6 @@ def rewrite_qmoe_layers(
     return layer_recipe, needed_banks
 
 
-def ensure_unified_dynamic_cache_model(
-    model: onnx.ModelProto,
-    max_total_sequence_length: int = 262152,
-    indexer_state_capacity_attr: int = 8259,
-) -> onnx.ModelProto:
-    """Convert `model` in place into a unified dynamic-capacity graph with symbolic `kv_capacity` / `state_capacity`."""
-    for idx, t in enumerate(model.graph.initializer):
-        if t.name == "contrib_const_dsa_total_seq":
-            model.graph.initializer[idx].CopyFrom(
-                numpy_helper.from_array(
-                    np.array([max_total_sequence_length], dtype=np.int32), name="contrib_const_dsa_total_seq"
-                )
-            )
-    for vi in list(model.graph.input) + list(model.graph.output) + list(model.graph.value_info):
-        if vi.type.HasField("tensor_type") and vi.type.tensor_type.HasField("shape"):
-            dims = vi.type.tensor_type.shape.dim
-            if vi.name in ("past_position_ids", "present_position_ids") and len(dims) == 2:
-                dims[1].ClearField("dim_value")
-                dims[1].dim_param = "kv_capacity"
-            elif vi.name.endswith((".key", ".value")) and len(dims) == 4:
-                dims[2].ClearField("dim_value")
-                dims[2].dim_param = "kv_capacity"
-            elif vi.name.endswith(".index_key") and len(dims) == 3:
-                dims[1].ClearField("dim_value")
-                dims[1].dim_param = "state_capacity"
-    for n in model.graph.node:
-        if n.op_type == "PackedSparseAttentionIndexer":
-            for a in n.attribute:
-                if a.type == onnx.AttributeProto.INT and a.name == "state_capacity":
-                    a.i = indexer_state_capacity_attr
-    return model
-
-
-def build_context_tier_model(src_model: onnx.ModelProto, kv_capacity: int, state_capacity: int) -> onnx.ModelProto:
-    """Create a fixed-capacity context-tier copy (`model_2k.onnx`, `model_8k.onnx`, `model_64k.onnx`, `model_128k.onnx`)."""
-    m_tier = onnx.ModelProto()
-    m_tier.CopyFrom(src_model)
-    for idx, t in enumerate(m_tier.graph.initializer):
-        if t.name == "contrib_const_dsa_total_seq":
-            m_tier.graph.initializer[idx].CopyFrom(
-                numpy_helper.from_array(np.array([kv_capacity], dtype=np.int32), name="contrib_const_dsa_total_seq")
-            )
-    for vi in list(m_tier.graph.input) + list(m_tier.graph.output) + list(m_tier.graph.value_info):
-        if vi.type.HasField("tensor_type") and vi.type.tensor_type.HasField("shape"):
-            dims = vi.type.tensor_type.shape.dim
-            if vi.name in ("past_position_ids", "present_position_ids") and len(dims) == 2:
-                dims[1].ClearField("dim_param")
-                dims[1].dim_value = kv_capacity
-            elif vi.name.endswith((".key", ".value")) and len(dims) == 4:
-                dims[2].ClearField("dim_param")
-                dims[2].dim_value = kv_capacity
-            elif vi.name.endswith(".index_key") and len(dims) == 3:
-                dims[1].ClearField("dim_param")
-                dims[1].dim_value = state_capacity
-            else:
-                for d in dims:
-                    if d.HasField("dim_value"):
-                        if d.dim_value in SRC_KV_CAPS:
-                            d.dim_value = kv_capacity
-                        elif d.dim_value in SRC_STATE_CAPS:
-                            d.dim_value = state_capacity
-    for n in m_tier.graph.node:
-        for a in n.attribute:
-            if a.type == onnx.AttributeProto.INT and a.name == "state_capacity" and a.i in SRC_STATE_CAPS:
-                a.i = state_capacity
-    return m_tier
-
-
 def compute_package_referenced_size(pkg_dir: Path) -> dict:
     spans: set[tuple[str, int, int]] = set()
     by_file: dict[str, int] = {}
@@ -3172,6 +3017,7 @@ def build_rc5_package(
             "model_128k.onnx",
             "model_256k.onnx",
             "model_dynamic_ctx.onnx",
+            "model_int8kv.onnx",
             "package_manifest.json",
             "genai_config.json",
         }
@@ -3493,8 +3339,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--uniform-profile-slots", action="store_true", help="Spread --total-resident-slots uniformly across layers"
     )
     ap.add_argument("--copy", action="store_true", help="Copy weight files instead of hard-linking")
-    from precision_options import add_precision_cli_args
-
     add_precision_cli_args(ap)
     return ap
 
@@ -3591,19 +3435,24 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("--out or --models-root is required")
         build_jobs.append((out_dir, spec))
 
-    from precision_options import apply_precision_config_to_package, resolve_precision_config
+    try:
+        base_pcfg = resolve_precision_config(args)
+        job_pcfgs = []
+        for _out_dir, spec in build_jobs:
+            pcfg = base_pcfg
+            if not base_pcfg.is_non_default() and "precision_profile" in spec:
+                spec_args = argparse.Namespace(**vars(args))
+                spec_args.precision_profile = spec["precision_profile"]
+                if spec.get("consolidate_data_files"):
+                    spec_args.consolidate_data_files = True
+                pcfg = resolve_precision_config(spec_args)
+            job_pcfgs.append(pcfg)
+    except ValueError as e:
+        parser.error(str(e))
 
-    base_pcfg = resolve_precision_config(args)
     first_built_out: Path | None = None
-    for out_dir, spec in build_jobs:
+    for (out_dir, spec), pcfg in zip(build_jobs, job_pcfgs, strict=True):
         eff_reuse = args.reuse_banks_from or first_built_out
-        pcfg = base_pcfg
-        if not base_pcfg.is_non_default() and "precision_profile" in spec:
-            spec_args = argparse.Namespace(**vars(args))
-            spec_args.precision_profile = spec["precision_profile"]
-            if spec.get("consolidate_data_files"):
-                spec_args.consolidate_data_files = True
-            pcfg = resolve_precision_config(spec_args)
         eff_kl_mode = spec.get("kl_mode", args.kl_mode)
         if eff_kl_mode == "auto" and pcfg.gdn_precision == "fp32":
             eff_kl_mode = "auto_fp32"

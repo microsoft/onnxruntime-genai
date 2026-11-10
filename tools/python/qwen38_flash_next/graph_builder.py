@@ -2970,7 +2970,7 @@ def build_expert_profile_from_hf(
     num_layers: int = 48,
     num_experts: int = 512,
 ) -> None:
-    """Synthesize STRP v1 `expert-profile.bin` ranking `(layer, expert)` pairs from router gate norms."""
+    """Synthesize STRP v1 `expert-profile.bin` ranking `(layer, expert)` uint16 pairs from router gate norms."""
     scores: list[tuple[float, int, int]] = []
     for lid in range(num_layers):
         g = hf_loader.read_tensor(f"model.language_model.layers.{lid}.mlp.gate.weight").float()
@@ -2981,7 +2981,7 @@ def build_expert_profile_from_hf(
     scores.sort(key=lambda x: (-x[0], x[1], x[2]))
     n_ranked = len(scores)
     header = struct.pack("<6I", STRP_MAGIC, 1, num_layers, num_experts, n_ranked, n_ranked)
-    entries = np.zeros((n_ranked, 4), dtype=np.uint16)
+    entries = np.zeros((n_ranked, 2), dtype=np.uint16)
     for idx, (_sc, lid, eid) in enumerate(scores):
         entries[idx, 0] = lid
         entries[idx, 1] = eid
