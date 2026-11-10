@@ -27,7 +27,6 @@ import json
 import os
 import re
 import shutil
-from contextlib import ExitStack
 from pathlib import Path
 
 import numpy as np
@@ -37,6 +36,7 @@ from package_io import (
     CONTEXT_TIERS,
     AlignedBlobWriter,
     HFCheckpointReader,
+    append_file_range,
     build_context_tier_model,
     ensure_unified_dynamic_cache_model,
     make_ext_init,
@@ -350,28 +350,15 @@ def consolidate_package_external_data(
     slice_new_offset: dict[tuple[str, int, int], int] = {}
     cur_off = 0
     try:
-        with ExitStack() as stack:
-            out_f = stack.enter_context(open(tmp_data_path, "wb"))
+        with open(tmp_data_path, "wb") as out_f:
             out_fd = out_f.fileno()
-            in_files = {}
             for loc, off, length in slices_ordered:
                 pad = (page_align - (cur_off % page_align)) % page_align
                 if pad > 0:
                     os.write(out_fd, b"\x00" * pad)
                     cur_off += pad
                 slice_new_offset[(loc, off, length)] = cur_off
-                if loc not in in_files:
-                    in_files[loc] = stack.enter_context(open(pkg_dir / loc, "rb"))
-                in_fd = in_files[loc].fileno()
-                rem = length
-                in_pos = off
-                while rem > 0:
-                    chunk = min(rem, 1 << 30)
-                    sent = os.sendfile(out_fd, in_fd, in_pos, chunk)
-                    if sent <= 0:
-                        raise RuntimeError(f"sendfile returned {sent} for {loc} at {in_pos}")
-                    in_pos += sent
-                    rem -= sent
+                append_file_range(out_fd, pkg_dir / loc, off, length)
                 cur_off += length
             tail_pad = (page_align - (cur_off % page_align)) % page_align
             if tail_pad > 0:

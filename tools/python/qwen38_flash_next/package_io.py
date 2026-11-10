@@ -212,6 +212,18 @@ def read_gguf_tensor_infos(path: Path) -> tuple[list[dict], int]:
     return tensors, data_offset
 
 
+def append_file_range(out_fd: int, src_path: Path, offset: int, length: int) -> None:
+    """Appends `length` bytes of `src_path` starting at `offset` to the file descriptor `out_fd`, without a user-space copy."""
+    with open(src_path, "rb") as src:
+        pos, remaining = offset, length
+        while remaining > 0:
+            sent = os.sendfile(out_fd, src.fileno(), pos, min(remaining, 1 << 30))
+            if sent <= 0:
+                raise RuntimeError(f"sendfile returned {sent} for {src_path} at {pos}")
+            pos += sent
+            remaining -= sent
+
+
 def replace_file(path: Path, write: Callable[[Path], None]) -> None:
     """Write `path` through a temporary file that then replaces it.
 
