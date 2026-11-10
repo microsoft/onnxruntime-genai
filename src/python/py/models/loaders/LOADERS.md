@@ -27,6 +27,8 @@ CUDA packing settings are loader inputs, not properties inferred from the export
 
 New source formats should be implemented here and should expose the same model structure consumed by the builders, keeping source-specific logic out of the ONNX graph construction code.
 
+`OnnxSourceModel` also uses the component loader for its flat source graphs. Its explicit `allow_ort_extensions` validation mode temporarily registers missing standard-domain operators from the installed ORT operator schemas, including their input/output, attribute, and type constraints. Registration is removed even if validation fails. Default component validation remains unchanged, and unknown operators without a real runtime schema still fail.
+
 ## ONNX API boundary
 
 The loader ONNX import inventory is:

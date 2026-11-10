@@ -815,7 +815,7 @@ Static per-tensor and per-channel scales are supplied through a required calibra
 
 A calibrated scale is `threshold / qmax`, so it depends on the bit width it was calibrated for. The file may record that divisor as a top-level `"qmax"` (128 for int8, 8 for int4, 448 for fp8 e4m3); the builder then rescales the entries to the requested scheme, so a single calibration file can serve several bit widths. Without `"qmax"` the scales are used as-is and must already match the requested scheme — reusing an int8 file for `int4_*` without it silently under-scales by 16x and clips the cache.
 
-The scale file is produced by the `kv_cache_calibration` module, which runs a baseline (non-quantized) build of the same model over a calibration corpus and captures the `present.*.key`/`present.*.value` tensors:
+The scale file is produced by the `kv_cache_calibration` module, which runs a floating-KV baseline of the same model over a calibration corpus. FP16 and BF16 caches are supported. Dense graphs expose `present.*.key`/`present.*.value`; paged graphs can also expose `present_keys_*`/`present_values_*`. Paged calibration uses one contiguous block table for each sample, preserves required input/output GPU-buffer aliases, and excludes unused slots from scale estimation. A local `tokenizer.json` is loaded directly without executing a model's custom configuration code.
 
 ```bash
 # 1. Build the baseline (no kv_cache_quant_scheme) used for calibration:
@@ -858,6 +858,45 @@ python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o pa
 # From source (paged attention + fp8 per-tensor KV cache):
 python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e cuda -c cache_dir_to_store_temp_files --extra_options use_paged_attention=true kv_cache_quant_scheme=fp8_per_tensor kv_cache_scale_file=path_to_scales.json
 ```
+
+##### Import a Prequantized ONNX Target
+
+The Python `OnnxSourceModel` builder accepts validated flat ONNX sources when the original checkpoint is unavailable or its architecture has no checkpoint loader. It preserves existing nodes, tensor encodings, packed-weight layouts, metadata, and activation precision, and emits a new graph through `Model`'s graph, initializer, scale, and serialization APIs. It does not requantize the weights or modify the source graph. Local functions and nested graphs are rejected. The supported cache policies for this importer are `none` and static `int8_per_channel`; other checkpoint builders retain their existing wider scheme support.
+
+Calibrate the original target first:
+
+```bash
+# From source, at the repository root:
+python src/python/py/models/quantization/kv_cache_calibration.py \
+  --model original_target/model.onnx --tokenizer original_target \
+  --out target_scales.json --quant-type int8_per_channel \
+  --method minmax --target-seq 8192 --num-seqs 24 --corpus-file calibration.json
+```
+
+Then use the source builder with the original decoder bindings. For a target-plus-drafter package, import the drafter without a cache policy so its floating caches remain unchanged:
+
+```python
+# Add src/python/py and src/python/py/models to PYTHONPATH when running from source.
+import json
+from pathlib import Path
+from models.builders.onnx_source import OnnxSourceModel
+
+source = Path("original_package")
+config = json.loads((source / "genai_config.json").read_text())
+decoder = config["model"]["decoder"]
+target = OnnxSourceModel.from_pretrained(
+    source / decoder["filename"],
+    decoder,
+    {"kv_cache_quant_scheme": "int8_per_channel", "kv_cache_scale_file": "target_scales.json"},
+)
+target.save_model("int8_target_package")
+draft = OnnxSourceModel.from_pretrained(source / config["model"]["dflash2"]["filename"])
+draft.save_model("int8_target_package")
+```
+
+Retain the original package's runtime configuration and tokenizer assets. Each emitted graph owns its own complete external-data file; tiny imported shape initializers stay inline so ORT can infer shapes. Optional ORT-extension validation uses the installed runtime's schemas and restores the ONNX schema registry afterward. It does not replace missing schemas with unchecked placeholders.
+
+Use a representative calibration corpus and evaluate held-out quality, clipping, draft acceptance, and actual attention dispatch. Reusing the small built-in corpus is only initial calibration, not quality qualification. INT8 KV is lossy and does not guarantee original floating-KV token sequences. For performance comparisons, use identical allocation settings for both variants and verify the Engine's effective request-length limit: configured block capacity is shared with the drafter, and its partition changes when target and draft cache element sizes differ. Automatic free-memory reservations also need prefill-temporary headroom. Smaller caches do not guarantee lower TTFT or context-independent decode throughput.
 
 #### FP32 I/O for WebGPU EP
 

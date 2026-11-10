@@ -2163,8 +2163,8 @@ class Model:
         self.node_names = set()
 
     @classmethod
-    def save_onnx_model(cls, model, path, callback=None):
-        """Save weights and supported tensor attributes to one private data file."""
+    def save_onnx_model(cls, model, path, callback=None, *, inline_small_initializers=False):
+        """Save private weight data, optionally keeping tiny imported shape initializers inline."""
         path = os.fspath(path)
         data_name = os.path.basename(path) + ".data"
         staged_data_name = data_name + ".saving"
@@ -2174,7 +2174,12 @@ class Model:
         for function in model.functions.values():
             graphs.extend([function.graph, *function.graph.subgraphs()])
         initializers = [
-            value for graph in graphs for value in graph.initializers.values() if value.const_value is not None
+            value for graph in graphs for value in graph.initializers.values()
+            if value.const_value is not None and (not inline_small_initializers or value.const_value.nbytes > 256)
+        ]
+        inline_initializers = [
+            (value, value.const_value) for graph in graphs for value in graph.initializers.values()
+            if inline_small_initializers and isinstance(value.const_value, ir.ExternalTensor) and value.const_value.nbytes <= 256
         ]
         attributes = [
             (node, attribute)
@@ -2208,6 +2213,11 @@ class Model:
         backups = []
         installed = []
         try:
+            for value, tensor in inline_initializers:
+                value.const_value = ir.Tensor(
+                    tensor.numpy(), dtype=tensor.dtype, name=tensor.name,
+                    doc_string=tensor.doc_string, metadata_props=tensor.metadata_props,
+                )
             for node, attribute in constant_attributes:
                 tensor = attribute.as_tensor()
                 node.attributes[attribute.name] = ir.AttrTensor(
@@ -2258,6 +2268,8 @@ class Model:
             for destination in backups:
                 os.remove(destination + ".bak")
         finally:
+            for value, tensor in inline_initializers:
+                value.const_value = tensor
             for value, tensor in zip(initializers, original_tensors, strict=True):
                 value.const_value = tensor
             for node, attribute in [*attributes, *constant_attributes]:

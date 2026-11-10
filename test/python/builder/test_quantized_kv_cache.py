@@ -60,6 +60,136 @@ base_module = _load_base_module()
 builder_module = _load_builder_entrypoint_module()
 Model = base_module.Model
 Qwen35TextModel = importlib.import_module("models.builders.qwen").Qwen35TextModel
+OnnxSourceModel = importlib.import_module("models.builders.onnx_source").OnnxSourceModel
+
+
+@pytest.fixture
+def paged_onnx_source(tmp_path):
+    source = Model(graph_name="source")
+    source.graph.opset_imports["com.microsoft"] = 1
+    source.model.metadata_props["source_record"] = "preserved"
+    inputs = {
+        "qkv": (ir.DataType.BFLOAT16, [3, 1024]),
+        "past_keys_0": (ir.DataType.BFLOAT16, [1, 256, 1, 128]),
+        "past_values_0": (ir.DataType.BFLOAT16, [1, 256, 1, 128]),
+        "cumulative_sequence_lengths": (ir.DataType.INT32, [2]),
+        "past_sequence_lengths": (ir.DataType.INT32, [1]),
+        "block_table": (ir.DataType.INT32, [1, 1]),
+        "attention_metadata": (ir.DataType.INT32, [3]),
+    }
+    for name, (dtype, shape) in inputs.items():
+        source.graph.inputs.append(source.make_value(name, dtype, shape))
+    source.make_initializer(np.arange(512, dtype=np.int32).astype(np.uint8), "packed_weight")
+    source.make_node(
+        "PagedAttention",
+        inputs=["qkv", "", "", "past_keys_0", "past_values_0", "cumulative_sequence_lengths", "past_sequence_lengths", "block_table", *([""] * 8), "attention_metadata"],
+        outputs=["attention", "present_keys_0", "present_values_0"],
+        name="attention",
+        domain="com.microsoft",
+        num_heads=6,
+        kv_num_heads=1,
+    )
+    for name, shape in (("attention", [3, 768]), ("present_keys_0", [1, 256, 1, 128]), ("present_values_0", [1, 256, 1, 128])):
+        source.graph.outputs.append(source.make_value(name, ir.DataType.BFLOAT16, shape))
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    source_path = source_dir / "model.onnx"
+    source.save_onnx_model(source.model, source_path)
+    decoder = {
+        "num_hidden_layers": 1,
+        "num_key_value_heads": 1,
+        "head_size": 128,
+        "inputs": {"past_key_names": "past_keys_%d", "past_value_names": "past_values_%d"},
+        "outputs": {"present_key_names": "present_keys_%d", "present_value_names": "present_values_%d"},
+    }
+    return source_path, decoder
+
+
+@pytest.mark.parametrize("quantized", [False, True])
+def test_onnx_source_preserves_weights_and_applies_cache_policy(tmp_path, paged_onnx_source, quantized):
+    source_path, decoder = paged_onnx_source
+    options = {}
+    if quantized:
+        scale_path = tmp_path / "scales.json"
+        scale_path.write_text(json.dumps({
+            "scales": {"k_scales": [[0.125] * 128], "v_scales": [[0.25] * 128]},
+            "qmax": 128, "layer_ids": [0],
+        }))
+        options = {"kv_cache_quant_scheme": "int8_per_channel", "kv_cache_scale_file": str(scale_path)}
+    source_bytes = source_path.read_bytes()
+    source_data = source_path.with_suffix(".onnx.data").read_bytes()
+    model = OnnxSourceModel.from_pretrained(source_path, decoder, options)
+    exported_path = model.save_model(tmp_path / "exported")
+    exported = ir.load(exported_path)
+    assert exported.metadata_props["source_record"] == "preserved"
+    assert source_path.read_bytes() == source_bytes
+    assert source_path.with_suffix(".onnx.data").read_bytes() == source_data
+    np.testing.assert_array_equal(exported.graph.initializers["packed_weight"].const_value.numpy(), np.arange(512, dtype=np.int32).astype(np.uint8))
+    cache_dtype = ir.DataType.INT8 if quantized else ir.DataType.BFLOAT16
+    assert {value.dtype for value in exported.graph.inputs if value.name.startswith(("past_keys_", "past_values_"))} == {cache_dtype}
+    assert {value.dtype for value in exported.graph.outputs if value.name.startswith("present_")} == {cache_dtype}
+    assert exported.graph.inputs[0].dtype == ir.DataType.BFLOAT16
+    attention = next(node for node in exported.graph if node.op_type == "PagedAttention")
+    assert attention.attributes["num_heads"].as_int() == 6
+    assert attention.attributes["kv_num_heads"].as_int() == 1
+    assert len(exported.graph) == 1
+    if quantized:
+        assert attention.attributes["k_quant_type"].as_string() == "PER_CHANNEL"
+        for index, expected in ((14, 0.125), (15, 0.25)):
+            scale = attention.inputs[index].const_value.numpy()
+            assert scale.shape == (1, 1, 128)
+            np.testing.assert_array_equal(scale, np.full((1, 1, 128), expected, dtype=np.float32))
+    else:
+        assert "k_quant_type" not in attention.attributes
+    assert all(value.const_value.location == "model.onnx.data" for value in exported.graph.initializers.values())
+
+
+@pytest.mark.parametrize("scheme", ["int4_per_channel", "int8_per_token"])
+def test_onnx_source_rejects_unimplemented_cache_formats(paged_onnx_source, scheme):
+    source_path, decoder = paged_onnx_source
+    with pytest.raises(ValueError, match="supports only none or int8_per_channel"):
+        OnnxSourceModel.from_pretrained(source_path, decoder, {"kv_cache_quant_scheme": scheme})
+
+
+@pytest.mark.parametrize("invalid_attribute", [False, True])
+def test_onnx_source_validates_ort_normalization_without_registry_leaks(tmp_path, invalid_attribute):
+    onnx = importlib.import_module("onnx")
+    previously_registered = onnx.defs.has("SimplifiedLayerNormalization")
+    source = Model(graph_name="normalization_source")
+    source.graph.inputs.append(source.make_value("input", ir.DataType.FLOAT, [1, 4]))
+    source.make_initializer(np.ones(4, dtype=np.float32), "scale")
+    source.make_node(
+        "SimplifiedLayerNormalization", inputs=["input", "scale"], outputs=["output"],
+        name="normalization", epsilon=1e-5, **({"invalid_attribute": 1} if invalid_attribute else {}),
+    )
+    source.graph.outputs.append(source.make_value("output", ir.DataType.FLOAT, [1, 4]))
+    source_path = tmp_path / "normalization.onnx"
+    source.save_onnx_model(source.model, source_path)
+    if invalid_attribute:
+        with pytest.raises(ValueError, match="not a valid ONNX model"):
+            OnnxSourceModel.from_pretrained(source_path)
+    else:
+        model = OnnxSourceModel.from_pretrained(source_path)
+        assert next(iter(model.graph)).op_type == "SimplifiedLayerNormalization"
+    assert onnx.defs.has("SimplifiedLayerNormalization") == previously_registered
+
+
+def test_onnx_source_keeps_shape_initializers_loadable(tmp_path):
+    ort = importlib.import_module("onnxruntime")
+    source = Model(graph_name="shape_source")
+    source.graph.inputs.append(source.make_value("input", ir.DataType.FLOAT, [2]))
+    source.make_initializer(np.asarray([0], dtype=np.int64), "axis_zero")
+    source.make_node("Unsqueeze", inputs=["input", "axis_zero"], outputs=["output"], name="unsqueeze")
+    source.graph.outputs.append(source.make_value("output", ir.DataType.FLOAT, [1, 2]))
+    source_path = tmp_path / "shape.onnx"
+    source.save_onnx_model(source.model, source_path)
+    exported_path = OnnxSourceModel.from_pretrained(source_path).save_model(tmp_path / "exported")
+    exported = ir.load(exported_path)
+    assert not isinstance(exported.graph.initializers["axis_zero"].const_value, ir.ExternalTensor)
+    session_options = ort.SessionOptions()
+    session_options.intra_op_num_threads = 4
+    session = ort.InferenceSession(str(exported_path), sess_options=session_options, providers=["CPUExecutionProvider"])
+    np.testing.assert_array_equal(session.run(None, {"input": np.asarray([1, 2], dtype=np.float32)})[0], [[1, 2]])
 
 
 def _check_extra_options(extra_options, precision, execution_provider):

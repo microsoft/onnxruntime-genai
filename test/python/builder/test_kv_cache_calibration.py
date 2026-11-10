@@ -41,6 +41,81 @@ def _load_calibration_module():
 kvc = _load_calibration_module()
 
 
+@pytest.mark.parametrize("cache_dtype", ["FLOAT16", "BFLOAT16"])
+def test_run_calibration_batch_preserves_floating_cache(tmp_path, cache_dtype):
+    ir = pytest.importorskip("onnx_ir")
+    ort = pytest.importorskip("onnxruntime")
+    dtype = getattr(ir.DataType, cache_dtype)
+    cache_input = ir.Value(name="past_key_values.0.key", type=ir.TensorType(dtype), shape=ir.Shape([1, 1, 1, 4]))
+    cache_output = ir.Value(name="present.0.key", type=ir.TensorType(dtype), shape=ir.Shape([1, 1, 1, 4]))
+    graph = ir.Graph(
+        inputs=[cache_input],
+        outputs=[cache_output],
+        nodes=[ir.Node("", "Identity", inputs=[cache_input], outputs=[cache_output])],
+        opset_imports={"": 20},
+    )
+    model_path = tmp_path / "cache.onnx"
+    ir.save(ir.Model(graph, ir_version=10), model_path)
+    session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
+    expected = np.asarray([1.0, -2.5, 0.0, 3.75], dtype=np.float32).reshape(1, 1, 1, 4)
+    values = (expected.view(np.uint32) >> 16).astype(np.uint16) if cache_dtype == "BFLOAT16" else expected.astype(np.float16)
+    actual = kvc.run_calibration_batch(session, [cache_output.name], {cache_input.name: values})
+    np.testing.assert_array_equal(actual[0], expected)
+
+
+@pytest.mark.parametrize("cache_dtype", ["FLOAT16", "BFLOAT16"])
+def test_run_calibration_batch_aliases_paged_caches(tmp_path, cache_dtype):
+    ir = pytest.importorskip("onnx_ir")
+    ort = pytest.importorskip("onnxruntime")
+    if "CUDAExecutionProvider" not in ort.get_available_providers():
+        pytest.skip("CUDA paged attention is unavailable")
+    dtype = getattr(ir.DataType, cache_dtype)
+
+    def value(name, element_type, shape):
+        return ir.Value(name=name, type=ir.TensorType(element_type), shape=ir.Shape(shape))
+
+    query = value("qkv", dtype, [3, 1024])
+    past_keys = value("past_keys_0", dtype, [1, 256, 1, 128])
+    past_values = value("past_values_0", dtype, [1, 256, 1, 128])
+    cumulative = value("cumulative_sequence_lengths", ir.DataType.INT32, [2])
+    past_lengths = value("past_sequence_lengths", ir.DataType.INT32, [1])
+    block_table = value("block_table", ir.DataType.INT32, [1, 1])
+    metadata = value("attention_metadata", ir.DataType.INT32, [3])
+    attention = value("attention", dtype, [3, 768])
+    present_keys = value("present_keys_0", dtype, [1, 256, 1, 128])
+    present_values = value("present_values_0", dtype, [1, 256, 1, 128])
+    node = ir.node(
+        "PagedAttention",
+        inputs=[query, None, None, past_keys, past_values, cumulative, past_lengths, block_table, *([None] * 8), metadata],
+        outputs=[attention, present_keys, present_values],
+        domain="com.microsoft",
+        attributes={"num_heads": 6, "kv_num_heads": 1},
+        name="attention",
+    )
+    graph = ir.Graph(
+        inputs=[query, past_keys, past_values, cumulative, past_lengths, block_table, metadata],
+        outputs=[present_keys, present_values], nodes=[node], opset_imports={"": 20, "com.microsoft": 1},
+    )
+    model_path = tmp_path / "paged.onnx"
+    ir.save(ir.Model(graph, ir_version=10), model_path)
+    session_options = ort.SessionOptions()
+    session_options.intra_op_num_threads = 4
+    session = ort.InferenceSession(str(model_path), sess_options=session_options, providers=["CUDAExecutionProvider"])
+    packed = np.concatenate([np.ones((3, 768)), np.full((3, 128), 2), np.full((3, 128), 3)], axis=1).astype(np.float32)
+    feeds = {
+        "qkv": (packed.view(np.uint32) >> 16).astype(np.uint16) if cache_dtype == "BFLOAT16" else packed.astype(np.float16),
+        "past_keys_0": np.zeros((1, 256, 1, 128), dtype=np.uint16 if cache_dtype == "BFLOAT16" else np.float16),
+        "past_values_0": np.zeros((1, 256, 1, 128), dtype=np.uint16 if cache_dtype == "BFLOAT16" else np.float16),
+        "cumulative_sequence_lengths": np.asarray([0, 3], dtype=np.int32),
+        "past_sequence_lengths": np.asarray([0], dtype=np.int32),
+        "block_table": np.asarray([[0]], dtype=np.int32),
+        "attention_metadata": np.asarray([3, 3, 1], dtype=np.int32),
+    }
+    outputs = kvc.run_calibration_batch(session, ["present_keys_0", "present_values_0"], feeds)
+    np.testing.assert_array_equal(outputs[0].reshape(256, 128)[:3], np.full((3, 128), 2))
+    np.testing.assert_array_equal(outputs[1].reshape(256, 128)[:3], np.full((3, 128), 3))
+
+
 # ---------------------------------------------------------------------------
 # _get_quant_type_max
 # ---------------------------------------------------------------------------
@@ -402,6 +477,63 @@ def test_detect_kv_shape_reads_concrete_input_dims():
     num_kv_heads, head_size = kvc._detect_kv_shape(sess, "/nonexistent/model.onnx")
 
     assert (num_kv_heads, head_size) == (8, 64)
+
+
+def test_detect_kv_shape_reads_paged_cache_dims():
+    session = _FakeSession([
+        _FakeInput("cumulative_sequence_lengths", [2], "tensor(int32)"),
+        _FakeInput("past_keys_0", ["blocks", 256, 8, 128], "tensor(bfloat16)"),
+    ])
+    assert kvc._detect_kv_shape(session, "/nonexistent/model.onnx") == (8, 128)
+
+
+def test_calibrate_paged_cache_ignores_unused_slots(tmp_path, monkeypatch):
+    inputs = [
+        _FakeInput("input_ids", ["tokens"], "tensor(int64)"),
+        _FakeInput("cumulative_sequence_lengths", [2], "tensor(int32)"),
+        _FakeInput("past_sequence_lengths", [1], "tensor(int32)"),
+        _FakeInput("block_table", [1, "blocks"], "tensor(int32)"),
+        _FakeInput("block_table_windowed", [1, "blocks"], "tensor(int32)"),
+        _FakeInput("attention_metadata", [3], "tensor(int32)"),
+        _FakeInput("past_keys_3", ["blocks", 2, 1, 4], "tensor(float)"),
+        _FakeInput("past_values_3", ["blocks", 2, 1, 4], "tensor(float)"),
+    ]
+    outputs = [types.SimpleNamespace(name=name) for name in ("present_keys_3", "present_values_3")]
+
+    def run(output_names, feeds):
+        assert output_names == ["present_keys_3", "present_values_3"]
+        np.testing.assert_array_equal(feeds["cumulative_sequence_lengths"], [0, 3])
+        np.testing.assert_array_equal(feeds["past_sequence_lengths"], [0])
+        np.testing.assert_array_equal(feeds["attention_metadata"], [3, 3, 1])
+        np.testing.assert_array_equal(feeds["block_table"], [[0, 1]])
+        np.testing.assert_array_equal(feeds["block_table_windowed"], [[0, 1]])
+        assert feeds["input_ids"].shape == (3,)
+        assert feeds["past_keys_3"].shape == (2, 2, 1, 4)
+        keys = np.full((2, 2, 1, 4), 2.0, dtype=np.float32)
+        values = keys * 2
+        keys.reshape(4, 4)[3] = 1000
+        values.reshape(4, 4)[3] = 1000
+        return [keys, values]
+
+    session = _FakeSession(inputs, outputs, run)
+    monkeypatch.setitem(sys.modules, "onnxruntime", types.SimpleNamespace(
+        SessionOptions=types.SimpleNamespace,
+        InferenceSession=lambda *args, **kwargs: session,
+        get_available_providers=lambda: ["CPUExecutionProvider"],
+    ))
+    monkeypatch.setitem(sys.modules, "transformers", types.SimpleNamespace(
+        AutoTokenizer=types.SimpleNamespace(from_pretrained=lambda path: _FakeTokenizer()),
+    ))
+    monkeypatch.setattr(kvc, "run_calibration_batch", lambda session, names, feeds: session.run(names, feeds))
+    output_path = tmp_path / "scales.json"
+    kvc.calibrate_kv_scales(
+        "model.onnx", "tokenizer", str(output_path), method="minmax", target_seq=3, num_seqs=1,
+        k_rotary_envelope=False,
+    )
+    result = json.loads(output_path.read_text())
+    assert result["layer_ids"] == [3]
+    np.testing.assert_allclose(result["scales"]["k_scales"], [[2 / 128] * 4])
+    np.testing.assert_allclose(result["scales"]["v_scales"], [[4 / 128] * 4])
 
 
 def test_detect_kv_shape_falls_back_to_genai_config(tmp_path):
