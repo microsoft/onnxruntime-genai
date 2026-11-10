@@ -17,7 +17,8 @@ from pathlib import Path
 import numpy as np
 import onnx
 import torch
-from onnx import TensorProto, numpy_helper
+from onnx import TensorProto, helper, numpy_helper
+from rope import ContextCapacity
 
 ALIGN = 4096
 
@@ -276,10 +277,16 @@ def save_model_replacing(model: onnx.ModelProto, path: Path) -> None:
 
 def ensure_unified_dynamic_cache_model(
     model: onnx.ModelProto,
-    max_total_sequence_length: int = 262152,
-    indexer_state_capacity_attr: int = 8259,
+    max_total_sequence_length: int | None = None,
+    indexer_state_capacity_attr: int | None = None,
 ) -> onnx.ModelProto:
     """Convert `model` in place into a unified dynamic-capacity graph with symbolic `kv_capacity` / `state_capacity`."""
+    explicit_capacity = max_total_sequence_length is not None
+    if max_total_sequence_length is None:
+        existing = next((t for t in model.graph.initializer if t.name == "contrib_const_dsa_total_seq"), None)
+        max_total_sequence_length = int(numpy_helper.to_array(existing)[0]) if existing else 262152
+    if explicit_capacity and indexer_state_capacity_attr is None:
+        indexer_state_capacity_attr = max_total_sequence_length // 4 + 1
     for idx, t in enumerate(model.graph.initializer):
         if t.name == "contrib_const_dsa_total_seq":
             model.graph.initializer[idx].CopyFrom(
@@ -303,7 +310,9 @@ def ensure_unified_dynamic_cache_model(
         if n.op_type == "PackedSparseAttentionIndexer":
             for a in n.attribute:
                 if a.type == onnx.AttributeProto.INT and a.name == "state_capacity":
-                    a.i = indexer_state_capacity_attr
+                    if indexer_state_capacity_attr is not None:
+                        a.i = indexer_state_capacity_attr
+    set_capacity_metadata(model, max_total_sequence_length, "unified")
     return model
 
 
@@ -337,6 +346,25 @@ def build_context_tier_model(src_model: onnx.ModelProto, kv_capacity: int, state
                             d.dim_value = state_capacity
     for n in m_tier.graph.node:
         for a in n.attribute:
-            if a.type == onnx.AttributeProto.INT and a.name == "state_capacity" and a.i in SRC_STATE_CAPS:
+            if (
+                n.op_type == "PackedSparseAttentionIndexer"
+                and a.type == onnx.AttributeProto.INT
+                and a.name == "state_capacity"
+            ):
                 a.i = state_capacity
+    set_capacity_metadata(m_tier, kv_capacity, "fixed")
     return m_tier
+
+
+def set_capacity_metadata(model: onnx.ModelProto, kv_capacity: int, layout: str) -> None:
+    props = {p.key: p.value for p in model.metadata_props}
+    props["experiment.fixed_kv_capacity"] = str(kv_capacity)
+    if "qwen38.position_config" in props:
+        positions = json.loads(props["qwen38.position_config"])
+        if positions["capacity"] is not None:
+            capacity = ContextCapacity(kv_capacity - 8, layout)
+            if min(positions["target_rows"], positions["draft_rows"]) < capacity.positional_rows:
+                raise ValueError("Requested graph capacity exceeds positional coverage")
+            positions["capacity"] = capacity.to_dict()
+            props["qwen38.position_config"] = json.dumps(positions, sort_keys=True)
+    helper.set_model_props(model, props)

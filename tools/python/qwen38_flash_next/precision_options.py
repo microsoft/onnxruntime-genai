@@ -506,6 +506,10 @@ def apply_precision_config_to_package(
         return {"applied": False, "config": pcfg.to_dict()}
     pcfg.validate()
 
+    manifest_path = pkg_dir / "package_manifest.json"
+    if manifest_path.is_file() and json.loads(manifest_path.read_text()).get("position_config"):
+        raise ValueError("Precision overrides are not qualified for configurable RoPE/context exports")
+
     hf_reader = HFCheckpointReader(hf_dir)
     model_path = pkg_dir / "model.onnx"
     model = onnx.load(str(model_path), load_external_data=False)

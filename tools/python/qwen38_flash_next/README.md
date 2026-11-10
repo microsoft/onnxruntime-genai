@@ -189,11 +189,14 @@ an instantly answering device.
 
 `tools/python/qwen38_flash_next/build_package.py` procedurally constructs self-contained ONNX Runtime GenAI model packages for **Qwen3.8-Flash-Next** (`model.type: "qwen38_flash_graph"`) + **DFlash2** (`S=8`, 7-draft speculative decoding) directly from the two Hugging Face checkpoints (`Qwen3.8-Flash-Next` and `Qwen3.8-Flash-Next-DFlash2`), without depending on any pre-exported `.onnx` model.
 
-Every generated package supports:
+The default standard-RoPE export with unified caches supports:
 - **Single unified `model.onnx` across all context lengths (`32K` / `128K` / `256K`)**: cache capacity dimensions (`kv_capacity` and `state_capacity`) are symbolic and `contrib_const_dsa_total_seq` is set to `[262152]`, so a single `model.onnx` serves `32K` (`num_blocks: 142`), `128K` (`num_blocks: 525`), and `256K` (`num_blocks: 1037`) without duplicate `model_128k.onnx` / `model_256k.onnx` files.
 - **Pure GPU execution** up to **256K (`262,144`) context length** on H200 / high-VRAM GPUs (`gpu-128k`, `gpu-256k` -> `model.onnx`).
 - **QMoE CPU/GPU hybrid offload** on 20–36.5 GB consumer GPUs (`consumer-gpu-24g`, `consumer-gpu-24g-host-64g`, `consumer-gpu-30g-ram-48g-32k`, `consumer-gpu-32g` -> `model.onnx` + `expert-profile.bin`).
 - **Authoritative protocol boundary token IDs** (`bot_token_id: 248058`, `eot_token_id: 248059`, `bor_token_id: 248068`, `eor_token_id: 248069`) and **Engine dynamic batching** (`max_batch_size: 1`, `max_scheduled_tokens: 8192`).
+
+Opt-in fixed-capacity exports instead select one target graph and disable
+automatic context profiles and Engine dynamic batching (see section 4).
 
 ---
 
@@ -287,4 +290,171 @@ python tools/python/qwen38_flash_next/build_package.py \
   --precision-profile fp32 \
   --out /data/tlwu/qwen_flash_next_rc5_2b375
 ```
+
+## 4. Configurable YaRN and context capacity (RC5 exporter)
+
+The original command in section 1 remains the standard-RoPE export path. Without
+`--rope-config`, `--max-context-length` or `--cache-layout fixed`, target/QSA tables
+remain exactly 262144 rows, DFlash2 tables remain 262148 rows, and the existing
+unified-cache profiles are retained. The decoder configuration now correctly
+reports the graph's **24 query heads**, not 32; graph architecture is unchanged.
+
+A fresh export requires the original BF16 **target and DFlash2 checkpoints**,
+their configuration files, and tokenizer assets. Quantized ONNX banks are not
+substitutes for missing BF16 checkpoints when quantization is required.
+
+YaRN is an optional export-time dependency. Install the exact qualified upstream
+reference in the export environment:
+
+```bash
+python -m pip install -r tools/python/qwen38_flash_next/requirements-yarn.txt
+```
+
+The adapter verifies the SHA-256 of Transformers' `modeling_rope_utils.py` at
+revision `598d8ba8baaec7fec5a22da0e2844c7bf4ea20e1` before calling
+`ROPE_INIT_FUNCTIONS["yarn"]`. It fails rather than silently accepting another
+implementation. Standard-RoPE exports do not require Transformers.
+
+Export an independent 1M YaRN4 package:
+
+```bash
+python tools/python/qwen38_flash_next/build_package.py \
+  --hf-dir /checkpoints/Qwen3.8-Flash-Next \
+  --dflash-dir /checkpoints/Qwen3.8-Flash-Next-DFlash2 \
+  --preset 2b375_x02_y14_z32_dp23_b64 \
+  --rope-config tools/python/qwen38_flash_next/yarn4.json \
+  --max-context-length 1048576 --cache-layout fixed \
+  --precision-profile default --prefill-chunk 512 --copy \
+  --tactic-cache-dir /model-caches/qwen38-yarn4 \
+  --out /models/qwen38-yarn4-1m
+```
+
+`--rope-config` accepts a JSON object with the fields shown in `yarn4.json`.
+Supported types are `default` and `yarn`; scaling factors must be finite and at
+least one. The specialized graph requires head dimension 256, partial rotary
+factor 0.25 (effective dimension 64), and MRoPE sections `[11,11,10]`. These are
+the text-position table layout, not a new multimodal position-input interface.
+YaRN beta parameters and optional `attention_factor` are configurable. The
+included factor-4 configuration yields correction bounds 14-22 and magnitude
+`1.138629436111989`. Frequencies, phases, trigonometry and magnitude use FP32
+before BF16 conversion. Magnitude is applied once in the tables, not again in
+attention scaling. QSA tables duplicate the target's 32 columns to 64.
+
+**Context capacity is independent of the YaRN factor.** With logical length `C`:
+
+| Capacity | Formula | C = 1048576 |
+|---|---|---:|
+| KV and position history | C + 8 | 1048584 |
+| QSA compressed state | floor((C + 8) / 4) + 1 | 262147 |
+| Positional coverage | C + 16 | 1048592 |
+
+Coverage includes verification and speculative lookahead. DFlash2 uses its own
+standard RoPE (head 128, theta 10000), computed in FP64 then converted to FP32
+and BF16. It receives the extended row count, **not target YaRN scaling**.
+
+`--cache-layout fixed` constructs numeric cache dimensions directly and emits
+only the selected target, `model_1m.onnx` for this example. The config explicitly
+selects it. Automatic smaller-context profiles and Engine block-budget resizing
+are disabled. Fixed qualification uses BF16 GDN arithmetic, disabled graph
+optimization and conservative 512-row GEMM chunks. No generic builder, CUDA
+operator or runtime change is required.
+
+Unified caching remains the default. Explicit unified capacities must be
+multiples of 256; the exporter sizes the single-slot block budget including the
+existing DFlash2 reservation and disables automatic lower-capacity profiles.
+New unified capacities require separate GPU qualification. Explicit context/RoPE
+exports currently support **default component precision only**. Other precision
+profiles/overrides and `--context-tiers` are rejected before export. The legacy
+`--base-pkg` graph-conversion route is also rejected for this mode, including
+incoming explicit-capacity packages when the new options are omitted.
+
+For safe weight-bank reuse, replace the checkpoint arguments with:
+
+```text
+--reuse-banks-from /models/verified-original-rc5 --copy
+```
+
+The source must contain complete matching RC5 weight banks. Missing quantized
+banks still require real BF16 checkpoints; they are never invented. Reuse
+validates all six source positional tables, descriptors and recorded coverage.
+Legacy banks without positional provenance must match standard-RoPE mathematics.
+The builder then constructs new positional assets using `BinaryBlobWriter`,
+regenerates descriptors/pool metadata, and constructs the graphs without
+requantizing unchanged weights. Nonstandard legacy tables with no verifiable
+provenance are rejected. `bank_metadata.json`, graph metadata and the package
+manifest record the resolved positional configuration and reference revision.
+
+Explicit-capacity exports disable tactic writes into model directories. The
+default writable cache is a sibling `<output-name>-cache`; an explicit
+`--tactic-cache-dir` must be separate from every model/checkpoint directory.
+Use a new output directory: the existing builder replaces an existing output.
+Do not pass a protected model as `--out`. Keep `--rope-config` outside every
+output directory; overlapping resolved paths are rejected before any output
+is replaced, including when building multiple presets.
+
+### Tests and qualification
+
+Run the fast, GPU-free suite after installing its ordinary test dependencies and
+the optional pinned reference:
+
+```bash
+python -m pytest --confcutdir=test/python/builder \
+  test/python/builder/test_qwen38_package_builders.py -q
+```
+
+To additionally compare actual graph contracts and **every row of all six
+positional tables** with a preserved prototype:
+
+```bash
+QWEN38_REFERENCE_PACKAGE=/models/validated-yarn4-1m \
+  python -m pytest --confcutdir=test/python/builder \
+  test/python/builder/test_qwen38_package_builders.py -q
+```
+
+Also set `QWEN38_EXPORTED_PACKAGE=/models/new-yarn4-1m` to compare a complete
+new export's three graphs, external extents, logical tables, pool bindings and
+critical configuration with that prototype. This check reads positional tensors
+and graph headers, not all quantized weights.
+
+The inherited RC5 graphs have raw stock-ONNX-checker limitations: the target
+logits output has no declared shape, and DFlash2 uses two default-domain ORT
+`SimplifiedLayerNormalization` nodes. Checker-only qualification may add the
+symbolic output shape and custom-domain aliases in a temporary copy. These
+adjustments must not rewrite the exported/runtime graphs.
+
+The fast suite does not need a full checkpoint export. Package qualification
+must separately verify every external range, pool binding, initializer shape,
+capacity/selection setting and logical table hash against the reference.
+Compare logical tensors and normalized graph contracts, not physical file
+offsets or repeated multi-hundred-GB weight-file comparisons.
+
+For GPU qualification, use the pinned native ORT
+`8c1f2936809a17054d793aeba309c6b0e5236a85` and GenAI
+`f022ff6c897e7a13e6eac1d37dd384ff79d6665e` and verify their loaded paths.
+Keep writable caches outside model directories. Progress through short/4K,
+131K, 524K, 768K, 900K and **1048544 input + 32 generated** tokens with initial
+512-token prefill chunks. Check finite logits, validation statuses, QSA bounds,
+absolute positions, actual GPU table consumption and high-position rotations,
+DFlash2 execution, phase-specific device/process memory, timings and acceptance.
+Run lightweight retrieval diagnostics only after execution passes.
+
+The exporter-generated **fixed-capacity 1M YaRN4 package** passed
+**1048544 input + 32 generated tokens** on an **A100 80GB**, matching the
+post-export-patched prototype's generated tokens and final logits. Qualification
+used validated weight-bank reuse, default component precision, the pinned native
+runtime above and 512-token prefill chunks. All six positional tables matched
+the prototype bit-for-bit; GPU table readbacks, sampled rotary/QSA checks and
+DFlash2 execution passed with zero observed operator validation errors.
+
+The full-capacity campaign used target capture threshold **4**. The package's
+default threshold **2** was exercised separately at 4K and in near-1M retrieval
+diagnostics with facts at 1%, 50% and 90% depth. These results establish engineering
+execution correctness for the qualified configuration, not comprehensive
+long-context model quality or performance certification. They do not automatically
+qualify other exports, precision modes or unified layouts. Fresh checkpoint
+quantization remains unqualified because the original BF16 checkpoints were
+unavailable. Broad long-context quality and exact DFlash2 speculative losslessness
+remain unproven; the known width-dependent discrepancy is deferred.
+The original 128K/256K VRAM estimator is not used as admission evidence for new
+explicit-capacity packages.
 

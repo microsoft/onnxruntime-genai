@@ -56,7 +56,8 @@ def builders():
         paths = importlib.import_module("package_paths")
         gb = importlib.import_module("graph_builder")
         pkg = importlib.import_module("build_package")
-        yield types.SimpleNamespace(config=config, paths=paths, gb=gb, pkg=pkg)
+        rope = importlib.import_module("rope")
+        yield types.SimpleNamespace(config=config, paths=paths, gb=gb, pkg=pkg, rope=rope)
     finally:
         for name in (
             "package_config",
@@ -65,6 +66,7 @@ def builders():
             "precision_options",
             "graph_builder",
             "build_package",
+            "rope",
         ):
             sys.modules.pop(name, None)
         if sys.path and sys.path[0] == str(FLASH_NEXT_TOOLS_DIR):
@@ -368,6 +370,60 @@ def test_builder_refuses_output_overlapping_any_input(builders, tmp_path, flag, 
     with pytest.raises(SystemExit, match="must not be equal to, nested inside or contain"):
         builders.pkg.main(argv)
     assert snapshot(tmp_path / "inputs") == before
+
+
+@pytest.mark.parametrize("location", ["nested", "equal", "resolved", "symlink", "presets"])
+def test_rope_config_overlap_is_rejected_before_output_mutation(builders, tmp_path, location):
+    pkg = builders.pkg
+    reuse = tmp_path / "reuse"
+    reuse.mkdir()
+    out = tmp_path / "output"
+    if location == "presets":
+        first = out / pkg.resolve_preset_spec("all_int4")["pkg_name"]
+        first.mkdir(parents=True)
+        (first / "keep").write_text("unchanged")
+        out /= pkg.resolve_preset_spec("top08")["pkg_name"]
+    out.mkdir(parents=True)
+    (out / "keep").write_text("unchanged")
+    rope_path = out / "rope.json"
+    rope_path.write_text('{"rope_type": "default"}\n')
+    if location == "equal":
+        out = rope_path
+    elif location == "resolved":
+        alias = tmp_path / "alias"
+        alias.mkdir()
+        out = alias / ".." / out.name
+    elif location == "symlink":
+        alias = tmp_path / "rope-alias.json"
+        alias.symlink_to(rope_path)
+        rope_path = alias
+
+    argv = ["--reuse-banks-from", str(reuse), "--rope-config", str(rope_path)]
+    if location == "presets":
+        argv.extend(["--models-root", str(out.parent), "--presets", "all_int4,top08"])
+    else:
+        argv.extend(["--out", str(out)])
+    before = snapshot(tmp_path)
+    with pytest.raises(SystemExit, match="contain --rope-config"):
+        pkg.main(argv)
+    assert snapshot(tmp_path) == before
+
+
+def test_rope_config_outside_output_remains_supported(builders, tmp_path, monkeypatch):
+    rope_path, reuse = tmp_path / "rope.json", tmp_path / "reuse"
+    rope_path.write_text('{"rope_type": "default"}\n')
+    reuse.mkdir()
+    before = rope_path.read_bytes()
+
+    def stop_before_weights(*args, **kwargs):
+        raise RuntimeError("procedural export reached")
+
+    monkeypatch.setattr(builders.pkg, "_prepare_procedural_base_assets", stop_before_weights)
+    with pytest.raises(RuntimeError, match="procedural export reached"):
+        builders.pkg.main(
+            ["--out", str(tmp_path / "out"), "--reuse-banks-from", str(reuse), "--rope-config", str(rope_path)]
+        )
+    assert rope_path.read_bytes() == before
 
 
 def test_config_migration_and_rc5_session_options(builders):
@@ -940,6 +996,449 @@ def test_precision_options_profiles_and_overrides():
     assert c_custom.kv_cache_dtype == "fp16"
     assert c_custom.ple_engram == "default"
     assert c_custom.indexer_dtype == "fp32"
+
+
+@pytest.fixture(scope="module")
+def yarn_reference(builders):
+    transformers = pytest.importorskip(
+        "transformers", reason="Install qwen38_flash_next/requirements-yarn.txt for reference parity"
+    )
+    source = Path(transformers.__file__).parent / "modeling_rope_utils.py"
+    if hashlib.sha256(source.read_bytes()).hexdigest() != builders.rope.HF_ROPE_SHA256:
+        pytest.skip("Install qwen38_flash_next/requirements-yarn.txt for the exact optional reference")
+    return builders.rope.yarn_parameters
+
+
+@pytest.fixture(scope="module", autouse=True)
+def export_test_threads():
+    previous = torch.get_num_threads()
+    torch.set_num_threads(min(previous, 4))
+    yield
+    torch.set_num_threads(previous)
+
+
+def test_default_rope_preserves_original_formulas(builders):
+    positions = torch.tensor([0, 1, 32767, 262143, 524288, 1048591], dtype=torch.float32)
+    inv = 1.0 / (10000000.0 ** (torch.arange(0, 64, 2, dtype=torch.float32) / 64))
+    phase = positions[:, None] * inv[None, :]
+    cos, sin = builders.rope.target_rope(positions)
+    torch.testing.assert_close(cos, torch.cos(phase), rtol=0, atol=0)
+    torch.testing.assert_close(sin, torch.sin(phase), rtol=0, atol=0)
+    inv_d = 1.0 / (10000.0 ** (np.arange(0, 128, 2, dtype=np.float64) / 128))
+    phase_d = positions.numpy().astype(np.float64)[:, None] * inv_d[None, :]
+    for actual, fn in zip(builders.rope.dflash_rope(positions), (np.cos, np.sin), strict=True):
+        np.testing.assert_array_equal(actual.numpy(), fn(phase_d).astype(np.float32))
+
+
+@pytest.mark.parametrize("factor", [1.0, 4.0])
+def test_yarn_reference_frequencies_ramp_magnitude_and_partial_rotation(builders, yarn_reference, factor):
+    cfg = builders.rope.RopeConfig(rope_type="yarn", factor=factor)
+    inv, magnitude = yarn_reference(cfg)
+    frequencies = 10000000.0 ** (torch.arange(0, 64, 2, dtype=torch.float32) / 64)
+    ramp = ((torch.arange(32, dtype=torch.float32) - 14) / (22 - 14)).clamp(0, 1)
+    expected = (1.0 / (factor * frequencies)) * ramp + (1.0 / frequencies) * (1 - ramp)
+    torch.testing.assert_close(inv, expected, rtol=0, atol=0)
+    assert magnitude == (1.0 if factor == 1 else 1.138629436111989)
+    positions = [0, 262143, 524288, 1048575, 1048583, 1048591]
+    cos, sin = builders.rope.target_rope(positions, cfg)
+    phase = torch.tensor(positions, dtype=torch.float32)[:, None] * inv[None, :]
+    torch.testing.assert_close(cos, phase.cos() * magnitude, rtol=0, atol=0)
+    torch.testing.assert_close(sin, phase.sin() * magnitude, rtol=0, atol=0)
+    if factor == 1:
+        torch.testing.assert_close(inv, 1.0 / frequencies, rtol=0, atol=0)
+    q = torch.randn(len(positions), 256, generator=torch.Generator().manual_seed(7))
+    rotated = q.clone()
+    rotated[:, :32] = q[:, :32] * cos - q[:, 32:64] * sin
+    rotated[:, 32:64] = q[:, 32:64] * cos + q[:, :32] * sin
+    torch.testing.assert_close(rotated[:, 64:], q[:, 64:], rtol=0, atol=0)
+    complex_q = torch.complex(q[:, :32], q[:, 32:64])
+    expected_q = complex_q * torch.complex(cos, sin)
+    torch.testing.assert_close(rotated[:, :32], expected_q.real)
+    torch.testing.assert_close(rotated[:, 32:64], expected_q.imag)
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"rope_type": "unknown"},
+        {"rope_type": "yarn", "factor": float("nan")},
+        {"rope_type": "yarn", "factor": 0.5},
+        {"head_dim": 64},
+        {"partial_rotary_factor": 1.0},
+        {"mrope_sections": [16, 16]},
+        {"factor": 4.0},
+        {"unknown": 1},
+    ],
+)
+def test_invalid_rope_configuration_is_rejected(builders, values):
+    with pytest.raises(ValueError):
+        builders.rope.RopeConfig.from_dict(values)
+
+
+@pytest.mark.parametrize("context", [4096, 131072, 524288, 1048576])
+@pytest.mark.parametrize("layout", ["unified", "fixed"])
+def test_context_capacity_graph_and_selection_contract(builders, context, layout):
+    cap = builders.rope.ContextCapacity(context, layout)
+    assert (cap.kv_capacity, cap.state_capacity, cap.positional_rows) == (
+        context + 8,
+        (context + 8) // 4 + 1,
+        context + 16,
+    )
+    gb, pkg = builders.gb, builders.pkg
+    graph = gb.build_target_model_proto({}, {}, kv_capacity=cap.kv_capacity, state_capacity=cap.state_capacity)
+    if layout == "unified":
+        pkg.ensure_unified_dynamic_cache_model(graph)
+    elif context == 1048576:
+        assert cap.graph_filename == "model_1m.onnx"
+    for vi in [*graph.graph.input, *graph.graph.output]:
+        dims = vi.type.tensor_type.shape.dim
+        if vi.name in ("past_position_ids", "present_position_ids"):
+            assert dims[1].dim_value == cap.kv_capacity if layout == "fixed" else dims[1].dim_param == "kv_capacity"
+        elif vi.name.endswith((".key", ".value")):
+            assert dims[2].dim_value == cap.kv_capacity if layout == "fixed" else dims[2].dim_param == "kv_capacity"
+        elif vi.name.endswith(".index_key"):
+            assert (
+                dims[1].dim_value == cap.state_capacity if layout == "fixed" else dims[1].dim_param == "state_capacity"
+            )
+    indexers = [n for n in graph.graph.node if n.op_type == "PackedSparseAttentionIndexer"]
+    assert len(indexers) == 12
+    assert all(next(a.i for a in n.attribute if a.name == "state_capacity") == cap.state_capacity for n in indexers)
+    assert {p.key: p.value for p in graph.metadata_props}["experiment.fixed_kv_capacity"] == str(cap.kv_capacity)
+    assert numpy_helper.to_array(
+        next(t for t in graph.graph.initializer if t.name == "contrib_const_dsa_total_seq")
+    ) == [cap.kv_capacity]
+    assert all(
+        next(a.f for a in n.attribute if a.name == "scale") == 0.0625
+        for n in graph.graph.node
+        if n.op_type == "DynamicSparseAttention"
+    )
+    tier = pkg.build_context_tier_model(graph, 4104, 1027)
+    assert all(
+        next(a.i for a in n.attribute if a.name == "state_capacity") == 1027
+        for n in tier.graph.node
+        if n.op_type == "PackedSparseAttentionIndexer"
+    )
+    config = pkg.default_base_genai_config()
+    pkg.configure_rc5_genai_config(config, has_int3_layers=True, capacity=cap, prefill_chunk=512)
+    assert config["model"]["decoder"]["num_attention_heads"] == 24
+    assert config["model"]["decoder"]["filename"] == cap.graph_filename
+    assert config["model"]["context_length"] == config["search"]["max_length"] == context
+    assert config["model"]["qwen38_graph"]["kv_capacity"] == cap.kv_capacity
+    assert config["runtime_profiles"] == []
+    if layout == "fixed":
+        assert "dynamic_batching" not in config["engine"]
+    else:
+        assert config["engine"]["dynamic_batching"]["num_blocks"] == context // 256 + pkg.DFLASH2_RESERVED_BLOCKS
+
+
+def test_positional_serialization_pool_and_stale_reuse(builders, tmp_path, yarn_reference):
+    gb, rope = builders.gb, builders.rope
+    cfg = rope.RopeConfig(rope_type="yarn", factor=4)
+    cap = rope.ContextCapacity(513, "fixed")
+    locs = {}
+    gb.build_reused_position_tables(tmp_path, locs, cfg, cap.positional_rows, cap.positional_rows)
+    declared = rope.position_config(cfg, cap.positional_rows, cap.positional_rows, cap)
+    gb.save_bank_metadata_to_dir(tmp_path, locs, {}, declared)
+    assert rope.validate_reused_positions(tmp_path, locs) == declared
+    mapped = {
+        name: np.memmap(
+            tmp_path / meta["location"], mode="r", dtype="<u2", offset=meta["offset"], shape=tuple(meta["dims"])
+        )
+        for name, meta in locs.items()
+    }
+    for source, duplicate in zip(rope.TARGET_NAMES[:2], rope.TARGET_NAMES[2:], strict=True):
+        np.testing.assert_array_equal(mapped[duplicate], np.concatenate((mapped[source], mapped[source]), axis=1))
+    for name in rope.DRAFT_NAMES:
+        expected = rope.dflash_rope(np.arange(cap.positional_rows))[rope.DRAFT_NAMES.index(name)]
+        np.testing.assert_array_equal(mapped[name], expected.to(torch.bfloat16).view(torch.uint16).numpy())
+    locs["lm_head.weight_t.qweight"] = dict(location="unused.data", offset=0, length=1, dtype=2, dims=[1])
+    gb.write_weights_pool_txt(tmp_path, locs)
+    pool_lines = (tmp_path / "weights_pool.txt").read_text().splitlines()
+    for index, name in enumerate(rope.TARGET_NAMES):
+        fields = pool_lines[index + 1].split()
+        meta = locs[name]
+        assert fields[3:5] == [str(meta["offset"]), str(meta["length"])]
+        assert fields[6:9] == [str(cap.positional_rows), str(meta["dims"][1]), meta["location"]]
+    bad = copy.deepcopy(locs)
+    bad[rope.TARGET_NAMES[0]]["length"] -= 2
+    with pytest.raises(ValueError, match="external data"):
+        rope.validate_reused_positions(tmp_path, bad)
+    declared["target_rows"] -= 1
+    gb.save_bank_metadata_to_dir(tmp_path, locs, {}, declared)
+    with pytest.raises(ValueError, match="coverage metadata"):
+        rope.validate_reused_positions(tmp_path, locs)
+    declared["target_rows"] += 1
+    gb.save_bank_metadata_to_dir(tmp_path, locs, {}, declared)
+    del mapped
+    with open(tmp_path / "position_tables.data", "r+b") as stream:
+        stream.write(b"\xff\xff")
+    with pytest.raises(ValueError, match="Stale or unqualified"):
+        rope.validate_reused_positions(tmp_path, locs)
+
+
+def test_legacy_reuse_requires_actual_standard_rope_bytes(builders, tmp_path):
+    gb, rope = builders.gb, builders.rope
+    locations = {}
+    gb.build_reused_position_tables(tmp_path, locations, rope.RopeConfig(), 257, 261)
+    assert rope.validate_reused_positions(tmp_path, locations)["target_rows"] == 257
+
+
+def test_capacity_metadata_survives_tier_and_unified_conversion(builders):
+    pkg, rope = builders.pkg, builders.rope
+    cap = rope.ContextCapacity(1048576, "fixed")
+    graph = builders.gb.build_target_model_proto({}, {}, kv_capacity=cap.kv_capacity, state_capacity=cap.state_capacity)
+    props = {p.key: p.value for p in graph.metadata_props}
+    props["qwen38.position_config"] = json.dumps(
+        rope.position_config(rope.RopeConfig(), cap.positional_rows, cap.positional_rows, cap)
+    )
+    helper.set_model_props(graph, props)
+    pkg.ensure_unified_dynamic_cache_model(graph)
+    positions = json.loads({p.key: p.value for p in graph.metadata_props}["qwen38.position_config"])
+    assert positions["capacity"] == rope.ContextCapacity(1048576, "unified").to_dict()
+    tier = pkg.build_context_tier_model(graph, 4104, 1027)
+    positions = json.loads({p.key: p.value for p in tier.metadata_props}["qwen38.position_config"])
+    assert positions["capacity"] == rope.ContextCapacity(4096, "fixed").to_dict()
+    with pytest.raises(ValueError, match="exceeds positional coverage"):
+        pkg.build_context_tier_model(graph, 2097160, 524291)
+
+
+@pytest.mark.parametrize("existing_output", [False, True])
+def test_legacy_base_package_explicit_capacity_is_rejected_before_output_mutation(builders, tmp_path, existing_output):
+    pkg, rope = builders.pkg, builders.rope
+    source, pool = make_synthetic_rc5_base_package(tmp_path)
+    cap = rope.ContextCapacity(1048576, "unified")
+    model_path = source / "model.onnx"
+    model = onnx.load(model_path, load_external_data=False)
+    pkg.ensure_unified_dynamic_cache_model(model, cap.kv_capacity, cap.state_capacity)
+    props = {p.key: p.value for p in model.metadata_props}
+    props["qwen38.position_config"] = json.dumps(
+        rope.position_config(rope.RopeConfig(rope_type="yarn", factor=4), cap.positional_rows, cap.positional_rows, cap)
+    )
+    helper.set_model_props(model, props)
+    onnx.save_model(model, model_path, save_as_external_data=False)
+    config_path = source / "genai_config.json"
+    config = json.loads(config_path.read_text())
+    pkg.configure_rc5_genai_config(config, has_int3_layers=True, capacity=cap, prefill_chunk=512)
+    config_path.write_text(json.dumps(config))
+    out = tmp_path / "output"
+    if existing_output:
+        out.mkdir()
+        (out / "keep").write_text("unchanged")
+    before = snapshot(tmp_path)
+    with pytest.raises(ValueError, match="explicit-capacity.*--reuse-banks-from"):
+        pkg.build_rc5_package(out, base_pkg=source, pool_dir=pool, x_int4=1, y_int3=1, z_int2=2, kl_mode="dp23")
+    assert snapshot(tmp_path) == before
+
+
+def test_cache_cannot_write_into_reuse_source(builders, tmp_path):
+    source, out = tmp_path / "source", tmp_path / "output"
+    source.mkdir()
+    out.mkdir()
+    marker = out / "keep"
+    marker.write_text("unchanged")
+    with pytest.raises(ValueError, match="all model/checkpoint directories"):
+        builders.pkg.build_rc5_package(
+            out,
+            x_int4=2,
+            y_int3=14,
+            z_int2=32,
+            reuse_banks_from=source,
+            capacity=builders.rope.ContextCapacity(1048576, "fixed"),
+            tactic_cache_dir=source / "cache",
+        )
+    assert marker.read_text() == "unchanged"
+
+
+def test_precision_overrides_fail_before_output_mutation(builders, tmp_path):
+    out = tmp_path / "existing"
+    out.mkdir()
+    marker = out / "keep"
+    marker.write_text("unchanged")
+    with pytest.raises(SystemExit) as exc:
+        builders.pkg.main(
+            [
+                "--out",
+                str(out),
+                "--max-context-length",
+                "1048576",
+                "--cache-layout",
+                "fixed",
+                "--precision-profile",
+                "fp32",
+            ]
+        )
+    assert exc.value.code == 2
+    assert marker.read_text() == "unchanged"
+    (out / "package_manifest.json").write_text(json.dumps({"position_config": {"capacity": 1048576}}))
+    po = importlib.import_module("precision_options")
+    with pytest.raises(ValueError, match="not qualified"):
+        po.apply_precision_config_to_package(out, po.PrecisionConfig(profile="fp32"))
+    assert marker.read_text() == "unchanged"
+
+
+def test_unqualified_yarn_reference_is_rejected(builders, tmp_path, monkeypatch):
+    (tmp_path / "modeling_rope_utils.py").write_text("raise RuntimeError('must not execute')")
+    monkeypatch.setattr(
+        builders.rope.importlib.util, "find_spec", lambda _: types.SimpleNamespace(origin=str(tmp_path / "__init__.py"))
+    )
+    with pytest.raises(ValueError, match="Unqualified Transformers"):
+        builders.rope.yarn_parameters(builders.rope.RopeConfig(rope_type="yarn", factor=4))
+
+
+def test_actual_1m_prototype_graph_and_all_positional_rows(builders, yarn_reference):
+    root = os.environ.get("QWEN38_REFERENCE_PACKAGE")
+    if not root:
+        pytest.skip("Set QWEN38_REFERENCE_PACKAGE to the read-only validated 1M package")
+    root = Path(root)
+    gb, pkg, rope = builders.gb, builders.pkg, builders.rope
+    cfg = rope.RopeConfig(rope_type="yarn", factor=4)
+    cap = rope.ContextCapacity(1048576, "fixed")
+    locations, embedded = gb.load_bank_metadata_from_dir(root)
+    original_config = json.loads((root / "genai_config.json").read_text())
+    original = onnx.load(root / original_config["model"]["decoder"]["filename"], load_external_data=False)
+    generated = gb.build_target_model_proto(
+        locations, embedded, kv_capacity=cap.kv_capacity, state_capacity=cap.state_capacity
+    )
+    selection = pkg.select_qmoe_layers_by_kl(2, 14, 32, kl_mode="dp23")
+    pkg.rewrite_qmoe_layers(generated, *selection[:3])
+
+    def key(n):
+        return n.domain, n.op_type, list(n.input), list(n.output), sorted(a.SerializeToString() for a in n.attribute)
+
+    assert {n.name: key(n) for n in generated.graph.node} == {n.name: key(n) for n in original.graph.node}
+    assert list(generated.graph.input) == list(original.graph.input)
+    assert list(generated.graph.output) == list(original.graph.output)
+    original_inits = {t.name: t for t in original.graph.initializer}
+    assert set(original_inits) == {t.name for t in generated.graph.initializer}
+    for tensor in generated.graph.initializer:
+        expected = original_inits[tensor.name]
+        if tensor.data_location == TensorProto.EXTERNAL:
+            assert tensor == expected
+        else:
+            np.testing.assert_array_equal(numpy_helper.to_array(tensor), numpy_helper.to_array(expected))
+    for names in (rope.TARGET_NAMES, rope.DRAFT_NAMES):
+        for index, name in enumerate(names):
+            meta = locations[name]
+            assert meta["dims"][0] == cap.positional_rows
+            actual = np.memmap(
+                root / meta["location"], mode="r", dtype="<u2", offset=meta["offset"], shape=tuple(meta["dims"])
+            )
+            for start in range(0, cap.positional_rows, 4096):
+                positions = np.arange(start, min(start + 4096, cap.positional_rows))
+                values = rope.target_rope(positions, cfg) if names == rope.TARGET_NAMES else rope.dflash_rope(positions)
+                expected = values[index % 2].to(torch.bfloat16)
+                if names == rope.TARGET_NAMES and index >= 2:
+                    expected = torch.cat((expected, expected), dim=-1)
+                np.testing.assert_array_equal(
+                    actual[start : start + len(positions)], expected.view(torch.uint16).numpy()
+                )
+
+
+def test_exported_package_against_1m_prototype(builders):
+    reference = os.environ.get("QWEN38_REFERENCE_PACKAGE")
+    exported = os.environ.get("QWEN38_EXPORTED_PACKAGE")
+    if not reference or not exported:
+        pytest.skip("Set QWEN38_REFERENCE_PACKAGE and QWEN38_EXPORTED_PACKAGE for complete-package qualification")
+    reference, exported = Path(reference), Path(exported)
+    cfg_ref = json.loads((reference / "genai_config.json").read_text())
+    cfg = json.loads((exported / "genai_config.json").read_text())
+    positional = set(builders.rope.TARGET_NAMES + builders.rope.DRAFT_NAMES)
+    assert cfg["model"]["context_length"] == cfg["search"]["max_length"] == 1048576
+    assert cfg["model"]["qwen38_graph"]["kv_capacity"] == 1048584
+    assert cfg["model"]["decoder"]["filename"] == "model_1m.onnx"
+    assert cfg["model"]["decoder"]["num_attention_heads"] == 24
+    assert cfg["runtime_profiles"] == [] and "dynamic_batching" not in cfg["engine"]
+    assert sorted(p.name for p in exported.glob("model*.onnx")) == ["model_1m.onnx"]
+    all_initializers = {}
+    for section in ("decoder", "dflash2", "embedding"):
+        expected = onnx.load(reference / cfg_ref["model"][section]["filename"], load_external_data=False)
+        actual = onnx.load(exported / cfg["model"][section]["filename"], load_external_data=False)
+
+        def node_key(n):
+            return (
+                n.domain,
+                n.op_type,
+                list(n.input),
+                list(n.output),
+                sorted(a.SerializeToString() for a in n.attribute),
+            )
+
+        if section == "embedding":
+            # The procedural embedding only changes names, independent Gather ordering and explicit axis=0.
+            def embedding_contract(model):
+                values = {t.name: ("initializer", t.name) for t in model.graph.initializer}
+                values.update({v.name: ("input", v.name) for v in model.graph.input})
+                for node in model.graph.node:
+                    attrs = {a.name: helper.get_attribute_value(a) for a in node.attribute}
+                    if node.op_type == "Gather":
+                        attrs.setdefault("axis", 0)
+                    signature = (
+                        node.domain,
+                        node.op_type,
+                        tuple(sorted(attrs.items())),
+                        tuple(values[name] for name in node.input),
+                    )
+                    for index, name in enumerate(node.output):
+                        values[name] = signature, index
+                return {v.name: values[v.name] for v in model.graph.output}
+
+            assert len(actual.graph.node) == len(expected.graph.node) == 5
+            assert embedding_contract(actual) == embedding_contract(expected)
+        else:
+            assert {n.name: node_key(n) for n in actual.graph.node} == {
+                n.name: node_key(n) for n in expected.graph.node
+            }
+        assert list(actual.graph.input) == list(expected.graph.input)
+        assert list(actual.graph.output) == list(expected.graph.output)
+        expected_inits = {t.name: t for t in expected.graph.initializer}
+        assert set(expected_inits) == {t.name for t in actual.graph.initializer}
+        all_initializers.update({t.name: t for t in actual.graph.initializer})
+        for tensor in actual.graph.initializer:
+            other = expected_inits[tensor.name]
+            assert tensor.data_type == other.data_type and list(tensor.dims) == list(other.dims)
+            if tensor.data_location != TensorProto.EXTERNAL:
+                np.testing.assert_array_equal(numpy_helper.to_array(tensor), numpy_helper.to_array(other))
+                continue
+            desc = {e.key: e.value for e in tensor.external_data}
+            path = exported / desc["location"]
+            offset, length = int(desc["offset"]), int(desc["length"])
+            assert path.resolve().is_relative_to(exported.resolve()) and not path.is_symlink()
+            assert path.stat().st_nlink == 1
+            assert 0 <= offset < offset + length <= path.stat().st_size
+            if tensor.name not in positional:
+                assert tensor == other
+                continue
+            desc_ref = {e.key: e.value for e in other.external_data}
+            a = np.memmap(path, mode="r", dtype="<u2", offset=offset, shape=tuple(tensor.dims))
+            b = np.memmap(
+                reference / desc_ref["location"],
+                mode="r",
+                dtype="<u2",
+                offset=int(desc_ref["offset"]),
+                shape=tuple(other.dims),
+            )
+            for start in range(0, tensor.dims[0], 4096):
+                np.testing.assert_array_equal(a[start : start + 4096], b[start : start + 4096])
+        if section == "decoder":
+            props = {p.key: p.value for p in actual.metadata_props}
+            assert props["experiment.fixed_kv_capacity"] == "1048584"
+            assert json.loads(props["qwen38.position_config"])["capacity"]["state_capacity"] == 262147
+    pools = {}
+    for line in (exported / "weights_pool.txt").read_text().splitlines()[1:]:
+        fields = line.split()
+        if fields[0] == "pool":
+            pools[fields[1]] = fields
+        else:
+            tensor = all_initializers[fields[2]]
+            desc = {e.key: e.value for e in tensor.external_data}
+            entry = pools[fields[3]]
+            assert entry[2:5] == [str(tensor.data_type), desc["offset"], desc["length"]]
+            assert list(map(int, entry[6:-1])) == list(tensor.dims)
+            assert entry[-1] == desc["location"]
+    for section in ("decoder", "dflash2"):
+        options = cfg["model"][section]["session_options"]
+        assert options["ep.cuda.gemm_tactic_cache_to_model"] == "0"
+        assert not Path(options["ep.cuda.gemm_tactic_cache_dir"]).resolve().is_relative_to(exported.resolve())
 
 
 @pytest.fixture(params=["sendfile", "buffered"])

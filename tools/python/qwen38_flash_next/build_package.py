@@ -29,6 +29,7 @@ Key capabilities:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -54,7 +55,13 @@ from package_io import (
     make_ext_init,
 )
 from package_paths import reject_output_overlap
-from precision_options import add_precision_cli_args, apply_precision_config_to_package, resolve_precision_config
+from precision_options import (
+    PrecisionConfig,
+    add_precision_cli_args,
+    apply_precision_config_to_package,
+    resolve_precision_config,
+)
+from rope import DEFAULT_ROPE, ContextCapacity, RopeConfig, position_config, validate_reused_positions, yarn_parameters
 
 PLE_INT8_SCALE = 0.000703105776
 STRP_MAGIC = 0x50525453
@@ -1911,7 +1918,7 @@ def default_base_genai_config() -> dict:
             "decoder": {
                 "filename": "model.onnx",
                 "hidden_size": 2560,
-                "num_attention_heads": 32,
+                "num_attention_heads": 24,
                 "num_key_value_heads": 2,
                 "num_hidden_layers": 48,
                 "head_size": 256,
@@ -2393,10 +2400,10 @@ def rewrite_qmoe_layers(
     return layer_recipe, needed_banks
 
 
-def compute_package_referenced_size(pkg_dir: Path) -> dict:
+def compute_package_referenced_size(pkg_dir: Path, target_filename: str = "model.onnx") -> dict:
     spans: set[tuple[str, int, int]] = set()
     by_file: dict[str, int] = {}
-    onnx_files = [f for f in ("model.onnx", "dflash2.onnx", "embedding.onnx") if (pkg_dir / f).exists()]
+    onnx_files = [f for f in (target_filename, "dflash2.onnx", "embedding.onnx") if (pkg_dir / f).exists()]
     for mname in onnx_files:
         m = onnx.load(str(pkg_dir / mname), load_external_data=False)
         for t in m.graph.initializer:
@@ -2451,14 +2458,25 @@ def configure_rc5_genai_config(
     bs4: int = 32,
     bs3: int = 64,
     bs2: int = 64,
+    capacity: ContextCapacity | None = None,
+    tactic_cache_dir: Path | None = None,
 ) -> list[str]:
     """Update `genai_config.json` in place for RC5 GPU + QMoE offload compatibility and return migration notes."""
     model_sec = config.setdefault("model", {})
+    model_sec.setdefault("decoder", {})["num_attention_heads"] = 24
+    if capacity is not None:
+        model_sec["context_length"] = capacity.context_length
+        model_sec.setdefault("qwen38_graph", {})["kv_capacity"] = capacity.kv_capacity
+        model_sec["decoder"]["filename"] = capacity.graph_filename
     for token_key, token_val in PROTOCOL_BOUNDARY_TOKEN_IDS.items():
         if model_sec.get(token_key) != token_val:
             model_sec[token_key] = token_val
 
-    if max_context_length is not None and int(model_sec.get("context_length", 0)) < max_context_length:
+    if (
+        capacity is None
+        and max_context_length is not None
+        and int(model_sec.get("context_length", 0)) < max_context_length
+    ):
         model_sec["context_length"] = max_context_length
 
     qwen = model_sec.get("qwen38_graph")
@@ -2484,6 +2502,12 @@ def configure_rc5_genai_config(
         model_sec["eos_token_id"] = list(stop_token_ids)
 
     dec_opts = model_sec.setdefault("decoder", {}).setdefault("session_options", {})
+    if capacity is not None:
+        dec_opts["ep.cuda.gated_delta_net_bf16_precision"] = "bf16"
+        if capacity.cache_layout == "fixed":
+            dec_opts["graph_optimization_level"] = "ORT_DISABLE_ALL"
+            dec_opts["ep.cuda.matmul_nbits_m_chunk_size"] = "512"
+            dec_opts["ep.cuda.fpa_intb_profile_m"] = "1,2,4,8,16,32,64,128,256,512"
     prov_opts = dec_opts.get("provider_options")
     if isinstance(prov_opts, list):
         for entry in prov_opts:
@@ -2512,16 +2536,36 @@ def configure_rc5_genai_config(
     dyn_batch.setdefault("max_scheduled_tokens", DEFAULT_ENGINE_CONFIG["dynamic_batching"]["max_scheduled_tokens"])
 
     search_sec = config.setdefault("search", {})
-    if max_context_length is not None and int(search_sec.get("max_length", 0)) < max_context_length:
+    if capacity is not None:
+        search_sec["max_length"] = capacity.context_length
+        # Fixed graphs must not be resized by an automatic smaller-context profile.
+        config["runtime_profiles"] = []
+        if capacity.cache_layout == "fixed":
+            engine_sec.pop("dynamic_batching", None)
+        else:
+            dyn_batch.update(
+                block_size=256,
+                max_batch_size=1,
+                num_blocks=capacity.context_length // 256 + DFLASH2_RESERVED_BLOCKS,
+                prefix_caching=True,
+                dflash2_max_snapshots=1,
+            )
+            dyn_batch.pop("max_snapshots", None)
+    elif max_context_length is not None and int(search_sec.get("max_length", 0)) < max_context_length:
         search_sec["max_length"] = max_context_length
 
-    if include_runtime_profiles:
+    if include_runtime_profiles and capacity is None:
         dec_file = model_sec.get("decoder", {}).get("filename", "model.onnx")
         eff_y = y_int3 if (x_int4 != 48 or y_int3 != 0 or z_int2 != 0) else (1 if has_int3_layers else 0)
         eff_x = x_int4 if (x_int4 != 48 or y_int3 != 0 or z_int2 != 0) else (47 if has_int3_layers else 48)
         config["runtime_profiles"] = default_runtime_profiles(
             dec_file, x_int4=eff_x, y_int3=eff_y, z_int2=z_int2, bs4=bs4, bs3=bs3, bs2=bs2
         )
+    if tactic_cache_dir is not None:
+        for section in ("decoder", "dflash2"):
+            opts = model_sec.setdefault(section, {}).setdefault("session_options", {})
+            opts["ep.cuda.gemm_tactic_cache_to_model"] = "0"
+            opts["ep.cuda.gemm_tactic_cache_dir"] = str(tactic_cache_dir.resolve())
     return changes
 
 
@@ -2557,10 +2601,15 @@ def _prepare_procedural_base_assets(
     kv_scale_file: Path | None = None,
     expert_profile: Path | None = None,
     copy: bool = False,
+    rope_config: RopeConfig = DEFAULT_ROPE,
+    capacity: ContextCapacity | None = None,
 ) -> tuple[onnx.ModelProto, Path | None]:
     """Procedurally build or link non-QMoE `.data` / `ple/` banks and construct `embedding.onnx`, `dflash2.onnx`,
     and the initial 48-layer `model.onnx` `ModelProto` directly from `hf_dir` and `dflash_dir`.
     """
+    target_rows = capacity.positional_rows if capacity else 262144
+    draft_rows = capacity.positional_rows if capacity else 262148
+    positions = position_config(rope_config, target_rows, draft_rows, capacity)
     non_qmoe_files = (
         "embedding.onnx.data",
         "dflash2.onnx.data",
@@ -2581,6 +2630,8 @@ def _prepare_procedural_base_assets(
 
     if can_reuse:
         bank_src = reuse_banks_from.resolve()
+        tensor_locations, embedded_weights = gb.load_bank_metadata_from_dir(bank_src)
+        validate_reused_positions(bank_src, tensor_locations)
         for fn in non_qmoe_files:
             if fn == "weights_pool.txt":
                 shutil.copy2(bank_src / fn, out_pkg / fn)
@@ -2597,8 +2648,9 @@ def _prepare_procedural_base_assets(
             if src_tok.is_file():
                 link_file(src_tok, out_pkg / tok_fn, copy=copy)
 
-        tensor_locations, embedded_weights = gb.load_bank_metadata_from_dir(bank_src)
-        gb.save_bank_metadata_to_dir(out_pkg, tensor_locations, embedded_weights)
+        gb.build_reused_position_tables(out_pkg, tensor_locations, rope_config, target_rows, draft_rows)
+        gb.write_weights_pool_txt(out_pkg, tensor_locations)
+        gb.save_bank_metadata_to_dir(out_pkg, tensor_locations, embedded_weights, positions)
 
         emb_proto = gb.build_embedding_model_proto()
         onnx.save_model(emb_proto, str(out_pkg / "embedding.onnx"), save_as_external_data=False)
@@ -2655,12 +2707,16 @@ def _prepare_procedural_base_assets(
         hf_loader = gb.CheckpointTensorLoader(hf_dir)
         emb_locs = gb.build_embedding_from_hf(hf_loader, out_pkg)
         gb.build_ple_int8_from_hf(hf_loader, out_pkg)
-        target_locs, embedded_weights = gb.build_target_non_qmoe_from_hf(hf_loader, out_pkg, fast_quant_prepack_batch)
+        target_locs, embedded_weights = gb.build_target_non_qmoe_from_hf(
+            hf_loader, out_pkg, fast_quant_prepack_batch, max_rotary_rows=target_rows, rope_config=rope_config
+        )
         tensor_locations = {**emb_locs, **target_locs}
-        dflash_locs = gb.build_dflash2_from_hf(dflash_dir, out_pkg, tensor_locations, fast_quant_prepack_batch)
+        dflash_locs = gb.build_dflash2_from_hf(
+            dflash_dir, out_pkg, tensor_locations, fast_quant_prepack_batch, max_position=draft_rows
+        )
         tensor_locations.update(dflash_locs)
         gb.write_weights_pool_txt(out_pkg, tensor_locations)
-        gb.save_bank_metadata_to_dir(out_pkg, tensor_locations, embedded_weights)
+        gb.save_bank_metadata_to_dir(out_pkg, tensor_locations, embedded_weights, positions)
 
         for tok_fn in ("tokenizer.json", "tokenizer_config.json", "chat_template.jinja", "generation_config.json"):
             src_tok = hf_dir / tok_fn
@@ -2718,7 +2774,18 @@ def _prepare_procedural_base_assets(
         )
 
     kv_scales = gb.load_calibrated_kv_scales(kv_scale_file)
-    model = gb.build_target_model_proto(tensor_locations, embedded_weights, kv_scales=kv_scales)
+    cache_args = {}
+    if capacity is not None:
+        cache_args.update(
+            max_total_sequence_length=capacity.kv_capacity,
+            indexer_state_capacity_attr=capacity.state_capacity,
+        )
+        if capacity.cache_layout == "fixed":
+            cache_args.update(kv_capacity=capacity.kv_capacity, state_capacity=capacity.state_capacity)
+    model = gb.build_target_model_proto(tensor_locations, embedded_weights, kv_scales=kv_scales, **cache_args)
+    metadata = {p.key: p.value for p in model.metadata_props}
+    metadata["qwen38.position_config"] = json.dumps(positions, sort_keys=True)
+    helper.set_model_props(model, metadata)
     return model, prof_path
 
 
@@ -2760,11 +2827,33 @@ def build_rc5_package(
     link_root: Path | None = None,
     copy: bool = False,
     extra_meta: dict | None = None,
+    rope_config: RopeConfig = DEFAULT_ROPE,
+    capacity: ContextCapacity | None = None,
+    tactic_cache_dir: Path | None = None,
 ) -> dict:
     """Build one self-contained Qwen3.8-Flash-Next RC5 `(x INT4 + y INT3 + z INT2)` package supporting GPU & QMoE offload."""
     t0 = time.time()
     base_pkg_resolved = base_pkg.resolve() if base_pkg is not None else None
     reuse_resolved = reuse_banks_from.resolve() if reuse_banks_from is not None else None
+    if rope_config != RopeConfig() and capacity is None:
+        raise ValueError("An explicit max-context-length is required with a RoPE override")
+    if base_pkg is not None and (capacity is not None or rope_config != RopeConfig()):
+        raise ValueError("Use --reuse-banks-from, not --base-pkg, to construct configurable positional graphs")
+    if capacity is not None and context_tiers:
+        raise ValueError("Explicit capacity exports contain one target graph; omit --context-tiers")
+    if rope_config.rope_type == "yarn":
+        yarn_parameters(rope_config)
+    if capacity is not None and tactic_cache_dir is None:
+        tactic_cache_dir = out_pkg.parent / f"{out_pkg.name}-cache"
+    if tactic_cache_dir is not None:
+        cache = tactic_cache_dir.resolve()
+        for model_path in (out_pkg, base_pkg, reuse_banks_from, hf_dir, dflash_dir):
+            if model_path is not None:
+                root = model_path.resolve()
+                if cache == root or cache.is_relative_to(root) or root.is_relative_to(cache):
+                    raise ValueError(
+                        "--tactic-cache-dir must be outside and separate from all model/checkpoint directories"
+                    )
     reject_output_overlap(
         out_pkg,
         {
@@ -2779,8 +2868,32 @@ def build_rc5_package(
             "--ort-lib-dir": ort_lib_dir,
             "--plane-lib": plane_lib,
             "--kl-study-json": study_json,
+            "--tactic-cache-dir": tactic_cache_dir,
         },
     )
+
+    if base_pkg_resolved is not None:
+        src_model_path = base_pkg_resolved / "model.onnx"
+        if not src_model_path.is_file():
+            raise FileNotFoundError(f"Missing target model.onnx in --base-pkg: {src_model_path}")
+        if not (base_pkg_resolved / "genai_config.json").is_file():
+            raise FileNotFoundError(
+                f"Missing genai_config.json in --base-pkg: {base_pkg_resolved / 'genai_config.json'}"
+            )
+        model = onnx.load(str(src_model_path), load_external_data=False)
+        props = {p.key: p.value for p in model.metadata_props}
+        positions = json.loads(props.get("qwen38.position_config", "{}"))
+        if positions.get("capacity") is not None:
+            raise ValueError(
+                "--base-pkg cannot convert an explicit-capacity package: legacy conversion resets graph capacity "
+                "to 262K without reconciling the runtime configuration. Use --reuse-banks-from with "
+                "--max-context-length and --cache-layout instead."
+            )
+        for n in model.graph.node:
+            if n.op_type == "QMoEOffload":
+                raise ValueError(
+                    f"{src_model_path} contains legacy QMoEOffload nodes; rebuild with standard com.microsoft::QMoE nodes"
+                )
 
     if out_pkg.exists() or out_pkg.is_symlink():
         if out_pkg.is_symlink() or out_pkg.is_file():
@@ -2794,22 +2907,9 @@ def build_rc5_package(
 
     procedural_prof: Path | None = None
     if base_pkg_resolved is not None:
-        src_model_path = base_pkg_resolved / "model.onnx"
-        if not src_model_path.is_file():
-            raise FileNotFoundError(f"Missing target model.onnx in --base-pkg: {src_model_path}")
-        if not (base_pkg_resolved / "genai_config.json").is_file():
-            raise FileNotFoundError(
-                f"Missing genai_config.json in --base-pkg: {base_pkg_resolved / 'genai_config.json'}"
-            )
-        model = onnx.load(str(src_model_path), load_external_data=False)
-        for n in model.graph.node:
-            if n.op_type == "QMoEOffload":
-                raise ValueError(
-                    f"{src_model_path} contains legacy QMoEOffload nodes; rebuild with standard com.microsoft::QMoE nodes"
-                )
         ensure_rc5_speculative_prefix_commit(model)
         fused_routers = fuse_router_gate_up_proj(model)
-        ensure_unified_dynamic_cache_model(model)
+        ensure_unified_dynamic_cache_model(model, 262152, 8259)
     else:
         eff_hf_dir = hf_dir or DEFAULT_HF_DIR
         eff_dflash_dir = dflash_dir or DEFAULT_DFLASH_DIR
@@ -2821,6 +2921,8 @@ def build_rc5_package(
             kv_scale_file=kv_scale_file,
             expert_profile=expert_profile,
             copy=copy,
+            rope_config=rope_config,
+            capacity=capacity,
         )
         fused_routers = 48
 
@@ -3004,6 +3106,8 @@ def build_rc5_package(
         bs4=bs4,
         bs3=bs3,
         bs2=bs2,
+        capacity=capacity,
+        tactic_cache_dir=tactic_cache_dir,
     )
 
     if base_pkg_resolved is not None:
@@ -3101,9 +3205,10 @@ def build_rc5_package(
             )
         link_file(src_b, dst_b, copy=copy)
 
-    onnx.save_model(model, str(out_pkg / "model.onnx"), save_as_external_data=False)
+    target_filename = capacity.graph_filename if capacity else "model.onnx"
+    onnx.save_model(model, str(out_pkg / target_filename), save_as_external_data=False)
 
-    built_tiers: list[str] = ["unified_32k_128k_256k"]
+    built_tiers: list[str] = [target_filename if capacity else "unified_32k_128k_256k"]
     for tier in context_tiers:
         t_norm = tier.strip().lower()
         if not t_norm or t_norm in ("unified", "all"):
@@ -3117,7 +3222,7 @@ def build_rc5_package(
 
     (out_pkg / "genai_config.json").write_text(json.dumps(config, indent=2) + "\n")
 
-    sz_info = compute_package_referenced_size(out_pkg)
+    sz_info = compute_package_referenced_size(out_pkg, target_filename)
     ref_manifest = (
         json.loads((base_pkg_resolved / "package_manifest.json").read_text())
         if (base_pkg_resolved is not None and (base_pkg_resolved / "package_manifest.json").is_file())
@@ -3162,6 +3267,33 @@ def build_rc5_package(
             config.get("model", {}).get("qwen38_graph", {}).get("prefill", RC5_PREFILL_CONFIG)
         ),
     }
+    if capacity is not None:
+        manifest["position_config"] = position_config(
+            rope_config, capacity.positional_rows, capacity.positional_rows, capacity
+        )
+        manifest["vram_requirements"] = {
+            "qualification_required": True,
+            "note": "The original 128K/256K profile estimator is not admission data for an explicit context export.",
+        }
+        manifest["export_dependencies"] = {
+            "torch": torch.__version__,
+            "numpy": np.__version__,
+            "onnx": onnx.__version__,
+        }
+        manifest["exporter_sources_sha256"] = {
+            name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
+            for name in ("build_package.py", "graph_builder.py", "rope.py", "precision_options.py", "package_config.py")
+        }
+        if reuse_resolved is not None:
+            manifest["reused_bank_provenance"] = {
+                "source": str(reuse_resolved),
+                "metadata_sha256": {
+                    name: hashlib.sha256((reuse_resolved / name).read_bytes()).hexdigest()
+                    for name in ("package_manifest.json", "bank_metadata.json")
+                    if (reuse_resolved / name).is_file()
+                },
+                "quantized_banks": sorted(needed_banks),
+            }
     if len(layers_3) > 0:
         manifest["decoder_session_options_added_in_rc5"] = dict(INT3_DEQUANT_SESSION_OPTIONS)
     if "ort_provider" in ref_manifest:
@@ -3220,6 +3352,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Source/base Qwen3.8-Flash-Next RC5 (or RC4/RC2) package folder",
     )
     ap.add_argument("--out", type=Path, default=None, help="Output package directory (for single-package builds)")
+    ap.add_argument(
+        "--max-context-length", type=int, default=None, help="Logical context capacity, independent of RoPE scaling"
+    )
+    ap.add_argument("--rope-config", type=Path, default=None, help="JSON file with explicit target RoPE parameters")
+    ap.add_argument("--cache-layout", choices=("unified", "fixed"), default="unified")
+    ap.add_argument(
+        "--tactic-cache-dir", type=Path, default=None, help="Writable tactic cache outside the model package"
+    )
     ap.add_argument(
         "--models-root",
         type=Path,
@@ -3359,6 +3499,25 @@ def main(argv: list[str] | None = None) -> int:
             f"--prefill-chunk ({args.prefill_chunk}) and --prefill-chunk-tokens ({args.prefill_chunk_tokens}) disagree"
         )
     prefill_chunk = args.prefill_chunk if args.prefill_chunk is not None else args.prefill_chunk_tokens
+    try:
+        rope_config = (
+            RopeConfig.from_dict(json.loads(args.rope_config.read_text())) if args.rope_config else RopeConfig()
+        )
+        capacity = None
+        if args.max_context_length is not None or args.cache_layout == "fixed" or args.rope_config is not None:
+            capacity = ContextCapacity(
+                DEFAULT_MAX_CONTEXT_LENGTH if args.max_context_length is None else args.max_context_length,
+                args.cache_layout,
+            )
+        pcfg = resolve_precision_config(args)
+        if capacity is not None and pcfg.to_dict() != PrecisionConfig().to_dict():
+            raise ValueError("Configurable RoPE/context exports currently support only default component precision")
+        if args.base_pkg is not None and capacity is not None:
+            raise ValueError("Use --reuse-banks-from for configurable RoPE/context export, not --base-pkg")
+        if capacity is not None and args.context_tiers:
+            raise ValueError("Explicit capacity exports contain one target graph; omit --context-tiers")
+    except (ValueError, OSError) as exc:
+        parser.error(str(exc))
 
     stop_ids: list[int] | None = None
     if args.stop_token_ids is not None:
@@ -3435,6 +3594,9 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("--out or --models-root is required")
         build_jobs.append((out_dir, spec))
 
+    for out_dir, _ in build_jobs:
+        reject_output_overlap(out_dir, {"--rope-config": args.rope_config})
+
     try:
         base_pcfg = resolve_precision_config(args)
         job_pcfgs = []
@@ -3446,6 +3608,8 @@ def main(argv: list[str] | None = None) -> int:
                 if spec.get("consolidate_data_files"):
                     spec_args.consolidate_data_files = True
                 pcfg = resolve_precision_config(spec_args)
+            if capacity is not None and pcfg.to_dict() != PrecisionConfig().to_dict():
+                raise ValueError("Configurable RoPE/context exports currently support only default component precision")
             job_pcfgs.append(pcfg)
     except ValueError as e:
         parser.error(str(e))
@@ -3489,6 +3653,9 @@ def main(argv: list[str] | None = None) -> int:
             uniform_profile_slots=args.uniform_profile_slots,
             link_root=args.link_root,
             copy=args.copy,
+            rope_config=rope_config,
+            capacity=capacity,
+            tactic_cache_dir=args.tactic_cache_dir,
         )
         if pcfg.is_non_default():
             apply_precision_config_to_package(out_dir, pcfg, hf_dir=args.hf_dir or DEFAULT_HF_DIR)
