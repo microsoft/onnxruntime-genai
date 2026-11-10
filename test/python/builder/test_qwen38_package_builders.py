@@ -967,3 +967,25 @@ def test_consolidate_package_external_data_merges_and_page_aligns(tmp_path):
         assert ext_map["w_b"] == {"location": "model.onnx.data", "offset": "4096", "length": "200"}
 
 
+def test_rc6_fp32_gdn_kl_calibration_and_presets(builders):
+    pkg = builders.pkg
+    l4, l3, l2, mode = pkg.select_qmoe_layers_by_kl(2, 14, 32, kl_mode="dp23_fp32")
+    assert mode == "dp23_fp32"
+    assert l4 == [28, 32]
+    assert l3 == [1, 4, 14, 20, 21, 22, 31, 33, 35, 38, 39, 43, 45, 46]
+    assert len(l2) == 32
+
+    top16_4, top16_3, top16_2, top16_mode = pkg.select_qmoe_layers_by_kl(16, 32, 0, kl_mode="rank_fp32")
+    assert top16_mode == "rank_fp32"
+    assert top16_4 == [0, 1, 2, 3, 4, 5, 6, 7, 18, 24, 26, 27, 28, 29, 32, 33]
+    assert len(top16_3) == 32 and top16_2 == []
+
+    spec = pkg.resolve_preset_spec("rc6_2b375")
+    assert spec["pkg_name"] == "qwen_flash_next_rc6_2b375_fp32_fp16kv_v2"
+    assert (spec["x"], spec["y"], spec["z"]) == (2, 14, 32)
+    assert spec["kl_mode"] == "dp23_fp32"
+    assert spec["precision_profile"] == "fp32_fp16kv_v2"
+    assert spec["consolidate_data_files"] is True
+
+
+

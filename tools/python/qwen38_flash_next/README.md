@@ -267,6 +267,13 @@ Both `build_package.py` and `build_package_gguf.py` accept `--precision-profile 
   - With `--consolidate-data-files` (`consolidate_package_external_data`), all target decoder external `.data` files are merged into a single `4096`-byte page-aligned `model.onnx.data` file (compatible with `PosixEnv::MapFileIntoMemory` and `PromoteFileMappingToSharedReadOnly` for QMoE offload), leaving only 3 `.data` files in the package (`embedding.onnx.data`, `dflash2.onnx.data`, and `model.onnx.data`).
 
 ```bash
+# Build RC6 dual-ONNX packages (FP32-GDN calibrated QMoE + model.onnx [FP16 KV] + model_int8kv.onnx [INT8 KV] + consolidated model.onnx.data):
+python tools/python/qwen38_flash_next/build_package.py \
+  --hf-dir /data/tlwu/Qwen3.8-Flash-Next \
+  --dflash-dir /data/tlwu/Qwen3.8-Flash-Next-DFlash2 \
+  --preset rc6_2b375_fp32_fp16kv_v2 \
+  --out /data/tlwu/qwen_flash_next_rc6_2b375_fp32_fp16kv_v2
+
 # Build rc5_top16_fp32_fp16kv_v2, rc5_all_int4_fp32_fp16kv_v2, and rc5_2b375_fp32_fp16kv_v2
 # (emits both model.onnx [FP16 KV] and model_int8kv.onnx [INT8 KV] + consolidated model.onnx.data):
 python tools/python/qwen38_flash_next/build_package.py \
