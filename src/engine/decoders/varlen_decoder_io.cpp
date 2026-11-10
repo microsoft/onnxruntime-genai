@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <iomanip>
 #include <limits>
 #include <numeric>
 #include <stdexcept>
@@ -13,6 +14,7 @@
 
 #include "../../models/decoder_only.h"
 #include "../../models/utils.h"
+#include "../../logging.h"
 #include "../paged_key_value_cache.h"
 #include "../sequence_positions.h"
 
@@ -1164,6 +1166,32 @@ std::vector<DeviceSpan<float>> VarlenDecoderIO::ProcessLogits() {
   std::vector<DeviceSpan<float>> logits_vector;
   const std::vector<int64_t> logits_shape{static_cast<int64_t>(valid_token_indices_.size()),
                                           vocab_size};
+  const auto log_selected_logits = [&]() {
+    if (!g_log.enabled || !g_log.model_logits) {
+      return;
+    }
+    auto& output = Log("engine_selected_logits");
+    const auto previous_precision = output.precision();
+    output << std::setprecision(std::numeric_limits<float>::max_digits10) << '\n';
+    for (size_t row_index = 0; row_index < logits_vector.size(); ++row_index) {
+      const auto values = logits_vector[row_index].CopyDeviceToCpu();
+      std::vector<size_t> candidates(values.size());
+      std::iota(candidates.begin(), candidates.end(), size_t{0});
+      const size_t count = std::min<size_t>(8, candidates.size());
+      std::partial_sort(candidates.begin(), candidates.begin() + count, candidates.end(),
+                        [&](size_t left, size_t right) { return values[left] > values[right]; });
+      output << "{\"row\":" << row_index << ",\"packed_index\":" << valid_token_indices_[row_index]
+             << ",\"top\":[";
+      for (size_t candidate_index = 0; candidate_index < count; ++candidate_index) {
+        if (candidate_index != 0) output << ',';
+        const size_t token = candidates[candidate_index];
+        output << "{\"token\":" << token << ",\"logit\":" << values[token] << '}';
+      }
+      output << "]}\n";
+    }
+    output.precision(previous_precision);
+    output.flush();
+  };
 
   const bool requires_cast = active_logits_->GetType() != Ort::TypeToTensorType<float>;
   DeviceSpan<float> logits_fp32_span;
@@ -1189,6 +1217,7 @@ std::vector<DeviceSpan<float>> VarlenDecoderIO::ProcessLogits() {
     for (size_t i = 0; i < valid_token_indices_.size(); ++i) {
       logits_vector.push_back(logits_fp32_span.subspan(i * vocab_size, vocab_size));
     }
+    log_selected_logits();
     return logits_vector;
   }
 
@@ -1206,6 +1235,7 @@ std::vector<DeviceSpan<float>> VarlenDecoderIO::ProcessLogits() {
     }
   }
 
+  log_selected_logits();
   return logits_vector;
 }
 
