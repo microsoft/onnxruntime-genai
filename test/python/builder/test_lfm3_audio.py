@@ -310,6 +310,21 @@ def test_loads_through_the_lfm3_auto_class(monkeypatch, tmp_path, options, loads
     assert table.shape == (VOCAB_SIZE, TEXT_HIDDEN_SIZE)
 
 
+def test_base_revision_reaches_every_checkpoint_read(monkeypatch, tmp_path):
+    mixin, revisions = importlib.import_module("builders.lfm3_audio").FeatureExtractionMixin, []
+    read = mixin.get_feature_extractor_dict
+    monkeypatch.setattr(
+        mixin,
+        "get_feature_extractor_dict",
+        staticmethod(lambda *a, **kw: revisions.append(kw["revision"]) or read(*a, **kw)),
+    )
+    model = make_pipeline(tmp_path, base_revision="0123abcd")
+
+    # Model.load_weights pins the load to the revision of the part that loads
+    assert [part.revision for part in (model.speech, model.embedding, model.decoder)] == ["0123abcd"] * 3
+    assert revisions == ["0123abcd"]
+
+
 def run_embedding(tmp_path, ids, features):
     session = ort.InferenceSession(str(tmp_path / "out" / "embeddings.onnx"), providers=["CPUExecutionProvider"])
     return session.run(None, {"input_ids": np.array(ids, np.int64), "audio_features": features})[0]

@@ -590,7 +590,7 @@ class LFM2VLModel:
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         # The remaining options configure the decoder
-        options = {key: extra_options[key] for key in ("hf_token", "hf_remote") if key in extra_options}
+        options = {key: extra_options[key] for key in ("hf_token", "hf_remote", "base_revision") if key in extra_options}
         # Without the checkpoint's quantization_config, Model loads them through transformers, not QuantModel
         unquantized_config = copy.deepcopy(config)
         if hasattr(unquantized_config, "quantization_config"):
@@ -627,7 +627,10 @@ class LFM2VLModel:
 
     def read_image_processor(self, config, cache_dir):
         image_processor, _ = ImageProcessingMixin.get_image_processor_dict(
-            self.decoder.model_name_or_path, cache_dir=cache_dir, token=self.decoder.hf_token
+            self.decoder.model_name_or_path,
+            cache_dir=cache_dir,
+            token=self.decoder.hf_token,
+            revision=self.decoder.revision,
         )
         # transformers derives max_num_patches; without image splitting it is max_image_tokens * downsample_factor**2
         image_processor.setdefault(

@@ -554,7 +554,11 @@ class LFM2AudioModel(LFM2Model):
             from huggingface_hub import snapshot_download
 
             checkpoint_dir = snapshot_download(
-                source, cache_dir=self.cache_dir, token=self.hf_token, allow_patterns=["*.safetensors", "*.json"]
+                source,
+                cache_dir=self.cache_dir,
+                token=self.hf_token,
+                revision=self.revision,
+                allow_patterns=["*.safetensors", "*.json"],
             )
 
         index_path = os.path.join(checkpoint_dir, "model.safetensors.index.json")

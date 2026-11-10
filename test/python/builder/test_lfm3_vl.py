@@ -421,6 +421,24 @@ def test_embedding_model_writes_the_features_over_the_image_tokens(tmp_path):
     np.testing.assert_array_equal(embeds, expected.masked_scatter(mask, torch.from_numpy(features)).numpy())
 
 
+def test_base_revision_reaches_every_checkpoint_read(monkeypatch, tmp_path):
+    config = stand_in_config(tmp_path)
+    write_image_processor(tmp_path)
+    mixin, revisions = importlib.import_module("builders.lfm3_vl").ImageProcessingMixin, []
+    read = mixin.get_image_processor_dict
+    monkeypatch.setattr(
+        mixin,
+        "get_image_processor_dict",
+        staticmethod(lambda *a, **kw: revisions.append(kw["revision"]) or read(*a, **kw)),
+    )
+    options = {"exclude_embeds": True, "base_revision": "0123abcd"}
+    model = LFM3VLModel(config, ir.DataType.FLOAT, ir.DataType.FLOAT, "cpu", str(tmp_path / "cache"), options)
+
+    # Model.load_weights pins the load to the revision of the part that loads
+    assert [part.revision for part in (model.vision, model.embedding, model.decoder)] == ["0123abcd"] * 3
+    assert revisions == ["0123abcd"]
+
+
 @pytest.mark.parametrize(
     "exclude_embeds, builder_name, model_type",
     [(True, "LFM3VLModel", "lfm3_vl"), (False, "LFM3Model", "lfm3")],
