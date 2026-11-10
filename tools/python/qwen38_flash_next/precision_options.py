@@ -434,7 +434,11 @@ def compute_f32_rope_caches(max_rotary_rows: int = 262144) -> tuple[bytes, bytes
 
 
 def write_gguf_ple_table(out_dir: Path, engram_kind: str, engram_gguf: Path | None = None) -> str:
-    """Write `ple_table.txt` for `q8_0` (`scale -8.0`) or `iq4_nl` (`scale -20.0`) engram GGUF."""
+    """Write `ple_table.txt` for a `q8_0` or `iq4_nl` engram GGUF.
+
+    The table names its format with a `format` line and has no `scale` line: GGUF blocks carry their own fp16 scales, and a
+    runtime without the `format` line refuses the table instead of decoding it as INT8.
+    """
     if engram_gguf is None:
         engram_gguf = DEFAULT_ENGRAM_Q8_GGUF if engram_kind == "q8_0" else DEFAULT_ENGRAM_IQ4_GGUF
     if not engram_gguf.is_file():
@@ -447,11 +451,11 @@ def write_gguf_ple_table(out_dir: Path, engram_kind: str, engram_gguf: Path | No
     ggml_type = engram_ts[0]["ggml_type"]
     if ggml_type == 8:
         engram_dst_name = "Qwen3.8-Flash-Next-engram-Q8_0.gguf"
-        ple_scale = "-8.0"
+        ple_format = "q8_0"
         ple_row_bytes = (160 // 32) * 34
     elif ggml_type == 20:
         engram_dst_name = "Qwen3.8-Flash-Next-engram-IQ4_NL.gguf"
-        ple_scale = "-20.0"
+        ple_format = "iq4_nl"
         ple_row_bytes = (160 // 32) * 18
     else:
         raise ValueError(f"Unsupported engram ggml_type={ggml_type}")
@@ -473,7 +477,7 @@ def write_gguf_ple_table(out_dir: Path, engram_kind: str, engram_gguf: Path | No
         "head_dim 160",
         "heads_per_ngram 8",
         "eos 248044",
-        f"scale {ple_scale}",
+        f"format {ple_format}",
         "mult 23703573157769 20109073645365 8052911324071 0",
         "vocab 20000003 20000023 20000033 20000047 20000059 20000063 20000069 20000077 20000081 20000093 20000107 20000147 20000153 20000159 20000161 20000171",
         "offset 0 20000003 40000026 60000059 80000106 100000165 120000228 140000297 160000374 180000455 200000548 220000655 240000802 260000955 280001114 300001275",

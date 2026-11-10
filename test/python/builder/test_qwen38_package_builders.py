@@ -1161,17 +1161,37 @@ def test_aligned_blob_writer_page_aligns_and_replaces_existing_file(tmp_path):
     assert (tmp_path / "attn_consts.data").read_bytes() == b"a" * 10 + b"\x00" * 4086 + b"b" * 3
 
 
-def test_gguf_ple_table_is_copied_into_output_when_hard_link_fails(tmp_path, monkeypatch):
-    po = import_precision_options()
+def make_engram_gguf(path: Path, ggml_type: int, payload: bytes) -> int:
+    """Writes a GGUF file holding only per_layer_token_embd.weight and returns its data offset."""
     name = b"per_layer_token_embd.weight"
     header = struct.pack("<4sIQQ", b"GGUF", 3, 1, 1)
     header += struct.pack("<Q", 17) + b"general.alignment" + struct.pack("<II", 4, 64)
     header += struct.pack("<Q", len(name)) + name + struct.pack("<I", 2) + struct.pack("<QQ", 160, 4)
-    header += struct.pack("<IQ", 8, 0)
+    header += struct.pack("<IQ", ggml_type, 0)
     data_offset = (len(header) + 63) // 64 * 64
+    path.write_bytes(header + b"\x00" * (data_offset - len(header)) + payload)
+    return data_offset
+
+
+@pytest.mark.parametrize(("engram_kind", "ggml_type"), [("q8_0", 8), ("iq4_nl", 20)])
+def test_gguf_ple_table_names_its_format_instead_of_a_sentinel_scale(tmp_path, engram_kind, ggml_type):
+    po = import_precision_options()
+    src = tmp_path / "engram.gguf_file"
+    make_engram_gguf(src, ggml_type, b"\x11" * 64)
+    out = tmp_path / "out"
+    out.mkdir()
+    po.write_gguf_ple_table(out, engram_kind, src)
+    keys = [ln.split()[0] for ln in (out / "ple_table.txt").read_text().splitlines()]
+    assert f"format {engram_kind}" in (out / "ple_table.txt").read_text().splitlines()
+    assert keys.count("format") == 1
+    assert "scale" not in keys
+
+
+def test_gguf_ple_table_is_copied_into_output_when_hard_link_fails(tmp_path, monkeypatch):
+    po = import_precision_options()
     src = tmp_path / "src" / "engram.gguf_file"
     src.parent.mkdir()
-    src.write_bytes(header + b"\x00" * (data_offset - len(header)) + b"\x11" * 680)
+    data_offset = make_engram_gguf(src, 8, b"\x11" * 680)
     out = tmp_path / "out"
     out.mkdir()
 
