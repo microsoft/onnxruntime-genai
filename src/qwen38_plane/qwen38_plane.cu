@@ -524,22 +524,20 @@ static cudaError_t ensure_staged_buffers(StagedPleWorkspace& ws, size_t rows, si
   return cudaSuccess;
 }
 
-__host__ __device__ static inline bool is_gguf_iq4_nl_scale(float scale) {
-  return scale == -20.0f;
+// The pad_ word of a table (qwen38_plane_abi.h) holds whether its rows are gathered on the host and the format of its shards;
+// every reader of the word goes through these two.
+static inline bool ple_is_staged(int pad) { return (pad & QWEN38_PLANE_PLE_STAGED) != 0; }
+
+__host__ __device__ static inline int ple_format(int pad) { return QWEN38_PLANE_PLE_FORMAT_OF(pad); }
+
+__host__ __device__ static inline bool ple_format_is_gguf(int format) {
+  return format == QWEN38_PLANE_PLE_FORMAT_IQ4_NL || format == QWEN38_PLANE_PLE_FORMAT_Q8_0;
 }
 
-__host__ __device__ static inline bool is_gguf_q8_0_scale(float scale) {
-  return scale == -8.0f;
-}
-
-__host__ __device__ static inline bool is_gguf_block_ple_scale(float scale) {
-  return scale == -20.0f || scale == -8.0f;
-}
-
-// Where head `h` of the PLE row for the n-gram (c0, c1, tok) sits in the host table.
-__host__ __device__ static inline int ple_head_row_bytes(int head_dim, float scale) {
-  if (scale == -20.0f) return (head_dim / 32) * 18;
-  if (scale == -8.0f) return (head_dim / 32) * 34;
+// The bytes of one head of a PLE row: head_dim / 32 GGUF blocks, or head_dim FP8 / INT8 codes.
+__host__ __device__ static inline int ple_head_row_bytes(int head_dim, int format) {
+  if (format == QWEN38_PLANE_PLE_FORMAT_IQ4_NL) return (head_dim / 32) * 18;
+  if (format == QWEN38_PLANE_PLE_FORMAT_Q8_0) return (head_dim / 32) * 34;
   return head_dim;
 }
 
@@ -567,10 +565,12 @@ __device__ static __forceinline__ __nv_bfloat16 decode_ple_q8_0_elem(const unsig
   return __float2bfloat16_rn(d * static_cast<float>(q));
 }
 
-__device__ static __forceinline__ __nv_bfloat16 decode_ple_gguf_elem(const unsigned char* head_src, int c, float scale) {
-  return (scale == -8.0f) ? decode_ple_q8_0_elem(head_src, c) : decode_ple_iq4nl_elem(head_src, c);
+// Value `c` of a head of a GGUF table (ple_format_is_gguf), whose blocks start at `head_src`.
+__device__ static __forceinline__ __nv_bfloat16 decode_ple_gguf_elem(const unsigned char* head_src, int c, int format) {
+  return (format == QWEN38_PLANE_PLE_FORMAT_Q8_0) ? decode_ple_q8_0_elem(head_src, c) : decode_ple_iq4nl_elem(head_src, c);
 }
 
+// Where head `h` of the PLE row for the n-gram (c0, c1, tok) sits in the host table.
 static inline const unsigned char* resolve_ple_head_ptr(const PleParams& HP, int h, i64 tok, i64 c0, i64 c1) {
   unsigned long long mixed = (unsigned long long)tok * (unsigned long long)HP.mult[0];
   mixed ^= (unsigned long long)c1 * (unsigned long long)HP.mult[1];
@@ -589,7 +589,7 @@ static inline const unsigned char* resolve_ple_head_ptr(const PleParams& HP, int
   }
   const i64 first = lo == 0 ? 0 : HP.shard_end[lo - 1];
   const i64 row_idx = id - first;
-  const size_t rb = (size_t)ple_head_row_bytes(HP.head_dim, HP.scale);
+  const size_t rb = (size_t)ple_head_row_bytes(HP.head_dim, ple_format(HP.pad_));
   return HP.shard_ptr[lo] + (size_t)row_idx * rb;
 }
 
@@ -609,7 +609,7 @@ static inline void host_gather_ple_row(StagedPleWorkspace& ws, i64 tok, i64 s_c0
   const PleParams& HP = ws.params;
   const i64 c1 = s_c1;
   const i64 c0 = (c1 == HP.eos) ? HP.eos : s_c0;
-  const int rb = ple_head_row_bytes(HP.head_dim, HP.scale);
+  const int rb = ple_head_row_bytes(HP.head_dim, ple_format(HP.pad_));
   const size_t total_bytes = (size_t)HP.n_heads * (size_t)rb;
   size_t cache_slot = 0;
   const bool use_cache = (ws.ngram_cache_data != nullptr && total_bytes <= StagedPleWorkspace::kMaxRowBytes);
@@ -638,7 +638,7 @@ static inline void host_gather_ple_row(StagedPleWorkspace& ws, i64 tok, i64 s_c0
 static inline void host_gather_ple_rows_batch(StagedPleWorkspace& ws, int rows, const i64* d_toks, const i64* d_c0s,
                                               const i64* d_c1s, unsigned char* fp8_base, size_t row_stride) {
   const PleParams& HP = ws.params;
-  const int rb = ple_head_row_bytes(HP.head_dim, HP.scale);
+  const int rb = ple_head_row_bytes(HP.head_dim, ple_format(HP.pad_));
   const int nh = HP.n_heads;
   const size_t total_bytes = (size_t)nh * (size_t)rb;
   const bool use_cache = (ws.ngram_cache_data != nullptr && total_bytes <= StagedPleWorkspace::kMaxRowBytes);
@@ -707,7 +707,7 @@ static inline void host_gather_ple_rows_batch(StagedPleWorkspace& ws, int rows, 
       ws.ngram_cache_valid[cache_slot] = 1;
     }
 #ifdef _WIN32
-    if (HP.pad_ != 0) {
+    if (ple_is_staged(HP.pad_)) {
       for (int k = 0; k < num_misses; ++k) {
         (void)VirtualUnlock(ranges[k].VirtualAddress, ranges[k].NumberOfBytes);
       }
@@ -762,7 +762,7 @@ struct PleGatherPool {
   static void GatherSpans(PleGatherTask* t) {
     StagedPleWorkspace& ws = *t->ws;
     const PleParams& HP = ws.params;
-    const int rb = ple_head_row_bytes(HP.head_dim, HP.scale);
+    const int rb = ple_head_row_bytes(HP.head_dim, ple_format(HP.pad_));
     const int nh = HP.n_heads;
     const size_t total_bytes = (size_t)nh * (size_t)rb;
     const bool use_cache = (ws.ngram_cache_data != nullptr && total_bytes <= StagedPleWorkspace::kMaxRowBytes);
@@ -826,7 +826,7 @@ struct PleGatherPool {
         memcpy(miss_dsts[k], miss_srcs[k], (size_t)rb);
       }
 #ifdef _WIN32
-      if (HP.pad_ != 0) {
+      if (ple_is_staged(HP.pad_)) {
         for (const auto& r : ranges) {
           (void)VirtualUnlock(r.VirtualAddress, r.NumberOfBytes);
         }
@@ -858,7 +858,7 @@ struct PleGatherPool {
     if (t.failed.load(std::memory_order_relaxed)) return cudaErrorMemoryAllocation;
 
     const PleParams& HP = ws.params;
-    const size_t total_bytes = (size_t)HP.n_heads * (size_t)ple_head_row_bytes(HP.head_dim, HP.scale);
+    const size_t total_bytes = (size_t)HP.n_heads * (size_t)ple_head_row_bytes(HP.head_dim, ple_format(HP.pad_));
     if (ws.ngram_cache_data != nullptr && total_bytes <= StagedPleWorkspace::kMaxRowBytes) {
       const int max_cache_rows = static_cast<int>(ws.cache_slots / 4);
       const int start_i = (n > max_cache_rows) ? (n - max_cache_rows) : 0;
@@ -953,7 +953,7 @@ static StagedPleWorkspace* resolve_staged_ple_workspace(const void* P, cudaStrea
     *out_error = err;
     return nullptr;
   }
-  if (dev_params.pad_ == 1) {
+  if (ple_is_staged(dev_params.pad_)) {
     for (auto& kv : g_host_ple_workspaces) {
       if (memcmp(&kv.second->params, &dev_params, sizeof(PleParams)) == 0) {
         g_dev_to_host_ple[P] = kv.first;
@@ -982,7 +982,7 @@ static StagedPleWorkspace* resolve_staged_ple_workspace(const void* P, cudaStrea
   return nullptr;
 }
 
-__global__ void k_prep_staged(i64 capacity, int n_heads, int head_dim, float scale, i64 tok, i64 pos, i64 s_c1,
+__global__ void k_prep_staged(i64 capacity, int n_heads, int head_dim, float scale, int format, i64 tok, i64 pos, i64 s_c1,
                               const unsigned char* fp8_row, i64* ctx_out, i64* input_ids, i64* position_ids,
                               int* committed, i64* past_pos, __nv_bfloat16* ple_out, i64* state) {
   const int tid = threadIdx.x;
@@ -996,15 +996,14 @@ __global__ void k_prep_staged(i64 capacity, int n_heads, int head_dim, float sca
       state[5] |= 1;
   }
   const int total = n_heads * head_dim;
-  const bool is_gguf_block = is_gguf_block_ple_scale(scale);
-  if (is_gguf_block) {
-    const int rb = ple_head_row_bytes(head_dim, scale);
+  if (ple_format_is_gguf(format)) {
+    const int rb = ple_head_row_bytes(head_dim, format);
 #pragma unroll
     for (int u = 0; u < 3; ++u) {
       const int j = tid + u * blockDim.x;
       if (j < total) {
         const int h = j / head_dim, c = j - h * head_dim;
-        ple_out[j] = decode_ple_gguf_elem(fp8_row + h * rb, c, scale);
+        ple_out[j] = decode_ple_gguf_elem(fp8_row + h * rb, c, format);
       }
     }
     if (tid == 0) {
@@ -1050,9 +1049,9 @@ struct StagedFoldRows {
 
 // One block per row of a folded step of a staged table: the graph inputs, the context and the PLE row of row `blockIdx.x`.
 // Only row 0 writes the committed length, and not at all for a null `committed`.
-__global__ void k_prep_fold_staged(i64 capacity, int n_heads, int head_dim, float scale, StagedFoldRows step, i64 base_pos,
-                                   const unsigned char* fp8_rows, i64* ctx_out, i64* input_ids, i64* position_ids,
-                                   int* committed, i64* past_pos, __nv_bfloat16* ple_out, i64* state) {
+__global__ void k_prep_fold_staged(i64 capacity, int n_heads, int head_dim, float scale, int format, StagedFoldRows step,
+                                   i64 base_pos, const unsigned char* fp8_rows, i64* ctx_out, i64* input_ids,
+                                   i64* position_ids, int* committed, i64* past_pos, __nv_bfloat16* ple_out, i64* state) {
   const int row = blockIdx.x;
   const int tid = threadIdx.x;
   const i64 tok = step.tok[row];
@@ -1071,15 +1070,14 @@ __global__ void k_prep_fold_staged(i64 capacity, int n_heads, int head_dim, floa
   const int total = n_heads * head_dim;
   const unsigned char* fp8_row = fp8_rows + (size_t)row * StagedPleWorkspace::kPrepRingRowBytes;
   __nv_bfloat16* out_row = ple_out + (size_t)row * total;
-  const bool is_gguf_block = is_gguf_block_ple_scale(scale);
-  if (is_gguf_block) {
-    const int rb = ple_head_row_bytes(head_dim, scale);
+  if (ple_format_is_gguf(format)) {
+    const int rb = ple_head_row_bytes(head_dim, format);
 #pragma unroll
     for (int u = 0; u < 3; ++u) {
       const int j = tid + u * blockDim.x;
       if (j < total) {
         const int h = j / head_dim, c = j - h * head_dim;
-        out_row[j] = decode_ple_gguf_elem(fp8_row + h * rb, c, scale);
+        out_row[j] = decode_ple_gguf_elem(fp8_row + h * rb, c, format);
       }
     }
     return;
@@ -1108,23 +1106,21 @@ __global__ void k_prep_fold_staged(i64 capacity, int n_heads, int head_dim, floa
   }
 }
 
-__global__ void k_ple_rows_staged(int n_heads, int head_dim, float scale, const unsigned char* fp8_rows, int n,
+__global__ void k_ple_rows_staged(int n_heads, int head_dim, float scale, int format, const unsigned char* fp8_rows, int n,
                                   i64 last_c1, i64 last_tok, i64* ctx_out, __nv_bfloat16* ple_out) {
   const int tid = threadIdx.x;
   const int i = blockIdx.x;
   const int total = n_heads * head_dim;
-  const bool is_gguf_block = is_gguf_block_ple_scale(scale);
-  const int row_bytes = n_heads * ple_head_row_bytes(head_dim, scale);
-  const unsigned char* src = fp8_rows + (size_t)i * row_bytes;
+  const int rb = ple_head_row_bytes(head_dim, format);
+  const unsigned char* src = fp8_rows + (size_t)i * (size_t)n_heads * (size_t)rb;
   __nv_bfloat16* out = ple_out + (size_t)i * total;
-  if (is_gguf_block) {
-    const int rb = ple_head_row_bytes(head_dim, scale);
+  if (ple_format_is_gguf(format)) {
 #pragma unroll
     for (int u = 0; u < 3; ++u) {
       const int j = tid + u * blockDim.x;
       if (j < total) {
         const int h = j / head_dim, c = j - h * head_dim;
-        out[j] = decode_ple_gguf_elem(src + h * rb, c, scale);
+        out[j] = decode_ple_gguf_elem(src + h * rb, c, format);
       }
     }
     if (i == n - 1 && tid == 0) {
@@ -1211,15 +1207,15 @@ __global__ void k_prep(const PleParams* P, const i64* tok_ptr, const i64* pos_pt
   const int hd = P->head_dim;
   const int total = P->n_heads * hd;
   const float scale = P->scale;
-  const bool is_gguf_block = is_gguf_block_ple_scale(scale);
-  if (is_gguf_block) {
-    const int rb = ple_head_row_bytes(hd, scale);
+  const int format = ple_format(P->pad_);
+  if (ple_format_is_gguf(format)) {
+    const int rb = ple_head_row_bytes(hd, format);
 #pragma unroll
     for (int u = 0; u < 3; ++u) {
       const int j = tid + u * blockDim.x;
       if (j < total) {
         const int h = j / hd, c = j - h * hd;
-        ple_out[j] = decode_ple_gguf_elem(s_src[h] + s_row[h] * rb, c, scale);
+        ple_out[j] = decode_ple_gguf_elem(s_src[h] + s_row[h] * rb, c, format);
       }
     }
     if (tid == 0) {
@@ -1350,15 +1346,15 @@ __global__ void __launch_bounds__(1024) k_prep_fold(const PleParams* P, const i6
   }
   __syncthreads();
   const float scale = P->scale;
-  const bool is_gguf_block = is_gguf_block_ple_scale(scale);
-  if (is_gguf_block) {
-    const int rb = ple_head_row_bytes(hd, scale);
+  const int format = ple_format(P->pad_);
+  if (ple_format_is_gguf(format)) {
+    const int rb = ple_head_row_bytes(hd, format);
 #pragma unroll
     for (int u = 0; u < 3; ++u) {
       const int j = tid + u * blockDim.x;
       if (j < total) {
         const int h = j / hd, c = j - h * hd;
-        row_ple[j] = decode_ple_gguf_elem(s_src[h] + s_row[h] * rb, c, scale);
+        row_ple[j] = decode_ple_gguf_elem(s_src[h] + s_row[h] * rb, c, format);
       }
     }
     if (tid == 0) {
@@ -1577,15 +1573,15 @@ __global__ void k_ple_rows(const PleParams* P, const i64* tokens, int n, const i
   const int total = P->n_heads * hd;
   __nv_bfloat16* out = ple_out + (size_t)i * total;
   const float scale = P->scale;
-  const bool is_gguf_block = is_gguf_block_ple_scale(scale);
-  if (is_gguf_block) {
-    const int rb = ple_head_row_bytes(hd, scale);
+  const int format = ple_format(P->pad_);
+  if (ple_format_is_gguf(format)) {
+    const int rb = ple_head_row_bytes(hd, format);
 #pragma unroll
     for (int u = 0; u < 3; ++u) {
       const int j = tid + u * blockDim.x;
       if (j < total) {
         const int h = j / hd, c = j - h * hd;
-        out[j] = decode_ple_gguf_elem(s_src[h] + s_row[h] * rb, c, scale);
+        out[j] = decode_ple_gguf_elem(s_src[h] + s_row[h] * rb, c, format);
       }
     }
     if (i == n - 1 && tid == 0) {
@@ -1943,9 +1939,9 @@ static int prep_staged_fold_rows(cudaStream_t stream, const void* P, int rows, c
   hook_launch();
   BeginLaunch();
   k_prep_fold_staged<<<rows, 1024, 0, stream>>>(ws->params.capacity, ws->params.n_heads, ws->params.head_dim,
-                                                ws->params.scale, step, ws->scalars[1], device_rows, (i64*)ctx_out,
-                                                (i64*)input_ids, (i64*)position_ids, (int*)committed, (i64*)past_pos,
-                                                (__nv_bfloat16*)ple_out, (i64*)state);
+                                                ws->params.scale, ple_format(ws->params.pad_), step, ws->scalars[1],
+                                                device_rows, (i64*)ctx_out, (i64*)input_ids, (i64*)position_ids,
+                                                (int*)committed, (i64*)past_pos, (__nv_bfloat16*)ple_out, (i64*)state);
   return LaunchStatus();
 }
 
@@ -2003,7 +1999,7 @@ QWEN38_PLANE_EXPORT void qwen38_plane_set_ple_host_params(const void* params) {
   const PleParams* hp = static_cast<const PleParams*>(params);
   std::lock_guard<std::mutex> lock(g_staged_ple_mu);
   g_dev_to_host_ple.clear();
-  if (hp->pad_ == 1) {
+  if (ple_is_staged(hp->pad_)) {
     auto& ws = g_host_ple_workspaces[params];
     if (!ws) {
       ws = std::make_unique<StagedPleWorkspace>();
@@ -2158,9 +2154,9 @@ QWEN38_PLANE_EXPORT int qwen38_plane_prep(void* s, const void* P, const void* to
       hook_launch();
       BeginLaunch();
       k_prep_staged<<<1, 1024, 0, stream>>>(ws->params.capacity, ws->params.n_heads, ws->params.head_dim,
-                                            ws->params.scale, tok, pos, s_c1, slot_dev, (i64*)ctx_out,
-                                            (i64*)input_ids, (i64*)position_ids, (int*)committed, (i64*)past_pos,
-                                            (__nv_bfloat16*)ple_out, (i64*)state);
+                                            ws->params.scale, ple_format(ws->params.pad_), tok, pos, s_c1, slot_dev,
+                                            (i64*)ctx_out, (i64*)input_ids, (i64*)position_ids, (int*)committed,
+                                            (i64*)past_pos, (__nv_bfloat16*)ple_out, (i64*)state);
       const int launch_err = LaunchStatus();
       if (launch_err != 0) {
         return launch_err;
@@ -2238,7 +2234,7 @@ QWEN38_PLANE_EXPORT int qwen38_plane_ple_rows(void* s, const void* P, const void
         return (int)cudaErrorStreamCaptureUnsupported;
       }
       const size_t total =
-          (size_t)ws->params.n_heads * (size_t)ple_head_row_bytes(ws->params.head_dim, ws->params.scale);
+          (size_t)ws->params.n_heads * (size_t)ple_head_row_bytes(ws->params.head_dim, ple_format(ws->params.pad_));
       err = staged_bind_device(*ws);
       if (err == cudaSuccess) {
         err = ensure_staged_buffers(*ws, (size_t)n, total);
@@ -2294,8 +2290,8 @@ QWEN38_PLANE_EXPORT int qwen38_plane_ple_rows(void* s, const void* P, const void
       hook_launch();
       BeginLaunch();
       k_ple_rows_staged<<<n, 1024, 0, stream>>>(ws->params.n_heads, ws->params.head_dim, ws->params.scale,
-                                                ws->prefill_fp8_dev, n, last_c1, last_tok, (i64*)ctx_out,
-                                                (__nv_bfloat16*)ple_out);
+                                                ple_format(ws->params.pad_), ws->prefill_fp8_dev, n, last_c1, last_tok,
+                                                (i64*)ctx_out, (__nv_bfloat16*)ple_out);
       const int launch_err = LaunchStatus();
       if (launch_err != 0) {
         return launch_err;

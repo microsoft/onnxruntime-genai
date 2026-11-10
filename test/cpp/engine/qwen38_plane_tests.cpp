@@ -199,23 +199,26 @@ std::string Int8PleTable() {
   return text;
 }
 
-std::string Iq4NlPleTable() {
+// kValidPleTable with `scale_line` in place of its scale line (which an empty string removes).
+std::string PleTableWithScaleLine(const std::string& scale_line) {
   std::string text = kValidPleTable;
-  const std::string fp8_scale = "scale 0.5";
-  text.replace(text.find(fp8_scale), fp8_scale.size(), "scale -20.0");
+  const std::string fp8_scale = "scale 0.5\n";
+  text.replace(text.find(fp8_scale), fp8_scale.size(), scale_line);
+  return text;
+}
+
+// The PLE table description with GGUF shards of `format` (iq4_nl or q8_0) instead of FP8 shards: the format line selects them
+// and takes the place of the scale line, which their blocks do not need, and a head holds five blocks of 32 values.
+std::string GgufPleTable(const std::string& format) {
+  std::string text = PleTableWithScaleLine("format " + format + "\n");
   const std::string head_dim = "head_dim 4";
   text.replace(text.find(head_dim), head_dim.size(), "head_dim 160");
   return text;
 }
 
-std::string Q8_0PleTable() {
-  std::string text = kValidPleTable;
-  const std::string fp8_scale = "scale 0.5";
-  text.replace(text.find(fp8_scale), fp8_scale.size(), "scale -8.0");
-  const std::string head_dim = "head_dim 4";
-  text.replace(text.find(head_dim), head_dim.size(), "head_dim 160");
-  return text;
-}
+std::string Iq4NlPleTable() { return GgufPleTable("iq4_nl"); }
+
+std::string Q8_0PleTable() { return GgufPleTable("q8_0"); }
 
 }  // namespace
 
@@ -337,15 +340,18 @@ TEST(Qwen38PleDescriptionTest, ParsesAValidTable) {
   ForLfAndCrlfLines(kValidPleTable, [&](const std::string& lines) {
     const auto description = ParseQwen38PleDescription(WriteFile(dir / "ple_table.txt", lines));
 
+    EXPECT_EQ(description.format, Qwen38PleFormat::kFp8);
     EXPECT_EQ(description.params.n_heads, 2);
     EXPECT_EQ(description.params.head_dim, 4);
     EXPECT_EQ(description.params.heads_per_ngram, 1);
     EXPECT_EQ(description.params.eos, 7);
     EXPECT_FLOAT_EQ(description.params.scale, 0.5f);
+    EXPECT_EQ(description.params.pad_, 0);
     EXPECT_EQ(description.params.mult[2], 3);
     EXPECT_EQ(description.params.vocab[1], 13);
     EXPECT_EQ(description.params.offset[1], 11);
     EXPECT_EQ(description.params.n_shards, 2);
+    EXPECT_EQ(Qwen38PleShardRowBytes(description), 4u);
     ASSERT_EQ(description.shards.size(), 2u);
     EXPECT_EQ(description.shards[0].path, "ple/a.safetensors");
     EXPECT_EQ(description.shards[0].offset, 128u);
@@ -369,7 +375,8 @@ TEST(Qwen38PleDescriptionTest, Iq4NlShardsRequireWholeBlocks) {
     ForLfAndCrlfLines(with_head_dim(head_dim), [&](const std::string& lines) {
       const auto description = ParseQwen38PleDescription(WriteFile(table_path, lines));
       EXPECT_EQ(description.params.head_dim, head_dim);
-      EXPECT_FLOAT_EQ(description.params.scale, -20.0f);
+      EXPECT_EQ(description.format, Qwen38PleFormat::kIq4Nl);
+      EXPECT_EQ(Qwen38PleShardRowBytes(description), static_cast<uint64_t>(head_dim / 32 * 18));
     });
   }
   for (const int head_dim : {1, 31, 33, 63, 159, 161}) {
@@ -394,7 +401,8 @@ TEST(Qwen38PleDescriptionTest, Q8_0ShardsRequireWholeBlocks) {
     ForLfAndCrlfLines(with_head_dim(head_dim), [&](const std::string& lines) {
       const auto description = ParseQwen38PleDescription(WriteFile(table_path, lines));
       EXPECT_EQ(description.params.head_dim, head_dim);
-      EXPECT_FLOAT_EQ(description.params.scale, -8.0f);
+      EXPECT_EQ(description.format, Qwen38PleFormat::kQ8_0);
+      EXPECT_EQ(Qwen38PleShardRowBytes(description), static_cast<uint64_t>(head_dim / 32 * 34));
     });
   }
   for (const int head_dim : {1, 31, 33, 63, 159, 161}) {
@@ -402,6 +410,212 @@ TEST(Qwen38PleDescriptionTest, Q8_0ShardsRequireWholeBlocks) {
       EXPECT_THROW(ParseQwen38PleDescription(WriteFile(table_path, lines)), std::runtime_error) << head_dim;
     });
   }
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+namespace {
+
+// Parses `text` as the PLE table description at `path`, which has to be refused with a message that contains `expected`.
+void ExpectPleTableRefused(const std::filesystem::path& path, const std::string& text, const std::string& expected) {
+  try {
+    ParseQwen38PleDescription(WriteFile(path, text));
+    ADD_FAILURE() << "the PLE table was accepted: " << text;
+  } catch (const std::runtime_error& error) {
+    const std::string message = error.what();
+    EXPECT_NE(message.find(expected), std::string::npos) << message << ", for the table: " << text;
+  }
+}
+
+// A scale line of a PLE table description and the scale it holds.
+struct PleScaleLine {
+  std::string line;
+  float scale;
+};
+
+}  // namespace
+
+// A table without a format line keeps the meaning it always had: the sign of its scale selects the decoder, so a negative scale
+// is the negative of the dequantization scale of INT8 shards (here of four values a head, which no GGUF block would allow).
+TEST(Qwen38PleDescriptionTest, WithoutAFormatLineANegativeScaleIsAnInt8Scale) {
+  const auto dir = MakeScratchDir("ple_legacy_int8");
+  const auto table_path = dir / "ple_table.txt";
+  // The scale of the INT8 tables of the shipped packages, and scales next to the two that are refused below.
+  const std::vector<PleScaleLine> scales = {{"scale -0.000703105776\n", -0.000703105776f},
+                                            {"scale -0.5\n", -0.5f},
+                                            {"scale -7.99\n", -7.99f},
+                                            {"scale -8.5\n", -8.5f},
+                                            {"scale -20.25\n", -20.25f}};
+  for (const PleScaleLine& scale : scales) {
+    ForLfAndCrlfLines(PleTableWithScaleLine(scale.line), [&](const std::string& lines) {
+      const auto description = ParseQwen38PleDescription(WriteFile(table_path, lines));
+      EXPECT_EQ(description.format, Qwen38PleFormat::kInt8) << scale.line;
+      EXPECT_FLOAT_EQ(description.params.scale, scale.scale) << scale.line;
+      EXPECT_EQ(description.params.pad_, 0) << scale.line << ": an INT8 table keeps the legacy encoding";
+      EXPECT_EQ(Qwen38PleShardRowBytes(description), 4u) << scale.line << ": a row of an INT8 shard is head_dim bytes";
+    });
+  }
+
+  // Such a table needs the INT8 capability of the plane, and the GGUF ones do not stand in for it.
+  const auto description = ParseQwen38PleDescription(WriteFile(table_path, PleTableWithScaleLine("scale -0.000703105776\n")));
+  Qwen38Plane int8_only;
+  int8_only.capabilities = QWEN38_PLANE_CAP_INT8_PLE;
+  EXPECT_NO_THROW(RequireQwen38PleTableSupported(int8_only, description, table_path));
+  Qwen38Plane gguf_only;
+  gguf_only.capabilities = QWEN38_PLANE_CAP_IQ4_NL_PLE | QWEN38_PLANE_CAP_Q8_0_PLE;
+  gguf_only.library_path = "gguf/libqwen38_plane.so";
+  ExpectMissingCapability([&] { RequireQwen38PleTableSupported(gguf_only, description, table_path); }, "int8_ple",
+                          table_path.string(), gguf_only.library_path);
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+// The GGUF tables written before the format line existed marked Q8_0 shards with the scale -8 and IQ4_NL shards with -20,
+// which are valid INT8 scales as well. Without a format line such a table is refused with a message that names both readings,
+// instead of being decoded as either; a format line settles it, `format int8` included.
+TEST(Qwen38PleDescriptionTest, AScaleThatMarkedAGgufTableBeforeTheFormatLineNeedsOne) {
+  const auto dir = MakeScratchDir("ple_ambiguous_scale");
+  const auto table_path = dir / "ple_table.txt";
+  const std::string q8_0_error = "qwen38_graph: the PLE table " + table_path.string() +
+                                 " has scale -8.0 without a format line; add `format q8_0` (GGUF Q8_0 blocks) or "
+                                 "`format int8` (INT8 rows with scale 8.0)";
+  const std::string iq4_nl_error = "qwen38_graph: the PLE table " + table_path.string() +
+                                   " has scale -20.0 without a format line; add `format iq4_nl` (GGUF IQ4_NL blocks) or "
+                                   "`format int8` (INT8 rows with scale 20.0)";
+  struct AmbiguousScale {
+    std::string line;
+    std::string error;
+  };
+  const std::vector<AmbiguousScale> ambiguous = {{"scale -8.0\n", q8_0_error},
+                                                 {"scale -8\n", q8_0_error},
+                                                 {"scale -0.8e1\n", q8_0_error},
+                                                 {"scale -20.0\n", iq4_nl_error},
+                                                 {"scale -2e1\n", iq4_nl_error}};
+  for (const AmbiguousScale& scale : ambiguous) {
+    // A table of the GGUF geometry, as those packages have, and one of four values a head, which only INT8 shards can have.
+    for (const int head_dim : {160, 4}) {
+      std::string text = PleTableWithScaleLine(scale.line);
+      const std::string original = "head_dim 4";
+      text.replace(text.find(original), original.size(), "head_dim " + std::to_string(head_dim));
+      ForLfAndCrlfLines(text, [&](const std::string& lines) {
+        try {
+          ParseQwen38PleDescription(WriteFile(table_path, lines));
+          ADD_FAILURE() << "a table with " << scale.line << " and no format line was accepted";
+        } catch (const std::runtime_error& refused) {
+          EXPECT_EQ(std::string{refused.what()}, scale.error) << scale.line;
+        }
+      });
+    }
+  }
+
+  // `format int8` keeps those scales INT8 scales, of the rows of a head of any width.
+  for (const PleScaleLine& scale : std::vector<PleScaleLine>{{"scale -8.0\n", -8.0f}, {"scale -20.0\n", -20.0f}}) {
+    ForLfAndCrlfLines(PleTableWithScaleLine("format int8\n" + scale.line), [&](const std::string& lines) {
+      const auto description = ParseQwen38PleDescription(WriteFile(table_path, lines));
+      EXPECT_EQ(description.format, Qwen38PleFormat::kInt8) << scale.line;
+      EXPECT_FLOAT_EQ(description.params.scale, scale.scale) << scale.line;
+      EXPECT_EQ(description.params.pad_, 0) << scale.line;
+      EXPECT_EQ(Qwen38PleShardRowBytes(description), 4u) << scale.line;
+      Qwen38Plane int8_only;
+      int8_only.capabilities = QWEN38_PLANE_CAP_INT8_PLE;
+      EXPECT_NO_THROW(RequireQwen38PleTableSupported(int8_only, description, table_path)) << scale.line;
+    });
+  }
+
+  // The GGUF formats, named, take the old marks as the scale lines they ignore.
+  const auto q8_0 = ParseQwen38PleDescription(WriteFile(table_path, GgufPleTable("q8_0") + "scale -8.0\n"));
+  EXPECT_EQ(q8_0.format, Qwen38PleFormat::kQ8_0);
+  const auto iq4_nl = ParseQwen38PleDescription(WriteFile(table_path, GgufPleTable("iq4_nl") + "scale -20.0\n"));
+  EXPECT_EQ(iq4_nl.format, Qwen38PleFormat::kIq4Nl);
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+// A format line names the encoding of the shards, before or after the scale line. FP8 and INT8 keep the scale they are
+// dequantized with; the GGUF formats carry a scale in every block, so their scale line is optional and its value, whatever it
+// is, is ignored, and the plane learns the format from pad_ rather than from the scale.
+TEST(Qwen38PleDescriptionTest, AFormatLineSelectsTheEncodingOfTheShards) {
+  const auto dir = MakeScratchDir("ple_format_line");
+  const auto table_path = dir / "ple_table.txt";
+  const auto parse = [&](const std::string& text) { return ParseQwen38PleDescription(WriteFile(table_path, text)); };
+
+  for (const char* lines : {"format fp8\nscale 0.5\n", "scale 0.5\nformat fp8\n"}) {
+    ForLfAndCrlfLines(PleTableWithScaleLine(lines), [&](const std::string& text) {
+      const auto description = parse(text);
+      EXPECT_EQ(description.format, Qwen38PleFormat::kFp8) << lines;
+      EXPECT_FLOAT_EQ(description.params.scale, 0.5f) << lines;
+      EXPECT_EQ(description.params.pad_, 0) << lines;
+    });
+  }
+  const std::vector<PleScaleLine> int8_lines = {{"format int8\nscale -0.5\n", -0.5f}, {"scale -0.5\nformat int8\n", -0.5f}};
+  for (const PleScaleLine& lines : int8_lines) {
+    ForLfAndCrlfLines(PleTableWithScaleLine(lines.line), [&](const std::string& text) {
+      const auto description = parse(text);
+      EXPECT_EQ(description.format, Qwen38PleFormat::kInt8) << lines.line;
+      EXPECT_FLOAT_EQ(description.params.scale, lines.scale) << lines.line;
+      EXPECT_EQ(description.params.pad_, 0) << lines.line;
+    });
+  }
+
+  struct GgufFormat {
+    const char* name;
+    Qwen38PleFormat format;
+    int plane_format;
+    uint64_t row_bytes;  // of a head of 160 values
+  };
+  const std::vector<GgufFormat> gguf_formats = {{"iq4_nl", Qwen38PleFormat::kIq4Nl, QWEN38_PLANE_PLE_FORMAT_IQ4_NL, 5 * 18},
+                                                {"q8_0", Qwen38PleFormat::kQ8_0, QWEN38_PLANE_PLE_FORMAT_Q8_0, 5 * 34}};
+  for (const GgufFormat& gguf : gguf_formats) {
+    // The scale lines that the first GGUF packages had (-20 for IQ4_NL, -8 for Q8_0) are ignored like any other.
+    for (const char* scale_line : {"", "scale -20.0\n", "scale -8.0\n", "scale 0.5\n", "scale 0\n"}) {
+      ForLfAndCrlfLines(GgufPleTable(gguf.name) + scale_line, [&](const std::string& text) {
+        const auto description = parse(text);
+        EXPECT_EQ(description.format, gguf.format) << gguf.name << " [" << scale_line << "]";
+        EXPECT_FLOAT_EQ(description.params.scale, 1.0f) << gguf.name << " [" << scale_line << "]";
+        EXPECT_EQ(description.params.pad_, QWEN38_PLANE_PLE_PAD_OF_FORMAT(gguf.plane_format)) << gguf.name;
+        EXPECT_EQ(QWEN38_PLANE_PLE_FORMAT_OF(description.params.pad_), gguf.plane_format) << gguf.name;
+        EXPECT_EQ(description.params.pad_ & QWEN38_PLANE_PLE_STAGED, 0) << "staging is decided when the shards are mapped";
+        EXPECT_EQ(Qwen38PleShardRowBytes(description), gguf.row_bytes) << gguf.name;
+      });
+    }
+  }
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+TEST(Qwen38PleDescriptionTest, RejectsAFormatLineThatIsUnknownRepeatedOrContradictsTheScale) {
+  const auto dir = MakeScratchDir("ple_format_errors");
+  const auto table_path = dir / "ple_table.txt";
+
+  // The names are fp8, int8, iq4_nl and q8_0, exactly.
+  for (const char* name : {"FP8", "Int8", "IQ4_NL", "Q8_0", "q4_0", "iq4_xs", "bf16", "-8.0"}) {
+    ExpectPleTableRefused(table_path, PleTableWithScaleLine(std::string{"format "} + name + "\nscale 0.5\n"),
+                          "unknown PLE format");
+  }
+  ExpectPleTableRefused(table_path, PleTableWithScaleLine("format\nscale 0.5\n"), "malformed PLE format line");
+  ExpectPleTableRefused(table_path, PleTableWithScaleLine("format fp8 int8\nscale 0.5\n"), "malformed PLE format line");
+
+  // One format line at most, even when a second one agrees with the first.
+  ExpectPleTableRefused(table_path, PleTableWithScaleLine("format fp8\nformat fp8\nscale 0.5\n"), "more than one format line");
+  ExpectPleTableRefused(table_path, GgufPleTable("q8_0") + "format iq4_nl\n", "more than one format line");
+
+  // FP8 needs a positive scale and INT8 a negative one: a scale of the other sign is the encoding of the other format.
+  ExpectPleTableRefused(table_path, PleTableWithScaleLine("format fp8\nscale -0.5\n"),
+                        "declares format fp8 but its scale is negative");
+  ExpectPleTableRefused(table_path, PleTableWithScaleLine("format int8\nscale 0.5\n"),
+                        "declares format int8 but its scale is positive");
+
+  // FP8 and INT8 shards are dequantized with the scale, which has to be there, finite and non-zero.
+  for (const char* format : {"fp8", "int8"}) {
+    const std::string format_line = std::string{"format "} + format + "\n";
+    ExpectPleTableRefused(table_path, PleTableWithScaleLine(format_line), "needs a finite, non-zero scale line");
+    for (const char* scale_line : {"scale 0\n", "scale -0.0\n", "scale 1e999\n", "scale abc\n"}) {
+      ExpectPleTableRefused(table_path, PleTableWithScaleLine(format_line + scale_line), "malformed PLE scale line");
+    }
+  }
+
+  // A GGUF table ignores the value of its scale line, but not a scale line that holds no number.
+  ExpectPleTableRefused(table_path, GgufPleTable("iq4_nl") + "scale abc\n", "malformed PLE scale line");
   std::error_code ec;
   std::filesystem::remove_all(dir, ec);
 }
@@ -479,8 +693,8 @@ TEST(Qwen38PleDescriptionTest, RejectsMalformedTables) {
                          "../a.safetensors");
   EXPECT_THROW(parse_raw(WithCrlfLines(escaping_shard)), std::runtime_error);
 
-  // The scale picks the decoder of the shards (negative: INT8), so a table without a usable one is refused instead of
-  // decoding every PLE row to zero or NaN.
+  // Without a format line the scale picks the decoder of the shards (negative: INT8), so a table without a usable one is
+  // refused instead of decoding every PLE row to zero or NaN.
   const auto with_scale_line = [&](const std::string& scale_line) {
     std::string text = kValidPleTable;
     const std::string valid = "scale 0.5\n";
@@ -526,7 +740,9 @@ TEST(Qwen38PleTableTest, Iq4NlShardsUsePackedRowSizesAndRequireCapabilityBeforeM
   InitCurrentStubPlane(current);
   {
     Qwen38PleTable table{current, table_path, dir, 64};
-    EXPECT_FLOAT_EQ(table.params.scale, -20.0f);
+    // The format reaches the plane in pad_; the pin keeps a Windows table resident, so the staged bit is clear everywhere.
+    EXPECT_EQ(table.params.pad_, QWEN38_PLANE_PLE_PAD_OF_FORMAT(QWEN38_PLANE_PLE_FORMAT_IQ4_NL));
+    EXPECT_FLOAT_EQ(table.params.scale, 1.0f);
     EXPECT_EQ(table.params.head_dim, 160);
     EXPECT_EQ(StubPlaneState::registered_ptrs.size(), 2u);
   }
@@ -564,7 +780,8 @@ TEST(Qwen38PleTableTest, Q8_0ShardsUsePackedRowSizesAndRequireCapabilityBeforeMa
   InitCurrentStubPlane(current);
   {
     Qwen38PleTable table{current, table_path, dir, 64};
-    EXPECT_FLOAT_EQ(table.params.scale, -8.0f);
+    EXPECT_EQ(table.params.pad_, QWEN38_PLANE_PLE_PAD_OF_FORMAT(QWEN38_PLANE_PLE_FORMAT_Q8_0));
+    EXPECT_FLOAT_EQ(table.params.scale, 1.0f);
     EXPECT_EQ(table.params.head_dim, 160);
     EXPECT_EQ(StubPlaneState::registered_ptrs.size(), 2u);
   }
@@ -820,6 +1037,34 @@ TEST(Qwen38PleTableTest, Int8ShardsAreRefusedBeforeAnyShardIsMappedWhenThePlaneL
     EXPECT_EQ(StubPlaneState::registered_ptrs.size(), 2u);
   }
 
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+// The scales -8 and -20, which GGUF tables were once marked with, are INT8 scales of a table that says so: its shards are mapped
+// with rows of head_dim bytes and the plane gets the scale in the legacy encoding. Without the format line the same table is
+// refused before any shard is mapped.
+TEST(Qwen38PleTableTest, Int8ShardsAtTheScalesThatOnceMarkedGgufTablesAreMappedAsInt8RowsWhenTheFormatLineSaysSo) {
+  const auto dir = MakeScratchDir("ple_int8_gguf_marks");
+  WritePleShards(dir);
+  Qwen38Plane current;
+  for (const char* scale : {"-8.0", "-20.0"}) {
+    InitCurrentStubPlane(current);
+    const auto ambiguous = WriteFile(dir / "ambiguous_table.txt", PleTableWithScaleLine(std::string{"scale "} + scale + "\n"));
+    EXPECT_THROW((Qwen38PleTable{current, ambiguous, dir, 64}), std::runtime_error) << scale;
+    EXPECT_TRUE(StubPlaneState::registered_ptrs.empty()) << scale;
+
+    const auto int8_path =
+        WriteFile(dir / "int8_table.txt", PleTableWithScaleLine(std::string{"format int8\nscale "} + scale + "\n"));
+    {
+      Qwen38PleTable table{current, int8_path, dir, 64};
+      EXPECT_FLOAT_EQ(table.params.scale, std::stof(scale)) << scale;
+      EXPECT_EQ(table.params.pad_, 0) << scale;
+      EXPECT_EQ(table.params.head_dim, 4) << scale;
+      EXPECT_EQ(StubPlaneState::registered_ptrs.size(), 2u) << scale;
+    }
+    EXPECT_EQ(StubPlaneState::unregistered_ptrs, StubPlaneState::registered_ptrs) << scale;
+  }
   std::error_code ec;
   std::filesystem::remove_all(dir, ec);
 }

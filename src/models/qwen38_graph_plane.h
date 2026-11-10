@@ -182,6 +182,16 @@ struct PlaneHostBuffer {
   int64_t* ptr_{};
 };
 
+// The encoding of the shards of a PLE table, which the `format` line of its description names (fp8, int8, iq4_nl, q8_0). A
+// description without that line is FP8 when its scale is positive and INT8 when it is negative, as every table was before the
+// line existed (but for the scales -8 and -20, see ParseQwen38PleDescription).
+enum class Qwen38PleFormat {
+  kFp8,    // FP8 E4M3 codes times the scale, which is positive
+  kInt8,   // int8 values times |scale|: the scale line holds the negative of the dequantization scale
+  kIq4Nl,  // GGUF IQ4_NL blocks of 32 values in 18 bytes, each with its fp16 scale (plane capability iq4_nl_ple)
+  kQ8_0,   // GGUF Q8_0 blocks of 32 values in 34 bytes, each with its fp16 scale (plane capability q8_0_ple)
+};
+
 // Parsed PLE table description: the hash/gather parameters and the shard files in row order (the platform-independent half
 // of Qwen38PleTable, kept separate so it can be validated without mapping any file).
 struct Qwen38PleDescription {
@@ -190,19 +200,37 @@ struct Qwen38PleDescription {
     uint64_t offset{};
     long long rows{};
   };
-  Qwen38PleParams params{};  // shard_ptr / shard_end / capacity are filled when the shards are mapped
+  Qwen38PleFormat format{Qwen38PleFormat::kFp8};
+  // shard_ptr / shard_end / capacity are filled when the shards are mapped. pad_ holds the plane's encoding of `format`
+  // (Qwen38PlanePleFormat; the staged bit is the mapping's), and scale is 1 for the GGUF formats.
+  Qwen38PleParams params{};
   std::vector<Shard> shards;
 };
 
-// Reads a "qwen38_ple_table 1" description. Throws std::runtime_error on a wrong header, a malformed table, a missing, zero or
-// non-finite scale (positive for FP8 shards, negative for INT8 shards), or a shard path that is absolute or contains "..":
-// shards must live inside the model folder. Lines may end in LF or CRLF, here and in the two parsers below.
+// Reads a "qwen38_ple_table 1" description: one `key values` line per key, in any order, with the keys n_heads, head_dim,
+// heads_per_ngram, eos, scale, mult (4 values), vocab and offset (n_heads values each, after n_heads), shard (path, byte
+// offset and row count of one shard, in row order) and format.
+// The optional `format` line (at most one: fp8, int8, iq4_nl or q8_0) decides the encoding of the shards. Without it the sign
+// of the scale does, as before the line existed: positive for FP8 shards, negative for INT8 shards, whose scale line holds the
+// negative of the dequantization scale. A scale of exactly -8 or -20 without a format line is refused, since the GGUF tables
+// that predate the line marked Q8_0 and IQ4_NL shards with them. FP8 and INT8 tables need a finite scale line of that sign
+// (a format line has to agree with it). The GGUF formats keep an fp16 scale in every block: their scale line is optional and
+// its value is ignored, and their head_dim has to be a multiple of 32, the values of a block.
+// Throws std::runtime_error on a wrong header, a malformed table, a format line that is unknown, repeated or contradicts the
+// scale, a missing, zero or non-finite scale of an FP8 or INT8 table, a scale of -8 or -20 without a format line, or a shard
+// path that is absolute or contains "..": shards must live inside the model folder. Lines may end in LF or CRLF, here and in
+// the two parsers below.
 Qwen38PleDescription ParseQwen38PleDescription(const std::filesystem::path& table_path);
 
-// Throws std::runtime_error, naming the missing int8_ple capability and the library, when the shards of the table are INT8
-// (a negative scale) and `plane` would decode them as FP8. Checked before any shard is mapped.
+// Throws std::runtime_error, naming the missing capability and the library, when `plane` cannot decode the shards of the table:
+// INT8 shards need int8_ple (a library without it decodes them as FP8), IQ4_NL and Q8_0 shards iq4_nl_ple and q8_0_ple. FP8
+// shards need none. Checked before any shard is mapped.
 void RequireQwen38PleTableSupported(const Qwen38Plane& plane, const Qwen38PleDescription& description,
                                     const std::filesystem::path& table_path);
+
+// The bytes of one row of a shard of the table, one head of a PLE row: head_dim FP8 or INT8 codes, or head_dim / 32 GGUF
+// blocks of 18 (IQ4_NL) or 34 (Q8_0) bytes.
+uint64_t Qwen38PleShardRowBytes(const Qwen38PleDescription& description);
 
 // The layout of a CPU embedding table file (<model.embedding.filename>.data).
 enum class Qwen38EmbeddingFormat {
