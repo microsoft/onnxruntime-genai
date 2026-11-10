@@ -57,6 +57,11 @@ if(UNIX AND NOT APPLE)
     BUILD_WITH_INSTALL_RPATH TRUE
     INSTALL_RPATH "$ORIGIN"
   )
+elseif(APPLE)
+  set_target_properties(engine_benchmark PROPERTIES
+    BUILD_WITH_INSTALL_RPATH TRUE
+    INSTALL_RPATH "@loader_path"
+  )
 endif()
 
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${engine_benchmark_srcs})
