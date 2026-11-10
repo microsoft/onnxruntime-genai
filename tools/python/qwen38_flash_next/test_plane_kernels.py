@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
-"""Kernel-level tests of the fast prefill additions of libqwen38_plane.so (ABI 2) against the research (python/torch)
+"""Kernel-level tests of the fast prefill additions of libqwen38_plane.so (ABI 3) against the research (python/torch)
 implementations:
 
   qwen38_plane_ple_rows       batched PLE rows == Qwen4ExpCPUPLELookup (bitwise), incl. EOS masking and a carried-in context
@@ -40,6 +40,7 @@ def main():
     lib = ctypes.CDLL(str(args.lib or args.package / "libs/libqwen38_plane.so"))
     ci = ctypes.c_int
     lib.qwen38_plane_ple_rows.argtypes = [c_vp, c_vp, c_vp, ci, c_vp, c_vp, c_vp]
+    lib.qwen38_plane_ple_rows.restype = ci
     lib.qwen38_plane_pool_keys.argtypes = [c_vp, c_vp, ci, c_vp, c_vp, c_vp, ci, ctypes.c_float, ci, c_vp]
     lib.qwen38_plane_transpose_f32.argtypes = [c_vp, c_vp, c_vp, ci, ci]
     torch.cuda.init()
@@ -82,9 +83,11 @@ def main():
         ctx_in = torch.tensor(np.asarray(ctx0, dtype=np.int64).reshape(2), device="cuda")
         ctx_out = torch.zeros(2, dtype=torch.int64, device="cuda")
         out = torch.empty((n, dev.width), dtype=torch.bfloat16, device="cuda")
-        lib.qwen38_plane_ple_rows(
+        status = lib.qwen38_plane_ple_rows(
             stream, dev.ptr, tok_d.data_ptr(), n, ctx_in.data_ptr(), ctx_out.data_ptr(), out.data_ptr()
         )
+        if status:
+            raise RuntimeError(f"qwen38_plane_ple_rows failed with CUDA status {status} (n={n})")
         torch.cuda.synchronize()
         same = bool(torch.equal(out.view(torch.int16), ref.to(torch.bfloat16).view(torch.int16)))
         ctx_same = np.asarray(ctx_ref).reshape(-1).tolist() == ctx_out.cpu().tolist()

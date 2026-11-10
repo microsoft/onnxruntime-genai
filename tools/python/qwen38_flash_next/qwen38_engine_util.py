@@ -8,12 +8,15 @@ either a text file (tokenized with the package's own tokenizer) or a `.npy` file
 need no pool. Nothing is read from any other location.
 """
 
+import copy
 import hashlib
 import json
 import os
 import random
 import sys
+import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 _WIN_DLL_HANDLES = []
@@ -34,7 +37,7 @@ if os.name == "nt":
             _extra_dirs.append(os.path.join(_cuda_path, _sub))
     for _d in _extra_dirs:
         if os.path.isdir(_d):
-            _WIN_DLL_HANDLES.append(os.add_dll_directory(_d))
+            _WIN_DLL_HANDLES.append(os.add_dll_directory(str(Path(_d).resolve())))
             if _d not in os.environ.get("PATH", ""):
                 os.environ["PATH"] = _d + os.pathsep + os.environ.get("PATH", "")
 
@@ -45,6 +48,11 @@ EOS_IDS = (248046, 248044)
 
 # Test hook of the qwen38_flash_graph engine process; it is not a genai_config key.
 FORCE_REJECT_ENV = "ORT_QWEN38_FORCE_REJECT"
+HOST_EXPERT_BYTES_ENV = "QWEN38_HOST_EXPERT_BYTES"
+HOST_EXPERT_BYTES_ENTRY = "session.moe.offload.host_expert_bytes"
+
+# Models and tokenizers can open package assets after load_model returns.
+_BUDGET_PACKAGE_DIRS = []
 
 # Chat template switches that turn the default "thinking" generation prompt into the non-thinking one used by the gates.
 _THINKING_ON = "enable_thinking is undefined or enable_thinking is true"
@@ -141,10 +149,55 @@ def set_force_reject(enabled):
         )
 
 
+def environment_overlay():
+    raw = os.environ.get("QWEN38_OVERLAY_JSON")
+    overlay = json.loads(raw) if raw else {}
+    if not isinstance(overlay, dict):
+        raise ValueError("QWEN38_OVERLAY_JSON must be a JSON object")
+    return overlay
+
+
+def host_expert_budget():
+    raw = os.environ.get(HOST_EXPERT_BYTES_ENV)
+    if raw is None:
+        return None
+    try:
+        budget = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{HOST_EXPERT_BYTES_ENV} must be a positive integer byte budget") from exc
+    if not 0 < budget < 1 << 64:
+        raise ValueError(f"{HOST_EXPERT_BYTES_ENV} must be a positive integer byte budget below 2**64")
+    return budget
+
+
+def execution_protocol():
+    return {"overlay": environment_overlay(), "host_expert_bytes": host_expert_budget()}
+
+
+def with_host_expert_budget(document, budget):
+    document = copy.deepcopy(document)
+    options = document.setdefault("model", {}).setdefault("decoder", {}).setdefault("session_options", {})
+    options[HOST_EXPERT_BYTES_ENTRY] = str(budget)
+    for profile in document.get("runtime_profiles", []):
+        options = (
+            profile.setdefault("overlay", {})
+            .setdefault("model", {})
+            .setdefault("decoder", {})
+            .setdefault("session_options", {})
+        )
+        options[HOST_EXPERT_BYTES_ENTRY] = str(budget)
+    return document
+
+
 def load_model(package, provider=None, overlay=None):
     """Registers the plugin CUDA EP (`provider` path, default $QWEN_PROVIDER or <package>/provider/libonnxruntime_providers_cuda.so) and loads the package."""
+    package = Path(package).resolve()
+    package_config = json.loads((package / "genai_config.json").read_text())
+    env_overlay = environment_overlay()
+    validate_mtp_mode(package_config, env_overlay, overlay or {})
+    budget = host_expert_budget()
     if os.name == "nt":
-        pkg_libs = Path(package) / "libs"
+        pkg_libs = package / "libs"
         if pkg_libs.is_dir():
             _WIN_DLL_HANDLES.append(os.add_dll_directory(str(pkg_libs)))
     provider = provider or os.environ.get("QWEN_PROVIDER")
@@ -157,18 +210,59 @@ def load_model(package, provider=None, overlay=None):
         if pkg_provider.exists():
             provider = str(pkg_provider)
     if provider:
+        provider = str(Path(provider).resolve())
         if os.name == "nt":
             prov_dir = Path(provider).parent
             if prov_dir.is_dir():
                 _WIN_DLL_HANDLES.append(os.add_dll_directory(str(prov_dir)))
         og.register_execution_provider_library("CUDAExecutionProvider", provider)
-    config = og.Config(str(package))
-    env_overlay = os.environ.get("QWEN38_OVERLAY_JSON")
-    if env_overlay:
-        config.overlay(env_overlay)
-    if overlay:
-        config.overlay(json.dumps(overlay))
-    return og.Model(config)
+    directory = None
+    try:
+        config_package = package
+        if budget is not None:
+            # Config.overlay appends runtime profiles; patch the base profiles before loading, without changing the package.
+            directory = tempfile.TemporaryDirectory(prefix="qwen38_ram_budget_")
+            config_package = Path(directory.name)
+            for asset in package.iterdir():
+                if asset.name != "genai_config.json":
+                    (config_package / asset.name).symlink_to(asset, target_is_directory=asset.is_dir())
+            (config_package / "genai_config.json").write_text(
+                json.dumps(with_host_expert_budget(package_config, budget))
+            )
+        config = og.Config(str(config_package))
+        for document in (env_overlay, overlay):
+            if document:
+                effective = with_host_expert_budget(document, budget) if budget is not None else document
+                config.overlay(json.dumps(effective))
+        model = og.Model(config)
+        if directory is not None:
+            _BUDGET_PACKAGE_DIRS.append(directory)
+            directory = None
+        return model
+    finally:
+        if directory is not None:
+            directory.cleanup()
+
+
+def validate_mtp_mode(*configs):
+    """Rejects no-MTP on folded graphs after applying the package and overlays in order."""
+    mtp, fold = True, False
+    for config in configs:
+        graph = config.get("model", {}).get("qwen38_graph", {})
+        mtp = graph.get("mtp", {}).get("enabled", mtp)
+        fold = graph.get("fold", {}).get("enabled", fold)
+    if fold and not mtp:
+        raise ValueError(
+            "--no-mtp requires a non-folded package with S=1 graphs; this package has fold.enabled=true. "
+            "Use --force-reject with engine_gate.py for an identity reference; forced rejection does not measure S=1 performance."
+        )
+
+
+@dataclass(frozen=True)
+class TurnUsage:
+    prompt_tokens: int
+    generated_tokens: int
+    cached_prompt_tokens: int
 
 
 class TurnResult:
@@ -181,6 +275,7 @@ class TurnResult:
         self.runs = 0
         self.events = 0
         self.start = None
+        self.end = None
 
 
 def run_turn(engine, buffer, request, prompt, max_new, *, stop_strings=None, turn_setup=None, until=None):
@@ -216,8 +311,12 @@ def pump(engine, buffer, result, until=None):
                 result.tokens.append(int(event.token))
                 result.times.append(now)
             if event.flags & og.EngineEventFlags.TURN_FINISHED:
+                result.end = now
                 result.finish_reason = event.finish_reason
-                result.usage = event.usage
+                usage = event.usage
+                result.usage = TurnUsage(
+                    int(usage.prompt_tokens), int(usage.generated_tokens), int(usage.cached_prompt_tokens)
+                )
                 result.matched_stop_string_index = event.matched_stop_string_index
         if until is not None and until(result):
             break

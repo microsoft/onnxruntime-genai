@@ -8,6 +8,8 @@ Example: python run_with_ram_budget.py --ram-budget-gib 64 -- python bench_engin
 The default 8 GiB reserve covers non-expert allocations, pageable prefill waves and runtime overhead.
 Only the expert cache allocation is bounded internally. --enforce additionally uses a systemd user scope to
 cap the entire command (including children and charged file cache); it requires a working user manager.
+Commands using qwen38_engine_util.load_model also apply the byte budget to session-based QMoE offload,
+including runtime-profile overrides, without modifying the original package.
 """
 
 import argparse
@@ -25,6 +27,7 @@ def plan_environment(ram_gib, reserve_gib, layers, environment):
     if ram_gib == 0:
         env["ORT_QMOE_HOST_CACHE_MIB"] = "0"
         env.pop("ORT_QMOE_HOST_CACHE_LAYERS", None)
+        env.pop("QWEN38_HOST_EXPERT_BYTES", None)
         return env, 0
     cache_mib = math.floor((ram_gib - reserve_gib) * 1024)
     # This launcher targets Qwen's 2560 x 640 NVFP4 experts, including aligned global scales.
@@ -41,6 +44,7 @@ def plan_environment(ram_gib, reserve_gib, layers, environment):
             raise ValueError(f"Unset {name} before enabling the bounded host cache")
     env["ORT_QMOE_HOST_CACHE_MIB"] = str(cache_mib)
     env["ORT_QMOE_HOST_CACHE_LAYERS"] = str(layers)
+    env["QWEN38_HOST_EXPERT_BYTES"] = str(cache_mib << 20)
     return env, cache_mib
 
 
@@ -82,6 +86,7 @@ def main():
                 "ram_budget_gib": args.ram_budget_gib,
                 "reserve_gib": args.reserve_gib,
                 "expert_cache_mib": cache_mib,
+                "expert_cache_bytes": cache_mib << 20,
                 "layers": args.layers,
                 "enforce_total_ram": args.enforce,
                 "command": command,

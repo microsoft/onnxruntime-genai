@@ -9,11 +9,13 @@ Reuses the corpus, tokenization, and threshold estimation from
 onnxruntime_genai.models.quantization.kv_cache_calibration, while handling the Qwen3.8-Flash-Next
 PLE input (`ple_embeddings.1`), `past_position_ids`, `logits_indices`, the partial-rotary
 (`rotary_dim = 64` of `head_size = 256`) rotation-invariant pair envelope, and the MTP head KV model.
+Embedding-only graphs use the package's CPU embedding session for the prompt and shifted head inputs.
 """
 
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import os
 from pathlib import Path
@@ -24,7 +26,6 @@ import torch
 from onnxruntime_genai.models.quantization.kv_cache_calibration import (
     CORPUS,
     _get_quant_type_max,
-    _mse_threshold,
     _subsample,
     _tokenize_corpus,
 )
@@ -32,6 +33,94 @@ from transformers import AutoTokenizer
 
 # Every run calibrates both quantizations; --out receives the one named by --quant-type.
 QUANT_TYPES = ("int8_per_channel", "fp8_per_channel")
+METHODS = ("minmax", "percentile")
+
+
+def validate_method(method):
+    if method not in METHODS:
+        raise ValueError(
+            "dual INT8/FP8 calibration supports minmax or percentile; MSE models integer rounding, not FP8"
+        )
+
+
+def custom_ops_paths(pkg, options, name, fallback=None):
+    if not options.get("custom_ops_library") and not options.get("custom_ops_libraries"):
+        options = fallback or {}
+    libraries = ([options["custom_ops_library"]] if options.get("custom_ops_library") else []) + options.get(
+        "custom_ops_libraries", []
+    )
+    paths = list(dict.fromkeys((pkg / lib).resolve() for lib in libraries))
+    for path in paths:
+        if not path.is_file():
+            raise FileNotFoundError(f"{name} custom-op library not found: {path}")
+    return paths
+
+
+def create_calibration_sessions(ort, pkg):
+    """Loads the dense/head-KV graphs with their configured custom ops on separate session options.
+
+    An auxiliary session's explicit library list replaces the decoder's list; if it specifies neither library field,
+    the decoder's libraries are used. Relative paths are resolved from the package, as in the Engine packages.
+    """
+    pkg = pkg.resolve()
+    model = json.loads((pkg / "genai_config.json").read_text())["model"]
+    parent = model.get("decoder", {}).get("session_options", {})
+    prefill = model.get("qwen38_graph", {}).get("prefill", {})
+    plans = []
+    for name in ("dense", "head_kv"):
+        graph = prefill.get(name, {})
+        paths = custom_ops_paths(pkg, graph.get("session_options", {}), name, parent)
+        plans.append((pkg / graph.get("filename", f"{name}/model.onnx"), paths))
+
+    sessions = []
+    providers = [("CUDAExecutionProvider", {"device_id": 0, "arena_extend_strategy": "kSameAsRequested"})]
+    for filename, libraries in plans:
+        so = ort.SessionOptions()
+        so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
+        so.add_session_config_entry("session.use_device_allocator_for_initializers", "1")
+        for library in libraries:
+            so.register_custom_ops_library(str(library))
+        print(f"Loading calibration session from {filename}...", flush=True)
+        sessions.append(ort.InferenceSession(str(filename), sess_options=so, providers=providers))
+    return sessions
+
+
+def create_embedding_session(ort, pkg):
+    pkg = pkg.resolve()
+    graph = json.loads((pkg / "genai_config.json").read_text())["model"].get("embedding", {})
+    if not graph.get("filename"):
+        raise ValueError("inputs_embeds calibration requires model.embedding.filename")
+    so = ort.SessionOptions()
+    so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
+    so.enable_cpu_mem_arena = False
+    for library in custom_ops_paths(pkg, graph.get("session_options", {}), "embedding"):
+        so.register_custom_ops_library(str(library))
+    session = ort.InferenceSession(str(pkg / graph["filename"]), sess_options=so, providers=["CPUExecutionProvider"])
+    return (
+        session,
+        graph.get("inputs", {}).get("input_ids", "input_ids"),
+        graph.get("outputs", {}).get("embeddings", "inputs_embeds"),
+    )
+
+
+def run_embeddings(ort, session, input_name, output_name, tokens: np.ndarray, device) -> torch.Tensor:
+    meta = next((meta for meta in session.get_inputs() if meta.name == input_name), None)
+    if meta is None or len(meta.shape) not in (1, 2):
+        raise ValueError(f"embedding input {input_name!r} must exist and have rank 1 or 2")
+    ids = tokens.reshape(-1) if len(meta.shape) == 1 else tokens
+    binding = session.io_binding()
+    binding.bind_cpu_input(input_name, np.ascontiguousarray(ids, dtype=np.int64))
+    binding.bind_output(output_name, "cpu")
+    session.run_with_iobinding(binding)
+    output = binding.get_outputs()[0]
+    if output.data_type() == "tensor(bfloat16)":
+        # CPU/DirectML wheels need not expose DLPack, and OrtValue.numpy() does not support BF16.
+        # Copy the raw CPU storage so the tensor also survives the binding's lifetime.
+        raw = bytearray(ctypes.string_at(output.data_ptr(), int(np.prod(output.shape())) * 2))
+        embeddings = torch.frombuffer(raw, dtype=torch.bfloat16).reshape(output.shape())
+    else:
+        embeddings = torch.from_numpy(output.numpy().copy())
+    return embeddings.reshape(1, tokens.shape[1], -1).to(device=device).contiguous()
 
 
 def ensure_distinct_outputs(output_paths: dict[str, Path]) -> None:
@@ -87,6 +176,22 @@ def pair_envelope_partial(x: np.ndarray, num_kv_heads: int, head_size: int, rota
     return out.reshape(x.shape[0], -1)
 
 
+def discover_kv_outputs(output_names):
+    keys, values = {}, {}
+    for name in output_names:
+        parts = name.split(".")
+        if len(parts) == 3 and parts[0] == "present" and parts[1].isdigit():
+            if parts[2] == "key":
+                keys[int(parts[1])] = name
+            elif parts[2] == "value":
+                values[int(parts[1])] = name
+    if not keys or keys.keys() != values.keys():
+        raise ValueError(
+            f"expected paired KV outputs: key-only layers {sorted(keys.keys() - values.keys())}, value-only layers {sorted(values.keys() - keys.keys())}"
+        )
+    return keys, values
+
+
 def calibrate_package(
     pkg: Path,
     checkpoint: Path,
@@ -100,6 +205,7 @@ def calibrate_package(
     sample_budget: int = 16384,
 ) -> dict:
     output_paths = plan_output_paths(out_json, quant_type)
+    validate_method(method)
 
     import onnxruntime as ort  # noqa: PLC0415
     from mobius._configs import Qwen4ExpConfig  # noqa: PLC0415
@@ -122,32 +228,21 @@ def calibrate_package(
     ple_layer = next(int(i) - 1 for i in (config.ple_layer_ids or []))
     lookup = Qwen4ExpCPUPLELookup(str(checkpoint), config, ple_layer)
 
-    so = ort.SessionOptions()
-    so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
-    so.add_session_config_entry("session.use_device_allocator_for_initializers", "1")
-    providers = [("CUDAExecutionProvider", {"device_id": 0, "arena_extend_strategy": "kSameAsRequested"})]
-
-    print(f"Loading dense session from {pkg / 'dense/model.onnx'}...", flush=True)
-    dense_sess = ort.InferenceSession(str(pkg / "dense/model.onnx"), sess_options=so, providers=providers)
-    print(f"Loading head_kv session from {pkg / 'head_kv/model.onnx'}...", flush=True)
-    head_kv_sess = ort.InferenceSession(str(pkg / "head_kv/model.onnx"), sess_options=so, providers=providers)
+    dense_sess, head_kv_sess = create_calibration_sessions(ort, pkg)
+    dense_inputs = {meta.name for meta in dense_sess.get_inputs()}
+    head_inputs = {meta.name for meta in head_kv_sess.get_inputs()}
+    embedding = (
+        create_embedding_session(ort, pkg)
+        if "inputs_embeds" in dense_inputs or "inputs_embeds" in head_inputs
+        else None
+    )
 
     num_kv_heads = 2
     head_size = 256
     channels = num_kv_heads * head_size
 
-    output_names = [o.name for o in dense_sess.get_outputs()]
-    present_keys = {
-        int(name.split(".")[1]): name
-        for name in output_names
-        if name.startswith("present.") and name.endswith(".key") and name.split(".")[1].isdigit()
-    }
-    present_values = {
-        int(name.split(".")[1]): name
-        for name in output_names
-        if name.startswith("present.") and name.endswith(".value") and name.split(".")[1].isdigit()
-    }
-    layer_ids = sorted(present_keys.keys() & present_values.keys())
+    present_keys, present_values = discover_kv_outputs([o.name for o in dense_sess.get_outputs()])
+    layer_ids = sorted(present_keys)
     num_layers = len(layer_ids)
     print(f"Target sparse attention layers ({num_layers}): {layer_ids}", flush=True)
 
@@ -156,9 +251,13 @@ def calibrate_package(
     init_states = {}
     for meta in dense_sess.get_inputs():
         name = meta.name
-        if name in ("input_ids", "attention_mask", "position_ids", "logits_indices") or name.startswith(
-            "ple_embeddings."
-        ):
+        if name in (
+            "input_ids",
+            "inputs_embeds",
+            "attention_mask",
+            "position_ids",
+            "logits_indices",
+        ) or name.startswith("ple_embeddings."):
             continue
         shape = [1 if not isinstance(d, int) or d <= 0 else d for d in meta.shape]
         if name == "past_position_ids":
@@ -194,6 +293,9 @@ def calibrate_package(
         ctx = lookup.initial_context(1)
         ple_emb, _ = lookup([prompt_list], ctx)
         ple_dev = ple_emb.to(device=device, dtype=torch.bfloat16).contiguous()
+        embeddings = None
+        if embedding is not None:
+            embeddings = run_embeddings(ort, *embedding, seq_np, device)
 
         binding = dense_sess.io_binding()
         keep = []
@@ -204,7 +306,11 @@ def calibrate_package(
             keep_ref.append((t, ov))
             b.bind_ortvalue_input(name, ov)
 
-        bind_in("input_ids", torch.from_numpy(seq_np).to(device=device, dtype=torch.int64))
+        if "input_ids" in dense_inputs:
+            bind_in("input_ids", torch.from_numpy(seq_np).to(device=device, dtype=torch.int64))
+        if "inputs_embeds" in dense_inputs:
+            assert embeddings is not None
+            bind_in("inputs_embeds", embeddings)
         bind_in("attention_mask", torch.ones((1, seq_len), dtype=torch.int64, device=device))
         bind_in("position_ids", torch.arange(seq_len, dtype=torch.int64, device=device).reshape(1, seq_len))
         bind_in("logits_indices", torch.tensor([seq_len - 1], dtype=torch.int64, device=device))
@@ -240,7 +346,11 @@ def calibrate_package(
         hidden = out_map["hidden_states"][:, :-1, :].contiguous()
         m = seq_len - 1
         hb = head_kv_sess.io_binding()
-        bind_in("input_ids", torch.from_numpy(seq_np[:, 1:]).to(device=device, dtype=torch.int64), hb)
+        if "input_ids" in head_inputs:
+            bind_in("input_ids", torch.from_numpy(seq_np[:, 1:]).to(device=device, dtype=torch.int64), hb)
+        if "inputs_embeds" in head_inputs:
+            assert embeddings is not None
+            bind_in("inputs_embeds", embeddings[:, 1:, :], hb)
         bind_in("attention_mask", torch.ones((1, m), dtype=torch.int64, device=device), hb)
         bind_in("position_ids", torch.arange(1, seq_len, dtype=torch.int64, device=device).reshape(1, m), hb)
         bind_in("past_position_ids", torch.zeros((1, 0), dtype=torch.int64, device=device), hb)
@@ -308,27 +418,35 @@ def calibrate_quant_types(
 
     The buffers have one entry per target layer followed by one for the MTP head (`len(layer_ids) + 1` in total).
     """
+    validate_method(method)
+    for name, arrays in (
+        ("k_amax", [k_amax]),
+        ("v_amax", [v_amax]),
+        ("k_env", [a for entry in k_env_buf for a in entry]),
+        ("v_env", [a for entry in v_env_buf for a in entry]),
+        ("k_raw", [a for entry in k_raw_buf for a in entry]),
+        ("v_raw", [a for entry in v_raw_buf for a in entry]),
+    ):
+        if any(not np.isfinite(a).all() for a in arrays):
+            raise ValueError(f"non-finite calibration capture: {name}")
     num_layers = len(layer_ids)
     total_entries = num_layers + 1
     results = {}
-    for qtype, target_path in output_paths.items():
+    for qtype in output_paths:
         qmax = _get_quant_type_max(qtype)
         is_fp8 = qtype.startswith("fp8")
-        qneg, qpos = (-qmax, qmax) if is_fp8 else (-qmax, qmax - 1.0)
         k_thr = k_amax.copy()
         v_thr = v_amax.copy()
-        if method in ("percentile", "mse"):
+        if method == "percentile":
             for i in range(total_entries):
                 ks = np.concatenate(k_env_buf[i], axis=0).astype(np.float32)
                 vs = np.concatenate(v_env_buf[i], axis=0).astype(np.float32)
-                if method == "percentile":
-                    k_thr[i] = np.percentile(np.abs(ks), percentile, axis=0)
-                    v_thr[i] = np.percentile(np.abs(vs), percentile, axis=0)
-                else:
-                    k_thr[i] = _mse_threshold(ks, k_amax[i], qmax, qneg, qpos)
-                    v_thr[i] = _mse_threshold(vs, v_amax[i], qmax, qneg, qpos)
+                k_thr[i] = np.percentile(np.abs(ks), percentile, axis=0)
+                v_thr[i] = np.percentile(np.abs(vs), percentile, axis=0)
         k_scales = np.maximum(k_thr, 1e-6) / qmax
         v_scales = np.maximum(v_thr, 1e-6) / qmax
+        if not np.isfinite(k_scales).all() or not np.isfinite(v_scales).all():
+            raise ValueError(f"non-finite {qtype} calibration scales")
 
         # Compute empirical reconstruction relative L2 error across all captured tokens
         k_errs, v_errs = [], []
@@ -343,8 +461,11 @@ def calibrate_quant_types(
             else:
                 kq = np.clip(np.rint(kr / ks_i), -128.0, 127.0) * ks_i
                 vq = np.clip(np.rint(vr / vs_i), -128.0, 127.0) * vs_i
-            k_errs.append(float(np.linalg.norm(kr - kq) / np.linalg.norm(kr)))
-            v_errs.append(float(np.linalg.norm(vr - vq) / np.linalg.norm(vr)))
+            k_norm, v_norm = float(np.linalg.norm(kr)), float(np.linalg.norm(vr))
+            k_errs.append(float(np.linalg.norm(kr - kq)) / k_norm if k_norm else 0.0)
+            v_errs.append(float(np.linalg.norm(vr - vq)) / v_norm if v_norm else 0.0)
+        if not np.isfinite(k_errs).all() or not np.isfinite(v_errs).all():
+            raise ValueError(f"non-finite {qtype} calibration error statistics")
 
         payload = {
             "scales": {
@@ -372,9 +493,12 @@ def calibrate_quant_types(
             },
         }
         results[qtype] = payload
+    # Serialize both payloads before publishing either: invalid scales/statistics must not leave a partial calibration.
+    serialized = {qtype: json.dumps(payload, indent=2, allow_nan=False) + "\n" for qtype, payload in results.items()}
+    for qtype, target_path in output_paths.items():
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        target_path.write_text(json.dumps(payload, indent=2) + "\n")
-        print(f"Wrote {target_path}: stats={json.dumps(payload['stats'])}", flush=True)
+        target_path.write_text(serialized[qtype])
+        print(f"Wrote {target_path}: stats={json.dumps(results[qtype]['stats'])}", flush=True)
 
     return results
 
@@ -391,7 +515,9 @@ def main() -> None:
         "(kv_scales_int8_per_channel.json -> kv_scales_fp8_per_channel.json, scales.json -> scales.fp8_per_channel.json)",
     )
     parser.add_argument("--quant-type", default="int8_per_channel", choices=QUANT_TYPES)
-    parser.add_argument("--method", default="percentile", choices=("minmax", "percentile", "mse"))
+    parser.add_argument(
+        "--method", default="percentile", choices=METHODS, help="MSE is unsupported for the FP8 companion"
+    )
     parser.add_argument("--percentile", type=float, default=99.99)
     parser.add_argument("--num-seqs", type=int, default=24)
     parser.add_argument("--target-seq", type=int, default=512)

@@ -48,8 +48,11 @@ struct ConvKeyValueCache : KeyValueCache {
   // bound to both). Enabled the same way as DefaultKeyValueCache: via
   // IsPastPresentShareBufferEnabled (genai search options) and/or a fixed kv seq_len
   // detected in the model graph by DetectAndConfigureFixedKvShape. Sequence capacity is
-  // the detected fixed dim when present, else search.max_length.
+  // the detected fixed dim when present, else search.max_length, except in window-sized layers (kv_windowed_).
   bool kv_share_buffer_{false};
+  // Per KV layer: a sliding_attention layer whose window-sized buffer is bound as past and present in every mode.
+  std::vector<bool> kv_windowed_;
+  int kv_window_capacity_{};
 
   // Conv state cache (only for conv layers)
   int conv_layer_count_{};

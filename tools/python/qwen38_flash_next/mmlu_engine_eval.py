@@ -37,7 +37,7 @@ from pathlib import Path
 
 import numpy as np
 import onnxruntime_genai as og
-from qwen38_engine_util import load_model, run_turn, set_force_reject
+from qwen38_engine_util import execution_protocol, load_model, run_turn, set_force_reject
 
 for _path in os.environ.get("QWEN38_EVAL_PATHS", "").split(os.pathsep):
     if _path:
@@ -75,14 +75,17 @@ def generate(engine, buffer, prompt, max_new):
     ended_with_stop = result.finish_reason == og.FinishReason.EOS
     if ended_with_stop:
         tokens.append(EOS_APPENDED)
-    decode_s = result.times[-1] - result.times[0] if result.times else 0.0
+    decode_s = 0.0
+    if result.times:
+        decode_end = result.end if ended_with_stop else result.times[-1]
+        decode_s = decode_end - result.times[0]
     return {
         "tokens": tokens,
         "stop_token_appended": ended_with_stop,
         "usage_ok": result.usage.prompt_tokens == len(prompt) and result.usage.generated_tokens == len(result.tokens),
         "ttft_s": result.times[0] - result.start if result.times else None,
         "decode_s": decode_s,
-        "wall_s": (result.times[-1] - result.start) if result.times else 0.0,
+        "wall_s": result.end - result.start,
         "cycles": int(after["rounds"] - before["rounds"]),
         "accepted": int(after["draft_tokens_accepted"] - before["draft_tokens_accepted"]),
     }
@@ -107,7 +110,9 @@ def run(args):
             r = json.loads(line)
             done[r["index"]] = r
     meta = {
+        **execution_protocol(),
         "max_new": args.max_new,
+        "force_reject": args.force_reject,
         "shard": args.shard,
         "shards": args.shards,
         "package": str(args.model),

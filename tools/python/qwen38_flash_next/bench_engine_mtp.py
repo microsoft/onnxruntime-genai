@@ -25,7 +25,10 @@ from qwen38_engine_util import Prompts, add_prompt_arguments, load_model, run_tu
 
 def host_memory_stats():
     """Collect Linux host accounting outside timed decode; cgroup peak includes charged file cache."""
-    stats = {"expert_cache_mib": os.environ.get("ORT_QMOE_HOST_CACHE_MIB", "0")}
+    stats = {
+        "expert_cache_mib": os.environ.get("ORT_QMOE_HOST_CACHE_MIB", "0"),
+        "expert_cache_bytes": os.environ.get("QWEN38_HOST_EXPERT_BYTES"),
+    }
     try:
         stats["process_status"] = {
             line.split(":", 1)[0]: line.split(":", 1)[1].strip()
@@ -83,7 +86,9 @@ def main():
     parser.add_argument("--new", type=int, default=256)
     parser.add_argument("--reps", type=int, default=3)
     parser.add_argument("--no-warmup", action="store_true")
-    parser.add_argument("--no-mtp", action="store_true")
+    parser.add_argument(
+        "--no-mtp", action="store_true", help="S=1 decode; requires a non-folded package with S=1 graphs"
+    )
     parser.add_argument(
         "--stop-token-id",
         type=int,
@@ -94,6 +99,8 @@ def main():
     parser.add_argument("--provider", default=os.environ.get("QWEN_PROVIDER"))
     add_prompt_arguments(parser)
     args = parser.parse_args()
+    if args.new < 2:
+        parser.error("--new must be at least 2 to measure decode throughput")
     if args.out.exists():
         raise FileExistsError(args.out)
 
@@ -128,7 +135,10 @@ def main():
             accepted = after["draft_tokens_accepted"] - before["draft_tokens_accepted"]
             proposed = after["draft_tokens_proposed"] - before["draft_tokens_proposed"]
             head_calls = after["draft_forward_passes"] - before["draft_forward_passes"]
-            accept_hist, pos_accept_rates, cond_accept_rates = acceptance_stats(before, after, rounds)
+            if proposed:
+                accept_hist, pos_accept_rates, cond_accept_rates = acceptance_stats(before, after, rounds)
+            else:
+                accept_hist, pos_accept_rates, cond_accept_rates = None, None, None
             record = {
                 "label": (
                     "warmup" if index == 0 and not skip_warmup else f"run{index if not skip_warmup else index + 1}"
@@ -143,7 +153,7 @@ def main():
                 "cycles": rounds,
                 "proposed": proposed,
                 "accepted": accepted,
-                "accept_rate": accepted / rounds if rounds else None,
+                "accept_rate": accepted / rounds if proposed and rounds else None,
                 "accepted_per_proposed": accepted / proposed if proposed else None,
                 "head_calls": head_calls,
                 "accept_hist": accept_hist,

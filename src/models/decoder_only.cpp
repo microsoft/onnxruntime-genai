@@ -3,6 +3,7 @@
 #include "engram.h"
 #include <charconv>
 #include <limits>
+#include "preprocessing/multi_modal_processor.h"
 
 namespace Generators {
 DecoderOnly_Model::DecoderOnly_Model(std::unique_ptr<Config> config, OrtEnv& ort_env)
@@ -44,6 +45,47 @@ DecoderOnly_Model::DecoderOnly_Model(std::unique_ptr<Config> config, OrtEnv& ort
     }
     cpu_embedding_ = std::make_shared<CpuEmbedding>(*this, ort_env);
     cpu_embedding_->ValidateConsumer(session_info_, config_->model.decoder.inputs.embeddings);
+  }
+  if (!config_->model.vision.filename.empty()) {
+    if (!cpu_embedding_ || !config_->engine.dynamic_batching || !config_->model.vision.pipeline.empty() ||
+        !config_->model.speech.filename.empty()) {
+      throw std::runtime_error(
+          "Packed vision requires a Qwen dynamic-batching decoder with pure CPU embeddings.");
+    }
+    const auto& inputs = config_->model.decoder.inputs;
+    if (!session_info_.HasInput(inputs.position_ids) ||
+        session_info_.GetInputShape(inputs.position_ids) != std::vector<int64_t>{3, -1} ||
+        session_info_.GetInputDataType(inputs.position_ids) != Ort::TypeToTensorType<int64_t>) {
+      throw std::runtime_error("Packed Qwen vision requires three-axis int64 decoder position IDs.");
+    }
+    if (config_->model.type == "qwen4_exp" &&
+        (!session_info_.HasInput(inputs.rotary_position_ids) ||
+         session_info_.GetInputShape(inputs.rotary_position_ids) != std::vector<int64_t>{3, -1, -1} ||
+         session_info_.GetInputDataType(inputs.rotary_position_ids) != Ort::TypeToTensorType<int64_t>)) {
+      throw std::runtime_error("Packed Qwen4-Exp vision requires three-axis int64 sparse-indexer rotary history.");
+    }
+    vision_ = std::make_unique<PackedVision>();
+    vision_->session_options = OrtSessionOptions::Create();
+    vision_->device = CreateSessionOptionsFromConfig(
+        config_->model.vision.session_options.value_or(config_->model.decoder.session_options),
+        *vision_->session_options, true, /*disable_graph_capture=*/true);
+    vision_->session = CreateSession(ort_env, config_->model.vision.filename, vision_->session_options.get());
+    vision_->session_info.Add(*vision_->session);
+    const auto& vision_config = config_->model.vision;
+    const auto pixels = vision_->session_info.GetInputShape(vision_config.inputs.pixel_values);
+    const auto features = vision_->session_info.GetOutputShape(vision_config.outputs.image_features);
+    if (vision_->session->GetInputNames().size() != 2 || vision_->session->GetOutputNames().size() != 1 ||
+        pixels.size() != 2 || pixels[0] >= 0 || pixels[1] <= 0 ||
+        vision_->session_info.GetInputDataType(vision_config.inputs.pixel_values) != cpu_embedding_->type_ ||
+        vision_->session_info.GetInputShape(vision_config.inputs.image_grid_thw) != std::vector<int64_t>{1, 3} ||
+        vision_->session_info.GetInputDataType(vision_config.inputs.image_grid_thw) != Ort::TypeToTensorType<int64_t> ||
+        features != std::vector<int64_t>{-1, cpu_embedding_->hidden_size_} ||
+        vision_->session_info.GetOutputDataType(vision_config.outputs.image_features) != cpu_embedding_->type_ ||
+        vision_config.patch_size <= 0 || vision_config.spatial_merge_size <= 0) {
+      throw std::runtime_error("Packed vision encoder does not match the patch/grid/projected-feature contract.");
+    }
+    vision_->processor = std::make_shared<MultiModalProcessor>(
+        *config_, vision_->session_info, GetOrCreatePreprocessingThreadPool());
   }
 }
 

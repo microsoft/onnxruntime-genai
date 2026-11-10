@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
-"""Helpers that load the ``tools/qwen38_graph`` scripts in the unit tests.
+"""Helpers that load the ``tools/python/qwen38_flash_next`` scripts in the unit tests.
 
 The scripts import each other by bare module name and pull in ``onnxruntime_genai`` (and, depending on the script, ``torch``,
 ``transformers`` or the research evaluation libraries). The tests only exercise their pure logic, so ``load_tools`` replaces those
@@ -23,7 +23,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-TOOLS_DIR = REPO_ROOT / "tools" / "qwen38_graph"
+TOOLS_DIR = REPO_ROOT / "tools" / "python" / "qwen38_flash_next"
 KV_CALIBRATION_SOURCE = REPO_ROOT / "src" / "python" / "py" / "models" / "quantization" / "kv_cache_calibration.py"
 
 
@@ -64,7 +64,7 @@ def _drop_tool_modules():
 
 @contextlib.contextmanager
 def load_tools(*names, stubs=None):
-    """Yields the ``tools/qwen38_graph`` modules ``names``, imported with ``stubs`` (module name -> module) installed.
+    """Yields the ``tools/python/qwen38_flash_next`` modules ``names``, imported with ``stubs`` (module name -> module) installed.
 
     ``onnxruntime_genai`` is always replaced by a minimal stub unless ``stubs`` provides one.
     """
@@ -82,16 +82,22 @@ def load_tools(*names, stubs=None):
 
 # The keys below ``model.qwen38_graph`` that the engine's config parser (src/config.cpp, model type ``qwen38_flash_graph``) knows.
 # It rejects every other key when the package is loaded, e.g. the former ``fold.mtp`` / ``fold.drafter`` head sessions,
-# ``fold.force_reject``, ``mtp.skip_refeed``, ``prefill_chunk_tokens`` and all CUDA graph id keys. A leaf maps to ``None``;
+# ``fold.force_reject``, ``mtp.skip_refeed``, ``prefill_chunk_tokens`` and the obsolete top-level CUDA graph id keys.
+# Positive, distinct legacy ``fold.target_graph_id`` / ``fold.head_r2.graph_id`` are still accepted. A leaf maps to ``None``;
 # the ``session_options`` objects are standard session options, which this description does not look into.
 QWEN38_GRAPH_KEYS = {
     "plane_library": None,
     "ple_table": None,
     "kv_capacity": None,
+    "max_batch_size": None,
     "warmup": None,
     "head": {"filename_s1": None, "filename_s2": None, "session_options": None},
     "mtp": {"enabled": None, "prefill_head": None},
-    "fold": {"enabled": None, "head_r2": {"filename": None, "session_options": None}},
+    "fold": {
+        "enabled": None,
+        "target_graph_id": None,
+        "head_r2": {"filename": None, "graph_id": None, "session_options": None},
+    },
     "prefill": {
         "enabled": None,
         "chunk": None,
@@ -109,8 +115,6 @@ REMOVED_QWEN38_GRAPH_KEYS = (
     "fold.force_reject",
     "fold.mtp",
     "fold.drafter",
-    "fold.target_graph_id",
-    "fold.head_r2.graph_id",
     "prefill_chunk_tokens",
     "target_s1_graph_id",
     "target_s2_graph_id",

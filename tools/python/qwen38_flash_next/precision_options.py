@@ -2,7 +2,7 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 """Flexible component-level precision configuration and post-build ONNX/package transformer
-for Qwen3.8-Flash-Next RC5 (`build_package.py`) and GGUF (`build_package_gguf.py`) packages.
+for Qwen3.8-Flash-Next RC5 packages built by `build_package.py`.
 
 Supports independent control over:
   - `--precision-profile {default,fp32,fp32_fp16kv}`: preset combinations
@@ -14,6 +14,9 @@ Supports independent control over:
   - `--ple-engram {default,int8,iq4_nl,q8_0}`: Per-Layer Embedding (PLE) engram table quantization
   - `--ple-norm-dtype {bf16,fp32}`: Layer 1 PLE `BranchwiseRMSNorm` scale precision (`M = BFloat16` vs `float`)
   - `--small-weights-source {default,gguf,hf_bf16}`: GGUF small weights source (`hc_*`, `shared_expert.*`)
+
+`--qsa-qkv-dtype` other than `default` requires `--indexer-dtype fp32`: the FP16 QSA projections replace the fused INT8
+`SplitQsa` projection, which also produces the indexer projection.
 """
 
 from __future__ import annotations
@@ -29,6 +32,20 @@ from pathlib import Path
 import numpy as np
 import onnx
 from onnx import TensorProto, helper, numpy_helper
+from package_io import (
+    CONTEXT_TIERS,
+    AlignedBlobWriter,
+    HFCheckpointReader,
+    append_file_range,
+    build_context_tier_model,
+    ensure_unified_dynamic_cache_model,
+    make_ext_init,
+    read_gguf_tensor_infos,
+    save_model_replacing,
+    set_inline_f32,
+    write_all,
+    write_text_replacing,
+)
 
 DEFAULT_HF_DIR = Path("/data/tlwu/Qwen3.8-Flash-Next")
 DEFAULT_ENGRAM_Q8_GGUF = Path("/data/tlwu/qwen_flash_next_ggufs/engram/Qwen3.8-Flash-Next-engram-Q8_0.gguf_file")
@@ -47,7 +64,8 @@ class PrecisionConfig:
     ple_engram: str = "default"  # default | int8 | iq4_nl | q8_0
     ple_norm_dtype: str = "bf16"  # bf16 | fp32
     small_weights_source: str = "default"  # default | gguf | hf_bf16
-    emit_int8kv_variant: bool = False  # emit model_int8kv.onnx alongside model.onnx when kv_cache_dtype in ("bf16", "fp16")
+    # emit model_int8kv.onnx alongside model.onnx when kv_cache_dtype in ("bf16", "fp16")
+    emit_int8kv_variant: bool = False
     consolidate_data_files: bool = False  # consolidate target .data files into a single model.onnx.data
     engram_gguf_path: Path | None = None
 
@@ -66,6 +84,13 @@ class PrecisionConfig:
             or self.emit_int8kv_variant
             or self.consolidate_data_files
         )
+
+    def validate(self) -> None:
+        if self.qsa_qkv_dtype != "default" and self.indexer_dtype != "fp32":
+            raise ValueError(
+                f"--qsa-qkv-dtype {self.qsa_qkv_dtype} requires --indexer-dtype fp32 (got {self.indexer_dtype}): "
+                "the FP16 QSA projections replace the fused INT8 SplitQsa projection that also produces the indexer projection"
+            )
 
     def to_dict(self) -> dict[str, object]:
         d = dataclasses.asdict(self)
@@ -257,6 +282,7 @@ def resolve_precision_config(args: argparse.Namespace) -> PrecisionConfig:
         cfg.consolidate_data_files = bool(args.consolidate_data_files)
     if getattr(args, "engram_gguf", None) is not None:
         cfg.engram_gguf_path = args.engram_gguf
+    cfg.validate()
     return cfg
 
 
@@ -264,127 +290,108 @@ def consolidate_package_external_data(
     pkg_dir: Path,
     target_data_name: str = "model.onnx.data",
 ) -> dict[str, object]:
-    """Consolidate all target decoder external `.data` files referenced by `model.onnx` (and `model_int8kv.onnx`)
-    into a single `4096`-byte page-aligned `model.onnx.data` file, leaving only:
+    """Consolidate all target decoder external `.data` files into a single `4096`-byte page-aligned `model.onnx.data` file,
+    leaving only:
       - `embedding.onnx` + `embedding.onnx.data`
       - `dflash2.onnx` + `dflash2.onnx.data`
-      - `model.onnx` (+ `model_int8kv.onnx`) + `model.onnx.data`
+      - `model.onnx` (+ `model_int8kv.onnx` and context-tier `model_*.onnx`) + `model.onnx.data`
+
+    The data files referenced by the decoder graphs (`model.onnx` and every `model_*.onnx` variant) are merged, including an
+    existing `target_data_name`, whose slices are relocated as well. All other graphs of the package and `weights_pool.txt` are
+    rewritten wherever they reference a merged file, so no file that is still referenced is removed.
     """
     model_path = pkg_dir / "model.onnx"
     if not model_path.exists():
         return {"consolidated": False}
 
-    model = onnx.load(str(model_path), load_external_data=False)
-    int8_path = pkg_dir / "model_int8kv.onnx"
-    model_int8 = onnx.load(str(int8_path), load_external_data=False) if int8_path.exists() else None
-    dflash_path = pkg_dir / "dflash2.onnx"
-    model_dflash = onnx.load(str(dflash_path), load_external_data=False) if dflash_path.exists() else None
+    decoder_paths = [model_path, *sorted(pkg_dir.glob("model_*.onnx"))]
+    other_paths = sorted(p for p in pkg_dir.glob("*.onnx") if p not in decoder_paths)
+    graphs = {p: onnx.load(str(p), load_external_data=False) for p in decoder_paths + other_paths}
 
-    keep_separate = {"embedding.onnx.data", "dflash2.onnx.data", target_data_name}
+    keep_separate = {"embedding.onnx.data", "dflash2.onnx.data"}
     slices_ordered: list[tuple[str, int, int]] = []
     seen_slices: set[tuple[str, int, int]] = set()
     old_files: set[str] = set()
 
-    def collect_from_proto(m_proto: onnx.ModelProto | None, only_from_old_files: bool = False) -> None:
-        if m_proto is None:
-            return
+    def add_slice(key: tuple[str, int, int]) -> None:
+        if key not in seen_slices:
+            seen_slices.add(key)
+            slices_ordered.append(key)
+
+    def external_inits(m_proto: onnx.ModelProto):
         for t in m_proto.graph.initializer:
-            if t.data_location != TensorProto.EXTERNAL:
-                continue
-            ext = {kv.key: kv.value for kv in t.external_data}
+            if t.data_location == TensorProto.EXTERNAL:
+                yield t, {kv.key: kv.value for kv in t.external_data}
+
+    for p in decoder_paths:
+        for _t, ext in external_inits(graphs[p]):
             loc = ext.get("location", "")
             if not loc or loc in keep_separate or loc.endswith(".gguf") or "/" in loc:
                 continue
-            if only_from_old_files and loc not in old_files:
-                continue
-            key = (loc, int(ext.get("offset", 0)), int(ext["length"]))
             old_files.add(loc)
-            if key not in seen_slices:
-                seen_slices.add(key)
-                slices_ordered.append(key)
-
-    collect_from_proto(model, only_from_old_files=False)
-    collect_from_proto(model_int8, only_from_old_files=False)
-    collect_from_proto(model_dflash, only_from_old_files=True)
+            add_slice((loc, int(ext.get("offset", 0)), int(ext["length"])))
+    for p in other_paths:
+        for _t, ext in external_inits(graphs[p]):
+            loc = ext.get("location", "")
+            if loc in old_files:
+                add_slice((loc, int(ext.get("offset", 0)), int(ext["length"])))
 
     pool_path = pkg_dir / "weights_pool.txt"
     pool_lines = pool_path.read_text().splitlines() if pool_path.exists() else []
     for ln in pool_lines:
         parts = ln.split()
-        if len(parts) >= 8 and parts[0] == "pool":
-            loc = parts[-1]
-            if loc in old_files:
-                key = (loc, int(parts[3]), int(parts[4]))
-                if key not in seen_slices:
-                    seen_slices.add(key)
-                    slices_ordered.append(key)
+        if len(parts) >= 8 and parts[0] == "pool" and parts[-1] in old_files:
+            add_slice((parts[-1], int(parts[3]), int(parts[4])))
 
-    if not slices_ordered:
+    if not old_files - {target_data_name}:
         return {"consolidated": False}
 
     page_align = 4096
     tmp_data_path = pkg_dir / f"{target_data_name}.tmp.{os.getpid()}"
     slice_new_offset: dict[tuple[str, int, int], int] = {}
     cur_off = 0
-    open_fds: dict[str, int] = {}
     try:
         with open(tmp_data_path, "wb") as out_f:
             out_fd = out_f.fileno()
             for loc, off, length in slices_ordered:
                 pad = (page_align - (cur_off % page_align)) % page_align
                 if pad > 0:
-                    os.write(out_fd, b"\x00" * pad)
+                    write_all(out_fd, b"\x00" * pad)
                     cur_off += pad
                 slice_new_offset[(loc, off, length)] = cur_off
-                if loc not in open_fds:
-                    open_fds[loc] = os.open(str(pkg_dir / loc), os.O_RDONLY)
-                in_fd = open_fds[loc]
-                rem = length
-                in_pos = off
-                while rem > 0:
-                    chunk = min(rem, 1 << 30)
-                    sent = os.sendfile(out_fd, in_fd, in_pos, chunk)
-                    if sent <= 0:
-                        raise RuntimeError(f"sendfile returned {sent} for {loc} at {in_pos}")
-                    in_pos += sent
-                    rem -= sent
+                append_file_range(out_fd, pkg_dir / loc, off, length)
                 cur_off += length
             tail_pad = (page_align - (cur_off % page_align)) % page_align
             if tail_pad > 0:
-                os.write(out_fd, b"\x00" * tail_pad)
+                write_all(out_fd, b"\x00" * tail_pad)
                 cur_off += tail_pad
+        tmp_data_path.replace(pkg_dir / target_data_name)
     finally:
-        for fd in open_fds.values():
-            os.close(fd)
+        if tmp_data_path.exists():
+            tmp_data_path.unlink()
 
-    def rewrite_proto_inits(m_proto: onnx.ModelProto | None) -> bool:
-        if m_proto is None:
-            return False
+    def rewrite_proto_inits(m_proto: onnx.ModelProto) -> bool:
         changed = False
-        for t in m_proto.graph.initializer:
-            if t.data_location != TensorProto.EXTERNAL:
-                continue
-            ext = {kv.key: kv.value for kv in t.external_data}
+        for t, ext in external_inits(m_proto):
             loc = ext.get("location", "")
             if loc not in old_files:
                 continue
             key = (loc, int(ext.get("offset", 0)), int(ext["length"]))
-            new_off = slice_new_offset[key]
             del t.external_data[:]
-            for k, v in (("location", target_data_name), ("offset", str(new_off)), ("length", str(key[2]))):
+            for k, v in (
+                ("location", target_data_name),
+                ("offset", str(slice_new_offset[key])),
+                ("length", str(key[2])),
+            ):
                 entry = t.external_data.add()
                 entry.key = k
                 entry.value = v
             changed = True
         return changed
 
-    tmp_data_path.replace(pkg_dir / target_data_name)
-    if rewrite_proto_inits(model):
-        onnx.save(model, str(model_path))
-    if rewrite_proto_inits(model_int8) and model_int8 is not None:
-        onnx.save(model_int8, str(int8_path))
-    if rewrite_proto_inits(model_dflash) and model_dflash is not None:
-        onnx.save(model_dflash, str(dflash_path))
+    for p, m_proto in graphs.items():
+        if rewrite_proto_inits(m_proto):
+            save_model_replacing(m_proto, p)
 
     if pool_lines:
         new_pool_lines: list[str] = []
@@ -397,14 +404,20 @@ def consolidate_package_external_data(
                 new_pool_lines.append(" ".join(parts))
             else:
                 new_pool_lines.append(ln)
-        pool_path.write_text("\n".join(new_pool_lines) + "\n")
+        write_text_replacing(pool_path, "\n".join(new_pool_lines) + "\n")
 
-    for loc in sorted(old_files):
+    removed_files = sorted(old_files - {target_data_name})
+    for loc in removed_files:
         p_old = pkg_dir / loc
         if p_old.exists() or p_old.is_symlink():
             p_old.unlink()
 
-    return {"consolidated": True, "target_data_file": target_data_name, "total_bytes": cur_off, "removed_files": sorted(old_files)}
+    return {
+        "consolidated": True,
+        "target_data_file": target_data_name,
+        "total_bytes": cur_off,
+        "removed_files": removed_files,
+    }
 
 
 def compute_f32_rope_caches(max_rotary_rows: int = 262144) -> tuple[bytes, bytes, bytes, bytes]:
@@ -422,13 +435,15 @@ def compute_f32_rope_caches(max_rotary_rows: int = 262144) -> tuple[bytes, bytes
 
 def write_gguf_ple_table(out_dir: Path, engram_kind: str, engram_gguf: Path | None = None) -> str:
     """Write `ple_table.txt` for `q8_0` (`scale -8.0`) or `iq4_nl` (`scale -20.0`) engram GGUF."""
-    from build_package_gguf import parse_gguf_header
-
     if engram_gguf is None:
         engram_gguf = DEFAULT_ENGRAM_Q8_GGUF if engram_kind == "q8_0" else DEFAULT_ENGRAM_IQ4_GGUF
-    assert engram_gguf.exists(), f"Missing engram GGUF: {engram_gguf}"
-    _, engram_ts, engram_doff = parse_gguf_header(engram_gguf)
-    assert len(engram_ts) == 1 and engram_ts[0]["name"] == "per_layer_token_embd.weight"
+    if not engram_gguf.is_file():
+        raise FileNotFoundError(f"Missing engram GGUF: {engram_gguf}")
+    engram_ts, engram_doff = read_gguf_tensor_infos(engram_gguf)
+    if len(engram_ts) != 1 or engram_ts[0]["name"] != "per_layer_token_embd.weight":
+        raise ValueError(
+            f"{engram_gguf} must hold only per_layer_token_embd.weight, got {[t['name'] for t in engram_ts]}"
+        )
     ggml_type = engram_ts[0]["ggml_type"]
     if ggml_type == 8:
         engram_dst_name = "Qwen3.8-Flash-Next-engram-Q8_0.gguf"
@@ -447,10 +462,7 @@ def write_gguf_ple_table(out_dir: Path, engram_kind: str, engram_gguf: Path | No
     try:
         os.link(engram_gguf, dst)
     except OSError:
-        shared_home_engram = Path(f"/home/tianlei/models/{engram_gguf.name}")
-        if not shared_home_engram.exists():
-            shutil.copy2(engram_gguf, shared_home_engram)
-        os.link(shared_home_engram, dst)
+        shutil.copy2(engram_gguf, dst)
 
     if (out_dir / "ple").is_dir():
         shutil.rmtree(out_dir / "ple")
@@ -476,7 +488,7 @@ def write_gguf_ple_table(out_dir: Path, engram_kind: str, engram_gguf: Path | No
         byte_off = engram_doff + cur_row * ple_row_bytes
         ple_lines.append(f"shard {engram_dst_name} {byte_off} {r_cnt}")
         cur_row += r_cnt
-    (out_dir / "ple_table.txt").write_text("\n".join(ple_lines) + "\n")
+    write_text_replacing(out_dir / "ple_table.txt", "\n".join(ple_lines) + "\n")
     return engram_dst_name
 
 
@@ -488,13 +500,11 @@ def apply_precision_config_to_package(
     """Apply `pcfg` component precision overrides in-place to a built RC5 or GGUF package at `pkg_dir`."""
     if not pcfg.is_non_default():
         return {"applied": False, "config": pcfg.to_dict()}
+    pcfg.validate()
 
     manifest_path = pkg_dir / "package_manifest.json"
     if manifest_path.is_file() and json.loads(manifest_path.read_text()).get("position_config"):
         raise ValueError("Precision overrides are not qualified for configurable RoPE/context exports")
-
-    from build_package import HFCheckpointReader, ensure_unified_dynamic_cache_model, make_ext_init
-    from build_package_gguf import SmallWeightBlobWriter, set_inline_f32
 
     hf_reader = HFCheckpointReader(hf_dir)
     model_path = pkg_dir / "model.onnx"
@@ -518,12 +528,17 @@ def apply_precision_config_to_package(
             old_ac_bytes = ac_path.read_bytes()
         ac_path.unlink()
 
-    for legacy_blob in ("fp32_gates_and_indexer.data", "fp16_qsa_v_rc5.data", "fp16_qsa_kv.data", "fp16_qsa_qkv_o.data"):
+    for legacy_blob in (
+        "fp32_gates_and_indexer.data",
+        "fp16_qsa_v_rc5.data",
+        "fp16_qsa_kv.data",
+        "fp16_qsa_qkv_o.data",
+    ):
         p_leg = pkg_dir / legacy_blob
         if p_leg.is_symlink() or p_leg.exists():
             p_leg.unlink()
 
-    ac_writer = SmallWeightBlobWriter(pkg_dir, "attn_consts.data")
+    ac_writer = AlignedBlobWriter(pkg_dir, "attn_consts.data")
 
     def add_ac_ext(onnx_name: str, raw_bytes: bytes, dt: int, dims: list[int]) -> tuple[str, int, int, int, list[int]]:
         info = ac_writer.write_raw(raw_bytes, dt, dims)
@@ -559,7 +574,7 @@ def apply_precision_config_to_package(
         pool_lines = new_pool
 
     if pool_lines:
-        pool_path.write_text("\n".join(pool_lines) + "\n")
+        write_text_replacing(pool_path, "\n".join(pool_lines) + "\n")
 
     # 3. Optional FP32 GDN gate projections & FP32 Indexer projections (packed into attn_consts.data)
     if pcfg.gdn_gate_dtype == "fp32" or pcfg.indexer_dtype == "fp32":
@@ -574,14 +589,29 @@ def apply_precision_config_to_package(
                     hf_reader.read_bf16_tensor(f"{lpfx}.linear_attn.in_proj_b.weight").float().numpy().T,
                     dtype=np.float32,
                 )
-                add_ac_ext(f"model.layers.{lid}.linear_attn.alpha.weight_t.f32", w_a.tobytes(), TensorProto.FLOAT, list(w_a.shape))
-                add_ac_ext(f"model.layers.{lid}.linear_attn.beta.weight_t.f32", w_b.tobytes(), TensorProto.FLOAT, list(w_b.shape))
+                add_ac_ext(
+                    f"model.layers.{lid}.linear_attn.alpha.weight_t.f32",
+                    w_a.tobytes(),
+                    TensorProto.FLOAT,
+                    list(w_a.shape),
+                )
+                add_ac_ext(
+                    f"model.layers.{lid}.linear_attn.beta.weight_t.f32",
+                    w_b.tobytes(),
+                    TensorProto.FLOAT,
+                    list(w_b.shape),
+                )
             elif lid % 4 == 3 and pcfg.indexer_dtype == "fp32":
                 w_iqk = np.ascontiguousarray(
                     hf_reader.read_bf16_tensor(f"{lpfx}.self_attn.indexer.index_qk_proj.weight").float().numpy().T,
                     dtype=np.float32,
                 )
-                add_ac_ext(f"model.layers.{lid}.self_attn.indexer_qk.weight_t.f32", w_iqk.tobytes(), TensorProto.FLOAT, list(w_iqk.shape))
+                add_ac_ext(
+                    f"model.layers.{lid}.self_attn.indexer_qk.weight_t.f32",
+                    w_iqk.tobytes(),
+                    TensorProto.FLOAT,
+                    list(w_iqk.shape),
+                )
 
     # 3b. Optional FP16 QSA V (`v_rc5_fp16`), K/V (`kv_fp16`), or Q/K/V/O (`fp16`) projections (packed into attn_consts.data)
     if pcfg.qsa_qkv_dtype == "v_rc5_fp16":
@@ -596,14 +626,21 @@ def apply_precision_config_to_package(
             q_signed = torch.round(w_f32 / scales_f32).clamp(-128.0, 127.0)
             w_bf16_deq = (q_signed.to(torch.bfloat16) * scales_bf16.unsqueeze(-1)).float().reshape(512, 2560)
             w_v_fp16_t = np.ascontiguousarray(w_bf16_deq.numpy().T, dtype=np.float16)
-            add_ac_ext(f"model.layers.{lid}.self_attn.v.rc5_deq.fp16", w_v_fp16_t.tobytes(), TensorProto.FLOAT16, list(w_v_fp16_t.shape))
+            add_ac_ext(
+                f"model.layers.{lid}.self_attn.v.rc5_deq.fp16",
+                w_v_fp16_t.tobytes(),
+                TensorProto.FLOAT16,
+                list(w_v_fp16_t.shape),
+            )
     elif pcfg.qsa_qkv_dtype == "kv_fp16":
         for lid in range(3, 48, 4):
             lpfx = f"model.language_model.layers.{lid}"
             w_k = hf_reader.read_bf16_tensor(f"{lpfx}.self_attn.k_proj.weight").float().numpy().astype(np.float16).T
             w_v = hf_reader.read_bf16_tensor(f"{lpfx}.self_attn.v_proj.weight").float().numpy().astype(np.float16).T
             w_kv = np.ascontiguousarray(np.concatenate([w_k, w_v], axis=1), dtype=np.float16)
-            add_ac_ext(f"model.layers.{lid}.self_attn.kv.weight_t.fp16", w_kv.tobytes(), TensorProto.FLOAT16, list(w_kv.shape))
+            add_ac_ext(
+                f"model.layers.{lid}.self_attn.kv.weight_t.fp16", w_kv.tobytes(), TensorProto.FLOAT16, list(w_kv.shape)
+            )
         inits_by_name["const_split_qsa_kv_512_512"] = numpy_helper.from_array(
             np.array([512, 512], dtype=np.int64), name="const_split_qsa_kv_512_512"
         )
@@ -614,17 +651,25 @@ def apply_precision_config_to_package(
             w_k = hf_reader.read_bf16_tensor(f"{lpfx}.self_attn.k_proj.weight").float().numpy().astype(np.float16).T
             w_v = hf_reader.read_bf16_tensor(f"{lpfx}.self_attn.v_proj.weight").float().numpy().astype(np.float16).T
             w_qkv = np.ascontiguousarray(np.concatenate([w_q, w_k, w_v], axis=1), dtype=np.float16)
-            add_ac_ext(f"model.layers.{lid}.self_attn.qkv.weight_t.fp16", w_qkv.tobytes(), TensorProto.FLOAT16, list(w_qkv.shape))
+            add_ac_ext(
+                f"model.layers.{lid}.self_attn.qkv.weight_t.fp16",
+                w_qkv.tobytes(),
+                TensorProto.FLOAT16,
+                list(w_qkv.shape),
+            )
             w_o = np.ascontiguousarray(
                 hf_reader.read_bf16_tensor(f"{lpfx}.self_attn.o_proj.weight").float().numpy().astype(np.float16).T,
                 dtype=np.float16,
             )
-            add_ac_ext(f"model.layers.{lid}.self_attn.o_proj.weight_t.fp16", w_o.tobytes(), TensorProto.FLOAT16, list(w_o.shape))
+            add_ac_ext(
+                f"model.layers.{lid}.self_attn.o_proj.weight_t.fp16",
+                w_o.tobytes(),
+                TensorProto.FLOAT16,
+                list(w_o.shape),
+            )
         inits_by_name["const_split_qsa_qkv_12288_512_512"] = numpy_helper.from_array(
             np.array([12288, 512, 512], dtype=np.int64), name="const_split_qsa_qkv_12288_512_512"
         )
-
-    ac_writer.close()
 
     # 4. Inline norms (indexer q/k layernorm and Layer 1 PLE norms)
     if pcfg.indexer_dtype == "fp32":
@@ -687,9 +732,7 @@ def apply_precision_config_to_package(
             continue
         if n.op_type == "RMSNormRotary":
             out_fp16 = (
-                1
-                if (pcfg.kv_cache_dtype == "fp16" or pcfg.qsa_qkv_dtype in ("v_rc5_fp16", "kv_fp16", "fp16"))
-                else 0
+                1 if (pcfg.kv_cache_dtype == "fp16" or pcfg.qsa_qkv_dtype in ("v_rc5_fp16", "kv_fp16", "fp16")) else 0
             )
             attrs = {a.name: helper.get_attribute_value(a) for a in n.attribute}
             attrs["output_fp16"] = out_fp16
@@ -1105,7 +1148,15 @@ def apply_precision_config_to_package(
     del model.graph.initializer[:]
     model.graph.initializer.extend(final_inits)
     ensure_unified_dynamic_cache_model(model)
-    onnx.save(model, str(model_path))
+    save_model_replacing(model, model_path)
+
+    # Context-tier graphs are copies of model.onnx; rebuild them so they match the transformed graph and attn_consts.data.
+    rebuilt_tiers: list[str] = []
+    for tier, (kv_cap, st_cap) in CONTEXT_TIERS.items():
+        tier_path = pkg_dir / f"model_{tier}.onnx"
+        if tier_path.exists():
+            save_model_replacing(build_context_tier_model(model, kv_cap, st_cap), tier_path)
+            rebuilt_tiers.append(tier)
 
     emitted_int8kv_onnx: str | None = None
     if (
@@ -1136,7 +1187,7 @@ def apply_precision_config_to_package(
         model_int8kv.graph.initializer.extend(final_int8_inits)
         ensure_unified_dynamic_cache_model(model_int8kv)
         emitted_int8kv_onnx = "model_int8kv.onnx"
-        onnx.save(model_int8kv, str(pkg_dir / emitted_int8kv_onnx))
+        save_model_replacing(model_int8kv, pkg_dir / emitted_int8kv_onnx)
 
     # 7. Update genai_config.json session options and offload runtime_profiles
     cfg_path = pkg_dir / "genai_config.json"
@@ -1152,7 +1203,7 @@ def apply_precision_config_to_package(
                     dec_ov["filename"] = emitted_int8kv_onnx
                 elif "filename" in dec_ov:
                     del dec_ov["filename"]
-        cfg_path.write_text(json.dumps(gcfg, indent=2) + "\n")
+        write_text_replacing(cfg_path, json.dumps(gcfg, indent=2) + "\n")
 
     # Copy tactic cache TSV for model_int8kv.onnx if model.onnx tactic cache exists
     if emitted_int8kv_onnx is not None:
@@ -1178,11 +1229,12 @@ def apply_precision_config_to_package(
             }
         if consolidation_info is not None and consolidation_info.get("consolidated"):
             manifest["external_data_files"] = ["model.onnx.data", "dflash2.onnx.data", "embedding.onnx.data"]
-        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+        write_text_replacing(manifest_path, json.dumps(manifest, indent=2) + "\n")
 
     return {
         "applied": True,
         "config": pcfg.to_dict(),
         "emitted_int8kv_onnx": emitted_int8kv_onnx,
+        "rebuilt_context_tiers": rebuilt_tiers,
         "consolidation": consolidation_info,
     }

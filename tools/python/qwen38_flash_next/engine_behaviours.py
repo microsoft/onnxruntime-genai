@@ -5,6 +5,9 @@
 test/cpp/engine/qwen38_graph_executor_tests.cpp): stop tokens, limits, stop strings, cancel (during prefill and decode),
 queueing of a second request, turn continuation, rewind, speculative statistics and the capability errors.
 
+This suite requires the single-slot baseline with max_request_length=33024. Other capacities and multi-slot scheduling
+need different probes and are rejected before any checks run.
+
 --prefill steps|fast overlays prefill.enabled (the v12b fast prefill is tolerance level and not run-to-run reproducible, so the
 "identical to the reference" checks are exact only with --prefill steps, the bit-exact muted-fold prompt path).
 
@@ -30,12 +33,28 @@ def check(name, ok, detail=None):
 
 
 def expect_error(name, action, fragment):
+    if not fragment:
+        raise ValueError("expected error fragment must not be empty")
     try:
         action()
     except Exception as error:
         check(name, fragment in str(error), str(error)[:200])
         return
     check(name, False, "no error raised")
+
+
+def decode_chunks(tokenizer, tokens):
+    stream = tokenizer.create_stream()
+    return [stream.decode(token) for token in tokens]
+
+
+def require_baseline(capabilities):
+    if capabilities.configured_max_batch_size != 1 or capabilities.max_request_length != 33024:
+        raise ValueError(
+            "engine_behaviours.py requires the single-slot baseline "
+            "(configured_max_batch_size=1, max_request_length=33024); "
+            f"got {capabilities.configured_max_batch_size} slots and max_request_length={capabilities.max_request_length}"
+        )
 
 
 def main():
@@ -51,13 +70,14 @@ def main():
 
     overlay = {"model": {"qwen38_graph": {"prefill": {"enabled": args.prefill == "fast"}}}} if args.prefill else None
     model = load_model(args.model, args.provider, overlay)
+    engine = og.Engine(model)
+    capabilities = engine.get_capabilities()
+    require_baseline(capabilities)
     tokenizer = og.Tokenizer(model)
     prompts = Prompts.from_args(model, args)
-    engine = og.Engine(model)
     buffer = engine.create_event_buffer(16)
     finish = og.FinishReason
 
-    capabilities = engine.get_capabilities()
     check("capabilities: one row", capabilities.configured_max_batch_size == 1, capabilities.configured_max_batch_size)
     check(
         "capabilities: max_request_length is the KV capacity - 4",
@@ -107,7 +127,7 @@ def main():
     check("session-limited tokens are a prefix of the reference", limited.tokens == reference.tokens[:9])
 
     # stop string: a 5-character window of the reference text (with a visible character) that ends after the 12th token
-    pieces = [tokenizer.decode(np.asarray([t], dtype=np.int32)) for t in reference.tokens]
+    pieces = decode_chunks(tokenizer, reference.tokens)
     full = "".join(pieces)
     offset = len("".join(pieces[:12]))
     stop = next(
@@ -118,8 +138,9 @@ def main():
     request = engine.create_request()
     stopped, _ = run_turn(engine, buffer, request, text, 100, stop_strings=[stop])
     request.close()
-    produced = "".join(tokenizer.decode(np.asarray([t], dtype=np.int32)) for t in stopped.tokens)
-    before_last = "".join(tokenizer.decode(np.asarray([t], dtype=np.int32)) for t in stopped.tokens[:-1])
+    stopped_pieces = decode_chunks(tokenizer, stopped.tokens)
+    produced = "".join(stopped_pieces)
+    before_last = "".join(stopped_pieces[:-1])
     # the Engine delivers whole tokens: the turn ends with the first token whose text completes the match
     check(
         "stop string ends the turn at its first occurrence",
@@ -200,7 +221,7 @@ def main():
     expect_error(
         "the first request cannot continue after the second took the slot",
         lambda: first.begin_turn(np.asarray([1000, 1001], dtype=np.int32), t1),
-        "",
+        "no longer resident",
     )
     first.close()
     second.close()
