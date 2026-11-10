@@ -290,7 +290,8 @@ TEST(NemotronBolt, PreservesLogicalDrafterLengthsAndExplicitSanitizerPolicy) {
     EXPECT_EQ(length_policy->second, policy.empty() ? "1" : policy);
     EXPECT_EQ(std::count_if(entries.begin(), entries.end(), [](const auto& option) {
                 return option.first == key;
-              }), 1);
+              }),
+              1);
 #else
     if (policy.empty()) {
       EXPECT_EQ(length_policy, entries.end());
