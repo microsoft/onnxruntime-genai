@@ -51,15 +51,18 @@ def bf16_gemma3_checkpoint(tmp_path):
     return model, tmp_path
 
 
-def build_fp32(monkeypatch, tmp_path):
+def build(monkeypatch, tmp_path, precision="fp32", execution_provider="cpu"):
     model_class = builder_module.Gemma3Model
     monkeypatch.setattr(model_class, "make_genai_config", lambda self, *args: None)
     monkeypatch.setattr(model_class, "save_processing", lambda *args: None)
     input_path, cache_dir = str(tmp_path / "input"), str(tmp_path / "cache")
     extra_options = {}
     extra_options["hf_details"] = builder_module.get_hf_details("", input_path, cache_dir, extra_options)
-    builder_module.create_model("", input_path, str(tmp_path / "output"), "fp32", "cpu", cache_dir, **extra_options)
-    onnx_model = ir.load(tmp_path / "output" / "model.onnx")
+    output_dir = tmp_path / f"output_{precision}_{execution_provider}"
+    builder_module.create_model(
+        "", input_path, str(output_dir), precision, execution_provider, cache_dir, **extra_options
+    )
+    onnx_model = ir.load(output_dir / "model.onnx")
     constants = {name: value.const_value.numpy() for name, value in onnx_model.graph.initializers.items()}
     for node in onnx_model.graph:
         if node.op_type == "Constant" and "value" in node.attributes:
@@ -67,9 +70,10 @@ def build_fp32(monkeypatch, tmp_path):
     return constants
 
 
-def test_rmsnorm_offset_is_added_in_fp32(monkeypatch, bf16_gemma3_checkpoint):
+@pytest.mark.parametrize(("precision", "execution_provider"), [("fp32", "cpu"), ("fp16", "cuda")])
+def test_rmsnorm_offset_is_added_in_fp32(monkeypatch, bf16_gemma3_checkpoint, precision, execution_provider):
     model, tmp_path = bf16_gemma3_checkpoint
-    initializers = build_fp32(monkeypatch, tmp_path)
+    initializers = build(monkeypatch, tmp_path, precision, execution_provider)
     hf_weights = {name: param.detach().to(torch.bfloat16) for name, param in model.named_parameters()}
 
     expected = {
@@ -84,14 +88,16 @@ def test_rmsnorm_offset_is_added_in_fp32(monkeypatch, bf16_gemma3_checkpoint):
     for onnx_name, bf16_weight in expected.items():
         assert onnx_name in initializers, f"{onnx_name} not in {norm_names}"
         actual = initializers[onnx_name]
-        assert actual.dtype == np.float32
-        # Transformers computes (1 + weight) on the weight upcast to FP32.
-        np.testing.assert_array_equal(actual, bf16_weight.float().numpy() + 1, err_msg=onnx_name)
+        assert actual.dtype in (np.float32, np.float16), (onnx_name, actual.dtype)
+        # Transformers computes (1 + weight) on the weight upcast to FP32; an FP16 model
+        # should round that result to FP16 once, not round it to bfloat16 first.
+        wanted = (bf16_weight.float().numpy() + 1).astype(actual.dtype)
+        np.testing.assert_array_equal(actual, wanted, err_msg=onnx_name)
 
 
 def test_embedding_scale_is_exact_sqrt_of_hidden_size(monkeypatch, bf16_gemma3_checkpoint):
     _, tmp_path = bf16_gemma3_checkpoint
-    initializers = build_fp32(monkeypatch, tmp_path)
+    initializers = build(monkeypatch, tmp_path)
     scales = [
         value.item() for name, value in initializers.items() if value.size == 1 and abs(value.item() - 8.49) < 0.01
     ]
