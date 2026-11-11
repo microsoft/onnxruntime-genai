@@ -925,6 +925,13 @@ def test_bank_metadata_and_weights_pool_roundtrip(builders, tmp_path):
     loaded_locs, loaded_emb = gb.load_bank_metadata_from_dir(tmp_path)
     assert loaded_locs == locs
     assert set(loaded_emb) == set(emb_w)
+    # Saving into a package whose bank_metadata.json is a hard link into another package must leave that package alone.
+    linked = tmp_path / "linked"
+    linked.mkdir()
+    os.link(tmp_path / "bank_metadata.json", linked / "bank_metadata.json")
+    gb.save_bank_metadata_to_dir(linked, {}, {})
+    assert gb.load_bank_metadata_from_dir(linked)[0] == {}
+    assert gb.load_bank_metadata_from_dir(tmp_path)[0] == locs
     gb.write_weights_pool_txt(tmp_path, locs)
     pool_text = (tmp_path / "weights_pool.txt").read_text()
     assert "qwen38_weights_pool 1" in pool_text
@@ -1632,6 +1639,50 @@ def test_consolidated_precision_build_rewrites_every_graph_and_keeps_base_packag
     assert external_locations(base_pkg / "dflash2.onnx")["dflash2.shared_scales"]["location"] == "qmoe_scales.data"
 
 
+def test_precision_build_from_base_package_keeps_its_bank_metadata_intact(builders, tmp_path):
+    gb, rope_mod = builders.gb, builders.rope
+    base_pkg, pool_dir = make_synthetic_rc5_base_package(tmp_path, num_layers=4, num_experts=8)
+    rows = 16
+    locs: dict[str, dict] = {}
+    gb.build_reused_position_tables(base_pkg, locs, rope_mod.DEFAULT_ROPE, rows, rows)
+    positions = rope_mod.position_config(rope_mod.DEFAULT_ROPE, rows, rows, None)
+    gb.save_bank_metadata_to_dir(base_pkg, locs, {}, positions)
+    model = onnx.load(str(base_pkg / "model.onnx"))
+    for name in ("model.rotary_emb.cos_cache", "model.rotary_emb.sin_cache"):
+        meta = locs[name]
+        model.graph.initializer.append(
+            gb.make_ext_init(name, meta["location"], meta["offset"], meta["length"], meta["dtype"], meta["dims"])
+        )
+        model.graph.node.append(helper.make_node("Identity", [name], [f"{name}.out"], name=f"use_{name}"))
+    onnx.save(model, str(base_pkg / "model.onnx"))
+    before = snapshot(base_pkg)
+
+    # Without --consolidate-data-files, the conversion re-synchronizes the output's bank_metadata.json, which starts out
+    # as a hard link of the base package's file.
+    out_pkg = tmp_path / "out_fp32_rotary"
+    rc = builders.pkg.main(
+        [
+            "--base-pkg",
+            str(base_pkg),
+            "--pool-dir",
+            str(pool_dir),
+            "--out",
+            str(out_pkg),
+            "--qmoe-xyz",
+            "1,1,2",
+            "--kl-mode",
+            "dp23",
+            "--rotary-cache-dtype",
+            "fp32",
+        ]
+    )
+    assert rc == 0
+    assert snapshot(base_pkg) == before
+    out_locs, _ = gb.load_bank_metadata_from_dir(out_pkg)
+    assert out_locs["model.rotary_emb.cos_cache"]["location"] == "attn_consts.data"
+    assert out_locs["model.rotary_emb.cos_cache"]["dtype"] == TensorProto.FLOAT
+
+
 def test_fp16_qsa_projections_require_fp32_indexer(builders):
     po = import_precision_options()
     ap = argparse.ArgumentParser()
@@ -1775,9 +1826,14 @@ def _make_mini_qmoe_hf_checkpoint(
     use_language_model_prefix: bool = True,
     single_file: bool = True,
     fill_val: float = 0.25,
+    padding_bytes: tuple[int, int] = (0, 0),
 ) -> Path:
+    """Write the expert weights of a tiny QMoE checkpoint, optionally between unrelated filler tensors of the given sizes."""
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     tensors: dict[str, tuple[str, list[int], bytes]] = {}
+    lead, trail = padding_bytes
+    if lead:
+        tensors["model.language_model.embed_tokens.weight"] = ("U8", [lead], bytes(lead))
     prefix = "model.language_model.layers" if use_language_model_prefix else "model.layers"
     for lid in range(num_layers):
         gu_numel = num_experts * (2 * inter_size) * hidden_size
@@ -1802,6 +1858,8 @@ def _make_mini_qmoe_hf_checkpoint(
             list(dn.shape),
             dn.view(torch.uint16).numpy().tobytes(),
         )
+    if trail:
+        tensors["lm_head.weight"] = ("U8", [trail], bytes(trail))
     if single_file:
         _write_safetensors_file(ckpt_dir / "model.safetensors", tensors)
     else:
@@ -2009,6 +2067,51 @@ def test_lowbit_qmoe_bank_reuse_requires_matching_settings_and_publishes_atomica
     assert weights.read_bytes() != mse_weights
     rebuilt_meta = json.loads((pool / "qmoe_bank_metadata.json").read_text(encoding="utf-8"))["banks"][weights.name]
     assert rebuilt_meta["mode"] == "sym_rtn"
+
+
+def test_checkpoint_fingerprint_covers_every_byte_and_rejects_stale_banks(builders, tmp_path, monkeypatch):
+    pkg = builders.pkg
+    # Cache the digest of the freshly written shard too, so the edit below must also invalidate a cached digest.
+    monkeypatch.setattr(importlib.import_module("package_io"), "RACY_CHANGE_WINDOW_NS", -1)
+    spec = (
+        "fc1",
+        3,
+        64,
+        "mse",
+        False,
+        "qmoe_fc1_int3_b64.data",
+        "qmoe_fc1_int3_b64_scales.data",
+        [2, 128, 64 * 3 // 8],
+        [2, 128, 1],
+    )
+    # The experts sit 8 MiB into an ~80 MiB shard, away from its first, middle and last 4 MiB.
+    ckpt = _make_mini_qmoe_hf_checkpoint(tmp_path / "ckpt", num_layers=2, padding_bytes=(8 << 20, 72 << 20))
+    pool = tmp_path / "pool"
+    weights = pool / spec[5]
+    pkg.ensure_qmoe_banks(pool, [spec], hf_dir=ckpt, num_layers=2)
+    stale_bank = weights.read_bytes()
+    bank_meta = json.loads((pool / "qmoe_bank_metadata.json").read_text(encoding="utf-8"))["banks"][weights.name]
+    assert bank_meta["checkpoint_fingerprint"] == pkg.checkpoint_fingerprint(ckpt)
+
+    shard = ckpt / "model.safetensors"
+    with open(shard, "rb") as f:
+        header_len = struct.unpack("<Q", f.read(8))[0]
+        header = json.loads(f.read(header_len))
+    start, end = header["model.language_model.layers.0.mlp.experts.gate_up_proj"]["data_offsets"]
+    begin, window = 8 + header_len + start, 4 << 20
+    assert window <= begin and begin + (end - start) <= shard.stat().st_size // 2
+    with open(shard, "r+b") as f:
+        f.seek(begin)
+        negated = np.frombuffer(f.read(end - start), dtype=np.uint16) ^ np.uint16(0x8000)
+        f.seek(begin)
+        f.write(negated.tobytes())
+
+    assert pkg.checkpoint_fingerprint(ckpt) != bank_meta["checkpoint_fingerprint"]
+    pkg.ensure_qmoe_banks(pool, [spec], hf_dir=ckpt, num_layers=2)
+    fresh_pool = tmp_path / "fresh_pool"
+    pkg.ensure_qmoe_banks(fresh_pool, [spec], hf_dir=ckpt, num_layers=2)
+    assert weights.read_bytes() != stale_bank
+    assert weights.read_bytes() == (fresh_pool / spec[5]).read_bytes()
 
 
 def test_precision_conversion_updates_bank_metadata_and_supports_fp32_position_reuse(builders, tmp_path):

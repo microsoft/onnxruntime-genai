@@ -12,7 +12,9 @@ import json
 import os
 import struct
 import sys
+import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -38,6 +40,38 @@ SRC_STATE_CAPS = {8257, 8259, 32771, 33283, 65539}
 
 def align_up(val: int, align: int = ALIGN) -> int:
     return (val + align - 1) // align * align
+
+
+FINGERPRINT_THREADS = 16
+# At least the coarsest file system timestamp granularity (FAT: 2 s).
+RACY_CHANGE_WINDOW_NS = 2_000_000_000
+_SHA256_BY_FILE_STATE: dict[tuple[int, int, int, int, int], str] = {}
+
+
+def file_sha256(path: Path) -> str:
+    """Return the SHA-256 of the complete contents of `path`.
+
+    The digest is cached for the rest of the process under the file's device, inode, size, modification time and status
+    change time, which every write to or replacement of the file changes. A file last changed less than
+    `RACY_CHANGE_WINDOW_NS` before it was hashed is not cached, since a further change within the same timestamp tick
+    would leave its key unchanged.
+    """
+    st = path.stat()
+    key = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+    digest = _SHA256_BY_FILE_STATE.get(key)
+    if digest is not None:
+        return digest
+    started_ns = time.time_ns()
+    h = hashlib.sha256()
+    buf = bytearray(4 << 20)
+    view = memoryview(buf)
+    with open(path, "rb", buffering=0) as f:
+        while n := f.readinto(buf):
+            h.update(view[:n])
+    digest = h.hexdigest()
+    if started_ns - max(st.st_mtime_ns, st.st_ctime_ns) > RACY_CHANGE_WINDOW_NS:
+        _SHA256_BY_FILE_STATE[key] = digest
+    return digest
 
 
 class HFCheckpointReader:
@@ -165,31 +199,19 @@ class HFCheckpointReader:
         return t
 
     def checkpoint_fingerprint(self) -> str:
-        """Compute a deterministic fingerprint of the checkpoint's shards, headers, and weight payloads."""
+        """Return a SHA-256 of the weight map and the complete contents of every shard.
+
+        Weight banks are reused only while their recorded fingerprint matches, so every byte is hashed: a change anywhere
+        in a shard must produce a new fingerprint. The shards are hashed in parallel.
+        """
         h = hashlib.sha256()
-        shards = sorted(set(self.weight_map.values()))
         for item_k, item_v in sorted(self.weight_map.items()):
             h.update(f"{item_k}:{item_v}\n".encode())
-        window = 4 * 1024 * 1024
-        for shard in shards:
-            p = self.hf_dir / shard
-            if not p.is_file():
-                continue
-            st = p.stat()
-            h.update(f"{shard}:{st.st_size}:".encode())
-            with open(p, "rb") as f:
-                if st.st_size <= 16 * window:
-                    while True:
-                        chunk = f.read(window)
-                        if not chunk:
-                            break
-                        h.update(chunk)
-                else:
-                    h.update(f.read(window))
-                    f.seek(st.st_size // 2)
-                    h.update(f.read(window))
-                    f.seek(max(0, st.st_size - window))
-                    h.update(f.read(window))
+        shards = [shard for shard in sorted(set(self.weight_map.values())) if (self.hf_dir / shard).is_file()]
+        with ThreadPoolExecutor(max_workers=max(1, min(FINGERPRINT_THREADS, len(shards)))) as ex:
+            digests = list(ex.map(file_sha256, [self.hf_dir / shard for shard in shards]))
+        for shard, digest in zip(shards, digests, strict=True):
+            h.update(f"{shard}:{digest}\n".encode())
         return h.hexdigest()
 
 
