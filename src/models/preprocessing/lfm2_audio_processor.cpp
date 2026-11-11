@@ -114,9 +114,18 @@ std::vector<float> ResampleLfm2Audio(const float* pcm, int64_t num_samples, int6
   const int64_t width = static_cast<int64_t>(std::ceil(kLowpassFilterWidth * static_cast<double>(orig) / base_freq));
   const int64_t kernel_size = 2 * width + orig;
 
-  // One kernel per output phase, built in double and stored in float as torchaudio does.
-  std::vector<float> kernels(static_cast<size_t>(target * kernel_size));
-  for (int64_t phase = 0; phase < target; ++phase) {
+  std::vector<float> padded(static_cast<size_t>(width + num_samples + width + orig), 0.0f);
+  std::copy(pcm, pcm + num_samples, padded.begin() + width);
+
+  // ceil(target * num_samples / orig) samples; the strided convolution makes a few more, which
+  // torchaudio trims.
+  const int64_t num_outputs = (target * num_samples + orig - 1) / orig;
+  std::vector<float> resampled(static_cast<size_t>(num_outputs));
+
+  // Output i uses phase i % target's kernel, built in double and stored in float as torchaudio does.
+  // Built one phase at a time: all target kernels together can take gigabytes for an odd source rate.
+  std::vector<float> kernel(static_cast<size_t>(kernel_size));
+  for (int64_t phase = 0; phase < std::min(target, num_outputs); ++phase) {
     for (int64_t k = 0; k < kernel_size; ++k) {
       double t = (-static_cast<double>(phase) / static_cast<double>(target) +
                   static_cast<double>(k - width) / static_cast<double>(orig)) *
@@ -125,26 +134,16 @@ std::vector<float> ResampleLfm2Audio(const float* pcm, int64_t num_samples, int6
       const double window = std::pow(std::cos(t * kPi / kLowpassFilterWidth / 2.0), 2.0);
       t *= kPi;
       const double sinc = t == 0.0 ? 1.0 : std::sin(t) / t;
-      kernels[static_cast<size_t>(phase * kernel_size + k)] =
-          static_cast<float>(sinc * window * base_freq / static_cast<double>(orig));
+      kernel[static_cast<size_t>(k)] = static_cast<float>(sinc * window * base_freq / static_cast<double>(orig));
     }
-  }
-
-  std::vector<float> padded(static_cast<size_t>(width + num_samples + width + orig), 0.0f);
-  std::copy(pcm, pcm + num_samples, padded.begin() + width);
-
-  // ceil(target * num_samples / orig) samples; the strided convolution makes a few more, which
-  // torchaudio trims.
-  const int64_t num_outputs = (target * num_samples + orig - 1) / orig;
-  std::vector<float> resampled(static_cast<size_t>(num_outputs));
-  for (int64_t i = 0; i < num_outputs; ++i) {
-    const float* frame = padded.data() + (i / target) * orig;
-    const float* kernel = kernels.data() + (i % target) * kernel_size;
-    float value = 0.0f;
-    for (int64_t k = 0; k < kernel_size; ++k) {
-      value += frame[k] * kernel[k];
+    for (int64_t i = phase; i < num_outputs; i += target) {
+      const float* frame = padded.data() + (i / target) * orig;
+      float value = 0.0f;
+      for (int64_t k = 0; k < kernel_size; ++k) {
+        value += frame[k] * kernel[static_cast<size_t>(k)];
+      }
+      resampled[static_cast<size_t>(i)] = value;
     }
-    resampled[static_cast<size_t>(i)] = value;
   }
   return resampled;
 }
