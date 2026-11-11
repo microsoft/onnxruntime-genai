@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
-"""Unit tests for the unified Qwen3.8 RC5 package builder (`tools/qwen38_graph/build_package.py`) and helpers.
+"""Unit tests for the unified Qwen3.8 RC5 package builder (`tools/python/qwen38_flash_next/build_package.py`) and helpers.
 
 Covers:
 1. KL-similarity `(x INT4 + y INT3 + z INT2)` QMoE layer sorting, 2D dynamic programming, and predefined RC5 presets.
@@ -1942,6 +1942,73 @@ def test_fast_quant_prepack_batch_preserves_non_default_device(builders):
     wrapped = FakeDeviceTensor(raw, torch.device("cuda:1"))
     pkg.fast_quant_prepack_batch(wrapped, bits=4, block_size=32, is_qmoe=True)
     assert FakeDeviceTensor.recorded_devices[0] == "cuda:1"
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two CUDA devices")
+def test_fast_quant_prepack_batch_allocates_only_on_the_input_gpu(builders):
+    pkg = builders.pkg
+    weights = torch.randn(2, 64, 64, dtype=torch.bfloat16, device="cuda:1")
+    explicit = torch.randn(2, 64, 64, dtype=torch.bfloat16)
+    for index in range(torch.cuda.device_count()):
+        torch.cuda.reset_peak_memory_stats(index)
+    default_gpu_before = torch.cuda.memory_allocated(0)
+
+    pkg.fast_quant_prepack_batch(weights, bits=4, block_size=32, is_qmoe=True)
+    assert torch.cuda.max_memory_allocated(0) == default_gpu_before
+    assert torch.cuda.max_memory_allocated(1) > weights.numel() * weights.element_size()
+
+    # An explicit device also keeps a CPU-resident input off the thread's default GPU.
+    pkg.fast_quant_prepack_batch(explicit, bits=4, block_size=32, is_qmoe=True, device="cuda:1")
+    assert torch.cuda.max_memory_allocated(0) == default_gpu_before
+
+
+def test_lowbit_qmoe_bank_reuse_requires_matching_settings_and_publishes_atomically(builders, tmp_path, monkeypatch):
+    pkg = builders.pkg
+
+    def spec(mode: str):
+        return (
+            "fc1",
+            3,
+            64,
+            mode,
+            False,
+            "qmoe_fc1_int3_b64.data",
+            "qmoe_fc1_int3_b64_scales.data",
+            [2, 128, 64 * 3 // 8],
+            [2, 128, 1],
+        )
+
+    ckpt = _make_mini_qmoe_hf_checkpoint(tmp_path / "ckpt", num_layers=2)
+    pool = tmp_path / "pool"
+    weights, scales = pool / "qmoe_fc1_int3_b64.data", pool / "qmoe_fc1_int3_b64_scales.data"
+
+    pkg.ensure_qmoe_banks(pool, [spec("mse")], hf_dir=ckpt, num_layers=2)
+    mse_weights, mse_scales = weights.read_bytes(), scales.read_bytes()
+    published = weights.stat().st_mtime_ns
+    bank_meta = json.loads((pool / "qmoe_bank_metadata.json").read_text(encoding="utf-8"))["banks"][weights.name]
+    assert bank_meta["mode"] == "mse" and bank_meta["bits"] == 3 and bank_meta["checkpoint_fingerprint"]
+
+    # The same request reuses the published bank; the pool needs no checkpoint for that.
+    pkg.ensure_qmoe_banks(pool, [spec("mse")], hf_dir=ckpt, num_layers=2)
+    pkg.ensure_qmoe_banks(pool, [spec("mse")], hf_dir=None, num_layers=2)
+    assert weights.stat().st_mtime_ns == published
+
+    # Same file names and byte sizes but another quantization mode is a different bank. If rebuilding it fails, the
+    # previously published bank must survive intact and no temporary files may remain for a retry to trust.
+    def fail_to_read(self, name, device="cpu"):
+        raise RuntimeError("simulated checkpoint read failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(pkg.HFCheckpointReader, "read_bf16_tensor", fail_to_read)
+        with pytest.raises(RuntimeError, match="simulated checkpoint read failure"):
+            pkg.ensure_qmoe_banks(pool, [spec("sym_rtn")], hf_dir=ckpt, num_layers=2)
+    assert (weights.read_bytes(), scales.read_bytes()) == (mse_weights, mse_scales)
+    assert [p.name for p in pool.iterdir() if ".tmp." in p.name] == []
+
+    pkg.ensure_qmoe_banks(pool, [spec("sym_rtn")], hf_dir=ckpt, num_layers=2)
+    assert weights.read_bytes() != mse_weights
+    rebuilt_meta = json.loads((pool / "qmoe_bank_metadata.json").read_text(encoding="utf-8"))["banks"][weights.name]
+    assert rebuilt_meta["mode"] == "sym_rtn"
 
 
 def test_precision_conversion_updates_bank_metadata_and_supports_fp32_position_reuse(builders, tmp_path):

@@ -2330,20 +2330,14 @@ def ensure_qmoe_banks(
     n_gpus = max(1, torch.cuda.device_count()) if torch.cuda.is_available() else 0
     wave_size = min(8, max(1, n_gpus)) if n_gpus > 0 else 1
 
-    w_handles: dict[str, object] = {}
-    s_handles: dict[str, object] = {}
     tmp_paths: dict[str, Path] = {}
     try:
         for spec in need_build:
             _, _, _, _, _, w_fn, s_fn, _, _ = spec
-            if w_fn not in w_handles:
-                tw = pool_dir / f".{w_fn}.tmp.{os.getpid()}"
-                tmp_paths[w_fn] = tw
-                w_handles[w_fn] = open(tw, "wb")  # noqa: SIM115
-            if s_fn not in s_handles:
-                ts = pool_dir / f".{s_fn}.tmp.{os.getpid()}"
-                tmp_paths[s_fn] = ts
-                s_handles[s_fn] = open(ts, "wb")  # noqa: SIM115
+            for fn in (w_fn, s_fn):
+                if fn not in tmp_paths:
+                    tmp_paths[fn] = pool_dir / f".{fn}.tmp.{os.getpid()}"
+                    tmp_paths[fn].write_bytes(b"")
 
         for start in range(0, num_layers, wave_size):
             layers = list(range(start, min(num_layers, start + wave_size)))
@@ -2380,13 +2374,9 @@ def ensure_qmoe_banks(
 
             for l_res in wave_res:
                 for (w_fn, s_fn), (wb, sb) in l_res.items():
-                    w_handles[w_fn].write(wb)
-                    s_handles[s_fn].write(sb)
-
-        for fh in list(w_handles.values()) + list(s_handles.values()):
-            fh.close()
-        w_handles.clear()
-        s_handles.clear()
+                    for fn, data in ((w_fn, wb), (s_fn, sb)):
+                        with open(tmp_paths[fn], "ab") as f:
+                            f.write(data)
 
         meta_updates: dict[str, dict] = {}
         for spec in need_build:
@@ -2400,13 +2390,12 @@ def ensure_qmoe_banks(
                     f"Quantized bank size mismatch for {w_fn}/{s_fn}: "
                     f"got ({tw.stat().st_size}, {ts.stat().st_size}), expected ({exp_w_sz}, {exp_s_sz})"
                 )
-            os.replace(tw, pool_dir / w_fn)
-            os.replace(ts, pool_dir / s_fn)
             meta_updates[w_fn] = _lowbit_bank_meta_entry(spec, num_layers=num_layers, ckpt_fp=req_ckpt_fp)
+        # Publish only after every bank of this request is complete and verified.
+        for fn, tmp_path in tmp_paths.items():
+            os.replace(tmp_path, pool_dir / fn)
         _save_qmoe_bank_metadata(pool_dir, meta_updates)
     finally:
-        for fh in list(w_handles.values()) + list(s_handles.values()):
-            fh.close()
         for tp in tmp_paths.values():
             if tp.exists():
                 tp.unlink()
