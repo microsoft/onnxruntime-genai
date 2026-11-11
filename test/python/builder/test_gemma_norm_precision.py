@@ -80,16 +80,13 @@ def test_rmsnorm_offset_is_added_in_fp32(monkeypatch, bf16_gemma3_checkpoint):
         "model.layers.0.attn.q_norm.layernorm.weight": hf_weights["model.layers.0.self_attn.q_norm.weight"],
         "model.layers.0.attn.k_norm.layernorm.weight": hf_weights["model.layers.0.self_attn.k_norm.weight"],
     }
-    checked = 0
+    norm_names = sorted(name for name in initializers if "norm" in name)
     for onnx_name, bf16_weight in expected.items():
-        if onnx_name not in initializers:
-            continue
+        assert onnx_name in initializers, f"{onnx_name} not in {norm_names}"
         actual = initializers[onnx_name]
         assert actual.dtype == np.float32
         # Transformers computes (1 + weight) on the weight upcast to FP32.
         np.testing.assert_array_equal(actual, bf16_weight.float().numpy() + 1, err_msg=onnx_name)
-        checked += 1
-    assert checked >= 2, sorted(name for name in initializers if "norm" in name)
 
 
 def test_embedding_scale_is_exact_sqrt_of_hidden_size(monkeypatch, bf16_gemma3_checkpoint):
