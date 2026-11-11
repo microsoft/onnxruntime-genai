@@ -212,8 +212,12 @@ if(WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
   target_compile_features(telemetry_version_reload_tests PRIVATE cxx_std_17)
   target_link_libraries(telemetry_version_reload_tests PRIVATE ${CMAKE_DL_LIBS})
   add_dependencies(telemetry_version_reload_tests telemetry_version_reload_fixture)
+  set(reload_version_args)
+  if(ORTGENAI_TELEMETRY_PAL_SOURCE)
+    list(APPEND reload_version_args "3.10.310.1")
+  endif()
   add_test(NAME TelemetryVersionReload
-    COMMAND telemetry_version_reload_tests $<TARGET_FILE:telemetry_version_reload_fixture>)
+    COMMAND telemetry_version_reload_tests $<TARGET_FILE:telemetry_version_reload_fixture> ${reload_version_args})
   set_tests_properties(TelemetryVersionReload PROPERTIES TIMEOUT 30)
 endif()
 

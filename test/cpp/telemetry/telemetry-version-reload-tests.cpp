@@ -24,7 +24,7 @@ struct CloseModule {
   }
 };
 
-bool RunCycle(const std::string& path) {
+bool RunCycle(const std::string& path, std::string_view expected_version) {
 #if defined(_WIN32)
   std::unique_ptr<void, CloseModule> module{LoadLibraryA(path.c_str())};
 #else
@@ -49,7 +49,7 @@ bool RunCycle(const std::string& path) {
   }
 
   const std::string_view version{getter()};
-  if (version.substr(0, 4) != "EVT-" || version.find("3.10.310.1") == std::string_view::npos ||
+  if (version.substr(0, 4) != "EVT-" || version.find(expected_version) == std::string_view::npos ||
       version.data() != getter()) {
     std::fputs("FAIL: unexpected SDK version value or unstable storage\n", stderr);
     return false;
@@ -71,12 +71,13 @@ bool RunCycle(const std::string& path) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (argc != 2) {
+  if (argc != 2 && argc != 3) {
     return 1;
   }
 
   const std::string path{argv[1]};
-  if (!RunCycle(path) || !RunCycle(path)) {
+  const std::string_view expected_version = argc == 3 ? argv[2] : "";
+  if (!RunCycle(path, expected_version) || !RunCycle(path, expected_version)) {
     return 1;
   }
 
