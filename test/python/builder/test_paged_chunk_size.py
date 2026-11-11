@@ -25,9 +25,9 @@ sys.path.insert(0, str(BUILDERS_DIR.parent))
 
 
 def _load_builder_module(module_name):
-    spec = importlib.util.spec_from_file_location(
-        f"models.builders.{module_name}", BUILDERS_DIR / f"{module_name}.py"
-    )
+    if f"models.builders.{module_name}" in sys.modules:
+        return sys.modules[f"models.builders.{module_name}"]
+    spec = importlib.util.spec_from_file_location(f"models.builders.{module_name}", BUILDERS_DIR / f"{module_name}.py")
     module = importlib.util.module_from_spec(spec)
     sys.modules[f"models.builders.{module_name}"] = module
     spec.loader.exec_module(module)
@@ -109,18 +109,14 @@ def test_genai_config_omits_chunk_size_by_default(monkeypatch, tmp_path):
 @pytest.mark.parametrize("value", [256, 512, 1024])
 def test_genai_config_emits_chunk_size_without_a_ring(monkeypatch, tmp_path, value):
     # No sliding-window layers here, which is the case that used to drop the option.
-    config = _write_genai_config(
-        monkeypatch, tmp_path, {"use_paged_attention": True, "paged_chunk_size": value}
-    )
+    config = _write_genai_config(monkeypatch, tmp_path, {"use_paged_attention": True, "paged_chunk_size": value})
 
     assert config["search"]["chunk_size"] == value
 
 
 def test_genai_config_accepts_chunk_size_as_a_string(monkeypatch, tmp_path):
     # Olive and the command line both hand extra options through as strings.
-    config = _write_genai_config(
-        monkeypatch, tmp_path, {"use_paged_attention": True, "paged_chunk_size": "512"}
-    )
+    config = _write_genai_config(monkeypatch, tmp_path, {"use_paged_attention": True, "paged_chunk_size": "512"})
 
     assert config["search"]["chunk_size"] == 512
 

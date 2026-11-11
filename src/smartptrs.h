@@ -40,6 +40,9 @@ struct DeviceBuffer : std::enable_shared_from_this<DeviceBuffer> {
   virtual void AllocateCpu() = 0;      // Allocates p_cpu_ if necessary (using appropriate memory type for interop)
   virtual void CopyDeviceToCpu() = 0;  // Allocates p_cpu_ if necessary and copies p_device_ memory into it
   virtual void CopyCpuToDevice() = 0;
+  // Uploads only [begin_bytes, begin_bytes + size_in_bytes) of the CPU memory. Backends without a ranged
+  // upload fall back to uploading the whole buffer, which contains that range.
+  virtual void CopyCpuRangeToDevice(size_t /*begin_bytes*/, size_t /*size_in_bytes*/) { CopyCpuToDevice(); }
   virtual void CopyFrom(size_t begin_dest, DeviceBuffer& source, size_t begin_source, size_t size_in_bytes) = 0;
   virtual void Zero() = 0;  // Zero out the device memory
   virtual void CopyFromCpu(const void* source, size_t size_in_bytes) {
@@ -65,15 +68,21 @@ struct DeviceSpan {
   bool empty() const { return length_ == 0; }
   size_t size() const { return length_; }
 
-  operator DeviceSpan<const T>() const { return DeviceSpan<const T>(*p_device_memory_, begin_, length_); }
+  operator DeviceSpan<const T>() const {
+    return p_device_memory_ ? DeviceSpan<const T>(*p_device_memory_, begin_, length_) : DeviceSpan<const T>{};
+  }
 
   DeviceSpan<T> subspan(size_t begin, size_t length) { return DeviceSpan<T>(*p_device_memory_, begin_ + begin, length); }
 
   // True if both spans are views of the same allocation, so that pointer arithmetic between them is meaningful
   bool SameBufferAs(const DeviceSpan<T>& other) const { return p_device_memory_ == other.p_device_memory_; }
 
+  DeviceBuffer& GetBuffer() const { return *p_device_memory_; }
+  std::shared_ptr<DeviceBuffer> BackingBuffer() const { return p_device_memory_; }
+  size_t ByteOffset() const { return begin_ * sizeof(T); }
+
   // Return the device accessible memory. Should only be done in device specific code, as it's not CPU accessible
-  std::span<T> Span() { return std::span<T>{reinterpret_cast<T*>(p_device_memory_->p_device_) + begin_, length_}; }
+  std::span<T> Span() const { return std::span<T>{reinterpret_cast<T*>(p_device_memory_->p_device_) + begin_, length_}; }
 
   // Return the CPU accessible memory, allocating if necessary (note, to get the current device memory on CPU, use 'CopyDeviceToCpu' instead)
   std::span<T> CpuSpan() {
@@ -89,6 +98,10 @@ struct DeviceSpan {
 
   // Copy CPU memory to device memory, typically used after calling CpuSpan or CopyDeviceToCpu to update the device memory with the modifications made
   void CopyCpuToDevice() { p_device_memory_->CopyCpuToDevice(); }
+
+  // Like CopyCpuToDevice, but uploads only this span's range of the buffer. Every CPU-side modification must lie
+  // inside the span; use it for a small active subspan of a large reused buffer.
+  void CopyCpuRangeToDevice() { p_device_memory_->CopyCpuRangeToDevice(begin_ * sizeof(T), length_ * sizeof(T)); }
 
   void CopyFromCpu(std::span<const T> source) {
     assert(source.size() == size());
@@ -118,6 +131,8 @@ struct PositionInputs {
   virtual void Add() = 0;
   virtual void Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) = 0;
   virtual void RewindTo(size_t index) = 0;
+  virtual OrtValue* GetRotaryPositionIds() { return nullptr; }
+  virtual void SetRotaryPositionIds(OrtValue* positions) { (void)positions; }
 };
 
 struct BatchedSamplerState {
@@ -191,15 +206,19 @@ struct StateSlotDesc {
 enum class StateUpdateReplayKind : uint32_t {
   CausalConv = 1,
   GatedDeltaNet = 2,
+  Snapshot = 3,
+  Indexer = 4,
 };
 
 struct StateUpdateReplayDesc {
-  const void* source_state;
-  void* destination_state;
-  const void* value;
-  const float* decay;
-  const float* key;
-  const float* delta;
+  // DeviceSpan preserves the backing-buffer identity, byte offset, byte length, and lifetime
+  // without assuming that the device exposes an addressable pointer.
+  DeviceSpan<const uint8_t> source_state;
+  DeviceSpan<uint8_t> destination_state;
+  DeviceSpan<const uint8_t> value;
+  DeviceSpan<const uint8_t> decay;
+  DeviceSpan<const uint8_t> key;
+  DeviceSpan<const uint8_t> delta;
   uint64_t channel_count;
   uint64_t state_width;
   uint64_t key_width;
@@ -208,16 +227,29 @@ struct StateUpdateReplayDesc {
   uint32_t kept_count;
   uint32_t element_size;
   StateUpdateReplayKind kind;
+  DeviceSpan<const uint8_t> source_aux_state;
+  DeviceSpan<uint8_t> destination_aux_state;
+  DeviceSpan<const uint8_t> source_lengths;
+  DeviceSpan<uint8_t> destination_lengths;
+  uint64_t state_capacity;
+  uint64_t aux_capacity;
+  uint32_t compress_ratio;
 };
-
-static_assert(std::is_trivially_copyable_v<StateUpdateReplayDesc>);
 
 // Increment whenever a layout the add-on boundary depends on changes: DeviceInterface's virtual
 // layout, or the virtual or data layout of any type constructed by, passed to, or returned across
-// that boundary (Search, BatchedSampler, BatchedSamplerState, GeneratorParams, or Config).
+// that boundary (DeviceBuffer, Search, BatchedSampler, BatchedSamplerState, GeneratorParams, or Config).
 // Dynamically loaded add-ons must report this exact version before the host can safely call through
 // the C++ interface.
-inline constexpr uint32_t kDeviceInterfaceVersion = 11;
+// Version 15: DeviceInterface gained AllocatePinnedHost, CopyDeviceToHost and CopyHostToDevice.
+// Version 16: DeviceInterface gained SelectDevice.
+// Version 17: Config::Model gained the qwen38_graph member, which changed the layouts of Config::Model and Config.
+// Version 18: DeviceBuffer::CopyCpuRangeToDevice shifted the virtual slots that follow CopyCpuToDevice.
+// Version 19: Config::Model::Qwen38Graph gained max_batch_size, which changed the layouts of Config::Model and Config.
+// Version 20: Config gained memory budget/headroom settings; DeviceInterface gained sampler startup-byte sizing.
+// Version 21: Config::Engine::DynamicBatching gained host/device media budgets, changing Config's layout.
+// Version 22: DeviceInterface gained ApplyWhisperTimestampRules; Config gained Whisper timestamp settings.
+inline constexpr uint32_t kDeviceInterfaceVersion = 22;
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}
@@ -261,6 +293,7 @@ struct DeviceInterface {
   virtual std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) = 0;
   virtual std::unique_ptr<BatchedSampler> CreateBatchedSampler(size_t /*max_batch_size*/,
                                                                int /*vocab_size*/) { return {}; }
+  virtual size_t GetBatchedSamplerInitialAllocationBytes(size_t /*max_batch_size*/) const { return 0; }
 
   virtual void Synchronize() = 0;  // Synchronize the device, typically used for timing or debugging
 
@@ -358,17 +391,41 @@ struct DeviceInterface {
     throw std::logic_error("Device does not support compact fixed-state replay.");
   }
   // True for EPs where an OrtValue can bind a tensor view formed by adding a byte offset to the base
-  // address returned for persistent device storage. Keep last for vtable ABI stability.
+  // address returned for persistent device storage.
   virtual bool SupportsOffsetTensorViews() const { return false; }
   // True when allocation, zeroing, ranged copies, tensor binding, and synchronization are qualified
   // to complete fixed-state device work before FixedStatePool publishes a bank flip.
-  // Keep last for vtable ABI stability.
   virtual bool SupportsTransactionalFixedState() const { return false; }
   // True when a `bytes`-sized host mirror of this device's buffers returns to a pool that hands it
   // out again only after its pending host-to-device copy completes. Dropping such a mirror right
   // after an upload never waits for the device, so a caller can take a fresh mirror per upload
   // instead of synchronizing before it reuses one. Keep last for vtable ABI stability.
   virtual bool RecyclesHostMirrorsAfterUpload(size_t /*bytes*/) const { return false; }
+  // Default false: no effect — encoder / control-flow graph capture follows the normal per-EP config
+  // default. An EP overrides to true to defensively force encoder capture off (see the AMDGPU
+  // override for rationale). Keep last for vtable ABI stability.
+  virtual bool DisablesEncoderGraphCapture() const { return false; }
+  // True when ReplayStateUpdates can reconstruct a partially accepted fixed-state transition.
+  virtual bool SupportsCompactStateReplay() const { return false; }
+  // True when a CPU session may be handed this interface's tensors directly (see SessionCanAccess):
+  // the CPU reads and writes them through their own pointer, and their OrtMemoryInfo names a CPU
+  // device. AMDGPU's pinned inputs fail the second test, since ORT tags them with the GPU.
+  virtual bool IsHostAccessible() const { return false; }
+  // Host storage must remain alive until all enqueued ranged transfers have completed.
+  virtual std::shared_ptr<void> AllocatePinnedHost(size_t /*bytes*/) {
+    throw std::logic_error("Device does not support pinned host allocation.");
+  }
+  virtual void CopyDeviceToHost(void* /*host*/, const void* /*device*/, size_t /*bytes*/) {
+    throw std::logic_error("Device does not support ranged device-to-host copies.");
+  }
+  virtual void CopyHostToDevice(void* /*device*/, const void* /*host*/, size_t /*bytes*/) {
+    throw std::logic_error("Device does not support ranged host-to-device copies.");
+  }
+  // Binds the interface to the device ordinal of the EP device the session was appended to, before
+  // the device's stream is handed to the EP or its allocator is requested. The default does nothing,
+  // for devices with no per-ordinal state. Keep last for vtable ABI stability.
+  virtual void SelectDevice(int /*device_id*/) {}
+
   // Applies Whisper timestamp decoding rules to fp32 logits in place without copying the
   // vocabulary to the host. `sequences` is laid out as [batch_beam_size, max_length].
   // Keep last for vtable ABI stability.

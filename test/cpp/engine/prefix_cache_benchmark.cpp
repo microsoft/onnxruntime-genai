@@ -9,12 +9,14 @@
 #include <iostream>
 #include <memory>
 #include <numeric>
+#include <string>
 #include <string_view>
 #include <vector>
 
 #include <gtest/gtest.h>
 
 #include "engine/prefix_cache.h"
+#include "engine/fixed_state_pool.h"
 #include "engine/scheduler.h"
 #include "engine_test_doubles.h"
 #include "engine_test_helpers.h"
@@ -37,6 +39,9 @@ struct LatencySummary {
   double mean_us{};
   double p50_us{};
   double p95_us{};
+  size_t operations_per_sample{};
+  size_t measured_samples{};
+  size_t operation_count{};
 };
 
 double Percentile(std::vector<double> samples, double percentile) {
@@ -52,8 +57,10 @@ double Percentile(std::vector<double> samples, double percentile) {
 
 template <typename Operation>
 LatencySummary Measure(Operation&& operation,
-                       size_t operations_per_sample = 1) {
-  for (size_t sample = 0; sample < kWarmupSamples; ++sample) {
+                       size_t operations_per_sample = 1,
+                       size_t measured_samples = kMeasuredSamples,
+                       size_t warmup_samples = kWarmupSamples) {
+  for (size_t sample = 0; sample < warmup_samples; ++sample) {
     for (size_t operation_index = 0;
          operation_index < operations_per_sample; ++operation_index) {
       operation();
@@ -61,8 +68,8 @@ LatencySummary Measure(Operation&& operation,
   }
 
   std::vector<double> samples;
-  samples.reserve(kMeasuredSamples);
-  for (size_t sample = 0; sample < kMeasuredSamples; ++sample) {
+  samples.reserve(measured_samples);
+  for (size_t sample = 0; sample < measured_samples; ++sample) {
     const auto start = Clock::now();
     for (size_t operation_index = 0;
          operation_index < operations_per_sample; ++operation_index) {
@@ -80,6 +87,9 @@ LatencySummary Measure(Operation&& operation,
           static_cast<double>(samples.size()),
       Percentile(samples, 50.0),
       Percentile(samples, 95.0),
+      operations_per_sample,
+      measured_samples,
+      operations_per_sample * (warmup_samples + measured_samples),
   };
 }
 
@@ -98,6 +108,9 @@ void PrintResult(std::string_view benchmark,
             << std::setw(14) << latency.mean_us
             << std::setw(14) << latency.p50_us
             << std::setw(14) << latency.p95_us
+            << std::setw(12) << latency.operations_per_sample
+            << std::setw(10) << latency.measured_samples
+            << std::setw(12) << latency.operation_count
             << '\n';
 }
 
@@ -150,8 +163,30 @@ void PrintHeader() {
             << std::setw(14) << "mean_us"
             << std::setw(14) << "p50_us"
             << std::setw(14) << "p95_us"
+            << std::setw(12) << "ops/sample"
+            << std::setw(10) << "samples"
+            << std::setw(12) << "calls"
             << '\n'
-            << std::string(108, '-') << '\n';
+            << std::string(142, '-') << '\n';
+}
+
+void MeasureReclaimable(const PrefixCache& cache, size_t expected,
+                        std::string_view benchmark, std::string_view scenario,
+                        size_t histories) {
+  ASSERT_EQ(cache.ReclaimableBlocks(), expected);
+  size_t observed = 0;
+  const auto query = [&] { observed += cache.ReclaimableBlocks(); };
+  const auto start = Clock::now();
+  query();
+  const double calibration_us =
+      std::chrono::duration<double, std::micro>(Clock::now() - start).count();
+  const size_t operations_per_sample = static_cast<size_t>(
+      std::clamp(250.0 / std::max(calibration_us, 0.001), 1.0, 10000.0));
+  const size_t measured_samples = calibration_us >= 10000.0 ? 11 : 31;
+  auto latency = Measure(query, operations_per_sample, measured_samples, 3);
+  ++latency.operation_count;  // Include the calibration query, but not the untimed assertion.
+  EXPECT_EQ(observed, expected * latency.operation_count);
+  PrintResult(benchmark, scenario, histories, cache.IndexedBlocks(), latency);
 }
 
 TEST(PrefixCacheBenchmark, DISABLED_LargePopulatedCacheLookup) {
@@ -280,6 +315,203 @@ TEST(SchedulerBenchmark,
                 batch_size, 0, latency);
   }
   EXPECT_GT(planned_tokens, 0u);
+}
+
+TEST(PrefixCacheBenchmark, DISABLED_HybridCheckpointReclamationScaling) {
+  constexpr size_t block_size = 256;
+  auto model = LoadSyntheticHybridModel();
+  PrintHeader();
+  for (const size_t history_blocks : {128u, 512u, 2048u}) {
+    for (const size_t histories : {1u, 8u, 32u}) {
+      const size_t total_blocks = history_blocks * histories;
+      if (total_blocks > 16384) {
+        continue;
+      }
+      BlockPool blocks{block_size, total_blocks};
+      PrefixCacheOptions options;
+      options.enabled = true;
+      options.max_blocks = total_blocks;
+      options.requires_checkpoint = true;
+      options.max_checkpoints = histories;
+      FixedStatePool fixed{model, 1, histories};
+      PrefixCache cache{blocks, options};
+      std::vector<std::shared_ptr<const BlockIdentity>> endpoints;
+      const char request_id{};
+      const size_t token_count = history_blocks * block_size;
+      for (size_t history = 0; history < histories; ++history) {
+        const std::array<FixedStateReservationRequest, 1> requests{
+            FixedStateReservationRequest{&request_id, token_count, 0}};
+        {
+          auto reservation = fixed.Reserve(requests);
+          reservation.Commit();
+        }
+        std::vector<int32_t> tokens(token_count);
+        std::iota(tokens.begin(), tokens.end(),
+                  static_cast<int32_t>(history * token_count + 1));
+        auto owned = blocks.AllocateBlocks(token_count);
+        const auto registration = cache.RegisterCheckpointedPrefix(
+            owned, tokens, {}, fixed.CapturePrefixCheckpoint(&request_id));
+        ASSERT_EQ(registration.status, PrefixCacheRegistrationStatus::Indexed);
+        endpoints.push_back(registration.identity);
+        blocks.Free(owned);
+        fixed.Release(fixed.HandleFor(&request_id));
+      }
+      ASSERT_EQ(cache.IndexedBlocks(), total_blocks);
+      std::vector<size_t> lease_counts{0, (histories + 1) / 2};
+      if (histories > 1) {
+        lease_counts.push_back(histories);
+      }
+      for (const size_t leased_histories : lease_counts) {
+        std::vector<std::shared_ptr<const FixedStatePrefixCheckpoint>> leases;
+        for (size_t history = 0; history < leased_histories; ++history) {
+          leases.push_back(cache.DraftBoundary(endpoints[history], token_count));
+          ASSERT_NE(leases.back(), nullptr);
+        }
+        const size_t expected = (histories - leased_histories) * history_blocks;
+        ASSERT_EQ(cache.ReclaimableBlocks(), expected);
+        const std::string scenario =
+            std::to_string(history_blocks) + "b/" + std::to_string(leased_histories) + "leased";
+        MeasureReclaimable(cache, expected, "hybrid-reclaimable", scenario, histories);
+      }
+      EXPECT_EQ(cache.ReclaimableBlocks(), total_blocks);
+      EXPECT_EQ(cache.Reclaim(total_blocks), total_blocks);
+    }
+  }
+}
+
+TEST(PrefixCacheBenchmark, DISABLED_SparseHybridCheckpointReclamation) {
+  constexpr size_t block_size = 256;
+  constexpr size_t history_blocks = 4;
+  constexpr size_t token_count = block_size * history_blocks;
+  auto model = LoadSyntheticHybridModel();
+  PrintHeader();
+  for (const size_t pool_blocks : {4096u, 65536u, 262144u}) {
+    for (const size_t histories : {1u, 8u}) {
+      BlockPool blocks{block_size, pool_blocks};
+      PrefixCacheOptions options;
+      options.enabled = true;
+      options.max_blocks = pool_blocks;
+      options.requires_checkpoint = true;
+      options.max_checkpoints = histories;
+      FixedStatePool fixed{model, 1, histories};
+      PrefixCache cache{blocks, options};
+      const char request_id{};
+      std::vector<std::shared_ptr<const BlockIdentity>> endpoints;
+      for (size_t history = 0; history < histories; ++history) {
+        const std::array<FixedStateReservationRequest, 1> requests{
+            FixedStateReservationRequest{&request_id, token_count, 0}};
+        {
+          auto reservation = fixed.Reserve(requests);
+          reservation.Commit();
+        }
+        std::vector<int32_t> tokens(token_count);
+        std::iota(tokens.begin(), tokens.end(),
+                  static_cast<int32_t>(history * token_count + 1));
+        auto owned = blocks.AllocateBlocks(token_count);
+        ASSERT_EQ(owned.size(), history_blocks);
+        const auto registration = cache.RegisterCheckpointedPrefix(
+            owned, tokens, {}, fixed.CapturePrefixCheckpoint(&request_id));
+        ASSERT_EQ(registration.status, PrefixCacheRegistrationStatus::Indexed);
+        endpoints.push_back(registration.identity);
+        blocks.Free(owned);
+        fixed.Release(fixed.HandleFor(&request_id));
+      }
+      ASSERT_EQ(cache.IndexedBlocks(), histories * history_blocks);
+      const auto scenario = std::to_string(pool_blocks) + "pool";
+      MeasureReclaimable(cache, histories * history_blocks,
+                         "sparse-unleased", scenario, histories);
+      std::vector<std::shared_ptr<const FixedStatePrefixCheckpoint>> leases;
+      for (const auto& endpoint : endpoints) {
+        leases.push_back(cache.DraftBoundary(endpoint, token_count));
+        ASSERT_NE(leases.back(), nullptr);
+      }
+      MeasureReclaimable(cache, 0, "sparse-all-leased", scenario, histories);
+      EXPECT_EQ(cache.Reclaim(pool_blocks), 0u);
+      leases.clear();
+      EXPECT_EQ(cache.Reclaim(pool_blocks), histories * history_blocks);
+    }
+  }
+}
+
+TEST(PrefixCacheBenchmark, DISABLED_SharedEvictedCheckpointAncestry) {
+  constexpr size_t block_size = 256;
+  auto model = LoadSyntheticHybridModel();
+  PrintHeader();
+  for (const size_t ancestor_blocks : {128u, 512u, 2048u}) {
+    for (const size_t histories : {8u, 32u}) {
+      const size_t ancestor_tokens = ancestor_blocks * block_size;
+      const size_t token_count = ancestor_tokens + block_size;
+      BlockPool blocks{block_size, ancestor_blocks + histories};
+      PrefixCacheOptions options;
+      options.enabled = true;
+      options.max_blocks = blocks.Capacity();
+      options.requires_checkpoint = true;
+      options.max_checkpoints = histories;
+      FixedStatePool fixed{model, 1, histories};
+      PrefixCache cache{blocks, options};
+      auto ancestors = blocks.AllocateBlocks(ancestor_tokens);
+      ASSERT_EQ(ancestors.size(), ancestor_blocks);
+      std::shared_ptr<const BlockIdentity> parent;
+      std::vector<int32_t> tokens(block_size);
+      for (size_t index = 0; index < ancestor_blocks; ++index) {
+        std::iota(tokens.begin(), tokens.end(),
+                  static_cast<int32_t>(index * block_size + 1));
+        const auto registration = cache.Register(ancestors[index], tokens, parent);
+        ASSERT_EQ(registration.status, PrefixCacheRegistrationStatus::Indexed);
+        parent = registration.identity;
+      }
+      const char request_id{};
+      std::vector<std::shared_ptr<Block>> tails;
+      std::vector<std::shared_ptr<const BlockIdentity>> endpoints;
+      for (size_t history = 0; history < histories; ++history) {
+        const std::array<FixedStateReservationRequest, 1> requests{
+            FixedStateReservationRequest{&request_id, token_count, 0}};
+        {
+          auto reservation = fixed.Reserve(requests);
+          reservation.Commit();
+        }
+        auto tail = blocks.AllocateBlocks(block_size);
+        ASSERT_EQ(tail.size(), 1u);
+        std::iota(tokens.begin(), tokens.end(),
+                  static_cast<int32_t>(ancestor_tokens + history * block_size + 1));
+        const auto registration = cache.RegisterCheckpointedPrefix(
+            tail, tokens, parent, fixed.CapturePrefixCheckpoint(&request_id));
+        ASSERT_EQ(registration.status, PrefixCacheRegistrationStatus::Indexed);
+        endpoints.push_back(registration.identity);
+        tails.push_back(tail.front());
+        fixed.Release(fixed.HandleFor(&request_id));
+      }
+      // Hold the endpoints by block reference while evicting their shared, unleased parents.
+      blocks.Free(ancestors);
+      ASSERT_EQ(cache.Reclaim(ancestor_blocks), ancestor_blocks);
+      ASSERT_EQ(cache.IndexedBlocks(), histories);
+      std::vector<std::shared_ptr<const FixedStatePrefixCheckpoint>> leases;
+      for (const auto& endpoint : endpoints) {
+        leases.push_back(cache.DraftBoundary(endpoint, token_count));
+        ASSERT_NE(leases.back(), nullptr);
+      }
+      blocks.Free(tails);
+      ASSERT_EQ(cache.ReclaimableBlocks(), 0u);
+
+      auto reused = blocks.AllocateBlocks(ancestor_tokens);
+      ASSERT_EQ(reused.size(), ancestor_blocks);
+      parent.reset();
+      for (size_t index = 0; index < ancestor_blocks; ++index) {
+        std::iota(tokens.begin(), tokens.end(),
+                  -static_cast<int32_t>((index + 1) * block_size));
+        const auto registration = cache.Register(reused[index], tokens, parent);
+        ASSERT_EQ(registration.status, PrefixCacheRegistrationStatus::Indexed);
+        parent = registration.identity;
+      }
+      blocks.Free(reused);
+      const auto scenario = std::to_string(ancestor_blocks) + "missing";
+      MeasureReclaimable(cache, ancestor_blocks, "shared-evicted", scenario, histories);
+      EXPECT_EQ(cache.Reclaim(ancestor_blocks), ancestor_blocks);
+      EXPECT_EQ(cache.ReclaimableBlocks(), 0u);
+      leases.clear();
+      EXPECT_EQ(cache.Reclaim(histories), histories);
+    }
+  }
 }
 
 }  // namespace

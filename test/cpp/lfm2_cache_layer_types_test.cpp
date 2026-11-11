@@ -100,12 +100,18 @@ void ExpectLayerTypesValidationMessage(const std::string& message, size_t actual
 
 // LFM2 variants that the exporter labels with their own model type still have to run through the
 // LFM2 runtime: the same conv state cache, and no rewind.
-void ExpectLfm2Runtime(const std::string& model_type, const std::string& temp_suffix) {
+void ExpectLfm2Runtime(const std::string& model_type, const std::string& temp_suffix,
+                       const std::string& layer_types_json = "") {
   const auto src_dir = GetLfm2ModelPath();
   const auto model_dir = MakeTempDir(temp_suffix);
   fs_std::copy(src_dir, model_dir, fs_std::copy_options::recursive | fs_std::copy_options::overwrite_existing);
   std::string config = ReadFile(model_dir / "genai_config.json");
   ReplaceFirst(config, "\"type\": \"lfm2\"", "\"type\": \"" + model_type + "\"");
+  if (!layer_types_json.empty()) {
+    ReplaceFirst(config,
+                 "\"layer_types\": [\"conv\", \"full_attention\", \"conv\", \"full_attention\"]",
+                 "\"layer_types\": " + layer_types_json);
+  }
   WriteFile(model_dir / "genai_config.json", config);
 
   auto model = OgaModel::Create(model_dir.string().c_str());
@@ -129,6 +135,40 @@ void ExpectLfm2Runtime(const std::string& model_type, const std::string& temp_su
   }
   EXPECT_NE(message.find("RewindTo is currently not supported for " + model_type), std::string::npos) << message;
   EXPECT_EQ(generator->GetSequenceCount(0), sequence_length);
+}
+
+// An LFM3 model whose layer 3 is a sliding_attention layer. A window_size above 0 adds the
+// decoder.sliding_window section that the builder writes with windowed_kv_cache, the default.
+fs_std::path WriteLfm3Model(const std::string& suffix, int window_size, bool share_buffer) {
+  const auto model_dir = WriteModelWithLayerTypes(suffix, "[\"conv\", \"full_attention\", \"conv\", \"sliding_attention\"]");
+  std::string config = ReadFile(model_dir / "genai_config.json");
+  ReplaceFirst(config, "\"type\": \"lfm2\"", "\"type\": \"lfm3\"");
+  if (window_size > 0) {
+    ReplaceFirst(config, "\"conv_cache_size\": 4,",
+                 "\"conv_cache_size\": 4, \"sliding_window\": {\"window_size\": " + std::to_string(window_size) +
+                     ", \"slide_key_value_cache\": false, \"slide_inputs\": false, \"layers\": [3], \"cache_slack\": 0},");
+  }
+  if (share_buffer) {
+    ReplaceFirst(config, "\"past_present_share_buffer\": false", "\"past_present_share_buffer\": true");
+  }
+  WriteFile(model_dir / "genai_config.json", config);
+  return model_dir;
+}
+
+// Sequence lengths of the KV buffers bound before the first run: the full_attention layer's past, and
+// the sliding_attention layer's past and present.
+void ExpectKvLengths(const fs_std::path& model_dir, int max_length, int64_t full_past, int64_t sliding,
+                     int chunk_size = 0) {
+  auto model = OgaModel::Create(model_dir.string().c_str());
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+  if (chunk_size > 0) {
+    params->SetSearchOption("chunk_size", chunk_size);
+  }
+  auto generator = OgaGenerator::Create(*model, *params);
+  EXPECT_EQ(generator->GetInput("past_key_values.1.key")->Shape()[2], full_past);
+  EXPECT_EQ(generator->GetInput("past_key_values.3.key")->Shape()[2], sliding);
+  EXPECT_EQ(generator->GetOutput("present.3.key")->Shape()[2], sliding);
 }
 
 }  // namespace
@@ -157,6 +197,17 @@ TEST(LFM2CacheLayerTypesValidationTest, EmptyLayerTypesArray) {
   const auto model_dir = WriteModelWithLayerTypes("empty", "[]");
   const std::string message = CaptureRuntimeErrorMessage(model_dir);
   ExpectLayerTypesValidationMessage(message, 0, 4);
+}
+
+// A layer type the cache does not know must not be taken for a conv layer.
+TEST(LFM2CacheLayerTypesValidationTest, UnknownLayerType) {
+  SkipIfModelUnavailable();
+
+  const auto model_dir = WriteModelWithLayerTypes(
+      "unknown",
+      "[\"conv\", \"full_attention\", \"linear_attention\", \"full_attention\"]");
+  const std::string message = CaptureRuntimeErrorMessage(model_dir);
+  EXPECT_NE(message.find("LFM2Cache: layer_types[2] is \"linear_attention\""), std::string::npos) << message;
 }
 
 TEST(LFM2CacheLayerTypesValidationTest, ValidMatchingLayers) {
@@ -189,4 +240,44 @@ TEST(LFM2CacheLayerTypesValidationTest, Lfm2VlTextTypeUsesLfm2Runtime) {
 TEST(LFM2CacheLayerTypesValidationTest, Lfm2AudioTextTypeUsesLfm2Runtime) {
   SkipIfModelUnavailable();
   ExpectLfm2Runtime("lfm2_audio_text", "audio_text_type");
+}
+
+// LFM3 is exported as "lfm3", and its sliding_attention layers keep a KV cache like the
+// full_attention ones rather than a conv state.
+TEST(LFM2CacheLayerTypesValidationTest, Lfm3TypeUsesLfm2Runtime) {
+  SkipIfModelUnavailable();
+  ExpectLfm2Runtime("lfm3", "lfm3_type", "[\"conv\", \"full_attention\", \"conv\", \"sliding_attention\"]");
+}
+
+// The sliding layer keeps the window plus the CPU slack of 16 instead of max_length, in one buffer bound
+// as past and present: the attention op evicts from it in place.
+TEST(LFM2CacheLayerTypesValidationTest, Lfm3SlidingLayerKeepsOnlyTheWindow) {
+  SkipIfModelUnavailable();
+  ExpectKvLengths(WriteLfm3Model("lfm3_window", 4, true), 64, 64, 4 + 16);
+}
+
+// The attention op stages a long step itself, so chunk_size adds no rows: ORT's CUDA kernel accepts only
+// a buffer of exactly the window.
+TEST(LFM2CacheLayerTypesValidationTest, Lfm3SlidingLayerIgnoresChunkSize) {
+  SkipIfModelUnavailable();
+  ExpectKvLengths(WriteLfm3Model("lfm3_window_chunked", 4, true), 64, 64, 4 + 16, 32);
+}
+
+// ORT rejects a buffer shorter than the window, so a shorter max_length does not shrink it.
+TEST(LFM2CacheLayerTypesValidationTest, Lfm3SlidingLayerHoldsTheWindowPastMaxLength) {
+  SkipIfModelUnavailable();
+  ExpectKvLengths(WriteLfm3Model("lfm3_window_short", 16, true), 8, 8, 16);
+}
+
+// Without a shared buffer (beam search, for one) the full layer grows from an empty past, while the
+// sliding layer keeps its fixed buffer from the first run.
+TEST(LFM2CacheLayerTypesValidationTest, Lfm3SlidingLayerStaysFixedWithoutSharedBuffer) {
+  SkipIfModelUnavailable();
+  ExpectKvLengths(WriteLfm3Model("lfm3_window_unshared", 4, false), 64, 0, 4 + 16);
+}
+
+// Exports without windowed_kv_cache have no decoder.sliding_window, so the sliding layer keeps max_length.
+TEST(LFM2CacheLayerTypesValidationTest, Lfm3SlidingLayerWithoutWindowKeepsMaxLength) {
+  SkipIfModelUnavailable();
+  ExpectKvLengths(WriteLfm3Model("lfm3_no_window", 0, true), 64, 64, 64);
 }

@@ -69,3 +69,11 @@ VAD policy, seek/redecode behavior, adding each window's absolute offset, and fi
 segment assembly. Word-level cross-attention/DTW timestamps are not provided by this
 feature. Create a fresh generator for each new audio window or redecode attempt; appending
 another window after timestamp generation begins is rejected.
+
+The shared [ASR postprocessor](metadata_decode.md) currently requires a single
+sequence/beam and model-supplied acoustic intervals for timestamp output. Whisper's
+timestamp boundary tokens do not provide those per-token intervals, so enabling
+`whisper_timestamps` does not enable timestamp output through `ASRPostProcessor`.
+A finalized-sequence adapter for segment results, including the audio window's
+recording offset, is separate follow-up work; these primitives do not add another
+public word/segment result API.

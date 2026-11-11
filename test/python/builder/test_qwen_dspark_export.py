@@ -45,7 +45,7 @@ def _draft_checkpoint(tmp_path, name="dspark_draft", target_layer_ids=TARGET_LAY
     return str(draft_dir)
 
 
-def _composite(aux_layers=AUX_LAYERS, use_paged_attention=True, dflash2_path=None):
+def _composite(aux_layers=AUX_LAYERS, use_paged_attention=True, dflash2_path=None, ep="cuda"):
     model = object.__new__(Qwen35MoEModel)
     model.dspark = None
     model.dspark_shared_initializers = []
@@ -71,17 +71,30 @@ def _composite(aux_layers=AUX_LAYERS, use_paged_attention=True, dflash2_path=Non
         attention_attrs={"paged_block_size": 256},
         context_length=32768,
         original_context_length=131072,
+        ep=ep,
+        model=ir.Model(ir.Graph([], [], nodes=[]), ir_version=10),
     )
     return model
 
 
-def test_absent_option_builds_no_drafter(tmp_path):
-    model = _composite()
+@pytest.mark.parametrize("ep", ["cuda", "webgpu"])
+def test_absent_option_builds_no_drafter(tmp_path, ep):
+    model = _composite(ep=ep)
 
     model.make_dspark_init(io_dtype=None, extra_options={})
     model.make_dspark_model(str(tmp_path))
 
     assert model.dspark is None
+
+
+def test_webgpu_drafter_is_rejected_before_checkpoint_access(tmp_path):
+    model = _composite(ep="webgpu")
+
+    with pytest.raises(ValueError, match="dspark_path is not supported on WebGPU.*BF16"):
+        model.make_dspark_init(
+            io_dtype=ir.DataType.FLOAT16,
+            extra_options={"dspark_path": str(tmp_path / "missing-drafter")},
+        )
 
 
 def test_drafter_requires_paged_attention(tmp_path):
@@ -228,6 +241,22 @@ def test_kv_cache_uses_configured_paged_block_size(tmp_path):
     builder.declare_io()
 
     assert builder.values["past_key_values.0.key"].shape[1] == 512
+
+
+def test_webgpu_drafter_omits_attention_metadata(tmp_path):
+    builder = DSparkBuilder(
+        _draft_checkpoint(tmp_path),
+        str(tmp_path),
+        ir.DataType.FLOAT16,
+        paged_block_size=256,
+        max_position_embeddings=128,
+        ep="webgpu",
+    )
+
+    builder.declare_io()
+
+    assert "attention_metadata" not in builder.values
+    assert builder.genai_config_section()["inputs"]["attention_metadata"] == ""
 
 
 def test_non_fp8_lm_head_does_not_require_a_scale(tmp_path):
@@ -425,19 +454,21 @@ def test_drafter_uses_target_context_length(tmp_path, monkeypatch):
     class StubDSparkBuilder:
         def __init__(self, _draft_dir, _target_dir, _io_dtype, _paged_block_size, max_position, **_kwargs):
             captured["max_position"] = max_position
+            captured["ep"] = _kwargs["ep"]
 
         def make_model(self):
             pass
 
     dspark_module = importlib.import_module("models.builders.dspark")
     monkeypatch.setattr(dspark_module, "DSparkBuilder", StubDSparkBuilder)
-    model = _composite()
+    model = _composite(ep="webgpu")
     model.dspark_path = _draft_checkpoint(tmp_path)
     model.dspark_attrs = {"io_dtype": None, "num_draft_tokens": None, "top_k": 16}
 
     model.make_dspark_model(str(tmp_path))
 
     assert captured["max_position"] == model.decoder.context_length
+    assert captured["ep"] == model.decoder.ep
 
 
 @pytest.mark.parametrize("prefix_caching", [None, False, True])
@@ -498,14 +529,11 @@ def test_failed_save_preserves_existing_dspark_files(tmp_path, monkeypatch):
     data_path.write_bytes(b"old data")
     builder = object.__new__(DSparkBuilder)
     builder.filename = "dspark.onnx"
-    # save_model stamps build metadata on the model, so the stub has to accept attributes.
-    builder.model = types.SimpleNamespace()
+    builder.model = ir.Model(ir.Graph(inputs=(), outputs=(), nodes=(), opset_imports={"": 22}), ir_version=10)
 
     def fail_save(_model, staged_path, **kwargs):
         with open(staged_path, "wb") as staged_model:
             staged_model.write(b"partial model")
-        with open(os.path.join(os.path.dirname(staged_path), kwargs["external_data"]), "wb") as staged_data:
-            staged_data.write(b"partial data")
         raise OSError("injected save failure")
 
     monkeypatch.setattr(ir, "save", fail_save)
@@ -525,23 +553,15 @@ def test_failed_replacement_restores_existing_dspark_files(tmp_path, monkeypatch
     data_path.write_bytes(b"old data")
     builder = object.__new__(DSparkBuilder)
     builder.filename = "dspark.onnx"
-    # save_model stamps build metadata on the model, so the stub has to accept attributes.
-    builder.model = types.SimpleNamespace()
-
-    def save_staged_files(_model, staged_path, **kwargs):
-        with open(staged_path, "wb") as staged_model:
-            staged_model.write(b"new model")
-        with open(os.path.join(os.path.dirname(staged_path), kwargs["external_data"]), "wb") as staged_data:
-            staged_data.write(b"new data")
+    builder.model = ir.Model(ir.Graph(inputs=(), outputs=(), nodes=(), opset_imports={"": 22}), ir_version=10)
 
     original_replace = os.replace
 
     def fail_model_install(source, destination):
-        if os.path.basename(source) == "dspark.onnx" and os.fspath(destination) == os.fspath(model_path):
+        if os.path.basename(source) == "dspark.onnx.saving" and os.fspath(destination) == os.fspath(model_path):
             raise OSError("injected replacement failure")
         original_replace(source, destination)
 
-    monkeypatch.setattr(ir, "save", save_staged_files)
     monkeypatch.setattr(os, "replace", fail_model_install)
 
     with pytest.raises(OSError, match="injected replacement failure"):

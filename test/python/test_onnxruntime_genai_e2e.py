@@ -27,17 +27,31 @@ def run_model(model_path: str | bytes | os.PathLike):
         "def binary_search(arr, x):",
     ]
 
-    sequences = tokenizer.encode_batch(prompts)
     params = og.GeneratorParams(model)
-    params.set_search_options(batch_size=3, max_length=200)
+    batch_size = len(prompts)
+    offset = 0
+    while offset < len(prompts):
+        params.set_search_options(batch_size=batch_size, max_length=200)
+        try:
+            generator = og.Generator(model, params)
+        except RuntimeError as error:
+            if (
+                batch_size == 1
+                or "LongRoPE context selection currently requires batch_size=1 and num_beams=1" not in str(error)
+            ):
+                raise
+            batch_size = 1
+            continue
 
-    generator = og.Generator(model, params)
-    generator.append_tokens(sequences)
-    while not generator.is_done():
-        generator.generate_next_token()
+        sequences = tokenizer.encode_batch(prompts[offset : offset + batch_size])
+        generator.append_tokens(sequences)
+        while not generator.is_done():
+            generator.generate_next_token()
 
-    for i in range(3):
-        assert generator.get_sequence(i) is not None
+        for i in range(batch_size):
+            assert generator.get_sequence(i) is not None
+        offset += batch_size
+        del generator
 
 
 def run_graph_capture_model(model_path: str | bytes | os.PathLike):
@@ -309,8 +323,9 @@ def get_args():
     return args
 
 
-if __name__ == "__main__":
+def main():
     args = get_args()
+    failed_models = []
     for model_path in args.models:
         try:
             log.info(f"Running {model_path}")
@@ -318,6 +333,7 @@ if __name__ == "__main__":
         except Exception as e:
             log.error(e)
             log.exception(f"Failed to run {model_path}")
+            failed_models.append(model_path)
 
     # Run graph-capture models with pytest for proper marker filtering
     for model_path in args.graph_capture_models:
@@ -327,6 +343,7 @@ if __name__ == "__main__":
         except Exception as e:
             log.error(e)
             log.exception(f"Failed to run graph-capture model {model_path}")
+            failed_models.append(model_path)
 
     # Run Whisper E2E tests
     run_whisper()
@@ -339,3 +356,10 @@ if __name__ == "__main__":
 
     # Run tool calling E2E tests
     run_tool_calling()
+
+    if failed_models:
+        raise RuntimeError(f"Failed to run models: {failed_models}")
+
+
+if __name__ == "__main__":
+    main()

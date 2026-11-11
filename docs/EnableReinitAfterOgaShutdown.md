@@ -80,6 +80,19 @@ destructors, so the interface, the stream, and the file-static allocator all
 cease to exist between cycles -- genai returns to a just-loaded state with no
 cached add-on state.
 
+The exception is a process that has loaded the qwen38 plane built into the add-on
+(`Qwen38Plane` with an empty library path): that plane keeps a reference on the
+library and never unloads it, because unloading a library that has launched
+kernels and loading it again crashed libcudart. The add-on then stays mapped across
+`OgaShutdown()` with the interface of the previous init still in `g_cuda_device`,
+and the next init enters it again through `GetInterface()`. The add-on is written
+for that. The stream and the file-static allocator pointer belong to the interface:
+its destructor destroys the stream and clears the pointer, so `CudaInterfaceImplBase`
+can create the stream and `InitOrt()` can assert `!ort_allocator_` again, and
+`GetInterface()` destroys the previous interface before it creates the next one.
+`ReInitTests.TheCudaAddOnIsEnteredAgainWhenTheBuiltInQwen38PlaneKeepsItMapped`
+covers the sequence.
+
 ## Teardown order
 
 `~OrtGlobals` destroys state in the reverse of construction order, so everything

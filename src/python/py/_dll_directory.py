@@ -31,7 +31,7 @@ def add_onnxruntime_dependency(package_id: str):
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         ort_handle = kernel32.GetModuleHandleW("onnxruntime.dll")
         # Only manually load the dlls if onnxruntime.dll is not already loaded.
-        # This allows WinML to use its packed dlls.
+        # This also supports applications that preload ORT from an external runtime package.
         if not ort_handle:
             ort_package = importlib.util.find_spec("onnxruntime")
             if not ort_package:

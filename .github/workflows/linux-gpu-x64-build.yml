@@ -1,6 +1,11 @@
 name: "Linux CUDA x64 Build"
 on:
   workflow_dispatch:
+    inputs:
+      dflash2_graph_model:
+        description: "Graph-enabled Qwen DFlash2 model on the runner under /data/ortgenai (256-token blocks, 512-token prefill)"
+        type: string
+        default: ""
   push:
     branches:
       - main
@@ -13,13 +18,13 @@ concurrency:
 
 env:
   ORT_BUILD_VERSION: "1.26.0"
-  ORT_RUNTIME_VERSION: "1.30.0-dev-20260825-0522-9cbf665b59"
+  ORT_RUNTIME_VERSION: "1.31.0"
   ORT_BUILD_PACKAGE_NAME: Microsoft.ML.OnnxRuntime.Gpu.Linux
   ORT_RUNTIME_PACKAGE_NAME: microsoft.ml.onnxruntime
   ORT_EP_PACKAGE_NAME: Microsoft.ML.OnnxRuntime.EP.Cuda12.linux-x64
-  ORT_EP_NUGET_VERSION: "0.2.0-dev.20260819+f1d07f0d"
-  ORT_EP_PYPI_VERSION: "0.2.0.dev20260819"
-  ORT_EP_PYPI_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/"
+  ORT_EP_NUGET_VERSION: "0.3.0-dev.20261009143618"
+  ORT_EP_PYPI_VERSION: "0.3.0"
+  ORT_EP_PYPI_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/"
   DOTNET_INSTALL_DIR: "${{ github.workspace }}/dotnet"
 
 jobs:
@@ -29,14 +34,14 @@ jobs:
       packages: write # needed for GHCR push
     env:
       PYTHON_EXECUTABLE: "/opt/python/cp312-cp312/bin/python3.12"
-    runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-A10", "JobId=linux-cuda-x64-build-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}"]
+    runs-on: ort-genai-github-linux-6-a10-eus2-ss
     steps:
       - name: Checkout OnnxRuntime GenAI repo
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: true
       - name: Checkout ManyLinux repo  # We are using the same manylinux repo as the one used in the packaging build
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: pypa/manylinux
           ref: 5eda9aded5462201e6310105728d33016e637ea7
@@ -44,11 +49,11 @@ jobs:
           path: manylinux
           submodules: true
 
-      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: '8.0.x'
 
-      - uses: microsoft/onnxruntime-github-actions/setup-build-tools@47a55233e7a9e40e8ade1a71d1b6141be5044924 # v0.0.8
+      - uses: microsoft/onnxruntime-github-actions/setup-build-tools@efa14f1fd8b27f52a47d9f0cacdbf642972c6090 # v0.0.14
         with:
           vcpkg-version: '2025.03.19'
           vcpkg-hash: '17e96169cd3f266c4716fcdc1bb728e6a64f103941ece463a2834d50694eba4fb48f30135503fd466402afa139abc847ef630733c442595d1c34979f261b0114'
@@ -57,7 +62,7 @@ jobs:
           add-cmake-to-path: 'true'
           disable-terrapin: 'true'
 
-      - uses: microsoft/onnxruntime-github-actions/setup-build-tools@47a55233e7a9e40e8ade1a71d1b6141be5044924 # v0.0.8
+      - uses: microsoft/onnxruntime-github-actions/setup-build-tools@efa14f1fd8b27f52a47d9f0cacdbf642972c6090 # v0.0.14
         with:
           vcpkg-version: '2025.03.19'
           vcpkg-hash: '17e96169cd3f266c4716fcdc1bb728e6a64f103941ece463a2834d50694eba4fb48f30135503fd466402afa139abc847ef630733c442595d1c34979f261b0114'
@@ -153,6 +158,7 @@ jobs:
                 --cmake_extra_defines \
                   MANYLINUX=ON \
                   PYTHON_EXECUTABLE=${{ env.PYTHON_EXECUTABLE }} \
+                  ENABLE_QWEN38_PLANE=ON \
                   TEST_PHI2=False \
                   TEST_QWEN_2_5=True \
                   'CMAKE_CUDA_ARCHITECTURES=60-real;70-real;75-real;80-real;86-real;89-real;90-real;100-real;120' \
@@ -203,11 +209,32 @@ jobs:
               ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/requirements.txt --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/cuda/torch/requirements.txt --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip uninstall -y onnxruntime-gpu && \
-              ${{ env.PYTHON_EXECUTABLE }} -m pip install --index-url ${{ env.ORT_EP_PYPI_SOURCE }} -r test/python/cuda/ort/requirements.txt --user && \
+              ${{ env.PYTHON_EXECUTABLE }} -m pip install --index-url https://pypi.org/simple/ -r test/python/cuda/ort/requirements.txt --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install --index-url ${{ env.ORT_EP_PYPI_SOURCE }} onnxruntime-ep-cuda12==${{ env.ORT_EP_PYPI_VERSION }} --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install /ort_genai_src/build/cuda/Release/wheel/onnxruntime_genai*manylinux*.whl --no-deps --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pytest -sv test/python/test_onnxruntime_genai_engine.py && \
               ${{ env.PYTHON_EXECUTABLE }} test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/models --e2e"
+
+      # Needs ORT #33817 (MoEGroupRouter and per-key KDA), which first shipped in the 1.32.0.dev20261109001 nightlies.
+      # The onnxruntime-gpu nightly carries the CPU and CUDA kernels from one revision. It is built for CUDA 13, which
+      # the A10 runner image's driver supports (ORT's CUDA 13 CI uses the same image), so the CUDA 13 runtime
+      # libraries come from PyPI instead of the CUDA 12.8 toolkit in the docker image.
+      - name: Run Bailing CPU/CUDA kernel regressions with nightly ONNX Runtime
+        run: |
+          set -e -x
+          docker run \
+            --gpus all \
+            --rm \
+            --volume $GITHUB_WORKSPACE:/ort_genai_src \
+            -w /ort_genai_src onnxruntimecudabuildx64 bash -c " \
+              (nvidia-smi || true) && \
+              ${{ env.PYTHON_EXECUTABLE }} -m venv build/bailing-venv && \
+              build/bailing-venv/bin/python -m pip install -r test/python/requirements.txt && \
+              build/bailing-venv/bin/python -m pip install -r test/python/cpu/torch/requirements.txt && \
+              build/bailing-venv/bin/python -m pip install -r test/python/cuda/ort-nightly/requirements.txt && \
+              build/bailing-venv/bin/python -m pip install -r test/python/cuda/ort-nightly/cuda13-runtime.txt && \
+              ORTGENAI_REQUIRE_BAILING_KERNELS=1 \
+                build/bailing-venv/bin/python -m pytest -q --noconftest test/python/models/test_bailing_builder.py"
 
       # TODO: Enable this by adding dotnet to the docker image
       # - name: Build the C# API and Run the C# Tests
@@ -221,6 +248,8 @@ jobs:
       #         dotnet test /p:NativeBuildOutputDir='/ort_genai_src/build/cuda/Release/'"
 
       - name: Docker -- Run unit tests
+        env:
+          D_FLASH2_GRAPH_TEST_MODEL: ${{ inputs.dflash2_graph_model }}
         run: |
           echo "Running docker image onnxruntimecudabuildx64"
           rm -f build/cuda/Release/libonnxruntime_providers_cuda.so
@@ -228,6 +257,7 @@ jobs:
           docker run \
             --gpus all \
             --rm \
+            --env D_FLASH2_GRAPH_TEST_MODEL \
             --volume /data/ortgenai/:/data/ortgenai/ \
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
             -w /ort_genai_src onnxruntimecudabuildx64 bash -c " \

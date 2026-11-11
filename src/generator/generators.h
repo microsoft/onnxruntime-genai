@@ -124,6 +124,9 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   bool IsPastPresentShareBufferEnabled(const std::string& model_type) const;
 };
 
+class TokenOutputs;
+class ASRPostProcessor;
+
 struct Generator : LeakChecked<Generator> {
   enum class Action {
     standard,   // Default, set in any other case
@@ -178,6 +181,8 @@ struct Generator : LeakChecked<Generator> {
   bool IsGreedySampling() const;
 
  private:
+  friend class ASRPostProcessor;
+  TokenOutputs GetTokenOutputs() const;
 #if defined(_MSC_VER)
   [[msvc::no_unique_address]]
 #else
@@ -185,8 +190,14 @@ struct Generator : LeakChecked<Generator> {
 #endif
   GenerationTelemetry generation_telemetry_;
   void LogGeneratorCreate(const GeneratorParams& params);
+  size_t PaddedInputIdsSize(size_t input_ids_count) const;
   DeviceSpan<int32_t> AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids);
   void ComputeLogits(DeviceSpan<int32_t> next_tokens);
+  void RunGeneratedToken();
+  DeviceSpan<float> RunWithRopeCache(DeviceSpan<int32_t> next_tokens);
+  int rope_cache_length_{};
+  int rope_context_threshold_{};
+  void ThrowIfAppendExceedsMaxLength(size_t input_ids_count);
   Action last_action_{Action::standard};
 
   // Pre-computed per-token decisions: avoid repeated checks each token
@@ -224,6 +235,11 @@ struct OrtGlobals {
 
   std::unique_ptr<OrtEnv> env_;
 
+  // True when genai (not a host) registered the AMDGPU umbrella EP library on env_. Scoped to this
+  // OrtGlobals so it is cleared whenever the env is torn down (Shutdown / re-init), keeping ownership
+  // tied to the registration's lifetime. Read/written by the AMDGPU session-options teardown gate.
+  bool amdgpu_owns_ep_registration_ = false;
+
   // Get-or-create the DeviceInterface for a device type. The interface is owned by this
   // OrtGlobals instance (in-process EPs) or by a genai add-on library it holds (CUDA), so every
   // interface is rebuilt on re-initialization after a shutdown. Thread-safe.
@@ -236,6 +252,8 @@ struct OrtGlobals {
     // https://github.com/microsoft/onnxruntime/blob/3c8c46029735a89c8d1ea0aa6c1812db5b78ad72/include/onnxruntime/core/session/onnxruntime_c_api.h#L2852-L2862
     // Members are destroyed in reverse declaration order, so session_ must be declared BEFORE allocator_ so that
     // ~allocator_ runs first.
+    // Retained for WebGPU helper sessions, including the selected provider/device factory.
+    std::unique_ptr<OrtSessionOptions> session_options_;
     std::unique_ptr<OrtSession> session_;
     std::unique_ptr<Ort::Allocator> allocator_;
     // Optional host-accessible allocator for decode inputs, owned by the OrtEnv (do not free).

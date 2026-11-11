@@ -123,6 +123,19 @@ fs_std::path ExportModelWithExternalData(const fs_std::path& src_onnx, const fs_
 
 }  // namespace
 
+TEST(ModelPackage, UsesStableApi) {
+  Ort::InitApi();
+  EXPECT_EQ(&Ort::GetModelPackageApi(), Ort::api->GetModelPackageApi());
+}
+
+TEST(ModelPackage, RejectsOlderRuntimeApi) {
+  Ort::InitApi();
+  const auto saved_version = Ort::api_version;
+  Ort::api_version = 30;
+  EXPECT_THROW(Ort::GetModelPackageApi(), std::runtime_error);
+  Ort::api_version = saved_version;
+}
+
 TEST(ModelPackage, RejectsFlatDirectory) {
   const auto root = MakeTempDir("flat");
   WriteFile(root / "genai_config.json", "{}");

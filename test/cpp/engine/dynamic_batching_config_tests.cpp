@@ -50,6 +50,101 @@ TEST(DynamicBatchingConfigTest, ScheduledTokenBudgetDefaultsTo2048) {
   EXPECT_EQ(config.engine.dynamic_batching->max_scheduled_tokens, 2048u);
 }
 
+TEST(DynamicBatchingConfigTest, DeviceMemoryBudgetUsesExistingTransactionalOverlays) {
+  auto config = LoadDynamicConfig(R"({"max_batch_size":1})");
+  EXPECT_FALSE(config.engine.dynamic_batching->device_memory_budget_bytes);
+  OverlayConfig(config, R"({"engine":{"dynamic_batching":{"device_memory_budget_bytes":25769803776}}})");
+  ASSERT_EQ(config.engine.dynamic_batching->device_memory_budget_bytes, 25769803776ull);
+  EXPECT_THROW(OverlayConfig(config, R"({"engine":{"dynamic_batching":{"device_memory_budget_bytes":0}}})"),
+               std::runtime_error);
+  EXPECT_EQ(config.engine.dynamic_batching->device_memory_budget_bytes, 25769803776ull);
+}
+
+TEST(DynamicBatchingConfigTest, RejectsInvalidDeviceMemoryBudgets) {
+  for (const auto* value : {"0", "-1", "1.5", "true", "\"24\"", "null", "9007199254740992"}) {
+    EXPECT_THROW(LoadDynamicConfig(std::string{R"({"device_memory_budget_bytes":)"} + value + "}"),
+                 std::runtime_error);
+  }
+}
+
+TEST(DynamicBatchingConfigTest, MediaLimitsUseTransactionalPositiveByteOverlays) {
+  for (const auto* name : {"media_host_bytes", "media_device_bytes"}) {
+    auto config = LoadDynamicConfig(std::string{"{\""} + name + "\":2097152}");
+    const auto value = [&]() {
+      return name == std::string_view{"media_host_bytes"} ? config.engine.dynamic_batching->media_host_bytes
+                                                          : config.engine.dynamic_batching->media_device_bytes;
+    };
+    EXPECT_EQ(value(), 2097152u);
+    for (const auto* invalid : {"0", "-1", "1.5", "true", "\"24\"", "null", "9007199254740992"}) {
+      EXPECT_THROW(OverlayConfig(config, std::string{"{\"engine\":{\"dynamic_batching\":{\""} + name + "\":" + invalid + "}}}"),
+                   std::runtime_error);
+      EXPECT_EQ(value(), 2097152u);
+    }
+  }
+}
+
+TEST(DynamicBatchingConfigTest, DeviceMemoryHeadroomUsesTransactionalByteOverlays) {
+  auto config = LoadDynamicConfig(R"({"max_batch_size":1})");
+  EXPECT_FALSE(config.engine.dynamic_batching->device_memory_headroom_bytes);
+  OverlayConfig(config, R"({"engine":{"dynamic_batching":{"device_memory_headroom_bytes":4294967296}}})");
+  EXPECT_EQ(config.engine.dynamic_batching->device_memory_headroom_bytes, 4294967296ull);
+  for (const auto* value : {"-1", "1.5", "true", "\"24\"", "null", "9007199254740992"}) {
+    EXPECT_THROW(OverlayConfig(config, std::string{R"({"engine":{"dynamic_batching":{"device_memory_headroom_bytes":)"} +
+                                           value + "}}}"),
+                 std::runtime_error);
+    EXPECT_EQ(config.engine.dynamic_batching->device_memory_headroom_bytes, 4294967296ull);
+    EXPECT_THROW(OverlayConfig(config, std::string{R"({"runtime_profiles":[{
+      "id":"invalid-headroom","eligibility":{"minimum_total_device_memory_bytes":0},
+      "overlay":{"engine":{"dynamic_batching":{"device_memory_headroom_bytes":)"} +
+                                           value + "}}}}]}"),
+                 std::runtime_error);
+  }
+  OverlayConfig(config, R"({"engine":{"dynamic_batching":{"device_memory_headroom_bytes":0}}})");
+  EXPECT_EQ(config.engine.dynamic_batching->device_memory_headroom_bytes, 0u);
+}
+
+TEST(DynamicBatchingConfigTest, RuntimeProfileCanOverrideOnlyMediaLimits) {
+  auto config = LoadDynamicConfig(R"({"media_host_bytes":536870912,"media_device_bytes":134217728})");
+  OverlayConfig(config, R"({"runtime_profiles":[{
+    "id":"media","eligibility":{"minimum_total_device_memory_bytes":0},
+    "overlay":{"engine":{"dynamic_batching":{"media_host_bytes":4294967296,"media_device_bytes":2097152}}}
+  }]})");
+  ApplyRuntimeProfile(config, uint64_t{34359738368});
+  EXPECT_EQ(config.engine.dynamic_batching->media_host_bytes, 4294967296ull);
+  EXPECT_EQ(config.engine.dynamic_batching->media_device_bytes, 2097152u);
+  EXPECT_THROW(OverlayConfig(config, R"({"runtime_profiles":[{
+    "id":"invalid","eligibility":{"minimum_total_device_memory_bytes":0},
+    "overlay":{"engine":{"dynamic_batching":{"media_host_bytes":0}}}
+  }]})"),
+               std::runtime_error);
+  EXPECT_EQ(config.engine.dynamic_batching->media_host_bytes, 4294967296ull);
+}
+
+TEST(DynamicBatchingConfigTest, RuntimeProfileCanOverrideOnlyHeadroomIncludingZero) {
+  for (const auto bytes : {uint64_t{0}, uint64_t{4294967296}}) {
+    auto config = LoadDynamicConfig(R"({"device_memory_headroom_bytes":2147483648})");
+    OverlayConfig(config, std::string{R"({"runtime_profiles":[{
+      "id":"headroom-only","eligibility":{"minimum_total_device_memory_bytes":0},
+      "overlay":{"engine":{"dynamic_batching":{"device_memory_headroom_bytes":)"} +
+                              std::to_string(bytes) + "}}}}]}");
+    ApplyRuntimeProfile(config, uint64_t{34359738368});
+    EXPECT_EQ(config.engine.dynamic_batching->device_memory_headroom_bytes, bytes);
+  }
+}
+
+TEST(DynamicBatchingConfigTest, RuntimeProfileCannotReplaceDeviceMemoryBudget) {
+  auto config = LoadDynamicConfig(R"({"device_memory_budget_bytes":25769803776,"num_blocks":407})");
+  OverlayConfig(config, R"({"runtime_profiles":[{
+    "id":"larger-cache",
+    "eligibility":{"minimum_total_device_memory_bytes":0},
+    "overlay":{"engine":{"dynamic_batching":{"num_blocks":1024}}}
+  }]})");
+  ApplyRuntimeProfile(config, uint64_t{34359738368});
+  EXPECT_EQ(config.engine.dynamic_batching->num_blocks, 1024u);
+  EXPECT_FALSE(config.engine.dynamic_batching->gpu_utilization_factor);
+  EXPECT_EQ(config.engine.dynamic_batching->device_memory_budget_bytes, 25769803776ull);
+}
+
 TEST(DynamicBatchingConfigTest, ScheduledTokenBudgetAcceptsOverride) {
   const auto config =
       LoadDynamicConfig(R"({ "max_scheduled_tokens": 321 })");
@@ -58,13 +153,11 @@ TEST(DynamicBatchingConfigTest, ScheduledTokenBudgetAcceptsOverride) {
   EXPECT_EQ(config.engine.dynamic_batching->max_scheduled_tokens, 321u);
 }
 
-TEST(DynamicBatchingConfigTest, PrefixCachingDefaultsToEnabled) {
+TEST(DynamicBatchingConfigTest, PrefixCachingDefaultsToUnset) {
   const auto config = LoadDynamicConfig(R"({ "max_batch_size": 4 })");
 
   ASSERT_TRUE(config.engine.dynamic_batching.has_value());
-  EXPECT_TRUE(config.engine.dynamic_batching->prefix_caching);
-  EXPECT_FALSE(
-      config.engine.dynamic_batching->prefix_caching_explicitly_set);
+  EXPECT_FALSE(config.engine.dynamic_batching->prefix_caching.has_value());
 }
 
 TEST(DynamicBatchingConfigTest, PrefixCachingAcceptsExplicitDisable) {
@@ -72,9 +165,101 @@ TEST(DynamicBatchingConfigTest, PrefixCachingAcceptsExplicitDisable) {
       LoadDynamicConfig(R"({ "prefix_caching": false })");
 
   ASSERT_TRUE(config.engine.dynamic_batching.has_value());
-  EXPECT_FALSE(config.engine.dynamic_batching->prefix_caching);
-  EXPECT_TRUE(
-      config.engine.dynamic_batching->prefix_caching_explicitly_set);
+  ASSERT_TRUE(config.engine.dynamic_batching->prefix_caching.has_value());
+  EXPECT_FALSE(*config.engine.dynamic_batching->prefix_caching);
+}
+
+TEST(DynamicBatchingConfigTest, PrefixCachingAcceptsExplicitEnable) {
+  const auto config =
+      LoadDynamicConfig(R"({ "prefix_caching": true })");
+
+  ASSERT_TRUE(config.engine.dynamic_batching.has_value());
+  ASSERT_TRUE(config.engine.dynamic_batching->prefix_caching.has_value());
+  EXPECT_TRUE(*config.engine.dynamic_batching->prefix_caching);
+}
+
+TEST(DynamicBatchingConfigTest, SnapshotTiersDefaultOffAndAcceptIndependentBudgets) {
+  const auto defaults = LoadDynamicConfig(R"({"max_batch_size":4})");
+  EXPECT_TRUE(defaults.engine.dynamic_batching->prefix_caching.value_or(true));
+  EXPECT_FALSE(defaults.engine.dynamic_batching->snapshot_cache.Enabled());
+  EXPECT_FALSE(defaults.engine.dynamic_batching->max_snapshots);
+  EXPECT_EQ(defaults.engine.dynamic_batching->dflash2_max_snapshots, 1u);
+  const auto config = LoadDynamicConfig(R"({
+    "prefix_caching": true,
+    "max_snapshots": 8,
+    "snapshot_cache": {
+      "vram_bytes": 4294967296, "ram_bytes": 8589934592, "disk_bytes": 17179869184,
+      "directory": "spill"
+    }
+  })");
+  const auto& batching = *config.engine.dynamic_batching;
+  EXPECT_TRUE(batching.prefix_caching);
+  ASSERT_EQ(batching.max_snapshots, 8u);
+  EXPECT_EQ(batching.snapshot_cache.vram_bytes, 4294967296ull);
+  EXPECT_EQ(batching.snapshot_cache.ram_bytes, 8589934592ull);
+  EXPECT_EQ(batching.snapshot_cache.disk_bytes, 17179869184ull);
+  EXPECT_EQ(batching.snapshot_cache.directory, "spill");
+}
+
+TEST(DynamicBatchingConfigTest, RejectsInvalidSnapshotBudgetsAndCount) {
+  for (const auto* value : {"-1", "1.5", "true", "\"16\"", "9007199254740992"}) {
+    for (const auto* tier : {"vram_bytes", "ram_bytes", "disk_bytes"}) {
+      const auto config = std::string{"{\"snapshot_cache\":{\""} +
+                          tier + "\":" + value + "}}";
+      EXPECT_THROW(LoadDynamicConfig(config), std::runtime_error);
+    }
+  }
+  for (const auto* value : {"-1", "1.5", "true", "2147483648"}) {
+    EXPECT_THROW(LoadDynamicConfig(std::string{R"({"max_snapshots":)"} +
+                                   value + "}"),
+                 std::runtime_error);
+  }
+  EXPECT_NO_THROW(LoadDynamicConfig(R"({"max_snapshots":0})"));
+}
+
+TEST(DynamicBatchingConfigTest, RuntimeProfileReplacesSnapshotPolicyAndCanDisableCount) {
+  auto config = LoadDynamicConfig(R"({
+    "prefix_caching":true,
+    "max_snapshots":8,
+    "snapshot_cache":{"vram_bytes":1024,"ram_bytes":2048}
+  })");
+  OverlayConfig(config, R"({"runtime_profiles":[{
+    "id":"disk-only",
+    "eligibility":{"minimum_total_device_memory_bytes":0},
+    "overlay":{"engine":{"dynamic_batching":{
+      "prefix_caching":false,"max_snapshots":0,
+      "snapshot_cache":{"disk_bytes":4096}
+    }}}
+  }]})");
+  ApplyRuntimeProfile(config, uint64_t{0});
+  const auto& batching = *config.engine.dynamic_batching;
+  ASSERT_TRUE(batching.prefix_caching.has_value());
+  EXPECT_FALSE(*batching.prefix_caching);
+  ASSERT_EQ(batching.max_snapshots, 0u);
+  EXPECT_EQ(batching.snapshot_cache.vram_bytes, 0u);
+  EXPECT_EQ(batching.snapshot_cache.ram_bytes, 0u);
+  EXPECT_EQ(batching.snapshot_cache.disk_bytes, 4096u);
+}
+
+TEST(DynamicBatchingConfigTest, OverlayReplacesSnapshotPolicyIncludingExplicitEmptyOptOut) {
+  auto config = LoadDynamicConfig(R"({
+    "snapshot_cache":{"vram_bytes":1024,"ram_bytes":2048,"directory":"spill"}
+  })");
+  OverlayConfig(config, R"({"engine":{"dynamic_batching":{
+    "snapshot_cache":{"disk_bytes":4096}
+  }}})");
+  const auto& policy = config.engine.dynamic_batching->snapshot_cache;
+  EXPECT_TRUE(policy.explicitly_set);
+  EXPECT_EQ(policy.vram_bytes, 0u);
+  EXPECT_EQ(policy.ram_bytes, 0u);
+  EXPECT_EQ(policy.disk_bytes, 4096u);
+  EXPECT_TRUE(policy.directory.empty());
+
+  OverlayConfig(config, R"({"engine":{"dynamic_batching":{"snapshot_cache":{}}}})");
+  const auto& disabled = config.engine.dynamic_batching->snapshot_cache;
+  EXPECT_TRUE(disabled.Configured());
+  EXPECT_FALSE(disabled.Enabled());
+  EXPECT_TRUE(disabled.directory.empty());
 }
 
 TEST(CpuEmbeddingConfigTest, PrefaultDefaultsOnAndCanBeDisabled) {
@@ -168,11 +353,13 @@ TEST(DecoderStateGroupsConfigTest, ParsesSparseHybridManifest) {
       },
       {
         "kind": "fixed_conv",
-        "layer_ids": [0, 1, 2]
+        "layer_ids": [0, 1, 2],
+        "state_update": { "capacity": 3 }
       },
       {
         "kind": "fixed_recurrent",
-        "layer_ids": [0, 1, 2]
+        "layer_ids": [0, 1, 2],
+        "state_update": { "capacity": 3, "key_head_count": 1 }
       }
     ]
   })");
@@ -195,6 +382,42 @@ TEST(DecoderStateGroupsConfigTest, ParsesSparseHybridManifest) {
   EXPECT_EQ(config.model.decoder.inputs.state_update_active, "state_update_active");
   EXPECT_EQ(config.model.decoder.outputs.state_update_conv_value_names, "state_update.%d.conv_value");
   EXPECT_EQ(config.model.decoder.outputs.state_update_recurrent_capsule_names, "state_update.%d.recurrent_capsule");
+}
+
+TEST(DecoderStateGroupsConfigTest, ParsesPleAndPackedIndexerStateGroups) {
+  const auto config = LoadDecoderConfig(R"({
+    "num_hidden_layers": 2,
+    "ple_token_pad_id": 7,
+    "inputs": {
+      "past_ple_token_names": "past.%d.ple_tokens",
+      "past_ple_conv_names": "past.%d.ple_conv",
+      "past_indexer_names": "past.%d.indexer_key",
+      "past_indexer_kv_buffer_names": "past.%d.indexer_kv_buffer",
+      "past_indexer_state_lengths_names": "past.%d.indexer_state_lengths"
+    },
+    "outputs": {
+      "present_ple_token_names": "present.%d.ple_tokens",
+      "present_ple_conv_names": "present.%d.ple_conv",
+      "present_indexer_names": "present.%d.indexer_key",
+      "present_indexer_kv_buffer_names": "present.%d.indexer_kv_buffer",
+      "present_indexer_state_lengths_names": "present.%d.indexer_state_lengths"
+    },
+    "state_groups": [
+      {"kind": "fixed_ple", "layer_ids": [0]},
+      {"kind": "fixed_indexer", "layer_ids": [1]}
+    ]
+  })");
+
+  ASSERT_TRUE(config.model.decoder.state_groups);
+  ASSERT_EQ(config.model.decoder.state_groups->size(), 2u);
+  EXPECT_EQ(config.model.decoder.state_groups->at(0).kind,
+            Config::Model::Decoder::StateGroupKind::FixedPle);
+  EXPECT_EQ(config.model.decoder.state_groups->at(1).kind,
+            Config::Model::Decoder::StateGroupKind::FixedIndexer);
+  EXPECT_EQ(config.model.decoder.inputs.past_indexer_kv_buffer_names,
+            "past.%d.indexer_kv_buffer");
+  EXPECT_EQ(config.model.decoder.outputs.present_indexer_state_lengths_names,
+            "present.%d.indexer_state_lengths");
 }
 
 TEST(DecoderStateGroupsConfigTest, OverlayValidationIsTransactional) {

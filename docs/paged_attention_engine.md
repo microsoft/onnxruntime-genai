@@ -2,7 +2,7 @@
 
 This document describes how the paged attention engine and continuous batching work in the current codebase. It is intended to be the living architecture guide for this part of ONNX Runtime GenAI.
 
-Update this document whenever a change affects request admission, scheduling, paged KV-cache ownership, model input packing, sampling, transaction behavior, request completion, or failure handling. Historical design and performance work can remain in separate documents, but this document should always describe the behavior that exists on the current branch.
+Update this document whenever a change affects request admission, scheduling, paged KV-cache ownership, model input packing, sampling, transaction behavior, request completion, or failure handling. Keep model deployment recipes, validation reports, and historical performance measurements outside this guide; it describes the behavior that exists on the current branch.
 
 ## Scope
 
@@ -50,6 +50,49 @@ The main implementation is under `src/engine/`:
 | Batched token sampling | `scheduled_requests.h`, `scheduled_requests.cpp` |
 | Planned work and transaction outcomes | `step_plan.h` |
 | State consistency checks | `engine_invariants.h`, `engine_invariants.cpp` |
+| Prepared media, bounded ownership, encoding, and positions | `media.h`, `media.cpp` |
+
+## Vision inputs
+
+Packed Qwen3.5-family and Qwen4-Exp (Flash-Next) vision packages support `request.begin_turn(formatted_prompt, turn_options, images=images)` in Python, `OgaRequest::BeginTurn(formatted_prompt, options, images)` in C++, and `OgaRequestBeginTurnWithImages` in C. The original token overload is unchanged. The prompt overload also accepts text without images. Engine types remain independent of Generator parameters and state; callers do not create a multimodal processor.
+
+The package type follows the source model: `qwen3_5`, `qwen3_5_moe`, and `qwen4_exp` identify complete packed vision-language exports; their corresponding `_text` types identify text-only exports. Text-only packages reject image inputs and cannot configure a vision encoder. A complete Engine vision export must include the supported encoder, processor assets, pure CPU token lookup, and packed decoder. Changing the type label or retaining image markers in a tokenizer does not add vision support. The runtime validates these component and position contracts before accepting images; ordinary Generator vision packages retain their separate execution path.
+
+The input is an explicitly formatted **incremental turn**, not messages or unformatted text. The Engine applies no chat template. For this package, each image has one `<|vision_start|><|image_pad|><|vision_end|>` marker, in input-image order. Only PNG/JPEG images with inspectable dimensions and the configured Qwen `PatchImage` pipeline are accepted. Audio, video, streaming, cross-attention, and Generator merge-embedding packages are not enabled by this interface.
+
+On a vision Engine, the token-only overload rejects all three image-marker IDs. Image markers require the formatted prompt and matching ordered image inputs; they cannot silently fall back to token embeddings.
+
+Packed vision with MTP is not enabled; exports must set `exclude_mtp=true` or select a supported block drafter for Qwen3.5-family targets. Flash-Next uses the ordinary dynamic Engine with floating KV, internal sparse selection, PLE/Engram, and independent target/indexer MRoPE. Its vision support is scoped to eager, target-only execution; it does not extend to CUDA graph decode, quantized KV, MTP/block drafters, expert offload, or the separate `qwen38_flash_graph` backend. Text-only MTP behavior is unchanged. Vision-targeted adapters are rejected rather than silently discarded; merge them into the source checkpoint before export. Text-only adapters can still accompany packed vision.
+
+Admission synchronously inspects dimensions, validates marker counts and session limits, and preprocesses into owned canonical host patches. Invalid admission preserves prior history and the next Turn ID. After success, callers may release the image handle. Neural vision encoding happens during `Run()`, outside decoder reservation. When no decoder work is ready, one `Run()` can encode one image and produce **zero events** without advancing request tokens, RNG, cache state, or positions. Continue while `has_pending_requests()` is true. Runnable text/decode peers take priority over preparation; the existing decode-first starvation limitation is unchanged.
+
+There is no encoder aging rule or reserved preparation step: sustained runnable text traffic can indefinitely delay image preparation. Once that traffic drains or becomes non-executable, pending image preparation can proceed. Applications requiring bounded image latency must bound competing work; this feature does not change the Engine's strict priority policy.
+
+The scheduler checks prospective prefix hits before requesting features. Prefill ranges split at media boundaries whether features are cold or resident, so feature-cache residency does not change recurrent-state chunking. Individually fitting images need not coexist. Whole images are encoded even when a chunk or prefix hit starts inside one. The decoder still performs its pure CPU token lookup, then replaces exactly the image rows with projected features. Cache lengths, token usage, and session limits count expanded decoder rows, not MRoPE extents. Three-axis positions derive from retained image geometry for prefill, generated text, continuation, and rewind. Encoder/prefill execution is eager; eligible decode/speculative steps retain the existing CUDA graph path.
+
+Rotary-history bindings retain fixed architecture-context geometry; their initialization and transfer are not bounded by the current prefill chunk.
+
+Exact canonical content and geometry are interned within the Engine. Private row identities feed only the existing collision-checked prefix cache, never the model, tokenizer, policies, or drafter. Different image content cannot adopt media-dependent state or descendants. Optional identity eviction may cause a safe cache miss. Hybrid fixed-state and DFlash checkpoints use the same enriched prefix lineage. When the cache enables prefix reuse, media-bearing prefills align to the furthest complete block within their assigned budget when one fits, so matching hybrid snapshots can be published.
+
+### Media limits and failures
+
+`engine.dynamic_batching.media_host_bytes` defaults to 536870912 (512 MiB) and bounds retained canonical patches/identities plus a conservative synchronous preprocessing reservation. `media_device_bytes` defaults to 134217728 (128 MiB) and bounds reclaimable projected features. Both are positive integer byte counts, accept ordinary overlays and runtime profiles, and share the parser's maximum exact integer limit of 9007199254740991 (also limited by platform `size_t`). Features are charged to the feature limit on their encoder's actual device, including CPU if configured there; they are not also charged to the canonical-host limit.
+
+Media prefix identities also have an Engine-lifetime limit: at most 2147483646 image-feature rows can be cumulatively assigned private identities. Reusing an interned image does not allocate new identities, but evicting media does not recycle them because cached prefixes can still reference old identities. Failed admissions can also consume identities after preprocessing. Exhaustion rejects subsequent admissions needing new identities without reusing IDs or corrupting cached prefixes; recreate the Engine to reset this limit. The host/device byte limits bound retained memory, not this cumulative count.
+
+The feature allowance is reserved before automatic KV sizing only when the encoder and KV cache use the same device, and loaded encoder weights participate in startup memory measurement. Explicit `num_blocks` pools are not reduced by this media allowance; existing auxiliary-cache deductions are unchanged. These are application tensor limits, **not an ORT allocator quota**: encoder workspace, provider-owned transfer scratch, and temporary session allocations require profiled device headroom. Caller-side image loading/encoded storage also precedes admission and is outside its host reservation. Canonical host inputs survive feature eviction for replay; close/rewind release discarded request ownership, while bounded optional interning can retain reusable items.
+
+Shared image loading, including Generator callers, accepts at most 512 MiB of encoded bytes per image collection. File lengths and the combined buffer size are checked before payload allocation, reading or copying. This separate loading limit is not raised by `media_host_bytes`; the file-buffer path still temporarily holds both its snapshot and the Extensions-owned copy.
+
+Known admission size/shape violations reject before mutation. Classified ORT BFC allocation pressure evicts features and permits one clean encoder retry; a second failure terminates the identified request through the existing failure event path. Unknown encoder errors remain shared-fatal. Preparation never enters or weakens the decoder's existing reservation/publication transaction.
+
+### Formatting continuation and replay
+
+`examples/python/engine/vision-qa.py` demonstrates an initial full-template rendering and an explicit Qwen user-turn append protocol. Requests do not retain EOS, so the protocol supplies the assistant `<|im_end|>` closure before appending the next user. Length/stop truncation also explicitly closes that partial assistant message; this is an application formatting policy, not automatic Engine behavior. Use unnumbered image markers; any visible image numbering is caller-owned across turns.
+
+Do not render a tool message in isolation or assume a full-history template is append-compatible: Qwen templates can regroup tool messages and remove old reasoning. For tool turns, render the complete message history and compare **tokenized** retained prefixes. If earlier tokens change, rewind to an available turn boundary and replay the retained prefix plus newly rendered suffix; when no such boundary represents that history, recreate the Request and replay the full rendering. The Engine deliberately does not infer roles, tools, or replay edits.
+
+See the Model Builder's [packed Qwen vision instructions](../src/python/py/models/README.md#packed-qwen-vision-for-the-engine) for package construction and model-specific runtime settings.
 
 ## The main idea
 
@@ -115,9 +158,103 @@ Dynamic batching limits scheduled rows with `max_batch_size` and limits the tota
 query tokens in one model run with `max_scheduled_tokens`. The token limit defaults
 to 2048. Both limits are positive and independent.
 
+### Device-memory budget and conservative headroom
+
+Set `engine.dynamic_batching.device_memory_budget_bytes` before loading a model
+to size its CUDA paged cache against a per-model allowance. The package also supplies
+`device_memory_headroom_bytes`, a conservative allowance for additional GPU memory:
+
+```json
+{
+  "engine": {
+    "dynamic_batching": {
+      "device_memory_budget_bytes": 25769803776,
+      "device_memory_headroom_bytes": 3221225472
+    }
+  }
+}
+```
+
+The example is a 24-GiB budget with 3 GiB of headroom, not 24 GB. The headroom
+is illustrative, not a validated value for every model. Both values are integer
+byte counts no greater than 9007199254740991, the existing JSON parser's exact
+integer range. The budget must be positive; headroom must be non-negative.
+Budgeted Engine construction requires explicit headroom; zero is accepted only
+as an explicit choice, not substituted for missing profiling data.
+Existing configuration overlays, including `OgaConfigOverlay`, can set the
+budget before Model creation; there is no separate budget API.
+
+The supported path is one initial load of a CUDA paged decoder Model/Engine,
+including an enabled windowed DFlash 2 drafter. CPU embedding is supported.
+Other devices/backends and enabled MTP or DSpark auxiliary models are rejected
+during Engine construction when this field is set.
+
+An explicit budget overrides `num_blocks` and `gpu_utilization_factor`, including
+block counts supplied by runtime profiles. Other profile and execution settings
+remain unchanged. The user budget is not a runtime-profile overlay setting.
+Packages may override headroom through a runtime profile's
+`overlay.engine.dynamic_batching.device_memory_headroom_bytes`.
+Omitting the user budget preserves existing sizing behavior, even when headroom
+is configured.
+
+Runtime profiles are applied first, using actual hardware facts. Cache sizing
+then uses the effective configuration in this order:
+
+| Settings | Cache sizing behavior |
+|---|---|
+| User budget and explicit headroom | Subtract observed startup usage, headroom, and pending reservations before choosing blocks. Ignore `num_blocks` and `gpu_utilization_factor`. |
+| No user budget; `num_blocks` is set | Use the configured target-equivalent cache allowance. With auxiliary caches, the resolved target block count can be smaller. Ignore `gpu_utilization_factor`. |
+| No user budget or `num_blocks`; `gpu_utilization_factor` is set | Use that fraction of currently free GPU memory, with the existing 10% reserve, then deduct pending reservations. |
+| Runtime profile supplies `num_blocks` | Use that count unless a user budget is set. Other execution settings from the profile still apply. |
+| Runtime profile supplies headroom | Use that headroom only when a user budget is set. |
+| Headroom without a user budget | Ignore headroom and keep the existing sizing behavior. |
+
+For example, `num_blocks: 407` does not necessarily mean 407 target blocks when
+a drafter is enabled: the draft caches share the equivalent byte allowance.
+Use Engine capabilities for the resolved request-length limit.
+
+After device initialization and before loading model initializers/sessions,
+the Model records free GPU memory. Cache sizing subtracts the observed startup
+consumption, including draft-model weights, allocated draft caches, and already
+allocated fixed state, from the allowance and clamps the remainder to current
+free memory. Configured headroom is then subtracted, followed by pending window
+storage, graph buffers, capture block tables, and sampler startup buffers,
+before dividing by the graph-derived cache bytes per block. The explicit headroom
+replaces the generic 10% reserve only in the user-budget path; the legacy path
+retains that reserve. An insufficient budget after deducting configured headroom
+and reservations, or a zero resulting block count, is an initialization error.
+Successful initialization does not certify that the supplied headroom covers
+every later allocation.
+Budgeted key/value payloads use allocator `Reserve` storage, following the scale
+cache ownership pattern, rather than growing the shared arena in larger chunks.
+The default allocation path is unchanged when the budget is omitted.
+
+Headroom covers additional peak usage not already counted in the startup delta
+or pending reservations, including lazy inference workspace, allocator growth,
+and any initialization overhead excluded by the baseline. Do not charge already
+allocated Engine state or known reservations twice. Package authors should profile
+cold initialization and representative mixed workloads at the supported context,
+batch, prefill, speculative, and graph-capture limits, then add a conservative margin.
+A shared value may cover supported GPU families; a run on one GPU alone does not
+establish that it is sufficient elsewhere. Revalidate it when the shipped execution
+configuration or runtime changes.
+
+After successful initialization, use Engine capabilities to read the actual
+maximum request length. This is a prompt/history-plus-generation structural
+limit for exclusive cache use, not current free capacity or a concurrency
+guarantee. Neither a pre-load estimate nor live resizing is provided.
+
+This is an incremental device-wide startup measurement, not allocation
+ownership accounting, an exclusive reservation, or a hard VRAM quota. Other
+GPU activity and reuse of shared or retained allocator storage can affect the
+measurement. Later logits, sampling workspace, and provider allocations are
+covered only to the extent allowed for by the packaged headroom; it is not an
+allocation-enforced peak limit. Reload-aware accounting and physical
+reclamation are outside this initial scope.
+
 ### Prefix caching
 
-Dynamic batching reuses complete prompt blocks from earlier requests by default.
+Dynamic batching caches prefixes by default for supported layouts.
 Set `engine.dynamic_batching.prefix_caching` to `false` to disable it. A lookup
 compares both the token contents and the complete parent-block identity; hash
 equality alone is never accepted as a match. The final prompt token always runs
@@ -155,8 +292,10 @@ components remain available. Hybrid targets index only blocks completed during
 prefill; decode and reasoning steps do not publish paged identities without matching
 fixed-state checkpoints.
 
-Hybrid prefix caching does not reduce the configured prefill chunk size. A
-checkpoint is attached only when a successful step's committed endpoint is
+For text-only requests, hybrid prefix caching does not reduce the configured prefill chunk size.
+Media-bearing requests additionally end chunks at cache-block boundaries so they can publish
+matching fixed-state checkpoints; missing features also bound chunks at image boundaries.
+A checkpoint is attached only when a successful step's committed endpoint is
 block-aligned and a checkpoint row is available. Newly completed blocks remain
 private until that checkpoint can be published with the entire new suffix;
 partial chunks and exhausted checkpoint capacity do not index orphan blocks.
@@ -165,13 +304,26 @@ request's committed state. When replacing a retained checkpoint, suffix metadata
 checkpoint ownership metadata, and tensor-copy views are allocated before
 reclaiming its row, so a metadata allocation failure preserves the earlier hit.
 When prompts branch between fixed-state checkpoints, an identical intermediate KV
-block can belong to an older suffix that the new request cannot adopt. Publication
-stages the new suffix and checkpoint before retiring that entire conflicting
-history. A matching existing checkpoint still prevents duplicate publication.
-Active block owners, pending fixed-state matches, and leased draft snapshots
-defer retirement; later publication can retry after those leases are released.
-Dropped checkpoints can be rebuilt through the same mechanism without splicing
-canonical KV blocks into recomputed fixed state.
+block can belong to an older suffix that the new request cannot adopt. With
+capacity for multiple checkpoints, the index may retain distinct physical
+histories for the same logical tokens. Logical identity verifies token content;
+physical ancestry identifies the exact KV chain that belongs with a checkpoint.
+Physical variants share immutable logical token metadata rather than retaining
+duplicate token arrays. Paged-only identities store their tokens directly and
+do not allocate a separate logical-identity chain.
+A hybrid match selects a complete checkpointed history, never a mixture of
+blocks from different histories.
+
+Checkpoint reclamation prefers intermediate checkpoints in the publishing
+history before independent deep endpoints. This allows two warm branches to
+remain reusable without increasing the configured block or checkpoint budgets.
+A usable checkpoint at the same complete logical boundary still prevents
+redundant publication. When only one checkpoint or insufficient block capacity
+is available, publication stages its replacement before retiring an unleased
+conflicting suffix. Active block owners, pending fixed-state matches, and leased
+draft snapshots protect the old history. Metadata or capture-allocation failure
+preserves earlier hits; a later publication may retry after capacity or leases
+change. Recomputed private KV is never spliced into a different physical history.
 After adoption, prefill resumes at that checkpoint and may
 process the full configured chunk, so later checkpoint positions can shift
 relative to the original request's chunk boundaries. A match pins both its
@@ -188,22 +340,261 @@ capture remain disabled until that ring holds a complete attention window.
 Full-attention drafters still require their entire prefix; their admission behavior
 is unchanged.
 
+Admission charges an adopted retained block against reclaimable capacity only when
+that block is actually in the prefix cache's reclaimable set. Fixed-state and draft
+checkpoint leases protect their complete physical ancestry from reclamation. Such a
+protected block already occupies committed pool capacity and is not charged again;
+an exact-fit request may therefore adopt it and reserve the remaining free blocks.
+Unleased retained blocks remain charged so selecting one request cannot let a later
+request plan against capacity that the first request's adoption has protected.
+
 The implementation applies only to newly admitted requests and does not splice
-a prefix into resident continuation turns. It still rejects target
-sliding-window KV rings and auxiliary caches that mirror every target block when
-`prefix_caching` is explicitly set to `true`. Existing configurations that omit
-the setting keep loading with caching disabled for those layouts, and builders
-emit an explicit `false` opt-out. A fixed-size Engine-hosted auxiliary pool
-can coexist with target prefix caching. For a windowed DFlash 2 drafter, one
+a prefix into resident continuation turns. For target sliding-window paged models,
+explicit `prefix_caching: true` retains every layer in full-sequence paged storage
+instead of a mutable ring. Both block-table inputs use the same physical block IDs;
+the model's sliding attention mask is unchanged. This costs more KV memory per
+retained token but allows reuse at every complete block, including prefixes older
+than a ring could retain. Omitting the setting or setting it to `false` preserves
+ring storage with prefix caching disabled. Builders emit an explicit `false`
+opt-out for these models.
+
+Auxiliary caches that mirror every target block are still rejected when caching
+is explicitly enabled, and default to caching disabled when the setting is omitted.
+A fixed-size Engine-hosted auxiliary pool
+can coexist with target prefix caching. For a windowed DFlash 2 drafter, an
 optional ring checkpoint can be attached to the exact indexed target boundary
 after its fixed-state checkpoint and the complete drafter proposal succeed.
-The ring is restored into newly allocated drafter blocks before a cached
-request joins at a nonzero position. An unleased older ring checkpoint may be
-replaced at a later boundary without evicting target blocks or fixed state.
+The ring is restored into newly allocated drafter blocks before a cached request
+joins at a nonzero position.
+
+### Tiered snapshot cache
+
+Snapshot storage uses one Engine-owned policy, not separate limits keyed by
+`decoder`, `dflash2`, `mtp`, or other component names. Configure
+`engine.dynamic_batching.snapshot_cache` with any combination of
+`vram_bytes`, `ram_bytes`, and `disk_bytes`; within an explicit object, omitted
+limits default to zero and disable that tier. Omitting the entire object preserves
+legacy device-resident DFlash snapshots, count-limited and reserved from the
+existing cache budget. An explicit empty object or all-zero budgets disable
+snapshot storage on CPU/CUDA without disabling target prefix caching.
+`max_snapshots`, when present, is the shared count cap, not a per-component
+allowance. It is unbounded when omitted. Separate Engine instances have
+independent policies; these are not process-wide limits.
+
+**Current integration: DFlash snapshots only.** DFlash ring payloads are the
+only component registered with this policy today. These limits do not cover retained
+target KV, hybrid fixed-state checkpoints, active drafter rings, or total process
+memory. Target KV and fixed state remain device-resident under their existing
+budgets. CPU execution supports explicit RAM and disk tiers; explicit VRAM
+storage requires CUDA.
+
+WebGPU keeps snapshots device-resident and ignores all three tier byte budgets.
+When nonzero byte budgets are configured, each Engine logs one warning if warning
+logging is enabled. The byte limits are not enforced on WebGPU; `prefix_caching`,
+`dflash2_max_snapshots`, and `max_snapshots` still apply. Snapshot capacity remains
+bounded by the existing device cache reservation, and unleased snapshots are
+reclaimed at the count limit. Target KV and fixed-state reclamation are unchanged.
+
+```json
+{
+  "engine": {
+    "dynamic_batching": {
+      "prefix_caching": true,
+      "dflash2_max_snapshots": 8,
+      "max_snapshots": 8,
+      "snapshot_cache": {
+        "vram_bytes": 104857600,
+        "ram_bytes": 209715200,
+        "disk_bytes": 419430400
+      }
+    }
+  }
+}
+```
+
+`dflash2_max_snapshots` defaults to one and adds a DFlash-only count ceiling
+across all tiers. Zero disables DFlash snapshots without disabling target prefix
+caching. The DFlash count is also capped by the hybrid fixed-state checkpoint
+capacity (`max_batch_size`). `max_snapshots` is an optional additional count cap
+shared by every producer; zero disables all snapshot publication. Neither count
+increases a tier budget or enables storage when an explicit policy sets all byte
+budgets to zero on CPU or CUDA. Without an explicit policy, device-resident
+snapshots retain the previous residency and count defaults, but not the previous
+eviction order (see below). WebGPU does not require byte budgets.
+Snapshot counts must be integers from zero through 2147483647; byte limits must
+be non-negative exact integers no greater than 9007199254740991 and fit the
+platform's `size_t`. Prefix caching may be enabled without enabling any draft
+snapshot tier.
+
+The Engine owns one `PrefixSnapshotCache` and supplies it to snapshot producers;
+the drafter does not create a private policy. `PrefixCache` owns prefix identity.
+New snapshots enter the fastest tier with available capacity. Under pressure,
+unleased least-recently-used payloads are demoted from VRAM to RAM to disk;
+when no lower tier can retain them they are evicted. Committed restoration
+refreshes eviction recency; it does not promote a payload to a faster tier.
+At the count cap, the oldest unleased snapshot is replaced, reusing compatible
+storage in its current tier without reusing the old checkpoint identity. A leased snapshot cannot
+move or be overwritten, and its bytes continue counting against its tier.
+If all suitable capacity is leased, publication is refused and counted in the
+existing prefix-publication refusal metric.
+
+**Intentional behavior change:** LRU replacement also applies when `snapshot_cache`
+is omitted. The previous descendant-before-ancestor preference is not retained:
+an older, shorter checkpoint can be evicted before a newer descendant during
+chunked prefill. A target-prefix hit at that shorter boundary can therefore lack
+a draft snapshot and require draft-context rebuilding. This policy favors recent
+capture/restore activity, not prefix breadth; it is not a claim that LRU wins for
+every branching workload. Target-prefix identity and target KV eviction are unchanged.
+
+VRAM snapshot capacity is rounded down to whole rings and reserved from the
+shared target/drafter KV budget before target sizing. It is reduced when necessary
+to preserve at least one target block, for both `num_blocks` and automatic sizing.
+RAM and disk do not consume that GPU reserve. CUDA RAM payloads use pinned memory.
+CPU/CUDA capture and restore transfer only selected ring blocks and synchronize before
+publication. WebGPU stages each backing buffer once per layer, gathers/scatters
+the selected blocks on the CPU, and uploads the destination once. Tier moves copy into separately budgeted destination storage before
+releasing the source. A failed move leaves its source intact; completed independent
+demotions remain valid even if a later operation fails. If a disk demotion fails
+operationally, the policy then evicts that unleased source when no usable lower
+tier remains, allowing admission to continue.
+
+Pinned allocation and release (`cudaHostAlloc`/`cudaFreeHost`) can implicitly
+synchronize and take milliseconds for large rings. They occur on the serving
+path during cold capture, demotion, eviction and lazy transfer-scratch creation;
+compatible count replacement reuses storage but does not eliminate these costs.
+Allocations use `cudaHostAllocPortable` for CUDA-context portability. These
+operations must run outside an active CUDA stream capture. This implementation
+does not preallocate the RAM tier or provide a pinned-buffer pool, and byte
+budgets are not allocation-latency guarantees.
+
+Disk spill files are uniquely owned, Engine-local temporary payloads, never a persistent
+cache. `directory` optionally names an existing parent directory; otherwise the
+system temporary directory is used. With disk enabled, Engine construction
+resolves this path to an absolute path, checks that it is an existing directory,
+and creates, writes and removes a private probe payload to check usability.
+Configuration errors name `engine.dynamic_batching.snapshot_cache.directory`;
+later working-directory changes do not redirect spill. Only the manager's own generated files and
+directories are removed after their final owners release them. A lease may outlive
+the drafter, including its disk storage. A process crash can leave `oga-prefix-*`
+directories behind. There is no startup sweep because another live Engine may own
+them; operators may remove confirmed orphan directories only after ensuring that
+no live process or outstanding owner is using them. Disk transfer scratch is bounded to
+one reusable 1 MiB buffer per cache manager and is separate from retained payload budgets;
+tensor/index metadata and filesystem allocation overhead are also excluded.
+Adjacent disk ranges share transfer-buffer batches instead of synchronizing per
+ring block, and capture flushes once before publishing the complete snapshot.
+Disk I/O remains synchronous and can increase inference-loop latency; budgets
+are capacity limits, not latency guarantees.
+Explicit RAM/disk tiering is a **latency-tolerant opt-in**. Allocation, copies,
+disk I/O, synchronization and source release run on the Engine loop and can
+delay unrelated decoding requests. No bounded pinned-buffer pool is provided.
+An operational disk allocation or demotion failure disables further disk writes
+for that Engine and logs a warning when warning logging is enabled. Recreating the
+Engine is required to re-enable disk writes. Existing disk snapshots remain readable,
+but their storage is not reused for new captures. RAM/VRAM admission can reclaim
+unleased victims rather than repeatedly retrying the failing disk path; leased
+payloads remain protected. A disk-only policy refuses subsequent captures.
+Other operational disk failures refuse capture or discard the failed restore snapshot,
+without clearing healthy drafter context or spending its proposal-failure budget.
+Contract violations and device failures still propagate.
+Cleanup failures are logged as warnings.
+Spill directories request owner-only filesystem permissions. Windows inherits
+the parent directory's ACL, so a custom parent must restrict access appropriately.
+
+Runtime-profile overlays accept `prefix_caching`, `dflash2_max_snapshots`,
+`max_snapshots`, and `snapshot_cache`. A profile's snapshot-cache object replaces
+the base object completely, so omitted tier limits disable those tiers in that
+profile.
+
+CUDA add-ons must be built for the same device-interface version as the core
+library. Install matching core/add-on packages together; older add-on binaries
+are rejected rather than loaded with an incompatible C++ layout.
+
+#### Snapshot diagnostics
+
+Enable the existing GenAI logger with `SetLogBool("enabled", true)` to receive
+`engine_snapshot_cache` events. No separate logging option or public metrics
+interface is required. Storage events report effective tier limits, current
+retained payload bytes, the shared count ceiling, and whether legacy
+device-resident storage is selected. Tier numbers are `0` for VRAM, `1` for RAM,
+`2` for disk, and `3` when no entry is associated with an event.
+For device-resident storage, count limits and the existing cache reservation
+apply instead of the tier byte limits.
+
+`allocated`, `reused`, `demoted`, `evicted`, and `discarded` describe storage
+decisions. `refused` distinguishes disabled counts, payloads too large for any
+tier, and capacity protected by component-count, shared-count, or tier leases.
+`move_staged` reports occupancy while both source and destination are charged;
+`demoted` reports occupancy after source release. These bytes exclude transfer
+scratch, metadata, allocator overhead, and active inference memory.
+Successful DFlash `capture` and `restore`, and storage `demoted` events, include
+host elapsed microseconds through transfer synchronization. Capture timing also
+includes admission and any required demotions; these are synchronous operation
+times, not independent disk bandwidth or end-to-end request latency measures.
+
+See [prefix-cache validation](prefix-cache-validation.md#snapshot-tier-validation) for snapshot-tier testing and benchmark instructions.
+
+The generic configuration and shared Engine ownership establish the policy for
+future snapshot-producing components without creating component-specific controls.
+The storage manager is deliberately independent of token identity and tensor
+semantics. Integrating retained target KV and fixed state requires shared
+accounting and coordinated eviction even if those payloads remain in VRAM.
+Offloading them additionally requires a coordinated
+checkpoint bundle, physical-block reallocation on restore, per-component lease
+protection, and transactional publication of the complete bundle. This PR does
+not integrate or offload those components, and the configured budgets do not yet
+bound the entire retained prefix.
+
 If the matching draft checkpoint is absent, the request retains the full
-target hit and runs target-only until the windowed drafter has rebuilt its context.
+target hit, but cannot immediately resume DFlash drafting at that boundary.
+An eligible windowed drafter with a free ring can start ingesting auxiliary
+hidden states from target tokens executed **after** the cached boundary. It
+does not replay or reconstruct the skipped prefix. DFlash drafts remain disabled
+until those newly executed tokens cover its required context window
+(`model.dflash2.sliding_window + model.dflash2.block_size`). Only then can
+drafting resume, subject to the normal turn eligibility and generation limits.
+A short request may finish before reaching that threshold and use no DFlash
+drafts at all. A matching snapshot avoids this warm-up.
 Full-attention DSpark remains target-only
 after a nonzero-position prefix hit.
+
+The selected runtime profile overrides the base configuration (default `1`),
+including an explicit `0` to disable drafter snapshots. The Engine allocates its
+snapshot pool from the resolved GenAI configuration; there is no separate
+Engine-construction API override. This is Engine-wide resource policy, not a
+property of the ONNX graph or a per-session, per-Request, or per-Turn setting.
+The pool is not resized during active request processing.
+
+For example, retain up to four snapshots on a larger device while preserving
+the one-snapshot base count ceiling. Both configurations explicitly enable
+prefix caching and share a RAM byte budget, which can further limit the count:
+
+```json
+{
+  "engine": {
+    "dynamic_batching": {
+      "num_blocks": 512,
+      "max_batch_size": 8,
+      "prefix_caching": true,
+      "dflash2_max_snapshots": 1,
+      "snapshot_cache": {"ram_bytes": 1073741824}
+    }
+  },
+  "runtime_profiles": [{
+    "id": "larger-snapshot-pool",
+    "eligibility": {"minimum_total_device_memory_bytes": 34359738368},
+    "overlay": {
+      "engine": {"dynamic_batching": {"dflash2_max_snapshots": 4}}
+    }
+  }]
+}
+```
+
+For operator-run boundary, request-order, branching, lease, cancellation, and
+bounded-pool checks on the intended GPU stack, see
+[Prefix-cache validation](prefix-cache-validation.md). The dedicated runner
+compares exact greedy output against cache-disabled references and checks
+post-release reuse progress independently of timing.
 
 Without dynamic batching, the engine uses the older static batching path. Static batching allocates and advances a batch as a unit. It does not use the transaction flow described below.
 
@@ -594,8 +985,10 @@ token budget. The proposal width an automatic drafter aims for is model/Engine c
 The request must already belong to the Engine, have completed prefill, and be ready to decode.
 Verification supports greedy target selection and random target sampling with a positive `top_k`;
 proposals remain deterministic. Whole-turn guidance, a `repetition_penalty` other than 1,
-no-repeat-ngram processing, or a not-yet-met minimum generated token count makes a turn
+or no-repeat-ngram processing makes a turn
 ineligible for drafts, because the verification rows do not reproduce those logits processors.
+Minimum generated-token counts are supported: each target verification row, including the
+correction/bonus row, masks EOS using its own logical sequence position before argmax or sampling.
 Delimited guidance permits drafts outside its constrained regions: proposals stop before the
 opening marker, drafts pause inside the region, and resume after the closing marker. Automatic
 MTP drafting remains disabled throughout a delimited turn. Eligibility is per turn: the next turn
@@ -637,6 +1030,15 @@ loading or running that head. The flag does not affect an `MtpGenerator` constru
 the application. Server authors should size capacity and handle failures against the following
 behaviors.
 
+**Selected logits.** An MTP graph can expose an optional
+`model.mtp.inputs.logits_indices` input containing int32 packed-row indices.
+Gathering those hidden-state rows before the vocabulary projection avoids
+computing logits for auxiliary cache-update rows that drafting does not sample.
+This binding belongs to the head and is not inherited from
+`model.decoder.inputs.logits_indices`; target and head graphs may select logits
+independently. Target verification must still project every required draft and
+correction/bonus row.
+
 **Auxiliary memory accounting.** The head is a second paged pool that always holds the same block
 count as the target pool, so both are sized from one budget. With
 `engine.dynamic_batching.gpu_utilization_factor`, the auxiliary bytes per block are folded into the
@@ -644,6 +1046,12 @@ capacity computation. With an explicit `engine.dynamic_batching.num_blocks`, tha
 combined budget: the target pool is scaled down so target plus head together cost what the
 configured block count would have cost without a head. A `num_blocks` too small to leave at least
 one block for each pool is rejected at Engine construction.
+
+**Head-local contracts.** The projected head clears target-only selected-logits inputs
+and compact replay capacity. Its disabled fixed-indexer payload capacity is resolved from
+the head's actual session outputs, not the target manifest. Resolution still validates
+the full state, dtype, buffer, and capture-control bindings, and malformed metadata does
+not publish a partial configuration. Enabled target replay contracts remain unchanged.
 
 **Failure isolation.** The target decode is mandatory; MTP drafting is optional acceleration. A
 recoverable head failure (cache pressure, shape mismatch, binding or session error) releases only
@@ -840,12 +1248,14 @@ cumulative_sequence_lengths  boundaries of each request in the flat token array
 past_sequence_lengths        committed KV length and write position for each request
 ```
 
-When the graph declares `position_ids`, it also builds one absolute int64 position per packed
-token. Request row `i` starts at its committed `past_sequence_lengths[i]`, so a token at local
-offset `j` receives position `past_sequence_lengths[i] + j`. Models may consume either `[num_tokens]`
-or Qwen MRoPE `[3, num_tokens]` geometry; the latter repeats each text position across all three
-MRoPE axes for the text-only decoder path. Multimodal per-axis coordinates are outside the Engine
-contract. The StepPlan row, token count, and packed offset are validated before this optional
+When the graph declares `position_ids`, it also builds int64 positions for each packed
+token. For text-only history, a token at local offset `j` receives position
+`past_sequence_lengths[i] + j`. Models may consume either `[num_tokens]` or Qwen MRoPE
+`[3, num_tokens]` geometry; the latter repeats each text position across all three axes
+for text-only history. The packed vision path instead derives per-axis coordinates from
+retained image grids, including the resulting offset for subsequent text and generated
+tokens. Cache offsets and token budgets still count expanded decoder rows, not MRoPE extents.
+The StepPlan row, token count, and packed offset are validated before this optional
 tensor is copied to the model-input device.
 This representation allows one model invocation to mix requests with different sequence lengths and different amounts of pending work. A step can contain a long prefill for one request and single-token decoding for other requests without padding every request to the same query length.
 
@@ -859,10 +1269,13 @@ The first two values are upper bounds. The third is a lower bound on the longest
 
 Pure-decode steps and mixed prefill/decode steps may select different numerically valid CUDA
 backends. Floating-point reassociation can therefore flip a near-tied greedy token when batch
-composition changes even though request state and continuation are correct. Qualification should
-use continuation/replay invariants, tolerant logits or top-k comparisons, and task-level quality;
-bitwise token equality across batch compositions is available only when every selected backend is
+composition changes even though request state and continuation are correct.
+Bitwise token equality across batch compositions is available only when every selected backend is
 batch-invariant.
+
+After logits processing, greedy selection must return a token with a maximum score in the current
+row. Selecting a lower-scoring token or using results from an earlier step is a correctness error,
+not expected floating-point variability.
 
 ### 9. Run the decoder once
 
@@ -879,7 +1292,7 @@ For eligible decode shapes, the decoder may capture or replay a CUDA graph. Pref
 `ScheduledRequests::GenerateNextTokensForTransaction()` then:
 
 1. Applies each request's logits processors to its own logits row.
-2. Samples a next token using the scheduler-owned batched sampler when supported, otherwise uses the per-request search path. A greedy request that verified drafts this step skips sampling: drafted requests run without logits processors, so the argmax that verification already computed for the row after the accepted prefix is committed directly.
+2. Samples a next token using the scheduler-owned batched sampler when supported, otherwise uses the per-request search path. A greedy request that verified drafts this step skips sampling: verification already applied the row-specific EOS floor before computing argmax, so the token for the row after the accepted prefix is committed directly.
 3. Runs the per-request sequence and EOS handling.
 4. Produces a `RequestStepResult` for each request.
 
@@ -902,11 +1315,17 @@ Requests that appended a token or became complete produce staged events. Events 
 
 The commit order in `Engine::RunDynamic()` is deliberate:
 
-1. Prepare the reservation: validate every ownership and capacity precondition of both sub-reservations. A fallback reservation copies each fixed staged output into its slot's inactive persistent bank. A direct reservation has already written full-step outputs there; if speculative verification keeps only a prefix, compact replay reconstructs the accepted state from the untouched active bank into that same inactive bank. Preparation synchronizes without publishing anything. This is the last step that performs fallible device work, and a failure here is fatal even though committed state is intact, because a partially written inactive bank cannot be proven consistent for a retry. The publish steps below do only host-side work; they can still throw on a state-machine misuse (for example a double publish), and the Engine treats any such throw as fatal too.
+1. Prepare the reservation: validate every ownership and capacity precondition of both sub-reservations, stage full-step fixed outputs in inactive banks as needed, and synchronize the preparation work without publishing anything. If speculative verification keeps only a prefix, compact replay reconstructs the accepted state from the untouched input snapshot into the inactive bank; this work may be queued for a later pool operation instead of executing during preparation. A preparation failure is fatal even though committed state is intact, because a partially written inactive bank cannot be proven consistent for a retry. The publication operations below do only host-side work; they can still throw on a state-machine misuse (for example a double publish), and the Engine treats any such throw as fatal too.
 2. Commit the request search checkpoints and sampler checkpoint.
 3. Publish the reservation: paged occupancy first, then the fixed bank flip.
 4. Commit each request's lightweight bookkeeping.
 5. Publish the staged events.
+
+Publication can precede physical execution of deferred replay. Before a later reader can consume
+the published bank, a pool operation executes replay or enqueues it ahead of that reader on the
+same device stream. If deferred replay fails, the triggering operation throws and the pool becomes
+unhealthy and unusable; already published metadata is not rolled back, and subsequent state
+readers are rejected rather than allowed to consume unreplayed state.
 
 Everything after step 1 crosses the commit boundary and is never retried. This is a fail-stop
 publication interval: a throw is fatal and the Engine is not used again; already published
@@ -914,7 +1333,7 @@ components are not rolled back.
 
 Committing the cache reservation:
 
-- Flips each selected fixed slot to its freshly prepared bank, advances its state generation and committed token boundary, and publishes provisional fixed-slot ownership (`FixedStateReservation::PublishCommit()` is `noexcept`).
+- Flips each selected fixed slot to its prepared or replay-pending bank, advances its state generation and committed token boundary, and publishes provisional fixed-slot ownership (`FixedStateReservation::PublishCommit()` is `noexcept`).
 - Adds reserved blocks to existing block tables.
 - Adds provisional block tables for newly admitted requests.
 - Advances committed cache-slot counts.
@@ -1021,7 +1440,7 @@ override it explicitly.
 `no_repeat_ngram_size` is only implemented by the CPU search, so a nonzero value is rejected at
 admission by a core-owned capability predicate keyed by the scoring device type, rather than
 throwing after the model has already run. A `repetition_penalty` other than 1, a nonzero
-`no_repeat_ngram_size`, or an unmet minimum also disables speculative drafting for that turn,
+`no_repeat_ngram_size` also disables speculative drafting for that turn,
 because verification rows do not reproduce those logits processors.
 
 `min_generated_tokens` masks the end-of-sequence token until the turn has generated that many
@@ -1155,14 +1574,11 @@ linear in how deep into the turn it already is. This follows from the required p
 speculative draft verification can observe up to `kMaxGeneratedTokensPerStep` tokens for one
 request in a single step rather than the ordinary path's one, but this does not change the bound
 above: it is already stated in terms of the replayed turn depth (the checkpoint the step began at),
-not the number of tokens observed within the failing step itself. This repository does not include
-a replay benchmark or publish a measured per-token constant. A Request many thousands of tokens
+not the number of tokens observed within the failing step itself. A Request many thousands of tokens
 into a long turn pays a proportionally larger replay on every retryable abort that touches it, and
 a batch with several such requests pays that cost once per request, every time. No batching or
-amortization across requests exists for this replay today. Rollout qualification for stop strings
-at scale should measure this cost with representative tokenizers and turn depths, and monitor
-observed abort frequency alongside typical current-turn depth rather than assuming replay cost is
-negligible.
+amortization across requests exists for this replay today. Recovery runs synchronously on the
+Engine owner thread, so repeated aborts of deep turns can delay unrelated requests.
 
 Stop strings require an Engine configured for dynamic batching. Static batching completes generation
 through `ScheduledRequests::GenerateNextTokens`, a non-transactional path that cannot stage, roll
@@ -1273,14 +1689,10 @@ position belongs to that result. The counters are advanced while verification re
 proposal because `token_appended` and `finish_reason` alone cannot distinguish budget exhaustion
 from a confirmed final draft or a rejected proposal.
 
-**CUDA batched-commit qualification gap.** The per-stage loop's `can_batch_commits` branch (used
+**Token commit paths.** The per-stage loop's `can_batch_commits` branch (used
 when every active request's `Search` supports device-side batched commit) and the non-batched
 fallback use different token-commit mechanisms, then call the same stage-finalization code for
-counters, checkpoints, promotion, stop truncation, and result publication. The CPU test doubles
-this document's tests run against cannot produce a `Search` that supports batched commit, so no
-automated test in this repository actually exercises the device-side commit mechanism with decoded
-stop strings. Treat that branch as requiring real CUDA qualification before relying on it in
-production; shared finalization does not prove that the preceding device commit has been tested.
+counters, checkpoints, promotion, stop truncation, and result publication.
 
 ## Rollback and failure handling
 
@@ -1299,8 +1711,7 @@ Step 1 restores every request in the failing batch, not just one; for a stop-ena
 staged an observed token this step, restoring its search state also replays its stop-string
 controller (see "Decoded stop strings" above), so a batch containing several stop-enabled requests
 deep into their turns pays that per-request replay cost once per request on every retryable abort --
-see that section's "Recovery cost bound" for the resulting complexity and rollout-qualification
-guidance.
+see that section's "Recovery cost bound" for the resulting complexity and owner-thread latency.
 
 After a successful rollback, committed request state and committed cache state match the state
 before the step began. `Run()` translates `RetryableBatchAbort` into a `Retryable` event and
@@ -1484,7 +1895,13 @@ The resulting per-block cost feeds `ComputePagedBlockCapacityFromBytes()`, which
 
 Scale caches follow their layer's mapping. A windowed layer's scale tensor is allocated with `num_window_blocks` leading entries and a full-attention layer's with `num_blocks`, matching that layer's key and value tensors, and each is indexed by the block table that layer already uses — the windowed block table for ring layers, the primary block table for the rest.
 
-The two budgets stay separate in the same way. `PagedKeyValueCacheBytesPerBlock()` skips windowed layers entirely, and the windowed reservation is computed as `num_window_blocks * BytesPerBlock(layer)` per windowed layer, which includes that layer's scale bytes. Windowed storage is taken off the top before the full-attention block count is derived, so a quantized windowed layer shrinks the ring's budget rather than the full-attention pool's per-block cost.
+In ring mode, the two budgets stay separate in the same way. `PagedKeyValueCacheBytesPerBlock()` skips ring-backed windowed layers, and the windowed reservation is computed as `num_window_blocks * BytesPerBlock(layer)` per windowed layer, which includes that layer's scale bytes. Windowed storage is taken off the top before the full-attention block count is derived, so a quantized windowed layer shrinks the ring's budget rather than the full-attention pool's per-block cost.
+
+With explicit `prefix_caching: true`, there is no separate ring allocation:
+windowed payloads and scales use full paged storage and are included in
+`PagedKeyValueCacheBytesPerBlock()`. Automatic memory sizing therefore yields
+fewer blocks for the same byte budget. An explicit `num_blocks` still specifies
+the number of target blocks, so keeping that count increases allocated bytes.
 
 ## Sliding-window paged layers
 
@@ -1495,6 +1912,8 @@ cache through the full context. This path is enabled only when all of the follow
 - `model.decoder.inputs.block_table_windowed` is configured and is an input of the exported model.
 - `search.chunk_size` is configured to a value greater than zero.
 - At least one decoder layer keeps the full sequence.
+- `engine.dynamic_batching.prefix_caching` is omitted or `false`. Explicit `true`
+  uses full paged storage for all layers to make retained prefix blocks immutable.
 
 Models without the windowed block-table input continue to use the normal full-sequence paged cache
 for every layer. The layer indices must be within the decoder layer range and the window size must be
@@ -1536,9 +1955,45 @@ positive fixed extent before allocating device storage. It also rejects a zero b
 two different fixed batch extents on input and output,
 dynamic or mismatched non-batch axes, and dtype mismatches. Every dtype and
 per-request row size is derived from that validated geometry, and state is
-allocated with the model state-device allocator. The initial implementation
-supports CPU and CUDA; other devices are rejected until they provide the required
-offset-copy and completion guarantees.
+allocated with the model state-device allocator. Devices are admitted only when
+they provide the allocation, fill, ranged-copy, tensor-binding, and synchronization
+semantics needed to publish state transactionally. CPU, CUDA, and WebGPU satisfy
+that contract. CPU and CUDA bind offset tensor views directly; WebGPU uses staging
+bindings. Compact partial-acceptance replay is device-native on CUDA. WebGPU's
+`ReplayStateUpdates` processes descriptors in their supplied order: FP32
+GatedDeltaNet descriptors with one shared backing owner for their
+decay/key/delta capsule sections invoke ORT's `com.microsoft::GatedDeltaNetStateReplay`
+(version 1). Convolution descriptors and FP32 recurrent descriptors with separate
+capsule backing owners retain CPU staging, `ReplayStateUpdatesOnCpu`, and upload.
+Each descriptor finishes before the next one reads its inputs. Non-FP32 recurrent
+state and unknown replay kinds are rejected; the CPU recurrent reference also
+requires FP32. Invalid GPU views, helper-session creation errors, and failed ORT runs
+propagate without retrying on CPU. Consecutive CPU-fallback descriptors share one
+host mirror per backing, observe earlier writes, and upload each modified backing
+once, preserving untouched rows and bytes. Those mirrors are uploaded before a GPU
+descriptor runs and refreshed after it, so mixed replay preserves device ordering.
+
+The replay invocation remains private to the WebGPU device interface.
+The device owns its lazily created helper session, cloned from the fully configured
+allocator-initialization session options, with graph capture disabled. This first
+version supports context 0 only and requires an ORT build containing the operator.
+Full backing allocations are bound as rank-1 tensors; absolute logical byte offsets
+from `DeviceSpan::ByteOffset()` are converted to FP32-element metadata offsets.
+The output is prebound to the same inactive destination allocation as its input.
+The operator's checked completion makes a successful helper return a GPU-completion
+boundary; ORT failures propagate to the caller. The helper serializes its own runs,
+but callers must order target-session work before replay and keep borrowed
+buffer owners alive through the call. There is one helper `Session::Run` and one
+checked-completion boundary per recurrent descriptor, with no batching or GPU
+convolution replay. It does not publish or flip a state bank. `PrepareCommit` queues
+compact replay, and `PublishCommit` publishes bank metadata before the next pool
+operation flushes that replay ahead of all state readers. Preparation failures leave
+active banks unchanged and fail the reservation. A deferred replay error propagates
+from the next reader and marks the pool unhealthy, preventing further reservations
+or checkpoint capture from observing incomplete state.
+The source must be the incoming state before capsule capture, and capsule geometry
+and original capture capacity must match the producer; `kept_count` selects only
+the leading transitions, not a different capsule layout.
 
 Each resident request owns a stable slot identified by request identity and an
 allocation generation. A released and reused slot receives a new generation, so
@@ -1553,20 +2008,28 @@ allocation surface.
 
 A reservation accepts requests in scheduled row order and exposes ordered handles,
 bindings, and target tokens. A contiguous resident interval binds its active bank
-directly as model input and its inactive bank as model output. If resident banks
+directly as model input and its inactive bank as model output. When
+`search.past_present_share_buffer` is enabled on CUDA, the append-only fixed-indexer key
+input and output instead alias the same buffer; the separately double-buffered
+indexer length remains the publication boundary. If resident banks
 differ, the pool first copies only minority rows into a canonical bank and changes
 their selectors after synchronization; this representation-only normalization does
 not advance request state. New admissions and fragmented intervals gather committed
-or zero state into contiguous model inputs and use distinct staged outputs. No path
-binds an output over visible committed state. The reservation reports its input/output
+or zero state into contiguous model inputs and use staged outputs. The indexer key
+uses one shared staging buffer under the same option; other state keeps distinct
+input and output staging. No mutable visibility metadata is bound over visible
+committed state. The reservation reports its input/output
 binding footprint through the retained `PlannedStagingBytes` API; direct views overlap
 storage already counted by `PersistentBytes`.
 
-Every tensor is backed by two persistent `[capacity, row...]` banks, and each slot
+Every tensor is normally backed by two persistent `[capacity, row...]` banks, and each slot
 records which bank is currently active (holds its visible committed state). This
 double buffering lets the commit be split into three phases so that a composite
 Engine transaction can validate and stage all of its resources, synchronize once,
-and then publish them at a single infallible boundary:
+and then publish them at a single infallible boundary. The fixed-indexer key is the
+one exception when sharing is enabled: `PackedSparseAttentionIndexer` only appends
+keys, while its separately banked state length determines the committed prefix. A
+discard can therefore leave unreferenced appended bytes without exposing them.
 
 - **`ValidateCommit()`** is `const`, mutates nothing, and performs every host-side
   precondition check before device work begins. It proves every checkpointed slot
@@ -1574,23 +2037,26 @@ and then publish them at a single infallible boundary:
   left it (ownership, identity, generation, and reservation id), that publishing it
   cannot overflow a generation, and that no row regresses below its slot's
   `committed_tokens`.
-- **`PrepareCommit()`** is the fallible device-completion phase: it re-validates,
-  copies fallback outputs into the **inactive** bank, and synchronizes. A partially
-  accepted compact update over a direct output is replayed into the inactive bank by
-  the pool's next operation (`Reserve()`, `CapturePrefixCheckpoint()`, or the next
-  `PrepareCommit()`), which enqueues it ahead of every later reader of the banks on
-  the same stream, so the device runs the replay while the host prepares the next
-  step; discarding the prepared reservation drops it. A fully accepted direct
-  output needs no state copy. The active (visible) bank is never touched, so a
-  failure leaves committed state exactly as it was; it drains the device and marks
-  the pool unhealthy because the inactive banks may be left partially written. A
-  deferred replay that fails to launch also marks the pool unhealthy. The
-  reservation becomes `Prepared`.
+- **`PrepareCommit()`** is the fallible preparation phase: it re-validates,
+  copies full-step fallback outputs into the **inactive** bank, and synchronizes the
+  work it performs. A partially accepted compact update may instead queue replay
+  from the untouched input snapshot into the inactive bank. The pool's next operation
+  (`Reserve()`, `CapturePrefixCheckpoint()`, or the next `PrepareCommit()`) executes
+  that replay before allowing a later reader to proceed, or enqueues it ahead of the
+  reader on the same device stream. Discarding the prepared reservation drops its
+  deferred replay. A fully accepted direct output needs no state copy. Preparation
+  does not write the active (visible) bank, except for append-only shared indexer-key
+  writes bounded by separately published committed lengths, so a failure during preparation leaves
+  committed state exactly as it was; the pool drains the device and marks itself
+  unhealthy because the inactive banks may be left partially written. A
+  deferred replay that later fails also throws and marks the pool unhealthy, even
+  if publication has already occurred; subsequent state readers are rejected. The
+  reservation becomes `Prepared` without necessarily executing deferred replay.
 - **`PublishCommit()`** is `noexcept` and performs no fallible or device work: it
-  flips each slot to its freshly written bank, advances `state_generation`, sets
+  flips each slot to its prepared or replay-pending bank, advances `state_generation`, sets
   `committed_tokens` to the row's `target_tokens`, and publishes provisional
-  ownership. Because a prepared commit only wrote invisible banks, its output is
-  invisible until this flip.
+  ownership. Ownership and committed-token metadata become visible at this flip;
+  physical replay may still be pending.
 
 `Commit()` is a convenience wrapper that runs the three phases in order. `Discard()`
 is valid from either `Reserved` or `Prepared`: it preserves every resident slot's
@@ -1616,7 +2082,8 @@ bank is written by the commit that publishes it before it is ever gathered, and 
 slot's inactive bank is only ever written (never read) before it becomes active, so
 the persistent banks never need construction-time zeroing. The pool therefore does
 not zero on release, and does not zero gather or staged tensors. It reports its
-persistent bytes (both state banks and both staging buffers), reusable zeroing scratch bytes, and
+persistent bytes (normally both state banks and both staging buffers; one of each for
+a shared indexer key), reusable zeroing scratch bytes, and
 the active reservation's input/output binding footprint separately. The two-bank design trades roughly double
 the persistent footprint for a publish that is a host-only bank flip with no device
 copy, which is what lets `PublishCommit()` be `noexcept`.
@@ -1749,6 +2216,12 @@ Because these buffers are allocated after the cache has chosen its block count, 
 their bytes from the automatic free-memory budget before the paged cache is sized. An explicit
 `engine.dynamic_batching.num_blocks` is left alone: pinning the pool means owning that budget.
 
+Before allocation or byte reservation, the shared graph-buffer planner rejects zero or
+overflowing packed batch-row counts before applying the scheduled-token cap, and rejects
+position-plane products exceeding `int64_t` tensor dimensions after applying the cap.
+These checks protect both sizing paths and do not change graph capture behavior for valid
+configurations.
+
 ### Buffers and lifetime
 
 Graph buffers are allocated once at configured limits and reshaped as static views, so their device
@@ -1852,12 +2325,31 @@ automatic sizing, that pool is allocated before the target measures free memory.
 is explicit, its fixed footprint is instead validated and deducted from the byte budget represented
 by that baseline target block count before either cache pool is allocated.
 A windowed DFlash 2 model with hybrid target prefix caching reserves one
-additional ring's bytes for its optional checkpoint, independent of context
-length. Readers lease the immutable snapshot through admission; replacing it
-cannot overwrite an in-flight adopter. If the budget cannot leave at least one
-target paged block after the auxiliary pool and snapshot reservation, the
-optional checkpoint is disabled and the existing target-only prefix behavior
-is retained. A full-attention block
+additional ring per retained snapshot, independent of context length.
+`engine.dynamic_batching.dflash2_max_snapshots` (default `1`, with `0` disabling
+draft snapshots) caps only DFlash snapshots. The configured VRAM, RAM, and disk
+byte budgets take effect first, and can reduce that count to zero. An optional
+`max_snapshots` applies a further shared count cap without changing any
+component-specific limit.
+
+VRAM snapshots reserve only the whole rings that fit their VRAM byte budget and
+the shared target-cache budget, while preserving at least one target paged
+block. RAM and disk snapshots do not reduce target cache capacity. CUDA RAM
+snapshots use pinned host storage; capture downloads selected ring blocks and
+restore uploads them into a request's active ring. CPU execution uses ordinary
+RAM or disk storage. These transfers add capture and prefix-hit latency, not
+per-token transfers during steady-state decoding.
+
+Readers lease immutable snapshots through admission; replacement cannot move or
+overwrite an in-flight adopter, and leased bytes remain charged to their tier.
+A lease keeps storage alive after the drafter or Engine manager is destroyed.
+Compatible storage is reused only after the previous snapshot's last lease
+ends. Allocation failure leaves target-only prefix reuse available. Without a
+matching draft snapshot, the target prefix still hits, but DFlash cannot draft immediately.
+It can ingest newly executed target tokens into a fresh windowed ring and resume
+drafting only after those tokens fill the required context window; a short
+request can remain target-only throughout. The skipped prefix is not rebuilt.
+A full-attention block
 drafter (DSpark) instead mirrors the target pool: its bytes per target block and its fixed
 query-spill bytes are charged against the same budget before target capacity is selected, using the
 cache element type reported by the graph. That trade is explicit -- a DSpark drafter with the same
@@ -1874,8 +2366,11 @@ ingest-only, because retaining its cache is what lets a later greedy turn resume
 Rewind releases any tracked DFlash/DSpark state, including its cache blocks. On replay, a request
 that was previously sampled or admission-denied can try to join again if its new position-zero
 step is draft-eligible and capacity is available. A nonzero-position hit also joins a windowed
-DFlash 2 drafter when its exact target boundary still has a draft checkpoint and a free ring.
-Otherwise it remains target-only; rewind does not guarantee renewed drafting.
+DFlash 2 drafter immediately when its exact target boundary still has a draft checkpoint and a
+free ring. Without a matching checkpoint, an eligible windowed drafter can claim a free ring but
+must ingest a full required context window of newly executed target tokens before proposing
+drafts. Full-attention DSpark cannot join at a nonzero position without its prior context.
+Rewind therefore does not guarantee renewed drafting.
 
 ## Backpressure and fairness
 
@@ -1932,6 +2427,192 @@ releases the retained state on its owner thread and the closed Request becomes a
 tombstone.
 
 Changes to shared types such as `Request`, `ScheduledRequests`, `ModelExecutor`, or `SimpleDecoder` should be checked against both paths. This document should be updated only where behavior is shared or where the dynamic path changes.
+
+### Static backend that selects its own tokens
+
+The `qwen38_flash_graph` model type (Qwen3.8-Flash CUDA-graph decode with a built-in multi-token-prediction loop: an MTP head
+proposes up to three draft tokens per cycle, a DFlash2 drafter up to seven) runs on the static path through a `ModelExecutor`
+that chooses its own tokens, instead of attaching decoder state with logits. Its state is fixed in-place KV, a
+recurrent-state bank ring and a device-side draft -> verify -> commit loop that cannot be paged or cropped to an arbitrary
+token. The device holds `model.qwen38_graph.max_batch_size` slots (default 1), one resident Request per slot.
+`CreateEngineBackend` (`src/engine/backend_factory.h`) and `CreateQwen38GraphDependencies`
+(`src/engine/qwen38_graph_executor.h`) assemble it:
+
+- MoE offload requires an explicit `session.moe.offload.mode` of `required`, `auto`, `1` or `on` (case-insensitive).
+  A budget alone does not enable offload, matching ORT's disabled default; `disabled`, `0` and `off` preserve that behavior.
+  Only enabled offload changes target-graph selection, synthetic warmup options or session budgets.
+  By default, offload uses a fixed-layout estimate for the Flash-Next NVFP4 package. `ORT_QWEN38_ADAPTIVE_CTX_BUDGET`
+  keeps it on when unset, empty, `1` or `true`, turns it off when `0` or `false`, and makes model creation fail on any
+  other value. The estimate assumes 12 attention layers,
+  two KV heads of 256 channels, one-byte K/V caches, int64 position IDs, and a 128-float index-key row per four positions
+  per layer. It charges 16 KiB per position per request slot, relative to one slot of 33032 positions. These are not bytes
+  measured from the selected graph, and do not account for every state tensor, workspace or allocator overhead.
+  The filename tier estimates include the package's padding:
+
+  | Filename component | Estimated KV positions |
+  | --- | ---: |
+  | `_2k` | 2312 |
+  | `_8k` | 8456 |
+  | `_16k` | 16648 |
+  | `_32k` | 33032 |
+  | `_64k` | 65800 |
+  | `_128k` | 133128 |
+
+  Other names, including `model_dynamic_ctx.onnx`, use the configured `model.qwen38_graph.kv_capacity` for the estimate.
+  The loaded graph remains authoritative for execution capacity. With model logging enabled, adaptive offload reports
+  a capacity mismatch, but cannot resize budgets on an already-created session. Different cache layouts/dtypes or padding
+  require disabling adaptive budgets and configuring suitable explicit budgets; this estimate does not guarantee that a
+  model fits in device memory.
+- The slot count is an integer in 1..8 (`Config::Model::Qwen38Graph::kMaxBatchSize`): the JSON parser rejects any other
+  `max_batch_size` and names the key and the value, and the other settings that can choose the count
+  (`engine.dynamic_batching.max_batch_size`, `search.batch_size`) are held to the same range at model creation instead
+  of being clamped silently. `engine.static_batching` never chooses the count: it configures the Engine's static path in
+  general, which this backend has always ignored, so a package that carries it (with the Engine's default of 4 or a
+  value of its own) keeps its single slot and keeps loading on a stack that cannot serve several. Only a setting that
+  asks for slots opts in. Several slots are served by the batched fold target and only
+  work with: the folded MTP stack (`fold.enabled`), drafted by the DFlash2 drafter (`model.dflash2.filename`) when the stack has an
+  internal head (`fold.head_r2.filename`), whose state and drafting are not slot-addressed; the unified fast prefill, i.e. `prefill.enabled` without a separate dense
+  graph (the prompts are ingested chunk by chunk through the fold target, slot by slot; a configuration with
+  `prefill.enabled` false or with a dense prefill graph is single-slot); a compact-state target (the exporter's
+  `state_update.*` outputs; a ring-bank target with `present_mid*` outputs keeps one bank per row count for the whole batch and
+  is single-slot); and a plane library with the `batched_prep` capability (`qwen38_plane_prep_batched`, which takes the row
+  count and the slot count as arguments) and the `ctx_slot_stride` capability (slot `s` of its `ctx_out` is at word `16 * s`,
+  see the next item). The model checks the first two before the plane library is loaded and any weight is
+  uploaded, the plane capabilities when the library has been loaded and before any weight is uploaded, and the compact-state
+  property on the output names of the target graph, which it reads from the model file (`ReadQwen38OnnxOutputNames`: the
+  protobuf framing of `ModelProto.graph` and `GraphProto.output`, skipping every initializer) before any weight is uploaded
+  too. A model file the reader cannot parse (an ORT-format model, say) is left to the same check on the output names of the
+  target session, which runs as soon as that session exists, before the other sessions and any device state are created.
+  Each failure is a `std::runtime_error` that names the setting. A plane library without `batched_prep` or `ctx_slot_stride`
+  still loads packages with one slot.
+- The fold stack reads the n-gram contexts of the verify rows of every slot from one buffer (`ctx_a`) that
+  `com.microsoft::SpeculativePrefixCommit` takes as its `prefixes` input. The op divides the size of the input by the slot count
+  and reads slot `s` at `s` times that many words, and the engine binds `batch * 16` words (2 words for each of the 8 rows of the
+  largest verify step), so every writer of the buffer puts slot `s` at word `16 * s` (`QWEN38_PLANE_CTX_WORDS_PER_SLOT`)
+  whatever the number of verify rows (3 to 8): the resident and the host-staged paths of `qwen38_plane_prep_batched` do, and the
+  words of a slot past its `2 * rows` are left untouched. The one-slot prep writes slot 0 only. A plane library from before
+  this layout wrote slot `s` at word `2 * rows * s` (the same offset only for 8 rows) and does not report `ctx_slot_stride`:
+  the model refuses it for several slots, because the n-gram context a slot commits would otherwise be read from the wrong
+  words with no error.
+- The fold model takes exactly the four graph inputs of the `SpeculativePrefixCommit` contract of ORT #33474: `fold.ctl`,
+  `fold.ctx_commit`, `fold.ctx_a` and `fold.ptrs`. The engine owns a device buffer for each of them and for nothing else, so
+  when it builds the target it refuses a model with any other `fold.*` input, such as the `fold.ctx_b` of the node of an earlier
+  export, with a `std::runtime_error` that names the input; export the model package again for the contract.
+- The compact `state_update` replay corrects the recurrent, convolution and indexer state of a slot after a partial
+  acceptance. The verify step reads the state bank `k` and writes the state it ends in, after all of its rows, to the other
+  bank `k ^ 1` (the two banks alternate from one cycle to the next); the replay recomputes the state of the rows that were
+  accepted from bank `k`, which the step left untouched, and the updates the step captured, and writes it over the state in
+  bank `k ^ 1`, so it reads and writes different buffers. A `CausalConvWithState` state is replayed in either physical layout,
+  `[batch, channels, history]` (what the exporter writes) or `[batch, history, channels]`: `ValidateQwen38ReplayDescriptor`
+  takes the channel count from the last dimension of the `state_update` value, finds the layout from the dimension of the
+  state that has it, and
+  `MakeQwen38ConvReplayDescriptor` passes it to the plane in `Qwen38StateReplayDesc::layout`. A state with as many steps as
+  channels cannot be told apart and is taken as channel-first. Only a package with a history-first conv state needs a plane
+  library with the `conv_history_first_replay` capability; the model checks it while it builds the target, before any request,
+  and the error names the capability, the state and the library. A channel-first package keeps loading with a library without it.
+- `FixedSlotCacheManager` (`Qwen38GraphCacheManager`, `src/engine/fixed_slot_scheduler.h`) holds one row per slot (`SlotOf`,
+  `ResidentRequestCount`). `FixedSlotScheduler` queues further Requests and replaces a slot as soon as its turn is over, so a
+  short prompt or answer does not wait for a long one, and `CacheManager::SupportsContinuousMultiSlotDecoding()` lets a
+  resident Request continue its turn while others are resident. `RewindToStartOfTurn` releases the slot; a continued turn
+  (`BeginTurn` on the resident Request) and the replay after a rewind re-ingest the whole retained history (through the same
+  chunked prefill as a new prompt), because the look-ahead cycle and the bank ring cannot be rolled back. There is no prefix
+  cache.
+- `Qwen38GraphExecutor::SelectsOwnTokens()` is true. One Engine step is one prompt chunk (the size the device asks for,
+  `Qwen38DecodeDevice::PrefillChunkTokens()`: `model.qwen38_graph.prefill.chunk` when set, otherwise 8192 tokens with the
+  dense prefill (`prefill.enabled`) and 2048 per step through the decode graphs, see `EffectiveQwen38PrefillChunkTokens`; the
+  device clamps it to the capacity of the loaded graph, which a context tier can leave below the configured chunk, so that
+  case is not a configuration error;
+  the decode-graph path needs an even chunk; a step that only advances the prompt delivers no event, so `CancelRequest`
+  stays responsive; the dense prefill state continues across the chunks and is handed over to the decode state in the step that
+  ingests the last one) or one whole cycle (with `fold.enabled`: one CUDA-graph launch per contiguous active-slot interval).
+  The executor tells the device the
+  prompt length of the turn (`Qwen38DecodeDevice::ExpectPrefillTokens`, after `Reset()` and before the first chunk; with
+  several slots `ExpectPrefillTokensSlot(slot, total)`, after `ResetSlot(slot)` and before the first `PrefillChunkSlot` of
+  that slot); the device hands it to the ORT QMoE kernels with every chunk of that turn and drops it at
+  `Reset()`/`ResetSlot()`/`BeginDecode()`/`BeginDecodeSlot()`. The value is state of the device and, with several slots, of
+  the slot: nothing is published through the process environment by the executor, so Engines of different models and slots
+  that ingest their prompts in interleaved chunks never see each other's value. The device itself publishes the QMoE hints
+  (`ORT_QMOE_PREFILL_NEW_TURN`, `ORT_QMOE_PREFILL_TOTAL_TOKENS`, `ORT_QMOE_CURRENT_MAX_COMPACT_EXPERTS`,
+  `ORT_QMOE_PREFILL_HANDOFF_DONE`, `ORT_QMOE_IN_WARMUP`), only for the duration of one ORT Run (`Qwen38OrtEnvScope`, one process-wide lock,
+  the previous values are restored): the values of a prompt chunk are computed from that chunk's slot alone, never kept or
+  max-merged across Runs, and a Run publishes the new-turn and hand-off notices of the slots it serves only (a prompt chunk
+  serves its slot, a batched decode the slots that decode in it).
+  Every Run also carries `ep.cuda.qmoe_in_warmup=1` during synthetic warmup and `0` afterwards; current ORT reads that entry
+  rather than `ORT_QMOE_IN_WARMUP`. Reused run options are updated only when the value changes, including the reset to `0`
+  before live runs. With warmup enabled (the default), the first offloaded target warmup for each direction uses its normal
+  `gpu_graph_id` and captures while the device is muted. Subsequent synthetic warmups use `gpu_graph_id=-1`, including
+  batched shapes: captured replays bypass the per-run control and would otherwise score and promote dummy-token experts.
+  Captured graphs are provider- and thread-owned. Acquiring the device on another thread (a model loaded on one thread and
+  driven by an Engine on another) therefore recreates the capturing sessions and the decode state on the acquiring thread and
+  repeats the muted warmup there before any live request; a thread that reuses an exited thread's operating-system ID still
+  counts as a new thread. Engines on the owning thread reuse its captures. A failed recreation discards the partial state and
+  releases the lease, so the next acquisition retries.
+  With several slots a step advances every slot (`Qwen38GraphSession::StepBatch`): it commits the in-flight batched cycle of
+  the decoding slots, prefills the next chunk of the slots that have not started decoding and enqueues the next batched
+  cycle. The executor declares its step plan via `ScheduledRequests::BeginBackendStep` and stages owned `BackendRowResult`
+  records (`PrefillProgress` and/or `SelectedTokenBlock`, up to `kMaxGeneratedTokensPerStep` candidate tokens) via
+  `ScheduledRequests::StageBackendRow`; `GenerateNextTokens` validates the whole batch before mutating any Request, commits
+  candidates through `Request::CommitExternalTokens` (observing stop strings, EOS, turn limit, and context limit in order),
+  and records `TokenCommitAck` counts (consumed, appended, and staged for events) settled through `TokenProducingSession`
+  before events are published. Stop strings are therefore accepted on this static path; every other static executor still
+  rejects them.
+- The next cycle is enqueued before a step returns, so the GPU runs it while the Engine delivers the previous tokens. A stop
+  string can only be known after delivery, so one cycle may be wasted; the next request and Engine teardown wait for it with
+  `Qwen38DecodeDevice::Drain()`, and so does a rewind of a single-slot device. With several slots a rewind's `ReleaseSlot()` does
+  the same when a cycle is unchecked: it drains the device and reads the status of every slot before the slot is returned, so a
+  failing look-ahead fails the rewind before the Request is mutated (the failure is kept for retries and the next step). The
+  replacement of a slot (`ReleaseSlotForTeardown()`: a cancellation, a new Request taking over a finished turn) does not wait;
+  the new prompt waits for the device in `BeginSlot()`, before it resets the slot. The record of such a
+  cycle is never consumed, so its status is read from the device instead: `CheckDecodeStatus()` right after `Drain()` reports
+  the error bits accumulated by every cycle since the last
+  `Reset()`, also when a record was left unconsumed. The executor always runs `Drain()` and then `CheckDecodeStatus()` before
+  `Reset()` (which clears the bits): a cancellation or stop-string match that leaves a cycle behind therefore still fails the
+  next request or the rewind when that cycle went wrong. The same holds for `ResetSlot()` with several slots: the bits of a
+  batched cycle are kept per slot, `ResetSlot()` clears the ones of its slot, and `CheckDecodeStatus()` reads every slot that
+  started a decode (slot 0 or not) and names the slots with bits set. A slot handed to a new request, whose previous request
+  was canceled or finished while a batched cycle was in flight, is therefore only reset once the stream was drained and the
+  status of all the slots was read (a status that was already read since the last cycle, as at the end of a chain of cycles,
+  is not read again). A device error is fatal to the Engine, as every executor failure is, so a reported status is never
+  consumed twice, and a fatal execution failure poisons the mutable device context across Engine leases until the model is
+  reloaded. At Engine teardown the executor drains the device and reads its status too, but nobody is left to report an error
+  to, so a failure poisons the device context instead (the next Engine over the model fails).
+- Ready slots decode between prompt chunks, including when a new long prompt joins resident decoders. Phase 1 defers the
+  next cycle only until phase 2 has ingested one chunk per prefilling slot; phase 2 then enqueues all ready decoders.
+  The device splits active slots into contiguous intervals and uses fixed-address bindings for each interval, including
+  its offset KV, indexer, recurrent state, control block, context and result ring. A slot outside those intervals is never
+  an idle row of a target Run, so neither its prompt KV nor its recurrent state is overwritten. Each prefilling slot keeps
+  its own recurrent bank independent of the decode ring phase; its final hand-off copies that slot's recurrent state to the
+  current decode bank before it joins the ready slots. Target graph ids include the first slot as well as batch size and
+  bank phase, and warm-up covers those offset bindings. Contiguous ready slots still share one target forward; separated
+  intervals run separately, without waiting for the prompts between them. Auxiliary features are bound directly to persistent
+  per-slot slices, so both shared and deferred DFlash proposals consume the right slot's features. Each interval binding owns
+  its validation aggregate, and each slot retains the direction of its in-flight target Run so completion errors report that
+  Run's status codes even after later intervals execute.
+- With several slots the DFlash2 drafter proposes for one slot after the other without waiting for the device in between.
+  A step tensor larger than a launch can carry (4032 bytes: the block table of a long context) is uploaded from its host
+  mirror when the device reaches the copy, so one shared mirror per tensor would be rewritten by the next slot's proposal
+  before the previous upload ran, and the first slot would read another request's block ids. The engine therefore asks the
+  drafter for a fresh mirror per upload (`Dflash2Drafter::SetFreshStagingMirrors`, `Dflash2HostStaging`): the pinned-mirror
+  pool hands a mirror out again only after the upload that read it has run, and never waits for the device to do so. A
+  single-slot engine keeps one mirror per tensor, as before.
+- `ModelExecutor::ValidateTurn` and `BackendCapabilities` reject, before any Request mutation, what the device loop cannot do:
+  sampling, repetition penalty, no-repeat n-grams, `min_generated_tokens`, seeds and guidance. `MaxDraftTokensPerStep()` is
+  zero (the caller cannot attach drafts). `GetCapabilities()` reports the resolved slot count and `max_request_length` =
+  KV capacity - reserved tail, clamped to `model.context_length` when that is configured, so it is the smaller of the two.
+- `GetSpeculativeStats()` includes the executor's counters (`ModelExecutor::AddSpeculativeStats`): one round per slot and
+  cycle, one or more proposed drafts per round (the fold verifies 1..3), accepted drafts, bonus and correction tokens, the
+  acceptance-length histogram. Target forwards are counted per physical Run (one per contiguous ready-slot interval), not
+  per slot. A shared batched DFlash proposal counts one draft forward across its surviving rows; independent startup and
+  deferred-seed proposals still count separately. An explicit zero draft-forward count stays zero. The counters describe
+  what the Engine consumed, as `Engine::RecordSpeculativeCommit` does for sampled MTP: a turn that ends inside a cycle (turn or
+  session limit, stop string, EOS) only accepts the drafts it delivered,
+  `draft_tokens_evaluated` counts the draft positions examined up to the terminal token (every accepted draft consumed, an EOS
+  draft included, plus the rejected position only when the turn got as far as the correction token), so `acceptance_rate` is not
+  diluted by drafts after the end of the turn. Rounds are classified like `Engine::RecordSpeculativeCommit` does, by the number
+  of accepted drafts that were delivered: none is a zero-accept round, all of the proposed ones a full-accept round and anything
+  in between a partial-accept round (`partial_accept_rounds`, counted whether or not a correction token was delivered).- The model's device state is leased to one Engine at a time (`Qwen38GraphModel::AcquireDevice`); a second Engine over the same
+  model fails with a clear error until the first one is destroyed, and a poisoned context cannot be leased again. The model has
+  no Generator API support.
 
 ## Experimental low-level public API shape
 

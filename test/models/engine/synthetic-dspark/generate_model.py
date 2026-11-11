@@ -180,3 +180,55 @@ for index, node in enumerate(windowed.graph.node):
         break
 onnx.checker.check_model(windowed)
 onnx.save(windowed, Path(__file__).with_name("dflash2.onnx"))
+
+# The composite target exposes FP16 auxiliary hidden states.
+fp16_aux = onnx.ModelProto()
+fp16_aux.CopyFrom(windowed)
+fp16_aux.graph.input[0].type.tensor_type.elem_type = TensorProto.FLOAT16
+# Engine batches can mix context-only feeds with feeds requesting query blocks.
+# Candidate/score rows describe only query-block feeds, not every served request.
+fp16_aux.graph.initializer.extend(
+    [
+        helper.make_tensor("four_i64", TensorProto.INT64, [1], [4]),
+        helper.make_tensor("four_scalar_i64", TensorProto.INT64, [], [4]),
+        helper.make_tensor("zero_scalar_i64", TensorProto.INT64, [], [0]),
+    ]
+)
+query_nodes = [
+    helper.make_node("Shape", ["block_row_index"], ["query_rows_shape"]),
+    helper.make_node("Div", ["query_rows_shape", "four_i64"], ["query_batch"]),
+    helper.make_node("Squeeze", ["query_rows_shape"], ["query_rows_count"]),
+    helper.make_node("Range", ["zero_scalar_i64", "query_rows_count", "four_scalar_i64"], ["query_anchor_indices"]),
+    helper.make_node("Gather", ["block_row_index", "query_anchor_indices"], ["query_anchor_rows"], axis=0),
+    helper.make_node("Slice", ["cumulative_sequence_lengths", "start1", "end_all", "axis0"], ["query_boundaries"]),
+    helper.make_node("Unsqueeze", ["query_anchor_rows", "axis1"], ["query_anchor_columns"]),
+    helper.make_node("Unsqueeze", ["query_boundaries", "axis0"], ["query_boundaries_row"]),
+    helper.make_node("GreaterOrEqual", ["query_anchor_columns", "query_boundaries_row"], ["query_after"]),
+    helper.make_node("Cast", ["query_after"], ["query_after_i32"], to=TensorProto.INT32),
+    helper.make_node("ReduceSum", ["query_after_i32", "axis1"], ["query_request_rows"], keepdims=0),
+    helper.make_node("Cast", ["query_request_rows"], ["query_request_rows_i64"], to=TensorProto.INT64),
+    helper.make_node("Unsqueeze", ["query_request_rows_i64", "axis1"], ["query_request_indices"]),
+    helper.make_node("Sub", ["past_sequence_lengths", "past_sequence_lengths"], ["no_query"]),
+    helper.make_node("Add", ["no_query", "one_i32"], ["one_per_request"]),
+    helper.make_node("Gather", ["one_per_request", "query_request_rows_i64"], ["one_per_query"], axis=0),
+    helper.make_node("ScatterND", ["no_query", "query_request_indices", "one_per_query"], ["has_query_i32"]),
+    helper.make_node("Greater", ["has_query_i32", "zero_i32"], ["has_query"]),
+    helper.make_node("Where", ["has_query", "five_i32", "one_i32"], ["context_tail_offset"]),
+]
+for node in fp16_aux.graph.node:
+    if node.output[0] in ("candidate_shape", "score_shape"):
+        node.input[0] = "query_batch"
+    elif node.output[0] == "last_context_offset":
+        node.input[1] = "context_tail_offset"
+    elif node.output[0] == "draft_values_col":
+        node.input[0] = "query_draft_values"
+nodes = list(fp16_aux.graph.node)
+draft_index = next(index for index, node in enumerate(nodes) if node.output[0] == "draft_values_col")
+nodes.insert(
+    draft_index,
+    helper.make_node("Gather", ["draft_values_with_cache", "query_request_rows_i64"], ["query_draft_values"], axis=0),
+)
+fp16_aux.graph.ClearField("node")
+fp16_aux.graph.node.extend([*query_nodes, *nodes])
+onnx.checker.check_model(fp16_aux)
+onnx.save(fp16_aux, Path(__file__).with_name("dflash2-fp16-aux.onnx"))

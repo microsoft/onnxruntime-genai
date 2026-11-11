@@ -95,7 +95,7 @@ std::unique_ptr<OrtOpAttr> CreateOpAttr(const AttributeValue& attr) {
 namespace GraphBuilder {
 
 // Build complete ONNX model using the Model Editor API
-std::unique_ptr<OrtModel> Build(const ModelConfig& config) {
+std::unique_ptr<OrtModel> Build(const ModelConfig& config, const char* domain, int opset_version) {
   // Create graph using RAII wrapper
   auto graph = OrtGraph::Create();
 
@@ -167,7 +167,7 @@ std::unique_ptr<OrtModel> Build(const ModelConfig& config) {
   // Create node using RAII wrapper
   auto node = OrtNode::Create(
       config.op_type.c_str(),
-      "",  // empty domain = ONNX domain
+      domain,
       (config.op_type + "_node").c_str(),
       input_names.data(),
       input_names.size(),
@@ -184,9 +184,10 @@ std::unique_ptr<OrtModel> Build(const ModelConfig& config) {
   node.release();
 
   // Create model with opset using RAII wrapper
-  const char* domain_name = "";
-  int opset = config.opset_version;
-  auto model = OrtModel::Create(&domain_name, &opset, 1);
+  int opset = opset_version ? opset_version : config.opset_version;
+  const char* domains[]{"", domain};
+  const int opsets[]{domain[0] ? config.opset_version : opset, opset};
+  auto model = OrtModel::Create(domains, opsets, domain[0] ? 2 : 1);
 
   // Add graph to model (model takes ownership of graph)
   model->AddGraph(graph.get());

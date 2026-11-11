@@ -11,11 +11,83 @@
 #include "engine/decoders/varlen_decoder_io.h"
 #include "engine/paged_key_value_cache.h"
 #include "engine/step_plan.h"
+#include "engine_test_doubles.h"
 #include "engine_test_helpers.h"
+#include "models/io/rotary_position_history.h"
 
 namespace Generators {
 namespace test {
 namespace {
+
+TEST(RotaryPositionHistoryTest, RetainsPromptCoordinatesAndForecastsGeneratedTokens) {
+  RotaryPositionHistory history{1, 8};
+  const std::array<int64_t, 9> prompt{0, 1, 1, 0, 2, 2, 0, 1, 4};
+  history.Update(prompt, 0, 3);
+  const auto values = history.Values();
+  EXPECT_EQ(values[1], 1);
+  EXPECT_EQ(values[8 + 1], 2);
+  EXPECT_EQ(values[16 + 2], 4);
+  for (size_t plane = 0; plane < 3; ++plane) {
+    for (size_t token = 3; token < 8; ++token)
+      EXPECT_EQ(values[plane * 8 + token], static_cast<int64_t>(token + 2));
+  }
+  const std::array<int64_t, 3> decode{5, 5, 5};
+  history.Update(decode, 3, 1);
+  EXPECT_EQ(values[16 + 2], 4);
+  EXPECT_EQ(values[8 + 4], 6);
+  history.Forecast(2);
+  EXPECT_EQ(values[2], 3);
+  EXPECT_EQ(values[8 + 2], 3);
+  EXPECT_EQ(values[16 + 2], 3);
+  history.Forecast(0);
+  for (size_t plane = 0; plane < 3; ++plane)
+    EXPECT_EQ(values[plane * 8 + 7], 7);
+}
+
+TEST(RotaryPositionHistoryTest, ExpandsEachPromptRowAcrossItsBeams) {
+  RotaryPositionHistory history{4, 4};
+  const std::array<int64_t, 12> prompt{0, 1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6};
+  history.Update(prompt, 0, 2, 2);
+  for (size_t plane = 0; plane < 3; ++plane) {
+    EXPECT_EQ(history.Values()[(plane * 4 + 0) * 4 + 1], prompt[plane * 4 + 1]);
+    EXPECT_EQ(history.Values()[(plane * 4 + 1) * 4 + 1], prompt[plane * 4 + 1]);
+    EXPECT_EQ(history.Values()[(plane * 4 + 2) * 4 + 1], prompt[plane * 4 + 3]);
+    EXPECT_EQ(history.Values()[(plane * 4 + 3) * 4 + 1], prompt[plane * 4 + 3]);
+  }
+}
+
+TEST(RotaryPositionHistoryTest, MtpCopiesBothRowsAndFutureCoordinatesWithoutAliasing) {
+  RotaryPositionHistory main{2, 8};
+  RotaryPositionHistory head{2, 6};
+  const std::array<int64_t, 12> prompt{0, 1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6};
+  main.Update(prompt, 0, 2);
+  head.CopyFrom(main.Values(), 8);
+  for (size_t row = 0; row < 6; ++row)
+    for (size_t token = 0; token < 6; ++token)
+      EXPECT_EQ(head.Values()[row * 6 + token], main.Values()[row * 8 + token]);
+  const auto old = head.Values()[0];
+  main.Values()[0] = 42;
+  EXPECT_EQ(head.Values()[0], old);
+}
+
+TEST(RotaryPositionHistoryTest, RejectsMalformedOrOutOfCapacityCoordinates) {
+  EXPECT_THROW((RotaryPositionHistory{0, 4}), std::runtime_error);
+  RotaryPositionHistory history{1, 4};
+  EXPECT_THROW(history.Update(std::array<int64_t, 3>{0, 0, 0}, 4, 1), std::runtime_error);
+  EXPECT_THROW(history.Update(std::array<int64_t, 3>{0, -1, 0}, 0, 1), std::runtime_error);
+  EXPECT_THROW(history.Update(std::array<int64_t, 3>{0, 0, 0}, 0, 1, 2), std::runtime_error);
+  EXPECT_THROW(history.CopyFrom(std::array<int64_t, 3>{0, 0, 0}, 1), std::runtime_error);
+  EXPECT_THROW(history.Forecast(5), std::runtime_error);
+}
+
+TEST(RotaryPositionHistoryTest, PadsUnusedForecastRowsWithinTheRotaryTable) {
+  RotaryPositionHistory history{1, 8, 7};
+  history.Update(std::array<int64_t, 3>{4, 5, 6}, 0, 1);
+  for (size_t plane = 0; plane < 3; ++plane)
+    for (size_t token = 1; token < 8; ++token)
+      EXPECT_EQ(history.Values()[plane * 8 + token], 7);
+  EXPECT_THROW(history.Update(std::array<int64_t, 3>{8, 8, 8}, 1, 1), std::runtime_error);
+}
 
 TEST(VarlenDecoderIOTest, PackedHybridPositionIdsAcceptTokenVectorOrMropeMatrix) {
   EXPECT_NO_THROW(ValidatePackedPositionIdsInput(
@@ -51,6 +123,130 @@ TEST(VarlenDecoderIOTest, PackedHybridPositionIdsAcceptTokenVectorOrMropeMatrix)
                    ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64,
                    std::array<int64_t, 1>{0}),
                std::runtime_error);
+}
+
+TEST(VarlenDecoderIOTest, PackedHiddenStatesUseExportedInputWidth) {
+  EXPECT_NO_THROW(ValidatePackedHiddenStatesInputShape(
+      std::array<int64_t, 2>{3, 10240}, 3,
+      std::array<int64_t, 2>{-1, 10240}));
+  EXPECT_THROW(ValidatePackedHiddenStatesInputShape(
+                   std::array<int64_t, 2>{3, 2560}, 3,
+                   std::array<int64_t, 2>{-1, 10240}),
+               std::runtime_error);
+  EXPECT_THROW(ValidatePackedHiddenStatesInputShape(
+                   std::array<int64_t, 2>{2, 10240}, 3,
+                   std::array<int64_t, 2>{-1, 10240}),
+               std::runtime_error);
+}
+
+TEST(VarlenDecoderIOTest, PacksThreePlanePositionsInScheduledRequestOrder) {
+  auto model = std::dynamic_pointer_cast<DecoderOnly_Model>(LoadSyntheticPagedPerTokenModel());
+  auto cache = std::shared_ptr<CacheManager>{CacheManager::Create(model)};
+  auto engine = MakeDoublesEngine(model, 2, EosToken(*model)).engine;
+  auto first = CreateRequestWithPrompt(engine, std::array<int32_t, 7>{2, 3, 4, 5, 6, 7, 8});
+  auto second = CreateRequestWithPrompt(engine, std::array<int32_t, 5>{9, 8, 7, 6, 5});
+  for (const auto& request : {first, second}) {
+    request->Schedule();
+    RequestStepPlan prefix;
+    prefix.request = request;
+    prefix.request_id = request.get();
+    prefix.sequence_length_before = request->CurrentSequenceLength();
+    prefix.unprocessed_token_count = request == first ? 5 : 1;
+    prefix.target_cache_slots = prefix.unprocessed_token_count;
+    PrepareRequestStep(model, prefix);
+    request->CommitStep(prefix, {});
+  }
+  for (bool reversed : {true, false}) {
+    StepPlan plan;
+    const std::array<std::shared_ptr<Request>, 2> order =
+        reversed ? std::array{second, first} : std::array{first, second};
+    for (const auto& request : order) {
+      RequestStepPlan entry;
+      entry.request = request;
+      entry.request_id = request.get();
+      entry.sequence_length_before = request->CurrentSequenceLength();
+      entry.unprocessed_token_count = request == first ? 2 : 3;
+      entry.packed_token_offset = plan.token_count;
+      entry.logits_row_index = plan.token_count + entry.unprocessed_token_count - 1;
+      entry.target_cache_slots = request->ProcessedSequenceLength() + entry.unprocessed_token_count;
+      plan.token_count += entry.unprocessed_token_count;
+      plan.requests.push_back(entry);
+    }
+    ScheduledRequests scheduled{plan, model, nullptr, nullptr};
+    ExecutionContext context{&plan};
+    VarlenDecoderIO io{model, scheduled, cache, &context, nullptr, 3};
+    const auto position = std::find_if(io.input_names_.begin(), io.input_names_.end(), [&](const char* name) {
+      return model->config_->model.decoder.inputs.position_ids == name;
+    });
+    ASSERT_NE(position, io.input_names_.end());
+    auto& tensor = *io.inputs_[position - io.input_names_.begin()];
+    EXPECT_EQ(tensor.GetTensorTypeAndShapeInfo()->GetShape(), (std::vector<int64_t>{3, 5}));
+    const std::array<int64_t, 5> expected = reversed ? std::array<int64_t, 5>{1, 2, 3, 5, 6}
+                                                     : std::array<int64_t, 5>{5, 6, 1, 2, 3};
+    const auto* data = tensor.GetTensorData<int64_t>();
+    for (size_t plane = 0; plane < 3; ++plane) {
+      EXPECT_TRUE(std::equal(expected.begin(), expected.end(), data + plane * expected.size()));
+    }
+  }
+}
+
+TEST(VarlenDecoderIOTest, RotaryHistoryBoundsMediaCoordinatesAndOverwritesUnusedCaptureRows) {
+  auto model = std::dynamic_pointer_cast<DecoderOnly_Model>(LoadSyntheticPagedPerTokenModel());
+  auto session = model->CreateSession(GetOrtEnv(), "../synthetic-rotary-history/positions.onnx",
+                                      model->session_options_.get());
+  model->session_info_.Add(*session);
+  model->config_->model.decoder.inputs.rotary_position_ids = "rotary_position_ids";
+  model->config_->model.context_length = 32;
+  auto cache = std::shared_ptr<CacheManager>{CacheManager::Create(model)};
+  auto engine = MakeDoublesEngine(model, 2, EosToken(*model)).engine;
+  auto first = std::make_shared<MediaItem>();
+  first->grid = {1, 4, 6};
+  first->rows = 6;
+  auto second = std::make_shared<MediaItem>();
+  second->grid = {1, 4, 4};
+  second->rows = 4;
+  const std::array<MediaSpan, 2> media{{{1, first}, {8, second}}};
+  const std::array<std::array<int64_t, 11>, 3> expected{{
+      {0, 1, 1, 1, 1, 1, 1, 4, 5, 5, 5},
+      {0, 1, 1, 1, 2, 2, 2, 4, 5, 5, 6},
+      {0, 1, 2, 3, 1, 2, 3, 4, 5, 6, 5},
+  }};
+  for (const bool persistent : {false, true}) {
+    auto buffers = persistent ? std::make_unique<VarlenGraphBuffers>(*model, 0, 3) : nullptr;
+    for (const size_t past : {8u, 0u}) {
+      auto request = CreateRequestWithPrompt(engine, std::array<int32_t, 13>{2, 3, 4, 5, 6, 7, 8, 9, 8, 7, 6, 5, 4});
+      request->ReserveMedia(2);
+      request->AppendMedia(media);
+      if (past != 0) {
+        request->StagePrefixAdoption(past);
+        request->CommitPrefixAdoption();
+      }
+      StepPlan plan;
+      RequestStepPlan entry;
+      entry.request = request;
+      entry.request_id = request.get();
+      entry.sequence_length_before = request->CurrentSequenceLength();
+      entry.unprocessed_token_count = 3;
+      entry.target_cache_slots = past + 3;
+      entry.logits_row_index = 2;
+      plan.token_count = 3;
+      plan.requests.push_back(entry);
+      ScheduledRequests scheduled{plan, model, nullptr, nullptr};
+      ExecutionContext context{&plan};
+      context.block_table_columns = 4;
+      VarlenDecoderIO io{model, scheduled, cache, &context, buffers.get()};
+      const auto input = std::find_if(io.input_names_.begin(), io.input_names_.end(),
+                                      [](const char* name) { return std::string_view{name} == "rotary_position_ids"; });
+      ASSERT_NE(input, io.input_names_.end());
+      const auto& tensor = *io.inputs_[input - io.input_names_.begin()];
+      EXPECT_EQ(tensor.GetTensorTypeAndShapeInfo()->GetShape(), (std::vector<int64_t>{3, 1, 32}));
+      const auto* values = tensor.GetTensorData<int64_t>();
+      for (size_t plane = 0; plane < 3; ++plane)
+        for (size_t row = 0; row < 32; ++row)
+          EXPECT_EQ(values[plane * 32 + row], row < past + 3 ? expected[plane][row] : static_cast<int64_t>(row));
+      request->Close();
+    }
+  }
 }
 
 TEST(VarlenDecoderIOTest, EagerMetadataUsesExactStepBounds) {
@@ -288,6 +484,38 @@ TEST(VarlenDecoderIOTest, GraphBuffersRejectStepsWiderThanTheyWereSizedFor) {
   EXPECT_FALSE(buffers.Fits(1, kMaxDraftTokensPerStep + 2));
 }
 
+TEST(VarlenDecoderIOTest, GraphBuffersRejectInvalidPackedRowCounts) {
+  auto model = std::dynamic_pointer_cast<DecoderOnly_Model>(LoadSyntheticPagedPerTokenModel());
+  ASSERT_TRUE(model);
+  const size_t planes = PackedPositionIdPlanes(*model);
+  const size_t width = kMaxDraftTokensPerStep + 1;
+  for (const size_t batch : std::array<size_t, 3>{
+           0, static_cast<size_t>(std::numeric_limits<int64_t>::max()), std::numeric_limits<size_t>::max()}) {
+    model->config_->engine.dynamic_batching->max_batch_size = batch;
+    EXPECT_THROW(VarlenGraphBufferBytes(*model, planes, width), std::runtime_error);
+    EXPECT_THROW((VarlenGraphBuffers{*model, planes, width}), std::runtime_error);
+  }
+  model->config_->engine.dynamic_batching->max_batch_size =
+      static_cast<size_t>(std::numeric_limits<int64_t>::max()) / width;
+  model->config_->engine.dynamic_batching->max_scheduled_tokens = 0;
+  EXPECT_THROW(VarlenGraphBufferBytes(*model, 3, width), std::runtime_error);
+  EXPECT_THROW((VarlenGraphBuffers{*model, 3, width}), std::runtime_error);
+}
+
+TEST(VarlenDecoderIOTest, GraphBuffersRejectPackedRowOverflowBeforeScheduledTokenCap) {
+  auto model = std::dynamic_pointer_cast<DecoderOnly_Model>(LoadSyntheticPagedPerTokenModel());
+  ASSERT_TRUE(model);
+  const size_t planes = PackedPositionIdPlanes(*model);
+  const size_t width = static_cast<size_t>(std::numeric_limits<int64_t>::max()) / 2 + 1;
+  model->config_->engine.dynamic_batching->max_batch_size = 2;
+  model->config_->engine.dynamic_batching->max_scheduled_tokens = 2;
+
+  EXPECT_NO_THROW(VarlenGraphBufferBytes(*model, planes, width - 1));
+  EXPECT_NO_THROW((VarlenGraphBuffers{*model, planes, width - 1}));
+  EXPECT_THROW(VarlenGraphBufferBytes(*model, planes, width), std::runtime_error);
+  EXPECT_THROW((VarlenGraphBuffers{*model, planes, width}), std::runtime_error);
+}
+
 TEST(VarlenDecoderIOTest, GraphIdSeparatesEveryCapturedShape) {
   GraphAnnotationIds ids;
   const auto id = [&](size_t batch, size_t tokens, size_t columns, size_t binding) {
@@ -313,6 +541,24 @@ TEST(VarlenDecoderIOTest, GraphIdSeparatesEveryCapturedShape) {
   EXPECT_GT(single, 0);
   EXPECT_GT(flipped_bank, 0);
   EXPECT_EQ(ids.size(), 5u);
+}
+
+TEST(VarlenDecoderIOTest, GraphIdSeparatesMtpScratchBanksFromCommittedState) {
+  GraphAnnotationIds ids;
+  const auto committed = DecodeGraphKey(1, 1, 8, 3);
+  const auto first_bank = DecodeGraphKey(1, 1, 8, 3, 1);
+  const auto second_bank = DecodeGraphKey(1, 1, 8, 3, 2);
+  ASSERT_TRUE(committed.has_value());
+  ASSERT_TRUE(first_bank.has_value());
+  ASSERT_TRUE(second_bank.has_value());
+  const int committed_id = ids.Id(*committed);
+  const int first_id = ids.Id(*first_bank);
+  const int second_id = ids.Id(*second_bank);
+  EXPECT_NE(committed_id, first_id);
+  EXPECT_NE(committed_id, second_id);
+  EXPECT_NE(first_id, second_id);
+  EXPECT_EQ(ids.Id(*DecodeGraphKey(1, 1, 8, 3, 1)), first_id);
+  EXPECT_EQ(ids.Id(*DecodeGraphKey(1, 1, 8, 3, 2)), second_id);
 }
 
 TEST(VarlenDecoderIOTest, GraphIdIsStableForARepeatedShape) {
@@ -433,6 +679,21 @@ TEST(VarlenDecoderIOTest, PacksMetadataInOperatorContractOrder) {
   EXPECT_EQ(packed[0], 3);
   EXPECT_EQ(packed[1], 513);
   EXPECT_EQ(packed[2], 257);
+}
+
+TEST(VarlenDecoderIOTest, PacksSelectedOnlySparseMetadataInOperatorContractOrder) {
+  AttentionMetadataValues metadata;
+  metadata.max_query_len_bound = 3;
+  metadata.max_kv_len_bound = 513;
+  metadata.max_kv_len_lower_bound = 257;
+  const auto packed = PackSparseAttentionMetadata(metadata);
+
+  static_assert(packed.size() == kSparseAttentionMetadataElementCount);
+  EXPECT_EQ(packed[0], 3);
+  EXPECT_EQ(packed[1], 0);
+  EXPECT_EQ(packed[2], 513);
+  EXPECT_EQ(packed[3], 0);
+  EXPECT_EQ(packed[4], 513);
 }
 
 TEST(VarlenDecoderIOTest, RejectsZeroSizedGraphBounds) {

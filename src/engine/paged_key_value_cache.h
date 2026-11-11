@@ -38,6 +38,18 @@ inline size_t GetGraphBlockTableColumns(size_t max_blocks, size_t max_columns) {
 // Shared automatic-sizing budget, including the fragmentation allowance.
 size_t PagedCacheMemoryBudget(size_t available_memory_bytes, float gpu_utilization_factor);
 
+// Remaining startup allowance, clamped to free device memory, minus explicit profiled headroom.
+size_t DeviceMemoryBudgetAvailableBytes(uint64_t budget_bytes,
+                                        size_t initial_free_bytes,
+                                        size_t available_memory_bytes,
+                                        std::optional<uint64_t> headroom_bytes);
+
+// Block capacity from an already resolved cache budget, without another fragmentation allowance.
+size_t ComputePagedBlockCapacityFromBudget(size_t budget_bytes,
+                                           size_t reserved_memory_bytes,
+                                           size_t primary_bytes_per_block,
+                                           size_t auxiliary_bytes_per_block = 0);
+
 // Blocks the target pool can hold in `available_memory_bytes`, after a fragmentation allowance and
 // the caller's utilization factor. `primary_bytes_per_block` is the target's own cost for one block
 // across all full-attention layers -- use PagedKeyValueCacheBytesPerBlock() to obtain it, so that
@@ -63,8 +75,11 @@ size_t ResolveConfiguredPagedBlockCount(size_t configured_num_blocks,
 // Bytes one block costs across every full-attention layer of the target's paged group: the key and
 // value caches at the physical trailing width the graph declares (which is head_size/2 for a
 // 4-bit packed cache, not head_size), plus the per-token scale caches when the model binds them.
-// Windowed layers are excluded because their ring is sized separately.
+// Ring-backed windowed layers are excluded because their storage is sized separately. Explicit
+// prefix caching retains windowed layers in full paged storage and includes them in this cost.
 size_t PagedKeyValueCacheBytesPerBlock(const std::shared_ptr<Model>& model);
+
+size_t PagedCacheCaptureBlockTableBytes(const std::shared_ptr<Model>& model);
 
 // Resolves the configured prefix-cache flag, retention capacity, and target/auxiliary layout into
 // one policy shared by paged block retention and hybrid fixed-state checkpoint allocation.
@@ -111,6 +126,7 @@ struct PagedKeyValueCache {
       const PagedCacheReservation& reservation) noexcept;
   void RecordDeferredPrefixMatches(size_t count) noexcept;
   void RecordPrefixPublicationRefusal() noexcept;
+  bool CanSealCommittedBlocks(const void* request_id) const;
   void SealCommittedBlocks(const void* request_id,
                            std::span<const int32_t> tokens,
                            std::shared_ptr<const FixedStatePrefixCheckpoint> checkpoint = nullptr);
@@ -131,8 +147,10 @@ struct PagedKeyValueCache {
                              std::shared_ptr<const Dflash2PrefixCheckpoint> checkpoint);
   void DropUnleasedDraftCheckpoints();
   size_t ReclaimPrefixCheckpoints(size_t checkpoints_needed);
+  bool ReclaimPrefixCheckpoint(const FixedStatePrefixCheckpoint* checkpoint);
   size_t ReclaimablePrefixCheckpoints() const;
-  const FixedStatePrefixCheckpoint* ReclaimablePrefixCheckpoint() const;
+  const FixedStatePrefixCheckpoint* ReclaimablePrefixCheckpoint(
+      const void* request_id = nullptr) const;
   bool PrefixCachingEnabled() const;
   bool RequiresPrefixCheckpoint() const;
   size_t BlockSize() const { return block_pool_->BlockSize(); }
@@ -185,7 +203,8 @@ struct PagedKeyValueCache {
   //   ring = [5, 9], block_size = 4, so the table is
   //   [5, 9, 5, 9, 5, 9, ...]
   //
-  // Only valid when WindowedLayers() is non-empty.
+  // With explicit prefix caching, returns the primary table under the windowed input name instead:
+  // both layer types retain the same immutable prefix blocks.
   std::pair<OrtValue*, const char*> WindowBlockTables(const std::vector<std::shared_ptr<Request>>& requests);
   std::pair<OrtValue*, const char*> WindowBlockTables(
       const std::vector<std::shared_ptr<Request>>& requests,
@@ -218,6 +237,9 @@ struct PagedKeyValueCache {
 
  private:
   struct LayerCache {
+    // Budgeted payload storage outlives its non-owning tensor views.
+    std::unique_ptr<void, Ort::AllocatorDeleter> key_storage;
+    std::unique_ptr<void, Ort::AllocatorDeleter> value_storage;
     // Shape: [num_blocks, block_size, num_kv_heads, head_width], where head_width is the trailing
     // dimension the graph declares for this layer's cache input, not config head_size. They differ
     // whenever the cache is packed: a 4-bit cache stores two elements per uint8, so head_width is
@@ -292,6 +314,7 @@ struct PagedKeyValueCache {
   // and a chunked prefill advances by up to `chunk_size` at once, so it must cover
   // `chunk_size + window_size - 1` positions. Zero when the model has no windowed layers.
   size_t window_size_{};
+  bool window_block_table_required_{};
   size_t window_ring_blocks_{};
   size_t window_live_span_{};  // chunk_size + window_size - 1, checked against each step
   std::unique_ptr<BlockPool> window_block_pool_;

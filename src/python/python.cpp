@@ -6,8 +6,12 @@
 #define OGA_USE_SPAN 1
 #include "../models/onnxruntime_api.h"
 #include "../ort_genai.h"
+#include <cstring>
+#include <filesystem>
 #include <iostream>
+#include <mutex>
 #include <optional>
+#include <unordered_map>
 
 using namespace pybind11::literals;
 
@@ -321,6 +325,54 @@ pybind11::dict ToSpeculativeStatsDict(const OgaSpeculativeStats& stats) {
   return d;
 }
 
+template <typename Output>
+struct PyPostProcessorOutput {
+  const Output* output;
+  std::weak_ptr<bool> lifetime;
+
+  const Output& Get() const {
+    if (lifetime.expired()) throw std::runtime_error("The postprocessor result expired after a processor mutation or destruction.");
+    return *output;
+  }
+};
+
+using PyASRPostProcessorResult = PyPostProcessorOutput<OgaASRPostProcessorResult>;
+using PyASRPostProcessorTimestampResult = PyPostProcessorOutput<OgaASRPostProcessorTimestampResult>;
+using PyASRPostProcessorTimestampRecord = PyPostProcessorOutput<OgaASRPostProcessorTimestampRecord>;
+
+struct PyASRPostProcessor {
+  explicit PyASRPostProcessor(std::unique_ptr<OgaASRPostProcessor> processor)
+      : processor_{std::move(processor)} {}
+
+  void ProcessNext() {
+    result_lifetime_ = std::make_shared<bool>(true);
+    processor_->ProcessNext();
+  }
+
+  void Finalize() {
+    result_lifetime_ = std::make_shared<bool>(true);
+    processor_->Finalize();
+  }
+
+  void Reset() {
+    result_lifetime_ = std::make_shared<bool>(true);
+    processor_->Reset();
+  }
+
+  std::vector<PyASRPostProcessorResult> GetNextResults() const {
+    std::vector<PyASRPostProcessorResult> results;
+    const auto native_results = processor_->GetNextResults();
+    results.reserve(native_results.size());
+    for (const auto* result : native_results)
+      results.push_back({result, result_lifetime_});
+    return results;
+  }
+
+ private:
+  std::unique_ptr<OgaASRPostProcessor> processor_;
+  std::shared_ptr<bool> result_lifetime_{std::make_shared<bool>(true)};
+};
+
 struct PyGenerator {
   PyGenerator(const OgaModel& model, PyGeneratorParams& params) {
     generator_ = OgaGenerator::Create(model, *params.params_);
@@ -328,6 +380,10 @@ struct PyGenerator {
 
   pybind11::array_t<int32_t> GetNextTokens() {
     return ToPython(generator_->GetNextTokens());
+  }
+
+  std::unique_ptr<OgaASRPostProcessor> CreatePostProcessor() {
+    return OgaASRPostProcessor::Create(*generator_);
   }
 
   pybind11::array_t<int32_t> GetSequence(int index) {
@@ -498,8 +554,52 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
            pybind11::arg("enable_ff_tokens") = false)
       .def("get_search_options", &PyGeneratorParams::GetSearchOptions);
 
+  pybind11::class_<PyASRPostProcessorTimestampRecord>(m, "ASRPostProcessorTimestampRecord")
+      .def_property_readonly("text", [](const PyASRPostProcessorTimestampRecord& record) { return record.Get().GetText(); })
+      .def_property_readonly("frame_interval", [](const PyASRPostProcessorTimestampRecord& record) { return record.Get().GetFrameInterval(); })
+      .def_property_readonly("time_interval", [](const PyASRPostProcessorTimestampRecord& record) { return record.Get().GetTimestampInterval(); });
+
+  pybind11::class_<PyASRPostProcessorTimestampResult>(m, "ASRPostProcessorTimestampResult")
+      .def_property_readonly("words", [](const PyASRPostProcessorTimestampResult& result) {
+        std::vector<PyASRPostProcessorTimestampRecord> records;
+        const auto& timestamps = result.Get();
+        const auto count = timestamps.GetWordCount();
+        records.reserve(count);
+        for (size_t index = 0; index < count; ++index)
+          records.push_back({timestamps.GetTimestampRecord(OgaTimestampRecordKind_Words, index), result.lifetime});
+        return records;
+      })
+      .def_property_readonly("segments", [](const PyASRPostProcessorTimestampResult& result) {
+        std::vector<PyASRPostProcessorTimestampRecord> records;
+        const auto& timestamps = result.Get();
+        const auto count = timestamps.GetSegmentCount();
+        records.reserve(count);
+        for (size_t index = 0; index < count; ++index)
+          records.push_back({timestamps.GetTimestampRecord(OgaTimestampRecordKind_Segments, index), result.lifetime});
+        return records;
+      });
+
+  pybind11::class_<PyASRPostProcessorResult>(m, "ASRPostProcessorResult")
+      .def_property_readonly("text", [](const PyASRPostProcessorResult& result) { return result.Get().GetText(); })
+      .def_property_readonly("timestamp_result", [](const PyASRPostProcessorResult& result) -> std::optional<PyASRPostProcessorTimestampResult> {
+        const auto* timestamps = result.Get().GetTimestampResult();
+        if (!timestamps) return std::nullopt;
+        return PyASRPostProcessorTimestampResult{timestamps, result.lifetime};
+      });
+
+  pybind11::class_<PyASRPostProcessor>(m, "ASRPostProcessor")
+      .def(pybind11::init([](PyGenerator& generator) {
+             return std::make_unique<PyASRPostProcessor>(generator.CreatePostProcessor());
+           }),
+           pybind11::keep_alive<1, 2>())
+      .def("process_next", &PyASRPostProcessor::ProcessNext)
+      .def("get_next_results", &PyASRPostProcessor::GetNextResults)
+      .def("finalize", &PyASRPostProcessor::Finalize)
+      .def("reset", &PyASRPostProcessor::Reset);
+
   pybind11::class_<OgaTokenizerStream>(m, "TokenizerStream")
-      .def("decode", [](OgaTokenizerStream& t, int32_t token) { return t.Decode(token); });
+      .def("decode", [](OgaTokenizerStream& t, int32_t token) { return t.Decode(token); })
+      .def("reset", &OgaTokenizerStream::Reset);
 
   pybind11::class_<OgaNamedTensors>(m, "NamedTensors")
       .def(pybind11::init([]() { return OgaNamedTensors::Create(); }))
@@ -638,6 +738,14 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("clear_decoder_provider_options_hardware_device_type", &OgaConfig::ClearDecoderProviderOptionsHardwareDeviceType)
       .def("clear_decoder_provider_options_hardware_device_id", &OgaConfig::ClearDecoderProviderOptionsHardwareDeviceId)
       .def("clear_decoder_provider_options_hardware_vendor_id", &OgaConfig::ClearDecoderProviderOptionsHardwareVendorId);
+
+  pybind11::class_<NonGenerativeSession>(m, "_NonGenerativeSession")
+      .def(pybind11::init<const OgaConfig&>(), pybind11::arg("config"))
+      .def("run", [](NonGenerativeSession& session,
+                     const std::string& request) {
+        pybind11::gil_scoped_release release;
+        return session.Run(request);
+      });
 
   pybind11::class_<OgaModel>(m, "Model")
       .def(pybind11::init([](const OgaConfig& config) { return OgaModel::Create(config); }))
@@ -925,6 +1033,18 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
           },
           pybind11::arg("tokens"),
           pybind11::arg("turn_options") = pybind11::none())
+      .def(
+          "begin_turn",
+          [](OgaRequest& request, const std::string& prompt, OgaTurnOptions* options, OgaImages* images) {
+            if (prompt.find('\0') != std::string::npos)
+              throw pybind11::value_error("A formatted prompt must not contain embedded NUL.");
+            pybind11::gil_scoped_release release;
+            return request.BeginTurn(prompt.c_str(), options, images);
+          },
+          pybind11::arg("prompt"), pybind11::arg("turn_options") = pybind11::none(),
+          pybind11::kw_only(), pybind11::arg("images") = pybind11::none(),
+          "Admit an already formatted incremental prompt and ordered images. CPU preprocessing "
+          "is synchronous; encoding is scheduled by Engine.run. No chat template is applied.")
       .def("cancel_turn", &OgaRequest::CancelTurn)
       .def("rewind_to_start_of_turn", &OgaRequest::RewindToStartOfTurn,
            pybind11::arg("turn_id"),

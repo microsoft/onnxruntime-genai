@@ -1,0 +1,4 @@
+wheel==0.47.0
+packaging==26.2
+pyelftools==0.32
+auditwheel==6.8.2; sys_platform == "linux"

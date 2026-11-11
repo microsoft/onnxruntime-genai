@@ -21,24 +21,10 @@ from pathlib import Path
 import pytest
 
 MODELS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models"
-BUILDERS_DIR = MODELS_DIR / "builders"
 sys.path.insert(0, str(MODELS_DIR))
 
 
 def _load_builder_entrypoint_module():
-    # builder.py imports every concrete model class; stub the package so these
-    # validation-only tests stay free of those dependencies.
-    builders_stub = types.ModuleType("builders")
-
-    def _stub_getattr(name):  # PEP 562: satisfies `from builders import <ModelClass>`
-        if name.startswith("__"):
-            raise AttributeError(name)
-        return type(name, (), {})
-
-    builders_stub.__getattr__ = _stub_getattr
-    builders_stub.__path__ = [str(BUILDERS_DIR)]
-    sys.modules["builders"] = builders_stub
-
     spec = importlib.util.spec_from_file_location("models_builder_entrypoint", MODELS_DIR / "builder.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -69,6 +55,37 @@ def test_block_size_is_parsed_from_a_string():
     _check_extra_options(options)
 
     assert options["paged_block_size"] == 64
+
+
+@pytest.mark.parametrize(
+    ("model_type", "has_vision", "text_only", "supported"),
+    [
+        ("qwen3_5", True, False, True),
+        ("qwen3_5_moe", True, False, True),
+        ("qwen4_exp", True, False, True),
+        ("qwen4_exp", True, True, False),
+        ("qwen4_exp", False, False, False),
+        ("qwen4_exp_text", True, False, False),
+        ("qwen3_5", True, True, False),
+        ("qwen3_5", False, False, False),
+        ("llama", True, False, False),
+    ],
+)
+def test_paged_excluded_embeddings_require_a_vision_composite(
+    monkeypatch, model_type, has_vision, text_only, supported
+):
+    config = types.SimpleNamespace(
+        model_type=model_type,
+        vision_config=object() if has_vision else None,
+        tie_word_embeddings=False,
+    )
+    monkeypatch.setattr(builder_module, "get_hf_details", lambda *args, **kwargs: {"hf_config": config})
+    options = {"use_paged_attention": "true", "exclude_embeds": "true", "text_only": text_only}
+    if supported:
+        builder_module.check_extra_options("dummy-model", "", "", "fp16", "cuda", "", options)
+    else:
+        with pytest.raises(ValueError, match="requires a complete Qwen vision composite"):
+            builder_module.check_extra_options("dummy-model", "", "", "fp16", "cuda", "", options)
 
 
 @pytest.mark.parametrize("block_size", [8, 15])

@@ -13,6 +13,9 @@ import onnx_ir as ir
 import torch
 from transformers import AutoTokenizer, GenerationConfig
 
+from builder_config import serialize_genai_config
+
+
 class WhisperEncoder(Model):
     # Each Whisper encoder layer is typically defined as:
     # input_layernorm --> attention --> output_layernorm --> MLP
@@ -1065,4 +1068,4 @@ class WhisperModel(Model):
             genai_config["search"]["whisper_max_initial_timestamp_index"] = max_initial_timestamp_index
 
         with open(os.path.join(out_dir, "genai_config.json"), "w") as f:
-            json.dump(genai_config, f, indent=4)
+            f.write(serialize_genai_config(genai_config))

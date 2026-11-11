@@ -12,21 +12,21 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  ORT_BUILD_VERSION: "1.30.0"
+  ORT_BUILD_VERSION: "1.31.0"
   ORT_PACKAGE_NAME: Microsoft.ML.OnnxRuntime
 
 jobs:
   linux-cuda-arm64-build:
     permissions:
       contents: read
-    runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2004-ARM-CPU", "JobId=linux-cuda-arm64-build-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}"]
+    runs-on: ort-genai-github-linux-8-arm64-eus2-ss
     steps:
       - name: Checkout OnnxRuntime GenAI repo
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: true
 
-      - name: Download ARM64 ONNX Runtime 1.30 build libraries
+      - name: Download ARM64 ONNX Runtime 1.31 build libraries
         run: |
           set -euo pipefail
           curl -fsSL \
@@ -59,7 +59,7 @@ jobs:
           docker run --rm \
             --volume "$GITHUB_WORKSPACE:/ort_genai_src" \
             -w /ort_genai_src \
-            -e ONNXRUNTIME_VERSION=1.30.0 \
+            -e ONNXRUNTIME_VERSION=${{ env.ORT_BUILD_VERSION }} \
             ort_genai_linux_cuda_arm64_gha bash -c '
               set -e
               PY=/opt/python/cp312-cp312/bin/python3.12

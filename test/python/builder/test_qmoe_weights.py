@@ -149,6 +149,7 @@ def test_gptoss_moe_dispatches_fused_and_decomposed_paths(monkeypatch):
 def _load_builder_cli_module(monkeypatch):
     builders_module = types.ModuleType("builders")
     for class_name in (
+        "BailingMoeV3Model",
         "ChatGLMModel",
         "ErnieModel",
         "Gemma2Model",
@@ -164,11 +165,14 @@ def _load_builder_cli_module(monkeypatch):
         "LFM2AudioModel",
         "LFM2Model",
         "LFM2MoEModel",
+        "LFM2VLModel",
+        "LFM3Model",
         "LlamaModel",
         "Mistral3TextModel",
         "MistralModel",
         "Model",
         "NemotronModel",
+        "NemotronParseModel",
         "OLMoModel",
         "Phi3MiniLongRoPEModel",
         "Phi3MiniModel",
@@ -183,6 +187,8 @@ def _load_builder_cli_module(monkeypatch):
         "Qwen35TextModel",
         "Qwen3Model",
         "Qwen3VLTextModel",
+        "Qwen4ExpModel",
+        "Qwen4ExpTextModel",
         "QwenModel",
         "SmolLM3Model",
         "VideoChatFlashQwenModel",
@@ -226,6 +232,22 @@ def test_moe_quant_type_mxfp4_is_accepted(monkeypatch, precision):
     builder = _load_builder_cli_module(monkeypatch)
     options = _parse_extra_options(builder, ["moe_quant_type=mxfp4"], precision, "cuda")
     assert options["moe_quant_type"] == "mxfp4"
+
+
+@pytest.mark.parametrize(
+    ("moe_quant_type", "expected_op_type", "expected_bits"),
+    [("none", "MoE", 0), ("int4", "QMoE", 4), ("int8", "QMoE", 8)],
+)
+def test_make_moe_init_selects_operator(moe_quant_type, expected_op_type, expected_bits):
+    model = Model.__new__(Model)
+    model.quant_config = types.SimpleNamespace(moe=types.SimpleNamespace(type=moe_quant_type, weights_prepacked=-1))
+    model.ep = "cuda"
+    model.moe_attrs = {"swiglu_limit": None}
+
+    model.make_moe_init()
+
+    assert model.moe_attrs["op_type"] == expected_op_type
+    assert model.moe_attrs["expert_weight_bits"] == expected_bits
 
 
 def test_moe_quant_type_rejects_invalid_value(monkeypatch):

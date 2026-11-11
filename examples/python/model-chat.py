@@ -28,7 +28,8 @@ def main(args):
         print("Loading model...")
 
     # Create model
-    config = get_config(args.model_path, args.execution_provider, args.ep_path)
+    search_options = get_search_options(args)
+    config = get_config(args.model_path, args.execution_provider, args.ep_path, search_options=search_options)
     model = og.Model(config)
     if args.verbose:
         print("Model loaded")
@@ -41,7 +42,6 @@ def main(args):
 
     # Get and set search options for generator params
     params = og.GeneratorParams(model)
-    search_options = get_search_options(args)
     params.set_search_options(**search_options)
     if args.verbose:
         print(f"GeneratorParams created: {search_options}")

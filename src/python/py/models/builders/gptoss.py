@@ -21,6 +21,20 @@ class GPTOSSModel(Model):
         self.moe_attrs["normalize_routing_weights"] = True
         self.moe_attrs["swiglu_fusion"] = 1
 
+        if self.io_dtype == ir.DataType.FLOAT16 and self.num_layers == 36 and self.moe_attrs["num_experts"] == 128:
+            if self.ep in {"cuda", "trt-rtx"}:
+                guidance = (
+                    "For CUDA/TRT-RTX, consider `--precision bf16` or "
+                    "`--precision int4 --extra_options use_cuda_bf16=true`."
+                )
+            else:
+                guidance = "Consider FP32 I/O or an execution provider with BF16 support."
+            print(
+                "WARNING: The 36-layer, 128-expert GPT-OSS (120B) configuration may overflow "
+                "with float16 I/O and produce NaN logits. Validate your checkpoint and workload. "
+                f"{guidance}"
+            )
+
     def load_mxfp4_experts(self, layer_id, decode=False):
         try:
             from loaders.gptoss import GptOssMXFP4Loader  # noqa: PLC0415
