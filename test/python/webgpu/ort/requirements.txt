@@ -1,5 +1,5 @@
 -i https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/
 # PagedAttention requires the extended schema with attention_metadata at input 16.
 # State replay requires ConvStateReplay and GatedDeltaNetStateReplay schemas and WebGPU kernels.
-onnxruntime==1.32.0.dev20261106001
-onnxruntime-ep-webgpu==0.6.0.dev20261106072551
+onnxruntime==1.33.0.dev20261111002
+onnxruntime-ep-webgpu==0.7.0.dev20261111070922
