@@ -30,6 +30,8 @@ struct LFM2_State : State {
 
  private:
   void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> beam_indices, int total_length);
+  std::vector<int64_t> PaddedRowLengths(DeviceSpan<int32_t>& next_tokens);
+  void RunRowsAlone(std::span<const int64_t> lengths);
 
   const LFM2_Model& model_;
 
@@ -38,6 +40,7 @@ struct LFM2_State : State {
   std::unique_ptr<KeyValueCache> cache_;
   std::unique_ptr<PositionInputs> position_inputs_;
   ExtraInputs extra_inputs_{*this};
+  size_t extra_inputs_begin_{};
 };
 
 }  // namespace Generators

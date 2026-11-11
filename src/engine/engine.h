@@ -71,6 +71,7 @@ struct EngineEvent {
   uint64_t turn_id{};
   uint32_t flags{};
   int32_t token{};
+  int32_t terminal_token_id{-1};
   GenerationFinishReason finish_reason{GenerationFinishReason::None};
   EngineErrorCode error_code{EngineErrorCode::None};
   // Caller-facing index into the turn's stop-string list, valid only when finish_reason ==
@@ -221,6 +222,8 @@ struct Engine : std::enable_shared_from_this<Engine>,
   uint64_t BeginTurn(const std::shared_ptr<Request>& request,
                      std::span<const int32_t> tokens,
                      const TurnOptions& options);
+  uint64_t BeginTurn(const std::shared_ptr<Request>& request,
+                     const std::string& prompt, const TurnOptions& options, const Images* images);
   void RewindRequestToStartOfTurn(
       const std::shared_ptr<Request>& request, uint64_t turn_id);
   void CloseRequest(const std::shared_ptr<Request>& request);
@@ -228,6 +231,8 @@ struct Engine : std::enable_shared_from_this<Engine>,
 
  private:
   friend struct test::EngineRunTestAccess;
+  uint64_t AdmitTurn(const std::shared_ptr<Request>& request, std::span<const int32_t> tokens,
+                     const TurnOptions& options);
   void DetachRequestForTeardown(
       const std::shared_ptr<Request>& request) noexcept;
   // Logs one warning when the hosted speculative path cannot deliver the configured
@@ -292,7 +297,8 @@ struct Engine : std::enable_shared_from_this<Engine>,
                                           std::string_view message,
                                           std::exception_ptr error);
 
-  std::shared_ptr<Model> model_;                 // The model used by the Engine.
+  std::shared_ptr<Model> model_;  // The model used by the Engine.
+  std::unique_ptr<MediaStore> media_store_;
   std::shared_ptr<CacheManager> cache_manager_;  // The cache manager for handling cached data.
   std::shared_ptr<PrefixSnapshotCache> snapshot_cache_;
   std::unique_ptr<Scheduler> scheduler_;           // The scheduler responsible for managing execution order.

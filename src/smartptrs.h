@@ -246,8 +246,11 @@ struct StateUpdateReplayDesc {
 // Version 17: Config::Model gained the qwen38_graph member, which changed the layouts of Config::Model and Config.
 // Version 18: DeviceBuffer::CopyCpuRangeToDevice shifted the virtual slots that follow CopyCpuToDevice.
 // Version 19: Config::Model::Qwen38Graph gained max_batch_size, which changed the layouts of Config::Model and Config.
-// Version 20: Config::SessionOptions gained providers_explicitly_selected.
-inline constexpr uint32_t kDeviceInterfaceVersion = 20;
+// Version 20: Config gained memory budget/headroom settings; DeviceInterface gained sampler startup-byte sizing.
+// Version 21: Config::Engine::DynamicBatching gained host/device media budgets, changing Config's layout.
+// Version 22: Config's decoder/drafter layouts gained GGUF initializer mappings.
+// Version 23: Config::SessionOptions gained providers_explicitly_selected.
+inline constexpr uint32_t kDeviceInterfaceVersion = 23;
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}
@@ -291,6 +294,7 @@ struct DeviceInterface {
   virtual std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) = 0;
   virtual std::unique_ptr<BatchedSampler> CreateBatchedSampler(size_t /*max_batch_size*/,
                                                                int /*vocab_size*/) { return {}; }
+  virtual size_t GetBatchedSamplerInitialAllocationBytes(size_t /*max_batch_size*/) const { return 0; }
 
   virtual void Synchronize() = 0;  // Synchronize the device, typically used for timing or debugging
 

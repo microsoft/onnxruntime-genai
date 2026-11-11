@@ -266,7 +266,7 @@ class LFM2Model(Model):
 
 
 class LFM3Model(LFM2Model):
-    """LFM3 decoder (LFM3-1.7B, and the decoder of LFM3-VL, LFM3-Audio and LFM3-Omni).
+    """LFM3 decoder (LFM3-1.7B, d1-2B, and the decoder of LFM3-VL, LFM3-Audio and LFM3-Omni).
 
     The LFM2 conv/attention stack with:
     - a third layer type, "sliding_attention", using GQA's local window;
@@ -275,6 +275,8 @@ class LFM3Model(LFM2Model):
       proportional RoPE, so the tail is baked into a full-width cos/sin cache;
     - a sigmoid output gate per head (`gate_proj`) applied before `o_proj`;
     - sandwich norms (`post_operator_norm`, `post_ffn_norm`), see `LFM2Model.make_post_norm`.
+
+    d1-2B's full-attention layers read the whole prompt both ways; its other layers stay causal.
     """
 
     def make_rope_init(self, config):
@@ -300,6 +302,8 @@ class LFM3Model(LFM2Model):
                 raise NotImplementedError(f"LFM3 {layer_type} RoPE {params} is not supported.")
 
     def make_attention_init(self, config):
+        if self.architecture == "D1Model":
+            self.check_d1_export(config)
         super().make_attention_init(config)
         # Only these ops implement the sliding window and the KV cache; the packed Attention and
         # MultiHeadAttention fallbacks (e.g. CUDA or DML with fp32, CPU with fp16) would build a different model.
@@ -312,13 +316,27 @@ class LFM3Model(LFM2Model):
         if self.ep == "dml" and "sliding_attention" in self.layer_types:
             raise NotImplementedError("LFM3's sliding_attention layers need a local window, which DML does not apply.")
 
-    # VL, Audio and Omni checkpoints nest the decoder under model.language_model, and their remote code
+    def check_d1_export(self, config):
+        if config.model_type != "lfm3_vl":
+            raise NotImplementedError(f"D1Model is supported for d1-2B (lfm3_vl), not {config.model_type}.")
+        # Under "set" a lone question reads its whole prompt both ways, which is what causal=0 does.
+        if config.d1_attention != "set":
+            raise NotImplementedError(f"D1Model with d1_attention={config.d1_attention} is not supported.")
+        if self.ep not in {"cpu", "cuda"}:
+            raise NotImplementedError(
+                f"d1-2B needs GroupQueryAttention with causal=0, which ONNX Runtime has on CPU and CUDA, not {self.ep}."
+            )
+        if self.use_paged_attention:
+            raise NotImplementedError("d1-2B needs causal=0, which PagedAttention does not have.")
+
+    # VL, Audio, Omni and d1 checkpoints nest the decoder under model.language_model, and their remote code
     # registers the first auto class rather than AutoModelForCausalLM. With the embedding layer excluded the
     # decoder is a stage of the second, a pipeline the runtime does not have yet.
     MULTIMODAL: ClassVar[dict[str, tuple[str, str]]] = {
         "Lfm3VlForConditionalGeneration": ("AutoModelForImageTextToText", "lfm3_vl"),
         "Lfm3AudioForConditionalGeneration": ("AutoModelForMultimodalLM", "lfm3_audio"),
         "Lfm3OmniForConditionalGeneration": ("AutoModelForMultimodalLM", "lfm3_omni"),
+        "D1Model": ("AutoModel", "lfm3_vl"),
     }
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
@@ -329,7 +347,20 @@ class LFM3Model(LFM2Model):
             for name in ("audio_start_token_id", "mixed_start_token_id", "text_end_token_id")
             if getattr(config, name, None) is not None
         ]
+        # Window-sized KV caches run on text exports for CPU and CUDA. ConvKeyValueCache refuses them under graph
+        # capture, which reruns the step it captures and so evicts from the window more than once. Decided here because
+        # Model.__init__ calls make_context_length_init before it sets self.ep.
+        # TODO: turn them on for TRT-RTX once a windowed export runs there; for WebGPU once its GroupQueryAttention
+        # takes sliding_window_cache=1, which also needs webgpu in Model.uses_windowed_kv_cache; for paged exports once
+        # the Engine's window ring has run with conv state; for exclude_embeds once the pipelines that read it exist.
+        self.keep_max_length_kv_caches = ep not in {"cpu", "cuda"} or any(
+            extra_options.get(option, False)
+            for option in ("use_paged_attention", "enable_cuda_graph", "exclude_embeds")
+        )
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        # An export cut by num_hidden_layers before its first sliding layer has nothing to window.
+        if "sliding_attention" not in self.layer_types:
+            self.context_length_attrs["window_kv_cache"] = False
         dtype = ir.DataType.FLOAT if self.rope_attrs["cast"]["use_fp32"] else self.io_dtype
         self.rope_cache_names = {}
         for layer_type in self.lfm3_rope_parameters:
@@ -356,11 +387,13 @@ class LFM3Model(LFM2Model):
 
     def make_context_length_init(self, config):
         super().make_context_length_init(config)
-        # TODO: sliding layers keep max_length KV caches until the runtime's hybrid conv/KV cache
-        # (ConvKeyValueCache) has window-sized buffers.
-        if self.extra_options.get("windowed_kv_cache", False):
-            print("Warning: LFM3 ignores windowed_kv_cache=true; its sliding layers keep max_length KV caches.")
-        self.context_length_attrs["window_kv_cache"] = False
+        if self.keep_max_length_kv_caches:
+            if self.extra_options.get("windowed_kv_cache", False):
+                print(
+                    "Warning: LFM3 ignores windowed_kv_cache=true here: only text exports for CPU and CUDA, without "
+                    "paged attention or graph capture, have window-sized KV caches."
+                )
+            self.context_length_attrs["window_kv_cache"] = False
 
     def make_intermediate_size_init(self, config):
         # Lfm3Config has no block_auto_adjust_ff_dim: the MLP uses intermediate_size as is.
@@ -382,6 +415,12 @@ class LFM3Model(LFM2Model):
 
     def make_rotary_embedding_caches(self, **kwargs):
         return self.rope_cache_names[self.attention_layer_type]
+
+    def get_attention_op_attributes(self, **kwargs):
+        attributes = super().get_attention_op_attributes(**kwargs)
+        if self.architecture == "D1Model" and self.attention_layer_type == "full_attention":
+            attributes["causal"] = 0
+        return attributes
 
     def make_attention_output_proj(self, layer_id, attention, root_input, **kwargs):
         # attn_output * sigmoid(gate_proj(x)), one gate per head, broadcast over head_dim
@@ -582,7 +621,7 @@ class LFM2MoEModel(LFM2Model):
     def make_moe_preprocessing(self, layer_id, moe, root_input):
         # Keep the router in floating point so int4 rounding cannot flip an expert choice.
         moe.gate.exclude_from_quantization = True
-        self.make_interleaved_swiglu_moe_preprocessing(layer_id, moe)
+        self.make_interleaved_swiglu_moe_preprocessing(layer_id, moe, self.moe_intermediate_size)
 
     def make_moe_router(self, layer_id, moe, root_input):
         """Emit the in-graph expert selection.

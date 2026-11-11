@@ -11,11 +11,13 @@ namespace Generators {
 
 namespace {
 
+// Holds the vector and an index, not an element reference: the first State::Run can grow outputs_ for extra outputs.
 struct OrtValuePointerRestore {
-  OrtValue*& slot;
+  std::vector<OrtValue*>& slots;
+  size_t index;
   OrtValue* value;
 
-  ~OrtValuePointerRestore() { slot = value; }
+  ~OrtValuePointerRestore() { slots[index] = value; }
 };
 
 }  // namespace
@@ -67,9 +69,9 @@ DeviceSpan<float> Gemma4VisionState::Run(int current_length, DeviceSpan<int32_t>
   OrtValue* pixel_values = inputs_[pixel_values_index_];
   OrtValue* position_ids = inputs_[position_ids_index_];
   OrtValue* image_features = outputs_[0];
-  const OrtValuePointerRestore restore_pixel_values{inputs_[pixel_values_index_], pixel_values};
-  const OrtValuePointerRestore restore_position_ids{inputs_[position_ids_index_], position_ids};
-  const OrtValuePointerRestore restore_image_features{outputs_[0], image_features};
+  const OrtValuePointerRestore restore_pixel_values{inputs_, pixel_values_index_, pixel_values};
+  const OrtValuePointerRestore restore_position_ids{inputs_, position_ids_index_, position_ids};
+  const OrtValuePointerRestore restore_image_features{outputs_, 0, image_features};
   const auto pixel_info = pixel_values->GetTensorTypeAndShapeInfo();
   const auto position_info = position_ids->GetTensorTypeAndShapeInfo();
   const auto feature_info = image_features->GetTensorTypeAndShapeInfo();

@@ -93,10 +93,6 @@ struct CpuEngram {
     auto host = bytes.CpuSpan();
     const size_t row_bytes = static_cast<size_t>(width) * Ort::SizeOf(type);
     const auto& cpu_memory = GetDeviceInterface(DeviceType::CPU)->GetAllocator().GetInfo();
-    auto output_memory = output.p_device_->GetType() == DeviceType::CUDA
-                             ? OrtMemoryInfo::Create("CudaPinned", OrtDeviceAllocator,
-                                                     output.p_device_->GetMemoryInfo()->GetDeviceId(), OrtMemTypeCPUOutput)
-                             : OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
     size_t offset = 0;
     size_t history_offset = 0;
     DeviceSpan<int64_t> present_span;
@@ -122,7 +118,8 @@ struct CpuEngram {
                                                ids_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
       auto past_tensor = OrtValue::CreateTensor(cpu_memory, past.data(), past.size() * sizeof(int64_t),
                                                 past_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
-      auto embeddings = OrtValue::CreateTensor(*output_memory, host.data() + offset * row_bytes,
+      // The workspace owns any physical pinning; this is a host tensor, as in CpuEmbedding::Run.
+      auto embeddings = OrtValue::CreateTensor(cpu_memory, host.data() + offset * row_bytes,
                                                ids.size() * row_bytes, embeddings_shape, type);
       auto present = present_tokens
                          ? OrtValue::CreateTensor(cpu_memory, present_span.CpuSpan().data() + history_offset,
@@ -718,6 +715,21 @@ void VarlenDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, 
                                  model->cpu_embedding_->type_,
                                  {static_cast<int64_t>(num_tokens), model->cpu_embedding_->hidden_size_});
       model->cpu_embedding_->Run(cpu_span, *embeddings, *embedding_workspace_);
+      const size_t row_bytes = static_cast<size_t>(model->cpu_embedding_->hidden_size_) *
+                               Ort::SizeOf(model->cpu_embedding_->type_);
+      size_t packed_row = 0;
+      for (const auto& request : scheduled_requests) {
+        const auto first_row = static_cast<size_t>(request->ProcessedSequenceLength());
+        const auto end_row = first_row + request->ScheduledTokenCount();
+        for (const auto& span : request->Media()) {
+          const auto begin = std::max(first_row, span.start);
+          const auto end = std::min(end_row, span.start + span.item->rows);
+          if (begin >= end) continue;
+          if (!span.item->features) throw std::logic_error("Decoder plan references unprepared image features.");
+          embeddings->GetByteSpan().subspan((packed_row + begin - first_row) * row_bytes, (end - begin) * row_bytes).CopyFrom(span.item->features->GetByteSpan().subspan((begin - span.start) * row_bytes, (end - begin) * row_bytes));
+        }
+        packed_row += request->ScheduledTokenCount();
+      }
       input_names_.push_back(model->config_->model.decoder.inputs.embeddings.c_str());
       inputs_.push_back(embeddings->GetOrtTensor());
       if (owned_embeddings) owned_inputs_.push_back(std::move(owned_embeddings));
@@ -819,11 +831,17 @@ void VarlenDecoderIO::PreparePositionIds(
       }
     }
     const int64_t first_position = request->ProcessedSequenceLength();
-    for (size_t token = 0; token < token_count; ++token) {
-      const int64_t position =
-          first_position + static_cast<int64_t>(token);
+    if (request->Media().empty()) {
       for (size_t plane = 0; plane < position_planes_; ++plane) {
-        position_cpu[plane * num_tokens + packed_offset + token] = position;
+        std::iota(position_cpu.begin() + plane * num_tokens + packed_offset,
+                  position_cpu.begin() + plane * num_tokens + packed_offset + token_count, first_position);
+      }
+    } else {
+      for (size_t token = 0; token < token_count; ++token) {
+        const auto positions = request->Position(static_cast<size_t>(first_position) + token);
+        for (size_t plane = 0; plane < position_planes_; ++plane) {
+          position_cpu[plane * num_tokens + packed_offset + token] = positions[plane];
+        }
       }
     }
     packed_offset += token_count;
@@ -862,9 +880,23 @@ void VarlenDecoderIO::PrepareRotaryPositionIds(
   tensor->CreateTensor(shape, graph_buffers_ != nullptr);
   auto positions = tensor->GetDeviceSpan<int64_t>();
   auto cpu = positions.CpuSpan();
-  // Engine requests are currently text-only; multimodal prompts are rejected by SimpleDecoder.
-  for (size_t row = 0; row < 3 * scheduled_requests.size(); ++row) {
-    std::iota(cpu.begin() + row * capacity, cpu.begin() + (row + 1) * capacity, int64_t{0});
+  for (size_t row = 0; row < scheduled_requests.size(); ++row) {
+    if (scheduled_requests[row]->Media().empty()) {
+      for (size_t plane = 0; plane < 3; ++plane)
+        std::iota(cpu.begin() + (plane * scheduled_requests.size() + row) * capacity,
+                  cpu.begin() + (plane * scheduled_requests.size() + row + 1) * capacity, int64_t{0});
+      continue;
+    }
+    const auto& request = scheduled_requests[row];
+    const size_t history = static_cast<size_t>(request->ProcessedSequenceLength()) + request->ScheduledTokenCount();
+    std::array<std::span<int64_t>, 3> planes;
+    for (size_t plane = 0; plane < 3; ++plane) {
+      const auto start = (plane * scheduled_requests.size() + row) * capacity;
+      planes[plane] = cpu.subspan(start, history);
+      // Keep fixed capture geometry, but never forecast unprocessed image coordinates into its tail.
+      std::iota(cpu.begin() + start + history, cpu.begin() + start + capacity, static_cast<int64_t>(history));
+    }
+    MediaPositions(request->Media(), 0, planes);
   }
   positions.CopyCpuToDevice();
   input_names_.push_back(name.c_str());

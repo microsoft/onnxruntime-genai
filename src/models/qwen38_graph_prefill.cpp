@@ -614,8 +614,9 @@ void Qwen38GraphEngine::FastAppendSlot(int slot, std::span<const int32_t> tokens
     }
   }
   MutedPrefillSlot(slot, true);
-  const int cur_bank = bank_phase_ % num_banks_;
-  const int scratch_bank = (bank_phase_ + 1) % num_banks_;
+  // Decode cycles rotate the shared phase while this slot's prompt can be paused between chunks.
+  const int cur_bank = max_batch_ == 1 ? bank_phase_ : slot_ledgers_[slot].Bank();
+  const int scratch_bank = (cur_bank + 1) % num_banks_;
   size_t last_m = 1;
   for (size_t lo = 0; lo < n;) {
     const size_t pos = base + lo;

@@ -16,10 +16,11 @@ std::vector<const OrtEpDevice*> ApplyDeviceFiltering(const Config::ProviderOptio
 // True when provider_options sets at least one hardware filtering criterion.
 bool HasDeviceFiltering(const Config::ProviderOptions& provider_options);
 
-// Returns EpMetadata["cuda_device_id"] of |device|, or an empty string when the device does not report it.
+// Returns EpMetadata["cuda_device_id"], falling back to the plugin's EpOptions["device_id"].
+// Returns an empty string when neither reports the CUDA ordinal.
 std::string GetCudaDeviceIdMetadata(const OrtEpDevice* device);
 
-// Returns the index of the CUDA EP device a session must use. |cuda_device_ids| lists EpMetadata["cuda_device_id"] of the
+// Returns the index of the CUDA EP device a session must use. |cuda_device_ids| lists the CUDA ordinals of the
 // devices that survived hardware filtering, in enumeration order (which need not be CUDA device_id order).
 // Hardware filtering takes precedence: an explicit |requested_id| selects only among the surviving devices and throws
 // std::runtime_error, naming the requested and the available ids, when none matches. Without a requested id the CUDA

@@ -767,6 +767,125 @@ def test_guidance_ff_tokens_leave_no_room_for_append(test_data_path, device):
     assert len(generator.get_sequence(0)) == 10
 
 
+def _new_sliding_window_generator(directory, test_data_path, device, max_length, pattern=None):
+    # slide_inputs, as in Qualcomm AI Hub exports, pads every input to whole windows, here of 4 tokens.
+    source = Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32"
+    config = json.loads((source / "genai_config.json").read_text())
+    vocab_size = config["model"]["vocab_size"]
+    window = {"window_size": 4, "slide_inputs": True}
+    config["model"].update(type="llama", decoder={"filename": "model.onnx", "sliding_window": window})
+    (directory / "genai_config.json").write_text(json.dumps(config))
+    for name in ("tokenizer.json", "tokenizer_config.json"):
+        shutil.copy(source / name, directory)
+    # The logits ignore the input and pick token 0 unless guidance masks it.
+    graph = onnx.helper.make_graph(
+        [
+            onnx.helper.make_node("Shape", ["input_ids"], ["input_shape"]),
+            onnx.helper.make_node("Concat", ["input_shape", "vocab_size"], ["logits_shape"], axis=0),
+            onnx.helper.make_node("Expand", ["row", "logits_shape"], ["logits"]),
+        ],
+        "sliding_window",
+        [onnx.helper.make_tensor_value_info("input_ids", onnx.TensorProto.INT32, ["batch", "sequence"])],
+        [onnx.helper.make_tensor_value_info("logits", onnx.TensorProto.FLOAT, ["batch", "sequence", vocab_size])],
+        [
+            onnx.helper.make_tensor("row", onnx.TensorProto.FLOAT, [vocab_size], np.eye(1, vocab_size)[0]),
+            onnx.helper.make_tensor("vocab_size", onnx.TensorProto.INT64, [1], [vocab_size]),
+        ],
+    )
+    opset = [onnx.helper.make_opsetid("", 17)]
+    onnx.save(onnx.helper.make_model(graph, opset_imports=opset, ir_version=10), directory / "model.onnx")
+
+    model_config = og.Config(os.fspath(directory))
+    model_config.clear_providers()
+    if device != "cpu":
+        model_config.append_provider(device)
+    model = og.Model(model_config)
+    search_params = og.GeneratorParams(model)
+    search_params.set_search_options(do_sample=False, max_length=max_length)
+    if pattern:
+        search_params.set_guidance("regex", pattern, enable_ff_tokens=True)
+    try:
+        return og.Tokenizer(model), og.Generator(model, search_params)
+    except RuntimeError as error:
+        if "guidance is unavailable" in str(error).lower():
+            pytest.skip("ONNX Runtime GenAI was built without guidance support")
+        raise
+
+
+@pytest.mark.parametrize("device", ff_tokens_devices)
+def test_sliding_window_append_counts_padding(tmp_path, test_data_path, device):
+    _, generator = _new_sliding_window_generator(tmp_path, test_data_path, device, 10)
+    with pytest.raises(RuntimeError, match="exceeds max length"):
+        generator.append_tokens(np.arange(1, 10, dtype=np.int32)[np.newaxis, :])  # padded to 12
+    assert len(generator.get_sequence(0)) == 0
+
+    generator.append_tokens(np.arange(1, 6, dtype=np.int32)[np.newaxis, :])  # padded to 8
+    while not generator.is_done():
+        generator.generate_next_token()
+    assert list(generator.get_sequence(0)[3:]) == [1, 2, 3, 4, 5, 0, 0]
+
+
+@pytest.mark.parametrize("device", ff_tokens_devices)
+@pytest.mark.parametrize("next_call", ["generate_next_token", "get_logits", "append_tokens"])
+@pytest.mark.parametrize(
+    "pattern,max_length,kept",
+    [
+        # The ten forced words pad to 12 with 7 slots left, so one window of four words is kept.
+        (r"[0-9] to the and of in is on that for it", 12, " to the and of"),
+        # " in" is dropped, so the digit the grammar wants after it must not be generated.
+        (r"[0-9] to the and of in[0-9]", 12, " to the and of"),
+        # With 3 slots left no window fits, and the append fails before the last token runs.
+        (r"[0-9] to the and of in is on that for it", 8, ""),
+    ],
+    ids=["ten-words", "words-then-digit", "no-window-left"],
+)
+def test_guidance_ff_tokens_stop_at_padded_max_length(
+    tmp_path, test_data_path, device, next_call, pattern, max_length, kept
+):
+    tokenizer, generator = _new_sliding_window_generator(tmp_path, test_data_path, device, max_length, pattern)
+    generator.append_tokens(np.array([[1, 2, 3, 4]], dtype=np.int32))
+    generator.generate_next_token()
+    if next_call == "append_tokens":
+        with pytest.raises(RuntimeError, match="exceeds max length"):
+            generator.append_tokens(np.array([[1]], dtype=np.int32))
+    else:
+        getattr(generator, next_call)()
+    sequence = generator.get_sequence(0)
+    if next_call != "generate_next_token":
+        # Dropped forced words end the generation like a stop token, so one more step adds nothing.
+        assert not generator.is_done()
+        generator.generate_next_token()
+        assert len(generator.get_sequence(0)) == len(sequence)
+    assert generator.is_done()
+    assert len(sequence) <= max_length
+    assert re.fullmatch("[0-9]" + kept, tokenizer.decode(sequence[4:]))
+
+
+@pytest.mark.parametrize("device", ff_tokens_devices)
+def test_guidance_append_counts_padding_before_running_last_token(tmp_path, test_data_path, device):
+    pattern = r"[0-9] to the and of in is on that for it"
+    _, generator = _new_sliding_window_generator(tmp_path, test_data_path, device, 12, pattern)
+    generator.append_tokens(np.array([[1, 2, 3, 4]], dtype=np.int32))
+    generator.generate_next_token()
+    # Five tokens pad to 8, which does not fit after 5, so the last token and its forced words stay out.
+    with pytest.raises(RuntimeError, match="exceeds max length"):
+        generator.append_tokens(np.arange(1, 6, dtype=np.int32)[np.newaxis, :])
+    assert len(generator.get_sequence(0)) == 5
+
+
+@pytest.mark.parametrize("device", ff_tokens_devices)
+def test_guidance_ff_tokens_fit_with_padding(tmp_path, test_data_path, device):
+    pattern = r"[0-9] to the and of in is on that for it"
+    tokenizer, generator = _new_sliding_window_generator(tmp_path, test_data_path, device, 20, pattern)
+    generator.append_tokens(np.array([[1, 2, 3, 4]], dtype=np.int32))
+    while not generator.is_done():
+        generator.generate_next_token()
+    # The ten forced words fill three windows after two pad tokens.
+    sequence = generator.get_sequence(0)
+    assert len(sequence) == 17
+    assert tokenizer.decode(sequence[7:]) == " to the and of in is on that for it"
+
+
 # Test Model Loading with No Chat Template
 @pytest.mark.parametrize("device", devices)
 @pytest.mark.parametrize("batch", [True, False])

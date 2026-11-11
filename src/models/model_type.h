@@ -16,14 +16,16 @@ namespace Generators {
 
 struct ModelType {
   inline static bool IsLLM(const std::string& model_type) {
+    if (model_type == "nemotron_bolt")
+      return true;
     // Large-language model (LLM)
-    static constexpr std::array<std::string_view, 37> LLM = {"chatglm", "decoder", "ernie4_5", "gemma", "gemma2", "gemma3_text", "gemma3_vl_text", "gemma4_text", "gpt2", "gptoss", "granite", "granitemoehybrid", "hunyuandensev1", "internlm2", "lfm2", "lfm2_audio_text", "lfm2_moe", "lfm2_vl_text", "lfm3", "llama", "mistral", "mistral3_text", "nemotron", "olmo", "phi", "phimoe", "phi3", "phi3small", "qwen2", "qwen2_5_vl_text", "qwen3", "qwen3_vl_text", "qwen3_5_moe_text", "qwen3_5_text", "qwen4_exp_text", "qwen38_flash_graph", "smollm3"};
+    static constexpr std::array<std::string_view, 39> LLM = {"bailing", "bailing_hybrid", "chatglm", "decoder", "ernie4_5", "gemma", "gemma2", "gemma3_text", "gemma3_vl_text", "gemma4_text", "gpt2", "gptoss", "granite", "granitemoehybrid", "hunyuandensev1", "internlm2", "lfm2", "lfm2_audio_text", "lfm2_moe", "lfm2_vl_text", "lfm3", "llama", "mistral", "mistral3_text", "nemotron", "olmo", "phi", "phimoe", "phi3", "phi3small", "qwen2", "qwen2_5_vl_text", "qwen3", "qwen3_vl_text", "qwen3_5_moe_text", "qwen3_5_text", "qwen4_exp_text", "qwen38_flash_graph", "smollm3"};
     return std::find(LLM.begin(), LLM.end(), model_type) != LLM.end();
   }
 
   inline static bool IsVLM(const std::string& model_type) {
     // Vision-language model (VLM)
-    static constexpr std::array<std::string_view, 12> VLM = {"fara", "gemma3", "lfm2_vl", "mistral3", "nemotron_parse", "phi3v", "qwen2_5_vl", "qwen3_vl", "qwen3_5", "qwen3_5_moe", "qwen4_exp", "videochat_flash_qwen"};
+    static constexpr std::array<std::string_view, 13> VLM = {"bailing_moe_v3_vl", "fara", "gemma3", "lfm2_vl", "mistral3", "nemotron_parse", "phi3v", "qwen2_5_vl", "qwen3_vl", "qwen3_5", "qwen3_5_moe", "qwen4_exp", "videochat_flash_qwen"};
     return std::find(VLM.begin(), VLM.end(), model_type) != VLM.end();
   }
 
@@ -74,8 +76,8 @@ struct ModelType {
   }
 
   inline static bool IsQwenVLFamily(const std::string& model_type) {
-    // Qwen-VL family: models requiring 3D mRoPE position IDs
-    static constexpr std::array<std::string_view, 12> QwenVL = {"fara", "qwen2_5_vl_text", "qwen2_5_vl", "qwen3_vl", "qwen3_vl_text", "qwen3_5", "qwen3_5_moe", "qwen3_5_moe_text", "qwen3_5_text", "qwen4_exp", "qwen4_exp_text", "videochat_flash_qwen"};
+    // Models using Qwen-style three-axis mRoPE positions.
+    static constexpr std::array<std::string_view, 13> QwenVL = {"bailing_moe_v3_vl", "fara", "qwen2_5_vl_text", "qwen2_5_vl", "qwen3_vl", "qwen3_vl_text", "qwen3_5", "qwen3_5_moe", "qwen3_5_moe_text", "qwen3_5_text", "qwen4_exp", "qwen4_exp_text", "videochat_flash_qwen"};
     return std::find(QwenVL.begin(), QwenVL.end(), model_type) != QwenVL.end();
   }
 

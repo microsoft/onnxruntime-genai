@@ -25,6 +25,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -184,11 +185,13 @@ class SharedSlotDevice final : public DeviceInterface {
 };
 
 TEST_F(StopStringEngineTest, AcceptedDraftEosSurvivesCompactedSharedSlotAndRollback) {
+  model_->config_->model.eos_token_id = {0, 2};
   SharedSlotDevice device{*model_->p_device_scoring_};
   ScopedScoringDevice scoring{*model_, device};
-  for (const size_t eos_position : {size_t{0}, size_t{1}}) {
+  const std::array<std::pair<int32_t, size_t>, 4> eos_cases{{{0, 0}, {0, 1}, {2, 0}, {2, 1}}};
+  for (const auto& [eos_token, eos_position] : eos_cases) {
     for (const bool queued_restore : {false, true}) {
-      SCOPED_TRACE(::testing::Message() << "EOS position " << eos_position
+      SCOPED_TRACE(::testing::Message() << "EOS " << eos_token << ", position " << eos_position
                                         << ", queued restore " << queued_restore);
       auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
       engine.cache->SetMaxDraftTokensPerStep(3);
@@ -203,7 +206,7 @@ TEST_F(StopStringEngineTest, AcceptedDraftEosSurvivesCompactedSharedSlotAndRollb
       ASSERT_TRUE(request->BindNextTokensSlot(slots.subspan(0, 1)));
       ASSERT_TRUE(survivor->BindNextTokensSlot(slots.subspan(1, 1)));
       std::array<int32_t, 3> drafts{11, 12, 13};
-      drafts[eos_position] = EosToken(*model_);
+      drafts[eos_position] = eos_token;
       request->SetDraftTokens(drafts);
       RequestStepPlan plan;
       plan.request = request;
@@ -219,9 +222,10 @@ TEST_F(StopStringEngineTest, AcceptedDraftEosSurvivesCompactedSharedSlotAndRollb
         request->CommitAcceptedDraftsForTransaction(drafts.size());
         ASSERT_TRUE(request->DraftVerificationCompletedGeneration());
         EXPECT_EQ(request->AcceptedDraftTokenCount(), eos_position);
-        EXPECT_EQ(request->StageDraftCompletionForTransaction().finish_reason,
-                  GenerationFinishReason::EosToken);
-        EXPECT_EQ(slots.CpuSpan()[0], EosToken(*model_));
+        const auto staged = request->StageDraftCompletionForTransaction();
+        EXPECT_EQ(staged.finish_reason, GenerationFinishReason::EosToken);
+        EXPECT_EQ(staged.token, eos_token);
+        EXPECT_EQ(slots.CpuSpan()[0], eos_token);
 
         // The finished first row is removed; the surviving second row reuses its slot before
         // ScheduledRequests stages the finished request a second time.
@@ -233,6 +237,7 @@ TEST_F(StopStringEngineTest, AcceptedDraftEosSurvivesCompactedSharedSlotAndRollb
         ASSERT_EQ(slots.CpuSpan()[0], 12);
         const auto completed = request->StageDraftCompletionForTransaction();
         EXPECT_EQ(completed.finish_reason, GenerationFinishReason::EosToken);
+        EXPECT_EQ(completed.token, eos_token);
         EXPECT_FALSE(completed.token_appended);
         EXPECT_EQ(completed.matched_stop_string_index, -1);
         survivor->RestoreStateForTransaction();
