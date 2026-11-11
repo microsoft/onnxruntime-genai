@@ -1922,6 +1922,7 @@ TEST_F(Qwen38GraphEngineTest, NativePrefixCacheReusesExactPromptAcrossClosedRequ
   ASSERT_TRUE(engine->PrefixCacheStats());
   EXPECT_EQ(engine->PrefixCacheStats()->hits, 1u);
   EXPECT_EQ(engine->PrefixCacheStats()->matched_tokens, prompt.size());
+  EXPECT_EQ(device_->CallCount("capture"), 1u);
 }
 
 TEST_F(Qwen38GraphEngineTest, NativePrefixCacheRestoresLongestPrefixAndOnlyIngestsSuffix) {
@@ -2032,6 +2033,17 @@ TEST_F(Qwen38GraphEngineTest, NativePrefixCacheAllocationFailureLeavesGeneration
   EXPECT_EQ(RunToCompletion(*engine, next).tokens, Expected(5, 3));
   EXPECT_EQ(engine->PrefixCacheStats()->hits, 0u);
   EXPECT_GT(engine->PrefixCacheStats()->publication_refusals, 0u);
+  EXPECT_TRUE(device_->ContextIsHealthy());
+}
+
+TEST_F(Qwen38GraphEngineTest, NativePrefixCacheRefusedCaptureIsCountedWithoutBreakingGeneration) {
+  device_->prefix_caching = true;
+  device_->max_prefix_snapshots = 0;
+  auto engine = MakeEngine();
+  auto request = Begin(*engine, Prompt(13), 3);
+  EXPECT_EQ(RunToCompletion(*engine, request).tokens, Expected(13, 3));
+  EXPECT_EQ(engine->PrefixCacheStats()->publication_refusals, 1u);
+  EXPECT_EQ(device_->CallCount("capture"), 1u);
   EXPECT_TRUE(device_->ContextIsHealthy());
 }
 

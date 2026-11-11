@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "engine/backend_capabilities.h"
+#include "engine/prefix_snapshot_cache.h"
 #include "model.h"
 #include "../dflash2_drafter.h"
 #include "qwen38_decode_device.h"
@@ -35,6 +36,18 @@
 namespace Generators {
 
 struct Qwen38GraphModel;
+
+std::shared_ptr<PrefixSnapshotCache> CreateQwen38PrefixSnapshotCache(const Config& config);
+
+bool Qwen38PrefixCheckpointEligible(bool dflash, const std::optional<Qwen38DflashPromptFeatures::Chunk>& saved,
+                                    size_t context_window);
+bool ShouldCaptureQwen38Prefix(size_t remaining, size_t chunk_tokens, bool dflash,
+                               const std::optional<Qwen38DflashPromptFeatures::Chunk>& saved, size_t context_window);
+
+// Packed ranges for fixed-capacity KV/index rows, positions, hidden features, or a full recurrent/dense tensor.
+std::vector<PrefixSnapshotCache::Entry::Range> PlanQwen38PrefixRanges(
+    const std::string& name, const std::vector<int64_t>& shape, size_t element_bytes,
+    size_t tensor_bytes, size_t length, bool index = false);
 
 // A fixed-address device tensor plus the OrtValue that names it in IO bindings.
 struct DevTensor {
@@ -597,6 +610,7 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   void MarkContextFailed() noexcept override;
   bool ContextIsHealthy() const noexcept override;
   bool PrefixCachingEnabled() const override;
+  bool ShouldCapturePrefix(size_t remaining) const override;
   std::shared_ptr<const Qwen38PrefixState> CapturePrefix() override;
   void RestorePrefix(const Qwen38PrefixState& state, std::span<const int32_t> tokens) override;
 

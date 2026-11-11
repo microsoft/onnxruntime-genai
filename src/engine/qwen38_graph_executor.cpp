@@ -130,7 +130,10 @@ void Qwen38GraphSession::SavePrefix(std::span<const int32_t> tokens) {
   if (!device_->PrefixCachingEnabled()) return;
   try {
     auto state = device_->CapturePrefix();
-    if (!state) return;
+    if (!state) {
+      ++prefix_metrics_.publication_refusals;
+      return;
+    }
     auto entry = PrefixEntry{std::vector<int32_t>{tokens.begin(), tokens.end()}, std::move(state)};
     prefixes_.erase(std::remove_if(prefixes_.begin(), prefixes_.end(), [this](const PrefixEntry& existing) {
                       if (existing.state->IsResident()) return false;
@@ -233,9 +236,9 @@ void Qwen38GraphSession::Begin(const Qwen38StepRequest& request) {
     ++prefix_metrics_.lookups;
     prefix_metrics_.queried_tokens += request.tokens.size();
     if (const auto* prefix = FindPrefix(request.tokens)) {
+      device_dirty_ = true;
       device_->RestorePrefix(*prefix->state, prefix->tokens);
       prefilled_ = adopted_prefix_ = prefix->tokens.size();
-      device_dirty_ = true;
       ++prefix_metrics_.matches;
     }
   }
@@ -435,7 +438,8 @@ Qwen38StepResult Qwen38GraphSession::Step(const Qwen38StepRequest& request) {
       prefilled_ += chunk;
       ++work_metrics_.work_records;
       work_metrics_.prefill_tokens += chunk;
-      SavePrefix(request.tokens.first(prefilled_));
+      if (device_->ShouldCapturePrefix(request.tokens.size() - prefilled_))
+        SavePrefix(request.tokens.first(prefilled_));
     }
     result.cached_prefix_tokens = std::exchange(adopted_prefix_, 0);
     pending_cached_prefix_ = result.cached_prefix_tokens;

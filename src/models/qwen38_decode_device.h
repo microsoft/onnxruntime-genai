@@ -124,6 +124,7 @@ class Qwen38DecodeDevice {
   virtual void MarkContextFailed() noexcept {}
   virtual bool ContextIsHealthy() const noexcept { return true; }
   virtual bool PrefixCachingEnabled() const { return false; }
+  virtual bool ShouldCapturePrefix(size_t remaining) const { return remaining == 0; }
   virtual std::shared_ptr<const Qwen38PrefixState> CapturePrefix() { return nullptr; }
   virtual void RestorePrefix(const Qwen38PrefixState&, std::span<const int32_t>) {
     throw std::logic_error("This Qwen device does not support prefix restoration.");

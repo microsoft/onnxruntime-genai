@@ -1802,6 +1802,55 @@ void Qwen38GraphEngine::MarkContextFailed() noexcept { model_.PoisonExecutionCon
 
 bool Qwen38GraphEngine::ContextIsHealthy() const noexcept { return model_.IsExecutionContextHealthy(); }
 
+bool Qwen38PrefixCheckpointEligible(bool dflash, const std::optional<Qwen38DflashPromptFeatures::Chunk>& saved,
+                                    size_t context_window) {
+  return !dflash || (saved && (saved->position == 0 || (context_window != 0 && saved->rows >= context_window)));
+}
+
+bool ShouldCaptureQwen38Prefix(size_t remaining, size_t chunk_tokens, bool dflash,
+                               const std::optional<Qwen38DflashPromptFeatures::Chunk>& saved, size_t context_window) {
+  if (remaining == 0) return true;
+  if (!dflash || chunk_tokens == 0 || !Qwen38PrefixCheckpointEligible(true, saved, context_window)) return false;
+  const size_t final_rows = (remaining - 1) % chunk_tokens + 1;
+  if (context_window != 0 && final_rows >= context_window) return false;
+  // Keep only the last eligible checkpoint when the final chunk cannot reconstruct the drafter.
+  return remaining <= chunk_tokens || context_window == 0 || chunk_tokens < context_window;
+}
+
+std::vector<PrefixSnapshotCache::Entry::Range> PlanQwen38PrefixRanges(
+    const std::string& name, const std::vector<int64_t>& shape, size_t element_bytes,
+    size_t tensor_bytes, size_t length, bool index) {
+  const auto multiply = [](size_t a, size_t b) {
+    if (b != 0 && a > std::numeric_limits<size_t>::max() / b)
+      throw std::overflow_error("Qwen prefix snapshot size overflow.");
+    return a * b;
+  };
+  size_t kept_bytes = tensor_bytes;
+  const bool hidden = name == "d_prompt_hidden" || name == "d_dflash_prompt";
+  if (name == "past_position_ids" || hidden) {
+    if (hidden && (shape.empty() || shape.back() <= 0))
+      throw std::invalid_argument("Qwen prefix hidden shape is invalid.");
+    const size_t row_bytes = hidden ? multiply(static_cast<size_t>(shape.back()), element_bytes) : element_bytes;
+    kept_bytes = multiply(length, row_bytes);
+    if (kept_bytes > tensor_bytes) throw std::out_of_range("Qwen prefix rows exceed the tensor capacity.");
+  } else if (index || (name.size() >= 4 && name.compare(name.size() - 4, 4, ".key") == 0) ||
+             (name.size() >= 6 && name.compare(name.size() - 6, 6, ".value") == 0)) {
+    if (shape.size() < 2 || shape[shape.size() - 2] <= 0 || shape.back() <= 0 || element_bytes == 0)
+      throw std::invalid_argument("Qwen prefix cache shape is invalid.");
+    const size_t rows = static_cast<size_t>(shape[shape.size() - 2]);
+    const size_t row_bytes = multiply(static_cast<size_t>(shape.back()), element_bytes);
+    const size_t stride = multiply(rows, row_bytes);
+    if (tensor_bytes % stride != 0) throw std::invalid_argument("Qwen prefix cache byte size is invalid.");
+    const size_t kept_rows = std::min(rows, index ? length / kQwen38IndexKeyRatio + 1 : length);
+    kept_bytes = multiply(kept_rows, row_bytes);
+    std::vector<PrefixSnapshotCache::Entry::Range> ranges;
+    for (size_t offset = 0; offset < tensor_bytes; offset += stride)
+      ranges.push_back({ranges.size() * kept_bytes, offset, kept_bytes});
+    return ranges;
+  }
+  return {{0, 0, kept_bytes}};
+}
+
 struct Qwen38GraphEngine::PrefixState final : Qwen38PrefixState, PrefixSnapshotCache::Entry {
   struct Buffer {
     uint8_t* address{};
@@ -1829,12 +1878,17 @@ bool Qwen38GraphEngine::PrefixCachingEnabled() const {
   return max_batch_ == 1 && model_.prefix_snapshot_cache_ != nullptr;
 }
 
+bool Qwen38GraphEngine::ShouldCapturePrefix(size_t remaining) const {
+  return ShouldCaptureQwen38Prefix(remaining, PrefillChunkTokens(), dflash_ != nullptr,
+                                   dflash_ ? slot_dflash_prompt_[0].SavedChunk() : std::nullopt,
+                                   dflash_ ? dflash_->ContextWindow() : 0);
+}
+
 std::shared_ptr<const Qwen38PrefixState> Qwen38GraphEngine::CapturePrefix() {
   if (!PrefixCachingEnabled() || decode_started_ || inflight_ || ledger_.Length() == 0) return nullptr;
   const auto saved = dflash_ ? slot_dflash_prompt_[0].SavedChunk() : std::nullopt;
   // Rebuild the drafter from this chunk, never from speculative state left by an earlier owner.
-  if (dflash_ && (!saved || (saved->position != 0 &&
-                             (dflash_->ContextWindow() == 0 || saved->rows < dflash_->ContextWindow())))) {
+  if (!Qwen38PrefixCheckpointEligible(dflash_ != nullptr, saved, dflash_ ? dflash_->ContextWindow() : 0)) {
     return nullptr;
   }
   auto snapshot = std::make_shared<PrefixState>(*this);
@@ -1845,7 +1899,7 @@ std::shared_ptr<const Qwen38PrefixState> Qwen38GraphEngine::CapturePrefix() {
                        std::string dense_name = {}, std::vector<int64_t> shape = {},
                        ONNXTensorElementDataType element_type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED) {
     if (bytes == 0) return;
-    if (ranges.empty()) ranges.push_back({0, 0, bytes});
+    if (ranges.empty()) ranges = PlanQwen38PrefixRanges("", {}, 1, bytes, length);
     size_t packed = 0;
     for (const auto& range : ranges) {
       if (range.bytes > std::numeric_limits<size_t>::max() - packed)
@@ -1860,22 +1914,7 @@ std::shared_ptr<const Qwen38PrefixState> Qwen38GraphEngine::CapturePrefix() {
     snapshot->buffers.push_back({address, bytes, std::move(ranges), std::move(dense_name), std::move(shape), element_type});
   };
   const auto add_cache = [&](const std::string& name, const DevTensor& tensor, bool index) {
-    const auto& shape = tensor.shape;
-    if (name == "past_position_ids") {
-      add(tensor.ptr, tensor.Bytes(), {{0, 0, length * sizeof(int64_t)}});
-    } else if (index || (name.size() >= 4 && name.compare(name.size() - 4, 4, ".key") == 0) ||
-               (name.size() >= 6 && name.compare(name.size() - 6, 6, ".value") == 0)) {
-      const size_t rows = static_cast<size_t>(shape.at(shape.size() - 2));
-      const size_t row_bytes = static_cast<size_t>(shape.back()) * Ort::SizeOf(tensor.type);
-      const size_t kept_rows = std::min(rows, index ? length / kQwen38IndexKeyRatio + 1 : length);
-      const size_t stride = rows * row_bytes;
-      std::vector<PrefixSnapshotCache::Entry::Range> ranges;
-      for (size_t offset = 0; offset < tensor.Bytes(); offset += stride)
-        ranges.push_back({ranges.size() * kept_rows * row_bytes, offset, kept_rows * row_bytes});
-      add(tensor.ptr, tensor.Bytes(), std::move(ranges));
-    } else {
-      add(tensor.ptr, tensor.Bytes());
-    }
+    add(tensor.ptr, tensor.Bytes(), PlanQwen38PrefixRanges(name, tensor.shape, Ort::SizeOf(tensor.type), tensor.Bytes(), length, index));
   };
   for (const auto& [name, tensor] : store_) add_cache(name, *tensor, false);
   for (const auto& [name, tensor] : shared_) add_cache(name, *tensor, true);
@@ -1883,9 +1922,11 @@ std::shared_ptr<const Qwen38PrefixState> Qwen38GraphEngine::CapturePrefix() {
   add(ctx_commit_.data(), ctx_commit_.size());
   add(d_last_hidden_.data(), d_last_hidden_.size());
   if (keep_hidden_ && !dflash_)
-    add(d_prompt_hidden_.data(), d_prompt_hidden_.size(), {{0, 0, length * static_cast<size_t>(hidden_width_) * 2}});
+    add(d_prompt_hidden_.data(), d_prompt_hidden_.size(),
+        PlanQwen38PrefixRanges("d_prompt_hidden", {hidden_width_}, 2, d_prompt_hidden_.size(), length));
   if (saved)
-    add(d_dflash_prompt_.data(), d_dflash_prompt_.size(), {{0, 0, saved->rows * kDflashWidth * 2}});
+    add(d_dflash_prompt_.data(), d_dflash_prompt_.size(),
+        PlanQwen38PrefixRanges("d_dflash_prompt", {kDflashWidth}, 2, d_dflash_prompt_.size(), saved->rows));
   if (fast_ && !fast_->unified) {
     for (const auto& [name, value] : fast_->states) {
       const auto info = value->GetTensorTypeAndShapeInfo();
@@ -3517,19 +3558,32 @@ bool ApplyQwen38DynamicBatchingConfig(Config& config) {
   return has_dynamic_batching_kv;
 }
 
+std::shared_ptr<PrefixSnapshotCache> CreateQwen38PrefixSnapshotCache(const Config& config) {
+  const auto& batching = config.engine.dynamic_batching;
+  if (!batching || !batching->prefix_caching.value_or(false)) return nullptr;
+  const char* disabled = nullptr;
+  if (batching->max_snapshots.value_or(1) == 0)
+    disabled = "max_snapshots is zero";
+  else if (ResolveQwen38MaxBatchSize(config) != 1)
+    disabled = "multiple request slots are configured";
+  else if (batching->snapshot_cache.Configured() && !batching->snapshot_cache.Enabled())
+    disabled = "snapshot_cache tier budgets are all zero";
+  if (disabled) {
+    if (g_log.enabled && g_log.warning)
+      Log("warning", "Native Qwen prefix caching is inactive: %s.", disabled);
+    return nullptr;
+  }
+  const auto& limits = batching->snapshot_cache;
+  const bool resident = !limits.Configured();
+  return std::make_shared<PrefixSnapshotCache>(
+      std::array<size_t, 3>{limits.vram_bytes, limits.ram_bytes, limits.disk_bytes},
+      batching->max_snapshots.value_or(resident ? 1 : std::numeric_limits<size_t>::max()),
+      std::filesystem::path{fs::path{limits.directory}.c_str()}, resident);
+}
+
 Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{PreflightQwen38GraphModelConfig(std::move(config))} {
-  const auto& batching = config_->engine.dynamic_batching;
-  if (batching && batching->prefix_caching.value_or(false) &&
-      batching->max_snapshots.value_or(1) != 0 && ResolveQwen38MaxBatchSize(*config_) == 1) {
-    const auto& limits = batching->snapshot_cache;
-    const bool resident = !limits.Configured();
-    if (resident || limits.Enabled())
-      prefix_snapshot_cache_ = std::make_shared<PrefixSnapshotCache>(
-          std::array<size_t, 3>{limits.vram_bytes, limits.ram_bytes, limits.disk_bytes},
-          batching->max_snapshots.value_or(resident ? 1 : std::numeric_limits<size_t>::max()),
-          std::filesystem::path{fs::path{limits.directory}.c_str()}, resident);
-  }
+  prefix_snapshot_cache_ = CreateQwen38PrefixSnapshotCache(*config_);
   const bool has_dynamic_batching_kv = ApplyQwen38DynamicBatchingConfig(*config_);
   const auto& q = config_->model.qwen38_graph;
   const bool separate_prefill_sessions =
