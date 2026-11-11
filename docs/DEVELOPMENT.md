@@ -57,7 +57,7 @@ NUL bytes. Nested names, packages and external tensor attributes are outside thi
 contract.
 
 Build against an ORT SDK and runtime that expose
-`OrtApi::SessionOptionsSetExternalInitializerFileHandles` (API version 32 or
+`OrtApi::SessionOptionsSetExternalInitializerFileHandles` (API version 33 or
 newer). Older SDKs can still build the library, but descriptor registration fails
 explicitly. An unavailable API, missing file or invalid range is an explicit
 error, not filesystem or CPU fallback. ORT maps initializer ranges rather than

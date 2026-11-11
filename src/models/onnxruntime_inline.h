@@ -1583,7 +1583,7 @@ inline OrtStatus* SetExternalInitializerFileHandles(
     OrtSessionOptions* options, const char* const* names, const FileHandle* handles, size_t count) {
   if constexpr (HasExternalInitializerFileHandlesApi<Api>::value) {
     const auto* ort_api = static_cast<const Api*>(api);
-    if (ort_api != nullptr && api_version >= 32 &&
+    if (ort_api != nullptr && api_version >= 33 &&
         ort_api->SessionOptionsSetExternalInitializerFileHandles != nullptr) {
       return ort_api->SessionOptionsSetExternalInitializerFileHandles(options, names, handles, count);
     }
@@ -1599,7 +1599,7 @@ template <typename Api = OrtApi>
 inline bool IsExternalInitializerFileHandlesApiAvailable() {
   if constexpr (HasExternalInitializerFileHandlesApi<Api>::value) {
     const auto* ort_api = static_cast<const Api*>(api);
-    if (ort_api != nullptr && api_version >= 32 &&
+    if (ort_api != nullptr && api_version >= 33 &&
         ort_api->SessionOptionsSetExternalInitializerFileHandles != nullptr) {
       auto probe = OrtSessionOptions::Create();
       OrtStatus* status = ort_api->SessionOptionsSetExternalInitializerFileHandles(probe.get(), nullptr, nullptr, 0);

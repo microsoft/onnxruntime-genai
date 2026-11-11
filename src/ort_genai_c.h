@@ -66,11 +66,10 @@ typedef struct OgaSpeculativeStats OgaSpeculativeStats;
 typedef struct OgaRuntimeSettings OgaRuntimeSettings;
 typedef struct OgaConfig OgaConfig;
 typedef struct OgaModel OgaModel;
+/** A native Windows file HANDLE on Windows (not a C runtime file descriptor), or a file descriptor on supported non-Windows platforms. */
 #ifdef _WIN32
-/** A native Windows file HANDLE, not a C runtime file descriptor. */
 typedef void* OgaFileHandle;
 #else
-/** A POSIX file descriptor. */
 typedef int OgaFileHandle;
 #endif
 // OgaSequences is an array of token arrays where the number of token arrays can be obtained using
@@ -397,11 +396,12 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigAddExternalInitializerData(
  * reopening paths. Cannot be combined with external initializer buffers.
  * Registered graph-buffer overrides (e.g. decrypted translation graphs) are copied
  * into model-owned storage during model creation for subsequent session recreation.
- * Requires ORT's experimental file-source API; absence is an explicit error.
+ * Requires ORT's `OrtApi::SessionOptionsSetExternalInitializerFileHandles` (API version 33+);
+ * absence or minimal builds return an explicit error.
  * ORT-format direct-model-byte options are unsupported in this mode. Metadata
  * must be a JSON object without embedded NUL bytes.
- * Execution-provider selection is unchanged. Initializers use CPU-backed mappings
- * and ordinary provider upload, not a platform-specific accelerated file loader.
+ * Execution-provider selection is unchanged, and Windows/D3D12 accelerated weight
+ * loading can consume the registered handles without resolving filesystem paths.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigSetModelFileHandles(
     OgaConfig* config, const char* const* names, const OgaFileHandle* handles, size_t count);
