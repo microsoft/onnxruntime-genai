@@ -1788,6 +1788,13 @@ class Model:
         tokenizer.model_max_length = self.context_length
         print(f"Saving processing files in {out_dir} for GenAI")
         tokenizer.save_pretrained(out_dir)
+        try:
+            generation_config = self.load_generation_config(extra_kwargs)
+        except OSError:
+            pass
+        else:
+            # Preserve checkpoint metadata without revalidating inactive sampling hints with save_pretrained.
+            generation_config.to_json_file(os.path.join(out_dir, "generation_config.json"))
 
     def resolve_weight_override_type(self, quant_type):
         descriptor = resolve_dtype(quant_type)
