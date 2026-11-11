@@ -20,6 +20,13 @@ RequestRewindState::~RequestRewindState() = default;
 
 namespace {
 
+std::unique_ptr<Search> CreateRequestSearch(const GeneratorParams& params) {
+  // Bolt's classic Generator exposes EOS; Engine Requests retain the ordinary Search contract.
+  if (params.config.model.type == "nemotron_bolt")
+    return std::make_unique<GreedySearch_Cpu>(params);
+  return CreateSearch(params);
+}
+
 // Preserves the existing host output for every seed that fits in 32 bits, so an Engine turn seeded
 // with a value the classic Generator could also express reproduces exactly the same token stream.
 // A seed with a nonzero high half -- which the classic int seed could never express -- mixes both
@@ -141,7 +148,7 @@ Request::Request(
       current_seed_basis_{InitialSeedBasis(model.config_->search.random_seed)},
       rng_{MakeHostRandomGenerator(current_seed_basis_)},
       draft_rng_{MakeDraftRandomGenerator(current_seed_basis_)},
-      search_{CreateSearch(*params_)} {
+      search_{CreateRequestSearch(*params_)} {
   draft_tokens_.reserve(kMaxDraftTokensPerStep);
 
   // The engine drives one independent search per request, so completion is batched: see
@@ -1536,7 +1543,7 @@ RequestRewindState Request::PrepareRewindToStartOfTurn(
   state.sequence_length = boundary->sequence_length;
   state.retained_turn_count =
       static_cast<size_t>(boundary - turn_boundaries_.begin());
-  state.search = CreateSearch(*params_);
+  state.search = CreateRequestSearch(*params_);
   state.search->DeferCompletion(true);
   if (state.sequence_length != 0) {
     const std::span<const int32_t> retained_tokens{

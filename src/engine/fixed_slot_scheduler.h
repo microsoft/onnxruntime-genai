@@ -15,6 +15,7 @@ struct FixedSlotSession {
   virtual ~FixedSlotSession() = default;
   virtual size_t MaxRequestLength() const = 0;
   virtual size_t MaxBatchSize() const = 0;
+  virtual const PrefixCacheMetrics* PrefixMetrics() const { return nullptr; }
   // Quiesce all work referencing a slot and inspect pending status before returning it for reuse.
   virtual void ReleaseSlot(size_t slot) = 0;
   virtual void ReleaseSlotForTeardown(size_t slot) noexcept = 0;
@@ -37,6 +38,7 @@ struct FixedSlotCacheManager final : CacheManager {
   size_t MaxBatchSize() const override { return max_slots_; }
   size_t MaxStaticBatchSize() const override { return max_slots_; }
   size_t MaxStaticRequestLength() const override { return session_->MaxRequestLength(); }
+  const PrefixCacheMetrics* PrefixMetrics() const override { return session_->PrefixMetrics(); }
   std::vector<std::shared_ptr<Request>> AllocatedRequests() const override;
   bool IsResident(const std::shared_ptr<Request>& request) const override;
   size_t ResidentRequestCount() const override;

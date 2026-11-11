@@ -4,7 +4,9 @@
 
 #include "model.h"
 #include "dflash2_drafter.h"
+#include "engine/prefix_cache.h"
 #include <deque>
+#include <mutex>
 
 namespace Generators {
 
@@ -13,6 +15,31 @@ struct NemotronBoltTestAccess;
 }
 
 inline constexpr size_t kBoltVerifyRows = 8;
+
+struct NemotronBoltPrefixCache {
+  struct Entry : PrefixSnapshotCache::Entry {
+    std::vector<int32_t> tokens;
+    std::vector<std::vector<Range>> ranges;
+    size_t aux_start{};
+    int32_t state_row{};
+    int32_t anchor{};
+  };
+
+  explicit NemotronBoltPrefixCache(std::shared_ptr<PrefixSnapshotCache> storage)
+      : storage_{std::move(storage)} {}
+  std::shared_ptr<Entry> Find(std::span<const int32_t> tokens);
+  void Capture(std::span<const int32_t> tokens, std::span<Tensor* const> caches,
+               int32_t state_row, int32_t anchor, Tensor& aux, size_t aux_start, size_t aux_row_bytes);
+  void Restore(const Entry& entry, std::span<Tensor* const> caches, Tensor& aux,
+               size_t aux_start, size_t aux_row_bytes);
+  const PrefixCacheMetrics& Metrics() const { return metrics_; }
+
+ private:
+  void Prune();
+  std::shared_ptr<PrefixSnapshotCache> storage_;
+  std::vector<std::shared_ptr<Entry>> entries_;
+  PrefixCacheMetrics metrics_;
+};
 
 void ValidateNemotronBoltSearch(const GeneratorParams& params);
 size_t NemotronBoltAcceptedPrefix(std::span<const int32_t> drafts,
@@ -30,6 +57,9 @@ struct NemotronBoltModel : Model {
   std::shared_ptr<Dflash2Model> drafter_model_;
   size_t capacity_{};
   size_t aux_width_{};
+  // Target and drafter CUDA graph sessions, and their shared snapshot index, have one host owner at a time.
+  mutable std::mutex execution_mutex_;
+  std::unique_ptr<NemotronBoltPrefixCache> prefix_cache_;
 };
 
 // The target owns dense attention K/V and eight recurrent-state rows. Only the drafter is paged.
@@ -43,6 +73,7 @@ struct NemotronBoltState : State {
   void Prefill(std::span<const int32_t> tokens);
   int32_t NextToken(size_t public_length);
   SpeculativeStats Stats() const;
+  size_t CachedPromptTokens() const { return cached_prompt_tokens_; }
 
  private:
   friend struct test::NemotronBoltTestAccess;
@@ -68,6 +99,7 @@ struct NemotronBoltState : State {
   std::vector<int32_t> drafts_;
   std::deque<int32_t> pending_;
   bool prefilled_{};
+  size_t cached_prompt_tokens_{};
   SpeculativeStats stats_;
 };
 

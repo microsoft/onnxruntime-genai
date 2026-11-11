@@ -2428,6 +2428,52 @@ tombstone.
 
 Changes to shared types such as `Request`, `ScheduledRequests`, `ModelExecutor`, or `SimpleDecoder` should be checked against both paths. This document should be updated only where behavior is shared or where the dynamic path changes.
 
+### Native Bolt prefix caching
+
+The `nemotron_bolt` CUDA backend supports the single-slot Engine as well as the classic Generator.
+It selects greedy tokens internally; sampling, penalties, guidance, per-turn seeds, external prefill
+chunking, and multi-slot batching remain unsupported. The Engine applies its normal EOS, stop-string,
+and per-turn token limits. A new turn replays the Request's authoritative history, never buffered
+speculative tokens from the previous turn. As with other fixed-slot backends, displaced Requests
+cannot continue until their history is explicitly replayed in a new Request.
+
+Prefix reuse is opt-in and shared by Generators and Engines using the same Model:
+
+```json
+{
+  "engine": {
+    "dynamic_batching": {
+      "max_batch_size": 1,
+      "prefix_caching": true,
+      "max_snapshots": 2,
+      "snapshot_cache": {
+        "ram_bytes": 2147483648
+      }
+    }
+  }
+}
+```
+
+For Bolt this configuration selects snapshot policy, not paged execution. `num_blocks`,
+`gpu_utilization_factor`, and device-memory budgeting are unsupported. The native target always
+consumes eight-token blocks; one Engine prefill step processes the complete prompt synchronously.
+Snapshot storage uses the existing `snapshot_cache` VRAM/RAM/disk byte budgets and count limit.
+Without an explicit storage policy, at most one device-resident checkpoint is retained.
+`prefix_caching: false`, `max_snapshots: 0`, or explicitly zero storage budgets disable reuse.
+A windowed DFlash2 drafter is required.
+
+Only the last complete eight-token prompt boundary is published. A hit restores both dense KV heads,
+the committed recurrent row, the pending target prediction, and the trailing committed auxiliary
+features needed to rebuild the drafter. An unaligned tail is recomputed, preserving the target's
+original block boundaries. The longest exact token-prefix match is used; divergent suffixes are
+prefilled normally. Snapshots survive Request close and Generator reset/destruction, but not Model
+destruction. Snapshot allocation or spill-publication failures refuse caching without failing
+generation; restoration and device errors still fail the operation.
+
+Engine turn usage reports only cached tokens belonging to the current input, not replayed history
+from earlier turns. `prefix_cache_stats` reports successful Engine adoptions. The classic Generator
+benefits from reuse but does not expose Engine turn-usage accounting.
+
 ### Static backend that selects its own tokens
 
 The `qwen38_flash_graph` model type (Qwen3.8-Flash CUDA-graph decode with a built-in multi-token-prediction loop: an MTP head
