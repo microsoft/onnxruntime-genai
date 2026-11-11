@@ -306,12 +306,19 @@ int main(int argc, char* argv[]) {
   if (mode != "retained" && mode != "threaded" && mode != "recreated" &&
       mode != "explicit" && mode != "prime-only" && mode != "disabled" && mode != "ci-disabled" &&
       mode != "prime-failed" && mode != "prime-allocation-failed" &&
-      mode != "upload-at-exit" && mode != "upload-after-reinit") {
+      mode != "upload-at-exit" && mode != "upload-after-reinit" && mode != "upload-overridden-argv0") {
     Fail(32, "unknown shutdown regression mode");
   }
   auto& state = GetState();
   state.expected_process_name = std::filesystem::path(argv[0]).filename().string();
-  state.upload_at_exit = mode == "upload-at-exit" || mode == "upload-after-reinit";
+  if (mode == "upload-overridden-argv0") {
+    constexpr char overridden[] = "host --api-key=private";
+    const auto capacity = std::string_view(argv[0]).size() + 1;
+    if (capacity < sizeof(overridden)) Fail(32, "argv[0] buffer is too small for the regression");
+    std::snprintf(argv[0], capacity, "%s", overridden);
+  }
+  state.upload_at_exit =
+      mode == "upload-at-exit" || mode == "upload-after-reinit" || mode == "upload-overridden-argv0";
   // Register after the singleton, but before the SDK's lazy version and auth mutex.
   // The original SDK destroys both before this callback releases the blocked encoder.
   if (state.upload_at_exit) {

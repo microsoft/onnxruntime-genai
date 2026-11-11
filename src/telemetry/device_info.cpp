@@ -163,10 +163,11 @@ std::string GetProcessName() {
   }
   return TelemetryInternal::ProcessNameFromTelemetryInput(BoundedTelemetryCString(path.data(), path.size()));
 #elif defined(__linux__) || defined(__ANDROID__)
-  const auto cmdline = ReadBoundedFile("/proc/self/cmdline");
-  // A missing terminator could mean argv[0] was truncated before its basename.
-  if (cmdline.find('\0') == std::string::npos) return {};
-  return TelemetryInternal::ProcessNameFromTelemetryInput(cmdline);
+  std::string path(kMaxTelemetryInputBytes, '\0');
+  const auto length = readlink("/proc/self/exe", path.data(), path.size());
+  if (length <= 0 || static_cast<size_t>(length) >= path.size()) return {};
+  path.resize(static_cast<size_t>(length));
+  return TelemetryInternal::ProcessNameFromTelemetryInput(path);
 #else
   return {};
 #endif

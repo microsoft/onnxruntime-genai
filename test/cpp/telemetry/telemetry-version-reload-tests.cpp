@@ -1,8 +1,8 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include <bit>
 #include <cstdio>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -37,16 +37,19 @@ bool RunCycle(const std::string& path) {
 
   using Getter = const char* (*)();
 #if defined(_WIN32)
-  const auto getter = std::bit_cast<Getter>(GetProcAddress(static_cast<HMODULE>(module.get()), "TelemetryReloadSdkVersion"));
+  const auto symbol = GetProcAddress(static_cast<HMODULE>(module.get()), "TelemetryReloadSdkVersion");
 #else
-  const auto getter = std::bit_cast<Getter>(dlsym(module.get(), "TelemetryReloadSdkVersion"));
+  const auto symbol = dlsym(module.get(), "TelemetryReloadSdkVersion");
 #endif
+  Getter getter{};
+  static_assert(sizeof(getter) == sizeof(symbol));
+  std::memcpy(&getter, &symbol, sizeof(getter));
   if (!getter) {
     return false;
   }
 
   const std::string_view version{getter()};
-  if (!version.starts_with("EVT-") || version.find("3.10.310.1") == std::string_view::npos ||
+  if (version.substr(0, 4) != "EVT-" || version.find("3.10.310.1") == std::string_view::npos ||
       version.data() != getter()) {
     std::fputs("FAIL: unexpected SDK version value or unstable storage\n", stderr);
     return false;

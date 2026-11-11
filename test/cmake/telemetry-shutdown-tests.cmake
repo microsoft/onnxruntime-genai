@@ -5,7 +5,7 @@ if(NOT ENABLE_TELEMETRY OR CMAKE_CROSSCOMPILING OR ANDROID OR IOS)
   return()
 endif()
 
-foreach(mode missing preserved sqlite-preserved zlib-preserved)
+foreach(mode missing preserved sqlite-preserved zlib-preserved sqlite-alternate sqlite-both)
   add_test(NAME TelemetryAppleDependencies-${mode}
     COMMAND ${CMAKE_COMMAND}
       -S "${CMAKE_CURRENT_LIST_DIR}/telemetry-dependencies"
@@ -208,8 +208,8 @@ if(WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
   endif()
   add_executable(telemetry_version_reload_tests
     "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry/telemetry-version-reload-tests.cpp")
-  target_compile_features(telemetry_version_reload_fixture PRIVATE cxx_std_20)
-  target_compile_features(telemetry_version_reload_tests PRIVATE cxx_std_20)
+  target_compile_features(telemetry_version_reload_fixture PRIVATE cxx_std_17)
+  target_compile_features(telemetry_version_reload_tests PRIVATE cxx_std_17)
   target_link_libraries(telemetry_version_reload_tests PRIVATE ${CMAKE_DL_LIBS})
   add_dependencies(telemetry_version_reload_tests telemetry_version_reload_fixture)
   add_test(NAME TelemetryVersionReload
@@ -217,7 +217,11 @@ if(WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set_tests_properties(TelemetryVersionReload PROPERTIES TIMEOUT 30)
 endif()
 
-foreach(mode retained threaded recreated explicit prime-only disabled ci-disabled prime-failed prime-allocation-failed upload-at-exit upload-after-reinit)
+set(shutdown_modes retained threaded recreated explicit prime-only disabled ci-disabled prime-failed prime-allocation-failed upload-at-exit upload-after-reinit)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  list(APPEND shutdown_modes upload-overridden-argv0)
+endif()
+foreach(mode IN LISTS shutdown_modes)
   set(home "${CMAKE_CURRENT_BINARY_DIR}/telemetry-shutdown-${mode}")
   file(MAKE_DIRECTORY "${home}")
   set(disabled 0)
