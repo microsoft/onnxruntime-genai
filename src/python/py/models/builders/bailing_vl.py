@@ -57,6 +57,9 @@ class BailingVLModel(Model):
         )
         if hasattr(config, "quantization_config"):
             text_config.quantization_config = deepcopy(config.quantization_config)
+        for name in ("bot_token_id", "eot_token_id", "bor_token_id", "eor_token_id"):
+            if hasattr(config, name):
+                setattr(text_config, name, getattr(config, name))
         self.decoder = BailingVLTextModel(text_config, io_dtype, onnx_dtype, ep, cache_dir, deepcopy(extra_options))
         if not self.text_only and self.decoder.filename in {"embedding.onnx", "vision.onnx"}:
             raise ValueError("Ling decoder filename conflicts with an emitted companion graph")
@@ -146,6 +149,13 @@ class BailingVLTextModel(BailingMoeV3Model):
         self.rope_attrs["mrope_section"] = list(config.mrope_section)
         self.rope_attrs["op_type"] = "RotaryEmbedding" if extra_options.get("text_only", False) else "MRotaryEmbedding"
         self.rope_attrs["interleaved"] = 1
+        if self.rope_attrs["op_type"] == "MRotaryEmbedding":
+            self.rope_attrs["position_start"] = -self.original_context_length
+            self.rope_attrs["cache_length"] = self.original_context_length + self.context_length
+            self.rope_attrs["cast"]["use_fp32"] = True
+            self.model.metadata_props["com.microsoft.genai.vision_position_range"] = (
+                f"{self.rope_attrs['position_start']}:{self.context_length}"
+            )
         self.get_mrope_owners(self.mla_attrs["qk_rope_head_dim"])
 
     def get_mrope_owners(self, rotary_dim):

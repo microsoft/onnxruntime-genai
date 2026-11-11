@@ -74,13 +74,13 @@ void MediaItem::ReleaseFeatures() {
   accounting->device_bytes -= feature_bytes;
 }
 
-std::array<int64_t, 3> MediaPosition(std::span<const MediaSpan> media, size_t row, size_t merge_size) {
+std::array<int64_t, 3> MediaPosition(std::span<const MediaSpan> media, size_t row) {
   std::array<int64_t, 3> result;
-  MediaPositions(media, row, merge_size, {std::span<int64_t>{&result[0], 1}, std::span<int64_t>{&result[1], 1}, std::span<int64_t>{&result[2], 1}});
+  MediaPositions(media, row, {std::span<int64_t>{&result[0], 1}, std::span<int64_t>{&result[1], 1}, std::span<int64_t>{&result[2], 1}});
   return result;
 }
 
-void MediaPositions(std::span<const MediaSpan> media, size_t first_row, size_t merge_size,
+void MediaPositions(std::span<const MediaSpan> media, size_t first_row,
                     const std::array<std::span<int64_t>, 3>& positions) {
   const size_t count = positions[0].size();
   if (positions[1].size() != count || positions[2].size() != count)
@@ -92,8 +92,7 @@ void MediaPositions(std::span<const MediaSpan> media, size_t first_row, size_t m
     const size_t row = first_row + index;
     while (span_index < media.size() && row >= media[span_index].start + media[span_index].item->rows) {
       const auto& span = media[span_index++];
-      delta += std::max(span.item->grid[1], span.item->grid[2]) / static_cast<int64_t>(merge_size) -
-               static_cast<int64_t>(span.item->rows);
+      delta += span.item->positions.extent - static_cast<int64_t>(span.item->rows);
     }
     if (span_index == media.size() || row < media[span_index].start) {
       const size_t end = span_index == media.size() ? count : std::min(count, media[span_index].start - first_row);
@@ -103,14 +102,15 @@ void MediaPositions(std::span<const MediaSpan> media, size_t first_row, size_t m
       continue;
     }
     const auto& span = media[span_index];
-    const auto width = span.item->grid[2] / static_cast<int64_t>(merge_size);
+    const auto& layout = span.item->positions;
+    const auto width = layout.width;
     const auto base = static_cast<int64_t>(span.start) + delta;
     const size_t end = index + std::min(count - index, span.item->rows - (row - span.start));
     for (; index < end; ++index) {
       const auto offset = static_cast<int64_t>(first_row + index - span.start);
-      positions[0][index] = base;
-      positions[1][index] = base + offset / width;
-      positions[2][index] = base + offset % width;
+      positions[0][index] = base + layout.origin[0];
+      positions[1][index] = base + layout.origin[1] + offset / width;
+      positions[2][index] = base + layout.origin[2] + offset % width;
     }
   }
 }
@@ -324,6 +324,7 @@ PreparedMediaTurn MediaStore::Prepare(const std::string& prompt, std::span<const
         throw std::overflow_error("Engine media prefix identity space is exhausted.");
       item = std::make_shared<MediaItem>();
       item->grid = {grid[0], grid[1], grid[2]};
+      item->positions = GetImagePositionLayout(config, item->grid);
       item->rows = rows;
       item->prefix_base = static_cast<int32_t>(next_prefix_row_);
       next_prefix_row_ += rows;

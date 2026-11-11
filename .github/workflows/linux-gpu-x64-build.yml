@@ -219,7 +219,7 @@ jobs:
       # The onnxruntime-gpu nightly carries the CPU and CUDA kernels from one revision. It is built for CUDA 13, which
       # the A10 runner image's driver supports (ORT's CUDA 13 CI uses the same image), so the CUDA 13 runtime
       # libraries come from PyPI instead of the CUDA 12.8 toolkit in the docker image.
-      - name: Run Bailing CPU/CUDA kernel regressions with nightly ONNX Runtime
+      - name: Run Bailing routing, KDA and clipped-expert regressions with nightly ONNX Runtime
         run: |
           set -e -x
           docker run \

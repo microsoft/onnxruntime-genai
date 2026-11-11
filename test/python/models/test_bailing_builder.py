@@ -359,6 +359,8 @@ def test_ling_composite_config_preserves_component_and_position_contracts(tmp_pa
         image_token_id=29,
         vision_start_token_id=30,
     )
+    markers = {"<tool_call>": 24, "</tool_call>": 25, "<think>": 26, "</think>": 27}
+    builder.add_special_token_ids(config, SimpleNamespace(get_vocab=lambda: markers))
     model = BailingVLModel(
         config,
         ir.DataType.BFLOAT16,
@@ -370,6 +372,13 @@ def test_ling_composite_config_preserves_component_and_position_contracts(tmp_pa
     model.decoder.make_inputs_and_outputs()
     model.make_genai_config(config, {}, str(tmp_path))
     saved = json.loads((tmp_path / "genai_config.json").read_text())["model"]
+    for name, token in (
+        ("bot_token_id", "<tool_call>"),
+        ("eot_token_id", "</tool_call>"),
+        ("bor_token_id", "<think>"),
+        ("eor_token_id", "</think>"),
+    ):
+        assert saved[name] == markers[token]
     assert saved["type"] == ("bailing_hybrid" if text_only else "bailing_moe_v3_vl")
     assert saved["decoder"]["session_options"]["provider_options"][0]["cuda"]["use_tf32"] == "0"
     with pytest.raises(ValueError, match="FP32 routing"):
@@ -719,38 +728,71 @@ def test_direct_query_loader_preserves_source_pair_order(tmp_path, multimodal):
         weights.close()
 
 
-@pytest.mark.parametrize("text_only,text_coordinates", [(False, False), (False, True), (True, True)])
-def test_ling_packed_rotary_matches_adjacent_pairs_and_reuses_current_rows(tmp_path, text_only, text_coordinates):
+@pytest.mark.parametrize(
+    "text_only,text_coordinates,dtype,quantized",
+    [
+        (False, False, ir.DataType.FLOAT16, False),
+        (False, True, ir.DataType.FLOAT16, False),
+        (True, True, ir.DataType.FLOAT16, False),
+        (False, False, ir.DataType.BFLOAT16, False),
+        (False, True, ir.DataType.BFLOAT16, False),
+        (False, False, ir.DataType.FLOAT16, True),
+        (False, False, ir.DataType.BFLOAT16, True),
+    ],
+)
+def test_ling_packed_rotary_matches_adjacent_pairs_and_reuses_current_rows(
+    tmp_path, text_only, text_coordinates, dtype, quantized
+):
     model = _model(
         tmp_path,
         model_class=BailingVLTextModel,
         use_paged_attention=True,
-        dtype=ir.DataType.FLOAT16,
+        dtype=dtype,
+        precision=ir.DataType.INT4 if quantized else dtype,
+        op_types_to_quantize=["MatMul", "Gather"],
         ep="cuda",
         text_only=text_only,
         config_overrides={"q_lora_rank": None, "mrope_section": [8, 12, 12]},
     )
     position_shape = ["num_tokens"] if text_only else [3, "num_tokens"]
     model.graph.inputs.append(model.make_value("position_ids", ir.DataType.INT64, position_shape))
-    positions = np.array([[1, 3, 5]] * 3 if text_coordinates else [[0, 3, 5], [2, 4, 6], [7, 8, 9]], dtype=np.int64)
+    positions = np.array(
+        [[1, 3, 5]] * 3 if text_coordinates else [[0, 3, 127], [-128, 4, 126], [127, -8, -127]], dtype=np.int64
+    )
     feeds = {"position_ids": positions[0] if text_only else positions}
     expected = []
     for label, heads in (("query", 2), ("key", 1)):
         shape = [3, heads, 64]
         data = np.sin(np.arange(np.prod(shape), dtype=np.float32) * 0.03).reshape(shape).astype(np.float16)
-        feeds[label] = data.reshape(3, -1)
-        model.graph.inputs.append(model.make_value(label, ir.DataType.FLOAT16, ["num_tokens", heads * 64]))
-        output = model.make_mla_rope(f"/{label}/rotary", label, heads, ["num_tokens"])
+        if dtype == ir.DataType.BFLOAT16:
+            data = torch.from_numpy(data).bfloat16().float().numpy()
+        feeds[label] = data.astype(np.float32).reshape(3, -1)
+        input_shape = ["num_tokens", heads * 64]
+        model.graph.inputs.append(model.make_value(label, ir.DataType.FLOAT, input_shape))
+        model.make_cast(f"/{label}/Cast", label, dtype, input_shape)
+        output = model.make_mla_rope(f"/{label}/rotary", f"/{label}/Cast/output_0", heads, ["num_tokens"])
+        model.make_cast(f"/{label}/Result", output, ir.DataType.FLOAT, input_shape)
+        output = f"/{label}/Result/output_0"
         model.graph.outputs.append(model.values[output])
         owners = np.array([1, 2] * 12 + [0] * 8)
         frequencies = 1 / 10000 ** (np.arange(32, dtype=np.float32) * 2 / 64)
-        angles = positions[owners, :].T * frequencies
-        cos, sin = np.cos(angles).astype(np.float16)[:, None], np.sin(angles).astype(np.float16)[:, None]
-        rotated = np.empty_like(data)
-        rotated[..., 0::2] = data[..., 0::2] * cos - data[..., 1::2] * sin
-        rotated[..., 1::2] = data[..., 1::2] * cos + data[..., 0::2] * sin
-        expected.append(rotated.reshape(3, -1))
-    session = ort.InferenceSession(ir.to_proto(model.model).SerializeToString(), providers=["CPUExecutionProvider"])
+        angles = positions[owners, :].T.astype(np.float32) * frequencies
+        cos, sin = np.cos(angles).astype(np.float32)[:, None], np.sin(angles).astype(np.float32)[:, None]
+        values = data.astype(np.float32)
+        rotated = np.empty_like(values)
+        rotated[..., 0::2] = values[..., 0::2] * cos - values[..., 1::2] * sin
+        rotated[..., 1::2] = values[..., 1::2] * cos + values[..., 0::2] * sin
+        target_dtype = torch.bfloat16 if dtype == ir.DataType.BFLOAT16 else torch.float16
+        expected.append(torch.from_numpy(rotated).to(target_dtype).float().numpy().reshape(3, -1))
+    model.save_model(str(tmp_path))
+    serialized = onnx.load(tmp_path / model.filename, load_external_data=False)
+    metadata = {entry.key: entry.value for entry in serialized.metadata_props}
+    if not text_only:
+        assert metadata["com.microsoft.genai.vision_position_range"] == "-128:128"
+        initializers = {tensor.name: tensor for tensor in serialized.graph.initializer}
+        assert initializers["cos_cache"].data_type == onnx.TensorProto.FLOAT
+        assert initializers["sin_cache"].data_type == onnx.TensorProto.FLOAT
+    session = ort.InferenceSession(str(tmp_path / model.filename), providers=["CPUExecutionProvider"])
     actual = session.run(None, feeds)
     for output, reference in zip(actual, expected, strict=True):
         np.testing.assert_allclose(output, reference, rtol=2e-3, atol=1e-3)
@@ -1138,6 +1180,8 @@ def kernel_session(model, provider, required_op):
         required_op == "GatedDeltaNet" and "gate_lower_bound" not in schemas[required_op].attributes
     ):
         unavailable(f"Requires an ONNX Runtime build with {required_op} from ORT PR #33817")
+    if required_op in {"MoE", "QMoE"} and "swiglu_limit_after_activation" not in schemas[required_op].attributes:
+        unavailable(f"Requires an ONNX Runtime build with post-SiLU {required_op} clipping from ORT PR #33954")
     if provider == "CUDAExecutionProvider":
         try:
             prepare_cuda_provider()
@@ -1152,6 +1196,56 @@ def kernel_session(model, provider, required_op):
     return ort.InferenceSession(
         ir.serde.serialize_model(model.model).SerializeToString(), sess_options=options, providers=[provider]
     )
+
+
+@pytest.mark.parametrize("precision", [ir.DataType.FLOAT16, ir.DataType.INT4])
+def test_builder_emitted_clipped_experts_execute_source_post_silu_order(tmp_path, precision):
+    model = _model(
+        tmp_path,
+        dtype=ir.DataType.FLOAT16,
+        precision=precision,
+        ep="cuda",
+        use_paged_attention=True,
+        config_overrides={
+            "num_experts": 2,
+            "num_experts_per_tok": 1,
+            "n_group": 1,
+            "topk_group": 1,
+            "norm_topk_prob": True,
+            "moe_shared_expert_intermediate_size": 128,
+            "expert_swiglu_limit_list": [0, 0, 4, 0],
+        },
+    )
+    hidden = torch.zeros(3, model.hidden_size, dtype=torch.float16)
+    hidden[:, 0] = torch.tensor([1, 0.4, -1], dtype=torch.float16)
+    gate_up = torch.zeros(2, 2 * model.intermediate_size, model.hidden_size)
+    gate_up[:, 0, 0] = 10
+    gate_up[:, model.intermediate_size, 0] = 2
+    down = torch.zeros(2, model.hidden_size, model.intermediate_size)
+    down[:, 0, 0] = 1
+    shared = SimpleNamespace(
+        gate_proj=TensorModule(weight=torch.zeros(128, model.hidden_size)),
+        up_proj=TensorModule(weight=torch.zeros(128, model.hidden_size)),
+        down_proj=TensorModule(weight=torch.zeros(model.hidden_size, 128)),
+    )
+    moe = SimpleNamespace(
+        gate=TensorModule(weight=torch.zeros(2, model.hidden_size)),
+        expert_bias=torch.zeros(2),
+        experts=SimpleNamespace(gate_up_proj=gate_up, down_proj=down),
+        shared_experts=shared,
+    )
+    model.graph.inputs.append(model.make_value("hidden", model.io_dtype, list(hidden.shape)))
+    model.make_moe(2, moe, "hidden")
+    model.graph.outputs.append(model.values[model.layernorm_attrs["skip_input"]])
+    actual = kernel_session(model, "CUDAExecutionProvider", model.moe_attrs["op_type"]).run(
+        None, {"hidden": hidden.numpy()}
+    )[0]
+    expected = torch.zeros_like(hidden)
+    gates = (hidden[:, 0].float() * 10).half().float()
+    ups = (hidden[:, 0].float() * 2).half().float()
+    expected[:, 0] = torch.nn.functional.silu(gates).clamp(max=4) * ups.clamp(-4, 4)
+    np.testing.assert_allclose(actual, expected.numpy(), rtol=2e-3, atol=1e-3)
+    assert actual[0, 0] == 8
 
 
 @pytest.mark.parametrize("provider", ["CPUExecutionProvider", "CUDAExecutionProvider"])

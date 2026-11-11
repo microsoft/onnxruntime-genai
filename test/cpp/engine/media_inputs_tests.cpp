@@ -271,18 +271,20 @@ TEST(MediaInputsTest, LeavesUnknownHeaderDimensionsUnavailable) {
 TEST(MediaInputsTest, PositionsUseGeometryRatherThanExpandedRowCount) {
   auto first = std::make_shared<MediaItem>();
   first->grid = {1, 4, 6};
+  first->positions = {{0, 0, 0}, 3, 3};
   first->rows = 6;
   auto second = std::make_shared<MediaItem>();
   second->grid = {1, 4, 4};
+  second->positions = {{0, 0, 0}, 2, 2};
   second->rows = 4;
   const std::array<MediaSpan, 2> media{{{3, first}, {12, second}}};
-  EXPECT_EQ(MediaPosition(media, 2, 2), (std::array<int64_t, 3>{2, 2, 2}));
-  EXPECT_EQ(MediaPosition(media, 3, 2), (std::array<int64_t, 3>{3, 3, 3}));
-  EXPECT_EQ(MediaPosition(media, 7, 2), (std::array<int64_t, 3>{3, 4, 4}));
-  EXPECT_EQ(MediaPosition(media, 9, 2), (std::array<int64_t, 3>{6, 6, 6}));
-  EXPECT_EQ(MediaPosition(media, 13, 2), (std::array<int64_t, 3>{9, 9, 10}));
-  EXPECT_EQ(MediaPosition(media, 16, 2), (std::array<int64_t, 3>{11, 11, 11}));
-  EXPECT_EQ(MediaPosition(media, 7, 2), (std::array<int64_t, 3>{3, 4, 4}));
+  EXPECT_EQ(MediaPosition(media, 2), (std::array<int64_t, 3>{2, 2, 2}));
+  EXPECT_EQ(MediaPosition(media, 3), (std::array<int64_t, 3>{3, 3, 3}));
+  EXPECT_EQ(MediaPosition(media, 7), (std::array<int64_t, 3>{3, 4, 4}));
+  EXPECT_EQ(MediaPosition(media, 9), (std::array<int64_t, 3>{6, 6, 6}));
+  EXPECT_EQ(MediaPosition(media, 13), (std::array<int64_t, 3>{9, 9, 10}));
+  EXPECT_EQ(MediaPosition(media, 16), (std::array<int64_t, 3>{11, 11, 11}));
+  EXPECT_EQ(MediaPosition(media, 7), (std::array<int64_t, 3>{3, 4, 4}));
 }
 
 TEST(MediaInputsTest, ResizePreflightMatchesNativeTieAndMinimumPixelRules) {
@@ -297,9 +299,11 @@ TEST(MediaInputsTest, ResizePreflightMatchesNativeTieAndMinimumPixelRules) {
 TEST(MediaInputsTest, PositionRangesPreserveImageBoundariesAndLaterTextOffsets) {
   auto first = std::make_shared<MediaItem>();
   first->grid = {1, 4, 6};
+  first->positions = {{0, 0, 0}, 3, 3};
   first->rows = 6;
   auto second = std::make_shared<MediaItem>();
   second->grid = {1, 4, 4};
+  second->positions = {{0, 0, 0}, 2, 2};
   second->rows = 4;
   const std::array<MediaSpan, 2> media{{{3, first}, {12, second}}};
   const std::array<std::array<int64_t, 20>, 3> expected{{
@@ -311,10 +315,43 @@ TEST(MediaInputsTest, PositionRangesPreserveImageBoundariesAndLaterTextOffsets) 
                                      std::pair{14u, 4u}, std::pair{20u, 0u}}) {
     std::array<std::vector<int64_t>, 3> actual;
     for (auto& plane : actual) plane.resize(count);
-    MediaPositions(media, start, 2, {actual[0], actual[1], actual[2]});
+    MediaPositions(media, start, {actual[0], actual[1], actual[2]});
     for (size_t plane = 0; plane < 3; ++plane)
       EXPECT_TRUE(std::equal(actual[plane].begin(), actual[plane].end(), expected[plane].begin() + start));
   }
+}
+
+TEST(MediaInputsTest, LingPositionsCenterEvenAndOddGridsAndContinueFromTime) {
+  Config::Model config;
+  config.type = "bailing_moe_v3_vl";
+  config.vision.spatial_merge_size = 2;
+  auto first = std::make_shared<MediaItem>();
+  first->grid = {1, 4, 4};
+  first->rows = 4;
+  first->positions = GetImagePositionLayout(config, first->grid);
+  auto second = std::make_shared<MediaItem>();
+  second->grid = {1, 6, 10};
+  second->rows = 15;
+  second->positions = GetImagePositionLayout(config, second->grid);
+  const std::array<MediaSpan, 2> media{{{1, first}, {7, second}}};
+  const std::array<std::array<int64_t, 24>, 3> expected{{
+      {0, 1, 1, 1, 1, 2, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 5, 6},
+      {0, 1, 1, 2, 2, 2, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 6},
+      {0, 1, 2, 1, 2, 2, 3, 2, 3, 4, 5, 6, 2, 3, 4, 5, 6, 2, 3, 4, 5, 6, 5, 6},
+  }};
+  for (size_t start = 0; start < expected[0].size(); ++start) {
+    for (size_t count : {size_t{1}, std::min(size_t{7}, expected[0].size() - start)}) {
+      std::array<std::vector<int64_t>, 3> actual;
+      for (auto& plane : actual) plane.resize(count);
+      MediaPositions(media, start, {actual[0], actual[1], actual[2]});
+      for (size_t plane = 0; plane < 3; ++plane)
+        EXPECT_TRUE(std::equal(actual[plane].begin(), actual[plane].end(), expected[plane].begin() + start));
+    }
+  }
+  second->positions = GetImagePositionLayout(config, {1, 6, 10});
+  const std::array<MediaSpan, 1> early{{{1, second}}};
+  EXPECT_EQ(MediaPosition(early, 1), (std::array<int64_t, 3>{1, 0, -1}));
+  EXPECT_EQ(MediaPosition(early, 16), (std::array<int64_t, 3>{2, 2, 2}));
 }
 
 TEST(MediaInputsTest, PrefixIdentityDoesNotReplaceVocabularyInputs) {

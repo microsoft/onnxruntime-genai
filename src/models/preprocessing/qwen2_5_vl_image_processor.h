@@ -9,6 +9,8 @@
 
 namespace Generators {
 
+ImagePositionLayout GetImagePositionLayout(const Config::Model& config, const std::array<int64_t, 3>& grid);
+
 void ExtractQwenImagePatches(ThreadPool* thread_pool, const float* source, float* destination,
                              int64_t height, int64_t width, int64_t channels,
                              int64_t patch_size, int64_t temporal_patch_size);

@@ -94,6 +94,19 @@ It is intended for supporting the latest, popular state-of-the-art models.
 
 Bailing exports require an ONNX Runtime build containing [ORT #33817](https://github.com/microsoft/onnxruntime/pull/33817), merged November 8, 2026 as `d93f5446f362d9c70bea81de953f32a26aa26d25`, for `MoEGroupRouter` and per-key KDA decay. The first `onnxruntime` and `onnxruntime-gpu` nightly wheels with it are `1.32.0.dev20261109001`; a CPU `onnxruntime` nightly also works with an `onnxruntime-ep-cuda12` nightly built after the merge. Older installed wheels, including the reviewed ORT 1.30.0 wheel, do not gain these operators automatically. The Linux CUDA CI workflow installs the nightly packages pinned in `test/python/cuda/ort-nightly/` and requires the CPU/CUDA routing and KDA tests to execute, not skip.
 
+Ling Flash-VL also requires [ORT #33954](https://github.com/microsoft/onnxruntime/pull/33954),
+merged as `d65da43ffd021b9392ee799f96c0666c1afc29b4`, for the
+`swiglu_limit_after_activation` attribute on `MoE` and `QMoE`. The pinned GPU
+nightly `1.32.0.dev20261110001` includes both capabilities. Earlier routing/KDA
+nightlies alone are insufficient for clipped expert layers.
+
+Ling image exports declare their signed rotary-cache domain in decoder ONNX
+metadata `com.microsoft.genai.vision_position_range` as `lower:upper` (upper
+exclusive). Current runtimes require it to cover the configured context in both
+directions. Re-export older Ling image packages; the runtime rejects them rather
+than using incompatible nonnegative rotary caches. Text-only and Qwen packages
+do not require this metadata.
+
 Dense text LongRoPE exports using an `If` node declare an int64 scalar
 `rope_context_length` input. ONNX metadata entries
 `com.microsoft.genai.rope_context_length_input` and

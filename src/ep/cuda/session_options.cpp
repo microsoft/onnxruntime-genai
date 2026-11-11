@@ -56,12 +56,22 @@ Config::ProviderOptions ResolveStreamBindingOptions(const Config::ProviderOption
 
 namespace {
 
-void EnsureCudaPluginEpRegistered() {
+void EnsureCudaPluginEpRegistered(bool require_plugin) {
   if (!FindRegisteredEpDevices("CUDAExecutionProvider").empty()) {
     return;
   }
   std::error_code ec;
   std::filesystem::path ep_path = GetEnv("ORT_CUDA_PLUGIN_EP_PATH");
+  if (ep_path.empty() && !require_plugin) {
+    try {
+      // Prefer the bridge when available; session-only CUDA settings need not
+      // also be accepted as plugin provider options.
+      auto options = OrtCUDAProviderOptionsV2::Create();
+      options->Update(nullptr, nullptr, 0);
+      return;
+    } catch (const Ort::Exception&) {
+    }
+  }
 #if !defined(_WIN32)
   if (ep_path.empty()) {
     Dl_info info{};
@@ -156,7 +166,7 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
   // so the CUDA runtime device, stream, and OrtMemoryInfo agree with the selected EP device.
   // The process-wide stream cannot be rebound after creation. Discover adjacent plugin libraries
   // before selecting a device, including when the provider bridge is unavailable.
-  EnsureCudaPluginEpRegistered();
+  EnsureCudaPluginEpRegistered(HasDeviceFiltering(provider_options));
   std::optional<std::string> selected_plugin_device_id;
   auto ep_devices_ptrs = FindRegisteredEpDevices("CUDAExecutionProvider");
   if (!ep_devices_ptrs.empty()) {

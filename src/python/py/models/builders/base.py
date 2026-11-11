@@ -354,6 +354,7 @@ class Model:
             "create_caches": True,                           # Create cos/sin caches for rotary embeddings
             "save_caches": True,                             # Auto-save cos/sin caches for rotary embeddings after creation
             "cache_length": self.context_length,             # Cache length to use when creating cos/sin caches for rotary embeddings
+            "position_start": 0,  # First signed coordinate represented by the rotary cache
             "theta": rope_theta,                             # Base value if calculating cos/sin caches from scratch
             "partial_rotary_factor": partial_rotary_factor,  # Factor for partial rotary embeddings
             "interleaved": 0,                                # Interleave the rotary embeddings (e.g. [0, 0, 0, 1, 1, 1] to [0, 1, 0, 1, 0, 1], RotaryEmbedding kernel expects a default value of 0)
@@ -3936,9 +3937,8 @@ class Model:
             inv_freq = self.make_inv_freq_rescaled(inv_freq)
 
         position_scale = self.rope_attrs["position_scale"] if self.context_length == self.original_context_length else 1
-        t = (torch.arange(self.rope_attrs["cache_length"], dtype=self.rope_attrs["t_dtype"]) * position_scale).type_as(
-            inv_freq
-        )
+        t = torch.arange(self.rope_attrs["cache_length"], dtype=self.rope_attrs["t_dtype"])
+        t = ((t + self.rope_attrs.get("position_start", 0)) * position_scale).type_as(inv_freq)
 
         freqs = torch.outer(t, inv_freq)
         emb = torch.cat((freqs, freqs), dim=-1)

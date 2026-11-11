@@ -161,6 +161,7 @@ def ling_vision_model():
     config.overlay(
         json.dumps(
             {
+                "model": {"decoder": {"session_options": {"session.use_device_allocator_for_initializers": "1"}}},
                 "engine": {
                     "dynamic_batching": {
                         "num_blocks": 16,

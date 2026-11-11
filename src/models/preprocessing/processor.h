@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 #pragma once
 
+#include <array>
 #include <cstdint>
 
 #include "image_processor.h"
@@ -12,6 +13,13 @@
 #include "models/model.h"
 
 namespace Generators {
+
+struct ImagePositionLayout {
+  // Relative to the next text coordinate; extent controls text after the image.
+  std::array<int64_t, 3> origin{};
+  int64_t width{};
+  int64_t extent{};
+};
 
 inline constexpr size_t kMaxEncodedImageBytes = 512 * 1024 * 1024;
 

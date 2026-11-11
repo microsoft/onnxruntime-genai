@@ -12,6 +12,27 @@ DecoderOnly_Model::DecoderOnly_Model(std::unique_ptr<Config> config, OrtEnv& ort
   session_info_.Add(*session_decoder_);
   auto metadata = session_decoder_->GetModelMetadata();
   const auto keys = metadata->GetCustomMetadataMapKeysAllocated();
+  if (config_->model.type == "bailing_moe_v3_vl" && !config_->model.vision.filename.empty()) {
+    constexpr auto range_key = "com.microsoft.genai.vision_position_range";
+    const auto incompatible = [] {
+      throw std::runtime_error(
+          "Ling image decoder requires signed vision position range metadata covering the configured context. "
+          "Rebuild the complete model with the current Model Builder.");
+    };
+    if (std::find(keys.begin(), keys.end(), range_key) == keys.end()) incompatible();
+    const auto range = metadata->LookupCustomMetadataMap(range_key);
+    const auto separator = range.find(':');
+    if (separator == std::string::npos) incompatible();
+    int64_t lower{}, upper{};
+    const auto* begin = range.data();
+    const auto* end = begin + range.size();
+    const auto [lower_end, lower_error] = std::from_chars(begin, begin + separator, lower);
+    const auto [upper_end, upper_error] = std::from_chars(begin + separator + 1, end, upper);
+    const auto context = static_cast<int64_t>(config_->model.context_length);
+    if (lower_error != std::errc{} || upper_error != std::errc{} ||
+        lower_end != begin + separator || upper_end != end || lower > -context || upper < context)
+      incompatible();
+  }
   if (std::find(keys.begin(), keys.end(), "com.microsoft.genai.rope_context_length_input") != keys.end()) {
     if (std::find(keys.begin(), keys.end(), "com.microsoft.genai.original_context_length") == keys.end())
       throw std::runtime_error("LongRoPE metadata requires an original context length");

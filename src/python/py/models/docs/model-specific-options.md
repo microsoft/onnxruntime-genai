@@ -6,6 +6,13 @@ These options and workflows apply to particular model families and speculative d
 
 Use an ONNX Runtime build at `d93f5446f362d9c70bea81de953f32a26aa26d25` or a later revision containing [ORT #33817](https://github.com/microsoft/onnxruntime/pull/33817), merged November 8, 2026. Nightly packages work: the `onnxruntime` and `onnxruntime-gpu` wheels `1.32.0.dev20261109001` are the first to include it, and a CPU `onnxruntime` nightly can instead be paired with an `onnxruntime-ep-cuda12` nightly built after the merge (all are published on the [ORT-Nightly feed](https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/)). A version label alone is not sufficient: the build must register `MoEGroupRouter` and the `gate_lower_bound` attribute on `GatedDeltaNet` for per-key KDA. Older wheels such as the reviewed ORT 1.30.0 build lack this support.
 
+Ling Flash-VL clipped experts additionally require [ORT #33954](https://github.com/microsoft/onnxruntime/pull/33954)
+(`d65da43ffd021b9392ee799f96c0666c1afc29b4`): both `MoE` and `QMoE` must register
+`swiglu_limit_after_activation`. The CUDA CI pin `1.32.0.dev20261110001` includes
+this capability as well as routing/KDA; the older `20261109001` baseline is not
+sufficient for clipped layers. CI executes the builder-emitted clipped experts,
+not only schema/attribute checks.
+
 The builder reads Bailing configuration fields rather than assuming the Ling-3.0-tiny values. `layer_group_size` must be a positive integer (default `1`); per-layer lists are explicitly unsupported. Full attention ends each complete group and covers every layer in an incomplete final group, matching the Hugging Face checkpoint's decoder scheduling. Limiting the exported layer count preserves the original checkpoint's layer types.
 
 `norm_topk_prob` controls routed-expert normalization (default `false`), and `routed_scaling_factor` scales only the routed experts (default `1.0`). Because `MoEGroupRouter` emits selected log-scores and MoE/QMoE applies softmax, unnormalized routing additionally restores the selected sigmoid-score sum before adding the shared expert. `group_topk` is configurable, defaults to `2` for `noaux_tc`, must be a positive integer, and is clamped to the number of experts per group by the runtime operator.

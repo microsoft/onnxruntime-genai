@@ -896,7 +896,7 @@ void VarlenDecoderIO::PrepareRotaryPositionIds(
       // Keep fixed capture geometry, but never forecast unprocessed image coordinates into its tail.
       std::iota(cpu.begin() + start + history, cpu.begin() + start + capacity, static_cast<int64_t>(history));
     }
-    MediaPositions(request->Media(), 0, static_cast<size_t>(model->config_->model.vision.spatial_merge_size), planes);
+    MediaPositions(request->Media(), 0, planes);
   }
   positions.CopyCpuToDevice();
   input_names_.push_back(name.c_str());

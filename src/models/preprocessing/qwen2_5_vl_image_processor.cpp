@@ -15,6 +15,17 @@
 
 namespace Generators {
 
+ImagePositionLayout GetImagePositionLayout(const Config::Model& config, const std::array<int64_t, 3>& grid) {
+  const int64_t merge = config.vision.spatial_merge_size;
+  if (merge <= 0 || grid[0] != 1 || grid[1] <= 0 || grid[2] <= 0 ||
+      grid[1] % merge != 0 || grid[2] % merge != 0)
+    throw std::invalid_argument("Image positions require a complete spatially merged image grid.");
+  const int64_t height = grid[1] / merge, width = grid[2] / merge;
+  if (config.type == "bailing_moe_v3_vl")
+    return {{0, -((height - 1) / 2), -((width - 1) / 2)}, width, 1};
+  return {{0, 0, 0}, width, std::max(height, width)};
+}
+
 std::vector<int32_t> TokenizeLingImagePrompt(const Tokenizer& tokenizer, const std::string& prompt,
                                              std::span<const int64_t> grids, int64_t spatial_merge_size) {
   constexpr std::string_view start = "<|vision_start|>", end = "<|vision_end|>", pad = "<|image_pad|>";

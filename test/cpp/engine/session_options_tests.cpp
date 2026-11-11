@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include "ep/cuda/session_options.h"
+#include "models/env_utils.h"
 #include "models/session_options.h"
 
 namespace Generators::test {
@@ -30,6 +31,31 @@ std::string SelectionError(const std::vector<std::string>& ids, const std::optio
 }
 
 }  // namespace
+
+#if USE_CUDA
+TEST(CudaProviderRegistrationTest, AvailableBridgeDoesNotAutoRegisterAPlugin) {
+  if (!GetEnv("ORT_CUDA_PLUGIN_EP_PATH").empty()) {
+    GTEST_SKIP() << "The caller explicitly requested plugin registration";
+  }
+  if (!FindRegisteredEpDevices("CUDAExecutionProvider").empty()) {
+    GTEST_SKIP() << "CUDA is already registered as a plugin";
+  }
+  try {
+    auto options = OrtCUDAProviderOptionsV2::Create();
+    options->Update(nullptr, nullptr, 0);
+  } catch (const Ort::Exception& error) {
+    GTEST_SKIP() << "A CUDA provider bridge is unavailable: " << error.what();
+  }
+
+  auto session_options = OrtSessionOptions::Create();
+  session_options->AddConfigEntry("ep.cuda.gated_delta_net_bf16_precision", "bf16");
+  Config config;
+  ProviderOptions provider_options;
+  provider_options.name = "cuda";
+  ASSERT_NE(CUDAExecutionProvider::AppendExecutionProvider(*session_options, provider_options, config), nullptr);
+  EXPECT_TRUE(FindRegisteredEpDevices("CUDAExecutionProvider").empty());
+}
+#endif
 
 class CudaDeviceMetadataTest : public testing::Test {
  protected:
