@@ -138,6 +138,8 @@ DeviceSpan<float> Lfm3AudioSpeechState::Run(int current_length, DeviceSpan<int32
   // The padded mel is the caller's CPU tensor; the features live on the speech session's device.
   const auto* padded_data = static_cast<const uint8_t*>(padded_mel->GetTensorRawData());
   auto feature_bytes = ByteWrapTensor(*p_session_device_, *features);
+  // WebGPU copies into an offset through the CPU, moving the whole buffer each time; stage on the CPU, upload once.
+  const bool stage_on_cpu = p_session_device_->GetType() == DeviceType::WEBGPU;
   size_t feature_offset = 0;
   for (size_t clip = 0; clip < frames_per_clip_.size(); ++clip) {
     const int64_t frames = frames_per_clip_[clip];
@@ -159,8 +161,17 @@ DeviceSpan<float> Lfm3AudioSpeechState::Run(int current_length, DeviceSpan<int32
     State::Run(*model_.speech_session_);
 
     const size_t clip_bytes = static_cast<size_t>(tokens) * token_bytes;
-    feature_bytes.subspan(feature_offset, clip_bytes).CopyFrom(ByteWrapTensor(*p_session_device_, *clip_features));
+    auto clip_span = ByteWrapTensor(*p_session_device_, *clip_features);
+    if (stage_on_cpu) {
+      const auto clip_cpu = clip_span.CopyDeviceToCpu();
+      std::copy(clip_cpu.begin(), clip_cpu.end(), feature_bytes.subspan(feature_offset, clip_bytes).CpuSpan().begin());
+    } else {
+      feature_bytes.subspan(feature_offset, clip_bytes).CopyFrom(clip_span);
+    }
     feature_offset += clip_bytes;
+  }
+  if (stage_on_cpu) {
+    feature_bytes.CopyCpuToDevice();
   }
   return {};
 }
