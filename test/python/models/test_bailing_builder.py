@@ -1037,6 +1037,9 @@ def test_shared_clamps_execute_without_changing_activation_precision(tmp_path, d
     # Isolate clipping from provider-specific low-precision SiLU and QuickGelu numerics.
     expected = activation.clamp(max=4) * up.clamp(-4, 4)
     torch.testing.assert_close(output, expected)
+    for name in ("/clipped/Sigmoid", "/clipped/SiLU"):
+        node = next(node for node in model.graph if node.name == name)
+        assert all(value.dtype == model.io_dtype for value in (*node.inputs, *node.outputs))
     clips = [node for node in model.graph if node.op_type == "Clip"]
     assert len(clips) == 2
     clip_dtype = ir.DataType.FLOAT if dtype == ir.DataType.BFLOAT16 else dtype
