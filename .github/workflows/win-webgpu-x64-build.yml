@@ -20,15 +20,12 @@ env:
   buildRoot: 'build/cpu/win-x64'
   binaryDir: 'build/cpu/win-x64/Release'
   WEBGPU_EP_PACKAGE_NAME: 'Microsoft.ML.OnnxRuntime.EP.WebGpu'
-  WEBGPU_EP_PACKAGE_VERSION: '0.6.0-dev.20261020022011'
+  WEBGPU_EP_PACKAGE_VERSION: '0.7.0-dev.20261111070922+6cc3c095'
   # Use an API-32 SDK for both the native build and runtime tests.
   # PagedAttention requires the extended schema with attention_metadata at input 16.
-  # This core/plugin pair includes the GatedDeltaNetStateReplay schema and WebGPU kernel.
-  # The core includes the ConvStateReplay schema from microsoft/onnxruntime#33493.
-  # The newest published WebGPU plugin still predates that change (merged 2026-10-21).
-  # Advance its pin when a build containing the kernel is published.
-  # Required replay tests fail, not skip, until the WebGPU kernel is available.
-  ORT_TEST_VERSION: '1.32.0-dev-20261027-0506-7617fc8'
+  # State replay requires ConvStateReplay and GatedDeltaNetStateReplay schemas and WebGPU kernels.
+  # Required replay tests must execute without skips.
+  ORT_TEST_VERSION: '1.32.0-dev-20261110-0452-5393483'
 
 jobs:
   windows-webgpu-x64-build:

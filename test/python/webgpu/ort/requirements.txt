@@ -1,3 +1,4 @@
 -i https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/
-onnxruntime==1.32.0.dev20261009003
-onnxruntime-ep-webgpu==0.5.0.dev20261009200253
+# State replay requires ConvStateReplay and GatedDeltaNetStateReplay schemas and WebGPU kernels.
+onnxruntime==1.33.0.dev20261111002
+onnxruntime-ep-webgpu==0.7.0.dev20261111070922
