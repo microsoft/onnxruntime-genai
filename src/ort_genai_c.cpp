@@ -1386,7 +1386,7 @@ OgaResult* OGA_API_CALL OgaTokenizerStreamReset(OgaTokenizerStream* stream) {
 
 OgaResult* OGA_API_CALL OgaCreateTensorFromBuffer(void* data, const int64_t* shape_dims, size_t shape_dims_count, OgaElementType element_type, OgaTensor** out) {
   OGA_TRY
-  auto p_memory_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
+  auto p_memory_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
   auto ort_element_type = static_cast<ONNXTensorElementDataType>(element_type);
   size_t byte_count = Ort::SizeOf(ort_element_type);
   if (shape_dims_count > 0 && shape_dims == nullptr)

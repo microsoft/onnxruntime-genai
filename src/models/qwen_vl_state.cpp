@@ -124,8 +124,6 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
   const int64_t hidden_size = feature_shape[1];
   const size_t pixel_element_size = Ort::SizeOf(pixel_type);
   const size_t feature_element_size = Ort::SizeOf(feature_type);
-  auto* pixel_data = static_cast<uint8_t*>(pixel_values->GetTensorMutableRawData());
-  auto* feature_data = static_cast<uint8_t*>(image_features->GetTensorMutableRawData());
   const int64_t merge_size = model_.config_->model.vision.spatial_merge_size;
   const int64_t merge_square = merge_size * merge_size;
   const int64_t total_patches = pixel_shape[0];
@@ -153,7 +151,6 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
                              ") for " + std::to_string(num_images_) + " images");
   }
 
-  auto cpu_memory = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
   int64_t patch_offset = 0;
   int64_t feature_offset = 0;
   for (int64_t image = 0; image < num_images_; ++image) {
@@ -184,14 +181,14 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
     const std::array<int64_t, 2> image_pixel_shape{num_patches, patch_dim};
     const std::array<int64_t, 2> image_grid_shape{1, 3};
     const std::array<int64_t, 2> image_feature_shape{num_features, hidden_size};
-    auto image_pixel_values = OrtValue::CreateTensor(
-        *cpu_memory, pixel_data + static_cast<size_t>(image_patch_offset * patch_dim) * pixel_element_size,
+    auto image_pixel_values = CreateQwenTensorView(
+        *pixel_values, static_cast<size_t>(image_patch_offset * patch_dim) * pixel_element_size,
         static_cast<size_t>(num_patches * patch_dim) * pixel_element_size, image_pixel_shape, pixel_type);
-    auto image_grid = OrtValue::CreateTensor(
-        *cpu_memory, const_cast<int64_t*>(grid_data + image * 3), 3 * sizeof(int64_t),
+    auto image_grid = CreateQwenTensorView(
+        *grid, static_cast<size_t>(image * 3) * sizeof(int64_t), 3 * sizeof(int64_t),
         image_grid_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
-    auto image_feature_values = OrtValue::CreateTensor(
-        *cpu_memory, feature_data + static_cast<size_t>(feature_offset * hidden_size) * feature_element_size,
+    auto image_feature_values = CreateQwenTensorView(
+        *image_features, static_cast<size_t>(feature_offset * hidden_size) * feature_element_size,
         static_cast<size_t>(num_features * hidden_size) * feature_element_size,
         image_feature_shape, feature_type);
 

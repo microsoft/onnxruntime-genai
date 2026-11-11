@@ -3,6 +3,9 @@
 
 #pragma once
 
+#include <memory>
+#include <span>
+
 #include "multi_modal.h"
 
 namespace Generators {
@@ -15,6 +18,14 @@ struct QwenVisionState : VisionState {
 };
 
 int64_t GetQwenImageCount(const std::vector<ExtraInput>& extra_inputs);
+
+// Views a byte range of `source` without copying. The view keeps the source's memory info, so a slice of a device
+// buffer stays bound to that device instead of being presented to the session as host memory.
+inline std::unique_ptr<OrtValue> CreateQwenTensorView(OrtValue& source, size_t byte_offset, size_t byte_count,
+                                                      std::span<const int64_t> shape, ONNXTensorElementDataType type) {
+  auto* data = static_cast<uint8_t*>(source.GetTensorMutableRawData()) + byte_offset;
+  return OrtValue::CreateTensor(source.GetTensorMemoryInfo(), data, byte_count, shape, type);
+}
 
 struct QwenPatchLayout {
   int64_t padded_image_stride{};

@@ -48,7 +48,7 @@ NOTE: The std::unique_ptr<t>s could just be 'auto', it's expanded for clarity
 Ort::InitApi();
 std::unique_ptr<OrtEnv> p_env=OrtEnv::Create(ORT_LOGGING_LEVEL_WARNING, "test");
 
-std::unique_ptr<OrtMemoryInfo> p_memory_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
+std::unique_ptr<OrtMemoryInfo> p_memory_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
 std::unique_ptr<OrtValue> p_input_tensor = OrtValue::CreateTensor<float>(*p_memory_info, input_image_.data(), input_image_.size(), input_shape_.data(), input_shape_.size());
 std::unique_ptr<OrtValue> p_output_tensor = OrtValue::CreateTensor<float>(*p_memory_info, results_.data(), results_.size(), output_shape_.data(), output_shape_.size());
 

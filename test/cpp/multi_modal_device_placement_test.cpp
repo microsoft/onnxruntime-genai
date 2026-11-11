@@ -12,6 +12,7 @@
 #include "models/model.h"
 #include "models/io/embeddings.h"
 #include "models/io/hidden_states.h"
+#include "models/qwen_vl_state.h"
 
 namespace {
 
@@ -181,6 +182,20 @@ TEST(MultiModalDevicePlacementTests, EmbeddingsPreserveAdditionalFeatureDimensio
             (std::vector<int64_t>{1, 2, 35, 256}));
   embeddings.RestoreFullView();
   EXPECT_EQ(state.inputs_.back(), embeddings.Get());
+}
+
+// Plugin execution providers reject OrtMemTypeCPU views, and a host description would misplace device features.
+TEST(MultiModalDevicePlacementTests, QwenPerImageViewsKeepTheSourceMemoryInfo) {
+  Ort::InitApi();
+  auto& allocator = Generators::GetDeviceInterface(Generators::DeviceType::CPU)->GetAllocator();
+  auto source = OrtValue::CreateTensor<int64_t>(allocator, std::array<int64_t, 2>{2, 3});
+
+  auto view = Generators::CreateQwenTensorView(*source, 3 * sizeof(int64_t), 3 * sizeof(int64_t),
+                                               std::array<int64_t, 2>{1, 3}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+
+  EXPECT_EQ(view->GetTensorMemoryInfo().GetMemoryType(), OrtMemTypeDefault);
+  EXPECT_TRUE(view->GetTensorMemoryInfo() == source->GetTensorMemoryInfo());
+  EXPECT_EQ(view->GetTensorData<int64_t>(), source->GetTensorData<int64_t>() + 3);
 }
 
 }  // namespace
