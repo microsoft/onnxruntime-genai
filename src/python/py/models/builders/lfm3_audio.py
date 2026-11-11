@@ -189,6 +189,9 @@ class LFM3AudioModel(LFM2VLModel):
             raise NotImplementedError(
                 f"use_paged_attention=true is not supported for the {self.pipeline_type} pipeline yet."
             )
+        # Only the decoder applies the adapter, so its weights on the speech encoder or embeddings would be dropped
+        if "adapter_path" in extra_options:
+            raise NotImplementedError(f"adapter_path is not supported for the {self.pipeline_type} pipeline yet.")
         # TODO: allow other EPs once a real LFM3-Audio model has run on them.
         if ep not in {"cpu", "cuda", "webgpu"}:
             raise NotImplementedError(

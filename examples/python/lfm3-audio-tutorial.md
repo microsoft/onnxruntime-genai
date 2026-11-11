@@ -99,7 +99,7 @@ Audio files are decoded by onnxruntime-extensions (WAV, FLAC, MP3), mixed down t
 - Long prompts in one WebGPU run. The prompt's logits must fit in about 4 GiB: about 8,400 tokens (11 minutes of audio) in fp32 and 16,800 in fp16. Set the `chunk_size` search option (for example 4096) to run longer prompts in parts.
 - More than two channels. They cannot be detected, so such a file is not mixed down correctly.
 - MP3 files that start with an ID3 tag. The audio decoder does not recognize them; remove the tag or convert the file.
-- Execution providers other than CPU, CUDA and WebGPU, and `use_paged_attention=true`. The builder refuses them.
+- Execution providers other than CPU, CUDA and WebGPU, `use_paged_attention=true` and `adapter_path`. The builder refuses them.
 - Graph capture on WebGPU. ONNX Runtime refuses it for the LFM3 decoder, which keeps 6 attention-mask nodes and `/model/last_real_token/Cast` on the CPU.
 - Window-sized caches. Every attention layer, the sliding-window ones included, keeps a KV cache of `search.max_length` tokens, so set `search.max_length` to the length you need.
 

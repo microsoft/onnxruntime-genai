@@ -699,6 +699,7 @@ def test_sub_models_follow_the_decoder_without_graph_capture(
         ({"ep": "cuda", "dtype": FP32}, NotImplementedError, "selects Attention"),
         ({"dtype": FP16}, NotImplementedError, "selects MultiHeadAttention"),
         ({"ep": "cuda", "dtype": FP16, "options": {"use_paged_attention": True}}, NotImplementedError, "use_paged"),
+        ({"options": {"adapter_path": "adapter"}}, NotImplementedError, "adapter_path"),
         ({"options": {"filename": "embeddings.onnx"}}, ValueError, "cannot be named embeddings.onnx"),
         ({"options": {"filename": "audio_encoder.onnx"}}, ValueError, "cannot be named audio_encoder.onnx"),
         ({"extractor": {"feature_extractor_type": "WhisperFeatureExtractor"}}, ValueError, "feature_extractor_type"),
