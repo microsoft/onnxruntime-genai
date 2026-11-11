@@ -112,11 +112,17 @@ DeviceSpan<float> Lfm3AudioSpeechState::Run(int current_length, DeviceSpan<int32
     throw std::runtime_error("lfm3_audio: the speech model has no bound input named \"" + mel_name + "\".");
   }
   const auto mel_index = static_cast<size_t>(mel_input - input_names_.begin());
+  const auto& features_name = model_.config_->model.speech.outputs.audio_features;
+  const auto features_output = std::find(output_names_.begin(), output_names_.end(), features_name);
+  if (features_output == output_names_.end()) {
+    throw std::runtime_error("lfm3_audio: the speech model has no bound output named \"" + features_name + "\".");
+  }
+  const auto features_index = static_cast<size_t>(features_output - output_names_.begin());
   OrtValue* padded_mel = inputs_[mel_index];
-  OrtValue* features = outputs_[0];
+  OrtValue* features = outputs_[features_index];
   // Each run binds one clip's tensors, which die with their loop iteration.
   const OrtValuePointerRestore restore_mel{inputs_, mel_index, padded_mel};
-  const OrtValuePointerRestore restore_features{outputs_, 0, features};
+  const OrtValuePointerRestore restore_features{outputs_, features_index, features};
 
   const auto mel_info = padded_mel->GetTensorTypeAndShapeInfo();
   const auto mel_type = mel_info->GetElementType();
@@ -149,7 +155,7 @@ DeviceSpan<float> Lfm3AudioSpeechState::Run(int current_length, DeviceSpan<int32
                                                 std::vector<int64_t>{tokens, hidden_size}, feature_type);
 
     inputs_[mel_index] = clip_mel.get();
-    outputs_[0] = clip_features.get();
+    outputs_[features_index] = clip_features.get();
     State::Run(*model_.speech_session_);
 
     const size_t clip_bytes = static_cast<size_t>(tokens) * token_bytes;

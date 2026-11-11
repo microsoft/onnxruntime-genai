@@ -224,11 +224,14 @@ class LFM3AudioModel(LFM2VLModel):
             "normalization_divisor": 4.0,
             "padding_side": "right",
             "padding_value": 0.0,
-            "win_length": extractor["n_fft"],
+            "win_length": extractor.get("n_fft"),
             "feature_size": config.audio_encoder_config.num_mel_bins,
             "encoder_stride": 8,
         }
         unsupported = {key: extractor.get(key) for key, value in expected.items() if extractor.get(key) != value}
+        # A missing win_length equals a missing n_fft above, so check n_fft on its own
+        if extractor.get("n_fft") is None:
+            unsupported["n_fft"] = None
         if unsupported:
             raise ValueError(f"Unsupported audio feature extractor settings {unsupported}: expected {expected}")
         return extractor
