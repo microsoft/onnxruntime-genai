@@ -103,4 +103,7 @@ class PrefixSnapshotCache {
   uint64_t clock_{};
 };
 
+// Native backends opt in explicitly; backend capability validation is separate from storage policy.
+std::shared_ptr<PrefixSnapshotCache> CreateNativePrefixSnapshotCache(const Config::Engine::DynamicBatching& config);
+
 }  // namespace Generators

@@ -17,6 +17,7 @@
 #endif
 
 #include "../logging.h"
+#include "../filesystem.h"
 
 namespace Generators {
 namespace {
@@ -249,6 +250,18 @@ void PrefixSnapshotCache::Entry::Read(
 
 void PrefixSnapshotCache::Entry::Flush() {
   if (disk) disk->file.flush();
+}
+
+std::shared_ptr<PrefixSnapshotCache> CreateNativePrefixSnapshotCache(const Config::Engine::DynamicBatching& config) {
+  const auto& limits = config.snapshot_cache;
+  if (!config.prefix_caching.value_or(false) || config.max_snapshots.value_or(1) == 0 ||
+      (limits.Configured() && !limits.Enabled()))
+    return nullptr;
+  const bool resident = !limits.Configured();
+  return std::make_shared<PrefixSnapshotCache>(
+      std::array<size_t, 3>{limits.vram_bytes, limits.ram_bytes, limits.disk_bytes},
+      config.max_snapshots.value_or(resident ? 1 : std::numeric_limits<size_t>::max()),
+      std::filesystem::path{fs::path{limits.directory}.c_str()}, resident);
 }
 
 PrefixSnapshotCache::PrefixSnapshotCache(

@@ -3588,12 +3588,7 @@ std::shared_ptr<PrefixSnapshotCache> CreateQwen38PrefixSnapshotCache(const Confi
       Log("warning", "Native Qwen prefix caching is inactive: %s.", disabled);
     return nullptr;
   }
-  const auto& limits = batching->snapshot_cache;
-  const bool resident = !limits.Configured();
-  return std::make_shared<PrefixSnapshotCache>(
-      std::array<size_t, 3>{limits.vram_bytes, limits.ram_bytes, limits.disk_bytes},
-      batching->max_snapshots.value_or(resident ? 1 : std::numeric_limits<size_t>::max()),
-      std::filesystem::path{fs::path{limits.directory}.c_str()}, resident);
+  return CreateNativePrefixSnapshotCache(*batching);
 }
 
 Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_env)

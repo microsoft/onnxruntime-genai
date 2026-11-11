@@ -2428,6 +2428,19 @@ tombstone.
 
 Changes to shared types such as `Request`, `ScheduledRequests`, `ModelExecutor`, or `SimpleDecoder` should be checked against both paths. This document should be updated only where behavior is shared or where the dynamic path changes.
 
+### Shared native prefix-cache infrastructure
+
+Native Qwen and Bolt reuse `PrefixCheckpointIndex` for longest resident token-prefix matching and
+stale-entry pruning, and `CreateNativePrefixSnapshotCache` for opt-in storage policy, count limits,
+and tier budgets. Index entries expose token identity and live residency without requiring a
+model-specific index implementation. Lookup neither leases a snapshot nor updates its recency;
+the backend retains any adoption lease and touches storage only after restoration succeeds.
+
+Capture eligibility, tensor packing, restore operations, and speculative-context reconstruction
+remain backend-owned. Each index belongs to one compatible execution context: Qwen retains its
+Engine scope, while Bolt retains its Model scope. This first shared layer does not enable reuse
+across models or execution contexts, change Engine adapters, or unify paged and native execution.
+
 ### Native Bolt prefix caching
 
 The `nemotron_bolt` CUDA backend supports the single-slot Engine as well as the classic Generator.

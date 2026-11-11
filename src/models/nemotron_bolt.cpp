@@ -5,7 +5,6 @@
 #include "search.h"
 
 #include <array>
-#include <filesystem>
 #include <limits>
 #include <set>
 
@@ -69,23 +68,12 @@ struct BoltSearch : GreedySearch_Cpu {
 
 }  // namespace
 
-void NemotronBoltPrefixCache::Prune() {
-  entries_.erase(std::remove_if(entries_.begin(), entries_.end(), [](const auto& entry) {
-                   return entry->state != PrefixSnapshotCache::State::Resident;
-                 }),
-                 entries_.end());
-}
-
 std::shared_ptr<NemotronBoltPrefixCache::Entry> NemotronBoltPrefixCache::Find(std::span<const int32_t> tokens) {
-  Prune();
+  entries_.Prune();
   ++metrics_.lookups;
   metrics_.queried_tokens += tokens.size() / kBoltVerifyRows * kBoltVerifyRows;
-  std::shared_ptr<Entry> best;
-  for (const auto& entry : entries_) {
-    if (entry->tokens.size() <= tokens.size() && (!best || entry->tokens.size() > best->tokens.size()) &&
-        std::equal(entry->tokens.begin(), entry->tokens.end(), tokens.begin()))
-      best = entry;
-  }
+  const auto* match = entries_.Find(tokens);
+  auto best = match ? match->checkpoint : nullptr;
   if (best) ++metrics_.matches;
   return best;
 }
@@ -99,11 +87,9 @@ void NemotronBoltPrefixCache::Capture(std::span<const int32_t> tokens, std::span
   auto* device = aux.p_device_;
   device->Synchronize();
   try {
-    Prune();
-    for (const auto& existing : entries_)
-      if (existing->tokens.size() == tokens.size() &&
-          std::equal(existing->tokens.begin(), existing->tokens.end(), tokens.begin()))
-        return;
+    entries_.Prune();
+    if (const auto* existing = entries_.Find(tokens); existing && existing->Tokens().size() == tokens.size())
+      return;
     auto entry = std::make_shared<Entry>();
     entry->tokens.assign(tokens.begin(), tokens.end());
     entry->aux_start = aux_start;
@@ -139,7 +125,7 @@ void NemotronBoltPrefixCache::Capture(std::span<const int32_t> tokens, std::span
       entry->bytes += packed;
       entry->shapes.push_back({static_cast<int64_t>(packed)});
     }
-    entries_.reserve(entries_.size() + 1);
+    entries_.ReserveForPublication();
     if (!storage_->Allocate(entry, device, "nemotron_bolt")) {
       ++metrics_.retention_refusals;
       return;
@@ -154,8 +140,8 @@ void NemotronBoltPrefixCache::Capture(std::span<const int32_t> tokens, std::span
       storage_->Discard(*entry);
       throw;
     }
-    Prune();
-    entries_.push_back(std::move(entry));
+    entries_.Prune();
+    entries_.Publish({std::move(entry)});
     metrics_.registered_blocks += tokens.size() / kBoltVerifyRows;
   } catch (const std::bad_alloc&) {
     ++metrics_.publication_refusals;
@@ -242,13 +228,8 @@ NemotronBoltModel::NemotronBoltModel(std::unique_ptr<Config> config, OrtEnv& env
             "native prefix caching requires max_batch_size=1 and does not support paged cache sizing");
     if (batching->prefix_caching.value_or(false) && batching->max_snapshots.value_or(1) != 0) {
       Require(config_->model.dflash2.sliding_window > 0, "prefix caching requires a windowed drafter");
-      const auto& limits = batching->snapshot_cache;
-      const bool resident = !limits.Configured();
-      if (resident || limits.Enabled())
-        prefix_cache_ = std::make_unique<NemotronBoltPrefixCache>(std::make_shared<PrefixSnapshotCache>(
-            std::array<size_t, 3>{limits.vram_bytes, limits.ram_bytes, limits.disk_bytes},
-            batching->max_snapshots.value_or(resident ? 1 : std::numeric_limits<size_t>::max()),
-            std::filesystem::path{fs::path{limits.directory}.c_str()}, resident));
+      if (auto storage = CreateNativePrefixSnapshotCache(*batching))
+        prefix_cache_ = std::make_unique<NemotronBoltPrefixCache>(std::move(storage));
     }
     config_->engine.dynamic_batching.reset();
   }

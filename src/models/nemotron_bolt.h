@@ -5,6 +5,7 @@
 #include "model.h"
 #include "dflash2_drafter.h"
 #include "engine/prefix_cache.h"
+#include "engine/prefix-checkpoint-index.h"
 #include <deque>
 #include <mutex>
 
@@ -35,9 +36,13 @@ struct NemotronBoltPrefixCache {
   const PrefixCacheMetrics& Metrics() const { return metrics_; }
 
  private:
-  void Prune();
+  struct IndexedEntry {
+    std::shared_ptr<Entry> checkpoint;
+    std::span<const int32_t> Tokens() const { return checkpoint->tokens; }
+    bool IsResident() const { return checkpoint->state == PrefixSnapshotCache::State::Resident; }
+  };
   std::shared_ptr<PrefixSnapshotCache> storage_;
-  std::vector<std::shared_ptr<Entry>> entries_;
+  PrefixCheckpointIndex<IndexedEntry> entries_;
   PrefixCacheMetrics metrics_;
 };
 

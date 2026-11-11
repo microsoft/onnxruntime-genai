@@ -115,15 +115,7 @@ bool Qwen38GraphSession::IsStopToken(int32_t token) const {
 }
 
 const Qwen38GraphSession::PrefixEntry* Qwen38GraphSession::FindPrefix(std::span<const int32_t> tokens) const {
-  const PrefixEntry* best = nullptr;
-  for (const auto& entry : prefixes_) {
-    if (entry.state->IsResident() && entry.tokens.size() <= tokens.size() &&
-        (!best || entry.tokens.size() > best->tokens.size()) &&
-        std::equal(entry.tokens.begin(), entry.tokens.end(), tokens.begin())) {
-      best = &entry;
-    }
-  }
-  return best;
+  return prefixes_.Find(tokens);
 }
 
 void Qwen38GraphSession::SavePrefix(std::span<const int32_t> tokens) {
@@ -135,13 +127,8 @@ void Qwen38GraphSession::SavePrefix(std::span<const int32_t> tokens) {
       return;
     }
     auto entry = PrefixEntry{std::vector<int32_t>{tokens.begin(), tokens.end()}, std::move(state)};
-    prefixes_.erase(std::remove_if(prefixes_.begin(), prefixes_.end(), [this](const PrefixEntry& existing) {
-                      if (existing.state->IsResident()) return false;
-                      ++prefix_metrics_.evictions;
-                      return true;
-                    }),
-                    prefixes_.end());
-    prefixes_.push_back(std::move(entry));
+    prefix_metrics_.evictions += prefixes_.Prune();
+    prefixes_.Publish(std::move(entry));
   } catch (const std::bad_alloc&) {
     ++prefix_metrics_.publication_refusals;
   }
