@@ -3,8 +3,11 @@
 #include <gtest/gtest.h>
 #include <array>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 
+#include "dflash2_drafter.h"
 #include "models/nemotron_bolt.h"
 #include "search.h"
 
@@ -344,6 +347,269 @@ TEST(NemotronBoltGPU, SequentialGeneratorsResetAndPublicBoundaries) {
         dynamic_cast<NemotronBoltState&>(*generator.state_), long_result.size());
     EXPECT_EQ(long_result, expected);
   }
+}
+
+TEST(NemotronBolt, GgufInitializersConfigParsingAndPathValidation) {
+  namespace fs_std = std::filesystem;
+  const auto tmp_dir = fs_std::temp_directory_path() / "ortgenai_gguf_init_test";
+  std::error_code ec;
+  fs_std::remove_all(tmp_dir, ec);
+  fs_std::create_directories(tmp_dir);
+
+  auto write_file = [&](const fs_std::path& p, const std::string& content) {
+    std::ofstream out(p, std::ios::binary);
+    out << content;
+  };
+
+  // 1. String form for decoder, inline object form for dflash2
+  write_file(tmp_dir / "genai_config.json", R"({
+    "model": {
+      "type": "nemotron_bolt",
+      "vocab_size": 128,
+      "context_length": 32,
+      "decoder": {
+        "filename": "model.onnx",
+        "gguf_initializers": "gguf_initializers.json"
+      },
+      "dflash2": {
+        "filename": "dflash2.onnx",
+        "num_hidden_layers": 2,
+        "num_key_value_heads": 2,
+        "head_size": 64,
+        "block_size": 8,
+        "num_draft_tokens": 7,
+        "selector_top_k": 8,
+        "mask_token_id": 100,
+        "sliding_window": 1024,
+        "gguf_initializers": {
+          "files": ["weights.gguf"],
+          "share": true,
+          "tensors": {
+            "embed_w": "token_embd.weight",
+            "lm_head": {
+              "gguf_name": "output.weight",
+              "data_type": 2,
+              "shape": [128, 34],
+              "share": false
+            }
+          }
+        }
+      }
+    },
+    "search": {}
+  })");
+
+  Config cfg(fs::path{tmp_dir.string()}, {});
+  EXPECT_EQ(cfg.model.decoder.gguf_initializers.config_file, "gguf_initializers.json");
+  ASSERT_EQ(cfg.model.dflash2.gguf_initializers.files.size(), 1u);
+  EXPECT_EQ(cfg.model.dflash2.gguf_initializers.files[0], "weights.gguf");
+  EXPECT_TRUE(cfg.model.dflash2.gguf_initializers.share);
+  EXPECT_TRUE(cfg.model.dflash2.gguf_initializers.has_share);
+  ASSERT_EQ(cfg.model.dflash2.gguf_initializers.tensors.size(), 2u);
+  EXPECT_EQ(cfg.model.dflash2.gguf_initializers.tensors[0].onnx_name, "embed_w");
+  EXPECT_EQ(cfg.model.dflash2.gguf_initializers.tensors[0].gguf_name, "token_embd.weight");
+  EXPECT_FALSE(cfg.model.dflash2.gguf_initializers.tensors[0].has_share);
+  EXPECT_EQ(cfg.model.dflash2.gguf_initializers.tensors[1].onnx_name, "lm_head");
+  EXPECT_EQ(cfg.model.dflash2.gguf_initializers.tensors[1].gguf_name, "output.weight");
+  EXPECT_EQ(cfg.model.dflash2.gguf_initializers.tensors[1].data_type, 2);
+  EXPECT_EQ(cfg.model.dflash2.gguf_initializers.tensors[1].shape, (std::vector<int64_t>{128, 34}));
+  EXPECT_TRUE(cfg.model.dflash2.gguf_initializers.tensors[1].has_share);
+  EXPECT_FALSE(cfg.model.dflash2.gguf_initializers.tensors[1].share);
+
+  auto dflash2_cfg = CreateDflash2Config(cfg);
+  EXPECT_EQ(dflash2_cfg->model.decoder.gguf_initializers.files, cfg.model.dflash2.gguf_initializers.files);
+  EXPECT_EQ(dflash2_cfg->model.decoder.gguf_initializers.tensors.size(), 2u);
+
+  // Per-tensor file and data type overrides for mtp
+  Config mtp_cfg;
+  OverlayConfig(mtp_cfg, R"({
+    "model": {
+      "mtp": {
+        "filename": "mtp.onnx",
+        "gguf_initializers": {
+          "files": ["mtp.gguf"],
+          "tensors": {
+            "w0": {
+              "gguf_name": "blk.0.weight",
+              "file": "shard0.gguf",
+              "data_type": 1
+            }
+          }
+        }
+      }
+    }
+  })");
+  ASSERT_EQ(mtp_cfg.model.mtp.gguf_initializers.files.size(), 1u);
+  EXPECT_EQ(mtp_cfg.model.mtp.gguf_initializers.files[0], "mtp.gguf");
+  ASSERT_EQ(mtp_cfg.model.mtp.gguf_initializers.tensors.size(), 1u);
+  EXPECT_EQ(mtp_cfg.model.mtp.gguf_initializers.tensors[0].onnx_name, "w0");
+  EXPECT_EQ(mtp_cfg.model.mtp.gguf_initializers.tensors[0].gguf_name, "blk.0.weight");
+  EXPECT_EQ(mtp_cfg.model.mtp.gguf_initializers.tensors[0].file, "shard0.gguf");
+  EXPECT_EQ(mtp_cfg.model.mtp.gguf_initializers.tensors[0].data_type, 1);
+
+  // 2. LoadGgufInitializersConfig from external JSON file and reject path traversal
+  write_file(tmp_dir / "gguf_initializers.json", R"({
+    "files": ["model.gguf"],
+    "tensors": {
+      "embed": {
+        "gguf_name": "token_embd.weight",
+        "share": true
+      }
+    }
+  })");
+  Config::Model::GgufInitializers ext_loaded;
+  LoadGgufInitializersConfig(fs::path{(tmp_dir / "gguf_initializers.json").string()}, ext_loaded);
+  ASSERT_EQ(ext_loaded.files.size(), 1u);
+  EXPECT_EQ(ext_loaded.files[0], "model.gguf");
+  ASSERT_EQ(ext_loaded.tensors.size(), 1u);
+  EXPECT_EQ(ext_loaded.tensors[0].onnx_name, "embed");
+  EXPECT_TRUE(ext_loaded.tensors[0].share);
+
+  // Path traversal in external gguf_initializers.json must be rejected
+  write_file(tmp_dir / "bad_gguf_initializers.json", R"({
+    "files": ["../outside.gguf"],
+    "tensors": {}
+  })");
+  Config::Model::GgufInitializers bad_loaded;
+  EXPECT_THROW(LoadGgufInitializersConfig(fs::path{(tmp_dir / "bad_gguf_initializers.json").string()}, bad_loaded),
+               std::runtime_error);
+
+  // Path traversal in inline genai_config.json gguf_initializers must be rejected
+  write_file(tmp_dir / "genai_config.json", R"({
+    "model": {
+      "type": "nemotron_bolt",
+      "vocab_size": 128,
+      "context_length": 32,
+      "decoder": {
+        "filename": "model.onnx",
+        "gguf_initializers": "../outside.json"
+      }
+    },
+    "search": {}
+  })");
+  EXPECT_THROW(Config(fs::path{tmp_dir.string()}, {}), std::runtime_error);
+
+  // 3. Synthetic GGUF v3 binary header parsing and AddGgufInitializers validation
+  auto write_u32 = [](std::string& buf, uint32_t v) {
+    buf.append(reinterpret_cast<const char*>(&v), 4);
+  };
+  auto write_u64 = [](std::string& buf, uint64_t v) {
+    buf.append(reinterpret_cast<const char*>(&v), 8);
+  };
+  auto write_gguf_str = [&](std::string& buf, std::string_view s) {
+    write_u64(buf, s.size());
+    buf.append(s.data(), s.size());
+  };
+
+  std::string gguf_bytes;
+  gguf_bytes.append("GGUF", 4);
+  write_u32(gguf_bytes, 3);  // version 3
+  write_u64(gguf_bytes, 2);  // tensor_count = 2
+  write_u64(gguf_bytes, 1);  // kv_count = 1
+  write_gguf_str(gguf_bytes, "general.alignment");
+  write_u32(gguf_bytes, 4);  // UINT32
+  write_u32(gguf_bytes, 32);
+
+  // Tensor 0: "weight_f32", dims=[4, 2] -> ONNX default shape [2, 4] FLOAT (32 bytes), offset 0
+  write_gguf_str(gguf_bytes, "weight_f32");
+  write_u32(gguf_bytes, 2);
+  write_u64(gguf_bytes, 4);
+  write_u64(gguf_bytes, 2);
+  write_u32(gguf_bytes, 0);  // F32
+  write_u64(gguf_bytes, 0);
+
+  // Tensor 1: "weight_q8", dims=[32, 2] -> ONNX default shape [2, 34] UINT8 (68 bytes), offset 32
+  write_gguf_str(gguf_bytes, "weight_q8");
+  write_u32(gguf_bytes, 2);
+  write_u64(gguf_bytes, 32);
+  write_u64(gguf_bytes, 2);
+  write_u32(gguf_bytes, 8);  // Q8_0
+  write_u64(gguf_bytes, 32);
+
+  while (gguf_bytes.size() % 32 != 0) gguf_bytes.push_back('\0');
+  gguf_bytes.append(32 + 68, '\x01');
+  write_file(tmp_dir / "synthetic.gguf", gguf_bytes);
+
+  // Missing GGUF tensor name throws from AddGgufInitializers before CreateSession
+  write_file(tmp_dir / "genai_config.json", R"({
+    "model": {
+      "type": "gpt2",
+      "vocab_size": 128,
+      "context_length": 32,
+      "decoder": {
+        "filename": "nonexistent_model.onnx",
+        "gguf_initializers": {
+          "files": ["synthetic.gguf"],
+          "tensors": {
+            "w_missing": "does_not_exist"
+          }
+        }
+      }
+    },
+    "search": {}
+  })");
+  try {
+    CreateModel(GetOrtEnv(), tmp_dir.string().c_str());
+    FAIL() << "Expected missing GGUF tensor to throw";
+  } catch (const std::exception& e) {
+    EXPECT_NE(std::string(e.what()).find("does_not_exist"), std::string::npos) << e.what();
+  }
+
+  // Byte size mismatch throws from AddGgufInitializers
+  write_file(tmp_dir / "genai_config.json", R"({
+    "model": {
+      "type": "gpt2",
+      "vocab_size": 128,
+      "context_length": 32,
+      "decoder": {
+        "filename": "nonexistent_model.onnx",
+        "gguf_initializers": {
+          "files": ["synthetic.gguf"],
+          "tensors": {
+            "w0": {
+              "gguf_name": "weight_f32",
+              "shape": [2, 5]
+            }
+          }
+        }
+      }
+    },
+    "search": {}
+  })");
+  try {
+    CreateModel(GetOrtEnv(), tmp_dir.string().c_str());
+    FAIL() << "Expected byte size mismatch to throw";
+  } catch (const std::exception& e) {
+    EXPECT_NE(std::string(e.what()).find("Byte size mismatch"), std::string::npos) << e.what();
+  }
+
+  // Valid GGUF tensor mappings succeed in AddGgufInitializers and reach CreateSession(nonexistent_model.onnx)
+  write_file(tmp_dir / "genai_config.json", R"({
+    "model": {
+      "type": "gpt2",
+      "vocab_size": 128,
+      "context_length": 32,
+      "decoder": {
+        "filename": "nonexistent_model.onnx",
+        "gguf_initializers": {
+          "files": ["synthetic.gguf"],
+          "tensors": {
+            "w0": "weight_f32",
+            "w1": "weight_q8"
+          }
+        }
+      }
+    },
+    "search": {}
+  })");
+  try {
+    CreateModel(GetOrtEnv(), tmp_dir.string().c_str());
+    FAIL() << "Expected nonexistent_model.onnx to throw after AddGgufInitializers succeeds";
+  } catch (const std::exception& e) {
+    EXPECT_NE(std::string(e.what()).find("nonexistent_model.onnx"), std::string::npos) << e.what();
+  }
+
+  fs_std::remove_all(tmp_dir, ec);
 }
 
 }  // namespace
