@@ -31,6 +31,7 @@ from pathlib import Path
 
 import numpy as np
 import onnx
+import torch
 from onnx import TensorProto, helper, numpy_helper
 from package_io import (
     CONTEXT_TIERS,
@@ -619,8 +620,6 @@ def apply_precision_config_to_package(
 
     # 3b. Optional FP16 QSA V (`v_rc5_fp16`), K/V (`kv_fp16`), or Q/K/V/O (`fp16`) projections (packed into attn_consts.data)
     if pcfg.qsa_qkv_dtype == "v_rc5_fp16":
-        import torch
-
         for lid in range(3, 48, 4):
             lpfx = f"model.language_model.layers.{lid}"
             w_v_hf = hf_reader.read_bf16_tensor(f"{lpfx}.self_attn.v_proj.weight")
@@ -757,7 +756,7 @@ def apply_precision_config_to_package(
             if pcfg.qsa_qkv_dtype == "fp16":
                 dsa_out_orig = n.output[0]
                 dsa_out_bf16 = f"{dsa_out_orig}.bf16"
-                dsa_outputs = [dsa_out_bf16] + list(n.output[1:])
+                dsa_outputs = [dsa_out_bf16, *n.output[1:]]
                 new_nodes.extend(
                     [
                         helper.make_node(

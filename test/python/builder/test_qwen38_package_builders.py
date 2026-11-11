@@ -1708,6 +1708,16 @@ def test_gguf_ple_table_is_copied_into_output_when_hard_link_fails(tmp_path, mon
 
 def test_rc6_fp32_gdn_kl_calibration_and_presets(builders):
     pkg = builders.pkg
+    gb = builders.gb
+    assert gb.DEFAULT_KV_SCALE_FILE.is_file()
+    raw_kv = json.loads(gb.DEFAULT_KV_SCALE_FILE.read_text(encoding="utf-8"))
+    assert raw_kv["layer_ids"] == [3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43, 47]
+    assert raw_kv["qmax"] == 128.0
+    assert len(raw_kv["scales"]["k_scales"]) == 12 and len(raw_kv["scales"]["v_scales"]) == 12
+    kv_scales = gb.load_calibrated_kv_scales()
+    assert len(kv_scales) == 24
+    assert all(arr.shape == (512,) and arr.dtype == np.float32 for arr in kv_scales.values())
+
     l4, l3, l2, mode = pkg.select_qmoe_layers_by_kl(2, 14, 32, kl_mode="dp23_fp32")
     assert mode == "dp23_fp32"
     assert l4 == [28, 32]
@@ -1729,8 +1739,9 @@ def test_rc6_fp32_gdn_kl_calibration_and_presets(builders):
     spec_top16 = pkg.resolve_preset_spec("rc6_top16")
     assert spec_top16["pkg_name"] == "qwen_flash_next_rc6_top16_fp32"
     assert (spec_top16["x"], spec_top16["y"], spec_top16["z"]) == (16, 32, 0)
-    assert spec_top16["kl_mode"] == "rank_fp32"
+    assert spec_top16["kl_mode"] == "rank"
 
     spec_all4 = pkg.resolve_preset_spec("rc6_all_int4")
     assert spec_all4["pkg_name"] == "qwen_flash_next_rc6_all_int4_fp32"
     assert (spec_all4["x"], spec_all4["y"], spec_all4["z"]) == (48, 0, 0)
+    assert spec_all4["kl_mode"] == "rank"

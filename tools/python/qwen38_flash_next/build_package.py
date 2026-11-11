@@ -391,7 +391,7 @@ PRESETS: dict[str, dict] = {
         "bs4": 32,
         "bs3": 64,
         "bs2": 64,
-        "kl_mode": "rank_fp32",
+        "kl_mode": "rank",
         "precision_profile": "fp32_fp16kv_v2",
         "consolidate_data_files": True,
     },
@@ -403,7 +403,7 @@ PRESETS: dict[str, dict] = {
         "bs4": 32,
         "bs3": 64,
         "bs2": 64,
-        "kl_mode": "rank_fp32",
+        "kl_mode": "rank",
         "precision_profile": "fp32_fp16kv_v2",
         "consolidate_data_files": True,
     },
@@ -672,7 +672,7 @@ def select_qmoe_layers_by_kl(
         else:
             resolved = "dp2" + sfx
 
-    base_mode = resolved[:-5] if resolved.endswith("_fp32") else resolved
+    base_mode = resolved.removesuffix("_fp32")
     if base_mode == "rank":
         ref_ranked = RANKED_SENSITIVE_LAYERS_FP32 if use_fp32_gdn else RANKED_SENSITIVE_LAYERS
         if num_layers == len(ref_ranked) and study_json is None:
