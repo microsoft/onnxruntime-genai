@@ -282,6 +282,9 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         text = [get_prompt_by_length(prompt_length)] * batch_size
         prompt = f"{args.chat_template.format(input=text)}"
         tokens = tokenizer.encode(prompt)
+        # The stored prompts are only approximately prompt_length tokens long, so
+        # use the real token count for metrics and for the generator capacity.
+        prompt_length = len(tokens)
     else:
         # We will generate the prompt using a generator below;
         # prompt_length is already known from the args.
@@ -299,7 +302,13 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         top_p=args.top_p,
         temperature=temperature,
         **({ "max_length": max_length } if override_max_length else {}),
-        min_length=max_length if override_max_length else prompt_length + generation_length,
+        min_length=(
+            args.min_length
+            if args.min_length is not None
+            else max_length
+            if override_max_length
+            else prompt_length + generation_length
+        ),
         batch_size=batch_size,
     )
 
@@ -424,9 +433,11 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     print(f"Average Prompt Processing Throughput (per token): {avg_per_token_prompt_thrpt} tps")
 
     # Calculate token generation input prep metrics
-    avg_token_gen_latency_s = sum(token_gen_times) / len(token_gen_times)
+    # The first new token is timed as sampling. An EOS stop on that token
+    # leaves this list empty.
+    avg_token_gen_latency_s = sum(token_gen_times) / len(token_gen_times) if token_gen_times else 0.0
     avg_token_gen_latency_ms = avg_token_gen_latency_s * 1000
-    avg_token_gen_thrpt = batch_size * (1 / avg_token_gen_latency_s)
+    avg_token_gen_thrpt = batch_size * (1 / avg_token_gen_latency_s) if avg_token_gen_latency_s else 0.0
     print(f"Average Token Generation Latency (per token): {avg_token_gen_latency_ms} ms")
     print(f"Average Token Generation Throughput (per token): {avg_token_gen_thrpt} tps")
 
@@ -560,6 +571,13 @@ if __name__ == "__main__":
     parser.add_argument("-r", "--repetitions", type=int, default=10, help="Number of times to repeat the benchmark")
     parser.add_argument("-w", "--warmup", type=int, default=5, help="Number of warmup runs before benchmarking")
     parser.add_argument("-k", "--top_k", type=int, default=50, help="Top k tokens to sample from")
+    parser.add_argument(
+        "--min_length",
+        type=int,
+        default=None,
+        help="Minimum sequence length before EOS can stop generation. "
+        "The default matches the requested length so a benchmark emits every requested token.",
+    )
     parser.add_argument("-p", "--top_p", type=float, default=1.0, help="Top p probability to sample with")
     parser.add_argument(
         "-o", "--output", type=str, default="genai_e2e", help="Output CSV file name or path (with .csv extension)"

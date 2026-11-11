@@ -33,6 +33,26 @@ from transformers import (
 )
 
 
+def _rope_setting(config, name, default):
+    """Read one RoPE setting from a Hugging Face config.
+
+    Recent Transformers stores partial_rotary_factor on rope_parameters.
+    The legacy top-level attribute is then absent. Treating that absence as
+    full rotation changes the next token for models that rotate only part of
+    each head.
+    """
+    if hasattr(config, name):
+        value = getattr(config, name)
+        if value is not None:
+            return value
+    parameters = getattr(config, "rope_parameters", None)
+    if isinstance(parameters, Mapping):
+        value = parameters.get(name)
+        if value is not None:
+            return value
+    return default
+
+
 def parse_hf_token(hf_token):
     """
     Returns the authentication token needed for Hugging Face.
@@ -228,7 +248,7 @@ class Model:
 
         # RotaryEmbedding-specific variables
         position_scale = config.rope_position_scale if hasattr(config, "rope_position_scale") else 1
-        partial_rotary_factor = config.partial_rotary_factor if hasattr(config, "partial_rotary_factor") else 1.0
+        partial_rotary_factor = _rope_setting(config, "partial_rotary_factor", 1.0)
         rotemb_dim = int(self.head_size * partial_rotary_factor) if partial_rotary_factor != 1.0 else 0
         rope_theta = (
             config.rope_theta
@@ -550,8 +570,15 @@ class Model:
                 and not self.extra_options.get("disable_qkv_fusion", False)
             )
 
-            # Some EPs don't support fusing rotary embeddings inside GQA yet
-            self.attention_attrs["use_rope_in_attn"] = self.is_fused_rope_supported()
+            # Some EPs don't support fusing rotary embeddings inside GQA yet.
+            # GroupQueryAttention also cannot take a partial rotary width: the
+            # attribute is rejected, and a narrower cos/sin cache is ignored.
+            # Keep RoPE in its own op so partial_rotary_factor is honored.
+            self.attention_attrs["use_rope_in_attn"] = (
+                self.is_fused_rope_supported() and not self.rope_attrs["rotary_embedding_dim"]
+            )
+            if self.rope_attrs["rotary_embedding_dim"]:
+                self.attention_attrs["use_packed_matmul"] = False
             if self.attention_attrs["use_rope_in_attn"]:
                 # GQA + Rot.Emb. does not require `position_ids` as input
                 del self.input_names["position_ids"]
@@ -824,8 +851,10 @@ class Model:
                 callback=callback,
             )
 
-        # Delete temporary cache dir if empty
-        if not os.listdir(self.cache_dir):
+        # Delete temporary cache dir if empty. A multi-component model
+        # (encoder then decoder) shares this directory; the first save removes
+        # it, so the next save must tolerate the directory already being gone.
+        if os.path.isdir(self.cache_dir) and not os.listdir(self.cache_dir):
             os.rmdir(self.cache_dir)
 
     def make_initializer(self, tensor: torch.Tensor | np.ndarray | ir.TensorProtocol, /, name: str, to: ir.DataType | None = None):
@@ -4110,8 +4139,37 @@ class Model:
                     break
 
             # Load PyTorch model
+            # Older Phi-3 remote code reads rope_scaling["type"]. Current
+            # Transformers rewrites a missing scaling block to rope_type
+            # "default", which that code cannot index. On current
+            # Transformers rope_scaling is an alias of rope_parameters, and
+            # clearing it removes the RoPE config the constructor reads.
+            loaded_config = AutoConfig.from_pretrained(
+                self.model_name_or_path,
+                cache_dir=self.cache_dir,
+                token=self.hf_token,
+                trust_remote_code=self.hf_remote,
+            )
+            scaling = getattr(loaded_config, "rope_scaling", None)
+            # rope_scaling aliases rope_parameters, so this clear is only safe
+            # for Phi-3 remote code, which indexes rope_scaling["type"] and
+            # treats a missing block as the default rotary embedding.
+            auto_map = getattr(loaded_config, "auto_map", None)
+            phi3_remote = getattr(loaded_config, "model_type", None) == "phi3" and isinstance(
+                auto_map, Mapping
+            ) and any("modeling_phi3" in str(target) for target in auto_map.values())
+            if (
+                phi3_remote
+                and isinstance(scaling, Mapping)
+                and "type" not in scaling
+                and "partial_rotary_factor" not in scaling
+                and "long_factor" not in scaling
+                and scaling.get("rope_type", "default") == "default"
+            ):
+                loaded_config.rope_scaling = None
             model = auto_class.from_pretrained(
                 self.model_name_or_path,
+                config=loaded_config,
                 cache_dir=self.cache_dir,
                 token=self.hf_token,
                 trust_remote_code=self.hf_remote,

@@ -24,6 +24,11 @@ from builders import (
     Gemma3Model,
     GemmaModel,
     GPTOSSModel,
+    BloomModel,
+    CodeGenModel,
+    GPT2Model,
+    GPTNeoModel,
+    GPTNeoXModel,
     GraniteModel,
     HunyuanDenseV1Model,
     InternLM2Model,
@@ -34,6 +39,7 @@ from builders import (
     Model,
     NemotronModel,
     OLMoModel,
+    OPTModel,
     Phi3MiniLongRoPEModel,
     Phi3MiniModel,
     Phi3MoELongRoPEModel,
@@ -239,6 +245,12 @@ def create_model(
         print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
         extra_options["exclude_embeds"] = True
         onnx_model = Gemma3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] in {"GPT2LMHeadModel", "GPTBigCodeForCausalLM"}:
+        onnx_model = GPT2Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "GPTNeoForCausalLM":
+        onnx_model = GPTNeoModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "GPTNeoXForCausalLM":
+        onnx_model = GPTNeoXModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "GptOssForCausalLM":
         print("WARNING: This model only supports symmetric quantization for `QMoE`.")
         if hasattr(config, "quantization_config") and config.quantization_config.get("quant_method") != "quark":
@@ -267,8 +279,14 @@ def create_model(
         onnx_model = Mistral3TextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "NemotronForCausalLM":
         onnx_model = NemotronModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "BloomForCausalLM":
+        onnx_model = BloomModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "CodeGenForCausalLM":
+        onnx_model = CodeGenModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "OlmoForCausalLM":
         onnx_model = OLMoModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "OPTForCausalLM":
+        onnx_model = OPTModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "PhiForCausalLM":
         onnx_model = PhiModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Phi3ForCausalLM" and config.max_position_embeddings == config.original_max_position_embeddings:

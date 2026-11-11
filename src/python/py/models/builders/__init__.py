@@ -15,6 +15,7 @@ from .granite import GraniteModel
 from .hunyuan import HunyuanDenseV1Model
 from .internlm import InternLM2Model
 from .lfm2 import LFM2Model
+from .legacy import BloomModel, CodeGenModel, GPT2Model, GPTNeoModel, GPTNeoXModel, OPTModel
 from .llama import LlamaModel
 from .mistral import Mistral3TextModel, MistralModel
 from .nemotron import NemotronModel
@@ -40,6 +41,11 @@ __all__ = [
     "Gemma2Model",
     "Gemma3Model",
     "GemmaModel",
+    "BloomModel",
+    "CodeGenModel",
+    "GPT2Model",
+    "GPTNeoModel",
+    "GPTNeoXModel",
     "GraniteModel",
     "HunyuanDenseV1Model",
     "InternLM2Model",
@@ -50,6 +56,7 @@ __all__ = [
     "Model",
     "NemotronModel",
     "OLMoModel",
+    "OPTModel",
     "Phi3MiniLongRoPEModel",
     "Phi3MiniModel",
     "Phi3MoELongRoPEModel",
