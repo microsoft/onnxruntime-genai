@@ -337,6 +337,52 @@ def test_lfm2_conv_state_of_each_row(tmp_path):
         np.testing.assert_array_equal(present[row], columns[row, :, real_tokens : real_tokens + state_size])
 
 
+@pytest.mark.parametrize("activation", ["none", "silu"])
+@pytest.mark.parametrize("use_bias", [False, True])
+def test_dml_causal_conv_matches_torch_across_prefill_and_decode(tmp_path, activation, use_bias):
+    model, _ = _build_tiny_lfm2(ep="dml")
+    assert not any(node.op_type == "CausalConvWithState" for node in model.model.graph)
+    rng = np.random.default_rng(6)
+    channels, state_size = model.hidden_size, model.conv_L_cache - 1
+    weight = rng.standard_normal((channels, 1, state_size + 1)).astype(np.float32)
+    bias = rng.standard_normal(channels).astype(np.float32) if use_bias else None
+    model.make_initializer(torch.from_numpy(weight), "test.weight", to=model.io_dtype)
+    if use_bias:
+        model.make_initializer(torch.from_numpy(bias), "test.bias", to=model.io_dtype)
+    conv_input = "/model/layers.0/conv/Mul_1/output_0"
+    model.make_causal_conv_with_state(
+        "/test/conv",
+        root_input=conv_input,
+        weight="test.weight",
+        bias="test.bias" if use_bias else "",
+        past_conv_state="past.0.conv",
+        present_conv_state="test.present",
+        activation=activation,
+        channels=channels,
+    )
+    ir.save(model.model, tmp_path / "model.onnx")
+    subgraph = onnx_utils.Extractor(onnx.load(tmp_path / "model.onnx")).extract_model(
+        [conv_input, "past.0.conv"], ["/test/conv/output_0", "test.present"]
+    )
+    session = ort.InferenceSession(subgraph.SerializeToString(), providers=["CPUExecutionProvider"])
+    past = rng.standard_normal((2, channels, state_size)).astype(np.float32)
+    for length in (7, 1, 4, 1):
+        inputs = rng.standard_normal((2, channels, length)).astype(np.float32)
+        columns = np.concatenate([past, inputs], axis=2)
+        expected = torch.nn.functional.conv1d(
+            torch.from_numpy(columns),
+            torch.from_numpy(weight),
+            torch.from_numpy(bias) if use_bias else None,
+            groups=channels,
+        )
+        if activation == "silu":
+            expected = torch.nn.functional.silu(expected)
+        output, present = session.run(None, {conv_input: inputs, "past.0.conv": past})
+        np.testing.assert_allclose(output, expected.numpy(), rtol=1e-5, atol=1e-5)
+        np.testing.assert_array_equal(present, columns[:, :, -state_size:])
+        past = present
+
+
 @requires_causal_conv_with_state
 def test_lfm2_left_padded_batch_keeps_each_rows_last_columns(tmp_path):
     # With left padding every row ends at the last column, so each row keeps the op's own state, as before

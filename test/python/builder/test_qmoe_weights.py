@@ -149,6 +149,8 @@ def test_gptoss_moe_dispatches_fused_and_decomposed_paths(monkeypatch):
 def _load_builder_cli_module(monkeypatch):
     builders_module = types.ModuleType("builders")
     for class_name in (
+        "BailingMoeV3Model",
+        "BailingVLModel",
         "ChatGLMModel",
         "ErnieModel",
         "Gemma2Model",
@@ -275,12 +277,13 @@ def test_moe_quant_type_nvfp4_accepts_floating_graph_precision(monkeypatch, prec
     assert options["moe_quant_type"] == "nvfp4"
 
 
-def test_modelopt_selects_native_quantization_from_metadata(monkeypatch):
+@pytest.mark.parametrize("quant_method", ["modelopt", "compressed-tensors"])
+def test_modelopt_selects_native_quantization_from_metadata(monkeypatch, quant_method):
     builder = _load_builder_cli_module(monkeypatch)
     options = _parse_extra_options(
         builder,
         [],
-        quantization_config={"quant_method": "modelopt", "kv_cache_quant_algo": "FP8"},
+        quantization_config={"quant_method": quant_method, "kv_cache_quant_algo": "FP8"},
     )
 
     assert options["moe_quant_type"] == "nvfp4"

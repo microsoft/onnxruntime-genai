@@ -1,4 +1,5 @@
-FROM onnxruntimebuildcache.azurecr.io/public/azureml/onnxruntime_build_cuda13_aarch64_almalinux9_gcc14:20260323.1
+ARG BASEIMAGE
+FROM $BASEIMAGE
 
 ADD scripts /tmp/scripts
 RUN --mount=type=secret,id=pip_index_url,required=true \

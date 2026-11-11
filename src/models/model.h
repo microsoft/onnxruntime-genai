@@ -24,6 +24,7 @@ class ThreadPool;
 void Cast(OrtValue& input, std::unique_ptr<OrtValue>& output, DeviceInterface& device, ONNXTensorElementDataType type);
 void CheckResult(extError_t error);
 void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config);
+void ApplyRunOption(OrtRunOptions& run_options, const char* key, const char* value);
 void ApplySessionOptionsFromConfig(
     const Config& config,
     const Config::SessionOptions& config_session_options,
@@ -120,7 +121,7 @@ struct State {
 
  protected:
   void Run(OrtSession& session, bool graph_capture_this_run = false, int graph_capture_length = 1,
-           int graph_capture_variant = 0);
+           int graph_capture_variant = 0, OrtIoBinding* binding = nullptr);
   int GraphIdForLength(int graph_capture_length, int graph_capture_variant);
   bool first_run_{true};
 
@@ -171,6 +172,7 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
   std::shared_ptr<MultiModalProcessor> CreateMultiModalProcessor() const;
 
   virtual std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const = 0;
+  virtual OrtSession* GetVisionSession() const { return nullptr; }
 
   std::unique_ptr<OrtValue> ExpandInputs(std::unique_ptr<OrtValue>& input, int num_beams) const;
 
@@ -186,6 +188,7 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;
   std::vector<std::shared_ptr<void>> shared_initializer_entries_;
+  std::optional<size_t> device_memory_budget_initial_free_bytes_;
 
   DeviceInterface* p_device_{};          // The device we're running on (matches device_type_) used for things that work the same on all devices
   DeviceInterface* p_device_inputs_{};   // For some model inputs, the device might be the CPU device (all but KV cache currently for WebGPU and DML)

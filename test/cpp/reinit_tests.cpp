@@ -15,6 +15,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 
@@ -38,7 +39,8 @@
 #include "ep/dml/interface.h"  // Generators::InitDmlInterface / CloseDmlInterface / GetDmlInterface
 #endif
 #if USE_CUDA
-#include "ep/cuda/session_options.h"    // Generators::CUDAExecutionProvider::ResolveStreamBindingOptions
+#include "ep/cuda/session_options.h"  // Generators::CUDAExecutionProvider::ResolveStreamBindingOptions
+#include "models/session_options.h"
 #include "models/qwen38_graph_plane.h"  // Generators::Qwen38Plane: the plane that pins the CUDA add-on
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -761,6 +763,90 @@ TEST(ReInitTests, ALegacyCudaSessionWithoutAnIdIsBoundToGpuZero) {
   EXPECT_EQ(cuda->GetDeviceId(&resolved), 0);
   OgaShutdown();
 }
+
+#if !defined(_WIN32)
+class CudaAdjacentPluginTest : public testing::Test {
+ protected:
+  struct HardwareDevice {
+    const OrtHardwareDevice* device;
+    uint32_t id;
+  };
+
+  static inline const OrtApi* real_api{};
+  static inline HardwareDevice hardware_devices[]{{nullptr, 0}, {nullptr, 1}};
+  OrtApi test_api{};
+
+  static const OrtHardwareDevice* ORT_API_CALL EpDeviceHardware(const OrtEpDevice* device) {
+    const auto* hardware = real_api->EpDevice_Device(device);
+    const auto cuda_id = Generators::GetCudaDeviceIdMetadata(device);
+    if (cuda_id == "0" || cuda_id == "1") {
+      hardware_devices[cuda_id == "1" ? 1 : 0].device = hardware;
+    }
+    return hardware;
+  }
+
+  static uint32_t ORT_API_CALL HardwareId(const OrtHardwareDevice* device) {
+    for (const auto& hardware : hardware_devices) {
+      if (device == hardware.device) return hardware.id;
+    }
+    return real_api->HardwareDevice_DeviceId(device);
+  }
+
+  static OrtStatus* ORT_API_CALL DisableProviderBridge(OrtCUDAProviderOptionsV2**) noexcept {
+    return real_api->CreateStatus(ORT_FAIL, "Provider bridge disabled for adjacent-plugin regression");
+  }
+
+  void SetUp() override {
+    if (const std::string reason = CudaUnavailableReason(2); !reason.empty()) GTEST_SKIP() << reason;
+    (void)Generators::GetOrtEnv();
+    real_api = Ort::api;
+    test_api = *real_api;
+    // Identical physical GPUs share PCI device IDs. Give just the hardware-filter view distinct
+    // IDs while retaining the real plugin devices, CUDA metadata, streams, and append calls.
+    test_api.EpDevice_Device = EpDeviceHardware;
+    test_api.HardwareDevice_DeviceId = HardwareId;
+    test_api.CreateCUDAProviderOptions = DisableProviderBridge;
+    Ort::api = &test_api;
+  }
+
+  void TearDown() override {
+    OgaShutdown();
+    if (real_api) Ort::api = real_api;
+    real_api = nullptr;
+    for (auto& hardware : hardware_devices) hardware.device = nullptr;
+  }
+};
+
+TEST_F(CudaAdjacentPluginTest, HardwareFilterExcludesGpuZeroBeforeStreamCreation) {
+  if (const char* explicit_path = std::getenv("ORT_CUDA_PLUGIN_EP_PATH"); explicit_path && *explicit_path) {
+    GTEST_SKIP() << "Adjacent-library discovery requires ORT_CUDA_PLUGIN_EP_PATH to be unset";
+  }
+  Dl_info info{};
+  ASSERT_NE(dladdr(reinterpret_cast<const void*>(real_api->RegisterExecutionProviderLibrary), &info), 0);
+  ASSERT_NE(info.dli_fname, nullptr);
+  const auto candidate = std::filesystem::path(info.dli_fname).parent_path() / "libonnxruntime_providers_cuda.so";
+  if (!std::filesystem::exists(candidate)) GTEST_SKIP() << "No CUDA plugin adjacent to the ORT runtime";
+  ASSERT_TRUE(Generators::FindRegisteredEpDevices("CUDAExecutionProvider").empty());
+
+  Generators::ProviderOptions options;
+  options.name = "cuda";
+  options.device_filtering_options.emplace();
+  options.device_filtering_options->hardware_device_id = 1;
+  auto session_options = OrtSessionOptions::Create();
+  Generators::Config config;
+
+  auto* device = Generators::CUDAExecutionProvider::AppendExecutionProvider(*session_options, options, config);
+
+  ASSERT_NE(device, nullptr);
+  EXPECT_EQ(device->GetDeviceId(nullptr), 1);
+  EXPECT_EQ(device->GetMemoryInfo()->GetDeviceId(), 1);
+  EXPECT_NE(device->GetCudaStream(), nullptr);
+  const auto filtered = Generators::ApplyDeviceFiltering(
+      options, Generators::FindRegisteredEpDevices("CUDAExecutionProvider"));
+  ASSERT_EQ(filtered.size(), 1u);
+  EXPECT_EQ(Generators::GetCudaDeviceIdMetadata(filtered.front()), "1");
+}
+#endif
 
 // The CUDA add-on keeps its stream, its allocator pointer and its device interface in file-scope state. The qwen38 plane built
 // into the add-on is never unloaded (a library that has launched kernels must not be unloaded and loaded again, see

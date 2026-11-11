@@ -418,12 +418,23 @@ PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model,
     } else {
       size_t free_bytes = 0, total_bytes = 0;
       model_->p_device_kvcache_->GetAvailableMemory(free_bytes, total_bytes);
-      budget = PagedCacheMemoryBudget(free_bytes, *batching.gpu_utilization_factor);
+      if (batching.device_memory_budget_bytes) {
+        if (!model_->device_memory_budget_initial_free_bytes_) {
+          throw std::runtime_error("device_memory_budget_bytes must be configured before loading the model.");
+        }
+        budget = DeviceMemoryBudgetAvailableBytes(
+            *batching.device_memory_budget_bytes,
+            *model_->device_memory_budget_initial_free_bytes_, free_bytes,
+            batching.device_memory_headroom_bytes);
+      } else {
+        budget = PagedCacheMemoryBudget(free_bytes, *batching.gpu_utilization_factor);
+      }
     }
-    const size_t available = budget > auxiliary_reserved_memory_bytes &&
-                                     budget - auxiliary_reserved_memory_bytes >= target_block_bytes
-                                 ? budget - auxiliary_reserved_memory_bytes - target_block_bytes
-                                 : 0;
+    size_t available = budget;
+    for (const size_t reserved : {auxiliary_reserved_memory_bytes,
+                                  PagedCacheCaptureBlockTableBytes(model_), target_block_bytes}) {
+      available -= std::min(available, reserved);
+    }
     const size_t device_count = std::min(count, available / optional_draft_checkpoint_bytes);
     const size_t vram_count = device_resident ? device_count
                                               : std::min(device_count, limits.vram_bytes / optional_draft_checkpoint_bytes);
@@ -466,7 +477,7 @@ std::shared_ptr<const PrefixCacheMatch> PagedCacheManager::MatchPrefix(
   if (!key_value_cache_->PrefixCachingEnabled()) {
     return nullptr;
   }
-  const auto tokens = request.TokensCpu();
+  const auto tokens = request.PrefixTokensCpu();
   if (tokens.size() <= 1) {
     return nullptr;
   }
@@ -486,14 +497,18 @@ void PagedCacheManager::SealCommittedBlocks(const StepPlan& plan) {
     return;
   }
   for (const auto& entry : plan.requests) {
-    if (!fixed_state_pool_) {
-      key_value_cache_->SealCommittedBlocks(
-          entry.request_id, entry.request->TokensCpu());
+    if ((fixed_state_pool_ && !entry.is_prefill) ||
+        !key_value_cache_->CanSealCommittedBlocks(entry.request_id)) {
       continue;
     }
-    if (!entry.is_prefill ||
-        !key_value_cache_->CanSealPrefixCheckpoint(
-            entry.request_id, entry.target_cache_slots, entry.request->TokensCpu())) {
+    const auto tokens = entry.request->PrefixTokensCpu();
+    if (!fixed_state_pool_) {
+      key_value_cache_->SealCommittedBlocks(
+          entry.request_id, tokens);
+      continue;
+    }
+    if (!key_value_cache_->CanSealPrefixCheckpoint(
+            entry.request_id, entry.target_cache_slots, tokens)) {
       continue;
     }
     if (fixed_state_pool_->AvailablePrefixCheckpoints() == 0) {
@@ -509,7 +524,7 @@ void PagedCacheManager::SealCommittedBlocks(const StepPlan& plan) {
       }
     }
     key_value_cache_->SealCheckpointedPrefix(
-        entry.request_id, entry.request->TokensCpu(), entry.target_cache_slots,
+        entry.request_id, tokens, entry.target_cache_slots,
         [this, request_id = entry.request_id] {
           const auto* replacement =
               fixed_state_pool_->AvailablePrefixCheckpoints() == 0

@@ -57,6 +57,41 @@ def test_block_size_is_parsed_from_a_string():
     assert options["paged_block_size"] == 64
 
 
+@pytest.mark.parametrize(
+    ("model_type", "has_vision", "text_only", "supported"),
+    [
+        ("bailing_moe_v3_vl", True, False, True),
+        ("bailing_moe_v3_vl", True, True, False),
+        ("bailing_moe_v3_vl", False, False, False),
+        ("bailing_hybrid", True, False, False),
+        ("qwen3_5", True, False, True),
+        ("qwen3_5_moe", True, False, True),
+        ("qwen4_exp", True, False, True),
+        ("qwen4_exp", True, True, False),
+        ("qwen4_exp", False, False, False),
+        ("qwen4_exp_text", True, False, False),
+        ("qwen3_5", True, True, False),
+        ("qwen3_5", False, False, False),
+        ("llama", True, False, False),
+    ],
+)
+def test_paged_excluded_embeddings_require_a_vision_composite(
+    monkeypatch, model_type, has_vision, text_only, supported
+):
+    config = types.SimpleNamespace(
+        model_type=model_type,
+        vision_config=object() if has_vision else None,
+        tie_word_embeddings=False,
+    )
+    monkeypatch.setattr(builder_module, "get_hf_details", lambda *args, **kwargs: {"hf_config": config})
+    options = {"use_paged_attention": "true", "exclude_embeds": "true", "text_only": text_only}
+    if supported:
+        builder_module.check_extra_options("dummy-model", "", "", "fp16", "cuda", "", options)
+    else:
+        with pytest.raises(ValueError, match="requires a complete supported vision composite"):
+            builder_module.check_extra_options("dummy-model", "", "", "fp16", "cuda", "", options)
+
+
 @pytest.mark.parametrize("block_size", [8, 15])
 def test_block_sizes_below_the_minimum_are_rejected(block_size):
     with pytest.raises(ValueError, match="paged_block_size must be a power of two and at least 16"):

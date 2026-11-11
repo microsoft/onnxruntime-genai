@@ -389,7 +389,6 @@ class Qwen35TextModel(Model):
         return {
             "state_update_capacity": capacity,
             "state_update_capture_count": self.input_names["state_update.capture_count"],
-            "state_update_active": self.input_names["state_update.active"],
             "state_update_value": self.output_names["state_update.conv_value"][layer_id],
             "state_update_value_shape": self.output_shapes["state_update.conv_value"],
         }
@@ -636,7 +635,7 @@ class Qwen35MoETextModel(Qwen35TextModel):
         return layer.mlp
 
     def make_moe_preprocessing(self, layer_id, moe, root_input):
-        self.make_interleaved_swiglu_moe_preprocessing(layer_id, moe)
+        self.make_interleaved_swiglu_moe_preprocessing(layer_id, moe, self.moe_intermediate_size)
 
     def make_moe_router(self, layer_id, moe, root_input):
         basename = f"/model/layers.{layer_id}/moe"

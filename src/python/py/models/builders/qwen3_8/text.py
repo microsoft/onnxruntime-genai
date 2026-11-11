@@ -8,7 +8,7 @@ import torch
 from loaders.engram import EngramWeights
 
 from ..base import Model
-from ..qwen3_5 import Qwen35MoETextModel
+from ..qwen3_5.text import Qwen35MoETextModel
 
 
 class Qwen4ExpTextModel(Qwen35MoETextModel):

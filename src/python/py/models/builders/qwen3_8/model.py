@@ -7,14 +7,14 @@ import os
 
 import onnx_ir as ir
 from builder_config import serialize_genai_config
-from huggingface_hub import hf_hub_download, snapshot_download
+from huggingface_hub import snapshot_download
 
 from ..mtp import MTPModel
 from .embedding import Qwen4ExpEmbeddingModel
 from .engram import Qwen4ExpEngramModel
 from .mtp import Qwen4ExpMTPTextModel
 from .text import Qwen4ExpTextModel
-from .vision import Qwen4ExpVisionModel
+from .vision import Qwen4ExpVisionModel, save_image_processor
 
 
 class Qwen4ExpModel(MTPModel):
@@ -28,6 +28,18 @@ class Qwen4ExpModel(MTPModel):
         decoder_options = self.make_mtp_init(config, self.extra_options)
         self.decoder = Qwen4ExpTextModel(copy.deepcopy(config), io_dtype, onnx_dtype, ep, cache_dir, decoder_options)
         self.decoder.model_type = "qwen4_exp_text" if self.text_only else "qwen3_5"
+        # Implicit exclusion serves the legacy merge graph, not a standalone lookup.
+        self.decoder.embed_attrs["emit_component"] = self.decoder.use_paged_attention and self.extra_options.get(
+            "exclude_embeds", False
+        )
+        if self.is_packed_vision():
+            self.decoder.model_type = "qwen4_exp"
+            if config.vision_config.out_hidden_size != self.decoder.hidden_size:
+                raise ValueError("The Qwen4-Exp vision output width must match the decoder embedding width.")
+            if self.mtp_attrs["build"]:
+                raise ValueError("Packed Qwen4-Exp vision does not support MTP; set exclude_mtp=true.")
+            if any(self.extra_options.get(option) for option in ("dflash2_path", "dspark_path")):
+                raise ValueError("Packed Qwen4-Exp vision does not support block drafters.")
         self.mtp = None
         if self.mtp_attrs["build"]:
             self.decoder.hyper_connection_attrs["emit_pre_final_hidden_states"] = True
@@ -47,6 +59,14 @@ class Qwen4ExpModel(MTPModel):
         self.context_length = self.decoder.context_length
         self.exclude_embeds = self.decoder.exclude_embeds
         self.model_type = self.decoder.model_type
+
+    def is_packed_vision(self):
+        # Qwen4-Exp also excludes decoder embeddings implicitly for its legacy merge export.
+        return (
+            not self.text_only
+            and self.extra_options.get("use_paged_attention", False)
+            and self.extra_options.get("exclude_embeds", False)
+        )
 
     def make_mtp_init(self, config, extra_options):
         decoder_options = super().make_mtp_init(config, extra_options)
@@ -113,6 +133,16 @@ class Qwen4ExpModel(MTPModel):
             self.mtp_attrs["index_share"] = self.mtp.sparse_indexer_attrs["index_share"]
 
     def make_model(self, input_path):
+        if self.is_packed_vision() and self.decoder.adapter_path:
+            from peft.utils.save_and_load import load_peft_weights  # noqa: PLC0415
+
+            adapter = load_peft_weights(
+                self.decoder.adapter_path, device="cpu", cache_dir=self.decoder.cache_dir, token=self.hf_token
+            )
+            if any("visual" in name.split(".") for name in adapter):
+                raise ValueError(
+                    "Packed Qwen4-Exp vision does not support vision-targeted adapters; export a merged checkpoint."
+                )
         if self.decoder.quant_type == "fp8" and not os.path.isdir(input_path):
             input_path = snapshot_download(
                 repo_id=self.decoder.model_name_or_path,
@@ -151,10 +181,11 @@ class Qwen4ExpModel(MTPModel):
             )
         if self.text_only:
             return
-        embedding_model = Qwen4ExpEmbeddingModel(
-            self.config, language_model.embed_tokens.weight.detach().cpu(), self.decoder.io_dtype
-        )
-        embedding_model.save_model(output_dir)
+        if not self.is_packed_vision():
+            embedding_model = Qwen4ExpEmbeddingModel(
+                self.config, language_model.embed_tokens.weight.detach().cpu(), self.decoder.io_dtype
+            )
+            embedding_model.save_model(output_dir)
         vision_config = self.config.vision_config
         if vision_config.out_hidden_size != self.decoder.hidden_size:
             raise ValueError(
@@ -215,22 +246,35 @@ class Qwen4ExpModel(MTPModel):
         decoder_inputs = model_config["decoder"]["inputs"]
         decoder_inputs["engram_embeddings"] = "engram_embeddings"
         if not self.text_only:
-            model_config["type"] = "qwen3_5"
             model_config["image_token_id"] = config.image_token_id
             model_config["vision_start_token_id"] = config.vision_start_token_id
             decoder_inputs["inputs_embeds"] = "inputs_embeds"
-            decoder_inputs["input_ids"] = "input_ids"
-            model_config["embedding"] = {
-                "filename": "embedding.onnx",
-                "inputs": {"input_ids": "input_ids", "image_features": "image_features"},
-                "outputs": {"inputs_embeds": "inputs_embeds"},
-            }
+            if self.is_packed_vision():
+                model_config.setdefault(
+                    "embedding",
+                    {
+                        "filename": "embedding.onnx",
+                        "session_options": {"intra_op_num_threads": 1},
+                        "inputs": {"input_ids": "input_ids"},
+                        "outputs": {"inputs_embeds": "inputs_embeds"},
+                    },
+                )
+            else:
+                model_config["type"] = "qwen3_5"
+                decoder_inputs["input_ids"] = "input_ids"
+                model_config["embedding"] = {
+                    "filename": "embedding.onnx",
+                    "inputs": {"input_ids": "input_ids", "image_features": "image_features"},
+                    "outputs": {"inputs_embeds": "inputs_embeds"},
+                }
             model_config["vision"] = {
                 "filename": "vision.onnx",
                 "spatial_merge_size": config.vision_config.spatial_merge_size,
                 "inputs": {"pixel_values": "pixel_values", "image_grid_thw": "image_grid_thw"},
                 "outputs": {"image_features": "image_features"},
             }
+            if self.is_packed_vision():
+                model_config["vision"]["patch_size"] = config.vision_config.patch_size
         ple_layer_id = config.text_config.ple_layer_ids[0] - 1
         engram_session_options = {
             "provider_options": [{"cuda" if self.decoder.ep == "cuda" else "cpu": {}}],
@@ -322,76 +366,4 @@ class Qwen4ExpModel(MTPModel):
 
     def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
         self.decoder.save_processing(model_name_or_path, extra_kwargs, out_dir)
-        preprocessor_path = (
-            os.path.join(model_name_or_path, "preprocessor_config.json")
-            if os.path.isdir(model_name_or_path)
-            else hf_hub_download(
-                model_name_or_path,
-                "preprocessor_config.json",
-                cache_dir=extra_kwargs.get("cache_dir"),
-                token=self.hf_token,
-            )
-        )
-        with open(preprocessor_path) as preprocessor_file:
-            image_processor = json.load(preprocessor_file)
-        processor_config = {
-            "processor": {
-                "name": "qwen4_exp_image_processor",
-                "transforms": [
-                    {
-                        "operation": {
-                            "name": "decode_image",
-                            "type": "DecodeImage",
-                            "attrs": {"color_space": "RGB"},
-                        }
-                    },
-                    {"operation": {"name": "convert_to_rgb", "type": "ConvertRGB"}},
-                    {
-                        "operation": {
-                            "name": "resize",
-                            "type": "Resize",
-                            "attrs": {
-                                "width": 540,
-                                "height": 360,
-                                "smart_resize": 1,
-                                "min_pixels": image_processor["size"]["shortest_edge"],
-                                "max_pixels": image_processor["size"]["longest_edge"],
-                                "patch_size": image_processor["patch_size"],
-                                "merge_size": image_processor["merge_size"],
-                            },
-                        }
-                    },
-                    {
-                        "operation": {
-                            "name": "rescale",
-                            "type": "Rescale",
-                            "attrs": {"rescale_factor": 1 / 255},
-                        }
-                    },
-                    {
-                        "operation": {
-                            "name": "normalize",
-                            "type": "Normalize",
-                            "attrs": {
-                                "mean": image_processor["image_mean"],
-                                "std": image_processor["image_std"],
-                                "qwen3_vl": 1,
-                            },
-                        }
-                    },
-                    {
-                        "operation": {
-                            "name": "patch_image",
-                            "type": "PatchImage",
-                            "attrs": {
-                                "patch_size": image_processor["patch_size"],
-                                "temporal_patch_size": image_processor["temporal_patch_size"],
-                                "merge_size": image_processor["merge_size"],
-                            },
-                        }
-                    },
-                ],
-            }
-        }
-        with open(os.path.join(out_dir, "processor_config.json"), "w") as processor_config_file:
-            json.dump(processor_config, processor_config_file, indent=4)
+        save_image_processor(model_name_or_path, extra_kwargs, out_dir, self.hf_token)
