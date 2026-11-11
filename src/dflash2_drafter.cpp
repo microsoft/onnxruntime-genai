@@ -12,9 +12,13 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
+#include <iomanip>
+#include <iostream>
 #include <limits>
 #include <new>
 #include <numeric>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -1548,7 +1552,9 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
         feed.first_position, feed.aux_row_count, "DFlash 2 cached positions");
   }
 
-  if (!drafts_wanted || device_selection) {
+  const char* trace = std::getenv("ORT_GENAI_TRACE_SPECULATIVE");
+  const bool trace_greedy = trace != nullptr && trace[0] == '1';
+  if (!drafts_wanted || (device_selection && !trace_greedy)) {
     return true;
   }
 
@@ -1570,6 +1576,41 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
     candidate_cpu = candidate_span.CopyDeviceToCpu();
     scores_cpu = scores_span.CopyDeviceToCpu();
   }
+  if (trace_greedy) {
+    for (size_t slot = 0; slot < block_feed_indices.size(); ++slot) {
+      const auto& feed = feeds[block_feed_indices[slot]];
+      if (feed.wants_independent_sampling || feed.wants_lattice) continue;
+      std::ostringstream record;
+      record << std::setprecision(9)
+             << "{\"event\":\"draft\",\"request\":" << reinterpret_cast<uintptr_t>(feed.request)
+             << ",\"base\":" << feed.first_position + feed.aux_row_count + 1
+             << ",\"context_first\":" << feed.first_position << ",\"context_rows\":" << feed.aux_row_count
+             << ",\"anchor\":" << feed.anchor_token << ",\"device_selection\":" << (device_selection ? 1 : 0)
+             << ",\"top_k\":" << top_k << ",\"steps\":[";
+      size_t previous = 0;
+      for (size_t step = 0; step < num_spec; ++step) {
+        const size_t candidate_offset = (slot * num_spec + step) * top_k;
+        const float* values = scores_cpu.data() + (candidate_offset + previous) * top_k;
+        const size_t best = static_cast<size_t>(std::max_element(values, values + top_k) - values);
+        record << (step == 0 ? "" : ",") << "{\"offset\":" << step << ",\"previous_index\":" << previous
+               << ",\"chosen_index\":" << best << ",\"chosen\":" << candidate_cpu[candidate_offset + best]
+               << ",\"candidates\":[";
+        for (size_t candidate = 0; candidate < top_k; ++candidate) {
+          record << (candidate == 0 ? "" : ",") << "[" << candidate_cpu[candidate_offset + candidate] << ",";
+          if (std::isfinite(values[candidate]))
+            record << values[candidate];
+          else
+            record << "null";
+          record << "]";
+        }
+        record << "]}";
+        previous = best;
+      }
+      record << "]}";
+      std::cout << "SpeculativeTrace " << record.str() << std::endl;
+    }
+  }
+  if (device_selection) return true;
   for (size_t slot = 0; slot < block_feed_indices.size(); ++slot) {
     const size_t feed_index = block_feed_indices[slot];
     if (feeds[feed_index].wants_independent_sampling && draft_distributions) {
