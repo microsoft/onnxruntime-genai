@@ -70,9 +70,10 @@ struct BoltSearch : GreedySearch_Cpu {
 }  // namespace
 
 void NemotronBoltPrefixCache::Prune() {
-  std::erase_if(entries_, [](const auto& entry) {
-    return entry->state != PrefixSnapshotCache::State::Resident;
-  });
+  entries_.erase(std::remove_if(entries_.begin(), entries_.end(), [](const auto& entry) {
+                   return entry->state != PrefixSnapshotCache::State::Resident;
+                 }),
+                 entries_.end());
 }
 
 std::shared_ptr<NemotronBoltPrefixCache::Entry> NemotronBoltPrefixCache::Find(std::span<const int32_t> tokens) {
