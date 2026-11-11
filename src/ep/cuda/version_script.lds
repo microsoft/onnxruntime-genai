@@ -3,6 +3,7 @@ VERS_1.0 {
   global:
     GetInterface;
     GetInterfaceVersion;
+    ReleaseInterfaceResources;
     ShutdownInterface;
     qwen38_plane_*;
 

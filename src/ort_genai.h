@@ -1427,6 +1427,10 @@ inline void SetTelemetryEnabled(bool enabled) {
   OgaSetTelemetryEnabled(enabled);
 }
 
+inline void ReleaseDeviceResources(const char* device_type) {
+  OgaCheckResult(OgaReleaseDeviceResources(device_type));
+}
+
 }  // namespace Oga
 
 struct OgaStreamingProcessor : OgaAbstract {

@@ -1,6 +1,7 @@
 EXPORTS
    GetInterface
    GetInterfaceVersion
+   ReleaseInterfaceResources
    ShutdownInterface
    qwen38_plane_abi_version
    qwen38_plane_sizeof_ple_params

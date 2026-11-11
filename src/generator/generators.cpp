@@ -7,6 +7,7 @@
 #include "token_outputs.h"
 #include <algorithm>
 #include <cctype>
+#include <condition_variable>
 #include <cstring>
 #include "config_utils.h"
 #include "models/preprocessing/genai_tokenizer.h"
@@ -104,11 +105,11 @@ OrtGlobals::OrtGlobals()
 // The single genai global. Lazily (re)created by GetOrtGlobals() and reset by Shutdown(), so that
 // genai can be torn down and re-initialized in-process (e.g. a host recreating its wrapper).
 static std::unique_ptr<OrtGlobals> g_ort_globals;
-// Guards lazy (re)creation and teardown of g_ort_globals so concurrent first-use (or first-use
-// after a shutdown) cannot double-construct the globals, and a concurrent Shutdown() cannot race
-// creation. Re-init after shutdown must remain possible, so this is a plain mutex rather than
-// std::call_once (which is process-once).
+// Guards ownership, lazy creation and release pins, never cache/interface locks or teardown.
+// Re-init after shutdown must remain possible, so std::call_once is not sufficient.
 static std::mutex g_ort_globals_mutex;
+static std::condition_variable g_ort_globals_cv;
+static bool g_ort_globals_tearing_down = false;
 // Set by the process-exit EnsureShutdown destructor to prevent GetOrtGlobals() from resurrecting
 // the globals during static destruction.
 static bool g_process_exiting = false;
@@ -140,12 +141,44 @@ std::unique_ptr<OrtGlobals>& GetOrtGlobals() {
   // via the OrtGlobals member accessor), so acquiring this lock here cannot deadlock. The lock is
   // released before the returned reference is dereferenced by callers, so it does not nest with
   // device_interfaces_mutex_.
-  std::scoped_lock lock{g_ort_globals_mutex};
+  std::unique_lock lock{g_ort_globals_mutex};
+  g_ort_globals_cv.wait(lock, [] { return !g_ort_globals_tearing_down; });
   if (!g_ort_globals && !g_process_exiting)
     g_ort_globals = std::make_unique<OrtGlobals>();
 
   return g_ort_globals;
 }
+
+// Pin without creating globals. Shutdown waits for these pins with the global mutex released,
+// so release (including provider callbacks) may still re-enter GetOrtEnv/GetOrtGlobals.
+class ScopedDeviceResourceRelease {
+ public:
+  ScopedDeviceResourceRelease() {
+    std::unique_lock lock{g_ort_globals_mutex};
+    g_ort_globals_cv.wait(lock, [] { return !g_ort_globals_tearing_down; });
+    globals_ = g_ort_globals.get();
+    if (globals_)
+      ++globals_->active_resource_releases_;
+  }
+
+  ~ScopedDeviceResourceRelease() {
+    if (globals_) {
+      {
+        std::scoped_lock lock{g_ort_globals_mutex};
+        --globals_->active_resource_releases_;
+      }
+      g_ort_globals_cv.notify_all();
+    }
+  }
+
+  ScopedDeviceResourceRelease(const ScopedDeviceResourceRelease&) = delete;
+  ScopedDeviceResourceRelease& operator=(const ScopedDeviceResourceRelease&) = delete;
+
+  OrtGlobals* get() const { return globals_; }
+
+ private:
+  OrtGlobals* globals_{};
+};
 
 // Used by Shutdown() to display the counts and types of any leaked objects.
 // Leak reporting is gated to debug builds or when logging is enabled, since
@@ -183,9 +216,15 @@ void Shutdown() {
   // finally releases the OrtEnv. All of that runs on both the runtime and the process-exit path; the
   // only difference at process exit is that the OrtEnv itself is leaked rather than destroyed, for
   // the reason described below.
-  std::scoped_lock lock{g_ort_globals_mutex};
+  std::unique_lock lock{g_ort_globals_mutex};
+  g_ort_globals_cv.wait(lock, [] {
+    return !g_ort_globals_tearing_down &&
+           (!g_ort_globals || g_ort_globals->active_resource_releases_ == 0);
+  });
+  if (!g_ort_globals)
+    return;
 
-  if (g_ort_globals && g_process_exiting) {
+  if (g_process_exiting) {
     // At process exit (the EnsureShutdown static destructor sets g_process_exiting under this lock),
     // destroying the OrtEnv is unsafe: releasing it from within __cxa_finalize drives ORT's
     // Environment/LoggingManager destructor to lock a mutex whose backing static may already be
@@ -204,7 +243,30 @@ void Shutdown() {
     (void)g_ort_globals->env_.release();
   }
 
-  g_ort_globals.reset();
+  // Only block accessors after releases drain: their provider callbacks may still need this env.
+  g_ort_globals_tearing_down = true;
+  auto globals = std::move(g_ort_globals);
+  lock.unlock();
+  globals.reset();
+  lock.lock();
+  g_ort_globals_tearing_down = false;
+  lock.unlock();
+  g_ort_globals_cv.notify_all();
+}
+
+void ReleaseDeviceResources(std::string_view device_type) {
+  DeviceType type;
+  if (device_type == "CUDA") {
+    type = DeviceType::CUDA;
+  } else if (device_type == "NvTensorRtRtx") {
+    type = DeviceType::NvTensorRtRtx;
+  } else {
+    throw std::invalid_argument("ReleaseDeviceResources currently supports CUDA and NvTensorRtRtx devices.");
+  }
+
+  ScopedDeviceResourceRelease release;
+  if (auto* globals = release.get())
+    globals->ReleaseDeviceResources(type);
 }
 
 OrtEnv& GetOrtEnv() {
@@ -320,7 +382,8 @@ OrtGlobals::~OrtGlobals() {
   // (the trivial-session allocators and registered EP libraries) BEFORE the env that owns them.
   // Ending all allocator usage before the env is destroyed keeps this correct even if a future
   // interface or buffer dereferences a cached allocator during its own destruction — we do not
-  // rely on "nothing happens to deref it today". Shutdown is single-threaded, so no locks.
+  // rely on "nothing happens to deref it today". Shutdown has drained release pins and blocks
+  // re-creation; all other users must already be gone per the lifetime contract, so no locks.
 
   // 1. Sessions that hold env / EP state directly. Models (which own these indirectly) are already
   //    gone per the lifetime contract; drop the genai-side session caches here.
@@ -346,14 +409,43 @@ OrtGlobals::~OrtGlobals() {
 
   // 3.5 Release a genai-owned AMDGPU umbrella-EP registration while env_ is still valid, in case a host
   //     retains the env past step 4 (then ORT's auto-unregister never fires) or a Model ctor threw
-  //     before ~Model could release. Passed by reference to avoid re-locking g_ort_globals_mutex; no-op
-  //     unless genai owns it. Skipped at process exit (env_ released; __cxa_finalize teardown can abort).
-  if (!g_process_exiting && env_)
+  //     before ~Model could release. Passed by reference to use this env, not lazily create another.
+  //     Skipped at process exit (env_ released; __cxa_finalize teardown can abort).
+  if (env_)
     AMDGPUExecutionProvider::ReleaseOwnedUmbrellaEp(*env_, amdgpu_owns_ep_registration_);
 
   // 4. Finally the env. If genai held the last reference, ORT destroys the environment here,
   //    unregistering / unloading any still-registered EP libraries — by now nothing references them.
   env_.reset();
+}
+
+void OrtGlobals::ReleaseDeviceResources(DeviceType type) {
+  {
+    std::scoped_lock lock{graph_session_cache_.mutex_};
+    auto& sessions = graph_session_cache_.sessions_;
+    for (auto it = sessions.begin(); it != sessions.end();) {
+      if (it->second.device_type == type) {
+        it = sessions.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+
+  std::scoped_lock lock{device_interfaces_mutex_};
+  auto interface = device_interfaces_.find(type);
+  // A failed add-on load can leave a null interface entry in the cache.
+  if (cuda_library_ && *cuda_library_ && interface != device_interfaces_.end() && interface->second) {
+    using ReleaseInterfaceResourcesFn = void (*)(const char*);
+    auto release_interface_resources = reinterpret_cast<ReleaseInterfaceResourcesFn>(
+        cuda_library_->GetSymbol("ReleaseInterfaceResources"));
+    if (!release_interface_resources) {
+      throw std::runtime_error("CUDA add-on library does not export ReleaseInterfaceResources.");
+    }
+    release_interface_resources(to_string(type).c_str());
+  }
+
+  device_allocators_[static_cast<int>(type)].Reset();
 }
 
 DeviceInterface* OrtGlobals::LoadCudaInterface(DeviceType type) {
