@@ -27,6 +27,10 @@ public class TestUtils {
     return getFilePathFromDisk(getTestModelPath("phi-2/int4/cpu"));
   }
 
+  public static final String whisperModelPath() {
+    return getFilePathFromDisk(getTestModelPath("whisper"));
+  }
+
   public static final String testVisionModelPath() {
     return getFilePathFromDisk(getTestModelPath("phi3-v"));
   }

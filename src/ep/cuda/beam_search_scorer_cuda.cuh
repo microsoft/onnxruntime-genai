@@ -55,6 +55,11 @@ void LaunchBeamSearchScorer_Process(BeamScorerState& state_cpu,
                                     std::span<const int32_t> next_indices,
                                     cudaStream_t stream);
 
+void LaunchExpandBatchDone(std::span<const BeamHypotheses> beam_hyps,
+                           std::span<bool> sequence_done,
+                           int num_beams,
+                           cudaStream_t stream);
+
 void LaunchBeamSearchScorer_AppendNextTokenToSequences(BeamScorerState& state_cpu,
                                                        BeamScorerState& state,
                                                        std::span<const int32_t> sequences,

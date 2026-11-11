@@ -803,6 +803,21 @@ TEST_F(EngineRunTest, StaticAndDynamicCompletionPreserveTerminalEosIdentity) {
   }
 }
 
+TEST(EngineValidationTest, RejectsNullModelBeforeCheckingTimestampOptions) {
+  EXPECT_THROW((Engine{nullptr, EngineDependencies{}}), std::runtime_error);
+}
+
+TEST_F(EngineRunTest, RejectsWhisperTimestampDecoding) {
+  model_->config_->search.whisper_timestamps = true;
+  try {
+    Engine engine{model_, EngineDependencies{}};
+    FAIL() << "Expected Whisper timestamp decoding to be rejected";
+  } catch (const std::runtime_error& error) {
+    EXPECT_STREQ(error.what(),
+                 "whisper_timestamps is not supported by the continuous batching Engine");
+  }
+}
+
 TEST(EngineSnapshotCacheTest, PolicyPreservesLegacyDefaultsAndIsOwnedByTheEngine) {
   auto model = CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-composite");
   auto& batching = *model->config_->engine.dynamic_batching;

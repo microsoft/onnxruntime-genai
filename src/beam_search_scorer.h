@@ -47,6 +47,7 @@ struct BeamSearchScorer {
                 size_t num_return_sequences);
 
   bool IsDone() const { return not_done_count_ == 0; }
+  bool IsBatchDone(size_t batch_id) const { return beam_hyps_[batch_id].done_; }
 
   DeviceSpan<float> GetNextScores() { return next_beam_scores_; }
   DeviceSpan<int32_t> GetNextTokens() { return next_beam_tokens_; }

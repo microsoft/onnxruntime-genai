@@ -43,6 +43,8 @@ struct Search : LeakChecked<Search> {
   virtual DeviceSpan<float> GetLogits() const = 0;
   virtual void SetLogits(DeviceSpan<float> logits) = 0;
   virtual bool IsDone() const = 0;
+  virtual bool IsSequenceDone(size_t /*index*/) const { return false; }
+  virtual const bool* GetSequenceDoneDevice() const { return nullptr; }
 
   // Deferred completion lets a caller that drives many independent searches launch the token
   // selection work for all of them before paying for a single device synchronization. When
@@ -208,6 +210,7 @@ struct GreedySearch_Cpu : Search_Cpu {
 
   DeviceSpan<int32_t> GetNextTokens() override;
   DeviceSpan<int32_t> GetNextIndices() override { return {}; }
+  bool IsSequenceDone(size_t index) const override { return eos_seen_[index]; }
 
   void SelectTop() override;
   void CommitToken(int32_t token) override;
@@ -255,6 +258,9 @@ struct BeamSearch_Cpu : Search_Cpu {
   DeviceSpan<int32_t> GetSequence(size_t batch_id, size_t beam_id);
 
   bool IsDone() const override;
+  bool IsSequenceDone(size_t index) const override {
+    return beam_scorer_->IsBatchDone(index / static_cast<size_t>(params_->search.num_beams));
+  }
 
   void SelectTop() override;
 

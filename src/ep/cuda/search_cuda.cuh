@@ -18,6 +18,15 @@ void Launch_GetLastTokens(int32_t* next_tokens, const int32_t* sequences, int ba
 void LaunchAddProbsKernel(float* log_probs, float* cum_log_probs, const int batch_size, const int num_beams, const int vocab_size, cudaStream_t stream);
 void LaunchSetScoreProcessor(float* next_token_scores, int batch_beam_size, int vocab_size, int token, float score, cudaStream_t stream);
 void LaunchRepetitionPenaltyProcessor(const int32_t* sequences, float* next_token_scores, int batch_size, int num_beams, int vocab_size, int max_sequence_length, int current_sequence_length, float repetition_penalty, cudaStream_t stream);
+void LaunchWhisperTimestampRules(float* logits, const int32_t* sequences,
+                                 const bool* sequence_done,
+                                 int batch_beam_size, int vocab_size,
+                                 int max_length, int current_length,
+                                 int sample_begin, int timestamp_begin,
+                                 int eot_token, int no_timestamps_token,
+                                 int max_initial_timestamp_index,
+                                 int32_t* error_status,
+                                 cudaStream_t stream);
 
 void TopPSampling(int32_t* next_token, float* scores, int size, float p, float temperature);
 }  // namespace cuda

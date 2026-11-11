@@ -30,6 +30,7 @@ void RunStandardDecodingStep(Generator& g) {
   g.search_->ApplyMinLength(search.min_length);
   g.search_->ApplyRepetitionPenalty(search.repetition_penalty);
   g.search_->ApplyNoRepeatNgram(search.no_repeat_ngram_size);
+  g.ApplyWhisperTimestampRules();
 
   if (g_log.enabled && g_log.generate_next_token) {
     auto& stream = Log("generate_next_token");

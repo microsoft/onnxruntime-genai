@@ -26,6 +26,7 @@ list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/parallel_performance
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/parallel_preprocessing_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/parallel_utils_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/model_package_test.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/whisper_timestamp_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/mtp_config_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/qwen2vl_position_inputs_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/reinit_tests.cpp")
@@ -229,6 +230,27 @@ if (NOT MSVC)
 endif()
 
 add_test(NAME ReInitTests COMMAND reinit_tests)
+add_executable(whisper_timestamp_unit_tests "${CMAKE_CURRENT_SOURCE_DIR}/cpp/whisper_timestamp_tests.cpp")
+target_include_directories(whisper_timestamp_unit_tests PRIVATE
+  ${ORT_HEADER_DIR}
+  ${onnxruntime_extensions_SOURCE_DIR}/shared/api
+  ${CMAKE_SOURCE_DIR}/src
+)
+target_link_libraries(whisper_timestamp_unit_tests PRIVATE
+  onnxruntime-genai-obj
+  onnxruntime_extensions
+  GTest::gtest
+)
+add_dependencies(whisper_timestamp_unit_tests onnxruntime-genai)
+set_target_properties(whisper_timestamp_unit_tests PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>"
+    FOLDER "Tests"
+)
+if (NOT MSVC)
+  target_compile_options(whisper_timestamp_unit_tests PRIVATE "-fvisibility=hidden")
+endif()
+add_test(NAME WhisperTimestampUnitTests COMMAND whisper_timestamp_unit_tests)
+
 add_executable(parallel_preprocessing_tests
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/parallel_performance_tests.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/parallel_preprocessing_tests.cpp"

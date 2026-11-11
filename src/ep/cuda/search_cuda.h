@@ -26,6 +26,7 @@ struct Search_Cuda : Search {
     }
     return *done_cpu_;
   }  // TODO: Use an event
+  const bool* GetSequenceDoneDevice() const override { return eos_seen_.data(); }
   void ResetDone();
 
   DeviceSpan<float> GetLogits() const override;

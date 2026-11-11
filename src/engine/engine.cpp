@@ -210,6 +210,10 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
   if (!model_) {
     throw std::runtime_error("Engine requires a non-null model.");
   }
+  if (model_->config_->search.whisper_timestamps) {
+    throw std::runtime_error(
+        "whisper_timestamps is not supported by the continuous batching Engine");
+  }
   if (auto packed = std::dynamic_pointer_cast<DecoderOnly_Model>(model_); packed && packed->vision_) {
     stop_tokenizer_ = packed->vision_->processor->tokenizer_;
     const auto& batching = *model_->config_->engine.dynamic_batching;

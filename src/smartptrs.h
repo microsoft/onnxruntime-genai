@@ -248,7 +248,8 @@ struct StateUpdateReplayDesc {
 // Version 19: Config::Model::Qwen38Graph gained max_batch_size, which changed the layouts of Config::Model and Config.
 // Version 20: Config gained memory budget/headroom settings; DeviceInterface gained sampler startup-byte sizing.
 // Version 21: Config::Engine::DynamicBatching gained host/device media budgets, changing Config's layout.
-inline constexpr uint32_t kDeviceInterfaceVersion = 21;
+// Version 22: DeviceInterface gained ApplyWhisperTimestampRules; Config gained Whisper timestamp settings.
+inline constexpr uint32_t kDeviceInterfaceVersion = 22;
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}
@@ -424,6 +425,19 @@ struct DeviceInterface {
   // the device's stream is handed to the EP or its allocator is requested. The default does nothing,
   // for devices with no per-ordinal state. Keep last for vtable ABI stability.
   virtual void SelectDevice(int /*device_id*/) {}
+
+  // Applies Whisper timestamp decoding rules to fp32 logits in place without copying the
+  // vocabulary to the host. `sequences` is laid out as [batch_beam_size, max_length].
+  // Keep last for vtable ABI stability.
+  virtual bool ApplyWhisperTimestampRules(float* /*logits*/, const int32_t* /*sequences*/,
+                                          const bool* /*sequence_done*/,
+                                          int /*batch_beam_size*/, int /*vocab_size*/,
+                                          int /*max_length*/, int /*current_length*/,
+                                          int /*sample_begin*/, int /*timestamp_begin*/,
+                                          int /*eot_token*/, int /*no_timestamps_token*/,
+                                          int /*max_initial_timestamp_index*/) {
+    return false;
+  }
 };
 
 // A shared_ptr based type that we expose through our C API should inherit from this type.

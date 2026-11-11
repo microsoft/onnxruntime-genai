@@ -5,6 +5,7 @@ import argparse
 import glob
 import os
 import readline
+import re
 
 import onnxruntime_genai as og
 from common import register_ep
@@ -19,6 +20,24 @@ def _complete(text, state):
 class Format:
     end = "\033[0m"
     underline = "\033[4m"
+
+
+def _word_error_rate(reference: str, hypothesis: str) -> float:
+    reference_words = re.findall(r"\w+", reference.lower())
+    hypothesis_words = re.findall(r"\w+", hypothesis.lower())
+    previous = list(range(len(hypothesis_words) + 1))
+    for reference_index, reference_word in enumerate(reference_words, start=1):
+        current = [reference_index]
+        for hypothesis_index, hypothesis_word in enumerate(hypothesis_words, start=1):
+            current.append(
+                min(
+                    previous[hypothesis_index] + 1,
+                    current[hypothesis_index - 1] + 1,
+                    previous[hypothesis_index - 1] + (reference_word != hypothesis_word),
+                )
+            )
+        previous = current
+    return previous[-1] / max(1, len(reference_words))
 
 
 def run(args: argparse.Namespace):
@@ -53,7 +72,9 @@ def run(args: argparse.Namespace):
 
         print("Processing audio...")
         batch_size = len(audio_paths)
-        decoder_prompt_tokens = ["<|startoftranscript|>", "<|en|>", "<|transcribe|>", "<|notimestamps|>"]
+        decoder_prompt_tokens = ["<|startoftranscript|>", "<|en|>", "<|transcribe|>"]
+        if not args.timestamps:
+            decoder_prompt_tokens.append("<|notimestamps|>")
         prompts = ["".join(decoder_prompt_tokens)] * batch_size
         inputs = processor(prompts, audios=audios)
 
@@ -64,6 +85,7 @@ def run(args: argparse.Namespace):
             num_return_sequences=args.num_beams,
             max_length=448,
             batch_size=batch_size,
+            whisper_timestamps=args.timestamps,
         )
 
         generator = og.Generator(model, params)
@@ -74,8 +96,21 @@ def run(args: argparse.Namespace):
 
         print()
         transcriptions = []
+        tokenizer = og.Tokenizer(model)
         for i in range(batch_size * args.num_beams):
             tokens = generator.get_sequence(i)
+            if args.timestamps:
+                timestamp_tokens = [int(token) for token in tokens if tokenizer.is_timestamp_token(int(token))]
+                if len(timestamp_tokens) < 2:
+                    raise RuntimeError("Timestamp-enabled Whisper output did not contain timestamp boundaries.")
+                if timestamp_tokens != sorted(timestamp_tokens):
+                    raise RuntimeError("Whisper timestamp tokens are not monotonic.")
+                if timestamp_tokens[0] > tokenizer.timestamp_begin_token_id + 50:
+                    raise RuntimeError("The first Whisper timestamp exceeds the configured initial boundary.")
+                timestamp_seconds = [tokenizer.timestamp_to_seconds(token) for token in timestamp_tokens]
+                print(f"Timestamp token IDs: {timestamp_tokens}")
+                print(f"Timestamp seconds: {timestamp_seconds}")
+
             transcription = processor.decode(tokens)
 
             print("Transcription:")
@@ -89,16 +124,17 @@ def run(args: argparse.Namespace):
 
         if args.non_interactive:
             args.output = args.output.strip()
-            matching = False
-            for transcription in transcriptions:
-                if transcription == args.output:
-                    matching = True
-                    break
+            if args.max_word_error_rate is None:
+                if args.output in transcriptions:
+                    print("One of the model's transcriptions matches the expected transcription.")
+                    return
+                raise Exception("None of the model's transcriptions match the expected transcription.")
 
-            if matching:
-                print("One of the model's transcriptions matches the expected transcription.")
+            best_word_error_rate = min(_word_error_rate(args.output, text) for text in transcriptions)
+            print(f"Best word error rate: {best_word_error_rate}")
+            if best_word_error_rate <= args.max_word_error_rate:
                 return
-            raise Exception("None of the model's transcriptions match the expected transcription.")
+            raise Exception(f"No transcription met the maximum word error rate of {args.max_word_error_rate}.")
 
 
 if __name__ == "__main__":
@@ -124,6 +160,17 @@ if __name__ == "__main__":
         default=False,
         action="store_true",
         help="Non-interactive mode for CI testing purposes",
+    )
+    parser.add_argument(
+        "--timestamps",
+        action="store_true",
+        help="Enable Whisper timestamp-token generation and validate the generated timestamp sequence.",
+    )
+    parser.add_argument(
+        "--max_word_error_rate",
+        type=float,
+        default=None,
+        help="Accept a non-interactive transcription when its word error rate is at most this value.",
     )
     args = parser.parse_args()
     run(args)

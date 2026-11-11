@@ -192,6 +192,27 @@ void LaunchBeamSearchScorer_Process(BeamScorerState& state_cpu,
   CUDA_CHECK_LAUNCH();
 }
 
+__global__ void ExpandBatchDone(const BeamHypotheses* beam_hyps,
+                                bool* sequence_done,
+                                int sequence_count,
+                                int num_beams) {
+  const int sequence_index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (sequence_index < sequence_count)
+    sequence_done[sequence_index] = beam_hyps[sequence_index / num_beams].done_;
+}
+
+void LaunchExpandBatchDone(std::span<const BeamHypotheses> beam_hyps,
+                           std::span<bool> sequence_done,
+                           int num_beams,
+                           cudaStream_t stream) {
+  constexpr int block_size = 256;
+  const int sequence_count = static_cast<int>(sequence_done.size());
+  const int grid_size = (sequence_count + block_size - 1) / block_size;
+  ExpandBatchDone<<<grid_size, block_size, 0, stream>>>(
+      beam_hyps.data(), sequence_done.data(), sequence_count, num_beams);
+  CUDA_CHECK_LAUNCH();
+}
+
 __global__ void BeamSearchScorer_AppendNextTokenToSequences1(BeamScorerState& state,
                                                              int batch_beam_size,
                                                              const int32_t* sequences_buffer,
