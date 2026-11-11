@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
-"""Regenerate tiny decoders with real GQA supporting shared dynamic KV."""
+"""Regenerate tiny decoders with real GQA supporting shared KV."""
 
 from pathlib import Path
 
@@ -10,7 +10,7 @@ import onnx
 from onnx import TensorProto, helper, numpy_helper
 
 
-def build(control_flow=False, cpu_compute=False, fixed=False, sparse=False):
+def build(control_flow=False, cpu_compute=False, fixed=False):
     def value(name, dtype, shape):
         return helper.make_tensor_value_info(name, dtype, shape)
 
@@ -20,9 +20,10 @@ def build(control_flow=False, cpu_compute=False, fixed=False, sparse=False):
     table = np.full((16, 16), -10, dtype=np.float32)
     for token in range(16):
         table[token, (token + 1) % 16] = 10
-    cache_size = 8 if fixed else "capacity"
-    past = ("kv.3.k", "kv.3.v") if sparse else ("past_key_values.0.key", "past_key_values.0.value")
-    present = ("out.3.k", "out.3.v") if sparse else ("present.0.key", "present.0.value")
+    cache_size = 16 if fixed else "capacity"
+    # All variants exercise sparse layer discovery and custom cache names.
+    past = ("kv.3.k", "kv.3.v")
+    present = ("out.3.k", "out.3.v")
     inputs = [
         value("input_ids", TensorProto.INT64, ["batch", "sequence"]),
         value("attention_mask", TensorProto.INT64, ["batch", "total"]),
@@ -112,6 +113,5 @@ if __name__ == "__main__":
         ("control-flow.onnx", {"control_flow": True}),
         ("cpu-compute.onnx", {"cpu_compute": True}),
         ("fixed-control-flow.onnx", {"control_flow": True, "fixed": True}),
-        ("sparse-control-flow.onnx", {"control_flow": True, "sparse": True}),
     ):
         onnx.save(build(**options), Path(__file__).parent / name)

@@ -268,7 +268,6 @@ if(USE_WEBGPU)
   target_include_directories(shared_cache_growth_tests PRIVATE ${ORT_HEADER_DIR} ${CMAKE_SOURCE_DIR}/src)
   target_link_libraries(shared_cache_growth_tests PRIVATE onnxruntime-genai-obj GTest::gtest)
   target_compile_definitions(shared_cache_growth_tests PRIVATE
-    ORTGENAI_TEST_WEBGPU_GQA_MODEL_DIR="${CMAKE_CURRENT_SOURCE_DIR}/models/webgpu-shared-gqa"
     ORTGENAI_TEST_WEBGPU_FALLBACK_MODEL_DIR="${CMAKE_CURRENT_SOURCE_DIR}/models/webgpu-capture-fallback")
   add_dependencies(shared_cache_growth_tests onnxruntime-genai)
   set_target_properties(shared_cache_growth_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>")

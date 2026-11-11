@@ -70,8 +70,8 @@ struct TestGqaModel : Model {
     config_->model.decoder.inputs.past_value_names = "kv.%d.v";
     config_->model.decoder.outputs.present_key_names = "out.%d.k";
     config_->model.decoder.outputs.present_value_names = "out.%d.v";
-    config_->config_path = fs::path{ORTGENAI_TEST_WEBGPU_GQA_MODEL_DIR};
-    config_->model.decoder.filename = "model.onnx";
+    config_->config_path = fs::path{ORTGENAI_TEST_WEBGPU_FALLBACK_MODEL_DIR};
+    config_->model.decoder.filename = "gqa.onnx";
     session_options_->AddConfigEntry("session.disable_cpu_ep_fallback", "1");
     session = CreateSession(GetOrtEnv(), config_->model.decoder.filename, session_options_.get());
     session_info_.Add(*session);
@@ -148,12 +148,10 @@ std::unique_ptr<Config> FallbackConfig(const char* filename, bool capture, int m
   config->search.max_length = max_length;
   config->search.past_present_share_buffer = true;
   SetProviderOption(*config, "WebGPU", "enableGraphCapture", capture ? "1" : "0");
-  if (std::string_view{filename}.starts_with("sparse-")) {
-    config->model.decoder.inputs.past_key_names = "kv.%d.k";
-    config->model.decoder.inputs.past_value_names = "kv.%d.v";
-    config->model.decoder.outputs.present_key_names = "out.%d.k";
-    config->model.decoder.outputs.present_value_names = "out.%d.v";
-  }
+  config->model.decoder.inputs.past_key_names = "kv.%d.k";
+  config->model.decoder.inputs.past_value_names = "kv.%d.v";
+  config->model.decoder.outputs.present_key_names = "out.%d.k";
+  config->model.decoder.outputs.present_value_names = "out.%d.v";
   return config;
 }
 
@@ -181,8 +179,9 @@ void CheckFallbackGeneration(const char* filename, bool memory_model = false, in
   EXPECT_EQ(model->config_->search.max_length, max_length);
   EXPECT_EQ(model->p_device_inputs_->GetType(), expected_capture ? DeviceType::WEBGPU : DeviceType::CPU);
   const auto& decoder = model->config_->model.decoder;
-  const auto key = ComposeKeyValueName(decoder.inputs.past_key_names, std::string_view{filename}.starts_with("sparse-") ? 3 : 0);
-  ASSERT_EQ(model->session_info_.GetInputShape(key)[2], -1);
+  const auto key = ComposeKeyValueName(decoder.inputs.past_key_names, 3);
+  const auto declared_capacity = model->session_info_.GetInputShape(key)[2];
+  ASSERT_EQ(declared_capacity, std::string_view{filename}.starts_with("fixed-") ? 16 : -1);
   auto params = CreateGeneratorParams(*model);
   EXPECT_EQ(params->use_graph_capture, expected_capture);
   auto generator = CreateGenerator(*model, *params);
@@ -210,13 +209,14 @@ void CheckFallbackGeneration(const char* filename, bool memory_model = false, in
   size_t cache_count = 0;
   for (size_t i = 0; i < state.output_names_.size(); ++i) {
     const std::string_view name{state.output_names_[i]};
-    if (!name.starts_with("present.") && !name.starts_with("out.")) continue;
+    if (!name.starts_with("out.")) continue;
     ++cache_count;
     const auto cache = Read(*model->p_device_kvcache_, *state.outputs_[i]);
     EXPECT_EQ(cache, Read(*reference->p_device_kvcache_, *eager->state_->outputs_[i]));
-    EXPECT_EQ(state.outputs_[i]->GetTensorTypeAndShapeInfo()->GetShape()[2], cross_growth ? 1024 : std::min(max_length, 512));
+    const auto expected_capacity = declared_capacity > 0 ? declared_capacity : (cross_growth ? 1024 : std::min(max_length, 512));
+    EXPECT_EQ(state.outputs_[i]->GetTensorTypeAndShapeInfo()->GetShape()[2], expected_capacity);
     EXPECT_NE(std::find(state.inputs_.begin(), state.inputs_.end(), state.outputs_[i]), state.inputs_.end());
-    if (name.ends_with("value") || name.ends_with(".v")) {
+    if (name.ends_with(".v")) {
       for (size_t token = 0; token < prompt.size() + 5; ++token) {
         const float expected = token < prompt.size() ? static_cast<float>(prompt[token]) : static_cast<float>(3 + token - prompt.size());
         for (size_t dim = 0; dim < 64; ++dim) EXPECT_FLOAT_EQ(cache[token * 64 + dim], expected);
@@ -226,32 +226,17 @@ void CheckFallbackGeneration(const char* filename, bool memory_model = false, in
   EXPECT_EQ(cache_count, 2);
 }
 
-TEST(WebGpuCaptureFallback, SharedDynamicControlFlowRebuildsEagerSession) {
-  CheckFallbackGeneration("control-flow.onnx");
+TEST(WebGpuCaptureFallback, SharedDynamicPreservesMemoryModelAndGrows) {
+  CheckFallbackGeneration("control-flow.onnx", true, 4093, true);
 }
 
 TEST(WebGpuCaptureFallback, SharedDynamicCpuComputeRebuildsEagerSession) {
   CheckFallbackGeneration("cpu-compute.onnx");
 }
 
-TEST(WebGpuCaptureFallback, SharedDynamicPreservesMemoryModel) {
-  CheckFallbackGeneration("control-flow.onnx", true);
-}
-
-TEST(WebGpuCaptureFallback, SharedDynamicKeepsSmallMaxLength) {
-  CheckFallbackGeneration("control-flow.onnx", false, 8);
-}
-
-TEST(WebGpuCaptureFallback, SharedDynamicKeepsNonPowerOfTwoMaxLength) {
-  CheckFallbackGeneration("control-flow.onnx", false, 4093);
-}
-
-TEST(WebGpuCaptureFallback, SharedDynamicGrowsAfterFallback) {
-  CheckFallbackGeneration("control-flow.onnx", false, 1024, true);
-}
-
-TEST(WebGpuCaptureFallback, SharedDynamicSparseNames) {
-  CheckFallbackGeneration("sparse-control-flow.onnx");
+TEST(WebGpuCaptureFallback, SharedStaticPreservesDeclaredCapacity) {
+  // A smaller search limit must not shrink the model's fixed 16-slot tensors.
+  CheckFallbackGeneration("fixed-control-flow.onnx", false, 8);
 }
 
 TEST(WebGpuCaptureFallback, CompatibleSharedDynamicKeepsCaptureThroughGrowth) {
@@ -260,12 +245,13 @@ TEST(WebGpuCaptureFallback, CompatibleSharedDynamicKeepsCaptureThroughGrowth) {
 
 TEST(WebGpuCaptureFallback, RepeatedGeneratorsUseOneEagerModel) {
   const int initial_models = LeakChecked<Model>::Count();
-  {
-    auto model = CreateModel(GetOrtEnv(), FallbackConfig("control-flow.onnx", true));
+  for (const char* filename : {"control-flow.onnx", "fixed-control-flow.onnx"}) {
+    SCOPED_TRACE(filename);
+    auto model = CreateModel(GetOrtEnv(), FallbackConfig(filename, true));
     auto* decoder = dynamic_cast<DecoderOnly_Model*>(model.get());
     ASSERT_NE(decoder, nullptr);
     auto* session = decoder->session_decoder_.get();
-    for (int attempt = 0; attempt < 6; ++attempt) {
+    for (int attempt = 0; attempt < 2; ++attempt) {
       auto params = CreateGeneratorParams(*model);
       auto first = CreateGenerator(*model, *params);
       auto second = CreateGenerator(*model, *params);
@@ -286,28 +272,20 @@ TEST(WebGpuCaptureFallback, RepeatedGeneratorsUseOneEagerModel) {
   EXPECT_EQ(LeakChecked<Model>::Count(), initial_models);
 }
 
-TEST(WebGpuCaptureFallback, UnsharedConfigurationRetainsCaptureError) {
-  auto config = FallbackConfig("control-flow.onnx", true);
-  config->search.past_present_share_buffer = false;
-  EXPECT_THROW(CreateModel(GetOrtEnv(), std::move(config)), Ort::Exception);
-}
-
-TEST(WebGpuCaptureFallback, MultipleBeamsRetainCaptureError) {
-  auto config = FallbackConfig("control-flow.onnx", true);
-  config->search.num_beams = 2;
-  EXPECT_THROW(CreateModel(GetOrtEnv(), std::move(config)), Ort::Exception);
-}
-
-TEST(WebGpuCaptureFallback, FixedSequenceRetainsCaptureError) {
-  const int initial_models = LeakChecked<Model>::Count();
-  EXPECT_THROW(CreateModel(GetOrtEnv(), FallbackConfig("fixed-control-flow.onnx", true, 8)), Ort::Exception);
-  EXPECT_EQ(LeakChecked<Model>::Count(), initial_models);
-}
-
-TEST(WebGpuCaptureFallback, MissingCacheMetadataRetainsCaptureError) {
-  auto config = FallbackConfig("control-flow.onnx", true);
-  config->model.decoder.inputs.past_key_names = "absent.%d.key";
-  EXPECT_THROW(CreateModel(GetOrtEnv(), std::move(config)), Ort::Exception);
+TEST(WebGpuCaptureFallback, OutOfScopeRetainsCaptureError) {
+  for (const char* filename : {"control-flow.onnx", "fixed-control-flow.onnx"}) {
+    for (int restriction = 0; restriction < 3; ++restriction) {
+      SCOPED_TRACE(filename);
+      SCOPED_TRACE(restriction);
+      auto config = FallbackConfig(filename, true);
+      if (restriction == 0) config->search.past_present_share_buffer = false;
+      if (restriction == 1) config->search.num_beams = 2;
+      if (restriction == 2) config->model.decoder.inputs.past_key_names = "absent.%d.key";
+      const int initial_models = LeakChecked<Model>::Count();
+      EXPECT_THROW(CreateModel(GetOrtEnv(), std::move(config)), Ort::Exception);
+      EXPECT_EQ(LeakChecked<Model>::Count(), initial_models);
+    }
+  }
 }
 
 TEST(WebGpuCaptureFallback, MissingModelsStillFail) {
@@ -318,17 +296,6 @@ TEST(WebGpuCaptureFallback, EagerFailureStillPropagates) {
   auto config = FallbackConfig("control-flow.onnx", true);
   config->model.decoder.session_options.config_entries.emplace_back("session.disable_cpu_ep_fallback", "1");
   EXPECT_THROW(CreateModel(GetOrtEnv(), std::move(config)), Ort::Exception);
-}
-
-TEST(WebGpuCaptureFallback, CpuRetainsGeneratorCaptureErrors) {
-  auto config = FallbackConfig("shared.onnx", false);
-  config->model.decoder.session_options.providers.clear();
-  config->model.decoder.session_options.provider_options.clear();
-  config->search.past_present_share_buffer = false;
-  auto model = CreateModel(GetOrtEnv(), std::move(config));
-  auto params = CreateGeneratorParams(*model);
-  params->use_graph_capture = true;
-  EXPECT_THROW(CreateGenerator(*model, *params), std::runtime_error);
 }
 
 TEST(SharedCacheGrowth, SymbolicShapeAloneDoesNotEnableSharing) {

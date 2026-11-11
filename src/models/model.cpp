@@ -1192,10 +1192,11 @@ static void DisableWebGpuGraphCapture(Config& config) {
   if (config.model.draft) disable_decoder(*config.model.draft);
 }
 
-static bool HasDynamicKeyValueCache(const Model& model) {
+static bool HasSharedKeyValueCacheShape(const Model& model) {
   const auto& decoder = model.config_->model.decoder;
   const auto input_names = model.session_info_.GetInputNames();
-  auto dynamic_ports = [&](const std::string& past, const std::string& present) {
+  int64_t common_sequence_dim = 0;
+  auto compatible_ports = [&](const std::string& past, const std::string& present) {
     const auto past_index = past.find("%d");
     const auto present_index = present.find("%d");
     if (past_index == std::string::npos || present_index == std::string::npos) return false;
@@ -1211,15 +1212,20 @@ static bool HasDynamicKeyValueCache(const Model& model) {
       if (!model.session_info_.HasOutput(output)) return false;
       const auto input_shape = model.session_info_.GetInputShape(name);
       const auto output_shape = model.session_info_.GetOutputShape(output);
-      // Only a symbolic sequence axis establishes dynamic KV; symbolic batch
-      // dimensions alone, explicit zero and fixed positive capacities do not.
-      if (input_shape.size() != 4 || output_shape.size() != 4 || input_shape[2] >= 0 || output_shape[2] >= 0) return false;
+      if (input_shape.size() != 4 || output_shape.size() != 4) return false;
+      // Accept dynamic KV or a uniform positive fixed capacity, matching the
+      // fixed-cache allocation policy. Reject zero, mixed and mismatched axes.
+      const auto sequence_dim = input_shape[2] < 0 && output_shape[2] < 0 ? int64_t{-1} : input_shape[2];
+      if (sequence_dim == 0 || (sequence_dim > 0 && output_shape[2] != sequence_dim) ||
+          (sequence_dim < 0 && output_shape[2] >= 0) ||
+          (common_sequence_dim != 0 && sequence_dim != common_sequence_dim)) return false;
+      common_sequence_dim = sequence_dim;
       found = true;
     }
     return found;
   };
-  return dynamic_ports(decoder.inputs.past_key_names, decoder.outputs.present_key_names) &&
-         dynamic_ports(decoder.inputs.past_value_names, decoder.outputs.present_value_names);
+  return compatible_ports(decoder.inputs.past_key_names, decoder.outputs.present_key_names) &&
+         compatible_ports(decoder.inputs.past_value_names, decoder.outputs.present_value_names);
 }
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
@@ -1246,9 +1252,9 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     // The failed Model has been destroyed and no caller generation exists. Rebuild all
     // sessions and device/input policies consistently, with one eager attempt.
     // Metadata is available only after successful loading. Preserve the original
-    // capture refusal for fixed/mixed/absent KV caches outside this fallback scope.
+    // capture refusal for mixed/absent KV caches outside this fallback scope.
     auto model = CreateModelImpl(ort_env, std::move(eager_config));
-    if (!HasDynamicKeyValueCache(*model)) throw;
+    if (!HasSharedKeyValueCacheShape(*model)) throw;
     if (g_log.enabled && g_log.warning)
       Log("warning") << "WebGPU graph capture unavailable; using eager mode: " << message << std::endl;
     return model;
