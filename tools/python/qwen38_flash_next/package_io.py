@@ -7,6 +7,7 @@ This module imports neither script, so both can use it without an import cycle.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import struct
@@ -40,14 +41,28 @@ def align_up(val: int, align: int = ALIGN) -> int:
 
 
 class HFCheckpointReader:
-    def __init__(self, hf_dir: Path) -> None:
-        self.hf_dir = hf_dir
-        idx_path = hf_dir / "model.safetensors.index.json"
-        if idx_path.exists():
-            self.weight_map: dict[str, str] = json.loads(idx_path.read_text())["weight_map"]
+    """Unified safetensors reader supporting single-file (`model.safetensors`), sharded (`model.safetensors.index.json`),
+    `model.layers.*` <-> `model.language_model.layers.*` name resolution, and `BF16` / `F32` / `I64` / `F8_E4M3` weights.
+    """
+
+    def __init__(self, hf_dir: Path, *, require_checkpoint: bool = False) -> None:
+        self.hf_dir = Path(hf_dir)
+        self.ckpt_dir = self.hf_dir.resolve() if self.hf_dir.exists() else self.hf_dir
+        self._header_cache: dict[str, tuple[int, dict]] = {}
+        idx_path = self.hf_dir / "model.safetensors.index.json"
+        single_path = self.hf_dir / "model.safetensors"
+        if idx_path.is_file():
+            self.weight_map: dict[str, str] = json.loads(idx_path.read_text(encoding="utf-8"))["weight_map"]
+        elif single_path.is_file():
+            base_off, hdr = self._get_header("model.safetensors")
+            _ = base_off
+            self.weight_map = {k: "model.safetensors" for k in hdr if k != "__metadata__"}
+        elif require_checkpoint:
+            raise FileNotFoundError(
+                f"Neither model.safetensors.index.json nor model.safetensors found in {self.ckpt_dir}"
+            )
         else:
             self.weight_map = {}
-        self._header_cache: dict[str, tuple[int, dict]] = {}
 
     def _get_header(self, filename: str) -> tuple[int, dict]:
         if filename not in self._header_cache:
@@ -58,28 +73,57 @@ class HFCheckpointReader:
             self._header_cache[filename] = (8 + hdr_len, hdr)
         return self._header_cache[filename]
 
+    @staticmethod
+    def _candidate_names(name: str) -> list[str]:
+        candidates = [name]
+        if name.startswith("model.language_model."):
+            suffix = name[len("model.language_model.") :]
+            candidates.extend((f"model.{suffix}", suffix))
+        elif name.startswith("model."):
+            suffix = name[len("model.") :]
+            candidates.extend((f"model.language_model.{suffix}", suffix))
+        else:
+            candidates.extend((f"model.{name}", f"model.language_model.{name}"))
+        if not name.endswith(".weight"):
+            for base in list(candidates):
+                candidates.append(f"{base}.weight")
+        return candidates
+
+    def _resolve_key(self, name: str) -> str:
+        for cand in self._candidate_names(name):
+            if cand in self.weight_map:
+                return cand
+        raise KeyError(f"Weight {name!r} not found in {self.hf_dir}")
+
     def read_raw_tensor(self, name: str) -> tuple[str, list[int], bytes]:
-        shard = self.weight_map[name]
+        key = self._resolve_key(name)
+        shard = self.weight_map[key]
         base_off, hdr = self._get_header(shard)
-        info = hdr[name]
+        info = hdr[key]
         start, end = info["data_offsets"]
         with open(self.hf_dir / shard, "rb") as f:
             f.seek(base_off + start)
             raw = f.read(end - start)
         return info["dtype"], info["shape"], raw
 
-    def read_bf16_tensor(self, name: str, device: str | torch.device = "cpu") -> torch.Tensor:
-        if name in self.weight_map:
-            dtype, shape, raw = self.read_raw_tensor(name)
-            if dtype != "BF16":
-                raise ValueError(f"Expected BF16 for {name}, got {dtype}")
-            arr = np.frombuffer(raw, dtype=np.uint16).copy()
-            return torch.from_numpy(arr).view(torch.bfloat16).reshape(shape).to(device)
-        if name + "_scale_inv" in self.weight_map:
-            dtype_w, shape_w, raw_w = self.read_raw_tensor(name)
-            dtype_s, shape_s, raw_s = self.read_raw_tensor(name + "_scale_inv")
+    def read_tensor(self, name: str, device: str | torch.device = "cpu") -> torch.Tensor:
+        try:
+            key = self._resolve_key(name)
+        except KeyError:
+            scale_key = None
+            for cand in self._candidate_names(name):
+                if f"{cand}_scale_inv" in self.weight_map and cand in self.weight_map:
+                    scale_key = cand
+                    break
+            if scale_key is None:
+                raise
+            key = scale_key
+
+        if f"{key}_scale_inv" in self.weight_map:
+            dtype_w, shape_w, raw_w = self.read_raw_tensor(key)
+            dtype_s, shape_s, raw_s = self.read_raw_tensor(f"{key}_scale_inv")
             if dtype_w != "F8_E4M3":
-                raise ValueError(f"Expected F8_E4M3 for {name}, got {dtype_w}")
+                raise ValueError(f"Expected F8_E4M3 for {key}, got {dtype_w}")
             w_u8 = torch.from_numpy(np.frombuffer(raw_w, dtype=np.uint8).copy()).reshape(shape_w).to(device)
             w_f32 = w_u8.view(torch.float8_e4m3fn).float()
             s_dtype = np.float32 if dtype_s == "F32" else np.uint16
@@ -98,7 +142,71 @@ class HFCheckpointReader:
                 _, sn, sk = s_f32.shape
                 s_exp = s_f32.repeat_interleave(rows // sn, dim=1).repeat_interleave(cols // sk, dim=2)
                 return (w_f32 * s_exp).to(torch.bfloat16)
-        raise KeyError(f"Tensor {name} not found in {self.hf_dir}")
+            raise ValueError(f"Unsupported rank {w_f32.dim()} for F8_E4M3 tensor {key}")
+
+        dtype_str, shape, raw = self.read_raw_tensor(key)
+        if dtype_str == "BF16":
+            arr = np.frombuffer(raw, dtype=np.uint16).copy()
+            t = torch.from_numpy(arr).view(torch.bfloat16).reshape(shape)
+        elif dtype_str == "F32":
+            arr = np.frombuffer(raw, dtype=np.float32).copy()
+            t = torch.from_numpy(arr).reshape(shape)
+        elif dtype_str == "I64":
+            arr = np.frombuffer(raw, dtype=np.int64).copy()
+            t = torch.from_numpy(arr).reshape(shape)
+        else:
+            raise ValueError(f"Unsupported safetensors dtype {dtype_str!r} for {key}")
+        return t.to(device=device, non_blocking=False) if str(device) != "cpu" else t
+
+    def read_bf16_tensor(self, name: str, device: str | torch.device = "cpu") -> torch.Tensor:
+        t = self.read_tensor(name, device=device)
+        if t.dtype != torch.bfloat16:
+            raise ValueError(f"Expected BF16 for {name}, got {t.dtype}")
+        return t
+
+    def checkpoint_fingerprint(self) -> str:
+        """Compute a deterministic fingerprint of the checkpoint's shards, headers, and weight payloads."""
+        h = hashlib.sha256()
+        shards = sorted(set(self.weight_map.values()))
+        for item_k, item_v in sorted(self.weight_map.items()):
+            h.update(f"{item_k}:{item_v}\n".encode())
+        window = 4 * 1024 * 1024
+        for shard in shards:
+            p = self.hf_dir / shard
+            if not p.is_file():
+                continue
+            st = p.stat()
+            h.update(f"{shard}:{st.st_size}:".encode())
+            with open(p, "rb") as f:
+                if st.st_size <= 16 * window:
+                    while True:
+                        chunk = f.read(window)
+                        if not chunk:
+                            break
+                        h.update(chunk)
+                else:
+                    h.update(f.read(window))
+                    f.seek(st.st_size // 2)
+                    h.update(f.read(window))
+                    f.seek(max(0, st.st_size - window))
+                    h.update(f.read(window))
+        return h.hexdigest()
+
+
+class CheckpointTensorLoader(HFCheckpointReader):
+    """Memory-mapped reader for single-file (`model.safetensors`) or sharded (`model.safetensors.index.json`) checkpoints."""
+
+    def __init__(self, ckpt_dir: Path) -> None:
+        super().__init__(ckpt_dir, require_checkpoint=True)
+
+
+def checkpoint_fingerprint(hf_dir: Path | None) -> str | None:
+    if hf_dir is None or not Path(hf_dir).is_dir():
+        return None
+    reader = HFCheckpointReader(Path(hf_dir))
+    if not reader.weight_map:
+        return None
+    return reader.checkpoint_fingerprint()
 
 
 def set_ext_data(tensor: TensorProto, location: str, offset: int, length: int, dtype: int, dims: list[int]) -> None:

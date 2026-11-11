@@ -32,6 +32,7 @@ from pathlib import Path
 import numpy as np
 import onnx
 import torch
+from graph_builder import sync_bank_metadata_from_models
 from onnx import TensorProto, helper, numpy_helper
 from package_io import (
     CONTEXT_TIERS,
@@ -47,6 +48,7 @@ from package_io import (
     write_all,
     write_text_replacing,
 )
+from rope import DEFAULT_ROPE, RopeConfig, target_rope
 
 DEFAULT_HF_DIR = Path("/data/tlwu/Qwen3.8-Flash-Next")
 DEFAULT_ENGRAM_Q8_GGUF = Path("/data/tlwu/qwen_flash_next_ggufs/engram/Qwen3.8-Flash-Next-engram-Q8_0.gguf_file")
@@ -344,6 +346,14 @@ def consolidate_package_external_data(
         if len(parts) >= 8 and parts[0] == "pool" and parts[-1] in old_files:
             add_slice((parts[-1], int(parts[3]), int(parts[4])))
 
+    bank_meta_path = pkg_dir / "bank_metadata.json"
+    bank_meta_data = json.loads(bank_meta_path.read_text()) if bank_meta_path.is_file() else None
+    if bank_meta_data is not None:
+        for meta in bank_meta_data.get("tensor_locations", {}).values():
+            loc = str(meta.get("location", ""))
+            if loc in old_files and (pkg_dir / loc).is_file():
+                add_slice((loc, int(meta.get("offset", 0)), int(meta.get("length", 0))))
+
     if not old_files - {target_data_name}:
         return {"consolidated": False}
 
@@ -407,11 +417,24 @@ def consolidate_package_external_data(
                 new_pool_lines.append(ln)
         write_text_replacing(pool_path, "\n".join(new_pool_lines) + "\n")
 
+    if bank_meta_data is not None:
+        for meta in bank_meta_data.get("tensor_locations", {}).values():
+            loc = str(meta.get("location", ""))
+            if loc in old_files:
+                key = (loc, int(meta.get("offset", 0)), int(meta.get("length", 0)))
+                if key in slice_new_offset:
+                    meta["location"] = target_data_name
+                    meta["offset"] = slice_new_offset[key]
+        write_text_replacing(bank_meta_path, json.dumps(bank_meta_data, indent=2) + "\n")
+
     removed_files = sorted(old_files - {target_data_name})
     for loc in removed_files:
         p_old = pkg_dir / loc
         if p_old.exists() or p_old.is_symlink():
             p_old.unlink()
+
+    if bank_meta_path.is_file():
+        sync_bank_metadata_from_models(pkg_dir)
 
     return {
         "consolidated": True,
@@ -421,14 +444,13 @@ def consolidate_package_external_data(
     }
 
 
-def compute_f32_rope_caches(max_rotary_rows: int = 262144) -> tuple[bytes, bytes, bytes, bytes]:
+def compute_f32_rope_caches(
+    max_rotary_rows: int = 262144, rope_config: RopeConfig = DEFAULT_ROPE
+) -> tuple[bytes, bytes, bytes, bytes]:
     """Return `(cos64_f32_bytes, sin64_f32_bytes, cos32_f32_bytes, sin32_f32_bytes)` in `float32`."""
-    dim = 64
-    inv = 1.0 / (10000000.0 ** (np.arange(0, dim, 2, dtype=np.float32) / dim))
-    pos = np.arange(max_rotary_rows, dtype=np.float32)[:, None]
-    freqs = pos * inv[None, :]
-    cos32 = np.ascontiguousarray(np.cos(freqs), dtype=np.float32)
-    sin32 = np.ascontiguousarray(np.sin(freqs), dtype=np.float32)
+    cos_t, sin_t = target_rope(torch.arange(max_rotary_rows, dtype=torch.float32), rope_config)
+    cos32 = np.ascontiguousarray(cos_t.to(torch.float32).numpy(), dtype=np.float32)
+    sin32 = np.ascontiguousarray(sin_t.to(torch.float32).numpy(), dtype=np.float32)
     cos64 = np.ascontiguousarray(np.concatenate([cos32, cos32], axis=-1), dtype=np.float32)
     sin64 = np.ascontiguousarray(np.concatenate([sin32, sin32], axis=-1), dtype=np.float32)
     return cos64.tobytes(), sin64.tobytes(), cos32.tobytes(), sin32.tobytes()
@@ -522,14 +544,33 @@ def apply_precision_config_to_package(
 
     # 2. Optional RoPE / Indexer cache, FP32 GDN/Indexer projections, and FP16 QSA projections
     #    All precision-override tensors are packed into the single `attn_consts.data` file.
-    cos64_f32_bytes, sin64_f32_bytes, cos32_f32_bytes, sin32_f32_bytes = compute_f32_rope_caches(262144)
+    max_rotary_rows = 262144
+    rope_cfg = DEFAULT_ROPE
+    if "model.rotary_emb.cos_cache" in inits_by_name and len(inits_by_name["model.rotary_emb.cos_cache"].dims) >= 1:
+        max_rotary_rows = int(inits_by_name["model.rotary_emb.cos_cache"].dims[0])
+    bank_meta_path = pkg_dir / "bank_metadata.json"
+    if bank_meta_path.is_file():
+        pos_cfg = json.loads(bank_meta_path.read_text()).get("position_config")
+        if isinstance(pos_cfg, dict):
+            if "target_rows" in pos_cfg:
+                max_rotary_rows = int(pos_cfg["target_rows"])
+            if "rope" in pos_cfg and isinstance(pos_cfg["rope"], dict):
+                rope_cfg = RopeConfig.from_dict(pos_cfg["rope"])
+    cos64_f32_bytes, sin64_f32_bytes, cos32_f32_bytes, sin32_f32_bytes = compute_f32_rope_caches(
+        max_rotary_rows, rope_cfg
+    )
     pool_path = pkg_dir / "weights_pool.txt"
     pool_lines = pool_path.read_text().splitlines() if pool_path.exists() else []
 
     ac_path = pkg_dir / "attn_consts.data"
     old_ac_bytes = b""
+    idx_cos_loc = ""
+    if "capture.indexer_cos_cache.folded" in inits_by_name:
+        idx_cos_loc = {e.key: e.value for e in inits_by_name["capture.indexer_cos_cache.folded"].external_data}.get(
+            "location", ""
+        )
     if ac_path.is_symlink() or ac_path.exists():
-        if pcfg.indexer_dtype != "fp32":
+        if pcfg.indexer_dtype != "fp32" and idx_cos_loc == "attn_consts.data":
             old_ac_bytes = ac_path.read_bytes()
         ac_path.unlink()
 
@@ -551,14 +592,18 @@ def apply_precision_config_to_package(
         return info
 
     if pcfg.indexer_dtype == "fp32":
-        c64_info = add_ac_ext("capture.indexer_cos_cache.folded", cos64_f32_bytes, TensorProto.FLOAT, [262144, 64])
-        s64_info = add_ac_ext("capture.indexer_sin_cache.folded", sin64_f32_bytes, TensorProto.FLOAT, [262144, 64])
+        c64_info = add_ac_ext(
+            "capture.indexer_cos_cache.folded", cos64_f32_bytes, TensorProto.FLOAT, [max_rotary_rows, 64]
+        )
+        s64_info = add_ac_ext(
+            "capture.indexer_sin_cache.folded", sin64_f32_bytes, TensorProto.FLOAT, [max_rotary_rows, 64]
+        )
         new_pool: list[str] = []
         for ln in pool_lines:
             if ln.startswith("pool 2 "):
-                new_pool.append(f"pool 2 1 {c64_info[1]} {c64_info[2]} 2 262144 64 attn_consts.data")
+                new_pool.append(f"pool 2 1 {c64_info[1]} {c64_info[2]} 2 {max_rotary_rows} 64 attn_consts.data")
             elif ln.startswith("pool 3 "):
-                new_pool.append(f"pool 3 1 {s64_info[1]} {s64_info[2]} 2 262144 64 attn_consts.data")
+                new_pool.append(f"pool 3 1 {s64_info[1]} {s64_info[2]} 2 {max_rotary_rows} 64 attn_consts.data")
             else:
                 new_pool.append(ln)
         pool_lines = new_pool
@@ -566,14 +611,14 @@ def apply_precision_config_to_package(
         ac_writer.write_raw(old_ac_bytes, TensorProto.UINT8, [len(old_ac_bytes)])
 
     if pcfg.rotary_cache_dtype == "fp32":
-        c32_info = add_ac_ext("model.rotary_emb.cos_cache", cos32_f32_bytes, TensorProto.FLOAT, [262144, 32])
-        s32_info = add_ac_ext("model.rotary_emb.sin_cache", sin32_f32_bytes, TensorProto.FLOAT, [262144, 32])
+        c32_info = add_ac_ext("model.rotary_emb.cos_cache", cos32_f32_bytes, TensorProto.FLOAT, [max_rotary_rows, 32])
+        s32_info = add_ac_ext("model.rotary_emb.sin_cache", sin32_f32_bytes, TensorProto.FLOAT, [max_rotary_rows, 32])
         new_pool = []
         for ln in pool_lines:
             if ln.startswith("pool 0 "):
-                new_pool.append(f"pool 0 1 {c32_info[1]} {c32_info[2]} 2 262144 32 attn_consts.data")
+                new_pool.append(f"pool 0 1 {c32_info[1]} {c32_info[2]} 2 {max_rotary_rows} 32 attn_consts.data")
             elif ln.startswith("pool 1 "):
-                new_pool.append(f"pool 1 1 {s32_info[1]} {s32_info[2]} 2 262144 32 attn_consts.data")
+                new_pool.append(f"pool 1 1 {s32_info[1]} {s32_info[2]} 2 {max_rotary_rows} 32 attn_consts.data")
             else:
                 new_pool.append(ln)
         pool_lines = new_pool
@@ -1219,6 +1264,8 @@ def apply_precision_config_to_package(
     consolidation_info = None
     if pcfg.consolidate_data_files:
         consolidation_info = consolidate_package_external_data(pkg_dir, "model.onnx.data")
+    elif (pkg_dir / "bank_metadata.json").is_file():
+        sync_bank_metadata_from_models(pkg_dir)
 
     # 9. Update package_manifest.json
     manifest_path = pkg_dir / "package_manifest.json"

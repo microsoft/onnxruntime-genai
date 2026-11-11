@@ -200,25 +200,34 @@ def validate_reused_positions(root: Path, locations: dict[str, dict]) -> dict:
                 raise ValueError(f"Invalid positional shape for {name}: {dims}")
             path = root / meta["location"]
             offset, length = int(meta["offset"]), int(meta["length"])
+            dtype_id = int(meta["dtype"])
+            allowed_dtypes = (16, 1) if names == TARGET_NAMES else (16,)
+            elem_bytes = 4 if dtype_id == 1 else 2
             if (
                 not path.resolve().is_relative_to(root.resolve())
                 or not path.is_file()
-                or meta["dtype"] != 16
+                or dtype_id not in allowed_dtypes
                 or offset < 0
-                or offset % 2
-                or length != dims[0] * width * 2
+                or offset % elem_bytes
+                or length != dims[0] * width * elem_bytes
                 or offset + length > path.stat().st_size
             ):
                 raise ValueError(f"Invalid positional external data for {name}")
             group_rows.add(dims[0])
-            actual = np.memmap(path, mode="r", dtype="<u2", offset=offset, shape=tuple(dims))
+            np_dtype = "<f4" if dtype_id == 1 else "<u2"
+            actual = np.memmap(path, mode="r", dtype=np_dtype, offset=offset, shape=tuple(dims))
             for start in range(0, dims[0], 4096):
                 positions = np.arange(start, min(start + 4096, dims[0]))
                 values = target_rope(positions, rope) if names == TARGET_NAMES else dflash_rope(positions)
-                expected = values[index % 2].to(torch.bfloat16)
+                expected = values[index % 2]
+                if dtype_id == 16:
+                    expected = expected.to(torch.bfloat16)
+                else:
+                    expected = expected.to(torch.float32)
                 if width == 64 and names == TARGET_NAMES:
                     expected = torch.cat((expected, expected), dim=-1)
-                if not np.array_equal(actual[start : start + len(positions)], expected.view(torch.uint16).numpy()):
+                expected_np = expected.numpy() if dtype_id == 1 else expected.view(torch.uint16).numpy()
+                if not np.array_equal(actual[start : start + len(positions)], expected_np):
                     raise ValueError(f"Stale or unqualified positional asset {name} at row {start}")
             del actual
         if len(group_rows) != 1:

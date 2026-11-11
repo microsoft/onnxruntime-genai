@@ -51,6 +51,7 @@ from package_io import (
     HFCheckpointReader,
     align_up,
     build_context_tier_model,
+    checkpoint_fingerprint,
     ensure_unified_dynamic_cache_model,
     make_ext_init,
 )
@@ -862,6 +863,7 @@ def fast_quant_prepack_batch(
     bits: int,
     block_size: int = 32,
     is_qmoe: bool = False,
+    device: str | torch.device | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Exact SM80 CutlassFpAIntB / QMoE blockwise symmetric quantizer + prepacker."""
     orig_shape = weights_bf16.shape
@@ -870,7 +872,12 @@ def fast_quant_prepack_batch(
     num_experts, rows, cols = weights_bf16.shape
     if cols % block_size != 0 or cols % 64 != 0:
         raise ValueError(f"Invalid K={cols} for block_size={block_size}")
-    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    if device is not None:
+        dev: str | torch.device = device
+    elif weights_bf16.is_cuda:
+        dev = weights_bf16.device
+    else:
+        dev = "cuda" if torch.cuda.is_available() else "cpu"
     w = weights_bf16.to(device=dev, dtype=torch.bfloat16)
 
     qmax = float((1 << (bits - 1)) - 1)
@@ -2055,6 +2062,133 @@ def _infer_qmoe_geometry(model: onnx.ModelProto) -> tuple[int, int, int]:
     return 512, 2560, 640
 
 
+QMOE_BANK_METADATA_NAME = "qmoe_bank_metadata.json"
+
+
+def _load_qmoe_bank_metadata(pool_dir: Path) -> dict[str, dict]:
+    p = pool_dir / QMOE_BANK_METADATA_NAME
+    if not p.is_file():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        banks = data.get("banks", {})
+        return banks if isinstance(banks, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def _save_qmoe_bank_metadata(pool_dir: Path, updates: dict[str, dict]) -> None:
+    banks = _load_qmoe_bank_metadata(pool_dir)
+    banks.update(updates)
+    p = pool_dir / QMOE_BANK_METADATA_NAME
+    tmp_p = pool_dir / f".{QMOE_BANK_METADATA_NAME}.tmp.{os.getpid()}"
+    tmp_p.write_text(json.dumps({"banks": banks}, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp_p, p)
+
+
+def _int4_bank_meta_entry(
+    *,
+    num_layers: int,
+    num_experts: int,
+    hidden_size: int,
+    inter_size: int,
+    bs4: int,
+    exp_w_sz: int,
+    exp_s_sz: int,
+    ckpt_fp: str | None = None,
+) -> dict:
+    entry = {
+        "scales_file": "qmoe_scales.data",
+        "weights_bytes": exp_w_sz,
+        "scales_bytes": exp_s_sz,
+        "num_layers": num_layers,
+        "num_experts": num_experts,
+        "hidden_size": hidden_size,
+        "inter_size": inter_size,
+        "bits": 4,
+        "block_size": bs4,
+        "mode": "symmetric_sm80",
+        "sm80_prepack": True,
+    }
+    if ckpt_fp is not None:
+        entry["checkpoint_fingerprint"] = ckpt_fp
+    return entry
+
+
+def _lowbit_bank_meta_entry(
+    spec: tuple[str, int, int, str, bool, str, str, list[int], list[int]],
+    *,
+    num_layers: int,
+    ckpt_fp: str | None = None,
+) -> dict:
+    proj, bits, bs, mode, sm80, _w_fn, s_fn, w_sh, s_sh = spec
+    entry = {
+        "proj": proj,
+        "scales_file": s_fn,
+        "weights_bytes": num_layers * int(np.prod(w_sh)),
+        "scales_bytes": num_layers * int(np.prod(s_sh)) * 2,
+        "num_layers": num_layers,
+        "bits": bits,
+        "block_size": bs,
+        "mode": mode,
+        "sm80_prepack": sm80,
+        "w_shape": list(w_sh),
+        "s_shape": list(s_sh),
+    }
+    if ckpt_fp is not None:
+        entry["checkpoint_fingerprint"] = ckpt_fp
+    return entry
+
+
+def _is_valid_qmoe_bank_pair(
+    cand_dir: Path,
+    w_fn: str,
+    s_fn: str,
+    exp_w_sz: int,
+    exp_s_sz: int,
+    *,
+    req_meta: dict,
+    req_ckpt_fp: str | None = None,
+    require_fp: bool = False,
+) -> bool:
+    w_p = cand_dir / w_fn
+    s_p = cand_dir / s_fn
+    if not (w_p.is_file() and s_p.is_file()):
+        return False
+    if w_p.stat().st_size != exp_w_sz or s_p.stat().st_size != exp_s_sz:
+        return False
+
+    qmoe_banks = _load_qmoe_bank_metadata(cand_dir)
+    entry = qmoe_banks.get(w_fn)
+    if entry is not None:
+        for k, v in req_meta.items():
+            if k == "checkpoint_fingerprint":
+                continue
+            if entry.get(k) != v:
+                return False
+        recorded_fp = entry.get("checkpoint_fingerprint")
+        if req_ckpt_fp is not None:
+            if recorded_fp is not None and recorded_fp != req_ckpt_fp:
+                return False
+            if require_fp and recorded_fp != req_ckpt_fp:
+                return False
+        return True
+
+    bank_meta_p = cand_dir / "bank_metadata.json"
+    recorded_pkg_fp = None
+    if bank_meta_p.is_file():
+        try:
+            recorded_pkg_fp = json.loads(bank_meta_p.read_text(encoding="utf-8")).get("checkpoint_fingerprint")
+        except (OSError, ValueError, TypeError):
+            recorded_pkg_fp = None
+    if req_ckpt_fp is not None:
+        if recorded_pkg_fp is not None and recorded_pkg_fp != req_ckpt_fp:
+            return False
+        if require_fp and recorded_pkg_fp != req_ckpt_fp:
+            return False
+    return True
+
+
 def ensure_qmoe_int4_bank(
     pool_dir: Path,
     hf_dir: Path | None = None,
@@ -2073,7 +2207,27 @@ def ensure_qmoe_int4_bank(
     fc2_s_sz = num_experts * hidden_size * (inter_size // bs4) * 2
     exp_w_sz = num_layers * (fc1_w_sz + fc2_w_sz)
     exp_s_sz = num_layers * (fc1_s_sz + fc2_s_sz)
-    if w_p.exists() and s_p.exists() and w_p.stat().st_size >= exp_w_sz and s_p.stat().st_size >= exp_s_sz:
+    req_ckpt_fp = checkpoint_fingerprint(hf_dir)
+    req_meta = _int4_bank_meta_entry(
+        num_layers=num_layers,
+        num_experts=num_experts,
+        hidden_size=hidden_size,
+        inter_size=inter_size,
+        bs4=bs4,
+        exp_w_sz=exp_w_sz,
+        exp_s_sz=exp_s_sz,
+        ckpt_fp=req_ckpt_fp,
+    )
+    if _is_valid_qmoe_bank_pair(
+        pool_dir,
+        "qmoe_int4.data",
+        "qmoe_scales.data",
+        exp_w_sz,
+        exp_s_sz,
+        req_meta=req_meta,
+        req_ckpt_fp=req_ckpt_fp,
+        require_fp=(req_ckpt_fp is not None),
+    ):
         return
     if hf_dir is None or not hf_dir.exists():
         raise FileNotFoundError(
@@ -2081,38 +2235,58 @@ def ensure_qmoe_int4_bank(
         )
 
     pool_dir.mkdir(parents=True, exist_ok=True)
-    hf_reader = HFCheckpointReader(hf_dir)
+    hf_reader = HFCheckpointReader(hf_dir, require_checkpoint=True)
+    if req_ckpt_fp is None:
+        req_ckpt_fp = hf_reader.checkpoint_fingerprint()
+        req_meta["checkpoint_fingerprint"] = req_ckpt_fp
     n_gpus = max(1, torch.cuda.device_count()) if torch.cuda.is_available() else 0
     wave_size = min(8, max(1, n_gpus)) if n_gpus > 0 else 1
 
-    with open(w_p, "wb") as fw, open(s_p, "wb") as fs:
-        for start in range(0, num_layers, wave_size):
-            layers = list(range(start, min(num_layers, start + wave_size)))
+    tmp_w = pool_dir / f".qmoe_int4.data.tmp.{os.getpid()}"
+    tmp_s = pool_dir / f".qmoe_scales.data.tmp.{os.getpid()}"
+    try:
+        with open(tmp_w, "wb") as fw, open(tmp_s, "wb") as fs:
+            for start in range(0, num_layers, wave_size):
+                layers = list(range(start, min(num_layers, start + wave_size)))
 
-            def _quant_int4_layer(l_idx: int) -> tuple[bytes, bytes, bytes, bytes]:
-                dev = torch.device(f"cuda:{l_idx % n_gpus}") if n_gpus > 0 else torch.device("cpu")
-                pfx = f"model.layers.{l_idx}.mlp"
-                raw_gu = hf_reader.read_bf16_tensor(f"{pfx}.experts.gate_up_proj", device="cpu").to(dev)
-                half = raw_gu.shape[1] // 2
-                gu_dev = torch.stack([raw_gu[:, :half, :], raw_gu[:, half:, :]], dim=2).reshape_as(raw_gu).contiguous()
-                del raw_gu
-                dn_dev = hf_reader.read_bf16_tensor(f"{pfx}.experts.down_proj", device="cpu").to(dev).contiguous()
-                w1, s1 = fast_quant_prepack_batch(gu_dev, bits=4, block_size=bs4, is_qmoe=True)
-                w2, s2 = fast_quant_prepack_batch(dn_dev, bits=4, block_size=bs4, is_qmoe=True)
-                return (
-                    w1.view(torch.uint8).numpy().tobytes(),
-                    w2.view(torch.uint8).numpy().tobytes(),
-                    s1.view(torch.uint16).numpy().tobytes(),
-                    s2.view(torch.uint16).numpy().tobytes(),
-                )
+                def _quant_int4_layer(l_idx: int) -> tuple[bytes, bytes, bytes, bytes]:
+                    dev = torch.device(f"cuda:{l_idx % n_gpus}") if n_gpus > 0 else torch.device("cpu")
+                    pfx = f"model.layers.{l_idx}.mlp"
+                    raw_gu = hf_reader.read_bf16_tensor(f"{pfx}.experts.gate_up_proj", device="cpu").to(dev)
+                    half = raw_gu.shape[1] // 2
+                    gu_dev = (
+                        torch.stack([raw_gu[:, :half, :], raw_gu[:, half:, :]], dim=2).reshape_as(raw_gu).contiguous()
+                    )
+                    del raw_gu
+                    dn_dev = hf_reader.read_bf16_tensor(f"{pfx}.experts.down_proj", device="cpu").to(dev).contiguous()
+                    w1, s1 = fast_quant_prepack_batch(gu_dev, bits=4, block_size=bs4, is_qmoe=True, device=dev)
+                    w2, s2 = fast_quant_prepack_batch(dn_dev, bits=4, block_size=bs4, is_qmoe=True, device=dev)
+                    return (
+                        w1.view(torch.uint8).numpy().tobytes(),
+                        w2.view(torch.uint8).numpy().tobytes(),
+                        s1.view(torch.uint16).numpy().tobytes(),
+                        s2.view(torch.uint16).numpy().tobytes(),
+                    )
 
-            with ThreadPoolExecutor(max_workers=len(layers)) as ex:
-                wave_res = list(ex.map(_quant_int4_layer, layers))
-            for w1b, w2b, s1b, s2b in wave_res:
-                fw.write(w1b)
-                fw.write(w2b)
-                fs.write(s1b)
-                fs.write(s2b)
+                with ThreadPoolExecutor(max_workers=len(layers)) as ex:
+                    wave_res = list(ex.map(_quant_int4_layer, layers))
+                for w1b, w2b, s1b, s2b in wave_res:
+                    fw.write(w1b)
+                    fw.write(w2b)
+                    fs.write(s1b)
+                    fs.write(s2b)
+        if tmp_w.stat().st_size != exp_w_sz or tmp_s.stat().st_size != exp_s_sz:
+            raise ValueError(
+                f"Quantized INT4 bank size mismatch: got ({tmp_w.stat().st_size}, {tmp_s.stat().st_size}), "
+                f"expected ({exp_w_sz}, {exp_s_sz})"
+            )
+        os.replace(tmp_w, w_p)
+        os.replace(tmp_s, s_p)
+        _save_qmoe_bank_metadata(pool_dir, {"qmoe_int4.data": req_meta})
+    finally:
+        for tp in (tmp_w, tmp_s):
+            if tp.exists():
+                tp.unlink()
 
 
 def ensure_qmoe_banks(
@@ -2122,14 +2296,23 @@ def ensure_qmoe_banks(
     num_layers: int = 48,
 ) -> None:
     """Verify that all required low-bit QMoE bank files exist in `pool_dir`, quantizing from `hf_dir` if missing."""
+    req_ckpt_fp = checkpoint_fingerprint(hf_dir)
     need_build = []
     for spec in needed_specs:
         _proj, _bits, _bs, _mode, _sm80, w_fn, s_fn, w_sh, s_sh = spec
-        w_p = pool_dir / w_fn
-        s_p = pool_dir / s_fn
         exp_w_sz = num_layers * int(np.prod(w_sh))
         exp_s_sz = num_layers * int(np.prod(s_sh)) * 2
-        if not (w_p.exists() and s_p.exists() and w_p.stat().st_size == exp_w_sz and s_p.stat().st_size == exp_s_sz):
+        req_meta = _lowbit_bank_meta_entry(spec, num_layers=num_layers, ckpt_fp=req_ckpt_fp)
+        if not _is_valid_qmoe_bank_pair(
+            pool_dir,
+            w_fn,
+            s_fn,
+            exp_w_sz,
+            exp_s_sz,
+            req_meta=req_meta,
+            req_ckpt_fp=req_ckpt_fp,
+            require_fp=(req_ckpt_fp is not None),
+        ):
             need_build.append(spec)
 
     if not need_build:
@@ -2141,19 +2324,26 @@ def ensure_qmoe_banks(
         )
 
     pool_dir.mkdir(parents=True, exist_ok=True)
-    hf_reader = HFCheckpointReader(hf_dir)
+    hf_reader = HFCheckpointReader(hf_dir, require_checkpoint=True)
+    if req_ckpt_fp is None:
+        req_ckpt_fp = hf_reader.checkpoint_fingerprint()
     n_gpus = max(1, torch.cuda.device_count()) if torch.cuda.is_available() else 0
     wave_size = min(8, max(1, n_gpus)) if n_gpus > 0 else 1
 
     w_handles: dict[str, object] = {}
     s_handles: dict[str, object] = {}
+    tmp_paths: dict[str, Path] = {}
     try:
         for spec in need_build:
             _, _, _, _, _, w_fn, s_fn, _, _ = spec
             if w_fn not in w_handles:
-                w_handles[w_fn] = open(pool_dir / w_fn, "wb")  # noqa: SIM115
+                tw = pool_dir / f".{w_fn}.tmp.{os.getpid()}"
+                tmp_paths[w_fn] = tw
+                w_handles[w_fn] = open(tw, "wb")  # noqa: SIM115
             if s_fn not in s_handles:
-                s_handles[s_fn] = open(pool_dir / s_fn, "wb")  # noqa: SIM115
+                ts = pool_dir / f".{s_fn}.tmp.{os.getpid()}"
+                tmp_paths[s_fn] = ts
+                s_handles[s_fn] = open(ts, "wb")  # noqa: SIM115
 
         for start in range(0, num_layers, wave_size):
             layers = list(range(start, min(num_layers, start + wave_size)))
@@ -2192,9 +2382,34 @@ def ensure_qmoe_banks(
                 for (w_fn, s_fn), (wb, sb) in l_res.items():
                     w_handles[w_fn].write(wb)
                     s_handles[s_fn].write(sb)
+
+        for fh in list(w_handles.values()) + list(s_handles.values()):
+            fh.close()
+        w_handles.clear()
+        s_handles.clear()
+
+        meta_updates: dict[str, dict] = {}
+        for spec in need_build:
+            _proj, _bits, _bs, _mode, _sm80, w_fn, s_fn, w_sh, s_sh = spec
+            exp_w_sz = num_layers * int(np.prod(w_sh))
+            exp_s_sz = num_layers * int(np.prod(s_sh)) * 2
+            tw = tmp_paths[w_fn]
+            ts = tmp_paths[s_fn]
+            if tw.stat().st_size != exp_w_sz or ts.stat().st_size != exp_s_sz:
+                raise ValueError(
+                    f"Quantized bank size mismatch for {w_fn}/{s_fn}: "
+                    f"got ({tw.stat().st_size}, {ts.stat().st_size}), expected ({exp_w_sz}, {exp_s_sz})"
+                )
+            os.replace(tw, pool_dir / w_fn)
+            os.replace(ts, pool_dir / s_fn)
+            meta_updates[w_fn] = _lowbit_bank_meta_entry(spec, num_layers=num_layers, ckpt_fp=req_ckpt_fp)
+        _save_qmoe_bank_metadata(pool_dir, meta_updates)
     finally:
         for fh in list(w_handles.values()) + list(s_handles.values()):
             fh.close()
+        for tp in tmp_paths.values():
+            if tp.exists():
+                tp.unlink()
 
 
 def rewrite_qmoe_layers(
@@ -2610,33 +2825,74 @@ def _prepare_procedural_base_assets(
     target_rows = capacity.positional_rows if capacity else 262144
     draft_rows = capacity.positional_rows if capacity else 262148
     positions = position_config(rope_config, target_rows, draft_rows, capacity)
-    non_qmoe_files = (
-        "embedding.onnx.data",
-        "dflash2.onnx.data",
+    req_ckpt_fp = checkpoint_fingerprint(hf_dir)
+    split_non_qmoe_files = (
         "norm_and_rope.data",
         "attn_consts.data",
         "contrib_weights.data",
         "matmul_int8.data",
         "matmul_scales.data",
+    )
+    common_non_qmoe_files = (
+        "embedding.onnx.data",
+        "dflash2.onnx.data",
         "ple_table.txt",
         "weights_pool.txt",
     )
     can_reuse = (
         reuse_banks_from is not None
         and reuse_banks_from.is_dir()
-        and all((reuse_banks_from / fn).is_file() for fn in non_qmoe_files)
+        and all((reuse_banks_from / fn).is_file() for fn in common_non_qmoe_files)
+        and (
+            all((reuse_banks_from / fn).is_file() for fn in split_non_qmoe_files)
+            or (reuse_banks_from / "model.onnx.data").is_file()
+        )
         and (reuse_banks_from / "ple").is_dir()
     )
+    if can_reuse and req_ckpt_fp is not None and (reuse_banks_from / "bank_metadata.json").is_file():
+        recorded_fp = json.loads((reuse_banks_from / "bank_metadata.json").read_text(encoding="utf-8")).get(
+            "checkpoint_fingerprint"
+        )
+        if recorded_fp is not None and recorded_fp != req_ckpt_fp:
+            can_reuse = False
 
     if can_reuse:
         bank_src = reuse_banks_from.resolve()
         tensor_locations, embedded_weights = gb.load_bank_metadata_from_dir(bank_src)
         validate_reused_positions(bank_src, tensor_locations)
-        for fn in non_qmoe_files:
+        for fn in common_non_qmoe_files:
             if fn == "weights_pool.txt":
                 shutil.copy2(bank_src / fn, out_pkg / fn)
             else:
                 link_file(bank_src / fn, out_pkg / fn, copy=copy)
+        if all((bank_src / fn).is_file() for fn in split_non_qmoe_files):
+            for fn in split_non_qmoe_files:
+                link_file(bank_src / fn, out_pkg / fn, copy=copy)
+        elif (bank_src / "model.onnx.data").is_file():
+            writers = {fn: gb.BinaryBlobWriter(out_pkg / fn) for fn in split_non_qmoe_files}
+            try:
+                with open(bank_src / "model.onnx.data", "rb") as f_cons:
+                    for t_name, meta in list(tensor_locations.items()):
+                        if meta.get("location") != "model.onnx.data":
+                            continue
+                        f_cons.seek(int(meta["offset"]))
+                        raw = f_cons.read(int(meta["length"]))
+                        if ".qweight" in t_name:
+                            dst_fn = "matmul_int8.data"
+                        elif ".scales" in t_name:
+                            dst_fn = "matmul_scales.data"
+                        elif "rotary_emb" in t_name or "layernorm" in t_name or "norm" in t_name:
+                            dst_fn = "norm_and_rope.data"
+                        elif "indexer" in t_name or "linear_attn.alpha" in t_name or "linear_attn.beta" in t_name:
+                            dst_fn = "attn_consts.data"
+                        else:
+                            dst_fn = "contrib_weights.data"
+                        tensor_locations[t_name] = writers[dst_fn].write_aligned(
+                            raw, int(meta["dtype"]), list(meta["dims"])
+                        )
+            finally:
+                for w in writers.values():
+                    w.close()
         for tsv in bank_src.glob("*.tsv"):
             if tsv.is_file():
                 shutil.copy2(tsv, out_pkg / tsv.name)
@@ -2650,7 +2906,9 @@ def _prepare_procedural_base_assets(
 
         gb.build_reused_position_tables(out_pkg, tensor_locations, rope_config, target_rows, draft_rows)
         gb.write_weights_pool_txt(out_pkg, tensor_locations)
-        gb.save_bank_metadata_to_dir(out_pkg, tensor_locations, embedded_weights, positions)
+        gb.save_bank_metadata_to_dir(
+            out_pkg, tensor_locations, embedded_weights, positions, checkpoint_fingerprint=req_ckpt_fp
+        )
 
         emb_proto = gb.build_embedding_model_proto()
         onnx.save_model(emb_proto, str(out_pkg / "embedding.onnx"), save_as_external_data=False)
@@ -2716,7 +2974,13 @@ def _prepare_procedural_base_assets(
         )
         tensor_locations.update(dflash_locs)
         gb.write_weights_pool_txt(out_pkg, tensor_locations)
-        gb.save_bank_metadata_to_dir(out_pkg, tensor_locations, embedded_weights, positions)
+        gb.save_bank_metadata_to_dir(
+            out_pkg,
+            tensor_locations,
+            embedded_weights,
+            positions,
+            checkpoint_fingerprint=req_ckpt_fp or hf_loader.checkpoint_fingerprint(),
+        )
 
         for tok_fn in ("tokenizer.json", "tokenizer_config.json", "chat_template.jinja", "generation_config.json"):
             src_tok = hf_dir / tok_fn
@@ -2954,10 +3218,38 @@ def build_rc5_package(
     default_pool_parent = (base_pkg_resolved or reuse_resolved or out_pkg.resolve()).parent
     effective_pool_dir = (pool_dir or (default_pool_parent / "_qmoe_lowbit_shared_banks")).resolve()
     eff_hf_for_qmoe = hf_dir or (DEFAULT_HF_DIR if base_pkg_resolved is None else None)
+    req_ckpt_fp = checkpoint_fingerprint(eff_hf_for_qmoe)
 
+    int4_fc1_w_sz = num_experts * hidden_size * (2 * inter_size // 2)
+    int4_fc2_w_sz = num_experts * inter_size * (hidden_size // 2)
+    int4_fc1_s_sz = num_experts * (2 * inter_size) * (hidden_size // bs4) * 2
+    int4_fc2_s_sz = num_experts * hidden_size * (inter_size // bs4) * 2
+    exp_int4_w_sz = num_layers * (int4_fc1_w_sz + int4_fc2_w_sz)
+    exp_int4_s_sz = num_layers * (int4_fc1_s_sz + int4_fc2_s_sz)
+    int4_req_meta = _int4_bank_meta_entry(
+        num_layers=num_layers,
+        num_experts=num_experts,
+        hidden_size=hidden_size,
+        inter_size=inter_size,
+        bs4=bs4,
+        exp_w_sz=exp_int4_w_sz,
+        exp_s_sz=exp_int4_s_sz,
+        ckpt_fp=req_ckpt_fp,
+    )
+    valid_bank_pairs: dict[tuple[str, str], tuple[int, int, dict]] = {}
     if layers_4:
+        valid_bank_pairs[("qmoe_int4.data", "qmoe_scales.data")] = (exp_int4_w_sz, exp_int4_s_sz, int4_req_meta)
         has_int4_bank = any(
-            (d / "qmoe_int4.data").exists() and (d / "qmoe_scales.data").exists()
+            _is_valid_qmoe_bank_pair(
+                d,
+                "qmoe_int4.data",
+                "qmoe_scales.data",
+                exp_int4_w_sz,
+                exp_int4_s_sz,
+                req_meta=int4_req_meta,
+                req_ckpt_fp=req_ckpt_fp,
+                require_fp=(d == effective_pool_dir and req_ckpt_fp is not None),
+            )
             for d in [*bank_search_dirs, effective_pool_dir]
         )
         if not has_int4_bank:
@@ -3028,11 +3320,27 @@ def build_rc5_package(
         )
 
     if needed_bank_specs:
-        missing_in_base = [
-            spec
-            for spec in needed_bank_specs
-            if not any((d / spec[5]).exists() and (d / spec[6]).exists() for d in bank_search_dirs)
-        ]
+        missing_in_base = []
+        for spec in needed_bank_specs:
+            _proj, _bits, _bs, _mode, _sm80, w_fn, s_fn, w_sh, s_sh = spec
+            exp_w_sz = num_layers * int(np.prod(w_sh))
+            exp_s_sz = num_layers * int(np.prod(s_sh)) * 2
+            req_meta = _lowbit_bank_meta_entry(spec, num_layers=num_layers, ckpt_fp=req_ckpt_fp)
+            valid_bank_pairs[(w_fn, s_fn)] = (exp_w_sz, exp_s_sz, req_meta)
+            if not any(
+                _is_valid_qmoe_bank_pair(
+                    d,
+                    w_fn,
+                    s_fn,
+                    exp_w_sz,
+                    exp_s_sz,
+                    req_meta=req_meta,
+                    req_ckpt_fp=req_ckpt_fp,
+                    require_fp=False,
+                )
+                for d in bank_search_dirs
+            ):
+                missing_in_base.append(spec)
         if missing_in_base:
             ensure_qmoe_banks(effective_pool_dir, missing_in_base, hf_dir=eff_hf_for_qmoe, num_layers=num_layers)
 
@@ -3087,6 +3395,12 @@ def build_rc5_package(
             popularity_file=EXPERT_PROFILE_NAME if resolved_profile is not None else None,
             node_overrides=node_overrides_str,
         )
+    elif device_expert_bytes is not None or host_expert_bytes is not None:
+        explicit_offload_entries = {}
+        if device_expert_bytes is not None:
+            explicit_offload_entries["session.moe.offload.device_expert_bytes"] = str(budget_bytes(device_expert_bytes))
+        if host_expert_bytes is not None:
+            explicit_offload_entries["session.moe.offload.host_expert_bytes"] = str(budget_bytes(host_expert_bytes))
 
     if base_pkg_resolved is not None and (base_pkg_resolved / "genai_config.json").is_file():
         config = json.loads((base_pkg_resolved / "genai_config.json").read_text())
@@ -3130,7 +3444,8 @@ def build_rc5_package(
             for p in base_pkg_resolved.iterdir()
             if p.is_file() and (p.name.startswith("qmoe_") and p.name.endswith(".data"))
         }
-        skip_root.update(qmoe_data_files - needed_banks)
+        skip_root.update(qmoe_data_files)
+        skip_root.add(QMOE_BANK_METADATA_NAME)
 
         copied_suffixes = (".tsv",)
         copied_names = ("weights_pool.txt",)
@@ -3190,20 +3505,34 @@ def build_rc5_package(
     if resolved_profile is not None and not (out_pkg / EXPERT_PROFILE_NAME).exists():
         link_file(resolved_profile, out_pkg / EXPERT_PROFILE_NAME, copy=copy)
 
-    for b_fn in sorted(needed_banks):
-        dst_b = out_pkg / b_fn
-        if dst_b.exists():
+    pkg_qmoe_meta: dict[str, dict] = {}
+    for (w_fn, s_fn), (exp_w_sz, exp_s_sz, req_meta) in sorted(valid_bank_pairs.items()):
+        if w_fn not in needed_banks and s_fn not in needed_banks:
             continue
-        src_b: Path | None = None
+        chosen_dir: Path | None = None
         for cand_dir in (*bank_search_dirs, effective_pool_dir):
-            if (cand_dir / b_fn).exists():
-                src_b = cand_dir / b_fn
+            if _is_valid_qmoe_bank_pair(
+                cand_dir,
+                w_fn,
+                s_fn,
+                exp_w_sz,
+                exp_s_sz,
+                req_meta=req_meta,
+                req_ckpt_fp=req_ckpt_fp,
+                require_fp=(cand_dir == effective_pool_dir and req_ckpt_fp is not None),
+            ):
+                chosen_dir = cand_dir
                 break
-        if src_b is None:
+        if chosen_dir is None:
             raise FileNotFoundError(
-                f"Required QMoE bank file {b_fn} not found in {bank_search_dirs} or {effective_pool_dir}"
+                f"Required valid QMoE bank pair ({w_fn}, {s_fn}) not found in {bank_search_dirs} or {effective_pool_dir}"
             )
-        link_file(src_b, dst_b, copy=copy)
+        link_file(chosen_dir / w_fn, out_pkg / w_fn, copy=copy)
+        link_file(chosen_dir / s_fn, out_pkg / s_fn, copy=copy)
+        cand_meta = _load_qmoe_bank_metadata(chosen_dir).get(w_fn)
+        pkg_qmoe_meta[w_fn] = dict(cand_meta) if isinstance(cand_meta, dict) else dict(req_meta)
+    if pkg_qmoe_meta:
+        _save_qmoe_bank_metadata(out_pkg, pkg_qmoe_meta)
 
     target_filename = capacity.graph_filename if capacity else "model.onnx"
     onnx.save_model(model, str(out_pkg / target_filename), save_as_external_data=False)

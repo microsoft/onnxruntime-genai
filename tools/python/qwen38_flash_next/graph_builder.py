@@ -20,6 +20,7 @@ import numpy as np
 import onnx
 import torch
 from onnx import TensorProto, helper, numpy_helper
+from package_io import CheckpointTensorLoader
 from rope import DEFAULT_ROPE, DRAFT_NAMES, TARGET_NAMES, RopeConfig, dflash_rope, target_rope
 
 ALIGN = 4096
@@ -1975,6 +1976,11 @@ def build_target_model_proto(
     for _k_name, t_proto in sorted(embedded_weights.items()):
         t_copy = TensorProto()
         t_copy.CopyFrom(t_proto)
+        if t_copy.name.endswith(".bf16") and t_copy.data_type == TensorProto.FLOAT:
+            f32_t = torch.from_numpy(np.frombuffer(t_copy.raw_data, dtype=np.float32).copy())
+            u16_bytes = f32_t.to(torch.bfloat16).view(torch.uint16).numpy().tobytes()
+            t_copy.data_type = TensorProto.BFLOAT16
+            t_copy.raw_data = u16_bytes
         inits.append(t_copy)
 
     used_inputs = {inp for n in nodes for inp in n.input if inp}
@@ -2035,95 +2041,6 @@ def build_target_model_proto(
         prop.key = k_prop
         prop.value = v_prop
     return model
-
-
-def _load_safetensors_tensor(shard_path: Path, key: str, device: str = "cpu") -> torch.Tensor:
-    with open(shard_path, "rb") as f:
-        hlen = struct.unpack("<Q", f.read(8))[0]
-        hdr = json.loads(f.read(hlen))
-    info = hdr[key]
-    s, e = info["data_offsets"]
-    shape = tuple(info["shape"])
-    dtype_str = info["dtype"]
-    base_off = 8 + hlen + s
-    if dtype_str == "BF16":
-        mm = np.memmap(shard_path, dtype=np.uint16, mode="r", offset=base_off, shape=shape)
-        t = torch.from_numpy(mm.copy()).view(torch.bfloat16)
-    elif dtype_str == "F32":
-        mm = np.memmap(shard_path, dtype=np.float32, mode="r", offset=base_off, shape=shape)
-        t = torch.from_numpy(mm.copy())
-    elif dtype_str == "I64":
-        mm = np.memmap(shard_path, dtype=np.int64, mode="r", offset=base_off, shape=shape)
-        t = torch.from_numpy(mm.copy())
-    else:
-        raise ValueError(f"Unsupported safetensors dtype {dtype_str!r} for {key}")
-    return t.to(device=device) if device != "cpu" else t
-
-
-class CheckpointTensorLoader:
-    """Memory-mapped reader for single-file (`model.safetensors`) or sharded (`model.safetensors.index.json`) checkpoints."""
-
-    def __init__(self, ckpt_dir: Path) -> None:
-        self.ckpt_dir = ckpt_dir.resolve()
-        idx_path = self.ckpt_dir / "model.safetensors.index.json"
-        single_path = self.ckpt_dir / "model.safetensors"
-        if idx_path.is_file():
-            self.weight_map: dict[str, str] = json.loads(idx_path.read_text())["weight_map"]
-        elif single_path.is_file():
-            with open(single_path, "rb") as f:
-                hlen = struct.unpack("<Q", f.read(8))[0]
-                hdr = json.loads(f.read(hlen))
-            self.weight_map = {k: "model.safetensors" for k in hdr if k != "__metadata__"}
-        else:
-            raise FileNotFoundError(
-                f"Neither model.safetensors.index.json nor model.safetensors found in {self.ckpt_dir}"
-            )
-        self._headers: dict[str, tuple[int, dict]] = {}
-
-    def _resolve_key(self, name: str) -> str:
-        if name in self.weight_map:
-            return name
-        if name.startswith("model.layers."):
-            alt = "model.language_model." + name[len("model.") :]
-            if alt in self.weight_map:
-                return alt
-        if name.startswith("model.embed_tokens."):
-            alt = "model.language_model." + name[len("model.") :]
-            if alt in self.weight_map:
-                return alt
-        if name.startswith("model.hyper_connection_mixer."):
-            alt = "model.language_model." + name[len("model.") :]
-            if alt in self.weight_map:
-                return alt
-        raise KeyError(f"Weight {name!r} not found in {self.ckpt_dir}")
-
-    def read_tensor(self, name: str, device: str = "cpu") -> torch.Tensor:
-        key = self._resolve_key(name)
-        shard_file = self.weight_map[key]
-        if shard_file not in self._headers:
-            p = self.ckpt_dir / shard_file
-            with open(p, "rb") as f:
-                hlen = struct.unpack("<Q", f.read(8))[0]
-                hdr = json.loads(f.read(hlen))
-            self._headers[shard_file] = (8 + hlen, hdr)
-        base_off, hdr = self._headers[shard_file]
-        info = hdr[key]
-        s, _e = info["data_offsets"]
-        shape = tuple(info["shape"])
-        dtype_str = info["dtype"]
-        p = self.ckpt_dir / shard_file
-        if dtype_str == "BF16":
-            mm = np.memmap(p, dtype=np.uint16, mode="r", offset=base_off + s, shape=shape)
-            t = torch.from_numpy(mm).view(torch.bfloat16)
-        elif dtype_str == "F32":
-            mm = np.memmap(p, dtype=np.float32, mode="r", offset=base_off + s, shape=shape)
-            t = torch.from_numpy(mm)
-        elif dtype_str == "I64":
-            mm = np.memmap(p, dtype=np.int64, mode="r", offset=base_off + s, shape=shape)
-            t = torch.from_numpy(mm)
-        else:
-            raise ValueError(f"Unsupported safetensors dtype {dtype_str!r} for {key}")
-        return t.to(device=device, non_blocking=False) if device != "cpu" else t.clone()
 
 
 @torch.no_grad()
@@ -2674,32 +2591,20 @@ def write_weights_pool_txt(out_dir: Path, tensor_locations: dict[str, dict]) -> 
     (out_dir / "weights_pool.txt").write_text("\n".join(pool_lines + session_lines) + "\n")
 
 
-def load_bank_metadata_from_dir(bank_dir: Path) -> tuple[dict[str, dict], dict[str, TensorProto]]:
-    """Load `(tensor_locations, embedded_weights)` from `bank_dir/bank_metadata.json` or existing ONNX headers."""
-    meta_json = bank_dir / "bank_metadata.json"
-    if meta_json.is_file():
-        data = json.loads(meta_json.read_text())
-        tensor_locations = data["tensor_locations"]
-        embedded_weights: dict[str, TensorProto] = {}
-        for name, item in data["embedded_weights"].items():
-            t = TensorProto()
-            t.name = name
-            t.data_type = int(item["dtype"])
-            t.dims.extend(item["dims"])
-            t.raw_data = base64.b85decode(item["raw_b85"])
-            embedded_weights[name] = t
-        return tensor_locations, embedded_weights
-
-    # Fallback also supports a package containing only its explicitly selected fixed graph.
-    tensor_locations = {}
-    embedded_weights = {}
+def _extract_bank_metadata_from_onnx(bank_dir: Path) -> tuple[dict[str, dict], dict[str, TensorProto]]:
+    tensor_locations: dict[str, dict] = {}
+    embedded_weights: dict[str, TensorProto] = {}
     target_filename = "model.onnx"
     config_path = bank_dir / "genai_config.json"
     if config_path.is_file():
-        target_filename = json.loads(config_path.read_text())["model"]["decoder"]["filename"]
+        target_filename = (
+            json.loads(config_path.read_text()).get("model", {}).get("decoder", {}).get("filename", "model.onnx")
+        )
+    if not (bank_dir / target_filename).is_file() and (bank_dir / "model.onnx").is_file():
+        target_filename = "model.onnx"
     if not (bank_dir / target_filename).resolve().is_relative_to(bank_dir.resolve()):
         raise ValueError("Target graph must be inside the reused package")
-    for m_name in (target_filename, "dflash2.onnx"):
+    for m_name in ("embedding.onnx", target_filename, "dflash2.onnx"):
         p = bank_dir / m_name
         if not p.is_file():
             continue
@@ -2707,6 +2612,8 @@ def load_bank_metadata_from_dir(bank_dir: Path) -> tuple[dict[str, dict], dict[s
         for t in m.graph.initializer:
             ext = {e.key: e.value for e in t.external_data}
             if ext and "location" in ext:
+                if ".mlp.fc1_experts_" in t.name or ".mlp.fc2_experts_" in t.name:
+                    continue
                 tensor_locations[t.name] = {
                     "location": ext["location"],
                     "offset": int(ext.get("offset", 0)),
@@ -2725,14 +2632,42 @@ def load_bank_metadata_from_dir(bank_dir: Path) -> tuple[dict[str, dict], dict[s
     return tensor_locations, embedded_weights
 
 
+def load_bank_metadata_from_dir(bank_dir: Path) -> tuple[dict[str, dict], dict[str, TensorProto]]:
+    """Load `(tensor_locations, embedded_weights)` from `bank_dir/bank_metadata.json` or existing ONNX headers."""
+    meta_json = bank_dir / "bank_metadata.json"
+    if meta_json.is_file():
+        data = json.loads(meta_json.read_text())
+        tensor_locations = data["tensor_locations"]
+        embedded_weights: dict[str, TensorProto] = {}
+        for name, item in data["embedded_weights"].items():
+            t = TensorProto()
+            t.name = name
+            t.data_type = int(item["dtype"])
+            t.dims.extend(item["dims"])
+            t.raw_data = base64.b85decode(item["raw_b85"])
+            embedded_weights[name] = t
+        return tensor_locations, embedded_weights
+
+    return _extract_bank_metadata_from_onnx(bank_dir)
+
+
 def save_bank_metadata_to_dir(
     out_dir: Path,
     tensor_locations: dict[str, dict],
     embedded_weights: dict[str, TensorProto],
     position_config: dict | None = None,
+    checkpoint_fingerprint: str | None = None,
 ) -> None:
     """Save `bank_metadata.json` so subsequent multi-preset builds can reuse binary `.data` banks without parsing ONNX."""
-    non_qmoe_locs = {k: v for k, v in tensor_locations.items() if not str(v.get("location", "")).startswith("qmoe_")}
+    meta_json = out_dir / "bank_metadata.json"
+    prev: dict = json.loads(meta_json.read_text()) if meta_json.is_file() else {}
+    non_qmoe_locs = {
+        k: v
+        for k, v in tensor_locations.items()
+        if not str(v.get("location", "")).startswith("qmoe_")
+        and ".mlp.fc1_experts_" not in k
+        and ".mlp.fc2_experts_" not in k
+    }
     emb_serialized = {
         name: {
             "dtype": int(t.data_type),
@@ -2741,10 +2676,26 @@ def save_bank_metadata_to_dir(
         }
         for name, t in embedded_weights.items()
     }
-    metadata = {"tensor_locations": non_qmoe_locs, "embedded_weights": emb_serialized}
-    if position_config is not None:
-        metadata["position_config"] = position_config
-    (out_dir / "bank_metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
+    metadata: dict = {"tensor_locations": non_qmoe_locs, "embedded_weights": emb_serialized}
+    eff_pos = position_config if position_config is not None else prev.get("position_config")
+    if eff_pos is not None:
+        metadata["position_config"] = eff_pos
+    eff_fp = checkpoint_fingerprint if checkpoint_fingerprint is not None else prev.get("checkpoint_fingerprint")
+    if eff_fp is not None:
+        metadata["checkpoint_fingerprint"] = eff_fp
+    meta_json.write_text(json.dumps(metadata, indent=2) + "\n")
+
+
+def sync_bank_metadata_from_models(pkg_dir: Path) -> None:
+    """Re-synchronize `bank_metadata.json` with the current ONNX headers in `pkg_dir` after precision conversion or consolidation."""
+    tensor_locations, embedded_weights = _extract_bank_metadata_from_onnx(pkg_dir)
+    meta_json = pkg_dir / "bank_metadata.json"
+    if meta_json.is_file():
+        prev_locs = json.loads(meta_json.read_text()).get("tensor_locations", {})
+        for k, v in prev_locs.items():
+            if k not in tensor_locations and (pkg_dir / str(v.get("location", ""))).is_file():
+                tensor_locations[k] = v
+    save_bank_metadata_to_dir(pkg_dir, tensor_locations, embedded_weights)
 
 
 def build_reused_position_tables(

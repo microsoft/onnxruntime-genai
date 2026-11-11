@@ -1745,3 +1745,333 @@ def test_rc6_fp32_gdn_kl_calibration_and_presets(builders):
     assert spec_all4["pkg_name"] == "qwen_flash_next_rc6_all_int4_fp32"
     assert (spec_all4["x"], spec_all4["y"], spec_all4["z"]) == (48, 0, 0)
     assert spec_all4["kl_mode"] == "rank"
+
+
+def _write_safetensors_file(path: Path, tensors: dict[str, tuple[str, list[int], bytes]]) -> None:
+    hdr: dict[str, object] = {}
+    chunks: list[bytes] = []
+    offset = 0
+    for name, (dtype_str, shape, raw) in tensors.items():
+        hdr[name] = {"dtype": dtype_str, "shape": list(shape), "data_offsets": [offset, offset + len(raw)]}
+        chunks.append(raw)
+        offset += len(raw)
+    hdr_bytes = json.dumps(hdr).encode("utf-8")
+    pad = (8 - (len(hdr_bytes) % 8)) % 8
+    if pad:
+        hdr_bytes += b" " * pad
+    with open(path, "wb") as f:
+        f.write(struct.pack("<Q", len(hdr_bytes)))
+        f.write(hdr_bytes)
+        f.writelines(chunks)
+
+
+def _make_mini_qmoe_hf_checkpoint(
+    ckpt_dir: Path,
+    *,
+    num_layers: int = 2,
+    num_experts: int = 2,
+    hidden_size: int = 64,
+    inter_size: int = 64,
+    use_language_model_prefix: bool = True,
+    single_file: bool = True,
+    fill_val: float = 0.25,
+) -> Path:
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    tensors: dict[str, tuple[str, list[int], bytes]] = {}
+    prefix = "model.language_model.layers" if use_language_model_prefix else "model.layers"
+    for lid in range(num_layers):
+        gu_numel = num_experts * (2 * inter_size) * hidden_size
+        dn_numel = num_experts * hidden_size * inter_size
+        gu = (
+            torch.sin(torch.arange(gu_numel, dtype=torch.float32) * fill_val + lid)
+            .reshape(num_experts, 2 * inter_size, hidden_size)
+            .to(torch.bfloat16)
+        )
+        dn = (
+            torch.cos(torch.arange(dn_numel, dtype=torch.float32) * fill_val + lid)
+            .reshape(num_experts, hidden_size, inter_size)
+            .to(torch.bfloat16)
+        )
+        tensors[f"{prefix}.{lid}.mlp.experts.gate_up_proj"] = (
+            "BF16",
+            list(gu.shape),
+            gu.view(torch.uint16).numpy().tobytes(),
+        )
+        tensors[f"{prefix}.{lid}.mlp.experts.down_proj"] = (
+            "BF16",
+            list(dn.shape),
+            dn.view(torch.uint16).numpy().tobytes(),
+        )
+    if single_file:
+        _write_safetensors_file(ckpt_dir / "model.safetensors", tensors)
+    else:
+        shard_name = "model-00001-of-00001.safetensors"
+        _write_safetensors_file(ckpt_dir / shard_name, tensors)
+        weight_map = dict.fromkeys(tensors, shard_name)
+        (ckpt_dir / "model.safetensors.index.json").write_text(
+            json.dumps({"weight_map": weight_map}, indent=2) + "\n", encoding="utf-8"
+        )
+    return ckpt_dir
+
+
+def test_unified_checkpoint_reader_single_and_sharded_language_model_keys(builders, tmp_path, monkeypatch):
+    pkg = builders.pkg
+    gb = builders.gb
+    for single_file in (True, False):
+        ckpt = _make_mini_qmoe_hf_checkpoint(
+            tmp_path / ("single" if single_file else "sharded"),
+            num_layers=2,
+            num_experts=2,
+            hidden_size=64,
+            inter_size=64,
+            use_language_model_prefix=True,
+            single_file=single_file,
+        )
+        loader = gb.CheckpointTensorLoader(ckpt)
+        t_gu = loader.read_bf16_tensor("model.layers.0.mlp.experts.gate_up_proj")
+        assert t_gu.shape == (2, 128, 64) and t_gu.dtype == torch.bfloat16
+
+        pool = tmp_path / f"pool_{'single' if single_file else 'sharded'}"
+        pkg.ensure_qmoe_int4_bank(pool, hf_dir=ckpt, num_layers=2, num_experts=2, hidden_size=64, inter_size=64, bs4=32)
+        assert (pool / "qmoe_int4.data").is_file()
+        assert (pool / "qmoe_scales.data").is_file()
+        assert (pool / "qmoe_bank_metadata.json").is_file()
+
+        specs = [
+            (
+                "fc1",
+                3,
+                64,
+                "mse",
+                False,
+                "qmoe_fc1_int3_b64.data",
+                "qmoe_fc1_int3_b64_scales.data",
+                [2, 128, 64 * 3 // 8],
+                [2, 128, 1],
+            ),
+            (
+                "fc2",
+                2,
+                64,
+                "mse",
+                True,
+                "qmoe_fc2_int2_b64_sm80.data",
+                "qmoe_fc2_int2_b64_scales.data",
+                [2, 64, 64 // 4],
+                [2, 64, 1],
+            ),
+        ]
+        pkg.ensure_qmoe_banks(pool, specs, hf_dir=ckpt, num_layers=2)
+        assert (pool / "qmoe_fc1_int3_b64.data").is_file()
+        assert (pool / "qmoe_fc2_int2_b64_sm80.data").is_file()
+
+    # Failure mid-quantization leaves no partial bank or .tmp files behind
+    fail_pool = tmp_path / "fail_pool"
+    ckpt_ok = _make_mini_qmoe_hf_checkpoint(tmp_path / "ckpt_fail", num_layers=2, single_file=True)
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("simulated quantization failure")
+
+    monkeypatch.setattr(pkg, "fast_quant_prepack_batch", boom)
+    with pytest.raises(RuntimeError, match="simulated quantization failure"):
+        pkg.ensure_qmoe_int4_bank(
+            fail_pool, hf_dir=ckpt_ok, num_layers=2, num_experts=2, hidden_size=64, inter_size=64, bs4=32
+        )
+    assert not (fail_pool / "qmoe_int4.data").exists()
+    assert not (fail_pool / "qmoe_scales.data").exists()
+    assert list(fail_pool.glob("*.tmp.*")) == []
+
+
+def test_qmoe_bank_validation_rejects_truncated_files_and_stale_checkpoint_pools(builders, tmp_path):
+    pkg = builders.pkg
+    base_pkg, pool_dir = make_synthetic_rc5_base_package(tmp_path / "trunc", num_layers=4, num_experts=8)
+    # Truncate qmoe_int4.data and qmoe_scales.data in base_pkg to 1 byte
+    (base_pkg / "qmoe_int4.data").write_bytes(b"\x00")
+    (base_pkg / "qmoe_scales.data").write_bytes(b"\x00")
+
+    out_fail = tmp_path / "out_trunc_fail"
+    with pytest.raises(FileNotFoundError, match="qmoe_int4.data"):
+        pkg.build_rc5_package(out_fail, base_pkg=base_pkg, pool_dir=pool_dir, x_int4=4, y_int3=0, z_int2=0)
+
+    # With a valid checkpoint, truncated base_pkg banks are ignored and regenerated into pool_dir
+    ckpt_a = _make_mini_qmoe_hf_checkpoint(
+        tmp_path / "ckpt_a", num_layers=4, num_experts=8, hidden_size=64, inter_size=64, fill_val=0.15
+    )
+    out_regen = tmp_path / "out_regen"
+    pkg.build_rc5_package(out_regen, base_pkg=base_pkg, pool_dir=pool_dir, hf_dir=ckpt_a, x_int4=4, y_int3=0, z_int2=0)
+    int4_bytes_a = (out_regen / "qmoe_int4.data").read_bytes()
+    assert len(int4_bytes_a) > 1
+
+    # Building from a different checkpoint B with the same shared pool_dir detects the fingerprint change and regenerates
+    ckpt_b = _make_mini_qmoe_hf_checkpoint(
+        tmp_path / "ckpt_b", num_layers=4, num_experts=8, hidden_size=64, inter_size=64, fill_val=0.85
+    )
+    out_regen_b = tmp_path / "out_regen_b"
+    pkg.build_rc5_package(
+        out_regen_b, base_pkg=base_pkg, pool_dir=pool_dir, hf_dir=ckpt_b, x_int4=4, y_int3=0, z_int2=0
+    )
+    int4_bytes_b = (out_regen_b / "qmoe_int4.data").read_bytes()
+    assert int4_bytes_b != int4_bytes_a
+
+
+def test_fast_quant_prepack_batch_preserves_non_default_device(builders):
+    pkg = builders.pkg
+
+    class FakeDeviceTensor(torch.Tensor):
+        @staticmethod
+        def __new__(cls, data: torch.Tensor, fake_dev: torch.device):
+            obj = torch.Tensor._make_subclass(cls, data, data.requires_grad)
+            obj._fake_dev = fake_dev
+            return obj
+
+        @property
+        def is_cuda(self):  # type: ignore[override]
+            return True
+
+        @property
+        def device(self):  # type: ignore[override]
+            return self._fake_dev
+
+        def to(self, *args, **kwargs):  # type: ignore[override]
+            target_dev = kwargs.get("device", args[0] if args else None)
+            FakeDeviceTensor.recorded_devices.append(str(target_dev))
+            return torch.Tensor(self).to(dtype=kwargs.get("dtype", self.dtype))
+
+    FakeDeviceTensor.recorded_devices = []
+    raw = torch.randn(2, 64, 64, dtype=torch.bfloat16)
+    wrapped = FakeDeviceTensor(raw, torch.device("cuda:1"))
+    pkg.fast_quant_prepack_batch(wrapped, bits=4, block_size=32, is_qmoe=True)
+    assert FakeDeviceTensor.recorded_devices[0] == "cuda:1"
+
+
+def test_precision_conversion_updates_bank_metadata_and_supports_fp32_position_reuse(builders, tmp_path):
+    po = import_precision_options()
+    gb = builders.gb
+    rope_mod = builders.rope
+    pkg_dir = tmp_path / "pkg_fp32_pos"
+    pkg_dir.mkdir(parents=True)
+
+    rows = 16
+    rope_cfg = rope_mod.DEFAULT_ROPE
+    positions = rope_mod.position_config(rope_cfg, rows, rows, None)
+    tensor_locations: dict[str, dict] = {}
+    gb.build_reused_position_tables(pkg_dir, tensor_locations, rope_cfg, rows, rows)
+
+    norm_raw = torch.ones(128, dtype=torch.bfloat16).view(torch.uint16).numpy().tobytes()
+    norm_t = gb.make_bf16_tensor(
+        "v_model.layers.3.self_attn.indexer.q_layernorm.Add_494.folded.bf16",
+        np.frombuffer(norm_raw, dtype=np.uint16),
+        [128],
+    )
+    embedded_weights = {norm_t.name: norm_t}
+    gb.save_bank_metadata_to_dir(pkg_dir, tensor_locations, embedded_weights, positions)
+
+    inits = [norm_t]
+    for name in (*rope_mod.TARGET_NAMES,):
+        meta = tensor_locations[name]
+        inits.append(
+            gb.make_ext_init(name, meta["location"], meta["offset"], meta["length"], meta["dtype"], meta["dims"])
+        )
+    nodes = [helper.make_node("Identity", [t.name], [f"{t.name}_out"], name=f"id_{idx}") for idx, t in enumerate(inits)]
+    model = helper.make_model(helper.make_graph(nodes, "g", [], [], initializer=inits))
+    onnx.save(model, str(pkg_dir / "model.onnx"))
+
+    dflash_inits = [
+        gb.make_ext_init(
+            name,
+            tensor_locations[name]["location"],
+            tensor_locations[name]["offset"],
+            tensor_locations[name]["length"],
+            tensor_locations[name]["dtype"],
+            tensor_locations[name]["dims"],
+        )
+        for name in rope_mod.DRAFT_NAMES
+    ]
+    dflash_nodes = [
+        helper.make_node("Identity", [t.name], [f"{t.name}_out"], name=f"df_{idx}")
+        for idx, t in enumerate(dflash_inits)
+    ]
+    dflash = helper.make_model(helper.make_graph(dflash_nodes, "df", [], [], initializer=dflash_inits))
+    onnx.save(dflash, str(pkg_dir / "dflash2.onnx"))
+
+    # Create a tiny checkpoint with the 12 QSA layers' indexer projections (layers 3, 7, ..., 47)
+    hf_dir = tmp_path / "hf_idx"
+    hf_dir.mkdir()
+    idx_tensors: dict[str, tuple[str, list[int], bytes]] = {}
+    for lid in range(3, 48, 4):
+        qk = torch.zeros((640, 2560), dtype=torch.bfloat16)
+        ln = torch.zeros((128,), dtype=torch.bfloat16)
+        idx_tensors[f"model.language_model.layers.{lid}.self_attn.indexer.index_qk_proj.weight"] = (
+            "BF16",
+            [640, 2560],
+            qk.view(torch.uint16).numpy().tobytes(),
+        )
+        for kind in ("q", "k"):
+            idx_tensors[f"model.language_model.layers.{lid}.self_attn.indexer.{kind}_layernorm.weight"] = (
+                "BF16",
+                [128],
+                ln.view(torch.uint16).numpy().tobytes(),
+            )
+    _write_safetensors_file(hf_dir / "model.safetensors", idx_tensors)
+
+    pcfg = po.PrecisionConfig(indexer_dtype="fp32", rotary_cache_dtype="fp32")
+    po.apply_precision_config_to_package(pkg_dir, pcfg, hf_dir=hf_dir)
+
+    reloaded_locs, reloaded_emb = gb.load_bank_metadata_from_dir(pkg_dir)
+    for name in rope_mod.TARGET_NAMES:
+        assert reloaded_locs[name]["location"] == "attn_consts.data"
+        assert reloaded_locs[name]["dtype"] == TensorProto.FLOAT
+        assert reloaded_locs[name]["dims"][0] == rows
+    assert reloaded_emb[norm_t.name].data_type == TensorProto.FLOAT
+
+    # validate_reused_positions accepts the FP32 target RoPE & indexer tables in attn_consts.data
+    validated = rope_mod.validate_reused_positions(pkg_dir, reloaded_locs)
+    assert validated["target_rows"] == rows
+
+
+def test_explicit_device_and_host_expert_budget_overrides_without_offload_mode(builders, tmp_path):
+    pkg = builders.pkg
+    base_pkg, pool_dir = make_synthetic_rc5_base_package(tmp_path / "budget", num_layers=4, num_experts=8)
+
+    # Case 1: base package already has offload enabled; overriding budgets without --offload-mode updates them
+    gcfg_path = base_pkg / "genai_config.json"
+    gcfg = json.loads(gcfg_path.read_text(encoding="utf-8"))
+    gcfg["model"]["decoder"]["session_options"]["session.moe.offload.mode"] = "required"
+    gcfg["model"]["decoder"]["session_options"]["session.moe.offload.device_expert_bytes"] = str(4 * 1024**3)
+    gcfg["model"]["decoder"]["session_options"]["session.moe.offload.host_expert_bytes"] = str(16 * 1024**3)
+    gcfg_path.write_text(json.dumps(gcfg, indent=2) + "\n", encoding="utf-8")
+
+    out_with_offload = tmp_path / "out_with_offload"
+    pkg.build_rc5_package(
+        out_with_offload,
+        base_pkg=base_pkg,
+        pool_dir=pool_dir,
+        x_int4=4,
+        y_int3=0,
+        z_int2=0,
+        device_expert_bytes=str(8 * 1024**3),
+        host_expert_bytes=str(24 * 1024**3),
+    )
+    out_cfg = json.loads((out_with_offload / "genai_config.json").read_text(encoding="utf-8"))
+    sopts = out_cfg["model"]["decoder"]["session_options"]
+    assert sopts["session.moe.offload.mode"] == "required"
+    assert sopts["session.moe.offload.device_expert_bytes"] == str(8 * 1024**3)
+    assert sopts["session.moe.offload.host_expert_bytes"] == str(24 * 1024**3)
+
+    # Case 2: base package has offload disabled; budget override updates the budget key without enabling offload.mode
+    del gcfg["model"]["decoder"]["session_options"]["session.moe.offload.mode"]
+    gcfg_path.write_text(json.dumps(gcfg, indent=2) + "\n", encoding="utf-8")
+    out_no_offload = tmp_path / "out_no_offload"
+    pkg.build_rc5_package(
+        out_no_offload,
+        base_pkg=base_pkg,
+        pool_dir=pool_dir,
+        x_int4=4,
+        y_int3=0,
+        z_int2=0,
+        device_expert_bytes=str(6 * 1024**3),
+    )
+    out_cfg2 = json.loads((out_no_offload / "genai_config.json").read_text(encoding="utf-8"))
+    sopts2 = out_cfg2["model"]["decoder"]["session_options"]
+    assert "session.moe.offload.mode" not in sopts2
+    assert sopts2["session.moe.offload.device_expert_bytes"] == str(6 * 1024**3)
