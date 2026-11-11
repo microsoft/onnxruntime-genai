@@ -336,13 +336,10 @@ DefaultKeyValueCacheBase::DefaultKeyValueCacheBase(State& state)
         }
       }
       // Set shape_[2] to max of all layer shapes for RewindTo bounds checking
-      shape_[2] = std::max(max_length, windowed_cache_size);
+      shape_[2] = max_length;
     } else {
       // Uniform sliding window allocation (backward compatibility)
       shape_[2] = windowed_cache_size;
-      for (auto& layer_shape : layer_shapes_) {
-        layer_shape[2] = windowed_cache_size;
-      }
     }
   } else if (past_present_share_buffer_) {
     // For fixed kv-cache models the cache size comes from the model graph,
