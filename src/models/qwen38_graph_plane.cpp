@@ -1005,6 +1005,7 @@ Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::filesystem::path& 
   const size_t page = si.dwAllocationGranularity ? static_cast<size_t>(si.dwAllocationGranularity) : 65536u;
   bool pin_ple = false;
   GetEnv("ORT_QMOE_WIN_PIN_PLE", pin_ple);
+  GetEnv("ORT_QWEN38_PIN_PLE", pin_ple);
   // The description's pad_ holds the format of the shards; a table that is not pinned is staged as well.
   if (!pin_ple) params.pad_ |= QWEN38_PLANE_PLE_STAGED;
   const uint64_t row_bytes = Qwen38PleShardRowBytes(description);
@@ -1214,6 +1215,10 @@ Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::filesystem::path& 
   const long page = sysconf(_SC_PAGESIZE);
   const size_t page_sz = page > 0 ? static_cast<size_t>(page) : size_t{4096};
   const uint64_t row_bytes = Qwen38PleShardRowBytes(description);
+  bool pin_ple = true;
+  GetEnv("ORT_QMOE_WIN_PIN_PLE", pin_ple);
+  GetEnv("ORT_QWEN38_PIN_PLE", pin_ple);
+  if (!pin_ple) params.pad_ |= QWEN38_PLANE_PLE_STAGED;
   long long first_row = 0;
   try {
     for (size_t i = 0; i < description.shards.size(); ++i) {
@@ -1247,9 +1252,16 @@ Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::filesystem::path& 
       void* base = mmap(nullptr, map_len, PROT_READ, MAP_SHARED, fd, static_cast<off_t>(aligned));
       close(fd);
       if (base == MAP_FAILED) throw std::runtime_error("qwen38_graph: mmap failed for " + full.string());
+      auto* rows = static_cast<unsigned char*>(base) + delta;
+      if (!pin_ple) {
+        mappings_.push_back(Mapping{base, map_len, nullptr});
+        params.shard_ptr[i] = rows;
+        first_row += shard.rows;
+        params.shard_end[i] = first_row;
+        continue;
+      }
       (void)madvise(base, map_len, MADV_WILLNEED);
       mappings_.push_back(Mapping{base, map_len, nullptr});
-      auto* rows = static_cast<unsigned char*>(base) + delta;
       // cudaHostRegisterMapped | cudaHostRegisterReadOnly: the gather kernel reads the table zero-copy over PCIe.
       plane.Check(plane.host_register(rows, bytes, 2 | 8), "cudaHostRegister(PLE shard)");
       mappings_.back().registered = rows;
