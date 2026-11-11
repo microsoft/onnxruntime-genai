@@ -44,7 +44,6 @@ class _FakeGQAModel:
     def __init__(self, ep="cpu"):
         self.ep = ep
         self.extra_options = {}
-        self.context_length = 8192
         self.context_length_attrs = {"window_kv_cache": True}
         self.use_paged_attention = False
         self.kv_cache_attrs = {"quant_scheme": "none", "quant_mode": "PER_TENSOR", "bit_width": 0}

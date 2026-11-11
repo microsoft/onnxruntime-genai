@@ -590,7 +590,10 @@ void Model::AddSharedInitializers() {
     const uint64_t offset = initializer.offset.empty() ? 0 : std::stoull(initializer.offset);
     const size_t length = static_cast<size_t>(std::stoull(initializer.length));
     const auto data_type = static_cast<ONNXTensorElementDataType>(initializer.data_type);
-    auto memory_info = p_device_->GetMemoryInfo();
+    // Generic CPU-backed providers need not expose device-only memory metadata.
+    auto memory_info = p_device_->GetType() == DeviceType::CPU
+                           ? OrtMemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault)
+                           : p_device_->GetMemoryInfo();
 
     std::ostringstream key;
     key << SharedInitializerFileIdentity(data_path) << ':' << offset << ':' << length << ':'

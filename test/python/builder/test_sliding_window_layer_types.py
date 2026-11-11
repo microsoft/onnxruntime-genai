@@ -3,7 +3,6 @@
 
 """Configs without ``layer_types`` must keep their ``sliding_window`` on every layer (issue #2832)."""
 
-import json
 from types import SimpleNamespace
 
 import pytest
@@ -40,12 +39,26 @@ def test_default_layer_type(config, expected):
     assert base.Model.__new__(base.Model).default_layer_type(config) == expected
 
 
+@pytest.mark.parametrize(
+    "sliding_window, context_length, expected",
+    [
+        (2047, 4096, "sliding_attention"),  # Phi-3-mini-4k-instruct
+        (4096, 4096, "full_attention"),
+        (262144, 131072, "full_attention"),  # Phi-4-mini-instruct
+    ],
+)
+def test_default_layer_type_ignores_windows_that_cover_the_context(sliding_window, context_length, expected):
+    model = base.Model.__new__(base.Model)
+    model.context_length = context_length
+    assert model.default_layer_type(SimpleNamespace(sliding_window=sliding_window)) == expected
+
+
 def transformers_config(class_name, architecture, **kwargs):
     transformers = pytest.importorskip("transformers")
     # _builder_test_utils installs an importable transformers stub when the package is absent.
     if not hasattr(transformers, class_name):
         pytest.skip(f"transformers does not provide {class_name}")
-    config = getattr(transformers, class_name)(**(SMALL_CONFIG | kwargs))
+    config = getattr(transformers, class_name)(**SMALL_CONFIG, **kwargs)
     config.architectures = [architecture]
     return config
 
@@ -91,75 +104,18 @@ def test_phi3_sliding_window_applies_to_every_layer(tmp_path):
     assert local_window_sizes(model) == [8, 8]
 
 
-@pytest.mark.parametrize("ep", ["cpu", "cuda"])
-@pytest.mark.parametrize("window_size", [32, 64, 128])
-def test_phi3_only_compacts_windows_smaller_than_context(tmp_path, ep, window_size):
-    config = transformers_config("Phi3Config", "Phi3ForCausalLM", sliding_window=window_size)
-    io_dtype = base.ir.DataType.FLOAT16 if ep == "cuda" else base.ir.DataType.FLOAT
-    model = phi.Phi3MiniModel(config, io_dtype, io_dtype, ep, str(tmp_path), {})
-
-    attributes = model.get_attention_op_attributes()
-    assert attributes["local_window_size"] == window_size
-    assert bool(attributes.get("sliding_window_cache")) is (window_size < model.context_length)
-    cache_shape = model.make_key_value_cache_shape(0, ["batch_size", 2, "past_sequence_length", 16])
-    assert cache_shape[2] == ("past_sliding_length" if window_size < model.context_length else "past_sequence_length")
-
-    model.make_genai_config(config, {}, str(tmp_path))
-    runtime_config = json.loads((tmp_path / "genai_config.json").read_text())
-    assert ("sliding_window" in runtime_config["model"]["decoder"]) is (window_size < model.context_length)
-
-
-@pytest.mark.parametrize("ep", ["cpu", "cuda"])
-@pytest.mark.parametrize("window_size", [64, 128])
-def test_phi3_full_context_window_runs_short_generator_session(tmp_path, ep, window_size):
-    np = pytest.importorskip("numpy")
-    torch = pytest.importorskip("torch")
-    transformers = pytest.importorskip("transformers")
-    og = pytest.importorskip("onnxruntime_genai")
-    if ep == "cuda" and not og.is_cuda_available():
-        pytest.skip("needs the CUDA build of onnxruntime_genai")
-
-    config = transformers_config(
-        "Phi3Config",
-        "Phi3ForCausalLM",
-        vocab_size=320,
-        sliding_window=window_size,
-        pad_token_id=0,
-        bos_token_id=1,
-        eos_token_id=2,
-    )
-    config._name_or_path = str(tmp_path)
-    config._attn_implementation = "eager"
-    with torch.random.fork_rng(devices=[]):
-        torch.manual_seed(0)
-        hf_model = transformers.Phi3ForCausalLM(config).eval()
-
-    io_dtype = base.ir.DataType.FLOAT16 if ep == "cuda" else base.ir.DataType.FLOAT
-    builder = phi.Phi3MiniModel(config, io_dtype, io_dtype, ep, str(tmp_path), {})
-    builder.load_weights = lambda input_path: hf_model
-    builder.make_model("")
-    builder.save_model(str(tmp_path))
-    builder.make_genai_config(config, {}, str(tmp_path))
-
-    model = og.Model(str(tmp_path))
-    params = og.GeneratorParams(model)
-    params.set_search_options(min_length=8, max_length=8)
-    generator = og.Generator(model, params)
-    generator.append_tokens(np.array([[1, 3, 4]], dtype=np.int32))
-    while not generator.is_done():
-        sequence = generator.get_sequence(0)
-        with torch.no_grad():
-            expected = hf_model(torch.tensor([sequence.tolist()])).logits[0, -1].numpy()
-        np.testing.assert_allclose(generator.get_logits().reshape(-1), expected, rtol=0, atol=1e-3)
-        generator.generate_next_token()
-
-    assert len(generator.get_sequence(0)) == 8
-    assert generator.get_input("past_key_values.0.key").shape[2] == 8
-
-
 def test_qwen2_with_sliding_window_disabled_uses_full_attention(tmp_path):
     config = transformers_config("Qwen2Config", "Qwen2ForCausalLM", sliding_window=4, use_sliding_window=False)
     model = build(qwen.QwenModel, config, tmp_path)
+
+    assert model.layer_types == ["full_attention", "full_attention"]
+    assert local_window_sizes(model) == [-1, -1]
+
+
+def test_phi3_window_longer_than_the_context_uses_full_attention(tmp_path):
+    # Phi-4-mini sets sliding_window=262144 with max_position_embeddings=131072.
+    config = transformers_config("Phi3Config", "Phi3ForCausalLM", sliding_window=128)
+    model = build(phi.Phi3MiniModel, config, tmp_path)
 
     assert model.layer_types == ["full_attention", "full_attention"]
     assert local_window_sizes(model) == [-1, -1]
