@@ -264,14 +264,18 @@ struct StagedPleWorkspace {
   cudaEvent_t prefill_done_event = nullptr;
   cudaStream_t last_prefill_stream = nullptr;
   bool prefill_in_flight = false;
-  // Host PLE n-gram row cache budget per staged workspace: up to kCacheSlots (65,536) rows of kMaxRowBytes (3,072 bytes =
-  // 192 MiB of ngram_cache_data plus 1.56 MiB of key/validity arrays), sized down to kMinCacheSlots (16,384 rows = 48 MiB)
+  // Host PLE n-gram row cache budget per staged workspace: up to kCacheSlots (65,536) rows of kMaxRowBytes (3,264 bytes =
+  // 204 MiB of ngram_cache_data plus 1.56 MiB of key/validity arrays), sized down to kMinCacheSlots (16,384 rows = 51 MiB)
   // when cudaMemGetInfo reports < 12 GiB free memory, or overridden to a power-of-two in
-  // [kMinOverrideCacheSlots (1,024 rows = 3 MiB), kCacheSlots] via ORT_QWEN38_PLE_CACHE_SLOTS.
+  // [kMinOverrideCacheSlots (1,024 rows = 3.2 MiB), kCacheSlots] via ORT_QWEN38_PLE_CACHE_SLOTS.
+  // A slot holds the widest encoded row that a table can have: the 3,072 values that one 1024-thread block gathers (see
+  // Qwen38PleParams) as the 96 blocks of 34 bytes of GGUF Q8_0, which is 192 bytes more than the same values take as FP8 or
+  // INT8 codes. A row that is wider than a slot is not cached.
   static constexpr size_t kCacheSlots = 65536;
   static constexpr size_t kMinCacheSlots = 16384;
   static constexpr size_t kMinOverrideCacheSlots = 1024;
-  static constexpr size_t kMaxRowBytes = 3072;
+  static constexpr size_t kMaxRowValues = 3072;
+  static constexpr size_t kMaxRowBytes = kMaxRowValues / 32 * 34;
   static constexpr size_t kPrepRingRows = 64;        // rows of the prep ring (a power of two)
   static constexpr size_t kPrepRingRowBytes = 8192;  // bytes of one row of the prep ring
   size_t cache_slots = kCacheSlots;

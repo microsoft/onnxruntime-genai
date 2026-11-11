@@ -5758,6 +5758,93 @@ TEST_F(Qwen38PlanePleRowsTest, EveryRowOfAnInt8TableAtTheScalesMinus8AndMinus20M
   }
 }
 
+// The n-gram cache of the host gather holds the rows of the widest table there can be: 16 heads of 192 values in GGUF Q8_0 are
+// 3,072 values in 3,264 bytes, more than the 3,072 bytes that a row of as many FP8 codes takes. The table is changed after its
+// rows were gathered. A row that the next gather returns as it was comes from the cache; one that it returns changed was read
+// from the table again, as every such row was while a slot of the cache could not hold it. Fewer than 32 tokens are gathered on
+// the calling thread and 32 or more by the worker threads, which check the size of a row on their own.
+TEST_F(Qwen38PlanePleRowsTest, TheNgramCacheHoldsRowsOfTheWidestQ8_0Table) {
+  if ((plane_->capabilities & QWEN38_PLANE_CAP_Q8_0_PLE) == 0) GTEST_SKIP() << "the plane library has no Q8_0 PLE";
+  constexpr int kHeads = 16;
+  constexpr int kHeadDim = 192;
+  constexpr size_t kBlockBytes = 34;
+  constexpr size_t kHeadBytes = kHeadDim / 32 * kBlockBytes;
+  constexpr size_t kRowValues = kHeads * kHeadDim;
+  constexpr size_t kRowsPerHead = 8;
+  static_assert(kRowValues == 3072 && kHeads * kHeadBytes == 3264, "the widest row of a table, in the widest encoding");
+
+  // Two rows that hash to one slot would evict each other, which a cache of fewer slots makes likelier.
+  Generators::test::ScopedEnvironmentVariable slots{"ORT_QWEN38_PLE_CACHE_SLOTS", "65536"};
+
+  for (const size_t count : {size_t{3}, size_t{33}}) {
+    SCOPED_TRACE(std::to_string(count) + " tokens");
+    // Every block has a scale of its own, and the sign of a scale is what the table is changed by below.
+    std::vector<uint8_t> table(kHeads * kRowsPerHead * kHeadBytes);
+    for (size_t block = 0; block < table.size() / kBlockBytes; ++block) {
+      uint8_t* bytes = table.data() + block * kBlockBytes;
+      const unsigned scale = (4u + block % 8u) << 10 | static_cast<unsigned>((37 * block) & 0x3FF);
+      bytes[0] = static_cast<uint8_t>(scale & 0xFF);
+      bytes[1] = static_cast<uint8_t>(scale >> 8);
+      for (size_t j = 0; j < 32; ++j) bytes[2 + j] = static_cast<uint8_t>(8 * j + 13 * block);
+    }
+
+    Qwen38PleParams params{};
+    params.n_heads = kHeads;
+    params.head_dim = kHeadDim;
+    params.heads_per_ngram = kHeads / 2;
+    params.n_shards = 1;
+    params.mult[0] = static_cast<long long>(0x9E3779B97F4A7C15ull);
+    params.mult[1] = static_cast<long long>(0xC2B2AE3D27D4EB4Full);
+    params.mult[2] = static_cast<long long>(0x165667B19E3779F9ull);
+    for (int head = 0; head < kHeads; ++head) {
+      params.vocab[head] = static_cast<long long>(kRowsPerHead);
+      params.offset[head] = static_cast<long long>(head * kRowsPerHead);
+    }
+    params.shard_end[0] = static_cast<long long>(kHeads * kRowsPerHead);
+    params.shard_ptr[0] = table.data();
+    params.scale = 1.0f;
+    params.pad_ = QWEN38_PLANE_PLE_PAD_OF_FORMAT(QWEN38_PLANE_PLE_FORMAT_Q8_0) | QWEN38_PLANE_PLE_STAGED;
+    params.eos = 1 << 30;
+    params.capacity = 16;
+
+    KernelTestDevice device{*plane_};
+    const PlaneBuffer device_params = device.UploadBytes(&params, sizeof(params));
+    plane_->set_ple_host_params(&params);
+    struct Registration {
+      Qwen38Plane& plane;
+      Qwen38PleParams& params;
+      ~Registration() { plane.unset_ple_host_params(&params); }
+    } registration{*plane_, params};
+
+    WordStream words{2913};
+    std::vector<int64_t> tokens(count);
+    for (int64_t& token : tokens) token = static_cast<int64_t>(words.Next() % 262144);
+    const FoldContext context{{11, 13}};
+    const auto gather = [&] {
+      const PlaneBuffer tokens_in = device.Upload(tokens);
+      const PlaneBuffer context_in = device.UploadBytes(context.data(), sizeof(context));
+      const PlaneBuffer context_out = device.Filled(sizeof(context), 0xAB);
+      const PlaneBuffer ple = device.Filled(count * kRowValues * sizeof(uint16_t), 0xAB);
+      EXPECT_EQ(plane_->ple_rows(device.stream(), device_params.data(), tokens_in.data(), static_cast<int>(count),
+                                 context_in.data(), context_out.data(), ple.data()),
+                0);
+      return device.Download<uint16_t>(ple, count * kRowValues);
+    };
+
+    const std::vector<uint16_t> first = gather();
+    for (size_t block = 0; block < table.size() / kBlockBytes; ++block) table[block * kBlockBytes + 1] ^= 0x80;
+    ExpectSameElements(first, gather(), "the rows of the second gather, after the table was changed");
+
+    // Registering the table again empties the cache: the rows are read from the changed table, and each of them differs.
+    plane_->unset_ple_host_params(&params);
+    plane_->set_ple_host_params(&params);
+    const std::vector<uint16_t> changed = gather();
+    size_t same = 0;
+    for (size_t i = 0; i < first.size(); ++i) same += first[i] == changed[i] ? 1 : 0;
+    EXPECT_EQ(same, 0u) << same << " of " << first.size() << " values did not change with the table";
+  }
+}
+
 // The prep of one row skips the committed length when it is given no place for it, and so does the prep of a whole step.
 TEST_F(Qwen38PlaneFoldPrepTest, FusedPrepWithoutACommittedLengthWritesEverythingElse) {
   ASSERT_NE(plane_->capabilities & QWEN38_PLANE_CAP_NEGATIVE_POS_ADD_BATCH, 0ull);
