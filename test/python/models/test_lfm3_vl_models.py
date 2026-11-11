@@ -471,7 +471,7 @@ def test_lfm3_vl_builder_makes_a_working_pipeline(test_data_path, tmp_path):
             expected.append(builder_tests.expected_features(hf_model, image_rows, int(rows), int(cols)).numpy())
         offset += rows * cols
     features = generator.get_input("image_features")
-    np.testing.assert_allclose(features, np.concatenate(expected), rtol=1e-4, atol=1e-5)
+    np.testing.assert_allclose(features, np.concatenate(expected), rtol=0, atol=1e-4)
 
     input_ids = inputs["input_ids"].as_numpy()[0]
     is_image = input_ids == config.image_token_id
