@@ -2347,12 +2347,20 @@ struct Embedding_Element : JSON::Element {
     throw JSON::unknown_value_error{};
   }
 
+  Element& OnArray(std::string_view name) override {
+    if (name == "shared_initializers") {
+      return shared_initializers_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
  private:
   Config::Model::Embedding& v_;
   std::unique_ptr<SessionOptions_Element> session_options_;
   std::unique_ptr<RunOptions_Element> run_options_;
   EmbeddingInputs_Element inputs_{v_.inputs};
   EmbeddingOutputs_Element outputs_{v_.outputs};
+  SharedInitializers_Element shared_initializers_{v_.shared_initializers};
 };
 
 struct EngramInputs_Element : JSON::Element {

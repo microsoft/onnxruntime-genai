@@ -59,9 +59,9 @@ constexpr const char* kOrtSessionOptionsModelExternalInitializersFileFolderPath 
     "session.model_external_initializers_file_folder_path";
 constexpr const char* kOrtSessionOptionEpContextFilePath = "ep.context_file_path";
 
+// One device copy of a file range. Each session gets its own tensor view of it (see AddSharedInitializers).
 struct SharedInitializerEntry {
   DeviceSpan<uint8_t> device_data;
-  std::unique_ptr<OrtValue> shared_view;
 };
 
 std::mutex g_shared_initializers_mutex;
@@ -537,7 +537,7 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
     p_device_->GetAvailableMemory(free_bytes, total_bytes);
     device_memory_budget_initial_free_bytes_ = free_bytes;
   }
-  AddSharedInitializers();
+  AddSharedInitializers(config_->model.decoder.shared_initializers, *session_options_, p_device_);
 
   // Inputs-only interface backed by a host-accessible allocation, so the CPU updates the small
   // decode inputs in place with no per-step roundtrip. Null if the device offers no such allocator.
@@ -574,15 +574,27 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
     AcquireAMDGPUInterface();
 }
 
-void Model::AddSharedInitializers() {
-  if (config_->memory_assets_only_ && !config_->model.decoder.shared_initializers.empty()) {
+void Model::AddSharedInitializers(const std::vector<Config::Model::SharedInitializer>& initializers,
+                                  OrtSessionOptions& session_options, DeviceInterface* device) {
+  if (initializers.empty()) {
+    return;
+  }
+  if (config_->memory_assets_only_) {
     throw std::runtime_error("Memory-only loading does not support shared initializer descriptors.");
   }
+  if (!device) {
+    throw std::runtime_error("Shared initializers need the device of the session that uses them.");
+  }
 
-  for (const auto& initializer : config_->model.decoder.shared_initializers) {
+  for (const auto& initializer : initializers) {
     if (initializer.name.empty() || initializer.data_file.empty() || initializer.length.empty() ||
         initializer.shape.empty() || initializer.data_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED) {
       throw std::runtime_error("Invalid shared initializer metadata for '" + initializer.name + "'.");
+    }
+    // They share a device copy. A CPU session reads its graph's own external data instead, which ORT maps
+    // from the file, so a heap copy would only add memory (and the CPU device has no memory info for it).
+    if (device->GetType() == DeviceType::CPU) {
+      continue;
     }
 
     const fs::path data_path = config_->ResolvePath(initializer.data_file);
@@ -590,15 +602,14 @@ void Model::AddSharedInitializers() {
     const uint64_t offset = initializer.offset.empty() ? 0 : std::stoull(initializer.offset);
     const size_t length = static_cast<size_t>(std::stoull(initializer.length));
     const auto data_type = static_cast<ONNXTensorElementDataType>(initializer.data_type);
-    auto memory_info = p_device_->GetMemoryInfo();
+    auto memory_info = device->GetMemoryInfo();
 
+    // The buffer is keyed by the bytes it holds, not by dtype or shape: graphs that view the same range
+    // differently (e.g. an embedding table [vocab, hidden / 2] tied to a MatMulNBits LM head
+    // [vocab, blocks, block_bytes]) still share one device copy, each through its own view.
     std::ostringstream key;
     key << SharedInitializerFileIdentity(data_path) << ':' << offset << ':' << length << ':'
-        << initializer.data_type << ':'
         << memory_info->GetDeviceType() << ':' << memory_info->GetDeviceId();
-    for (int64_t dimension : initializer.shape) {
-      key << ':' << dimension;
-    }
 
     std::shared_ptr<SharedInitializerEntry> entry;
     {
@@ -621,16 +632,18 @@ void Model::AddSharedInitializers() {
         }
 
         entry = std::make_shared<SharedInitializerEntry>();
-        entry->device_data = p_device_->Allocate<uint8_t>(length);
+        entry->device_data = device->Allocate<uint8_t>(length);
         entry->device_data.CopyFromCpu(bytes);
-        entry->shared_view = OrtValue::CreateTensor(
-            *memory_info, entry->device_data.Span().data(), length, initializer.shape, data_type);
         g_shared_initializers[key.str()] = entry;
       }
     }
 
-    session_options_->AddInitializer(initializer.name.c_str(), *entry->shared_view);
+    // ORT keeps a pointer to the view, so it lives as long as the model, like the buffer it points into.
+    std::shared_ptr<OrtValue> view = OrtValue::CreateTensor(
+        *memory_info, entry->device_data.Span().data(), length, initializer.shape, data_type);
+    session_options.AddInitializer(initializer.name.c_str(), *view);
     shared_initializer_entries_.push_back(std::move(entry));
+    shared_initializer_entries_.push_back(std::move(view));
   }
 }
 

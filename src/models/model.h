@@ -187,7 +187,7 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;
-  std::vector<std::shared_ptr<void>> shared_initializer_entries_;
+  std::vector<std::shared_ptr<void>> shared_initializer_entries_;  // Device buffers and the views sessions use
   std::optional<size_t> device_memory_budget_initial_free_bytes_;
 
   DeviceInterface* p_device_{};          // The device we're running on (matches device_type_) used for things that work the same on all devices
@@ -225,7 +225,10 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
  protected:
   std::shared_ptr<ThreadPool> GetOrCreatePreprocessingThreadPool() const;
   void CreateSessionOptions();
-  void AddSharedInitializers();
+  // Points the named initializers of the session built from `session_options` at one device copy of their
+  // bytes, shared by every session (of any model in the process) that names the same file range.
+  void AddSharedInitializers(const std::vector<Config::Model::SharedInitializer>& initializers,
+                             OrtSessionOptions& session_options, DeviceInterface* device);
 
   std::map<std::string, std::unique_ptr<OrtSessionOptions>> pipeline_session_options_;
 };
