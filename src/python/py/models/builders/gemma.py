@@ -20,7 +20,7 @@ from .mistral import MistralModel
 class GemmaModel(MistralModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-        self.embed_attrs["scale"] = np.round(np.sqrt(self.hidden_size), decimals=2)
+        self.embed_attrs["scale"] = float(np.sqrt(self.hidden_size))
         self.layernorm_attrs["add_offset"] = 1
 
 
@@ -587,7 +587,7 @@ class Gemma4MoEModel(Gemma4Model):
         in_dtype = self.values[root_input].dtype
         weight_name = f"model.{name}.weight"
         if with_scale:
-            self.make_initializer(weight + self.layernorm_attrs["add_offset"], weight_name, to=in_dtype)
+            self.make_initializer(weight.float() + self.layernorm_attrs["add_offset"], weight_name, to=in_dtype)
         else:
             self.make_initializer(torch.ones(self.hidden_size), weight_name, to=in_dtype)
         # Node paths use '/' separators (initializer names keep the '.'-joined form).

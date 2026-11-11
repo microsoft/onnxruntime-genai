@@ -3705,7 +3705,7 @@ class Model:
 
         # Create weight and bias tensors
         weight = f"model.layers.{layer_id}.{location}_layernorm.weight"
-        self.make_initializer(layernorm.weight + self.layernorm_attrs["add_offset"], weight, to=new_io_dtype)
+        self.make_initializer(layernorm.weight.float() + self.layernorm_attrs["add_offset"], weight, to=new_io_dtype)
         bias = f"model.layers.{layer_id}.{location}_layernorm.bias"
         if not simple:
             self.make_initializer(layernorm.bias, bias, to=new_io_dtype)
@@ -4346,7 +4346,7 @@ class Model:
         q_layernorm_name = f"/model/layers.{layer_id}/attn/q_norm/SimplifiedLayerNormalization"
         q_weight_name = f"model.layers.{layer_id}.attn.q_norm.layernorm.weight"
         q_layernorm_output = f"{q_layernorm_name}/output_0"
-        self.make_initializer(attention.q_norm.weight + self.layernorm_attrs["add_offset"], q_weight_name, to=new_io_dtype)
+        self.make_initializer(attention.q_norm.weight.float() + self.layernorm_attrs["add_offset"], q_weight_name, to=new_io_dtype)
 
         # Create Cast nodes for inputs and outputs if old_dtype != new_dtype
         q_layernorm_inputs = [q_reshape_1_output, q_weight_name]
@@ -4397,7 +4397,7 @@ class Model:
         k_weight_name = f"model.layers.{layer_id}.attn.k_norm.layernorm.weight"
         k_layernorm_output = f"{k_layernorm_name}/output_0"
         self.make_initializer(
-            attention.k_norm.weight + self.layernorm_attrs["add_offset"], k_weight_name, to=new_io_dtype
+            attention.k_norm.weight.float() + self.layernorm_attrs["add_offset"], k_weight_name, to=new_io_dtype
         )
 
         # Create Cast nodes for inputs and outputs if old_dtype != new_dtype
@@ -5408,10 +5408,10 @@ class Model:
     def make_fused_gqa_qk_norm_inputs(self, layer_id, attention):
         q_weight_name, k_weight_name = self.get_qk_norm_weight_names(layer_id)
         self.make_initializer(
-            attention.q_norm.weight + self.layernorm_attrs["add_offset"], q_weight_name, to=self.io_dtype
+            attention.q_norm.weight.float() + self.layernorm_attrs["add_offset"], q_weight_name, to=self.io_dtype
         )
         self.make_initializer(
-            attention.k_norm.weight + self.layernorm_attrs["add_offset"], k_weight_name, to=self.io_dtype
+            attention.k_norm.weight.float() + self.layernorm_attrs["add_offset"], k_weight_name, to=self.io_dtype
         )
 
     def make_attention_qk_rope(self, layer_id, **kwargs):
