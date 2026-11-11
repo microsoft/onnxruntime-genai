@@ -251,9 +251,10 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     }
     for (const auto& span : request->Media()) {
       if (span.start + span.item->rows <= effective_processed_sequence_length ||
-          span.start >= static_cast<size_t>(snapshot.current_sequence_length) || span.item->features)
+          span.start >= static_cast<size_t>(snapshot.current_sequence_length))
         continue;
       if (span.start <= effective_processed_sequence_length) {
+        if (span.item->features) continue;
         if (!preparation_request) {
           if (newly_admitted) {
             // Preparing a queued image cannot release decoder capacity. Check admission first
@@ -278,6 +279,7 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
         }
         return;
       }
+      // Keep recurrent-state chunking independent of feature-cache residency.
       const auto available = span.start - effective_processed_sequence_length;
       prefill_token_cap = std::min(prefill_token_cap.value_or(available), available);
       break;

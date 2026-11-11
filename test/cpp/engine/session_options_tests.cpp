@@ -31,6 +31,80 @@ std::string SelectionError(const std::vector<std::string>& ids, const std::optio
 
 }  // namespace
 
+class CudaDeviceMetadataTest : public testing::Test {
+ protected:
+  struct KeyValue {
+    const char* key;
+    const char* value;
+  };
+  struct Device {
+    const KeyValue* metadata;
+    const KeyValue* options;
+  };
+
+  const OrtApi* saved_api{};
+  OrtApi test_api{};
+
+  static const OrtKeyValuePairs* ORT_API_CALL Metadata(const OrtEpDevice* device) noexcept {
+    return reinterpret_cast<const OrtKeyValuePairs*>(reinterpret_cast<const Device*>(device)->metadata);
+  }
+  static const OrtKeyValuePairs* ORT_API_CALL Options(const OrtEpDevice* device) noexcept {
+    return reinterpret_cast<const OrtKeyValuePairs*>(reinterpret_cast<const Device*>(device)->options);
+  }
+  static void ORT_API_CALL Pairs(const OrtKeyValuePairs* pairs, const char* const** keys,
+                                 const char* const** values, size_t* count) noexcept {
+    const auto* pair = reinterpret_cast<const KeyValue*>(pairs);
+    *keys = &pair->key;
+    *values = &pair->value;
+    *count = 1;
+  }
+
+  void SetUp() override {
+    saved_api = Ort::api;
+    test_api = *saved_api;
+    test_api.EpDevice_EpMetadata = Metadata;
+    test_api.EpDevice_EpOptions = Options;
+    test_api.GetKeyValuePairs = Pairs;
+    Ort::api = &test_api;
+  }
+  void TearDown() override { Ort::api = saved_api; }
+
+  static std::string ReadId(const char* metadata_id, const char* option_id) {
+    const KeyValue metadata{"cuda_device_id", metadata_id};
+    const KeyValue options{"device_id", option_id};
+    const Device device{metadata_id ? &metadata : nullptr, option_id ? &options : nullptr};
+    return GetCudaDeviceIdMetadata(reinterpret_cast<const OrtEpDevice*>(&device));
+  }
+};
+
+TEST_F(CudaDeviceMetadataTest, PluginOptionsSupplyTheIdWhenMetadataIsAbsent) {
+  EXPECT_EQ(ReadId(nullptr, "1"), "1");
+}
+
+TEST_F(CudaDeviceMetadataTest, LegacyMetadataStillSuppliesTheId) {
+  EXPECT_EQ(ReadId("1", nullptr), "1");
+}
+
+TEST_F(CudaDeviceMetadataTest, MetadataTakesPrecedenceOverPluginOptions) {
+  EXPECT_EQ(ReadId("1", "0"), "1");
+}
+
+TEST_F(CudaDeviceMetadataTest, EmptyMetadataFallsBackToPluginOptions) {
+  EXPECT_EQ(ReadId("", "1"), "1");
+}
+
+TEST_F(CudaDeviceMetadataTest, MissingMetadataAndOptionsReportNoId) {
+  EXPECT_TRUE(ReadId(nullptr, nullptr).empty());
+}
+
+TEST_F(CudaDeviceMetadataTest, EmptyPluginOptionsReportNoId) {
+  EXPECT_TRUE(ReadId(nullptr, "").empty());
+}
+
+TEST_F(CudaDeviceMetadataTest, MultiDigitOrdinalsArePreserved) {
+  EXPECT_EQ(ReadId(nullptr, "11"), "11");
+}
+
 TEST(CudaArenaOptionTest, StrategyAcceptsTheSymbolicNamesAndNumbers) {
   using CUDAExecutionProvider::ParseArenaOptionValue;
   EXPECT_EQ(ParseArenaOptionValue("arena_extend_strategy", "kNextPowerOfTwo"), 0u);

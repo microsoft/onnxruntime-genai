@@ -52,6 +52,7 @@ struct ConvKeyValueCache : KeyValueCache {
   bool kv_share_buffer_{false};
   // Per KV layer: a sliding_attention layer whose window-sized buffer is bound as past and present in every mode.
   std::vector<bool> kv_windowed_;
+  int kv_window_capacity_{};
 
   // Conv state cache (only for conv layers)
   int conv_layer_count_{};

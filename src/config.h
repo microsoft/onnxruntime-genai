@@ -807,7 +807,7 @@ struct Config {
 
       int kv_capacity{33028};
 
-      bool warmup{true};  // Run the graph warm-up (captures every CUDA graph) when the model is created
+      bool warmup{true};  // Capture graphs at model creation and before use on a new Engine thread
 
       // Concurrent request slots of the Engine-hosted decode device, in [1, kMaxBatchSize]. Values above 1 need the fold
       // stack with unified fast prefill (see ValidateQwen38MultiSlotConfig).

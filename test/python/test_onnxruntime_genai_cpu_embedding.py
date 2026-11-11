@@ -190,6 +190,13 @@ def test_cpu_embedding_engine_synthetic(tmp_path, device, monkeypatch):
 
     expected = run(original)
     assert run(exported) == expected
+    vision_config = og.Config(str(exported))
+    vision_config.clear_providers()
+    if device == "cuda":
+        vision_config.append_provider("cuda")
+    vision_config.overlay(json.dumps({"model": {"type": "qwen4_exp", "vision": {"filename": "vision.onnx"}}}))
+    with pytest.raises(RuntimeError, match="requires three-axis int64 decoder position IDs"):
+        og.Model(vision_config)
     config = json.loads(config_path.read_text())
     config["model"]["embedding"]["outputs"]["inputs_embeds"] = "missing_output"
     config_path.write_text(json.dumps(config))

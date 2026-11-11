@@ -49,11 +49,12 @@ std::shared_ptr<ThreadPool> Model::GetOrCreatePreprocessingThreadPool() const {
 
 std::shared_ptr<MultiModalProcessor> Model::CreateMultiModalProcessor() const {
   return std::make_shared<MultiModalProcessor>(*config_, session_info_,
-                                               config_->model.type == "whisper" ? nullptr : GetOrCreatePreprocessingThreadPool());
+                                               config_->model.type == "whisper" ? nullptr : GetOrCreatePreprocessingThreadPool(),
+                                               GetVisionSession());
 }
 
 MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& session_info,
-                                         std::shared_ptr<ThreadPool> thread_pool)
+                                         std::shared_ptr<ThreadPool> thread_pool, OrtSession* vision_session)
     : tokenizer_{std::make_shared<Tokenizer>(config)},
       thread_pool_{std::move(thread_pool)},
       processor_factory_{
@@ -75,6 +76,12 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
           {"qwen4_exp", Processor::Create<QwenImageProcessor>},
           {"nemotron_parse", Processor::Create<NemotronParseProcessor>},
           {"videochat_flash_qwen", Processor::Create<VideoChatFlashProcessor>}} {
+  if (config.model.type == "gemma4" && vision_session) {
+    SessionInfo vision_info;
+    vision_info.Add(*vision_session);
+    processor_ = std::make_shared<Gemma4MultiModalProcessor>(config, session_info, &vision_info, thread_pool_.get());
+    return;
+  }
   auto processor = processor_factory_.find(config.model.type);
   if (processor != processor_factory_.end()) {
     processor_ = processor->second(config, session_info, thread_pool_.get());

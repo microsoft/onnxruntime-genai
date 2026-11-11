@@ -507,12 +507,13 @@ ONNXTensorElementDataType ValidateDflash2ModelCompatibility(
 
 Dflash2Model::Dflash2Model(std::unique_ptr<Config> config, OrtEnv& ort_env,
                            std::shared_ptr<CpuEmbedding> cpu_embedding,
-                           const std::function<void(OrtSessionOptions&)>& configure_session_options)
+                           const std::function<void(OrtSessionOptions&)>& configure_session_options,
+                           bool is_session_recreation)
     : Model{std::move(config)}, cpu_embedding_{std::move(cpu_embedding)} {
   if (configure_session_options && session_options_) {
     configure_session_options(*session_options_);
   }
-  session_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());
+  session_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get(), is_session_recreation);
   session_info_.Add(*session_);
   if (cpu_embedding_) {
     cpu_embedding_->ValidateConsumer(session_info_, config_->model.dflash2.inputs.embeddings);

@@ -2,7 +2,7 @@
 
 This document describes how the paged attention engine and continuous batching work in the current codebase. It is intended to be the living architecture guide for this part of ONNX Runtime GenAI.
 
-Update this document whenever a change affects request admission, scheduling, paged KV-cache ownership, model input packing, sampling, transaction behavior, request completion, or failure handling. Historical design and performance work can remain in separate documents, but this document should always describe the behavior that exists on the current branch.
+Update this document whenever a change affects request admission, scheduling, paged KV-cache ownership, model input packing, sampling, transaction behavior, request completion, or failure handling. Keep model deployment recipes, validation reports, and historical performance measurements outside this guide; it describes the behavior that exists on the current branch.
 
 ## Scope
 
@@ -54,21 +54,23 @@ The main implementation is under `src/engine/`:
 
 ## Vision inputs
 
-The packed Qwen3.5-family vision package supports `request.begin_turn(formatted_prompt, turn_options, images=images)` in Python, `OgaRequest::BeginTurn(formatted_prompt, options, images)` in C++, and `OgaRequestBeginTurnWithImages` in C. The original token overload is unchanged. The prompt overload also accepts text without images. Engine types remain independent of Generator parameters and state; callers do not create a multimodal processor.
+Packed Qwen3.5-family and Qwen4-Exp (Flash-Next) vision packages support `request.begin_turn(formatted_prompt, turn_options, images=images)` in Python, `OgaRequest::BeginTurn(formatted_prompt, options, images)` in C++, and `OgaRequestBeginTurnWithImages` in C. The original token overload is unchanged. The prompt overload also accepts text without images. Engine types remain independent of Generator parameters and state; callers do not create a multimodal processor.
 
-The package type follows the source model: `qwen3_5` (or `qwen3_5_moe`) identifies the complete vision-language model, while `qwen3_5_text` (or `qwen3_5_moe_text`) identifies a text-only export. Text-only packages reject image inputs and cannot configure a vision encoder. A complete Engine vision export must include the supported encoder, processor assets, pure CPU token lookup, and packed decoder. Changing the type label or retaining image markers in a tokenizer does not add vision support. The runtime validates these component contracts before accepting images; ordinary Generator vision packages retain their separate execution path.
+The package type follows the source model: `qwen3_5`, `qwen3_5_moe`, and `qwen4_exp` identify complete packed vision-language exports; their corresponding `_text` types identify text-only exports. Text-only packages reject image inputs and cannot configure a vision encoder. A complete Engine vision export must include the supported encoder, processor assets, pure CPU token lookup, and packed decoder. Changing the type label or retaining image markers in a tokenizer does not add vision support. The runtime validates these component and position contracts before accepting images; ordinary Generator vision packages retain their separate execution path.
 
 The input is an explicitly formatted **incremental turn**, not messages or unformatted text. The Engine applies no chat template. For this package, each image has one `<|vision_start|><|image_pad|><|vision_end|>` marker, in input-image order. Only PNG/JPEG images with inspectable dimensions and the configured Qwen `PatchImage` pipeline are accepted. Audio, video, streaming, cross-attention, and Generator merge-embedding packages are not enabled by this interface.
 
 On a vision Engine, the token-only overload rejects all three image-marker IDs. Image markers require the formatted prompt and matching ordered image inputs; they cannot silently fall back to token embeddings.
 
-Packed vision with MTP is not enabled; exports must set `exclude_mtp=true` or select a supported block drafter. Text-only MTP behavior is unchanged. Vision-targeted adapters are rejected rather than silently discarded; merge them into the source checkpoint before export. Text-only adapters can still accompany packed vision.
+Packed vision with MTP is not enabled; exports must set `exclude_mtp=true` or select a supported block drafter for Qwen3.5-family targets. Flash-Next uses the ordinary dynamic Engine with floating KV, internal sparse selection, PLE/Engram, and independent target/indexer MRoPE. Its vision support is scoped to eager, target-only execution; it does not extend to CUDA graph decode, quantized KV, MTP/block drafters, expert offload, or the separate `qwen38_flash_graph` backend. Text-only MTP behavior is unchanged. Vision-targeted adapters are rejected rather than silently discarded; merge them into the source checkpoint before export. Text-only adapters can still accompany packed vision.
 
 Admission synchronously inspects dimensions, validates marker counts and session limits, and preprocesses into owned canonical host patches. Invalid admission preserves prior history and the next Turn ID. After success, callers may release the image handle. Neural vision encoding happens during `Run()`, outside decoder reservation. When no decoder work is ready, one `Run()` can encode one image and produce **zero events** without advancing request tokens, RNG, cache state, or positions. Continue while `has_pending_requests()` is true. Runnable text/decode peers take priority over preparation; the existing decode-first starvation limitation is unchanged.
 
 There is no encoder aging rule or reserved preparation step: sustained runnable text traffic can indefinitely delay image preparation. Once that traffic drains or becomes non-executable, pending image preparation can proceed. Applications requiring bounded image latency must bound competing work; this feature does not change the Engine's strict priority policy.
 
-The scheduler checks prospective prefix hits before requesting features. Missing features split prefill ranges at media boundaries; individually fitting images need not coexist. Whole images are encoded even when a chunk or prefix hit starts inside one. The decoder still performs its pure CPU token lookup, then replaces exactly the image rows with projected features. Cache lengths, token usage, and session limits count expanded decoder rows, not MRoPE extents. Three-axis positions derive from retained image geometry for prefill, generated text, continuation, and rewind. Encoder/prefill execution is eager; eligible decode/speculative steps retain the existing CUDA graph path.
+The scheduler checks prospective prefix hits before requesting features. Prefill ranges split at media boundaries whether features are cold or resident, so feature-cache residency does not change recurrent-state chunking. Individually fitting images need not coexist. Whole images are encoded even when a chunk or prefix hit starts inside one. The decoder still performs its pure CPU token lookup, then replaces exactly the image rows with projected features. Cache lengths, token usage, and session limits count expanded decoder rows, not MRoPE extents. Three-axis positions derive from retained image geometry for prefill, generated text, continuation, and rewind. Encoder/prefill execution is eager; eligible decode/speculative steps retain the existing CUDA graph path.
+
+Rotary-history bindings retain fixed architecture-context geometry; their initialization and transfer are not bounded by the current prefill chunk.
 
 Exact canonical content and geometry are interned within the Engine. Private row identities feed only the existing collision-checked prefix cache, never the model, tokenizer, policies, or drafter. Different image content cannot adopt media-dependent state or descendants. Optional identity eviction may cause a safe cache miss. Hybrid fixed-state and DFlash checkpoints use the same enriched prefix lineage. When the cache enables prefix reuse, media-bearing prefills align to the furthest complete block within their assigned budget when one fits, so matching hybrid snapshots can be published.
 
@@ -90,39 +92,7 @@ Known admission size/shape violations reject before mutation. Classified ORT BFC
 
 Do not render a tool message in isolation or assume a full-history template is append-compatible: Qwen templates can regroup tool messages and remove old reasoning. For tool turns, render the complete message history and compare **tokenized** retained prefixes. If earlier tokens change, rewind to an available turn boundary and replay the retained prefix plus newly rendered suffix; when no such boundary represents that history, recreate the Request and replay the full rendering. The Engine deliberately does not infer roles, tools, or replay edits.
 
-Optional real-checkpoint tests live in `test/python/test_onnxruntime_genai_engine_vision.py`. Qualification jobs set `ORTGENAI_ENGINE_VISION_MODEL` to the complete packed vision package and `ORTGENAI_REQUIRE_ENGINE_VISION=1`; missing assets/CUDA/drafter activity then fail rather than silently skip.
-
-### Reference qualification
-
-The Qwen3.8-27B reference was exported from target revision `1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0` and DFlash2 revision `dedf8df68adfb1afeaf7b7480c0a0243108177b4`. The complete source-built package retains INT4 target/drafter weights, CPU embeddings, INT8 target KV, and seven-row hybrid rollback capacity. Qualification used an A100, CUDA 12.8, and native ORT 1.31.1.
-
-The 32 real-model cases passed across eager/captured execution and target-only/DFlash2, including two-image pressure, content-sensitive prefixes, continuation, rewind, cancellation, mixed batches, seeded sampling, decoded stops, and tool-history replay. Nsight recorded 124 successful captures/instantiations and 407 graph launches; graph-node traces include target GDN and convolution kernels, with repeated execution of 30 target graphs. Matching tokens or selecting a graph ID alone was not used as replay proof.
-
-After independent review fixes, all 33 real-model cases passed, including an additional tight-host-budget regression: a pre-existing request can admit images immediately after another media-owning request is abandoned, without an intervening `Run()` or request creation.
-
-For comparison with the supplied optimized text package, qualification also preserves its runtime settings. Apply this overlay with `Config.overlay()` before creating the Model; select eager/captured execution separately with the existing CUDA provider option:
-
-```json
-{
-  "model": {
-    "decoder": {
-      "session_options": {
-        "ep.cuda.fpa_intb_gemm": "1",
-        "session.use_device_allocator_for_initializers": "1",
-        "ep.cuda.matmul_nbits_m_chunk_size": "512",
-        "ep.cuda.enable_gemm_auto_tune": "1"
-      }
-    },
-    "embedding": {"prefault": true}
-  }
-}
-```
-
-With four request slots, 64 cache blocks, 64-row chunks, prefix caching off, and 64 generated tokens, warm text TTFT was 45.5 ms versus 43.0 ms for the original package; decode was 10.61 versus 10.35 ms/token. Both pass the declared 20% regression limit. A text peer admitted with a fresh image reached its first token in 84.9 ms, passing the declared 2x isolated-text limit. Fresh-image TTFT was 290 ms, including 47.3 ms of encoding; repeated-image TTFT was 197-217 ms with feature reuse. Five-millisecond device-wide memory samples observed 22.83 GiB, not a hard allocator peak or quota. Default CUDA kernels without the matching launch settings were materially slower and were not accepted as the performance baseline.
-
-Original text-only static KV scales failed the vision numerical gate. Vision-aware scales passed against floating KV on the tested images and held-out resize geometry: minimum aligned-logit cosine 0.99935, maximum RMS error 0.126, and worst clipping/saturation 0.0144% (limits: cosine at least 0.995, RMS at most 0.2, clipping at most 0.05%). This uses two real images and is **not held-out content-corpus or broad image-quality qualification**. Deployments must qualify their own calibration coverage.
-
-Regression checks passed 1,644 native Engine tests, two public C/C++ API tests, and 817 affected builder tests; optional skips/disabled tests are not qualification evidence. The local Python ORT 1.30.0 and native SDK 1.31.1 conflict when initialized in one CUDA process, independently reproducible without GenAI. Critical unchanged GIL-release and CPU-lookup CUDA checks pass in clean processes, but the combined Python files were not qualified in that environment. This build has guidance disabled; audio, other drafters, and other vision backends have no end-to-end reference qualification here.
+See the Model Builder's [packed Qwen vision instructions](../src/python/py/models/README.md#packed-qwen-vision-for-the-engine) for package construction and model-specific runtime settings.
 
 ## The main idea
 
@@ -515,8 +485,7 @@ Adjacent disk ranges share transfer-buffer batches instead of synchronizing per
 ring block, and capture flushes once before publishing the complete snapshot.
 Disk I/O remains synchronous and can increase inference-loop latency; budgets
 are capacity limits, not latency guarantees.
-Treat explicit RAM/disk tiering as a **latency-tolerant opt-in** until the exact
-deployment has been qualified under sustained pressure. Allocation, copies,
+Explicit RAM/disk tiering is a **latency-tolerant opt-in**. Allocation, copies,
 disk I/O, synchronization and source release run on the Engine loop and can
 delay unrelated decoding requests. No bounded pinned-buffer pool is provided.
 An operational disk allocation or demotion failure disables further disk writes
@@ -541,7 +510,7 @@ CUDA add-ons must be built for the same device-interface version as the core
 library. Install matching core/add-on packages together; older add-on binaries
 are rejected rather than loaded with an incompatible C++ layout.
 
-#### Snapshot diagnostics and qualification
+#### Snapshot diagnostics
 
 Enable the existing GenAI logger with `SetLogBool("enabled", true)` to receive
 `engine_snapshot_cache` events. No separate logging option or public metrics
@@ -563,58 +532,7 @@ host elapsed microseconds through transfer synchronization. Capture timing also
 includes admission and any required demotions; these are synchronous operation
 times, not independent disk bandwidth or end-to-end request latency measures.
 
-Qualify the exact core/add-on build on the intended CUDA stack before relying
-on tiered-cache performance. Check output against cache-disabled controls,
-exercise simultaneous adoption leases and all-leased refusal, then release
-owners and verify progress. Include tier demotion, disk failure/retry,
-cancellation, CUDA graph restore, and final-owner spill cleanup. Record
-configured and effective budgets, staged peak payload occupancy, transfer
-latencies, and request latency with logging disabled for timing measurements.
-CPU results and measurements from an earlier storage implementation do not
-qualify CUDA transfers or the revised policy.
-
-`examples/python/engine/prefix-cache-qa.py` retains repeatable `growing-chain`
-and `branching` scenarios for eviction-policy comparisons, and `tier-pressure`
-for new prefill admissions after a peer starts decoding. `history-capacity`
-revisits distinct histories after filling the cache without assuming they all
-remain resident. For example:
-
-```bash
-python examples/python/engine/prefix-cache-qa.py --model-path <configured-model> \
-  --suites growing-chain branching tier-pressure history-capacity --scenario-repeats 5 \
-  --lengths 2561 4097 --chunk-sizes 512 --max-batch-size 16 --num-blocks 256 \
-  --pressure-requests 6 --generated-tokens 64 --reference-repeats 2 \
-  --build-label <source-and-policy-identity> --output <report.json>
-```
-
-Each repetition uses a fresh Engine; every output and failing repetition remains
-in the JSON. Reports include raw request/TTFT/inter-token timings, nearest-rank
-p50/p95/p99, sample counts, aggregate generation throughput, cached tokens and
-speculative counters. Inter-token intervals are host-observed event arrival
-gaps, including Engine stalls and event batching, not individual GPU kernel times.
-Small sample counts do not establish a reliable p99 distribution. No warmup
-repetition is silently excluded.
-
-Compare victim selection on otherwise identical binaries at equal **effective**
-snapshot capacity, with `snapshot_cache` omitted; record reservation diagnostics
-separately from logging-disabled timing runs. Compare tier placement separately
-against that device-resident policy, not only against snapshots disabled.
-Under a fixed total KV byte budget, report effective target blocks and retained
-histories alongside throughput and tail latency. These scripts do not by
-themselves establish equal capacities or infer a numerical root cause from
-cache-disabled failures; run base and head on the same prompts and CUDA stack.
-Concurrent exact-output qualification remains tracked separately in #2698.
-
-CUDA graph qualification uses the parameterized
-`SnapshotTiers/Dflash2GraphRestoreTest.*` cases for explicit VRAM, RAM, disk and
-mixed placement. The mixed case creates three boundaries and revisits the older
-RAM/disk snapshots after demotion. Set `D_FLASH2_GRAPH_TEST_MODEL` to a
-graph-enabled Qwen DFlash2 package (256-token blocks, 512-token prefill), and
-`D_FLASH2_GRAPH_TEST_REQUIRED=1` to fail rather than skip if the model is missing.
-The Linux and Windows CUDA build workflows accept the `dflash2_graph_model`
-manual-dispatch input for this qualification. The package must already be
-provisioned on the runner; ordinary CI without it still skips these real-model
-cases and must not be reported as real CUDA graph qualification.
+See [prefix-cache validation](prefix-cache-validation.md#snapshot-tier-validation) for snapshot-tier testing and benchmark instructions.
 
 The generic configuration and shared Engine ownership establish the policy for
 future snapshot-producing components without creating component-specific controls.
@@ -1351,9 +1269,8 @@ The first two values are upper bounds. The third is a lower bound on the longest
 
 Pure-decode steps and mixed prefill/decode steps may select different numerically valid CUDA
 backends. Floating-point reassociation can therefore flip a near-tied greedy token when batch
-composition changes even though request state and continuation are correct. Qualification should
-use continuation/replay invariants, tolerant logits or top-k comparisons, and task-level quality;
-bitwise token equality across batch compositions is available only when every selected backend is
+composition changes even though request state and continuation are correct.
+Bitwise token equality across batch compositions is available only when every selected backend is
 batch-invariant.
 
 After logits processing, greedy selection must return a token with a maximum score in the current
@@ -1657,14 +1574,11 @@ linear in how deep into the turn it already is. This follows from the required p
 speculative draft verification can observe up to `kMaxGeneratedTokensPerStep` tokens for one
 request in a single step rather than the ordinary path's one, but this does not change the bound
 above: it is already stated in terms of the replayed turn depth (the checkpoint the step began at),
-not the number of tokens observed within the failing step itself. This repository does not include
-a replay benchmark or publish a measured per-token constant. A Request many thousands of tokens
+not the number of tokens observed within the failing step itself. A Request many thousands of tokens
 into a long turn pays a proportionally larger replay on every retryable abort that touches it, and
 a batch with several such requests pays that cost once per request, every time. No batching or
-amortization across requests exists for this replay today. Rollout qualification for stop strings
-at scale should measure this cost with representative tokenizers and turn depths, and monitor
-observed abort frequency alongside typical current-turn depth rather than assuming replay cost is
-negligible.
+amortization across requests exists for this replay today. Recovery runs synchronously on the
+Engine owner thread, so repeated aborts of deep turns can delay unrelated requests.
 
 Stop strings require an Engine configured for dynamic batching. Static batching completes generation
 through `ScheduledRequests::GenerateNextTokens`, a non-transactional path that cannot stage, roll
@@ -1775,14 +1689,10 @@ position belongs to that result. The counters are advanced while verification re
 proposal because `token_appended` and `finish_reason` alone cannot distinguish budget exhaustion
 from a confirmed final draft or a rejected proposal.
 
-**CUDA batched-commit qualification gap.** The per-stage loop's `can_batch_commits` branch (used
+**Token commit paths.** The per-stage loop's `can_batch_commits` branch (used
 when every active request's `Search` supports device-side batched commit) and the non-batched
 fallback use different token-commit mechanisms, then call the same stage-finalization code for
-counters, checkpoints, promotion, stop truncation, and result publication. The CPU test doubles
-this document's tests run against cannot produce a `Search` that supports batched commit, so no
-automated test in this repository actually exercises the device-side commit mechanism with decoded
-stop strings. Treat that branch as requiring real CUDA qualification before relying on it in
-production; shared finalization does not prove that the preceding device commit has been tested.
+counters, checkpoints, promotion, stop truncation, and result publication.
 
 ## Rollback and failure handling
 
@@ -1801,8 +1711,7 @@ Step 1 restores every request in the failing batch, not just one; for a stop-ena
 staged an observed token this step, restoring its search state also replays its stop-string
 controller (see "Decoded stop strings" above), so a batch containing several stop-enabled requests
 deep into their turns pays that per-request replay cost once per request on every retryable abort --
-see that section's "Recovery cost bound" for the resulting complexity and rollout-qualification
-guidance.
+see that section's "Recovery cost bound" for the resulting complexity and owner-thread latency.
 
 After a successful rollback, committed request state and committed cache state match the state
 before the step began. `Run()` translates `RetryableBatchAbort` into a `Retryable` event and
@@ -2047,7 +1956,7 @@ two different fixed batch extents on input and output,
 dynamic or mismatched non-batch axes, and dtype mismatches. Every dtype and
 per-request row size is derived from that validated geometry, and state is
 allocated with the model state-device allocator. Devices are admitted only when
-they qualify the allocation, fill, ranged-copy, tensor-binding, and synchronization
+they provide the allocation, fill, ranged-copy, tensor-binding, and synchronization
 semantics needed to publish state transactionally. CPU, CUDA, and WebGPU satisfy
 that contract. CPU and CUDA bind offset tensor views directly; WebGPU uses staging
 bindings. Compact partial-acceptance replay is device-native on CUDA. WebGPU's
@@ -2532,7 +2441,9 @@ token. The device holds `model.qwen38_graph.max_batch_size` slots (default 1), o
 - MoE offload requires an explicit `session.moe.offload.mode` of `required`, `auto`, `1` or `on` (case-insensitive).
   A budget alone does not enable offload, matching ORT's disabled default; `disabled`, `0` and `off` preserve that behavior.
   Only enabled offload changes target-graph selection, synthetic warmup options or session budgets.
-  `ORT_QWEN38_ADAPTIVE_CTX_BUDGET=1` opts into a fixed-layout estimate for the Flash-Next NVFP4 package: 12 attention layers,
+  By default, offload uses a fixed-layout estimate for the Flash-Next NVFP4 package. `ORT_QWEN38_ADAPTIVE_CTX_BUDGET`
+  keeps it on when unset, empty, `1` or `true`, turns it off when `0` or `false`, and makes model creation fail on any
+  other value. The estimate assumes 12 attention layers,
   two KV heads of 256 channels, one-byte K/V caches, int64 position IDs, and a 128-float index-key row per four positions
   per layer. It charges 16 KiB per position per request slot, relative to one slot of 33032 positions. These are not bytes
   measured from the selected graph, and do not account for every state tensor, workspace or allocator overhead.
@@ -2628,9 +2539,14 @@ token. The device holds `model.qwen38_graph.max_batch_size` slots (default 1), o
   serves its slot, a batched decode the slots that decode in it).
   Every Run also carries `ep.cuda.qmoe_in_warmup=1` during synthetic warmup and `0` afterwards; current ORT reads that entry
   rather than `ORT_QMOE_IN_WARMUP`. Reused run options are updated only when the value changes, including the reset to `0`
-  before live runs. Offloaded target decode warmup uses `gpu_graph_id=-1`, including all batched shapes:
-  captured replays bypass the per-run control and would otherwise score and promote dummy-token experts. These targets
-  pay graph capture costs during their first live runs; non-offloaded targets and auxiliary heads still capture during warmup.
+  before live runs. With warmup enabled (the default), the first offloaded target warmup for each direction uses its normal
+  `gpu_graph_id` and captures while the device is muted. Subsequent synthetic warmups use `gpu_graph_id=-1`, including
+  batched shapes: captured replays bypass the per-run control and would otherwise score and promote dummy-token experts.
+  Captured graphs are provider- and thread-owned. Acquiring the device on another thread (a model loaded on one thread and
+  driven by an Engine on another) therefore recreates the capturing sessions and the decode state on the acquiring thread and
+  repeats the muted warmup there before any live request; a thread that reuses an exited thread's operating-system ID still
+  counts as a new thread. Engines on the owning thread reuse its captures. A failed recreation discards the partial state and
+  releases the lease, so the next acquisition retries.
   With several slots a step advances every slot (`Qwen38GraphSession::StepBatch`): it commits the in-flight batched cycle of
   the decoding slots, prefills the next chunk of the slots that have not started decoding and enqueues the next batched
   cycle. The executor declares its step plan via `ScheduledRequests::BeginBackendStep` and stages owned `BackendRowResult`

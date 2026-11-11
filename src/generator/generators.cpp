@@ -890,6 +890,26 @@ void Generator::SetInputs(const NamedTensors& named_tensors) {
     throw std::runtime_error("Please use generator.AppendTokens for " + model_->config_->model.type + ". SetInputs is not supported for this model type.");
   }
 
+  // Multimodal states take extra inputs only once, so later images or audio would be dropped while
+  // their placeholder tokens stay in input_ids. Processors that emit neither num_image_tokens nor
+  // audio_sizes (Whisper, Parakeet, Nemotron Parse, streaming ASR) are not checked.
+  if (!set_extra_inputs_) {
+    const auto& audio_sizes_name = model_->config_->model.speech.inputs.audio_sizes;
+    for (const auto& [name, tensor] : named_tensors) {
+      const auto graph_name = model_->config_->GetGraphName(name).first;
+      if (graph_name != Config::Defaults::NumImageTokens && graph_name != audio_sizes_name)
+        continue;
+      // A nonzero count has a nonzero byte whatever its integer type, so the bytes are read as they are.
+      const auto* bytes = static_cast<const uint8_t*>(tensor->GetRawData());
+      const size_t size = tensor->GetElementCount() * Ort::SizeOf(tensor->GetType());
+      if (std::any_of(bytes, bytes + size, [](uint8_t byte) { return byte != 0; }))
+        throw std::runtime_error(
+            "SetInputs got images or audio after this generator already received inputs. Only a generator's first "
+            "inputs can carry images or audio; pass later turns as text, or create a new generator for a prompt "
+            "with new images or audio.");
+    }
+  }
+
   cpu_span<int32_t> input_ids;
   for (const auto& [name, tensor] : named_tensors) {
     if (name == Config::Defaults::InputIdsName) {
