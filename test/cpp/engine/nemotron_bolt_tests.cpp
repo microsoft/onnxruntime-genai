@@ -71,6 +71,42 @@ TEST(NemotronBolt, RejectsInvalidVerificationGeometry) {
                std::runtime_error);
 }
 
+TEST(NemotronBolt, HonorsGreedyEquivalentSamplingOptions) {
+  Config config;
+  config.model.type = "nemotron_bolt";
+  config.model.vocab_size = 128;
+  config.model.context_length = 16;
+  config.search.max_length = 16;
+  config.speculative.max_draft_tokens = 7;
+  struct Case {
+    float temperature;
+    int top_k;
+    bool greedy;
+  };
+  for (const auto& test : std::array<Case, 8>{{
+           {0.0f, 0, true},
+           {0.0f, 1, true},
+           {0.0f, 50, true},
+           {0.7f, 1, true},
+           {1.0f, 1, true},
+           {0.7f, 50, false},
+           {1.0f, 0, false},
+           {1.0f, 50, false},
+       }}) {
+    SCOPED_TRACE(::testing::Message() << "temperature=" << test.temperature << ", top_k=" << test.top_k);
+    auto params = std::make_shared<GeneratorParams>(config);
+    params->use_graph_capture = true;
+    params->search.do_sample = true;
+    params->search.temperature = test.temperature;
+    params->search.top_k = test.top_k;
+    if (test.greedy) {
+      EXPECT_NO_THROW(ValidateNemotronBoltSearch(*params));
+    } else {
+      EXPECT_THROW(ValidateNemotronBoltSearch(*params), std::runtime_error);
+    }
+  }
+}
+
 TEST(NemotronBolt, RejectsUnsupportedSearchInsteadOfIgnoringIt) {
   Config config;
   config.model.type = "nemotron_bolt";
@@ -207,9 +243,13 @@ TEST(NemotronBoltGPU, SequentialGeneratorsResetAndPublicBoundaries) {
       29196, 5627, 1261, 3310, 1395, 1261, 5796, 92145, 1044, 1454, 1261, 4958,
       17984, 1046, 11, 1010, 10, 1503, 19464, 1010, 12, 13};
   std::vector<int32_t> baseline;
-  for (int request = 0; request < 2; ++request) {
+  for (int request = 0; request < 3; ++request) {
+    SCOPED_TRACE(request);
     auto params = std::make_shared<GeneratorParams>(*model);
     params->search.max_length = static_cast<int>(prompt.size() + 32);
+    params->search.do_sample = request != 0;
+    params->search.temperature = request == 1 ? 0.0f : 1.0f;
+    params->search.top_k = request == 2 ? 1 : 50;
     Generator generator{*model, *params};
     for (int reset = 0; reset < 2; ++reset) {
       if (reset == 1) {
@@ -243,6 +283,13 @@ TEST(NemotronBoltGPU, SequentialGeneratorsResetAndPublicBoundaries) {
       generator.RewindToLength(0);
       EXPECT_EQ(generator.TokenCount(), 0);
     }
+  }
+  {
+    auto params = std::make_shared<GeneratorParams>(*model);
+    params->search.do_sample = true;
+    params->search.temperature = 1.0f;
+    params->search.top_k = 50;
+    EXPECT_THROW(Generator(*model, *params), std::runtime_error);
   }
   for (int budget : {0, 1, 2, 3, 7, 8, 9}) {
     auto params = std::make_shared<GeneratorParams>(*model);

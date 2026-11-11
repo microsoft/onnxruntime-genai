@@ -32,8 +32,8 @@ Config::ProviderOptions ResolveStreamBindingOptions(const Config::ProviderOption
 void AddCudaStreamConfig(OrtSessionOptions& session_options, DeviceInterface* device,
                          const std::string& config_key = "user_compute_stream");
 
-// Registers the CUDA execution provider on |session_options|. Tries the V2
-// plugin path first; falls back to the provider-bridge (CUDA V2 options) path.
+// Discovers CUDA plugins before binding the shared stream to the selected device.
+// Tries the V2 plugin path first; falls back to the provider-bridge (CUDA V2 options) path.
 DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
                                          const Config::ProviderOptions& provider_options,
                                          const Config& config,

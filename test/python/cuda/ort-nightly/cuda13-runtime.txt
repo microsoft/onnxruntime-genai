@@ -1,0 +1,5 @@
+# CUDA 13.0 user-space libraries that the onnxruntime-gpu nightly links against; cuDNN is not needed for the Bailing
+# kernels. onnxruntime.preload_dlls() finds them in site-packages, and the driver must support CUDA 13.
+nvidia-cuda-runtime==13.0.96
+nvidia-cublas==13.0.2.14
+nvidia-curand==10.4.0.35

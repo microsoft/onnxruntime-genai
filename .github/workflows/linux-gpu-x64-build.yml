@@ -215,6 +215,27 @@ jobs:
               ${{ env.PYTHON_EXECUTABLE }} -m pytest -sv test/python/test_onnxruntime_genai_engine.py && \
               ${{ env.PYTHON_EXECUTABLE }} test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/models --e2e"
 
+      # Needs ORT #33817 (MoEGroupRouter and per-key KDA), which first shipped in the 1.32.0.dev20261109001 nightlies.
+      # The onnxruntime-gpu nightly carries the CPU and CUDA kernels from one revision. It is built for CUDA 13, which
+      # the A10 runner image's driver supports (ORT's CUDA 13 CI uses the same image), so the CUDA 13 runtime
+      # libraries come from PyPI instead of the CUDA 12.8 toolkit in the docker image.
+      - name: Run Bailing CPU/CUDA kernel regressions with nightly ONNX Runtime
+        run: |
+          set -e -x
+          docker run \
+            --gpus all \
+            --rm \
+            --volume $GITHUB_WORKSPACE:/ort_genai_src \
+            -w /ort_genai_src onnxruntimecudabuildx64 bash -c " \
+              (nvidia-smi || true) && \
+              ${{ env.PYTHON_EXECUTABLE }} -m venv build/bailing-venv && \
+              build/bailing-venv/bin/python -m pip install -r test/python/requirements.txt && \
+              build/bailing-venv/bin/python -m pip install -r test/python/cpu/torch/requirements.txt && \
+              build/bailing-venv/bin/python -m pip install -r test/python/cuda/ort-nightly/requirements.txt && \
+              build/bailing-venv/bin/python -m pip install -r test/python/cuda/ort-nightly/cuda13-runtime.txt && \
+              ORTGENAI_REQUIRE_BAILING_KERNELS=1 \
+                build/bailing-venv/bin/python -m pytest -q --noconftest test/python/models/test_bailing_builder.py"
+
       # TODO: Enable this by adding dotnet to the docker image
       # - name: Build the C# API and Run the C# Tests
       #   run: |

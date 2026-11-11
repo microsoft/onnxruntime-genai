@@ -103,18 +103,20 @@ std::vector<const OrtEpDevice*> FindRegisteredEpDevices(const std::string& ep_na
 }
 
 std::string GetCudaDeviceIdMetadata(const OrtEpDevice* device) {
-  const OrtKeyValuePairs* kv = Ort::GetEpDeviceMetadata(device);
-  if (!kv) return {};
-  const char* const* keys = nullptr;
-  const char* const* vals = nullptr;
-  size_t n = 0;
-  Ort::GetKeyValuePairs(kv, &keys, &vals, &n);
-  for (size_t i = 0; i < n; ++i) {
-    if (keys[i] && vals[i] && std::string_view(keys[i]) == "cuda_device_id") {
-      return vals[i];
+  const auto read_id = [](const OrtKeyValuePairs* kv, std::string_view name) -> std::string {
+    if (!kv) return {};
+    const char* const* keys = nullptr;
+    const char* const* vals = nullptr;
+    size_t n = 0;
+    Ort::GetKeyValuePairs(kv, &keys, &vals, &n);
+    for (size_t i = 0; i < n; ++i) {
+      if (keys[i] && vals[i] && std::string_view(keys[i]) == name) return vals[i];
     }
-  }
-  return {};
+    return {};
+  };
+  auto id = read_id(Ort::GetEpDeviceMetadata(device), "cuda_device_id");
+  if (!id.empty()) return id;
+  return read_id(Ort::api->EpDevice_EpOptions(device), "device_id");
 }
 
 size_t SelectCudaDeviceIndex(const std::vector<std::string>& cuda_device_ids,
@@ -166,7 +168,7 @@ bool AppendExecutionProviderV2(
 
   auto filtered_ep_device_ptrs = ApplyDeviceFiltering(provider_options, ep_devices_ptrs);
   if (device_type == DeviceType::CUDA) {
-    // Match the requested CUDA device_id against EpMetadata["cuda_device_id"] because GetEpDevices() enumerates
+    // Match the requested CUDA device_id against the plugin's CUDA ordinal because GetEpDevices() enumerates
     // multi-GPU cards in sysfs order rather than CUDA device_id order.
     std::optional<std::string> requested_id;
     if (auto it = options.find("device_id"); it != options.end() && !it->second.empty()) {

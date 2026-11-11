@@ -29,6 +29,7 @@ from builder_config import (
     validate_model_dependent_config,
 )
 from builders import (
+    BailingMoeV3Model,
     ChatGLMModel,
     ErnieModel,
     Gemma2Model,
@@ -64,7 +65,6 @@ from builders import (
     Qwen3Model,
     Qwen3VLTextModel,
     Qwen4ExpModel,
-    Qwen4ExpTextModel,
     Qwen25VLTextModel,
     QwenModel,
     SmolLM3Model,
@@ -453,11 +453,14 @@ def check_extra_options(
 
     quantization_config = getattr(config, "quantization_config", {})
     if quantization_config.get("quant_method") == "fp8":
-        if getattr(config, "model_type", None) not in {"qwen4_exp", "qwen4_exp_text"}:
-            raise ValueError("Native FP8 checkpoint export is currently supported only for Qwen3.8.")
+        if getattr(config, "model_type", None) not in {"qwen4_exp", "qwen4_exp_text", "bailing_hybrid"}:
+            raise ValueError("Native FP8 checkpoint export is currently supported only for Qwen3.8 and BailingMoeV3.")
         if execution_provider not in {"cuda", "webgpu"}:
-            raise ValueError("Native Qwen3.8 FP8 checkpoint export requires the CUDA or WebGPU EP.")
-    if quantization_config.get("quant_method") in {"modelopt", "compressed-tensors"}:
+            raise ValueError("Native Qwen3.8/BailingMoeV3 FP8 checkpoint export requires the CUDA or WebGPU EP.")
+    if (
+        quantization_config.get("quant_method") in {"modelopt", "compressed-tensors"}
+        and getattr(config, "model_type", None) != "bailing_hybrid"
+    ):
         if execution_provider != "cuda":
             raise ValueError("ModelOpt FP8/NVFP4 checkpoints are only supported on the CUDA EP.")
         if extra_options.get("moe_quant_type", "nvfp4") != "nvfp4":
@@ -735,7 +738,10 @@ def create_model(
     config_only = extra_options.get("config_only", False)
 
     # List architecture options in alphabetical order
-    if config.architectures[0] == "ChatGLMForConditionalGeneration" or config.architectures[0] == "ChatGLMModel":
+    if config.architectures[0] == "BailingMoeV3ForCausalLM":
+        onnx_model = BailingMoeV3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        onnx_model.model_type = "bailing_hybrid"
+    elif config.architectures[0] == "ChatGLMForConditionalGeneration" or config.architectures[0] == "ChatGLMModel":
         # Quantized ChatGLM model has ChatGLMForConditionalGeneration as architecture whereas HF model as the latter
         config.bos_token_id = 1
         config.hidden_act = "swiglu"
@@ -1021,6 +1027,11 @@ def get_args():
                     Unsupported shapes, non-default zero points, and shared weight buffers stay raw.
                 use_device_allocator_for_initializers = true/false: Default false; opt into device allocation.
                     Paged Qwen3.8 sessions enable this automatically.
+                gated_delta_net_bf16_precision = bf16/fp16/fp32: Internal KDA prefill tensor-core precision.
+                    Bailing CUDA BF16 paged-attention exports only; explicit use elsewhere is rejected.
+                    Default bf16 uses native BF16 tiles; fp16 uses runtime range safeguards;
+                    fp32 uses the higher-accuracy multi-slice path. Model I/O and FP32 recurrent states are unchanged.
+                    Example: -p bf16 -e cuda --extra_options use_paged_attention=true gated_delta_net_bf16_precision=fp32
                 is_symmetric = Quantize the weights symmetrically. Default is true.
                     If true, quantization is done to int4/int8. If false, quantization is done to uint4/uint8.
                 op_types_to_quantize = MatMul/Gather: Specify op types to target for int4/int8 weight-only quantization.
@@ -1119,7 +1130,7 @@ def get_args():
                     small dynamic-convolution and candidate-selector projections dense. The body
                     uses the target's automatic hardware-specific packing policy. CUDA emits
                     the corresponding fpA-intB layout for
-                    projections the kernel supports (N % 64 for int4, N % 32 for int8); other
+                    projections the kernel supports (N %% 64 for int4, N %% 32 for int8); other
                     projections stay raw, and the drafter session disables fpA-intB selection for them.
                     CUDA body activations and KV caches default to bf16. WebGPU uses FP16,
                     with FP32 residual/skip normalization and convolution-finish accumulation for FP16
