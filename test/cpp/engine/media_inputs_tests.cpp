@@ -41,10 +41,12 @@ TEST(MediaInputsTest, PromptPlanningPreservesProcessorSpecificWhitespace) {
   for (const auto& [type, separator] : {std::pair{"qwen3_5", ""}, {"qwen4_exp", ""}, {"bailing_moe_v3_vl", "\n"}}) {
     config->model.type = type;
     const MultiModalProcessor processor{*config, {}, nullptr, nullptr};
-    for (const std::string suffix : {"", " ", "\n\n  code", "\tcode"}) {
+    for (const std::string suffix : {"", " ", "\n", "\n\n  code", "\tcode", "\n \t\ncode"}) {
       const auto prompt = "before " + marker + marker + suffix;
-      EXPECT_EQ(processor.processor_->ExpandImagePrompt(tokenizer, prompt, grids),
+      const auto tokens = processor.processor_->ExpandImagePrompt(tokenizer, prompt, grids);
+      EXPECT_EQ(tokens,
                 tokenizer.Encode(("before " + expanded + separator + expanded + separator + suffix).c_str()));
+      EXPECT_GE(tokens.size(), tokenizer.Encode(prompt.c_str()).size() + 2);
     }
   }
 }

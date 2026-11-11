@@ -34,6 +34,14 @@ Operator settings belong in the existing sparse-indexer, PLE, hyper-connection, 
 
 For model-specific command-line examples, see [Model-specific Export Options](model-specific-options.md). General architecture and naming guidance remain in [DESIGN.md](../DESIGN.md).
 
+## Sampled DFlash2 proposals
+
+On Qwen3.8-27B with temperature 1.0, top-k 20 and top-p 0.95 (MMLU-Pro, 800 prompts, batch 1),
+`lattice` averaged 5.01 tokens per target step against 4.78 for `greedy_path` and 4.66 for
+`independent`, and decoded 3.1x faster than `none`.
+
+These measurements motivate the default `sampled_proposal` policy. See the [Engine guide](../../../../../docs/paged_attention_engine.md) for the general proposal and verification contracts.
+
 ## Static backend that selects its own tokens
 
 The `qwen38_flash_graph` model type (Qwen3.8-Flash CUDA-graph decode with a built-in multi-token-prediction loop: an MTP head

@@ -39,6 +39,13 @@ class CudaBridgeProbeTest : public testing::Test {
   OrtApi test_api{};
   inline static bool available{};
 
+  static OrtStatus* ORT_API_CALL Create(OrtCUDAProviderOptionsV2** out) noexcept {
+    static int sentinel;
+    *out = reinterpret_cast<OrtCUDAProviderOptionsV2*>(&sentinel);
+    return nullptr;
+  }
+  static void ORT_API_CALL Release(OrtCUDAProviderOptionsV2*) noexcept {}
+
   static OrtStatus* ORT_API_CALL Update(OrtCUDAProviderOptionsV2*, const char* const* keys,
                                         const char* const* values, size_t count) noexcept {
     EXPECT_EQ(count, 1u);
@@ -51,6 +58,8 @@ class CudaBridgeProbeTest : public testing::Test {
   void SetUp() override {
     saved_api = Ort::api;
     test_api = *saved_api;
+    test_api.CreateCUDAProviderOptions = Create;
+    test_api.ReleaseCUDAProviderOptions = Release;
     test_api.UpdateCUDAProviderOptions = Update;
     Ort::api = &test_api;
   }

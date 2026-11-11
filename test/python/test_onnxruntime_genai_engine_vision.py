@@ -318,6 +318,49 @@ def test_formatted_admission_reclaims_abandoned_media_before_host_preflight(visi
     survivor.close()
 
 
+def test_oversized_turn_preserves_reusable_media(vision_package):
+    directory, _ = vision_package
+    config = og.Config(directory)
+    config.overlay(
+        json.dumps(
+            {
+                "model": {"dflash2": {"filename": ""}},
+                "engine": {
+                    "dynamic_batching": {
+                        "num_blocks": 64,
+                        "max_batch_size": 1,
+                        "prefix_caching": True,
+                        "media_host_bytes": 21 * 1024 * 1024,
+                    }
+                },
+            }
+        )
+    )
+    config.set_provider_option("cuda", "enable_cuda_graph", "0")
+    model = og.Model(config)
+    engine, tokenizer = og.Engine(model), og.Tokenizer(model)
+    value = prompt(tokenizer, 1, "Describe the images briefly. " + "code " * 200)
+    images = og.Images.open(str(IMAGE_DIR / "sheet.png"))
+    cached_tokens = []
+    for iteration in range(3):
+        if iteration == 2:
+            options = og.RequestOptions()
+            options.set_max_session_tokens(len(tokenizer.encode(value)) + 1)
+            rejected = engine.create_request(options=options)
+            larger_image = og.Images.open(str(IMAGE_DIR / "cars.jpg"))
+            with pytest.raises(RuntimeError, match="Expanded image rows exceed"):
+                begin(rejected, value, larger_image, maximum=1)
+            rejected.close()
+        request = new_request(engine)
+        begin(request, value, images, maximum=1)
+        _, finishes, _ = drain(engine)
+        assert len(finishes) == 1
+        cached_tokens.append(finishes[0][3])
+        request.close()
+    assert cached_tokens[1] > 0
+    assert cached_tokens[2] == cached_tokens[1]
+
+
 def test_text_only_export_rejects_images_without_consuming_the_turn(vision_package):
     directory, manifest = vision_package
     config = og.Config(directory)
@@ -351,6 +394,7 @@ def test_vision_export_requires_multimodal_position_bindings(vision_package):
     directory, manifest = vision_package
     bindings = [
         ("position_ids", "missing_position_input", "three-axis int64 decoder position IDs"),
+        ("rotary_position_ids", "missing_rotary_input", "rotary history must use three-axis int64 positions"),
         (
             "rotary_position_ids",
             manifest["model"]["decoder"]["inputs"]["position_ids"],

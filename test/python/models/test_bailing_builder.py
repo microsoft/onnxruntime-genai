@@ -1023,15 +1023,19 @@ def test_shared_clamps_execute_without_changing_activation_precision(tmp_path, d
         model.graph.inputs.append(model.make_value(name, model.io_dtype, shape))
     result = Standard.make_clipped_swiglu(model, "/clipped", "gate", "up", 4, shape)
     model.graph.outputs.append(model.values[result])
+    model.graph.outputs.append(model.values["/clipped/SiLU/output_0"])
     model.save_model(str(tmp_path))
     session = kernel_session(model, provider)
     inputs = session.io_binding()
     inputs.bind_input("gate", "cpu", 0, int(dtype), shape, gate.data_ptr())
     inputs.bind_input("up", "cpu", 0, int(dtype), shape, up.data_ptr())
     output = torch.empty_like(gate)
+    activation = torch.empty_like(gate)
     inputs.bind_output(result, "cpu", 0, int(dtype), shape, output.data_ptr())
+    inputs.bind_output("/clipped/SiLU/output_0", "cpu", 0, int(dtype), shape, activation.data_ptr())
     session.run_with_iobinding(inputs)
-    expected = torch.nn.functional.silu(gate).clamp(max=4) * up.clamp(-4, 4)
+    # Isolate clipping from provider-specific low-precision SiLU and QuickGelu numerics.
+    expected = activation.clamp(max=4) * up.clamp(-4, 4)
     torch.testing.assert_close(output, expected)
     clips = [node for node in model.graph if node.op_type == "Clip"]
     assert len(clips) == 2

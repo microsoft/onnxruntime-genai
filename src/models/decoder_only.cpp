@@ -58,8 +58,9 @@ DecoderOnly_Model::DecoderOnly_Model(std::unique_ptr<Config> config, OrtEnv& ort
         session_info_.GetInputDataType(inputs.position_ids) != Ort::TypeToTensorType<int64_t>) {
       throw std::runtime_error("Packed vision requires three-axis int64 decoder position IDs.");
     }
-    if (session_info_.HasInput(inputs.rotary_position_ids) &&
-        (session_info_.GetInputShape(inputs.rotary_position_ids) != std::vector<int64_t>{3, -1, -1} ||
+    if (!inputs.rotary_position_ids.empty() &&
+        (!session_info_.HasInput(inputs.rotary_position_ids) ||
+         session_info_.GetInputShape(inputs.rotary_position_ids) != std::vector<int64_t>{3, -1, -1} ||
          session_info_.GetInputDataType(inputs.rotary_position_ids) != Ort::TypeToTensorType<int64_t>)) {
       throw std::runtime_error("Packed vision rotary history must use three-axis int64 positions.");
     }

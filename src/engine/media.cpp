@@ -235,6 +235,8 @@ PreparedMediaTurn MediaStore::Prepare(const std::string& prompt, std::span<const
       throw std::invalid_argument("An image cannot fit the configured device media budget.");
     estimate = AddBytes(estimate, AddBytes(MultiplyBytes(source_pixels, 16), MultiplyBytes(MultiplyBytes(height, width), 64)));
   }
+  if (expected_rows > remaining_rows)
+    throw std::invalid_argument("Expanded image rows exceed the remaining session capacity.");
   estimate = AddBytes(estimate, MultiplyBytes(MultiplyBytes(count, maximum_patches), patch_bytes));
   estimate = AddBytes(estimate, MultiplyBytes(AddBytes(expected_rows, count), 128));
   estimate = AddBytes(estimate, MultiplyBytes(prompt.size(), 16));
