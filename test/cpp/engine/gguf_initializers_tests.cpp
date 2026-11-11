@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -8,15 +9,32 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+
 #include <gtest/gtest.h>
 
 #include "models/model.h"
+#include "models/session_options.h"
 
 namespace Generators::test {
 namespace {
@@ -56,10 +74,96 @@ struct DmlTypeOnlyDevice final : DeviceInterface {
   static std::logic_error Unexpected() { return std::logic_error{"Unexpected DML test device call."}; }
 };
 
+#if USE_CUDA
+// Forwards the calls that initializer loading makes to a real device and counts its allocations. A `device_id` makes it
+// report another device identity, which the shared-initializer cache must not match with the real device's allocations.
+struct ForwardingDevice final : DeviceInterface {
+  explicit ForwardingDevice(DeviceInterface& device, std::optional<int> device_id = {})
+      : device_{device}, device_id_{device_id} {}
+
+  DeviceType GetType() const override { return device_.GetType(); }
+  void InitOrt(const OrtApi& api, Ort::Allocator& allocator) override { device_.InitOrt(api, allocator); }
+  Ort::Allocator& GetAllocator() override { return device_.GetAllocator(); }
+  std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
+    auto info = device_.GetMemoryInfo();
+    if (!device_id_) return info;
+    return OrtMemoryInfo::Create(info->GetAllocatorName().c_str(), info->GetAllocatorType(), *device_id_,
+                                 info->GetMemoryType());
+  }
+  std::string GetExecutionProviderName() const override { return device_.GetExecutionProviderName(); }
+  std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
+    ++allocations;
+    return device_.AllocateBase(size);
+  }
+  std::shared_ptr<DeviceBuffer> WrapMemoryBase(void* p, size_t size) override { return device_.WrapMemoryBase(p, size); }
+  // Loading initializers never creates searches or caches.
+  std::unique_ptr<Search> CreateGreedy(const GeneratorParams&) override { throw Unexpected(); }
+  std::unique_ptr<Search> CreateBeam(const GeneratorParams&) override { throw Unexpected(); }
+  std::unique_ptr<KeyValueCache> CreateKeyValueCache(State&) override { throw Unexpected(); }
+  void Synchronize() override { device_.Synchronize(); }
+
+  size_t allocations{};
+
+ private:
+  static std::logic_error Unexpected() { return std::logic_error{"Unexpected forwarding test device call."}; }
+
+  DeviceInterface& device_;
+  std::optional<int> device_id_;
+};
+#endif
+
+// Rewrites bytes of a file through a writable shared mapping, which every other mapping of the file observes.
+void OverwriteMappedBytes(const std::filesystem::path& path, size_t offset, const void* data, size_t size) {
+#ifdef _WIN32
+  HANDLE file = ::CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  ASSERT_NE(file, INVALID_HANDLE_VALUE) << ::GetLastError();
+  HANDLE mapping = ::CreateFileMappingW(file, nullptr, PAGE_READWRITE, 0, 0, nullptr);
+  ::CloseHandle(file);
+  ASSERT_NE(mapping, nullptr) << ::GetLastError();
+  void* view = ::MapViewOfFile(mapping, FILE_MAP_WRITE, 0, 0, 0);
+  ::CloseHandle(mapping);
+  ASSERT_NE(view, nullptr) << ::GetLastError();
+  std::memcpy(static_cast<uint8_t*>(view) + offset, data, size);
+  ::UnmapViewOfFile(view);
+#else
+  const int fd = ::open(path.c_str(), O_RDWR);
+  ASSERT_GE(fd, 0) << path;
+  struct stat file_info = {};
+  ASSERT_EQ(::fstat(fd, &file_info), 0) << path;
+  const auto file_size = static_cast<size_t>(file_info.st_size);
+  void* view = ::mmap(nullptr, file_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  ::close(fd);
+  ASSERT_NE(view, MAP_FAILED) << path;
+  std::memcpy(static_cast<uint8_t*>(view) + offset, data, size);
+  ::munmap(view, file_size);
+#endif
+}
+
 struct F32Tensor {
   std::string name;
   std::vector<float> values;
 };
+
+// A GGUF tensor with GGML dimensions (innermost first) and its raw data bytes.
+struct GgufTensor {
+  std::string name;
+  uint32_t ggml_type{};
+  std::vector<uint64_t> dims;
+  std::string data;
+};
+
+constexpr uint32_t kGgmlF32 = 0;
+constexpr uint32_t kUnsupportedGgmlType = 43;  // Not in the loader's GGML type table.
+
+GgufTensor F32GgufTensor(const F32Tensor& tensor) {
+  std::string data;
+  for (float value : tensor.values) {
+    uint32_t bits = FloatBits(value);
+    for (size_t i = 0; i < sizeof(bits); ++i, bits >>= 8) data.push_back(static_cast<char>(bits & 0xff));
+  }
+  return {tensor.name, kGgmlF32, {tensor.values.size()}, std::move(data)};
+}
 
 class GgufInitializersTest : public ::testing::Test {
  protected:
@@ -90,8 +194,10 @@ class GgufInitializersTest : public ::testing::Test {
     output.close();
   }
 
-  // Writes a GGUF v3 file of one-dimensional F32 tensors, each starting on a 32-byte boundary.
-  void WriteF32Gguf(const std::string& filename, const std::vector<F32Tensor>& tensors) const {
+  // Serializes a GGUF v3 file whose tensor data each start on a 32-byte boundary, and stores the file offset of each
+  // tensor's data in `data_offsets` when given.
+  static std::string SerializeGguf(const std::vector<GgufTensor>& tensors,
+                                   std::vector<size_t>* data_offsets = nullptr) {
     std::string bytes{"GGUF"};
     auto append_integer = [&](auto value) {
       for (size_t i = 0; i < sizeof(value); ++i) {
@@ -109,17 +215,27 @@ class GgufInitializersTest : public ::testing::Test {
     uint64_t offset = 0;
     for (const auto& tensor : tensors) {
       append_string(tensor.name);
-      append_integer(uint32_t{1});
-      append_integer(static_cast<uint64_t>(tensor.values.size()));
-      append_integer(uint32_t{0});
+      append_integer(static_cast<uint32_t>(tensor.dims.size()));
+      for (uint64_t dim : tensor.dims) append_integer(dim);
+      append_integer(tensor.ggml_type);
       append_integer(offset);
-      offset += (tensor.values.size() * sizeof(float) + 31) / 32 * 32;
+      offset += (tensor.data.size() + 31) / 32 * 32;
     }
     for (const auto& tensor : tensors) {
       while (bytes.size() % 32 != 0) bytes.push_back('\0');
-      for (float value : tensor.values) append_integer(FloatBits(value));
+      if (data_offsets) data_offsets->push_back(bytes.size());
+      bytes.append(tensor.data);
     }
-    WriteFile(filename, bytes);
+    return bytes;
+  }
+
+  // Writes one-dimensional F32 tensors and returns the file offset of each tensor's data.
+  std::vector<size_t> WriteF32Gguf(const std::string& filename, const std::vector<F32Tensor>& tensors) const {
+    std::vector<GgufTensor> gguf_tensors;
+    for (const auto& tensor : tensors) gguf_tensors.push_back(F32GgufTensor(tensor));
+    std::vector<size_t> data_offsets;
+    WriteFile(filename, SerializeGguf(gguf_tensors, &data_offsets));
+    return data_offsets;
   }
 
   void WriteGguf(const std::string& filename, float weight, std::array<float, 2> other) const {
@@ -150,6 +266,25 @@ class GgufInitializersTest : public ::testing::Test {
     return std::make_unique<GgufLoaderModel>(LoadConfig());
   }
 
+  // Loads the model with `provider` as its only execution provider.
+  std::unique_ptr<GgufLoaderModel> LoadModel(std::string_view provider, std::string_view option = {},
+                                             std::string_view value = {}) const {
+    auto config = LoadConfig();
+    ClearProviders(*config);
+    SetProviderOption(*config, provider, option, value);
+    return std::make_unique<GgufLoaderModel>(std::move(config));
+  }
+
+  // The shared cache keeps a tensor's device buffer alive for as long as any model uses the weights, so the upload must
+  // not leave a host staging copy in it. Also checks that the upload produced the GGUF tensor bytes.
+  static void ExpectUploadedWithoutHostCopy(DeviceSpan<uint8_t> data, const std::vector<float>& weight) {
+    const auto& buffer = data.GetBuffer();
+    EXPECT_TRUE(buffer.p_cpu_ == nullptr || buffer.p_cpu_ == buffer.p_device_);
+    ASSERT_EQ(data.size(), weight.size() * sizeof(float));
+    const auto bytes = data.CopyDeviceToCpu();
+    EXPECT_EQ(std::memcmp(bytes.data(), weight.data(), bytes.size()), 0);
+  }
+
   void ExpectModelError(std::string_view message) const {
     try {
       LoadModel();
@@ -175,9 +310,9 @@ class GgufInitializersTest : public ::testing::Test {
     EXPECT_FALSE(std::filesystem::exists(directory_ / "missing.data"));
   }
 
-  // Runs large.onnx (y = x + large_weight) with x = 1 and checks y against the GGUF tensor values.
-  static void CheckLargeOutput(OrtSession& session, const std::vector<float>& weight) {
-    std::vector<float> input(weight.size(), 1.0f);
+  // Runs large.onnx (y = x + large_weight) with x = 1 and returns y.
+  static std::vector<float> RunLargeModel(OrtSession& session, size_t count) {
+    std::vector<float> input(count, 1.0f);
     const std::vector<int64_t> shape{static_cast<int64_t>(input.size())};
     auto memory_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
     auto x = OrtValue::CreateTensor(*memory_info, input.data(), input.size() * sizeof(float), shape,
@@ -188,11 +323,40 @@ class GgufInitializersTest : public ::testing::Test {
     OrtValue* output = nullptr;
     session.Run(nullptr, &input_name, inputs, 1, &output_name, &output, 1);
     std::unique_ptr<OrtValue> y{output};
-    ASSERT_EQ(y->GetTensorTypeAndShapeInfo()->GetShape(), shape);
+    const auto y_info = y->GetTensorTypeAndShapeInfo();
+    EXPECT_EQ(y_info->GetShape(), shape);
     const float* values = y->GetTensorData<float>();
+    return std::vector<float>(values, values + y_info->GetElementCount());
+  }
+
+  // Checks large.onnx outputs against the GGUF tensor values.
+  static void CheckLargeOutput(OrtSession& session, const std::vector<float>& weight) {
+    const auto values = RunLargeModel(session, weight.size());
+    ASSERT_EQ(values.size(), weight.size());
     for (size_t i = 0; i < weight.size(); ++i) {
       EXPECT_FLOAT_EQ(values[i], weight[i] + 1.0f) << i;
     }
+  }
+
+  // Whether this ONNX Runtime reads AddExternalInitializers buffers in place when
+  // session.use_external_initializer_file_buffers_directly is set (microsoft/onnxruntime#33877), rather than copying
+  // them during session creation. Changing a borrowed buffer after session creation changes the next Run's output.
+  bool RuntimeBorrowsExternalInitializers() const {
+    std::vector<float> weight(64, 1.0f);
+    const std::vector<int64_t> shape{static_cast<int64_t>(weight.size())};
+    auto memory_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
+    std::vector<std::unique_ptr<OrtValue>> values;
+    values.push_back(OrtValue::CreateTensor(*memory_info, weight.data(), weight.size() * sizeof(float), shape,
+                                            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT));
+    auto options = OrtSessionOptions::Create();
+    options->SetIntraOpNumThreads(1);
+    options->AddConfigEntry("session.use_external_initializer_file_buffers_directly", "1");
+    options->AddExternalInitializers({"large_weight"}, values);
+    const auto model_path = directory_ / "large.onnx";
+    auto session = OrtSession::Create(GetOrtEnv(), model_path.c_str(), options.get());
+    std::fill(weight.begin(), weight.end(), 2.0f);
+    const auto y = RunLargeModel(*session, weight.size());
+    return !y.empty() && y[0] == 3.0f;
   }
 
   static constexpr std::string_view kDefaultMapping =
@@ -209,15 +373,14 @@ TEST_F(GgufInitializersTest, DefaultShapesLoadWithoutExternalData) {
 
 TEST_F(GgufInitializersTest, OverridesDoNotChangeDefaultSearchFiles) {
   WriteGguf("overrides.gguf", 4.0f, {5.0f, 6.0f});
-  const std::string override_mapping =
-      R"({"onnx_name":"weight","gguf_name":"weight","file":"overrides.gguf"})";
-  const std::string default_mapping = R"({"onnx_name":"other_weight","gguf_name":"other_weight"})";
+  const std::string override_mapping = R"("weight":{"gguf_name":"weight","file":"overrides.gguf"})";
+  const std::string default_mapping = R"("other_weight":"other_weight")";
   for (bool override_first : {true, false}) {
     SCOPED_TRACE(override_first);
-    WriteConfig(R"({"files":["weights.gguf"],"tensors":[)" +
+    WriteConfig(R"({"files":["weights.gguf"],"tensors":{)" +
                 (override_first ? override_mapping + "," + default_mapping
                                 : default_mapping + "," + override_mapping) +
-                "]}");
+                "}}");
     auto model = LoadModel();
     CheckOutputs(*model, *model->session_options_, {1}, 4.0f);
   }
@@ -237,10 +400,47 @@ TEST_F(GgufInitializersTest, DistinctDefaultFilesRemainAmbiguous) {
 }
 
 TEST_F(GgufInitializersTest, OverridesDoNotProvideImplicitDefaults) {
-  WriteConfig(R"({"tensors":[
-    {"onnx_name":"weight","gguf_name":"weight","file":"weights.gguf"},
-    {"onnx_name":"other_weight","gguf_name":"other_weight"}]})");
+  WriteConfig(R"({"tensors":{
+    "weight":{"gguf_name":"weight","file":"weights.gguf"},
+    "other_weight":"other_weight"}})");
   ExpectModelError("GGUF tensor 'other_weight'");
+}
+
+TEST_F(GgufInitializersTest, MappingFieldsHaveOneSpelling) {
+  for (std::string_view mapping : {
+           R"({"file":"weights.gguf","tensors":{"weight":"weight"}})",
+           R"({"files":["weights.gguf"],"tensors":[{"onnx_name":"weight","gguf_name":"weight"}]})",
+           R"({"files":["weights.gguf"],"tensors":{"weight":{"onnx_name":"weight","gguf_name":"weight"}}})",
+           R"({"files":["weights.gguf"],"tensors":{"weight":{"tensor":"weight"}}})",
+           R"({"files":["weights.gguf"],"tensors":{"weight":{"gguf_name":"weight","data_file":"weights.gguf"}}})",
+           R"({"files":["weights.gguf"],"tensors":{"weight":{"gguf_name":"weight","dtype":1}}})",
+       }) {
+    SCOPED_TRACE(mapping);
+    WriteConfig(mapping);
+    try {
+      LoadConfig();
+      FAIL() << "Expected an alternative GGUF mapping spelling to be rejected";
+    } catch (const std::runtime_error& error) {
+      EXPECT_NE(std::string_view{error.what()}.find("Unknown value"), std::string_view::npos) << error.what();
+    }
+  }
+}
+
+TEST_F(GgufInitializersTest, OnlySelectedTensorsAreValidated) {
+  // Besides the mapped tensors, the file holds a tensor of an unsupported type and one whose data the file cuts short.
+  auto bytes = SerializeGguf({F32GgufTensor({"weight", {1.5f}}), F32GgufTensor({"other_weight", {2.0f, 3.0f}}), {"unsupported", kUnsupportedGgmlType, {32}, std::string(32, '\x01')}, F32GgufTensor({"truncated", std::vector<float>(16, 1.0f)})});
+  bytes.resize(bytes.size() - 32);
+  WriteFile("weights.gguf", bytes);
+  WriteConfig(kDefaultMapping);
+  {
+    auto model = LoadModel();
+    CheckOutputs(*model, *model->session_options_);
+  }
+
+  WriteConfig(R"({"files":["weights.gguf"],"tensors":{"weight":"unsupported"}})");
+  ExpectModelError("Unsupported GGUF tensor type 43 for tensor 'unsupported'");
+  WriteConfig(R"({"files":["weights.gguf"],"tensors":{"weight":"truncated"}})");
+  ExpectModelError("GGUF tensor 'truncated' exceeds file bounds");
 }
 
 TEST_F(GgufInitializersTest, ExplicitScalarShapeLoadsAsRankZero) {
@@ -405,6 +605,118 @@ TEST_F(GgufInitializersTest, LargeInitializerMappingOutlivesReleasedModels) {
   second_session.reset();
   second.reset();
   CheckLargeOutput(*third_session, weight);
+}
+
+// A session that borrows the mapped GGUF data reads it during Run, so bytes rewritten after session creation change the
+// output. A session holding a private copy keeps returning the original values, as it would if the direct-buffer option
+// were not set.
+TEST_F(GgufInitializersTest, SessionsReadMappedTensorsWithoutCopying) {
+  if (!RuntimeBorrowsExternalInitializers()) {
+    GTEST_SKIP() << "This ONNX Runtime copies AddExternalInitializers buffers; borrowing requires "
+                    "microsoft/onnxruntime#33877.";
+  }
+  std::vector<float> weight(64);
+  for (size_t i = 0; i < weight.size(); ++i) weight[i] = 0.25f * static_cast<float>(i) - 4.0f;
+  const auto data_offsets = WriteF32Gguf("large.gguf", {{"large_weight", weight}});
+  WriteConfig(R"({"files":["large.gguf"],"tensors":{"large_weight":"large_weight"}})", "large.onnx");
+  auto model = LoadModel();
+  auto session = model->CreateSession(GetOrtEnv(), model->config_->model.decoder.filename,
+                                      model->session_options_.get());
+  CheckLargeOutput(*session, weight);
+
+  for (float& value : weight) value += 100.0f;
+  ASSERT_NO_FATAL_FAILURE(OverwriteMappedBytes(directory_ / "large.gguf", data_offsets[0], weight.data(),
+                                               weight.size() * sizeof(float)));
+  CheckLargeOutput(*session, weight);
+}
+
+#if USE_CUDA
+TEST_F(GgufInitializersTest, CudaSharedTensorsUseOneDeviceAllocation) {
+  if (!GetDeviceInterface(DeviceType::CUDA)) {
+    GTEST_SKIP() << "CUDA device is unavailable";
+  }
+  std::vector<float> weight(64);
+  for (size_t i = 0; i < weight.size(); ++i) weight[i] = 0.5f * static_cast<float>(i) - 8.0f;
+  WriteF32Gguf("large.gguf", {{"large_weight", weight}});
+  WriteConfig(R"({"files":["large.gguf"],"share":true,"tensors":{"large_weight":"large_weight"}})", "large.onnx");
+  auto create_session = [](GgufLoaderModel& model) {
+    return model.CreateSession(GetOrtEnv(), model.config_->model.decoder.filename, model.session_options_.get());
+  };
+
+  // A target and a drafter mapping the same tensor bind one device allocation, which keeps no host staging copy.
+  auto first = LoadModel("cuda", "enable_cuda_graph", "0");
+  auto second = LoadModel("cuda", "enable_cuda_graph", "0");
+  ASSERT_EQ(first->p_device_->GetType(), DeviceType::CUDA);
+  ASSERT_EQ(first->gguf_shared_device_data_.size(), 1u);
+  ASSERT_EQ(second->gguf_shared_device_data_.size(), 1u);
+  const DeviceSpan<uint8_t> shared = first->gguf_shared_device_data_[0];
+  EXPECT_TRUE(shared.SameBufferAs(second->gguf_shared_device_data_[0]));
+  ExpectUploadedWithoutHostCopy(shared, weight);
+
+  auto first_session = create_session(*first);
+  auto second_session = create_session(*second);
+  CheckLargeOutput(*first_session, weight);
+  CheckLargeOutput(*second_session, weight);
+
+  // The surviving model keeps the shared allocation valid after the other model and its session are released.
+  first_session.reset();
+  first.reset();
+  CheckLargeOutput(*second_session, weight);
+
+  // Registers the mapping again through `device` and returns the allocation it bound.
+  DeviceInterface* const cuda = second->p_device_;
+  auto register_through = [&](ForwardingDevice& device) {
+    auto options = OrtSessionOptions::Create();
+    second->p_device_ = &device;
+    try {
+      second->AddGgufInitializers(*options);
+    } catch (...) {
+      second->p_device_ = cuda;
+      throw;
+    }
+    second->p_device_ = cuda;
+    return second->gguf_shared_device_data_.back();
+  };
+  auto& mapping = second->config_->model.decoder.gguf_initializers.tensors[0];
+
+  ForwardingDevice same_device{*cuda};
+  EXPECT_TRUE(register_through(same_device).SameBufferAs(shared));
+  EXPECT_EQ(same_device.allocations, 0u);
+
+  // Other layouts of the same bytes, and other device identities, get their own allocations.
+  mapping.has_shape = true;
+  mapping.shape = {8, 8};
+  EXPECT_FALSE(register_through(same_device).SameBufferAs(shared));
+  mapping.shape = {64};
+  mapping.data_type = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32;
+  EXPECT_FALSE(register_through(same_device).SameBufferAs(shared));
+  EXPECT_EQ(same_device.allocations, 2u);
+
+  mapping.has_shape = false;
+  mapping.shape.clear();
+  mapping.data_type = 0;
+  ForwardingDevice other_device{*cuda, cuda->GetMemoryInfo()->GetDeviceId() + 1};
+  EXPECT_FALSE(register_through(other_device).SameBufferAs(shared));
+  EXPECT_EQ(other_device.allocations, 1u);
+
+  CheckLargeOutput(*second_session, weight);
+}
+#endif
+
+TEST_F(GgufInitializersTest, WebGpuSharedUploadsKeepNoHostCopy) {
+  GetOrtEnv();
+  const auto providers = Ort::GetAvailableProviders();
+  if (std::find(providers.begin(), providers.end(), "WebGpuExecutionProvider") == providers.end() &&
+      FindRegisteredEpDevices("WebGpuExecutionProvider").empty()) {
+    GTEST_SKIP() << "No native or registered WebGPU EP is available.";
+  }
+  std::vector<float> weight(64);
+  for (size_t i = 0; i < weight.size(); ++i) weight[i] = 0.5f * static_cast<float>(i) - 8.0f;
+  WriteF32Gguf("large.gguf", {{"large_weight", weight}});
+  WriteConfig(R"({"files":["large.gguf"],"share":true,"tensors":{"large_weight":"large_weight"}})", "large.onnx");
+  auto model = LoadModel("webgpu");
+  ASSERT_EQ(model->gguf_shared_device_data_.size(), 1u);
+  ExpectUploadedWithoutHostCopy(model->gguf_shared_device_data_[0], weight);
 }
 
 TEST_F(GgufInitializersTest, EmptyFilesAreRejected) {

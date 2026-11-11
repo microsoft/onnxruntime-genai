@@ -80,18 +80,25 @@ struct SharedInitializerEntry {
 std::mutex g_shared_initializers_mutex;
 std::unordered_map<std::string, std::weak_ptr<SharedInitializerEntry>> g_shared_initializers;
 
+// A GGUF tensor directory entry as read from the header. Its type, geometry, and file bounds are validated only when a
+// mapping selects it (see GgufFileEntry::Resolve), so unused tensors cannot prevent loading the ones a model uses.
 struct GgufTensorInfo {
   std::string name;
   uint32_t ggml_type{};
   std::vector<uint64_t> ggml_dims;
+  uint64_t rel_offset{};
+};
+
+// A selected GGUF tensor whose type, geometry, and file bounds have been validated.
+struct GgufTensorView {
   ONNXTensorElementDataType default_dtype{ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED};
   std::vector<int64_t> default_shape;
-  uint64_t rel_offset{};
   uint64_t data_offset{};
   size_t n_bytes{};
 };
 
-void GetGgmlTypeGeometry(uint32_t ggml_type, size_t& blck_size, size_t& type_size,
+// Returns false for GGML types this loader does not know.
+bool GetGgmlTypeGeometry(uint32_t ggml_type, size_t& blck_size, size_t& type_size,
                          ONNXTensorElementDataType& default_dtype) {
   default_dtype = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8;
   switch (ggml_type) {
@@ -99,136 +106,136 @@ void GetGgmlTypeGeometry(uint32_t ggml_type, size_t& blck_size, size_t& type_siz
       blck_size = 1;
       type_size = 4;
       default_dtype = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
-      return;
+      return true;
     case 1:  // F16
       blck_size = 1;
       type_size = 2;
       default_dtype = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16;
-      return;
+      return true;
     case 2:  // Q4_0
       blck_size = 32;
       type_size = 18;
-      return;
+      return true;
     case 3:  // Q4_1
       blck_size = 32;
       type_size = 20;
-      return;
+      return true;
     case 6:  // Q5_0
       blck_size = 32;
       type_size = 22;
-      return;
+      return true;
     case 7:  // Q5_1
       blck_size = 32;
       type_size = 24;
-      return;
+      return true;
     case 8:  // Q8_0
       blck_size = 32;
       type_size = 34;
-      return;
+      return true;
     case 9:  // Q8_1
       blck_size = 32;
       type_size = 36;
-      return;
+      return true;
     case 10:  // Q2_K
       blck_size = 256;
       type_size = 84;
-      return;
+      return true;
     case 11:  // Q3_K
       blck_size = 256;
       type_size = 110;
-      return;
+      return true;
     case 12:  // Q4_K
       blck_size = 256;
       type_size = 144;
-      return;
+      return true;
     case 13:  // Q5_K
       blck_size = 256;
       type_size = 176;
-      return;
+      return true;
     case 14:  // Q6_K
       blck_size = 256;
       type_size = 210;
-      return;
+      return true;
     case 15:  // Q8_K
       blck_size = 256;
       type_size = 292;
-      return;
+      return true;
     case 16:  // IQ2_XXS
       blck_size = 256;
       type_size = 66;
-      return;
+      return true;
     case 17:  // IQ2_XS
       blck_size = 256;
       type_size = 74;
-      return;
+      return true;
     case 18:  // IQ3_XXS
       blck_size = 256;
       type_size = 98;
-      return;
+      return true;
     case 19:  // IQ1_S
       blck_size = 256;
       type_size = 50;
-      return;
+      return true;
     case 20:  // IQ4_NL
       blck_size = 32;
       type_size = 18;
-      return;
+      return true;
     case 21:  // IQ3_S
       blck_size = 256;
       type_size = 110;
-      return;
+      return true;
     case 22:  // IQ2_S
       blck_size = 256;
       type_size = 82;
-      return;
+      return true;
     case 23:  // IQ4_XS
       blck_size = 256;
       type_size = 136;
-      return;
+      return true;
     case 24:  // I8
       blck_size = 1;
       type_size = 1;
       default_dtype = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8;
-      return;
+      return true;
     case 25:  // I16
       blck_size = 1;
       type_size = 2;
       default_dtype = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16;
-      return;
+      return true;
     case 26:  // I32
       blck_size = 1;
       type_size = 4;
       default_dtype = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32;
-      return;
+      return true;
     case 27:  // I64
       blck_size = 1;
       type_size = 8;
       default_dtype = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64;
-      return;
+      return true;
     case 28:  // F64
       blck_size = 1;
       type_size = 8;
       default_dtype = ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE;
-      return;
+      return true;
     case 29:  // IQ1_M
       blck_size = 256;
       type_size = 56;
-      return;
+      return true;
     case 30:  // BF16
       blck_size = 1;
       type_size = 2;
       default_dtype = ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16;
-      return;
+      return true;
     case 39:  // MXFP4
       blck_size = 32;
       type_size = 17;
-      return;
+      return true;
     case 40:  // NVFP4
       blck_size = 64;
       type_size = 36;
-      return;
+      return true;
     default:
-      throw std::runtime_error("Unsupported GGUF tensor type: " + std::to_string(ggml_type));
+      return false;
   }
 }
 
@@ -290,6 +297,49 @@ struct GgufFileEntry {
 
   GgufFileEntry(const GgufFileEntry&) = delete;
   GgufFileEntry& operator=(const GgufFileEntry&) = delete;
+
+  // Validates a tensor that a mapping selected. Unsupported or malformed selected tensors still fail here.
+  GgufTensorView Resolve(const GgufTensorInfo& info) const {
+    GgufTensorView view;
+    size_t blck_size = 1, type_size = 1;
+    if (!GetGgmlTypeGeometry(info.ggml_type, blck_size, type_size, view.default_dtype)) {
+      throw std::runtime_error("Unsupported GGUF tensor type " + std::to_string(info.ggml_type) + " for tensor '" +
+                               info.name + "' in " + path.string());
+    }
+    const size_t n_dims = info.ggml_dims.size();
+    if (info.ggml_dims[0] % blck_size != 0) {
+      throw std::runtime_error("GGUF tensor '" + info.name + "' dim[0] is not divisible by block size in " +
+                               path.string());
+    }
+    const uint64_t n_blocks = info.ggml_dims[0] / blck_size;
+    if (n_blocks > std::numeric_limits<size_t>::max() / type_size) {
+      throw std::runtime_error("GGUF tensor '" + info.name + "' byte size overflow in " + path.string());
+    }
+    size_t total_bytes = static_cast<size_t>(n_blocks) * type_size;
+    for (size_t d = 1; d < n_dims; ++d) {
+      const uint64_t dim = info.ggml_dims[d];
+      if (dim > std::numeric_limits<size_t>::max() ||
+          (dim > 0 && total_bytes > std::numeric_limits<size_t>::max() / static_cast<size_t>(dim))) {
+        throw std::runtime_error("GGUF tensor '" + info.name + "' byte size overflow in " + path.string());
+      }
+      total_bytes *= static_cast<size_t>(dim);
+    }
+    view.default_shape.resize(n_dims);
+    for (size_t d = 0; d + 1 < n_dims; ++d) {
+      view.default_shape[d] = static_cast<int64_t>(info.ggml_dims[n_dims - 1 - d]);
+    }
+    view.default_shape[n_dims - 1] = static_cast<int64_t>(n_blocks * (blck_size == 1 ? 1 : type_size));
+
+    if (tensor_data_offset > mmap_size || info.rel_offset > mmap_size - tensor_data_offset) {
+      throw std::runtime_error("GGUF tensor '" + info.name + "' offset exceeds file bounds in " + path.string());
+    }
+    view.data_offset = tensor_data_offset + info.rel_offset;
+    if (total_bytes > mmap_size - view.data_offset) {
+      throw std::runtime_error("GGUF tensor '" + info.name + "' exceeds file bounds in " + path.string());
+    }
+    view.n_bytes = total_bytes;
+    return view;
+  }
 
  private:
   // Maps the whole file read-only, so tensor pages are loaded on demand and remain reclaimable by the OS.
@@ -471,8 +521,6 @@ struct GgufFileEntry {
     if (tensor_count > mmap_size / 16) {
       throw std::runtime_error("GGUF tensor_count exceeds file bounds in " + path.string());
     }
-    std::vector<GgufTensorInfo> parsed;
-    parsed.reserve(static_cast<size_t>(tensor_count));
     for (uint64_t i = 0; i < tensor_count; ++i) {
       GgufTensorInfo info;
       info.name = read_str();
@@ -486,53 +534,16 @@ struct GgufFileEntry {
       }
       info.ggml_type = read_u32();
       info.rel_offset = read_u64();
-
-      size_t blck_size = 1, type_size = 1;
-      GetGgmlTypeGeometry(info.ggml_type, blck_size, type_size, info.default_dtype);
-      if (info.ggml_dims[0] % blck_size != 0) {
-        throw std::runtime_error("GGUF tensor '" + info.name + "' dim[0] is not divisible by block size");
+      auto name = info.name;
+      if (!tensors.emplace(std::move(name), std::move(info)).second) {
+        throw std::runtime_error("Duplicate GGUF tensor name in " + path.string());
       }
-      info.default_shape.resize(n_dims);
-      const uint64_t n_blocks = info.ggml_dims[0] / blck_size;
-      if (n_blocks > std::numeric_limits<size_t>::max() / type_size) {
-        throw std::runtime_error("GGUF tensor '" + info.name + "' byte size overflow in " + path.string());
-      }
-      size_t total_bytes = static_cast<size_t>(n_blocks) * type_size;
-      for (uint32_t d = 1; d < n_dims; ++d) {
-        const uint64_t dim = info.ggml_dims[d];
-        if (dim > std::numeric_limits<size_t>::max() ||
-            (dim > 0 && total_bytes > std::numeric_limits<size_t>::max() / static_cast<size_t>(dim))) {
-          throw std::runtime_error("GGUF tensor '" + info.name + "' byte size overflow in " + path.string());
-        }
-        total_bytes *= static_cast<size_t>(dim);
-      }
-      for (uint32_t d = 0; d < n_dims - 1; ++d) {
-        info.default_shape[d] = static_cast<int64_t>(info.ggml_dims[n_dims - 1 - d]);
-      }
-      info.default_shape[n_dims - 1] =
-          static_cast<int64_t>(n_blocks * (blck_size == 1 ? 1 : type_size));
-      info.n_bytes = total_bytes;
-      parsed.push_back(std::move(info));
     }
 
     if (cursor > std::numeric_limits<uint64_t>::max() - (alignment - 1)) {
       throw std::runtime_error("GGUF tensor_data_offset overflow in " + path.string());
     }
     tensor_data_offset = ((cursor + alignment - 1) / alignment) * alignment;
-    tensors.reserve(parsed.size());
-    for (auto& info : parsed) {
-      if (tensor_data_offset > mmap_size || info.rel_offset > mmap_size - tensor_data_offset) {
-        throw std::runtime_error("GGUF tensor '" + info.name + "' offset exceeds file bounds in " + path.string());
-      }
-      info.data_offset = tensor_data_offset + info.rel_offset;
-      if (info.n_bytes > mmap_size - info.data_offset) {
-        throw std::runtime_error("GGUF tensor '" + info.name + "' exceeds file bounds in " + path.string());
-      }
-      auto name = info.name;
-      if (!tensors.emplace(std::move(name), std::move(info)).second) {
-        throw std::runtime_error("Duplicate GGUF tensor name in " + path.string());
-      }
-    }
   }
 };
 
@@ -1205,10 +1216,11 @@ void Model::AddGgufInitializers(OrtSessionOptions& session_options) {
                                mapping.onnx_name + "' was not found in configured GGUF file(s).");
     }
 
+    const GgufTensorView tensor = matched_file->Resolve(*matched_info);
     const auto data_type = mapping.data_type != 0
                                ? static_cast<ONNXTensorElementDataType>(mapping.data_type)
-                               : matched_info->default_dtype;
-    const auto& shape = mapping.has_shape || !mapping.shape.empty() ? mapping.shape : matched_info->default_shape;
+                               : tensor.default_dtype;
+    const auto& shape = mapping.has_shape || !mapping.shape.empty() ? mapping.shape : tensor.default_shape;
     size_t expected_bytes = OrtElementByteSize(data_type);
     for (int64_t d : shape) {
       if (d < 0) {
@@ -1220,15 +1232,15 @@ void Model::AddGgufInitializers(OrtSessionOptions& session_options) {
       }
       expected_bytes *= dim;
     }
-    if (expected_bytes != matched_info->n_bytes) {
+    if (expected_bytes != tensor.n_bytes) {
       throw std::runtime_error("Byte size mismatch for GGUF initializer '" + mapping.onnx_name + "' -> '" +
                                mapping.gguf_name + "': expected " + std::to_string(expected_bytes) +
-                               " bytes from shape/type, GGUF tensor has " + std::to_string(matched_info->n_bytes) +
+                               " bytes from shape/type, GGUF tensor has " + std::to_string(tensor.n_bytes) +
                                " bytes.");
     }
 
-    void* tensor_ptr = matched_file->mmap_base + matched_info->data_offset;
-    auto cpu_view = OrtValue::CreateTensor(*cpu_memory_info, tensor_ptr, matched_info->n_bytes, shape, data_type);
+    void* tensor_ptr = matched_file->mmap_base + tensor.data_offset;
+    auto cpu_view = OrtValue::CreateTensor(*cpu_memory_info, tensor_ptr, tensor.n_bytes, shape, data_type);
     ext_names.push_back(mapping.onnx_name);
     ext_values.push_back(std::move(cpu_view));
 
@@ -1241,7 +1253,7 @@ void Model::AddGgufInitializers(OrtSessionOptions& session_options) {
       }
       auto memory_info = p_device_->GetMemoryInfo();
       std::ostringstream key;
-      key << matched_file->identity << ':' << matched_info->data_offset << ':' << matched_info->n_bytes << ':'
+      key << matched_file->identity << ':' << tensor.data_offset << ':' << tensor.n_bytes << ':'
           << static_cast<int>(data_type) << ':' << memory_info->GetAllocatorName() << ':'
           << memory_info->GetDeviceType() << ':' << memory_info->GetDeviceId();
       for (int64_t dimension : shape) {
@@ -1256,15 +1268,17 @@ void Model::AddGgufInitializers(OrtSessionOptions& session_options) {
         }
         if (!shared_entry) {
           shared_entry = std::make_shared<SharedInitializerEntry>();
-          shared_entry->device_data = p_device_->Allocate<uint8_t>(matched_info->n_bytes);
+          shared_entry->device_data = p_device_->Allocate<uint8_t>(tensor.n_bytes);
+          // Uploads straight from the mapped file; device buffers keep no host staging copy afterwards.
           shared_entry->device_data.CopyFromCpu(
-              std::span<const uint8_t>(static_cast<const uint8_t*>(tensor_ptr), matched_info->n_bytes));
+              std::span<const uint8_t>(static_cast<const uint8_t*>(tensor_ptr), tensor.n_bytes));
           shared_entry->shared_view = OrtValue::CreateTensor(
-              *memory_info, shared_entry->device_data.Span().data(), matched_info->n_bytes, shape, data_type);
+              *memory_info, shared_entry->device_data.Span().data(), tensor.n_bytes, shape, data_type);
           g_shared_initializers[key.str()] = shared_entry;
         }
       }
       session_options.AddInitializer(mapping.onnx_name.c_str(), *shared_entry->shared_view);
+      gguf_shared_device_data_.push_back(shared_entry->device_data);
       shared_initializer_entries_.push_back(std::move(shared_entry));
     }
   }
@@ -1299,6 +1313,7 @@ Model::~Model() {
     pipeline_session_options_.clear();
     session_options_.reset();
     gguf_external_values_.clear();
+    gguf_shared_device_data_.clear();
     shared_initializer_entries_.clear();
     CloseAMDGPUInterface();
   }

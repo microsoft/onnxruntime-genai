@@ -187,6 +187,9 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
   std::unique_ptr<OrtSessionOptions> session_options_;
   std::vector<std::shared_ptr<void>> shared_initializer_entries_;
   std::vector<std::unique_ptr<OrtValue>> gguf_external_values_;
+  // Device allocations of GGUF tensors registered with "share": true. Models on the same device that map the same
+  // tensor with the same layout hold the same allocation.
+  std::vector<DeviceSpan<uint8_t>> gguf_shared_device_data_;
   std::optional<size_t> device_memory_budget_initial_free_bytes_;
 
   DeviceInterface* p_device_{};          // The device we're running on (matches device_type_) used for things that work the same on all devices

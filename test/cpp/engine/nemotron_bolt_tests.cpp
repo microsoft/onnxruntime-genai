@@ -341,7 +341,7 @@ TEST(NemotronBolt, GgufInitializersConfigParsingAndPathValidation) {
             "embed_w": "token_embd.weight",
             "lm_head": {
               "gguf_name": "output.weight",
-              "dtype": 2,
+              "data_type": 2,
               "shape": [128, 34],
               "share": false
             }
@@ -373,22 +373,21 @@ TEST(NemotronBolt, GgufInitializersConfigParsingAndPathValidation) {
   EXPECT_EQ(dflash2_cfg->model.decoder.gguf_initializers.files, cfg.model.dflash2.gguf_initializers.files);
   EXPECT_EQ(dflash2_cfg->model.decoder.gguf_initializers.tensors.size(), 2u);
 
-  // Array form for mtp
+  // Per-tensor file and data type overrides for mtp
   Config mtp_cfg;
   OverlayConfig(mtp_cfg, R"({
     "model": {
       "mtp": {
         "filename": "mtp.onnx",
         "gguf_initializers": {
-          "file": "mtp.gguf",
-          "tensors": [
-            {
-              "onnx_name": "w0",
-              "tensor": "blk.0.weight",
+          "files": ["mtp.gguf"],
+          "tensors": {
+            "w0": {
+              "gguf_name": "blk.0.weight",
               "file": "shard0.gguf",
               "data_type": 1
             }
-          ]
+          }
         }
       }
     }

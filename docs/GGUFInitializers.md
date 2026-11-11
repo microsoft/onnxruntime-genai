@@ -80,13 +80,18 @@ In `gguf_initializers.json`:
 | Field | Type | Description |
 | --- | --- | --- |
 | `config_file` | `string` | Optional path (relative to `genai_config.json`) to an external JSON mapping file. Can also be passed directly as `"gguf_initializers": "path.json"`. An external mapping file cannot specify `config_file` itself; nested mapping files are rejected. |
-| `files` / `file` | `string[]` / `string` | One or more `.gguf` files (relative to `genai_config.json`) searched when a tensor mapping does not specify its own `file`. Aliases of the same file are deduplicated; matches in distinct files are rejected as ambiguous. Per-tensor overrides do not add files to this default search list. |
+| `files` | `string[]` | One or more `.gguf` files (relative to `genai_config.json`) searched when a tensor mapping does not specify its own `file`. Aliases of the same file are deduplicated; matches in distinct files are rejected as ambiguous. Per-tensor overrides do not add files to this default search list. |
 | `share` | `bool` | Default cross-session device sharing flag (`false` by default) inherited by tensor entries that do not specify `share`. |
-| `tensors` | `object` or `array` | Map of `onnx_initializer_name -> gguf_tensor_name` (or mapping object), or array of mapping objects with `onnx_name` (`name`) and `gguf_name` (`gguf_tensor` / `tensor`). |
-| `tensors[].file` | `string` | Optional `.gguf` file override for a specific tensor when weights span multiple GGUF shards. |
-| `tensors[].data_type` (`dtype`) | `int` | Optional `ONNXTensorElementDataType` enum override. Defaults to the GGUF type's natural ONNX element type (`FLOAT` for `F32`, `FLOAT16` for `F16`, `BFLOAT16` for `BF16`, `UINT8` for block-quantized types). |
-| `tensors[].shape` | `int64[]` | Optional ONNX tensor shape override. An explicit `[]` creates a rank-zero scalar. Must match the exact byte size of the GGUF tensor. When omitted, defaults to `[ggml_dims[n-1], ..., ggml_dims[1], (ggml_dims[0] / blck_size) * type_size]` for block-quantized tensors or `[ggml_dims[n-1], ..., ggml_dims[0]]` for unquantized tensors. |
-| `tensors[].share` | `bool` | When `true` on a non-CPU device, copies the GGUF tensor once into a cached device `OrtValue` and registers it via `SessionOptions::AddInitializer` so multiple sessions (e.g. target decoder and `dflash2` / `mtp` drafter) share a single GPU allocation. Ignored on CPU. Rejected on DML, whose allocator is closed while shared tensors may still be alive. |
+| `tensors` | `object` | Map from ONNX initializer name to either a GGUF tensor name (string) or a mapping object with the fields below. |
+| `tensors.<name>.gguf_name` | `string` | Required in a mapping object: the GGUF tensor name. |
+| `tensors.<name>.file` | `string` | Optional `.gguf` file override for a specific tensor when weights span multiple GGUF shards. |
+| `tensors.<name>.data_type` | `int` | Optional `ONNXTensorElementDataType` enum override. Defaults to the GGUF type's natural ONNX element type (`FLOAT` for `F32`, `FLOAT16` for `F16`, `BFLOAT16` for `BF16`, `UINT8` for block-quantized types). |
+| `tensors.<name>.shape` | `int64[]` | Optional ONNX tensor shape override. An explicit `[]` creates a rank-zero scalar. Must match the exact byte size of the GGUF tensor. When omitted, defaults to `[ggml_dims[n-1], ..., ggml_dims[1], (ggml_dims[0] / blck_size) * type_size]` for block-quantized tensors or `[ggml_dims[n-1], ..., ggml_dims[0]]` for unquantized tensors. |
+| `tensors.<name>.share` | `bool` | When `true` on a non-CPU device, copies the GGUF tensor once into a cached device `OrtValue` and registers it via `SessionOptions::AddInitializer` so multiple sessions (e.g. target decoder and `dflash2` / `mtp` drafter) share a single GPU allocation. Ignored on CPU. Rejected on DML, whose allocator is closed while shared tensors may still be alive. |
+
+Each field has exactly one spelling, and unknown fields are rejected.
+
+Only the tensors that a mapping selects are validated, so a GGUF file can contain tensors of types this loader does not support (or with inconsistent geometry) as long as no mapping selects them. Selecting such a tensor fails with an error naming the tensor and file.
 
 ## Runtime Behavior & Zero-Copy Loading
 
@@ -100,4 +105,4 @@ In `gguf_initializers.json`:
 
    When tensors are copied, budget host memory for those copies in addition to the mapped file pages.
 3. **Cross-Session Device Sharing (`"share": true`)**:
-   Tensors marked with `"share": true` (such as `token_embd.weight` and `output.weight` shared between the target decoder and the LiLiCorr/DFlash2 drafter) are uploaded once to device memory, cached in `g_shared_initializers`, and bound into both sessions via `SessionOptions::AddInitializer`. The cache distinguishes allocator names as well as device types and IDs, so different execution providers cannot share incompatible allocations. Sharing is not supported on DML.
+   Tensors marked with `"share": true` (such as `token_embd.weight` and `output.weight` shared between the target decoder and the LiLiCorr/DFlash2 drafter) are uploaded once to device memory directly from the mapped file, cached in `g_shared_initializers`, and bound into both sessions via `SessionOptions::AddInitializer`. The device buffers keep no host staging copy after the upload, so sharing costs only the device allocation besides the mapped pages. The cache distinguishes allocator names as well as device types and IDs, so different execution providers cannot share incompatible allocations. Sharing is not supported on DML.

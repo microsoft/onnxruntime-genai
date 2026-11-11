@@ -772,14 +772,13 @@ struct SharedInitializers_Element : JSON::Element {
 struct GgufTensorMapping_Element : JSON::Element {
   explicit GgufTensorMapping_Element(Config::Model::GgufTensorMapping& v) : v_{v} {}
 
+  // The ONNX initializer name is this object's key in "tensors", so it is not a field.
   void OnValue(std::string_view name, JSON::Value value) override {
-    if (name == "onnx_name" || name == "name") {
-      v_.onnx_name = JSON::Get<std::string_view>(value);
-    } else if (name == "gguf_name" || name == "gguf_tensor" || name == "tensor") {
+    if (name == "gguf_name") {
       v_.gguf_name = JSON::Get<std::string_view>(value);
-    } else if (name == "file" || name == "data_file") {
+    } else if (name == "file") {
       v_.file = JSON::Get<std::string_view>(value);
-    } else if (name == "data_type" || name == "dtype") {
+    } else if (name == "data_type") {
       v_.data_type = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "share") {
       v_.share = JSON::Get<bool>(value);
@@ -823,20 +822,6 @@ struct GgufTensorsObject_Element : JSON::Element {
   std::unique_ptr<GgufTensorMapping_Element> element_;
 };
 
-struct GgufTensorsArray_Element : JSON::Element {
-  explicit GgufTensorsArray_Element(std::vector<Config::Model::GgufTensorMapping>& v) : v_{v} {}
-
-  Element& OnObject(std::string_view /*name*/) override {
-    auto& entry = v_.emplace_back();
-    element_ = std::make_unique<GgufTensorMapping_Element>(entry);
-    return *element_;
-  }
-
- private:
-  std::vector<Config::Model::GgufTensorMapping>& v_;
-  std::unique_ptr<GgufTensorMapping_Element> element_;
-};
-
 struct GgufFilesArray_Element : JSON::Element {
   explicit GgufFilesArray_Element(std::vector<std::string>& v) : v_{v} {}
 
@@ -854,8 +839,6 @@ struct GgufInitializers_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "config_file") {
       v_.config_file = JSON::Get<std::string_view>(value);
-    } else if (name == "file") {
-      v_.files.emplace_back(JSON::Get<std::string_view>(value));
     } else if (name == "share") {
       v_.share = JSON::Get<bool>(value);
       v_.has_share = true;
@@ -866,7 +849,7 @@ struct GgufInitializers_Element : JSON::Element {
 
   Element& OnObject(std::string_view name) override {
     if (name == "tensors") {
-      return tensors_obj_;
+      return tensors_;
     }
     throw JSON::unknown_value_error{};
   }
@@ -875,17 +858,13 @@ struct GgufInitializers_Element : JSON::Element {
     if (name == "files") {
       return files_;
     }
-    if (name == "tensors") {
-      return tensors_arr_;
-    }
     throw JSON::unknown_value_error{};
   }
 
  private:
   Config::Model::GgufInitializers& v_;
   GgufFilesArray_Element files_{v_.files};
-  GgufTensorsObject_Element tensors_obj_{v_.tensors};
-  GgufTensorsArray_Element tensors_arr_{v_.tensors};
+  GgufTensorsObject_Element tensors_{v_.tensors};
 };
 
 struct GgufInitializersRoot_Element : JSON::Element {
