@@ -185,7 +185,7 @@ ProcessImagePrompt(const Processor& processor, const Generators::Tokenizer& toke
 
     // Calculate total image tokens based on grid dimensions
     // For each image: (temporal * height * width) / (merge_size^2)
-    for (size_t i = 0; i < num_images; ++i) {
+    for (int64_t i = 0; i < num_images; ++i) {
       int64_t t = image_grid_thw_data[i * 3 + 0];
       int64_t h = image_grid_thw_data[i * 3 + 1];
       int64_t w = image_grid_thw_data[i * 3 + 2];
@@ -217,7 +217,7 @@ std::vector<int32_t> QwenImageProcessor::ExpandImagePrompt(const Tokenizer& toke
   std::string text = prompt;
   // If prompt is empty, add vision markers for each image
   if (text.empty()) {
-    for (int64_t i = 0; i < num_images; ++i) {
+    for (size_t i = 0; i < num_images; ++i) {
       text += std::string(vision_start_token) + " " + std::string(vision_end_token);
       if (i < num_images - 1) {
         text += " ";
