@@ -2882,7 +2882,8 @@ def _prepare_procedural_base_assets(
             finally:
                 for w in writers.values():
                     w.close()
-        for tsv in bank_src.glob("*.tsv"):
+        for tsv_name in ("model.onnx.matmulnbits_fpa_intb.tsv", "dflash2.onnx.matmulnbits_fpa_intb.tsv"):
+            tsv = bank_src / tsv_name
             if tsv.is_file():
                 shutil.copy2(tsv, out_pkg / tsv.name)
         for p in sorted((bank_src / "ple").iterdir()):
@@ -3425,6 +3426,15 @@ def build_rc5_package(
             "model_256k.onnx",
             "model_dynamic_ctx.onnx",
             "model_int8kv.onnx",
+            "model_2k.onnx.matmulnbits_fpa_intb.tsv",
+            "model_8k.onnx.matmulnbits_fpa_intb.tsv",
+            "model_16k.onnx.matmulnbits_fpa_intb.tsv",
+            "model_32k.onnx.matmulnbits_fpa_intb.tsv",
+            "model_64k.onnx.matmulnbits_fpa_intb.tsv",
+            "model_128k.onnx.matmulnbits_fpa_intb.tsv",
+            "model_256k.onnx.matmulnbits_fpa_intb.tsv",
+            "model_dynamic_ctx.onnx.matmulnbits_fpa_intb.tsv",
+            "model_int8kv.onnx.matmulnbits_fpa_intb.tsv",
             "package_manifest.json",
             "genai_config.json",
         }
