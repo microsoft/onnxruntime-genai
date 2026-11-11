@@ -150,8 +150,7 @@ TEST(ConfigTest, ModelProviderSelectionIsAuthoritativeForNonPrimarySessions) {
   auto& stage = config->model.decoder.pipeline.emplace_back();
   stage.model_id = "stage";
   stage.session_options.emplace();
-  config->model.vision.pipeline.resize(1);
-  for (auto* options : {&stage.session_options, &config->model.vision.pipeline[0].session_options,
+  for (auto* options : {&stage.session_options, &config->model.engram.session_options,
                         &config->model.vad.session_options}) {
     options->emplace().provider_options = {{"WebGPU", {}}, {"nonexistent_provider", {}}};
   }
@@ -165,7 +164,7 @@ TEST(ConfigTest, ModelProviderSelectionIsAuthoritativeForNonPrimarySessions) {
   EXPECT_EQ(model->p_device_->GetType(), DeviceType::CPU);
   const auto trivial = GetTrivialModel();
   EXPECT_NO_THROW(OrtSession::Create(GetOrtEnv(), trivial.data(), trivial.size(), model->GetSessionOptions("stage")));
-  for (const auto* configured : {&*model->config_->model.vision.pipeline[0].session_options,
+  for (const auto* configured : {&*model->config_->model.engram.session_options,
                                  &*model->config_->model.vad.session_options}) {
     auto options = OrtSessionOptions::Create();
     EXPECT_NO_THROW(model->CreateSessionOptionsFromConfig(*configured, *options, false));
