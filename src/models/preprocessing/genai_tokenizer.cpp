@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <stdexcept>
 #include <string_view>
+#include <utility>
 
 namespace Generators {
 
@@ -77,8 +78,21 @@ Tokenizer::Tokenizer(const Config& config) : bos_token_id_{config.model.bos_toke
     if (!memory_data_) {
       throw std::runtime_error("Memory asset bundle is missing tokenizer data.");
     }
+    std::string_view module_json;
+    if (config.external_file_sources_ &&
+        std::find(config.external_file_sources_->names.begin(),
+                  config.external_file_sources_->names.end(),
+                  "tokenizer_module.json") != config.external_file_sources_->names.end()) {
+      const auto owner = std::make_shared<const std::pair<
+          std::shared_ptr<const TokenizerMemoryData>, std::string>>(
+          memory_data_, config.ReadFileSource("tokenizer_module.json"));
+      module_json = owner->second;
+      // Retain both payloads without changing the legacy tokenizer JSON representation.
+      memory_data_ = std::shared_ptr<const TokenizerMemoryData>(owner, owner->first.get());
+    }
     memory_blob_.emplace(std::string_view{memory_data_->config_json},
-                         std::string_view{memory_data_->tokenizer_json});
+                         std::string_view{memory_data_->tokenizer_json},
+                         module_json);
     CheckResult(OrtxCreateTokenizerFromBlob(tokenizer_.Address(), &*memory_blob_));
     CheckResult(OrtxUpdateTokenizerOptions(tokenizer_, keys, values, 2));
   } else {

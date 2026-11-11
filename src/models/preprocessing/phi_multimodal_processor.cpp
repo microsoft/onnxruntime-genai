@@ -106,7 +106,9 @@ ProcessImageAudioPrompt(const Generators::Tokenizer& tokenizer, const std::strin
 PhiMultiModalProcessor::PhiMultiModalProcessor(Config& config, const SessionInfo& session_info)
     : pixel_values_type_{session_info.GetInputDataType(config.model.vision.inputs.pixel_values)},
       attention_mask_type_{session_info.GetInputDataType(config.model.vision.inputs.attention_mask)} {
-  const auto image_processor_config = (config.config_path / fs::path(config.model.vision.config_filename)).string();
+  const auto image_processor_config = config.external_file_sources_
+                                          ? config.ReadFileSource(config.model.vision.config_filename)
+                                          : (config.config_path / fs::path(config.model.vision.config_filename)).string();
   CheckResult(OrtxCreateProcessor(image_processor_.ToBeAssigned(), image_processor_config.c_str()));
 
   config.AddMapping(std::string(Config::Defaults::InputIdsName), config.model.embedding.inputs.input_ids);
@@ -120,12 +122,20 @@ PhiMultiModalProcessor::PhiMultiModalProcessor(Config& config, const SessionInfo
   // skip the speech ONNX entirely. Matches the Gemma4 processor's pattern.
   if (!config.model.speech.config_filename.empty()) {
     auto speech_config_path = config.config_path / fs::path(config.model.speech.config_filename);
-    if (fs::exists(speech_config_path)) {
+    const bool has_speech_config = config.external_file_sources_
+                                       ? std::find(config.external_file_sources_->names.begin(),
+                                                   config.external_file_sources_->names.end(),
+                                                   config.model.speech.config_filename) != config.external_file_sources_->names.end()
+                                       : fs::exists(speech_config_path);
+    if (has_speech_config) {
       has_speech_ = true;
       audio_features_type_ = session_info.GetInputDataType(config.model.speech.inputs.audio_embeds);
       audio_sizes_type_ = session_info.GetInputDataType(config.model.speech.inputs.audio_sizes);
 
-      CheckResult(OrtxCreateSpeechFeatureExtractor(audio_processor_.ToBeAssigned(), speech_config_path.string().c_str()));
+      const auto speech_config = config.external_file_sources_
+                                     ? config.ReadFileSource(config.model.speech.config_filename)
+                                     : speech_config_path.string();
+      CheckResult(OrtxCreateSpeechFeatureExtractor(audio_processor_.ToBeAssigned(), speech_config.c_str()));
 
       config.AddMapping(std::string(Config::Defaults::AudioEmbedsName), config.model.speech.inputs.audio_embeds);
       config.AddMapping(std::string(Config::Defaults::AudioAttentionMaskName), config.model.speech.inputs.attention_mask);

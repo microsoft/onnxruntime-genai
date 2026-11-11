@@ -66,6 +66,12 @@ typedef struct OgaSpeculativeStats OgaSpeculativeStats;
 typedef struct OgaRuntimeSettings OgaRuntimeSettings;
 typedef struct OgaConfig OgaConfig;
 typedef struct OgaModel OgaModel;
+/** A native Windows file HANDLE on Windows (not a C runtime file descriptor), or a file descriptor on supported non-Windows platforms. */
+#ifdef _WIN32
+typedef void* OgaFileHandle;
+#else
+typedef int OgaFileHandle;
+#endif
 // OgaSequences is an array of token arrays where the number of token arrays can be obtained using
 // OgaSequencesCount and the number of tokens in each token array can be obtained using OgaSequencesGetSequenceCount.
 typedef struct OgaSequences OgaSequences;
@@ -380,6 +386,25 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateConfigFromBuffer(const char* config_
                                                              OgaConfig** out);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigAddExternalInitializerData(
     OgaConfig* config, const char* filename, const void* data, size_t length);
+/**
+ * Graph and external-weight sources for configs created from JSON bytes.
+ * Supported on Windows, Linux, Android, macOS and iOS, with a matching full ORT build.
+ * Registers the complete set atomically, duplicating native regular-file handles.
+ * Windows requires HANDLEs with read access; duplicates have only read access.
+ * POSIX requires read-only file descriptors. Original handles may be closed after success. Files must not
+ * be modified while dependent models/sessions exist. Missing sources fail without
+ * reopening paths. Cannot be combined with external initializer buffers.
+ * Registered graph-buffer overrides (e.g. decrypted translation graphs) are copied
+ * into model-owned storage during model creation for subsequent session recreation.
+ * Requires ORT's `OrtApi::SessionOptionsSetExternalInitializerFileHandles` (API version 33+);
+ * absence or minimal builds return an explicit error.
+ * ORT-format direct-model-byte options are unsupported in this mode. Metadata
+ * must be a JSON object without embedded NUL bytes.
+ * Execution-provider selection is unchanged, and Windows/D3D12 accelerated weight
+ * loading can consume the registered handles without resolving filesystem paths.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigSetModelFileHandles(
+    OgaConfig* config, const char* const* names, const OgaFileHandle* handles, size_t count);
 // Tokenizer JSON is copied and retained by models/tokenizers using this config.
 OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigSetTokenizerData(
     OgaConfig* config, const char* config_json, size_t config_length,

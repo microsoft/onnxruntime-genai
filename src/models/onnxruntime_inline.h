@@ -1569,6 +1569,53 @@ inline std::unique_ptr<OrtLoraAdapter> OrtLoraAdapter::Create(const ORTCHAR_T* a
   return std::unique_ptr<OrtLoraAdapter>{p};
 }
 
+namespace Ort {
+
+template <typename Api, typename = void>
+struct HasExternalInitializerFileHandlesApi : std::false_type {};
+
+template <typename Api>
+struct HasExternalInitializerFileHandlesApi<
+    Api, std::void_t<decltype(&Api::SessionOptionsSetExternalInitializerFileHandles)>> : std::true_type {};
+
+template <typename FileHandle, typename Api = OrtApi>
+inline OrtStatus* SetExternalInitializerFileHandles(
+    OrtSessionOptions* options, const char* const* names, const FileHandle* handles, size_t count) {
+  if constexpr (HasExternalInitializerFileHandlesApi<Api>::value) {
+    const auto* ort_api = static_cast<const Api*>(api);
+    if (ort_api != nullptr && api_version >= 33 &&
+        ort_api->SessionOptionsSetExternalInitializerFileHandles != nullptr) {
+      return ort_api->SessionOptionsSetExternalInitializerFileHandles(options, names, handles, count);
+    }
+  }
+  (void)options;
+  (void)names;
+  (void)handles;
+  (void)count;
+  throw std::runtime_error("ORT lacks the required initializer file-source API.");
+}
+
+template <typename Api = OrtApi>
+inline bool IsExternalInitializerFileHandlesApiAvailable() {
+  if constexpr (HasExternalInitializerFileHandlesApi<Api>::value) {
+    const auto* ort_api = static_cast<const Api*>(api);
+    if (ort_api != nullptr && api_version >= 33 &&
+        ort_api->SessionOptionsSetExternalInitializerFileHandles != nullptr) {
+      auto probe = OrtSessionOptions::Create();
+      OrtStatus* status = ort_api->SessionOptionsSetExternalInitializerFileHandles(probe.get(), nullptr, nullptr, 0);
+      if (status == nullptr) {
+        return true;
+      }
+      const bool supported = ort_api->GetErrorCode(status) != ORT_NOT_IMPLEMENTED;
+      ort_api->ReleaseStatus(status);
+      return supported;
+    }
+  }
+  return false;
+}
+
+}  // namespace Ort
+
 #if ORT_GENAI_HAS_MODEL_PACKAGE
 
 namespace Ort {
