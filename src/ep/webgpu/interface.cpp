@@ -93,6 +93,26 @@ struct WebGPUMemory final : DeviceBuffer {
     GetOrtEnv().CopyTensors(src_ptrs, dst_ptrs, nullptr);
   }
 
+  // Uploads straight from `source`, as CUDA does: the base version stages through p_cpu_, which then
+  // stays allocated as long as the buffer (a whole host copy of a shared initializer, for example).
+  void CopyFromCpu(const void* source, size_t size_in_bytes) override {
+    if (!ort_allocator_) {
+      throw std::runtime_error("WebGPU allocator not initialized");
+    }
+    assert(size_in_bytes == size_in_bytes_);
+
+    int64_t shape_val = static_cast<int64_t>(size_in_bytes);
+    std::span<const int64_t> shape{&shape_val, 1};
+    auto cpu_mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+    auto src_tensor = OrtValue::CreateTensor(*cpu_mem_info, const_cast<void*>(source), size_in_bytes, shape,
+                                             ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+    auto dst_tensor = OrtValue::CreateTensor(*ort_memory_info_, p_device_, size_in_bytes, shape,
+                                             ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+    const std::vector<const OrtValue*> src_ptrs = {src_tensor.get()};
+    const std::vector<OrtValue*> dst_ptrs = {dst_tensor.get()};
+    GetOrtEnv().CopyTensors(src_ptrs, dst_ptrs, nullptr);
+  }
+
   void CopyFrom(size_t begin_dest, DeviceBuffer& source, size_t begin_source, size_t size_in_bytes) override {
     if (!ort_allocator_) {
       throw std::runtime_error("WebGPU allocator not initialized");
